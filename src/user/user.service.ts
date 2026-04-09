@@ -7,10 +7,12 @@ import { PrismaService } from '@/prisma.service'
 import { UpdateUserDto } from '@/user/dto/update-user.dto'
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { Role, type User } from '@prisma/client'
-import { hash } from 'argon2'
+import { hash } from 'bcryptjs'
 
 @Injectable()
 export class UserService {
+	private readonly PASSWORD_SALT_ROUNDS = 10
+
 	constructor(private prisma: PrismaService) {}
 
 	async getUserList(searchTerm: string) {
@@ -82,7 +84,7 @@ export class UserService {
 			data: {
 				...dto,
 				email: dto.email.toLowerCase(),
-				password: await hash(dto.password)
+				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
 			}
 		})
 	}
@@ -115,7 +117,9 @@ export class UserService {
 			data: {
 				id: dto.id ? dto.id : user.id,
 				email: dto.email ? dto.email.toLowerCase() : user.email,
-				password: dto.password ? await hash(dto.password) : user.password,
+				password: dto.password
+					? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+					: user.password,
 				name: dto.name,
 				avatarPath: dto.avatarPath ? dto.avatarPath : user.avatarPath,
 				rights: [

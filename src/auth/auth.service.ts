@@ -12,7 +12,7 @@ import {
 } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
 import { Role, type User } from '@prisma/client'
-import { hash, verify } from 'argon2'
+import { compare, hash } from 'bcryptjs'
 import * as dotenv from 'dotenv'
 import generator from 'generate-password-ts'
 import { omit } from 'lodash'
@@ -20,6 +20,8 @@ import { omit } from 'lodash'
 dotenv.config()
 @Injectable()
 export class AuthService {
+	private readonly PASSWORD_SALT_ROUNDS = 10
+
 	constructor(
 		private jwt: JwtService,
 		private userService: UserService,
@@ -109,7 +111,7 @@ export class AuthService {
 					id: user.id
 				},
 				data: {
-					password: await hash(newPassword)
+					password: await hash(newPassword, this.PASSWORD_SALT_ROUNDS)
 				}
 			})
 
@@ -140,7 +142,7 @@ export class AuthService {
 		if (!user) {
 			throw new UnauthorizedException('Email or password invalid')
 		}
-		const isValid = await verify(user.password, dto.password)
+		const isValid = await compare(dto.password, user.password)
 		if (!isValid) {
 			throw new UnauthorizedException('Email or password invalid')
 		}
