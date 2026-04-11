@@ -6,7 +6,8 @@ import {
 
 const RECAPTCHA_ERROR_MESSAGES: Record<string, string> = {
 	[ErrorCode.MissingInputSecret]: 'Не настроен секретный ключ reCAPTCHA.',
-	[ErrorCode.InvalidInputSecret]: 'Указан неверный секретный ключ reCAPTCHA.',
+	[ErrorCode.InvalidInputSecret]:
+		'Указан неверный секретный ключ reCAPTCHA.',
 	[ErrorCode.MissingInputResponse]: 'Капча не была пройдена.',
 	[ErrorCode.InvalidInputResponse]: 'Токен reCAPTCHA недействителен.',
 	[ErrorCode.BadRequest]: 'Некорректный запрос проверки reCAPTCHA.',
@@ -21,18 +22,17 @@ const RECAPTCHA_ERROR_MESSAGES: Record<string, string> = {
 		'Не удалось проверить reCAPTCHA. Попробуйте позже.',
 	[ErrorCode.SiteMismatch]:
 		'Текущий домен не разрешён для этого ключа reCAPTCHA.',
-	[ErrorCode.BrowserError]:
-		'Браузер не смог пройти проверку reCAPTCHA.',
+	[ErrorCode.BrowserError]: 'Браузер не смог пройти проверку reCAPTCHA.',
 	[ErrorCode.UnknownError]: 'Ошибка проверки reCAPTCHA.'
-}
+};
 
 @Catch(GoogleRecaptchaException)
 export class GoogleRecaptchaExceptionFilter implements ExceptionFilter {
 	catch(exception: GoogleRecaptchaException, host: ArgumentsHost) {
-		const response = host.switchToHttp().getResponse()
-		const status = exception.getStatus()
-		const errorCodes = exception.errorCodes || []
-		const firstErrorCode = errorCodes[0] || ErrorCode.UnknownError
+		const response = host.switchToHttp().getResponse();
+		const status = exception.getStatus();
+		const errorCodes = exception.errorCodes || [];
+		const firstErrorCode = errorCodes[0] || ErrorCode.UnknownError;
 
 		response.status(status).json({
 			statusCode: status,
@@ -41,6 +41,6 @@ export class GoogleRecaptchaExceptionFilter implements ExceptionFilter {
 				RECAPTCHA_ERROR_MESSAGES[ErrorCode.UnknownError],
 			error: 'reCAPTCHA Error',
 			code: firstErrorCode
-		})
+		});
 	}
 }

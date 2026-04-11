@@ -8,6 +8,11 @@ import * as cookieParser from 'cookie-parser';
 
 export const bootstrap = async () => {
 	const app = await NestFactory.create(AppModule);
+	const httpAdapter = app.getHttpAdapter()
+	const instance = httpAdapter.getInstance()
+	if (typeof instance?.set === 'function') {
+		instance.set('trust proxy', true)
+	}
 
 	app.setGlobalPrefix('api', {
 		exclude: [

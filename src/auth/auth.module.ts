@@ -10,6 +10,7 @@ import { JwtStrategy } from '@/auth/strategies/jwt.strategy'
 import { getJwtConfig } from '@/config/jwt.config'
 import { EmailModule } from '@/email/email.module'
 import { PrismaService } from '@/prisma.service'
+import { SmsModule } from '@/sms/sms.module'
 import { UserModule } from '@/user/user.module'
 import { Module } from '@nestjs/common'
 import { ConfigModule, ConfigService } from '@nestjs/config'
@@ -23,7 +24,8 @@ import { JwtModule } from '@nestjs/jwt'
 			useFactory: getJwtConfig
 		}),
 		UserModule,
-		EmailModule
+		EmailModule,
+		SmsModule
 	],
 	controllers: [AuthController, SocialMediaAuthController],
 	providers: [

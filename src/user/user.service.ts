@@ -18,14 +18,30 @@ export class UserService {
 	async getUserList(searchTerm: string) {
 		return this.prisma.user.findMany({
 			where: {
-				email: {
-					contains: searchTerm
-				}
+				OR: [
+					{
+						email: {
+							contains: searchTerm
+						}
+					},
+					{
+						phone: {
+							contains: searchTerm
+						}
+					},
+					{
+						name: {
+							contains: searchTerm
+						}
+					}
+				]
 			},
 			select: {
 				id: true,
 				name: true,
 				email: true,
+				phone: true,
+				isPhoneVerified: true,
 				verificationToken: true,
 				rights: true,
 				createdAt: true,
@@ -46,6 +62,14 @@ export class UserService {
 		return this.prisma.user.findUnique({
 			where: {
 				email
+			}
+		})
+	}
+
+	async getUserByPhone(phone: string) {
+		return this.prisma.user.findUnique({
+			where: {
+				phone
 			}
 		})
 	}
@@ -89,6 +113,18 @@ export class UserService {
 		})
 	}
 
+	async createPhoneUser(dto: { phone: string; password: string }) {
+		return this.prisma.user.create({
+			data: {
+				email: null,
+				phone: dto.phone,
+				isPhoneVerified: true,
+				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS),
+				verificationToken: null
+			}
+		})
+	}
+
 	async updateUser(id: string, dto?: UpdateUserDto) {
 		const user = await this.prisma.user.findUnique({
 			where: {
@@ -100,14 +136,28 @@ export class UserService {
 			throw new NotFoundException('User not found')
 		}
 
-		const isSameUser = await this.prisma.user.findFirst({
-			where: {
-				email: dto.email
-			}
-		})
+		const isSameUser = dto.email
+			? await this.prisma.user.findFirst({
+					where: {
+						email: dto.email
+					}
+				})
+			: null
 
 		if (isSameUser && id !== isSameUser.id) {
 			throw new NotFoundException('Email busy')
+		}
+
+		const isSamePhoneUser = dto.phone
+			? await this.prisma.user.findFirst({
+					where: {
+						phone: dto.phone
+					}
+				})
+			: null
+
+		if (isSamePhoneUser && id !== isSamePhoneUser.id) {
+			throw new NotFoundException('Phone busy')
 		}
 
 		return this.prisma.user.update({
@@ -116,7 +166,15 @@ export class UserService {
 			},
 			data: {
 				id: dto.id ? dto.id : user.id,
-				email: dto.email ? dto.email.toLowerCase() : user.email,
+				email:
+					typeof dto.email === 'string'
+						? dto.email.toLowerCase()
+						: user.email,
+				phone: typeof dto.phone === 'string' ? dto.phone : user.phone,
+				isPhoneVerified:
+					typeof dto.isPhoneVerified === 'boolean'
+						? dto.isPhoneVerified
+						: user.isPhoneVerified,
 				password: dto.password
 					? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
 					: user.password,

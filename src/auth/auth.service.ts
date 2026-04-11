@@ -1,9 +1,14 @@
 import { AuthDto } from '@/auth/dto/auth.dto'
 import { ConfirmationEmailDto } from '@/auth/dto/confirmation-email.dto'
+import { PhoneLoginDto } from '@/auth/dto/phone-login.dto'
+import { PhoneRegisterDto } from '@/auth/dto/phone-register.dto'
 import { RestorePasswordDto } from '@/auth/dto/restore-password.dto'
+import { SendPhoneCodeDto } from '@/auth/dto/send-phone-code.dto'
 import { EmailService } from '@/email/email.service'
 import { PrismaService } from '@/prisma.service'
+import { SmsService } from '@/sms/sms.service'
 import { UserService } from '@/user/user.service'
+import { normalizePhone } from '@/utils/phone.util'
 import {
 	BadRequestException,
 	Injectable,
@@ -21,12 +26,15 @@ export class AuthService {
 	private readonly PASSWORD_SALT_ROUNDS = 10
 	private readonly TOKEN_EXPIRATION_ACCESS = '1h'
 	private readonly TOKEN_EXPIRATION_REFRESH = '7d'
+	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5
+	private readonly PHONE_CODE_MAX_ATTEMPTS = 5
 
 	constructor(
 		private jwt: JwtService,
 		private userService: UserService,
 		private emailService: EmailService,
-		private prisma: PrismaService
+		private prisma: PrismaService,
+		private smsService: SmsService
 	) {}
 
 	async login(dto: AuthDto) {
@@ -42,9 +50,87 @@ export class AuthService {
 		const user = await this.userService.createUser(dto)
 
 		await this.emailService.sendVerification(
-			user.email,
+			user.email!,
 			`${process.env.MODE === 'production' ? process.env.PRODUCTION_HOST : process.env.DEVELOPMENT_HOST}/confirmation-email?token=${user.verificationToken}`
 		)
+
+		return this.buildResponseObject(user)
+	}
+
+	async sendPhoneCode(dto: SendPhoneCodeDto, ip?: string) {
+		const phone = normalizePhone(dto.phone)
+		const userExists = await this.userService.getUserByPhone(phone)
+
+		if (userExists) {
+			throw new BadRequestException('Phone already exists')
+		}
+
+		const code = this.generatePhoneCode()
+		const expiresAt = new Date(
+			Date.now() + this.PHONE_CODE_EXPIRATION_MINUTES * 60 * 1000
+		)
+
+		await this.prisma.phoneVerificationCode.upsert({
+			where: {
+				phone_purpose: {
+					phone,
+					purpose: 'REGISTER'
+				}
+			},
+			update: {
+				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
+				attempts: 0,
+				expiresAt
+			},
+			create: {
+				phone,
+				purpose: 'REGISTER',
+				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
+				expiresAt
+			}
+		})
+
+		await this.smsService.sendVerificationCode(phone, code, ip)
+
+		return true
+	}
+
+	async registerByPhone(dto: PhoneRegisterDto) {
+		const phone = normalizePhone(dto.phone)
+		const existingUser = await this.userService.getUserByPhone(phone)
+
+		if (existingUser) {
+			throw new BadRequestException('Phone already exists')
+		}
+
+		await this.validatePhoneCode(phone, dto.code)
+
+		const user = await this.userService.createPhoneUser({
+			phone,
+			password: dto.password
+		})
+
+		await this.deletePhoneCode(phone)
+
+		return this.buildResponseObject(user)
+	}
+
+	async loginByPhone(dto: PhoneLoginDto) {
+		const phone = normalizePhone(dto.phone)
+		const user = await this.userService.getUserByPhone(phone)
+
+		if (!user) {
+			throw new UnauthorizedException('Email or password invalid')
+		}
+
+		if (!user.isPhoneVerified) {
+			throw new UnauthorizedException('Phone not verified')
+		}
+
+		const isValid = await compare(dto.password, user.password)
+		if (!isValid) {
+			throw new UnauthorizedException('Email or password invalid')
+		}
 
 		return this.buildResponseObject(user)
 	}
@@ -111,8 +197,13 @@ export class AuthService {
 	}
 
 	async restorePassword(dto: RestorePasswordDto) {
-		const { email } = dto
-		const user = await this.prisma.user.findUnique({ where: { email } })
+		const { email, phone } = dto
+		const normalizedPhone = phone ? normalizePhone(phone) : undefined
+		const user = email
+			? await this.prisma.user.findUnique({ where: { email } })
+			: normalizedPhone
+				? await this.prisma.user.findUnique({ where: { phone: normalizedPhone } })
+				: null
 
 		if (!user) {
 			throw new NotFoundException('User not found')
@@ -134,7 +225,11 @@ export class AuthService {
 			}
 		})
 
-		await this.emailService.sendNewPassword(user.email, newPassword)
+		if (email) {
+			await this.emailService.sendNewPassword(user.email!, newPassword)
+		} else if (normalizedPhone) {
+			await this.smsService.sendRestorePassword(normalizedPhone, newPassword)
+		}
 	}
 
 	async buildResponseObject(user: User) {
@@ -152,6 +247,58 @@ export class AuthService {
 			expiresIn: this.TOKEN_EXPIRATION_REFRESH
 		})
 		return { accessToken, refreshToken }
+	}
+
+	private generatePhoneCode() {
+		return `${Math.floor(100000 + Math.random() * 900000)}`
+	}
+
+	private async validatePhoneCode(phone: string, code: string) {
+		const verificationCode = await this.prisma.phoneVerificationCode.findUnique({
+			where: {
+				phone_purpose: {
+					phone,
+					purpose: 'REGISTER'
+				}
+			}
+		})
+
+		if (!verificationCode || verificationCode.expiresAt.getTime() < Date.now()) {
+			await this.deletePhoneCode(phone)
+			throw new UnauthorizedException('Phone verification code not found')
+		}
+
+		const isValidCode = await compare(code, verificationCode.codeHash)
+		if (!isValidCode) {
+			const nextAttempts = verificationCode.attempts + 1
+
+			if (nextAttempts >= this.PHONE_CODE_MAX_ATTEMPTS) {
+				await this.deletePhoneCode(phone)
+			} else {
+				await this.prisma.phoneVerificationCode.update({
+					where: {
+						phone_purpose: {
+							phone,
+							purpose: 'REGISTER'
+						}
+					},
+					data: {
+						attempts: nextAttempts
+					}
+				})
+			}
+
+			throw new UnauthorizedException('Phone verification code invalid')
+		}
+	}
+
+	private async deletePhoneCode(phone: string) {
+		await this.prisma.phoneVerificationCode.deleteMany({
+			where: {
+				phone,
+				purpose: 'REGISTER'
+			}
+		})
 	}
 
 	private async saveRefreshToken(userId: string, refreshToken: string) {

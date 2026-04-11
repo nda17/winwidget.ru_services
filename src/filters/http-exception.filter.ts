@@ -29,7 +29,7 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 	},
 	'Email or password invalid': {
 		code: 'invalid_credentials',
-		message: 'Неверный email или пароль.'
+		message: 'Неверный логин или пароль.'
 	},
 	'User not found by social media': {
 		code: 'social_user_not_found',
@@ -50,6 +50,42 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 	'Email busy': {
 		code: 'email_busy',
 		message: 'Этот email уже занят.'
+	},
+	'Phone busy': {
+		code: 'phone_busy',
+		message: 'Этот номер телефона уже занят.'
+	},
+	'Phone already exists': {
+		code: 'phone_already_exists',
+		message: 'Пользователь с таким номером уже существует.'
+	},
+	'Phone not verified': {
+		code: 'phone_not_verified',
+		message: 'Номер телефона не подтвержден.'
+	},
+	'Phone verification code not found': {
+		code: 'phone_code_not_found',
+		message: 'Код подтверждения не найден или истёк.'
+	},
+	'Phone verification code invalid': {
+		code: 'phone_code_invalid',
+		message: 'Неверный код подтверждения.'
+	},
+	'Sms provider insufficient funds': {
+		code: 'sms_provider_balance',
+		message: 'Не удалось отправить SMS. Попробуйте позже.'
+	},
+	'SMS provider request failed': {
+		code: 'sms_provider_failed',
+		message: 'Не удалось отправить SMS. Попробуйте позже.'
+	},
+	'SMS provider returned an error': {
+		code: 'sms_provider_failed',
+		message: 'Не удалось отправить SMS. Попробуйте позже.'
+	},
+	'Invalid ip-address': {
+		code: 'sms_provider_ip',
+		message: 'Не удалось отправить SMS. Попробуйте позже.'
 	},
 	'У тебя нет прав!': {
 		code: 'forbidden',

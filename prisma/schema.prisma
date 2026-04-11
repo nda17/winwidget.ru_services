@@ -9,15 +9,30 @@ datasource db {
 
 model User {
   id                 String   @id @default(cuid())
-  email              String   @unique
+  email              String?  @unique
+  phone              String?  @unique
+  isPhoneVerified    Boolean  @default(false) @map("is_phone_verified")
   name               String?
   password           String
   avatarPath         String?
-  verificationToken   String?  @default(cuid()) @map("verification_token")
+  verificationToken  String?  @default(cuid()) @map("verification_token")
   hashedRefreshToken String?  @map("hashed_refresh_token")
   rights             Role[]   @default([USER])
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
+}
+
+model PhoneVerificationCode {
+  phone     String
+  purpose   PhoneVerificationPurpose
+  codeHash  String                 @map("code_hash")
+  attempts  Int                    @default(0)
+  expiresAt DateTime               @map("expires_at")
+  createdAt DateTime               @default(now()) @map("created_at")
+  updatedAt DateTime               @updatedAt @map("updated_at")
+
+  @@id([phone, purpose])
+  @@map("phone_verification_codes")
 }
 
 enum Role {
@@ -25,4 +40,8 @@ enum Role {
   PREMIUM
   MANAGER
   ADMIN
+}
+
+enum PhoneVerificationPurpose {
+  REGISTER
 }

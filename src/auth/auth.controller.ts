@@ -1,7 +1,10 @@
 import { AuthService } from '@/auth/auth.service'
 import { AuthDto } from '@/auth/dto/auth.dto'
 import { ConfirmationEmailDto } from '@/auth/dto/confirmation-email.dto'
+import { PhoneLoginDto } from '@/auth/dto/phone-login.dto'
+import { PhoneRegisterDto } from '@/auth/dto/phone-register.dto'
 import { RestorePasswordDto } from '@/auth/dto/restore-password.dto'
+import { SendPhoneCodeDto } from '@/auth/dto/send-phone-code.dto'
 import { RefreshTokenService } from '@/auth/refresh-token.service'
 import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard'
 import {
@@ -56,6 +59,51 @@ export class AuthController {
 		return response
 	}
 
+	@UseGuards(AuthRateLimitGuard)
+	@UsePipes(new ValidationPipe())
+	@HttpCode(200)
+	@Recaptcha({ action: 'phone_send_code' })
+	@Post('auth/phone/send-code')
+	async sendPhoneCode(
+		@Body() dto: SendPhoneCodeDto,
+		@Req() req: Request
+	) {
+		const ip = this.getClientIp(req)
+		return this.authService.sendPhoneCode(dto, ip)
+	}
+
+	@UseGuards(AuthRateLimitGuard)
+	@UsePipes(new ValidationPipe())
+	@HttpCode(200)
+	@Recaptcha({ action: 'phone_register' })
+	@Post('auth/phone/register')
+	async registerByPhone(
+		@Body() dto: PhoneRegisterDto,
+		@Res({ passthrough: true }) res: Response
+	) {
+		const { refreshToken, ...response } =
+			await this.authService.registerByPhone(dto)
+
+		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken)
+		return response
+	}
+
+	@UseGuards(AuthRateLimitGuard)
+	@UsePipes(new ValidationPipe())
+	@HttpCode(200)
+	@Recaptcha({ action: 'phone_login' })
+	@Post('auth/phone/login')
+	async loginByPhone(
+		@Body() dto: PhoneLoginDto,
+		@Res({ passthrough: true }) res: Response
+	) {
+		const { refreshToken, ...response } =
+			await this.authService.loginByPhone(dto)
+
+		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken)
+		return response
+	}
+
 	@HttpCode(200)
 	@Patch('auth/confirmation-email')
 	async verifyEmail(@Body() dto: ConfirmationEmailDto) {
@@ -68,11 +116,11 @@ export class AuthController {
 
 	@UseGuards(AuthRateLimitGuard)
 	@HttpCode(200)
-	@Recaptcha({ action: 'restore-password' })
+	@Recaptcha({ action: 'restore_password' })
 	@Patch('auth/restore-password')
 	async restorePassword(@Body() dto: RestorePasswordDto) {
-		if (!dto) {
-			throw new NotFoundException('Email not passed')
+		if (!dto || (!dto.email && !dto.phone)) {
+			throw new NotFoundException('Email or phone not passed')
 		}
 
 		return this.authService.restorePassword(dto)
@@ -114,5 +162,25 @@ export class AuthController {
 		this.refreshTokenService.removeRefreshTokenFromResponse(res)
 
 		return true
+	}
+
+	private getClientIp(request: Request) {
+		const forwardedFor = request.headers['x-forwarded-for']
+		const realIp = request.headers['x-real-ip']
+		const cfIp = request.headers['cf-connecting-ip']
+
+		if (typeof cfIp === 'string' && cfIp.length > 0) {
+			return cfIp.trim()
+		}
+
+		if (typeof realIp === 'string' && realIp.length > 0) {
+			return realIp.trim()
+		}
+
+		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+			return forwardedFor.split(',')[0].trim()
+		}
+
+		return request.ip ?? undefined
 	}
 }

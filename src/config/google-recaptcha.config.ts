@@ -12,7 +12,15 @@ export const getGoogleRecaptchaConfig = async (
 		const rawToken = req.headers.recaptcha
 		return Array.isArray(rawToken) ? rawToken[0] : rawToken || ''
 	},
-	actions: ['login', 'register', 'restore-password'],
+	actions: [
+		'login',
+		'register',
+		'restore-password',
+		'restore_password',
+		'phone_send_code',
+		'phone_register',
+		'phone_login'
+	],
 	score:
 		Number(configService.get<string>('RECAPTCHA_MIN_SCORE')) ||
 		DEFAULT_RECAPTCHA_MIN_SCORE,
