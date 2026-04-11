@@ -4,6 +4,7 @@ import {
 	IGoogleProfile
 } from '@/auth/social-media/social-media-auth.types'
 import { PrismaService } from '@/prisma.service'
+import { UpdateProfileDto } from '@/user/dto/update-profile.dto'
 import { UpdateUserDto } from '@/user/dto/update-user.dto'
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { Role, type User } from '@prisma/client'
@@ -15,26 +16,33 @@ export class UserService {
 
 	constructor(private prisma: PrismaService) {}
 
-	async getUserList(searchTerm: string) {
+	async getUserList(searchTerm?: string) {
+		const normalizedSearchTerm = searchTerm?.trim()
+
 		return this.prisma.user.findMany({
-			where: {
-				OR: [
-					{
-						email: {
-							contains: searchTerm
-						}
-					},
-					{
-						phone: {
-							contains: searchTerm
-						}
-					},
-					{
-						name: {
-							contains: searchTerm
-						}
+			where: normalizedSearchTerm
+				? {
+						OR: [
+							{
+								email: {
+									contains: normalizedSearchTerm
+								}
+							},
+							{
+								phone: {
+									contains: normalizedSearchTerm
+								}
+							},
+							{
+								name: {
+									contains: normalizedSearchTerm
+								}
+							}
+						]
 					}
-				]
+				: undefined,
+			orderBy: {
+				createdAt: 'desc'
 			},
 			select: {
 				id: true,
@@ -123,6 +131,37 @@ export class UserService {
 				verificationToken: null
 			}
 		})
+	}
+
+	async updateProfile(id: string, dto?: UpdateProfileDto) {
+		const user = await this.prisma.user.findUnique({
+			where: {
+				id
+			}
+		})
+
+		if (!user) {
+			throw new NotFoundException('User not found')
+		}
+
+		await this.prisma.user.update({
+			where: {
+				id
+			},
+			data: {
+				name: typeof dto?.name === 'string' ? dto.name : user.name,
+				avatarPath:
+					typeof dto?.avatarPath === 'string' && dto.avatarPath.length
+						? dto.avatarPath
+						: user.avatarPath,
+				password:
+					typeof dto?.password === 'string' && dto.password.length
+						? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+						: user.password
+			}
+		})
+
+		return true
 	}
 
 	async updateUser(id: string, dto?: UpdateUserDto) {

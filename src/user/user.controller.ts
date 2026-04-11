@@ -1,5 +1,6 @@
 import { Auth } from '@/auth/decorators/auth.decorator'
 import { CurrentUser } from '@/auth/decorators/user.decorator'
+import { UpdateProfileDto } from '@/user/dto/update-profile.dto'
 import { UpdateUserDto } from '@/user/dto/update-user.dto'
 import { UserService } from '@/user/user.service'
 import {
@@ -23,6 +24,16 @@ export class UserController {
 	@Get('profile')
 	async getProfile(@CurrentUser('id') id: string) {
 		return this.userService.getUserById(id)
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Patch('profile')
+	async updateProfile(
+		@CurrentUser('id') id: string,
+		@Body() dto: UpdateProfileDto
+	) {
+		return this.userService.updateProfile(id, dto)
 	}
 
 	@HttpCode(200)
