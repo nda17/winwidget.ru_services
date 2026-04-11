@@ -13,14 +13,14 @@ import {
 import { JwtService } from '@nestjs/jwt'
 import { Role, type User } from '@prisma/client'
 import { compare, hash } from 'bcryptjs'
-import * as dotenv from 'dotenv'
 import generator from 'generate-password-ts'
 import { omit } from 'lodash'
 
-dotenv.config()
 @Injectable()
 export class AuthService {
 	private readonly PASSWORD_SALT_ROUNDS = 10
+	private readonly TOKEN_EXPIRATION_ACCESS = '1h'
+	private readonly TOKEN_EXPIRATION_REFRESH = '7d'
 
 	constructor(
 		private jwt: JwtService,
@@ -28,9 +28,6 @@ export class AuthService {
 		private emailService: EmailService,
 		private prisma: PrismaService
 	) {}
-
-	private readonly TOKEN_EXPIRATION_ACCESS = '1h'
-	private readonly TOKEN_EXPIRATION_REFRESH = '7d'
 
 	async login(dto: AuthDto) {
 		const user = await this.validateUser(dto)
@@ -53,12 +50,45 @@ export class AuthService {
 	}
 
 	async getNewTokens(refreshToken: string) {
-		const result = await this.jwt.verifyAsync(refreshToken)
-		if (!result) {
+		const result = await this.jwt.verifyAsync<{ id: string }>(refreshToken)
+		if (!result?.id) {
 			throw new UnauthorizedException('Invalid refresh token')
 		}
+
 		const user = await this.userService.getUserById(result.id)
+		if (!user?.hashedRefreshToken) {
+			throw new UnauthorizedException('Invalid refresh token')
+		}
+
+		const isValidRefreshToken = await compare(
+			refreshToken,
+			user.hashedRefreshToken
+		)
+		if (!isValidRefreshToken) {
+			throw new UnauthorizedException('Invalid refresh token')
+		}
+
 		return this.buildResponseObject(user)
+	}
+
+	async logout(refreshToken?: string) {
+		if (!refreshToken) {
+			return true
+		}
+
+		try {
+			const result = await this.jwt.verifyAsync<{ id: string }>(refreshToken)
+			if (result?.id) {
+				await this.prisma.user.update({
+					where: { id: result.id },
+					data: { hashedRefreshToken: null }
+				})
+			}
+		} catch {
+			return true
+		}
+
+		return true
 	}
 
 	async confirmationEmail(dto: ConfirmationEmailDto) {
@@ -66,7 +96,7 @@ export class AuthService {
 
 		const user = await this.prisma.user.findFirst({
 			where: {
-				verificationToken: verificationToken
+				verificationToken
 			}
 		})
 
@@ -75,54 +105,41 @@ export class AuthService {
 		}
 
 		await this.prisma.user.update({
-			where: {
-				id: user.id
-			},
-			data: {
-				verificationToken: null
-			}
+			where: { id: user.id },
+			data: { verificationToken: null }
 		})
 	}
 
 	async restorePassword(dto: RestorePasswordDto) {
 		const { email } = dto
-
-		const user = await this.prisma.user.findUnique({
-			where: {
-				email: email
-			}
-		})
+		const user = await this.prisma.user.findUnique({ where: { email } })
 
 		if (!user) {
 			throw new NotFoundException('User not found')
 		}
 
-		if (user) {
-			const newPassword = generator.generate({
-				length: 6,
-				uppercase: true,
-				lowercase: true,
-				numbers: true,
-				strict: true
-			})
+		const newPassword = generator.generate({
+			length: 6,
+			uppercase: true,
+			lowercase: true,
+			numbers: true,
+			strict: true
+		})
 
-			await this.prisma.user.update({
-				where: {
-					id: user.id
-				},
-				data: {
-					password: await hash(newPassword, this.PASSWORD_SALT_ROUNDS)
-				}
-			})
+		await this.prisma.user.update({
+			where: { id: user.id },
+			data: {
+				password: await hash(newPassword, this.PASSWORD_SALT_ROUNDS),
+				hashedRefreshToken: null
+			}
+		})
 
-			await this.emailService.sendNewPassword(user.email, newPassword)
-		}
-
-		return
+		await this.emailService.sendNewPassword(user.email, newPassword)
 	}
 
 	async buildResponseObject(user: User) {
 		const tokens = await this.issueTokens(user.id, user.rights)
+		await this.saveRefreshToken(user.id, tokens.refreshToken)
 		return { user: this.omitPassword(user), ...tokens }
 	}
 
@@ -135,6 +152,15 @@ export class AuthService {
 			expiresIn: this.TOKEN_EXPIRATION_REFRESH
 		})
 		return { accessToken, refreshToken }
+	}
+
+	private async saveRefreshToken(userId: string, refreshToken: string) {
+		await this.prisma.user.update({
+			where: { id: userId },
+			data: {
+				hashedRefreshToken: await hash(refreshToken, this.PASSWORD_SALT_ROUNDS)
+			}
+		})
 	}
 
 	private async validateUser(dto: AuthDto) {
@@ -150,6 +176,6 @@ export class AuthService {
 	}
 
 	private omitPassword(user: User) {
-		return omit(user, ['password'])
+		return omit(user, ['password', 'hashedRefreshToken'])
 	}
 }

@@ -1,8 +1,8 @@
-import { ArgumentsHost, Catch, ExceptionFilter } from '@nestjs/common'
+import { ArgumentsHost, Catch, ExceptionFilter } from '@nestjs/common';
 import {
 	ErrorCode,
 	GoogleRecaptchaException
-} from '@nestlab/google-recaptcha'
+} from '@nestlab/google-recaptcha';
 
 const RECAPTCHA_ERROR_MESSAGES: Record<string, string> = {
 	[ErrorCode.MissingInputSecret]: 'Не настроен секретный ключ reCAPTCHA.',

@@ -1,4 +1,5 @@
 import { AuthController } from '@/auth/auth.controller'
+import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard'
 import { AuthService } from '@/auth/auth.service'
 import { RefreshTokenService } from '@/auth/refresh-token.service'
 import { SocialMediaAuthController } from '@/auth/social-media/social-media-auth.controller'
@@ -30,6 +31,7 @@ import { JwtModule } from '@nestjs/jwt'
 		PrismaService,
 		AuthService,
 		RefreshTokenService,
+		AuthRateLimitGuard,
 		GoogleStrategy,
 		GithubStrategy,
 		SocialMediaAuthService

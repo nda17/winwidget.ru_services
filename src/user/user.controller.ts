@@ -55,13 +55,6 @@ export class UserController {
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
-	@Get('count')
-	async getCountUsers() {
-		return this.userService.getCountUsers()
-	}
-
-	@HttpCode(200)
-	@Auth(Role.ADMIN)
 	@Patch('user/:id')
 	async updateUser(@Param('id') id: string, @Body() dto: UpdateUserDto) {
 		return this.userService.updateUser(id, dto)
