@@ -69,6 +69,7 @@ enum AuthIdentityType {
   PHONE
   GOOGLE
   GITHUB
+  YANDEX
 }
 
 enum VerificationChallengeType {

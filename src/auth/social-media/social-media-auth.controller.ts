@@ -1,8 +1,24 @@
 import { AuthService } from '@/auth/auth.service';
 import { RefreshTokenService } from '@/auth/refresh-token.service';
 import { SocialMediaAuthService } from '@/auth/social-media/social-media-auth.service';
-import { TSocialProfile } from '@/auth/social-media/social-media-auth.types';
-import { Controller, Get, Req, Res, UseGuards } from '@nestjs/common';
+import {
+	IYandexProfile,
+	TSocialProfile
+} from '@/auth/social-media/social-media-auth.types';
+import {
+	buildYandexAuthUrl,
+	buildYandexAvatarUrl,
+	exchangeYandexCode,
+	fetchYandexUserInfo
+} from '@/auth/strategies/yandex.strategy';
+import {
+	Controller,
+	Get,
+	Query,
+	Req,
+	Res,
+	UseGuards
+} from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Response } from 'express';
 
@@ -52,5 +68,47 @@ export class SocialMediaAuthController {
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 
 		return res.redirect(`${this._CLIENT_BASE_URL}${accessToken}`);
+	}
+
+	@Get('yandex')
+	yandexAuth(@Res() res: Response) {
+		const url = buildYandexAuthUrl(
+			process.env.YANDEX_CLIENT_ID!,
+			process.env.YANDEX_CALLBACK_URL!
+		);
+		return res.redirect(url);
+	}
+
+	@Get('yandex/redirect')
+	async yandexAuthRedirect(
+		@Query('code') code: string,
+		@Res({ passthrough: true }) res: Response
+	) {
+		const accessToken = await exchangeYandexCode(
+			code,
+			process.env.YANDEX_CLIENT_ID!,
+			process.env.YANDEX_CLIENT_SECRET!,
+			process.env.YANDEX_CALLBACK_URL!
+		);
+
+		const userInfo = await fetchYandexUserInfo(accessToken);
+
+		const profile: IYandexProfile = {
+			providerId: userInfo.id,
+			email: userInfo.default_email,
+			displayName: userInfo.display_name,
+			picture: buildYandexAvatarUrl(userInfo),
+			accessToken
+		};
+
+		const user = await this.socialMediaAuthService.login({
+			user: profile
+		});
+
+		const { accessToken: jwt, refreshToken } =
+			await this.authService.buildResponseObject(user);
+		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
+
+		return res.redirect(`${this._CLIENT_BASE_URL}${jwt}`);
 	}
 }

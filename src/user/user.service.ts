@@ -1,6 +1,7 @@
 import {
 	IGithubProfile,
-	IGoogleProfile
+	IGoogleProfile,
+	IYandexProfile
 } from '@/auth/social-media/social-media-auth.types';
 import { PrismaService } from '@/prisma.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
@@ -22,7 +23,8 @@ export type PublicUserLoginMethod =
 	| 'EMAIL'
 	| 'PHONE'
 	| 'GOOGLE'
-	| 'GITHUB';
+	| 'GITHUB'
+	| 'YANDEX';
 
 export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
 	email: string | null;
@@ -31,7 +33,7 @@ export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
 	loginMethods: PublicUserLoginMethod[];
 };
 
-type SocialIdentityType = 'GOOGLE' | 'GITHUB';
+type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX';
 
 @Injectable()
 export class UserService {
@@ -131,7 +133,9 @@ export class UserService {
 		});
 	}
 
-	async findOrCreateSocialUser(profile: IGoogleProfile | IGithubProfile) {
+	async findOrCreateSocialUser(
+		profile: IGoogleProfile | IGithubProfile | IYandexProfile
+	) {
 		const socialType = this.getSocialIdentityType(profile);
 		const socialIdentity = await this.prisma.authIdentity.findUnique({
 			where: {
@@ -181,14 +185,16 @@ export class UserService {
 	}
 
 	private async _createSocialUser(
-		profile: IGoogleProfile | IGithubProfile,
+		profile: IGoogleProfile | IGithubProfile | IYandexProfile,
 		socialType: SocialIdentityType
 	): Promise<UserWithAuthIdentities> {
 		const email = normalizeEmail(profile.email);
 		const name =
 			'firstName' in profile
 				? `${profile.firstName} ${profile.lastName}`
-				: profile.username;
+				: 'displayName' in profile
+					? profile.displayName
+					: profile.username;
 		const picture = profile.picture || '';
 		const verifiedAt = new Date();
 
@@ -511,6 +517,10 @@ export class UserService {
 			loginMethods.push('GITHUB');
 		}
 
+		if (this.getIdentityByType(user, AuthIdentityType.YANDEX)) {
+			loginMethods.push('YANDEX');
+		}
+
 		return loginMethods;
 	}
 
@@ -546,11 +556,11 @@ export class UserService {
 	}
 
 	private getSocialIdentityType(
-		profile: IGoogleProfile | IGithubProfile
+		profile: IGoogleProfile | IGithubProfile | IYandexProfile
 	): SocialIdentityType {
-		return 'firstName' in profile
-			? AuthIdentityType.GOOGLE
-			: AuthIdentityType.GITHUB;
+		if ('firstName' in profile) return AuthIdentityType.GOOGLE;
+		if ('displayName' in profile) return AuthIdentityType.YANDEX;
+		return AuthIdentityType.GITHUB;
 	}
 
 	private normalizeEditableEmail(email?: string) {

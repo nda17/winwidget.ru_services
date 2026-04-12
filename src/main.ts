@@ -20,7 +20,9 @@ export const bootstrap = async () => {
 			{ path: 'auth/google', method: RequestMethod.GET },
 			{ path: 'auth/google/redirect', method: RequestMethod.GET },
 			{ path: 'auth/github', method: RequestMethod.GET },
-			{ path: 'auth/github/redirect', method: RequestMethod.GET }
+			{ path: 'auth/github/redirect', method: RequestMethod.GET },
+			{ path: 'auth/yandex', method: RequestMethod.GET },
+			{ path: 'auth/yandex/redirect', method: RequestMethod.GET }
 		]
 	});
 

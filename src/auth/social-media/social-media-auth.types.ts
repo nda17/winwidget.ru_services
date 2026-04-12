@@ -15,4 +15,15 @@ export interface IGithubProfile {
 	accessToken: string;
 }
 
-export type TSocialProfile = IGoogleProfile | IGithubProfile;
+export interface IYandexProfile {
+	providerId: string;
+	email: string;
+	displayName: string;
+	picture: string;
+	accessToken: string;
+}
+
+export type TSocialProfile =
+	| IGoogleProfile
+	| IGithubProfile
+	| IYandexProfile;
