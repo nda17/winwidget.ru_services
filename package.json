@@ -20,7 +20,12 @@
 		"test:cov": "jest --coverage",
 		"test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
 		"test:e2e": "jest --config ./test/jest-e2e.json",
-		"email": "emails dev"
+		"email": "emails dev",
+		"prepare": "husky"
+	},
+	"lint-staged": {
+		"*.{ts,tsx,js,json,md}": "prettier --write",
+		"*.{ts,tsx}": "eslint --fix --max-warnings=0"
 	},
 	"dependencies": {
 		"@nestjs-modules/mailer": "^2.0.2",
@@ -79,7 +84,9 @@
 		"eslint": "^8.57.1",
 		"eslint-config-prettier": "^9.1.0",
 		"eslint-plugin-prettier": "^5.2.1",
+		"husky": "^9.1.7",
 		"jest": "^29.7.0",
+		"lint-staged": "^16.4.0",
 		"morgan": "^1.10.0",
 		"prettier": "^3.4.2",
 		"source-map-support": "^0.5.21",
