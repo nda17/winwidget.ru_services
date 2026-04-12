@@ -1,13 +1,13 @@
-import { Injectable } from '@nestjs/common'
-import type { Response } from 'express'
+import { Injectable } from '@nestjs/common';
+import type { Response } from 'express';
 
 @Injectable()
 export class RefreshTokenService {
-	readonly EXPIRE_DAY_REFRESH_TOKEN = 7
-	readonly REFRESH_TOKEN_NAME = 'refreshToken'
+	readonly EXPIRE_DAY_REFRESH_TOKEN = 7;
+	readonly REFRESH_TOKEN_NAME = 'refreshToken';
 
 	private getCookieOptions(expires: Date) {
-		const isProduction = process.env.MODE === 'production'
+		const isProduction = process.env.MODE === 'production';
 
 		return {
 			httpOnly: true,
@@ -15,18 +15,18 @@ export class RefreshTokenService {
 			secure: isProduction,
 			sameSite: isProduction ? ('none' as const) : ('lax' as const),
 			path: '/'
-		}
+		};
 	}
 
 	addRefreshTokenToResponse(res: Response, refreshToken: string) {
-		const expiresIn = new Date()
-		expiresIn.setDate(expiresIn.getDate() + this.EXPIRE_DAY_REFRESH_TOKEN)
+		const expiresIn = new Date();
+		expiresIn.setDate(expiresIn.getDate() + this.EXPIRE_DAY_REFRESH_TOKEN);
 
 		res.cookie(
 			this.REFRESH_TOKEN_NAME,
 			refreshToken,
 			this.getCookieOptions(expiresIn)
-		)
+		);
 	}
 
 	removeRefreshTokenFromResponse(res: Response) {
@@ -34,6 +34,6 @@ export class RefreshTokenService {
 			this.REFRESH_TOKEN_NAME,
 			'',
 			this.getCookieOptions(new Date(0))
-		)
+		);
 	}
 }

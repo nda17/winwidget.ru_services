@@ -1,40 +1,65 @@
 import {
 	IGithubProfile,
 	IGoogleProfile
-} from '@/auth/social-media/social-media-auth.types'
-import { PrismaService } from '@/prisma.service'
-import { UpdateProfileDto } from '@/user/dto/update-profile.dto'
-import { UpdateUserDto } from '@/user/dto/update-user.dto'
-import { Injectable, NotFoundException } from '@nestjs/common'
-import { Role, type User } from '@prisma/client'
-import { hash } from 'bcryptjs'
+} from '@/auth/social-media/social-media-auth.types';
+import { PrismaService } from '@/prisma.service';
+import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
+import { UpdateUserDto } from '@/user/dto/update-user.dto';
+import { normalizePhone } from '@/utils/phone.util';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { AuthIdentityType, Prisma, Role, type User } from '@prisma/client';
+import { hash } from 'bcryptjs';
+
+export type UserWithAuthIdentities = Prisma.UserGetPayload<{
+	include: {
+		authIdentities: true;
+	};
+}>;
+
+export type PublicUserLoginMethod =
+	| 'EMAIL'
+	| 'PHONE'
+	| 'GOOGLE'
+	| 'GITHUB';
+
+export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
+	email: string | null;
+	phone: string | null;
+	isPhoneVerified: boolean;
+	loginMethods: PublicUserLoginMethod[];
+};
+
+type SocialIdentityType = 'GOOGLE' | 'GITHUB';
 
 @Injectable()
 export class UserService {
-	private readonly PASSWORD_SALT_ROUNDS = 10
+	private readonly PASSWORD_SALT_ROUNDS = 10;
 
 	constructor(private prisma: PrismaService) {}
 
 	async getUserList(searchTerm?: string) {
-		const normalizedSearchTerm = searchTerm?.trim()
-
-		return this.prisma.user.findMany({
+		const normalizedSearchTerm = searchTerm?.trim();
+		const users = await this.prisma.user.findMany({
 			where: normalizedSearchTerm
 				? {
 						OR: [
 							{
-								email: {
-									contains: normalizedSearchTerm
-								}
-							},
-							{
-								phone: {
-									contains: normalizedSearchTerm
-								}
-							},
-							{
 								name: {
-									contains: normalizedSearchTerm
+									contains: normalizedSearchTerm,
+									mode: 'insensitive'
+								}
+							},
+							{
+								authIdentities: {
+									some: {
+										type: {
+											in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
+										},
+										value: {
+											contains: normalizedSearchTerm,
+											mode: 'insensitive'
+										}
+									}
 								}
 							}
 						]
@@ -43,92 +68,193 @@ export class UserService {
 			orderBy: {
 				createdAt: 'desc'
 			},
-			select: {
-				id: true,
-				name: true,
-				email: true,
-				phone: true,
-				isPhoneVerified: true,
-				rights: true,
-				createdAt: true,
-				password: false
+			include: {
+				authIdentities: true
 			}
-		})
+		});
+
+		return users.map(user => this.toPublicUser(user));
 	}
 
 	async getUserById(id: string) {
 		return this.prisma.user.findUnique({
 			where: {
 				id
+			},
+			include: {
+				authIdentities: true
 			}
-		})
+		});
+	}
+
+	async getPublicUserById(id: string) {
+		const user = await this.getUserById(id);
+		return user ? this.toPublicUser(user) : null;
 	}
 
 	async getUserByEmail(email: string) {
+		const normalizedEmail = this.normalizeEmail(email);
+
 		return this.prisma.user.findFirst({
 			where: {
-				email: {
-					equals: email,
-					mode: 'insensitive'
+				authIdentities: {
+					some: {
+						type: AuthIdentityType.EMAIL,
+						value: {
+							equals: normalizedEmail,
+							mode: 'insensitive'
+						}
+					}
 				}
+			},
+			include: {
+				authIdentities: true
 			}
-		})
+		});
 	}
 
 	async getUserByPhone(phone: string) {
-		return this.prisma.user.findUnique({
+		const normalizedPhone = normalizePhone(phone);
+
+		return this.prisma.user.findFirst({
 			where: {
-				phone
+				authIdentities: {
+					some: {
+						type: AuthIdentityType.PHONE,
+						value: normalizedPhone
+					}
+				}
+			},
+			include: {
+				authIdentities: true
 			}
-		})
+		});
 	}
 
 	async findOrCreateSocialUser(profile: IGoogleProfile | IGithubProfile) {
-		let user = await this.getUserByEmail(profile.email)
-		if (!user) {
-			user = await this._createSocialUser(profile)
+		const socialType = this.getSocialIdentityType(profile);
+		const socialIdentity = await this.prisma.authIdentity.findUnique({
+			where: {
+				type_value: {
+					type: socialType,
+					value: profile.providerId
+				}
+			},
+			include: {
+				user: {
+					include: {
+						authIdentities: true
+					}
+				}
+			}
+		});
+
+		if (socialIdentity?.user) {
+			return socialIdentity.user;
 		}
-		return user
+
+		const normalizedEmail = this.normalizeEmail(profile.email);
+		let user = await this.getUserByEmail(normalizedEmail);
+
+		if (!user) {
+			user = await this._createSocialUser(profile, socialType);
+			return user;
+		}
+
+		await this.upsertIdentity({
+			userId: user.id,
+			type: socialType,
+			value: profile.providerId,
+			verifiedAt: new Date()
+		});
+
+		if (!this.getIdentityByType(user, AuthIdentityType.EMAIL)) {
+			await this.upsertIdentity({
+				userId: user.id,
+				type: AuthIdentityType.EMAIL,
+				value: normalizedEmail,
+				verifiedAt: new Date()
+			});
+		}
+
+		return (await this.getUserById(user.id))!;
 	}
 
 	private async _createSocialUser(
-		profile: IGoogleProfile | IGithubProfile
-	): Promise<User> {
-		const email = profile.email
+		profile: IGoogleProfile | IGithubProfile,
+		socialType: SocialIdentityType
+	): Promise<UserWithAuthIdentities> {
+		const email = this.normalizeEmail(profile.email);
 		const name =
 			'firstName' in profile
 				? `${profile.firstName} ${profile.lastName}`
-				: profile.username
-		const picture = profile.picture || ''
+				: profile.username;
+		const picture = profile.picture || '';
+		const verifiedAt = new Date();
 
 		return this.prisma.user.create({
 			data: {
-				email: email.toLowerCase(),
 				name,
 				password: '',
-				avatarPath: picture
+				avatarPath: picture,
+				authIdentities: {
+					create: [
+						{
+							type: socialType,
+							value: profile.providerId,
+							verifiedAt
+						},
+						{
+							type: AuthIdentityType.EMAIL,
+							value: email,
+							verifiedAt
+						}
+					]
+				}
+			},
+			include: {
+				authIdentities: true
 			}
-		})
+		});
 	}
 
-	async createVerifiedEmailUser(dto: { email: string; passwordHash: string }) {
+	async createVerifiedEmailUser(dto: {
+		email: string;
+		passwordHash: string;
+	}) {
 		return this.prisma.user.create({
 			data: {
-				email: dto.email.toLowerCase(),
-				password: dto.passwordHash
+				password: dto.passwordHash,
+				authIdentities: {
+					create: {
+						type: AuthIdentityType.EMAIL,
+						value: this.normalizeEmail(dto.email),
+						verifiedAt: new Date()
+					}
+				}
+			},
+			include: {
+				authIdentities: true
 			}
-		})
+		});
 	}
 
 	async createPhoneUser(dto: { phone: string; password: string }) {
 		return this.prisma.user.create({
 			data: {
-				email: null,
-				phone: dto.phone,
-				isPhoneVerified: true,
-				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS),
+				authIdentities: {
+					create: {
+						type: AuthIdentityType.PHONE,
+						value: normalizePhone(dto.phone),
+						verifiedAt: new Date()
+					}
+				}
+			},
+			include: {
+				authIdentities: true
 			}
-		})
+		});
 	}
 
 	async updateProfile(id: string, dto?: UpdateProfileDto) {
@@ -136,10 +262,10 @@ export class UserService {
 			where: {
 				id
 			}
-		})
+		});
 
 		if (!user) {
-			throw new NotFoundException('User not found')
+			throw new NotFoundException('User not found');
 		}
 
 		await this.prisma.user.update({
@@ -157,74 +283,169 @@ export class UserService {
 						? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
 						: user.password
 			}
-		})
+		});
 
-		return true
+		return true;
 	}
 
 	async updateUser(id: string, dto?: UpdateUserDto) {
-		const user = await this.prisma.user.findUnique({
-			where: {
-				id
-			}
-		})
+		const user = await this.getUserById(id);
 
 		if (!user) {
-			throw new NotFoundException('User not found')
+			throw new NotFoundException('User not found');
 		}
 
-		const isSameUser = dto.email
-			? await this.prisma.user.findFirst({
-					where: {
-						email: dto.email
+		const emailIdentity = this.getIdentityByType(
+			user,
+			AuthIdentityType.EMAIL
+		);
+		const phoneIdentity = this.getIdentityByType(
+			user,
+			AuthIdentityType.PHONE
+		);
+		const nextEmail = this.normalizeEditableEmail(dto?.email);
+		const nextPhone = this.normalizeEditablePhone(dto?.phone);
+
+		if (nextEmail) {
+			const sameEmailIdentity = await this.prisma.authIdentity.findFirst({
+				where: {
+					type: AuthIdentityType.EMAIL,
+					value: {
+						equals: nextEmail,
+						mode: 'insensitive'
 					}
-				})
-			: null
+				}
+			});
 
-		if (isSameUser && id !== isSameUser.id) {
-			throw new NotFoundException('Email busy')
-		}
-
-		const isSamePhoneUser = dto.phone
-			? await this.prisma.user.findFirst({
-					where: {
-						phone: dto.phone
-					}
-				})
-			: null
-
-		if (isSamePhoneUser && id !== isSamePhoneUser.id) {
-			throw new NotFoundException('Phone busy')
-		}
-
-		return this.prisma.user.update({
-			where: {
-				id
-			},
-			data: {
-				id: dto.id ? dto.id : user.id,
-				email:
-					typeof dto.email === 'string'
-						? dto.email.toLowerCase()
-						: user.email,
-				phone: typeof dto.phone === 'string' ? dto.phone : user.phone,
-				isPhoneVerified:
-					typeof dto.isPhoneVerified === 'boolean'
-						? dto.isPhoneVerified
-						: user.isPhoneVerified,
-				password: dto.password
-					? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
-					: user.password,
-				name: dto.name,
-				avatarPath: dto.avatarPath ? dto.avatarPath : user.avatarPath,
-				rights: [
-					dto.isUser ? Role.USER : null,
-					dto.isAdmin ? Role.ADMIN : null,
-					dto.isManager ? Role.MANAGER : null,
-					dto.isPremium ? Role.PREMIUM : null
-				].filter((role) => role !== null)
+			if (sameEmailIdentity && sameEmailIdentity.userId !== id) {
+				throw new NotFoundException('Email busy');
 			}
-		})
+		}
+
+		if (nextPhone) {
+			const samePhoneIdentity = await this.prisma.authIdentity.findUnique({
+				where: {
+					type_value: {
+						type: AuthIdentityType.PHONE,
+						value: nextPhone
+					}
+				}
+			});
+
+			if (samePhoneIdentity && samePhoneIdentity.userId !== id) {
+				throw new NotFoundException('Phone busy');
+			}
+		}
+
+		const updatedUser = await this.prisma.$transaction(async tx => {
+			const updated = await tx.user.update({
+				where: {
+					id
+				},
+				data: {
+					id: dto?.id ? dto.id : user.id,
+					password: dto?.password
+						? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+						: user.password,
+					name: typeof dto?.name === 'string' ? dto.name : user.name,
+					avatarPath:
+						typeof dto?.avatarPath === 'string' && dto.avatarPath.length
+							? dto.avatarPath
+							: user.avatarPath,
+					rights: [
+						dto?.isUser ? Role.USER : null,
+						dto?.isAdmin ? Role.ADMIN : null,
+						dto?.isManager ? Role.MANAGER : null,
+						dto?.isPremium ? Role.PREMIUM : null
+					].filter(role => role !== null)
+				}
+			});
+
+			const targetUserId = updated.id;
+
+			if (nextEmail !== undefined) {
+				if (nextEmail) {
+					await tx.authIdentity.upsert({
+						where: {
+							userId_type: {
+								userId: targetUserId,
+								type: AuthIdentityType.EMAIL
+							}
+						},
+						update: {
+							value: nextEmail,
+							verifiedAt: emailIdentity?.verifiedAt ?? new Date()
+						},
+						create: {
+							userId: targetUserId,
+							type: AuthIdentityType.EMAIL,
+							value: nextEmail,
+							verifiedAt: new Date()
+						}
+					});
+				} else {
+					await tx.authIdentity.deleteMany({
+						where: {
+							userId: targetUserId,
+							type: AuthIdentityType.EMAIL
+						}
+					});
+				}
+			}
+
+			if (
+				nextPhone !== undefined ||
+				typeof dto?.isPhoneVerified === 'boolean'
+			) {
+				const phoneValue = nextPhone ?? phoneIdentity?.value ?? null;
+
+				if (phoneValue) {
+					const isVerified =
+						typeof dto?.isPhoneVerified === 'boolean'
+							? dto.isPhoneVerified
+							: Boolean(phoneIdentity?.verifiedAt);
+
+					await tx.authIdentity.upsert({
+						where: {
+							userId_type: {
+								userId: targetUserId,
+								type: AuthIdentityType.PHONE
+							}
+						},
+						update: {
+							value: phoneValue,
+							verifiedAt: isVerified
+								? (phoneIdentity?.verifiedAt ?? new Date())
+								: null
+						},
+						create: {
+							userId: targetUserId,
+							type: AuthIdentityType.PHONE,
+							value: phoneValue,
+							verifiedAt: isVerified ? new Date() : null
+						}
+					});
+				} else {
+					await tx.authIdentity.deleteMany({
+						where: {
+							userId: targetUserId,
+							type: AuthIdentityType.PHONE
+						}
+					});
+				}
+			}
+
+			return tx.user.findUnique({
+				where: {
+					id: targetUserId
+				},
+				include: {
+					authIdentities: true
+				}
+			});
+		});
+
+		return updatedUser ? this.toPublicUser(updatedUser) : null;
 	}
 
 	async deleteUser(id: string) {
@@ -232,6 +453,126 @@ export class UserService {
 			where: {
 				id
 			}
-		})
+		});
+	}
+
+	toPublicUser(user: UserWithAuthIdentities): PublicUser {
+		const emailIdentity = this.getIdentityByType(
+			user,
+			AuthIdentityType.EMAIL
+		);
+		const phoneIdentity = this.getIdentityByType(
+			user,
+			AuthIdentityType.PHONE
+		);
+
+		return {
+			id: user.id,
+			name: user.name,
+			avatarPath: user.avatarPath,
+			rights: user.rights,
+			createdAt: user.createdAt,
+			updatedAt: user.updatedAt,
+			email: emailIdentity?.value ?? null,
+			phone: phoneIdentity?.value ?? null,
+			isPhoneVerified: Boolean(phoneIdentity?.verifiedAt),
+			loginMethods: this.getLoginMethods(user)
+		};
+	}
+
+	private getIdentityByType(
+		user: UserWithAuthIdentities,
+		type: AuthIdentityType
+	) {
+		return user.authIdentities.find(identity => identity.type === type);
+	}
+
+	private getLoginMethods(
+		user: UserWithAuthIdentities
+	): PublicUserLoginMethod[] {
+		const loginMethods: PublicUserLoginMethod[] = [];
+		const phoneIdentity = this.getIdentityByType(
+			user,
+			AuthIdentityType.PHONE
+		);
+
+		if (this.getIdentityByType(user, AuthIdentityType.EMAIL)) {
+			loginMethods.push('EMAIL');
+		}
+
+		if (phoneIdentity?.verifiedAt) {
+			loginMethods.push('PHONE');
+		}
+
+		if (this.getIdentityByType(user, AuthIdentityType.GOOGLE)) {
+			loginMethods.push('GOOGLE');
+		}
+
+		if (this.getIdentityByType(user, AuthIdentityType.GITHUB)) {
+			loginMethods.push('GITHUB');
+		}
+
+		return loginMethods;
+	}
+
+	private async upsertIdentity({
+		userId,
+		type,
+		value,
+		verifiedAt
+	}: {
+		userId: string;
+		type: AuthIdentityType;
+		value: string;
+		verifiedAt: Date | null;
+	}) {
+		return this.prisma.authIdentity.upsert({
+			where: {
+				userId_type: {
+					userId,
+					type
+				}
+			},
+			update: {
+				value,
+				verifiedAt
+			},
+			create: {
+				userId,
+				type,
+				value,
+				verifiedAt
+			}
+		});
+	}
+
+	private getSocialIdentityType(
+		profile: IGoogleProfile | IGithubProfile
+	): SocialIdentityType {
+		return 'firstName' in profile
+			? AuthIdentityType.GOOGLE
+			: AuthIdentityType.GITHUB;
+	}
+
+	private normalizeEmail(email: string) {
+		return email.trim().toLowerCase();
+	}
+
+	private normalizeEditableEmail(email?: string) {
+		if (typeof email !== 'string') {
+			return undefined;
+		}
+
+		const trimmedEmail = email.trim();
+		return trimmedEmail ? this.normalizeEmail(trimmedEmail) : null;
+	}
+
+	private normalizeEditablePhone(phone?: string) {
+		if (typeof phone !== 'string') {
+			return undefined;
+		}
+
+		const trimmedPhone = phone.trim();
+		return trimmedPhone ? normalizePhone(trimmedPhone) : null;
 	}
 }

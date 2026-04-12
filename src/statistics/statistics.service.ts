@@ -1,6 +1,6 @@
 import { PrismaService } from '@/prisma.service';
 import { Injectable } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import { AuthIdentityType, Role } from '@prisma/client';
 import * as dayjs from 'dayjs';
 
 @Injectable()
@@ -59,7 +59,7 @@ export class StatisticsService {
 			totalUsers,
 			activeUsers30d,
 			newUsers30d,
-			pendingEmailRegistrations,
+			usersWithAuthIdentities,
 			premiumUsers,
 			adminUsers,
 			managerUsers
@@ -75,7 +75,16 @@ export class StatisticsService {
 					createdAt: { gte: monthAgo }
 				}
 			}),
-			this.prisma.pendingEmailRegistration.count(),
+			this.prisma.user.findMany({
+				select: {
+					authIdentities: {
+						select: {
+							type: true,
+							verifiedAt: true
+						}
+					}
+				}
+			}),
 			this.prisma.user.count({
 				where: {
 					rights: { has: Role.PREMIUM }
@@ -92,12 +101,30 @@ export class StatisticsService {
 				}
 			})
 		]);
+		const usersWithMultipleLoginMethods = usersWithAuthIdentities.reduce(
+			(total, user) => {
+				const loginMethods = user.authIdentities.filter((identity) => {
+					if (identity.type === AuthIdentityType.PHONE) {
+						return Boolean(identity.verifiedAt);
+					}
+
+					return (
+						identity.type === AuthIdentityType.EMAIL ||
+						identity.type === AuthIdentityType.GOOGLE ||
+						identity.type === AuthIdentityType.GITHUB
+					);
+				});
+
+				return total + (loginMethods.length >= 2 ? 1 : 0);
+			},
+			0
+		);
 
 		return {
 			totalUsers,
 			activeUsers30d,
 			newUsers30d,
-			unconfirmedUsers: pendingEmailRegistrations,
+			multiLoginUsers: usersWithMultipleLoginMethods,
 			premiumUsers,
 			adminUsers,
 			managerUsers

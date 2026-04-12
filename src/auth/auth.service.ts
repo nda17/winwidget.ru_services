@@ -1,37 +1,44 @@
-import { AuthDto } from '@/auth/dto/auth.dto'
-import { EmailRegisterDto } from '@/auth/dto/email-register.dto'
-import { PhoneLoginDto } from '@/auth/dto/phone-login.dto'
-import { PhoneRegisterDto } from '@/auth/dto/phone-register.dto'
-import { ResendEmailCodeDto } from '@/auth/dto/resend-email-code.dto'
-import { RestorePasswordDto } from '@/auth/dto/restore-password.dto'
-import { SendPhoneCodeDto } from '@/auth/dto/send-phone-code.dto'
-import { EmailService } from '@/email/email.service'
-import { PrismaService } from '@/prisma.service'
-import { SmsService } from '@/sms/sms.service'
-import { UserService } from '@/user/user.service'
-import { normalizePhone } from '@/utils/phone.util'
+import { AuthDto } from '@/auth/dto/auth.dto';
+import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
+import { PhoneLoginDto } from '@/auth/dto/phone-login.dto';
+import { PhoneRegisterDto } from '@/auth/dto/phone-register.dto';
+import { ResendEmailCodeDto } from '@/auth/dto/resend-email-code.dto';
+import { RestorePasswordDto } from '@/auth/dto/restore-password.dto';
+import { SendPhoneCodeDto } from '@/auth/dto/send-phone-code.dto';
+import { EmailService } from '@/email/email.service';
+import { PrismaService } from '@/prisma.service';
+import { SmsService } from '@/sms/sms.service';
+import {
+	type UserWithAuthIdentities,
+	UserService
+} from '@/user/user.service';
+import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
 	Injectable,
 	NotFoundException,
 	UnauthorizedException
-} from '@nestjs/common'
-import { JwtService } from '@nestjs/jwt'
-import { PendingEmailRegistration, Role, type User } from '@prisma/client'
-import { compare, hash } from 'bcryptjs'
-import generator from 'generate-password-ts'
-import { omit } from 'lodash'
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import {
+	Role,
+	type VerificationChallenge,
+	VerificationChallengePurpose,
+	VerificationChallengeType
+} from '@prisma/client';
+import { compare, hash } from 'bcryptjs';
+import generator from 'generate-password-ts';
 
 @Injectable()
 export class AuthService {
-	private readonly PASSWORD_SALT_ROUNDS = 10
-	private readonly TOKEN_EXPIRATION_ACCESS = '1h'
-	private readonly TOKEN_EXPIRATION_REFRESH = '7d'
-	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10
-	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5
-	private readonly EMAIL_CODE_RESEND_COOLDOWN_SECONDS = 60
-	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5
-	private readonly PHONE_CODE_MAX_ATTEMPTS = 5
+	private readonly PASSWORD_SALT_ROUNDS = 10;
+	private readonly TOKEN_EXPIRATION_ACCESS = '1h';
+	private readonly TOKEN_EXPIRATION_REFRESH = '7d';
+	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10;
+	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5;
+	private readonly EMAIL_CODE_RESEND_COOLDOWN_SECONDS = 60;
+	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5;
+	private readonly PHONE_CODE_MAX_ATTEMPTS = 5;
 
 	constructor(
 		private jwt: JwtService,
@@ -42,227 +49,264 @@ export class AuthService {
 	) {}
 
 	async login(dto: AuthDto) {
-		const user = await this.validateUser(dto)
-		return this.buildResponseObject(user)
+		const user = await this.validateUser(dto);
+		return this.buildResponseObject(user);
 	}
 
 	async register(dto: AuthDto) {
-		const email = this.normalizeEmail(dto.email)
-		const userExists = await this.userService.getUserByEmail(email)
+		const email = this.normalizeEmail(dto.email);
+		const userExists = await this.userService.getUserByEmail(email);
 
 		if (userExists) {
-			throw new BadRequestException('User already exists')
+			throw new BadRequestException('User already exists');
 		}
 
 		const pendingRegistration =
-			await this.prisma.pendingEmailRegistration.findUnique({
+			await this.prisma.verificationChallenge.findUnique({
 				where: {
-					email
+					type_purpose_value: {
+						type: VerificationChallengeType.EMAIL,
+						purpose: VerificationChallengePurpose.REGISTER,
+						value: email
+					}
 				}
-			})
+			});
 
 		if (pendingRegistration) {
-			this.ensureEmailCodeResendAllowed(pendingRegistration)
+			this.ensureEmailCodeResendAllowed(pendingRegistration);
 		}
 
 		return this.upsertPendingEmailRegistration({
 			email,
 			passwordHash: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
-		})
+		});
 	}
 
 	async registerByEmail(dto: EmailRegisterDto) {
-		const email = this.normalizeEmail(dto.email)
-		const existingUser = await this.userService.getUserByEmail(email)
+		const email = this.normalizeEmail(dto.email);
+		const existingUser = await this.userService.getUserByEmail(email);
 
 		if (existingUser) {
-			throw new BadRequestException('User already exists')
+			throw new BadRequestException('User already exists');
 		}
 
-		const pendingRegistration = await this.validateEmailCode(email, dto.code)
+		const pendingRegistration = await this.validateEmailCode(
+			email,
+			dto.code
+		);
+		if (!pendingRegistration.passwordHash) {
+			throw new UnauthorizedException('Email verification code not found');
+		}
 		const user = await this.userService.createVerifiedEmailUser({
 			email,
 			passwordHash: pendingRegistration.passwordHash
-		})
+		});
 
-		await this.deletePendingEmailRegistration(email)
+		await this.deletePendingEmailRegistration(email);
 
-		return this.buildResponseObject(user)
+		return this.buildResponseObject(user);
 	}
 
 	async resendEmailCode(dto: ResendEmailCodeDto) {
-		const email = this.normalizeEmail(dto.email)
-		const userExists = await this.userService.getUserByEmail(email)
+		const email = this.normalizeEmail(dto.email);
+		const userExists = await this.userService.getUserByEmail(email);
 
 		if (userExists) {
-			await this.deletePendingEmailRegistration(email)
-			throw new BadRequestException('User already exists')
+			await this.deletePendingEmailRegistration(email);
+			throw new BadRequestException('User already exists');
 		}
 
 		const pendingRegistration =
-			await this.prisma.pendingEmailRegistration.findUnique({
+			await this.prisma.verificationChallenge.findUnique({
 				where: {
-					email
+					type_purpose_value: {
+						type: VerificationChallengeType.EMAIL,
+						purpose: VerificationChallengePurpose.REGISTER,
+						value: email
+					}
 				}
-			})
+			});
 
 		if (!pendingRegistration) {
-			throw new UnauthorizedException('Email verification code not found')
+			throw new UnauthorizedException('Email verification code not found');
 		}
 
-		this.ensureEmailCodeResendAllowed(pendingRegistration)
+		if (!pendingRegistration.passwordHash) {
+			await this.deletePendingEmailRegistration(email);
+			throw new UnauthorizedException('Email verification code not found');
+		}
+
+		this.ensureEmailCodeResendAllowed(pendingRegistration);
 
 		return this.upsertPendingEmailRegistration({
 			email,
 			passwordHash: pendingRegistration.passwordHash
-		})
+		});
 	}
 
 	async sendPhoneCode(dto: SendPhoneCodeDto, ip?: string) {
-		const phone = normalizePhone(dto.phone)
-		const userExists = await this.userService.getUserByPhone(phone)
+		const phone = normalizePhone(dto.phone);
+		const userExists = await this.userService.getUserByPhone(phone);
 
 		if (userExists) {
-			throw new BadRequestException('Phone already exists')
+			throw new BadRequestException('Phone already exists');
 		}
 
-		const code = this.generatePhoneCode()
+		const code = this.generatePhoneCode();
 		const expiresAt = new Date(
 			Date.now() + this.PHONE_CODE_EXPIRATION_MINUTES * 60 * 1000
-		)
+		);
 
-		await this.prisma.phoneVerificationCode.upsert({
+		await this.prisma.verificationChallenge.upsert({
 			where: {
-				phone_purpose: {
-					phone,
-					purpose: 'REGISTER'
+				type_purpose_value: {
+					type: VerificationChallengeType.PHONE,
+					purpose: VerificationChallengePurpose.REGISTER,
+					value: phone
 				}
 			},
 			update: {
+				passwordHash: null,
 				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
 				attempts: 0,
-				expiresAt
+				expiresAt,
+				lastSentAt: new Date()
 			},
 			create: {
-				phone,
-				purpose: 'REGISTER',
+				type: VerificationChallengeType.PHONE,
+				purpose: VerificationChallengePurpose.REGISTER,
+				value: phone,
 				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
 				expiresAt
 			}
-		})
+		});
 
-		await this.smsService.sendVerificationCode(phone, code, ip)
+		await this.smsService.sendVerificationCode(phone, code, ip);
 
-		return true
+		return true;
 	}
 
 	async registerByPhone(dto: PhoneRegisterDto) {
-		const phone = normalizePhone(dto.phone)
-		const existingUser = await this.userService.getUserByPhone(phone)
+		const phone = normalizePhone(dto.phone);
+		const existingUser = await this.userService.getUserByPhone(phone);
 
 		if (existingUser) {
-			throw new BadRequestException('Phone already exists')
+			throw new BadRequestException('Phone already exists');
 		}
 
-		await this.validatePhoneCode(phone, dto.code)
+		await this.validatePhoneCode(phone, dto.code);
 
 		const user = await this.userService.createPhoneUser({
 			phone,
 			password: dto.password
-		})
+		});
 
-		await this.deletePhoneCode(phone)
+		await this.deletePhoneCode(phone);
 
-		return this.buildResponseObject(user)
+		return this.buildResponseObject(user);
 	}
 
 	async loginByPhone(dto: PhoneLoginDto) {
-		const phone = normalizePhone(dto.phone)
-		const user = await this.userService.getUserByPhone(phone)
+		const phone = normalizePhone(dto.phone);
+		const user = await this.userService.getUserByPhone(phone);
 
 		if (!user) {
-			throw new UnauthorizedException('Email or password invalid')
+			throw new UnauthorizedException('Email or password invalid');
 		}
 
-		if (!user.isPhoneVerified) {
-			throw new UnauthorizedException('Phone not verified')
+		const phoneIdentity = user.authIdentities.find(
+			identity => identity.type === 'PHONE'
+		);
+
+		if (!phoneIdentity?.verifiedAt) {
+			throw new UnauthorizedException('Phone not verified');
 		}
 
-		const isValid = await compare(dto.password, user.password)
+		const isValid = await compare(dto.password, user.password);
 		if (!isValid) {
-			throw new UnauthorizedException('Email or password invalid')
+			throw new UnauthorizedException('Email or password invalid');
 		}
 
-		return this.buildResponseObject(user)
+		return this.buildResponseObject(user);
 	}
 
 	async getNewTokens(refreshToken: string) {
-		const result = await this.jwt.verifyAsync<{ id: string }>(refreshToken)
+		const result = await this.jwt.verifyAsync<{ id: string }>(
+			refreshToken
+		);
 		if (!result?.id) {
-			throw new UnauthorizedException('Invalid refresh token')
+			throw new UnauthorizedException('Invalid refresh token');
 		}
 
-		const user = await this.userService.getUserById(result.id)
+		const user = await this.userService.getUserById(result.id);
 		if (!user?.hashedRefreshToken) {
-			throw new UnauthorizedException('Invalid refresh token')
+			throw new UnauthorizedException('Invalid refresh token');
 		}
 
 		const isValidRefreshToken = await compare(
 			refreshToken,
 			user.hashedRefreshToken
-		)
+		);
 		if (!isValidRefreshToken) {
-			throw new UnauthorizedException('Invalid refresh token')
+			throw new UnauthorizedException('Invalid refresh token');
 		}
 
-		return this.buildResponseObject(user)
+		return this.buildResponseObject(user);
 	}
 
 	async logout(refreshToken?: string) {
 		if (!refreshToken) {
-			return true
+			return true;
 		}
 
 		try {
-			const result = await this.jwt.verifyAsync<{ id: string }>(refreshToken)
+			const result = await this.jwt.verifyAsync<{ id: string }>(
+				refreshToken
+			);
 			if (result?.id) {
 				await this.prisma.user.update({
 					where: { id: result.id },
 					data: { hashedRefreshToken: null }
-				})
+				});
 			}
 		} catch {
-			return true
+			return true;
 		}
 
-		return true
+		return true;
 	}
 
 	async restorePassword(dto: RestorePasswordDto) {
-		const { email, phone } = dto
-		const normalizedEmail = email ? this.normalizeEmail(email) : undefined
-		const normalizedPhone = phone ? normalizePhone(phone) : undefined
+		const { email, phone } = dto;
+		const normalizedEmail = email ? this.normalizeEmail(email) : undefined;
+		const normalizedPhone = phone ? normalizePhone(phone) : undefined;
 		const user = normalizedEmail
 			? await this.userService.getUserByEmail(normalizedEmail)
 			: normalizedPhone
-				? await this.prisma.user.findUnique({ where: { phone: normalizedPhone } })
-				: null
+				? await this.userService.getUserByPhone(normalizedPhone)
+				: null;
 
 		if (!user) {
 			if (normalizedEmail) {
 				const pendingRegistration =
-					await this.prisma.pendingEmailRegistration.findUnique({
+					await this.prisma.verificationChallenge.findUnique({
 						where: {
-							email: normalizedEmail
+							type_purpose_value: {
+								type: VerificationChallengeType.EMAIL,
+								purpose: VerificationChallengePurpose.REGISTER,
+								value: normalizedEmail
+							}
 						}
-					})
+					});
 
 				if (pendingRegistration) {
-					throw new BadRequestException('Email registration not completed')
+					throw new BadRequestException(
+						'Email registration not completed'
+					);
 				}
 			}
 
-			throw new NotFoundException('User not found')
+			throw new NotFoundException('User not found');
 		}
 
 		const newPassword = generator.generate({
@@ -271,7 +315,7 @@ export class AuthService {
 			lowercase: true,
 			numbers: true,
 			strict: true
-		})
+		});
 
 		await this.prisma.user.update({
 			where: { id: user.id },
@@ -279,160 +323,193 @@ export class AuthService {
 				password: await hash(newPassword, this.PASSWORD_SALT_ROUNDS),
 				hashedRefreshToken: null
 			}
-		})
+		});
 
 		if (normalizedEmail) {
-			await this.emailService.sendNewPassword(user.email!, newPassword)
+			await this.emailService.sendNewPassword(
+				normalizedEmail,
+				newPassword
+			);
 		} else if (normalizedPhone) {
-			await this.smsService.sendRestorePassword(normalizedPhone, newPassword)
+			await this.smsService.sendRestorePassword(
+				normalizedPhone,
+				newPassword
+			);
 		}
 	}
 
-	async buildResponseObject(user: User) {
-		const tokens = await this.issueTokens(user.id, user.rights)
-		await this.saveRefreshToken(user.id, tokens.refreshToken)
-		return { user: this.omitPassword(user), ...tokens }
+	async buildResponseObject(user: UserWithAuthIdentities) {
+		const tokens = await this.issueTokens(user.id, user.rights);
+		await this.saveRefreshToken(user.id, tokens.refreshToken);
+		return { user: this.userService.toPublicUser(user), ...tokens };
 	}
 
 	private async issueTokens(userId: string, rights: Role[]) {
-		const payload = { id: userId, rights }
+		const payload = { id: userId, rights };
 		const accessToken = this.jwt.sign(payload, {
 			expiresIn: this.TOKEN_EXPIRATION_ACCESS
-		})
+		});
 		const refreshToken = this.jwt.sign(payload, {
 			expiresIn: this.TOKEN_EXPIRATION_REFRESH
-		})
-		return { accessToken, refreshToken }
+		});
+		return { accessToken, refreshToken };
 	}
 
 	private generatePhoneCode() {
-		return `${Math.floor(100000 + Math.random() * 900000)}`
+		return `${Math.floor(100000 + Math.random() * 900000)}`;
 	}
 
 	private generateEmailCode() {
-		return `${Math.floor(100000 + Math.random() * 900000)}`
+		return `${Math.floor(100000 + Math.random() * 900000)}`;
 	}
 
 	private async validatePhoneCode(phone: string, code: string) {
-		const verificationCode = await this.prisma.phoneVerificationCode.findUnique({
-			where: {
-				phone_purpose: {
-					phone,
-					purpose: 'REGISTER'
+		const verificationCode =
+			await this.prisma.verificationChallenge.findUnique({
+				where: {
+					type_purpose_value: {
+						type: VerificationChallengeType.PHONE,
+						purpose: VerificationChallengePurpose.REGISTER,
+						value: phone
+					}
 				}
-			}
-		})
+			});
 
-		if (!verificationCode || verificationCode.expiresAt.getTime() < Date.now()) {
-			await this.deletePhoneCode(phone)
-			throw new UnauthorizedException('Phone verification code not found')
+		if (
+			!verificationCode ||
+			verificationCode.expiresAt.getTime() < Date.now()
+		) {
+			await this.deletePhoneCode(phone);
+			throw new UnauthorizedException('Phone verification code not found');
 		}
 
-		const isValidCode = await compare(code, verificationCode.codeHash)
+		const isValidCode = await compare(code, verificationCode.codeHash);
 		if (!isValidCode) {
-			const nextAttempts = verificationCode.attempts + 1
+			const nextAttempts = verificationCode.attempts + 1;
 
 			if (nextAttempts >= this.PHONE_CODE_MAX_ATTEMPTS) {
-				await this.deletePhoneCode(phone)
+				await this.deletePhoneCode(phone);
 			} else {
-				await this.prisma.phoneVerificationCode.update({
+				await this.prisma.verificationChallenge.update({
 					where: {
-						phone_purpose: {
-							phone,
-							purpose: 'REGISTER'
+						type_purpose_value: {
+							type: VerificationChallengeType.PHONE,
+							purpose: VerificationChallengePurpose.REGISTER,
+							value: phone
 						}
 					},
 					data: {
 						attempts: nextAttempts
 					}
-				})
+				});
 			}
 
-			throw new UnauthorizedException('Phone verification code invalid')
+			throw new UnauthorizedException('Phone verification code invalid');
 		}
 	}
 
 	private async validateEmailCode(email: string, code: string) {
 		const pendingRegistration =
-			await this.prisma.pendingEmailRegistration.findUnique({
+			await this.prisma.verificationChallenge.findUnique({
 				where: {
-					email
+					type_purpose_value: {
+						type: VerificationChallengeType.EMAIL,
+						purpose: VerificationChallengePurpose.REGISTER,
+						value: email
+					}
 				}
-			})
+			});
 
-		if (!pendingRegistration || pendingRegistration.expiresAt.getTime() < Date.now()) {
-			throw new UnauthorizedException('Email verification code not found')
+		if (
+			!pendingRegistration ||
+			pendingRegistration.expiresAt.getTime() < Date.now()
+		) {
+			throw new UnauthorizedException('Email verification code not found');
 		}
 
 		if (pendingRegistration.attempts >= this.EMAIL_CODE_MAX_ATTEMPTS) {
-			throw new UnauthorizedException('Email verification code attempts exceeded')
+			throw new UnauthorizedException(
+				'Email verification code attempts exceeded'
+			);
 		}
 
-		const isValidCode = await compare(code, pendingRegistration.codeHash)
+		const isValidCode = await compare(code, pendingRegistration.codeHash);
 
 		if (!isValidCode) {
-			const nextAttempts = pendingRegistration.attempts + 1
+			const nextAttempts = pendingRegistration.attempts + 1;
 
-			await this.prisma.pendingEmailRegistration.update({
+			await this.prisma.verificationChallenge.update({
 				where: {
-					email
+					type_purpose_value: {
+						type: VerificationChallengeType.EMAIL,
+						purpose: VerificationChallengePurpose.REGISTER,
+						value: email
+					}
 				},
 				data: {
 					attempts: nextAttempts
 				}
-			})
+			});
 
 			if (nextAttempts >= this.EMAIL_CODE_MAX_ATTEMPTS) {
 				throw new UnauthorizedException(
 					'Email verification code attempts exceeded'
-				)
+				);
 			}
 
-			throw new UnauthorizedException('Email verification code invalid')
+			throw new UnauthorizedException('Email verification code invalid');
 		}
 
-		return pendingRegistration
+		return pendingRegistration;
 	}
 
 	private async deletePhoneCode(phone: string) {
-		await this.prisma.phoneVerificationCode.deleteMany({
+		await this.prisma.verificationChallenge.deleteMany({
 			where: {
-				phone,
-				purpose: 'REGISTER'
+				type: VerificationChallengeType.PHONE,
+				purpose: VerificationChallengePurpose.REGISTER,
+				value: phone
 			}
-		})
+		});
 	}
 
 	private async deletePendingEmailRegistration(email: string) {
-		await this.prisma.pendingEmailRegistration.deleteMany({
+		await this.prisma.verificationChallenge.deleteMany({
 			where: {
-				email
+				type: VerificationChallengeType.EMAIL,
+				purpose: VerificationChallengePurpose.REGISTER,
+				value: email
 			}
-		})
+		});
 	}
 
 	private async upsertPendingEmailRegistration({
 		email,
 		passwordHash
 	}: {
-		email: string
-		passwordHash: string
+		email: string;
+		passwordHash: string;
 	}) {
-		const code = this.generateEmailCode()
-		const now = new Date()
+		const code = this.generateEmailCode();
+		const now = new Date();
 		const expiresAt = new Date(
 			now.getTime() + this.EMAIL_CODE_EXPIRATION_MINUTES * 60 * 1000
-		)
+		);
 		const resendAvailableAt = new Date(
 			now.getTime() + this.EMAIL_CODE_RESEND_COOLDOWN_SECONDS * 1000
-		)
-		const codeHash = await hash(code, this.PASSWORD_SALT_ROUNDS)
+		);
+		const codeHash = await hash(code, this.PASSWORD_SALT_ROUNDS);
 
-		await this.prisma.pendingEmailRegistration.upsert({
+		await this.prisma.verificationChallenge.upsert({
 			where: {
-				email
+				type_purpose_value: {
+					type: VerificationChallengeType.EMAIL,
+					purpose: VerificationChallengePurpose.REGISTER,
+					value: email
+				}
 			},
 			update: {
+				value: email,
 				passwordHash,
 				codeHash,
 				attempts: 0,
@@ -440,32 +517,34 @@ export class AuthService {
 				lastSentAt: now
 			},
 			create: {
-				email,
+				type: VerificationChallengeType.EMAIL,
+				purpose: VerificationChallengePurpose.REGISTER,
+				value: email,
 				passwordHash,
 				codeHash,
 				expiresAt,
 				lastSentAt: now
 			}
-		})
+		});
 
-		await this.emailService.sendVerificationCode(email, code)
+		await this.emailService.sendVerificationCode(email, code);
 
 		return {
 			email,
 			expiresAt,
 			resendAvailableAt
-		}
+		};
 	}
 
 	private ensureEmailCodeResendAllowed(
-		pendingRegistration: PendingEmailRegistration
+		pendingRegistration: VerificationChallenge
 	) {
 		const resendAllowedAt =
 			pendingRegistration.lastSentAt.getTime() +
-			this.EMAIL_CODE_RESEND_COOLDOWN_SECONDS * 1000
+			this.EMAIL_CODE_RESEND_COOLDOWN_SECONDS * 1000;
 
 		if (resendAllowedAt > Date.now()) {
-			throw new BadRequestException('Email verification resend cooldown')
+			throw new BadRequestException('Email verification resend cooldown');
 		}
 	}
 
@@ -473,30 +552,29 @@ export class AuthService {
 		await this.prisma.user.update({
 			where: { id: userId },
 			data: {
-				hashedRefreshToken: await hash(refreshToken, this.PASSWORD_SALT_ROUNDS)
+				hashedRefreshToken: await hash(
+					refreshToken,
+					this.PASSWORD_SALT_ROUNDS
+				)
 			}
-		})
+		});
 	}
 
 	private async validateUser(dto: AuthDto) {
 		const user = await this.userService.getUserByEmail(
 			this.normalizeEmail(dto.email)
-		)
+		);
 		if (!user) {
-			throw new UnauthorizedException('Email or password invalid')
+			throw new UnauthorizedException('Email or password invalid');
 		}
-		const isValid = await compare(dto.password, user.password)
+		const isValid = await compare(dto.password, user.password);
 		if (!isValid) {
-			throw new UnauthorizedException('Email or password invalid')
+			throw new UnauthorizedException('Email or password invalid');
 		}
-		return user
+		return user;
 	}
 
 	private normalizeEmail(email: string) {
-		return email.trim().toLowerCase()
-	}
-
-	private omitPassword(user: User) {
-		return omit(user, ['password', 'hashedRefreshToken'])
+		return email.trim().toLowerCase();
 	}
 }

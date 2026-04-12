@@ -1,7 +1,7 @@
-import { Auth } from '@/auth/decorators/auth.decorator'
-import { StatisticsService } from '@/statistics/statistics.service'
-import { Controller, Get, HttpCode } from '@nestjs/common'
-import { Role } from '@prisma/client'
+import { Auth } from '@/auth/decorators/auth.decorator';
+import { StatisticsService } from '@/statistics/statistics.service';
+import { Controller, Get, HttpCode } from '@nestjs/common';
+import { Role } from '@prisma/client';
 
 @Controller('/statistics')
 export class StatisticsController {
@@ -11,13 +11,13 @@ export class StatisticsController {
 	@Auth(Role.ADMIN)
 	@Get('/registrations-by-month')
 	async getRegistrationsByMonth() {
-		return this.statisticsService.getUserRegistrationsByMonth()
+		return this.statisticsService.getUserRegistrationsByMonth();
 	}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('/overview')
 	getOverview() {
-		return this.statisticsService.getOverview()
+		return this.statisticsService.getOverview();
 	}
 }

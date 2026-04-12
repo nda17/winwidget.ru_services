@@ -9,43 +9,52 @@ datasource db {
 
 model User {
   id                 String   @id @default(cuid())
-  email              String?  @unique
-  phone              String?  @unique
-  isPhoneVerified    Boolean  @default(false) @map("is_phone_verified")
   name               String?
   password           String
   avatarPath         String?
   hashedRefreshToken String?  @map("hashed_refresh_token")
   rights             Role[]   @default([USER])
+  authIdentities     AuthIdentity[]
+  verificationChallenges VerificationChallenge[]
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 }
 
-model PendingEmailRegistration {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  passwordHash String   @map("password_hash")
-  codeHash     String   @map("code_hash")
-  attempts     Int      @default(0)
-  expiresAt    DateTime @map("expires_at")
-  lastSentAt   DateTime @default(now()) @map("last_sent_at")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+model AuthIdentity {
+  id         String           @id @default(cuid())
+  userId     String           @map("user_id")
+  type       AuthIdentityType
+  value      String
+  verifiedAt DateTime?        @map("verified_at")
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
-  @@map("pending_email_registrations")
+  @@unique([type, value])
+  @@unique([userId, type])
+  @@index([userId])
+  @@map("auth_identities")
 }
 
-model PhoneVerificationCode {
-  phone     String
-  purpose   PhoneVerificationPurpose
-  codeHash  String                 @map("code_hash")
-  attempts  Int                    @default(0)
-  expiresAt DateTime               @map("expires_at")
-  createdAt DateTime               @default(now()) @map("created_at")
-  updatedAt DateTime               @updatedAt @map("updated_at")
+model VerificationChallenge {
+  id         String           @id @default(cuid())
+  userId     String?          @map("user_id")
+  type       VerificationChallengeType
+  purpose    VerificationChallengePurpose
+  value      String
+  passwordHash String?        @map("password_hash")
+  codeHash   String           @map("code_hash")
+  attempts   Int              @default(0)
+  expiresAt  DateTime         @map("expires_at")
+  lastSentAt DateTime         @default(now()) @map("last_sent_at")
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+  user       User?            @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
-  @@id([phone, purpose])
-  @@map("phone_verification_codes")
+  @@unique([userId, type, purpose])
+  @@unique([type, purpose, value])
+  @@index([expiresAt])
+  @@map("verification_challenges")
 }
 
 enum Role {
@@ -55,6 +64,19 @@ enum Role {
   ADMIN
 }
 
-enum PhoneVerificationPurpose {
+enum AuthIdentityType {
+  EMAIL
+  PHONE
+  GOOGLE
+  GITHUB
+}
+
+enum VerificationChallengeType {
+  EMAIL
+  PHONE
+}
+
+enum VerificationChallengePurpose {
   REGISTER
+  BIND_IDENTITY
 }

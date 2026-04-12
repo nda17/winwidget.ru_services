@@ -3,7 +3,7 @@ import * as React from 'react';
 const NewPasswordEmail = ({ password }: { password: string }) => {
 	return (
 		<div>
-			<h1>Здравствуйте!</h1>
+			<h1>Ваш временный пароль для входа</h1>
 
 			<p>
 				Вы получили это письмо, потому что данный адрес указали этот адрес

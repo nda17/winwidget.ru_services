@@ -1,4 +1,9 @@
-import { ArgumentsHost, Catch, ExceptionFilter, Logger } from '@nestjs/common';
+import {
+	ArgumentsHost,
+	Catch,
+	ExceptionFilter,
+	Logger
+} from '@nestjs/common';
 import {
 	ErrorCode,
 	GoogleRecaptchaException

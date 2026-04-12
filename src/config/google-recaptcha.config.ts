@@ -1,24 +1,25 @@
-import { ConfigService } from '@nestjs/config'
-import { Logger } from '@nestjs/common'
-import { GoogleRecaptchaModuleOptions } from '@nestlab/google-recaptcha/interfaces/google-recaptcha-module-options'
-import { Request } from 'express'
+import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
+import { GoogleRecaptchaModuleOptions } from '@nestlab/google-recaptcha/interfaces/google-recaptcha-module-options';
+import { Request } from 'express';
 
-const DEFAULT_RECAPTCHA_MIN_SCORE = 0.5
-const isTrue = (value?: string) => value === 'true'
-const recaptchaLogger = new Logger('reCAPTCHA')
+const DEFAULT_RECAPTCHA_MIN_SCORE = 0.5;
+const isTrue = (value?: string) => value === 'true';
+const recaptchaLogger = new Logger('reCAPTCHA');
 
 export const getGoogleRecaptchaConfig = async (
 	configService: ConfigService
 ): Promise<GoogleRecaptchaModuleOptions> => {
-	const isDevelopment = configService.get<string>('MODE') === 'development'
+	const isDevelopment =
+		configService.get<string>('MODE') === 'development';
 	const isRecaptchaEnabled = () =>
-		isTrue(configService.get<string>('RECAPTCHA_ENABLED'))
+		isTrue(configService.get<string>('RECAPTCHA_ENABLED'));
 
 	return {
 		secretKey: configService.get<string>('RECAPTCHA_SECRET_KEY'),
-		response: (req) => {
-			const rawToken = req.headers.recaptcha
-			return Array.isArray(rawToken) ? rawToken[0] : rawToken || ''
+		response: req => {
+			const rawToken = req.headers.recaptcha;
+			return Array.isArray(rawToken) ? rawToken[0] : rawToken || '';
 		},
 		actions: [
 			'login',
@@ -34,9 +35,9 @@ export const getGoogleRecaptchaConfig = async (
 		score:
 			Number(configService.get<string>('RECAPTCHA_MIN_SCORE')) ||
 			DEFAULT_RECAPTCHA_MIN_SCORE,
-		skipIf: (req) => {
-			const request = req as Request
-			const shouldSkip = !isRecaptchaEnabled()
+		skipIf: req => {
+			const request = req as Request;
+			const shouldSkip = !isRecaptchaEnabled();
 
 			if (isDevelopment && shouldSkip) {
 				recaptchaLogger.debug(
@@ -46,10 +47,10 @@ export const getGoogleRecaptchaConfig = async (
 						tokenProvided: Boolean(request.headers.recaptcha)
 					},
 					'skip'
-				)
+				);
 			}
 
-			return shouldSkip
+			return shouldSkip;
 		}
-	}
-}
+	};
+};

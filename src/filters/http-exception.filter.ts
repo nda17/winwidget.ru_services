@@ -55,6 +55,14 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 		code: 'phone_already_exists',
 		message: 'Пользователь с таким номером уже существует.'
 	},
+	'Email already linked': {
+		code: 'email_already_linked',
+		message: 'Этот email уже привязан к вашему профилю.'
+	},
+	'Phone already linked': {
+		code: 'phone_already_linked',
+		message: 'Этот номер телефона уже привязан к вашему профилю.'
+	},
 	'Phone not verified': {
 		code: 'phone_not_verified',
 		message: 'Номер телефона не подтвержден.'
@@ -66,6 +74,14 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 	'Phone verification code invalid': {
 		code: 'phone_code_invalid',
 		message: 'Неверный код подтверждения.'
+	},
+	'Phone verification code attempts exceeded': {
+		code: 'phone_code_attempts_exceeded',
+		message: 'Лимит попыток исчерпан. Запросите новый код.'
+	},
+	'Phone verification resend cooldown': {
+		code: 'phone_code_resend_cooldown',
+		message: 'Отправить код повторно можно немного позже.'
 	},
 	'Email verification code not found': {
 		code: 'email_code_not_found',

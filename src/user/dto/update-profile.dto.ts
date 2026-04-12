@@ -1,13 +1,13 @@
-import { IsOptional, IsString, Matches } from 'class-validator'
+import { IsOptional, IsString, Matches } from 'class-validator';
 
 export class UpdateProfileDto {
 	@IsOptional()
 	@Matches(/^[a-zA-Z][a-zA-Z0-9-]+$/)
-	name?: string
+	name?: string;
 
 	@IsOptional()
 	@IsString()
-	avatarPath?: string
+	avatarPath?: string;
 
 	@IsOptional()
 	@IsString()
@@ -15,5 +15,5 @@ export class UpdateProfileDto {
 		message:
 			'Мин. длина 6 символов. Должен содержать 1 цифру 0-9, 1 строчную букву a-z и 1 заглавную букву A-Z.'
 	})
-	password?: string
+	password?: string;
 }

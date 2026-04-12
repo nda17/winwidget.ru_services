@@ -1,8 +1,13 @@
-import { Auth } from '@/auth/decorators/auth.decorator'
-import { CurrentUser } from '@/auth/decorators/user.decorator'
-import { UpdateProfileDto } from '@/user/dto/update-profile.dto'
-import { UpdateUserDto } from '@/user/dto/update-user.dto'
-import { UserService } from '@/user/user.service'
+import { Auth } from '@/auth/decorators/auth.decorator';
+import { CurrentUser } from '@/auth/decorators/user.decorator';
+import { SendProfileEmailCodeDto } from '@/user/dto/send-profile-email-code.dto';
+import { SendProfilePhoneCodeDto } from '@/user/dto/send-profile-phone-code.dto';
+import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
+import { UpdateUserDto } from '@/user/dto/update-user.dto';
+import { VerifyProfileEmailCodeDto } from '@/user/dto/verify-profile-email-code.dto';
+import { VerifyProfilePhoneCodeDto } from '@/user/dto/verify-profile-phone-code.dto';
+import { UserIdentityBindingService } from '@/user/user-identity-binding.service';
+import { UserService } from '@/user/user.service';
 import {
 	Body,
 	Controller,
@@ -11,19 +16,27 @@ import {
 	HttpCode,
 	Param,
 	Patch,
-	Query
-} from '@nestjs/common'
-import { Role } from '@prisma/client'
+	Post,
+	Query,
+	Req,
+	UsePipes,
+	ValidationPipe
+} from '@nestjs/common';
+import { Request } from 'express';
+import { Role } from '@prisma/client';
 
 @Controller('users')
 export class UserController {
-	constructor(private readonly userService: UserService) {}
+	constructor(
+		private readonly userService: UserService,
+		private readonly userIdentityBindingService: UserIdentityBindingService
+	) {}
 
 	@HttpCode(200)
 	@Auth()
 	@Get('profile')
 	async getProfile(@CurrentUser('id') id: string) {
-		return this.userService.getUserById(id)
+		return this.userService.getPublicUserById(id);
 	}
 
 	@HttpCode(200)
@@ -33,48 +46,125 @@ export class UserController {
 		@CurrentUser('id') id: string,
 		@Body() dto: UpdateProfileDto
 	) {
-		return this.userService.updateProfile(id, dto)
+		return this.userService.updateProfile(id, dto);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@Post('profile/bind/email/send-code')
+	async sendProfileEmailCode(
+		@CurrentUser('id') id: string,
+		@Body() dto: SendProfileEmailCodeDto
+	) {
+		return this.userIdentityBindingService.sendEmailCode(id, dto.email);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@Post('profile/bind/email/verify')
+	async verifyProfileEmailCode(
+		@CurrentUser('id') id: string,
+		@Body() dto: VerifyProfileEmailCodeDto
+	) {
+		return this.userIdentityBindingService.verifyEmailCode(
+			id,
+			dto.email,
+			dto.code
+		);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@Post('profile/bind/phone/send-code')
+	async sendProfilePhoneCode(
+		@CurrentUser('id') id: string,
+		@Body() dto: SendProfilePhoneCodeDto,
+		@Req() req: Request
+	) {
+		return this.userIdentityBindingService.sendPhoneCode(
+			id,
+			dto.phone,
+			this.getClientIp(req)
+		);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@Post('profile/bind/phone/verify')
+	async verifyProfilePhoneCode(
+		@CurrentUser('id') id: string,
+		@Body() dto: VerifyProfilePhoneCodeDto
+	) {
+		return this.userIdentityBindingService.verifyPhoneCode(
+			id,
+			dto.phone,
+			dto.code
+		);
 	}
 
 	@HttpCode(200)
 	@Auth(Role.PREMIUM)
 	@Get('premium')
 	async getPremium() {
-		return { access: true }
+		return { access: true };
 	}
 
 	@HttpCode(200)
 	@Auth([Role.ADMIN, Role.MANAGER])
 	@Get('manager')
 	async getManager() {
-		return { access: true }
+		return { access: true };
 	}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('user-list')
 	async getUserList(@Query('searchTerm') searchTerm?: string) {
-		return this.userService.getUserList(searchTerm)
+		return this.userService.getUserList(searchTerm);
 	}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('edit/:id')
 	async getUserById(@Param('id') id: string) {
-		return this.userService.getUserById(id)
+		return this.userService.getPublicUserById(id);
 	}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Patch('user/:id')
 	async updateUser(@Param('id') id: string, @Body() dto: UpdateUserDto) {
-		return this.userService.updateUser(id, dto)
+		return this.userService.updateUser(id, dto);
 	}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Delete('user/:id')
 	async deleteUser(@Param('id') id: string) {
-		return this.userService.deleteUser(id)
+		return this.userService.deleteUser(id);
+	}
+
+	private getClientIp(request: Request) {
+		const forwardedFor = request.headers['x-forwarded-for']
+		const realIp = request.headers['x-real-ip']
+		const cfIp = request.headers['cf-connecting-ip']
+
+		if (typeof cfIp === 'string' && cfIp.length > 0) {
+			return cfIp.trim()
+		}
+
+		if (typeof realIp === 'string' && realIp.length > 0) {
+			return realIp.trim()
+		}
+
+		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+			return forwardedFor.split(',')[0].trim()
+		}
+
+		return request.ip ?? undefined
 	}
 }

@@ -1,14 +1,13 @@
 import { AuthController } from '@/auth/auth.controller';
 import { AuthService } from '@/auth/auth.service';
 import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard';
-import { PendingEmailRegistrationCleanupService } from '@/auth/pending-email-registration-cleanup.service';
-import { PhoneCodeCleanupService } from '@/auth/phone-code-cleanup.service';
 import { RefreshTokenService } from '@/auth/refresh-token.service';
 import { SocialMediaAuthController } from '@/auth/social-media/social-media-auth.controller';
 import { SocialMediaAuthService } from '@/auth/social-media/social-media-auth.service';
 import { GithubStrategy } from '@/auth/strategies/github.strategy';
 import { GoogleStrategy } from '@/auth/strategies/google.strategy';
 import { JwtStrategy } from '@/auth/strategies/jwt.strategy';
+import { VerificationChallengeCleanupService } from '@/auth/verification-challenge-cleanup.service';
 import { getJwtConfig } from '@/config/jwt.config';
 import { EmailModule } from '@/email/email.module';
 import { PrismaService } from '@/prisma.service';
@@ -34,8 +33,7 @@ import { JwtModule } from '@nestjs/jwt';
 		JwtStrategy,
 		PrismaService,
 		AuthService,
-		PhoneCodeCleanupService,
-		PendingEmailRegistrationCleanupService,
+		VerificationChallengeCleanupService,
 		RefreshTokenService,
 		AuthRateLimitGuard,
 		GoogleStrategy,

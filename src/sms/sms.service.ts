@@ -1,6 +1,6 @@
-import { type SendSmsOptions } from '@/sms/interfaces/sms-provider.interface'
-import { Inject, Injectable } from '@nestjs/common'
-import { SmsAeroProvider } from '@/sms/providers/smsaero.provider'
+import { type SendSmsOptions } from '@/sms/interfaces/sms-provider.interface';
+import { Inject, Injectable } from '@nestjs/common';
+import { SmsAeroProvider } from '@/sms/providers/smsaero.provider';
 
 @Injectable()
 export class SmsService {
@@ -9,7 +9,7 @@ export class SmsService {
 	) {}
 
 	send(options: SendSmsOptions) {
-		return this.provider.send(options)
+		return this.provider.send(options);
 	}
 
 	sendVerificationCode(phone: string, code: string, ip?: string) {
@@ -17,7 +17,7 @@ export class SmsService {
 			to: phone,
 			text: `Ваш код подтверждения: ${code}`,
 			ip
-		})
+		});
 	}
 
 	sendRestorePassword(phone: string, password: string, ip?: string) {
@@ -25,6 +25,6 @@ export class SmsService {
 			to: phone,
 			text: `Ваш новый пароль: ${password}`,
 			ip
-		})
+		});
 	}
 }

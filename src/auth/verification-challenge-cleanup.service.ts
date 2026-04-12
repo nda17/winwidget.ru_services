@@ -7,23 +7,23 @@ import {
 } from '@nestjs/common'
 
 @Injectable()
-export class PendingEmailRegistrationCleanupService
+export class VerificationChallengeCleanupService
 	implements OnModuleInit, OnModuleDestroy
 {
 	private readonly NIGHTLY_CLEANUP_HOUR_MOSCOW = 1
 	private readonly MOSCOW_UTC_OFFSET_HOURS = 3
-	private readonly logger = new Logger(PendingEmailRegistrationCleanupService.name)
+	private readonly logger = new Logger(VerificationChallengeCleanupService.name)
 	private readonly isDevMode = process.env.MODE === 'development'
 	private cleanupTimeout: NodeJS.Timeout | null = null
 
 	constructor(private prisma: PrismaService) {}
 
 	async onModuleInit() {
-		const deletedCount = await this.cleanupExpiredPendingEmailRegistrations()
+		const deletedCount = await this.cleanupExpiredVerificationChallenges()
 
 		if (this.isDevMode) {
 			this.logger.log(
-				`Startup cleanup finished: removed ${deletedCount} expired pending email registration(s).`
+				`Startup cleanup finished: removed ${deletedCount} expired verification challenge(s).`
 			)
 		}
 
@@ -37,8 +37,8 @@ export class PendingEmailRegistrationCleanupService
 		}
 	}
 
-	private async cleanupExpiredPendingEmailRegistrations() {
-		const result = await this.prisma.pendingEmailRegistration.deleteMany({
+	private async cleanupExpiredVerificationChallenges() {
+		const result = await this.prisma.verificationChallenge.deleteMany({
 			where: {
 				expiresAt: {
 					lt: new Date()
@@ -55,18 +55,18 @@ export class PendingEmailRegistrationCleanupService
 
 		if (this.isDevMode) {
 			this.logger.log(
-				`Next pending email registration cleanup scheduled for ${nextRun.toISOString()} (01:00 MSK).`
+				`Next verification challenge cleanup scheduled for ${nextRun.toISOString()} (01:00 MSK).`
 			)
 		}
 
 		this.cleanupTimeout = setTimeout(async () => {
 			try {
 				const deletedCount =
-					await this.cleanupExpiredPendingEmailRegistrations()
+					await this.cleanupExpiredVerificationChallenges()
 
 				if (this.isDevMode) {
 					this.logger.log(
-						`Nightly cleanup finished: removed ${deletedCount} expired pending email registration(s).`
+						`Nightly cleanup finished: removed ${deletedCount} expired verification challenge(s).`
 					)
 				}
 			} finally {

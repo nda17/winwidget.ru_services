@@ -9,10 +9,10 @@ import * as cookieParser from 'cookie-parser';
 
 export const bootstrap = async () => {
 	const app = await NestFactory.create(AppModule);
-	const httpAdapter = app.getHttpAdapter()
-	const instance = httpAdapter.getInstance()
+	const httpAdapter = app.getHttpAdapter();
+	const instance = httpAdapter.getInstance();
 	if (typeof instance?.set === 'function') {
-		instance.set('trust proxy', true)
+		instance.set('trust proxy', true);
 	}
 
 	app.setGlobalPrefix('api', {
@@ -20,8 +20,7 @@ export const bootstrap = async () => {
 			{ path: 'auth/google', method: RequestMethod.GET },
 			{ path: 'auth/google/redirect', method: RequestMethod.GET },
 			{ path: 'auth/github', method: RequestMethod.GET },
-			{ path: 'auth/github/redirect', method: RequestMethod.GET },
-			{ path: 'verify-email', method: RequestMethod.GET }
+			{ path: 'auth/github/redirect', method: RequestMethod.GET }
 		]
 	});
 

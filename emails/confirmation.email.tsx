@@ -3,7 +3,7 @@ import * as React from 'react';
 const VerificationEmail = ({ code }: { code: string }) => {
 	return (
 		<div>
-			<h1>Здравствуйте!</h1>
+			<h1>Ваш код подтверждения</h1>
 
 			<p>
 				Вы получили это письмо, потому что кто-то указал его при

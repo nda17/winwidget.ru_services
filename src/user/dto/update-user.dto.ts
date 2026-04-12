@@ -1,47 +1,53 @@
-import { IsBoolean, IsEmail, IsOptional, IsString, Matches } from 'class-validator'
+import {
+	IsBoolean,
+	IsEmail,
+	IsOptional,
+	IsString,
+	Matches
+} from 'class-validator';
 
 export class UpdateUserDto {
 	@IsOptional()
 	@IsEmail()
-	email?: string
+	email?: string;
 
 	@IsOptional()
 	@Matches(/^[0-9+()\-\s]{10,20}$/)
-	phone?: string
+	phone?: string;
 
 	@IsOptional()
 	@IsBoolean()
-	isPhoneVerified?: boolean
+	isPhoneVerified?: boolean;
 
 	@IsOptional()
 	@IsString()
-	id?: string
+	id?: string;
 
 	@IsOptional()
 	@IsString()
-	password?: string
+	password?: string;
 
 	@IsOptional()
 	@IsString()
-	name?: string
+	name?: string;
 
 	@IsOptional()
 	@IsString()
-	avatarPath?: string
+	avatarPath?: string;
 
 	@IsOptional()
 	@IsBoolean()
-	isUser?: boolean
+	isUser?: boolean;
 
 	@IsOptional()
 	@IsBoolean()
-	isAdmin?: boolean
+	isAdmin?: boolean;
 
 	@IsOptional()
 	@IsBoolean()
-	isManager?: boolean
+	isManager?: boolean;
 
 	@IsOptional()
 	@IsBoolean()
-	isPremium?: boolean
+	isPremium?: boolean;
 }

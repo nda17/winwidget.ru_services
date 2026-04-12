@@ -4,35 +4,38 @@ import {
 	Injectable,
 	Logger,
 	NestInterceptor
-} from '@nestjs/common'
-import { RecaptchaVerificationResult } from '@nestlab/google-recaptcha'
-import { Observable, tap } from 'rxjs'
-import { Request } from 'express'
+} from '@nestjs/common';
+import { RecaptchaVerificationResult } from '@nestlab/google-recaptcha';
+import { Observable, tap } from 'rxjs';
+import { Request } from 'express';
 
 type RequestWithRecaptchaResult = Request & {
-	recaptchaValidationResult?: RecaptchaVerificationResult
-}
+	recaptchaValidationResult?: RecaptchaVerificationResult;
+};
 
 @Injectable()
 export class RecaptchaDevLoggingInterceptor implements NestInterceptor {
-	private readonly logger = new Logger('reCAPTCHA')
-	private readonly isDevelopment = process.env.MODE === 'development'
+	private readonly logger = new Logger('reCAPTCHA');
+	private readonly isDevelopment = process.env.MODE === 'development';
 
-	intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+	intercept(
+		context: ExecutionContext,
+		next: CallHandler
+	): Observable<unknown> {
 		if (!this.isDevelopment || context.getType() !== 'http') {
-			return next.handle()
+			return next.handle();
 		}
 
 		const request = context
 			.switchToHttp()
-			.getRequest<RequestWithRecaptchaResult>()
+			.getRequest<RequestWithRecaptchaResult>();
 
 		return next.handle().pipe(
 			tap(() => {
-				const result = request.recaptchaValidationResult
+				const result = request.recaptchaValidationResult;
 
 				if (!result) {
-					return
+					return;
 				}
 
 				this.logger.debug(
@@ -48,8 +51,8 @@ export class RecaptchaDevLoggingInterceptor implements NestInterceptor {
 						errors: result.errors
 					},
 					'success'
-				)
+				);
 			})
-		)
+		);
 	}
 }
