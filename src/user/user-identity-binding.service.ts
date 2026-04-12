@@ -1,36 +1,36 @@
-import { EmailService } from '@/email/email.service'
-import { PrismaService } from '@/prisma.service'
-import { SmsService } from '@/sms/sms.service'
-import { UserService } from '@/user/user.service'
-import { normalizePhone } from '@/utils/phone.util'
+import { EmailService } from '@/email/email.service';
+import { PrismaService } from '@/prisma.service';
+import { SmsService } from '@/sms/sms.service';
+import { UserService } from '@/user/user.service';
+import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
 	Injectable,
 	NotFoundException,
 	UnauthorizedException
-} from '@nestjs/common'
+} from '@nestjs/common';
 import {
 	AuthIdentityType,
 	type VerificationChallenge,
 	VerificationChallengePurpose,
 	VerificationChallengeType
-} from '@prisma/client'
-import { compare, hash } from 'bcryptjs'
+} from '@prisma/client';
+import { compare, hash } from 'bcryptjs';
 
 type PendingBindingResponse = {
-	value: string
-	expiresAt: Date
-	resendAvailableAt: Date
-}
+	value: string;
+	expiresAt: Date;
+	resendAvailableAt: Date;
+};
 
 @Injectable()
 export class UserIdentityBindingService {
-	private readonly PASSWORD_SALT_ROUNDS = 10
-	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10
-	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5
-	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5
-	private readonly PHONE_CODE_MAX_ATTEMPTS = 5
-	private readonly CODE_RESEND_COOLDOWN_SECONDS = 60
+	private readonly PASSWORD_SALT_ROUNDS = 10;
+	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10;
+	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5;
+	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5;
+	private readonly PHONE_CODE_MAX_ATTEMPTS = 5;
+	private readonly CODE_RESEND_COOLDOWN_SECONDS = 60;
 
 	constructor(
 		private prisma: PrismaService,
@@ -40,52 +40,53 @@ export class UserIdentityBindingService {
 	) {}
 
 	async sendEmailCode(userId: string, email: string) {
-		const normalizedEmail = this.normalizeEmail(email)
+		const normalizedEmail = this.normalizeEmail(email);
 		await this.ensureIdentityCanBeBound({
 			userId,
 			type: VerificationChallengeType.EMAIL,
 			value: normalizedEmail
-		})
+		});
 
-		const pendingBinding = await this.prisma.verificationChallenge.findUnique({
-			where: {
-				userId_type_purpose: {
-					userId,
-					type: VerificationChallengeType.EMAIL,
-					purpose: VerificationChallengePurpose.BIND_IDENTITY
+		const pendingBinding =
+			await this.prisma.verificationChallenge.findUnique({
+				where: {
+					userId_type_purpose: {
+						userId,
+						type: VerificationChallengeType.EMAIL,
+						purpose: VerificationChallengePurpose.BIND_IDENTITY
+					}
 				}
-			}
-		})
+			});
 
 		if (pendingBinding?.value === normalizedEmail) {
 			this.ensureResendAllowed(
 				pendingBinding,
 				VerificationChallengeType.EMAIL
-			)
+			);
 		}
 
 		return this.upsertPendingBinding({
 			userId,
 			type: VerificationChallengeType.EMAIL,
 			value: normalizedEmail
-		})
+		});
 	}
 
 	async verifyEmailCode(userId: string, email: string, code: string) {
-		const normalizedEmail = this.normalizeEmail(email)
+		const normalizedEmail = this.normalizeEmail(email);
 		const pendingBinding = await this.validatePendingBinding({
 			userId,
 			type: VerificationChallengeType.EMAIL,
 			value: normalizedEmail,
 			code,
 			maxAttempts: this.EMAIL_CODE_MAX_ATTEMPTS
-		})
+		});
 
 		await this.ensureIdentityCanBeBound({
 			userId,
 			type: VerificationChallengeType.EMAIL,
 			value: normalizedEmail
-		})
+		});
 
 		await this.prisma.authIdentity.upsert({
 			where: {
@@ -104,39 +105,40 @@ export class UserIdentityBindingService {
 				value: normalizedEmail,
 				verifiedAt: new Date()
 			}
-		})
+		});
 
 		await this.deletePendingBinding(
 			userId,
 			VerificationChallengeType.EMAIL
-		)
+		);
 
-		return this.userService.getPublicUserById(pendingBinding.userId!)
+		return this.userService.getPublicUserById(pendingBinding.userId!);
 	}
 
 	async sendPhoneCode(userId: string, phone: string, ip?: string) {
-		const normalizedPhone = normalizePhone(phone)
+		const normalizedPhone = normalizePhone(phone);
 		await this.ensureIdentityCanBeBound({
 			userId,
 			type: VerificationChallengeType.PHONE,
 			value: normalizedPhone
-		})
+		});
 
-		const pendingBinding = await this.prisma.verificationChallenge.findUnique({
-			where: {
-				userId_type_purpose: {
-					userId,
-					type: VerificationChallengeType.PHONE,
-					purpose: VerificationChallengePurpose.BIND_IDENTITY
+		const pendingBinding =
+			await this.prisma.verificationChallenge.findUnique({
+				where: {
+					userId_type_purpose: {
+						userId,
+						type: VerificationChallengeType.PHONE,
+						purpose: VerificationChallengePurpose.BIND_IDENTITY
+					}
 				}
-			}
-		})
+			});
 
 		if (pendingBinding?.value === normalizedPhone) {
 			this.ensureResendAllowed(
 				pendingBinding,
 				VerificationChallengeType.PHONE
-			)
+			);
 		}
 
 		return this.upsertPendingBinding({
@@ -144,24 +146,24 @@ export class UserIdentityBindingService {
 			type: VerificationChallengeType.PHONE,
 			value: normalizedPhone,
 			ip
-		})
+		});
 	}
 
 	async verifyPhoneCode(userId: string, phone: string, code: string) {
-		const normalizedPhone = normalizePhone(phone)
+		const normalizedPhone = normalizePhone(phone);
 		const pendingBinding = await this.validatePendingBinding({
 			userId,
 			type: VerificationChallengeType.PHONE,
 			value: normalizedPhone,
 			code,
 			maxAttempts: this.PHONE_CODE_MAX_ATTEMPTS
-		})
+		});
 
 		await this.ensureIdentityCanBeBound({
 			userId,
 			type: VerificationChallengeType.PHONE,
 			value: normalizedPhone
-		})
+		});
 
 		await this.prisma.authIdentity.upsert({
 			where: {
@@ -180,14 +182,14 @@ export class UserIdentityBindingService {
 				value: normalizedPhone,
 				verifiedAt: new Date()
 			}
-		})
+		});
 
 		await this.deletePendingBinding(
 			userId,
 			VerificationChallengeType.PHONE
-		)
+		);
 
-		return this.userService.getPublicUserById(pendingBinding.userId!)
+		return this.userService.getPublicUserById(pendingBinding.userId!);
 	}
 
 	private async upsertPendingBinding({
@@ -196,13 +198,13 @@ export class UserIdentityBindingService {
 		value,
 		ip
 	}: {
-		userId: string
-		type: VerificationChallengeType
-		value: string
-		ip?: string
+		userId: string;
+		type: VerificationChallengeType;
+		value: string;
+		ip?: string;
 	}): Promise<PendingBindingResponse> {
-		const code = this.generateCode()
-		const now = new Date()
+		const code = this.generateCode();
+		const now = new Date();
 		const expiresAt = new Date(
 			now.getTime() +
 				(type === VerificationChallengeType.EMAIL
@@ -210,10 +212,10 @@ export class UserIdentityBindingService {
 					: this.PHONE_CODE_EXPIRATION_MINUTES) *
 					60 *
 					1000
-		)
+		);
 		const resendAvailableAt = new Date(
 			now.getTime() + this.CODE_RESEND_COOLDOWN_SECONDS * 1000
-		)
+		);
 
 		await this.prisma.verificationChallenge.upsert({
 			where: {
@@ -240,19 +242,19 @@ export class UserIdentityBindingService {
 				expiresAt,
 				lastSentAt: now
 			}
-		})
+		});
 
 		if (type === VerificationChallengeType.EMAIL) {
-			await this.emailService.sendVerificationCode(value, code)
+			await this.emailService.sendVerificationCode(value, code);
 		} else {
-			await this.smsService.sendVerificationCode(value, code, ip)
+			await this.smsService.sendVerificationCode(value, code, ip);
 		}
 
 		return {
 			value,
 			expiresAt,
 			resendAvailableAt
-		}
+		};
 	}
 
 	private async validatePendingBinding({
@@ -262,39 +264,42 @@ export class UserIdentityBindingService {
 		code,
 		maxAttempts
 	}: {
-		userId: string
-		type: VerificationChallengeType
-		value: string
-		code: string
-		maxAttempts: number
+		userId: string;
+		type: VerificationChallengeType;
+		value: string;
+		code: string;
+		maxAttempts: number;
 	}) {
-		const pendingBinding = await this.prisma.verificationChallenge.findUnique({
-			where: {
-				userId_type_purpose: {
-					userId,
-					type,
-					purpose: VerificationChallengePurpose.BIND_IDENTITY
+		const pendingBinding =
+			await this.prisma.verificationChallenge.findUnique({
+				where: {
+					userId_type_purpose: {
+						userId,
+						type,
+						purpose: VerificationChallengePurpose.BIND_IDENTITY
+					}
 				}
-			}
-		})
+			});
 
 		if (
 			!pendingBinding ||
 			pendingBinding.value !== value ||
 			pendingBinding.expiresAt.getTime() < Date.now()
 		) {
-			await this.deletePendingBinding(userId, type)
-			throw new UnauthorizedException(this.getCodeNotFoundError(type))
+			await this.deletePendingBinding(userId, type);
+			throw new UnauthorizedException(this.getCodeNotFoundError(type));
 		}
 
-		const isValidCode = await compare(code, pendingBinding.codeHash)
+		const isValidCode = await compare(code, pendingBinding.codeHash);
 
 		if (!isValidCode) {
-			const nextAttempts = pendingBinding.attempts + 1
+			const nextAttempts = pendingBinding.attempts + 1;
 
 			if (nextAttempts >= maxAttempts) {
-				await this.deletePendingBinding(userId, type)
-				throw new UnauthorizedException(this.getAttemptsExceededError(type))
+				await this.deletePendingBinding(userId, type);
+				throw new UnauthorizedException(
+					this.getAttemptsExceededError(type)
+				);
 			}
 
 			await this.prisma.verificationChallenge.update({
@@ -308,12 +313,12 @@ export class UserIdentityBindingService {
 				data: {
 					attempts: nextAttempts
 				}
-			})
+			});
 
-			throw new UnauthorizedException(this.getCodeInvalidError(type))
+			throw new UnauthorizedException(this.getCodeInvalidError(type));
 		}
 
-		return pendingBinding
+		return pendingBinding;
 	}
 
 	private async ensureIdentityCanBeBound({
@@ -321,34 +326,34 @@ export class UserIdentityBindingService {
 		type,
 		value
 	}: {
-		userId: string
-		type: VerificationChallengeType
-		value: string
+		userId: string;
+		type: VerificationChallengeType;
+		value: string;
 	}) {
-		const user = await this.userService.getUserById(userId)
+		const user = await this.userService.getUserById(userId);
 
 		if (!user) {
-			throw new NotFoundException('User not found')
+			throw new NotFoundException('User not found');
 		}
 
-		const authType = this.toAuthIdentityType(type)
+		const authType = this.toAuthIdentityType(type);
 		const currentIdentity = user.authIdentities.find(
-			(identity) => identity.type === authType
-		)
+			identity => identity.type === authType
+		);
 
 		if (currentIdentity?.value === value) {
 			if (
 				type === VerificationChallengeType.PHONE &&
 				!currentIdentity.verifiedAt
 			) {
-				return
+				return;
 			}
 
 			throw new BadRequestException(
 				type === VerificationChallengeType.EMAIL
 					? 'Email already linked'
 					: 'Phone already linked'
-			)
+			);
 		}
 
 		const existingIdentity =
@@ -369,14 +374,14 @@ export class UserIdentityBindingService {
 								value
 							}
 						}
-					})
+					});
 
 		if (existingIdentity && existingIdentity.userId !== userId) {
 			throw new NotFoundException(
 				type === VerificationChallengeType.EMAIL
 					? 'Email busy'
 					: 'Phone busy'
-			)
+			);
 		}
 
 		const pendingBinding =
@@ -399,15 +404,18 @@ export class UserIdentityBindingService {
 								value
 							}
 						}
-					})
+					});
 
-		if (pendingBinding && pendingBinding.expiresAt.getTime() < Date.now()) {
+		if (
+			pendingBinding &&
+			pendingBinding.expiresAt.getTime() < Date.now()
+		) {
 			await this.prisma.verificationChallenge.deleteMany({
 				where: {
 					id: pendingBinding.id
 				}
-			})
-			return
+			});
+			return;
 		}
 
 		if (pendingBinding && pendingBinding.userId !== userId) {
@@ -415,7 +423,7 @@ export class UserIdentityBindingService {
 				type === VerificationChallengeType.EMAIL
 					? 'Email busy'
 					: 'Phone busy'
-			)
+			);
 		}
 	}
 
@@ -425,14 +433,14 @@ export class UserIdentityBindingService {
 	) {
 		const resendAllowedAt =
 			pendingBinding.lastSentAt.getTime() +
-			this.CODE_RESEND_COOLDOWN_SECONDS * 1000
+			this.CODE_RESEND_COOLDOWN_SECONDS * 1000;
 
 		if (resendAllowedAt > Date.now()) {
 			throw new BadRequestException(
 				type === VerificationChallengeType.EMAIL
 					? 'Email verification resend cooldown'
 					: 'Phone verification resend cooldown'
-			)
+			);
 		}
 	}
 
@@ -446,38 +454,38 @@ export class UserIdentityBindingService {
 				type,
 				purpose: VerificationChallengePurpose.BIND_IDENTITY
 			}
-		})
+		});
 	}
 
 	private getCodeNotFoundError(type: VerificationChallengeType) {
 		return type === VerificationChallengeType.EMAIL
 			? 'Email verification code not found'
-			: 'Phone verification code not found'
+			: 'Phone verification code not found';
 	}
 
 	private getCodeInvalidError(type: VerificationChallengeType) {
 		return type === VerificationChallengeType.EMAIL
 			? 'Email verification code invalid'
-			: 'Phone verification code invalid'
+			: 'Phone verification code invalid';
 	}
 
 	private getAttemptsExceededError(type: VerificationChallengeType) {
 		return type === VerificationChallengeType.EMAIL
 			? 'Email verification code attempts exceeded'
-			: 'Phone verification code attempts exceeded'
+			: 'Phone verification code attempts exceeded';
 	}
 
 	private toAuthIdentityType(type: VerificationChallengeType) {
 		return type === VerificationChallengeType.EMAIL
 			? AuthIdentityType.EMAIL
-			: AuthIdentityType.PHONE
+			: AuthIdentityType.PHONE;
 	}
 
 	private generateCode() {
-		return `${Math.floor(100000 + Math.random() * 900000)}`
+		return `${Math.floor(100000 + Math.random() * 900000)}`;
 	}
 
 	private normalizeEmail(email: string) {
-		return email.trim().toLowerCase()
+		return email.trim().toLowerCase();
 	}
 }

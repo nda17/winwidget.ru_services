@@ -103,7 +103,7 @@ export class StatisticsService {
 		]);
 		const usersWithMultipleLoginMethods = usersWithAuthIdentities.reduce(
 			(total, user) => {
-				const loginMethods = user.authIdentities.filter((identity) => {
+				const loginMethods = user.authIdentities.filter(identity => {
 					if (identity.type === AuthIdentityType.PHONE) {
 						return Boolean(identity.verifiedAt);
 					}

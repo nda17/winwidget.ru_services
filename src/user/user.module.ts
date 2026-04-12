@@ -9,11 +9,7 @@ import { Module } from '@nestjs/common';
 @Module({
 	imports: [EmailModule, SmsModule],
 	controllers: [UserController],
-	providers: [
-		UserService,
-		UserIdentityBindingService,
-		PrismaService
-	],
+	providers: [UserService, UserIdentityBindingService, PrismaService],
 	exports: [UserService]
 })
 export class UserModule {}
