@@ -2,6 +2,8 @@ import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
 import { SmsService } from '@/sms/sms.service';
 import { UserService } from '@/user/user.service';
+import { normalizeEmail } from '@/utils/email.util';
+import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
 import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
@@ -25,7 +27,6 @@ type PendingBindingResponse = {
 
 @Injectable()
 export class UserIdentityBindingService {
-	private readonly PASSWORD_SALT_ROUNDS = 10;
 	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10;
 	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5;
 	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5;
@@ -40,7 +41,7 @@ export class UserIdentityBindingService {
 	) {}
 
 	async sendEmailCode(userId: string, email: string) {
-		const normalizedEmail = this.normalizeEmail(email);
+		const normalizedEmail = normalizeEmail(email);
 		await this.ensureIdentityCanBeBound({
 			userId,
 			type: VerificationChallengeType.EMAIL,
@@ -73,7 +74,7 @@ export class UserIdentityBindingService {
 	}
 
 	async verifyEmailCode(userId: string, email: string, code: string) {
-		const normalizedEmail = this.normalizeEmail(email);
+		const normalizedEmail = normalizeEmail(email);
 		const pendingBinding = await this.validatePendingBinding({
 			userId,
 			type: VerificationChallengeType.EMAIL,
@@ -228,7 +229,7 @@ export class UserIdentityBindingService {
 			update: {
 				value,
 				passwordHash: null,
-				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
+				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
 				attempts: 0,
 				expiresAt,
 				lastSentAt: now
@@ -238,7 +239,7 @@ export class UserIdentityBindingService {
 				type,
 				purpose: VerificationChallengePurpose.BIND_IDENTITY,
 				value,
-				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
+				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
 				expiresAt,
 				lastSentAt: now
 			}
@@ -483,9 +484,5 @@ export class UserIdentityBindingService {
 
 	private generateCode() {
 		return `${Math.floor(100000 + Math.random() * 900000)}`;
-	}
-
-	private normalizeEmail(email: string) {
-		return email.trim().toLowerCase();
 	}
 }

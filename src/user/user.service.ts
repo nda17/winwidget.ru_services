@@ -9,6 +9,8 @@ import { normalizePhone } from '@/utils/phone.util';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { AuthIdentityType, Prisma, Role, type User } from '@prisma/client';
 import { hash } from 'bcryptjs';
+import { normalizeEmail } from '@/utils/email.util';
+import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
 
 export type UserWithAuthIdentities = Prisma.UserGetPayload<{
 	include: {
@@ -33,8 +35,6 @@ type SocialIdentityType = 'GOOGLE' | 'GITHUB';
 
 @Injectable()
 export class UserService {
-	private readonly PASSWORD_SALT_ROUNDS = 10;
-
 	constructor(private prisma: PrismaService) {}
 
 	async getUserList(searchTerm?: string) {
@@ -93,7 +93,7 @@ export class UserService {
 	}
 
 	async getUserByEmail(email: string) {
-		const normalizedEmail = this.normalizeEmail(email);
+		const normalizedEmail = normalizeEmail(email);
 
 		return this.prisma.user.findFirst({
 			where: {
@@ -153,7 +153,7 @@ export class UserService {
 			return socialIdentity.user;
 		}
 
-		const normalizedEmail = this.normalizeEmail(profile.email);
+		const normalizedEmail = normalizeEmail(profile.email);
 		let user = await this.getUserByEmail(normalizedEmail);
 
 		if (!user) {
@@ -184,7 +184,7 @@ export class UserService {
 		profile: IGoogleProfile | IGithubProfile,
 		socialType: SocialIdentityType
 	): Promise<UserWithAuthIdentities> {
-		const email = this.normalizeEmail(profile.email);
+		const email = normalizeEmail(profile.email);
 		const name =
 			'firstName' in profile
 				? `${profile.firstName} ${profile.lastName}`
@@ -228,7 +228,7 @@ export class UserService {
 				authIdentities: {
 					create: {
 						type: AuthIdentityType.EMAIL,
-						value: this.normalizeEmail(dto.email),
+						value: normalizeEmail(dto.email),
 						verifiedAt: new Date()
 					}
 				}
@@ -242,7 +242,7 @@ export class UserService {
 	async createPhoneUser(dto: { phone: string; password: string }) {
 		return this.prisma.user.create({
 			data: {
-				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS),
+				password: await hash(dto.password, PASSWORD_SALT_ROUNDS),
 				authIdentities: {
 					create: {
 						type: AuthIdentityType.PHONE,
@@ -280,7 +280,7 @@ export class UserService {
 						: user.avatarPath,
 				password:
 					typeof dto?.password === 'string' && dto.password.length
-						? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+						? await hash(dto.password, PASSWORD_SALT_ROUNDS)
 						: user.password
 			}
 		});
@@ -343,9 +343,8 @@ export class UserService {
 					id
 				},
 				data: {
-					id: dto?.id ? dto.id : user.id,
 					password: dto?.password
-						? await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+						? await hash(dto.password, PASSWORD_SALT_ROUNDS)
 						: user.password,
 					name: typeof dto?.name === 'string' ? dto.name : user.name,
 					avatarPath:
@@ -554,17 +553,13 @@ export class UserService {
 			: AuthIdentityType.GITHUB;
 	}
 
-	private normalizeEmail(email: string) {
-		return email.trim().toLowerCase();
-	}
-
 	private normalizeEditableEmail(email?: string) {
 		if (typeof email !== 'string') {
 			return undefined;
 		}
 
 		const trimmedEmail = email.trim();
-		return trimmedEmail ? this.normalizeEmail(trimmedEmail) : null;
+		return trimmedEmail ? normalizeEmail(trimmedEmail) : null;
 	}
 
 	private normalizeEditablePhone(phone?: string) {

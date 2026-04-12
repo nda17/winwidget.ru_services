@@ -22,6 +22,7 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { getClientIp } from '@/utils/ip.util';
 import { Recaptcha } from '@nestlab/google-recaptcha';
 import { Request, Response } from 'express';
 
@@ -88,7 +89,7 @@ export class AuthController {
 	@Recaptcha({ action: 'phone_send_code' })
 	@Post('auth/phone/send-code')
 	async sendPhoneCode(@Body() dto: SendPhoneCodeDto, @Req() req: Request) {
-		const ip = this.getClientIp(req);
+		const ip = getClientIp(req);
 		return this.authService.sendPhoneCode(dto, ip);
 	}
 
@@ -172,25 +173,5 @@ export class AuthController {
 		this.refreshTokenService.removeRefreshTokenFromResponse(res);
 
 		return true;
-	}
-
-	private getClientIp(request: Request) {
-		const forwardedFor = request.headers['x-forwarded-for'];
-		const realIp = request.headers['x-real-ip'];
-		const cfIp = request.headers['cf-connecting-ip'];
-
-		if (typeof cfIp === 'string' && cfIp.length > 0) {
-			return cfIp.trim();
-		}
-
-		if (typeof realIp === 'string' && realIp.length > 0) {
-			return realIp.trim();
-		}
-
-		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
-			return forwardedFor.split(',')[0].trim();
-		}
-
-		return request.ip ?? undefined;
 	}
 }

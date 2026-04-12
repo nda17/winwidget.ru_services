@@ -28,10 +28,11 @@ import {
 } from '@prisma/client';
 import { compare, hash } from 'bcryptjs';
 import generator from 'generate-password-ts';
+import { normalizeEmail } from '@/utils/email.util';
+import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
 
 @Injectable()
 export class AuthService {
-	private readonly PASSWORD_SALT_ROUNDS = 10;
 	private readonly TOKEN_EXPIRATION_ACCESS = '1h';
 	private readonly TOKEN_EXPIRATION_REFRESH = '7d';
 	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10;
@@ -54,7 +55,7 @@ export class AuthService {
 	}
 
 	async register(dto: AuthDto) {
-		const email = this.normalizeEmail(dto.email);
+		const email = normalizeEmail(dto.email);
 		const userExists = await this.userService.getUserByEmail(email);
 
 		if (userExists) {
@@ -78,12 +79,12 @@ export class AuthService {
 
 		return this.upsertPendingEmailRegistration({
 			email,
-			passwordHash: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+			passwordHash: await hash(dto.password, PASSWORD_SALT_ROUNDS)
 		});
 	}
 
 	async registerByEmail(dto: EmailRegisterDto) {
-		const email = this.normalizeEmail(dto.email);
+		const email = normalizeEmail(dto.email);
 		const existingUser = await this.userService.getUserByEmail(email);
 
 		if (existingUser) {
@@ -108,7 +109,7 @@ export class AuthService {
 	}
 
 	async resendEmailCode(dto: ResendEmailCodeDto) {
-		const email = this.normalizeEmail(dto.email);
+		const email = normalizeEmail(dto.email);
 		const userExists = await this.userService.getUserByEmail(email);
 
 		if (userExists) {
@@ -152,7 +153,7 @@ export class AuthService {
 			throw new BadRequestException('Phone already exists');
 		}
 
-		const code = this.generatePhoneCode();
+		const code = this.generateCode();
 		const expiresAt = new Date(
 			Date.now() + this.PHONE_CODE_EXPIRATION_MINUTES * 60 * 1000
 		);
@@ -167,7 +168,7 @@ export class AuthService {
 			},
 			update: {
 				passwordHash: null,
-				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
+				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
 				attempts: 0,
 				expiresAt,
 				lastSentAt: new Date()
@@ -176,7 +177,7 @@ export class AuthService {
 				type: VerificationChallengeType.PHONE,
 				purpose: VerificationChallengePurpose.REGISTER,
 				value: phone,
-				codeHash: await hash(code, this.PASSWORD_SALT_ROUNDS),
+				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
 				expiresAt
 			}
 		});
@@ -278,7 +279,7 @@ export class AuthService {
 
 	async restorePassword(dto: RestorePasswordDto) {
 		const { email, phone } = dto;
-		const normalizedEmail = email ? this.normalizeEmail(email) : undefined;
+		const normalizedEmail = email ? normalizeEmail(email) : undefined;
 		const normalizedPhone = phone ? normalizePhone(phone) : undefined;
 		const user = normalizedEmail
 			? await this.userService.getUserByEmail(normalizedEmail)
@@ -320,7 +321,7 @@ export class AuthService {
 		await this.prisma.user.update({
 			where: { id: user.id },
 			data: {
-				password: await hash(newPassword, this.PASSWORD_SALT_ROUNDS),
+				password: await hash(newPassword, PASSWORD_SALT_ROUNDS),
 				hashedRefreshToken: null
 			}
 		});
@@ -355,11 +356,7 @@ export class AuthService {
 		return { accessToken, refreshToken };
 	}
 
-	private generatePhoneCode() {
-		return `${Math.floor(100000 + Math.random() * 900000)}`;
-	}
-
-	private generateEmailCode() {
+	private generateCode() {
 		return `${Math.floor(100000 + Math.random() * 900000)}`;
 	}
 
@@ -490,7 +487,7 @@ export class AuthService {
 		email: string;
 		passwordHash: string;
 	}) {
-		const code = this.generateEmailCode();
+		const code = this.generateCode();
 		const now = new Date();
 		const expiresAt = new Date(
 			now.getTime() + this.EMAIL_CODE_EXPIRATION_MINUTES * 60 * 1000
@@ -498,7 +495,7 @@ export class AuthService {
 		const resendAvailableAt = new Date(
 			now.getTime() + this.EMAIL_CODE_RESEND_COOLDOWN_SECONDS * 1000
 		);
-		const codeHash = await hash(code, this.PASSWORD_SALT_ROUNDS);
+		const codeHash = await hash(code, PASSWORD_SALT_ROUNDS);
 
 		await this.prisma.verificationChallenge.upsert({
 			where: {
@@ -552,17 +549,14 @@ export class AuthService {
 		await this.prisma.user.update({
 			where: { id: userId },
 			data: {
-				hashedRefreshToken: await hash(
-					refreshToken,
-					this.PASSWORD_SALT_ROUNDS
-				)
+				hashedRefreshToken: await hash(refreshToken, PASSWORD_SALT_ROUNDS)
 			}
 		});
 	}
 
 	private async validateUser(dto: AuthDto) {
 		const user = await this.userService.getUserByEmail(
-			this.normalizeEmail(dto.email)
+			normalizeEmail(dto.email)
 		);
 		if (!user) {
 			throw new UnauthorizedException('Email or password invalid');
@@ -572,9 +566,5 @@ export class AuthService {
 			throw new UnauthorizedException('Email or password invalid');
 		}
 		return user;
-	}
-
-	private normalizeEmail(email: string) {
-		return email.trim().toLowerCase();
 	}
 }
