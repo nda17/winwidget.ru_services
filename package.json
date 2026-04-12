@@ -9,7 +9,7 @@
 		"prisma-generate": "npx prisma generate",
 		"prisma-db-push": "npx prisma db push",
 		"build": "nest build",
-		"format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+		"format": "prettier --write --no-error-on-unmatched-pattern \"src/**/*.ts\" \"test/**/*.ts\" \"emails/**/*.tsx\"",
 		"start": "nest start",
 		"dev": "nest start --watch",
 		"start:debug": "nest start --debug --watch",
