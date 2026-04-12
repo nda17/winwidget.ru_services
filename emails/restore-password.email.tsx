@@ -14,7 +14,9 @@ const NewPasswordEmail = ({ password }: { password: string }) => {
 
 			<p
 				style={{
-					color: '#A981DC'
+					fontSize: '2rem',
+					fontWeight: 700,
+					letterSpacing: '.3rem'
 				}}
 			>
 				{password}

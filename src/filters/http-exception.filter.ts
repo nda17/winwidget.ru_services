@@ -19,10 +19,6 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 		code: 'invalid_refresh_token',
 		message: 'Недействительный refresh token.'
 	},
-	'Token not exists!': {
-		code: 'verification_token_not_found',
-		message: 'Токен подтверждения не найден.'
-	},
 	'User not found': {
 		code: 'user_not_found',
 		message: 'Пользователь не найден.'
@@ -70,6 +66,27 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 	'Phone verification code invalid': {
 		code: 'phone_code_invalid',
 		message: 'Неверный код подтверждения.'
+	},
+	'Email verification code not found': {
+		code: 'email_code_not_found',
+		message: 'Код подтверждения email не найден или истёк.'
+	},
+	'Email verification code invalid': {
+		code: 'email_code_invalid',
+		message: 'Неверный код подтверждения email.'
+	},
+	'Email verification code attempts exceeded': {
+		code: 'email_code_attempts_exceeded',
+		message: 'Лимит попыток исчерпан. Запросите новый код.'
+	},
+	'Email verification resend cooldown': {
+		code: 'email_code_resend_cooldown',
+		message: 'Отправить код повторно можно немного позже.'
+	},
+	'Email registration not completed': {
+		code: 'email_registration_not_completed',
+		message:
+			'Регистрация по email не завершена. Подтвердите email кодом из письма.'
 	},
 	'Sms provider insufficient funds': {
 		code: 'sms_provider_balance',

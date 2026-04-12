@@ -1,7 +1,8 @@
 import { AuthDto } from '@/auth/dto/auth.dto'
-import { ConfirmationEmailDto } from '@/auth/dto/confirmation-email.dto'
+import { EmailRegisterDto } from '@/auth/dto/email-register.dto'
 import { PhoneLoginDto } from '@/auth/dto/phone-login.dto'
 import { PhoneRegisterDto } from '@/auth/dto/phone-register.dto'
+import { ResendEmailCodeDto } from '@/auth/dto/resend-email-code.dto'
 import { RestorePasswordDto } from '@/auth/dto/restore-password.dto'
 import { SendPhoneCodeDto } from '@/auth/dto/send-phone-code.dto'
 import { EmailService } from '@/email/email.service'
@@ -16,7 +17,7 @@ import {
 	UnauthorizedException
 } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
-import { Role, type User } from '@prisma/client'
+import { PendingEmailRegistration, Role, type User } from '@prisma/client'
 import { compare, hash } from 'bcryptjs'
 import generator from 'generate-password-ts'
 import { omit } from 'lodash'
@@ -26,6 +27,9 @@ export class AuthService {
 	private readonly PASSWORD_SALT_ROUNDS = 10
 	private readonly TOKEN_EXPIRATION_ACCESS = '1h'
 	private readonly TOKEN_EXPIRATION_REFRESH = '7d'
+	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10
+	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5
+	private readonly EMAIL_CODE_RESEND_COOLDOWN_SECONDS = 60
 	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5
 	private readonly PHONE_CODE_MAX_ATTEMPTS = 5
 
@@ -43,18 +47,75 @@ export class AuthService {
 	}
 
 	async register(dto: AuthDto) {
-		const userExists = await this.userService.getUserByEmail(dto.email)
+		const email = this.normalizeEmail(dto.email)
+		const userExists = await this.userService.getUserByEmail(email)
+
 		if (userExists) {
 			throw new BadRequestException('User already exists')
 		}
-		const user = await this.userService.createUser(dto)
 
-		await this.emailService.sendVerification(
-			user.email!,
-			`${process.env.MODE === 'production' ? process.env.PRODUCTION_HOST : process.env.DEVELOPMENT_HOST}/confirmation-email?token=${user.verificationToken}`
-		)
+		const pendingRegistration =
+			await this.prisma.pendingEmailRegistration.findUnique({
+				where: {
+					email
+				}
+			})
+
+		if (pendingRegistration) {
+			this.ensureEmailCodeResendAllowed(pendingRegistration)
+		}
+
+		return this.upsertPendingEmailRegistration({
+			email,
+			passwordHash: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+		})
+	}
+
+	async registerByEmail(dto: EmailRegisterDto) {
+		const email = this.normalizeEmail(dto.email)
+		const existingUser = await this.userService.getUserByEmail(email)
+
+		if (existingUser) {
+			throw new BadRequestException('User already exists')
+		}
+
+		const pendingRegistration = await this.validateEmailCode(email, dto.code)
+		const user = await this.userService.createVerifiedEmailUser({
+			email,
+			passwordHash: pendingRegistration.passwordHash
+		})
+
+		await this.deletePendingEmailRegistration(email)
 
 		return this.buildResponseObject(user)
+	}
+
+	async resendEmailCode(dto: ResendEmailCodeDto) {
+		const email = this.normalizeEmail(dto.email)
+		const userExists = await this.userService.getUserByEmail(email)
+
+		if (userExists) {
+			await this.deletePendingEmailRegistration(email)
+			throw new BadRequestException('User already exists')
+		}
+
+		const pendingRegistration =
+			await this.prisma.pendingEmailRegistration.findUnique({
+				where: {
+					email
+				}
+			})
+
+		if (!pendingRegistration) {
+			throw new UnauthorizedException('Email verification code not found')
+		}
+
+		this.ensureEmailCodeResendAllowed(pendingRegistration)
+
+		return this.upsertPendingEmailRegistration({
+			email,
+			passwordHash: pendingRegistration.passwordHash
+		})
 	}
 
 	async sendPhoneCode(dto: SendPhoneCodeDto, ip?: string) {
@@ -177,35 +238,30 @@ export class AuthService {
 		return true
 	}
 
-	async confirmationEmail(dto: ConfirmationEmailDto) {
-		const { verificationToken } = dto
-
-		const user = await this.prisma.user.findFirst({
-			where: {
-				verificationToken
-			}
-		})
-
-		if (!user) {
-			throw new NotFoundException('Token not exists!')
-		}
-
-		await this.prisma.user.update({
-			where: { id: user.id },
-			data: { verificationToken: null }
-		})
-	}
-
 	async restorePassword(dto: RestorePasswordDto) {
 		const { email, phone } = dto
+		const normalizedEmail = email ? this.normalizeEmail(email) : undefined
 		const normalizedPhone = phone ? normalizePhone(phone) : undefined
-		const user = email
-			? await this.prisma.user.findUnique({ where: { email } })
+		const user = normalizedEmail
+			? await this.userService.getUserByEmail(normalizedEmail)
 			: normalizedPhone
 				? await this.prisma.user.findUnique({ where: { phone: normalizedPhone } })
 				: null
 
 		if (!user) {
+			if (normalizedEmail) {
+				const pendingRegistration =
+					await this.prisma.pendingEmailRegistration.findUnique({
+						where: {
+							email: normalizedEmail
+						}
+					})
+
+				if (pendingRegistration) {
+					throw new BadRequestException('Email registration not completed')
+				}
+			}
+
 			throw new NotFoundException('User not found')
 		}
 
@@ -225,7 +281,7 @@ export class AuthService {
 			}
 		})
 
-		if (email) {
+		if (normalizedEmail) {
 			await this.emailService.sendNewPassword(user.email!, newPassword)
 		} else if (normalizedPhone) {
 			await this.smsService.sendRestorePassword(normalizedPhone, newPassword)
@@ -250,6 +306,10 @@ export class AuthService {
 	}
 
 	private generatePhoneCode() {
+		return `${Math.floor(100000 + Math.random() * 900000)}`
+	}
+
+	private generateEmailCode() {
 		return `${Math.floor(100000 + Math.random() * 900000)}`
 	}
 
@@ -292,6 +352,48 @@ export class AuthService {
 		}
 	}
 
+	private async validateEmailCode(email: string, code: string) {
+		const pendingRegistration =
+			await this.prisma.pendingEmailRegistration.findUnique({
+				where: {
+					email
+				}
+			})
+
+		if (!pendingRegistration || pendingRegistration.expiresAt.getTime() < Date.now()) {
+			throw new UnauthorizedException('Email verification code not found')
+		}
+
+		if (pendingRegistration.attempts >= this.EMAIL_CODE_MAX_ATTEMPTS) {
+			throw new UnauthorizedException('Email verification code attempts exceeded')
+		}
+
+		const isValidCode = await compare(code, pendingRegistration.codeHash)
+
+		if (!isValidCode) {
+			const nextAttempts = pendingRegistration.attempts + 1
+
+			await this.prisma.pendingEmailRegistration.update({
+				where: {
+					email
+				},
+				data: {
+					attempts: nextAttempts
+				}
+			})
+
+			if (nextAttempts >= this.EMAIL_CODE_MAX_ATTEMPTS) {
+				throw new UnauthorizedException(
+					'Email verification code attempts exceeded'
+				)
+			}
+
+			throw new UnauthorizedException('Email verification code invalid')
+		}
+
+		return pendingRegistration
+	}
+
 	private async deletePhoneCode(phone: string) {
 		await this.prisma.phoneVerificationCode.deleteMany({
 			where: {
@@ -299,6 +401,72 @@ export class AuthService {
 				purpose: 'REGISTER'
 			}
 		})
+	}
+
+	private async deletePendingEmailRegistration(email: string) {
+		await this.prisma.pendingEmailRegistration.deleteMany({
+			where: {
+				email
+			}
+		})
+	}
+
+	private async upsertPendingEmailRegistration({
+		email,
+		passwordHash
+	}: {
+		email: string
+		passwordHash: string
+	}) {
+		const code = this.generateEmailCode()
+		const now = new Date()
+		const expiresAt = new Date(
+			now.getTime() + this.EMAIL_CODE_EXPIRATION_MINUTES * 60 * 1000
+		)
+		const resendAvailableAt = new Date(
+			now.getTime() + this.EMAIL_CODE_RESEND_COOLDOWN_SECONDS * 1000
+		)
+		const codeHash = await hash(code, this.PASSWORD_SALT_ROUNDS)
+
+		await this.prisma.pendingEmailRegistration.upsert({
+			where: {
+				email
+			},
+			update: {
+				passwordHash,
+				codeHash,
+				attempts: 0,
+				expiresAt,
+				lastSentAt: now
+			},
+			create: {
+				email,
+				passwordHash,
+				codeHash,
+				expiresAt,
+				lastSentAt: now
+			}
+		})
+
+		await this.emailService.sendVerificationCode(email, code)
+
+		return {
+			email,
+			expiresAt,
+			resendAvailableAt
+		}
+	}
+
+	private ensureEmailCodeResendAllowed(
+		pendingRegistration: PendingEmailRegistration
+	) {
+		const resendAllowedAt =
+			pendingRegistration.lastSentAt.getTime() +
+			this.EMAIL_CODE_RESEND_COOLDOWN_SECONDS * 1000
+
+		if (resendAllowedAt > Date.now()) {
+			throw new BadRequestException('Email verification resend cooldown')
+		}
 	}
 
 	private async saveRefreshToken(userId: string, refreshToken: string) {
@@ -311,7 +479,9 @@ export class AuthService {
 	}
 
 	private async validateUser(dto: AuthDto) {
-		const user = await this.userService.getUserByEmail(dto.email)
+		const user = await this.userService.getUserByEmail(
+			this.normalizeEmail(dto.email)
+		)
 		if (!user) {
 			throw new UnauthorizedException('Email or password invalid')
 		}
@@ -320,6 +490,10 @@ export class AuthService {
 			throw new UnauthorizedException('Email or password invalid')
 		}
 		return user
+	}
+
+	private normalizeEmail(email: string) {
+		return email.trim().toLowerCase()
 	}
 
 	private omitPassword(user: User) {

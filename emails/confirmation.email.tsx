@@ -1,29 +1,27 @@
 import * as React from 'react';
 
-const VerificationEmail = ({ url }: { url: string }) => {
+const VerificationEmail = ({ code }: { code: string }) => {
 	return (
 		<div>
 			<h1>Здравствуйте!</h1>
 
 			<p>
 				Вы получили это письмо, потому что кто-то указал его при
-				регистрации в сервисе winwidget.ru. Если это были вы, перейдите по
-				ссылке, чтобы подтвердить свой адрес электронной почты.
+				регистрации в сервисе winwidget.ru. Если это были вы, используйте
+				код ниже, чтобы подтвердить свой адрес электронной почты.
 			</p>
 
-			<a href={url}>Подтвердить email адрес</a>
-
-			<p>или скопируйте ссылку и вставьте её в свой браузер.</p>
-
-			<a
-				href={url}
-				target="_blank"
+			<p
 				style={{
-					color: '#A981DC'
+					fontSize: '2rem',
+					fontWeight: 700,
+					letterSpacing: '.3rem'
 				}}
 			>
-				{url}
-			</a>
+				{code}
+			</p>
+
+			<p>Код действует 10 минут.</p>
 
 			<p
 				style={{

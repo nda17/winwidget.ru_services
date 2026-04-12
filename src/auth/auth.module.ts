@@ -1,6 +1,7 @@
 import { AuthController } from '@/auth/auth.controller';
 import { AuthService } from '@/auth/auth.service';
 import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard';
+import { PendingEmailRegistrationCleanupService } from '@/auth/pending-email-registration-cleanup.service';
 import { PhoneCodeCleanupService } from '@/auth/phone-code-cleanup.service';
 import { RefreshTokenService } from '@/auth/refresh-token.service';
 import { SocialMediaAuthController } from '@/auth/social-media/social-media-auth.controller';
@@ -34,6 +35,7 @@ import { JwtModule } from '@nestjs/jwt';
 		PrismaService,
 		AuthService,
 		PhoneCodeCleanupService,
+		PendingEmailRegistrationCleanupService,
 		RefreshTokenService,
 		AuthRateLimitGuard,
 		GoogleStrategy,

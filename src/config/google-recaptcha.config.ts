@@ -23,6 +23,8 @@ export const getGoogleRecaptchaConfig = async (
 		actions: [
 			'login',
 			'register',
+			'email_register',
+			'email_resend_code',
 			'restore-password',
 			'restore_password',
 			'phone_send_code',

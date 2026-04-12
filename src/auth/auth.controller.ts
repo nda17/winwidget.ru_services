@@ -1,8 +1,9 @@
 import { AuthService } from '@/auth/auth.service'
 import { AuthDto } from '@/auth/dto/auth.dto'
-import { ConfirmationEmailDto } from '@/auth/dto/confirmation-email.dto'
+import { EmailRegisterDto } from '@/auth/dto/email-register.dto'
 import { PhoneLoginDto } from '@/auth/dto/phone-login.dto'
 import { PhoneRegisterDto } from '@/auth/dto/phone-register.dto'
+import { ResendEmailCodeDto } from '@/auth/dto/resend-email-code.dto'
 import { RestorePasswordDto } from '@/auth/dto/restore-password.dto'
 import { SendPhoneCodeDto } from '@/auth/dto/send-phone-code.dto'
 import { RefreshTokenService } from '@/auth/refresh-token.service'
@@ -50,13 +51,34 @@ export class AuthController {
 	@HttpCode(200)
 	@Recaptcha({ action: 'register' })
 	@Post('auth/register')
-	async register(
-		@Body() dto: AuthDto,
+	async register(@Body() dto: AuthDto) {
+		return this.authService.register(dto)
+	}
+
+	@UseGuards(AuthRateLimitGuard)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@HttpCode(200)
+	@Recaptcha({ action: 'email_register' })
+	@Post('auth/email/register')
+	async registerByEmail(
+		@Body() dto: EmailRegisterDto,
 		@Res({ passthrough: true }) res: Response
 	) {
-		const { refreshToken, ...response } = await this.authService.register(dto)
+		const { refreshToken, ...response } =
+			await this.authService.registerByEmail(dto)
+
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken)
+
 		return response
+	}
+
+	@UseGuards(AuthRateLimitGuard)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@HttpCode(200)
+	@Recaptcha({ action: 'email_resend_code' })
+	@Post('auth/email/resend-code')
+	async resendEmailCode(@Body() dto: ResendEmailCodeDto) {
+		return this.authService.resendEmailCode(dto)
 	}
 
 	@UseGuards(AuthRateLimitGuard)
@@ -102,16 +124,6 @@ export class AuthController {
 
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken)
 		return response
-	}
-
-	@HttpCode(200)
-	@Patch('auth/confirmation-email')
-	async verifyEmail(@Body() dto: ConfirmationEmailDto) {
-		if (!dto) {
-			throw new NotFoundException('Token not passed')
-		}
-
-		return this.authService.confirmationEmail(dto)
 	}
 
 	@UseGuards(AuthRateLimitGuard)

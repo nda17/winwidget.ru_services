@@ -1,4 +1,3 @@
-import { AuthDto } from '@/auth/dto/auth.dto'
 import {
 	IGithubProfile,
 	IGoogleProfile
@@ -50,7 +49,6 @@ export class UserService {
 				email: true,
 				phone: true,
 				isPhoneVerified: true,
-				verificationToken: true,
 				rights: true,
 				createdAt: true,
 				password: false
@@ -67,9 +65,12 @@ export class UserService {
 	}
 
 	async getUserByEmail(email: string) {
-		return this.prisma.user.findUnique({
+		return this.prisma.user.findFirst({
 			where: {
-				email
+				email: {
+					equals: email,
+					mode: 'insensitive'
+				}
 			}
 		})
 	}
@@ -102,20 +103,19 @@ export class UserService {
 
 		return this.prisma.user.create({
 			data: {
-				email,
+				email: email.toLowerCase(),
 				name,
 				password: '',
-				verificationToken: null,
 				avatarPath: picture
 			}
 		})
 	}
 
-	async createUser(dto: AuthDto) {
+	async createVerifiedEmailUser(dto: { email: string; passwordHash: string }) {
 		return this.prisma.user.create({
 			data: {
 				email: dto.email.toLowerCase(),
-				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
+				password: dto.passwordHash
 			}
 		})
 	}
@@ -126,8 +126,7 @@ export class UserService {
 				email: null,
 				phone: dto.phone,
 				isPhoneVerified: true,
-				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS),
-				verificationToken: null
+				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
 			}
 		})
 	}

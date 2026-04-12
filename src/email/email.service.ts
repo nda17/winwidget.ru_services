@@ -1,8 +1,8 @@
-import VerificationEmail from '@email/confirmation.email'
-import NewPasswordEmail from '@email/restore-password.email'
-import { MailerService } from '@nestjs-modules/mailer'
-import { Injectable } from '@nestjs/common'
-import { render } from '@react-email/render'
+import VerificationEmail from '@email/confirmation.email';
+import NewPasswordEmail from '@email/restore-password.email';
+import { MailerService } from '@nestjs-modules/mailer';
+import { Injectable } from '@nestjs/common';
+import { render } from '@react-email/render';
 
 @Injectable()
 export class EmailService {
@@ -13,16 +13,16 @@ export class EmailService {
 			to,
 			subject,
 			html
-		})
+		});
 	}
 
-	sendVerification(to: string, verificationLink: string) {
-		const html = render(VerificationEmail({ url: verificationLink }))
-		return this.sendEmail(to, 'Confirmation Email', html)
+	sendVerificationCode(to: string, code: string) {
+		const html = render(VerificationEmail({ code }));
+		return this.sendEmail(to, 'Код подтверждения email', html);
 	}
 
 	sendNewPassword(to: string, password: string) {
-		const html = render(NewPasswordEmail({ password: password }))
-		return this.sendEmail(to, 'New password', html)
+		const html = render(NewPasswordEmail({ password: password }));
+		return this.sendEmail(to, 'Временный пароль', html);
 	}
 }
