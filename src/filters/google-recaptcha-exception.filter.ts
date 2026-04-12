@@ -1,8 +1,9 @@
-import { ArgumentsHost, Catch, ExceptionFilter } from '@nestjs/common';
+import { ArgumentsHost, Catch, ExceptionFilter, Logger } from '@nestjs/common';
 import {
 	ErrorCode,
 	GoogleRecaptchaException
 } from '@nestlab/google-recaptcha';
+import { Request } from 'express';
 
 const RECAPTCHA_ERROR_MESSAGES: Record<string, string> = {
 	[ErrorCode.MissingInputSecret]: 'Не настроен секретный ключ reCAPTCHA.',
@@ -28,11 +29,44 @@ const RECAPTCHA_ERROR_MESSAGES: Record<string, string> = {
 
 @Catch(GoogleRecaptchaException)
 export class GoogleRecaptchaExceptionFilter implements ExceptionFilter {
+	private readonly logger = new Logger('reCAPTCHA');
+	private readonly isDevelopment = process.env.MODE === 'development';
+
 	catch(exception: GoogleRecaptchaException, host: ArgumentsHost) {
+		const request = host.switchToHttp().getRequest<
+			Request & {
+				recaptchaValidationResult?: {
+					success: boolean;
+					action?: string;
+					score?: number;
+					hostname?: string;
+					remoteIp?: string;
+					errors?: string[];
+				};
+			}
+		>();
 		const response = host.switchToHttp().getResponse();
 		const status = exception.getStatus();
 		const errorCodes = exception.errorCodes || [];
 		const firstErrorCode = errorCodes[0] || ErrorCode.UnknownError;
+
+		if (this.isDevelopment) {
+			this.logger.debug(
+				{
+					method: request?.method,
+					path: request?.originalUrl || request?.url,
+					tokenProvided: Boolean(request?.headers?.recaptcha),
+					success: request?.recaptchaValidationResult?.success ?? false,
+					action: request?.recaptchaValidationResult?.action,
+					score: request?.recaptchaValidationResult?.score,
+					hostname: request?.recaptchaValidationResult?.hostname,
+					remoteIp:
+						request?.recaptchaValidationResult?.remoteIp ?? request?.ip,
+					errors: errorCodes
+				},
+				'error'
+			);
+		}
 
 		response.status(status).json({
 			statusCode: status,
