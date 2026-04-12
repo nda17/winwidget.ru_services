@@ -1,19 +1,19 @@
-import * as React from 'react'
+import * as React from 'react';
 
 const VerificationEmail = ({ url }: { url: string }) => {
 	return (
 		<div>
-			<h1>Welcome!</h1>
+			<h1>Здравствуйте!</h1>
 
 			<p>
-				You received this email because someone included it during
-				registration. If it was you, click the link to verify your email
-				address.
+				Вы получили это письмо, потому что кто-то указал его при
+				регистрации в сервисе winwidget.ru. Если это были вы, перейдите по
+				ссылке, чтобы подтвердить свой адрес электронной почты.
 			</p>
 
-			<a href={url}>Confirm email address</a>
+			<a href={url}>Подтвердить email адрес</a>
 
-			<p>or copy the link and paste it into your browser</p>
+			<p>или скопируйте ссылку и вставьте её в свой браузер.</p>
 
 			<a
 				href={url}
@@ -30,12 +30,12 @@ const VerificationEmail = ({ url }: { url: string }) => {
 					color: '#FC0303'
 				}}
 			>
-				This letter was generated and sent by a robot. You do not need to
-				respond to it. If you have a question, please contact
-				info@winwidget.ru
+				Это письмо было сгенерировано и отправлено роботом. Вам не нужно
+				отвечать на него. Если у вас есть вопрос, пожалуйста, свяжитесь с
+				нами по адресу info@winwidget.ru
 			</p>
 		</div>
-	)
-}
+	);
+};
 
-export default VerificationEmail
+export default VerificationEmail;

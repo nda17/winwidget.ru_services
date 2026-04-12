@@ -1,14 +1,15 @@
-import * as React from 'react'
+import * as React from 'react';
 
 const NewPasswordEmail = ({ password }: { password: string }) => {
 	return (
 		<div>
-			<h1>Welcome!</h1>
+			<h1>Здравствуйте!</h1>
 
 			<p>
-				You received this email because you specified it as the address for
-				receiving a new temporary password to replace the one you forgot.
-				Your new temporary password:
+				Вы получили это письмо, потому что данный адрес указали этот адрес
+				в качестве адреса для получения нового временного пароля взамен
+				забытого. Рекомендуем сменить временный пароль после входа в
+				систему. Ваш новый временный пароль:
 			</p>
 
 			<p
@@ -24,12 +25,12 @@ const NewPasswordEmail = ({ password }: { password: string }) => {
 					color: '#FC0303'
 				}}
 			>
-				This letter was generated and sent by a robot. You do not need to
-				respond to it. If you have a question, please contact
-				info@winwidget.ru
+				Это письмо было сгенерировано и отправлено роботом. Вам не нужно
+				отвечать на него. Если у вас есть вопрос, пожалуйста, свяжитесь с
+				нами по адресу info@winwidget.ru
 			</p>
 		</div>
-	)
-}
+	);
+};
 
-export default NewPasswordEmail
+export default NewPasswordEmail;
