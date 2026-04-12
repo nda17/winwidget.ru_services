@@ -1,5 +1,6 @@
 import { AppModule } from '@/app.module';
 import { GoogleRecaptchaExceptionFilter } from '@/filters/google-recaptcha-exception.filter';
+import { RecaptchaDevLoggingInterceptor } from '@/interceptors/recaptcha-dev-logging.interceptor';
 import { AppHttpExceptionFilter } from '@/filters/http-exception.filter';
 import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
@@ -30,6 +31,7 @@ export const bootstrap = async () => {
 	}
 
 	app.use(cookieParser());
+	app.useGlobalInterceptors(new RecaptchaDevLoggingInterceptor());
 	app.useGlobalFilters(
 		new GoogleRecaptchaExceptionFilter(),
 		new AppHttpExceptionFilter()

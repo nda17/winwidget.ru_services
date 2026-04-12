@@ -32,7 +32,7 @@ export class AuthController {
 	) {}
 
 	@UseGuards(AuthRateLimitGuard)
-	@UsePipes(new ValidationPipe())
+	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
 	@Recaptcha({ action: 'login' })
 	@Post('auth/login')
@@ -46,7 +46,7 @@ export class AuthController {
 	}
 
 	@UseGuards(AuthRateLimitGuard)
-	@UsePipes(new ValidationPipe())
+	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
 	@Recaptcha({ action: 'register' })
 	@Post('auth/register')
@@ -60,7 +60,7 @@ export class AuthController {
 	}
 
 	@UseGuards(AuthRateLimitGuard)
-	@UsePipes(new ValidationPipe())
+	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
 	@Recaptcha({ action: 'phone_send_code' })
 	@Post('auth/phone/send-code')
@@ -73,7 +73,7 @@ export class AuthController {
 	}
 
 	@UseGuards(AuthRateLimitGuard)
-	@UsePipes(new ValidationPipe())
+	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
 	@Recaptcha({ action: 'phone_register' })
 	@Post('auth/phone/register')
@@ -89,7 +89,7 @@ export class AuthController {
 	}
 
 	@UseGuards(AuthRateLimitGuard)
-	@UsePipes(new ValidationPipe())
+	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
 	@Recaptcha({ action: 'phone_login' })
 	@Post('auth/phone/login')

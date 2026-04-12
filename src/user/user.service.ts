@@ -114,7 +114,6 @@ export class UserService {
 	async createUser(dto: AuthDto) {
 		return this.prisma.user.create({
 			data: {
-				...dto,
 				email: dto.email.toLowerCase(),
 				password: await hash(dto.password, this.PASSWORD_SALT_ROUNDS)
 			}
