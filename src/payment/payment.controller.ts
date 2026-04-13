@@ -13,6 +13,12 @@ export class PaymentController {
 		return this.paymentService.createPremiumPayment(userId);
 	}
 
+	@Post('verify')
+	@Auth()
+	async verifyPayment(@CurrentUser('id') userId: string) {
+		return this.paymentService.verifyLatestPayment(userId);
+	}
+
 	@Post('webhook')
 	async webhook(@Body() body: any) {
 		return this.paymentService.handleWebhook(body);

@@ -27,7 +27,6 @@ export class PaymentService {
 			throw new BadRequestException('У вас уже есть подписка PREMIUM');
 		}
 
-		// Проверяем, нет ли уже активного незавершённого платежа
 		const pendingPayment = await this.prisma.payment.findFirst({
 			where: { userId, status: PaymentStatus.PENDING }
 		});
@@ -74,6 +73,33 @@ export class PaymentService {
 		};
 	}
 
+	async verifyLatestPayment(userId: string) {
+		// Ищем последний платёж пользователя (PENDING или SUCCEEDED)
+		const payment = await this.prisma.payment.findFirst({
+			where: {
+				userId,
+				status: { in: [PaymentStatus.PENDING, PaymentStatus.SUCCEEDED] }
+			},
+			orderBy: { createdAt: 'desc' }
+		});
+
+		if (!payment) {
+			throw new BadRequestException('Платёж не найден');
+		}
+
+		if (payment.status === PaymentStatus.SUCCEEDED) {
+			return { activated: true };
+		}
+
+		await this.handlePaymentSucceeded(payment.yookassaId);
+
+		const updated = await this.prisma.payment.findUnique({
+			where: { yookassaId: payment.yookassaId }
+		});
+
+		return { activated: updated?.status === PaymentStatus.SUCCEEDED };
+	}
+
 	async handleWebhook(body: any) {
 		const event: string = body?.event;
 		const yookassaId: string = body?.object?.id;
@@ -92,7 +118,6 @@ export class PaymentService {
 	}
 
 	private async handlePaymentSucceeded(yookassaId: string) {
-		// Идемпотентность: не обрабатываем уже завершённый платёж
 		const payment = await this.prisma.payment.findUnique({
 			where: { yookassaId }
 		});
@@ -101,21 +126,18 @@ export class PaymentService {
 			return;
 		}
 
-		// Верификация: запрашиваем реальный статус у ЮKassa, не доверяем телу вебхука
 		const realPayment = await this.yookassa.getPayment(yookassaId);
 
 		if (realPayment.status !== 'succeeded') {
 			return;
 		}
 
-		// userId берём из верифицированного ответа ЮKassa, не из тела вебхука
 		const userId = realPayment.metadata?.userId;
 
 		if (!userId) {
 			return;
 		}
 
-		// Транзакция: обновляем платёж и выдаём роль атомарно
 		await this.prisma.$transaction([
 			this.prisma.payment.update({
 				where: { yookassaId },
