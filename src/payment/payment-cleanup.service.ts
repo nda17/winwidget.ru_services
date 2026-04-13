@@ -68,9 +68,11 @@ export class PaymentCleanupService
 			try {
 				const deletedCount = await this.cleanupStalePendingPayments();
 
-				this.logger.log(
-					`Nightly cleanup finished: removed ${deletedCount} stale pending payment(s).`
-				);
+				if (this.isDevMode) {
+					this.logger.log(
+						`Nightly cleanup finished: removed ${deletedCount} stale pending payment(s).`
+					);
+				}
 			} finally {
 				this.scheduleNightlyCleanup();
 			}

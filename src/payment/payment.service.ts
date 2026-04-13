@@ -1,12 +1,13 @@
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { AuthIdentityType, PaymentStatus, Role } from '@prisma/client';
 
 @Injectable()
 export class PaymentService {
 	private readonly PREMIUM_PRICE = '100.00';
 	private readonly RETURN_URL = `${process.env.RECAPTCHA_CLIENT_URL}/payment/success`;
+	private readonly logger = new Logger(PaymentService.name);
 
 	constructor(
 		private prisma: PrismaService,
@@ -67,6 +68,10 @@ export class PaymentService {
 				status: PaymentStatus.PENDING
 			}
 		});
+
+		this.logger.log(
+			`Payment created: yookassaId=${yookassaPayment.id} userId=${userId}`
+		);
 
 		return {
 			confirmationUrl: yookassaPayment.confirmation.confirmation_url
@@ -150,6 +155,10 @@ export class PaymentService {
 				}
 			})
 		]);
+
+		this.logger.log(
+			`Payment succeeded: yookassaId=${yookassaId} userId=${userId}`
+		);
 	}
 
 	private async handlePaymentCanceled(yookassaId: string) {
@@ -157,5 +166,7 @@ export class PaymentService {
 			where: { yookassaId, status: PaymentStatus.PENDING },
 			data: { status: PaymentStatus.CANCELLED }
 		});
+
+		this.logger.log(`Payment cancelled: yookassaId=${yookassaId}`);
 	}
 }
