@@ -22,7 +22,6 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { getClientIp } from '@/utils/ip.util';
 import { Recaptcha } from '@nestlab/google-recaptcha';
 import { Request, Response } from 'express';
 
@@ -60,7 +59,7 @@ export class AuthController {
 	@UseGuards(AuthRateLimitGuard)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
-	@Recaptcha({ action: 'email_register' })
+	@Recaptcha({ action: 'register' })
 	@Post('auth/email/register')
 	async registerByEmail(
 		@Body() dto: EmailRegisterDto,
@@ -68,16 +67,14 @@ export class AuthController {
 	) {
 		const { refreshToken, ...response } =
 			await this.authService.registerByEmail(dto);
-
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
-
 		return response;
 	}
 
 	@UseGuards(AuthRateLimitGuard)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
-	@Recaptcha({ action: 'email_resend_code' })
+	@Recaptcha({ action: 'register' })
 	@Post('auth/email/resend-code')
 	async resendEmailCode(@Body() dto: ResendEmailCodeDto) {
 		return this.authService.resendEmailCode(dto);
@@ -89,7 +86,7 @@ export class AuthController {
 	@Recaptcha({ action: 'phone_send_code' })
 	@Post('auth/phone/send-code')
 	async sendPhoneCode(@Body() dto: SendPhoneCodeDto, @Req() req: Request) {
-		const ip = getClientIp(req);
+		const ip = this.getClientIp(req);
 		return this.authService.sendPhoneCode(dto, ip);
 	}
 
@@ -104,7 +101,6 @@ export class AuthController {
 	) {
 		const { refreshToken, ...response } =
 			await this.authService.registerByPhone(dto);
-
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
 	}
@@ -120,7 +116,6 @@ export class AuthController {
 	) {
 		const { refreshToken, ...response } =
 			await this.authService.loginByPhone(dto);
-
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
 	}
@@ -133,7 +128,6 @@ export class AuthController {
 		if (!dto || (!dto.email && !dto.phone)) {
 			throw new NotFoundException('Email or phone not passed');
 		}
-
 		return this.authService.restorePassword(dto);
 	}
 
@@ -156,7 +150,6 @@ export class AuthController {
 			await this.authService.getNewTokens(refreshTokenFromCookies);
 
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
-
 		return response;
 	}
 
@@ -171,7 +164,20 @@ export class AuthController {
 
 		await this.authService.logout(refreshTokenFromCookies);
 		this.refreshTokenService.removeRefreshTokenFromResponse(res);
-
 		return true;
+	}
+
+	private getClientIp(request: Request) {
+		const forwardedFor = request.headers['x-forwarded-for'];
+		const realIp = request.headers['x-real-ip'];
+		const cfIp = request.headers['cf-connecting-ip'];
+
+		if (typeof cfIp === 'string' && cfIp.length > 0) return cfIp.trim();
+		if (typeof realIp === 'string' && realIp.length > 0)
+			return realIp.trim();
+		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+			return forwardedFor.split(',')[0].trim();
+		}
+		return request.ip ?? undefined;
 	}
 }
