@@ -16,8 +16,23 @@ model User {
   rights             Role[]   @default([USER])
   authIdentities     AuthIdentity[]
   verificationChallenges VerificationChallenge[]
+  payments           Payment[]
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
+}
+
+model Payment {
+  id         String        @id @default(cuid())
+  userId     String        @map("user_id")
+  yookassaId String        @unique @map("yookassa_id")
+  amount     String
+  status     PaymentStatus @default(PENDING)
+  createdAt  DateTime      @default(now()) @map("created_at")
+  updatedAt  DateTime      @updatedAt @map("updated_at")
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("payments")
 }
 
 model AuthIdentity {
@@ -55,6 +70,12 @@ model VerificationChallenge {
   @@unique([type, purpose, value])
   @@index([expiresAt])
   @@map("verification_challenges")
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  CANCELLED
 }
 
 enum Role {

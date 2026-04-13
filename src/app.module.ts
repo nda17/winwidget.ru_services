@@ -1,6 +1,7 @@
 import { AuthModule } from '@/auth/auth.module';
 import { getGoogleRecaptchaConfig } from '@/config/google-recaptcha.config';
 import { FileModule } from '@/file/file.module';
+import { PaymentModule } from '@/payment/payment.module';
 import { StatisticsModule } from '@/statistics/statistics.module';
 import { UserModule } from '@/user/user.module';
 import { Module } from '@nestjs/common';
@@ -20,7 +21,8 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		AuthModule,
 		StatisticsModule,
 		UserModule,
-		FileModule
+		FileModule,
+		PaymentModule
 	]
 })
 export class AppModule {}
