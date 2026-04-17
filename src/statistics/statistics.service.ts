@@ -60,9 +60,7 @@ export class StatisticsService {
 			activeUsers30d,
 			newUsers30d,
 			usersWithAuthIdentities,
-			premiumUsers,
-			adminUsers,
-			managerUsers
+			adminUsers
 		] = await Promise.all([
 			this.prisma.user.count(),
 			this.prisma.user.count({
@@ -87,17 +85,7 @@ export class StatisticsService {
 			}),
 			this.prisma.user.count({
 				where: {
-					rights: { has: Role.PREMIUM }
-				}
-			}),
-			this.prisma.user.count({
-				where: {
 					rights: { has: Role.ADMIN }
-				}
-			}),
-			this.prisma.user.count({
-				where: {
-					rights: { has: Role.MANAGER }
 				}
 			})
 		]);
@@ -125,9 +113,7 @@ export class StatisticsService {
 			activeUsers30d,
 			newUsers30d,
 			multiLoginUsers: usersWithMultipleLoginMethods,
-			premiumUsers,
-			adminUsers,
-			managerUsers
+			adminUsers
 		};
 	}
 

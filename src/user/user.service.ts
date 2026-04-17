@@ -359,9 +359,7 @@ export class UserService {
 							: user.avatarPath,
 					rights: [
 						dto?.isUser ? Role.USER : null,
-						dto?.isAdmin ? Role.ADMIN : null,
-						dto?.isManager ? Role.MANAGER : null,
-						dto?.isPremium ? Role.PREMIUM : null
+						dto?.isAdmin ? Role.ADMIN : null
 					].filter(role => role !== null)
 				}
 			});

@@ -108,20 +108,6 @@ export class UserController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.PREMIUM)
-	@Get('premium')
-	async getPremium() {
-		return { access: true };
-	}
-
-	@HttpCode(200)
-	@Auth([Role.ADMIN, Role.MANAGER])
-	@Get('manager')
-	async getManager() {
-		return { access: true };
-	}
-
-	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('user-list')
 	async getUserList(@Query('searchTerm') searchTerm?: string) {
