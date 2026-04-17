@@ -135,8 +135,6 @@ enum PaymentStatus {
 
 enum Role {
   USER
-  PREMIUM
-  MANAGER
   ADMIN
 }
 
