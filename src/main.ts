@@ -1,11 +1,14 @@
 import { AppModule } from '@/app.module';
 import { GoogleRecaptchaExceptionFilter } from '@/filters/google-recaptcha-exception.filter';
-import { RecaptchaDevLoggingInterceptor } from '@/interceptors/recaptcha-dev-logging.interceptor';
 import { AppHttpExceptionFilter } from '@/filters/http-exception.filter';
+import { RecaptchaDevLoggingInterceptor } from '@/interceptors/recaptcha-dev-logging.interceptor';
 import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { path as appRoot } from 'app-root-path';
 import 'colors';
 import * as cookieParser from 'cookie-parser';
+import * as express from 'express';
+import { join } from 'path';
 
 export const bootstrap = async () => {
 	const app = await NestFactory.create(AppModule);
@@ -22,7 +25,9 @@ export const bootstrap = async () => {
 			{ path: 'auth/github', method: RequestMethod.GET },
 			{ path: 'auth/github/redirect', method: RequestMethod.GET },
 			{ path: 'auth/yandex', method: RequestMethod.GET },
-			{ path: 'auth/yandex/redirect', method: RequestMethod.GET }
+			{ path: 'auth/yandex/redirect', method: RequestMethod.GET },
+			{ path: 'widget/:key', method: RequestMethod.GET },
+			{ path: 'page/:key', method: RequestMethod.GET }
 		]
 	});
 
@@ -32,13 +37,15 @@ export const bootstrap = async () => {
 	}
 
 	app.use(cookieParser());
+	// Serve static widget runtime files: /widgets/wheel.js etc.
+	app.use(express.static(join(appRoot, 'public')));
 	app.useGlobalInterceptors(new RecaptchaDevLoggingInterceptor());
 	app.useGlobalFilters(
 		new GoogleRecaptchaExceptionFilter(),
 		new AppHttpExceptionFilter()
 	);
 	app.enableCors({
-		origin: [process.env.PRODUCTION_HOST, process.env.DEVELOPMENT_HOST],
+		origin: true, // reflect request origin — works with any site + credentials
 		credentials: true,
 		exposedHeaders: 'set-cookie'
 	});
