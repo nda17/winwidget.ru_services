@@ -9,9 +9,11 @@ import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
 import { SmsService } from '@/sms/sms.service';
 import {
-	type UserWithAuthIdentities,
-	UserService
+	UserService,
+	type UserWithAuthIdentities
 } from '@/user/user.service';
+import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
+import { normalizeEmail } from '@/utils/email.util';
 import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
@@ -21,15 +23,15 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
+	Plan,
 	Role,
+	SubscriptionStatus,
 	type VerificationChallenge,
 	VerificationChallengePurpose,
 	VerificationChallengeType
 } from '@prisma/client';
 import { compare, hash } from 'bcryptjs';
 import generator from 'generate-password-ts';
-import { normalizeEmail } from '@/utils/email.util';
-import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
 
 @Injectable()
 export class AuthService {
@@ -340,9 +342,25 @@ export class AuthService {
 	}
 
 	async buildResponseObject(user: UserWithAuthIdentities) {
+		await this.ensureTrialSubscription(user.id);
 		const tokens = await this.issueTokens(user.id, user.rights);
 		await this.saveRefreshToken(user.id, tokens.refreshToken);
 		return { user: this.userService.toPublicUser(user), ...tokens };
+	}
+
+	private async ensureTrialSubscription(userId: string) {
+		const existing = await this.prisma.subscription.findUnique({
+			where: { userId }
+		});
+		if (!existing) {
+			await this.prisma.subscription.create({
+				data: {
+					userId,
+					plan: Plan.TRIAL,
+					status: SubscriptionStatus.ACTIVE
+				}
+			});
+		}
 	}
 
 	private async issueTokens(userId: string, rights: Role[]) {

@@ -1,20 +1,35 @@
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
-import { AuthIdentityType, PaymentStatus, Role } from '@prisma/client';
+import { PLAN_PRICES } from '@/subscription/subscription.constants';
+import { SubscriptionService } from '@/subscription/subscription.service';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+	AuthIdentityType,
+	BillingPeriod,
+	PaymentStatus,
+	Plan
+} from '@prisma/client';
 
 @Injectable()
 export class PaymentService {
-	private readonly PREMIUM_PRICE = '100.00';
 	private readonly RETURN_URL = `${process.env.RECAPTCHA_CLIENT_URL}/payment/success`;
 	private readonly logger = new Logger(PaymentService.name);
 
 	constructor(
 		private prisma: PrismaService,
-		private yookassa: YookassaService
+		private yookassa: YookassaService,
+		private subscriptionService: SubscriptionService
 	) {}
 
-	async createPremiumPayment(userId: string) {
+	async createPayment(
+		userId: string,
+		plan: Plan,
+		billingPeriod: BillingPeriod
+	) {
+		if (plan === Plan.TRIAL) {
+			throw new BadRequestException('Нельзя оплатить тестовый тариф');
+		}
+
 		const user = await this.prisma.user.findUnique({
 			where: { id: userId },
 			include: { authIdentities: true }
@@ -22,10 +37,6 @@ export class PaymentService {
 
 		if (!user) {
 			throw new BadRequestException('Пользователь не найден');
-		}
-
-		if (user.rights.includes(Role.PREMIUM)) {
-			throw new BadRequestException('У вас уже есть подписка PREMIUM');
 		}
 
 		const pendingPayment = await this.prisma.payment.findFirst({
@@ -51,9 +62,16 @@ export class PaymentService {
 			);
 		}
 
+		const price = PLAN_PRICES[plan][billingPeriod];
+		const amount = `${price}.00`;
+		const planLabel = plan === Plan.EASY ? 'Easy' : 'Hard';
+		const periodLabel =
+			billingPeriod === BillingPeriod.MONTHLY ? 'месяц' : 'год';
+		const description = `Тариф ${planLabel} на ${periodLabel} — winwidget.ru`;
+
 		const yookassaPayment = await this.yookassa.createPayment({
-			amount: this.PREMIUM_PRICE,
-			description: 'Подписка PREMIUM — winwidget.ru',
+			amount,
+			description,
 			returnUrl: this.RETURN_URL,
 			userId,
 			customerEmail: emailIdentity?.value,
@@ -64,13 +82,15 @@ export class PaymentService {
 			data: {
 				userId,
 				yookassaId: yookassaPayment.id,
-				amount: this.PREMIUM_PRICE,
-				status: PaymentStatus.PENDING
+				amount,
+				status: PaymentStatus.PENDING,
+				plan,
+				billingPeriod
 			}
 		});
 
 		this.logger.log(
-			`Payment created: yookassaId=${yookassaPayment.id} userId=${userId}`
+			`Payment created: yookassaId=${yookassaPayment.id} userId=${userId} plan=${plan} period=${billingPeriod}`
 		);
 
 		return {
@@ -79,7 +99,6 @@ export class PaymentService {
 	}
 
 	async verifyLatestPayment(userId: string) {
-		// Ищем последний платёж пользователя (PENDING или SUCCEEDED)
 		const payment = await this.prisma.payment.findFirst({
 			where: {
 				userId,
@@ -138,8 +157,10 @@ export class PaymentService {
 		}
 
 		const userId = realPayment.metadata?.userId;
+		if (!userId) return;
 
-		if (!userId) {
+		if (!payment.plan || !payment.billingPeriod) {
+			this.logger.warn(`Payment ${yookassaId} missing plan/billingPeriod`);
 			return;
 		}
 
@@ -147,17 +168,17 @@ export class PaymentService {
 			this.prisma.payment.update({
 				where: { yookassaId },
 				data: { status: PaymentStatus.SUCCEEDED }
-			}),
-			this.prisma.user.update({
-				where: { id: userId },
-				data: {
-					rights: { push: Role.PREMIUM }
-				}
 			})
 		]);
 
+		await this.subscriptionService.createOrUpgradeSubscription(
+			userId,
+			payment.plan,
+			payment.billingPeriod
+		);
+
 		this.logger.log(
-			`Payment succeeded: yookassaId=${yookassaId} userId=${userId}`
+			`Payment succeeded: yookassaId=${yookassaId} userId=${userId} plan=${payment.plan}`
 		);
 	}
 
