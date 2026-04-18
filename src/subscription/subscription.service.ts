@@ -188,4 +188,96 @@ export class SubscriptionService {
 	getMaxWidgets(plan: Plan): number {
 		return PLAN_LIMITS[plan].maxWidgets;
 	}
+
+	async adminGetAllSubscriptions() {
+		const subs = await this.prisma.subscription.findMany({
+			include: {
+				user: {
+					select: {
+						id: true,
+						name: true,
+						authIdentities: {
+							where: { type: 'EMAIL' },
+							select: { value: true }
+						}
+					}
+				}
+			},
+			orderBy: { updatedAt: 'desc' }
+		});
+
+		return subs.map(sub => ({
+			...sub,
+			user: sub.user
+				? {
+						id: sub.user.id,
+						name: sub.user.name,
+						email: sub.user.authIdentities[0]?.value ?? null
+					}
+				: null
+		}));
+	}
+
+	async adminActivateSubscription(
+		userId: string,
+		plan: Plan,
+		billingPeriod: BillingPeriod,
+		startsAt?: Date,
+		extendIfActive?: boolean
+	) {
+		const start = dayjs(startsAt ?? new Date());
+
+		const addPeriod = (base: dayjs.Dayjs) =>
+			plan === Plan.TRIAL
+				? base.add(7, 'day')
+				: billingPeriod === BillingPeriod.YEARLY
+					? base.add(1, 'year')
+					: base.add(1, 'month');
+
+		let base = start;
+		if (extendIfActive !== false) {
+			const existing = await this.prisma.subscription.findUnique({
+				where: { userId }
+			});
+			if (
+				existing?.status === SubscriptionStatus.ACTIVE &&
+				existing.expiresAt &&
+				dayjs(existing.expiresAt).isAfter(dayjs())
+			) {
+				base = dayjs(existing.expiresAt);
+			}
+		}
+
+		const expiresAt = addPeriod(base).toDate();
+
+		return this.prisma.subscription.upsert({
+			where: { userId },
+			update: {
+				plan,
+				billingPeriod,
+				status: SubscriptionStatus.ACTIVE,
+				startsAt: start.toDate(),
+				expiresAt,
+				leadsThisPeriod: 0,
+				periodResetsAt: start.add(1, 'month').toDate()
+			},
+			create: {
+				userId,
+				plan,
+				billingPeriod,
+				status: SubscriptionStatus.ACTIVE,
+				startsAt: start.toDate(),
+				expiresAt,
+				leadsThisPeriod: 0,
+				periodResetsAt: start.add(1, 'month').toDate()
+			}
+		});
+	}
+
+	async adminCancelSubscription(userId: string) {
+		return this.prisma.subscription.update({
+			where: { userId },
+			data: { status: SubscriptionStatus.CANCELLED }
+		});
+	}
 }
