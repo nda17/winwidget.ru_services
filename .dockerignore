@@ -1,0 +1,17 @@
+dist
+node_modules
+.git
+.env
+.env.*
+Dockerfile
+README.md
+coverage
+tsconfig.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+uploads/*
+!uploads/user-avatar
+!uploads/user-avatar/avatar-default.png
