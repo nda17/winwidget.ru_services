@@ -1,4 +1,9 @@
-import { IsOptional, IsString, Matches } from 'class-validator';
+import {
+	IsOptional,
+	IsString,
+	Matches,
+	ValidateIf
+} from 'class-validator';
 
 export class UpdateProfileDto {
 	@IsOptional()
@@ -6,8 +11,9 @@ export class UpdateProfileDto {
 	name?: string;
 
 	@IsOptional()
+	@ValidateIf(o => o.avatarPath !== null)
 	@IsString()
-	avatarPath?: string;
+	avatarPath?: string | null;
 
 	@IsOptional()
 	@IsString()

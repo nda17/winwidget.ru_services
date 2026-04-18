@@ -281,9 +281,11 @@ export class UserService {
 			data: {
 				name: typeof dto?.name === 'string' ? dto.name : user.name,
 				avatarPath:
-					typeof dto?.avatarPath === 'string' && dto.avatarPath.length
-						? dto.avatarPath
-						: user.avatarPath,
+					dto?.avatarPath === null
+						? null
+						: typeof dto?.avatarPath === 'string' && dto.avatarPath.length
+							? dto.avatarPath
+							: user.avatarPath,
 				password:
 					typeof dto?.password === 'string' && dto.password.length
 						? await hash(dto.password, PASSWORD_SALT_ROUNDS)

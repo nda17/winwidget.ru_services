@@ -2,6 +2,7 @@ import { Auth } from '@/auth/decorators/auth.decorator';
 import { FileService } from '@/file/file.service';
 import {
 	Controller,
+	Delete,
 	HttpCode,
 	Post,
 	Query,
@@ -23,5 +24,12 @@ export class FileController {
 		@Query('folder') folder?: string
 	) {
 		return this.fileService.saveFiles([file], folder);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Delete()
+	async deleteFile(@Query('filePath') filePath: string) {
+		return this.fileService.deleteFile(filePath);
 	}
 }
