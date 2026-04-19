@@ -189,12 +189,7 @@ export class UserService {
 		socialType: SocialIdentityType
 	): Promise<UserWithAuthIdentities> {
 		const email = normalizeEmail(profile.email);
-		const name =
-			'firstName' in profile
-				? `${profile.firstName} ${profile.lastName}`
-				: 'displayName' in profile
-					? profile.displayName
-					: profile.username;
+		const name = this.getSocialProfileName(profile, socialType, email);
 		const picture = profile.picture || '';
 		const verifiedAt = new Date();
 
@@ -222,6 +217,27 @@ export class UserService {
 				authIdentities: true
 			}
 		});
+	}
+
+	private getSocialProfileName(
+		profile: IGoogleProfile | IGithubProfile | IYandexProfile,
+		socialType: SocialIdentityType,
+		fallback: string
+	) {
+		if (socialType === AuthIdentityType.GOOGLE) {
+			const googleProfile = profile as IGoogleProfile;
+			return (
+				[googleProfile.firstName, googleProfile.lastName]
+					.filter(Boolean)
+					.join(' ') || fallback
+			);
+		}
+
+		if (socialType === AuthIdentityType.YANDEX) {
+			return (profile as IYandexProfile).displayName || fallback;
+		}
+
+		return (profile as IGithubProfile).username || fallback;
 	}
 
 	async createVerifiedEmailUser(dto: {
