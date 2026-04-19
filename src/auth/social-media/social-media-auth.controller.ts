@@ -30,7 +30,7 @@ export class SocialMediaAuthController {
 		private readonly refreshTokenService: RefreshTokenService
 	) {}
 
-	private _CLIENT_BASE_URL = `${process.env.RECAPTCHA_CLIENT_URL}/social-auth?accessToken=`;
+	private _SOCIAL_AUTH_REDIRECT = `${process.env.RECAPTCHA_CLIENT_URL}/social-auth`;
 
 	@Get('google')
 	@UseGuards(AuthGuard('google'))
@@ -44,11 +44,11 @@ export class SocialMediaAuthController {
 	) {
 		const user = await this.socialMediaAuthService.login(req);
 
-		const { accessToken, refreshToken } =
+		const { refreshToken } =
 			await this.authService.buildResponseObject(user);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 
-		return res.redirect(`${this._CLIENT_BASE_URL}${accessToken}`);
+		return res.redirect(this._SOCIAL_AUTH_REDIRECT);
 	}
 
 	@Get('github')
@@ -63,11 +63,11 @@ export class SocialMediaAuthController {
 	) {
 		const user = await this.socialMediaAuthService.login(req);
 
-		const { accessToken, refreshToken } =
+		const { refreshToken } =
 			await this.authService.buildResponseObject(user);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 
-		return res.redirect(`${this._CLIENT_BASE_URL}${accessToken}`);
+		return res.redirect(this._SOCIAL_AUTH_REDIRECT);
 	}
 
 	@Get('yandex')
@@ -84,31 +84,40 @@ export class SocialMediaAuthController {
 		@Query('code') code: string,
 		@Res({ passthrough: true }) res: Response
 	) {
-		const accessToken = await exchangeYandexCode(
-			code,
-			process.env.YANDEX_CLIENT_ID!,
-			process.env.YANDEX_CLIENT_SECRET!,
-			process.env.YANDEX_CALLBACK_URL!
-		);
+		try {
+			const yandexAccessToken = await exchangeYandexCode(
+				code,
+				process.env.YANDEX_CLIENT_ID!,
+				process.env.YANDEX_CLIENT_SECRET!,
+				process.env.YANDEX_CALLBACK_URL!
+			);
 
-		const userInfo = await fetchYandexUserInfo(accessToken);
+			const userInfo = await fetchYandexUserInfo(yandexAccessToken);
 
-		const profile: IYandexProfile = {
-			providerId: userInfo.id,
-			email: userInfo.default_email,
-			displayName: userInfo.display_name,
-			picture: buildYandexAvatarUrl(userInfo),
-			accessToken
-		};
+			const profile: IYandexProfile = {
+				providerId: userInfo.id,
+				email: userInfo.default_email,
+				displayName: userInfo.display_name,
+				picture: buildYandexAvatarUrl(userInfo),
+				accessToken: yandexAccessToken
+			};
 
-		const user = await this.socialMediaAuthService.login({
-			user: profile
-		});
+			const user = await this.socialMediaAuthService.login({
+				user: profile
+			});
 
-		const { accessToken: jwt, refreshToken } =
-			await this.authService.buildResponseObject(user);
-		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
+			const { refreshToken } =
+				await this.authService.buildResponseObject(user);
+			this.refreshTokenService.addRefreshTokenToResponse(
+				res,
+				refreshToken
+			);
 
-		return res.redirect(`${this._CLIENT_BASE_URL}${jwt}`);
+			return res.redirect(this._SOCIAL_AUTH_REDIRECT);
+		} catch {
+			return res.redirect(
+				`${process.env.RECAPTCHA_CLIENT_URL}/login?error=social_auth_failed`
+			);
+		}
 	}
 }

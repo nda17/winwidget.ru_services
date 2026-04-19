@@ -45,7 +45,10 @@ export const bootstrap = async () => {
 		new AppHttpExceptionFilter()
 	);
 	app.enableCors({
-		origin: true, // reflect request origin — works with any site + credentials
+		origin:
+			process.env.MODE === 'development'
+				? true
+				: ([process.env.RECAPTCHA_CLIENT_URL].filter(Boolean) as string[]),
 		credentials: true,
 		exposedHeaders: 'set-cookie'
 	});

@@ -15,6 +15,24 @@ interface IRateLimitEntry {
 @Injectable()
 export class AuthRateLimitGuard implements CanActivate {
 	private static readonly storage = new Map<string, IRateLimitEntry>();
+	private static cleanupInterval: ReturnType<typeof setInterval> | null =
+		null;
+
+	constructor() {
+		if (!AuthRateLimitGuard.cleanupInterval) {
+			AuthRateLimitGuard.cleanupInterval = setInterval(
+				() => {
+					const now = Date.now();
+					for (const [key, entry] of AuthRateLimitGuard.storage) {
+						if (entry.expiresAt <= now) {
+							AuthRateLimitGuard.storage.delete(key);
+						}
+					}
+				},
+				5 * 60 * 1000
+			);
+		}
+	}
 
 	canActivate(context: ExecutionContext): boolean {
 		const request = context.switchToHttp().getRequest<Request>();
@@ -54,8 +72,13 @@ export class AuthRateLimitGuard implements CanActivate {
 	}
 
 	private getClientIp(request: Request) {
+		const cfIp = request.headers['cf-connecting-ip'];
+		const realIp = request.headers['x-real-ip'];
 		const forwardedFor = request.headers['x-forwarded-for'];
 
+		if (typeof cfIp === 'string' && cfIp.length > 0) return cfIp.trim();
+		if (typeof realIp === 'string' && realIp.length > 0)
+			return realIp.trim();
 		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
 			return forwardedFor.split(',')[0].trim();
 		}

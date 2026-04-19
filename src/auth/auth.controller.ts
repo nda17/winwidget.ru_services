@@ -121,6 +121,7 @@ export class AuthController {
 	}
 
 	@UseGuards(AuthRateLimitGuard)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
 	@Recaptcha({ action: 'restore_password' })
 	@Patch('auth/restore-password')

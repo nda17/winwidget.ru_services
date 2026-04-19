@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto';
 import { AuthDto } from '@/auth/dto/auth.dto';
 import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
 import { PhoneLoginDto } from '@/auth/dto/phone-login.dto';
@@ -155,7 +156,29 @@ export class AuthService {
 			throw new BadRequestException('Phone already exists');
 		}
 
+		const existing = await this.prisma.verificationChallenge.findUnique({
+			where: {
+				type_purpose_value: {
+					type: VerificationChallengeType.PHONE,
+					purpose: VerificationChallengePurpose.REGISTER,
+					value: phone
+				}
+			}
+		});
+
+		if (existing) {
+			const resendAllowedAt =
+				existing.lastSentAt.getTime() +
+				this.PHONE_CODE_EXPIRATION_MINUTES * 60 * 1000;
+			if (resendAllowedAt > Date.now()) {
+				throw new BadRequestException(
+					'Phone verification resend cooldown'
+				);
+			}
+		}
+
 		const code = this.generateCode();
+		const codeHash = await hash(code, PASSWORD_SALT_ROUNDS);
 		const expiresAt = new Date(
 			Date.now() + this.PHONE_CODE_EXPIRATION_MINUTES * 60 * 1000
 		);
@@ -170,7 +193,7 @@ export class AuthService {
 			},
 			update: {
 				passwordHash: null,
-				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
+				codeHash,
 				attempts: 0,
 				expiresAt,
 				lastSentAt: new Date()
@@ -179,8 +202,9 @@ export class AuthService {
 				type: VerificationChallengeType.PHONE,
 				purpose: VerificationChallengePurpose.REGISTER,
 				value: phone,
-				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
-				expiresAt
+				codeHash,
+				expiresAt,
+				lastSentAt: new Date()
 			}
 		});
 
@@ -223,6 +247,10 @@ export class AuthService {
 
 		if (!phoneIdentity?.verifiedAt) {
 			throw new UnauthorizedException('Phone not verified');
+		}
+
+		if (!user.password) {
+			throw new UnauthorizedException('Email or password invalid');
 		}
 
 		const isValid = await compare(dto.password, user.password);
@@ -313,7 +341,7 @@ export class AuthService {
 		}
 
 		const newPassword = generator.generate({
-			length: 6,
+			length: 12,
 			uppercase: true,
 			lowercase: true,
 			numbers: true,
@@ -375,7 +403,7 @@ export class AuthService {
 	}
 
 	private generateCode() {
-		return `${Math.floor(100000 + Math.random() * 900000)}`;
+		return `${randomInt(100000, 1000000)}`;
 	}
 
 	private async validatePhoneCode(phone: string, code: string) {
@@ -435,10 +463,12 @@ export class AuthService {
 				}
 			});
 
-		if (
-			!pendingRegistration ||
-			pendingRegistration.expiresAt.getTime() < Date.now()
-		) {
+		if (!pendingRegistration) {
+			throw new UnauthorizedException('Email verification code not found');
+		}
+
+		if (pendingRegistration.expiresAt.getTime() < Date.now()) {
+			await this.deletePendingEmailRegistration(email);
 			throw new UnauthorizedException('Email verification code not found');
 		}
 
@@ -451,9 +481,7 @@ export class AuthService {
 		const isValidCode = await compare(code, pendingRegistration.codeHash);
 
 		if (!isValidCode) {
-			const nextAttempts = pendingRegistration.attempts + 1;
-
-			await this.prisma.verificationChallenge.update({
+			const updated = await this.prisma.verificationChallenge.update({
 				where: {
 					type_purpose_value: {
 						type: VerificationChallengeType.EMAIL,
@@ -461,12 +489,10 @@ export class AuthService {
 						value: email
 					}
 				},
-				data: {
-					attempts: nextAttempts
-				}
+				data: { attempts: { increment: 1 } }
 			});
 
-			if (nextAttempts >= this.EMAIL_CODE_MAX_ATTEMPTS) {
+			if (updated.attempts >= this.EMAIL_CODE_MAX_ATTEMPTS) {
 				throw new UnauthorizedException(
 					'Email verification code attempts exceeded'
 				);
@@ -576,7 +602,7 @@ export class AuthService {
 		const user = await this.userService.getUserByEmail(
 			normalizeEmail(dto.email)
 		);
-		if (!user) {
+		if (!user || !user.password) {
 			throw new UnauthorizedException('Email or password invalid');
 		}
 		const isValid = await compare(dto.password, user.password);

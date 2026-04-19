@@ -40,6 +40,12 @@ export const exchangeYandexCode = async (
 		body: body.toString()
 	});
 
+	if (!response.ok) {
+		throw new Error(
+			`Yandex token exchange HTTP error: ${response.status}`
+		);
+	}
+
 	const data = (await response.json()) as {
 		access_token?: string;
 		error?: string;
@@ -61,6 +67,11 @@ export const fetchYandexUserInfo = async (
 			headers: { Authorization: `OAuth ${accessToken}` }
 		}
 	);
+
+	if (!response.ok) {
+		throw new Error(`Yandex user info HTTP error: ${response.status}`);
+	}
+
 	return response.json() as Promise<IYandexUserInfo>;
 };
 
