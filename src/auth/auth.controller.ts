@@ -59,7 +59,7 @@ export class AuthController {
 	@UseGuards(AuthRateLimitGuard)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
-	@Recaptcha({ action: 'register' })
+	@Recaptcha({ action: 'email_register' })
 	@Post('auth/email/register')
 	async registerByEmail(
 		@Body() dto: EmailRegisterDto,
@@ -74,7 +74,7 @@ export class AuthController {
 	@UseGuards(AuthRateLimitGuard)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
-	@Recaptcha({ action: 'register' })
+	@Recaptcha({ action: 'email_resend_code' })
 	@Post('auth/email/resend-code')
 	async resendEmailCode(@Body() dto: ResendEmailCodeDto) {
 		return this.authService.resendEmailCode(dto);
