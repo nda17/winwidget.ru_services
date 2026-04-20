@@ -416,7 +416,7 @@
     #dev-info {
       font-size: 12px;
       position: absolute;
-      bottom: 10px;
+      top: 5px;
       color: rgba(255,255,255,0.35);
       letter-spacing: 0.2px;
     }

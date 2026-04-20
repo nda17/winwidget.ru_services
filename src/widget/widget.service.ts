@@ -750,7 +750,7 @@ export class WidgetService {
 					</a>
 				</div>
 				<p style="color:#999;font-size:12px;margin-top:16px;text-align:center">
-					Письмо отправлено автоматически сервисом <a href="https://winwidget.ru" style="color:#C21B84">winWidget.ru</a>
+					Письмо отправлено автоматически сервисом <a href="https://winwidget.ru" style="color:#C21B84">winwidget.ru</a>
 				</p>
 			</div>
 		`;
@@ -810,7 +810,7 @@ export class WidgetService {
 					${data.bonus ? row('Выигранный приз', `<b style="color:#4705fb">${data.bonus}</b>`) : ''}
 					${data.url ? row('Страница', `<a href="${data.url}" style="color:#4705fb">${data.url}</a>`) : ''}
 				</table>
-				<p style="color:#999;font-size:12px;margin-top:16px;text-align:center">Письмо отправлено автоматически сервисом <a href="https://winwidget.ru" style="color:#4705fb">winWidget.ru</a></p>
+				<p style="color:#999;font-size:12px;margin-top:16px;text-align:center">Письмо отправлено автоматически сервисом <a href="https://winwidget.ru" style="color:#4705fb">winwidget.ru</a></p>
 			</div>
 		`;
 	}
