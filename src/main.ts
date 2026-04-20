@@ -37,6 +37,13 @@ export const bootstrap = async () => {
 	}
 
 	app.use(cookieParser());
+	app.use('/api/widget', (req: any, res: any, next: any) => {
+		res.setHeader('Access-Control-Allow-Origin', '*');
+		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+		if (req.method === 'OPTIONS') return res.status(204).end();
+		next();
+	});
 	// Serve static widget runtime files: /widgets/wheel.js etc.
 	app.use(express.static(join(appRoot, 'public')));
 	app.useGlobalInterceptors(new RecaptchaDevLoggingInterceptor());

@@ -6,9 +6,10 @@ import {
 	NotFoundException,
 	Param,
 	Post,
-	Req
+	Req,
+	Res
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 
 function extractIp(req: Request): string {
 	const forwarded = req.headers['x-forwarded-for'];
@@ -25,7 +26,12 @@ export class WidgetApiController {
 	 * Returns widget config in drum-widget.js mapServerConfig format.
 	 */
 	@Get(':key/config')
-	async getConfig(@Param('key') key: string, @Req() req: Request) {
+	async getConfig(
+		@Param('key') key: string,
+		@Req() req: Request,
+		@Res({ passthrough: true }) res: Response
+	) {
+		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.widgetService.getPublicConfig(
 			key,
 			extractIp(req)
@@ -50,8 +56,10 @@ export class WidgetApiController {
 			name?: string;
 			bonus?: string;
 		},
-		@Req() req: Request
+		@Req() req: Request,
+		@Res({ passthrough: true }) res: Response
 	) {
+		res.setHeader('Access-Control-Allow-Origin', '*');
 		return this.widgetService.submitLeadByKey(
 			key,
 			body.phone,
