@@ -13,5 +13,3 @@ yarn-error.log*
 pnpm-debug.log*
 .DS_Store
 uploads/*
-!uploads/user-avatar
-!uploads/user-avatar/avatar-default.png

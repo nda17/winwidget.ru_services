@@ -38,13 +38,12 @@ COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nestjs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nestjs:nodejs /app/public ./public
-COPY --from=builder --chown=nestjs:nodejs /app/uploads ./uploads-seed
 COPY --from=builder --chown=nestjs:nodejs /app/package.json ./package.json
 COPY --chown=nestjs:nodejs docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
 	&& mkdir -p /app/uploads \
-	&& chown -R nestjs:nodejs /app/uploads /app/uploads-seed
+	&& chown -R nestjs:nodejs /app/uploads
 
 USER nestjs
 
