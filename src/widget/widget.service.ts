@@ -488,19 +488,15 @@ export class WidgetService {
 		const notificationEmail = config?.integrations?.email;
 		if (notificationEmail) {
 			try {
-				await this.emailService.sendEmail(
-					notificationEmail,
-					`Новая заявка с виджета "${widget.name}"`,
-					this.buildLeadNotificationHtml({
-						widgetName: widget.name,
-						phone: dto.phone,
-						email: dto.email,
-						name: dto.name,
-						bonus: dto.bonus,
-						url: dto.url,
-						date: new Date()
-					})
-				);
+				await this.emailService.sendLeadNotification(notificationEmail, {
+					widgetName: widget.name,
+					phone: dto.phone,
+					email: dto.email,
+					name: dto.name,
+					bonus: dto.bonus,
+					url: dto.url,
+					date: new Date()
+				});
 			} catch {
 				// Email errors shouldn't fail the lead submission
 			}
@@ -681,19 +677,24 @@ export class WidgetService {
 			| string
 			| undefined;
 
-		const subject = `⚠️ Лимит заявок исчерпан — виджет «${widget.name}»`;
-		const html = this.buildLimitReachedHtml(widget.name, limit);
-
 		if (accountEmail) {
 			try {
-				await this.emailService.sendEmail(accountEmail, subject, html);
+				await this.emailService.sendLimitReachedNotification(
+					accountEmail,
+					widget.name,
+					limit
+				);
 			} catch {}
 			sentTo.add(accountEmail);
 		}
 
 		if (integrationEmail && !sentTo.has(integrationEmail)) {
 			try {
-				await this.emailService.sendEmail(integrationEmail, subject, html);
+				await this.emailService.sendLimitReachedNotification(
+					integrationEmail,
+					widget.name,
+					limit
+				);
 			} catch {}
 		}
 
@@ -727,35 +728,6 @@ export class WidgetService {
 		}
 	}
 
-	private buildLimitReachedHtml(
-		widgetName: string,
-		limit: number
-	): string {
-		return `
-			<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-				<div style="background:linear-gradient(87.12deg,#470B58 1.98%,#C21B84 50.27%,#FA595E 74.42%,#F8BD31 98.56%);padding:20px 24px;border-radius:8px 8px 0 0">
-					<h2 style="color:#fff;margin:0;font-size:20px">⚠️ Лимит заявок исчерпан</h2>
-					<p style="color:rgba(255,255,255,0.85);margin:4px 0 0">Виджет «${widgetName}»</p>
-				</div>
-				<div style="background:#fff;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px;padding:24px">
-					<p style="color:#222;font-size:15px;margin:0 0 12px">
-						Ваш виджет принял <b>${limit} из ${limit}</b> доступных заявок и больше <b>не принимает новые заявки</b>.
-					</p>
-					<p style="color:#555;font-size:14px;margin:0 0 24px">
-						Чтобы продолжить сбор заявок, перейдите на платный тариф.
-					</p>
-					<a href="https://winwidget.ru/#pricing"
-						style="display:inline-block;padding:12px 28px;background:linear-gradient(87.12deg,#470B58 1.98%,#C21B84 50.27%,#FA595E 74.42%,#F8BD31 98.56%);color:#fff;text-decoration:none;border-radius:8px;font-weight:600;font-size:14px">
-						Выбрать тариф
-					</a>
-				</div>
-				<p style="color:#999;font-size:12px;margin-top:16px;text-align:center">
-					Письмо отправлено автоматически сервисом <a href="https://winwidget.ru" style="color:#C21B84">winwidget.ru</a>
-				</p>
-			</div>
-		`;
-	}
-
 	private buildTelegramMessage(data: {
 		widgetName: string;
 		phone?: string;
@@ -780,39 +752,6 @@ export class WidgetService {
 		if (data.bonus) lines.push(`🎁 <b>Приз:</b> ${data.bonus}`);
 		if (data.url) lines.push(`🌐 <b>Страница:</b> ${data.url}`);
 		return lines.join('\n');
-	}
-
-	private buildLeadNotificationHtml(data: {
-		widgetName: string;
-		phone?: string;
-		email?: string;
-		name?: string;
-		bonus?: string;
-		url?: string;
-		date: Date;
-	}): string {
-		const dateStr = data.date.toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
-		const row = (label: string, value: string) =>
-			`<tr><td style="padding:8px 12px;border-bottom:1px solid #eee;color:#666;white-space:nowrap"><b>${label}</b></td><td style="padding:8px 12px;border-bottom:1px solid #eee;color:#222">${value}</td></tr>`;
-		return `
-			<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-				<div style="background:#4705fb;padding:20px 24px;border-radius:8px 8px 0 0">
-					<h2 style="color:#fff;margin:0;font-size:20px">🎯 Новая заявка с виджета</h2>
-					<p style="color:rgba(255,255,255,0.8);margin:4px 0 0">${data.widgetName}</p>
-				</div>
-				<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
-					${row('Дата', dateStr)}
-					${data.name ? row('Имя', data.name) : ''}
-					${data.phone ? row('Телефон', data.phone) : ''}
-					${data.email ? row('Email', data.email) : ''}
-					${data.bonus ? row('Выигранный приз', `<b style="color:#4705fb">${data.bonus}</b>`) : ''}
-					${data.url ? row('Страница', `<a href="${data.url}" style="color:#4705fb">${data.url}</a>`) : ''}
-				</table>
-				<p style="color:#999;font-size:12px;margin-top:16px;text-align:center">Письмо отправлено автоматически сервисом <a href="https://winwidget.ru" style="color:#4705fb">winwidget.ru</a></p>
-			</div>
-		`;
 	}
 
 	private async getWidgetByIdAndOwner(widgetId: string, userId: string) {
