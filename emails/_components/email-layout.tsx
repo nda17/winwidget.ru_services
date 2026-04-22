@@ -176,14 +176,14 @@ const EmailLayout = ({
 						}
 
 						.ww-title {
-							font-size: 22px !important;
-							line-height: 28px !important;
+							font-size: 15px !important;
+							line-height: 20px !important;
 							margin-bottom: 8px !important;
 						}
 
 						.ww-subtitle {
-							font-size: 14px !important;
-							line-height: 21px !important;
+							font-size: 10px !important;
+							line-height: 14px !important;
 						}
 
 						.ww-content {
@@ -193,14 +193,14 @@ const EmailLayout = ({
 						.ww-body-text,
 						.ww-primary-text,
 						.ww-secondary-text {
-							font-size: 15px !important;
-							line-height: 24px !important;
+							font-size: 14px !important;
+							line-height: 22px !important;
 							margin-bottom: 16px !important;
 						}
 
 						.ww-note-text {
-							font-size: 13px !important;
-							line-height: 20px !important;
+							font-size: 12px !important;
+							line-height: 18px !important;
 							margin-top: 14px !important;
 						}
 
@@ -222,8 +222,8 @@ const EmailLayout = ({
 
 						.ww-table-label,
 						.ww-table-value {
-							font-size: 13px !important;
-							line-height: 18px !important;
+							font-size: 12px !important;
+							line-height: 17px !important;
 							padding: 11px 12px !important;
 						}
 
