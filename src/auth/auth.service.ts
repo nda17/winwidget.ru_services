@@ -262,9 +262,14 @@ export class AuthService {
 	}
 
 	async getNewTokens(refreshToken: string) {
-		const result = await this.jwt.verifyAsync<{ id: string }>(
-			refreshToken
-		);
+		let result: { id: string } | null = null;
+
+		try {
+			result = await this.jwt.verifyAsync<{ id: string }>(refreshToken);
+		} catch {
+			throw new UnauthorizedException('Invalid refresh token');
+		}
+
 		if (!result?.id) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
