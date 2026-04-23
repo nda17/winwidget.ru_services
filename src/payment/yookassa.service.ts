@@ -10,6 +10,18 @@ interface ICreatePaymentParams {
 	customerPhone?: string;
 }
 
+interface IYookassaPaymentResponse {
+	id: string;
+	status: string;
+	confirmation?: {
+		type: string;
+		confirmation_url?: string;
+	};
+	metadata?: {
+		userId?: string;
+	};
+}
+
 @Injectable()
 export class YookassaService {
 	private readonly baseUrl = 'https://api.yookassa.ru/v3';
@@ -65,7 +77,7 @@ export class YookassaService {
 			);
 		}
 
-		return data;
+		return data as IYookassaPaymentResponse;
 	}
 
 	async getPayment(yookassaId: string) {
@@ -87,10 +99,6 @@ export class YookassaService {
 			);
 		}
 
-		return data as {
-			id: string;
-			status: string;
-			metadata: { userId: string };
-		};
+		return data as IYookassaPaymentResponse;
 	}
 }

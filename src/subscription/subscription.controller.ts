@@ -1,6 +1,7 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { AdminActivateSubscriptionDto } from '@/subscription/dto/admin-activate-subscription.dto';
+import { SubscriptionExpiryService } from '@/subscription/subscription-expiry.service';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import {
 	Body,
@@ -17,7 +18,10 @@ import { Role } from '@prisma/client';
 
 @Controller('subscriptions')
 export class SubscriptionController {
-	constructor(private readonly subscriptionService: SubscriptionService) {}
+	constructor(
+		private readonly subscriptionService: SubscriptionService,
+		private readonly subscriptionExpiryService: SubscriptionExpiryService
+	) {}
 
 	@HttpCode(200)
 	@Auth()
@@ -58,5 +62,24 @@ export class SubscriptionController {
 	@Patch('admin/:userId/cancel')
 	async adminCancel(@Param('userId') userId: string) {
 		return this.subscriptionService.adminCancelSubscription(userId);
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Post('admin/run-expiry-check')
+	async runExpiryCheck() {
+		const expiredCount =
+			await this.subscriptionExpiryService.runManualCheck();
+
+		return {
+			taskId: 'subscriptionExpiryCheck',
+			title: 'Проверка истёкших подписок',
+			affectedCount: expiredCount,
+			message:
+				expiredCount > 0
+					? `Деактивировано ${expiredCount} истёкших подписок.`
+					: 'Истёкшие подписки для деактивации не найдены.',
+			executedAt: new Date().toISOString()
+		};
 	}
 }

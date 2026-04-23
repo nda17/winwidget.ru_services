@@ -39,7 +39,33 @@ export class PaymentCleanupService
 		}
 	}
 
-	private async cleanupStalePendingPayments() {
+	async runManualCleanup() {
+		const deletedCount = await this.cleanupStalePendingPayments();
+
+		this.logger.log(
+			`Manual cleanup finished: removed ${deletedCount} stale pending payment(s).`
+		);
+
+		return deletedCount;
+	}
+
+	async cleanupStalePendingPaymentsForUser(userId: string) {
+		const deletedCount = await this.cleanupStalePendingPayments({
+			userId
+		});
+
+		if (deletedCount > 0) {
+			this.logger.log(
+				`Pre-payment cleanup finished for user ${userId}: removed ${deletedCount} stale pending payment(s).`
+			);
+		}
+
+		return deletedCount;
+	}
+
+	private async cleanupStalePendingPayments(options?: {
+		userId?: string;
+	}) {
 		const staleThreshold = new Date(
 			Date.now() - this.STALE_PAYMENT_AGE_HOURS * 60 * 60 * 1000
 		);
@@ -47,7 +73,8 @@ export class PaymentCleanupService
 		const result = await this.prisma.payment.deleteMany({
 			where: {
 				status: PaymentStatus.PENDING,
-				createdAt: { lt: staleThreshold }
+				createdAt: { lt: staleThreshold },
+				...(options?.userId ? { userId: options.userId } : {})
 			}
 		});
 

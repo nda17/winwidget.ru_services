@@ -1,13 +1,19 @@
+import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
-import { PLAN_PRICES } from '@/subscription/subscription.constants';
+import {
+	PLAN_PRICES,
+	PLAN_PRIORITY
+} from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import {
 	AuthIdentityType,
 	BillingPeriod,
+	Payment,
 	PaymentStatus,
-	Plan
+	Plan,
+	SubscriptionStatus
 } from '@prisma/client';
 
 @Injectable()
@@ -18,7 +24,8 @@ export class PaymentService {
 	constructor(
 		private prisma: PrismaService,
 		private yookassa: YookassaService,
-		private subscriptionService: SubscriptionService
+		private subscriptionService: SubscriptionService,
+		private paymentCleanupService: PaymentCleanupService
 	) {}
 
 	async createPayment(
@@ -39,13 +46,31 @@ export class PaymentService {
 			throw new BadRequestException('Пользователь не найден');
 		}
 
-		const pendingPayment = await this.prisma.payment.findFirst({
-			where: { userId, status: PaymentStatus.PENDING }
-		});
+		await this.paymentCleanupService.cleanupStalePendingPaymentsForUser(
+			userId
+		);
+
+		const pendingPayment = await this.getActualPendingPayment(userId);
 
 		if (pendingPayment) {
 			throw new BadRequestException(
-				'У вас уже есть незавершённый платёж. Завершите его или дождитесь отмены'
+				'У вас уже есть незавершённый платёж. Вернитесь к нему или отмените текущую попытку на странице оплаты.'
+			);
+		}
+
+		const currentSubscription =
+			await this.subscriptionService.checkAndResetPeriod(userId);
+
+		if (
+			currentSubscription &&
+			currentSubscription.status === SubscriptionStatus.ACTIVE &&
+			PLAN_PRIORITY[currentSubscription.plan] > PLAN_PRIORITY[plan]
+		) {
+			const currentPlanLabel = this.getPlanLabel(currentSubscription.plan);
+			const requestedPlanLabel = this.getPlanLabel(plan);
+
+			throw new BadRequestException(
+				`Пока у вас активен тариф ${currentPlanLabel}, оплатить ${requestedPlanLabel} нельзя. Дождитесь окончания текущего тарифа или продлите ${currentPlanLabel}.`
 			);
 		}
 
@@ -78,11 +103,20 @@ export class PaymentService {
 			customerPhone: phoneIdentity?.value
 		});
 
+		const confirmationUrl = yookassaPayment.confirmation?.confirmation_url;
+
+		if (!confirmationUrl) {
+			throw new BadRequestException(
+				'Не удалось получить ссылку на оплату от ЮKassa'
+			);
+		}
+
 		await this.prisma.payment.create({
 			data: {
 				userId,
 				yookassaId: yookassaPayment.id,
 				amount,
+				confirmationUrl,
 				status: PaymentStatus.PENDING,
 				plan,
 				billingPeriod
@@ -94,7 +128,51 @@ export class PaymentService {
 		);
 
 		return {
-			confirmationUrl: yookassaPayment.confirmation.confirmation_url
+			confirmationUrl
+		};
+	}
+
+	async getPendingPayment(userId: string) {
+		await this.paymentCleanupService.cleanupStalePendingPaymentsForUser(
+			userId
+		);
+
+		const pendingPayment = await this.getActualPendingPayment(userId);
+
+		if (!pendingPayment || !pendingPayment.confirmationUrl) {
+			return null;
+		}
+
+		return this.serializePendingPayment(pendingPayment);
+	}
+
+	async cancelPendingPayment(userId: string) {
+		await this.paymentCleanupService.cleanupStalePendingPaymentsForUser(
+			userId
+		);
+
+		const pendingPayment = await this.getActualPendingPayment(userId);
+
+		if (!pendingPayment) {
+			throw new BadRequestException('Незавершённый платёж не найден');
+		}
+
+		await this.prisma.payment.update({
+			where: { id: pendingPayment.id },
+			data: {
+				status: PaymentStatus.CANCELLED,
+				confirmationUrl: null
+			}
+		});
+
+		this.logger.log(
+			`Pending payment cancelled locally: yookassaId=${pendingPayment.yookassaId} userId=${userId}`
+		);
+
+		return {
+			cancelled: true,
+			message: 'Незавершённый платёж отменён.',
+			cancelledAt: new Date().toISOString()
 		};
 	}
 
@@ -167,7 +245,10 @@ export class PaymentService {
 		await this.prisma.$transaction([
 			this.prisma.payment.update({
 				where: { yookassaId },
-				data: { status: PaymentStatus.SUCCEEDED }
+				data: {
+					status: PaymentStatus.SUCCEEDED,
+					confirmationUrl: null
+				}
 			})
 		]);
 
@@ -185,9 +266,74 @@ export class PaymentService {
 	private async handlePaymentCanceled(yookassaId: string) {
 		await this.prisma.payment.updateMany({
 			where: { yookassaId, status: PaymentStatus.PENDING },
-			data: { status: PaymentStatus.CANCELLED }
+			data: {
+				status: PaymentStatus.CANCELLED,
+				confirmationUrl: null
+			}
 		});
 
 		this.logger.log(`Payment cancelled: yookassaId=${yookassaId}`);
+	}
+
+	private async getActualPendingPayment(userId: string) {
+		const pendingPayment = await this.prisma.payment.findFirst({
+			where: { userId, status: PaymentStatus.PENDING },
+			orderBy: { createdAt: 'desc' }
+		});
+
+		if (!pendingPayment) {
+			return null;
+		}
+
+		return this.syncPendingPaymentWithProvider(pendingPayment);
+	}
+
+	private async syncPendingPaymentWithProvider(payment: Payment) {
+		try {
+			const realPayment = await this.yookassa.getPayment(
+				payment.yookassaId
+			);
+
+			if (realPayment.status === 'succeeded') {
+				await this.handlePaymentSucceeded(payment.yookassaId);
+				return null;
+			}
+
+			if (realPayment.status === 'canceled') {
+				await this.handlePaymentCanceled(payment.yookassaId);
+				return null;
+			}
+		} catch (error) {
+			this.logger.warn(
+				`Failed to sync payment status with ЮKassa: yookassaId=${payment.yookassaId} error=${error instanceof Error ? error.message : String(error)}`
+			);
+		}
+
+		return payment;
+	}
+
+	private serializePendingPayment(payment: Payment) {
+		return {
+			id: payment.id,
+			yookassaId: payment.yookassaId,
+			amount: payment.amount,
+			plan: payment.plan,
+			billingPeriod: payment.billingPeriod,
+			confirmationUrl: payment.confirmationUrl,
+			createdAt: payment.createdAt
+		};
+	}
+
+	private getPlanLabel(plan: Plan) {
+		switch (plan) {
+			case Plan.TRIAL:
+				return 'Тест-драйв';
+			case Plan.EASY:
+				return 'Easy';
+			case Plan.HARD:
+				return 'Hard';
+			default:
+				return plan;
+		}
 	}
 }

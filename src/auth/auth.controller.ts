@@ -1,3 +1,4 @@
+import { Auth } from '@/auth/decorators/auth.decorator';
 import { AuthService } from '@/auth/auth.service';
 import { AuthDto } from '@/auth/dto/auth.dto';
 import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
@@ -7,6 +8,7 @@ import { ResendEmailCodeDto } from '@/auth/dto/resend-email-code.dto';
 import { RestorePasswordDto } from '@/auth/dto/restore-password.dto';
 import { SendPhoneCodeDto } from '@/auth/dto/send-phone-code.dto';
 import { RefreshTokenService } from '@/auth/refresh-token.service';
+import { VerificationChallengeCleanupService } from '@/auth/verification-challenge-cleanup.service';
 import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard';
 import {
 	Body,
@@ -23,13 +25,15 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { Recaptcha } from '@nestlab/google-recaptcha';
+import { Role } from '@prisma/client';
 import { Request, Response } from 'express';
 
 @Controller()
 export class AuthController {
 	constructor(
 		private readonly authService: AuthService,
-		private readonly refreshTokenService: RefreshTokenService
+		private readonly refreshTokenService: RefreshTokenService,
+		private readonly verificationChallengeCleanupService: VerificationChallengeCleanupService
 	) {}
 
 	@UseGuards(AuthRateLimitGuard)
@@ -177,6 +181,25 @@ export class AuthController {
 		await this.authService.logout(refreshTokenFromCookies);
 		this.refreshTokenService.removeRefreshTokenFromResponse(res);
 		return true;
+	}
+
+	@HttpCode(200)
+	@Post('auth/admin/run-verification-challenge-cleanup')
+	@Auth(Role.ADMIN)
+	async runVerificationChallengeCleanup() {
+		const deletedCount =
+			await this.verificationChallengeCleanupService.runManualCleanup();
+
+		return {
+			taskId: 'verificationChallengeCleanup',
+			title: 'Очистка verification challenges',
+			affectedCount: deletedCount,
+			message:
+				deletedCount > 0
+					? `Удалено ${deletedCount} просроченных verification challenge(s).`
+					: 'Просроченные verification challenges не найдены.',
+			executedAt: new Date().toISOString()
+		};
 	}
 
 	private getClientIp(request: Request) {

@@ -33,6 +33,15 @@ export class SubscriptionExpiryService
 		}
 	}
 
+	async runManualCheck(): Promise<number> {
+		const expired = await this.expireSubscriptions();
+		this.logger.log(
+			`Manual check complete: deactivated ${expired} expired subscription(s).`
+		);
+
+		return expired;
+	}
+
 	private async expireSubscriptions(): Promise<number> {
 		const result = await this.prisma.subscription.updateMany({
 			where: {

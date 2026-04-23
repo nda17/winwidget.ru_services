@@ -8,19 +8,19 @@ datasource db {
 }
 
 model User {
-  id                 String   @id @default(cuid())
-  name               String?
-  password           String
-  avatarPath         String?
-  hashedRefreshToken String?  @map("hashed_refresh_token")
-  rights             Role[]   @default([USER])
-  authIdentities     AuthIdentity[]
+  id                     String                  @id @default(cuid())
+  name                   String?
+  password               String
+  avatarPath             String?
+  hashedRefreshToken     String?                 @map("hashed_refresh_token")
+  rights                 Role[]                  @default([USER])
+  authIdentities         AuthIdentity[]
   verificationChallenges VerificationChallenge[]
-  payments           Payment[]
-  widgets            Widget[]
-  subscription       Subscription?
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  payments               Payment[]
+  widgets                Widget[]
+  subscription           Subscription?
+  createdAt              DateTime                @default(now()) @map("created_at")
+  updatedAt              DateTime                @updatedAt @map("updated_at")
 }
 
 model Widget {
@@ -75,16 +75,17 @@ model Subscription {
 }
 
 model Payment {
-  id            String         @id @default(cuid())
-  userId        String         @map("user_id")
-  yookassaId    String         @unique @map("yookassa_id")
-  amount        String
-  status        PaymentStatus  @default(PENDING)
-  plan          Plan?
-  billingPeriod BillingPeriod? @map("billing_period")
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id              String         @id @default(cuid())
+  userId          String         @map("user_id")
+  yookassaId      String         @unique @map("yookassa_id")
+  amount          String
+  confirmationUrl String?        @map("confirmation_url")
+  status          PaymentStatus  @default(PENDING)
+  plan            Plan?
+  billingPeriod   BillingPeriod? @map("billing_period")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("payments")
@@ -107,19 +108,19 @@ model AuthIdentity {
 }
 
 model VerificationChallenge {
-  id         String           @id @default(cuid())
-  userId     String?          @map("user_id")
-  type       VerificationChallengeType
-  purpose    VerificationChallengePurpose
-  value      String
-  passwordHash String?        @map("password_hash")
-  codeHash   String           @map("code_hash")
-  attempts   Int              @default(0)
-  expiresAt  DateTime         @map("expires_at")
-  lastSentAt DateTime         @default(now()) @map("last_sent_at")
-  createdAt  DateTime         @default(now()) @map("created_at")
-  updatedAt  DateTime         @updatedAt @map("updated_at")
-  user       User?            @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id           String                       @id @default(cuid())
+  userId       String?                      @map("user_id")
+  type         VerificationChallengeType
+  purpose      VerificationChallengePurpose
+  value        String
+  passwordHash String?                      @map("password_hash")
+  codeHash     String                       @map("code_hash")
+  attempts     Int                          @default(0)
+  expiresAt    DateTime                     @map("expires_at")
+  lastSentAt   DateTime                     @default(now()) @map("last_sent_at")
+  createdAt    DateTime                     @default(now()) @map("created_at")
+  updatedAt    DateTime                     @updatedAt @map("updated_at")
+  user         User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([userId, type, purpose])
   @@unique([type, purpose, value])
@@ -174,11 +175,11 @@ enum SubscriptionStatus {
 }
 
 model SiteSettings {
-  id                String   @id @default("singleton")
-  bannerEnabled     Boolean  @default(false) @map("banner_enabled")
-  bannerText        String   @default("") @map("banner_text")
-  snowflakeEnabled  Boolean  @default(false) @map("snowflake_enabled")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  id               String   @id @default("singleton")
+  bannerEnabled    Boolean  @default(false) @map("banner_enabled")
+  bannerText       String   @default("") @map("banner_text")
+  snowflakeEnabled Boolean  @default(false) @map("snowflake_enabled")
+  updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
 }

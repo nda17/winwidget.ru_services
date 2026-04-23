@@ -18,6 +18,12 @@ export const PLAN_LIMITS = {
 	}
 } as const;
 
+export const PLAN_PRIORITY: Record<Plan, number> = {
+	[Plan.TRIAL]: 0,
+	[Plan.EASY]: 1,
+	[Plan.HARD]: 2
+};
+
 export const PLAN_PRICES: Record<Plan, Record<BillingPeriod, number>> = {
 	[Plan.TRIAL]: {
 		[BillingPeriod.MONTHLY]: 0,

@@ -1,18 +1,25 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { CreatePaymentDto } from '@/payment/dto/create-payment.dto';
+import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { PaymentService } from '@/payment/payment.service';
 import {
 	Body,
 	Controller,
+	Get,
+	HttpCode,
 	Post,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { Role } from '@prisma/client';
 
 @Controller('payments')
 export class PaymentController {
-	constructor(private readonly paymentService: PaymentService) {}
+	constructor(
+		private readonly paymentService: PaymentService,
+		private readonly paymentCleanupService: PaymentCleanupService
+	) {}
 
 	@Post('create')
 	@Auth()
@@ -32,6 +39,39 @@ export class PaymentController {
 	@Auth()
 	async verifyPayment(@CurrentUser('id') userId: string) {
 		return this.paymentService.verifyLatestPayment(userId);
+	}
+
+	@HttpCode(200)
+	@Get('pending')
+	@Auth()
+	async getPendingPayment(@CurrentUser('id') userId: string) {
+		return this.paymentService.getPendingPayment(userId);
+	}
+
+	@HttpCode(200)
+	@Post('pending/cancel')
+	@Auth()
+	async cancelPendingPayment(@CurrentUser('id') userId: string) {
+		return this.paymentService.cancelPendingPayment(userId);
+	}
+
+	@HttpCode(200)
+	@Post('admin/run-cleanup')
+	@Auth(Role.ADMIN)
+	async runCleanup() {
+		const deletedCount =
+			await this.paymentCleanupService.runManualCleanup();
+
+		return {
+			taskId: 'paymentCleanup',
+			title: 'Очистка зависших платежей',
+			affectedCount: deletedCount,
+			message:
+				deletedCount > 0
+					? `Удалено ${deletedCount} зависших платежей.`
+					: 'Зависшие платежи не найдены.',
+			executedAt: new Date().toISOString()
+		};
 	}
 
 	@Post('webhook')

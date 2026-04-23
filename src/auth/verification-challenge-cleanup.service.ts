@@ -39,6 +39,16 @@ export class VerificationChallengeCleanupService
 		}
 	}
 
+	async runManualCleanup() {
+		const deletedCount = await this.cleanupExpiredVerificationChallenges();
+
+		this.logger.log(
+			`Manual cleanup finished: removed ${deletedCount} expired verification challenge(s).`
+		);
+
+		return deletedCount;
+	}
+
 	private async cleanupExpiredVerificationChallenges() {
 		const result = await this.prisma.verificationChallenge.deleteMany({
 			where: {
