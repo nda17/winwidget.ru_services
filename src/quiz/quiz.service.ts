@@ -2,9 +2,9 @@ import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
-import { CreateWidgetDto } from '@/widget/dto/create-widget.dto';
-import { SubmitLeadDto } from '@/widget/dto/submit-lead.dto';
-import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
+import { CreateQuizDto } from '@/quiz/dto/create-quiz.dto';
+import { SubmitQuizLeadDto } from '@/quiz/dto/submit-quiz-lead.dto';
+import { UpdateQuizDto } from '@/quiz/dto/update-quiz.dto';
 import {
 	BadRequestException,
 	ForbiddenException,
@@ -17,37 +17,83 @@ import * as XLSX from 'xlsx';
 
 const DEFAULT_CONFIG = {
 	color: '#4705fb',
-	autoOpenDelay: 45,
-	spinDuration: 5,
+	bgColor: '',
+	buttonColor: '',
 	buttonSide: 'right',
 	buttonPulse: true,
 	buttonBottom: 3,
-	alreadyPlayedTitle: '🎉 Вы уже участвовали!',
-	alreadyPlayedSubtitle:
-		'Каждый посетитель может крутить колесо только один раз',
-	hideIfPlayed: false,
+	autoOpenDelay: 45,
+	title: 'Пройдите наш квиз!',
+	subtitle:
+		'Ответьте на несколько вопросов и получите персональную рекомендацию',
+	buttonText: 'Начать квиз',
+	contactTitle: 'Оставьте контакт для получения результата',
 	dataType: 'PHONE',
-	title: 'Крутите колесо!',
-	subtitle: '',
-	winMessage: 'Поздравляем! Не пропустите звонок, мы скоро свяжемся',
+	phoneRegion: 'RU',
 	privacyUrl:
 		'https://winwidget.ru/legal-documentation/consent-processing',
-	phoneRegion: 'RU',
-	buttonText: 'Крутить!',
 	filterDuplicates: false,
-	buttonColor: '',
-	spinCooldownDays: 0,
-	spinResetToken: '',
-	actionButton: null,
-	bonuses: [
-		{ name: 'Бонус #1', active: true },
-		{ name: 'Бонус #2', active: true },
-		{ name: 'Бонус #3', active: true },
-		{ name: 'Бонус #4', active: true },
-		{ name: 'Бонус #5', active: true },
-		{ name: 'Бонус #6', active: true },
-		{ name: 'Бонус #7', active: true },
-		{ name: 'Бонус #8', active: true }
+	alreadyPlayedTitle: '🎉 Вы уже проходили этот квиз!',
+	alreadyPlayedSubtitle:
+		'Каждый посетитель может пройти квиз только один раз',
+	hideIfPlayed: false,
+	quizCooldownDays: 0,
+	quizResetToken: '',
+	questions: [
+		{
+			id: 'q1',
+			text: 'Вопрос 1',
+			type: 'radio',
+			options: [
+				{ id: 'q1o1', text: 'Вариант А', scores: { r1: 1, r2: 0 } },
+				{ id: 'q1o2', text: 'Вариант Б', scores: { r1: 0, r2: 1 } }
+			]
+		},
+		{
+			id: 'q2',
+			text: 'Вопрос 2',
+			type: 'radio',
+			options: [
+				{ id: 'q2o1', text: 'Вариант А', scores: { r1: 1, r2: 0 } },
+				{ id: 'q2o2', text: 'Вариант Б', scores: { r1: 0, r2: 1 } }
+			]
+		},
+		{
+			id: 'q3',
+			text: 'Вопрос 3',
+			type: 'radio',
+			options: [
+				{ id: 'q3o1', text: 'Вариант А', scores: { r1: 1, r2: 0 } },
+				{ id: 'q3o2', text: 'Вариант Б', scores: { r1: 0, r2: 1 } }
+			]
+		},
+		{
+			id: 'q4',
+			text: 'Вопрос 4',
+			type: 'radio',
+			options: [
+				{ id: 'q4o1', text: 'Вариант А', scores: { r1: 1, r2: 0 } },
+				{ id: 'q4o2', text: 'Вариант Б', scores: { r1: 0, r2: 1 } }
+			]
+		}
+	],
+	results: [
+		{
+			id: 'r1',
+			title: 'Результат A',
+			description: 'Опишите здесь что получит клиент с таким профилем.',
+			promoCode: '',
+			buttonText: '',
+			buttonUrl: ''
+		},
+		{
+			id: 'r2',
+			title: 'Результат B',
+			description: 'Опишите здесь что получит клиент с таким профилем.',
+			promoCode: '',
+			buttonText: '',
+			buttonUrl: ''
+		}
 	],
 	integrations: {
 		email: '',
@@ -63,16 +109,16 @@ const DEFAULT_CONFIG = {
 };
 
 @Injectable()
-export class WidgetService {
+export class QuizService {
 	constructor(
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
 		private emailService: EmailService
 	) {}
 
-	async getMyWidgets(userId: string) {
+	async getMyQuizzes(userId: string) {
 		const sub = await this.subscriptionService.checkAndResetPeriod(userId);
-		const widgets = await this.prisma.widget.findMany({
+		const quizzes = await this.prisma.quiz.findMany({
 			where: { userId },
 			orderBy: { createdAt: 'desc' },
 			include: {
@@ -80,10 +126,10 @@ export class WidgetService {
 			}
 		});
 
-		return { widgets, subscription: sub };
+		return { quizzes, subscription: sub };
 	}
 
-	async createWidget(userId: string, dto: CreateWidgetDto) {
+	async createQuiz(userId: string, dto: CreateQuizDto) {
 		const check = await this.subscriptionService.isWidgetAllowed(userId);
 
 		if (!check.allowed) {
@@ -98,36 +144,31 @@ export class WidgetService {
 			throw new ForbiddenException('Создание виджета недоступно');
 		}
 
-		// Ensure subscription exists (trial for new users)
 		await this.subscriptionService.getOrCreateTrialSubscription(userId);
 
 		const publicKey = this.generatePublicKey();
 
-		return this.prisma.widget.create({
+		return this.prisma.quiz.create({
 			data: {
 				userId,
 				publicKey,
-				name: dto.name || 'Виджет',
+				name: dto.name || 'Квиз',
 				config: DEFAULT_CONFIG
 			}
 		});
 	}
 
-	async updateWidget(
-		userId: string,
-		widgetId: string,
-		dto: UpdateWidgetDto
-	) {
-		const widget = await this.getWidgetByIdAndOwner(widgetId, userId);
+	async updateQuiz(userId: string, quizId: string, dto: UpdateQuizDto) {
+		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
 
-		return this.prisma.widget.update({
-			where: { id: widget.id },
+		return this.prisma.quiz.update({
+			where: { id: quiz.id },
 			data: {
 				...(dto.name !== undefined && { name: dto.name }),
 				...(dto.isActive !== undefined && { isActive: dto.isActive }),
 				...(dto.config !== undefined && {
 					config: {
-						...(widget.config as object),
+						...(quiz.config as object),
 						...dto.config
 					}
 				})
@@ -135,39 +176,39 @@ export class WidgetService {
 		});
 	}
 
-	async deleteWidget(userId: string, widgetId: string) {
-		const widget = await this.getWidgetByIdAndOwner(widgetId, userId);
-		return this.prisma.widget.delete({ where: { id: widget.id } });
+	async deleteQuiz(userId: string, quizId: string) {
+		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
+		return this.prisma.quiz.delete({ where: { id: quiz.id } });
 	}
 
-	async getLeads(userId: string, widgetId: string, page = 1, limit = 50) {
-		await this.getWidgetByIdAndOwner(widgetId, userId);
+	async getLeads(userId: string, quizId: string, page = 1, limit = 50) {
+		await this.getQuizByIdAndOwner(quizId, userId);
 
 		const skip = (page - 1) * limit;
 		const [leads, total] = await Promise.all([
-			this.prisma.lead.findMany({
-				where: { widgetId },
+			this.prisma.quizLead.findMany({
+				where: { quizId },
 				orderBy: { createdAt: 'desc' },
 				skip,
 				take: limit
 			}),
-			this.prisma.lead.count({ where: { widgetId } })
+			this.prisma.quizLead.count({ where: { quizId } })
 		]);
 
 		return { leads, total, page, limit };
 	}
 
-	async getLeadsStats(userId: string, widgetId: string) {
-		await this.getWidgetByIdAndOwner(widgetId, userId);
+	async getLeadsStats(userId: string, quizId: string) {
+		await this.getQuizByIdAndOwner(quizId, userId);
 
 		const sub = await this.subscriptionService.checkAndResetPeriod(userId);
 		if (sub?.plan === Plan.EASY) {
 			throw new ForbiddenException('Аналитика недоступна на тарифе Easy');
 		}
 
-		const grouped = await this.prisma.lead.groupBy({
-			by: ['bonus'],
-			where: { widgetId },
+		const grouped = await this.prisma.quizLead.groupBy({
+			by: ['result'],
+			where: { quizId },
 			_count: { id: true },
 			orderBy: { _count: { id: 'desc' } }
 		});
@@ -175,7 +216,7 @@ export class WidgetService {
 		const total = grouped.reduce((sum, g) => sum + g._count.id, 0);
 
 		const stats = grouped.map(g => ({
-			bonus: g.bonus || 'Без бонуса',
+			result: g.result || 'Без результата',
 			count: g._count.id,
 			percent: total > 0 ? Math.round((g._count.id / total) * 100) : 0
 		}));
@@ -185,10 +226,10 @@ export class WidgetService {
 
 	async exportLeads(
 		userId: string,
-		widgetId: string,
+		quizId: string,
 		format: 'csv' | 'xlsx'
 	) {
-		const widget = await this.getWidgetByIdAndOwner(widgetId, userId);
+		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
 
 		const sub = await this.subscriptionService.checkAndResetPeriod(userId);
 		if (sub?.plan === Plan.EASY) {
@@ -197,18 +238,18 @@ export class WidgetService {
 			);
 		}
 
-		const leads = await this.prisma.lead.findMany({
-			where: { widgetId },
+		const leads = await this.prisma.quizLead.findMany({
+			where: { quizId },
 			orderBy: { createdAt: 'asc' }
 		});
 
-		const safeName = widget.name.replace(/[^\w\u0400-\u04FF\-]/g, '_');
+		const safeName = quiz.name.replace(/[^\wЀ-ӿ\-]/g, '_');
 
 		if (format === 'csv') {
 			return {
 				data: this.buildCsv(leads),
 				contentType: 'text/csv; charset=utf-8',
-				filename: `leads_${safeName}.csv`
+				filename: `quiz_leads_${safeName}.csv`
 			};
 		}
 
@@ -217,7 +258,7 @@ export class WidgetService {
 			Дата: new Date(lead.createdAt).toLocaleString('ru-RU'),
 			Телефон: lead.phone || lead.contact || '',
 			Email: lead.email || '',
-			Бонус: lead.bonus || '',
+			Результат: lead.result || '',
 			Страница: lead.url || ''
 		}));
 		const ws = XLSX.utils.json_to_sheet(rows);
@@ -232,52 +273,24 @@ export class WidgetService {
 			data: buf,
 			contentType:
 				'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-			filename: `leads_${safeName}.xlsx`
+			filename: `quiz_leads_${safeName}.xlsx`
 		};
 	}
 
-	private buildCsv(leads: any[]): Buffer {
-		const headers = ['№', 'Дата', 'Телефон', 'Email', 'Бонус', 'Страница'];
-		const esc = (v: any) => {
-			const s = String(v ?? '');
-			return s.includes(',') || s.includes('"') || s.includes('\n')
-				? `"${s.replace(/"/g, '""')}"`
-				: s;
-		};
-		const rows = leads.map((l, i) => [
-			i + 1,
-			new Date(l.createdAt).toLocaleString('ru-RU'),
-			l.phone || l.contact || '',
-			l.email || '',
-			l.bonus || '',
-			l.url || ''
-		]);
-		const csv = [headers, ...rows]
-			.map(r => r.map(esc).join(','))
-			.join('\r\n');
-		return Buffer.from('\uFEFF' + csv, 'utf-8');
-	}
-
-	/**
-	 * Returns widget config in the format expected by drum-widget.js mapServerConfig.
-	 * Returns null if widget not found, { isActive: false } if inactive/limit reached.
-	 */
 	async getPublicConfig(
 		publicKey: string,
 		ip?: string
 	): Promise<object | null> {
-		const widget = await this.prisma.widget.findUnique({
+		const quiz = await this.prisma.quiz.findUnique({
 			where: { publicKey },
-			include: {
-				user: { include: { subscription: true } }
-			}
+			include: { user: { include: { subscription: true } } }
 		});
 
-		if (!widget) return null;
+		if (!quiz) return null;
 
-		const config = widget.config as any;
-		const sub = widget.user.subscription;
-		const isActive = widget.isActive && sub?.status === 'ACTIVE';
+		const config = quiz.config as any;
+		const sub = quiz.user.subscription;
+		const isActive = quiz.isActive && sub?.status === 'ACTIVE';
 
 		let canAcceptLeads = isActive;
 		if (isActive && sub) {
@@ -290,128 +303,65 @@ export class WidgetService {
 			}
 		}
 
-		if (!canAcceptLeads) {
-			return { isActive: false };
-		}
+		if (!canAcceptLeads) return { isActive: false };
 
-		// IP-based played check
 		let hasPlayedByIp = false;
 		if (ip) {
-			const spinCooldownDays = config.spinCooldownDays ?? 0;
-			const spinResetToken = config.spinResetToken || '';
+			const cooldownDays = config.quizCooldownDays ?? 0;
+			const resetToken = config.quizResetToken || '';
 			const since =
-				spinCooldownDays > 0
-					? new Date(Date.now() - spinCooldownDays * 24 * 60 * 60 * 1000)
+				cooldownDays > 0
+					? new Date(Date.now() - cooldownDays * 24 * 60 * 60 * 1000)
 					: null;
-			const existing = await this.prisma.lead.findFirst({
+			const existing = await this.prisma.quizLead.findFirst({
 				where: {
-					widgetId: widget.id,
+					quizId: quiz.id,
 					ip,
-					spinResetToken,
+					quizResetToken: resetToken,
 					...(since ? { createdAt: { gte: since } } : {})
 				}
 			});
 			hasPlayedByIp = !!existing;
 		}
 
-		const dataType = (config.dataType || 'PHONE').toUpperCase();
-
 		return {
 			isActive: true,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
-			title: config.title || 'Крутите колесо!',
-			subtitle:
-				config.subtitle ||
-				(() => {
-					const dt = (config.dataType || 'PHONE').toUpperCase();
-					if (dt === 'EMAIL')
-						return 'Введите свою почту, чтобы выиграть приз';
-					if (dt === 'PHONE_AND_EMAIL')
-						return 'Введите свой номер телефона и почту, чтобы выиграть приз';
-					if (dt === 'NONE') return 'Крутите барабан, чтобы выиграть приз';
-					return 'Введите свой номер телефона, чтобы выиграть приз';
-				})(),
-			winMessage: config.winMessage || '',
-			buttonText: config.buttonText || 'Крутить!',
-			autoOpenDelay: config.autoOpenDelay || null,
-			privacyUrl: config.privacyUrl || null,
-			dataType,
-			spinDuration: config.spinDuration ?? 5,
+			buttonColor: config.buttonColor || '',
 			buttonSide: config.buttonSide || 'right',
 			buttonPulse: config.buttonPulse !== false,
 			buttonBottom: config.buttonBottom ?? 3,
 			buttonOffset: config.buttonOffset ?? 3,
-			buttonSize: config.buttonSize ?? 64,
+			buttonSize: config.buttonSize ?? 60,
+			autoOpenDelay: config.autoOpenDelay || null,
+			title: config.title || 'Пройдите наш квиз!',
+			subtitle: config.subtitle || '',
+			buttonText: config.buttonText || 'Начать квиз',
+			contactTitle:
+				config.contactTitle || 'Оставьте контакт для получения результата',
+			dataType: (config.dataType || 'PHONE').toUpperCase(),
+			phoneRegion: config.phoneRegion || 'RU',
+			privacyUrl: config.privacyUrl || null,
 			alreadyPlayedTitle:
-				config.alreadyPlayedTitle || '🎉 Вы уже участвовали!',
+				config.alreadyPlayedTitle || '🎉 Вы уже проходили этот квиз!',
 			alreadyPlayedSubtitle:
 				config.alreadyPlayedSubtitle ||
-				'Каждый посетитель может крутить колесо только один раз',
+				'Каждый посетитель может пройти квиз только один раз',
 			hideIfPlayed: config.hideIfPlayed === true,
-			buttonColor: config.buttonColor || '',
-			centerColor: config.centerColor || '#ffffff',
-			arrowColor: config.arrowColor || '#ffcc00',
-			spinCooldownDays: config.spinCooldownDays ?? 0,
-			spinResetToken: config.spinResetToken || '',
+			quizCooldownDays: config.quizCooldownDays ?? 0,
+			quizResetToken: config.quizResetToken || '',
 			hasPlayedByIp,
 			yandexMetrikaId: config?.integrations?.yandexMetrikaId || null,
 			vkPixelId: config?.integrations?.vkPixelId || null,
 			roistatEnabled: config?.integrations?.roistatEnabled === true,
-			bonuses: (config.bonuses || []) as any[]
+			questions: config.questions || [],
+			results: config.results || []
 		};
 	}
 
-	/**
-	 * Submit lead from public widget (drum-widget.js API)
-	 */
-	async submitLeadByKey(
-		key: string,
-		phone?: string,
-		email?: string,
-		name?: string,
-		bonus?: string,
-		ip?: string
-	) {
-		const contact = phone ? phone : email || name || 'unknown';
-		return this.submitLead(
-			{ key, contact, phone, email, name, bonus, url: undefined },
-			ip
-		);
-	}
-
-	async getWidgetConfig(publicKey: string) {
-		const widget = await this.prisma.widget.findUnique({
-			where: { publicKey },
-			include: {
-				user: {
-					include: { subscription: true }
-				}
-			}
-		});
-
-		if (!widget) {
-			return null;
-		}
-
-		if (!widget.isActive) return null;
-
-		const sub = widget.user.subscription;
-		if (!sub || sub.status !== 'ACTIVE') return null;
-
-		const limits = PLAN_LIMITS[sub.plan as Plan];
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return null;
-		}
-
-		return widget.config;
-	}
-
-	async submitLead(dto: SubmitLeadDto, ip?: string) {
-		const widget = await this.prisma.widget.findUnique({
+	async submitLead(dto: SubmitQuizLeadDto, ip?: string) {
+		const quiz = await this.prisma.quiz.findUnique({
 			where: { publicKey: dto.key },
 			include: {
 				user: {
@@ -423,80 +373,142 @@ export class WidgetService {
 			}
 		});
 
-		if (!widget) {
-			throw new NotFoundException('Виджет не найден');
-		}
+		if (!quiz) throw new NotFoundException('Квиз не найден');
 
-		const check = await this.subscriptionService.canSubmitLead(widget.id);
+		const check = await this.subscriptionService.canSubmitQuizLead(
+			quiz.id
+		);
 		if (!check.allowed) {
 			throw new ForbiddenException(
 				'Лимит заявок исчерпан или подписка неактивна'
 			);
 		}
 
-		const config = widget.config as any;
+		const config = quiz.config as any;
 
-		// Filter duplicates if enabled
 		if (config?.filterDuplicates) {
-			const spinResetToken = config.spinResetToken || '';
+			const resetToken = config.quizResetToken || '';
 			const orConditions: object[] = [{ contact: dto.contact }];
 			if (ip) orConditions.push({ ip });
-			const existingLead = await this.prisma.lead.findFirst({
-				where: { widgetId: widget.id, spinResetToken, OR: orConditions }
+			const existing = await this.prisma.quizLead.findFirst({
+				where: {
+					quizId: quiz.id,
+					quizResetToken: resetToken,
+					OR: orConditions
+				}
 			});
-			if (existingLead) {
+			if (existing) {
 				throw new BadRequestException(
 					'Заявка с таким контактом уже существует'
 				);
 			}
 		}
 
-		const lead = await this.prisma.lead.create({
+		// Score answers to determine result
+		const resultId = this.scoreAnswers(
+			dto.answers,
+			config.questions || [],
+			config.results || []
+		);
+
+		const lead = await this.prisma.quizLead.create({
 			data: {
-				widgetId: widget.id,
+				quizId: quiz.id,
 				contact: dto.contact,
 				phone: dto.phone,
 				email: dto.email,
-				bonus: dto.bonus,
+				answers: dto.answers as any,
+				result: resultId,
 				url: dto.url,
 				ip: ip || null,
-				spinResetToken: config.spinResetToken || ''
+				quizResetToken: config.quizResetToken || ''
 			}
 		});
 
-		await this.subscriptionService.incrementLeadCount(widget.userId);
+		await this.subscriptionService.incrementLeadCount(quiz.userId);
 
-		// Notify owner if lead limit just reached
-		const sub = widget.user.subscription;
+		const sub = quiz.user.subscription;
 		if (sub) {
 			const limits = PLAN_LIMITS[sub.plan as Plan];
 			const newCount = sub.leadsThisPeriod + 1;
 			if (!limits.unlimited && newCount === limits.maxLeadsPerPeriod) {
-				this.sendLimitReachedNotifications(widget, config, newCount).catch(
+				this.sendLimitReachedNotifications(quiz, config, newCount).catch(
 					() => {}
 				);
 			}
 		}
 
-		// Send email notification to widget owner if configured
+		// Resolve result data to return to client
+		const resultData =
+			(config.results || []).find((r: any) => r.id === resultId) || null;
+
+		await this.sendNotifications(quiz, config, dto, resultData);
+
+		return { success: true, lead, result: resultData };
+	}
+
+	private scoreAnswers(
+		answers: { questionId: string; optionIds: string[] }[],
+		questions: any[],
+		results: any[]
+	): string | null {
+		if (!results.length) return null;
+
+		const scores: Record<string, number> = {};
+		for (const r of results) scores[r.id] = 0;
+
+		for (const answer of answers) {
+			const question = questions.find(
+				(q: any) => q.id === answer.questionId
+			);
+			if (!question) continue;
+			for (const optionId of answer.optionIds) {
+				const option = question.options?.find(
+					(o: any) => o.id === optionId
+				);
+				if (!option?.scores) continue;
+				for (const [resultId, points] of Object.entries(
+					option.scores as Record<string, number>
+				)) {
+					if (resultId in scores) scores[resultId] += points;
+				}
+			}
+		}
+
+		// Winner = result with max score; on tie, first in array
+		let winner = results[0].id;
+		let maxScore = -Infinity;
+		for (const r of results) {
+			if ((scores[r.id] ?? 0) > maxScore) {
+				maxScore = scores[r.id] ?? 0;
+				winner = r.id;
+			}
+		}
+		return winner;
+	}
+
+	private async sendNotifications(
+		quiz: any,
+		config: any,
+		dto: SubmitQuizLeadDto,
+		resultData: any
+	) {
+		const resultTitle = resultData?.title || '';
+
 		const notificationEmail = config?.integrations?.email;
 		if (notificationEmail) {
 			try {
 				await this.emailService.sendLeadNotification(notificationEmail, {
-					widgetName: widget.name,
+					widgetName: quiz.name,
 					phone: dto.phone,
 					email: dto.email,
-					name: dto.name,
-					bonus: dto.bonus,
+					bonus: resultTitle,
 					url: dto.url,
 					date: new Date()
 				});
-			} catch {
-				// Email errors shouldn't fail the lead submission
-			}
+			} catch {}
 		}
 
-		// Webhook notification
 		const webhookUrl = config?.integrations?.webhookUrl;
 		if (webhookUrl) {
 			try {
@@ -504,21 +516,19 @@ export class WidgetService {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
-						name: widget.name,
+						name: quiz.name,
 						lead: dto.contact,
 						phone: dto.phone || null,
 						email: dto.email || null,
-						bonus: dto.bonus || null,
+						result: resultTitle,
+						answers: dto.answers,
 						url: dto.url || null,
 						time: new Date().toISOString()
 					})
 				});
-			} catch {
-				// Webhook errors shouldn't fail the lead submission
-			}
+			} catch {}
 		}
 
-		// Telegram notification
 		const telegramChatId = config?.integrations?.telegramChatId;
 		const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
 		if (telegramChatId && telegramBotToken) {
@@ -531,11 +541,10 @@ export class WidgetService {
 						body: JSON.stringify({
 							chat_id: telegramChatId,
 							text: this.buildTelegramMessage({
-								widgetName: widget.name,
+								quizName: quiz.name,
 								phone: dto.phone,
 								email: dto.email,
-								name: dto.name,
-								bonus: dto.bonus,
+								result: resultTitle,
 								url: dto.url,
 								date: new Date()
 							}),
@@ -543,27 +552,23 @@ export class WidgetService {
 						})
 					}
 				);
-			} catch {
-				// Telegram errors shouldn't fail the lead submission
-			}
+			} catch {}
 		}
 
-		// Bitrix24 notification
 		const bitrix24WebhookUrl = config?.integrations?.bitrix24WebhookUrl;
 		if (bitrix24WebhookUrl) {
 			try {
 				const fields: Record<string, any> = {
-					TITLE: `Заявка с виджета «${widget.name}»${dto.bonus ? ` — ${dto.bonus}` : ''}`,
+					TITLE: `Заявка с квиза «${quiz.name}»${resultTitle ? ` — ${resultTitle}` : ''}`,
 					SOURCE_ID: 'WEB',
 					COMMENTS: [
-						`Виджет: ${widget.name}`,
-						dto.bonus ? `Приз: ${dto.bonus}` : '',
+						`Квиз: ${quiz.name}`,
+						resultTitle ? `Результат: ${resultTitle}` : '',
 						dto.url ? `Страница: ${dto.url}` : ''
 					]
 						.filter(Boolean)
 						.join('\n')
 				};
-				if (dto.name) fields.NAME = dto.name;
 				if (dto.phone)
 					fields.PHONE = [{ VALUE: dto.phone, VALUE_TYPE: 'WORK' }];
 				if (dto.email)
@@ -575,17 +580,13 @@ export class WidgetService {
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ fields })
 				});
-			} catch {
-				// Bitrix24 errors shouldn't fail the lead submission
-			}
+			} catch {}
 		}
 
-		// amoCRM notification
 		const amoCrmDomain = config?.integrations?.amoCrmDomain;
 		const amoCrmToken = config?.integrations?.amoCrmToken;
 		if (amoCrmDomain && amoCrmToken) {
 			try {
-				// Normalize domain: strip protocol and trailing slash, append .amocrm.ru if needed
 				let domain = amoCrmDomain
 					.replace(/^https?:\/\//, '')
 					.replace(/\/$/, '');
@@ -604,37 +605,18 @@ export class WidgetService {
 						values: [{ value: dto.email, enum_code: 'WORK' }]
 					});
 
-				const leadNote = [
-					`Виджет: ${widget.name}`,
-					dto.bonus ? `Приз: ${dto.bonus}` : '',
-					dto.url ? `Страница: ${dto.url}` : ''
-				]
-					.filter(Boolean)
-					.join('\n');
-
 				const body: any = [
 					{
-						name: `Заявка с виджета «${widget.name}»${dto.bonus ? ` — ${dto.bonus}` : ''}`,
+						name: `Заявка с квиза «${quiz.name}»${resultTitle ? ` — ${resultTitle}` : ''}`,
 						_embedded: {
 							contacts: [
 								{
-									...(dto.name ? { first_name: dto.name } : {}),
 									...(contactFields.length
 										? { custom_fields_values: contactFields }
 										: {})
 								}
 							]
-						},
-						...(leadNote
-							? {
-									custom_fields_values: [
-										{
-											field_code: 'DESCRIPTION',
-											values: [{ value: leadNote }]
-										}
-									]
-								}
-							: {})
+						}
 					}
 				];
 
@@ -646,27 +628,19 @@ export class WidgetService {
 					},
 					body: JSON.stringify(body)
 				});
-			} catch {
-				// amoCRM errors shouldn't fail the lead submission
-			}
+			} catch {}
 		}
-
-		return { success: true, lead };
 	}
 
 	private async sendLimitReachedNotifications(
-		widget: any,
+		quiz: any,
 		config: any,
 		limit: number
 	) {
 		const sentTo = new Set<string>();
-
-		// Account email from AuthIdentity
-		const accountEmail = widget.user?.authIdentities?.[0]?.value as
+		const accountEmail = quiz.user?.authIdentities?.[0]?.value as
 			| string
 			| undefined;
-
-		// Integration email (may differ from account email)
 		const integrationEmail = config?.integrations?.email as
 			| string
 			| undefined;
@@ -675,7 +649,7 @@ export class WidgetService {
 			try {
 				await this.emailService.sendLimitReachedNotification(
 					accountEmail,
-					widget.name,
+					quiz.name,
 					limit
 				);
 			} catch {}
@@ -686,13 +660,12 @@ export class WidgetService {
 			try {
 				await this.emailService.sendLimitReachedNotification(
 					integrationEmail,
-					widget.name,
+					quiz.name,
 					limit
 				);
 			} catch {}
 		}
 
-		// Telegram
 		const telegramChatId = config?.integrations?.telegramChatId as
 			| string
 			| undefined;
@@ -709,9 +682,9 @@ export class WidgetService {
 							parse_mode: 'HTML',
 							text: [
 								`⚠️ <b>Лимит заявок исчерпан</b>`,
-								`Виджет <i>${widget.name}</i> принял последнюю заявку (${limit} из ${limit}).`,
+								`Квиз <i>${quiz.name}</i> принял последнюю заявку (${limit} из ${limit}).`,
 								``,
-								`Виджет больше не будет принимать новые заявки.`,
+								`Квиз больше не будет принимать новые заявки.`,
 								`Для продолжения работы перейдите на платный тариф:`,
 								`👉 https://winwidget.ru/#pricing`
 							].join('\n')
@@ -723,11 +696,10 @@ export class WidgetService {
 	}
 
 	private buildTelegramMessage(data: {
-		widgetName: string;
+		quizName: string;
 		phone?: string;
 		email?: string;
-		name?: string;
-		bonus?: string;
+		result?: string;
 		url?: string;
 		date: Date;
 	}): string {
@@ -735,32 +707,58 @@ export class WidgetService {
 			timeZone: 'Europe/Moscow'
 		});
 		const lines: string[] = [
-			`🎯 <b>Новая заявка с виджета</b>`,
-			`<i>${data.widgetName}</i>`,
+			`🎯 <b>Новая заявка с квиза</b>`,
+			`<i>${data.quizName}</i>`,
 			``,
 			`📅 <b>Дата:</b> ${dateStr}`
 		];
-		if (data.name) lines.push(`👤 <b>Имя:</b> ${data.name}`);
 		if (data.phone) lines.push(`📞 <b>Телефон:</b> ${data.phone}`);
 		if (data.email) lines.push(`✉️ <b>Email:</b> ${data.email}`);
-		if (data.bonus) lines.push(`🎁 <b>Приз:</b> ${data.bonus}`);
+		if (data.result) lines.push(`🏆 <b>Результат:</b> ${data.result}`);
 		if (data.url) lines.push(`🌐 <b>Страница:</b> ${data.url}`);
 		return lines.join('\n');
 	}
 
-	private async getWidgetByIdAndOwner(widgetId: string, userId: string) {
-		const widget = await this.prisma.widget.findUnique({
-			where: { id: widgetId }
+	private buildCsv(leads: any[]): Buffer {
+		const headers = [
+			'№',
+			'Дата',
+			'Телефон',
+			'Email',
+			'Результат',
+			'Страница'
+		];
+		const esc = (v: any) => {
+			const s = String(v ?? '');
+			return s.includes(',') || s.includes('"') || s.includes('\n')
+				? `"${s.replace(/"/g, '""')}"`
+				: s;
+		};
+		const rows = leads.map((l, i) => [
+			i + 1,
+			new Date(l.createdAt).toLocaleString('ru-RU'),
+			l.phone || l.contact || '',
+			l.email || '',
+			l.result || '',
+			l.url || ''
+		]);
+		const csv = [headers, ...rows]
+			.map(r => r.map(esc).join(','))
+			.join('\r\n');
+		return Buffer.from('﻿' + csv, 'utf-8');
+	}
+
+	private async getQuizByIdAndOwner(quizId: string, userId: string) {
+		const quiz = await this.prisma.quiz.findUnique({
+			where: { id: quizId }
 		});
-
-		if (!widget) throw new NotFoundException('Виджет не найден');
-		if (widget.userId !== userId)
+		if (!quiz) throw new NotFoundException('Квиз не найден');
+		if (quiz.userId !== userId)
 			throw new ForbiddenException('Нет доступа');
-
-		return widget;
+		return quiz;
 	}
 
 	private generatePublicKey(): string {
-		return randomBytes(6).toString('hex'); // 12 символов hex
+		return randomBytes(6).toString('hex');
 	}
 }

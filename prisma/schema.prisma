@@ -18,6 +18,7 @@ model User {
   verificationChallenges VerificationChallenge[]
   payments               Payment[]
   widgets                Widget[]
+  quizzes                Quiz[]
   subscription           Subscription?
   createdAt              DateTime                @default(now()) @map("created_at")
   updatedAt              DateTime                @updatedAt @map("updated_at")
@@ -37,6 +38,41 @@ model Widget {
 
   @@index([userId])
   @@map("widgets")
+}
+
+model Quiz {
+  id        String     @id @default(cuid())
+  userId    String     @map("user_id")
+  publicKey String     @unique @map("public_key")
+  name      String     @default("Квиз")
+  isActive  Boolean    @default(true) @map("is_active")
+  config    Json       @default("{}")
+  leads     QuizLead[]
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("quizzes")
+}
+
+model QuizLead {
+  id             String   @id @default(cuid())
+  quizId         String   @map("quiz_id")
+  contact        String
+  phone          String?
+  email          String?
+  answers        Json     @default("[]")
+  result         String?
+  url            String?
+  ip             String?
+  quizResetToken String?  @map("quiz_reset_token")
+  quiz           Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([quizId])
+  @@index([quizId, ip])
+  @@map("quiz_leads")
 }
 
 model Lead {

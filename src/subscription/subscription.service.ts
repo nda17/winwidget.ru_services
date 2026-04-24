@@ -136,11 +136,12 @@ export class SubscriptionService {
 		}
 
 		const limits = PLAN_LIMITS[sub.plan];
-		const widgetCount = await this.prisma.widget.count({
-			where: { userId }
-		});
+		const [widgetCount, quizCount] = await Promise.all([
+			this.prisma.widget.count({ where: { userId } }),
+			this.prisma.quiz.count({ where: { userId } })
+		]);
 
-		if (widgetCount >= limits.maxWidgets) {
+		if (widgetCount + quizCount >= limits.maxWidgets) {
 			return { allowed: false, reason: 'widget_limit_reached' };
 		}
 
@@ -161,6 +162,35 @@ export class SubscriptionService {
 
 		const userId = widget.userId;
 		const sub = await this.checkAndResetPeriod(userId);
+
+		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
+			return { allowed: false, reason: 'subscription_expired' };
+		}
+
+		const limits = PLAN_LIMITS[sub.plan];
+
+		if (
+			!limits.unlimited &&
+			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
+		) {
+			return { allowed: false, reason: 'lead_limit_reached' };
+		}
+
+		return { allowed: true };
+	}
+
+	async canSubmitQuizLead(
+		quizId: string
+	): Promise<{ allowed: boolean; reason?: string }> {
+		const quiz = await this.prisma.quiz.findUnique({
+			where: { id: quizId },
+			include: { user: { include: { subscription: true } } }
+		});
+
+		if (!quiz) return { allowed: false, reason: 'quiz_not_found' };
+		if (!quiz.isActive) return { allowed: false, reason: 'quiz_inactive' };
+
+		const sub = await this.checkAndResetPeriod(quiz.userId);
 
 		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
 			return { allowed: false, reason: 'subscription_expired' };

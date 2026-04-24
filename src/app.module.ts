@@ -9,6 +9,7 @@ import { StatisticsModule } from '@/statistics/statistics.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { UserModule } from '@/user/user.module';
 import { WidgetModule } from '@/widget/widget.module';
+import { QuizModule } from '@/quiz/quiz.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
@@ -30,6 +31,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		PaymentModule,
 		SubscriptionModule,
 		WidgetModule,
+		QuizModule,
 		SiteSettingsModule,
 		LegalPagesModule,
 		NotesModule
