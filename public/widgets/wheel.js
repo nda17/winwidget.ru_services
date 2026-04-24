@@ -1,5 +1,3 @@
-//сделать настройку ограничения попыток по ip по дням в блоке ограничения в лк пользователя, нужно при прокрутке получать ip клиента и добавить ограничение оп номеру тел
-
 (function () {
 	// Защита от двойного выполнения (React StrictMode и т.п.)
 	if (window.__winwidgetScriptRunning) {
@@ -20,16 +18,15 @@
 		}
 	})();
 
-	const isMobile = window.matchMedia('(max-width: 767px)').matches;
 	const giftBtn = document.createElement('div');
-	const giftFontSize = isMobile ? '52px' : '64px';
+	const giftFontSize = '64px';
 	giftBtn.innerHTML = `
-  <div style="
+  <div id="ww-btn-emoji" style="
     font-size:${giftFontSize};line-height:1;
     filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2));
     transform-origin:50% 100%;
   ">🎁</div>
-  <div style="
+  <div id="ww-btn-label" style="
     margin-top:6px;
     background:linear-gradient(135deg,#ffd700,#ff8c00);
     color:#1a0600;font-size:11px;font-weight:900;
@@ -494,7 +491,6 @@
       }
       #control-wrapper { max-width: 290px; gap: 12px; }
       #title-widget { font-size: clamp(1.5rem, 2vw, 2rem); }
-      #dev-info { right: 14px; }
     }
 
     @supports not (height: 100dvh) {
@@ -1408,13 +1404,24 @@
 
 		// Apply button position and pulse from config
 		_giftPulseEnabled = config.buttonPulse !== false;
+		var sz = config.buttonSize ?? 64;
+		var emojiEl = giftBtn.querySelector('#ww-btn-emoji');
+		if (emojiEl) emojiEl.style.fontSize = sz + 'px';
+		var labelEl = giftBtn.querySelector('#ww-btn-label');
+		if (labelEl) {
+			var lf = Math.max(8, Math.round((sz / 64) * 11));
+			var lph = Math.max(2, Math.round((sz / 64) * 3));
+			var lpv = Math.max(6, Math.round((sz / 64) * 12));
+			labelEl.style.fontSize = lf + 'px';
+			labelEl.style.padding = lph + 'px ' + lpv + 'px';
+		}
 		giftBtn.style.bottom = `${config.buttonBottom ?? 3}%`;
 		if (config.buttonSide === 'left') {
 			giftBtn.style.right = 'auto';
-			giftBtn.style.left = '28px';
+			giftBtn.style.left = (config.buttonOffset ?? 3) + '%';
 		} else {
 			giftBtn.style.left = 'auto';
-			giftBtn.style.right = '28px';
+			giftBtn.style.right = (config.buttonOffset ?? 3) + '%';
 		}
 
 		if (window.winwidgetAutoOpen) {
@@ -1423,7 +1430,7 @@
 			setTimeout(openWidget, 300);
 		} else {
 			// Показываем кнопку только сейчас — конфиг загружен, все проверки пройдены
-			giftBtn.style.display = '';
+			giftBtn.style.display = 'flex';
 			stopGiftAnimation();
 			startGiftAnimation();
 		}
@@ -1431,21 +1438,21 @@
 
 	/************************ Загрузка конфига с сервера ************************/
 	function mapServerConfig(server, token) {
-		const raffleBonus = (server.bonuses || [])
-			.filter(b => b.isInRaffle)
-			.sort((a, b) => a.order - b.order);
+		const color = server.color;
+		const arrowColor = server.arrowColor || '#ffcc00';
+		const dc = server.dataType;
 
+		const raffleBonus = (server.bonuses || []).filter(b => b.active);
 		const sectors =
 			raffleBonus.length > 0
-				? raffleBonus.map((bonus, i) => {
+				? raffleBonus.map((b, i) => {
 						const sectorColor =
-							bonus.color || (i % 2 === 0 ? server.color : '#ffffff');
-						const isDark = sectorColor !== '#ffffff';
+							b.color || (i % 2 === 0 ? color : '#ffffff');
 						return {
-							label: bonus.text,
-							probability: bonus.neverWin ? 0 : (bonus.probability ?? 1),
+							label: b.name,
+							probability: b.neverWin ? 0 : (b.probability ?? 1),
 							color: sectorColor,
-							textColor: isDark ? '#ffffff' : '#000000',
+							textColor: sectorColor !== '#ffffff' ? '#ffffff' : '#000000',
 							fontSize: '14'
 						};
 					})
@@ -1453,7 +1460,7 @@
 						{
 							label: 'Приз 1',
 							probability: 1,
-							color: server.color,
+							color,
 							textColor: '#ffffff',
 							fontSize: '14'
 						},
@@ -1466,69 +1473,30 @@
 						}
 					];
 
-		const dc = server.dataCollection;
 		return {
+			...server,
 			_token: token,
-			widgetColor: server.color,
-			bgColor: server.bgColor || server.color,
+			widgetColor: color,
+			bgColor: server.bgColor || color,
 			sectors,
-			centerColor: server.centerColor || '#ffffff',
 			centerSVG: null,
-			arrowColor: server.arrowColor || '#ffcc00',
-			arrowSVG: (() => {
-				const c = server.arrowColor || '#ffcc00';
-				return `<polygon points="0,12 18,5 18,19" fill="${c}" filter="url(#arrow-shadow)"/><defs><filter id="arrow-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="rgba(0,0,0,0.5)"/></filter></defs>`;
-			})(),
-			borderColor: server.color,
+			arrowSVG: `<polygon points="0,12 18,5 18,19" fill="${arrowColor}" filter="url(#arrow-shadow)"/><defs><filter id="arrow-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="rgba(0,0,0,0.5)"/></filter></defs>`,
+			borderColor: color,
 			borderWidth: 8,
-			lineColor: '#000000',
-			title: server.headline || 'Испытайте удачу',
-			subtitle:
-				server.subheadline ||
-				(() => {
-					const dc = (server.dataCollection || 'PHONE').toUpperCase();
-					if (dc === 'EMAIL')
-						return 'Введите свою почту, чтобы выиграть приз';
-					if (dc === 'PHONE_AND_EMAIL')
-						return 'Введите свой номер телефона и почту, чтобы выиграть приз';
-					if (dc === 'NONE') return 'Крутите барабан, чтобы выиграть приз';
-					return 'Введите свой номер телефона, чтобы выиграть приз';
-				})(),
-			confettiEffectActive: true,
-			confettiExplosioneEffect: true,
-			confettiFallsEffect: false,
-			winningAdviceActive: !!server.winMessage,
-			winningAdviceText: server.winMessage || '',
 			phoneFieldActive: dc === 'PHONE' || dc === 'PHONE_AND_EMAIL',
-			nameFieldActive: dc !== 'NONE',
 			emailFieldActive: dc === 'EMAIL' || dc === 'PHONE_AND_EMAIL',
+			nameFieldActive: dc !== 'NONE',
 			checkboxPolicyActive: true,
 			startBtnText: server.buttonText || 'Крутить!',
 			linkConsentText:
-				server.privacyPolicyUrl ||
+				server.privacyUrl ||
 				'https://winwidget.ru/legal-documentation/consent-processing',
-			linkPolicyText: server.privacyPolicyUrl || '#',
-			linkOffer: '#',
+			winningAdviceActive: !!server.winMessage,
+			winningAdviceText: server.winMessage || '',
 			developInfoActive: true,
 			devModeActive: false,
-			autoOpenSeconds: server.autoOpenSeconds || null,
-			spinDuration: server.spinDuration || 5,
-			buttonSide: server.buttonSide || 'right',
-			buttonPulse: server.buttonPulse !== false,
-			buttonBottom: server.buttonBottom ?? 3,
-			alreadyPlayedTitle:
-				server.alreadyPlayedTitle || '🎉 Вы уже участвовали!',
-			alreadyPlayedSubtitle:
-				server.alreadyPlayedSubtitle ||
-				'Каждый посетитель может крутить колесо только один раз',
-			hideIfPlayed: server.hideIfPlayed === true,
-			buttonColor: server.buttonColor || '',
-			spinCooldownDays: server.spinCooldownDays ?? 0,
-			spinResetToken: server.spinResetToken || '',
-			hasPlayedByIp: server.hasPlayedByIp === true,
-			yandexMetrikaId: server.yandexMetrikaId || null,
-			vkPixelId: server.vkPixelId || null,
-			roistatEnabled: server.roistatEnabled === true
+			confettiEffectActive: true,
+			autoOpenSeconds: server.autoOpenDelay
 		};
 	}
 
