@@ -27,6 +27,7 @@ export class QuizPublicController {
   </style>
 </head>
 <body>
+  <script>window.winquizAutoOpen = true;</script>
   <script src="${origin}/widgets/quiz.js" data-key="${key}" async></script>
 </body>
 </html>`;

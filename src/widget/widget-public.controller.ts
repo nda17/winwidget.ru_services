@@ -35,10 +35,10 @@ export class WidgetPublicController {
 	}
 
 	/**
-	 * Serves widget preview page: GET /page/:key
+	 * Serves widget preview page: GET /page-wheel/:key
 	 * Direct link — standalone page with the widget
 	 */
-	@Get('page/:key')
+	@Get('page-wheel/:key')
 	async serveWidgetPage(
 		@Param('key') key: string,
 		@Req() req: Request,
