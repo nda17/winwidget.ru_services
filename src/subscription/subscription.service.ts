@@ -208,6 +208,36 @@ export class SubscriptionService {
 		return { allowed: true };
 	}
 
+	async canSubmitCallbackLead(
+		callbackId: string
+	): Promise<{ allowed: boolean; reason?: string }> {
+		const callback = await this.prisma.callback.findUnique({
+			where: { id: callbackId },
+			include: { user: { include: { subscription: true } } }
+		});
+
+		if (!callback) return { allowed: false, reason: 'callback_not_found' };
+		if (!callback.isActive)
+			return { allowed: false, reason: 'callback_inactive' };
+
+		const sub = await this.checkAndResetPeriod(callback.userId);
+
+		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
+			return { allowed: false, reason: 'subscription_expired' };
+		}
+
+		const limits = PLAN_LIMITS[sub.plan];
+
+		if (
+			!limits.unlimited &&
+			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
+		) {
+			return { allowed: false, reason: 'lead_limit_reached' };
+		}
+
+		return { allowed: true };
+	}
+
 	async incrementLeadCount(userId: string) {
 		return this.prisma.subscription.update({
 			where: { userId },

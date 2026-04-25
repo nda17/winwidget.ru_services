@@ -27,9 +27,10 @@ export const bootstrap = async () => {
 			{ path: 'auth/yandex', method: RequestMethod.GET },
 			{ path: 'auth/yandex/redirect', method: RequestMethod.GET },
 			{ path: 'widget/:key', method: RequestMethod.GET },
-			{ path: 'page/:key', method: RequestMethod.GET },
+			{ path: 'page-wheel/:key', method: RequestMethod.GET },
 			{ path: 'quiz-widget/:key', method: RequestMethod.GET },
-			{ path: 'page-quiz/:key', method: RequestMethod.GET }
+			{ path: 'page-quiz/:key', method: RequestMethod.GET },
+			{ path: 'page-callback/:key', method: RequestMethod.GET }
 		]
 	});
 
@@ -47,6 +48,13 @@ export const bootstrap = async () => {
 		next();
 	});
 	app.use('/api/quiz', (req: any, res: any, next: any) => {
+		res.setHeader('Access-Control-Allow-Origin', '*');
+		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+		if (req.method === 'OPTIONS') return res.status(204).end();
+		next();
+	});
+	app.use('/api/callback', (req: any, res: any, next: any) => {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
