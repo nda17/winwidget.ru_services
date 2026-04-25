@@ -19,6 +19,7 @@ model User {
   payments               Payment[]
   widgets                Widget[]
   quizzes                Quiz[]
+  callbacks              Callback[]
   subscription           Subscription?
   createdAt              DateTime                @default(now()) @map("created_at")
   updatedAt              DateTime                @updatedAt @map("updated_at")
@@ -38,6 +39,38 @@ model Widget {
 
   @@index([userId])
   @@map("widgets")
+}
+
+model Callback {
+  id        String         @id @default(cuid())
+  userId    String         @map("user_id")
+  publicKey String         @unique @map("public_key")
+  name      String         @default("Обратный звонок")
+  isActive  Boolean        @default(true) @map("is_active")
+  config    Json           @default("{}")
+  leads     CallbackLead[]
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("callbacks")
+}
+
+model CallbackLead {
+  id           String   @id @default(cuid())
+  callbackId   String   @map("callback_id")
+  phone        String
+  timeSlot     String   @default("") @map("time_slot")
+  timezone     String   @default("") @map("timezone")
+  url          String?
+  ip           String?
+  callback     Callback @relation(fields: [callbackId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([callbackId])
+  @@index([callbackId, ip])
+  @@map("callback_leads")
 }
 
 model Quiz {
