@@ -179,27 +179,55 @@ export class PaymentService {
 	async verifyLatestPayment(userId: string) {
 		const payment = await this.prisma.payment.findFirst({
 			where: {
-				userId,
-				status: { in: [PaymentStatus.PENDING, PaymentStatus.SUCCEEDED] }
+				userId
 			},
 			orderBy: { createdAt: 'desc' }
 		});
 
 		if (!payment) {
-			throw new BadRequestException('Платёж не найден');
+			return {
+				activated: false,
+				status: 'not_found',
+				plan: null,
+				billingPeriod: null,
+				message: 'Платёж не найден'
+			};
 		}
 
 		if (payment.status === PaymentStatus.SUCCEEDED) {
-			return { activated: true };
+			return this.serializePaymentVerification(payment, true);
 		}
 
-		await this.handlePaymentSucceeded(payment.yookassaId);
+		if (payment.status === PaymentStatus.CANCELLED) {
+			return this.serializePaymentVerification(payment, false);
+		}
+
+		const realPayment = await this.yookassa.getPayment(payment.yookassaId);
+
+		if (realPayment.status === 'succeeded') {
+			await this.handlePaymentSucceeded(payment.yookassaId);
+		} else if (realPayment.status === 'canceled') {
+			await this.handlePaymentCanceled(payment.yookassaId);
+		}
 
 		const updated = await this.prisma.payment.findUnique({
 			where: { yookassaId: payment.yookassaId }
 		});
 
-		return { activated: updated?.status === PaymentStatus.SUCCEEDED };
+		if (!updated) {
+			return {
+				activated: false,
+				status: 'not_found',
+				plan: null,
+				billingPeriod: null,
+				message: 'Платёж не найден'
+			};
+		}
+
+		return this.serializePaymentVerification(
+			updated,
+			updated.status === PaymentStatus.SUCCEEDED
+		);
 	}
 
 	async handleWebhook(body: any) {
@@ -321,6 +349,33 @@ export class PaymentService {
 			billingPeriod: payment.billingPeriod,
 			confirmationUrl: payment.confirmationUrl,
 			createdAt: payment.createdAt
+		};
+	}
+
+	private serializePaymentVerification(
+		payment: Payment,
+		activated: boolean
+	) {
+		const status =
+			payment.status === PaymentStatus.SUCCEEDED
+				? 'succeeded'
+				: payment.status === PaymentStatus.CANCELLED
+					? 'cancelled'
+					: 'pending';
+
+		const message =
+			status === 'succeeded'
+				? 'Оплата подтверждена'
+				: status === 'cancelled'
+					? 'Оплата отменена или не завершена'
+					: 'Ожидаем подтверждение оплаты';
+
+		return {
+			activated,
+			status,
+			plan: payment.plan,
+			billingPeriod: payment.billingPeriod,
+			message
 		};
 	}
 
