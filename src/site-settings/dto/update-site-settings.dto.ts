@@ -18,4 +18,8 @@ export class UpdateSiteSettingsDto {
 	@IsOptional()
 	@IsBoolean()
 	snowflakeEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	paymentEnabled?: boolean;
 }

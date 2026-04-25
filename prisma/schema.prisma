@@ -215,6 +215,7 @@ model SiteSettings {
   bannerEnabled    Boolean  @default(false) @map("banner_enabled")
   bannerText       String   @default("") @map("banner_text")
   snowflakeEnabled Boolean  @default(false) @map("snowflake_enabled")
+  paymentEnabled   Boolean  @default(true) @map("payment_enabled")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
