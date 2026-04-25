@@ -182,7 +182,7 @@ export class QuizService {
 	}
 
 	async getLeads(userId: string, quizId: string, page = 1, limit = 50) {
-		await this.getQuizByIdAndOwner(quizId, userId);
+		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
 
 		const skip = (page - 1) * limit;
 		const [leads, total] = await Promise.all([
@@ -195,11 +195,16 @@ export class QuizService {
 			this.prisma.quizLead.count({ where: { quizId } })
 		]);
 
-		return { leads, total, page, limit };
+		return {
+			leads: this.normalizeLeadResults(leads, quiz.config),
+			total,
+			page,
+			limit
+		};
 	}
 
 	async getLeadsStats(userId: string, quizId: string) {
-		await this.getQuizByIdAndOwner(quizId, userId);
+		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
 
 		const sub = await this.subscriptionService.checkAndResetPeriod(userId);
 		if (sub?.plan === Plan.EASY) {
@@ -214,12 +219,24 @@ export class QuizService {
 		});
 
 		const total = grouped.reduce((sum, g) => sum + g._count.id, 0);
+		const statsByResult = new Map<string, number>();
 
-		const stats = grouped.map(g => ({
-			result: g.result || 'Без результата',
-			count: g._count.id,
-			percent: total > 0 ? Math.round((g._count.id / total) * 100) : 0
-		}));
+		for (const g of grouped) {
+			const result =
+				this.resolveResultTitle(g.result, quiz.config) || 'Без результата';
+			statsByResult.set(
+				result,
+				(statsByResult.get(result) || 0) + g._count.id
+			);
+		}
+
+		const stats = Array.from(statsByResult.entries())
+			.map(([result, count]) => ({
+				result,
+				count,
+				percent: total > 0 ? Math.round((count / total) * 100) : 0
+			}))
+			.sort((a, b) => b.count - a.count);
 
 		return { stats, total };
 	}
@@ -242,18 +259,19 @@ export class QuizService {
 			where: { quizId },
 			orderBy: { createdAt: 'asc' }
 		});
+		const normalizedLeads = this.normalizeLeadResults(leads, quiz.config);
 
 		const safeName = quiz.name.replace(/[^\wЀ-ӿ\-]/g, '_');
 
 		if (format === 'csv') {
 			return {
-				data: this.buildCsv(leads),
+				data: this.buildCsv(normalizedLeads),
 				contentType: 'text/csv; charset=utf-8',
 				filename: `quiz_leads_${safeName}.csv`
 			};
 		}
 
-		const rows = leads.map((lead: any, i: number) => ({
+		const rows = normalizedLeads.map((lead: any, i: number) => ({
 			'№': i + 1,
 			Дата: new Date(lead.createdAt).toLocaleString('ru-RU'),
 			Телефон: lead.phone || lead.contact || '',
@@ -410,6 +428,9 @@ export class QuizService {
 			config.questions || [],
 			config.results || []
 		);
+		const resultData =
+			(config.results || []).find((r: any) => r.id === resultId) || null;
+		const resultTitle = resultData?.title || resultId;
 
 		const lead = await this.prisma.quizLead.create({
 			data: {
@@ -418,7 +439,7 @@ export class QuizService {
 				phone: dto.phone,
 				email: dto.email,
 				answers: dto.answers as any,
-				result: resultId,
+				result: resultTitle,
 				url: dto.url,
 				ip: ip || null,
 				quizResetToken: config.quizResetToken || ''
@@ -437,10 +458,6 @@ export class QuizService {
 				);
 			}
 		}
-
-		// Resolve result data to return to client
-		const resultData =
-			(config.results || []).find((r: any) => r.id === resultId) || null;
 
 		await this.sendNotifications(quiz, config, dto, resultData);
 
@@ -746,6 +763,25 @@ export class QuizService {
 			.map(r => r.map(esc).join(','))
 			.join('\r\n');
 		return Buffer.from('﻿' + csv, 'utf-8');
+	}
+
+	private normalizeLeadResults<T extends { result: string | null }>(
+		leads: T[],
+		config: any
+	): T[] {
+		return leads.map(lead => ({
+			...lead,
+			result: this.resolveResultTitle(lead.result, config)
+		}));
+	}
+
+	private resolveResultTitle(result: string | null, config: any) {
+		if (!result) return null;
+
+		const results = Array.isArray(config?.results) ? config.results : [];
+		const matchedResult = results.find((item: any) => item?.id === result);
+
+		return matchedResult?.title || result;
 	}
 
 	private async getQuizByIdAndOwner(quizId: string, userId: string) {
