@@ -26,9 +26,29 @@ interface IYookassaPaymentResponse {
 export class YookassaService {
 	private readonly baseUrl = 'https://api.yookassa.ru/v3';
 
+	private getCredentials() {
+		const isProduction =
+			process.env.MODE?.trim().toLowerCase() === 'production';
+		const shopId = isProduction
+			? process.env.YOOKASSA_PRODUCTION_SHOP_ID
+			: process.env.YOOKASSA_SHOP_ID;
+		const secretKey = isProduction
+			? process.env.YOOKASSA_PRODUCTION_SECRET_KEY
+			: process.env.YOOKASSA_SECRET_KEY;
+
+		if (!shopId || !secretKey) {
+			throw new Error(
+				isProduction
+					? 'YooKassa production credentials are missing: set YOOKASSA_PRODUCTION_SHOP_ID and YOOKASSA_PRODUCTION_SECRET_KEY'
+					: 'YooKassa development credentials are missing: set YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY'
+			);
+		}
+
+		return { shopId, secretKey };
+	}
+
 	private getAuthHeader(): string {
-		const shopId = process.env.YOOKASSA_SHOP_ID!;
-		const secretKey = process.env.YOOKASSA_SECRET_KEY!;
+		const { shopId, secretKey } = this.getCredentials();
 		return `Basic ${Buffer.from(`${shopId}:${secretKey}`).toString('base64')}`;
 	}
 
