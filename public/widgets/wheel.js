@@ -1363,13 +1363,14 @@
 		overlay.addEventListener('click', closeWidget);
 
 		// Ограничение попыток (localStorage + IP)
+		let hasPlayed = false;
 		try {
 			const playedKey =
 				'winwidget_played_' +
 				config._token +
 				(config.spinResetToken ? '_' + config.spinResetToken : '');
 			const storedTs = localStorage.getItem(playedKey);
-			let hasPlayed = config.hasPlayedByIp === true;
+			hasPlayed = config.hasPlayedByIp === true;
 			if (!hasPlayed && storedTs) {
 				const cooldownMs =
 					(config.spinCooldownDays || 0) * 24 * 60 * 60 * 1000;
@@ -1398,7 +1399,7 @@
 			}
 		} catch (e) {}
 
-		if (config.autoOpenSeconds) {
+		if (config.autoOpenSeconds && !hasPlayed) {
 			setTimeout(openWidget, config.autoOpenSeconds * 1000);
 		}
 

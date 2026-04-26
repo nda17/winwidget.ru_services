@@ -84,13 +84,8 @@
 	function startBtnAnim() {
 		if (_animActive) return;
 		_animActive = true;
-		quizBtn.style.animation = [
-			'wqBounce 3s ease-in-out infinite',
-			'wqSway 4s ease-in-out infinite',
-			_pulseEnabled ? '' : ''
-		]
-			.filter(Boolean)
-			.join(',');
+		quizBtn.style.animation =
+			'wqBounce 3s ease-in-out infinite,wqSway 4s ease-in-out infinite';
 		var icon = quizBtn.querySelector('#wq-btn-icon');
 		if (icon && _pulseEnabled)
 			icon.style.animation = 'wqGlow 2.5s ease-in-out infinite';
@@ -881,6 +876,32 @@
 			qLabelEl.style.fontSize = qlf + 'px';
 			qLabelEl.style.padding = qlph + 'px ' + qlpv + 'px';
 		}
+		var _openBtnColor = cfg.openButtonColor || _accent;
+		var gradEl = quizBtn.querySelector('#wqGrad');
+		if (gradEl) {
+			var stops = gradEl.querySelectorAll('stop');
+			if (stops[0]) stops[0].setAttribute('stop-color', _openBtnColor);
+			if (stops[1]) stops[1].setAttribute('stop-color', _openBtnColor);
+		}
+		var iconEl = quizBtn.querySelector('#wq-btn-icon');
+		if (iconEl) {
+			iconEl.style.filter =
+				'drop-shadow(0 6px 20px ' +
+				hexToRgba(_openBtnColor, 0.55) +
+				') drop-shadow(0 2px 6px rgba(0,0,0,0.3))';
+		}
+		var qBtnLabel = quizBtn.querySelector('#wq-btn-label');
+		if (qBtnLabel) {
+			qBtnLabel.style.background =
+				'linear-gradient(135deg,' +
+				_openBtnColor +
+				',' +
+				_openBtnColor +
+				')';
+			qBtnLabel.style.boxShadow =
+				'0 3px 12px ' + hexToRgba(_openBtnColor, 0.5);
+		}
+
 		quizBtn.style.bottom = (cfg.buttonBottom ?? 3) + '%';
 		if (cfg.buttonSide === 'left') {
 			quizBtn.style.right = 'auto';
@@ -917,7 +938,7 @@
 			return;
 		}
 
-		if (cfg.autoOpenDelay)
+		if (cfg.autoOpenDelay && !hasPlayed)
 			setTimeout(openWidget, cfg.autoOpenDelay * 1000);
 
 		if (window.winquizAutoOpen) {

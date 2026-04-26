@@ -137,8 +137,12 @@
 		'<div id="wcb-btn-icon" style="',
 		'filter:drop-shadow(0 6px 24px rgba(71,5,251,0.6)) drop-shadow(0 2px 8px rgba(0,0,0,0.25));',
 		'transition:filter 0.4s ease,transform 0.2s cubic-bezier(.34,1.56,.64,1);',
+		'position:relative;',
 		'">',
-		'<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">',
+		'<div id="wcb-ring-1" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.35);"></div>',
+		'<div id="wcb-ring-2" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.25);"></div>',
+		'<div id="wcb-ring-3" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.15);"></div>',
+		'<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg" style="position:relative;z-index:1;display:block">',
 		'<circle cx="30" cy="30" r="30" fill="url(#wcbGrad)"/>',
 		'<circle cx="30" cy="30" r="27" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="1.5"/>',
 		'<path d="M21 19.5c0-.83.67-1.5 1.5-1.5h3.1c.4 0 .77.24.9.6l1.4 4c.14.38.03.82-.28 1.1l-1.62 1.62c1.15 2.38 3.08 4.3 5.46 5.46l1.62-1.62c.28-.3.72-.42 1.1-.28l4 1.4c.36.13.6.5.6.9V34c0 .83-.67 1.5-1.5 1.5C28.27 35.5 21 28.23 21 19.5z" fill="white" opacity="0.95"/>',
@@ -149,7 +153,8 @@
 		'</linearGradient>',
 		'</defs>',
 		'</svg>',
-		'</div>'
+		'</div>',
+		''
 	].join('');
 
 	cbBtn.style.cssText = [
@@ -170,12 +175,15 @@
 
 	var styleAnim = document.createElement('style');
 	styleAnim.textContent = [
-		'@keyframes wcbPulse{0%,100%{box-shadow:0 0 0 0 rgba(71,5,251,0.4)}70%{box-shadow:0 0 0 14px rgba(71,5,251,0)}}',
+		'@keyframes wcbRipple{0%{transform:scale(1);opacity:0.55}100%{transform:scale(2.4);opacity:0}}',
 		'@keyframes wcbShake{0%,100%{transform:translateX(0)}12%{transform:translateX(-5px)}25%{transform:translateX(5px)}37%{transform:translateX(-4px)}50%{transform:translateX(4px)}62%{transform:translateX(-2px)}75%{transform:translateX(2px)}87%{transform:translateX(-1px)}}',
 		'.wcb-field-err{border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,0.15)!important}',
 		'.wcb-shake{animation:wcbShake 420ms ease}',
 		'.wcb-err-text{color:#ef4444;font-size:11px;margin-top:5px;display:none;padding-left:2px}',
 		'.wcb-err-text.wcb-err-show{display:block}',
+		'#wcb-ring-1{animation:wcbRipple 2.4s ease-out infinite}',
+		'#wcb-ring-2{animation:wcbRipple 2.4s ease-out infinite 0.8s}',
+		'#wcb-ring-3{animation:wcbRipple 2.4s ease-out infinite 1.6s}',
 		'#wcb-btn-icon:hover{transform:scale(1.1)!important}',
 		'#wcb-bubble:hover{opacity:0.95!important}',
 		'#wcb-bubble-close:hover{color:#888!important}',
@@ -261,10 +269,8 @@
 		if (!cfg) return;
 		var side = cfg.buttonSide === 'left' ? 'left' : 'right';
 		var opp = side === 'left' ? 'right' : 'left';
-		var bottom = (cfg.buttonBottom || 3) * 16;
-		var offset = (cfg.buttonOffset || 3) * 16;
-		cbBtn.style.bottom = bottom + 'px';
-		cbBtn.style[side] = offset + 'px';
+		cbBtn.style.bottom = (cfg.buttonBottom || 3) + '%';
+		cbBtn.style[side] = (cfg.buttonOffset || 3) + '%';
 		cbBtn.style[opp] = 'auto';
 	}
 
@@ -307,7 +313,17 @@
 		if (!rgb) return;
 		var svgGrad = icon.querySelector('#wcbGrad');
 		if (svgGrad) {
-			svgGrad.children[0].setAttribute('stop-color', color);
+			var r0 = Math.round(rgb.r + (255 - rgb.r) * 0.3);
+			var g0 = Math.round(rgb.g + (255 - rgb.g) * 0.15);
+			var b0 = Math.round(rgb.b + (255 - rgb.b) * 0.05);
+			var stop0 =
+				'#' +
+				[r0, g0, b0]
+					.map(function (v) {
+						return ('0' + Math.min(255, v).toString(16)).slice(-2);
+					})
+					.join('');
+			svgGrad.children[0].setAttribute('stop-color', stop0);
 			svgGrad.children[1].setAttribute('stop-color', color);
 		}
 		var glowColor = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',0.6)';
@@ -315,6 +331,13 @@
 			'drop-shadow(0 6px 24px ' +
 			glowColor +
 			') drop-shadow(0 2px 8px rgba(0,0,0,0.25))';
+		var ringBase = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',';
+		var r1 = document.getElementById('wcb-ring-1');
+		var r2 = document.getElementById('wcb-ring-2');
+		var r3 = document.getElementById('wcb-ring-3');
+		if (r1) r1.style.background = ringBase + '0.35)';
+		if (r2) r2.style.background = ringBase + '0.25)';
+		if (r3) r3.style.background = ringBase + '0.15)';
 	}
 
 	// ─── Build modal content ──────────────────────────────────────────────────
@@ -764,7 +787,14 @@
 				}
 			}
 
-			if (cfg.color) applyColor(cfg.color);
+			applyColor(cfg.openButtonColor || cfg.color || '#4705fb');
+
+			if (cfg.buttonPulse === false) {
+				['wcb-ring-1', 'wcb-ring-2', 'wcb-ring-3'].forEach(function (id) {
+					var el = document.getElementById(id);
+					if (el) el.style.display = 'none';
+				});
+			}
 
 			if (cfg.bgColor) modal.style.background = cfg.bgColor;
 
@@ -786,7 +816,8 @@
 			}
 
 			if (bubbleEl) {
-				bubbleEl.addEventListener('click', function () {
+				bubbleEl.addEventListener('click', function (e) {
+					e.stopPropagation();
 					hideBubble();
 					openModal();
 				});
@@ -804,27 +835,6 @@
 						});
 					});
 				}, 2000);
-			}
-
-			if (cfg.buttonPulse) {
-				var pulseStyle = document.createElement('style');
-				pulseStyle.textContent =
-					'#wcb-pulse-ring{animation:wcbPulse 2s cubic-bezier(0.66,0,0,1) infinite}';
-				document.head.appendChild(pulseStyle);
-				var ring = document.createElement('div');
-				ring.id = 'wcb-pulse-ring';
-				css(ring, {
-					position: 'absolute',
-					width: size + 'px',
-					height: size + 'px',
-					borderRadius: '50%',
-					border: '3px solid ' + (cfg.color || '#4705fb'),
-					boxSizing: 'border-box',
-					pointerEvents: 'none'
-				});
-				var firstChild = cbBtn.querySelector('#wcb-btn-icon');
-				if (firstChild) firstChild.style.position = 'relative';
-				cbBtn.insertBefore(ring, cbBtn.firstChild);
 			}
 
 			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;

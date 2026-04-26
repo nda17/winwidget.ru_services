@@ -238,6 +238,7 @@ export class CallbackService {
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
 			buttonColor: config.buttonColor || '',
+			openButtonColor: config.openButtonColor || '',
 			buttonSide: config.buttonSide || 'right',
 			buttonPulse: config.buttonPulse !== false,
 			buttonBottom: config.buttonBottom ?? 3,
