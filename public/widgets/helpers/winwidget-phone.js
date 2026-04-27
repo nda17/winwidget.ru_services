@@ -1,150 +1,115 @@
 (function () {
 	'use strict';
-
 	if (window.winwidgetPhone) return;
-
-	var currentScript = document.currentScript;
-	var BASE_URL = (function () {
-		try {
-			var src = new URL(
-				currentScript && currentScript.src
-					? currentScript.src
-					: location.href
-			);
-			src.pathname = src.pathname.replace(/\/[^/]*$/, '/');
-			src.search = '';
-			src.hash = '';
-			return src.toString();
-		} catch (e) {
-			return 'https://winwidget.ru/widgets/';
-		}
-	})();
-
-	var loadingPromise = null;
-
-	function loadScript(src) {
-		return new Promise(function (resolve, reject) {
-			var existing = document.querySelector('script[src="' + src + '"]');
-			if (existing) {
-				existing.addEventListener('load', resolve, { once: true });
-				existing.addEventListener('error', reject, { once: true });
-				if (window.libphonenumber) resolve();
+	var o = document.currentScript,
+		d = (function () {
+			try {
+				var e = new URL(o && o.src ? o.src : location.href);
+				return (
+					(e.pathname = e.pathname.replace(/\/[^/]*$/, '/')),
+					(e.search = ''),
+					(e.hash = ''),
+					e.toString()
+				);
+			} catch (n) {
+				return 'https://winwidget.ru/widgets/';
+			}
+		})(),
+		u = null;
+	function f(e) {
+		return new Promise(function (n, r) {
+			var t = document.querySelector('script[src="' + e + '"]');
+			if (t) {
+				(t.addEventListener('load', n, { once: !0 }),
+					t.addEventListener('error', r, { once: !0 }),
+					window.libphonenumber && n());
 				return;
 			}
-
-			var script = document.createElement('script');
-			script.src = src;
-			script.async = true;
-			script.onload = resolve;
-			script.onerror = reject;
-			document.head.appendChild(script);
+			var i = document.createElement('script');
+			((i.src = e),
+				(i.async = !0),
+				(i.onload = n),
+				(i.onerror = r),
+				document.head.appendChild(i));
 		});
 	}
-
-	function load() {
-		if (window.libphonenumber)
-			return Promise.resolve(window.libphonenumber);
-		if (!loadingPromise) {
-			loadingPromise = loadScript(BASE_URL + 'libphonenumber-min.js').then(
-				function () {
-					if (!window.libphonenumber) {
-						throw new Error('libphonenumber-js is not available');
-					}
-					return window.libphonenumber;
-				}
-			);
-		}
-		return loadingPromise;
+	function h() {
+		return window.libphonenumber
+			? Promise.resolve(window.libphonenumber)
+			: (u ||
+					(u = f(d + 'libphonenumber-min.js').then(function () {
+						if (!window.libphonenumber)
+							throw new Error('libphonenumber-js is not available');
+						return window.libphonenumber;
+					})),
+				u);
 	}
-
-	function normalizeInitialValue(value) {
-		var raw = String(value || '').trim();
-		var digits = raw.replace(/\D/g, '');
-
-		if (raw.indexOf('+') === 0) return raw;
-		if (raw.indexOf('8') === 0 && digits.length >= 10) {
-			return '7' + digits.slice(1);
-		}
-
-		return raw;
+	function l(e) {
+		var n = String(e || '').trim(),
+			r = n.replace(/\D/g, '');
+		return n.indexOf('+') === 0
+			? n
+			: n.indexOf('8') === 0 && r.length >= 10
+				? '7' + r.slice(1)
+				: n;
 	}
-
-	function format(value) {
-		var lib = window.libphonenumber;
-		var raw = normalizeInitialValue(value);
-		if (!lib || !raw) return raw;
-
+	function c(e) {
+		var n = window.libphonenumber,
+			r = l(e);
+		if (!n || !r) return r;
 		try {
-			var formatter =
-				raw.indexOf('+') === 0
-					? new lib.AsYouType()
-					: new lib.AsYouType('RU');
-			return formatter.input(raw);
-		} catch (e) {
-			return raw;
+			var t =
+				r.indexOf('+') === 0 ? new n.AsYouType() : new n.AsYouType('RU');
+			return t.input(r);
+		} catch (i) {
+			return r;
 		}
 	}
-
-	function parse(value) {
-		var lib = window.libphonenumber;
-		var raw = normalizeInitialValue(value);
-		if (!lib || !raw) return null;
-
+	function a(e) {
+		var n = window.libphonenumber,
+			r = l(e);
+		if (!n || !r) return null;
 		try {
-			var phone = lib.parsePhoneNumberFromString(
-				raw,
-				raw.indexOf('+') === 0 ? undefined : 'RU'
+			var t = n.parsePhoneNumberFromString(
+				r,
+				r.indexOf('+') === 0 ? void 0 : 'RU'
 			);
-			return phone && phone.isValid() ? phone.number : null;
-		} catch (e) {
+			return t && t.isValid() ? t.number : null;
+		} catch (i) {
 			return null;
 		}
 	}
-
-	function attach(input, options) {
-		options = options || {};
-		if (!input) return null;
-
-		input.placeholder = options.placeholder || '+7 999 123-45-67';
-		input.setAttribute('inputmode', 'tel');
-		input.setAttribute('autocomplete', 'tel');
-
-		function update() {
-			var startAtEnd = input.selectionStart === input.value.length;
-			input.value = format(input.value);
-			if (startAtEnd) {
+	function w(e, n) {
+		if (((n = n || {}), !e)) return null;
+		((e.placeholder = n.placeholder || '+7 999 123-45-67'),
+			e.setAttribute('inputmode', 'tel'),
+			e.setAttribute('autocomplete', 'tel'));
+		function r() {
+			var t = e.selectionStart === e.value.length;
+			if (((e.value = c(e.value)), t))
 				try {
-					input.setSelectionRange(input.value.length, input.value.length);
-				} catch (e) {}
-			}
-			if (typeof options.onChange === 'function') {
-				options.onChange(parse(input.value));
-			}
+					e.setSelectionRange(e.value.length, e.value.length);
+				} catch (i) {}
+			typeof n.onChange == 'function' && n.onChange(a(e.value));
 		}
-
-		input.addEventListener('input', update);
-		input.addEventListener('paste', function () {
-			setTimeout(update, 0);
-		});
-
-		return {
-			getNumber: function () {
-				return parse(input.value);
-			},
-			isValid: function () {
-				return Boolean(parse(input.value));
-			},
-			format: update,
-			destroy: function () {
-				input.removeEventListener('input', update);
+		return (
+			e.addEventListener('input', r),
+			e.addEventListener('paste', function () {
+				setTimeout(r, 0);
+			}),
+			{
+				getNumber: function () {
+					return a(e.value);
+				},
+				isValid: function () {
+					return !!a(e.value);
+				},
+				format: r,
+				destroy: function () {
+					e.removeEventListener('input', r);
+				}
 			}
-		};
+		);
 	}
-
-	window.winwidgetPhone = {
-		load: load,
-		format: format,
-		parse: parse,
-		attach: attach
-	};
+	window.winwidgetPhone = { load: h, format: c, parse: a, attach: w };
 })();

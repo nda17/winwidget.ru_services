@@ -1,63 +1,3 @@
-Черновик документации
-
-Внешний URL (Webhook)
-
-Сервер делает POST на указанный URL после каждого лида
-Данные: name, lead, phone, email, bonus, url, time
-Telegram
-
-Используется бот с токеном из TELEGRAM_BOT_TOKEN в .env сервера
-Пользователь вводит свой Chat ID (узнать через @getmyid_bot)
-Красивое HTML-сообщение с иконками и всеми данными лида
-Яндекс Метрика
-
-Пользователь вводит ID счётчика
-При открытии виджета → ym(id, 'reachGoal', 'ip3_open')
-При отправке заявки → ym(id, 'reachGoal', 'ip3_send')
-VK Ретаргетинг
-
-Пользователь вводит ID пикселя (формат VK-RTRG-...)
-При открытии → VK.Goal('ip3*open')
-При отправке → VK.Goal('ip3_send')
-Не забудь добавить TELEGRAM_BOT_TOKEN=ваш*токен в .env на сервере и создать бота через @BotFather.
-
-как протестировать
-Тестирование интеграций
-
-1. Внешний URL (Webhook)
-   Используй webhook.site — бесплатный сервис для перехвата запросов:
-
-Открой webhook.site → скопируй уникальный URL
-Вставь его в поле «Внешний URL» в настройках виджета → сохрани
-Заполни и отправь форму виджета
-На сайте webhook.site увидишь POST-запрос с данными лида в реальном времени 2. Telegram
-Добавь токен в .env сервера:
-
-TELEGRAM*BOT_TOKEN=токен*от_botfather
-Напиши боту /start в Telegram
-Узнай свой Chat ID через @getmyid_bot
-Вставь ID в поле настроек виджета → сохрани
-Отправь тестовую заявку → должно прийти сообщение
-Можно протестировать токен и chat_id напрямую через curl:
-
-curl -X POST "https://api.telegram.org/botТВОЙ_ТОКЕН/sendMessage" \
- -H "Content-Type: application/json" \
- -d '{"chat_id":"ТВОЙ_ID","text":"тест"}' 3. Яндекс Метрика
-Открой виджет на странице с установленным счётчиком
-В Яндекс Метрике → Отчёты → Конверсии — там должны появиться цели ip3_open и ip3_send
-Или в консоли браузера проверь что функция доступна:
-
-typeof ym // должно быть "function" 4. VK Пиксель
-В консоли браузера на странице с пикселем:
-
-typeof VK !== 'undefined' && typeof VK.Goal === 'function' // должно быть true
-Быстрый тест сервера локально
-Если сервер запущен локально — можно вызвать API напрямую:
-
-curl -X POST "http://localhost:4200/api/widget/ПУБЛИЧНЫЙ_КЛЮЧ/lead" \
- -H "Content-Type: application/json" \
- -d '{"phone":"+79001234567","name":"Тест","bonus":"Скидка 10%"}'
-
 # winwidget.ru_server
 
 Backend_winwidget.ru
@@ -67,6 +7,39 @@ Backend_winwidget.ru
 ```bash
 npx prisma migrate deploy
 npx prisma generate
+```
+
+## Runtime-скрипты виджетов
+
+Браузерные скрипты, которые отдаются клиентским сайтам по адресам
+`/widgets/wheel.js`, `/widgets/quiz.js`, `/widgets/callback.js` и
+`/widgets/timer.js`, собираются из исходников в `widgets-src`.
+
+Правило разработки:
+
+- редактировать читаемые файлы в `widgets-src`;
+- не править руками минифицированные файлы в `public/widgets`;
+- после правок запускать сборку виджетов;
+- коммитить и `widgets-src`, и обновлённые `public/widgets`.
+
+```bash
+pnpm run build:widgets
+```
+
+Команда минифицирует runtime-файлы через `esbuild`, копирует готовые
+assets и запускает синтаксическую проверку generated JS через
+`node --check`.
+
+Отдельно можно запустить только проверку:
+
+```bash
+pnpm run build:widgets:check
+```
+
+Полная production-сборка backend тоже включает этот шаг:
+
+```bash
+pnpm build
 ```
 
 ### Если `prisma migrate dev` падает с `P3014`

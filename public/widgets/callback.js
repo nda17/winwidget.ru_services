@@ -1,231 +1,205 @@
 (function () {
 	'use strict';
-
 	if (window.__wincallbackScriptRunning) return;
-	window.__wincallbackScriptRunning = true;
-
-	var _currentScript = document.currentScript;
-
-	var API_BASE = (function () {
+	window.__wincallbackScriptRunning = !0;
+	var h = document.currentScript,
+		O = (function () {
+			try {
+				var e = new URL(h && h.src ? h.src : location.href);
+				return e.origin + '/api';
+			} catch (t) {
+				return 'https://winwidget.ru/api';
+			}
+		})(),
+		T = (h && h.getAttribute('data-key')) || '';
+	if (!T) return;
+	function V(e) {
 		try {
-			var src = new URL(
-				_currentScript && _currentScript.src
-					? _currentScript.src
-					: location.href
+			var t = new URL(h && h.src ? h.src : location.href);
+			return (
+				(t.pathname = t.pathname.replace(/\/[^/]*$/, '/' + e)),
+				(t.search = ''),
+				(t.hash = ''),
+				t.toString()
 			);
-			return src.origin + '/api';
-		} catch (e) {
-			return 'https://winwidget.ru/api';
-		}
-	})();
-
-	var KEY =
-		(_currentScript && _currentScript.getAttribute('data-key')) || '';
-	if (!KEY) return;
-
-	function getWidgetAssetUrl(fileName) {
-		try {
-			var src = new URL(
-				_currentScript && _currentScript.src
-					? _currentScript.src
-					: location.href
-			);
-			src.pathname = src.pathname.replace(/\/[^/]*$/, '/' + fileName);
-			src.search = '';
-			src.hash = '';
-			return src.toString();
-		} catch (e) {
-			return 'https://winwidget.ru/widgets/' + fileName;
+		} catch (n) {
+			return 'https://winwidget.ru/widgets/' + e;
 		}
 	}
-
-	function loadExternalScript(src) {
-		return new Promise(function (resolve, reject) {
-			var existing = document.querySelector('script[src="' + src + '"]');
-			if (existing) {
-				existing.addEventListener('load', resolve, { once: true });
-				existing.addEventListener('error', reject, { once: true });
-				if (window.winwidgetPhone) resolve();
+	function $(e) {
+		return new Promise(function (t, n) {
+			var o = document.querySelector('script[src="' + e + '"]');
+			if (o) {
+				(o.addEventListener('load', t, { once: !0 }),
+					o.addEventListener('error', n, { once: !0 }),
+					window.winwidgetPhone && t());
 				return;
 			}
-			var script = document.createElement('script');
-			script.src = src;
-			script.async = true;
-			script.onload = function () {
-				resolve();
-			};
-			script.onerror = reject;
-			document.head.appendChild(script);
+			var r = document.createElement('script');
+			((r.src = e),
+				(r.async = !0),
+				(r.onload = function () {
+					t();
+				}),
+				(r.onerror = n),
+				document.head.appendChild(r));
 		});
 	}
-
-	function ensurePhoneHelper() {
-		if (window.winwidgetPhone) return window.winwidgetPhone.load();
-		return loadExternalScript(
-			getWidgetAssetUrl('helpers/winwidget-phone.js')
-		)
-			.then(function () {
-				return window.winwidgetPhone ? window.winwidgetPhone.load() : null;
-			})
-			.catch(function (e) {
-				console.warn('[wincallback] Failed to load phone formatter:', e);
-				return null;
-			});
+	function J() {
+		return window.winwidgetPhone
+			? window.winwidgetPhone.load()
+			: $(V('helpers/winwidget-phone.js'))
+					.then(function () {
+						return window.winwidgetPhone
+							? window.winwidgetPhone.load()
+							: null;
+					})
+					.catch(function (e) {
+						return (
+							console.warn(
+								'[wincallback] Failed to load phone formatter:',
+								e
+							),
+							null
+						);
+					});
 	}
-
-	var AUTO_OPEN = Boolean(
-		window.wincallbackAutoOpen ||
-		window.winwidgetCallbackAutoOpen ||
-		(window.winwidget && window.winwidget.autoOpen)
-	);
-
-	// ─── Phone mask ───────────────────────────────────────────────────────────
-
-	var MASKS = {
-		RU: {
-			mask: '+7 (###) ###-##-##',
-			placeholder: '+7 (___) ___-__-__',
-			digits: 10
-		},
-		BY: {
-			mask: '+375 (##) ###-##-##',
-			placeholder: '+375 (__) ___-__-__',
-			digits: 9
-		},
-		KZ: {
-			mask: '+7 (###) ###-##-##',
-			placeholder: '+7 (___) ___-__-__',
-			digits: 10
-		},
-		UA: {
-			mask: '+380 (##) ###-##-##',
-			placeholder: '+380 (__) ___-__-__',
-			digits: 9
-		},
-		UZ: {
-			mask: '+998 (##) ###-##-##',
-			placeholder: '+998 (__) ___-__-__',
-			digits: 9
-		},
-		INT: {
-			mask: '+##############',
-			placeholder: '+______________',
-			digits: 14
-		}
-	};
-
-	function applyMask(raw, maskDef) {
-		var digits = raw.replace(/\D/g, '');
-		if (maskDef === MASKS.RU || maskDef === MASKS.KZ) {
-			if (digits.startsWith('8')) digits = '7' + digits.slice(1);
-			if (digits.startsWith('7')) digits = digits.slice(1);
-		}
-		if (maskDef === MASKS.BY && digits.startsWith('375'))
-			digits = digits.slice(3);
-		if (maskDef === MASKS.UA && digits.startsWith('380'))
-			digits = digits.slice(3);
-		if (maskDef === MASKS.UZ && digits.startsWith('998'))
-			digits = digits.slice(3);
-
-		var masked = maskDef.mask;
-		var i = 0;
-		masked = masked.replace(/#/g, function () {
-			return i < digits.length ? digits[i++] : '_';
-		});
-		return masked;
+	var m = !!(
+			window.wincallbackAutoOpen ||
+			window.winwidgetCallbackAutoOpen ||
+			(window.winwidget && window.winwidget.autoOpen)
+		),
+		C = {
+			RU: {
+				mask: '+7 (###) ###-##-##',
+				placeholder: '+7 (___) ___-__-__',
+				digits: 10
+			},
+			BY: {
+				mask: '+375 (##) ###-##-##',
+				placeholder: '+375 (__) ___-__-__',
+				digits: 9
+			},
+			KZ: {
+				mask: '+7 (###) ###-##-##',
+				placeholder: '+7 (___) ___-__-__',
+				digits: 10
+			},
+			UA: {
+				mask: '+380 (##) ###-##-##',
+				placeholder: '+380 (__) ___-__-__',
+				digits: 9
+			},
+			UZ: {
+				mask: '+998 (##) ###-##-##',
+				placeholder: '+998 (__) ___-__-__',
+				digits: 9
+			},
+			INT: {
+				mask: '+##############',
+				placeholder: '+______________',
+				digits: 14
+			}
+		};
+	function le(e, t) {
+		var n = e.replace(/\D/g, '');
+		((t === C.RU || t === C.KZ) &&
+			(n.startsWith('8') && (n = '7' + n.slice(1)),
+			n.startsWith('7') && (n = n.slice(1))),
+			t === C.BY && n.startsWith('375') && (n = n.slice(3)),
+			t === C.UA && n.startsWith('380') && (n = n.slice(3)),
+			t === C.UZ && n.startsWith('998') && (n = n.slice(3)));
+		var o = t.mask,
+			r = 0;
+		return (
+			(o = o.replace(/#/g, function () {
+				return r < n.length ? n[r++] : '_';
+			})),
+			o
+		);
 	}
-
-	function getRawDigits(masked, maskDef) {
-		var prefix = maskDef.mask.split('#')[0];
-		var prefixDigits = prefix.replace(/\D/g, '');
-		var body = masked.replace(/\D/g, '');
-		if (body.startsWith(prefixDigits))
-			body = body.slice(prefixDigits.length);
-		return body.replace(/_/g, '');
+	function Q(e, t) {
+		var n = t.mask.split('#')[0],
+			o = n.replace(/\D/g, ''),
+			r = e.replace(/\D/g, '');
+		return (
+			r.startsWith(o) && (r = r.slice(o.length)),
+			r.replace(/_/g, '')
+		);
 	}
-
-	function isPhoneComplete(masked, maskDef) {
-		return getRawDigits(masked, maskDef).length >= maskDef.digits;
+	function se(e, t) {
+		return Q(e, t).length >= t.digits;
 	}
-
-	// ─── State ────────────────────────────────────────────────────────────────
-
-	var cfg = null;
-	var isOpen = false;
-	var submitted = false;
-
-	// ─── Floating button ──────────────────────────────────────────────────────
-
-	var cbBtn = document.createElement('div');
-	cbBtn.id = 'callback-widget-button';
-	cbBtn.innerHTML = [
-		'<div id="wcb-bubble" style="',
-		'display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);',
-		'background:#fff;border-radius:18px;padding:12px 34px 12px 16px;',
-		'width:172px;box-sizing:border-box;',
-		'border:1px solid rgba(71,5,251,0.12);',
-		'box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);',
-		'cursor:pointer;opacity:0;',
-		'transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);',
-		'font-family:system-ui,-apple-system,sans-serif;',
-		'">',
-		'<button id="wcb-bubble-close" style="',
-		'position:absolute;top:7px;right:8px;background:none;border:none;',
-		'font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;',
-		'display:flex;align-items:center;justify-content:center;',
-		'width:16px;height:16px;border-radius:50%;',
-		'">✕</button>',
-		'<p id="wcb-bubble-text" style="',
-		'margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;',
-		'"></p>',
-		'<span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>',
-		'<div id="wcb-bubble-tail" style="',
-		'position:absolute;top:50%;transform:translateY(-50%);',
-		'width:0;height:0;',
-		'border-top:7px solid transparent;border-bottom:7px solid transparent;',
-		'"></div>',
-		'</div>',
-		'<div id="wcb-btn-icon" style="',
-		'filter:drop-shadow(0 6px 24px rgba(71,5,251,0.6)) drop-shadow(0 2px 8px rgba(0,0,0,0.25));',
-		'transition:filter 0.4s ease,transform 0.2s cubic-bezier(.34,1.56,.64,1);',
-		'position:relative;',
-		'">',
-		'<div id="wcb-ring-1" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.35);"></div>',
-		'<div id="wcb-ring-2" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.25);"></div>',
-		'<div id="wcb-ring-3" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.15);"></div>',
-		'<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg" style="position:relative;z-index:1;display:block">',
-		'<circle cx="30" cy="30" r="30" fill="url(#wcbGrad)"/>',
-		'<circle cx="30" cy="30" r="27" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="1.5"/>',
-		'<path d="M21 19.5c0-.83.67-1.5 1.5-1.5h3.1c.4 0 .77.24.9.6l1.4 4c.14.38.03.82-.28 1.1l-1.62 1.62c1.15 2.38 3.08 4.3 5.46 5.46l1.62-1.62c.28-.3.72-.42 1.1-.28l4 1.4c.36.13.6.5.6.9V34c0 .83-.67 1.5-1.5 1.5C28.27 35.5 21 28.23 21 19.5z" fill="white" opacity="0.95"/>',
-		'<defs>',
-		'<linearGradient id="wcbGrad" x1="0" y1="0" x2="60" y2="60" gradientUnits="userSpaceOnUse">',
-		'<stop offset="0%" stop-color="#9333ea"/>',
-		'<stop offset="100%" stop-color="#4705fb"/>',
-		'</linearGradient>',
-		'</defs>',
-		'</svg>',
-		'</div>',
-		''
-	].join('');
-
-	cbBtn.style.cssText = [
-		'position:fixed',
-		'display:none',
-		'align-items:center',
-		'justify-content:center',
-		'flex-direction:column',
-		'cursor:pointer',
-		'z-index:9999',
-		'max-width:calc(100vw - 56px)',
-		'transition:opacity 350ms ease,transform 350ms cubic-bezier(.34,1.56,.64,1)',
-		'user-select:none',
-		'-webkit-tap-highlight-color:transparent'
-	].join(';');
-
-	document.body.appendChild(cbBtn);
-
-	var styleAnim = document.createElement('style');
-	styleAnim.textContent = [
+	var i = null,
+		f = !1,
+		U = !1,
+		s = document.createElement('div');
+	((s.id = 'callback-widget-button'),
+		(s.innerHTML = [
+			'<div id="wcb-bubble" style="',
+			'display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);',
+			'background:#fff;border-radius:18px;padding:12px 34px 12px 16px;',
+			'width:172px;box-sizing:border-box;',
+			'border:1px solid rgba(71,5,251,0.12);',
+			'box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);',
+			'cursor:pointer;opacity:0;',
+			'transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);',
+			'font-family:system-ui,-apple-system,sans-serif;',
+			'">',
+			'<button id="wcb-bubble-close" style="',
+			'position:absolute;top:7px;right:8px;background:none;border:none;',
+			'font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;',
+			'display:flex;align-items:center;justify-content:center;',
+			'width:16px;height:16px;border-radius:50%;',
+			'">\u2715</button>',
+			'<p id="wcb-bubble-text" style="',
+			'margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;',
+			'"></p>',
+			'<span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>',
+			'<div id="wcb-bubble-tail" style="',
+			'position:absolute;top:50%;transform:translateY(-50%);',
+			'width:0;height:0;',
+			'border-top:7px solid transparent;border-bottom:7px solid transparent;',
+			'"></div>',
+			'</div>',
+			'<div id="wcb-btn-icon" style="',
+			'filter:drop-shadow(0 6px 24px rgba(71,5,251,0.6)) drop-shadow(0 2px 8px rgba(0,0,0,0.25));',
+			'transition:filter 0.4s ease,transform 0.2s cubic-bezier(.34,1.56,.64,1);',
+			'position:relative;',
+			'">',
+			'<div id="wcb-ring-1" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.35);"></div>',
+			'<div id="wcb-ring-2" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.25);"></div>',
+			'<div id="wcb-ring-3" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.15);"></div>',
+			'<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg" style="position:relative;z-index:1;display:block">',
+			'<circle cx="30" cy="30" r="30" fill="url(#wcbGrad)"/>',
+			'<circle cx="30" cy="30" r="27" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="1.5"/>',
+			'<path d="M21 19.5c0-.83.67-1.5 1.5-1.5h3.1c.4 0 .77.24.9.6l1.4 4c.14.38.03.82-.28 1.1l-1.62 1.62c1.15 2.38 3.08 4.3 5.46 5.46l1.62-1.62c.28-.3.72-.42 1.1-.28l4 1.4c.36.13.6.5.6.9V34c0 .83-.67 1.5-1.5 1.5C28.27 35.5 21 28.23 21 19.5z" fill="white" opacity="0.95"/>',
+			'<defs>',
+			'<linearGradient id="wcbGrad" x1="0" y1="0" x2="60" y2="60" gradientUnits="userSpaceOnUse">',
+			'<stop offset="0%" stop-color="#9333ea"/>',
+			'<stop offset="100%" stop-color="#4705fb"/>',
+			'</linearGradient>',
+			'</defs>',
+			'</svg>',
+			'</div>',
+			''
+		].join('')),
+		(s.style.cssText = [
+			'position:fixed',
+			'display:none',
+			'align-items:center',
+			'justify-content:center',
+			'flex-direction:column',
+			'cursor:pointer',
+			'z-index:9999',
+			'max-width:calc(100vw - 56px)',
+			'transition:opacity 350ms ease,transform 350ms cubic-bezier(.34,1.56,.64,1)',
+			'user-select:none',
+			'-webkit-tap-highlight-color:transparent'
+		].join(';')),
+		document.body.appendChild(s));
+	var y = document.createElement('style');
+	((y.textContent = [
 		'@keyframes wcbBounce{0%,100%{transform:translateY(0) scale(1)}10%{transform:translateY(-16px) scale(1.1)}20%{transform:translateY(0) scale(1)}30%{transform:translateY(-6px) scale(1.04)}40%{transform:translateY(0) scale(1)}}',
 		'@keyframes wcbSway{0%,100%{transform:rotate(0)}25%{transform:rotate(-6deg)}75%{transform:rotate(6deg)}}',
 		'@keyframes wcbGlow{0%,100%{filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2))}50%{filter:drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5))}}',
@@ -247,216 +221,187 @@
 		'#wcb-brand{text-align:center;font-size:11px;color:#ccc;margin-top:8px;line-height:1.5}',
 		'#wcb-brand a{color:#bbb;text-decoration:none;font-weight:600}',
 		'#wcb-brand a:hover{color:#888}'
-	].join('');
-	document.head.appendChild(styleAnim);
-
-	var buttonAnimationActive = false;
-	var buttonPulseEnabled = true;
-	var scrollTriggered = false;
-
-	function startButtonAnimation() {
-		if (buttonAnimationActive) return;
-		buttonAnimationActive = true;
-		cbBtn.style.animation = [
-			'wcbBounce 3s ease-in-out infinite',
-			'wcbSway 4s ease-in-out infinite',
-			buttonPulseEnabled ? 'wcbGlow 2.5s ease-in-out infinite' : ''
-		]
-			.filter(Boolean)
-			.join(',');
+	].join('')),
+		document.head.appendChild(y));
+	var I = !1,
+		j = !0,
+		W = !1;
+	function z() {
+		I ||
+			((I = !0),
+			(s.style.animation = [
+				'wcbBounce 3s ease-in-out infinite',
+				'wcbSway 4s ease-in-out infinite',
+				j ? 'wcbGlow 2.5s ease-in-out infinite' : ''
+			]
+				.filter(Boolean)
+				.join(',')));
 	}
-
-	function stopButtonAnimation() {
-		buttonAnimationActive = false;
-		cbBtn.style.animation = 'none';
+	function H() {
+		((I = !1), (s.style.animation = 'none'));
 	}
-
-	setTimeout(startButtonAnimation, 4000);
-
-	window.addEventListener(
-		'scroll',
-		function () {
-			if (scrollTriggered) return;
-			scrollTriggered = true;
-			cbBtn.animate(
-				[
-					{ transform: 'translateY(0) rotate(0deg)' },
-					{ transform: 'translateY(-250px) rotate(-6deg)' },
-					{ transform: 'translateY(0) rotate(0deg)' }
-				],
-				{
-					duration: 2300,
-					easing: 'cubic-bezier(.34,1.56,.64,1)'
-				}
-			);
-			startButtonAnimation();
-		},
-		{ passive: true }
-	);
-
-	// ─── Modal ────────────────────────────────────────────────────────────────
-
-	var host = document.createElement('div');
-	host.id = 'callback-widget-host';
-	document.body.appendChild(host);
-	var shadow = host.attachShadow({ mode: 'open' });
-	var shadowStyle = document.createElement('style');
-	shadowStyle.textContent = styleAnim.textContent;
-	shadow.appendChild(shadowStyle);
-
-	var overlay = document.createElement('div');
-	overlay.id = 'callback-widget-overlay';
-	overlay.style.cssText = [
-		'position:fixed',
-		'inset:0',
-		'z-index:10000',
-		'display:none',
-		'align-items:center',
-		'justify-content:center',
-		'padding:16px',
-		'box-sizing:border-box'
-	].join(';');
-
-	var backdrop = document.createElement('div');
-	backdrop.style.cssText =
-		'position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);';
-	overlay.appendChild(backdrop);
-
-	var modal = document.createElement('div');
-	modal.id = 'wcb-modal';
-	modal.style.cssText = [
-		'position:relative',
-		'width:100%',
-		'max-width:400px',
-		'background:#fff',
-		'border-radius:20px',
-		'padding:28px 24px 24px',
-		'box-sizing:border-box',
-		'box-shadow:0 24px 80px rgba(0,0,0,0.22)',
-		'font-family:system-ui,-apple-system,sans-serif',
-		'max-height:calc(100svh - 48px)',
-		'overflow-y:auto',
-		'-webkit-overflow-scrolling:touch',
-		'transform:translateY(40px)',
-		'opacity:0',
-		'transition:transform 380ms cubic-bezier(.22,1,.36,1),opacity 280ms ease'
-	].join(';');
-	overlay.appendChild(modal);
-	shadow.appendChild(overlay);
-
-	// ─── Helpers ──────────────────────────────────────────────────────────────
-
-	function css(el, obj) {
-		Object.keys(obj).forEach(function (k) {
-			el.style[k] = obj[k];
+	(setTimeout(z, 4e3),
+		window.addEventListener(
+			'scroll',
+			function () {
+				W ||
+					((W = !0),
+					s.animate(
+						[
+							{ transform: 'translateY(0) rotate(0deg)' },
+							{ transform: 'translateY(-250px) rotate(-6deg)' },
+							{ transform: 'translateY(0) rotate(0deg)' }
+						],
+						{ duration: 2300, easing: 'cubic-bezier(.34,1.56,.64,1)' }
+					),
+					z());
+			},
+			{ passive: !0 }
+		));
+	var v = document.createElement('div');
+	((v.id = 'callback-widget-host'), document.body.appendChild(v));
+	var F = v.attachShadow({ mode: 'open' }),
+		N = document.createElement('style');
+	((N.textContent = y.textContent), F.appendChild(N));
+	var x = document.createElement('div');
+	((x.id = 'callback-widget-overlay'),
+		(x.style.cssText = [
+			'position:fixed',
+			'inset:0',
+			'z-index:10000',
+			'display:none',
+			'align-items:center',
+			'justify-content:center',
+			'padding:16px',
+			'box-sizing:border-box'
+		].join(';')));
+	var P = document.createElement('div');
+	((P.style.cssText =
+		'position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);'),
+		x.appendChild(P));
+	var a = document.createElement('div');
+	((a.id = 'wcb-modal'),
+		(a.style.cssText = [
+			'position:relative',
+			'width:100%',
+			'max-width:400px',
+			'background:#fff',
+			'border-radius:20px',
+			'padding:28px 24px 24px',
+			'box-sizing:border-box',
+			'box-shadow:0 24px 80px rgba(0,0,0,0.22)',
+			'font-family:system-ui,-apple-system,sans-serif',
+			'max-height:calc(100svh - 48px)',
+			'overflow-y:auto',
+			'-webkit-overflow-scrolling:touch',
+			'transform:translateY(40px)',
+			'opacity:0',
+			'transition:transform 380ms cubic-bezier(.22,1,.36,1),opacity 280ms ease'
+		].join(';')),
+		x.appendChild(a),
+		F.appendChild(x));
+	function R(e, t) {
+		Object.keys(t).forEach(function (n) {
+			e.style[n] = t[n];
 		});
 	}
-
-	function el(tag, styles, html) {
-		var e = document.createElement(tag);
-		if (styles) css(e, styles);
-		if (html) e.innerHTML = html;
-		return e;
+	function u(e, t, n) {
+		var o = document.createElement(e);
+		return (t && R(o, t), n && (o.innerHTML = n), o);
 	}
-
-	function shakeInput(input) {
-		input.classList.remove('wcb-shake');
-		void input.offsetWidth;
-		input.classList.add('wcb-shake');
-		setTimeout(function () {
-			input.classList.remove('wcb-shake');
-		}, 450);
+	function ee(e) {
+		(e.classList.remove('wcb-shake'),
+			e.offsetWidth,
+			e.classList.add('wcb-shake'),
+			setTimeout(function () {
+				e.classList.remove('wcb-shake');
+			}, 450));
 	}
-
-	function positionButton() {
-		if (!cfg) return;
-		var side = cfg.buttonSide === 'left' ? 'left' : 'right';
-		var opp = side === 'left' ? 'right' : 'left';
-		cbBtn.style.bottom = (cfg.buttonBottom || 3) + '%';
-		cbBtn.style[side] = (cfg.buttonOffset || 3) + '%';
-		cbBtn.style[opp] = 'auto';
-	}
-
-	function updateBubbleSide(side) {
-		var bubble = document.getElementById('wcb-bubble');
-		var tail = document.getElementById('wcb-bubble-tail');
-		if (!bubble || !tail) return;
-		if (side === 'left') {
-			bubble.style.left = 'calc(100% + 14px)';
-			bubble.style.right = 'auto';
-			tail.style.left = '-8px';
-			tail.style.right = 'auto';
-			tail.style.borderLeft = 'none';
-			tail.style.borderRight = '8px solid #fff';
-		} else {
-			bubble.style.right = 'calc(100% + 14px)';
-			bubble.style.left = 'auto';
-			tail.style.right = '-8px';
-			tail.style.left = 'auto';
-			tail.style.borderRight = 'none';
-			tail.style.borderLeft = '8px solid #fff';
+	function te() {
+		if (i) {
+			var e = i.buttonSide === 'left' ? 'left' : 'right',
+				t = e === 'left' ? 'right' : 'left';
+			((s.style.bottom = (i.buttonBottom || 3) + '%'),
+				(s.style[e] = (i.buttonOffset || 3) + '%'),
+				(s.style[t] = 'auto'));
 		}
 	}
-
-	function hexToRgb(hex) {
-		var r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-		return r
+	function ne(e) {
+		var t = document.getElementById('wcb-bubble'),
+			n = document.getElementById('wcb-bubble-tail');
+		!t ||
+			!n ||
+			(e === 'left'
+				? ((t.style.left = 'calc(100% + 14px)'),
+					(t.style.right = 'auto'),
+					(n.style.left = '-8px'),
+					(n.style.right = 'auto'),
+					(n.style.borderLeft = 'none'),
+					(n.style.borderRight = '8px solid #fff'))
+				: ((t.style.right = 'calc(100% + 14px)'),
+					(t.style.left = 'auto'),
+					(n.style.right = '-8px'),
+					(n.style.left = 'auto'),
+					(n.style.borderRight = 'none'),
+					(n.style.borderLeft = '8px solid #fff')));
+	}
+	function ie(e) {
+		var t = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(e);
+		return t
 			? {
-					r: parseInt(r[1], 16),
-					g: parseInt(r[2], 16),
-					b: parseInt(r[3], 16)
+					r: parseInt(t[1], 16),
+					g: parseInt(t[2], 16),
+					b: parseInt(t[3], 16)
 				}
 			: null;
 	}
-
-	function applyColor(color) {
-		var icon = document.getElementById('wcb-btn-icon');
-		if (!icon || !color) return;
-		var rgb = hexToRgb(color);
-		if (!rgb) return;
-		var svgGrad = icon.querySelector('#wcbGrad');
-		if (svgGrad) {
-			var r0 = Math.round(rgb.r + (255 - rgb.r) * 0.3);
-			var g0 = Math.round(rgb.g + (255 - rgb.g) * 0.15);
-			var b0 = Math.round(rgb.b + (255 - rgb.b) * 0.05);
-			var stop0 =
-				'#' +
-				[r0, g0, b0]
-					.map(function (v) {
-						return ('0' + Math.min(255, v).toString(16)).slice(-2);
-					})
-					.join('');
-			svgGrad.children[0].setAttribute('stop-color', stop0);
-			svgGrad.children[1].setAttribute('stop-color', color);
+	function oe(e) {
+		var t = document.getElementById('wcb-btn-icon');
+		if (!(!t || !e)) {
+			var n = ie(e);
+			if (n) {
+				var o = t.querySelector('#wcbGrad');
+				if (o) {
+					var r = Math.round(n.r + (255 - n.r) * 0.3),
+						b = Math.round(n.g + (255 - n.g) * 0.15),
+						w = Math.round(n.b + (255 - n.b) * 0.05),
+						c =
+							'#' +
+							[r, b, w]
+								.map(function (B) {
+									return ('0' + Math.min(255, B).toString(16)).slice(-2);
+								})
+								.join('');
+					(o.children[0].setAttribute('stop-color', c),
+						o.children[1].setAttribute('stop-color', e));
+				}
+				var l = 'rgba(' + n.r + ',' + n.g + ',' + n.b + ',0.6)';
+				t.style.filter =
+					'drop-shadow(0 6px 24px ' +
+					l +
+					') drop-shadow(0 2px 8px rgba(0,0,0,0.25))';
+				var g = 'rgba(' + n.r + ',' + n.g + ',' + n.b + ',',
+					L = document.getElementById('wcb-ring-1'),
+					A = document.getElementById('wcb-ring-2'),
+					d = document.getElementById('wcb-ring-3');
+				(L && (L.style.background = g + '0.35)'),
+					A && (A.style.background = g + '0.25)'),
+					d && (d.style.background = g + '0.15)'));
+			}
 		}
-		var glowColor = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',0.6)';
-		icon.style.filter =
-			'drop-shadow(0 6px 24px ' +
-			glowColor +
-			') drop-shadow(0 2px 8px rgba(0,0,0,0.25))';
-		var ringBase = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',';
-		var r1 = document.getElementById('wcb-ring-1');
-		var r2 = document.getElementById('wcb-ring-2');
-		var r3 = document.getElementById('wcb-ring-3');
-		if (r1) r1.style.background = ringBase + '0.35)';
-		if (r2) r2.style.background = ringBase + '0.25)';
-		if (r3) r3.style.background = ringBase + '0.15)';
 	}
-
-	// ─── Build modal content ──────────────────────────────────────────────────
-
-	function buildBrand() {
-		var wrap = document.createElement('div');
-		wrap.id = 'wcb-brand';
-		wrap.innerHTML =
-			'\u0421\u0434\u0435\u043b\u0430\u043d\u043e \u0432&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener">winwidget.ru</a>';
-		return wrap;
+	function q() {
+		var e = document.createElement('div');
+		return (
+			(e.id = 'wcb-brand'),
+			(e.innerHTML =
+				'\u0421\u0434\u0435\u043B\u0430\u043D\u043E \u0432&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener">winwidget.ru</a>'),
+			e
+		);
 	}
-
-	function buildForm() {
-		modal.innerHTML = '';
-
-		var closeBtn = el(
+	function re() {
+		a.innerHTML = '';
+		var e = u(
 			'button',
 			{
 				position: 'absolute',
@@ -472,18 +417,19 @@
 			},
 			'&times;'
 		);
-		closeBtn.setAttribute('aria-label', 'Закрыть');
-		if (AUTO_OPEN) closeBtn.style.display = 'none';
-		closeBtn.onclick = function () {
-			closeModal();
-		};
-		modal.appendChild(closeBtn);
-
-		var accentColor = cfg.color || '#4705fb';
-		var btnColor = cfg.buttonColor || accentColor;
-
-		if (cfg.title) {
-			var titleEl = el('h2', {
+		(e.setAttribute(
+			'aria-label',
+			'\u0417\u0430\u043A\u0440\u044B\u0442\u044C'
+		),
+			m && (e.style.display = 'none'),
+			(e.onclick = function () {
+				S();
+			}),
+			a.appendChild(e));
+		var t = i.color || '#4705fb',
+			n = i.buttonColor || t;
+		if (i.title) {
+			var o = u('h2', {
 				margin: '0 0 6px',
 				fontSize: '20px',
 				fontWeight: '700',
@@ -491,135 +437,110 @@
 				lineHeight: '1.3',
 				paddingRight: '24px'
 			});
-			titleEl.textContent = cfg.title;
-			modal.appendChild(titleEl);
+			((o.textContent = i.title), a.appendChild(o));
 		}
-
-		if (cfg.subtitle) {
-			var subtitleEl = el('p', {
+		if (i.subtitle) {
+			var r = u('p', {
 				margin: '0 0 20px',
 				fontSize: '13px',
 				color: '#888',
 				lineHeight: '1.5'
 			});
-			subtitleEl.textContent = cfg.subtitle;
-			modal.appendChild(subtitleEl);
+			((r.textContent = i.subtitle), a.appendChild(r));
 		}
-
-		// ── Phone input ──────────────────────────────────────────────────────────
-
-		var phoneValid = false;
-		var phoneController = null;
-
-		var phoneWrap = el('div', { marginBottom: '12px' });
-
-		var phoneInput = document.createElement('input');
-		phoneInput.type = 'tel';
-		phoneInput.autocomplete = 'tel';
-		phoneInput.placeholder = '+7 999 123-45-67';
-		css(phoneInput, {
-			width: '100%',
-			boxSizing: 'border-box',
-			padding: '12px 14px',
-			fontSize: '16px',
-			border: '1.5px solid #e0d6f0',
-			borderRadius: '12px',
-			outline: 'none',
-			fontFamily: 'inherit',
-			transition: 'border-color 0.2s, box-shadow 0.2s'
-		});
-
-		var phoneErrText = document.createElement('div');
-		phoneErrText.className = 'wcb-err-text';
-		phoneErrText.textContent = 'Введите корректный номер телефона';
-
-		function clearPhoneErr() {
-			phoneInput.classList.remove('wcb-field-err');
-			phoneErrText.classList.remove('wcb-err-show');
-		}
-
-		function showPhoneErr() {
-			phoneInput.classList.add('wcb-field-err');
-			phoneErrText.classList.add('wcb-err-show');
-			shakeInput(phoneInput);
-			phoneInput.focus();
-		}
-
-		phoneInput.addEventListener('focus', function () {
-			if (!phoneInput.classList.contains('wcb-field-err')) {
-				phoneInput.style.borderColor = accentColor;
-				phoneInput.style.boxShadow = '0 0 0 3px ' + accentColor + '22';
-			}
-		});
-		phoneInput.addEventListener('blur', function () {
-			if (!phoneInput.classList.contains('wcb-field-err')) {
-				phoneInput.style.borderColor = '#e0d6f0';
-				phoneInput.style.boxShadow = 'none';
-			}
-		});
-
-		phoneWrap.appendChild(phoneInput);
-		phoneWrap.appendChild(phoneErrText);
-		modal.appendChild(phoneWrap);
-
-		// ── Time slot select ─────────────────────────────────────────────────────
-
-		var timeSelect = null;
-		if (cfg.timeSlots && cfg.timeSlots.length > 0) {
-			var timeWrap = el('div', { marginBottom: '12px' });
-			var timeLabel = el('label', {
-				display: 'block',
-				fontSize: '12px',
-				color: '#888',
-				marginBottom: '4px',
-				fontWeight: '500'
-			});
-			timeLabel.textContent = 'Удобное время для звонка';
-
-			timeSelect = document.createElement('select');
-			css(timeSelect, {
+		var b = !1,
+			w = null,
+			c = u('div', { marginBottom: '12px' }),
+			l = document.createElement('input');
+		((l.type = 'tel'),
+			(l.autocomplete = 'tel'),
+			(l.placeholder = '+7 999 123-45-67'),
+			R(l, {
 				width: '100%',
 				boxSizing: 'border-box',
 				padding: '12px 14px',
-				fontSize: '15px',
+				fontSize: '16px',
 				border: '1.5px solid #e0d6f0',
 				borderRadius: '12px',
 				outline: 'none',
 				fontFamily: 'inherit',
-				background: '#fff',
-				color: '#1a1a1a',
-				cursor: 'pointer',
-				transition: 'border-color 0.2s, box-shadow 0.2s',
-				appearance: 'none',
-				backgroundImage:
-					"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24'%3E%3Cpath fill='%23888' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E\")",
-				backgroundRepeat: 'no-repeat',
-				backgroundPosition: 'right 12px center'
-			});
-			timeSelect.addEventListener('focus', function () {
-				timeSelect.style.borderColor = accentColor;
-				timeSelect.style.boxShadow = '0 0 0 3px ' + accentColor + '22';
-			});
-			timeSelect.addEventListener('blur', function () {
-				timeSelect.style.borderColor = '#e0d6f0';
-				timeSelect.style.boxShadow = 'none';
-			});
-
-			cfg.timeSlots.forEach(function (slot) {
-				var opt = document.createElement('option');
-				opt.value = slot;
-				opt.textContent = slot;
-				timeSelect.appendChild(opt);
-			});
-
-			timeWrap.appendChild(timeLabel);
-			timeWrap.appendChild(timeSelect);
-			modal.appendChild(timeWrap);
+				transition: 'border-color 0.2s, box-shadow 0.2s'
+			}));
+		var g = document.createElement('div');
+		((g.className = 'wcb-err-text'),
+			(g.textContent =
+				'\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0442\u0435\u043B\u0435\u0444\u043E\u043D\u0430'));
+		function L() {
+			(l.classList.remove('wcb-field-err'),
+				g.classList.remove('wcb-err-show'));
 		}
-
-		// ── Submit button ────────────────────────────────────────────────────────
-
-		var submitBtn = el('button', {
+		function A() {
+			(l.classList.add('wcb-field-err'),
+				g.classList.add('wcb-err-show'),
+				ee(l),
+				l.focus());
+		}
+		(l.addEventListener('focus', function () {
+			l.classList.contains('wcb-field-err') ||
+				((l.style.borderColor = t),
+				(l.style.boxShadow = '0 0 0 3px ' + t + '22'));
+		}),
+			l.addEventListener('blur', function () {
+				l.classList.contains('wcb-field-err') ||
+					((l.style.borderColor = '#e0d6f0'),
+					(l.style.boxShadow = 'none'));
+			}),
+			c.appendChild(l),
+			c.appendChild(g),
+			a.appendChild(c));
+		var d = null;
+		if (i.timeSlots && i.timeSlots.length > 0) {
+			var B = u('div', { marginBottom: '12px' }),
+				Z = u('label', {
+					display: 'block',
+					fontSize: '12px',
+					color: '#888',
+					marginBottom: '4px',
+					fontWeight: '500'
+				});
+			((Z.textContent =
+				'\u0423\u0434\u043E\u0431\u043D\u043E\u0435 \u0432\u0440\u0435\u043C\u044F \u0434\u043B\u044F \u0437\u0432\u043E\u043D\u043A\u0430'),
+				(d = document.createElement('select')),
+				R(d, {
+					width: '100%',
+					boxSizing: 'border-box',
+					padding: '12px 14px',
+					fontSize: '15px',
+					border: '1.5px solid #e0d6f0',
+					borderRadius: '12px',
+					outline: 'none',
+					fontFamily: 'inherit',
+					background: '#fff',
+					color: '#1a1a1a',
+					cursor: 'pointer',
+					transition: 'border-color 0.2s, box-shadow 0.2s',
+					appearance: 'none',
+					backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24'%3E%3Cpath fill='%23888' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E")`,
+					backgroundRepeat: 'no-repeat',
+					backgroundPosition: 'right 12px center'
+				}),
+				d.addEventListener('focus', function () {
+					((d.style.borderColor = t),
+						(d.style.boxShadow = '0 0 0 3px ' + t + '22'));
+				}),
+				d.addEventListener('blur', function () {
+					((d.style.borderColor = '#e0d6f0'),
+						(d.style.boxShadow = 'none'));
+				}),
+				i.timeSlots.forEach(function (k) {
+					var _ = document.createElement('option');
+					((_.value = k), (_.textContent = k), d.appendChild(_));
+				}),
+				B.appendChild(Z),
+				B.appendChild(d),
+				a.appendChild(B));
+		}
+		var p = u('button', {
 			width: '100%',
 			padding: '14px',
 			fontSize: '15px',
@@ -628,139 +549,126 @@
 			border: 'none',
 			borderRadius: '12px',
 			cursor: 'pointer',
-			background:
-				'linear-gradient(135deg,' + btnColor + ',' + btnColor + 'cc)',
-			marginBottom: cfg.privacyUrl ? '12px' : '0',
+			background: 'linear-gradient(135deg,' + n + ',' + n + 'cc)',
+			marginBottom: i.privacyUrl ? '12px' : '0',
 			transition: 'opacity 0.2s, transform 0.15s',
 			opacity: '0.5'
 		});
-		submitBtn.textContent = cfg.submitButtonText || 'Заказать звонок';
-		if (window.winwidgetPhone) {
-			phoneController = window.winwidgetPhone.attach(phoneInput, {
-				placeholder: '+7 999 123-45-67',
-				onChange: function (phone) {
-					phoneValid = Boolean(phone);
-					submitBtn.style.opacity = phoneValid ? '1' : '0.5';
-					clearPhoneErr();
+		((p.textContent =
+			i.submitButtonText ||
+			'\u0417\u0430\u043A\u0430\u0437\u0430\u0442\u044C \u0437\u0432\u043E\u043D\u043E\u043A'),
+			window.winwidgetPhone &&
+				(w = window.winwidgetPhone.attach(l, {
+					placeholder: '+7 999 123-45-67',
+					onChange: function (k) {
+						((b = !!k), (p.style.opacity = b ? '1' : '0.5'), L());
+					}
+				})),
+			p.addEventListener('mouseenter', function () {
+				b && (p.style.opacity = '0.88');
+			}),
+			p.addEventListener('mouseleave', function () {
+				p.style.opacity = b ? '1' : '0.5';
+			}));
+		var M = !1;
+		if (
+			(p.addEventListener('click', function () {
+				if (!M) {
+					if (!b) {
+						A();
+						return;
+					}
+					var k = w ? w.getNumber() : null;
+					((M = !0),
+						(p.disabled = !0),
+						(p.style.opacity = '0.6'),
+						(p.textContent =
+							'\u041E\u0442\u043F\u0440\u0430\u0432\u043B\u044F\u0435\u043C...'));
+					var _ = '';
+					try {
+						_ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+					} catch (K) {}
+					fetch(O + '/callback/' + T + '/lead', {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							phone: k,
+							timeSlot: d ? d.value : '',
+							timezone: _,
+							url: window.location.href
+						})
+					})
+						.then(function (K) {
+							return K.json();
+						})
+						.then(function () {
+							((U = !0), G());
+						})
+						.catch(function () {
+							((M = !1),
+								(p.disabled = !1),
+								(p.style.opacity = '1'),
+								(p.textContent =
+									i.submitButtonText ||
+									'\u0417\u0430\u043A\u0430\u0437\u0430\u0442\u044C \u0437\u0432\u043E\u043D\u043E\u043A'));
+						});
 				}
-			});
-		}
-
-		submitBtn.addEventListener('mouseenter', function () {
-			if (phoneValid) submitBtn.style.opacity = '0.88';
-		});
-		submitBtn.addEventListener('mouseleave', function () {
-			submitBtn.style.opacity = phoneValid ? '1' : '0.5';
-		});
-
-		var isSubmitting = false;
-		submitBtn.addEventListener('click', function () {
-			if (isSubmitting) return;
-			if (!phoneValid) {
-				showPhoneErr();
-				return;
-			}
-
-			var phone = phoneController ? phoneController.getNumber() : null;
-
-			isSubmitting = true;
-			submitBtn.disabled = true;
-			submitBtn.style.opacity = '0.6';
-			submitBtn.textContent = 'Отправляем...';
-
-			var timezone = '';
-			try {
-				timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-			} catch (e) {}
-
-			fetch(API_BASE + '/callback/' + KEY + '/lead', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					phone: phone,
-					timeSlot: timeSelect ? timeSelect.value : '',
-					timezone: timezone,
-					url: window.location.href
-				})
-			})
-				.then(function (r) {
-					return r.json();
-				})
-				.then(function () {
-					submitted = true;
-					buildSuccess();
-				})
-				.catch(function () {
-					isSubmitting = false;
-					submitBtn.disabled = false;
-					submitBtn.style.opacity = '1';
-					submitBtn.textContent =
-						cfg.submitButtonText || 'Заказать звонок';
-				});
-		});
-
-		modal.appendChild(submitBtn);
-
-		// Privacy link
-		if (cfg.privacyUrl) {
-			var privacyEl = el('p', {
+			}),
+			a.appendChild(p),
+			i.privacyUrl)
+		) {
+			var D = u('p', {
 				margin: '0',
 				fontSize: '11px',
 				color: '#bbb',
 				textAlign: 'center',
 				lineHeight: '1.5'
 			});
-			privacyEl.innerHTML =
-				'Нажимая кнопку, вы соглашаетесь с <a href="' +
-				cfg.privacyUrl +
-				'" target="_blank" style="color:#bbb">политикой конфиденциальности</a>';
-			modal.appendChild(privacyEl);
+			((D.innerHTML =
+				'\u041D\u0430\u0436\u0438\u043C\u0430\u044F \u043A\u043D\u043E\u043F\u043A\u0443, \u0432\u044B \u0441\u043E\u0433\u043B\u0430\u0448\u0430\u0435\u0442\u0435\u0441\u044C \u0441 <a href="' +
+				i.privacyUrl +
+				'" target="_blank" style="color:#bbb">\u043F\u043E\u043B\u0438\u0442\u0438\u043A\u043E\u0439 \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438</a>'),
+				a.appendChild(D));
 		}
-		modal.appendChild(buildBrand());
+		a.appendChild(q());
 	}
-
-	function buildSuccess() {
-		modal.innerHTML = '';
-		var accentColor = cfg.color || '#4705fb';
-
-		var closeBtn = el(
-			'button',
-			{
-				position: 'absolute',
-				top: '12px',
-				right: '16px',
-				background: 'none',
-				border: 'none',
-				fontSize: '22px',
-				cursor: 'pointer',
-				color: '#aaa',
-				lineHeight: '1',
-				padding: '4px'
-			},
-			'&times;'
-		);
-		if (AUTO_OPEN) closeBtn.style.display = 'none';
-		closeBtn.onclick = function () {
-			closeModal();
-		};
-		modal.appendChild(closeBtn);
-
-		var icon = el('div', {
+	function G() {
+		a.innerHTML = '';
+		var e = i.color || '#4705fb',
+			t = u(
+				'button',
+				{
+					position: 'absolute',
+					top: '12px',
+					right: '16px',
+					background: 'none',
+					border: 'none',
+					fontSize: '22px',
+					cursor: 'pointer',
+					color: '#aaa',
+					lineHeight: '1',
+					padding: '4px'
+				},
+				'&times;'
+			);
+		(m && (t.style.display = 'none'),
+			(t.onclick = function () {
+				S();
+			}),
+			a.appendChild(t));
+		var n = u('div', {
 			width: '60px',
 			height: '60px',
 			borderRadius: '50%',
-			background: accentColor + '18',
+			background: e + '18',
 			display: 'flex',
 			alignItems: 'center',
 			justifyContent: 'center',
 			margin: '0 auto 16px',
 			fontSize: '28px'
 		});
-		icon.textContent = '✓';
-		icon.style.color = accentColor;
-		modal.appendChild(icon);
-
-		var title = el('h2', {
+		((n.textContent = '\u2713'), (n.style.color = e), a.appendChild(n));
+		var o = u('h2', {
 			margin: '0 0 8px',
 			fontSize: '20px',
 			fontWeight: '700',
@@ -768,215 +676,165 @@
 			textAlign: 'center',
 			paddingRight: '0'
 		});
-		title.textContent = cfg.successTitle || 'Спасибо! Мы перезвоним';
-		modal.appendChild(title);
-
-		if (cfg.successSubtitle) {
-			var sub = el('p', {
+		if (
+			((o.textContent =
+				i.successTitle ||
+				'\u0421\u043F\u0430\u0441\u0438\u0431\u043E! \u041C\u044B \u043F\u0435\u0440\u0435\u0437\u0432\u043E\u043D\u0438\u043C'),
+			a.appendChild(o),
+			i.successSubtitle)
+		) {
+			var r = u('p', {
 				margin: '0',
 				fontSize: '14px',
 				color: '#888',
 				textAlign: 'center',
 				lineHeight: '1.5'
 			});
-			sub.textContent = cfg.successSubtitle;
-			modal.appendChild(sub);
+			((r.textContent = i.successSubtitle), a.appendChild(r));
 		}
-		modal.appendChild(buildBrand());
+		a.appendChild(q());
 	}
-
-	// ─── Open / close ─────────────────────────────────────────────────────────
-
-	function openModal() {
-		if (isOpen) return;
-		isOpen = true;
-		cbBtn.style.opacity = '0';
-		cbBtn.style.pointerEvents = 'none';
-		cbBtn.style.transform = 'scale(0.8)';
-		stopButtonAnimation();
-		overlay.style.display = 'flex';
-		submitted ? buildSuccess() : buildForm();
-		requestAnimationFrame(function () {
+	function E() {
+		f ||
+			((f = !0),
+			(s.style.opacity = '0'),
+			(s.style.pointerEvents = 'none'),
+			(s.style.transform = 'scale(0.8)'),
+			H(),
+			(x.style.display = 'flex'),
+			U ? G() : re(),
 			requestAnimationFrame(function () {
-				modal.style.transform = 'translateY(0)';
-				modal.style.opacity = '1';
-			});
-		});
-		fireEvent('open');
+				requestAnimationFrame(function () {
+					((a.style.transform = 'translateY(0)'), (a.style.opacity = '1'));
+				});
+			}),
+			X('open'));
 	}
-
-	function closeModal() {
-		if (!isOpen) return;
-		isOpen = false;
-		cbBtn.style.opacity = '1';
-		cbBtn.style.pointerEvents = 'auto';
-		cbBtn.style.transform = 'scale(1)';
-		startButtonAnimation();
-		modal.style.transform = 'translateY(40px)';
-		modal.style.opacity = '0';
-		setTimeout(function () {
-			if (!isOpen) overlay.style.display = 'none';
-		}, 300);
-		fireEvent('close');
+	function S() {
+		f &&
+			((f = !1),
+			(s.style.opacity = '1'),
+			(s.style.pointerEvents = 'auto'),
+			(s.style.transform = 'scale(1)'),
+			z(),
+			(a.style.transform = 'translateY(40px)'),
+			(a.style.opacity = '0'),
+			setTimeout(function () {
+				f || (x.style.display = 'none');
+			}, 300),
+			X('close'));
 	}
-
-	function fireEvent(name) {
+	function X(e) {
 		try {
-			document.dispatchEvent(
-				new CustomEvent('winwidget:callback:' + name)
-			);
-		} catch (e) {}
+			document.dispatchEvent(new CustomEvent('winwidget:callback:' + e));
+		} catch (t) {}
 	}
-
-	// ─── Clicks ───────────────────────────────────────────────────────────────
-
-	function hideBubble() {
-		var bubble = document.getElementById('wcb-bubble');
-		if (!bubble || bubble.style.display === 'none') return;
-		bubble.style.opacity = '0';
-		bubble.style.transform = 'translateY(-50%) scale(0.85)';
-		setTimeout(function () {
-			bubble.style.display = 'none';
-		}, 300);
+	function Y() {
+		var e = document.getElementById('wcb-bubble');
+		!e ||
+			e.style.display === 'none' ||
+			((e.style.opacity = '0'),
+			(e.style.transform = 'translateY(-50%) scale(0.85)'),
+			setTimeout(function () {
+				e.style.display = 'none';
+			}, 300));
 	}
-
-	cbBtn.addEventListener('click', function () {
-		hideBubble();
-		isOpen ? closeModal() : openModal();
-	});
-
-	backdrop.addEventListener('click', function () {
-		if (!AUTO_OPEN) closeModal();
-	});
-
-	// ─── Init ─────────────────────────────────────────────────────────────────
-
-	Promise.all([
-		ensurePhoneHelper(),
-		fetch(API_BASE + '/callback/' + KEY + '/config')
-	])
-		.then(function (result) {
-			var r = result[1];
-			if (!r.ok) {
-				console.warn(
-					'[wincallback] Widget not found or inactive (' + r.status + ')'
-				);
-				return null;
-			}
-			return r.json();
-		})
-		.then(function (data) {
-			if (data === null) return;
-			if (!data || !data.isActive) {
-				console.warn('[wincallback] Widget is inactive');
-				return;
-			}
-
-			cfg = data;
-
-			var size = cfg.buttonSize || 60;
-
-			positionButton();
-			cbBtn.style.display = AUTO_OPEN ? 'none' : 'flex';
-
-			var iconEl = cbBtn.querySelector('#wcb-btn-icon');
-			if (iconEl) {
-				var svg = iconEl.querySelector('svg');
-				if (svg) {
-					svg.setAttribute('width', size);
-					svg.setAttribute('height', size);
-					svg.setAttribute('viewBox', '0 0 60 60');
+	(s.addEventListener('click', function () {
+		(Y(), f ? S() : E());
+	}),
+		P.addEventListener('click', function () {
+			m || S();
+		}),
+		Promise.all([J(), fetch(O + '/callback/' + T + '/config')])
+			.then(function (e) {
+				var t = e[1];
+				return t.ok
+					? t.json()
+					: (console.warn(
+							'[wincallback] Widget not found or inactive (' +
+								t.status +
+								')'
+						),
+						null);
+			})
+			.then(function (e) {
+				if (e !== null) {
+					if (!e || !e.isActive) {
+						console.warn('[wincallback] Widget is inactive');
+						return;
+					}
+					i = e;
+					var t = i.buttonSize || 60;
+					(te(), (s.style.display = m ? 'none' : 'flex'));
+					var n = s.querySelector('#wcb-btn-icon');
+					if (n) {
+						var o = n.querySelector('svg');
+						o &&
+							(o.setAttribute('width', t),
+							o.setAttribute('height', t),
+							o.setAttribute('viewBox', '0 0 60 60'));
+					}
+					(oe(i.openButtonColor || i.color || '#4705fb'),
+						(j = i.buttonPulse !== !1),
+						i.buttonPulse === !1 &&
+							['wcb-ring-1', 'wcb-ring-2', 'wcb-ring-3'].forEach(
+								function (c) {
+									var l = document.getElementById(c);
+									l && (l.style.display = 'none');
+								}
+							),
+						i.bgColor && (a.style.background = i.bgColor),
+						ne(i.buttonSide || 'right'));
+					var r = document.getElementById('wcb-bubble-close'),
+						b = document.getElementById('wcb-bubble'),
+						w = document.getElementById('wcb-bubble-text');
+					(w &&
+						(w.textContent =
+							i.bubbleText ||
+							i.title ||
+							'\u041F\u0435\u0440\u0435\u0437\u0432\u043E\u043D\u0438\u043C!'),
+						b && i.bubbleEnabled === !1 && (b.style.display = 'none'),
+						r &&
+							r.addEventListener('click', function (c) {
+								(c.stopPropagation(), Y());
+							}),
+						b &&
+							b.addEventListener('click', function (c) {
+								(c.stopPropagation(), Y(), E());
+							}),
+						!m &&
+							i.bubbleEnabled !== !1 &&
+							setTimeout(function () {
+								var c = document.getElementById('wcb-bubble');
+								!c ||
+									f ||
+									((c.style.display = 'block'),
+									requestAnimationFrame(function () {
+										requestAnimationFrame(function () {
+											((c.style.opacity = '1'),
+												(c.style.transform = 'translateY(-50%) scale(1)'));
+										});
+									}));
+							}, 2e3),
+						!(i.hasSubmittedByIp && i.filterDuplicates) &&
+							(!m && !f && (H(), z()),
+							i.autoOpenDelay &&
+								i.autoOpenDelay > 0 &&
+								setTimeout(function () {
+									f || E();
+								}, i.autoOpenDelay * 1e3),
+							m && E()));
 				}
-			}
-
-			applyColor(cfg.openButtonColor || cfg.color || '#4705fb');
-
-			buttonPulseEnabled = cfg.buttonPulse !== false;
-			if (cfg.buttonPulse === false) {
-				['wcb-ring-1', 'wcb-ring-2', 'wcb-ring-3'].forEach(function (id) {
-					var el = document.getElementById(id);
-					if (el) el.style.display = 'none';
-				});
-			}
-
-			if (cfg.bgColor) modal.style.background = cfg.bgColor;
-
-			updateBubbleSide(cfg.buttonSide || 'right');
-
-			var bubbleClose = document.getElementById('wcb-bubble-close');
-			var bubbleEl = document.getElementById('wcb-bubble');
-			var bubbleText = document.getElementById('wcb-bubble-text');
-
-			if (bubbleText)
-				bubbleText.textContent =
-					cfg.bubbleText || cfg.title || 'Перезвоним!';
-			if (bubbleEl && cfg.bubbleEnabled === false) {
-				bubbleEl.style.display = 'none';
-			}
-
-			if (bubbleClose) {
-				bubbleClose.addEventListener('click', function (e) {
-					e.stopPropagation();
-					hideBubble();
-				});
-			}
-
-			if (bubbleEl) {
-				bubbleEl.addEventListener('click', function (e) {
-					e.stopPropagation();
-					hideBubble();
-					openModal();
-				});
-			}
-
-			if (!AUTO_OPEN && cfg.bubbleEnabled !== false) {
-				setTimeout(function () {
-					var b = document.getElementById('wcb-bubble');
-					if (!b || isOpen) return;
-					b.style.display = 'block';
-					requestAnimationFrame(function () {
-						requestAnimationFrame(function () {
-							b.style.opacity = '1';
-							b.style.transform = 'translateY(-50%) scale(1)';
-						});
-					});
-				}, 2000);
-			}
-
-			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
-
-			if (!AUTO_OPEN && !isOpen) {
-				stopButtonAnimation();
-				startButtonAnimation();
-			}
-
-			if (cfg.autoOpenDelay && cfg.autoOpenDelay > 0) {
-				setTimeout(function () {
-					if (!isOpen) openModal();
-				}, cfg.autoOpenDelay * 1000);
-			}
-
-			if (AUTO_OPEN) {
-				openModal();
-			}
-		})
-		.catch(function (e) {
-			console.error('[wincallback] Failed to load config:', e);
-		});
-
-	// ─── Public API ───────────────────────────────────────────────────────────
-
-	function destroyWidget() {
-		if (cbBtn.parentNode) cbBtn.parentNode.removeChild(cbBtn);
-		if (host.parentNode) host.parentNode.removeChild(host);
-		if (styleAnim.parentNode) styleAnim.parentNode.removeChild(styleAnim);
-		delete window.__wincallbackScriptRunning;
-		delete window.winwidgetCallback;
+			})
+			.catch(function (e) {
+				console.error('[wincallback] Failed to load config:', e);
+			}));
+	function ae() {
+		(s.parentNode && s.parentNode.removeChild(s),
+			v.parentNode && v.parentNode.removeChild(v),
+			y.parentNode && y.parentNode.removeChild(y),
+			delete window.__wincallbackScriptRunning,
+			delete window.winwidgetCallback);
 	}
-
-	window.winwidgetCallback = {
-		open: openModal,
-		close: closeModal,
-		destroy: destroyWidget
-	};
+	window.winwidgetCallback = { open: E, close: S, destroy: ae };
 })();

@@ -1,82 +1,68 @@
 (function () {
 	'use strict';
-
 	if (window.__winquizScriptRunning) return;
-	window.__winquizScriptRunning = true;
-
-	var _currentScript = document.currentScript;
-
-	var API_BASE = (function () {
+	window.__winquizScriptRunning = !0;
+	var h = document.currentScript,
+		Z = (function () {
+			try {
+				var e = new URL(h && h.src ? h.src : location.href);
+				return e.origin + '/api';
+			} catch (n) {
+				return 'https://winwidget.ru/api';
+			}
+		})(),
+		L = (h && h.getAttribute('data-key')) || '';
+	if (!L) return;
+	function he(e) {
 		try {
-			var src = new URL(
-				_currentScript && _currentScript.src
-					? _currentScript.src
-					: location.href
+			var n = new URL(h && h.src ? h.src : location.href);
+			return (
+				(n.pathname = n.pathname.replace(/\/[^/]*$/, '/' + e)),
+				(n.search = ''),
+				(n.hash = ''),
+				n.toString()
 			);
-			return src.origin + '/api';
-		} catch (e) {
-			return 'https://winwidget.ru/api';
-		}
-	})();
-
-	var KEY =
-		(_currentScript && _currentScript.getAttribute('data-key')) || '';
-	if (!KEY) return;
-
-	function getWidgetAssetUrl(fileName) {
-		try {
-			var src = new URL(
-				_currentScript && _currentScript.src
-					? _currentScript.src
-					: location.href
-			);
-			src.pathname = src.pathname.replace(/\/[^/]*$/, '/' + fileName);
-			src.search = '';
-			src.hash = '';
-			return src.toString();
-		} catch (e) {
-			return 'https://winwidget.ru/widgets/' + fileName;
+		} catch (r) {
+			return 'https://winwidget.ru/widgets/' + e;
 		}
 	}
-
-	function loadExternalScript(src) {
-		return new Promise(function (resolve, reject) {
-			var existing = document.querySelector('script[src="' + src + '"]');
-			if (existing) {
-				existing.addEventListener('load', resolve, { once: true });
-				existing.addEventListener('error', reject, { once: true });
-				if (window.winwidgetPhone) resolve();
+	function me(e) {
+		return new Promise(function (n, r) {
+			var a = document.querySelector('script[src="' + e + '"]');
+			if (a) {
+				(a.addEventListener('load', n, { once: !0 }),
+					a.addEventListener('error', r, { once: !0 }),
+					window.winwidgetPhone && n());
 				return;
 			}
-			var script = document.createElement('script');
-			script.src = src;
-			script.async = true;
-			script.onload = function () {
-				resolve();
-			};
-			script.onerror = reject;
-			document.head.appendChild(script);
+			var d = document.createElement('script');
+			((d.src = e),
+				(d.async = !0),
+				(d.onload = function () {
+					n();
+				}),
+				(d.onerror = r),
+				document.head.appendChild(d));
 		});
 	}
-
-	function ensurePhoneHelper() {
-		if (window.winwidgetPhone) return window.winwidgetPhone.load();
-		return loadExternalScript(
-			getWidgetAssetUrl('helpers/winwidget-phone.js')
-		)
-			.then(function () {
-				return window.winwidgetPhone ? window.winwidgetPhone.load() : null;
-			})
-			.catch(function (e) {
-				console.warn('[winquiz] Failed to load phone formatter:', e);
-				return null;
-			});
+	function ve() {
+		return window.winwidgetPhone
+			? window.winwidgetPhone.load()
+			: me(he('helpers/winwidget-phone.js'))
+					.then(function () {
+						return window.winwidgetPhone
+							? window.winwidgetPhone.load()
+							: null;
+					})
+					.catch(function (e) {
+						return (
+							console.warn('[winquiz] Failed to load phone formatter:', e),
+							null
+						);
+					});
 	}
-
-	// ─── Floating button ──────────────────────────────────────────────────────
-
-	var quizBtn = document.createElement('div');
-	quizBtn.innerHTML = [
+	var o = document.createElement('div');
+	((o.innerHTML = [
 		'<div id="wq-bubble" style="',
 		'display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);',
 		'background:#fff;border-radius:18px;padding:12px 34px 12px 16px;',
@@ -92,7 +78,7 @@
 		'font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;',
 		'display:flex;align-items:center;justify-content:center;',
 		'width:16px;height:16px;border-radius:50%;',
-		'">✕</button>',
+		'">\u2715</button>',
 		'<p id="wq-bubble-text" style="',
 		'margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;',
 		'"></p>',
@@ -126,131 +112,108 @@
 		'padding:3px 12px;border-radius:20px;white-space:normal;text-align:center;',
 		'letter-spacing:0.8px;text-transform:uppercase;line-height:1.3;',
 		'box-shadow:0 3px 12px rgba(71,5,251,0.5);',
-		'">Квиз!<br>Приз!</div>'
-	].join('');
-
-	quizBtn.style.cssText = [
-		'position:fixed',
-		'display:none',
-		'align-items:center',
-		'justify-content:center',
-		'flex-direction:column',
-		'cursor:pointer',
-		'z-index:9999',
-		'max-width:calc(100vw - 56px)',
-		'transition:opacity 350ms ease,transform 350ms cubic-bezier(.34,1.56,.64,1)',
-		'user-select:none',
-		'-webkit-tap-highlight-color:transparent'
-	].join(';');
-
-	document.body.appendChild(quizBtn);
-
-	// Button animations
-	var styleAnim = document.createElement('style');
-	styleAnim.textContent = [
+		'">\u041A\u0432\u0438\u0437!<br>\u041F\u0440\u0438\u0437!</div>'
+	].join('')),
+		(o.style.cssText = [
+			'position:fixed',
+			'display:none',
+			'align-items:center',
+			'justify-content:center',
+			'flex-direction:column',
+			'cursor:pointer',
+			'z-index:9999',
+			'max-width:calc(100vw - 56px)',
+			'transition:opacity 350ms ease,transform 350ms cubic-bezier(.34,1.56,.64,1)',
+			'user-select:none',
+			'-webkit-tap-highlight-color:transparent'
+		].join(';')),
+		document.body.appendChild(o));
+	var F = document.createElement('style');
+	((F.textContent = [
 		'@keyframes wqBounce{0%,100%{transform:translateY(0) scale(1)}10%{transform:translateY(-16px) scale(1.1)}20%{transform:translateY(0) scale(1)}30%{transform:translateY(-6px) scale(1.04)}40%{transform:translateY(0) scale(1)}}',
 		'@keyframes wqSway{0%,100%{transform:rotate(0)}25%{transform:rotate(-6deg)}75%{transform:rotate(6deg)}}',
 		'@keyframes wqGlow{0%,100%{filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2))}50%{filter:drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5))}}',
 		'#wq-bubble:hover{opacity:0.95!important}',
 		'#wq-bubble-close:hover{color:#888!important}',
 		'@media(max-width:480px){#wq-bubble{display:none!important}}'
-	].join('');
-	document.head.appendChild(styleAnim);
-
-	var _pulseEnabled = true;
-	var _animActive = false;
-
-	function startBtnAnim() {
-		if (_animActive) return;
-		_animActive = true;
-		quizBtn.style.animation = [
-			'wqBounce 3s ease-in-out infinite',
-			'wqSway 4s ease-in-out infinite',
-			_pulseEnabled ? 'wqGlow 2.5s ease-in-out infinite' : ''
-		]
-			.filter(Boolean)
-			.join(',');
+	].join('')),
+		document.head.appendChild(F));
+	var W = !0,
+		O = !1;
+	function T() {
+		O ||
+			((O = !0),
+			(o.style.animation = [
+				'wqBounce 3s ease-in-out infinite',
+				'wqSway 4s ease-in-out infinite',
+				W ? 'wqGlow 2.5s ease-in-out infinite' : ''
+			]
+				.filter(Boolean)
+				.join(',')));
 	}
-
-	function stopBtnAnim() {
-		_animActive = false;
-		quizBtn.style.animation = 'none';
+	function K() {
+		((O = !1), (o.style.animation = 'none'));
 	}
-
-	function updateBubbleSide(side) {
-		var bubble = document.getElementById('wq-bubble');
-		var tail = document.getElementById('wq-bubble-tail');
-		if (!bubble || !tail) return;
-		if (side === 'left') {
-			bubble.style.left = 'calc(100% + 14px)';
-			bubble.style.right = 'auto';
-			tail.style.left = '-8px';
-			tail.style.right = 'auto';
-			tail.style.borderLeft = 'none';
-			tail.style.borderRight = '8px solid #fff';
-		} else {
-			bubble.style.right = 'calc(100% + 14px)';
-			bubble.style.left = 'auto';
-			tail.style.right = '-8px';
-			tail.style.left = 'auto';
-			tail.style.borderRight = 'none';
-			tail.style.borderLeft = '8px solid #fff';
-		}
+	function ye(e) {
+		var n = document.getElementById('wq-bubble'),
+			r = document.getElementById('wq-bubble-tail');
+		!n ||
+			!r ||
+			(e === 'left'
+				? ((n.style.left = 'calc(100% + 14px)'),
+					(n.style.right = 'auto'),
+					(r.style.left = '-8px'),
+					(r.style.right = 'auto'),
+					(r.style.borderLeft = 'none'),
+					(r.style.borderRight = '8px solid #fff'))
+				: ((n.style.right = 'calc(100% + 14px)'),
+					(n.style.left = 'auto'),
+					(r.style.right = '-8px'),
+					(r.style.left = 'auto'),
+					(r.style.borderRight = 'none'),
+					(r.style.borderLeft = '8px solid #fff')));
 	}
-
-	function hideBubble() {
-		var bubble = document.getElementById('wq-bubble');
-		if (!bubble || bubble.style.display === 'none') return;
-		bubble.style.opacity = '0';
-		bubble.style.transform = 'translateY(-50%) scale(0.85)';
-		setTimeout(function () {
-			bubble.style.display = 'none';
-		}, 300);
+	function D() {
+		var e = document.getElementById('wq-bubble');
+		!e ||
+			e.style.display === 'none' ||
+			((e.style.opacity = '0'),
+			(e.style.transform = 'translateY(-50%) scale(0.85)'),
+			setTimeout(function () {
+				e.style.display = 'none';
+			}, 300));
 	}
-
-	setTimeout(startBtnAnim, 4000);
-
-	var _scrollTriggered = false;
+	setTimeout(T, 4e3);
+	var X = !1;
 	window.addEventListener(
 		'scroll',
 		function () {
-			if (_scrollTriggered) return;
-			_scrollTriggered = true;
-			quizBtn.animate(
-				[
-					{ transform: 'translateY(0) rotate(0)' },
-					{ transform: 'translateY(-250px) rotate(-6deg)' },
-					{ transform: 'translateY(0) rotate(0)' }
-				],
-				{ duration: 2300, easing: 'cubic-bezier(.34,1.56,.64,1)' }
-			);
-			startBtnAnim();
+			X ||
+				((X = !0),
+				o.animate(
+					[
+						{ transform: 'translateY(0) rotate(0)' },
+						{ transform: 'translateY(-250px) rotate(-6deg)' },
+						{ transform: 'translateY(0) rotate(0)' }
+					],
+					{ duration: 2300, easing: 'cubic-bezier(.34,1.56,.64,1)' }
+				),
+				T());
 		},
-		{ passive: true }
+		{ passive: !0 }
 	);
-
-	// ─── Shadow DOM host ─────────────────────────────────────────────────────
-
-	var host = document.createElement('div');
-	host.id = 'quiz-widget-host';
-	document.body.appendChild(host);
-	var shadow = host.attachShadow({ mode: 'open' });
-
-	var style = document.createElement('style');
-	style.textContent = [
+	var R = document.createElement('div');
+	((R.id = 'quiz-widget-host'), document.body.appendChild(R));
+	var f = R.attachShadow({ mode: 'open' }),
+		V = document.createElement('style');
+	((V.textContent = [
 		':host{position:fixed;z-index:10000;top:0}',
 		'*{box-sizing:border-box;margin:0;padding:0}',
-
-		// wrapper
 		'#wq-wrap{width:100vw;height:100dvh;display:none;overflow-x:hidden;overflow-y:auto;justify-content:center;align-items:flex-start;padding:12px}',
 		'@supports not (height:100dvh){#wq-wrap{height:100vh}}',
 		'.visible{display:flex!important}',
 		'.hidden{display:none!important}',
-
-		// overlay
 		'#wq-overlay{position:fixed;inset:0;background:rgba(8,4,20,0.86);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);z-index:999;touch-action:none}',
-
-		// card
 		'#wq-card{position:relative;z-index:1000;display:flex;flex-direction:column;width:100%;max-width:520px;margin:auto;',
 		'background:linear-gradient(160deg,#1a0a2e 0%,#0f0520 100%);',
 		'border-radius:24px;padding:32px 24px 28px;',
@@ -259,8 +222,6 @@
 		'overflow:hidden}',
 		'#wq-card::before{content:"";position:absolute;top:0;left:10%;right:10%;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.18),transparent);pointer-events:none}',
 		'#wq-card::after{content:"";position:absolute;top:-80px;right:-80px;width:240px;height:240px;background:radial-gradient(circle,rgba(124,58,237,0.15) 0%,transparent 70%);pointer-events:none}',
-
-		// close
 		'#wq-close{position:absolute;top:14px;right:14px;width:34px;height:34px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.2s,transform 0.2s,border-color 0.2s;backdrop-filter:blur(4px)}',
 		'#wq-close:hover{background:rgba(255,255,255,0.16);border-color:rgba(255,255,255,0.22);transform:scale(1.08) rotate(90deg)}',
 		'#wq-close svg{width:14px;height:14px}',
@@ -268,22 +229,14 @@
 		'#wq-brand{position:absolute;top:10px;left:50%;transform:translateX(-50%);font-size:11px;color:rgba(255,255,255,0.3);white-space:nowrap;letter-spacing:0.2px;pointer-events:auto}',
 		'#wq-brand a{color:rgba(255,200,50,0.65);text-decoration:none;font-weight:600}',
 		'#wq-brand a:hover{color:#ffc832}',
-
-		// progress
 		'#wq-progress{display:flex;gap:5px;margin-bottom:22px}',
 		'.wq-bar{flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,0.1);transition:background 0.3s}',
 		'.wq-bar.done{background:linear-gradient(90deg,#7c3aed,#4705fb)}',
-
-		// screens
 		'.wq-screen{display:none;flex-direction:column;gap:16px;animation:wqFadeIn 0.25s ease}',
 		'.wq-screen.active{display:flex}',
 		'@keyframes wqFadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}',
-
-		// typography
 		'.wq-title{font-size:clamp(1.1rem,4.5vw,1.6rem);font-weight:800;color:#fff;line-height:1.25;letter-spacing:-0.3px;text-shadow:0 2px 12px rgba(0,0,0,0.3);overflow-wrap:break-word;word-break:break-word}',
 		'.wq-subtitle{font-size:14px;color:rgba(255,255,255,0.65);line-height:1.55}',
-
-		// start btn
 		'.wq-start-btn{padding:0 24px;height:52px;font-size:16px;font-weight:700;letter-spacing:0.4px;cursor:pointer;border:none;border-radius:14px;color:#fff;',
 		'background:linear-gradient(135deg,#7c3aed 0%,#4705fb 100%);',
 		'box-shadow:0 4px 22px rgba(71,5,251,0.5),inset 0 1px 0 rgba(255,255,255,0.15);',
@@ -291,8 +244,6 @@
 		'.wq-start-btn::before{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,0.1) 0%,transparent 60%);pointer-events:none}',
 		'.wq-start-btn:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(71,5,251,0.65),inset 0 1px 0 rgba(255,255,255,0.15);filter:brightness(1.08)}',
 		'.wq-start-btn:active{transform:translateY(0)}',
-
-		// question
 		'.wq-q-text{font-size:1rem;font-weight:700;color:#fff;line-height:1.4;overflow-wrap:break-word}',
 		'.wq-options{display:flex;flex-direction:column;gap:9px}',
 		'.wq-opt{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:12px;',
@@ -306,16 +257,12 @@
 		'.wq-opt.selected .wq-opt-indicator::after{content:"";display:block;width:8px;height:8px;border-radius:50%;background:#a78bfa}',
 		'.wq-opt-checkbox .wq-opt-indicator{border-radius:5px}',
 		'.wq-opt.selected .wq-opt-checkbox-indicator::after{content:"";display:block;width:10px;height:6px;border-left:2px solid #a78bfa;border-bottom:2px solid #a78bfa;transform:rotate(-45deg) translateY(-1px)}',
-
-		// next btn
 		'.wq-next-btn{align-self:flex-end;padding:10px 24px;border-radius:10px;border:none;',
 		'background:linear-gradient(135deg,#7c3aed,#4705fb);color:#fff;',
 		'font-size:0.9rem;font-weight:700;cursor:pointer;transition:opacity 0.2s,transform 0.15s;',
 		'box-shadow:0 3px 12px rgba(71,5,251,0.4)}',
 		'.wq-next-btn:hover{opacity:0.9;transform:translateY(-1px)}',
 		'.wq-next-btn:disabled{opacity:0.35;cursor:default;transform:none}',
-
-		// contact
 		'.wq-contact-title{font-size:1rem;font-weight:700;color:#fff;line-height:1.35}',
 		'.wq-input{border:1.5px solid rgba(255,255,255,0.1);outline:none;',
 		'background:rgba(255,255,255,0.07);padding:0 15px;border-radius:12px;',
@@ -324,7 +271,6 @@
 		'.wq-input::placeholder{color:rgba(255,255,255,0.35)}',
 		'.wq-input:focus{border-color:rgba(124,58,237,0.7);background:rgba(124,58,237,0.1);box-shadow:0 0 0 3px rgba(124,58,237,0.15)}',
 		'.wq-input.error{border-color:rgba(239,68,68,0.7);box-shadow:0 0 0 3px rgba(239,68,68,0.12)}',
-
 		'.wq-submit-btn{padding:0 24px;height:52px;font-size:16px;font-weight:700;letter-spacing:0.4px;cursor:pointer;border:none;border-radius:14px;color:#fff;',
 		'background:linear-gradient(135deg,#7c3aed 0%,#4705fb 100%);',
 		'box-shadow:0 4px 22px rgba(71,5,251,0.5),inset 0 1px 0 rgba(255,255,255,0.15);',
@@ -333,12 +279,9 @@
 		'.wq-submit-btn:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(71,5,251,0.65);filter:brightness(1.08)}',
 		'.wq-submit-btn:active{transform:translateY(0)}',
 		'.wq-submit-btn:disabled{opacity:0.5;cursor:not-allowed;transform:none}',
-
 		'.wq-privacy{font-size:12px;color:rgba(255,255,255,0.38);text-align:center;line-height:1.5}',
 		'.wq-privacy a{color:rgba(255,255,255,0.55);text-decoration:underline;text-underline-offset:2px}',
 		'.wq-privacy a:hover{color:#fff}',
-
-		// result
 		'.wq-result-badge{display:inline-flex;align-items:center;gap:6px;background:linear-gradient(135deg,rgba(124,58,237,0.3),rgba(71,5,251,0.2));border:1px solid rgba(124,58,237,0.4);border-radius:20px;padding:5px 14px;font-size:12px;font-weight:700;color:#a78bfa;letter-spacing:0.5px;text-transform:uppercase}',
 		'.wq-result-title{font-size:clamp(1.1rem,4vw,1.5rem);font-weight:800;color:#fff;line-height:1.25;overflow-wrap:break-word}',
 		'.wq-result-desc{font-size:0.9rem;color:rgba(255,255,255,0.72);line-height:1.65}',
@@ -352,731 +295,603 @@
 		'box-shadow:0 4px 18px rgba(71,5,251,0.45);transition:opacity 0.2s,transform 0.15s}',
 		'.wq-result-btn:hover{opacity:0.9;transform:translateY(-1px)}',
 		'.wq-divider{height:1px;background:rgba(255,255,255,0.08);margin:2px 0}',
-
-		// already
 		'.wq-already-icon{font-size:2.5rem;text-align:center}',
 		'.wq-already-title{font-size:1.1rem;font-weight:700;color:#fff;text-align:center}',
 		'.wq-already-desc{font-size:0.875rem;color:rgba(255,255,255,0.6);text-align:center;line-height:1.55}',
-
-		// desktop
 		'@media (min-width:768px){',
 		'#wq-wrap{align-items:center}',
 		'#wq-card{min-height:unset;padding:40px 40px 36px;justify-content:flex-start}',
 		'}'
-	].join('');
-
-	shadow.appendChild(style);
-
-	var container = document.createElement('div');
-	container.innerHTML = [
+	].join('')),
+		f.appendChild(V));
+	var $ = document.createElement('div');
+	(($.innerHTML = [
 		'<div id="wq-wrap">',
 		'<div id="wq-overlay"></div>',
 		'<div id="wq-card">',
-		'<button id="wq-close" aria-label="Закрыть">',
+		'<button id="wq-close" aria-label="\u0417\u0430\u043A\u0440\u044B\u0442\u044C">',
 		'<svg viewBox="0 0 24 24" fill="none"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>',
 		'</button>',
-		'<div id="wq-brand">Сделано в&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener">winwidget.ru</a></div>',
+		'<div id="wq-brand">\u0421\u0434\u0435\u043B\u0430\u043D\u043E \u0432&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener">winwidget.ru</a></div>',
 		'<div id="wq-inner"></div>',
 		'</div>',
 		'</div>'
-	].join('');
-	shadow.appendChild(container);
-
-	var wrap = shadow.getElementById('wq-wrap');
-	var inner = shadow.getElementById('wq-inner');
-	var closeBtn = shadow.getElementById('wq-close');
-	var overlay = shadow.getElementById('wq-overlay');
-
-	// ─── Validation helpers ───────────────────────────────────────────────────
-
-	var EMAIL_REGEXP =
-		/^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$/;
-
-	// Phone mask (RU: +7 (9__) ___-__-__)
-	function buildPhoneMask(region) {
-		if (region === 'BY') return '+375 (__) ___-__-__';
-		if (region === 'UA') return '+380 (__) ___-__-__';
-		if (region === 'KZ') return '+7 (7__) ___-__-__';
-		if (region === 'international') return '+__ (__________';
-		return '+7 (9__) ___-__-__';
+	].join('')),
+		f.appendChild($));
+	var B = f.getElementById('wq-wrap'),
+		Y = f.getElementById('wq-inner'),
+		J = f.getElementById('wq-close'),
+		Q = f.getElementById('wq-overlay'),
+		qe =
+			/^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$/;
+	function je(e) {
+		return e === 'BY'
+			? '+375 (__) ___-__-__'
+			: e === 'UA'
+				? '+380 (__) ___-__-__'
+				: e === 'KZ'
+					? '+7 (7__) ___-__-__'
+					: e === 'international'
+						? '+__ (__________'
+						: '+7 (9__) ___-__-__';
 	}
-
-	function maskDigitsCount(region) {
-		if (region === 'BY') return 9;
-		if (region === 'UA') return 9;
-		if (region === 'KZ') return 9;
-		if (region === 'international') return 7;
-		return 9;
+	function Me(e) {
+		return e === 'BY' || e === 'UA' || e === 'KZ'
+			? 9
+			: e === 'international'
+				? 7
+				: 9;
 	}
-
-	function shakeInput(el) {
-		var distance = 6,
-			shakes = 15,
-			duration = 350,
-			start = null;
-		function frame(t) {
-			if (!start) start = t;
-			var p = (t - start) / duration;
-			el.style.transform =
+	function ee(e) {
+		var n = 6,
+			r = 15,
+			a = 350,
+			d = null;
+		function i(s) {
+			d || (d = s);
+			var x = (s - d) / a;
+			((e.style.transform =
 				'translateX(' +
-				Math.sin(p * shakes * Math.PI * 2) * distance * (1 - p) +
-				'px)';
-			if (t - start < duration) requestAnimationFrame(frame);
-			else {
-				el.style.transform = '';
-				el.classList.remove('error');
-			}
+				Math.sin(x * r * Math.PI * 2) * n * (1 - x) +
+				'px)'),
+				s - d < a
+					? requestAnimationFrame(i)
+					: ((e.style.transform = ''), e.classList.remove('error')));
 		}
-		el.classList.add('error');
-		requestAnimationFrame(frame);
+		(e.classList.add('error'), requestAnimationFrame(i));
 	}
-
-	function esc(s) {
-		return String(s || '')
+	function u(e) {
+		return String(e || '')
 			.replace(/&/g, '&amp;')
 			.replace(/</g, '&lt;')
 			.replace(/>/g, '&gt;');
 	}
-
-	function hexToRgba(hex, alpha) {
-		var h = String(hex || '#7c3aed').replace('#', '');
-		if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
-		var r = parseInt(h.slice(0, 2), 16),
-			g = parseInt(h.slice(2, 4), 16),
-			b = parseInt(h.slice(4, 6), 16);
-		return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+	function p(e, n) {
+		var r = String(e || '#7c3aed').replace('#', '');
+		r.length === 3 && (r = r[0] + r[0] + r[1] + r[1] + r[2] + r[2]);
+		var a = parseInt(r.slice(0, 2), 16),
+			d = parseInt(r.slice(2, 4), 16),
+			i = parseInt(r.slice(4, 6), 16);
+		return 'rgba(' + a + ',' + d + ',' + i + ',' + n + ')';
 	}
-
-	// ─── Score calculation ────────────────────────────────────────────────────
-
-	function scoreAnswers(answers, questions, results) {
-		if (!results || !results.length) return null;
-		var scores = {};
-		results.forEach(function (r) {
-			scores[r.id] = 0;
-		});
-		answers.forEach(function (ans) {
-			var q = null;
-			for (var i = 0; i < questions.length; i++) {
-				if (questions[i].id === ans.questionId) {
-					q = questions[i];
-					break;
-				}
-			}
-			if (!q) return;
-			ans.optionIds.forEach(function (oid) {
-				var opt = null;
-				for (var j = 0; j < q.options.length; j++) {
-					if (q.options[j].id === oid) {
-						opt = q.options[j];
+	function ke(e, n, r) {
+		if (!r || !r.length) return null;
+		var a = {};
+		(r.forEach(function (s) {
+			a[s.id] = 0;
+		}),
+			e.forEach(function (s) {
+				for (var x = null, E = 0; E < n.length; E++)
+					if (n[E].id === s.questionId) {
+						x = n[E];
 						break;
 					}
-				}
-				if (!opt || !opt.scores) return;
-				Object.keys(opt.scores).forEach(function (rid) {
-					if (rid in scores) scores[rid] += Number(opt.scores[rid]) || 0;
-				});
-			});
-		});
-		var winner = results[0];
-		var max = -Infinity;
-		results.forEach(function (r) {
-			if ((scores[r.id] || 0) > max) {
-				max = scores[r.id] || 0;
-				winner = r;
-			}
-		});
-		return winner;
+				x &&
+					s.optionIds.forEach(function (z) {
+						for (var m = null, C = 0; C < x.options.length; C++)
+							if (x.options[C].id === z) {
+								m = x.options[C];
+								break;
+							}
+						!m ||
+							!m.scores ||
+							Object.keys(m.scores).forEach(function (v) {
+								v in a && (a[v] += Number(m.scores[v]) || 0);
+							});
+					});
+			}));
+		var d = r[0],
+			i = -1 / 0;
+		return (
+			r.forEach(function (s) {
+				(a[s.id] || 0) > i && ((i = a[s.id] || 0), (d = s));
+			}),
+			d
+		);
 	}
-
-	// ─── Widget init ──────────────────────────────────────────────────────────
-
-	function initWidget(cfg) {
-		var questions = cfg.questions || [];
-		var results = cfg.results || [];
-		var answers = [];
-
-		_pulseEnabled = cfg.buttonPulse !== false;
-		var _devMode = cfg.devModeActive === true;
-
-		// Dynamic color overrides
-		var _accent = cfg.color || '#7c3aed';
-		var _btn = cfg.buttonColor || _accent;
-		var dynStyle = document.createElement('style');
-		dynStyle.textContent = [
-			cfg.bgColor
-				? '#wq-card{background:' + cfg.bgColor + '!important}'
-				: '',
-			'.wq-bar.done{background:' + _accent + '!important}',
+	function Ee(e) {
+		var pe, ue, be, fe;
+		var n = e.questions || [],
+			r = e.results || [],
+			a = [];
+		W = e.buttonPulse !== !1;
+		var d = e.devModeActive === !0,
+			i = e.color || '#7c3aed',
+			s = e.buttonColor || i,
+			x = document.createElement('style');
+		((x.textContent = [
+			e.bgColor ? '#wq-card{background:' + e.bgColor + '!important}' : '',
+			'.wq-bar.done{background:' + i + '!important}',
 			'.wq-start-btn,.wq-submit-btn,.wq-result-btn{background:' +
-				_btn +
+				s +
 				'!important;box-shadow:0 4px 22px ' +
-				hexToRgba(_btn, 0.5) +
+				p(s, 0.5) +
 				',inset 0 1px 0 rgba(255,255,255,0.15)!important}',
 			'.wq-start-btn:hover,.wq-submit-btn:hover,.wq-result-btn:hover{box-shadow:0 8px 30px ' +
-				hexToRgba(_btn, 0.65) +
+				p(s, 0.65) +
 				'!important}',
 			'.wq-next-btn{background:' +
-				_accent +
+				i +
 				'!important;box-shadow:0 3px 12px ' +
-				hexToRgba(_accent, 0.4) +
+				p(i, 0.4) +
 				'!important}',
 			'.wq-opt:hover{border-color:' +
-				hexToRgba(_accent, 0.6) +
+				p(i, 0.6) +
 				'!important;background:' +
-				hexToRgba(_accent, 0.12) +
+				p(i, 0.12) +
 				'!important}',
 			'.wq-opt.selected{border-color:' +
-				_accent +
+				i +
 				'!important;background:linear-gradient(135deg,' +
-				hexToRgba(_accent, 0.35) +
+				p(i, 0.35) +
 				',' +
-				hexToRgba(_btn, 0.25) +
+				p(s, 0.25) +
 				')!important;box-shadow:0 2px 12px ' +
-				hexToRgba(_btn, 0.25) +
+				p(s, 0.25) +
 				'!important}',
 			'.wq-input:focus{border-color:' +
-				hexToRgba(_accent, 0.7) +
+				p(i, 0.7) +
 				'!important;box-shadow:0 0 0 3px ' +
-				hexToRgba(_accent, 0.15) +
+				p(i, 0.15) +
 				'!important}',
 			'.wq-result-badge{background:linear-gradient(135deg,' +
-				hexToRgba(_accent, 0.3) +
+				p(i, 0.3) +
 				',' +
-				hexToRgba(_btn, 0.2) +
+				p(s, 0.2) +
 				')!important;border-color:' +
-				hexToRgba(_accent, 0.4) +
+				p(i, 0.4) +
 				'!important}'
-		].join('');
-		shadow.appendChild(dynStyle);
-
-		// pixel events
-		function firePixel(goal) {
-			if (cfg.yandexMetrikaId && typeof ym === 'function') {
+		].join('')),
+			f.appendChild(x));
+		function E(t) {
+			if (e.yandexMetrikaId && typeof ym == 'function')
 				try {
-					ym(Number(cfg.yandexMetrikaId), 'reachGoal', goal);
-				} catch (e) {}
-			}
-			if (cfg.vkPixelId && window.VK && typeof VK.Goal === 'function') {
+					ym(Number(e.yandexMetrikaId), 'reachGoal', t);
+				} catch (l) {}
+			if (e.vkPixelId && window.VK && typeof VK.Goal == 'function')
 				try {
-					VK.Goal(goal);
-				} catch (e) {}
-			}
-			if (cfg.roistatEnabled && window.roistat && window.roistat.event) {
+					VK.Goal(t);
+				} catch (l) {}
+			if (e.roistatEnabled && window.roistat && window.roistat.event)
 				try {
-					window.roistat.event.send(goal);
-				} catch (e) {}
+					window.roistat.event.send(t);
+				} catch (l) {}
+		}
+		function z() {
+			(D(),
+				B.classList.remove('hidden'),
+				B.classList.add('visible'),
+				(document.body.style.overflow = 'hidden'),
+				(document.body.style.position = 'fixed'),
+				(document.body.style.width = '100%'),
+				(o.style.opacity = '0'),
+				(o.style.pointerEvents = 'none'),
+				(o.style.transform = 'scale(0.8)'),
+				K(),
+				E('quiz_open'));
+		}
+		function m() {
+			(B.classList.remove('visible'),
+				B.classList.add('hidden'),
+				(document.body.style.overflow = ''),
+				(document.body.style.position = ''),
+				(document.body.style.width = ''),
+				window.winquizAutoOpen ||
+					((o.style.opacity = '1'),
+					(o.style.pointerEvents = 'auto'),
+					(o.style.transform = 'scale(1)'),
+					T()));
+		}
+		(o.addEventListener('click', z),
+			J.addEventListener('click', m),
+			Q.addEventListener('click', m));
+		function C(t, l) {
+			var c = document.createElement('div');
+			c.id = 'wq-progress';
+			for (var w = 0; w < l; w++) {
+				var b = document.createElement('div');
+				((b.className = 'wq-bar' + (w < t ? ' done' : '')),
+					c.appendChild(b));
 			}
+			return c;
 		}
-
-		function openWidget() {
-			hideBubble();
-			wrap.classList.remove('hidden');
-			wrap.classList.add('visible');
-			document.body.style.overflow = 'hidden';
-			document.body.style.position = 'fixed';
-			document.body.style.width = '100%';
-			quizBtn.style.opacity = '0';
-			quizBtn.style.pointerEvents = 'none';
-			quizBtn.style.transform = 'scale(0.8)';
-			stopBtnAnim();
-			firePixel('quiz_open');
+		function v(t) {
+			Y.innerHTML = t;
 		}
-
-		function closeWidget() {
-			wrap.classList.remove('visible');
-			wrap.classList.add('hidden');
-			document.body.style.overflow = '';
-			document.body.style.position = '';
-			document.body.style.width = '';
-			if (!window.winquizAutoOpen) {
-				quizBtn.style.opacity = '1';
-				quizBtn.style.pointerEvents = 'auto';
-				quizBtn.style.transform = 'scale(1)';
-				startBtnAnim();
-			}
+		function te() {
+			((a = []),
+				v(
+					[
+						'<div class="wq-screen active" id="s-welcome">',
+						'<div class="wq-title">' + u(e.title) + '</div>',
+						e.subtitle
+							? '<div class="wq-subtitle">' + u(e.subtitle) + '</div>'
+							: '',
+						'<div class="wq-divider"></div>',
+						'<button class="wq-start-btn" id="wq-start">' +
+							u(
+								e.buttonText ||
+									'\u041D\u0430\u0447\u0430\u0442\u044C \u043A\u0432\u0438\u0437'
+							) +
+							'</button>',
+						'</div>'
+					].join('')
+				),
+				f
+					.getElementById('wq-start')
+					.addEventListener('click', function () {
+						n.length && ne(0);
+					}));
 		}
-
-		quizBtn.addEventListener('click', openWidget);
-		closeBtn.addEventListener('click', closeWidget);
-		overlay.addEventListener('click', closeWidget);
-
-		// ── Screens ────────────────────────────────────────────────────────────
-
-		function makeProgress(current, total) {
-			var el = document.createElement('div');
-			el.id = 'wq-progress';
-			for (var i = 0; i < total; i++) {
-				var bar = document.createElement('div');
-				bar.className = 'wq-bar' + (i < current ? ' done' : '');
-				el.appendChild(bar);
-			}
-			return el;
-		}
-
-		function render(html) {
-			inner.innerHTML = html;
-		}
-
-		function showWelcome() {
-			answers = [];
-			render(
-				[
-					'<div class="wq-screen active" id="s-welcome">',
-					'<div class="wq-title">' + esc(cfg.title) + '</div>',
-					cfg.subtitle
-						? '<div class="wq-subtitle">' + esc(cfg.subtitle) + '</div>'
-						: '',
-					'<div class="wq-divider"></div>',
-					'<button class="wq-start-btn" id="wq-start">' +
-						esc(cfg.buttonText || 'Начать квиз') +
-						'</button>',
-					'</div>'
-				].join('')
-			);
-
-			shadow
-				.getElementById('wq-start')
-				.addEventListener('click', function () {
-					if (!questions.length) return;
-					showQuestion(0);
-				});
-		}
-
-		function showQuestion(idx) {
-			if (idx >= questions.length) {
-				var dc = (cfg.dataType || 'PHONE').toUpperCase();
-				if (dc === 'NONE') {
-					submitAndShowResult(null, null);
-				} else {
-					showContact();
-				}
+		function ne(t) {
+			if (t >= n.length) {
+				var l = (e.dataType || 'PHONE').toUpperCase();
+				l === 'NONE' ? re(null, null) : ze();
 				return;
 			}
-			var q = questions[idx];
-			var isCheckbox = q.type === 'checkbox';
-			var selected = [];
-
-			inner.innerHTML = '';
-			inner.appendChild(makeProgress(idx, questions.length));
-
-			var screen = document.createElement('div');
-			screen.className = 'wq-screen active';
-
-			var counter = document.createElement('div');
-			counter.style.cssText =
-				'font-size:12px;font-weight:600;color:rgba(255,255,255,0.4);letter-spacing:0.5px;text-transform:uppercase';
-			counter.textContent =
-				'Вопрос ' + (idx + 1) + ' из ' + questions.length;
-			screen.appendChild(counter);
-
-			var qText = document.createElement('div');
-			qText.className = 'wq-q-text';
-			qText.textContent = q.text || 'Вопрос ' + (idx + 1);
-			screen.appendChild(qText);
-
-			var optList = document.createElement('div');
-			optList.className = 'wq-options';
-			var goNextScheduled = false;
-
-			q.options.forEach(function (opt, oIdx) {
-				var btn = document.createElement('button');
-				btn.className = 'wq-opt' + (isCheckbox ? ' wq-opt-checkbox' : '');
-				btn.setAttribute('data-id', opt.id);
-				btn.innerHTML = [
-					'<span class="wq-opt-indicator' +
-						(isCheckbox ? ' wq-opt-checkbox-indicator' : '') +
-						'"></span>',
-					'<span>' + esc(opt.text || 'Вариант ' + (oIdx + 1)) + '</span>'
-				].join('');
-
-				btn.addEventListener('click', function () {
-					if (isCheckbox) {
-						var i = selected.indexOf(opt.id);
-						if (i === -1) {
-							selected.push(opt.id);
-							btn.classList.add('selected');
-						} else {
-							selected.splice(i, 1);
-							btn.classList.remove('selected');
-						}
-						if (nextBtn) nextBtn.disabled = selected.length === 0;
-					} else {
-						selected = [opt.id];
-						optList.querySelectorAll('.wq-opt').forEach(function (b) {
-							b.classList.remove('selected');
-						});
-						btn.classList.add('selected');
-						if (!goNextScheduled) {
-							goNextScheduled = true;
-							setTimeout(goNext, 300);
-						}
-					}
-				});
-				optList.appendChild(btn);
-			});
-			screen.appendChild(optList);
-
-			var nextBtn = null;
-			if (isCheckbox) {
-				nextBtn = document.createElement('button');
-				nextBtn.className = 'wq-next-btn';
-				nextBtn.textContent = 'Далее →';
-				nextBtn.disabled = true;
-				nextBtn.addEventListener('click', goNext);
-				screen.appendChild(nextBtn);
-			}
-
-			inner.appendChild(screen);
-
-			function goNext() {
-				answers.push({ questionId: q.id, optionIds: selected.slice() });
-				showQuestion(idx + 1);
+			var c = n[t],
+				w = c.type === 'checkbox',
+				b = [];
+			((Y.innerHTML = ''), Y.appendChild(C(t, n.length)));
+			var g = document.createElement('div');
+			g.className = 'wq-screen active';
+			var I = document.createElement('div');
+			((I.style.cssText =
+				'font-size:12px;font-weight:600;color:rgba(255,255,255,0.4);letter-spacing:0.5px;text-transform:uppercase'),
+				(I.textContent =
+					'\u0412\u043E\u043F\u0440\u043E\u0441 ' +
+					(t + 1) +
+					' \u0438\u0437 ' +
+					n.length),
+				g.appendChild(I));
+			var y = document.createElement('div');
+			((y.className = 'wq-q-text'),
+				(y.textContent =
+					c.text || '\u0412\u043E\u043F\u0440\u043E\u0441 ' + (t + 1)),
+				g.appendChild(y));
+			var N = document.createElement('div');
+			N.className = 'wq-options';
+			var we = !1;
+			(c.options.forEach(function (P, Te) {
+				var k = document.createElement('button');
+				((k.className = 'wq-opt' + (w ? ' wq-opt-checkbox' : '')),
+					k.setAttribute('data-id', P.id),
+					(k.innerHTML = [
+						'<span class="wq-opt-indicator' +
+							(w ? ' wq-opt-checkbox-indicator' : '') +
+							'"></span>',
+						'<span>' +
+							u(
+								P.text ||
+									'\u0412\u0430\u0440\u0438\u0430\u043D\u0442 ' + (Te + 1)
+							) +
+							'</span>'
+					].join('')),
+					k.addEventListener('click', function () {
+						if (w) {
+							var ge = b.indexOf(P.id);
+							(ge === -1
+								? (b.push(P.id), k.classList.add('selected'))
+								: (b.splice(ge, 1), k.classList.remove('selected')),
+								q && (q.disabled = b.length === 0));
+						} else
+							((b = [P.id]),
+								N.querySelectorAll('.wq-opt').forEach(function (Ye) {
+									Ye.classList.remove('selected');
+								}),
+								k.classList.add('selected'),
+								we || ((we = !0), setTimeout(xe, 300)));
+					}),
+					N.appendChild(k));
+			}),
+				g.appendChild(N));
+			var q = null;
+			(w &&
+				((q = document.createElement('button')),
+				(q.className = 'wq-next-btn'),
+				(q.textContent = '\u0414\u0430\u043B\u0435\u0435 \u2192'),
+				(q.disabled = !0),
+				q.addEventListener('click', xe),
+				g.appendChild(q)),
+				Y.appendChild(g));
+			function xe() {
+				(a.push({ questionId: c.id, optionIds: b.slice() }), ne(t + 1));
 			}
 		}
-
-		function showContact() {
-			var dc = (cfg.dataType || 'PHONE').toUpperCase();
-
-			render(
+		function ze() {
+			var t = (e.dataType || 'PHONE').toUpperCase();
+			v(
 				[
 					'<div class="wq-screen active" id="s-contact">',
 					'<div class="wq-contact-title">' +
-						esc(
-							cfg.contactTitle ||
-								'Оставьте контакт для получения результата'
+						u(
+							e.contactTitle ||
+								'\u041E\u0441\u0442\u0430\u0432\u044C\u0442\u0435 \u043A\u043E\u043D\u0442\u0430\u043A\u0442 \u0434\u043B\u044F \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u0438\u044F \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u0430'
 						) +
 						'</div>',
-					dc === 'PHONE' || dc === 'PHONE_AND_EMAIL'
-						? '<input class="wq-input" id="wq-phone" type="tel" placeholder="✦  Ваш телефон" autocomplete="tel"/>'
+					t === 'PHONE' || t === 'PHONE_AND_EMAIL'
+						? '<input class="wq-input" id="wq-phone" type="tel" placeholder="\u2726  \u0412\u0430\u0448 \u0442\u0435\u043B\u0435\u0444\u043E\u043D" autocomplete="tel"/>'
 						: '',
-					dc === 'EMAIL' || dc === 'PHONE_AND_EMAIL'
-						? '<input class="wq-input" id="wq-email" type="email" placeholder="✦  Ваш email" autocomplete="email"/>'
+					t === 'EMAIL' || t === 'PHONE_AND_EMAIL'
+						? '<input class="wq-input" id="wq-email" type="email" placeholder="\u2726  \u0412\u0430\u0448 email" autocomplete="email"/>'
 						: '',
 					'<div id="wq-err" style="font-size:13px;color:rgba(239,120,100,1);min-height:18px"></div>',
-					'<button class="wq-submit-btn" id="wq-submit">Получить результат</button>',
-					cfg.privacyUrl
-						? '<div class="wq-privacy">Нажимая кнопку, вы соглашаетесь с <a href="' +
-							esc(cfg.privacyUrl) +
-							'" target="_blank" rel="noopener">политикой конфиденциальности</a></div>'
+					'<button class="wq-submit-btn" id="wq-submit">\u041F\u043E\u043B\u0443\u0447\u0438\u0442\u044C \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442</button>',
+					e.privacyUrl
+						? '<div class="wq-privacy">\u041D\u0430\u0436\u0438\u043C\u0430\u044F \u043A\u043D\u043E\u043F\u043A\u0443, \u0432\u044B \u0441\u043E\u0433\u043B\u0430\u0448\u0430\u0435\u0442\u0435\u0441\u044C \u0441 <a href="' +
+							u(e.privacyUrl) +
+							'" target="_blank" rel="noopener">\u043F\u043E\u043B\u0438\u0442\u0438\u043A\u043E\u0439 \u043A\u043E\u043D\u0444\u0438\u0434\u0435\u043D\u0446\u0438\u0430\u043B\u044C\u043D\u043E\u0441\u0442\u0438</a></div>'
 						: '',
 					'</div>'
 				].join('')
 			);
-
-			var phoneInput = shadow.getElementById('wq-phone');
-			var emailInput = shadow.getElementById('wq-email');
-			var errEl = shadow.getElementById('wq-err');
-			var submitBtn = shadow.getElementById('wq-submit');
-			var phoneController =
-				phoneInput && window.winwidgetPhone
-					? window.winwidgetPhone.attach(phoneInput, {
-							placeholder: '+7 999 123-45-67'
-						})
-					: null;
-
-			function getPhone() {
-				if (!phoneInput) return null;
-				return phoneController ? phoneController.getNumber() : null;
+			var l = f.getElementById('wq-phone'),
+				c = f.getElementById('wq-email'),
+				w = f.getElementById('wq-err'),
+				b = f.getElementById('wq-submit'),
+				g =
+					l && window.winwidgetPhone
+						? window.winwidgetPhone.attach(l, {
+								placeholder: '+7 999 123-45-67'
+							})
+						: null;
+			function I() {
+				return l && g ? g.getNumber() : null;
 			}
-
-			submitBtn.addEventListener('click', function () {
-				errEl.textContent = '';
-				var valid = true;
-
-				if (!_devMode) {
-					if (phoneInput && !getPhone()) {
-						shakeInput(phoneInput);
-						errEl.textContent = 'Введите корректный номер телефона';
-						valid = false;
-					}
-					if (
-						valid &&
-						emailInput &&
-						!EMAIL_REGEXP.test(emailInput.value.trim())
-					) {
-						shakeInput(emailInput);
-						errEl.textContent = 'Введите корректный email';
-						valid = false;
-					}
-					if (!valid) return;
-				}
-
-				submitBtn.disabled = true;
-				submitBtn.textContent = 'Отправляем...';
-				submitAndShowResult(
-					getPhone(),
-					emailInput ? emailInput.value.trim() : null
-				);
+			b.addEventListener('click', function () {
+				w.textContent = '';
+				var y = !0;
+				(!d &&
+					(l &&
+						!I() &&
+						(ee(l),
+						(w.textContent =
+							'\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0442\u0435\u043B\u0435\u0444\u043E\u043D\u0430'),
+						(y = !1)),
+					y &&
+						c &&
+						!qe.test(c.value.trim()) &&
+						(ee(c),
+						(w.textContent =
+							'\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043A\u043E\u0440\u0440\u0435\u043A\u0442\u043D\u044B\u0439 email'),
+						(y = !1)),
+					!y)) ||
+					((b.disabled = !0),
+					(b.textContent =
+						'\u041E\u0442\u043F\u0440\u0430\u0432\u043B\u044F\u0435\u043C...'),
+					re(I(), c ? c.value.trim() : null));
 			});
 		}
-
-		function setPlayedCookie() {
+		function Ce() {
 			try {
-				var ck = 'wq_p_' + KEY + '_' + (cfg.quizResetToken || '');
-				var d =
-					(cfg.quizCooldownDays || 0) > 0 ? cfg.quizCooldownDays : 365;
+				var t = 'wq_p_' + L + '_' + (e.quizResetToken || ''),
+					l = (e.quizCooldownDays || 0) > 0 ? e.quizCooldownDays : 365;
 				document.cookie =
-					ck +
+					t +
 					'=' +
 					encodeURIComponent(String(Date.now())) +
 					';expires=' +
-					new Date(Date.now() + d * 864e5).toUTCString() +
+					new Date(Date.now() + l * 864e5).toUTCString() +
 					';path=/;SameSite=Lax';
-			} catch (e) {}
+			} catch (c) {}
 		}
-
-		function submitAndShowResult(phone, email) {
-			var resultData = scoreAnswers(answers, questions, results);
-			setPlayedCookie();
-
-			fetch(API_BASE + '/quiz/' + KEY + '/lead', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					contact: phone || email || 'unknown',
-					phone: phone || undefined,
-					email: email || undefined,
-					answers: answers,
-					url: window.location.href
-				})
-			}).catch(function () {});
-
-			firePixel('quiz_lead');
-			showResult(resultData);
+		function re(t, l) {
+			var c = ke(a, n, r);
+			(Ce(),
+				fetch(Z + '/quiz/' + L + '/lead', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						contact: t || l || 'unknown',
+						phone: t || void 0,
+						email: l || void 0,
+						answers: a,
+						url: window.location.href
+					})
+				}).catch(function () {}),
+				E('quiz_lead'),
+				Ae(c));
 		}
-
-		function showResult(rd) {
-			render(
+		function Ae(t) {
+			v(
 				[
 					'<div class="wq-screen active" id="s-result">',
-					'<div class="wq-result-badge">&#10003; Ваш результат</div>',
-					rd
+					'<div class="wq-result-badge">&#10003; \u0412\u0430\u0448 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442</div>',
+					t
 						? [
-								'<div class="wq-result-title">' + esc(rd.title) + '</div>',
-								rd.description
+								'<div class="wq-result-title">' + u(t.title) + '</div>',
+								t.description
 									? '<div class="wq-result-desc">' +
-										esc(rd.description) +
+										u(t.description) +
 										'</div>'
 									: '',
-								rd.promoCode
+								t.promoCode
 									? [
 											'<div class="wq-promo">',
-											'<div class="wq-promo-label">Ваш промокод</div>',
+											'<div class="wq-promo-label">\u0412\u0430\u0448 \u043F\u0440\u043E\u043C\u043E\u043A\u043E\u0434</div>',
 											'<div class="wq-promo-code">' +
-												esc(rd.promoCode) +
+												u(t.promoCode) +
 												'</div>',
 											'</div>'
 										].join('')
 									: '',
-								rd.buttonText && rd.buttonUrl
+								t.buttonText && t.buttonUrl
 									? '<a class="wq-result-btn" href="' +
-										esc(rd.buttonUrl) +
+										u(t.buttonUrl) +
 										'" target="_blank" rel="noopener noreferrer">' +
-										esc(rd.buttonText) +
+										u(t.buttonText) +
 										'</a>'
 									: ''
 							].join('')
 						: [
-								'<div class="wq-result-title">Спасибо!</div>',
-								'<div class="wq-result-desc">Ваши ответы приняты. Мы свяжемся с вами в ближайшее время.</div>'
+								'<div class="wq-result-title">\u0421\u043F\u0430\u0441\u0438\u0431\u043E!</div>',
+								'<div class="wq-result-desc">\u0412\u0430\u0448\u0438 \u043E\u0442\u0432\u0435\u0442\u044B \u043F\u0440\u0438\u043D\u044F\u0442\u044B. \u041C\u044B \u0441\u0432\u044F\u0436\u0435\u043C\u0441\u044F \u0441 \u0432\u0430\u043C\u0438 \u0432 \u0431\u043B\u0438\u0436\u0430\u0439\u0448\u0435\u0435 \u0432\u0440\u0435\u043C\u044F.</div>'
 							].join(''),
 					'</div>'
 				].join('')
 			);
 		}
-
-		function showAlready() {
-			render(
+		function oe() {
+			v(
 				[
 					'<div class="wq-screen active">',
-					'<div class="wq-already-icon">🎉</div>',
+					'<div class="wq-already-icon">\u{1F389}</div>',
 					'<div class="wq-already-title">' +
-						esc(cfg.alreadyPlayedTitle || 'Вы уже проходили этот квиз!') +
+						u(
+							e.alreadyPlayedTitle ||
+								'\u0412\u044B \u0443\u0436\u0435 \u043F\u0440\u043E\u0445\u043E\u0434\u0438\u043B\u0438 \u044D\u0442\u043E\u0442 \u043A\u0432\u0438\u0437!'
+						) +
 						'</div>',
 					'<div class="wq-already-desc">' +
-						esc(
-							cfg.alreadyPlayedSubtitle ||
-								'Каждый посетитель может пройти квиз только один раз'
+						u(
+							e.alreadyPlayedSubtitle ||
+								'\u041A\u0430\u0436\u0434\u044B\u0439 \u043F\u043E\u0441\u0435\u0442\u0438\u0442\u0435\u043B\u044C \u043C\u043E\u0436\u0435\u0442 \u043F\u0440\u043E\u0439\u0442\u0438 \u043A\u0432\u0438\u0437 \u0442\u043E\u043B\u044C\u043A\u043E \u043E\u0434\u0438\u043D \u0440\u0430\u0437'
 						) +
 						'</div>',
 					'</div>'
 				].join('')
 			);
 		}
-
-		// ── Button positioning ─────────────────────────────────────────────────
-
-		var qsz = cfg.buttonSize ?? 60;
-		var btnSvg = quizBtn.querySelector('#wq-btn-svg');
-		if (btnSvg) {
-			btnSvg.setAttribute('width', qsz + '');
-			btnSvg.setAttribute('height', qsz + '');
+		var S = (pe = e.buttonSize) != null ? pe : 60,
+			U = o.querySelector('#wq-btn-svg');
+		U &&
+			(U.setAttribute('width', S + ''), U.setAttribute('height', S + ''));
+		var H = o.querySelector('#wq-btn-label');
+		if (H) {
+			var Ie = Math.max(8, Math.round((S / 60) * 11)),
+				Le = Math.max(2, Math.round((S / 60) * 3)),
+				Be = Math.max(6, Math.round((S / 60) * 12));
+			((H.style.fontSize = Ie + 'px'),
+				(H.style.padding = Le + 'px ' + Be + 'px'));
 		}
-		var qLabelEl = quizBtn.querySelector('#wq-btn-label');
-		if (qLabelEl) {
-			var qlf = Math.max(8, Math.round((qsz / 60) * 11));
-			var qlph = Math.max(2, Math.round((qsz / 60) * 3));
-			var qlpv = Math.max(6, Math.round((qsz / 60) * 12));
-			qLabelEl.style.fontSize = qlf + 'px';
-			qLabelEl.style.padding = qlph + 'px ' + qlpv + 'px';
+		var A = e.openButtonColor || i,
+			ie = o.querySelector('#wqGrad');
+		if (ie) {
+			var j = ie.querySelectorAll('stop');
+			(j[0] && j[0].setAttribute('stop-color', A),
+				j[1] && j[1].setAttribute('stop-color', A));
 		}
-		var _openBtnColor = cfg.openButtonColor || _accent;
-		var gradEl = quizBtn.querySelector('#wqGrad');
-		if (gradEl) {
-			var stops = gradEl.querySelectorAll('stop');
-			if (stops[0]) stops[0].setAttribute('stop-color', _openBtnColor);
-			if (stops[1]) stops[1].setAttribute('stop-color', _openBtnColor);
-		}
-		var iconEl = quizBtn.querySelector('#wq-btn-icon');
-		if (iconEl) {
-			iconEl.style.filter =
+		var ae = o.querySelector('#wq-btn-icon');
+		ae &&
+			(ae.style.filter =
 				'drop-shadow(0 6px 20px ' +
-				hexToRgba(_openBtnColor, 0.55) +
-				') drop-shadow(0 2px 6px rgba(0,0,0,0.3))';
-		}
-		var qBtnLabel = quizBtn.querySelector('#wq-btn-label');
-		if (qBtnLabel) {
-			qBtnLabel.style.background =
-				'linear-gradient(135deg,' +
-				_openBtnColor +
-				',' +
-				_openBtnColor +
-				')';
-			qBtnLabel.style.boxShadow =
-				'0 3px 12px ' + hexToRgba(_openBtnColor, 0.5);
-		}
-
-		quizBtn.style.bottom = (cfg.buttonBottom ?? 3) + '%';
-		updateBubbleSide(cfg.buttonSide || 'right');
-		var bubbleText = document.getElementById('wq-bubble-text');
-		if (bubbleText) {
-			bubbleText.textContent =
-				cfg.bubbleText || cfg.title || 'Пройдите квиз!';
-		}
-		var bubbleEl = document.getElementById('wq-bubble');
-		var bubbleClose = document.getElementById('wq-bubble-close');
-		if (bubbleEl && cfg.bubbleEnabled === false) {
-			bubbleEl.style.display = 'none';
-		}
-		if (bubbleClose) {
-			bubbleClose.addEventListener('click', function (e) {
-				e.stopPropagation();
-				hideBubble();
-			});
-		}
-		if (bubbleEl) {
-			bubbleEl.addEventListener('click', function (e) {
-				e.stopPropagation();
-				hideBubble();
-				openWidget();
-			});
-		}
-		if (cfg.buttonSide === 'left') {
-			quizBtn.style.right = 'auto';
-			quizBtn.style.left = (cfg.buttonOffset ?? 3) + '%';
-		} else {
-			quizBtn.style.left = 'auto';
-			quizBtn.style.right = (cfg.buttonOffset ?? 3) + '%';
-		}
-
-		// ── Already played check ──────────────────────────────────────────────
-
-		var hasPlayed = false;
+				p(A, 0.55) +
+				') drop-shadow(0 2px 6px rgba(0,0,0,0.3))');
+		var G = o.querySelector('#wq-btn-label');
+		(G &&
+			((G.style.background =
+				'linear-gradient(135deg,' + A + ',' + A + ')'),
+			(G.style.boxShadow = '0 3px 12px ' + p(A, 0.5))),
+			(o.style.bottom = ((ue = e.buttonBottom) != null ? ue : 3) + '%'),
+			ye(e.buttonSide || 'right'));
+		var se = document.getElementById('wq-bubble-text');
+		se &&
+			(se.textContent =
+				e.bubbleText ||
+				e.title ||
+				'\u041F\u0440\u043E\u0439\u0434\u0438\u0442\u0435 \u043A\u0432\u0438\u0437!');
+		var M = document.getElementById('wq-bubble'),
+			de = document.getElementById('wq-bubble-close');
+		(M && e.bubbleEnabled === !1 && (M.style.display = 'none'),
+			de &&
+				de.addEventListener('click', function (t) {
+					(t.stopPropagation(), D());
+				}),
+			M &&
+				M.addEventListener('click', function (t) {
+					(t.stopPropagation(), D(), z());
+				}),
+			e.buttonSide === 'left'
+				? ((o.style.right = 'auto'),
+					(o.style.left = ((be = e.buttonOffset) != null ? be : 3) + '%'))
+				: ((o.style.left = 'auto'),
+					(o.style.right =
+						((fe = e.buttonOffset) != null ? fe : 3) + '%')));
+		var _ = !1;
 		try {
-			var cookieKey = 'wq_p_' + KEY + '_' + (cfg.quizResetToken || '');
-			var stored = document.cookie.match(
-				'(?:^|;)\\s*' + cookieKey + '=([^;]*)'
-			);
-			if (stored) {
-				var ts = decodeURIComponent(stored[1]);
-				var cooldownMs = (cfg.quizCooldownDays || 0) * 864e5;
-				if (cooldownMs === 0) {
-					hasPlayed = true;
-				} else {
-					hasPlayed = Date.now() - parseInt(ts, 10) < cooldownMs;
-				}
+			var Se = 'wq_p_' + L + '_' + (e.quizResetToken || ''),
+				le = document.cookie.match('(?:^|;)\\s*' + Se + '=([^;]*)');
+			if (le) {
+				var Pe = decodeURIComponent(le[1]),
+					ce = (e.quizCooldownDays || 0) * 864e5;
+				ce === 0 ? (_ = !0) : (_ = Date.now() - parseInt(Pe, 10) < ce);
 			}
-		} catch (e) {}
-
-		// Server-side IP check takes priority
-		if (cfg.hasPlayedByIp) hasPlayed = true;
-
-		if (hasPlayed && cfg.hideIfPlayed) {
-			quizBtn.style.display = 'none';
+		} catch (t) {}
+		if ((e.hasPlayedByIp && (_ = !0), _ && e.hideIfPlayed)) {
+			o.style.display = 'none';
 			return;
 		}
-
-		if (cfg.autoOpenDelay && !hasPlayed)
-			setTimeout(openWidget, cfg.autoOpenDelay * 1000);
-
-		if (window.winquizAutoOpen) {
-			closeBtn.style.display = 'none';
-			overlay.style.pointerEvents = 'none';
-			setTimeout(openWidget, 300);
-			if (hasPlayed) {
-				setTimeout(showAlready, 350);
-			} else {
-				showWelcome();
-			}
-		} else {
-			if (hasPlayed) {
-				showAlready();
-			} else {
-				showWelcome();
-			}
-			quizBtn.style.display = 'flex';
-			if (cfg.bubbleEnabled !== false) {
-				setTimeout(function () {
-					var b = document.getElementById('wq-bubble');
-					if (!b || wrap.classList.contains('visible')) return;
-					b.style.display = 'block';
-					requestAnimationFrame(function () {
-						requestAnimationFrame(function () {
-							b.style.opacity = '1';
-							b.style.transform = 'translateY(-50%) scale(1)';
-						});
-					});
-				}, 2000);
-			}
-			stopBtnAnim();
-			startBtnAnim();
-		}
+		(e.autoOpenDelay && !_ && setTimeout(z, e.autoOpenDelay * 1e3),
+			window.winquizAutoOpen
+				? ((J.style.display = 'none'),
+					(Q.style.pointerEvents = 'none'),
+					setTimeout(z, 300),
+					_ ? setTimeout(oe, 350) : te())
+				: (_ ? oe() : te(),
+					(o.style.display = 'flex'),
+					e.bubbleEnabled !== !1 &&
+						setTimeout(function () {
+							var t = document.getElementById('wq-bubble');
+							!t ||
+								B.classList.contains('visible') ||
+								((t.style.display = 'block'),
+								requestAnimationFrame(function () {
+									requestAnimationFrame(function () {
+										((t.style.opacity = '1'),
+											(t.style.transform = 'translateY(-50%) scale(1)'));
+									});
+								}));
+						}, 2e3),
+					K(),
+					T()));
 	}
-
-	// ─── Boot ─────────────────────────────────────────────────────────────────
-
-	function showDisabledPage() {
-		var el = document.createElement('div');
-		el.style.cssText =
-			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
-		el.innerHTML =
-			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">Квиз отключён</h1><p style="font-size:0.9rem;color:#8080a0;margin-bottom:28px;max-width:300px">Этот квиз в данный момент отключён.</p><a href="https://winwidget.ru/widgets" style="display:inline-block;padding:11px 28px;background:#4705fb;color:#fff;border-radius:10px;font-weight:700;font-size:0.9rem;text-decoration:none">Перейти в кабинет</a>';
-		document.body.appendChild(el);
+	function _e() {
+		var e = document.createElement('div');
+		((e.style.cssText =
+			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647'),
+			(e.innerHTML =
+				'<div style="font-size:3rem;margin-bottom:16px">\u{1F512}</div><h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">\u041A\u0432\u0438\u0437 \u043E\u0442\u043A\u043B\u044E\u0447\u0451\u043D</h1><p style="font-size:0.9rem;color:#8080a0;margin-bottom:28px;max-width:300px">\u042D\u0442\u043E\u0442 \u043A\u0432\u0438\u0437 \u0432 \u0434\u0430\u043D\u043D\u044B\u0439 \u043C\u043E\u043C\u0435\u043D\u0442 \u043E\u0442\u043A\u043B\u044E\u0447\u0451\u043D.</p><a href="https://winwidget.ru/widgets" style="display:inline-block;padding:11px 28px;background:#4705fb;color:#fff;border-radius:10px;font-weight:700;font-size:0.9rem;text-decoration:none">\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u0432 \u043A\u0430\u0431\u0438\u043D\u0435\u0442</a>'),
+			document.body.appendChild(e));
 	}
-
-	Promise.all([
-		ensurePhoneHelper(),
-		fetch(API_BASE + '/quiz/' + KEY + '/config')
-	])
-		.then(function (result) {
-			var r = result[1];
-			if (!r.ok) {
-				console.warn(
-					'[winquiz] Widget not found or inactive (' + r.status + ')'
-				);
-				return null;
-			}
-			return r.json();
+	Promise.all([ve(), fetch(Z + '/quiz/' + L + '/config')])
+		.then(function (e) {
+			var n = e[1];
+			return n.ok
+				? n.json()
+				: (console.warn(
+						'[winquiz] Widget not found or inactive (' + n.status + ')'
+					),
+					null);
 		})
-		.then(function (server) {
-			if (server === null) return;
-			if (!server || !server.isActive) {
-				console.warn('[winquiz] Widget is inactive');
-				if (window.winquizAutoOpen) showDisabledPage();
-				return;
+		.then(function (e) {
+			if (e !== null) {
+				if (!e || !e.isActive) {
+					(console.warn('[winquiz] Widget is inactive'),
+						window.winquizAutoOpen && _e());
+					return;
+				}
+				Ee(e);
 			}
-			initWidget(server);
 		})
 		.catch(function (e) {
 			console.error('[winquiz] failed to load config', e);

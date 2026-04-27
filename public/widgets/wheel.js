@@ -1,73 +1,69 @@
 (function () {
-	// Защита от двойного выполнения (React StrictMode и т.п.)
-	if (window.__winwidgetScriptRunning) {
-		return;
-	}
-	window.__winwidgetScriptRunning = true;
-
-	// Захватываем currentScript синхронно — после async он будет null
-	var _currentScript = document.currentScript;
-
-	var API_BASE = (() => {
+	if (window.__winwidgetScriptRunning) return;
+	window.__winwidgetScriptRunning = !0;
+	var k = document.currentScript,
+		tt = (() => {
+			try {
+				const t = new URL((k == null ? void 0 : k.src) || location.href);
+				return t.hostname === 'localhost'
+					? `${t.origin}/api`
+					: `${t.origin}/api`;
+			} catch (t) {
+				return 'https://winwidget.ru/api';
+			}
+		})();
+	const p = document.createElement('div'),
+		gt = '64px';
+	function yt(t) {
 		try {
-			const src = new URL(_currentScript?.src || location.href);
-			if (src.hostname === 'localhost') return `${src.origin}/api`;
-			return `${src.origin}/api`;
-		} catch {
-			return 'https://winwidget.ru/api';
-		}
-	})();
-
-	const giftBtn = document.createElement('div');
-	const giftFontSize = '64px';
-
-	function getWidgetAssetUrl(fileName) {
-		try {
-			const src = new URL(_currentScript?.src || location.href);
-			src.pathname = src.pathname.replace(/\/[^/]*$/, '/' + fileName);
-			src.search = '';
-			src.hash = '';
-			return src.toString();
-		} catch {
-			return 'https://winwidget.ru/widgets/' + fileName;
+			const c = new URL((k == null ? void 0 : k.src) || location.href);
+			return (
+				(c.pathname = c.pathname.replace(/\/[^/]*$/, '/' + t)),
+				(c.search = ''),
+				(c.hash = ''),
+				c.toString()
+			);
+		} catch (c) {
+			return 'https://winwidget.ru/widgets/' + t;
 		}
 	}
-
-	function loadExternalScript(src) {
-		return new Promise((resolve, reject) => {
-			const existing = document.querySelector('script[src="' + src + '"]');
-			if (existing) {
-				existing.addEventListener('load', resolve, { once: true });
-				existing.addEventListener('error', reject, { once: true });
-				if (window.winwidgetPhone) resolve();
+	function vt(t) {
+		return new Promise((c, l) => {
+			const y = document.querySelector('script[src="' + t + '"]');
+			if (y) {
+				(y.addEventListener('load', c, { once: !0 }),
+					y.addEventListener('error', l, { once: !0 }),
+					window.winwidgetPhone && c());
 				return;
 			}
-			const script = document.createElement('script');
-			script.src = src;
-			script.async = true;
-			script.onload = () => {
-				resolve();
-			};
-			script.onerror = reject;
-			document.head.appendChild(script);
+			const b = document.createElement('script');
+			((b.src = t),
+				(b.async = !0),
+				(b.onload = () => {
+					c();
+				}),
+				(b.onerror = l),
+				document.head.appendChild(b));
 		});
 	}
-
-	function ensurePhoneHelper() {
-		if (window.winwidgetPhone) return window.winwidgetPhone.load();
-		return loadExternalScript(
-			getWidgetAssetUrl('helpers/winwidget-phone.js')
-		)
-			.then(() =>
-				window.winwidgetPhone ? window.winwidgetPhone.load() : null
-			)
-			.catch(e => {
-				console.warn('[winwidget] Failed to load phone formatter:', e);
-				return null;
-			});
+	function At() {
+		return window.winwidgetPhone
+			? window.winwidgetPhone.load()
+			: vt(yt('helpers/winwidget-phone.js'))
+					.then(() =>
+						window.winwidgetPhone ? window.winwidgetPhone.load() : null
+					)
+					.catch(
+						t => (
+							console.warn(
+								'[winwidget] Failed to load phone formatter:',
+								t
+							),
+							null
+						)
+					);
 	}
-
-	giftBtn.innerHTML = `
+	((p.innerHTML = `
   <div id="ww-bubble" style="
     display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);
     background:#fff;border-radius:18px;padding:12px 34px 12px 16px;
@@ -83,7 +79,7 @@
       font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;
       display:flex;align-items:center;justify-content:center;
       width:16px;height:16px;border-radius:50%;
-    ">✕</button>
+    ">\u2715</button>
     <p id="ww-bubble-text" style="
       margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;
     "></p>
@@ -95,10 +91,10 @@
     "></div>
   </div>
   <div id="ww-btn-emoji" style="
-    font-size:${giftFontSize};line-height:1;
+    font-size:${gt};line-height:1;
     filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2));
     transform-origin:50% 100%;
-  ">🎁</div>
+  ">\u{1F381}</div>
   <div id="ww-btn-label" style="
     margin-top:6px;
     background:linear-gradient(135deg,#ffd700,#ff8c00);
@@ -106,9 +102,9 @@
     padding:3px 12px;border-radius:20px;white-space:nowrap;
     letter-spacing:0.8px;text-transform:uppercase;
     box-shadow:0 3px 10px rgba(255,140,0,0.5);
-  ">Приз!</div>
-`;
-	giftBtn.style.cssText = `
+  ">\u041F\u0440\u0438\u0437!</div>
+`),
+		(p.style.cssText = `
     position: fixed;
     bottom: 28px;
     right: max(28px, env(safe-area-inset-right, 0px) + 28px);
@@ -121,13 +117,11 @@
     max-width: calc(100vw - 56px);
     transition: opacity 350ms ease, transform 350ms cubic-bezier(.34,1.56,.64,1);
     user-select: none;
-`;
-	giftBtn.style.display = 'none'; // скрыта до загрузки конфига
-	document.body.appendChild(giftBtn);
-
-	/************************ Анимацаия плавающей кнопки открытия виджета ************************/
-	const styleAnimGiftBtn = document.createElement('style');
-	styleAnimGiftBtn.textContent = `
+`),
+		(p.style.display = 'none'),
+		document.body.appendChild(p));
+	const et = document.createElement('style');
+	((et.textContent = `
 @keyframes gift-bounce {
   0%   { transform: translateY(0) scale(1); }
   10%  { transform: translateY(-16px) scale(1.1); }
@@ -150,170 +144,137 @@
 #ww-bubble:hover{opacity:0.95!important}
 #ww-bubble-close:hover{color:#888!important}
 @media(max-width:480px){#ww-bubble{display:none!important}}
-`;
-
-	document.head.appendChild(styleAnimGiftBtn);
-
-	let giftAnimationActive = false;
-	let giftIdleTimeout = null;
-	let _giftPulseEnabled = true; // обновляется из initWidget
-
-	function startGiftAnimation() {
-		if (giftAnimationActive) return;
-		giftAnimationActive = true;
-
-		giftBtn.style.animation = [
-			'gift-bounce 3s ease-in-out infinite',
-			'gift-sway 4s ease-in-out infinite',
-			_giftPulseEnabled ? 'gift-pulse 2.5s ease-in-out infinite' : ''
-		]
-			.filter(Boolean)
-			.join(', ');
+`),
+		document.head.appendChild(et));
+	let W = !1,
+		Qt = null,
+		nt = !0;
+	function q() {
+		W ||
+			((W = !0),
+			(p.style.animation = [
+				'gift-bounce 3s ease-in-out infinite',
+				'gift-sway 4s ease-in-out infinite',
+				nt ? 'gift-pulse 2.5s ease-in-out infinite' : ''
+			]
+				.filter(Boolean)
+				.join(', ')));
 	}
-
-	function stopGiftAnimation() {
-		giftAnimationActive = false;
-		giftBtn.style.animation = 'none';
+	function V() {
+		((W = !1), (p.style.animation = 'none'));
 	}
-
-	function updateBubbleSide(side) {
-		var bubble = document.getElementById('ww-bubble');
-		var tail = document.getElementById('ww-bubble-tail');
-		if (!bubble || !tail) return;
-		if (side === 'left') {
-			bubble.style.left = 'calc(100% + 14px)';
-			bubble.style.right = 'auto';
-			tail.style.left = '-8px';
-			tail.style.right = 'auto';
-			tail.style.borderLeft = 'none';
-			tail.style.borderRight = '8px solid #fff';
-		} else {
-			bubble.style.right = 'calc(100% + 14px)';
-			bubble.style.left = 'auto';
-			tail.style.right = '-8px';
-			tail.style.left = 'auto';
-			tail.style.borderRight = 'none';
-			tail.style.borderLeft = '8px solid #fff';
-		}
+	function kt(t) {
+		var c = document.getElementById('ww-bubble'),
+			l = document.getElementById('ww-bubble-tail');
+		!c ||
+			!l ||
+			(t === 'left'
+				? ((c.style.left = 'calc(100% + 14px)'),
+					(c.style.right = 'auto'),
+					(l.style.left = '-8px'),
+					(l.style.right = 'auto'),
+					(l.style.borderLeft = 'none'),
+					(l.style.borderRight = '8px solid #fff'))
+				: ((c.style.right = 'calc(100% + 14px)'),
+					(c.style.left = 'auto'),
+					(l.style.right = '-8px'),
+					(l.style.left = 'auto'),
+					(l.style.borderRight = 'none'),
+					(l.style.borderLeft = '8px solid #fff')));
 	}
-
-	function hideBubble() {
-		var bubble = document.getElementById('ww-bubble');
-		if (!bubble || bubble.style.display === 'none') return;
-		bubble.style.opacity = '0';
-		bubble.style.transform = 'translateY(-50%) scale(0.85)';
-		setTimeout(function () {
-			bubble.style.display = 'none';
-		}, 300);
+	function H() {
+		var t = document.getElementById('ww-bubble');
+		!t ||
+			t.style.display === 'none' ||
+			((t.style.opacity = '0'),
+			(t.style.transform = 'translateY(-50%) scale(0.85)'),
+			setTimeout(function () {
+				t.style.display = 'none';
+			}, 300));
 	}
-
 	setTimeout(() => {
-		startGiftAnimation();
-	}, 4000);
-
-	let scrollTriggered = false;
-
+		q();
+	}, 4e3);
+	let ot = !1;
 	window.addEventListener(
 		'scroll',
 		() => {
-			if (scrollTriggered) return;
-			scrollTriggered = true;
-
-			giftBtn.animate(
-				[
-					{ transform: 'translateY(0) rotate(0deg)' },
-					{ transform: 'translateY(-250px) rotate(-6deg)' },
-					{ transform: 'translateY(0) rotate(0deg)' }
-				],
-				{
-					duration: 2300,
-					easing: 'cubic-bezier(.34,1.56,.64,1)'
-				}
-			);
-
-			startGiftAnimation();
+			ot ||
+				((ot = !0),
+				p.animate(
+					[
+						{ transform: 'translateY(0) rotate(0deg)' },
+						{ transform: 'translateY(-250px) rotate(-6deg)' },
+						{ transform: 'translateY(0) rotate(0deg)' }
+					],
+					{ duration: 2300, easing: 'cubic-bezier(.34,1.56,.64,1)' }
+				),
+				q());
 		},
-		{ passive: true }
+		{ passive: !0 }
 	);
-	/************************/
-
-	async function initWidget(config) {
-		function firePixelEvent(goalName) {
-			if (config.yandexMetrikaId && typeof ym === 'function') {
+	async function Et(t) {
+		var pt, ut, ht, ft;
+		function c(e) {
+			if (t.yandexMetrikaId && typeof ym == 'function')
 				try {
-					ym(Number(config.yandexMetrikaId), 'reachGoal', goalName);
-				} catch (e) {}
-			}
-			if (config.vkPixelId && window.VK && typeof VK.Goal === 'function') {
+					ym(Number(t.yandexMetrikaId), 'reachGoal', e);
+				} catch (r) {}
+			if (t.vkPixelId && window.VK && typeof VK.Goal == 'function')
 				try {
-					VK.Goal(goalName);
-				} catch (e) {}
-			}
+					VK.Goal(e);
+				} catch (r) {}
 			if (
-				config.roistatEnabled &&
+				t.roistatEnabled &&
 				window.roistat &&
-				typeof window.roistat.event === 'object' &&
-				typeof window.roistat.event.send === 'function'
-			) {
+				typeof window.roistat.event == 'object' &&
+				typeof window.roistat.event.send == 'function'
+			)
 				try {
-					window.roistat.event.send(goalName);
-				} catch (e) {}
-			}
+					window.roistat.event.send(e);
+				} catch (r) {}
 		}
-
-		function openWidget() {
-			hideBubble();
-			mainWrapper.classList.remove('hidden');
-			mainWrapper.classList.add('visible');
-			// Блокируем скролл страницы
-			document.body.style.overflow = 'hidden';
-			document.body.style.position = 'fixed';
-			document.body.style.width = '100%';
-			giftBtn.style.opacity = '0';
-			giftBtn.style.pointerEvents = 'none';
-			giftBtn.style.transform = 'scale(0.8)';
-			stopGiftAnimation();
-			firePixelEvent('ip3_open');
+		function l() {
+			(H(),
+				M.classList.remove('hidden'),
+				M.classList.add('visible'),
+				(document.body.style.overflow = 'hidden'),
+				(document.body.style.position = 'fixed'),
+				(document.body.style.width = '100%'),
+				(p.style.opacity = '0'),
+				(p.style.pointerEvents = 'none'),
+				(p.style.transform = 'scale(0.8)'),
+				V(),
+				c('ip3_open'));
 		}
-
-		function closeWidget() {
-			mainWrapper.classList.remove('visible');
-			mainWrapper.classList.add('hidden');
-			// Разблокируем скролл страницы
-			document.body.style.overflow = '';
-			document.body.style.position = '';
-			document.body.style.width = '';
-			if (!window.winwidgetAutoOpen) {
-				giftBtn.style.opacity = '1';
-				giftBtn.style.pointerEvents = 'auto';
-				giftBtn.style.transform = 'scale(1)';
-				startGiftAnimation();
-			}
+		function y() {
+			(M.classList.remove('visible'),
+				M.classList.add('hidden'),
+				(document.body.style.overflow = ''),
+				(document.body.style.position = ''),
+				(document.body.style.width = ''),
+				window.winwidgetAutoOpen ||
+					((p.style.opacity = '1'),
+					(p.style.pointerEvents = 'auto'),
+					(p.style.transform = 'scale(1)'),
+					q()));
 		}
-
-		//Создаем HTML контейнер для ShadowDOM
-		const host = document.createElement('div');
-		host.id = 'wheel-widget-host';
-		document.body.appendChild(host);
-
-		// //Инициализируем Shadow DOM
-		const shadow = host.attachShadow({ mode: 'open' });
-
-		//CSS
-		const style = document.createElement('style');
-
-		style.textContent = `
+		const b = document.createElement('div');
+		((b.id = 'wheel-widget-host'), document.body.appendChild(b));
+		const u = b.attachShadow({ mode: 'open' }),
+			N = document.createElement('style');
+		((N.textContent = `
     :host {
-      --spin-duration: ${config.spinDuration || 5}s;
+      --spin-duration: ${t.spinDuration || 5}s;
       --wheel-size: 300px;
-      --accent: ${config.widgetColor};
+      --accent: ${t.widgetColor};
       position: fixed;
       z-index: 10000;
       top: 0;
     }
     * { box-sizing: border-box; }
 
-    /* ── Обёртка на весь экран ── */
+    /* \u2500\u2500 \u041E\u0431\u0451\u0440\u0442\u043A\u0430 \u043D\u0430 \u0432\u0435\u0441\u044C \u044D\u043A\u0440\u0430\u043D \u2500\u2500 */
     #main-wrapper {
       width: 100vw;
       height: 100dvh;
@@ -325,7 +286,7 @@
       padding: 12px;
     }
 
-    /* ── Полупрозрачный фон ── */
+    /* \u2500\u2500 \u041F\u043E\u043B\u0443\u043F\u0440\u043E\u0437\u0440\u0430\u0447\u043D\u044B\u0439 \u0444\u043E\u043D \u2500\u2500 */
     #overlay {
       position: fixed;
       inset: 0;
@@ -336,7 +297,7 @@
       touch-action: none;
     }
 
-    /* ── Карточка ── */
+    /* \u2500\u2500 \u041A\u0430\u0440\u0442\u043E\u0447\u043A\u0430 \u2500\u2500 */
     #banner-wrapper {
       position: relative;
       z-index: 1000;
@@ -344,7 +305,7 @@
       flex-direction: column;
       align-items: center;
       padding: 28px 20px 24px;
-      background: ${config.bgColor};
+      background: ${t.bgColor};
       border-radius: 20px;
       box-shadow:
         0 0 0 1px rgba(255,255,255,0.08),
@@ -358,7 +319,7 @@
       justify-content: center;
     }
 
-    /* Декоративный блик сверху */
+    /* \u0414\u0435\u043A\u043E\u0440\u0430\u0442\u0438\u0432\u043D\u044B\u0439 \u0431\u043B\u0438\u043A \u0441\u0432\u0435\u0440\u0445\u0443 */
     #banner-wrapper::before {
       content: '';
       position: absolute;
@@ -368,7 +329,7 @@
       pointer-events: none;
     }
 
-    /* ── Контент (форма + колесо) ── */
+    /* \u2500\u2500 \u041A\u043E\u043D\u0442\u0435\u043D\u0442 (\u0444\u043E\u0440\u043C\u0430 + \u043A\u043E\u043B\u0435\u0441\u043E) \u2500\u2500 */
     #banner-content {
       display: flex;
       flex-direction: column;
@@ -378,7 +339,7 @@
       gap: 24px;
     }
 
-    /* ── Колесо ── */
+    /* \u2500\u2500 \u041A\u043E\u043B\u0435\u0441\u043E \u2500\u2500 */
     #wheel-wrapper {
       position: relative;
       width: var(--wheel-size);
@@ -392,7 +353,7 @@
     }
     .sector text { pointer-events: none; user-select: none; }
 
-    /* Стрелка */
+    /* \u0421\u0442\u0440\u0435\u043B\u043A\u0430 */
     #wheel-arrow {
       position: absolute;
       top: 50%;
@@ -406,7 +367,7 @@
     }
     #wheel-arrow svg { width: 100%; height: 100%; display: block; }
 
-    /* ── Панель управления ── */
+    /* \u2500\u2500 \u041F\u0430\u043D\u0435\u043B\u044C \u0443\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u0438\u044F \u2500\u2500 */
     #control-wrapper {
       display: flex;
       flex-direction: column;
@@ -415,7 +376,7 @@
       width: 100%;
     }
 
-    /* Заголовок */
+    /* \u0417\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A */
     #title-widget {
       font-size: clamp(1.1rem, 4.5vw, 1.75rem);
       font-weight: 800;
@@ -429,7 +390,7 @@
       word-break: break-word;
     }
 
-    /* Подзаголовок */
+    /* \u041F\u043E\u0434\u0437\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A */
     #subtitle-widget {
       width: 100%;
       color: rgba(255,255,255,0.72);
@@ -439,7 +400,7 @@
       line-height: 1.5;
     }
 
-    /* Инпуты */
+    /* \u0418\u043D\u043F\u0443\u0442\u044B */
     #name-input,
     #phone-input,
     #email-input {
@@ -468,7 +429,7 @@
       box-shadow: 0 0 0 3px rgba(255,255,255,0.06);
     }
 
-    /* Кнопка КРУТИТЬ */
+    /* \u041A\u043D\u043E\u043F\u043A\u0430 \u041A\u0420\u0423\u0422\u0418\u0422\u042C */
     #spin {
       width: 100%;
       padding: 0 24px;
@@ -505,7 +466,7 @@
       transform: none;
     }
 
-    /* Ссылки политики */
+    /* \u0421\u0441\u044B\u043B\u043A\u0438 \u043F\u043E\u043B\u0438\u0442\u0438\u043A\u0438 */
     #link-policy, #link-consent, #link-offer {
       color: rgba(255,255,255,0.75);
       text-decoration: underline;
@@ -517,7 +478,7 @@
       color: #ffffff;
     }
 
-    /* Брендинг */
+    /* \u0411\u0440\u0435\u043D\u0434\u0438\u043D\u0433 */
     #dev-info {
       font-size: 12px;
       position: absolute;
@@ -532,7 +493,7 @@
     }
     #dev-info-text:hover { color: #ffc832; }
 
-    /* Конфетти */
+    /* \u041A\u043E\u043D\u0444\u0435\u0442\u0442\u0438 */
     .confetti {
       position: absolute;
       width: 8px;
@@ -551,7 +512,7 @@
     .visible { display: flex !important; }
     .hidden { display: none !important; }
 
-    /* Кнопка закрытия */
+    /* \u041A\u043D\u043E\u043F\u043A\u0430 \u0437\u0430\u043A\u0440\u044B\u0442\u0438\u044F */
     #widget-close {
       position: absolute;
       top: 14px;
@@ -581,7 +542,7 @@
       stroke-linecap: round;
     }
 
-    /* ── Desktop ── */
+    /* \u2500\u2500 Desktop \u2500\u2500 */
     @media (min-width: 768px) {
       :host { --wheel-size: 360px; }
       #main-wrapper { align-items: center; }
@@ -605,7 +566,7 @@
       #main-wrapper { height: 100vh; }
     }
 
-    /* ── Checkbox ── */
+    /* \u2500\u2500 Checkbox \u2500\u2500 */
     #checkbox-text {
       color: rgba(255,255,255,0.65);
       font-size: 13px;
@@ -666,16 +627,14 @@
       80%  { transform: translateX(4px); }
       100% { transform: translateX(0); }
     }
-  `;
-
-		shadow.appendChild(style);
-
-		const container = document.createElement('div');
-		container.innerHTML = `
+  `),
+			u.appendChild(N));
+		const E = document.createElement('div');
+		((E.innerHTML = `
   <div id='main-wrapper'>
     <div id="overlay"></div>
     <div id="banner-wrapper">
-      <button id="widget-close" aria-label="Закрыть">
+      <button id="widget-close" aria-label="\u0417\u0430\u043A\u0440\u044B\u0442\u044C">
         <svg viewBox="0 0 24 24" fill="none">
           <line x1="6" y1="6" x2="18" y2="18"/>
           <line x1="18" y1="6" x2="6" y2="18"/>
@@ -684,25 +643,25 @@
 
       <div id="banner-content">
         <div id='control-wrapper'>
-          <h1 id='title-widget'>${config.title}</h1>
-          <p id='subtitle-widget'>${config.subtitle}</p>
-          ${config.nameFieldActive ? `<input type="text"  placeholder="✦  Ваше имя"    id="name-input"  autocomplete="name" />` : ``}
-          ${config.phoneFieldActive ? `<input type="tel"   placeholder="✦  Ваш телефон" id="phone-input" autocomplete="tel" />` : ``}
-          ${config.emailFieldActive ? `<input type="email" placeholder="✦  Ваш email"   id="email-input" autocomplete="email" />` : ``}
+          <h1 id='title-widget'>${t.title}</h1>
+          <p id='subtitle-widget'>${t.subtitle}</p>
+          ${t.nameFieldActive ? '<input type="text"  placeholder="\u2726  \u0412\u0430\u0448\u0435 \u0438\u043C\u044F"    id="name-input"  autocomplete="name" />' : ''}
+          ${t.phoneFieldActive ? '<input type="tel"   placeholder="\u2726  \u0412\u0430\u0448 \u0442\u0435\u043B\u0435\u0444\u043E\u043D" id="phone-input" autocomplete="tel" />' : ''}
+          ${t.emailFieldActive ? '<input type="email" placeholder="\u2726  \u0412\u0430\u0448 email"   id="email-input" autocomplete="email" />' : ''}
           ${
-						config.checkboxPolicyActive
+						t.checkboxPolicyActive
 							? `
             <label id="custom-checkbox">
               <input type="checkbox" id="policy-input" />
               <span id="checkmark"></span>
               <span id="checkbox-text">
-                <a id='link-consent' href='${config.linkConsentText}' target='_blank' rel='noopener noreferrer'>Согласен</a> на обработку персональных данных
+                <a id='link-consent' href='${t.linkConsentText}' target='_blank' rel='noopener noreferrer'>\u0421\u043E\u0433\u043B\u0430\u0441\u0435\u043D</a> \u043D\u0430 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0443 \u043F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u044C\u043D\u044B\u0445 \u0434\u0430\u043D\u043D\u044B\u0445
               </span>
             </label>`
-							: ``
+							: ''
 					}
           <button type='button' id="spin">
-            <span style="margin-right:6px">🎰</span>${config.startBtnText}
+            <span style="margin-right:6px">\u{1F3B0}</span>${t.startBtnText}
           </button>
         </div>
 
@@ -726,854 +685,596 @@
         </div>
       </div>
 
-      ${config.developInfoActive ? `<div id='dev-info'>Сделано в&nbsp;<a id='dev-info-text' href='https://winwidget.ru'>winwidget.ru</a></div>` : ``}
+      ${t.developInfoActive ? "<div id='dev-info'>\u0421\u0434\u0435\u043B\u0430\u043D\u043E \u0432&nbsp;<a id='dev-info-text' href='https://winwidget.ru'>winwidget.ru</a></div>" : ''}
     </div>
   </div>
-`;
-
-		shadow.appendChild(container);
-
-		const EMAIL_REGEXP =
-			/^(([^<>()[\].,;:\s@"]+(\.[^<>()[\].,;:\s@"]+)*)|(".+"))@(([^<>()[\].,;:\s@"]+\.)+[^<>()[\].,;:\s@"]{2,})$/iu;
-
-		const overlay = shadow.querySelector('#overlay');
-		const mainWrapper = shadow.querySelector('#main-wrapper');
-		const wheelWrapper = shadow.querySelector('#wheel-wrapper');
-		const bannerWrapper = shadow.querySelector('#banner-wrapper');
-		const wheel = shadow.querySelector('#wheel');
-		const closeBtn = shadow.querySelector('#widget-close');
-		const startBtn = shadow.querySelector('#spin');
-		const wheelArrow = shadow.querySelector('#wheel-arrow');
-		const title = shadow.querySelector('#title-widget');
-		const subtitle = shadow.querySelector('#subtitle-widget');
-		const policy = shadow.querySelector('#custom-checkbox');
-		const CENTER = 150;
-		const RADIUS = 150;
-		let currentRotation = 0;
-		let lastWin = null;
-
-		// Устанавливаем цвет фона виджета
-		bannerWrapper.style.background = config.bgColor;
-
-		// Цвет кнопки старта
-		if (config.buttonColor) {
-			startBtn.style.background = config.buttonColor;
-			startBtn.style.boxShadow = `0 4px 20px ${config.buttonColor}80, inset 0 1px 0 rgba(255,255,255,0.15)`;
+`),
+			u.appendChild(E));
+		const X =
+				/^(([^<>()[\].,;:\s@"]+(\.[^<>()[\].,;:\s@"]+)*)|(".+"))@(([^<>()[\].,;:\s@"]+\.)+[^<>()[\].,;:\s@"]{2,})$/iu,
+			B = u.querySelector('#overlay'),
+			M = u.querySelector('#main-wrapper'),
+			te = u.querySelector('#wheel-wrapper'),
+			U = u.querySelector('#banner-wrapper'),
+			w = u.querySelector('#wheel'),
+			it = u.querySelector('#widget-close'),
+			z = u.querySelector('#spin'),
+			$t = u.querySelector('#wheel-arrow'),
+			Ft = u.querySelector('#title-widget'),
+			rt = u.querySelector('#subtitle-widget'),
+			R = u.querySelector('#custom-checkbox'),
+			h = 150,
+			C = 150;
+		let at = 0,
+			O = null;
+		((U.style.background = t.bgColor),
+			t.buttonColor &&
+				((z.style.background = t.buttonColor),
+				(z.style.boxShadow = `0 4px 20px ${t.buttonColor}80, inset 0 1px 0 rgba(255,255,255,0.15)`)),
+			t.arrowSVG &&
+				($t.innerHTML = `<svg viewBox="0 0 20 24">${t.arrowSVG}</svg>`));
+		function st(e, r) {
+			const n = Math.PI / 180,
+				o = h + C * Math.cos(e * n),
+				s = h + C * Math.sin(e * n),
+				a = h + C * Math.cos(r * n),
+				d = h + C * Math.sin(r * n),
+				i = r - e > 180 ? 1 : 0;
+			return `M ${h} ${h} L ${o} ${s} A ${C} ${C} 0 ${i} 1 ${a} ${d} Z`;
 		}
-
-		/************************ БАРАБАН ************************/
-		// Вставка стрелки SVG
-		if (config.arrowSVG) {
-			wheelArrow.innerHTML = `<svg viewBox="0 0 20 24">${config.arrowSVG}</svg>`;
-		}
-
-		// Создание SVG-сектора
-		function createSectorPath(startAngle, endAngle) {
-			const rad = Math.PI / 180;
-			const x1 = CENTER + RADIUS * Math.cos(startAngle * rad);
-			const y1 = CENTER + RADIUS * Math.sin(startAngle * rad);
-			const x2 = CENTER + RADIUS * Math.cos(endAngle * rad);
-			const y2 = CENTER + RADIUS * Math.sin(endAngle * rad);
-			const largeArc = endAngle - startAngle > 180 ? 1 : 0;
-			return `M ${CENTER} ${CENTER} L ${x1} ${y1} A ${RADIUS} ${RADIUS} 0 ${largeArc} 1 ${x2} ${y2} Z`;
-		}
-
-		// Центральный элемент колеса
-		function renderCenter() {
-			if (config.centerSVG) {
-				// Создаём группу для трансформации
-				const g = document.createElementNS(
+		function zt() {
+			if (t.centerSVG) {
+				const e = document.createElementNS(
 					'http://www.w3.org/2000/svg',
 					'g'
 				);
-
-				// Здесь центрируем SVG
-				g.setAttribute('transform', `translate(${CENTER}, ${CENTER})`);
-
-				// Создаём временный контейнер для парсинга SVG
-				const temp = document.createElement('div');
-				temp.innerHTML = config.centerSVG.trim();
-				const svgElement = temp.firstChild;
-
-				// Определяем размеры SVG
-				const width = svgElement.getAttribute('width') || 40;
-				const height = svgElement.getAttribute('height') || 40;
-
-				// Смещаем SVG так, чтобы его центр совпадал с (0,0)
-				svgElement.setAttribute('x', -width / 2);
-				svgElement.setAttribute('y', -height / 2);
-
-				g.appendChild(svgElement);
-				wheel.appendChild(g);
+				e.setAttribute('transform', `translate(${h}, ${h})`);
+				const r = document.createElement('div');
+				r.innerHTML = t.centerSVG.trim();
+				const n = r.firstChild,
+					o = n.getAttribute('width') || 40,
+					s = n.getAttribute('height') || 40;
+				(n.setAttribute('x', -o / 2),
+					n.setAttribute('y', -s / 2),
+					e.appendChild(n),
+					w.appendChild(e));
 			} else {
-				const ns = 'http://www.w3.org/2000/svg';
-				const defs = document.createElementNS(ns, 'defs');
-				const grad = document.createElementNS(ns, 'radialGradient');
-				grad.setAttribute('id', 'center-grad');
-				grad.setAttribute('cx', '35%');
-				grad.setAttribute('cy', '35%');
-				const s1 = document.createElementNS(ns, 'stop');
-				s1.setAttribute('offset', '0%');
-				s1.setAttribute('stop-color', '#ffffff');
-				const s2 = document.createElementNS(ns, 'stop');
-				s2.setAttribute('offset', '100%');
-				s2.setAttribute('stop-color', config.centerColor);
-				grad.appendChild(s1);
-				grad.appendChild(s2);
-				defs.appendChild(grad);
-				wheel.appendChild(defs);
-
-				// Outer glow ring
-				const ring = document.createElementNS(ns, 'circle');
-				ring.setAttribute('cx', CENTER);
-				ring.setAttribute('cy', CENTER);
-				ring.setAttribute('r', 26);
-				ring.setAttribute('fill', 'none');
-				ring.setAttribute('stroke', 'rgba(255,255,255,0.2)');
-				ring.setAttribute('stroke-width', '3');
-				wheel.appendChild(ring);
-
-				// Center button
-				const centerCircle = document.createElementNS(ns, 'circle');
-				centerCircle.setAttribute('cx', CENTER);
-				centerCircle.setAttribute('cy', CENTER);
-				centerCircle.setAttribute('r', 22);
-				centerCircle.setAttribute('fill', 'url(#center-grad)');
-				centerCircle.setAttribute('stroke', 'rgba(255,255,255,0.35)');
-				centerCircle.setAttribute('stroke-width', '1.5');
-				centerCircle.setAttribute('filter', 'url(#shadow)');
-				wheel.appendChild(centerCircle);
-
-				// Shine dot
-				const shine = document.createElementNS(ns, 'circle');
-				shine.setAttribute('cx', CENTER - 6);
-				shine.setAttribute('cy', CENTER - 6);
-				shine.setAttribute('r', 4);
-				shine.setAttribute('fill', 'rgba(255,255,255,0.45)');
-				wheel.appendChild(shine);
+				const e = 'http://www.w3.org/2000/svg',
+					r = document.createElementNS(e, 'defs'),
+					n = document.createElementNS(e, 'radialGradient');
+				(n.setAttribute('id', 'center-grad'),
+					n.setAttribute('cx', '35%'),
+					n.setAttribute('cy', '35%'));
+				const o = document.createElementNS(e, 'stop');
+				(o.setAttribute('offset', '0%'),
+					o.setAttribute('stop-color', '#ffffff'));
+				const s = document.createElementNS(e, 'stop');
+				(s.setAttribute('offset', '100%'),
+					s.setAttribute('stop-color', t.centerColor),
+					n.appendChild(o),
+					n.appendChild(s),
+					r.appendChild(n),
+					w.appendChild(r));
+				const a = document.createElementNS(e, 'circle');
+				(a.setAttribute('cx', h),
+					a.setAttribute('cy', h),
+					a.setAttribute('r', 26),
+					a.setAttribute('fill', 'none'),
+					a.setAttribute('stroke', 'rgba(255,255,255,0.2)'),
+					a.setAttribute('stroke-width', '3'),
+					w.appendChild(a));
+				const d = document.createElementNS(e, 'circle');
+				(d.setAttribute('cx', h),
+					d.setAttribute('cy', h),
+					d.setAttribute('r', 22),
+					d.setAttribute('fill', 'url(#center-grad)'),
+					d.setAttribute('stroke', 'rgba(255,255,255,0.35)'),
+					d.setAttribute('stroke-width', '1.5'),
+					d.setAttribute('filter', 'url(#shadow)'),
+					w.appendChild(d));
+				const i = document.createElementNS(e, 'circle');
+				(i.setAttribute('cx', h - 6),
+					i.setAttribute('cy', h - 6),
+					i.setAttribute('r', 4),
+					i.setAttribute('fill', 'rgba(255,255,255,0.45)'),
+					w.appendChild(i));
 			}
 		}
-
-		// Отрисовка колеса
-		function renderWheel() {
-			// Делаем запрос на сервер и проверяем есть ли попытка в прокрутке барабана у клиента ? Если нет, уведомляем его об этом и называем причину отказа
-			const go = true;
-			if (!go) {
-				title.textContent = `Попытки закончились. 🎊 Вы выйграли: Скидка 1%`;
-				subtitle.textContent = 'Колесо можно крутить раз в неделю!';
-				config.nameFieldActive && inputName?.remove();
-				config.phoneFieldActive && inputPhone?.remove();
-				config.emailFieldActive && inputEmail?.remove();
-				startBtn.remove();
-				config.checkboxPolicyActive && policy?.remove();
-				wheelWrapper.classList.add('blur');
-			}
-
-			wheel.innerHTML = '';
-			const count = config.sectors.length;
-			const angleStep = 360 / count;
-
-			config.sectors.forEach((sector, i) => {
-				const start = i * angleStep - 90;
-				const end = start + angleStep;
-				const midAngle = start + angleStep / 2;
-
-				const g = document.createElementNS(
-					'http://www.w3.org/2000/svg',
-					'g'
-				);
+		function Pt() {
+			w.innerHTML = '';
+			const n = 360 / t.sectors.length;
+			t.sectors.forEach((a, d) => {
+				const i = d * n - 90,
+					x = i + n,
+					v = i + n / 2,
+					g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
 				g.classList.add('sector');
-
-				// сектор
-				const path = document.createElementNS(
+				const A = document.createElementNS(
 					'http://www.w3.org/2000/svg',
 					'path'
 				);
-				path.setAttribute('d', createSectorPath(start, end));
-				path.setAttribute('fill', sector.color);
-				path.setAttribute('stroke', 'rgba(0,0,0,0.18)');
-				path.setAttribute('stroke-width', '1.5');
-				g.appendChild(path);
-
-				// Subtle shine overlay per sector
-				const shinePath = document.createElementNS(
+				(A.setAttribute('d', st(i, x)),
+					A.setAttribute('fill', a.color),
+					A.setAttribute('stroke', 'rgba(0,0,0,0.18)'),
+					A.setAttribute('stroke-width', '1.5'),
+					g.appendChild(A));
+				const F = document.createElementNS(
 					'http://www.w3.org/2000/svg',
 					'path'
 				);
-				shinePath.setAttribute('d', createSectorPath(start, end));
-				shinePath.setAttribute('fill', 'url(#sector-shine)');
-				shinePath.setAttribute('pointer-events', 'none');
-				g.appendChild(shinePath);
-
-				// текст
-				const text = document.createElementNS(
-					'http://www.w3.org/2000/svg',
-					'text'
-				);
-				const distanceFromCenter = RADIUS * 0.62;
-				const tx =
-					CENTER +
-					distanceFromCenter * Math.cos((midAngle * Math.PI) / 180);
-				const ty =
-					CENTER +
-					distanceFromCenter * Math.sin((midAngle * Math.PI) / 180);
-				text.setAttribute('x', tx);
-				text.setAttribute('y', ty);
-				text.setAttribute('text-anchor', 'middle');
-				text.setAttribute('dominant-baseline', 'middle');
-				text.setAttribute(
-					'transform',
-					`rotate(${midAngle}, ${tx}, ${ty})`
-				);
-				text.style.fontFamily = "'Arial', sans-serif";
-				text.style.fontWeight = '700';
-				text.style.fill = sector.textColor;
-				text.style.fontSize = `${Math.max(10, parseInt(sector.fontSize) || 14)}px`;
-				text.setAttribute('filter', 'url(#text-shadow)');
-				text.textContent = sector.label;
-
-				g.appendChild(text);
-				wheel.appendChild(g);
+				(F.setAttribute('d', st(i, x)),
+					F.setAttribute('fill', 'url(#sector-shine)'),
+					F.setAttribute('pointer-events', 'none'),
+					g.appendChild(F));
+				const m = document.createElementNS(
+						'http://www.w3.org/2000/svg',
+						'text'
+					),
+					f = C * 0.62,
+					L = h + f * Math.cos((v * Math.PI) / 180),
+					D = h + f * Math.sin((v * Math.PI) / 180);
+				(m.setAttribute('x', L),
+					m.setAttribute('y', D),
+					m.setAttribute('text-anchor', 'middle'),
+					m.setAttribute('dominant-baseline', 'middle'),
+					m.setAttribute('transform', `rotate(${v}, ${L}, ${D})`),
+					(m.style.fontFamily = "'Arial', sans-serif"),
+					(m.style.fontWeight = '700'),
+					(m.style.fill = a.textColor),
+					(m.style.fontSize = `${Math.max(10, parseInt(a.fontSize) || 14)}px`),
+					m.setAttribute('filter', 'url(#text-shadow)'),
+					(m.textContent = a.label),
+					g.appendChild(m),
+					w.appendChild(g));
 			});
-
-			// Внешняя рамка с градиентом
-			const outerCircle = document.createElementNS(
+			const o = document.createElementNS(
 				'http://www.w3.org/2000/svg',
 				'circle'
 			);
-			outerCircle.setAttribute('cx', CENTER);
-			outerCircle.setAttribute('cy', CENTER);
-			outerCircle.setAttribute('r', RADIUS + config.borderWidth / 2);
-			outerCircle.setAttribute('fill', 'none');
-			outerCircle.setAttribute('stroke', config.borderColor);
-			outerCircle.setAttribute('stroke-width', config.borderWidth);
-			outerCircle.setAttribute('filter', 'url(#shadow)');
-			wheel.appendChild(outerCircle);
-
-			// Внутренний блик-кольцо
-			const innerRing = document.createElementNS(
+			(o.setAttribute('cx', h),
+				o.setAttribute('cy', h),
+				o.setAttribute('r', C + t.borderWidth / 2),
+				o.setAttribute('fill', 'none'),
+				o.setAttribute('stroke', t.borderColor),
+				o.setAttribute('stroke-width', t.borderWidth),
+				o.setAttribute('filter', 'url(#shadow)'),
+				w.appendChild(o));
+			const s = document.createElementNS(
 				'http://www.w3.org/2000/svg',
 				'circle'
 			);
-			innerRing.setAttribute('cx', CENTER);
-			innerRing.setAttribute('cy', CENTER);
-			innerRing.setAttribute('r', RADIUS - 2);
-			innerRing.setAttribute('fill', 'none');
-			innerRing.setAttribute('stroke', 'rgba(255,255,255,0.12)');
-			innerRing.setAttribute('stroke-width', '2');
-			wheel.appendChild(innerRing);
-
-			// центральный элемент (круг или SVG)
-			renderCenter();
+			(s.setAttribute('cx', h),
+				s.setAttribute('cy', h),
+				s.setAttribute('r', C - 2),
+				s.setAttribute('fill', 'none'),
+				s.setAttribute('stroke', 'rgba(255,255,255,0.12)'),
+				s.setAttribute('stroke-width', '2'),
+				w.appendChild(s),
+				zt());
 		}
-
-		// Выбор призового сектора по весам
-		function weightedRandom(sectors) {
-			const total = sectors.reduce((sum, s) => sum + s.probability, 0);
-			let r = Math.random() * total;
-			for (let i = 0; i < sectors.length; i++) {
-				r -= sectors[i].probability;
-				if (r <= 0) return i;
-			}
+		function Tt(e) {
+			const r = e.reduce((o, s) => o + s.probability, 0);
+			let n = Math.random() * r;
+			for (let o = 0; o < e.length; o++)
+				if (((n -= e[o].probability), n <= 0)) return o;
 		}
-
-		// Вращение колеса
-		function spinStartAnimate() {
+		function Bt() {
 			try {
-				const _playedKey =
+				const a =
 					'winwidget_played_' +
-					config._token +
-					(config.spinResetToken ? '_' + config.spinResetToken : '');
-				localStorage.setItem(_playedKey, Date.now().toString());
-			} catch (e) {}
-			const winIndex = weightedRandom(config.sectors);
-			lastWin = config.sectors[winIndex];
-			const count = config.sectors.length;
-			const anglePerSector = 360 / count;
-			const midAngleSVG =
-				-90 + winIndex * anglePerSector + anglePerSector / 2;
-			const targetAngle = 360 * 6 - midAngleSVG;
-
-			currentRotation = targetAngle;
-
-			wheel.style.transition = `transform 4s cubic-bezier(.17,.67,.3,1)`;
-			wheel.style.transform = `rotate(${currentRotation}deg)`;
-
-			setTimeout(() => swingEffect(targetAngle, winIndex), 4200);
+					t._token +
+					(t.spinResetToken ? '_' + t.spinResetToken : '');
+				localStorage.setItem(a, Date.now().toString());
+			} catch (a) {}
+			const e = Tt(t.sectors);
+			O = t.sectors[e];
+			const n = 360 / t.sectors.length,
+				o = -90 + e * n + n / 2,
+				s = 360 * 6 - o;
+			((at = s),
+				(w.style.transition = 'transform 4s cubic-bezier(.17,.67,.3,1)'),
+				(w.style.transform = `rotate(${at}deg)`),
+				setTimeout(() => It(s, e), 4200));
 		}
-
-		// Завершающее колебание стрелки ±5°
-		function swingEffect(baseAngle, winIndex) {
-			const swingAmplitude = 5;
-			const swingDuration = 1000;
-			const startTime = Date.now();
-
-			function animate() {
-				const elapsed = Date.now() - startTime;
-				const progress = Math.min(elapsed / swingDuration, 1);
-				const swingRotation =
-					Math.sin(progress * Math.PI * 4) *
-					swingAmplitude *
-					(1 - progress);
-
-				wheel.style.transition = 'transform 0s';
-				wheel.style.transform = `rotate(${baseAngle + swingRotation}deg)`;
-
-				if (progress < 1) {
-					requestAnimationFrame(animate);
-				} else {
-					//Анимация выйгрыша
-					if (config.confettiEffectActive) {
-						confettiExplosioneEffect({
-							container: bannerWrapper,
-							count: 180
-						});
-						setTimeout(
-							() => confettiFallsEffect({ container: bannerWrapper }),
-							600
-						);
-					}
-
-					//Изменение title виджета на название приза
-					title.textContent = `🎊 Вы выиграли: ${config.sectors[winIndex].label}`;
-
-					//Скрываем инпуты и кнопки
-					showElements();
-				}
+		function It(e, r) {
+			const s = Date.now();
+			function a() {
+				const d = Date.now() - s,
+					i = Math.min(d / 1e3, 1),
+					x = Math.sin(i * Math.PI * 4) * 5 * (1 - i);
+				((w.style.transition = 'transform 0s'),
+					(w.style.transform = `rotate(${e + x}deg)`),
+					i < 1
+						? requestAnimationFrame(a)
+						: (t.confettiEffectActive &&
+								(Vt({ container: U, count: 180 }),
+								setTimeout(() => Wt({ container: U }), 600)),
+							(Ft.textContent = `\u{1F38A} \u0412\u044B \u0432\u044B\u0438\u0433\u0440\u0430\u043B\u0438: ${t.sectors[r].label}`),
+							Lt()));
 			}
-			animate();
-			sendResultToServer();
+			(a(), Gt());
 		}
-
-		/************************ Изменение виджета после выйгрыша ************************/
-		function showElements() {
-			config.winningAdviceActive
-				? (subtitle.textContent = config.winningAdviceText)
-				: subtitle.remove();
-			config.nameFieldActive && inputName?.remove();
-			config.phoneFieldActive && inputPhone?.remove();
-			config.emailFieldActive && inputEmail?.remove();
-			startBtn.remove();
-			config.checkboxPolicyActive && policy?.remove();
+		function Lt() {
+			(t.winningAdviceActive
+				? (rt.textContent = t.winningAdviceText)
+				: rt.remove(),
+				t.nameFieldActive && (S == null || S.remove()),
+				t.phoneFieldActive && (P == null || P.remove()),
+				t.emailFieldActive && ($ == null || $.remove()),
+				z.remove(),
+				t.checkboxPolicyActive && (R == null || R.remove()));
 		}
-		/************************/
-
-		/************************ ИНПУТЫ ************************/
-		//Опциональные инпуты
-		const inputName = config.nameFieldActive
-			? shadow.getElementById('name-input')
-			: null;
-		const inputPhone = config.phoneFieldActive
-			? shadow.getElementById('phone-input')
-			: null;
-		const inputEmail = config.emailFieldActive
-			? shadow.getElementById('email-input')
-			: null;
-		const inputCheckboxPolicy = config.checkboxPolicyActive
-			? shadow.getElementById('policy-input')
-			: null;
-
-		const phoneController =
-			config.phoneFieldActive && window.winwidgetPhone
-				? window.winwidgetPhone.attach(inputPhone, {
-						placeholder: '+7 999 123-45-67'
-					})
-				: null;
-
-		//Анимация инпутов при ошибке ввода
-		function shakeInput(element) {
-			//сила качания
-			const distance = 6;
-			// количество колебаний
-			const shakes = 15;
-			// общая длительность (мс)
-			const duration = 350;
-
-			let start = null;
-
-			function animate(time) {
-				if (!start) start = time;
-				const progress = time - start;
-				const percent = progress / duration;
-
-				const offset =
-					Math.sin(percent * shakes * Math.PI * 2) *
-					distance *
-					(1 - percent);
-
-				element.style.transform = `translateX(${offset}px)`;
-
-				if (progress < duration) {
-					requestAnimationFrame(animate);
-				} else {
-					element.style.transform = '';
-				}
+		const S = t.nameFieldActive ? u.getElementById('name-input') : null,
+			P = t.phoneFieldActive ? u.getElementById('phone-input') : null,
+			$ = t.emailFieldActive ? u.getElementById('email-input') : null,
+			Dt = t.checkboxPolicyActive
+				? u.getElementById('policy-input')
+				: null,
+			_ =
+				t.phoneFieldActive && window.winwidgetPhone
+					? window.winwidgetPhone.attach(P, {
+							placeholder: '+7 999 123-45-67'
+						})
+					: null;
+		function j(e) {
+			let s = null;
+			function a(d) {
+				s || (s = d);
+				const i = d - s,
+					x = i / 350,
+					v = Math.sin(x * 15 * Math.PI * 2) * 6 * (1 - x);
+				((e.style.transform = `translateX(${v}px)`),
+					i < 350 ? requestAnimationFrame(a) : (e.style.transform = ''));
 			}
-
-			requestAnimationFrame(animate);
+			requestAnimationFrame(a);
 		}
-
-		//Валидация инпутов
-		function validate() {
-			let isValid = true;
-
-			if (!config.devModeActive) {
-				if (config.nameFieldActive && !inputName.value.trim().length) {
-					shakeInput(inputName);
-					isValid = false;
-				}
-
-				if (
-					config.phoneFieldActive &&
-					(!phoneController || !phoneController.isValid())
-				) {
-					shakeInput(inputPhone);
-					isValid = false;
-				}
-
-				if (
-					config.emailFieldActive &&
-					!EMAIL_REGEXP.test(inputEmail.value)
-				) {
-					shakeInput(inputEmail);
-					isValid = false;
-				}
-
-				if (config.checkboxPolicyActive && !inputCheckboxPolicy.checked) {
-					shakeInput(policy);
-					isValid = false;
-				}
-			}
-
-			return isValid;
+		function Y() {
+			let e = !0;
+			return (
+				t.devModeActive ||
+					(t.nameFieldActive && !S.value.trim().length && (j(S), (e = !1)),
+					t.phoneFieldActive && (!_ || !_.isValid()) && (j(P), (e = !1)),
+					t.emailFieldActive && !X.test($.value) && (j($), (e = !1)),
+					t.checkboxPolicyActive && !Dt.checked && (j(R), (e = !1))),
+				e
+			);
 		}
-
-		// Потеря фокуса c инпута с именем
-		function handleBlurInputName() {
-			if (!inputName.value.length) {
-				return;
-			}
-
-			validate();
+		function qt() {
+			S.value.length && Y();
 		}
-
-		// Потеря фокуса c инпута с номером телефона
-		function handleBlurInputPhone() {
-			validate();
+		function Nt() {
+			Y();
 		}
-
-		// Потеря фокуса c инпута с email
-		function handleBlurInputEmail() {
-			if (!inputEmail.value.length) {
-				return;
-			}
-
-			validate();
+		function Rt() {
+			$.value.length && Y();
 		}
-		/************************/
-
-		/************************ Получение и форматирование данных с инпутов ************************/
-		//Получаем имя пользователя
-		function getName() {
-			return config.nameFieldActive ? inputName.value : null;
+		function Ot() {
+			return t.nameFieldActive ? S.value : null;
 		}
-
-		// Получение чистого номера для отправки на бэк
-		function getFormatPhone() {
-			return phoneController ? phoneController.getNumber() : null;
+		function _t() {
+			return _ ? _.getNumber() : null;
 		}
-
-		//Получаем email пользователя
-		function getEmail() {
-			return config.emailFieldActive ? inputEmail.value : null;
+		function jt() {
+			return t.emailFieldActive ? $.value : null;
 		}
-
-		async function pushBtn() {
-			const isValid = validate();
-
-			if (!isValid) {
-				return;
-			}
-
-			startBtn.disabled = true;
-			startBtn.style.opacity = '0.6';
-			startBtn.style.cursor = 'not-allowed';
-
-			spinStartAnimate();
+		async function Yt() {
+			Y() &&
+				((z.disabled = !0),
+				(z.style.opacity = '0.6'),
+				(z.style.cursor = 'not-allowed'),
+				Bt());
 		}
-		/************************/
-
-		/************************ Отправка на сервер ************************/
-		async function sendResultToServer() {
-			const payload = {
-				phone: getFormatPhone(),
-				email: getEmail(),
-				name: getName(),
-				bonus: lastWin?.label
+		async function Gt() {
+			const e = {
+				phone: _t(),
+				email: jt(),
+				name: Ot(),
+				bonus: O == null ? void 0 : O.label
 			};
-
 			try {
-				await fetch(`${API_BASE}/widget/${config._token}/lead`, {
+				(await fetch(`${tt}/widget/${t._token}/lead`, {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(payload)
-				});
-				firePixelEvent('ip3_send');
-			} catch (e) {
-				console.error('[winwidget] Failed to send lead:', e);
+					body: JSON.stringify(e)
+				}),
+					c('ip3_send'));
+			} catch (r) {
+				console.error('[winwidget] Failed to send lead:', r);
 			}
 		}
-		/************************/
-
-		/************************ АНИМАЦИЯ КОНФЕТИ ************************/
-		//Конфетти с эффектом падения сверху
-		function confettiFallsEffect({ container, count = 60 }) {
-			const COLORS = [
-				'#FFD700',
-				'#FF6B9D',
-				'#7BED9F',
-				'#70A1FF',
-				'#ECCC68',
-				'#ffffff',
-				'#A29BFE',
-				'#FF6348'
-			];
-			const shapes = ['square', 'circle', 'streamer', 'diamond'];
-			const rect = container.getBoundingClientRect();
-
-			for (let i = 0; i < count; i++) {
-				const delay = Math.random() * 1200;
+		function Wt({ container: e, count: r = 60 }) {
+			const n = [
+					'#FFD700',
+					'#FF6B9D',
+					'#7BED9F',
+					'#70A1FF',
+					'#ECCC68',
+					'#ffffff',
+					'#A29BFE',
+					'#FF6348'
+				],
+				o = ['square', 'circle', 'streamer', 'diamond'],
+				s = e.getBoundingClientRect();
+			for (let a = 0; a < r; a++) {
+				const d = Math.random() * 1200;
 				setTimeout(() => {
-					const el = document.createElement('div');
-					const shape = shapes[Math.floor(Math.random() * shapes.length)];
-					el.classList.add('confetti', shape);
-					el.style.backgroundColor =
-						COLORS[Math.floor(Math.random() * COLORS.length)];
-					const size = Math.random() * 6 + 5;
-					if (shape !== 'streamer') {
-						el.style.width = `${size}px`;
-						el.style.height = `${size}px`;
-					}
-					el.style.left = Math.random() * rect.width + 'px';
-					el.style.top = '-20px';
-					el.style.opacity = '1';
-					container.appendChild(el);
-
-					const duration = 3.5 + Math.random() * 2;
-					const swingX = (Math.random() - 0.5) * 60;
-					const rotate =
-						Math.random() * 720 * (Math.random() < 0.5 ? 1 : -1);
-					requestAnimationFrame(() => {
-						el.style.transition = `top ${duration}s linear, transform ${duration}s ease-out, opacity 0.8s ease-out ${(duration - 0.9).toFixed(1)}s`;
-						el.style.top = `${rect.height + 20}px`;
-						el.style.transform = `translateX(${swingX}px) rotate(${rotate}deg)`;
-						el.style.opacity = '0';
-					});
-					setTimeout(() => el.remove(), duration * 1000 + 300);
-				}, delay);
+					const i = document.createElement('div'),
+						x = o[Math.floor(Math.random() * o.length)];
+					(i.classList.add('confetti', x),
+						(i.style.backgroundColor =
+							n[Math.floor(Math.random() * n.length)]));
+					const v = Math.random() * 6 + 5;
+					(x !== 'streamer' &&
+						((i.style.width = `${v}px`), (i.style.height = `${v}px`)),
+						(i.style.left = Math.random() * s.width + 'px'),
+						(i.style.top = '-20px'),
+						(i.style.opacity = '1'),
+						e.appendChild(i));
+					const g = 3.5 + Math.random() * 2,
+						A = (Math.random() - 0.5) * 60,
+						F = Math.random() * 720 * (Math.random() < 0.5 ? 1 : -1);
+					(requestAnimationFrame(() => {
+						((i.style.transition = `top ${g}s linear, transform ${g}s ease-out, opacity 0.8s ease-out ${(g - 0.9).toFixed(1)}s`),
+							(i.style.top = `${s.height + 20}px`),
+							(i.style.transform = `translateX(${A}px) rotate(${F}deg)`),
+							(i.style.opacity = '0'));
+					}),
+						setTimeout(() => i.remove(), g * 1e3 + 300));
+				}, d);
 			}
 		}
-
-		function confettiExplosioneEffect({ container, count = 160 }) {
-			const COLORS = [
-				'#FFD700',
-				'#FFC200',
-				'#FF6B9D',
-				'#FF4757',
-				'#7BED9F',
-				'#2ED573',
-				'#70A1FF',
-				'#1E90FF',
-				'#ECCC68',
-				'#ffffff',
-				'#A29BFE',
-				'#6C5CE7',
-				'#FF6348',
-				'#FFA502'
-			];
-			const shapes = [
-				'square',
-				'circle',
-				'streamer',
-				'diamond',
-				'square',
-				'circle'
-			];
-			const rect = container.getBoundingClientRect();
-			const W = rect.width;
-			const H = rect.height;
-
-			// 3 волны с нарастанием
-			const waves = [
+		function Vt({ container: e, count: r = 160 }) {
+			const n = [
+					'#FFD700',
+					'#FFC200',
+					'#FF6B9D',
+					'#FF4757',
+					'#7BED9F',
+					'#2ED573',
+					'#70A1FF',
+					'#1E90FF',
+					'#ECCC68',
+					'#ffffff',
+					'#A29BFE',
+					'#6C5CE7',
+					'#FF6348',
+					'#FFA502'
+				],
+				o = [
+					'square',
+					'circle',
+					'streamer',
+					'diamond',
+					'square',
+					'circle'
+				],
+				s = e.getBoundingClientRect(),
+				a = s.width,
+				d = s.height;
+			[
 				{
 					delay: 0,
-					origins: [
-						{ x: W * 0.5, y: H * 0.35, n: Math.floor(count * 0.45) }
-					]
+					origins: [{ x: a * 0.5, y: d * 0.35, n: Math.floor(r * 0.45) }]
 				},
 				{
 					delay: 180,
 					origins: [
-						{ x: W * 0.2, y: H * 0.25, n: Math.floor(count * 0.25) },
-						{ x: W * 0.8, y: H * 0.25, n: Math.floor(count * 0.25) }
+						{ x: a * 0.2, y: d * 0.25, n: Math.floor(r * 0.25) },
+						{ x: a * 0.8, y: d * 0.25, n: Math.floor(r * 0.25) }
 					]
 				},
 				{
 					delay: 380,
 					origins: [
-						{ x: W * 0.5, y: H * 0.2, n: Math.floor(count * 0.2) },
-						{ x: W * 0.1, y: H * 0.4, n: Math.floor(count * 0.1) },
-						{ x: W * 0.9, y: H * 0.4, n: Math.floor(count * 0.1) }
+						{ x: a * 0.5, y: d * 0.2, n: Math.floor(r * 0.2) },
+						{ x: a * 0.1, y: d * 0.4, n: Math.floor(r * 0.1) },
+						{ x: a * 0.9, y: d * 0.4, n: Math.floor(r * 0.1) }
 					]
 				}
-			];
-
-			waves.forEach(({ delay, origins }) => {
+			].forEach(({ delay: x, origins: v }) => {
 				setTimeout(() => {
-					origins.forEach(({ x, y, n }) => {
-						for (let i = 0; i < n; i++) {
-							const el = document.createElement('div');
-							const shape =
-								shapes[Math.floor(Math.random() * shapes.length)];
-							el.classList.add('confetti', shape);
-							el.style.backgroundColor =
-								COLORS[Math.floor(Math.random() * COLORS.length)];
-							const size = Math.random() * 8 + 5;
-							if (shape !== 'streamer') {
-								el.style.width = `${size}px`;
-								el.style.height = `${size}px`;
-							}
-							el.style.left = `${x + (Math.random() - 0.5) * 16}px`;
-							el.style.top = `${y + (Math.random() - 0.5) * 16}px`;
-							el.style.opacity = '1';
-							container.appendChild(el);
-
-							// случайный угол: верхняя полусфера с небольшим вылетом вниз
-							const angle =
-								(-90 + (Math.random() - 0.5) * 200) * (Math.PI / 180);
-							const power = 120 + Math.random() * 220;
-							const vx = Math.cos(angle) * power;
-							const vy = Math.sin(angle) * power;
-							const r0 = Math.random() * 360;
-							const r1 = r0 + (Math.random() * 900 - 450);
-							const phase1 = 380 + Math.random() * 200;
-
-							requestAnimationFrame(() => {
-								el.style.transition = `transform ${phase1}ms cubic-bezier(.15,.8,.25,1)`;
-								el.style.transform = `translate(${vx}px,${vy}px) rotate(${r0}deg)`;
-							});
-
-							setTimeout(() => {
-								const fallY = H - y + Math.abs(vy) + 80;
-								const drift = (Math.random() - 0.5) * 100;
-								const phase2 = 1800 + Math.random() * 900;
-								el.style.transition = `transform ${phase2}ms cubic-bezier(.1,.5,.3,1), opacity ${Math.round(phase2 * 0.35)}ms ease-out ${Math.round(phase2 * 0.65)}ms`;
-								el.style.transform = `translate(${vx + drift}px,${vy + fallY}px) rotate(${r1}deg)`;
-								el.style.opacity = '0';
-							}, phase1);
-
-							setTimeout(() => el.remove(), phase1 + 2800);
+					v.forEach(({ x: g, y: A, n: F }) => {
+						for (let m = 0; m < F; m++) {
+							const f = document.createElement('div'),
+								L = o[Math.floor(Math.random() * o.length)];
+							(f.classList.add('confetti', L),
+								(f.style.backgroundColor =
+									n[Math.floor(Math.random() * n.length)]));
+							const D = Math.random() * 8 + 5;
+							(L !== 'streamer' &&
+								((f.style.width = `${D}px`), (f.style.height = `${D}px`)),
+								(f.style.left = `${g + (Math.random() - 0.5) * 16}px`),
+								(f.style.top = `${A + (Math.random() - 0.5) * 16}px`),
+								(f.style.opacity = '1'),
+								e.appendChild(f));
+							const bt =
+									(-90 + (Math.random() - 0.5) * 200) * (Math.PI / 180),
+								mt = 120 + Math.random() * 220,
+								wt = Math.cos(bt) * mt,
+								J = Math.sin(bt) * mt,
+								xt = Math.random() * 360,
+								Kt = xt + (Math.random() * 900 - 450),
+								Z = 380 + Math.random() * 200;
+							(requestAnimationFrame(() => {
+								((f.style.transition = `transform ${Z}ms cubic-bezier(.15,.8,.25,1)`),
+									(f.style.transform = `translate(${wt}px,${J}px) rotate(${xt}deg)`));
+							}),
+								setTimeout(() => {
+									const Jt = d - A + Math.abs(J) + 80,
+										Zt = (Math.random() - 0.5) * 100,
+										Q = 1800 + Math.random() * 900;
+									((f.style.transition = `transform ${Q}ms cubic-bezier(.1,.5,.3,1), opacity ${Math.round(Q * 0.35)}ms ease-out ${Math.round(Q * 0.65)}ms`),
+										(f.style.transform = `translate(${wt + Zt}px,${J + Jt}px) rotate(${Kt}deg)`),
+										(f.style.opacity = '0'));
+								}, Z),
+								setTimeout(() => f.remove(), Z + 2800));
 						}
 					});
-				}, delay);
+				}, x);
 			});
 		}
-		/************************/
-
-		//Инициализация
-		renderWheel();
-
-		//Обработчики событий
-		config.nameFieldActive &&
-			inputName.addEventListener('blur', handleBlurInputName);
-		config.phoneFieldActive &&
-			inputPhone.addEventListener('blur', handleBlurInputPhone);
-		config.emailFieldActive &&
-			inputEmail.addEventListener('blur', handleBlurInputEmail);
-		closeBtn.addEventListener('click', closeWidget);
-		startBtn.addEventListener('click', pushBtn);
-		giftBtn.addEventListener('click', openWidget);
-		var bubbleClose = document.getElementById('ww-bubble-close');
-		var bubbleEl = document.getElementById('ww-bubble');
-		if (bubbleClose) {
-			bubbleClose.addEventListener('click', function (e) {
-				e.stopPropagation();
-				hideBubble();
-			});
-		}
-		if (bubbleEl) {
-			bubbleEl.addEventListener('click', function (e) {
-				e.stopPropagation();
-				hideBubble();
-				openWidget();
-			});
-		}
-		overlay.addEventListener('click', closeWidget);
-
-		// Ограничение попыток (localStorage + IP)
-		let hasPlayed = false;
+		(Pt(),
+			t.nameFieldActive && S.addEventListener('blur', qt),
+			t.phoneFieldActive && P.addEventListener('blur', Nt),
+			t.emailFieldActive && $.addEventListener('blur', Rt),
+			it.addEventListener('click', y),
+			z.addEventListener('click', Yt),
+			p.addEventListener('click', l));
+		var lt = document.getElementById('ww-bubble-close'),
+			I = document.getElementById('ww-bubble');
+		(lt &&
+			lt.addEventListener('click', function (e) {
+				(e.stopPropagation(), H());
+			}),
+			I &&
+				I.addEventListener('click', function (e) {
+					(e.stopPropagation(), H(), l());
+				}),
+			B.addEventListener('click', y));
+		let T = !1;
 		try {
-			const playedKey =
-				'winwidget_played_' +
-				config._token +
-				(config.spinResetToken ? '_' + config.spinResetToken : '');
-			const storedTs = localStorage.getItem(playedKey);
-			hasPlayed = config.hasPlayedByIp === true;
-			if (!hasPlayed && storedTs) {
-				const cooldownMs =
-					(config.spinCooldownDays || 0) * 24 * 60 * 60 * 1000;
-				if (cooldownMs === 0) {
-					hasPlayed = true; // один раз навсегда
-				} else {
-					hasPlayed = Date.now() - parseInt(storedTs, 10) < cooldownMs;
-				}
+			const e =
+					'winwidget_played_' +
+					t._token +
+					(t.spinResetToken ? '_' + t.spinResetToken : ''),
+				r = localStorage.getItem(e);
+			if (((T = t.hasPlayedByIp === !0), !T && r)) {
+				const n = (t.spinCooldownDays || 0) * 24 * 60 * 60 * 1e3;
+				n === 0 ? (T = !0) : (T = Date.now() - parseInt(r, 10) < n);
 			}
-			if (hasPlayed) {
-				if (config.hideIfPlayed) {
-					// Полностью скрываем виджет и кнопку
-					giftBtn.style.display = 'none';
-					stopGiftAnimation();
-					const host = document.getElementById('wheel-widget-host');
-					if (host) host.style.display = 'none';
+			if (T) {
+				if (t.hideIfPlayed) {
+					((p.style.display = 'none'), V());
+					const o = document.getElementById('wheel-widget-host');
+					o && (o.style.display = 'none');
 					return;
 				}
-				const controlWrapper = shadow.querySelector('#control-wrapper');
-				if (controlWrapper) {
-					controlWrapper.innerHTML = `
-					<h1 id='title-widget' style='text-align:center;overflow-wrap:break-word;word-break:break-word'>${config.alreadyPlayedTitle}</h1>
-					<p id='subtitle-widget' style='text-align:center;margin-top:8px'>${config.alreadyPlayedSubtitle}</p>
-				`;
-				}
+				const n = u.querySelector('#control-wrapper');
+				n &&
+					(n.innerHTML = `
+					<h1 id='title-widget' style='text-align:center;overflow-wrap:break-word;word-break:break-word'>${t.alreadyPlayedTitle}</h1>
+					<p id='subtitle-widget' style='text-align:center;margin-top:8px'>${t.alreadyPlayedSubtitle}</p>
+				`);
 			}
 		} catch (e) {}
-
-		if (config.autoOpenSeconds && !hasPlayed) {
-			setTimeout(openWidget, config.autoOpenSeconds * 1000);
+		(t.autoOpenSeconds && !T && setTimeout(l, t.autoOpenSeconds * 1e3),
+			(nt = t.buttonPulse !== !1));
+		var G = (pt = t.buttonSize) != null ? pt : 64,
+			dt = p.querySelector('#ww-btn-emoji');
+		dt && (dt.style.fontSize = G + 'px');
+		var K = p.querySelector('#ww-btn-label');
+		if (K) {
+			var Ht = Math.max(8, Math.round((G / 64) * 11)),
+				Xt = Math.max(2, Math.round((G / 64) * 3)),
+				Ut = Math.max(6, Math.round((G / 64) * 12));
+			((K.style.fontSize = Ht + 'px'),
+				(K.style.padding = Xt + 'px ' + Ut + 'px'));
 		}
-
-		// Apply button position and pulse from config
-		_giftPulseEnabled = config.buttonPulse !== false;
-		var sz = config.buttonSize ?? 64;
-		var emojiEl = giftBtn.querySelector('#ww-btn-emoji');
-		if (emojiEl) emojiEl.style.fontSize = sz + 'px';
-		var labelEl = giftBtn.querySelector('#ww-btn-label');
-		if (labelEl) {
-			var lf = Math.max(8, Math.round((sz / 64) * 11));
-			var lph = Math.max(2, Math.round((sz / 64) * 3));
-			var lpv = Math.max(6, Math.round((sz / 64) * 12));
-			labelEl.style.fontSize = lf + 'px';
-			labelEl.style.padding = lph + 'px ' + lpv + 'px';
-		}
-		updateBubbleSide(config.buttonSide || 'right');
-		var bubbleText = document.getElementById('ww-bubble-text');
-		if (bubbleText)
-			bubbleText.textContent =
-				config.bubbleText || config.title || 'Испытайте удачу!';
-		var bubbleEl = document.getElementById('ww-bubble');
-		if (bubbleEl && config.bubbleEnabled === false) {
-			bubbleEl.style.display = 'none';
-		}
-		giftBtn.style.bottom = `${config.buttonBottom ?? 3}%`;
-		if (config.buttonSide === 'left') {
-			giftBtn.style.right = 'auto';
-			giftBtn.style.left = (config.buttonOffset ?? 3) + '%';
-		} else {
-			giftBtn.style.left = 'auto';
-			giftBtn.style.right = (config.buttonOffset ?? 3) + '%';
-		}
-
-		if (window.winwidgetAutoOpen) {
-			closeBtn.style.display = 'none';
-			overlay.style.pointerEvents = 'none';
-			setTimeout(openWidget, 300);
-		} else {
-			// Показываем кнопку только сейчас — конфиг загружен, все проверки пройдены
-			giftBtn.style.display = 'flex';
-			if (config.bubbleEnabled !== false) {
-				setTimeout(function () {
-					var b = document.getElementById('ww-bubble');
-					if (!b || mainWrapper.classList.contains('visible')) return;
-					b.style.display = 'block';
-					requestAnimationFrame(function () {
-						requestAnimationFrame(function () {
-							b.style.opacity = '1';
-							b.style.transform = 'translateY(-50%) scale(1)';
-						});
-					});
-				}, 2000);
-			}
-			stopGiftAnimation();
-			startGiftAnimation();
-		}
-	} // end initWidget
-
-	/************************ Загрузка конфига с сервера ************************/
-	function mapServerConfig(server, token) {
-		const color = server.color;
-		const arrowColor = server.arrowColor || '#ffcc00';
-		const dc = server.dataType;
-
-		const raffleBonus = (server.bonuses || []).filter(b => b.active);
-		const sectors =
-			raffleBonus.length > 0
-				? raffleBonus.map((b, i) => {
-						const sectorColor =
-							b.color || (i % 2 === 0 ? color : '#ffffff');
-						return {
-							label: b.name,
-							probability: b.neverWin ? 0 : (b.probability ?? 1),
-							color: sectorColor,
-							textColor: sectorColor !== '#ffffff' ? '#ffffff' : '#000000',
-							fontSize: '14'
-						};
-					})
-				: [
-						{
-							label: 'Приз 1',
-							probability: 1,
-							color,
-							textColor: '#ffffff',
-							fontSize: '14'
-						},
-						{
-							label: 'Приз 2',
-							probability: 1,
-							color: '#ffffff',
-							textColor: '#000000',
-							fontSize: '14'
-						}
-					];
-
+		kt(t.buttonSide || 'right');
+		var ct = document.getElementById('ww-bubble-text');
+		ct &&
+			(ct.textContent =
+				t.bubbleText ||
+				t.title ||
+				'\u0418\u0441\u043F\u044B\u0442\u0430\u0439\u0442\u0435 \u0443\u0434\u0430\u0447\u0443!');
+		var I = document.getElementById('ww-bubble');
+		(I && t.bubbleEnabled === !1 && (I.style.display = 'none'),
+			(p.style.bottom = `${(ut = t.buttonBottom) != null ? ut : 3}%`),
+			t.buttonSide === 'left'
+				? ((p.style.right = 'auto'),
+					(p.style.left = ((ht = t.buttonOffset) != null ? ht : 3) + '%'))
+				: ((p.style.left = 'auto'),
+					(p.style.right =
+						((ft = t.buttonOffset) != null ? ft : 3) + '%')),
+			window.winwidgetAutoOpen
+				? ((it.style.display = 'none'),
+					(B.style.pointerEvents = 'none'),
+					setTimeout(l, 300))
+				: ((p.style.display = 'flex'),
+					t.bubbleEnabled !== !1 &&
+						setTimeout(function () {
+							var e = document.getElementById('ww-bubble');
+							!e ||
+								M.classList.contains('visible') ||
+								((e.style.display = 'block'),
+								requestAnimationFrame(function () {
+									requestAnimationFrame(function () {
+										((e.style.opacity = '1'),
+											(e.style.transform = 'translateY(-50%) scale(1)'));
+									});
+								}));
+						}, 2e3),
+					V(),
+					q()));
+	}
+	function Ct(t, c) {
+		const l = t.color,
+			y = t.arrowColor || '#ffcc00',
+			b = t.dataType,
+			u = (t.bonuses || []).filter(E => E.active),
+			N =
+				u.length > 0
+					? u.map((E, X) => {
+							var M;
+							const B = E.color || (X % 2 === 0 ? l : '#ffffff');
+							return {
+								label: E.name,
+								probability: E.neverWin
+									? 0
+									: (M = E.probability) != null
+										? M
+										: 1,
+								color: B,
+								textColor: B !== '#ffffff' ? '#ffffff' : '#000000',
+								fontSize: '14'
+							};
+						})
+					: [
+							{
+								label: '\u041F\u0440\u0438\u0437 1',
+								probability: 1,
+								color: l,
+								textColor: '#ffffff',
+								fontSize: '14'
+							},
+							{
+								label: '\u041F\u0440\u0438\u0437 2',
+								probability: 1,
+								color: '#ffffff',
+								textColor: '#000000',
+								fontSize: '14'
+							}
+						];
 		return {
-			...server,
-			_token: token,
-			widgetColor: color,
-			bgColor: server.bgColor || color,
-			sectors,
+			...t,
+			_token: c,
+			widgetColor: l,
+			bgColor: t.bgColor || l,
+			sectors: N,
 			centerSVG: null,
-			arrowSVG: `<polygon points="0,12 18,5 18,19" fill="${arrowColor}" filter="url(#arrow-shadow)"/><defs><filter id="arrow-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="rgba(0,0,0,0.5)"/></filter></defs>`,
-			borderColor: color,
+			arrowSVG: `<polygon points="0,12 18,5 18,19" fill="${y}" filter="url(#arrow-shadow)"/><defs><filter id="arrow-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="rgba(0,0,0,0.5)"/></filter></defs>`,
+			borderColor: l,
 			borderWidth: 8,
-			phoneFieldActive: dc === 'PHONE' || dc === 'PHONE_AND_EMAIL',
-			emailFieldActive: dc === 'EMAIL' || dc === 'PHONE_AND_EMAIL',
-			nameFieldActive: dc !== 'NONE',
-			checkboxPolicyActive: true,
-			startBtnText: server.buttonText || 'Крутить!',
+			phoneFieldActive: b === 'PHONE' || b === 'PHONE_AND_EMAIL',
+			emailFieldActive: b === 'EMAIL' || b === 'PHONE_AND_EMAIL',
+			nameFieldActive: b !== 'NONE',
+			checkboxPolicyActive: !0,
+			startBtnText:
+				t.buttonText || '\u041A\u0440\u0443\u0442\u0438\u0442\u044C!',
 			linkConsentText:
-				server.privacyUrl ||
+				t.privacyUrl ||
 				'https://winwidget.ru/legal-documentation/consent-processing',
-			winningAdviceActive: !!server.winMessage,
-			winningAdviceText: server.winMessage || '',
-			developInfoActive: true,
-			devModeActive: false,
-			confettiEffectActive: true,
-			autoOpenSeconds: server.autoOpenDelay
+			winningAdviceActive: !!t.winMessage,
+			winningAdviceText: t.winMessage || '',
+			developInfoActive: !0,
+			devModeActive: !1,
+			confettiEffectActive: !0,
+			autoOpenSeconds: t.autoOpenDelay
 		};
 	}
-
-	function showDisabledPage() {
-		const el = document.createElement('div');
-		el.style.cssText = [
+	function Mt() {
+		const t = document.createElement('div');
+		((t.style.cssText = [
 			'position:fixed',
 			'inset:0',
 			'display:flex',
@@ -1586,59 +1287,56 @@
 			'text-align:center',
 			'padding:24px',
 			'z-index:2147483647'
-		].join(';');
-		el.innerHTML = [
-			'<div style="font-size:3rem;margin-bottom:16px">🔒</div>',
-			'<h1 style="font-size:1.4rem;font-weight:700;margin-bottom:10px">Виджет отключён</h1>',
-			'<p style="font-size:0.95rem;color:#8080a0;margin-bottom:28px;max-width:320px">',
-			'Этот виджет в данный момент отключён. Включите его в личном кабинете.',
-			'</p>',
-			'<a href="https://winwidget.ru/widgets" ',
-			'style="display:inline-block;padding:11px 28px;background:#4705fb;color:#fff;',
-			'border-radius:10px;font-weight:700;font-size:0.9rem;text-decoration:none;',
-			'transition:background 0.2s" ',
-			'onmouseover="this.style.background=\'#5a1aff\'" ',
-			'onmouseout="this.style.background=\'#4705fb\'">',
-			'Перейти в кабинет',
-			'</a>'
-		].join('');
-		document.body.appendChild(el);
+		].join(';')),
+			(t.innerHTML = [
+				'<div style="font-size:3rem;margin-bottom:16px">\u{1F512}</div>',
+				'<h1 style="font-size:1.4rem;font-weight:700;margin-bottom:10px">\u0412\u0438\u0434\u0436\u0435\u0442 \u043E\u0442\u043A\u043B\u044E\u0447\u0451\u043D</h1>',
+				'<p style="font-size:0.95rem;color:#8080a0;margin-bottom:28px;max-width:320px">',
+				'\u042D\u0442\u043E\u0442 \u0432\u0438\u0434\u0436\u0435\u0442 \u0432 \u0434\u0430\u043D\u043D\u044B\u0439 \u043C\u043E\u043C\u0435\u043D\u0442 \u043E\u0442\u043A\u043B\u044E\u0447\u0451\u043D. \u0412\u043A\u043B\u044E\u0447\u0438\u0442\u0435 \u0435\u0433\u043E \u0432 \u043B\u0438\u0447\u043D\u043E\u043C \u043A\u0430\u0431\u0438\u043D\u0435\u0442\u0435.',
+				'</p>',
+				'<a href="https://winwidget.ru/widgets" ',
+				'style="display:inline-block;padding:11px 28px;background:#4705fb;color:#fff;',
+				'border-radius:10px;font-weight:700;font-size:0.9rem;text-decoration:none;',
+				'transition:background 0.2s" ',
+				`onmouseover="this.style.background='#5a1aff'" `,
+				`onmouseout="this.style.background='#4705fb'">`,
+				'\u041F\u0435\u0440\u0435\u0439\u0442\u0438 \u0432 \u043A\u0430\u0431\u0438\u043D\u0435\u0442',
+				'</a>'
+			].join('')),
+			document.body.appendChild(t));
 	}
-
-	async function bootstrap() {
-		const token = _currentScript?.dataset?.key || window.winwidget;
-		if (!token) {
+	async function St() {
+		var c;
+		const t =
+			((c = k == null ? void 0 : k.dataset) == null ? void 0 : c.key) ||
+			window.winwidget;
+		if (!t) {
 			console.warn(
 				'[winwidget] Token not set. Use data-key attribute: <script src="..." data-key="YOUR_TOKEN"> or set window.winwidget before the script.'
 			);
 			return;
 		}
-
 		try {
-			const [, res] = await Promise.all([
-				ensurePhoneHelper(),
-				fetch(`${API_BASE}/widget/${token}/config`)
+			const [, l] = await Promise.all([
+				At(),
+				fetch(`${tt}/widget/${t}/config`)
 			]);
-			if (!res.ok) {
+			if (!l.ok) {
 				console.warn(
-					`[winwidget] Widget not found or inactive (${res.status})`
+					`[winwidget] Widget not found or inactive (${l.status})`
 				);
 				return;
 			}
-			const server = await res.json();
-			if (!server.isActive) {
-				console.warn('[winwidget] Widget is inactive');
-				if (window.winwidgetAutoOpen) {
-					showDisabledPage();
-				}
+			const y = await l.json();
+			if (!y.isActive) {
+				(console.warn('[winwidget] Widget is inactive'),
+					window.winwidgetAutoOpen && Mt());
 				return;
 			}
-			initWidget(mapServerConfig(server, token));
-		} catch (e) {
-			console.error('[winwidget] Failed to load config:', e);
+			Et(Ct(y, t));
+		} catch (l) {
+			console.error('[winwidget] Failed to load config:', l);
 		}
 	}
-
-	bootstrap();
+	St();
 })();
-/************************/
