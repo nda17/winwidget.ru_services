@@ -19,9 +19,14 @@ const DEFAULT_CONFIG = {
 	color: '#4705fb',
 	bgColor: '',
 	buttonColor: '',
+	openButtonColor: '',
 	buttonSide: 'right',
 	buttonPulse: true,
 	buttonBottom: 3,
+	buttonOffset: 3,
+	buttonSize: 60,
+	bubbleEnabled: true,
+	bubbleText: 'Пройдите квиз!',
 	autoOpenDelay: 45,
 	title: 'Пройдите наш квиз!',
 	subtitle:
@@ -29,7 +34,6 @@ const DEFAULT_CONFIG = {
 	buttonText: 'Начать квиз',
 	contactTitle: 'Оставьте контакт для получения результата',
 	dataType: 'PHONE',
-	phoneRegion: 'RU',
 	privacyUrl:
 		'https://winwidget.ru/legal-documentation/consent-processing',
 	filterDuplicates: false,
@@ -353,6 +357,8 @@ export class QuizService {
 			buttonBottom: config.buttonBottom ?? 3,
 			buttonOffset: config.buttonOffset ?? 3,
 			buttonSize: config.buttonSize ?? 60,
+			bubbleEnabled: config.bubbleEnabled !== false,
+			bubbleText: config.bubbleText || 'Пройдите квиз!',
 			autoOpenDelay: config.autoOpenDelay || null,
 			title: config.title || 'Пройдите наш квиз!',
 			subtitle: config.subtitle || '',
@@ -360,7 +366,6 @@ export class QuizService {
 			contactTitle:
 				config.contactTitle || 'Оставьте контакт для получения результата',
 			dataType: (config.dataType || 'PHONE').toUpperCase(),
-			phoneRegion: config.phoneRegion || 'RU',
 			privacyUrl: config.privacyUrl || null,
 			alreadyPlayedTitle:
 				config.alreadyPlayedTitle || '🎉 Вы уже проходили этот квиз!',
