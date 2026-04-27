@@ -30,7 +30,8 @@ export const bootstrap = async () => {
 			{ path: 'page-wheel/:key', method: RequestMethod.GET },
 			{ path: 'quiz-widget/:key', method: RequestMethod.GET },
 			{ path: 'page-quiz/:key', method: RequestMethod.GET },
-			{ path: 'page-callback/:key', method: RequestMethod.GET }
+			{ path: 'page-callback/:key', method: RequestMethod.GET },
+			{ path: 'page-timer/:key', method: RequestMethod.GET }
 		]
 	});
 

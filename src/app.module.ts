@@ -11,6 +11,8 @@ import { UserModule } from '@/user/user.module';
 import { WidgetModule } from '@/widget/widget.module';
 import { QuizModule } from '@/quiz/quiz.module';
 import { CallbackModule } from '@/callback/callback.module';
+import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
+import { HealthModule } from '@/health/health.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
@@ -34,9 +36,11 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		WidgetModule,
 		QuizModule,
 		CallbackModule,
+		CountdownTimerModule,
 		SiteSettingsModule,
 		LegalPagesModule,
-		NotesModule
+		NotesModule,
+		HealthModule
 	]
 })
 export class AppModule {}

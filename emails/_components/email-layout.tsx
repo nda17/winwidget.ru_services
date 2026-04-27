@@ -24,7 +24,9 @@ interface EmailLayoutProps {
 const brandGradient =
 	'linear-gradient(87.12deg, #470B58 1.98%, #C21B84 50.27%, #FA595E 74.42%, #F8BD31 98.56%)';
 const siteUrl = process.env.RECAPTCHA_CLIENT_URL || 'https://winwidget.ru';
-const logoUrl = new URL('/icon-512x512.png', siteUrl).toString();
+const apiPublicUrl =
+	process.env.API_PUBLIC_URL || 'https://api.winwidget.ru';
+const logoUrl = new URL('/email/logo.png', apiPublicUrl).toString();
 
 const bodyStyle = {
 	backgroundColor: '#f5f5f7',
