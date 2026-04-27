@@ -180,6 +180,12 @@
 	var timerBtn = document.createElement('div');
 	timerBtn.id = 'timer-widget-button';
 	timerBtn.innerHTML = [
+		'<div id="wt-bubble" style="display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);background:#fff;border-radius:18px;padding:12px 34px 12px 16px;width:172px;box-sizing:border-box;border:1px solid rgba(71,5,251,0.12);box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);cursor:pointer;opacity:0;transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);font-family:system-ui,-apple-system,sans-serif;">',
+		'<button id="wt-bubble-close" style="position:absolute;top:7px;right:8px;background:none;border:none;font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;display:flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;">✕</button>',
+		'<p id="wt-bubble-text" style="margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;"></p>',
+		'<span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>',
+		'<div id="wt-bubble-tail" style="position:absolute;top:50%;transform:translateY(-50%);width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;"></div>',
+		'</div>',
 		'<div id="wt-btn-icon" style="position:relative;filter:drop-shadow(0 6px 24px rgba(71,5,251,0.45)) drop-shadow(0 2px 8px rgba(0,0,0,0.22));">',
 		'<div id="wt-ring-1" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.32);"></div>',
 		'<div id="wt-ring-2" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.18);"></div>',
@@ -213,8 +219,10 @@
 		'@keyframes wtGlow{0%,100%{filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2))}50%{filter:drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5))}}',
 		'@keyframes wtRipple{0%{transform:scale(1);opacity:.55}100%{transform:scale(2.15);opacity:0}}',
 		'#wt-ring-1,#wt-ring-2{display:none}',
+		'#wt-bubble:hover{opacity:0.95!important}',
+		'#wt-bubble-close:hover{color:#888!important}',
 		'.wt-input-error{border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,.12)!important}',
-		'@media(max-width:480px){#timer-widget-overlay{padding:12px!important}#wt-modal{padding:22px 16px 18px!important;border-radius:18px!important}.wt-time-value{font-size:24px!important}.wt-time-box{padding:10px 6px!important}}'
+		'@media(max-width:480px){#timer-widget-overlay{padding:12px!important}#wt-modal{padding:22px 16px 18px!important;border-radius:18px!important}.wt-time-value{font-size:24px!important}.wt-time-box{padding:10px 6px!important}#wt-bubble{display:none!important}}'
 	].join('');
 	document.head.appendChild(style);
 
@@ -310,6 +318,37 @@
 			svg.setAttribute('width', size);
 			svg.setAttribute('height', size);
 		}
+	}
+
+	function updateBubbleSide(side) {
+		var bubble = document.getElementById('wt-bubble');
+		var tail = document.getElementById('wt-bubble-tail');
+		if (!bubble || !tail) return;
+		if (side === 'left') {
+			bubble.style.left = 'calc(100% + 14px)';
+			bubble.style.right = 'auto';
+			tail.style.left = '-8px';
+			tail.style.right = 'auto';
+			tail.style.borderLeft = 'none';
+			tail.style.borderRight = '8px solid #fff';
+		} else {
+			bubble.style.right = 'calc(100% + 14px)';
+			bubble.style.left = 'auto';
+			tail.style.right = '-8px';
+			tail.style.left = 'auto';
+			tail.style.borderRight = 'none';
+			tail.style.borderLeft = '8px solid #fff';
+		}
+	}
+
+	function hideBubble() {
+		var bubble = document.getElementById('wt-bubble');
+		if (!bubble || bubble.style.display === 'none') return;
+		bubble.style.opacity = '0';
+		bubble.style.transform = 'translateY(-50%) scale(0.85)';
+		setTimeout(function () {
+			bubble.style.display = 'none';
+		}, 300);
 	}
 
 	function applyButtonColor(color) {
@@ -919,6 +958,7 @@
 	}
 
 	function handleButtonClick() {
+		hideBubble();
 		isOpen ? closeModal() : openModal();
 	}
 
@@ -934,6 +974,44 @@
 		modal.style.background = cfg.bgColor || '#fff';
 		var label = document.getElementById('wt-btn-label');
 		if (label) label.textContent = cfg.bubbleText || 'Акция';
+
+		updateBubbleSide(cfg.buttonSide || 'right');
+
+		var bubbleClose = document.getElementById('wt-bubble-close');
+		var bubbleEl = document.getElementById('wt-bubble');
+		var bubbleText = document.getElementById('wt-bubble-text');
+
+		if (bubbleText) bubbleText.textContent = cfg.bubbleText || 'Акция!';
+		if (bubbleEl && cfg.bubbleEnabled === false) {
+			bubbleEl.style.display = 'none';
+		}
+		if (bubbleClose) {
+			bubbleClose.addEventListener('click', function (e) {
+				e.stopPropagation();
+				hideBubble();
+			});
+		}
+		if (bubbleEl) {
+			bubbleEl.addEventListener('click', function (e) {
+				e.stopPropagation();
+				hideBubble();
+				openModal();
+			});
+		}
+		if (!AUTO_OPEN && cfg.bubbleEnabled !== false) {
+			setTimeout(function () {
+				var b = document.getElementById('wt-bubble');
+				if (!b || isOpen) return;
+				b.style.display = 'block';
+				requestAnimationFrame(function () {
+					requestAnimationFrame(function () {
+						b.style.opacity = '1';
+						b.style.transform = 'translateY(-50%) scale(1)';
+					});
+				});
+			}, 2000);
+		}
+
 		if (!AUTO_OPEN && !isOpen) {
 			stopButtonAnimation();
 			startButtonAnimation();
