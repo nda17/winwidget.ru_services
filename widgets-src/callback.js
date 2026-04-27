@@ -319,7 +319,7 @@
 
 	var backdrop = document.createElement('div');
 	backdrop.style.cssText =
-		'position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);';
+		'position:absolute;inset:0;background:rgba(8,4,20,0.85);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);touch-action:none;';
 	overlay.appendChild(backdrop);
 
 	var modal = document.createElement('div');

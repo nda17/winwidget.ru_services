@@ -250,7 +250,7 @@
 			'position:fixed;inset:0;z-index:10000;display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box'));
 	var A = document.createElement('div');
 	((A.style.cssText =
-		'position:absolute;inset:0;background:rgba(7,8,20,.56);backdrop-filter:blur(4px);'),
+		'position:absolute;inset:0;background:rgba(8,4,20,0.85);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);touch-action:none;'),
 		w.appendChild(A));
 	var o = document.createElement('div');
 	((o.id = 'wt-modal'),

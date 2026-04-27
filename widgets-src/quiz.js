@@ -248,7 +248,7 @@
 		'.hidden{display:none!important}',
 
 		// overlay
-		'#wq-overlay{position:fixed;inset:0;background:rgba(8,4,20,0.86);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);z-index:999;touch-action:none}',
+		'#wq-overlay{position:fixed;inset:0;background:rgba(8,4,20,0.85);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:999;touch-action:none}',
 
 		// card
 		'#wq-card{position:relative;z-index:1000;display:flex;flex-direction:column;width:100%;max-width:520px;margin:auto;',

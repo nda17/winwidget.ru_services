@@ -277,7 +277,7 @@
 		].join(';')));
 	var P = document.createElement('div');
 	((P.style.cssText =
-		'position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);'),
+		'position:absolute;inset:0;background:rgba(8,4,20,0.85);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);touch-action:none;'),
 		x.appendChild(P));
 	var a = document.createElement('div');
 	((a.id = 'wcb-modal'),
