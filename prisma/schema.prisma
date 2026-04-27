@@ -20,6 +20,7 @@ model User {
   widgets                Widget[]
   quizzes                Quiz[]
   callbacks              Callback[]
+  countdownTimers        CountdownTimer[]
   subscription           Subscription?
   createdAt              DateTime                @default(now()) @map("created_at")
   updatedAt              DateTime                @updatedAt @map("updated_at")
@@ -71,6 +72,40 @@ model CallbackLead {
   @@index([callbackId])
   @@index([callbackId, ip])
   @@map("callback_leads")
+}
+
+model CountdownTimer {
+  id        String               @id @default(cuid())
+  userId    String               @map("user_id")
+  publicKey String               @unique @map("public_key")
+  name      String               @default("Таймер")
+  isActive  Boolean              @default(true) @map("is_active")
+  config    Json                 @default("{}")
+  leads     CountdownTimerLead[]
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime             @default(now()) @map("created_at")
+  updatedAt DateTime             @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("countdown_timers")
+}
+
+model CountdownTimerLead {
+  id               String         @id @default(cuid())
+  countdownTimerId String         @map("countdown_timer_id")
+  phone            String?
+  email            String?
+  url              String?
+  ip               String?
+  timerResetToken  String         @default("") @map("timer_reset_token")
+  countdownTimer   CountdownTimer @relation(fields: [countdownTimerId], references: [id], onDelete: Cascade)
+  createdAt        DateTime       @default(now()) @map("created_at")
+
+  @@index([countdownTimerId])
+  @@index([countdownTimerId, ip])
+  @@index([countdownTimerId, timerResetToken])
+  @@index([countdownTimerId, timerResetToken, ip])
+  @@map("countdown_timer_leads")
 }
 
 model Quiz {
