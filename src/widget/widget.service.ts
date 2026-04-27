@@ -17,11 +17,16 @@ import * as XLSX from 'xlsx';
 
 const DEFAULT_CONFIG = {
 	color: '#4705fb',
+	bgColor: '',
 	autoOpenDelay: 45,
 	spinDuration: 5,
 	buttonSide: 'right',
 	buttonPulse: true,
 	buttonBottom: 3,
+	buttonOffset: 3,
+	buttonSize: 64,
+	bubbleEnabled: true,
+	bubbleText: 'Испытайте удачу!',
 	alreadyPlayedTitle: '🎉 Вы уже участвовали!',
 	alreadyPlayedSubtitle:
 		'Каждый посетитель может крутить колесо только один раз',
@@ -32,10 +37,11 @@ const DEFAULT_CONFIG = {
 	winMessage: 'Поздравляем! Не пропустите звонок, мы скоро свяжемся',
 	privacyUrl:
 		'https://winwidget.ru/legal-documentation/consent-processing',
-	phoneRegion: 'RU',
 	buttonText: 'Крутить!',
 	filterDuplicates: false,
 	buttonColor: '',
+	centerColor: '#ffffff',
+	arrowColor: '#ffcc00',
 	spinCooldownDays: 0,
 	spinResetToken: '',
 	actionButton: null,
@@ -343,6 +349,8 @@ export class WidgetService {
 			buttonBottom: config.buttonBottom ?? 3,
 			buttonOffset: config.buttonOffset ?? 3,
 			buttonSize: config.buttonSize ?? 64,
+			bubbleEnabled: config.bubbleEnabled !== false,
+			bubbleText: config.bubbleText || 'Испытайте удачу!',
 			alreadyPlayedTitle:
 				config.alreadyPlayedTitle || '🎉 Вы уже участвовали!',
 			alreadyPlayedSubtitle:
