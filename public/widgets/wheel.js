@@ -20,7 +20,80 @@
 
 	const giftBtn = document.createElement('div');
 	const giftFontSize = '64px';
+
+	function getWidgetAssetUrl(fileName) {
+		try {
+			const src = new URL(_currentScript?.src || location.href);
+			src.pathname = src.pathname.replace(/\/[^/]*$/, '/' + fileName);
+			src.search = '';
+			src.hash = '';
+			return src.toString();
+		} catch {
+			return 'https://winwidget.ru/widgets/' + fileName;
+		}
+	}
+
+	function loadExternalScript(src) {
+		return new Promise((resolve, reject) => {
+			const existing = document.querySelector('script[src="' + src + '"]');
+			if (existing) {
+				existing.addEventListener('load', resolve, { once: true });
+				existing.addEventListener('error', reject, { once: true });
+				if (window.winwidgetPhone) resolve();
+				return;
+			}
+			const script = document.createElement('script');
+			script.src = src;
+			script.async = true;
+			script.onload = () => {
+				resolve();
+			};
+			script.onerror = reject;
+			document.head.appendChild(script);
+		});
+	}
+
+	function ensurePhoneHelper() {
+		if (window.winwidgetPhone) return window.winwidgetPhone.load();
+		return loadExternalScript(
+			getWidgetAssetUrl('helpers/winwidget-phone.js')
+		)
+			.then(() =>
+				window.winwidgetPhone ? window.winwidgetPhone.load() : null
+			)
+			.catch(e => {
+				console.warn('[winwidget] Failed to load phone formatter:', e);
+				return null;
+			});
+	}
+
 	giftBtn.innerHTML = `
+  <div id="ww-bubble" style="
+    display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);
+    background:#fff;border-radius:18px;padding:12px 34px 12px 16px;
+    width:172px;box-sizing:border-box;
+    border:1px solid rgba(71,5,251,0.12);
+    box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);
+    cursor:pointer;opacity:0;
+    transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);
+    font-family:system-ui,-apple-system,sans-serif;
+  ">
+    <button id="ww-bubble-close" style="
+      position:absolute;top:7px;right:8px;background:none;border:none;
+      font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;
+      display:flex;align-items:center;justify-content:center;
+      width:16px;height:16px;border-radius:50%;
+    ">✕</button>
+    <p id="ww-bubble-text" style="
+      margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;
+    "></p>
+    <span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>
+    <div id="ww-bubble-tail" style="
+      position:absolute;top:50%;transform:translateY(-50%);
+      width:0;height:0;
+      border-top:7px solid transparent;border-bottom:7px solid transparent;
+    "></div>
+  </div>
   <div id="ww-btn-emoji" style="
     font-size:${giftFontSize};line-height:1;
     filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2));
@@ -74,6 +147,9 @@
   50%  { filter: drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5)); }
   100% { filter: drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2)); }
 }
+#ww-bubble:hover{opacity:0.95!important}
+#ww-bubble-close:hover{color:#888!important}
+@media(max-width:480px){#ww-bubble{display:none!important}}
 `;
 
 	document.head.appendChild(styleAnimGiftBtn);
@@ -98,6 +174,37 @@
 	function stopGiftAnimation() {
 		giftAnimationActive = false;
 		giftBtn.style.animation = 'none';
+	}
+
+	function updateBubbleSide(side) {
+		var bubble = document.getElementById('ww-bubble');
+		var tail = document.getElementById('ww-bubble-tail');
+		if (!bubble || !tail) return;
+		if (side === 'left') {
+			bubble.style.left = 'calc(100% + 14px)';
+			bubble.style.right = 'auto';
+			tail.style.left = '-8px';
+			tail.style.right = 'auto';
+			tail.style.borderLeft = 'none';
+			tail.style.borderRight = '8px solid #fff';
+		} else {
+			bubble.style.right = 'calc(100% + 14px)';
+			bubble.style.left = 'auto';
+			tail.style.right = '-8px';
+			tail.style.left = 'auto';
+			tail.style.borderRight = 'none';
+			tail.style.borderLeft = '8px solid #fff';
+		}
+	}
+
+	function hideBubble() {
+		var bubble = document.getElementById('ww-bubble');
+		if (!bubble || bubble.style.display === 'none') return;
+		bubble.style.opacity = '0';
+		bubble.style.transform = 'translateY(-50%) scale(0.85)';
+		setTimeout(function () {
+			bubble.style.display = 'none';
+		}, 300);
 	}
 
 	setTimeout(() => {
@@ -155,6 +262,7 @@
 		}
 
 		function openWidget() {
+			hideBubble();
 			mainWrapper.classList.remove('hidden');
 			mainWrapper.classList.add('visible');
 			// Блокируем скролл страницы
@@ -200,7 +308,7 @@
       --wheel-size: 300px;
       --accent: ${config.widgetColor};
       position: fixed;
-      z-index: 100;
+      z-index: 10000;
       top: 0;
     }
     * { box-sizing: border-box; }
@@ -965,75 +1073,12 @@
 			? shadow.getElementById('policy-input')
 			: null;
 
-		//Инпут с номером телефона
-		const MASK = '+7 (9__) ___-__-__';
-		let digits = ''; // 9 цифр без 7и9
-
-		//Рендер маски номера телефона
-		function renderMask() {
-			let result = MASK.split('');
-			let d = 0;
-
-			for (let i = 0; i < result.length; i++) {
-				if (result[i] === '_' && digits[d]) {
-					result[i] = digits[d++];
-				}
-			}
-
-			inputPhone.value = result.join('');
-			moveCursor();
-		}
-
-		function moveCursor() {
-			const pos = inputPhone.value.indexOf('_');
-			inputPhone.setSelectionRange(
-				pos === -1 ? inputPhone.value.length : pos,
-				pos === -1 ? inputPhone.value.length : pos
-			);
-		}
-
-		// Фокус на инпуте с номером телефона
-		config.phoneFieldActive &&
-			inputPhone.addEventListener('focus', () => {
-				if (!inputPhone.value) {
-					renderMask();
-				}
-			});
-
-		// Ввод и удаление в инпуте с номером телефона
-		function handleKeydownInputPhone(e) {
-			// цифры
-			if (/\d/.test(e.key)) {
-				if (digits.length < 9) {
-					digits += e.key;
-					renderMask();
-				}
-				e.preventDefault();
-				return;
-			}
-
-			// backspace
-			if (e.key === 'Backspace') {
-				digits = digits.slice(0, -1);
-				renderMask();
-				e.preventDefault();
-				return;
-			}
-
-			// служебные клавиши
-			if (!['ArrowLeft', 'ArrowRight', 'Tab'].includes(e.key)) {
-				e.preventDefault();
-			}
-		}
-
-		// Вставка номера телефона из буфера обмена
-		function handlePaste(text) {
-			const digitsOnly = text.replace(/\D/g, '');
-			// убираем ведущие 7/8 и ведущую 9 (зафиксирована в маске), берём последние 9 цифр
-			const stripped = digitsOnly.replace(/^[78]?9?/, '');
-			digits = stripped.slice(0, 9);
-			renderMask();
-		}
+		const phoneController =
+			config.phoneFieldActive && window.winwidgetPhone
+				? window.winwidgetPhone.attach(inputPhone, {
+						placeholder: '+7 999 123-45-67'
+					})
+				: null;
 
 		//Анимация инпутов при ошибке ввода
 		function shakeInput(element) {
@@ -1078,7 +1123,10 @@
 					isValid = false;
 				}
 
-				if (config.phoneFieldActive && digits.length !== 9) {
+				if (
+					config.phoneFieldActive &&
+					(!phoneController || !phoneController.isValid())
+				) {
 					shakeInput(inputPhone);
 					isValid = false;
 				}
@@ -1111,11 +1159,6 @@
 
 		// Потеря фокуса c инпута с номером телефона
 		function handleBlurInputPhone() {
-			if (!digits.length) {
-				inputPhone.value = '';
-				return;
-			}
-
 			validate();
 		}
 
@@ -1137,7 +1180,7 @@
 
 		// Получение чистого номера для отправки на бэк
 		function getFormatPhone() {
-			return digits.length === 9 ? `79${digits}` : null;
+			return phoneController ? phoneController.getNumber() : null;
 		}
 
 		//Получаем email пользователя
@@ -1345,21 +1388,26 @@
 			inputName.addEventListener('blur', handleBlurInputName);
 		config.phoneFieldActive &&
 			inputPhone.addEventListener('blur', handleBlurInputPhone);
-		config.phoneFieldActive &&
-			inputPhone.addEventListener('paste', e => {
-				e.preventDefault();
-				const pastedText = (
-					e.clipboardData || window.clipboardData
-				).getData('text');
-				handlePaste(pastedText);
-			});
-		config.phoneFieldActive &&
-			inputPhone.addEventListener('keydown', handleKeydownInputPhone);
 		config.emailFieldActive &&
 			inputEmail.addEventListener('blur', handleBlurInputEmail);
 		closeBtn.addEventListener('click', closeWidget);
 		startBtn.addEventListener('click', pushBtn);
 		giftBtn.addEventListener('click', openWidget);
+		var bubbleClose = document.getElementById('ww-bubble-close');
+		var bubbleEl = document.getElementById('ww-bubble');
+		if (bubbleClose) {
+			bubbleClose.addEventListener('click', function (e) {
+				e.stopPropagation();
+				hideBubble();
+			});
+		}
+		if (bubbleEl) {
+			bubbleEl.addEventListener('click', function (e) {
+				e.stopPropagation();
+				hideBubble();
+				openWidget();
+			});
+		}
 		overlay.addEventListener('click', closeWidget);
 
 		// Ограничение попыток (localStorage + IP)
@@ -1416,6 +1464,15 @@
 			labelEl.style.fontSize = lf + 'px';
 			labelEl.style.padding = lph + 'px ' + lpv + 'px';
 		}
+		updateBubbleSide(config.buttonSide || 'right');
+		var bubbleText = document.getElementById('ww-bubble-text');
+		if (bubbleText)
+			bubbleText.textContent =
+				config.bubbleText || config.title || 'Испытайте удачу!';
+		var bubbleEl = document.getElementById('ww-bubble');
+		if (bubbleEl && config.bubbleEnabled === false) {
+			bubbleEl.style.display = 'none';
+		}
 		giftBtn.style.bottom = `${config.buttonBottom ?? 3}%`;
 		if (config.buttonSide === 'left') {
 			giftBtn.style.right = 'auto';
@@ -1432,6 +1489,19 @@
 		} else {
 			// Показываем кнопку только сейчас — конфиг загружен, все проверки пройдены
 			giftBtn.style.display = 'flex';
+			if (config.bubbleEnabled !== false) {
+				setTimeout(function () {
+					var b = document.getElementById('ww-bubble');
+					if (!b || mainWrapper.classList.contains('visible')) return;
+					b.style.display = 'block';
+					requestAnimationFrame(function () {
+						requestAnimationFrame(function () {
+							b.style.opacity = '1';
+							b.style.transform = 'translateY(-50%) scale(1)';
+						});
+					});
+				}, 2000);
+			}
 			stopGiftAnimation();
 			startGiftAnimation();
 		}
@@ -1545,7 +1615,10 @@
 		}
 
 		try {
-			const res = await fetch(`${API_BASE}/widget/${token}/config`);
+			const [, res] = await Promise.all([
+				ensurePhoneHelper(),
+				fetch(`${API_BASE}/widget/${token}/config`)
+			]);
 			if (!res.ok) {
 				console.warn(
 					`[winwidget] Widget not found or inactive (${res.status})`

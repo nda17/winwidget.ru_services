@@ -23,6 +23,56 @@
 		(_currentScript && _currentScript.getAttribute('data-key')) || '';
 	if (!KEY) return;
 
+	function getWidgetAssetUrl(fileName) {
+		try {
+			var src = new URL(
+				_currentScript && _currentScript.src
+					? _currentScript.src
+					: location.href
+			);
+			src.pathname = src.pathname.replace(/\/[^/]*$/, '/' + fileName);
+			src.search = '';
+			src.hash = '';
+			return src.toString();
+		} catch (e) {
+			return 'https://winwidget.ru/widgets/' + fileName;
+		}
+	}
+
+	function loadExternalScript(src) {
+		return new Promise(function (resolve, reject) {
+			var existing = document.querySelector('script[src="' + src + '"]');
+			if (existing) {
+				existing.addEventListener('load', resolve, { once: true });
+				existing.addEventListener('error', reject, { once: true });
+				if (window.winwidgetPhone) resolve();
+				return;
+			}
+			var script = document.createElement('script');
+			script.src = src;
+			script.async = true;
+			script.onload = function () {
+				resolve();
+			};
+			script.onerror = reject;
+			document.head.appendChild(script);
+		});
+	}
+
+	function ensurePhoneHelper() {
+		if (window.winwidgetPhone) return window.winwidgetPhone.load();
+		return loadExternalScript(
+			getWidgetAssetUrl('helpers/winwidget-phone.js')
+		)
+			.then(function () {
+				return window.winwidgetPhone ? window.winwidgetPhone.load() : null;
+			})
+			.catch(function (e) {
+				console.warn('[wincallback] Failed to load phone formatter:', e);
+				return null;
+			});
+	}
+
 	var AUTO_OPEN = Boolean(
 		window.wincallbackAutoOpen ||
 		window.winwidgetCallbackAutoOpen ||
@@ -111,10 +161,10 @@
 	cbBtn.innerHTML = [
 		'<div id="wcb-bubble" style="',
 		'display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);',
-		'background:#fff;border-radius:14px;padding:10px 30px 10px 14px;',
-		'width:150px;box-sizing:border-box;',
-		'border:1px solid rgba(71,5,251,0.1);',
-		'box-shadow:0 8px 28px rgba(71,5,251,0.16),0 2px 8px rgba(0,0,0,0.08);',
+		'background:#fff;border-radius:18px;padding:12px 34px 12px 16px;',
+		'width:172px;box-sizing:border-box;',
+		'border:1px solid rgba(71,5,251,0.12);',
+		'box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);',
 		'cursor:pointer;opacity:0;',
 		'transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);',
 		'font-family:system-ui,-apple-system,sans-serif;',
@@ -128,6 +178,7 @@
 		'<p id="wcb-bubble-text" style="',
 		'margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;',
 		'"></p>',
+		'<span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>',
 		'<div id="wcb-bubble-tail" style="',
 		'position:absolute;top:50%;transform:translateY(-50%);',
 		'width:0;height:0;',
@@ -175,16 +226,16 @@
 
 	var styleAnim = document.createElement('style');
 	styleAnim.textContent = [
+		'@keyframes wcbBounce{0%,100%{transform:translateY(0) scale(1)}10%{transform:translateY(-16px) scale(1.1)}20%{transform:translateY(0) scale(1)}30%{transform:translateY(-6px) scale(1.04)}40%{transform:translateY(0) scale(1)}}',
+		'@keyframes wcbSway{0%,100%{transform:rotate(0)}25%{transform:rotate(-6deg)}75%{transform:rotate(6deg)}}',
+		'@keyframes wcbGlow{0%,100%{filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2))}50%{filter:drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5))}}',
 		'@keyframes wcbRipple{0%{transform:scale(1);opacity:0.55}100%{transform:scale(2.4);opacity:0}}',
 		'@keyframes wcbShake{0%,100%{transform:translateX(0)}12%{transform:translateX(-5px)}25%{transform:translateX(5px)}37%{transform:translateX(-4px)}50%{transform:translateX(4px)}62%{transform:translateX(-2px)}75%{transform:translateX(2px)}87%{transform:translateX(-1px)}}',
 		'.wcb-field-err{border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,0.15)!important}',
 		'.wcb-shake{animation:wcbShake 420ms ease}',
 		'.wcb-err-text{color:#ef4444;font-size:11px;margin-top:5px;display:none;padding-left:2px}',
 		'.wcb-err-text.wcb-err-show{display:block}',
-		'#wcb-ring-1{animation:wcbRipple 2.4s ease-out infinite}',
-		'#wcb-ring-2{animation:wcbRipple 2.4s ease-out infinite 0.8s}',
-		'#wcb-ring-3{animation:wcbRipple 2.4s ease-out infinite 1.6s}',
-		'#wcb-btn-icon:hover{transform:scale(1.1)!important}',
+		'#wcb-ring-1,#wcb-ring-2,#wcb-ring-3{display:none}',
 		'#wcb-bubble:hover{opacity:0.95!important}',
 		'#wcb-bubble-close:hover{color:#888!important}',
 		'#callback-widget-overlay{align-items:center!important}',
@@ -199,7 +250,59 @@
 	].join('');
 	document.head.appendChild(styleAnim);
 
+	var buttonAnimationActive = false;
+	var buttonPulseEnabled = true;
+	var scrollTriggered = false;
+
+	function startButtonAnimation() {
+		if (buttonAnimationActive) return;
+		buttonAnimationActive = true;
+		cbBtn.style.animation = [
+			'wcbBounce 3s ease-in-out infinite',
+			'wcbSway 4s ease-in-out infinite',
+			buttonPulseEnabled ? 'wcbGlow 2.5s ease-in-out infinite' : ''
+		]
+			.filter(Boolean)
+			.join(',');
+	}
+
+	function stopButtonAnimation() {
+		buttonAnimationActive = false;
+		cbBtn.style.animation = 'none';
+	}
+
+	setTimeout(startButtonAnimation, 4000);
+
+	window.addEventListener(
+		'scroll',
+		function () {
+			if (scrollTriggered) return;
+			scrollTriggered = true;
+			cbBtn.animate(
+				[
+					{ transform: 'translateY(0) rotate(0deg)' },
+					{ transform: 'translateY(-250px) rotate(-6deg)' },
+					{ transform: 'translateY(0) rotate(0deg)' }
+				],
+				{
+					duration: 2300,
+					easing: 'cubic-bezier(.34,1.56,.64,1)'
+				}
+			);
+			startButtonAnimation();
+		},
+		{ passive: true }
+	);
+
 	// ─── Modal ────────────────────────────────────────────────────────────────
+
+	var host = document.createElement('div');
+	host.id = 'callback-widget-host';
+	document.body.appendChild(host);
+	var shadow = host.attachShadow({ mode: 'open' });
+	var shadowStyle = document.createElement('style');
+	shadowStyle.textContent = styleAnim.textContent;
+	shadow.appendChild(shadowStyle);
 
 	var overlay = document.createElement('div');
 	overlay.id = 'callback-widget-overlay';
@@ -239,7 +342,7 @@
 		'transition:transform 380ms cubic-bezier(.22,1,.36,1),opacity 280ms ease'
 	].join(';');
 	overlay.appendChild(modal);
-	document.body.appendChild(overlay);
+	shadow.appendChild(overlay);
 
 	// ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -405,16 +508,15 @@
 
 		// ── Phone input ──────────────────────────────────────────────────────────
 
-		var maskDef = MASKS[cfg.phoneRegion] || MASKS.RU;
 		var phoneValid = false;
+		var phoneController = null;
 
 		var phoneWrap = el('div', { marginBottom: '12px' });
 
 		var phoneInput = document.createElement('input');
 		phoneInput.type = 'tel';
 		phoneInput.autocomplete = 'tel';
-		phoneInput.placeholder = maskDef.placeholder;
-		phoneInput.value = applyMask('', maskDef);
+		phoneInput.placeholder = '+7 999 123-45-67';
 		css(phoneInput, {
 			width: '100%',
 			boxSizing: 'border-box',
@@ -431,8 +533,6 @@
 		phoneErrText.className = 'wcb-err-text';
 		phoneErrText.textContent = 'Введите корректный номер телефона';
 
-		var prevRaw = getRawDigits(phoneInput.value, maskDef);
-
 		function clearPhoneErr() {
 			phoneInput.classList.remove('wcb-field-err');
 			phoneErrText.classList.remove('wcb-err-show');
@@ -445,15 +545,6 @@
 			phoneInput.focus();
 		}
 
-		function applyPhoneUpdate(newRaw) {
-			var masked = applyMask(newRaw, maskDef);
-			prevRaw = getRawDigits(masked, maskDef);
-			phoneInput.value = masked;
-			phoneValid = isPhoneComplete(masked, maskDef);
-			submitBtn.style.opacity = phoneValid ? '1' : '0.5';
-			clearPhoneErr();
-		}
-
 		phoneInput.addEventListener('focus', function () {
 			if (!phoneInput.classList.contains('wcb-field-err')) {
 				phoneInput.style.borderColor = accentColor;
@@ -464,27 +555,6 @@
 			if (!phoneInput.classList.contains('wcb-field-err')) {
 				phoneInput.style.borderColor = '#e0d6f0';
 				phoneInput.style.boxShadow = 'none';
-			}
-		});
-		phoneInput.addEventListener('keydown', function (e) {
-			if (e.key === 'Backspace') {
-				e.preventDefault();
-				applyPhoneUpdate(prevRaw.slice(0, -1));
-			}
-		});
-		phoneInput.addEventListener('input', function (e) {
-			var isDelete =
-				e.inputType === 'deleteContentBackward' ||
-				e.inputType === 'deleteContentForward';
-			if (isDelete) {
-				var currentRaw = getRawDigits(phoneInput.value, maskDef);
-				if (currentRaw.length >= prevRaw.length) {
-					applyPhoneUpdate(prevRaw.slice(0, -1));
-				} else {
-					applyPhoneUpdate(currentRaw);
-				}
-			} else {
-				applyPhoneUpdate(getRawDigits(phoneInput.value, maskDef));
 			}
 		});
 
@@ -565,6 +635,16 @@
 			opacity: '0.5'
 		});
 		submitBtn.textContent = cfg.submitButtonText || 'Заказать звонок';
+		if (window.winwidgetPhone) {
+			phoneController = window.winwidgetPhone.attach(phoneInput, {
+				placeholder: '+7 999 123-45-67',
+				onChange: function (phone) {
+					phoneValid = Boolean(phone);
+					submitBtn.style.opacity = phoneValid ? '1' : '0.5';
+					clearPhoneErr();
+				}
+			});
+		}
 
 		submitBtn.addEventListener('mouseenter', function () {
 			if (phoneValid) submitBtn.style.opacity = '0.88';
@@ -581,7 +661,7 @@
 				return;
 			}
 
-			var phone = phoneInput.value.replace(/\D/g, '');
+			var phone = phoneController ? phoneController.getNumber() : null;
 
 			isSubmitting = true;
 			submitBtn.disabled = true;
@@ -597,7 +677,7 @@
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					phone: '+' + phone,
+					phone: phone,
 					timeSlot: timeSelect ? timeSelect.value : '',
 					timezone: timezone,
 					url: window.location.href
@@ -710,6 +790,10 @@
 	function openModal() {
 		if (isOpen) return;
 		isOpen = true;
+		cbBtn.style.opacity = '0';
+		cbBtn.style.pointerEvents = 'none';
+		cbBtn.style.transform = 'scale(0.8)';
+		stopButtonAnimation();
 		overlay.style.display = 'flex';
 		submitted ? buildSuccess() : buildForm();
 		requestAnimationFrame(function () {
@@ -724,6 +808,10 @@
 	function closeModal() {
 		if (!isOpen) return;
 		isOpen = false;
+		cbBtn.style.opacity = '1';
+		cbBtn.style.pointerEvents = 'auto';
+		cbBtn.style.transform = 'scale(1)';
+		startButtonAnimation();
 		modal.style.transform = 'translateY(40px)';
 		modal.style.opacity = '0';
 		setTimeout(function () {
@@ -763,12 +851,26 @@
 
 	// ─── Init ─────────────────────────────────────────────────────────────────
 
-	fetch(API_BASE + '/callback/' + KEY + '/config')
-		.then(function (r) {
+	Promise.all([
+		ensurePhoneHelper(),
+		fetch(API_BASE + '/callback/' + KEY + '/config')
+	])
+		.then(function (result) {
+			var r = result[1];
+			if (!r.ok) {
+				console.warn(
+					'[wincallback] Widget not found or inactive (' + r.status + ')'
+				);
+				return null;
+			}
 			return r.json();
 		})
 		.then(function (data) {
-			if (!data || !data.isActive) return;
+			if (data === null) return;
+			if (!data || !data.isActive) {
+				console.warn('[wincallback] Widget is inactive');
+				return;
+			}
 
 			cfg = data;
 
@@ -789,6 +891,7 @@
 
 			applyColor(cfg.openButtonColor || cfg.color || '#4705fb');
 
+			buttonPulseEnabled = cfg.buttonPulse !== false;
 			if (cfg.buttonPulse === false) {
 				['wcb-ring-1', 'wcb-ring-2', 'wcb-ring-3'].forEach(function (id) {
 					var el = document.getElementById(id);
@@ -807,6 +910,9 @@
 			if (bubbleText)
 				bubbleText.textContent =
 					cfg.bubbleText || cfg.title || 'Перезвоним!';
+			if (bubbleEl && cfg.bubbleEnabled === false) {
+				bubbleEl.style.display = 'none';
+			}
 
 			if (bubbleClose) {
 				bubbleClose.addEventListener('click', function (e) {
@@ -823,7 +929,7 @@
 				});
 			}
 
-			if (!AUTO_OPEN) {
+			if (!AUTO_OPEN && cfg.bubbleEnabled !== false) {
 				setTimeout(function () {
 					var b = document.getElementById('wcb-bubble');
 					if (!b || isOpen) return;
@@ -839,6 +945,11 @@
 
 			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
 
+			if (!AUTO_OPEN && !isOpen) {
+				stopButtonAnimation();
+				startButtonAnimation();
+			}
+
 			if (cfg.autoOpenDelay && cfg.autoOpenDelay > 0) {
 				setTimeout(function () {
 					if (!isOpen) openModal();
@@ -849,12 +960,23 @@
 				openModal();
 			}
 		})
-		.catch(function () {});
+		.catch(function (e) {
+			console.error('[wincallback] Failed to load config:', e);
+		});
 
 	// ─── Public API ───────────────────────────────────────────────────────────
 
+	function destroyWidget() {
+		if (cbBtn.parentNode) cbBtn.parentNode.removeChild(cbBtn);
+		if (host.parentNode) host.parentNode.removeChild(host);
+		if (styleAnim.parentNode) styleAnim.parentNode.removeChild(styleAnim);
+		delete window.__wincallbackScriptRunning;
+		delete window.winwidgetCallback;
+	}
+
 	window.winwidgetCallback = {
 		open: openModal,
-		close: closeModal
+		close: closeModal,
+		destroy: destroyWidget
 	};
 })();

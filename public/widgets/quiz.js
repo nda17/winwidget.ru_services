@@ -23,10 +23,86 @@
 		(_currentScript && _currentScript.getAttribute('data-key')) || '';
 	if (!KEY) return;
 
+	function getWidgetAssetUrl(fileName) {
+		try {
+			var src = new URL(
+				_currentScript && _currentScript.src
+					? _currentScript.src
+					: location.href
+			);
+			src.pathname = src.pathname.replace(/\/[^/]*$/, '/' + fileName);
+			src.search = '';
+			src.hash = '';
+			return src.toString();
+		} catch (e) {
+			return 'https://winwidget.ru/widgets/' + fileName;
+		}
+	}
+
+	function loadExternalScript(src) {
+		return new Promise(function (resolve, reject) {
+			var existing = document.querySelector('script[src="' + src + '"]');
+			if (existing) {
+				existing.addEventListener('load', resolve, { once: true });
+				existing.addEventListener('error', reject, { once: true });
+				if (window.winwidgetPhone) resolve();
+				return;
+			}
+			var script = document.createElement('script');
+			script.src = src;
+			script.async = true;
+			script.onload = function () {
+				resolve();
+			};
+			script.onerror = reject;
+			document.head.appendChild(script);
+		});
+	}
+
+	function ensurePhoneHelper() {
+		if (window.winwidgetPhone) return window.winwidgetPhone.load();
+		return loadExternalScript(
+			getWidgetAssetUrl('helpers/winwidget-phone.js')
+		)
+			.then(function () {
+				return window.winwidgetPhone ? window.winwidgetPhone.load() : null;
+			})
+			.catch(function (e) {
+				console.warn('[winquiz] Failed to load phone formatter:', e);
+				return null;
+			});
+	}
+
 	// ─── Floating button ──────────────────────────────────────────────────────
 
 	var quizBtn = document.createElement('div');
 	quizBtn.innerHTML = [
+		'<div id="wq-bubble" style="',
+		'display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);',
+		'background:#fff;border-radius:18px;padding:12px 34px 12px 16px;',
+		'width:172px;box-sizing:border-box;',
+		'border:1px solid rgba(71,5,251,0.12);',
+		'box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);',
+		'cursor:pointer;opacity:0;',
+		'transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);',
+		'font-family:system-ui,-apple-system,sans-serif;',
+		'">',
+		'<button id="wq-bubble-close" style="',
+		'position:absolute;top:7px;right:8px;background:none;border:none;',
+		'font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;',
+		'display:flex;align-items:center;justify-content:center;',
+		'width:16px;height:16px;border-radius:50%;',
+		'">✕</button>',
+		'<p id="wq-bubble-text" style="',
+		'margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;',
+		'"></p>',
+		'<span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>',
+		'<div id="wq-bubble-tail" style="',
+		'position:absolute;top:50%;transform:translateY(-50%);',
+		'width:0;height:0;',
+		'border-top:7px solid transparent;border-bottom:7px solid transparent;',
+		'"></div>',
+		'</div>',
 		'<div id="wq-btn-icon" style="',
 		'filter:drop-shadow(0 6px 20px rgba(71,5,251,0.55)) drop-shadow(0 2px 6px rgba(0,0,0,0.3));',
 		'transition:filter 0.4s ease;',
@@ -74,7 +150,10 @@
 	styleAnim.textContent = [
 		'@keyframes wqBounce{0%,100%{transform:translateY(0) scale(1)}10%{transform:translateY(-16px) scale(1.1)}20%{transform:translateY(0) scale(1)}30%{transform:translateY(-6px) scale(1.04)}40%{transform:translateY(0) scale(1)}}',
 		'@keyframes wqSway{0%,100%{transform:rotate(0)}25%{transform:rotate(-6deg)}75%{transform:rotate(6deg)}}',
-		'@keyframes wqGlow{0%,100%{filter:drop-shadow(0 6px 20px rgba(71,5,251,0.55)) drop-shadow(0 2px 6px rgba(0,0,0,0.3))}50%{filter:drop-shadow(0 8px 32px rgba(124,58,237,0.9)) drop-shadow(0 4px 16px rgba(71,5,251,0.6)) drop-shadow(0 0 24px rgba(167,139,250,0.4))}}'
+		'@keyframes wqGlow{0%,100%{filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2))}50%{filter:drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5))}}',
+		'#wq-bubble:hover{opacity:0.95!important}',
+		'#wq-bubble-close:hover{color:#888!important}',
+		'@media(max-width:480px){#wq-bubble{display:none!important}}'
 	].join('');
 	document.head.appendChild(styleAnim);
 
@@ -84,18 +163,49 @@
 	function startBtnAnim() {
 		if (_animActive) return;
 		_animActive = true;
-		quizBtn.style.animation =
-			'wqBounce 3s ease-in-out infinite,wqSway 4s ease-in-out infinite';
-		var icon = quizBtn.querySelector('#wq-btn-icon');
-		if (icon && _pulseEnabled)
-			icon.style.animation = 'wqGlow 2.5s ease-in-out infinite';
+		quizBtn.style.animation = [
+			'wqBounce 3s ease-in-out infinite',
+			'wqSway 4s ease-in-out infinite',
+			_pulseEnabled ? 'wqGlow 2.5s ease-in-out infinite' : ''
+		]
+			.filter(Boolean)
+			.join(',');
 	}
 
 	function stopBtnAnim() {
 		_animActive = false;
 		quizBtn.style.animation = 'none';
-		var icon = quizBtn.querySelector('#wq-btn-icon');
-		if (icon) icon.style.animation = 'none';
+	}
+
+	function updateBubbleSide(side) {
+		var bubble = document.getElementById('wq-bubble');
+		var tail = document.getElementById('wq-bubble-tail');
+		if (!bubble || !tail) return;
+		if (side === 'left') {
+			bubble.style.left = 'calc(100% + 14px)';
+			bubble.style.right = 'auto';
+			tail.style.left = '-8px';
+			tail.style.right = 'auto';
+			tail.style.borderLeft = 'none';
+			tail.style.borderRight = '8px solid #fff';
+		} else {
+			bubble.style.right = 'calc(100% + 14px)';
+			bubble.style.left = 'auto';
+			tail.style.right = '-8px';
+			tail.style.left = 'auto';
+			tail.style.borderRight = 'none';
+			tail.style.borderLeft = '8px solid #fff';
+		}
+	}
+
+	function hideBubble() {
+		var bubble = document.getElementById('wq-bubble');
+		if (!bubble || bubble.style.display === 'none') return;
+		bubble.style.opacity = '0';
+		bubble.style.transform = 'translateY(-50%) scale(0.85)';
+		setTimeout(function () {
+			bubble.style.display = 'none';
+		}, 300);
 	}
 
 	setTimeout(startBtnAnim, 4000);
@@ -109,10 +219,10 @@
 			quizBtn.animate(
 				[
 					{ transform: 'translateY(0) rotate(0)' },
-					{ transform: 'translateY(-200px) rotate(-8deg)' },
+					{ transform: 'translateY(-250px) rotate(-6deg)' },
 					{ transform: 'translateY(0) rotate(0)' }
 				],
-				{ duration: 2000, easing: 'cubic-bezier(.34,1.56,.64,1)' }
+				{ duration: 2300, easing: 'cubic-bezier(.34,1.56,.64,1)' }
 			);
 			startBtnAnim();
 		},
@@ -128,7 +238,7 @@
 
 	var style = document.createElement('style');
 	style.textContent = [
-		':host{position:fixed;z-index:100;top:0}',
+		':host{position:fixed;z-index:10000;top:0}',
 		'*{box-sizing:border-box;margin:0;padding:0}',
 
 		// wrapper
@@ -460,6 +570,7 @@
 		}
 
 		function openWidget() {
+			hideBubble();
 			wrap.classList.remove('hidden');
 			wrap.classList.add('visible');
 			document.body.style.overflow = 'hidden';
@@ -626,10 +737,6 @@
 
 		function showContact() {
 			var dc = (cfg.dataType || 'PHONE').toUpperCase();
-			var region = cfg.phoneRegion || 'RU';
-			var MASK = buildPhoneMask(region);
-			var NEED_DIGITS = maskDigitsCount(region);
-			var phoneDigits = '';
 
 			render(
 				[
@@ -661,78 +768,16 @@
 			var emailInput = shadow.getElementById('wq-email');
 			var errEl = shadow.getElementById('wq-err');
 			var submitBtn = shadow.getElementById('wq-submit');
-
-			// Phone mask (RU style from wheel.js)
-			if (phoneInput) {
-				function renderMask() {
-					var res = MASK.split('');
-					var d = 0;
-					for (var i = 0; i < res.length; i++) {
-						if (res[i] === '_' && phoneDigits[d]) {
-							res[i] = phoneDigits[d++];
-						}
-					}
-					phoneInput.value = res.join('');
-					var pos = phoneInput.value.indexOf('_');
-					phoneInput.setSelectionRange(
-						pos === -1 ? phoneInput.value.length : pos,
-						pos === -1 ? phoneInput.value.length : pos
-					);
-				}
-
-				phoneInput.addEventListener('focus', function () {
-					if (!phoneInput.value) renderMask();
-				});
-				phoneInput.addEventListener('blur', function () {
-					if (!phoneDigits.length) phoneInput.value = '';
-				});
-
-				phoneInput.addEventListener('keydown', function (e) {
-					if (/\d/.test(e.key)) {
-						if (phoneDigits.length < NEED_DIGITS) {
-							phoneDigits += e.key;
-							renderMask();
-						}
-						e.preventDefault();
-						return;
-					}
-					if (e.key === 'Backspace') {
-						phoneDigits = phoneDigits.slice(0, -1);
-						renderMask();
-						e.preventDefault();
-						return;
-					}
-					if (!['ArrowLeft', 'ArrowRight', 'Tab'].includes(e.key))
-						e.preventDefault();
-				});
-
-				phoneInput.addEventListener('paste', function (e) {
-					e.preventDefault();
-					var text = (e.clipboardData || window.clipboardData).getData(
-						'text'
-					);
-					var digitsOnly = text.replace(/\D/g, '');
-					var stripped = digitsOnly.replace(/^[78]?9?/, '');
-					phoneDigits = stripped.slice(0, NEED_DIGITS);
-					renderMask();
-				});
-			}
+			var phoneController =
+				phoneInput && window.winwidgetPhone
+					? window.winwidgetPhone.attach(phoneInput, {
+							placeholder: '+7 999 123-45-67'
+						})
+					: null;
 
 			function getPhone() {
 				if (!phoneInput) return null;
-				if (region === 'RU' || region === 'KZ')
-					return phoneDigits.length === NEED_DIGITS
-						? '79' + phoneDigits
-						: null;
-				if (region === 'BY')
-					return phoneDigits.length === NEED_DIGITS
-						? '375' + phoneDigits
-						: null;
-				if (region === 'UA')
-					return phoneDigits.length === NEED_DIGITS
-						? '380' + phoneDigits
-						: null;
-				return phoneDigits.length >= 7 ? phoneDigits : null;
+				return phoneController ? phoneController.getNumber() : null;
 			}
 
 			submitBtn.addEventListener('click', function () {
@@ -740,7 +785,7 @@
 				var valid = true;
 
 				if (!_devMode) {
-					if (phoneInput && phoneDigits.length !== NEED_DIGITS) {
+					if (phoneInput && !getPhone()) {
 						shakeInput(phoneInput);
 						errEl.textContent = 'Введите корректный номер телефона';
 						valid = false;
@@ -903,6 +948,30 @@
 		}
 
 		quizBtn.style.bottom = (cfg.buttonBottom ?? 3) + '%';
+		updateBubbleSide(cfg.buttonSide || 'right');
+		var bubbleText = document.getElementById('wq-bubble-text');
+		if (bubbleText) {
+			bubbleText.textContent =
+				cfg.bubbleText || cfg.title || 'Пройдите квиз!';
+		}
+		var bubbleEl = document.getElementById('wq-bubble');
+		var bubbleClose = document.getElementById('wq-bubble-close');
+		if (bubbleEl && cfg.bubbleEnabled === false) {
+			bubbleEl.style.display = 'none';
+		}
+		if (bubbleClose) {
+			bubbleClose.addEventListener('click', function (e) {
+				e.stopPropagation();
+				hideBubble();
+			});
+		}
+		if (bubbleEl) {
+			bubbleEl.addEventListener('click', function (e) {
+				e.stopPropagation();
+				hideBubble();
+				openWidget();
+			});
+		}
 		if (cfg.buttonSide === 'left') {
 			quizBtn.style.right = 'auto';
 			quizBtn.style.left = (cfg.buttonOffset ?? 3) + '%';
@@ -957,6 +1026,19 @@
 				showWelcome();
 			}
 			quizBtn.style.display = 'flex';
+			if (cfg.bubbleEnabled !== false) {
+				setTimeout(function () {
+					var b = document.getElementById('wq-bubble');
+					if (!b || wrap.classList.contains('visible')) return;
+					b.style.display = 'block';
+					requestAnimationFrame(function () {
+						requestAnimationFrame(function () {
+							b.style.opacity = '1';
+							b.style.transform = 'translateY(-50%) scale(1)';
+						});
+					});
+				}, 2000);
+			}
 			stopBtnAnim();
 			startBtnAnim();
 		}
@@ -973,12 +1055,24 @@
 		document.body.appendChild(el);
 	}
 
-	fetch(API_BASE + '/quiz/' + KEY + '/config')
-		.then(function (r) {
+	Promise.all([
+		ensurePhoneHelper(),
+		fetch(API_BASE + '/quiz/' + KEY + '/config')
+	])
+		.then(function (result) {
+			var r = result[1];
+			if (!r.ok) {
+				console.warn(
+					'[winquiz] Widget not found or inactive (' + r.status + ')'
+				);
+				return null;
+			}
 			return r.json();
 		})
 		.then(function (server) {
+			if (server === null) return;
 			if (!server || !server.isActive) {
+				console.warn('[winquiz] Widget is inactive');
 				if (window.winquizAutoOpen) showDisabledPage();
 				return;
 			}
