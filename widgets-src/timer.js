@@ -518,13 +518,14 @@
 	function buildBrand() {
 		var brand = el('div', {
 			textAlign: 'center',
-			fontSize: '11px',
-			color: '#bbb',
+			fontSize: '12px',
+			color: 'rgba(255,255,255,0.35)',
 			marginTop: '12px',
-			lineHeight: '1.5'
+			lineHeight: '1.5',
+			letterSpacing: '0.2px'
 		});
 		brand.innerHTML =
-			'Работает на <a href="https://winwidget.ru" target="_blank" style="color:#999;text-decoration:none;font-weight:700">Winwidget</a>';
+			'Сделано в&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener" style="color:rgba(255,200,50,0.7);text-decoration:none;font-weight:600">winwidget.ru</a>';
 		return brand;
 	}
 

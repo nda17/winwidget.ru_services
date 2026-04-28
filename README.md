@@ -19,8 +19,9 @@ npx prisma generate
 
 - редактировать читаемые файлы в `widgets-src`;
 - не править руками минифицированные файлы в `public/widgets`;
-- после правок запускать сборку виджетов;
-- коммитить и `widgets-src`, и обновлённые `public/widgets`.
+- после правок запускать сборку виджетов для локальной проверки;
+- коммитить только исходники `widgets-src` и scripts/config, а
+  `public/widgets` считать generated artifact.
 
 ```bash
 pnpm run build:widgets
@@ -41,6 +42,10 @@ pnpm run build:widgets:check
 ```bash
 pnpm build
 ```
+
+Docker production build также запускает `pnpm build`, поэтому на деплое
+`public/widgets` создаётся автоматически из `widgets-src` и не должен
+храниться в git.
 
 ### Если `prisma migrate dev` падает с `P3014`
 

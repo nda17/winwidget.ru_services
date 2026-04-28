@@ -244,9 +244,9 @@
 		'#wcb-modal{padding:20px 16px 20px!important}',
 		'#wcb-bubble{display:none!important}',
 		'}',
-		'#wcb-brand{text-align:center;font-size:11px;color:#ccc;margin-top:8px;line-height:1.5}',
-		'#wcb-brand a{color:#bbb;text-decoration:none;font-weight:600}',
-		'#wcb-brand a:hover{color:#888}'
+		'#wcb-brand{text-align:center;font-size:12px;color:rgba(255,255,255,0.35);margin-top:12px;line-height:1.5;letter-spacing:0.2px}',
+		'#wcb-brand a{color:rgba(255,200,50,0.7);text-decoration:none;font-weight:600}',
+		'#wcb-brand a:hover{color:#ffc832}'
 	].join('');
 	document.head.appendChild(styleAnim);
 
@@ -449,7 +449,7 @@
 		var wrap = document.createElement('div');
 		wrap.id = 'wcb-brand';
 		wrap.innerHTML =
-			'\u0421\u0434\u0435\u043b\u0430\u043d\u043e \u0432&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener">winwidget.ru</a>';
+			'Сделано в&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener">winwidget.ru</a>';
 		return wrap;
 	}
 

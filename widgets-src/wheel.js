@@ -726,7 +726,7 @@
         </div>
       </div>
 
-      ${config.developInfoActive ? `<div id='dev-info'>Сделано в&nbsp;<a id='dev-info-text' href='https://winwidget.ru'>winwidget.ru</a></div>` : ``}
+      ${config.developInfoActive ? `<div id='dev-info'>Сделано в&nbsp;<a id='dev-info-text' href='https://winwidget.ru' target='_blank' rel='noopener'>winwidget.ru</a></div>` : ``}
     </div>
   </div>
 `;
@@ -1453,14 +1453,14 @@
 
 		// Apply button position and pulse from config
 		_giftPulseEnabled = config.buttonPulse !== false;
-		var sz = config.buttonSize ?? 64;
+		var sz = config.buttonSize ?? 60;
 		var emojiEl = giftBtn.querySelector('#ww-btn-emoji');
 		if (emojiEl) emojiEl.style.fontSize = sz + 'px';
 		var labelEl = giftBtn.querySelector('#ww-btn-label');
 		if (labelEl) {
-			var lf = Math.max(8, Math.round((sz / 64) * 11));
-			var lph = Math.max(2, Math.round((sz / 64) * 3));
-			var lpv = Math.max(6, Math.round((sz / 64) * 12));
+			var lf = Math.max(8, Math.round((sz / 60) * 11));
+			var lph = Math.max(2, Math.round((sz / 60) * 3));
+			var lpv = Math.max(6, Math.round((sz / 60) * 12));
 			labelEl.style.fontSize = lf + 'px';
 			labelEl.style.padding = lph + 'px ' + lpv + 'px';
 		}

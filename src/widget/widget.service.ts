@@ -24,7 +24,7 @@ const DEFAULT_CONFIG = {
 	buttonPulse: true,
 	buttonBottom: 3,
 	buttonOffset: 3,
-	buttonSize: 64,
+	buttonSize: 60,
 	bubbleEnabled: true,
 	bubbleText: 'Испытайте удачу!',
 	alreadyPlayedTitle: '🎉 Вы уже участвовали!',
@@ -348,7 +348,7 @@ export class WidgetService {
 			buttonPulse: config.buttonPulse !== false,
 			buttonBottom: config.buttonBottom ?? 3,
 			buttonOffset: config.buttonOffset ?? 3,
-			buttonSize: config.buttonSize ?? 64,
+			buttonSize: config.buttonSize ?? 60,
 			bubbleEnabled: config.bubbleEnabled !== false,
 			bubbleText: config.bubbleText || 'Испытайте удачу!',
 			alreadyPlayedTitle:
