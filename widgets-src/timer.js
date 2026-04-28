@@ -516,16 +516,18 @@
 	}
 
 	function buildBrand() {
+		if (cfg && cfg.developInfoActive === false)
+			return document.createDocumentFragment();
 		var brand = el('div', {
 			textAlign: 'center',
 			fontSize: '12px',
-			color: 'rgba(255,255,255,0.35)',
+			color: '#6b6378',
 			marginTop: '12px',
 			lineHeight: '1.5',
 			letterSpacing: '0.2px'
 		});
 		brand.innerHTML =
-			'Сделано в&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener" style="color:rgba(255,200,50,0.7);text-decoration:none;font-weight:600">winwidget.ru</a>';
+			'Сделано в&nbsp;<a href="https://winwidget.ru" target="_blank" rel="noopener" style="color:#4705fb;text-decoration:none;font-weight:600">winwidget.ru</a>';
 		return brand;
 	}
 

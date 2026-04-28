@@ -244,9 +244,9 @@
 		'#wcb-modal{padding:20px 16px 20px!important}',
 		'#wcb-bubble{display:none!important}',
 		'}',
-		'#wcb-brand{text-align:center;font-size:12px;color:rgba(255,255,255,0.35);margin-top:12px;line-height:1.5;letter-spacing:0.2px}',
-		'#wcb-brand a{color:rgba(255,200,50,0.7);text-decoration:none;font-weight:600}',
-		'#wcb-brand a:hover{color:#ffc832}'
+		'#wcb-brand{text-align:center;font-size:12px;color:#6b6378;margin-top:12px;line-height:1.5;letter-spacing:0.2px}',
+		'#wcb-brand a{color:#4705fb;text-decoration:none;font-weight:600}',
+		'#wcb-brand a:hover{color:#3210bb}'
 	].join('');
 	document.head.appendChild(styleAnim);
 
@@ -446,6 +446,8 @@
 	// ─── Build modal content ──────────────────────────────────────────────────
 
 	function buildBrand() {
+		if (cfg && cfg.developInfoActive === false)
+			return document.createDocumentFragment();
 		var wrap = document.createElement('div');
 		wrap.id = 'wcb-brand';
 		wrap.innerHTML =

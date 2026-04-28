@@ -35,6 +35,7 @@ const DEFAULT_CONFIG = {
 	successSubtitle: 'Ожидайте звонка в выбранное время',
 	privacyUrl:
 		'https://winwidget.ru/legal-documentation/consent-processing',
+	developInfoActive: true,
 	filterDuplicates: false,
 	timeSlots: [
 		'9:00–11:00',
@@ -254,6 +255,7 @@ export class CallbackService {
 			successTitle: config.successTitle || 'Спасибо! Мы перезвоним',
 			successSubtitle: config.successSubtitle || '',
 			privacyUrl: config.privacyUrl || null,
+			developInfoActive: config.developInfoActive !== false,
 			filterDuplicates: config.filterDuplicates === true,
 			timeSlots: config.timeSlots || [],
 			hasSubmittedByIp,

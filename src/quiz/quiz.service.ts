@@ -36,6 +36,7 @@ const DEFAULT_CONFIG = {
 	dataType: 'PHONE',
 	privacyUrl:
 		'https://winwidget.ru/legal-documentation/consent-processing',
+	developInfoActive: true,
 	filterDuplicates: false,
 	alreadyPlayedTitle: '🎉 Вы уже проходили этот квиз!',
 	alreadyPlayedSubtitle:
@@ -367,6 +368,7 @@ export class QuizService {
 				config.contactTitle || 'Оставьте контакт для получения результата',
 			dataType: (config.dataType || 'PHONE').toUpperCase(),
 			privacyUrl: config.privacyUrl || null,
+			developInfoActive: config.developInfoActive !== false,
 			alreadyPlayedTitle:
 				config.alreadyPlayedTitle || '🎉 Вы уже проходили этот квиз!',
 			alreadyPlayedSubtitle:
