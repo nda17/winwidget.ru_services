@@ -17,7 +17,7 @@ export class UpdateProfileDto {
 
 	@IsOptional()
 	@IsString()
-	@Matches(/(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])[0-9a-zA-Z]{6,}/, {
+	@Matches(/(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])\S{6,}/, {
 		message:
 			'Мин. длина 6 символов. Должен содержать 1 цифру 0-9, 1 строчную букву a-z и 1 заглавную букву A-Z.'
 	})
