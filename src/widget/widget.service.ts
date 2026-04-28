@@ -16,7 +16,7 @@ import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
 const DEFAULT_CONFIG = {
-	color: '#4705fb',
+	color: '#470b58',
 	bgColor: '',
 	autoOpenDelay: 45,
 	spinDuration: 5,
@@ -41,19 +41,19 @@ const DEFAULT_CONFIG = {
 	filterDuplicates: false,
 	buttonColor: '',
 	centerColor: '#ffffff',
-	arrowColor: '#ffcc00',
+	arrowColor: '#ffffff',
 	spinCooldownDays: 0,
 	spinResetToken: '',
 	actionButton: null,
 	bonuses: [
-		{ name: 'Бонус #1', active: true },
-		{ name: 'Бонус #2', active: true },
-		{ name: 'Бонус #3', active: true },
-		{ name: 'Бонус #4', active: true },
-		{ name: 'Бонус #5', active: true },
-		{ name: 'Бонус #6', active: true },
-		{ name: 'Бонус #7', active: true },
-		{ name: 'Бонус #8', active: true }
+		{ name: 'Скидка 10%', active: true, color: '#470b58' },
+		{ name: 'Подарок!', active: true, color: '#8a1580' },
+		{ name: 'Скидка 5%', active: true, color: '#c21b84' },
+		{ name: 'Бесплатно', active: true, color: '#e03060' },
+		{ name: 'Бонус', active: true, color: '#fa595e' },
+		{ name: 'Скидка 15%', active: true, color: '#f87040' },
+		{ name: 'Промокод', active: true, color: '#f8a030' },
+		{ name: 'Скидка 20%', active: true, color: '#f8bd31' }
 	],
 	integrations: {
 		email: '',
