@@ -12,19 +12,17 @@ export class SmsService {
 		return this.provider.send(options);
 	}
 
-	sendVerificationCode(phone: string, code: string, ip?: string) {
+	sendVerificationCode(phone: string, code: string) {
 		return this.provider.send({
 			to: phone,
-			text: `Ваш код подтверждения: ${code}`,
-			ip
+			text: `Ваш код подтверждения: ${code}`
 		});
 	}
 
-	sendRestorePassword(phone: string, password: string, ip?: string) {
+	sendRestorePassword(phone: string, password: string) {
 		return this.provider.send({
 			to: phone,
-			text: `Ваш новый пароль: ${password}`,
-			ip
+			text: `Ваш новый пароль: ${password}`
 		});
 	}
 }

@@ -148,7 +148,7 @@ export class AuthService {
 		});
 	}
 
-	async sendPhoneCode(dto: SendPhoneCodeDto, ip?: string) {
+	async sendPhoneCode(dto: SendPhoneCodeDto) {
 		const phone = normalizePhone(dto.phone);
 		const userExists = await this.userService.getUserByPhone(phone);
 
@@ -208,7 +208,7 @@ export class AuthService {
 			}
 		});
 
-		await this.smsService.sendVerificationCode(phone, code, ip);
+		await this.smsService.sendVerificationCode(phone, code);
 
 		return true;
 	}

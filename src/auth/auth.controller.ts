@@ -89,9 +89,8 @@ export class AuthController {
 	@HttpCode(200)
 	@Recaptcha({ action: 'phone_send_code' })
 	@Post('auth/phone/send-code')
-	async sendPhoneCode(@Body() dto: SendPhoneCodeDto, @Req() req: Request) {
-		const ip = this.getClientIp(req);
-		return this.authService.sendPhoneCode(dto, ip);
+	async sendPhoneCode(@Body() dto: SendPhoneCodeDto) {
+		return this.authService.sendPhoneCode(dto);
 	}
 
 	@UseGuards(AuthRateLimitGuard)

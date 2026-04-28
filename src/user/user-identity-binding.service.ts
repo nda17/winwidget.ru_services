@@ -116,7 +116,7 @@ export class UserIdentityBindingService {
 		return this.userService.getPublicUserById(pendingBinding.userId!);
 	}
 
-	async sendPhoneCode(userId: string, phone: string, ip?: string) {
+	async sendPhoneCode(userId: string, phone: string) {
 		const normalizedPhone = normalizePhone(phone);
 		await this.ensureIdentityCanBeBound({
 			userId,
@@ -145,8 +145,7 @@ export class UserIdentityBindingService {
 		return this.upsertPendingBinding({
 			userId,
 			type: VerificationChallengeType.PHONE,
-			value: normalizedPhone,
-			ip
+			value: normalizedPhone
 		});
 	}
 
@@ -196,13 +195,11 @@ export class UserIdentityBindingService {
 	private async upsertPendingBinding({
 		userId,
 		type,
-		value,
-		ip
+		value
 	}: {
 		userId: string;
 		type: VerificationChallengeType;
 		value: string;
-		ip?: string;
 	}): Promise<PendingBindingResponse> {
 		const code = this.generateCode();
 		const now = new Date();
@@ -248,7 +245,7 @@ export class UserIdentityBindingService {
 		if (type === VerificationChallengeType.EMAIL) {
 			await this.emailService.sendVerificationCode(value, code);
 		} else {
-			await this.smsService.sendVerificationCode(value, code, ip);
+			await this.smsService.sendVerificationCode(value, code);
 		}
 
 		return {

@@ -18,12 +18,9 @@ import {
 	Patch,
 	Post,
 	Query,
-	Req,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { getClientIp } from '@/utils/ip.util';
-import { Request } from 'express';
 import { Role } from '@prisma/client';
 
 @Controller('users')
@@ -82,14 +79,9 @@ export class UserController {
 	@Post('profile/bind/phone/send-code')
 	async sendProfilePhoneCode(
 		@CurrentUser('id') id: string,
-		@Body() dto: SendProfilePhoneCodeDto,
-		@Req() req: Request
+		@Body() dto: SendProfilePhoneCodeDto
 	) {
-		return this.userIdentityBindingService.sendPhoneCode(
-			id,
-			dto.phone,
-			getClientIp(req)
-		);
+		return this.userIdentityBindingService.sendPhoneCode(id, dto.phone);
 	}
 
 	@HttpCode(200)
