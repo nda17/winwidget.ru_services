@@ -1564,7 +1564,7 @@
 				'https://winwidget.ru/legal-documentation/consent-processing',
 			winningAdviceActive: !!server.winMessage,
 			winningAdviceText: server.winMessage || '',
-			developInfoActive: true,
+			developInfoActive: server.developInfoActive !== false,
 			devModeActive: false,
 			confettiEffectActive: true,
 			autoOpenSeconds: server.autoOpenDelay
