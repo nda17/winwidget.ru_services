@@ -13,6 +13,7 @@ import { QuizModule } from '@/quiz/quiz.module';
 import { CallbackModule } from '@/callback/callback.module';
 import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
 import { HealthModule } from '@/health/health.module';
+import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
@@ -39,6 +40,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		CountdownTimerModule,
 		SiteSettingsModule,
 		LegalPagesModule,
+		HomePageContentModule,
 		NotesModule,
 		HealthModule
 	]
