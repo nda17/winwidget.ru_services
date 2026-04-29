@@ -15,6 +15,7 @@ import { CallbackModule } from '@/callback/callback.module';
 import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
 import { HealthModule } from '@/health/health.module';
 import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
+import { MailingModule } from '@/mailing/mailing.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
@@ -43,6 +44,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		LegalPagesModule,
 		HomePageContentModule,
 		NotesModule,
+		MailingModule,
 		HealthModule
 	]
 })

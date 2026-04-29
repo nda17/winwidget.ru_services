@@ -1,4 +1,5 @@
 import VerificationEmail from '@email/confirmation.email';
+import AdminBroadcastEmail from '@email/admin-broadcast.email';
 import LeadNotificationEmail from '@email/lead-notification.email';
 import LimitReachedEmail from '@email/limit-reached.email';
 import NewPasswordEmail from '@email/restore-password.email';
@@ -14,6 +15,11 @@ interface LeadNotificationPayload {
 	bonus?: string;
 	url?: string;
 	date: Date;
+}
+
+interface AdminBroadcastPayload {
+	subject: string;
+	message: string;
 }
 
 @Injectable()
@@ -36,6 +42,17 @@ export class EmailService {
 	sendNewPassword(to: string, password: string) {
 		const html = render(NewPasswordEmail({ password: password }));
 		return this.sendEmail(to, 'Временный пароль', html);
+	}
+
+	sendAdminBroadcast(to: string, data: AdminBroadcastPayload) {
+		const html = render(
+			AdminBroadcastEmail({
+				subject: data.subject,
+				message: data.message
+			})
+		);
+
+		return this.sendEmail(to, data.subject, html);
 	}
 
 	sendLeadNotification(to: string, data: LeadNotificationPayload) {
