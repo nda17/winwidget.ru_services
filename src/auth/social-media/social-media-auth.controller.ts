@@ -1,4 +1,6 @@
 import { AuthService } from '@/auth/auth.service';
+import { GoogleAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/google-auth-enabled.guard';
+import { YandexAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/yandex-auth-enabled.guard';
 import { RefreshTokenService } from '@/auth/refresh-token.service';
 import { SocialMediaAuthService } from '@/auth/social-media/social-media-auth.service';
 import {
@@ -33,11 +35,11 @@ export class SocialMediaAuthController {
 	private _SOCIAL_AUTH_REDIRECT = `${process.env.RECAPTCHA_CLIENT_URL}/social-auth`;
 
 	@Get('google')
-	@UseGuards(AuthGuard('google'))
+	@UseGuards(GoogleAuthEnabledGuard, AuthGuard('google'))
 	async googleAuth() {}
 
 	@Get('google/redirect')
-	@UseGuards(AuthGuard('google'))
+	@UseGuards(GoogleAuthEnabledGuard, AuthGuard('google'))
 	async googleAuthRedirect(
 		@Req() req: { user: TSocialProfile },
 		@Res({ passthrough: true }) res: Response
@@ -71,6 +73,7 @@ export class SocialMediaAuthController {
 	}
 
 	@Get('yandex')
+	@UseGuards(YandexAuthEnabledGuard)
 	yandexAuth(@Res() res: Response) {
 		const url = buildYandexAuthUrl(
 			process.env.YANDEX_CLIENT_ID!,
@@ -80,6 +83,7 @@ export class SocialMediaAuthController {
 	}
 
 	@Get('yandex/redirect')
+	@UseGuards(YandexAuthEnabledGuard)
 	async yandexAuthRedirect(
 		@Query('code') code: string,
 		@Res({ passthrough: true }) res: Response

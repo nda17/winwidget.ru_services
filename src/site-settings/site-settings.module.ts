@@ -5,6 +5,7 @@ import { Module } from '@nestjs/common';
 
 @Module({
 	controllers: [SiteSettingsController],
-	providers: [SiteSettingsService, PrismaService]
+	providers: [SiteSettingsService, PrismaService],
+	exports: [SiteSettingsService]
 })
 export class SiteSettingsModule {}

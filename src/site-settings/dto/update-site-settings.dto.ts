@@ -22,4 +22,16 @@ export class UpdateSiteSettingsDto {
 	@IsOptional()
 	@IsBoolean()
 	paymentEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	recaptchaEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	googleAuthEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	yandexAuthEnabled?: boolean;
 }

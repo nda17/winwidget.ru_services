@@ -2,13 +2,15 @@ import { ConfigService } from '@nestjs/config';
 import { Logger } from '@nestjs/common';
 import { GoogleRecaptchaModuleOptions } from '@nestlab/google-recaptcha/interfaces/google-recaptcha-module-options';
 import { Request } from 'express';
+import { SiteSettingsService } from '@/site-settings/site-settings.service';
 
 const DEFAULT_RECAPTCHA_MIN_SCORE = 0.5;
 const isTrue = (value?: string) => value === 'true';
 const recaptchaLogger = new Logger('reCAPTCHA');
 
 export const getGoogleRecaptchaConfig = async (
-	configService: ConfigService
+	configService: ConfigService,
+	siteSettingsService: SiteSettingsService
 ): Promise<GoogleRecaptchaModuleOptions> => {
 	const isDevelopment =
 		configService.get<string>('MODE') === 'development';
@@ -35,9 +37,22 @@ export const getGoogleRecaptchaConfig = async (
 		score:
 			Number(configService.get<string>('RECAPTCHA_MIN_SCORE')) ||
 			DEFAULT_RECAPTCHA_MIN_SCORE,
-		skipIf: req => {
+		skipIf: async req => {
 			const request = req as Request;
-			const shouldSkip = !isRecaptchaEnabled();
+			let recaptchaEnabledBySettings = true;
+
+			try {
+				const settings = await siteSettingsService.get();
+				recaptchaEnabledBySettings = settings.recaptchaEnabled;
+			} catch (error) {
+				recaptchaLogger.error(
+					error instanceof Error ? error.message : String(error),
+					'Failed to load site settings for reCAPTCHA'
+				);
+			}
+
+			const shouldSkip =
+				!isRecaptchaEnabled() || !recaptchaEnabledBySettings;
 
 			if (isDevelopment && shouldSkip) {
 				recaptchaLogger.debug(

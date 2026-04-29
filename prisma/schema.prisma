@@ -284,6 +284,9 @@ model SiteSettings {
   bannerText       String   @default("") @map("banner_text")
   snowflakeEnabled Boolean  @default(false) @map("snowflake_enabled")
   paymentEnabled   Boolean  @default(true) @map("payment_enabled")
+  recaptchaEnabled Boolean  @default(true) @map("recaptcha_enabled")
+  googleAuthEnabled Boolean @default(true) @map("google_auth_enabled")
+  yandexAuthEnabled Boolean @default(true) @map("yandex_auth_enabled")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")

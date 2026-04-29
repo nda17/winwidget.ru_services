@@ -5,6 +5,7 @@ import { LegalPagesModule } from '@/legal-pages/legal-pages.module';
 import { NotesModule } from '@/notes/notes.module';
 import { PaymentModule } from '@/payment/payment.module';
 import { SiteSettingsModule } from '@/site-settings/site-settings.module';
+import { SiteSettingsService } from '@/site-settings/site-settings.service';
 import { StatisticsModule } from '@/statistics/statistics.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { UserModule } from '@/user/user.module';
@@ -24,9 +25,9 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 			isGlobal: true
 		}),
 		GoogleRecaptchaModule.forRootAsync({
-			imports: [ConfigModule],
+			imports: [ConfigModule, SiteSettingsModule],
 			useFactory: getGoogleRecaptchaConfig,
-			inject: [ConfigService]
+			inject: [ConfigService, SiteSettingsService]
 		}),
 		AuthModule,
 		StatisticsModule,
