@@ -6,6 +6,10 @@ import { PrismaService } from '@/prisma.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import {
+	isWidgetDomainAllowed,
+	normalizeInstallDomain
+} from '@/widget-domain/widget-domain.util';
+import {
 	BadRequestException,
 	ForbiddenException,
 	Injectable,
@@ -122,6 +126,9 @@ export class CountdownTimerService {
 			data: {
 				...(dto.name !== undefined && { name: dto.name }),
 				...(dto.isActive !== undefined && { isActive: dto.isActive }),
+				...(dto.installDomain !== undefined && {
+					installDomain: normalizeInstallDomain(dto.installDomain)
+				}),
 				...(dto.config !== undefined && {
 					config: {
 						...(timer.config as object),
@@ -210,7 +217,11 @@ export class CountdownTimerService {
 		};
 	}
 
-	async getPublicConfig(publicKey: string, ip?: string) {
+	async getPublicConfig(
+		publicKey: string,
+		ip?: string,
+		requestDomain: string | null = null
+	) {
 		const timer = await this.prisma.countdownTimer.findUnique({
 			where: { publicKey },
 			include: { user: { include: { subscription: true } } }
@@ -218,6 +229,10 @@ export class CountdownTimerService {
 		if (!timer) return null;
 
 		const config = timer.config as any;
+		if (!isWidgetDomainAllowed(timer.installDomain, requestDomain)) {
+			return { isActive: false };
+		}
+
 		const sub = timer.user.subscription;
 		const dataType = (config.dataType || 'NONE').toUpperCase();
 		const isActive = timer.isActive && sub?.status === 'ACTIVE';
@@ -297,7 +312,11 @@ export class CountdownTimerService {
 		};
 	}
 
-	async submitLead(dto: SubmitCountdownTimerLeadDto, ip?: string) {
+	async submitLead(
+		dto: SubmitCountdownTimerLeadDto,
+		ip?: string,
+		requestDomain: string | null = null
+	) {
 		const timer = await this.prisma.countdownTimer.findUnique({
 			where: { publicKey: dto.key },
 			include: {
@@ -312,6 +331,10 @@ export class CountdownTimerService {
 		if (!timer) throw new NotFoundException('Таймер не найден');
 
 		const config = timer.config as any;
+		if (!isWidgetDomainAllowed(timer.installDomain, requestDomain)) {
+			throw new ForbiddenException('Домен установки виджета не совпадает');
+		}
+
 		const dataType = (config.dataType || 'NONE').toUpperCase();
 		if (dataType === 'NONE') {
 			throw new BadRequestException('Сбор контактов отключён');

@@ -10,6 +10,8 @@ export class CountdownTimerPublicController {
 		@Res() res: Response
 	) {
 		const origin = `${req.protocol}://${req.get('host')}`;
+		res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+		res.setHeader('X-Frame-Options', 'SAMEORIGIN');
 		res.setHeader('Content-Type', 'text/html; charset=utf-8');
 		return res.send(`<!doctype html>
 <html lang="ru">

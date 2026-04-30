@@ -6,6 +6,10 @@ import { CreateWidgetDto } from '@/widget/dto/create-widget.dto';
 import { SubmitLeadDto } from '@/widget/dto/submit-lead.dto';
 import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
 import {
+	isWidgetDomainAllowed,
+	normalizeInstallDomain
+} from '@/widget-domain/widget-domain.util';
+import {
 	BadRequestException,
 	ForbiddenException,
 	Injectable,
@@ -132,6 +136,9 @@ export class WidgetService {
 			data: {
 				...(dto.name !== undefined && { name: dto.name }),
 				...(dto.isActive !== undefined && { isActive: dto.isActive }),
+				...(dto.installDomain !== undefined && {
+					installDomain: normalizeInstallDomain(dto.installDomain)
+				}),
 				...(dto.config !== undefined && {
 					config: {
 						...(widget.config as object),
@@ -271,7 +278,8 @@ export class WidgetService {
 	 */
 	async getPublicConfig(
 		publicKey: string,
-		ip?: string
+		ip?: string,
+		requestDomain: string | null = null
 	): Promise<object | null> {
 		const widget = await this.prisma.widget.findUnique({
 			where: { publicKey },
@@ -283,6 +291,10 @@ export class WidgetService {
 		if (!widget) return null;
 
 		const config = widget.config as any;
+		if (!isWidgetDomainAllowed(widget.installDomain, requestDomain)) {
+			return { isActive: false };
+		}
+
 		const sub = widget.user.subscription;
 		const isActive = widget.isActive && sub?.status === 'ACTIVE';
 
@@ -380,16 +392,21 @@ export class WidgetService {
 		email?: string,
 		name?: string,
 		bonus?: string,
-		ip?: string
+		ip?: string,
+		requestDomain: string | null = null
 	) {
 		const contact = phone ? phone : email || name || 'unknown';
 		return this.submitLead(
 			{ key, contact, phone, email, name, bonus, url: undefined },
-			ip
+			ip,
+			requestDomain
 		);
 	}
 
-	async getWidgetConfig(publicKey: string) {
+	async getWidgetConfig(
+		publicKey: string,
+		requestDomain: string | null = null
+	) {
 		const widget = await this.prisma.widget.findUnique({
 			where: { publicKey },
 			include: {
@@ -405,6 +422,10 @@ export class WidgetService {
 
 		if (!widget.isActive) return null;
 
+		if (!isWidgetDomainAllowed(widget.installDomain, requestDomain)) {
+			return null;
+		}
+
 		const sub = widget.user.subscription;
 		if (!sub || sub.status !== 'ACTIVE') return null;
 
@@ -419,7 +440,11 @@ export class WidgetService {
 		return widget.config;
 	}
 
-	async submitLead(dto: SubmitLeadDto, ip?: string) {
+	async submitLead(
+		dto: SubmitLeadDto,
+		ip?: string,
+		requestDomain: string | null = null
+	) {
 		const widget = await this.prisma.widget.findUnique({
 			where: { publicKey: dto.key },
 			include: {
@@ -444,6 +469,9 @@ export class WidgetService {
 		}
 
 		const config = widget.config as any;
+		if (!isWidgetDomainAllowed(widget.installDomain, requestDomain)) {
+			throw new ForbiddenException('Домен установки виджета не совпадает');
+		}
 
 		// Filter duplicates if enabled
 		if (config?.filterDuplicates) {

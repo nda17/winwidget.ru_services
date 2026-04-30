@@ -6,6 +6,10 @@ import { CreateCallbackDto } from '@/callback/dto/create-callback.dto';
 import { SubmitCallbackLeadDto } from '@/callback/dto/submit-callback-lead.dto';
 import { UpdateCallbackDto } from '@/callback/dto/update-callback.dto';
 import {
+	isWidgetDomainAllowed,
+	normalizeInstallDomain
+} from '@/widget-domain/widget-domain.util';
+import {
 	BadRequestException,
 	ForbiddenException,
 	Injectable,
@@ -111,6 +115,9 @@ export class CallbackService {
 			data: {
 				...(dto.name !== undefined && { name: dto.name }),
 				...(dto.isActive !== undefined && { isActive: dto.isActive }),
+				...(dto.installDomain !== undefined && {
+					installDomain: normalizeInstallDomain(dto.installDomain)
+				}),
 				...(dto.config !== undefined && {
 					config: {
 						...(callback.config as object),
@@ -202,7 +209,8 @@ export class CallbackService {
 
 	async getPublicConfig(
 		publicKey: string,
-		ip?: string
+		ip?: string,
+		requestDomain: string | null = null
 	): Promise<object | null> {
 		const callback = await this.prisma.callback.findUnique({
 			where: { publicKey },
@@ -212,6 +220,10 @@ export class CallbackService {
 		if (!callback) return null;
 
 		const config = callback.config as any;
+		if (!isWidgetDomainAllowed(callback.installDomain, requestDomain)) {
+			return { isActive: false };
+		}
+
 		const sub = callback.user.subscription;
 		const isActive = callback.isActive && sub?.status === 'ACTIVE';
 
@@ -265,7 +277,11 @@ export class CallbackService {
 		};
 	}
 
-	async submitLead(dto: SubmitCallbackLeadDto, ip?: string) {
+	async submitLead(
+		dto: SubmitCallbackLeadDto,
+		ip?: string,
+		requestDomain: string | null = null
+	) {
 		const callback = await this.prisma.callback.findUnique({
 			where: { publicKey: dto.key },
 			include: {
@@ -289,6 +305,9 @@ export class CallbackService {
 			);
 
 		const config = callback.config as any;
+		if (!isWidgetDomainAllowed(callback.installDomain, requestDomain)) {
+			throw new ForbiddenException('Домен установки виджета не совпадает');
+		}
 
 		if (config?.filterDuplicates && ip) {
 			const existing = await this.prisma.callbackLead.findFirst({

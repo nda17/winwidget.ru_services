@@ -15,6 +15,9 @@ export class QuizPublicController {
 	) {
 		const origin = `${req.protocol}://${req.get('host')}`;
 
+		res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+		res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+
 		const html = `<!DOCTYPE html>
 <html lang="ru">
 <head>

@@ -17,6 +17,11 @@ export class UpdateCallbackDto {
 	isActive?: boolean;
 
 	@IsOptional()
+	@IsString()
+	@MaxLength(253)
+	installDomain?: string;
+
+	@IsOptional()
 	@IsObject()
 	config?: Record<string, any>;
 }

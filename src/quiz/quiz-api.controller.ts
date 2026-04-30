@@ -1,4 +1,5 @@
 import { QuizService } from '@/quiz/quiz.service';
+import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -34,7 +35,8 @@ export class QuizApiController {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.quizService.getPublicConfig(
 			key,
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 		if (config === null) throw new NotFoundException('Квиз не найден');
 		return config;
@@ -69,7 +71,8 @@ export class QuizApiController {
 				answers: body.answers || [],
 				url: body.url
 			},
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 	}
 }

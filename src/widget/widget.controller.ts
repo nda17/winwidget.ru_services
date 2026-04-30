@@ -4,6 +4,7 @@ import { CreateWidgetDto } from '@/widget/dto/create-widget.dto';
 import { SubmitLeadDto } from '@/widget/dto/submit-lead.dto';
 import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
 import { WidgetService } from '@/widget/widget.service';
+import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -14,11 +15,12 @@ import {
 	Patch,
 	Post,
 	Query,
+	Req,
 	Res,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 
 @Controller('widgets')
 export class WidgetController {
@@ -118,8 +120,12 @@ export class WidgetController {
 	@HttpCode(200)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@Post('submit')
-	async submitLead(@Body() dto: SubmitLeadDto) {
-		return this.widgetService.submitLead(dto);
+	async submitLead(@Body() dto: SubmitLeadDto, @Req() req: Request) {
+		return this.widgetService.submitLead(
+			dto,
+			undefined,
+			getWidgetRequestDomain(req)
+		);
 	}
 
 	// Serve widget.js — called from /widget/:key.js outside /api prefix
@@ -127,9 +133,13 @@ export class WidgetController {
 	@Get('serve/:key')
 	async serveWidgetConfig(
 		@Param('key') key: string,
+		@Req() req: Request,
 		@Res() res: Response
 	) {
-		const config = await this.widgetService.getWidgetConfig(key);
+		const config = await this.widgetService.getWidgetConfig(
+			key,
+			getWidgetRequestDomain(req)
+		);
 
 		if (!config) {
 			res

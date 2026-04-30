@@ -1,4 +1,5 @@
 import { WidgetService } from '@/widget/widget.service';
+import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -34,7 +35,8 @@ export class WidgetApiController {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.widgetService.getPublicConfig(
 			key,
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 		if (config === null) {
 			throw new NotFoundException('Виджет не найден');
@@ -66,7 +68,8 @@ export class WidgetApiController {
 			body.email,
 			body.name,
 			body.bonus,
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 	}
 }

@@ -27,32 +27,34 @@ model User {
 }
 
 model Widget {
-  id        String   @id @default(cuid())
-  userId    String   @map("user_id")
-  publicKey String   @unique @map("public_key")
-  name      String   @default("Виджет")
-  isActive  Boolean  @default(true) @map("is_active")
-  config    Json     @default("{}")
-  leads     Lead[]
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  publicKey     String   @unique @map("public_key")
+  name          String   @default("Виджет")
+  isActive      Boolean  @default(true) @map("is_active")
+  installDomain String   @default("") @map("install_domain")
+  config        Json     @default("{}")
+  leads         Lead[]
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("widgets")
 }
 
 model Callback {
-  id        String         @id @default(cuid())
-  userId    String         @map("user_id")
-  publicKey String         @unique @map("public_key")
-  name      String         @default("Обратный звонок")
-  isActive  Boolean        @default(true) @map("is_active")
-  config    Json           @default("{}")
-  leads     CallbackLead[]
-  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime       @default(now()) @map("created_at")
-  updatedAt DateTime       @updatedAt @map("updated_at")
+  id            String         @id @default(cuid())
+  userId        String         @map("user_id")
+  publicKey     String         @unique @map("public_key")
+  name          String         @default("Обратный звонок")
+  isActive      Boolean        @default(true) @map("is_active")
+  installDomain String         @default("") @map("install_domain")
+  config        Json           @default("{}")
+  leads         CallbackLead[]
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("callbacks")
@@ -75,16 +77,17 @@ model CallbackLead {
 }
 
 model CountdownTimer {
-  id        String               @id @default(cuid())
-  userId    String               @map("user_id")
-  publicKey String               @unique @map("public_key")
-  name      String               @default("Таймер")
-  isActive  Boolean              @default(true) @map("is_active")
-  config    Json                 @default("{}")
-  leads     CountdownTimerLead[]
-  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime             @default(now()) @map("created_at")
-  updatedAt DateTime             @updatedAt @map("updated_at")
+  id            String               @id @default(cuid())
+  userId        String               @map("user_id")
+  publicKey     String               @unique @map("public_key")
+  name          String               @default("Таймер")
+  isActive      Boolean              @default(true) @map("is_active")
+  installDomain String               @default("") @map("install_domain")
+  config        Json                 @default("{}")
+  leads         CountdownTimerLead[]
+  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime             @default(now()) @map("created_at")
+  updatedAt     DateTime             @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("countdown_timers")
@@ -109,16 +112,17 @@ model CountdownTimerLead {
 }
 
 model Quiz {
-  id        String     @id @default(cuid())
-  userId    String     @map("user_id")
-  publicKey String     @unique @map("public_key")
-  name      String     @default("Квиз")
-  isActive  Boolean    @default(true) @map("is_active")
-  config    Json       @default("{}")
-  leads     QuizLead[]
-  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime   @default(now()) @map("created_at")
-  updatedAt DateTime   @updatedAt @map("updated_at")
+  id            String     @id @default(cuid())
+  userId        String     @map("user_id")
+  publicKey     String     @unique @map("public_key")
+  name          String     @default("Квиз")
+  isActive      Boolean    @default(true) @map("is_active")
+  installDomain String     @default("") @map("install_domain")
+  config        Json       @default("{}")
+  leads         QuizLead[]
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("quizzes")

@@ -6,6 +6,10 @@ import { CreateQuizDto } from '@/quiz/dto/create-quiz.dto';
 import { SubmitQuizLeadDto } from '@/quiz/dto/submit-quiz-lead.dto';
 import { UpdateQuizDto } from '@/quiz/dto/update-quiz.dto';
 import {
+	isWidgetDomainAllowed,
+	normalizeInstallDomain
+} from '@/widget-domain/widget-domain.util';
+import {
 	BadRequestException,
 	ForbiddenException,
 	Injectable,
@@ -171,6 +175,9 @@ export class QuizService {
 			data: {
 				...(dto.name !== undefined && { name: dto.name }),
 				...(dto.isActive !== undefined && { isActive: dto.isActive }),
+				...(dto.installDomain !== undefined && {
+					installDomain: normalizeInstallDomain(dto.installDomain)
+				}),
 				...(dto.config !== undefined && {
 					config: {
 						...(quiz.config as object),
@@ -302,7 +309,8 @@ export class QuizService {
 
 	async getPublicConfig(
 		publicKey: string,
-		ip?: string
+		ip?: string,
+		requestDomain: string | null = null
 	): Promise<object | null> {
 		const quiz = await this.prisma.quiz.findUnique({
 			where: { publicKey },
@@ -312,6 +320,10 @@ export class QuizService {
 		if (!quiz) return null;
 
 		const config = quiz.config as any;
+		if (!isWidgetDomainAllowed(quiz.installDomain, requestDomain)) {
+			return { isActive: false };
+		}
+
 		const sub = quiz.user.subscription;
 		const isActive = quiz.isActive && sub?.status === 'ACTIVE';
 
@@ -386,7 +398,11 @@ export class QuizService {
 		};
 	}
 
-	async submitLead(dto: SubmitQuizLeadDto, ip?: string) {
+	async submitLead(
+		dto: SubmitQuizLeadDto,
+		ip?: string,
+		requestDomain: string | null = null
+	) {
 		const quiz = await this.prisma.quiz.findUnique({
 			where: { publicKey: dto.key },
 			include: {
@@ -411,6 +427,9 @@ export class QuizService {
 		}
 
 		const config = quiz.config as any;
+		if (!isWidgetDomainAllowed(quiz.installDomain, requestDomain)) {
+			throw new ForbiddenException('Домен установки виджета не совпадает');
+		}
 
 		if (config?.filterDuplicates) {
 			const resetToken = config.quizResetToken || '';

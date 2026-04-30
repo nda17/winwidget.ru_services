@@ -4,6 +4,7 @@ import { CreateQuizDto } from '@/quiz/dto/create-quiz.dto';
 import { SubmitQuizLeadDto } from '@/quiz/dto/submit-quiz-lead.dto';
 import { UpdateQuizDto } from '@/quiz/dto/update-quiz.dto';
 import { QuizService } from '@/quiz/quiz.service';
+import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -14,11 +15,12 @@ import {
 	Patch,
 	Post,
 	Query,
+	Req,
 	Res,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 
 @Controller('quizzes')
 export class QuizController {
@@ -113,7 +115,11 @@ export class QuizController {
 	@HttpCode(200)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@Post('submit')
-	async submitLead(@Body() dto: SubmitQuizLeadDto) {
-		return this.quizService.submitLead(dto);
+	async submitLead(@Body() dto: SubmitQuizLeadDto, @Req() req: Request) {
+		return this.quizService.submitLead(
+			dto,
+			undefined,
+			getWidgetRequestDomain(req)
+		);
 	}
 }

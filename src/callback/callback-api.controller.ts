@@ -1,4 +1,5 @@
 import { CallbackService } from '@/callback/callback.service';
+import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -30,7 +31,8 @@ export class CallbackApiController {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.callbackService.getPublicConfig(
 			key,
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 		if (config === null) throw new NotFoundException('Виджет не найден');
 		return config;
@@ -58,7 +60,8 @@ export class CallbackApiController {
 				timezone: body.timezone,
 				url: body.url
 			},
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 	}
 }

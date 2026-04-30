@@ -1,4 +1,5 @@
 import { CountdownTimerService } from '@/countdown-timer/countdown-timer.service';
+import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -38,7 +39,8 @@ export class CountdownTimerApiController {
 		res.setHeader('Expires', '0');
 		const config = await this.countdownTimerService.getPublicConfig(
 			key,
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 		if (config === null) throw new NotFoundException('Таймер не найден');
 		return config;
@@ -59,7 +61,8 @@ export class CountdownTimerApiController {
 				email: body.email,
 				url: body.url
 			},
-			extractIp(req)
+			extractIp(req),
+			getWidgetRequestDomain(req)
 		);
 	}
 }
