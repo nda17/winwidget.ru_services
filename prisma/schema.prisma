@@ -195,6 +195,18 @@ model Payment {
   @@map("payments")
 }
 
+model TariffPrice {
+  id            String        @id @default(cuid())
+  plan          Plan
+  billingPeriod BillingPeriod @map("billing_period")
+  amount        Int
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  @@unique([plan, billingPeriod])
+  @@map("tariff_prices")
+}
+
 model AuthIdentity {
   id         String           @id @default(cuid())
   userId     String           @map("user_id")

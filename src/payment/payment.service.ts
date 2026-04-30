@@ -1,11 +1,9 @@
 import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
-import {
-	PLAN_PRICES,
-	PLAN_PRIORITY
-} from '@/subscription/subscription.constants';
+import { PLAN_PRIORITY } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
+import { TariffPricesService } from '@/tariff-prices/tariff-prices.service';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import {
 	AuthIdentityType,
@@ -25,7 +23,8 @@ export class PaymentService {
 		private prisma: PrismaService,
 		private yookassa: YookassaService,
 		private subscriptionService: SubscriptionService,
-		private paymentCleanupService: PaymentCleanupService
+		private paymentCleanupService: PaymentCleanupService,
+		private tariffPricesService: TariffPricesService
 	) {}
 
 	async createPayment(
@@ -87,7 +86,10 @@ export class PaymentService {
 			);
 		}
 
-		const price = PLAN_PRICES[plan][billingPeriod];
+		const price = await this.tariffPricesService.getPrice(
+			plan,
+			billingPeriod
+		);
 		const amount = `${price}.00`;
 		const planLabel = plan === Plan.EASY ? 'Easy' : 'Hard';
 		const periodLabel =

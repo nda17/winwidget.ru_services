@@ -8,6 +8,7 @@ import { SiteSettingsModule } from '@/site-settings/site-settings.module';
 import { SiteSettingsService } from '@/site-settings/site-settings.service';
 import { StatisticsModule } from '@/statistics/statistics.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
+import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
 import { UserModule } from '@/user/user.module';
 import { WidgetModule } from '@/widget/widget.module';
 import { QuizModule } from '@/quiz/quiz.module';
@@ -41,6 +42,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		CallbackModule,
 		CountdownTimerModule,
 		SiteSettingsModule,
+		TariffPricesModule,
 		LegalPagesModule,
 		HomePageContentModule,
 		NotesModule,

@@ -5,10 +5,11 @@ import { PaymentService } from '@/payment/payment.service';
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
 import { SubscriptionModule } from '@/subscription/subscription.module';
+import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [AuthModule, SubscriptionModule],
+	imports: [AuthModule, SubscriptionModule, TariffPricesModule],
 	controllers: [PaymentController],
 	providers: [
 		PaymentService,
