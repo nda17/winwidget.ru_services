@@ -3,8 +3,11 @@ import {
 	IsBoolean,
 	IsDateString,
 	IsEnum,
+	IsInt,
 	IsOptional,
-	IsString
+	IsString,
+	Max,
+	Min
 } from 'class-validator';
 
 export class AdminActivateSubscriptionDto {
@@ -25,4 +28,14 @@ export class AdminActivateSubscriptionDto {
 	@IsOptional()
 	@IsBoolean()
 	extendIfActive?: boolean;
+}
+
+export class AdminExtendSubscriptionDto {
+	@IsString()
+	userId: string;
+
+	@IsInt()
+	@Min(1)
+	@Max(3650)
+	days: number;
 }

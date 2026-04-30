@@ -1,6 +1,9 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
-import { AdminActivateSubscriptionDto } from '@/subscription/dto/admin-activate-subscription.dto';
+import {
+	AdminActivateSubscriptionDto,
+	AdminExtendSubscriptionDto
+} from '@/subscription/dto/admin-activate-subscription.dto';
 import { SubscriptionExpiryService } from '@/subscription/subscription-expiry.service';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import {
@@ -54,6 +57,17 @@ export class SubscriptionController {
 			dto.billingPeriod,
 			dto.startsAt ? new Date(dto.startsAt) : undefined,
 			dto.extendIfActive
+		);
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@Post('admin/extend-days')
+	async adminExtendDays(@Body() dto: AdminExtendSubscriptionDto) {
+		return this.subscriptionService.adminExtendSubscriptionDays(
+			dto.userId,
+			dto.days
 		);
 	}
 

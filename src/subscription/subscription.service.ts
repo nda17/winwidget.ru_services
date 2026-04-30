@@ -1,6 +1,6 @@
 import { PrismaService } from '@/prisma.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { BillingPeriod, Plan, SubscriptionStatus } from '@prisma/client';
 import * as dayjs from 'dayjs';
 
@@ -367,6 +367,40 @@ export class SubscriptionService {
 				leadsThisPeriod: 0,
 				periodResetsAt: start.add(1, 'month').toDate()
 			}
+		});
+	}
+
+	async adminExtendSubscriptionDays(userId: string, days: number) {
+		const subscription = await this.prisma.subscription.findUnique({
+			where: { userId }
+		});
+
+		if (!subscription) {
+			throw new BadRequestException('Подписка пользователя не найдена');
+		}
+
+		const now = dayjs();
+		const isActiveFutureSubscription =
+			subscription.status === SubscriptionStatus.ACTIVE &&
+			subscription.expiresAt &&
+			dayjs(subscription.expiresAt).isAfter(now);
+		const base = isActiveFutureSubscription
+			? dayjs(subscription.expiresAt)
+			: now;
+		const data = {
+			status: SubscriptionStatus.ACTIVE,
+			expiresAt: base.add(days, 'day').toDate(),
+			...(isActiveFutureSubscription
+				? {}
+				: {
+						leadsThisPeriod: 0,
+						periodResetsAt: now.add(1, 'month').toDate()
+					})
+		};
+
+		return this.prisma.subscription.update({
+			where: { userId },
+			data
 		});
 	}
 
