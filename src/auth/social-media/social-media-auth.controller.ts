@@ -13,12 +13,14 @@ import {
 	exchangeYandexCode,
 	fetchYandexUserInfo
 } from '@/auth/strategies/yandex.strategy';
+import { USER_DEACTIVATED_MESSAGE } from '@/utils/auth.constants';
 import {
 	Controller,
 	Get,
 	Query,
 	Req,
 	Res,
+	UnauthorizedException,
 	UseGuards
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
@@ -33,6 +35,7 @@ export class SocialMediaAuthController {
 	) {}
 
 	private _SOCIAL_AUTH_REDIRECT = `${process.env.RECAPTCHA_CLIENT_URL}/social-auth`;
+	private _LOGIN_REDIRECT = `${process.env.RECAPTCHA_CLIENT_URL}/login`;
 
 	@Get('google')
 	@UseGuards(GoogleAuthEnabledGuard, AuthGuard('google'))
@@ -44,13 +47,21 @@ export class SocialMediaAuthController {
 		@Req() req: { user: TSocialProfile },
 		@Res({ passthrough: true }) res: Response
 	) {
-		const user = await this.socialMediaAuthService.login(req);
+		try {
+			const user = await this.socialMediaAuthService.login(req);
 
-		const { refreshToken } =
-			await this.authService.buildResponseObject(user);
-		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
+			const { refreshToken } =
+				await this.authService.buildResponseObject(user);
+			this.refreshTokenService.addRefreshTokenToResponse(
+				res,
+				refreshToken
+			);
 
-		return res.redirect(this._SOCIAL_AUTH_REDIRECT);
+			return res.redirect(this._SOCIAL_AUTH_REDIRECT);
+		} catch (error) {
+			this.refreshTokenService.removeRefreshTokenFromResponse(res);
+			return res.redirect(this.getSocialAuthErrorRedirect(error));
+		}
 	}
 
 	@Get('github')
@@ -63,13 +74,21 @@ export class SocialMediaAuthController {
 		@Req() req: { user: TSocialProfile },
 		@Res({ passthrough: true }) res: Response
 	) {
-		const user = await this.socialMediaAuthService.login(req);
+		try {
+			const user = await this.socialMediaAuthService.login(req);
 
-		const { refreshToken } =
-			await this.authService.buildResponseObject(user);
-		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
+			const { refreshToken } =
+				await this.authService.buildResponseObject(user);
+			this.refreshTokenService.addRefreshTokenToResponse(
+				res,
+				refreshToken
+			);
 
-		return res.redirect(this._SOCIAL_AUTH_REDIRECT);
+			return res.redirect(this._SOCIAL_AUTH_REDIRECT);
+		} catch (error) {
+			this.refreshTokenService.removeRefreshTokenFromResponse(res);
+			return res.redirect(this.getSocialAuthErrorRedirect(error));
+		}
 	}
 
 	@Get('yandex')
@@ -118,10 +137,19 @@ export class SocialMediaAuthController {
 			);
 
 			return res.redirect(this._SOCIAL_AUTH_REDIRECT);
-		} catch {
-			return res.redirect(
-				`${process.env.RECAPTCHA_CLIENT_URL}/login?error=social_auth_failed`
-			);
+		} catch (error) {
+			this.refreshTokenService.removeRefreshTokenFromResponse(res);
+			return res.redirect(this.getSocialAuthErrorRedirect(error));
 		}
+	}
+
+	private getSocialAuthErrorRedirect(error: unknown) {
+		const errorCode =
+			error instanceof UnauthorizedException &&
+			error.message === USER_DEACTIVATED_MESSAGE
+				? 'account_deactivated'
+				: 'social_auth_failed';
+
+		return `${this._LOGIN_REDIRECT}?error=${errorCode}`;
 	}
 }

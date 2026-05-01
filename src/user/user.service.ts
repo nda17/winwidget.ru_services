@@ -8,7 +8,13 @@ import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
 import { UpdateUserDto } from '@/user/dto/update-user.dto';
 import { normalizePhone } from '@/utils/phone.util';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AuthIdentityType, Prisma, Role, type User } from '@prisma/client';
+import {
+	AuthIdentityType,
+	Prisma,
+	Role,
+	UserStatus,
+	type User
+} from '@prisma/client';
 import { hash } from 'bcryptjs';
 import { normalizeEmail } from '@/utils/email.util';
 import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
@@ -162,6 +168,10 @@ export class UserService {
 
 		if (!user) {
 			user = await this._createSocialUser(profile, socialType);
+			return user;
+		}
+
+		if (user.status === UserStatus.DEACTIVATED) {
 			return user;
 		}
 
@@ -375,10 +385,9 @@ export class UserService {
 						typeof dto?.avatarPath === 'string' && dto.avatarPath.length
 							? dto.avatarPath
 							: user.avatarPath,
-					rights: [
-						dto?.isUser ? Role.USER : null,
-						dto?.isAdmin ? Role.ADMIN : null
-					].filter(role => role !== null)
+					rights: [Role.USER, dto?.isAdmin ? Role.ADMIN : null].filter(
+						role => role !== null
+					)
 				}
 			});
 
@@ -477,6 +486,61 @@ export class UserService {
 		});
 	}
 
+	async toggleUserActivation(id: string) {
+		const user = await this.prisma.user.findUnique({
+			where: { id },
+			select: { status: true }
+		});
+
+		if (!user) {
+			throw new NotFoundException('User not found');
+		}
+
+		const shouldDeactivate = user.status === UserStatus.ACTIVE;
+
+		const updatedUser = await this.prisma.$transaction(async tx => {
+			const updated = await tx.user.update({
+				where: { id },
+				data: shouldDeactivate
+					? {
+							status: UserStatus.DEACTIVATED,
+							personalDataConsentRevokedAt: new Date(),
+							hashedRefreshToken: null
+						}
+					: {
+							status: UserStatus.ACTIVE,
+							personalDataConsentRevokedAt: null
+						},
+				include: {
+					authIdentities: true
+				}
+			});
+
+			if (shouldDeactivate) {
+				await tx.widget.updateMany({
+					where: { userId: id },
+					data: { isActive: false }
+				});
+				await tx.quiz.updateMany({
+					where: { userId: id },
+					data: { isActive: false }
+				});
+				await tx.callback.updateMany({
+					where: { userId: id },
+					data: { isActive: false }
+				});
+				await tx.countdownTimer.updateMany({
+					where: { userId: id },
+					data: { isActive: false }
+				});
+			}
+
+			return updated;
+		});
+
+		return this.toPublicUser(updatedUser);
+	}
+
 	toPublicUser(user: UserWithAuthIdentities): PublicUser {
 		const emailIdentity = this.getIdentityByType(
 			user,
@@ -491,6 +555,8 @@ export class UserService {
 			id: user.id,
 			name: user.name,
 			avatarPath: user.avatarPath,
+			status: user.status,
+			personalDataConsentRevokedAt: user.personalDataConsentRevokedAt,
 			rights: user.rights,
 			createdAt: user.createdAt,
 			updatedAt: user.updatedAt,

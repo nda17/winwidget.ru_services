@@ -5,7 +5,11 @@ import {
 } from '@/mailing/dto/send-admin-broadcast.dto';
 import { PrismaService } from '@/prisma.service';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { AuthIdentityType, SubscriptionStatus } from '@prisma/client';
+import {
+	AuthIdentityType,
+	SubscriptionStatus,
+	UserStatus
+} from '@prisma/client';
 
 export interface AdminBroadcastResult {
 	audience: AdminBroadcastAudience;
@@ -79,9 +83,10 @@ export class MailingService {
 				value: {
 					not: ''
 				},
-				...(audience === 'ACTIVE_SUBSCRIPTION'
-					? {
-							user: {
+				user: {
+					status: UserStatus.ACTIVE,
+					...(audience === 'ACTIVE_SUBSCRIPTION'
+						? {
 								subscription: {
 									is: {
 										status: SubscriptionStatus.ACTIVE,
@@ -98,8 +103,8 @@ export class MailingService {
 									}
 								}
 							}
-						}
-					: {})
+						: {})
+				}
 			},
 			select: {
 				value: true

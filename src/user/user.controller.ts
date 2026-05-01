@@ -122,6 +122,13 @@ export class UserController {
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
+	@Patch('user/:id/toggle-activation')
+	async toggleUserActivation(@Param('id') id: string) {
+		return this.userService.toggleUserActivation(id);
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
 	@Delete('user/:id')
 	async deleteUser(@Param('id') id: string) {
 		return this.userService.deleteUser(id);

@@ -13,7 +13,10 @@ import {
 	UserService,
 	type UserWithAuthIdentities
 } from '@/user/user.service';
-import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
+import {
+	PASSWORD_SALT_ROUNDS,
+	USER_DEACTIVATED_MESSAGE
+} from '@/utils/auth.constants';
 import { normalizeEmail } from '@/utils/email.util';
 import { normalizePhone } from '@/utils/phone.util';
 import {
@@ -27,6 +30,7 @@ import {
 	Plan,
 	Role,
 	SubscriptionStatus,
+	UserStatus,
 	type VerificationChallenge,
 	VerificationChallengePurpose,
 	VerificationChallengeType
@@ -275,7 +279,13 @@ export class AuthService {
 		}
 
 		const user = await this.userService.getUserById(result.id);
-		if (!user?.hashedRefreshToken) {
+		if (!user) {
+			throw new UnauthorizedException('Invalid refresh token');
+		}
+
+		this.ensureUserActive(user);
+
+		if (!user.hashedRefreshToken) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
@@ -345,6 +355,8 @@ export class AuthService {
 			throw new NotFoundException('User not found');
 		}
 
+		this.ensureUserActive(user);
+
 		const newPassword = generator.generate({
 			length: 12,
 			uppercase: true,
@@ -375,6 +387,7 @@ export class AuthService {
 	}
 
 	async buildResponseObject(user: UserWithAuthIdentities) {
+		this.ensureUserActive(user);
 		await this.ensureTrialSubscription(user.id);
 		const tokens = await this.issueTokens(user.id, user.rights);
 		await this.saveRefreshToken(user.id, tokens.refreshToken);
@@ -409,6 +422,12 @@ export class AuthService {
 
 	private generateCode() {
 		return `${randomInt(100000, 1000000)}`;
+	}
+
+	private ensureUserActive(user: Pick<UserWithAuthIdentities, 'status'>) {
+		if (user.status === UserStatus.DEACTIVATED) {
+			throw new UnauthorizedException(USER_DEACTIVATED_MESSAGE);
+		}
 	}
 
 	private async validatePhoneCode(phone: string, code: string) {
