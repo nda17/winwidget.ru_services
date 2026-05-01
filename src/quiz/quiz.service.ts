@@ -31,7 +31,7 @@ const DEFAULT_CONFIG = {
 	buttonSize: 60,
 	bubbleEnabled: true,
 	bubbleText: 'Пройдите квиз!',
-	autoOpenDelay: 45,
+	autoOpenDelay: null,
 	title: 'Пройдите наш квиз!',
 	subtitle:
 		'Ответьте на несколько вопросов и получите персональную рекомендацию',

@@ -22,7 +22,7 @@ import * as XLSX from 'xlsx';
 const DEFAULT_CONFIG = {
 	color: '#4705fb',
 	bgColor: '',
-	autoOpenDelay: 45,
+	autoOpenDelay: null,
 	spinDuration: 5,
 	buttonSide: 'right',
 	buttonPulse: true,
