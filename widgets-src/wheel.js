@@ -18,6 +18,11 @@
 		}
 	})();
 
+	function getWidgetFetchOptions(options = {}) {
+		if (!window.winwidgetAutoOpen) return options;
+		return { ...options, referrerPolicy: 'unsafe-url' };
+	}
+
 	const giftBtn = document.createElement('div');
 	const giftFontSize = '64px';
 
@@ -1213,11 +1218,14 @@
 			};
 
 			try {
-				await fetch(`${API_BASE}/widget/${config._token}/lead`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(payload)
-				});
+				await fetch(
+					`${API_BASE}/widget/${config._token}/lead`,
+					getWidgetFetchOptions({
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify(payload)
+					})
+				);
 				firePixelEvent('ip3_send');
 			} catch (e) {
 				console.error('[winwidget] Failed to send lead:', e);
@@ -1617,7 +1625,10 @@
 		try {
 			const [, res] = await Promise.all([
 				ensurePhoneHelper(),
-				fetch(`${API_BASE}/widget/${token}/config`)
+				fetch(
+					`${API_BASE}/widget/${token}/config`,
+					getWidgetFetchOptions()
+				)
 			]);
 			if (!res.ok) {
 				console.warn(

@@ -23,6 +23,12 @@
 		(_currentScript && _currentScript.getAttribute('data-key')) || '';
 	if (!KEY) return;
 
+	function getWidgetFetchOptions(options) {
+		var next = options || {};
+		if (window.winquizAutoOpen) next.referrerPolicy = 'unsafe-url';
+		return next;
+	}
+
 	function getWidgetAssetUrl(fileName) {
 		try {
 			var src = new URL(
@@ -834,17 +840,20 @@
 			var resultData = scoreAnswers(answers, questions, results);
 			setPlayedCookie();
 
-			fetch(API_BASE + '/quiz/' + KEY + '/lead', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					contact: phone || email || 'unknown',
-					phone: phone || undefined,
-					email: email || undefined,
-					answers: answers,
-					url: window.location.href
+			fetch(
+				API_BASE + '/quiz/' + KEY + '/lead',
+				getWidgetFetchOptions({
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						contact: phone || email || 'unknown',
+						phone: phone || undefined,
+						email: email || undefined,
+						answers: answers,
+						url: window.location.href
+					})
 				})
-			}).catch(function () {});
+			).catch(function () {});
 
 			firePixel('quiz_lead');
 			showResult(resultData);
@@ -1061,7 +1070,7 @@
 
 	Promise.all([
 		ensurePhoneHelper(),
-		fetch(API_BASE + '/quiz/' + KEY + '/config')
+		fetch(API_BASE + '/quiz/' + KEY + '/config', getWidgetFetchOptions())
 	])
 		.then(function (result) {
 			var r = result[1];

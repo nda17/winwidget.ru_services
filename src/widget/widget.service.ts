@@ -279,7 +279,8 @@ export class WidgetService {
 	async getPublicConfig(
 		publicKey: string,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	): Promise<object | null> {
 		const widget = await this.prisma.widget.findUnique({
 			where: { publicKey },
@@ -291,7 +292,10 @@ export class WidgetService {
 		if (!widget) return null;
 
 		const config = widget.config as any;
-		if (!isWidgetDomainAllowed(widget.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(widget.installDomain, requestDomain)
+		) {
 			return { isActive: false };
 		}
 
@@ -393,19 +397,22 @@ export class WidgetService {
 		name?: string,
 		bonus?: string,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	) {
 		const contact = phone ? phone : email || name || 'unknown';
 		return this.submitLead(
 			{ key, contact, phone, email, name, bonus, url: undefined },
 			ip,
-			requestDomain
+			requestDomain,
+			directPageAccessAllowed
 		);
 	}
 
 	async getWidgetConfig(
 		publicKey: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	) {
 		const widget = await this.prisma.widget.findUnique({
 			where: { publicKey },
@@ -422,7 +429,10 @@ export class WidgetService {
 
 		if (!widget.isActive) return null;
 
-		if (!isWidgetDomainAllowed(widget.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(widget.installDomain, requestDomain)
+		) {
 			return null;
 		}
 
@@ -443,7 +453,8 @@ export class WidgetService {
 	async submitLead(
 		dto: SubmitLeadDto,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	) {
 		const widget = await this.prisma.widget.findUnique({
 			where: { publicKey: dto.key },
@@ -469,7 +480,10 @@ export class WidgetService {
 		}
 
 		const config = widget.config as any;
-		if (!isWidgetDomainAllowed(widget.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(widget.installDomain, requestDomain)
+		) {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 

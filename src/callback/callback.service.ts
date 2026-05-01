@@ -210,7 +210,8 @@ export class CallbackService {
 	async getPublicConfig(
 		publicKey: string,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	): Promise<object | null> {
 		const callback = await this.prisma.callback.findUnique({
 			where: { publicKey },
@@ -220,7 +221,10 @@ export class CallbackService {
 		if (!callback) return null;
 
 		const config = callback.config as any;
-		if (!isWidgetDomainAllowed(callback.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(callback.installDomain, requestDomain)
+		) {
 			return { isActive: false };
 		}
 
@@ -280,7 +284,8 @@ export class CallbackService {
 	async submitLead(
 		dto: SubmitCallbackLeadDto,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	) {
 		const callback = await this.prisma.callback.findUnique({
 			where: { publicKey: dto.key },
@@ -305,7 +310,10 @@ export class CallbackService {
 			);
 
 		const config = callback.config as any;
-		if (!isWidgetDomainAllowed(callback.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(callback.installDomain, requestDomain)
+		) {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 

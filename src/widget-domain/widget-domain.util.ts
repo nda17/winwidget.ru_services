@@ -139,6 +139,19 @@ export const getWidgetRequestDomain = (req: Request) => {
 	);
 };
 
+const getWidgetRequestReferer = (req: Request) => {
+	const referer = getHeaderValue(
+		req.headers.referer || req.headers.referrer
+	);
+	if (!referer) return null;
+
+	try {
+		return new URL(referer);
+	} catch {
+		return null;
+	}
+};
+
 const getInternalDomains = () => {
 	return new Set(
 		[
@@ -158,12 +171,25 @@ const isInternalWidgetDomain = (domain: string | null) => {
 	return getInternalDomains().has(domain);
 };
 
+export const isWidgetDirectPageRequest = (
+	req: Request,
+	pagePath: string,
+	publicKey: string
+) => {
+	const referer = getWidgetRequestReferer(req);
+	if (!referer) return false;
+
+	const refererDomain = safeNormalizeDomain(referer.hostname);
+	if (!isInternalWidgetDomain(refererDomain)) return false;
+
+	const normalizedPath = referer.pathname.replace(/\/+$/, '');
+	return normalizedPath === `/${pagePath}/${publicKey}`;
+};
+
 export const isWidgetDomainAllowed = (
 	installDomain: string,
 	requestDomain: string | null
 ) => {
-	if (isInternalWidgetDomain(requestDomain)) return true;
-
 	const normalizedInstallDomain = safeNormalizeDomain(installDomain);
 	if (!normalizedInstallDomain || !requestDomain) return false;
 

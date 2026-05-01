@@ -4,7 +4,10 @@ import { CreateQuizDto } from '@/quiz/dto/create-quiz.dto';
 import { SubmitQuizLeadDto } from '@/quiz/dto/submit-quiz-lead.dto';
 import { UpdateQuizDto } from '@/quiz/dto/update-quiz.dto';
 import { QuizService } from '@/quiz/quiz.service';
-import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
+import {
+	getWidgetRequestDomain,
+	isWidgetDirectPageRequest
+} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -119,7 +122,8 @@ export class QuizController {
 		return this.quizService.submitLead(
 			dto,
 			undefined,
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-quiz', dto.key)
 		);
 	}
 }

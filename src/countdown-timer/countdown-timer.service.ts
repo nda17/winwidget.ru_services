@@ -220,7 +220,8 @@ export class CountdownTimerService {
 	async getPublicConfig(
 		publicKey: string,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	) {
 		const timer = await this.prisma.countdownTimer.findUnique({
 			where: { publicKey },
@@ -229,7 +230,10 @@ export class CountdownTimerService {
 		if (!timer) return null;
 
 		const config = timer.config as any;
-		if (!isWidgetDomainAllowed(timer.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(timer.installDomain, requestDomain)
+		) {
 			return { isActive: false };
 		}
 
@@ -315,7 +319,8 @@ export class CountdownTimerService {
 	async submitLead(
 		dto: SubmitCountdownTimerLeadDto,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	) {
 		const timer = await this.prisma.countdownTimer.findUnique({
 			where: { publicKey: dto.key },
@@ -331,7 +336,10 @@ export class CountdownTimerService {
 		if (!timer) throw new NotFoundException('Таймер не найден');
 
 		const config = timer.config as any;
-		if (!isWidgetDomainAllowed(timer.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(timer.installDomain, requestDomain)
+		) {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 

@@ -82,6 +82,12 @@
 		(window.winwidget && window.winwidget.autoOpen)
 	);
 
+	function getWidgetFetchOptions(options) {
+		var next = options || {};
+		if (AUTO_OPEN) next.referrerPolicy = 'unsafe-url';
+		return next;
+	}
+
 	var MASKS = {
 		RU: {
 			mask: '+7 (###) ###-##-##',
@@ -792,15 +798,18 @@
 			submit.disabled = true;
 			submit.style.opacity = '.65';
 			submit.textContent = 'Отправляем...';
-			fetch(API_BASE + '/countdown-timer/' + KEY + '/lead', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					phone: phone || undefined,
-					email: email || undefined,
-					url: window.location.href
+			fetch(
+				API_BASE + '/countdown-timer/' + KEY + '/lead',
+				getWidgetFetchOptions({
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						phone: phone || undefined,
+						email: email || undefined,
+						url: window.location.href
+					})
 				})
-			})
+			)
 				.then(function (r) {
 					if (!r.ok) throw new Error('submit failed');
 					return r.json();
@@ -1045,7 +1054,7 @@
 	function loadConfig(options) {
 		return Promise.all([
 			ensurePhoneHelper(),
-			fetch(getConfigUrl(), { cache: 'no-store' })
+			fetch(getConfigUrl(), getWidgetFetchOptions({ cache: 'no-store' }))
 		])
 			.then(function (result) {
 				var r = result[1];

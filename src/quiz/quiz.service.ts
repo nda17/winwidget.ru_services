@@ -310,7 +310,8 @@ export class QuizService {
 	async getPublicConfig(
 		publicKey: string,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	): Promise<object | null> {
 		const quiz = await this.prisma.quiz.findUnique({
 			where: { publicKey },
@@ -320,7 +321,10 @@ export class QuizService {
 		if (!quiz) return null;
 
 		const config = quiz.config as any;
-		if (!isWidgetDomainAllowed(quiz.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(quiz.installDomain, requestDomain)
+		) {
 			return { isActive: false };
 		}
 
@@ -401,7 +405,8 @@ export class QuizService {
 	async submitLead(
 		dto: SubmitQuizLeadDto,
 		ip?: string,
-		requestDomain: string | null = null
+		requestDomain: string | null = null,
+		directPageAccessAllowed = false
 	) {
 		const quiz = await this.prisma.quiz.findUnique({
 			where: { publicKey: dto.key },
@@ -427,7 +432,10 @@ export class QuizService {
 		}
 
 		const config = quiz.config as any;
-		if (!isWidgetDomainAllowed(quiz.installDomain, requestDomain)) {
+		if (
+			!directPageAccessAllowed &&
+			!isWidgetDomainAllowed(quiz.installDomain, requestDomain)
+		) {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 

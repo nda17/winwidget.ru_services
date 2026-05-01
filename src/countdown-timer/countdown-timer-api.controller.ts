@@ -1,5 +1,8 @@
 import { CountdownTimerService } from '@/countdown-timer/countdown-timer.service';
-import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
+import {
+	getWidgetRequestDomain,
+	isWidgetDirectPageRequest
+} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -40,7 +43,8 @@ export class CountdownTimerApiController {
 		const config = await this.countdownTimerService.getPublicConfig(
 			key,
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-timer', key)
 		);
 		if (config === null) throw new NotFoundException('Таймер не найден');
 		return config;
@@ -62,7 +66,8 @@ export class CountdownTimerApiController {
 				url: body.url
 			},
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-timer', key)
 		);
 	}
 }

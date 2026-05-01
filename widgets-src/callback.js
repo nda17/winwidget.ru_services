@@ -79,6 +79,12 @@
 		(window.winwidget && window.winwidget.autoOpen)
 	);
 
+	function getWidgetFetchOptions(options) {
+		var next = options || {};
+		if (AUTO_OPEN) next.referrerPolicy = 'unsafe-url';
+		return next;
+	}
+
 	// ─── Phone mask ───────────────────────────────────────────────────────────
 
 	var MASKS = {
@@ -675,16 +681,19 @@
 				timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 			} catch (e) {}
 
-			fetch(API_BASE + '/callback/' + KEY + '/lead', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					phone: phone,
-					timeSlot: timeSelect ? timeSelect.value : '',
-					timezone: timezone,
-					url: window.location.href
+			fetch(
+				API_BASE + '/callback/' + KEY + '/lead',
+				getWidgetFetchOptions({
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						phone: phone,
+						timeSlot: timeSelect ? timeSelect.value : '',
+						timezone: timezone,
+						url: window.location.href
+					})
 				})
-			})
+			)
 				.then(function (r) {
 					return r.json();
 				})
@@ -855,7 +864,10 @@
 
 	Promise.all([
 		ensurePhoneHelper(),
-		fetch(API_BASE + '/callback/' + KEY + '/config')
+		fetch(
+			API_BASE + '/callback/' + KEY + '/config',
+			getWidgetFetchOptions()
+		)
 	])
 		.then(function (result) {
 			var r = result[1];

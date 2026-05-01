@@ -1,5 +1,8 @@
 import { CallbackService } from '@/callback/callback.service';
-import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
+import {
+	getWidgetRequestDomain,
+	isWidgetDirectPageRequest
+} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -32,7 +35,8 @@ export class CallbackApiController {
 		const config = await this.callbackService.getPublicConfig(
 			key,
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-callback', key)
 		);
 		if (config === null) throw new NotFoundException('Виджет не найден');
 		return config;
@@ -61,7 +65,8 @@ export class CallbackApiController {
 				url: body.url
 			},
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-callback', key)
 		);
 	}
 }

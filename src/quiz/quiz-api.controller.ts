@@ -1,5 +1,8 @@
 import { QuizService } from '@/quiz/quiz.service';
-import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
+import {
+	getWidgetRequestDomain,
+	isWidgetDirectPageRequest
+} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -36,7 +39,8 @@ export class QuizApiController {
 		const config = await this.quizService.getPublicConfig(
 			key,
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-quiz', key)
 		);
 		if (config === null) throw new NotFoundException('Квиз не найден');
 		return config;
@@ -72,7 +76,8 @@ export class QuizApiController {
 				url: body.url
 			},
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-quiz', key)
 		);
 	}
 }

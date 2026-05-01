@@ -1,5 +1,8 @@
 import { WidgetService } from '@/widget/widget.service';
-import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
+import {
+	getWidgetRequestDomain,
+	isWidgetDirectPageRequest
+} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -36,7 +39,8 @@ export class WidgetApiController {
 		const config = await this.widgetService.getPublicConfig(
 			key,
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-wheel', key)
 		);
 		if (config === null) {
 			throw new NotFoundException('Виджет не найден');
@@ -69,7 +73,8 @@ export class WidgetApiController {
 			body.name,
 			body.bonus,
 			extractIp(req),
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-wheel', key)
 		);
 	}
 }

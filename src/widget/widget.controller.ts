@@ -4,7 +4,10 @@ import { CreateWidgetDto } from '@/widget/dto/create-widget.dto';
 import { SubmitLeadDto } from '@/widget/dto/submit-lead.dto';
 import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
 import { WidgetService } from '@/widget/widget.service';
-import { getWidgetRequestDomain } from '@/widget-domain/widget-domain.util';
+import {
+	getWidgetRequestDomain,
+	isWidgetDirectPageRequest
+} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -124,7 +127,8 @@ export class WidgetController {
 		return this.widgetService.submitLead(
 			dto,
 			undefined,
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-wheel', dto.key)
 		);
 	}
 
@@ -138,7 +142,8 @@ export class WidgetController {
 	) {
 		const config = await this.widgetService.getWidgetConfig(
 			key,
-			getWidgetRequestDomain(req)
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-wheel', key)
 		);
 
 		if (!config) {
