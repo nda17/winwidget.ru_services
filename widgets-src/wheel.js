@@ -24,7 +24,7 @@
 	}
 
 	const giftBtn = document.createElement('div');
-	const giftFontSize = '64px';
+	const giftButtonSize = '64px';
 
 	function getWidgetAssetUrl(fileName) {
 		try {
@@ -99,11 +99,11 @@
       border-top:7px solid transparent;border-bottom:7px solid transparent;
     "></div>
   </div>
-  <div id="ww-btn-emoji" style="
-    font-size:${giftFontSize};line-height:1;
+  <img id="ww-btn-icon" src="${getWidgetAssetUrl('gift-button.png')}" alt="" aria-hidden="true" draggable="false" style="
+    width:${giftButtonSize};height:${giftButtonSize};display:block;object-fit:contain;line-height:1;
     filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2));
     transform-origin:50% 100%;
-  ">🎁</div>
+  " />
   <div id="ww-btn-label" style="
     margin-top:6px;
     background:linear-gradient(135deg,#ffd700,#ff8c00);
@@ -1462,8 +1462,11 @@
 		// Apply button position and pulse from config
 		_giftPulseEnabled = config.buttonPulse !== false;
 		var sz = config.buttonSize ?? 60;
-		var emojiEl = giftBtn.querySelector('#ww-btn-emoji');
-		if (emojiEl) emojiEl.style.fontSize = sz + 'px';
+		var iconEl = giftBtn.querySelector('#ww-btn-icon');
+		if (iconEl) {
+			iconEl.style.width = sz + 'px';
+			iconEl.style.height = sz + 'px';
+		}
 		var labelEl = giftBtn.querySelector('#ww-btn-label');
 		if (labelEl) {
 			var lf = Math.max(8, Math.round((sz / 60) * 11));

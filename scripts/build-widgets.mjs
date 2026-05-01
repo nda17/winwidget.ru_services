@@ -15,6 +15,7 @@ const widgetEntries = [
 ];
 
 const copiedAssets = [
+	['gift-button.png', 'gift-button.png'],
 	['helpers/libphonenumber-min.js', 'helpers/libphonenumber-min.js']
 ];
 
