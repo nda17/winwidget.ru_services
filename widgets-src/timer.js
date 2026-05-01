@@ -978,6 +978,18 @@
 		if (!AUTO_OPEN) closeModal();
 	}
 
+	function showDisabledPage() {
+		var existing = document.getElementById('timer-widget-disabled');
+		if (existing) return;
+		var el = document.createElement('div');
+		el.id = 'timer-widget-disabled';
+		el.style.cssText =
+			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
+		el.innerHTML =
+			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.4rem;font-weight:700;margin-bottom:10px">Виджет отключён</h1><p style="font-size:0.95rem;color:#8080a0;margin-bottom:28px;max-width:320px">Этот виджет в данный момент отключён. Включите его в личном кабинете.</p><a href="https://winwidget.ru/widgets" style="display:inline-block;padding:11px 28px;background:#4705fb;color:#fff;border-radius:10px;font-weight:700;font-size:0.9rem;text-decoration:none">Перейти в кабинет</a>';
+		document.body.appendChild(el);
+	}
+
 	function applyLoadedConfig(options) {
 		options = options || {};
 		positionButton();
@@ -1075,6 +1087,7 @@
 					cfg = null;
 					timerBtn.style.display = 'none';
 					closeModal();
+					if (AUTO_OPEN) showDisabledPage();
 					return;
 				}
 				cfg = data;
@@ -1104,6 +1117,9 @@
 	function destroyWidget() {
 		if (tickTimer) clearInterval(tickTimer);
 		if (autoOpenTimer) clearTimeout(autoOpenTimer);
+		var disabledPage = document.getElementById('timer-widget-disabled');
+		if (disabledPage && disabledPage.parentNode)
+			disabledPage.parentNode.removeChild(disabledPage);
 		timerBtn.removeEventListener('click', handleButtonClick);
 		backdrop.removeEventListener('click', handleBackdropClick);
 		window.removeEventListener(
