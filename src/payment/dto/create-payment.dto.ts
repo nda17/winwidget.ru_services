@@ -1,5 +1,5 @@
 import { BillingPeriod, Plan } from '@prisma/client';
-import { IsEnum } from 'class-validator';
+import { IsEnum, IsString } from 'class-validator';
 
 export class CreatePaymentDto {
 	@IsEnum(Plan)
@@ -7,4 +7,9 @@ export class CreatePaymentDto {
 
 	@IsEnum(BillingPeriod)
 	billingPeriod: BillingPeriod;
+}
+
+export class AdminCheckPaymentDto {
+	@IsString()
+	paymentId: string;
 }

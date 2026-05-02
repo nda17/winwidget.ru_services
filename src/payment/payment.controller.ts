@@ -1,6 +1,9 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
-import { CreatePaymentDto } from '@/payment/dto/create-payment.dto';
+import {
+	AdminCheckPaymentDto,
+	CreatePaymentDto
+} from '@/payment/dto/create-payment.dto';
 import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { PaymentService } from '@/payment/payment.service';
 import {
@@ -9,6 +12,7 @@ import {
 	Get,
 	HttpCode,
 	Post,
+	Query,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
@@ -53,6 +57,29 @@ export class PaymentController {
 	@Auth()
 	async cancelPendingPayment(@CurrentUser('id') userId: string) {
 		return this.paymentService.cancelPendingPayment(userId);
+	}
+
+	@HttpCode(200)
+	@Get('admin/list')
+	@Auth(Role.ADMIN)
+	async adminGetPayments(
+		@Query('page') page?: string,
+		@Query('limit') limit?: string,
+		@Query('status') status?: string
+	) {
+		return this.paymentService.adminGetPayments(
+			page ? parseInt(page, 10) : 1,
+			limit ? parseInt(limit, 10) : 20,
+			status
+		);
+	}
+
+	@HttpCode(200)
+	@Post('admin/check')
+	@Auth(Role.ADMIN)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	async adminCheckPayment(@Body() dto: AdminCheckPaymentDto) {
+		return this.paymentService.adminCheckPayment(dto.paymentId);
 	}
 
 	@HttpCode(200)

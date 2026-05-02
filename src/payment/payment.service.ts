@@ -4,7 +4,12 @@ import { PrismaService } from '@/prisma.service';
 import { PLAN_PRIORITY } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { TariffPricesService } from '@/tariff-prices/tariff-prices.service';
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+	BadRequestException,
+	Injectable,
+	Logger,
+	NotFoundException
+} from '@nestjs/common';
 import {
 	AuthIdentityType,
 	BillingPeriod,
@@ -13,6 +18,17 @@ import {
 	Plan,
 	SubscriptionStatus
 } from '@prisma/client';
+
+type AdminPaymentWithUser = Payment & {
+	user: {
+		id: string;
+		name: string | null;
+		authIdentities: Array<{
+			type: AuthIdentityType;
+			value: string;
+		}>;
+	};
+};
 
 @Injectable()
 export class PaymentService {
@@ -175,6 +191,138 @@ export class PaymentService {
 			cancelled: true,
 			message: 'Незавершённый платёж отменён.',
 			cancelledAt: new Date().toISOString()
+		};
+	}
+
+	async adminGetPayments(page = 1, limit = 20, status?: string) {
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+		const normalizedStatus = this.normalizeAdminPaymentStatus(status);
+		const where = normalizedStatus
+			? { status: normalizedStatus }
+			: undefined;
+		const skip = (normalizedPage - 1) * normalizedLimit;
+
+		const [payments, total] = await this.prisma.$transaction([
+			this.prisma.payment.findMany({
+				where,
+				skip,
+				take: normalizedLimit,
+				orderBy: { createdAt: 'desc' },
+				include: {
+					user: {
+						select: {
+							id: true,
+							name: true,
+							authIdentities: {
+								where: {
+									type: {
+										in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
+									}
+								},
+								select: {
+									type: true,
+									value: true
+								}
+							}
+						}
+					}
+				}
+			}),
+			this.prisma.payment.count({ where })
+		]);
+
+		return {
+			items: payments.map(payment => this.serializeAdminPayment(payment)),
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
+	}
+
+	private normalizeAdminPaymentStatus(status?: string) {
+		if (!status) {
+			return undefined;
+		}
+
+		const normalizedStatus = status.trim().toUpperCase();
+
+		if (
+			!Object.values(PaymentStatus).includes(
+				normalizedStatus as PaymentStatus
+			)
+		) {
+			throw new BadRequestException('Некорректный статус платежа');
+		}
+
+		return normalizedStatus as PaymentStatus;
+	}
+
+	async adminCheckPayment(paymentId: string) {
+		const normalizedPaymentId = paymentId.trim();
+
+		if (!normalizedPaymentId) {
+			throw new BadRequestException('Укажите ID платежа');
+		}
+
+		const payment = await this.prisma.payment.findFirst({
+			where: {
+				OR: [
+					{ id: normalizedPaymentId },
+					{ yookassaId: normalizedPaymentId }
+				]
+			}
+		});
+
+		if (!payment) {
+			throw new NotFoundException('Платёж не найден');
+		}
+
+		const realPayment = await this.yookassa.getPayment(payment.yookassaId);
+
+		if (realPayment.status === 'succeeded') {
+			await this.handlePaymentSucceeded(payment.yookassaId);
+		} else if (realPayment.status === 'canceled') {
+			await this.handlePaymentCanceled(payment.yookassaId);
+		}
+
+		const updated = await this.prisma.payment.findUnique({
+			where: { yookassaId: payment.yookassaId },
+			include: {
+				user: {
+					select: {
+						id: true,
+						name: true,
+						authIdentities: {
+							where: {
+								type: {
+									in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
+								}
+							},
+							select: {
+								type: true,
+								value: true
+							}
+						}
+					}
+				}
+			}
+		});
+
+		if (!updated) {
+			throw new NotFoundException('Платёж не найден');
+		}
+
+		return {
+			payment: this.serializeAdminPayment(updated),
+			providerStatus: realPayment.status,
+			message: this.getAdminCheckMessage(
+				updated.status,
+				realPayment.status
+			),
+			checkedAt: new Date().toISOString()
 		};
 	}
 
@@ -379,6 +527,55 @@ export class PaymentService {
 			billingPeriod: payment.billingPeriod,
 			message
 		};
+	}
+
+	private serializeAdminPayment(payment: AdminPaymentWithUser) {
+		const emailIdentity = payment.user.authIdentities.find(
+			identity => identity.type === AuthIdentityType.EMAIL
+		);
+		const phoneIdentity = payment.user.authIdentities.find(
+			identity => identity.type === AuthIdentityType.PHONE
+		);
+
+		return {
+			id: payment.id,
+			yookassaId: payment.yookassaId,
+			status: payment.status,
+			amount: payment.amount,
+			plan: payment.plan,
+			billingPeriod: payment.billingPeriod,
+			confirmationUrl: payment.confirmationUrl,
+			createdAt: payment.createdAt,
+			updatedAt: payment.updatedAt,
+			user: {
+				id: payment.user.id,
+				name: payment.user.name,
+				email: emailIdentity?.value ?? null,
+				phone: phoneIdentity?.value ?? null
+			}
+		};
+	}
+
+	private getAdminCheckMessage(
+		paymentStatus: PaymentStatus,
+		providerStatus: string
+	) {
+		if (
+			providerStatus === 'succeeded' &&
+			paymentStatus !== PaymentStatus.SUCCEEDED
+		) {
+			return 'YooKassa вернула succeeded, но локальный статус не изменился. Проверь metadata платежа.';
+		}
+
+		if (paymentStatus === PaymentStatus.SUCCEEDED) {
+			return 'Платёж подтверждён, подписка синхронизирована.';
+		}
+
+		if (paymentStatus === PaymentStatus.CANCELLED) {
+			return 'Платёж отменён.';
+		}
+
+		return 'Платёж ещё ожидает оплаты.';
 	}
 
 	private getPlanLabel(plan: Plan) {
