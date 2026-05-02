@@ -1,7 +1,12 @@
 import { PrismaService } from '@/prisma.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { BillingPeriod, Plan, SubscriptionStatus } from '@prisma/client';
+import {
+	BillingPeriod,
+	Plan,
+	SubscriptionHistoryAction,
+	SubscriptionStatus
+} from '@prisma/client';
 import * as dayjs from 'dayjs';
 
 @Injectable()
@@ -314,6 +319,52 @@ export class SubscriptionService {
 		}));
 	}
 
+	async adminGetSubscriptionHistory() {
+		const histories = await this.prisma.subscriptionHistory.findMany({
+			include: {
+				user: {
+					select: {
+						id: true,
+						name: true,
+						authIdentities: {
+							where: { type: 'EMAIL' },
+							select: { value: true }
+						}
+					}
+				},
+				admin: {
+					select: {
+						id: true,
+						name: true,
+						authIdentities: {
+							where: { type: 'EMAIL' },
+							select: { value: true }
+						}
+					}
+				}
+			},
+			orderBy: { createdAt: 'desc' }
+		});
+
+		return histories.map(history => ({
+			...history,
+			user: history.user
+				? {
+						id: history.user.id,
+						name: history.user.name,
+						email: history.user.authIdentities[0]?.value ?? null
+					}
+				: null,
+			admin: history.admin
+				? {
+						id: history.admin.id,
+						name: history.admin.name,
+						email: history.admin.authIdentities[0]?.value ?? null
+					}
+				: null
+		}));
+	}
+
 	async adminActivateSubscription(
 		userId: string,
 		plan: Plan,
@@ -370,7 +421,11 @@ export class SubscriptionService {
 		});
 	}
 
-	async adminExtendSubscriptionDays(userId: string, days: number) {
+	async adminExtendSubscriptionDays(
+		userId: string,
+		days: number,
+		adminId: string
+	) {
 		const subscription = await this.prisma.subscription.findUnique({
 			where: { userId }
 		});
@@ -387,9 +442,10 @@ export class SubscriptionService {
 		const base = isActiveFutureSubscription
 			? dayjs(subscription.expiresAt)
 			: now;
+		const newExpiresAt = base.add(days, 'day').toDate();
 		const data = {
 			status: SubscriptionStatus.ACTIVE,
-			expiresAt: base.add(days, 'day').toDate(),
+			expiresAt: newExpiresAt,
 			...(isActiveFutureSubscription
 				? {}
 				: {
@@ -398,9 +454,25 @@ export class SubscriptionService {
 					})
 		};
 
-		return this.prisma.subscription.update({
-			where: { userId },
-			data
+		return this.prisma.$transaction(async tx => {
+			const updatedSubscription = await tx.subscription.update({
+				where: { userId },
+				data
+			});
+
+			await tx.subscriptionHistory.create({
+				data: {
+					subscriptionId: subscription.id,
+					userId,
+					adminId,
+					action: SubscriptionHistoryAction.BONUS_DAYS,
+					days,
+					oldExpiresAt: subscription.expiresAt,
+					newExpiresAt
+				}
+			});
+
+			return updatedSubscription;
 		});
 	}
 

@@ -48,6 +48,13 @@ export class SubscriptionController {
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
+	@Get('admin/history')
+	async adminGetHistory() {
+		return this.subscriptionService.adminGetSubscriptionHistory();
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@Post('admin/activate')
 	async adminActivate(@Body() dto: AdminActivateSubscriptionDto) {
@@ -64,10 +71,14 @@ export class SubscriptionController {
 	@Auth(Role.ADMIN)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@Post('admin/extend-days')
-	async adminExtendDays(@Body() dto: AdminExtendSubscriptionDto) {
+	async adminExtendDays(
+		@Body() dto: AdminExtendSubscriptionDto,
+		@CurrentUser('id') adminId: string
+	) {
 		return this.subscriptionService.adminExtendSubscriptionDays(
 			dto.userId,
-			dto.days
+			dto.days,
+			adminId
 		);
 	}
 

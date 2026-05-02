@@ -24,6 +24,8 @@ model User {
   callbacks                    Callback[]
   countdownTimers              CountdownTimer[]
   subscription                 Subscription?
+  subscriptionHistories        SubscriptionHistory[]   @relation("SubscriptionHistoryUser")
+  subscriptionHistoryActions   SubscriptionHistory[]   @relation("SubscriptionHistoryAdmin")
   createdAt                    DateTime                @default(now()) @map("created_at")
   updatedAt                    DateTime                @updatedAt @map("updated_at")
 
@@ -180,10 +182,32 @@ model Subscription {
   leadsThisPeriod Int                @default(0) @map("leads_this_period")
   periodResetsAt  DateTime?          @map("period_resets_at")
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  histories       SubscriptionHistory[]
   createdAt       DateTime           @default(now()) @map("created_at")
   updatedAt       DateTime           @updatedAt @map("updated_at")
 
   @@map("subscriptions")
+}
+
+model SubscriptionHistory {
+  id             String                    @id @default(cuid())
+  subscriptionId String                    @map("subscription_id")
+  userId         String                    @map("user_id")
+  adminId        String?                   @map("admin_id")
+  action         SubscriptionHistoryAction
+  days           Int?
+  oldExpiresAt   DateTime?                 @map("old_expires_at")
+  newExpiresAt   DateTime?                 @map("new_expires_at")
+  subscription   Subscription              @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  user           User                      @relation("SubscriptionHistoryUser", fields: [userId], references: [id], onDelete: Cascade)
+  admin          User?                     @relation("SubscriptionHistoryAdmin", fields: [adminId], references: [id], onDelete: SetNull)
+  createdAt      DateTime                  @default(now()) @map("created_at")
+
+  @@index([subscriptionId])
+  @@index([userId])
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("subscription_history")
 }
 
 model Payment {
@@ -301,6 +325,10 @@ enum SubscriptionStatus {
   ACTIVE
   EXPIRED
   CANCELLED
+}
+
+enum SubscriptionHistoryAction {
+  BONUS_DAYS
 }
 
 model SiteSettings {
