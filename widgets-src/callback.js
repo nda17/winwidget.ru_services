@@ -78,6 +78,7 @@
 		window.winwidgetCallbackAutoOpen ||
 		(window.winwidget && window.winwidget.autoOpen)
 	);
+	var widgetLayerZIndex = AUTO_OPEN ? '2147483647' : '10000';
 
 	function getWidgetFetchOptions(options) {
 		var next = options || {};
@@ -315,7 +316,7 @@
 	overlay.style.cssText = [
 		'position:fixed',
 		'inset:0',
-		'z-index:10000',
+		'z-index:' + widgetLayerZIndex,
 		'display:none',
 		'align-items:center',
 		'justify-content:center',

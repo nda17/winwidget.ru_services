@@ -313,7 +313,7 @@
       --wheel-size: 300px;
       --accent: ${config.widgetColor};
       position: fixed;
-      z-index: 10000;
+      z-index: ${window.winwidgetAutoOpen ? 2147483647 : 10000};
       top: 0;
     }
     * { box-sizing: border-box; }

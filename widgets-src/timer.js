@@ -81,6 +81,7 @@
 		window.winwidgetTimerAutoOpen ||
 		(window.winwidget && window.winwidget.autoOpen)
 	);
+	var widgetLayerZIndex = AUTO_OPEN ? '2147483647' : '10000';
 
 	function getWidgetFetchOptions(options) {
 		var next = options || {};
@@ -287,7 +288,9 @@
 	var overlay = document.createElement('div');
 	overlay.id = 'timer-widget-overlay';
 	overlay.style.cssText =
-		'position:fixed;inset:0;z-index:10000;display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
+		'position:fixed;inset:0;z-index:' +
+		widgetLayerZIndex +
+		';display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
 	var backdrop = document.createElement('div');
 	backdrop.style.cssText =
 		'position:absolute;inset:0;background:rgba(8,4,20,0.85);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);touch-action:none;';

@@ -244,7 +244,7 @@
 
 	var style = document.createElement('style');
 	style.textContent = [
-		':host{position:fixed;z-index:10000;top:0}',
+		`:host{position:fixed;z-index:${window.winquizAutoOpen ? 2147483647 : 10000};top:0}`,
 		'*{box-sizing:border-box;margin:0;padding:0}',
 
 		// wrapper
