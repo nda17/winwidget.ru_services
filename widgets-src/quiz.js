@@ -1064,7 +1064,7 @@
 		el.style.cssText =
 			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
 		el.innerHTML =
-			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">Квиз отключён</h1><p style="font-size:0.9rem;color:#8080a0;margin-bottom:28px;max-width:300px">Этот квиз в данный момент отключён.</p><a href="https://winwidget.ru/widgets" style="display:inline-block;padding:11px 28px;background:#4705fb;color:#fff;border-radius:10px;font-weight:700;font-size:0.9rem;text-decoration:none">Перейти в кабинет</a>';
+			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">Виджет временно отключен</h1>';
 		document.body.appendChild(el);
 	}
 

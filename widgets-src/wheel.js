@@ -1600,18 +1600,7 @@
 		].join(';');
 		el.innerHTML = [
 			'<div style="font-size:3rem;margin-bottom:16px">🔒</div>',
-			'<h1 style="font-size:1.4rem;font-weight:700;margin-bottom:10px">Виджет отключён</h1>',
-			'<p style="font-size:0.95rem;color:#8080a0;margin-bottom:28px;max-width:320px">',
-			'Этот виджет в данный момент отключён. Включите его в личном кабинете.',
-			'</p>',
-			'<a href="https://winwidget.ru/widgets" ',
-			'style="display:inline-block;padding:11px 28px;background:#4705fb;color:#fff;',
-			'border-radius:10px;font-weight:700;font-size:0.9rem;text-decoration:none;',
-			'transition:background 0.2s" ',
-			'onmouseover="this.style.background=\'#5a1aff\'" ',
-			'onmouseout="this.style.background=\'#4705fb\'">',
-			'Перейти в кабинет',
-			'</a>'
+			'<h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">Виджет временно отключен</h1>'
 		].join('');
 		document.body.appendChild(el);
 	}
