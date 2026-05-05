@@ -1,0 +1,177 @@
+import { PrismaService } from '@/prisma.service';
+import { Injectable, Logger } from '@nestjs/common';
+import { AuthIdentityType, Prisma } from '@prisma/client';
+import { Request } from 'express';
+
+export type AdminEventLogSection =
+	| 'PAYMENTS'
+	| 'MAILINGS'
+	| 'TASKS'
+	| 'SUBSCRIPTIONS'
+	| 'USERS'
+	| 'BACKLOG';
+
+export type AdminEventLogAction =
+	| 'PAYMENT_MANUAL_CHECK'
+	| 'PAYMENT_CLEANUP_RUN'
+	| 'MAILING_BROADCAST_SEND'
+	| 'SUBSCRIPTION_ACTIVATE'
+	| 'SUBSCRIPTION_EXTEND_DAYS'
+	| 'SUBSCRIPTION_CANCEL'
+	| 'SUBSCRIPTION_EXPIRY_CHECK_RUN'
+	| 'VERIFICATION_CHALLENGE_CLEANUP_RUN'
+	| 'USER_UPDATE'
+	| 'USER_TOGGLE_ACTIVATION'
+	| 'USER_DELETE'
+	| 'BACKLOG_TASK_CREATE'
+	| 'BACKLOG_TASK_UPDATE'
+	| 'BACKLOG_TASK_DELETE';
+
+interface AdminEventLogRecordInput {
+	adminId?: string | null;
+	section: AdminEventLogSection;
+	action: AdminEventLogAction;
+	description: string;
+	entityType?: string | null;
+	entityId?: string | null;
+	entityLabel?: string | null;
+	targetUserId?: string | null;
+	metadata?: Prisma.InputJsonValue;
+	request?: Request;
+}
+
+interface UserSnapshot {
+	name: string | null;
+	email: string | null;
+}
+
+@Injectable()
+export class AdminEventLogService {
+	private readonly logger = new Logger(AdminEventLogService.name);
+
+	constructor(private readonly prisma: PrismaService) {}
+
+	async getAll(page = 1, limit = 20) {
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+		const skip = (normalizedPage - 1) * normalizedLimit;
+
+		const [items, total] = await this.prisma.$transaction([
+			this.prisma.adminEventLog.findMany({
+				orderBy: { createdAt: 'desc' },
+				skip,
+				take: normalizedLimit
+			}),
+			this.prisma.adminEventLog.count()
+		]);
+
+		return {
+			items,
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
+	}
+
+	async record(input: AdminEventLogRecordInput) {
+		try {
+			const [adminSnapshot, targetUserSnapshot] = await Promise.all([
+				this.getUserSnapshot(input.adminId),
+				this.getUserSnapshot(input.targetUserId)
+			]);
+			const requestSnapshot = this.getRequestSnapshot(input.request);
+
+			return await this.prisma.adminEventLog.create({
+				data: {
+					adminId: input.adminId || null,
+					adminName: adminSnapshot?.name ?? null,
+					adminEmail: adminSnapshot?.email ?? null,
+					section: input.section,
+					action: input.action,
+					description: input.description.trim(),
+					entityType: input.entityType || null,
+					entityId: input.entityId || null,
+					entityLabel: input.entityLabel || null,
+					targetUserId: input.targetUserId || null,
+					targetUserName: targetUserSnapshot?.name ?? null,
+					targetUserEmail: targetUserSnapshot?.email ?? null,
+					metadata: input.metadata ?? {},
+					ip: requestSnapshot.ip,
+					userAgent: requestSnapshot.userAgent
+				}
+			});
+		} catch (error) {
+			this.logger.warn(
+				`Admin event log failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
+			return null;
+		}
+	}
+
+	private async getUserSnapshot(
+		userId?: string | null
+	): Promise<UserSnapshot | null> {
+		if (!userId) {
+			return null;
+		}
+
+		const user = await this.prisma.user.findUnique({
+			where: { id: userId },
+			select: {
+				name: true,
+				authIdentities: {
+					where: { type: AuthIdentityType.EMAIL },
+					select: { value: true },
+					take: 1
+				}
+			}
+		});
+
+		if (!user) {
+			return null;
+		}
+
+		return {
+			name: user.name,
+			email: user.authIdentities[0]?.value ?? null
+		};
+	}
+
+	private getRequestSnapshot(request?: Request) {
+		if (!request) {
+			return {
+				ip: null,
+				userAgent: null
+			};
+		}
+
+		const forwardedFor = this.getHeaderValue(
+			request.headers['x-forwarded-for']
+		);
+		const realIp = this.getHeaderValue(request.headers['x-real-ip']);
+		const cfIp = this.getHeaderValue(request.headers['cf-connecting-ip']);
+		const userAgent = this.getHeaderValue(request.headers['user-agent']);
+
+		return {
+			ip:
+				cfIp ||
+				realIp ||
+				(forwardedFor ? forwardedFor.split(',')[0].trim() : null) ||
+				request.ip ||
+				null,
+			userAgent: userAgent || null
+		};
+	}
+
+	private getHeaderValue(value?: string | string[]) {
+		if (Array.isArray(value)) {
+			return value[0]?.trim() || null;
+		}
+
+		return value?.trim() || null;
+	}
+}

@@ -1,4 +1,5 @@
 import { AuthModule } from '@/auth/auth.module';
+import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { getGoogleRecaptchaConfig } from '@/config/google-recaptcha.config';
 import { FileModule } from '@/file/file.module';
 import { LegalPagesModule } from '@/legal-pages/legal-pages.module';
@@ -47,7 +48,8 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		HomePageContentModule,
 		NotesModule,
 		MailingModule,
-		HealthModule
+		HealthModule,
+		AdminEventLogModule
 	]
 })
 export class AppModule {}

@@ -26,6 +26,8 @@ model User {
   subscription                 Subscription?
   subscriptionHistories        SubscriptionHistory[]   @relation("SubscriptionHistoryUser")
   subscriptionHistoryActions   SubscriptionHistory[]   @relation("SubscriptionHistoryAdmin")
+  adminEventLogActions         AdminEventLog[]         @relation("AdminEventLogAdmin")
+  adminEventLogTargets         AdminEventLog[]         @relation("AdminEventLogTargetUser")
   createdAt                    DateTime                @default(now()) @map("created_at")
   updatedAt                    DateTime                @updatedAt @map("updated_at")
 
@@ -208,6 +210,36 @@ model SubscriptionHistory {
   @@index([adminId])
   @@index([createdAt])
   @@map("subscription_history")
+}
+
+model AdminEventLog {
+  id              String   @id @default(cuid())
+  adminId         String?  @map("admin_id")
+  adminName       String?  @map("admin_name")
+  adminEmail      String?  @map("admin_email")
+  section         String
+  action          String
+  description     String
+  entityType      String?  @map("entity_type")
+  entityId        String?  @map("entity_id")
+  entityLabel     String?  @map("entity_label")
+  targetUserId    String?  @map("target_user_id")
+  targetUserName  String?  @map("target_user_name")
+  targetUserEmail String?  @map("target_user_email")
+  metadata        Json     @default("{}")
+  ip              String?
+  userAgent       String?  @map("user_agent")
+  admin           User?    @relation("AdminEventLogAdmin", fields: [adminId], references: [id], onDelete: SetNull)
+  targetUser      User?    @relation("AdminEventLogTargetUser", fields: [targetUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([adminId])
+  @@index([targetUserId])
+  @@index([section])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("admin_event_logs")
 }
 
 model Payment {

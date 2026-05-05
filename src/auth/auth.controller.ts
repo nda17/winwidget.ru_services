@@ -1,4 +1,6 @@
+import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
+import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { AuthService } from '@/auth/auth.service';
 import { AuthDto } from '@/auth/dto/auth.dto';
 import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
@@ -33,7 +35,8 @@ export class AuthController {
 	constructor(
 		private readonly authService: AuthService,
 		private readonly refreshTokenService: RefreshTokenService,
-		private readonly verificationChallengeCleanupService: VerificationChallengeCleanupService
+		private readonly verificationChallengeCleanupService: VerificationChallengeCleanupService,
+		private readonly adminEventLogService: AdminEventLogService
 	) {}
 
 	@UseGuards(AuthRateLimitGuard)
@@ -185,11 +188,14 @@ export class AuthController {
 	@HttpCode(200)
 	@Post('auth/admin/run-verification-challenge-cleanup')
 	@Auth(Role.ADMIN)
-	async runVerificationChallengeCleanup() {
+	async runVerificationChallengeCleanup(
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
 		const deletedCount =
 			await this.verificationChallengeCleanupService.runManualCleanup();
 
-		return {
+		const result = {
 			taskId: 'verificationChallengeCleanup',
 			title: 'Очистка verification challenges',
 			affectedCount: deletedCount,
@@ -199,6 +205,20 @@ export class AuthController {
 					: 'Просроченные verification challenges не найдены.',
 			executedAt: new Date().toISOString()
 		};
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'TASKS',
+			action: 'VERIFICATION_CHALLENGE_CLEANUP_RUN',
+			description: result.title,
+			entityType: 'manual_task',
+			entityId: result.taskId,
+			entityLabel: result.title,
+			metadata: result,
+			request
+		});
+
+		return result;
 	}
 
 	private getClientIp(request: Request) {

@@ -1,3 +1,4 @@
+import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { AuthController } from '@/auth/auth.controller';
 import { AuthService } from '@/auth/auth.service';
 import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard';
@@ -30,7 +31,8 @@ import { JwtModule } from '@nestjs/jwt';
 		UserModule,
 		EmailModule,
 		SmsModule,
-		SiteSettingsModule
+		SiteSettingsModule,
+		AdminEventLogModule
 	],
 	controllers: [AuthController, SocialMediaAuthController],
 	providers: [

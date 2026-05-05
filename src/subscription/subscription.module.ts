@@ -1,3 +1,4 @@
+import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { AuthModule } from '@/auth/auth.module';
 import { PrismaService } from '@/prisma.service';
 import { SubscriptionExpiryService } from '@/subscription/subscription-expiry.service';
@@ -6,7 +7,7 @@ import { SubscriptionService } from '@/subscription/subscription.service';
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [AuthModule],
+	imports: [AuthModule, AdminEventLogModule],
 	controllers: [SubscriptionController],
 	providers: [
 		SubscriptionService,

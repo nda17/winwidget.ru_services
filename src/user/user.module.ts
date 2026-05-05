@@ -1,3 +1,4 @@
+import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { EmailModule } from '@/email/email.module';
 import { PrismaService } from '@/prisma.service';
 import { SmsModule } from '@/sms/sms.module';
@@ -7,7 +8,7 @@ import { UserService } from '@/user/user.service';
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [EmailModule, SmsModule],
+	imports: [EmailModule, SmsModule, AdminEventLogModule],
 	controllers: [UserController],
 	providers: [UserService, UserIdentityBindingService, PrismaService],
 	exports: [UserService]

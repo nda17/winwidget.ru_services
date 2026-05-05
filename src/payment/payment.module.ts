@@ -1,3 +1,4 @@
+import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { AuthModule } from '@/auth/auth.module';
 import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { PaymentController } from '@/payment/payment.controller';
@@ -9,7 +10,12 @@ import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [AuthModule, SubscriptionModule, TariffPricesModule],
+	imports: [
+		AuthModule,
+		SubscriptionModule,
+		TariffPricesModule,
+		AdminEventLogModule
+	],
 	controllers: [PaymentController],
 	providers: [
 		PaymentService,
