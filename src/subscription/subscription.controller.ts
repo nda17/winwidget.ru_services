@@ -14,6 +14,7 @@ import {
 	Param,
 	Patch,
 	Post,
+	Query,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
@@ -42,15 +43,27 @@ export class SubscriptionController {
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('admin/list')
-	async adminGetAll() {
-		return this.subscriptionService.adminGetAllSubscriptions();
+	async adminGetAll(
+		@Query('page') page?: string,
+		@Query('limit') limit?: string
+	) {
+		return this.subscriptionService.adminGetAllSubscriptions(
+			page ? parseInt(page, 10) : 1,
+			limit ? parseInt(limit, 10) : 15
+		);
 	}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('admin/history')
-	async adminGetHistory() {
-		return this.subscriptionService.adminGetSubscriptionHistory();
+	async adminGetHistory(
+		@Query('page') page?: string,
+		@Query('limit') limit?: string
+	) {
+		return this.subscriptionService.adminGetSubscriptionHistory(
+			page ? parseInt(page, 10) : 1,
+			limit ? parseInt(limit, 10) : 10
+		);
 	}
 
 	@HttpCode(200)

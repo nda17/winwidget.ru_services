@@ -10,7 +10,8 @@ import {
 	HttpCode,
 	Param,
 	Patch,
-	Post
+	Post,
+	Query
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
 
@@ -21,8 +22,11 @@ export class NotesController {
 
 	@HttpCode(200)
 	@Get()
-	getAll() {
-		return this.notesService.getAll();
+	getAll(@Query('page') page?: string, @Query('limit') limit?: string) {
+		return this.notesService.getAll(
+			page ? parseInt(page, 10) : 1,
+			limit ? parseInt(limit, 10) : 10
+		);
 	}
 
 	@HttpCode(200)

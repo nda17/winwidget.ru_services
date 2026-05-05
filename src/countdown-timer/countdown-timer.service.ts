@@ -151,20 +151,29 @@ export class CountdownTimerService {
 		limit = 50
 	) {
 		await this.getByIdAndOwner(countdownTimerId, userId);
-		const skip = (page - 1) * limit;
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? limit : 50;
+		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [leads, total] = await Promise.all([
 			this.prisma.countdownTimerLead.findMany({
 				where: { countdownTimerId },
 				orderBy: { createdAt: 'desc' },
 				skip,
-				take: limit
+				take: normalizedLimit
 			}),
 			this.prisma.countdownTimerLead.count({
 				where: { countdownTimerId }
 			})
 		]);
 
-		return { leads, total, page, limit };
+		return {
+			leads,
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
 	}
 
 	async exportLeads(

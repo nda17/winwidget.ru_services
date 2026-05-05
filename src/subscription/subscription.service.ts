@@ -290,79 +290,109 @@ export class SubscriptionService {
 		return PLAN_LIMITS[plan].maxWidgets;
 	}
 
-	async adminGetAllSubscriptions() {
-		const subs = await this.prisma.subscription.findMany({
-			include: {
-				user: {
-					select: {
-						id: true,
-						name: true,
-						authIdentities: {
-							where: { type: 'EMAIL' },
-							select: { value: true }
-						}
-					}
-				}
-			},
-			orderBy: { updatedAt: 'desc' }
-		});
-
-		return subs.map(sub => ({
-			...sub,
-			user: sub.user
-				? {
-						id: sub.user.id,
-						name: sub.user.name,
-						email: sub.user.authIdentities[0]?.value ?? null
-					}
-				: null
-		}));
-	}
-
-	async adminGetSubscriptionHistory() {
-		const histories = await this.prisma.subscriptionHistory.findMany({
-			include: {
-				user: {
-					select: {
-						id: true,
-						name: true,
-						authIdentities: {
-							where: { type: 'EMAIL' },
-							select: { value: true }
+	async adminGetAllSubscriptions(page = 1, limit = 15) {
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 15;
+		const skip = (normalizedPage - 1) * normalizedLimit;
+		const [subs, total] = await Promise.all([
+			this.prisma.subscription.findMany({
+				include: {
+					user: {
+						select: {
+							id: true,
+							name: true,
+							authIdentities: {
+								where: { type: 'EMAIL' },
+								select: { value: true }
+							}
 						}
 					}
 				},
-				admin: {
-					select: {
-						id: true,
-						name: true,
-						authIdentities: {
-							where: { type: 'EMAIL' },
-							select: { value: true }
+				orderBy: { updatedAt: 'desc' },
+				skip,
+				take: normalizedLimit
+			}),
+			this.prisma.subscription.count()
+		]);
+
+		return {
+			items: subs.map(sub => ({
+				...sub,
+				user: sub.user
+					? {
+							id: sub.user.id,
+							name: sub.user.name,
+							email: sub.user.authIdentities[0]?.value ?? null
+						}
+					: null
+			})),
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
+	}
+
+	async adminGetSubscriptionHistory(page = 1, limit = 10) {
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 10;
+		const skip = (normalizedPage - 1) * normalizedLimit;
+		const [histories, total] = await Promise.all([
+			this.prisma.subscriptionHistory.findMany({
+				include: {
+					user: {
+						select: {
+							id: true,
+							name: true,
+							authIdentities: {
+								where: { type: 'EMAIL' },
+								select: { value: true }
+							}
+						}
+					},
+					admin: {
+						select: {
+							id: true,
+							name: true,
+							authIdentities: {
+								where: { type: 'EMAIL' },
+								select: { value: true }
+							}
 						}
 					}
-				}
-			},
-			orderBy: { createdAt: 'desc' }
-		});
+				},
+				orderBy: { createdAt: 'desc' },
+				skip,
+				take: normalizedLimit
+			}),
+			this.prisma.subscriptionHistory.count()
+		]);
 
-		return histories.map(history => ({
-			...history,
-			user: history.user
-				? {
-						id: history.user.id,
-						name: history.user.name,
-						email: history.user.authIdentities[0]?.value ?? null
-					}
-				: null,
-			admin: history.admin
-				? {
-						id: history.admin.id,
-						name: history.admin.name,
-						email: history.admin.authIdentities[0]?.value ?? null
-					}
-				: null
-		}));
+		return {
+			items: histories.map(history => ({
+				...history,
+				user: history.user
+					? {
+							id: history.user.id,
+							name: history.user.name,
+							email: history.user.authIdentities[0]?.value ?? null
+						}
+					: null,
+				admin: history.admin
+					? {
+							id: history.admin.id,
+							name: history.admin.name,
+							email: history.admin.authIdentities[0]?.value ?? null
+						}
+					: null
+			})),
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
 	}
 
 	async adminActivateSubscription(

@@ -141,18 +141,27 @@ export class CallbackService {
 	) {
 		await this.getByIdAndOwner(callbackId, userId);
 
-		const skip = (page - 1) * limit;
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? limit : 50;
+		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [leads, total] = await Promise.all([
 			this.prisma.callbackLead.findMany({
 				where: { callbackId },
 				orderBy: { createdAt: 'desc' },
 				skip,
-				take: limit
+				take: normalizedLimit
 			}),
 			this.prisma.callbackLead.count({ where: { callbackId } })
 		]);
 
-		return { leads, total, page, limit };
+		return {
+			leads,
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
 	}
 
 	async exportLeads(

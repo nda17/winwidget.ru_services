@@ -102,8 +102,16 @@ export class UserController {
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('user-list')
-	async getUserList(@Query('searchTerm') searchTerm?: string) {
-		return this.userService.getUserList(searchTerm);
+	async getUserList(
+		@Query('searchTerm') searchTerm?: string,
+		@Query('page') page?: string,
+		@Query('limit') limit?: string
+	) {
+		return this.userService.getUserList(
+			searchTerm,
+			page ? parseInt(page, 10) : 1,
+			limit ? parseInt(limit, 10) : 20
+		);
 	}
 
 	@HttpCode(200)

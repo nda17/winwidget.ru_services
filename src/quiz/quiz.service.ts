@@ -196,13 +196,16 @@ export class QuizService {
 	async getLeads(userId: string, quizId: string, page = 1, limit = 50) {
 		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
 
-		const skip = (page - 1) * limit;
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? limit : 50;
+		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [leads, total] = await Promise.all([
 			this.prisma.quizLead.findMany({
 				where: { quizId },
 				orderBy: { createdAt: 'desc' },
 				skip,
-				take: limit
+				take: normalizedLimit
 			}),
 			this.prisma.quizLead.count({ where: { quizId } })
 		]);
@@ -210,8 +213,9 @@ export class QuizService {
 		return {
 			leads: this.normalizeLeadResults(leads, quiz.config),
 			total,
-			page,
-			limit
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
 		};
 	}
 

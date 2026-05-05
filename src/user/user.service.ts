@@ -45,43 +45,59 @@ type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX';
 export class UserService {
 	constructor(private prisma: PrismaService) {}
 
-	async getUserList(searchTerm?: string) {
+	async getUserList(searchTerm?: string, page = 1, limit = 20) {
 		const normalizedSearchTerm = searchTerm?.trim();
-		const users = await this.prisma.user.findMany({
-			where: normalizedSearchTerm
-				? {
-						OR: [
-							{
-								name: {
-									contains: normalizedSearchTerm,
-									mode: 'insensitive'
-								}
-							},
-							{
-								authIdentities: {
-									some: {
-										type: {
-											in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
-										},
-										value: {
-											contains: normalizedSearchTerm,
-											mode: 'insensitive'
-										}
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+		const where: Prisma.UserWhereInput | undefined = normalizedSearchTerm
+			? {
+					OR: [
+						{
+							name: {
+								contains: normalizedSearchTerm,
+								mode: 'insensitive'
+							}
+						},
+						{
+							authIdentities: {
+								some: {
+									type: {
+										in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
+									},
+									value: {
+										contains: normalizedSearchTerm,
+										mode: 'insensitive'
 									}
 								}
 							}
-						]
-					}
-				: undefined,
-			orderBy: {
-				createdAt: 'desc'
-			},
-			include: {
-				authIdentities: true
-			}
-		});
+						}
+					]
+				}
+			: undefined;
+		const skip = (normalizedPage - 1) * normalizedLimit;
+		const [users, total] = await Promise.all([
+			this.prisma.user.findMany({
+				where,
+				orderBy: {
+					createdAt: 'desc'
+				},
+				include: {
+					authIdentities: true
+				},
+				skip,
+				take: normalizedLimit
+			}),
+			this.prisma.user.count({ where })
+		]);
 
-		return users.map(user => this.toPublicUser(user));
+		return {
+			items: users.map(user => this.toPublicUser(user)),
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
 	}
 
 	async getUserById(id: string) {
