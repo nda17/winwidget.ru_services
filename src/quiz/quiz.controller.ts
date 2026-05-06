@@ -4,6 +4,7 @@ import { CreateQuizDto } from '@/quiz/dto/create-quiz.dto';
 import { SubmitQuizLeadDto } from '@/quiz/dto/submit-quiz-lead.dto';
 import { UpdateQuizDto } from '@/quiz/dto/update-quiz.dto';
 import { QuizService } from '@/quiz/quiz.service';
+import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -20,9 +21,12 @@ import {
 	Query,
 	Req,
 	Res,
+	UploadedFile,
+	UseInterceptors,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Request, Response } from 'express';
 
 @Controller('quizzes')
@@ -57,6 +61,22 @@ export class QuizController {
 		@Body() dto: UpdateQuizDto
 	) {
 		return this.quizService.updateQuiz(userId, quizId, dto);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Post(':id/button-image')
+	@UseInterceptors(
+		FileInterceptor('file', {
+			limits: { fileSize: WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES }
+		})
+	)
+	async uploadButtonImage(
+		@CurrentUser('id') userId: string,
+		@Param('id') quizId: string,
+		@UploadedFile() file?: Express.Multer.File
+	) {
+		return this.quizService.uploadButtonImage(userId, quizId, file);
 	}
 
 	@HttpCode(200)

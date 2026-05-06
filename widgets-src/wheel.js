@@ -1475,6 +1475,12 @@
 		if (iconEl) {
 			iconEl.style.width = sz + 'px';
 			iconEl.style.height = sz + 'px';
+			iconEl.onerror = function () {
+				iconEl.onerror = null;
+				iconEl.src = getWidgetAssetUrl('gift-button.png');
+			};
+			iconEl.src =
+				config.buttonImageUrl || getWidgetAssetUrl('gift-button.png');
 		}
 		var labelEl = giftBtn.querySelector('#ww-btn-label');
 		if (labelEl) {

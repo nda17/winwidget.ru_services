@@ -1,5 +1,6 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { EmailModule } from '@/email/email.module';
+import { FileModule } from '@/file/file.module';
 import { PrismaService } from '@/prisma.service';
 import { SmsModule } from '@/sms/sms.module';
 import { UserController } from '@/user/user.controller';
@@ -8,7 +9,7 @@ import { UserService } from '@/user/user.service';
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [EmailModule, SmsModule, AdminEventLogModule],
+	imports: [EmailModule, SmsModule, AdminEventLogModule, FileModule],
 	controllers: [UserController],
 	providers: [UserService, UserIdentityBindingService, PrismaService],
 	exports: [UserService]

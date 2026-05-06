@@ -3,6 +3,7 @@ import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { CreateCountdownTimerDto } from '@/countdown-timer/dto/create-countdown-timer.dto';
 import { UpdateCountdownTimerDto } from '@/countdown-timer/dto/update-countdown-timer.dto';
 import { CountdownTimerService } from '@/countdown-timer/countdown-timer.service';
+import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
 import {
 	Body,
 	Controller,
@@ -12,8 +13,11 @@ import {
 	Patch,
 	Post,
 	Query,
-	Res
+	Res,
+	UploadedFile,
+	UseInterceptors
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 
 @Auth()
@@ -46,6 +50,24 @@ export class CountdownTimerController {
 			userId,
 			countdownTimerId,
 			dto
+		);
+	}
+
+	@Post(':id/button-image')
+	@UseInterceptors(
+		FileInterceptor('file', {
+			limits: { fileSize: WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES }
+		})
+	)
+	async uploadButtonImage(
+		@CurrentUser('id') userId: string,
+		@Param('id') countdownTimerId: string,
+		@UploadedFile() file?: Express.Multer.File
+	) {
+		return this.countdownTimerService.uploadButtonImage(
+			userId,
+			countdownTimerId,
+			file
 		);
 	}
 

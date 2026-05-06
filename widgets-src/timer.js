@@ -987,6 +987,15 @@
 		modal.style.background = cfg.bgColor || '#fff';
 		var label = document.getElementById('wt-btn-label');
 		if (label) label.textContent = cfg.bubbleText || 'Акция';
+		var icon = timerBtn.querySelector('#wt-btn-icon');
+		if (icon) {
+			icon.onerror = function () {
+				icon.onerror = null;
+				icon.src = getWidgetAssetUrl('timer-button.png');
+			};
+			icon.src =
+				cfg.buttonImageUrl || getWidgetAssetUrl('timer-button.png');
+		}
 
 		updateBubbleSide(cfg.buttonSide || 'right');
 

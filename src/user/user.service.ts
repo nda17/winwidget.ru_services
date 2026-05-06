@@ -3,6 +3,7 @@ import {
 	IGoogleProfile,
 	IYandexProfile
 } from '@/auth/social-media/social-media-auth.types';
+import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
 import { UpdateUserDto } from '@/user/dto/update-user.dto';
@@ -82,7 +83,10 @@ export interface OverviewWidgetItem {
 
 @Injectable()
 export class UserService {
-	constructor(private prisma: PrismaService) {}
+	constructor(
+		private prisma: PrismaService,
+		private readonly fileService: FileService
+	) {}
 
 	async getUserList(searchTerm?: string, page = 1, limit = 20) {
 		const normalizedSearchTerm = searchTerm?.trim();
@@ -914,6 +918,14 @@ export class UserService {
 	}
 
 	async deleteUser(id: string) {
+		const buttonImageUrls = await this.getUserWidgetButtonImageUrls(id);
+
+		await Promise.all(
+			buttonImageUrls.map(url =>
+				this.fileService.deleteWidgetButtonImage(url)
+			)
+		);
+
 		return this.prisma.user.delete({
 			where: {
 				id
@@ -1006,6 +1018,45 @@ export class UserService {
 			leadsCount: widget._count.leads,
 			updatedAt: widget.updatedAt
 		};
+	}
+
+	private async getUserWidgetButtonImageUrls(userId: string) {
+		const [widgets, quizzes, callbacks, countdownTimers] =
+			await Promise.all([
+				this.prisma.widget.findMany({
+					where: { userId },
+					select: { config: true }
+				}),
+				this.prisma.quiz.findMany({
+					where: { userId },
+					select: { config: true }
+				}),
+				this.prisma.callback.findMany({
+					where: { userId },
+					select: { config: true }
+				}),
+				this.prisma.countdownTimer.findMany({
+					where: { userId },
+					select: { config: true }
+				})
+			]);
+
+		return [...widgets, ...quizzes, ...callbacks, ...countdownTimers]
+			.map(({ config }) => this.getButtonImageUrlFromConfig(config))
+			.filter((url): url is string => Boolean(url));
+	}
+
+	private getButtonImageUrlFromConfig(config: Prisma.JsonValue) {
+		if (!config || typeof config !== 'object' || Array.isArray(config)) {
+			return null;
+		}
+
+		const buttonImageUrl = (config as Record<string, unknown>)
+			.buttonImageUrl;
+
+		return typeof buttonImageUrl === 'string' && buttonImageUrl.trim()
+			? buttonImageUrl
+			: null;
 	}
 
 	toPublicUser(user: UserWithAuthIdentities): PublicUser {

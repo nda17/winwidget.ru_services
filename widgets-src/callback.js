@@ -875,6 +875,12 @@
 			if (iconEl) {
 				iconEl.style.width = size + 'px';
 				iconEl.style.height = size + 'px';
+				iconEl.onerror = function () {
+					iconEl.onerror = null;
+					iconEl.src = getWidgetAssetUrl('callback-button.png');
+				};
+				iconEl.src =
+					cfg.buttonImageUrl || getWidgetAssetUrl('callback-button.png');
 			}
 
 			applyColor(cfg.openButtonColor || cfg.color || '#4705fb');

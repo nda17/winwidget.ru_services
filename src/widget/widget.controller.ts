@@ -4,6 +4,7 @@ import { CreateWidgetDto } from '@/widget/dto/create-widget.dto';
 import { SubmitLeadDto } from '@/widget/dto/submit-lead.dto';
 import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
 import { WidgetService } from '@/widget/widget.service';
+import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -20,9 +21,12 @@ import {
 	Query,
 	Req,
 	Res,
+	UploadedFile,
+	UseInterceptors,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Request, Response } from 'express';
 
 @Controller('widgets')
@@ -57,6 +61,22 @@ export class WidgetController {
 		@Body() dto: UpdateWidgetDto
 	) {
 		return this.widgetService.updateWidget(userId, widgetId, dto);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Post(':id/button-image')
+	@UseInterceptors(
+		FileInterceptor('file', {
+			limits: { fileSize: WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES }
+		})
+	)
+	async uploadButtonImage(
+		@CurrentUser('id') userId: string,
+		@Param('id') widgetId: string,
+		@UploadedFile() file?: Express.Multer.File
+	) {
+		return this.widgetService.uploadButtonImage(userId, widgetId, file);
 	}
 
 	@HttpCode(200)

@@ -3,6 +3,7 @@ import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { CreateCallbackDto } from '@/callback/dto/create-callback.dto';
 import { UpdateCallbackDto } from '@/callback/dto/update-callback.dto';
 import { CallbackService } from '@/callback/callback.service';
+import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
 import {
 	Body,
 	Controller,
@@ -14,9 +15,12 @@ import {
 	Post,
 	Query,
 	Res,
+	UploadedFile,
+	UseInterceptors,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Response } from 'express';
 
 @Controller('callbacks')
@@ -51,6 +55,26 @@ export class CallbackController {
 		@Body() dto: UpdateCallbackDto
 	) {
 		return this.callbackService.updateCallback(userId, callbackId, dto);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Post(':id/button-image')
+	@UseInterceptors(
+		FileInterceptor('file', {
+			limits: { fileSize: WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES }
+		})
+	)
+	async uploadButtonImage(
+		@CurrentUser('id') userId: string,
+		@Param('id') callbackId: string,
+		@UploadedFile() file?: Express.Multer.File
+	) {
+		return this.callbackService.uploadButtonImage(
+			userId,
+			callbackId,
+			file
+		);
 	}
 
 	@HttpCode(200)

@@ -1,4 +1,5 @@
 import { EmailService } from '@/email/email.service';
+import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
@@ -15,7 +16,7 @@ import {
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { Plan } from '@prisma/client';
+import { Plan, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
@@ -29,6 +30,7 @@ const DEFAULT_CONFIG = {
 	buttonBottom: 3,
 	buttonOffset: 3,
 	buttonSize: 60,
+	buttonImageUrl: '',
 	bubbleEnabled: true,
 	bubbleText: 'Пройдите квиз!',
 	autoOpenDelay: null,
@@ -122,7 +124,8 @@ export class QuizService {
 	constructor(
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
-		private emailService: EmailService
+		private emailService: EmailService,
+		private fileService: FileService
 	) {}
 
 	async getMyQuizzes(userId: string) {
@@ -169,8 +172,20 @@ export class QuizService {
 
 	async updateQuiz(userId: string, quizId: string, dto: UpdateQuizDto) {
 		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
+		const currentConfig = quiz.config as Record<string, any>;
+		const configPatch =
+			dto.config !== undefined
+				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
+				: undefined;
+		const nextConfig =
+			configPatch !== undefined
+				? {
+						...currentConfig,
+						...configPatch
+					}
+				: undefined;
 
-		return this.prisma.quiz.update({
+		const updated = await this.prisma.quiz.update({
 			where: { id: quiz.id },
 			data: {
 				...(dto.name !== undefined && { name: dto.name }),
@@ -178,19 +193,67 @@ export class QuizService {
 				...(dto.installDomain !== undefined && {
 					installDomain: normalizeInstallDomain(dto.installDomain)
 				}),
-				...(dto.config !== undefined && {
-					config: {
-						...(quiz.config as object),
-						...dto.config
-					}
-				})
+				...(nextConfig !== undefined && { config: nextConfig })
 			}
 		});
+
+		if (nextConfig) {
+			await this.deleteButtonImageIfRemoved(currentConfig, nextConfig);
+		}
+
+		return updated;
 	}
 
 	async deleteQuiz(userId: string, quizId: string) {
 		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
+		await this.fileService.deleteWidgetButtonImage(
+			(quiz.config as Record<string, any>).buttonImageUrl
+		);
 		return this.prisma.quiz.delete({ where: { id: quiz.id } });
+	}
+
+	async uploadButtonImage(
+		userId: string,
+		quizId: string,
+		file: Express.Multer.File | undefined
+	) {
+		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
+		await this.assertCanUseButtonImage(userId);
+
+		const currentConfig = quiz.config as Record<string, any>;
+		let uploadedUrl = '';
+
+		try {
+			const uploadedFile = await this.fileService.saveWidgetButtonImage(
+				file,
+				'quiz',
+				quiz.id
+			);
+			uploadedUrl = uploadedFile.url;
+
+			const updated = await this.prisma.quiz.update({
+				where: { id: quiz.id },
+				data: {
+					config: {
+						...currentConfig,
+						buttonImageUrl: uploadedUrl
+					}
+				}
+			});
+
+			await this.fileService
+				.deleteWidgetButtonImage(currentConfig.buttonImageUrl)
+				.catch(() => undefined);
+
+			return updated;
+		} catch (error) {
+			if (uploadedUrl) {
+				await this.fileService
+					.deleteWidgetButtonImage(uploadedUrl)
+					.catch(() => undefined);
+			}
+			throw error;
+		}
 	}
 
 	async getLeads(userId: string, quizId: string, page = 1, limit = 50) {
@@ -380,6 +443,11 @@ export class QuizService {
 			buttonBottom: config.buttonBottom ?? 3,
 			buttonOffset: config.buttonOffset ?? 3,
 			buttonSize: config.buttonSize ?? 60,
+			buttonImageUrl: this.fileService.getWidgetButtonImageUrl(
+				config.buttonImageUrl,
+				sub?.status === SubscriptionStatus.ACTIVE &&
+					sub?.plan === Plan.HARD
+			),
 			bubbleEnabled: config.bubbleEnabled !== false,
 			bubbleText: config.bubbleText || 'Пройдите квиз!',
 			autoOpenDelay: config.autoOpenDelay || null,
@@ -833,6 +901,65 @@ export class QuizService {
 		if (quiz.userId !== userId)
 			throw new ForbiddenException('Нет доступа');
 		return quiz;
+	}
+
+	private async assertCanUseButtonImage(userId: string) {
+		const sub = await this.subscriptionService.checkAndResetPeriod(userId);
+
+		if (
+			!sub ||
+			sub.status !== SubscriptionStatus.ACTIVE ||
+			sub.plan !== Plan.HARD
+		) {
+			throw new ForbiddenException(
+				'Загрузка своей картинки кнопки доступна только на тарифе Hard'
+			);
+		}
+	}
+
+	private prepareButtonImageConfigPatch(
+		currentConfig: Record<string, any>,
+		configPatch: Record<string, any>
+	) {
+		const nextPatch = { ...configPatch };
+
+		if (
+			!Object.prototype.hasOwnProperty.call(nextPatch, 'buttonImageUrl')
+		) {
+			return nextPatch;
+		}
+
+		const currentUrl =
+			typeof currentConfig.buttonImageUrl === 'string'
+				? currentConfig.buttonImageUrl
+				: '';
+		const nextUrl =
+			typeof nextPatch.buttonImageUrl === 'string'
+				? nextPatch.buttonImageUrl
+				: '';
+
+		if (nextUrl && nextUrl !== currentUrl) {
+			throw new BadRequestException(
+				'Картинку кнопки нужно загружать через отдельное поле загрузки'
+			);
+		}
+
+		nextPatch.buttonImageUrl = nextUrl;
+		return nextPatch;
+	}
+
+	private async deleteButtonImageIfRemoved(
+		previousConfig: Record<string, any>,
+		nextConfig: Record<string, any>
+	) {
+		const previousUrl = previousConfig.buttonImageUrl;
+		const nextUrl = nextConfig.buttonImageUrl;
+
+		if (previousUrl && previousUrl !== nextUrl) {
+			await this.fileService
+				.deleteWidgetButtonImage(previousUrl)
+				.catch(() => undefined);
+		}
 	}
 
 	private generatePublicKey(): string {

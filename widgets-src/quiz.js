@@ -917,6 +917,12 @@
 		if (btnIcon) {
 			btnIcon.style.width = qsz + 'px';
 			btnIcon.style.height = qsz + 'px';
+			btnIcon.onerror = function () {
+				btnIcon.onerror = null;
+				btnIcon.src = getWidgetAssetUrl('quiz-button.png');
+			};
+			btnIcon.src =
+				cfg.buttonImageUrl || getWidgetAssetUrl('quiz-button.png');
 		}
 		var qLabelEl = quizBtn.querySelector('#wq-btn-label');
 		if (qLabelEl) {
