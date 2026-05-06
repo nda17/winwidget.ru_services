@@ -120,6 +120,13 @@ export class UserController {
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
+	@Get('edit/:id/overview')
+	async getUserOverview(@Param('id') id: string) {
+		return this.userService.getAdminUserOverview(id);
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
 	@Get('edit/:id')
 	async getUserById(@Param('id') id: string) {
 		return this.userService.getPublicUserById(id);

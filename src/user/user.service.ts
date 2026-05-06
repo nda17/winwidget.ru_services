@@ -10,6 +10,7 @@ import { normalizePhone } from '@/utils/phone.util';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import {
 	AuthIdentityType,
+	PaymentStatus,
 	Prisma,
 	Role,
 	UserStatus,
@@ -40,6 +41,44 @@ export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
 };
 
 type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX';
+export type OverviewWidgetType =
+	| 'WHEEL'
+	| 'QUIZ'
+	| 'CALLBACK'
+	| 'COUNTDOWN_TIMER';
+
+export interface OverviewLeadTypeCount {
+	type: OverviewWidgetType;
+	label: string;
+	count: number;
+}
+
+export interface OverviewWidgetTypeCount extends OverviewLeadTypeCount {
+	active: number;
+	inactive: number;
+}
+
+interface OverviewWidgetSource {
+	id: string;
+	name: string;
+	isActive: boolean;
+	installDomain: string;
+	updatedAt: Date;
+	_count: {
+		leads: number;
+	};
+}
+
+export interface OverviewWidgetItem {
+	id: string;
+	type: OverviewWidgetType;
+	label: string;
+	name: string;
+	isActive: boolean;
+	installDomain: string;
+	leadsCount: number;
+	updatedAt: Date;
+}
 
 @Injectable()
 export class UserService {
@@ -114,6 +153,386 @@ export class UserService {
 	async getPublicUserById(id: string) {
 		const user = await this.getUserById(id);
 		return user ? this.toPublicUser(user) : null;
+	}
+
+	async getAdminUserOverview(id: string) {
+		const user = await this.getUserById(id);
+
+		if (!user) {
+			throw new NotFoundException('User not found');
+		}
+
+		const [
+			subscription,
+			pendingPaymentsCount,
+			succeededPaymentsCount,
+			cancelledPaymentsCount,
+			latestPayments,
+			wheelWidgetsCount,
+			activeWheelWidgetsCount,
+			quizWidgetsCount,
+			activeQuizWidgetsCount,
+			callbackWidgetsCount,
+			activeCallbackWidgetsCount,
+			timerWidgetsCount,
+			activeTimerWidgetsCount,
+			latestWheelWidgets,
+			latestQuizzes,
+			latestCallbacks,
+			latestTimers,
+			wheelLeadsCount,
+			quizLeadsCount,
+			callbackLeadsCount,
+			timerLeadsCount,
+			latestWheelLeads,
+			latestQuizLeads,
+			latestCallbackLeads,
+			latestTimerLeads,
+			latestActivity
+		] = await this.prisma.$transaction([
+			this.prisma.subscription.findUnique({
+				where: { userId: id }
+			}),
+			this.prisma.payment.count({
+				where: { userId: id, status: PaymentStatus.PENDING }
+			}),
+			this.prisma.payment.count({
+				where: { userId: id, status: PaymentStatus.SUCCEEDED }
+			}),
+			this.prisma.payment.count({
+				where: { userId: id, status: PaymentStatus.CANCELLED }
+			}),
+			this.prisma.payment.findMany({
+				where: { userId: id },
+				orderBy: { createdAt: 'desc' },
+				take: 5,
+				select: {
+					id: true,
+					yookassaId: true,
+					status: true,
+					amount: true,
+					plan: true,
+					billingPeriod: true,
+					createdAt: true,
+					updatedAt: true
+				}
+			}),
+			this.prisma.widget.count({
+				where: { userId: id }
+			}),
+			this.prisma.widget.count({
+				where: { userId: id, isActive: true }
+			}),
+			this.prisma.quiz.count({
+				where: { userId: id }
+			}),
+			this.prisma.quiz.count({
+				where: { userId: id, isActive: true }
+			}),
+			this.prisma.callback.count({
+				where: { userId: id }
+			}),
+			this.prisma.callback.count({
+				where: { userId: id, isActive: true }
+			}),
+			this.prisma.countdownTimer.count({
+				where: { userId: id }
+			}),
+			this.prisma.countdownTimer.count({
+				where: { userId: id, isActive: true }
+			}),
+			this.prisma.widget.findMany({
+				where: { userId: id },
+				orderBy: { updatedAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					name: true,
+					isActive: true,
+					installDomain: true,
+					updatedAt: true,
+					_count: { select: { leads: true } }
+				}
+			}),
+			this.prisma.quiz.findMany({
+				where: { userId: id },
+				orderBy: { updatedAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					name: true,
+					isActive: true,
+					installDomain: true,
+					updatedAt: true,
+					_count: { select: { leads: true } }
+				}
+			}),
+			this.prisma.callback.findMany({
+				where: { userId: id },
+				orderBy: { updatedAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					name: true,
+					isActive: true,
+					installDomain: true,
+					updatedAt: true,
+					_count: { select: { leads: true } }
+				}
+			}),
+			this.prisma.countdownTimer.findMany({
+				where: { userId: id },
+				orderBy: { updatedAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					name: true,
+					isActive: true,
+					installDomain: true,
+					updatedAt: true,
+					_count: { select: { leads: true } }
+				}
+			}),
+			this.prisma.lead.count({
+				where: { widget: { userId: id } }
+			}),
+			this.prisma.quizLead.count({
+				where: { quiz: { userId: id } }
+			}),
+			this.prisma.callbackLead.count({
+				where: { callback: { userId: id } }
+			}),
+			this.prisma.countdownTimerLead.count({
+				where: { countdownTimer: { userId: id } }
+			}),
+			this.prisma.lead.findMany({
+				where: { widget: { userId: id } },
+				orderBy: { createdAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					contact: true,
+					phone: true,
+					email: true,
+					bonus: true,
+					url: true,
+					createdAt: true,
+					widget: { select: { name: true } }
+				}
+			}),
+			this.prisma.quizLead.findMany({
+				where: { quiz: { userId: id } },
+				orderBy: { createdAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					contact: true,
+					phone: true,
+					email: true,
+					result: true,
+					url: true,
+					createdAt: true,
+					quiz: { select: { name: true } }
+				}
+			}),
+			this.prisma.callbackLead.findMany({
+				where: { callback: { userId: id } },
+				orderBy: { createdAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					phone: true,
+					timeSlot: true,
+					url: true,
+					createdAt: true,
+					callback: { select: { name: true } }
+				}
+			}),
+			this.prisma.countdownTimerLead.findMany({
+				where: { countdownTimer: { userId: id } },
+				orderBy: { createdAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					phone: true,
+					email: true,
+					url: true,
+					createdAt: true,
+					countdownTimer: { select: { name: true } }
+				}
+			}),
+			this.prisma.adminEventLog.findMany({
+				where: {
+					OR: [{ targetUserId: id }, { adminId: id }]
+				},
+				orderBy: { createdAt: 'desc' },
+				take: 5,
+				select: {
+					id: true,
+					section: true,
+					action: true,
+					description: true,
+					entityType: true,
+					entityLabel: true,
+					adminName: true,
+					adminEmail: true,
+					targetUserId: true,
+					createdAt: true
+				}
+			})
+		]);
+
+		const paymentCounts = {
+			[PaymentStatus.PENDING]: pendingPaymentsCount,
+			[PaymentStatus.SUCCEEDED]: succeededPaymentsCount,
+			[PaymentStatus.CANCELLED]: cancelledPaymentsCount
+		};
+		const widgetTypes = [
+			this.buildWidgetTypeCount(
+				'WHEEL',
+				'Колесо',
+				wheelWidgetsCount,
+				activeWheelWidgetsCount
+			),
+			this.buildWidgetTypeCount(
+				'QUIZ',
+				'Квиз',
+				quizWidgetsCount,
+				activeQuizWidgetsCount
+			),
+			this.buildWidgetTypeCount(
+				'CALLBACK',
+				'Обратный звонок',
+				callbackWidgetsCount,
+				activeCallbackWidgetsCount
+			),
+			this.buildWidgetTypeCount(
+				'COUNTDOWN_TIMER',
+				'Таймер',
+				timerWidgetsCount,
+				activeTimerWidgetsCount
+			)
+		];
+		const latestWidgets = [
+			...latestWheelWidgets.map(widget =>
+				this.toOverviewWidgetItem('WHEEL', 'Колесо', widget)
+			),
+			...latestQuizzes.map(quiz =>
+				this.toOverviewWidgetItem('QUIZ', 'Квиз', quiz)
+			),
+			...latestCallbacks.map(callback =>
+				this.toOverviewWidgetItem('CALLBACK', 'Обратный звонок', callback)
+			),
+			...latestTimers.map(timer =>
+				this.toOverviewWidgetItem('COUNTDOWN_TIMER', 'Таймер', timer)
+			)
+		]
+			.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+			.slice(0, 5);
+		const leadTypes: OverviewLeadTypeCount[] = [
+			{ type: 'WHEEL', label: 'Колесо', count: wheelLeadsCount },
+			{ type: 'QUIZ', label: 'Квиз', count: quizLeadsCount },
+			{
+				type: 'CALLBACK',
+				label: 'Обратный звонок',
+				count: callbackLeadsCount
+			},
+			{
+				type: 'COUNTDOWN_TIMER',
+				label: 'Таймер',
+				count: timerLeadsCount
+			}
+		];
+		const latestLeads = [
+			...latestWheelLeads.map(lead => ({
+				id: lead.id,
+				type: 'WHEEL' as const,
+				label: 'Колесо',
+				sourceName: lead.widget.name,
+				contact: lead.contact || lead.phone || lead.email || null,
+				phone: lead.phone,
+				email: lead.email,
+				url: lead.url,
+				detail: lead.bonus,
+				createdAt: lead.createdAt
+			})),
+			...latestQuizLeads.map(lead => ({
+				id: lead.id,
+				type: 'QUIZ' as const,
+				label: 'Квиз',
+				sourceName: lead.quiz.name,
+				contact: lead.contact || lead.phone || lead.email || null,
+				phone: lead.phone,
+				email: lead.email,
+				url: lead.url,
+				detail: lead.result,
+				createdAt: lead.createdAt
+			})),
+			...latestCallbackLeads.map(lead => ({
+				id: lead.id,
+				type: 'CALLBACK' as const,
+				label: 'Обратный звонок',
+				sourceName: lead.callback.name,
+				contact: lead.phone,
+				phone: lead.phone,
+				email: null,
+				url: lead.url,
+				detail: lead.timeSlot,
+				createdAt: lead.createdAt
+			})),
+			...latestTimerLeads.map(lead => ({
+				id: lead.id,
+				type: 'COUNTDOWN_TIMER' as const,
+				label: 'Таймер',
+				sourceName: lead.countdownTimer.name,
+				contact: lead.phone || lead.email || null,
+				phone: lead.phone,
+				email: lead.email,
+				url: lead.url,
+				detail: null,
+				createdAt: lead.createdAt
+			}))
+		]
+			.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+			.slice(0, 5);
+		const totalWidgets = widgetTypes.reduce(
+			(sum, item) => sum + item.count,
+			0
+		);
+		const activeWidgets = widgetTypes.reduce(
+			(sum, item) => sum + item.active,
+			0
+		);
+
+		return {
+			subscription,
+			payments: {
+				total:
+					paymentCounts.PENDING +
+					paymentCounts.SUCCEEDED +
+					paymentCounts.CANCELLED,
+				counts: paymentCounts,
+				latest: latestPayments
+			},
+			widgets: {
+				total: totalWidgets,
+				active: activeWidgets,
+				inactive: totalWidgets - activeWidgets,
+				byType: widgetTypes,
+				latest: latestWidgets
+			},
+			leads: {
+				total: leadTypes.reduce((sum, item) => sum + item.count, 0),
+				byType: leadTypes,
+				latest: latestLeads
+			},
+			activity: {
+				latest: latestActivity.map(item => ({
+					...item,
+					role: item.targetUserId === id ? 'TARGET' : 'ADMIN'
+				}))
+			}
+		};
 	}
 
 	async getUserByEmail(email: string) {
@@ -555,6 +974,38 @@ export class UserService {
 		});
 
 		return this.toPublicUser(updatedUser);
+	}
+
+	private buildWidgetTypeCount(
+		type: OverviewWidgetType,
+		label: string,
+		count: number,
+		active: number
+	): OverviewWidgetTypeCount {
+		return {
+			type,
+			label,
+			count,
+			active,
+			inactive: count - active
+		};
+	}
+
+	private toOverviewWidgetItem(
+		type: OverviewWidgetType,
+		label: string,
+		widget: OverviewWidgetSource
+	): OverviewWidgetItem {
+		return {
+			id: widget.id,
+			type,
+			label,
+			name: widget.name,
+			isActive: widget.isActive,
+			installDomain: widget.installDomain,
+			leadsCount: widget._count.leads,
+			updatedAt: widget.updatedAt
+		};
 	}
 
 	toPublicUser(user: UserWithAuthIdentities): PublicUser {
