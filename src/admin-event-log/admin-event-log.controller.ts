@@ -14,11 +14,13 @@ export class AdminEventLogController {
 	@Get()
 	async getAll(
 		@Query('page') page?: string,
-		@Query('limit') limit?: string
+		@Query('limit') limit?: string,
+		@Query('userId') userId?: string
 	) {
 		return this.adminEventLogService.getAll(
 			page ? parseInt(page, 10) : 1,
-			limit ? parseInt(limit, 10) : 20
+			limit ? parseInt(limit, 10) : 20,
+			userId
 		);
 	}
 }

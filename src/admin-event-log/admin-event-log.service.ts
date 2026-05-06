@@ -51,19 +51,30 @@ export class AdminEventLogService {
 
 	constructor(private readonly prisma: PrismaService) {}
 
-	async getAll(page = 1, limit = 20) {
+	async getAll(page = 1, limit = 20, userId?: string) {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+		const normalizedUserId = userId?.trim();
+		const where: Prisma.AdminEventLogWhereInput | undefined =
+			normalizedUserId
+				? {
+						OR: [
+							{ targetUserId: normalizedUserId },
+							{ adminId: normalizedUserId }
+						]
+					}
+				: undefined;
 		const skip = (normalizedPage - 1) * normalizedLimit;
 
 		const [items, total] = await this.prisma.$transaction([
 			this.prisma.adminEventLog.findMany({
+				where,
 				orderBy: { createdAt: 'desc' },
 				skip,
 				take: normalizedLimit
 			}),
-			this.prisma.adminEventLog.count()
+			this.prisma.adminEventLog.count({ where })
 		]);
 
 		return {
