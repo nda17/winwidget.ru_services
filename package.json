@@ -8,6 +8,7 @@
 	"scripts": {
 		"prisma-generate": "npx prisma generate",
 		"prisma-db-push": "npx prisma db push",
+		"dev-prisma-migration": "DATABASE_URL=\"$(sed -n 's/^DATABASE_URL_DEVELOPMENT=//p' .env | tr -d '\"')\" pnpm exec prisma migrate deploy",
 		"build": "pnpm run build:app && pnpm run build:widgets",
 		"build:app": "nest build",
 		"build:widgets": "node scripts/build-widgets.mjs && pnpm run build:widgets:check",
