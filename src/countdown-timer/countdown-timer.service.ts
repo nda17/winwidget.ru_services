@@ -246,7 +246,9 @@ export class CountdownTimerService {
 			return { isActive: false };
 		}
 
-		const sub = timer.user.subscription;
+		const sub = await this.subscriptionService.checkAndResetPeriod(
+			timer.userId
+		);
 		const dataType = (config.dataType || 'NONE').toUpperCase();
 		const isActive = timer.isActive && sub?.status === 'ACTIVE';
 

@@ -5,7 +5,7 @@ import {
 	OnModuleDestroy,
 	OnModuleInit
 } from '@nestjs/common';
-import { Plan, SubscriptionStatus } from '@prisma/client';
+import { SubscriptionStatus } from '@prisma/client';
 
 @Injectable()
 export class SubscriptionExpiryService
@@ -46,7 +46,6 @@ export class SubscriptionExpiryService
 		const result = await this.prisma.subscription.updateMany({
 			where: {
 				status: SubscriptionStatus.ACTIVE,
-				plan: { not: Plan.TRIAL },
 				expiresAt: { lt: new Date() }
 			},
 			data: { status: SubscriptionStatus.EXPIRED }

@@ -332,7 +332,9 @@ export class QuizService {
 			return { isActive: false };
 		}
 
-		const sub = quiz.user.subscription;
+		const sub = await this.subscriptionService.checkAndResetPeriod(
+			quiz.userId
+		);
 		const isActive = quiz.isActive && sub?.status === 'ACTIVE';
 
 		let canAcceptLeads = isActive;

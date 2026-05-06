@@ -237,7 +237,9 @@ export class CallbackService {
 			return { isActive: false };
 		}
 
-		const sub = callback.user.subscription;
+		const sub = await this.subscriptionService.checkAndResetPeriod(
+			callback.userId
+		);
 		const isActive = callback.isActive && sub?.status === 'ACTIVE';
 
 		let canAcceptLeads = isActive;

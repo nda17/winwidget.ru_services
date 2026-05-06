@@ -308,7 +308,9 @@ export class WidgetService {
 			return { isActive: false };
 		}
 
-		const sub = widget.user.subscription;
+		const sub = await this.subscriptionService.checkAndResetPeriod(
+			widget.userId
+		);
 		const isActive = widget.isActive && sub?.status === 'ACTIVE';
 
 		let canAcceptLeads = isActive;
