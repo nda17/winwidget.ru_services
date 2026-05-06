@@ -33,5 +33,5 @@ CREATE INDEX "callback_leads_callback_id_idx" ON "callback_leads"("callback_id")
 CREATE INDEX "callback_leads_callback_id_ip_idx" ON "callback_leads"("callback_id", "ip");
 
 -- AddForeignKey
-ALTER TABLE "callbacks" ADD CONSTRAINT "callbacks_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "callbacks" ADD CONSTRAINT "callbacks_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 ALTER TABLE "callback_leads" ADD CONSTRAINT "callback_leads_callback_id_fkey" FOREIGN KEY ("callback_id") REFERENCES "callbacks"("id") ON DELETE CASCADE ON UPDATE CASCADE;
