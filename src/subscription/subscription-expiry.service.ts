@@ -1,3 +1,4 @@
+import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
 import {
 	Injectable,
@@ -5,23 +6,38 @@ import {
 	OnModuleDestroy,
 	OnModuleInit
 } from '@nestjs/common';
-import { SubscriptionStatus } from '@prisma/client';
+import {
+	AuthIdentityType,
+	Plan,
+	Prisma,
+	SubscriptionStatus,
+	UserStatus
+} from '@prisma/client';
+
+interface SubscriptionExpiryReminderResult {
+	sentCount: number;
+	failedCount: number;
+}
 
 @Injectable()
 export class SubscriptionExpiryService
 	implements OnModuleInit, OnModuleDestroy
 {
 	private readonly RUN_HOURS_MOSCOW = [3, 15]; // 03:00 и 15:00 МСК
+	private readonly REMINDER_DAYS_BEFORE_EXPIRY = [6, 3, 0] as const;
 	private readonly MOSCOW_UTC_OFFSET_HOURS = 3;
 	private readonly logger = new Logger(SubscriptionExpiryService.name);
 	private expiryTimeout: NodeJS.Timeout | null = null;
 
-	constructor(private prisma: PrismaService) {}
+	constructor(
+		private prisma: PrismaService,
+		private readonly emailService: EmailService
+	) {}
 
 	async onModuleInit() {
-		const expired = await this.expireSubscriptions();
+		const result = await this.runSubscriptionMaintenance();
 		this.logger.log(
-			`Startup check: deactivated ${expired} expired subscription(s).`
+			`Startup check: deactivated ${result.expiredCount} expired subscription(s), sent ${result.reminders.sentCount} expiry reminder(s), failed ${result.reminders.failedCount}.`
 		);
 		this.scheduleNext();
 	}
@@ -42,6 +58,16 @@ export class SubscriptionExpiryService
 		return expired;
 	}
 
+	private async runSubscriptionMaintenance() {
+		const expiredCount = await this.expireSubscriptions();
+		const reminders = await this.sendExpiryReminders();
+
+		return {
+			expiredCount,
+			reminders
+		};
+	}
+
 	private async expireSubscriptions(): Promise<number> {
 		const result = await this.prisma.subscription.updateMany({
 			where: {
@@ -51,6 +77,221 @@ export class SubscriptionExpiryService
 			data: { status: SubscriptionStatus.EXPIRED }
 		});
 		return result.count;
+	}
+
+	private async sendExpiryReminders(): Promise<SubscriptionExpiryReminderResult> {
+		let sentCount = 0;
+		let failedCount = 0;
+
+		for (const daysBeforeExpiry of this.REMINDER_DAYS_BEFORE_EXPIRY) {
+			const subscriptions =
+				await this.findSubscriptionsForReminder(daysBeforeExpiry);
+			const sentReminderKeys = await this.getSentReminderKeys(
+				subscriptions,
+				daysBeforeExpiry
+			);
+
+			for (const subscription of subscriptions) {
+				if (!subscription.expiresAt) continue;
+
+				const reminderKey = this.getReminderKey(
+					subscription.id,
+					subscription.expiresAt
+				);
+				if (sentReminderKeys.has(reminderKey)) continue;
+
+				const email = this.getPrimaryEmail(
+					subscription.user.authIdentities
+				);
+				if (!email) continue;
+
+				try {
+					await this.emailService.sendSubscriptionExpiryReminder(email, {
+						daysBeforeExpiry,
+						planLabel: this.getPlanLabel(subscription.plan),
+						expiresAtLabel: this.formatMoscowDateTime(
+							subscription.expiresAt
+						)
+					});
+
+					await this.prisma.subscriptionExpiryReminder.create({
+						data: {
+							subscriptionId: subscription.id,
+							userId: subscription.userId,
+							daysBeforeExpiry,
+							expiresAt: subscription.expiresAt,
+							sentTo: email
+						}
+					});
+
+					sentReminderKeys.add(reminderKey);
+					sentCount += 1;
+				} catch (error) {
+					if (this.isUniqueConstraintError(error)) {
+						sentReminderKeys.add(reminderKey);
+						continue;
+					}
+
+					failedCount += 1;
+					this.logger.warn(
+						`Subscription expiry reminder failed for user ${subscription.userId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`
+					);
+				}
+			}
+		}
+
+		return {
+			sentCount,
+			failedCount
+		};
+	}
+
+	private async findSubscriptionsForReminder(daysBeforeExpiry: number) {
+		const { start, end } = this.getMoscowDayRange(daysBeforeExpiry);
+
+		return this.prisma.subscription.findMany({
+			where: {
+				status: SubscriptionStatus.ACTIVE,
+				expiresAt: {
+					gte: start,
+					lt: end
+				},
+				user: {
+					status: UserStatus.ACTIVE,
+					authIdentities: {
+						some: {
+							type: AuthIdentityType.EMAIL,
+							value: {
+								not: ''
+							}
+						}
+					}
+				}
+			},
+			select: {
+				id: true,
+				userId: true,
+				plan: true,
+				expiresAt: true,
+				user: {
+					select: {
+						authIdentities: {
+							where: {
+								type: AuthIdentityType.EMAIL,
+								value: {
+									not: ''
+								}
+							},
+							select: {
+								value: true
+							},
+							orderBy: {
+								createdAt: 'asc'
+							}
+						}
+					}
+				}
+			},
+			orderBy: {
+				expiresAt: 'asc'
+			}
+		});
+	}
+
+	private async getSentReminderKeys(
+		subscriptions: Awaited<
+			ReturnType<SubscriptionExpiryService['findSubscriptionsForReminder']>
+		>,
+		daysBeforeExpiry: number
+	) {
+		const subscriptionIds = subscriptions.map(
+			subscription => subscription.id
+		);
+
+		if (!subscriptionIds.length) {
+			return new Set<string>();
+		}
+
+		const reminders =
+			await this.prisma.subscriptionExpiryReminder.findMany({
+				where: {
+					subscriptionId: {
+						in: subscriptionIds
+					},
+					daysBeforeExpiry
+				},
+				select: {
+					subscriptionId: true,
+					expiresAt: true
+				}
+			});
+
+		return new Set(
+			reminders.map(reminder =>
+				this.getReminderKey(reminder.subscriptionId, reminder.expiresAt)
+			)
+		);
+	}
+
+	private getMoscowDayRange(daysFromToday: number) {
+		const offsetMs = this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000;
+		const nowMsk = new Date(Date.now() + offsetMs);
+		const startMsk = new Date(nowMsk);
+		startMsk.setUTCHours(0, 0, 0, 0);
+		startMsk.setUTCDate(startMsk.getUTCDate() + daysFromToday);
+
+		const endMsk = new Date(startMsk);
+		endMsk.setUTCDate(endMsk.getUTCDate() + 1);
+
+		return {
+			start: new Date(startMsk.getTime() - offsetMs),
+			end: new Date(endMsk.getTime() - offsetMs)
+		};
+	}
+
+	private getPrimaryEmail(
+		identities: Array<{
+			value: string;
+		}>
+	) {
+		return identities[0]?.value.trim().toLowerCase() || null;
+	}
+
+	private getPlanLabel(plan: Plan) {
+		switch (plan) {
+			case Plan.TRIAL:
+				return 'Тест-драйв';
+			case Plan.EASY:
+				return 'Easy';
+			case Plan.HARD:
+				return 'Hard';
+			default:
+				return plan;
+		}
+	}
+
+	private formatMoscowDateTime(date: Date) {
+		return date.toLocaleString('ru-RU', {
+			timeZone: 'Europe/Moscow',
+			day: '2-digit',
+			month: '2-digit',
+			year: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
+
+	private getReminderKey(subscriptionId: string, expiresAt: Date) {
+		return `${subscriptionId}:${expiresAt.getTime()}`;
+	}
+
+	private isUniqueConstraintError(error: unknown) {
+		return (
+			error instanceof Prisma.PrismaClientKnownRequestError &&
+			error.code === 'P2002'
+		);
 	}
 
 	private scheduleNext() {
@@ -66,9 +307,9 @@ export class SubscriptionExpiryService
 
 		this.expiryTimeout = setTimeout(async () => {
 			try {
-				const expired = await this.expireSubscriptions();
+				const result = await this.runSubscriptionMaintenance();
 				this.logger.log(
-					`Scheduled check complete: deactivated ${expired} expired subscription(s).`
+					`Scheduled check complete: deactivated ${result.expiredCount} expired subscription(s), sent ${result.reminders.sentCount} expiry reminder(s), failed ${result.reminders.failedCount}.`
 				);
 			} catch (err) {
 				this.logger.error('Subscription expiry check failed:', err);

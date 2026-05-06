@@ -8,14 +8,14 @@ datasource db {
 }
 
 model User {
-  id                           String                  @id @default(cuid())
+  id                           String                       @id @default(cuid())
   name                         String?
   password                     String
   avatarPath                   String?
-  hashedRefreshToken           String?                 @map("hashed_refresh_token")
-  status                       UserStatus              @default(ACTIVE)
-  personalDataConsentRevokedAt DateTime?               @map("personal_data_consent_revoked_at")
-  rights                       Role[]                  @default([USER])
+  hashedRefreshToken           String?                      @map("hashed_refresh_token")
+  status                       UserStatus                   @default(ACTIVE)
+  personalDataConsentRevokedAt DateTime?                    @map("personal_data_consent_revoked_at")
+  rights                       Role[]                       @default([USER])
   authIdentities               AuthIdentity[]
   verificationChallenges       VerificationChallenge[]
   payments                     Payment[]
@@ -24,12 +24,13 @@ model User {
   callbacks                    Callback[]
   countdownTimers              CountdownTimer[]
   subscription                 Subscription?
-  subscriptionHistories        SubscriptionHistory[]   @relation("SubscriptionHistoryUser")
-  subscriptionHistoryActions   SubscriptionHistory[]   @relation("SubscriptionHistoryAdmin")
-  adminEventLogActions         AdminEventLog[]         @relation("AdminEventLogAdmin")
-  adminEventLogTargets         AdminEventLog[]         @relation("AdminEventLogTargetUser")
-  createdAt                    DateTime                @default(now()) @map("created_at")
-  updatedAt                    DateTime                @updatedAt @map("updated_at")
+  subscriptionHistories        SubscriptionHistory[]        @relation("SubscriptionHistoryUser")
+  subscriptionHistoryActions   SubscriptionHistory[]        @relation("SubscriptionHistoryAdmin")
+  subscriptionExpiryReminders  SubscriptionExpiryReminder[]
+  adminEventLogActions         AdminEventLog[]              @relation("AdminEventLogAdmin")
+  adminEventLogTargets         AdminEventLog[]              @relation("AdminEventLogTargetUser")
+  createdAt                    DateTime                     @default(now()) @map("created_at")
+  updatedAt                    DateTime                     @updatedAt @map("updated_at")
 
   @@index([status])
 }
@@ -69,15 +70,15 @@ model Callback {
 }
 
 model CallbackLead {
-  id           String   @id @default(cuid())
-  callbackId   String   @map("callback_id")
-  phone        String
-  timeSlot     String   @default("") @map("time_slot")
-  timezone     String   @default("") @map("timezone")
-  url          String?
-  ip           String?
-  callback     Callback @relation(fields: [callbackId], references: [id], onDelete: Cascade)
-  createdAt    DateTime @default(now()) @map("created_at")
+  id         String   @id @default(cuid())
+  callbackId String   @map("callback_id")
+  phone      String
+  timeSlot   String   @default("") @map("time_slot")
+  timezone   String   @default("") @map("timezone")
+  url        String?
+  ip         String?
+  callback   Callback @relation(fields: [callbackId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([callbackId])
   @@index([callbackId, ip])
@@ -174,21 +175,40 @@ model Lead {
 }
 
 model Subscription {
-  id              String                @id @default(cuid())
-  userId          String                @unique @map("user_id")
-  plan            Plan                  @default(TRIAL)
-  billingPeriod   BillingPeriod?        @map("billing_period")
-  status          SubscriptionStatus    @default(ACTIVE)
-  startsAt        DateTime              @default(now()) @map("starts_at")
-  expiresAt       DateTime?             @map("expires_at")
-  leadsThisPeriod Int                   @default(0) @map("leads_this_period")
-  periodResetsAt  DateTime?             @map("period_resets_at")
-  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id              String                       @id @default(cuid())
+  userId          String                       @unique @map("user_id")
+  plan            Plan                         @default(TRIAL)
+  billingPeriod   BillingPeriod?               @map("billing_period")
+  status          SubscriptionStatus           @default(ACTIVE)
+  startsAt        DateTime                     @default(now()) @map("starts_at")
+  expiresAt       DateTime?                    @map("expires_at")
+  leadsThisPeriod Int                          @default(0) @map("leads_this_period")
+  periodResetsAt  DateTime?                    @map("period_resets_at")
+  user            User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
   histories       SubscriptionHistory[]
-  createdAt       DateTime              @default(now()) @map("created_at")
-  updatedAt       DateTime              @updatedAt @map("updated_at")
+  expiryReminders SubscriptionExpiryReminder[]
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @updatedAt @map("updated_at")
 
   @@map("subscriptions")
+}
+
+model SubscriptionExpiryReminder {
+  id               String       @id @default(cuid())
+  subscriptionId   String       @map("subscription_id")
+  userId           String       @map("user_id")
+  daysBeforeExpiry Int          @map("days_before_expiry")
+  expiresAt        DateTime     @map("expires_at")
+  sentTo           String       @map("sent_to")
+  subscription     Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentAt           DateTime     @default(now()) @map("sent_at")
+
+  @@unique([subscriptionId, daysBeforeExpiry, expiresAt], map: "subscription_expiry_reminder_unique")
+  @@index([userId], map: "subscription_expiry_reminders_user_id_idx")
+  @@index([daysBeforeExpiry, expiresAt], map: "subscription_expiry_reminders_days_expires_idx")
+  @@index([sentAt], map: "subscription_expiry_reminders_sent_at_idx")
+  @@map("subscription_expiry_reminders")
 }
 
 model SubscriptionHistory {
@@ -374,15 +394,15 @@ enum SubscriptionBonusAudience {
 }
 
 model SiteSettings {
-  id               String   @id @default("singleton")
-  bannerEnabled    Boolean  @default(false) @map("banner_enabled")
-  bannerText       String   @default("") @map("banner_text")
-  snowflakeEnabled Boolean  @default(false) @map("snowflake_enabled")
-  paymentEnabled   Boolean  @default(true) @map("payment_enabled")
-  recaptchaEnabled Boolean  @default(true) @map("recaptcha_enabled")
-  googleAuthEnabled Boolean @default(true) @map("google_auth_enabled")
-  yandexAuthEnabled Boolean @default(true) @map("yandex_auth_enabled")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  id                String   @id @default("singleton")
+  bannerEnabled     Boolean  @default(false) @map("banner_enabled")
+  bannerText        String   @default("") @map("banner_text")
+  snowflakeEnabled  Boolean  @default(false) @map("snowflake_enabled")
+  paymentEnabled    Boolean  @default(true) @map("payment_enabled")
+  recaptchaEnabled  Boolean  @default(true) @map("recaptcha_enabled")
+  googleAuthEnabled Boolean  @default(true) @map("google_auth_enabled")
+  yandexAuthEnabled Boolean  @default(true) @map("yandex_auth_enabled")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
 }

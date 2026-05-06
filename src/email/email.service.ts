@@ -3,6 +3,7 @@ import AdminBroadcastEmail from '@email/admin-broadcast.email';
 import LeadNotificationEmail from '@email/lead-notification.email';
 import LimitReachedEmail from '@email/limit-reached.email';
 import NewPasswordEmail from '@email/restore-password.email';
+import SubscriptionExpiryReminderEmail from '@email/subscription-expiry-reminder.email';
 import { MailerService } from '@nestjs-modules/mailer';
 import { Injectable } from '@nestjs/common';
 import { render } from '@react-email/render';
@@ -20,6 +21,12 @@ interface LeadNotificationPayload {
 interface AdminBroadcastPayload {
 	subject: string;
 	message: string;
+}
+
+interface SubscriptionExpiryReminderPayload {
+	daysBeforeExpiry: number;
+	planLabel: string;
+	expiresAtLabel: string;
 }
 
 @Injectable()
@@ -53,6 +60,25 @@ export class EmailService {
 		);
 
 		return this.sendEmail(to, data.subject, html);
+	}
+
+	sendSubscriptionExpiryReminder(
+		to: string,
+		data: SubscriptionExpiryReminderPayload
+	) {
+		const html = render(
+			SubscriptionExpiryReminderEmail({
+				daysBeforeExpiry: data.daysBeforeExpiry,
+				planLabel: data.planLabel,
+				expiresAtLabel: data.expiresAtLabel
+			})
+		);
+		const subject =
+			data.daysBeforeExpiry === 0
+				? 'Сегодня последний день подписки WinWidget'
+				: `Подписка WinWidget закончится через ${this.getDaysLabel(data.daysBeforeExpiry)}`;
+
+		return this.sendEmail(to, subject, html);
 	}
 
 	sendLeadNotification(to: string, data: LeadNotificationPayload) {
@@ -95,5 +121,17 @@ export class EmailService {
 			`⚠️ Лимит заявок исчерпан — виджет «${widgetName}»`,
 			html
 		);
+	}
+
+	private getDaysLabel(days: number) {
+		const mod10 = days % 10;
+		const mod100 = days % 100;
+
+		if (mod10 === 1 && mod100 !== 11) return `${days} день`;
+		if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) {
+			return `${days} дня`;
+		}
+
+		return `${days} дней`;
 	}
 }
