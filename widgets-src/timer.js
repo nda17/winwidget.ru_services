@@ -193,14 +193,9 @@
 		'<span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>',
 		'<div id="wt-bubble-tail" style="position:absolute;top:50%;transform:translateY(-50%);width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;"></div>',
 		'</div>',
-		'<div id="wt-btn-icon" style="position:relative;filter:drop-shadow(0 6px 24px rgba(71,5,251,0.45)) drop-shadow(0 2px 8px rgba(0,0,0,0.22));">',
-		'<div id="wt-ring-1" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.32);"></div>',
-		'<div id="wt-ring-2" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.18);"></div>',
-		'<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg" style="position:relative;z-index:1;display:block">',
-		'<circle cx="30" cy="30" r="30" fill="#4705fb"/>',
-		'<circle cx="30" cy="30" r="26" stroke="rgba(255,255,255,0.22)" stroke-width="1.5"/>',
-		'<path d="M30 16a14 14 0 1014 14 14 14 0 00-14-14zm1.2 7v7.4l5 3-.95 1.56-6.05-3.62V23h2z" fill="white"/>',
-		'</svg></div>',
+		'<img id="wt-btn-icon" src="' +
+			getWidgetAssetUrl('timer-button.png') +
+			'" alt="" aria-hidden="true" draggable="false" style="width:60px;height:60px;display:block;object-fit:contain;line-height:1;filter:drop-shadow(0 6px 24px rgba(71,5,251,0.45)) drop-shadow(0 2px 8px rgba(0,0,0,0.22));transform-origin:50% 100%;" />',
 		'<div id="wt-btn-label" style="margin-top:6px;background:#fff;color:#1a1a1a;border:1px solid rgba(71,5,251,0.12);box-shadow:0 8px 24px rgba(71,5,251,0.14);font-size:11px;font-weight:800;padding:5px 10px;border-radius:999px;white-space:nowrap;line-height:1.2;">Акция</div>'
 	].join('');
 	timerBtn.style.cssText = [
@@ -224,8 +219,6 @@
 		'@keyframes wtBounce{0%,100%{transform:translateY(0) scale(1)}10%{transform:translateY(-16px) scale(1.1)}20%{transform:translateY(0) scale(1)}30%{transform:translateY(-6px) scale(1.04)}40%{transform:translateY(0) scale(1)}}',
 		'@keyframes wtSway{0%,100%{transform:rotate(0)}25%{transform:rotate(-6deg)}75%{transform:rotate(6deg)}}',
 		'@keyframes wtGlow{0%,100%{filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2))}50%{filter:drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5))}}',
-		'@keyframes wtRipple{0%{transform:scale(1);opacity:.55}100%{transform:scale(2.15);opacity:0}}',
-		'#wt-ring-1,#wt-ring-2{display:none}',
 		'#wt-bubble:hover{opacity:0.95!important}',
 		'#wt-bubble-close:hover{color:#888!important}',
 		'.wt-input-error{border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,.12)!important}',
@@ -322,10 +315,10 @@
 		timerBtn.style[side] = (cfg.buttonOffset ?? 3) + '%';
 		timerBtn.style[side === 'left' ? 'right' : 'left'] = 'auto';
 		timerBtn.style.bottom = (cfg.buttonBottom ?? 3) + '%';
-		var svg = timerBtn.querySelector('svg');
-		if (svg) {
-			svg.setAttribute('width', size);
-			svg.setAttribute('height', size);
+		var icon = timerBtn.querySelector('#wt-btn-icon');
+		if (icon) {
+			icon.style.width = size + 'px';
+			icon.style.height = size + 'px';
 		}
 	}
 
@@ -362,8 +355,6 @@
 
 	function applyButtonColor(color) {
 		buttonPulseEnabled = cfg.buttonPulse !== false;
-		var circle = timerBtn.querySelector('circle');
-		if (circle && color) circle.setAttribute('fill', color);
 		var icon = timerBtn.querySelector('#wt-btn-icon');
 		if (icon && color) {
 			icon.style.filter =
@@ -371,11 +362,6 @@
 				color +
 				'66) drop-shadow(0 2px 8px rgba(0,0,0,.22))';
 		}
-		['wt-ring-1', 'wt-ring-2'].forEach(function (id) {
-			var ring = document.getElementById(id);
-			if (ring)
-				ring.style.display = cfg.buttonPulse === false ? 'none' : '';
-		});
 	}
 
 	function getDeadline() {

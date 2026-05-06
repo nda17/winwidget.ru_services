@@ -109,22 +109,14 @@
 		'border-top:7px solid transparent;border-bottom:7px solid transparent;',
 		'"></div>',
 		'</div>',
-		'<div id="wq-btn-icon" style="',
+		'<img id="wq-btn-icon" src="' +
+			getWidgetAssetUrl('quiz-button.png') +
+			'" alt="" aria-hidden="true" draggable="false" style="',
+		'width:60px;height:60px;display:block;object-fit:contain;line-height:1;',
 		'filter:drop-shadow(0 6px 20px rgba(71,5,251,0.55)) drop-shadow(0 2px 6px rgba(0,0,0,0.3));',
+		'transform-origin:50% 100%;',
 		'transition:filter 0.4s ease;',
-		'">',
-		'<svg id="wq-btn-svg" width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">',
-		'<circle cx="30" cy="30" r="30" fill="url(#wqGrad)"/>',
-		'<circle cx="30" cy="30" r="28" fill="none" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>',
-		'<text x="30" y="38" text-anchor="middle" font-family="system-ui,sans-serif" font-size="28" font-weight="900" fill="white">?</text>',
-		'<defs>',
-		'<radialGradient id="wqGrad" cx="40%" cy="30%" r="70%">',
-		'<stop offset="0%" stop-color="#7c3aed"/>',
-		'<stop offset="100%" stop-color="#4705fb"/>',
-		'</radialGradient>',
-		'</defs>',
-		'</svg>',
-		'</div>',
+		'" />',
 		'<div id="wq-btn-label" style="',
 		'margin-top:6px;',
 		'background:linear-gradient(135deg,#7c3aed,#4705fb);',
@@ -921,10 +913,10 @@
 		// ── Button positioning ─────────────────────────────────────────────────
 
 		var qsz = cfg.buttonSize ?? 60;
-		var btnSvg = quizBtn.querySelector('#wq-btn-svg');
-		if (btnSvg) {
-			btnSvg.setAttribute('width', qsz + '');
-			btnSvg.setAttribute('height', qsz + '');
+		var btnIcon = quizBtn.querySelector('#wq-btn-icon');
+		if (btnIcon) {
+			btnIcon.style.width = qsz + 'px';
+			btnIcon.style.height = qsz + 'px';
 		}
 		var qLabelEl = quizBtn.querySelector('#wq-btn-label');
 		if (qLabelEl) {
@@ -935,12 +927,6 @@
 			qLabelEl.style.padding = qlph + 'px ' + qlpv + 'px';
 		}
 		var _openBtnColor = cfg.openButtonColor || _accent;
-		var gradEl = quizBtn.querySelector('#wqGrad');
-		if (gradEl) {
-			var stops = gradEl.querySelectorAll('stop');
-			if (stops[0]) stops[0].setAttribute('stop-color', _openBtnColor);
-			if (stops[1]) stops[1].setAttribute('stop-color', _openBtnColor);
-		}
 		var iconEl = quizBtn.querySelector('#wq-btn-icon');
 		if (iconEl) {
 			iconEl.style.filter =

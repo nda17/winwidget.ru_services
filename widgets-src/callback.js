@@ -192,26 +192,14 @@
 		'border-top:7px solid transparent;border-bottom:7px solid transparent;',
 		'"></div>',
 		'</div>',
-		'<div id="wcb-btn-icon" style="',
-		'filter:drop-shadow(0 6px 24px rgba(71,5,251,0.6)) drop-shadow(0 2px 8px rgba(0,0,0,0.25));',
+		'<img id="wcb-btn-icon" src="' +
+			getWidgetAssetUrl('callback-button.png') +
+			'" alt="" aria-hidden="true" draggable="false" style="',
+		'width:60px;height:60px;display:block;object-fit:contain;line-height:1;',
+		'filter:drop-shadow(0 6px 24px rgba(71,5,251,0.45)) drop-shadow(0 2px 8px rgba(0,0,0,0.22));',
+		'transform-origin:50% 100%;',
 		'transition:filter 0.4s ease,transform 0.2s cubic-bezier(.34,1.56,.64,1);',
-		'position:relative;',
-		'">',
-		'<div id="wcb-ring-1" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.35);"></div>',
-		'<div id="wcb-ring-2" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.25);"></div>',
-		'<div id="wcb-ring-3" style="position:absolute;inset:0;border-radius:50%;pointer-events:none;background:rgba(71,5,251,0.15);"></div>',
-		'<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg" style="position:relative;z-index:1;display:block">',
-		'<circle cx="30" cy="30" r="30" fill="url(#wcbGrad)"/>',
-		'<circle cx="30" cy="30" r="27" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="1.5"/>',
-		'<path d="M21 19.5c0-.83.67-1.5 1.5-1.5h3.1c.4 0 .77.24.9.6l1.4 4c.14.38.03.82-.28 1.1l-1.62 1.62c1.15 2.38 3.08 4.3 5.46 5.46l1.62-1.62c.28-.3.72-.42 1.1-.28l4 1.4c.36.13.6.5.6.9V34c0 .83-.67 1.5-1.5 1.5C28.27 35.5 21 28.23 21 19.5z" fill="white" opacity="0.95"/>',
-		'<defs>',
-		'<linearGradient id="wcbGrad" x1="0" y1="0" x2="60" y2="60" gradientUnits="userSpaceOnUse">',
-		'<stop offset="0%" stop-color="#9333ea"/>',
-		'<stop offset="100%" stop-color="#4705fb"/>',
-		'</linearGradient>',
-		'</defs>',
-		'</svg>',
-		'</div>',
+		'" />',
 		''
 	].join('');
 
@@ -236,13 +224,11 @@
 		'@keyframes wcbBounce{0%,100%{transform:translateY(0) scale(1)}10%{transform:translateY(-16px) scale(1.1)}20%{transform:translateY(0) scale(1)}30%{transform:translateY(-6px) scale(1.04)}40%{transform:translateY(0) scale(1)}}',
 		'@keyframes wcbSway{0%,100%{transform:rotate(0)}25%{transform:rotate(-6deg)}75%{transform:rotate(6deg)}}',
 		'@keyframes wcbGlow{0%,100%{filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2))}50%{filter:drop-shadow(0 8px 28px rgba(101,16,255,0.7)) drop-shadow(0 2px 12px rgba(37,117,252,0.5))}}',
-		'@keyframes wcbRipple{0%{transform:scale(1);opacity:0.55}100%{transform:scale(2.4);opacity:0}}',
 		'@keyframes wcbShake{0%,100%{transform:translateX(0)}12%{transform:translateX(-5px)}25%{transform:translateX(5px)}37%{transform:translateX(-4px)}50%{transform:translateX(4px)}62%{transform:translateX(-2px)}75%{transform:translateX(2px)}87%{transform:translateX(-1px)}}',
 		'.wcb-field-err{border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,0.15)!important}',
 		'.wcb-shake{animation:wcbShake 420ms ease}',
 		'.wcb-err-text{color:#ef4444;font-size:11px;margin-top:5px;display:none;padding-left:2px}',
 		'.wcb-err-text.wcb-err-show{display:block}',
-		'#wcb-ring-1,#wcb-ring-2,#wcb-ring-3{display:none}',
 		'#wcb-bubble:hover{opacity:0.95!important}',
 		'#wcb-bubble-close:hover{color:#888!important}',
 		'#callback-widget-overlay{align-items:center!important}',
@@ -421,33 +407,11 @@
 		if (!icon || !color) return;
 		var rgb = hexToRgb(color);
 		if (!rgb) return;
-		var svgGrad = icon.querySelector('#wcbGrad');
-		if (svgGrad) {
-			var r0 = Math.round(rgb.r + (255 - rgb.r) * 0.3);
-			var g0 = Math.round(rgb.g + (255 - rgb.g) * 0.15);
-			var b0 = Math.round(rgb.b + (255 - rgb.b) * 0.05);
-			var stop0 =
-				'#' +
-				[r0, g0, b0]
-					.map(function (v) {
-						return ('0' + Math.min(255, v).toString(16)).slice(-2);
-					})
-					.join('');
-			svgGrad.children[0].setAttribute('stop-color', stop0);
-			svgGrad.children[1].setAttribute('stop-color', color);
-		}
 		var glowColor = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',0.6)';
 		icon.style.filter =
 			'drop-shadow(0 6px 24px ' +
 			glowColor +
 			') drop-shadow(0 2px 8px rgba(0,0,0,0.25))';
-		var ringBase = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',';
-		var r1 = document.getElementById('wcb-ring-1');
-		var r2 = document.getElementById('wcb-ring-2');
-		var r3 = document.getElementById('wcb-ring-3');
-		if (r1) r1.style.background = ringBase + '0.35)';
-		if (r2) r2.style.background = ringBase + '0.25)';
-		if (r3) r3.style.background = ringBase + '0.15)';
 	}
 
 	// ─── Build modal content ──────────────────────────────────────────────────
@@ -909,23 +873,13 @@
 
 			var iconEl = cbBtn.querySelector('#wcb-btn-icon');
 			if (iconEl) {
-				var svg = iconEl.querySelector('svg');
-				if (svg) {
-					svg.setAttribute('width', size);
-					svg.setAttribute('height', size);
-					svg.setAttribute('viewBox', '0 0 60 60');
-				}
+				iconEl.style.width = size + 'px';
+				iconEl.style.height = size + 'px';
 			}
 
 			applyColor(cfg.openButtonColor || cfg.color || '#4705fb');
 
 			buttonPulseEnabled = cfg.buttonPulse !== false;
-			if (cfg.buttonPulse === false) {
-				['wcb-ring-1', 'wcb-ring-2', 'wcb-ring-3'].forEach(function (id) {
-					var el = document.getElementById(id);
-					if (el) el.style.display = 'none';
-				});
-			}
 
 			if (cfg.bgColor) modal.style.background = cfg.bgColor;
 
