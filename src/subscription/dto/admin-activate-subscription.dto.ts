@@ -3,6 +3,7 @@ import {
 	IsBoolean,
 	IsDateString,
 	IsEnum,
+	IsIn,
 	IsInt,
 	IsOptional,
 	IsString,
@@ -30,9 +31,23 @@ export class AdminActivateSubscriptionDto {
 	extendIfActive?: boolean;
 }
 
+export const ADMIN_BONUS_AUDIENCES = [
+	'SINGLE',
+	'ACTIVE_SUBSCRIPTION',
+	'INACTIVE_SUBSCRIPTION',
+	'ALL'
+] as const;
+
+export type AdminBonusAudience = (typeof ADMIN_BONUS_AUDIENCES)[number];
+
 export class AdminExtendSubscriptionDto {
+	@IsOptional()
 	@IsString()
-	userId: string;
+	userId?: string;
+
+	@IsOptional()
+	@IsIn([...ADMIN_BONUS_AUDIENCES])
+	audience?: AdminBonusAudience;
 
 	@IsInt()
 	@Min(1)

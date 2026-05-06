@@ -1,13 +1,39 @@
 import { PrismaService } from '@/prisma.service';
+import type { AdminBonusAudience } from '@/subscription/dto/admin-activate-subscription.dto';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {
 	BillingPeriod,
 	Plan,
+	Prisma,
+	Subscription,
+	SubscriptionBonusAudience,
 	SubscriptionHistoryAction,
 	SubscriptionStatus
 } from '@prisma/client';
 import * as dayjs from 'dayjs';
+
+const BONUS_AUDIENCE_LABELS: Record<AdminBonusAudience, string> = {
+	SINGLE: 'Выбранный пользователь',
+	ACTIVE_SUBSCRIPTION: 'Все активные пользователи',
+	INACTIVE_SUBSCRIPTION: 'Все неактивные пользователи',
+	ALL: 'Все пользователи'
+};
+
+interface AdminExtendSubscriptionDaysInput {
+	userId?: string;
+	days: number;
+	adminId: string;
+	audience?: AdminBonusAudience;
+}
+
+export interface AdminExtendSubscriptionDaysResult {
+	audience: AdminBonusAudience;
+	audienceLabel: string;
+	affectedUsersCount: number;
+	historyId: string;
+	subscription?: Subscription;
+}
 
 @Injectable()
 export class SubscriptionService {
@@ -451,11 +477,28 @@ export class SubscriptionService {
 		});
 	}
 
-	async adminExtendSubscriptionDays(
+	async adminExtendSubscriptionDays({
+		userId,
+		days,
+		adminId,
+		audience = 'SINGLE'
+	}: AdminExtendSubscriptionDaysInput): Promise<AdminExtendSubscriptionDaysResult> {
+		if (audience === 'SINGLE') {
+			return this.adminExtendSingleSubscriptionDays(userId, days, adminId);
+		}
+
+		return this.adminExtendMassSubscriptionDays(audience, days, adminId);
+	}
+
+	private async adminExtendSingleSubscriptionDays(
 		userId: string,
 		days: number,
 		adminId: string
-	) {
+	): Promise<AdminExtendSubscriptionDaysResult> {
+		if (!userId) {
+			throw new BadRequestException('Выберите пользователя');
+		}
+
 		const subscription = await this.prisma.subscription.findUnique({
 			where: { userId }
 		});
@@ -465,8 +508,173 @@ export class SubscriptionService {
 		}
 
 		const now = dayjs();
+		const { data, newExpiresAt } = this.getBonusExtensionData(
+			subscription,
+			days,
+			now
+		);
+
+		return this.prisma.$transaction(async tx => {
+			const updatedSubscription = await tx.subscription.update({
+				where: { userId },
+				data
+			});
+
+			const history = await tx.subscriptionHistory.create({
+				data: {
+					subscriptionId: subscription.id,
+					userId,
+					adminId,
+					action: SubscriptionHistoryAction.BONUS_DAYS,
+					days,
+					oldExpiresAt: subscription.expiresAt,
+					newExpiresAt,
+					targetAudience: SubscriptionBonusAudience.SINGLE,
+					targetLabel: BONUS_AUDIENCE_LABELS.SINGLE,
+					affectedUsersCount: 1
+				}
+			});
+
+			return {
+				audience: 'SINGLE',
+				audienceLabel: BONUS_AUDIENCE_LABELS.SINGLE,
+				affectedUsersCount: 1,
+				historyId: history.id,
+				subscription: updatedSubscription
+			};
+		});
+	}
+
+	private async adminExtendMassSubscriptionDays(
+		audience: Exclude<AdminBonusAudience, 'SINGLE'>,
+		days: number,
+		adminId: string
+	): Promise<AdminExtendSubscriptionDaysResult> {
+		const now = dayjs();
+		const users = await this.getBonusAudienceUsers(audience, now.toDate());
+
+		if (!users.length) {
+			throw new BadRequestException(
+				'Пользователи для начисления не найдены'
+			);
+		}
+
+		const subscriptionOperations = users.map(user => {
+			const { data, newExpiresAt } = this.getBonusExtensionData(
+				user.subscription,
+				days,
+				now
+			);
+
+			if (user.subscription) {
+				return this.prisma.subscription.update({
+					where: { id: user.subscription.id },
+					data
+				});
+			}
+
+			return this.prisma.subscription.create({
+				data: {
+					userId: user.id,
+					plan: Plan.TRIAL,
+					status: SubscriptionStatus.ACTIVE,
+					expiresAt: newExpiresAt,
+					leadsThisPeriod: 0,
+					periodResetsAt: now.add(1, 'month').toDate()
+				}
+			});
+		});
+
+		const affectedUsersCount = subscriptionOperations.length;
+		const transactionResults = await this.prisma.$transaction([
+			...subscriptionOperations,
+			this.prisma.subscriptionHistory.create({
+				data: {
+					adminId,
+					action: SubscriptionHistoryAction.BONUS_DAYS,
+					days,
+					targetAudience: audience as SubscriptionBonusAudience,
+					targetLabel: BONUS_AUDIENCE_LABELS[audience],
+					affectedUsersCount
+				}
+			})
+		]);
+		const history = transactionResults[transactionResults.length - 1];
+
+		return {
+			audience,
+			audienceLabel: BONUS_AUDIENCE_LABELS[audience],
+			affectedUsersCount,
+			historyId: history.id
+		};
+	}
+
+	private async getBonusAudienceUsers(
+		audience: Exclude<AdminBonusAudience, 'SINGLE'>,
+		now: Date
+	) {
+		const activeSubscriptionWhere = this.getActiveSubscriptionWhere(now);
+		const where: Prisma.UserWhereInput =
+			audience === 'ACTIVE_SUBSCRIPTION'
+				? {
+						subscription: {
+							is: activeSubscriptionWhere
+						}
+					}
+				: audience === 'INACTIVE_SUBSCRIPTION'
+					? {
+							OR: [
+								{
+									subscription: {
+										is: null
+									}
+								},
+								{
+									subscription: {
+										isNot: activeSubscriptionWhere
+									}
+								}
+							]
+						}
+					: {};
+
+		return this.prisma.user.findMany({
+			where,
+			select: {
+				id: true,
+				subscription: true
+			},
+			orderBy: {
+				createdAt: 'asc'
+			}
+		});
+	}
+
+	private getActiveSubscriptionWhere(
+		now: Date
+	): Prisma.SubscriptionWhereInput {
+		return {
+			status: SubscriptionStatus.ACTIVE,
+			OR: [
+				{
+					expiresAt: null
+				},
+				{
+					expiresAt: {
+						gt: now
+					}
+				}
+			]
+		};
+	}
+
+	private getBonusExtensionData(
+		subscription: Subscription | null,
+		days: number,
+		now: dayjs.Dayjs
+	) {
 		const isActiveFutureSubscription =
-			subscription.status === SubscriptionStatus.ACTIVE &&
+			subscription?.status === SubscriptionStatus.ACTIVE &&
 			subscription.expiresAt &&
 			dayjs(subscription.expiresAt).isAfter(now);
 		const base = isActiveFutureSubscription
@@ -484,26 +692,7 @@ export class SubscriptionService {
 					})
 		};
 
-		return this.prisma.$transaction(async tx => {
-			const updatedSubscription = await tx.subscription.update({
-				where: { userId },
-				data
-			});
-
-			await tx.subscriptionHistory.create({
-				data: {
-					subscriptionId: subscription.id,
-					userId,
-					adminId,
-					action: SubscriptionHistoryAction.BONUS_DAYS,
-					days,
-					oldExpiresAt: subscription.expiresAt,
-					newExpiresAt
-				}
-			});
-
-			return updatedSubscription;
-		});
+		return { data, newExpiresAt };
 	}
 
 	async adminCancelSubscription(userId: string) {

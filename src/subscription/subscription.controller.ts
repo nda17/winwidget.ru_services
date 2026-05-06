@@ -120,24 +120,37 @@ export class SubscriptionController {
 		@Req() request: Request
 	) {
 		const subscription =
-			await this.subscriptionService.adminExtendSubscriptionDays(
-				dto.userId,
-				dto.days,
-				adminId
-			);
+			await this.subscriptionService.adminExtendSubscriptionDays({
+				userId: dto.userId,
+				days: dto.days,
+				adminId,
+				audience: dto.audience
+			});
 
 		await this.adminEventLogService.record({
 			adminId,
 			section: 'SUBSCRIPTIONS',
 			action: 'SUBSCRIPTION_EXTEND_DAYS',
-			description: `Начислены бонусные дни: ${dto.days}`,
-			entityType: 'subscription',
-			entityId: subscription.id,
-			entityLabel: `${dto.days} дн.`,
-			targetUserId: dto.userId,
+			description: `Начислены бонусные дни: ${dto.days} (${subscription.audienceLabel})`,
+			entityType:
+				subscription.audience === 'SINGLE'
+					? 'subscription'
+					: 'subscription_bonus_audience',
+			entityId:
+				subscription.audience === 'SINGLE'
+					? subscription.subscription?.id
+					: subscription.historyId,
+			entityLabel:
+				subscription.audience === 'SINGLE'
+					? `${dto.days} дн.`
+					: subscription.audienceLabel,
+			targetUserId: subscription.audience === 'SINGLE' ? dto.userId : null,
 			metadata: {
 				days: dto.days,
-				expiresAt: subscription.expiresAt?.toISOString() ?? null
+				audience: subscription.audience,
+				affectedUsersCount: subscription.affectedUsersCount,
+				expiresAt:
+					subscription.subscription?.expiresAt?.toISOString() ?? null
 			},
 			request
 		});

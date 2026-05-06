@@ -36,6 +36,7 @@ import {
 	VerificationChallengeType
 } from '@prisma/client';
 import { compare, hash } from 'bcryptjs';
+import * as dayjs from 'dayjs';
 import generator from 'generate-password-ts';
 
 @Injectable()
@@ -403,7 +404,8 @@ export class AuthService {
 				data: {
 					userId,
 					plan: Plan.TRIAL,
-					status: SubscriptionStatus.ACTIVE
+					status: SubscriptionStatus.ACTIVE,
+					expiresAt: dayjs().add(7, 'day').toDate()
 				}
 			});
 		}
