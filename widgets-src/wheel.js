@@ -306,10 +306,15 @@
 
 		//CSS
 		const style = document.createElement('style');
+		const spinDurationSeconds = Math.min(
+			10,
+			Math.max(4, Number(config.spinDuration) || 5)
+		);
+		const spinEasing = 'cubic-bezier(.22,.61,.36,1)';
 
 		style.textContent = `
     :host {
-      --spin-duration: ${config.spinDuration || 5}s;
+      --spin-duration: ${spinDurationSeconds}s;
       --wheel-size: 300px;
       --accent: ${config.widgetColor};
       position: fixed;
@@ -393,7 +398,7 @@
     svg { width: 100%; height: 100%; overflow: visible; }
     #wheel {
       transform-origin: 50% 50%;
-      transition: transform var(--spin-duration) cubic-bezier(.17,.67,.3,1);
+      transition: transform var(--spin-duration) ${spinEasing};
     }
     .sector text { pointer-events: none; user-select: none; }
 
@@ -997,14 +1002,18 @@
 			const anglePerSector = 360 / count;
 			const midAngleSVG =
 				-90 + winIndex * anglePerSector + anglePerSector / 2;
-			const targetAngle = 360 * 6 - midAngleSVG;
+			const spinTurns = Math.round(6 + (spinDurationSeconds - 4) * 1.5);
+			const targetAngle = 360 * spinTurns - midAngleSVG;
 
 			currentRotation = targetAngle;
 
-			wheel.style.transition = `transform 4s cubic-bezier(.17,.67,.3,1)`;
+			wheel.style.transition = `transform ${spinDurationSeconds}s ${spinEasing}`;
 			wheel.style.transform = `rotate(${currentRotation}deg)`;
 
-			setTimeout(() => swingEffect(targetAngle, winIndex), 4200);
+			setTimeout(
+				() => swingEffect(targetAngle, winIndex),
+				spinDurationSeconds * 1000 + 200
+			);
 		}
 
 		// Завершающее колебание стрелки ±5°
