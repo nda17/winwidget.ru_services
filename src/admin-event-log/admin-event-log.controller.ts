@@ -15,12 +15,24 @@ export class AdminEventLogController {
 	async getAll(
 		@Query('page') page?: string,
 		@Query('limit') limit?: string,
-		@Query('userId') userId?: string
+		@Query('userId') userId?: string,
+		@Query('adminId') adminId?: string,
+		@Query('section') section?: string,
+		@Query('action') action?: string,
+		@Query('createdFrom') createdFrom?: string,
+		@Query('createdTo') createdTo?: string
 	) {
 		return this.adminEventLogService.getAll(
 			page ? parseInt(page, 10) : 1,
 			limit ? parseInt(limit, 10) : 20,
-			userId
+			{
+				userId,
+				adminId,
+				section,
+				action,
+				createdFrom,
+				createdTo
+			}
 		);
 	}
 }

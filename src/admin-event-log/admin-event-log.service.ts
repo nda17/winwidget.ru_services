@@ -1,5 +1,5 @@
 import { PrismaService } from '@/prisma.service';
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { AuthIdentityType, Prisma } from '@prisma/client';
 import { Request } from 'express';
 
@@ -27,6 +27,32 @@ export type AdminEventLogAction =
 	| 'BACKLOG_TASK_UPDATE'
 	| 'BACKLOG_TASK_DELETE';
 
+const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
+	'PAYMENTS',
+	'MAILINGS',
+	'TASKS',
+	'SUBSCRIPTIONS',
+	'USERS',
+	'BACKLOG'
+];
+
+const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
+	'PAYMENT_MANUAL_CHECK',
+	'PAYMENT_CLEANUP_RUN',
+	'MAILING_BROADCAST_SEND',
+	'SUBSCRIPTION_ACTIVATE',
+	'SUBSCRIPTION_EXTEND_DAYS',
+	'SUBSCRIPTION_CANCEL',
+	'SUBSCRIPTION_EXPIRY_CHECK_RUN',
+	'VERIFICATION_CHALLENGE_CLEANUP_RUN',
+	'USER_UPDATE',
+	'USER_TOGGLE_ACTIVATION',
+	'USER_DELETE',
+	'BACKLOG_TASK_CREATE',
+	'BACKLOG_TASK_UPDATE',
+	'BACKLOG_TASK_DELETE'
+];
+
 interface AdminEventLogRecordInput {
 	adminId?: string | null;
 	section: AdminEventLogSection;
@@ -40,6 +66,15 @@ interface AdminEventLogRecordInput {
 	request?: Request;
 }
 
+interface AdminEventLogFilters {
+	userId?: string;
+	adminId?: string;
+	section?: string;
+	action?: string;
+	createdFrom?: string;
+	createdTo?: string;
+}
+
 interface UserSnapshot {
 	name: string | null;
 	email: string | null;
@@ -51,20 +86,11 @@ export class AdminEventLogService {
 
 	constructor(private readonly prisma: PrismaService) {}
 
-	async getAll(page = 1, limit = 20, userId?: string) {
+	async getAll(page = 1, limit = 20, filters: AdminEventLogFilters = {}) {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
-		const normalizedUserId = userId?.trim();
-		const where: Prisma.AdminEventLogWhereInput | undefined =
-			normalizedUserId
-				? {
-						OR: [
-							{ targetUserId: normalizedUserId },
-							{ adminId: normalizedUserId }
-						]
-					}
-				: undefined;
+		const where = this.getAdminEventLogWhere(filters);
 		const skip = (normalizedPage - 1) * normalizedLimit;
 
 		const [items, total] = await this.prisma.$transaction([
@@ -84,6 +110,101 @@ export class AdminEventLogService {
 			limit: normalizedLimit,
 			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
 		};
+	}
+
+	private getAdminEventLogWhere(
+		filters: AdminEventLogFilters
+	): Prisma.AdminEventLogWhereInput | undefined {
+		const and: Prisma.AdminEventLogWhereInput[] = [];
+		const userId = filters.userId?.trim();
+		const adminId = filters.adminId?.trim();
+		const section = this.normalizeSection(filters.section);
+		const action = this.normalizeAction(filters.action);
+		const createdAt = this.getDateRangeFilter(
+			filters.createdFrom,
+			filters.createdTo
+		);
+
+		if (userId) {
+			and.push({
+				OR: [{ targetUserId: userId }, { adminId: userId }]
+			});
+		}
+
+		if (adminId) and.push({ adminId });
+		if (section) and.push({ section });
+		if (action) and.push({ action });
+		if (createdAt) and.push({ createdAt });
+
+		return and.length ? { AND: and } : undefined;
+	}
+
+	private normalizeSection(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (
+			!ADMIN_EVENT_LOG_SECTIONS.includes(
+				normalized as AdminEventLogSection
+			)
+		) {
+			throw new BadRequestException('Некорректный раздел журнала');
+		}
+
+		return normalized;
+	}
+
+	private normalizeAction(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (
+			!ADMIN_EVENT_LOG_ACTIONS.includes(normalized as AdminEventLogAction)
+		) {
+			throw new BadRequestException('Некорректное действие журнала');
+		}
+
+		return normalized;
+	}
+
+	private getDateRangeFilter(from?: string, to?: string) {
+		const gte = this.normalizeDate(from, false);
+		const lte = this.normalizeDate(to, true);
+
+		if (!gte && !lte) {
+			return undefined;
+		}
+
+		return {
+			...(gte ? { gte } : {}),
+			...(lte ? { lte } : {})
+		};
+	}
+
+	private normalizeDate(value?: string, endOfDay = false) {
+		const normalized = value?.trim();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		const date = new Date(
+			endOfDay
+				? `${normalized}T23:59:59.999Z`
+				: `${normalized}T00:00:00.000Z`
+		);
+
+		if (Number.isNaN(date.getTime())) {
+			throw new BadRequestException('Некорректная дата фильтра');
+		}
+
+		return date;
 	}
 
 	async record(input: AdminEventLogRecordInput) {

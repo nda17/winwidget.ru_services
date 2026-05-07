@@ -69,12 +69,24 @@ export class PaymentController {
 	async adminGetPayments(
 		@Query('page') page?: string,
 		@Query('limit') limit?: string,
-		@Query('status') status?: string
+		@Query('status') status?: string,
+		@Query('plan') plan?: string,
+		@Query('billingPeriod') billingPeriod?: string,
+		@Query('createdFrom') createdFrom?: string,
+		@Query('createdTo') createdTo?: string,
+		@Query('search') search?: string
 	) {
 		return this.paymentService.adminGetPayments(
 			page ? parseInt(page, 10) : 1,
 			limit ? parseInt(limit, 10) : 20,
-			status
+			{
+				status,
+				plan,
+				billingPeriod,
+				createdFrom,
+				createdTo,
+				search
+			}
 		);
 	}
 

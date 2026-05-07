@@ -109,12 +109,22 @@ export class UserController {
 	async getUserList(
 		@Query('searchTerm') searchTerm?: string,
 		@Query('page') page?: string,
-		@Query('limit') limit?: string
+		@Query('limit') limit?: string,
+		@Query('role') role?: string,
+		@Query('registeredFrom') registeredFrom?: string,
+		@Query('registeredTo') registeredTo?: string,
+		@Query('subscription') subscription?: string
 	) {
 		return this.userService.getUserList(
 			searchTerm,
 			page ? parseInt(page, 10) : 1,
-			limit ? parseInt(limit, 10) : 20
+			limit ? parseInt(limit, 10) : 20,
+			{
+				role,
+				registeredFrom,
+				registeredTo,
+				subscription
+			}
 		);
 	}
 

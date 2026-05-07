@@ -29,10 +29,21 @@ export class NotesController {
 
 	@HttpCode(200)
 	@Get()
-	getAll(@Query('page') page?: string, @Query('limit') limit?: string) {
+	getAll(
+		@Query('page') page?: string,
+		@Query('limit') limit?: string,
+		@Query('status') status?: string,
+		@Query('createdFrom') createdFrom?: string,
+		@Query('createdTo') createdTo?: string
+	) {
 		return this.notesService.getAll(
 			page ? parseInt(page, 10) : 1,
-			limit ? parseInt(limit, 10) : 10
+			limit ? parseInt(limit, 10) : 10,
+			{
+				status,
+				createdFrom,
+				createdTo
+			}
 		);
 	}
 

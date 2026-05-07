@@ -35,6 +35,21 @@ export interface AdminExtendSubscriptionDaysResult {
 	subscription?: Subscription;
 }
 
+export interface AdminSubscriptionFilters {
+	plan?: string;
+	status?: string;
+	billingPeriod?: string;
+	expiresFrom?: string;
+	expiresTo?: string;
+}
+
+export interface AdminSubscriptionHistoryFilters {
+	audience?: string;
+	adminId?: string;
+	createdFrom?: string;
+	createdTo?: string;
+}
+
 @Injectable()
 export class SubscriptionService {
 	constructor(private prisma: PrismaService) {}
@@ -316,13 +331,19 @@ export class SubscriptionService {
 		return PLAN_LIMITS[plan].maxWidgets;
 	}
 
-	async adminGetAllSubscriptions(page = 1, limit = 15) {
+	async adminGetAllSubscriptions(
+		page = 1,
+		limit = 15,
+		filters: AdminSubscriptionFilters = {}
+	) {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 15;
+		const where = this.getAdminSubscriptionWhere(filters);
 		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [subs, total] = await Promise.all([
 			this.prisma.subscription.findMany({
+				where,
 				include: {
 					user: {
 						select: {
@@ -339,7 +360,7 @@ export class SubscriptionService {
 				skip,
 				take: normalizedLimit
 			}),
-			this.prisma.subscription.count()
+			this.prisma.subscription.count({ where })
 		]);
 
 		return {
@@ -360,13 +381,19 @@ export class SubscriptionService {
 		};
 	}
 
-	async adminGetSubscriptionHistory(page = 1, limit = 10) {
+	async adminGetSubscriptionHistory(
+		page = 1,
+		limit = 10,
+		filters: AdminSubscriptionHistoryFilters = {}
+	) {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 10;
+		const where = this.getAdminSubscriptionHistoryWhere(filters);
 		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [histories, total] = await Promise.all([
 			this.prisma.subscriptionHistory.findMany({
+				where,
 				include: {
 					user: {
 						select: {
@@ -393,7 +420,7 @@ export class SubscriptionService {
 				skip,
 				take: normalizedLimit
 			}),
-			this.prisma.subscriptionHistory.count()
+			this.prisma.subscriptionHistory.count({ where })
 		]);
 
 		return {
@@ -700,5 +727,137 @@ export class SubscriptionService {
 			where: { userId },
 			data: { status: SubscriptionStatus.CANCELLED }
 		});
+	}
+
+	private getAdminSubscriptionWhere(
+		filters: AdminSubscriptionFilters
+	): Prisma.SubscriptionWhereInput {
+		const where: Prisma.SubscriptionWhereInput = {};
+		const plan = this.normalizePlan(filters.plan);
+		const status = this.normalizeSubscriptionStatus(filters.status);
+		const billingPeriod = this.normalizeBillingPeriod(
+			filters.billingPeriod
+		);
+		const expiresAt = this.getDateRangeFilter(
+			filters.expiresFrom,
+			filters.expiresTo
+		);
+
+		if (plan) where.plan = plan;
+		if (status) where.status = status;
+		if (billingPeriod !== undefined) where.billingPeriod = billingPeriod;
+		if (expiresAt) where.expiresAt = expiresAt;
+
+		return where;
+	}
+
+	private getAdminSubscriptionHistoryWhere(
+		filters: AdminSubscriptionHistoryFilters
+	): Prisma.SubscriptionHistoryWhereInput {
+		const where: Prisma.SubscriptionHistoryWhereInput = {};
+		const audience = this.normalizeSubscriptionBonusAudience(
+			filters.audience
+		);
+		const adminId = filters.adminId?.trim();
+		const createdAt = this.getDateRangeFilter(
+			filters.createdFrom,
+			filters.createdTo
+		);
+
+		if (audience) where.targetAudience = audience;
+		if (adminId) where.adminId = adminId;
+		if (createdAt) where.createdAt = createdAt;
+
+		return where;
+	}
+
+	private normalizePlan(value?: string) {
+		return this.normalizeEnumValue(value, Plan, 'Некорректный тариф');
+	}
+
+	private normalizeSubscriptionStatus(value?: string) {
+		return this.normalizeEnumValue(
+			value,
+			SubscriptionStatus,
+			'Некорректный статус подписки'
+		);
+	}
+
+	private normalizeBillingPeriod(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (normalized === 'NONE') {
+			return null;
+		}
+
+		return this.normalizeEnumValue(
+			normalized,
+			BillingPeriod,
+			'Некорректный период подписки'
+		);
+	}
+
+	private normalizeSubscriptionBonusAudience(value?: string) {
+		return this.normalizeEnumValue(
+			value,
+			SubscriptionBonusAudience,
+			'Некорректная аудитория начисления'
+		);
+	}
+
+	private normalizeEnumValue<T extends Record<string, string>>(
+		value: string | undefined,
+		enumValues: T,
+		errorMessage: string
+	): T[keyof T] | undefined {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (!Object.values(enumValues).includes(normalized)) {
+			throw new BadRequestException(errorMessage);
+		}
+
+		return normalized as T[keyof T];
+	}
+
+	private getDateRangeFilter(from?: string, to?: string) {
+		const gte = this.normalizeDate(from, false);
+		const lte = this.normalizeDate(to, true);
+
+		if (!gte && !lte) {
+			return undefined;
+		}
+
+		return {
+			...(gte ? { gte } : {}),
+			...(lte ? { lte } : {})
+		};
+	}
+
+	private normalizeDate(value?: string, endOfDay = false) {
+		const normalized = value?.trim();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		const date = new Date(
+			endOfDay
+				? `${normalized}T23:59:59.999Z`
+				: `${normalized}T00:00:00.000Z`
+		);
+
+		if (Number.isNaN(date.getTime())) {
+			throw new BadRequestException('Некорректная дата фильтра');
+		}
+
+		return date;
 	}
 }

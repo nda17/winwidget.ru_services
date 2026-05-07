@@ -16,6 +16,7 @@ import {
 	Payment,
 	PaymentStatus,
 	Plan,
+	Prisma,
 	SubscriptionStatus
 } from '@prisma/client';
 
@@ -29,6 +30,15 @@ type AdminPaymentWithUser = Payment & {
 		}>;
 	};
 };
+
+export interface AdminPaymentFilters {
+	status?: string;
+	plan?: string;
+	billingPeriod?: string;
+	createdFrom?: string;
+	createdTo?: string;
+	search?: string;
+}
 
 @Injectable()
 export class PaymentService {
@@ -194,14 +204,15 @@ export class PaymentService {
 		};
 	}
 
-	async adminGetPayments(page = 1, limit = 20, status?: string) {
+	async adminGetPayments(
+		page = 1,
+		limit = 20,
+		filters: AdminPaymentFilters = {}
+	) {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
-		const normalizedStatus = this.normalizeAdminPaymentStatus(status);
-		const where = normalizedStatus
-			? { status: normalizedStatus }
-			: undefined;
+		const where = this.getAdminPaymentWhere(filters);
 		const skip = (normalizedPage - 1) * normalizedLimit;
 
 		const [payments, total] = await this.prisma.$transaction([
@@ -258,6 +269,143 @@ export class PaymentService {
 		}
 
 		return normalizedStatus as PaymentStatus;
+	}
+
+	private getAdminPaymentWhere(
+		filters: AdminPaymentFilters
+	): Prisma.PaymentWhereInput | undefined {
+		const and: Prisma.PaymentWhereInput[] = [];
+		const status = this.normalizeAdminPaymentStatus(filters.status);
+		const plan = this.normalizeAdminPaymentPlan(filters.plan);
+		const billingPeriod = this.normalizeAdminPaymentBillingPeriod(
+			filters.billingPeriod
+		);
+		const createdAt = this.getDateRangeFilter(
+			filters.createdFrom,
+			filters.createdTo
+		);
+		const search = filters.search?.trim();
+
+		if (status) and.push({ status });
+		if (plan !== undefined) and.push({ plan });
+		if (billingPeriod !== undefined) and.push({ billingPeriod });
+		if (createdAt) and.push({ createdAt });
+
+		if (search) {
+			and.push({
+				OR: [
+					{
+						id: {
+							contains: search,
+							mode: 'insensitive'
+						}
+					},
+					{
+						yookassaId: {
+							contains: search,
+							mode: 'insensitive'
+						}
+					},
+					{
+						user: {
+							name: {
+								contains: search,
+								mode: 'insensitive'
+							}
+						}
+					},
+					{
+						user: {
+							authIdentities: {
+								some: {
+									type: {
+										in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
+									},
+									value: {
+										contains: search,
+										mode: 'insensitive'
+									}
+								}
+							}
+						}
+					}
+				]
+			});
+		}
+
+		return and.length ? { AND: and } : undefined;
+	}
+
+	private normalizeAdminPaymentPlan(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (normalized === 'NONE') {
+			return null;
+		}
+
+		if (!Object.values(Plan).includes(normalized as Plan)) {
+			throw new BadRequestException('Некорректный тариф платежа');
+		}
+
+		return normalized as Plan;
+	}
+
+	private normalizeAdminPaymentBillingPeriod(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (normalized === 'NONE') {
+			return null;
+		}
+
+		if (
+			!Object.values(BillingPeriod).includes(normalized as BillingPeriod)
+		) {
+			throw new BadRequestException('Некорректный период платежа');
+		}
+
+		return normalized as BillingPeriod;
+	}
+
+	private getDateRangeFilter(from?: string, to?: string) {
+		const gte = this.normalizeDate(from, false);
+		const lte = this.normalizeDate(to, true);
+
+		if (!gte && !lte) {
+			return undefined;
+		}
+
+		return {
+			...(gte ? { gte } : {}),
+			...(lte ? { lte } : {})
+		};
+	}
+
+	private normalizeDate(value?: string, endOfDay = false) {
+		const normalized = value?.trim();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		const date = new Date(
+			endOfDay
+				? `${normalized}T23:59:59.999Z`
+				: `${normalized}T00:00:00.000Z`
+		);
+
+		if (Number.isNaN(date.getTime())) {
+			throw new BadRequestException('Некорректная дата фильтра');
+		}
+
+		return date;
 	}
 
 	async adminCheckPayment(paymentId: string) {

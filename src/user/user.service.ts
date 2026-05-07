@@ -8,7 +8,11 @@ import { PrismaService } from '@/prisma.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
 import { UpdateUserDto } from '@/user/dto/update-user.dto';
 import { normalizePhone } from '@/utils/phone.util';
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+	BadRequestException,
+	Injectable,
+	NotFoundException
+} from '@nestjs/common';
 import {
 	AuthIdentityType,
 	PaymentStatus,
@@ -40,6 +44,13 @@ export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
 	isPhoneVerified: boolean;
 	loginMethods: PublicUserLoginMethod[];
 };
+
+export interface AdminUserListFilters {
+	role?: string;
+	registeredFrom?: string;
+	registeredTo?: string;
+	subscription?: string;
+}
 
 type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX';
 export type OverviewWidgetType =
@@ -88,36 +99,20 @@ export class UserService {
 		private readonly fileService: FileService
 	) {}
 
-	async getUserList(searchTerm?: string, page = 1, limit = 20) {
+	async getUserList(
+		searchTerm?: string,
+		page = 1,
+		limit = 20,
+		filters: AdminUserListFilters = {}
+	) {
 		const normalizedSearchTerm = searchTerm?.trim();
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
-		const where: Prisma.UserWhereInput | undefined = normalizedSearchTerm
-			? {
-					OR: [
-						{
-							name: {
-								contains: normalizedSearchTerm,
-								mode: 'insensitive'
-							}
-						},
-						{
-							authIdentities: {
-								some: {
-									type: {
-										in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
-									},
-									value: {
-										contains: normalizedSearchTerm,
-										mode: 'insensitive'
-									}
-								}
-							}
-						}
-					]
-				}
-			: undefined;
+		const where = this.getAdminUserListWhere(
+			normalizedSearchTerm,
+			filters
+		);
 		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [users, total] = await Promise.all([
 			this.prisma.user.findMany({
@@ -1057,6 +1052,156 @@ export class UserService {
 		return typeof buttonImageUrl === 'string' && buttonImageUrl.trim()
 			? buttonImageUrl
 			: null;
+	}
+
+	private getAdminUserListWhere(
+		normalizedSearchTerm: string | undefined,
+		filters: AdminUserListFilters
+	): Prisma.UserWhereInput | undefined {
+		const and: Prisma.UserWhereInput[] = [];
+		const role = this.normalizeUserRole(filters.role);
+		const subscriptionFilter = this.normalizeSubscriptionPresence(
+			filters.subscription
+		);
+		const createdAt = this.getDateRangeFilter(
+			filters.registeredFrom,
+			filters.registeredTo
+		);
+
+		if (normalizedSearchTerm) {
+			and.push({
+				OR: [
+					{
+						name: {
+							contains: normalizedSearchTerm,
+							mode: 'insensitive'
+						}
+					},
+					{
+						authIdentities: {
+							some: {
+								type: {
+									in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
+								},
+								value: {
+									contains: normalizedSearchTerm,
+									mode: 'insensitive'
+								}
+							}
+						}
+					}
+				]
+			});
+		}
+
+		if (role) {
+			and.push(this.getRoleWhere(role));
+		}
+
+		if (createdAt) {
+			and.push({ createdAt });
+		}
+
+		if (subscriptionFilter === 'HAS') {
+			and.push({
+				subscription: {
+					isNot: null
+				}
+			});
+		}
+
+		if (subscriptionFilter === 'NONE') {
+			and.push({
+				subscription: {
+					is: null
+				}
+			});
+		}
+
+		return and.length ? { AND: and } : undefined;
+	}
+
+	private normalizeUserRole(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (!Object.values(Role).includes(normalized as Role)) {
+			throw new BadRequestException('Некорректная роль пользователя');
+		}
+
+		return normalized as Role;
+	}
+
+	private getRoleWhere(role: Role): Prisma.UserWhereInput {
+		if (role === Role.ADMIN) {
+			return {
+				rights: {
+					has: Role.ADMIN
+				}
+			};
+		}
+
+		return {
+			rights: {
+				has: Role.USER
+			},
+			NOT: {
+				rights: {
+					has: Role.ADMIN
+				}
+			}
+		};
+	}
+
+	private normalizeSubscriptionPresence(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		if (normalized !== 'HAS' && normalized !== 'NONE') {
+			throw new BadRequestException('Некорректный фильтр подписки');
+		}
+
+		return normalized;
+	}
+
+	private getDateRangeFilter(from?: string, to?: string) {
+		const gte = this.normalizeDate(from, false);
+		const lte = this.normalizeDate(to, true);
+
+		if (!gte && !lte) {
+			return undefined;
+		}
+
+		return {
+			...(gte ? { gte } : {}),
+			...(lte ? { lte } : {})
+		};
+	}
+
+	private normalizeDate(value?: string, endOfDay = false) {
+		const normalized = value?.trim();
+
+		if (!normalized) {
+			return undefined;
+		}
+
+		const date = new Date(
+			endOfDay
+				? `${normalized}T23:59:59.999Z`
+				: `${normalized}T00:00:00.000Z`
+		);
+
+		if (Number.isNaN(date.getTime())) {
+			throw new BadRequestException('Некорректная дата фильтра');
+		}
+
+		return date;
 	}
 
 	toPublicUser(user: UserWithAuthIdentities): PublicUser {

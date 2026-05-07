@@ -49,11 +49,23 @@ export class SubscriptionController {
 	@Get('admin/list')
 	async adminGetAll(
 		@Query('page') page?: string,
-		@Query('limit') limit?: string
+		@Query('limit') limit?: string,
+		@Query('plan') plan?: string,
+		@Query('status') status?: string,
+		@Query('billingPeriod') billingPeriod?: string,
+		@Query('expiresFrom') expiresFrom?: string,
+		@Query('expiresTo') expiresTo?: string
 	) {
 		return this.subscriptionService.adminGetAllSubscriptions(
 			page ? parseInt(page, 10) : 1,
-			limit ? parseInt(limit, 10) : 15
+			limit ? parseInt(limit, 10) : 15,
+			{
+				plan,
+				status,
+				billingPeriod,
+				expiresFrom,
+				expiresTo
+			}
 		);
 	}
 
@@ -62,11 +74,21 @@ export class SubscriptionController {
 	@Get('admin/history')
 	async adminGetHistory(
 		@Query('page') page?: string,
-		@Query('limit') limit?: string
+		@Query('limit') limit?: string,
+		@Query('audience') audience?: string,
+		@Query('adminId') adminId?: string,
+		@Query('createdFrom') createdFrom?: string,
+		@Query('createdTo') createdTo?: string
 	) {
 		return this.subscriptionService.adminGetSubscriptionHistory(
 			page ? parseInt(page, 10) : 1,
-			limit ? parseInt(limit, 10) : 10
+			limit ? parseInt(limit, 10) : 10,
+			{
+				audience,
+				adminId,
+				createdFrom,
+				createdTo
+			}
 		);
 	}
 
