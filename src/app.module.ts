@@ -10,6 +10,7 @@ import { SiteSettingsService } from '@/site-settings/site-settings.service';
 import { StatisticsModule } from '@/statistics/statistics.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
+import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { UserModule } from '@/user/user.module';
 import { WidgetModule } from '@/widget/widget.module';
 import { QuizModule } from '@/quiz/quiz.module';
@@ -49,6 +50,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		NotesModule,
 		MailingModule,
 		HealthModule,
+		TelegramBotModule,
 		AdminEventLogModule
 	]
 })

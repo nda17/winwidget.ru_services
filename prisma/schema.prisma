@@ -407,6 +407,17 @@ model SiteSettings {
   @@map("site_settings")
 }
 
+model TelegramBotSettings {
+  id                              String    @id @default("singleton")
+  dailySummaryEnabled             Boolean   @default(false) @map("daily_summary_enabled")
+  dailySummaryChatId              String    @default("") @map("daily_summary_chat_id")
+  dailySummaryLastSentPeriodStart DateTime? @map("daily_summary_last_sent_period_start")
+  dailySummaryLastSentAt          DateTime? @map("daily_summary_last_sent_at")
+  updatedAt                       DateTime  @updatedAt @map("updated_at")
+
+  @@map("telegram_bot_settings")
+}
+
 model LegalPage {
   slug      String   @id
   content   String   @default("")

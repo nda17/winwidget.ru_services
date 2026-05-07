@@ -9,7 +9,8 @@ export type AdminEventLogSection =
 	| 'TASKS'
 	| 'SUBSCRIPTIONS'
 	| 'USERS'
-	| 'BACKLOG';
+	| 'BACKLOG'
+	| 'TELEGRAM_BOT';
 
 export type AdminEventLogAction =
 	| 'PAYMENT_MANUAL_CHECK'
@@ -25,7 +26,8 @@ export type AdminEventLogAction =
 	| 'USER_DELETE'
 	| 'BACKLOG_TASK_CREATE'
 	| 'BACKLOG_TASK_UPDATE'
-	| 'BACKLOG_TASK_DELETE';
+	| 'BACKLOG_TASK_DELETE'
+	| 'TELEGRAM_BOT_SETTINGS_UPDATE';
 
 const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
 	'PAYMENTS',
@@ -33,7 +35,8 @@ const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
 	'TASKS',
 	'SUBSCRIPTIONS',
 	'USERS',
-	'BACKLOG'
+	'BACKLOG',
+	'TELEGRAM_BOT'
 ];
 
 const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
@@ -50,7 +53,8 @@ const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
 	'USER_DELETE',
 	'BACKLOG_TASK_CREATE',
 	'BACKLOG_TASK_UPDATE',
-	'BACKLOG_TASK_DELETE'
+	'BACKLOG_TASK_DELETE',
+	'TELEGRAM_BOT_SETTINGS_UPDATE'
 ];
 
 interface AdminEventLogRecordInput {
