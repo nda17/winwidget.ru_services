@@ -304,6 +304,8 @@ export class CallbackService {
 			callback.userId
 		);
 		const isActive = callback.isActive && sub?.status === 'ACTIVE';
+		const hasActiveHardSubscription =
+			sub?.status === SubscriptionStatus.ACTIVE && sub?.plan === Plan.HARD;
 
 		let canAcceptLeads = isActive;
 		if (isActive && sub) {
@@ -338,9 +340,9 @@ export class CallbackService {
 			buttonSize: config.buttonSize ?? 60,
 			buttonImageUrl: this.fileService.getWidgetButtonImageUrl(
 				config.buttonImageUrl,
-				sub?.status === SubscriptionStatus.ACTIVE &&
-					sub?.plan === Plan.HARD
+				hasActiveHardSubscription
 			),
+			hideBranding: hasActiveHardSubscription,
 			autoOpenDelay: config.autoOpenDelay || null,
 			bubbleEnabled: config.bubbleEnabled !== false,
 			bubbleText: config.bubbleText || config.title || 'Перезвоним!',
@@ -350,7 +352,8 @@ export class CallbackService {
 			successTitle: config.successTitle || 'Спасибо! Мы перезвоним',
 			successSubtitle: config.successSubtitle || '',
 			privacyUrl: config.privacyUrl || null,
-			developInfoActive: config.developInfoActive !== false,
+			developInfoActive:
+				config.developInfoActive !== false && !hasActiveHardSubscription,
 			filterDuplicates: config.filterDuplicates === true,
 			timeSlots: config.timeSlots || [],
 			hasSubmittedByIp,
