@@ -99,6 +99,34 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 		code: 'email_code_resend_cooldown',
 		message: 'Отправить код повторно можно немного позже.'
 	},
+	'Telegram auth bot not configured': {
+		code: 'telegram_auth_bot_not_configured',
+		message: 'Auth_bot не настроен. Попробуйте другой способ входа.'
+	},
+	'Telegram auth request not found': {
+		code: 'telegram_auth_request_not_found',
+		message: 'Сессия входа через Telegram не найдена или истекла.'
+	},
+	'Telegram verification code not found': {
+		code: 'telegram_code_not_found',
+		message: 'Код Telegram не найден или истёк.'
+	},
+	'Telegram verification code invalid': {
+		code: 'telegram_code_invalid',
+		message: 'Неверный код Telegram.'
+	},
+	'Telegram verification code attempts exceeded': {
+		code: 'telegram_code_attempts_exceeded',
+		message: 'Лимит попыток исчерпан. Запросите новый код.'
+	},
+	'Telegram auth webhook secret invalid': {
+		code: 'telegram_auth_webhook_secret_invalid',
+		message: 'Некорректный секрет webhook Auth_bot.'
+	},
+	'Telegram auth bot request failed': {
+		code: 'telegram_auth_bot_request_failed',
+		message: 'Auth_bot не смог отправить сообщение. Попробуйте позже.'
+	},
 	'Email registration not completed': {
 		code: 'email_registration_not_completed',
 		message:

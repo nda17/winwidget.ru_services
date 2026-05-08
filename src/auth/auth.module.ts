@@ -10,6 +10,8 @@ import { SocialMediaAuthService } from '@/auth/social-media/social-media-auth.se
 import { GithubStrategy } from '@/auth/strategies/github.strategy';
 import { GoogleStrategy } from '@/auth/strategies/google.strategy';
 import { JwtStrategy } from '@/auth/strategies/jwt.strategy';
+import { TelegramAuthController } from '@/auth/telegram-auth/telegram-auth.controller';
+import { TelegramAuthService } from '@/auth/telegram-auth/telegram-auth.service';
 import { VerificationChallengeCleanupService } from '@/auth/verification-challenge-cleanup.service';
 import { getJwtConfig } from '@/config/jwt.config';
 import { EmailModule } from '@/email/email.module';
@@ -34,11 +36,16 @@ import { JwtModule } from '@nestjs/jwt';
 		SiteSettingsModule,
 		AdminEventLogModule
 	],
-	controllers: [AuthController, SocialMediaAuthController],
+	controllers: [
+		AuthController,
+		SocialMediaAuthController,
+		TelegramAuthController
+	],
 	providers: [
 		JwtStrategy,
 		PrismaService,
 		AuthService,
+		TelegramAuthService,
 		VerificationChallengeCleanupService,
 		RefreshTokenService,
 		AuthRateLimitGuard,

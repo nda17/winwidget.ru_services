@@ -311,22 +311,28 @@ model AuthIdentity {
 }
 
 model VerificationChallenge {
-  id           String                       @id @default(cuid())
-  userId       String?                      @map("user_id")
-  type         VerificationChallengeType
-  purpose      VerificationChallengePurpose
-  value        String
-  passwordHash String?                      @map("password_hash")
-  codeHash     String                       @map("code_hash")
-  attempts     Int                          @default(0)
-  expiresAt    DateTime                     @map("expires_at")
-  lastSentAt   DateTime                     @default(now()) @map("last_sent_at")
-  createdAt    DateTime                     @default(now()) @map("created_at")
-  updatedAt    DateTime                     @updatedAt @map("updated_at")
-  user         User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id                String                       @id @default(cuid())
+  userId            String?                      @map("user_id")
+  type              VerificationChallengeType
+  purpose           VerificationChallengePurpose
+  value             String
+  passwordHash      String?                      @map("password_hash")
+  codeHash          String                       @map("code_hash")
+  attempts          Int                          @default(0)
+  telegramUserId    String?                      @map("telegram_user_id")
+  telegramChatId    String?                      @map("telegram_chat_id")
+  telegramUsername  String?                      @map("telegram_username")
+  telegramFirstName String?                      @map("telegram_first_name")
+  telegramLastName  String?                      @map("telegram_last_name")
+  expiresAt         DateTime                     @map("expires_at")
+  lastSentAt        DateTime                     @default(now()) @map("last_sent_at")
+  createdAt         DateTime                     @default(now()) @map("created_at")
+  updatedAt         DateTime                     @updatedAt @map("updated_at")
+  user              User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([userId, type, purpose])
   @@unique([type, purpose, value])
+  @@index([telegramUserId])
   @@index([expiresAt])
   @@map("verification_challenges")
 }
@@ -353,16 +359,19 @@ enum AuthIdentityType {
   GOOGLE
   GITHUB
   YANDEX
+  TELEGRAM
 }
 
 enum VerificationChallengeType {
   EMAIL
   PHONE
+  TELEGRAM
 }
 
 enum VerificationChallengePurpose {
   REGISTER
   BIND_IDENTITY
+  LOGIN
 }
 
 enum Plan {

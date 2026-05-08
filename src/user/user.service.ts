@@ -36,7 +36,8 @@ export type PublicUserLoginMethod =
 	| 'PHONE'
 	| 'GOOGLE'
 	| 'GITHUB'
-	| 'YANDEX';
+	| 'YANDEX'
+	| 'TELEGRAM';
 
 export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
 	email: string | null;
@@ -1264,6 +1265,10 @@ export class UserService {
 
 		if (this.getIdentityByType(user, AuthIdentityType.YANDEX)) {
 			loginMethods.push('YANDEX');
+		}
+
+		if (this.getIdentityByType(user, AuthIdentityType.TELEGRAM)) {
+			loginMethods.push('TELEGRAM');
 		}
 
 		return loginMethods;

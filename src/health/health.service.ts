@@ -30,7 +30,8 @@ export class HealthService {
 			this.checkSmsAero(),
 			this.checkRecaptcha(),
 			this.checkYooKassa(),
-			this.checkTelegram()
+			this.checkInfoTelegramBot(),
+			this.checkAuthTelegramBot()
 		]);
 
 		return {
@@ -227,19 +228,53 @@ export class HealthService {
 		};
 	}
 
-	private async checkTelegram(): Promise<HealthCheck> {
-		const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
+	private async checkInfoTelegramBot(): Promise<HealthCheck> {
+		return this.checkTelegramBot({
+			id: 'telegram_info_bot',
+			title: 'Info_bot',
+			tokenKey: 'TELEGRAM_BOT_TOKEN'
+		});
+	}
 
-		if (!token) {
+	private async checkAuthTelegramBot(): Promise<HealthCheck> {
+		return this.checkTelegramBot({
+			id: 'telegram_auth_bot',
+			title: 'Auth_bot',
+			tokenKey: 'TELEGRAM_AUTH_BOT_TOKEN',
+			usernameKey: 'TELEGRAM_AUTH_BOT_USERNAME'
+		});
+	}
+
+	private async checkTelegramBot({
+		id,
+		title,
+		tokenKey,
+		usernameKey
+	}: {
+		id: string;
+		title: string;
+		tokenKey: string;
+		usernameKey?: string;
+	}): Promise<HealthCheck> {
+		const token = this.configService.get<string>(tokenKey);
+		const username = usernameKey
+			? this.configService.get<string>(usernameKey)
+			: null;
+		const missing = [
+			!token ? tokenKey : null,
+			usernameKey && !username ? usernameKey : null
+		].filter((key): key is string => Boolean(key));
+
+		if (missing.length > 0) {
 			return {
-				id: 'telegram',
-				title: 'Telegram бот',
+				id,
+				title,
 				status: 'warning',
-				message: 'Не настроен TELEGRAM_BOT_TOKEN'
+				message: `Не настроены переменные: ${missing.join(', ')}`
 			};
 		}
 
-		return this.measure('telegram', 'Telegram бот', async () => {
+		return this.measure(id, title, async () => {
 			const response = await this.fetchWithTimeout(
 				`https://api.telegram.org/bot${token}/getMe`
 			);
@@ -253,7 +288,7 @@ export class HealthService {
 				throw new Error('Telegram returned ok=false');
 			}
 
-			return 'Бот отвечает';
+			return `${title} отвечает`;
 		});
 	}
 

@@ -45,10 +45,10 @@ export class TelegramBotController {
 			adminId,
 			section: 'TELEGRAM_BOT',
 			action: 'TELEGRAM_BOT_SETTINGS_UPDATE',
-			description: 'Обновлены настройки Telegram-бота',
+			description: 'Обновлены настройки Info_bot',
 			entityType: 'telegram_bot_settings',
 			entityId: 'singleton',
-			entityLabel: 'Telegram-бот',
+			entityLabel: 'Info_bot',
 			metadata: {
 				dailySummaryEnabled: settings.dailySummaryEnabled,
 				dailySummaryChatIdConfigured: Boolean(

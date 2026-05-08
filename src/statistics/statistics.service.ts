@@ -99,7 +99,8 @@ export class StatisticsService {
 					return (
 						identity.type === AuthIdentityType.EMAIL ||
 						identity.type === AuthIdentityType.GOOGLE ||
-						identity.type === AuthIdentityType.GITHUB
+						identity.type === AuthIdentityType.GITHUB ||
+						identity.type === AuthIdentityType.TELEGRAM
 					);
 				});
 
