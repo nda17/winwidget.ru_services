@@ -53,7 +53,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	constructor(private readonly prisma: PrismaService) {}
 
-	onModuleInit() {
+	async onModuleInit() {
+		await this.sendMissedDailySummaryIfNeeded();
 		this.scheduleDailySummary();
 	}
 
@@ -158,6 +159,27 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}, delay);
 
 		this.summaryTimeout.unref?.();
+	}
+
+	private async sendMissedDailySummaryIfNeeded() {
+		if (!this.shouldRunStartupDailySummary()) {
+			return;
+		}
+
+		try {
+			const sent = await this.sendDailySummaryIfEnabled();
+			this.logger.log(
+				sent
+					? 'Missed Telegram daily summary sent on startup.'
+					: 'No missed Telegram daily summary to send on startup.'
+			);
+		} catch (error) {
+			this.logger.error(
+				`Telegram daily summary startup check failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
+		}
 	}
 
 	private async sendDailySummaryIfEnabled() {
@@ -454,5 +476,20 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		return new Date(shiftedNextRun.getTime() - offsetMs);
+	}
+
+	private shouldRunStartupDailySummary() {
+		const offsetMs = this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000;
+		const shiftedNow = new Date(Date.now() + offsetMs);
+		const shiftedRun = new Date(shiftedNow);
+
+		shiftedRun.setUTCHours(
+			this.DAILY_SUMMARY_HOUR_MOSCOW,
+			this.DAILY_SUMMARY_MINUTE_MOSCOW,
+			0,
+			0
+		);
+
+		return shiftedNow.getTime() >= shiftedRun.getTime();
 	}
 }

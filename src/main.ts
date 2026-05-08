@@ -86,13 +86,20 @@ export const bootstrap = async () => {
 	});
 
 	const port = process.env.PORT || 5000;
-
-	await app.listen(port, () =>
+	const listenHost = process.env.API_LISTEN_HOST?.trim();
+	const displayHost = listenHost || 'localhost';
+	const onListen = () =>
 		console.info(
-			`🚀🚀🚀 Server running in ${process.env.MODE} mode at http://localhost:${port} 🚀🚀🚀`
+			`🚀🚀🚀 Server running in ${process.env.MODE} mode at http://${displayHost}:${port} 🚀🚀🚀`
 				.bgRed.bold
-		)
-	);
+		);
+
+	if (listenHost) {
+		await app.listen(port, listenHost, onListen);
+		return;
+	}
+
+	await app.listen(port, onListen);
 };
 
 bootstrap();
