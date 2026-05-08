@@ -399,6 +399,8 @@ export class QuizService {
 			quiz.userId
 		);
 		const isActive = quiz.isActive && sub?.status === 'ACTIVE';
+		const hasActiveHardSubscription =
+			sub?.status === SubscriptionStatus.ACTIVE && sub?.plan === Plan.HARD;
 
 		let canAcceptLeads = isActive;
 		if (isActive && sub) {
@@ -445,9 +447,9 @@ export class QuizService {
 			buttonSize: config.buttonSize ?? 60,
 			buttonImageUrl: this.fileService.getWidgetButtonImageUrl(
 				config.buttonImageUrl,
-				sub?.status === SubscriptionStatus.ACTIVE &&
-					sub?.plan === Plan.HARD
+				hasActiveHardSubscription
 			),
+			hideBranding: hasActiveHardSubscription,
 			bubbleEnabled: config.bubbleEnabled !== false,
 			bubbleText: config.bubbleText || 'Пройдите квиз!',
 			autoOpenDelay: config.autoOpenDelay || null,
@@ -458,7 +460,8 @@ export class QuizService {
 				config.contactTitle || 'Оставьте контакт для получения результата',
 			dataType: (config.dataType || 'PHONE').toUpperCase(),
 			privacyUrl: config.privacyUrl || null,
-			developInfoActive: config.developInfoActive !== false,
+			developInfoActive:
+				config.developInfoActive !== false && !hasActiveHardSubscription,
 			alreadyPlayedTitle:
 				config.alreadyPlayedTitle || '🎉 Вы уже проходили этот квиз!',
 			alreadyPlayedSubtitle:

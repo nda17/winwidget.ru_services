@@ -495,7 +495,10 @@
 		var answers = [];
 		var brand = shadow.getElementById('wq-brand');
 		if (brand) {
-			brand.style.display = cfg.developInfoActive === false ? 'none' : '';
+			brand.style.display =
+				cfg.developInfoActive === false || cfg.hideBranding === true
+					? 'none'
+					: '';
 		}
 
 		_pulseEnabled = cfg.buttonPulse !== false;

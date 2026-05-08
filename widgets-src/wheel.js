@@ -736,7 +736,7 @@
         </div>
       </div>
 
-      ${config.developInfoActive ? `<div id='dev-info'>Сделано в&nbsp;<a id='dev-info-text' href='https://winwidget.ru' target='_blank' rel='noopener'>winwidget.ru</a></div>` : ``}
+      ${config.developInfoActive && config.hideBranding !== true ? `<div id='dev-info'>Сделано в&nbsp;<a id='dev-info-text' href='https://winwidget.ru' target='_blank' rel='noopener'>winwidget.ru</a></div>` : ``}
     </div>
   </div>
 `;
@@ -1591,6 +1591,7 @@
 			winningAdviceActive: !!server.winMessage,
 			winningAdviceText: server.winMessage || '',
 			developInfoActive: server.developInfoActive !== false,
+			hideBranding: server.hideBranding === true,
 			devModeActive: false,
 			confettiEffectActive: true,
 			autoOpenSeconds: server.autoOpenDelay

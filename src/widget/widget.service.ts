@@ -375,6 +375,8 @@ export class WidgetService {
 			widget.userId
 		);
 		const isActive = widget.isActive && sub?.status === 'ACTIVE';
+		const hasActiveHardSubscription =
+			sub?.status === SubscriptionStatus.ACTIVE && sub?.plan === Plan.HARD;
 
 		let canAcceptLeads = isActive;
 		if (isActive && sub) {
@@ -434,6 +436,8 @@ export class WidgetService {
 			autoOpenDelay: config.autoOpenDelay || null,
 			privacyUrl: config.privacyUrl || null,
 			dataType,
+			developInfoActive:
+				config.developInfoActive !== false && !hasActiveHardSubscription,
 			spinDuration: config.spinDuration ?? 5,
 			buttonSide: config.buttonSide || 'right',
 			buttonPulse: config.buttonPulse !== false,
@@ -442,9 +446,9 @@ export class WidgetService {
 			buttonSize: config.buttonSize ?? 60,
 			buttonImageUrl: this.fileService.getWidgetButtonImageUrl(
 				config.buttonImageUrl,
-				sub?.status === SubscriptionStatus.ACTIVE &&
-					sub?.plan === Plan.HARD
+				hasActiveHardSubscription
 			),
+			hideBranding: hasActiveHardSubscription,
 			bubbleEnabled: config.bubbleEnabled !== false,
 			bubbleText: config.bubbleText || 'Испытайте удачу!',
 			alreadyPlayedTitle:

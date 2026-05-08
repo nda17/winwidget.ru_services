@@ -314,6 +314,8 @@ export class CountdownTimerService {
 		);
 		const dataType = (config.dataType || 'NONE').toUpperCase();
 		const isActive = timer.isActive && sub?.status === 'ACTIVE';
+		const hasActiveHardSubscription =
+			sub?.status === SubscriptionStatus.ACTIVE && sub?.plan === Plan.HARD;
 
 		let canShowWidget = isActive;
 		if (isActive && sub && dataType !== 'NONE') {
@@ -361,9 +363,9 @@ export class CountdownTimerService {
 			buttonSize: config.buttonSize ?? 60,
 			buttonImageUrl: this.fileService.getWidgetButtonImageUrl(
 				config.buttonImageUrl,
-				sub?.status === SubscriptionStatus.ACTIVE &&
-					sub?.plan === Plan.HARD
+				hasActiveHardSubscription
 			),
+			hideBranding: hasActiveHardSubscription,
 			autoOpenDelay: config.autoOpenDelay || null,
 			bubbleText: config.bubbleText || 'Акция',
 			title: config.title || 'Скидка ограничена по времени',
@@ -384,7 +386,8 @@ export class CountdownTimerService {
 			actionButtonText: config.actionButtonText || 'Перейти к акции',
 			actionButtonUrl: config.actionButtonUrl || '',
 			privacyUrl: config.privacyUrl || null,
-			developInfoActive: config.developInfoActive !== false,
+			developInfoActive:
+				config.developInfoActive !== false && !hasActiveHardSubscription,
 			filterDuplicates: config.filterDuplicates === true,
 			submissionCooldownDays: config.submissionCooldownDays ?? 0,
 			timerResetToken: config.timerResetToken || '',

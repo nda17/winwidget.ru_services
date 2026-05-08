@@ -417,7 +417,10 @@
 	// ─── Build modal content ──────────────────────────────────────────────────
 
 	function buildBrand() {
-		if (cfg && cfg.developInfoActive === false)
+		if (
+			cfg &&
+			(cfg.developInfoActive === false || cfg.hideBranding === true)
+		)
 			return document.createDocumentFragment();
 		var wrap = document.createElement('div');
 		wrap.id = 'wcb-brand';

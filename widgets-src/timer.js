@@ -511,7 +511,10 @@
 	}
 
 	function buildBrand() {
-		if (cfg && cfg.developInfoActive === false)
+		if (
+			cfg &&
+			(cfg.developInfoActive === false || cfg.hideBranding === true)
+		)
 			return document.createDocumentFragment();
 		var brand = el('div', {
 			textAlign: 'center',
