@@ -1,9 +1,13 @@
+import { randomBytes } from 'node:crypto';
 import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
 import { SmsService } from '@/sms/sms.service';
 import { UserService } from '@/user/user.service';
 import { normalizeEmail } from '@/utils/email.util';
-import { PASSWORD_SALT_ROUNDS } from '@/utils/auth.constants';
+import {
+	PASSWORD_SALT_ROUNDS,
+	TELEGRAM_AUTH_NOT_CONFIGURED
+} from '@/utils/auth.constants';
 import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
@@ -29,6 +33,7 @@ type PendingBindingResponse = {
 export class UserIdentityBindingService {
 	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10;
 	private readonly PHONE_CODE_EXPIRATION_MINUTES = 5;
+	private readonly TELEGRAM_BINDING_EXPIRATION_MINUTES = 15;
 	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5;
 	private readonly PHONE_CODE_MAX_ATTEMPTS = 5;
 	private readonly CODE_RESEND_COOLDOWN_SECONDS = 60;
@@ -190,6 +195,71 @@ export class UserIdentityBindingService {
 		);
 
 		return this.userService.getPublicUserById(pendingBinding.userId!);
+	}
+
+	async startTelegramBinding(userId: string) {
+		this.ensureTelegramBotConfigured();
+
+		const user = await this.userService.getUserById(userId);
+
+		if (!user) {
+			throw new NotFoundException('User not found');
+		}
+
+		const currentIdentity = user.authIdentities.find(
+			identity => identity.type === AuthIdentityType.TELEGRAM
+		);
+
+		if (currentIdentity) {
+			throw new BadRequestException('Telegram already linked');
+		}
+
+		await this.deleteExpiredTelegramBindings();
+
+		const requestId = randomBytes(16).toString('hex');
+		const codeHash = await hash(requestId, PASSWORD_SALT_ROUNDS);
+		const now = new Date();
+		const expiresAt = new Date(
+			now.getTime() + this.TELEGRAM_BINDING_EXPIRATION_MINUTES * 60 * 1000
+		);
+
+		await this.prisma.verificationChallenge.upsert({
+			where: {
+				userId_type_purpose: {
+					userId,
+					type: VerificationChallengeType.TELEGRAM,
+					purpose: VerificationChallengePurpose.BIND_IDENTITY
+				}
+			},
+			update: {
+				value: requestId,
+				passwordHash: null,
+				codeHash,
+				attempts: 0,
+				telegramUserId: null,
+				telegramChatId: null,
+				telegramUsername: null,
+				telegramFirstName: null,
+				telegramLastName: null,
+				expiresAt,
+				lastSentAt: now
+			},
+			create: {
+				userId,
+				type: VerificationChallengeType.TELEGRAM,
+				purpose: VerificationChallengePurpose.BIND_IDENTITY,
+				value: requestId,
+				codeHash,
+				expiresAt,
+				lastSentAt: now
+			}
+		});
+
+		return {
+			requestId,
+			botUrl: `https://t.me/${this.getTelegramBotUsername()}?start=${requestId}`,
+			expiresAt
+		};
 	}
 
 	private async upsertPendingBinding({
@@ -477,6 +547,35 @@ export class UserIdentityBindingService {
 		return type === VerificationChallengeType.EMAIL
 			? AuthIdentityType.EMAIL
 			: AuthIdentityType.PHONE;
+	}
+
+	private async deleteExpiredTelegramBindings() {
+		await this.prisma.verificationChallenge.deleteMany({
+			where: {
+				type: VerificationChallengeType.TELEGRAM,
+				purpose: VerificationChallengePurpose.BIND_IDENTITY,
+				expiresAt: {
+					lt: new Date()
+				}
+			}
+		});
+	}
+
+	private ensureTelegramBotConfigured() {
+		if (!process.env.TELEGRAM_AUTH_BOT_TOKEN?.trim()) {
+			throw new BadRequestException(TELEGRAM_AUTH_NOT_CONFIGURED);
+		}
+
+		if (!this.getTelegramBotUsername()) {
+			throw new BadRequestException(TELEGRAM_AUTH_NOT_CONFIGURED);
+		}
+	}
+
+	private getTelegramBotUsername() {
+		return (
+			process.env.TELEGRAM_AUTH_BOT_USERNAME?.trim().replace(/^@/, '') ??
+			''
+		);
 	}
 
 	private generateCode() {

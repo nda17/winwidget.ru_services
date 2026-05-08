@@ -135,6 +135,10 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 		code: 'telegram_auth_bot_request_failed',
 		message: 'Auth_bot не смог отправить сообщение. Попробуйте позже.'
 	},
+	'Telegram already linked': {
+		code: 'telegram_already_linked',
+		message: 'Telegram уже привязан к вашему профилю.'
+	},
 	'Email registration not completed': {
 		code: 'email_registration_not_completed',
 		message:

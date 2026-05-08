@@ -104,6 +104,13 @@ export class UserController {
 	}
 
 	@HttpCode(200)
+	@Auth()
+	@Post('profile/bind/telegram/start')
+	async startProfileTelegramBinding(@CurrentUser('id') id: string) {
+		return this.userIdentityBindingService.startTelegramBinding(id);
+	}
+
+	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('user-list')
 	async getUserList(

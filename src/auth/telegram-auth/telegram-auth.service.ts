@@ -91,7 +91,7 @@ export class TelegramAuthService {
 	}
 
 	async verify(requestId: string, code: string) {
-		const request = await this.getActiveRequest(requestId);
+		const request = await this.getActiveLoginRequest(requestId);
 
 		if (!request) {
 			throw new UnauthorizedException(TELEGRAM_AUTH_REQUEST_NOT_FOUND);
@@ -126,7 +126,7 @@ export class TelegramAuthService {
 					type_purpose_value: {
 						type: VerificationChallengeType.TELEGRAM,
 						purpose: VerificationChallengePurpose.LOGIN,
-						value: requestId
+						value: request.value
 					}
 				},
 				data: {
@@ -172,7 +172,7 @@ export class TelegramAuthService {
 			return;
 		}
 
-		const request = await this.getActiveRequest(requestId);
+		const request = await this.getActiveWebhookRequest(requestId);
 
 		if (!request) {
 			await this.sendMessage(
@@ -182,14 +182,21 @@ export class TelegramAuthService {
 			return;
 		}
 
+		const isBinding =
+			request.purpose === VerificationChallengePurpose.BIND_IDENTITY;
+
 		await this.sendMessage(
 			message.chat.id,
-			'Нажмите кнопку ниже, чтобы получить код для входа в сервис winwidget.',
+			isBinding
+				? 'Нажмите кнопку ниже, чтобы привязать Telegram к профилю winwidget.'
+				: 'Нажмите кнопку ниже, чтобы получить код для входа в сервис winwidget.',
 			{
 				inline_keyboard: [
 					[
 						{
-							text: 'Получить код для входа в winwidget',
+							text: isBinding
+								? 'Привязать Telegram к winwidget'
+								: 'Получить код для входа в winwidget',
 							callback_data: `${this.CALLBACK_PREFIX}${requestId}`
 						}
 					]
@@ -207,7 +214,7 @@ export class TelegramAuthService {
 			.slice(this.CALLBACK_PREFIX.length)
 			.trim();
 		const chatId = callbackQuery.message?.chat.id ?? callbackQuery.from.id;
-		const request = await this.getActiveRequest(requestId);
+		const request = await this.getActiveWebhookRequest(requestId);
 
 		if (!request) {
 			await this.answerCallbackQuery(
@@ -221,6 +228,19 @@ export class TelegramAuthService {
 			return;
 		}
 
+		if (request.purpose === VerificationChallengePurpose.BIND_IDENTITY) {
+			await this.handleBindingCallback(callbackQuery, request, chatId);
+			return;
+		}
+
+		await this.handleLoginCallback(callbackQuery, request, chatId);
+	}
+
+	private async handleLoginCallback(
+		callbackQuery: TelegramCallbackQuery,
+		request: VerificationChallenge,
+		chatId: string | number
+	) {
 		const telegramUserId = String(callbackQuery.from.id);
 
 		if (
@@ -245,7 +265,7 @@ export class TelegramAuthService {
 				type_purpose_value: {
 					type: VerificationChallengeType.TELEGRAM,
 					purpose: VerificationChallengePurpose.LOGIN,
-					value: requestId
+					value: request.value
 				}
 			},
 			data: {
@@ -265,6 +285,86 @@ export class TelegramAuthService {
 		await this.sendMessage(
 			chatId,
 			`Код для входа в winwidget.ru: ${code}\n\nВведите его на странице входа. Код действует ${this.CODE_EXPIRATION_MINUTES} минут.`
+		);
+	}
+
+	private async handleBindingCallback(
+		callbackQuery: TelegramCallbackQuery,
+		request: VerificationChallenge,
+		chatId: string | number
+	) {
+		if (!request.userId) {
+			await this.answerCallbackQuery(
+				callbackQuery.id,
+				'Ссылка для привязки истекла.'
+			);
+			return;
+		}
+
+		const telegramUserId = String(callbackQuery.from.id);
+		const currentIdentity = await this.prisma.authIdentity.findUnique({
+			where: {
+				userId_type: {
+					userId: request.userId,
+					type: AuthIdentityType.TELEGRAM
+				}
+			}
+		});
+
+		if (currentIdentity) {
+			await this.deleteRequestById(request.id);
+			await this.answerCallbackQuery(
+				callbackQuery.id,
+				'Telegram уже привязан.'
+			);
+			await this.sendMessage(
+				chatId,
+				'Telegram уже привязан к этому профилю winwidget.ru.'
+			);
+			return;
+		}
+
+		const existingIdentity = await this.prisma.authIdentity.findUnique({
+			where: {
+				type_value: {
+					type: AuthIdentityType.TELEGRAM,
+					value: telegramUserId
+				}
+			}
+		});
+
+		if (existingIdentity && existingIdentity.userId !== request.userId) {
+			await this.answerCallbackQuery(
+				callbackQuery.id,
+				'Этот Telegram уже привязан к другому профилю.'
+			);
+			await this.sendMessage(
+				chatId,
+				'Этот Telegram уже привязан к другому профилю winwidget.ru.'
+			);
+			return;
+		}
+
+		await this.prisma.$transaction([
+			this.prisma.authIdentity.create({
+				data: {
+					userId: request.userId,
+					type: AuthIdentityType.TELEGRAM,
+					value: telegramUserId,
+					verifiedAt: new Date()
+				}
+			}),
+			this.prisma.verificationChallenge.delete({
+				where: {
+					id: request.id
+				}
+			})
+		]);
+
+		await this.answerCallbackQuery(callbackQuery.id, 'Telegram привязан.');
+		await this.sendMessage(
+			chatId,
+			'Telegram привязан к профилю winwidget.ru. Вернитесь в профиль и обновите статус.'
 		);
 	}
 
@@ -322,7 +422,7 @@ export class TelegramAuthService {
 		return `Telegram ${request.telegramUserId}`;
 	}
 
-	private async getActiveRequest(requestId: string) {
+	private async getActiveLoginRequest(requestId: string) {
 		const request = await this.prisma.verificationChallenge.findUnique({
 			where: {
 				type_purpose_value: {
@@ -345,12 +445,46 @@ export class TelegramAuthService {
 		return request;
 	}
 
+	private async getActiveWebhookRequest(requestId: string) {
+		const request = await this.prisma.verificationChallenge.findFirst({
+			where: {
+				type: VerificationChallengeType.TELEGRAM,
+				value: requestId,
+				purpose: {
+					in: [
+						VerificationChallengePurpose.LOGIN,
+						VerificationChallengePurpose.BIND_IDENTITY
+					]
+				}
+			}
+		});
+
+		if (!request) {
+			return null;
+		}
+
+		if (request.expiresAt.getTime() < Date.now()) {
+			await this.deleteRequestById(request.id);
+			return null;
+		}
+
+		return request;
+	}
+
 	private async deleteRequest(requestId: string) {
 		await this.prisma.verificationChallenge.deleteMany({
 			where: {
 				type: VerificationChallengeType.TELEGRAM,
 				purpose: VerificationChallengePurpose.LOGIN,
 				value: requestId
+			}
+		});
+	}
+
+	private async deleteRequestById(id: string) {
+		await this.prisma.verificationChallenge.deleteMany({
+			where: {
+				id
 			}
 		});
 	}
