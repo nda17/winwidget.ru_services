@@ -1,4 +1,5 @@
 import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard';
+import { TelegramAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/telegram-auth-enabled.guard';
 import {
 	TelegramAuthService,
 	type TelegramWebhookUpdate
@@ -39,7 +40,7 @@ export class TelegramAuthController {
 		private readonly refreshTokenService: RefreshTokenService
 	) {}
 
-	@UseGuards(AuthRateLimitGuard)
+	@UseGuards(AuthRateLimitGuard, TelegramAuthEnabledGuard)
 	@HttpCode(200)
 	@Recaptcha({ action: 'telegram_auth_start' })
 	@Post('auth/telegram/start')
@@ -47,7 +48,7 @@ export class TelegramAuthController {
 		return this.telegramAuthService.start();
 	}
 
-	@UseGuards(AuthRateLimitGuard)
+	@UseGuards(AuthRateLimitGuard, TelegramAuthEnabledGuard)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@HttpCode(200)
 	@Recaptcha({ action: 'telegram_auth_verify' })

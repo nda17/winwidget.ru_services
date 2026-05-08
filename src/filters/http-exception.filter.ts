@@ -31,6 +31,14 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 		code: 'social_user_not_found',
 		message: 'Не удалось получить пользователя из социальной сети.'
 	},
+	'Github auth is disabled': {
+		code: 'github_auth_disabled',
+		message: 'Вход через GitHub временно отключён.'
+	},
+	'Telegram auth is disabled': {
+		code: 'telegram_auth_disabled',
+		message: 'Вход через Telegram временно отключён.'
+	},
 	'Token not passed': {
 		code: 'token_not_passed',
 		message: 'Токен не передан.'

@@ -94,6 +94,16 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return this.serializeSettings(settings);
 	}
 
+	async sendInfoBotMessage(chatId: string, text: string) {
+		const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+
+		if (!token) {
+			throw new Error('Info_bot token is not configured');
+		}
+
+		await this.sendTelegramMessage(token, chatId, text);
+	}
+
 	private getSettingsPatch(dto: UpdateTelegramBotSettingsDto) {
 		return {
 			...(typeof dto.dailySummaryEnabled === 'boolean'

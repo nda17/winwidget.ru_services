@@ -34,4 +34,12 @@ export class UpdateSiteSettingsDto {
 	@IsOptional()
 	@IsBoolean()
 	yandexAuthEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	githubAuthEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	telegramAuthEnabled?: boolean;
 }

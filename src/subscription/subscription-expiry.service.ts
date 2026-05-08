@@ -1,5 +1,6 @@
 import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
+import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import {
 	Injectable,
 	Logger,
@@ -19,6 +20,14 @@ interface SubscriptionExpiryReminderResult {
 	failedCount: number;
 }
 
+type SubscriptionExpiryReminderChannel = 'email' | 'telegram';
+
+interface SubscriptionExpiryReminderRecipient {
+	channel: SubscriptionExpiryReminderChannel;
+	value: string;
+	sentTo: string;
+}
+
 @Injectable()
 export class SubscriptionExpiryService
 	implements OnModuleInit, OnModuleDestroy
@@ -31,7 +40,8 @@ export class SubscriptionExpiryService
 
 	constructor(
 		private prisma: PrismaService,
-		private readonly emailService: EmailService
+		private readonly emailService: EmailService,
+		private readonly telegramBotService: TelegramBotService
 	) {}
 
 	async onModuleInit() {
@@ -94,50 +104,53 @@ export class SubscriptionExpiryService
 			for (const subscription of subscriptions) {
 				if (!subscription.expiresAt) continue;
 
-				const reminderKey = this.getReminderKey(
-					subscription.id,
-					subscription.expiresAt
-				);
-				if (sentReminderKeys.has(reminderKey)) continue;
-
-				const email = this.getPrimaryEmail(
+				const recipients = this.getReminderRecipients(
 					subscription.user.authIdentities
 				);
-				if (!email) continue;
+				if (!recipients.length) continue;
 
-				try {
-					await this.emailService.sendSubscriptionExpiryReminder(email, {
-						daysBeforeExpiry,
-						planLabel: this.getPlanLabel(subscription.plan),
-						expiresAtLabel: this.formatMoscowDateTime(
-							subscription.expiresAt
-						)
-					});
+				const reminderPayload = {
+					daysBeforeExpiry,
+					planLabel: this.getPlanLabel(subscription.plan),
+					expiresAtLabel: this.formatMoscowDateTime(subscription.expiresAt)
+				};
 
-					await this.prisma.subscriptionExpiryReminder.create({
-						data: {
-							subscriptionId: subscription.id,
-							userId: subscription.userId,
-							daysBeforeExpiry,
-							expiresAt: subscription.expiresAt,
-							sentTo: email
-						}
-					});
-
-					sentReminderKeys.add(reminderKey);
-					sentCount += 1;
-				} catch (error) {
-					if (this.isUniqueConstraintError(error)) {
-						sentReminderKeys.add(reminderKey);
-						continue;
-					}
-
-					failedCount += 1;
-					this.logger.warn(
-						`Subscription expiry reminder failed for user ${subscription.userId}: ${
-							error instanceof Error ? error.message : String(error)
-						}`
+				for (const recipient of recipients) {
+					const reminderKey = this.getReminderKey(
+						subscription.id,
+						subscription.expiresAt,
+						recipient.sentTo
 					);
+					if (sentReminderKeys.has(reminderKey)) continue;
+
+					try {
+						await this.sendReminder(recipient, reminderPayload);
+
+						await this.prisma.subscriptionExpiryReminder.create({
+							data: {
+								subscriptionId: subscription.id,
+								userId: subscription.userId,
+								daysBeforeExpiry,
+								expiresAt: subscription.expiresAt,
+								sentTo: recipient.sentTo
+							}
+						});
+
+						sentReminderKeys.add(reminderKey);
+						sentCount += 1;
+					} catch (error) {
+						if (this.isUniqueConstraintError(error)) {
+							sentReminderKeys.add(reminderKey);
+							continue;
+						}
+
+						failedCount += 1;
+						this.logger.warn(
+							`Subscription expiry ${recipient.channel} reminder failed for user ${subscription.userId}: ${
+								error instanceof Error ? error.message : String(error)
+							}`
+						);
+					}
 				}
 			}
 		}
@@ -162,7 +175,9 @@ export class SubscriptionExpiryService
 					status: UserStatus.ACTIVE,
 					authIdentities: {
 						some: {
-							type: AuthIdentityType.EMAIL,
+							type: {
+								in: [AuthIdentityType.EMAIL, AuthIdentityType.TELEGRAM]
+							},
 							value: {
 								not: ''
 							}
@@ -179,12 +194,15 @@ export class SubscriptionExpiryService
 					select: {
 						authIdentities: {
 							where: {
-								type: AuthIdentityType.EMAIL,
+								type: {
+									in: [AuthIdentityType.EMAIL, AuthIdentityType.TELEGRAM]
+								},
 								value: {
 									not: ''
 								}
 							},
 							select: {
+								type: true,
 								value: true
 							},
 							orderBy: {
@@ -224,13 +242,18 @@ export class SubscriptionExpiryService
 				},
 				select: {
 					subscriptionId: true,
-					expiresAt: true
+					expiresAt: true,
+					sentTo: true
 				}
 			});
 
 		return new Set(
 			reminders.map(reminder =>
-				this.getReminderKey(reminder.subscriptionId, reminder.expiresAt)
+				this.getReminderKey(
+					reminder.subscriptionId,
+					reminder.expiresAt,
+					reminder.sentTo
+				)
 			)
 		);
 	}
@@ -251,12 +274,82 @@ export class SubscriptionExpiryService
 		};
 	}
 
-	private getPrimaryEmail(
+	private getReminderRecipients(
 		identities: Array<{
+			type: AuthIdentityType;
 			value: string;
 		}>
 	) {
-		return identities[0]?.value.trim().toLowerCase() || null;
+		const recipients: SubscriptionExpiryReminderRecipient[] = [];
+		const email = this.getPrimaryEmail(identities);
+		const telegramChatId = this.getPrimaryTelegramChatId(identities);
+
+		if (email) {
+			recipients.push({
+				channel: 'email',
+				value: email,
+				sentTo: email
+			});
+		}
+
+		if (telegramChatId) {
+			recipients.push({
+				channel: 'telegram',
+				value: telegramChatId,
+				sentTo: `telegram:${telegramChatId}`
+			});
+		}
+
+		return recipients;
+	}
+
+	private getPrimaryEmail(
+		identities: Array<{
+			type: AuthIdentityType;
+			value: string;
+		}>
+	) {
+		return (
+			identities
+				.find(identity => identity.type === AuthIdentityType.EMAIL)
+				?.value.trim()
+				.toLowerCase() || null
+		);
+	}
+
+	private getPrimaryTelegramChatId(
+		identities: Array<{
+			type: AuthIdentityType;
+			value: string;
+		}>
+	) {
+		return (
+			identities
+				.find(identity => identity.type === AuthIdentityType.TELEGRAM)
+				?.value.trim() || null
+		);
+	}
+
+	private async sendReminder(
+		recipient: SubscriptionExpiryReminderRecipient,
+		payload: {
+			daysBeforeExpiry: number;
+			planLabel: string;
+			expiresAtLabel: string;
+		}
+	) {
+		if (recipient.channel === 'email') {
+			await this.emailService.sendSubscriptionExpiryReminder(
+				recipient.value,
+				payload
+			);
+			return;
+		}
+
+		await this.telegramBotService.sendInfoBotMessage(
+			recipient.value,
+			this.buildTelegramExpiryReminderMessage(payload)
+		);
 	}
 
 	private getPlanLabel(plan: Plan) {
@@ -283,8 +376,45 @@ export class SubscriptionExpiryService
 		});
 	}
 
-	private getReminderKey(subscriptionId: string, expiresAt: Date) {
-		return `${subscriptionId}:${expiresAt.getTime()}`;
+	private buildTelegramExpiryReminderMessage(payload: {
+		daysBeforeExpiry: number;
+		planLabel: string;
+		expiresAtLabel: string;
+	}) {
+		const statusText =
+			payload.daysBeforeExpiry === 0
+				? 'Сегодня последний день подписки.'
+				: `До окончания подписки осталось ${payload.daysBeforeExpiry} ${this.getDayWord(payload.daysBeforeExpiry)}.`;
+
+		return [
+			'<b>Подписка winwidget.ru</b>',
+			`Тариф: ${payload.planLabel}`,
+			`Дата окончания: ${payload.expiresAtLabel} МСК`,
+			'',
+			statusText,
+			'',
+			'Продлить доступ можно в личном кабинете.'
+		].join('\n');
+	}
+
+	private getDayWord(value: number) {
+		const mod10 = value % 10;
+		const mod100 = value % 100;
+
+		if (mod10 === 1 && mod100 !== 11) return 'день';
+		if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) {
+			return 'дня';
+		}
+
+		return 'дней';
+	}
+
+	private getReminderKey(
+		subscriptionId: string,
+		expiresAt: Date,
+		sentTo: string
+	) {
+		return `${subscriptionId}:${expiresAt.getTime()}:${sentTo}`;
 	}
 
 	private isUniqueConstraintError(error: unknown) {

@@ -1,4 +1,5 @@
 import { AuthService } from '@/auth/auth.service';
+import { GithubAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/github-auth-enabled.guard';
 import { GoogleAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/google-auth-enabled.guard';
 import { YandexAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/yandex-auth-enabled.guard';
 import { RefreshTokenService } from '@/auth/refresh-token.service';
@@ -65,11 +66,11 @@ export class SocialMediaAuthController {
 	}
 
 	@Get('github')
-	@UseGuards(AuthGuard('github'))
+	@UseGuards(GithubAuthEnabledGuard, AuthGuard('github'))
 	async githubAuth() {}
 
 	@Get('github/redirect')
-	@UseGuards(AuthGuard('github'))
+	@UseGuards(GithubAuthEnabledGuard, AuthGuard('github'))
 	async githubAuthRedirect(
 		@Req() req: { user: TSocialProfile },
 		@Res({ passthrough: true }) res: Response

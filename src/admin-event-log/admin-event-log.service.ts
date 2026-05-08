@@ -10,6 +10,7 @@ export type AdminEventLogSection =
 	| 'SUBSCRIPTIONS'
 	| 'USERS'
 	| 'BACKLOG'
+	| 'SITE_SETTINGS'
 	| 'TELEGRAM_BOT';
 
 export type AdminEventLogAction =
@@ -27,6 +28,7 @@ export type AdminEventLogAction =
 	| 'BACKLOG_TASK_CREATE'
 	| 'BACKLOG_TASK_UPDATE'
 	| 'BACKLOG_TASK_DELETE'
+	| 'SITE_SETTINGS_UPDATE'
 	| 'TELEGRAM_BOT_SETTINGS_UPDATE';
 
 const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
@@ -36,6 +38,7 @@ const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
 	'SUBSCRIPTIONS',
 	'USERS',
 	'BACKLOG',
+	'SITE_SETTINGS',
 	'TELEGRAM_BOT'
 ];
 
@@ -54,6 +57,7 @@ const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
 	'BACKLOG_TASK_CREATE',
 	'BACKLOG_TASK_UPDATE',
 	'BACKLOG_TASK_DELETE',
+	'SITE_SETTINGS_UPDATE',
 	'TELEGRAM_BOT_SETTINGS_UPDATE'
 ];
 

@@ -204,7 +204,7 @@ model SubscriptionExpiryReminder {
   user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   sentAt           DateTime     @default(now()) @map("sent_at")
 
-  @@unique([subscriptionId, daysBeforeExpiry, expiresAt], map: "subscription_expiry_reminder_unique")
+  @@unique([subscriptionId, daysBeforeExpiry, expiresAt, sentTo], map: "subscription_expiry_reminder_unique")
   @@index([userId], map: "subscription_expiry_reminders_user_id_idx")
   @@index([daysBeforeExpiry, expiresAt], map: "subscription_expiry_reminders_days_expires_idx")
   @@index([sentAt], map: "subscription_expiry_reminders_sent_at_idx")
@@ -403,15 +403,17 @@ enum SubscriptionBonusAudience {
 }
 
 model SiteSettings {
-  id                String   @id @default("singleton")
-  bannerEnabled     Boolean  @default(false) @map("banner_enabled")
-  bannerText        String   @default("") @map("banner_text")
-  snowflakeEnabled  Boolean  @default(false) @map("snowflake_enabled")
-  paymentEnabled    Boolean  @default(true) @map("payment_enabled")
-  recaptchaEnabled  Boolean  @default(true) @map("recaptcha_enabled")
-  googleAuthEnabled Boolean  @default(true) @map("google_auth_enabled")
-  yandexAuthEnabled Boolean  @default(true) @map("yandex_auth_enabled")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  id                  String   @id @default("singleton")
+  bannerEnabled       Boolean  @default(false) @map("banner_enabled")
+  bannerText          String   @default("") @map("banner_text")
+  snowflakeEnabled    Boolean  @default(false) @map("snowflake_enabled")
+  paymentEnabled      Boolean  @default(true) @map("payment_enabled")
+  recaptchaEnabled    Boolean  @default(true) @map("recaptcha_enabled")
+  googleAuthEnabled   Boolean  @default(true) @map("google_auth_enabled")
+  yandexAuthEnabled   Boolean  @default(true) @map("yandex_auth_enabled")
+  githubAuthEnabled   Boolean  @default(true) @map("github_auth_enabled")
+  telegramAuthEnabled Boolean  @default(true) @map("telegram_auth_enabled")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
 }

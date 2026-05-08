@@ -2,7 +2,9 @@ import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { AuthController } from '@/auth/auth.controller';
 import { AuthService } from '@/auth/auth.service';
 import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard';
+import { GithubAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/github-auth-enabled.guard';
 import { GoogleAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/google-auth-enabled.guard';
+import { TelegramAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/telegram-auth-enabled.guard';
 import { YandexAuthEnabledGuard } from '@/auth/guards/social-auth-enabled/yandex-auth-enabled.guard';
 import { RefreshTokenService } from '@/auth/refresh-token.service';
 import { SocialMediaAuthController } from '@/auth/social-media/social-media-auth.controller';
@@ -49,7 +51,9 @@ import { JwtModule } from '@nestjs/jwt';
 		VerificationChallengeCleanupService,
 		RefreshTokenService,
 		AuthRateLimitGuard,
+		GithubAuthEnabledGuard,
 		GoogleAuthEnabledGuard,
+		TelegramAuthEnabledGuard,
 		YandexAuthEnabledGuard,
 		GoogleStrategy,
 		GithubStrategy,
