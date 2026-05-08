@@ -28,6 +28,17 @@ interface SubscriptionExpiryReminderRecipient {
 	sentTo: string;
 }
 
+interface SubscriptionExpiryReminderUser {
+	authIdentities: Array<{
+		type: AuthIdentityType;
+		value: string;
+	}>;
+	telegramNotificationChannel: {
+		chatId: string;
+		isActive: boolean;
+	} | null;
+}
+
 @Injectable()
 export class SubscriptionExpiryService
 	implements OnModuleInit, OnModuleDestroy
@@ -104,9 +115,7 @@ export class SubscriptionExpiryService
 			for (const subscription of subscriptions) {
 				if (!subscription.expiresAt) continue;
 
-				const recipients = this.getReminderRecipients(
-					subscription.user.authIdentities
-				);
+				const recipients = this.getReminderRecipients(subscription.user);
 				if (!recipients.length) continue;
 
 				const reminderPayload = {
@@ -144,6 +153,15 @@ export class SubscriptionExpiryService
 							continue;
 						}
 
+						if (
+							recipient.channel === 'telegram' &&
+							this.telegramBotService.isRecipientUnavailableError(error)
+						) {
+							await this.telegramBotService.deactivateNotificationChannelByChatId(
+								recipient.value
+							);
+						}
+
 						failedCount += 1;
 						this.logger.warn(
 							`Subscription expiry ${recipient.channel} reminder failed for user ${subscription.userId}: ${
@@ -173,16 +191,28 @@ export class SubscriptionExpiryService
 				},
 				user: {
 					status: UserStatus.ACTIVE,
-					authIdentities: {
-						some: {
-							type: {
-								in: [AuthIdentityType.EMAIL, AuthIdentityType.TELEGRAM]
-							},
-							value: {
-								not: ''
+					OR: [
+						{
+							authIdentities: {
+								some: {
+									type: AuthIdentityType.EMAIL,
+									value: {
+										not: ''
+									}
+								}
+							}
+						},
+						{
+							telegramNotificationChannel: {
+								is: {
+									isActive: true,
+									chatId: {
+										not: ''
+									}
+								}
 							}
 						}
-					}
+					]
 				}
 			},
 			select: {
@@ -194,9 +224,7 @@ export class SubscriptionExpiryService
 					select: {
 						authIdentities: {
 							where: {
-								type: {
-									in: [AuthIdentityType.EMAIL, AuthIdentityType.TELEGRAM]
-								},
+								type: AuthIdentityType.EMAIL,
 								value: {
 									not: ''
 								}
@@ -207,6 +235,12 @@ export class SubscriptionExpiryService
 							},
 							orderBy: {
 								createdAt: 'asc'
+							}
+						},
+						telegramNotificationChannel: {
+							select: {
+								chatId: true,
+								isActive: true
 							}
 						}
 					}
@@ -274,15 +308,12 @@ export class SubscriptionExpiryService
 		};
 	}
 
-	private getReminderRecipients(
-		identities: Array<{
-			type: AuthIdentityType;
-			value: string;
-		}>
-	) {
+	private getReminderRecipients(user: SubscriptionExpiryReminderUser) {
 		const recipients: SubscriptionExpiryReminderRecipient[] = [];
-		const email = this.getPrimaryEmail(identities);
-		const telegramChatId = this.getPrimaryTelegramChatId(identities);
+		const email = this.getPrimaryEmail(user.authIdentities);
+		const telegramChatId = this.getPrimaryTelegramChatId(
+			user.telegramNotificationChannel
+		);
 
 		if (email) {
 			recipients.push({
@@ -318,16 +349,10 @@ export class SubscriptionExpiryService
 	}
 
 	private getPrimaryTelegramChatId(
-		identities: Array<{
-			type: AuthIdentityType;
-			value: string;
-		}>
+		channel: SubscriptionExpiryReminderUser['telegramNotificationChannel']
 	) {
-		return (
-			identities
-				.find(identity => identity.type === AuthIdentityType.TELEGRAM)
-				?.value.trim() || null
-		);
+		if (!channel?.isActive) return null;
+		return channel.chatId.trim() || null;
 	}
 
 	private async sendReminder(

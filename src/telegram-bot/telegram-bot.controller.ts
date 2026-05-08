@@ -2,13 +2,18 @@ import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service'
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
-import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
+import {
+	TelegramBotService,
+	type TelegramInfoBotWebhookUpdate
+} from '@/telegram-bot/telegram-bot.service';
 import {
 	Body,
 	Controller,
 	Get,
+	Headers,
 	HttpCode,
 	Patch,
+	Post,
 	Req,
 	UsePipes,
 	ValidationPipe
@@ -60,5 +65,14 @@ export class TelegramBotController {
 		});
 
 		return settings;
+	}
+
+	@HttpCode(200)
+	@Post('webhook')
+	handleWebhook(
+		@Body() update: TelegramInfoBotWebhookUpdate,
+		@Headers('x-telegram-bot-api-secret-token') secret?: string
+	) {
+		return this.telegramBotService.handleWebhook(update, secret);
 	}
 }

@@ -17,6 +17,7 @@ model User {
   personalDataConsentRevokedAt DateTime?                    @map("personal_data_consent_revoked_at")
   rights                       Role[]                       @default([USER])
   authIdentities               AuthIdentity[]
+  telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
   payments                     Payment[]
   widgets                      Widget[]
@@ -211,6 +212,25 @@ model SubscriptionExpiryReminder {
   @@map("subscription_expiry_reminders")
 }
 
+model TelegramNotificationChannel {
+  id             String    @id @default(cuid())
+  userId         String    @unique @map("user_id")
+  chatId         String    @unique @map("chat_id")
+  telegramUserId String?   @unique @map("telegram_user_id")
+  username       String?
+  firstName      String?   @map("first_name")
+  lastName       String?   @map("last_name")
+  isActive       Boolean   @default(true) @map("is_active")
+  connectedAt    DateTime  @default(now()) @map("connected_at")
+  disabledAt     DateTime? @map("disabled_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([isActive], map: "telegram_notification_channels_is_active_idx")
+  @@map("telegram_notification_channels")
+}
+
 model SubscriptionHistory {
   id                 String                     @id @default(cuid())
   subscriptionId     String?                    @map("subscription_id")
@@ -371,6 +391,7 @@ enum VerificationChallengeType {
 enum VerificationChallengePurpose {
   REGISTER
   BIND_IDENTITY
+  BIND_TELEGRAM_NOTIFICATIONS
   LOGIN
 }
 

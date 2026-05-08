@@ -3,6 +3,7 @@ import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { SendProfileEmailCodeDto } from '@/user/dto/send-profile-email-code.dto';
 import { SendProfilePhoneCodeDto } from '@/user/dto/send-profile-phone-code.dto';
+import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
 import { UpdateUserDto } from '@/user/dto/update-user.dto';
 import { VerifyProfileEmailCodeDto } from '@/user/dto/verify-profile-email-code.dto';
@@ -31,6 +32,7 @@ export class UserController {
 	constructor(
 		private readonly userService: UserService,
 		private readonly userIdentityBindingService: UserIdentityBindingService,
+		private readonly telegramBotService: TelegramBotService,
 		private readonly adminEventLogService: AdminEventLogService
 	) {}
 
@@ -108,6 +110,20 @@ export class UserController {
 	@Post('profile/bind/telegram/start')
 	async startProfileTelegramBinding(@CurrentUser('id') id: string) {
 		return this.userIdentityBindingService.startTelegramBinding(id);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Get('profile/telegram-notifications')
+	getProfileTelegramNotifications(@CurrentUser('id') id: string) {
+		return this.telegramBotService.getNotificationStatus(id);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Post('profile/telegram-notifications/start')
+	startProfileTelegramNotifications(@CurrentUser('id') id: string) {
+		return this.telegramBotService.startNotificationBinding(id);
 	}
 
 	@HttpCode(200)

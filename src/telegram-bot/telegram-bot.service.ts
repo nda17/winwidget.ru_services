@@ -1,18 +1,29 @@
+import { randomBytes } from 'node:crypto';
 import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
+import {
+	PASSWORD_SALT_ROUNDS,
+	TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED,
+	TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID
+} from '@/utils/auth.constants';
 import {
 	BadRequestException,
 	Injectable,
 	Logger,
 	OnModuleDestroy,
-	OnModuleInit
+	OnModuleInit,
+	UnauthorizedException
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
 	PaymentStatus,
 	SubscriptionStatus,
-	type TelegramBotSettings
+	type TelegramBotSettings,
+	type TelegramNotificationChannel,
+	VerificationChallengePurpose,
+	VerificationChallengeType
 } from '@prisma/client';
+import { hash } from 'bcryptjs';
 
 interface DailySummaryPeriod {
 	start: Date;
@@ -43,10 +54,33 @@ interface DailySummaryStats {
 	usersWithoutContactsCount: number;
 }
 
+type TelegramUser = {
+	id: number;
+	username?: string;
+	first_name?: string;
+	last_name?: string;
+};
+
+type TelegramChat = {
+	id: number | string;
+	type?: string;
+};
+
+type TelegramMessage = {
+	text?: string;
+	chat: TelegramChat;
+	from?: TelegramUser;
+};
+
+export type TelegramInfoBotWebhookUpdate = {
+	message?: TelegramMessage;
+};
+
 @Injectable()
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private readonly DAILY_SUMMARY_HOUR_MOSCOW = 1;
 	private readonly DAILY_SUMMARY_MINUTE_MOSCOW = 50;
+	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
 	private readonly MOSCOW_UTC_OFFSET_HOURS = 3;
 	private readonly logger = new Logger(TelegramBotService.name);
 	private summaryTimeout: NodeJS.Timeout | null = null;
@@ -104,6 +138,103 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		await this.sendTelegramMessage(token, chatId, text);
 	}
 
+	async getNotificationStatus(userId: string) {
+		const channel =
+			await this.prisma.telegramNotificationChannel.findUnique({
+				where: { userId }
+			});
+
+		return this.serializeNotificationStatus(channel);
+	}
+
+	async startNotificationBinding(userId: string) {
+		this.ensureNotificationBotConfigured();
+		await this.deleteExpiredNotificationBindings();
+
+		const requestId = randomBytes(16).toString('hex');
+		const codeHash = await hash(requestId, PASSWORD_SALT_ROUNDS);
+		const now = new Date();
+		const expiresAt = new Date(
+			now.getTime() +
+				this.NOTIFICATION_BINDING_EXPIRATION_MINUTES * 60 * 1000
+		);
+
+		await this.prisma.verificationChallenge.upsert({
+			where: {
+				userId_type_purpose: {
+					userId,
+					type: VerificationChallengeType.TELEGRAM,
+					purpose: VerificationChallengePurpose.BIND_TELEGRAM_NOTIFICATIONS
+				}
+			},
+			update: {
+				value: requestId,
+				passwordHash: null,
+				codeHash,
+				attempts: 0,
+				telegramUserId: null,
+				telegramChatId: null,
+				telegramUsername: null,
+				telegramFirstName: null,
+				telegramLastName: null,
+				expiresAt,
+				lastSentAt: now
+			},
+			create: {
+				userId,
+				type: VerificationChallengeType.TELEGRAM,
+				purpose: VerificationChallengePurpose.BIND_TELEGRAM_NOTIFICATIONS,
+				value: requestId,
+				codeHash,
+				expiresAt,
+				lastSentAt: now
+			}
+		});
+
+		return {
+			requestId,
+			botUrl: `https://t.me/${this.getInfoBotUsername()}?start=${requestId}`,
+			expiresAt
+		};
+	}
+
+	async handleWebhook(
+		update: TelegramInfoBotWebhookUpdate,
+		secret?: string
+	) {
+		this.ensureNotificationWebhookSecret(secret);
+
+		if (update.message) {
+			await this.handleNotificationMessage(update.message);
+		}
+
+		return true;
+	}
+
+	isRecipientUnavailableError(error: unknown) {
+		const message =
+			error instanceof Error
+				? error.message.toLowerCase()
+				: String(error).toLowerCase();
+
+		return (
+			message.includes('bot was blocked') ||
+			message.includes('chat not found') ||
+			message.includes('user is deactivated') ||
+			message.includes('forbidden')
+		);
+	}
+
+	async deactivateNotificationChannelByChatId(chatId: string) {
+		await this.prisma.telegramNotificationChannel.updateMany({
+			where: { chatId },
+			data: {
+				isActive: false,
+				disabledAt: new Date()
+			}
+		});
+	}
+
 	private getSettingsPatch(dto: UpdateTelegramBotSettingsDto) {
 		return {
 			...(typeof dto.dailySummaryEnabled === 'boolean'
@@ -136,6 +267,189 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			),
 			updatedAt: settings.updatedAt.toISOString()
 		};
+	}
+
+	private serializeNotificationStatus(
+		channel: TelegramNotificationChannel | null
+	) {
+		return {
+			connected: Boolean(channel?.isActive),
+			username: channel?.username ?? null,
+			connectedAt:
+				channel?.isActive && channel.connectedAt
+					? channel.connectedAt.toISOString()
+					: null,
+			disabledAt: channel?.disabledAt?.toISOString() ?? null,
+			telegramBotTokenConfigured: Boolean(
+				process.env.TELEGRAM_BOT_TOKEN?.trim()
+			),
+			telegramBotUsernameConfigured: Boolean(this.getInfoBotUsername())
+		};
+	}
+
+	private async handleNotificationMessage(message: TelegramMessage) {
+		if (!message.text?.startsWith('/start')) {
+			return;
+		}
+
+		const chatId = String(message.chat.id);
+		const requestId = message.text.split(/\s+/)[1]?.trim();
+
+		if (message.chat.type && message.chat.type !== 'private') {
+			await this.sendInfoBotMessage(
+				chatId,
+				'Подключите уведомления winwidget.ru в личном чате с Info_bot.'
+			);
+			return;
+		}
+
+		if (!requestId) {
+			await this.sendInfoBotMessage(
+				chatId,
+				'Чтобы подключить уведомления, откройте профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений.'
+			);
+			return;
+		}
+
+		const request = await this.getActiveNotificationRequest(requestId);
+
+		if (!request?.userId) {
+			await this.sendInfoBotMessage(
+				chatId,
+				'Ссылка подключения уведомлений истекла. Вернитесь в профиль winwidget.ru и создайте новую ссылку.'
+			);
+			return;
+		}
+
+		const telegramUserId = message.from?.id
+			? String(message.from.id)
+			: null;
+		const linkedChannel =
+			await this.prisma.telegramNotificationChannel.findFirst({
+				where: {
+					OR: [{ chatId }, ...(telegramUserId ? [{ telegramUserId }] : [])]
+				}
+			});
+
+		if (linkedChannel && linkedChannel.userId !== request.userId) {
+			await this.sendInfoBotMessage(
+				chatId,
+				'Этот Telegram уже подключён к другому профилю winwidget.ru.'
+			);
+			return;
+		}
+
+		const now = new Date();
+
+		await this.prisma.$transaction([
+			this.prisma.telegramNotificationChannel.upsert({
+				where: {
+					userId: request.userId
+				},
+				update: {
+					chatId,
+					telegramUserId,
+					username: message.from?.username ?? null,
+					firstName: message.from?.first_name ?? null,
+					lastName: message.from?.last_name ?? null,
+					isActive: true,
+					connectedAt: now,
+					disabledAt: null
+				},
+				create: {
+					userId: request.userId,
+					chatId,
+					telegramUserId,
+					username: message.from?.username ?? null,
+					firstName: message.from?.first_name ?? null,
+					lastName: message.from?.last_name ?? null,
+					isActive: true,
+					connectedAt: now
+				}
+			}),
+			this.prisma.verificationChallenge.delete({
+				where: {
+					id: request.id
+				}
+			})
+		]);
+
+		await this.sendInfoBotMessage(
+			chatId,
+			'Telegram-уведомления winwidget.ru подключены. Напоминания о подписке будут приходить сюда.'
+		);
+	}
+
+	private async getActiveNotificationRequest(requestId: string) {
+		const request = await this.prisma.verificationChallenge.findUnique({
+			where: {
+				type_purpose_value: {
+					type: VerificationChallengeType.TELEGRAM,
+					purpose:
+						VerificationChallengePurpose.BIND_TELEGRAM_NOTIFICATIONS,
+					value: requestId
+				}
+			}
+		});
+
+		if (!request) return null;
+
+		if (request.expiresAt.getTime() < Date.now()) {
+			await this.deleteNotificationRequestById(request.id);
+			return null;
+		}
+
+		return request;
+	}
+
+	private async deleteNotificationRequestById(id: string) {
+		await this.prisma.verificationChallenge.deleteMany({
+			where: {
+				id
+			}
+		});
+	}
+
+	private async deleteExpiredNotificationBindings() {
+		await this.prisma.verificationChallenge.deleteMany({
+			where: {
+				type: VerificationChallengeType.TELEGRAM,
+				purpose: VerificationChallengePurpose.BIND_TELEGRAM_NOTIFICATIONS,
+				expiresAt: {
+					lt: new Date()
+				}
+			}
+		});
+	}
+
+	private ensureNotificationBotConfigured() {
+		if (!process.env.TELEGRAM_BOT_TOKEN?.trim()) {
+			throw new BadRequestException(
+				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
+			);
+		}
+
+		if (!this.getInfoBotUsername()) {
+			throw new BadRequestException(
+				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
+			);
+		}
+	}
+
+	private ensureNotificationWebhookSecret(secret?: string) {
+		const expected = process.env.TELEGRAM_BOT_WEBHOOK_SECRET?.trim();
+
+		if (expected && secret !== expected) {
+			throw new UnauthorizedException(
+				TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID
+			);
+		}
+	}
+
+	private getInfoBotUsername() {
+		return (
+			process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, '') ?? ''
+		);
 	}
 
 	private scheduleDailySummary() {

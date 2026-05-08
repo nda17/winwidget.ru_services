@@ -3,13 +3,20 @@ import { EmailModule } from '@/email/email.module';
 import { FileModule } from '@/file/file.module';
 import { PrismaService } from '@/prisma.service';
 import { SmsModule } from '@/sms/sms.module';
+import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { UserController } from '@/user/user.controller';
 import { UserIdentityBindingService } from '@/user/user-identity-binding.service';
 import { UserService } from '@/user/user.service';
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [EmailModule, SmsModule, AdminEventLogModule, FileModule],
+	imports: [
+		EmailModule,
+		SmsModule,
+		AdminEventLogModule,
+		FileModule,
+		TelegramBotModule
+	],
 	controllers: [UserController],
 	providers: [UserService, UserIdentityBindingService, PrismaService],
 	exports: [UserService]
