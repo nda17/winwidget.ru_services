@@ -81,6 +81,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private readonly DAILY_SUMMARY_HOUR_MOSCOW = 1;
 	private readonly DAILY_SUMMARY_MINUTE_MOSCOW = 50;
 	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
+	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
 	private readonly MOSCOW_UTC_OFFSET_HOURS = 3;
 	private readonly logger = new Logger(TelegramBotService.name);
 	private summaryTimeout: NodeJS.Timeout | null = null;
@@ -205,7 +206,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		this.ensureNotificationWebhookSecret(secret);
 
 		if (update.message) {
-			await this.handleNotificationMessage(update.message);
+			void this.handleNotificationMessage(update.message).catch(error => {
+				this.logger.warn(
+					`Info_bot webhook handling failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`
+				);
+			});
 		}
 
 		return true;
@@ -711,6 +718,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
+				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
 				body: JSON.stringify({
 					chat_id: chatId,
 					text,

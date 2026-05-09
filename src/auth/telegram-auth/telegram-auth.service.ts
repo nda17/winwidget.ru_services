@@ -12,6 +12,7 @@ import {
 import {
 	BadRequestException,
 	Injectable,
+	Logger,
 	UnauthorizedException
 } from '@nestjs/common';
 import {
@@ -58,6 +59,8 @@ export class TelegramAuthService {
 	private readonly CODE_EXPIRATION_MINUTES = 10;
 	private readonly CODE_MAX_ATTEMPTS = 5;
 	private readonly CALLBACK_PREFIX = 'winwidget_login:';
+	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
+	private readonly logger = new Logger(TelegramAuthService.name);
 
 	constructor(private readonly prisma: PrismaService) {}
 
@@ -146,12 +149,24 @@ export class TelegramAuthService {
 		this.ensureWebhookSecret(secret);
 
 		if (update.callback_query) {
-			await this.handleCallback(update.callback_query);
+			void this.handleCallback(update.callback_query).catch(error => {
+				this.logger.warn(
+					`Auth_bot callback handling failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`
+				);
+			});
 			return true;
 		}
 
 		if (update.message) {
-			await this.handleMessage(update.message);
+			void this.handleMessage(update.message).catch(error => {
+				this.logger.warn(
+					`Auth_bot message handling failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`
+				);
+			});
 		}
 
 		return true;
@@ -512,6 +527,7 @@ export class TelegramAuthService {
 			{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
+				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
 				body: JSON.stringify({
 					chat_id: chatId,
 					text,
