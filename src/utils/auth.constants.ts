@@ -13,6 +13,7 @@ export const TELEGRAM_AUTH_CODE_ATTEMPTS_EXCEEDED =
 	'Telegram verification code attempts exceeded';
 export const TELEGRAM_AUTH_WEBHOOK_SECRET_INVALID =
 	'Telegram auth webhook secret invalid';
+export const TELEGRAM_LAST_LOGIN_METHOD = 'Telegram last login method';
 export const TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED =
 	'Telegram notification bot not configured';
 export const TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID =

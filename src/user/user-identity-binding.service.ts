@@ -6,7 +6,8 @@ import { UserService } from '@/user/user.service';
 import { normalizeEmail } from '@/utils/email.util';
 import {
 	PASSWORD_SALT_ROUNDS,
-	TELEGRAM_AUTH_NOT_CONFIGURED
+	TELEGRAM_AUTH_NOT_CONFIGURED,
+	TELEGRAM_LAST_LOGIN_METHOD
 } from '@/utils/auth.constants';
 import { normalizePhone } from '@/utils/phone.util';
 import {
@@ -16,6 +17,7 @@ import {
 	UnauthorizedException
 } from '@nestjs/common';
 import {
+	type AuthIdentity,
 	AuthIdentityType,
 	type VerificationChallenge,
 	VerificationChallengePurpose,
@@ -260,6 +262,44 @@ export class UserIdentityBindingService {
 			botUrl: `https://t.me/${this.getTelegramBotUsername()}?start=${requestId}`,
 			expiresAt
 		};
+	}
+
+	async unlinkTelegramBinding(userId: string) {
+		const user = await this.userService.getUserById(userId);
+
+		if (!user) {
+			throw new NotFoundException('User not found');
+		}
+
+		const telegramIdentity = user.authIdentities.find(
+			identity => identity.type === AuthIdentityType.TELEGRAM
+		);
+
+		if (!telegramIdentity) {
+			return this.userService.getPublicUserById(userId);
+		}
+
+		if (!this.hasAnotherLoginMethod(user.authIdentities)) {
+			throw new BadRequestException(TELEGRAM_LAST_LOGIN_METHOD);
+		}
+
+		await this.prisma.$transaction([
+			this.prisma.authIdentity.deleteMany({
+				where: {
+					userId,
+					type: AuthIdentityType.TELEGRAM
+				}
+			}),
+			this.prisma.verificationChallenge.deleteMany({
+				where: {
+					userId,
+					type: VerificationChallengeType.TELEGRAM,
+					purpose: VerificationChallengePurpose.BIND_IDENTITY
+				}
+			})
+		]);
+
+		return this.userService.getPublicUserById(userId);
 	}
 
 	private async upsertPendingBinding({
@@ -576,6 +616,18 @@ export class UserIdentityBindingService {
 			process.env.TELEGRAM_AUTH_BOT_USERNAME?.trim().replace(/^@/, '') ??
 			''
 		);
+	}
+
+	private hasAnotherLoginMethod(identities: AuthIdentity[]) {
+		return identities.some(identity => {
+			if (!identity.value.trim()) return false;
+			if (identity.type === AuthIdentityType.TELEGRAM) return false;
+			if (identity.type === AuthIdentityType.PHONE) {
+				return Boolean(identity.verifiedAt);
+			}
+
+			return true;
+		});
 	}
 
 	private generateCode() {

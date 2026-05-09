@@ -114,6 +114,13 @@ export class UserController {
 
 	@HttpCode(200)
 	@Auth()
+	@Delete('profile/bind/telegram')
+	async unlinkProfileTelegramBinding(@CurrentUser('id') id: string) {
+		return this.userIdentityBindingService.unlinkTelegramBinding(id);
+	}
+
+	@HttpCode(200)
+	@Auth()
 	@Get('profile/telegram-notifications')
 	getProfileTelegramNotifications(@CurrentUser('id') id: string) {
 		return this.telegramBotService.getNotificationStatus(id);

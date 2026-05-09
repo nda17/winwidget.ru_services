@@ -131,6 +131,11 @@ const ERROR_MAP: Record<string, ErrorDescriptor> = {
 		code: 'telegram_auth_webhook_secret_invalid',
 		message: 'Некорректный секрет webhook Auth_bot.'
 	},
+	'Telegram last login method': {
+		code: 'telegram_last_login_method',
+		message:
+			'Сначала привяжите другой способ входа, потом отключите Telegram.'
+	},
 	'Telegram notification bot not configured': {
 		code: 'telegram_notification_bot_not_configured',
 		message: 'Info_bot не настроен. Попробуйте позже.'
