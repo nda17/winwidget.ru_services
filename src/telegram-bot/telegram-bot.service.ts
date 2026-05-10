@@ -766,7 +766,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		if (message.text?.startsWith('/start')) {
 			await this.sendSupportBotMessage(
 				userChatId,
-				'Здравствуйте! Напишите ваш вопрос одним или несколькими сообщениями, и администратор ответит здесь.'
+				'Вас приветствует служба поддрежки сервиса winwdiget.ru! Спасибо что пользуетесь нашим сервисом. Напишите ваш вопрос и мы ответим вам в ближайшее время.'
 			);
 			return;
 		}
@@ -774,7 +774,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		if (!message.message_id) {
 			await this.sendSupportBotMessage(
 				userChatId,
-				'Не удалось обработать сообщение. Пожалуйста, отправьте его ещё раз.'
+				'Не удалось отправить сообщение. Пожалуйста, отправьте его ещё раз.'
 			);
 			return;
 		}
@@ -818,7 +818,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 		await this.sendSupportBotMessage(
 			userChatId,
-			'Сообщение передано команде поддержки. Ответ будет направлен в текущий чат.'
+			'Сообщение передано команде поддержки. Ответим в текущий чат в ближайшее время.'
 		);
 	}
 
