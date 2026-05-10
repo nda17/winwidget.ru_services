@@ -4,6 +4,7 @@ import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
 	TelegramBotService,
+	type TelegramWebhookBot,
 	type TelegramInfoBotWebhookUpdate
 } from '@/telegram-bot/telegram-bot.service';
 import {
@@ -12,6 +13,7 @@ import {
 	Get,
 	Headers,
 	HttpCode,
+	Param,
 	Patch,
 	Post,
 	Req,
@@ -65,6 +67,55 @@ export class TelegramBotController {
 		});
 
 		return settings;
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Post('admin/webhooks/reinstall')
+	async reinstallWebhooks(
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		const result = await this.telegramBotService.reinstallWebhooks();
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'TELEGRAM_BOT',
+			action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
+			description: 'Переустановлены webhook Telegram-ботов',
+			entityType: 'telegram_webhook',
+			entityId: 'all',
+			entityLabel: 'Auth_bot + Info_bot',
+			metadata: result,
+			request
+		});
+
+		return result;
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Post('admin/webhooks/:bot/reinstall')
+	async reinstallWebhook(
+		@Param('bot') bot: TelegramWebhookBot,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		const result = await this.telegramBotService.reinstallWebhook(bot);
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'TELEGRAM_BOT',
+			action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
+			description: `Переустановлен webhook ${result.title}`,
+			entityType: 'telegram_webhook',
+			entityId: result.bot,
+			entityLabel: result.title,
+			metadata: result,
+			request
+		});
+
+		return result;
 	}
 
 	@HttpCode(200)

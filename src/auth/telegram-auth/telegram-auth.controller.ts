@@ -32,6 +32,11 @@ class TelegramAuthVerifyDto {
 	code: string;
 }
 
+class TelegramAuthCompleteDto {
+	@IsString()
+	requestId: string;
+}
+
 @Controller()
 export class TelegramAuthController {
 	constructor(
@@ -65,6 +70,30 @@ export class TelegramAuthController {
 			await this.authService.buildResponseObject(user);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
+	}
+
+	@UseGuards(AuthRateLimitGuard, TelegramAuthEnabledGuard)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@HttpCode(200)
+	@Post('auth/telegram/complete')
+	async complete(
+		@Body() dto: TelegramAuthCompleteDto,
+		@Res({ passthrough: true }) res: Response
+	) {
+		const user = await this.telegramAuthService.complete(dto.requestId);
+
+		if (!user) {
+			return { confirmed: false };
+		}
+
+		const { refreshToken, ...response } =
+			await this.authService.buildResponseObject(user);
+		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
+
+		return {
+			confirmed: true,
+			...response
+		};
 	}
 
 	@HttpCode(200)

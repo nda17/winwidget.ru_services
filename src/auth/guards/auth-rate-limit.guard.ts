@@ -68,6 +68,10 @@ export class AuthRateLimitGuard implements CanActivate {
 			return { limit: 20, windowMs: 60 * 1000 };
 		}
 
+		if (path.includes('telegram/complete')) {
+			return { limit: 80, windowMs: 3 * 60 * 1000 };
+		}
+
 		return { limit: 10, windowMs: 10 * 60 * 1000 };
 	}
 

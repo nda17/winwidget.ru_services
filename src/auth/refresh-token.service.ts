@@ -8,12 +8,14 @@ export class RefreshTokenService {
 
 	private getCookieOptions(expires: Date) {
 		const isProduction = process.env.MODE === 'production';
+		const domain = process.env.AUTH_COOKIE_DOMAIN?.trim();
 
 		return {
 			httpOnly: true,
 			expires,
 			secure: isProduction,
 			sameSite: isProduction ? ('none' as const) : ('lax' as const),
+			...(domain ? { domain } : {}),
 			path: '/'
 		};
 	}

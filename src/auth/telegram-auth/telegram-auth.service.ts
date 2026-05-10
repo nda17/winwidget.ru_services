@@ -56,7 +56,6 @@ export type TelegramWebhookUpdate = {
 @Injectable()
 export class TelegramAuthService {
 	private readonly REQUEST_EXPIRATION_MINUTES = 15;
-	private readonly CODE_EXPIRATION_MINUTES = 10;
 	private readonly CODE_MAX_ATTEMPTS = 5;
 	private readonly CALLBACK_PREFIX = 'winwidget_login:';
 	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
@@ -145,6 +144,22 @@ export class TelegramAuthService {
 		return user;
 	}
 
+	async complete(requestId: string) {
+		const request = await this.getActiveLoginRequest(requestId);
+
+		if (!request) {
+			throw new UnauthorizedException(TELEGRAM_AUTH_REQUEST_NOT_FOUND);
+		}
+
+		if (!request.telegramUserId) {
+			return null;
+		}
+
+		const user = await this.findOrCreateTelegramUser(request);
+		await this.deleteRequest(requestId);
+		return user;
+	}
+
 	async handleWebhook(update: TelegramWebhookUpdate, secret?: string) {
 		this.ensureWebhookSecret(secret);
 
@@ -204,14 +219,14 @@ export class TelegramAuthService {
 			message.chat.id,
 			isBinding
 				? 'Нажмите кнопку ниже, чтобы привязать Telegram к профилю winwidget.'
-				: 'Нажмите кнопку ниже, чтобы получить код для входа в сервис winwidget.',
+				: 'Нажмите кнопку ниже, чтобы подтвердить вход в winwidget.',
 			{
 				inline_keyboard: [
 					[
 						{
 							text: isBinding
 								? 'Привязать Telegram к winwidget'
-								: 'Получить код для входа в winwidget',
+								: 'Подтвердить вход в winwidget',
 							callback_data: `${this.CALLBACK_PREFIX}${requestId}`
 						}
 					]
@@ -264,16 +279,12 @@ export class TelegramAuthService {
 		) {
 			await this.answerCallbackQuery(
 				callbackQuery.id,
-				'Код уже выдан другому Telegram-аккаунту.'
+				'Вход уже подтверждён другим Telegram-аккаунтом.'
 			);
 			return;
 		}
 
-		const code = this.generateCode();
 		const now = new Date();
-		const expiresAt = new Date(
-			now.getTime() + this.CODE_EXPIRATION_MINUTES * 60 * 1000
-		);
 
 		await this.prisma.verificationChallenge.update({
 			where: {
@@ -284,22 +295,20 @@ export class TelegramAuthService {
 				}
 			},
 			data: {
-				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
 				attempts: 0,
 				telegramUserId,
 				telegramChatId: String(chatId),
 				telegramUsername: callbackQuery.from.username ?? null,
 				telegramFirstName: callbackQuery.from.first_name ?? null,
 				telegramLastName: callbackQuery.from.last_name ?? null,
-				expiresAt,
 				lastSentAt: now
 			}
 		});
 
-		await this.answerCallbackQuery(callbackQuery.id, 'Код отправлен.');
+		await this.answerCallbackQuery(callbackQuery.id, 'Вход подтверждён.');
 		await this.sendMessage(
 			chatId,
-			`Код для входа в winwidget.ru: ${code}\n\nВведите его на странице входа. Код действует ${this.CODE_EXPIRATION_MINUTES} минут.`
+			'Вход через Telegram подтверждён. Вернитесь на сайт, статус обновится автоматически.'
 		);
 	}
 
@@ -379,7 +388,7 @@ export class TelegramAuthService {
 		await this.answerCallbackQuery(callbackQuery.id, 'Telegram привязан.');
 		await this.sendMessage(
 			chatId,
-			'Telegram привязан к профилю winwidget.ru. Вернитесь в профиль и обновите статус.'
+			'Telegram привязан к профилю winwidget.ru. Вернитесь на сайт, статус обновится автоматически.'
 		);
 	}
 

@@ -3,6 +3,7 @@ import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
 	PASSWORD_SALT_ROUNDS,
+	TELEGRAM_AUTH_NOT_CONFIGURED,
 	TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED,
 	TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID
 } from '@/utils/auth.constants';
@@ -76,6 +77,17 @@ export type TelegramInfoBotWebhookUpdate = {
 	message?: TelegramMessage;
 };
 
+export type TelegramWebhookBot = 'info' | 'auth';
+
+interface TelegramWebhookConfig {
+	bot: TelegramWebhookBot;
+	title: string;
+	token?: string;
+	secret?: string;
+	path: string;
+	allowedUpdates: string[];
+}
+
 @Injectable()
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private readonly DAILY_SUMMARY_HOUR_MOSCOW = 1;
@@ -127,6 +139,67 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		});
 
 		return this.serializeSettings(settings);
+	}
+
+	async reinstallWebhook(bot: TelegramWebhookBot) {
+		const config = this.getWebhookConfig(bot);
+		const webhookUrl = this.getWebhookUrl(config.path);
+
+		if (!config.token?.trim()) {
+			throw new BadRequestException(
+				bot === 'auth'
+					? TELEGRAM_AUTH_NOT_CONFIGURED
+					: TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
+			);
+		}
+
+		const body = {
+			url: webhookUrl,
+			drop_pending_updates: true,
+			allowed_updates: config.allowedUpdates,
+			...(config.secret?.trim()
+				? { secret_token: config.secret.trim() }
+				: {})
+		};
+
+		const response = await fetch(
+			`https://api.telegram.org/bot${config.token.trim()}/setWebhook`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
+				body: JSON.stringify(body)
+			}
+		);
+		const data = (await response.json().catch(() => null)) as {
+			ok?: boolean;
+			description?: string;
+		} | null;
+
+		if (!response.ok || !data?.ok) {
+			throw new BadRequestException(
+				`Не удалось установить webhook ${config.title}: ${data?.description ?? `HTTP ${response.status}`}`
+			);
+		}
+
+		return {
+			bot: config.bot,
+			title: config.title,
+			webhookUrl,
+			dropPendingUpdates: true,
+			allowedUpdates: config.allowedUpdates,
+			secretConfigured: Boolean(config.secret?.trim()),
+			installedAt: new Date().toISOString()
+		};
+	}
+
+	async reinstallWebhooks() {
+		const [info, auth] = await Promise.all([
+			this.reinstallWebhook('info'),
+			this.reinstallWebhook('auth')
+		]);
+
+		return { items: [info, auth] };
 	}
 
 	async sendInfoBotMessage(chatId: string, text: string) {
@@ -242,6 +315,50 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		});
 	}
 
+	private getWebhookConfig(
+		bot: TelegramWebhookBot
+	): TelegramWebhookConfig {
+		if (bot === 'auth') {
+			return {
+				bot,
+				title: 'Auth_bot',
+				token: process.env.TELEGRAM_AUTH_BOT_TOKEN,
+				secret: process.env.TELEGRAM_AUTH_BOT_WEBHOOK_SECRET,
+				path: 'telegram-auth/webhook',
+				allowedUpdates: ['message', 'callback_query']
+			};
+		}
+
+		if (bot !== 'info') {
+			throw new BadRequestException('Неизвестный Telegram-бот');
+		}
+
+		return {
+			bot,
+			title: 'Info_bot',
+			token: process.env.TELEGRAM_BOT_TOKEN,
+			secret: process.env.TELEGRAM_BOT_WEBHOOK_SECRET,
+			path: 'telegram-bot/webhook',
+			allowedUpdates: ['message']
+		};
+	}
+
+	private getWebhookUrl(path: string) {
+		const host = (
+			process.env.TELEGRAM_WEBHOOK_HOST ||
+			process.env.PRODUCTION_HOST ||
+			''
+		)
+			.trim()
+			.replace(/\/+$/, '');
+
+		if (!host) {
+			throw new BadRequestException('Не настроен хост webhook Telegram');
+		}
+
+		return `${host}/api/${path}`;
+	}
+
 	private getSettingsPatch(dto: UpdateTelegramBotSettingsDto) {
 		return {
 			...(typeof dto.dailySummaryEnabled === 'boolean'
@@ -271,6 +388,20 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				settings.dailySummaryLastSentAt?.toISOString() ?? null,
 			telegramBotTokenConfigured: Boolean(
 				process.env.TELEGRAM_BOT_TOKEN?.trim()
+			),
+			telegramBotUsernameConfigured: Boolean(this.getInfoBotUsername()),
+			authTelegramBotTokenConfigured: Boolean(
+				process.env.TELEGRAM_AUTH_BOT_TOKEN?.trim()
+			),
+			authTelegramBotUsernameConfigured: Boolean(
+				process.env.TELEGRAM_AUTH_BOT_USERNAME?.trim()
+			),
+			telegramWebhookHostConfigured: Boolean(
+				(
+					process.env.TELEGRAM_WEBHOOK_HOST ||
+					process.env.PRODUCTION_HOST ||
+					''
+				).trim()
 			),
 			updatedAt: settings.updatedAt.toISOString()
 		};
