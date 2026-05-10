@@ -31,7 +31,8 @@ export class HealthService {
 			this.checkRecaptcha(),
 			this.checkYooKassa(),
 			this.checkInfoTelegramBot(),
-			this.checkAuthTelegramBot()
+			this.checkAuthTelegramBot(),
+			this.checkSupportTelegramBot()
 		]);
 
 		return {
@@ -231,7 +232,7 @@ export class HealthService {
 	private async checkInfoTelegramBot(): Promise<HealthCheck> {
 		return this.checkTelegramBot({
 			id: 'telegram_info_bot',
-			title: 'Info_bot',
+			title: '@winwidget_info_bot',
 			tokenKey: 'TELEGRAM_BOT_TOKEN'
 		});
 	}
@@ -239,9 +240,18 @@ export class HealthService {
 	private async checkAuthTelegramBot(): Promise<HealthCheck> {
 		return this.checkTelegramBot({
 			id: 'telegram_auth_bot',
-			title: 'Auth_bot',
+			title: '@nda-auth_bot',
 			tokenKey: 'TELEGRAM_AUTH_BOT_TOKEN',
 			usernameKey: 'TELEGRAM_AUTH_BOT_USERNAME'
+		});
+	}
+
+	private async checkSupportTelegramBot(): Promise<HealthCheck> {
+		return this.checkTelegramBot({
+			id: 'telegram_support_bot',
+			title: '@winwidget-support_bot',
+			tokenKey: 'TELEGRAM_SUPPORT_BOT_TOKEN',
+			usernameKey: 'TELEGRAM_SUPPORT_BOT_USERNAME'
 		});
 	}
 
