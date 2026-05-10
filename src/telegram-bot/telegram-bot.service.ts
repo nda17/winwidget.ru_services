@@ -136,10 +136,9 @@ type TelegramBotInfo = {
 
 @Injectable()
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
-	private readonly DAILY_SUMMARY_HOUR_MOSCOW = 1;
-	private readonly DAILY_SUMMARY_MINUTE_MOSCOW = 50;
-	private readonly DAILY_DATABASE_BACKUP_HOUR_MOSCOW = 1;
-	private readonly DAILY_DATABASE_BACKUP_MINUTE_MOSCOW = 45;
+	private readonly DEFAULT_DAILY_SUMMARY_TIME = '01:50';
+	private readonly DEFAULT_DATABASE_BACKUP_TIME = '01:45';
+	private readonly MIN_TELEGRAM_TASK_TIME_GAP_MINUTES = 5;
 	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
 	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
 	private readonly TELEGRAM_API_STATUS_TIMEOUT_MS = 10_000;
@@ -163,8 +162,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		await this.sendMissedDailyDatabaseBackupIfNeeded();
 		await this.sendMissedDailySummaryIfNeeded();
 		this.scheduleWebhookHealthcheck();
-		this.scheduleDailyDatabaseBackup();
-		this.scheduleDailySummary();
+		void this.scheduleDailyDatabaseBackup();
+		void this.scheduleDailySummary();
 	}
 
 	onModuleDestroy() {
@@ -194,10 +193,24 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const data = this.getSettingsPatch(dto);
 		const nextDailySummaryEnabled =
 			data.dailySummaryEnabled ?? currentSettings.dailySummaryEnabled;
+		const nextDatabaseBackupEnabled =
+			data.databaseBackupEnabled ?? currentSettings.databaseBackupEnabled;
 		const nextDailySummaryChatId =
 			data.dailySummaryChatId ?? currentSettings.dailySummaryChatId;
+		const nextDailySummaryTime =
+			data.dailySummaryTime ?? currentSettings.dailySummaryTime;
+		const nextDatabaseBackupTime =
+			data.databaseBackupTime ?? currentSettings.databaseBackupTime;
 
-		if (nextDailySummaryEnabled && !nextDailySummaryChatId.trim()) {
+		this.ensureScheduleTimesSeparated(
+			nextDailySummaryTime,
+			nextDatabaseBackupTime
+		);
+
+		if (
+			(nextDailySummaryEnabled || nextDatabaseBackupEnabled) &&
+			!nextDailySummaryChatId.trim()
+		) {
 			throw new BadRequestException('Укажите ID группы Telegram');
 		}
 
@@ -209,6 +222,14 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				...data
 			}
 		});
+
+		if ('dailySummaryTime' in data || 'dailySummaryEnabled' in data) {
+			this.rescheduleDailySummary();
+		}
+
+		if ('databaseBackupTime' in data || 'databaseBackupEnabled' in data) {
+			this.rescheduleDailyDatabaseBackup();
+		}
 
 		return this.serializeSettings(settings);
 	}
@@ -879,6 +900,25 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				: {}),
 			...(typeof dto.dailySummaryChatId === 'string'
 				? { dailySummaryChatId: dto.dailySummaryChatId.trim() }
+				: {}),
+			...(typeof dto.dailySummaryTime === 'string'
+				? {
+						dailySummaryTime: this.normalizeScheduleTime(
+							dto.dailySummaryTime,
+							this.DEFAULT_DAILY_SUMMARY_TIME
+						)
+					}
+				: {}),
+			...(typeof dto.databaseBackupEnabled === 'boolean'
+				? { databaseBackupEnabled: dto.databaseBackupEnabled }
+				: {}),
+			...(typeof dto.databaseBackupTime === 'string'
+				? {
+						databaseBackupTime: this.normalizeScheduleTime(
+							dto.databaseBackupTime,
+							this.DEFAULT_DATABASE_BACKUP_TIME
+						)
+					}
 				: {})
 		};
 	}
@@ -893,19 +933,31 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	private serializeSettings(settings: TelegramBotSettings) {
 		const webhookHost = this.getConfiguredWebhookHost();
+		const dailySummaryTime = this.normalizeScheduleTime(
+			settings.dailySummaryTime,
+			this.DEFAULT_DAILY_SUMMARY_TIME
+		);
+		const databaseBackupTime = this.normalizeScheduleTime(
+			settings.databaseBackupTime,
+			this.DEFAULT_DATABASE_BACKUP_TIME
+		);
 
 		return {
 			dailySummaryEnabled: settings.dailySummaryEnabled,
 			dailySummaryChatId: settings.dailySummaryChatId,
+			dailySummaryTime,
+			dailySummaryTimeLabel: `${dailySummaryTime} МСК`,
 			dailySummaryLastSentPeriodStart:
 				settings.dailySummaryLastSentPeriodStart?.toISOString() ?? null,
 			dailySummaryLastSentAt:
 				settings.dailySummaryLastSentAt?.toISOString() ?? null,
+			databaseBackupEnabled: settings.databaseBackupEnabled,
+			databaseBackupTime,
+			databaseBackupTimeLabel: `${databaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:
 				settings.databaseBackupLastSentAt?.toISOString() ?? null,
-			databaseBackupTime: '01:45 МСК',
 			databaseRestoreConfirmation: this.DATABASE_RESTORE_CONFIRMATION,
 			telegramBotTokenConfigured: Boolean(
 				process.env.TELEGRAM_INFO_BOT_TOKEN?.trim()
@@ -1345,8 +1397,34 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		);
 	}
 
-	private scheduleDailySummary() {
-		const nextRun = this.getNextDailySummaryDate();
+	private rescheduleDailySummary() {
+		if (this.summaryTimeout) {
+			clearTimeout(this.summaryTimeout);
+			this.summaryTimeout = null;
+		}
+
+		void this.scheduleDailySummary();
+	}
+
+	private rescheduleDailyDatabaseBackup() {
+		if (this.databaseBackupTimeout) {
+			clearTimeout(this.databaseBackupTimeout);
+			this.databaseBackupTimeout = null;
+		}
+
+		void this.scheduleDailyDatabaseBackup();
+	}
+
+	private async scheduleDailySummary() {
+		const settings = await this.getOrCreateSettings();
+		const scheduleTime = this.getScheduleTimeParts(
+			settings.dailySummaryTime,
+			this.DEFAULT_DAILY_SUMMARY_TIME
+		);
+		const nextRun = this.getNextMoscowRunDate(
+			scheduleTime.hour,
+			scheduleTime.minute
+		);
 		const delay = Math.max(nextRun.getTime() - Date.now(), 1_000);
 		const moscowTime = new Date(
 			nextRun.getTime() + this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000
@@ -1371,7 +1449,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 					}`
 				);
 			} finally {
-				this.scheduleDailySummary();
+				void this.scheduleDailySummary();
 			}
 		}, delay);
 
@@ -1379,7 +1457,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private async sendMissedDailySummaryIfNeeded() {
-		if (!this.shouldRunStartupDailySummary()) {
+		if (!(await this.shouldRunStartupDailySummary())) {
 			return;
 		}
 
@@ -1433,8 +1511,16 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return true;
 	}
 
-	private scheduleDailyDatabaseBackup() {
-		const nextRun = this.getNextDailyDatabaseBackupDate();
+	private async scheduleDailyDatabaseBackup() {
+		const settings = await this.getOrCreateSettings();
+		const scheduleTime = this.getScheduleTimeParts(
+			settings.databaseBackupTime,
+			this.DEFAULT_DATABASE_BACKUP_TIME
+		);
+		const nextRun = this.getNextMoscowRunDate(
+			scheduleTime.hour,
+			scheduleTime.minute
+		);
 		const delay = Math.max(nextRun.getTime() - Date.now(), 1_000);
 		const moscowTime = new Date(
 			nextRun.getTime() + this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000
@@ -1459,7 +1545,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 					}`
 				);
 			} finally {
-				this.scheduleDailyDatabaseBackup();
+				void this.scheduleDailyDatabaseBackup();
 			}
 		}, delay);
 
@@ -1467,7 +1553,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private async sendMissedDailyDatabaseBackupIfNeeded() {
-		if (!this.shouldRunStartupDailyDatabaseBackup()) {
+		if (!(await this.shouldRunStartupDailyDatabaseBackup())) {
 			return;
 		}
 
@@ -1492,7 +1578,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
 		const chatId = settings.dailySummaryChatId.trim();
 
-		if (!chatId || !token) {
+		if (!settings.databaseBackupEnabled || !chatId || !token) {
 			return false;
 		}
 
@@ -2023,18 +2109,48 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		});
 	}
 
-	private getNextDailySummaryDate() {
-		return this.getNextMoscowRunDate(
-			this.DAILY_SUMMARY_HOUR_MOSCOW,
-			this.DAILY_SUMMARY_MINUTE_MOSCOW
-		);
+	private normalizeScheduleTime(value: string, fallback: string) {
+		const trimmed = value.trim();
+
+		if (/^([01]\d|2[0-3]):[0-5]\d$/.test(trimmed)) {
+			return trimmed;
+		}
+
+		return fallback;
 	}
 
-	private getNextDailyDatabaseBackupDate() {
-		return this.getNextMoscowRunDate(
-			this.DAILY_DATABASE_BACKUP_HOUR_MOSCOW,
-			this.DAILY_DATABASE_BACKUP_MINUTE_MOSCOW
+	private getScheduleTimeParts(value: string, fallback: string) {
+		const normalized = this.normalizeScheduleTime(value, fallback);
+		const [hour, minute] = normalized.split(':').map(Number);
+
+		return { hour, minute, normalized };
+	}
+
+	private ensureScheduleTimesSeparated(
+		dailySummaryTime: string,
+		databaseBackupTime: string
+	) {
+		const summaryMinutes = this.getScheduleTimeMinutes(
+			dailySummaryTime,
+			this.DEFAULT_DAILY_SUMMARY_TIME
 		);
+		const backupMinutes = this.getScheduleTimeMinutes(
+			databaseBackupTime,
+			this.DEFAULT_DATABASE_BACKUP_TIME
+		);
+		const directGap = Math.abs(summaryMinutes - backupMinutes);
+		const gap = Math.min(directGap, 24 * 60 - directGap);
+
+		if (gap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES) {
+			throw new BadRequestException(
+				`Разнесите отправку сводки и backup минимум на ${this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES} минут`
+			);
+		}
+	}
+
+	private getScheduleTimeMinutes(value: string, fallback: string) {
+		const { hour, minute } = this.getScheduleTimeParts(value, fallback);
+		return hour * 60 + minute;
 	}
 
 	private getNextMoscowRunDate(hour: number, minute: number) {
@@ -2051,17 +2167,29 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return new Date(shiftedNextRun.getTime() - offsetMs);
 	}
 
-	private shouldRunStartupDailySummary() {
+	private async shouldRunStartupDailySummary() {
+		const settings = await this.getOrCreateSettings();
+		const scheduleTime = this.getScheduleTimeParts(
+			settings.dailySummaryTime,
+			this.DEFAULT_DAILY_SUMMARY_TIME
+		);
+
 		return this.shouldRunStartupMoscowTask(
-			this.DAILY_SUMMARY_HOUR_MOSCOW,
-			this.DAILY_SUMMARY_MINUTE_MOSCOW
+			scheduleTime.hour,
+			scheduleTime.minute
 		);
 	}
 
-	private shouldRunStartupDailyDatabaseBackup() {
+	private async shouldRunStartupDailyDatabaseBackup() {
+		const settings = await this.getOrCreateSettings();
+		const scheduleTime = this.getScheduleTimeParts(
+			settings.databaseBackupTime,
+			this.DEFAULT_DATABASE_BACKUP_TIME
+		);
+
 		return this.shouldRunStartupMoscowTask(
-			this.DAILY_DATABASE_BACKUP_HOUR_MOSCOW,
-			this.DAILY_DATABASE_BACKUP_MINUTE_MOSCOW
+			scheduleTime.hour,
+			scheduleTime.minute
 		);
 	}
 

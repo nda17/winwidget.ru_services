@@ -73,6 +73,9 @@ export class TelegramBotController {
 				dailySummaryChatIdConfigured: Boolean(
 					settings.dailySummaryChatId.trim()
 				),
+				dailySummaryTime: settings.dailySummaryTime,
+				databaseBackupEnabled: settings.databaseBackupEnabled,
+				databaseBackupTime: settings.databaseBackupTime,
 				telegramBotTokenConfigured: settings.telegramBotTokenConfigured,
 				supportTelegramBotTokenConfigured:
 					settings.supportTelegramBotTokenConfigured
