@@ -114,6 +114,13 @@ export class UserController {
 
 	@HttpCode(200)
 	@Auth()
+	@Post('profile/bind/telegram/cancel')
+	async cancelProfileTelegramBinding(@CurrentUser('id') id: string) {
+		return this.userIdentityBindingService.cancelTelegramBinding(id);
+	}
+
+	@HttpCode(200)
+	@Auth()
 	@Delete('profile/bind/telegram')
 	async unlinkProfileTelegramBinding(@CurrentUser('id') id: string) {
 		return this.userIdentityBindingService.unlinkTelegramBinding(id);
@@ -131,6 +138,13 @@ export class UserController {
 	@Post('profile/telegram-notifications/start')
 	startProfileTelegramNotifications(@CurrentUser('id') id: string) {
 		return this.telegramBotService.startNotificationBinding(id);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Post('profile/telegram-notifications/cancel')
+	cancelProfileTelegramNotifications(@CurrentUser('id') id: string) {
+		return this.telegramBotService.cancelNotificationBinding(id);
 	}
 
 	@HttpCode(200)

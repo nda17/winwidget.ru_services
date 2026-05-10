@@ -5,7 +5,8 @@ import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram
 import {
 	TelegramBotService,
 	type TelegramWebhookBot,
-	type TelegramInfoBotWebhookUpdate
+	type TelegramInfoBotWebhookUpdate,
+	type TelegramSupportBotWebhookUpdate
 } from '@/telegram-bot/telegram-bot.service';
 import {
 	Body,
@@ -52,21 +53,30 @@ export class TelegramBotController {
 			adminId,
 			section: 'TELEGRAM_BOT',
 			action: 'TELEGRAM_BOT_SETTINGS_UPDATE',
-			description: 'Обновлены настройки Info_bot',
+			description: 'Обновлены настройки Telegram-ботов',
 			entityType: 'telegram_bot_settings',
 			entityId: 'singleton',
-			entityLabel: 'Info_bot',
+			entityLabel: 'Telegram-боты',
 			metadata: {
 				dailySummaryEnabled: settings.dailySummaryEnabled,
 				dailySummaryChatIdConfigured: Boolean(
 					settings.dailySummaryChatId.trim()
 				),
-				telegramBotTokenConfigured: settings.telegramBotTokenConfigured
+				telegramBotTokenConfigured: settings.telegramBotTokenConfigured,
+				supportTelegramBotTokenConfigured:
+					settings.supportTelegramBotTokenConfigured
 			},
 			request
 		});
 
 		return settings;
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Get('admin/webhooks/status')
+	getWebhookStatuses() {
+		return this.telegramBotService.getWebhookStatuses();
 	}
 
 	@HttpCode(200)
@@ -85,7 +95,7 @@ export class TelegramBotController {
 			description: 'Переустановлены webhook Telegram-ботов',
 			entityType: 'telegram_webhook',
 			entityId: 'all',
-			entityLabel: 'Auth_bot + Info_bot',
+			entityLabel: 'Auth_bot + Info_bot + Support_bot',
 			metadata: result,
 			request
 		});
@@ -125,5 +135,14 @@ export class TelegramBotController {
 		@Headers('x-telegram-bot-api-secret-token') secret?: string
 	) {
 		return this.telegramBotService.handleWebhook(update, secret);
+	}
+
+	@HttpCode(200)
+	@Post('support-webhook')
+	handleSupportWebhook(
+		@Body() update: TelegramSupportBotWebhookUpdate,
+		@Headers('x-telegram-bot-api-secret-token') secret?: string
+	) {
+		return this.telegramBotService.handleSupportWebhook(update, secret);
 	}
 }

@@ -37,6 +37,11 @@ class TelegramAuthCompleteDto {
 	requestId: string;
 }
 
+class TelegramAuthCancelDto {
+	@IsString()
+	requestId: string;
+}
+
 @Controller()
 export class TelegramAuthController {
 	constructor(
@@ -94,6 +99,14 @@ export class TelegramAuthController {
 			confirmed: true,
 			...response
 		};
+	}
+
+	@UseGuards(AuthRateLimitGuard, TelegramAuthEnabledGuard)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@HttpCode(200)
+	@Post('auth/telegram/cancel')
+	cancel(@Body() dto: TelegramAuthCancelDto) {
+		return this.telegramAuthService.cancel(dto.requestId);
 	}
 
 	@HttpCode(200)

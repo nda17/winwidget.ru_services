@@ -18,3 +18,7 @@ export const TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED =
 	'Telegram notification bot not configured';
 export const TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID =
 	'Telegram notification webhook secret invalid';
+export const TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED =
+	'Telegram support bot not configured';
+export const TELEGRAM_SUPPORT_WEBHOOK_SECRET_INVALID =
+	'Telegram support webhook secret invalid';

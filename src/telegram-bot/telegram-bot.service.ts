@@ -5,7 +5,9 @@ import {
 	PASSWORD_SALT_ROUNDS,
 	TELEGRAM_AUTH_NOT_CONFIGURED,
 	TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED,
-	TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID
+	TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID,
+	TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED,
+	TELEGRAM_SUPPORT_WEBHOOK_SECRET_INVALID
 } from '@/utils/auth.constants';
 import {
 	BadRequestException,
@@ -57,6 +59,7 @@ interface DailySummaryStats {
 
 type TelegramUser = {
 	id: number;
+	is_bot?: boolean;
 	username?: string;
 	first_name?: string;
 	last_name?: string;
@@ -68,25 +71,52 @@ type TelegramChat = {
 };
 
 type TelegramMessage = {
+	message_id?: number;
 	text?: string;
+	caption?: string;
 	chat: TelegramChat;
 	from?: TelegramUser;
+	reply_to_message?: TelegramMessage;
 };
 
 export type TelegramInfoBotWebhookUpdate = {
 	message?: TelegramMessage;
 };
 
-export type TelegramWebhookBot = 'info' | 'auth';
+export type TelegramSupportBotWebhookUpdate = {
+	message?: TelegramMessage;
+};
+
+export type TelegramWebhookBot = 'info' | 'auth' | 'support';
 
 interface TelegramWebhookConfig {
 	bot: TelegramWebhookBot;
 	title: string;
 	token?: string;
+	username?: string;
 	secret?: string;
 	path: string;
 	allowedUpdates: string[];
 }
+
+type TelegramWebhookInfo = {
+	ok?: boolean;
+	result?: {
+		url?: string;
+		pending_update_count?: number;
+		last_error_date?: number;
+		last_error_message?: string;
+		allowed_updates?: string[];
+	};
+	description?: string;
+};
+
+type TelegramBotInfo = {
+	ok?: boolean;
+	result?: {
+		username?: string;
+	};
+};
 
 @Injectable()
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
@@ -146,11 +176,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const webhookUrl = this.getWebhookUrl(config.path);
 
 		if (!config.token?.trim()) {
-			throw new BadRequestException(
-				bot === 'auth'
-					? TELEGRAM_AUTH_NOT_CONFIGURED
-					: TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
-			);
+			throw new BadRequestException(this.getBotNotConfiguredError(bot));
 		}
 
 		const body = {
@@ -194,12 +220,27 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async reinstallWebhooks() {
-		const [info, auth] = await Promise.all([
+		const [info, auth, support] = await Promise.all([
 			this.reinstallWebhook('info'),
-			this.reinstallWebhook('auth')
+			this.reinstallWebhook('auth'),
+			this.reinstallWebhook('support')
 		]);
 
-		return { items: [info, auth] };
+		return { items: [info, auth, support] };
+	}
+
+	async getWebhookStatuses() {
+		const configs: TelegramWebhookConfig[] = [
+			this.getWebhookConfig('info'),
+			this.getWebhookConfig('auth'),
+			this.getWebhookConfig('support')
+		];
+
+		const items = await Promise.all(
+			configs.map(config => this.getWebhookStatus(config))
+		);
+
+		return { items };
 	}
 
 	async sendInfoBotMessage(chatId: string, text: string) {
@@ -272,6 +313,18 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		};
 	}
 
+	async cancelNotificationBinding(userId: string) {
+		await this.prisma.verificationChallenge.deleteMany({
+			where: {
+				userId,
+				type: VerificationChallengeType.TELEGRAM,
+				purpose: VerificationChallengePurpose.BIND_TELEGRAM_NOTIFICATIONS
+			}
+		});
+
+		return { cancelled: true };
+	}
+
 	async handleWebhook(
 		update: TelegramInfoBotWebhookUpdate,
 		secret?: string
@@ -282,6 +335,25 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			void this.handleNotificationMessage(update.message).catch(error => {
 				this.logger.warn(
 					`Info_bot webhook handling failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`
+				);
+			});
+		}
+
+		return true;
+	}
+
+	async handleSupportWebhook(
+		update: TelegramSupportBotWebhookUpdate,
+		secret?: string
+	) {
+		this.ensureSupportWebhookSecret(secret);
+
+		if (update.message) {
+			void this.handleSupportMessage(update.message).catch(error => {
+				this.logger.warn(
+					`Support_bot webhook handling failed: ${
 						error instanceof Error ? error.message : String(error)
 					}`
 				);
@@ -323,9 +395,24 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				bot,
 				title: 'Auth_bot',
 				token: process.env.TELEGRAM_AUTH_BOT_TOKEN,
+				username: process.env.TELEGRAM_AUTH_BOT_USERNAME?.trim().replace(
+					/^@/,
+					''
+				),
 				secret: process.env.TELEGRAM_AUTH_BOT_WEBHOOK_SECRET,
 				path: 'telegram-auth/webhook',
 				allowedUpdates: ['message', 'callback_query']
+			};
+		}
+
+		if (bot === 'support') {
+			return {
+				bot,
+				title: 'Support_bot',
+				token: process.env.TELEGRAM_SUPPORT_BOT_TOKEN,
+				secret: process.env.TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET,
+				path: 'telegram-bot/support-webhook',
+				allowedUpdates: ['message']
 			};
 		}
 
@@ -337,6 +424,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			bot,
 			title: 'Info_bot',
 			token: process.env.TELEGRAM_BOT_TOKEN,
+			username: process.env.TELEGRAM_BOT_USERNAME?.trim().replace(
+				/^@/,
+				''
+			),
 			secret: process.env.TELEGRAM_BOT_WEBHOOK_SECRET,
 			path: 'telegram-bot/webhook',
 			allowedUpdates: ['message']
@@ -357,6 +448,127 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		return `${host}/api/${path}`;
+	}
+
+	private async getWebhookStatus(config: TelegramWebhookConfig) {
+		let expectedWebhookUrl: string | null = null;
+
+		try {
+			expectedWebhookUrl = this.getWebhookUrl(config.path);
+		} catch (error) {
+			return {
+				bot: config.bot,
+				title: config.title,
+				configured: Boolean(config.token?.trim()),
+				ok: false,
+				expectedWebhookUrl: null,
+				webhookUrl: null,
+				webhookMatchesExpected: false,
+				pendingUpdateCount: null,
+				lastErrorAt: null,
+				lastErrorMessage: null,
+				allowedUpdates: null,
+				secretConfigured: Boolean(config.secret?.trim()),
+				configuredUsername: config.username || null,
+				actualUsername: null,
+				usernameMatchesConfigured: null,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Не настроен хост webhook Telegram'
+			};
+		}
+
+		const token = config.token?.trim();
+
+		if (!token) {
+			return {
+				bot: config.bot,
+				title: config.title,
+				configured: false,
+				ok: false,
+				expectedWebhookUrl,
+				webhookUrl: null,
+				webhookMatchesExpected: false,
+				pendingUpdateCount: null,
+				lastErrorAt: null,
+				lastErrorMessage: null,
+				allowedUpdates: null,
+				secretConfigured: Boolean(config.secret?.trim()),
+				configuredUsername: config.username || null,
+				actualUsername: null,
+				usernameMatchesConfigured: null,
+				error: this.getBotNotConfiguredError(config.bot)
+			};
+		}
+
+		try {
+			const [webhookInfo, botInfo] = await Promise.all([
+				this.fetchTelegramApi<TelegramWebhookInfo>(
+					token,
+					'getWebhookInfo'
+				),
+				this.fetchTelegramApi<TelegramBotInfo>(token, 'getMe')
+			]);
+			const result = webhookInfo.result;
+			const webhookUrl = result?.url || null;
+			const lastErrorDate = result?.last_error_date;
+			const actualUsername = botInfo.result?.username ?? null;
+
+			return {
+				bot: config.bot,
+				title: config.title,
+				configured: true,
+				ok: Boolean(webhookInfo.ok),
+				expectedWebhookUrl,
+				webhookUrl,
+				webhookMatchesExpected: webhookUrl === expectedWebhookUrl,
+				pendingUpdateCount: result?.pending_update_count ?? 0,
+				lastErrorAt: lastErrorDate
+					? new Date(lastErrorDate * 1000).toISOString()
+					: null,
+				lastErrorMessage: result?.last_error_message ?? null,
+				allowedUpdates: result?.allowed_updates ?? null,
+				secretConfigured: Boolean(config.secret?.trim()),
+				configuredUsername: config.username || null,
+				actualUsername,
+				usernameMatchesConfigured: config.username
+					? actualUsername === config.username
+					: null,
+				error: webhookInfo.ok ? null : (webhookInfo.description ?? null)
+			};
+		} catch (error) {
+			return {
+				bot: config.bot,
+				title: config.title,
+				configured: true,
+				ok: false,
+				expectedWebhookUrl,
+				webhookUrl: null,
+				webhookMatchesExpected: false,
+				pendingUpdateCount: null,
+				lastErrorAt: null,
+				lastErrorMessage: null,
+				allowedUpdates: null,
+				secretConfigured: Boolean(config.secret?.trim()),
+				configuredUsername: config.username || null,
+				actualUsername: null,
+				usernameMatchesConfigured: null,
+				error: error instanceof Error ? error.message : String(error)
+			};
+		}
+	}
+
+	private getBotNotConfiguredError(bot: TelegramWebhookBot) {
+		if (bot === 'auth') {
+			return TELEGRAM_AUTH_NOT_CONFIGURED;
+		}
+
+		if (bot === 'support') {
+			return TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED;
+		}
+
+		return TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED;
 	}
 
 	private getSettingsPatch(dto: UpdateTelegramBotSettingsDto) {
@@ -396,6 +608,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			authTelegramBotUsernameConfigured: Boolean(
 				process.env.TELEGRAM_AUTH_BOT_USERNAME?.trim()
 			),
+			supportTelegramBotTokenConfigured: Boolean(
+				process.env.TELEGRAM_SUPPORT_BOT_TOKEN?.trim()
+			),
 			telegramWebhookHostConfigured: Boolean(
 				(
 					process.env.TELEGRAM_WEBHOOK_HOST ||
@@ -427,6 +642,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	private async handleNotificationMessage(message: TelegramMessage) {
 		if (!message.text?.startsWith('/start')) {
+			if (!message.chat.type || message.chat.type === 'private') {
+				await this.sendInfoBotMessage(
+					String(message.chat.id),
+					'Чтобы подключить уведомления, откройте профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений.'
+				);
+			}
+
 			return;
 		}
 
@@ -518,6 +740,199 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		);
 	}
 
+	private async handleSupportMessage(message: TelegramMessage) {
+		if (message.from?.is_bot) {
+			return;
+		}
+
+		if (
+			message.chat.type === 'group' ||
+			message.chat.type === 'supergroup'
+		) {
+			await this.handleSupportAdminReply(message);
+			return;
+		}
+
+		if (message.chat.type && message.chat.type !== 'private') {
+			return;
+		}
+
+		await this.handleSupportUserMessage(message);
+	}
+
+	private async handleSupportUserMessage(message: TelegramMessage) {
+		const userChatId = String(message.chat.id);
+
+		if (message.text?.startsWith('/start')) {
+			await this.sendSupportBotMessage(
+				userChatId,
+				'Здравствуйте! Напишите ваш вопрос одним или несколькими сообщениями, и администратор ответит здесь.'
+			);
+			return;
+		}
+
+		if (!message.message_id) {
+			await this.sendSupportBotMessage(
+				userChatId,
+				'Не удалось обработать сообщение. Пожалуйста, отправьте его ещё раз.'
+			);
+			return;
+		}
+
+		const settings = await this.getOrCreateSettings();
+		const adminChatId = settings.dailySummaryChatId.trim();
+
+		if (!adminChatId) {
+			await this.sendSupportBotMessage(
+				userChatId,
+				'Служба поддержки временно недоступна. Пожалуйста, попробуйте позже.'
+			);
+			return;
+		}
+
+		const copiedMessage = await this.copySupportBotMessage(
+			adminChatId,
+			userChatId,
+			message.message_id
+		);
+
+		await this.saveSupportMessageMapping({
+			adminChatId,
+			adminMessageId: copiedMessage.message_id,
+			message
+		});
+
+		const contextMessage = await this.sendSupportBotMessage(
+			adminChatId,
+			this.getSupportContextText(message),
+			{
+				reply_to_message_id: copiedMessage.message_id
+			}
+		);
+
+		await this.saveSupportMessageMapping({
+			adminChatId,
+			adminMessageId: contextMessage.message_id,
+			message
+		});
+
+		await this.sendSupportBotMessage(
+			userChatId,
+			'Сообщение отправлено в поддержку. Ответ администратора придёт сюда.'
+		);
+	}
+
+	private async handleSupportAdminReply(message: TelegramMessage) {
+		const replyToMessageId = message.reply_to_message?.message_id;
+
+		if (!replyToMessageId || !message.message_id) {
+			return;
+		}
+
+		const adminChatId = String(message.chat.id);
+		const supportMessage =
+			await this.prisma.telegramSupportMessage.findUnique({
+				where: {
+					adminChatId_adminMessageId: {
+						adminChatId,
+						adminMessageId: replyToMessageId
+					}
+				}
+			});
+
+		if (!supportMessage) {
+			return;
+		}
+
+		try {
+			await this.copySupportBotMessage(
+				supportMessage.userChatId,
+				adminChatId,
+				message.message_id
+			);
+			await this.sendSupportBotMessage(
+				adminChatId,
+				'Ответ отправлен пользователю.',
+				{
+					reply_to_message_id: message.message_id
+				}
+			);
+		} catch (error) {
+			await this.sendSupportBotMessage(
+				adminChatId,
+				'Не удалось отправить ответ пользователю. Возможно, пользователь заблокировал бота.',
+				{
+					reply_to_message_id: message.message_id
+				}
+			).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	private async saveSupportMessageMapping({
+		adminChatId,
+		adminMessageId,
+		message
+	}: {
+		adminChatId: string;
+		adminMessageId: number;
+		message: TelegramMessage;
+	}) {
+		await this.prisma.telegramSupportMessage.upsert({
+			where: {
+				adminChatId_adminMessageId: {
+					adminChatId,
+					adminMessageId
+				}
+			},
+			update: {
+				userChatId: String(message.chat.id),
+				telegramUserId: message.from?.id ? String(message.from.id) : null,
+				username: message.from?.username ?? null,
+				firstName: message.from?.first_name ?? null,
+				lastName: message.from?.last_name ?? null,
+				text: message.text ?? message.caption ?? null
+			},
+			create: {
+				adminChatId,
+				adminMessageId,
+				userChatId: String(message.chat.id),
+				telegramUserId: message.from?.id ? String(message.from.id) : null,
+				username: message.from?.username ?? null,
+				firstName: message.from?.first_name ?? null,
+				lastName: message.from?.last_name ?? null,
+				text: message.text ?? message.caption ?? null
+			}
+		});
+	}
+
+	private getSupportContextText(message: TelegramMessage) {
+		const fullName = [message.from?.first_name, message.from?.last_name]
+			.filter(Boolean)
+			.join(' ')
+			.trim();
+		const username = message.from?.username
+			? `@${message.from.username}`
+			: null;
+		const name = username || fullName || 'Без имени';
+		const telegramUserId = message.from?.id
+			? String(message.from.id)
+			: 'неизвестен';
+		const preview =
+			message.text || message.caption || 'Сообщение без текста';
+
+		return [
+			'Новое обращение в поддержку winwidget.ru',
+			`Пользователь: ${name}`,
+			`Telegram ID: ${telegramUserId}`,
+			`Chat ID: ${String(message.chat.id)}`,
+			'',
+			'Ответьте reply на это сообщение или на сообщение пользователя выше.',
+			'',
+			`Текст: ${preview}`
+		].join('\n');
+	}
+
 	private async getActiveNotificationRequest(requestId: string) {
 		const request = await this.prisma.verificationChallenge.findUnique({
 			where: {
@@ -582,6 +997,27 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID
 			);
 		}
+	}
+
+	private ensureSupportWebhookSecret(secret?: string) {
+		const expected =
+			process.env.TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET?.trim();
+
+		if (expected && secret !== expected) {
+			throw new UnauthorizedException(
+				TELEGRAM_SUPPORT_WEBHOOK_SECRET_INVALID
+			);
+		}
+	}
+
+	private getSupportBotToken() {
+		const token = process.env.TELEGRAM_SUPPORT_BOT_TOKEN?.trim();
+
+		if (!token) {
+			throw new BadRequestException(TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED);
+		}
+
+		return token;
 	}
 
 	private getInfoBotUsername() {
@@ -837,6 +1273,82 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			`- Истекают в ближайшие 7 дней: ${stats.expiringSubscriptionsCount}`,
 			`- Истекли, но ещё ACTIVE: ${stats.expiredActiveSubscriptionsCount}`
 		].join('\n');
+	}
+
+	private async sendSupportBotMessage(
+		chatId: string,
+		text: string,
+		options?: { reply_to_message_id?: number }
+	) {
+		const data = await this.fetchTelegramApi<{
+			ok?: boolean;
+			result?: { message_id: number };
+		}>(this.getSupportBotToken(), 'sendMessage', {
+			chat_id: chatId,
+			text,
+			disable_web_page_preview: true,
+			...(options?.reply_to_message_id
+				? { reply_to_message_id: options.reply_to_message_id }
+				: {})
+		});
+
+		if (!data.result?.message_id) {
+			throw new Error(
+				'Telegram support sendMessage returned no message_id'
+			);
+		}
+
+		return data.result;
+	}
+
+	private async copySupportBotMessage(
+		chatId: string,
+		fromChatId: string,
+		messageId: number
+	) {
+		const data = await this.fetchTelegramApi<{
+			ok?: boolean;
+			result?: { message_id: number };
+		}>(this.getSupportBotToken(), 'copyMessage', {
+			chat_id: chatId,
+			from_chat_id: fromChatId,
+			message_id: messageId
+		});
+
+		if (!data.result?.message_id) {
+			throw new Error(
+				'Telegram support copyMessage returned no message_id'
+			);
+		}
+
+		return data.result;
+	}
+
+	private async fetchTelegramApi<T>(
+		token: string,
+		method: string,
+		body?: Record<string, unknown>
+	) {
+		const response = await fetch(
+			`https://api.telegram.org/bot${token}/${method}`,
+			{
+				method: body ? 'POST' : 'GET',
+				headers: body ? { 'Content-Type': 'application/json' } : undefined,
+				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
+				body: body ? JSON.stringify(body) : undefined
+			}
+		);
+		const data = (await response.json().catch(() => null)) as
+			| (T & { ok?: boolean; description?: string })
+			| null;
+
+		if (!response.ok || !data?.ok) {
+			throw new Error(
+				`Telegram ${method} failed: ${data?.description ?? `HTTP ${response.status}`}`
+			);
+		}
+
+		return data;
 	}
 
 	private async sendTelegramMessage(

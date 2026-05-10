@@ -231,6 +231,24 @@ model TelegramNotificationChannel {
   @@map("telegram_notification_channels")
 }
 
+model TelegramSupportMessage {
+  id             String   @id @default(cuid())
+  adminChatId    String   @map("admin_chat_id")
+  adminMessageId Int      @map("admin_message_id")
+  userChatId     String   @map("user_chat_id")
+  telegramUserId String?  @map("telegram_user_id")
+  username       String?
+  firstName      String?  @map("first_name")
+  lastName       String?  @map("last_name")
+  text           String?  @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@unique([adminChatId, adminMessageId], map: "telegram_support_messages_admin_message_unique")
+  @@index([userChatId], map: "telegram_support_messages_user_chat_id_idx")
+  @@index([createdAt], map: "telegram_support_messages_created_at_idx")
+  @@map("telegram_support_messages")
+}
+
 model SubscriptionHistory {
   id                 String                     @id @default(cuid())
   subscriptionId     String?                    @map("subscription_id")

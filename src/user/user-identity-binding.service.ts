@@ -302,6 +302,18 @@ export class UserIdentityBindingService {
 		return this.userService.getPublicUserById(userId);
 	}
 
+	async cancelTelegramBinding(userId: string) {
+		await this.prisma.verificationChallenge.deleteMany({
+			where: {
+				userId,
+				type: VerificationChallengeType.TELEGRAM,
+				purpose: VerificationChallengePurpose.BIND_IDENTITY
+			}
+		});
+
+		return { cancelled: true };
+	}
+
 	private async upsertPendingBinding({
 		userId,
 		type,

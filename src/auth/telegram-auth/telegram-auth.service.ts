@@ -32,6 +32,7 @@ type TelegramUser = {
 
 type TelegramChat = {
 	id: number | string;
+	type?: string;
 };
 
 type TelegramMessage = {
@@ -160,6 +161,11 @@ export class TelegramAuthService {
 		return user;
 	}
 
+	async cancel(requestId: string) {
+		await this.deleteRequest(requestId);
+		return { cancelled: true };
+	}
+
 	async handleWebhook(update: TelegramWebhookUpdate, secret?: string) {
 		this.ensureWebhookSecret(secret);
 
@@ -189,6 +195,13 @@ export class TelegramAuthService {
 
 	private async handleMessage(message: TelegramMessage) {
 		if (!message.text?.startsWith('/start')) {
+			if (!message.chat.type || message.chat.type === 'private') {
+				await this.sendMessage(
+					message.chat.id,
+					'Для входа или привязки Telegram откройте Auth_bot через кнопку на сайте winwidget.ru.'
+				);
+			}
+
 			return;
 		}
 
