@@ -307,6 +307,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 		this.databaseRestoreInProgress = true;
 		const backupPath = await this.writeUploadedBackupFile(file);
+		const database = this.getPostgresCommandConnection();
 
 		try {
 			await this.prisma.$disconnect();
@@ -316,8 +317,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				'--if-exists',
 				'--no-owner',
 				'--no-privileges',
+				'--schema',
+				database.schema,
 				'--dbname',
-				this.getDatabaseUrl(),
+				database.url,
 				backupPath
 			]);
 
@@ -1385,15 +1388,18 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const createdAt = new Date();
 		const fileName = `winwidget-db-${createdAt.toISOString().replace(/[:.]/g, '-')}.dump`;
 		const filePath = join(directory, fileName);
+		const database = this.getPostgresCommandConnection();
 
 		try {
 			await this.runPostgresCommand('pg_dump', [
 				'--format=custom',
 				'--no-owner',
 				'--no-privileges',
+				'--schema',
+				database.schema,
 				'--file',
 				filePath,
-				this.getDatabaseUrl()
+				database.url
 			]);
 
 			const fileStat = await stat(filePath);
@@ -1483,6 +1489,20 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 					: 'PostgreSQL command failed';
 			throw new BadRequestException(message);
 		}
+	}
+
+	private getPostgresCommandConnection() {
+		const rawDatabaseUrl = this.getDatabaseUrl();
+		const url = new URL(rawDatabaseUrl);
+
+		const schema = url.searchParams.get('schema')?.trim() || 'public';
+
+		url.searchParams.delete('schema');
+
+		return {
+			url: url.toString(),
+			schema
+		};
 	}
 
 	private getDatabaseUrl() {
