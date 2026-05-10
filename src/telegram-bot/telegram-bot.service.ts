@@ -142,6 +142,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private readonly DAILY_DATABASE_BACKUP_MINUTE_MOSCOW = 45;
 	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
 	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
+	private readonly TELEGRAM_API_STATUS_TIMEOUT_MS = 10_000;
 	private readonly TELEGRAM_WEBHOOK_MAX_CONNECTIONS = 40;
 	private readonly TELEGRAM_WEBHOOK_HEALTHCHECK_INTERVAL_MS = 60_000;
 	private readonly DATABASE_BACKUP_TIMEOUT_MS = 10 * 60 * 1000;
@@ -259,7 +260,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		];
 
 		const items = await Promise.all(
-			configs.map(config => this.getWebhookStatus(config))
+			configs.map(config => this.getSyncedWebhookStatus(config))
 		);
 
 		return { items };
@@ -659,11 +660,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 					const status = await this.getWebhookStatus(config);
 
-					if (
-						status.error ||
-						!status.ok ||
-						status.webhookMatchesExpected
-					) {
+					if (!this.shouldRestoreWebhookUrl(status)) {
 						return;
 					}
 
@@ -686,6 +683,41 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
+	private async getSyncedWebhookStatus(config: TelegramWebhookConfig) {
+		const status = await this.getWebhookStatus(config);
+
+		if (!this.shouldRestoreWebhookUrl(status)) {
+			return status;
+		}
+
+		try {
+			await this.setTelegramWebhook(config, false);
+			this.logger.warn(`Telegram webhook ${config.title} URL restored.`);
+			return this.getWebhookStatus(config);
+		} catch (error) {
+			return {
+				...status,
+				error: `Не удалось восстановить webhook URL: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			};
+		}
+	}
+
+	private shouldRestoreWebhookUrl(status: {
+		configured: boolean;
+		ok: boolean;
+		webhookMatchesExpected: boolean;
+		error: string | null;
+	}) {
+		return (
+			status.configured &&
+			status.ok &&
+			!status.error &&
+			!status.webhookMatchesExpected
+		);
+	}
+
 	private async setTelegramWebhook(
 		config: TelegramWebhookConfig,
 		dropPendingUpdates: boolean
@@ -696,15 +728,20 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			throw new Error(this.getBotNotConfiguredError(config.bot));
 		}
 
-		await this.fetchTelegramApi(token, 'setWebhook', {
-			url: this.getWebhookUrl(config.path),
-			drop_pending_updates: dropPendingUpdates,
-			max_connections: this.TELEGRAM_WEBHOOK_MAX_CONNECTIONS,
-			allowed_updates: config.allowedUpdates,
-			...(config.secret?.trim()
-				? { secret_token: config.secret.trim() }
-				: {})
-		});
+		await this.fetchTelegramApi(
+			token,
+			'setWebhook',
+			{
+				url: this.getWebhookUrl(config.path),
+				drop_pending_updates: dropPendingUpdates,
+				max_connections: this.TELEGRAM_WEBHOOK_MAX_CONNECTIONS,
+				allowed_updates: config.allowedUpdates,
+				...(config.secret?.trim()
+					? { secret_token: config.secret.trim() }
+					: {})
+			},
+			this.TELEGRAM_API_STATUS_TIMEOUT_MS
+		);
 	}
 
 	private async getWebhookStatus(config: TelegramWebhookConfig) {
@@ -763,9 +800,16 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			const [webhookInfo, botInfo] = await Promise.all([
 				this.fetchTelegramApi<TelegramWebhookInfo>(
 					token,
-					'getWebhookInfo'
+					'getWebhookInfo',
+					undefined,
+					this.TELEGRAM_API_STATUS_TIMEOUT_MS
 				),
-				this.fetchTelegramApi<TelegramBotInfo>(token, 'getMe')
+				this.fetchTelegramApi<TelegramBotInfo>(
+					token,
+					'getMe',
+					undefined,
+					this.TELEGRAM_API_STATUS_TIMEOUT_MS
+				)
 			]);
 			const result = webhookInfo.result;
 			const webhookUrl = result?.url || null;
@@ -1869,14 +1913,15 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private async fetchTelegramApi<T>(
 		token: string,
 		method: string,
-		body?: Record<string, unknown>
+		body?: Record<string, unknown>,
+		timeoutMs = this.TELEGRAM_SEND_TIMEOUT_MS
 	) {
 		const response = await fetch(
 			`https://api.telegram.org/bot${token}/${method}`,
 			{
 				method: body ? 'POST' : 'GET',
 				headers: body ? { 'Content-Type': 'application/json' } : undefined,
-				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
+				signal: AbortSignal.timeout(timeoutMs),
 				body: body ? JSON.stringify(body) : undefined
 			}
 		);
