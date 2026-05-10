@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
@@ -27,6 +26,7 @@ import {
 	VerificationChallengeType
 } from '@prisma/client';
 import { hash } from 'bcryptjs';
+import { randomBytes } from 'node:crypto';
 
 interface DailySummaryPeriod {
 	start: Date;
@@ -818,7 +818,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 		await this.sendSupportBotMessage(
 			userChatId,
-			'Сообщение отправлено в поддержку. Ответ администратора придёт сюда.'
+			'Сообщение передано команде поддержки. Ответ будет направлен в текущий чат.'
 		);
 	}
 
