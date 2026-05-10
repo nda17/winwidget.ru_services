@@ -26,7 +26,21 @@ import {
 	VerificationChallengeType
 } from '@prisma/client';
 import { hash } from 'bcryptjs';
-import { randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { randomBytes, randomUUID } from 'node:crypto';
+import {
+	mkdir,
+	readFile,
+	stat,
+	unlink,
+	writeFile
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+export const DATABASE_BACKUP_MAX_FILE_SIZE_BYTES = 49 * 1024 * 1024;
 
 interface DailySummaryPeriod {
 	start: Date;
@@ -80,10 +94,12 @@ type TelegramMessage = {
 };
 
 export type TelegramInfoBotWebhookUpdate = {
+	update_id?: number;
 	message?: TelegramMessage;
 };
 
 export type TelegramSupportBotWebhookUpdate = {
+	update_id?: number;
 	message?: TelegramMessage;
 };
 
@@ -122,16 +138,27 @@ type TelegramBotInfo = {
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private readonly DAILY_SUMMARY_HOUR_MOSCOW = 1;
 	private readonly DAILY_SUMMARY_MINUTE_MOSCOW = 50;
+	private readonly DAILY_DATABASE_BACKUP_HOUR_MOSCOW = 1;
+	private readonly DAILY_DATABASE_BACKUP_MINUTE_MOSCOW = 45;
 	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
 	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
+	private readonly TELEGRAM_WEBHOOK_MAX_CONNECTIONS = 40;
+	private readonly DATABASE_BACKUP_TIMEOUT_MS = 10 * 60 * 1000;
+	private readonly DATABASE_RESTORE_CONFIRMATION = 'ВОССТАНОВИТЬ БД';
 	private readonly MOSCOW_UTC_OFFSET_HOURS = 3;
 	private readonly logger = new Logger(TelegramBotService.name);
 	private summaryTimeout: NodeJS.Timeout | null = null;
+	private databaseBackupTimeout: NodeJS.Timeout | null = null;
+	private databaseBackupInProgress = false;
+	private databaseRestoreInProgress = false;
 
 	constructor(private readonly prisma: PrismaService) {}
 
 	async onModuleInit() {
+		void this.ensureWebhooksOnStartup();
+		await this.sendMissedDailyDatabaseBackupIfNeeded();
 		await this.sendMissedDailySummaryIfNeeded();
+		this.scheduleDailyDatabaseBackup();
 		this.scheduleDailySummary();
 	}
 
@@ -139,6 +166,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		if (this.summaryTimeout) {
 			clearTimeout(this.summaryTimeout);
 			this.summaryTimeout = null;
+		}
+
+		if (this.databaseBackupTimeout) {
+			clearTimeout(this.databaseBackupTimeout);
+			this.databaseBackupTimeout = null;
 		}
 	}
 
@@ -179,32 +211,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			throw new BadRequestException(this.getBotNotConfiguredError(bot));
 		}
 
-		const body = {
-			url: webhookUrl,
-			drop_pending_updates: true,
-			allowed_updates: config.allowedUpdates,
-			...(config.secret?.trim()
-				? { secret_token: config.secret.trim() }
-				: {})
-		};
-
-		const response = await fetch(
-			`https://api.telegram.org/bot${config.token.trim()}/setWebhook`,
-			{
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
-				body: JSON.stringify(body)
-			}
-		);
-		const data = (await response.json().catch(() => null)) as {
-			ok?: boolean;
-			description?: string;
-		} | null;
-
-		if (!response.ok || !data?.ok) {
+		try {
+			await this.setTelegramWebhook(config, true);
+		} catch (error) {
 			throw new BadRequestException(
-				`Не удалось установить webhook ${config.title}: ${data?.description ?? `HTTP ${response.status}`}`
+				`Не удалось установить webhook ${config.title}: ${
+					error instanceof Error ? error.message : String(error)
+				}`
 			);
 		}
 
@@ -243,14 +256,96 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return { items };
 	}
 
-	async sendInfoBotMessage(chatId: string, text: string) {
-		const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+	async createAndSendDatabaseBackup(trigger: 'manual' | 'scheduled') {
+		const result = await this.createDatabaseBackupFile();
+
+		try {
+			const sent = await this.sendDatabaseBackupFile(
+				result.filePath,
+				trigger
+			);
+
+			return {
+				...result,
+				sent
+			};
+		} finally {
+			await this.deleteTempFile(result.filePath);
+		}
+	}
+
+	async restoreDatabaseBackup(
+		file: Express.Multer.File | undefined,
+		confirmation: string
+	) {
+		if (this.databaseRestoreInProgress) {
+			throw new BadRequestException('Восстановление базы уже выполняется');
+		}
+
+		if (confirmation !== this.DATABASE_RESTORE_CONFIRMATION) {
+			throw new BadRequestException(
+				`Введите подтверждение: ${this.DATABASE_RESTORE_CONFIRMATION}`
+			);
+		}
+
+		if (!file?.buffer?.length) {
+			throw new BadRequestException('Файл backup не передан');
+		}
+
+		if (file.size > DATABASE_BACKUP_MAX_FILE_SIZE_BYTES) {
+			throw new BadRequestException(
+				'Файл backup должен быть меньше 49 МБ'
+			);
+		}
+
+		const originalName = file.originalname || 'database-backup.dump';
+		const extension = originalName.toLowerCase().split('.').pop();
+
+		if (extension !== 'dump') {
+			throw new BadRequestException('Загрузите backup в формате .dump');
+		}
+
+		this.databaseRestoreInProgress = true;
+		const backupPath = await this.writeUploadedBackupFile(file);
+
+		try {
+			await this.prisma.$disconnect();
+			await this.runPostgresCommand('pg_restore', [
+				'--exit-on-error',
+				'--clean',
+				'--if-exists',
+				'--no-owner',
+				'--no-privileges',
+				'--dbname',
+				this.getDatabaseUrl(),
+				backupPath
+			]);
+
+			return {
+				restored: true,
+				fileName: originalName,
+				fileSize: file.size,
+				restoredAt: new Date().toISOString()
+			};
+		} finally {
+			await this.prisma.$connect();
+			await this.deleteTempFile(backupPath);
+			this.databaseRestoreInProgress = false;
+		}
+	}
+
+	async sendInfoBotMessage(
+		chatId: string,
+		text: string,
+		options?: { parseMode?: 'HTML' | null }
+	) {
+		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
 
 		if (!token) {
 			throw new Error('Info_bot token is not configured');
 		}
 
-		await this.sendTelegramMessage(token, chatId, text);
+		await this.sendTelegramMessage(token, chatId, text, options);
 	}
 
 	async getNotificationStatus(userId: string) {
@@ -331,14 +426,12 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	) {
 		this.ensureNotificationWebhookSecret(secret);
 
-		if (update.message) {
-			void this.handleNotificationMessage(update.message).catch(error => {
-				this.logger.warn(
-					`Info_bot webhook handling failed: ${
-						error instanceof Error ? error.message : String(error)
-					}`
-				);
-			});
+		const message = update.message;
+
+		if (message) {
+			this.enqueueWebhookTask('Info_bot', update.update_id, () =>
+				this.handleNotificationMessage(message)
+			);
 		}
 
 		return true;
@@ -350,14 +443,12 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	) {
 		this.ensureSupportWebhookSecret(secret);
 
-		if (update.message) {
-			void this.handleSupportMessage(update.message).catch(error => {
-				this.logger.warn(
-					`Support_bot webhook handling failed: ${
-						error instanceof Error ? error.message : String(error)
-					}`
-				);
-			});
+		const message = update.message;
+
+		if (message) {
+			this.enqueueWebhookTask('Support_bot', update.update_id, () =>
+				this.handleSupportMessage(message)
+			);
 		}
 
 		return true;
@@ -375,6 +466,22 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			message.includes('user is deactivated') ||
 			message.includes('forbidden')
 		);
+	}
+
+	private enqueueWebhookTask(
+		botTitle: string,
+		updateId: number | undefined,
+		task: () => Promise<void>
+	) {
+		setImmediate(() => {
+			void task().catch(error => {
+				this.logger.warn(
+					`${botTitle} webhook handling failed${
+						updateId ? ` for update ${updateId}` : ''
+					}: ${error instanceof Error ? error.message : String(error)}`
+				);
+			});
+		});
 	}
 
 	async deactivateNotificationChannelByChatId(chatId: string) {
@@ -410,6 +517,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				bot,
 				title: 'Support_bot',
 				token: process.env.TELEGRAM_SUPPORT_BOT_TOKEN,
+				username: this.getSupportBotUsername(),
 				secret: process.env.TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET,
 				path: 'telegram-bot/support-webhook',
 				allowedUpdates: ['message']
@@ -423,12 +531,12 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return {
 			bot,
 			title: 'Info_bot',
-			token: process.env.TELEGRAM_BOT_TOKEN,
-			username: process.env.TELEGRAM_BOT_USERNAME?.trim().replace(
+			token: process.env.TELEGRAM_INFO_BOT_TOKEN,
+			username: process.env.TELEGRAM_INFO_BOT_USERNAME?.trim().replace(
 				/^@/,
 				''
 			),
-			secret: process.env.TELEGRAM_BOT_WEBHOOK_SECRET,
+			secret: process.env.TELEGRAM_INFO_BOT_WEBHOOK_SECRET,
 			path: 'telegram-bot/webhook',
 			allowedUpdates: ['message']
 		};
@@ -448,6 +556,56 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		return `${host}/api/${path}`;
+	}
+
+	private async ensureWebhooksOnStartup() {
+		const configs: TelegramWebhookConfig[] = [
+			this.getWebhookConfig('info'),
+			this.getWebhookConfig('auth'),
+			this.getWebhookConfig('support')
+		];
+
+		await Promise.all(
+			configs.map(async config => {
+				if (!config.token?.trim()) {
+					return;
+				}
+
+				try {
+					await this.setTelegramWebhook(config, false);
+					this.logger.log(
+						`Telegram webhook ${config.title} checked on startup.`
+					);
+				} catch (error) {
+					this.logger.warn(
+						`Telegram webhook ${config.title} startup check failed: ${
+							error instanceof Error ? error.message : String(error)
+						}`
+					);
+				}
+			})
+		);
+	}
+
+	private async setTelegramWebhook(
+		config: TelegramWebhookConfig,
+		dropPendingUpdates: boolean
+	) {
+		const token = config.token?.trim();
+
+		if (!token) {
+			throw new Error(this.getBotNotConfiguredError(config.bot));
+		}
+
+		await this.fetchTelegramApi(token, 'setWebhook', {
+			url: this.getWebhookUrl(config.path),
+			drop_pending_updates: dropPendingUpdates,
+			max_connections: this.TELEGRAM_WEBHOOK_MAX_CONNECTIONS,
+			allowed_updates: config.allowedUpdates,
+			...(config.secret?.trim()
+				? { secret_token: config.secret.trim() }
+				: {})
+		});
 	}
 
 	private async getWebhookStatus(config: TelegramWebhookConfig) {
@@ -598,8 +756,14 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				settings.dailySummaryLastSentPeriodStart?.toISOString() ?? null,
 			dailySummaryLastSentAt:
 				settings.dailySummaryLastSentAt?.toISOString() ?? null,
+			databaseBackupLastSentPeriodStart:
+				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
+			databaseBackupLastSentAt:
+				settings.databaseBackupLastSentAt?.toISOString() ?? null,
+			databaseBackupTime: '01:45 МСК',
+			databaseRestoreConfirmation: this.DATABASE_RESTORE_CONFIRMATION,
 			telegramBotTokenConfigured: Boolean(
-				process.env.TELEGRAM_BOT_TOKEN?.trim()
+				process.env.TELEGRAM_INFO_BOT_TOKEN?.trim()
 			),
 			telegramBotUsernameConfigured: Boolean(this.getInfoBotUsername()),
 			authTelegramBotTokenConfigured: Boolean(
@@ -634,7 +798,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 					: null,
 			disabledAt: channel?.disabledAt?.toISOString() ?? null,
 			telegramBotTokenConfigured: Boolean(
-				process.env.TELEGRAM_BOT_TOKEN?.trim()
+				process.env.TELEGRAM_INFO_BOT_TOKEN?.trim()
 			),
 			telegramBotUsernameConfigured: Boolean(this.getInfoBotUsername())
 		};
@@ -976,7 +1140,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private ensureNotificationBotConfigured() {
-		if (!process.env.TELEGRAM_BOT_TOKEN?.trim()) {
+		if (!process.env.TELEGRAM_INFO_BOT_TOKEN?.trim()) {
 			throw new BadRequestException(
 				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
 			);
@@ -990,7 +1154,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private ensureNotificationWebhookSecret(secret?: string) {
-		const expected = process.env.TELEGRAM_BOT_WEBHOOK_SECRET?.trim();
+		const expected = process.env.TELEGRAM_INFO_BOT_WEBHOOK_SECRET?.trim();
 
 		if (expected && secret !== expected) {
 			throw new UnauthorizedException(
@@ -1020,9 +1184,21 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return token;
 	}
 
+	private getSupportBotUsername() {
+		return (
+			process.env.TELEGRAM_SUPPORT_BOT_USERNAME?.trim().replace(
+				/^@/,
+				''
+			) ||
+			process.env.TELEGRAM_SUPPORT_USERNAME?.trim().replace(/^@/, '') ||
+			''
+		);
+	}
+
 	private getInfoBotUsername() {
 		return (
-			process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, '') ?? ''
+			process.env.TELEGRAM_INFO_BOT_USERNAME?.trim().replace(/^@/, '') ??
+			''
 		);
 	}
 
@@ -1082,7 +1258,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	private async sendDailySummaryIfEnabled() {
 		const settings = await this.getOrCreateSettings();
-		const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
 		const chatId = settings.dailySummaryChatId.trim();
 
 		if (!settings.dailySummaryEnabled || !chatId || !token) {
@@ -1112,6 +1288,218 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		});
 
 		return true;
+	}
+
+	private scheduleDailyDatabaseBackup() {
+		const nextRun = this.getNextDailyDatabaseBackupDate();
+		const delay = Math.max(nextRun.getTime() - Date.now(), 1_000);
+		const moscowTime = new Date(
+			nextRun.getTime() + this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000
+		);
+
+		this.logger.log(
+			`Next Telegram database backup scheduled for ${moscowTime.toISOString().replace('T', ' ').slice(0, 16)} MSK.`
+		);
+
+		this.databaseBackupTimeout = setTimeout(async () => {
+			try {
+				const sent = await this.sendDailyDatabaseBackupIfEnabled();
+				this.logger.log(
+					sent
+						? 'Telegram database backup sent.'
+						: 'Telegram database backup skipped.'
+				);
+			} catch (error) {
+				this.logger.error(
+					`Telegram database backup failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`
+				);
+			} finally {
+				this.scheduleDailyDatabaseBackup();
+			}
+		}, delay);
+
+		this.databaseBackupTimeout.unref?.();
+	}
+
+	private async sendMissedDailyDatabaseBackupIfNeeded() {
+		if (!this.shouldRunStartupDailyDatabaseBackup()) {
+			return;
+		}
+
+		try {
+			const sent = await this.sendDailyDatabaseBackupIfEnabled();
+			this.logger.log(
+				sent
+					? 'Missed Telegram database backup sent on startup.'
+					: 'No missed Telegram database backup to send on startup.'
+			);
+		} catch (error) {
+			this.logger.error(
+				`Telegram database backup startup check failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
+		}
+	}
+
+	private async sendDailyDatabaseBackupIfEnabled() {
+		const settings = await this.getOrCreateSettings();
+		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
+		const chatId = settings.dailySummaryChatId.trim();
+
+		if (!chatId || !token) {
+			return false;
+		}
+
+		const period = this.getPreviousMoscowDayPeriod();
+
+		if (
+			settings.databaseBackupLastSentPeriodStart?.getTime() ===
+			period.start.getTime()
+		) {
+			return false;
+		}
+
+		const result = await this.createAndSendDatabaseBackup('scheduled');
+
+		await this.prisma.telegramBotSettings.update({
+			where: { id: 'singleton' },
+			data: {
+				databaseBackupLastSentPeriodStart: period.start,
+				databaseBackupLastSentAt: new Date()
+			}
+		});
+
+		return result.sent;
+	}
+
+	private async createDatabaseBackupFile() {
+		if (this.databaseBackupInProgress) {
+			throw new BadRequestException('Backup базы уже выполняется');
+		}
+
+		this.databaseBackupInProgress = true;
+		const directory = await this.ensureDatabaseBackupTempDir();
+		const createdAt = new Date();
+		const fileName = `winwidget-db-${createdAt.toISOString().replace(/[:.]/g, '-')}.dump`;
+		const filePath = join(directory, fileName);
+
+		try {
+			await this.runPostgresCommand('pg_dump', [
+				'--format=custom',
+				'--no-owner',
+				'--no-privileges',
+				'--file',
+				filePath,
+				this.getDatabaseUrl()
+			]);
+
+			const fileStat = await stat(filePath);
+
+			if (fileStat.size > DATABASE_BACKUP_MAX_FILE_SIZE_BYTES) {
+				throw new BadRequestException(
+					'Backup создан, но он больше 49 МБ и не может быть отправлен Telegram-ботом'
+				);
+			}
+
+			return {
+				filePath,
+				fileName,
+				fileSize: fileStat.size,
+				createdAt: createdAt.toISOString()
+			};
+		} finally {
+			this.databaseBackupInProgress = false;
+		}
+	}
+
+	private async sendDatabaseBackupFile(
+		filePath: string,
+		trigger: 'manual' | 'scheduled'
+	) {
+		const settings = await this.getOrCreateSettings();
+		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
+		const chatId = settings.dailySummaryChatId.trim();
+
+		if (!token) {
+			throw new BadRequestException(
+				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
+			);
+		}
+
+		if (!chatId) {
+			throw new BadRequestException('Укажите ID группы Telegram');
+		}
+
+		await this.sendTelegramDocument(
+			token,
+			chatId,
+			filePath,
+			[
+				'<b>Backup базы данных WinWidget</b>',
+				`Создано: ${this.formatMoscowDateTime(new Date())} МСК`,
+				`Тип: ${trigger === 'manual' ? 'ручной' : 'ежедневный'}`
+			].join('\n')
+		);
+
+		return true;
+	}
+
+	private async writeUploadedBackupFile(file: Express.Multer.File) {
+		const directory = await this.ensureDatabaseBackupTempDir();
+		const safeName = basename(file.originalname || 'database-backup.dump');
+		const filePath = join(
+			directory,
+			`restore-${randomUUID()}-${safeName}`
+		);
+
+		await writeFile(filePath, file.buffer);
+
+		return filePath;
+	}
+
+	private async ensureDatabaseBackupTempDir() {
+		const directory = join(tmpdir(), 'winwidget-db-backups');
+		await mkdir(directory, { recursive: true });
+		return directory;
+	}
+
+	private async deleteTempFile(filePath: string) {
+		await unlink(filePath).catch(() => undefined);
+	}
+
+	private async runPostgresCommand(command: string, args: string[]) {
+		try {
+			await execFileAsync(command, args, {
+				timeout: this.DATABASE_BACKUP_TIMEOUT_MS,
+				maxBuffer: 1024 * 1024
+			});
+		} catch (error) {
+			const message =
+				error instanceof Error
+					? error.message
+					: 'PostgreSQL command failed';
+			throw new BadRequestException(message);
+		}
+	}
+
+	private getDatabaseUrl() {
+		const mode = process.env.MODE?.trim().toLowerCase() ?? 'development';
+		const databaseUrlKey =
+			mode === 'production'
+				? 'DATABASE_URL_PRODUCTION'
+				: 'DATABASE_URL_DEVELOPMENT';
+		const databaseUrl = process.env[databaseUrlKey]?.trim();
+
+		if (!databaseUrl || databaseUrl === 'change_me') {
+			throw new BadRequestException(
+				`Не настроена переменная ${databaseUrlKey}`
+			);
+		}
+
+		return databaseUrl;
 	}
 
 	private async collectDailySummaryStats(period: DailySummaryPeriod) {
@@ -1324,6 +1712,44 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return data.result;
 	}
 
+	private async sendTelegramDocument(
+		token: string,
+		chatId: string,
+		filePath: string,
+		caption: string
+	) {
+		const fileBuffer = await readFile(filePath);
+		const formData = new FormData();
+
+		formData.append('chat_id', chatId);
+		formData.append('caption', caption);
+		formData.append('parse_mode', 'HTML');
+		formData.append(
+			'document',
+			new Blob([fileBuffer]),
+			basename(filePath)
+		);
+
+		const response = await fetch(
+			`https://api.telegram.org/bot${token}/sendDocument`,
+			{
+				method: 'POST',
+				signal: AbortSignal.timeout(this.DATABASE_BACKUP_TIMEOUT_MS),
+				body: formData
+			}
+		);
+		const data = (await response.json().catch(() => null)) as {
+			ok?: boolean;
+			description?: string;
+		} | null;
+
+		if (!response.ok || !data?.ok) {
+			throw new Error(
+				`Telegram sendDocument failed: ${data?.description ?? `HTTP ${response.status}`}`
+			);
+		}
+	}
+
 	private async fetchTelegramApi<T>(
 		token: string,
 		method: string,
@@ -1354,8 +1780,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private async sendTelegramMessage(
 		token: string,
 		chatId: string,
-		text: string
+		text: string,
+		options?: { parseMode?: 'HTML' | null }
 	) {
+		const parseMode = options?.parseMode === null ? null : 'HTML';
 		const response = await fetch(
 			`https://api.telegram.org/bot${token}/sendMessage`,
 			{
@@ -1365,7 +1793,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				body: JSON.stringify({
 					chat_id: chatId,
 					text,
-					parse_mode: 'HTML',
+					...(parseMode ? { parse_mode: parseMode } : {}),
 					disable_web_page_preview: true
 				})
 			}
@@ -1435,16 +1863,25 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private getNextDailySummaryDate() {
+		return this.getNextMoscowRunDate(
+			this.DAILY_SUMMARY_HOUR_MOSCOW,
+			this.DAILY_SUMMARY_MINUTE_MOSCOW
+		);
+	}
+
+	private getNextDailyDatabaseBackupDate() {
+		return this.getNextMoscowRunDate(
+			this.DAILY_DATABASE_BACKUP_HOUR_MOSCOW,
+			this.DAILY_DATABASE_BACKUP_MINUTE_MOSCOW
+		);
+	}
+
+	private getNextMoscowRunDate(hour: number, minute: number) {
 		const offsetMs = this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000;
 		const shiftedNow = new Date(Date.now() + offsetMs);
 		const shiftedNextRun = new Date(shiftedNow);
 
-		shiftedNextRun.setUTCHours(
-			this.DAILY_SUMMARY_HOUR_MOSCOW,
-			this.DAILY_SUMMARY_MINUTE_MOSCOW,
-			0,
-			0
-		);
+		shiftedNextRun.setUTCHours(hour, minute, 0, 0);
 
 		if (shiftedNextRun.getTime() <= shiftedNow.getTime()) {
 			shiftedNextRun.setUTCDate(shiftedNextRun.getUTCDate() + 1);
@@ -1454,16 +1891,25 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private shouldRunStartupDailySummary() {
+		return this.shouldRunStartupMoscowTask(
+			this.DAILY_SUMMARY_HOUR_MOSCOW,
+			this.DAILY_SUMMARY_MINUTE_MOSCOW
+		);
+	}
+
+	private shouldRunStartupDailyDatabaseBackup() {
+		return this.shouldRunStartupMoscowTask(
+			this.DAILY_DATABASE_BACKUP_HOUR_MOSCOW,
+			this.DAILY_DATABASE_BACKUP_MINUTE_MOSCOW
+		);
+	}
+
+	private shouldRunStartupMoscowTask(hour: number, minute: number) {
 		const offsetMs = this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000;
 		const shiftedNow = new Date(Date.now() + offsetMs);
 		const shiftedRun = new Date(shiftedNow);
 
-		shiftedRun.setUTCHours(
-			this.DAILY_SUMMARY_HOUR_MOSCOW,
-			this.DAILY_SUMMARY_MINUTE_MOSCOW,
-			0,
-			0
-		);
+		shiftedRun.setUTCHours(hour, minute, 0, 0);
 
 		return shiftedNow.getTime() >= shiftedRun.getTime();
 	}

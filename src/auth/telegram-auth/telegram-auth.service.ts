@@ -50,6 +50,7 @@ type TelegramCallbackQuery = {
 };
 
 export type TelegramWebhookUpdate = {
+	update_id?: number;
 	message?: TelegramMessage;
 	callback_query?: TelegramCallbackQuery;
 };
@@ -169,28 +170,39 @@ export class TelegramAuthService {
 	async handleWebhook(update: TelegramWebhookUpdate, secret?: string) {
 		this.ensureWebhookSecret(secret);
 
-		if (update.callback_query) {
-			void this.handleCallback(update.callback_query).catch(error => {
-				this.logger.warn(
-					`Auth_bot callback handling failed: ${
-						error instanceof Error ? error.message : String(error)
-					}`
-				);
-			});
+		const callbackQuery = update.callback_query;
+		const message = update.message;
+
+		if (callbackQuery) {
+			this.enqueueWebhookTask('callback', update.update_id, () =>
+				this.handleCallback(callbackQuery)
+			);
 			return true;
 		}
 
-		if (update.message) {
-			void this.handleMessage(update.message).catch(error => {
-				this.logger.warn(
-					`Auth_bot message handling failed: ${
-						error instanceof Error ? error.message : String(error)
-					}`
-				);
-			});
+		if (message) {
+			this.enqueueWebhookTask('message', update.update_id, () =>
+				this.handleMessage(message)
+			);
 		}
 
 		return true;
+	}
+
+	private enqueueWebhookTask(
+		updateType: string,
+		updateId: number | undefined,
+		task: () => Promise<void>
+	) {
+		setImmediate(() => {
+			void task().catch(error => {
+				this.logger.warn(
+					`Auth_bot ${updateType} handling failed${
+						updateId ? ` for update ${updateId}` : ''
+					}: ${error instanceof Error ? error.message : String(error)}`
+				);
+			});
+		});
 	}
 
 	private async handleMessage(message: TelegramMessage) {
@@ -573,6 +585,7 @@ export class TelegramAuthService {
 			{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
+				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
 				body: JSON.stringify({
 					callback_query_id: callbackQueryId,
 					text

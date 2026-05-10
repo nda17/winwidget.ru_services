@@ -41,4 +41,8 @@ export class UpdateUserDto {
 	@IsOptional()
 	@IsBoolean()
 	isAdmin?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	isDev?: boolean;
 }

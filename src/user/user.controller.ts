@@ -193,9 +193,10 @@ export class UserController {
 		@Param('id') id: string,
 		@Body() dto: UpdateUserDto,
 		@CurrentUser('id') adminId: string,
+		@CurrentUser('rights') adminRights: Role[],
 		@Req() request: Request
 	) {
-		const user = await this.userService.updateUser(id, dto);
+		const user = await this.userService.updateUser(id, dto, adminRights);
 		const updatedFields = Object.keys(dto).filter(
 			field => field !== 'password'
 		);
@@ -212,7 +213,8 @@ export class UserController {
 			metadata: {
 				updatedFields,
 				passwordChanged: Boolean(dto.password),
-				isAdmin: dto.isAdmin ?? null
+				isAdmin: dto.isAdmin ?? null,
+				isDev: dto.isDev ?? null
 			},
 			request
 		});

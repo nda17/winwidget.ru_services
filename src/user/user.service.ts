@@ -10,6 +10,7 @@ import { UpdateUserDto } from '@/user/dto/update-user.dto';
 import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
+	ForbiddenException,
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
@@ -757,7 +758,11 @@ export class UserService {
 		return true;
 	}
 
-	async updateUser(id: string, dto?: UpdateUserDto) {
+	async updateUser(
+		id: string,
+		dto?: UpdateUserDto,
+		adminRights: Role[] = []
+	) {
 		const user = await this.getUserById(id);
 
 		if (!user) {
@@ -820,9 +825,7 @@ export class UserService {
 						typeof dto?.avatarPath === 'string' && dto.avatarPath.length
 							? dto.avatarPath
 							: user.avatarPath,
-					rights: [Role.USER, dto?.isAdmin ? Role.ADMIN : null].filter(
-						role => role !== null
-					)
+					rights: this.buildEditableRights(user, dto, adminRights)
 				}
 			});
 
@@ -1137,10 +1140,10 @@ export class UserService {
 	}
 
 	private getRoleWhere(role: Role): Prisma.UserWhereInput {
-		if (role === Role.ADMIN) {
+		if (role !== Role.USER) {
 			return {
 				rights: {
-					has: Role.ADMIN
+					has: role
 				}
 			};
 		}
@@ -1155,6 +1158,37 @@ export class UserService {
 				}
 			}
 		};
+	}
+
+	private buildEditableRights(
+		user: UserWithAuthIdentities,
+		dto?: UpdateUserDto,
+		adminRights: Role[] = []
+	): Role[] {
+		const currentIsDev = user.rights.includes(Role.DEV);
+		const nextIsDev = dto?.isDev ?? currentIsDev;
+		const devRoleChanged =
+			typeof dto?.isDev === 'boolean' && dto.isDev !== currentIsDev;
+
+		if (devRoleChanged && !adminRights.includes(Role.DEV)) {
+			throw new ForbiddenException(
+				'Роль DEV может менять только пользователь с ролью DEV'
+			);
+		}
+
+		const nextIsAdmin =
+			nextIsDev || (dto?.isAdmin ?? user.rights.includes(Role.ADMIN));
+		const rights: Role[] = [Role.USER];
+
+		if (nextIsAdmin) {
+			rights.push(Role.ADMIN);
+		}
+
+		if (nextIsDev) {
+			rights.push(Role.DEV);
+		}
+
+		return rights;
 	}
 
 	private normalizeSubscriptionPresence(value?: string) {

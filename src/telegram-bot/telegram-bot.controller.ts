@@ -3,6 +3,7 @@ import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
+	DATABASE_BACKUP_MAX_FILE_SIZE_BYTES,
 	TelegramBotService,
 	type TelegramWebhookBot,
 	type TelegramInfoBotWebhookUpdate,
@@ -11,6 +12,7 @@ import {
 import {
 	Body,
 	Controller,
+	ForbiddenException,
 	Get,
 	Headers,
 	HttpCode,
@@ -18,11 +20,20 @@ import {
 	Patch,
 	Post,
 	Req,
+	UploadedFile,
+	UseInterceptors,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
+import { IsString } from 'class-validator';
 import { Request } from 'express';
+
+class RestoreDatabaseBackupDto {
+	@IsString()
+	confirmation: string;
+}
 
 @Controller('telegram-bot')
 export class TelegramBotController {
@@ -126,6 +137,78 @@ export class TelegramBotController {
 		});
 
 		return result;
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Post('admin/database-backup/send')
+	async sendDatabaseBackup(
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		const result =
+			await this.telegramBotService.createAndSendDatabaseBackup('manual');
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'TELEGRAM_BOT',
+			action: 'TELEGRAM_DATABASE_BACKUP_CREATE',
+			description: 'Создан и отправлен backup базы данных',
+			entityType: 'database_backup',
+			entityId: result.fileName,
+			entityLabel: result.fileName,
+			metadata: {
+				fileName: result.fileName,
+				fileSize: result.fileSize,
+				createdAt: result.createdAt
+			},
+			request
+		});
+
+		return result;
+	}
+
+	@HttpCode(200)
+	@Auth(Role.DEV)
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	@Post('admin/database-backup/restore')
+	@UseInterceptors(
+		FileInterceptor('file', {
+			limits: { fileSize: DATABASE_BACKUP_MAX_FILE_SIZE_BYTES }
+		})
+	)
+	async restoreDatabaseBackup(
+		@UploadedFile() file: Express.Multer.File | undefined,
+		@Body() dto: RestoreDatabaseBackupDto,
+		@CurrentUser('id') adminId: string,
+		@CurrentUser('rights') adminRights: Role[],
+		@Req() request: Request
+	) {
+		if (!adminRights?.includes(Role.ADMIN)) {
+			throw new ForbiddenException(
+				'Восстановление БД доступно только админу с ролью DEV'
+			);
+		}
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'TELEGRAM_BOT',
+			action: 'TELEGRAM_DATABASE_RESTORE',
+			description: 'Запущено восстановление базы данных из backup',
+			entityType: 'database_backup',
+			entityId: file?.originalname ?? 'unknown',
+			entityLabel: file?.originalname ?? 'unknown',
+			metadata: {
+				fileName: file?.originalname ?? null,
+				fileSize: file?.size ?? null
+			},
+			request
+		});
+
+		return this.telegramBotService.restoreDatabaseBackup(
+			file,
+			dto.confirmation
+		);
 	}
 
 	@HttpCode(200)

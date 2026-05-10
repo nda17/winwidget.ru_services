@@ -42,9 +42,16 @@ export class MailingController {
 			entityLabel: dto.subject.trim(),
 			metadata: {
 				audience: result.audience,
+				channel: result.channel,
 				recipientCount: result.recipientCount,
 				sentCount: result.sentCount,
 				failedCount: result.failedCount,
+				emailRecipientCount: result.emailRecipientCount,
+				emailSentCount: result.emailSentCount,
+				emailFailedCount: result.emailFailedCount,
+				telegramRecipientCount: result.telegramRecipientCount,
+				telegramSentCount: result.telegramSentCount,
+				telegramFailedCount: result.telegramFailedCount,
 				executedAt: result.executedAt
 			},
 			request

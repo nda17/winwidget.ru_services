@@ -479,7 +479,7 @@ export class CallbackService {
 		}
 
 		const telegramChatId = config?.integrations?.telegramChatId;
-		const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
 		if (telegramChatId && telegramBotToken) {
 			try {
 				await fetch(
@@ -597,7 +597,7 @@ export class CallbackService {
 		const telegramChatId = config?.integrations?.telegramChatId as
 			| string
 			| undefined;
-		const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
+		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
 		if (telegramChatId && telegramBotToken) {
 			try {
 				await fetch(

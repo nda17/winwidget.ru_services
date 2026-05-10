@@ -384,6 +384,7 @@ enum PaymentStatus {
 enum Role {
   USER
   ADMIN
+  DEV
 }
 
 enum UserStatus {
@@ -463,6 +464,8 @@ model TelegramBotSettings {
   dailySummaryChatId              String    @default("") @map("daily_summary_chat_id")
   dailySummaryLastSentPeriodStart DateTime? @map("daily_summary_last_sent_period_start")
   dailySummaryLastSentAt          DateTime? @map("daily_summary_last_sent_at")
+  databaseBackupLastSentPeriodStart DateTime? @map("database_backup_last_sent_period_start")
+  databaseBackupLastSentAt          DateTime? @map("database_backup_last_sent_at")
   updatedAt                       DateTime  @updatedAt @map("updated_at")
 
   @@map("telegram_bot_settings")

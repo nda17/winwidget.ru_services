@@ -233,7 +233,8 @@ export class HealthService {
 		return this.checkTelegramBot({
 			id: 'telegram_info_bot',
 			title: '@winwidget_info_bot',
-			tokenKey: 'TELEGRAM_BOT_TOKEN'
+			tokenKey: 'TELEGRAM_INFO_BOT_TOKEN',
+			usernameKey: 'TELEGRAM_INFO_BOT_USERNAME'
 		});
 	}
 
@@ -249,9 +250,12 @@ export class HealthService {
 	private async checkSupportTelegramBot(): Promise<HealthCheck> {
 		return this.checkTelegramBot({
 			id: 'telegram_support_bot',
-			title: '@winwidget-support_bot',
+			title: '@winwidget_support_bot',
 			tokenKey: 'TELEGRAM_SUPPORT_BOT_TOKEN',
-			usernameKey: 'TELEGRAM_SUPPORT_BOT_USERNAME'
+			usernameKeys: [
+				'TELEGRAM_SUPPORT_BOT_USERNAME',
+				'TELEGRAM_SUPPORT_USERNAME'
+			]
 		});
 	}
 
@@ -259,20 +263,25 @@ export class HealthService {
 		id,
 		title,
 		tokenKey,
-		usernameKey
+		usernameKey,
+		usernameKeys
 	}: {
 		id: string;
 		title: string;
 		tokenKey: string;
 		usernameKey?: string;
+		usernameKeys?: string[];
 	}): Promise<HealthCheck> {
 		const token = this.configService.get<string>(tokenKey);
-		const username = usernameKey
-			? this.configService.get<string>(usernameKey)
-			: null;
+		const usernameEnvKeys =
+			usernameKeys ?? (usernameKey ? [usernameKey] : []);
+		const username =
+			usernameEnvKeys
+				.map(key => this.configService.get<string>(key))
+				.find(Boolean) ?? null;
 		const missing = [
 			!token ? tokenKey : null,
-			usernameKey && !username ? usernameKey : null
+			usernameEnvKeys.length > 0 && !username ? usernameEnvKeys[0] : null
 		].filter((key): key is string => Boolean(key));
 
 		if (missing.length > 0) {
