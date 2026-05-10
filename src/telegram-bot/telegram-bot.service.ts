@@ -143,12 +143,15 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
 	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
 	private readonly TELEGRAM_WEBHOOK_MAX_CONNECTIONS = 40;
+	private readonly TELEGRAM_WEBHOOK_HEALTHCHECK_INTERVAL_MS = 60_000;
 	private readonly DATABASE_BACKUP_TIMEOUT_MS = 10 * 60 * 1000;
 	private readonly DATABASE_RESTORE_CONFIRMATION = 'ВОССТАНОВИТЬ БД';
 	private readonly MOSCOW_UTC_OFFSET_HOURS = 3;
 	private readonly logger = new Logger(TelegramBotService.name);
 	private summaryTimeout: NodeJS.Timeout | null = null;
 	private databaseBackupTimeout: NodeJS.Timeout | null = null;
+	private webhookHealthcheckInterval: NodeJS.Timeout | null = null;
+	private webhookHealthcheckInProgress = false;
 	private databaseBackupInProgress = false;
 	private databaseRestoreInProgress = false;
 
@@ -158,6 +161,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		void this.ensureWebhooksOnStartup();
 		await this.sendMissedDailyDatabaseBackupIfNeeded();
 		await this.sendMissedDailySummaryIfNeeded();
+		this.scheduleWebhookHealthcheck();
 		this.scheduleDailyDatabaseBackup();
 		this.scheduleDailySummary();
 	}
@@ -171,6 +175,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		if (this.databaseBackupTimeout) {
 			clearTimeout(this.databaseBackupTimeout);
 			this.databaseBackupTimeout = null;
+		}
+
+		if (this.webhookHealthcheckInterval) {
+			clearInterval(this.webhookHealthcheckInterval);
+			this.webhookHealthcheckInterval = null;
 		}
 	}
 
@@ -254,6 +263,25 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		);
 
 		return { items };
+	}
+
+	getWebhookHealth() {
+		const webhookHost = this.getConfiguredWebhookHost();
+
+		return {
+			ok: Boolean(webhookHost),
+			mode: process.env.MODE?.trim() || null,
+			webhookHostConfigured: Boolean(webhookHost),
+			webhookHost: webhookHost || null,
+			expectedWebhooks: webhookHost
+				? {
+						info: `${webhookHost}/api/telegram-bot/webhook`,
+						auth: `${webhookHost}/api/telegram-auth/webhook`,
+						support: `${webhookHost}/api/telegram-bot/support-webhook`
+					}
+				: null,
+			checkedAt: new Date().toISOString()
+		};
 	}
 
 	async createAndSendDatabaseBackup(trigger: 'manual' | 'scheduled') {
@@ -546,19 +574,31 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private getWebhookUrl(path: string) {
-		const host = (
-			process.env.TELEGRAM_WEBHOOK_HOST ||
-			process.env.PRODUCTION_HOST ||
-			''
-		)
-			.trim()
-			.replace(/\/+$/, '');
+		const host = this.getConfiguredWebhookHost();
 
 		if (!host) {
-			throw new BadRequestException('Не настроен хост webhook Telegram');
+			throw new BadRequestException(
+				process.env.MODE === 'production'
+					? 'Не настроен TELEGRAM_WEBHOOK_HOST для production'
+					: 'Не настроен хост webhook Telegram'
+			);
 		}
 
 		return `${host}/api/${path}`;
+	}
+
+	private getConfiguredWebhookHost() {
+		const explicitHost = process.env.TELEGRAM_WEBHOOK_HOST?.trim();
+
+		if (explicitHost) {
+			return explicitHost.replace(/\/+$/, '');
+		}
+
+		if (process.env.MODE === 'production') {
+			return '';
+		}
+
+		return (process.env.PRODUCTION_HOST ?? '').trim().replace(/\/+$/, '');
 	}
 
 	private async ensureWebhooksOnStartup() {
@@ -588,6 +628,62 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				}
 			})
 		);
+	}
+
+	private scheduleWebhookHealthcheck() {
+		this.webhookHealthcheckInterval = setInterval(() => {
+			void this.syncWebhookUrlsIfNeeded();
+		}, this.TELEGRAM_WEBHOOK_HEALTHCHECK_INTERVAL_MS);
+
+		this.webhookHealthcheckInterval.unref?.();
+	}
+
+	private async syncWebhookUrlsIfNeeded() {
+		if (this.webhookHealthcheckInProgress) {
+			return;
+		}
+
+		this.webhookHealthcheckInProgress = true;
+		const configs: TelegramWebhookConfig[] = [
+			this.getWebhookConfig('info'),
+			this.getWebhookConfig('auth'),
+			this.getWebhookConfig('support')
+		];
+
+		try {
+			await Promise.all(
+				configs.map(async config => {
+					if (!config.token?.trim()) {
+						return;
+					}
+
+					const status = await this.getWebhookStatus(config);
+
+					if (
+						status.error ||
+						!status.ok ||
+						status.webhookMatchesExpected
+					) {
+						return;
+					}
+
+					try {
+						await this.setTelegramWebhook(config, false);
+						this.logger.warn(
+							`Telegram webhook ${config.title} URL restored.`
+						);
+					} catch (error) {
+						this.logger.warn(
+							`Telegram webhook ${config.title} URL restore failed: ${
+								error instanceof Error ? error.message : String(error)
+							}`
+						);
+					}
+				})
+			);
+		} finally {
+			this.webhookHealthcheckInProgress = false;
+		}
 	}
 
 	private async setTelegramWebhook(
@@ -752,6 +848,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private serializeSettings(settings: TelegramBotSettings) {
+		const webhookHost = this.getConfiguredWebhookHost();
+
 		return {
 			dailySummaryEnabled: settings.dailySummaryEnabled,
 			dailySummaryChatId: settings.dailySummaryChatId,
@@ -778,13 +876,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			supportTelegramBotTokenConfigured: Boolean(
 				process.env.TELEGRAM_SUPPORT_BOT_TOKEN?.trim()
 			),
-			telegramWebhookHostConfigured: Boolean(
-				(
-					process.env.TELEGRAM_WEBHOOK_HOST ||
-					process.env.PRODUCTION_HOST ||
-					''
-				).trim()
-			),
+			telegramWebhookHostConfigured: Boolean(webhookHost),
+			telegramWebhookHost: webhookHost || null,
+			telegramWebhookHealthUrl: webhookHost
+				? `${webhookHost}/api/telegram-bot/webhook-health`
+				: null,
 			updatedAt: settings.updatedAt.toISOString()
 		};
 	}

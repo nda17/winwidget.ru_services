@@ -212,6 +212,12 @@ export class TelegramBotController {
 	}
 
 	@HttpCode(200)
+	@Get('webhook-health')
+	getWebhookHealth() {
+		return this.telegramBotService.getWebhookHealth();
+	}
+
+	@HttpCode(200)
 	@Post('webhook')
 	handleWebhook(
 		@Body() update: TelegramInfoBotWebhookUpdate,
