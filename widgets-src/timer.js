@@ -195,8 +195,7 @@
 		'</div>',
 		'<img id="wt-btn-icon" src="' +
 			getWidgetAssetUrl('timer-button.png') +
-			'" alt="" aria-hidden="true" draggable="false" style="width:60px;height:60px;display:block;object-fit:contain;line-height:1;filter:drop-shadow(0 6px 24px rgba(71,5,251,0.45)) drop-shadow(0 2px 8px rgba(0,0,0,0.22));transform-origin:50% 100%;" />',
-		'<div id="wt-btn-label" style="margin-top:6px;background:#fff;color:#1a1a1a;border:1px solid rgba(71,5,251,0.12);box-shadow:0 8px 24px rgba(71,5,251,0.14);font-size:11px;font-weight:800;padding:5px 10px;border-radius:999px;white-space:nowrap;line-height:1.2;">Акция</div>'
+			'" alt="" aria-hidden="true" draggable="false" style="width:60px;height:60px;display:block;object-fit:contain;line-height:1;filter:drop-shadow(0 6px 24px rgba(71,5,251,0.45)) drop-shadow(0 2px 8px rgba(0,0,0,0.22));transform-origin:50% 100%;" />'
 	].join('');
 	timerBtn.style.cssText = [
 		'position:fixed',
@@ -458,18 +457,6 @@
 			if (!node) return;
 			node.textContent = key === 'days' ? String(t[key]) : pad(t[key]);
 		});
-		var label = document.getElementById('wt-btn-label');
-		if (label) {
-			label.textContent =
-				left <= 0
-					? cfg.expiredTitle || 'Акция завершена'
-					: (cfg.bubbleText || 'Акция') +
-						': ' +
-						(t.days > 0 ? t.days + 'д ' : '') +
-						pad(t.hours) +
-						':' +
-						pad(t.minutes);
-		}
 		if (left <= 0) {
 			if (cfg.expiredBehavior === 'hide') {
 				timerBtn.style.display = 'none';
@@ -988,8 +975,6 @@
 		applyButtonColor(cfg.openButtonColor || cfg.color || '#4705fb');
 		timerBtn.style.display = AUTO_OPEN ? 'none' : 'flex';
 		modal.style.background = cfg.bgColor || '#fff';
-		var label = document.getElementById('wt-btn-label');
-		if (label) label.textContent = cfg.bubbleText || 'Акция';
 		var icon = timerBtn.querySelector('#wt-btn-icon');
 		if (icon) {
 			icon.onerror = function () {

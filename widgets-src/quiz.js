@@ -116,15 +116,7 @@
 		'filter:drop-shadow(0 6px 20px rgba(71,5,251,0.55)) drop-shadow(0 2px 6px rgba(0,0,0,0.3));',
 		'transform-origin:50% 100%;',
 		'transition:filter 0.4s ease;',
-		'" />',
-		'<div id="wq-btn-label" style="',
-		'margin-top:6px;',
-		'background:linear-gradient(135deg,#7c3aed,#4705fb);',
-		'color:#fff;font-size:11px;font-weight:900;',
-		'padding:3px 12px;border-radius:20px;white-space:normal;text-align:center;',
-		'letter-spacing:0.8px;text-transform:uppercase;line-height:1.3;',
-		'box-shadow:0 3px 12px rgba(71,5,251,0.5);',
-		'">Квиз!<br>Приз!</div>'
+		'" />'
 	].join('');
 
 	quizBtn.style.cssText = [
@@ -927,14 +919,6 @@
 			btnIcon.src =
 				cfg.buttonImageUrl || getWidgetAssetUrl('quiz-button.png');
 		}
-		var qLabelEl = quizBtn.querySelector('#wq-btn-label');
-		if (qLabelEl) {
-			var qlf = Math.max(8, Math.round((qsz / 60) * 11));
-			var qlph = Math.max(2, Math.round((qsz / 60) * 3));
-			var qlpv = Math.max(6, Math.round((qsz / 60) * 12));
-			qLabelEl.style.fontSize = qlf + 'px';
-			qLabelEl.style.padding = qlph + 'px ' + qlpv + 'px';
-		}
 		var _openBtnColor = cfg.openButtonColor || _accent;
 		var iconEl = quizBtn.querySelector('#wq-btn-icon');
 		if (iconEl) {
@@ -943,18 +927,6 @@
 				hexToRgba(_openBtnColor, 0.55) +
 				') drop-shadow(0 2px 6px rgba(0,0,0,0.3))';
 		}
-		var qBtnLabel = quizBtn.querySelector('#wq-btn-label');
-		if (qBtnLabel) {
-			qBtnLabel.style.background =
-				'linear-gradient(135deg,' +
-				_openBtnColor +
-				',' +
-				_openBtnColor +
-				')';
-			qBtnLabel.style.boxShadow =
-				'0 3px 12px ' + hexToRgba(_openBtnColor, 0.5);
-		}
-
 		quizBtn.style.bottom = (cfg.buttonBottom ?? 3) + '%';
 		updateBubbleSide(cfg.buttonSide || 'right');
 		var bubbleText = document.getElementById('wq-bubble-text');

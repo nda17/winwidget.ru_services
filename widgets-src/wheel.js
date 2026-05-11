@@ -104,14 +104,6 @@
     filter:drop-shadow(0 6px 16px rgba(0,0,0,0.35)) drop-shadow(0 2px 4px rgba(0,0,0,0.2));
     transform-origin:50% 100%;
   " />
-  <div id="ww-btn-label" style="
-    margin-top:6px;
-    background:linear-gradient(135deg,#ffd700,#ff8c00);
-    color:#1a0600;font-size:11px;font-weight:900;
-    padding:3px 12px;border-radius:20px;white-space:nowrap;
-    letter-spacing:0.8px;text-transform:uppercase;
-    box-shadow:0 3px 10px rgba(255,140,0,0.5);
-  ">Приз!</div>
 `;
 	giftBtn.style.cssText = `
     position: fixed;
@@ -1481,14 +1473,6 @@
 			};
 			iconEl.src =
 				config.buttonImageUrl || getWidgetAssetUrl('gift-button.png');
-		}
-		var labelEl = giftBtn.querySelector('#ww-btn-label');
-		if (labelEl) {
-			var lf = Math.max(8, Math.round((sz / 60) * 11));
-			var lph = Math.max(2, Math.round((sz / 60) * 3));
-			var lpv = Math.max(6, Math.round((sz / 60) * 12));
-			labelEl.style.fontSize = lf + 'px';
-			labelEl.style.padding = lph + 'px ' + lpv + 'px';
 		}
 		updateBubbleSide(config.buttonSide || 'right');
 		var bubbleText = document.getElementById('ww-bubble-text');
