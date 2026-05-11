@@ -28,6 +28,8 @@ model User {
   subscriptionHistories        SubscriptionHistory[]        @relation("SubscriptionHistoryUser")
   subscriptionHistoryActions   SubscriptionHistory[]        @relation("SubscriptionHistoryAdmin")
   subscriptionExpiryReminders  SubscriptionExpiryReminder[]
+  affiliateReferralsMade       AffiliateReferral[]          @relation("AffiliateReferralReferrer")
+  affiliateReferral            AffiliateReferral?           @relation("AffiliateReferralReferred")
   adminEventLogActions         AdminEventLog[]              @relation("AdminEventLogAdmin")
   adminEventLogTargets         AdminEventLog[]              @relation("AdminEventLogTargetUser")
   createdAt                    DateTime                     @default(now()) @map("created_at")
@@ -312,6 +314,7 @@ model Payment {
   status          PaymentStatus  @default(PENDING)
   plan            Plan?
   billingPeriod   BillingPeriod? @map("billing_period")
+  affiliateReferral AffiliateReferral?
   createdAt       DateTime       @default(now()) @map("created_at")
   updatedAt       DateTime       @updatedAt @map("updated_at")
   user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -442,6 +445,13 @@ enum SubscriptionBonusAudience {
   ALL
 }
 
+enum AffiliateReferralStatus {
+  REGISTERED
+  REWARD_PENDING
+  CANCELLED
+  PAID
+}
+
 model SiteSettings {
   id                  String   @id @default("singleton")
   bannerEnabled       Boolean  @default(false) @map("banner_enabled")
@@ -453,9 +463,35 @@ model SiteSettings {
   yandexAuthEnabled   Boolean  @default(true) @map("yandex_auth_enabled")
   githubAuthEnabled   Boolean  @default(true) @map("github_auth_enabled")
   telegramAuthEnabled Boolean  @default(true) @map("telegram_auth_enabled")
+  affiliateProgramEnabled Boolean @default(false) @map("affiliate_program_enabled")
+  affiliateCashbackPercent Int @default(10) @map("affiliate_cashback_percent")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
+}
+
+model AffiliateReferral {
+  id              String                  @id @default(cuid())
+  referrerId      String                  @map("referrer_id")
+  referredUserId  String                  @unique @map("referred_user_id")
+  firstPaymentId  String?                 @unique @map("first_payment_id")
+  status          AffiliateReferralStatus @default(REGISTERED)
+  paymentAmount   Int?                    @map("payment_amount")
+  cashbackPercent Int?                    @map("cashback_percent")
+  cashbackAmount  Int?                    @map("cashback_amount")
+  availableAt     DateTime?               @map("available_at")
+  cancelledAt     DateTime?               @map("cancelled_at")
+  paidAt          DateTime?               @map("paid_at")
+  referrer        User                    @relation("AffiliateReferralReferrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referredUser    User                    @relation("AffiliateReferralReferred", fields: [referredUserId], references: [id], onDelete: Cascade)
+  firstPayment    Payment?                @relation(fields: [firstPaymentId], references: [id], onDelete: SetNull)
+  createdAt       DateTime                @default(now()) @map("created_at")
+  updatedAt       DateTime                @updatedAt @map("updated_at")
+
+  @@index([referrerId])
+  @@index([status])
+  @@index([availableAt])
+  @@map("affiliate_referrals")
 }
 
 model TelegramBotSettings {

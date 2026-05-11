@@ -1,4 +1,10 @@
-import { IsEmail, IsString, Matches } from 'class-validator';
+import {
+	IsEmail,
+	IsOptional,
+	IsString,
+	Matches,
+	MaxLength
+} from 'class-validator';
 
 export class EmailRegisterDto {
 	@IsEmail({}, { message: 'Please enter a valid email' })
@@ -10,4 +16,9 @@ export class EmailRegisterDto {
 	})
 	@IsString()
 	code: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(80)
+	referrerId?: string;
 }

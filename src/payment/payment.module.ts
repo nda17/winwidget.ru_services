@@ -1,4 +1,5 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
+import { AffiliateModule } from '@/affiliate/affiliate.module';
 import { AuthModule } from '@/auth/auth.module';
 import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { PaymentController } from '@/payment/payment.controller';
@@ -14,6 +15,7 @@ import { Module } from '@nestjs/common';
 		AuthModule,
 		SubscriptionModule,
 		TariffPricesModule,
+		AffiliateModule,
 		AdminEventLogModule
 	],
 	controllers: [PaymentController],

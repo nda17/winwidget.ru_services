@@ -16,7 +16,7 @@ import {
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { Plan, SubscriptionStatus } from '@prisma/client';
+import { Plan, Prisma, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
@@ -75,6 +75,34 @@ const DEFAULT_CONFIG = {
 	}
 };
 
+type AdminWidgetType = 'WHEEL' | 'QUIZ' | 'CALLBACK' | 'TIMER';
+
+interface AdminWidgetMonitoringFilters {
+	type?: string;
+	isActive?: string;
+	plan?: string;
+	search?: string;
+}
+
+interface AdminWidgetMonitoringRow {
+	widget_type: AdminWidgetType;
+	id: string;
+	name: string;
+	public_key: string;
+	is_active: boolean;
+	install_domain: string;
+	owner_id: string;
+	owner_name: string | null;
+	owner_email: string | null;
+	owner_phone: string | null;
+	owner_plan: Plan | null;
+	subscription_status: SubscriptionStatus | null;
+	lead_count: number | bigint;
+	last_lead_at: Date | null;
+	created_at: Date;
+	updated_at: Date;
+}
+
 @Injectable()
 export class WidgetService {
 	constructor(
@@ -95,6 +123,45 @@ export class WidgetService {
 		});
 
 		return { widgets, subscription: sub };
+	}
+
+	async getAdminWidgetMonitoring(
+		page = 1,
+		limit = 20,
+		filters: AdminWidgetMonitoringFilters = {}
+	) {
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+		const skip = (normalizedPage - 1) * normalizedLimit;
+		const whereSql = this.getAdminWidgetMonitoringWhere(filters);
+		const baseSql = this.getAdminWidgetMonitoringBaseSql();
+
+		const [items, totalRows] = await this.prisma.$transaction([
+			this.prisma.$queryRaw<AdminWidgetMonitoringRow[]>(Prisma.sql`
+				SELECT *
+				FROM (${baseSql}) AS admin_widgets
+				${whereSql}
+				ORDER BY last_lead_at DESC NULLS LAST, created_at DESC
+				LIMIT ${normalizedLimit}
+				OFFSET ${skip}
+			`),
+			this.prisma.$queryRaw<Array<{ count: number | bigint }>>(Prisma.sql`
+				SELECT COUNT(*)::int AS count
+				FROM (${baseSql}) AS admin_widgets
+				${whereSql}
+			`)
+		]);
+
+		const total = this.toNumber(totalRows[0]?.count ?? 0);
+
+		return {
+			items: items.map(item => this.serializeAdminWidgetMonitoring(item)),
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
 	}
 
 	async createWidget(userId: string, dto: CreateWidgetDto) {
@@ -854,6 +921,208 @@ export class WidgetService {
 				);
 			} catch {}
 		}
+	}
+
+	private getAdminWidgetMonitoringBaseSql() {
+		const ownerFieldsSql = Prisma.sql`
+			u.id AS owner_id,
+			u.name AS owner_name,
+			email_identity.value AS owner_email,
+			phone_identity.value AS owner_phone,
+			s.plan::text AS owner_plan,
+			s.status::text AS subscription_status
+		`;
+		const ownerJoinsSql = Prisma.sql`
+			JOIN "User" u ON u.id = entity.user_id
+			LEFT JOIN subscriptions s ON s.user_id = u.id
+			LEFT JOIN LATERAL (
+				SELECT ai.value
+				FROM auth_identities ai
+				WHERE ai.user_id = u.id AND ai.type::text = 'EMAIL'
+				ORDER BY ai.created_at ASC
+				LIMIT 1
+			) email_identity ON true
+			LEFT JOIN LATERAL (
+				SELECT ai.value
+				FROM auth_identities ai
+				WHERE ai.user_id = u.id AND ai.type::text = 'PHONE'
+				ORDER BY ai.created_at ASC
+				LIMIT 1
+			) phone_identity ON true
+		`;
+
+		return Prisma.sql`
+			SELECT
+				'WHEEL'::text AS widget_type,
+				entity.id,
+				entity.name,
+				entity.public_key,
+				entity.is_active,
+				entity.install_domain,
+				${ownerFieldsSql},
+				(SELECT COUNT(*)::int FROM leads l WHERE l.widget_id = entity.id) AS lead_count,
+				(SELECT MAX(l.created_at) FROM leads l WHERE l.widget_id = entity.id) AS last_lead_at,
+				entity.created_at,
+				entity.updated_at
+			FROM widgets entity
+			${ownerJoinsSql}
+
+			UNION ALL
+
+			SELECT
+				'QUIZ'::text AS widget_type,
+				entity.id,
+				entity.name,
+				entity.public_key,
+				entity.is_active,
+				entity.install_domain,
+				${ownerFieldsSql},
+				(SELECT COUNT(*)::int FROM quiz_leads l WHERE l.quiz_id = entity.id) AS lead_count,
+				(SELECT MAX(l.created_at) FROM quiz_leads l WHERE l.quiz_id = entity.id) AS last_lead_at,
+				entity.created_at,
+				entity.updated_at
+			FROM quizzes entity
+			${ownerJoinsSql}
+
+			UNION ALL
+
+			SELECT
+				'CALLBACK'::text AS widget_type,
+				entity.id,
+				entity.name,
+				entity.public_key,
+				entity.is_active,
+				entity.install_domain,
+				${ownerFieldsSql},
+				(SELECT COUNT(*)::int FROM callback_leads l WHERE l.callback_id = entity.id) AS lead_count,
+				(SELECT MAX(l.created_at) FROM callback_leads l WHERE l.callback_id = entity.id) AS last_lead_at,
+				entity.created_at,
+				entity.updated_at
+			FROM callbacks entity
+			${ownerJoinsSql}
+
+			UNION ALL
+
+			SELECT
+				'TIMER'::text AS widget_type,
+				entity.id,
+				entity.name,
+				entity.public_key,
+				entity.is_active,
+				entity.install_domain,
+				${ownerFieldsSql},
+				(SELECT COUNT(*)::int FROM countdown_timer_leads l WHERE l.countdown_timer_id = entity.id) AS lead_count,
+				(SELECT MAX(l.created_at) FROM countdown_timer_leads l WHERE l.countdown_timer_id = entity.id) AS last_lead_at,
+				entity.created_at,
+				entity.updated_at
+			FROM countdown_timers entity
+			${ownerJoinsSql}
+		`;
+	}
+
+	private getAdminWidgetMonitoringWhere(
+		filters: AdminWidgetMonitoringFilters
+	) {
+		const and: Prisma.Sql[] = [];
+		const type = this.normalizeAdminWidgetType(filters.type);
+		const isActive = this.normalizeAdminWidgetActive(filters.isActive);
+		const plan = this.normalizeAdminWidgetPlan(filters.plan);
+		const search = filters.search?.trim();
+
+		if (type) and.push(Prisma.sql`widget_type = ${type}`);
+		if (isActive !== undefined) {
+			and.push(Prisma.sql`is_active = ${isActive}`);
+		}
+		if (plan === null) {
+			and.push(Prisma.sql`owner_plan IS NULL`);
+		} else if (plan) {
+			and.push(Prisma.sql`owner_plan = ${plan}`);
+		}
+		if (search) {
+			and.push(Prisma.sql`
+				concat_ws(
+					' ',
+					id,
+					name,
+					public_key,
+					install_domain,
+					owner_id,
+					owner_name,
+					owner_email,
+					owner_phone
+				) ILIKE ${`%${search}%`}
+			`);
+		}
+
+		return and.length
+			? Prisma.sql`WHERE ${Prisma.join(and, ' AND ')}`
+			: Prisma.empty;
+	}
+
+	private normalizeAdminWidgetType(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+		const allowed: AdminWidgetType[] = [
+			'WHEEL',
+			'QUIZ',
+			'CALLBACK',
+			'TIMER'
+		];
+
+		if (!normalized) return undefined;
+		if (!allowed.includes(normalized as AdminWidgetType)) {
+			throw new BadRequestException('Некорректный тип виджета');
+		}
+
+		return normalized as AdminWidgetType;
+	}
+
+	private normalizeAdminWidgetActive(value?: string) {
+		const normalized = value?.trim().toLowerCase();
+
+		if (!normalized) return undefined;
+		if (normalized === 'true') return true;
+		if (normalized === 'false') return false;
+
+		throw new BadRequestException('Некорректный статус виджета');
+	}
+
+	private normalizeAdminWidgetPlan(value?: string) {
+		const normalized = value?.trim().toUpperCase();
+
+		if (!normalized) return undefined;
+		if (normalized === 'NONE') return null;
+		if (!Object.values(Plan).includes(normalized as Plan)) {
+			throw new BadRequestException('Некорректный тариф владельца');
+		}
+
+		return normalized as Plan;
+	}
+
+	private serializeAdminWidgetMonitoring(item: AdminWidgetMonitoringRow) {
+		return {
+			type: item.widget_type,
+			id: item.id,
+			name: item.name,
+			publicKey: item.public_key,
+			isActive: item.is_active,
+			installDomain: item.install_domain,
+			owner: {
+				id: item.owner_id,
+				name: item.owner_name,
+				email: item.owner_email,
+				phone: item.owner_phone
+			},
+			ownerPlan: item.owner_plan,
+			subscriptionStatus: item.subscription_status,
+			leadCount: this.toNumber(item.lead_count),
+			lastLeadAt: item.last_lead_at?.toISOString() ?? null,
+			createdAt: item.created_at.toISOString(),
+			updatedAt: item.updated_at.toISOString()
+		};
+	}
+
+	private toNumber(value: number | bigint) {
+		return typeof value === 'bigint' ? Number(value) : value;
 	}
 
 	private buildTelegramMessage(data: {

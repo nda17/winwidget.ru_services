@@ -1,3 +1,4 @@
+import { AffiliateService } from '@/affiliate/affiliate.service';
 import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
@@ -50,7 +51,8 @@ export class PaymentService {
 		private yookassa: YookassaService,
 		private subscriptionService: SubscriptionService,
 		private paymentCleanupService: PaymentCleanupService,
-		private tariffPricesService: TariffPricesService
+		private tariffPricesService: TariffPricesService,
+		private affiliateService: AffiliateService
 	) {}
 
 	async createPayment(
@@ -568,21 +570,20 @@ export class PaymentService {
 			return;
 		}
 
-		await this.prisma.$transaction([
-			this.prisma.payment.update({
-				where: { yookassaId },
-				data: {
-					status: PaymentStatus.SUCCEEDED,
-					confirmationUrl: null
-				}
-			})
-		]);
+		const updatedPayment = await this.prisma.payment.update({
+			where: { yookassaId },
+			data: {
+				status: PaymentStatus.SUCCEEDED,
+				confirmationUrl: null
+			}
+		});
 
 		await this.subscriptionService.createOrUpgradeSubscription(
 			userId,
 			payment.plan,
 			payment.billingPeriod
 		);
+		await this.affiliateService.processPaymentSucceeded(updatedPayment);
 
 		this.logger.log(
 			`Payment succeeded: yookassaId=${yookassaId} userId=${userId} plan=${payment.plan}`
@@ -590,6 +591,10 @@ export class PaymentService {
 	}
 
 	private async handlePaymentCanceled(yookassaId: string) {
+		const payment = await this.prisma.payment.findUnique({
+			where: { yookassaId }
+		});
+
 		await this.prisma.payment.updateMany({
 			where: { yookassaId, status: PaymentStatus.PENDING },
 			data: {
@@ -597,6 +602,10 @@ export class PaymentService {
 				confirmationUrl: null
 			}
 		});
+
+		if (payment) {
+			await this.affiliateService.cancelRewardForPayment(payment.id);
+		}
 
 		this.logger.log(`Payment cancelled: yookassaId=${yookassaId}`);
 	}

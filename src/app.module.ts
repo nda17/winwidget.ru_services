@@ -1,5 +1,7 @@
 import { AuthModule } from '@/auth/auth.module';
+import { AdminAlertsModule } from '@/admin-alerts/admin-alerts.module';
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
+import { AffiliateModule } from '@/affiliate/affiliate.module';
 import { getGoogleRecaptchaConfig } from '@/config/google-recaptcha.config';
 import { FileModule } from '@/file/file.module';
 import { LegalPagesModule } from '@/legal-pages/legal-pages.module';
@@ -16,6 +18,7 @@ import { WidgetModule } from '@/widget/widget.module';
 import { QuizModule } from '@/quiz/quiz.module';
 import { CallbackModule } from '@/callback/callback.module';
 import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
+import { DevToolsModule } from '@/dev-tools/dev-tools.module';
 import { HealthModule } from '@/health/health.module';
 import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
 import { MailingModule } from '@/mailing/mailing.module';
@@ -51,6 +54,9 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		MailingModule,
 		HealthModule,
 		TelegramBotModule,
+		DevToolsModule,
+		AdminAlertsModule,
+		AffiliateModule,
 		AdminEventLogModule
 	]
 })

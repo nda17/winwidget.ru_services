@@ -1,4 +1,4 @@
-import { IsString, Matches } from 'class-validator';
+import { IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 export class PhoneRegisterDto {
 	@Matches(/^[0-9+()\-\s]{10,20}$/, {
@@ -19,4 +19,9 @@ export class PhoneRegisterDto {
 	})
 	@IsString()
 	code: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(80)
+	referrerId?: string;
 }

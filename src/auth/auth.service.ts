@@ -1,4 +1,5 @@
 import { randomInt } from 'node:crypto';
+import { AffiliateService } from '@/affiliate/affiliate.service';
 import { AuthDto } from '@/auth/dto/auth.dto';
 import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
 import { PhoneLoginDto } from '@/auth/dto/phone-login.dto';
@@ -54,7 +55,8 @@ export class AuthService {
 		private userService: UserService,
 		private emailService: EmailService,
 		private prisma: PrismaService,
-		private smsService: SmsService
+		private smsService: SmsService,
+		private affiliateService: AffiliateService
 	) {}
 
 	async login(dto: AuthDto) {
@@ -111,6 +113,7 @@ export class AuthService {
 			passwordHash: pendingRegistration.passwordHash
 		});
 
+		await this.affiliateService.registerReferral(dto.referrerId, user.id);
 		await this.deletePendingEmailRegistration(email);
 
 		return this.buildResponseObject(user);
@@ -233,6 +236,7 @@ export class AuthService {
 			password: dto.password
 		});
 
+		await this.affiliateService.registerReferral(dto.referrerId, user.id);
 		await this.deletePhoneCode(phone);
 
 		return this.buildResponseObject(user);

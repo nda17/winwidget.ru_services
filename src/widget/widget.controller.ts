@@ -27,6 +27,7 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Role } from '@prisma/client';
 import { Request, Response } from 'express';
 
 @Controller('widgets')
@@ -38,6 +39,24 @@ export class WidgetController {
 	@Get()
 	async getMyWidgets(@CurrentUser('id') userId: string) {
 		return this.widgetService.getMyWidgets(userId);
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Get('admin/monitoring')
+	async getAdminWidgetMonitoring(
+		@Query('page') page?: string,
+		@Query('limit') limit?: string,
+		@Query('type') type?: string,
+		@Query('isActive') isActive?: string,
+		@Query('plan') plan?: string,
+		@Query('search') search?: string
+	) {
+		return this.widgetService.getAdminWidgetMonitoring(
+			page ? parseInt(page, 10) : 1,
+			limit ? parseInt(limit, 10) : 20,
+			{ type, isActive, plan, search }
+		);
 	}
 
 	@HttpCode(201)
