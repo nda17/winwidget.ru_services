@@ -6,9 +6,11 @@ export class RefreshTokenService {
 	readonly EXPIRE_DAY_REFRESH_TOKEN = 7;
 	readonly REFRESH_TOKEN_NAME = 'refreshToken';
 
-	private getCookieOptions(expires: Date) {
+	private getCookieOptions(expires: Date, includeDomain = true) {
 		const isProduction = process.env.MODE === 'production';
-		const domain = process.env.AUTH_COOKIE_DOMAIN?.trim();
+		const domain = includeDomain
+			? process.env.AUTH_COOKIE_DOMAIN?.trim()
+			: '';
 
 		return {
 			httpOnly: true,
@@ -20,9 +22,20 @@ export class RefreshTokenService {
 		};
 	}
 
+	private removeLegacyHostRefreshTokenCookie(res: Response) {
+		if (!process.env.AUTH_COOKIE_DOMAIN?.trim()) return;
+
+		res.cookie(
+			this.REFRESH_TOKEN_NAME,
+			'',
+			this.getCookieOptions(new Date(0), false)
+		);
+	}
+
 	addRefreshTokenToResponse(res: Response, refreshToken: string) {
 		const expiresIn = new Date();
 		expiresIn.setDate(expiresIn.getDate() + this.EXPIRE_DAY_REFRESH_TOKEN);
+		this.removeLegacyHostRefreshTokenCookie(res);
 
 		res.cookie(
 			this.REFRESH_TOKEN_NAME,
@@ -32,6 +45,8 @@ export class RefreshTokenService {
 	}
 
 	removeRefreshTokenFromResponse(res: Response) {
+		this.removeLegacyHostRefreshTokenCookie(res);
+
 		res.cookie(
 			this.REFRESH_TOKEN_NAME,
 			'',
