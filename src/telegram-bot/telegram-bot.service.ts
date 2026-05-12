@@ -243,6 +243,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		try {
+			await this.deleteTelegramWebhook(config, true);
 			await this.setTelegramWebhook(config, true);
 		} catch (error) {
 			throw new BadRequestException(
@@ -765,6 +766,26 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		);
 	}
 
+	private async deleteTelegramWebhook(
+		config: TelegramWebhookConfig,
+		dropPendingUpdates: boolean
+	) {
+		const token = config.token?.trim();
+
+		if (!token) {
+			throw new Error(this.getBotNotConfiguredError(config.bot));
+		}
+
+		await this.fetchTelegramApi(
+			token,
+			'deleteWebhook',
+			{
+				drop_pending_updates: dropPendingUpdates
+			},
+			this.TELEGRAM_API_STATUS_TIMEOUT_MS
+		);
+	}
+
 	private async getWebhookStatus(config: TelegramWebhookConfig) {
 		let expectedWebhookUrl: string | null = null;
 
@@ -1023,16 +1044,23 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		if (!requestId) {
-			await this.sendInfoBotMessage(
-				chatId,
-				'Чтобы подключить уведомления, откройте профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений.'
-			);
+			await this.handleNotificationStartWithoutRequest(message, chatId);
 			return;
 		}
 
 		const request = await this.getActiveNotificationRequest(requestId);
 
 		if (!request?.userId) {
+			if (
+				await this.handleNotificationStartWithoutRequest(
+					message,
+					chatId,
+					'Ссылка подключения уведомлений истекла. Если Telegram уже привязан как способ входа, мы подключим уведомления автоматически.'
+				)
+			) {
+				return;
+			}
+
 			await this.sendInfoBotMessage(
 				chatId,
 				'Ссылка подключения уведомлений истекла. Вернитесь в профиль winwidget.ru и создайте новую ссылку.'
@@ -1060,43 +1088,134 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 		const now = new Date();
 
-		await this.prisma.$transaction([
-			this.prisma.telegramNotificationChannel.upsert({
-				where: {
-					userId: request.userId
-				},
-				update: {
-					chatId,
-					telegramUserId,
-					username: message.from?.username ?? null,
-					firstName: message.from?.first_name ?? null,
-					lastName: message.from?.last_name ?? null,
-					isActive: true,
-					connectedAt: now,
-					disabledAt: null
-				},
-				create: {
-					userId: request.userId,
-					chatId,
-					telegramUserId,
-					username: message.from?.username ?? null,
-					firstName: message.from?.first_name ?? null,
-					lastName: message.from?.last_name ?? null,
-					isActive: true,
-					connectedAt: now
-				}
-			}),
-			this.prisma.verificationChallenge.delete({
-				where: {
-					id: request.id
-				}
-			})
-		]);
+		await this.upsertNotificationChannel({
+			userId: request.userId,
+			message,
+			chatId,
+			telegramUserId,
+			connectedAt: now
+		});
+
+		await this.prisma.verificationChallenge.delete({
+			where: {
+				id: request.id
+			}
+		});
 
 		await this.sendInfoBotMessage(
 			chatId,
 			'Telegram-уведомления winwidget.ru подключены. Напоминания о подписке будут приходить сюда.'
 		);
+	}
+
+	private async handleNotificationStartWithoutRequest(
+		message: TelegramMessage,
+		chatId: string,
+		intro?: string
+	) {
+		const telegramUserId = message.from?.id
+			? String(message.from.id)
+			: null;
+
+		if (!telegramUserId) {
+			await this.sendInfoBotMessage(
+				chatId,
+				'Чтобы подключить уведомления, откройте профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений.'
+			);
+			return Boolean(intro);
+		}
+
+		const identity = await this.prisma.authIdentity.findUnique({
+			where: {
+				type_value: {
+					type: AuthIdentityType.TELEGRAM,
+					value: telegramUserId
+				}
+			},
+			select: {
+				userId: true
+			}
+		});
+
+		if (!identity) {
+			await this.sendInfoBotMessage(
+				chatId,
+				intro
+					? `${intro}\n\nЧтобы подключить уведомления к профилю без Telegram-входа, вернитесь в профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений.`
+					: 'Чтобы подключить уведомления, откройте профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений.'
+			);
+			return Boolean(intro);
+		}
+
+		const linkedChannel =
+			await this.prisma.telegramNotificationChannel.findFirst({
+				where: {
+					OR: [{ chatId }, { telegramUserId }]
+				}
+			});
+
+		if (linkedChannel && linkedChannel.userId !== identity.userId) {
+			await this.sendInfoBotMessage(
+				chatId,
+				'Этот Telegram уже подключён к другому профилю winwidget.ru.'
+			);
+			return true;
+		}
+
+		await this.upsertNotificationChannel({
+			userId: identity.userId,
+			message,
+			chatId,
+			telegramUserId,
+			connectedAt: new Date()
+		});
+
+		await this.sendInfoBotMessage(
+			chatId,
+			'Telegram-уведомления winwidget.ru подключены. Теперь сервисные сообщения будут приходить сюда.'
+		);
+
+		return true;
+	}
+
+	private async upsertNotificationChannel({
+		userId,
+		message,
+		chatId,
+		telegramUserId,
+		connectedAt
+	}: {
+		userId: string;
+		message: TelegramMessage;
+		chatId: string;
+		telegramUserId: string | null;
+		connectedAt: Date;
+	}) {
+		await this.prisma.telegramNotificationChannel.upsert({
+			where: {
+				userId
+			},
+			update: {
+				chatId,
+				telegramUserId,
+				username: message.from?.username ?? null,
+				firstName: message.from?.first_name ?? null,
+				lastName: message.from?.last_name ?? null,
+				isActive: true,
+				connectedAt,
+				disabledAt: null
+			},
+			create: {
+				userId,
+				chatId,
+				telegramUserId,
+				username: message.from?.username ?? null,
+				firstName: message.from?.first_name ?? null,
+				lastName: message.from?.last_name ?? null,
+				isActive: true,
+				connectedAt
+			}
+		});
 	}
 
 	private async handleSupportMessage(message: TelegramMessage) {
