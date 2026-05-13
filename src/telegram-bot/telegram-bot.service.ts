@@ -22,6 +22,7 @@ import {
 	SubscriptionStatus,
 	type TelegramBotSettings,
 	type TelegramNotificationChannel,
+	type VerificationChallenge,
 	VerificationChallengePurpose,
 	VerificationChallengeType
 } from '@prisma/client';
@@ -403,12 +404,14 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async getNotificationStatus(userId: string) {
-		const channel =
-			await this.prisma.telegramNotificationChannel.findUnique({
+		const [channel, pendingRequest] = await Promise.all([
+			this.prisma.telegramNotificationChannel.findUnique({
 				where: { userId }
-			});
+			}),
+			this.getActiveNotificationRequestByUserId(userId)
+		]);
 
-		return this.serializeNotificationStatus(channel);
+		return this.serializeNotificationStatus(channel, pendingRequest);
 	}
 
 	async startNotificationBinding(userId: string) {
@@ -454,6 +457,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				lastSentAt: now
 			}
 		});
+
+		this.logger.log(
+			`Telegram notification binding started for user ${userId}, request ${this.maskRequestId(requestId)}`
+		);
 
 		return {
 			requestId,
@@ -1003,7 +1010,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private serializeNotificationStatus(
-		channel: TelegramNotificationChannel | null
+		channel: TelegramNotificationChannel | null,
+		pendingRequest?: VerificationChallenge | null
 	) {
 		return {
 			connected: Boolean(channel?.isActive),
@@ -1016,24 +1024,31 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			telegramBotTokenConfigured: Boolean(
 				process.env.TELEGRAM_INFO_BOT_TOKEN?.trim()
 			),
-			telegramBotUsernameConfigured: Boolean(this.getInfoBotUsername())
+			telegramBotUsernameConfigured: Boolean(this.getInfoBotUsername()),
+			pendingRequest: pendingRequest
+				? {
+						requestId: pendingRequest.value,
+						botUrl: `https://t.me/${this.getInfoBotUsername()}?start=${pendingRequest.value}`,
+						expiresAt: pendingRequest.expiresAt.toISOString()
+					}
+				: null
 		};
 	}
 
 	private async handleNotificationMessage(message: TelegramMessage) {
-		if (!message.text?.startsWith('/start')) {
+		const chatId = String(message.chat.id);
+		const requestId = this.extractNotificationRequestId(message.text);
+
+		if (!requestId && !message.text?.startsWith('/start')) {
 			if (!message.chat.type || message.chat.type === 'private') {
 				await this.sendInfoBotMessage(
-					String(message.chat.id),
-					'Чтобы подключить уведомления, откройте профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений.'
+					chatId,
+					'Чтобы подключить уведомления, откройте профиль winwidget.ru и нажмите кнопку подключения Telegram-уведомлений. Если ссылка не открылась, отправьте сюда код подключения из профиля.'
 				);
 			}
 
 			return;
 		}
-
-		const chatId = String(message.chat.id);
-		const requestId = message.text.split(/\s+/)[1]?.trim();
 
 		if (message.chat.type && message.chat.type !== 'private') {
 			await this.sendInfoBotMessage(
@@ -1051,6 +1066,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const request = await this.getActiveNotificationRequest(requestId);
 
 		if (!request?.userId) {
+			this.logger.warn(
+				`Telegram notification binding request not found: ${this.maskRequestId(requestId)}`
+			);
+
 			if (
 				await this.handleNotificationStartWithoutRequest(
 					message,
@@ -1101,6 +1120,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				id: request.id
 			}
 		});
+
+		this.logger.log(
+			`Telegram notification binding completed for user ${request.userId}, request ${this.maskRequestId(requestId)}`
+		);
 
 		await this.sendInfoBotMessage(
 			chatId,
@@ -1431,6 +1454,35 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		return request;
+	}
+
+	private async getActiveNotificationRequestByUserId(userId: string) {
+		const request = await this.prisma.verificationChallenge.findUnique({
+			where: {
+				userId_type_purpose: {
+					userId,
+					type: VerificationChallengeType.TELEGRAM,
+					purpose: VerificationChallengePurpose.BIND_TELEGRAM_NOTIFICATIONS
+				}
+			}
+		});
+
+		if (!request) return null;
+
+		if (request.expiresAt.getTime() < Date.now()) {
+			await this.deleteNotificationRequestById(request.id);
+			return null;
+		}
+
+		return request;
+	}
+
+	private extractNotificationRequestId(text?: string) {
+		return text?.match(/\b[a-f0-9]{32}\b/i)?.[0]?.toLowerCase() ?? null;
+	}
+
+	private maskRequestId(requestId: string) {
+		return `${requestId.slice(0, 8)}...`;
 	}
 
 	private async deleteNotificationRequestById(id: string) {
