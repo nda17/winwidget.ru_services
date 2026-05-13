@@ -17,6 +17,7 @@ import {
 import { USER_DEACTIVATED_MESSAGE } from '@/utils/auth.constants';
 import {
 	Controller,
+	ExecutionContext,
 	Get,
 	Query,
 	Req,
@@ -25,7 +26,42 @@ import {
 	UseGuards
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
-import { Response } from 'express';
+import { Request, Response } from 'express';
+
+const MAX_AFFILIATE_REFERRER_ID_LENGTH = 128;
+
+const normalizeAffiliateReferrerId = (value: unknown) => {
+	const rawValue = Array.isArray(value) ? value[0] : value;
+
+	if (typeof rawValue !== 'string') {
+		return undefined;
+	}
+
+	const referrerId = rawValue.trim();
+	return referrerId &&
+		referrerId.length <= MAX_AFFILIATE_REFERRER_ID_LENGTH
+		? referrerId
+		: undefined;
+};
+
+const getAffiliateAuthOptions = (context: ExecutionContext) => {
+	const request = context.switchToHttp().getRequest<Request>();
+	const referrerId = normalizeAffiliateReferrerId(request.query.ref);
+
+	return referrerId ? { state: referrerId } : {};
+};
+
+class GoogleAffiliateAuthGuard extends AuthGuard('google') {
+	getAuthenticateOptions(context: ExecutionContext) {
+		return getAffiliateAuthOptions(context);
+	}
+}
+
+class GithubAffiliateAuthGuard extends AuthGuard('github') {
+	getAuthenticateOptions(context: ExecutionContext) {
+		return getAffiliateAuthOptions(context);
+	}
+}
 
 @Controller('auth')
 export class SocialMediaAuthController {
@@ -39,17 +75,21 @@ export class SocialMediaAuthController {
 	private _LOGIN_REDIRECT = `${process.env.RECAPTCHA_CLIENT_URL}/login`;
 
 	@Get('google')
-	@UseGuards(GoogleAuthEnabledGuard, AuthGuard('google'))
+	@UseGuards(GoogleAuthEnabledGuard, GoogleAffiliateAuthGuard)
 	async googleAuth() {}
 
 	@Get('google/redirect')
 	@UseGuards(GoogleAuthEnabledGuard, AuthGuard('google'))
 	async googleAuthRedirect(
 		@Req() req: { user: TSocialProfile },
+		@Query('state') state: string,
 		@Res({ passthrough: true }) res: Response
 	) {
 		try {
-			const user = await this.socialMediaAuthService.login(req);
+			const user = await this.socialMediaAuthService.login(
+				req,
+				normalizeAffiliateReferrerId(state)
+			);
 
 			const { refreshToken } =
 				await this.authService.buildResponseObject(user);
@@ -66,17 +106,21 @@ export class SocialMediaAuthController {
 	}
 
 	@Get('github')
-	@UseGuards(GithubAuthEnabledGuard, AuthGuard('github'))
+	@UseGuards(GithubAuthEnabledGuard, GithubAffiliateAuthGuard)
 	async githubAuth() {}
 
 	@Get('github/redirect')
 	@UseGuards(GithubAuthEnabledGuard, AuthGuard('github'))
 	async githubAuthRedirect(
 		@Req() req: { user: TSocialProfile },
+		@Query('state') state: string,
 		@Res({ passthrough: true }) res: Response
 	) {
 		try {
-			const user = await this.socialMediaAuthService.login(req);
+			const user = await this.socialMediaAuthService.login(
+				req,
+				normalizeAffiliateReferrerId(state)
+			);
 
 			const { refreshToken } =
 				await this.authService.buildResponseObject(user);
@@ -94,10 +138,11 @@ export class SocialMediaAuthController {
 
 	@Get('yandex')
 	@UseGuards(YandexAuthEnabledGuard)
-	yandexAuth(@Res() res: Response) {
+	yandexAuth(@Query('ref') ref: string, @Res() res: Response) {
 		const url = buildYandexAuthUrl(
 			process.env.YANDEX_CLIENT_ID!,
-			process.env.YANDEX_CALLBACK_URL!
+			process.env.YANDEX_CALLBACK_URL!,
+			normalizeAffiliateReferrerId(ref)
 		);
 		return res.redirect(url);
 	}
@@ -106,6 +151,7 @@ export class SocialMediaAuthController {
 	@UseGuards(YandexAuthEnabledGuard)
 	async yandexAuthRedirect(
 		@Query('code') code: string,
+		@Query('state') state: string,
 		@Res({ passthrough: true }) res: Response
 	) {
 		try {
@@ -126,9 +172,12 @@ export class SocialMediaAuthController {
 				accessToken: yandexAccessToken
 			};
 
-			const user = await this.socialMediaAuthService.login({
-				user: profile
-			});
+			const user = await this.socialMediaAuthService.login(
+				{
+					user: profile
+				},
+				normalizeAffiliateReferrerId(state)
+			);
 
 			const { refreshToken } =
 				await this.authService.buildResponseObject(user);

@@ -18,7 +18,7 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { Recaptcha } from '@nestlab/google-recaptcha';
-import { IsString, Matches } from 'class-validator';
+import { IsOptional, IsString, Matches } from 'class-validator';
 import { Response } from 'express';
 
 class TelegramAuthVerifyDto {
@@ -30,11 +30,19 @@ class TelegramAuthVerifyDto {
 	})
 	@IsString()
 	code: string;
+
+	@IsOptional()
+	@IsString()
+	referrerId?: string;
 }
 
 class TelegramAuthCompleteDto {
 	@IsString()
 	requestId: string;
+
+	@IsOptional()
+	@IsString()
+	referrerId?: string;
 }
 
 class TelegramAuthCancelDto {
@@ -69,7 +77,8 @@ export class TelegramAuthController {
 	) {
 		const user = await this.telegramAuthService.verify(
 			dto.requestId,
-			dto.code
+			dto.code,
+			dto.referrerId
 		);
 		const { refreshToken, ...response } =
 			await this.authService.buildResponseObject(user);
@@ -85,7 +94,10 @@ export class TelegramAuthController {
 		@Body() dto: TelegramAuthCompleteDto,
 		@Res({ passthrough: true }) res: Response
 	) {
-		const user = await this.telegramAuthService.complete(dto.requestId);
+		const user = await this.telegramAuthService.complete(
+			dto.requestId,
+			dto.referrerId
+		);
 
 		if (!user) {
 			return { confirmed: false };

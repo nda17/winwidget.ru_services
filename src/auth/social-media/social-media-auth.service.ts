@@ -1,16 +1,31 @@
+import { AffiliateService } from '@/affiliate/affiliate.service';
 import { TSocialProfile } from '@/auth/social-media/social-media-auth.types';
 import { UserService } from '@/user/user.service';
 import { BadRequestException, Injectable } from '@nestjs/common';
 
 @Injectable()
 export class SocialMediaAuthService {
-	constructor(private userService: UserService) {}
+	constructor(
+		private readonly userService: UserService,
+		private readonly affiliateService: AffiliateService
+	) {}
 
-	async login(req: { user: TSocialProfile }) {
+	async login(req: { user: TSocialProfile }, referrerId?: string) {
 		if (!req.user) {
 			throw new BadRequestException('User not found by social media');
 		}
 
-		return this.userService.findOrCreateSocialUser(req.user);
+		const result = await this.userService.findOrCreateSocialUserWithResult(
+			req.user
+		);
+
+		if (result.isCreated) {
+			await this.affiliateService.registerReferral(
+				referrerId,
+				result.user.id
+			);
+		}
+
+		return result.user;
 	}
 }

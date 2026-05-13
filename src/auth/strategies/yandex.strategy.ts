@@ -9,7 +9,8 @@ export interface IYandexUserInfo {
 
 export const buildYandexAuthUrl = (
 	clientId: string,
-	callbackUrl: string
+	callbackUrl: string,
+	state?: string
 ): string => {
 	const params = new URLSearchParams({
 		client_id: clientId,
@@ -17,6 +18,11 @@ export const buildYandexAuthUrl = (
 		redirect_uri: callbackUrl,
 		force_confirm: 'no'
 	});
+
+	if (state) {
+		params.set('state', state);
+	}
+
 	return `https://oauth.yandex.ru/authorize?${params}`;
 };
 

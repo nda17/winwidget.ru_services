@@ -1,4 +1,5 @@
 import { randomBytes, randomInt } from 'node:crypto';
+import { AffiliateService } from '@/affiliate/affiliate.service';
 import { PrismaService } from '@/prisma.service';
 import {
 	PASSWORD_SALT_ROUNDS,
@@ -63,7 +64,10 @@ export class TelegramAuthService {
 	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
 	private readonly logger = new Logger(TelegramAuthService.name);
 
-	constructor(private readonly prisma: PrismaService) {}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly affiliateService: AffiliateService
+	) {}
 
 	async start() {
 		this.ensureBotConfigured();
@@ -94,7 +98,7 @@ export class TelegramAuthService {
 		};
 	}
 
-	async verify(requestId: string, code: string) {
+	async verify(requestId: string, code: string, referrerId?: string) {
 		const request = await this.getActiveLoginRequest(requestId);
 
 		if (!request) {
@@ -141,12 +145,12 @@ export class TelegramAuthService {
 			throw new UnauthorizedException(TELEGRAM_AUTH_CODE_INVALID);
 		}
 
-		const user = await this.findOrCreateTelegramUser(request);
+		const user = await this.findOrCreateTelegramUser(request, referrerId);
 		await this.deleteRequest(requestId);
 		return user;
 	}
 
-	async complete(requestId: string) {
+	async complete(requestId: string, referrerId?: string) {
 		const request = await this.getActiveLoginRequest(requestId);
 
 		if (!request) {
@@ -157,7 +161,7 @@ export class TelegramAuthService {
 			return null;
 		}
 
-		const user = await this.findOrCreateTelegramUser(request);
+		const user = await this.findOrCreateTelegramUser(request, referrerId);
 		await this.deleteRequest(requestId);
 		return user;
 	}
@@ -417,7 +421,10 @@ export class TelegramAuthService {
 		);
 	}
 
-	private async findOrCreateTelegramUser(request: VerificationChallenge) {
+	private async findOrCreateTelegramUser(
+		request: VerificationChallenge,
+		referrerId?: string
+	) {
 		const telegramUserId = request.telegramUserId!;
 		const identity = await this.prisma.authIdentity.findUnique({
 			where: {
@@ -441,7 +448,7 @@ export class TelegramAuthService {
 
 		const displayName = this.getTelegramDisplayName(request);
 
-		return this.prisma.user.create({
+		const user = await this.prisma.user.create({
 			data: {
 				name: displayName,
 				password: '',
@@ -457,6 +464,9 @@ export class TelegramAuthService {
 				authIdentities: true
 			}
 		});
+
+		await this.affiliateService.registerReferral(referrerId, user.id);
+		return user;
 	}
 
 	private getTelegramDisplayName(request: VerificationChallenge) {

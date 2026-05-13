@@ -578,6 +578,13 @@ export class UserService {
 	async findOrCreateSocialUser(
 		profile: IGoogleProfile | IGithubProfile | IYandexProfile
 	) {
+		const result = await this.findOrCreateSocialUserWithResult(profile);
+		return result.user;
+	}
+
+	async findOrCreateSocialUserWithResult(
+		profile: IGoogleProfile | IGithubProfile | IYandexProfile
+	) {
 		const socialType = this.getSocialIdentityType(profile);
 		const socialIdentity = await this.prisma.authIdentity.findUnique({
 			where: {
@@ -596,7 +603,10 @@ export class UserService {
 		});
 
 		if (socialIdentity?.user) {
-			return socialIdentity.user;
+			return {
+				user: socialIdentity.user,
+				isCreated: false
+			};
 		}
 
 		const normalizedEmail = normalizeEmail(profile.email);
@@ -604,11 +614,17 @@ export class UserService {
 
 		if (!user) {
 			user = await this._createSocialUser(profile, socialType);
-			return user;
+			return {
+				user,
+				isCreated: true
+			};
 		}
 
 		if (user.status === UserStatus.DEACTIVATED) {
-			return user;
+			return {
+				user,
+				isCreated: false
+			};
 		}
 
 		await this.upsertIdentity({
@@ -627,7 +643,10 @@ export class UserService {
 			});
 		}
 
-		return (await this.getUserById(user.id))!;
+		return {
+			user: (await this.getUserById(user.id))!,
+			isCreated: false
+		};
 	}
 
 	private async _createSocialUser(
