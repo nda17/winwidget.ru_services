@@ -9,6 +9,13 @@ export class StatisticsController {
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
+	@Get('/dashboard')
+	async getDashboard() {
+		return this.statisticsService.getDashboard();
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
 	@Get('/registrations-by-month')
 	async getRegistrationsByMonth() {
 		return this.statisticsService.getUserRegistrationsByMonth();

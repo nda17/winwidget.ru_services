@@ -1,11 +1,450 @@
 import { PrismaService } from '@/prisma.service';
 import { Injectable } from '@nestjs/common';
-import { AuthIdentityType, Role } from '@prisma/client';
+import {
+	AuthIdentityType,
+	PaymentStatus,
+	Plan,
+	Role,
+	SubscriptionStatus
+} from '@prisma/client';
 import * as dayjs from 'dayjs';
 
 @Injectable()
 export class StatisticsService {
 	constructor(private prisma: PrismaService) {}
+
+	async getDashboard() {
+		const now = new Date();
+		const todayStart = this.startOfDay(now);
+		const tomorrowStart = this.addDays(todayStart, 1);
+		const last30DaysStart = this.addDays(now, -30);
+		const previous30DaysStart = this.addDays(now, -60);
+		const currentMonthStart = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			1
+		);
+		const firstRevenueMonthStart = new Date(
+			now.getFullYear(),
+			now.getMonth() - 11,
+			1
+		);
+		const expiresIn3Days = this.addDays(now, 3);
+		const expiresIn7Days = this.addDays(now, 7);
+		const leadDayPeriods = this.generateDayPeriods(30, now);
+		const revenueMonthPeriods = this.generateMonthPeriods(12, now);
+
+		const [
+			totalUsers,
+			activeUsers30d,
+			newUsers30d,
+			adminUsers,
+			usersWithoutEmail,
+			usersWithoutPhone,
+			usersWithoutContacts,
+			telegramLinkedUsers,
+			succeededPaymentsAll,
+			succeededPayments30d,
+			succeededPaymentsCurrentMonth,
+			succeededPaymentsForRevenueChart,
+			pendingPaymentsCurrent,
+			cancelledPayments30d,
+			activeSubscriptions,
+			paidActiveSubscriptions,
+			trialActiveSubscriptions,
+			expiringSubscriptionsToday,
+			expiringSubscriptions3d,
+			expiringSubscriptions7d,
+			expiredActiveSubscriptions,
+			subscriptionsByPlan,
+			subscriptionsByStatus,
+			wheelLeads30d,
+			quizLeads30d,
+			callbackLeads30d,
+			countdownTimerLeads30d,
+			wheelLeadsPrevious30d,
+			quizLeadsPrevious30d,
+			callbackLeadsPrevious30d,
+			countdownTimerLeadsPrevious30d,
+			wheelLeadsToday,
+			quizLeadsToday,
+			callbackLeadsToday,
+			countdownTimerLeadsToday,
+			wheelLeadsAllTime,
+			quizLeadsAllTime,
+			callbackLeadsAllTime,
+			countdownTimerLeadsAllTime,
+			wheelLeadDates,
+			quizLeadDates,
+			callbackLeadDates,
+			countdownTimerLeadDates,
+			wheelWidgetStats,
+			quizWidgetStats,
+			callbackWidgetStats,
+			countdownTimerWidgetStats
+		] = await Promise.all([
+			this.prisma.user.count(),
+			this.prisma.user.count({
+				where: { updatedAt: { gte: last30DaysStart } }
+			}),
+			this.prisma.user.count({
+				where: { createdAt: { gte: last30DaysStart } }
+			}),
+			this.prisma.user.count({
+				where: { rights: { has: Role.ADMIN } }
+			}),
+			this.prisma.user.count({
+				where: {
+					authIdentities: {
+						none: { type: AuthIdentityType.EMAIL }
+					}
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					authIdentities: {
+						none: { type: AuthIdentityType.PHONE }
+					}
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					authIdentities: {
+						none: {
+							type: {
+								in: [AuthIdentityType.EMAIL, AuthIdentityType.PHONE]
+							}
+						}
+					}
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					authIdentities: {
+						some: { type: AuthIdentityType.TELEGRAM }
+					}
+				}
+			}),
+			this.prisma.payment.findMany({
+				where: { status: PaymentStatus.SUCCEEDED },
+				select: { amount: true, userId: true }
+			}),
+			this.prisma.payment.findMany({
+				where: {
+					status: PaymentStatus.SUCCEEDED,
+					updatedAt: { gte: last30DaysStart }
+				},
+				select: { amount: true, userId: true }
+			}),
+			this.prisma.payment.findMany({
+				where: {
+					status: PaymentStatus.SUCCEEDED,
+					updatedAt: { gte: currentMonthStart }
+				},
+				select: { amount: true }
+			}),
+			this.prisma.payment.findMany({
+				where: {
+					status: PaymentStatus.SUCCEEDED,
+					updatedAt: { gte: firstRevenueMonthStart }
+				},
+				select: {
+					amount: true,
+					updatedAt: true
+				}
+			}),
+			this.prisma.payment.count({
+				where: { status: PaymentStatus.PENDING }
+			}),
+			this.prisma.payment.count({
+				where: {
+					status: PaymentStatus.CANCELLED,
+					updatedAt: { gte: last30DaysStart }
+				}
+			}),
+			this.prisma.subscription.count({
+				where: { status: SubscriptionStatus.ACTIVE }
+			}),
+			this.prisma.subscription.count({
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					plan: { in: [Plan.EASY, Plan.HARD] }
+				}
+			}),
+			this.prisma.subscription.count({
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					plan: Plan.TRIAL
+				}
+			}),
+			this.prisma.subscription.count({
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					expiresAt: {
+						gte: todayStart,
+						lt: tomorrowStart
+					}
+				}
+			}),
+			this.prisma.subscription.count({
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					expiresAt: {
+						gte: now,
+						lt: expiresIn3Days
+					}
+				}
+			}),
+			this.prisma.subscription.count({
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					expiresAt: {
+						gte: now,
+						lt: expiresIn7Days
+					}
+				}
+			}),
+			this.prisma.subscription.count({
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					expiresAt: { lt: now }
+				}
+			}),
+			this.prisma.subscription.groupBy({
+				by: ['plan'],
+				_count: true,
+				where: { status: SubscriptionStatus.ACTIVE }
+			}),
+			this.prisma.subscription.groupBy({
+				by: ['status'],
+				_count: true
+			}),
+			this.prisma.lead.count({
+				where: { createdAt: { gte: last30DaysStart } }
+			}),
+			this.prisma.quizLead.count({
+				where: { createdAt: { gte: last30DaysStart } }
+			}),
+			this.prisma.callbackLead.count({
+				where: { createdAt: { gte: last30DaysStart } }
+			}),
+			this.prisma.countdownTimerLead.count({
+				where: { createdAt: { gte: last30DaysStart } }
+			}),
+			this.prisma.lead.count({
+				where: {
+					createdAt: {
+						gte: previous30DaysStart,
+						lt: last30DaysStart
+					}
+				}
+			}),
+			this.prisma.quizLead.count({
+				where: {
+					createdAt: {
+						gte: previous30DaysStart,
+						lt: last30DaysStart
+					}
+				}
+			}),
+			this.prisma.callbackLead.count({
+				where: {
+					createdAt: {
+						gte: previous30DaysStart,
+						lt: last30DaysStart
+					}
+				}
+			}),
+			this.prisma.countdownTimerLead.count({
+				where: {
+					createdAt: {
+						gte: previous30DaysStart,
+						lt: last30DaysStart
+					}
+				}
+			}),
+			this.prisma.lead.count({
+				where: {
+					createdAt: {
+						gte: todayStart,
+						lt: tomorrowStart
+					}
+				}
+			}),
+			this.prisma.quizLead.count({
+				where: {
+					createdAt: {
+						gte: todayStart,
+						lt: tomorrowStart
+					}
+				}
+			}),
+			this.prisma.callbackLead.count({
+				where: {
+					createdAt: {
+						gte: todayStart,
+						lt: tomorrowStart
+					}
+				}
+			}),
+			this.prisma.countdownTimerLead.count({
+				where: {
+					createdAt: {
+						gte: todayStart,
+						lt: tomorrowStart
+					}
+				}
+			}),
+			this.prisma.lead.count(),
+			this.prisma.quizLead.count(),
+			this.prisma.callbackLead.count(),
+			this.prisma.countdownTimerLead.count(),
+			this.prisma.lead.findMany({
+				where: { createdAt: { gte: leadDayPeriods[0].start } },
+				select: { createdAt: true }
+			}),
+			this.prisma.quizLead.findMany({
+				where: { createdAt: { gte: leadDayPeriods[0].start } },
+				select: { createdAt: true }
+			}),
+			this.prisma.callbackLead.findMany({
+				where: { createdAt: { gte: leadDayPeriods[0].start } },
+				select: { createdAt: true }
+			}),
+			this.prisma.countdownTimerLead.findMany({
+				where: { createdAt: { gte: leadDayPeriods[0].start } },
+				select: { createdAt: true }
+			}),
+			this.getWidgetStats('wheel', last30DaysStart),
+			this.getWidgetStats('quiz', last30DaysStart),
+			this.getWidgetStats('callback', last30DaysStart),
+			this.getWidgetStats('countdownTimer', last30DaysStart)
+		]);
+
+		const revenue30d = this.getPaymentsAmount(succeededPayments30d);
+		const totalLeads30d =
+			wheelLeads30d +
+			quizLeads30d +
+			callbackLeads30d +
+			countdownTimerLeads30d;
+		const previousLeads30d =
+			wheelLeadsPrevious30d +
+			quizLeadsPrevious30d +
+			callbackLeadsPrevious30d +
+			countdownTimerLeadsPrevious30d;
+		const totalLeadsToday =
+			wheelLeadsToday +
+			quizLeadsToday +
+			callbackLeadsToday +
+			countdownTimerLeadsToday;
+		const totalLeadsAllTime =
+			wheelLeadsAllTime +
+			quizLeadsAllTime +
+			callbackLeadsAllTime +
+			countdownTimerLeadsAllTime;
+		const widgetStats = [
+			wheelWidgetStats,
+			quizWidgetStats,
+			callbackWidgetStats,
+			countdownTimerWidgetStats
+		];
+
+		return {
+			generatedAt: now.toISOString(),
+			finance: {
+				revenueAllTime: this.getPaymentsAmount(succeededPaymentsAll),
+				revenue30d,
+				revenueCurrentMonth: this.getPaymentsAmount(
+					succeededPaymentsCurrentMonth
+				),
+				succeededPayments30d: succeededPayments30d.length,
+				pendingPaymentsCurrent,
+				cancelledPayments30d,
+				averageCheck30d: succeededPayments30d.length
+					? revenue30d / succeededPayments30d.length
+					: 0,
+				payingUsersTotal: this.countUniqueValues(
+					succeededPaymentsAll.map(payment => payment.userId)
+				),
+				payingUsers30d: this.countUniqueValues(
+					succeededPayments30d.map(payment => payment.userId)
+				)
+			},
+			subscriptions: {
+				active: activeSubscriptions,
+				paidActive: paidActiveSubscriptions,
+				trialActive: trialActiveSubscriptions,
+				expiringToday: expiringSubscriptionsToday,
+				expiring3d: expiringSubscriptions3d,
+				expiring7d: expiringSubscriptions7d,
+				expiredActive: expiredActiveSubscriptions,
+				byPlan: this.fillPlanStats(subscriptionsByPlan),
+				byStatus: this.fillSubscriptionStatusStats(subscriptionsByStatus)
+			},
+			leads: {
+				total30d: totalLeads30d,
+				previous30d: previousLeads30d,
+				growth30d: this.getGrowthPercent(totalLeads30d, previousLeads30d),
+				today: totalLeadsToday,
+				allTime: totalLeadsAllTime,
+				byType30d: [
+					{ type: 'wheel', label: 'Колесо', count: wheelLeads30d },
+					{ type: 'quiz', label: 'Квизы', count: quizLeads30d },
+					{
+						type: 'callback',
+						label: 'Обратный звонок',
+						count: callbackLeads30d
+					},
+					{
+						type: 'countdownTimer',
+						label: 'Таймеры',
+						count: countdownTimerLeads30d
+					}
+				],
+				byDay: this.buildLeadDayStats(leadDayPeriods, {
+					wheel: wheelLeadDates,
+					quiz: quizLeadDates,
+					callback: callbackLeadDates,
+					countdownTimer: countdownTimerLeadDates
+				})
+			},
+			widgets: {
+				total: widgetStats.reduce((sum, item) => sum + item.total, 0),
+				active: widgetStats.reduce((sum, item) => sum + item.active, 0),
+				inactive: widgetStats.reduce(
+					(sum, item) => sum + item.inactive,
+					0
+				),
+				withoutDomain: widgetStats.reduce(
+					(sum, item) => sum + item.withoutDomain,
+					0
+				),
+				activeWithoutDomain: widgetStats.reduce(
+					(sum, item) => sum + item.activeWithoutDomain,
+					0
+				),
+				new30d: widgetStats.reduce((sum, item) => sum + item.new30d, 0),
+				byType: widgetStats
+			},
+			users: {
+				total: totalUsers,
+				publicTotal: Math.max(totalUsers - adminUsers, 0),
+				active30d: activeUsers30d,
+				new30d: newUsers30d,
+				admins: adminUsers,
+				withoutEmail: usersWithoutEmail,
+				withoutPhone: usersWithoutPhone,
+				withoutContacts: usersWithoutContacts,
+				telegramLinked: telegramLinkedUsers
+			},
+			charts: {
+				revenueByMonth: this.buildRevenueMonthStats(
+					revenueMonthPeriods,
+					succeededPaymentsForRevenueChart
+				)
+			}
+		};
+	}
 
 	async getUserRegistrationsByMonth() {
 		const currentMonth = new Date().getMonth();
@@ -140,5 +579,302 @@ export class StatisticsService {
 		});
 
 		return months;
+	}
+
+	private async getWidgetStats(
+		type: 'wheel' | 'quiz' | 'callback' | 'countdownTimer',
+		since: Date
+	) {
+		const getStats = async (model: {
+			count: (args?: Record<string, unknown>) => Promise<number>;
+		}) => {
+			const [
+				total,
+				active,
+				inactive,
+				withoutDomain,
+				activeWithoutDomain,
+				new30d
+			] = await Promise.all([
+				model.count(),
+				model.count({ where: { isActive: true } }),
+				model.count({ where: { isActive: false } }),
+				model.count({ where: { installDomain: '' } }),
+				model.count({
+					where: { isActive: true, installDomain: '' }
+				}),
+				model.count({ where: { createdAt: { gte: since } } })
+			]);
+
+			return {
+				total,
+				active,
+				inactive,
+				withoutDomain,
+				activeWithoutDomain,
+				new30d
+			};
+		};
+
+		const stats =
+			type === 'wheel'
+				? await getStats(this.prisma.widget)
+				: type === 'quiz'
+					? await getStats(this.prisma.quiz)
+					: type === 'callback'
+						? await getStats(this.prisma.callback)
+						: await getStats(this.prisma.countdownTimer);
+
+		return {
+			type,
+			label: this.getWidgetTypeLabel(type),
+			...stats
+		};
+	}
+
+	private buildLeadDayStats(
+		periods: Array<{
+			date: string;
+			label: string;
+			start: Date;
+		}>,
+		leadDates: Record<
+			'wheel' | 'quiz' | 'callback' | 'countdownTimer',
+			Array<{ createdAt: Date }>
+		>
+	) {
+		const wheelMap = this.buildDateCountMap(leadDates.wheel);
+		const quizMap = this.buildDateCountMap(leadDates.quiz);
+		const callbackMap = this.buildDateCountMap(leadDates.callback);
+		const countdownTimerMap = this.buildDateCountMap(
+			leadDates.countdownTimer
+		);
+
+		return periods.map(period => {
+			const wheel = wheelMap.get(period.date) ?? 0;
+			const quiz = quizMap.get(period.date) ?? 0;
+			const callback = callbackMap.get(period.date) ?? 0;
+			const countdownTimer = countdownTimerMap.get(period.date) ?? 0;
+
+			return {
+				date: period.date,
+				label: period.label,
+				wheel,
+				quiz,
+				callback,
+				countdownTimer,
+				total: wheel + quiz + callback + countdownTimer
+			};
+		});
+	}
+
+	private buildRevenueMonthStats(
+		periods: Array<{
+			periodKey: string;
+			label: string;
+		}>,
+		payments: Array<{ amount: string; updatedAt: Date }>
+	) {
+		const statsMap = new Map(
+			periods.map(period => [
+				period.periodKey,
+				{
+					revenue: 0,
+					payments: 0
+				}
+			])
+		);
+
+		for (const payment of payments) {
+			const periodKey = this.formatMonthKey(payment.updatedAt);
+			const periodStats = statsMap.get(periodKey);
+
+			if (!periodStats) {
+				continue;
+			}
+
+			periodStats.revenue += this.parsePaymentAmount(payment.amount);
+			periodStats.payments += 1;
+		}
+
+		return periods.map(period => {
+			const stats = statsMap.get(period.periodKey);
+
+			return {
+				...period,
+				revenue: stats?.revenue ?? 0,
+				payments: stats?.payments ?? 0
+			};
+		});
+	}
+
+	private fillPlanStats(items: Array<{ plan: Plan; _count: number }>) {
+		const counts = new Map(items.map(item => [item.plan, item._count]));
+
+		return [Plan.TRIAL, Plan.EASY, Plan.HARD].map(plan => ({
+			plan,
+			label: this.getPlanLabel(plan),
+			count: counts.get(plan) ?? 0
+		}));
+	}
+
+	private fillSubscriptionStatusStats(
+		items: Array<{ status: SubscriptionStatus; _count: number }>
+	) {
+		const counts = new Map(items.map(item => [item.status, item._count]));
+
+		return [
+			SubscriptionStatus.ACTIVE,
+			SubscriptionStatus.EXPIRED,
+			SubscriptionStatus.CANCELLED
+		].map(status => ({
+			status,
+			label: this.getSubscriptionStatusLabel(status),
+			count: counts.get(status) ?? 0
+		}));
+	}
+
+	private buildDateCountMap(items: Array<{ createdAt: Date }>) {
+		const map = new Map<string, number>();
+
+		for (const item of items) {
+			const key = this.formatDateKey(item.createdAt);
+			map.set(key, (map.get(key) ?? 0) + 1);
+		}
+
+		return map;
+	}
+
+	private generateDayPeriods(days: number, endDate: Date) {
+		const endDayStart = this.startOfDay(endDate);
+
+		return Array.from({ length: days }, (_, index) => {
+			const date = this.addDays(endDayStart, index - days + 1);
+
+			return {
+				date: this.formatDateKey(date),
+				label: this.formatDayLabel(date),
+				start: date
+			};
+		});
+	}
+
+	private generateMonthPeriods(months: number, endDate: Date) {
+		const currentMonthStart = new Date(
+			endDate.getFullYear(),
+			endDate.getMonth(),
+			1
+		);
+
+		return Array.from({ length: months }, (_, index) => {
+			const date = new Date(
+				currentMonthStart.getFullYear(),
+				currentMonthStart.getMonth() + index - months + 1,
+				1
+			);
+
+			return {
+				periodKey: this.formatMonthKey(date),
+				label: this.formatMonthLabel(date)
+			};
+		});
+	}
+
+	private getPaymentsAmount(payments: Array<{ amount: string }>) {
+		return payments.reduce(
+			(total, payment) => total + this.parsePaymentAmount(payment.amount),
+			0
+		);
+	}
+
+	private parsePaymentAmount(value: string) {
+		const amount = Number(value.replace(',', '.'));
+		return Number.isFinite(amount) ? amount : 0;
+	}
+
+	private getGrowthPercent(current: number, previous: number) {
+		if (previous <= 0) {
+			return current > 0 ? null : 0;
+		}
+
+		return ((current - previous) / previous) * 100;
+	}
+
+	private countUniqueValues(values: string[]) {
+		return new Set(values).size;
+	}
+
+	private startOfDay(value: Date) {
+		return new Date(
+			value.getFullYear(),
+			value.getMonth(),
+			value.getDate()
+		);
+	}
+
+	private addDays(value: Date, days: number) {
+		const date = new Date(value);
+		date.setDate(date.getDate() + days);
+		return date;
+	}
+
+	private formatDateKey(value: Date) {
+		const month = `${value.getMonth() + 1}`.padStart(2, '0');
+		const day = `${value.getDate()}`.padStart(2, '0');
+
+		return `${value.getFullYear()}-${month}-${day}`;
+	}
+
+	private formatMonthKey(value: Date) {
+		const month = `${value.getMonth() + 1}`.padStart(2, '0');
+
+		return `${value.getFullYear()}-${month}`;
+	}
+
+	private formatDayLabel(value: Date) {
+		return new Intl.DateTimeFormat('ru-RU', {
+			day: '2-digit',
+			month: 'short'
+		}).format(value);
+	}
+
+	private formatMonthLabel(value: Date) {
+		return new Intl.DateTimeFormat('ru-RU', {
+			month: 'short',
+			year: 'numeric'
+		}).format(value);
+	}
+
+	private getPlanLabel(plan: Plan) {
+		const labels: Record<Plan, string> = {
+			TRIAL: 'Trial',
+			EASY: 'Easy',
+			HARD: 'Hard'
+		};
+
+		return labels[plan];
+	}
+
+	private getSubscriptionStatusLabel(status: SubscriptionStatus) {
+		const labels: Record<SubscriptionStatus, string> = {
+			ACTIVE: 'Активные',
+			EXPIRED: 'Истекшие',
+			CANCELLED: 'Отменённые'
+		};
+
+		return labels[status];
+	}
+
+	private getWidgetTypeLabel(
+		type: 'wheel' | 'quiz' | 'callback' | 'countdownTimer'
+	) {
+		const labels = {
+			wheel: 'Колесо',
+			quiz: 'Квизы',
+			callback: 'Обратный звонок',
+			countdownTimer: 'Таймеры'
+		};
+
+		return labels[type];
 	}
 }
