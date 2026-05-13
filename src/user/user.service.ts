@@ -841,9 +841,12 @@ export class UserService {
 						: user.password,
 					name: typeof dto?.name === 'string' ? dto.name : user.name,
 					avatarPath:
-						typeof dto?.avatarPath === 'string' && dto.avatarPath.length
-							? dto.avatarPath
-							: user.avatarPath,
+						dto?.avatarPath === null
+							? null
+							: typeof dto?.avatarPath === 'string' &&
+								  dto.avatarPath.length
+								? dto.avatarPath
+								: user.avatarPath,
 					rights: this.buildEditableRights(user, dto, adminRights)
 				}
 			});

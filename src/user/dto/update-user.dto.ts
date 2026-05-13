@@ -31,8 +31,9 @@ export class UpdateUserDto {
 	name?: string;
 
 	@IsOptional()
+	@ValidateIf((_, value) => value !== null)
 	@IsString()
-	avatarPath?: string;
+	avatarPath?: string | null;
 
 	@IsOptional()
 	@IsBoolean()

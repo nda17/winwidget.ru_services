@@ -5,6 +5,7 @@ import { Module } from '@nestjs/common';
 
 @Module({
 	controllers: [HealthController],
-	providers: [HealthService, PrismaService]
+	providers: [HealthService, PrismaService],
+	exports: [HealthService]
 })
 export class HealthModule {}
