@@ -481,6 +481,29 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return { cancelled: true };
 	}
 
+	async disconnectNotificationChannel(userId: string) {
+		const now = new Date();
+
+		await Promise.all([
+			this.prisma.telegramNotificationChannel.updateMany({
+				where: { userId },
+				data: {
+					isActive: false,
+					disabledAt: now
+				}
+			}),
+			this.prisma.verificationChallenge.deleteMany({
+				where: {
+					userId,
+					type: VerificationChallengeType.TELEGRAM,
+					purpose: VerificationChallengePurpose.BIND_TELEGRAM_NOTIFICATIONS
+				}
+			})
+		]);
+
+		return { disconnected: true };
+	}
+
 	async handleWebhook(
 		update: TelegramInfoBotWebhookUpdate,
 		secret?: string
@@ -1880,12 +1903,28 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				maxBuffer: 1024 * 1024
 			});
 		} catch (error) {
-			const message =
-				error instanceof Error
-					? error.message
-					: 'PostgreSQL command failed';
+			const message = this.getPostgresCommandErrorMessage(command, error);
 			throw new BadRequestException(message);
 		}
+	}
+
+	private getPostgresCommandErrorMessage(command: string, error: unknown) {
+		if (this.isMissingExecutableError(error)) {
+			return `На сервере не найден ${command}. Установите PostgreSQL client tools (postgresql-client/libpq) или пересоберите backend Docker-образ.`;
+		}
+
+		return error instanceof Error
+			? error.message
+			: 'PostgreSQL command failed';
+	}
+
+	private isMissingExecutableError(error: unknown) {
+		return (
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'ENOENT'
+		);
 	}
 
 	private getPostgresCommandConnection() {

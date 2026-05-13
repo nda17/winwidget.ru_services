@@ -148,6 +148,13 @@ export class UserController {
 	}
 
 	@HttpCode(200)
+	@Auth()
+	@Delete('profile/telegram-notifications')
+	disconnectProfileTelegramNotifications(@CurrentUser('id') id: string) {
+		return this.telegramBotService.disconnectNotificationChannel(id);
+	}
+
+	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('user-list')
 	async getUserList(
