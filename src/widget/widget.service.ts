@@ -75,7 +75,12 @@ const DEFAULT_CONFIG = {
 	}
 };
 
-type AdminWidgetType = 'WHEEL' | 'QUIZ' | 'CALLBACK' | 'TIMER';
+type AdminWidgetType =
+	| 'WHEEL'
+	| 'QUIZ'
+	| 'CALLBACK'
+	| 'TIMER'
+	| 'STOP_OFFER';
 
 interface AdminWidgetMonitoringFilters {
 	type?: string;
@@ -1017,6 +1022,23 @@ export class WidgetService {
 				entity.updated_at
 			FROM countdown_timers entity
 			${ownerJoinsSql}
+
+			UNION ALL
+
+			SELECT
+				'STOP_OFFER'::text AS widget_type,
+				entity.id,
+				entity.name,
+				entity.public_key,
+				entity.is_active,
+				entity.install_domain,
+				${ownerFieldsSql},
+				(SELECT COUNT(*)::int FROM stop_offer_leads l WHERE l.stop_offer_id = entity.id) AS lead_count,
+				(SELECT MAX(l.created_at) FROM stop_offer_leads l WHERE l.stop_offer_id = entity.id) AS last_lead_at,
+				entity.created_at,
+				entity.updated_at
+			FROM stop_offers entity
+			${ownerJoinsSql}
 		`;
 	}
 
@@ -1065,7 +1087,8 @@ export class WidgetService {
 			'WHEEL',
 			'QUIZ',
 			'CALLBACK',
-			'TIMER'
+			'TIMER',
+			'STOP_OFFER'
 		];
 
 		if (!normalized) return undefined;

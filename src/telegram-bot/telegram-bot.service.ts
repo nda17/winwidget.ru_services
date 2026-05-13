@@ -64,6 +64,7 @@ interface DailySummaryStats {
 		quiz: number;
 		callback: number;
 		countdownTimer: number;
+		stopOffer: number;
 	};
 	expiringSubscriptionsCount: number;
 	expiredActiveSubscriptionsCount: number;
@@ -1949,6 +1950,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			quizLeadsCount,
 			callbackLeadsCount,
 			countdownTimerLeadsCount,
+			stopOfferLeadsCount,
 			expiringSubscriptionsCount,
 			expiredActiveSubscriptionsCount,
 			usersWithoutEmailCount,
@@ -1986,6 +1988,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			this.prisma.countdownTimerLead.count({
 				where: { createdAt: range }
 			}),
+			this.prisma.stopOfferLead.count({ where: { createdAt: range } }),
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
@@ -2034,7 +2037,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			wheelLeadsCount +
 			quizLeadsCount +
 			callbackLeadsCount +
-			countdownTimerLeadsCount;
+			countdownTimerLeadsCount +
+			stopOfferLeadsCount;
 
 		return {
 			period,
@@ -2050,7 +2054,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				wheel: wheelLeadsCount,
 				quiz: quizLeadsCount,
 				callback: callbackLeadsCount,
-				countdownTimer: countdownTimerLeadsCount
+				countdownTimer: countdownTimerLeadsCount,
+				stopOffer: stopOfferLeadsCount
 			},
 			expiringSubscriptionsCount,
 			expiredActiveSubscriptionsCount,
@@ -2085,6 +2090,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			`- Квизы: ${stats.leads.quiz}`,
 			`- Обратный звонок: ${stats.leads.callback}`,
 			`- Таймеры: ${stats.leads.countdownTimer}`,
+			`- Стоп-офферы: ${stats.leads.stopOffer}`,
 			'',
 			'<b>Подписки</b>',
 			`- Истекают в ближайшие 7 дней: ${stats.expiringSubscriptionsCount}`,

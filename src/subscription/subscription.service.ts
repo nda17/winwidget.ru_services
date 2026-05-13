@@ -182,16 +182,26 @@ export class SubscriptionService {
 		}
 
 		const limits = PLAN_LIMITS[sub.plan];
-		const [widgetCount, quizCount, callbackCount, countdownTimerCount] =
-			await Promise.all([
-				this.prisma.widget.count({ where: { userId } }),
-				this.prisma.quiz.count({ where: { userId } }),
-				this.prisma.callback.count({ where: { userId } }),
-				this.prisma.countdownTimer.count({ where: { userId } })
-			]);
+		const [
+			widgetCount,
+			quizCount,
+			callbackCount,
+			countdownTimerCount,
+			stopOfferCount
+		] = await Promise.all([
+			this.prisma.widget.count({ where: { userId } }),
+			this.prisma.quiz.count({ where: { userId } }),
+			this.prisma.callback.count({ where: { userId } }),
+			this.prisma.countdownTimer.count({ where: { userId } }),
+			this.prisma.stopOffer.count({ where: { userId } })
+		]);
 
 		if (
-			widgetCount + quizCount + callbackCount + countdownTimerCount >=
+			widgetCount +
+				quizCount +
+				callbackCount +
+				countdownTimerCount +
+				stopOfferCount >=
 			limits.maxWidgets
 		) {
 			return { allowed: false, reason: 'widget_limit_reached' };
@@ -303,6 +313,37 @@ export class SubscriptionService {
 			return { allowed: false, reason: 'timer_inactive' };
 
 		const sub = await this.checkAndResetPeriod(timer.userId);
+
+		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
+			return { allowed: false, reason: 'subscription_expired' };
+		}
+
+		const limits = PLAN_LIMITS[sub.plan];
+
+		if (
+			!limits.unlimited &&
+			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
+		) {
+			return { allowed: false, reason: 'lead_limit_reached' };
+		}
+
+		return { allowed: true };
+	}
+
+	async canSubmitStopOfferLead(
+		stopOfferId: string
+	): Promise<{ allowed: boolean; reason?: string }> {
+		const stopOffer = await this.prisma.stopOffer.findUnique({
+			where: { id: stopOfferId },
+			include: { user: { include: { subscription: true } } }
+		});
+
+		if (!stopOffer)
+			return { allowed: false, reason: 'stop_offer_not_found' };
+		if (!stopOffer.isActive)
+			return { allowed: false, reason: 'stop_offer_inactive' };
+
+		const sub = await this.checkAndResetPeriod(stopOffer.userId);
 
 		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
 			return { allowed: false, reason: 'subscription_expired' };

@@ -11,6 +11,7 @@ const widgetEntries = [
 	['quiz.js', 'quiz.js'],
 	['callback.js', 'callback.js'],
 	['timer.js', 'timer.js'],
+	['stop-offer.js', 'stop-offer.js'],
 	['helpers/winwidget-phone.js', 'helpers/winwidget-phone.js']
 ];
 

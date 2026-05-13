@@ -12,8 +12,9 @@ npx prisma generate
 ## Runtime-скрипты виджетов
 
 Браузерные скрипты, которые отдаются клиентским сайтам по адресам
-`/widgets/wheel.js`, `/widgets/quiz.js`, `/widgets/callback.js` и
-`/widgets/timer.js`, собираются из исходников в `widgets-src`.
+`/widgets/wheel.js`, `/widgets/quiz.js`, `/widgets/callback.js`,
+`/widgets/timer.js` и `/widgets/stop-offer.js`, собираются из исходников
+в `widgets-src`.
 
 Правило разработки:
 

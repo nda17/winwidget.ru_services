@@ -10,6 +10,7 @@ const files = [
 	'quiz.js',
 	'callback.js',
 	'timer.js',
+	'stop-offer.js',
 	'helpers/winwidget-phone.js'
 ];
 

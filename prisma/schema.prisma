@@ -24,6 +24,7 @@ model User {
   quizzes                      Quiz[]
   callbacks                    Callback[]
   countdownTimers              CountdownTimer[]
+  stopOffers                   StopOffer[]
   subscription                 Subscription?
   subscriptionHistories        SubscriptionHistory[]        @relation("SubscriptionHistoryUser")
   subscriptionHistoryActions   SubscriptionHistory[]        @relation("SubscriptionHistoryAdmin")
@@ -121,6 +122,41 @@ model CountdownTimerLead {
   @@index([countdownTimerId, timerResetToken])
   @@index([countdownTimerId, timerResetToken, ip])
   @@map("countdown_timer_leads")
+}
+
+model StopOffer {
+  id            String          @id @default(cuid())
+  userId        String          @map("user_id")
+  publicKey     String          @unique @map("public_key")
+  name          String          @default("Стоп-оффер")
+  isActive      Boolean         @default(true) @map("is_active")
+  installDomain String          @default("") @map("install_domain")
+  config        Json            @default("{}")
+  leads         StopOfferLead[]
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("stop_offers")
+}
+
+model StopOfferLead {
+  id          String    @id @default(cuid())
+  stopOfferId String    @map("stop_offer_id")
+  phone       String?
+  email       String?
+  url         String?
+  ip          String?
+  resetToken  String    @default("") @map("reset_token")
+  stopOffer   StopOffer @relation(fields: [stopOfferId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([stopOfferId])
+  @@index([stopOfferId, ip])
+  @@index([stopOfferId, resetToken])
+  @@index([stopOfferId, resetToken, ip])
+  @@map("stop_offer_leads")
 }
 
 model Quiz {

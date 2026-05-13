@@ -59,7 +59,8 @@ export type OverviewWidgetType =
 	| 'WHEEL'
 	| 'QUIZ'
 	| 'CALLBACK'
-	| 'COUNTDOWN_TIMER';
+	| 'COUNTDOWN_TIMER'
+	| 'STOP_OFFER';
 
 export interface OverviewLeadTypeCount {
 	type: OverviewWidgetType;
@@ -177,18 +178,23 @@ export class UserService {
 			activeCallbackWidgetsCount,
 			timerWidgetsCount,
 			activeTimerWidgetsCount,
+			stopOfferWidgetsCount,
+			activeStopOfferWidgetsCount,
 			latestWheelWidgets,
 			latestQuizzes,
 			latestCallbacks,
 			latestTimers,
+			latestStopOffers,
 			wheelLeadsCount,
 			quizLeadsCount,
 			callbackLeadsCount,
 			timerLeadsCount,
+			stopOfferLeadsCount,
 			latestWheelLeads,
 			latestQuizLeads,
 			latestCallbackLeads,
 			latestTimerLeads,
+			latestStopOfferLeads,
 			latestActivity
 		] = await this.prisma.$transaction([
 			this.prisma.subscription.findUnique({
@@ -240,6 +246,12 @@ export class UserService {
 				where: { userId: id }
 			}),
 			this.prisma.countdownTimer.count({
+				where: { userId: id, isActive: true }
+			}),
+			this.prisma.stopOffer.count({
+				where: { userId: id }
+			}),
+			this.prisma.stopOffer.count({
 				where: { userId: id, isActive: true }
 			}),
 			this.prisma.widget.findMany({
@@ -294,6 +306,19 @@ export class UserService {
 					_count: { select: { leads: true } }
 				}
 			}),
+			this.prisma.stopOffer.findMany({
+				where: { userId: id },
+				orderBy: { updatedAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					name: true,
+					isActive: true,
+					installDomain: true,
+					updatedAt: true,
+					_count: { select: { leads: true } }
+				}
+			}),
 			this.prisma.lead.count({
 				where: { widget: { userId: id } }
 			}),
@@ -305,6 +330,9 @@ export class UserService {
 			}),
 			this.prisma.countdownTimerLead.count({
 				where: { countdownTimer: { userId: id } }
+			}),
+			this.prisma.stopOfferLead.count({
+				where: { stopOffer: { userId: id } }
 			}),
 			this.prisma.lead.findMany({
 				where: { widget: { userId: id } },
@@ -362,6 +390,19 @@ export class UserService {
 					countdownTimer: { select: { name: true } }
 				}
 			}),
+			this.prisma.stopOfferLead.findMany({
+				where: { stopOffer: { userId: id } },
+				orderBy: { createdAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					phone: true,
+					email: true,
+					url: true,
+					createdAt: true,
+					stopOffer: { select: { name: true } }
+				}
+			}),
 			this.prisma.adminEventLog.findMany({
 				where: {
 					OR: [{ targetUserId: id }, { adminId: id }]
@@ -412,6 +453,12 @@ export class UserService {
 				'Таймер',
 				timerWidgetsCount,
 				activeTimerWidgetsCount
+			),
+			this.buildWidgetTypeCount(
+				'STOP_OFFER',
+				'Стоп-оффер',
+				stopOfferWidgetsCount,
+				activeStopOfferWidgetsCount
 			)
 		];
 		const latestWidgets = [
@@ -426,6 +473,9 @@ export class UserService {
 			),
 			...latestTimers.map(timer =>
 				this.toOverviewWidgetItem('COUNTDOWN_TIMER', 'Таймер', timer)
+			),
+			...latestStopOffers.map(stopOffer =>
+				this.toOverviewWidgetItem('STOP_OFFER', 'Стоп-оффер', stopOffer)
 			)
 		]
 			.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
@@ -442,6 +492,11 @@ export class UserService {
 				type: 'COUNTDOWN_TIMER',
 				label: 'Таймер',
 				count: timerLeadsCount
+			},
+			{
+				type: 'STOP_OFFER',
+				label: 'Стоп-оффер',
+				count: stopOfferLeadsCount
 			}
 		];
 		const latestLeads = [
@@ -486,6 +541,18 @@ export class UserService {
 				type: 'COUNTDOWN_TIMER' as const,
 				label: 'Таймер',
 				sourceName: lead.countdownTimer.name,
+				contact: lead.phone || lead.email || null,
+				phone: lead.phone,
+				email: lead.email,
+				url: lead.url,
+				detail: null,
+				createdAt: lead.createdAt
+			})),
+			...latestStopOfferLeads.map(lead => ({
+				id: lead.id,
+				type: 'STOP_OFFER' as const,
+				label: 'Стоп-оффер',
+				sourceName: lead.stopOffer.name,
 				contact: lead.phone || lead.email || null,
 				phone: lead.phone,
 				email: lead.email,
@@ -998,6 +1065,10 @@ export class UserService {
 					data: { isActive: false }
 				});
 				await tx.countdownTimer.updateMany({
+					where: { userId: id },
+					data: { isActive: false }
+				});
+				await tx.stopOffer.updateMany({
 					where: { userId: id },
 					data: { isActive: false }
 				});
