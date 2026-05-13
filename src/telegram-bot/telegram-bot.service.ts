@@ -458,10 +458,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			}
 		});
 
-		this.logger.log(
-			`Telegram notification binding started for user ${userId}, request ${this.maskRequestId(requestId)}`
-		);
-
 		return {
 			requestId,
 			botUrl: `https://t.me/${this.getInfoBotUsername()}?start=${requestId}`,
@@ -669,9 +665,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 				try {
 					await this.setTelegramWebhook(config, false);
-					this.logger.log(
-						`Telegram webhook ${config.title} checked on startup.`
-					);
 				} catch (error) {
 					this.logger.warn(
 						`Telegram webhook ${config.title} startup check failed: ${
@@ -1143,10 +1136,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				id: request.id
 			}
 		});
-
-		this.logger.log(
-			`Telegram notification binding completed for user ${request.userId}, request ${this.maskRequestId(requestId)}`
-		);
 
 		await this.sendInfoBotMessage(
 			chatId,
@@ -1620,14 +1609,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			scheduleTime.minute
 		);
 		const delay = Math.max(nextRun.getTime() - Date.now(), 1_000);
-		const moscowTime = new Date(
-			nextRun.getTime() + this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000
-		);
-
-		this.logger.log(
-			`Next Telegram daily summary scheduled for ${moscowTime.toISOString().replace('T', ' ').slice(0, 16)} MSK.`
-		);
-
 		this.summaryTimeout = setTimeout(async () => {
 			try {
 				const sent = await this.sendDailySummaryIfEnabled();
@@ -1716,14 +1697,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			scheduleTime.minute
 		);
 		const delay = Math.max(nextRun.getTime() - Date.now(), 1_000);
-		const moscowTime = new Date(
-			nextRun.getTime() + this.MOSCOW_UTC_OFFSET_HOURS * 60 * 60 * 1000
-		);
-
-		this.logger.log(
-			`Next Telegram database backup scheduled for ${moscowTime.toISOString().replace('T', ' ').slice(0, 16)} MSK.`
-		);
-
 		this.databaseBackupTimeout = setTimeout(async () => {
 			try {
 				const sent = await this.sendDailyDatabaseBackupIfEnabled();
