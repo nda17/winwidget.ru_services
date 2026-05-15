@@ -420,7 +420,7 @@
 			fontWeight: '850'
 		});
 		title.className = 'wso-title';
-		title.textContent = safeText(cfg.title, 'Заберите скидку 10%');
+		title.textContent = safeText(cfg.title, 'Персональное предложение');
 		modal.appendChild(title);
 		if (cfg.subtitle) {
 			var subtitle = el('p', {
