@@ -80,7 +80,8 @@ type AdminWidgetType =
 	| 'QUIZ'
 	| 'CALLBACK'
 	| 'TIMER'
-	| 'STOP_OFFER';
+	| 'STOP_OFFER'
+	| 'ONLINE_CONSULTANT';
 
 interface AdminWidgetMonitoringFilters {
 	type?: string;
@@ -1039,6 +1040,23 @@ export class WidgetService {
 				entity.updated_at
 			FROM stop_offers entity
 			${ownerJoinsSql}
+
+			UNION ALL
+
+			SELECT
+				'ONLINE_CONSULTANT'::text AS widget_type,
+				entity.id,
+				entity.name,
+				entity.public_key,
+				entity.is_active,
+				entity.install_domain,
+				${ownerFieldsSql},
+				(SELECT COUNT(*)::int FROM online_consultant_leads l WHERE l.online_consultant_id = entity.id) AS lead_count,
+				(SELECT MAX(l.created_at) FROM online_consultant_leads l WHERE l.online_consultant_id = entity.id) AS last_lead_at,
+				entity.created_at,
+				entity.updated_at
+			FROM online_consultants entity
+			${ownerJoinsSql}
 		`;
 	}
 
@@ -1088,7 +1106,8 @@ export class WidgetService {
 			'QUIZ',
 			'CALLBACK',
 			'TIMER',
-			'STOP_OFFER'
+			'STOP_OFFER',
+			'ONLINE_CONSULTANT'
 		];
 
 		if (!normalized) return undefined;

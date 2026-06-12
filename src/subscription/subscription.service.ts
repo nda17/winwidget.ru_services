@@ -187,13 +187,15 @@ export class SubscriptionService {
 			quizCount,
 			callbackCount,
 			countdownTimerCount,
-			stopOfferCount
+			stopOfferCount,
+			onlineConsultantCount
 		] = await Promise.all([
 			this.prisma.widget.count({ where: { userId } }),
 			this.prisma.quiz.count({ where: { userId } }),
 			this.prisma.callback.count({ where: { userId } }),
 			this.prisma.countdownTimer.count({ where: { userId } }),
-			this.prisma.stopOffer.count({ where: { userId } })
+			this.prisma.stopOffer.count({ where: { userId } }),
+			this.prisma.onlineConsultant.count({ where: { userId } })
 		]);
 
 		if (
@@ -201,7 +203,8 @@ export class SubscriptionService {
 				quizCount +
 				callbackCount +
 				countdownTimerCount +
-				stopOfferCount >=
+				stopOfferCount +
+				onlineConsultantCount >=
 			limits.maxWidgets
 		) {
 			return { allowed: false, reason: 'widget_limit_reached' };
@@ -344,6 +347,39 @@ export class SubscriptionService {
 			return { allowed: false, reason: 'stop_offer_inactive' };
 
 		const sub = await this.checkAndResetPeriod(stopOffer.userId);
+
+		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
+			return { allowed: false, reason: 'subscription_expired' };
+		}
+
+		const limits = PLAN_LIMITS[sub.plan];
+
+		if (
+			!limits.unlimited &&
+			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
+		) {
+			return { allowed: false, reason: 'lead_limit_reached' };
+		}
+
+		return { allowed: true };
+	}
+
+	async canSubmitOnlineConsultantLead(
+		onlineConsultantId: string
+	): Promise<{ allowed: boolean; reason?: string }> {
+		const onlineConsultant = await this.prisma.onlineConsultant.findUnique(
+			{
+				where: { id: onlineConsultantId },
+				include: { user: { include: { subscription: true } } }
+			}
+		);
+
+		if (!onlineConsultant)
+			return { allowed: false, reason: 'online_consultant_not_found' };
+		if (!onlineConsultant.isActive)
+			return { allowed: false, reason: 'online_consultant_inactive' };
+
+		const sub = await this.checkAndResetPeriod(onlineConsultant.userId);
 
 		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
 			return { allowed: false, reason: 'subscription_expired' };

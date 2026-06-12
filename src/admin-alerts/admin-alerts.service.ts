@@ -456,6 +456,21 @@ export class AdminAlertsService {
 				created_at,
 				updated_at
 			FROM stop_offers
+
+			UNION ALL
+
+			SELECT
+				'ONLINE_CONSULTANT'::text AS widget_type,
+				'Онлайн-консультант'::text AS widget_label,
+				id,
+				user_id,
+				name,
+				public_key,
+				is_active,
+				install_domain,
+				created_at,
+				updated_at
+			FROM online_consultants
 		`;
 	}
 

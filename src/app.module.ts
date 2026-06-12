@@ -19,6 +19,7 @@ import { QuizModule } from '@/quiz/quiz.module';
 import { CallbackModule } from '@/callback/callback.module';
 import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
 import { StopOfferModule } from '@/stop-offer/stop-offer.module';
+import { OnlineConsultantModule } from '@/online-consultant/online-consultant.module';
 import { DevToolsModule } from '@/dev-tools/dev-tools.module';
 import { HealthModule } from '@/health/health.module';
 import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
@@ -48,6 +49,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		CallbackModule,
 		CountdownTimerModule,
 		StopOfferModule,
+		OnlineConsultantModule,
 		SiteSettingsModule,
 		TariffPricesModule,
 		LegalPagesModule,

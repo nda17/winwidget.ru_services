@@ -32,7 +32,8 @@ export const bootstrap = async () => {
 			{ path: 'page-quiz/:key', method: RequestMethod.GET },
 			{ path: 'page-callback/:key', method: RequestMethod.GET },
 			{ path: 'page-timer/:key', method: RequestMethod.GET },
-			{ path: 'page-stop-offer/:key', method: RequestMethod.GET }
+			{ path: 'page-stop-offer/:key', method: RequestMethod.GET },
+			{ path: 'page-online-consultant/:key', method: RequestMethod.GET }
 		]
 	});
 
@@ -71,6 +72,13 @@ export const bootstrap = async () => {
 		next();
 	});
 	app.use('/api/stop-offer', (req: any, res: any, next: any) => {
+		res.setHeader('Access-Control-Allow-Origin', '*');
+		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+		if (req.method === 'OPTIONS') return res.status(204).end();
+		next();
+	});
+	app.use('/api/online-consultant', (req: any, res: any, next: any) => {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');

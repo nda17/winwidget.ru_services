@@ -11,6 +11,7 @@ const files = [
 	'callback.js',
 	'timer.js',
 	'stop-offer.js',
+	'online-consultant.js',
 	'helpers/winwidget-phone.js'
 ];
 

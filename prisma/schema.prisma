@@ -25,6 +25,7 @@ model User {
   callbacks                    Callback[]
   countdownTimers              CountdownTimer[]
   stopOffers                   StopOffer[]
+  onlineConsultants            OnlineConsultant[]
   subscription                 Subscription?
   subscriptionHistories        SubscriptionHistory[]        @relation("SubscriptionHistoryUser")
   subscriptionHistoryActions   SubscriptionHistory[]        @relation("SubscriptionHistoryAdmin")
@@ -157,6 +158,40 @@ model StopOfferLead {
   @@index([stopOfferId, resetToken])
   @@index([stopOfferId, resetToken, ip])
   @@map("stop_offer_leads")
+}
+
+model OnlineConsultant {
+  id            String                 @id @default(cuid())
+  userId        String                 @map("user_id")
+  publicKey     String                 @unique @map("public_key")
+  name          String                 @default("Онлайн-консультант")
+  isActive      Boolean                @default(true) @map("is_active")
+  installDomain String                 @default("") @map("install_domain")
+  config        Json                   @default("{}")
+  leads         OnlineConsultantLead[]
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime               @default(now()) @map("created_at")
+  updatedAt     DateTime               @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("online_consultants")
+}
+
+model OnlineConsultantLead {
+  id                 String           @id @default(cuid())
+  onlineConsultantId String           @map("online_consultant_id")
+  phone              String?
+  email              String?
+  actionLabel        String           @default("") @map("action_label")
+  actionValue        String           @default("") @map("action_value")
+  url                String?
+  ip                 String?
+  onlineConsultant   OnlineConsultant @relation(fields: [onlineConsultantId], references: [id], onDelete: Cascade)
+  createdAt          DateTime         @default(now()) @map("created_at")
+
+  @@index([onlineConsultantId])
+  @@index([onlineConsultantId, ip])
+  @@map("online_consultant_leads")
 }
 
 model Quiz {

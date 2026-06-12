@@ -60,7 +60,8 @@ export type OverviewWidgetType =
 	| 'QUIZ'
 	| 'CALLBACK'
 	| 'COUNTDOWN_TIMER'
-	| 'STOP_OFFER';
+	| 'STOP_OFFER'
+	| 'ONLINE_CONSULTANT';
 
 export interface OverviewLeadTypeCount {
 	type: OverviewWidgetType;
@@ -180,21 +181,26 @@ export class UserService {
 			activeTimerWidgetsCount,
 			stopOfferWidgetsCount,
 			activeStopOfferWidgetsCount,
+			onlineConsultantWidgetsCount,
+			activeOnlineConsultantWidgetsCount,
 			latestWheelWidgets,
 			latestQuizzes,
 			latestCallbacks,
 			latestTimers,
 			latestStopOffers,
+			latestOnlineConsultants,
 			wheelLeadsCount,
 			quizLeadsCount,
 			callbackLeadsCount,
 			timerLeadsCount,
 			stopOfferLeadsCount,
+			onlineConsultantLeadsCount,
 			latestWheelLeads,
 			latestQuizLeads,
 			latestCallbackLeads,
 			latestTimerLeads,
 			latestStopOfferLeads,
+			latestOnlineConsultantLeads,
 			latestActivity
 		] = await this.prisma.$transaction([
 			this.prisma.subscription.findUnique({
@@ -252,6 +258,12 @@ export class UserService {
 				where: { userId: id }
 			}),
 			this.prisma.stopOffer.count({
+				where: { userId: id, isActive: true }
+			}),
+			this.prisma.onlineConsultant.count({
+				where: { userId: id }
+			}),
+			this.prisma.onlineConsultant.count({
 				where: { userId: id, isActive: true }
 			}),
 			this.prisma.widget.findMany({
@@ -319,6 +331,19 @@ export class UserService {
 					_count: { select: { leads: true } }
 				}
 			}),
+			this.prisma.onlineConsultant.findMany({
+				where: { userId: id },
+				orderBy: { updatedAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					name: true,
+					isActive: true,
+					installDomain: true,
+					updatedAt: true,
+					_count: { select: { leads: true } }
+				}
+			}),
 			this.prisma.lead.count({
 				where: { widget: { userId: id } }
 			}),
@@ -333,6 +358,9 @@ export class UserService {
 			}),
 			this.prisma.stopOfferLead.count({
 				where: { stopOffer: { userId: id } }
+			}),
+			this.prisma.onlineConsultantLead.count({
+				where: { onlineConsultant: { userId: id } }
 			}),
 			this.prisma.lead.findMany({
 				where: { widget: { userId: id } },
@@ -403,6 +431,20 @@ export class UserService {
 					stopOffer: { select: { name: true } }
 				}
 			}),
+			this.prisma.onlineConsultantLead.findMany({
+				where: { onlineConsultant: { userId: id } },
+				orderBy: { createdAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					phone: true,
+					email: true,
+					actionLabel: true,
+					url: true,
+					createdAt: true,
+					onlineConsultant: { select: { name: true } }
+				}
+			}),
 			this.prisma.adminEventLog.findMany({
 				where: {
 					OR: [{ targetUserId: id }, { adminId: id }]
@@ -459,6 +501,12 @@ export class UserService {
 				'Стоп-оффер',
 				stopOfferWidgetsCount,
 				activeStopOfferWidgetsCount
+			),
+			this.buildWidgetTypeCount(
+				'ONLINE_CONSULTANT',
+				'Онлайн-консультант',
+				onlineConsultantWidgetsCount,
+				activeOnlineConsultantWidgetsCount
 			)
 		];
 		const latestWidgets = [
@@ -476,6 +524,13 @@ export class UserService {
 			),
 			...latestStopOffers.map(stopOffer =>
 				this.toOverviewWidgetItem('STOP_OFFER', 'Стоп-оффер', stopOffer)
+			),
+			...latestOnlineConsultants.map(onlineConsultant =>
+				this.toOverviewWidgetItem(
+					'ONLINE_CONSULTANT',
+					'Онлайн-консультант',
+					onlineConsultant
+				)
 			)
 		]
 			.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
@@ -497,6 +552,11 @@ export class UserService {
 				type: 'STOP_OFFER',
 				label: 'Стоп-оффер',
 				count: stopOfferLeadsCount
+			},
+			{
+				type: 'ONLINE_CONSULTANT',
+				label: 'Онлайн-консультант',
+				count: onlineConsultantLeadsCount
 			}
 		];
 		const latestLeads = [
@@ -558,6 +618,18 @@ export class UserService {
 				email: lead.email,
 				url: lead.url,
 				detail: null,
+				createdAt: lead.createdAt
+			})),
+			...latestOnlineConsultantLeads.map(lead => ({
+				id: lead.id,
+				type: 'ONLINE_CONSULTANT' as const,
+				label: 'Онлайн-консультант',
+				sourceName: lead.onlineConsultant.name,
+				contact: lead.phone || lead.email || null,
+				phone: lead.phone,
+				email: lead.email,
+				url: lead.url,
+				detail: lead.actionLabel,
 				createdAt: lead.createdAt
 			}))
 		]
@@ -1113,27 +1185,42 @@ export class UserService {
 	}
 
 	private async getUserWidgetButtonImageUrls(userId: string) {
-		const [widgets, quizzes, callbacks, countdownTimers] =
-			await Promise.all([
-				this.prisma.widget.findMany({
-					where: { userId },
-					select: { config: true }
-				}),
-				this.prisma.quiz.findMany({
-					where: { userId },
-					select: { config: true }
-				}),
-				this.prisma.callback.findMany({
-					where: { userId },
-					select: { config: true }
-				}),
-				this.prisma.countdownTimer.findMany({
-					where: { userId },
-					select: { config: true }
-				})
-			]);
+		const [
+			widgets,
+			quizzes,
+			callbacks,
+			countdownTimers,
+			onlineConsultants
+		] = await Promise.all([
+			this.prisma.widget.findMany({
+				where: { userId },
+				select: { config: true }
+			}),
+			this.prisma.quiz.findMany({
+				where: { userId },
+				select: { config: true }
+			}),
+			this.prisma.callback.findMany({
+				where: { userId },
+				select: { config: true }
+			}),
+			this.prisma.countdownTimer.findMany({
+				where: { userId },
+				select: { config: true }
+			}),
+			this.prisma.onlineConsultant.findMany({
+				where: { userId },
+				select: { config: true }
+			})
+		]);
 
-		return [...widgets, ...quizzes, ...callbacks, ...countdownTimers]
+		return [
+			...widgets,
+			...quizzes,
+			...callbacks,
+			...countdownTimers,
+			...onlineConsultants
+		]
 			.map(({ config }) => this.getButtonImageUrlFromConfig(config))
 			.filter((url): url is string => Boolean(url));
 	}

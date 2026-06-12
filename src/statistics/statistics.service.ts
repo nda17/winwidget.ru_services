@@ -63,31 +63,37 @@ export class StatisticsService {
 			callbackLeads30d,
 			countdownTimerLeads30d,
 			stopOfferLeads30d,
+			onlineConsultantLeads30d,
 			wheelLeadsPrevious30d,
 			quizLeadsPrevious30d,
 			callbackLeadsPrevious30d,
 			countdownTimerLeadsPrevious30d,
 			stopOfferLeadsPrevious30d,
+			onlineConsultantLeadsPrevious30d,
 			wheelLeadsToday,
 			quizLeadsToday,
 			callbackLeadsToday,
 			countdownTimerLeadsToday,
 			stopOfferLeadsToday,
+			onlineConsultantLeadsToday,
 			wheelLeadsAllTime,
 			quizLeadsAllTime,
 			callbackLeadsAllTime,
 			countdownTimerLeadsAllTime,
 			stopOfferLeadsAllTime,
+			onlineConsultantLeadsAllTime,
 			wheelLeadDates,
 			quizLeadDates,
 			callbackLeadDates,
 			countdownTimerLeadDates,
 			stopOfferLeadDates,
+			onlineConsultantLeadDates,
 			wheelWidgetStats,
 			quizWidgetStats,
 			callbackWidgetStats,
 			countdownTimerWidgetStats,
-			stopOfferWidgetStats
+			stopOfferWidgetStats,
+			onlineConsultantWidgetStats
 		] = await Promise.all([
 			this.prisma.user.count(),
 			this.prisma.user.count({
@@ -240,6 +246,9 @@ export class StatisticsService {
 			this.prisma.stopOfferLead.count({
 				where: { createdAt: { gte: last30DaysStart } }
 			}),
+			this.prisma.onlineConsultantLead.count({
+				where: { createdAt: { gte: last30DaysStart } }
+			}),
 			this.prisma.lead.count({
 				where: {
 					createdAt: {
@@ -280,6 +289,14 @@ export class StatisticsService {
 					}
 				}
 			}),
+			this.prisma.onlineConsultantLead.count({
+				where: {
+					createdAt: {
+						gte: previous30DaysStart,
+						lt: last30DaysStart
+					}
+				}
+			}),
 			this.prisma.lead.count({
 				where: {
 					createdAt: {
@@ -313,6 +330,14 @@ export class StatisticsService {
 				}
 			}),
 			this.prisma.stopOfferLead.count({
+				where: {
+					createdAt: {
+						gte: todayStart,
+						lt: tomorrowStart
+					}
+				}
+			}),
+			this.prisma.onlineConsultantLead.count({
 				where: {
 					createdAt: {
 						gte: todayStart,
@@ -325,6 +350,7 @@ export class StatisticsService {
 			this.prisma.callbackLead.count(),
 			this.prisma.countdownTimerLead.count(),
 			this.prisma.stopOfferLead.count(),
+			this.prisma.onlineConsultantLead.count(),
 			this.prisma.lead.findMany({
 				where: { createdAt: { gte: leadDayPeriods[0].start } },
 				select: { createdAt: true }
@@ -345,11 +371,16 @@ export class StatisticsService {
 				where: { createdAt: { gte: leadDayPeriods[0].start } },
 				select: { createdAt: true }
 			}),
+			this.prisma.onlineConsultantLead.findMany({
+				where: { createdAt: { gte: leadDayPeriods[0].start } },
+				select: { createdAt: true }
+			}),
 			this.getWidgetStats('wheel', last30DaysStart),
 			this.getWidgetStats('quiz', last30DaysStart),
 			this.getWidgetStats('callback', last30DaysStart),
 			this.getWidgetStats('countdownTimer', last30DaysStart),
-			this.getWidgetStats('stopOffer', last30DaysStart)
+			this.getWidgetStats('stopOffer', last30DaysStart),
+			this.getWidgetStats('onlineConsultant', last30DaysStart)
 		]);
 
 		const revenue30d = this.getPaymentsAmount(succeededPayments30d);
@@ -358,31 +389,36 @@ export class StatisticsService {
 			quizLeads30d +
 			callbackLeads30d +
 			countdownTimerLeads30d +
-			stopOfferLeads30d;
+			stopOfferLeads30d +
+			onlineConsultantLeads30d;
 		const previousLeads30d =
 			wheelLeadsPrevious30d +
 			quizLeadsPrevious30d +
 			callbackLeadsPrevious30d +
 			countdownTimerLeadsPrevious30d +
-			stopOfferLeadsPrevious30d;
+			stopOfferLeadsPrevious30d +
+			onlineConsultantLeadsPrevious30d;
 		const totalLeadsToday =
 			wheelLeadsToday +
 			quizLeadsToday +
 			callbackLeadsToday +
 			countdownTimerLeadsToday +
-			stopOfferLeadsToday;
+			stopOfferLeadsToday +
+			onlineConsultantLeadsToday;
 		const totalLeadsAllTime =
 			wheelLeadsAllTime +
 			quizLeadsAllTime +
 			callbackLeadsAllTime +
 			countdownTimerLeadsAllTime +
-			stopOfferLeadsAllTime;
+			stopOfferLeadsAllTime +
+			onlineConsultantLeadsAllTime;
 		const widgetStats = [
 			wheelWidgetStats,
 			quizWidgetStats,
 			callbackWidgetStats,
 			countdownTimerWidgetStats,
-			stopOfferWidgetStats
+			stopOfferWidgetStats,
+			onlineConsultantWidgetStats
 		];
 
 		return {
@@ -440,6 +476,11 @@ export class StatisticsService {
 						type: 'stopOffer',
 						label: 'Стоп-офферы',
 						count: stopOfferLeads30d
+					},
+					{
+						type: 'onlineConsultant',
+						label: 'Онлайн-консультанты',
+						count: onlineConsultantLeads30d
 					}
 				],
 				byDay: this.buildLeadDayStats(leadDayPeriods, {
@@ -447,7 +488,8 @@ export class StatisticsService {
 					quiz: quizLeadDates,
 					callback: callbackLeadDates,
 					countdownTimer: countdownTimerLeadDates,
-					stopOffer: stopOfferLeadDates
+					stopOffer: stopOfferLeadDates,
+					onlineConsultant: onlineConsultantLeadDates
 				})
 			},
 			widgets: {
@@ -624,7 +666,13 @@ export class StatisticsService {
 	}
 
 	private async getWidgetStats(
-		type: 'wheel' | 'quiz' | 'callback' | 'countdownTimer' | 'stopOffer',
+		type:
+			| 'wheel'
+			| 'quiz'
+			| 'callback'
+			| 'countdownTimer'
+			| 'stopOffer'
+			| 'onlineConsultant',
 		since: Date
 	) {
 		const getStats = async (model: {
@@ -667,7 +715,9 @@ export class StatisticsService {
 						? await getStats(this.prisma.callback)
 						: type === 'countdownTimer'
 							? await getStats(this.prisma.countdownTimer)
-							: await getStats(this.prisma.stopOffer);
+							: type === 'stopOffer'
+								? await getStats(this.prisma.stopOffer)
+								: await getStats(this.prisma.onlineConsultant);
 
 		return {
 			type,
@@ -683,7 +733,12 @@ export class StatisticsService {
 			start: Date;
 		}>,
 		leadDates: Record<
-			'wheel' | 'quiz' | 'callback' | 'countdownTimer' | 'stopOffer',
+			| 'wheel'
+			| 'quiz'
+			| 'callback'
+			| 'countdownTimer'
+			| 'stopOffer'
+			| 'onlineConsultant',
 			Array<{ createdAt: Date }>
 		>
 	) {
@@ -694,6 +749,9 @@ export class StatisticsService {
 			leadDates.countdownTimer
 		);
 		const stopOfferMap = this.buildDateCountMap(leadDates.stopOffer);
+		const onlineConsultantMap = this.buildDateCountMap(
+			leadDates.onlineConsultant
+		);
 
 		return periods.map(period => {
 			const wheel = wheelMap.get(period.date) ?? 0;
@@ -701,6 +759,7 @@ export class StatisticsService {
 			const callback = callbackMap.get(period.date) ?? 0;
 			const countdownTimer = countdownTimerMap.get(period.date) ?? 0;
 			const stopOffer = stopOfferMap.get(period.date) ?? 0;
+			const onlineConsultant = onlineConsultantMap.get(period.date) ?? 0;
 
 			return {
 				date: period.date,
@@ -710,7 +769,14 @@ export class StatisticsService {
 				callback,
 				countdownTimer,
 				stopOffer,
-				total: wheel + quiz + callback + countdownTimer + stopOffer
+				onlineConsultant,
+				total:
+					wheel +
+					quiz +
+					callback +
+					countdownTimer +
+					stopOffer +
+					onlineConsultant
 			};
 		});
 	}
@@ -913,14 +979,21 @@ export class StatisticsService {
 	}
 
 	private getWidgetTypeLabel(
-		type: 'wheel' | 'quiz' | 'callback' | 'countdownTimer' | 'stopOffer'
+		type:
+			| 'wheel'
+			| 'quiz'
+			| 'callback'
+			| 'countdownTimer'
+			| 'stopOffer'
+			| 'onlineConsultant'
 	) {
 		const labels = {
 			wheel: 'Колесо',
 			quiz: 'Квизы',
 			callback: 'Обратный звонок',
 			countdownTimer: 'Таймеры',
-			stopOffer: 'Стоп-офферы'
+			stopOffer: 'Стоп-офферы',
+			onlineConsultant: 'Онлайн-консультанты'
 		};
 
 		return labels[type];
