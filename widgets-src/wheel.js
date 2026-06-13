@@ -38,6 +38,45 @@
 		}
 	}
 
+	function getColorRgb(color) {
+		const match = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(
+			String(color || '').trim()
+		);
+
+		if (!match) return null;
+
+		return {
+			red: parseInt(match[1], 16),
+			green: parseInt(match[2], 16),
+			blue: parseInt(match[3], 16)
+		};
+	}
+
+	function getColorBrightness(color) {
+		const rgb = getColorRgb(color);
+		if (!rgb) return 0;
+
+		return (rgb.red * 299 + rgb.green * 587 + rgb.blue * 114) / 1000;
+	}
+
+	function isLightColor(color) {
+		return getColorBrightness(color) > 170;
+	}
+
+	function getReadableTextColor(color) {
+		const rgb = getColorRgb(color);
+		if (!rgb) return '#ffffff';
+
+		return getColorBrightness(color) > 170 ? '#000000' : '#ffffff';
+	}
+
+	function getColorAlpha(color, alpha) {
+		const rgb = getColorRgb(color);
+		if (!rgb) return `rgba(255,255,255,${alpha})`;
+
+		return `rgba(${rgb.red},${rgb.green},${rgb.blue},${alpha})`;
+	}
+
 	function loadExternalScript(src) {
 		return new Promise((resolve, reject) => {
 			const existing = document.querySelector('script[src="' + src + '"]');
@@ -303,6 +342,20 @@
 			Math.max(4, Number(config.spinDuration) || 5)
 		);
 		const spinEasing = 'cubic-bezier(.22,.61,.36,1)';
+		const contentTextColor =
+			config.textColor ||
+			getReadableTextColor(config.bgColor || config.widgetColor);
+		const contentTextShadowColor = isLightColor(contentTextColor)
+			? 'rgba(0,0,0,0.3)'
+			: 'rgba(255,255,255,0.24)';
+		const contentTextMuted = getColorAlpha(contentTextColor, 0.72);
+		const contentTextSoft = getColorAlpha(contentTextColor, 0.48);
+		const contentTextWeak = getColorAlpha(contentTextColor, 0.35);
+		const contentTextBorder = getColorAlpha(contentTextColor, 0.18);
+		const contentTextFocusBorder = getColorAlpha(contentTextColor, 0.42);
+		const contentTextInputBg = getColorAlpha(contentTextColor, 0.06);
+		const contentTextInputFocusBg = getColorAlpha(contentTextColor, 0.1);
+		const contentTextFocusShadow = getColorAlpha(contentTextColor, 0.08);
 
 		style.textContent = `
     :host {
@@ -423,10 +476,10 @@
       font-weight: 800;
       margin: 0;
       text-align: center;
-      color: #ffffff;
+      color: ${contentTextColor};
       letter-spacing: -0.3px;
       line-height: 1.2;
-      text-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      text-shadow: 0 2px 12px ${contentTextShadowColor};
       overflow-wrap: break-word;
       word-break: break-word;
     }
@@ -434,7 +487,7 @@
     /* Подзаголовок */
     #subtitle-widget {
       width: 100%;
-      color: rgba(255,255,255,0.72);
+      color: ${contentTextMuted};
       margin: 0;
       text-align: center;
       font-size: 14px;
@@ -445,13 +498,13 @@
     #name-input,
     #phone-input,
     #email-input {
-      border: 1.5px solid rgba(255,255,255,0.12);
+      border: 1.5px solid ${contentTextBorder};
       outline: none;
-      background: rgba(255,255,255,0.08);
+      background: ${contentTextInputBg};
       padding: 0 14px;
       border-radius: 12px;
       width: 100%;
-      color: #ffffff;
+      color: ${contentTextColor};
       font-weight: 400;
       font-size: 15px;
       line-height: 1;
@@ -461,13 +514,13 @@
     }
     #name-input::placeholder,
     #phone-input::placeholder,
-    #email-input::placeholder { color: rgba(255,255,255,0.4); }
+    #email-input::placeholder { color: ${contentTextSoft}; }
     #name-input:focus,
     #phone-input:focus,
     #email-input:focus {
-      border-color: rgba(255,255,255,0.4);
-      background: rgba(255,255,255,0.13);
-      box-shadow: 0 0 0 3px rgba(255,255,255,0.06);
+      border-color: ${contentTextFocusBorder};
+      background: ${contentTextInputFocusBg};
+      box-shadow: 0 0 0 3px ${contentTextFocusShadow};
     }
 
     /* Кнопка КРУТИТЬ */
@@ -509,14 +562,14 @@
 
     /* Ссылки политики */
     #link-policy, #link-consent, #link-offer {
-      color: rgba(255,255,255,0.75);
+      color: ${contentTextMuted};
       text-decoration: underline;
       text-underline-offset: 2px;
       cursor: pointer;
       transition: color 0.2s;
     }
     #link-policy:hover, #link-consent:hover, #link-offer:hover {
-      color: #ffffff;
+      color: ${contentTextColor};
     }
 
     /* Брендинг */
@@ -524,7 +577,7 @@
       font-size: 12px;
       position: absolute;
       top: 5px;
-      color: rgba(255,255,255,0.35);
+      color: ${contentTextWeak};
       letter-spacing: 0.2px;
     }
     #dev-info-text {
@@ -561,8 +614,8 @@
       width: 34px;
       height: 34px;
       padding: 0;
-      background: rgba(255,255,255,0.1);
-      border: 1px solid rgba(255,255,255,0.12);
+      background: ${contentTextInputBg};
+      border: 1px solid ${contentTextBorder};
       border-radius: 50%;
       cursor: pointer;
       display: flex;
@@ -572,13 +625,13 @@
       backdrop-filter: blur(4px);
     }
     #widget-close:hover {
-      background: rgba(255,255,255,0.2);
-      border-color: rgba(255,255,255,0.25);
+      background: ${contentTextInputFocusBg};
+      border-color: ${contentTextWeak};
       transform: scale(1.08) rotate(90deg);
     }
     #widget-close svg { width: 14px; height: 14px; }
     #widget-close line {
-      stroke: rgba(255,255,255,0.85);
+      stroke: ${getColorAlpha(contentTextColor, 0.85)};
       stroke-width: 2;
       stroke-linecap: round;
     }
@@ -609,7 +662,7 @@
 
     /* ── Checkbox ── */
     #checkbox-text {
-      color: rgba(255,255,255,0.65);
+      color: ${contentTextMuted};
       font-size: 13px;
       line-height: 1.45;
     }
@@ -633,8 +686,8 @@
       min-width: 18px;
       margin-top: 1px;
       border-radius: 5px;
-      border: 1.5px solid rgba(255,255,255,0.35);
-      background: rgba(255,255,255,0.06);
+      border: 1.5px solid ${contentTextWeak};
+      background: ${contentTextInputBg};
       display: flex;
       align-items: center;
       justify-content: center;
@@ -657,7 +710,7 @@
       transform: rotate(-45deg) scale(1);
     }
     #custom-checkbox:hover #checkmark {
-      border-color: rgba(255,255,255,0.6);
+      border-color: ${getColorAlpha(contentTextColor, 0.6)};
     }
 
     @keyframes shake {
@@ -751,6 +804,9 @@
 		const policy = shadow.querySelector('#custom-checkbox');
 		const CENTER = 150;
 		const RADIUS = 150;
+		const textMeasureContext = document
+			.createElement('canvas')
+			.getContext('2d');
 		let currentRotation = 0;
 		let lastWin = null;
 
@@ -778,6 +834,151 @@
 			const y2 = CENTER + RADIUS * Math.sin(endAngle * rad);
 			const largeArc = endAngle - startAngle > 180 ? 1 : 0;
 			return `M ${CENTER} ${CENTER} L ${x1} ${y1} A ${RADIUS} ${RADIUS} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+		}
+
+		function getSectorTextLayout(sectorCount) {
+			const normalizedSectorCount = Math.max(
+				2,
+				Math.min(8, Number(sectorCount) || 8)
+			);
+			const sectorAngle = (2 * Math.PI) / normalizedSectorCount;
+			const textRadius = RADIUS * 0.59;
+			const tangentSpace = 2 * textRadius * Math.sin(sectorAngle / 2) - 18;
+			const minFontSize = 9;
+			const readableMaxLines = normalizedSectorCount >= 7 ? 2 : 3;
+			const maxLines = Math.max(
+				1,
+				Math.min(
+					readableMaxLines,
+					Math.floor(tangentSpace / (minFontSize * 1.2))
+				)
+			);
+
+			return {
+				textRadius,
+				maxLineWidth: 102,
+				maxLines,
+				minFontSize
+			};
+		}
+
+		function measureSectorTextWidth(value, fontSize) {
+			if (textMeasureContext) {
+				textMeasureContext.font = `700 ${fontSize}px Arial, sans-serif`;
+				return textMeasureContext.measureText(String(value || '')).width;
+			}
+
+			return String(value || '').length * fontSize * 0.62;
+		}
+
+		function splitLongSectorWord(word, fontSize, maxLineWidth) {
+			const chunks = [];
+			let chunk = '';
+
+			Array.from(word).forEach(char => {
+				const nextChunk = chunk + char;
+				if (
+					!chunk ||
+					measureSectorTextWidth(nextChunk, fontSize) <= maxLineWidth
+				) {
+					chunk = nextChunk;
+					return;
+				}
+
+				chunks.push(chunk);
+				chunk = char;
+			});
+
+			if (chunk) chunks.push(chunk);
+
+			return chunks;
+		}
+
+		function wrapSectorLabel(label, fontSize, maxLineWidth) {
+			const words = String(label || '')
+				.trim()
+				.split(/\s+/)
+				.filter(Boolean);
+			const lines = [];
+			let currentLine = '';
+
+			words.forEach(word => {
+				const nextLine = currentLine ? `${currentLine} ${word}` : word;
+
+				if (measureSectorTextWidth(nextLine, fontSize) <= maxLineWidth) {
+					currentLine = nextLine;
+					return;
+				}
+
+				if (currentLine) {
+					lines.push(currentLine);
+					currentLine = '';
+				}
+
+				if (measureSectorTextWidth(word, fontSize) <= maxLineWidth) {
+					currentLine = word;
+					return;
+				}
+
+				const chunks = splitLongSectorWord(word, fontSize, maxLineWidth);
+				lines.push(...chunks.slice(0, -1));
+				currentLine = chunks[chunks.length - 1] || '';
+			});
+
+			if (currentLine) lines.push(currentLine);
+
+			return lines.length > 0 ? lines : [''];
+		}
+
+		function fitSectorLabel(label, layout, preferredFontSize) {
+			let fallback = {
+				fontSize: layout.minFontSize,
+				lines: wrapSectorLabel(
+					label,
+					layout.minFontSize,
+					layout.maxLineWidth
+				)
+			};
+
+			for (
+				let fontSize = preferredFontSize;
+				fontSize >= layout.minFontSize;
+				fontSize -= 1
+			) {
+				const lines = wrapSectorLabel(
+					label,
+					fontSize,
+					layout.maxLineWidth
+				);
+
+				if (lines.length <= layout.maxLines) {
+					return { fontSize, lines };
+				}
+
+				fallback = { fontSize, lines };
+			}
+
+			return fallback;
+		}
+
+		function appendSectorTextLines(text, lines, x, fontSize) {
+			const lineHeight = fontSize * 1.15;
+			const firstLineOffset = -((lines.length - 1) * lineHeight) / 2;
+
+			text.textContent = '';
+			lines.forEach((line, index) => {
+				const tspan = document.createElementNS(
+					'http://www.w3.org/2000/svg',
+					'tspan'
+				);
+				tspan.setAttribute('x', x);
+				tspan.setAttribute(
+					'dy',
+					String(index === 0 ? firstLineOffset : lineHeight)
+				);
+				tspan.textContent = line;
+				text.appendChild(tspan);
+			});
 		}
 
 		// Центральный элемент колеса
@@ -912,7 +1113,8 @@
 					'http://www.w3.org/2000/svg',
 					'text'
 				);
-				const distanceFromCenter = RADIUS * 0.62;
+				const textLayout = getSectorTextLayout(count);
+				const distanceFromCenter = textLayout.textRadius;
 				const tx =
 					CENTER +
 					distanceFromCenter * Math.cos((midAngle * Math.PI) / 180);
@@ -930,9 +1132,19 @@
 				text.style.fontFamily = "'Arial', sans-serif";
 				text.style.fontWeight = '700';
 				text.style.fill = sector.textColor;
-				text.style.fontSize = `${Math.max(10, parseInt(sector.fontSize) || 14)}px`;
+				const fittedText = fitSectorLabel(
+					sector.label,
+					textLayout,
+					Math.max(10, parseInt(sector.fontSize) || 14)
+				);
+				text.style.fontSize = `${fittedText.fontSize}px`;
 				text.setAttribute('filter', 'url(#text-shadow)');
-				text.textContent = sector.label;
+				appendSectorTextLines(
+					text,
+					fittedText.lines,
+					tx,
+					fittedText.fontSize
+				);
 
 				g.appendChild(text);
 				wheel.appendChild(g);
@@ -1533,7 +1745,7 @@
 							label: b.name,
 							probability: b.neverWin ? 0 : (b.probability ?? 1),
 							color: sectorColor,
-							textColor: sectorColor !== '#ffffff' ? '#ffffff' : '#000000',
+							textColor: b.textColor || getReadableTextColor(sectorColor),
 							fontSize: '14'
 						};
 					})
@@ -1542,14 +1754,14 @@
 							label: 'Приз 1',
 							probability: 1,
 							color,
-							textColor: '#ffffff',
+							textColor: getReadableTextColor(color),
 							fontSize: '14'
 						},
 						{
 							label: 'Приз 2',
 							probability: 1,
 							color: '#ffffff',
-							textColor: '#000000',
+							textColor: getReadableTextColor('#ffffff'),
 							fontSize: '14'
 						}
 					];
