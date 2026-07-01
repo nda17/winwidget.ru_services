@@ -63,6 +63,65 @@ const DEFAULT_CONFIG = {
 	}
 };
 
+const toPlainObject = (value: unknown): Record<string, any> =>
+	value && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, any>)
+		: {};
+
+const toNumberValue = (value: unknown, fallback: number): number => {
+	const numeric = Number(value);
+	return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const clampNumber = (
+	value: unknown,
+	min: number,
+	max: number,
+	fallback: number
+): number => Math.min(max, Math.max(min, toNumberValue(value, fallback)));
+
+const toOptionalDelay = (value: unknown): number | null => {
+	if (value === null || value === '' || value === undefined) return null;
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) return null;
+	return Math.min(86400, numeric);
+};
+
+const normalizeCallbackConfig = (rawConfig: unknown) => {
+	const raw = toPlainObject(rawConfig);
+
+	return {
+		...DEFAULT_CONFIG,
+		...raw,
+		buttonBottom: clampNumber(
+			raw.buttonBottom,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonBottom
+		),
+		buttonOffset: clampNumber(
+			raw.buttonOffset,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonOffset
+		),
+		buttonSize: clampNumber(
+			raw.buttonSize,
+			40,
+			100,
+			DEFAULT_CONFIG.buttonSize
+		),
+		autoOpenDelay: toOptionalDelay(raw.autoOpenDelay),
+		timeSlots: Array.isArray(raw.timeSlots)
+			? raw.timeSlots
+			: DEFAULT_CONFIG.timeSlots,
+		integrations: {
+			...DEFAULT_CONFIG.integrations,
+			...toPlainObject(raw.integrations)
+		}
+	};
+};
+
 @Injectable()
 export class CallbackService {
 	constructor(
@@ -119,10 +178,14 @@ export class CallbackService {
 				: undefined;
 		const nextConfig =
 			configPatch !== undefined
-				? {
+				? normalizeCallbackConfig({
 						...currentConfig,
-						...configPatch
-					}
+						...configPatch,
+						integrations: {
+							...(currentConfig.integrations || {}),
+							...(configPatch.integrations || {})
+						}
+					})
 				: undefined;
 
 		const updated = await this.prisma.callback.update({
@@ -174,10 +237,10 @@ export class CallbackService {
 			const updated = await this.prisma.callback.update({
 				where: { id: callback.id },
 				data: {
-					config: {
+					config: normalizeCallbackConfig({
 						...currentConfig,
 						buttonImageUrl: uploadedUrl
-					}
+					})
 				}
 			});
 
@@ -292,7 +355,7 @@ export class CallbackService {
 
 		if (!callback) return null;
 
-		const config = callback.config as any;
+		const config = normalizeCallbackConfig(callback.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(callback.installDomain, requestDomain)
@@ -391,7 +454,7 @@ export class CallbackService {
 				'Лимит заявок исчерпан или подписка неактивна'
 			);
 
-		const config = callback.config as any;
+		const config = normalizeCallbackConfig(callback.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(callback.installDomain, requestDomain)

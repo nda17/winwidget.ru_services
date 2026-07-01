@@ -69,6 +69,70 @@ const createDefaultConfig = () => ({
 	}
 });
 
+const toPlainObject = (value: unknown): Record<string, any> =>
+	value && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, any>)
+		: {};
+
+const toNumberValue = (value: unknown, fallback: number): number => {
+	const numeric = Number(value);
+	return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const clampNumber = (
+	value: unknown,
+	min: number,
+	max: number,
+	fallback: number
+): number => Math.min(max, Math.max(min, toNumberValue(value, fallback)));
+
+const toOptionalDelay = (value: unknown): number | null => {
+	if (value === null || value === '' || value === undefined) return null;
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) return null;
+	return Math.min(86400, numeric);
+};
+
+const normalizeCountdownTimerConfig = (rawConfig: unknown) => {
+	const defaults = createDefaultConfig();
+	const raw = toPlainObject(rawConfig);
+
+	return {
+		...defaults,
+		...raw,
+		buttonBottom: clampNumber(
+			raw.buttonBottom,
+			1,
+			50,
+			defaults.buttonBottom
+		),
+		buttonOffset: clampNumber(
+			raw.buttonOffset,
+			1,
+			50,
+			defaults.buttonOffset
+		),
+		buttonSize: clampNumber(raw.buttonSize, 40, 100, defaults.buttonSize),
+		autoOpenDelay: toOptionalDelay(raw.autoOpenDelay),
+		evergreenDurationMinutes: clampNumber(
+			raw.evergreenDurationMinutes,
+			1,
+			10080,
+			defaults.evergreenDurationMinutes
+		),
+		submissionCooldownDays: clampNumber(
+			raw.submissionCooldownDays,
+			0,
+			365,
+			defaults.submissionCooldownDays
+		),
+		integrations: {
+			...defaults.integrations,
+			...toPlainObject(raw.integrations)
+		}
+	};
+};
+
 @Injectable()
 export class CountdownTimerService {
 	constructor(
@@ -130,10 +194,14 @@ export class CountdownTimerService {
 				: undefined;
 		const nextConfig =
 			configPatch !== undefined
-				? {
+				? normalizeCountdownTimerConfig({
 						...currentConfig,
-						...configPatch
-					}
+						...configPatch,
+						integrations: {
+							...(currentConfig.integrations || {}),
+							...(configPatch.integrations || {})
+						}
+					})
 				: undefined;
 
 		const updated = await this.prisma.countdownTimer.update({
@@ -185,10 +253,10 @@ export class CountdownTimerService {
 			const updated = await this.prisma.countdownTimer.update({
 				where: { id: timer.id },
 				data: {
-					config: {
+					config: normalizeCountdownTimerConfig({
 						...currentConfig,
 						buttonImageUrl: uploadedUrl
-					}
+					})
 				}
 			});
 
@@ -301,7 +369,7 @@ export class CountdownTimerService {
 		});
 		if (!timer) return null;
 
-		const config = timer.config as any;
+		const config = normalizeCountdownTimerConfig(timer.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(timer.installDomain, requestDomain)
@@ -417,7 +485,7 @@ export class CountdownTimerService {
 		});
 		if (!timer) throw new NotFoundException('Таймер не найден');
 
-		const config = timer.config as any;
+		const config = normalizeCountdownTimerConfig(timer.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(timer.installDomain, requestDomain)

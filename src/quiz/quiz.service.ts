@@ -119,6 +119,98 @@ const DEFAULT_CONFIG = {
 	}
 };
 
+const toPlainObject = (value: unknown): Record<string, any> =>
+	value && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, any>)
+		: {};
+
+const toNumberValue = (value: unknown, fallback: number): number => {
+	const numeric = Number(value);
+	return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const clampNumber = (
+	value: unknown,
+	min: number,
+	max: number,
+	fallback: number
+): number => Math.min(max, Math.max(min, toNumberValue(value, fallback)));
+
+const toOptionalDelay = (value: unknown): number | null => {
+	if (value === null || value === '' || value === undefined) return null;
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) return null;
+	return Math.min(86400, numeric);
+};
+
+const normalizeQuestions = (value: unknown) => {
+	const source = Array.isArray(value) ? value : DEFAULT_CONFIG.questions;
+
+	return source.map(question => {
+		const item = toPlainObject(question);
+		const options = Array.isArray(item.options)
+			? item.options.map(option => {
+					const optionItem = toPlainObject(option);
+					const scores = toPlainObject(optionItem.scores);
+
+					return {
+						...optionItem,
+						scores: Object.fromEntries(
+							Object.entries(scores).map(([resultId, score]) => [
+								resultId,
+								clampNumber(score, 0, 10, 0)
+							])
+						)
+					};
+				})
+			: item.options;
+
+		return { ...item, options };
+	});
+};
+
+const normalizeQuizConfig = (rawConfig: unknown) => {
+	const raw = toPlainObject(rawConfig);
+
+	return {
+		...DEFAULT_CONFIG,
+		...raw,
+		buttonBottom: clampNumber(
+			raw.buttonBottom,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonBottom
+		),
+		buttonOffset: clampNumber(
+			raw.buttonOffset,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonOffset
+		),
+		buttonSize: clampNumber(
+			raw.buttonSize,
+			40,
+			100,
+			DEFAULT_CONFIG.buttonSize
+		),
+		autoOpenDelay: toOptionalDelay(raw.autoOpenDelay),
+		quizCooldownDays: clampNumber(
+			raw.quizCooldownDays,
+			0,
+			365,
+			DEFAULT_CONFIG.quizCooldownDays
+		),
+		questions: normalizeQuestions(raw.questions),
+		results: Array.isArray(raw.results)
+			? raw.results
+			: DEFAULT_CONFIG.results,
+		integrations: {
+			...DEFAULT_CONFIG.integrations,
+			...toPlainObject(raw.integrations)
+		}
+	};
+};
+
 @Injectable()
 export class QuizService {
 	constructor(
@@ -179,10 +271,14 @@ export class QuizService {
 				: undefined;
 		const nextConfig =
 			configPatch !== undefined
-				? {
+				? normalizeQuizConfig({
 						...currentConfig,
-						...configPatch
-					}
+						...configPatch,
+						integrations: {
+							...(currentConfig.integrations || {}),
+							...(configPatch.integrations || {})
+						}
+					})
 				: undefined;
 
 		const updated = await this.prisma.quiz.update({
@@ -234,10 +330,10 @@ export class QuizService {
 			const updated = await this.prisma.quiz.update({
 				where: { id: quiz.id },
 				data: {
-					config: {
+					config: normalizeQuizConfig({
 						...currentConfig,
 						buttonImageUrl: uploadedUrl
-					}
+					})
 				}
 			});
 
@@ -387,7 +483,7 @@ export class QuizService {
 
 		if (!quiz) return null;
 
-		const config = quiz.config as any;
+		const config = normalizeQuizConfig(quiz.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(quiz.installDomain, requestDomain)
@@ -508,7 +604,7 @@ export class QuizService {
 			);
 		}
 
-		const config = quiz.config as any;
+		const config = normalizeQuizConfig(quiz.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(quiz.installDomain, requestDomain)

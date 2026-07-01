@@ -76,6 +76,93 @@ const DEFAULT_CONFIG = {
 	}
 };
 
+const toPlainObject = (value: unknown): Record<string, any> =>
+	value && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, any>)
+		: {};
+
+const toNumberValue = (value: unknown, fallback: number): number => {
+	const numeric = Number(value);
+	return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const clampNumber = (
+	value: unknown,
+	min: number,
+	max: number,
+	fallback: number
+): number => Math.min(max, Math.max(min, toNumberValue(value, fallback)));
+
+const toOptionalDelay = (value: unknown): number | null => {
+	if (value === null || value === '' || value === undefined) return null;
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) return null;
+	return Math.min(86400, numeric);
+};
+
+const normalizeBonuses = (value: unknown) => {
+	const source = Array.isArray(value) ? value : DEFAULT_CONFIG.bonuses;
+
+	return source.map((bonus, index) => {
+		const item = toPlainObject(bonus);
+		return {
+			...item,
+			name:
+				typeof item.name === 'string' ? item.name : `Бонус #${index + 1}`,
+			active:
+				typeof item.active === 'boolean'
+					? item.active
+					: DEFAULT_CONFIG.bonuses[index]?.active !== false,
+			probability: clampNumber(item.probability, 1, 100, 1)
+		};
+	});
+};
+
+const normalizeWheelConfig = (rawConfig: unknown) => {
+	const raw = toPlainObject(rawConfig);
+
+	return {
+		...DEFAULT_CONFIG,
+		...raw,
+		autoOpenDelay: toOptionalDelay(raw.autoOpenDelay),
+		spinDuration: clampNumber(
+			raw.spinDuration,
+			4,
+			10,
+			DEFAULT_CONFIG.spinDuration
+		),
+		buttonBottom: clampNumber(
+			raw.buttonBottom,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonBottom
+		),
+		buttonOffset: clampNumber(
+			raw.buttonOffset,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonOffset
+		),
+		buttonSize: clampNumber(
+			raw.buttonSize,
+			40,
+			100,
+			DEFAULT_CONFIG.buttonSize
+		),
+		spinCooldownDays: clampNumber(
+			raw.spinCooldownDays,
+			0,
+			365,
+			DEFAULT_CONFIG.spinCooldownDays
+		),
+		bonuses: normalizeBonuses(raw.bonuses),
+		integrations: {
+			...DEFAULT_CONFIG.integrations,
+			...toPlainObject(raw.integrations)
+		}
+	};
+};
+
 type AdminWidgetType =
 	| 'WHEEL'
 	| 'QUIZ'
@@ -214,10 +301,14 @@ export class WidgetService {
 				: undefined;
 		const nextConfig =
 			configPatch !== undefined
-				? {
+				? normalizeWheelConfig({
 						...currentConfig,
-						...configPatch
-					}
+						...configPatch,
+						integrations: {
+							...(currentConfig.integrations || {}),
+							...(configPatch.integrations || {})
+						}
+					})
 				: undefined;
 
 		const updated = await this.prisma.widget.update({
@@ -269,10 +360,10 @@ export class WidgetService {
 			const updated = await this.prisma.widget.update({
 				where: { id: widget.id },
 				data: {
-					config: {
+					config: normalizeWheelConfig({
 						...currentConfig,
 						buttonImageUrl: uploadedUrl
-					}
+					})
 				}
 			});
 
@@ -437,7 +528,7 @@ export class WidgetService {
 
 		if (!widget) return null;
 
-		const config = widget.config as any;
+		const config = normalizeWheelConfig(widget.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(widget.installDomain, requestDomain)
@@ -637,7 +728,7 @@ export class WidgetService {
 			);
 		}
 
-		const config = widget.config as any;
+		const config = normalizeWheelConfig(widget.config);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(widget.installDomain, requestDomain)

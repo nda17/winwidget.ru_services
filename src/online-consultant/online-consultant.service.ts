@@ -101,6 +101,30 @@ const ONLINE_CONSULTANT_DATA_TYPES = new Set([
 const MIN_QUICK_ACTIONS = 2;
 const MAX_QUICK_ACTIONS = 10;
 
+const toPlainObject = (value: unknown): Record<string, any> =>
+	value && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, any>)
+		: {};
+
+const toNumberValue = (value: unknown, fallback: number): number => {
+	const numeric = Number(value);
+	return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const clampNumber = (
+	value: unknown,
+	min: number,
+	max: number,
+	fallback: number
+): number => Math.min(max, Math.max(min, toNumberValue(value, fallback)));
+
+const toOptionalDelay = (value: unknown): number | null => {
+	if (value === null || value === '' || value === undefined) return null;
+	const numeric = Number(value);
+	if (!Number.isFinite(numeric) || numeric <= 0) return null;
+	return Math.min(86400, numeric);
+};
+
 const getDataType = (value: unknown): string => {
 	const normalized = typeof value === 'string' ? value.toUpperCase() : '';
 	return ONLINE_CONSULTANT_DATA_TYPES.has(normalized)
@@ -169,6 +193,41 @@ const getQuickActions = (value: unknown) => {
 	});
 };
 
+const normalizeOnlineConsultantConfig = (rawConfig: unknown) => {
+	const raw = toPlainObject(rawConfig);
+
+	return {
+		...DEFAULT_CONFIG,
+		...raw,
+		buttonBottom: clampNumber(
+			raw.buttonBottom,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonBottom
+		),
+		buttonOffset: clampNumber(
+			raw.buttonOffset,
+			1,
+			50,
+			DEFAULT_CONFIG.buttonOffset
+		),
+		buttonSize: clampNumber(
+			raw.buttonSize,
+			40,
+			100,
+			DEFAULT_CONFIG.buttonSize
+		),
+		autoOpenDelay: toOptionalDelay(raw.autoOpenDelay),
+		quickActions: Array.isArray(raw.quickActions)
+			? raw.quickActions
+			: DEFAULT_CONFIG.quickActions,
+		integrations: {
+			...DEFAULT_CONFIG.integrations,
+			...toPlainObject(raw.integrations)
+		}
+	};
+};
+
 @Injectable()
 export class OnlineConsultantService {
 	constructor(
@@ -231,16 +290,20 @@ export class OnlineConsultantService {
 				: undefined;
 		const nextConfig =
 			configPatch !== undefined
-				? {
+				? normalizeOnlineConsultantConfig({
 						...currentConfig,
 						...configPatch,
+						integrations: {
+							...(currentConfig.integrations || {}),
+							...(configPatch.integrations || {})
+						},
 						...(Object.prototype.hasOwnProperty.call(
 							configPatch,
 							'quickActions'
 						) && {
 							quickActions: getQuickActions(configPatch.quickActions)
 						})
-					}
+					})
 				: undefined;
 
 		const updated = await this.prisma.onlineConsultant.update({
@@ -303,10 +366,10 @@ export class OnlineConsultantService {
 			const updated = await this.prisma.onlineConsultant.update({
 				where: { id: onlineConsultant.id },
 				data: {
-					config: {
+					config: normalizeOnlineConsultantConfig({
 						...currentConfig,
 						buttonImageUrl: uploadedUrl
-					}
+					})
 				}
 			});
 
@@ -429,7 +492,9 @@ export class OnlineConsultantService {
 
 		if (!onlineConsultant) return null;
 
-		const config = onlineConsultant.config as any;
+		const config = normalizeOnlineConsultantConfig(
+			onlineConsultant.config
+		);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(onlineConsultant.installDomain, requestDomain)
@@ -527,7 +592,9 @@ export class OnlineConsultantService {
 		if (!onlineConsultant)
 			throw new NotFoundException('Онлайн-консультант не найден');
 
-		const config = onlineConsultant.config as any;
+		const config = normalizeOnlineConsultantConfig(
+			onlineConsultant.config
+		);
 		if (
 			!directPageAccessAllowed &&
 			!isWidgetDomainAllowed(onlineConsultant.installDomain, requestDomain)
