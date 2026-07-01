@@ -356,6 +356,18 @@
 		const contentTextInputBg = getColorAlpha(contentTextColor, 0.06);
 		const contentTextInputFocusBg = getColorAlpha(contentTextColor, 0.1);
 		const contentTextFocusShadow = getColorAlpha(contentTextColor, 0.08);
+		const bannerBackground = config.glassEffect
+			? `linear-gradient(135deg, ${getColorAlpha(config.bgColor, 0.78)}, ${getColorAlpha(config.bgColor, 0.46)})`
+			: config.bgColor;
+		const bannerBorder = config.glassEffect
+			? `1px solid ${getColorAlpha(contentTextColor, 0.24)}`
+			: 'none';
+		const bannerBackdropFilter = config.glassEffect
+			? 'blur(18px) saturate(1.35)'
+			: 'none';
+		const bannerGlassOverlay = config.glassEffect
+			? `radial-gradient(circle at 18% 12%, rgba(255,255,255,0.2), transparent 32%), linear-gradient(135deg, rgba(255,255,255,0.14), transparent 46%, rgba(255,255,255,0.06))`
+			: 'none';
 
 		style.textContent = `
     :host {
@@ -399,7 +411,10 @@
       flex-direction: column;
       align-items: center;
       padding: 28px 20px 24px;
-      background: ${config.bgColor};
+      background: ${bannerBackground};
+      border: ${bannerBorder};
+      backdrop-filter: ${bannerBackdropFilter};
+      -webkit-backdrop-filter: ${bannerBackdropFilter};
       border-radius: 20px;
       box-shadow:
         0 0 0 1px rgba(255,255,255,0.08),
@@ -423,9 +438,20 @@
       pointer-events: none;
     }
 
+    #banner-wrapper::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: ${bannerGlassOverlay};
+      pointer-events: none;
+      z-index: 0;
+    }
+
     /* ── Контент (форма + колесо) ── */
     #banner-content {
       display: flex;
+      position: relative;
+      z-index: 1;
       flex-direction: column;
       width: 100%;
       justify-content: center;
@@ -576,6 +602,7 @@
     #dev-info {
       font-size: 12px;
       position: absolute;
+      z-index: 1;
       top: 5px;
       color: ${contentTextWeak};
       letter-spacing: 0.2px;
@@ -609,6 +636,7 @@
     /* Кнопка закрытия */
     #widget-close {
       position: absolute;
+      z-index: 1;
       top: 14px;
       right: 14px;
       width: 34px;
@@ -811,7 +839,7 @@
 		let lastWin = null;
 
 		// Устанавливаем цвет фона виджета
-		bannerWrapper.style.background = config.bgColor;
+		bannerWrapper.style.background = bannerBackground;
 
 		// Цвет кнопки старта
 		if (config.buttonColor) {
@@ -1816,6 +1844,7 @@
 	function mapServerConfig(server, token) {
 		const color = server.color;
 		const arrowColor = server.arrowColor || '#ffcc00';
+		const wheelBorderColor = server.wheelBorderColor || color;
 		const dc = server.dataType;
 
 		const raffleBonus = (server.bonuses || []).filter(b => b.active);
@@ -1857,10 +1886,11 @@
 			_token: token,
 			widgetColor: color,
 			bgColor: server.bgColor || color,
+			glassEffect: server.glassEffect === true,
 			sectors,
 			centerSVG: null,
 			arrowSVG: `<polygon points="0,12 18,5 18,19" fill="${arrowColor}" filter="url(#arrow-shadow)"/><defs><filter id="arrow-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="rgba(0,0,0,0.5)"/></filter></defs>`,
-			borderColor: color,
+			borderColor: wheelBorderColor,
 			borderWidth: 8,
 			phoneFieldActive: dc === 'PHONE' || dc === 'PHONE_AND_EMAIL',
 			emailFieldActive: dc === 'EMAIL' || dc === 'PHONE_AND_EMAIL',

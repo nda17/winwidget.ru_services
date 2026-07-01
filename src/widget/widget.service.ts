@@ -23,6 +23,8 @@ import * as XLSX from 'xlsx';
 const DEFAULT_CONFIG = {
 	color: '#4705fb',
 	bgColor: '',
+	glassEffect: false,
+	wheelBorderColor: '',
 	autoOpenDelay: null,
 	spinDuration: 5,
 	buttonSide: 'right',
@@ -126,6 +128,9 @@ const toNumberValue = (value: unknown, fallback: number): number => {
 	return Number.isFinite(numeric) ? numeric : fallback;
 };
 
+const toBooleanValue = (value: unknown, fallback: boolean): boolean =>
+	typeof value === 'boolean' ? value : fallback;
+
 const clampNumber = (
 	value: unknown,
 	min: number,
@@ -166,6 +171,14 @@ const normalizeWheelConfig = (rawConfig: unknown) => {
 	return {
 		...DEFAULT_CONFIG,
 		...raw,
+		glassEffect: toBooleanValue(
+			raw.glassEffect,
+			DEFAULT_CONFIG.glassEffect
+		),
+		wheelBorderColor:
+			typeof raw.wheelBorderColor === 'string'
+				? raw.wheelBorderColor
+				: DEFAULT_CONFIG.wheelBorderColor,
 		autoOpenDelay: toOptionalDelay(raw.autoOpenDelay),
 		spinDuration: clampNumber(
 			raw.spinDuration,
@@ -626,6 +639,8 @@ export class WidgetService {
 			isActive: true,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
+			glassEffect: config.glassEffect === true,
+			wheelBorderColor: config.wheelBorderColor || '',
 			title: config.title || 'Крутите колесо!',
 			subtitle:
 				config.subtitle ||
