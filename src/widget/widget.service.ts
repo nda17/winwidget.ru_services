@@ -54,14 +54,14 @@ const DEFAULT_CONFIG = {
 	spinResetToken: '',
 	actionButton: null,
 	bonuses: [
-		{ name: 'Бонус #1', active: true },
-		{ name: 'Бонус #2', active: true },
-		{ name: 'Бонус #3', active: true },
-		{ name: 'Бонус #4', active: true },
-		{ name: 'Бонус #5', active: true },
-		{ name: 'Бонус #6', active: true },
-		{ name: 'Бонус #7', active: true },
-		{ name: 'Бонус #8', active: true }
+		{ name: 'Бонус #1', wheelLabel: 'Бонус #1', active: true },
+		{ name: 'Бонус #2', wheelLabel: 'Бонус #2', active: true },
+		{ name: 'Бонус #3', wheelLabel: 'Бонус #3', active: true },
+		{ name: 'Бонус #4', wheelLabel: 'Бонус #4', active: true },
+		{ name: 'Бонус #5', wheelLabel: 'Бонус #5', active: true },
+		{ name: 'Бонус #6', wheelLabel: 'Бонус #6', active: true },
+		{ name: 'Бонус #7', wheelLabel: 'Бонус #7', active: true },
+		{ name: 'Бонус #8', wheelLabel: 'Бонус #8', active: true }
 	],
 	integrations: {
 		email: '',
@@ -109,6 +109,8 @@ const normalizeBonuses = (value: unknown) => {
 			...item,
 			name:
 				typeof item.name === 'string' ? item.name : `Бонус #${index + 1}`,
+			wheelLabel:
+				typeof item.wheelLabel === 'string' ? item.wheelLabel : '',
 			active:
 				typeof item.active === 'boolean'
 					? item.active

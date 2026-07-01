@@ -894,7 +894,8 @@
 			return chunks;
 		}
 
-		function wrapSectorLabel(label, fontSize, maxLineWidth) {
+		function wrapSectorLabel(label, fontSize, maxLineWidth, options = {}) {
+			const splitLongWords = options.splitLongWords !== false;
 			const words = String(label || '')
 				.trim()
 				.split(/\s+/)
@@ -915,7 +916,10 @@
 					currentLine = '';
 				}
 
-				if (measureSectorTextWidth(word, fontSize) <= maxLineWidth) {
+				if (
+					measureSectorTextWidth(word, fontSize) <= maxLineWidth ||
+					!splitLongWords
+				) {
 					currentLine = word;
 					return;
 				}
@@ -930,16 +934,75 @@
 			return lines.length > 0 ? lines : [''];
 		}
 
-		function fitSectorLabel(label, layout, preferredFontSize) {
-			let fallback = {
-				fontSize: layout.minFontSize,
-				lines: wrapSectorLabel(
-					label,
-					layout.minFontSize,
-					layout.maxLineWidth
+		function sectorLabelFits(lines, fontSize, maxLineWidth, maxLines) {
+			return (
+				lines.length <= maxLines &&
+				lines.every(
+					line => measureSectorTextWidth(line, fontSize) <= maxLineWidth
 				)
-			};
+			);
+		}
 
+		function trimSectorTextToWidth(
+			value,
+			fontSize,
+			maxLineWidth,
+			forceEllipsis
+		) {
+			const ellipsis = '...';
+			let text = String(value || '').trim();
+			const suffix = forceEllipsis ? ellipsis : '';
+
+			if (
+				text &&
+				measureSectorTextWidth(text + suffix, fontSize) <= maxLineWidth
+			) {
+				return text + suffix;
+			}
+
+			const targetWidth =
+				maxLineWidth - measureSectorTextWidth(ellipsis, fontSize);
+			let trimmed = '';
+
+			Array.from(text).forEach(char => {
+				const nextValue = trimmed + char;
+				if (measureSectorTextWidth(nextValue, fontSize) <= targetWidth) {
+					trimmed = nextValue;
+				}
+			});
+
+			trimmed = trimmed.trim();
+			return trimmed ? `${trimmed}${ellipsis}` : ellipsis;
+		}
+
+		function clampSectorLabelLines(
+			lines,
+			fontSize,
+			maxLineWidth,
+			maxLines
+		) {
+			const safeLines = lines.length > 0 ? lines : [''];
+			const visibleLines = safeLines.slice(0, maxLines);
+
+			return visibleLines.map((line, index) => {
+				const isLastVisibleLine = index === visibleLines.length - 1;
+				const lineOverflows =
+					measureSectorTextWidth(line, fontSize) > maxLineWidth;
+				const hasHiddenLines =
+					isLastVisibleLine && safeLines.length > visibleLines.length;
+
+				if (!lineOverflows && !hasHiddenLines) return line;
+
+				return trimSectorTextToWidth(
+					line,
+					fontSize,
+					maxLineWidth,
+					hasHiddenLines || lineOverflows
+				);
+			});
+		}
+
+		function fitSectorLabel(label, layout, preferredFontSize) {
 			for (
 				let fontSize = preferredFontSize;
 				fontSize >= layout.minFontSize;
@@ -948,17 +1011,37 @@
 				const lines = wrapSectorLabel(
 					label,
 					fontSize,
-					layout.maxLineWidth
+					layout.maxLineWidth,
+					{ splitLongWords: false }
 				);
 
-				if (lines.length <= layout.maxLines) {
+				if (
+					sectorLabelFits(
+						lines,
+						fontSize,
+						layout.maxLineWidth,
+						layout.maxLines
+					)
+				) {
 					return { fontSize, lines };
 				}
-
-				fallback = { fontSize, lines };
 			}
 
-			return fallback;
+			const fallbackLines = wrapSectorLabel(
+				label,
+				layout.minFontSize,
+				layout.maxLineWidth
+			);
+
+			return {
+				fontSize: layout.minFontSize,
+				lines: clampSectorLabelLines(
+					fallbackLines,
+					layout.minFontSize,
+					layout.maxLineWidth,
+					layout.maxLines
+				)
+			};
 		}
 
 		function appendSectorTextLines(text, lines, x, fontSize) {
@@ -1253,7 +1336,7 @@
 					}
 
 					//Изменение title виджета на название приза
-					title.textContent = `🎊 Вы выиграли: ${config.sectors[winIndex].label}`;
+					title.textContent = `🎊 Вы выиграли: ${config.sectors[winIndex].fullLabel}`;
 
 					//Скрываем инпуты и кнопки
 					showElements();
@@ -1427,7 +1510,7 @@
 				phone: getFormatPhone(),
 				email: getEmail(),
 				name: getName(),
-				bonus: lastWin?.label
+				bonus: lastWin?.fullLabel
 			};
 
 			try {
@@ -1742,7 +1825,8 @@
 						const sectorColor =
 							b.color || (i % 2 === 0 ? color : '#ffffff');
 						return {
-							label: b.name,
+							label: b.wheelLabel || '',
+							fullLabel: b.name,
 							probability: b.neverWin ? 0 : (b.probability ?? 1),
 							color: sectorColor,
 							textColor: b.textColor || getReadableTextColor(sectorColor),
@@ -1752,6 +1836,7 @@
 				: [
 						{
 							label: 'Приз 1',
+							fullLabel: 'Приз 1',
 							probability: 1,
 							color,
 							textColor: getReadableTextColor(color),
@@ -1759,6 +1844,7 @@
 						},
 						{
 							label: 'Приз 2',
+							fullLabel: 'Приз 2',
 							probability: 1,
 							color: '#ffffff',
 							textColor: getReadableTextColor('#ffffff'),

@@ -685,9 +685,21 @@
 			}, cfg.autoOpenDelay * 1000);
 		}
 		if (cfg.desktopExitIntent !== false) {
-			document.addEventListener('mouseleave', handleMouseLeave);
+			document.addEventListener('mouseleave', handleExitIntent);
+			document.addEventListener('mouseout', handleExitIntent);
+			if (document.documentElement) {
+				document.documentElement.addEventListener(
+					'mouseleave',
+					handleExitIntent
+				);
+			}
+			window.addEventListener('mouseout', handleExitIntent);
 		}
 		window.addEventListener('scroll', handleScroll, { passive: true });
+		document.addEventListener('scroll', handleScroll, {
+			passive: true,
+			capture: true
+		});
 		if (isLikelyMobile()) {
 			mobileTimer = setTimeout(
 				function () {
@@ -707,20 +719,78 @@
 
 	function teardownTriggers() {
 		clearTimers();
-		document.removeEventListener('mouseleave', handleMouseLeave);
+		document.removeEventListener('mouseleave', handleExitIntent);
+		document.removeEventListener('mouseout', handleExitIntent);
+		if (document.documentElement) {
+			document.documentElement.removeEventListener(
+				'mouseleave',
+				handleExitIntent
+			);
+		}
+		window.removeEventListener('mouseout', handleExitIntent);
 		window.removeEventListener('scroll', handleScroll);
+		document.removeEventListener('scroll', handleScroll, true);
 	}
 
-	function handleMouseLeave(event) {
-		if (isLikelyMobile()) return;
-		if (event.clientY <= 0) triggerOpen('exit-intent');
+	function handleExitIntent(event) {
+		if (!cfg || cfg.desktopExitIntent === false || isLikelyMobile())
+			return;
+		var y =
+			event && typeof event.clientY === 'number' ? event.clientY : null;
+		if (y === null || y > 8) return;
+		if (event.type === 'mouseout') {
+			var relatedTarget = event.relatedTarget || event.toElement;
+			if (relatedTarget) return;
+		}
+		triggerOpen('exit-intent');
 	}
 
-	function handleScroll() {
-		if (!cfg || hasTriggered || isOpen) return;
+	function getElementScrollProgress(element) {
+		if (!element || element.nodeType !== 1) return 0;
+		var scrollHeight = Number(element.scrollHeight) || 0;
+		var clientHeight = Number(element.clientHeight) || 0;
+		var scrollTop = Number(element.scrollTop) || 0;
+		var maxScroll = scrollHeight - clientHeight;
+		if (maxScroll <= 1) return 0;
+		return (scrollTop / maxScroll) * 100;
+	}
+
+	function getDocumentScrollProgress() {
 		var doc = document.documentElement;
-		var maxScroll = Math.max(1, doc.scrollHeight - window.innerHeight);
-		var progress = (window.scrollY / maxScroll) * 100;
+		var body = document.body;
+		var scrollingElement = document.scrollingElement || doc;
+		var scrollTop = Math.max(
+			window.pageYOffset || 0,
+			window.scrollY || 0,
+			scrollingElement ? scrollingElement.scrollTop || 0 : 0,
+			doc ? doc.scrollTop || 0 : 0,
+			body ? body.scrollTop || 0 : 0
+		);
+		var scrollHeight = Math.max(
+			scrollingElement ? scrollingElement.scrollHeight || 0 : 0,
+			doc ? doc.scrollHeight || 0 : 0,
+			body ? body.scrollHeight || 0 : 0
+		);
+		var viewportHeight =
+			window.innerHeight ||
+			(scrollingElement ? scrollingElement.clientHeight || 0 : 0) ||
+			(doc ? doc.clientHeight || 0 : 0);
+		var maxScroll = Math.max(1, scrollHeight - viewportHeight);
+		return (scrollTop / maxScroll) * 100;
+	}
+
+	function getScrollEventProgress(event) {
+		var target = event && event.target;
+		if (!target || target === document || target === window) return 0;
+		return getElementScrollProgress(target);
+	}
+
+	function handleScroll(event) {
+		if (!cfg || hasTriggered || isOpen) return;
+		var progress = Math.max(
+			getDocumentScrollProgress(),
+			getScrollEventProgress(event)
+		);
 		if (progress >= (Number(cfg.scrollPercent) || 70)) {
 			triggerOpen('scroll');
 		}
