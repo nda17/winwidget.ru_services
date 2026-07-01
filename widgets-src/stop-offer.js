@@ -694,6 +694,8 @@
 				);
 			}
 			window.addEventListener('mouseout', handleExitIntent);
+			window.addEventListener('blur', handlePageLeaveIntent);
+			document.addEventListener('visibilitychange', handlePageLeaveIntent);
 		}
 		window.addEventListener('scroll', handleScroll, { passive: true });
 		document.addEventListener('scroll', handleScroll, {
@@ -728,6 +730,11 @@
 			);
 		}
 		window.removeEventListener('mouseout', handleExitIntent);
+		window.removeEventListener('blur', handlePageLeaveIntent);
+		document.removeEventListener(
+			'visibilitychange',
+			handlePageLeaveIntent
+		);
 		window.removeEventListener('scroll', handleScroll);
 		document.removeEventListener('scroll', handleScroll, true);
 	}
@@ -743,6 +750,18 @@
 			if (relatedTarget) return;
 		}
 		triggerOpen('exit-intent');
+	}
+
+	function handlePageLeaveIntent() {
+		if (!cfg || cfg.desktopExitIntent === false || isLikelyMobile())
+			return;
+		if (document.visibilityState === 'hidden') {
+			triggerOpen('exit-intent');
+			return;
+		}
+		if (document.hasFocus && !document.hasFocus()) {
+			triggerOpen('exit-intent');
+		}
 	}
 
 	function getElementScrollProgress(element) {
