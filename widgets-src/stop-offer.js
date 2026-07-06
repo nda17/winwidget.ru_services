@@ -58,7 +58,7 @@
 				resolve();
 			};
 			script.onerror = reject;
-			document.head.appendChild(script);
+			(document.head || document.documentElement).appendChild(script);
 		});
 	}
 
@@ -119,50 +119,74 @@
 	var hasTriggered = false;
 	var autoOpenTimer = null;
 	var mobileTimer = null;
+	var routeChangeTimer = null;
+	var lastLocationHref = window.location.href;
+	var isStarted = false;
+	var isDestroyed = false;
+	var bodyReadyListenersAttached = false;
+	var originalPushState = null;
+	var originalReplaceState = null;
+	var patchedPushState = null;
+	var patchedReplaceState = null;
+	var host = null;
+	var shadow = null;
+	var style = null;
+	var overlay = null;
+	var backdrop = null;
+	var modal = null;
 
-	var host = document.createElement('div');
-	host.id = 'stop-offer-widget-host';
-	document.body.appendChild(host);
-	var shadow = host.attachShadow({ mode: 'open' });
+	function ensureWidgetDom() {
+		if (host && host.parentNode && shadow && overlay && backdrop && modal)
+			return true;
+		if (!document.body) return false;
 
-	var style = document.createElement('style');
-	style.id = 'stop-offer-widget-style';
-	style.textContent = [
-		'.wso-input-error{border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,.12)!important}',
-		'@media(max-width:520px){#wso-overlay{padding:12px!important}#wso-modal{padding:24px 16px 18px!important;border-radius:18px!important}.wso-title{font-size:23px!important}.wso-offer{font-size:30px!important}}'
-	].join('');
-	shadow.appendChild(style);
+		host = document.createElement('div');
+		host.id = 'stop-offer-widget-host';
+		document.body.appendChild(host);
+		shadow = host.attachShadow({ mode: 'open' });
 
-	var overlay = document.createElement('div');
-	overlay.id = 'wso-overlay';
-	overlay.style.cssText =
-		'position:fixed;inset:0;z-index:' +
-		widgetLayerZIndex +
-		';display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
-	var backdrop = document.createElement('div');
-	backdrop.style.cssText =
-		'position:absolute;inset:0;background:rgba(8,4,20,.82);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);touch-action:none';
-	overlay.appendChild(backdrop);
-	var modal = document.createElement('div');
-	modal.id = 'wso-modal';
-	modal.style.cssText = [
-		'position:relative',
-		'z-index:1',
-		'width:100%',
-		'max-width:460px',
-		'background:#fff',
-		'border-radius:24px',
-		'padding:30px 24px 22px',
-		'box-sizing:border-box',
-		'box-shadow:0 28px 80px rgba(0,0,0,.3)',
-		'font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
-		'transform:translateY(28px) scale(.98)',
-		'opacity:0',
-		'transition:transform .3s cubic-bezier(.22,1,.36,1),opacity .25s ease',
-		'overflow:hidden'
-	].join(';');
-	overlay.appendChild(modal);
-	shadow.appendChild(overlay);
+		style = document.createElement('style');
+		style.id = 'stop-offer-widget-style';
+		style.textContent = [
+			'.wso-input-error{border-color:#ef4444!important;box-shadow:0 0 0 3px rgba(239,68,68,.12)!important}',
+			'@media(max-width:520px){#wso-overlay{padding:12px!important}#wso-modal{padding:24px 16px 18px!important;border-radius:18px!important}.wso-title{font-size:23px!important}.wso-offer{font-size:30px!important}}'
+		].join('');
+		shadow.appendChild(style);
+
+		overlay = document.createElement('div');
+		overlay.id = 'wso-overlay';
+		overlay.style.cssText =
+			'position:fixed;inset:0;z-index:' +
+			widgetLayerZIndex +
+			';display:none;align-items:center;justify-content:center;padding:16px;box-sizing:border-box';
+		backdrop = document.createElement('div');
+		backdrop.style.cssText =
+			'position:absolute;inset:0;background:rgba(8,4,20,.82);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);touch-action:none';
+		overlay.appendChild(backdrop);
+		modal = document.createElement('div');
+		modal.id = 'wso-modal';
+		modal.style.cssText = [
+			'position:relative',
+			'z-index:1',
+			'width:100%',
+			'max-width:460px',
+			'background:#fff',
+			'border-radius:24px',
+			'padding:30px 24px 22px',
+			'box-sizing:border-box',
+			'box-shadow:0 28px 80px rgba(0,0,0,.3)',
+			'font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+			'transform:translateY(28px) scale(.98)',
+			'opacity:0',
+			'transition:transform .3s cubic-bezier(.22,1,.36,1),opacity .25s ease',
+			'overflow:hidden'
+		].join(';');
+		overlay.appendChild(modal);
+		shadow.appendChild(overlay);
+		backdrop.addEventListener('click', handleBackdropClick);
+
+		return true;
+	}
 
 	function getDisplayResetToken() {
 		return cfg && cfg.displayResetToken ? cfg.displayResetToken : '';
@@ -633,7 +657,7 @@
 	}
 
 	function openModal() {
-		if (!cfg || isOpen) return;
+		if (isDestroyed || !cfg || isOpen || !ensureWidgetDom()) return;
 		isOpen = true;
 		rememberSeen();
 		overlay.style.display = 'flex';
@@ -649,18 +673,19 @@
 	}
 
 	function closeModal() {
-		if (!isOpen) return;
+		if (!isOpen || !modal || !overlay) return;
 		isOpen = false;
 		modal.style.transform = 'translateY(28px) scale(.98)';
 		modal.style.opacity = '0';
 		setTimeout(function () {
-			if (!isOpen) overlay.style.display = 'none';
+			if (!isOpen && overlay) overlay.style.display = 'none';
 		}, 280);
 		fireEvent('close');
 	}
 
 	function triggerOpen(reason) {
 		if (
+			isDestroyed ||
 			!cfg ||
 			hasTriggered ||
 			isOpen ||
@@ -674,7 +699,8 @@
 	}
 
 	function setupTriggers() {
-		clearTimers();
+		if (isDestroyed) return;
+		teardownTriggers();
 		if (AUTO_OPEN) {
 			openModal();
 			return;
@@ -833,6 +859,7 @@
 	}
 
 	function showDisabledPage() {
+		if (!document.body) return;
 		var existing = document.getElementById('stop-offer-widget-disabled');
 		if (existing) return;
 		var disabled = document.createElement('div');
@@ -850,6 +877,7 @@
 			fetch(getConfigUrl(), getWidgetFetchOptions({ cache: 'no-store' }))
 		])
 			.then(function (result) {
+				if (isDestroyed) return null;
 				var response = result[1];
 				if (!response.ok) {
 					console.warn(
@@ -862,6 +890,7 @@
 				return response.json();
 			})
 			.then(function (data) {
+				if (isDestroyed) return;
 				if (data === null) return;
 				if (!data || !data.isActive) {
 					console.warn('[winstopoffer] Widget is inactive');
@@ -886,6 +915,11 @@
 	}
 
 	function refreshConfig() {
+		if (isDestroyed) return Promise.resolve(null);
+		if (!isStarted) {
+			startWhenBodyReady();
+			return Promise.resolve(null);
+		}
 		return loadConfig();
 	}
 
@@ -905,9 +939,151 @@
 		if (!AUTO_OPEN) closeModal();
 	}
 
+	function handleRouteChange() {
+		routeChangeTimer = null;
+		if (isDestroyed) return;
+
+		var nextHref = window.location.href;
+		if (nextHref === lastLocationHref) return;
+
+		lastLocationHref = nextHref;
+		hasTriggered = false;
+		if (isOpen) closeModal();
+		if (!cfg || AUTO_OPEN) return;
+
+		setupTriggers();
+		fireEvent('route-change');
+	}
+
+	function scheduleRouteChangeCheck() {
+		if (isDestroyed) return;
+		if (routeChangeTimer) clearTimeout(routeChangeTimer);
+		routeChangeTimer = setTimeout(handleRouteChange, 50);
+	}
+
+	function setupSpaNavigationListeners() {
+		if (AUTO_OPEN) return;
+
+		lastLocationHref = window.location.href;
+		window.addEventListener('popstate', scheduleRouteChangeCheck);
+		window.addEventListener('hashchange', scheduleRouteChangeCheck);
+
+		if (!window.history) return;
+		try {
+			if (typeof window.history.pushState === 'function') {
+				originalPushState = window.history.pushState;
+				patchedPushState = function () {
+					var result = originalPushState.apply(this, arguments);
+					scheduleRouteChangeCheck();
+					return result;
+				};
+				window.history.pushState = patchedPushState;
+			}
+			if (typeof window.history.replaceState === 'function') {
+				originalReplaceState = window.history.replaceState;
+				patchedReplaceState = function () {
+					var result = originalReplaceState.apply(this, arguments);
+					scheduleRouteChangeCheck();
+					return result;
+				};
+				window.history.replaceState = patchedReplaceState;
+			}
+		} catch (e) {
+			if (
+				patchedPushState &&
+				window.history.pushState === patchedPushState
+			) {
+				window.history.pushState = originalPushState;
+			}
+			if (
+				patchedReplaceState &&
+				window.history.replaceState === patchedReplaceState
+			) {
+				window.history.replaceState = originalReplaceState;
+			}
+			originalPushState = null;
+			originalReplaceState = null;
+			patchedPushState = null;
+			patchedReplaceState = null;
+		}
+	}
+
+	function teardownSpaNavigationListeners() {
+		if (routeChangeTimer) clearTimeout(routeChangeTimer);
+		routeChangeTimer = null;
+		window.removeEventListener('popstate', scheduleRouteChangeCheck);
+		window.removeEventListener('hashchange', scheduleRouteChangeCheck);
+
+		if (window.history) {
+			if (
+				patchedPushState &&
+				window.history.pushState === patchedPushState
+			) {
+				window.history.pushState = originalPushState;
+			}
+			if (
+				patchedReplaceState &&
+				window.history.replaceState === patchedReplaceState
+			) {
+				window.history.replaceState = originalReplaceState;
+			}
+		}
+
+		originalPushState = null;
+		originalReplaceState = null;
+		patchedPushState = null;
+		patchedReplaceState = null;
+	}
+
+	function handleDomReady() {
+		document.removeEventListener('DOMContentLoaded', handleDomReady);
+		window.removeEventListener('load', handleDomReady);
+		bodyReadyListenersAttached = false;
+		startWidget();
+	}
+
+	function startWhenBodyReady() {
+		if (isStarted || isDestroyed) return;
+		if (document.body) {
+			startWidget();
+			return;
+		}
+		if (bodyReadyListenersAttached) return;
+
+		bodyReadyListenersAttached = true;
+		document.addEventListener('DOMContentLoaded', handleDomReady, {
+			once: true
+		});
+		window.addEventListener('load', handleDomReady, { once: true });
+	}
+
+	function startWidget() {
+		if (isStarted || isDestroyed) return;
+		if (!ensureWidgetDom()) {
+			startWhenBodyReady();
+			return;
+		}
+
+		isStarted = true;
+		window.addEventListener(
+			'winwidget:stop-offer:updated',
+			handleExternalRefresh
+		);
+		window.addEventListener('storage', handleStorageRefresh);
+		setupSpaNavigationListeners();
+		loadConfig();
+	}
+
 	function destroyWidget() {
+		isDestroyed = true;
+		isOpen = false;
 		teardownTriggers();
-		backdrop.removeEventListener('click', handleBackdropClick);
+		teardownSpaNavigationListeners();
+		document.removeEventListener('DOMContentLoaded', handleDomReady);
+		window.removeEventListener('load', handleDomReady);
+		bodyReadyListenersAttached = false;
+		if (backdrop)
+			backdrop.removeEventListener('click', handleBackdropClick);
 		window.removeEventListener(
 			'winwidget:stop-offer:updated',
 			handleExternalRefresh
@@ -918,7 +1094,13 @@
 		);
 		if (disabledPage && disabledPage.parentNode)
 			disabledPage.parentNode.removeChild(disabledPage);
-		if (host.parentNode) host.parentNode.removeChild(host);
+		if (host && host.parentNode) host.parentNode.removeChild(host);
+		host = null;
+		shadow = null;
+		style = null;
+		overlay = null;
+		backdrop = null;
+		modal = null;
 		delete window.__winstopofferScriptRunning;
 		if (
 			window.winwidgetStopOffer &&
@@ -928,13 +1110,6 @@
 		}
 	}
 
-	backdrop.addEventListener('click', handleBackdropClick);
-	window.addEventListener(
-		'winwidget:stop-offer:updated',
-		handleExternalRefresh
-	);
-	window.addEventListener('storage', handleStorageRefresh);
-
 	window.winwidgetStopOffer = {
 		key: KEY,
 		open: openModal,
@@ -943,5 +1118,5 @@
 		destroy: destroyWidget
 	};
 
-	loadConfig();
+	startWhenBodyReady();
 })();
