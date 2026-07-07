@@ -472,6 +472,7 @@ enum AuthIdentityType {
   GOOGLE
   GITHUB
   YANDEX
+  VK
   TELEGRAM
 }
 
@@ -533,6 +534,7 @@ model SiteSettings {
   googleAuthEnabled   Boolean  @default(true) @map("google_auth_enabled")
   yandexAuthEnabled   Boolean  @default(true) @map("yandex_auth_enabled")
   githubAuthEnabled   Boolean  @default(true) @map("github_auth_enabled")
+  vkAuthEnabled       Boolean  @default(false) @map("vk_auth_enabled")
   telegramAuthEnabled Boolean  @default(true) @map("telegram_auth_enabled")
   affiliateProgramEnabled Boolean @default(false) @map("affiliate_program_enabled")
   affiliateCashbackPercent Int @default(10) @map("affiliate_cashback_percent")

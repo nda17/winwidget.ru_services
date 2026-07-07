@@ -23,7 +23,18 @@ export interface IYandexProfile {
 	accessToken: string;
 }
 
+export interface IVkProfile {
+	provider: 'vk';
+	providerId: string;
+	email: string;
+	firstName?: string;
+	lastName?: string;
+	picture?: string;
+	accessToken: string;
+}
+
 export type TSocialProfile =
 	| IGoogleProfile
 	| IGithubProfile
-	| IYandexProfile;
+	| IYandexProfile
+	| IVkProfile;

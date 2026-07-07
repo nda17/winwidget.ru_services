@@ -26,6 +26,8 @@ export const bootstrap = async () => {
 			{ path: 'auth/github/redirect', method: RequestMethod.GET },
 			{ path: 'auth/yandex', method: RequestMethod.GET },
 			{ path: 'auth/yandex/redirect', method: RequestMethod.GET },
+			{ path: 'auth/vk', method: RequestMethod.GET },
+			{ path: 'auth/vk/redirect', method: RequestMethod.GET },
 			{ path: 'widget/:key', method: RequestMethod.GET },
 			{ path: 'page-wheel/:key', method: RequestMethod.GET },
 			{ path: 'quiz-widget/:key', method: RequestMethod.GET },

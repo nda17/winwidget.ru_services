@@ -1,7 +1,9 @@
 import {
 	IGithubProfile,
 	IGoogleProfile,
-	IYandexProfile
+	IYandexProfile,
+	IVkProfile,
+	TSocialProfile
 } from '@/auth/social-media/social-media-auth.types';
 import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
@@ -38,6 +40,7 @@ export type PublicUserLoginMethod =
 	| 'GOOGLE'
 	| 'GITHUB'
 	| 'YANDEX'
+	| 'VK'
 	| 'TELEGRAM';
 
 export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
@@ -54,7 +57,7 @@ export interface AdminUserListFilters {
 	subscription?: string;
 }
 
-type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX';
+type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX' | 'VK';
 export type OverviewWidgetType =
 	| 'WHEEL'
 	| 'QUIZ'
@@ -714,16 +717,12 @@ export class UserService {
 		});
 	}
 
-	async findOrCreateSocialUser(
-		profile: IGoogleProfile | IGithubProfile | IYandexProfile
-	) {
+	async findOrCreateSocialUser(profile: TSocialProfile) {
 		const result = await this.findOrCreateSocialUserWithResult(profile);
 		return result.user;
 	}
 
-	async findOrCreateSocialUserWithResult(
-		profile: IGoogleProfile | IGithubProfile | IYandexProfile
-	) {
+	async findOrCreateSocialUserWithResult(profile: TSocialProfile) {
 		const socialType = this.getSocialIdentityType(profile);
 		const socialIdentity = await this.prisma.authIdentity.findUnique({
 			where: {
@@ -789,7 +788,7 @@ export class UserService {
 	}
 
 	private async _createSocialUser(
-		profile: IGoogleProfile | IGithubProfile | IYandexProfile,
+		profile: TSocialProfile,
 		socialType: SocialIdentityType
 	): Promise<UserWithAuthIdentities> {
 		const email = normalizeEmail(profile.email);
@@ -824,7 +823,7 @@ export class UserService {
 	}
 
 	private getSocialProfileName(
-		profile: IGoogleProfile | IGithubProfile | IYandexProfile,
+		profile: TSocialProfile,
 		socialType: SocialIdentityType,
 		fallback: string
 	) {
@@ -839,6 +838,15 @@ export class UserService {
 
 		if (socialType === AuthIdentityType.YANDEX) {
 			return (profile as IYandexProfile).displayName || fallback;
+		}
+
+		if (socialType === AuthIdentityType.VK) {
+			const vkProfile = profile as IVkProfile;
+			return (
+				[vkProfile.firstName, vkProfile.lastName]
+					.filter(Boolean)
+					.join(' ') || fallback
+			);
 		}
 
 		return (profile as IGithubProfile).username || fallback;
@@ -1481,6 +1489,10 @@ export class UserService {
 			loginMethods.push('YANDEX');
 		}
 
+		if (this.getIdentityByType(user, AuthIdentityType.VK)) {
+			loginMethods.push('VK');
+		}
+
 		if (this.getIdentityByType(user, AuthIdentityType.TELEGRAM)) {
 			loginMethods.push('TELEGRAM');
 		}
@@ -1520,8 +1532,11 @@ export class UserService {
 	}
 
 	private getSocialIdentityType(
-		profile: IGoogleProfile | IGithubProfile | IYandexProfile
+		profile: TSocialProfile
 	): SocialIdentityType {
+		if ('provider' in profile && profile.provider === 'vk') {
+			return AuthIdentityType.VK;
+		}
 		if ('firstName' in profile) return AuthIdentityType.GOOGLE;
 		if ('displayName' in profile) return AuthIdentityType.YANDEX;
 		return AuthIdentityType.GITHUB;

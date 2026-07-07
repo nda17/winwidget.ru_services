@@ -82,6 +82,9 @@ export class SiteSettingsController {
 			...(typeof dto.githubAuthEnabled === 'boolean'
 				? { githubAuthEnabled: settings.githubAuthEnabled }
 				: {}),
+			...(typeof dto.vkAuthEnabled === 'boolean'
+				? { vkAuthEnabled: settings.vkAuthEnabled }
+				: {}),
 			...(typeof dto.telegramAuthEnabled === 'boolean'
 				? { telegramAuthEnabled: settings.telegramAuthEnabled }
 				: {})

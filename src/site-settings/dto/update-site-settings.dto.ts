@@ -41,5 +41,9 @@ export class UpdateSiteSettingsDto {
 
 	@IsOptional()
 	@IsBoolean()
+	vkAuthEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
 	telegramAuthEnabled?: boolean;
 }
