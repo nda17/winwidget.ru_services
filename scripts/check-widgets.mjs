@@ -12,6 +12,7 @@ const files = [
 	'timer.js',
 	'stop-offer.js',
 	'online-consultant.js',
+	'calculator.js',
 	'helpers/winwidget-phone.js'
 ];
 

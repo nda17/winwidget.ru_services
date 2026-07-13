@@ -1,7 +1,11 @@
 import { PrismaService } from '@/prisma.service';
 import type { AdminBonusAudience } from '@/subscription/dto/admin-activate-subscription.dto';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+	BadRequestException,
+	ForbiddenException,
+	Injectable
+} from '@nestjs/common';
 import {
 	BillingPeriod,
 	Plan,
@@ -19,6 +23,10 @@ const BONUS_AUDIENCE_LABELS: Record<AdminBonusAudience, string> = {
 	INACTIVE_SUBSCRIPTION: 'Все неактивные пользователи',
 	ALL: 'Все пользователи'
 };
+const ATOMIC_TRANSACTION_OPTIONS = {
+	maxWait: 5000,
+	timeout: 10000
+} as const;
 
 interface AdminExtendSubscriptionDaysInput {
 	userId?: string;
@@ -49,6 +57,16 @@ export interface AdminSubscriptionHistoryFilters {
 	createdFrom?: string;
 	createdTo?: string;
 }
+
+export interface AtomicLeadCreationResult<T> {
+	lead: T;
+	newCount: number;
+	limitReached: boolean;
+}
+
+type TransactionOperation<T> = (
+	transaction: Prisma.TransactionClient
+) => Promise<T>;
 
 @Injectable()
 export class SubscriptionService {
@@ -139,269 +157,185 @@ export class SubscriptionService {
 	}
 
 	async checkAndResetPeriod(userId: string) {
-		const sub = await this.getSubscription(userId);
-		if (!sub) return sub;
+		return this.prisma.$transaction(async transaction => {
+			const subscription = await this.lockSubscription(
+				transaction,
+				userId
+			);
+			if (!subscription) return null;
 
+			return this.normalizeLockedSubscription(transaction, subscription);
+		}, ATOMIC_TRANSACTION_OPTIONS);
+	}
+
+	async createWidgetWithinLimit<T>(
+		userId: string,
+		createWidget: TransactionOperation<T>
+	): Promise<T> {
+		const result = await this.prisma.$transaction(async transaction => {
+			const subscription = await this.lockSubscription(
+				transaction,
+				userId
+			);
+			if (!subscription) {
+				return { allowed: false as const, reason: 'unavailable' as const };
+			}
+
+			const normalizedSubscription =
+				await this.normalizeLockedSubscription(transaction, subscription);
+			if (normalizedSubscription.status !== SubscriptionStatus.ACTIVE) {
+				return { allowed: false as const, reason: 'expired' as const };
+			}
+
+			const counts = await Promise.all([
+				transaction.widget.count({ where: { userId } }),
+				transaction.quiz.count({ where: { userId } }),
+				transaction.callback.count({ where: { userId } }),
+				transaction.countdownTimer.count({ where: { userId } }),
+				transaction.stopOffer.count({ where: { userId } }),
+				transaction.onlineConsultant.count({ where: { userId } }),
+				transaction.calculator.count({ where: { userId } })
+			]);
+			const widgetCount = counts.reduce(
+				(total, count) => total + count,
+				0
+			);
+			const limits = PLAN_LIMITS[normalizedSubscription.plan];
+
+			if (widgetCount >= limits.maxWidgets) {
+				return { allowed: false as const, reason: 'limit' as const };
+			}
+
+			return {
+				allowed: true as const,
+				widget: await createWidget(transaction)
+			};
+		}, ATOMIC_TRANSACTION_OPTIONS);
+
+		if (!result.allowed) {
+			if (result.reason === 'limit') {
+				throw new ForbiddenException(
+					'Достигнут лимит виджетов для вашего тарифа'
+				);
+			}
+			if (result.reason === 'expired') {
+				throw new ForbiddenException('Ваша подписка истекла');
+			}
+			throw new ForbiddenException('Создание виджета недоступно');
+		}
+
+		return result.widget;
+	}
+
+	async createLeadWithinLimit<T>(
+		userId: string,
+		createLead: TransactionOperation<T>
+	): Promise<AtomicLeadCreationResult<T>> {
+		const result = await this.prisma.$transaction(async transaction => {
+			const subscription = await this.lockSubscription(
+				transaction,
+				userId
+			);
+			if (!subscription) {
+				return { allowed: false as const };
+			}
+
+			const normalizedSubscription =
+				await this.normalizeLockedSubscription(transaction, subscription);
+			if (normalizedSubscription.status !== SubscriptionStatus.ACTIVE) {
+				return { allowed: false as const };
+			}
+
+			const limits = PLAN_LIMITS[normalizedSubscription.plan];
+			if (
+				!limits.unlimited &&
+				normalizedSubscription.leadsThisPeriod >= limits.maxLeadsPerPeriod
+			) {
+				return { allowed: false as const };
+			}
+
+			const lead = await createLead(transaction);
+			const updatedSubscription = await transaction.subscription.update({
+				where: { userId },
+				data: { leadsThisPeriod: { increment: 1 } }
+			});
+
+			return {
+				allowed: true as const,
+				lead,
+				newCount: updatedSubscription.leadsThisPeriod,
+				limitReached:
+					!limits.unlimited &&
+					updatedSubscription.leadsThisPeriod === limits.maxLeadsPerPeriod
+			};
+		}, ATOMIC_TRANSACTION_OPTIONS);
+
+		if (!result.allowed) {
+			throw new ForbiddenException(
+				'Лимит заявок исчерпан или подписка неактивна'
+			);
+		}
+
+		return {
+			lead: result.lead,
+			newCount: result.newCount,
+			limitReached: result.limitReached
+		};
+	}
+
+	private async lockSubscription(
+		transaction: Prisma.TransactionClient,
+		userId: string
+	): Promise<Subscription | null> {
+		const rows = await transaction.$queryRaw<Array<{ id: string }>>(
+			Prisma.sql`
+				SELECT "id"
+				FROM "subscriptions"
+				WHERE "user_id" = ${userId}
+				FOR UPDATE
+			`
+		);
+		if (!rows.length) return null;
+
+		return transaction.subscription.findUnique({ where: { userId } });
+	}
+
+	private async normalizeLockedSubscription(
+		transaction: Prisma.TransactionClient,
+		subscription: Subscription
+	): Promise<Subscription> {
 		const now = dayjs();
 
-		// Expire subscription if past expiresAt (applies to all plans including TRIAL)
-		if (sub.expiresAt && now.isAfter(sub.expiresAt)) {
-			return this.prisma.subscription.update({
-				where: { userId },
+		if (subscription.expiresAt && now.isAfter(subscription.expiresAt)) {
+			if (subscription.status === SubscriptionStatus.EXPIRED) {
+				return subscription;
+			}
+			return transaction.subscription.update({
+				where: { userId: subscription.userId },
 				data: { status: SubscriptionStatus.EXPIRED }
 			});
 		}
 
-		// Reset monthly lead counter only for non-TRIAL plans
 		if (
-			sub.plan !== Plan.TRIAL &&
-			sub.periodResetsAt &&
-			now.isAfter(sub.periodResetsAt)
+			subscription.plan !== Plan.TRIAL &&
+			subscription.periodResetsAt &&
+			now.isAfter(subscription.periodResetsAt)
 		) {
-			const nextReset = dayjs(sub.periodResetsAt).add(1, 'month').toDate();
-			return this.prisma.subscription.update({
-				where: { userId },
+			let nextReset = dayjs(subscription.periodResetsAt);
+			do {
+				nextReset = nextReset.add(1, 'month');
+			} while (!nextReset.isAfter(now));
+
+			return transaction.subscription.update({
+				where: { userId: subscription.userId },
 				data: {
 					leadsThisPeriod: 0,
-					periodResetsAt: nextReset
+					periodResetsAt: nextReset.toDate()
 				}
 			});
 		}
 
-		return sub;
-	}
-
-	async isWidgetAllowed(
-		userId: string
-	): Promise<{ allowed: boolean; reason?: string }> {
-		const sub = await this.checkAndResetPeriod(userId);
-		if (!sub) return { allowed: false, reason: 'no_subscription' };
-
-		if (sub.status !== SubscriptionStatus.ACTIVE) {
-			return { allowed: false, reason: 'subscription_expired' };
-		}
-
-		const limits = PLAN_LIMITS[sub.plan];
-		const [
-			widgetCount,
-			quizCount,
-			callbackCount,
-			countdownTimerCount,
-			stopOfferCount,
-			onlineConsultantCount
-		] = await Promise.all([
-			this.prisma.widget.count({ where: { userId } }),
-			this.prisma.quiz.count({ where: { userId } }),
-			this.prisma.callback.count({ where: { userId } }),
-			this.prisma.countdownTimer.count({ where: { userId } }),
-			this.prisma.stopOffer.count({ where: { userId } }),
-			this.prisma.onlineConsultant.count({ where: { userId } })
-		]);
-
-		if (
-			widgetCount +
-				quizCount +
-				callbackCount +
-				countdownTimerCount +
-				stopOfferCount +
-				onlineConsultantCount >=
-			limits.maxWidgets
-		) {
-			return { allowed: false, reason: 'widget_limit_reached' };
-		}
-
-		return { allowed: true };
-	}
-
-	async canSubmitLead(
-		widgetId: string
-	): Promise<{ allowed: boolean; reason?: string }> {
-		const widget = await this.prisma.widget.findUnique({
-			where: { id: widgetId },
-			include: { user: { include: { subscription: true } } }
-		});
-
-		if (!widget) return { allowed: false, reason: 'widget_not_found' };
-		if (!widget.isActive)
-			return { allowed: false, reason: 'widget_inactive' };
-
-		const userId = widget.userId;
-		const sub = await this.checkAndResetPeriod(userId);
-
-		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
-			return { allowed: false, reason: 'subscription_expired' };
-		}
-
-		const limits = PLAN_LIMITS[sub.plan];
-
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return { allowed: false, reason: 'lead_limit_reached' };
-		}
-
-		return { allowed: true };
-	}
-
-	async canSubmitQuizLead(
-		quizId: string
-	): Promise<{ allowed: boolean; reason?: string }> {
-		const quiz = await this.prisma.quiz.findUnique({
-			where: { id: quizId },
-			include: { user: { include: { subscription: true } } }
-		});
-
-		if (!quiz) return { allowed: false, reason: 'quiz_not_found' };
-		if (!quiz.isActive) return { allowed: false, reason: 'quiz_inactive' };
-
-		const sub = await this.checkAndResetPeriod(quiz.userId);
-
-		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
-			return { allowed: false, reason: 'subscription_expired' };
-		}
-
-		const limits = PLAN_LIMITS[sub.plan];
-
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return { allowed: false, reason: 'lead_limit_reached' };
-		}
-
-		return { allowed: true };
-	}
-
-	async canSubmitCallbackLead(
-		callbackId: string
-	): Promise<{ allowed: boolean; reason?: string }> {
-		const callback = await this.prisma.callback.findUnique({
-			where: { id: callbackId },
-			include: { user: { include: { subscription: true } } }
-		});
-
-		if (!callback) return { allowed: false, reason: 'callback_not_found' };
-		if (!callback.isActive)
-			return { allowed: false, reason: 'callback_inactive' };
-
-		const sub = await this.checkAndResetPeriod(callback.userId);
-
-		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
-			return { allowed: false, reason: 'subscription_expired' };
-		}
-
-		const limits = PLAN_LIMITS[sub.plan];
-
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return { allowed: false, reason: 'lead_limit_reached' };
-		}
-
-		return { allowed: true };
-	}
-
-	async canSubmitCountdownTimerLead(
-		countdownTimerId: string
-	): Promise<{ allowed: boolean; reason?: string }> {
-		const timer = await this.prisma.countdownTimer.findUnique({
-			where: { id: countdownTimerId },
-			include: { user: { include: { subscription: true } } }
-		});
-
-		if (!timer) return { allowed: false, reason: 'timer_not_found' };
-		if (!timer.isActive)
-			return { allowed: false, reason: 'timer_inactive' };
-
-		const sub = await this.checkAndResetPeriod(timer.userId);
-
-		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
-			return { allowed: false, reason: 'subscription_expired' };
-		}
-
-		const limits = PLAN_LIMITS[sub.plan];
-
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return { allowed: false, reason: 'lead_limit_reached' };
-		}
-
-		return { allowed: true };
-	}
-
-	async canSubmitStopOfferLead(
-		stopOfferId: string
-	): Promise<{ allowed: boolean; reason?: string }> {
-		const stopOffer = await this.prisma.stopOffer.findUnique({
-			where: { id: stopOfferId },
-			include: { user: { include: { subscription: true } } }
-		});
-
-		if (!stopOffer)
-			return { allowed: false, reason: 'stop_offer_not_found' };
-		if (!stopOffer.isActive)
-			return { allowed: false, reason: 'stop_offer_inactive' };
-
-		const sub = await this.checkAndResetPeriod(stopOffer.userId);
-
-		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
-			return { allowed: false, reason: 'subscription_expired' };
-		}
-
-		const limits = PLAN_LIMITS[sub.plan];
-
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return { allowed: false, reason: 'lead_limit_reached' };
-		}
-
-		return { allowed: true };
-	}
-
-	async canSubmitOnlineConsultantLead(
-		onlineConsultantId: string
-	): Promise<{ allowed: boolean; reason?: string }> {
-		const onlineConsultant = await this.prisma.onlineConsultant.findUnique(
-			{
-				where: { id: onlineConsultantId },
-				include: { user: { include: { subscription: true } } }
-			}
-		);
-
-		if (!onlineConsultant)
-			return { allowed: false, reason: 'online_consultant_not_found' };
-		if (!onlineConsultant.isActive)
-			return { allowed: false, reason: 'online_consultant_inactive' };
-
-		const sub = await this.checkAndResetPeriod(onlineConsultant.userId);
-
-		if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
-			return { allowed: false, reason: 'subscription_expired' };
-		}
-
-		const limits = PLAN_LIMITS[sub.plan];
-
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return { allowed: false, reason: 'lead_limit_reached' };
-		}
-
-		return { allowed: true };
-	}
-
-	async incrementLeadCount(userId: string) {
-		return this.prisma.subscription.update({
-			where: { userId },
-			data: { leadsThisPeriod: { increment: 1 } }
-		});
+		return subscription;
 	}
 
 	getMaxWidgets(plan: Plan): number {

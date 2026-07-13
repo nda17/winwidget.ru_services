@@ -1,13 +1,13 @@
 import { AuthModule } from '@/auth/auth.module';
+import { CalculatorApiController } from '@/calculator/calculator-api.controller';
+import { CalculatorPublicController } from '@/calculator/calculator-public.controller';
+import { CalculatorController } from '@/calculator/calculator.controller';
+import { CalculatorService } from '@/calculator/calculator.service';
 import { EmailModule } from '@/email/email.module';
 import { FileModule } from '@/file/file.module';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
-import { WidgetApiController } from '@/widget/widget-api.controller';
-import { WidgetPublicController } from '@/widget/widget-public.controller';
-import { WidgetController } from '@/widget/widget.controller';
-import { WidgetService } from '@/widget/widget.service';
 import { Module } from '@nestjs/common';
 
 @Module({
@@ -19,11 +19,11 @@ import { Module } from '@nestjs/common';
 		SafeOutboundHttpModule
 	],
 	controllers: [
-		WidgetController,
-		WidgetPublicController,
-		WidgetApiController
+		CalculatorController,
+		CalculatorPublicController,
+		CalculatorApiController
 	],
-	providers: [WidgetService, PrismaService],
-	exports: [WidgetService]
+	providers: [CalculatorService, PrismaService],
+	exports: [CalculatorService]
 })
-export class WidgetModule {}
+export class CalculatorModule {}

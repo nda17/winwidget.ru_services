@@ -80,6 +80,9 @@ importers:
       generate-password-ts:
         specifier: ^1.6.5
         version: 1.6.5
+      ipaddr.js:
+        specifier: 1.9.1
+        version: 1.9.1
       libphonenumber-js:
         specifier: ^1.12.42
         version: 1.12.42
@@ -119,6 +122,9 @@ importers:
       rxjs:
         specifier: ^7.8.1
         version: 7.8.2
+      undici:
+        specifier: 6.24.1
+        version: 6.24.1
       xlsx:
         specifier: ^0.18.5
         version: 0.18.5
@@ -13737,8 +13743,7 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  undici@6.24.1:
-    optional: true
+  undici@6.24.1: {}
 
   universalify@2.0.1: {}
 

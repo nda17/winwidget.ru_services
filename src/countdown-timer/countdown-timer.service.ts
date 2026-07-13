@@ -4,6 +4,7 @@ import { UpdateCountdownTimerDto } from '@/countdown-timer/dto/update-countdown-
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import {
@@ -139,7 +140,8 @@ export class CountdownTimerService {
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
 		private emailService: EmailService,
-		private fileService: FileService
+		private fileService: FileService,
+		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
 
 	async getMyCountdownTimers(userId: string) {
@@ -156,29 +158,18 @@ export class CountdownTimerService {
 		userId: string,
 		dto: CreateCountdownTimerDto
 	) {
-		const check = await this.subscriptionService.isWidgetAllowed(userId);
-		if (!check.allowed) {
-			if (check.reason === 'widget_limit_reached') {
-				throw new ForbiddenException(
-					'Достигнут лимит виджетов для вашего тарифа'
-				);
-			}
-			if (check.reason === 'subscription_expired') {
-				throw new ForbiddenException('Ваша подписка истекла');
-			}
-			throw new ForbiddenException('Создание виджета недоступно');
-		}
-
-		await this.subscriptionService.getOrCreateTrialSubscription(userId);
-
-		return this.prisma.countdownTimer.create({
-			data: {
-				userId,
-				publicKey: this.generatePublicKey(),
-				name: dto.name || 'Таймер',
-				config: createDefaultConfig()
-			}
-		});
+		return this.subscriptionService.createWidgetWithinLimit(
+			userId,
+			transaction =>
+				transaction.countdownTimer.create({
+					data: {
+						userId,
+						publicKey: this.generatePublicKey(),
+						name: dto.name || 'Таймер',
+						config: createDefaultConfig()
+					}
+				})
+		);
 	}
 
 	async updateCountdownTimer(
@@ -203,6 +194,12 @@ export class CountdownTimerService {
 						}
 					})
 				: undefined;
+
+		if (dto.config !== undefined && nextConfig) {
+			await this.safeOutboundHttpService.validateIntegrationConfig(
+				nextConfig.integrations
+			);
+		}
 
 		const updated = await this.prisma.countdownTimer.update({
 			where: { id: timer.id },
@@ -484,6 +481,11 @@ export class CountdownTimerService {
 			}
 		});
 		if (!timer) throw new NotFoundException('Таймер не найден');
+		if (!timer.isActive) {
+			throw new ForbiddenException(
+				'Лимит заявок исчерпан или подписка неактивна'
+			);
+		}
 
 		const config = normalizeCountdownTimerConfig(timer.config);
 		if (
@@ -499,67 +501,61 @@ export class CountdownTimerService {
 		}
 		this.validateContact(dataType, dto);
 
-		const check =
-			await this.subscriptionService.canSubmitCountdownTimerLead(timer.id);
-		if (!check.allowed) {
-			throw new ForbiddenException(
-				'Лимит заявок исчерпан или подписка неактивна'
-			);
-		}
+		const { lead, newCount, limitReached } =
+			await this.subscriptionService.createLeadWithinLimit(
+				timer.userId,
+				async transaction => {
+					if (config?.filterDuplicates) {
+						const submissionCooldownDays =
+							config.submissionCooldownDays ?? 0;
+						const timerResetToken = config.timerResetToken || '';
+						const since =
+							submissionCooldownDays > 0
+								? new Date(
+										Date.now() -
+											submissionCooldownDays * 24 * 60 * 60 * 1000
+									)
+								: null;
+						const orConditions: object[] = [];
+						if (dto.phone) orConditions.push({ phone: dto.phone });
+						if (dto.email) orConditions.push({ email: dto.email });
+						if (ip) orConditions.push({ ip });
 
-		if (config?.filterDuplicates) {
-			const submissionCooldownDays = config.submissionCooldownDays ?? 0;
-			const timerResetToken = config.timerResetToken || '';
-			const since =
-				submissionCooldownDays > 0
-					? new Date(
-							Date.now() - submissionCooldownDays * 24 * 60 * 60 * 1000
-						)
-					: null;
-			const orConditions: object[] = [];
-			if (dto.phone) orConditions.push({ phone: dto.phone });
-			if (dto.email) orConditions.push({ email: dto.email });
-			if (ip) orConditions.push({ ip });
-
-			if (orConditions.length) {
-				const existing = await this.prisma.countdownTimerLead.findFirst({
-					where: {
-						countdownTimerId: timer.id,
-						timerResetToken,
-						...(since ? { createdAt: { gte: since } } : {}),
-						OR: orConditions
+						if (orConditions.length) {
+							const existing =
+								await transaction.countdownTimerLead.findFirst({
+									where: {
+										countdownTimerId: timer.id,
+										timerResetToken,
+										...(since ? { createdAt: { gte: since } } : {}),
+										OR: orConditions
+									}
+								});
+							if (existing) {
+								throw new BadRequestException(
+									'Заявка с таким контактом уже существует'
+								);
+							}
+						}
 					}
-				});
-				if (existing) {
-					throw new BadRequestException(
-						'Заявка с таким контактом уже существует'
-					);
+
+					return transaction.countdownTimerLead.create({
+						data: {
+							countdownTimerId: timer.id,
+							phone: dto.phone || null,
+							email: dto.email || null,
+							url: dto.url,
+							ip: ip || null,
+							timerResetToken: config.timerResetToken || ''
+						}
+					});
 				}
-			}
-		}
+			);
 
-		const lead = await this.prisma.countdownTimerLead.create({
-			data: {
-				countdownTimerId: timer.id,
-				phone: dto.phone || null,
-				email: dto.email || null,
-				url: dto.url,
-				ip: ip || null,
-				timerResetToken: config.timerResetToken || ''
-			}
-		});
-
-		await this.subscriptionService.incrementLeadCount(timer.userId);
-
-		const sub = timer.user.subscription;
-		if (sub) {
-			const limits = PLAN_LIMITS[sub.plan as Plan];
-			const newCount = sub.leadsThisPeriod + 1;
-			if (!limits.unlimited && newCount === limits.maxLeadsPerPeriod) {
-				this.sendLimitReachedNotifications(timer, config, newCount).catch(
-					() => {}
-				);
-			}
+		if (limitReached) {
+			this.sendLimitReachedNotifications(timer, config, newCount).catch(
+				() => {}
+			);
 		}
 
 		await this.sendNotifications(timer, config, dto);
@@ -604,18 +600,18 @@ export class CountdownTimerService {
 		const webhookUrl = config?.integrations?.webhookUrl;
 		if (webhookUrl) {
 			try {
-				await fetch(webhookUrl, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
+				await this.safeOutboundHttpService.postJson(
+					webhookUrl,
+					{
 						name: timer.name,
 						lead: dto.phone || dto.email || null,
 						phone: dto.phone || null,
 						email: dto.email || null,
 						url: dto.url || null,
 						time: new Date().toISOString()
-					})
-				});
+					},
+					{ policy: 'webhook' }
+				);
 			} catch {}
 		}
 

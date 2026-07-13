@@ -13,6 +13,7 @@ const widgetEntries = [
 	['timer.js', 'timer.js'],
 	['stop-offer.js', 'stop-offer.js'],
 	['online-consultant.js', 'online-consultant.js'],
+	['calculator.js', 'calculator.js'],
 	['helpers/winwidget-phone.js', 'helpers/winwidget-phone.js']
 ];
 
@@ -22,6 +23,7 @@ const copiedAssets = [
 	['quiz-button.png', 'quiz-button.png'],
 	['timer-button.png', 'timer-button.png'],
 	['online-consultant-button.png', 'online-consultant-button.png'],
+	['calculator-button.png', 'calculator-button.png'],
 	['helpers/libphonenumber-min.js', 'helpers/libphonenumber-min.js']
 ];
 

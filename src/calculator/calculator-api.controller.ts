@@ -1,4 +1,5 @@
-import { WidgetService } from '@/widget/widget.service';
+import { CalculatorService } from '@/calculator/calculator.service';
+import { SubmitCalculatorLeadDto } from '@/calculator/dto/submit-calculator-lead.dto';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -11,24 +12,22 @@ import {
 	Param,
 	Post,
 	Req,
-	Res
+	Res,
+	UsePipes,
+	ValidationPipe
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 
-function extractIp(req: Request): string {
+const extractIp = (req: Request): string => {
 	const forwarded = req.headers['x-forwarded-for'];
 	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
 	return req.ip || req.socket?.remoteAddress || '';
-}
+};
 
-@Controller('widget')
-export class WidgetApiController {
-	constructor(private readonly widgetService: WidgetService) {}
+@Controller('calculator')
+export class CalculatorApiController {
+	constructor(private readonly calculatorService: CalculatorService) {}
 
-	/**
-	 * GET /api/widget/:key/config
-	 * Returns widget config in the wheel runtime format.
-	 */
 	@Get(':key/config')
 	async getConfig(
 		@Param('key') key: string,
@@ -36,45 +35,38 @@ export class WidgetApiController {
 		@Res({ passthrough: true }) res: Response
 	) {
 		res.setHeader('Access-Control-Allow-Origin', '*');
-		const config = await this.widgetService.getPublicConfig(
-			key,
-			extractIp(req),
-			getWidgetRequestDomain(req),
-			isWidgetDirectPageRequest(req, 'page-wheel', key)
+		res.setHeader(
+			'Cache-Control',
+			'no-store, no-cache, must-revalidate, proxy-revalidate'
 		);
+		const config = await this.calculatorService.getPublicConfig(
+			key,
+			getWidgetRequestDomain(req),
+			isWidgetDirectPageRequest(req, 'page-calculator', key)
+		);
+
 		if (config === null) {
-			throw new NotFoundException('Виджет не найден');
+			throw new NotFoundException('Калькулятор не найден');
 		}
+
 		return config;
 	}
 
-	/**
-	 * POST /api/widget/:key/lead
-	 * Accepts lead from the public wheel widget: { phone, email, name, bonus }
-	 */
 	@Post(':key/lead')
+	@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 	async submitLead(
 		@Param('key') key: string,
-		@Body()
-		body: {
-			phone?: string;
-			email?: string;
-			name?: string;
-			bonus?: string;
-		},
+		@Body() dto: SubmitCalculatorLeadDto,
 		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
 		res.setHeader('Access-Control-Allow-Origin', '*');
-		return this.widgetService.submitLeadByKey(
+		return this.calculatorService.submitLead(
 			key,
-			body.phone,
-			body.email,
-			body.name,
-			body.bonus,
+			dto,
 			extractIp(req),
 			getWidgetRequestDomain(req),
-			isWidgetDirectPageRequest(req, 'page-wheel', key)
+			isWidgetDirectPageRequest(req, 'page-calculator', key)
 		);
 	}
 }

@@ -471,6 +471,21 @@ export class AdminAlertsService {
 				created_at,
 				updated_at
 			FROM online_consultants
+
+			UNION ALL
+
+			SELECT
+				'CALCULATOR'::text AS widget_type,
+				'Калькулятор стоимости'::text AS widget_label,
+				id,
+				user_id,
+				name,
+				public_key,
+				is_active,
+				install_domain,
+				created_at,
+				updated_at
+			FROM calculators
 		`;
 	}
 

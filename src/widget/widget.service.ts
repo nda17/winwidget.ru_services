@@ -1,6 +1,7 @@
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { CreateWidgetDto } from '@/widget/dto/create-widget.dto';
@@ -224,7 +225,8 @@ type AdminWidgetType =
 	| 'CALLBACK'
 	| 'TIMER'
 	| 'STOP_OFFER'
-	| 'ONLINE_CONSULTANT';
+	| 'ONLINE_CONSULTANT'
+	| 'CALCULATOR';
 
 interface AdminWidgetMonitoringFilters {
 	type?: string;
@@ -258,7 +260,8 @@ export class WidgetService {
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
 		private emailService: EmailService,
-		private fileService: FileService
+		private fileService: FileService,
+		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
 
 	async getMyWidgets(userId: string) {
@@ -314,33 +317,20 @@ export class WidgetService {
 	}
 
 	async createWidget(userId: string, dto: CreateWidgetDto) {
-		const check = await this.subscriptionService.isWidgetAllowed(userId);
-
-		if (!check.allowed) {
-			if (check.reason === 'widget_limit_reached') {
-				throw new ForbiddenException(
-					'Достигнут лимит виджетов для вашего тарифа'
-				);
-			}
-			if (check.reason === 'subscription_expired') {
-				throw new ForbiddenException('Ваша подписка истекла');
-			}
-			throw new ForbiddenException('Создание виджета недоступно');
-		}
-
-		// Ensure subscription exists (trial for new users)
-		await this.subscriptionService.getOrCreateTrialSubscription(userId);
-
 		const publicKey = this.generatePublicKey();
 
-		return this.prisma.widget.create({
-			data: {
-				userId,
-				publicKey,
-				name: dto.name || 'Виджет',
-				config: DEFAULT_CONFIG
-			}
-		});
+		return this.subscriptionService.createWidgetWithinLimit(
+			userId,
+			transaction =>
+				transaction.widget.create({
+					data: {
+						userId,
+						publicKey,
+						name: dto.name || 'Виджет',
+						config: DEFAULT_CONFIG
+					}
+				})
+		);
 	}
 
 	async updateWidget(
@@ -365,6 +355,12 @@ export class WidgetService {
 						}
 					})
 				: undefined;
+
+		if (dto.config !== undefined && nextConfig) {
+			await this.safeOutboundHttpService.validateIntegrationConfig(
+				nextConfig.integrations
+			);
+		}
 
 		const updated = await this.prisma.widget.update({
 			where: { id: widget.id },
@@ -565,7 +561,7 @@ export class WidgetService {
 	}
 
 	/**
-	 * Returns widget config in the format expected by drum-widget.js mapServerConfig.
+	 * Returns widget config in the format expected by the wheel runtime.
 	 * Returns null if widget not found, { isActive: false } if inactive/limit reached.
 	 */
 	async getPublicConfig(
@@ -694,7 +690,7 @@ export class WidgetService {
 	}
 
 	/**
-	 * Submit lead from public widget (drum-widget.js API)
+	 * Submit lead from the public wheel widget API.
 	 */
 	async submitLeadByKey(
 		key: string,
@@ -778,8 +774,7 @@ export class WidgetService {
 			throw new NotFoundException('Виджет не найден');
 		}
 
-		const check = await this.subscriptionService.canSubmitLead(widget.id);
-		if (!check.allowed) {
+		if (!widget.isActive) {
 			throw new ForbiddenException(
 				'Лимит заявок исчерпан или подписка неактивна'
 			);
@@ -793,46 +788,47 @@ export class WidgetService {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 
-		// Filter duplicates if enabled
-		if (config?.filterDuplicates) {
-			const spinResetToken = config.spinResetToken || '';
-			const orConditions: object[] = [{ contact: dto.contact }];
-			if (ip) orConditions.push({ ip });
-			const existingLead = await this.prisma.lead.findFirst({
-				where: { widgetId: widget.id, spinResetToken, OR: orConditions }
-			});
-			if (existingLead) {
-				throw new BadRequestException(
-					'Заявка с таким контактом уже существует'
-				);
-			}
-		}
+		const { lead, newCount, limitReached } =
+			await this.subscriptionService.createLeadWithinLimit(
+				widget.userId,
+				async transaction => {
+					if (config?.filterDuplicates) {
+						const spinResetToken = config.spinResetToken || '';
+						const orConditions: object[] = [{ contact: dto.contact }];
+						if (ip) orConditions.push({ ip });
+						const existingLead = await transaction.lead.findFirst({
+							where: {
+								widgetId: widget.id,
+								spinResetToken,
+								OR: orConditions
+							}
+						});
+						if (existingLead) {
+							throw new BadRequestException(
+								'Заявка с таким контактом уже существует'
+							);
+						}
+					}
 
-		const lead = await this.prisma.lead.create({
-			data: {
-				widgetId: widget.id,
-				contact: dto.contact,
-				phone: dto.phone,
-				email: dto.email,
-				bonus: dto.bonus,
-				url: dto.url,
-				ip: ip || null,
-				spinResetToken: config.spinResetToken || ''
-			}
-		});
+					return transaction.lead.create({
+						data: {
+							widgetId: widget.id,
+							contact: dto.contact,
+							phone: dto.phone,
+							email: dto.email,
+							bonus: dto.bonus,
+							url: dto.url,
+							ip: ip || null,
+							spinResetToken: config.spinResetToken || ''
+						}
+					});
+				}
+			);
 
-		await this.subscriptionService.incrementLeadCount(widget.userId);
-
-		// Notify owner if lead limit just reached
-		const sub = widget.user.subscription;
-		if (sub) {
-			const limits = PLAN_LIMITS[sub.plan as Plan];
-			const newCount = sub.leadsThisPeriod + 1;
-			if (!limits.unlimited && newCount === limits.maxLeadsPerPeriod) {
-				this.sendLimitReachedNotifications(widget, config, newCount).catch(
-					() => {}
-				);
-			}
+		if (limitReached) {
+			this.sendLimitReachedNotifications(widget, config, newCount).catch(
+				() => {}
+			);
 		}
 
 		// Send email notification to widget owner if configured
@@ -857,10 +853,9 @@ export class WidgetService {
 		const webhookUrl = config?.integrations?.webhookUrl;
 		if (webhookUrl) {
 			try {
-				await fetch(webhookUrl, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
+				await this.safeOutboundHttpService.postJson(
+					webhookUrl,
+					{
 						name: widget.name,
 						lead: dto.contact,
 						phone: dto.phone || null,
@@ -868,8 +863,9 @@ export class WidgetService {
 						bonus: dto.bonus || null,
 						url: dto.url || null,
 						time: new Date().toISOString()
-					})
-				});
+					},
+					{ policy: 'webhook' }
+				);
 			} catch {
 				// Webhook errors shouldn't fail the lead submission
 			}
@@ -927,11 +923,11 @@ export class WidgetService {
 					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
 
 				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await fetch(`${base}/crm.lead.add.json`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ fields })
-				});
+				await this.safeOutboundHttpService.postJson(
+					`${base}/crm.lead.add.json`,
+					{ fields },
+					{ policy: 'bitrix24' }
+				);
 			} catch {
 				// Bitrix24 errors shouldn't fail the lead submission
 			}
@@ -942,13 +938,6 @@ export class WidgetService {
 		const amoCrmToken = config?.integrations?.amoCrmToken;
 		if (amoCrmDomain && amoCrmToken) {
 			try {
-				// Normalize domain: strip protocol and trailing slash, append .amocrm.ru if needed
-				let domain = amoCrmDomain
-					.replace(/^https?:\/\//, '')
-					.replace(/\/$/, '');
-				if (!domain.includes('.')) domain = `${domain}.amocrm.ru`;
-				const baseUrl = `https://${domain}`;
-
 				const contactFields: any[] = [];
 				if (dto.phone)
 					contactFields.push({
@@ -995,14 +984,14 @@ export class WidgetService {
 					}
 				];
 
-				await fetch(`${baseUrl}/api/v4/leads/complex`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-						Authorization: `Bearer ${amoCrmToken}`
-					},
-					body: JSON.stringify(body)
-				});
+				await this.safeOutboundHttpService.postJson(
+					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
+					body,
+					{
+						policy: 'amo-crm',
+						headers: { Authorization: `Bearer ${amoCrmToken}` }
+					}
+				);
 			} catch {
 				// amoCRM errors shouldn't fail the lead submission
 			}
@@ -1207,6 +1196,23 @@ export class WidgetService {
 				entity.updated_at
 			FROM online_consultants entity
 			${ownerJoinsSql}
+
+			UNION ALL
+
+			SELECT
+				'CALCULATOR'::text AS widget_type,
+				entity.id,
+				entity.name,
+				entity.public_key,
+				entity.is_active,
+				entity.install_domain,
+				${ownerFieldsSql},
+				(SELECT COUNT(*)::int FROM calculator_leads l WHERE l.calculator_id = entity.id) AS lead_count,
+				(SELECT MAX(l.created_at) FROM calculator_leads l WHERE l.calculator_id = entity.id) AS last_lead_at,
+				entity.created_at,
+				entity.updated_at
+			FROM calculators entity
+			${ownerJoinsSql}
 		`;
 	}
 
@@ -1257,7 +1263,8 @@ export class WidgetService {
 			'CALLBACK',
 			'TIMER',
 			'STOP_OFFER',
-			'ONLINE_CONSULTANT'
+			'ONLINE_CONSULTANT',
+			'CALCULATOR'
 		];
 
 		if (!normalized) return undefined;

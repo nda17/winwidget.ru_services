@@ -26,6 +26,7 @@ model User {
   countdownTimers              CountdownTimer[]
   stopOffers                   StopOffer[]
   onlineConsultants            OnlineConsultant[]
+  calculators                  Calculator[]
   subscription                 Subscription?
   subscriptionHistories        SubscriptionHistory[]        @relation("SubscriptionHistoryUser")
   subscriptionHistoryActions   SubscriptionHistory[]        @relation("SubscriptionHistoryAdmin")
@@ -192,6 +193,42 @@ model OnlineConsultantLead {
   @@index([onlineConsultantId])
   @@index([onlineConsultantId, ip])
   @@map("online_consultant_leads")
+}
+
+model Calculator {
+  id            String           @id @default(cuid())
+  userId        String           @map("user_id")
+  publicKey     String           @unique @map("public_key")
+  name          String           @default("Калькулятор")
+  isActive      Boolean          @default(true) @map("is_active")
+  installDomain String           @default("") @map("install_domain")
+  config        Json             @default("{}")
+  leads         CalculatorLead[]
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@map("calculators")
+}
+
+model CalculatorLead {
+  id              String     @id @default(cuid())
+  calculatorId    String     @map("calculator_id")
+  contact         String
+  phone           String?
+  email           String?
+  answers         Json       @default("[]")
+  calculatedPrice Decimal    @map("calculated_price") @db.Decimal(14, 2)
+  currency        String     @default("RUB")
+  url             String?
+  ip              String?
+  calculator      Calculator @relation(fields: [calculatorId], references: [id], onDelete: Cascade)
+  createdAt       DateTime   @default(now()) @map("created_at")
+
+  @@index([calculatorId])
+  @@index([calculatorId, ip])
+  @@map("calculator_leads")
 }
 
 model Quiz {

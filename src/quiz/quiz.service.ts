@@ -1,6 +1,7 @@
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { CreateQuizDto } from '@/quiz/dto/create-quiz.dto';
@@ -217,7 +218,8 @@ export class QuizService {
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
 		private emailService: EmailService,
-		private fileService: FileService
+		private fileService: FileService,
+		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
 
 	async getMyQuizzes(userId: string) {
@@ -234,32 +236,20 @@ export class QuizService {
 	}
 
 	async createQuiz(userId: string, dto: CreateQuizDto) {
-		const check = await this.subscriptionService.isWidgetAllowed(userId);
-
-		if (!check.allowed) {
-			if (check.reason === 'widget_limit_reached') {
-				throw new ForbiddenException(
-					'Достигнут лимит виджетов для вашего тарифа'
-				);
-			}
-			if (check.reason === 'subscription_expired') {
-				throw new ForbiddenException('Ваша подписка истекла');
-			}
-			throw new ForbiddenException('Создание виджета недоступно');
-		}
-
-		await this.subscriptionService.getOrCreateTrialSubscription(userId);
-
 		const publicKey = this.generatePublicKey();
 
-		return this.prisma.quiz.create({
-			data: {
-				userId,
-				publicKey,
-				name: dto.name || 'Квиз',
-				config: DEFAULT_CONFIG
-			}
-		});
+		return this.subscriptionService.createWidgetWithinLimit(
+			userId,
+			transaction =>
+				transaction.quiz.create({
+					data: {
+						userId,
+						publicKey,
+						name: dto.name || 'Квиз',
+						config: DEFAULT_CONFIG
+					}
+				})
+		);
 	}
 
 	async updateQuiz(userId: string, quizId: string, dto: UpdateQuizDto) {
@@ -280,6 +270,12 @@ export class QuizService {
 						}
 					})
 				: undefined;
+
+		if (dto.config !== undefined && nextConfig) {
+			await this.safeOutboundHttpService.validateIntegrationConfig(
+				nextConfig.integrations
+			);
+		}
 
 		const updated = await this.prisma.quiz.update({
 			where: { id: quiz.id },
@@ -595,10 +591,7 @@ export class QuizService {
 
 		if (!quiz) throw new NotFoundException('Квиз не найден');
 
-		const check = await this.subscriptionService.canSubmitQuizLead(
-			quiz.id
-		);
-		if (!check.allowed) {
+		if (!quiz.isActive) {
 			throw new ForbiddenException(
 				'Лимит заявок исчерпан или подписка неактивна'
 			);
@@ -612,24 +605,6 @@ export class QuizService {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 
-		if (config?.filterDuplicates) {
-			const resetToken = config.quizResetToken || '';
-			const orConditions: object[] = [{ contact: dto.contact }];
-			if (ip) orConditions.push({ ip });
-			const existing = await this.prisma.quizLead.findFirst({
-				where: {
-					quizId: quiz.id,
-					quizResetToken: resetToken,
-					OR: orConditions
-				}
-			});
-			if (existing) {
-				throw new BadRequestException(
-					'Заявка с таким контактом уже существует'
-				);
-			}
-		}
-
 		// Score answers to determine result
 		const resultId = this.scoreAnswers(
 			dto.answers,
@@ -640,31 +615,48 @@ export class QuizService {
 			(config.results || []).find((r: any) => r.id === resultId) || null;
 		const resultTitle = resultData?.title || resultId;
 
-		const lead = await this.prisma.quizLead.create({
-			data: {
-				quizId: quiz.id,
-				contact: dto.contact,
-				phone: dto.phone,
-				email: dto.email,
-				answers: dto.answers as any,
-				result: resultTitle,
-				url: dto.url,
-				ip: ip || null,
-				quizResetToken: config.quizResetToken || ''
-			}
-		});
+		const { lead, newCount, limitReached } =
+			await this.subscriptionService.createLeadWithinLimit(
+				quiz.userId,
+				async transaction => {
+					if (config?.filterDuplicates) {
+						const resetToken = config.quizResetToken || '';
+						const orConditions: object[] = [{ contact: dto.contact }];
+						if (ip) orConditions.push({ ip });
+						const existing = await transaction.quizLead.findFirst({
+							where: {
+								quizId: quiz.id,
+								quizResetToken: resetToken,
+								OR: orConditions
+							}
+						});
+						if (existing) {
+							throw new BadRequestException(
+								'Заявка с таким контактом уже существует'
+							);
+						}
+					}
 
-		await this.subscriptionService.incrementLeadCount(quiz.userId);
+					return transaction.quizLead.create({
+						data: {
+							quizId: quiz.id,
+							contact: dto.contact,
+							phone: dto.phone,
+							email: dto.email,
+							answers: dto.answers as any,
+							result: resultTitle,
+							url: dto.url,
+							ip: ip || null,
+							quizResetToken: config.quizResetToken || ''
+						}
+					});
+				}
+			);
 
-		const sub = quiz.user.subscription;
-		if (sub) {
-			const limits = PLAN_LIMITS[sub.plan as Plan];
-			const newCount = sub.leadsThisPeriod + 1;
-			if (!limits.unlimited && newCount === limits.maxLeadsPerPeriod) {
-				this.sendLimitReachedNotifications(quiz, config, newCount).catch(
-					() => {}
-				);
-			}
+		if (limitReached) {
+			this.sendLimitReachedNotifications(quiz, config, newCount).catch(
+				() => {}
+			);
 		}
 
 		await this.sendNotifications(quiz, config, dto, resultData);
@@ -737,10 +729,9 @@ export class QuizService {
 		const webhookUrl = config?.integrations?.webhookUrl;
 		if (webhookUrl) {
 			try {
-				await fetch(webhookUrl, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
+				await this.safeOutboundHttpService.postJson(
+					webhookUrl,
+					{
 						name: quiz.name,
 						lead: dto.contact,
 						phone: dto.phone || null,
@@ -749,8 +740,9 @@ export class QuizService {
 						answers: dto.answers,
 						url: dto.url || null,
 						time: new Date().toISOString()
-					})
-				});
+					},
+					{ policy: 'webhook' }
+				);
 			} catch {}
 		}
 
@@ -800,11 +792,11 @@ export class QuizService {
 					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
 
 				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await fetch(`${base}/crm.lead.add.json`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ fields })
-				});
+				await this.safeOutboundHttpService.postJson(
+					`${base}/crm.lead.add.json`,
+					{ fields },
+					{ policy: 'bitrix24' }
+				);
 			} catch {}
 		}
 
@@ -812,12 +804,6 @@ export class QuizService {
 		const amoCrmToken = config?.integrations?.amoCrmToken;
 		if (amoCrmDomain && amoCrmToken) {
 			try {
-				let domain = amoCrmDomain
-					.replace(/^https?:\/\//, '')
-					.replace(/\/$/, '');
-				if (!domain.includes('.')) domain = `${domain}.amocrm.ru`;
-				const baseUrl = `https://${domain}`;
-
 				const contactFields: any[] = [];
 				if (dto.phone)
 					contactFields.push({
@@ -845,14 +831,14 @@ export class QuizService {
 					}
 				];
 
-				await fetch(`${baseUrl}/api/v4/leads/complex`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-						Authorization: `Bearer ${amoCrmToken}`
-					},
-					body: JSON.stringify(body)
-				});
+				await this.safeOutboundHttpService.postJson(
+					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
+					body,
+					{
+						policy: 'amo-crm',
+						headers: { Authorization: `Bearer ${amoCrmToken}` }
+					}
+				);
 			} catch {}
 		}
 	}

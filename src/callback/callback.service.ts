@@ -1,6 +1,7 @@
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { CreateCallbackDto } from '@/callback/dto/create-callback.dto';
@@ -128,7 +129,8 @@ export class CallbackService {
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
 		private emailService: EmailService,
-		private fileService: FileService
+		private fileService: FileService,
+		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
 
 	async getMyCallbacks(userId: string) {
@@ -142,27 +144,18 @@ export class CallbackService {
 	}
 
 	async createCallback(userId: string, dto: CreateCallbackDto) {
-		const check = await this.subscriptionService.isWidgetAllowed(userId);
-		if (!check.allowed) {
-			if (check.reason === 'widget_limit_reached')
-				throw new ForbiddenException(
-					'Достигнут лимит виджетов для вашего тарифа'
-				);
-			if (check.reason === 'subscription_expired')
-				throw new ForbiddenException('Ваша подписка истекла');
-			throw new ForbiddenException('Создание виджета недоступно');
-		}
-
-		await this.subscriptionService.getOrCreateTrialSubscription(userId);
-
-		return this.prisma.callback.create({
-			data: {
-				userId,
-				publicKey: this.generatePublicKey(),
-				name: dto.name || 'Обратный звонок',
-				config: DEFAULT_CONFIG
-			}
-		});
+		return this.subscriptionService.createWidgetWithinLimit(
+			userId,
+			transaction =>
+				transaction.callback.create({
+					data: {
+						userId,
+						publicKey: this.generatePublicKey(),
+						name: dto.name || 'Обратный звонок',
+						config: DEFAULT_CONFIG
+					}
+				})
+		);
 	}
 
 	async updateCallback(
@@ -187,6 +180,12 @@ export class CallbackService {
 						}
 					})
 				: undefined;
+
+		if (dto.config !== undefined && nextConfig) {
+			await this.safeOutboundHttpService.validateIntegrationConfig(
+				nextConfig.integrations
+			);
+		}
 
 		const updated = await this.prisma.callback.update({
 			where: { id: callback.id },
@@ -445,14 +444,11 @@ export class CallbackService {
 		});
 
 		if (!callback) throw new NotFoundException('Виджет не найден');
-
-		const check = await this.subscriptionService.canSubmitCallbackLead(
-			callback.id
-		);
-		if (!check.allowed)
+		if (!callback.isActive) {
 			throw new ForbiddenException(
 				'Лимит заявок исчерпан или подписка неактивна'
 			);
+		}
 
 		const config = normalizeCallbackConfig(callback.config);
 		if (
@@ -462,40 +458,38 @@ export class CallbackService {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 
-		if (config?.filterDuplicates && ip) {
-			const existing = await this.prisma.callbackLead.findFirst({
-				where: { callbackId: callback.id, ip }
-			});
-			if (existing)
-				throw new BadRequestException(
-					'Заявка с этого устройства уже существует'
-				);
-		}
+		const { lead, newCount, limitReached } =
+			await this.subscriptionService.createLeadWithinLimit(
+				callback.userId,
+				async transaction => {
+					if (config?.filterDuplicates && ip) {
+						const existing = await transaction.callbackLead.findFirst({
+							where: { callbackId: callback.id, ip }
+						});
+						if (existing) {
+							throw new BadRequestException(
+								'Заявка с этого устройства уже существует'
+							);
+						}
+					}
 
-		const lead = await this.prisma.callbackLead.create({
-			data: {
-				callbackId: callback.id,
-				phone: dto.phone,
-				timeSlot: dto.timeSlot || '',
-				timezone: dto.timezone || '',
-				url: dto.url,
-				ip: ip || null
-			}
-		});
+					return transaction.callbackLead.create({
+						data: {
+							callbackId: callback.id,
+							phone: dto.phone,
+							timeSlot: dto.timeSlot || '',
+							timezone: dto.timezone || '',
+							url: dto.url,
+							ip: ip || null
+						}
+					});
+				}
+			);
 
-		await this.subscriptionService.incrementLeadCount(callback.userId);
-
-		const sub = callback.user.subscription;
-		if (sub) {
-			const limits = PLAN_LIMITS[sub.plan as Plan];
-			const newCount = sub.leadsThisPeriod + 1;
-			if (!limits.unlimited && newCount === limits.maxLeadsPerPeriod) {
-				this.sendLimitReachedNotifications(
-					callback,
-					config,
-					newCount
-				).catch(() => {});
-			}
+		if (limitReached) {
+			this.sendLimitReachedNotifications(callback, config, newCount).catch(
+				() => {}
+			);
 		}
 
 		await this.sendNotifications(callback, config, dto);
@@ -526,18 +520,18 @@ export class CallbackService {
 		const webhookUrl = config?.integrations?.webhookUrl;
 		if (webhookUrl) {
 			try {
-				await fetch(webhookUrl, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
+				await this.safeOutboundHttpService.postJson(
+					webhookUrl,
+					{
 						name: callback.name,
 						phone: dto.phone,
 						timeSlot: dto.timeSlot || null,
 						timezone: dto.timezone || null,
 						url: dto.url || null,
 						time: new Date().toISOString()
-					})
-				});
+					},
+					{ policy: 'webhook' }
+				);
 			} catch {}
 		}
 
@@ -577,11 +571,11 @@ export class CallbackService {
 					PHONE: [{ VALUE: dto.phone, VALUE_TYPE: 'WORK' }]
 				};
 				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await fetch(`${base}/crm.lead.add.json`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ fields })
-				});
+				await this.safeOutboundHttpService.postJson(
+					`${base}/crm.lead.add.json`,
+					{ fields },
+					{ policy: 'bitrix24' }
+				);
 			} catch {}
 		}
 
@@ -589,11 +583,6 @@ export class CallbackService {
 		const amoCrmToken = config?.integrations?.amoCrmToken;
 		if (amoCrmDomain && amoCrmToken) {
 			try {
-				let domain = amoCrmDomain
-					.replace(/^https?:\/\//, '')
-					.replace(/\/$/, '');
-				if (!domain.includes('.')) domain = `${domain}.amocrm.ru`;
-
 				const body: any = [
 					{
 						name: `Обратный звонок — «${callback.name}»`,
@@ -611,14 +600,14 @@ export class CallbackService {
 						}
 					}
 				];
-				await fetch(`https://${domain}/api/v4/leads/complex`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-						Authorization: `Bearer ${amoCrmToken}`
-					},
-					body: JSON.stringify(body)
-				});
+				await this.safeOutboundHttpService.postJson(
+					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
+					body,
+					{
+						policy: 'amo-crm',
+						headers: { Authorization: `Bearer ${amoCrmToken}` }
+					}
+				);
 			} catch {}
 		}
 	}

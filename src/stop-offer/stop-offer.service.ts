@@ -1,5 +1,6 @@
 import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { CreateStopOfferDto } from '@/stop-offer/dto/create-stop-offer.dto';
 import { SubmitStopOfferLeadDto } from '@/stop-offer/dto/submit-stop-offer-lead.dto';
 import { UpdateStopOfferDto } from '@/stop-offer/dto/update-stop-offer.dto';
@@ -213,7 +214,8 @@ export class StopOfferService {
 	constructor(
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
-		private emailService: EmailService
+		private emailService: EmailService,
+		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
 
 	async getMyStopOffers(userId: string) {
@@ -228,30 +230,18 @@ export class StopOfferService {
 	}
 
 	async createStopOffer(userId: string, dto: CreateStopOfferDto) {
-		const check = await this.subscriptionService.isWidgetAllowed(userId);
-
-		if (!check.allowed) {
-			if (check.reason === 'widget_limit_reached') {
-				throw new ForbiddenException(
-					'Достигнут лимит виджетов для вашего тарифа'
-				);
-			}
-			if (check.reason === 'subscription_expired') {
-				throw new ForbiddenException('Ваша подписка истекла');
-			}
-			throw new ForbiddenException('Создание виджета недоступно');
-		}
-
-		await this.subscriptionService.getOrCreateTrialSubscription(userId);
-
-		return this.prisma.stopOffer.create({
-			data: {
-				userId,
-				publicKey: this.generatePublicKey(),
-				name: dto.name || 'Стоп-оффер',
-				config: createDefaultConfig()
-			}
-		});
+		return this.subscriptionService.createWidgetWithinLimit(
+			userId,
+			transaction =>
+				transaction.stopOffer.create({
+					data: {
+						userId,
+						publicKey: this.generatePublicKey(),
+						name: dto.name || 'Стоп-оффер',
+						config: createDefaultConfig()
+					}
+				})
+		);
 	}
 
 	async updateStopOffer(
@@ -272,6 +262,11 @@ export class StopOfferService {
 						}
 					})
 				: undefined;
+		if (dto.config !== undefined && nextConfig) {
+			await this.safeOutboundHttpService.validateIntegrationConfig(
+				nextConfig.integrations
+			);
+		}
 
 		return this.prisma.stopOffer.update({
 			where: { id: stopOffer.id },
@@ -510,70 +505,68 @@ export class StopOfferService {
 		}
 		this.validateContact(dataType, dto);
 
-		const check = await this.subscriptionService.canSubmitStopOfferLead(
-			stopOffer.id
-		);
-		if (!check.allowed) {
+		if (!stopOffer.isActive) {
 			throw new ForbiddenException(
 				'Лимит заявок исчерпан или подписка неактивна'
 			);
 		}
 
-		if (config?.filterDuplicates) {
-			const submissionCooldownDays = config.submissionCooldownDays ?? 0;
-			const submissionResetToken = config.submissionResetToken || '';
-			const since =
-				submissionCooldownDays > 0
-					? new Date(
-							Date.now() - submissionCooldownDays * 24 * 60 * 60 * 1000
-						)
-					: null;
-			const orConditions: object[] = [];
-			if (dto.phone) orConditions.push({ phone: dto.phone });
-			if (dto.email) orConditions.push({ email: dto.email });
-			if (ip) orConditions.push({ ip });
+		const { lead, newCount, limitReached } =
+			await this.subscriptionService.createLeadWithinLimit(
+				stopOffer.userId,
+				async transaction => {
+					if (config?.filterDuplicates) {
+						const submissionCooldownDays =
+							config.submissionCooldownDays ?? 0;
+						const submissionResetToken = config.submissionResetToken || '';
+						const since =
+							submissionCooldownDays > 0
+								? new Date(
+										Date.now() -
+											submissionCooldownDays * 24 * 60 * 60 * 1000
+									)
+								: null;
+						const orConditions: object[] = [];
+						if (dto.phone) orConditions.push({ phone: dto.phone });
+						if (dto.email) orConditions.push({ email: dto.email });
+						if (ip) orConditions.push({ ip });
 
-			if (orConditions.length) {
-				const existing = await this.prisma.stopOfferLead.findFirst({
-					where: {
-						stopOfferId: stopOffer.id,
-						resetToken: submissionResetToken,
-						...(since ? { createdAt: { gte: since } } : {}),
-						OR: orConditions
+						if (orConditions.length) {
+							const existing = await transaction.stopOfferLead.findFirst({
+								where: {
+									stopOfferId: stopOffer.id,
+									resetToken: submissionResetToken,
+									...(since ? { createdAt: { gte: since } } : {}),
+									OR: orConditions
+								}
+							});
+							if (existing) {
+								throw new BadRequestException(
+									'Заявка с таким контактом уже существует'
+								);
+							}
+						}
 					}
-				});
-				if (existing) {
-					throw new BadRequestException(
-						'Заявка с таким контактом уже существует'
-					);
+
+					return transaction.stopOfferLead.create({
+						data: {
+							stopOfferId: stopOffer.id,
+							phone: dto.phone || null,
+							email: dto.email || null,
+							url: dto.url,
+							ip: ip || null,
+							resetToken: config.submissionResetToken || ''
+						}
+					});
 				}
-			}
-		}
+			);
 
-		const lead = await this.prisma.stopOfferLead.create({
-			data: {
-				stopOfferId: stopOffer.id,
-				phone: dto.phone || null,
-				email: dto.email || null,
-				url: dto.url,
-				ip: ip || null,
-				resetToken: config.submissionResetToken || ''
-			}
-		});
-
-		await this.subscriptionService.incrementLeadCount(stopOffer.userId);
-
-		const sub = stopOffer.user.subscription;
-		if (sub) {
-			const limits = PLAN_LIMITS[sub.plan as Plan];
-			const newCount = sub.leadsThisPeriod + 1;
-			if (!limits.unlimited && newCount === limits.maxLeadsPerPeriod) {
-				this.sendLimitReachedNotifications(
-					stopOffer,
-					config,
-					newCount
-				).catch(() => {});
-			}
+		if (limitReached) {
+			this.sendLimitReachedNotifications(
+				stopOffer,
+				config,
+				newCount
+			).catch(() => {});
 		}
 
 		await this.sendNotifications(stopOffer, config, dto);
@@ -615,10 +608,9 @@ export class StopOfferService {
 		const webhookUrl = config?.integrations?.webhookUrl;
 		if (webhookUrl) {
 			try {
-				await fetch(webhookUrl, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
+				await this.safeOutboundHttpService.postJson(
+					webhookUrl,
+					{
 						name: stopOffer.name,
 						lead: dto.phone || dto.email || null,
 						phone: dto.phone || null,
@@ -626,8 +618,9 @@ export class StopOfferService {
 						offer: config.offerText || null,
 						url: dto.url || null,
 						time: new Date().toISOString()
-					})
-				});
+					},
+					{ policy: 'webhook' }
+				);
 			} catch {}
 		}
 
@@ -671,11 +664,11 @@ export class StopOfferService {
 					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
 				}
 				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await fetch(`${base}/crm.lead.add.json`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ fields })
-				});
+				await this.safeOutboundHttpService.postJson(
+					`${base}/crm.lead.add.json`,
+					{ fields },
+					{ policy: 'bitrix24' }
+				);
 			} catch {}
 		}
 
@@ -683,11 +676,6 @@ export class StopOfferService {
 		const amoCrmToken = config?.integrations?.amoCrmToken;
 		if (amoCrmDomain && amoCrmToken) {
 			try {
-				let domain = amoCrmDomain
-					.replace(/^https?:\/\//, '')
-					.replace(/\/$/, '');
-				if (!domain.includes('.')) domain = `${domain}.amocrm.ru`;
-
 				const customFields: Array<Record<string, any>> = [];
 				if (dto.phone) {
 					customFields.push({
@@ -717,14 +705,14 @@ export class StopOfferService {
 							: undefined
 					}
 				];
-				await fetch(`https://${domain}/api/v4/leads/complex`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-						Authorization: `Bearer ${amoCrmToken}`
-					},
-					body: JSON.stringify(body)
-				});
+				await this.safeOutboundHttpService.postJson(
+					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
+					body,
+					{
+						policy: 'amo-crm',
+						headers: { Authorization: `Bearer ${amoCrmToken}` }
+					}
+				);
 			} catch {}
 		}
 	}

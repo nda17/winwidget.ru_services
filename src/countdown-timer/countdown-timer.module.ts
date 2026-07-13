@@ -5,11 +5,12 @@ import { CountdownTimerService } from '@/countdown-timer/countdown-timer.service
 import { EmailService } from '@/email/email.service';
 import { FileModule } from '@/file/file.module';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [FileModule],
+	imports: [FileModule, SafeOutboundHttpModule],
 	controllers: [
 		CountdownTimerController,
 		CountdownTimerPublicController,

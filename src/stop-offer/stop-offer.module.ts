@@ -4,10 +4,12 @@ import { StopOfferController } from '@/stop-offer/stop-offer.controller';
 import { StopOfferService } from '@/stop-offer/stop-offer.service';
 import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { Module } from '@nestjs/common';
 
 @Module({
+	imports: [SafeOutboundHttpModule],
 	controllers: [
 		StopOfferController,
 		StopOfferPublicController,

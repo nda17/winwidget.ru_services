@@ -2,6 +2,7 @@ import { AuthModule } from '@/auth/auth.module';
 import { EmailModule } from '@/email/email.module';
 import { FileModule } from '@/file/file.module';
 import { PrismaService } from '@/prisma.service';
+import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { OnlineConsultantApiController } from '@/online-consultant/online-consultant-api.controller';
 import { OnlineConsultantPublicController } from '@/online-consultant/online-consultant-public.controller';
@@ -10,7 +11,13 @@ import { OnlineConsultantService } from '@/online-consultant/online-consultant.s
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [AuthModule, SubscriptionModule, EmailModule, FileModule],
+	imports: [
+		AuthModule,
+		SubscriptionModule,
+		EmailModule,
+		FileModule,
+		SafeOutboundHttpModule
+	],
 	controllers: [
 		OnlineConsultantController,
 		OnlineConsultantPublicController,

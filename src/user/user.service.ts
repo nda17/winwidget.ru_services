@@ -64,7 +64,8 @@ export type OverviewWidgetType =
 	| 'CALLBACK'
 	| 'COUNTDOWN_TIMER'
 	| 'STOP_OFFER'
-	| 'ONLINE_CONSULTANT';
+	| 'ONLINE_CONSULTANT'
+	| 'CALCULATOR';
 
 export interface OverviewLeadTypeCount {
 	type: OverviewWidgetType;
@@ -186,24 +187,29 @@ export class UserService {
 			activeStopOfferWidgetsCount,
 			onlineConsultantWidgetsCount,
 			activeOnlineConsultantWidgetsCount,
+			calculatorWidgetsCount,
+			activeCalculatorWidgetsCount,
 			latestWheelWidgets,
 			latestQuizzes,
 			latestCallbacks,
 			latestTimers,
 			latestStopOffers,
 			latestOnlineConsultants,
+			latestCalculators,
 			wheelLeadsCount,
 			quizLeadsCount,
 			callbackLeadsCount,
 			timerLeadsCount,
 			stopOfferLeadsCount,
 			onlineConsultantLeadsCount,
+			calculatorLeadsCount,
 			latestWheelLeads,
 			latestQuizLeads,
 			latestCallbackLeads,
 			latestTimerLeads,
 			latestStopOfferLeads,
 			latestOnlineConsultantLeads,
+			latestCalculatorLeads,
 			latestActivity
 		] = await this.prisma.$transaction([
 			this.prisma.subscription.findUnique({
@@ -267,6 +273,12 @@ export class UserService {
 				where: { userId: id }
 			}),
 			this.prisma.onlineConsultant.count({
+				where: { userId: id, isActive: true }
+			}),
+			this.prisma.calculator.count({
+				where: { userId: id }
+			}),
+			this.prisma.calculator.count({
 				where: { userId: id, isActive: true }
 			}),
 			this.prisma.widget.findMany({
@@ -347,6 +359,19 @@ export class UserService {
 					_count: { select: { leads: true } }
 				}
 			}),
+			this.prisma.calculator.findMany({
+				where: { userId: id },
+				orderBy: { updatedAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					name: true,
+					isActive: true,
+					installDomain: true,
+					updatedAt: true,
+					_count: { select: { leads: true } }
+				}
+			}),
 			this.prisma.lead.count({
 				where: { widget: { userId: id } }
 			}),
@@ -364,6 +389,9 @@ export class UserService {
 			}),
 			this.prisma.onlineConsultantLead.count({
 				where: { onlineConsultant: { userId: id } }
+			}),
+			this.prisma.calculatorLead.count({
+				where: { calculator: { userId: id } }
 			}),
 			this.prisma.lead.findMany({
 				where: { widget: { userId: id } },
@@ -448,6 +476,22 @@ export class UserService {
 					onlineConsultant: { select: { name: true } }
 				}
 			}),
+			this.prisma.calculatorLead.findMany({
+				where: { calculator: { userId: id } },
+				orderBy: { createdAt: 'desc' },
+				take: 3,
+				select: {
+					id: true,
+					contact: true,
+					phone: true,
+					email: true,
+					calculatedPrice: true,
+					currency: true,
+					url: true,
+					createdAt: true,
+					calculator: { select: { name: true } }
+				}
+			}),
 			this.prisma.adminEventLog.findMany({
 				where: {
 					OR: [{ targetUserId: id }, { adminId: id }]
@@ -510,6 +554,12 @@ export class UserService {
 				'Онлайн-консультант',
 				onlineConsultantWidgetsCount,
 				activeOnlineConsultantWidgetsCount
+			),
+			this.buildWidgetTypeCount(
+				'CALCULATOR',
+				'Калькулятор стоимости',
+				calculatorWidgetsCount,
+				activeCalculatorWidgetsCount
 			)
 		];
 		const latestWidgets = [
@@ -533,6 +583,13 @@ export class UserService {
 					'ONLINE_CONSULTANT',
 					'Онлайн-консультант',
 					onlineConsultant
+				)
+			),
+			...latestCalculators.map(calculator =>
+				this.toOverviewWidgetItem(
+					'CALCULATOR',
+					'Калькулятор стоимости',
+					calculator
 				)
 			)
 		]
@@ -560,6 +617,11 @@ export class UserService {
 				type: 'ONLINE_CONSULTANT',
 				label: 'Онлайн-консультант',
 				count: onlineConsultantLeadsCount
+			},
+			{
+				type: 'CALCULATOR',
+				label: 'Калькулятор стоимости',
+				count: calculatorLeadsCount
 			}
 		];
 		const latestLeads = [
@@ -633,6 +695,18 @@ export class UserService {
 				email: lead.email,
 				url: lead.url,
 				detail: lead.actionLabel,
+				createdAt: lead.createdAt
+			})),
+			...latestCalculatorLeads.map(lead => ({
+				id: lead.id,
+				type: 'CALCULATOR' as const,
+				label: 'Калькулятор стоимости',
+				sourceName: lead.calculator.name,
+				contact: lead.contact || lead.phone || lead.email || null,
+				phone: lead.phone,
+				email: lead.email,
+				url: lead.url,
+				detail: `${lead.calculatedPrice.toFixed(2)} ${lead.currency}`,
 				createdAt: lead.createdAt
 			}))
 		]
@@ -1152,6 +1226,10 @@ export class UserService {
 					where: { userId: id },
 					data: { isActive: false }
 				});
+				await tx.calculator.updateMany({
+					where: { userId: id },
+					data: { isActive: false }
+				});
 			}
 
 			return updated;
@@ -1198,7 +1276,8 @@ export class UserService {
 			quizzes,
 			callbacks,
 			countdownTimers,
-			onlineConsultants
+			onlineConsultants,
+			calculators
 		] = await Promise.all([
 			this.prisma.widget.findMany({
 				where: { userId },
@@ -1219,6 +1298,10 @@ export class UserService {
 			this.prisma.onlineConsultant.findMany({
 				where: { userId },
 				select: { config: true }
+			}),
+			this.prisma.calculator.findMany({
+				where: { userId },
+				select: { config: true }
 			})
 		]);
 
@@ -1227,7 +1310,8 @@ export class UserService {
 			...quizzes,
 			...callbacks,
 			...countdownTimers,
-			...onlineConsultants
+			...onlineConsultants,
+			...calculators
 		]
 			.map(({ config }) => this.getButtonImageUrlFromConfig(config))
 			.filter((url): url is string => Boolean(url));
