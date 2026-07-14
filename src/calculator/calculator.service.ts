@@ -30,7 +30,7 @@ const MAX_OPTIONS = 20;
 const MAX_PRICE = 1_000_000_000;
 const MAX_RESULT_PRICE = new Prisma.Decimal('999999999999.99');
 
-type CalculatorFieldType = 'select' | 'number' | 'checkbox';
+type CalculatorFieldType = 'select' | 'number' | 'radio' | 'checkbox';
 
 interface CalculatorOption {
 	id: string;
@@ -245,6 +245,17 @@ const normalizeOptions = (
 	});
 };
 
+const isBooleanOptionPair = (options: CalculatorOption[]) => {
+	if (options.length !== 2) return false;
+	const labels = new Set(
+		options.map(option => option.label.trim().toLocaleLowerCase('ru-RU'))
+	);
+	return (
+		(labels.has('да') && labels.has('нет')) ||
+		(labels.has('yes') && labels.has('no'))
+	);
+};
+
 const normalizeFields = (value: unknown): CalculatorField[] => {
 	const source = Array.isArray(value)
 		? value.slice(0, MAX_FIELDS)
@@ -259,6 +270,7 @@ const normalizeFields = (value: unknown): CalculatorField[] => {
 		const type: CalculatorFieldType = [
 			'select',
 			'number',
+			'radio',
 			'checkbox'
 		].includes(raw.type)
 			? raw.type
@@ -271,9 +283,14 @@ const normalizeFields = (value: unknown): CalculatorField[] => {
 		};
 
 		if (type !== 'number') {
+			const options = normalizeOptions(raw.options, index);
 			return {
 				...base,
-				options: normalizeOptions(raw.options, index)
+				type:
+					type === 'checkbox' && isBooleanOptionPair(options)
+						? 'radio'
+						: type,
+				options
 			};
 		}
 
@@ -957,7 +974,10 @@ export class CalculatorService {
 					`Заполните параметр «${field.label}»`
 				);
 			}
-			if (field.type === 'select' && uniqueIds.length !== 1) {
+			if (
+				(field.type === 'select' || field.type === 'radio') &&
+				uniqueIds.length !== 1
+			) {
 				throw new BadRequestException(
 					`Выберите один вариант параметра «${field.label}»`
 				);
@@ -980,7 +1000,10 @@ export class CalculatorService {
 				fieldId: field.id,
 				fieldLabel: field.label,
 				type: field.type,
-				value: field.type === 'select' ? uniqueIds[0] || '' : uniqueIds,
+				value:
+					field.type === 'select' || field.type === 'radio'
+						? uniqueIds[0] || ''
+						: uniqueIds,
 				valueLabel: selectedOptions.map(option => option.label).join(', ')
 			});
 		}

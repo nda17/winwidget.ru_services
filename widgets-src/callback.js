@@ -556,7 +556,7 @@
 			css(timeSelect, {
 				width: '100%',
 				boxSizing: 'border-box',
-				padding: '12px 14px',
+				padding: '12px 40px 12px 14px',
 				fontSize: '15px',
 				border: '1.5px solid #e0d6f0',
 				borderRadius: '12px',
@@ -566,6 +566,7 @@
 				color: '#1a1a1a',
 				cursor: 'pointer',
 				transition: 'border-color 0.2s, box-shadow 0.2s',
+				webkitAppearance: 'none',
 				appearance: 'none',
 				backgroundImage:
 					"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24'%3E%3Cpath fill='%23888' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E\")",

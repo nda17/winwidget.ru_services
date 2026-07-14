@@ -171,6 +171,19 @@
 		return null;
 	}
 
+	function isBooleanOptionPair(options) {
+		if (!Array.isArray(options) || options.length !== 2) return false;
+		var labels = options.map(function (option) {
+			return String(option && option.label ? option.label : '')
+				.trim()
+				.toLocaleLowerCase('ru-RU');
+		});
+		return (
+			(labels.indexOf('да') !== -1 && labels.indexOf('нет') !== -1) ||
+			(labels.indexOf('yes') !== -1 && labels.indexOf('no') !== -1)
+		);
+	}
+
 	function calculatePrice(answers) {
 		var fields = Array.isArray(cfg && cfg.fields) ? cfg.fields : [];
 		var subtotal = Math.max(0, toFiniteNumber(cfg && cfg.basePrice, 0));
@@ -191,7 +204,10 @@
 				return;
 			}
 
-			if (field.type === 'checkbox') {
+			if (
+				field.type === 'checkbox' &&
+				!isBooleanOptionPair(field.options)
+			) {
 				(Array.isArray(value) ? value : []).forEach(function (optionId) {
 					applyOption(getOption(field, optionId));
 				});
@@ -588,17 +604,28 @@
 					numberInput.value = String(field.defaultValue);
 				numberInput.setAttribute('data-value-input', 'number');
 				fieldElement.appendChild(numberInput);
-			} else if (field.type === 'checkbox') {
+			} else if (field.type === 'checkbox' || field.type === 'radio') {
 				var checks = document.createElement('div');
 				checks.className = 'wwc-checks';
+				var isSingleChoice =
+					field.type === 'radio' || isBooleanOptionPair(field.options);
+				checks.setAttribute(
+					'role',
+					isSingleChoice ? 'radiogroup' : 'group'
+				);
+				checks.setAttribute('aria-label', field.label || 'Параметр');
 				(Array.isArray(field.options) ? field.options : []).forEach(
 					function (option) {
 						var checkLabel = document.createElement('label');
 						checkLabel.className = 'wwc-check';
 						var checkInput = document.createElement('input');
-						checkInput.type = 'checkbox';
+						checkInput.type = isSingleChoice ? 'radio' : 'checkbox';
+						if (isSingleChoice) checkInput.name = 'wwc-field-' + field.id;
 						checkInput.value = option.id;
-						checkInput.setAttribute('data-value-input', 'checkbox');
+						checkInput.setAttribute(
+							'data-value-input',
+							isSingleChoice ? 'radio' : 'checkbox'
+						);
 						var checkText = document.createElement('span');
 						checkText.textContent = option.label || 'Вариант';
 						checkLabel.appendChild(checkInput);
@@ -647,7 +674,10 @@
 			fields.forEach(function (field) {
 				var fieldElement = fieldElements[field.id];
 				if (!fieldElement) return;
-				if (field.type === 'checkbox') {
+				if (
+					field.type === 'checkbox' &&
+					!isBooleanOptionPair(field.options)
+				) {
 					var selected = Array.prototype.slice
 						.call(fieldElement.querySelectorAll('input:checked'))
 						.map(function (input) {
@@ -655,6 +685,16 @@
 						});
 					collected[field.id] = selected;
 					if (field.required && !selected.length && !invalidField)
+						invalidField = fieldElement;
+					return;
+				}
+				if (
+					field.type === 'radio' ||
+					(field.type === 'checkbox' && isBooleanOptionPair(field.options))
+				) {
+					var selectedRadio = fieldElement.querySelector('input:checked');
+					collected[field.id] = selectedRadio ? selectedRadio.value : '';
+					if (field.required && !selectedRadio && !invalidField)
 						invalidField = fieldElement;
 					return;
 				}
