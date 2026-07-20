@@ -18,7 +18,9 @@ import {
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
+	BillingPeriod,
 	PaymentStatus,
+	Plan,
 	Role,
 	SubscriptionStatus,
 	type TelegramBotSettings,
@@ -107,6 +109,7 @@ type TelegramChat = {
 
 type TelegramMessage = {
 	message_id?: number;
+	message_thread_id?: number;
 	text?: string;
 	caption?: string;
 	chat: TelegramChat;
@@ -125,6 +128,19 @@ export type TelegramSupportBotWebhookUpdate = {
 };
 
 export type TelegramWebhookBot = 'info' | 'auth' | 'support';
+
+export interface PaymentSucceededNotification {
+	paymentId: string;
+	yookassaId: string;
+	amount: string;
+	plan: Plan;
+	billingPeriod: BillingPeriod;
+	userId: string;
+	userName: string | null;
+	email: string | null;
+	phone: string | null;
+	succeededAt: Date;
+}
 
 interface TelegramWebhookConfig {
 	bot: TelegramWebhookBot;
@@ -218,6 +234,22 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			data.databaseBackupEnabled ?? currentSettings.databaseBackupEnabled;
 		const nextDailySummaryChatId =
 			data.dailySummaryChatId ?? currentSettings.dailySummaryChatId;
+		const nextDatabaseBackupThreadId =
+			data.databaseBackupThreadId !== undefined
+				? data.databaseBackupThreadId
+				: currentSettings.databaseBackupThreadId;
+		const nextSupportThreadId =
+			data.supportThreadId !== undefined
+				? data.supportThreadId
+				: currentSettings.supportThreadId;
+		const nextPaymentsThreadId =
+			data.paymentsThreadId !== undefined
+				? data.paymentsThreadId
+				: currentSettings.paymentsThreadId;
+		const nextReportsThreadId =
+			data.reportsThreadId !== undefined
+				? data.reportsThreadId
+				: currentSettings.reportsThreadId;
 		const nextDailySummaryTime =
 			data.dailySummaryTime ?? currentSettings.dailySummaryTime;
 		const nextDatabaseBackupTime =
@@ -229,10 +261,52 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		);
 
 		if (
-			(nextDailySummaryEnabled || nextDatabaseBackupEnabled) &&
-			!nextDailySummaryChatId.trim()
+			!nextDailySummaryChatId.trim() &&
+			[
+				nextSupportThreadId,
+				nextDatabaseBackupThreadId,
+				nextPaymentsThreadId,
+				nextReportsThreadId
+			].some(Boolean)
 		) {
-			throw new BadRequestException('Укажите ID группы Telegram');
+			throw new BadRequestException(
+				'Укажите ID Telegram-группы для настроенных топиков'
+			);
+		}
+
+		const updatesDailySummaryDelivery =
+			'dailySummaryEnabled' in data ||
+			'dailySummaryChatId' in data ||
+			'dailySummaryTime' in data ||
+			'reportsThreadId' in data;
+		const updatesDatabaseBackupDelivery =
+			'databaseBackupEnabled' in data ||
+			'dailySummaryChatId' in data ||
+			'databaseBackupTime' in data ||
+			'databaseBackupThreadId' in data;
+
+		if (updatesDailySummaryDelivery && nextDailySummaryEnabled) {
+			if (!nextDailySummaryChatId.trim()) {
+				throw new BadRequestException(
+					'Укажите ID Telegram-группы для отправки отчётов'
+				);
+			}
+
+			if (!nextReportsThreadId) {
+				throw new BadRequestException('Укажите ID топика Reports');
+			}
+		}
+
+		if (updatesDatabaseBackupDelivery && nextDatabaseBackupEnabled) {
+			if (!nextDailySummaryChatId.trim()) {
+				throw new BadRequestException(
+					'Укажите ID Telegram-группы для отправки backup'
+				);
+			}
+
+			if (!nextDatabaseBackupThreadId) {
+				throw new BadRequestException('Укажите ID топика Backups');
+			}
 		}
 
 		const settings = await this.prisma.telegramBotSettings.upsert({
@@ -329,6 +403,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async createAndSendDatabaseBackup(trigger: 'manual' | 'scheduled') {
+		if (trigger === 'manual') {
+			const settings = await this.getOrCreateSettings();
+			this.getDatabaseBackupDestination(settings);
+		}
+
 		const result = await this.createDatabaseBackupFile();
 
 		try {
@@ -412,7 +491,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	async sendInfoBotMessage(
 		chatId: string,
 		text: string,
-		options?: { parseMode?: 'HTML' | null }
+		options?: { parseMode?: 'HTML' | null; messageThreadId?: number }
 	) {
 		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
 
@@ -421,6 +500,50 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		await this.sendTelegramMessage(token, chatId, text, options);
+	}
+
+	async sendPaymentSucceededNotification(
+		data: PaymentSucceededNotification
+	) {
+		const settings = await this.getOrCreateSettings();
+		const chatId = settings.dailySummaryChatId.trim();
+		const messageThreadId = settings.paymentsThreadId;
+		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
+
+		if (!chatId) {
+			throw new BadRequestException(
+				'Не настроен ID Telegram-группы для уведомлений о платежах'
+			);
+		}
+
+		if (!messageThreadId) {
+			throw new BadRequestException('Не настроен ID топика Payments');
+		}
+
+		if (!token) {
+			throw new BadRequestException(
+				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
+			);
+		}
+
+		const text = [
+			'<b>Новый успешный платёж</b>',
+			'',
+			`<b>Сумма:</b> ${this.escapeTelegramHtml(data.amount)} ₽`,
+			`<b>Тариф:</b> ${this.escapeTelegramHtml(this.getPaymentPlanLabel(data.plan))}`,
+			`<b>Период:</b> ${this.escapeTelegramHtml(this.getPaymentBillingPeriodLabel(data.billingPeriod))}`,
+			`<b>Пользователь:</b> ${this.escapeTelegramHtml(data.userName || '—')}`,
+			`<b>Email:</b> ${this.escapeTelegramHtml(data.email || '—')}`,
+			`<b>Телефон:</b> ${this.escapeTelegramHtml(data.phone || '—')}`,
+			`<b>ID пользователя:</b> <code>${this.escapeTelegramHtml(data.userId)}</code>`,
+			`<b>ID платежа:</b> <code>${this.escapeTelegramHtml(data.paymentId)}</code>`,
+			`<b>ID YooKassa:</b> <code>${this.escapeTelegramHtml(data.yookassaId)}</code>`,
+			`<b>Оплачен:</b> ${this.escapeTelegramHtml(this.formatMoscowDateTime(data.succeededAt))} МСК`
+		].join('\n');
+
+		await this.sendTelegramMessage(token, chatId, text, {
+			messageThreadId
+		});
 	}
 
 	async getNotificationStatus(userId: string) {
@@ -965,6 +1088,22 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			...(typeof dto.dailySummaryChatId === 'string'
 				? { dailySummaryChatId: dto.dailySummaryChatId.trim() }
 				: {}),
+			...(dto.supportThreadId === null ||
+			typeof dto.supportThreadId === 'number'
+				? { supportThreadId: dto.supportThreadId }
+				: {}),
+			...(dto.databaseBackupThreadId === null ||
+			typeof dto.databaseBackupThreadId === 'number'
+				? { databaseBackupThreadId: dto.databaseBackupThreadId }
+				: {}),
+			...(dto.paymentsThreadId === null ||
+			typeof dto.paymentsThreadId === 'number'
+				? { paymentsThreadId: dto.paymentsThreadId }
+				: {}),
+			...(dto.reportsThreadId === null ||
+			typeof dto.reportsThreadId === 'number'
+				? { reportsThreadId: dto.reportsThreadId }
+				: {}),
 			...(typeof dto.dailySummaryTime === 'string'
 				? {
 						dailySummaryTime: this.normalizeScheduleTime(
@@ -1009,6 +1148,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return {
 			dailySummaryEnabled: settings.dailySummaryEnabled,
 			dailySummaryChatId: settings.dailySummaryChatId,
+			supportThreadId: settings.supportThreadId,
+			databaseBackupThreadId: settings.databaseBackupThreadId,
+			paymentsThreadId: settings.paymentsThreadId,
+			reportsThreadId: settings.reportsThreadId,
 			dailySummaryTime,
 			dailySummaryTimeLabel: `${dailySummaryTime} МСК`,
 			dailySummaryLastSentPeriodStart:
@@ -1295,6 +1438,17 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	private async handleSupportUserMessage(message: TelegramMessage) {
 		const userChatId = String(message.chat.id);
+		const settings = await this.getOrCreateSettings();
+		const adminChatId = settings.dailySummaryChatId.trim();
+		const messageThreadId = settings.supportThreadId;
+
+		if (!adminChatId || !messageThreadId) {
+			await this.sendSupportBotMessage(
+				userChatId,
+				'Служба поддержки временно недоступна. Пожалуйста, попробуйте позже.'
+			);
+			return;
+		}
 
 		if (message.text?.startsWith('/start')) {
 			await this.sendSupportBotMessage(
@@ -1312,21 +1466,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			return;
 		}
 
-		const settings = await this.getOrCreateSettings();
-		const adminChatId = settings.dailySummaryChatId.trim();
-
-		if (!adminChatId) {
-			await this.sendSupportBotMessage(
-				userChatId,
-				'Служба поддержки временно недоступна. Пожалуйста, попробуйте позже.'
-			);
-			return;
-		}
-
 		const copiedMessage = await this.copySupportBotMessage(
 			adminChatId,
 			userChatId,
-			message.message_id
+			message.message_id,
+			{ messageThreadId }
 		);
 
 		await this.saveSupportMessageMapping({
@@ -1339,7 +1483,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			adminChatId,
 			this.getSupportContextText(message),
 			{
-				reply_to_message_id: copiedMessage.message_id
+				reply_to_message_id: copiedMessage.message_id,
+				messageThreadId
 			}
 		);
 
@@ -1363,6 +1508,19 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 
 		const adminChatId = String(message.chat.id);
+		const settings = await this.getOrCreateSettings();
+		const configuredAdminChatId = settings.dailySummaryChatId.trim();
+		const messageThreadId = settings.supportThreadId;
+
+		if (
+			!configuredAdminChatId ||
+			!messageThreadId ||
+			adminChatId !== configuredAdminChatId ||
+			message.message_thread_id !== messageThreadId
+		) {
+			return;
+		}
+
 		const supportMessage =
 			await this.prisma.telegramSupportMessage.findUnique({
 				where: {
@@ -1387,7 +1545,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				adminChatId,
 				'Ответ отправлен пользователю.',
 				{
-					reply_to_message_id: message.message_id
+					reply_to_message_id: message.message_id,
+					messageThreadId
 				}
 			);
 		} catch (error) {
@@ -1395,7 +1554,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				adminChatId,
 				'Не удалось отправить ответ пользователю. Возможно, пользователь заблокировал бота.',
 				{
-					reply_to_message_id: message.message_id
+					reply_to_message_id: message.message_id,
+					messageThreadId
 				}
 			).catch(() => undefined);
 			throw error;
@@ -1676,8 +1836,30 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const settings = await this.getOrCreateSettings();
 		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
 		const chatId = settings.dailySummaryChatId.trim();
+		const messageThreadId = settings.reportsThreadId;
 
-		if (!settings.dailySummaryEnabled || !chatId || !token) {
+		if (!settings.dailySummaryEnabled) {
+			return false;
+		}
+
+		if (!chatId) {
+			this.logger.warn(
+				'Telegram daily summary skipped: group chat ID is not configured.'
+			);
+			return false;
+		}
+
+		if (!messageThreadId) {
+			this.logger.warn(
+				'Telegram daily summary skipped: reportsThreadId is not configured.'
+			);
+			return false;
+		}
+
+		if (!token) {
+			this.logger.warn(
+				'Telegram daily summary skipped: Info_bot token is not configured.'
+			);
 			return false;
 		}
 
@@ -1693,7 +1875,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const stats = await this.collectDailySummaryStats(period);
 		const text = this.buildDailySummaryMessage(stats);
 
-		await this.sendTelegramMessage(token, chatId, text);
+		await this.sendTelegramMessage(token, chatId, text, {
+			messageThreadId
+		});
 
 		await this.prisma.telegramBotSettings.update({
 			where: { id: 'singleton' },
@@ -1764,8 +1948,30 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const settings = await this.getOrCreateSettings();
 		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
 		const chatId = settings.dailySummaryChatId.trim();
+		const messageThreadId = settings.databaseBackupThreadId;
 
-		if (!settings.databaseBackupEnabled || !chatId || !token) {
+		if (!settings.databaseBackupEnabled) {
+			return false;
+		}
+
+		if (!chatId) {
+			this.logger.warn(
+				'Telegram database backup skipped: group chat ID is not configured.'
+			);
+			return false;
+		}
+
+		if (!messageThreadId) {
+			this.logger.warn(
+				'Telegram database backup skipped: databaseBackupThreadId is not configured.'
+			);
+			return false;
+		}
+
+		if (!token) {
+			this.logger.warn(
+				'Telegram database backup skipped: Info_bot token is not configured.'
+			);
 			return false;
 		}
 
@@ -1839,18 +2045,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		trigger: 'manual' | 'scheduled'
 	) {
 		const settings = await this.getOrCreateSettings();
-		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
-		const chatId = settings.dailySummaryChatId.trim();
-
-		if (!token) {
-			throw new BadRequestException(
-				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
-			);
-		}
-
-		if (!chatId) {
-			throw new BadRequestException('Укажите ID группы Telegram');
-		}
+		const { token, chatId, messageThreadId } =
+			this.getDatabaseBackupDestination(settings);
 
 		await this.sendTelegramDocument(
 			token,
@@ -1860,10 +2056,35 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				'<b>Backup базы данных WinWidget</b>',
 				`Создано: ${this.formatMoscowDateTime(new Date())} МСК`,
 				`Тип: ${trigger === 'manual' ? 'ручной' : 'ежедневный'}`
-			].join('\n')
+			].join('\n'),
+			messageThreadId
 		);
 
 		return true;
+	}
+
+	private getDatabaseBackupDestination(settings: TelegramBotSettings) {
+		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
+		const chatId = settings.dailySummaryChatId.trim();
+		const messageThreadId = settings.databaseBackupThreadId;
+
+		if (!chatId) {
+			throw new BadRequestException(
+				'Не настроен ID Telegram-группы для отправки backup'
+			);
+		}
+
+		if (!messageThreadId) {
+			throw new BadRequestException('Не настроен ID топика Backups');
+		}
+
+		if (!token) {
+			throw new BadRequestException(
+				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
+			);
+		}
+
+		return { token, chatId, messageThreadId };
 	}
 
 	private async writeUploadedBackupFile(file: Express.Multer.File) {
@@ -2329,7 +2550,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private async sendSupportBotMessage(
 		chatId: string,
 		text: string,
-		options?: { reply_to_message_id?: number }
+		options?: {
+			reply_to_message_id?: number;
+			messageThreadId?: number;
+		}
 	) {
 		const data = await this.fetchTelegramApi<{
 			ok?: boolean;
@@ -2340,6 +2564,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			disable_web_page_preview: true,
 			...(options?.reply_to_message_id
 				? { reply_to_message_id: options.reply_to_message_id }
+				: {}),
+			...(options?.messageThreadId
+				? { message_thread_id: options.messageThreadId }
 				: {})
 		});
 
@@ -2355,7 +2582,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private async copySupportBotMessage(
 		chatId: string,
 		fromChatId: string,
-		messageId: number
+		messageId: number,
+		options?: { messageThreadId?: number }
 	) {
 		const data = await this.fetchTelegramApi<{
 			ok?: boolean;
@@ -2363,7 +2591,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}>(this.getSupportBotToken(), 'copyMessage', {
 			chat_id: chatId,
 			from_chat_id: fromChatId,
-			message_id: messageId
+			message_id: messageId,
+			...(options?.messageThreadId
+				? { message_thread_id: options.messageThreadId }
+				: {})
 		});
 
 		if (!data.result?.message_id) {
@@ -2379,12 +2610,14 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		token: string,
 		chatId: string,
 		filePath: string,
-		caption: string
+		caption: string,
+		messageThreadId: number
 	) {
 		const fileBuffer = await readFile(filePath);
 		const formData = new FormData();
 
 		formData.append('chat_id', chatId);
+		formData.append('message_thread_id', String(messageThreadId));
 		formData.append('caption', caption);
 		formData.append('parse_mode', 'HTML');
 		formData.append(
@@ -2445,7 +2678,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		token: string,
 		chatId: string,
 		text: string,
-		options?: { parseMode?: 'HTML' | null }
+		options?: { parseMode?: 'HTML' | null; messageThreadId?: number }
 	) {
 		const parseMode = options?.parseMode === null ? null : 'HTML';
 		const response = await fetch(
@@ -2456,6 +2689,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
 				body: JSON.stringify({
 					chat_id: chatId,
+					...(options?.messageThreadId
+						? { message_thread_id: options.messageThreadId }
+						: {}),
 					text,
 					...(parseMode ? { parse_mode: parseMode } : {}),
 					disable_web_page_preview: true
@@ -2500,6 +2736,37 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			minimumFractionDigits: 1,
 			maximumFractionDigits: 1
 		}).format(value);
+	}
+
+	private getPaymentPlanLabel(plan: Plan) {
+		switch (plan) {
+			case Plan.TRIAL:
+				return 'Тест-драйв';
+			case Plan.EASY:
+				return 'Easy';
+			case Plan.HARD:
+				return 'Hard';
+			default:
+				return plan;
+		}
+	}
+
+	private getPaymentBillingPeriodLabel(billingPeriod: BillingPeriod) {
+		switch (billingPeriod) {
+			case BillingPeriod.MONTHLY:
+				return 'месяц';
+			case BillingPeriod.YEARLY:
+				return 'год';
+			default:
+				return billingPeriod;
+		}
+	}
+
+	private escapeTelegramHtml(value: string | number) {
+		return String(value)
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;');
 	}
 
 	private formatMoscowDate(date: Date) {

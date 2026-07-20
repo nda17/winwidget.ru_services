@@ -62,6 +62,12 @@ export class TelegramBotController {
 				dailySummaryChatIdConfigured: Boolean(
 					settings.dailySummaryChatId.trim()
 				),
+				supportThreadIdConfigured: Boolean(settings.supportThreadId),
+				databaseBackupThreadIdConfigured: Boolean(
+					settings.databaseBackupThreadId
+				),
+				paymentsThreadIdConfigured: Boolean(settings.paymentsThreadId),
+				reportsThreadIdConfigured: Boolean(settings.reportsThreadId),
 				dailySummaryTime: settings.dailySummaryTime,
 				databaseBackupEnabled: settings.databaseBackupEnabled,
 				databaseBackupTime: settings.databaseBackupTime,

@@ -1,9 +1,12 @@
 import {
 	IsBoolean,
+	IsInt,
 	IsOptional,
 	IsString,
 	Matches,
-	MaxLength
+	Max,
+	MaxLength,
+	Min
 } from 'class-validator';
 
 export class UpdateTelegramBotSettingsDto {
@@ -15,6 +18,30 @@ export class UpdateTelegramBotSettingsDto {
 	@IsString()
 	@MaxLength(100)
 	dailySummaryChatId?: string;
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(2147483647)
+	supportThreadId?: number | null;
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(2147483647)
+	databaseBackupThreadId?: number | null;
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(2147483647)
+	paymentsThreadId?: number | null;
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(2147483647)
+	reportsThreadId?: number | null;
 
 	@IsOptional()
 	@IsString()
