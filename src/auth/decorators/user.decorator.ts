@@ -2,7 +2,7 @@ import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 import prisma from '@prisma/client';
 
 export const CurrentUser = createParamDecorator(
-	(data: keyof prisma.User, ctx: ExecutionContext) => {
+	(data: keyof prisma.User | 'sessionId', ctx: ExecutionContext) => {
 		const request = ctx.switchToHttp().getRequest();
 		const user = request.user;
 

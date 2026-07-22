@@ -43,7 +43,7 @@ export type PublicUserLoginMethod =
 	| 'VK'
 	| 'TELEGRAM';
 
-export type PublicUser = Omit<User, 'password' | 'hashedRefreshToken'> & {
+export type PublicUser = Omit<User, 'password'> & {
 	email: string | null;
 	phone: string | null;
 	isPhoneVerified: boolean;
@@ -1193,8 +1193,7 @@ export class UserService {
 				data: shouldDeactivate
 					? {
 							status: UserStatus.DEACTIVATED,
-							personalDataConsentRevokedAt: new Date(),
-							hashedRefreshToken: null
+							personalDataConsentRevokedAt: new Date()
 						}
 					: {
 							status: UserStatus.ACTIVE,
@@ -1206,6 +1205,11 @@ export class UserService {
 			});
 
 			if (shouldDeactivate) {
+				await tx.userSession.updateMany({
+					where: { userId: id, revokedAt: null },
+					data: { revokedAt: new Date() }
+				});
+
 				await tx.widget.updateMany({
 					where: { userId: id },
 					data: { isActive: false }

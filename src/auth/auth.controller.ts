@@ -15,8 +15,11 @@ import { AuthRateLimitGuard } from '@/auth/guards/auth-rate-limit.guard';
 import {
 	Body,
 	Controller,
+	Delete,
+	Get,
 	HttpCode,
 	NotFoundException,
+	Param,
 	Patch,
 	Post,
 	Req,
@@ -46,10 +49,13 @@ export class AuthController {
 	@Post('auth/login')
 	async login(
 		@Body() dto: AuthDto,
+		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
-		const { refreshToken, ...response } =
-			await this.authService.login(dto);
+		const { refreshToken, ...response } = await this.authService.login(
+			dto,
+			req
+		);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
 	}
@@ -70,10 +76,11 @@ export class AuthController {
 	@Post('auth/email/register')
 	async registerByEmail(
 		@Body() dto: EmailRegisterDto,
+		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
 		const { refreshToken, ...response } =
-			await this.authService.registerByEmail(dto);
+			await this.authService.registerByEmail(dto, req);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
 	}
@@ -103,10 +110,11 @@ export class AuthController {
 	@Post('auth/phone/register')
 	async registerByPhone(
 		@Body() dto: PhoneRegisterDto,
+		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
 		const { refreshToken, ...response } =
-			await this.authService.registerByPhone(dto);
+			await this.authService.registerByPhone(dto, req);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
 	}
@@ -118,10 +126,11 @@ export class AuthController {
 	@Post('auth/phone/login')
 	async loginByPhone(
 		@Body() dto: PhoneLoginDto,
+		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
 		const { refreshToken, ...response } =
-			await this.authService.loginByPhone(dto);
+			await this.authService.loginByPhone(dto, req);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
 	}
@@ -174,6 +183,47 @@ export class AuthController {
 			req.cookies[this.refreshTokenService.REFRESH_TOKEN_NAME];
 
 		await this.authService.logout(refreshTokenFromCookies);
+		this.refreshTokenService.removeRefreshTokenFromResponse(res);
+		return true;
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Get('auth/sessions')
+	getSessions(
+		@CurrentUser('id') userId: string,
+		@CurrentUser('sessionId') sessionId: string
+	) {
+		return this.authService.getSessions(userId, sessionId);
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Delete('auth/sessions/:sessionId')
+	async revokeSession(
+		@CurrentUser('id') userId: string,
+		@CurrentUser('sessionId') currentSessionId: string,
+		@Param('sessionId') sessionId: string,
+		@Res({ passthrough: true }) res: Response
+	) {
+		await this.authService.revokeSession(userId, sessionId);
+		const currentSessionRevoked = sessionId === currentSessionId;
+
+		if (currentSessionRevoked) {
+			this.refreshTokenService.removeRefreshTokenFromResponse(res);
+		}
+
+		return { currentSessionRevoked };
+	}
+
+	@HttpCode(200)
+	@Auth()
+	@Delete('auth/sessions')
+	async revokeAllSessions(
+		@CurrentUser('id') userId: string,
+		@Res({ passthrough: true }) res: Response
+	) {
+		await this.authService.revokeAllSessions(userId);
 		this.refreshTokenService.removeRefreshTokenFromResponse(res);
 		return true;
 	}

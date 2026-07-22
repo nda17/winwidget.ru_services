@@ -12,7 +12,6 @@ model User {
   name                         String?
   password                     String
   avatarPath                   String?
-  hashedRefreshToken           String?                      @map("hashed_refresh_token")
   status                       UserStatus                   @default(ACTIVE)
   personalDataConsentRevokedAt DateTime?                    @map("personal_data_consent_revoked_at")
   rights                       Role[]                       @default([USER])
@@ -35,10 +34,28 @@ model User {
   affiliateReferral            AffiliateReferral?           @relation("AffiliateReferralReferred")
   adminEventLogActions         AdminEventLog[]              @relation("AdminEventLogAdmin")
   adminEventLogTargets         AdminEventLog[]              @relation("AdminEventLogTargetUser")
+  sessions                     UserSession[]
   createdAt                    DateTime                     @default(now()) @map("created_at")
   updatedAt                    DateTime                     @updatedAt @map("updated_at")
 
   @@index([status])
+}
+
+model UserSession {
+  id               String    @id
+  userId           String    @map("user_id")
+  refreshTokenHash String    @map("refresh_token_hash")
+  userAgent        String?   @map("user_agent")
+  ipAddress        String?   @map("ip_address")
+  expiresAt        DateTime  @map("expires_at")
+  lastUsedAt       DateTime  @default(now()) @map("last_used_at")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("user_sessions")
 }
 
 model Widget {

@@ -1,4 +1,4 @@
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { AffiliateService } from '@/affiliate/affiliate.service';
 import { AuthDto } from '@/auth/dto/auth.dto';
 import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
@@ -39,11 +39,13 @@ import {
 import { compare, hash } from 'bcryptjs';
 import * as dayjs from 'dayjs';
 import generator from 'generate-password-ts';
+import type { Request } from 'express';
 
 @Injectable()
 export class AuthService {
 	private readonly TOKEN_EXPIRATION_ACCESS = '1h';
 	private readonly TOKEN_EXPIRATION_REFRESH = '7d';
+	private readonly SESSION_EXPIRATION_DAYS = 7;
 	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10;
 	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5;
 	private readonly EMAIL_CODE_RESEND_COOLDOWN_SECONDS = 60;
@@ -59,9 +61,9 @@ export class AuthService {
 		private affiliateService: AffiliateService
 	) {}
 
-	async login(dto: AuthDto) {
+	async login(dto: AuthDto, request?: Request) {
 		const user = await this.validateUser(dto);
-		return this.buildResponseObject(user);
+		return this.buildResponseObject(user, request);
 	}
 
 	async register(dto: AuthDto) {
@@ -93,7 +95,7 @@ export class AuthService {
 		});
 	}
 
-	async registerByEmail(dto: EmailRegisterDto) {
+	async registerByEmail(dto: EmailRegisterDto, request?: Request) {
 		const email = normalizeEmail(dto.email);
 		const existingUser = await this.userService.getUserByEmail(email);
 
@@ -116,7 +118,7 @@ export class AuthService {
 		await this.affiliateService.registerReferral(dto.referrerId, user.id);
 		await this.deletePendingEmailRegistration(email);
 
-		return this.buildResponseObject(user);
+		return this.buildResponseObject(user, request);
 	}
 
 	async resendEmailCode(dto: ResendEmailCodeDto) {
@@ -221,7 +223,7 @@ export class AuthService {
 		return true;
 	}
 
-	async registerByPhone(dto: PhoneRegisterDto) {
+	async registerByPhone(dto: PhoneRegisterDto, request?: Request) {
 		const phone = normalizePhone(dto.phone);
 		const existingUser = await this.userService.getUserByPhone(phone);
 
@@ -239,10 +241,10 @@ export class AuthService {
 		await this.affiliateService.registerReferral(dto.referrerId, user.id);
 		await this.deletePhoneCode(phone);
 
-		return this.buildResponseObject(user);
+		return this.buildResponseObject(user, request);
 	}
 
-	async loginByPhone(dto: PhoneLoginDto) {
+	async loginByPhone(dto: PhoneLoginDto, request?: Request) {
 		const phone = normalizePhone(dto.phone);
 		const user = await this.userService.getUserByPhone(phone);
 
@@ -267,19 +269,22 @@ export class AuthService {
 			throw new UnauthorizedException('Email or password invalid');
 		}
 
-		return this.buildResponseObject(user);
+		return this.buildResponseObject(user, request);
 	}
 
 	async getNewTokens(refreshToken: string) {
-		let result: { id: string } | null = null;
+		let result: { id: string; sessionId: string } | null = null;
 
 		try {
-			result = await this.jwt.verifyAsync<{ id: string }>(refreshToken);
+			result = await this.jwt.verifyAsync<{
+				id: string;
+				sessionId: string;
+			}>(refreshToken);
 		} catch {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
-		if (!result?.id) {
+		if (!result?.id || !result.sessionId) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
@@ -290,19 +295,37 @@ export class AuthService {
 
 		this.ensureUserActive(user);
 
-		if (!user.hashedRefreshToken) {
+		const session = await this.prisma.userSession.findFirst({
+			where: {
+				id: result.sessionId,
+				userId: user.id,
+				revokedAt: null,
+				expiresAt: { gt: new Date() }
+			}
+		});
+
+		if (!session) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
 		const isValidRefreshToken = await compare(
 			refreshToken,
-			user.hashedRefreshToken
+			session.refreshTokenHash
 		);
 		if (!isValidRefreshToken) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
-		const accessToken = this.issueAccessToken(user.id, user.rights);
+		await this.prisma.userSession.update({
+			where: { id: session.id },
+			data: { lastUsedAt: new Date() }
+		});
+
+		const accessToken = this.issueAccessToken(
+			user.id,
+			user.rights,
+			session.id
+		);
 
 		return {
 			user: this.userService.toPublicUser(user),
@@ -316,13 +339,14 @@ export class AuthService {
 		}
 
 		try {
-			const result = await this.jwt.verifyAsync<{ id: string }>(
-				refreshToken
-			);
-			if (result?.id) {
-				await this.prisma.user.update({
-					where: { id: result.id },
-					data: { hashedRefreshToken: null }
+			const result = await this.jwt.verifyAsync<{
+				id: string;
+				sessionId: string;
+			}>(refreshToken);
+			if (result?.id && result.sessionId) {
+				await this.prisma.userSession.updateMany({
+					where: { id: result.sessionId, userId: result.id },
+					data: { revokedAt: new Date() }
 				});
 			}
 		} catch {
@@ -375,13 +399,18 @@ export class AuthService {
 			strict: true
 		});
 
-		await this.prisma.user.update({
-			where: { id: user.id },
-			data: {
-				password: await hash(newPassword, PASSWORD_SALT_ROUNDS),
-				hashedRefreshToken: null
-			}
-		});
+		await this.prisma.$transaction([
+			this.prisma.user.update({
+				where: { id: user.id },
+				data: {
+					password: await hash(newPassword, PASSWORD_SALT_ROUNDS)
+				}
+			}),
+			this.prisma.userSession.updateMany({
+				where: { userId: user.id, revokedAt: null },
+				data: { revokedAt: new Date() }
+			})
+		]);
 
 		if (normalizedEmail) {
 			await this.emailService.sendNewPassword(
@@ -396,12 +425,75 @@ export class AuthService {
 		}
 	}
 
-	async buildResponseObject(user: UserWithAuthIdentities) {
+	async buildResponseObject(
+		user: UserWithAuthIdentities,
+		request?: Request
+	) {
 		this.ensureUserActive(user);
 		await this.ensureTrialSubscription(user.id);
-		const tokens = await this.issueTokens(user.id, user.rights);
-		await this.saveRefreshToken(user.id, tokens.refreshToken);
+		const sessionId = randomUUID();
+		const tokens = await this.issueTokens(user.id, user.rights, sessionId);
+		const expiresAt = dayjs()
+			.add(this.SESSION_EXPIRATION_DAYS, 'day')
+			.toDate();
+
+		await this.prisma.userSession.create({
+			data: {
+				id: sessionId,
+				userId: user.id,
+				refreshTokenHash: await hash(
+					tokens.refreshToken,
+					PASSWORD_SALT_ROUNDS
+				),
+				userAgent: request?.get('user-agent')?.slice(0, 500),
+				ipAddress: this.getClientIp(request),
+				expiresAt
+			}
+		});
 		return { user: this.userService.toPublicUser(user), ...tokens };
+	}
+
+	async getSessions(userId: string, currentSessionId: string) {
+		const sessions = await this.prisma.userSession.findMany({
+			where: {
+				userId,
+				revokedAt: null,
+				expiresAt: { gt: new Date() }
+			},
+			orderBy: { lastUsedAt: 'desc' }
+		});
+
+		return sessions.map(session => ({
+			id: session.id,
+			userAgent: session.userAgent,
+			ipAddress: session.ipAddress,
+			createdAt: session.createdAt,
+			lastUsedAt: session.lastUsedAt,
+			expiresAt: session.expiresAt,
+			isCurrent: session.id === currentSessionId
+		}));
+	}
+
+	async revokeSession(userId: string, sessionId: string) {
+		const result = await this.prisma.userSession.updateMany({
+			where: { id: sessionId, userId, revokedAt: null },
+			data: { revokedAt: new Date() }
+		});
+
+		if (result.count === 0) {
+			throw new NotFoundException('Session not found');
+		}
+
+		return true;
+	}
+
+	async revokeAllSessions(userId: string) {
+		await this.prisma.userSession.updateMany({
+			where: { userId, revokedAt: null },
+			data: { revokedAt: new Date() }
+		});
+
+		return true;
 	}
 
 	private async ensureTrialSubscription(userId: string) {
@@ -420,18 +512,26 @@ export class AuthService {
 		}
 	}
 
-	private async issueTokens(userId: string, rights: Role[]) {
-		const accessToken = this.issueAccessToken(userId, rights);
-		const payload = { id: userId, rights };
+	private async issueTokens(
+		userId: string,
+		rights: Role[],
+		sessionId: string
+	) {
+		const accessToken = this.issueAccessToken(userId, rights, sessionId);
+		const payload = { id: userId, rights, sessionId };
 		const refreshToken = this.jwt.sign(payload, {
 			expiresIn: this.TOKEN_EXPIRATION_REFRESH
 		});
 		return { accessToken, refreshToken };
 	}
 
-	private issueAccessToken(userId: string, rights: Role[]) {
+	private issueAccessToken(
+		userId: string,
+		rights: Role[],
+		sessionId: string
+	) {
 		return this.jwt.sign(
-			{ id: userId, rights },
+			{ id: userId, rights, sessionId },
 			{ expiresIn: this.TOKEN_EXPIRATION_ACCESS }
 		);
 	}
@@ -629,13 +729,21 @@ export class AuthService {
 		}
 	}
 
-	private async saveRefreshToken(userId: string, refreshToken: string) {
-		await this.prisma.user.update({
-			where: { id: userId },
-			data: {
-				hashedRefreshToken: await hash(refreshToken, PASSWORD_SALT_ROUNDS)
-			}
-		});
+	private getClientIp(request?: Request) {
+		if (!request) return undefined;
+
+		const forwardedFor = request.headers['x-forwarded-for'];
+		const realIp = request.headers['x-real-ip'];
+		const cfIp = request.headers['cf-connecting-ip'];
+
+		if (typeof cfIp === 'string' && cfIp.length > 0) return cfIp.trim();
+		if (typeof realIp === 'string' && realIp.length > 0)
+			return realIp.trim();
+		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
+			return forwardedFor.split(',')[0].trim();
+		}
+
+		return request.ip ?? undefined;
 	}
 
 	private async validateUser(dto: AuthDto) {

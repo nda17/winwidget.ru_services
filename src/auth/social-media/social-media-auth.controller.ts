@@ -138,7 +138,7 @@ export class SocialMediaAuthController {
 	@Get('google/redirect')
 	@UseGuards(GoogleAuthEnabledGuard, AuthGuard('google'))
 	async googleAuthRedirect(
-		@Req() req: { user: TSocialProfile },
+		@Req() req: Request & { user: TSocialProfile },
 		@Query('state') state: string,
 		@Res({ passthrough: true }) res: Response
 	) {
@@ -148,8 +148,10 @@ export class SocialMediaAuthController {
 				normalizeAffiliateReferrerId(state)
 			);
 
-			const { refreshToken } =
-				await this.authService.buildResponseObject(user);
+			const { refreshToken } = await this.authService.buildResponseObject(
+				user,
+				req
+			);
 			this.refreshTokenService.addRefreshTokenToResponse(
 				res,
 				refreshToken
@@ -169,7 +171,7 @@ export class SocialMediaAuthController {
 	@Get('github/redirect')
 	@UseGuards(GithubAuthEnabledGuard, AuthGuard('github'))
 	async githubAuthRedirect(
-		@Req() req: { user: TSocialProfile },
+		@Req() req: Request & { user: TSocialProfile },
 		@Query('state') state: string,
 		@Res({ passthrough: true }) res: Response
 	) {
@@ -179,8 +181,10 @@ export class SocialMediaAuthController {
 				normalizeAffiliateReferrerId(state)
 			);
 
-			const { refreshToken } =
-				await this.authService.buildResponseObject(user);
+			const { refreshToken } = await this.authService.buildResponseObject(
+				user,
+				req
+			);
 			this.refreshTokenService.addRefreshTokenToResponse(
 				res,
 				refreshToken
@@ -207,6 +211,7 @@ export class SocialMediaAuthController {
 	@Get('yandex/redirect')
 	@UseGuards(YandexAuthEnabledGuard)
 	async yandexAuthRedirect(
+		@Req() req: Request,
 		@Query('code') code: string,
 		@Query('state') state: string,
 		@Res({ passthrough: true }) res: Response
@@ -236,8 +241,10 @@ export class SocialMediaAuthController {
 				normalizeAffiliateReferrerId(state)
 			);
 
-			const { refreshToken } =
-				await this.authService.buildResponseObject(user);
+			const { refreshToken } = await this.authService.buildResponseObject(
+				user,
+				req
+			);
 			this.refreshTokenService.addRefreshTokenToResponse(
 				res,
 				refreshToken
@@ -355,8 +362,10 @@ export class SocialMediaAuthController {
 				referrerId
 			);
 
-			const { refreshToken } =
-				await this.authService.buildResponseObject(user);
+			const { refreshToken } = await this.authService.buildResponseObject(
+				user,
+				req
+			);
 			this.refreshTokenService.addRefreshTokenToResponse(
 				res,
 				refreshToken

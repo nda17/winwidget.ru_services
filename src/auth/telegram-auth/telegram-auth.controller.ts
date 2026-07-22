@@ -12,6 +12,7 @@ import {
 	Headers,
 	HttpCode,
 	Post,
+	Req,
 	Res,
 	UseGuards,
 	UsePipes,
@@ -19,7 +20,7 @@ import {
 } from '@nestjs/common';
 import { Recaptcha } from '@nestlab/google-recaptcha';
 import { IsOptional, IsString, Matches } from 'class-validator';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 
 class TelegramAuthVerifyDto {
 	@IsString()
@@ -73,6 +74,7 @@ export class TelegramAuthController {
 	@Post('auth/telegram/verify')
 	async verify(
 		@Body() dto: TelegramAuthVerifyDto,
+		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
 		const user = await this.telegramAuthService.verify(
@@ -81,7 +83,7 @@ export class TelegramAuthController {
 			dto.referrerId
 		);
 		const { refreshToken, ...response } =
-			await this.authService.buildResponseObject(user);
+			await this.authService.buildResponseObject(user, req);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 		return response;
 	}
@@ -92,6 +94,7 @@ export class TelegramAuthController {
 	@Post('auth/telegram/complete')
 	async complete(
 		@Body() dto: TelegramAuthCompleteDto,
+		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
 		const user = await this.telegramAuthService.complete(
@@ -104,7 +107,7 @@ export class TelegramAuthController {
 		}
 
 		const { refreshToken, ...response } =
-			await this.authService.buildResponseObject(user);
+			await this.authService.buildResponseObject(user, req);
 		this.refreshTokenService.addRefreshTokenToResponse(res, refreshToken);
 
 		return {
