@@ -302,7 +302,12 @@ export class AuthService {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
-		return this.buildResponseObject(user);
+		const accessToken = this.issueAccessToken(user.id, user.rights);
+
+		return {
+			user: this.userService.toPublicUser(user),
+			accessToken
+		};
 	}
 
 	async logout(refreshToken?: string) {
@@ -416,14 +421,19 @@ export class AuthService {
 	}
 
 	private async issueTokens(userId: string, rights: Role[]) {
+		const accessToken = this.issueAccessToken(userId, rights);
 		const payload = { id: userId, rights };
-		const accessToken = this.jwt.sign(payload, {
-			expiresIn: this.TOKEN_EXPIRATION_ACCESS
-		});
 		const refreshToken = this.jwt.sign(payload, {
 			expiresIn: this.TOKEN_EXPIRATION_REFRESH
 		});
 		return { accessToken, refreshToken };
+	}
+
+	private issueAccessToken(userId: string, rights: Role[]) {
+		return this.jwt.sign(
+			{ id: userId, rights },
+			{ expiresIn: this.TOKEN_EXPIRATION_ACCESS }
+		);
 	}
 
 	private generateCode() {

@@ -154,14 +154,7 @@ export class AuthController {
 		}
 
 		try {
-			const { refreshToken, ...response } =
-				await this.authService.getNewTokens(refreshTokenFromCookies);
-
-			this.refreshTokenService.addRefreshTokenToResponse(
-				res,
-				refreshToken
-			);
-			return response;
+			return await this.authService.getNewTokens(refreshTokenFromCookies);
 		} catch (error) {
 			if (error instanceof UnauthorizedException) {
 				this.refreshTokenService.removeRefreshTokenFromResponse(res);
