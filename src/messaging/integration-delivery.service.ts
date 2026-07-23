@@ -1,46 +1,480 @@
 import { EmailService } from '@/email/email.service';
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
+import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
+import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import { IntegrationKind } from '@/messaging/messaging.constants';
+import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
+import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+	BillingPeriod,
+	MailingCampaignStatus,
+	MailingDeliveryChannel,
+	MailingDeliveryStatus,
+	Plan
+} from '@prisma/client';
+
+type DeliveryEventPayload =
+	| LeadIntegrationEventPayload
+	| PaymentSucceededEventPayload
+	| MailingDeliveryEventPayload
+	| LimitReachedEventPayload;
 
 @Injectable()
 export class IntegrationDeliveryService {
 	constructor(
 		private readonly emailService: EmailService,
 		private readonly safeOutboundHttpService: SafeOutboundHttpService,
-		private readonly configService: ConfigService
+		private readonly configService: ConfigService,
+		private readonly prisma: PrismaService
 	) {}
 
 	async deliver(
 		kind: IntegrationKind,
-		event: LeadIntegrationEventPayload,
+		event: DeliveryEventPayload,
 		eventId: string
 	): Promise<void> {
-		if (event.integration !== kind) {
+		if (kind === 'payment-email' || kind === 'payment-telegram') {
+			const paymentEvent = this.getPaymentEvent(event);
+			if (kind === 'payment-email') {
+				await this.sendPaymentEmail(paymentEvent, eventId);
+			} else {
+				await this.sendPaymentTelegram(paymentEvent);
+			}
+			return;
+		}
+		if (kind === 'mailing-email' || kind === 'mailing-telegram') {
+			await this.sendMailingDelivery(kind, event, eventId);
+			return;
+		}
+		if (kind === 'limit-email' || kind === 'limit-telegram') {
+			await this.sendLimitReached(kind, event, eventId);
+			return;
+		}
+
+		const leadEvent = event as LeadIntegrationEventPayload;
+		if (leadEvent.integration !== kind) {
 			throw new Error(
-				`Integration mismatch: queue=${kind}, payload=${event.integration}`
+				`Integration mismatch: queue=${kind}, payload=${leadEvent.integration}`
 			);
 		}
 
 		switch (kind) {
 			case 'email':
-				await this.sendEmail(event, eventId);
+				await this.sendEmail(leadEvent, eventId);
 				return;
 			case 'webhook':
-				await this.sendWebhook(event, eventId);
+				await this.sendWebhook(leadEvent, eventId);
 				return;
 			case 'telegram':
-				await this.sendTelegram(event);
+				await this.sendTelegram(leadEvent);
 				return;
 			case 'bitrix24':
-				await this.sendBitrix24(event);
+				await this.sendBitrix24(leadEvent);
 				return;
 			case 'amo-crm':
-				await this.sendAmoCrm(event);
+				await this.sendAmoCrm(leadEvent);
 				return;
 		}
+	}
+
+	private getPaymentEvent(
+		event: DeliveryEventPayload
+	): PaymentSucceededEventPayload {
+		const value = event as PaymentSucceededEventPayload;
+		if (
+			value?.schemaVersion !== 1 ||
+			value?.eventType !== 'payment.succeeded.v1' ||
+			!value.payment?.id ||
+			!value.payment?.yookassaId ||
+			!value.user?.id
+		) {
+			throw new Error('Invalid payment succeeded event payload');
+		}
+		return value;
+	}
+
+	private async sendMailingDelivery(
+		kind: 'mailing-email' | 'mailing-telegram',
+		event: DeliveryEventPayload,
+		eventId: string
+	): Promise<void> {
+		const payload = event as MailingDeliveryEventPayload;
+		const expectedChannel =
+			kind === 'mailing-email'
+				? MailingDeliveryChannel.EMAIL
+				: MailingDeliveryChannel.TELEGRAM;
+		if (
+			payload?.schemaVersion !== 1 ||
+			payload?.eventType !== 'mailing.delivery.requested.v1' ||
+			!payload.campaignId ||
+			!payload.deliveryId ||
+			payload.channel !== expectedChannel
+		) {
+			throw new Error('Invalid mailing delivery event payload');
+		}
+
+		const delivery = await this.prisma.mailingDelivery.findUnique({
+			where: { id: payload.deliveryId },
+			include: { campaign: true }
+		});
+		if (!delivery || delivery.campaignId !== payload.campaignId) {
+			throw new Error('Mailing delivery not found');
+		}
+		if (
+			delivery.status !== MailingDeliveryStatus.PENDING &&
+			delivery.status !== MailingDeliveryStatus.PROCESSING
+		) {
+			return;
+		}
+		if (
+			delivery.campaign.status === MailingCampaignStatus.CANCELLED ||
+			delivery.campaign.cancelRequestedAt
+		) {
+			await this.cancelPendingMailingDelivery(
+				delivery.id,
+				delivery.campaignId
+			);
+			return;
+		}
+
+		await this.prisma.$transaction([
+			this.prisma.mailingDelivery.updateMany({
+				where: {
+					id: delivery.id,
+					status: {
+						in: [
+							MailingDeliveryStatus.PENDING,
+							MailingDeliveryStatus.PROCESSING
+						]
+					}
+				},
+				data: {
+					status: MailingDeliveryStatus.PROCESSING,
+					attempts: { increment: 1 }
+				}
+			}),
+			this.prisma.mailingCampaign.updateMany({
+				where: {
+					id: delivery.campaignId,
+					status: MailingCampaignStatus.QUEUED
+				},
+				data: {
+					status: MailingCampaignStatus.RUNNING,
+					startedAt: new Date()
+				}
+			})
+		]);
+
+		if (expectedChannel === MailingDeliveryChannel.EMAIL) {
+			await this.emailService.sendAdminBroadcast(
+				delivery.recipient,
+				{
+					subject: delivery.campaign.subject,
+					message: delivery.campaign.message
+				},
+				{ messageId: `<${eventId}.mailing@winwidget.ru>` }
+			);
+		} else {
+			await this.sendTelegramMessage(
+				delivery.recipient,
+				this.buildTelegramBroadcastMessages(
+					delivery.campaign.subject,
+					delivery.campaign.message
+				)
+			);
+		}
+
+		await this.completeMailingDelivery(delivery.id, delivery.campaignId);
+	}
+
+	private async sendLimitReached(
+		kind: 'limit-email' | 'limit-telegram',
+		event: DeliveryEventPayload,
+		eventId: string
+	): Promise<void> {
+		const payload = event as LimitReachedEventPayload;
+		if (
+			payload?.schemaVersion !== 1 ||
+			payload?.eventType !== 'lead.limit.reached.v1' ||
+			!payload.entity?.id ||
+			!payload.entity?.name ||
+			!Number.isInteger(payload.limit) ||
+			!payload.destinations
+		) {
+			throw new Error('Invalid limit reached event payload');
+		}
+
+		if (kind === 'limit-email') {
+			for (const [index, email] of payload.destinations.emails.entries()) {
+				await this.emailService.sendLimitReachedNotification(
+					email,
+					payload.entity.name,
+					payload.limit,
+					{
+						messageId: `<${eventId}.limit.${index}@winwidget.ru>`
+					}
+				);
+			}
+			return;
+		}
+
+		const chatId = payload.destinations.telegramChatId;
+		if (!chatId) return;
+		await this.sendTelegramMessage(
+			chatId,
+			[
+				[
+					'⚠️ <b>Лимит заявок исчерпан</b>',
+					`${this.escapeHtml(payload.entity.name)} принял последнюю заявку (${payload.limit} из ${payload.limit}).`,
+					'',
+					'Новые заявки больше не принимаются.',
+					'Для продолжения работы перейдите на платный тариф:',
+					'👉 https://winwidget.ru/#pricing'
+				].join('\n')
+			],
+			'HTML'
+		);
+	}
+
+	private async completeMailingDelivery(
+		deliveryId: string,
+		campaignId: string
+	): Promise<void> {
+		await this.prisma.$transaction(async transaction => {
+			const updated = await transaction.mailingDelivery.updateMany({
+				where: {
+					id: deliveryId,
+					status: MailingDeliveryStatus.PROCESSING
+				},
+				data: {
+					status: MailingDeliveryStatus.SENT,
+					sentAt: new Date(),
+					lastError: null
+				}
+			});
+			if (updated.count !== 1) return;
+			const campaign = await transaction.mailingCampaign.update({
+				where: { id: campaignId },
+				data: { sentCount: { increment: 1 } }
+			});
+			const pending = await transaction.mailingDelivery.count({
+				where: {
+					campaignId,
+					status: {
+						in: [
+							MailingDeliveryStatus.PENDING,
+							MailingDeliveryStatus.PROCESSING
+						]
+					}
+				}
+			});
+			if (pending !== 0) return;
+			await transaction.mailingCampaign.updateMany({
+				where: {
+					id: campaignId,
+					status: { not: MailingCampaignStatus.CANCELLED }
+				},
+				data: {
+					status:
+						campaign.failedCount > 0
+							? MailingCampaignStatus.PARTIAL_FAILED
+							: MailingCampaignStatus.COMPLETED,
+					completedAt: new Date()
+				}
+			});
+		});
+	}
+
+	private async cancelPendingMailingDelivery(
+		deliveryId: string,
+		campaignId: string
+	): Promise<void> {
+		const updated = await this.prisma.mailingDelivery.updateMany({
+			where: {
+				id: deliveryId,
+				status: {
+					in: [
+						MailingDeliveryStatus.PENDING,
+						MailingDeliveryStatus.PROCESSING
+					]
+				}
+			},
+			data: {
+				status: MailingDeliveryStatus.CANCELLED,
+				cancelledAt: new Date()
+			}
+		});
+		if (updated.count) {
+			await this.prisma.mailingCampaign.update({
+				where: { id: campaignId },
+				data: { cancelledCount: { increment: 1 } }
+			});
+		}
+	}
+
+	private buildTelegramBroadcastMessages(
+		subject: string,
+		message: string
+	) {
+		const chunks: string[] = [];
+		let rest = message;
+		while (rest.length > 3500) {
+			const slice = rest.slice(0, 3500);
+			const lastLineBreak = slice.lastIndexOf('\n');
+			const splitAt = lastLineBreak > 2100 ? lastLineBreak + 1 : 3500;
+			chunks.push(rest.slice(0, splitAt).trimEnd());
+			rest = rest.slice(splitAt).trimStart();
+		}
+		if (rest) chunks.push(rest);
+		if (!chunks.length) chunks.push('');
+		return chunks.map((chunk, index) =>
+			index === 0 ? [subject, '', chunk].join('\n') : chunk
+		);
+	}
+
+	private async sendTelegramMessage(
+		chatId: string,
+		messages: string[],
+		parseMode: 'HTML' | null = null
+	): Promise<void> {
+		const token = this.configService
+			.get<string>('TELEGRAM_INFO_BOT_TOKEN')
+			?.trim();
+		if (!token)
+			throw new Error('TELEGRAM_INFO_BOT_TOKEN is not configured');
+		for (const text of messages) {
+			const response = await fetch(
+				`https://api.telegram.org/bot${token}/sendMessage`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						chat_id: chatId,
+						text,
+						parse_mode: parseMode
+					}),
+					signal: AbortSignal.timeout(10_000)
+				}
+			);
+			if (!response.ok) {
+				if (response.status === 400 || response.status === 403) {
+					await this.prisma.telegramNotificationChannel
+						.updateMany({
+							where: { chatId },
+							data: {
+								isActive: false,
+								disabledAt: new Date()
+							}
+						})
+						.catch(() => undefined);
+				}
+				throw new Error(
+					`Telegram API returned ${response.status}: ${(await response.text()).slice(0, 500)}`
+				);
+			}
+		}
+	}
+
+	private async sendPaymentEmail(
+		event: PaymentSucceededEventPayload,
+		eventId: string
+	): Promise<void> {
+		if (!event.user.email) return;
+		await this.emailService.sendPaymentSucceededNotification(
+			event.user.email,
+			{
+				amount: event.payment.amount,
+				planLabel: this.getPlanLabel(event.payment.plan),
+				billingPeriodLabel: this.getBillingPeriodLabel(
+					event.payment.billingPeriod
+				),
+				expiresAtLabel: event.subscription.expiresAt
+					? this.formatMoscowDateTime(
+							new Date(event.subscription.expiresAt)
+						)
+					: null
+			},
+			eventId
+		);
+	}
+
+	private async sendPaymentTelegram(
+		event: PaymentSucceededEventPayload
+	): Promise<void> {
+		const settings = await this.prisma.telegramBotSettings.findUnique({
+			where: { id: 'singleton' },
+			select: {
+				dailySummaryChatId: true,
+				paymentsThreadId: true
+			}
+		});
+		const chatId = settings?.dailySummaryChatId.trim();
+		const messageThreadId = settings?.paymentsThreadId;
+		const token = this.configService
+			.get<string>('TELEGRAM_INFO_BOT_TOKEN')
+			?.trim();
+		if (!chatId)
+			throw new Error('Telegram payment chat ID is not configured');
+		if (!messageThreadId) {
+			throw new Error('Telegram Payments topic is not configured');
+		}
+		if (!token)
+			throw new Error('TELEGRAM_INFO_BOT_TOKEN is not configured');
+
+		const text = [
+			'<b>Новый успешный платёж</b>',
+			'',
+			`<b>Сумма:</b> ${this.escapeHtml(event.payment.amount)} ₽`,
+			`<b>Тариф:</b> ${this.escapeHtml(this.getPlanLabel(event.payment.plan))}`,
+			`<b>Период:</b> ${this.escapeHtml(this.getBillingPeriodLabel(event.payment.billingPeriod))}`,
+			`<b>Пользователь:</b> ${this.escapeHtml(event.user.name || '—')}`,
+			`<b>Email:</b> ${this.escapeHtml(event.user.email || '—')}`,
+			`<b>Телефон:</b> ${this.escapeHtml(event.user.phone || '—')}`,
+			`<b>ID пользователя:</b> <code>${this.escapeHtml(event.user.id)}</code>`,
+			`<b>ID платежа:</b> <code>${this.escapeHtml(event.payment.id)}</code>`,
+			`<b>ID YooKassa:</b> <code>${this.escapeHtml(event.payment.yookassaId)}</code>`,
+			`<b>Оплачен:</b> ${this.escapeHtml(this.formatMoscowDateTime(new Date(event.payment.succeededAt)))} МСК`
+		].join('\n');
+		const response = await fetch(
+			`https://api.telegram.org/bot${token}/sendMessage`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					chat_id: chatId,
+					message_thread_id: messageThreadId,
+					text,
+					parse_mode: 'HTML'
+				}),
+				signal: AbortSignal.timeout(10_000)
+			}
+		);
+		if (!response.ok) {
+			throw new Error(
+				`Telegram API returned ${response.status}: ${(await response.text()).slice(0, 500)}`
+			);
+		}
+	}
+
+	private getPlanLabel(plan: Plan): string {
+		return plan === Plan.TRIAL
+			? 'Тест-драйв'
+			: plan === Plan.EASY
+				? 'Easy'
+				: 'Hard';
+	}
+
+	private getBillingPeriodLabel(period: BillingPeriod): string {
+		return period === BillingPeriod.MONTHLY ? 'месяц' : 'год';
+	}
+
+	private formatMoscowDateTime(value: Date): string {
+		return value.toLocaleString('ru-RU', {
+			timeZone: 'Europe/Moscow'
+		});
 	}
 
 	private async sendEmail(

@@ -3,6 +3,7 @@ import type { LeadIntegrationEventPayload } from '@/messaging/lead-integration-e
 import type { EmailService } from '@/email/email.service';
 import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import type { ConfigService } from '@nestjs/config';
+import type { PrismaService } from '@/prisma.service';
 
 const createEvent = (
 	overrides: Partial<LeadIntegrationEventPayload> = {}
@@ -26,7 +27,10 @@ const createEvent = (
 describe('IntegrationDeliveryService', () => {
 	const createService = () => {
 		const emailService = {
-			sendLeadNotification: jest.fn().mockResolvedValue(undefined)
+			sendLeadNotification: jest.fn().mockResolvedValue(undefined),
+			sendPaymentSucceededNotification: jest
+				.fn()
+				.mockResolvedValue(undefined)
 		} as unknown as EmailService;
 		const safeOutboundHttpService = {
 			postJson: jest.fn().mockResolvedValue(undefined),
@@ -35,14 +39,21 @@ describe('IntegrationDeliveryService', () => {
 		const configService = {
 			get: jest.fn()
 		} as unknown as ConfigService;
+		const prisma = {
+			telegramBotSettings: {
+				findUnique: jest.fn()
+			}
+		} as unknown as PrismaService;
 
 		return {
 			service: new IntegrationDeliveryService(
 				emailService,
 				safeOutboundHttpService,
-				configService
+				configService,
+				prisma
 			),
-			safeOutboundHttpService
+			safeOutboundHttpService,
+			emailService
 		};
 	};
 
@@ -63,6 +74,48 @@ describe('IntegrationDeliveryService', () => {
 				policy: 'webhook',
 				headers: { 'X-WinWidget-Event-Id': 'event-1' }
 			}
+		);
+	});
+
+	it('sends a payment email from the payment consumer', async () => {
+		const { service, emailService } = createService();
+
+		await service.deliver(
+			'payment-email',
+			{
+				schemaVersion: 1,
+				eventType: 'payment.succeeded.v1',
+				payment: {
+					id: 'payment-1',
+					yookassaId: 'yookassa-1',
+					amount: '990.00',
+					plan: 'EASY',
+					billingPeriod: 'MONTHLY',
+					succeededAt: '2026-07-23T12:00:00.000Z'
+				},
+				user: {
+					id: 'user-1',
+					name: 'Иван',
+					email: 'user@example.com',
+					phone: null
+				},
+				subscription: {
+					expiresAt: '2026-08-23T12:00:00.000Z'
+				}
+			},
+			'event-1'
+		);
+
+		expect(
+			emailService.sendPaymentSucceededNotification
+		).toHaveBeenCalledWith(
+			'user@example.com',
+			expect.objectContaining({
+				amount: '990.00',
+				planLabel: 'Easy',
+				billingPeriodLabel: 'месяц'
+			}),
+			'event-1'
 		);
 	});
 

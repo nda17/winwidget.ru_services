@@ -1,6 +1,6 @@
 import {
 	INTEGRATION_ROUTING_KEYS,
-	IntegrationKind,
+	LeadIntegrationKind,
 	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { Prisma } from '@prisma/client';
@@ -44,7 +44,7 @@ export interface LeadIntegrationData {
 
 export interface LeadIntegrationEventPayload {
 	schemaVersion: 1;
-	integration: IntegrationKind;
+	integration: LeadIntegrationKind;
 	source: LeadSource;
 	entity: {
 		id: string;
@@ -84,7 +84,7 @@ export async function enqueueLeadIntegrationEvents(
 	if (!integrations) return;
 
 	const destinations: Array<{
-		integration: IntegrationKind;
+		integration: LeadIntegrationKind;
 		destination: LeadIntegrationEventPayload['destination'];
 	}> = [];
 

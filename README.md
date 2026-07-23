@@ -249,7 +249,9 @@ OUTBOX_RETENTION_DAYS=7
 RABBITMQ_WORKER_PREFETCH=10
 MESSAGING_ALERTS_ENABLED=false
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
-INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm
+INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram
+MAILING_EMAIL_RATE_PER_SECOND=5
+MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
 В production пароль должен отличаться от локального. Удобно использовать
@@ -273,7 +275,9 @@ OUTBOX_RETENTION_DAYS=7
 RABBITMQ_WORKER_PREFETCH=10
 MESSAGING_ALERTS_ENABLED=true
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
-INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm
+INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram
+MAILING_EMAIL_RATE_PER_SECOND=5
+MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
 `RABBITMQ_PASSWORD` и пароль внутри `RABBITMQ_URL` должны совпадать.
@@ -289,6 +293,60 @@ Production deploy останавливается до запуска мигра�
 - `MESSAGING_ALERTS_ENABLED` — Telegram-алерты о недоступных messaging-процессах и необработанных ошибках;
 - `INTEGRATION_RECEIPT_RETENTION_DAYS` — срок хранения отметок об успешной доставке, минимум 30 дней;
 - `INTEGRATION_WORKER_KINDS` — consumers, запускаемые worker-контейнером.
+- `MAILING_EMAIL_RATE_PER_SECOND` — максимальная скорость массовой email-рассылки в одном worker-процессе;
+- `MAILING_TELEGRAM_RATE_PER_SECOND` — максимальная скорость массовой Telegram-рассылки в одном worker-процессе.
+
+Worker получает сообщения из RabbitMQ по push-модели через `basic.consume`:
+broker доставляет сообщение сам, а worker подтверждает обработку через `ack`.
+Pull-чтение (`basic.get`) для рабочих очередей не используется. Отдельный
+polling применяется только publisher-процессом при чтении PostgreSQL Outbox.
+
+Успешная оплата обрабатывается следующим образом:
+
+1. Статус платежа, подписка и событие `payment.succeeded.v1` записываются одной
+   транзакцией PostgreSQL.
+2. Outbox publisher публикует событие в RabbitMQ.
+3. RabbitMQ направляет одно событие в две независимые очереди:
+   `winwidget.payment-notification.email` и
+   `winwidget.payment-notification.telegram`.
+4. Каждый consumer имеет собственные receipt, retry и DLQ. Сбой Telegram не
+   блокирует email и наоборот.
+
+Независимые retry-очереди используют суффикс `retry-v2`. Старые пустые
+`*.retry.1..3`, если они остались после обновления существующего RabbitMQ,
+больше не получают сообщения; удаляйте их вручную только после проверки, что
+в них нет отложенных сообщений.
+
+Бизнес-критичные изменения платежа и подписки остаются синхронными в
+PostgreSQL. Через RabbitMQ выполняются только побочные уведомления.
+
+### Массовые рассылки
+
+Администратор создаёт кампанию, после чего API сразу возвращает её идентификатор
+и снимок количества получателей. Кампания, получатели и Outbox-события
+создаются одной транзакцией PostgreSQL. Email и Telegram обрабатываются
+независимыми очередями `winwidget.mailing.email` и
+`winwidget.mailing.telegram`.
+
+- для каждого получателя хранится отдельный статус;
+- worker ограничивает скорость отправки через
+  `MAILING_*_RATE_PER_SECOND`;
+- после перезапуска необработанные сообщения остаются в RabbitMQ;
+- окончательная ошибка попадает в DLQ и отражается в кампании;
+- ручной retry восстанавливает только выбранную доставку;
+- отмена помечает ещё не начатые доставки как отменённые; сообщение, которое
+  уже отправляется, может успеть уйти.
+
+### Уведомление о лимите заявок
+
+Когда последняя доступная заявка фиксируется в PostgreSQL, событие
+`lead.limit.reached.v1` создаётся в той же транзакции. Оно разветвляется в
+независимые email и Telegram queues. Прежняя fire-and-forget отправка из
+API-процесса удалена.
+
+Напоминания об окончании подписки пока остаются в существующем scheduler:
+у них уже есть PostgreSQL-дедупликация. Отчёты и прочие административные задачи
+в RabbitMQ не перенесены.
 
 RabbitMQ Management UI слушает только `127.0.0.1:15672`. Не открывайте этот
 порт публично. Для временного доступа используйте SSH tunnel:
@@ -299,14 +357,19 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 
 После этого интерфейс доступен локально по `http://127.0.0.1:15672`.
 
+Административные API общего мониторинга Outbox/RabbitMQ и ручного retry
+доступны только роли `DEV`. Обычные администраторы управляют массовыми
+кампаниями на странице «Рассылки», но не имеют доступа к общему DLQ.
+
 ### Гарантии доставки и защита от дублей
 
 Система использует доставку `at-least-once`: событие не теряется при временной
 недоступности RabbitMQ или внешнего сервиса, но при аварии в момент внешнего
 запроса теоретически возможна повторная доставка.
 
-- worker хранит успешные `eventId` в `integration_delivery_receipts` и не
-  обрабатывает уже завершённое событие повторно;
+- worker хранит успешную пару `eventId + consumer` в
+  `integration_delivery_receipts` и не обрабатывает уже завершённую доставку
+  повторно;
 - webhook получает стабильный `eventId` в JSON и заголовке
   `X-WinWidget-Event-Id`, чтобы принимающая сторона могла реализовать свою
   идемпотентность;

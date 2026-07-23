@@ -5,6 +5,7 @@ import {
 	INTEGRATION_QUEUE_NAMES,
 	INTEGRATION_ROUTING_KEYS,
 	IntegrationKind,
+	MANUAL_RETRY_EXCHANGE,
 	RETRY_DELAYS_MS,
 	RETRY_EXCHANGE
 } from '@/messaging/messaging.constants';
@@ -93,7 +94,8 @@ export class RabbitMqService
 		kind: IntegrationKind,
 		payload: unknown,
 		attempt: number,
-		eventId: string
+		eventId: string,
+		eventType: string
 	): Promise<void> {
 		const retryIndex = Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1);
 		const routingKey = this.getRetryRoutingKey(kind, retryIndex);
@@ -104,7 +106,7 @@ export class RabbitMqService
 			deliveryMode: 2,
 			mandatory: true,
 			messageId: eventId,
-			type: 'lead.integration.requested.v1',
+			type: eventType,
 			headers: { 'x-retry-attempt': attempt },
 			timestamp: Date.now()
 		});
@@ -115,11 +117,12 @@ export class RabbitMqService
 		payload: unknown,
 		attempt: number,
 		eventId: string,
-		error: string
+		error: string,
+		eventType: string
 	): Promise<void> {
 		await this.channel.publish(
 			DEAD_LETTER_EXCHANGE,
-			INTEGRATION_ROUTING_KEYS[kind],
+			this.getDeadLetterRoutingKey(kind),
 			payload,
 			{
 				contentType: 'application/json',
@@ -127,7 +130,7 @@ export class RabbitMqService
 				deliveryMode: 2,
 				mandatory: true,
 				messageId: eventId,
-				type: 'lead.integration.requested.v1',
+				type: eventType,
 				headers: {
 					'x-retry-attempt': attempt,
 					'x-last-error': error.slice(0, 1000)
@@ -212,6 +215,9 @@ export class RabbitMqService
 		await channel.assertExchange(DEAD_LETTER_EXCHANGE, 'topic', {
 			durable: true
 		});
+		await channel.assertExchange(MANUAL_RETRY_EXCHANGE, 'direct', {
+			durable: true
+		});
 
 		for (const kind of INTEGRATION_KINDS) {
 			const queue = INTEGRATION_QUEUE_NAMES[kind];
@@ -222,23 +228,24 @@ export class RabbitMqService
 				durable: true
 			});
 			await channel.bindQueue(queue, EVENTS_EXCHANGE, routingKey);
+			await channel.bindQueue(queue, MANUAL_RETRY_EXCHANGE, kind);
 
 			await channel.assertQueue(deadLetterQueue, { durable: true });
 			await channel.bindQueue(
 				deadLetterQueue,
 				DEAD_LETTER_EXCHANGE,
-				routingKey
+				this.getDeadLetterRoutingKey(kind)
 			);
 
 			for (const [index, delay] of RETRY_DELAYS_MS.entries()) {
-				const retryQueue = `${queue}.retry.${index + 1}`;
+				const retryQueue = `${queue}.retry-v2.${index + 1}`;
 				const retryRoutingKey = this.getRetryRoutingKey(kind, index);
 
 				await channel.assertQueue(retryQueue, {
 					durable: true,
 					messageTtl: delay,
-					deadLetterExchange: EVENTS_EXCHANGE,
-					deadLetterRoutingKey: routingKey
+					deadLetterExchange: MANUAL_RETRY_EXCHANGE,
+					deadLetterRoutingKey: kind
 				});
 				await channel.bindQueue(
 					retryQueue,
@@ -253,6 +260,10 @@ export class RabbitMqService
 		kind: IntegrationKind,
 		index: number
 	): string {
-		return `${INTEGRATION_ROUTING_KEYS[kind]}.retry.${index + 1}`;
+		return `${kind}.retry.${index + 1}`;
+	}
+
+	private getDeadLetterRoutingKey(kind: IntegrationKind): string {
+		return `${kind}.dead-letter`;
 	}
 }

@@ -1,9 +1,9 @@
 import { CreateCountdownTimerDto } from '@/countdown-timer/dto/create-countdown-timer.dto';
 import { SubmitCountdownTimerLeadDto } from '@/countdown-timer/dto/submit-countdown-timer-lead.dto';
 import { UpdateCountdownTimerDto } from '@/countdown-timer/dto/update-countdown-timer.dto';
-import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
+import { enqueueEntityLimitReachedEvent } from '@/messaging/limit-reached-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -140,7 +140,6 @@ export class CountdownTimerService {
 	constructor(
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
-		private emailService: EmailService,
 		private fileService: FileService,
 		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
@@ -502,75 +501,79 @@ export class CountdownTimerService {
 		}
 		this.validateContact(dataType, dto);
 
-		const { lead, newCount, limitReached } =
-			await this.subscriptionService.createLeadWithinLimit(
-				timer.userId,
-				async transaction => {
-					if (config?.filterDuplicates) {
-						const submissionCooldownDays =
-							config.submissionCooldownDays ?? 0;
-						const timerResetToken = config.timerResetToken || '';
-						const since =
-							submissionCooldownDays > 0
-								? new Date(
-										Date.now() -
-											submissionCooldownDays * 24 * 60 * 60 * 1000
-									)
-								: null;
-						const orConditions: object[] = [];
-						if (dto.phone) orConditions.push({ phone: dto.phone });
-						if (dto.email) orConditions.push({ email: dto.email });
-						if (ip) orConditions.push({ ip });
+		const { lead } = await this.subscriptionService.createLeadWithinLimit(
+			timer.userId,
+			async transaction => {
+				if (config?.filterDuplicates) {
+					const submissionCooldownDays =
+						config.submissionCooldownDays ?? 0;
+					const timerResetToken = config.timerResetToken || '';
+					const since =
+						submissionCooldownDays > 0
+							? new Date(
+									Date.now() - submissionCooldownDays * 24 * 60 * 60 * 1000
+								)
+							: null;
+					const orConditions: object[] = [];
+					if (dto.phone) orConditions.push({ phone: dto.phone });
+					if (dto.email) orConditions.push({ email: dto.email });
+					if (ip) orConditions.push({ ip });
 
-						if (orConditions.length) {
-							const existing =
-								await transaction.countdownTimerLead.findFirst({
-									where: {
-										countdownTimerId: timer.id,
-										timerResetToken,
-										...(since ? { createdAt: { gte: since } } : {}),
-										OR: orConditions
-									}
-								});
-							if (existing) {
-								throw new BadRequestException(
-									'Заявка с таким контактом уже существует'
-								);
-							}
+					if (orConditions.length) {
+						const existing =
+							await transaction.countdownTimerLead.findFirst({
+								where: {
+									countdownTimerId: timer.id,
+									timerResetToken,
+									...(since ? { createdAt: { gte: since } } : {}),
+									OR: orConditions
+								}
+							});
+						if (existing) {
+							throw new BadRequestException(
+								'Заявка с таким контактом уже существует'
+							);
 						}
 					}
-
-					const createdLead = await transaction.countdownTimerLead.create({
-						data: {
-							countdownTimerId: timer.id,
-							phone: dto.phone || null,
-							email: dto.email || null,
-							url: dto.url,
-							ip: ip || null,
-							timerResetToken: config.timerResetToken || ''
-						}
-					});
-					await enqueueLeadIntegrationEvents(transaction, {
-						source: 'countdown-timer',
-						entity: { id: timer.id, name: timer.name },
-						lead: {
-							id: createdLead.id,
-							phone: dto.phone,
-							email: dto.email,
-							url: dto.url,
-							createdAt: createdLead.createdAt
-						},
-						integrations: config.integrations
-					});
-					return createdLead;
 				}
-			);
 
-		if (limitReached) {
-			this.sendLimitReachedNotifications(timer, config, newCount).catch(
-				() => {}
-			);
-		}
+				const createdLead = await transaction.countdownTimerLead.create({
+					data: {
+						countdownTimerId: timer.id,
+						phone: dto.phone || null,
+						email: dto.email || null,
+						url: dto.url,
+						ip: ip || null,
+						timerResetToken: config.timerResetToken || ''
+					}
+				});
+				await enqueueLeadIntegrationEvents(transaction, {
+					source: 'countdown-timer',
+					entity: { id: timer.id, name: timer.name },
+					lead: {
+						id: createdLead.id,
+						phone: dto.phone,
+						email: dto.email,
+						url: dto.url,
+						createdAt: createdLead.createdAt
+					},
+					integrations: config.integrations
+				});
+				return createdLead;
+			},
+			(transaction, limit) =>
+				enqueueEntityLimitReachedEvent(transaction, {
+					entity: {
+						id: timer.id,
+						name: timer.name,
+						type: 'countdown-timer'
+					},
+					limit,
+					accountEmail: timer.user?.authIdentities?.[0]?.value,
+					integrationEmail: config?.integrations?.email,
+					telegramChatId: config?.integrations?.telegramChatId
+				})
+		);
 
 		return { success: true, lead };
 	}
@@ -587,40 +590,6 @@ export class CountdownTimerService {
 		}
 		if (dataType === 'PHONE_AND_EMAIL' && (!dto.phone || !dto.email)) {
 			throw new BadRequestException('Введите телефон и email');
-		}
-	}
-
-	private async sendLimitReachedNotifications(
-		timer: any,
-		config: any,
-		limit: number
-	) {
-		const sentTo = new Set<string>();
-		const accountEmail = timer.user?.authIdentities?.[0]?.value as
-			| string
-			| undefined;
-		const integrationEmail = config?.integrations?.email as
-			| string
-			| undefined;
-
-		if (accountEmail) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					accountEmail,
-					timer.name,
-					limit
-				);
-			} catch {}
-			sentTo.add(accountEmail);
-		}
-		if (integrationEmail && !sentTo.has(integrationEmail)) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					integrationEmail,
-					timer.name,
-					limit
-				);
-			} catch {}
 		}
 	}
 

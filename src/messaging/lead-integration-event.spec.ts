@@ -1,5 +1,8 @@
 import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
-import { INTEGRATION_ROUTING_KEYS } from '@/messaging/messaging.constants';
+import {
+	INTEGRATION_ROUTING_KEYS,
+	LEAD_INTEGRATION_KINDS
+} from '@/messaging/messaging.constants';
 import type { Prisma } from '@prisma/client';
 
 describe('enqueueLeadIntegrationEvents', () => {
@@ -33,7 +36,9 @@ describe('enqueueLeadIntegrationEvents', () => {
 		expect(data).toHaveLength(5);
 		expect(
 			data.map((event: { routingKey: string }) => event.routingKey)
-		).toEqual(Object.values(INTEGRATION_ROUTING_KEYS));
+		).toEqual(
+			LEAD_INTEGRATION_KINDS.map(kind => INTEGRATION_ROUTING_KEYS[kind])
+		);
 		expect(data[0].payload).toMatchObject({
 			schemaVersion: 1,
 			source: 'widget',

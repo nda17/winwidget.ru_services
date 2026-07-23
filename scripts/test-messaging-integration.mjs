@@ -108,6 +108,14 @@ try {
 		return true;
 	}, 'publisher topology');
 	channel = await connection.createChannel();
+	for (const queue of [
+		'winwidget.mailing.email',
+		'winwidget.mailing.telegram',
+		'winwidget.limit-notification.email',
+		'winwidget.limit-notification.telegram'
+	]) {
+		await channel.checkQueue(queue);
+	}
 
 	const configuredSmokeEventCount = Number(
 		process.env.MESSAGING_SMOKE_EVENT_COUNT || 10
@@ -172,6 +180,76 @@ try {
 	);
 	await channel.cancel(outboxConsumerTag);
 
+	const paymentEventId = randomUUID();
+	createdEventIds.push(paymentEventId);
+	const pendingPaymentQueues = new Set([
+		'payment-email',
+		'payment-telegram'
+	]);
+	const paymentConsumerTags = [];
+	for (const [kind, queue] of [
+		['payment-email', 'winwidget.payment-notification.email'],
+		['payment-telegram', 'winwidget.payment-notification.telegram']
+	]) {
+		const { consumerTag } = await channel.consume(
+			queue,
+			message => {
+				if (!message) return;
+				if (message.properties.messageId !== paymentEventId) {
+					channel.nack(message, false, true);
+					return;
+				}
+				pendingPaymentQueues.delete(kind);
+				channel.ack(message);
+			},
+			{ noAck: false }
+		);
+		paymentConsumerTags.push(consumerTag);
+	}
+	await prisma.outboxEvent.create({
+		data: {
+			id: paymentEventId,
+			eventType: 'payment.succeeded.v1',
+			routingKey: 'payment.succeeded.v1',
+			payload: {
+				schemaVersion: 1,
+				eventType: 'payment.succeeded.v1',
+				payment: {
+					id: 'ci-payment',
+					yookassaId: 'ci-yookassa',
+					amount: '990.00',
+					plan: 'EASY',
+					billingPeriod: 'MONTHLY',
+					succeededAt: new Date().toISOString()
+				},
+				user: {
+					id: 'ci-user',
+					name: 'CI',
+					email: 'ci@example.com',
+					phone: null
+				},
+				subscription: { expiresAt: null }
+			}
+		}
+	});
+	await waitFor(
+		() => pendingPaymentQueues.size === 0,
+		'payment event fan-out'
+	);
+	await waitFor(
+		() =>
+			prisma.outboxEvent
+				.findUnique({
+					where: { id: paymentEventId },
+					select: { status: true }
+				})
+				.then(event => event?.status === 'PUBLISHED'),
+		'published payment outbox status'
+	);
+	for (const consumerTag of paymentConsumerTags) {
+		await channel.cancel(consumerTag);
+	}
+
 	startProcess('dist/src/integration-worker-main.js', {
 		INTEGRATION_WORKER_KINDS: 'webhook'
 	});
@@ -221,7 +299,14 @@ try {
 	await waitFor(
 		() =>
 			prisma.integrationDeliveryFailure
-				.findUnique({ where: { eventId: duplicateEventId } })
+				.findUnique({
+					where: {
+						eventId_integration: {
+							eventId: duplicateEventId,
+							integration: 'webhook'
+						}
+					}
+				})
 				.then(failure => Boolean(failure?.resolvedAt)),
 		'duplicate receipt resolution'
 	);
@@ -241,13 +326,18 @@ try {
 	await waitFor(
 		() =>
 			prisma.integrationDeliveryFailure.findUnique({
-				where: { eventId: malformedEventId }
+				where: {
+					eventId_integration: {
+						eventId: malformedEventId,
+						integration: 'webhook'
+					}
+				}
 			}),
 		'persisted DLQ failure'
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: ${smokeEventCount} Outbox -> RabbitMQ and malformed -> DLQ -> PostgreSQL\n`
+		`Messaging integration smoke passed: ${smokeEventCount} lead events, payment fan-out and malformed -> DLQ -> PostgreSQL\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);

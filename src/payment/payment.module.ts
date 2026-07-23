@@ -8,7 +8,6 @@ import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
-import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { Module } from '@nestjs/common';
 
 @Module({
@@ -17,8 +16,7 @@ import { Module } from '@nestjs/common';
 		SubscriptionModule,
 		TariffPricesModule,
 		AffiliateModule,
-		AdminEventLogModule,
-		TelegramBotModule
+		AdminEventLogModule
 	],
 	controllers: [PaymentController],
 	providers: [

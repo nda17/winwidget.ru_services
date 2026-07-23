@@ -1,8 +1,8 @@
 import {
-	EVENTS_EXCHANGE,
 	INTEGRATION_QUEUE_NAMES,
-	INTEGRATION_ROUTING_KEYS,
-	IntegrationKind
+	IntegrationKind,
+	MANUAL_RETRY_EXCHANGE,
+	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -25,8 +25,12 @@ export class RabbitMqManagementService {
 			`/api/queues/${this.getEncodedVhost()}`
 		);
 		return queues
-			.filter(queue =>
-				queue.name.startsWith('winwidget.lead-integration.')
+			.filter(
+				queue =>
+					queue.name.startsWith('winwidget.lead-integration.') ||
+					queue.name.startsWith('winwidget.payment-notification.') ||
+					queue.name.startsWith('winwidget.mailing.') ||
+					queue.name.startsWith('winwidget.limit-notification.')
 			)
 			.sort((left, right) => left.name.localeCompare(right.name));
 	}
@@ -45,7 +49,7 @@ export class RabbitMqManagementService {
 		payload: unknown;
 	}): Promise<void> {
 		const response = await this.request<{ routed?: boolean }>(
-			`/api/exchanges/${this.getEncodedVhost()}/${encodeURIComponent(EVENTS_EXCHANGE)}/publish`,
+			`/api/exchanges/${this.getEncodedVhost()}/${encodeURIComponent(MANUAL_RETRY_EXCHANGE)}/publish`,
 			{
 				method: 'POST',
 				body: JSON.stringify({
@@ -53,12 +57,17 @@ export class RabbitMqManagementService {
 						content_type: 'application/json',
 						delivery_mode: 2,
 						message_id: input.eventId,
-						type: 'lead.integration.requested.v1',
+						type:
+							(
+								input.payload as {
+									eventType?: string;
+								}
+							)?.eventType || OUTBOX_EVENT_TYPE,
 						headers: {
 							'x-manual-retry': true
 						}
 					},
-					routing_key: INTEGRATION_ROUTING_KEYS[input.kind],
+					routing_key: input.kind,
 					payload: JSON.stringify(input.payload),
 					payload_encoding: 'string'
 				})

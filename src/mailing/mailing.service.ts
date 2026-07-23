@@ -1,178 +1,212 @@
-import { EmailService } from '@/email/email.service';
 import {
 	AdminBroadcastAudience,
-	AdminBroadcastChannel,
 	SendAdminBroadcastDto
 } from '@/mailing/dto/send-admin-broadcast.dto';
+import {
+	getMailingDeliveryRoutingKey,
+	MailingDeliveryEventPayload,
+	serializeMailingDeliveryEvent
+} from '@/messaging/mailing-delivery-event';
 import { PrismaService } from '@/prisma.service';
-import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import {
+	BadRequestException,
+	ConflictException,
+	Injectable,
+	NotFoundException
+} from '@nestjs/common';
 import {
 	AuthIdentityType,
+	MailingCampaignStatus,
+	MailingDeliveryChannel,
+	MailingDeliveryStatus,
 	SubscriptionStatus,
 	UserStatus
 } from '@prisma/client';
+import { randomUUID } from 'crypto';
 
-export interface AdminBroadcastResult {
-	audience: AdminBroadcastAudience;
-	channel: AdminBroadcastChannel;
-	recipientCount: number;
-	sentCount: number;
-	failedCount: number;
-	emailRecipientCount: number;
-	emailSentCount: number;
-	emailFailedCount: number;
-	telegramRecipientCount: number;
-	telegramSentCount: number;
-	telegramFailedCount: number;
-	executedAt: string;
-}
+const TERMINAL_CAMPAIGN_STATUSES: MailingCampaignStatus[] = [
+	MailingCampaignStatus.COMPLETED,
+	MailingCampaignStatus.PARTIAL_FAILED,
+	MailingCampaignStatus.CANCELLED
+];
 
 @Injectable()
 export class MailingService {
-	private readonly logger = new Logger(MailingService.name);
+	constructor(private readonly prisma: PrismaService) {}
 
-	constructor(
-		private readonly prisma: PrismaService,
-		private readonly emailService: EmailService,
-		private readonly telegramBotService: TelegramBotService
-	) {}
-
-	async sendAdminBroadcast(
-		dto: SendAdminBroadcastDto
-	): Promise<AdminBroadcastResult> {
+	async createAdminBroadcast(adminId: string, dto: SendAdminBroadcastDto) {
 		const subject = dto.subject.trim();
 		const message = dto.message.trim();
-		const channel = dto.channel ?? 'EMAIL';
+		const requestedChannel = dto.channel ?? 'EMAIL';
 
 		if (!subject || !message) {
-			throw new BadRequestException('Тема и текст письма обязательны');
+			throw new BadRequestException('Тема и текст рассылки обязательны');
 		}
 
-		const emailRecipients =
-			channel === 'EMAIL' || channel === 'BOTH'
-				? await this.getRecipientEmails(dto.audience)
-				: [];
-		const telegramRecipients =
-			channel === 'TELEGRAM' || channel === 'BOTH'
-				? await this.getRecipientTelegramChatIds(dto.audience)
-				: [];
-		const emailResult = await this.sendEmailBroadcast(
-			emailRecipients,
-			subject,
-			message
-		);
-		const telegramResult = await this.sendTelegramBroadcast(
-			telegramRecipients,
-			subject,
-			message
+		const [emailRecipients, telegramRecipients] = await Promise.all([
+			requestedChannel === 'EMAIL' || requestedChannel === 'BOTH'
+				? this.getRecipientEmails(dto.audience)
+				: Promise.resolve([]),
+			requestedChannel === 'TELEGRAM' || requestedChannel === 'BOTH'
+				? this.getRecipientTelegramChatIds(dto.audience)
+				: Promise.resolve([])
+		]);
+		const campaignId = randomUUID();
+		const deliveries = [
+			...emailRecipients.map(recipient => ({
+				id: randomUUID(),
+				campaignId,
+				channel: MailingDeliveryChannel.EMAIL,
+				recipient
+			})),
+			...telegramRecipients.map(recipient => ({
+				id: randomUUID(),
+				campaignId,
+				channel: MailingDeliveryChannel.TELEGRAM,
+				recipient
+			}))
+		];
+		const now = new Date();
+
+		await this.prisma.$transaction(
+			async transaction => {
+				await transaction.mailingCampaign.create({
+					data: {
+						id: campaignId,
+						adminId,
+						subject,
+						message,
+						audience: dto.audience,
+						requestedChannel,
+						status: deliveries.length
+							? MailingCampaignStatus.QUEUED
+							: MailingCampaignStatus.COMPLETED,
+						recipientCount: deliveries.length,
+						emailRecipientCount: emailRecipients.length,
+						telegramRecipientCount: telegramRecipients.length,
+						completedAt: deliveries.length ? null : now
+					}
+				});
+				if (!deliveries.length) return;
+
+				await transaction.mailingDelivery.createMany({
+					data: deliveries
+				});
+				await transaction.outboxEvent.createMany({
+					data: deliveries.map(delivery => {
+						const payload: MailingDeliveryEventPayload = {
+							schemaVersion: 1,
+							eventType: 'mailing.delivery.requested.v1',
+							campaignId,
+							deliveryId: delivery.id,
+							channel: delivery.channel
+						};
+						return {
+							id: randomUUID(),
+							eventType: payload.eventType,
+							routingKey: getMailingDeliveryRoutingKey(delivery.channel),
+							payload: serializeMailingDeliveryEvent(payload)
+						};
+					})
+				});
+			},
+			{ maxWait: 5000, timeout: 30_000 }
 		);
 
+		return this.getCampaign(campaignId);
+	}
+
+	async getCampaigns(page = 1, limit = 20) {
+		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+		const normalizedLimit =
+			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+		const [items, total] = await this.prisma.$transaction([
+			this.prisma.mailingCampaign.findMany({
+				orderBy: { createdAt: 'desc' },
+				skip: (normalizedPage - 1) * normalizedLimit,
+				take: normalizedLimit
+			}),
+			this.prisma.mailingCampaign.count()
+		]);
+
 		return {
-			audience: dto.audience,
-			channel,
-			recipientCount: emailRecipients.length + telegramRecipients.length,
-			sentCount: emailResult.sentCount + telegramResult.sentCount,
-			failedCount: emailResult.failedCount + telegramResult.failedCount,
-			emailRecipientCount: emailRecipients.length,
-			emailSentCount: emailResult.sentCount,
-			emailFailedCount: emailResult.failedCount,
-			telegramRecipientCount: telegramRecipients.length,
-			telegramSentCount: telegramResult.sentCount,
-			telegramFailedCount: telegramResult.failedCount,
-			executedAt: new Date().toISOString()
+			items: items.map(item => this.serializeCampaign(item)),
+			total,
+			page: normalizedPage,
+			limit: normalizedLimit,
+			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
 		};
 	}
 
-	private async sendEmailBroadcast(
-		recipients: string[],
-		subject: string,
-		message: string
-	) {
-		let sentCount = 0;
-		let failedCount = 0;
-		const batchSize = 5;
-
-		for (let i = 0; i < recipients.length; i += batchSize) {
-			const batch = recipients.slice(i, i + batchSize);
-
-			await Promise.all(
-				batch.map(async email => {
-					try {
-						await this.emailService.sendAdminBroadcast(email, {
-							subject,
-							message
-						});
-						sentCount += 1;
-					} catch (error) {
-						failedCount += 1;
-						this.logger.warn(
-							`Admin email broadcast failed for ${email}: ${
-								error instanceof Error ? error.message : String(error)
-							}`
-						);
-					}
-				})
-			);
-		}
-
-		return {
-			sentCount,
-			failedCount
-		};
+	async getCampaign(id: string) {
+		const campaign = await this.prisma.mailingCampaign.findUnique({
+			where: { id }
+		});
+		if (!campaign) throw new NotFoundException('Рассылка не найдена');
+		return this.serializeCampaign(campaign);
 	}
 
-	private async sendTelegramBroadcast(
-		recipients: string[],
-		subject: string,
-		message: string
-	) {
-		let sentCount = 0;
-		let failedCount = 0;
-		const batchSize = 5;
-		const telegramMessages = this.buildTelegramBroadcastMessages(
-			subject,
-			message
-		);
+	async cancelCampaign(id: string) {
+		await this.prisma.$transaction(async transaction => {
+			const campaign = await transaction.mailingCampaign.findUnique({
+				where: { id }
+			});
+			if (!campaign) throw new NotFoundException('Рассылка не найдена');
+			if (TERMINAL_CAMPAIGN_STATUSES.includes(campaign.status)) {
+				throw new ConflictException('Рассылка уже завершена');
+			}
 
-		for (let i = 0; i < recipients.length; i += batchSize) {
-			const batch = recipients.slice(i, i + batchSize);
+			const now = new Date();
+			const cancelled = await transaction.mailingDelivery.updateMany({
+				where: {
+					campaignId: id,
+					status: MailingDeliveryStatus.PENDING
+				},
+				data: {
+					status: MailingDeliveryStatus.CANCELLED,
+					cancelledAt: now
+				}
+			});
+			await transaction.mailingCampaign.update({
+				where: { id },
+				data: {
+					status: MailingCampaignStatus.CANCELLED,
+					cancelRequestedAt: now,
+					completedAt: now,
+					cancelledCount: { increment: cancelled.count }
+				}
+			});
+		});
 
-			await Promise.all(
-				batch.map(async chatId => {
-					try {
-						for (const telegramMessage of telegramMessages) {
-							await this.telegramBotService.sendInfoBotMessage(
-								chatId,
-								telegramMessage,
-								{ parseMode: null }
-							);
-						}
-						sentCount += 1;
-					} catch (error) {
-						failedCount += 1;
+		return this.getCampaign(id);
+	}
 
-						if (
-							this.telegramBotService.isRecipientUnavailableError(error)
-						) {
-							await this.telegramBotService
-								.deactivateNotificationChannelByChatId(chatId)
-								.catch(() => undefined);
-						}
-
-						this.logger.warn(
-							`Admin Telegram broadcast failed for ${chatId}: ${
-								error instanceof Error ? error.message : String(error)
-							}`
-						);
-					}
-				})
-			);
-		}
-
+	private serializeCampaign(campaign: {
+		id: string;
+		subject: string;
+		message: string;
+		audience: string;
+		requestedChannel: string;
+		status: MailingCampaignStatus;
+		recipientCount: number;
+		sentCount: number;
+		failedCount: number;
+		cancelledCount: number;
+		emailRecipientCount: number;
+		telegramRecipientCount: number;
+		startedAt: Date | null;
+		completedAt: Date | null;
+		cancelRequestedAt: Date | null;
+		createdAt: Date;
+		updatedAt: Date;
+	}) {
 		return {
-			sentCount,
-			failedCount
+			...campaign,
+			startedAt: campaign.startedAt?.toISOString() || null,
+			completedAt: campaign.completedAt?.toISOString() || null,
+			cancelRequestedAt: campaign.cancelRequestedAt?.toISOString() || null,
+			createdAt: campaign.createdAt.toISOString(),
+			updatedAt: campaign.updatedAt.toISOString()
 		};
 	}
 
@@ -181,9 +215,7 @@ export class MailingService {
 		const identities = await this.prisma.authIdentity.findMany({
 			where: {
 				type: AuthIdentityType.EMAIL,
-				value: {
-					not: ''
-				},
+				value: { not: '' },
 				user: {
 					status: UserStatus.ACTIVE,
 					...(audience === 'ACTIVE_SUBSCRIPTION'
@@ -191,30 +223,16 @@ export class MailingService {
 								subscription: {
 									is: {
 										status: SubscriptionStatus.ACTIVE,
-										OR: [
-											{
-												expiresAt: null
-											},
-											{
-												expiresAt: {
-													gt: now
-												}
-											}
-										]
+										OR: [{ expiresAt: null }, { expiresAt: { gt: now } }]
 									}
 								}
 							}
 						: {})
 				}
 			},
-			select: {
-				value: true
-			},
-			orderBy: {
-				createdAt: 'asc'
-			}
+			select: { value: true },
+			orderBy: { createdAt: 'asc' }
 		});
-
 		return Array.from(
 			new Set(
 				identities
@@ -232,9 +250,7 @@ export class MailingService {
 			await this.prisma.telegramNotificationChannel.findMany({
 				where: {
 					isActive: true,
-					chatId: {
-						not: ''
-					},
+					chatId: { not: '' },
 					user: {
 						status: UserStatus.ACTIVE,
 						...(audience === 'ACTIVE_SUBSCRIPTION'
@@ -242,65 +258,20 @@ export class MailingService {
 									subscription: {
 										is: {
 											status: SubscriptionStatus.ACTIVE,
-											OR: [
-												{
-													expiresAt: null
-												},
-												{
-													expiresAt: {
-														gt: now
-													}
-												}
-											]
+											OR: [{ expiresAt: null }, { expiresAt: { gt: now } }]
 										}
 									}
 								}
 							: {})
 					}
 				},
-				select: {
-					chatId: true
-				},
-				orderBy: {
-					createdAt: 'asc'
-				}
+				select: { chatId: true },
+				orderBy: { createdAt: 'asc' }
 			});
-
 		return Array.from(
 			new Set(
 				channels.map(channel => channel.chatId.trim()).filter(Boolean)
 			)
 		);
-	}
-
-	private buildTelegramBroadcastMessages(
-		subject: string,
-		message: string
-	) {
-		return this.splitTelegramMessage(message).map((chunk, index) =>
-			index === 0 ? [subject, '', chunk].join('\n') : chunk
-		);
-	}
-
-	private splitTelegramMessage(message: string) {
-		const maxLength = 3500;
-		const chunks: string[] = [];
-		let rest = message;
-
-		while (rest.length > maxLength) {
-			const slice = rest.slice(0, maxLength);
-			const lastLineBreak = slice.lastIndexOf('\n');
-			const splitAt =
-				lastLineBreak > maxLength * 0.6 ? lastLineBreak + 1 : maxLength;
-
-			chunks.push(rest.slice(0, splitAt).trimEnd());
-			rest = rest.slice(splitAt).trimStart();
-		}
-
-		if (rest) {
-			chunks.push(rest);
-		}
-
-		return chunks.length ? chunks : [''];
 	}
 }

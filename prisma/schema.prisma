@@ -34,6 +34,7 @@ model User {
   affiliateReferral            AffiliateReferral?           @relation("AffiliateReferralReferred")
   adminEventLogActions         AdminEventLog[]              @relation("AdminEventLogAdmin")
   adminEventLogTargets         AdminEventLog[]              @relation("AdminEventLogTargetUser")
+  mailingCampaigns             MailingCampaign[]            @relation("MailingCampaignAdmin")
   sessions                     UserSession[]
   createdAt                    DateTime                     @default(now()) @map("created_at")
   updatedAt                    DateTime                     @updatedAt @map("updated_at")
@@ -486,7 +487,7 @@ model MessagingHeartbeat {
 
 model IntegrationDeliveryFailure {
   id          String    @id @default(uuid()) @db.Uuid
-  eventId     String    @unique @map("event_id") @db.Uuid
+  eventId     String    @map("event_id") @db.Uuid
   integration String
   routingKey  String    @map("routing_key")
   payload     Json
@@ -498,6 +499,7 @@ model IntegrationDeliveryFailure {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
+  @@unique([eventId, integration], map: "integration_delivery_failures_event_integration_unique")
   @@index([resolvedAt, failedAt], map: "integration_delivery_failures_status_idx")
   @@index([integration, resolvedAt], map: "integration_delivery_failures_integration_idx")
   @@map("integration_delivery_failures")
@@ -505,14 +507,62 @@ model IntegrationDeliveryFailure {
 
 model IntegrationDeliveryReceipt {
   id          String   @id @default(uuid()) @db.Uuid
-  eventId     String   @unique @map("event_id") @db.Uuid
+  eventId     String   @map("event_id") @db.Uuid
   integration String
   deliveredAt DateTime @default(now()) @map("delivered_at")
   createdAt   DateTime @default(now()) @map("created_at")
 
+  @@unique([eventId, integration], map: "integration_delivery_receipts_event_integration_unique")
   @@index([integration, deliveredAt], map: "integration_delivery_receipts_integration_delivered_idx")
   @@index([deliveredAt], map: "integration_delivery_receipts_delivered_idx")
   @@map("integration_delivery_receipts")
+}
+
+model MailingCampaign {
+  id                     String                @id @default(uuid()) @db.Uuid
+  adminId                String                @map("admin_id")
+  subject                String
+  message                String                @db.Text
+  audience               String
+  requestedChannel       String                @map("requested_channel")
+  status                 MailingCampaignStatus @default(QUEUED)
+  recipientCount         Int                   @default(0) @map("recipient_count")
+  sentCount              Int                   @default(0) @map("sent_count")
+  failedCount            Int                   @default(0) @map("failed_count")
+  cancelledCount         Int                   @default(0) @map("cancelled_count")
+  emailRecipientCount    Int                   @default(0) @map("email_recipient_count")
+  telegramRecipientCount Int                   @default(0) @map("telegram_recipient_count")
+  startedAt              DateTime?             @map("started_at")
+  completedAt            DateTime?             @map("completed_at")
+  cancelRequestedAt      DateTime?             @map("cancel_requested_at")
+  createdAt              DateTime              @default(now()) @map("created_at")
+  updatedAt              DateTime              @updatedAt @map("updated_at")
+  admin                  User                  @relation("MailingCampaignAdmin", fields: [adminId], references: [id], onDelete: Restrict)
+  deliveries             MailingDelivery[]
+
+  @@index([status, createdAt], map: "mailing_campaigns_status_created_idx")
+  @@index([adminId, createdAt], map: "mailing_campaigns_admin_created_idx")
+  @@map("mailing_campaigns")
+}
+
+model MailingDelivery {
+  id          String                 @id @default(uuid()) @db.Uuid
+  campaignId  String                 @map("campaign_id") @db.Uuid
+  channel     MailingDeliveryChannel
+  recipient   String
+  status      MailingDeliveryStatus  @default(PENDING)
+  attempts    Int                    @default(0)
+  lastError   String?                @map("last_error") @db.Text
+  sentAt      DateTime?              @map("sent_at")
+  cancelledAt DateTime?              @map("cancelled_at")
+  createdAt   DateTime               @default(now()) @map("created_at")
+  updatedAt   DateTime               @updatedAt @map("updated_at")
+  campaign    MailingCampaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, channel, recipient], map: "mailing_deliveries_campaign_channel_recipient_unique")
+  @@index([campaignId, status], map: "mailing_deliveries_campaign_status_idx")
+  @@index([status, updatedAt], map: "mailing_deliveries_status_updated_idx")
+  @@map("mailing_deliveries")
 }
 
 model TariffPrice {
@@ -650,6 +700,27 @@ enum AffiliateReferralStatus {
   REWARD_PENDING
   CANCELLED
   PAID
+}
+
+enum MailingCampaignStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  PARTIAL_FAILED
+  CANCELLED
+}
+
+enum MailingDeliveryChannel {
+  EMAIL
+  TELEGRAM
+}
+
+enum MailingDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  CANCELLED
 }
 
 model SiteSettings {

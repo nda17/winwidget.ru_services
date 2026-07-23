@@ -16,7 +16,7 @@ import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('messaging/admin')
-@Auth(Role.ADMIN)
+@Auth(Role.DEV)
 export class MessagingAdminController {
 	constructor(
 		private readonly messagingAdminService: MessagingAdminService,

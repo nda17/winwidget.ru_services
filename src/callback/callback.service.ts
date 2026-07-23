@@ -1,6 +1,6 @@
-import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
+import { enqueueEntityLimitReachedEvent } from '@/messaging/limit-reached-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -129,7 +129,6 @@ export class CallbackService {
 	constructor(
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
-		private emailService: EmailService,
 		private fileService: FileService,
 		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
@@ -459,118 +458,60 @@ export class CallbackService {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 
-		const { lead, newCount, limitReached } =
-			await this.subscriptionService.createLeadWithinLimit(
-				callback.userId,
-				async transaction => {
-					if (config?.filterDuplicates && ip) {
-						const existing = await transaction.callbackLead.findFirst({
-							where: { callbackId: callback.id, ip }
-						});
-						if (existing) {
-							throw new BadRequestException(
-								'Заявка с этого устройства уже существует'
-							);
-						}
+		const { lead } = await this.subscriptionService.createLeadWithinLimit(
+			callback.userId,
+			async transaction => {
+				if (config?.filterDuplicates && ip) {
+					const existing = await transaction.callbackLead.findFirst({
+						where: { callbackId: callback.id, ip }
+					});
+					if (existing) {
+						throw new BadRequestException(
+							'Заявка с этого устройства уже существует'
+						);
 					}
-
-					const createdLead = await transaction.callbackLead.create({
-						data: {
-							callbackId: callback.id,
-							phone: dto.phone,
-							timeSlot: dto.timeSlot || '',
-							timezone: dto.timezone || '',
-							url: dto.url,
-							ip: ip || null
-						}
-					});
-					await enqueueLeadIntegrationEvents(transaction, {
-						source: 'callback',
-						entity: { id: callback.id, name: callback.name },
-						lead: {
-							id: createdLead.id,
-							phone: dto.phone,
-							timeSlot: dto.timeSlot,
-							timezone: dto.timezone,
-							url: dto.url,
-							createdAt: createdLead.createdAt
-						},
-						integrations: config.integrations
-					});
-					return createdLead;
 				}
-			);
 
-		if (limitReached) {
-			this.sendLimitReachedNotifications(callback, config, newCount).catch(
-				() => {}
-			);
-		}
+				const createdLead = await transaction.callbackLead.create({
+					data: {
+						callbackId: callback.id,
+						phone: dto.phone,
+						timeSlot: dto.timeSlot || '',
+						timezone: dto.timezone || '',
+						url: dto.url,
+						ip: ip || null
+					}
+				});
+				await enqueueLeadIntegrationEvents(transaction, {
+					source: 'callback',
+					entity: { id: callback.id, name: callback.name },
+					lead: {
+						id: createdLead.id,
+						phone: dto.phone,
+						timeSlot: dto.timeSlot,
+						timezone: dto.timezone,
+						url: dto.url,
+						createdAt: createdLead.createdAt
+					},
+					integrations: config.integrations
+				});
+				return createdLead;
+			},
+			(transaction, limit) =>
+				enqueueEntityLimitReachedEvent(transaction, {
+					entity: {
+						id: callback.id,
+						name: callback.name,
+						type: 'callback'
+					},
+					limit,
+					accountEmail: callback.user?.authIdentities?.[0]?.value,
+					integrationEmail: config?.integrations?.email,
+					telegramChatId: config?.integrations?.telegramChatId
+				})
+		);
 
 		return { success: true, lead };
-	}
-
-	private async sendLimitReachedNotifications(
-		callback: any,
-		config: any,
-		limit: number
-	) {
-		const sentTo = new Set<string>();
-		const accountEmail = callback.user?.authIdentities?.[0]?.value as
-			| string
-			| undefined;
-		const integrationEmail = config?.integrations?.email as
-			| string
-			| undefined;
-
-		if (accountEmail) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					accountEmail,
-					callback.name,
-					limit
-				);
-			} catch {}
-			sentTo.add(accountEmail);
-		}
-
-		if (integrationEmail && !sentTo.has(integrationEmail)) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					integrationEmail,
-					callback.name,
-					limit
-				);
-			} catch {}
-		}
-
-		const telegramChatId = config?.integrations?.telegramChatId as
-			| string
-			| undefined;
-		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (telegramChatId && telegramBotToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramBotToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: telegramChatId,
-							parse_mode: 'HTML',
-							text: [
-								`⚠️ <b>Лимит заявок исчерпан</b>`,
-								`Виджет <i>${callback.name}</i> принял последнюю заявку (${limit} из ${limit}).`,
-								``,
-								`Виджет больше не будет принимать новые заявки.`,
-								`Для продолжения работы перейдите на платный тариф:`,
-								`👉 https://winwidget.ru/#pricing`
-							].join('\n')
-						})
-					}
-				);
-			} catch {}
-		}
 	}
 
 	private buildCsv(leads: any[]): Buffer {

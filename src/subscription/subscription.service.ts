@@ -100,13 +100,41 @@ export class SubscriptionService {
 		plan: Plan,
 		billingPeriod: BillingPeriod
 	) {
+		return this.createOrUpgradeSubscriptionWithClient(
+			this.prisma,
+			userId,
+			plan,
+			billingPeriod
+		);
+	}
+
+	async createOrUpgradeSubscriptionInTransaction(
+		transaction: Prisma.TransactionClient,
+		userId: string,
+		plan: Plan,
+		billingPeriod: BillingPeriod
+	) {
+		return this.createOrUpgradeSubscriptionWithClient(
+			transaction,
+			userId,
+			plan,
+			billingPeriod
+		);
+	}
+
+	private async createOrUpgradeSubscriptionWithClient(
+		client: Pick<Prisma.TransactionClient, 'subscription'>,
+		userId: string,
+		plan: Plan,
+		billingPeriod: BillingPeriod
+	) {
 		const now = dayjs();
 		const addPeriod = (base: dayjs.Dayjs) =>
 			billingPeriod === BillingPeriod.YEARLY
 				? base.add(1, 'year')
 				: base.add(1, 'month');
 
-		const existing = await this.prisma.subscription.findUnique({
+		const existing = await client.subscription.findUnique({
 			where: { userId }
 		});
 
@@ -132,7 +160,7 @@ export class SubscriptionService {
 		const expiresAt = addPeriod(base).toDate();
 		const periodResetsAt = now.add(1, 'month').toDate();
 
-		return this.prisma.subscription.upsert({
+		return client.subscription.upsert({
 			where: { userId },
 			update: {
 				plan,
@@ -229,7 +257,11 @@ export class SubscriptionService {
 
 	async createLeadWithinLimit<T>(
 		userId: string,
-		createLead: TransactionOperation<T>
+		createLead: TransactionOperation<T>,
+		onLimitReached?: (
+			transaction: Prisma.TransactionClient,
+			limit: number
+		) => Promise<unknown>
 	): Promise<AtomicLeadCreationResult<T>> {
 		const result = await this.prisma.$transaction(async transaction => {
 			const subscription = await this.lockSubscription(
@@ -260,13 +292,21 @@ export class SubscriptionService {
 				data: { leadsThisPeriod: { increment: 1 } }
 			});
 
+			const limitReached =
+				!limits.unlimited &&
+				updatedSubscription.leadsThisPeriod === limits.maxLeadsPerPeriod;
+			if (limitReached && onLimitReached) {
+				await onLimitReached(
+					transaction,
+					updatedSubscription.leadsThisPeriod
+				);
+			}
+
 			return {
 				allowed: true as const,
 				lead,
 				newCount: updatedSubscription.leadsThisPeriod,
-				limitReached:
-					!limits.unlimited &&
-					updatedSubscription.leadsThisPeriod === limits.maxLeadsPerPeriod
+				limitReached
 			};
 		}, ATOMIC_TRANSACTION_OPTIONS);
 

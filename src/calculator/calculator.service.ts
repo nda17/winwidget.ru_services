@@ -4,9 +4,9 @@ import {
 	SubmitCalculatorLeadDto
 } from '@/calculator/dto/submit-calculator-lead.dto';
 import { UpdateCalculatorDto } from '@/calculator/dto/update-calculator.dto';
-import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
+import { enqueueEntityLimitReachedEvent } from '@/messaging/limit-reached-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -448,7 +448,6 @@ export class CalculatorService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly subscriptionService: SubscriptionService,
-		private readonly emailService: EmailService,
 		private readonly fileService: FileService,
 		private readonly safeOutboundHttpService: SafeOutboundHttpService
 	) {}
@@ -820,69 +819,72 @@ export class CalculatorService {
 		};
 		this.assertContact(config.dataType, normalizedDto);
 		const calculation = this.calculate(config, dto.answers);
-		const { lead, newCount, limitReached } =
-			await this.subscriptionService.createLeadWithinLimit(
-				calculator.userId,
-				async transaction => {
-					if (config.filterDuplicates) {
-						const or: Prisma.CalculatorLeadWhereInput[] = [];
-						if (normalizedPhone) or.push({ phone: normalizedPhone });
-						if (normalizedEmail) or.push({ email: normalizedEmail });
-						if (ip) or.push({ ip });
-						const existing = await transaction.calculatorLead.findFirst({
-							where: {
-								calculatorId: calculator.id,
-								OR: or
-							}
-						});
-						if (existing) {
-							throw new BadRequestException(
-								'Заявка с таким контактом уже существует'
-							);
-						}
-					}
-
-					const createdLead = await transaction.calculatorLead.create({
-						data: {
+		const { lead } = await this.subscriptionService.createLeadWithinLimit(
+			calculator.userId,
+			async transaction => {
+				if (config.filterDuplicates) {
+					const or: Prisma.CalculatorLeadWhereInput[] = [];
+					if (normalizedPhone) or.push({ phone: normalizedPhone });
+					if (normalizedEmail) or.push({ email: normalizedEmail });
+					if (ip) or.push({ ip });
+					const existing = await transaction.calculatorLead.findFirst({
+						where: {
 							calculatorId: calculator.id,
-							contact: normalizedDto.contact || '',
-							phone: normalizedPhone,
-							email: normalizedEmail,
-							answers:
-								calculation.answers as unknown as Prisma.InputJsonValue,
-							calculatedPrice: calculation.price,
-							currency: config.currency,
-							url: dto.url,
-							ip: ip || null
+							OR: or
 						}
 					});
-					await enqueueLeadIntegrationEvents(transaction, {
-						source: 'calculator',
-						entity: { id: calculator.id, name: calculator.name },
-						lead: {
-							id: createdLead.id,
-							contact: normalizedDto.contact,
-							phone: normalizedPhone,
-							email: normalizedEmail,
-							answers: calculation.answers,
-							calculatedPrice: calculation.price.toFixed(2),
-							currency: config.currency,
-							url: dto.url,
-							createdAt: createdLead.createdAt
-						},
-						integrations: config.integrations
-					});
-					return createdLead;
+					if (existing) {
+						throw new BadRequestException(
+							'Заявка с таким контактом уже существует'
+						);
+					}
 				}
-			);
 
-		if (limitReached) {
-			this.sendLimitReachedNotifications(
-				calculator,
-				config,
-				newCount
-			).catch(() => undefined);
-		}
+				const createdLead = await transaction.calculatorLead.create({
+					data: {
+						calculatorId: calculator.id,
+						contact: normalizedDto.contact || '',
+						phone: normalizedPhone,
+						email: normalizedEmail,
+						answers:
+							calculation.answers as unknown as Prisma.InputJsonValue,
+						calculatedPrice: calculation.price,
+						currency: config.currency,
+						url: dto.url,
+						ip: ip || null
+					}
+				});
+				await enqueueLeadIntegrationEvents(transaction, {
+					source: 'calculator',
+					entity: { id: calculator.id, name: calculator.name },
+					lead: {
+						id: createdLead.id,
+						contact: normalizedDto.contact,
+						phone: normalizedPhone,
+						email: normalizedEmail,
+						answers: calculation.answers,
+						calculatedPrice: calculation.price.toFixed(2),
+						currency: config.currency,
+						url: dto.url,
+						createdAt: createdLead.createdAt
+					},
+					integrations: config.integrations
+				});
+				return createdLead;
+			},
+			(transaction, limit) =>
+				enqueueEntityLimitReachedEvent(transaction, {
+					entity: {
+						id: calculator.id,
+						name: calculator.name,
+						type: 'calculator'
+					},
+					limit,
+					accountEmail: calculator.user?.authIdentities?.[0]?.value,
+					integrationEmail: config.integrations.email,
+					telegramChatId: config.integrations.telegramChatId
+				})
+		);
 
 		return {
 			success: true,
@@ -1043,65 +1045,6 @@ export class CalculatorService {
 		}
 		if (dataType === 'PHONE_AND_EMAIL' && (!dto.phone || !dto.email)) {
 			throw new BadRequestException('Укажите телефон и email');
-		}
-	}
-
-	private async sendLimitReachedNotifications(
-		calculator: any,
-		config: ReturnType<typeof normalizeCalculatorConfig>,
-		limit: number
-	) {
-		const sentTo = new Set<string>();
-		const accountEmail = calculator.user?.authIdentities?.[0]?.value as
-			| string
-			| undefined;
-		const integrationEmail = config.integrations.email as
-			| string
-			| undefined;
-
-		if (accountEmail) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					accountEmail,
-					calculator.name,
-					limit
-				);
-			} catch {}
-			sentTo.add(accountEmail);
-		}
-		if (integrationEmail && !sentTo.has(integrationEmail)) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					integrationEmail,
-					calculator.name,
-					limit
-				);
-			} catch {}
-		}
-
-		const telegramToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (config.integrations.telegramChatId && telegramToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: config.integrations.telegramChatId,
-							parse_mode: 'HTML',
-							text: [
-								'⚠️ <b>Лимит заявок исчерпан</b>',
-								`Калькулятор <i>${this.escapeHtml(calculator.name)}</i> принял последнюю заявку (${limit} из ${limit}).`,
-								'',
-								'Калькулятор больше не будет принимать новые заявки.',
-								'Для продолжения работы перейдите на платный тариф:',
-								'👉 https://winwidget.ru/#pricing'
-							].join('\n')
-						})
-					}
-				);
-			} catch {}
 		}
 	}
 

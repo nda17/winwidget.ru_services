@@ -1,11 +1,11 @@
 import { AffiliateService } from '@/affiliate/affiliate.service';
+import { enqueuePaymentSucceededEvent } from '@/messaging/payment-succeeded-event';
 import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
 import { PLAN_PRIORITY } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { TariffPricesService } from '@/tariff-prices/tariff-prices.service';
-import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import {
 	BadRequestException,
 	Injectable,
@@ -53,8 +53,7 @@ export class PaymentService {
 		private subscriptionService: SubscriptionService,
 		private paymentCleanupService: PaymentCleanupService,
 		private tariffPricesService: TariffPricesService,
-		private affiliateService: AffiliateService,
-		private readonly telegramBotService: TelegramBotService
+		private affiliateService: AffiliateService
 	) {}
 
 	async createPayment(
@@ -554,6 +553,7 @@ export class PaymentService {
 			where: { yookassaId },
 			select: {
 				status: true,
+				userId: true,
 				plan: true,
 				billingPeriod: true
 			}
@@ -569,49 +569,37 @@ export class PaymentService {
 			return;
 		}
 
-		const userId = realPayment.metadata?.userId;
-		if (!userId) return;
+		const userId = payment.userId;
 
 		if (!payment.plan || !payment.billingPeriod) {
 			this.logger.warn(`Payment ${yookassaId} missing plan/billingPeriod`);
 			return;
 		}
 
-		const transitionResult = await this.prisma.payment.updateMany({
-			where: {
-				yookassaId,
-				status: { not: PaymentStatus.SUCCEEDED }
-			},
-			data: {
-				status: PaymentStatus.SUCCEEDED,
-				confirmationUrl: null
-			}
-		});
+		const result = await this.prisma.$transaction(async transaction => {
+			const transitionResult = await transaction.payment.updateMany({
+				where: {
+					yookassaId,
+					status: { not: PaymentStatus.SUCCEEDED }
+				},
+				data: {
+					status: PaymentStatus.SUCCEEDED,
+					confirmationUrl: null
+				}
+			});
+			if (transitionResult.count !== 1) return null;
 
-		if (transitionResult.count !== 1) {
-			return;
-		}
-
-		const updatedPayment = await this.prisma.payment.findUnique({
-			where: { yookassaId }
-		});
-
-		if (!updatedPayment) {
-			this.logger.warn(
-				`Payment disappeared after succeeded transition: yookassaId=${yookassaId}`
-			);
-			return;
-		}
-
-		await this.subscriptionService.createOrUpgradeSubscription(
-			userId,
-			payment.plan,
-			payment.billingPeriod
-		);
-		await this.affiliateService.processPaymentSucceeded(updatedPayment);
-
-		try {
-			const user = await this.prisma.user.findUnique({
+			const updatedPayment = await transaction.payment.findUniqueOrThrow({
+				where: { yookassaId }
+			});
+			const subscription =
+				await this.subscriptionService.createOrUpgradeSubscriptionInTransaction(
+					transaction,
+					userId,
+					payment.plan,
+					payment.billingPeriod
+				);
+			const user = await transaction.user.findUnique({
 				where: { id: userId },
 				select: {
 					name: true,
@@ -635,23 +623,34 @@ export class PaymentService {
 				identity => identity.type === AuthIdentityType.PHONE
 			);
 
-			await this.telegramBotService.sendPaymentSucceededNotification({
-				paymentId: updatedPayment.id,
-				yookassaId: updatedPayment.yookassaId,
-				amount: updatedPayment.amount,
-				plan: payment.plan,
-				billingPeriod: payment.billingPeriod,
-				userId,
-				userName: user?.name ?? null,
-				email: emailIdentity?.value ?? null,
-				phone: phoneIdentity?.value ?? null,
-				succeededAt: updatedPayment.updatedAt
+			await enqueuePaymentSucceededEvent(transaction, {
+				schemaVersion: 1,
+				eventType: 'payment.succeeded.v1',
+				payment: {
+					id: updatedPayment.id,
+					yookassaId: updatedPayment.yookassaId,
+					amount: updatedPayment.amount,
+					plan: payment.plan,
+					billingPeriod: payment.billingPeriod,
+					succeededAt: updatedPayment.updatedAt.toISOString()
+				},
+				user: {
+					id: userId,
+					name: user?.name ?? null,
+					email: emailIdentity?.value ?? null,
+					phone: phoneIdentity?.value ?? null
+				},
+				subscription: {
+					expiresAt: subscription.expiresAt?.toISOString() ?? null
+				}
 			});
-		} catch (error) {
-			this.logger.warn(
-				`Failed to send Telegram payment notification: yookassaId=${yookassaId} error=${error instanceof Error ? error.message : String(error)}`
-			);
-		}
+
+			return { updatedPayment };
+		});
+		if (!result) return;
+		const { updatedPayment } = result;
+
+		await this.affiliateService.processPaymentSucceeded(updatedPayment);
 
 		this.logger.log(
 			`Payment succeeded: yookassaId=${yookassaId} userId=${userId} plan=${payment.plan}`

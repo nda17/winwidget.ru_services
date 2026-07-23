@@ -184,17 +184,49 @@ export class MessagingAdminService {
 				where: { id }
 			});
 		const kind = this.normalizeIntegration(failure.integration);
+		const mailingDelivery =
+			kind === 'mailing-email' || kind === 'mailing-telegram'
+				? this.getMailingDeliveryReference(failure.payload)
+				: null;
 
 		try {
+			if (mailingDelivery) {
+				await this.reopenMailingDelivery(
+					mailingDelivery.deliveryId,
+					mailingDelivery.campaignId
+				);
+			}
 			await this.rabbitManagement.publishIntegrationEvent({
 				kind,
 				eventId: failure.eventId,
 				payload: failure.payload
 			});
 		} catch (error) {
-			await this.prisma.integrationDeliveryFailure.update({
-				where: { id },
-				data: { retryingAt: null }
+			await this.prisma.$transaction(async transaction => {
+				await transaction.integrationDeliveryFailure.update({
+					where: { id },
+					data: { retryingAt: null }
+				});
+				if (mailingDelivery) {
+					const reverted = await transaction.mailingDelivery.updateMany({
+						where: {
+							id: mailingDelivery.deliveryId,
+							campaignId: mailingDelivery.campaignId,
+							status: 'PENDING'
+						},
+						data: { status: 'FAILED' }
+					});
+					if (reverted.count) {
+						await transaction.mailingCampaign.update({
+							where: { id: mailingDelivery.campaignId },
+							data: {
+								failedCount: { increment: 1 },
+								status: 'PARTIAL_FAILED',
+								completedAt: new Date()
+							}
+						});
+					}
+				}
 			});
 			throw error;
 		}
@@ -205,6 +237,54 @@ export class MessagingAdminService {
 			integration: kind,
 			retryingAt: new Date().toISOString()
 		};
+	}
+
+	private getMailingDeliveryReference(payload: Prisma.JsonValue) {
+		if (
+			!payload ||
+			typeof payload !== 'object' ||
+			Array.isArray(payload)
+		) {
+			throw new BadRequestException('Некорректное событие рассылки');
+		}
+		const deliveryId = payload.deliveryId;
+		const campaignId = payload.campaignId;
+		if (typeof deliveryId !== 'string' || typeof campaignId !== 'string') {
+			throw new BadRequestException('Некорректное событие рассылки');
+		}
+		return { deliveryId, campaignId };
+	}
+
+	private async reopenMailingDelivery(
+		deliveryId: string,
+		campaignId: string
+	): Promise<void> {
+		await this.prisma.$transaction(async transaction => {
+			const reopened = await transaction.mailingDelivery.updateMany({
+				where: {
+					id: deliveryId,
+					campaignId,
+					status: 'FAILED'
+				},
+				data: {
+					status: 'PENDING',
+					lastError: null
+				}
+			});
+			if (reopened.count !== 1) {
+				throw new ConflictException(
+					'Доставка рассылки уже обработана или отменена'
+				);
+			}
+			await transaction.mailingCampaign.update({
+				where: { id: campaignId },
+				data: {
+					failedCount: { decrement: 1 },
+					status: 'RUNNING',
+					completedAt: null
+				}
+			});
+		});
 	}
 
 	private getFailureWhere(

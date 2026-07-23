@@ -5,12 +5,19 @@ import {
 	RETRY_DELAYS_MS
 } from '@/messaging/messaging.constants';
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
+import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
+import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
+import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma } from '@prisma/client';
+import {
+	MailingCampaignStatus,
+	MailingDeliveryStatus,
+	Prisma
+} from '@prisma/client';
 import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'crypto';
 
@@ -18,6 +25,7 @@ import { randomUUID } from 'crypto';
 export class IntegrationWorkerService implements OnModuleInit {
 	private readonly logger = new Logger(IntegrationWorkerService.name);
 	private lastReceiptCleanupAt = 0;
+	private readonly rateLimitTails = new Map<string, Promise<void>>();
 
 	constructor(
 		private readonly rabbitMq: RabbitMqService,
@@ -60,9 +68,13 @@ export class IntegrationWorkerService implements OnModuleInit {
 			return;
 		}
 
-		let payload: LeadIntegrationEventPayload;
+		let payload:
+			| LeadIntegrationEventPayload
+			| PaymentSucceededEventPayload
+			| MailingDeliveryEventPayload
+			| LimitReachedEventPayload;
 		try {
-			payload = this.parsePayload(message);
+			payload = this.parsePayload(kind, message);
 		} catch (error) {
 			await this.deadLetterMalformed(
 				kind,
@@ -75,11 +87,16 @@ export class IntegrationWorkerService implements OnModuleInit {
 		try {
 			const receipt =
 				await this.prisma.integrationDeliveryReceipt.findUnique({
-					where: { eventId },
+					where: {
+						eventId_integration: {
+							eventId,
+							integration: kind
+						}
+					},
 					select: { id: true }
 				});
 			if (receipt) {
-				await this.resolveFailure(eventId);
+				await this.resolveFailure(eventId, kind);
 				this.rabbitMq.ack(message);
 				this.logger.warn(
 					`Duplicate integration skipped eventId=${eventId} kind=${kind}`
@@ -87,14 +104,14 @@ export class IntegrationWorkerService implements OnModuleInit {
 				return;
 			}
 
-			await this.delivery.deliver(kind, payload, eventId);
+			await this.deliverWithRateLimit(kind, payload, eventId);
 			await this.prisma.integrationDeliveryReceipt.create({
 				data: {
 					eventId,
 					integration: kind
 				}
 			});
-			await this.resolveFailure(eventId);
+			await this.resolveFailure(eventId, kind);
 			await this.cleanupReceiptsIfDue();
 			this.rabbitMq.ack(message);
 			this.logger.log(
@@ -112,7 +129,8 @@ export class IntegrationWorkerService implements OnModuleInit {
 						kind,
 						payload,
 						nextAttempt,
-						eventId
+						eventId,
+						this.getEventType(payload)
 					);
 					this.logger.warn(
 						`Integration retry scheduled eventId=${eventId} kind=${kind} attempt=${nextAttempt}: ${errorMessage}`
@@ -123,7 +141,8 @@ export class IntegrationWorkerService implements OnModuleInit {
 						payload,
 						nextAttempt,
 						eventId,
-						errorMessage
+						errorMessage,
+						this.getEventType(payload)
 					);
 					this.logger.error(
 						`Integration moved to dead-letter eventId=${eventId} kind=${kind}: ${errorMessage}`
@@ -143,9 +162,12 @@ export class IntegrationWorkerService implements OnModuleInit {
 		}
 	}
 
-	private async resolveFailure(eventId: string): Promise<void> {
+	private async resolveFailure(
+		eventId: string,
+		integration: IntegrationKind
+	): Promise<void> {
 		await this.prisma.integrationDeliveryFailure.updateMany({
-			where: { eventId, resolvedAt: null },
+			where: { eventId, integration, resolvedAt: null },
 			data: {
 				resolvedAt: new Date(),
 				retryingAt: null
@@ -174,25 +196,77 @@ export class IntegrationWorkerService implements OnModuleInit {
 	}
 
 	private parsePayload(
+		kind: IntegrationKind,
 		message: ConsumeMessage
-	): LeadIntegrationEventPayload {
-		const value = JSON.parse(
-			message.content.toString('utf8')
-		) as LeadIntegrationEventPayload;
+	):
+		| LeadIntegrationEventPayload
+		| PaymentSucceededEventPayload
+		| MailingDeliveryEventPayload
+		| LimitReachedEventPayload {
+		const value = JSON.parse(message.content.toString('utf8')) as
+			| LeadIntegrationEventPayload
+			| PaymentSucceededEventPayload
+			| MailingDeliveryEventPayload
+			| LimitReachedEventPayload;
+
+		if (kind === 'payment-email' || kind === 'payment-telegram') {
+			const payment = value as PaymentSucceededEventPayload;
+			if (
+				payment?.schemaVersion !== 1 ||
+				payment?.eventType !== 'payment.succeeded.v1' ||
+				!payment.payment?.id ||
+				!payment.payment?.yookassaId ||
+				!payment.user?.id
+			) {
+				throw new Error('Invalid payment succeeded event payload');
+			}
+			return payment;
+		}
+		if (kind === 'mailing-email' || kind === 'mailing-telegram') {
+			const mailing = value as MailingDeliveryEventPayload;
+			const expectedChannel =
+				kind === 'mailing-email' ? 'EMAIL' : 'TELEGRAM';
+			if (
+				mailing?.schemaVersion !== 1 ||
+				mailing?.eventType !== 'mailing.delivery.requested.v1' ||
+				!mailing.campaignId ||
+				!mailing.deliveryId ||
+				mailing.channel !== expectedChannel
+			) {
+				throw new Error('Invalid mailing delivery event payload');
+			}
+			return mailing;
+		}
+		if (kind === 'limit-email' || kind === 'limit-telegram') {
+			const limit = value as LimitReachedEventPayload;
+			if (
+				limit?.schemaVersion !== 1 ||
+				limit?.eventType !== 'lead.limit.reached.v1' ||
+				!limit.entity?.id ||
+				!limit.entity?.name ||
+				!Number.isInteger(limit.limit) ||
+				!limit.destinations
+			) {
+				throw new Error('Invalid limit reached event payload');
+			}
+			return limit;
+		}
+
+		const lead = value as LeadIntegrationEventPayload;
 
 		if (
-			value?.schemaVersion !== 1 ||
-			!value.integration ||
-			!value.source ||
-			!value.entity?.id ||
-			!value.entity?.name ||
-			!value.lead?.id ||
-			!value.lead?.createdAt ||
-			!value.destination
+			lead?.schemaVersion !== 1 ||
+			!lead.integration ||
+			!lead.source ||
+			!lead.entity?.id ||
+			!lead.entity?.name ||
+			!lead.lead?.id ||
+			!lead.lead?.createdAt ||
+			!lead.destination
 		) {
 			throw new Error('Invalid lead integration event payload');
 		}
-		return value;
+		return lead;
 	}
 
 	private async deadLetterMalformed(
@@ -214,12 +288,25 @@ export class IntegrationWorkerService implements OnModuleInit {
 				payload,
 				this.getRetryAttempt(message),
 				eventId,
-				error
+				error,
+				message.properties.type || 'unknown'
 			);
 			this.rabbitMq.ack(message);
 		} catch {
 			this.rabbitMq.nack(message, true);
 		}
+	}
+
+	private getEventType(
+		payload:
+			| LeadIntegrationEventPayload
+			| PaymentSucceededEventPayload
+			| MailingDeliveryEventPayload
+			| LimitReachedEventPayload
+	): string {
+		return 'eventType' in payload
+			? payload.eventType
+			: 'lead.integration.requested.v1';
 	}
 
 	private async collectDeadLetter(
@@ -246,7 +333,12 @@ export class IntegrationWorkerService implements OnModuleInit {
 
 		try {
 			await this.prisma.integrationDeliveryFailure.upsert({
-				where: { eventId },
+				where: {
+					eventId_integration: {
+						eventId,
+						integration: kind
+					}
+				},
 				create: {
 					eventId,
 					integration: kind,
@@ -267,6 +359,7 @@ export class IntegrationWorkerService implements OnModuleInit {
 					resolvedAt: null
 				}
 			});
+			await this.markMailingDeliveryFailed(kind, payload, lastError);
 			this.rabbitMq.ack(message);
 			this.logger.error(
 				`Dead-letter persisted eventId=${eventId} kind=${kind}`
@@ -279,6 +372,114 @@ export class IntegrationWorkerService implements OnModuleInit {
 			);
 			this.rabbitMq.nack(message, true);
 		}
+	}
+
+	private async deliverWithRateLimit(
+		kind: IntegrationKind,
+		payload:
+			| LeadIntegrationEventPayload
+			| PaymentSucceededEventPayload
+			| MailingDeliveryEventPayload
+			| LimitReachedEventPayload,
+		eventId: string
+	): Promise<void> {
+		const intervalMs = this.getRateLimitInterval(kind);
+		if (!intervalMs) {
+			await this.delivery.deliver(kind, payload, eventId);
+			return;
+		}
+
+		const previous = this.rateLimitTails.get(kind) || Promise.resolve();
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => {
+			release = resolve;
+		});
+		this.rateLimitTails.set(
+			kind,
+			previous.catch(() => undefined).then(() => gate)
+		);
+		await previous.catch(() => undefined);
+		try {
+			await this.delivery.deliver(kind, payload, eventId);
+		} finally {
+			setTimeout(release, intervalMs);
+		}
+	}
+
+	private getRateLimitInterval(kind: IntegrationKind): number {
+		const key =
+			kind === 'mailing-email'
+				? 'MAILING_EMAIL_RATE_PER_SECOND'
+				: kind === 'mailing-telegram'
+					? 'MAILING_TELEGRAM_RATE_PER_SECOND'
+					: null;
+		if (!key) return 0;
+		const fallback = kind === 'mailing-email' ? 5 : 10;
+		const configured = Number(
+			this.configService.get<string>(key) || fallback
+		);
+		const rate =
+			Number.isFinite(configured) && configured > 0
+				? Math.min(configured, 50)
+				: fallback;
+		return Math.ceil(1000 / rate);
+	}
+
+	private async markMailingDeliveryFailed(
+		kind: IntegrationKind,
+		payload: Prisma.InputJsonValue,
+		lastError: string
+	): Promise<void> {
+		if (kind !== 'mailing-email' && kind !== 'mailing-telegram') return;
+		const deliveryId = (payload as { deliveryId?: string }).deliveryId;
+		const campaignId = (payload as { campaignId?: string }).campaignId;
+		if (!deliveryId || !campaignId) return;
+
+		await this.prisma.$transaction(async transaction => {
+			const failed = await transaction.mailingDelivery.updateMany({
+				where: {
+					id: deliveryId,
+					campaignId,
+					status: {
+						in: [
+							MailingDeliveryStatus.PENDING,
+							MailingDeliveryStatus.PROCESSING
+						]
+					}
+				},
+				data: {
+					status: MailingDeliveryStatus.FAILED,
+					lastError: lastError.slice(0, 10_000)
+				}
+			});
+			if (failed.count !== 1) return;
+			await transaction.mailingCampaign.update({
+				where: { id: campaignId },
+				data: { failedCount: { increment: 1 } }
+			});
+			const pending = await transaction.mailingDelivery.count({
+				where: {
+					campaignId,
+					status: {
+						in: [
+							MailingDeliveryStatus.PENDING,
+							MailingDeliveryStatus.PROCESSING
+						]
+					}
+				}
+			});
+			if (pending !== 0) return;
+			await transaction.mailingCampaign.updateMany({
+				where: {
+					id: campaignId,
+					status: { not: MailingCampaignStatus.CANCELLED }
+				},
+				data: {
+					status: MailingCampaignStatus.PARTIAL_FAILED,
+					completedAt: new Date()
+				}
+			});
+		});
 	}
 
 	private getRetryAttempt(message: ConsumeMessage): number {

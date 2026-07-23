@@ -1,6 +1,6 @@
-import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
 import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
+import { enqueueEntityLimitReachedEvent } from '@/messaging/limit-reached-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -260,7 +260,6 @@ export class WidgetService {
 	constructor(
 		private prisma: PrismaService,
 		private subscriptionService: SubscriptionService,
-		private emailService: EmailService,
 		private fileService: FileService,
 		private safeOutboundHttpService: SafeOutboundHttpService
 	) {}
@@ -789,134 +788,71 @@ export class WidgetService {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 
-		const { lead, newCount, limitReached } =
-			await this.subscriptionService.createLeadWithinLimit(
-				widget.userId,
-				async transaction => {
-					if (config?.filterDuplicates) {
-						const spinResetToken = config.spinResetToken || '';
-						const orConditions: object[] = [{ contact: dto.contact }];
-						if (ip) orConditions.push({ ip });
-						const existingLead = await transaction.lead.findFirst({
-							where: {
-								widgetId: widget.id,
-								spinResetToken,
-								OR: orConditions
-							}
-						});
-						if (existingLead) {
-							throw new BadRequestException(
-								'Заявка с таким контактом уже существует'
-							);
-						}
-					}
-
-					const createdLead = await transaction.lead.create({
-						data: {
+		const { lead } = await this.subscriptionService.createLeadWithinLimit(
+			widget.userId,
+			async transaction => {
+				if (config?.filterDuplicates) {
+					const spinResetToken = config.spinResetToken || '';
+					const orConditions: object[] = [{ contact: dto.contact }];
+					if (ip) orConditions.push({ ip });
+					const existingLead = await transaction.lead.findFirst({
+						where: {
 							widgetId: widget.id,
-							contact: dto.contact,
-							phone: dto.phone,
-							email: dto.email,
-							bonus: dto.bonus,
-							url: dto.url,
-							ip: ip || null,
-							spinResetToken: config.spinResetToken || ''
+							spinResetToken,
+							OR: orConditions
 						}
 					});
-					await enqueueLeadIntegrationEvents(transaction, {
-						source: 'widget',
-						entity: { id: widget.id, name: widget.name },
-						lead: {
-							id: createdLead.id,
-							contact: dto.contact,
-							name: dto.name,
-							phone: dto.phone,
-							email: dto.email,
-							bonus: dto.bonus,
-							url: dto.url,
-							createdAt: createdLead.createdAt
-						},
-						integrations: config.integrations
-					});
-					return createdLead;
+					if (existingLead) {
+						throw new BadRequestException(
+							'Заявка с таким контактом уже существует'
+						);
+					}
 				}
-			);
 
-		if (limitReached) {
-			this.sendLimitReachedNotifications(widget, config, newCount).catch(
-				() => {}
-			);
-		}
+				const createdLead = await transaction.lead.create({
+					data: {
+						widgetId: widget.id,
+						contact: dto.contact,
+						phone: dto.phone,
+						email: dto.email,
+						bonus: dto.bonus,
+						url: dto.url,
+						ip: ip || null,
+						spinResetToken: config.spinResetToken || ''
+					}
+				});
+				await enqueueLeadIntegrationEvents(transaction, {
+					source: 'widget',
+					entity: { id: widget.id, name: widget.name },
+					lead: {
+						id: createdLead.id,
+						contact: dto.contact,
+						name: dto.name,
+						phone: dto.phone,
+						email: dto.email,
+						bonus: dto.bonus,
+						url: dto.url,
+						createdAt: createdLead.createdAt
+					},
+					integrations: config.integrations
+				});
+				return createdLead;
+			},
+			(transaction, limit) =>
+				enqueueEntityLimitReachedEvent(transaction, {
+					entity: {
+						id: widget.id,
+						name: widget.name,
+						type: 'widget'
+					},
+					limit,
+					accountEmail: widget.user?.authIdentities?.[0]?.value,
+					integrationEmail: config?.integrations?.email,
+					telegramChatId: config?.integrations?.telegramChatId
+				})
+		);
 
 		return { success: true, lead };
-	}
-
-	private async sendLimitReachedNotifications(
-		widget: any,
-		config: any,
-		limit: number
-	) {
-		const sentTo = new Set<string>();
-
-		// Account email from AuthIdentity
-		const accountEmail = widget.user?.authIdentities?.[0]?.value as
-			| string
-			| undefined;
-
-		// Integration email (may differ from account email)
-		const integrationEmail = config?.integrations?.email as
-			| string
-			| undefined;
-
-		if (accountEmail) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					accountEmail,
-					widget.name,
-					limit
-				);
-			} catch {}
-			sentTo.add(accountEmail);
-		}
-
-		if (integrationEmail && !sentTo.has(integrationEmail)) {
-			try {
-				await this.emailService.sendLimitReachedNotification(
-					integrationEmail,
-					widget.name,
-					limit
-				);
-			} catch {}
-		}
-
-		// Telegram
-		const telegramChatId = config?.integrations?.telegramChatId as
-			| string
-			| undefined;
-		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (telegramChatId && telegramBotToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramBotToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: telegramChatId,
-							parse_mode: 'HTML',
-							text: [
-								`⚠️ <b>Лимит заявок исчерпан</b>`,
-								`Виджет <i>${widget.name}</i> принял последнюю заявку (${limit} из ${limit}).`,
-								``,
-								`Виджет больше не будет принимать новые заявки.`,
-								`Для продолжения работы перейдите на платный тариф:`,
-								`👉 https://winwidget.ru/#pricing`
-							].join('\n')
-						})
-					}
-				);
-			} catch {}
-		}
 	}
 
 	private getAdminWidgetMonitoringBaseSql() {

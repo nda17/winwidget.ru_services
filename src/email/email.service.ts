@@ -2,6 +2,7 @@ import VerificationEmail from '@email/confirmation.email';
 import AdminBroadcastEmail from '@email/admin-broadcast.email';
 import LeadNotificationEmail from '@email/lead-notification.email';
 import LimitReachedEmail from '@email/limit-reached.email';
+import PaymentSucceededEmail from '@email/payment-succeeded.email';
 import NewPasswordEmail from '@email/restore-password.email';
 import SubscriptionExpiryReminderEmail from '@email/subscription-expiry-reminder.email';
 import { MailerService } from '@nestjs-modules/mailer';
@@ -29,6 +30,13 @@ interface SubscriptionExpiryReminderPayload {
 	daysBeforeExpiry: number;
 	planLabel: string;
 	expiresAtLabel: string;
+}
+
+interface PaymentSucceededEmailPayload {
+	amount: string;
+	planLabel: string;
+	billingPeriodLabel: string;
+	expiresAtLabel: string | null;
 }
 
 @Injectable()
@@ -59,7 +67,11 @@ export class EmailService {
 		return this.sendEmail(to, 'Временный пароль', html);
 	}
 
-	sendAdminBroadcast(to: string, data: AdminBroadcastPayload) {
+	sendAdminBroadcast(
+		to: string,
+		data: AdminBroadcastPayload,
+		options: { messageId?: string } = {}
+	) {
 		const html = render(
 			AdminBroadcastEmail({
 				subject: data.subject,
@@ -67,7 +79,7 @@ export class EmailService {
 			})
 		);
 
-		return this.sendEmail(to, data.subject, html);
+		return this.sendEmail(to, data.subject, html, options);
 	}
 
 	sendSubscriptionExpiryReminder(
@@ -119,10 +131,25 @@ export class EmailService {
 		);
 	}
 
+	sendPaymentSucceededNotification(
+		to: string,
+		data: PaymentSucceededEmailPayload,
+		eventId: string
+	) {
+		const html = render(PaymentSucceededEmail(data));
+		return this.sendEmail(
+			to,
+			'Оплата WinWidget успешно подтверждена',
+			html,
+			{ messageId: `<${eventId}.payment@winwidget.ru>` }
+		);
+	}
+
 	sendLimitReachedNotification(
 		to: string,
 		widgetName: string,
-		limit: number
+		limit: number,
+		options: { messageId?: string } = {}
 	) {
 		const html = render(
 			LimitReachedEmail({
@@ -134,7 +161,8 @@ export class EmailService {
 		return this.sendEmail(
 			to,
 			`⚠️ Лимит заявок исчерпан — виджет «${widgetName}»`,
-			html
+			html,
+			options
 		);
 	}
 
