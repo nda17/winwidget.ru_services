@@ -29,6 +29,34 @@ let childFailure;
 let connection;
 let channel;
 const createdEventIds = [];
+const requiredQueues = [
+	'winwidget.lead-integration.email',
+	'winwidget.lead-integration.webhook',
+	'winwidget.lead-integration.telegram',
+	'winwidget.lead-integration.bitrix24',
+	'winwidget.lead-integration.amo-crm',
+	'winwidget.payment-notification.email',
+	'winwidget.payment-notification.telegram',
+	'winwidget.mailing.email',
+	'winwidget.mailing.telegram',
+	'winwidget.limit-notification.email',
+	'winwidget.limit-notification.telegram'
+];
+
+const getRabbitManagementStatus = async path => {
+	const response = await fetch(
+		`${rabbitManagementUrl.replace(/\/$/, '')}${path}`,
+		{
+			headers: {
+				Authorization: `Basic ${Buffer.from(
+					`${rabbitUser}:${rabbitPassword}`
+				).toString('base64')}`
+			}
+		}
+	);
+	await response.body?.cancel();
+	return response.status;
+};
 
 const waitFor = async (check, label, timeoutMs = 20_000) => {
 	const deadline = Date.now() + timeoutMs;
@@ -91,31 +119,23 @@ try {
 
 	startProcess('dist/src/outbox-publisher-main.js');
 	await waitFor(async () => {
-		const response = await fetch(
-			`${rabbitManagementUrl.replace(/\/$/, '')}/api/exchanges/${encodeURIComponent(rabbitVhost)}/${encodeURIComponent('winwidget.events')}`,
-			{
-				headers: {
-					Authorization: `Basic ${Buffer.from(`${rabbitUser}:${rabbitPassword}`).toString('base64')}`
-				}
-			}
+		const statuses = await Promise.all(
+			requiredQueues.map(queue =>
+				getRabbitManagementStatus(
+					`/api/queues/${encodeURIComponent(rabbitVhost)}/${encodeURIComponent(queue)}`
+				)
+			)
 		);
-		if (response.status === 404) return false;
-		if (!response.ok) {
-			throw new Error(
-				`RabbitMQ Management API returned ${response.status}`
-			);
+		if (statuses.some(status => status === 404)) return false;
+		const failedStatus = statuses.find(
+			status => status < 200 || status >= 300
+		);
+		if (failedStatus) {
+			throw new Error(`RabbitMQ Management API returned ${failedStatus}`);
 		}
 		return true;
-	}, 'publisher topology');
+	}, 'publisher queues');
 	channel = await connection.createChannel();
-	for (const queue of [
-		'winwidget.mailing.email',
-		'winwidget.mailing.telegram',
-		'winwidget.limit-notification.email',
-		'winwidget.limit-notification.telegram'
-	]) {
-		await channel.checkQueue(queue);
-	}
 
 	const configuredSmokeEventCount = Number(
 		process.env.MESSAGING_SMOKE_EVENT_COUNT || 10
