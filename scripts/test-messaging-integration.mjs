@@ -5,9 +5,19 @@ import { spawn } from 'node:child_process';
 
 const databaseUrl = process.env.DATABASE_URL_DEVELOPMENT;
 const rabbitUrl = process.env.RABBITMQ_URL;
-if (!databaseUrl || !rabbitUrl) {
+const rabbitManagementUrl = process.env.RABBITMQ_MANAGEMENT_URL;
+const rabbitUser = process.env.RABBITMQ_USER;
+const rabbitPassword = process.env.RABBITMQ_PASSWORD;
+const rabbitVhost = process.env.RABBITMQ_VHOST || 'winwidget';
+if (
+	!databaseUrl ||
+	!rabbitUrl ||
+	!rabbitManagementUrl ||
+	!rabbitUser ||
+	!rabbitPassword
+) {
 	throw new Error(
-		'DATABASE_URL_DEVELOPMENT and RABBITMQ_URL are required'
+		'DATABASE_URL_DEVELOPMENT and RabbitMQ connection variables are required'
 	);
 }
 
@@ -52,15 +62,21 @@ try {
 
 	startProcess('dist/src/outbox-publisher-main.js');
 	await waitFor(async () => {
-		const probe = await connection.createChannel();
-		try {
-			await probe.checkExchange('winwidget.events');
-			await probe.close();
-			return true;
-		} catch {
-			await probe.close().catch(() => undefined);
-			return false;
+		const response = await fetch(
+			`${rabbitManagementUrl.replace(/\/$/, '')}/api/exchanges/${encodeURIComponent(rabbitVhost)}/${encodeURIComponent('winwidget.events')}`,
+			{
+				headers: {
+					Authorization: `Basic ${Buffer.from(`${rabbitUser}:${rabbitPassword}`).toString('base64')}`
+				}
+			}
+		);
+		if (response.status === 404) return false;
+		if (!response.ok) {
+			throw new Error(
+				`RabbitMQ Management API returned ${response.status}`
+			);
 		}
+		return true;
 	}, 'publisher topology');
 	channel = await connection.createChannel();
 
