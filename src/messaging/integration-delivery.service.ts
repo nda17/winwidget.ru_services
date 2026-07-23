@@ -22,6 +22,8 @@ type DeliveryEventPayload =
 	| MailingDeliveryEventPayload
 	| LimitReachedEventPayload;
 
+const MAILING_PROCESSING_LEASE_MS = 10 * 60 * 1000;
+
 @Injectable()
 export class IntegrationDeliveryService {
 	constructor(
@@ -123,9 +125,12 @@ export class IntegrationDeliveryService {
 		if (!delivery || delivery.campaignId !== payload.campaignId) {
 			throw new Error('Mailing delivery not found');
 		}
+		if (delivery.status === MailingDeliveryStatus.FAILED) {
+			throw new Error('Mailing delivery is in FAILED state');
+		}
 		if (
-			delivery.status !== MailingDeliveryStatus.PENDING &&
-			delivery.status !== MailingDeliveryStatus.PROCESSING
+			delivery.status === MailingDeliveryStatus.SENT ||
+			delivery.status === MailingDeliveryStatus.CANCELLED
 		) {
 			return;
 		}
@@ -139,24 +144,40 @@ export class IntegrationDeliveryService {
 			);
 			return;
 		}
-
-		await this.prisma.$transaction([
-			this.prisma.mailingDelivery.updateMany({
+		if (delivery.status === MailingDeliveryStatus.PROCESSING) {
+			const reclaimed = await this.prisma.mailingDelivery.updateMany({
 				where: {
 					id: delivery.id,
-					status: {
-						in: [
-							MailingDeliveryStatus.PENDING,
-							MailingDeliveryStatus.PROCESSING
-						]
+					campaignId: delivery.campaignId,
+					status: MailingDeliveryStatus.PROCESSING,
+					updatedAt: {
+						equals: delivery.updatedAt,
+						lt: new Date(Date.now() - MAILING_PROCESSING_LEASE_MS)
 					}
+				},
+				data: {
+					status: MailingDeliveryStatus.PENDING
+				}
+			});
+			if (reclaimed.count !== 1) {
+				throw new Error('Mailing delivery is already processing');
+			}
+		}
+
+		const claimed = await this.prisma.$transaction(async transaction => {
+			const result = await transaction.mailingDelivery.updateMany({
+				where: {
+					id: delivery.id,
+					campaignId: delivery.campaignId,
+					status: MailingDeliveryStatus.PENDING
 				},
 				data: {
 					status: MailingDeliveryStatus.PROCESSING,
 					attempts: { increment: 1 }
 				}
-			}),
-			this.prisma.mailingCampaign.updateMany({
+			});
+			if (result.count !== 1) return false;
+			await transaction.mailingCampaign.updateMany({
 				where: {
 					id: delivery.campaignId,
 					status: MailingCampaignStatus.QUEUED
@@ -165,29 +186,61 @@ export class IntegrationDeliveryService {
 					status: MailingCampaignStatus.RUNNING,
 					startedAt: new Date()
 				}
-			})
-		]);
-
-		if (expectedChannel === MailingDeliveryChannel.EMAIL) {
-			await this.emailService.sendAdminBroadcast(
-				delivery.recipient,
-				{
-					subject: delivery.campaign.subject,
-					message: delivery.campaign.message
-				},
-				{ messageId: `<${eventId}.mailing@winwidget.ru>` }
-			);
-		} else {
-			await this.sendTelegramMessage(
-				delivery.recipient,
-				this.buildTelegramBroadcastMessages(
-					delivery.campaign.subject,
-					delivery.campaign.message
-				)
-			);
+			});
+			return true;
+		});
+		if (!claimed) {
+			const current = await this.prisma.mailingDelivery.findUnique({
+				where: { id: delivery.id },
+				select: { status: true }
+			});
+			if (
+				current?.status === MailingDeliveryStatus.SENT ||
+				current?.status === MailingDeliveryStatus.CANCELLED
+			) {
+				return;
+			}
+			throw new Error('Mailing delivery could not be claimed');
 		}
 
-		await this.completeMailingDelivery(delivery.id, delivery.campaignId);
+		try {
+			if (expectedChannel === MailingDeliveryChannel.EMAIL) {
+				await this.emailService.sendAdminBroadcast(
+					delivery.recipient,
+					{
+						subject: delivery.campaign.subject,
+						message: delivery.campaign.message
+					},
+					{ messageId: `<${eventId}.mailing@winwidget.ru>` }
+				);
+			} else {
+				await this.sendTelegramMessage(
+					delivery.recipient,
+					this.buildTelegramBroadcastMessages(
+						delivery.campaign.subject,
+						delivery.campaign.message
+					)
+				);
+			}
+
+			await this.completeMailingDelivery(delivery.id, delivery.campaignId);
+		} catch (error) {
+			await this.prisma.mailingDelivery.updateMany({
+				where: {
+					id: delivery.id,
+					campaignId: delivery.campaignId,
+					status: MailingDeliveryStatus.PROCESSING
+				},
+				data: {
+					status: MailingDeliveryStatus.PENDING,
+					lastError:
+						error instanceof Error
+							? error.message.slice(0, 10_000)
+							: String(error).slice(0, 10_000)
+				}
+			});
+			throw error;
+		}
 	}
 
 	private async sendLimitReached(
@@ -292,27 +345,29 @@ export class IntegrationDeliveryService {
 		deliveryId: string,
 		campaignId: string
 	): Promise<void> {
-		const updated = await this.prisma.mailingDelivery.updateMany({
-			where: {
-				id: deliveryId,
-				status: {
-					in: [
-						MailingDeliveryStatus.PENDING,
-						MailingDeliveryStatus.PROCESSING
-					]
+		await this.prisma.$transaction(async transaction => {
+			const updated = await transaction.mailingDelivery.updateMany({
+				where: {
+					id: deliveryId,
+					campaignId,
+					status: {
+						in: [
+							MailingDeliveryStatus.PENDING,
+							MailingDeliveryStatus.PROCESSING
+						]
+					}
+				},
+				data: {
+					status: MailingDeliveryStatus.CANCELLED,
+					cancelledAt: new Date()
 				}
-			},
-			data: {
-				status: MailingDeliveryStatus.CANCELLED,
-				cancelledAt: new Date()
-			}
-		});
-		if (updated.count) {
-			await this.prisma.mailingCampaign.update({
+			});
+			if (updated.count !== 1) return;
+			await transaction.mailingCampaign.update({
 				where: { id: campaignId },
 				data: { cancelledCount: { increment: 1 } }
 			});
-		}
+		});
 	}
 
 	private buildTelegramBroadcastMessages(

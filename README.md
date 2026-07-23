@@ -289,8 +289,10 @@ Production deploy останавливается до запуска мигра�
 - `OUTBOX_BATCH_SIZE` — максимум событий, захватываемых publisher за цикл;
 - `OUTBOX_POLL_INTERVAL_MS` — интервал чтения outbox;
 - `OUTBOX_RETENTION_DAYS` — срок хранения успешно опубликованных событий;
+  очистка выполняется ограниченными пакетами;
 - `RABBITMQ_WORKER_PREFETCH` — максимум неподтверждённых сообщений worker;
-- `MESSAGING_ALERTS_ENABLED` — Telegram-алерты о недоступных messaging-процессах и необработанных ошибках;
+- `MESSAGING_ALERTS_ENABLED` — Telegram-алерты о недоступных messaging-процессах,
+  необработанных ошибках и событиях Outbox, ожидающих больше 15 минут;
 - `INTEGRATION_RECEIPT_RETENTION_DAYS` — срок хранения отметок об успешной доставке, минимум 30 дней;
 - `INTEGRATION_WORKER_KINDS` — consumers, запускаемые worker-контейнером.
 - `MAILING_EMAIL_RATE_PER_SECOND` — максимальная скорость массовой email-рассылки в одном worker-процессе;
@@ -311,6 +313,11 @@ polling применяется только publisher-процессом при 
    `winwidget.payment-notification.telegram`.
 4. Каждый consumer имеет собственные receipt, retry и DLQ. Сбой Telegram не
    блокирует email и наоборот.
+
+Publisher подтверждает публикацию только после broker confirm и проверки
+`mandatory return`. Если маршрута для события нет или RabbitMQ временно
+недоступен, Outbox остаётся в `PENDING` и повторяется с ограниченным backoff без
+необратимого лимита транспортных попыток.
 
 Независимые retry-очереди используют суффикс `retry-v2`. Старые пустые
 `*.retry.1..3`, если они остались после обновления существующего RabbitMQ,
@@ -370,6 +377,9 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 - worker хранит успешную пару `eventId + consumer` в
   `integration_delivery_receipts` и не обрабатывает уже завершённую доставку
   повторно;
+- перед внешним вызовом worker атомарно захватывает receipt в состоянии
+  `PROCESSING`; параллельный consumer не выполняет тот же вызов, а зависший
+  claim можно восстановить по lease;
 - webhook получает стабильный `eventId` в JSON и заголовке
   `X-WinWidget-Event-Id`, чтобы принимающая сторона могла реализовать свою
   идемпотентность;
@@ -377,7 +387,7 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 - Telegram, Битрикс24 и amoCRM не предоставляют общей транзакции с нашей БД,
   поэтому абсолютная exactly-once гарантия для них технически невозможна;
 - старые receipts удаляются worker по
-  `INTEGRATION_RECEIPT_RETENTION_DAYS`.
+  `INTEGRATION_RECEIPT_RETENTION_DAYS` ограниченными пакетами.
 
 ### Production runbook
 
@@ -419,10 +429,12 @@ docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
 - PostgreSQL недоступна: API не подтверждает сохранение заявки, publisher и
   worker возобновляют работу после восстановления соединения/перезапуска.
 - Ошибка в DLQ: устранить причину и нажать `Повторить` в
-  `/admin/messaging`; действие попадёт в журнал событий.
+  `/admin/messaging`; действие попадёт в журнал событий, а команда retry —
+  в PostgreSQL Outbox в той же транзакции с изменением состояния ошибки.
 
 CI запускает `test:messaging-integration`, который проверяет реальные цепочки
-`Outbox → RabbitMQ` и `RabbitMQ → DLQ → PostgreSQL`.
+`Outbox → RabbitMQ`, `mandatory return`, маршрут ручного retry и
+`RabbitMQ → DLQ → PostgreSQL`.
 
 При неизвестном `MODE` или отсутствующей выбранной переменной backend
 завершает запуск с ошибкой.
@@ -892,18 +904,27 @@ Verify выполняет:
 ```text
 pnpm install --frozen-lockfile
 pnpm exec prisma generate
+pnpm exec prisma migrate deploy
 pnpm exec tsc --noEmit
+pnpm exec jest --runInBand
+docker compose ... config --quiet
 pnpm build
+pnpm run test:messaging-integration
 ```
 
 После успешного verify deploy по SSH:
 
-1. обновляет ветку `prod` через `git pull --ff-only`;
+1. обновляет ветку `prod` через `git pull --ff-only`, требует чистый checkout и
+   точное совпадение с проверенным `${{ github.sha }}`;
 2. собирает backend image;
 3. запускает migration container;
 4. пересоздаёт API container;
-5. проверяет `http://127.0.0.1:4200/api/site-settings`;
-6. при ошибке выводит последние логи API.
+5. собирает образ с тегом и OCI revision полного SHA текущего Git commit;
+6. сверяет revision через локальный
+   `http://127.0.0.1:4200/api/health/deployment` и публичный
+   `https://api.winwidget.ru/api/health/deployment`;
+7. проверяет OCI-label и отсутствие рестартов у API, Outbox publisher и worker;
+8. при ошибке выводит последние логи API и процесс, занимающий порт `4200`.
 
 Production flow:
 

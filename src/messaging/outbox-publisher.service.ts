@@ -2,8 +2,7 @@ import {
 	OUTBOX_DEFAULT_BATCH_SIZE,
 	OUTBOX_DEFAULT_POLL_INTERVAL_MS,
 	OUTBOX_DEFAULT_RETENTION_DAYS,
-	OUTBOX_LOCK_TIMEOUT_MS,
-	OUTBOX_MAX_PUBLISH_ATTEMPTS
+	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
@@ -24,6 +23,8 @@ export class OutboxPublisherService
 {
 	private readonly logger = new Logger(OutboxPublisherService.name);
 	private readonly workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
+	private readonly cleanupBatchSize = 1000;
+	private readonly cleanupMaxBatches = 20;
 	private timer: NodeJS.Timeout | null = null;
 	private running = false;
 	private shuttingDown = false;
@@ -62,6 +63,13 @@ export class OutboxPublisherService
 			await this.cleanupPublishedEventsIfDue();
 			const events = await this.claimBatch();
 			for (const event of events) {
+				const claimRenewed = await this.renewClaim(event.id);
+				if (!claimRenewed) {
+					this.logger.warn(
+						`Skipped outbox event with lost claim eventId=${event.id}`
+					);
+					continue;
+				}
 				await this.publish(event);
 			}
 		} catch (error) {
@@ -85,6 +93,18 @@ export class OutboxPublisherService
 				where: {
 					status: OutboxEventStatus.PUBLISHING,
 					lockedAt: { lt: staleBefore }
+				},
+				data: {
+					status: OutboxEventStatus.PENDING,
+					lockedAt: null,
+					lockedBy: null
+				}
+			});
+
+			await transaction.outboxEvent.updateMany({
+				where: {
+					status: OutboxEventStatus.FAILED,
+					availableAt: { lte: new Date() }
 				},
 				data: {
 					status: OutboxEventStatus.PENDING,
@@ -133,10 +153,25 @@ export class OutboxPublisherService
 		});
 	}
 
+	private async renewClaim(eventId: string): Promise<boolean> {
+		const result = await this.prisma.outboxEvent.updateMany({
+			where: {
+				id: eventId,
+				status: OutboxEventStatus.PUBLISHING,
+				lockedBy: this.workerId
+			},
+			data: {
+				lockedAt: new Date()
+			}
+		});
+
+		return result.count === 1;
+	}
+
 	private async publish(event: OutboxEvent): Promise<void> {
 		try {
 			await this.rabbitMq.publishEvent(event.routingKey, event.payload, {
-				messageId: event.id,
+				messageId: event.messageId ?? event.id,
 				type: event.eventType,
 				headers: {
 					'x-outbox-event-id': event.id,
@@ -144,7 +179,7 @@ export class OutboxPublisherService
 				}
 			});
 
-			await this.prisma.outboxEvent.updateMany({
+			const result = await this.prisma.outboxEvent.updateMany({
 				where: {
 					id: event.id,
 					status: OutboxEventStatus.PUBLISHING,
@@ -159,22 +194,24 @@ export class OutboxPublisherService
 					lastError: null
 				}
 			});
+			if (result.count !== 1) {
+				this.logger.warn(
+					`Published outbox event but could not finalize its claim eventId=${event.id}`
+				);
+			}
 		} catch (error) {
 			const attempts = event.attempts + 1;
-			const failed = attempts >= OUTBOX_MAX_PUBLISH_ATTEMPTS;
 			const message =
 				error instanceof Error ? error.message : String(error);
 
-			await this.prisma.outboxEvent.updateMany({
+			const result = await this.prisma.outboxEvent.updateMany({
 				where: {
 					id: event.id,
 					status: OutboxEventStatus.PUBLISHING,
 					lockedBy: this.workerId
 				},
 				data: {
-					status: failed
-						? OutboxEventStatus.FAILED
-						: OutboxEventStatus.PENDING,
+					status: OutboxEventStatus.PENDING,
 					attempts,
 					availableAt: new Date(
 						Date.now() + this.getBackoffDelay(attempts)
@@ -184,6 +221,11 @@ export class OutboxPublisherService
 					lastError: message.slice(0, 4000)
 				}
 			});
+			if (result.count !== 1) {
+				this.logger.warn(
+					`Could not reschedule outbox event with lost claim eventId=${event.id}`
+				);
+			}
 
 			this.logger.warn(
 				`Outbox publish failed eventId=${event.id} attempt=${attempts}: ${message}`
@@ -232,15 +274,30 @@ export class OutboxPublisherService
 			now - retentionDays * 24 * 60 * 60 * 1000
 		);
 
-		const result = await this.prisma.outboxEvent.deleteMany({
-			where: {
-				status: OutboxEventStatus.PUBLISHED,
-				publishedAt: { lt: publishedBefore }
-			}
-		});
-		if (result.count) {
+		let deleted = 0;
+		for (let batch = 0; batch < this.cleanupMaxBatches; batch++) {
+			const count = await this.prisma.$executeRaw(
+				Prisma.sql`
+					WITH expired AS (
+						SELECT "id"
+						FROM "outbox_events"
+						WHERE "status" = 'PUBLISHED'::"OutboxEventStatus"
+							AND "published_at" < ${publishedBefore}
+						ORDER BY "published_at" ASC
+						LIMIT ${this.cleanupBatchSize}
+					)
+					DELETE FROM "outbox_events" AS event
+					USING expired
+					WHERE event."id" = expired."id"
+				`
+			);
+			deleted += count;
+			if (count < this.cleanupBatchSize) break;
+		}
+
+		if (deleted) {
 			this.logger.log(
-				`Deleted ${result.count} published outbox events older than ${retentionDays} days`
+				`Deleted ${deleted} published outbox events older than ${retentionDays} days`
 			);
 		}
 	}

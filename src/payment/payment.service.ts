@@ -599,6 +599,10 @@ export class PaymentService {
 					payment.plan,
 					payment.billingPeriod
 				);
+			await this.affiliateService.processPaymentSucceededInTransaction(
+				transaction,
+				updatedPayment
+			);
 			const user = await transaction.user.findUnique({
 				where: { id: userId },
 				select: {
@@ -648,9 +652,6 @@ export class PaymentService {
 			return { updatedPayment };
 		});
 		if (!result) return;
-		const { updatedPayment } = result;
-
-		await this.affiliateService.processPaymentSucceeded(updatedPayment);
 
 		this.logger.log(
 			`Payment succeeded: yookassaId=${yookassaId} userId=${userId} plan=${payment.plan}`

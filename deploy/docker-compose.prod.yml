@@ -1,4 +1,5 @@
 x-api-env: &api-env
+  APP_REVISION: ${APP_REVISION:-unknown}
   MODE: ${MODE:-production}
   NODE_ENV: production
   PORT: ${PORT:-4200}
@@ -92,6 +93,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${APP_REVISION:-unknown}
     environment: *api-env
     network_mode: host
     restart: unless-stopped
@@ -127,6 +130,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${APP_REVISION:-unknown}
     profiles:
       - migration
     environment: *api-env

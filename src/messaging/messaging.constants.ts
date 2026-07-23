@@ -59,8 +59,10 @@ export const INTEGRATION_QUEUE_NAMES: Record<IntegrationKind, string> = {
 	'limit-telegram': 'winwidget.limit-notification.telegram'
 };
 
+export const getManualRetryRoutingKey = (kind: IntegrationKind): string =>
+	`manual.${kind}`;
+
 export const RETRY_DELAYS_MS = [30_000, 300_000, 1_800_000] as const;
-export const OUTBOX_MAX_PUBLISH_ATTEMPTS = 20;
 export const OUTBOX_DEFAULT_BATCH_SIZE = 50;
 export const OUTBOX_DEFAULT_POLL_INTERVAL_MS = 1000;
 export const OUTBOX_LOCK_TIMEOUT_MS = 60_000;

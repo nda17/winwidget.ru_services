@@ -1,6 +1,7 @@
 import {
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
+	getManualRetryRoutingKey,
 	INTEGRATION_KINDS,
 	INTEGRATION_QUEUE_NAMES,
 	INTEGRATION_ROUTING_KEYS,
@@ -22,12 +23,18 @@ import {
 	connect
 } from 'amqp-connection-manager';
 import type { ConfirmChannel, ConsumeMessage, Options } from 'amqplib';
+import { randomUUID } from 'node:crypto';
 
 @Injectable()
 export class RabbitMqService
 	implements OnModuleInit, OnApplicationShutdown
 {
 	private readonly logger = new Logger(RabbitMqService.name);
+	private readonly deliveryChannels = new WeakMap<
+		ConsumeMessage,
+		ConfirmChannel
+	>();
+	private readonly returnedPublications = new Map<string, Error | null>();
 	private connection!: AmqpConnectionManager;
 	private channel!: ChannelWrapper;
 
@@ -80,7 +87,7 @@ export class RabbitMqService
 		payload: unknown,
 		options: Options.Publish = {}
 	): Promise<void> {
-		await this.channel.publish(EVENTS_EXCHANGE, routingKey, payload, {
+		await this.publishConfirmed(EVENTS_EXCHANGE, routingKey, payload, {
 			contentType: 'application/json',
 			contentEncoding: 'utf-8',
 			deliveryMode: 2,
@@ -100,7 +107,7 @@ export class RabbitMqService
 		const retryIndex = Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1);
 		const routingKey = this.getRetryRoutingKey(kind, retryIndex);
 
-		await this.channel.publish(RETRY_EXCHANGE, routingKey, payload, {
+		await this.publishConfirmed(RETRY_EXCHANGE, routingKey, payload, {
 			contentType: 'application/json',
 			contentEncoding: 'utf-8',
 			deliveryMode: 2,
@@ -120,7 +127,7 @@ export class RabbitMqService
 		error: string,
 		eventType: string
 	): Promise<void> {
-		await this.channel.publish(
+		await this.publishConfirmed(
 			DEAD_LETTER_EXCHANGE,
 			this.getDeadLetterRoutingKey(kind),
 			payload,
@@ -138,6 +145,35 @@ export class RabbitMqService
 				timestamp: Date.now()
 			}
 		);
+	}
+
+	private async publishConfirmed(
+		exchange: string,
+		routingKey: string,
+		payload: unknown,
+		options: Options.Publish
+	): Promise<void> {
+		const correlationId = randomUUID();
+		this.returnedPublications.set(correlationId, null);
+		try {
+			await this.channel.publish(
+				exchange,
+				routingKey,
+				this.encodePayload(payload),
+				{
+					...options,
+					correlationId
+				}
+			);
+			const returned = this.returnedPublications.get(correlationId);
+			if (returned) throw returned;
+		} finally {
+			this.returnedPublications.delete(correlationId);
+		}
+	}
+
+	private encodePayload(payload: unknown): Buffer {
+		return Buffer.from(JSON.stringify(payload));
 	}
 
 	async consume(
@@ -172,28 +208,68 @@ export class RabbitMqService
 		handler: (message: ConsumeMessage) => Promise<void>,
 		prefetch: number
 	): Promise<void> {
-		await this.channel.consume(
-			queue,
-			message => {
-				void handler(message).catch(error => {
-					this.logger.error(
-						`Unhandled ${consumerName} consumer error: ${
-							error instanceof Error ? error.stack : String(error)
-						}`
-					);
-					this.channel.nack(message, false, true);
-				});
-			},
-			{ noAck: false, prefetch }
-		);
+		await this.channel.addSetup(async channel => {
+			const deliveryChannel = channel as ConfirmChannel;
+			await deliveryChannel.prefetch(prefetch, false);
+			await deliveryChannel.consume(
+				queue,
+				message => {
+					if (!message) return;
+					this.deliveryChannels.set(message, deliveryChannel);
+					void handler(message).catch(error => {
+						this.logger.error(
+							`Unhandled ${consumerName} consumer error: ${
+								error instanceof Error ? error.stack : String(error)
+							}`
+						);
+						this.nack(message, true);
+					});
+				},
+				{ noAck: false }
+			);
+		});
 	}
 
 	ack(message: ConsumeMessage): void {
-		this.channel.ack(message);
+		const channel = this.deliveryChannels.get(message);
+		if (!channel) {
+			this.logger.warn(
+				'Skipped ack for a message without its delivery channel'
+			);
+			return;
+		}
+		try {
+			channel.ack(message);
+		} catch (error) {
+			this.logger.warn(
+				`Skipped ack on a closed delivery channel: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
+		} finally {
+			this.deliveryChannels.delete(message);
+		}
 	}
 
 	nack(message: ConsumeMessage, requeue: boolean): void {
-		this.channel.nack(message, false, requeue);
+		const channel = this.deliveryChannels.get(message);
+		if (!channel) {
+			this.logger.warn(
+				'Skipped nack for a message without its delivery channel'
+			);
+			return;
+		}
+		try {
+			channel.nack(message, false, requeue);
+		} catch (error) {
+			this.logger.warn(
+				`Skipped nack on a closed delivery channel: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
+		} finally {
+			this.deliveryChannels.delete(message);
+		}
 	}
 
 	async onApplicationShutdown(): Promise<void> {
@@ -206,6 +282,28 @@ export class RabbitMqService
 	}
 
 	private async assertTopology(channel: ConfirmChannel): Promise<void> {
+		channel.on('return', message => {
+			const correlationId = message.properties.correlationId;
+			if (!correlationId) {
+				this.logger.error(
+					`RabbitMQ returned an uncorrelated publication exchange=${message.fields.exchange} routingKey=${message.fields.routingKey}: ${message.fields.replyText}`
+				);
+				return;
+			}
+			if (!this.returnedPublications.has(correlationId)) {
+				this.logger.warn(
+					`RabbitMQ returned a publication after its confirm timeout correlationId=${correlationId}`
+				);
+				return;
+			}
+			this.returnedPublications.set(
+				correlationId,
+				new Error(
+					`RabbitMQ returned publication exchange=${message.fields.exchange} routingKey=${message.fields.routingKey}: ${message.fields.replyCode} ${message.fields.replyText}`
+				)
+			);
+		});
+
 		await channel.assertExchange(EVENTS_EXCHANGE, 'topic', {
 			durable: true
 		});
@@ -228,6 +326,11 @@ export class RabbitMqService
 				durable: true
 			});
 			await channel.bindQueue(queue, EVENTS_EXCHANGE, routingKey);
+			await channel.bindQueue(
+				queue,
+				EVENTS_EXCHANGE,
+				getManualRetryRoutingKey(kind)
+			);
 			await channel.bindQueue(queue, MANUAL_RETRY_EXCHANGE, kind);
 
 			await channel.assertQueue(deadLetterQueue, { durable: true });

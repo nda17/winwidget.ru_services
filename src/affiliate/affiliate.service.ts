@@ -125,12 +125,15 @@ export class AffiliateService {
 		});
 	}
 
-	async processPaymentSucceeded(payment: Payment) {
+	async processPaymentSucceededInTransaction(
+		transaction: Prisma.TransactionClient,
+		payment: Payment
+	) {
 		if (!payment.plan || !payment.billingPeriod) {
 			return;
 		}
 
-		const referral = await this.prisma.affiliateReferral.findUnique({
+		const referral = await transaction.affiliateReferral.findUnique({
 			where: { referredUserId: payment.userId }
 		});
 
@@ -141,8 +144,12 @@ export class AffiliateService {
 			return;
 		}
 
-		const settings = await this.getSettingsRecord();
-		const succeededPaymentsCount = await this.prisma.payment.count({
+		const settings = await transaction.siteSettings.upsert({
+			where: { id: 'singleton' },
+			update: {},
+			create: { id: 'singleton' }
+		});
+		const succeededPaymentsCount = await transaction.payment.count({
 			where: {
 				userId: payment.userId,
 				status: PaymentStatus.SUCCEEDED
@@ -153,7 +160,7 @@ export class AffiliateService {
 			!settings.affiliateProgramEnabled ||
 			succeededPaymentsCount !== 1
 		) {
-			await this.prisma.affiliateReferral.update({
+			await transaction.affiliateReferral.update({
 				where: { id: referral.id },
 				data: {
 					status: AffiliateReferralStatus.CANCELLED,
@@ -172,7 +179,7 @@ export class AffiliateService {
 			Date.now() + this.COOLING_PERIOD_DAYS * 24 * 60 * 60 * 1000
 		);
 
-		await this.prisma.affiliateReferral.update({
+		await transaction.affiliateReferral.update({
 			where: { id: referral.id },
 			data: {
 				firstPaymentId: payment.id,

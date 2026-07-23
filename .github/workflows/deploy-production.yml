@@ -123,12 +123,14 @@ jobs:
       - name: Deploy backend on VPS
         env:
           APP_ROOT: /opt/winwidget
+          DEPLOY_REVISION: ${{ github.sha }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" "APP_ROOT='$APP_ROOT' bash -s" <<'EOF'
+            "$SSH_USER@$SSH_HOST" \
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           git fetch origin prod

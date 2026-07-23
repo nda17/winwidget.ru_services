@@ -4,6 +4,11 @@ import type { EmailService } from '@/email/email.service';
 import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import type { ConfigService } from '@nestjs/config';
 import type { PrismaService } from '@/prisma.service';
+import {
+	MailingCampaignStatus,
+	MailingDeliveryChannel,
+	MailingDeliveryStatus
+} from '@prisma/client';
 
 const createEvent = (
 	overrides: Partial<LeadIntegrationEventPayload> = {}
@@ -127,5 +132,215 @@ describe('IntegrationDeliveryService', () => {
 		).rejects.toThrow(
 			'Integration mismatch: queue=email, payload=webhook'
 		);
+	});
+});
+
+describe('IntegrationDeliveryService mailing delivery', () => {
+	const campaignId = '11111111-1111-4111-8111-111111111111';
+	const deliveryId = '22222222-2222-4222-8222-222222222222';
+	const eventId = '33333333-3333-4333-8333-333333333333';
+	const event = {
+		schemaVersion: 1 as const,
+		eventType: 'mailing.delivery.requested.v1' as const,
+		campaignId,
+		deliveryId,
+		channel: MailingDeliveryChannel.EMAIL
+	};
+
+	const createService = (
+		status: MailingDeliveryStatus = MailingDeliveryStatus.PENDING,
+		campaignStatus: MailingCampaignStatus = MailingCampaignStatus.QUEUED
+	) => {
+		const deliveryRecord = {
+			id: deliveryId,
+			campaignId,
+			channel: MailingDeliveryChannel.EMAIL,
+			recipient: 'user@example.com',
+			status,
+			updatedAt: new Date(),
+			campaign: {
+				id: campaignId,
+				status: campaignStatus,
+				cancelRequestedAt:
+					campaignStatus === MailingCampaignStatus.CANCELLED
+						? new Date()
+						: null,
+				subject: 'Новости',
+				message: 'Текст рассылки'
+			}
+		};
+		const emailService = {
+			sendAdminBroadcast: jest.fn().mockResolvedValue(undefined)
+		} as unknown as EmailService;
+		const transaction = {
+			mailingDelivery: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+				count: jest.fn().mockResolvedValue(0)
+			},
+			mailingCampaign: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+				update: jest.fn().mockResolvedValue({ failedCount: 0 })
+			}
+		};
+		const prisma = {
+			mailingDelivery: {
+				findUnique: jest.fn().mockResolvedValue(deliveryRecord),
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			$transaction: jest.fn(async callback => callback(transaction))
+		} as unknown as PrismaService;
+		const service = new IntegrationDeliveryService(
+			emailService,
+			{} as SafeOutboundHttpService,
+			{ get: jest.fn() } as unknown as ConfigService,
+			prisma
+		);
+
+		return {
+			service,
+			emailService,
+			prisma,
+			transaction,
+			deliveryRecord
+		};
+	};
+
+	it('sends only after an atomic PENDING to PROCESSING claim', async () => {
+		const { service, emailService, transaction } = createService();
+
+		await service.deliver('mailing-email', event, eventId);
+
+		expect(transaction.mailingDelivery.updateMany).toHaveBeenNthCalledWith(
+			1,
+			{
+				where: {
+					id: deliveryId,
+					campaignId,
+					status: MailingDeliveryStatus.PENDING
+				},
+				data: {
+					status: MailingDeliveryStatus.PROCESSING,
+					attempts: { increment: 1 }
+				}
+			}
+		);
+		expect(emailService.sendAdminBroadcast).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not send when cancellation wins the claim race', async () => {
+		const { service, emailService, prisma, transaction, deliveryRecord } =
+			createService();
+		(
+			transaction.mailingDelivery.updateMany as jest.Mock
+		).mockResolvedValueOnce({ count: 0 });
+		(prisma.mailingDelivery.findUnique as jest.Mock)
+			.mockResolvedValueOnce(deliveryRecord)
+			.mockResolvedValueOnce({
+				status: MailingDeliveryStatus.CANCELLED
+			});
+
+		await service.deliver('mailing-email', event, eventId);
+
+		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
+	});
+
+	it('does not treat a FAILED delivery as successful', async () => {
+		const { service, emailService } = createService(
+			MailingDeliveryStatus.FAILED
+		);
+
+		await expect(
+			service.deliver('mailing-email', event, eventId)
+		).rejects.toThrow('Mailing delivery is in FAILED state');
+		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
+	});
+
+	it('cancels a pending delivery and increments the campaign atomically', async () => {
+		const { service, emailService, prisma, transaction } = createService(
+			MailingDeliveryStatus.PENDING,
+			MailingCampaignStatus.CANCELLED
+		);
+
+		await service.deliver('mailing-email', event, eventId);
+
+		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+		expect(transaction.mailingDelivery.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: deliveryId,
+				campaignId,
+				status: {
+					in: [
+						MailingDeliveryStatus.PENDING,
+						MailingDeliveryStatus.PROCESSING
+					]
+				}
+			},
+			data: {
+				status: MailingDeliveryStatus.CANCELLED,
+				cancelledAt: expect.any(Date)
+			}
+		});
+		expect(transaction.mailingCampaign.update).toHaveBeenCalledWith({
+			where: { id: campaignId },
+			data: { cancelledCount: { increment: 1 } }
+		});
+		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
+	});
+
+	it('does not leave a stale PROCESSING delivery behind after campaign cancellation', async () => {
+		const { service, emailService, transaction, deliveryRecord } =
+			createService(
+				MailingDeliveryStatus.PROCESSING,
+				MailingCampaignStatus.CANCELLED
+			);
+		deliveryRecord.updatedAt = new Date(Date.now() - 11 * 60 * 1000);
+
+		await service.deliver('mailing-email', event, eventId);
+
+		expect(transaction.mailingDelivery.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					id: deliveryId,
+					campaignId,
+					status: {
+						in: [
+							MailingDeliveryStatus.PENDING,
+							MailingDeliveryStatus.PROCESSING
+						]
+					}
+				},
+				data: {
+					status: MailingDeliveryStatus.CANCELLED,
+					cancelledAt: expect.any(Date)
+				}
+			})
+		);
+		expect(transaction.mailingCampaign.update).toHaveBeenCalledWith({
+			where: { id: campaignId },
+			data: { cancelledCount: { increment: 1 } }
+		});
+		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
+	});
+
+	it('returns a failed send to PENDING for the scheduled retry', async () => {
+		const { service, emailService, prisma } = createService();
+		(emailService.sendAdminBroadcast as jest.Mock).mockRejectedValue(
+			new Error('SMTP unavailable')
+		);
+
+		await expect(
+			service.deliver('mailing-email', event, eventId)
+		).rejects.toThrow('SMTP unavailable');
+		expect(prisma.mailingDelivery.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: deliveryId,
+				campaignId,
+				status: MailingDeliveryStatus.PROCESSING
+			},
+			data: {
+				status: MailingDeliveryStatus.PENDING,
+				lastError: 'SMTP unavailable'
+			}
+		});
 	});
 });

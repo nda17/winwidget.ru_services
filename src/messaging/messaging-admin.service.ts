@@ -1,7 +1,9 @@
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
 import {
+	getManualRetryRoutingKey,
 	INTEGRATION_KINDS,
-	IntegrationKind
+	IntegrationKind,
+	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
@@ -13,6 +15,8 @@ import {
 } from '@nestjs/common';
 import {
 	IntegrationDeliveryFailure,
+	IntegrationDeliveryReceiptStatus,
+	MailingCampaignStatus,
 	OutboxEventStatus,
 	Prisma
 } from '@prisma/client';
@@ -64,6 +68,7 @@ export class MessagingAdminService {
 			}),
 			this.prisma.integrationDeliveryReceipt.count({
 				where: {
+					status: IntegrationDeliveryReceiptStatus.DELIVERED,
 					deliveredAt: {
 						gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
 					}
@@ -153,90 +158,79 @@ export class MessagingAdminService {
 
 	async retryFailure(id: string) {
 		const staleRetryBefore = new Date(Date.now() - 5 * 60 * 1000);
-		const claimed =
-			await this.prisma.integrationDeliveryFailure.updateMany({
-				where: {
-					id,
-					resolvedAt: null,
-					OR: [
-						{ retryingAt: null },
-						{ retryingAt: { lt: staleRetryBefore } }
-					]
-				},
-				data: { retryingAt: new Date() }
-			});
-
-		if (claimed.count !== 1) {
-			const existing =
-				await this.prisma.integrationDeliveryFailure.findUnique({
+		const retryingAt = new Date();
+		const result = await this.prisma.$transaction(async transaction => {
+			const failure =
+				await transaction.integrationDeliveryFailure.findUnique({
 					where: { id }
 				});
-			if (!existing)
+			if (!failure) {
 				throw new NotFoundException('Ошибка доставки не найдена');
-			if (existing.resolvedAt) {
+			}
+			if (failure.resolvedAt) {
 				throw new ConflictException('Ошибка уже обработана');
 			}
-			throw new ConflictException('Повторная отправка уже выполняется');
-		}
 
-		const failure =
-			await this.prisma.integrationDeliveryFailure.findUniqueOrThrow({
-				where: { id }
-			});
-		const kind = this.normalizeIntegration(failure.integration);
-		const mailingDelivery =
-			kind === 'mailing-email' || kind === 'mailing-telegram'
-				? this.getMailingDeliveryReference(failure.payload)
-				: null;
+			const kind = this.normalizeIntegration(failure.integration);
+			const mailingDelivery =
+				kind === 'mailing-email' || kind === 'mailing-telegram'
+					? this.getMailingDeliveryReference(failure.payload)
+					: null;
+			const claimed =
+				await transaction.integrationDeliveryFailure.updateMany({
+					where: {
+						id,
+						resolvedAt: null,
+						OR: [
+							{ retryingAt: null },
+							{ retryingAt: { lt: staleRetryBefore } }
+						]
+					},
+					data: { retryingAt }
+				});
 
-		try {
+			if (claimed.count !== 1) {
+				throw new ConflictException('Повторная отправка уже выполняется');
+			}
+
 			if (mailingDelivery) {
 				await this.reopenMailingDelivery(
+					transaction,
 					mailingDelivery.deliveryId,
 					mailingDelivery.campaignId
 				);
 			}
-			await this.rabbitManagement.publishIntegrationEvent({
-				kind,
-				eventId: failure.eventId,
-				payload: failure.payload
-			});
-		} catch (error) {
-			await this.prisma.$transaction(async transaction => {
-				await transaction.integrationDeliveryFailure.update({
-					where: { id },
-					data: { retryingAt: null }
-				});
-				if (mailingDelivery) {
-					const reverted = await transaction.mailingDelivery.updateMany({
-						where: {
-							id: mailingDelivery.deliveryId,
-							campaignId: mailingDelivery.campaignId,
-							status: 'PENDING'
-						},
-						data: { status: 'FAILED' }
-					});
-					if (reverted.count) {
-						await transaction.mailingCampaign.update({
-							where: { id: mailingDelivery.campaignId },
-							data: {
-								failedCount: { increment: 1 },
-								status: 'PARTIAL_FAILED',
-								completedAt: new Date()
-							}
-						});
-					}
+
+			await transaction.outboxEvent.create({
+				data: {
+					messageId: failure.eventId,
+					eventType: this.getFailureEventType(failure.payload),
+					routingKey: getManualRetryRoutingKey(kind),
+					payload: failure.payload as Prisma.InputJsonValue
 				}
 			});
-			throw error;
-		}
+
+			return { failure, kind };
+		});
 
 		return {
-			id: failure.id,
-			eventId: failure.eventId,
-			integration: kind,
-			retryingAt: new Date().toISOString()
+			id: result.failure.id,
+			eventId: result.failure.eventId,
+			integration: result.kind,
+			retryingAt: retryingAt.toISOString()
 		};
+	}
+
+	private getFailureEventType(payload: Prisma.JsonValue): string {
+		if (
+			payload &&
+			typeof payload === 'object' &&
+			!Array.isArray(payload) &&
+			typeof payload.eventType === 'string'
+		) {
+			return payload.eventType;
+		}
+		return OUTBOX_EVENT_TYPE;
 	}
 
 	private getMailingDeliveryReference(payload: Prisma.JsonValue) {
@@ -256,34 +250,50 @@ export class MessagingAdminService {
 	}
 
 	private async reopenMailingDelivery(
+		transaction: Prisma.TransactionClient,
 		deliveryId: string,
 		campaignId: string
 	): Promise<void> {
-		await this.prisma.$transaction(async transaction => {
-			const reopened = await transaction.mailingDelivery.updateMany({
-				where: {
-					id: deliveryId,
-					campaignId,
-					status: 'FAILED'
-				},
-				data: {
-					status: 'PENDING',
-					lastError: null
-				}
-			});
-			if (reopened.count !== 1) {
-				throw new ConflictException(
-					'Доставка рассылки уже обработана или отменена'
-				);
+		const campaign = await transaction.mailingCampaign.findUnique({
+			where: { id: campaignId },
+			select: {
+				status: true,
+				cancelRequestedAt: true,
+				failedCount: true
 			}
-			await transaction.mailingCampaign.update({
-				where: { id: campaignId },
-				data: {
-					failedCount: { decrement: 1 },
-					status: 'RUNNING',
-					completedAt: null
-				}
-			});
+		});
+		if (
+			!campaign ||
+			campaign.status === MailingCampaignStatus.CANCELLED ||
+			campaign.cancelRequestedAt ||
+			campaign.failedCount < 1
+		) {
+			throw new ConflictException('Рассылка уже обработана или отменена');
+		}
+
+		const reopened = await transaction.mailingDelivery.updateMany({
+			where: {
+				id: deliveryId,
+				campaignId,
+				status: 'FAILED'
+			},
+			data: {
+				status: 'PENDING',
+				lastError: null
+			}
+		});
+		if (reopened.count !== 1) {
+			throw new ConflictException(
+				'Доставка рассылки уже обработана или отменена'
+			);
+		}
+		await transaction.mailingCampaign.update({
+			where: { id: campaignId },
+			data: {
+				failedCount: { decrement: 1 },
+				status: MailingCampaignStatus.RUNNING,
+				completedAt: null
+			}
 		});
 	}
 

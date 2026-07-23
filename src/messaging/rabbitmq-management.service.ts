@@ -1,8 +1,6 @@
 import {
 	INTEGRATION_QUEUE_NAMES,
-	IntegrationKind,
-	MANUAL_RETRY_EXCHANGE,
-	OUTBOX_EVENT_TYPE
+	IntegrationKind
 } from '@/messaging/messaging.constants';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -41,42 +39,6 @@ export class RabbitMqManagementService {
 			cluster_name?: string;
 		}>('/api/overview');
 		return `RabbitMQ ${overview.rabbitmq_version || 'доступен'}`;
-	}
-
-	async publishIntegrationEvent(input: {
-		kind: IntegrationKind;
-		eventId: string;
-		payload: unknown;
-	}): Promise<void> {
-		const response = await this.request<{ routed?: boolean }>(
-			`/api/exchanges/${this.getEncodedVhost()}/${encodeURIComponent(MANUAL_RETRY_EXCHANGE)}/publish`,
-			{
-				method: 'POST',
-				body: JSON.stringify({
-					properties: {
-						content_type: 'application/json',
-						delivery_mode: 2,
-						message_id: input.eventId,
-						type:
-							(
-								input.payload as {
-									eventType?: string;
-								}
-							)?.eventType || OUTBOX_EVENT_TYPE,
-						headers: {
-							'x-manual-retry': true
-						}
-					},
-					routing_key: input.kind,
-					payload: JSON.stringify(input.payload),
-					payload_encoding: 'string'
-				})
-			}
-		);
-
-		if (!response.routed) {
-			throw new Error('RabbitMQ не смог маршрутизировать сообщение');
-		}
 	}
 
 	getMainQueueName(kind: IntegrationKind): string {

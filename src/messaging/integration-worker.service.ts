@@ -14,6 +14,7 @@ import { PrismaService } from '@/prisma.service';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+	IntegrationDeliveryReceiptStatus,
 	MailingCampaignStatus,
 	MailingDeliveryStatus,
 	Prisma
@@ -21,9 +22,20 @@ import {
 import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'crypto';
 
+const DELIVERY_RECEIPT_LEASE_MS = 10 * 60 * 1000;
+
+class DeliveryClaimInProgressError extends Error {}
+
+type DeliveryClaim =
+	| { state: 'claimed'; lockedAt: Date }
+	| { state: 'delivered' }
+	| { state: 'processing' };
+
 @Injectable()
 export class IntegrationWorkerService implements OnModuleInit {
 	private readonly logger = new Logger(IntegrationWorkerService.name);
+	private readonly receiptCleanupBatchSize = 1000;
+	private readonly receiptCleanupMaxBatches = 20;
 	private lastReceiptCleanupAt = 0;
 	private readonly rateLimitTails = new Map<string, Promise<void>>();
 
@@ -84,18 +96,10 @@ export class IntegrationWorkerService implements OnModuleInit {
 			return;
 		}
 
+		let receiptClaim: Date | null = null;
 		try {
-			const receipt =
-				await this.prisma.integrationDeliveryReceipt.findUnique({
-					where: {
-						eventId_integration: {
-							eventId,
-							integration: kind
-						}
-					},
-					select: { id: true }
-				});
-			if (receipt) {
+			const claim = await this.claimDelivery(eventId, kind);
+			if (claim.state === 'delivered') {
 				await this.resolveFailure(eventId, kind);
 				this.rabbitMq.ack(message);
 				this.logger.warn(
@@ -103,14 +107,16 @@ export class IntegrationWorkerService implements OnModuleInit {
 				);
 				return;
 			}
+			if (claim.state === 'processing') {
+				throw new DeliveryClaimInProgressError(
+					`Integration delivery is already processing eventId=${eventId} kind=${kind}`
+				);
+			}
+			receiptClaim = claim.lockedAt;
 
 			await this.deliverWithRateLimit(kind, payload, eventId);
-			await this.prisma.integrationDeliveryReceipt.create({
-				data: {
-					eventId,
-					integration: kind
-				}
-			});
+			await this.markDeliveryDelivered(eventId, kind, receiptClaim);
+			receiptClaim = null;
 			await this.resolveFailure(eventId, kind);
 			await this.cleanupReceiptsIfDue();
 			this.rabbitMq.ack(message);
@@ -119,9 +125,26 @@ export class IntegrationWorkerService implements OnModuleInit {
 			);
 		} catch (error) {
 			const lastAttempt = this.getRetryAttempt(message);
-			const nextAttempt = lastAttempt + 1;
+			const nextAttempt =
+				error instanceof DeliveryClaimInProgressError
+					? Math.max(lastAttempt, 1)
+					: lastAttempt + 1;
 			const errorMessage =
 				error instanceof Error ? error.message : String(error);
+
+			if (receiptClaim) {
+				await this.releaseDeliveryClaim(eventId, kind, receiptClaim).catch(
+					releaseError => {
+						this.logger.error(
+							`Failed to release delivery claim eventId=${eventId} kind=${kind}: ${
+								releaseError instanceof Error
+									? releaseError.message
+									: String(releaseError)
+							}`
+						);
+					}
+				);
+			}
 
 			try {
 				if (nextAttempt <= RETRY_DELAYS_MS.length) {
@@ -162,6 +185,116 @@ export class IntegrationWorkerService implements OnModuleInit {
 		}
 	}
 
+	private async claimDelivery(
+		eventId: string,
+		integration: IntegrationKind
+	): Promise<DeliveryClaim> {
+		const lockedAt = new Date();
+		try {
+			await this.prisma.integrationDeliveryReceipt.create({
+				data: {
+					eventId,
+					integration,
+					status: IntegrationDeliveryReceiptStatus.PROCESSING,
+					lockedAt,
+					deliveredAt: null
+				}
+			});
+			return { state: 'claimed', lockedAt };
+		} catch (error) {
+			if (!this.isUniqueConstraintError(error)) throw error;
+		}
+
+		const receipt =
+			await this.prisma.integrationDeliveryReceipt.findUnique({
+				where: {
+					eventId_integration: {
+						eventId,
+						integration
+					}
+				},
+				select: {
+					status: true,
+					lockedAt: true
+				}
+			});
+		if (!receipt) {
+			throw new Error(
+				`Integration delivery receipt disappeared eventId=${eventId} kind=${integration}`
+			);
+		}
+		if (receipt.status === IntegrationDeliveryReceiptStatus.DELIVERED) {
+			return { state: 'delivered' };
+		}
+		if (
+			receipt.lockedAt.getTime() >
+			lockedAt.getTime() - DELIVERY_RECEIPT_LEASE_MS
+		) {
+			return { state: 'processing' };
+		}
+
+		const reclaimed =
+			await this.prisma.integrationDeliveryReceipt.updateMany({
+				where: {
+					eventId,
+					integration,
+					status: IntegrationDeliveryReceiptStatus.PROCESSING,
+					lockedAt: receipt.lockedAt
+				},
+				data: { lockedAt }
+			});
+		return reclaimed.count === 1
+			? { state: 'claimed', lockedAt }
+			: { state: 'processing' };
+	}
+
+	private async markDeliveryDelivered(
+		eventId: string,
+		integration: IntegrationKind,
+		lockedAt: Date
+	): Promise<void> {
+		const delivered =
+			await this.prisma.integrationDeliveryReceipt.updateMany({
+				where: {
+					eventId,
+					integration,
+					status: IntegrationDeliveryReceiptStatus.PROCESSING,
+					lockedAt
+				},
+				data: {
+					status: IntegrationDeliveryReceiptStatus.DELIVERED,
+					deliveredAt: new Date()
+				}
+			});
+		if (delivered.count !== 1) {
+			throw new Error(
+				`Integration delivery claim was lost eventId=${eventId} kind=${integration}`
+			);
+		}
+	}
+
+	private async releaseDeliveryClaim(
+		eventId: string,
+		integration: IntegrationKind,
+		lockedAt: Date
+	): Promise<void> {
+		await this.prisma.integrationDeliveryReceipt.deleteMany({
+			where: {
+				eventId,
+				integration,
+				status: IntegrationDeliveryReceiptStatus.PROCESSING,
+				lockedAt
+			}
+		});
+	}
+
+	private isUniqueConstraintError(error: unknown): boolean {
+		return (
+			error instanceof Prisma.PrismaClientKnownRequestError &&
+			error.code === 'P2002'
+		);
+	}
+
 	private async resolveFailure(
 		eventId: string,
 		integration: IntegrationKind
@@ -186,13 +319,27 @@ export class IntegrationWorkerService implements OnModuleInit {
 		);
 		const retentionDays =
 			Number.isInteger(configured) && configured >= 30 ? configured : 90;
-		await this.prisma.integrationDeliveryReceipt.deleteMany({
-			where: {
-				deliveredAt: {
-					lt: new Date(now - retentionDays * 24 * 60 * 60 * 1000)
-				}
-			}
-		});
+		const deliveredBefore = new Date(
+			now - retentionDays * 24 * 60 * 60 * 1000
+		);
+		for (let batch = 0; batch < this.receiptCleanupMaxBatches; batch++) {
+			const count = await this.prisma.$executeRaw(
+				Prisma.sql`
+					WITH expired AS (
+						SELECT "id"
+						FROM "integration_delivery_receipts"
+						WHERE "status" = 'DELIVERED'::"IntegrationDeliveryReceiptStatus"
+							AND "delivered_at" < ${deliveredBefore}
+						ORDER BY "delivered_at" ASC
+						LIMIT ${this.receiptCleanupBatchSize}
+					)
+					DELETE FROM "integration_delivery_receipts" AS receipt
+					USING expired
+					WHERE receipt."id" = expired."id"
+				`
+			);
+			if (count < this.receiptCleanupBatchSize) break;
+		}
 	}
 
 	private parsePayload(
@@ -384,7 +531,10 @@ export class IntegrationWorkerService implements OnModuleInit {
 		eventId: string
 	): Promise<void> {
 		const intervalMs = this.getRateLimitInterval(kind);
-		if (!intervalMs) {
+		if (
+			!intervalMs ||
+			(await this.shouldBypassMailingRateLimit(kind, payload))
+		) {
 			await this.delivery.deliver(kind, payload, eventId);
 			return;
 		}
@@ -404,6 +554,50 @@ export class IntegrationWorkerService implements OnModuleInit {
 		} finally {
 			setTimeout(release, intervalMs);
 		}
+	}
+
+	private async shouldBypassMailingRateLimit(
+		kind: IntegrationKind,
+		payload:
+			| LeadIntegrationEventPayload
+			| PaymentSucceededEventPayload
+			| MailingDeliveryEventPayload
+			| LimitReachedEventPayload
+	): Promise<boolean> {
+		if (kind !== 'mailing-email' && kind !== 'mailing-telegram') {
+			return false;
+		}
+
+		const deliveryId = (payload as MailingDeliveryEventPayload).deliveryId;
+		if (!deliveryId) return true;
+		const delivery = await this.prisma.mailingDelivery.findUnique({
+			where: { id: deliveryId },
+			select: {
+				status: true,
+				updatedAt: true,
+				campaign: {
+					select: {
+						status: true,
+						cancelRequestedAt: true
+					}
+				}
+			}
+		});
+		if (!delivery) return true;
+		if (
+			delivery.campaign.status === MailingCampaignStatus.CANCELLED ||
+			delivery.campaign.cancelRequestedAt
+		) {
+			return true;
+		}
+		if (delivery.status === MailingDeliveryStatus.PENDING) return false;
+		if (delivery.status === MailingDeliveryStatus.PROCESSING) {
+			return (
+				delivery.updatedAt.getTime() >
+				Date.now() - DELIVERY_RECEIPT_LEASE_MS
+			);
+		}
+		return true;
 	}
 
 	private getRateLimitInterval(kind: IntegrationKind): number {

@@ -7,6 +7,7 @@ import {
 	OnModuleInit
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { OutboxEventStatus } from '@prisma/client';
 
 @Injectable()
 export class MessagingOperationalAlertService
@@ -38,35 +39,51 @@ export class MessagingOperationalAlertService
 	private async check(): Promise<void> {
 		try {
 			const staleBefore = new Date(Date.now() - 30_000);
-			const [failedOutbox, unresolvedDlq, publisher, worker] =
-				await Promise.all([
-					this.prisma.outboxEvent.count({
-						where: { status: 'FAILED' }
-					}),
-					this.prisma.integrationDeliveryFailure.count({
-						where: { resolvedAt: null }
-					}),
-					this.prisma.messagingHeartbeat.count({
-						where: {
-							service: 'outbox-publisher',
-							lastSeenAt: { gte: staleBefore }
-						}
-					}),
-					this.prisma.messagingHeartbeat.count({
-						where: {
-							service: 'integration-worker',
-							lastSeenAt: { gte: staleBefore }
-						}
-					})
-				]);
+			const oldPendingBefore = new Date(Date.now() - 15 * 60 * 1000);
+			const [
+				failedOutbox,
+				stalePendingOutbox,
+				unresolvedDlq,
+				publisher,
+				worker
+			] = await Promise.all([
+				this.prisma.outboxEvent.count({
+					where: { status: OutboxEventStatus.FAILED }
+				}),
+				this.prisma.outboxEvent.count({
+					where: {
+						status: {
+							in: [OutboxEventStatus.PENDING, OutboxEventStatus.PUBLISHING]
+						},
+						createdAt: { lt: oldPendingBefore }
+					}
+				}),
+				this.prisma.integrationDeliveryFailure.count({
+					where: { resolvedAt: null }
+				}),
+				this.prisma.messagingHeartbeat.count({
+					where: {
+						service: 'outbox-publisher',
+						lastSeenAt: { gte: staleBefore }
+					}
+				}),
+				this.prisma.messagingHeartbeat.count({
+					where: {
+						service: 'integration-worker',
+						lastSeenAt: { gte: staleBefore }
+					}
+				})
+			]);
 			const signature = [
 				failedOutbox,
+				stalePendingOutbox,
 				unresolvedDlq,
 				publisher > 0 ? 1 : 0,
 				worker > 0 ? 1 : 0
 			].join(':');
 			const hasProblem =
 				failedOutbox > 0 ||
+				stalePendingOutbox > 0 ||
 				unresolvedDlq > 0 ||
 				publisher === 0 ||
 				worker === 0;
@@ -86,6 +103,7 @@ export class MessagingOperationalAlertService
 				[
 					'<b>Проблема в очередях интеграций</b>',
 					`Outbox FAILED: <b>${failedOutbox}</b>`,
+					`Outbox PENDING/PUBLISHING старше 15 минут: <b>${stalePendingOutbox}</b>`,
 					`DLQ не обработано: <b>${unresolvedDlq}</b>`,
 					`Outbox publisher: <b>${publisher > 0 ? 'работает' : 'нет heartbeat'}</b>`,
 					`Integration worker: <b>${worker > 0 ? 'работает' : 'нет heartbeat'}</b>`

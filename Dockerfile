@@ -27,9 +27,14 @@ RUN pnpm prune --prod --ignore-scripts
 
 FROM base AS runner
 
+ARG APP_REVISION=unknown
+
 ENV NODE_ENV=production
 ENV MODE=production
 ENV PORT=4200
+ENV APP_REVISION=${APP_REVISION}
+
+LABEL org.opencontainers.image.revision=${APP_REVISION}
 
 RUN addgroup -S -g 1001 nodejs \
 	&& adduser -S -D -H -u 1001 -G nodejs nestjs
