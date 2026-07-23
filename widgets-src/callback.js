@@ -160,6 +160,7 @@
 	var cfg = null;
 	var isOpen = false;
 	var submitted = false;
+	var previousBodyStyles = null;
 
 	// ─── Floating button ──────────────────────────────────────────────────────
 
@@ -767,6 +768,26 @@
 
 	// ─── Open / close ─────────────────────────────────────────────────────────
 
+	function lockBody() {
+		if (!document.body || previousBodyStyles) return;
+		previousBodyStyles = {
+			overflow: document.body.style.overflow,
+			position: document.body.style.position,
+			width: document.body.style.width
+		};
+		document.body.style.overflow = 'hidden';
+		document.body.style.position = 'fixed';
+		document.body.style.width = '100%';
+	}
+
+	function unlockBody() {
+		if (!document.body || !previousBodyStyles) return;
+		document.body.style.overflow = previousBodyStyles.overflow;
+		document.body.style.position = previousBodyStyles.position;
+		document.body.style.width = previousBodyStyles.width;
+		previousBodyStyles = null;
+	}
+
 	function openModal() {
 		if (isOpen) return;
 		isOpen = true;
@@ -775,6 +796,7 @@
 		cbBtn.style.transform = 'scale(0.8)';
 		stopButtonAnimation();
 		overlay.style.display = 'flex';
+		lockBody();
 		submitted ? buildSuccess() : buildForm();
 		requestAnimationFrame(function () {
 			requestAnimationFrame(function () {
@@ -792,6 +814,7 @@
 		cbBtn.style.pointerEvents = 'auto';
 		cbBtn.style.transform = 'scale(1)';
 		startButtonAnimation();
+		unlockBody();
 		modal.style.transform = 'translateY(40px)';
 		modal.style.opacity = '0';
 		setTimeout(function () {
@@ -959,6 +982,7 @@
 	// ─── Public API ───────────────────────────────────────────────────────────
 
 	function destroyWidget() {
+		unlockBody();
 		var disabledPage = document.getElementById('callback-widget-disabled');
 		if (disabledPage && disabledPage.parentNode)
 			disabledPage.parentNode.removeChild(disabledPage);
