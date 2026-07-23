@@ -18,12 +18,15 @@
 		"dev": "nest start --watch",
 		"start:debug": "nest start --debug --watch",
 		"start:prod": "node dist/src/main.js",
+		"start:outbox-publisher": "node dist/src/outbox-publisher-main.js",
+		"start:integration-worker": "node dist/src/integration-worker-main.js",
 		"lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
 		"test": "jest",
 		"test:watch": "jest --watch",
 		"test:cov": "jest --coverage",
 		"test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
 		"test:e2e": "jest --config ./test/jest-e2e.json",
+		"test:messaging-integration": "node scripts/test-messaging-integration.mjs",
 		"email": "emails dev",
 		"prepare": "husky"
 	},
@@ -46,6 +49,8 @@
 		"@prisma/client": "5.22.0",
 		"@react-email/components": "0.0.21",
 		"@react-email/render": "^0.0.16",
+		"amqp-connection-manager": "^5.0.0",
+		"amqplib": "^2.0.1",
 		"app-root-path": "^3.1.0",
 		"bcryptjs": "^2.4.3",
 		"class-transformer": "^0.5.1",
@@ -77,6 +82,7 @@
 		"@nestjs/cli": "^10.4.9",
 		"@nestjs/schematics": "^10.2.3",
 		"@nestjs/testing": "^10.4.15",
+		"@types/amqplib": "^0.10.8",
 		"@types/app-root-path": "^1.2.8",
 		"@types/cookie-parser": "^1.4.8",
 		"@types/express": "^4.17.21",
@@ -112,15 +118,17 @@
 		"moduleFileExtensions": [
 			"js",
 			"json",
-			"ts"
+			"ts",
+			"tsx"
 		],
 		"rootDir": "src",
 		"testRegex": ".*\\.spec\\.ts$",
 		"transform": {
-			"^.+\\.(t|j)s$": "ts-jest"
+			"^.+\\.(t|j)sx?$": "ts-jest"
 		},
 		"moduleNameMapper": {
-			"^@/(.*)$": "<rootDir>/$1"
+			"^@/(.*)$": "<rootDir>/$1",
+			"^@email/(.*)$": "<rootDir>/../emails/$1"
 		},
 		"collectCoverageFrom": [
 			"**/*.(t|j)s"

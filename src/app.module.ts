@@ -25,6 +25,7 @@ import { DevToolsModule } from '@/dev-tools/dev-tools.module';
 import { HealthModule } from '@/health/health.module';
 import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
 import { MailingModule } from '@/mailing/mailing.module';
+import { MessagingAdminModule } from '@/messaging/messaging-admin.module';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
@@ -58,6 +59,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		HomePageContentModule,
 		NotesModule,
 		MailingModule,
+		MessagingAdminModule,
 		HealthModule,
 		TelegramBotModule,
 		DevToolsModule,

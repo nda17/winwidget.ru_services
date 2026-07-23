@@ -502,6 +502,23 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		await this.sendTelegramMessage(token, chatId, text, options);
 	}
 
+	async sendMessagingOperationalAlert(text: string): Promise<boolean> {
+		const settings = await this.getOrCreateSettings();
+		const chatId = settings.dailySummaryChatId.trim();
+		const messageThreadId = settings.reportsThreadId;
+		if (!chatId || !messageThreadId) {
+			this.logger.warn(
+				'Messaging alert skipped: Reports topic is not configured.'
+			);
+			return false;
+		}
+		await this.sendInfoBotMessage(chatId, text, {
+			parseMode: 'HTML',
+			messageThreadId
+		});
+		return true;
+	}
+
 	async sendPaymentSucceededNotification(
 		data: PaymentSucceededNotification
 	) {

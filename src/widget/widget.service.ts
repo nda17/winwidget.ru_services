@@ -1,5 +1,6 @@
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
+import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -810,7 +811,7 @@ export class WidgetService {
 						}
 					}
 
-					return transaction.lead.create({
+					const createdLead = await transaction.lead.create({
 						data: {
 							widgetId: widget.id,
 							contact: dto.contact,
@@ -822,6 +823,22 @@ export class WidgetService {
 							spinResetToken: config.spinResetToken || ''
 						}
 					});
+					await enqueueLeadIntegrationEvents(transaction, {
+						source: 'widget',
+						entity: { id: widget.id, name: widget.name },
+						lead: {
+							id: createdLead.id,
+							contact: dto.contact,
+							name: dto.name,
+							phone: dto.phone,
+							email: dto.email,
+							bonus: dto.bonus,
+							url: dto.url,
+							createdAt: createdLead.createdAt
+						},
+						integrations: config.integrations
+					});
+					return createdLead;
 				}
 			);
 
@@ -829,172 +846,6 @@ export class WidgetService {
 			this.sendLimitReachedNotifications(widget, config, newCount).catch(
 				() => {}
 			);
-		}
-
-		// Send email notification to widget owner if configured
-		const notificationEmail = config?.integrations?.email;
-		if (notificationEmail) {
-			try {
-				await this.emailService.sendLeadNotification(notificationEmail, {
-					widgetName: widget.name,
-					phone: dto.phone,
-					email: dto.email,
-					name: dto.name,
-					bonus: dto.bonus,
-					url: dto.url,
-					date: new Date()
-				});
-			} catch {
-				// Email errors shouldn't fail the lead submission
-			}
-		}
-
-		// Webhook notification
-		const webhookUrl = config?.integrations?.webhookUrl;
-		if (webhookUrl) {
-			try {
-				await this.safeOutboundHttpService.postJson(
-					webhookUrl,
-					{
-						name: widget.name,
-						lead: dto.contact,
-						phone: dto.phone || null,
-						email: dto.email || null,
-						bonus: dto.bonus || null,
-						url: dto.url || null,
-						time: new Date().toISOString()
-					},
-					{ policy: 'webhook' }
-				);
-			} catch {
-				// Webhook errors shouldn't fail the lead submission
-			}
-		}
-
-		// Telegram notification
-		const telegramChatId = config?.integrations?.telegramChatId;
-		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (telegramChatId && telegramBotToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramBotToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: telegramChatId,
-							text: this.buildTelegramMessage({
-								widgetName: widget.name,
-								phone: dto.phone,
-								email: dto.email,
-								name: dto.name,
-								bonus: dto.bonus,
-								url: dto.url,
-								date: new Date()
-							}),
-							parse_mode: 'HTML'
-						})
-					}
-				);
-			} catch {
-				// Telegram errors shouldn't fail the lead submission
-			}
-		}
-
-		// Bitrix24 notification
-		const bitrix24WebhookUrl = config?.integrations?.bitrix24WebhookUrl;
-		if (bitrix24WebhookUrl) {
-			try {
-				const fields: Record<string, any> = {
-					TITLE: `Заявка с виджета «${widget.name}»${dto.bonus ? ` — ${dto.bonus}` : ''}`,
-					SOURCE_ID: 'WEB',
-					COMMENTS: [
-						`Виджет: ${widget.name}`,
-						dto.bonus ? `Приз: ${dto.bonus}` : '',
-						dto.url ? `Страница: ${dto.url}` : ''
-					]
-						.filter(Boolean)
-						.join('\n')
-				};
-				if (dto.name) fields.NAME = dto.name;
-				if (dto.phone)
-					fields.PHONE = [{ VALUE: dto.phone, VALUE_TYPE: 'WORK' }];
-				if (dto.email)
-					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
-
-				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await this.safeOutboundHttpService.postJson(
-					`${base}/crm.lead.add.json`,
-					{ fields },
-					{ policy: 'bitrix24' }
-				);
-			} catch {
-				// Bitrix24 errors shouldn't fail the lead submission
-			}
-		}
-
-		// amoCRM notification
-		const amoCrmDomain = config?.integrations?.amoCrmDomain;
-		const amoCrmToken = config?.integrations?.amoCrmToken;
-		if (amoCrmDomain && amoCrmToken) {
-			try {
-				const contactFields: any[] = [];
-				if (dto.phone)
-					contactFields.push({
-						field_code: 'PHONE',
-						values: [{ value: dto.phone, enum_code: 'WORK' }]
-					});
-				if (dto.email)
-					contactFields.push({
-						field_code: 'EMAIL',
-						values: [{ value: dto.email, enum_code: 'WORK' }]
-					});
-
-				const leadNote = [
-					`Виджет: ${widget.name}`,
-					dto.bonus ? `Приз: ${dto.bonus}` : '',
-					dto.url ? `Страница: ${dto.url}` : ''
-				]
-					.filter(Boolean)
-					.join('\n');
-
-				const body: any = [
-					{
-						name: `Заявка с виджета «${widget.name}»${dto.bonus ? ` — ${dto.bonus}` : ''}`,
-						_embedded: {
-							contacts: [
-								{
-									...(dto.name ? { first_name: dto.name } : {}),
-									...(contactFields.length
-										? { custom_fields_values: contactFields }
-										: {})
-								}
-							]
-						},
-						...(leadNote
-							? {
-									custom_fields_values: [
-										{
-											field_code: 'DESCRIPTION',
-											values: [{ value: leadNote }]
-										}
-									]
-								}
-							: {})
-					}
-				];
-
-				await this.safeOutboundHttpService.postJson(
-					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
-					body,
-					{
-						policy: 'amo-crm',
-						headers: { Authorization: `Bearer ${amoCrmToken}` }
-					}
-				);
-			} catch {
-				// amoCRM errors shouldn't fail the lead submission
-			}
 		}
 
 		return { success: true, lead };
@@ -1322,32 +1173,6 @@ export class WidgetService {
 
 	private toNumber(value: number | bigint) {
 		return typeof value === 'bigint' ? Number(value) : value;
-	}
-
-	private buildTelegramMessage(data: {
-		widgetName: string;
-		phone?: string;
-		email?: string;
-		name?: string;
-		bonus?: string;
-		url?: string;
-		date: Date;
-	}): string {
-		const dateStr = data.date.toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
-		const lines: string[] = [
-			`🎯 <b>Новая заявка с виджета</b>`,
-			`<i>${data.widgetName}</i>`,
-			``,
-			`📅 <b>Дата:</b> ${dateStr}`
-		];
-		if (data.name) lines.push(`👤 <b>Имя:</b> ${data.name}`);
-		if (data.phone) lines.push(`📞 <b>Телефон:</b> ${data.phone}`);
-		if (data.email) lines.push(`✉️ <b>Email:</b> ${data.email}`);
-		if (data.bonus) lines.push(`🎁 <b>Приз:</b> ${data.bonus}`);
-		if (data.url) lines.push(`🌐 <b>Страница:</b> ${data.url}`);
-		return lines.join('\n');
 	}
 
 	private async getWidgetByIdAndOwner(widgetId: string, userId: string) {

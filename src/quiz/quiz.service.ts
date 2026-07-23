@@ -1,5 +1,6 @@
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
+import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -637,7 +638,7 @@ export class QuizService {
 						}
 					}
 
-					return transaction.quizLead.create({
+					const createdLead = await transaction.quizLead.create({
 						data: {
 							quizId: quiz.id,
 							contact: dto.contact,
@@ -650,6 +651,22 @@ export class QuizService {
 							quizResetToken: config.quizResetToken || ''
 						}
 					});
+					await enqueueLeadIntegrationEvents(transaction, {
+						source: 'quiz',
+						entity: { id: quiz.id, name: quiz.name },
+						lead: {
+							id: createdLead.id,
+							contact: dto.contact,
+							phone: dto.phone,
+							email: dto.email,
+							answers: dto.answers,
+							result: resultTitle,
+							url: dto.url,
+							createdAt: createdLead.createdAt
+						},
+						integrations: config.integrations
+					});
+					return createdLead;
 				}
 			);
 
@@ -658,8 +675,6 @@ export class QuizService {
 				() => {}
 			);
 		}
-
-		await this.sendNotifications(quiz, config, dto, resultData);
 
 		return { success: true, lead, result: resultData };
 	}
@@ -702,145 +717,6 @@ export class QuizService {
 			}
 		}
 		return winner;
-	}
-
-	private async sendNotifications(
-		quiz: any,
-		config: any,
-		dto: SubmitQuizLeadDto,
-		resultData: any
-	) {
-		const resultTitle = resultData?.title || '';
-
-		const notificationEmail = config?.integrations?.email;
-		if (notificationEmail) {
-			try {
-				await this.emailService.sendLeadNotification(notificationEmail, {
-					widgetName: quiz.name,
-					phone: dto.phone,
-					email: dto.email,
-					bonus: resultTitle,
-					url: dto.url,
-					date: new Date()
-				});
-			} catch {}
-		}
-
-		const webhookUrl = config?.integrations?.webhookUrl;
-		if (webhookUrl) {
-			try {
-				await this.safeOutboundHttpService.postJson(
-					webhookUrl,
-					{
-						name: quiz.name,
-						lead: dto.contact,
-						phone: dto.phone || null,
-						email: dto.email || null,
-						result: resultTitle,
-						answers: dto.answers,
-						url: dto.url || null,
-						time: new Date().toISOString()
-					},
-					{ policy: 'webhook' }
-				);
-			} catch {}
-		}
-
-		const telegramChatId = config?.integrations?.telegramChatId;
-		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (telegramChatId && telegramBotToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramBotToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: telegramChatId,
-							text: this.buildTelegramMessage({
-								quizName: quiz.name,
-								phone: dto.phone,
-								email: dto.email,
-								result: resultTitle,
-								url: dto.url,
-								date: new Date()
-							}),
-							parse_mode: 'HTML'
-						})
-					}
-				);
-			} catch {}
-		}
-
-		const bitrix24WebhookUrl = config?.integrations?.bitrix24WebhookUrl;
-		if (bitrix24WebhookUrl) {
-			try {
-				const fields: Record<string, any> = {
-					TITLE: `Заявка с квиза «${quiz.name}»${resultTitle ? ` — ${resultTitle}` : ''}`,
-					SOURCE_ID: 'WEB',
-					COMMENTS: [
-						`Квиз: ${quiz.name}`,
-						resultTitle ? `Результат: ${resultTitle}` : '',
-						dto.url ? `Страница: ${dto.url}` : ''
-					]
-						.filter(Boolean)
-						.join('\n')
-				};
-				if (dto.phone)
-					fields.PHONE = [{ VALUE: dto.phone, VALUE_TYPE: 'WORK' }];
-				if (dto.email)
-					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
-
-				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await this.safeOutboundHttpService.postJson(
-					`${base}/crm.lead.add.json`,
-					{ fields },
-					{ policy: 'bitrix24' }
-				);
-			} catch {}
-		}
-
-		const amoCrmDomain = config?.integrations?.amoCrmDomain;
-		const amoCrmToken = config?.integrations?.amoCrmToken;
-		if (amoCrmDomain && amoCrmToken) {
-			try {
-				const contactFields: any[] = [];
-				if (dto.phone)
-					contactFields.push({
-						field_code: 'PHONE',
-						values: [{ value: dto.phone, enum_code: 'WORK' }]
-					});
-				if (dto.email)
-					contactFields.push({
-						field_code: 'EMAIL',
-						values: [{ value: dto.email, enum_code: 'WORK' }]
-					});
-
-				const body: any = [
-					{
-						name: `Заявка с квиза «${quiz.name}»${resultTitle ? ` — ${resultTitle}` : ''}`,
-						_embedded: {
-							contacts: [
-								{
-									...(contactFields.length
-										? { custom_fields_values: contactFields }
-										: {})
-								}
-							]
-						}
-					}
-				];
-
-				await this.safeOutboundHttpService.postJson(
-					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
-					body,
-					{
-						policy: 'amo-crm',
-						headers: { Authorization: `Bearer ${amoCrmToken}` }
-					}
-				);
-			} catch {}
-		}
 	}
 
 	private async sendLimitReachedNotifications(
@@ -904,30 +780,6 @@ export class QuizService {
 				);
 			} catch {}
 		}
-	}
-
-	private buildTelegramMessage(data: {
-		quizName: string;
-		phone?: string;
-		email?: string;
-		result?: string;
-		url?: string;
-		date: Date;
-	}): string {
-		const dateStr = data.date.toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
-		const lines: string[] = [
-			`🎯 <b>Новая заявка с квиза</b>`,
-			`<i>${data.quizName}</i>`,
-			``,
-			`📅 <b>Дата:</b> ${dateStr}`
-		];
-		if (data.phone) lines.push(`📞 <b>Телефон:</b> ${data.phone}`);
-		if (data.email) lines.push(`✉️ <b>Email:</b> ${data.email}`);
-		if (data.result) lines.push(`🏆 <b>Результат:</b> ${data.result}`);
-		if (data.url) lines.push(`🌐 <b>Страница:</b> ${data.url}`);
-		return lines.join('\n');
 	}
 
 	private buildCsv(leads: any[]): Buffer {

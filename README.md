@@ -227,6 +227,140 @@ MODE=development -> DATABASE_URL_DEVELOPMENT
 MODE=production  -> DATABASE_URL_PRODUCTION
 ```
 
+Production compose отслеживается вместе с backend-кодом в
+`deploy/docker-compose.prod.yml`. Он запускает четыре постоянных
+backend-контейнера: `api`, `rabbitmq`, `outbox-publisher` и
+`integration-worker`. Контейнер `migrate` запускается только на время деплоя.
+RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
+привязаны только к `127.0.0.1` backend VPS.
+
+## RabbitMQ и transactional outbox
+
+Локальный `.env` для запуска publisher/worker с RabbitMQ на localhost:
+
+```env
+RABBITMQ_USER=winwidget
+RABBITMQ_PASSWORD=winwidget
+RABBITMQ_VHOST=winwidget
+RABBITMQ_URL=amqp://winwidget:winwidget@127.0.0.1:5672/winwidget
+OUTBOX_BATCH_SIZE=50
+OUTBOX_POLL_INTERVAL_MS=500
+OUTBOX_RETENTION_DAYS=7
+RABBITMQ_WORKER_PREFETCH=10
+MESSAGING_ALERTS_ENABLED=false
+INTEGRATION_RECEIPT_RETENTION_DAYS=90
+INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm
+```
+
+В production пароль должен отличаться от локального. Удобно использовать
+hex-пароль: он не требует percent-encoding внутри URL.
+
+```bash
+openssl rand -hex 32
+```
+
+Добавьте полученное значение в
+`/opt/winwidget/deploy/backend/.env.production`:
+
+```env
+RABBITMQ_USER=winwidget
+RABBITMQ_PASSWORD=<полученный-hex-пароль>
+RABBITMQ_VHOST=winwidget
+RABBITMQ_URL=amqp://winwidget:<тот-же-hex-пароль>@127.0.0.1:5672/winwidget
+OUTBOX_BATCH_SIZE=50
+OUTBOX_POLL_INTERVAL_MS=1000
+OUTBOX_RETENTION_DAYS=7
+RABBITMQ_WORKER_PREFETCH=10
+MESSAGING_ALERTS_ENABLED=true
+INTEGRATION_RECEIPT_RETENTION_DAYS=90
+INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm
+```
+
+`RABBITMQ_PASSWORD` и пароль внутри `RABBITMQ_URL` должны совпадать.
+Production deploy останавливается до запуска миграции и контейнеров, если
+`RABBITMQ_PASSWORD` или `RABBITMQ_URL` пусты.
+
+Назначение настроек:
+
+- `OUTBOX_BATCH_SIZE` — максимум событий, захватываемых publisher за цикл;
+- `OUTBOX_POLL_INTERVAL_MS` — интервал чтения outbox;
+- `OUTBOX_RETENTION_DAYS` — срок хранения успешно опубликованных событий;
+- `RABBITMQ_WORKER_PREFETCH` — максимум неподтверждённых сообщений worker;
+- `MESSAGING_ALERTS_ENABLED` — Telegram-алерты о недоступных messaging-процессах и необработанных ошибках;
+- `INTEGRATION_RECEIPT_RETENTION_DAYS` — срок хранения отметок об успешной доставке, минимум 30 дней;
+- `INTEGRATION_WORKER_KINDS` — consumers, запускаемые worker-контейнером.
+
+RabbitMQ Management UI слушает только `127.0.0.1:15672`. Не открывайте этот
+порт публично. Для временного доступа используйте SSH tunnel:
+
+```bash
+ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
+```
+
+После этого интерфейс доступен локально по `http://127.0.0.1:15672`.
+
+### Гарантии доставки и защита от дублей
+
+Система использует доставку `at-least-once`: событие не теряется при временной
+недоступности RabbitMQ или внешнего сервиса, но при аварии в момент внешнего
+запроса теоретически возможна повторная доставка.
+
+- worker хранит успешные `eventId` в `integration_delivery_receipts` и не
+  обрабатывает уже завершённое событие повторно;
+- webhook получает стабильный `eventId` в JSON и заголовке
+  `X-WinWidget-Event-Id`, чтобы принимающая сторона могла реализовать свою
+  идемпотентность;
+- email получает стабильный `Message-ID`;
+- Telegram, Битрикс24 и amoCRM не предоставляют общей транзакции с нашей БД,
+  поэтому абсолютная exactly-once гарантия для них технически невозможна;
+- старые receipts удаляются worker по
+  `INTEGRATION_RECEIPT_RETENTION_DAYS`.
+
+### Production runbook
+
+Единственный compose, используемый CI/CD:
+`winwidget.ru_server/deploy/docker-compose.prod.yml`. Копия в
+`deploy/backend/docker-compose.prod.yml` оставлена только для старых ручных
+команд и должна содержать те же параметры.
+
+Перед первым production-деплоем:
+
+1. Убедиться, что у облачной PostgreSQL есть актуальный backup/snapshot.
+2. Заполнить RabbitMQ-переменные в
+   `/opt/winwidget/deploy/backend/.env.production`.
+3. Проверить, что management-порт `15672` и AMQP-порт `5672` доступны только
+   через localhost.
+4. Запустить штатный CI/CD. Контейнер `migrate` применит миграции до запуска
+   новой версии API и worker.
+5. Открыть `/admin/system` и `/admin/messaging`: RabbitMQ, publisher и worker
+   должны иметь статус `Работает`, а Outbox/DLQ — не накапливаться.
+
+Диагностика:
+
+```bash
+docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
+  -f /opt/winwidget/winwidget.ru_server/deploy/docker-compose.prod.yml ps
+
+docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
+  -f /opt/winwidget/winwidget.ru_server/deploy/docker-compose.prod.yml \
+  logs --tail=200 outbox-publisher integration-worker rabbitmq
+```
+
+Аварийные сценарии:
+
+- RabbitMQ недоступен: заявки продолжают сохраняться вместе с Outbox; после
+  восстановления publisher отправит накопившиеся события.
+- Worker недоступен: сообщения остаются в durable-очередях RabbitMQ.
+- Внешняя интеграция недоступна: выполняются повторы через 30 секунд, 5 и
+  30 минут, затем событие сохраняется как DLQ-ошибка.
+- PostgreSQL недоступна: API не подтверждает сохранение заявки, publisher и
+  worker возобновляют работу после восстановления соединения/перезапуска.
+- Ошибка в DLQ: устранить причину и нажать `Повторить` в
+  `/admin/messaging`; действие попадёт в журнал событий.
+
+CI запускает `test:messaging-integration`, который проверяет реальные цепочки
+`Outbox → RabbitMQ` и `RabbitMQ → DLQ → PostgreSQL`.
+
 При неизвестном `MODE` или отсутствующей выбранной переменной backend
 завершает запуск с ошибкой.
 

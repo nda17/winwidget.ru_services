@@ -6,6 +6,7 @@ import {
 import { UpdateCalculatorDto } from '@/calculator/dto/update-calculator.dto';
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
+import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -841,7 +842,7 @@ export class CalculatorService {
 						}
 					}
 
-					return transaction.calculatorLead.create({
+					const createdLead = await transaction.calculatorLead.create({
 						data: {
 							calculatorId: calculator.id,
 							contact: normalizedDto.contact || '',
@@ -855,6 +856,23 @@ export class CalculatorService {
 							ip: ip || null
 						}
 					});
+					await enqueueLeadIntegrationEvents(transaction, {
+						source: 'calculator',
+						entity: { id: calculator.id, name: calculator.name },
+						lead: {
+							id: createdLead.id,
+							contact: normalizedDto.contact,
+							phone: normalizedPhone,
+							email: normalizedEmail,
+							answers: calculation.answers,
+							calculatedPrice: calculation.price.toFixed(2),
+							currency: config.currency,
+							url: dto.url,
+							createdAt: createdLead.createdAt
+						},
+						integrations: config.integrations
+					});
+					return createdLead;
 				}
 			);
 
@@ -865,13 +883,6 @@ export class CalculatorService {
 				newCount
 			).catch(() => undefined);
 		}
-
-		await this.sendNotifications(
-			calculator,
-			config,
-			normalizedDto,
-			calculation
-		);
 
 		return {
 			success: true,
@@ -1035,159 +1046,6 @@ export class CalculatorService {
 		}
 	}
 
-	private async sendNotifications(
-		calculator: any,
-		config: ReturnType<typeof normalizeCalculatorConfig>,
-		dto: SubmitCalculatorLeadDto,
-		calculation: {
-			price: Prisma.Decimal;
-			answers: NormalizedCalculatorAnswer[];
-		}
-	) {
-		const priceLabel = `${calculation.price.toFixed(2)} ${config.currency}`;
-		const answersLabel = calculation.answers
-			.map(answer => `${answer.fieldLabel}: ${answer.valueLabel}`)
-			.join('\n');
-
-		if (config.integrations.email) {
-			try {
-				await this.emailService.sendLeadNotification(
-					config.integrations.email,
-					{
-						widgetName: calculator.name,
-						phone: dto.phone,
-						email: dto.email,
-						detailLabel: 'Рассчитанная стоимость',
-						detailValue: priceLabel,
-						url: dto.url,
-						date: new Date()
-					}
-				);
-			} catch {}
-		}
-
-		if (config.integrations.webhookUrl) {
-			try {
-				await this.safeOutboundHttpService.postJson(
-					config.integrations.webhookUrl,
-					{
-						name: calculator.name,
-						lead: dto.contact,
-						phone: dto.phone || null,
-						email: dto.email || null,
-						answers: calculation.answers,
-						calculatedPrice: calculation.price.toFixed(2),
-						currency: config.currency,
-						url: dto.url || null,
-						time: new Date().toISOString()
-					},
-					{ policy: 'webhook' }
-				);
-			} catch {}
-		}
-
-		const telegramToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (config.integrations.telegramChatId && telegramToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: config.integrations.telegramChatId,
-							text: this.buildTelegramMessage({
-								calculatorName: calculator.name,
-								phone: dto.phone,
-								email: dto.email,
-								price: priceLabel,
-								answers: answersLabel,
-								url: dto.url
-							}),
-							parse_mode: 'HTML'
-						})
-					}
-				);
-			} catch {}
-		}
-
-		if (config.integrations.bitrix24WebhookUrl) {
-			try {
-				const fields: Record<string, any> = {
-					TITLE: `Заявка с калькулятора «${calculator.name}» — ${priceLabel}`,
-					SOURCE_ID: 'WEB',
-					COMMENTS: [
-						`Калькулятор: ${calculator.name}`,
-						`Стоимость: ${priceLabel}`,
-						answersLabel,
-						dto.url ? `Страница: ${dto.url}` : ''
-					]
-						.filter(Boolean)
-						.join('\n')
-				};
-				if (dto.phone)
-					fields.PHONE = [{ VALUE: dto.phone, VALUE_TYPE: 'WORK' }];
-				if (dto.email)
-					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
-				const base = config.integrations.bitrix24WebhookUrl.replace(
-					/\/$/,
-					''
-				);
-				await this.safeOutboundHttpService.postJson(
-					`${base}/crm.lead.add.json`,
-					{ fields },
-					{ policy: 'bitrix24' }
-				);
-			} catch {}
-		}
-
-		if (
-			config.integrations.amoCrmDomain &&
-			config.integrations.amoCrmToken
-		) {
-			try {
-				const contactFields: any[] = [];
-				if (dto.phone) {
-					contactFields.push({
-						field_code: 'PHONE',
-						values: [{ value: dto.phone, enum_code: 'WORK' }]
-					});
-				}
-				if (dto.email) {
-					contactFields.push({
-						field_code: 'EMAIL',
-						values: [{ value: dto.email, enum_code: 'WORK' }]
-					});
-				}
-				await this.safeOutboundHttpService.postJson(
-					this.safeOutboundHttpService.getAmoCrmApiUrl(
-						config.integrations.amoCrmDomain
-					),
-					[
-						{
-							name: `Заявка с калькулятора «${calculator.name}» — ${priceLabel}`,
-							_embedded: {
-								contacts: [
-									{
-										...(contactFields.length
-											? { custom_fields_values: contactFields }
-											: {})
-									}
-								]
-							}
-						}
-					],
-					{
-						policy: 'amo-crm',
-						headers: {
-							Authorization: `Bearer ${config.integrations.amoCrmToken}`
-						}
-					}
-				);
-			} catch {}
-		}
-	}
-
 	private async sendLimitReachedNotifications(
 		calculator: any,
 		config: ReturnType<typeof normalizeCalculatorConfig>,
@@ -1245,34 +1103,6 @@ export class CalculatorService {
 				);
 			} catch {}
 		}
-	}
-
-	private buildTelegramMessage(data: {
-		calculatorName: string;
-		phone?: string;
-		email?: string;
-		price: string;
-		answers: string;
-		url?: string;
-	}) {
-		const lines = [
-			'🧮 <b>Новая заявка с калькулятора</b>',
-			`<i>${this.escapeHtml(data.calculatorName)}</i>`,
-			'',
-			`📅 <b>Дата:</b> ${new Date().toLocaleString('ru-RU', {
-				timeZone: 'Europe/Moscow'
-			})}`,
-			`💰 <b>Стоимость:</b> ${this.escapeHtml(data.price)}`
-		];
-		if (data.phone)
-			lines.push(`📞 <b>Телефон:</b> ${this.escapeHtml(data.phone)}`);
-		if (data.email)
-			lines.push(`✉️ <b>Email:</b> ${this.escapeHtml(data.email)}`);
-		if (data.answers)
-			lines.push(`📋 <b>Параметры:</b>\n${this.escapeHtml(data.answers)}`);
-		if (data.url)
-			lines.push(`🌐 <b>Страница:</b> ${this.escapeHtml(data.url)}`);
-		return lines.join('\n');
 	}
 
 	private buildCsv(leads: Array<Record<string, any>>) {

@@ -1,3 +1,4 @@
+import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
 import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable } from '@nestjs/common';
@@ -18,13 +19,21 @@ type HealthCheck = {
 export class HealthService {
 	constructor(
 		private readonly prisma: PrismaService,
-		private readonly configService: ConfigService
+		private readonly configService: ConfigService,
+		private readonly rabbitManagement: RabbitMqManagementService
 	) {}
 
 	async getAdminHealth() {
 		const checks = await Promise.all([
 			this.checkBackend(),
 			this.checkDatabase(),
+			this.checkRabbitMq(),
+			this.checkMessagingHeartbeat('outbox-publisher', 'Outbox publisher'),
+			this.checkMessagingHeartbeat(
+				'integration-worker',
+				'Integration worker'
+			),
+			this.checkMessagingBacklog(),
 			this.checkS3(),
 			this.checkSmtp(),
 			this.checkSmsAero(),
@@ -57,6 +66,65 @@ export class HealthService {
 			await this.prisma.$queryRaw`SELECT 1`;
 			return 'Подключение к базе работает';
 		});
+	}
+
+	private async checkRabbitMq(): Promise<HealthCheck> {
+		return this.measure('rabbitmq', 'RabbitMQ', () =>
+			this.rabbitManagement.checkConnection()
+		);
+	}
+
+	private async checkMessagingHeartbeat(
+		service: string,
+		title: string
+	): Promise<HealthCheck> {
+		const latest = await this.prisma.messagingHeartbeat.findFirst({
+			where: { service },
+			orderBy: { lastSeenAt: 'desc' },
+			select: { lastSeenAt: true }
+		});
+		const ageMs = latest ? Date.now() - latest.lastSeenAt.getTime() : null;
+		const healthy = ageMs !== null && ageMs <= 30_000;
+
+		return {
+			id: service.replace('-', '_'),
+			title,
+			status: healthy ? 'ok' : 'down',
+			message: healthy
+				? `Heartbeat получен ${Math.round(ageMs / 1000)} сек. назад`
+				: latest
+					? `Heartbeat не поступал ${Math.round((ageMs || 0) / 1000)} сек.`
+					: 'Heartbeat ещё не зарегистрирован'
+		};
+	}
+
+	private async checkMessagingBacklog(): Promise<HealthCheck> {
+		const [failedOutbox, unresolvedFailures, oldestPending] =
+			await Promise.all([
+				this.prisma.outboxEvent.count({ where: { status: 'FAILED' } }),
+				this.prisma.integrationDeliveryFailure.count({
+					where: { resolvedAt: null }
+				}),
+				this.prisma.outboxEvent.findFirst({
+					where: { status: { in: ['PENDING', 'PUBLISHING'] } },
+					orderBy: { createdAt: 'asc' },
+					select: { createdAt: true }
+				})
+			]);
+		const oldestAgeSeconds = oldestPending
+			? Math.round((Date.now() - oldestPending.createdAt.getTime()) / 1000)
+			: 0;
+		const hasProblem =
+			failedOutbox > 0 || unresolvedFailures > 0 || oldestAgeSeconds > 60;
+
+		return {
+			id: 'messaging_backlog',
+			title: 'Очередь интеграций',
+			status: hasProblem ? 'warning' : 'ok',
+			message: hasProblem
+				? `Outbox FAILED: ${failedOutbox}, DLQ: ${unresolvedFailures}, старейшее ожидание: ${oldestAgeSeconds} сек.`
+				: 'Задержек и необработанных ошибок нет'
+		};
 	}
 
 	private async checkS3(): Promise<HealthCheck> {

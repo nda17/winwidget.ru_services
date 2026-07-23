@@ -17,6 +17,42 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: winwidget_ci
+          POSTGRES_USER: winwidget
+          POSTGRES_PASSWORD: winwidget_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U winwidget -d winwidget_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        image: rabbitmq:4.2-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: winwidget
+          RABBITMQ_DEFAULT_PASS: winwidget_ci
+          RABBITMQ_DEFAULT_VHOST: winwidget
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
+      DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
+      RABBITMQ_URL: amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget
+      RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
+      RABBITMQ_USER: winwidget
+      RABBITMQ_PASSWORD: winwidget_ci
+      RABBITMQ_VHOST: winwidget
 
     steps:
       - name: Checkout repository
@@ -41,11 +77,26 @@ jobs:
       - name: Generate Prisma Client
         run: pnpm exec prisma generate
 
+      - name: Apply database migrations
+        run: pnpm exec prisma migrate deploy
+
+      - name: Verify RabbitMQ Management API
+        run: curl --fail --user "$RABBITMQ_USER:$RABBITMQ_PASSWORD" "$RABBITMQ_MANAGEMENT_URL/api/overview"
+
       - name: Type check
         run: pnpm exec tsc --noEmit
 
+      - name: Test
+        run: pnpm test --runInBand
+
+      - name: Validate production compose
+        run: docker compose --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+
       - name: Build
         run: pnpm build
+
+      - name: Messaging integration smoke
+        run: pnpm run test:messaging-integration
 
   deploy:
     needs: verify

@@ -35,11 +35,17 @@ interface SubscriptionExpiryReminderPayload {
 export class EmailService {
 	constructor(private readonly mailerService: MailerService) {}
 
-	sendEmail(to: string, subject: string, html: string) {
+	sendEmail(
+		to: string,
+		subject: string,
+		html: string,
+		options: { messageId?: string } = {}
+	) {
 		return this.mailerService.sendMail({
 			to,
 			subject,
-			html
+			html,
+			...options
 		});
 	}
 
@@ -83,7 +89,11 @@ export class EmailService {
 		return this.sendEmail(to, subject, html);
 	}
 
-	sendLeadNotification(to: string, data: LeadNotificationPayload) {
+	sendLeadNotification(
+		to: string,
+		data: LeadNotificationPayload,
+		options: { messageId?: string } = {}
+	) {
 		const dateLabel = data.date.toLocaleString('ru-RU', {
 			timeZone: 'Europe/Moscow'
 		});
@@ -104,7 +114,8 @@ export class EmailService {
 		return this.sendEmail(
 			to,
 			`Новая заявка с виджета "${data.widgetName}"`,
-			html
+			html,
+			options
 		);
 	}
 

@@ -3,6 +3,7 @@ import { SubmitCountdownTimerLeadDto } from '@/countdown-timer/dto/submit-countd
 import { UpdateCountdownTimerDto } from '@/countdown-timer/dto/update-countdown-timer.dto';
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
+import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -539,7 +540,7 @@ export class CountdownTimerService {
 						}
 					}
 
-					return transaction.countdownTimerLead.create({
+					const createdLead = await transaction.countdownTimerLead.create({
 						data: {
 							countdownTimerId: timer.id,
 							phone: dto.phone || null,
@@ -549,6 +550,19 @@ export class CountdownTimerService {
 							timerResetToken: config.timerResetToken || ''
 						}
 					});
+					await enqueueLeadIntegrationEvents(transaction, {
+						source: 'countdown-timer',
+						entity: { id: timer.id, name: timer.name },
+						lead: {
+							id: createdLead.id,
+							phone: dto.phone,
+							email: dto.email,
+							url: dto.url,
+							createdAt: createdLead.createdAt
+						},
+						integrations: config.integrations
+					});
+					return createdLead;
 				}
 			);
 
@@ -557,8 +571,6 @@ export class CountdownTimerService {
 				() => {}
 			);
 		}
-
-		await this.sendNotifications(timer, config, dto);
 
 		return { success: true, lead };
 	}
@@ -575,63 +587,6 @@ export class CountdownTimerService {
 		}
 		if (dataType === 'PHONE_AND_EMAIL' && (!dto.phone || !dto.email)) {
 			throw new BadRequestException('Введите телефон и email');
-		}
-	}
-
-	private async sendNotifications(
-		timer: any,
-		config: any,
-		dto: SubmitCountdownTimerLeadDto
-	) {
-		const notificationEmail = config?.integrations?.email;
-		if (notificationEmail) {
-			try {
-				await this.emailService.sendLeadNotification(notificationEmail, {
-					widgetName: timer.name,
-					phone: dto.phone,
-					email: dto.email,
-					bonus: 'Таймер обратного отсчёта',
-					url: dto.url,
-					date: new Date()
-				});
-			} catch {}
-		}
-
-		const webhookUrl = config?.integrations?.webhookUrl;
-		if (webhookUrl) {
-			try {
-				await this.safeOutboundHttpService.postJson(
-					webhookUrl,
-					{
-						name: timer.name,
-						lead: dto.phone || dto.email || null,
-						phone: dto.phone || null,
-						email: dto.email || null,
-						url: dto.url || null,
-						time: new Date().toISOString()
-					},
-					{ policy: 'webhook' }
-				);
-			} catch {}
-		}
-
-		const telegramChatId = config?.integrations?.telegramChatId;
-		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (telegramChatId && telegramBotToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramBotToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: telegramChatId,
-							text: this.buildTelegramMessage({ timer, dto }),
-							parse_mode: 'HTML'
-						})
-					}
-				);
-			} catch {}
 		}
 	}
 
@@ -667,25 +622,6 @@ export class CountdownTimerService {
 				);
 			} catch {}
 		}
-	}
-
-	private buildTelegramMessage(data: {
-		timer: any;
-		dto: SubmitCountdownTimerLeadDto;
-	}): string {
-		const dateStr = new Date().toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
-		const lines: string[] = [
-			`⏳ <b>Новая заявка с таймера</b>`,
-			`<i>${data.timer.name}</i>`,
-			``,
-			`📅 <b>Дата:</b> ${dateStr}`
-		];
-		if (data.dto.phone) lines.push(`📞 <b>Телефон:</b> ${data.dto.phone}`);
-		if (data.dto.email) lines.push(`✉️ <b>Email:</b> ${data.dto.email}`);
-		if (data.dto.url) lines.push(`🌐 <b>Страница:</b> ${data.dto.url}`);
-		return lines.join('\n');
 	}
 
 	private buildCsv(leads: any[]): Buffer {

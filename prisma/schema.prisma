@@ -431,21 +431,88 @@ model AdminEventLog {
 }
 
 model Payment {
-  id              String         @id @default(cuid())
-  userId          String         @map("user_id")
-  yookassaId      String         @unique @map("yookassa_id")
-  amount          String
-  confirmationUrl String?        @map("confirmation_url")
-  status          PaymentStatus  @default(PENDING)
-  plan            Plan?
-  billingPeriod   BillingPeriod? @map("billing_period")
+  id                String             @id @default(cuid())
+  userId            String             @map("user_id")
+  yookassaId        String             @unique @map("yookassa_id")
+  amount            String
+  confirmationUrl   String?            @map("confirmation_url")
+  status            PaymentStatus      @default(PENDING)
+  plan              Plan?
+  billingPeriod     BillingPeriod?     @map("billing_period")
   affiliateReferral AffiliateReferral?
-  createdAt       DateTime       @default(now()) @map("created_at")
-  updatedAt       DateTime       @updatedAt @map("updated_at")
-  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("payments")
+}
+
+model OutboxEvent {
+  id          String            @id @default(uuid()) @db.Uuid
+  eventType   String            @map("event_type")
+  routingKey  String            @map("routing_key")
+  payload     Json
+  status      OutboxEventStatus @default(PENDING)
+  attempts    Int               @default(0)
+  availableAt DateTime          @default(now()) @map("available_at")
+  lockedAt    DateTime?         @map("locked_at")
+  lockedBy    String?           @map("locked_by")
+  publishedAt DateTime?         @map("published_at")
+  lastError   String?           @map("last_error") @db.Text
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt], map: "outbox_events_dispatch_idx")
+  @@index([lockedAt], map: "outbox_events_locked_at_idx")
+  @@index([publishedAt], map: "outbox_events_published_at_idx")
+  @@map("outbox_events")
+}
+
+model MessagingHeartbeat {
+  id         String   @id @default(uuid()) @db.Uuid
+  service    String
+  instanceId String   @map("instance_id")
+  metadata   Json     @default("{}")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([service, instanceId], map: "messaging_heartbeats_service_instance_unique")
+  @@index([service, lastSeenAt], map: "messaging_heartbeats_service_seen_idx")
+  @@index([lastSeenAt], map: "messaging_heartbeats_seen_idx")
+  @@map("messaging_heartbeats")
+}
+
+model IntegrationDeliveryFailure {
+  id          String    @id @default(uuid()) @db.Uuid
+  eventId     String    @unique @map("event_id") @db.Uuid
+  integration String
+  routingKey  String    @map("routing_key")
+  payload     Json
+  attempts    Int
+  lastError   String    @map("last_error") @db.Text
+  failedAt    DateTime  @default(now()) @map("failed_at")
+  retryingAt  DateTime? @map("retrying_at")
+  resolvedAt  DateTime? @map("resolved_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([resolvedAt, failedAt], map: "integration_delivery_failures_status_idx")
+  @@index([integration, resolvedAt], map: "integration_delivery_failures_integration_idx")
+  @@map("integration_delivery_failures")
+}
+
+model IntegrationDeliveryReceipt {
+  id          String   @id @default(uuid()) @db.Uuid
+  eventId     String   @unique @map("event_id") @db.Uuid
+  integration String
+  deliveredAt DateTime @default(now()) @map("delivered_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([integration, deliveredAt], map: "integration_delivery_receipts_integration_delivered_idx")
+  @@index([deliveredAt], map: "integration_delivery_receipts_delivered_idx")
+  @@map("integration_delivery_receipts")
 }
 
 model TariffPrice {
@@ -507,6 +574,13 @@ enum PaymentStatus {
   PENDING
   SUCCEEDED
   CANCELLED
+}
+
+enum OutboxEventStatus {
+  PENDING
+  PUBLISHING
+  PUBLISHED
+  FAILED
 }
 
 enum Role {
@@ -579,20 +653,20 @@ enum AffiliateReferralStatus {
 }
 
 model SiteSettings {
-  id                  String   @id @default("singleton")
-  bannerEnabled       Boolean  @default(false) @map("banner_enabled")
-  bannerText          String   @default("") @map("banner_text")
-  snowflakeEnabled    Boolean  @default(false) @map("snowflake_enabled")
-  paymentEnabled      Boolean  @default(true) @map("payment_enabled")
-  recaptchaEnabled    Boolean  @default(true) @map("recaptcha_enabled")
-  googleAuthEnabled   Boolean  @default(true) @map("google_auth_enabled")
-  yandexAuthEnabled   Boolean  @default(true) @map("yandex_auth_enabled")
-  githubAuthEnabled   Boolean  @default(true) @map("github_auth_enabled")
-  vkAuthEnabled       Boolean  @default(false) @map("vk_auth_enabled")
-  telegramAuthEnabled Boolean  @default(true) @map("telegram_auth_enabled")
-  affiliateProgramEnabled Boolean @default(false) @map("affiliate_program_enabled")
-  affiliateCashbackPercent Int @default(10) @map("affiliate_cashback_percent")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  id                       String   @id @default("singleton")
+  bannerEnabled            Boolean  @default(false) @map("banner_enabled")
+  bannerText               String   @default("") @map("banner_text")
+  snowflakeEnabled         Boolean  @default(false) @map("snowflake_enabled")
+  paymentEnabled           Boolean  @default(true) @map("payment_enabled")
+  recaptchaEnabled         Boolean  @default(true) @map("recaptcha_enabled")
+  googleAuthEnabled        Boolean  @default(true) @map("google_auth_enabled")
+  yandexAuthEnabled        Boolean  @default(true) @map("yandex_auth_enabled")
+  githubAuthEnabled        Boolean  @default(true) @map("github_auth_enabled")
+  vkAuthEnabled            Boolean  @default(false) @map("vk_auth_enabled")
+  telegramAuthEnabled      Boolean  @default(true) @map("telegram_auth_enabled")
+  affiliateProgramEnabled  Boolean  @default(false) @map("affiliate_program_enabled")
+  affiliateCashbackPercent Int      @default(10) @map("affiliate_cashback_percent")
+  updatedAt                DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
 }
@@ -622,21 +696,21 @@ model AffiliateReferral {
 }
 
 model TelegramBotSettings {
-  id                              String    @id @default("singleton")
-  dailySummaryEnabled             Boolean   @default(false) @map("daily_summary_enabled")
-  dailySummaryChatId              String    @default("") @map("daily_summary_chat_id")
-  supportThreadId                 Int?      @map("support_thread_id")
-  databaseBackupThreadId          Int?      @map("database_backup_thread_id")
-  paymentsThreadId                Int?      @map("payments_thread_id")
-  reportsThreadId                 Int?      @map("reports_thread_id")
-  dailySummaryTime                String    @default("01:50") @map("daily_summary_time")
-  dailySummaryLastSentPeriodStart DateTime? @map("daily_summary_last_sent_period_start")
-  dailySummaryLastSentAt          DateTime? @map("daily_summary_last_sent_at")
-  databaseBackupEnabled           Boolean   @default(true) @map("database_backup_enabled")
-  databaseBackupTime              String    @default("01:45") @map("database_backup_time")
+  id                                String    @id @default("singleton")
+  dailySummaryEnabled               Boolean   @default(false) @map("daily_summary_enabled")
+  dailySummaryChatId                String    @default("") @map("daily_summary_chat_id")
+  supportThreadId                   Int?      @map("support_thread_id")
+  databaseBackupThreadId            Int?      @map("database_backup_thread_id")
+  paymentsThreadId                  Int?      @map("payments_thread_id")
+  reportsThreadId                   Int?      @map("reports_thread_id")
+  dailySummaryTime                  String    @default("01:50") @map("daily_summary_time")
+  dailySummaryLastSentPeriodStart   DateTime? @map("daily_summary_last_sent_period_start")
+  dailySummaryLastSentAt            DateTime? @map("daily_summary_last_sent_at")
+  databaseBackupEnabled             Boolean   @default(true) @map("database_backup_enabled")
+  databaseBackupTime                String    @default("01:45") @map("database_backup_time")
   databaseBackupLastSentPeriodStart DateTime? @map("database_backup_last_sent_period_start")
   databaseBackupLastSentAt          DateTime? @map("database_backup_last_sent_at")
-  updatedAt                       DateTime  @updatedAt @map("updated_at")
+  updatedAt                         DateTime  @updatedAt @map("updated_at")
 
   @@map("telegram_bot_settings")
 }

@@ -4,7 +4,7 @@ set -euo pipefail
 
 APP_ROOT="${APP_ROOT:-/opt/winwidget}"
 ENV_FILE="${ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
-COMPOSE_FILE="${COMPOSE_FILE:-$APP_ROOT/deploy/backend/docker-compose.prod.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml}"
 HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:4200/api/site-settings}"
 HEALTHCHECK_ATTEMPTS="${HEALTHCHECK_ATTEMPTS:-30}"
 HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
@@ -74,6 +74,9 @@ mode="${mode,,}"
 case "$mode" in
 	production)
 		require_env_key "DATABASE_URL_PRODUCTION"
+		require_env_key "RABBITMQ_URL"
+		require_env_key "RABBITMQ_USER"
+		require_env_key "RABBITMQ_PASSWORD"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
 		;;
@@ -90,7 +93,22 @@ esac
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build api
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile migration run --rm migrate
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate api
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d rabbitmq
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
+	api outbox-publisher integration-worker
+
+for service in rabbitmq api outbox-publisher integration-worker; do
+	container_id="$(
+		docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+			ps --status running -q "$service"
+	)"
+	if [[ -z "$container_id" ]]; then
+		echo "Required service is not running: $service" >&2
+		docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+			logs --tail=100 "$service"
+		exit 1
+	fi
+done
 
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if curl -fsS "$HEALTHCHECK_URL" > /dev/null; then
@@ -106,4 +124,5 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	sleep "$HEALTHCHECK_INTERVAL"
 done
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps api
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps \
+	api outbox-publisher integration-worker rabbitmq

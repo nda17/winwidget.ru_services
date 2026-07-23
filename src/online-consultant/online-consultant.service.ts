@@ -1,5 +1,6 @@
 import { EmailService } from '@/email/email.service';
 import { FileService } from '@/file/file.service';
+import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -636,17 +637,36 @@ export class OnlineConsultantService {
 						}
 					}
 
-					return transaction.onlineConsultantLead.create({
-						data: {
-							onlineConsultantId: onlineConsultant.id,
-							phone: dto.phone || null,
-							email: dto.email || null,
-							actionLabel: dto.actionLabel || '',
-							actionValue: dto.actionValue || '',
+					const createdLead =
+						await transaction.onlineConsultantLead.create({
+							data: {
+								onlineConsultantId: onlineConsultant.id,
+								phone: dto.phone || null,
+								email: dto.email || null,
+								actionLabel: dto.actionLabel || '',
+								actionValue: dto.actionValue || '',
+								url: dto.url,
+								ip: ip || null
+							}
+						});
+					await enqueueLeadIntegrationEvents(transaction, {
+						source: 'online-consultant',
+						entity: {
+							id: onlineConsultant.id,
+							name: onlineConsultant.name
+						},
+						lead: {
+							id: createdLead.id,
+							phone: dto.phone,
+							email: dto.email,
+							actionLabel: dto.actionLabel,
+							actionValue: dto.actionValue,
 							url: dto.url,
-							ip: ip || null
-						}
+							createdAt: createdLead.createdAt
+						},
+						integrations: config.integrations
 					});
+					return createdLead;
 				}
 			);
 
@@ -657,8 +677,6 @@ export class OnlineConsultantService {
 				newCount
 			).catch(() => {});
 		}
-
-		await this.sendNotifications(onlineConsultant, config, dto);
 
 		return { success: true, lead };
 	}
@@ -675,150 +693,6 @@ export class OnlineConsultantService {
 		}
 		if (dataType === 'PHONE_AND_EMAIL' && (!dto.phone || !dto.email)) {
 			throw new BadRequestException('Введите телефон и email');
-		}
-	}
-
-	private async sendNotifications(
-		onlineConsultant: any,
-		config: any,
-		dto: SubmitOnlineConsultantLeadDto
-	) {
-		const notificationEmail = config?.integrations?.email;
-		if (notificationEmail) {
-			try {
-				await this.emailService.sendLeadNotification(notificationEmail, {
-					widgetName: onlineConsultant.name,
-					phone: dto.phone,
-					email: dto.email,
-					bonus: dto.actionLabel
-						? `Вопрос: ${dto.actionLabel}`
-						: undefined,
-					url: dto.url,
-					date: new Date()
-				});
-			} catch {}
-		}
-
-		const webhookUrl = config?.integrations?.webhookUrl;
-		if (webhookUrl) {
-			try {
-				await this.safeOutboundHttpService.postJson(
-					webhookUrl,
-					{
-						name: onlineConsultant.name,
-						lead: dto.phone || dto.email || null,
-						phone: dto.phone || null,
-						email: dto.email || null,
-						actionLabel: dto.actionLabel || null,
-						actionValue: dto.actionValue || null,
-						url: dto.url || null,
-						time: new Date().toISOString()
-					},
-					{ policy: 'webhook' }
-				);
-			} catch {}
-		}
-
-		const telegramChatId = config?.integrations?.telegramChatId;
-		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (telegramChatId && telegramBotToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramBotToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: telegramChatId,
-							text: this.buildTelegramMessage({ onlineConsultant, dto }),
-							parse_mode: 'HTML'
-						})
-					}
-				);
-			} catch {}
-		}
-
-		const bitrix24WebhookUrl = config?.integrations?.bitrix24WebhookUrl;
-		if (bitrix24WebhookUrl) {
-			try {
-				const fields: Record<string, any> = {
-					TITLE: `Онлайн-консультант — «${onlineConsultant.name}»`,
-					SOURCE_ID: 'WEB',
-					COMMENTS: [
-						`Виджет: ${onlineConsultant.name}`,
-						dto.actionLabel ? `Вопрос: ${dto.actionLabel}` : '',
-						dto.actionValue ? `Ответ: ${dto.actionValue}` : '',
-						dto.url ? `Страница: ${dto.url}` : ''
-					]
-						.filter(Boolean)
-						.join('\n')
-				};
-				if (dto.phone) {
-					fields.PHONE = [{ VALUE: dto.phone, VALUE_TYPE: 'WORK' }];
-				}
-				if (dto.email) {
-					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
-				}
-				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await this.safeOutboundHttpService.postJson(
-					`${base}/crm.lead.add.json`,
-					{ fields },
-					{ policy: 'bitrix24' }
-				);
-			} catch {}
-		}
-
-		const amoCrmDomain = config?.integrations?.amoCrmDomain;
-		const amoCrmToken = config?.integrations?.amoCrmToken;
-		if (amoCrmDomain && amoCrmToken) {
-			try {
-				const body: any = [
-					{
-						name: `Онлайн-консультант — «${onlineConsultant.name}»`,
-						_embedded:
-							dto.phone || dto.email
-								? {
-										contacts: [
-											{
-												custom_fields_values: [
-													dto.phone
-														? {
-																field_code: 'PHONE',
-																values: [
-																	{
-																		value: dto.phone,
-																		enum_code: 'WORK'
-																	}
-																]
-															}
-														: null,
-													dto.email
-														? {
-																field_code: 'EMAIL',
-																values: [
-																	{
-																		value: dto.email,
-																		enum_code: 'WORK'
-																	}
-																]
-															}
-														: null
-												].filter(Boolean)
-											}
-										]
-									}
-								: undefined
-					}
-				];
-				await this.safeOutboundHttpService.postJson(
-					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
-					body,
-					{
-						policy: 'amo-crm',
-						headers: { Authorization: `Bearer ${amoCrmToken}` }
-					}
-				);
-			} catch {}
 		}
 	}
 
@@ -882,27 +756,6 @@ export class OnlineConsultantService {
 				);
 			} catch {}
 		}
-	}
-
-	private buildTelegramMessage(data: {
-		onlineConsultant: any;
-		dto: SubmitOnlineConsultantLeadDto;
-	}): string {
-		const dateStr = new Date().toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
-		const lines: string[] = [
-			`💬 <b>Заявка с онлайн-консультанта</b>`,
-			`<i>${data.onlineConsultant.name}</i>`,
-			``,
-			`📅 <b>Дата:</b> ${dateStr}`
-		];
-		if (data.dto.actionLabel)
-			lines.push(`❔ <b>Вопрос:</b> ${data.dto.actionLabel}`);
-		if (data.dto.phone) lines.push(`📞 <b>Телефон:</b> ${data.dto.phone}`);
-		if (data.dto.email) lines.push(`✉️ <b>Email:</b> ${data.dto.email}`);
-		if (data.dto.url) lines.push(`🌐 <b>Страница:</b> ${data.dto.url}`);
-		return lines.join('\n');
 	}
 
 	private buildCsv(leads: any[]): Buffer {

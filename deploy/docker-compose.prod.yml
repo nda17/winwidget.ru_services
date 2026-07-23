@@ -1,0 +1,134 @@
+x-api-env: &api-env
+  MODE: ${MODE:-production}
+  NODE_ENV: production
+  PORT: ${PORT:-4200}
+  API_LISTEN_HOST: ${API_LISTEN_HOST:-127.0.0.1}
+  PRODUCTION_HOST: ${PRODUCTION_HOST}
+  DEVELOPMENT_HOST: ${DEVELOPMENT_HOST}
+  AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+  TELEGRAM_WEBHOOK_HOST: ${TELEGRAM_WEBHOOK_HOST:-https://api.winwidget.ru}
+  DATABASE_URL_PRODUCTION: ${DATABASE_URL_PRODUCTION:-}
+  DATABASE_URL_DEVELOPMENT: ${DATABASE_URL_DEVELOPMENT:-}
+  JWT_SECRET: ${JWT_SECRET}
+  RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY}
+  RECAPTCHA_CLIENT_URL: ${RECAPTCHA_CLIENT_URL}
+  RECAPTCHA_ENABLED: ${RECAPTCHA_ENABLED:-true}
+  RECAPTCHA_MIN_SCORE: ${RECAPTCHA_MIN_SCORE:-0.5}
+  SMTP_LOGIN: ${SMTP_LOGIN}
+  SMTP_PASSWORD: ${SMTP_PASSWORD}
+  SMTP_SERVER: ${SMTP_SERVER}
+  SMSAERO_EMAIL: ${SMSAERO_EMAIL}
+  SMSAERO_API_KEY: ${SMSAERO_API_KEY}
+  SMSAERO_SIGN: ${SMSAERO_SIGN}
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+  GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL}
+  GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+  GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+  GITHUB_CALLBACK_URL: ${GITHUB_CALLBACK_URL}
+  YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID}
+  YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET}
+  YANDEX_CALLBACK_URL: ${YANDEX_CALLBACK_URL}
+  VK_CLIENT_ID: ${VK_CLIENT_ID:-}
+  VK_CLIENT_SECRET: ${VK_CLIENT_SECRET:-}
+  VK_SERVICE_TOKEN: ${VK_SERVICE_TOKEN:-}
+  VK_CALLBACK_URL: ${VK_CALLBACK_URL:-}
+  YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID}
+  YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY}
+  YOOKASSA_PRODUCTION_SHOP_ID: ${YOOKASSA_PRODUCTION_SHOP_ID}
+  YOOKASSA_PRODUCTION_SECRET_KEY: ${YOOKASSA_PRODUCTION_SECRET_KEY}
+  TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
+  TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME}
+  TELEGRAM_INFO_BOT_WEBHOOK_SECRET: ${TELEGRAM_INFO_BOT_WEBHOOK_SECRET}
+  TELEGRAM_AUTH_BOT_TOKEN: ${TELEGRAM_AUTH_BOT_TOKEN}
+  TELEGRAM_AUTH_BOT_USERNAME: ${TELEGRAM_AUTH_BOT_USERNAME}
+  TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: ${TELEGRAM_AUTH_BOT_WEBHOOK_SECRET}
+  TELEGRAM_SUPPORT_BOT_TOKEN: ${TELEGRAM_SUPPORT_BOT_TOKEN}
+  TELEGRAM_SUPPORT_BOT_USERNAME: ${TELEGRAM_SUPPORT_BOT_USERNAME:-}
+  TELEGRAM_SUPPORT_USERNAME: ${TELEGRAM_SUPPORT_USERNAME:-}
+  TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: ${TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET}
+  S3_ENDPOINT: ${S3_ENDPOINT:-https://s3.twcstorage.ru}
+  S3_REGION: ${S3_REGION:-ru-1}
+  S3_BUCKET: ${S3_BUCKET}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL}
+  S3_KEY_PREFIX: ${S3_KEY_PREFIX:-}
+  S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+  RABBITMQ_URL: ${RABBITMQ_URL}
+  RABBITMQ_MANAGEMENT_URL: ${RABBITMQ_MANAGEMENT_URL:-http://127.0.0.1:15672}
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+  OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+  OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-7}
+  RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
+  MESSAGING_ALERTS_ENABLED: ${MESSAGING_ALERTS_ENABLED:-true}
+  INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-email,webhook,telegram,bitrix24,amo-crm}
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.2-management-alpine
+    hostname: winwidget-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-winwidget}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - winwidget-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  api:
+    image: winwidget-api:${APP_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment: *api-env
+    network_mode: host
+    restart: unless-stopped
+
+  outbox-publisher:
+    image: winwidget-api:${APP_VERSION:-latest}
+    environment:
+      <<: *api-env
+      RABBITMQ_CONNECTION_NAME: winwidget-outbox-publisher
+      MESSAGING_SERVICE_NAME: outbox-publisher
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ["node", "dist/src/outbox-publisher-main.js"]
+    restart: unless-stopped
+
+  integration-worker:
+    image: winwidget-api:${APP_VERSION:-latest}
+    environment:
+      <<: *api-env
+      RABBITMQ_CONNECTION_NAME: winwidget-integration-worker
+      MESSAGING_SERVICE_NAME: integration-worker
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ["node", "dist/src/integration-worker-main.js"]
+    restart: unless-stopped
+
+  migrate:
+    image: winwidget-api:${APP_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    profiles:
+      - migration
+    environment: *api-env
+    command: ["./node_modules/.bin/prisma", "migrate", "deploy"]
+
+volumes:
+  winwidget-rabbitmq-data:

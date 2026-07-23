@@ -1,4 +1,5 @@
 import { EmailService } from '@/email/email.service';
+import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { CreateStopOfferDto } from '@/stop-offer/dto/create-stop-offer.dto';
@@ -548,7 +549,7 @@ export class StopOfferService {
 						}
 					}
 
-					return transaction.stopOfferLead.create({
+					const createdLead = await transaction.stopOfferLead.create({
 						data: {
 							stopOfferId: stopOffer.id,
 							phone: dto.phone || null,
@@ -558,6 +559,19 @@ export class StopOfferService {
 							resetToken: config.submissionResetToken || ''
 						}
 					});
+					await enqueueLeadIntegrationEvents(transaction, {
+						source: 'stop-offer',
+						entity: { id: stopOffer.id, name: stopOffer.name },
+						lead: {
+							id: createdLead.id,
+							phone: dto.phone,
+							email: dto.email,
+							url: dto.url,
+							createdAt: createdLead.createdAt
+						},
+						integrations: config.integrations
+					});
+					return createdLead;
 				}
 			);
 
@@ -568,8 +582,6 @@ export class StopOfferService {
 				newCount
 			).catch(() => {});
 		}
-
-		await this.sendNotifications(stopOffer, config, dto);
 
 		return { success: true, lead };
 	}
@@ -583,137 +595,6 @@ export class StopOfferService {
 		}
 		if (dataType === 'PHONE_AND_EMAIL' && (!dto.phone || !dto.email)) {
 			throw new BadRequestException('Введите телефон и email');
-		}
-	}
-
-	private async sendNotifications(
-		stopOffer: any,
-		config: any,
-		dto: SubmitStopOfferLeadDto
-	) {
-		const notificationEmail = config?.integrations?.email;
-		if (notificationEmail) {
-			try {
-				await this.emailService.sendLeadNotification(notificationEmail, {
-					widgetName: stopOffer.name,
-					phone: dto.phone,
-					email: dto.email,
-					bonus: config.offerText || 'Стоп-оффер',
-					url: dto.url,
-					date: new Date()
-				});
-			} catch {}
-		}
-
-		const webhookUrl = config?.integrations?.webhookUrl;
-		if (webhookUrl) {
-			try {
-				await this.safeOutboundHttpService.postJson(
-					webhookUrl,
-					{
-						name: stopOffer.name,
-						lead: dto.phone || dto.email || null,
-						phone: dto.phone || null,
-						email: dto.email || null,
-						offer: config.offerText || null,
-						url: dto.url || null,
-						time: new Date().toISOString()
-					},
-					{ policy: 'webhook' }
-				);
-			} catch {}
-		}
-
-		const telegramChatId = config?.integrations?.telegramChatId;
-		const telegramBotToken = process.env.TELEGRAM_INFO_BOT_TOKEN;
-		if (telegramChatId && telegramBotToken) {
-			try {
-				await fetch(
-					`https://api.telegram.org/bot${telegramBotToken}/sendMessage`,
-					{
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							chat_id: telegramChatId,
-							text: this.buildTelegramMessage({ stopOffer, config, dto }),
-							parse_mode: 'HTML'
-						})
-					}
-				);
-			} catch {}
-		}
-
-		const bitrix24WebhookUrl = config?.integrations?.bitrix24WebhookUrl;
-		if (bitrix24WebhookUrl) {
-			try {
-				const fields: Record<string, any> = {
-					TITLE: `Стоп-оффер — «${stopOffer.name}»`,
-					SOURCE_ID: 'WEB',
-					COMMENTS: [
-						`Виджет: ${stopOffer.name}`,
-						`Оффер: ${config.offerText || 'Стоп-оффер'}`,
-						dto.url ? `Страница: ${dto.url}` : ''
-					]
-						.filter(Boolean)
-						.join('\n')
-				};
-				if (dto.phone) {
-					fields.PHONE = [{ VALUE: dto.phone, VALUE_TYPE: 'WORK' }];
-				}
-				if (dto.email) {
-					fields.EMAIL = [{ VALUE: dto.email, VALUE_TYPE: 'WORK' }];
-				}
-				const base = bitrix24WebhookUrl.replace(/\/$/, '');
-				await this.safeOutboundHttpService.postJson(
-					`${base}/crm.lead.add.json`,
-					{ fields },
-					{ policy: 'bitrix24' }
-				);
-			} catch {}
-		}
-
-		const amoCrmDomain = config?.integrations?.amoCrmDomain;
-		const amoCrmToken = config?.integrations?.amoCrmToken;
-		if (amoCrmDomain && amoCrmToken) {
-			try {
-				const customFields: Array<Record<string, any>> = [];
-				if (dto.phone) {
-					customFields.push({
-						field_code: 'PHONE',
-						values: [{ value: dto.phone, enum_code: 'WORK' }]
-					});
-				}
-				if (dto.email) {
-					customFields.push({
-						field_code: 'EMAIL',
-						values: [{ value: dto.email, enum_code: 'WORK' }]
-					});
-				}
-
-				const body: any = [
-					{
-						name: `Стоп-оффер — «${stopOffer.name}»`,
-						price: 0,
-						_embedded: customFields.length
-							? {
-									contacts: [
-										{
-											custom_fields_values: customFields
-										}
-									]
-								}
-							: undefined
-					}
-				];
-				await this.safeOutboundHttpService.postJson(
-					this.safeOutboundHttpService.getAmoCrmApiUrl(amoCrmDomain),
-					body,
-					{
-						policy: 'amo-crm',
-						headers: { Authorization: `Bearer ${amoCrmToken}` }
-					}
-				);
-			} catch {}
 		}
 	}
 
@@ -749,27 +630,6 @@ export class StopOfferService {
 				);
 			} catch {}
 		}
-	}
-
-	private buildTelegramMessage(data: {
-		stopOffer: any;
-		config: any;
-		dto: SubmitStopOfferLeadDto;
-	}): string {
-		const dateStr = new Date().toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
-		const lines: string[] = [
-			`🛑 <b>Новая заявка со стоп-оффера</b>`,
-			`<i>${data.stopOffer.name}</i>`,
-			``,
-			`🎁 <b>Оффер:</b> ${data.config.offerText || 'Стоп-оффер'}`,
-			`📅 <b>Дата:</b> ${dateStr}`
-		];
-		if (data.dto.phone) lines.push(`📞 <b>Телефон:</b> ${data.dto.phone}`);
-		if (data.dto.email) lines.push(`✉️ <b>Email:</b> ${data.dto.email}`);
-		if (data.dto.url) lines.push(`🌐 <b>Страница:</b> ${data.dto.url}`);
-		return lines.join('\n');
 	}
 
 	private buildCsv(leads: any[]): Buffer {
