@@ -25,6 +25,7 @@ const prisma = new PrismaClient({
 	datasources: { db: { url: databaseUrl } }
 });
 const children = [];
+let childFailure;
 let connection;
 let channel;
 const createdEventIds = [];
@@ -32,6 +33,7 @@ const createdEventIds = [];
 const waitFor = async (check, label, timeoutMs = 20_000) => {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
+		if (childFailure) throw childFailure;
 		const result = await check();
 		if (result) return result;
 		await new Promise(resolve => setTimeout(resolve, 200));
@@ -52,8 +54,35 @@ const startProcess = (entry, extraEnv = {}) => {
 		},
 		stdio: 'inherit'
 	});
+	child.once('exit', (code, signal) => {
+		if (code !== 0 && signal !== 'SIGTERM') {
+			childFailure = new Error(
+				`${entry} exited unexpectedly: code=${code}, signal=${signal || 'none'}`
+			);
+		}
+	});
 	children.push(child);
 	return child;
+};
+
+const stopChildren = async () => {
+	await Promise.all(
+		children.map(
+			child =>
+				new Promise(resolve => {
+					if (child.exitCode !== null || child.signalCode !== null) {
+						resolve();
+						return;
+					}
+					const forceStop = setTimeout(() => child.kill('SIGKILL'), 5000);
+					child.once('exit', () => {
+						clearTimeout(forceStop);
+						resolve();
+					});
+					child.kill('SIGTERM');
+				})
+		)
+	);
 };
 
 try {
@@ -80,53 +109,38 @@ try {
 	}, 'publisher topology');
 	channel = await connection.createChannel();
 
-	const smokeEventCount = Number(
+	const configuredSmokeEventCount = Number(
 		process.env.MESSAGING_SMOKE_EVENT_COUNT || 10
 	);
+	const smokeEventCount =
+		Number.isInteger(configuredSmokeEventCount) &&
+		configuredSmokeEventCount > 0 &&
+		configuredSmokeEventCount <= 100
+			? configuredSmokeEventCount
+			: 10;
 	const outboxEventIds = Array.from({ length: smokeEventCount }, () =>
 		randomUUID()
 	);
 	createdEventIds.push(...outboxEventIds);
 	const pendingEventIds = new Set(outboxEventIds);
-	const received = new Promise((resolve, reject) => {
-		const timeout = setTimeout(
-			() =>
-				reject(
-					new Error(
-						`Outbox messages were not received: ${pendingEventIds.size} remaining`
-					)
-				),
-			20_000
-		);
-		void channel
-			.consume(
-				'winwidget.lead-integration.webhook',
-				message => {
-					if (!message) return;
-					if (
-						!pendingEventIds.delete(message.properties.messageId || '')
-					) {
-						channel.nack(message, false, true);
-						return;
-					}
-					channel.ack(message);
-					if (pendingEventIds.size === 0) {
-						clearTimeout(timeout);
-						resolve(true);
-					}
-				},
-				{ noAck: false }
-			)
-			.catch(reject);
-	});
+	const { consumerTag: outboxConsumerTag } = await channel.consume(
+		'winwidget.lead-integration.webhook',
+		message => {
+			if (!message) return;
+			if (!pendingEventIds.delete(message.properties.messageId || '')) {
+				channel.nack(message, false, true);
+				return;
+			}
+			channel.ack(message);
+		},
+		{ noAck: false }
+	);
 
 	await prisma.outboxEvent.createMany({
 		data: outboxEventIds.map((id, index) => ({
 			id,
 			eventType: 'lead.integration.requested.v1',
 			routingKey: 'lead.integration.webhook.v1',
-			aggregateType: 'ci-smoke',
-			aggregateId: randomUUID(),
 			payload: {
 				schemaVersion: 1,
 				integration: 'webhook',
@@ -140,7 +154,10 @@ try {
 			}
 		}))
 	});
-	await received;
+	await waitFor(
+		() => pendingEventIds.size === 0,
+		`Outbox messages (${pendingEventIds.size} remaining)`
+	);
 	await waitFor(
 		() =>
 			prisma.outboxEvent
@@ -153,6 +170,7 @@ try {
 				.then(count => count === smokeEventCount),
 		'published outbox statuses'
 	);
+	await channel.cancel(outboxConsumerTag);
 
 	startProcess('dist/src/integration-worker-main.js', {
 		INTEGRATION_WORKER_KINDS: 'webhook'
@@ -232,9 +250,9 @@ try {
 		`Messaging integration smoke passed: ${smokeEventCount} Outbox -> RabbitMQ and malformed -> DLQ -> PostgreSQL\n`
 	);
 } finally {
-	for (const child of children) child.kill('SIGTERM');
 	if (channel) await channel.close().catch(() => undefined);
 	if (connection) await connection.close().catch(() => undefined);
+	await stopChildren();
 	if (createdEventIds.length) {
 		await prisma.integrationDeliveryFailure
 			.deleteMany({ where: { eventId: { in: createdEventIds } } })
