@@ -33,6 +33,8 @@ Prisma ORM и обслуживает frontend, публичные страниц
 
 ### Интеграции и инфраструктура
 
+- RabbitMQ и transactional Outbox для at-least-once доставки асинхронных
+  побочных эффектов;
 - ЮKassa;
 - SMTP и Nodemailer;
 - React Email;
@@ -264,6 +266,7 @@ RABBITMQ_USER=winwidget
 RABBITMQ_PASSWORD=winwidget
 RABBITMQ_VHOST=winwidget
 RABBITMQ_URL=amqp://winwidget:winwidget@127.0.0.1:5672/winwidget
+RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
 OUTBOX_BATCH_SIZE=50
 OUTBOX_POLL_INTERVAL_MS=500
 OUTBOX_RETENTION_DAYS=7
@@ -295,6 +298,7 @@ RABBITMQ_USER=winwidget
 RABBITMQ_PASSWORD=<полученный-hex-пароль>
 RABBITMQ_VHOST=winwidget
 RABBITMQ_URL=amqp://winwidget:<тот-же-hex-пароль>@127.0.0.1:5672/winwidget
+RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
 OUTBOX_BATCH_SIZE=50
 OUTBOX_POLL_INTERVAL_MS=1000
 OUTBOX_RETENTION_DAYS=7
@@ -321,6 +325,9 @@ maintenance worker и наличие `daily-summary-telegram`/`database-backup` 
 
 Назначение настроек:
 
+- `RABBITMQ_MANAGEMENT_URL` — внутренний HTTP endpoint RabbitMQ Management API
+  для health-check и административного мониторинга; бизнес-события через него
+  не публикуются;
 - `OUTBOX_BATCH_SIZE` — максимум событий, захватываемых publisher за цикл;
 - `OUTBOX_POLL_INTERVAL_MS` — интервал чтения outbox;
 - `OUTBOX_RETENTION_DAYS` — срок хранения успешно опубликованных событий;
@@ -759,17 +766,27 @@ MODE=production  -> S3-совместимое хранилище
 
 # Фоновые задачи и health
 
-Фоновые задачи выполняются внутри backend-процесса:
+Короткие регламентные операции остаются в API:
 
 - очистка verification challenges;
 - очистка зависших платежей;
 - проверка подписок и expiry reminders;
-- Telegram daily summary;
-- резервная копия PostgreSQL в Telegram;
 - проверка Telegram webhooks.
 
-Для нескольких API replicas потребуется вынести расписание в отдельный worker
-или использовать distributed lock.
+Durable-задачи выполняются отдельными процессами:
+
+- `maintenance-worker` создаёт уникальные периодические запуски ежедневной
+  Telegram-сводки и backup, выполняет `pg_dump` и восстанавливает зависшие
+  задания по CAS-lease;
+- `outbox-publisher` читает PostgreSQL Outbox и публикует события в RabbitMQ;
+- `integration-worker` отправляет сводку и остальные внешние уведомления через
+  независимые очереди, retry и DLQ.
+
+Общий distributed lock для всех scheduler не используется. Очистки
+verification challenges и зависших платежей идемпотентны, а durable-задачи
+защищены уникальным ключом периода и lease. Перед увеличением количества API
+replicas нужно добавить durable deduplication для expiry reminders и остальных
+уведомлений, которые пока запускаются из API.
 
 Административный health endpoint:
 
@@ -777,9 +794,11 @@ MODE=production  -> S3-совместимое хранилище
 GET /api/health/admin
 ```
 
-Он проверяет backend, PostgreSQL, S3, SMTP, SMS Aero, reCAPTCHA, ЮKassa и три
-Telegram-бота. Итог каждого сервиса находится в массиве `checks` со статусом
-`ok`, `warning`, `down` или `disabled`.
+Он проверяет backend, PostgreSQL, RabbitMQ, heartbeat `outbox-publisher`,
+`integration-worker` и `maintenance-worker`, накопление Outbox/DLQ, состояние
+durable-задач, S3, SMTP, SMS Aero, reCAPTCHA, ЮKassa и три Telegram-бота. Итог
+каждой проверки находится в массиве `checks` со статусом `ok`, `warning`,
+`down` или `disabled`.
 
 ---
 
@@ -790,6 +809,7 @@ Telegram-бота. Итог каждого сервиса находится в 
 - Node.js 20;
 - pnpm 9;
 - PostgreSQL;
+- RabbitMQ 4 с Management plugin;
 - заполненный `.env`.
 
 ## Установка зависимостей
@@ -810,10 +830,28 @@ cp .env.example .env
 
 ## Development
 
+Для запуска только HTTP API:
+
 ```bash
 pnpm prisma-generate
 pnpm dev
 ```
+
+Для полного локального messaging-контура сначала запустите RabbitMQ с
+пользователем и vhost из `.env`, затем соберите NestJS и в отдельных терминалах
+запустите четыре процесса:
+
+```bash
+pnpm build:app
+pnpm start:prod
+pnpm start:outbox-publisher
+pnpm start:integration-worker
+pnpm start:maintenance-worker
+```
+
+Worker-команды запускают файлы из `dist`, поэтому после изменений их исходников
+нужно повторить `pnpm build:app`. HTTP API можно продолжать запускать через
+`pnpm dev`, если watch mode удобнее.
 
 По `.env.example` backend доступен на:
 
@@ -933,26 +971,54 @@ S3_KEY_PREFIX
 S3_FORCE_PATH_STYLE
 ```
 
+## RabbitMQ и фоновые процессы
+
+```text
+RABBITMQ_USER
+RABBITMQ_PASSWORD
+RABBITMQ_VHOST
+RABBITMQ_URL
+RABBITMQ_MANAGEMENT_URL
+OUTBOX_BATCH_SIZE
+OUTBOX_POLL_INTERVAL_MS
+OUTBOX_RETENTION_DAYS
+RABBITMQ_WORKER_PREFETCH
+MAINTENANCE_WORKER_PREFETCH
+SCHEDULED_JOB_POLL_INTERVAL_MS
+SCHEDULED_JOB_LEASE_MS
+SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS
+INTEGRATION_WORKER_KINDS
+MAINTENANCE_WORKER_KINDS
+MAILING_EMAIL_RATE_PER_SECOND
+MAILING_TELEGRAM_RATE_PER_SECOND
+MESSAGING_ALERTS_ENABLED
+INTEGRATION_RECEIPT_RETENTION_DAYS
+```
+
 ---
 
 # Команды
 
-| Команда                     | Назначение                             |
-| --------------------------- | -------------------------------------- |
-| `pnpm dev`                  | Development server с watch mode        |
-| `pnpm build`                | NestJS + runtime-виджеты               |
-| `pnpm build:app`            | Только NestJS                          |
-| `pnpm build:widgets`        | Сборка и проверка runtime-виджетов     |
-| `pnpm start:prod`           | Запуск собранного backend              |
-| `pnpm exec tsc --noEmit`    | TypeScript check                       |
-| `pnpm lint`                 | ESLint с автоматическими исправлениями |
-| `pnpm format`               | Форматирование исходников              |
-| `pnpm test`                 | Unit tests                             |
-| `pnpm test:watch`           | Unit tests в watch mode                |
-| `pnpm test:cov`             | Unit tests с coverage                  |
-| `pnpm email`                | React Email preview                    |
-| `pnpm prisma-generate`      | Генерация Prisma Client                |
-| `pnpm dev-prisma-migration` | Применение development migrations      |
+| Команда                           | Назначение                             |
+| --------------------------------- | -------------------------------------- |
+| `pnpm dev`                        | Development server с watch mode        |
+| `pnpm build`                      | NestJS + runtime-виджеты               |
+| `pnpm build:app`                  | Только NestJS                          |
+| `pnpm build:widgets`              | Сборка и проверка runtime-виджетов     |
+| `pnpm start:prod`                 | Запуск собранного HTTP API             |
+| `pnpm start:outbox-publisher`     | Запуск собранного Outbox publisher     |
+| `pnpm start:integration-worker`   | Запуск собранного integration worker   |
+| `pnpm start:maintenance-worker`   | Запуск собранного maintenance worker   |
+| `pnpm exec tsc --noEmit`          | TypeScript check                       |
+| `pnpm lint`                       | ESLint с автоматическими исправлениями |
+| `pnpm format`                     | Форматирование исходников              |
+| `pnpm test`                       | Unit tests                             |
+| `pnpm test:watch`                 | Unit tests в watch mode                |
+| `pnpm test:cov`                   | Unit tests с coverage                  |
+| `pnpm test:messaging-integration` | RabbitMQ/PostgreSQL integration smoke  |
+| `pnpm email`                      | React Email preview                    |
+| `pnpm prisma-generate`            | Генерация Prisma Client                |
+| `pnpm dev-prisma-migration`       | Применение development migrations      |
 
 `pnpm lint` и `pnpm format` изменяют файлы.
 
@@ -1047,14 +1113,19 @@ Verify выполняет:
 pnpm install --frozen-lockfile
 pnpm exec prisma generate
 pnpm exec prisma migrate deploy
+curl ... "$RABBITMQ_MANAGEMENT_URL/api/overview"
 pnpm exec tsc --noEmit
 pnpm exec jest --runInBand
-docker compose ... config --quiet
+docker compose ... config --quiet + semantic validation
 pnpm build
 docker compose ... build api
-pg_dump --version && pg_restore --version
+pg_dump --version && pg_restore --version && maintenance entrypoint check
 pnpm run test:messaging-integration
 ```
+
+Semantic compose validation проверяет точный набор пяти постоянных сервисов,
+команды worker-процессов, обязательные переменные и consumer kinds, а также
+ограниченный `tmpfs` maintenance worker.
 
 После успешного verify deploy по SSH:
 
