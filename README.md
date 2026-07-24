@@ -232,6 +232,14 @@ MODE=development -> DATABASE_URL_DEVELOPMENT
 MODE=production  -> DATABASE_URL_PRODUCTION
 ```
 
+Каждый Nest application context (`api`, `outbox-publisher`,
+`integration-worker`, `maintenance-worker`) импортирует глобальный
+`PrismaModule` и владеет ровно одним `PrismaClient`/connection pool.
+Feature-модули только внедряют `PrismaService` и не регистрируют его в
+собственных `providers` или `exports`. Root-модуль отключает свой Prisma client
+после завершения lifecycle-хуков процесса; API обрабатывает `SIGTERM` через
+Nest shutdown hooks.
+
 Для `pg_dump` maintenance worker сначала использует необязательный
 `DATABASE_BACKUP_URL`. Указывайте в нём прямой PostgreSQL endpoint, если
 основной Prisma URL ведёт через PgBouncer/pooler. Если переменная пустая,
