@@ -90,7 +90,23 @@ jobs:
         run: pnpm exec jest --runInBand
 
       - name: Validate production compose
-        run: docker compose --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+        run: |
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+            node -e '
+              const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+              const apiEnvironment = config.services?.api?.environment ?? {};
+              for (const key of [
+                "RABBITMQ_MANAGEMENT_URL",
+                "RABBITMQ_USER",
+                "RABBITMQ_PASSWORD",
+                "RABBITMQ_VHOST",
+              ]) {
+                if (!apiEnvironment[key]) {
+                  throw new Error(`Missing ${key} in production API environment`);
+                }
+              }
+            '
 
       - name: Build
         run: pnpm build
