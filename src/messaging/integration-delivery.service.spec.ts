@@ -150,16 +150,45 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 		deliveryId,
 		channel: MailingDeliveryChannel.EMAIL
 	};
+	const telegramEvent = {
+		...event,
+		channel: MailingDeliveryChannel.TELEGRAM
+	};
+
+	afterEach(() => {
+		jest.restoreAllMocks();
+	});
+
+	const mockTelegramFetchBody = (status: number, responseBody: string) =>
+		jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: status >= 200 && status < 300,
+			status,
+			text: jest.fn().mockResolvedValue(responseBody)
+		} as unknown as Response);
+
+	const mockTelegramFetch = (status = 200, description = 'OK') =>
+		mockTelegramFetchBody(
+			status,
+			JSON.stringify({
+				ok: status >= 200 && status < 300,
+				error_code: status,
+				description
+			})
+		);
 
 	const createService = (
 		status: MailingDeliveryStatus = MailingDeliveryStatus.PENDING,
-		campaignStatus: MailingCampaignStatus = MailingCampaignStatus.QUEUED
+		campaignStatus: MailingCampaignStatus = MailingCampaignStatus.QUEUED,
+		channel: MailingDeliveryChannel = MailingDeliveryChannel.EMAIL
 	) => {
 		const deliveryRecord = {
 			id: deliveryId,
 			campaignId,
-			channel: MailingDeliveryChannel.EMAIL,
-			recipient: 'user@example.com',
+			channel,
+			recipient:
+				channel === MailingDeliveryChannel.TELEGRAM
+					? '123456789'
+					: 'user@example.com',
 			status,
 			updatedAt: new Date(),
 			campaign: {
@@ -186,17 +215,25 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 				update: jest.fn().mockResolvedValue({ failedCount: 0 })
 			}
 		};
+		const notificationChannelUpdateMany = jest
+			.fn()
+			.mockResolvedValue({ count: 1 });
 		const prisma = {
 			mailingDelivery: {
 				findUnique: jest.fn().mockResolvedValue(deliveryRecord),
 				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			telegramNotificationChannel: {
+				updateMany: notificationChannelUpdateMany
 			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
 		const service = new IntegrationDeliveryService(
 			emailService,
 			{} as SafeOutboundHttpService,
-			{ get: jest.fn() } as unknown as ConfigService,
+			{
+				get: jest.fn().mockReturnValue('telegram-token')
+			} as unknown as ConfigService,
 			prisma,
 			{
 				deliver: jest.fn().mockResolvedValue(undefined)
@@ -208,7 +245,8 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			emailService,
 			prisma,
 			transaction,
-			deliveryRecord
+			deliveryRecord,
+			notificationChannelUpdateMany
 		};
 	};
 
@@ -233,6 +271,138 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 		);
 		expect(emailService.sendAdminBroadcast).toHaveBeenCalledTimes(1);
 	});
+
+	it('omits parse_mode from a plain-text Telegram mailing request', async () => {
+		const fetchMock = mockTelegramFetch();
+		const { service } = createService(
+			MailingDeliveryStatus.PENDING,
+			MailingCampaignStatus.QUEUED,
+			MailingDeliveryChannel.TELEGRAM
+		);
+
+		await service.deliver('mailing-telegram', telegramEvent, eventId);
+
+		const request = fetchMock.mock.calls[0][1] as RequestInit;
+		const body = JSON.parse(request.body as string) as Record<
+			string,
+			unknown
+		>;
+		expect(body).toEqual({
+			chat_id: '123456789',
+			text: 'Новости\n\nТекст рассылки'
+		});
+		expect(body).not.toHaveProperty('parse_mode');
+	});
+
+	it('keeps HTML parse_mode for Telegram messages that require formatting', async () => {
+		const fetchMock = mockTelegramFetch();
+		const { service } = createService();
+
+		await service.deliver(
+			'limit-telegram',
+			{
+				schemaVersion: 1,
+				eventType: 'lead.limit.reached.v1',
+				entity: {
+					id: 'widget-1',
+					name: 'Колесо',
+					type: 'WIDGET'
+				},
+				limit: 10,
+				destinations: {
+					emails: [],
+					telegramChatId: '123456789'
+				}
+			},
+			eventId
+		);
+
+		const request = fetchMock.mock.calls[0][1] as RequestInit;
+		const body = JSON.parse(request.body as string) as Record<
+			string,
+			unknown
+		>;
+		expect(body.parse_mode).toBe('HTML');
+	});
+
+	it('does not deactivate a Telegram channel for a formatting-related 400', async () => {
+		mockTelegramFetch(400, 'Bad Request: unsupported parse_mode');
+		const { service, notificationChannelUpdateMany } = createService(
+			MailingDeliveryStatus.PENDING,
+			MailingCampaignStatus.QUEUED,
+			MailingDeliveryChannel.TELEGRAM
+		);
+
+		await expect(
+			service.deliver('mailing-telegram', telegramEvent, eventId)
+		).rejects.toThrow('Bad Request: unsupported parse_mode');
+
+		expect(notificationChannelUpdateMany).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		[400, 'Bad Request'],
+		[
+			429,
+			JSON.stringify({
+				ok: false,
+				error_code: 429,
+				description: 'Too Many Requests: retry later'
+			})
+		],
+		[
+			502,
+			JSON.stringify({
+				ok: false,
+				error_code: 502,
+				description: 'Bad Gateway'
+			})
+		]
+	])(
+		'does not deactivate a Telegram channel for transient or unclassified error %i',
+		async (status, responseBody) => {
+			mockTelegramFetchBody(status, responseBody);
+			const { service, notificationChannelUpdateMany } = createService(
+				MailingDeliveryStatus.PENDING,
+				MailingCampaignStatus.QUEUED,
+				MailingDeliveryChannel.TELEGRAM
+			);
+
+			await expect(
+				service.deliver('mailing-telegram', telegramEvent, eventId)
+			).rejects.toThrow(`Telegram API returned ${status}`);
+
+			expect(notificationChannelUpdateMany).not.toHaveBeenCalled();
+		}
+	);
+
+	it.each([
+		[400, 'Bad Request: chat not found'],
+		[400, 'Bad Request: user is deactivated'],
+		[403, 'Forbidden: bot was blocked by the user']
+	])(
+		'deactivates a Telegram channel for permanent error %i %s',
+		async (status, description) => {
+			mockTelegramFetch(status, description);
+			const { service, notificationChannelUpdateMany } = createService(
+				MailingDeliveryStatus.PENDING,
+				MailingCampaignStatus.QUEUED,
+				MailingDeliveryChannel.TELEGRAM
+			);
+
+			await expect(
+				service.deliver('mailing-telegram', telegramEvent, eventId)
+			).rejects.toThrow(description);
+
+			expect(notificationChannelUpdateMany).toHaveBeenCalledWith({
+				where: { chatId: '123456789' },
+				data: {
+					isActive: false,
+					disabledAt: expect.any(Date)
+				}
+			});
+		}
+	);
 
 	it('does not send when cancellation wins the claim race', async () => {
 		const { service, emailService, prisma, transaction, deliveryRecord } =

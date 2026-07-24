@@ -420,13 +420,19 @@ export class IntegrationDeliveryService {
 					body: JSON.stringify({
 						chat_id: chatId,
 						text,
-						parse_mode: parseMode
+						...(parseMode === null ? {} : { parse_mode: parseMode })
 					}),
 					signal: AbortSignal.timeout(10_000)
 				}
 			);
 			if (!response.ok) {
-				if (response.status === 400 || response.status === 403) {
+				const responseBody = await response.text();
+				if (
+					this.shouldDeactivateTelegramNotificationChannel(
+						response.status,
+						responseBody
+					)
+				) {
 					await this.prisma.telegramNotificationChannel
 						.updateMany({
 							where: { chatId },
@@ -438,10 +444,33 @@ export class IntegrationDeliveryService {
 						.catch(() => undefined);
 				}
 				throw new Error(
-					`Telegram API returned ${response.status}: ${(await response.text()).slice(0, 500)}`
+					`Telegram API returned ${response.status}: ${responseBody.slice(0, 500)}`
 				);
 			}
 		}
+	}
+
+	private shouldDeactivateTelegramNotificationChannel(
+		status: number,
+		responseBody: string
+	): boolean {
+		if (status === 403) return true;
+		if (status !== 400) return false;
+
+		let description: unknown;
+		try {
+			description = (JSON.parse(responseBody) as { description?: unknown })
+				.description;
+		} catch {
+			return false;
+		}
+		if (typeof description !== 'string') return false;
+
+		const normalized = description.trim().toLowerCase();
+		return (
+			normalized === 'bad request: chat not found' ||
+			normalized === 'bad request: user is deactivated'
+		);
 	}
 
 	private async sendPaymentEmail(
