@@ -1,6 +1,5 @@
 import { AuthModule } from '@/auth/auth.module';
 import { FileModule } from '@/file/file.module';
-import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { WidgetApiController } from '@/widget/widget-api.controller';
@@ -21,7 +20,7 @@ import { Module } from '@nestjs/common';
 		WidgetPublicController,
 		WidgetApiController
 	],
-	providers: [WidgetService, PrismaService],
+	providers: [WidgetService],
 	exports: [WidgetService]
 })
 export class WidgetModule {}

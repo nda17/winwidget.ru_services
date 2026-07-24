@@ -26,6 +26,8 @@ function getDatabaseUrl() {
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit {
+	private disconnectPromise: Promise<void> | null = null;
+
 	constructor() {
 		super({
 			datasources: {
@@ -38,5 +40,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
 
 	async onModuleInit() {
 		await this.$connect();
+	}
+
+	disconnect() {
+		this.disconnectPromise ??= this.$disconnect();
+		return this.disconnectPromise;
 	}
 }

@@ -37,9 +37,12 @@ export class MaintenanceSchedulerService
 		this.timer.unref();
 	}
 
-	onApplicationShutdown(): void {
+	async onApplicationShutdown(): Promise<void> {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = null;
+		while (this.running) {
+			await new Promise(resolve => setTimeout(resolve, 25));
+		}
 	}
 
 	private async tick(): Promise<void> {

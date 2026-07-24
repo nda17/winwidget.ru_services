@@ -19,7 +19,6 @@ import { TelegramAuthService } from '@/auth/telegram-auth/telegram-auth.service'
 import { VerificationChallengeCleanupService } from '@/auth/verification-challenge-cleanup.service';
 import { getJwtConfig } from '@/config/jwt.config';
 import { EmailModule } from '@/email/email.module';
-import { PrismaService } from '@/prisma.service';
 import { SiteSettingsModule } from '@/site-settings/site-settings.module';
 import { SmsModule } from '@/sms/sms.module';
 import { UserModule } from '@/user/user.module';
@@ -48,7 +47,6 @@ import { JwtModule } from '@nestjs/jwt';
 	],
 	providers: [
 		JwtStrategy,
-		PrismaService,
 		AuthService,
 		TelegramAuthService,
 		VerificationChallengeCleanupService,

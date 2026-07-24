@@ -4,7 +4,6 @@ import { CalculatorPublicController } from '@/calculator/calculator-public.contr
 import { CalculatorController } from '@/calculator/calculator.controller';
 import { CalculatorService } from '@/calculator/calculator.service';
 import { FileModule } from '@/file/file.module';
-import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { Module } from '@nestjs/common';
@@ -21,7 +20,7 @@ import { Module } from '@nestjs/common';
 		CalculatorPublicController,
 		CalculatorApiController
 	],
-	providers: [CalculatorService, PrismaService],
+	providers: [CalculatorService],
 	exports: [CalculatorService]
 })
 export class CalculatorModule {}

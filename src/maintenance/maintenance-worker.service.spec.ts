@@ -439,4 +439,28 @@ describe('MaintenanceWorkerService', () => {
 			1
 		);
 	});
+
+	it('waits for active handlers before shutdown', async () => {
+		const { service } = createService();
+		let resolveHandler!: () => void;
+		const handler = (service as any).trackHandler(
+			() =>
+				new Promise<void>(resolve => {
+					resolveHandler = resolve;
+				})
+		);
+		let shutdownFinished = false;
+		const shutdown = service.onApplicationShutdown().then(() => {
+			shutdownFinished = true;
+		});
+
+		await Promise.resolve();
+		expect(shutdownFinished).toBe(false);
+
+		resolveHandler();
+		await handler;
+		await shutdown;
+
+		expect(shutdownFinished).toBe(true);
+	});
 });

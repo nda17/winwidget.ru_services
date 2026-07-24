@@ -4,13 +4,16 @@ import { ScheduledTasksModule } from '@/maintenance/scheduled-tasks.module';
 import { MaintenanceWorkerService } from '@/maintenance/maintenance-worker.service';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { RabbitMqModule } from '@/messaging/rabbitmq.module';
+import { PrismaModule } from '@/prisma.module';
+import { PrismaService } from '@/prisma.service';
 import { TelegramInfoTransportModule } from '@/telegram-bot/telegram-info-transport.module';
-import { Module } from '@nestjs/common';
+import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
 @Module({
 	imports: [
 		ConfigModule.forRoot({ isGlobal: true }),
+		PrismaModule,
 		RabbitMqModule,
 		ScheduledTasksModule,
 		TelegramInfoTransportModule
@@ -22,4 +25,10 @@ import { ConfigModule } from '@nestjs/config';
 		MaintenanceWorkerService
 	]
 })
-export class MaintenanceWorkerModule {}
+export class MaintenanceWorkerModule implements OnApplicationShutdown {
+	constructor(private readonly prisma: PrismaService) {}
+
+	onApplicationShutdown() {
+		return this.prisma.disconnect();
+	}
+}

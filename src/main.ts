@@ -12,6 +12,7 @@ import { join } from 'path';
 
 export const bootstrap = async () => {
 	const app = await NestFactory.create(AppModule);
+	app.enableShutdownHooks();
 	const httpAdapter = app.getHttpAdapter();
 	const instance = httpAdapter.getInstance();
 	if (typeof instance?.set === 'function') {

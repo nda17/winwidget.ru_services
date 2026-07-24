@@ -1,6 +1,5 @@
 import { AuthModule } from '@/auth/auth.module';
 import { FileModule } from '@/file/file.module';
-import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { QuizApiController } from '@/quiz/quiz-api.controller';
@@ -17,7 +16,7 @@ import { Module } from '@nestjs/common';
 		SafeOutboundHttpModule
 	],
 	controllers: [QuizController, QuizPublicController, QuizApiController],
-	providers: [QuizService, PrismaService],
+	providers: [QuizService],
 	exports: [QuizService]
 })
 export class QuizModule {}

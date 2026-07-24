@@ -1,6 +1,5 @@
 import { AuthModule } from '@/auth/auth.module';
 import { FileModule } from '@/file/file.module';
-import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { OnlineConsultantApiController } from '@/online-consultant/online-consultant-api.controller';
@@ -21,7 +20,7 @@ import { Module } from '@nestjs/common';
 		OnlineConsultantPublicController,
 		OnlineConsultantApiController
 	],
-	providers: [OnlineConsultantService, PrismaService],
+	providers: [OnlineConsultantService],
 	exports: [OnlineConsultantService]
 })
 export class OnlineConsultantModule {}

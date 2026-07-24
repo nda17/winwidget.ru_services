@@ -1,5 +1,4 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
-import { PrismaService } from '@/prisma.service';
 import { SiteSettingsController } from '@/site-settings/site-settings.controller';
 import { SiteSettingsService } from '@/site-settings/site-settings.service';
 import { Module } from '@nestjs/common';
@@ -7,7 +6,7 @@ import { Module } from '@nestjs/common';
 @Module({
 	imports: [AdminEventLogModule],
 	controllers: [SiteSettingsController],
-	providers: [SiteSettingsService, PrismaService],
+	providers: [SiteSettingsService],
 	exports: [SiteSettingsService]
 })
 export class SiteSettingsModule {}

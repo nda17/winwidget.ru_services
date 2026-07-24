@@ -3,7 +3,6 @@ import { CountdownTimerPublicController } from '@/countdown-timer/countdown-time
 import { CountdownTimerController } from '@/countdown-timer/countdown-timer.controller';
 import { CountdownTimerService } from '@/countdown-timer/countdown-timer.service';
 import { FileModule } from '@/file/file.module';
-import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { Module } from '@nestjs/common';
@@ -15,7 +14,7 @@ import { Module } from '@nestjs/common';
 		CountdownTimerPublicController,
 		CountdownTimerApiController
 	],
-	providers: [CountdownTimerService, PrismaService, SubscriptionService],
+	providers: [CountdownTimerService, SubscriptionService],
 	exports: [CountdownTimerService]
 })
 export class CountdownTimerModule {}

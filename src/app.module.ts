@@ -7,6 +7,8 @@ import { FileModule } from '@/file/file.module';
 import { LegalPagesModule } from '@/legal-pages/legal-pages.module';
 import { NotesModule } from '@/notes/notes.module';
 import { PaymentModule } from '@/payment/payment.module';
+import { PrismaModule } from '@/prisma.module';
+import { PrismaService } from '@/prisma.service';
 import { SiteSettingsModule } from '@/site-settings/site-settings.module';
 import { SiteSettingsService } from '@/site-settings/site-settings.service';
 import { StatisticsModule } from '@/statistics/statistics.module';
@@ -26,7 +28,7 @@ import { HealthModule } from '@/health/health.module';
 import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
 import { MailingModule } from '@/mailing/mailing.module';
 import { MessagingAdminModule } from '@/messaging/messaging-admin.module';
-import { Module } from '@nestjs/common';
+import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 
@@ -35,6 +37,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		ConfigModule.forRoot({
 			isGlobal: true
 		}),
+		PrismaModule,
 		GoogleRecaptchaModule.forRootAsync({
 			imports: [ConfigModule, SiteSettingsModule],
 			useFactory: getGoogleRecaptchaConfig,
@@ -68,4 +71,10 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		AdminEventLogModule
 	]
 })
-export class AppModule {}
+export class AppModule implements OnApplicationShutdown {
+	constructor(private readonly prisma: PrismaService) {}
+
+	onApplicationShutdown() {
+		return this.prisma.disconnect();
+	}
+}

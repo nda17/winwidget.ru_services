@@ -5,7 +5,6 @@ import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { PaymentController } from '@/payment/payment.controller';
 import { PaymentService } from '@/payment/payment.service';
 import { YookassaService } from '@/payment/yookassa.service';
-import { PrismaService } from '@/prisma.service';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
 import { Module } from '@nestjs/common';
@@ -19,11 +18,6 @@ import { Module } from '@nestjs/common';
 		AdminEventLogModule
 	],
 	controllers: [PaymentController],
-	providers: [
-		PaymentService,
-		YookassaService,
-		PrismaService,
-		PaymentCleanupService
-	]
+	providers: [PaymentService, YookassaService, PaymentCleanupService]
 })
 export class PaymentModule {}

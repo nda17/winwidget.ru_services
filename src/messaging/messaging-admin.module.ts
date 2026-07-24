@@ -3,7 +3,6 @@ import { MessagingAdminController } from '@/messaging/messaging-admin.controller
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import { MessagingOperationalAlertService } from '@/messaging/messaging-operational-alert.service';
 import { RabbitMqManagementModule } from '@/messaging/rabbitmq-management.module';
-import { PrismaService } from '@/prisma.service';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { Module } from '@nestjs/common';
 
@@ -14,11 +13,7 @@ import { Module } from '@nestjs/common';
 		TelegramBotModule
 	],
 	controllers: [MessagingAdminController],
-	providers: [
-		MessagingAdminService,
-		MessagingOperationalAlertService,
-		PrismaService
-	],
+	providers: [MessagingAdminService, MessagingOperationalAlertService],
 	exports: [MessagingAdminService]
 })
 export class MessagingAdminModule {}

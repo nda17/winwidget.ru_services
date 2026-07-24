@@ -19,7 +19,12 @@ import {
 	SCHEDULED_JOB_TYPES,
 	ScheduledJobRunView
 } from '@/scheduled-jobs/scheduled-jobs.types';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+	Injectable,
+	Logger,
+	OnApplicationShutdown,
+	OnModuleInit
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, ScheduledJobRunStatus } from '@prisma/client';
 import type { ConsumeMessage } from 'amqplib';
@@ -34,9 +39,12 @@ interface ScheduledJobStatusRow {
 }
 
 @Injectable()
-export class MaintenanceWorkerService implements OnModuleInit {
+export class MaintenanceWorkerService
+	implements OnModuleInit, OnApplicationShutdown
+{
 	private readonly logger = new Logger(MaintenanceWorkerService.name);
 	private readonly workerId = `maintenance:${hostname()}:${process.pid}:${randomUUID()}`;
+	private readonly activeHandlers = new Set<Promise<void>>();
 
 	constructor(
 		private readonly rabbitMq: RabbitMqService,
@@ -52,18 +60,33 @@ export class MaintenanceWorkerService implements OnModuleInit {
 		for (const kind of this.getEnabledKinds()) {
 			await this.rabbitMq.consume(
 				kind,
-				message => this.handle(kind, message),
+				message => this.trackHandler(() => this.handle(kind, message)),
 				prefetch
 			);
 			await this.rabbitMq.consumeDeadLetter(
 				kind,
-				message => this.collectDeadLetter(kind, message),
+				message =>
+					this.trackHandler(() => this.collectDeadLetter(kind, message)),
 				prefetch
 			);
 		}
 		this.logger.log(
 			`Maintenance consumers started kinds=${this.getEnabledKinds().join(',')} prefetch=${prefetch}`
 		);
+	}
+
+	async onApplicationShutdown(): Promise<void> {
+		await Promise.allSettled([...this.activeHandlers]);
+	}
+
+	private trackHandler(handler: () => Promise<void>): Promise<void> {
+		const promise = handler();
+		this.activeHandlers.add(promise);
+		void promise.then(
+			() => this.activeHandlers.delete(promise),
+			() => this.activeHandlers.delete(promise)
+		);
+		return promise;
 	}
 
 	private async handle(

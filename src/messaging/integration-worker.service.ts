@@ -16,7 +16,12 @@ import {
 	ScheduledJobDispatchHandledError,
 	ScheduledJobDispatchRejectedError
 } from '@/reports/daily-summary-delivery.service';
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import {
+	Injectable,
+	Logger,
+	OnApplicationShutdown,
+	OnModuleInit
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
 	IntegrationDeliveryReceiptStatus,
@@ -50,12 +55,15 @@ interface ScheduledJobStatusRow {
 }
 
 @Injectable()
-export class IntegrationWorkerService implements OnModuleInit {
+export class IntegrationWorkerService
+	implements OnModuleInit, OnApplicationShutdown
+{
 	private readonly logger = new Logger(IntegrationWorkerService.name);
 	private readonly receiptCleanupBatchSize = 1000;
 	private readonly receiptCleanupMaxBatches = 20;
 	private lastReceiptCleanupAt = 0;
 	private readonly rateLimitTails = new Map<string, Promise<void>>();
+	private readonly activeHandlers = new Set<Promise<void>>();
 
 	constructor(
 		private readonly rabbitMq: RabbitMqService,
@@ -70,18 +78,33 @@ export class IntegrationWorkerService implements OnModuleInit {
 		for (const kind of kinds) {
 			await this.rabbitMq.consume(
 				kind,
-				message => this.handle(kind, message),
+				message => this.trackHandler(() => this.handle(kind, message)),
 				prefetch
 			);
 			await this.rabbitMq.consumeDeadLetter(
 				kind,
-				message => this.collectDeadLetter(kind, message),
+				message =>
+					this.trackHandler(() => this.collectDeadLetter(kind, message)),
 				prefetch
 			);
 		}
 		this.logger.log(
 			`Integration consumers started kinds=${kinds.join(',')} prefetch=${prefetch}`
 		);
+	}
+
+	async onApplicationShutdown(): Promise<void> {
+		await Promise.allSettled([...this.activeHandlers]);
+	}
+
+	private trackHandler(handler: () => Promise<void>): Promise<void> {
+		const promise = handler();
+		this.activeHandlers.add(promise);
+		void promise.then(
+			() => this.activeHandlers.delete(promise),
+			() => this.activeHandlers.delete(promise)
+		);
+		return promise;
 	}
 
 	private async handle(

@@ -3,13 +3,14 @@ import { IntegrationDeliveryService } from '@/messaging/integration-delivery.ser
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { RabbitMqModule } from '@/messaging/rabbitmq.module';
+import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
 import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import { DailySummaryReportService } from '@/reports/daily-summary-report.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { ScheduledJobsModule } from '@/scheduled-jobs/scheduled-jobs.module';
 import { TelegramInfoTransportModule } from '@/telegram-bot/telegram-info-transport.module';
-import { Module } from '@nestjs/common';
+import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
 @Module({
@@ -17,6 +18,7 @@ import { ConfigModule } from '@nestjs/config';
 		ConfigModule.forRoot({
 			isGlobal: true
 		}),
+		PrismaModule,
 		RabbitMqModule,
 		EmailModule,
 		SafeOutboundHttpModule,
@@ -24,7 +26,6 @@ import { ConfigModule } from '@nestjs/config';
 		TelegramInfoTransportModule
 	],
 	providers: [
-		PrismaService,
 		MessagingHeartbeatService,
 		DailySummaryReportService,
 		DailySummaryDeliveryService,
@@ -32,4 +33,10 @@ import { ConfigModule } from '@nestjs/config';
 		IntegrationWorkerService
 	]
 })
-export class IntegrationWorkerModule {}
+export class IntegrationWorkerModule implements OnApplicationShutdown {
+	constructor(private readonly prisma: PrismaService) {}
+
+	onApplicationShutdown() {
+		return this.prisma.disconnect();
+	}
+}
