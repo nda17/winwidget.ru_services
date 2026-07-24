@@ -446,7 +446,8 @@ audit event. Если у этого администратора уже есть
 transaction-scoped advisory lock только на команду данного администратора;
 этот lock завершается до `pg_dump`.
 
-Админка восстанавливает polling после reload через
+Интерфейс ручного запуска и polling расположен на странице
+`/admin/databases`. Админка восстанавливает polling после reload через
 `GET /api/telegram-bot/admin/database-backup/jobs/active` и локальный marker.
 Endpoint и получение конкретного ручного job проверяют
 `input.requestedByAdminId`, поэтому один администратор не получает состояние
@@ -562,9 +563,11 @@ docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
   `/admin/messaging`; действие попадёт в журнал событий, а команда retry —
   в PostgreSQL Outbox в той же транзакции с изменением состояния ошибки.
 
-CI запускает `test:messaging-integration`, который проверяет реальные цепочки
-`Outbox → RabbitMQ`, `mandatory return`, маршрут ручного retry,
-`RabbitMQ → DLQ → PostgreSQL` и наличие очередей ежедневной сводки и backup.
+CI запускает `test:messaging-integration`, который после применения миграций
+проверяет transaction-scoped advisory lock ручного backup на реальной
+PostgreSQL, цепочки `Outbox → RabbitMQ`, `mandatory return`, маршрут ручного
+retry, `RabbitMQ → DLQ → PostgreSQL` и наличие очередей ежедневной сводки и
+backup.
 
 При неизвестном `MODE` или отсутствующей выбранной переменной backend
 завершает запуск с ошибкой.

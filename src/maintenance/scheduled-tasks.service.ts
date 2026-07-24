@@ -42,7 +42,7 @@ export class ScheduledTasksService {
 		const scheduleKey = `manual:${adminId}:${normalizedIdempotencyKey}`;
 		const result = await this.prisma.$transaction(
 			async transaction => {
-				await transaction.$queryRaw(
+				await transaction.$executeRaw(
 					Prisma.sql`
 						SELECT pg_advisory_xact_lock(
 							hashtextextended(

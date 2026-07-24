@@ -2,6 +2,12 @@ import { PrismaClient } from '@prisma/client';
 import * as amqp from 'amqplib';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const {
+	ScheduledTasksService
+} = require('../dist/src/maintenance/scheduled-tasks.service.js');
 
 const databaseUrl = process.env.DATABASE_URL_DEVELOPMENT;
 const rabbitUrl = process.env.RABBITMQ_URL;
@@ -116,8 +122,57 @@ const stopChildren = async () => {
 	);
 };
 
+const verifyManualBackupAdvisoryLock = async () => {
+	const adminId = `ci-admin-${randomUUID()}`;
+	const idempotencyKey = randomUUID();
+	const jobId = randomUUID();
+	const now = new Date();
+
+	try {
+		await prisma.$transaction([
+			prisma.scheduledJobRun.create({
+				data: {
+					id: jobId,
+					jobType: 'DATABASE_BACKUP',
+					scheduleKey: `ci:manual-backup:${jobId}`,
+					trigger: 'MANUAL',
+					status: 'SUCCEEDED',
+					scheduledFor: now,
+					input: { requestedByAdminId: adminId },
+					finishedAt: now
+				}
+			}),
+			prisma.scheduledJobIdempotencyKey.create({
+				data: {
+					adminId,
+					jobType: 'DATABASE_BACKUP',
+					idempotencyKey,
+					jobId
+				}
+			})
+		]);
+
+		const service = new ScheduledTasksService(prisma, {}, {});
+		const result = await service.enqueueManualDatabaseBackup(
+			adminId,
+			idempotencyKey
+		);
+		if (result.created || result.jobId !== jobId) {
+			throw new Error(
+				'Manual backup advisory-lock smoke returned another job'
+			);
+		}
+	} finally {
+		await prisma.scheduledJobIdempotencyKey.deleteMany({
+			where: { jobId }
+		});
+		await prisma.scheduledJobRun.deleteMany({ where: { id: jobId } });
+	}
+};
+
 try {
 	await prisma.$connect();
+	await verifyManualBackupAdvisoryLock();
 	connection = await amqp.connect(rabbitUrl);
 
 	startProcess('dist/src/outbox-publisher-main.js');
@@ -650,7 +705,7 @@ try {
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, terminal scheduled jobs and malformed -> DLQ -> PostgreSQL\n`
+		`Messaging integration smoke passed: manual backup advisory lock, ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, terminal scheduled jobs and malformed -> DLQ -> PostgreSQL\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);

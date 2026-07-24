@@ -124,7 +124,7 @@ describe('ScheduledTasksService', () => {
 			databaseBackupThreadId: 43
 		});
 		const transaction = {
-			$queryRaw: jest.fn().mockResolvedValue([{}]),
+			$executeRaw: jest.fn().mockResolvedValue(1),
 			telegramBotSettings: {
 				upsert: settingsUpsert
 			},
@@ -267,7 +267,9 @@ describe('ScheduledTasksService', () => {
 			}
 		});
 		expect(transaction.telegramBotSettings.upsert).not.toHaveBeenCalled();
-		expect(transaction.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+		expect(
+			transaction.$executeRaw.mock.invocationCallOrder[0]
+		).toBeLessThan(
 			transaction.scheduledJobRun.findFirst.mock.invocationCallOrder[0]
 		);
 	});
@@ -329,7 +331,7 @@ describe('ScheduledTasksService', () => {
 		>();
 		let activeJob: ScheduledJobRun | null = null;
 		const transaction = {
-			$queryRaw: jest.fn().mockResolvedValue([{}]),
+			$executeRaw: jest.fn().mockResolvedValue(1),
 			telegramBotSettings: {
 				upsert: jest.fn().mockResolvedValue({
 					dailySummaryChatId: '-100123',
