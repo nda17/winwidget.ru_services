@@ -82,9 +82,8 @@ const DEFAULT_CONFIG = {
 	subtitle: 'Выберите параметры и узнайте ориентировочную стоимость',
 	calculateButtonText: 'Рассчитать',
 	contactTitle: 'Оставьте контакт для получения расчёта',
-	contactPosition: 'AFTER_RESULT',
 	resultTitle: 'Ориентировочная стоимость',
-	dataType: 'PHONE',
+	dataType: 'NONE',
 	privacyUrl:
 		'https://winwidget.ru/legal-documentation/consent-processing',
 	developInfoActive: true,
@@ -384,11 +383,7 @@ const normalizeCalculatorConfig = (rawConfig: unknown) => {
 			DEFAULT_CONFIG.contactTitle,
 			150
 		),
-		contactPosition:
-			raw.contactPosition === 'BEFORE_RESULT'
-				? 'BEFORE_RESULT'
-				: 'AFTER_RESULT',
-		dataType: ['EMAIL', 'PHONE_AND_EMAIL'].includes(raw.dataType)
+		dataType: ['NONE', 'EMAIL', 'PHONE_AND_EMAIL'].includes(raw.dataType)
 			? raw.dataType
 			: 'PHONE',
 		resultTitle: toShortString(
@@ -751,7 +746,6 @@ export class CalculatorService {
 			textColor: config.textColor || '',
 			calculateButtonText: config.calculateButtonText || 'Рассчитать',
 			contactTitle: config.contactTitle || '',
-			contactPosition: config.contactPosition,
 			resultTitle: config.resultTitle || 'Ориентировочная стоимость',
 			dataType: config.dataType,
 			privacyUrl: config.privacyUrl || null,
@@ -1037,6 +1031,9 @@ export class CalculatorService {
 	}
 
 	private assertContact(dataType: string, dto: SubmitCalculatorLeadDto) {
+		if (dataType === 'NONE') {
+			throw new BadRequestException('Сбор контактов отключён');
+		}
 		if (dataType === 'EMAIL' && !dto.email) {
 			throw new BadRequestException('Укажите email');
 		}

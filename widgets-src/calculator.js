@@ -742,10 +742,8 @@
 	}
 
 	function continueAfterCalculation() {
-		if (
-			String(cfg.contactPosition || 'BEFORE_RESULT') === 'AFTER_RESULT'
-		) {
-			showContact(true);
+		if (String(cfg.dataType || 'NONE').toUpperCase() === 'NONE') {
+			showResult();
 			return;
 		}
 		showContact(false);
@@ -914,19 +912,27 @@
 	}
 
 	function showResult() {
+		var collectsContacts =
+			String(cfg.dataType || 'NONE').toUpperCase() !== 'NONE';
 		render(
 			[
 				'<div class="wwc-screen">',
 				buildPriceCard(currentPrice),
 				'<div class="wwc-title">' +
-					esc(cfg.successTitle || 'Спасибо! Расчёт готов') +
-					'</div>',
-				'<div class="wwc-subtitle">' +
 					esc(
-						cfg.successSubtitle ||
-							'Мы получили ваши данные и свяжемся с вами для уточнения деталей.'
+						collectsContacts
+							? cfg.successTitle || 'Спасибо! Расчёт готов'
+							: 'Расчёт готов'
 					) +
 					'</div>',
+				collectsContacts
+					? '<div class="wwc-subtitle">' +
+						esc(
+							cfg.successSubtitle ||
+								'Мы получили ваши данные и свяжемся с вами для уточнения деталей.'
+						) +
+						'</div>'
+					: '',
 				'</div>'
 			].join('')
 		);

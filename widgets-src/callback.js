@@ -613,6 +613,10 @@
 			opacity: '0.5'
 		});
 		submitBtn.textContent = cfg.submitButtonText || 'Заказать звонок';
+		var submitError = document.createElement('div');
+		submitError.className = 'wcb-err-text';
+		submitError.style.textAlign = 'center';
+		submitError.style.marginBottom = '12px';
 		if (window.winwidgetPhone) {
 			phoneController = window.winwidgetPhone.attach(phoneInput, {
 				placeholder: '+7 999 123-45-67',
@@ -634,6 +638,7 @@
 		var isSubmitting = false;
 		submitBtn.addEventListener('click', function () {
 			if (isSubmitting) return;
+			submitError.classList.remove('wcb-err-show');
 			if (!phoneValid) {
 				showPhoneErr();
 				return;
@@ -665,22 +670,37 @@
 				})
 			)
 				.then(function (r) {
-					return r.json();
+					return r.json().then(function (data) {
+						if (!r.ok) {
+							throw new Error(
+								data && data.message
+									? data.message
+									: 'Не удалось отправить заявку'
+							);
+						}
+						return data;
+					});
 				})
 				.then(function () {
 					submitted = true;
 					buildSuccess();
 				})
-				.catch(function () {
+				.catch(function (error) {
 					isSubmitting = false;
 					submitBtn.disabled = false;
 					submitBtn.style.opacity = '1';
 					submitBtn.textContent =
 						cfg.submitButtonText || 'Заказать звонок';
+					submitError.textContent =
+						error && error.message
+							? error.message
+							: 'Не удалось отправить заявку. Попробуйте ещё раз.';
+					submitError.classList.add('wcb-err-show');
 				});
 		});
 
 		modal.appendChild(submitBtn);
+		modal.appendChild(submitError);
 
 		// Privacy link
 		if (cfg.privacyUrl) {

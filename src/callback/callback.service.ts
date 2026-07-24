@@ -12,6 +12,7 @@ import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
+import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
 	ForbiddenException,
@@ -21,6 +22,8 @@ import {
 import { Plan, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
+
+const CALLBACK_REPEAT_COOLDOWN_MS = 30 * 60 * 1000;
 
 const DEFAULT_CONFIG = {
 	color: '#4705fb',
@@ -458,9 +461,29 @@ export class CallbackService {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
 
+		const normalizedPhone = normalizePhone(dto.phone);
+		if (!/^[+][1-9][0-9]{7,14}$/.test(normalizedPhone)) {
+			throw new BadRequestException('Укажите корректный телефон');
+		}
+
 		const { lead } = await this.subscriptionService.createLeadWithinLimit(
 			callback.userId,
 			async transaction => {
+				const recentLead = await transaction.callbackLead.findFirst({
+					where: {
+						callbackId: callback.id,
+						phone: normalizedPhone,
+						createdAt: {
+							gte: new Date(Date.now() - CALLBACK_REPEAT_COOLDOWN_MS)
+						}
+					}
+				});
+				if (recentLead) {
+					throw new BadRequestException(
+						'Заявка уже отправлена, мы скоро вам перезвоним'
+					);
+				}
+
 				if (config?.filterDuplicates && ip) {
 					const existing = await transaction.callbackLead.findFirst({
 						where: { callbackId: callback.id, ip }
@@ -475,7 +498,7 @@ export class CallbackService {
 				const createdLead = await transaction.callbackLead.create({
 					data: {
 						callbackId: callback.id,
-						phone: dto.phone,
+						phone: normalizedPhone,
 						timeSlot: dto.timeSlot || '',
 						timezone: dto.timezone || '',
 						url: dto.url,
