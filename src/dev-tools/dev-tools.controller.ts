@@ -2,12 +2,13 @@ import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service'
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import {
-	DATABASE_BACKUP_MAX_FILE_SIZE_BYTES,
-	TelegramBotService
-} from '@/telegram-bot/telegram-bot.service';
+	DATABASE_RESTORE_MAX_FILE_SIZE_BYTES,
+	DatabaseRestoreService
+} from '@/dev-tools/database-restore.service';
 import {
 	Body,
 	Controller,
+	Get,
 	HttpCode,
 	Post,
 	Req,
@@ -30,16 +31,22 @@ class RestoreDatabaseBackupDto {
 @Auth(Role.DEV)
 export class DevToolsController {
 	constructor(
-		private readonly telegramBotService: TelegramBotService,
+		private readonly databaseRestoreService: DatabaseRestoreService,
 		private readonly adminEventLogService: AdminEventLogService
 	) {}
+
+	@HttpCode(200)
+	@Get('database-backup/restore-settings')
+	getDatabaseRestoreSettings() {
+		return this.databaseRestoreService.getSettings();
+	}
 
 	@HttpCode(200)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@Post('database-backup/restore')
 	@UseInterceptors(
 		FileInterceptor('file', {
-			limits: { fileSize: DATABASE_BACKUP_MAX_FILE_SIZE_BYTES }
+			limits: { fileSize: DATABASE_RESTORE_MAX_FILE_SIZE_BYTES }
 		})
 	)
 	async restoreDatabaseBackup(
@@ -63,9 +70,6 @@ export class DevToolsController {
 			request
 		});
 
-		return this.telegramBotService.restoreDatabaseBackup(
-			file,
-			dto.confirmation
-		);
+		return this.databaseRestoreService.restore(file, dto.confirmation);
 	}
 }
