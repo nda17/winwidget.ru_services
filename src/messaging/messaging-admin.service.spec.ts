@@ -65,4 +65,66 @@ describe('MessagingAdminService', () => {
 			})
 		);
 	});
+
+	it('reopens a failed backup job in the same transaction as manual retry Outbox', async () => {
+		const eventId = '11111111-1111-4111-8111-111111111111';
+		const failure = {
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId,
+			integration: 'database-backup',
+			payload: {
+				schemaVersion: 1,
+				eventType: 'database.backup.requested.v1',
+				jobId: eventId,
+				jobType: 'DATABASE_BACKUP'
+			},
+			resolvedAt: null,
+			retryingAt: null
+		};
+		const transaction = {
+			integrationDeliveryFailure: {
+				findUnique: jest.fn().mockResolvedValue(failure),
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			scheduledJobRun: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			outboxEvent: {
+				create: jest.fn().mockResolvedValue({ id: 'outbox-1' })
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(async callback => callback(transaction))
+		} as unknown as PrismaService;
+		const service = new MessagingAdminService(
+			prisma,
+			{} as RabbitMqManagementService
+		);
+
+		await service.retryFailure(failure.id);
+
+		expect(transaction.scheduledJobRun.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: eventId,
+				jobType: 'DATABASE_BACKUP',
+				status: 'FAILED'
+			},
+			data: expect.objectContaining({
+				status: 'QUEUED',
+				maxAttempts: { increment: 4 },
+				finishedAt: null,
+				leaseOwner: null,
+				leaseToken: null,
+				leaseExpiresAt: null
+			})
+		});
+		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+			data: {
+				messageId: eventId,
+				eventType: 'database.backup.requested.v1',
+				routingKey: 'manual.database-backup',
+				payload: failure.payload
+			}
+		});
+	});
 });

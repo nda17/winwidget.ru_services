@@ -33,7 +33,12 @@ export class HealthService {
 				'integration-worker',
 				'Integration worker'
 			),
+			this.checkMessagingHeartbeat(
+				'maintenance-worker',
+				'Maintenance worker'
+			),
 			this.checkMessagingBacklog(),
+			this.checkScheduledJobs(),
 			this.checkS3(),
 			this.checkSmtp(),
 			this.checkSmsAero(),
@@ -124,6 +129,39 @@ export class HealthService {
 			message: hasProblem
 				? `Outbox FAILED: ${failedOutbox}, DLQ: ${unresolvedFailures}, старейшее ожидание: ${oldestAgeSeconds} сек.`
 				: 'Задержек и необработанных ошибок нет'
+		};
+	}
+
+	private async checkScheduledJobs(): Promise<HealthCheck> {
+		const now = new Date();
+		const overdueBefore = new Date(now.getTime() - 15 * 60 * 1000);
+		const [failed, overdueQueued, expiredLeases] = await Promise.all([
+			this.prisma.scheduledJobRun.count({
+				where: { status: 'FAILED' }
+			}),
+			this.prisma.scheduledJobRun.count({
+				where: {
+					status: 'QUEUED',
+					availableAt: { lt: overdueBefore }
+				}
+			}),
+			this.prisma.scheduledJobRun.count({
+				where: {
+					status: 'PROCESSING',
+					leaseExpiresAt: { lt: now }
+				}
+			})
+		]);
+		const hasProblem =
+			failed > 0 || overdueQueued > 0 || expiredLeases > 0;
+
+		return {
+			id: 'scheduled_jobs',
+			title: 'Фоновые задания',
+			status: hasProblem ? 'warning' : 'ok',
+			message: hasProblem
+				? `FAILED: ${failed}, QUEUED с задержкой > 15 минут: ${overdueQueued}, просроченных lease: ${expiredLeases}`
+				: 'Ошибок, длительной задержки и просроченных lease нет'
 		};
 	}
 
@@ -320,10 +358,7 @@ export class HealthService {
 			id: 'telegram_support_bot',
 			title: '@winwidget_support_bot',
 			tokenKey: 'TELEGRAM_SUPPORT_BOT_TOKEN',
-			usernameKeys: [
-				'TELEGRAM_SUPPORT_BOT_USERNAME',
-				'TELEGRAM_SUPPORT_USERNAME'
-			]
+			usernameKey: 'TELEGRAM_SUPPORT_BOT_USERNAME'
 		});
 	}
 
@@ -331,25 +366,20 @@ export class HealthService {
 		id,
 		title,
 		tokenKey,
-		usernameKey,
-		usernameKeys
+		usernameKey
 	}: {
 		id: string;
 		title: string;
 		tokenKey: string;
 		usernameKey?: string;
-		usernameKeys?: string[];
 	}): Promise<HealthCheck> {
 		const token = this.configService.get<string>(tokenKey);
-		const usernameEnvKeys =
-			usernameKeys ?? (usernameKey ? [usernameKey] : []);
-		const username =
-			usernameEnvKeys
-				.map(key => this.configService.get<string>(key))
-				.find(Boolean) ?? null;
+		const username = usernameKey
+			? this.configService.get<string>(usernameKey)
+			: null;
 		const missing = [
 			!token ? tokenKey : null,
-			usernameEnvKeys.length > 0 && !username ? usernameEnvKeys[0] : null
+			usernameKey && !username ? usernameKey : null
 		].filter((key): key is string => Boolean(key));
 
 		if (missing.length > 0) {

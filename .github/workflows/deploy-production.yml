@@ -95,21 +95,157 @@ jobs:
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
             node -e '
               const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
-              const apiEnvironment = config.services?.api?.environment ?? {};
-              for (const key of [
+              const services = config.services ?? {};
+              const persistentServiceNames = Object.entries(services)
+                .filter(([, service]) => !(service.profiles ?? []).includes("migration"))
+                .map(([name]) => name)
+                .sort();
+              const expectedPersistentServiceNames = [
+                "api",
+                "integration-worker",
+                "maintenance-worker",
+                "outbox-publisher",
+                "rabbitmq",
+              ];
+              if (
+                JSON.stringify(persistentServiceNames) !==
+                JSON.stringify(expectedPersistentServiceNames)
+              ) {
+                throw new Error(
+                  `Unexpected persistent services: ${persistentServiceNames.join(",")}`,
+                );
+              }
+
+              const requireService = name => {
+                const service = services[name];
+                if (!service) throw new Error(`Missing production service ${name}`);
+                return service;
+              };
+              const requireCommand = (name, expected) => {
+                const command = requireService(name).command;
+                const normalized = Array.isArray(command)
+                  ? command.join(" ")
+                  : String(command ?? "");
+                if (normalized !== expected) {
+                  throw new Error(`Unexpected ${name} command: ${normalized}`);
+                }
+              };
+              const requireEnvironment = (name, keys, allowEmpty = []) => {
+                const environment = requireService(name).environment ?? {};
+                for (const key of keys) {
+                  if (
+                    !(key in environment) ||
+                    (environment[key] === "" && !allowEmpty.includes(key))
+                  ) {
+                    throw new Error(`Missing ${key} in production ${name} environment`);
+                  }
+                }
+                return environment;
+              };
+              const requireKind = (environment, key, kind, name) => {
+                const kinds = String(environment[key] ?? "")
+                  .split(",")
+                  .map(value => value.trim())
+                  .filter(Boolean);
+                if (!kinds.includes(kind)) {
+                  throw new Error(`${key} in ${name} must include ${kind}`);
+                }
+              };
+
+              requireCommand(
+                "outbox-publisher",
+                "node dist/src/outbox-publisher-main.js",
+              );
+              requireCommand(
+                "integration-worker",
+                "node dist/src/integration-worker-main.js",
+              );
+              requireCommand(
+                "maintenance-worker",
+                "node dist/src/maintenance-worker-main.js",
+              );
+
+              requireEnvironment("api", [
                 "RABBITMQ_MANAGEMENT_URL",
                 "RABBITMQ_USER",
                 "RABBITMQ_PASSWORD",
                 "RABBITMQ_VHOST",
-              ]) {
-                if (!apiEnvironment[key]) {
-                  throw new Error(`Missing ${key} in production API environment`);
-                }
+              ]);
+              requireEnvironment("outbox-publisher", [
+                "DATABASE_URL_DEVELOPMENT",
+                "DATABASE_URL_PRODUCTION",
+                "RABBITMQ_URL",
+                "MESSAGING_SERVICE_NAME",
+              ], ["DATABASE_URL_PRODUCTION"]);
+              const integrationEnvironment = requireEnvironment(
+                "integration-worker",
+                [
+                  "DATABASE_URL_DEVELOPMENT",
+                  "DATABASE_URL_PRODUCTION",
+                  "RABBITMQ_URL",
+                  "MESSAGING_SERVICE_NAME",
+                  "INTEGRATION_WORKER_KINDS",
+                ],
+                ["DATABASE_URL_PRODUCTION"],
+              );
+              requireKind(
+                integrationEnvironment,
+                "INTEGRATION_WORKER_KINDS",
+                "daily-summary-telegram",
+                "integration-worker",
+              );
+              const maintenance = requireService("maintenance-worker");
+              const maintenanceEnvironment = requireEnvironment(
+                "maintenance-worker",
+                [
+                  "DATABASE_URL_DEVELOPMENT",
+                  "DATABASE_URL_PRODUCTION",
+                  "RABBITMQ_URL",
+                  "MESSAGING_SERVICE_NAME",
+                  "MAINTENANCE_WORKER_PREFETCH",
+                  "SCHEDULED_JOB_POLL_INTERVAL_MS",
+                  "SCHEDULED_JOB_LEASE_MS",
+                  "SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS",
+                  "MAINTENANCE_WORKER_KINDS",
+                ],
+                ["DATABASE_URL_PRODUCTION"],
+              );
+              requireKind(
+                maintenanceEnvironment,
+                "MAINTENANCE_WORKER_KINDS",
+                "database-backup",
+                "maintenance-worker",
+              );
+              const tmpfs = Array.isArray(maintenance.tmpfs)
+                ? maintenance.tmpfs.map(value =>
+                    typeof value === "string" ? value : JSON.stringify(value),
+                  )
+                : [];
+              if (
+                !tmpfs.some(
+                  value =>
+                    value.startsWith("/tmp") &&
+                    (value.includes("size=64m") ||
+                      value.includes("size=67108864") ||
+                      value.includes("\"size\":67108864")) &&
+                    (value.includes("mode=1777") ||
+                      value.includes("\"mode\":1777") ||
+                      value.includes("\"mode\":\"1777\"")),
+                )
+              ) {
+                throw new Error("maintenance-worker must use bounded /tmp tmpfs");
               }
             '
 
       - name: Build
         run: pnpm build
+
+      - name: Build and verify production image
+        run: |
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint sh api -lc \
+            'pg_dump --version && pg_restore --version && test -f dist/src/maintenance-worker-main.js'
 
       - name: Messaging integration smoke
         run: pnpm run test:messaging-integration

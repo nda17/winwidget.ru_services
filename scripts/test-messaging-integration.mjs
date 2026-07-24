@@ -29,6 +29,7 @@ let childFailure;
 let connection;
 let channel;
 const createdEventIds = [];
+const createdScheduledJobIds = [];
 const requiredQueues = [
 	'winwidget.lead-integration.email',
 	'winwidget.lead-integration.webhook',
@@ -40,7 +41,9 @@ const requiredQueues = [
 	'winwidget.mailing.email',
 	'winwidget.mailing.telegram',
 	'winwidget.limit-notification.email',
-	'winwidget.limit-notification.telegram'
+	'winwidget.limit-notification.telegram',
+	'winwidget.report.daily-summary.telegram',
+	'winwidget.maintenance.database-backup'
 ];
 
 const getRabbitManagementStatus = async path => {
@@ -283,9 +286,7 @@ try {
 				}
 			} catch (error) {
 				childFailure =
-					error instanceof Error
-						? error
-						: new Error(String(error));
+					error instanceof Error ? error : new Error(String(error));
 			}
 			manualRetryReceived = true;
 			channel.ack(message);
@@ -411,14 +412,161 @@ try {
 	}
 
 	startProcess('dist/src/integration-worker-main.js', {
-		INTEGRATION_WORKER_KINDS: 'webhook'
+		INTEGRATION_WORKER_KINDS: 'webhook,daily-summary-telegram'
 	});
 	await waitFor(async () => {
-		const info = await channel.checkQueue(
-			'winwidget.lead-integration.webhook.dead-letter'
+		const queues = await Promise.all(
+			[
+				'winwidget.lead-integration.webhook.dead-letter',
+				'winwidget.report.daily-summary.telegram',
+				'winwidget.report.daily-summary.telegram.dead-letter'
+			].map(queue => channel.checkQueue(queue))
 		);
-		return info.consumerCount > 0;
-	}, 'dead-letter collector');
+		return queues.every(queue => queue.consumerCount > 0);
+	}, 'integration worker consumers');
+
+	startProcess('dist/src/maintenance-worker-main.js', {
+		MAINTENANCE_WORKER_KINDS: 'database-backup',
+		MAINTENANCE_WORKER_PREFETCH: '1',
+		SCHEDULED_JOB_POLL_INTERVAL_MS: '30000',
+		SCHEDULED_JOB_LEASE_MS: '120000',
+		SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: '30000'
+	});
+	await waitFor(async () => {
+		const queues = await Promise.all(
+			[
+				'winwidget.maintenance.database-backup',
+				'winwidget.maintenance.database-backup.dead-letter'
+			].map(queue => channel.checkQueue(queue))
+		);
+		return queues.every(queue => queue.consumerCount > 0);
+	}, 'maintenance worker consumers');
+
+	const terminalDailySummaryJobId = randomUUID();
+	const terminalDailySummaryPeriodEnd = new Date();
+	const terminalDailySummaryPeriodStart = new Date(
+		terminalDailySummaryPeriodEnd.getTime() - 24 * 60 * 60 * 1000
+	);
+	const terminalDailySummaryScheduleKey = `ci:${terminalDailySummaryJobId}`;
+	createdEventIds.push(terminalDailySummaryJobId);
+	createdScheduledJobIds.push(terminalDailySummaryJobId);
+	await prisma.$transaction([
+		prisma.scheduledJobRun.create({
+			data: {
+				id: terminalDailySummaryJobId,
+				jobType: 'DAILY_TELEGRAM_SUMMARY',
+				scheduleKey: terminalDailySummaryScheduleKey,
+				trigger: 'SCHEDULED',
+				status: 'SUCCEEDED',
+				scheduledFor: terminalDailySummaryPeriodEnd,
+				periodStart: terminalDailySummaryPeriodStart,
+				periodEnd: terminalDailySummaryPeriodEnd,
+				input: {
+					chatId: 'ci-terminal-summary',
+					messageThreadId: 1
+				},
+				result: {
+					telegramSent: true,
+					smoke: true
+				},
+				finishedAt: terminalDailySummaryPeriodEnd
+			}
+		}),
+		prisma.outboxEvent.create({
+			data: {
+				id: terminalDailySummaryJobId,
+				messageId: terminalDailySummaryJobId,
+				eventType: 'report.daily-summary.requested.v1',
+				routingKey: 'report.daily-summary.requested.v1',
+				payload: {
+					schemaVersion: 1,
+					eventType: 'report.daily-summary.requested.v1',
+					jobId: terminalDailySummaryJobId,
+					jobType: 'DAILY_TELEGRAM_SUMMARY',
+					scheduleKey: terminalDailySummaryScheduleKey,
+					periodStart: terminalDailySummaryPeriodStart.toISOString(),
+					periodEnd: terminalDailySummaryPeriodEnd.toISOString()
+				}
+			}
+		})
+	]);
+	await waitFor(
+		() =>
+			prisma.integrationDeliveryReceipt
+				.findUnique({
+					where: {
+						eventId_integration: {
+							eventId: terminalDailySummaryJobId,
+							integration: 'daily-summary-telegram'
+						}
+					},
+					select: { status: true }
+				})
+				.then(receipt => receipt?.status === 'DELIVERED'),
+		'terminal daily summary delivery'
+	);
+
+	const terminalBackupJobId = randomUUID();
+	const terminalBackupCreatedAt = new Date();
+	const terminalBackupScheduleKey = `ci:${terminalBackupJobId}`;
+	createdEventIds.push(terminalBackupJobId);
+	createdScheduledJobIds.push(terminalBackupJobId);
+	await prisma.$transaction([
+		prisma.scheduledJobRun.create({
+			data: {
+				id: terminalBackupJobId,
+				jobType: 'DATABASE_BACKUP',
+				scheduleKey: terminalBackupScheduleKey,
+				trigger: 'MANUAL',
+				status: 'FAILED',
+				scheduledFor: terminalBackupCreatedAt,
+				input: {
+					chatId: 'ci-terminal-backup',
+					messageThreadId: 1,
+					trigger: 'MANUAL',
+					periodStart: null
+				},
+				attempts: 4,
+				maxAttempts: 4,
+				finishedAt: terminalBackupCreatedAt,
+				lastError: 'CI terminal database backup'
+			}
+		}),
+		prisma.outboxEvent.create({
+			data: {
+				id: terminalBackupJobId,
+				messageId: terminalBackupJobId,
+				eventType: 'database.backup.requested.v1',
+				routingKey: 'database.backup.requested.v1',
+				payload: {
+					schemaVersion: 1,
+					eventType: 'database.backup.requested.v1',
+					jobId: terminalBackupJobId,
+					jobType: 'DATABASE_BACKUP',
+					scheduleKey: terminalBackupScheduleKey,
+					periodStart: null,
+					periodEnd: null
+				}
+			}
+		})
+	]);
+	await waitFor(
+		() =>
+			prisma.integrationDeliveryFailure
+				.findUnique({
+					where: {
+						eventId_integration: {
+							eventId: terminalBackupJobId,
+							integration: 'database-backup'
+						}
+					},
+					select: { lastError: true }
+				})
+				.then(failure =>
+					failure?.lastError.includes('CI terminal database backup')
+				),
+		'terminal database backup dead-letter'
+	);
 
 	const duplicateEventId = randomUUID();
 	createdEventIds.push(duplicateEventId);
@@ -502,7 +650,7 @@ try {
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out and malformed -> DLQ -> PostgreSQL\n`
+		`Messaging integration smoke passed: ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, terminal scheduled jobs and malformed -> DLQ -> PostgreSQL\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);
@@ -517,6 +665,11 @@ try {
 			.catch(() => undefined);
 		await prisma.outboxEvent
 			.deleteMany({ where: { id: { in: createdEventIds } } })
+			.catch(() => undefined);
+	}
+	if (createdScheduledJobIds.length) {
+		await prisma.scheduledJobRun
+			.deleteMany({ where: { id: { in: createdScheduledJobIds } } })
 			.catch(() => undefined);
 	}
 	await prisma.$disconnect();

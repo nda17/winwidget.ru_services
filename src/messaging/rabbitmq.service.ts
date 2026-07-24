@@ -2,11 +2,11 @@ import {
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
 	getManualRetryRoutingKey,
-	INTEGRATION_KINDS,
-	INTEGRATION_QUEUE_NAMES,
-	INTEGRATION_ROUTING_KEYS,
-	IntegrationKind,
 	MANUAL_RETRY_EXCHANGE,
+	MESSAGING_KINDS,
+	MESSAGING_QUEUE_NAMES,
+	MESSAGING_ROUTING_KEYS,
+	MessagingKind,
 	RETRY_DELAYS_MS,
 	RETRY_EXCHANGE
 } from '@/messaging/messaging.constants';
@@ -98,7 +98,7 @@ export class RabbitMqService
 	}
 
 	async publishRetry(
-		kind: IntegrationKind,
+		kind: MessagingKind,
 		payload: unknown,
 		attempt: number,
 		eventId: string,
@@ -120,7 +120,7 @@ export class RabbitMqService
 	}
 
 	async publishDeadLetter(
-		kind: IntegrationKind,
+		kind: MessagingKind,
 		payload: unknown,
 		attempt: number,
 		eventId: string,
@@ -177,12 +177,12 @@ export class RabbitMqService
 	}
 
 	async consume(
-		kind: IntegrationKind,
+		kind: MessagingKind,
 		handler: (message: ConsumeMessage) => Promise<void>,
 		prefetch: number
 	): Promise<void> {
 		await this.consumeQueue(
-			INTEGRATION_QUEUE_NAMES[kind],
+			MESSAGING_QUEUE_NAMES[kind],
 			`${kind} integration`,
 			handler,
 			prefetch
@@ -190,12 +190,12 @@ export class RabbitMqService
 	}
 
 	async consumeDeadLetter(
-		kind: IntegrationKind,
+		kind: MessagingKind,
 		handler: (message: ConsumeMessage) => Promise<void>,
 		prefetch: number
 	): Promise<void> {
 		await this.consumeQueue(
-			`${INTEGRATION_QUEUE_NAMES[kind]}.dead-letter`,
+			`${MESSAGING_QUEUE_NAMES[kind]}.dead-letter`,
 			`${kind} dead-letter`,
 			handler,
 			prefetch
@@ -317,13 +317,16 @@ export class RabbitMqService
 			durable: true
 		});
 
-		for (const kind of INTEGRATION_KINDS) {
-			const queue = INTEGRATION_QUEUE_NAMES[kind];
-			const routingKey = INTEGRATION_ROUTING_KEYS[kind];
+		for (const kind of MESSAGING_KINDS) {
+			const queue = MESSAGING_QUEUE_NAMES[kind];
+			const routingKey = MESSAGING_ROUTING_KEYS[kind];
 			const deadLetterQueue = `${queue}.dead-letter`;
 
 			await channel.assertQueue(queue, {
-				durable: true
+				durable: true,
+				...(kind === 'database-backup'
+					? { arguments: { 'x-single-active-consumer': true } }
+					: {})
 			});
 			await channel.bindQueue(queue, EVENTS_EXCHANGE, routingKey);
 			await channel.bindQueue(
@@ -359,14 +362,11 @@ export class RabbitMqService
 		}
 	}
 
-	private getRetryRoutingKey(
-		kind: IntegrationKind,
-		index: number
-	): string {
+	private getRetryRoutingKey(kind: MessagingKind, index: number): string {
 		return `${kind}.retry.${index + 1}`;
 	}
 
-	private getDeadLetterRoutingKey(kind: IntegrationKind): string {
+	private getDeadLetterRoutingKey(kind: MessagingKind): string {
 		return `${kind}.dead-letter`;
 	}
 }

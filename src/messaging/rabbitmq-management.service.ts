@@ -1,6 +1,6 @@
 import {
-	INTEGRATION_QUEUE_NAMES,
-	IntegrationKind
+	MESSAGING_QUEUE_NAMES,
+	MessagingKind
 } from '@/messaging/messaging.constants';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -28,7 +28,9 @@ export class RabbitMqManagementService {
 					queue.name.startsWith('winwidget.lead-integration.') ||
 					queue.name.startsWith('winwidget.payment-notification.') ||
 					queue.name.startsWith('winwidget.mailing.') ||
-					queue.name.startsWith('winwidget.limit-notification.')
+					queue.name.startsWith('winwidget.limit-notification.') ||
+					queue.name.startsWith('winwidget.report.') ||
+					queue.name.startsWith('winwidget.maintenance.')
 			)
 			.sort((left, right) => left.name.localeCompare(right.name));
 	}
@@ -41,8 +43,8 @@ export class RabbitMqManagementService {
 		return `RabbitMQ ${overview.rabbitmq_version || 'доступен'}`;
 	}
 
-	getMainQueueName(kind: IntegrationKind): string {
-		return INTEGRATION_QUEUE_NAMES[kind];
+	getMainQueueName(kind: MessagingKind): string {
+		return MESSAGING_QUEUE_NAMES[kind];
 	}
 
 	private async request<T>(

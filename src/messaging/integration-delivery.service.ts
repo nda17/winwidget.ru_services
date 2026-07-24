@@ -1,10 +1,12 @@
 import { EmailService } from '@/email/email.service';
+import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
 import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import { IntegrationKind } from '@/messaging/messaging.constants';
 import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
 import { PrismaService } from '@/prisma.service';
+import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -20,7 +22,8 @@ type DeliveryEventPayload =
 	| LeadIntegrationEventPayload
 	| PaymentSucceededEventPayload
 	| MailingDeliveryEventPayload
-	| LimitReachedEventPayload;
+	| LimitReachedEventPayload
+	| DailySummaryRequestedEventPayload;
 
 const MAILING_PROCESSING_LEASE_MS = 10 * 60 * 1000;
 
@@ -30,7 +33,8 @@ export class IntegrationDeliveryService {
 		private readonly emailService: EmailService,
 		private readonly safeOutboundHttpService: SafeOutboundHttpService,
 		private readonly configService: ConfigService,
-		private readonly prisma: PrismaService
+		private readonly prisma: PrismaService,
+		private readonly dailySummaryDelivery: DailySummaryDeliveryService
 	) {}
 
 	async deliver(
@@ -38,6 +42,13 @@ export class IntegrationDeliveryService {
 		event: DeliveryEventPayload,
 		eventId: string
 	): Promise<void> {
+		if (kind === 'daily-summary-telegram') {
+			await this.dailySummaryDelivery.deliver(
+				event as DailySummaryRequestedEventPayload,
+				eventId
+			);
+			return;
+		}
 		if (kind === 'payment-email' || kind === 'payment-telegram') {
 			const paymentEvent = this.getPaymentEvent(event);
 			if (kind === 'payment-email') {

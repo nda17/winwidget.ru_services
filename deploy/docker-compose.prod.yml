@@ -46,7 +46,6 @@ x-api-env: &api-env
   TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: ${TELEGRAM_AUTH_BOT_WEBHOOK_SECRET}
   TELEGRAM_SUPPORT_BOT_TOKEN: ${TELEGRAM_SUPPORT_BOT_TOKEN}
   TELEGRAM_SUPPORT_BOT_USERNAME: ${TELEGRAM_SUPPORT_BOT_USERNAME:-}
-  TELEGRAM_SUPPORT_USERNAME: ${TELEGRAM_SUPPORT_USERNAME:-}
   TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: ${TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET}
   S3_ENDPOINT: ${S3_ENDPOINT:-https://s3.twcstorage.ru}
   S3_REGION: ${S3_REGION:-ru-1}
@@ -65,9 +64,14 @@ x-api-env: &api-env
   OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
   OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-7}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
+  MAINTENANCE_WORKER_PREFETCH: ${MAINTENANCE_WORKER_PREFETCH:-1}
+  SCHEDULED_JOB_POLL_INTERVAL_MS: ${SCHEDULED_JOB_POLL_INTERVAL_MS:-30000}
+  SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
+  SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
   MESSAGING_ALERTS_ENABLED: ${MESSAGING_ALERTS_ENABLED:-true}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram}
+  MAINTENANCE_WORKER_KINDS: ${MAINTENANCE_WORKER_KINDS:-database-backup}
   MAILING_EMAIL_RATE_PER_SECOND: ${MAILING_EMAIL_RATE_PER_SECOND:-5}
   MAILING_TELEGRAM_RATE_PER_SECOND: ${MAILING_TELEGRAM_RATE_PER_SECOND:-10}
 
@@ -80,12 +84,12 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-winwidget}
     ports:
-      - "127.0.0.1:5672:5672"
-      - "127.0.0.1:15672:15672"
+      - '127.0.0.1:5672:5672'
+      - '127.0.0.1:15672:15672'
     volumes:
       - winwidget-rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
       interval: 10s
       timeout: 5s
       retries: 12
@@ -112,7 +116,7 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-    command: ["node", "dist/src/outbox-publisher-main.js"]
+    command: ['node', 'dist/src/outbox-publisher-main.js']
     restart: unless-stopped
 
   integration-worker:
@@ -125,7 +129,23 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-    command: ["node", "dist/src/integration-worker-main.js"]
+    command: ['node', 'dist/src/integration-worker-main.js']
+    restart: unless-stopped
+
+  maintenance-worker:
+    image: winwidget-api:${APP_VERSION:-latest}
+    environment:
+      <<: *api-env
+      DATABASE_BACKUP_URL: ${DATABASE_BACKUP_URL:-}
+      RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
+      MESSAGING_SERVICE_NAME: maintenance-worker
+    network_mode: host
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/maintenance-worker-main.js']
     restart: unless-stopped
 
   migrate:
@@ -138,7 +158,7 @@ services:
     profiles:
       - migration
     environment: *api-env
-    command: ["./node_modules/.bin/prisma", "migrate", "deploy"]
+    command: ['./node_modules/.bin/prisma', 'migrate', 'deploy']
 
 volumes:
   winwidget-rabbitmq-data:

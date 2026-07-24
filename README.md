@@ -84,6 +84,9 @@ winwidget.ru_server/
 │   ├── calculator/            # Калькулятор
 │   ├── email/ и sms/          # уведомления и коды подтверждения
 │   ├── telegram-bot/          # три Telegram-бота и webhooks
+│   ├── messaging/             # RabbitMQ topology, consumers и Outbox contracts
+│   ├── scheduled-jobs/        # durable-запуски, уникальность и CAS-lease
+│   ├── maintenance/           # длительные регламентные задачи и backup
 │   ├── file/                  # local/S3 uploads
 │   ├── safe-outbound-http/    # защита исходящих webhook/CRM-запросов
 │   └── ...                    # контент, статистика и admin-модули
@@ -111,17 +114,19 @@ winwidget.ru_server/
 
 ## Основные модули
 
-| Область           | Модули                                                                                           | Ответственность                                 |
-| ----------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| Авторизация       | `auth`, `user`                                                                                   | JWT, OAuth, Telegram auth, профиль и identities |
-| Подписки          | `subscription`, `tariff-prices`                                                                  | тарифы, лимиты, история и expiry                |
-| Платежи           | `payment`, `affiliate`                                                                           | ЮKassa, активация подписок и referrals          |
-| Виджеты           | `widget`, `quiz`, `callback`, `countdown-timer`, `stop-offer`, `online-consultant`, `calculator` | CRUD, config, leads и preview                   |
-| Контент           | `home-page-content`, `legal-pages`, `site-settings`                                              | главная, документы и настройки сайта            |
-| Администрирование | `statistics`, `admin-alerts`, `admin-event-log`, `notes`, `mailing`, `health`, `dev-tools`       | dashboard, мониторинг и служебные действия      |
-| Уведомления       | `email`, `sms`, `telegram-bot`                                                                   | email, SMS и Telegram                           |
-| Файлы             | `file`                                                                                           | local uploads и S3                              |
-| Интеграции        | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                |
+| Область             | Модули                                                                                           | Ответственность                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| Авторизация         | `auth`, `user`                                                                                   | JWT, OAuth, Telegram auth, профиль и identities |
+| Подписки            | `subscription`, `tariff-prices`                                                                  | тарифы, лимиты, история и expiry                |
+| Платежи             | `payment`, `affiliate`                                                                           | ЮKassa, активация подписок и referrals          |
+| Виджеты             | `widget`, `quiz`, `callback`, `countdown-timer`, `stop-offer`, `online-consultant`, `calculator` | CRUD, config, leads и preview                   |
+| Контент             | `home-page-content`, `legal-pages`, `site-settings`                                              | главная, документы и настройки сайта            |
+| Администрирование   | `statistics`, `admin-alerts`, `admin-event-log`, `notes`, `mailing`, `health`, `dev-tools`       | dashboard, мониторинг и служебные действия      |
+| Уведомления         | `email`, `sms`, `telegram-bot`                                                                   | email, SMS и Telegram                           |
+| Messaging           | `messaging`, `outbox-publisher`, `integration-worker`                                            | RabbitMQ, Outbox, retry и DLQ                   |
+| Регламентные задачи | `scheduled-jobs`, `maintenance`                                                                  | durable scheduler, lease и backup               |
+| Файлы               | `file`                                                                                           | local uploads и S3                              |
+| Интеграции          | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                |
 
 Единого `AdminModule` нет: административные endpoints находятся внутри
 соответствующих предметных модулей.
@@ -227,10 +232,18 @@ MODE=development -> DATABASE_URL_DEVELOPMENT
 MODE=production  -> DATABASE_URL_PRODUCTION
 ```
 
+Для `pg_dump` maintenance worker сначала использует необязательный
+`DATABASE_BACKUP_URL`. Указывайте в нём прямой PostgreSQL endpoint, если
+основной Prisma URL ведёт через PgBouncer/pooler. Если переменная пустая,
+используется URL, выбранный через `MODE`; deploy не требует
+`DATABASE_BACKUP_URL`.
+
 Production compose отслеживается вместе с backend-кодом в
-`deploy/docker-compose.prod.yml`. Он запускает четыре постоянных
-backend-контейнера: `api`, `rabbitmq`, `outbox-publisher` и
-`integration-worker`. Контейнер `migrate` запускается только на время деплоя.
+`deploy/docker-compose.prod.yml`. Он запускает пять постоянных
+backend-контейнеров: `api`, `rabbitmq`, `outbox-publisher`,
+`integration-worker`, `maintenance-worker`. Контейнер `migrate` запускается
+только на время деплоя. PostgreSQL является внешней управляемой базой и в эти
+пять контейнеров не входит.
 RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
 привязаны только к `127.0.0.1` backend VPS.
 
@@ -247,9 +260,14 @@ OUTBOX_BATCH_SIZE=50
 OUTBOX_POLL_INTERVAL_MS=500
 OUTBOX_RETENTION_DAYS=7
 RABBITMQ_WORKER_PREFETCH=10
+MAINTENANCE_WORKER_PREFETCH=1
+SCHEDULED_JOB_POLL_INTERVAL_MS=30000
+SCHEDULED_JOB_LEASE_MS=120000
+SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS=30000
 MESSAGING_ALERTS_ENABLED=false
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
-INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram
+INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram
+MAINTENANCE_WORKER_KINDS=database-backup
 MAILING_EMAIL_RATE_PER_SECOND=5
 MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
@@ -273,16 +291,25 @@ OUTBOX_BATCH_SIZE=50
 OUTBOX_POLL_INTERVAL_MS=1000
 OUTBOX_RETENTION_DAYS=7
 RABBITMQ_WORKER_PREFETCH=10
+MAINTENANCE_WORKER_PREFETCH=1
+SCHEDULED_JOB_POLL_INTERVAL_MS=30000
+SCHEDULED_JOB_LEASE_MS=120000
+SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS=30000
 MESSAGING_ALERTS_ENABLED=true
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
-INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram
+INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram
+MAINTENANCE_WORKER_KINDS=database-backup
 MAILING_EMAIL_RATE_PER_SECOND=5
 MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
 `RABBITMQ_PASSWORD` и пароль внутри `RABBITMQ_URL` должны совпадать.
 Production deploy останавливается до запуска миграции и контейнеров, если
-`RABBITMQ_PASSWORD` или `RABBITMQ_URL` пусты.
+`RABBITMQ_PASSWORD` или `RABBITMQ_URL` пусты. Перед первым деплоем этой версии
+обновите реальный `.env.production`: deploy также проверяет новые настройки
+maintenance worker и наличие `daily-summary-telegram`/`database-backup` в
+списках consumers. Это предотвращает успешный релиз без обработчика новой
+очереди.
 
 Назначение настроек:
 
@@ -291,12 +318,25 @@ Production deploy останавливается до запуска мигра�
 - `OUTBOX_RETENTION_DAYS` — срок хранения успешно опубликованных событий;
   очистка выполняется ограниченными пакетами;
 - `RABBITMQ_WORKER_PREFETCH` — максимум неподтверждённых сообщений worker;
+- `MAINTENANCE_WORKER_PREFETCH` — число backup-задач, одновременно получаемых
+  maintenance worker; production-значение `1` не допускает параллельные
+  `pg_dump` в одном процессе;
+- `SCHEDULED_JOB_POLL_INTERVAL_MS` — интервал проверки расписания durable-задач;
+- `SCHEDULED_JOB_LEASE_MS` — срок CAS-lease длительной задачи;
+- `SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS` — интервал продления lease, который
+  должен быть меньше `SCHEDULED_JOB_LEASE_MS`;
 - `MESSAGING_ALERTS_ENABLED` — Telegram-алерты о недоступных messaging-процессах,
   необработанных ошибках и событиях Outbox, ожидающих больше 15 минут;
 - `INTEGRATION_RECEIPT_RETENTION_DAYS` — срок хранения отметок об успешной доставке, минимум 30 дней;
-- `INTEGRATION_WORKER_KINDS` — consumers, запускаемые worker-контейнером.
+- `INTEGRATION_WORKER_KINDS` — consumers, запускаемые integration worker;
+- `MAINTENANCE_WORKER_KINDS` — consumers длительных регламентных задач,
+  запускаемые maintenance worker;
 - `MAILING_EMAIL_RATE_PER_SECOND` — максимальная скорость массовой email-рассылки в одном worker-процессе;
 - `MAILING_TELEGRAM_RATE_PER_SECOND` — максимальная скорость массовой Telegram-рассылки в одном worker-процессе.
+
+Административный health и operational alert дополнительно контролируют
+`scheduled_job_runs`: окончательные `FAILED`, задания `QUEUED` с задержкой
+больше 15 минут и `PROCESSING` с просроченным lease.
 
 Worker получает сообщения из RabbitMQ по push-модели через `basic.consume`:
 broker доставляет сообщение сам, а worker подтверждает обработку через `ack`.
@@ -351,9 +391,79 @@ PostgreSQL. Через RabbitMQ выполняются только побочн
 независимые email и Telegram queues. Прежняя fire-and-forget отправка из
 API-процесса удалена.
 
+### Ежедневная Telegram-сводка
+
+Scheduler работает в `maintenance-worker`, а не в API. Для отчётного периода
+он одной транзакцией PostgreSQL создаёт durable-запуск с уникальным ключом и
+Outbox-событие. Событие фиксирует границы периода и поступает в отдельную
+очередь `winwidget.report.daily-summary.telegram`; отправку, retry и DLQ
+обрабатывает `integration-worker`. Поэтому повтор после сбоя не выбирает уже
+другой день, несколько replicas scheduler не создают два запуска, а startup API
+не ждёт формирования или отправки сводки.
+
+Доставка остаётся `at-least-once`: Telegram Bot API не поддерживает
+идемпотентный ключ. Если процесс завершится после успешного `sendMessage`, но до
+фиксации `SUCCEEDED` в PostgreSQL, retry может повторно отправить сводку. Lease,
+receipt и checkpoint предотвращают параллельную обработку и повторное
+формирование после сохранённого checkpoint, но не могут атомарно объединить
+Telegram и PostgreSQL.
+
+### Backup PostgreSQL
+
+Плановый и ручной backup сначала создают durable-задание в PostgreSQL и
+Outbox-событие. API только ставит ручной запуск в очередь и не выполняет
+`pg_dump` внутри HTTP-запроса. Отдельный `maintenance-worker` получает ID
+задания из `winwidget.maintenance.database-backup`, атомарно захватывает его
+через CAS и продлевает lease во время длительной работы. RabbitMQ не содержит
+файл backup или секреты подключения. В production временный dump создаётся в
+отдельном `tmpfs` maintenance-контейнера с лимитом 64 МБ и удаляется в
+`finally`; максимальный размер отправляемого файла ограничен 49 МБ.
+Если провайдер выдаёт отдельный direct endpoint, задайте его в
+`DATABASE_BACKUP_URL`: `pg_dump` не должен идти через transaction pooler.
+Переменная необязательна и при отсутствии использует обычный URL текущего
+`MODE`. Пароль удаляется из аргументов процесса и передаётся `pg_dump` только
+через `PGPASSWORD`; Prisma-only параметры подключения удаляются.
+
+Контракт ручного запуска изменён намеренно: endpoint возвращает принятое в
+очередь задание, а не готовый файл. Совместимость со старым синхронным ответом
+не сохраняется. `POST /api/telegram-bot/admin/database-backup/send` требует
+заголовок `Idempotency-Key` с UUID. Ключ сохраняется в детерминированном
+`scheduleKey` вместе с ID администратора и в отдельной таблице соответствий
+`adminId + jobType + idempotencyKey → jobId`. Поэтому повтор HTTP-запроса
+возвращает тот же job даже после его завершения и не создаёт второй Outbox или
+audit event. Если у этого администратора уже есть активный ручной backup, новый
+ключ атомарно связывается с текущим job; новый job появляется только после
+завершения активного. FK с `ON DELETE RESTRICT` защищает соответствие от
+случайного удаления job. Проверка и создание защищены коротким
+transaction-scoped advisory lock только на команду данного администратора;
+этот lock завершается до `pg_dump`.
+
+Админка восстанавливает polling после reload через
+`GET /api/telegram-bot/admin/database-backup/jobs/active` и локальный marker.
+Endpoint и получение конкретного ручного job проверяют
+`input.requestedByAdminId`, поэтому один администратор не получает состояние
+чужого запуска.
+
+Для Telegram-документа действует тот же `at-least-once` предел: авария после
+успешной загрузки файла, но до фиксации результата job может привести к
+повторной отправке. Одновременно один job выполняет только владелец актуального
+lease; состояние и окончательные ошибки остаются наблюдаемыми в PostgreSQL.
+
+Для всех scheduler не вводится общий PostgreSQL-lock. Уникальный ключ периода
+защищает расписание от дублей, длительный backup использует возобновляемый
+lease, а короткие идемпотентные очистки остаются без распределённой блокировки.
+Транзакция и advisory lock не удерживаются во время `pg_dump` или сетевой
+отправки.
+
+Telegram-копия backup является дополнительным операционным каналом. Основной
+защитой production-данных должны оставаться проверяемые backup и point-in-time
+recovery управляемой PostgreSQL с шифрованием и retention. Восстановление базы
+не выполняется worker автоматически: это отдельная защищённая операция по
+runbook.
+
 Напоминания об окончании подписки пока остаются в существующем scheduler:
-у них уже есть PostgreSQL-дедупликация. Отчёты и прочие административные задачи
-в RabbitMQ не перенесены.
+у них уже есть PostgreSQL-дедупликация. Остальные отчёты и административные
+задачи в RabbitMQ автоматически не переносятся.
 
 RabbitMQ Management UI слушает только `127.0.0.1:15672`. Не открывайте этот
 порт публично. Для временного доступа используйте SSH tunnel:
@@ -405,8 +515,9 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
    через localhost.
 4. Запустить штатный CI/CD. Контейнер `migrate` применит миграции до запуска
    новой версии API и worker.
-5. Открыть `/admin/system` и `/admin/messaging`: RabbitMQ, publisher и worker
-   должны иметь статус `Работает`, а Outbox/DLQ — не накапливаться.
+5. Открыть `/admin/system` и `/admin/messaging`: RabbitMQ, publisher,
+   integration worker и maintenance worker должны иметь статус `Работает`, а
+   Outbox/DLQ — не накапливаться.
 
 Диагностика:
 
@@ -416,14 +527,15 @@ docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
 
 docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
   -f /opt/winwidget/winwidget.ru_server/deploy/docker-compose.prod.yml \
-  logs --tail=200 outbox-publisher integration-worker rabbitmq
+  logs --tail=200 outbox-publisher integration-worker maintenance-worker rabbitmq
 ```
 
 Аварийные сценарии:
 
 - RabbitMQ недоступен: заявки продолжают сохраняться вместе с Outbox; после
   восстановления publisher отправит накопившиеся события.
-- Worker недоступен: сообщения остаются в durable-очередях RabbitMQ.
+- Worker недоступен: сообщения остаются в соответствующих durable-очередях
+  RabbitMQ; зависший backup восстанавливается только после истечения lease.
 - Внешняя интеграция недоступна: выполняются повторы через 30 секунд, 5 и
   30 минут, затем событие сохраняется как DLQ-ошибка.
 - PostgreSQL недоступна: API не подтверждает сохранение заявки, publisher и
@@ -433,8 +545,8 @@ docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
   в PostgreSQL Outbox в той же транзакции с изменением состояния ошибки.
 
 CI запускает `test:messaging-integration`, который проверяет реальные цепочки
-`Outbox → RabbitMQ`, `mandatory return`, маршрут ручного retry и
-`RabbitMQ → DLQ → PostgreSQL`.
+`Outbox → RabbitMQ`, `mandatory return`, маршрут ручного retry,
+`RabbitMQ → DLQ → PostgreSQL` и наличие очередей ежедневной сводки и backup.
 
 При неизвестном `MODE` или отсутствующей выбранной переменной backend
 завершает запуск с ошибкой.
@@ -449,6 +561,7 @@ CI запускает `test:messaging-integration`, который провер�
   `TariffPrice`, `AffiliateReferral`.
 - Telegram: `TelegramNotificationChannel`, `TelegramSupportMessage`,
   `TelegramBotSettings`.
+- Фоновые задачи: `ScheduledJobRun`.
 - Администрирование и контент: `AdminEventLog`, `SiteSettings`, `LegalPage`,
   `HomePageContent`, `Note`.
 
@@ -705,6 +818,7 @@ DEVELOPMENT_HOST
 AUTH_COOKIE_DOMAIN
 DATABASE_URL_DEVELOPMENT
 DATABASE_URL_PRODUCTION
+DATABASE_BACKUP_URL
 JWT_SECRET
 ```
 
@@ -909,6 +1023,8 @@ pnpm exec tsc --noEmit
 pnpm exec jest --runInBand
 docker compose ... config --quiet
 pnpm build
+docker compose ... build api
+pg_dump --version && pg_restore --version
 pnpm run test:messaging-integration
 ```
 
@@ -916,14 +1032,17 @@ pnpm run test:messaging-integration
 
 1. обновляет ветку `prod` через `git pull --ff-only`, требует чистый checkout и
    точное совпадение с проверенным `${{ github.sha }}`;
-2. собирает backend image;
+2. собирает backend image с тегом и OCI revision полного SHA commit;
 3. запускает migration container;
-4. пересоздаёт API container;
-5. собирает образ с тегом и OCI revision полного SHA текущего Git commit;
+4. запускает RabbitMQ и пересоздаёт API, Outbox publisher, integration worker и
+   maintenance worker;
+5. ждёт свежие heartbeat трёх worker-процессов и consumers основных/DLQ
+   очередей ежедневной сводки и backup;
 6. сверяет revision через локальный
    `http://127.0.0.1:4200/api/health/deployment` и публичный
    `https://api.winwidget.ru/api/health/deployment`;
-7. проверяет OCI-label и отсутствие рестартов у API, Outbox publisher и worker;
+7. проверяет OCI-label и отсутствие рестартов у API, Outbox publisher,
+   integration worker и maintenance worker;
 8. при ошибке выводит последние логи API и процесс, занимающий порт `4200`.
 
 Production flow:

@@ -1,6 +1,7 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
+import { ScheduledTasksService } from '@/maintenance/scheduled-tasks.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
 	TelegramBotService,
@@ -10,11 +11,14 @@ import {
 } from '@/telegram-bot/telegram-bot.service';
 import {
 	Body,
+	BadRequestException,
 	Controller,
 	Get,
 	Headers,
 	HttpCode,
+	NotFoundException,
 	Param,
+	ParseUUIDPipe,
 	Patch,
 	Post,
 	Req,
@@ -22,13 +26,15 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
+import { isUUID } from 'class-validator';
 import { Request } from 'express';
 
 @Controller('telegram-bot')
 export class TelegramBotController {
 	constructor(
 		private readonly telegramBotService: TelegramBotService,
-		private readonly adminEventLogService: AdminEventLogService
+		private readonly adminEventLogService: AdminEventLogService,
+		private readonly scheduledTasksService: ScheduledTasksService
 	) {}
 
 	@HttpCode(200)
@@ -137,33 +143,71 @@ export class TelegramBotController {
 		return result;
 	}
 
-	@HttpCode(200)
+	@HttpCode(202)
 	@Auth(Role.ADMIN)
 	@Post('admin/database-backup/send')
 	async sendDatabaseBackup(
 		@CurrentUser('id') adminId: string,
+		@Headers('idempotency-key') idempotencyKey: string | undefined,
 		@Req() request: Request
 	) {
-		const result =
-			await this.telegramBotService.createAndSendDatabaseBackup('manual');
+		if (!idempotencyKey || !isUUID(idempotencyKey)) {
+			throw new BadRequestException(
+				'Заголовок Idempotency-Key должен содержать UUID'
+			);
+		}
 
-		await this.adminEventLogService.record({
-			adminId,
-			section: 'TELEGRAM_BOT',
-			action: 'TELEGRAM_DATABASE_BACKUP_CREATE',
-			description: 'Создан и отправлен backup базы данных',
-			entityType: 'database_backup',
-			entityId: result.fileName,
-			entityLabel: result.fileName,
-			metadata: {
-				fileName: result.fileName,
-				fileSize: result.fileSize,
-				createdAt: result.createdAt
-			},
-			request
-		});
+		const result =
+			await this.scheduledTasksService.enqueueManualDatabaseBackup(
+				adminId,
+				idempotencyKey
+			);
+
+		if (result.created) {
+			await this.adminEventLogService.record({
+				adminId,
+				section: 'TELEGRAM_BOT',
+				action: 'TELEGRAM_DATABASE_BACKUP_CREATE',
+				description: 'Backup базы данных поставлен в очередь',
+				entityType: 'scheduled_job',
+				entityId: result.jobId,
+				entityLabel: 'Backup PostgreSQL',
+				metadata: {
+					jobId: result.jobId,
+					status: result.status,
+					queuedAt: result.queuedAt
+				},
+				request
+			});
+		}
 
 		return result;
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Get('admin/database-backup/jobs/active')
+	getLatestActiveManualDatabaseBackup(@CurrentUser('id') adminId: string) {
+		return this.scheduledTasksService.getLatestActiveManualDatabaseBackup(
+			adminId
+		);
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Get('admin/database-backup/jobs/:jobId')
+	async getDatabaseBackupJob(
+		@Param('jobId', new ParseUUIDPipe()) jobId: string,
+		@CurrentUser('id') adminId: string
+	) {
+		const job = await this.scheduledTasksService.getDatabaseBackupJob(
+			jobId,
+			adminId
+		);
+		if (!job) {
+			throw new NotFoundException('Задание backup не найдено');
+		}
+		return job;
 	}
 
 	@HttpCode(200)

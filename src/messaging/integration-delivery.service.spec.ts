@@ -4,6 +4,7 @@ import type { EmailService } from '@/email/email.service';
 import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import type { ConfigService } from '@nestjs/config';
 import type { PrismaService } from '@/prisma.service';
+import type { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import {
 	MailingCampaignStatus,
 	MailingDeliveryChannel,
@@ -55,7 +56,10 @@ describe('IntegrationDeliveryService', () => {
 				emailService,
 				safeOutboundHttpService,
 				configService,
-				prisma
+				prisma,
+				{
+					deliver: jest.fn().mockResolvedValue(undefined)
+				} as unknown as DailySummaryDeliveryService
 			),
 			safeOutboundHttpService,
 			emailService
@@ -193,7 +197,10 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			emailService,
 			{} as SafeOutboundHttpService,
 			{ get: jest.fn() } as unknown as ConfigService,
-			prisma
+			prisma,
+			{
+				deliver: jest.fn().mockResolvedValue(undefined)
+			} as unknown as DailySummaryDeliveryService
 		);
 
 		return {

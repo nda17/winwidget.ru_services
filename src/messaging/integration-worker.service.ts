@@ -4,6 +4,7 @@ import {
 	IntegrationKind,
 	RETRY_DELAYS_MS
 } from '@/messaging/messaging.constants';
+import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
 import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
@@ -11,13 +12,18 @@ import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-even
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
+import {
+	ScheduledJobDispatchHandledError,
+	ScheduledJobDispatchRejectedError
+} from '@/reports/daily-summary-delivery.service';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
 	IntegrationDeliveryReceiptStatus,
 	MailingCampaignStatus,
 	MailingDeliveryStatus,
-	Prisma
+	Prisma,
+	ScheduledJobRunStatus
 } from '@prisma/client';
 import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'crypto';
@@ -30,6 +36,18 @@ type DeliveryClaim =
 	| { state: 'claimed'; lockedAt: Date }
 	| { state: 'delivered' }
 	| { state: 'processing' };
+
+type WorkerEventPayload =
+	| LeadIntegrationEventPayload
+	| PaymentSucceededEventPayload
+	| MailingDeliveryEventPayload
+	| LimitReachedEventPayload
+	| DailySummaryRequestedEventPayload;
+
+interface ScheduledJobStatusRow {
+	jobType: string;
+	status: ScheduledJobRunStatus;
+}
 
 @Injectable()
 export class IntegrationWorkerService implements OnModuleInit {
@@ -71,20 +89,16 @@ export class IntegrationWorkerService implements OnModuleInit {
 		message: ConsumeMessage
 	): Promise<void> {
 		const eventId = message.properties.messageId;
-		if (!eventId) {
+		if (!this.isUuid(eventId)) {
 			await this.deadLetterMalformed(
 				kind,
 				message,
-				'RabbitMQ messageId is missing'
+				'RabbitMQ messageId is missing or invalid'
 			);
 			return;
 		}
 
-		let payload:
-			| LeadIntegrationEventPayload
-			| PaymentSucceededEventPayload
-			| MailingDeliveryEventPayload
-			| LimitReachedEventPayload;
+		let payload: WorkerEventPayload;
 		try {
 			payload = this.parsePayload(kind, message);
 		} catch (error) {
@@ -147,7 +161,46 @@ export class IntegrationWorkerService implements OnModuleInit {
 			}
 
 			try {
-				if (nextAttempt <= RETRY_DELAYS_MS.length) {
+				if (error instanceof ScheduledJobDispatchRejectedError) {
+					await this.rabbitMq.publishDeadLetter(
+						kind,
+						payload,
+						nextAttempt,
+						eventId,
+						error.message,
+						this.getEventType(payload)
+					);
+					this.rabbitMq.ack(message);
+					this.logger.error(
+						`Scheduled integration rejected eventId=${eventId} kind=${kind}: ${error.message}`
+					);
+					return;
+				}
+				if (error instanceof ScheduledJobDispatchHandledError) {
+					if (error.state === 'failed') {
+						await this.rabbitMq.publishDeadLetter(
+							kind,
+							payload,
+							error.job.attempts,
+							eventId,
+							error.message,
+							this.getEventType(payload)
+						);
+						this.logger.error(
+							`Scheduled integration moved to dead-letter eventId=${eventId} kind=${kind}: ${error.message}`
+						);
+					} else {
+						this.logger.warn(
+							`Scheduled integration retry persisted eventId=${eventId} kind=${kind} attempt=${error.job.attempts}: ${error.message}`
+						);
+					}
+					this.rabbitMq.ack(message);
+					return;
+				}
+				if (
+					kind === 'daily-summary-telegram' ||
+					nextAttempt <= RETRY_DELAYS_MS.length
+				) {
 					await this.rabbitMq.publishRetry(
 						kind,
 						payload,
@@ -345,16 +398,25 @@ export class IntegrationWorkerService implements OnModuleInit {
 	private parsePayload(
 		kind: IntegrationKind,
 		message: ConsumeMessage
-	):
-		| LeadIntegrationEventPayload
-		| PaymentSucceededEventPayload
-		| MailingDeliveryEventPayload
-		| LimitReachedEventPayload {
-		const value = JSON.parse(message.content.toString('utf8')) as
-			| LeadIntegrationEventPayload
-			| PaymentSucceededEventPayload
-			| MailingDeliveryEventPayload
-			| LimitReachedEventPayload;
+	): WorkerEventPayload {
+		const value = JSON.parse(
+			message.content.toString('utf8')
+		) as WorkerEventPayload;
+
+		if (kind === 'daily-summary-telegram') {
+			const summary = value as DailySummaryRequestedEventPayload;
+			if (
+				summary?.schemaVersion !== 1 ||
+				summary?.eventType !== 'report.daily-summary.requested.v1' ||
+				!this.isUuid(summary.jobId) ||
+				message.properties.messageId !== summary.jobId ||
+				!summary.periodStart ||
+				!summary.periodEnd
+			) {
+				throw new Error('Invalid daily summary event payload');
+			}
+			return summary;
+		}
 
 		if (kind === 'payment-email' || kind === 'payment-telegram') {
 			const payment = value as PaymentSucceededEventPayload;
@@ -421,7 +483,7 @@ export class IntegrationWorkerService implements OnModuleInit {
 		message: ConsumeMessage,
 		error: string
 	): Promise<void> {
-		const eventId = message.properties.messageId || randomUUID();
+		const eventId = this.normalizeEventId(message.properties.messageId);
 		let payload: unknown = {
 			raw: message.content.toString('utf8').slice(0, 10_000)
 		};
@@ -444,13 +506,7 @@ export class IntegrationWorkerService implements OnModuleInit {
 		}
 	}
 
-	private getEventType(
-		payload:
-			| LeadIntegrationEventPayload
-			| PaymentSucceededEventPayload
-			| MailingDeliveryEventPayload
-			| LimitReachedEventPayload
-	): string {
+	private getEventType(payload: WorkerEventPayload): string {
 		return 'eventType' in payload
 			? payload.eventType
 			: 'lead.integration.requested.v1';
@@ -460,13 +516,17 @@ export class IntegrationWorkerService implements OnModuleInit {
 		kind: IntegrationKind,
 		message: ConsumeMessage
 	): Promise<void> {
-		const eventId = message.properties.messageId || randomUUID();
+		const eventId = this.normalizeEventId(message.properties.messageId);
 		const rawPayload = message.content.toString('utf8');
 		let payload: Prisma.InputJsonValue = {
 			raw: rawPayload.slice(0, 10_000)
 		};
 		try {
-			payload = JSON.parse(rawPayload) as Prisma.InputJsonValue;
+			const parsed = JSON.parse(rawPayload) as unknown;
+			payload =
+				parsed === null
+					? { raw: rawPayload.slice(0, 10_000) }
+					: (parsed as Prisma.InputJsonValue);
 		} catch {}
 
 		const errorHeader = message.properties.headers?.['x-last-error'];
@@ -477,35 +537,52 @@ export class IntegrationWorkerService implements OnModuleInit {
 					? errorHeader.toString('utf8')
 					: 'Integration delivery failed';
 		const failedAt = new Date();
+		const upsert: Prisma.IntegrationDeliveryFailureUpsertArgs = {
+			where: {
+				eventId_integration: {
+					eventId,
+					integration: kind
+				}
+			},
+			create: {
+				eventId,
+				integration: kind,
+				routingKey: INTEGRATION_ROUTING_KEYS[kind],
+				payload,
+				attempts: this.getRetryAttempt(message),
+				lastError: lastError.slice(0, 10_000),
+				failedAt
+			},
+			update: {
+				integration: kind,
+				routingKey: INTEGRATION_ROUTING_KEYS[kind],
+				payload,
+				attempts: this.getRetryAttempt(message),
+				lastError: lastError.slice(0, 10_000),
+				failedAt,
+				retryingAt: null,
+				resolvedAt: null
+			}
+		};
 
 		try {
-			await this.prisma.integrationDeliveryFailure.upsert({
-				where: {
-					eventId_integration: {
-						eventId,
-						integration: kind
-					}
-				},
-				create: {
+			let persisted = true;
+			if (kind === 'daily-summary-telegram') {
+				persisted = await this.persistDailySummaryDeadLetter(
 					eventId,
-					integration: kind,
-					routingKey: INTEGRATION_ROUTING_KEYS[kind],
 					payload,
-					attempts: this.getRetryAttempt(message),
-					lastError: lastError.slice(0, 10_000),
-					failedAt
-				},
-				update: {
-					integration: kind,
-					routingKey: INTEGRATION_ROUTING_KEYS[kind],
-					payload,
-					attempts: this.getRetryAttempt(message),
-					lastError: lastError.slice(0, 10_000),
-					failedAt,
-					retryingAt: null,
-					resolvedAt: null
-				}
-			});
+					upsert
+				);
+			} else {
+				await this.prisma.integrationDeliveryFailure.upsert(upsert);
+			}
+			if (!persisted) {
+				this.rabbitMq.ack(message);
+				this.logger.warn(
+					`Skipped stale daily-summary dead-letter eventId=${eventId}`
+				);
+				return;
+			}
 			await this.markMailingDeliveryFailed(kind, payload, lastError);
 			this.rabbitMq.ack(message);
 			this.logger.error(
@@ -521,13 +598,64 @@ export class IntegrationWorkerService implements OnModuleInit {
 		}
 	}
 
+	private async persistDailySummaryDeadLetter(
+		eventId: string,
+		payload: Prisma.InputJsonValue,
+		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs
+	): Promise<boolean> {
+		const jobId = this.getDailySummaryJobId(payload);
+		return this.prisma.$transaction(async transaction => {
+			await transaction.$queryRaw(
+				Prisma.sql`
+					SELECT "id"
+					FROM "integration_delivery_failures"
+					WHERE "event_id" = ${eventId}::uuid
+						AND "integration" = 'daily-summary-telegram'
+					FOR UPDATE
+				`
+			);
+			const jobs = jobId
+				? await transaction.$queryRaw<ScheduledJobStatusRow[]>(
+						Prisma.sql`
+							SELECT
+								"job_type" AS "jobType",
+								"status"
+							FROM "scheduled_job_runs"
+							WHERE "id" = ${jobId}::uuid
+							FOR SHARE
+						`
+					)
+				: [];
+			if (
+				jobs[0] &&
+				eventId === jobId &&
+				jobs[0].jobType === 'DAILY_TELEGRAM_SUMMARY' &&
+				jobs[0].status !== ScheduledJobRunStatus.FAILED
+			) {
+				return false;
+			}
+			await transaction.integrationDeliveryFailure.upsert(upsert);
+			return true;
+		});
+	}
+
+	private getDailySummaryJobId(
+		payload: Prisma.InputJsonValue
+	): string | null {
+		if (
+			payload &&
+			typeof payload === 'object' &&
+			!Array.isArray(payload)
+		) {
+			const jobId = (payload as Record<string, unknown>).jobId;
+			if (this.isUuid(jobId)) return jobId;
+		}
+		return null;
+	}
+
 	private async deliverWithRateLimit(
 		kind: IntegrationKind,
-		payload:
-			| LeadIntegrationEventPayload
-			| PaymentSucceededEventPayload
-			| MailingDeliveryEventPayload
-			| LimitReachedEventPayload,
+		payload: WorkerEventPayload,
 		eventId: string
 	): Promise<void> {
 		const intervalMs = this.getRateLimitInterval(kind);
@@ -558,11 +686,7 @@ export class IntegrationWorkerService implements OnModuleInit {
 
 	private async shouldBypassMailingRateLimit(
 		kind: IntegrationKind,
-		payload:
-			| LeadIntegrationEventPayload
-			| PaymentSucceededEventPayload
-			| MailingDeliveryEventPayload
-			| LimitReachedEventPayload
+		payload: WorkerEventPayload
 	): Promise<boolean> {
 		if (kind !== 'mailing-email' && kind !== 'mailing-telegram') {
 			return false;
@@ -679,6 +803,19 @@ export class IntegrationWorkerService implements OnModuleInit {
 	private getRetryAttempt(message: ConsumeMessage): number {
 		const value = Number(message.properties.headers?.['x-retry-attempt']);
 		return Number.isInteger(value) && value >= 0 ? value : 0;
+	}
+
+	private normalizeEventId(value: unknown): string {
+		return this.isUuid(value) ? value : randomUUID();
+	}
+
+	private isUuid(value: unknown): value is string {
+		return (
+			typeof value === 'string' &&
+			/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+				value
+			)
+		);
 	}
 
 	private getPrefetch(): number {

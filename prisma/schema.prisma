@@ -471,6 +471,51 @@ model OutboxEvent {
   @@map("outbox_events")
 }
 
+model ScheduledJobRun {
+  id              String                       @id @default(uuid()) @db.Uuid
+  jobType         String                       @map("job_type")
+  scheduleKey     String                       @map("schedule_key")
+  trigger         ScheduledJobRunTrigger       @default(SCHEDULED)
+  status          ScheduledJobRunStatus        @default(QUEUED)
+  scheduledFor    DateTime                     @map("scheduled_for")
+  periodStart     DateTime?                    @map("period_start")
+  periodEnd       DateTime?                    @map("period_end")
+  input           Json                         @default("{}")
+  checkpoint      Json                         @default("{}")
+  result          Json?
+  attempts        Int                          @default(0)
+  maxAttempts     Int                          @default(4) @map("max_attempts")
+  availableAt     DateTime                     @default(now()) @map("available_at")
+  leaseOwner      String?                      @map("lease_owner")
+  leaseToken      String?                      @map("lease_token") @db.Uuid
+  leaseExpiresAt  DateTime?                    @map("lease_expires_at")
+  startedAt       DateTime?                    @map("started_at")
+  finishedAt      DateTime?                    @map("finished_at")
+  lastError       String?                      @map("last_error") @db.Text
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @updatedAt @map("updated_at")
+  idempotencyKeys ScheduledJobIdempotencyKey[]
+
+  @@unique([jobType, scheduleKey], map: "scheduled_job_runs_type_schedule_key_unique")
+  @@index([status, availableAt, createdAt], map: "scheduled_job_runs_dispatch_idx")
+  @@index([status, leaseExpiresAt], map: "scheduled_job_runs_lease_idx")
+  @@index([jobType, createdAt], map: "scheduled_job_runs_type_created_idx")
+  @@map("scheduled_job_runs")
+}
+
+model ScheduledJobIdempotencyKey {
+  adminId        String          @map("admin_id")
+  jobType        String          @map("job_type")
+  idempotencyKey String          @map("idempotency_key") @db.Uuid
+  jobId          String          @map("job_id") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at")
+  job            ScheduledJobRun @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@id([adminId, jobType, idempotencyKey], map: "scheduled_job_idempotency_keys_pkey")
+  @@index([jobId], map: "scheduled_job_idempotency_keys_job_idx")
+  @@map("scheduled_job_idempotency_keys")
+}
+
 model MessagingHeartbeat {
   id         String   @id @default(uuid()) @db.Uuid
   service    String
@@ -635,6 +680,20 @@ enum OutboxEventStatus {
   PUBLISHING
   PUBLISHED
   FAILED
+}
+
+enum ScheduledJobRunStatus {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  SKIPPED
+}
+
+enum ScheduledJobRunTrigger {
+  SCHEDULED
+  MANUAL
 }
 
 enum Role {

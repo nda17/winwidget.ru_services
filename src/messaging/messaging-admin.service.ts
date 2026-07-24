@@ -1,12 +1,13 @@
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
 import {
 	getManualRetryRoutingKey,
-	INTEGRATION_KINDS,
-	IntegrationKind,
+	MESSAGING_KINDS,
+	MessagingKind,
 	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
+import { SCHEDULED_JOB_TYPES } from '@/scheduled-jobs/scheduled-jobs.types';
 import {
 	BadRequestException,
 	ConflictException,
@@ -41,6 +42,7 @@ export class MessagingAdminService {
 			unresolvedFailures,
 			retryingFailures,
 			deliveredLast24Hours,
+			completedBackupsLast24Hours,
 			heartbeats,
 			queues
 		] = await Promise.all([
@@ -74,6 +76,15 @@ export class MessagingAdminService {
 					}
 				}
 			}),
+			this.prisma.scheduledJobRun.count({
+				where: {
+					jobType: 'DATABASE_BACKUP',
+					status: 'SUCCEEDED',
+					finishedAt: {
+						gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
+					}
+				}
+			}),
 			this.prisma.messagingHeartbeat.findMany({
 				orderBy: { lastSeenAt: 'desc' }
 			}),
@@ -96,7 +107,8 @@ export class MessagingAdminService {
 
 		const serviceHeartbeats = [
 			'outbox-publisher',
-			'integration-worker'
+			'integration-worker',
+			'maintenance-worker'
 		].map(service => {
 			const instances = heartbeats.filter(
 				item => item.service === service
@@ -118,7 +130,8 @@ export class MessagingAdminService {
 			oldestPendingAt: oldestPending?.createdAt.toISOString() || null,
 			unresolvedFailures,
 			retryingFailures,
-			deliveredLast24Hours,
+			deliveredLast24Hours:
+				deliveredLast24Hours + completedBackupsLast24Hours,
 			rabbitMqError: queues.error,
 			heartbeats: serviceHeartbeats,
 			queues: queues.queues.map(queue => ({
@@ -172,6 +185,11 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
+			const scheduledJobId = this.getScheduledJobId(
+				kind,
+				failure.eventId,
+				failure.payload
+			);
 			const mailingDelivery =
 				kind === 'mailing-email' || kind === 'mailing-telegram'
 					? this.getMailingDeliveryReference(failure.payload)
@@ -199,6 +217,9 @@ export class MessagingAdminService {
 					mailingDelivery.deliveryId,
 					mailingDelivery.campaignId
 				);
+			}
+			if (scheduledJobId) {
+				await this.reopenScheduledJob(transaction, scheduledJobId, kind);
 			}
 
 			await transaction.outboxEvent.create({
@@ -321,15 +342,87 @@ export class MessagingAdminService {
 		return where;
 	}
 
-	private normalizeIntegration(value: string): IntegrationKind {
-		if (!INTEGRATION_KINDS.includes(value as IntegrationKind)) {
+	private getScheduledJobId(
+		kind: MessagingKind,
+		eventId: string,
+		payload: Prisma.JsonValue
+	): string | null {
+		if (kind !== 'daily-summary-telegram' && kind !== 'database-backup') {
+			return null;
+		}
+		if (
+			!payload ||
+			typeof payload !== 'object' ||
+			Array.isArray(payload) ||
+			typeof payload.jobId !== 'string' ||
+			payload.jobId !== eventId
+		) {
+			throw new BadRequestException(
+				'Некорректное событие фонового задания'
+			);
+		}
+		return payload.jobId;
+	}
+
+	private async reopenScheduledJob(
+		transaction: Prisma.TransactionClient,
+		jobId: string,
+		kind: MessagingKind
+	): Promise<void> {
+		const jobType =
+			kind === 'daily-summary-telegram'
+				? SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY
+				: SCHEDULED_JOB_TYPES.DATABASE_BACKUP;
+		const reopened = await transaction.scheduledJobRun.updateMany({
+			where: {
+				id: jobId,
+				jobType,
+				status: 'FAILED'
+			},
+			data: {
+				status: 'QUEUED',
+				maxAttempts: { increment: 4 },
+				availableAt: new Date(),
+				finishedAt: null,
+				result: Prisma.DbNull,
+				lastError: null,
+				leaseOwner: null,
+				leaseToken: null,
+				leaseExpiresAt: null
+			}
+		});
+		if (reopened.count !== 1) {
+			throw new ConflictException(
+				'Фоновое задание уже перезапущено или обработано'
+			);
+		}
+	}
+
+	private normalizeIntegration(value: string): MessagingKind {
+		if (!MESSAGING_KINDS.includes(value as MessagingKind)) {
 			throw new BadRequestException('Некорректный тип интеграции');
 		}
-		return value as IntegrationKind;
+		return value as MessagingKind;
 	}
 
 	private serializeFailure(item: IntegrationDeliveryFailure) {
 		const payload = item.payload as unknown as LeadIntegrationEventPayload;
+		const jobPayload = item.payload as {
+			jobId?: string;
+			jobType?: string;
+		};
+		const scheduledJobEntity =
+			jobPayload.jobType === 'DAILY_TELEGRAM_SUMMARY'
+				? {
+						id: jobPayload.jobId || item.eventId,
+						name: 'Ежедневная Telegram-сводка'
+					}
+				: jobPayload.jobType === 'DATABASE_BACKUP'
+					? {
+							id: jobPayload.jobId || item.eventId,
+							name: 'Backup PostgreSQL'
+						}
+					: null;
 		return {
 			id: item.id,
 			eventId: item.eventId,
@@ -340,7 +433,7 @@ export class MessagingAdminService {
 			retryingAt: item.retryingAt?.toISOString() || null,
 			resolvedAt: item.resolvedAt?.toISOString() || null,
 			source: payload.source,
-			entity: payload.entity,
+			entity: scheduledJobEntity || payload.entity,
 			lead: {
 				id: payload.lead?.id || null,
 				contact: payload.lead?.contact || null,

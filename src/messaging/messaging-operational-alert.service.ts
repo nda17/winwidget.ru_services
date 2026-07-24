@@ -44,8 +44,11 @@ export class MessagingOperationalAlertService
 				failedOutbox,
 				stalePendingOutbox,
 				unresolvedDlq,
+				failedScheduledJobs,
+				staleScheduledJobs,
 				publisher,
-				worker
+				worker,
+				maintenanceWorker
 			] = await Promise.all([
 				this.prisma.outboxEvent.count({
 					where: { status: OutboxEventStatus.FAILED }
@@ -61,6 +64,23 @@ export class MessagingOperationalAlertService
 				this.prisma.integrationDeliveryFailure.count({
 					where: { resolvedAt: null }
 				}),
+				this.prisma.scheduledJobRun.count({
+					where: { status: 'FAILED' }
+				}),
+				this.prisma.scheduledJobRun.count({
+					where: {
+						OR: [
+							{
+								status: 'QUEUED',
+								availableAt: { lt: oldPendingBefore }
+							},
+							{
+								status: 'PROCESSING',
+								leaseExpiresAt: { lt: new Date() }
+							}
+						]
+					}
+				}),
 				this.prisma.messagingHeartbeat.count({
 					where: {
 						service: 'outbox-publisher',
@@ -72,26 +92,38 @@ export class MessagingOperationalAlertService
 						service: 'integration-worker',
 						lastSeenAt: { gte: staleBefore }
 					}
+				}),
+				this.prisma.messagingHeartbeat.count({
+					where: {
+						service: 'maintenance-worker',
+						lastSeenAt: { gte: staleBefore }
+					}
 				})
 			]);
 			const signature = [
 				failedOutbox,
 				stalePendingOutbox,
 				unresolvedDlq,
+				failedScheduledJobs,
+				staleScheduledJobs,
 				publisher > 0 ? 1 : 0,
-				worker > 0 ? 1 : 0
+				worker > 0 ? 1 : 0,
+				maintenanceWorker > 0 ? 1 : 0
 			].join(':');
 			const hasProblem =
 				failedOutbox > 0 ||
 				stalePendingOutbox > 0 ||
 				unresolvedDlq > 0 ||
+				failedScheduledJobs > 0 ||
+				staleScheduledJobs > 0 ||
 				publisher === 0 ||
-				worker === 0;
+				worker === 0 ||
+				maintenanceWorker === 0;
 
 			if (!hasProblem) {
 				if (this.lastProblemSignature) {
 					await this.telegramBot.sendMessagingOperationalAlert(
-						'<b>Очереди интеграций восстановлены</b>\nOutbox publisher и integration worker работают, необработанных ошибок нет.'
+						'<b>Очереди интеграций восстановлены</b>\nOutbox publisher, integration worker и maintenance worker работают, необработанных ошибок нет.'
 					);
 				}
 				this.lastProblemSignature = null;
@@ -105,8 +137,11 @@ export class MessagingOperationalAlertService
 					`Outbox FAILED: <b>${failedOutbox}</b>`,
 					`Outbox PENDING/PUBLISHING старше 15 минут: <b>${stalePendingOutbox}</b>`,
 					`DLQ не обработано: <b>${unresolvedDlq}</b>`,
+					`Scheduled jobs FAILED: <b>${failedScheduledJobs}</b>`,
+					`Scheduled jobs с задержкой/просроченным lease: <b>${staleScheduledJobs}</b>`,
 					`Outbox publisher: <b>${publisher > 0 ? 'работает' : 'нет heartbeat'}</b>`,
-					`Integration worker: <b>${worker > 0 ? 'работает' : 'нет heartbeat'}</b>`
+					`Integration worker: <b>${worker > 0 ? 'работает' : 'нет heartbeat'}</b>`,
+					`Maintenance worker: <b>${maintenanceWorker > 0 ? 'работает' : 'нет heartbeat'}</b>`
 				].join('\n')
 			);
 			this.lastProblemSignature = signature;

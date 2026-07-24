@@ -92,6 +92,20 @@ get_env_value() {
 	' "$ENV_FILE"
 }
 
+require_env_list_item() {
+	local key="$1"
+	local item="$2"
+	local value
+
+	value="$(get_env_value "$key" || true)"
+	case ",$value," in
+		*",$item,"*) return 0 ;;
+	esac
+
+	echo "$key in $ENV_FILE must include $item" >&2
+	exit 1
+}
+
 mode="$(get_env_value "MODE" || true)"
 mode="${mode:-production}"
 mode="${mode,,}"
@@ -102,6 +116,14 @@ case "$mode" in
 		require_env_key "RABBITMQ_URL"
 		require_env_key "RABBITMQ_USER"
 		require_env_key "RABBITMQ_PASSWORD"
+		require_env_key "MAINTENANCE_WORKER_PREFETCH"
+		require_env_key "SCHEDULED_JOB_POLL_INTERVAL_MS"
+		require_env_key "SCHEDULED_JOB_LEASE_MS"
+		require_env_key "SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS"
+		require_env_key "INTEGRATION_WORKER_KINDS"
+		require_env_key "MAINTENANCE_WORKER_KINDS"
+		require_env_list_item "INTEGRATION_WORKER_KINDS" "daily-summary-telegram"
+		require_env_list_item "MAINTENANCE_WORKER_KINDS" "database-backup"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
 		;;
@@ -120,14 +142,15 @@ docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build api
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile migration run --rm migrate
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d rabbitmq
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
-	api outbox-publisher integration-worker
+	api outbox-publisher integration-worker maintenance-worker
+messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
 
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
-		ps api outbox-publisher integration-worker rabbitmq || true
+		ps api outbox-publisher integration-worker maintenance-worker rabbitmq || true
 	docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
-		logs --tail=100 api || true
+		logs --tail=100 api outbox-publisher integration-worker maintenance-worker rabbitmq || true
 	echo "Processes listening on port 4200:"
 	ss -ltnp 'sport = :4200' || true
 }
@@ -135,7 +158,7 @@ show_api_diagnostics() {
 ensure_required_services_running() {
 	local service
 	local container_id
-	for service in rabbitmq api outbox-publisher integration-worker; do
+	for service in rabbitmq api outbox-publisher integration-worker maintenance-worker; do
 		container_id="$(
 			docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
 				ps --status running -q "$service"
@@ -164,6 +187,130 @@ check_deployment_revision() {
 		echo "Unexpected deployment health response from $url: $response"
 	fi
 	return 1
+}
+
+check_messaging_readiness() {
+	docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T \
+		-e "MESSAGING_READINESS_STARTED_AT=$messaging_readiness_started_at" \
+		api node - <<'NODE'
+const { PrismaClient } = require('@prisma/client');
+
+class ReadinessError extends Error {}
+
+const requiredServices = [
+	'outbox-publisher',
+	'integration-worker',
+	'maintenance-worker'
+];
+const requiredQueues = [
+	'winwidget.report.daily-summary.telegram',
+	'winwidget.report.daily-summary.telegram.dead-letter',
+	'winwidget.maintenance.database-backup',
+	'winwidget.maintenance.database-backup.dead-letter'
+];
+
+const run = async () => {
+	const mode = (process.env.MODE || 'production').trim().toLowerCase();
+	const databaseUrl =
+		mode === 'production'
+			? process.env.DATABASE_URL_PRODUCTION
+			: process.env.DATABASE_URL_DEVELOPMENT;
+	if (!databaseUrl) {
+		throw new ReadinessError('Messaging readiness database URL is missing');
+	}
+
+	const startedAt = Date.parse(
+		process.env.MESSAGING_READINESS_STARTED_AT || ''
+	);
+	if (!Number.isFinite(startedAt)) {
+		throw new ReadinessError('Messaging readiness timestamp is invalid');
+	}
+	const freshAfter = new Date(Math.max(startedAt, Date.now() - 30_000));
+	const prisma = new PrismaClient({
+		datasources: { db: { url: databaseUrl } }
+	});
+
+	try {
+		const heartbeats = await prisma.messagingHeartbeat.findMany({
+			where: {
+				service: { in: requiredServices },
+				lastSeenAt: { gte: freshAfter }
+			},
+			select: { service: true }
+		});
+		const activeServices = new Set(heartbeats.map(item => item.service));
+		const missingServices = requiredServices.filter(
+			service => !activeServices.has(service)
+		);
+		if (missingServices.length) {
+			throw new ReadinessError(
+				`Missing fresh heartbeat: ${missingServices.join(', ')}`
+			);
+		}
+
+		const baseUrl = (
+			process.env.RABBITMQ_MANAGEMENT_URL || 'http://127.0.0.1:15672'
+		).replace(/\/$/, '');
+		const user = process.env.RABBITMQ_USER;
+		const password = process.env.RABBITMQ_PASSWORD;
+		const vhost = process.env.RABBITMQ_VHOST || 'winwidget';
+		if (!user || !password) {
+			throw new ReadinessError(
+				'RabbitMQ management credentials are missing'
+			);
+		}
+		const authorization = `Basic ${Buffer.from(`${user}:${password}`).toString(
+			'base64'
+		)}`;
+
+		for (const queue of requiredQueues) {
+			let response;
+			try {
+				response = await fetch(
+					`${baseUrl}/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(queue)}`,
+					{
+						headers: { Authorization: authorization },
+						signal: AbortSignal.timeout(4000)
+					}
+				);
+			} catch {
+				throw new ReadinessError(
+					`RabbitMQ queue check failed: ${queue}`
+				);
+			}
+			if (!response.ok) {
+				await response.body?.cancel();
+				throw new ReadinessError(
+					`RabbitMQ queue ${queue} returned HTTP ${response.status}`
+				);
+			}
+			const state = await response.json();
+			if (!Number.isInteger(state.consumers) || state.consumers < 1) {
+				throw new ReadinessError(
+					`RabbitMQ queue has no consumers: ${queue}`
+				);
+			}
+		}
+	} finally {
+		await prisma.$disconnect();
+	}
+};
+
+run()
+	.then(() => {
+		process.stdout.write(
+			'Messaging heartbeats and RabbitMQ consumers are ready\n'
+		);
+	})
+	.catch(error => {
+		const message =
+			error instanceof ReadinessError
+				? error.message
+				: 'Messaging readiness could not query PostgreSQL or RabbitMQ';
+		process.stderr.write(`${message}\n`);
+		process.exitCode = 1;
+	});
+NODE
 }
 
 ensure_required_services_running
@@ -210,9 +357,23 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	sleep "$HEALTHCHECK_INTERVAL"
 done
 
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if check_messaging_readiness; then
+		break
+	fi
+
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo "Messaging readiness check failed"
+		show_api_diagnostics
+		exit 1
+	fi
+
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
 ensure_required_services_running
 
-for service in api outbox-publisher integration-worker; do
+for service in api outbox-publisher integration-worker maintenance-worker; do
 	container_id="$(
 		docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -q "$service"
 	)"
@@ -240,4 +401,4 @@ done
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps \
-	api outbox-publisher integration-worker rabbitmq
+	api outbox-publisher integration-worker maintenance-worker rabbitmq
