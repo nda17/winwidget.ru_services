@@ -22,8 +22,14 @@ import {
 	ChannelWrapper,
 	connect
 } from 'amqp-connection-manager';
+import type { SetupFunc } from 'amqp-connection-manager';
 import type { ConfirmChannel, ConsumeMessage, Options } from 'amqplib';
 import { randomUUID } from 'node:crypto';
+
+interface ConsumerRegistration {
+	setup: SetupFunc;
+	consumerTag: string | null;
+}
 
 @Injectable()
 export class RabbitMqService
@@ -35,6 +41,8 @@ export class RabbitMqService
 		ConfirmChannel
 	>();
 	private readonly returnedPublications = new Map<string, Error | null>();
+	private readonly consumerRegistrations = new Set<ConsumerRegistration>();
+	private consumersStopping = false;
 	private connection!: AmqpConnectionManager;
 	private channel!: ChannelWrapper;
 
@@ -208,26 +216,75 @@ export class RabbitMqService
 		handler: (message: ConsumeMessage) => Promise<void>,
 		prefetch: number
 	): Promise<void> {
-		await this.channel.addSetup(async channel => {
-			const deliveryChannel = channel as ConfirmChannel;
-			await deliveryChannel.prefetch(prefetch, false);
-			await deliveryChannel.consume(
-				queue,
-				message => {
-					if (!message) return;
-					this.deliveryChannels.set(message, deliveryChannel);
-					void handler(message).catch(error => {
-						this.logger.error(
-							`Unhandled ${consumerName} consumer error: ${
-								error instanceof Error ? error.stack : String(error)
-							}`
-						);
-						this.nack(message, true);
-					});
-				},
-				{ noAck: false }
+		if (this.consumersStopping) {
+			throw new Error('RabbitMQ consumers are stopping');
+		}
+
+		const registration: ConsumerRegistration = {
+			consumerTag: null,
+			setup: async channel => {
+				registration.consumerTag = null;
+				const deliveryChannel = channel as ConfirmChannel;
+				await deliveryChannel.prefetch(prefetch, false);
+				const consumer = await deliveryChannel.consume(
+					queue,
+					message => {
+						if (!message) return;
+						this.deliveryChannels.set(message, deliveryChannel);
+						if (this.consumersStopping) {
+							return;
+						}
+						void handler(message).catch(error => {
+							this.logger.error(
+								`Unhandled ${consumerName} consumer error: ${
+									error instanceof Error ? error.stack : String(error)
+								}`
+							);
+							this.nack(message, true);
+						});
+					},
+					{ noAck: false }
+				);
+				registration.consumerTag = consumer.consumerTag;
+			}
+		};
+		this.consumerRegistrations.add(registration);
+		try {
+			await this.channel.addSetup(registration.setup);
+		} catch (error) {
+			this.consumerRegistrations.delete(registration);
+			await this.channel
+				.removeSetup(registration.setup)
+				.catch(() => undefined);
+			throw error;
+		}
+	}
+
+	async cancelConsumers(): Promise<void> {
+		this.consumersStopping = true;
+		const registrations = [...this.consumerRegistrations];
+		this.consumerRegistrations.clear();
+		const results = await Promise.allSettled(
+			registrations.map(registration =>
+				this.channel.removeSetup(registration.setup, async channel => {
+					const consumerTag = registration.consumerTag;
+					registration.consumerTag = null;
+					if (consumerTag) {
+						await (channel as ConfirmChannel).cancel(consumerTag);
+					}
+				})
+			)
+		);
+		const failures = results.filter(
+			(result): result is PromiseRejectedResult =>
+				result.status === 'rejected'
+		);
+		if (failures.length) {
+			throw new AggregateError(
+				failures.map(result => result.reason),
+				`Failed to cancel ${failures.length} RabbitMQ consumer(s)`
 			);
-		});
+		}
 	}
 
 	ack(message: ConsumeMessage): void {

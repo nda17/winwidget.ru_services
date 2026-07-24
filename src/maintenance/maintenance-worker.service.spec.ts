@@ -73,6 +73,7 @@ describe('MaintenanceWorkerService', () => {
 		const rabbitMq = {
 			consume: jest.fn().mockResolvedValue(undefined),
 			consumeDeadLetter: jest.fn().mockResolvedValue(undefined),
+			cancelConsumers: jest.fn().mockResolvedValue(undefined),
 			ack: jest.fn(),
 			nack: jest.fn(),
 			publishRetry: jest.fn().mockResolvedValue(undefined),
@@ -89,6 +90,7 @@ describe('MaintenanceWorkerService', () => {
 				...job,
 				status: ScheduledJobRunStatus.SUCCEEDED
 			}),
+			requeueInterrupted: jest.fn(),
 			releaseOrFail: jest.fn()
 		} as unknown as ScheduledJobsService;
 		const scheduledTasks = {
@@ -441,7 +443,7 @@ describe('MaintenanceWorkerService', () => {
 	});
 
 	it('waits for active handlers before shutdown', async () => {
-		const { service } = createService();
+		const { service, rabbitMq } = createService();
 		let resolveHandler!: () => void;
 		const handler = (service as any).trackHandler(
 			() =>
@@ -450,11 +452,14 @@ describe('MaintenanceWorkerService', () => {
 				})
 		);
 		let shutdownFinished = false;
-		const shutdown = service.onApplicationShutdown().then(() => {
-			shutdownFinished = true;
-		});
+		const shutdown = service
+			.beforeApplicationShutdown('SIGTERM')
+			.then(() => {
+				shutdownFinished = true;
+			});
 
 		await Promise.resolve();
+		expect(rabbitMq.cancelConsumers).toHaveBeenCalledTimes(1);
 		expect(shutdownFinished).toBe(false);
 
 		resolveHandler();
@@ -462,5 +467,251 @@ describe('MaintenanceWorkerService', () => {
 		await shutdown;
 
 		expect(shutdownFinished).toBe(true);
+	});
+
+	it('aborts and atomically requeues an active backup during shutdown', async () => {
+		const { service, rabbitMq, scheduledJobs, backup } = createService();
+		const shutdownOrder: string[] = [];
+		(rabbitMq.cancelConsumers as jest.Mock).mockImplementation(() => {
+			shutdownOrder.push('cancel-consumers');
+			return Promise.resolve();
+		});
+		let backupStarted!: () => void;
+		const started = new Promise<void>(resolve => {
+			backupStarted = resolve;
+		});
+		(backup.createAndSend as jest.Mock).mockImplementation(
+			(_jobId, _input, signal: AbortSignal) =>
+				new Promise((_resolve, reject) => {
+					backupStarted();
+					signal.addEventListener(
+						'abort',
+						() => {
+							shutdownOrder.push('abort-backup');
+							reject(signal.reason);
+						},
+						{ once: true }
+					);
+				})
+		);
+		(scheduledJobs.requeueInterrupted as jest.Mock).mockResolvedValue({
+			state: 'requeued',
+			job: createJob({
+				status: ScheduledJobRunStatus.QUEUED,
+				attempts: 0,
+				leaseOwner: null,
+				leaseToken: null,
+				leaseExpiresAt: null
+			})
+		});
+		const handler = (service as any).trackHandler(() =>
+			(service as any).handle('database-backup', createMessage())
+		);
+		await started;
+
+		await service.beforeApplicationShutdown('SIGTERM');
+		await handler;
+
+		expect(rabbitMq.cancelConsumers).toHaveBeenCalledTimes(1);
+		expect(shutdownOrder).toEqual(['cancel-consumers', 'abort-backup']);
+		expect(scheduledJobs.requeueInterrupted).toHaveBeenCalledWith(
+			jobId,
+			leaseToken,
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(scheduledJobs.releaseOrFail).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('does not claim a new backup after shutdown starts', async () => {
+		const { service, rabbitMq, scheduledJobs, backup } = createService();
+
+		await service.beforeApplicationShutdown('SIGTERM');
+		await (service as any).handle('database-backup', createMessage());
+
+		expect(scheduledJobs.claim).not.toHaveBeenCalled();
+		expect(backup.createAndSend).not.toHaveBeenCalled();
+		expect(rabbitMq.nack).toHaveBeenCalledWith(expect.any(Object), true);
+	});
+
+	it('does not classify an existing backup error as a shutdown interruption', async () => {
+		const { service } = createService();
+		await service.beforeApplicationShutdown('SIGTERM');
+		const lease = (service as any).startLeaseRenewal(jobId, leaseToken);
+		const backupError = new Error('pg_dump failed');
+
+		expect(lease.signal.aborted).toBe(true);
+		expect(lease.wasInterruptedByShutdown(lease.signal.reason)).toBe(true);
+		expect(lease.wasInterruptedByShutdown(backupError)).toBe(false);
+		await lease.stop();
+	});
+
+	it('does not overwrite an earlier lease abort with a shutdown reason', async () => {
+		jest.useFakeTimers();
+		const { service, scheduledJobs } = createService({
+			SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: '5000'
+		});
+		(scheduledJobs.renewLease as jest.Mock).mockResolvedValue(null);
+		const lease = (service as any).startLeaseRenewal(jobId, leaseToken);
+		(service as any).activeLeases.set(jobId, lease);
+
+		try {
+			await jest.advanceTimersByTimeAsync(5_000);
+			const leaseError = lease.signal.reason;
+			expect(lease.signal.aborted).toBe(true);
+
+			await service.beforeApplicationShutdown('SIGTERM');
+
+			expect(lease.signal.reason).toBe(leaseError);
+			expect(lease.wasInterruptedByShutdown(leaseError)).toBe(false);
+		} finally {
+			await lease.stop();
+			jest.useRealTimers();
+		}
+	});
+
+	it('does not forgive a real backup error that races with shutdown', async () => {
+		const { service, scheduledJobs, backup } = createService();
+		const backupError = new Error('pg_dump failed');
+		let backupStarted!: () => void;
+		let rejectBackup!: (error: Error) => void;
+		const started = new Promise<void>(resolve => {
+			backupStarted = resolve;
+		});
+		(backup.createAndSend as jest.Mock).mockImplementation(
+			() =>
+				new Promise((_resolve, reject) => {
+					rejectBackup = reject;
+					backupStarted();
+				})
+		);
+		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
+			state: 'retry_scheduled',
+			job: createJob({
+				status: ScheduledJobRunStatus.QUEUED,
+				leaseOwner: null,
+				leaseToken: null,
+				leaseExpiresAt: null,
+				lastError: backupError.message
+			})
+		});
+		const handler = (service as any).trackHandler(() =>
+			(service as any).handle('database-backup', createMessage())
+		);
+		await started;
+
+		const shutdown = service.beforeApplicationShutdown('SIGTERM');
+		rejectBackup(backupError);
+		await handler;
+		await shutdown;
+
+		expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
+			jobId,
+			leaseToken,
+			backupError,
+			30_000,
+			expect.any(Object)
+		);
+		expect(scheduledJobs.requeueInterrupted).not.toHaveBeenCalled();
+	});
+
+	it('requeues a job claimed while shutdown is already in progress', async () => {
+		const { service, scheduledJobs, backup } = createService();
+		let resolveClaim!: (value: unknown) => void;
+		(scheduledJobs.claim as jest.Mock).mockReturnValue(
+			new Promise(resolve => {
+				resolveClaim = resolve;
+			})
+		);
+		(backup.createAndSend as jest.Mock).mockImplementation(
+			(_jobId, _input, signal: AbortSignal) => {
+				expect(signal.aborted).toBe(true);
+				return Promise.reject(signal.reason);
+			}
+		);
+		(scheduledJobs.requeueInterrupted as jest.Mock).mockResolvedValue({
+			state: 'requeued',
+			job: createJob({
+				status: ScheduledJobRunStatus.QUEUED,
+				attempts: 0,
+				leaseOwner: null,
+				leaseToken: null,
+				leaseExpiresAt: null
+			})
+		});
+		const handler = (service as any).trackHandler(() =>
+			(service as any).handle('database-backup', createMessage())
+		);
+		await Promise.resolve();
+
+		const shutdown = service.beforeApplicationShutdown('SIGTERM');
+		resolveClaim({
+			state: 'claimed',
+			job: createJob(),
+			leaseToken
+		});
+		await handler;
+		await shutdown;
+
+		expect(backup.createAndSend).toHaveBeenCalledWith(
+			jobId,
+			expect.any(Object),
+			expect.objectContaining({ aborted: true })
+		);
+		expect(scheduledJobs.requeueInterrupted).toHaveBeenCalledTimes(1);
+		expect(scheduledJobs.releaseOrFail).not.toHaveBeenCalled();
+	});
+
+	it('acknowledges a shutdown delivery after its lease ownership changed', async () => {
+		const { service, rabbitMq, scheduledJobs } = createService();
+		(scheduledJobs.requeueInterrupted as jest.Mock).mockResolvedValue({
+			state: 'lost'
+		});
+		const message = createMessage();
+
+		await (service as any).requeueInterruptedJob(
+			message,
+			createJob(),
+			leaseToken
+		);
+
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('requeues the Rabbit delivery when shutdown persistence fails', async () => {
+		const { service, rabbitMq, scheduledJobs } = createService();
+		(scheduledJobs.requeueInterrupted as jest.Mock).mockRejectedValue(
+			new Error('PostgreSQL unavailable')
+		);
+		const message = createMessage();
+
+		await (service as any).requeueInterruptedJob(
+			message,
+			createJob(),
+			leaseToken
+		);
+
+		expect(rabbitMq.ack).not.toHaveBeenCalled();
+		expect(rabbitMq.nack).toHaveBeenCalledWith(message, true);
+	});
+
+	it('bounds shutdown when consumer cancellation does not settle', async () => {
+		jest.useFakeTimers();
+		const { service, rabbitMq } = createService();
+		(rabbitMq.cancelConsumers as jest.Mock).mockReturnValue(
+			new Promise<void>(() => undefined)
+		);
+
+		try {
+			const shutdown = service.beforeApplicationShutdown('SIGTERM');
+			await jest.advanceTimersByTimeAsync(20_000);
+			await expect(shutdown).resolves.toBeUndefined();
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 });

@@ -168,6 +168,81 @@ describe('ScheduledJobsService', () => {
 		});
 	});
 
+	it('atomically requeues an interrupted job without consuming an attempt', async () => {
+		const jobId = randomUUID();
+		const leaseToken = randomUUID();
+		const job = createJob({
+			id: jobId,
+			status: ScheduledJobRunStatus.QUEUED,
+			attempts: 0,
+			availableAt: now
+		});
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([{ availableAt: now }]),
+			scheduledJobRun: {
+				findUniqueOrThrow: jest.fn().mockResolvedValue(job)
+			},
+			outboxEvent: {
+				create: jest.fn().mockResolvedValue({})
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(callback => callback(transaction))
+		} as unknown as PrismaService;
+		const service = new ScheduledJobsService(prisma);
+
+		const result = await service.requeueInterrupted(
+			jobId,
+			leaseToken,
+			event
+		);
+
+		expect(result.state).toBe('requeued');
+		const requeueSql = transaction.$queryRaw.mock.calls[0][0] as {
+			strings: string[];
+			values: unknown[];
+		};
+		expect(requeueSql.strings.join('?')).toContain(
+			'GREATEST("attempts" - 1, 0)'
+		);
+		expect(requeueSql.strings.join('?')).toContain(
+			'AND "lease_token" = ?::uuid'
+		);
+		expect(requeueSql.values).toContain(leaseToken);
+		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				messageId: jobId,
+				availableAt: now
+			})
+		});
+	});
+
+	it('does not requeue an interrupted job after lease ownership changed', async () => {
+		const jobId = randomUUID();
+		const leaseToken = randomUUID();
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([]),
+			scheduledJobRun: {
+				findUniqueOrThrow: jest.fn()
+			},
+			outboxEvent: {
+				create: jest.fn()
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(callback => callback(transaction))
+		} as unknown as PrismaService;
+		const service = new ScheduledJobsService(prisma);
+
+		await expect(
+			service.requeueInterrupted(jobId, leaseToken, event)
+		).resolves.toEqual({ state: 'lost' });
+		expect(
+			transaction.scheduledJobRun.findUniqueOrThrow
+		).not.toHaveBeenCalled();
+		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
+	});
+
 	it('marks an exhausted job failed without creating another retry event', async () => {
 		const jobId = randomUUID();
 		const leaseToken = randomUUID();

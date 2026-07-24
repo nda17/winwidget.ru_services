@@ -149,4 +149,55 @@ describe('DatabaseBackupService', () => {
 			}
 		}
 	});
+
+	it('escalates an aborted database command from SIGTERM to SIGKILL', async () => {
+		jest.useFakeTimers();
+		const service = createService({});
+		const child = new EventEmitter() as EventEmitter & {
+			stdout: PassThrough;
+			stderr: PassThrough;
+			kill: jest.Mock;
+		};
+		child.stdout = new PassThrough();
+		child.stderr = new PassThrough();
+		child.kill = jest.fn(signal => {
+			if (signal === 'SIGKILL') {
+				child.emit('close', null, signal);
+			}
+			return true;
+		});
+		(spawn as unknown as jest.Mock).mockReturnValue(child);
+		const controller = new AbortController();
+		const shutdownError = new Error('Maintenance worker is shutting down');
+
+		try {
+			const execution = (service as any).runCommand(
+				'pg_restore',
+				['--list', 'backup.dump'],
+				null,
+				controller.signal
+			);
+			const rejection = expect(execution).rejects.toBe(shutdownError);
+			controller.abort(shutdownError);
+
+			expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+			await jest.advanceTimersByTimeAsync(5_000);
+			await rejection;
+			expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	it('does not spawn a database command for a pre-aborted signal', async () => {
+		const service = createService({});
+		const controller = new AbortController();
+		const shutdownError = new Error('Maintenance worker is shutting down');
+		controller.abort(shutdownError);
+
+		await expect(
+			(service as any).runCommand('pg_dump', [], null, controller.signal)
+		).rejects.toBe(shutdownError);
+		expect(spawn).not.toHaveBeenCalled();
+	});
 });

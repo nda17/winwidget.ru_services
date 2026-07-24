@@ -4,6 +4,7 @@ import {
 	RecoverExpiredScheduledJobsResult,
 	ScheduledJobClaimResult,
 	ScheduledJobFailureResult,
+	ScheduledJobInterruptionResult,
 	ScheduledJobOutboxEvent,
 	ScheduledJobRunView,
 	serializeScheduledJobRun,
@@ -425,6 +426,53 @@ export class ScheduledJobsService {
 			);
 			return {
 				state: 'retry_scheduled',
+				job: serializeScheduledJobRun(job)
+			};
+		});
+	}
+
+	async requeueInterrupted(
+		id: string,
+		leaseToken: string,
+		event: ScheduledJobOutboxEvent
+	): Promise<ScheduledJobInterruptionResult> {
+		this.validateUuid(id, 'job id');
+		this.validateUuid(leaseToken, 'lease token');
+		this.validateEvent(event);
+
+		return this.prisma.$transaction(async transaction => {
+			const requeued = await transaction.$queryRaw<RetryUpdateRow[]>(
+				Prisma.sql`
+					UPDATE "scheduled_job_runs"
+					SET
+						"status" = 'QUEUED'::"ScheduledJobRunStatus",
+						"attempts" = GREATEST("attempts" - 1, 0),
+						"available_at" = NOW(),
+						"finished_at" = NULL,
+						"last_error" = NULL,
+						"lease_owner" = NULL,
+						"lease_token" = NULL,
+						"lease_expires_at" = NULL,
+						"updated_at" = NOW()
+					WHERE "id" = ${id}::uuid
+						AND "status" = 'PROCESSING'::"ScheduledJobRunStatus"
+						AND "lease_token" = ${leaseToken}::uuid
+					RETURNING "available_at" AS "availableAt"
+				`
+			);
+			if (!requeued.length) return { state: 'lost' };
+
+			const job = await transaction.scheduledJobRun.findUniqueOrThrow({
+				where: { id }
+			});
+			await this.createOutboxEvent(
+				transaction,
+				job,
+				event,
+				requeued[0].availableAt
+			);
+			return {
+				state: 'requeued',
 				job: serializeScheduledJobRun(job)
 			};
 		});

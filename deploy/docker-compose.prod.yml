@@ -146,6 +146,7 @@ services:
       rabbitmq:
         condition: service_healthy
     command: ['node', 'dist/src/maintenance-worker-main.js']
+    stop_grace_period: 30s
     restart: unless-stopped
 
   migrate:

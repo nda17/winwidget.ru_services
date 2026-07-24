@@ -20,9 +20,9 @@ import {
 	ScheduledJobRunView
 } from '@/scheduled-jobs/scheduled-jobs.types';
 import {
+	BeforeApplicationShutdown,
 	Injectable,
 	Logger,
-	OnApplicationShutdown,
 	OnModuleInit
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -33,18 +33,41 @@ import { randomUUID } from 'node:crypto';
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 20_000;
 
 interface ScheduledJobStatusRow {
 	status: ScheduledJobRunStatus;
 }
 
+interface BackupLease {
+	signal: AbortSignal;
+	stop: () => Promise<void>;
+	interruptForShutdown: (reason: Error) => void;
+	wasInterruptedByShutdown: (error: unknown) => boolean;
+}
+
+class MaintenanceWorkerShutdownError extends Error {
+	constructor(signal?: string) {
+		super(
+			`Maintenance worker is shutting down${
+				signal ? ` after ${signal}` : ''
+			}`
+		);
+		this.name = MaintenanceWorkerShutdownError.name;
+	}
+}
+
 @Injectable()
 export class MaintenanceWorkerService
-	implements OnModuleInit, OnApplicationShutdown
+	implements OnModuleInit, BeforeApplicationShutdown
 {
 	private readonly logger = new Logger(MaintenanceWorkerService.name);
 	private readonly workerId = `maintenance:${hostname()}:${process.pid}:${randomUUID()}`;
 	private readonly activeHandlers = new Set<Promise<void>>();
+	private readonly activeLeases = new Map<string, BackupLease>();
+	private shuttingDown = false;
+	private shutdownReason: MaintenanceWorkerShutdownError | null = null;
+	private shutdownPromise: Promise<void> | null = null;
 
 	constructor(
 		private readonly rabbitMq: RabbitMqService,
@@ -75,8 +98,53 @@ export class MaintenanceWorkerService
 		);
 	}
 
-	async onApplicationShutdown(): Promise<void> {
-		await Promise.allSettled([...this.activeHandlers]);
+	beforeApplicationShutdown(signal?: string): Promise<void> {
+		if (!this.shutdownPromise) {
+			this.shutdownPromise = this.shutdown(signal);
+		}
+		return this.shutdownPromise;
+	}
+
+	private async shutdown(signal?: string): Promise<void> {
+		this.shuttingDown = true;
+		this.shutdownReason = new MaintenanceWorkerShutdownError(signal);
+		let consumersCancelled = true;
+		const cancelConsumers = this.rabbitMq
+			.cancelConsumers()
+			.catch(error => {
+				consumersCancelled = false;
+				this.logger.error(
+					`Failed to cancel maintenance consumers during shutdown: ${
+						error instanceof Error ? error.stack : String(error)
+					}`
+				);
+			});
+		for (const lease of this.activeLeases.values()) {
+			lease.interruptForShutdown(this.shutdownReason);
+		}
+
+		const drained = await this.waitWithin(
+			(async () => {
+				await cancelConsumers;
+				while (this.activeHandlers.size) {
+					await Promise.allSettled([...this.activeHandlers]);
+				}
+			})(),
+			SHUTDOWN_DRAIN_TIMEOUT_MS
+		);
+		if (!drained) {
+			this.logger.warn(
+				`Maintenance shutdown drain timed out after ${SHUTDOWN_DRAIN_TIMEOUT_MS}ms activeHandlers=${this.activeHandlers.size}`
+			);
+			return;
+		}
+		if (consumersCancelled) {
+			this.logger.log('Maintenance consumers stopped cleanly');
+		} else {
+			this.logger.warn(
+				'Maintenance handlers drained; RabbitMQ channel close will finish consumer shutdown'
+			);
+		}
 	}
 
 	private trackHandler(handler: () => Promise<void>): Promise<void> {
@@ -93,6 +161,11 @@ export class MaintenanceWorkerService
 		kind: MaintenanceKind,
 		message: ConsumeMessage
 	): Promise<void> {
+		if (this.shuttingDown) {
+			this.rabbitMq.nack(message, true);
+			return;
+		}
+
 		let payload: DatabaseBackupRequestedEventPayload;
 		try {
 			payload = this.parsePayload(message);
@@ -107,6 +180,7 @@ export class MaintenanceWorkerService
 		const eventId = message.properties.messageId || payload.jobId;
 		let claimedJob: ScheduledJobRunView | null = null;
 		let claimedLeaseToken: string | null = null;
+		let lease: BackupLease | null = null;
 
 		try {
 			const claim = await this.scheduledJobs.claim(
@@ -163,7 +237,8 @@ export class MaintenanceWorkerService
 			claimedLeaseToken = claim.leaseToken;
 
 			const input = this.parseJobInput(claim.job.input);
-			const lease = this.startLeaseRenewal(claim.job.id, claim.leaseToken);
+			lease = this.startLeaseRenewal(claim.job.id, claim.leaseToken);
+			this.activeLeases.set(claim.job.id, lease);
 			let result: DatabaseBackupResult | null = null;
 			try {
 				result = await this.backup.createAndSend(
@@ -220,8 +295,17 @@ export class MaintenanceWorkerService
 				message,
 				claimedJob,
 				claimedLeaseToken,
+				lease?.wasInterruptedByShutdown(error) ?? false,
 				error
 			);
+		} finally {
+			if (
+				claimedJob &&
+				lease &&
+				this.activeLeases.get(claimedJob.id) === lease
+			) {
+				this.activeLeases.delete(claimedJob.id);
+			}
 		}
 	}
 
@@ -257,9 +341,14 @@ export class MaintenanceWorkerService
 		message: ConsumeMessage,
 		job: ScheduledJobRunView | null,
 		leaseToken: string | null,
+		interruptedByShutdown: boolean,
 		error: unknown
 	): Promise<void> {
 		if (!job || !leaseToken) {
+			if (this.shuttingDown) {
+				this.rabbitMq.nack(message, true);
+				return;
+			}
 			const nextAttempt = this.getRetryAttempt(message) + 1;
 			try {
 				await this.rabbitMq.publishRetry(
@@ -285,6 +374,11 @@ export class MaintenanceWorkerService
 				);
 				this.rabbitMq.nack(message, true);
 			}
+			return;
+		}
+
+		if (interruptedByShutdown) {
+			await this.requeueInterruptedJob(message, job, leaseToken);
 			return;
 		}
 
@@ -333,6 +427,37 @@ export class MaintenanceWorkerService
 					publishError instanceof Error
 						? publishError.stack
 						: String(publishError)
+				}`
+			);
+			this.rabbitMq.nack(message, true);
+		}
+	}
+
+	private async requeueInterruptedJob(
+		message: ConsumeMessage,
+		job: ScheduledJobRunView,
+		leaseToken: string
+	): Promise<void> {
+		try {
+			const result = await this.scheduledJobs.requeueInterrupted(
+				job.id,
+				leaseToken,
+				this.scheduledTasks.getEventForType(job.jobType)
+			);
+			if (result.state === 'lost') {
+				this.logger.warn(
+					`Skipped shutdown requeue after lease ownership changed jobId=${job.id}`
+				);
+			} else {
+				this.logger.log(
+					`Database backup requeued during maintenance shutdown jobId=${job.id}`
+				);
+			}
+			this.rabbitMq.ack(message);
+		} catch (error) {
+			this.logger.error(
+				`Failed to requeue database backup during shutdown jobId=${job.id}: ${
+					error instanceof Error ? error.stack : String(error)
 				}`
 			);
 			this.rabbitMq.nack(message, true);
@@ -521,12 +646,10 @@ export class MaintenanceWorkerService
 	private startLeaseRenewal(
 		jobId: string,
 		leaseToken: string
-	): {
-		signal: AbortSignal;
-		stop: () => Promise<void>;
-	} {
+	): BackupLease {
 		const controller = new AbortController();
 		let stopped = false;
+		let interruptedByShutdown = false;
 		let renewal: Promise<void> | null = null;
 		const timer = setInterval(() => {
 			if (renewal || stopped || controller.signal.aborted) return;
@@ -552,14 +675,27 @@ export class MaintenanceWorkerService
 			})();
 		}, this.getLeaseRenewInterval());
 		timer.unref();
-		return {
+		const lease: BackupLease = {
 			signal: controller.signal,
 			stop: async () => {
 				stopped = true;
 				clearInterval(timer);
 				if (renewal) await renewal;
-			}
+			},
+			interruptForShutdown: reason => {
+				if (controller.signal.aborted) return;
+				interruptedByShutdown = true;
+				controller.abort(reason);
+			},
+			wasInterruptedByShutdown: error =>
+				interruptedByShutdown &&
+				(error === controller.signal.reason ||
+					error instanceof MaintenanceWorkerShutdownError)
 		};
+		if (this.shutdownReason) {
+			lease.interruptForShutdown(this.shutdownReason);
+		}
+		return lease;
 	}
 
 	private getEnabledKinds(): MaintenanceKind[] {
@@ -645,5 +781,23 @@ export class MaintenanceWorkerService
 		return signal.reason instanceof Error
 			? signal.reason
 			: new Error('Database backup lease was lost');
+	}
+
+	private async waitWithin(
+		promise: Promise<void>,
+		timeoutMs: number
+	): Promise<boolean> {
+		let timeout: NodeJS.Timeout | undefined;
+		try {
+			return await Promise.race([
+				promise.then(() => true),
+				new Promise<boolean>(resolve => {
+					timeout = setTimeout(() => resolve(false), timeoutMs);
+					timeout.unref();
+				})
+			]);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+		}
 	}
 }

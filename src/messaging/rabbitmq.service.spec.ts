@@ -132,4 +132,45 @@ describe('RabbitMqService topology', () => {
 		expect(deliveryChannel.ack).toHaveBeenCalledWith(message);
 		expect((service as any).deliveryChannels.has(message)).toBe(false);
 	});
+
+	it('cancels registered consumers and leaves late deliveries for channel requeue', async () => {
+		let deliveryHandler:
+			| ((message: ConsumeMessage | null) => void)
+			| undefined;
+		const deliveryChannel = {
+			prefetch: jest.fn().mockResolvedValue(undefined),
+			consume: jest
+				.fn()
+				.mockImplementation(
+					(_queue, handler: (message: ConsumeMessage | null) => void) => {
+						deliveryHandler = handler;
+						return Promise.resolve({ consumerTag: 'consumer-1' });
+					}
+				),
+			cancel: jest.fn().mockResolvedValue(undefined),
+			nack: jest.fn()
+		} as unknown as ConfirmChannel;
+		const channel = {
+			addSetup: jest.fn(async setup => setup(deliveryChannel)),
+			removeSetup: jest.fn(async (_setup, teardown) =>
+				teardown?.(deliveryChannel)
+			)
+		};
+		const handler = jest.fn().mockResolvedValue(undefined);
+		const service = new RabbitMqService({
+			get: jest.fn()
+		} as unknown as ConfigService);
+		(service as any).channel = channel;
+
+		await service.consume('database-backup', handler, 1);
+		await service.cancelConsumers();
+
+		expect(channel.removeSetup).toHaveBeenCalledTimes(1);
+		expect(deliveryChannel.cancel).toHaveBeenCalledWith('consumer-1');
+
+		const message = {} as ConsumeMessage;
+		deliveryHandler?.(message);
+		expect(handler).not.toHaveBeenCalled();
+		expect(deliveryChannel.nack).not.toHaveBeenCalled();
+	});
 });

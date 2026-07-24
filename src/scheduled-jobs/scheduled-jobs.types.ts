@@ -87,6 +87,15 @@ export type ScheduledJobFailureResult =
 			state: 'lost';
 	  };
 
+export type ScheduledJobInterruptionResult =
+	| {
+			state: 'requeued';
+			job: ScheduledJobRunView;
+	  }
+	| {
+			state: 'lost';
+	  };
+
 export interface RecoverExpiredScheduledJobsResult {
 	requeued: number;
 	failed: number;
