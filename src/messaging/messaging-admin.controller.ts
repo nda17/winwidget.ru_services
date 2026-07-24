@@ -16,7 +16,6 @@ import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('messaging/admin')
-@Auth(Role.DEV)
 export class MessagingAdminController {
 	constructor(
 		private readonly messagingAdminService: MessagingAdminService,
@@ -24,12 +23,14 @@ export class MessagingAdminController {
 	) {}
 
 	@Get('overview')
+	@Auth([Role.ADMIN, Role.DEV])
 	@HttpCode(200)
 	getOverview() {
 		return this.messagingAdminService.getOverview();
 	}
 
 	@Get('failures')
+	@Auth(Role.DEV)
 	@HttpCode(200)
 	getFailures(
 		@Query('page') page?: string,
@@ -45,6 +46,7 @@ export class MessagingAdminController {
 	}
 
 	@Post('failures/:id/retry')
+	@Auth(Role.DEV)
 	@HttpCode(200)
 	async retryFailure(
 		@Param('id', new ParseUUIDPipe()) id: string,
