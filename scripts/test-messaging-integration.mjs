@@ -283,48 +283,73 @@ try {
 
 	const unroutableEventId = randomUUID();
 	createdEventIds.push(unroutableEventId);
-	await prisma.outboxEvent.create({
-		data: {
-			id: unroutableEventId,
-			eventType: 'ci.unroutable.v1',
-			routingKey: 'ci.missing.route.v1',
-			payload: {
-				schemaVersion: 1,
-				eventType: 'ci.unroutable.v1'
+	// Keep the event contract valid while exercising RabbitMQ's real NO_ROUTE path.
+	await channel.unbindQueue(
+		'winwidget.lead-integration.webhook',
+		'winwidget.events',
+		'lead.integration.webhook.v2'
+	);
+	try {
+		await prisma.outboxEvent.create({
+			data: {
+				id: unroutableEventId,
+				eventType: 'lead.integration.requested.v2',
+				routingKey: 'lead.integration.webhook.v2',
+				payload: {
+					schemaVersion: 2,
+					eventType: 'lead.integration.requested.v2',
+					integration: 'webhook',
+					source: 'widget',
+					entity: {
+						id: 'ci-unroutable-widget',
+						name: 'CI unroutable'
+					},
+					lead: {
+						id: randomUUID(),
+						createdAt: new Date().toISOString()
+					},
+					destination: { credentialRef: randomUUID() }
+				}
 			}
-		}
-	});
-	await waitFor(
-		() =>
-			prisma.outboxEvent
-				.findUnique({
-					where: { id: unroutableEventId },
-					select: {
-						status: true,
-						attempts: true,
-						lastError: true
-					}
-				})
-				.then(
-					event =>
-						event?.status === 'PENDING' &&
-						event.attempts >= 1 &&
-						event.lastError?.includes('returned publication')
-				),
-		'unroutable Outbox retry'
-	);
-	await waitFor(
-		() =>
-			prisma.outboxEvent
-				.deleteMany({
-					where: {
-						id: unroutableEventId,
-						status: 'PENDING'
-					}
-				})
-				.then(result => result.count === 1),
-		'unroutable Outbox cleanup'
-	);
+		});
+		await waitFor(
+			() =>
+				prisma.outboxEvent
+					.findUnique({
+						where: { id: unroutableEventId },
+						select: {
+							status: true,
+							attempts: true,
+							lastError: true
+						}
+					})
+					.then(
+						event =>
+							event?.status === 'PENDING' &&
+							event.attempts >= 1 &&
+							event.lastError?.includes('returned publication')
+					),
+			'unroutable Outbox retry'
+		);
+		await waitFor(
+			() =>
+				prisma.outboxEvent
+					.deleteMany({
+						where: {
+							id: unroutableEventId,
+							status: 'PENDING'
+						}
+					})
+					.then(result => result.count === 1),
+			'unroutable Outbox cleanup'
+		);
+	} finally {
+		await channel.bindQueue(
+			'winwidget.lead-integration.webhook',
+			'winwidget.events',
+			'lead.integration.webhook.v2'
+		);
+	}
 
 	const manualRetryOutboxId = randomUUID();
 	const manualRetryEventId = randomUUID();
