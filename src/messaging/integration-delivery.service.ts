@@ -1,6 +1,11 @@
 import { EmailService } from '@/email/email.service';
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
-import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
+import { classifyIntegrationError } from '@/messaging/integration-error-classifier';
+import {
+	LeadIntegrationEventPayload,
+	ResolvedLeadIntegrationEventPayload
+} from '@/messaging/lead-integration-event';
+import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import { IntegrationKind } from '@/messaging/messaging.constants';
@@ -8,8 +13,8 @@ import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-even
 import { PrismaService } from '@/prisma.service';
 import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
-import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
+import { Injectable, Logger } from '@nestjs/common';
 import {
 	BillingPeriod,
 	MailingCampaignStatus,
@@ -29,12 +34,15 @@ const MAILING_PROCESSING_LEASE_MS = 10 * 60 * 1000;
 
 @Injectable()
 export class IntegrationDeliveryService {
+	private readonly logger = new Logger(IntegrationDeliveryService.name);
+
 	constructor(
 		private readonly emailService: EmailService,
 		private readonly safeOutboundHttpService: SafeOutboundHttpService,
-		private readonly configService: ConfigService,
 		private readonly prisma: PrismaService,
-		private readonly dailySummaryDelivery: DailySummaryDeliveryService
+		private readonly dailySummaryDelivery: DailySummaryDeliveryService,
+		private readonly leadDestination: LeadIntegrationDestinationService,
+		private readonly telegram: TelegramInfoTransportService
 	) {}
 
 	async deliver(
@@ -67,7 +75,10 @@ export class IntegrationDeliveryService {
 			return;
 		}
 
-		const leadEvent = event as LeadIntegrationEventPayload;
+		const leadEvent = await this.leadDestination.resolve(
+			eventId,
+			event as LeadIntegrationEventPayload
+		);
 		if (leadEvent.integration !== kind) {
 			throw new Error(
 				`Integration mismatch: queue=${kind}, payload=${leadEvent.integration}`
@@ -226,6 +237,7 @@ export class IntegrationDeliveryService {
 				);
 			} else {
 				await this.sendTelegramMessage(
+					'mailing-telegram',
 					delivery.recipient,
 					this.buildTelegramBroadcastMessages(
 						delivery.campaign.subject,
@@ -288,6 +300,7 @@ export class IntegrationDeliveryService {
 		const chatId = payload.destinations.telegramChatId;
 		if (!chatId) return;
 		await this.sendTelegramMessage(
+			kind,
 			chatId,
 			[
 				[
@@ -402,75 +415,40 @@ export class IntegrationDeliveryService {
 	}
 
 	private async sendTelegramMessage(
+		kind: 'mailing-telegram' | 'limit-telegram',
 		chatId: string,
 		messages: string[],
 		parseMode: 'HTML' | null = null
 	): Promise<void> {
-		const token = this.configService
-			.get<string>('TELEGRAM_INFO_BOT_TOKEN')
-			?.trim();
-		if (!token)
-			throw new Error('TELEGRAM_INFO_BOT_TOKEN is not configured');
 		for (const text of messages) {
-			const response = await fetch(
-				`https://api.telegram.org/bot${token}/sendMessage`,
-				{
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						chat_id: chatId,
-						text,
-						...(parseMode === null ? {} : { parse_mode: parseMode })
-					}),
-					signal: AbortSignal.timeout(10_000)
-				}
-			);
-			if (!response.ok) {
-				const responseBody = await response.text();
-				if (
-					this.shouldDeactivateTelegramNotificationChannel(
-						response.status,
-						responseBody
-					)
-				) {
-					await this.prisma.telegramNotificationChannel
-						.updateMany({
+			try {
+				await this.telegram.sendMessage(chatId, text, {
+					parseMode
+				});
+			} catch (error) {
+				const classification = classifyIntegrationError(kind, error);
+				if (classification.mayDisableDestination) {
+					try {
+						await this.prisma.telegramNotificationChannel.updateMany({
 							where: { chatId },
 							data: {
 								isActive: false,
 								disabledAt: new Date()
 							}
-						})
-						.catch(() => undefined);
+						});
+					} catch (updateError) {
+						this.logger.warn(
+							`Could not deactivate Telegram destination chatId=${chatId}: ${
+								updateError instanceof Error
+									? updateError.message
+									: String(updateError)
+							}`
+						);
+					}
 				}
-				throw new Error(
-					`Telegram API returned ${response.status}: ${responseBody.slice(0, 500)}`
-				);
+				throw error;
 			}
 		}
-	}
-
-	private shouldDeactivateTelegramNotificationChannel(
-		status: number,
-		responseBody: string
-	): boolean {
-		if (status === 403) return true;
-		if (status !== 400) return false;
-
-		let description: unknown;
-		try {
-			description = (JSON.parse(responseBody) as { description?: unknown })
-				.description;
-		} catch {
-			return false;
-		}
-		if (typeof description !== 'string') return false;
-
-		const normalized = description.trim().toLowerCase();
-		return (
-			normalized === 'bad request: chat not found' ||
-			normalized === 'bad request: user is deactivated'
-		);
 	}
 
 	private async sendPaymentEmail(
@@ -508,17 +486,11 @@ export class IntegrationDeliveryService {
 		});
 		const chatId = settings?.dailySummaryChatId.trim();
 		const messageThreadId = settings?.paymentsThreadId;
-		const token = this.configService
-			.get<string>('TELEGRAM_INFO_BOT_TOKEN')
-			?.trim();
 		if (!chatId)
 			throw new Error('Telegram payment chat ID is not configured');
 		if (!messageThreadId) {
 			throw new Error('Telegram Payments topic is not configured');
 		}
-		if (!token)
-			throw new Error('TELEGRAM_INFO_BOT_TOKEN is not configured');
-
 		const text = [
 			'<b>Новый успешный платёж</b>',
 			'',
@@ -533,25 +505,10 @@ export class IntegrationDeliveryService {
 			`<b>ID YooKassa:</b> <code>${this.escapeHtml(event.payment.yookassaId)}</code>`,
 			`<b>Оплачен:</b> ${this.escapeHtml(this.formatMoscowDateTime(new Date(event.payment.succeededAt)))} МСК`
 		].join('\n');
-		const response = await fetch(
-			`https://api.telegram.org/bot${token}/sendMessage`,
-			{
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					chat_id: chatId,
-					message_thread_id: messageThreadId,
-					text,
-					parse_mode: 'HTML'
-				}),
-				signal: AbortSignal.timeout(10_000)
-			}
-		);
-		if (!response.ok) {
-			throw new Error(
-				`Telegram API returned ${response.status}: ${(await response.text()).slice(0, 500)}`
-			);
-		}
+		await this.telegram.sendMessage(chatId, text, {
+			messageThreadId,
+			parseMode: 'HTML'
+		});
 	}
 
 	private getPlanLabel(plan: Plan): string {
@@ -573,7 +530,7 @@ export class IntegrationDeliveryService {
 	}
 
 	private async sendEmail(
-		event: LeadIntegrationEventPayload,
+		event: ResolvedLeadIntegrationEventPayload,
 		eventId: string
 	): Promise<void> {
 		const destination = event.destination.email;
@@ -598,7 +555,7 @@ export class IntegrationDeliveryService {
 	}
 
 	private async sendWebhook(
-		event: LeadIntegrationEventPayload,
+		event: ResolvedLeadIntegrationEventPayload,
 		eventId: string
 	): Promise<void> {
 		const destination = event.destination.webhookUrl;
@@ -623,41 +580,20 @@ export class IntegrationDeliveryService {
 	}
 
 	private async sendTelegram(
-		event: LeadIntegrationEventPayload
+		event: ResolvedLeadIntegrationEventPayload
 	): Promise<void> {
 		const chatId = event.destination.telegramChatId;
 		if (!chatId) throw new Error('Telegram chat ID is missing');
 
-		const token = this.configService.get<string>(
-			'TELEGRAM_INFO_BOT_TOKEN'
+		await this.telegram.sendMessage(
+			chatId,
+			this.buildTelegramMessage(event),
+			{ parseMode: 'HTML' }
 		);
-		if (!token)
-			throw new Error('TELEGRAM_INFO_BOT_TOKEN is not configured');
-
-		const response = await fetch(
-			`https://api.telegram.org/bot${token}/sendMessage`,
-			{
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					chat_id: chatId,
-					text: this.buildTelegramMessage(event),
-					parse_mode: 'HTML'
-				}),
-				signal: AbortSignal.timeout(10_000)
-			}
-		);
-
-		if (!response.ok) {
-			const body = await response.text();
-			throw new Error(
-				`Telegram API returned ${response.status}: ${body.slice(0, 500)}`
-			);
-		}
 	}
 
 	private async sendBitrix24(
-		event: LeadIntegrationEventPayload
+		event: ResolvedLeadIntegrationEventPayload
 	): Promise<void> {
 		const webhookUrl = event.destination.bitrix24WebhookUrl;
 		if (!webhookUrl) throw new Error('Bitrix24 webhook URL is missing');
@@ -684,7 +620,7 @@ export class IntegrationDeliveryService {
 	}
 
 	private async sendAmoCrm(
-		event: LeadIntegrationEventPayload
+		event: ResolvedLeadIntegrationEventPayload
 	): Promise<void> {
 		const domain = event.destination.amoCrmDomain;
 		const token = event.destination.amoCrmToken;
@@ -735,7 +671,7 @@ export class IntegrationDeliveryService {
 	}
 
 	private buildTelegramMessage(
-		event: LeadIntegrationEventPayload
+		event: ResolvedLeadIntegrationEventPayload
 	): string {
 		const lines = [
 			'🎯 <b>Новая заявка</b>',
@@ -774,14 +710,18 @@ export class IntegrationDeliveryService {
 		return lines.join('\n');
 	}
 
-	private buildLeadTitle(event: LeadIntegrationEventPayload): string {
+	private buildLeadTitle(
+		event: ResolvedLeadIntegrationEventPayload
+	): string {
 		const outcome = this.getOutcome(event);
 		return `Заявка с виджета «${event.entity.name}»${
 			outcome ? ` — ${outcome}` : ''
 		}`;
 	}
 
-	private buildComments(event: LeadIntegrationEventPayload): string {
+	private buildComments(
+		event: ResolvedLeadIntegrationEventPayload
+	): string {
 		const detail = this.getDetail(event);
 		return [
 			`${this.getSourceLabel(event)}: ${event.entity.name}`,
@@ -796,7 +736,9 @@ export class IntegrationDeliveryService {
 			.join('\n');
 	}
 
-	private getOutcome(event: LeadIntegrationEventPayload): string | null {
+	private getOutcome(
+		event: ResolvedLeadIntegrationEventPayload
+	): string | null {
 		return (
 			event.lead.bonus ||
 			event.lead.result ||
@@ -807,7 +749,7 @@ export class IntegrationDeliveryService {
 	}
 
 	private getDetail(
-		event: LeadIntegrationEventPayload
+		event: ResolvedLeadIntegrationEventPayload
 	): { label: string; value: string } | null {
 		if (event.lead.actionLabel && event.lead.actionValue) {
 			return {
@@ -829,8 +771,13 @@ export class IntegrationDeliveryService {
 		return null;
 	}
 
-	private getSourceLabel(event: LeadIntegrationEventPayload): string {
-		const labels: Record<LeadIntegrationEventPayload['source'], string> = {
+	private getSourceLabel(
+		event: ResolvedLeadIntegrationEventPayload
+	): string {
+		const labels: Record<
+			ResolvedLeadIntegrationEventPayload['source'],
+			string
+		> = {
 			widget: 'Колесо фортуны',
 			quiz: 'Квиз',
 			callback: 'Обратный звонок',

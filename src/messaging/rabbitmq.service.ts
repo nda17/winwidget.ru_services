@@ -2,6 +2,8 @@ import {
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
 	getManualRetryRoutingKey,
+	LEGACY_LEAD_INTEGRATION_ROUTING_KEYS,
+	LEAD_INTEGRATION_KINDS,
 	MANUAL_RETRY_EXCHANGE,
 	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
@@ -29,6 +31,18 @@ import { randomUUID } from 'node:crypto';
 interface ConsumerRegistration {
 	setup: SetupFunc;
 	consumerTag: string | null;
+}
+
+export interface DeadLetterClassificationMetadata {
+	category: string;
+	normalizedCode: string;
+	safeReason: string;
+	httpStatus?: number | null;
+	providerCode?: string | null;
+	retryable: boolean;
+	classificationVersion: number;
+	firstFailedAt?: string;
+	deliveryToken?: string;
 }
 
 @Injectable()
@@ -133,7 +147,8 @@ export class RabbitMqService
 		attempt: number,
 		eventId: string,
 		error: string,
-		eventType: string
+		eventType: string,
+		classification?: DeadLetterClassificationMetadata
 	): Promise<void> {
 		await this.publishConfirmed(
 			DEAD_LETTER_EXCHANGE,
@@ -148,7 +163,44 @@ export class RabbitMqService
 				type: eventType,
 				headers: {
 					'x-retry-attempt': attempt,
-					'x-last-error': error.slice(0, 1000)
+					'x-last-error': error.slice(0, 1000),
+					...(classification
+						? {
+								'x-error-category': classification.category,
+								'x-error-code': classification.normalizedCode.slice(
+									0,
+									255
+								),
+								'x-safe-reason': classification.safeReason.slice(0, 1000),
+								'x-error-retryable': classification.retryable,
+								'x-classification-version':
+									classification.classificationVersion,
+								...(classification.firstFailedAt
+									? {
+											'x-first-failed-at': classification.firstFailedAt
+										}
+									: {}),
+								...(classification.deliveryToken
+									? {
+											'x-delivery-token': classification.deliveryToken
+										}
+									: {}),
+								...(classification.httpStatus !== null &&
+								classification.httpStatus !== undefined
+									? {
+											'x-http-status': classification.httpStatus
+										}
+									: {}),
+								...(classification.providerCode
+									? {
+											'x-provider-code': classification.providerCode.slice(
+												0,
+												255
+											)
+										}
+									: {})
+							}
+						: {})
 				},
 				timestamp: Date.now()
 			}
@@ -386,6 +438,19 @@ export class RabbitMqService
 					: {})
 			});
 			await channel.bindQueue(queue, EVENTS_EXCHANGE, routingKey);
+			if (
+				LEAD_INTEGRATION_KINDS.includes(
+					kind as (typeof LEAD_INTEGRATION_KINDS)[number]
+				)
+			) {
+				await channel.bindQueue(
+					queue,
+					EVENTS_EXCHANGE,
+					LEGACY_LEAD_INTEGRATION_ROUTING_KEYS[
+						kind as (typeof LEAD_INTEGRATION_KINDS)[number]
+					]
+				);
+			}
 			await channel.bindQueue(
 				queue,
 				EVENTS_EXCHANGE,

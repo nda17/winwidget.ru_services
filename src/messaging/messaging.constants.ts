@@ -1,6 +1,7 @@
 export const RABBITMQ_CONNECTION = Symbol('RABBITMQ_CONNECTION');
 
-export const OUTBOX_EVENT_TYPE = 'lead.integration.requested.v1';
+export const LEGACY_OUTBOX_EVENT_TYPE = 'lead.integration.requested.v1';
+export const OUTBOX_EVENT_TYPE = 'lead.integration.requested.v2';
 export const PAYMENT_SUCCEEDED_EVENT_TYPE = 'payment.succeeded.v1';
 export const MAILING_DELIVERY_EVENT_TYPE = 'mailing.delivery.requested.v1';
 export const LIMIT_REACHED_EVENT_TYPE = 'lead.limit.reached.v1';
@@ -21,6 +22,17 @@ export const LEAD_INTEGRATION_KINDS = [
 ] as const;
 
 export type LeadIntegrationKind = (typeof LEAD_INTEGRATION_KINDS)[number];
+
+export const LEGACY_LEAD_INTEGRATION_ROUTING_KEYS: Record<
+	LeadIntegrationKind,
+	string
+> = {
+	email: 'lead.integration.email.v1',
+	webhook: 'lead.integration.webhook.v1',
+	telegram: 'lead.integration.telegram.v1',
+	bitrix24: 'lead.integration.bitrix24.v1',
+	'amo-crm': 'lead.integration.amo-crm.v1'
+};
 
 export const INTEGRATION_KINDS = [
 	...LEAD_INTEGRATION_KINDS,
@@ -47,11 +59,11 @@ export const MESSAGING_KINDS = [
 export type MessagingKind = (typeof MESSAGING_KINDS)[number];
 
 export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
-	email: 'lead.integration.email.v1',
-	webhook: 'lead.integration.webhook.v1',
-	telegram: 'lead.integration.telegram.v1',
-	bitrix24: 'lead.integration.bitrix24.v1',
-	'amo-crm': 'lead.integration.amo-crm.v1',
+	email: 'lead.integration.email.v2',
+	webhook: 'lead.integration.webhook.v2',
+	telegram: 'lead.integration.telegram.v2',
+	bitrix24: 'lead.integration.bitrix24.v2',
+	'amo-crm': 'lead.integration.amo-crm.v2',
 	'payment-email': PAYMENT_SUCCEEDED_EVENT_TYPE,
 	'payment-telegram': PAYMENT_SUCCEEDED_EVENT_TYPE,
 	'mailing-email': 'mailing.delivery.email.v1',

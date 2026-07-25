@@ -44,6 +44,7 @@ export class MessagingOperationalAlertService
 				failedOutbox,
 				stalePendingOutbox,
 				unresolvedDlq,
+				dlqByCategory,
 				failedScheduledJobs,
 				staleScheduledJobs,
 				publisher,
@@ -63,6 +64,11 @@ export class MessagingOperationalAlertService
 				}),
 				this.prisma.integrationDeliveryFailure.count({
 					where: { resolvedAt: null }
+				}),
+				this.prisma.integrationDeliveryFailure.groupBy({
+					by: ['category', 'normalizedCode'],
+					where: { resolvedAt: null },
+					_count: { _all: true }
 				}),
 				this.prisma.scheduledJobRun.count({
 					where: { status: 'FAILED' }
@@ -100,10 +106,24 @@ export class MessagingOperationalAlertService
 					}
 				})
 			]);
+			const categoryCounts: Record<string, number> = {};
+			for (const item of dlqByCategory) {
+				const key =
+					!item.category || item.normalizedCode === 'UNCLASSIFIED'
+						? 'UNCLASSIFIED'
+						: item.category;
+				categoryCounts[key] =
+					(categoryCounts[key] || 0) + item._count._all;
+			}
 			const signature = [
 				failedOutbox,
 				stalePendingOutbox,
 				unresolvedDlq,
+				categoryCounts.TRANSIENT || 0,
+				categoryCounts.RATE_LIMIT || 0,
+				categoryCounts.PERMANENT || 0,
+				categoryCounts.AUTH_CONFIGURATION || 0,
+				categoryCounts.UNCLASSIFIED || 0,
 				failedScheduledJobs,
 				staleScheduledJobs,
 				publisher > 0 ? 1 : 0,
@@ -137,6 +157,11 @@ export class MessagingOperationalAlertService
 					`Outbox FAILED: <b>${failedOutbox}</b>`,
 					`Outbox PENDING/PUBLISHING старше 15 минут: <b>${stalePendingOutbox}</b>`,
 					`DLQ не обработано: <b>${unresolvedDlq}</b>`,
+					`— временные: <b>${categoryCounts.TRANSIENT || 0}</b>`,
+					`— rate limit: <b>${categoryCounts.RATE_LIMIT || 0}</b>`,
+					`— постоянные: <b>${categoryCounts.PERMANENT || 0}</b>`,
+					`— авторизация/настройка: <b>${categoryCounts.AUTH_CONFIGURATION || 0}</b>`,
+					`— без классификации: <b>${categoryCounts.UNCLASSIFIED || 0}</b>`,
 					`Scheduled jobs FAILED: <b>${failedScheduledJobs}</b>`,
 					`Scheduled jobs с задержкой/просроченным lease: <b>${staleScheduledJobs}</b>`,
 					`Outbox publisher: <b>${publisher > 0 ? 'работает' : 'нет heartbeat'}</b>`,

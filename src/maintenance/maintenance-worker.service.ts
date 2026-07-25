@@ -39,6 +39,10 @@ interface ScheduledJobStatusRow {
 	status: ScheduledJobRunStatus;
 }
 
+interface DeliveryFailureStatusRow {
+	resolvedAt: Date | null;
+}
+
 interface BackupLease {
 	signal: AbortSignal;
 	stop: () => Promise<void>;
@@ -322,7 +326,11 @@ export class MaintenanceWorkerService
 				},
 				data: {
 					resolvedAt: new Date(),
-					retryingAt: null
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
 				}
 			})
 			.catch(error => {
@@ -491,15 +499,20 @@ export class MaintenanceWorkerService
 					: 'Database backup failed';
 		try {
 			await this.prisma.$transaction(async transaction => {
-				await transaction.$queryRaw(
+				const failures = await transaction.$queryRaw<
+					DeliveryFailureStatusRow[]
+				>(
 					Prisma.sql`
-						SELECT "id"
+						SELECT "resolved_at" AS "resolvedAt"
 						FROM "integration_delivery_failures"
 						WHERE "event_id" = ${eventId}::uuid
 							AND "integration" = ${kind}
 						FOR UPDATE
 					`
 				);
+				if (failures[0]?.resolvedAt) {
+					return;
+				}
 				const jobs = payloadJobId
 					? await transaction.$queryRaw<ScheduledJobStatusRow[]>(
 							Prisma.sql`

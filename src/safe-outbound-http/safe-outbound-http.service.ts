@@ -1,10 +1,14 @@
+import {
+	OutboundHttpProvider,
+	SafeOutboundHttpError
+} from '@/safe-outbound-http/safe-outbound-http.error';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { lookup } from 'dns/promises';
 import * as ipaddr from 'ipaddr.js';
 import { isIP } from 'net';
 import { Agent, request } from 'undici';
 
-export type OutboundHttpPolicy = 'webhook' | 'bitrix24' | 'amo-crm';
+export type OutboundHttpPolicy = OutboundHttpProvider;
 
 interface PostJsonOptions {
 	policy: OutboundHttpPolicy;
@@ -25,6 +29,7 @@ interface IntegrationConfig {
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_RESPONSE_SIZE_BYTES = 64 * 1024;
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 const MAX_REDIRECTS = 2;
 const PUBLIC_HTTP_PORTS = new Set([80, 443, 8080, 8443]);
 const AMO_CRM_HOST_SUFFIXES = ['.amocrm.ru', '.amocrm.com', '.kommo.com'];
@@ -144,10 +149,10 @@ export class SafeOutboundHttpService {
 		options: PostJsonOptions
 	): Promise<void> {
 		const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-		const headers = this.normalizeHeaders(options.headers);
-		const body = Buffer.from(JSON.stringify(payload), 'utf8');
 
 		try {
+			const headers = this.normalizeHeaders(options.headers);
+			const body = Buffer.from(JSON.stringify(payload), 'utf8');
 			await this.requestWithRedirects(
 				url,
 				'POST',
@@ -158,10 +163,14 @@ export class SafeOutboundHttpService {
 				signal
 			);
 		} catch (error) {
-			this.logger.warn(
-				`Исходящий запрос интеграции ${options.policy} завершился ошибкой для ${this.safeOrigin(url)}: ${this.safeErrorMessage(error)}`
+			const safeError = this.toSafeOutboundHttpError(
+				options.policy,
+				error
 			);
-			throw error;
+			this.logger.warn(
+				`Исходящий запрос интеграции ${options.policy} завершился ошибкой code=${safeError.providerCode || 'UNCLASSIFIED'} status=${safeError.httpStatus ?? 'none'}: ${safeError.safeReason}`
+			);
+			throw safeError;
 		}
 	}
 
@@ -210,7 +219,7 @@ export class SafeOutboundHttpService {
 				maxRedirections: 0,
 				signal
 			});
-			await response.body.dump({ limit: MAX_RESPONSE_SIZE_BYTES });
+			const responseBody = await this.readResponseBody(response.body);
 
 			if (response.statusCode >= 300 && response.statusCode < 400) {
 				if (redirectCount >= MAX_REDIRECTS) {
@@ -253,8 +262,14 @@ export class SafeOutboundHttpService {
 				return;
 			}
 
-			if (response.statusCode < 200 || response.statusCode >= 300) {
-				throw new Error(`HTTP ${response.statusCode}`);
+			const responseError = this.getResponseError(
+				policy,
+				response.statusCode,
+				response.headers['retry-after'],
+				responseBody
+			);
+			if (responseError) {
+				throw responseError;
 			}
 		} finally {
 			await dispatcher.close().catch(() => undefined);
@@ -284,7 +299,26 @@ export class SafeOutboundHttpService {
 						lookup(hostname, { all: true, verbatim: true }),
 						signal
 					);
-		} catch {
+		} catch (error) {
+			const errorCode = this.getErrorCode(error);
+			if (errorCode === 'EAI_AGAIN' || errorCode === 'EDNS') {
+				throw new SafeOutboundHttpError({
+					provider: policy,
+					httpStatus: null,
+					providerCode: 'DNS_TEMPORARY',
+					retryAfterMs: null,
+					safeReason: 'Outbound integration DNS lookup failed temporarily'
+				});
+			}
+			if (errorCode === 'ENOTFOUND' || errorCode === 'ENODATA') {
+				throw new SafeOutboundHttpError({
+					provider: policy,
+					httpStatus: null,
+					providerCode: 'DNS_NOT_FOUND',
+					retryAfterMs: null,
+					safeReason: 'Outbound integration DNS destination was not found'
+				});
+			}
 			throw new BadRequestException(
 				'Не удалось проверить DNS-адрес интеграции'
 			);
@@ -441,23 +475,256 @@ export class SafeOutboundHttpService {
 		]);
 	}
 
-	private safeOrigin(value: string) {
+	private async readResponseBody(body: {
+		text: () => Promise<string>;
+	}): Promise<string> {
+		const value = await body.text();
+		const buffer = Buffer.from(value, 'utf8');
+		return buffer.length <= MAX_RESPONSE_SIZE_BYTES
+			? value
+			: buffer.subarray(0, MAX_RESPONSE_SIZE_BYTES).toString('utf8');
+	}
+
+	private getResponseError(
+		provider: OutboundHttpPolicy,
+		httpStatus: number,
+		retryAfterHeader: unknown,
+		responseBody: string
+	): SafeOutboundHttpError | null {
+		const retryAfterMs = this.parseRetryAfter(retryAfterHeader);
+		const parsedBody = this.parseJsonRecord(responseBody);
+		const providerCode =
+			provider === 'bitrix24'
+				? this.getBitrix24ErrorCode(parsedBody)
+				: provider === 'amo-crm'
+					? this.getAmoCrmErrorCode(parsedBody, httpStatus)
+					: null;
+		const failedHttpStatus = httpStatus < 200 || httpStatus >= 300;
+
+		if (!providerCode && !failedHttpStatus) return null;
+
+		const safeCode =
+			providerCode || this.normalizeProviderCode(`HTTP_${httpStatus}`);
+		const providerLabel =
+			provider === 'amo-crm'
+				? 'amoCRM'
+				: provider === 'bitrix24'
+					? 'Bitrix24'
+					: 'Webhook';
+		return new SafeOutboundHttpError({
+			provider,
+			httpStatus,
+			providerCode: safeCode,
+			retryAfterMs,
+			safeReason: safeCode
+				? `${providerLabel} request failed (${safeCode})`
+				: `${providerLabel} request failed`
+		});
+	}
+
+	private getBitrix24ErrorCode(
+		body: Record<string, unknown> | null
+	): string | null {
+		return this.normalizeProviderCode(body?.error);
+	}
+
+	private getAmoCrmErrorCode(
+		body: Record<string, unknown> | null,
+		httpStatus: number
+	): string | null {
+		if (!body) return null;
+
+		const directCode =
+			this.normalizeProviderCode(body.code) ||
+			this.normalizeProviderCode(body.error);
+		if (directCode) return directCode;
+
+		const validationErrors = body['validation-errors'];
+		if (Array.isArray(validationErrors)) {
+			for (const item of validationErrors) {
+				if (!item || typeof item !== 'object' || Array.isArray(item)) {
+					continue;
+				}
+				const errors = (item as Record<string, unknown>).errors;
+				if (!Array.isArray(errors)) continue;
+				for (const error of errors) {
+					if (
+						!error ||
+						typeof error !== 'object' ||
+						Array.isArray(error)
+					) {
+						continue;
+					}
+					const code = this.normalizeProviderCode(
+						(error as Record<string, unknown>).code
+					);
+					if (code) return code;
+				}
+			}
+		}
+
+		const bodyStatus =
+			typeof body.status === 'number' ? body.status : null;
+		if (
+			Array.isArray(validationErrors) ||
+			(bodyStatus !== null && bodyStatus >= 400)
+		) {
+			return this.normalizeProviderCode(
+				`HTTP_${bodyStatus || httpStatus}`
+			);
+		}
+
+		return null;
+	}
+
+	private parseJsonRecord(value: string): Record<string, unknown> | null {
+		if (!value.trim()) return null;
 		try {
-			return new URL(value).origin;
+			const parsed = JSON.parse(value) as unknown;
+			return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+				? (parsed as Record<string, unknown>)
+				: null;
 		} catch {
-			return 'invalid-url';
+			return null;
 		}
 	}
 
-	private safeErrorMessage(error: unknown) {
+	private normalizeProviderCode(value: unknown): string | null {
+		if (typeof value !== 'string' && typeof value !== 'number') {
+			return null;
+		}
+		const normalized = String(value).trim();
+		if (
+			!normalized ||
+			normalized.length > 100 ||
+			!/^[a-z\d_.:-]+$/i.test(normalized)
+		) {
+			return null;
+		}
+		return normalized;
+	}
+
+	private parseRetryAfter(value: unknown): number | null {
+		const candidate = Array.isArray(value) ? value[0] : value;
+		if (typeof candidate !== 'string' && typeof candidate !== 'number') {
+			return null;
+		}
+		const normalized = String(candidate).trim();
+		if (!normalized) return null;
+
+		if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+			const delay = Number(normalized) * 1000;
+			return Number.isFinite(delay)
+				? Math.min(Math.max(Math.round(delay), 0), MAX_RETRY_AFTER_MS)
+				: null;
+		}
+
+		const timestamp = Date.parse(normalized);
+		if (!Number.isFinite(timestamp)) return null;
+		return Math.min(
+			Math.max(timestamp - Date.now(), 0),
+			MAX_RETRY_AFTER_MS
+		);
+	}
+
+	private toSafeOutboundHttpError(
+		provider: OutboundHttpPolicy,
+		error: unknown
+	): SafeOutboundHttpError {
+		if (error instanceof SafeOutboundHttpError) return error;
+
+		const errorName = error instanceof Error ? error.name : '';
+		const errorCode = this.getErrorCode(error);
+		if (
+			errorName === 'TimeoutError' ||
+			errorName === 'AbortError' ||
+			[
+				'UND_ERR_CONNECT_TIMEOUT',
+				'UND_ERR_HEADERS_TIMEOUT',
+				'UND_ERR_BODY_TIMEOUT',
+				'ETIMEDOUT'
+			].includes(errorCode || '')
+		) {
+			return new SafeOutboundHttpError({
+				provider,
+				httpStatus: null,
+				providerCode: 'TRANSPORT_TIMEOUT',
+				retryAfterMs: null,
+				safeReason: 'Outbound integration request timed out'
+			});
+		}
+
+		if (['EAI_AGAIN', 'ENOTFOUND', 'EDNS'].includes(errorCode || '')) {
+			return new SafeOutboundHttpError({
+				provider,
+				httpStatus: null,
+				providerCode: 'DNS_ERROR',
+				retryAfterMs: null,
+				safeReason: 'Outbound integration DNS lookup failed'
+			});
+		}
+
+		if (
+			[
+				'ECONNREFUSED',
+				'ECONNRESET',
+				'ENETUNREACH',
+				'EHOSTUNREACH',
+				'UND_ERR_SOCKET'
+			].includes(errorCode || '')
+		) {
+			return new SafeOutboundHttpError({
+				provider,
+				httpStatus: null,
+				providerCode: 'CONNECTION_ERROR',
+				retryAfterMs: null,
+				safeReason: 'Outbound integration connection failed'
+			});
+		}
+
+		if (
+			[
+				'CERT_HAS_EXPIRED',
+				'DEPTH_ZERO_SELF_SIGNED_CERT',
+				'ERR_TLS_CERT_ALTNAME_INVALID',
+				'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+			].includes(errorCode || '')
+		) {
+			return new SafeOutboundHttpError({
+				provider,
+				httpStatus: null,
+				providerCode: 'TLS_CONFIGURATION',
+				retryAfterMs: null,
+				safeReason: 'Outbound integration TLS verification failed'
+			});
+		}
+
 		if (error instanceof BadRequestException) {
-			return error.message;
+			return new SafeOutboundHttpError({
+				provider,
+				httpStatus: null,
+				providerCode: error.message.includes('DNS-адрес')
+					? 'DNS_ERROR'
+					: 'INVALID_DESTINATION',
+				retryAfterMs: null,
+				safeReason: error.message.includes('DNS-адрес')
+					? 'Outbound integration DNS lookup failed'
+					: 'Outbound integration destination is invalid'
+			});
 		}
-		if (error instanceof Error) {
-			return error.name === 'TimeoutError' || error.name === 'AbortError'
-				? 'timeout'
-				: error.message.replace(/[\r\n]/g, ' ').slice(0, 160);
-		}
-		return 'unknown error';
+
+		return new SafeOutboundHttpError({
+			provider,
+			httpStatus: null,
+			providerCode: 'TRANSPORT_ERROR',
+			retryAfterMs: null,
+			safeReason: 'Outbound integration request failed'
+		});
+	}
+
+	private getErrorCode(error: unknown): string | null {
+		if (!error || typeof error !== 'object') return null;
+		const code = (error as { code?: unknown }).code;
+		return typeof code === 'string' ? code.toUpperCase() : null;
 	}
 }

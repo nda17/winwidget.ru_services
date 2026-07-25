@@ -5,7 +5,10 @@ import {
 import type { DailySummaryReportService } from '@/reports/daily-summary-report.service';
 import type { PrismaService } from '@/prisma.service';
 import type { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
-import type { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
+import {
+	TelegramApiError,
+	TelegramInfoTransportService
+} from '@/telegram-bot/telegram-info-transport.service';
 import type { ConfigService } from '@nestjs/config';
 import { ScheduledJobRunStatus } from '@prisma/client';
 
@@ -132,9 +135,107 @@ describe('DailySummaryDeliveryService', () => {
 			expect.objectContaining({
 				eventType: 'report.daily-summary.requested.v1',
 				routingKey: 'report.daily-summary.requested.v1'
-			})
+			}),
+			{ allowRetry: true }
 		);
 	});
+
+	it('uses Telegram Retry-After when it exceeds the scheduled backoff', async () => {
+		const { service, telegram, scheduledJobs } = createService({
+			text: 'stable checkpoint'
+		});
+		const telegramError = new TelegramApiError({
+			httpStatus: 429,
+			description: 'Too Many Requests: retry later',
+			parameters: { retry_after: 120 }
+		});
+		(telegram.sendMessage as jest.Mock).mockRejectedValue(telegramError);
+		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
+			state: 'retry_scheduled',
+			job: {
+				id: payload.jobId,
+				attempts: 1
+			}
+		});
+
+		await expect(service.deliver(payload, payload.jobId)).rejects.toEqual(
+			expect.objectContaining({
+				name: ScheduledJobDispatchHandledError.name,
+				state: 'retry_scheduled',
+				classification: expect.objectContaining({
+					category: 'RATE_LIMIT',
+					normalizedCode: 'TELEGRAM_RATE_LIMIT',
+					retryable: true,
+					retryDelayMs: 120_000
+				})
+			})
+		);
+		expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
+			payload.jobId,
+			'22222222-2222-4222-8222-222222222222',
+			telegramError,
+			120_000,
+			expect.any(Object),
+			{ allowRetry: true }
+		);
+	});
+
+	it.each([
+		[
+			'PERMANENT',
+			'TELEGRAM_CHAT_NOT_FOUND',
+			new TelegramApiError({
+				httpStatus: 400,
+				description: 'Bad Request: chat not found'
+			})
+		],
+		[
+			'AUTH_CONFIGURATION',
+			'TELEGRAM_BOT_AUTHENTICATION_FAILED',
+			new TelegramApiError({
+				httpStatus: 401,
+				description: 'Unauthorized'
+			})
+		]
+	])(
+		'fails the durable job immediately for a %s Telegram error',
+		async (category, normalizedCode, telegramError) => {
+			const { service, telegram, scheduledJobs } = createService({
+				text: 'stable checkpoint'
+			});
+			(telegram.sendMessage as jest.Mock).mockRejectedValue(telegramError);
+			(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
+				state: 'failed',
+				job: {
+					id: payload.jobId,
+					attempts: 1
+				}
+			});
+
+			await expect(
+				service.deliver(payload, payload.jobId)
+			).rejects.toEqual(
+				expect.objectContaining({
+					name: ScheduledJobDispatchHandledError.name,
+					state: 'failed',
+					classification: expect.objectContaining({
+						category,
+						normalizedCode,
+						retryable: false,
+						retryDelayMs: null
+					})
+				})
+			);
+			expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
+				payload.jobId,
+				'22222222-2222-4222-8222-222222222222',
+				telegramError,
+				30_000,
+				expect.any(Object),
+				{ allowRetry: false }
+			);
+		}
+	);
 
 	it('does not send a terminal job again after RabbitMQ redelivery', async () => {
 		const { service, scheduledJobs, report, telegram } = createService();

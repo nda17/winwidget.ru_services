@@ -195,7 +195,11 @@ describe('MaintenanceWorkerService', () => {
 			},
 			data: {
 				resolvedAt: expect.any(Date),
-				retryingAt: null
+				retryingAt: null,
+				resolution: 'DELIVERED',
+				resolutionComment: null,
+				resolvedById: null,
+				activeRetryToken: null
 			}
 		});
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
@@ -374,7 +378,7 @@ describe('MaintenanceWorkerService', () => {
 		transaction.$queryRaw.mockImplementation(statement => {
 			const sql = statement.strings.join('?');
 			return sql.includes('integration_delivery_failures')
-				? [{ id: 'failure-1' }]
+				? [{ resolvedAt: null }]
 				: [{ status: ScheduledJobRunStatus.QUEUED }];
 		});
 		const message = createMessage();
@@ -404,6 +408,28 @@ describe('MaintenanceWorkerService', () => {
 		).toContain('FOR UPDATE');
 		expect(transaction.scheduledJobRun.updateMany).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('ignores a late backup DLQ event after the failure was closed', async () => {
+		const { service, rabbitMq, transaction } = createService();
+		transaction.$queryRaw.mockImplementation(statement => {
+			const sql = statement.strings.join('?');
+			return sql.includes('integration_delivery_failures')
+				? [{ resolvedAt: new Date('2026-07-24T01:00:00.000Z') }]
+				: [{ status: ScheduledJobRunStatus.FAILED }];
+		});
+
+		await (service as any).collectDeadLetter(
+			'database-backup',
+			createMessage()
+		);
+
+		expect(transaction.$queryRaw).toHaveBeenCalledTimes(1);
+		expect(
+			transaction.integrationDeliveryFailure.upsert
+		).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
 	it('persists a malformed DLQ message under a safe UUID', async () => {

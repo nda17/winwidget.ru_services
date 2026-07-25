@@ -1,5 +1,6 @@
 import { EmailModule } from '@/email/email.module';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
+import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { RabbitMqModule } from '@/messaging/rabbitmq.module';
@@ -29,6 +30,7 @@ import { ConfigModule } from '@nestjs/config';
 		MessagingHeartbeatService,
 		DailySummaryReportService,
 		DailySummaryDeliveryService,
+		LeadIntegrationDestinationService,
 		IntegrationDeliveryService,
 		IntegrationWorkerService
 	]

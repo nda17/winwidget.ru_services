@@ -130,6 +130,7 @@ services:
       rabbitmq:
         condition: service_healthy
     command: ['node', 'dist/src/integration-worker-main.js']
+    stop_grace_period: 30s
     restart: unless-stopped
 
   maintenance-worker:

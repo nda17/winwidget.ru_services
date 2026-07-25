@@ -1,14 +1,32 @@
 import { SafeOutboundHttpService } from './safe-outbound-http.service';
+import { SafeOutboundHttpError } from './safe-outbound-http.error';
 import { BadRequestException } from '@nestjs/common';
 import * as dnsPromises from 'dns/promises';
 import * as undici from 'undici';
 
-const response = (statusCode: number, location?: string) =>
-	({
+interface ResponseOptions {
+	body?: string;
+	headers?: Record<string, string>;
+	location?: string;
+}
+
+const response = (
+	statusCode: number,
+	options: string | ResponseOptions = {}
+) => {
+	const normalized =
+		typeof options === 'string' ? { location: options } : options;
+	return {
 		statusCode,
-		headers: location ? { location } : {},
-		body: { dump: jest.fn().mockResolvedValue(undefined) }
-	}) as any;
+		headers: {
+			...(normalized.location ? { location: normalized.location } : {}),
+			...(normalized.headers || {})
+		},
+		body: {
+			text: jest.fn().mockResolvedValue(normalized.body || '')
+		}
+	} as any;
+};
 
 describe('SafeOutboundHttpService', () => {
 	let service: SafeOutboundHttpService;
@@ -116,7 +134,10 @@ describe('SafeOutboundHttpService', () => {
 				{ phone: '+79991234567' },
 				{ policy: 'webhook' }
 			)
-		).rejects.toBeInstanceOf(BadRequestException);
+		).rejects.toMatchObject({
+			provider: 'webhook',
+			providerCode: 'INVALID_DESTINATION'
+		});
 		expect(requestSpy).toHaveBeenCalledTimes(1);
 	});
 
@@ -145,6 +166,93 @@ describe('SafeOutboundHttpService', () => {
 
 		await expect(
 			service.postJson('https://8.8.8.8/lead', {}, { policy: 'webhook' })
-		).rejects.toBeInstanceOf(BadRequestException);
+		).rejects.toBeInstanceOf(SafeOutboundHttpError);
+	});
+
+	it('возвращает безопасную структурированную HTTP-ошибку и Retry-After', async () => {
+		jest.spyOn(undici, 'request').mockResolvedValue(
+			response(429, {
+				headers: { 'retry-after': '12' },
+				body: '{"error":"secret-value","url":"https://example.test/private"}'
+			})
+		);
+
+		const result = service.postJson(
+			'https://8.8.8.8/private-token',
+			{},
+			{ policy: 'webhook' }
+		);
+
+		await expect(result).rejects.toMatchObject({
+			provider: 'webhook',
+			httpStatus: 429,
+			providerCode: 'HTTP_429',
+			retryAfterMs: 12_000,
+			safeReason: 'Webhook request failed (HTTP_429)'
+		});
+		await expect(result).rejects.not.toThrow('secret-value');
+		await expect(result).rejects.not.toThrow('private-token');
+	});
+
+	it('распознаёт Bitrix24 JSON error даже при HTTP 200', async () => {
+		jest.spyOn(undici, 'request').mockResolvedValue(
+			response(200, {
+				body: JSON.stringify({
+					error: 'QUERY_LIMIT_EXCEEDED',
+					error_description: 'sensitive portal detail'
+				})
+			})
+		);
+
+		await expect(
+			service.postJson(
+				'https://8.8.8.8/rest/1/private-webhook/crm.lead.add.json',
+				{},
+				{ policy: 'bitrix24' }
+			)
+		).rejects.toMatchObject({
+			provider: 'bitrix24',
+			httpStatus: 200,
+			providerCode: 'QUERY_LIMIT_EXCEEDED',
+			retryAfterMs: null,
+			safeReason: 'Bitrix24 request failed (QUERY_LIMIT_EXCEEDED)'
+		});
+	});
+
+	it('извлекает безопасный код ошибки валидации amoCRM', async () => {
+		jest
+			.spyOn(dnsPromises, 'lookup')
+			.mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as any);
+		jest.spyOn(undici, 'request').mockResolvedValue(
+			response(400, {
+				body: JSON.stringify({
+					'validation-errors': [
+						{
+							errors: [
+								{
+									code: 'NotSupportedChoice',
+									detail: 'secret request value'
+								}
+							]
+						}
+					],
+					detail: 'request validation failed'
+				})
+			})
+		);
+
+		await expect(
+			service.postJson(
+				'https://tenant.amocrm.ru/api/v4/leads/complex',
+				{},
+				{ policy: 'amo-crm' }
+			)
+		).rejects.toMatchObject({
+			provider: 'amo-crm',
+			httpStatus: 400,
+			providerCode: 'NotSupportedChoice',
+			retryAfterMs: null,
+			safeReason: 'amoCRM request failed (NotSupportedChoice)'
+		});
 	});
 });

@@ -1,6 +1,10 @@
 import { DailySummaryReportService } from '@/reports/daily-summary-report.service';
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
 import {
+	classifyIntegrationError,
+	IntegrationErrorClassification
+} from '@/messaging/integration-error-classifier';
+import {
 	DAILY_SUMMARY_EVENT_TYPE,
 	MESSAGING_ROUTING_KEYS,
 	RETRY_DELAYS_MS
@@ -21,7 +25,8 @@ export class ScheduledJobDispatchHandledError extends Error {
 	constructor(
 		readonly state: 'retry_scheduled' | 'failed',
 		readonly job: ScheduledJobRunView,
-		message: string
+		message: string,
+		readonly classification?: IntegrationErrorClassification
 	) {
 		super(message);
 		this.name = ScheduledJobDispatchHandledError.name;
@@ -190,13 +195,21 @@ export class DailySummaryDeliveryService {
 		} catch (error) {
 			lease.stop();
 			if (error instanceof ScheduledJobDispatchHandledError) throw error;
-			const retryDelay =
+			const classification = classifyIntegrationError(
+				'daily-summary-telegram',
+				error
+			);
+			const scheduledRetryDelay =
 				RETRY_DELAYS_MS[
 					Math.min(
 						Math.max(claim.job.attempts - 1, 0),
 						RETRY_DELAYS_MS.length - 1
 					)
 				];
+			const retryDelay = Math.max(
+				scheduledRetryDelay,
+				classification.retryDelayMs || 0
+			);
 			const result = await this.scheduledJobs.releaseOrFail(
 				claim.job.id,
 				claim.leaseToken,
@@ -209,13 +222,15 @@ export class DailySummaryDeliveryService {
 						schemaVersion: 1,
 						eventType: DAILY_SUMMARY_EVENT_TYPE
 					}
-				}
+				},
+				{ allowRetry: classification.retryable }
 			);
 			if (result.state === 'lost') throw error;
 			throw new ScheduledJobDispatchHandledError(
 				result.state,
 				result.job,
-				error instanceof Error ? error.message : String(error)
+				error instanceof Error ? error.message : String(error),
+				classification
 			);
 		} finally {
 			lease.stop();

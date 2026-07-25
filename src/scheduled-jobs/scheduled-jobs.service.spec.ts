@@ -282,6 +282,48 @@ describe('ScheduledJobsService', () => {
 		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
 	});
 
+	it('forces a non-exhausted job to fail when retry is not allowed', async () => {
+		const jobId = randomUUID();
+		const leaseToken = randomUUID();
+		const job = createJob({
+			id: jobId,
+			status: ScheduledJobRunStatus.FAILED,
+			attempts: 1,
+			maxAttempts: 4,
+			finishedAt: now,
+			lastError: 'Telegram destination is no longer available'
+		});
+		const transaction = {
+			$queryRaw: jest
+				.fn()
+				.mockResolvedValue([{ id: jobId, attempts: 1, maxAttempts: 4 }]),
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			scheduledJobRun: {
+				findUniqueOrThrow: jest.fn().mockResolvedValue(job)
+			},
+			outboxEvent: {
+				create: jest.fn()
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(callback => callback(transaction))
+		} as unknown as PrismaService;
+		const service = new ScheduledJobsService(prisma);
+
+		const result = await service.releaseOrFail(
+			jobId,
+			leaseToken,
+			new Error('Telegram destination is no longer available'),
+			60_000,
+			event,
+			{ allowRetry: false }
+		);
+
+		expect(result.state).toBe('failed');
+		expect(transaction.$executeRaw).toHaveBeenCalledTimes(1);
+		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
+	});
+
 	it('persists one terminal Outbox event when an expired job is exhausted', async () => {
 		const processingJob = createJob({
 			status: ScheduledJobRunStatus.PROCESSING,

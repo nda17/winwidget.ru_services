@@ -339,7 +339,8 @@ export class ScheduledJobsService {
 		leaseToken: string,
 		error: unknown,
 		retryDelayMs: number,
-		event: ScheduledJobOutboxEvent
+		event: ScheduledJobOutboxEvent,
+		options: { allowRetry?: boolean } = {}
 	): Promise<ScheduledJobFailureResult> {
 		this.validateUuid(id, 'job id');
 		this.validateUuid(leaseToken, 'lease token');
@@ -364,7 +365,10 @@ export class ScheduledJobsService {
 			);
 			if (!locked.length) return { state: 'lost' };
 
-			if (locked[0].attempts >= locked[0].maxAttempts) {
+			if (
+				options.allowRetry === false ||
+				locked[0].attempts >= locked[0].maxAttempts
+			) {
 				const failedCount = await transaction.$executeRaw(
 					Prisma.sql`
 						UPDATE "scheduled_job_runs"

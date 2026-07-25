@@ -2,10 +2,19 @@ import {
 	INTEGRATION_KINDS,
 	INTEGRATION_ROUTING_KEYS,
 	IntegrationKind,
-	RETRY_DELAYS_MS
+	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
-import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
+import {
+	LeadIntegrationEventPayload,
+	LeadIntegrationEventPayloadV1,
+	LEAD_SOURCES
+} from '@/messaging/lead-integration-event';
+import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
+import {
+	classifyIntegrationError,
+	IntegrationErrorClassification
+} from '@/messaging/integration-error-classifier';
 import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
@@ -25,6 +34,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import {
 	IntegrationDeliveryReceiptStatus,
+	IntegrationErrorCategory,
 	MailingCampaignStatus,
 	MailingDeliveryStatus,
 	Prisma,
@@ -34,13 +44,16 @@ import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'crypto';
 
 const DELIVERY_RECEIPT_LEASE_MS = 10 * 60 * 1000;
-
-class DeliveryClaimInProgressError extends Error {}
+const DELIVERY_RECOVERY_GRACE_MS = 5_000;
+const AUTOMATIC_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type DeliveryClaim =
 	| { state: 'claimed'; lockedAt: Date }
 	| { state: 'delivered' }
-	| { state: 'processing' };
+	| { state: 'closed' }
+	| { state: 'dead-lettered' }
+	| { state: 'deferred' }
+	| { state: 'processing'; lockedAt: Date };
 
 type WorkerEventPayload =
 	| LeadIntegrationEventPayload
@@ -52,6 +65,12 @@ type WorkerEventPayload =
 interface ScheduledJobStatusRow {
 	jobType: string;
 	status: ScheduledJobRunStatus;
+}
+
+interface DeliveryFailureLockRow {
+	resolvedAt: Date | null;
+	retryingAt: Date | null;
+	activeRetryToken: string | null;
 }
 
 @Injectable()
@@ -69,7 +88,8 @@ export class IntegrationWorkerService
 		private readonly rabbitMq: RabbitMqService,
 		private readonly delivery: IntegrationDeliveryService,
 		private readonly configService: ConfigService,
-		private readonly prisma: PrismaService
+		private readonly prisma: PrismaService,
+		private readonly leadDestination: LeadIntegrationDestinationService
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -94,7 +114,19 @@ export class IntegrationWorkerService
 	}
 
 	async onApplicationShutdown(): Promise<void> {
+		const [consumerCancellation] = await Promise.allSettled([
+			this.rabbitMq.cancelConsumers()
+		]);
 		await Promise.allSettled([...this.activeHandlers]);
+		if (consumerCancellation.status === 'rejected') {
+			this.logger.error(
+				`Failed to cancel integration consumers during shutdown: ${
+					consumerCancellation.reason instanceof Error
+						? consumerCancellation.reason.message
+						: String(consumerCancellation.reason)
+				}`
+			);
+		}
 	}
 
 	private trackHandler(handler: () => Promise<void>): Promise<void> {
@@ -135,7 +167,12 @@ export class IntegrationWorkerService
 
 		let receiptClaim: Date | null = null;
 		try {
-			const claim = await this.claimDelivery(eventId, kind);
+			const claim = await this.claimDelivery(
+				eventId,
+				kind,
+				this.getRetryAttempt(message),
+				this.getStringHeader(message, 'x-delivery-token')
+			);
 			if (claim.state === 'delivered') {
 				await this.resolveFailure(eventId, kind);
 				this.rabbitMq.ack(message);
@@ -144,17 +181,45 @@ export class IntegrationWorkerService
 				);
 				return;
 			}
-			if (claim.state === 'processing') {
-				throw new DeliveryClaimInProgressError(
-					`Integration delivery is already processing eventId=${eventId} kind=${kind}`
+			if (
+				claim.state === 'closed' ||
+				claim.state === 'dead-lettered' ||
+				claim.state === 'deferred'
+			) {
+				this.rabbitMq.ack(message);
+				this.logger.warn(
+					`Integration delivery skipped by receipt state=${claim.state} eventId=${eventId} kind=${kind}`
 				);
+				return;
+			}
+			if (claim.state === 'processing') {
+				try {
+					await this.scheduleClaimRecovery(
+						kind,
+						payload,
+						eventId,
+						claim.lockedAt,
+						message
+					);
+					this.rabbitMq.ack(message);
+					this.logger.warn(
+						`Integration recovery scheduled for an active claim eventId=${eventId} kind=${kind}`
+					);
+				} catch (error) {
+					this.logger.error(
+						`Failed to schedule integration claim recovery eventId=${eventId} kind=${kind}: ${
+							error instanceof Error ? error.message : String(error)
+						}`
+					);
+					this.rabbitMq.nack(message, true);
+				}
+				return;
 			}
 			receiptClaim = claim.lockedAt;
 
 			await this.deliverWithRateLimit(kind, payload, eventId);
 			await this.markDeliveryDelivered(eventId, kind, receiptClaim);
 			receiptClaim = null;
-			await this.resolveFailure(eventId, kind);
 			await this.cleanupReceiptsIfDue();
 			this.rabbitMq.ack(message);
 			this.logger.log(
@@ -162,37 +227,37 @@ export class IntegrationWorkerService
 			);
 		} catch (error) {
 			const lastAttempt = this.getRetryAttempt(message);
-			const nextAttempt =
-				error instanceof DeliveryClaimInProgressError
-					? Math.max(lastAttempt, 1)
-					: lastAttempt + 1;
-			const errorMessage =
-				error instanceof Error ? error.message : String(error);
-
-			if (receiptClaim) {
-				await this.releaseDeliveryClaim(eventId, kind, receiptClaim).catch(
-					releaseError => {
-						this.logger.error(
-							`Failed to release delivery claim eventId=${eventId} kind=${kind}: ${
-								releaseError instanceof Error
-									? releaseError.message
-									: String(releaseError)
-							}`
-						);
-					}
-				);
-			}
+			const nextAttempt = lastAttempt + 1;
+			const firstFailedAt = this.getFirstFailedAt(message);
 
 			try {
 				if (error instanceof ScheduledJobDispatchRejectedError) {
+					const classification: IntegrationErrorClassification = {
+						category: 'PERMANENT',
+						normalizedCode: 'SCHEDULED_JOB_REFERENCE_INVALID',
+						retryable: false,
+						retryDelayMs: null,
+						safeReason: error.message.slice(0, 1000),
+						recognized: true,
+						mayDisableDestination: false,
+						classificationVersion: 1
+					};
 					await this.rabbitMq.publishDeadLetter(
 						kind,
 						payload,
 						nextAttempt,
 						eventId,
 						error.message,
-						this.getEventType(payload)
+						this.getEventType(payload),
+						this.getDeadLetterMetadata(
+							error,
+							classification,
+							firstFailedAt,
+							this.getStringHeader(message, 'x-delivery-token')
+						)
 					);
+					await this.markDeliveryDeadLettered(eventId, kind, receiptClaim);
+					receiptClaim = null;
 					this.rabbitMq.ack(message);
 					this.logger.error(
 						`Scheduled integration rejected eventId=${eventId} kind=${kind}: ${error.message}`
@@ -201,18 +266,39 @@ export class IntegrationWorkerService
 				}
 				if (error instanceof ScheduledJobDispatchHandledError) {
 					if (error.state === 'failed') {
+						const classification =
+							error.classification ||
+							this.classifyDeliveryError(kind, error);
 						await this.rabbitMq.publishDeadLetter(
 							kind,
 							payload,
 							error.job.attempts,
 							eventId,
 							error.message,
-							this.getEventType(payload)
+							this.getEventType(payload),
+							this.getDeadLetterMetadata(
+								error,
+								classification,
+								firstFailedAt,
+								this.getStringHeader(message, 'x-delivery-token')
+							)
 						);
+						await this.markDeliveryDeadLettered(
+							eventId,
+							kind,
+							receiptClaim
+						);
+						receiptClaim = null;
 						this.logger.error(
 							`Scheduled integration moved to dead-letter eventId=${eventId} kind=${kind}: ${error.message}`
 						);
 					} else {
+						await this.releaseDeliveryClaimIfOwned(
+							eventId,
+							kind,
+							receiptClaim
+						);
+						receiptClaim = null;
 						this.logger.warn(
 							`Scheduled integration retry persisted eventId=${eventId} kind=${kind} attempt=${error.job.attempts}: ${error.message}`
 						);
@@ -220,31 +306,69 @@ export class IntegrationWorkerService
 					this.rabbitMq.ack(message);
 					return;
 				}
+
+				let classification = this.classifyDeliveryError(kind, error);
+				const retryDelayMs = this.getRetryDelayMs(
+					classification,
+					nextAttempt
+				);
+				const retryBudgetAvailable =
+					nextAttempt <= this.getMaxRetryPublications(classification);
+				const retryWindowAvailable =
+					Date.now() + retryDelayMs <=
+					firstFailedAt.getTime() + AUTOMATIC_RETRY_WINDOW_MS;
 				if (
-					kind === 'daily-summary-telegram' ||
-					nextAttempt <= RETRY_DELAYS_MS.length
+					classification.retryable &&
+					retryBudgetAvailable &&
+					retryWindowAvailable
 				) {
-					await this.rabbitMq.publishRetry(
+					const availableAt = await this.scheduleRetry(
 						kind,
 						payload,
 						nextAttempt,
 						eventId,
-						this.getEventType(payload)
+						receiptClaim,
+						classification,
+						retryDelayMs,
+						firstFailedAt
 					);
+					receiptClaim = null;
 					this.logger.warn(
-						`Integration retry scheduled eventId=${eventId} kind=${kind} attempt=${nextAttempt}: ${errorMessage}`
+						`Integration retry scheduled eventId=${eventId} kind=${kind} attempt=${nextAttempt} category=${classification.category} code=${classification.normalizedCode} availableAt=${availableAt.toISOString()}`
 					);
 				} else {
+					if (classification.retryable && !retryWindowAvailable) {
+						classification = this.getExpiredRetryClassification();
+					} else if (classification.retryable && !retryBudgetAvailable) {
+						classification = {
+							...classification,
+							retryable: false,
+							retryDelayMs: null,
+							safeReason: `${classification.safeReason}; automatic retry budget exhausted`
+						};
+					}
+					const safePayload = await this.prepareSafeLeadPayload(
+						eventId,
+						payload
+					);
 					await this.rabbitMq.publishDeadLetter(
 						kind,
-						payload,
+						safePayload,
 						nextAttempt,
 						eventId,
-						errorMessage,
-						this.getEventType(payload)
+						classification.safeReason,
+						this.getEventType(safePayload),
+						this.getDeadLetterMetadata(
+							error,
+							classification,
+							firstFailedAt,
+							this.getStringHeader(message, 'x-delivery-token')
+						)
 					);
+					await this.markDeliveryDeadLettered(eventId, kind, receiptClaim);
+					receiptClaim = null;
 					this.logger.error(
-						`Integration moved to dead-letter eventId=${eventId} kind=${kind}: ${errorMessage}`
+						`Integration moved to dead-letter eventId=${eventId} kind=${kind} category=${classification.category} code=${classification.normalizedCode}: ${classification.safeReason}`
 					);
 				}
 				this.rabbitMq.ack(message);
@@ -256,6 +380,19 @@ export class IntegrationWorkerService
 							: String(publishError)
 					}`
 				);
+				await this.releaseDeliveryClaimIfOwned(
+					eventId,
+					kind,
+					receiptClaim
+				).catch(releaseError => {
+					this.logger.error(
+						`Failed to release delivery claim after republish error eventId=${eventId} kind=${kind}: ${
+							releaseError instanceof Error
+								? releaseError.message
+								: String(releaseError)
+						}`
+					);
+				});
 				this.rabbitMq.nack(message, true);
 			}
 		}
@@ -263,7 +400,9 @@ export class IntegrationWorkerService
 
 	private async claimDelivery(
 		eventId: string,
-		integration: IntegrationKind
+		integration: IntegrationKind,
+		retryAttempt: number,
+		deliveryToken: string | null
 	): Promise<DeliveryClaim> {
 		const lockedAt = new Date();
 		try {
@@ -273,7 +412,10 @@ export class IntegrationWorkerService
 					integration,
 					status: IntegrationDeliveryReceiptStatus.PROCESSING,
 					lockedAt,
-					deliveredAt: null
+					deliveredAt: null,
+					retryAttempt: null,
+					retryAvailableAt: null,
+					retryToken: null
 				}
 			});
 			return { state: 'claimed', lockedAt };
@@ -291,7 +433,10 @@ export class IntegrationWorkerService
 				},
 				select: {
 					status: true,
-					lockedAt: true
+					lockedAt: true,
+					retryAttempt: true,
+					retryAvailableAt: true,
+					retryToken: true
 				}
 			});
 		if (!receipt) {
@@ -303,10 +448,56 @@ export class IntegrationWorkerService
 			return { state: 'delivered' };
 		}
 		if (
+			receipt.status === IntegrationDeliveryReceiptStatus.CLOSED_NO_RETRY
+		) {
+			return { state: 'closed' };
+		}
+		if (
+			receipt.status === IntegrationDeliveryReceiptStatus.DEAD_LETTERED
+		) {
+			return { state: 'dead-lettered' };
+		}
+		if (
+			receipt.status === IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED
+		) {
+			if (
+				receipt.retryAttempt !== retryAttempt ||
+				!deliveryToken ||
+				!this.isUuid(deliveryToken) ||
+				receipt.retryToken !== deliveryToken ||
+				!receipt.retryAvailableAt ||
+				receipt.retryAvailableAt > lockedAt
+			) {
+				return { state: 'deferred' };
+			}
+			const activated =
+				await this.prisma.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration,
+						status: IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED,
+						retryAttempt,
+						retryAvailableAt: receipt.retryAvailableAt,
+						retryToken: deliveryToken
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt,
+						deliveredAt: null,
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			return activated.count === 1
+				? { state: 'claimed', lockedAt }
+				: { state: 'deferred' };
+		}
+		if (
 			receipt.lockedAt.getTime() >
 			lockedAt.getTime() - DELIVERY_RECEIPT_LEASE_MS
 		) {
-			return { state: 'processing' };
+			return { state: 'processing', lockedAt: receipt.lockedAt };
 		}
 
 		const reclaimed =
@@ -317,11 +508,16 @@ export class IntegrationWorkerService
 					status: IntegrationDeliveryReceiptStatus.PROCESSING,
 					lockedAt: receipt.lockedAt
 				},
-				data: { lockedAt }
+				data: {
+					lockedAt,
+					retryAttempt: null,
+					retryAvailableAt: null,
+					retryToken: null
+				}
 			});
 		return reclaimed.count === 1
 			? { state: 'claimed', lockedAt }
-			: { state: 'processing' };
+			: { state: 'deferred' };
 	}
 
 	private async markDeliveryDelivered(
@@ -329,8 +525,57 @@ export class IntegrationWorkerService
 		integration: IntegrationKind,
 		lockedAt: Date
 	): Promise<void> {
-		const delivered =
-			await this.prisma.integrationDeliveryReceipt.updateMany({
+		await this.prisma.$transaction(async transaction => {
+			const delivered =
+				await transaction.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration,
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.DELIVERED,
+						deliveredAt: new Date(),
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			if (delivered.count !== 1) {
+				throw new Error(
+					`Integration delivery claim was lost eventId=${eventId} kind=${integration}`
+				);
+			}
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: { eventId, integration, resolvedAt: null },
+				data: {
+					resolvedAt: new Date(),
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
+				}
+			});
+			await transaction.integrationCredentialSnapshot.deleteMany({
+				where: { eventId, integration }
+			});
+		});
+	}
+
+	private async markDeliveryDeadLettered(
+		eventId: string,
+		integration: IntegrationKind,
+		lockedAt: Date | null
+	): Promise<void> {
+		if (!lockedAt) {
+			throw new Error(
+				`Integration delivery claim is missing before DLQ eventId=${eventId} kind=${integration}`
+			);
+		}
+		const marked = await this.prisma.integrationDeliveryReceipt.updateMany(
+			{
 				where: {
 					eventId,
 					integration,
@@ -338,13 +583,29 @@ export class IntegrationWorkerService
 					lockedAt
 				},
 				data: {
-					status: IntegrationDeliveryReceiptStatus.DELIVERED,
-					deliveredAt: new Date()
+					status: IntegrationDeliveryReceiptStatus.DEAD_LETTERED,
+					deliveredAt: null,
+					retryAttempt: null,
+					retryAvailableAt: null,
+					retryToken: null
 				}
-			});
-		if (delivered.count !== 1) {
+			}
+		);
+		if (marked.count !== 1) {
+			const current =
+				await this.prisma.integrationDeliveryReceipt.findUnique({
+					where: {
+						eventId_integration: { eventId, integration }
+					},
+					select: { status: true }
+				});
+			if (
+				current?.status === IntegrationDeliveryReceiptStatus.DEAD_LETTERED
+			) {
+				return;
+			}
 			throw new Error(
-				`Integration delivery claim was lost eventId=${eventId} kind=${integration}`
+				`Integration delivery claim was lost before DLQ eventId=${eventId} kind=${integration}`
 			);
 		}
 	}
@@ -364,6 +625,15 @@ export class IntegrationWorkerService
 		});
 	}
 
+	private async releaseDeliveryClaimIfOwned(
+		eventId: string,
+		integration: IntegrationKind,
+		lockedAt: Date | null
+	): Promise<void> {
+		if (!lockedAt) return;
+		await this.releaseDeliveryClaim(eventId, integration, lockedAt);
+	}
+
 	private isUniqueConstraintError(error: unknown): boolean {
 		return (
 			error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -375,13 +645,294 @@ export class IntegrationWorkerService
 		eventId: string,
 		integration: IntegrationKind
 	): Promise<void> {
-		await this.prisma.integrationDeliveryFailure.updateMany({
-			where: { eventId, integration, resolvedAt: null },
-			data: {
-				resolvedAt: new Date(),
-				retryingAt: null
-			}
+		await this.prisma.$transaction(async transaction => {
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: {
+					eventId,
+					integration,
+					resolvedAt: null
+				},
+				data: {
+					resolvedAt: new Date(),
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
+				}
+			});
+			await transaction.integrationCredentialSnapshot.deleteMany({
+				where: { eventId, integration }
+			});
 		});
+	}
+
+	private async scheduleRetry(
+		integration: IntegrationKind,
+		payload: WorkerEventPayload,
+		attempt: number,
+		eventId: string,
+		lockedAt: Date | null,
+		classification: IntegrationErrorClassification,
+		delayMs: number,
+		firstFailedAt: Date
+	): Promise<Date> {
+		if (!lockedAt) {
+			throw new Error(
+				`Integration delivery claim is missing before retry eventId=${eventId} kind=${integration}`
+			);
+		}
+		const availableAt = new Date(Date.now() + delayMs);
+		const retryToken = randomUUID();
+
+		await this.prisma.$transaction(async transaction => {
+			const safePayload = await this.prepareSafeLeadPayload(
+				eventId,
+				payload,
+				transaction
+			);
+			const scheduled =
+				await transaction.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration,
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED,
+						deliveredAt: null,
+						retryAttempt: attempt,
+						retryAvailableAt: availableAt,
+						retryToken
+					}
+				});
+			if (scheduled.count !== 1) {
+				throw new Error(
+					`Integration delivery claim was lost before retry eventId=${eventId} kind=${integration}`
+				);
+			}
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: {
+					eventId,
+					integration,
+					resolvedAt: null,
+					retryingAt: { not: null }
+				},
+				data: { activeRetryToken: retryToken }
+			});
+			await transaction.outboxEvent.create({
+				data: {
+					messageId: eventId,
+					deduplicationKey: `integration:${eventId}:${integration}:retry:${attempt}:${retryToken}`,
+					eventType: this.getEventType(safePayload),
+					routingKey: INTEGRATION_ROUTING_KEYS[integration],
+					payload: safePayload as unknown as Prisma.InputJsonValue,
+					headers: {
+						'x-retry-attempt': attempt,
+						'x-first-failed-at': firstFailedAt.toISOString(),
+						'x-delivery-token': retryToken,
+						'x-error-category': classification.category,
+						'x-error-code': classification.normalizedCode,
+						'x-classification-version':
+							classification.classificationVersion
+					},
+					availableAt
+				}
+			});
+		});
+		return availableAt;
+	}
+
+	private async scheduleClaimRecovery(
+		integration: IntegrationKind,
+		payload: WorkerEventPayload,
+		eventId: string,
+		lockedAt: Date,
+		message: ConsumeMessage
+	): Promise<void> {
+		const availableAt = new Date(
+			Math.max(
+				Date.now() + 1000,
+				lockedAt.getTime() +
+					DELIVERY_RECEIPT_LEASE_MS +
+					DELIVERY_RECOVERY_GRACE_MS
+			)
+		);
+		const attempt = this.getRetryAttempt(message);
+		const firstFailedAt = this.getFirstFailedAt(message);
+		const deliveryToken = this.getStringHeader(
+			message,
+			'x-delivery-token'
+		);
+		await this.prisma.$transaction(async transaction => {
+			const safePayload = await this.prepareSafeLeadPayload(
+				eventId,
+				payload,
+				transaction
+			);
+			await transaction.outboxEvent.createMany({
+				data: [
+					{
+						messageId: eventId,
+						deduplicationKey: `integration:${eventId}:${integration}:claim:${lockedAt.toISOString()}`,
+						eventType: this.getEventType(safePayload),
+						routingKey: INTEGRATION_ROUTING_KEYS[integration],
+						payload: safePayload as unknown as Prisma.InputJsonValue,
+						headers: {
+							'x-retry-attempt': attempt,
+							'x-first-failed-at': firstFailedAt.toISOString(),
+							...(deliveryToken
+								? {
+										'x-delivery-token': deliveryToken
+									}
+								: {})
+						},
+						availableAt
+					}
+				],
+				skipDuplicates: true
+			});
+		});
+	}
+
+	private classifyDeliveryError(
+		kind: IntegrationKind,
+		error: unknown
+	): IntegrationErrorClassification {
+		return classifyIntegrationError(kind, error);
+	}
+
+	private getMaxRetryPublications(
+		classification: IntegrationErrorClassification
+	): number {
+		return classification.recognized ? 3 : 1;
+	}
+
+	private getRetryDelayMs(
+		classification: IntegrationErrorClassification,
+		attempt: number
+	): number {
+		const base = Math.max(1000, classification.retryDelayMs || 30_000);
+		const scaled =
+			classification.category === 'RATE_LIMIT'
+				? base
+				: base * 2 ** Math.max(0, attempt - 1);
+		const capped = Math.min(24 * 60 * 60 * 1000, scaled);
+		const jitter =
+			classification.category === 'RATE_LIMIT'
+				? Math.random() * 0.1
+				: Math.random() * 0.2 - 0.1;
+		return Math.max(1000, Math.round(capped * (1 + jitter)));
+	}
+
+	private async prepareSafeLeadPayload(
+		eventId: string,
+		payload: WorkerEventPayload,
+		transaction?: Prisma.TransactionClient
+	): Promise<WorkerEventPayload> {
+		const lead = payload as Partial<LeadIntegrationEventPayloadV1>;
+		if (
+			lead.schemaVersion !== 1 ||
+			!lead.integration ||
+			!lead.source ||
+			!lead.entity?.id ||
+			!lead.destination
+		) {
+			return payload;
+		}
+		return this.leadDestination.snapshotLegacyEvent(
+			eventId,
+			lead as LeadIntegrationEventPayloadV1,
+			transaction
+		);
+	}
+
+	private getFirstFailedAt(message: ConsumeMessage): Date {
+		const value = this.getStringHeader(message, 'x-first-failed-at');
+		const timestamp = value ? Date.parse(value) : Number.NaN;
+		const now = Date.now();
+		return Number.isFinite(timestamp) && timestamp <= now + 60_000
+			? new Date(timestamp)
+			: new Date(now);
+	}
+
+	private getExpiredRetryClassification(): IntegrationErrorClassification {
+		return {
+			category: 'PERMANENT',
+			normalizedCode: 'AUTOMATIC_RETRY_WINDOW_EXPIRED',
+			retryable: false,
+			retryDelayMs: null,
+			safeReason: 'Automatic retry window expired',
+			recognized: true,
+			mayDisableDestination: false,
+			classificationVersion: 1
+		};
+	}
+
+	private getStringHeader(
+		message: ConsumeMessage,
+		name: string
+	): string | null {
+		const value = message.properties.headers?.[name];
+		if (typeof value === 'string') return value;
+		if (Buffer.isBuffer(value)) return value.toString('utf8');
+		return null;
+	}
+
+	private getNumberHeader(
+		message: ConsumeMessage,
+		name: string
+	): number | null {
+		const value = Number(message.properties.headers?.[name]);
+		return Number.isInteger(value) ? value : null;
+	}
+
+	private getBooleanHeader(
+		message: ConsumeMessage,
+		name: string
+	): boolean | null {
+		const value = message.properties.headers?.[name];
+		if (typeof value === 'boolean') return value;
+		if (value === 'true' || value === 1) return true;
+		if (value === 'false' || value === 0) return false;
+		return null;
+	}
+
+	private getDeadLetterMetadata(
+		error: unknown,
+		classification: IntegrationErrorClassification,
+		firstFailedAt?: Date,
+		deliveryToken?: string | null
+	) {
+		const details =
+			error && typeof error === 'object'
+				? (error as Record<string, unknown>)
+				: null;
+		const httpStatus = Number(
+			details?.httpStatus || details?.status || details?.responseCode
+		);
+		const providerCode =
+			typeof details?.providerCode === 'string'
+				? details.providerCode
+				: typeof details?.errorCode === 'string' ||
+					  typeof details?.errorCode === 'number'
+					? String(details.errorCode)
+					: typeof details?.code === 'string'
+						? details.code
+						: null;
+		return {
+			category: classification.category,
+			normalizedCode: classification.normalizedCode,
+			safeReason: classification.safeReason,
+			httpStatus:
+				Number.isInteger(httpStatus) && httpStatus > 0 ? httpStatus : null,
+			providerCode,
+			retryable: classification.retryable,
+			classificationVersion: classification.classificationVersion,
+			firstFailedAt: firstFailedAt?.toISOString(),
+			deliveryToken: deliveryToken || undefined
+		};
 	}
 
 	private async cleanupReceiptsIfDue(): Promise<void> {
@@ -485,20 +1036,73 @@ export class IntegrationWorkerService
 		}
 
 		const lead = value as LeadIntegrationEventPayload;
+		const commonValid =
+			Boolean(lead?.integration) &&
+			LEAD_SOURCES.includes(lead?.source) &&
+			Boolean(lead?.entity?.id) &&
+			Boolean(lead?.entity?.name) &&
+			Boolean(lead?.lead?.id) &&
+			Boolean(lead?.lead?.createdAt) &&
+			this.isValidLeadDestination(lead);
+		const versionValid =
+			lead?.schemaVersion === 1 ||
+			(lead?.schemaVersion === 2 && lead.eventType === OUTBOX_EVENT_TYPE);
 
 		if (
-			lead?.schemaVersion !== 1 ||
+			!commonValid ||
+			!versionValid ||
 			!lead.integration ||
-			!lead.source ||
-			!lead.entity?.id ||
-			!lead.entity?.name ||
-			!lead.lead?.id ||
-			!lead.lead?.createdAt ||
-			!lead.destination
+			lead.integration !== kind
 		) {
 			throw new Error('Invalid lead integration event payload');
 		}
 		return lead;
+	}
+
+	private isValidLeadDestination(
+		lead: LeadIntegrationEventPayload
+	): boolean {
+		const destination = lead?.destination;
+		if (
+			!destination ||
+			typeof destination !== 'object' ||
+			Array.isArray(destination)
+		) {
+			return false;
+		}
+		if (lead.schemaVersion === 2) {
+			if (lead.integration === 'email') {
+				return (
+					'email' in destination &&
+					typeof destination.email === 'string' &&
+					Boolean(destination.email.trim())
+				);
+			}
+			if (lead.integration === 'telegram') {
+				return (
+					'telegramChatId' in destination &&
+					typeof destination.telegramChatId === 'string' &&
+					Boolean(destination.telegramChatId.trim())
+				);
+			}
+			return (
+				'credentialRef' in destination &&
+				this.isUuid(destination.credentialRef)
+			);
+		}
+		const legacyDestination = lead.destination;
+		const expected =
+			lead.integration === 'email'
+				? legacyDestination.email
+				: lead.integration === 'telegram'
+					? legacyDestination.telegramChatId
+					: lead.integration === 'webhook'
+						? legacyDestination.webhookUrl
+						: lead.integration === 'bitrix24'
+							? legacyDestination.bitrix24WebhookUrl
+							: legacyDestination.amoCrmDomain &&
+								legacyDestination.amoCrmToken;
+		return typeof expected === 'string' && Boolean(expected.trim());
 	}
 
 	private async deadLetterMalformed(
@@ -507,12 +1111,20 @@ export class IntegrationWorkerService
 		error: string
 	): Promise<void> {
 		const eventId = this.normalizeEventId(message.properties.messageId);
-		let payload: unknown = {
-			raw: message.content.toString('utf8').slice(0, 10_000)
+		const payload = {
+			malformed: true,
+			contentLength: message.content.length
 		};
-		try {
-			payload = JSON.parse(message.content.toString('utf8'));
-		} catch {}
+		const classification: IntegrationErrorClassification = {
+			category: 'PERMANENT',
+			normalizedCode: 'INVALID_EVENT_PAYLOAD',
+			retryable: false,
+			retryDelayMs: null,
+			safeReason: error.slice(0, 1000),
+			recognized: true,
+			mayDisableDestination: false,
+			classificationVersion: 1
+		};
 
 		try {
 			await this.rabbitMq.publishDeadLetter(
@@ -521,7 +1133,8 @@ export class IntegrationWorkerService
 				this.getRetryAttempt(message),
 				eventId,
 				error,
-				message.properties.type || 'unknown'
+				message.properties.type || 'unknown',
+				this.getDeadLetterMetadata(null, classification)
 			);
 			this.rabbitMq.ack(message);
 		} catch {
@@ -542,15 +1155,16 @@ export class IntegrationWorkerService
 		const eventId = this.normalizeEventId(message.properties.messageId);
 		const rawPayload = message.content.toString('utf8');
 		let payload: Prisma.InputJsonValue = {
-			raw: rawPayload.slice(0, 10_000)
+			malformed: true,
+			contentLength: message.content.length
 		};
+		let parsedPayload: unknown = null;
 		try {
-			const parsed = JSON.parse(rawPayload) as unknown;
-			payload =
-				parsed === null
-					? { raw: rawPayload.slice(0, 10_000) }
-					: (parsed as Prisma.InputJsonValue);
+			parsedPayload = JSON.parse(rawPayload) as unknown;
 		} catch {}
+		if (parsedPayload !== null) {
+			payload = parsedPayload as Prisma.InputJsonValue;
+		}
 
 		const errorHeader = message.properties.headers?.['x-last-error'];
 		const lastError =
@@ -560,6 +1174,55 @@ export class IntegrationWorkerService
 					? errorHeader.toString('utf8')
 					: 'Integration delivery failed';
 		const failedAt = new Date();
+		const categoryHeader = this.getStringHeader(
+			message,
+			'x-error-category'
+		);
+		const category =
+			categoryHeader &&
+			Object.values(IntegrationErrorCategory).includes(
+				categoryHeader as IntegrationErrorCategory
+			)
+				? (categoryHeader as IntegrationErrorCategory)
+				: null;
+		const normalizedCode = this.getStringHeader(message, 'x-error-code');
+		const safeReason =
+			this.getStringHeader(message, 'x-safe-reason') || lastError;
+		const httpStatus = this.getNumberHeader(message, 'x-http-status');
+		const providerCode = this.getStringHeader(message, 'x-provider-code');
+		const retryable = this.getBooleanHeader(message, 'x-error-retryable');
+		const classificationVersion = this.getNumberHeader(
+			message,
+			'x-classification-version'
+		);
+		const firstFailedAtHeader = this.getStringHeader(
+			message,
+			'x-first-failed-at'
+		);
+		const firstFailedAtTimestamp = firstFailedAtHeader
+			? Date.parse(firstFailedAtHeader)
+			: Number.NaN;
+		const firstFailedAt = Number.isFinite(firstFailedAtTimestamp)
+			? new Date(firstFailedAtTimestamp)
+			: failedAt;
+		const deliveryTokenHeader = this.getStringHeader(
+			message,
+			'x-delivery-token'
+		);
+		const deliveryToken =
+			deliveryTokenHeader && this.isUuid(deliveryTokenHeader)
+				? deliveryTokenHeader
+				: null;
+		const classificationData = {
+			category,
+			normalizedCode: normalizedCode?.slice(0, 255) || null,
+			safeReason: safeReason.slice(0, 10_000),
+			httpStatus,
+			providerCode: providerCode?.slice(0, 255) || null,
+			retryable,
+			classificationVersion,
+			firstFailedAt
+		};
 		const upsert: Prisma.IntegrationDeliveryFailureUpsertArgs = {
 			where: {
 				eventId_integration: {
@@ -574,7 +1237,8 @@ export class IntegrationWorkerService
 				payload,
 				attempts: this.getRetryAttempt(message),
 				lastError: lastError.slice(0, 10_000),
-				failedAt
+				failedAt,
+				...classificationData
 			},
 			update: {
 				integration: kind,
@@ -583,8 +1247,9 @@ export class IntegrationWorkerService
 				attempts: this.getRetryAttempt(message),
 				lastError: lastError.slice(0, 10_000),
 				failedAt,
+				activeRetryToken: null,
 				retryingAt: null,
-				resolvedAt: null
+				...classificationData
 			}
 		};
 
@@ -594,15 +1259,22 @@ export class IntegrationWorkerService
 				persisted = await this.persistDailySummaryDeadLetter(
 					eventId,
 					payload,
-					upsert
+					upsert,
+					deliveryToken
 				);
 			} else {
-				await this.prisma.integrationDeliveryFailure.upsert(upsert);
+				persisted = await this.persistIntegrationDeadLetter(
+					eventId,
+					kind,
+					payload,
+					upsert,
+					deliveryToken
+				);
 			}
 			if (!persisted) {
 				this.rabbitMq.ack(message);
 				this.logger.warn(
-					`Skipped stale daily-summary dead-letter eventId=${eventId}`
+					`Skipped stale or resolved dead-letter eventId=${eventId} kind=${kind}`
 				);
 				return;
 			}
@@ -621,21 +1293,50 @@ export class IntegrationWorkerService
 		}
 	}
 
+	private async persistIntegrationDeadLetter(
+		eventId: string,
+		kind: IntegrationKind,
+		payload: Prisma.InputJsonValue,
+		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs,
+		deliveryToken: string | null
+	): Promise<boolean> {
+		return this.prisma.$transaction(async transaction => {
+			const failures = await this.lockDeliveryFailure(
+				transaction,
+				eventId,
+				kind
+			);
+			if (!this.canPersistDeadLetter(failures[0], deliveryToken)) {
+				return false;
+			}
+			if (
+				!(await this.ensureDeadLetterReceipt(transaction, eventId, kind))
+			) {
+				return false;
+			}
+			const safeUpsert = await this.getSafeFailureUpsert(
+				transaction,
+				eventId,
+				payload,
+				upsert
+			);
+			await transaction.integrationDeliveryFailure.upsert(safeUpsert);
+			return true;
+		});
+	}
+
 	private async persistDailySummaryDeadLetter(
 		eventId: string,
 		payload: Prisma.InputJsonValue,
-		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs
+		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs,
+		deliveryToken: string | null
 	): Promise<boolean> {
 		const jobId = this.getDailySummaryJobId(payload);
 		return this.prisma.$transaction(async transaction => {
-			await transaction.$queryRaw(
-				Prisma.sql`
-					SELECT "id"
-					FROM "integration_delivery_failures"
-					WHERE "event_id" = ${eventId}::uuid
-						AND "integration" = 'daily-summary-telegram'
-					FOR UPDATE
-				`
+			const failures = await this.lockDeliveryFailure(
+				transaction,
+				eventId,
+				'daily-summary-telegram'
 			);
 			const jobs = jobId
 				? await transaction.$queryRaw<ScheduledJobStatusRow[]>(
@@ -657,9 +1358,138 @@ export class IntegrationWorkerService
 			) {
 				return false;
 			}
-			await transaction.integrationDeliveryFailure.upsert(upsert);
+			if (!this.canPersistDeadLetter(failures[0], deliveryToken, true)) {
+				return false;
+			}
+			if (
+				!(await this.ensureDeadLetterReceipt(
+					transaction,
+					eventId,
+					'daily-summary-telegram'
+				))
+			) {
+				return false;
+			}
+			const safeUpsert = await this.getSafeFailureUpsert(
+				transaction,
+				eventId,
+				payload,
+				upsert
+			);
+			await transaction.integrationDeliveryFailure.upsert(safeUpsert);
 			return true;
 		});
+	}
+
+	private lockDeliveryFailure(
+		transaction: Prisma.TransactionClient,
+		eventId: string,
+		integration: IntegrationKind
+	): Promise<DeliveryFailureLockRow[]> {
+		return transaction.$queryRaw<DeliveryFailureLockRow[]>(
+			Prisma.sql`
+				SELECT
+					"resolved_at" AS "resolvedAt",
+					"retrying_at" AS "retryingAt",
+					"active_retry_token" AS "activeRetryToken"
+				FROM "integration_delivery_failures"
+				WHERE "event_id" = ${eventId}::uuid
+					AND "integration" = ${integration}
+				FOR UPDATE
+			`
+		);
+	}
+
+	private canPersistDeadLetter(
+		failure: DeliveryFailureLockRow | undefined,
+		deliveryToken: string | null,
+		allowTokenlessRetry = false
+	): boolean {
+		if (!failure) return true;
+		if (failure.resolvedAt) return false;
+		if (
+			failure.retryingAt &&
+			failure.activeRetryToken &&
+			failure.activeRetryToken !== deliveryToken &&
+			!(allowTokenlessRetry && deliveryToken === null)
+		) {
+			return false;
+		}
+		return true;
+	}
+
+	private async ensureDeadLetterReceipt(
+		transaction: Prisma.TransactionClient,
+		eventId: string,
+		integration: IntegrationKind
+	): Promise<boolean> {
+		const rows = await transaction.$queryRaw<Array<{ id: string }>>(
+			Prisma.sql`
+				INSERT INTO "integration_delivery_receipts" (
+					"id",
+					"event_id",
+					"integration",
+					"status",
+					"locked_at",
+					"delivered_at",
+					"retry_attempt",
+					"retry_available_at",
+					"retry_token",
+					"created_at"
+				)
+				VALUES (
+					${randomUUID()}::uuid,
+					${eventId}::uuid,
+					${integration},
+					'DEAD_LETTERED'::"IntegrationDeliveryReceiptStatus",
+					NOW(),
+					NULL,
+					NULL,
+					NULL,
+					NULL,
+					NOW()
+				)
+				ON CONFLICT ("event_id", "integration") DO UPDATE
+				SET
+					"status" = 'DEAD_LETTERED'::"IntegrationDeliveryReceiptStatus",
+					"locked_at" = NOW(),
+					"delivered_at" = NULL,
+					"retry_attempt" = NULL,
+					"retry_available_at" = NULL,
+					"retry_token" = NULL
+				WHERE "integration_delivery_receipts"."status" IN (
+					'PROCESSING'::"IntegrationDeliveryReceiptStatus",
+					'RETRY_SCHEDULED'::"IntegrationDeliveryReceiptStatus",
+					'DEAD_LETTERED'::"IntegrationDeliveryReceiptStatus"
+				)
+				RETURNING "id"
+			`
+		);
+		return rows.length === 1;
+	}
+
+	private async getSafeFailureUpsert(
+		transaction: Prisma.TransactionClient,
+		eventId: string,
+		payload: Prisma.InputJsonValue,
+		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs
+	): Promise<Prisma.IntegrationDeliveryFailureUpsertArgs> {
+		const safePayload = (await this.prepareSafeLeadPayload(
+			eventId,
+			payload as unknown as WorkerEventPayload,
+			transaction
+		)) as unknown as Prisma.InputJsonValue;
+		return {
+			...upsert,
+			create: {
+				...upsert.create,
+				payload: safePayload
+			},
+			update: {
+				...upsert.update,
+				payload: safePayload
+			}
+		};
 	}
 
 	private getDailySummaryJobId(

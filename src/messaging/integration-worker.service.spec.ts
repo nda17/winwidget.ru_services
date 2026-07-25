@@ -1,6 +1,7 @@
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
 import { INTEGRATION_KINDS } from '@/messaging/messaging.constants';
 import type { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
+import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
 import type { PrismaService } from '@/prisma.service';
 import {
@@ -28,7 +29,8 @@ describe('IntegrationWorkerService', () => {
 			ack: jest.fn(),
 			nack: jest.fn(),
 			publishRetry: jest.fn().mockResolvedValue(undefined),
-			publishDeadLetter: jest.fn().mockResolvedValue(undefined)
+			publishDeadLetter: jest.fn().mockResolvedValue(undefined),
+			cancelConsumers: jest.fn().mockResolvedValue(undefined)
 		} as unknown as RabbitMqService;
 		const delivery = {
 			deliver: jest.fn().mockResolvedValue(undefined)
@@ -37,6 +39,12 @@ describe('IntegrationWorkerService', () => {
 			get: jest.fn((key: string) => values[key])
 		} as unknown as ConfigService;
 		const failureUpsert = jest.fn().mockResolvedValue({});
+		const receiptUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+		const receiptDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
+		const failureUpdateMany = jest.fn().mockResolvedValue({ count: 0 });
+		const snapshotDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
+		const outboxCreate = jest.fn().mockResolvedValue({ id: 'outbox-1' });
+		const outboxCreateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const transaction = {
 			$queryRaw: jest.fn().mockImplementation(statement => {
 				const sql = statement.strings.join('?');
@@ -45,7 +53,19 @@ describe('IntegrationWorkerService', () => {
 					: [{ jobType: 'DAILY_TELEGRAM_SUMMARY', status: 'FAILED' }];
 			}),
 			integrationDeliveryFailure: {
-				upsert: failureUpsert
+				upsert: failureUpsert,
+				updateMany: failureUpdateMany
+			},
+			integrationDeliveryReceipt: {
+				updateMany: receiptUpdateMany,
+				deleteMany: receiptDeleteMany
+			},
+			integrationCredentialSnapshot: {
+				deleteMany: snapshotDeleteMany
+			},
+			outboxEvent: {
+				create: outboxCreate,
+				createMany: outboxCreateMany
 			}
 		};
 
@@ -53,12 +73,18 @@ describe('IntegrationWorkerService', () => {
 			integrationDeliveryReceipt: {
 				findUnique: jest.fn().mockResolvedValue(null),
 				create: jest.fn().mockResolvedValue({ id: 'receipt-1' }),
-				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-				deleteMany: jest.fn().mockResolvedValue({ count: 0 })
+				updateMany: receiptUpdateMany,
+				deleteMany: receiptDeleteMany
 			},
 			integrationDeliveryFailure: {
-				updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+				updateMany: failureUpdateMany,
 				upsert: failureUpsert
+			},
+			integrationCredentialSnapshot: {
+				deleteMany: snapshotDeleteMany
+			},
+			outboxEvent: {
+				create: outboxCreate
 			},
 			scheduledJobRun: {
 				updateMany: jest.fn().mockResolvedValue({ count: 0 })
@@ -75,7 +101,17 @@ describe('IntegrationWorkerService', () => {
 				rabbitMq,
 				delivery,
 				configService,
-				prisma
+				prisma,
+				{
+					snapshotLegacyEvent: jest.fn(async (_eventId, event) => ({
+						...event,
+						schemaVersion: 2,
+						eventType: 'lead.integration.requested.v2',
+						destination: {
+							credentialRef: '22222222-2222-4222-8222-222222222222'
+						}
+					}))
+				} as unknown as LeadIntegrationDestinationService
 			),
 			rabbitMq,
 			delivery,
@@ -168,7 +204,7 @@ describe('IntegrationWorkerService', () => {
 	});
 
 	it('waits for active handlers before shutdown', async () => {
-		const { service } = createService();
+		const { service, rabbitMq } = createService();
 		let resolveHandler!: () => void;
 		const handler = (service as any).trackHandler(
 			() =>
@@ -189,6 +225,7 @@ describe('IntegrationWorkerService', () => {
 		await shutdown;
 
 		expect(shutdownFinished).toBe(true);
+		expect(rabbitMq.cancelConsumers).toHaveBeenCalledTimes(1);
 	});
 
 	it('skips an event that already has a delivery receipt', async () => {
@@ -209,6 +246,101 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
+	it('does not deliver an event closed without retry', async () => {
+		const { service, rabbitMq, delivery, prisma } = createService();
+		(
+			prisma.integrationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValue(uniqueConstraintError());
+		(
+			prisma.integrationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValue({
+			status: IntegrationDeliveryReceiptStatus.CLOSED_NO_RETRY,
+			lockedAt: new Date(),
+			retryAttempt: null,
+			retryAvailableAt: null,
+			retryToken: null
+		});
+
+		await (service as any).handle('webhook', createMessage());
+
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('activates only the retry message with the expected delivery token', async () => {
+		const { service, rabbitMq, delivery, prisma } = createService();
+		const retryToken = '22222222-2222-4222-8222-222222222222';
+		const retryAvailableAt = new Date(Date.now() - 1000);
+		(
+			prisma.integrationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValue(uniqueConstraintError());
+		(
+			prisma.integrationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValue({
+			status: IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED,
+			lockedAt: retryAvailableAt,
+			retryAttempt: 1,
+			retryAvailableAt,
+			retryToken
+		});
+		const message = createMessage();
+		message.properties.headers = {
+			'x-retry-attempt': 1,
+			'x-delivery-token': retryToken
+		};
+
+		await (service as any).handle('webhook', message);
+
+		expect(
+			prisma.integrationDeliveryReceipt.updateMany
+		).toHaveBeenNthCalledWith(1, {
+			where: {
+				eventId: '11111111-1111-4111-8111-111111111111',
+				integration: 'webhook',
+				status: IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED,
+				retryAttempt: 1,
+				retryAvailableAt,
+				retryToken
+			},
+			data: {
+				status: IntegrationDeliveryReceiptStatus.PROCESSING,
+				lockedAt: expect.any(Date),
+				deliveredAt: null,
+				retryAttempt: null,
+				retryAvailableAt: null,
+				retryToken: null
+			}
+		});
+		expect(delivery.deliver).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('skips a stale retry token without calling the destination', async () => {
+		const { service, rabbitMq, delivery, prisma } = createService();
+		(
+			prisma.integrationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValue(uniqueConstraintError());
+		(
+			prisma.integrationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValue({
+			status: IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED,
+			lockedAt: new Date(),
+			retryAttempt: 1,
+			retryAvailableAt: new Date(Date.now() - 1000),
+			retryToken: '22222222-2222-4222-8222-222222222222'
+		});
+		const message = createMessage();
+		message.properties.headers = {
+			'x-retry-attempt': 1,
+			'x-delivery-token': '33333333-3333-4333-8333-333333333333'
+		};
+
+		await (service as any).handle('webhook', message);
+
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
 	it('claims and marks a receipt before acknowledging successful delivery', async () => {
 		const { service, rabbitMq, delivery, prisma } = createService();
 
@@ -221,7 +353,10 @@ describe('IntegrationWorkerService', () => {
 				integration: 'webhook',
 				status: IntegrationDeliveryReceiptStatus.PROCESSING,
 				lockedAt: expect.any(Date),
-				deliveredAt: null
+				deliveredAt: null,
+				retryAttempt: null,
+				retryAvailableAt: null,
+				retryToken: null
 			}
 		});
 		expect(
@@ -235,14 +370,18 @@ describe('IntegrationWorkerService', () => {
 			},
 			data: {
 				status: IntegrationDeliveryReceiptStatus.DELIVERED,
-				deliveredAt: expect.any(Date)
+				deliveredAt: expect.any(Date),
+				retryAttempt: null,
+				retryAvailableAt: null,
+				retryToken: null
 			}
 		});
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
 	it('does not release a fresh claim owned by another handler', async () => {
-		const { service, rabbitMq, delivery, prisma } = createService();
+		const { service, rabbitMq, delivery, prisma, transaction } =
+			createService();
 		(
 			prisma.integrationDeliveryReceipt.create as jest.Mock
 		).mockRejectedValue(uniqueConstraintError());
@@ -259,12 +398,12 @@ describe('IntegrationWorkerService', () => {
 		expect(
 			prisma.integrationDeliveryReceipt.deleteMany
 		).not.toHaveBeenCalled();
-		expect(rabbitMq.publishRetry).toHaveBeenCalledTimes(1);
+		expect(transaction.outboxEvent.createMany).toHaveBeenCalledTimes(1);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
 	it('does not exhaust delivery retries while another handler owns the claim', async () => {
-		const { service, rabbitMq, prisma } = createService();
+		const { service, rabbitMq, prisma, transaction } = createService();
 		(
 			prisma.integrationDeliveryReceipt.create as jest.Mock
 		).mockRejectedValue(uniqueConstraintError());
@@ -279,18 +418,26 @@ describe('IntegrationWorkerService', () => {
 
 		await (service as any).handle('webhook', message);
 
-		expect(rabbitMq.publishRetry).toHaveBeenCalledWith(
-			'webhook',
-			expect.any(Object),
-			3,
-			'11111111-1111-4111-8111-111111111111',
-			'lead.integration.requested.v1'
-		);
+		expect(transaction.outboxEvent.createMany).toHaveBeenCalledWith({
+			data: [
+				expect.objectContaining({
+					messageId: '11111111-1111-4111-8111-111111111111',
+					eventType: 'lead.integration.requested.v2',
+					routingKey: 'lead.integration.webhook.v2',
+					headers: expect.objectContaining({
+						'x-retry-attempt': 3
+					}),
+					availableAt: expect.any(Date)
+				})
+			],
+			skipDuplicates: true
+		});
 		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
 	});
 
 	it('releases only its own claim when delivery fails', async () => {
-		const { service, rabbitMq, delivery, prisma } = createService();
+		const { service, rabbitMq, delivery, prisma, transaction } =
+			createService();
 		(delivery.deliver as jest.Mock).mockRejectedValue(
 			new Error('Remote service unavailable')
 		);
@@ -302,15 +449,29 @@ describe('IntegrationWorkerService', () => {
 		).mock.calls[0][0].data.lockedAt;
 		expect(
 			prisma.integrationDeliveryReceipt.deleteMany
+		).not.toHaveBeenCalled();
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
 		).toHaveBeenCalledWith({
 			where: {
 				eventId: '11111111-1111-4111-8111-111111111111',
 				integration: 'webhook',
 				status: IntegrationDeliveryReceiptStatus.PROCESSING,
 				lockedAt
-			}
+			},
+			data: expect.objectContaining({
+				status: IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED,
+				retryAttempt: 1,
+				retryAvailableAt: expect.any(Date),
+				retryToken: expect.any(String)
+			})
 		});
-		expect(rabbitMq.publishRetry).toHaveBeenCalledTimes(1);
+		expect(transaction.outboxEvent.create).toHaveBeenCalledTimes(1);
+		const retryOutbox =
+			transaction.outboxEvent.create.mock.calls[0][0].data;
+		expect(retryOutbox.deduplicationKey).toBe(
+			`integration:11111111-1111-4111-8111-111111111111:webhook:retry:1:${retryOutbox.headers['x-delivery-token']}`
+		);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
@@ -340,7 +501,7 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
-	it('keeps transient daily-summary infrastructure errors in delayed RabbitMQ retry', async () => {
+	it('dead-letters an unclassified daily-summary error after its short retry budget', async () => {
 		const { service, rabbitMq, delivery } = createService();
 		const message = createDailySummaryMessage();
 		message.properties.headers = { 'x-retry-attempt': 3 };
@@ -350,15 +511,51 @@ describe('IntegrationWorkerService', () => {
 
 		await (service as any).handle('daily-summary-telegram', message);
 
-		expect(rabbitMq.publishRetry).toHaveBeenCalledWith(
+		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
 			'daily-summary-telegram',
 			expect.any(Object),
 			4,
 			'11111111-1111-4111-8111-111111111111',
-			'report.daily-summary.requested.v1'
+			'Unclassified integration error; automatic retry budget exhausted',
+			'report.daily-summary.requested.v1',
+			expect.objectContaining({
+				category: 'TRANSIENT',
+				normalizedCode: 'UNCLASSIFIED',
+				retryable: false
+			})
 		);
-		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
+		expect(rabbitMq.publishRetry).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('stops automatic retries after the delivery window expires', async () => {
+		const { service, rabbitMq, delivery, transaction } = createService();
+		const message = createMessage();
+		message.properties.headers = {
+			'x-first-failed-at': new Date(
+				Date.now() - 25 * 60 * 60 * 1000
+			).toISOString()
+		};
+		(delivery.deliver as jest.Mock).mockRejectedValue(
+			new Error('Remote service unavailable')
+		);
+
+		await (service as any).handle('webhook', message);
+
+		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
+		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
+			'webhook',
+			expect.any(Object),
+			1,
+			'11111111-1111-4111-8111-111111111111',
+			'Automatic retry window expired',
+			'lead.integration.requested.v2',
+			expect.objectContaining({
+				category: 'PERMANENT',
+				normalizedCode: 'AUTOMATIC_RETRY_WINDOW_EXPIRED',
+				retryable: false
+			})
+		);
 	});
 
 	it('dead-letters a permanently rejected scheduled-job reference', async () => {
@@ -378,7 +575,11 @@ describe('IntegrationWorkerService', () => {
 			1,
 			'11111111-1111-4111-8111-111111111111',
 			'Daily summary job not found',
-			'report.daily-summary.requested.v1'
+			'report.daily-summary.requested.v1',
+			expect.objectContaining({
+				category: 'PERMANENT',
+				normalizedCode: 'SCHEDULED_JOB_REFERENCE_INVALID'
+			})
 		);
 		expect(rabbitMq.publishRetry).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
@@ -398,12 +599,16 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
 			'daily-summary-telegram',
 			expect.objectContaining({
-				jobId: '11111111-1111-4111-8111-111111111111'
+				malformed: true
 			}),
 			0,
 			'22222222-2222-4222-8222-222222222222',
 			'Invalid daily summary event payload',
-			'unknown'
+			'unknown',
+			expect.objectContaining({
+				category: 'PERMANENT',
+				normalizedCode: 'INVALID_EVENT_PAYLOAD'
+			})
 		);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
@@ -427,13 +632,18 @@ describe('IntegrationWorkerService', () => {
 				/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 			),
 			'RabbitMQ messageId is missing or invalid',
-			'unknown'
+			'unknown',
+			expect.objectContaining({
+				category: 'PERMANENT',
+				normalizedCode: 'INVALID_EVENT_PAYLOAD'
+			})
 		);
 		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalledWith(
 			'webhook',
 			expect.anything(),
 			expect.anything(),
 			'not-a-uuid',
+			expect.anything(),
 			expect.anything(),
 			expect.anything()
 		);
@@ -556,6 +766,63 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
+	it('does not overwrite an already resolved failure from a late DLQ message', async () => {
+		const { service, rabbitMq, prisma, transaction } = createService();
+		transaction.$queryRaw.mockImplementation(statement => {
+			const sql = statement.strings.join('?');
+			return sql.includes('integration_delivery_failures')
+				? [
+						{
+							resolvedAt: new Date(),
+							retryingAt: null,
+							activeRetryToken: null
+						}
+					]
+				: [{ id: 'receipt-1' }];
+		});
+		const message = createMessage();
+		message.properties.headers = {
+			'x-last-error': 'Late duplicate'
+		};
+
+		await (service as any).collectDeadLetter('webhook', message);
+
+		expect(
+			prisma.integrationDeliveryFailure.upsert
+		).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('ignores a stale DLQ token after a newer manual retry started', async () => {
+		const { service, rabbitMq, prisma, transaction } = createService();
+		transaction.$queryRaw.mockImplementation(statement => {
+			const sql = statement.strings.join('?');
+			return sql.includes('integration_delivery_failures')
+				? [
+						{
+							resolvedAt: null,
+							retryingAt: new Date(),
+							activeRetryToken: '22222222-2222-4222-8222-222222222222'
+						}
+					]
+				: [{ id: 'receipt-1' }];
+		});
+		const message = createMessage();
+		message.properties.headers = {
+			'x-last-error': 'Old delivery failure',
+			'x-delivery-token': '33333333-3333-4333-8333-333333333333'
+		};
+
+		await (service as any).collectDeadLetter('webhook', message);
+
+		expect(
+			prisma.integrationDeliveryFailure.upsert
+		).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
 	it('atomically reclaims a stale processing receipt', async () => {
 		const { service, rabbitMq, delivery, prisma } = createService();
 		const staleLockedAt = new Date(Date.now() - 11 * 60 * 1000);
@@ -580,7 +847,12 @@ describe('IntegrationWorkerService', () => {
 				status: IntegrationDeliveryReceiptStatus.PROCESSING,
 				lockedAt: staleLockedAt
 			},
-			data: { lockedAt: expect.any(Date) }
+			data: {
+				lockedAt: expect.any(Date),
+				retryAttempt: null,
+				retryAvailableAt: null,
+				retryToken: null
+			}
 		});
 		expect(delivery.deliver).toHaveBeenCalledTimes(1);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);

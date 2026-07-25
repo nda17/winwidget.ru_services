@@ -5,7 +5,7 @@ describe('MessagingAdminController authorization', () => {
 	const getRoles = (
 		method: keyof Pick<
 			MessagingAdminController,
-			'getOverview' | 'getFailures' | 'retryFailure'
+			'getOverview' | 'getFailures' | 'retryFailure' | 'closeFailure'
 		>
 	): Role[] =>
 		Reflect.getMetadata(
@@ -20,6 +20,7 @@ describe('MessagingAdminController authorization', () => {
 		expect(getRoles('getOverview')).toBeDefined();
 		expect(getRoles('getFailures')).toBeDefined();
 		expect(getRoles('retryFailure')).toBeDefined();
+		expect(getRoles('closeFailure')).toBeDefined();
 	});
 
 	it('allows ADMIN and DEV to read the queue overview', () => {
@@ -29,5 +30,6 @@ describe('MessagingAdminController authorization', () => {
 	it('keeps delivery failures and manual retry DEV-only', () => {
 		expect(getRoles('getFailures')).toEqual([Role.DEV]);
 		expect(getRoles('retryFailure')).toEqual([Role.DEV]);
+		expect(getRoles('closeFailure')).toEqual([Role.DEV]);
 	});
 });

@@ -17,6 +17,16 @@ describe('RabbitMqService topology', () => {
 		await (service as any).assertTopology(channel);
 
 		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.lead-integration.webhook',
+			'winwidget.events',
+			'lead.integration.webhook.v2'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.lead-integration.webhook',
+			'winwidget.events',
+			'lead.integration.webhook.v1'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
 			'winwidget.payment-notification.email',
 			'winwidget.events',
 			'payment.succeeded.v1'

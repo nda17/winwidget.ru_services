@@ -8,8 +8,10 @@ import type { Prisma } from '@prisma/client';
 describe('enqueueLeadIntegrationEvents', () => {
 	it('creates one outbox event for every configured integration', async () => {
 		const createMany = jest.fn().mockResolvedValue({ count: 5 });
+		const createSnapshots = jest.fn().mockResolvedValue({ count: 3 });
 		const transaction = {
-			outboxEvent: { createMany }
+			outboxEvent: { createMany },
+			integrationCredentialSnapshot: { createMany: createSnapshots }
 		} as unknown as Prisma.TransactionClient;
 		const createdAt = new Date('2026-07-23T12:00:00.000Z');
 
@@ -40,7 +42,8 @@ describe('enqueueLeadIntegrationEvents', () => {
 			LEAD_INTEGRATION_KINDS.map(kind => INTEGRATION_ROUTING_KEYS[kind])
 		);
 		expect(data[0].payload).toMatchObject({
-			schemaVersion: 1,
+			schemaVersion: 2,
+			eventType: 'lead.integration.requested.v2',
 			source: 'widget',
 			entity: { id: 'widget-1', name: 'Колесо' },
 			lead: {
@@ -48,12 +51,20 @@ describe('enqueueLeadIntegrationEvents', () => {
 				createdAt: createdAt.toISOString()
 			}
 		});
+		expect(createSnapshots).toHaveBeenCalledTimes(1);
+		expect(createSnapshots.mock.calls[0][0].data).toHaveLength(3);
+		expect(JSON.stringify(data)).not.toContain('token');
+		expect(JSON.stringify(data)).not.toContain('/rest/1/key');
+		expect(JSON.stringify(data)).not.toContain(
+			'https://example.com/webhook'
+		);
 	});
 
 	it('does not create outbox rows when no integrations are enabled', async () => {
 		const createMany = jest.fn();
 		const transaction = {
-			outboxEvent: { createMany }
+			outboxEvent: { createMany },
+			integrationCredentialSnapshot: { createMany: jest.fn() }
 		} as unknown as Prisma.TransactionClient;
 
 		await enqueueLeadIntegrationEvents(transaction, {
@@ -75,7 +86,8 @@ describe('enqueueLeadIntegrationEvents', () => {
 	it('does not enqueue incomplete amoCRM credentials', async () => {
 		const createMany = jest.fn();
 		const transaction = {
-			outboxEvent: { createMany }
+			outboxEvent: { createMany },
+			integrationCredentialSnapshot: { createMany: jest.fn() }
 		} as unknown as Prisma.TransactionClient;
 
 		await enqueueLeadIntegrationEvents(transaction, {

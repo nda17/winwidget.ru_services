@@ -1,6 +1,7 @@
 import { OutboxPublisherService } from '@/messaging/outbox-publisher.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
 import type { PrismaService } from '@/prisma.service';
+import { LEGACY_OUTBOX_EVENT_TYPE } from '@/messaging/messaging.constants';
 import type { ConfigService } from '@nestjs/config';
 import { OutboxEvent, OutboxEventStatus, Prisma } from '@prisma/client';
 
@@ -13,9 +14,11 @@ describe('OutboxPublisherService', () => {
 		return {
 			id: '11111111-1111-4111-8111-111111111111',
 			messageId: null,
+			deduplicationKey: null,
 			eventType: 'payment.succeeded.v1',
 			routingKey: 'payment.succeeded.v1',
 			payload: { schemaVersion: 1 } as Prisma.JsonObject,
+			headers: {},
 			status: OutboxEventStatus.PUBLISHING,
 			attempts: 0,
 			availableAt: now,
@@ -56,7 +59,11 @@ describe('OutboxPublisherService', () => {
 	it('uses the stable messageId while keeping the outbox row id in headers', async () => {
 		const { service, rabbitMq } = createService();
 		const event = createEvent({
-			messageId: '22222222-2222-4222-8222-222222222222'
+			messageId: '22222222-2222-4222-8222-222222222222',
+			headers: {
+				'x-retry-attempt': 2,
+				'x-error-category': 'RATE_LIMIT'
+			}
 		});
 
 		await (service as any).publish(event);
@@ -67,7 +74,9 @@ describe('OutboxPublisherService', () => {
 			expect.objectContaining({
 				messageId: '22222222-2222-4222-8222-222222222222',
 				headers: expect.objectContaining({
-					'x-outbox-event-id': '11111111-1111-4111-8111-111111111111'
+					'x-outbox-event-id': '11111111-1111-4111-8111-111111111111',
+					'x-retry-attempt': 2,
+					'x-error-category': 'RATE_LIMIT'
 				})
 			})
 		);
@@ -84,6 +93,58 @@ describe('OutboxPublisherService', () => {
 			event.payload,
 			expect.objectContaining({ messageId: event.id })
 		);
+	});
+
+	it('removes the destination from a published legacy lead event', async () => {
+		const { service, prisma, rabbitMq } = createService();
+		const event = createEvent({
+			eventType: LEGACY_OUTBOX_EVENT_TYPE,
+			payload: {
+				schemaVersion: 1,
+				integration: 'amo-crm',
+				destination: {
+					amoCrmDomain: 'example.amocrm.ru',
+					amoCrmToken: 'secret-token'
+				},
+				lead: { id: 'lead-1' }
+			}
+		});
+
+		await (service as any).publish(event);
+
+		expect(rabbitMq.publishEvent).toHaveBeenCalledWith(
+			event.routingKey,
+			event.payload,
+			expect.any(Object)
+		);
+		expect(prisma.outboxEvent.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: OutboxEventStatus.PUBLISHED,
+					payload: {
+						schemaVersion: 1,
+						integration: 'amo-crm',
+						lead: { id: 'lead-1' }
+					}
+				})
+			})
+		);
+		expect(event.payload).toHaveProperty('destination');
+	});
+
+	it('scrubs legacy published destinations before polling starts', async () => {
+		const { service, prisma } = createService();
+		const schedule = jest
+			.spyOn(service as any, 'schedule')
+			.mockImplementation(() => {});
+		(prisma.$executeRaw as jest.Mock).mockResolvedValue(2);
+
+		await service.onModuleInit();
+
+		expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+		expect(
+			(prisma.$executeRaw as jest.Mock).mock.invocationCallOrder[0]
+		).toBeLessThan(schedule.mock.invocationCallOrder[0]);
 	});
 
 	it('reschedules a failed publication indefinitely with capped backoff', async () => {

@@ -141,8 +141,13 @@ esac
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build api
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile migration run --rm migrate
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d rabbitmq
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop outbox-publisher
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
-	api outbox-publisher integration-worker maintenance-worker
+	integration-worker
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
+	api maintenance-worker
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
+	outbox-publisher
 messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
 
 show_api_diagnostics() {
@@ -194,6 +199,11 @@ check_messaging_readiness() {
 		-e "MESSAGING_READINESS_STARTED_AT=$messaging_readiness_started_at" \
 		api node - <<'NODE'
 const { PrismaClient } = require('@prisma/client');
+const {
+	INTEGRATION_KINDS,
+	MAINTENANCE_KINDS,
+	MESSAGING_QUEUE_NAMES
+} = require('./dist/src/messaging/messaging.constants.js');
 
 class ReadinessError extends Error {}
 
@@ -202,12 +212,23 @@ const requiredServices = [
 	'integration-worker',
 	'maintenance-worker'
 ];
-const requiredQueues = [
-	'winwidget.report.daily-summary.telegram',
-	'winwidget.report.daily-summary.telegram.dead-letter',
-	'winwidget.maintenance.database-backup',
-	'winwidget.maintenance.database-backup.dead-letter'
-];
+
+const parseEnabledKinds = (name, supportedKinds) => {
+	const value = process.env[name] || '';
+	const kinds = value
+		.split(',')
+		.map(item => item.trim())
+		.filter(Boolean);
+	const invalid = kinds.filter(kind => !supportedKinds.includes(kind));
+	if (!kinds.length || invalid.length) {
+		throw new ReadinessError(
+			invalid.length
+				? `${name} has unsupported values: ${invalid.join(', ')}`
+				: `${name} is empty`
+		);
+	}
+	return [...new Set(kinds)];
+};
 
 const run = async () => {
 	const mode = (process.env.MODE || 'production').trim().toLowerCase();
@@ -225,6 +246,17 @@ const run = async () => {
 	if (!Number.isFinite(startedAt)) {
 		throw new ReadinessError('Messaging readiness timestamp is invalid');
 	}
+	const requiredKinds = [
+		...parseEnabledKinds('INTEGRATION_WORKER_KINDS', INTEGRATION_KINDS),
+		...parseEnabledKinds('MAINTENANCE_WORKER_KINDS', MAINTENANCE_KINDS)
+	];
+	const requiredQueues = requiredKinds.flatMap(kind => {
+		const queue = MESSAGING_QUEUE_NAMES[kind];
+		if (!queue) {
+			throw new ReadinessError(`RabbitMQ queue is unknown for ${kind}`);
+		}
+		return [queue, `${queue}.dead-letter`];
+	});
 	const freshAfter = new Date(Math.max(startedAt, Date.now() - 30_000));
 	const prisma = new PrismaClient({
 		datasources: { db: { url: databaseUrl } }

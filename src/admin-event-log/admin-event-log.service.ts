@@ -40,6 +40,7 @@ export type AdminEventLogAction =
 	| 'TELEGRAM_DATABASE_BACKUP_CREATE'
 	| 'TELEGRAM_DATABASE_RESTORE'
 	| 'MESSAGING_FAILURE_RETRY'
+	| 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY'
 	| 'DEV_DATABASE_RESTORE'
 	| 'WIDGET_UPDATE'
 	| 'WIDGET_BUTTON_IMAGE_UPDATE';
@@ -82,12 +83,13 @@ const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
 	'TELEGRAM_DATABASE_BACKUP_CREATE',
 	'TELEGRAM_DATABASE_RESTORE',
 	'MESSAGING_FAILURE_RETRY',
+	'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
 	'DEV_DATABASE_RESTORE',
 	'WIDGET_UPDATE',
 	'WIDGET_BUTTON_IMAGE_UPDATE'
 ];
 
-interface AdminEventLogRecordInput {
+export interface AdminEventLogRecordInput {
 	adminId?: string | null;
 	section: AdminEventLogSection;
 	action: AdminEventLogAction;
@@ -243,31 +245,7 @@ export class AdminEventLogService {
 
 	async record(input: AdminEventLogRecordInput) {
 		try {
-			const [adminSnapshot, targetUserSnapshot] = await Promise.all([
-				this.getUserSnapshot(input.adminId),
-				this.getUserSnapshot(input.targetUserId)
-			]);
-			const requestSnapshot = this.getRequestSnapshot(input.request);
-
-			return await this.prisma.adminEventLog.create({
-				data: {
-					adminId: input.adminId || null,
-					adminName: adminSnapshot?.name ?? null,
-					adminEmail: adminSnapshot?.email ?? null,
-					section: input.section,
-					action: input.action,
-					description: input.description.trim(),
-					entityType: input.entityType || null,
-					entityId: input.entityId || null,
-					entityLabel: input.entityLabel || null,
-					targetUserId: input.targetUserId || null,
-					targetUserName: targetUserSnapshot?.name ?? null,
-					targetUserEmail: targetUserSnapshot?.email ?? null,
-					metadata: input.metadata ?? {},
-					ip: requestSnapshot.ip,
-					userAgent: requestSnapshot.userAgent
-				}
-			});
+			return await this.recordWithClient(this.prisma, input);
 		} catch (error) {
 			this.logger.warn(
 				`Admin event log failed: ${
@@ -278,14 +256,53 @@ export class AdminEventLogService {
 		}
 	}
 
+	recordInTransaction(
+		transaction: Prisma.TransactionClient,
+		input: AdminEventLogRecordInput
+	) {
+		return this.recordWithClient(transaction, input);
+	}
+
+	private async recordWithClient(
+		client: Prisma.TransactionClient | PrismaService,
+		input: AdminEventLogRecordInput
+	) {
+		const [adminSnapshot, targetUserSnapshot] = await Promise.all([
+			this.getUserSnapshot(input.adminId, client),
+			this.getUserSnapshot(input.targetUserId, client)
+		]);
+		const requestSnapshot = this.getRequestSnapshot(input.request);
+
+		return client.adminEventLog.create({
+			data: {
+				adminId: input.adminId || null,
+				adminName: adminSnapshot?.name ?? null,
+				adminEmail: adminSnapshot?.email ?? null,
+				section: input.section,
+				action: input.action,
+				description: input.description.trim(),
+				entityType: input.entityType || null,
+				entityId: input.entityId || null,
+				entityLabel: input.entityLabel || null,
+				targetUserId: input.targetUserId || null,
+				targetUserName: targetUserSnapshot?.name ?? null,
+				targetUserEmail: targetUserSnapshot?.email ?? null,
+				metadata: input.metadata ?? {},
+				ip: requestSnapshot.ip,
+				userAgent: requestSnapshot.userAgent
+			}
+		});
+	}
+
 	private async getUserSnapshot(
-		userId?: string | null
+		userId?: string | null,
+		client: Prisma.TransactionClient | PrismaService = this.prisma
 	): Promise<UserSnapshot | null> {
 		if (!userId) {
 			return null;
 		}
 
-		const user = await this.prisma.user.findUnique({
+		const user = await client.user.findUnique({
 			where: { id: userId },
 			select: {
 				name: true,

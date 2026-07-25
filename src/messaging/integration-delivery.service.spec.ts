@@ -1,10 +1,14 @@
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
-import type { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
+import type { LeadIntegrationEventPayloadV1 } from '@/messaging/lead-integration-event';
+import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import type { EmailService } from '@/email/email.service';
 import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
-import type { ConfigService } from '@nestjs/config';
 import type { PrismaService } from '@/prisma.service';
 import type { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
+import {
+	TelegramApiError,
+	type TelegramInfoTransportService
+} from '@/telegram-bot/telegram-info-transport.service';
 import {
 	MailingCampaignStatus,
 	MailingDeliveryChannel,
@@ -12,8 +16,8 @@ import {
 } from '@prisma/client';
 
 const createEvent = (
-	overrides: Partial<LeadIntegrationEventPayload> = {}
-): LeadIntegrationEventPayload => ({
+	overrides: Partial<LeadIntegrationEventPayloadV1> = {}
+): LeadIntegrationEventPayloadV1 => ({
 	schemaVersion: 1,
 	integration: 'webhook',
 	source: 'widget',
@@ -42,9 +46,6 @@ describe('IntegrationDeliveryService', () => {
 			postJson: jest.fn().mockResolvedValue(undefined),
 			getAmoCrmApiUrl: jest.fn()
 		} as unknown as SafeOutboundHttpService;
-		const configService = {
-			get: jest.fn()
-		} as unknown as ConfigService;
 		const prisma = {
 			telegramBotSettings: {
 				findUnique: jest.fn()
@@ -55,11 +56,16 @@ describe('IntegrationDeliveryService', () => {
 			service: new IntegrationDeliveryService(
 				emailService,
 				safeOutboundHttpService,
-				configService,
 				prisma,
 				{
 					deliver: jest.fn().mockResolvedValue(undefined)
-				} as unknown as DailySummaryDeliveryService
+				} as unknown as DailySummaryDeliveryService,
+				{
+					resolve: jest.fn(async (_eventId, event) => event)
+				} as unknown as LeadIntegrationDestinationService,
+				{
+					sendMessage: jest.fn().mockResolvedValue(undefined)
+				} as unknown as TelegramInfoTransportService
 			),
 			safeOutboundHttpService,
 			emailService
@@ -155,31 +161,11 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 		channel: MailingDeliveryChannel.TELEGRAM
 	};
 
-	afterEach(() => {
-		jest.restoreAllMocks();
-	});
-
-	const mockTelegramFetchBody = (status: number, responseBody: string) =>
-		jest.spyOn(globalThis, 'fetch').mockResolvedValue({
-			ok: status >= 200 && status < 300,
-			status,
-			text: jest.fn().mockResolvedValue(responseBody)
-		} as unknown as Response);
-
-	const mockTelegramFetch = (status = 200, description = 'OK') =>
-		mockTelegramFetchBody(
-			status,
-			JSON.stringify({
-				ok: status >= 200 && status < 300,
-				error_code: status,
-				description
-			})
-		);
-
 	const createService = (
 		status: MailingDeliveryStatus = MailingDeliveryStatus.PENDING,
 		campaignStatus: MailingCampaignStatus = MailingCampaignStatus.QUEUED,
-		channel: MailingDeliveryChannel = MailingDeliveryChannel.EMAIL
+		channel: MailingDeliveryChannel = MailingDeliveryChannel.EMAIL,
+		telegramError?: Error
 	) => {
 		const deliveryRecord = {
 			id: deliveryId,
@@ -228,16 +214,22 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
+		const telegram = {
+			sendMessage: telegramError
+				? jest.fn().mockRejectedValue(telegramError)
+				: jest.fn().mockResolvedValue(undefined)
+		} as unknown as TelegramInfoTransportService;
 		const service = new IntegrationDeliveryService(
 			emailService,
 			{} as SafeOutboundHttpService,
-			{
-				get: jest.fn().mockReturnValue('telegram-token')
-			} as unknown as ConfigService,
 			prisma,
 			{
 				deliver: jest.fn().mockResolvedValue(undefined)
-			} as unknown as DailySummaryDeliveryService
+			} as unknown as DailySummaryDeliveryService,
+			{
+				resolve: jest.fn(async (_eventId, event) => event)
+			} as unknown as LeadIntegrationDestinationService,
+			telegram
 		);
 
 		return {
@@ -246,7 +238,8 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			prisma,
 			transaction,
 			deliveryRecord,
-			notificationChannelUpdateMany
+			notificationChannelUpdateMany,
+			telegram
 		};
 	};
 
@@ -273,8 +266,7 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 	});
 
 	it('omits parse_mode from a plain-text Telegram mailing request', async () => {
-		const fetchMock = mockTelegramFetch();
-		const { service } = createService(
+		const { service, telegram } = createService(
 			MailingDeliveryStatus.PENDING,
 			MailingCampaignStatus.QUEUED,
 			MailingDeliveryChannel.TELEGRAM
@@ -282,21 +274,15 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 
 		await service.deliver('mailing-telegram', telegramEvent, eventId);
 
-		const request = fetchMock.mock.calls[0][1] as RequestInit;
-		const body = JSON.parse(request.body as string) as Record<
-			string,
-			unknown
-		>;
-		expect(body).toEqual({
-			chat_id: '123456789',
-			text: 'Новости\n\nТекст рассылки'
-		});
-		expect(body).not.toHaveProperty('parse_mode');
+		expect(telegram.sendMessage).toHaveBeenCalledWith(
+			'123456789',
+			'Новости\n\nТекст рассылки',
+			{ parseMode: null }
+		);
 	});
 
 	it('keeps HTML parse_mode for Telegram messages that require formatting', async () => {
-		const fetchMock = mockTelegramFetch();
-		const { service } = createService();
+		const { service, telegram } = createService();
 
 		await service.deliver(
 			'limit-telegram',
@@ -317,20 +303,22 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			eventId
 		);
 
-		const request = fetchMock.mock.calls[0][1] as RequestInit;
-		const body = JSON.parse(request.body as string) as Record<
-			string,
-			unknown
-		>;
-		expect(body.parse_mode).toBe('HTML');
+		expect(telegram.sendMessage).toHaveBeenCalledWith(
+			'123456789',
+			expect.any(String),
+			{ parseMode: 'HTML' }
+		);
 	});
 
 	it('does not deactivate a Telegram channel for a formatting-related 400', async () => {
-		mockTelegramFetch(400, 'Bad Request: unsupported parse_mode');
 		const { service, notificationChannelUpdateMany } = createService(
 			MailingDeliveryStatus.PENDING,
 			MailingCampaignStatus.QUEUED,
-			MailingDeliveryChannel.TELEGRAM
+			MailingDeliveryChannel.TELEGRAM,
+			new TelegramApiError({
+				httpStatus: 400,
+				description: 'Bad Request: unsupported parse_mode'
+			})
 		);
 
 		await expect(
@@ -342,35 +330,24 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 
 	it.each([
 		[400, 'Bad Request'],
-		[
-			429,
-			JSON.stringify({
-				ok: false,
-				error_code: 429,
-				description: 'Too Many Requests: retry later'
-			})
-		],
-		[
-			502,
-			JSON.stringify({
-				ok: false,
-				error_code: 502,
-				description: 'Bad Gateway'
-			})
-		]
+		[429, 'Too Many Requests: retry later'],
+		[502, 'Bad Gateway']
 	])(
 		'does not deactivate a Telegram channel for transient or unclassified error %i',
-		async (status, responseBody) => {
-			mockTelegramFetchBody(status, responseBody);
+		async (status, description) => {
 			const { service, notificationChannelUpdateMany } = createService(
 				MailingDeliveryStatus.PENDING,
 				MailingCampaignStatus.QUEUED,
-				MailingDeliveryChannel.TELEGRAM
+				MailingDeliveryChannel.TELEGRAM,
+				new TelegramApiError({
+					httpStatus: status,
+					description
+				})
 			);
 
 			await expect(
 				service.deliver('mailing-telegram', telegramEvent, eventId)
-			).rejects.toThrow(`Telegram API returned ${status}`);
+			).rejects.toThrow(description);
 
 			expect(notificationChannelUpdateMany).not.toHaveBeenCalled();
 		}
@@ -383,11 +360,14 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 	])(
 		'deactivates a Telegram channel for permanent error %i %s',
 		async (status, description) => {
-			mockTelegramFetch(status, description);
 			const { service, notificationChannelUpdateMany } = createService(
 				MailingDeliveryStatus.PENDING,
 				MailingCampaignStatus.QUEUED,
-				MailingDeliveryChannel.TELEGRAM
+				MailingDeliveryChannel.TELEGRAM,
+				new TelegramApiError({
+					httpStatus: status,
+					description
+				})
 			);
 
 			await expect(
