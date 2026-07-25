@@ -1,5 +1,5 @@
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
-import type { LeadIntegrationEventPayloadV1 } from '@/messaging/lead-integration-event';
+import type { LeadIntegrationEventPayloadV2 } from '@/messaging/lead-integration-event';
 import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import type { EmailService } from '@/email/email.service';
 import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
@@ -16,9 +16,10 @@ import {
 } from '@prisma/client';
 
 const createEvent = (
-	overrides: Partial<LeadIntegrationEventPayloadV1> = {}
-): LeadIntegrationEventPayloadV1 => ({
-	schemaVersion: 1,
+	overrides: Partial<LeadIntegrationEventPayloadV2> = {}
+): LeadIntegrationEventPayloadV2 => ({
+	schemaVersion: 2,
+	eventType: 'lead.integration.requested.v2',
 	integration: 'webhook',
 	source: 'widget',
 	entity: { id: 'widget-1', name: 'Колесо' },
@@ -29,7 +30,7 @@ const createEvent = (
 		createdAt: '2026-07-23T12:00:00.000Z'
 	},
 	destination: {
-		webhookUrl: 'https://example.com/webhook'
+		credentialRef: '11111111-1111-4111-8111-111111111111'
 	},
 	...overrides
 });
@@ -61,7 +62,12 @@ describe('IntegrationDeliveryService', () => {
 					deliver: jest.fn().mockResolvedValue(undefined)
 				} as unknown as DailySummaryDeliveryService,
 				{
-					resolve: jest.fn(async (_eventId, event) => event)
+					resolve: jest.fn(async (_eventId, event) => ({
+						...event,
+						destination: {
+							webhookUrl: 'https://example.com/webhook'
+						}
+					}))
 				} as unknown as LeadIntegrationDestinationService,
 				{
 					sendMessage: jest.fn().mockResolvedValue(undefined)

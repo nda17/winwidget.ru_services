@@ -4,7 +4,6 @@ import {
 } from '@/messaging/lead-integration-destination.service';
 import {
 	getLeadTargetFingerprint,
-	LeadIntegrationEventPayloadV1,
 	LeadIntegrationEventPayloadV2
 } from '@/messaging/lead-integration-event';
 import type { PrismaService } from '@/prisma.service';
@@ -32,8 +31,6 @@ describe('LeadIntegrationDestinationService', () => {
 		const prisma = {
 			integrationCredentialSnapshot: {
 				findFirst: jest.fn(),
-				findUnique: jest.fn(),
-				create: jest.fn(),
 				update: jest.fn(),
 				deleteMany: jest.fn()
 			},
@@ -133,37 +130,5 @@ describe('LeadIntegrationDestinationService', () => {
 		expect(
 			prisma.integrationCredentialSnapshot.update
 		).not.toHaveBeenCalled();
-	});
-
-	it('converts a legacy secret payload to a credential reference', async () => {
-		const { service, prisma } = createService();
-		const legacy: LeadIntegrationEventPayloadV1 = {
-			...base,
-			schemaVersion: 1,
-			destination: {
-				amoCrmDomain: 'example.amocrm.ru',
-				amoCrmToken: 'secret-token'
-			}
-		};
-		(
-			prisma.integrationCredentialSnapshot.findUnique as jest.Mock
-		).mockResolvedValue(null);
-		(
-			prisma.integrationCredentialSnapshot.create as jest.Mock
-		).mockResolvedValue({});
-
-		const converted = await service.snapshotLegacyEvent(eventId, legacy);
-
-		expect(converted).toMatchObject({
-			schemaVersion: 2,
-			eventType: 'lead.integration.requested.v2',
-			destination: {
-				credentialRef: expect.any(String)
-			}
-		});
-		expect(JSON.stringify(converted)).not.toContain('secret-token');
-		expect(
-			prisma.integrationCredentialSnapshot.create
-		).toHaveBeenCalledTimes(1);
 	});
 });

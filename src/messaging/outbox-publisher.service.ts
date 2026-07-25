@@ -1,5 +1,4 @@
 import {
-	LEGACY_OUTBOX_EVENT_TYPE,
 	OUTBOX_DEFAULT_BATCH_SIZE,
 	OUTBOX_DEFAULT_POLL_INTERVAL_MS,
 	OUTBOX_DEFAULT_RETENTION_DAYS,
@@ -37,8 +36,7 @@ export class OutboxPublisherService
 		private readonly configService: ConfigService
 	) {}
 
-	async onModuleInit(): Promise<void> {
-		await this.scrubPublishedLegacyDestinations();
+	onModuleInit(): void {
 		this.schedule(0);
 	}
 
@@ -182,8 +180,6 @@ export class OutboxPublisherService
 				}
 			});
 
-			const publishedPayload =
-				this.getPublishedPayloadWithoutLegacyDestination(event);
 			const result = await this.prisma.outboxEvent.updateMany({
 				where: {
 					id: event.id,
@@ -196,8 +192,7 @@ export class OutboxPublisherService
 					publishedAt: new Date(),
 					lockedAt: null,
 					lockedBy: null,
-					lastError: null,
-					...(publishedPayload ? { payload: publishedPayload } : {})
+					lastError: null
 				}
 			});
 			if (result.count !== 1) {
@@ -239,25 +234,6 @@ export class OutboxPublisherService
 		}
 	}
 
-	private getPublishedPayloadWithoutLegacyDestination(
-		event: OutboxEvent
-	): Prisma.InputJsonObject | null {
-		if (
-			event.eventType !== LEGACY_OUTBOX_EVENT_TYPE ||
-			!event.payload ||
-			typeof event.payload !== 'object' ||
-			Array.isArray(event.payload)
-		) {
-			return null;
-		}
-
-		return Object.fromEntries(
-			Object.entries(event.payload).filter(
-				([key]) => key !== 'destination'
-			)
-		) as Prisma.InputJsonObject;
-	}
-
 	private getEventHeaders(
 		value: Prisma.JsonValue
 	): Record<string, string | number | boolean> {
@@ -272,24 +248,6 @@ export class OutboxPublisherService
 					typeof entry[1] === 'boolean'
 			)
 		);
-	}
-
-	private async scrubPublishedLegacyDestinations(): Promise<void> {
-		const scrubbed = await this.prisma.$executeRaw(
-			Prisma.sql`
-				UPDATE "outbox_events"
-				SET "payload" = "payload" - 'destination'
-				WHERE "status" = 'PUBLISHED'::"OutboxEventStatus"
-					AND "event_type" = ${LEGACY_OUTBOX_EVENT_TYPE}
-					AND jsonb_typeof("payload") = 'object'
-					AND "payload" ? 'destination'
-			`
-		);
-		if (scrubbed > 0) {
-			this.logger.log(
-				`Removed legacy destinations from ${scrubbed} published outbox event(s)`
-			);
-		}
 	}
 
 	private getBackoffDelay(attempt: number): number {

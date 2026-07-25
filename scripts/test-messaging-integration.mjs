@@ -220,7 +220,8 @@ try {
 			try {
 				const payload = JSON.parse(message.content.toString('utf8'));
 				if (
-					payload?.schemaVersion !== 1 ||
+					payload?.schemaVersion !== 2 ||
+					payload?.eventType !== 'lead.integration.requested.v2' ||
 					payload?.integration !== 'webhook' ||
 					!payload?.lead?.id
 				) {
@@ -241,10 +242,11 @@ try {
 	await prisma.outboxEvent.createMany({
 		data: outboxEventIds.map((id, index) => ({
 			id,
-			eventType: 'lead.integration.requested.v1',
-			routingKey: 'lead.integration.webhook.v1',
+			eventType: 'lead.integration.requested.v2',
+			routingKey: 'lead.integration.webhook.v2',
 			payload: {
-				schemaVersion: 1,
+				schemaVersion: 2,
+				eventType: 'lead.integration.requested.v2',
 				integration: 'webhook',
 				source: 'widget',
 				entity: { id: `ci-widget-${index}`, name: 'CI smoke' },
@@ -252,7 +254,7 @@ try {
 					id: randomUUID(),
 					createdAt: new Date().toISOString()
 				},
-				destination: { webhookUrl: 'https://example.com' }
+				destination: { credentialRef: randomUUID() }
 			}
 		}))
 	});
@@ -334,7 +336,8 @@ try {
 			try {
 				const payload = JSON.parse(message.content.toString('utf8'));
 				if (
-					payload?.schemaVersion !== 1 ||
+					payload?.schemaVersion !== 2 ||
+					payload?.eventType !== 'lead.integration.requested.v2' ||
 					payload?.integration !== 'webhook'
 				) {
 					throw new Error('Manual retry payload is invalid');
@@ -352,10 +355,11 @@ try {
 		data: {
 			id: manualRetryOutboxId,
 			messageId: manualRetryEventId,
-			eventType: 'lead.integration.requested.v1',
+			eventType: 'lead.integration.requested.v2',
 			routingKey: 'manual.webhook',
 			payload: {
-				schemaVersion: 1,
+				schemaVersion: 2,
+				eventType: 'lead.integration.requested.v2',
 				integration: 'webhook',
 				source: 'widget',
 				entity: { id: 'ci-manual-widget', name: 'CI manual retry' },
@@ -363,7 +367,7 @@ try {
 					id: randomUUID(),
 					createdAt: new Date().toISOString()
 				},
-				destination: { webhookUrl: 'https://example.com' }
+				destination: { credentialRef: randomUUID() }
 			}
 		}
 	});
@@ -626,7 +630,8 @@ try {
 	const duplicateEventId = randomUUID();
 	createdEventIds.push(duplicateEventId);
 	const duplicatePayload = {
-		schemaVersion: 1,
+		schemaVersion: 2,
+		eventType: 'lead.integration.requested.v2',
 		integration: 'webhook',
 		source: 'widget',
 		entity: { id: 'ci-duplicate-widget', name: 'CI duplicate' },
@@ -634,7 +639,7 @@ try {
 			id: randomUUID(),
 			createdAt: new Date().toISOString()
 		},
-		destination: { webhookUrl: 'https://example.com' }
+		destination: { credentialRef: randomUUID() }
 	};
 	await prisma.integrationDeliveryReceipt.create({
 		data: {
@@ -648,7 +653,7 @@ try {
 		data: {
 			eventId: duplicateEventId,
 			integration: 'webhook',
-			routingKey: 'lead.integration.webhook.v1',
+			routingKey: 'lead.integration.webhook.v2',
 			payload: duplicatePayload,
 			attempts: 4,
 			lastError: 'CI duplicate guard'
@@ -656,7 +661,7 @@ try {
 	});
 	channel.publish(
 		'winwidget.events',
-		'lead.integration.webhook.v1',
+		'lead.integration.webhook.v2',
 		Buffer.from(JSON.stringify(duplicatePayload)),
 		{
 			persistent: true,
@@ -683,8 +688,10 @@ try {
 	createdEventIds.push(malformedEventId);
 	channel.publish(
 		'winwidget.events',
-		'lead.integration.webhook.v1',
-		Buffer.from('{"schemaVersion":1,"invalid":true}'),
+		'lead.integration.webhook.v2',
+		Buffer.from(
+			'{"schemaVersion":2,"eventType":"lead.integration.requested.v2","invalid":true}'
+		),
 		{
 			persistent: true,
 			messageId: malformedEventId,

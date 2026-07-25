@@ -8,7 +8,8 @@ describe('RabbitMqService topology', () => {
 			on: jest.fn(),
 			assertExchange: jest.fn().mockResolvedValue(undefined),
 			assertQueue: jest.fn().mockResolvedValue(undefined),
-			bindQueue: jest.fn().mockResolvedValue(undefined)
+			bindQueue: jest.fn().mockResolvedValue(undefined),
+			unbindQueue: jest.fn().mockResolvedValue(undefined)
 		} as unknown as ConfirmChannel;
 		const service = new RabbitMqService({
 			get: jest.fn()
@@ -21,11 +22,12 @@ describe('RabbitMqService topology', () => {
 			'winwidget.events',
 			'lead.integration.webhook.v2'
 		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
+		expect(channel.unbindQueue).toHaveBeenCalledWith(
 			'winwidget.lead-integration.webhook',
 			'winwidget.events',
 			'lead.integration.webhook.v1'
 		);
+		expect(channel.unbindQueue).toHaveBeenCalledTimes(5);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
 			'winwidget.payment-notification.email',
 			'winwidget.events',

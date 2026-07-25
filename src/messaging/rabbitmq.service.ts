@@ -2,7 +2,6 @@ import {
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
 	getManualRetryRoutingKey,
-	LEGACY_LEAD_INTEGRATION_ROUTING_KEYS,
 	LEAD_INTEGRATION_KINDS,
 	MANUAL_RETRY_EXCHANGE,
 	MESSAGING_KINDS,
@@ -443,12 +442,12 @@ export class RabbitMqService
 					kind as (typeof LEAD_INTEGRATION_KINDS)[number]
 				)
 			) {
-				await channel.bindQueue(
+				// Durable bindings survive deployments, so remove the retired
+				// v1 route explicitly instead of only stopping its declaration.
+				await channel.unbindQueue(
 					queue,
 					EVENTS_EXCHANGE,
-					LEGACY_LEAD_INTEGRATION_ROUTING_KEYS[
-						kind as (typeof LEAD_INTEGRATION_KINDS)[number]
-					]
+					`lead.integration.${kind}.v1`
 				);
 			}
 			await channel.bindQueue(

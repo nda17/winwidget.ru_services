@@ -12,9 +12,10 @@ describe('MessagingAdminService', () => {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
 			integration: 'webhook',
-			routingKey: 'lead.integration.webhook.v1',
+			routingKey: 'lead.integration.webhook.v2',
 			payload: {
-				schemaVersion: 1,
+				schemaVersion: 2,
+				eventType: 'lead.integration.requested.v2',
 				integration: 'webhook',
 				source: 'widget',
 				entity: { id: 'widget-1', name: 'Колесо' },
@@ -22,7 +23,9 @@ describe('MessagingAdminService', () => {
 					id: 'lead-1',
 					createdAt: '2026-07-24T00:00:00.000Z'
 				},
-				destination: { webhookUrl: 'https://example.com' }
+				destination: {
+					credentialRef: '33333333-3333-4333-8333-333333333333'
+				}
 			},
 			attempts: 4,
 			lastError: 'timeout',
@@ -51,16 +54,7 @@ describe('MessagingAdminService', () => {
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			{
-				snapshotLegacyEvent: jest.fn(async (_eventId, event) => ({
-					...event,
-					schemaVersion: 2,
-					eventType: 'lead.integration.requested.v2',
-					destination: {
-						credentialRef: '33333333-3333-4333-8333-333333333333'
-					}
-				}))
-			} as unknown as LeadIntegrationDestinationService,
+			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn().mockResolvedValue({})
 			} as unknown as AdminEventLogService
@@ -79,6 +73,7 @@ describe('MessagingAdminService', () => {
 				},
 				payload: expect.objectContaining({
 					schemaVersion: 2,
+					eventType: 'lead.integration.requested.v2',
 					destination: {
 						credentialRef: '33333333-3333-4333-8333-333333333333'
 					}
@@ -93,6 +88,55 @@ describe('MessagingAdminService', () => {
 				retryingAt: expect.any(String)
 			})
 		);
+	});
+
+	it('rejects a retired v1 lead retry before changing its state', async () => {
+		const failure = {
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId: '11111111-1111-4111-8111-111111111111',
+			integration: 'webhook',
+			payload: {
+				schemaVersion: 1,
+				integration: 'webhook',
+				source: 'widget',
+				entity: { id: 'widget-1', name: 'Колесо' },
+				lead: {
+					id: 'lead-1',
+					createdAt: '2026-07-24T00:00:00.000Z'
+				},
+				destination: { webhookUrl: 'https://example.com' }
+			},
+			resolvedAt: null,
+			retryingAt: null
+		};
+		const updateMany = jest.fn();
+		const outboxCreate = jest.fn();
+		const transaction = {
+			integrationDeliveryFailure: {
+				findUnique: jest.fn().mockResolvedValue(failure),
+				updateMany
+			},
+			outboxEvent: {
+				create: outboxCreate
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(async callback => callback(transaction))
+		} as unknown as PrismaService;
+		const service = new MessagingAdminService(
+			prisma,
+			{} as RabbitMqManagementService,
+			{} as LeadIntegrationDestinationService,
+			{
+				recordInTransaction: jest.fn()
+			} as unknown as AdminEventLogService
+		);
+
+		await expect(service.retryFailure(failure.id)).rejects.toThrow(
+			'Повтор устаревшего события интеграции недоступен'
+		);
+		expect(updateMany).not.toHaveBeenCalled();
+		expect(outboxCreate).not.toHaveBeenCalled();
 	});
 
 	it('reopens a failed backup job in the same transaction as manual retry Outbox', async () => {

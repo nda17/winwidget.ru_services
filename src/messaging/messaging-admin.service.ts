@@ -1,12 +1,12 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import {
 	LeadIntegrationEventPayload,
-	LeadIntegrationEventPayloadV1,
 	LeadIntegrationEventPayloadV2
 } from '@/messaging/lead-integration-event';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import {
 	getManualRetryRoutingKey,
+	LEAD_INTEGRATION_KINDS,
 	MESSAGING_KINDS,
 	MessagingKind,
 	OUTBOX_EVENT_TYPE
@@ -198,6 +198,16 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
+			if (
+				LEAD_INTEGRATION_KINDS.includes(
+					kind as (typeof LEAD_INTEGRATION_KINDS)[number]
+				) &&
+				!this.isLeadEventV2(failure.payload)
+			) {
+				throw new ConflictException(
+					'Повтор устаревшего события интеграции недоступен'
+				);
+			}
 			const retryToken = kind === 'database-backup' ? null : randomUUID();
 			const scheduledJobId = this.getScheduledJobId(
 				kind,
@@ -228,14 +238,7 @@ export class MessagingAdminService {
 				throw new ConflictException('Повторная отправка уже выполняется');
 			}
 
-			let retryPayload: Prisma.JsonValue = failure.payload;
-			if (this.isLeadEventV1(retryPayload)) {
-				retryPayload = (await this.leadDestination.snapshotLegacyEvent(
-					failure.eventId,
-					retryPayload as unknown as LeadIntegrationEventPayloadV1,
-					transaction
-				)) as unknown as Prisma.JsonValue;
-			}
+			const retryPayload: Prisma.JsonValue = failure.payload;
 			if (
 				failure.category === IntegrationErrorCategory.AUTH_CONFIGURATION &&
 				this.isLeadEventV2(retryPayload)
@@ -707,20 +710,8 @@ export class MessagingAdminService {
 			typeof payload === 'object' &&
 			!Array.isArray(payload) &&
 			payload.schemaVersion === 2 &&
+			payload.eventType === OUTBOX_EVENT_TYPE &&
 			typeof payload.integration === 'string' &&
-			Boolean(payload.destination)
-		);
-	}
-
-	private isLeadEventV1(payload: Prisma.JsonValue): boolean {
-		return (
-			Boolean(payload) &&
-			typeof payload === 'object' &&
-			!Array.isArray(payload) &&
-			payload.schemaVersion === 1 &&
-			typeof payload.integration === 'string' &&
-			typeof payload.source === 'string' &&
-			Boolean(payload.entity) &&
 			Boolean(payload.destination)
 		);
 	}

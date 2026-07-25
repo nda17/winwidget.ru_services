@@ -1,7 +1,6 @@
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
 import { INTEGRATION_KINDS } from '@/messaging/messaging.constants';
 import type { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
-import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
 import type { PrismaService } from '@/prisma.service';
 import {
@@ -101,17 +100,7 @@ describe('IntegrationWorkerService', () => {
 				rabbitMq,
 				delivery,
 				configService,
-				prisma,
-				{
-					snapshotLegacyEvent: jest.fn(async (_eventId, event) => ({
-						...event,
-						schemaVersion: 2,
-						eventType: 'lead.integration.requested.v2',
-						destination: {
-							credentialRef: '22222222-2222-4222-8222-222222222222'
-						}
-					}))
-				} as unknown as LeadIntegrationDestinationService
+				prisma
 			),
 			rabbitMq,
 			delivery,
@@ -124,7 +113,8 @@ describe('IntegrationWorkerService', () => {
 		({
 			content: Buffer.from(
 				JSON.stringify({
-					schemaVersion: 1,
+					schemaVersion: 2,
+					eventType: 'lead.integration.requested.v2',
 					integration: 'webhook',
 					source: 'widget',
 					entity: { id: 'widget-1', name: 'Колесо' },
@@ -132,7 +122,9 @@ describe('IntegrationWorkerService', () => {
 						id: 'lead-1',
 						createdAt: '2026-07-23T12:00:00.000Z'
 					},
-					destination: { webhookUrl: 'https://example.com' }
+					destination: {
+						credentialRef: '22222222-2222-4222-8222-222222222222'
+					}
 				})
 			),
 			properties: { messageId: '11111111-1111-4111-8111-111111111111' }
@@ -226,6 +218,45 @@ describe('IntegrationWorkerService', () => {
 
 		expect(shutdownFinished).toBe(true);
 		expect(rabbitMq.cancelConsumers).toHaveBeenCalledTimes(1);
+	});
+
+	it('rejects retired v1 lead events before delivery', async () => {
+		const { service, rabbitMq, delivery, prisma } = createService();
+		const message = createMessage();
+		message.content = Buffer.from(
+			JSON.stringify({
+				schemaVersion: 1,
+				integration: 'webhook',
+				source: 'widget',
+				entity: { id: 'widget-1', name: 'Колесо' },
+				lead: {
+					id: 'lead-1',
+					createdAt: '2026-07-23T12:00:00.000Z'
+				},
+				destination: { webhookUrl: 'https://example.com' }
+			})
+		);
+		message.properties.type = 'lead.integration.requested.v1';
+
+		await (service as any).handle('webhook', message);
+
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(
+			prisma.integrationDeliveryReceipt.create
+		).not.toHaveBeenCalled();
+		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
+			'webhook',
+			expect.objectContaining({ malformed: true }),
+			0,
+			'11111111-1111-4111-8111-111111111111',
+			'Invalid lead integration event payload',
+			'lead.integration.requested.v1',
+			expect.objectContaining({
+				category: 'PERMANENT',
+				normalizedCode: 'INVALID_EVENT_PAYLOAD'
+			})
+		);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
 	it('skips an event that already has a delivery receipt', async () => {

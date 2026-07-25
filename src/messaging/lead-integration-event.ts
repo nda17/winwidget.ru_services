@@ -63,16 +63,13 @@ interface LeadIntegrationEventBase {
 	lead: SerializedLeadIntegrationData;
 }
 
-export interface LeadIntegrationEventPayloadV1 extends LeadIntegrationEventBase {
-	schemaVersion: 1;
-	destination: {
-		email?: string;
-		webhookUrl?: string;
-		telegramChatId?: string;
-		bitrix24WebhookUrl?: string;
-		amoCrmDomain?: string;
-		amoCrmToken?: string;
-	};
+export interface ResolvedLeadIntegrationDestination {
+	email?: string;
+	webhookUrl?: string;
+	telegramChatId?: string;
+	bitrix24WebhookUrl?: string;
+	amoCrmDomain?: string;
+	amoCrmToken?: string;
 }
 
 export interface LeadIntegrationEventPayloadV2 extends LeadIntegrationEventBase {
@@ -84,14 +81,12 @@ export interface LeadIntegrationEventPayloadV2 extends LeadIntegrationEventBase 
 		| { credentialRef: string };
 }
 
-export type LeadIntegrationEventPayload =
-	| LeadIntegrationEventPayloadV1
-	| LeadIntegrationEventPayloadV2;
+export type LeadIntegrationEventPayload = LeadIntegrationEventPayloadV2;
 
 export interface ResolvedLeadIntegrationEventPayload extends LeadIntegrationEventBase {
-	schemaVersion: 1 | 2;
-	eventType?: typeof OUTBOX_EVENT_TYPE;
-	destination: LeadIntegrationEventPayloadV1['destination'];
+	schemaVersion: 2;
+	eventType: typeof OUTBOX_EVENT_TYPE;
+	destination: ResolvedLeadIntegrationDestination;
 }
 
 export interface LeadCredentialSnapshotData {
@@ -124,7 +119,7 @@ const fingerprint = (value: string): string =>
 
 export function getLeadTargetFingerprint(
 	integration: LeadCredentialSnapshotData['integration'],
-	destination: LeadIntegrationEventPayloadV1['destination']
+	destination: ResolvedLeadIntegrationDestination
 ): string {
 	if (integration === 'webhook' && destination.webhookUrl) {
 		return fingerprint(destination.webhookUrl.trim());
@@ -161,7 +156,7 @@ export function getCredentialSnapshotData(
 	integration: LeadCredentialSnapshotData['integration'],
 	source: LeadSource,
 	entityId: string,
-	destination: LeadIntegrationEventPayloadV1['destination']
+	destination: ResolvedLeadIntegrationDestination
 ): LeadCredentialSnapshotData {
 	const credentials: Prisma.InputJsonObject =
 		integration === 'webhook'
@@ -185,35 +180,6 @@ export function getCredentialSnapshotData(
 	};
 }
 
-export function toLeadIntegrationEventV2(
-	event: LeadIntegrationEventPayloadV1,
-	credentialRef?: string
-): LeadIntegrationEventPayloadV2 {
-	const destination =
-		event.integration === 'email' && event.destination.email
-			? { email: event.destination.email }
-			: event.integration === 'telegram' &&
-				  event.destination.telegramChatId
-				? { telegramChatId: event.destination.telegramChatId }
-				: credentialRef
-					? { credentialRef }
-					: null;
-	if (!destination) {
-		throw new Error(
-			`Integration destination is incomplete: ${event.integration}`
-		);
-	}
-	return {
-		schemaVersion: 2,
-		eventType: OUTBOX_EVENT_TYPE,
-		integration: event.integration,
-		source: event.source,
-		entity: event.entity,
-		lead: event.lead,
-		destination
-	};
-}
-
 export async function enqueueLeadIntegrationEvents(
 	transaction: Prisma.TransactionClient,
 	input: EnqueueLeadIntegrationEventsInput
@@ -223,7 +189,7 @@ export async function enqueueLeadIntegrationEvents(
 
 	const destinations: Array<{
 		integration: LeadIntegrationKind;
-		destination: LeadIntegrationEventPayloadV1['destination'];
+		destination: ResolvedLeadIntegrationDestination;
 	}> = [];
 
 	if (nonEmpty(integrations.email)) {
@@ -272,24 +238,19 @@ export async function enqueueLeadIntegrationEvents(
 	const snapshots: Array<LeadCredentialSnapshotData & { id: string }> = [];
 	const outboxEvents = destinations.map(({ integration, destination }) => {
 		const eventId = randomUUID();
-		const legacyEvent: LeadIntegrationEventPayloadV1 = {
-			schemaVersion: 1,
-			integration,
-			source: input.source,
-			entity: input.entity,
-			lead: {
-				...input.lead,
-				createdAt: input.lead.createdAt.toISOString()
-			},
-			destination
-		};
-		let credentialRef: string | undefined;
-		if (
+		let eventDestination: LeadIntegrationEventPayloadV2['destination'];
+		if (integration === 'email' && destination.email) {
+			eventDestination = { email: destination.email };
+		} else if (integration === 'telegram' && destination.telegramChatId) {
+			eventDestination = {
+				telegramChatId: destination.telegramChatId
+			};
+		} else if (
 			integration === 'webhook' ||
 			integration === 'bitrix24' ||
 			integration === 'amo-crm'
 		) {
-			credentialRef = randomUUID();
+			const credentialRef = randomUUID();
 			snapshots.push({
 				id: credentialRef,
 				...getCredentialSnapshotData(
@@ -300,8 +261,24 @@ export async function enqueueLeadIntegrationEvents(
 					destination
 				)
 			});
+			eventDestination = { credentialRef };
+		} else {
+			throw new Error(
+				`Integration destination is incomplete: ${integration}`
+			);
 		}
-		const payload = toLeadIntegrationEventV2(legacyEvent, credentialRef);
+		const payload: LeadIntegrationEventPayloadV2 = {
+			schemaVersion: 2,
+			eventType: OUTBOX_EVENT_TYPE,
+			integration,
+			source: input.source,
+			entity: input.entity,
+			lead: {
+				...input.lead,
+				createdAt: input.lead.createdAt.toISOString()
+			},
+			destination: eventDestination
+		};
 
 		return {
 			id: eventId,

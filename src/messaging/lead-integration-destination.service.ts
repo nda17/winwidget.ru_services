@@ -3,16 +3,14 @@ import {
 	getLeadTargetFingerprint,
 	LeadIntegrationConfigSnapshot,
 	LeadIntegrationEventPayload,
-	LeadIntegrationEventPayloadV1,
 	LeadIntegrationEventPayloadV2,
 	LeadSource,
 	ResolvedLeadIntegrationEventPayload,
-	toLeadIntegrationEventV2
+	ResolvedLeadIntegrationDestination
 } from '@/messaging/lead-integration-event';
 import { PrismaService } from '@/prisma.service';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
 
 export class IntegrationDestinationError extends Error {
 	constructor(
@@ -36,8 +34,6 @@ export class LeadIntegrationDestinationService {
 		eventId: string,
 		event: LeadIntegrationEventPayload
 	): Promise<ResolvedLeadIntegrationEventPayload> {
-		if (event.schemaVersion === 1) return event;
-
 		if (
 			event.integration === 'email' &&
 			'email' in event.destination &&
@@ -91,50 +87,6 @@ export class LeadIntegrationDestinationService {
 				snapshot.credentials
 			)
 		};
-	}
-
-	async snapshotLegacyEvent(
-		eventId: string,
-		event: LeadIntegrationEventPayloadV1,
-		transaction?: Prisma.TransactionClient
-	): Promise<LeadIntegrationEventPayloadV2> {
-		if (
-			event.integration === 'email' ||
-			event.integration === 'telegram'
-		) {
-			return toLeadIntegrationEventV2(event);
-		}
-
-		const client = transaction || this.prisma;
-		const existing = await client.integrationCredentialSnapshot.findUnique(
-			{
-				where: {
-					eventId_integration: {
-						eventId,
-						integration: event.integration
-					}
-				},
-				select: { id: true }
-			}
-		);
-		const credentialRef = existing?.id || randomUUID();
-		if (!existing) {
-			const snapshot = getCredentialSnapshotData(
-				eventId,
-				event.integration,
-				event.source,
-				event.entity.id,
-				event.destination
-			);
-			await client.integrationCredentialSnapshot.create({
-				data: {
-					id: credentialRef,
-					...snapshot,
-					credentials: snapshot.credentials
-				}
-			});
-		}
-		return toLeadIntegrationEventV2(event, credentialRef);
 	}
 
 	async refreshSnapshotFromCurrentConfig(
@@ -203,7 +155,7 @@ export class LeadIntegrationDestinationService {
 	private parseSnapshotCredentials(
 		integration: LeadIntegrationEventPayload['integration'],
 		value: Prisma.JsonValue
-	): LeadIntegrationEventPayloadV1['destination'] {
+	): ResolvedLeadIntegrationDestination {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) {
 			throw new IntegrationDestinationError(
 				'DESTINATION_SNAPSHOT_INVALID',
@@ -314,7 +266,7 @@ export class LeadIntegrationDestinationService {
 	private getDestinationFromConfig(
 		integration: 'webhook' | 'bitrix24' | 'amo-crm',
 		config: LeadIntegrationConfigSnapshot
-	): LeadIntegrationEventPayloadV1['destination'] {
+	): ResolvedLeadIntegrationDestination {
 		const destination =
 			integration === 'webhook'
 				? { webhookUrl: config.webhookUrl?.trim() }

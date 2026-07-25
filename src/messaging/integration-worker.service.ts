@@ -7,10 +7,8 @@ import {
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
 import {
 	LeadIntegrationEventPayload,
-	LeadIntegrationEventPayloadV1,
 	LEAD_SOURCES
 } from '@/messaging/lead-integration-event';
-import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import {
 	classifyIntegrationError,
 	IntegrationErrorClassification
@@ -88,8 +86,7 @@ export class IntegrationWorkerService
 		private readonly rabbitMq: RabbitMqService,
 		private readonly delivery: IntegrationDeliveryService,
 		private readonly configService: ConfigService,
-		private readonly prisma: PrismaService,
-		private readonly leadDestination: LeadIntegrationDestinationService
+		private readonly prisma: PrismaService
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -347,17 +344,13 @@ export class IntegrationWorkerService
 							safeReason: `${classification.safeReason}; automatic retry budget exhausted`
 						};
 					}
-					const safePayload = await this.prepareSafeLeadPayload(
-						eventId,
-						payload
-					);
 					await this.rabbitMq.publishDeadLetter(
 						kind,
-						safePayload,
+						payload,
 						nextAttempt,
 						eventId,
 						classification.safeReason,
-						this.getEventType(safePayload),
+						this.getEventType(payload),
 						this.getDeadLetterMetadata(
 							error,
 							classification,
@@ -686,11 +679,6 @@ export class IntegrationWorkerService
 		const retryToken = randomUUID();
 
 		await this.prisma.$transaction(async transaction => {
-			const safePayload = await this.prepareSafeLeadPayload(
-				eventId,
-				payload,
-				transaction
-			);
 			const scheduled =
 				await transaction.integrationDeliveryReceipt.updateMany({
 					where: {
@@ -725,9 +713,9 @@ export class IntegrationWorkerService
 				data: {
 					messageId: eventId,
 					deduplicationKey: `integration:${eventId}:${integration}:retry:${attempt}:${retryToken}`,
-					eventType: this.getEventType(safePayload),
+					eventType: this.getEventType(payload),
 					routingKey: INTEGRATION_ROUTING_KEYS[integration],
-					payload: safePayload as unknown as Prisma.InputJsonValue,
+					payload: payload as unknown as Prisma.InputJsonValue,
 					headers: {
 						'x-retry-attempt': attempt,
 						'x-first-failed-at': firstFailedAt.toISOString(),
@@ -766,19 +754,14 @@ export class IntegrationWorkerService
 			'x-delivery-token'
 		);
 		await this.prisma.$transaction(async transaction => {
-			const safePayload = await this.prepareSafeLeadPayload(
-				eventId,
-				payload,
-				transaction
-			);
 			await transaction.outboxEvent.createMany({
 				data: [
 					{
 						messageId: eventId,
 						deduplicationKey: `integration:${eventId}:${integration}:claim:${lockedAt.toISOString()}`,
-						eventType: this.getEventType(safePayload),
+						eventType: this.getEventType(payload),
 						routingKey: INTEGRATION_ROUTING_KEYS[integration],
-						payload: safePayload as unknown as Prisma.InputJsonValue,
+						payload: payload as unknown as Prisma.InputJsonValue,
 						headers: {
 							'x-retry-attempt': attempt,
 							'x-first-failed-at': firstFailedAt.toISOString(),
@@ -824,28 +807,6 @@ export class IntegrationWorkerService
 				? Math.random() * 0.1
 				: Math.random() * 0.2 - 0.1;
 		return Math.max(1000, Math.round(capped * (1 + jitter)));
-	}
-
-	private async prepareSafeLeadPayload(
-		eventId: string,
-		payload: WorkerEventPayload,
-		transaction?: Prisma.TransactionClient
-	): Promise<WorkerEventPayload> {
-		const lead = payload as Partial<LeadIntegrationEventPayloadV1>;
-		if (
-			lead.schemaVersion !== 1 ||
-			!lead.integration ||
-			!lead.source ||
-			!lead.entity?.id ||
-			!lead.destination
-		) {
-			return payload;
-		}
-		return this.leadDestination.snapshotLegacyEvent(
-			eventId,
-			lead as LeadIntegrationEventPayloadV1,
-			transaction
-		);
 	}
 
 	private getFirstFailedAt(message: ConsumeMessage): Date {
@@ -1045,8 +1006,7 @@ export class IntegrationWorkerService
 			Boolean(lead?.lead?.createdAt) &&
 			this.isValidLeadDestination(lead);
 		const versionValid =
-			lead?.schemaVersion === 1 ||
-			(lead?.schemaVersion === 2 && lead.eventType === OUTBOX_EVENT_TYPE);
+			lead?.schemaVersion === 2 && lead.eventType === OUTBOX_EVENT_TYPE;
 
 		if (
 			!commonValid ||
@@ -1070,39 +1030,24 @@ export class IntegrationWorkerService
 		) {
 			return false;
 		}
-		if (lead.schemaVersion === 2) {
-			if (lead.integration === 'email') {
-				return (
-					'email' in destination &&
-					typeof destination.email === 'string' &&
-					Boolean(destination.email.trim())
-				);
-			}
-			if (lead.integration === 'telegram') {
-				return (
-					'telegramChatId' in destination &&
-					typeof destination.telegramChatId === 'string' &&
-					Boolean(destination.telegramChatId.trim())
-				);
-			}
+		if (lead.integration === 'email') {
 			return (
-				'credentialRef' in destination &&
-				this.isUuid(destination.credentialRef)
+				'email' in destination &&
+				typeof destination.email === 'string' &&
+				Boolean(destination.email.trim())
 			);
 		}
-		const legacyDestination = lead.destination;
-		const expected =
-			lead.integration === 'email'
-				? legacyDestination.email
-				: lead.integration === 'telegram'
-					? legacyDestination.telegramChatId
-					: lead.integration === 'webhook'
-						? legacyDestination.webhookUrl
-						: lead.integration === 'bitrix24'
-							? legacyDestination.bitrix24WebhookUrl
-							: legacyDestination.amoCrmDomain &&
-								legacyDestination.amoCrmToken;
-		return typeof expected === 'string' && Boolean(expected.trim());
+		if (lead.integration === 'telegram') {
+			return (
+				'telegramChatId' in destination &&
+				typeof destination.telegramChatId === 'string' &&
+				Boolean(destination.telegramChatId.trim())
+			);
+		}
+		return (
+			'credentialRef' in destination &&
+			this.isUuid(destination.credentialRef)
+		);
 	}
 
 	private async deadLetterMalformed(
@@ -1143,9 +1088,7 @@ export class IntegrationWorkerService
 	}
 
 	private getEventType(payload: WorkerEventPayload): string {
-		return 'eventType' in payload
-			? payload.eventType
-			: 'lead.integration.requested.v1';
+		return payload.eventType;
 	}
 
 	private async collectDeadLetter(
@@ -1266,7 +1209,6 @@ export class IntegrationWorkerService
 				persisted = await this.persistIntegrationDeadLetter(
 					eventId,
 					kind,
-					payload,
 					upsert,
 					deliveryToken
 				);
@@ -1296,7 +1238,6 @@ export class IntegrationWorkerService
 	private async persistIntegrationDeadLetter(
 		eventId: string,
 		kind: IntegrationKind,
-		payload: Prisma.InputJsonValue,
 		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs,
 		deliveryToken: string | null
 	): Promise<boolean> {
@@ -1314,13 +1255,7 @@ export class IntegrationWorkerService
 			) {
 				return false;
 			}
-			const safeUpsert = await this.getSafeFailureUpsert(
-				transaction,
-				eventId,
-				payload,
-				upsert
-			);
-			await transaction.integrationDeliveryFailure.upsert(safeUpsert);
+			await transaction.integrationDeliveryFailure.upsert(upsert);
 			return true;
 		});
 	}
@@ -1370,13 +1305,7 @@ export class IntegrationWorkerService
 			) {
 				return false;
 			}
-			const safeUpsert = await this.getSafeFailureUpsert(
-				transaction,
-				eventId,
-				payload,
-				upsert
-			);
-			await transaction.integrationDeliveryFailure.upsert(safeUpsert);
+			await transaction.integrationDeliveryFailure.upsert(upsert);
 			return true;
 		});
 	}
@@ -1466,30 +1395,6 @@ export class IntegrationWorkerService
 			`
 		);
 		return rows.length === 1;
-	}
-
-	private async getSafeFailureUpsert(
-		transaction: Prisma.TransactionClient,
-		eventId: string,
-		payload: Prisma.InputJsonValue,
-		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs
-	): Promise<Prisma.IntegrationDeliveryFailureUpsertArgs> {
-		const safePayload = (await this.prepareSafeLeadPayload(
-			eventId,
-			payload as unknown as WorkerEventPayload,
-			transaction
-		)) as unknown as Prisma.InputJsonValue;
-		return {
-			...upsert,
-			create: {
-				...upsert.create,
-				payload: safePayload
-			},
-			update: {
-				...upsert.update,
-				payload: safePayload
-			}
-		};
 	}
 
 	private getDailySummaryJobId(
