@@ -1,4 +1,5 @@
 import { OutboxPublisherService } from '@/messaging/outbox-publisher.service';
+import type { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
 import type { PrismaService } from '@/prisma.service';
 import type { ConfigService } from '@nestjs/config';
@@ -47,11 +48,21 @@ describe('OutboxPublisherService', () => {
 		const configService = {
 			get: jest.fn()
 		} as unknown as ConfigService;
+		const heartbeat = {
+			markSuccessfulPoll: jest.fn(),
+			markSuccessfulPublish: jest.fn()
+		} as unknown as MessagingHeartbeatService;
 
 		return {
-			service: new OutboxPublisherService(prisma, rabbitMq, configService),
+			service: new OutboxPublisherService(
+				prisma,
+				rabbitMq,
+				configService,
+				heartbeat
+			),
 			prisma,
-			rabbitMq
+			rabbitMq,
+			heartbeat
 		};
 	};
 

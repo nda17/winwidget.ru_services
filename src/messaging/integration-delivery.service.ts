@@ -6,9 +6,17 @@ import {
 	ResolvedLeadIntegrationEventPayload
 } from '@/messaging/lead-integration-event';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
-import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
+import {
+	LimitReachedEmailEventPayload,
+	LimitReachedEventPayload,
+	LimitReachedTelegramEventPayload
+} from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
-import { IntegrationKind } from '@/messaging/messaging.constants';
+import {
+	IntegrationKind,
+	LIMIT_REACHED_EMAIL_EVENT_TYPE,
+	LIMIT_REACHED_TELEGRAM_EVENT_TYPE
+} from '@/messaging/messaging.constants';
 import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
 import { PrismaService } from '@/prisma.service';
 import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
@@ -236,13 +244,15 @@ export class IntegrationDeliveryService {
 					{ messageId: `<${eventId}.mailing@winwidget.ru>` }
 				);
 			} else {
-				await this.sendTelegramMessage(
-					'mailing-telegram',
+				await this.sendMailingTelegramMessages(
+					delivery.id,
+					delivery.campaignId,
 					delivery.recipient,
 					this.buildTelegramBroadcastMessages(
 						delivery.campaign.subject,
 						delivery.campaign.message
-					)
+					),
+					delivery.nextChunkIndex
 				);
 			}
 
@@ -273,39 +283,49 @@ export class IntegrationDeliveryService {
 	): Promise<void> {
 		const payload = event as LimitReachedEventPayload;
 		if (
-			payload?.schemaVersion !== 1 ||
-			payload?.eventType !== 'lead.limit.reached.v1' ||
+			payload?.schemaVersion !== 2 ||
 			!payload.entity?.id ||
 			!payload.entity?.name ||
-			!Number.isInteger(payload.limit) ||
-			!payload.destinations
+			!Number.isInteger(payload.limit)
 		) {
 			throw new Error('Invalid limit reached event payload');
 		}
 
 		if (kind === 'limit-email') {
-			for (const [index, email] of payload.destinations.emails.entries()) {
-				await this.emailService.sendLimitReachedNotification(
-					email,
-					payload.entity.name,
-					payload.limit,
-					{
-						messageId: `<${eventId}.limit.${index}@winwidget.ru>`
-					}
-				);
+			const emailPayload = payload as LimitReachedEmailEventPayload;
+			if (
+				emailPayload.eventType !== LIMIT_REACHED_EMAIL_EVENT_TYPE ||
+				typeof emailPayload.destination?.email !== 'string' ||
+				!emailPayload.destination.email.trim()
+			) {
+				throw new Error('Invalid limit reached email event payload');
 			}
+			await this.emailService.sendLimitReachedNotification(
+				emailPayload.destination.email,
+				emailPayload.entity.name,
+				emailPayload.limit,
+				{
+					messageId: `<${eventId}.limit@winwidget.ru>`
+				}
+			);
 			return;
 		}
 
-		const chatId = payload.destinations.telegramChatId;
-		if (!chatId) return;
+		const telegramPayload = payload as LimitReachedTelegramEventPayload;
+		if (
+			telegramPayload.eventType !== LIMIT_REACHED_TELEGRAM_EVENT_TYPE ||
+			typeof telegramPayload.destination?.telegramChatId !== 'string' ||
+			!telegramPayload.destination.telegramChatId.trim()
+		) {
+			throw new Error('Invalid limit reached Telegram event payload');
+		}
 		await this.sendTelegramMessage(
 			kind,
-			chatId,
+			telegramPayload.destination.telegramChatId,
 			[
 				[
 					'⚠️ <b>Лимит заявок исчерпан</b>',
-					`${this.escapeHtml(payload.entity.name)} принял последнюю заявку (${payload.limit} из ${payload.limit}).`,
+					`${this.escapeHtml(telegramPayload.entity.name)} принял последнюю заявку (${telegramPayload.limit} из ${telegramPayload.limit}).`,
 					'',
 					'Новые заявки больше не принимаются.',
 					'Для продолжения работы перейдите на платный тариф:',
@@ -314,6 +334,40 @@ export class IntegrationDeliveryService {
 			],
 			'HTML'
 		);
+	}
+
+	private async sendMailingTelegramMessages(
+		deliveryId: string,
+		campaignId: string,
+		chatId: string,
+		messages: string[],
+		nextChunkIndex: number
+	): Promise<void> {
+		if (
+			!Number.isInteger(nextChunkIndex) ||
+			nextChunkIndex < 0 ||
+			nextChunkIndex > messages.length
+		) {
+			throw new Error('Invalid Telegram mailing chunk progress');
+		}
+
+		for (let index = nextChunkIndex; index < messages.length; index += 1) {
+			await this.sendTelegramMessage('mailing-telegram', chatId, [
+				messages[index]
+			]);
+			const checkpoint = await this.prisma.mailingDelivery.updateMany({
+				where: {
+					id: deliveryId,
+					campaignId,
+					status: MailingDeliveryStatus.PROCESSING,
+					nextChunkIndex: index
+				},
+				data: { nextChunkIndex: index + 1 }
+			});
+			if (checkpoint.count !== 1) {
+				throw new Error('Telegram mailing chunk progress was lost');
+			}
+		}
 	}
 
 	private async completeMailingDelivery(

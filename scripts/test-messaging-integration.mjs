@@ -1,10 +1,12 @@
 import { PrismaClient } from '@prisma/client';
 import * as amqp from 'amqplib';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
 
 const require = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 const {
 	ScheduledTasksService
 } = require('../dist/src/maintenance/scheduled-tasks.service.js');
@@ -15,6 +17,7 @@ const rabbitManagementUrl = process.env.RABBITMQ_MANAGEMENT_URL;
 const rabbitUser = process.env.RABBITMQ_USER;
 const rabbitPassword = process.env.RABBITMQ_PASSWORD;
 const rabbitVhost = process.env.RABBITMQ_VHOST || 'winwidget';
+const rabbitContainerId = process.env.RABBITMQ_CONTAINER_ID;
 if (
 	!databaseUrl ||
 	!rabbitUrl ||
@@ -79,12 +82,14 @@ const waitFor = async (check, label, timeoutMs = 20_000) => {
 };
 
 const startProcess = (entry, extraEnv = {}) => {
+	const ownsTopology = entry.endsWith('outbox-publisher-main.js');
 	const child = spawn(process.execPath, [entry], {
 		env: {
 			...process.env,
 			MODE: 'development',
 			DATABASE_URL_DEVELOPMENT: databaseUrl,
 			RABBITMQ_URL: rabbitUrl,
+			RABBITMQ_ASSERT_TOPOLOGY: ownsTopology ? 'true' : 'false',
 			OUTBOX_POLL_INTERVAL_MS: '100',
 			MESSAGING_SERVICE_NAME: `ci-${entry}`,
 			...extraEnv
@@ -501,6 +506,140 @@ try {
 		return queues.every(queue => queue.consumerCount > 0);
 	}, 'maintenance worker consumers');
 
+	if (rabbitContainerId) {
+		const durableEventId = randomUUID();
+		createdEventIds.push(durableEventId);
+		await prisma.outboxEvent.create({
+			data: {
+				id: durableEventId,
+				eventType: 'lead.integration.requested.v2',
+				routingKey: 'lead.integration.email.v2',
+				payload: {
+					schemaVersion: 2,
+					eventType: 'lead.integration.requested.v2',
+					integration: 'email',
+					source: 'widget',
+					entity: { id: 'ci-restart-widget', name: 'CI restart' },
+					lead: {
+						id: randomUUID(),
+						createdAt: new Date().toISOString()
+					},
+					destination: { credentialRef: randomUUID() }
+				}
+			}
+		});
+		await waitFor(
+			() =>
+				prisma.outboxEvent
+					.findUnique({
+						where: { id: durableEventId },
+						select: { status: true }
+					})
+					.then(event => event?.status === 'PUBLISHED'),
+			'pre-restart durable Outbox publication'
+		);
+		await waitFor(
+			() =>
+				channel
+					.checkQueue('winwidget.lead-integration.email')
+					.then(queue => queue.messageCount > 0),
+			'pre-restart durable RabbitMQ message'
+		);
+
+		await channel.close();
+		channel = undefined;
+		await connection.close();
+		connection = undefined;
+		await execFileAsync('docker', ['restart', rabbitContainerId], {
+			timeout: 60_000
+		});
+		await waitFor(
+			() =>
+				getRabbitManagementStatus('/api/overview').then(
+					status => status >= 200 && status < 300
+				).catch(() => false),
+			'RabbitMQ after container restart',
+			60_000
+		);
+		connection = await amqp.connect(rabbitUrl);
+		channel = await connection.createChannel();
+
+		const durableMessage = await waitFor(
+			() =>
+				channel
+					.get('winwidget.lead-integration.email', { noAck: false })
+					.then(message =>
+						message?.properties.messageId === durableEventId
+							? message
+							: false
+					),
+			'durable message after RabbitMQ restart'
+		);
+		channel.ack(durableMessage);
+
+		await waitFor(async () => {
+			const queues = await Promise.all(
+				[
+					'winwidget.lead-integration.webhook',
+					'winwidget.lead-integration.webhook.dead-letter',
+					'winwidget.report.daily-summary.telegram',
+					'winwidget.report.daily-summary.telegram.dead-letter',
+					'winwidget.maintenance.database-backup',
+					'winwidget.maintenance.database-backup.dead-letter'
+				].map(queue => channel.checkQueue(queue))
+			);
+			return queues.every(queue => queue.consumerCount > 0);
+		}, 'worker consumers after RabbitMQ restart', 60_000);
+
+		const postRestartEventId = randomUUID();
+		createdEventIds.push(postRestartEventId);
+		await prisma.outboxEvent.create({
+			data: {
+				id: postRestartEventId,
+				eventType: 'lead.integration.requested.v2',
+				routingKey: 'lead.integration.email.v2',
+				payload: {
+					schemaVersion: 2,
+					eventType: 'lead.integration.requested.v2',
+					integration: 'email',
+					source: 'widget',
+					entity: {
+						id: 'ci-reconnected-widget',
+						name: 'CI reconnected'
+					},
+					lead: {
+						id: randomUUID(),
+						createdAt: new Date().toISOString()
+					},
+					destination: { credentialRef: randomUUID() }
+				}
+			}
+		});
+		await waitFor(
+			() =>
+				prisma.outboxEvent
+					.findUnique({
+						where: { id: postRestartEventId },
+						select: { status: true }
+					})
+					.then(event => event?.status === 'PUBLISHED'),
+			'Outbox publisher reconnect after RabbitMQ restart',
+			60_000
+		);
+		const postRestartMessage = await waitFor(
+			() =>
+				channel
+					.get('winwidget.lead-integration.email', { noAck: false })
+					.then(message =>
+						message?.properties.messageId === postRestartEventId
+							? message
+							: false
+					),
+			'post-restart RabbitMQ publication'
+		);
+		channel.ack(postRestartMessage);
+	}
+
 	const terminalDailySummaryJobId = randomUUID();
 	const terminalDailySummaryPeriodEnd = new Date();
 	const terminalDailySummaryPeriodStart = new Date(
@@ -712,7 +851,7 @@ try {
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: manual backup advisory lock, ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, terminal scheduled jobs and malformed -> DLQ -> PostgreSQL\n`
+		`Messaging integration smoke passed: manual backup advisory lock, ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, terminal scheduled jobs, malformed -> DLQ -> PostgreSQL${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);

@@ -1,23 +1,32 @@
-x-api-env: &api-env
+name: ${COMPOSE_PROJECT_NAME:-winwidget}
+
+x-runtime-env: &runtime-env
   APP_REVISION: ${APP_REVISION:-unknown}
   MODE: ${MODE:-production}
   NODE_ENV: production
+  DATABASE_URL_PRODUCTION: ${DATABASE_URL_PRODUCTION:-}
+
+x-smtp-env: &smtp-env
+  SMTP_LOGIN: ${SMTP_LOGIN}
+  SMTP_PASSWORD: ${SMTP_PASSWORD}
+  SMTP_SERVER: ${SMTP_SERVER}
+  SMTP_CONNECTION_TIMEOUT_MS: ${SMTP_CONNECTION_TIMEOUT_MS:-5000}
+  SMTP_GREETING_TIMEOUT_MS: ${SMTP_GREETING_TIMEOUT_MS:-5000}
+  SMTP_SOCKET_TIMEOUT_MS: ${SMTP_SOCKET_TIMEOUT_MS:-15000}
+
+x-api-env: &api-env
+  <<: [*runtime-env, *smtp-env]
   PORT: ${PORT:-4200}
   API_LISTEN_HOST: ${API_LISTEN_HOST:-127.0.0.1}
+  TRUST_PROXY: ${TRUST_PROXY:-loopback}
   PRODUCTION_HOST: ${PRODUCTION_HOST}
-  DEVELOPMENT_HOST: ${DEVELOPMENT_HOST}
   AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
   TELEGRAM_WEBHOOK_HOST: ${TELEGRAM_WEBHOOK_HOST:-https://api.winwidget.ru}
-  DATABASE_URL_PRODUCTION: ${DATABASE_URL_PRODUCTION:-}
-  DATABASE_URL_DEVELOPMENT: ${DATABASE_URL_DEVELOPMENT:-}
   JWT_SECRET: ${JWT_SECRET}
   RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY}
   RECAPTCHA_CLIENT_URL: ${RECAPTCHA_CLIENT_URL}
   RECAPTCHA_ENABLED: ${RECAPTCHA_ENABLED:-true}
   RECAPTCHA_MIN_SCORE: ${RECAPTCHA_MIN_SCORE:-0.5}
-  SMTP_LOGIN: ${SMTP_LOGIN}
-  SMTP_PASSWORD: ${SMTP_PASSWORD}
-  SMTP_SERVER: ${SMTP_SERVER}
   SMSAERO_EMAIL: ${SMSAERO_EMAIL}
   SMSAERO_API_KEY: ${SMSAERO_API_KEY}
   SMSAERO_SIGN: ${SMSAERO_SIGN}
@@ -34,8 +43,6 @@ x-api-env: &api-env
   VK_CLIENT_SECRET: ${VK_CLIENT_SECRET:-}
   VK_SERVICE_TOKEN: ${VK_SERVICE_TOKEN:-}
   VK_CALLBACK_URL: ${VK_CALLBACK_URL:-}
-  YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID}
-  YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY}
   YOOKASSA_PRODUCTION_SHOP_ID: ${YOOKASSA_PRODUCTION_SHOP_ID}
   YOOKASSA_PRODUCTION_SECRET_KEY: ${YOOKASSA_PRODUCTION_SECRET_KEY}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
@@ -55,33 +62,64 @@ x-api-env: &api-env
   S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL}
   S3_KEY_PREFIX: ${S3_KEY_PREFIX:-}
   S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
-  RABBITMQ_URL: ${RABBITMQ_URL}
   RABBITMQ_MANAGEMENT_URL: ${RABBITMQ_MANAGEMENT_URL:-http://127.0.0.1:15672}
-  RABBITMQ_USER: ${RABBITMQ_USER}
-  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD}
+  RABBITMQ_MONITOR_USER: ${RABBITMQ_MONITOR_USER}
+  RABBITMQ_MONITOR_PASSWORD: ${RABBITMQ_MONITOR_PASSWORD}
   RABBITMQ_VHOST: ${RABBITMQ_VHOST:-winwidget}
-  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
-  OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
-  OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-7}
+  MESSAGING_ALERTS_ENABLED: ${MESSAGING_ALERTS_ENABLED:-true}
+  MESSAGING_ACTIVITY_STALE_MS: ${MESSAGING_ACTIVITY_STALE_MS:-300000}
+  MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD: ${MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD:-100}
+
+x-integration-worker-env: &integration-worker-env
+  <<: [*runtime-env, *smtp-env]
+  TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
+  RABBITMQ_URL: ${RABBITMQ_INTEGRATION_WORKER_URL}
+  RABBITMQ_CONNECTION_NAME: winwidget-integration-worker
+  RABBITMQ_ASSERT_TOPOLOGY: 'false'
+  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
+  MESSAGING_SERVICE_NAME: integration-worker
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram}
+  INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
+  INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
+  SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
+  SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
+  MAILING_EMAIL_RATE_PER_SECOND: ${MAILING_EMAIL_RATE_PER_SECOND:-5}
+  MAILING_TELEGRAM_RATE_PER_SECOND: ${MAILING_TELEGRAM_RATE_PER_SECOND:-10}
+
+x-maintenance-worker-env: &maintenance-worker-env
+  <<: *runtime-env
+  DATABASE_BACKUP_URL: ${DATABASE_BACKUP_URL:-}
+  TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
+  RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
+  RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
+  RABBITMQ_ASSERT_TOPOLOGY: 'false'
+  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   MAINTENANCE_WORKER_PREFETCH: ${MAINTENANCE_WORKER_PREFETCH:-1}
+  MESSAGING_SERVICE_NAME: maintenance-worker
+  MAINTENANCE_WORKER_KINDS: ${MAINTENANCE_WORKER_KINDS:-database-backup}
   SCHEDULED_JOB_POLL_INTERVAL_MS: ${SCHEDULED_JOB_POLL_INTERVAL_MS:-30000}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
   SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
-  MESSAGING_ALERTS_ENABLED: ${MESSAGING_ALERTS_ENABLED:-true}
-  INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram}
-  MAINTENANCE_WORKER_KINDS: ${MAINTENANCE_WORKER_KINDS:-database-backup}
-  MAILING_EMAIL_RATE_PER_SECOND: ${MAILING_EMAIL_RATE_PER_SECOND:-5}
-  MAILING_TELEGRAM_RATE_PER_SECOND: ${MAILING_TELEGRAM_RATE_PER_SECOND:-10}
+
+x-outbox-publisher-env: &outbox-publisher-env
+  <<: *runtime-env
+  RABBITMQ_URL: ${RABBITMQ_PUBLISHER_URL}
+  RABBITMQ_CONNECTION_NAME: winwidget-outbox-publisher
+  RABBITMQ_ASSERT_TOPOLOGY: 'true'
+  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+  MESSAGING_SERVICE_NAME: outbox-publisher
+  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+  OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+  OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-7}
 
 services:
   rabbitmq:
     image: rabbitmq:4.2-management-alpine
     hostname: winwidget-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_ADMIN_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_ADMIN_PASSWORD}
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-winwidget}
     ports:
       - '127.0.0.1:5672:5672'
@@ -104,48 +142,55 @@ services:
         APP_REVISION: ${APP_REVISION:-unknown}
     environment: *api-env
     network_mode: host
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.PORT||4200)+'/api/v1/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    stop_grace_period: 30s
     restart: unless-stopped
 
   outbox-publisher:
     image: winwidget-api:${APP_VERSION:-latest}
-    environment:
-      <<: *api-env
-      RABBITMQ_CONNECTION_NAME: winwidget-outbox-publisher
-      MESSAGING_SERVICE_NAME: outbox-publisher
+    environment: *outbox-publisher-env
     network_mode: host
     depends_on:
       rabbitmq:
         condition: service_healthy
     command: ['node', 'dist/src/outbox-publisher-main.js']
+    stop_grace_period: 30s
     restart: unless-stopped
 
   integration-worker:
     image: winwidget-api:${APP_VERSION:-latest}
-    environment:
-      <<: *api-env
-      RABBITMQ_CONNECTION_NAME: winwidget-integration-worker
-      MESSAGING_SERVICE_NAME: integration-worker
+    environment: *integration-worker-env
     network_mode: host
     depends_on:
       rabbitmq:
         condition: service_healthy
+      outbox-publisher:
+        condition: service_started
     command: ['node', 'dist/src/integration-worker-main.js']
     stop_grace_period: 30s
     restart: unless-stopped
 
   maintenance-worker:
     image: winwidget-api:${APP_VERSION:-latest}
-    environment:
-      <<: *api-env
-      DATABASE_BACKUP_URL: ${DATABASE_BACKUP_URL:-}
-      RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
-      MESSAGING_SERVICE_NAME: maintenance-worker
+    environment: *maintenance-worker-env
     network_mode: host
     tmpfs:
       - /tmp:size=64m,mode=1777
     depends_on:
       rabbitmq:
         condition: service_healthy
+      outbox-publisher:
+        condition: service_started
     command: ['node', 'dist/src/maintenance-worker-main.js']
     stop_grace_period: 30s
     restart: unless-stopped
@@ -159,8 +204,10 @@ services:
         APP_REVISION: ${APP_REVISION:-unknown}
     profiles:
       - migration
-    environment: *api-env
+    environment: *runtime-env
     command: ['./node_modules/.bin/prisma', 'migrate', 'deploy']
 
 volumes:
   winwidget-rabbitmq-data:
+    external: true
+    name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}

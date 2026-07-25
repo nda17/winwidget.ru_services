@@ -1,4 +1,5 @@
 import { PrismaService } from '@/prisma.service';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
 import {
 	EnqueueScheduledJobInput,
 	RecoverExpiredScheduledJobsResult,
@@ -679,20 +680,22 @@ export class ScheduledJobsService {
 		event: ScheduledJobOutboxEvent,
 		availableAt: Date
 	): Promise<void> {
+		const payload = {
+			...(event.payload ?? {}),
+			jobId: job.id,
+			jobType: job.jobType,
+			scheduleKey: job.scheduleKey,
+			periodStart: job.periodStart?.toISOString() ?? null,
+			periodEnd: job.periodEnd?.toISOString() ?? null
+		} as Prisma.InputJsonObject;
 		await transaction.outboxEvent.create({
 			data: {
 				messageId: job.id,
 				eventType: event.eventType,
 				routingKey: event.routingKey,
 				availableAt,
-				payload: {
-					...(event.payload ?? {}),
-					jobId: job.id,
-					jobType: job.jobType,
-					scheduleKey: job.scheduleKey,
-					periodStart: job.periodStart?.toISOString() ?? null,
-					periodEnd: job.periodEnd?.toISOString() ?? null
-				} as Prisma.InputJsonObject
+				headers: createMessagingHeaders({ messageId: job.id }),
+				payload
 			}
 		});
 	}

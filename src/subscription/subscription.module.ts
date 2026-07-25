@@ -5,6 +5,7 @@ import { SubscriptionExpiryService } from '@/subscription/subscription-expiry.se
 import { SubscriptionController } from '@/subscription/subscription.controller';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
+import { TelegramInfoTransportModule } from '@/telegram-bot/telegram-info-transport.module';
 import { Module } from '@nestjs/common';
 
 @Module({
@@ -12,7 +13,8 @@ import { Module } from '@nestjs/common';
 		AuthModule,
 		AdminEventLogModule,
 		EmailModule,
-		TelegramBotModule
+		TelegramBotModule,
+		TelegramInfoTransportModule
 	],
 	controllers: [SubscriptionController],
 	providers: [SubscriptionService, SubscriptionExpiryService],

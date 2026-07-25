@@ -5,13 +5,28 @@ import {
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-interface RabbitQueueInfo {
+export interface RabbitQueueInfo {
 	name: string;
 	messages: number;
 	messages_ready: number;
 	messages_unacknowledged: number;
 	consumers: number;
 	state?: string;
+}
+
+export interface RabbitNodeInfo {
+	name: string;
+	running?: boolean;
+	mem_alarm?: boolean;
+	disk_free_alarm?: boolean;
+	partitions?: string[];
+}
+
+export interface RabbitBrokerHealth {
+	nodes: RabbitNodeInfo[];
+	alarmNodes: string[];
+	stoppedNodes: string[];
+	partitionedNodes: string[];
 }
 
 @Injectable()
@@ -43,6 +58,22 @@ export class RabbitMqManagementService {
 		return `RabbitMQ ${overview.rabbitmq_version || 'доступен'}`;
 	}
 
+	async getBrokerHealth(): Promise<RabbitBrokerHealth> {
+		const nodes = await this.request<RabbitNodeInfo[]>('/api/nodes');
+		return {
+			nodes,
+			alarmNodes: nodes
+				.filter(node => node.mem_alarm || node.disk_free_alarm)
+				.map(node => node.name),
+			stoppedNodes: nodes
+				.filter(node => node.running === false)
+				.map(node => node.name),
+			partitionedNodes: nodes
+				.filter(node => (node.partitions?.length || 0) > 0)
+				.map(node => node.name)
+		};
+	}
+
 	getMainQueueName(kind: MessagingKind): string {
 		return MESSAGING_QUEUE_NAMES[kind];
 	}
@@ -55,10 +86,14 @@ export class RabbitMqManagementService {
 			this.configService
 				.get<string>('RABBITMQ_MANAGEMENT_URL')
 				?.replace(/\/$/, '') || 'http://127.0.0.1:15672';
-		const user = this.configService.get<string>('RABBITMQ_USER');
-		const password = this.configService.get<string>('RABBITMQ_PASSWORD');
+		const user = this.configService.get<string>('RABBITMQ_MONITOR_USER');
+		const password = this.configService.get<string>(
+			'RABBITMQ_MONITOR_PASSWORD'
+		);
 		if (!user || !password) {
-			throw new Error('Не настроены RABBITMQ_USER или RABBITMQ_PASSWORD');
+			throw new Error(
+				'Не настроены RABBITMQ_MONITOR_USER или RABBITMQ_MONITOR_PASSWORD'
+			);
 		}
 
 		const response = await fetch(`${baseUrl}${path}`, {

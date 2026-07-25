@@ -1,14 +1,9 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { CreateWidgetDto } from '@/widget/dto/create-widget.dto';
-import { SubmitLeadDto } from '@/widget/dto/submit-lead.dto';
 import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
 import { WidgetService } from '@/widget/widget.service';
 import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
-import {
-	getWidgetRequestDomain,
-	isWidgetDirectPageRequest
-} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -19,7 +14,6 @@ import {
 	Patch,
 	Post,
 	Query,
-	Req,
 	Res,
 	UploadedFile,
 	UseInterceptors,
@@ -28,7 +22,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 
 @Controller('widgets')
 export class WidgetController {
@@ -156,65 +150,5 @@ export class WidgetController {
 			page ? parseInt(page) : 1,
 			limit ? parseInt(limit) : 50
 		);
-	}
-
-	// Public endpoint — no auth
-	@HttpCode(200)
-	@UsePipes(new ValidationPipe({ whitelist: true }))
-	@Post('submit')
-	async submitLead(@Body() dto: SubmitLeadDto, @Req() req: Request) {
-		return this.widgetService.submitLead(
-			dto,
-			undefined,
-			getWidgetRequestDomain(req),
-			isWidgetDirectPageRequest(req, 'page-wheel', dto.key)
-		);
-	}
-
-	// Serve widget.js — called from /widget/:key.js outside /api prefix
-	@HttpCode(200)
-	@Get('serve/:key')
-	async serveWidgetConfig(
-		@Param('key') key: string,
-		@Req() req: Request,
-		@Res() res: Response
-	) {
-		const config = await this.widgetService.getWidgetConfig(
-			key,
-			getWidgetRequestDomain(req),
-			isWidgetDirectPageRequest(req, 'page-wheel', key)
-		);
-
-		if (!config) {
-			res
-				.status(200)
-				.type('application/javascript')
-				.send('/* widget inactive */');
-			return;
-		}
-
-		const js = this.buildWidgetJs(key, config);
-		res.status(200).type('application/javascript').send(js);
-	}
-
-	private buildWidgetJs(key: string, config: any): string {
-		const configJson = JSON.stringify(config);
-		return `
-(function(d, w) {
-  if (w.__ww_loaded_${key}) return;
-  w.__ww_loaded_${key} = true;
-  var config = ${configJson};
-  config.key = '${key}';
-  config.apiUrl = '${process.env.WIDGET_API_URL || 'https://winwidget.ru/api'}';
-
-  var s = d.createElement('script');
-  s.async = true;
-  s.src = '${process.env.WIDGET_RUNTIME_URL || 'https://winwidget.ru'}/widget-runtime.js?' + Date.now();
-  s.onload = function() {
-    if (w.WinWidget) w.WinWidget.init(config);
-  };
-  d.head.appendChild(s);
-})(document, window);
-`.trim();
 	}
 }

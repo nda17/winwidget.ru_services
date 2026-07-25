@@ -11,6 +11,9 @@ import {
 	MessagingKind,
 	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
+import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
+import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
 import { SCHEDULED_JOB_TYPES } from '@/scheduled-jobs/scheduled-jobs.types';
@@ -127,13 +130,43 @@ export class MessagingAdminService {
 				item => item.service === service
 			);
 			const latest = instances[0]?.lastSeenAt || null;
+			const activity = instances.reduce(
+				(result, instance) => {
+					const metadata = parseMessagingHeartbeatMetadata(
+						instance.metadata
+					);
+					for (const key of [
+						'lastSuccessfulPollAt',
+						'lastSuccessfulPublishAt',
+						'lastSuccessfulConsumeAt'
+					] as const) {
+						const value = metadata[key];
+						if (
+							value &&
+							(!result[key] ||
+								Date.parse(value) > Date.parse(result[key] as string))
+						) {
+							result[key] = value;
+						}
+					}
+					return result;
+				},
+				{} as {
+					lastSuccessfulPollAt?: string;
+					lastSuccessfulPublishAt?: string;
+					lastSuccessfulConsumeAt?: string;
+				}
+			);
 			return {
 				service,
 				status: latest && latest >= staleBefore ? 'ok' : 'down',
 				activeInstances: instances.filter(
 					item => item.lastSeenAt >= staleBefore
 				).length,
-				lastSeenAt: latest?.toISOString() || null
+				lastSeenAt: latest?.toISOString() || null,
+				lastSuccessfulPollAt: activity.lastSuccessfulPollAt || null,
+				lastSuccessfulPublishAt: activity.lastSuccessfulPublishAt || null,
+				lastSuccessfulConsumeAt: activity.lastSuccessfulConsumeAt || null
 			};
 		});
 
@@ -182,7 +215,7 @@ export class MessagingAdminService {
 		};
 	}
 
-	async retryFailure(id: string) {
+	async retryFailure(id: string, adminId: string, request?: Request) {
 		const staleRetryBefore = new Date(Date.now() - 5 * 60 * 1000);
 		const retryingAt = new Date();
 		const result = await this.prisma.$transaction(async transaction => {
@@ -208,15 +241,29 @@ export class MessagingAdminService {
 					'Повтор устаревшего события интеграции недоступен'
 				);
 			}
+			const retryPayload: Prisma.JsonValue = failure.payload;
+			const retryEventType = this.getFailureEventType(retryPayload);
+			try {
+				assertMessagingEventContract(retryPayload, {
+					eventType: retryEventType,
+					routingKey: getManualRetryRoutingKey(kind),
+					messageId: failure.eventId,
+					kind
+				});
+			} catch {
+				throw new ConflictException(
+					'Повтор события с некорректным контрактом недоступен'
+				);
+			}
 			const retryToken = kind === 'database-backup' ? null : randomUUID();
 			const scheduledJobId = this.getScheduledJobId(
 				kind,
 				failure.eventId,
-				failure.payload
+				retryPayload
 			);
 			const mailingDelivery =
 				kind === 'mailing-email' || kind === 'mailing-telegram'
-					? this.getMailingDeliveryReference(failure.payload)
+					? this.getMailingDeliveryReference(retryPayload)
 					: null;
 			const claimed =
 				await transaction.integrationDeliveryFailure.updateMany({
@@ -238,7 +285,6 @@ export class MessagingAdminService {
 				throw new ConflictException('Повторная отправка уже выполняется');
 			}
 
-			const retryPayload: Prisma.JsonValue = failure.payload;
 			if (
 				failure.category === IntegrationErrorCategory.AUTH_CONFIGURATION &&
 				this.isLeadEventV2(retryPayload)
@@ -283,20 +329,36 @@ export class MessagingAdminService {
 			await transaction.outboxEvent.create({
 				data: {
 					messageId: failure.eventId,
-					eventType: this.getFailureEventType(
-						retryPayload as unknown as Prisma.JsonValue
-					),
+					eventType: retryEventType,
 					routingKey: getManualRetryRoutingKey(kind),
 					payload: retryPayload as Prisma.InputJsonValue,
-					...(retryToken
-						? {
-								headers: {
-									'x-retry-attempt': 0,
-									'x-delivery-token': retryToken
+					headers: createMessagingHeaders({
+						messageId: failure.eventId,
+						causationId: failure.eventId,
+						...(retryToken
+							? {
+									headers: {
+										'x-retry-attempt': 0,
+										'x-delivery-token': retryToken
+									}
 								}
-							}
-						: {})
+							: {})
+					})
 				}
+			});
+			await this.adminEventLog.recordInTransaction(transaction, {
+				adminId,
+				section: 'MESSAGING',
+				action: 'MESSAGING_FAILURE_RETRY',
+				description: `Повторно отправлено событие интеграции ${kind}`,
+				entityType: 'integration_delivery_failure',
+				entityId: failure.id,
+				entityLabel: kind,
+				metadata: {
+					eventId: failure.eventId,
+					integration: kind
+				},
+				request
 			});
 
 			return { failure, kind };

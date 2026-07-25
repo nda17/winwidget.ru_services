@@ -1,3 +1,4 @@
+import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import {
 	AdminBroadcastAudience,
 	SendAdminBroadcastDto
@@ -7,6 +8,7 @@ import {
 	MailingDeliveryEventPayload,
 	serializeMailingDeliveryEvent
 } from '@/messaging/mailing-delivery-event';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
 import { PrismaService } from '@/prisma.service';
 import {
 	BadRequestException,
@@ -19,9 +21,11 @@ import {
 	MailingCampaignStatus,
 	MailingDeliveryChannel,
 	MailingDeliveryStatus,
+	Prisma,
 	SubscriptionStatus,
 	UserStatus
 } from '@prisma/client';
+import { Request } from 'express';
 import { randomUUID } from 'crypto';
 
 const TERMINAL_CAMPAIGN_STATUSES: MailingCampaignStatus[] = [
@@ -32,14 +36,23 @@ const TERMINAL_CAMPAIGN_STATUSES: MailingCampaignStatus[] = [
 
 @Injectable()
 export class MailingService {
-	constructor(private readonly prisma: PrismaService) {}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly adminEventLog: AdminEventLogService
+	) {}
 
-	async createAdminBroadcast(adminId: string, dto: SendAdminBroadcastDto) {
+	async createAdminBroadcast(
+		adminId: string,
+		dto: SendAdminBroadcastDto,
+		idempotencyKey: string,
+		request?: Request
+	) {
 		const subject = dto.subject.trim();
 		const message = dto.message.trim();
 		const requestedChannel = dto.channel ?? 'EMAIL';
+		const normalizedIdempotencyKey = idempotencyKey.trim().toLowerCase();
 
-		if (!subject || !message) {
+		if (!subject || !message || !normalizedIdempotencyKey) {
 			throw new BadRequestException('Тема и текст рассылки обязательны');
 		}
 
@@ -67,53 +80,110 @@ export class MailingService {
 			}))
 		];
 		const now = new Date();
+		const campaignStatus = deliveries.length
+			? MailingCampaignStatus.QUEUED
+			: MailingCampaignStatus.COMPLETED;
 
-		await this.prisma.$transaction(
+		const persistedCampaignId = await this.prisma.$transaction(
 			async transaction => {
+				await transaction.$executeRaw(
+					Prisma.sql`
+							SELECT pg_advisory_xact_lock(
+								hashtextextended(
+									CAST(${`mailing:${adminId}:${normalizedIdempotencyKey}`} AS text),
+									0::bigint
+								)
+							)
+						`
+				);
+				const repeatedRequest =
+					await transaction.mailingCampaign.findUnique({
+						where: {
+							adminId_idempotencyKey: {
+								adminId,
+								idempotencyKey: normalizedIdempotencyKey
+							}
+						}
+					});
+				if (repeatedRequest) {
+					this.assertMatchingIdempotentRequest(repeatedRequest, {
+						subject,
+						message,
+						audience: dto.audience,
+						requestedChannel
+					});
+					return repeatedRequest.id;
+				}
+
 				await transaction.mailingCampaign.create({
 					data: {
 						id: campaignId,
 						adminId,
+						idempotencyKey: normalizedIdempotencyKey,
 						subject,
 						message,
 						audience: dto.audience,
 						requestedChannel,
-						status: deliveries.length
-							? MailingCampaignStatus.QUEUED
-							: MailingCampaignStatus.COMPLETED,
+						status: campaignStatus,
 						recipientCount: deliveries.length,
 						emailRecipientCount: emailRecipients.length,
 						telegramRecipientCount: telegramRecipients.length,
 						completedAt: deliveries.length ? null : now
 					}
 				});
-				if (!deliveries.length) return;
+				if (deliveries.length) {
+					await transaction.mailingDelivery.createMany({
+						data: deliveries
+					});
+					await transaction.outboxEvent.createMany({
+						data: deliveries.map(delivery => {
+							const eventId = randomUUID();
+							const payload: MailingDeliveryEventPayload = {
+								schemaVersion: 1,
+								eventType: 'mailing.delivery.requested.v1',
+								campaignId,
+								deliveryId: delivery.id,
+								channel: delivery.channel
+							};
+							return {
+								id: eventId,
+								messageId: eventId,
+								eventType: payload.eventType,
+								routingKey: getMailingDeliveryRoutingKey(delivery.channel),
+								payload: serializeMailingDeliveryEvent(payload),
+								headers: createMessagingHeaders({
+									messageId: eventId
+								})
+							};
+						})
+					});
+				}
 
-				await transaction.mailingDelivery.createMany({
-					data: deliveries
+				await this.adminEventLog.recordInTransaction(transaction, {
+					adminId,
+					section: 'MAILINGS',
+					action: 'MAILING_BROADCAST_SEND',
+					description: `Ручная рассылка: ${subject}`,
+					entityType: 'mailing',
+					entityId: campaignId,
+					entityLabel: subject,
+					metadata: {
+						audience: dto.audience,
+						channel: requestedChannel,
+						campaignId,
+						recipientCount: deliveries.length,
+						emailRecipientCount: emailRecipients.length,
+						telegramRecipientCount: telegramRecipients.length,
+						status: campaignStatus
+					},
+					request
 				});
-				await transaction.outboxEvent.createMany({
-					data: deliveries.map(delivery => {
-						const payload: MailingDeliveryEventPayload = {
-							schemaVersion: 1,
-							eventType: 'mailing.delivery.requested.v1',
-							campaignId,
-							deliveryId: delivery.id,
-							channel: delivery.channel
-						};
-						return {
-							id: randomUUID(),
-							eventType: payload.eventType,
-							routingKey: getMailingDeliveryRoutingKey(delivery.channel),
-							payload: serializeMailingDeliveryEvent(payload)
-						};
-					})
-				});
+				return campaignId;
 			},
 			{ maxWait: 5000, timeout: 30_000 }
 		);
 
-		return this.getCampaign(campaignId);
+		return this.getCampaign(persistedCampaignId);
 	}
 
 	async getCampaigns(page = 1, limit = 20) {
@@ -146,8 +216,15 @@ export class MailingService {
 		return this.serializeCampaign(campaign);
 	}
 
-	async cancelCampaign(id: string) {
-		await this.prisma.$transaction(async transaction => {
+	async cancelCampaign(id: string, adminId: string, request?: Request) {
+		const campaign = await this.prisma.$transaction(async transaction => {
+			await transaction.$executeRaw(
+				Prisma.sql`
+					SELECT pg_advisory_xact_lock(
+						hashtextextended(CAST(${`mailing-cancel:${id}`} AS text), 0::bigint)
+					)
+				`
+			);
 			const campaign = await transaction.mailingCampaign.findUnique({
 				where: { id }
 			});
@@ -167,7 +244,7 @@ export class MailingService {
 					cancelledAt: now
 				}
 			});
-			await transaction.mailingCampaign.update({
+			const updatedCampaign = await transaction.mailingCampaign.update({
 				where: { id },
 				data: {
 					status: MailingCampaignStatus.CANCELLED,
@@ -176,9 +253,52 @@ export class MailingService {
 					cancelledCount: { increment: cancelled.count }
 				}
 			});
+			await this.adminEventLog.recordInTransaction(transaction, {
+				adminId,
+				section: 'MAILINGS',
+				action: 'MAILING_BROADCAST_CANCEL',
+				description: `Отмена рассылки: ${updatedCampaign.subject}`,
+				entityType: 'mailing',
+				entityId: updatedCampaign.id,
+				entityLabel: updatedCampaign.subject,
+				metadata: {
+					campaignId: updatedCampaign.id,
+					status: updatedCampaign.status,
+					sentCount: updatedCampaign.sentCount,
+					cancelledCount: updatedCampaign.cancelledCount
+				},
+				request
+			});
+			return updatedCampaign;
 		});
 
-		return this.getCampaign(id);
+		return this.serializeCampaign(campaign);
+	}
+
+	private assertMatchingIdempotentRequest(
+		campaign: {
+			subject: string;
+			message: string;
+			audience: string;
+			requestedChannel: string;
+		},
+		request: {
+			subject: string;
+			message: string;
+			audience: string;
+			requestedChannel: string;
+		}
+	): void {
+		if (
+			campaign.subject !== request.subject ||
+			campaign.message !== request.message ||
+			campaign.audience !== request.audience ||
+			campaign.requestedChannel !== request.requestedChannel
+		) {
+			throw new ConflictException(
+				'Idempotency-Key уже использован для другой рассылки'
+			);
+		}
 	}
 
 	private serializeCampaign(campaign: {

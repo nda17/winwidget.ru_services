@@ -84,7 +84,8 @@ export class EmailService {
 
 	sendSubscriptionExpiryReminder(
 		to: string,
-		data: SubscriptionExpiryReminderPayload
+		data: SubscriptionExpiryReminderPayload,
+		options: { messageId?: string } = {}
 	) {
 		const html = render(
 			SubscriptionExpiryReminderEmail({
@@ -98,7 +99,7 @@ export class EmailService {
 				? 'Сегодня последний день подписки WinWidget'
 				: `Подписка WinWidget закончится через ${this.getDaysLabel(data.daysBeforeExpiry)}`;
 
-		return this.sendEmail(to, subject, html);
+		return this.sendEmail(to, subject, html, options);
 	}
 
 	sendLeadNotification(

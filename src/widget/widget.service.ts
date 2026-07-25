@@ -711,47 +711,6 @@ export class WidgetService {
 		);
 	}
 
-	async getWidgetConfig(
-		publicKey: string,
-		requestDomain: string | null = null,
-		directPageAccessAllowed = false
-	) {
-		const widget = await this.prisma.widget.findUnique({
-			where: { publicKey },
-			include: {
-				user: {
-					include: { subscription: true }
-				}
-			}
-		});
-
-		if (!widget) {
-			return null;
-		}
-
-		if (!widget.isActive) return null;
-
-		if (
-			!directPageAccessAllowed &&
-			!isWidgetDomainAllowed(widget.installDomain, requestDomain)
-		) {
-			return null;
-		}
-
-		const sub = widget.user.subscription;
-		if (!sub || sub.status !== 'ACTIVE') return null;
-
-		const limits = PLAN_LIMITS[sub.plan as Plan];
-		if (
-			!limits.unlimited &&
-			sub.leadsThisPeriod >= limits.maxLeadsPerPeriod
-		) {
-			return null;
-		}
-
-		return widget.config;
-	}
-
 	async submitLead(
 		dto: SubmitLeadDto,
 		ip?: string,

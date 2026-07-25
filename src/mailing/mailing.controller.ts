@@ -1,13 +1,14 @@
-import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { SendAdminBroadcastDto } from '@/mailing/dto/send-admin-broadcast.dto';
 import { MailingService } from '@/mailing/mailing.service';
 import {
 	Body,
+	BadRequestException,
 	Controller,
 	DefaultValuePipe,
 	Get,
+	Headers,
 	HttpCode,
 	Param,
 	ParseIntPipe,
@@ -18,14 +19,12 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
+import { isUUID } from 'class-validator';
 import { Request } from 'express';
 
 @Controller('mailings')
 export class MailingController {
-	constructor(
-		private readonly mailingService: MailingService,
-		private readonly adminEventLogService: AdminEventLogService
-	) {}
+	constructor(private readonly mailingService: MailingService) {}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
@@ -34,33 +33,21 @@ export class MailingController {
 	async sendAdminBroadcast(
 		@Body() dto: SendAdminBroadcastDto,
 		@CurrentUser('id') adminId: string,
+		@Headers('idempotency-key') idempotencyKey: string | undefined,
 		@Req() request: Request
 	) {
-		const result = await this.mailingService.createAdminBroadcast(
-			adminId,
-			dto
-		);
+		if (!idempotencyKey || !isUUID(idempotencyKey)) {
+			throw new BadRequestException(
+				'Заголовок Idempotency-Key должен содержать UUID'
+			);
+		}
 
-		await this.adminEventLogService.record({
+		return this.mailingService.createAdminBroadcast(
 			adminId,
-			section: 'MAILINGS',
-			action: 'MAILING_BROADCAST_SEND',
-			description: `Ручная рассылка: ${dto.subject.trim()}`,
-			entityType: 'mailing',
-			entityLabel: dto.subject.trim(),
-			metadata: {
-				audience: result.audience,
-				channel: result.requestedChannel,
-				campaignId: result.id,
-				recipientCount: result.recipientCount,
-				emailRecipientCount: result.emailRecipientCount,
-				telegramRecipientCount: result.telegramRecipientCount,
-				status: result.status
-			},
+			dto,
+			idempotencyKey,
 			request
-		});
-
-		return result;
+		);
 	}
 
 	@Auth(Role.ADMIN)
@@ -86,23 +73,6 @@ export class MailingController {
 		@CurrentUser('id') adminId: string,
 		@Req() request: Request
 	) {
-		const result = await this.mailingService.cancelCampaign(id);
-		await this.adminEventLogService.record({
-			adminId,
-			section: 'MAILINGS',
-			action: 'MAILING_BROADCAST_CANCEL',
-			description: `Отмена рассылки: ${result.subject}`,
-			entityType: 'mailing',
-			entityId: result.id,
-			entityLabel: result.subject,
-			metadata: {
-				campaignId: result.id,
-				status: result.status,
-				sentCount: result.sentCount,
-				cancelledCount: result.cancelledCount
-			},
-			request
-		});
-		return result;
+		return this.mailingService.cancelCampaign(id, adminId, request);
 	}
 }

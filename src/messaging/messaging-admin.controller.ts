@@ -1,4 +1,3 @@
-import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { CloseMessagingFailureDto } from '@/messaging/dto/close-messaging-failure.dto';
@@ -22,8 +21,7 @@ import { Request } from 'express';
 @Controller('messaging/admin')
 export class MessagingAdminController {
 	constructor(
-		private readonly messagingAdminService: MessagingAdminService,
-		private readonly adminEventLogService: AdminEventLogService
+		private readonly messagingAdminService: MessagingAdminService
 	) {}
 
 	@Get('overview')
@@ -58,22 +56,7 @@ export class MessagingAdminController {
 		@CurrentUser('id') adminId: string,
 		@Req() request: Request
 	) {
-		const result = await this.messagingAdminService.retryFailure(id);
-		await this.adminEventLogService.record({
-			adminId,
-			section: 'MESSAGING',
-			action: 'MESSAGING_FAILURE_RETRY',
-			description: `Повторно отправлено событие интеграции ${result.integration}`,
-			entityType: 'integration_delivery_failure',
-			entityId: result.id,
-			entityLabel: result.integration,
-			metadata: {
-				eventId: result.eventId,
-				integration: result.integration
-			},
-			request
-		});
-		return result;
+		return this.messagingAdminService.retryFailure(id, adminId, request);
 	}
 
 	@Post('failures/:id/close')

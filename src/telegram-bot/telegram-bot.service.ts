@@ -299,9 +299,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			webhookHost: webhookHost || null,
 			expectedWebhooks: webhookHost
 				? {
-						info: `${webhookHost}/api/telegram-bot/webhook`,
-						auth: `${webhookHost}/api/telegram-auth/webhook`,
-						support: `${webhookHost}/api/telegram-bot/support-webhook`
+						info: `${webhookHost}/api/v1/telegram-bot/webhook`,
+						auth: `${webhookHost}/api/v1/telegram-auth/webhook`,
+						support: `${webhookHost}/api/v1/telegram-bot/support-webhook`
 					}
 				: null,
 			checkedAt: new Date().toISOString()
@@ -613,7 +613,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			);
 		}
 
-		return `${host}/api/${path}`;
+		return `${host}/api/v1/${path}`;
 	}
 
 	private getConfiguredWebhookHost() {
@@ -1018,7 +1018,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			telegramWebhookHostConfigured: Boolean(webhookHost),
 			telegramWebhookHost: webhookHost || null,
 			telegramWebhookHealthUrl: webhookHost
-				? `${webhookHost}/api/telegram-bot/webhook-health`
+				? `${webhookHost}/api/v1/telegram-bot/webhook-health`
 				: null,
 			updatedAt: settings.updatedAt.toISOString()
 		};

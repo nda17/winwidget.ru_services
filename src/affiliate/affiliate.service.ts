@@ -463,9 +463,7 @@ export class AffiliateService {
 
 	private buildReferralLink(userId: string) {
 		const origin =
-			process.env.RECAPTCHA_CLIENT_URL ||
-			process.env.WIDGET_RUNTIME_URL ||
-			'https://winwidget.ru';
+			process.env.RECAPTCHA_CLIENT_URL || 'https://winwidget.ru';
 
 		return `${origin.replace(/\/$/, '')}/register?ref=${encodeURIComponent(userId)}`;
 	}

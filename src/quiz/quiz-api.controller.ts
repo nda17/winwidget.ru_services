@@ -26,7 +26,7 @@ export class QuizApiController {
 	constructor(private readonly quizService: QuizService) {}
 
 	/**
-	 * GET /api/quiz/:key/config
+	 * GET /api/v1/quiz/:key/config
 	 * Returns quiz config for quiz.js
 	 */
 	@Get(':key/config')
@@ -47,7 +47,7 @@ export class QuizApiController {
 	}
 
 	/**
-	 * POST /api/quiz/:key/lead
+	 * POST /api/v1/quiz/:key/lead
 	 * Accepts lead from quiz.js: { contact, phone, email, answers, url }
 	 */
 	@Post(':key/lead')

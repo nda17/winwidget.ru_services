@@ -3,7 +3,10 @@ export const RABBITMQ_CONNECTION = Symbol('RABBITMQ_CONNECTION');
 export const OUTBOX_EVENT_TYPE = 'lead.integration.requested.v2';
 export const PAYMENT_SUCCEEDED_EVENT_TYPE = 'payment.succeeded.v1';
 export const MAILING_DELIVERY_EVENT_TYPE = 'mailing.delivery.requested.v1';
-export const LIMIT_REACHED_EVENT_TYPE = 'lead.limit.reached.v1';
+export const LIMIT_REACHED_EMAIL_EVENT_TYPE =
+	'lead.limit.reached.email.v2';
+export const LIMIT_REACHED_TELEGRAM_EVENT_TYPE =
+	'lead.limit.reached.telegram.v2';
 export const DAILY_SUMMARY_EVENT_TYPE =
 	'report.daily-summary.requested.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
@@ -56,8 +59,8 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'payment-telegram': PAYMENT_SUCCEEDED_EVENT_TYPE,
 	'mailing-email': 'mailing.delivery.email.v1',
 	'mailing-telegram': 'mailing.delivery.telegram.v1',
-	'limit-email': LIMIT_REACHED_EVENT_TYPE,
-	'limit-telegram': LIMIT_REACHED_EVENT_TYPE,
+	'limit-email': LIMIT_REACHED_EMAIL_EVENT_TYPE,
+	'limit-telegram': LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	'daily-summary-telegram': DAILY_SUMMARY_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE
 };

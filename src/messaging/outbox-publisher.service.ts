@@ -4,12 +4,14 @@ import {
 	OUTBOX_DEFAULT_RETENTION_DAYS,
 	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
+import { getCurrentCorrelationId } from '@/messaging/messaging-context';
+import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
 import {
+	BeforeApplicationShutdown,
 	Injectable,
 	Logger,
-	OnApplicationShutdown,
 	OnModuleInit
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -17,9 +19,11 @@ import { OutboxEvent, OutboxEventStatus, Prisma } from '@prisma/client';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 20_000;
+
 @Injectable()
 export class OutboxPublisherService
-	implements OnModuleInit, OnApplicationShutdown
+	implements OnModuleInit, BeforeApplicationShutdown
 {
 	private readonly logger = new Logger(OutboxPublisherService.name);
 	private readonly workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
@@ -33,19 +37,34 @@ export class OutboxPublisherService
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly rabbitMq: RabbitMqService,
-		private readonly configService: ConfigService
+		private readonly configService: ConfigService,
+		private readonly heartbeat: MessagingHeartbeatService
 	) {}
 
 	onModuleInit(): void {
 		this.schedule(0);
 	}
 
-	async onApplicationShutdown(): Promise<void> {
+	async beforeApplicationShutdown(): Promise<void> {
 		this.shuttingDown = true;
 		if (this.timer) clearTimeout(this.timer);
 
-		while (this.running) {
-			await new Promise(resolve => setTimeout(resolve, 25));
+		const deadline = Date.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
+		while (this.running && Date.now() < deadline) {
+			await new Promise(resolve => setTimeout(resolve, 50));
+		}
+		if (this.running) {
+			this.logger.warn(
+				JSON.stringify({
+					event: 'outbox.shutdown_timeout',
+					activePoll: true,
+					timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS
+				})
+			);
+		} else {
+			this.logger.log(
+				JSON.stringify({ event: 'outbox.shutdown_complete' })
+			);
 		}
 	}
 
@@ -62,7 +81,15 @@ export class OutboxPublisherService
 		try {
 			await this.cleanupPublishedEventsIfDue();
 			const events = await this.claimBatch();
-			for (const event of events) {
+			this.heartbeat.markSuccessfulPoll();
+			for (let index = 0; index < events.length; index++) {
+				if (this.shuttingDown) {
+					await this.releaseClaims(
+						events.slice(index).map(item => item.id)
+					);
+					break;
+				}
+				const event = events[index];
 				const claimRenewed = await this.renewClaim(event.id);
 				if (!claimRenewed) {
 					this.logger.warn(
@@ -169,16 +196,24 @@ export class OutboxPublisherService
 	}
 
 	private async publish(event: OutboxEvent): Promise<void> {
+		const headers = this.getEventHeaders(event.headers);
+		const correlationId =
+			getCurrentCorrelationId() ||
+			(typeof headers['x-correlation-id'] === 'string'
+				? headers['x-correlation-id']
+				: event.messageId || event.id);
 		try {
 			await this.rabbitMq.publishEvent(event.routingKey, event.payload, {
 				messageId: event.messageId ?? event.id,
 				type: event.eventType,
+				correlationId,
 				headers: {
-					...this.getEventHeaders(event.headers),
+					...headers,
 					'x-outbox-event-id': event.id,
 					'x-publish-attempt': event.attempts + 1
 				}
 			});
+			this.heartbeat.markSuccessfulPublish();
 
 			const result = await this.prisma.outboxEvent.updateMany({
 				where: {
@@ -198,6 +233,18 @@ export class OutboxPublisherService
 			if (result.count !== 1) {
 				this.logger.warn(
 					`Published outbox event but could not finalize its claim eventId=${event.id}`
+				);
+			} else {
+				this.logger.log(
+					JSON.stringify({
+						event: 'outbox.publish_succeeded',
+						eventId: event.id,
+						messageId: event.messageId || event.id,
+						eventType: event.eventType,
+						routingKey: event.routingKey,
+						correlationId,
+						attempt: event.attempts + 1
+					})
 				);
 			}
 		} catch (error) {
@@ -229,9 +276,34 @@ export class OutboxPublisherService
 			}
 
 			this.logger.warn(
-				`Outbox publish failed eventId=${event.id} attempt=${attempts}: ${message}`
+				JSON.stringify({
+					event: 'outbox.publish_failed',
+					eventId: event.id,
+					messageId: event.messageId || event.id,
+					eventType: event.eventType,
+					routingKey: event.routingKey,
+					correlationId,
+					attempt: attempts,
+					error: message
+				})
 			);
 		}
+	}
+
+	private async releaseClaims(eventIds: string[]): Promise<void> {
+		if (!eventIds.length) return;
+		await this.prisma.outboxEvent.updateMany({
+			where: {
+				id: { in: eventIds },
+				status: OutboxEventStatus.PUBLISHING,
+				lockedBy: this.workerId
+			},
+			data: {
+				status: OutboxEventStatus.PENDING,
+				lockedAt: null,
+				lockedBy: null
+			}
+		});
 	}
 
 	private getEventHeaders(

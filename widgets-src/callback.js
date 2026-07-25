@@ -13,9 +13,9 @@
 					? _currentScript.src
 					: location.href
 			);
-			return src.origin + '/api';
+			return src.origin + '/api/v1';
 		} catch (e) {
-			return 'https://winwidget.ru/api';
+			return 'https://winwidget.ru/api/v1';
 		}
 	})();
 

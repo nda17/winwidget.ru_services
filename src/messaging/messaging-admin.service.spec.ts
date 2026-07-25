@@ -51,26 +51,30 @@ describe('MessagingAdminService', () => {
 			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
+		const adminEventLog = {
+			recordInTransaction: jest.fn().mockResolvedValue({})
+		} as unknown as AdminEventLogService;
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
 			{} as LeadIntegrationDestinationService,
-			{
-				recordInTransaction: jest.fn().mockResolvedValue({})
-			} as unknown as AdminEventLogService
+			adminEventLog
 		);
 
-		const result = await service.retryFailure(failure.id);
+		const result = await service.retryFailure(failure.id, 'admin-1');
 
 		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
 			data: expect.objectContaining({
 				messageId: failure.eventId,
 				eventType: 'lead.integration.requested.v2',
 				routingKey: 'manual.webhook',
-				headers: {
+				headers: expect.objectContaining({
 					'x-retry-attempt': 0,
-					'x-delivery-token': expect.any(String)
-				},
+					'x-delivery-token': expect.any(String),
+					'x-correlation-id': failure.eventId,
+					'x-request-id': failure.eventId,
+					'x-causation-id': failure.eventId
+				}),
 				payload: expect.objectContaining({
 					schemaVersion: 2,
 					eventType: 'lead.integration.requested.v2',
@@ -86,6 +90,14 @@ describe('MessagingAdminService', () => {
 				eventId: failure.eventId,
 				integration: 'webhook',
 				retryingAt: expect.any(String)
+			})
+		);
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				action: 'MESSAGING_FAILURE_RETRY',
+				entityId: failure.id,
+				adminId: 'admin-1'
 			})
 		);
 	});
@@ -132,8 +144,55 @@ describe('MessagingAdminService', () => {
 			} as unknown as AdminEventLogService
 		);
 
-		await expect(service.retryFailure(failure.id)).rejects.toThrow(
-			'Повтор устаревшего события интеграции недоступен'
+		await expect(
+			service.retryFailure(failure.id, 'admin-1')
+		).rejects.toThrow('Повтор устаревшего события интеграции недоступен');
+		expect(updateMany).not.toHaveBeenCalled();
+		expect(outboxCreate).not.toHaveBeenCalled();
+	});
+
+	it('rejects a malformed non-lead retry before changing its state', async () => {
+		const failure = {
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId: '11111111-1111-4111-8111-111111111111',
+			integration: 'payment-email',
+			payload: {
+				schemaVersion: 1,
+				eventType: 'payment.succeeded.v1',
+				payment: {
+					id: 'payment-1'
+				}
+			},
+			resolvedAt: null,
+			retryingAt: null
+		};
+		const updateMany = jest.fn();
+		const outboxCreate = jest.fn();
+		const transaction = {
+			integrationDeliveryFailure: {
+				findUnique: jest.fn().mockResolvedValue(failure),
+				updateMany
+			},
+			outboxEvent: {
+				create: outboxCreate
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(async callback => callback(transaction))
+		} as unknown as PrismaService;
+		const service = new MessagingAdminService(
+			prisma,
+			{} as RabbitMqManagementService,
+			{} as LeadIntegrationDestinationService,
+			{
+				recordInTransaction: jest.fn()
+			} as unknown as AdminEventLogService
+		);
+
+		await expect(
+			service.retryFailure(failure.id, 'admin-1')
+		).rejects.toThrow(
+			'Повтор события с некорректным контрактом недоступен'
 		);
 		expect(updateMany).not.toHaveBeenCalled();
 		expect(outboxCreate).not.toHaveBeenCalled();
@@ -149,7 +208,10 @@ describe('MessagingAdminService', () => {
 				schemaVersion: 1,
 				eventType: 'database.backup.requested.v1',
 				jobId: eventId,
-				jobType: 'DATABASE_BACKUP'
+				jobType: 'DATABASE_BACKUP',
+				scheduleKey: `manual:${eventId}`,
+				periodStart: null,
+				periodEnd: null
 			},
 			resolvedAt: null,
 			retryingAt: null
@@ -182,7 +244,7 @@ describe('MessagingAdminService', () => {
 			} as unknown as AdminEventLogService
 		);
 
-		await service.retryFailure(failure.id);
+		await service.retryFailure(failure.id, 'admin-1');
 
 		expect(transaction.scheduledJobRun.updateMany).toHaveBeenCalledWith({
 			where: {
@@ -204,7 +266,12 @@ describe('MessagingAdminService', () => {
 				messageId: eventId,
 				eventType: 'database.backup.requested.v1',
 				routingKey: 'manual.database-backup',
-				payload: failure.payload
+				payload: failure.payload,
+				headers: {
+					'x-correlation-id': eventId,
+					'x-request-id': eventId,
+					'x-causation-id': eventId
+				}
 			}
 		});
 	});

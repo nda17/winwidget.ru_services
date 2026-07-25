@@ -3,6 +3,8 @@ import {
 	LeadIntegrationKind,
 	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
+import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { Prisma } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
 
@@ -279,13 +281,21 @@ export async function enqueueLeadIntegrationEvents(
 			},
 			destination: eventDestination
 		};
+		const routingKey = INTEGRATION_ROUTING_KEYS[integration];
+		assertMessagingEventContract(payload, {
+			eventType: OUTBOX_EVENT_TYPE,
+			routingKey,
+			messageId: eventId,
+			kind: integration
+		});
 
 		return {
 			id: eventId,
 			messageId: eventId,
 			eventType: OUTBOX_EVENT_TYPE,
-			routingKey: INTEGRATION_ROUTING_KEYS[integration],
-			payload: payload as unknown as Prisma.InputJsonValue
+			routingKey,
+			payload: payload as unknown as Prisma.InputJsonValue,
+			headers: createMessagingHeaders({ messageId: eventId })
 		};
 	});
 

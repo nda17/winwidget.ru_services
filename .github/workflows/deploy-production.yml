@@ -52,6 +52,8 @@ jobs:
       RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
       RABBITMQ_USER: winwidget
       RABBITMQ_PASSWORD: winwidget_ci
+      RABBITMQ_MONITOR_USER: winwidget
+      RABBITMQ_MONITOR_PASSWORD: winwidget_ci
       RABBITMQ_VHOST: winwidget
 
     steps:
@@ -96,6 +98,18 @@ jobs:
             node -e '
               const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
               const services = config.services ?? {};
+              if (config.name !== "winwidget") {
+                throw new Error(`Unexpected Compose project name: ${config.name}`);
+              }
+              for (const [name, service] of Object.entries(services)) {
+                if ("container_name" in service) {
+                  throw new Error(`${name} must use the standard Compose container name`);
+                }
+              }
+              const rabbitVolume = config.volumes?.["winwidget-rabbitmq-data"];
+              if (!rabbitVolume?.external || !rabbitVolume.name) {
+                throw new Error("RabbitMQ must use a named external volume");
+              }
               const persistentServiceNames = Object.entries(services)
                 .filter(([, service]) => !(service.profiles ?? []).includes("migration"))
                 .map(([name]) => name)
@@ -142,13 +156,16 @@ jobs:
                 }
                 return environment;
               };
-              const requireKind = (environment, key, kind, name) => {
-                const kinds = String(environment[key] ?? "")
+              const requireExactKinds = (environment, key, expected, name) => {
+                const kinds = [...new Set(String(environment[key] ?? "")
                   .split(",")
                   .map(value => value.trim())
-                  .filter(Boolean);
-                if (!kinds.includes(kind)) {
-                  throw new Error(`${key} in ${name} must include ${kind}`);
+                  .filter(Boolean))].sort();
+                const normalizedExpected = [...expected].sort();
+                if (JSON.stringify(kinds) !== JSON.stringify(normalizedExpected)) {
+                  throw new Error(
+                    `${key} in ${name} must contain exactly ${normalizedExpected.join(",")}`,
+                  );
                 }
               };
 
@@ -167,40 +184,54 @@ jobs:
 
               requireEnvironment("api", [
                 "RABBITMQ_MANAGEMENT_URL",
-                "RABBITMQ_USER",
-                "RABBITMQ_PASSWORD",
+                "RABBITMQ_MONITOR_USER",
+                "RABBITMQ_MONITOR_PASSWORD",
                 "RABBITMQ_VHOST",
+                "TRUST_PROXY",
               ]);
               requireEnvironment("outbox-publisher", [
-                "DATABASE_URL_DEVELOPMENT",
                 "DATABASE_URL_PRODUCTION",
                 "RABBITMQ_URL",
+                "RABBITMQ_ASSERT_TOPOLOGY",
                 "MESSAGING_SERVICE_NAME",
               ], ["DATABASE_URL_PRODUCTION"]);
               const integrationEnvironment = requireEnvironment(
                 "integration-worker",
                 [
-                  "DATABASE_URL_DEVELOPMENT",
                   "DATABASE_URL_PRODUCTION",
                   "RABBITMQ_URL",
+                  "RABBITMQ_ASSERT_TOPOLOGY",
                   "MESSAGING_SERVICE_NAME",
                   "INTEGRATION_WORKER_KINDS",
                 ],
                 ["DATABASE_URL_PRODUCTION"],
               );
-              requireKind(
+              requireExactKinds(
                 integrationEnvironment,
                 "INTEGRATION_WORKER_KINDS",
-                "daily-summary-telegram",
+                [
+                  "email",
+                  "webhook",
+                  "telegram",
+                  "bitrix24",
+                  "amo-crm",
+                  "payment-email",
+                  "payment-telegram",
+                  "mailing-email",
+                  "mailing-telegram",
+                  "limit-email",
+                  "limit-telegram",
+                  "daily-summary-telegram",
+                ],
                 "integration-worker",
               );
               const maintenance = requireService("maintenance-worker");
               const maintenanceEnvironment = requireEnvironment(
                 "maintenance-worker",
                 [
-                  "DATABASE_URL_DEVELOPMENT",
                   "DATABASE_URL_PRODUCTION",
                   "RABBITMQ_URL",
+                  "RABBITMQ_ASSERT_TOPOLOGY",
                   "MESSAGING_SERVICE_NAME",
                   "MAINTENANCE_WORKER_PREFETCH",
                   "SCHEDULED_JOB_POLL_INTERVAL_MS",
@@ -210,12 +241,54 @@ jobs:
                 ],
                 ["DATABASE_URL_PRODUCTION"],
               );
-              requireKind(
+              requireExactKinds(
                 maintenanceEnvironment,
                 "MAINTENANCE_WORKER_KINDS",
-                "database-backup",
+                ["database-backup"],
                 "maintenance-worker",
               );
+              if ("RABBITMQ_URL" in (services.api.environment ?? {})) {
+                throw new Error("api must not receive an AMQP URL");
+              }
+              const rabbitUsers = [
+                services.rabbitmq.environment?.RABBITMQ_DEFAULT_USER,
+                services.api.environment?.RABBITMQ_MONITOR_USER,
+                new URL(services["outbox-publisher"].environment.RABBITMQ_URL).username,
+                new URL(services["integration-worker"].environment.RABBITMQ_URL).username,
+                new URL(services["maintenance-worker"].environment.RABBITMQ_URL).username,
+              ];
+              if (
+                services.rabbitmq.environment?.RABBITMQ_DEFAULT_VHOST !== "winwidget" ||
+                services.api.environment?.RABBITMQ_VHOST !== "winwidget"
+              ) {
+                throw new Error("Production RabbitMQ vhost must be winwidget");
+              }
+              for (const name of ["outbox-publisher", "integration-worker", "maintenance-worker"]) {
+                if (new URL(services[name].environment.RABBITMQ_URL).pathname !== "/winwidget") {
+                  throw new Error(`${name} must connect to the winwidget vhost`);
+                }
+              }
+              if (
+                rabbitUsers.some(value => !value) ||
+                new Set(rabbitUsers).size !== rabbitUsers.length
+              ) {
+                throw new Error("RabbitMQ admin, monitor and service users must be distinct");
+              }
+              if (
+                services["outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
+                services["integration-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
+                services["maintenance-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false"
+              ) {
+                throw new Error("Only outbox-publisher may assert RabbitMQ topology");
+              }
+              for (const name of ["outbox-publisher", "integration-worker", "maintenance-worker"]) {
+                const environment = services[name].environment ?? {};
+                for (const forbidden of ["JWT_SECRET", "RABBITMQ_MONITOR_PASSWORD"]) {
+                  if (forbidden in environment) {
+                    throw new Error(`${name} must not receive ${forbidden}`);
+                  }
+                }
+              }
               const tmpfs = Array.isArray(maintenance.tmpfs)
                 ? maintenance.tmpfs.map(value =>
                     typeof value === "string" ? value : JSON.stringify(value),
@@ -248,6 +321,8 @@ jobs:
             'pg_dump --version && pg_restore --version && test -f dist/src/maintenance-worker-main.js'
 
       - name: Messaging integration smoke
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
         run: pnpm run test:messaging-integration
 
   deploy:

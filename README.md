@@ -139,8 +139,8 @@ winwidget.ru_server/
 
 ## Базовые правила
 
-- Основной API prefix: `/api`.
-- OAuth endpoints и публичные preview-страницы исключены из prefix.
+- Основной API prefix: `/api/v1`.
+- Публичные loader- и preview-страницы исключены из API prefix.
 - Статические runtime-файлы отдаются из `public` по `/widgets/*`.
 - Development uploads сохраняются локально и доступны по `/uploads/*`.
 - Для публичных widget API разрешён cross-origin доступ.
@@ -150,15 +150,15 @@ winwidget.ru_server/
 
 Сейчас backend поддерживает семь типов виджетов:
 
-| Виджет             | Управление                | Public config/lead              | Preview                        |
-| ------------------ | ------------------------- | ------------------------------- | ------------------------------ |
-| Колесо фортуны     | `/api/widgets`            | `/api/widget/:key/*`            | `/page-wheel/:key`             |
-| Квиз               | `/api/quizzes`            | `/api/quiz/:key/*`              | `/page-quiz/:key`              |
-| Обратный звонок    | `/api/callbacks`          | `/api/callback/:key/*`          | `/page-callback/:key`          |
-| Таймер             | `/api/countdown-timers`   | `/api/countdown-timer/:key/*`   | `/page-timer/:key`             |
-| Stop Offer         | `/api/stop-offers`        | `/api/stop-offer/:key/*`        | `/page-stop-offer/:key`        |
-| Онлайн-консультант | `/api/online-consultants` | `/api/online-consultant/:key/*` | `/page-online-consultant/:key` |
-| Калькулятор        | `/api/calculators`        | `/api/calculator/:key/*`        | `/page-calculator/:key`        |
+| Виджет             | Управление                   | Public config/lead                 | Preview                        |
+| ------------------ | ---------------------------- | ---------------------------------- | ------------------------------ |
+| Колесо фортуны     | `/api/v1/widgets`            | `/api/v1/widget/:key/*`            | `/page-wheel/:key`             |
+| Квиз               | `/api/v1/quizzes`            | `/api/v1/quiz/:key/*`              | `/page-quiz/:key`              |
+| Обратный звонок    | `/api/v1/callbacks`          | `/api/v1/callback/:key/*`          | `/page-callback/:key`          |
+| Таймер             | `/api/v1/countdown-timers`   | `/api/v1/countdown-timer/:key/*`   | `/page-timer/:key`             |
+| Stop Offer         | `/api/v1/stop-offers`        | `/api/v1/stop-offer/:key/*`        | `/page-stop-offer/:key`        |
+| Онлайн-консультант | `/api/v1/online-consultants` | `/api/v1/online-consultant/:key/*` | `/page-online-consultant/:key` |
+| Калькулятор        | `/api/v1/calculators`        | `/api/v1/calculator/:key/*`        | `/page-calculator/:key`        |
 
 Для каждого типа разделены:
 
@@ -266,7 +266,10 @@ RABBITMQ_USER=winwidget
 RABBITMQ_PASSWORD=winwidget
 RABBITMQ_VHOST=winwidget
 RABBITMQ_URL=amqp://winwidget:winwidget@127.0.0.1:5672/winwidget
+RABBITMQ_ASSERT_TOPOLOGY=true
 RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
+RABBITMQ_MONITOR_USER=winwidget
+RABBITMQ_MONITOR_PASSWORD=winwidget
 OUTBOX_BATCH_SIZE=50
 OUTBOX_POLL_INTERVAL_MS=500
 OUTBOX_RETENTION_DAYS=7
@@ -276,7 +279,10 @@ SCHEDULED_JOB_POLL_INTERVAL_MS=30000
 SCHEDULED_JOB_LEASE_MS=120000
 SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS=30000
 MESSAGING_ALERTS_ENABLED=false
+MESSAGING_ACTIVITY_STALE_MS=300000
+MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
+INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
 INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram
 MAINTENANCE_WORKER_KINDS=database-backup
 MAILING_EMAIL_RATE_PER_SECOND=5
@@ -290,14 +296,23 @@ hex-пароль: он не требует percent-encoding внутри URL.
 openssl rand -hex 32
 ```
 
-Добавьте полученное значение в
+В production используются отдельные service accounts и verified external
+volume. Полный preflight и permissions runbook находится в
+`deploy/backend/README.md`. Минимальный набор в
 `/opt/winwidget/deploy/backend/.env.production`:
 
 ```env
-RABBITMQ_USER=winwidget
-RABBITMQ_PASSWORD=<полученный-hex-пароль>
+COMPOSE_PROJECT_NAME=winwidget
+RABBITMQ_DATA_VOLUME=<verified-existing-volume>
 RABBITMQ_VHOST=winwidget
-RABBITMQ_URL=amqp://winwidget:<тот-же-hex-пароль>@127.0.0.1:5672/winwidget
+RABBITMQ_ADMIN_USER=winwidget-admin
+RABBITMQ_ADMIN_PASSWORD=<полученный-hex-пароль>
+RABBITMQ_LEGACY_USER=winwidget
+RABBITMQ_MONITOR_USER=winwidget-monitor
+RABBITMQ_MONITOR_PASSWORD=<отдельный-hex-пароль>
+RABBITMQ_PUBLISHER_URL=amqp://winwidget-publisher:<url-encoded-password>@127.0.0.1:5672/winwidget
+RABBITMQ_INTEGRATION_WORKER_URL=amqp://winwidget-integration:<url-encoded-password>@127.0.0.1:5672/winwidget
+RABBITMQ_MAINTENANCE_WORKER_URL=amqp://winwidget-maintenance:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
 OUTBOX_BATCH_SIZE=50
 OUTBOX_POLL_INTERVAL_MS=1000
@@ -308,20 +323,20 @@ SCHEDULED_JOB_POLL_INTERVAL_MS=30000
 SCHEDULED_JOB_LEASE_MS=120000
 SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS=30000
 MESSAGING_ALERTS_ENABLED=true
+MESSAGING_ACTIVITY_STALE_MS=300000
+MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
+INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
 INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram
 MAINTENANCE_WORKER_KINDS=database-backup
 MAILING_EMAIL_RATE_PER_SECOND=5
 MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
-`RABBITMQ_PASSWORD` и пароль внутри `RABBITMQ_URL` должны совпадать.
-Production deploy останавливается до запуска миграции и контейнеров, если
-`RABBITMQ_PASSWORD` или `RABBITMQ_URL` пусты. Перед первым деплоем этой версии
-обновите реальный `.env.production`: deploy также проверяет новые настройки
-maintenance worker и наличие `daily-summary-telegram`/`database-backup` в
-списках consumers. Это предотвращает успешный релиз без обработчика новой
-очереди.
+Production deploy останавливается до миграции, если service credentials,
+verified volume или полный точный список consumers не заданы. Старые
+API/workers останавливаются до Prisma migration, поэтому несовместимые версии
+схемы одновременно не работают.
 
 Назначение настроек:
 
@@ -332,7 +347,8 @@ maintenance worker и наличие `daily-summary-telegram`/`database-backup` 
 - `OUTBOX_POLL_INTERVAL_MS` — интервал чтения outbox;
 - `OUTBOX_RETENTION_DAYS` — срок хранения успешно опубликованных событий;
   очистка выполняется ограниченными пакетами;
-- `RABBITMQ_WORKER_PREFETCH` — максимум неподтверждённых сообщений worker;
+- `RABBITMQ_WORKER_PREFETCH` — максимум неподтверждённых сообщений на каждый
+  main/DLQ consumer, а не общий лимит процесса;
 - `MAINTENANCE_WORKER_PREFETCH` — число backup-задач, одновременно получаемых
   maintenance worker; production-значение `1` не допускает параллельные
   `pg_dump` в одном процессе;
@@ -341,8 +357,14 @@ maintenance worker и наличие `daily-summary-telegram`/`database-backup` 
 - `SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS` — интервал продления lease, который
   должен быть меньше `SCHEDULED_JOB_LEASE_MS`;
 - `MESSAGING_ALERTS_ENABLED` — Telegram-алерты о недоступных messaging-процессах,
-  необработанных ошибках и событиях Outbox, ожидающих больше 15 минут;
+  необработанных ошибках, Rabbit alarm, очередях без consumers/backlog и
+  событиях Outbox, ожидающих больше 15 минут;
+- `MESSAGING_ACTIVITY_STALE_MS` — окно контроля последнего успешного
+  poll/publish/consume;
+- `MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD` — порог сообщений в одной queue;
 - `INTEGRATION_RECEIPT_RETENTION_DAYS` — срок хранения отметок об успешной доставке, минимум 30 дней;
+- `INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS` — срок хранения payload и текстов
+  ошибки только у уже resolved DLQ; classification и audit metadata остаются;
 - `INTEGRATION_WORKER_KINDS` — consumers, запускаемые integration worker;
 - `MAINTENANCE_WORKER_KINDS` — consumers длительных регламентных задач,
   запускаемые maintenance worker;
@@ -390,7 +412,11 @@ PostgreSQL. Через RabbitMQ выполняются только побочн
 независимыми очередями `winwidget.mailing.email` и
 `winwidget.mailing.telegram`.
 
+- создание требует UUID в `Idempotency-Key`; повтор с тем же ключом и тем же
+  запросом возвращает исходную кампанию;
 - для каждого получателя хранится отдельный статус;
+- Telegram-части сообщения имеют PostgreSQL-checkpoint, поэтому retry продолжает
+  отправку с первой незафиксированной части;
 - worker ограничивает скорость отправки через
   `MAILING_*_RATE_PER_SECOND`;
 - после перезапуска необработанные сообщения остаются в RabbitMQ;
@@ -402,9 +428,10 @@ PostgreSQL. Через RabbitMQ выполняются только побочн
 ### Уведомление о лимите заявок
 
 Когда последняя доступная заявка фиксируется в PostgreSQL, событие
-`lead.limit.reached.v1` создаётся в той же транзакции. Оно разветвляется в
-независимые email и Telegram queues. Прежняя fire-and-forget отправка из
-API-процесса удалена.
+`lead.limit.reached.email.v2` создаётся отдельно для каждого email-получателя, а
+`lead.limit.reached.telegram.v2` — для Telegram destination. Все события
+создаются в той же транзакции и поступают в независимые email и Telegram queues.
+Прежняя fire-and-forget отправка из API-процесса удалена.
 
 ### Ежедневная Telegram-сводка
 
@@ -441,7 +468,7 @@ Outbox-событие. API только ставит ручной запуск �
 
 Контракт ручного запуска изменён намеренно: endpoint возвращает принятое в
 очередь задание, а не готовый файл. Совместимость со старым синхронным ответом
-не сохраняется. `POST /api/telegram-bot/admin/database-backup/send` требует
+не сохраняется. `POST /api/v1/telegram-bot/admin/database-backup/send` требует
 заголовок `Idempotency-Key` с UUID. Ключ сохраняется в детерминированном
 `scheduleKey` вместе с ID администратора и в отдельной таблице соответствий
 `adminId + jobType + idempotencyKey → jobId`. Поэтому повтор HTTP-запроса
@@ -455,14 +482,14 @@ transaction-scoped advisory lock только на команду данного
 
 Интерфейс ручного запуска и polling расположен на странице
 `/admin/databases`. Админка восстанавливает polling после reload через
-`GET /api/telegram-bot/admin/database-backup/jobs/active` и локальный marker.
+`GET /api/v1/telegram-bot/admin/database-backup/jobs/active` и локальный marker.
 Endpoint и получение конкретного ручного job проверяют
 `input.requestedByAdminId`, поэтому один администратор не получает состояние
 чужого запуска.
 
 Восстановление остаётся отдельной операцией только для роли `DEV`:
-`POST /api/dev-tools/database-backup/restore`. Строка повторного подтверждения
-получается через `GET /api/dev-tools/database-backup/restore-settings` и больше
+`POST /api/v1/dev-tools/database-backup/restore`. Строка повторного подтверждения
+получается через `GET /api/v1/dev-tools/database-backup/restore-settings` и больше
 не входит в настройки Telegram-бота. Поэтому DEV-блок страницы «Базы данных»
 не зависит от загрузки Telegram settings; ограничение файла 49 МБ, проверка
 формата `.dump` и audit event восстановления сохранены.
@@ -505,7 +532,7 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 
 После этого интерфейс доступен локально по `http://127.0.0.1:15672`.
 
-Обзор состояния Outbox/RabbitMQ (`GET /api/messaging/admin/overview`) доступен
+Обзор состояния Outbox/RabbitMQ (`GET /api/v1/messaging/admin/overview`) доступен
 ролям `ADMIN` и `DEV`. Просмотр общего DLQ и ручной retry доступны только роли
 `DEV`. Обычные администраторы также управляют массовыми кампаниями на странице
 «Рассылки», но не имеют доступа к подробному списку ошибок доставки и их
@@ -535,9 +562,9 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 ### Production runbook
 
 Единственный compose, используемый CI/CD:
-`winwidget.ru_server/deploy/docker-compose.prod.yml`. Копия в
-`deploy/backend/docker-compose.prod.yml` оставлена только для старых ручных
-команд и должна содержать те же параметры.
+`winwidget.ru_server/deploy/docker-compose.prod.yml`. Root-файл
+`deploy/backend/docker-compose.prod.yml` содержит только Compose `include` на
+канонический файл и не дублирует services.
 
 Перед первым production-деплоем:
 
@@ -546,8 +573,10 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
    `/opt/winwidget/deploy/backend/.env.production`.
 3. Проверить, что management-порт `15672` и AMQP-порт `5672` доступны только
    через localhost.
-4. Запустить штатный CI/CD. Контейнер `migrate` применит миграции до запуска
-   новой версии API и worker.
+4. Запустить штатный CI/CD. До остановки старых процессов deploy создаст или
+   обновит RabbitMQ service users на verified external volume и применит
+   least-privilege permissions. Затем контейнер `migrate` применит миграции до
+   запуска новой версии API и worker.
 5. Открыть `/admin/system` и `/admin/messaging`: RabbitMQ, publisher,
    integration worker и maintenance worker должны иметь статус `Работает`, а
    Outbox/DLQ — не накапливаться.
@@ -582,8 +611,9 @@ docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
 CI запускает `test:messaging-integration`, который после применения миграций
 проверяет transaction-scoped advisory lock ручного backup на реальной
 PostgreSQL, цепочки `Outbox → RabbitMQ`, `mandatory return`, маршрут ручного
-retry, `RabbitMQ → DLQ → PostgreSQL` и наличие очередей ежедневной сводки и
-backup.
+retry, `RabbitMQ → DLQ → PostgreSQL`, наличие очередей ежедневной сводки и
+backup, а также restart RabbitMQ с проверкой durable-сообщения и reconnect
+publisher/consumers.
 
 При неизвестном `MODE` или отсутствующей выбранной переменной backend
 завершает запуск с ошибкой.
@@ -793,7 +823,7 @@ replicas нужно добавить durable deduplication для expiry reminde
 Административный health endpoint:
 
 ```text
-GET /api/health/admin
+GET /api/v1/health/admin
 ```
 
 Он проверяет backend, PostgreSQL, RabbitMQ, heartbeat `outbox-publisher`,
@@ -882,7 +912,6 @@ MODE
 PORT
 API_LISTEN_HOST
 PRODUCTION_HOST
-DEVELOPMENT_HOST
 AUTH_COOKIE_DOMAIN
 DATABASE_URL_DEVELOPMENT
 DATABASE_URL_PRODUCTION
@@ -976,11 +1005,19 @@ S3_FORCE_PATH_STYLE
 ## RabbitMQ и фоновые процессы
 
 ```text
-RABBITMQ_USER
-RABBITMQ_PASSWORD
+COMPOSE_PROJECT_NAME
+RABBITMQ_DATA_VOLUME
+RABBITMQ_ADMIN_USER
+RABBITMQ_ADMIN_PASSWORD
+RABBITMQ_LEGACY_USER
+RABBITMQ_MONITOR_USER
+RABBITMQ_MONITOR_PASSWORD
 RABBITMQ_VHOST
-RABBITMQ_URL
+RABBITMQ_PUBLISHER_URL
+RABBITMQ_INTEGRATION_WORKER_URL
+RABBITMQ_MAINTENANCE_WORKER_URL
 RABBITMQ_MANAGEMENT_URL
+RABBITMQ_ASSERT_TOPOLOGY
 OUTBOX_BATCH_SIZE
 OUTBOX_POLL_INTERVAL_MS
 OUTBOX_RETENTION_DAYS
@@ -994,7 +1031,10 @@ MAINTENANCE_WORKER_KINDS
 MAILING_EMAIL_RATE_PER_SECOND
 MAILING_TELEGRAM_RATE_PER_SECOND
 MESSAGING_ALERTS_ENABLED
+MESSAGING_ACTIVITY_STALE_MS
+MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD
 INTEGRATION_RECEIPT_RETENTION_DAYS
+INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS
 ```
 
 ---
@@ -1134,14 +1174,15 @@ Semantic compose validation проверяет точный набор пяти 
 1. обновляет ветку `prod` через `git pull --ff-only`, требует чистый checkout и
    точное совпадение с проверенным `${{ github.sha }}`;
 2. собирает backend image с тегом и OCI revision полного SHA commit;
-3. запускает migration container;
-4. запускает RabbitMQ и пересоздаёт API, Outbox publisher, integration worker и
-   maintenance worker;
-5. ждёт свежие heartbeat трёх worker-процессов и consumers основных/DLQ
-   очередей ежедневной сводки и backup;
+3. останавливает старые API/workers и запускает migration container без
+   mixed-version окна;
+4. сохраняет verified Rabbit volume, запускает RabbitMQ, topology owner
+   Outbox publisher, integration/maintenance workers и API;
+5. ждёт свежие heartbeat трёх worker-процессов, полный набор main/DLQ
+   consumers и отсутствие Rabbit alarm;
 6. сверяет revision через локальный
-   `http://127.0.0.1:4200/api/health/deployment` и публичный
-   `https://api.winwidget.ru/api/health/deployment`;
+   `http://127.0.0.1:4200/api/v1/health/deployment` и публичный
+   `https://api.winwidget.ru/api/v1/health/deployment`;
 7. проверяет OCI-label и отсутствие рестартов у API, Outbox publisher,
    integration worker и maintenance worker;
 8. при ошибке выводит последние логи API и процесс, занимающий порт `4200`.

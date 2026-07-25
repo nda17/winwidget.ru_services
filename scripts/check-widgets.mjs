@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const root = process.cwd();
@@ -15,6 +15,7 @@ const files = [
 	'calculator.js',
 	'helpers/winwidget-phone.js'
 ];
+const apiRuntimeFiles = files.filter(file => !file.startsWith('helpers/'));
 
 for (const file of files) {
 	const fullPath = join(widgetDir, file);
@@ -30,4 +31,13 @@ for (const file of files) {
 	}
 
 	console.log(`widgets: checked ${file}`);
+}
+
+for (const file of apiRuntimeFiles) {
+	const content = await readFile(join(widgetDir, file), 'utf8');
+
+	if (!content.includes('/api/v1')) {
+		console.error(`widgets: ${file} does not use the /api/v1 contract`);
+		process.exit(1);
+	}
 }

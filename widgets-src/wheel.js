@@ -11,10 +11,10 @@
 	var API_BASE = (() => {
 		try {
 			const src = new URL(_currentScript?.src || location.href);
-			if (src.hostname === 'localhost') return `${src.origin}/api`;
-			return `${src.origin}/api`;
+			if (src.hostname === 'localhost') return `${src.origin}/api/v1`;
+			return `${src.origin}/api/v1`;
 		} catch {
-			return 'https://winwidget.ru/api';
+			return 'https://winwidget.ru/api/v1';
 		}
 	})();
 

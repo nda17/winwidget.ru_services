@@ -12,6 +12,11 @@ import {
 	RETRY_EXCHANGE
 } from '@/messaging/messaging.constants';
 import {
+	createMessagingHeaders,
+	runWithMessageContext
+} from '@/messaging/messaging-context';
+import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
+import {
 	Injectable,
 	Logger,
 	OnApplicationShutdown,
@@ -26,6 +31,8 @@ import {
 import type { SetupFunc } from 'amqp-connection-manager';
 import type { ConfirmChannel, ConsumeMessage, Options } from 'amqplib';
 import { randomUUID } from 'node:crypto';
+
+const DEFAULT_MAX_MESSAGE_BYTES = 256 * 1024;
 
 interface ConsumerRegistration {
 	setup: SetupFunc;
@@ -56,6 +63,7 @@ export class RabbitMqService
 	private readonly returnedPublications = new Map<string, Error | null>();
 	private readonly consumerRegistrations = new Set<ConsumerRegistration>();
 	private consumersStopping = false;
+	private assertTopologyEnabled = false;
 	private connection!: AmqpConnectionManager;
 	private channel!: ChannelWrapper;
 
@@ -66,6 +74,7 @@ export class RabbitMqService
 		if (!url) {
 			throw new Error('RABBITMQ_URL is required for messaging processes');
 		}
+		this.assertTopologyEnabled = this.getAssertTopologyEnabled();
 
 		this.connection = connect([url], {
 			heartbeatIntervalInSeconds: 10,
@@ -92,7 +101,13 @@ export class RabbitMqService
 			name: 'winwidget-messaging',
 			confirm: true,
 			publishTimeout: 15_000,
-			setup: channel => this.assertTopology(channel as ConfirmChannel)
+			setup: async channel => {
+				const confirmChannel = channel as ConfirmChannel;
+				this.registerReturnHandler(confirmChannel);
+				if (this.assertTopologyEnabled) {
+					await this.assertTopology(confirmChannel);
+				}
+			}
 		});
 
 		this.channel.on('error', error =>
@@ -108,6 +123,14 @@ export class RabbitMqService
 		payload: unknown,
 		options: Options.Publish = {}
 	): Promise<void> {
+		const messageId =
+			typeof options.messageId === 'string' ? options.messageId : '';
+		const eventType = typeof options.type === 'string' ? options.type : '';
+		assertMessagingEventContract(payload, {
+			eventType,
+			routingKey,
+			messageId
+		});
 		await this.publishConfirmed(EVENTS_EXCHANGE, routingKey, payload, {
 			contentType: 'application/json',
 			contentEncoding: 'utf-8',
@@ -135,7 +158,11 @@ export class RabbitMqService
 			mandatory: true,
 			messageId: eventId,
 			type: eventType,
-			headers: { 'x-retry-attempt': attempt },
+			headers: createMessagingHeaders({
+				messageId: eventId,
+				causationId: eventId,
+				headers: { 'x-retry-attempt': attempt }
+			}),
 			timestamp: Date.now()
 		});
 	}
@@ -160,47 +187,52 @@ export class RabbitMqService
 				mandatory: true,
 				messageId: eventId,
 				type: eventType,
-				headers: {
-					'x-retry-attempt': attempt,
-					'x-last-error': error.slice(0, 1000),
-					...(classification
-						? {
-								'x-error-category': classification.category,
-								'x-error-code': classification.normalizedCode.slice(
-									0,
-									255
-								),
-								'x-safe-reason': classification.safeReason.slice(0, 1000),
-								'x-error-retryable': classification.retryable,
-								'x-classification-version':
-									classification.classificationVersion,
-								...(classification.firstFailedAt
-									? {
-											'x-first-failed-at': classification.firstFailedAt
-										}
-									: {}),
-								...(classification.deliveryToken
-									? {
-											'x-delivery-token': classification.deliveryToken
-										}
-									: {}),
-								...(classification.httpStatus !== null &&
-								classification.httpStatus !== undefined
-									? {
-											'x-http-status': classification.httpStatus
-										}
-									: {}),
-								...(classification.providerCode
-									? {
-											'x-provider-code': classification.providerCode.slice(
-												0,
-												255
-											)
-										}
-									: {})
-							}
-						: {})
-				},
+				headers: createMessagingHeaders({
+					messageId: eventId,
+					causationId: eventId,
+					headers: {
+						'x-retry-attempt': attempt,
+						'x-last-error': error.slice(0, 1000),
+						...(classification
+							? {
+									'x-error-category': classification.category,
+									'x-error-code': classification.normalizedCode.slice(
+										0,
+										255
+									),
+									'x-safe-reason': classification.safeReason.slice(
+										0,
+										1000
+									),
+									'x-error-retryable': classification.retryable,
+									'x-classification-version':
+										classification.classificationVersion,
+									...(classification.firstFailedAt
+										? {
+												'x-first-failed-at': classification.firstFailedAt
+											}
+										: {}),
+									...(classification.deliveryToken
+										? {
+												'x-delivery-token': classification.deliveryToken
+											}
+										: {}),
+									...(classification.httpStatus !== null &&
+									classification.httpStatus !== undefined
+										? {
+												'x-http-status': classification.httpStatus
+											}
+										: {}),
+									...(classification.providerCode
+										? {
+												'x-provider-code':
+													classification.providerCode.slice(0, 255)
+											}
+										: {})
+								}
+							: {})
+					}
+				}),
 				timestamp: Date.now()
 			}
 		);
@@ -212,27 +244,68 @@ export class RabbitMqService
 		payload: unknown,
 		options: Options.Publish
 	): Promise<void> {
-		const correlationId = randomUUID();
-		this.returnedPublications.set(correlationId, null);
+		const publicationToken = randomUUID();
+		const content = this.encodePayload(payload);
+		const messageId =
+			typeof options.messageId === 'string' && options.messageId
+				? options.messageId
+				: publicationToken;
+		const contextHeaders = createMessagingHeaders({
+			messageId,
+			headers: this.getScalarHeaders(options.headers)
+		});
+		const correlationId =
+			typeof options.correlationId === 'string' && options.correlationId
+				? options.correlationId
+				: String(contextHeaders['x-correlation-id']);
+		this.returnedPublications.set(publicationToken, null);
 		try {
-			await this.channel.publish(
-				exchange,
-				routingKey,
-				this.encodePayload(payload),
-				{
-					...options,
-					correlationId
+			await this.channel.publish(exchange, routingKey, content, {
+				...options,
+				correlationId,
+				headers: {
+					...(options.headers || {}),
+					...contextHeaders,
+					'x-publication-token': publicationToken
 				}
-			);
-			const returned = this.returnedPublications.get(correlationId);
+			});
+			const returned = this.returnedPublications.get(publicationToken);
 			if (returned) throw returned;
 		} finally {
-			this.returnedPublications.delete(correlationId);
+			this.returnedPublications.delete(publicationToken);
 		}
 	}
 
 	private encodePayload(payload: unknown): Buffer {
-		return Buffer.from(JSON.stringify(payload));
+		const content = Buffer.from(JSON.stringify(payload));
+		const configured = Number(
+			this.configService.get<string>('RABBITMQ_MAX_MESSAGE_BYTES') ||
+				DEFAULT_MAX_MESSAGE_BYTES
+		);
+		const maxBytes =
+			Number.isInteger(configured) && configured >= 1024
+				? Math.min(configured, 10 * 1024 * 1024)
+				: DEFAULT_MAX_MESSAGE_BYTES;
+		if (content.length > maxBytes) {
+			throw new Error(
+				`RabbitMQ payload exceeds limit bytes=${content.length} maxBytes=${maxBytes}`
+			);
+		}
+		return content;
+	}
+
+	private getScalarHeaders(
+		headers: Options.Publish['headers']
+	): Record<string, string | number | boolean> {
+		if (!headers) return {};
+		return Object.fromEntries(
+			Object.entries(headers).filter(
+				(entry): entry is [string, string | number | boolean] =>
+					typeof entry[1] === 'string' ||
+					typeof entry[1] === 'number' ||
+					typeof entry[1] === 'boolean'
+			)
+		);
 	}
 
 	async consume(
@@ -285,7 +358,9 @@ export class RabbitMqService
 						if (this.consumersStopping) {
 							return;
 						}
-						void handler(message).catch(error => {
+						void runWithMessageContext(message, () =>
+							handler(message)
+						).catch(error => {
 							this.logger.error(
 								`Unhandled ${consumerName} consumer error: ${
 									error instanceof Error ? error.stack : String(error)
@@ -303,6 +378,14 @@ export class RabbitMqService
 		try {
 			await this.channel.addSetup(registration.setup);
 		} catch (error) {
+			if (!this.assertTopologyEnabled) {
+				this.logger.warn(
+					`RabbitMQ ${consumerName} queue is not ready; consumer registration will retry after reconnect: ${
+						error instanceof Error ? error.message : String(error)
+					}`
+				);
+				return;
+			}
 			this.consumerRegistrations.delete(registration);
 			await this.channel
 				.removeSetup(registration.setup)
@@ -389,29 +472,37 @@ export class RabbitMqService
 		}
 	}
 
-	private async assertTopology(channel: ConfirmChannel): Promise<void> {
+	private registerReturnHandler(channel: ConfirmChannel): void {
 		channel.on('return', message => {
-			const correlationId = message.properties.correlationId;
-			if (!correlationId) {
+			const publicationToken =
+				message.properties.headers?.['x-publication-token'];
+			const normalizedToken = Buffer.isBuffer(publicationToken)
+				? publicationToken.toString('utf8')
+				: typeof publicationToken === 'string'
+					? publicationToken
+					: null;
+			if (!normalizedToken) {
 				this.logger.error(
 					`RabbitMQ returned an uncorrelated publication exchange=${message.fields.exchange} routingKey=${message.fields.routingKey}: ${message.fields.replyText}`
 				);
 				return;
 			}
-			if (!this.returnedPublications.has(correlationId)) {
+			if (!this.returnedPublications.has(normalizedToken)) {
 				this.logger.warn(
-					`RabbitMQ returned a publication after its confirm timeout correlationId=${correlationId}`
+					`RabbitMQ returned a publication after its confirm timeout publicationToken=${normalizedToken}`
 				);
 				return;
 			}
 			this.returnedPublications.set(
-				correlationId,
+				normalizedToken,
 				new Error(
 					`RabbitMQ returned publication exchange=${message.fields.exchange} routingKey=${message.fields.routingKey}: ${message.fields.replyCode} ${message.fields.replyText}`
 				)
 			);
 		});
+	}
 
+	private async assertTopology(channel: ConfirmChannel): Promise<void> {
 		await channel.assertExchange(EVENTS_EXCHANGE, 'topic', {
 			durable: true
 		});
@@ -442,8 +533,8 @@ export class RabbitMqService
 					kind as (typeof LEAD_INTEGRATION_KINDS)[number]
 				)
 			) {
-				// Durable bindings survive deployments, so remove the retired
-				// v1 route explicitly instead of only stopping its declaration.
+				// Reconcile durable broker topology left by the retired v1
+				// contract. This removes routing; it does not consume v1 events.
 				await channel.unbindQueue(
 					queue,
 					EVENTS_EXCHANGE,
@@ -481,6 +572,18 @@ export class RabbitMqService
 				);
 			}
 		}
+	}
+
+	private getAssertTopologyEnabled(): boolean {
+		const configured = this.configService.get<string | boolean>(
+			'RABBITMQ_ASSERT_TOPOLOGY'
+		);
+		if (configured === true || configured === 'true') return true;
+		if (configured === false || configured === 'false') return false;
+
+		throw new Error(
+			'RABBITMQ_ASSERT_TOPOLOGY must be explicitly set to true for the topology owner or false for workers'
+		);
 	}
 
 	private getRetryRoutingKey(kind: MessagingKind, index: number): string {

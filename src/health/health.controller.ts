@@ -17,6 +17,20 @@ export class HealthController {
 		};
 	}
 
+	@Get('/live')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	getLivenessHealth() {
+		return this.healthService.getLivenessHealth();
+	}
+
+	@Get('/ready')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	getReadinessHealth() {
+		return this.healthService.getReadinessHealth();
+	}
+
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Get('/admin')

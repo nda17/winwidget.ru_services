@@ -1,6 +1,7 @@
 import { DatabaseBackupService } from '@/maintenance/database-backup.service';
 import { ScheduledTasksService } from '@/maintenance/scheduled-tasks.service';
 import { MaintenanceWorkerService } from '@/maintenance/maintenance-worker.service';
+import type { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
@@ -55,13 +56,21 @@ describe('MaintenanceWorkerService', () => {
 		payload: unknown = {
 			schemaVersion: 1,
 			eventType: 'database.backup.requested.v1',
-			jobId
+			jobId,
+			jobType: 'DATABASE_BACKUP',
+			scheduleKey: 'manual:test',
+			periodStart: null,
+			periodEnd: null
 		}
 	): ConsumeMessage =>
 		({
 			content: Buffer.from(JSON.stringify(payload)),
+			fields: {
+				routingKey: 'database.backup.requested.v1'
+			},
 			properties: {
 				messageId,
+				type: 'database.backup.requested.v1',
 				headers: {}
 			}
 		}) as ConsumeMessage;
@@ -138,6 +147,9 @@ describe('MaintenanceWorkerService', () => {
 		const configService = {
 			get: jest.fn((key: string) => config[key])
 		} as unknown as ConfigService;
+		const heartbeat = {
+			markSuccessfulConsume: jest.fn()
+		} as unknown as MessagingHeartbeatService;
 
 		return {
 			service: new MaintenanceWorkerService(
@@ -146,7 +158,8 @@ describe('MaintenanceWorkerService', () => {
 				prisma,
 				scheduledJobs,
 				scheduledTasks,
-				backup
+				backup,
+				heartbeat
 			),
 			rabbitMq,
 			scheduledJobs,
@@ -364,7 +377,7 @@ describe('MaintenanceWorkerService', () => {
 			expect.stringMatching(
 				/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 			),
-			'Invalid database backup event payload',
+			'messageId must be a UUID',
 			'database.backup.requested.v1'
 		);
 		expect(

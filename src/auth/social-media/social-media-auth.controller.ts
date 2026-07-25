@@ -75,7 +75,7 @@ const getVkAuthCookieOptions = (includeDomain = true): CookieOptions => {
 		secure: isProduction,
 		sameSite: isProduction ? ('none' as const) : ('lax' as const),
 		...(domain ? { domain } : {}),
-		path: '/auth/vk'
+		path: '/api/v1/auth/vk'
 	};
 };
 

@@ -1,20 +1,22 @@
 import {
 	INTEGRATION_KINDS,
 	INTEGRATION_ROUTING_KEYS,
-	IntegrationKind,
-	OUTBOX_EVENT_TYPE
+	IntegrationKind
 } from '@/messaging/messaging.constants';
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
-import {
-	LeadIntegrationEventPayload,
-	LEAD_SOURCES
-} from '@/messaging/lead-integration-event';
+import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
 import {
 	classifyIntegrationError,
 	IntegrationErrorClassification
 } from '@/messaging/integration-error-classifier';
 import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
+import {
+	createMessagingHeaders,
+	getCurrentCorrelationId
+} from '@/messaging/messaging-context';
+import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
+import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
@@ -24,9 +26,9 @@ import {
 	ScheduledJobDispatchRejectedError
 } from '@/reports/daily-summary-delivery.service';
 import {
+	BeforeApplicationShutdown,
 	Injectable,
 	Logger,
-	OnApplicationShutdown,
 	OnModuleInit
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -44,6 +46,8 @@ import { randomUUID } from 'crypto';
 const DELIVERY_RECEIPT_LEASE_MS = 10 * 60 * 1000;
 const DELIVERY_RECOVERY_GRACE_MS = 5_000;
 const AUTOMATIC_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 20_000;
+const REDACTED_FAILURE_DETAIL = '[redacted after retention]';
 
 type DeliveryClaim =
 	| { state: 'claimed'; lockedAt: Date }
@@ -71,22 +75,28 @@ interface DeliveryFailureLockRow {
 	activeRetryToken: string | null;
 }
 
+interface MessagingRateLimitReservationRow {
+	waitMs: number;
+}
+
 @Injectable()
 export class IntegrationWorkerService
-	implements OnModuleInit, OnApplicationShutdown
+	implements OnModuleInit, BeforeApplicationShutdown
 {
 	private readonly logger = new Logger(IntegrationWorkerService.name);
 	private readonly receiptCleanupBatchSize = 1000;
 	private readonly receiptCleanupMaxBatches = 20;
 	private lastReceiptCleanupAt = 0;
-	private readonly rateLimitTails = new Map<string, Promise<void>>();
 	private readonly activeHandlers = new Set<Promise<void>>();
+	private shutdownPromise: Promise<void> | null = null;
+	private cleanupTimer: NodeJS.Timeout | null = null;
 
 	constructor(
 		private readonly rabbitMq: RabbitMqService,
 		private readonly delivery: IntegrationDeliveryService,
 		private readonly configService: ConfigService,
-		private readonly prisma: PrismaService
+		private readonly prisma: PrismaService,
+		private readonly heartbeat: MessagingHeartbeatService
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -95,39 +105,101 @@ export class IntegrationWorkerService
 		for (const kind of kinds) {
 			await this.rabbitMq.consume(
 				kind,
-				message => this.trackHandler(() => this.handle(kind, message)),
+				message =>
+					this.trackHandler(
+						() => this.handle(kind, message),
+						kind,
+						message
+					),
 				prefetch
 			);
 			await this.rabbitMq.consumeDeadLetter(
 				kind,
 				message =>
-					this.trackHandler(() => this.collectDeadLetter(kind, message)),
+					this.trackHandler(
+						() => this.collectDeadLetter(kind, message),
+						kind,
+						message
+					),
 				prefetch
 			);
 		}
 		this.logger.log(
 			`Integration consumers started kinds=${kinds.join(',')} prefetch=${prefetch}`
 		);
+		void this.runCleanup();
+		this.cleanupTimer = setInterval(
+			() => void this.runCleanup(),
+			60 * 60 * 1000
+		);
+		this.cleanupTimer.unref();
 	}
 
-	async onApplicationShutdown(): Promise<void> {
-		const [consumerCancellation] = await Promise.allSettled([
-			this.rabbitMq.cancelConsumers()
+	beforeApplicationShutdown(): Promise<void> {
+		if (!this.shutdownPromise) {
+			this.shutdownPromise = this.shutdown();
+		}
+		return this.shutdownPromise;
+	}
+
+	private async shutdown(): Promise<void> {
+		if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+		let consumerCancellationError: unknown = null;
+		const drained = await Promise.race([
+			(async () => {
+				await this.rabbitMq.cancelConsumers().catch(error => {
+					consumerCancellationError = error;
+				});
+				while (this.activeHandlers.size) {
+					await Promise.allSettled([...this.activeHandlers]);
+				}
+				return true;
+			})(),
+			new Promise<false>(resolve =>
+				setTimeout(() => resolve(false), SHUTDOWN_DRAIN_TIMEOUT_MS).unref()
+			)
 		]);
-		await Promise.allSettled([...this.activeHandlers]);
-		if (consumerCancellation.status === 'rejected') {
+		if (consumerCancellationError) {
 			this.logger.error(
 				`Failed to cancel integration consumers during shutdown: ${
-					consumerCancellation.reason instanceof Error
-						? consumerCancellation.reason.message
-						: String(consumerCancellation.reason)
+					consumerCancellationError instanceof Error
+						? consumerCancellationError.message
+						: String(consumerCancellationError)
 				}`
 			);
 		}
+		if (!drained) {
+			this.logger.warn(
+				JSON.stringify({
+					event: 'integration_worker.shutdown_timeout',
+					activeHandlers: this.activeHandlers.size,
+					timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS
+				})
+			);
+			return;
+		}
+		this.logger.log(
+			JSON.stringify({ event: 'integration_worker.shutdown_complete' })
+		);
 	}
 
-	private trackHandler(handler: () => Promise<void>): Promise<void> {
-		const promise = handler();
+	private trackHandler(
+		handler: () => Promise<void>,
+		kind?: IntegrationKind,
+		message?: ConsumeMessage
+	): Promise<void> {
+		const promise = handler().then(() => {
+			if (!kind || !message) return;
+			this.heartbeat.markSuccessfulConsume(kind);
+			this.logger.log(
+				JSON.stringify({
+					event: 'integration_worker.consume_completed',
+					kind,
+					messageId: message.properties.messageId || null,
+					correlationId: getCurrentCorrelationId()
+				})
+			);
+		});
 		this.activeHandlers.add(promise);
 		void promise.then(
 			() => this.activeHandlers.delete(promise),
@@ -217,7 +289,7 @@ export class IntegrationWorkerService
 			await this.deliverWithRateLimit(kind, payload, eventId);
 			await this.markDeliveryDelivered(eventId, kind, receiptClaim);
 			receiptClaim = null;
-			await this.cleanupReceiptsIfDue();
+			await this.runCleanup();
 			this.rabbitMq.ack(message);
 			this.logger.log(
 				`Integration delivered eventId=${eventId} kind=${kind}`
@@ -716,15 +788,19 @@ export class IntegrationWorkerService
 					eventType: this.getEventType(payload),
 					routingKey: INTEGRATION_ROUTING_KEYS[integration],
 					payload: payload as unknown as Prisma.InputJsonValue,
-					headers: {
-						'x-retry-attempt': attempt,
-						'x-first-failed-at': firstFailedAt.toISOString(),
-						'x-delivery-token': retryToken,
-						'x-error-category': classification.category,
-						'x-error-code': classification.normalizedCode,
-						'x-classification-version':
-							classification.classificationVersion
-					},
+					headers: createMessagingHeaders({
+						messageId: eventId,
+						causationId: eventId,
+						headers: {
+							'x-retry-attempt': attempt,
+							'x-first-failed-at': firstFailedAt.toISOString(),
+							'x-delivery-token': retryToken,
+							'x-error-category': classification.category,
+							'x-error-code': classification.normalizedCode,
+							'x-classification-version':
+								classification.classificationVersion
+						}
+					}),
 					availableAt
 				}
 			});
@@ -762,15 +838,19 @@ export class IntegrationWorkerService
 						eventType: this.getEventType(payload),
 						routingKey: INTEGRATION_ROUTING_KEYS[integration],
 						payload: payload as unknown as Prisma.InputJsonValue,
-						headers: {
-							'x-retry-attempt': attempt,
-							'x-first-failed-at': firstFailedAt.toISOString(),
-							...(deliveryToken
-								? {
-										'x-delivery-token': deliveryToken
-									}
-								: {})
-						},
+						headers: createMessagingHeaders({
+							messageId: eventId,
+							causationId: eventId,
+							headers: {
+								'x-retry-attempt': attempt,
+								'x-first-failed-at': firstFailedAt.toISOString(),
+								...(deliveryToken
+									? {
+											'x-delivery-token': deliveryToken
+										}
+									: {})
+							}
+						}),
 						availableAt
 					}
 				],
@@ -928,6 +1008,71 @@ export class IntegrationWorkerService
 			);
 			if (count < this.receiptCleanupBatchSize) break;
 		}
+
+		const configuredFailureRetention = Number(
+			this.configService.get<string>(
+				'INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS'
+			) || 30
+		);
+		const failureRetentionDays =
+			Number.isInteger(configuredFailureRetention) &&
+			configuredFailureRetention >= 1
+				? configuredFailureRetention
+				: 30;
+		const resolvedBefore = new Date(
+			now - failureRetentionDays * 24 * 60 * 60 * 1000
+		);
+		let redacted = 0;
+		for (let batch = 0; batch < this.receiptCleanupMaxBatches; batch++) {
+			const count = await this.prisma.$executeRaw(
+				Prisma.sql`
+					WITH expired AS (
+						SELECT "id"
+						FROM "integration_delivery_failures"
+						WHERE "resolved_at" IS NOT NULL
+							AND "resolved_at" < ${resolvedBefore}
+							AND (
+								"payload" <> '{}'::jsonb
+								OR "last_error" <> ${REDACTED_FAILURE_DETAIL}
+								OR (
+									"safe_reason" IS NOT NULL
+									AND "safe_reason" <> ${REDACTED_FAILURE_DETAIL}
+								)
+							)
+						ORDER BY "resolved_at" ASC
+						LIMIT ${this.receiptCleanupBatchSize}
+					)
+					UPDATE "integration_delivery_failures" AS failure
+					SET
+						"payload" = '{}'::jsonb,
+						"last_error" = ${REDACTED_FAILURE_DETAIL},
+						"safe_reason" = CASE
+							WHEN failure."safe_reason" IS NULL THEN NULL
+							ELSE ${REDACTED_FAILURE_DETAIL}
+						END,
+						"updated_at" = NOW()
+					FROM expired
+					WHERE failure."id" = expired."id"
+				`
+			);
+			redacted += count;
+			if (count < this.receiptCleanupBatchSize) break;
+		}
+		if (redacted) {
+			this.logger.log(
+				`Redacted ${redacted} resolved integration failures older than ${failureRetentionDays} days`
+			);
+		}
+	}
+
+	private async runCleanup(): Promise<void> {
+		await this.cleanupReceiptsIfDue().catch(error => {
+			this.logger.error(
+				`Messaging retention cleanup failed: ${
+					error instanceof Error ? error.stack : String(error)
+				}`
+			);
+		});
 	}
 
 	private parsePayload(
@@ -937,117 +1082,19 @@ export class IntegrationWorkerService
 		const value = JSON.parse(
 			message.content.toString('utf8')
 		) as WorkerEventPayload;
-
-		if (kind === 'daily-summary-telegram') {
-			const summary = value as DailySummaryRequestedEventPayload;
-			if (
-				summary?.schemaVersion !== 1 ||
-				summary?.eventType !== 'report.daily-summary.requested.v1' ||
-				!this.isUuid(summary.jobId) ||
-				message.properties.messageId !== summary.jobId ||
-				!summary.periodStart ||
-				!summary.periodEnd
-			) {
-				throw new Error('Invalid daily summary event payload');
-			}
-			return summary;
-		}
-
-		if (kind === 'payment-email' || kind === 'payment-telegram') {
-			const payment = value as PaymentSucceededEventPayload;
-			if (
-				payment?.schemaVersion !== 1 ||
-				payment?.eventType !== 'payment.succeeded.v1' ||
-				!payment.payment?.id ||
-				!payment.payment?.yookassaId ||
-				!payment.user?.id
-			) {
-				throw new Error('Invalid payment succeeded event payload');
-			}
-			return payment;
-		}
-		if (kind === 'mailing-email' || kind === 'mailing-telegram') {
-			const mailing = value as MailingDeliveryEventPayload;
-			const expectedChannel =
-				kind === 'mailing-email' ? 'EMAIL' : 'TELEGRAM';
-			if (
-				mailing?.schemaVersion !== 1 ||
-				mailing?.eventType !== 'mailing.delivery.requested.v1' ||
-				!mailing.campaignId ||
-				!mailing.deliveryId ||
-				mailing.channel !== expectedChannel
-			) {
-				throw new Error('Invalid mailing delivery event payload');
-			}
-			return mailing;
-		}
-		if (kind === 'limit-email' || kind === 'limit-telegram') {
-			const limit = value as LimitReachedEventPayload;
-			if (
-				limit?.schemaVersion !== 1 ||
-				limit?.eventType !== 'lead.limit.reached.v1' ||
-				!limit.entity?.id ||
-				!limit.entity?.name ||
-				!Number.isInteger(limit.limit) ||
-				!limit.destinations
-			) {
-				throw new Error('Invalid limit reached event payload');
-			}
-			return limit;
-		}
-
-		const lead = value as LeadIntegrationEventPayload;
-		const commonValid =
-			Boolean(lead?.integration) &&
-			LEAD_SOURCES.includes(lead?.source) &&
-			Boolean(lead?.entity?.id) &&
-			Boolean(lead?.entity?.name) &&
-			Boolean(lead?.lead?.id) &&
-			Boolean(lead?.lead?.createdAt) &&
-			this.isValidLeadDestination(lead);
-		const versionValid =
-			lead?.schemaVersion === 2 && lead.eventType === OUTBOX_EVENT_TYPE;
-
-		if (
-			!commonValid ||
-			!versionValid ||
-			!lead.integration ||
-			lead.integration !== kind
-		) {
-			throw new Error('Invalid lead integration event payload');
-		}
-		return lead;
-	}
-
-	private isValidLeadDestination(
-		lead: LeadIntegrationEventPayload
-	): boolean {
-		const destination = lead?.destination;
-		if (
-			!destination ||
-			typeof destination !== 'object' ||
-			Array.isArray(destination)
-		) {
-			return false;
-		}
-		if (lead.integration === 'email') {
-			return (
-				'email' in destination &&
-				typeof destination.email === 'string' &&
-				Boolean(destination.email.trim())
-			);
-		}
-		if (lead.integration === 'telegram') {
-			return (
-				'telegramChatId' in destination &&
-				typeof destination.telegramChatId === 'string' &&
-				Boolean(destination.telegramChatId.trim())
-			);
-		}
-		return (
-			'credentialRef' in destination &&
-			this.isUuid(destination.credentialRef)
-		);
+		assertMessagingEventContract(value, {
+			eventType:
+				typeof message.properties.type === 'string'
+					? message.properties.type
+					: '',
+			routingKey: message.fields.routingKey,
+			messageId:
+				typeof message.properties.messageId === 'string'
+					? message.properties.messageId
+					: '',
+			kind
+		});
+		return value;
 	}
 
 	private async deadLetterMalformed(
@@ -1425,21 +1472,65 @@ export class IntegrationWorkerService
 			return;
 		}
 
-		const previous = this.rateLimitTails.get(kind) || Promise.resolve();
-		let release!: () => void;
-		const gate = new Promise<void>(resolve => {
-			release = resolve;
-		});
-		this.rateLimitTails.set(
-			kind,
-			previous.catch(() => undefined).then(() => gate)
-		);
-		await previous.catch(() => undefined);
-		try {
-			await this.delivery.deliver(kind, payload, eventId);
-		} finally {
-			setTimeout(release, intervalMs);
+		const waitMs = await this.reserveRateLimitSlot(kind, intervalMs);
+		if (waitMs > 0) {
+			await new Promise<void>(resolve => {
+				setTimeout(resolve, waitMs);
+			});
 		}
+		await this.delivery.deliver(kind, payload, eventId);
+	}
+
+	private async reserveRateLimitSlot(
+		key: string,
+		intervalMs: number
+	): Promise<number> {
+		const [reservation] = await this.prisma.$queryRaw<
+			MessagingRateLimitReservationRow[]
+		>(
+			Prisma.sql`
+				WITH "reservation" AS (
+					INSERT INTO "messaging_rate_limits" (
+						"key",
+						"next_available_at",
+						"updated_at"
+					)
+					VALUES (
+						${key},
+						LOCALTIMESTAMP + ${intervalMs} * INTERVAL '1 millisecond',
+						LOCALTIMESTAMP
+					)
+					ON CONFLICT ("key") DO UPDATE
+					SET
+						"next_available_at" =
+							GREATEST(
+								"messaging_rate_limits"."next_available_at",
+								LOCALTIMESTAMP
+							) + ${intervalMs} * INTERVAL '1 millisecond',
+						"updated_at" = LOCALTIMESTAMP
+					RETURNING
+						"next_available_at" -
+							${intervalMs} * INTERVAL '1 millisecond'
+							AS "available_at"
+				)
+				SELECT
+					GREATEST(
+						0,
+						CEIL(
+							EXTRACT(
+								EPOCH FROM ("available_at" - LOCALTIMESTAMP)
+							) * 1000
+						)
+					)::integer AS "waitMs"
+				FROM "reservation"
+			`
+		);
+		if (!reservation) {
+			throw new Error(
+				`Failed to reserve messaging rate-limit slot for ${key}`
+			);
+		}
+		return reservation.waitMs;
 	}
 
 	private async shouldBypassMailingRateLimit(

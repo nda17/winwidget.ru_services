@@ -1,14 +1,9 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { CreateQuizDto } from '@/quiz/dto/create-quiz.dto';
-import { SubmitQuizLeadDto } from '@/quiz/dto/submit-quiz-lead.dto';
 import { UpdateQuizDto } from '@/quiz/dto/update-quiz.dto';
 import { QuizService } from '@/quiz/quiz.service';
 import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
-import {
-	getWidgetRequestDomain,
-	isWidgetDirectPageRequest
-} from '@/widget-domain/widget-domain.util';
 import {
 	Body,
 	Controller,
@@ -19,7 +14,6 @@ import {
 	Patch,
 	Post,
 	Query,
-	Req,
 	Res,
 	UploadedFile,
 	UseInterceptors,
@@ -27,7 +21,7 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 
 @Controller('quizzes')
 export class QuizController {
@@ -132,18 +126,6 @@ export class QuizController {
 			quizId,
 			page ? parseInt(page) : 1,
 			limit ? parseInt(limit) : 50
-		);
-	}
-
-	@HttpCode(200)
-	@UsePipes(new ValidationPipe({ whitelist: true }))
-	@Post('submit')
-	async submitLead(@Body() dto: SubmitQuizLeadDto, @Req() req: Request) {
-		return this.quizService.submitLead(
-			dto,
-			undefined,
-			getWidgetRequestDomain(req),
-			isWidgetDirectPageRequest(req, 'page-quiz', dto.key)
 		);
 	}
 }

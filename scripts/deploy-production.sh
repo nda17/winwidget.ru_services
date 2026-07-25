@@ -5,9 +5,9 @@ set -euo pipefail
 APP_ROOT="${APP_ROOT:-/opt/winwidget}"
 ENV_FILE="${ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 COMPOSE_FILE="${COMPOSE_FILE:-$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml}"
-HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:4200/api/health/deployment}"
-PUBLIC_HEALTHCHECK_URL="${PUBLIC_HEALTHCHECK_URL:-https://api.winwidget.ru/api/health/deployment}"
-READINESS_URL="${READINESS_URL:-http://127.0.0.1:4200/api/site-settings}"
+HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:4200/api/v1/health/deployment}"
+PUBLIC_HEALTHCHECK_URL="${PUBLIC_HEALTHCHECK_URL:-https://api.winwidget.ru/api/v1/health/deployment}"
+READINESS_URL="${READINESS_URL:-http://127.0.0.1:4200/api/v1/health/ready}"
 HEALTHCHECK_ATTEMPTS="${HEALTHCHECK_ATTEMPTS:-30}"
 HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
 
@@ -92,18 +92,32 @@ get_env_value() {
 	' "$ENV_FILE"
 }
 
-require_env_list_item() {
+require_env_exact_list() {
 	local key="$1"
-	local item="$2"
+	local expected="$2"
 	local value
+	local normalized
+	local normalized_expected
 
 	value="$(get_env_value "$key" || true)"
-	case ",$value," in
-		*",$item,"*) return 0 ;;
-	esac
-
-	echo "$key in $ENV_FILE must include $item" >&2
-	exit 1
+	normalized="$(
+		tr ',' '\n' <<<"$value" |
+			sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+			sed '/^$/d' |
+			sort -u |
+			paste -sd, -
+	)"
+	normalized_expected="$(
+		tr ',' '\n' <<<"$expected" |
+			sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+			sed '/^$/d' |
+			sort -u |
+			paste -sd, -
+	)"
+	if [[ "$normalized" != "$normalized_expected" ]]; then
+		echo "$key in $ENV_FILE must contain exactly: $expected" >&2
+		exit 1
+	fi
 }
 
 mode="$(get_env_value "MODE" || true)"
@@ -113,17 +127,28 @@ mode="${mode,,}"
 case "$mode" in
 	production)
 		require_env_key "DATABASE_URL_PRODUCTION"
-		require_env_key "RABBITMQ_URL"
-		require_env_key "RABBITMQ_USER"
-		require_env_key "RABBITMQ_PASSWORD"
+		require_env_key "COMPOSE_PROJECT_NAME"
+		require_env_key "RABBITMQ_DATA_VOLUME"
+		require_env_key "RABBITMQ_ADMIN_USER"
+		require_env_key "RABBITMQ_ADMIN_PASSWORD"
+		require_env_key "RABBITMQ_LEGACY_USER"
+		require_env_key "RABBITMQ_MONITOR_USER"
+		require_env_key "RABBITMQ_MONITOR_PASSWORD"
+		require_env_key "RABBITMQ_PUBLISHER_URL"
+		require_env_key "RABBITMQ_INTEGRATION_WORKER_URL"
+		require_env_key "RABBITMQ_MAINTENANCE_WORKER_URL"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
 		require_env_key "SCHEDULED_JOB_POLL_INTERVAL_MS"
 		require_env_key "SCHEDULED_JOB_LEASE_MS"
 		require_env_key "SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS"
 		require_env_key "INTEGRATION_WORKER_KINDS"
 		require_env_key "MAINTENANCE_WORKER_KINDS"
-		require_env_list_item "INTEGRATION_WORKER_KINDS" "daily-summary-telegram"
-		require_env_list_item "MAINTENANCE_WORKER_KINDS" "database-backup"
+		require_env_exact_list \
+			"INTEGRATION_WORKER_KINDS" \
+			"email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram"
+		require_env_exact_list \
+			"MAINTENANCE_WORKER_KINDS" \
+			"database-backup"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
 		;;
@@ -138,23 +163,425 @@ case "$mode" in
 		;;
 esac
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" build api
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile migration run --rm migrate
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d rabbitmq
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop outbox-publisher
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
-	integration-worker
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
-	api maintenance-worker
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate \
-	outbox-publisher
+target_project="$(get_env_value "COMPOSE_PROJECT_NAME" || true)"
+if [[ "$target_project" != "winwidget" ]]; then
+	echo "COMPOSE_PROJECT_NAME must be winwidget, got: ${target_project:-empty}" >&2
+	exit 1
+fi
+rabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"
+if [[ "$rabbitmq_vhost" != "winwidget" ]]; then
+	echo "RABBITMQ_VHOST must be winwidget, got: ${rabbitmq_vhost:-empty}" >&2
+	exit 1
+fi
+rabbitmq_data_volume="$(get_env_value "RABBITMQ_DATA_VOLUME" || true)"
+if ! docker volume inspect "$rabbitmq_data_volume" >/dev/null 2>&1; then
+	echo "Verified RabbitMQ volume does not exist: $rabbitmq_data_volume" >&2
+	echo "Determine the current /var/lib/rabbitmq volume before deployment; do not create a replacement blindly." >&2
+	exit 1
+fi
+export COMPOSE_PROJECT_NAME="$target_project"
+export RABBITMQ_DATA_VOLUME="$rabbitmq_data_volume"
+
+rabbitmq_container_ids="$(
+	docker ps -a \
+		--filter label=com.docker.compose.service=rabbitmq \
+		--format '{{.ID}}'
+)"
+legacy_project="$target_project"
+matched_rabbitmq_containers=0
+matched_rabbitmq_container_id=""
+while IFS= read -r container_id; do
+	[[ -n "$container_id" ]] || continue
+	mounted_volume="$(
+		docker inspect --format \
+			'{{ range .Mounts }}{{ if eq .Destination "/var/lib/rabbitmq" }}{{ .Name }}{{ end }}{{ end }}' \
+			"$container_id"
+	)"
+	if [[ "$mounted_volume" != "$rabbitmq_data_volume" ]]; then
+		continue
+	fi
+	matched_rabbitmq_containers=$((matched_rabbitmq_containers + 1))
+	matched_rabbitmq_container_id="$container_id"
+	legacy_project="$(
+		docker inspect --format \
+			'{{ index .Config.Labels "com.docker.compose.project" }}' \
+			"$container_id"
+	)"
+done <<<"$rabbitmq_container_ids"
+if ((matched_rabbitmq_containers > 1)); then
+	echo "More than one RabbitMQ container uses volume $rabbitmq_data_volume" >&2
+	exit 1
+fi
+if [[ -z "$legacy_project" ]]; then
+	echo "Could not determine the existing RabbitMQ Compose project" >&2
+	exit 1
+fi
+
+compose_target() {
+	docker compose --project-name "$target_project" \
+		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+compose_legacy() {
+	docker compose --project-name "$legacy_project" \
+		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+compose_target build api
+
+rabbitmq_admin_user="$(get_env_value "RABBITMQ_ADMIN_USER")"
+rabbitmq_admin_password="$(get_env_value "RABBITMQ_ADMIN_PASSWORD")"
+rabbitmq_legacy_user="$(get_env_value "RABBITMQ_LEGACY_USER")"
+rabbitmq_monitor_user="$(get_env_value "RABBITMQ_MONITOR_USER")"
+rabbitmq_monitor_password="$(get_env_value "RABBITMQ_MONITOR_PASSWORD")"
+previous_shared_user="$(get_env_value "RABBITMQ_USER" || true)"
+if [[ -n "$previous_shared_user" &&
+	"$previous_shared_user" != "change_me" &&
+	"$previous_shared_user" != "$rabbitmq_legacy_user" ]]; then
+	echo "RABBITMQ_LEGACY_USER must match the previous RABBITMQ_USER during cutover" >&2
+	exit 1
+fi
+
+validate_rabbitmq_username() {
+	local variable_name="$1"
+	local username="$2"
+
+	if [[ ! "$username" =~ ^[A-Za-z0-9._-]+$ ]]; then
+		echo "$variable_name must contain only letters, digits, dot, underscore or hyphen" >&2
+		exit 1
+	fi
+}
+
+validate_rabbitmq_username "RABBITMQ_ADMIN_USER" "$rabbitmq_admin_user"
+validate_rabbitmq_username "RABBITMQ_LEGACY_USER" "$rabbitmq_legacy_user"
+validate_rabbitmq_username "RABBITMQ_MONITOR_USER" "$rabbitmq_monitor_user"
+if [[ ! "$rabbitmq_vhost" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+	echo "RABBITMQ_VHOST contains unsupported characters" >&2
+	exit 1
+fi
+if [[ "$rabbitmq_admin_password" == change_me* ||
+	"$rabbitmq_monitor_password" == change_me* ||
+	${#rabbitmq_admin_password} -lt 32 ||
+	${#rabbitmq_monitor_password} -lt 32 ]]; then
+	echo "RabbitMQ admin and monitor passwords must be non-example values of at least 32 characters" >&2
+	exit 1
+fi
+
+parse_rabbitmq_service_url() {
+	local variable_name="$1"
+	local url_value
+	local parsed
+	local encoded_user
+	local encoded_password
+	local encoded_vhost
+
+	url_value="$(get_env_value "$variable_name")"
+	if ! parsed="$(
+		printf '%s' "$url_value" |
+			docker run --rm -i --network none \
+				--entrypoint node \
+				-e "RABBITMQ_EXPECTED_VHOST=$rabbitmq_vhost" \
+				"winwidget-api:$APP_VERSION" \
+				-e '
+const { readFileSync } = require("node:fs");
+
+const fail = message => {
+	process.stderr.write(`${message}\n`);
+	process.exit(1);
+};
+
+let url;
+try {
+	url = new URL(readFileSync(0, "utf8"));
+} catch {
+	fail("RabbitMQ service URL is invalid");
+}
+
+if (url.protocol !== "amqp:") {
+	fail("RabbitMQ service URL must use amqp for the local production broker");
+}
+if (!url.hostname || url.search || url.hash) {
+	fail("RabbitMQ service URL must contain a host and no query or fragment");
+}
+if (url.hostname !== "127.0.0.1" || (url.port && url.port !== "5672")) {
+	fail("RabbitMQ service URL must target 127.0.0.1:5672");
+}
+
+let username;
+let password;
+let vhost;
+try {
+	username = decodeURIComponent(url.username);
+	password = decodeURIComponent(url.password);
+	vhost = decodeURIComponent(url.pathname.slice(1));
+} catch {
+	fail("RabbitMQ service URL contains invalid percent-encoding");
+}
+
+if (!/^[A-Za-z0-9._-]+$/.test(username)) {
+	fail("RabbitMQ service username contains unsupported characters");
+}
+if (
+	password.length < 32 ||
+	password.startsWith("change_me") ||
+	/[\0\r\n]/.test(password)
+) {
+	fail("RabbitMQ service password is missing or unsafe");
+}
+if (vhost !== process.env.RABBITMQ_EXPECTED_VHOST) {
+	fail("RabbitMQ service URL vhost does not match RABBITMQ_VHOST");
+}
+
+for (const value of [username, password, vhost]) {
+	process.stdout.write(`${Buffer.from(value).toString("base64")}\n`);
+}
+'
+	)"; then
+		echo "$variable_name is invalid" >&2
+		exit 1
+	fi
+
+	encoded_user="$(sed -n '1p' <<<"$parsed")"
+	encoded_password="$(sed -n '2p' <<<"$parsed")"
+	encoded_vhost="$(sed -n '3p' <<<"$parsed")"
+	if [[ -z "$encoded_user" || -z "$encoded_password" || -z "$encoded_vhost" ]]; then
+		echo "$variable_name could not be parsed safely" >&2
+		exit 1
+	fi
+
+	printf '%s\n%s\n%s\n' \
+		"$encoded_user" "$encoded_password" "$encoded_vhost"
+}
+
+publisher_credentials="$(parse_rabbitmq_service_url "RABBITMQ_PUBLISHER_URL")"
+integration_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_INTEGRATION_WORKER_URL"
+)"
+maintenance_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_MAINTENANCE_WORKER_URL"
+)"
+
+publisher_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
+)"
+publisher_password_base64="$(sed -n '2p' <<<"$publisher_credentials")"
+integration_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$integration_credentials")" | base64 --decode
+)"
+integration_password_base64="$(sed -n '2p' <<<"$integration_credentials")"
+maintenance_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$maintenance_credentials")" | base64 --decode
+)"
+maintenance_password_base64="$(sed -n '2p' <<<"$maintenance_credentials")"
+rabbitmq_admin_password_base64="$(
+	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
+)"
+rabbitmq_monitor_password_base64="$(
+	printf '%s' "$rabbitmq_monitor_password" | base64 | tr -d '\n'
+)"
+
+service_users=(
+	"$rabbitmq_admin_user"
+	"$rabbitmq_monitor_user"
+	"$publisher_user"
+	"$integration_user"
+	"$maintenance_user"
+)
+for ((left = 0; left < ${#service_users[@]}; left++)); do
+	if [[ "$rabbitmq_legacy_user" == "${service_users[$left]}" ]]; then
+		echo "RABBITMQ_LEGACY_USER must differ from all current RabbitMQ users" >&2
+		exit 1
+	fi
+	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
+		if [[ "${service_users[$left]}" == "${service_users[$right]}" ]]; then
+			echo "RabbitMQ admin, monitor and service URLs must use distinct users" >&2
+			exit 1
+		fi
+	done
+done
+
+if [[ -n "$matched_rabbitmq_container_id" ]]; then
+	rabbitmq_is_running="$(
+		docker inspect --format '{{ .State.Running }}' \
+			"$matched_rabbitmq_container_id"
+	)"
+	if [[ "$rabbitmq_is_running" != "true" ]]; then
+		docker start "$matched_rabbitmq_container_id" >/dev/null
+	fi
+	provisioning_rabbitmq_container_id="$matched_rabbitmq_container_id"
+else
+	compose_target up -d rabbitmq
+	provisioning_rabbitmq_container_id="$(compose_target ps -q rabbitmq)"
+fi
+
+if [[ -z "$provisioning_rabbitmq_container_id" ]]; then
+	echo "RabbitMQ container for service-user provisioning was not found" >&2
+	exit 1
+fi
+
+for ((attempt = 1; attempt <= 30; attempt++)); do
+	if docker exec "$provisioning_rabbitmq_container_id" \
+		rabbitmq-diagnostics -q ping >/dev/null 2>&1; then
+		break
+	fi
+	if ((attempt == 30)); then
+		echo "RabbitMQ did not become ready for service-user provisioning" >&2
+		exit 1
+	fi
+	sleep 2
+done
+
+RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	docker exec \
+		-e RABBITMQ_PROVISION_VHOST \
+		"$provisioning_rabbitmq_container_id" \
+		sh -ec '
+if ! rabbitmqctl --silent list_vhosts name |
+	grep -Fqx -- "$RABBITMQ_PROVISION_VHOST"; then
+	rabbitmqctl add_vhost "$RABBITMQ_PROVISION_VHOST"
+fi
+'
+
+unexpected_broad_users="$(
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_PROVISION_ADMIN_USER="$rabbitmq_admin_user" \
+	RABBITMQ_PROVISION_LEGACY_USER="$rabbitmq_legacy_user" \
+		docker exec \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_PROVISION_ADMIN_USER \
+			-e RABBITMQ_PROVISION_LEGACY_USER \
+			"$provisioning_rabbitmq_container_id" \
+			sh -ec '
+rabbitmqctl --silent list_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" user configure write read |
+awk -v admin="$RABBITMQ_PROVISION_ADMIN_USER" \
+	-v legacy="$RABBITMQ_PROVISION_LEGACY_USER" \
+	'\''NR == 1 && $1 == "user" { next }
+	$2 == ".*" && $3 == ".*" && $4 == ".*" &&
+		$1 != admin && $1 != legacy { print $1 }'\''
+'
+)"
+if [[ -n "$unexpected_broad_users" ]]; then
+	echo "Unexpected broad RabbitMQ user(s) on vhost $rabbitmq_vhost:" >&2
+	echo "$unexpected_broad_users" >&2
+	echo "Verify RABBITMQ_LEGACY_USER before deployment" >&2
+	exit 1
+fi
+
+provision_rabbitmq_user() {
+	local username="$1"
+	local password_base64="$2"
+	local configure_pattern="$3"
+	local write_pattern="$4"
+	local read_pattern="$5"
+	local tag="$6"
+
+	RABBITMQ_PROVISION_USER="$username" \
+	RABBITMQ_PROVISION_PASSWORD_BASE64="$password_base64" \
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_PROVISION_CONFIGURE="$configure_pattern" \
+	RABBITMQ_PROVISION_WRITE="$write_pattern" \
+	RABBITMQ_PROVISION_READ="$read_pattern" \
+	RABBITMQ_PROVISION_TAG="$tag" \
+		docker exec \
+			-e RABBITMQ_PROVISION_USER \
+			-e RABBITMQ_PROVISION_PASSWORD_BASE64 \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_PROVISION_CONFIGURE \
+			-e RABBITMQ_PROVISION_WRITE \
+			-e RABBITMQ_PROVISION_READ \
+			-e RABBITMQ_PROVISION_TAG \
+			"$provisioning_rabbitmq_container_id" \
+			sh -ec '
+password="$(printf "%s" "$RABBITMQ_PROVISION_PASSWORD_BASE64" | base64 -d)"
+if rabbitmqctl --silent list_users |
+	cut -f1 |
+	grep -Fqx -- "$RABBITMQ_PROVISION_USER"; then
+	rabbitmqctl change_password "$RABBITMQ_PROVISION_USER" "$password"
+else
+	rabbitmqctl add_user "$RABBITMQ_PROVISION_USER" "$password"
+fi
+
+while IFS= read -r other_vhost; do
+	if [ "$other_vhost" != "$RABBITMQ_PROVISION_VHOST" ]; then
+		rabbitmqctl clear_permissions \
+			-p "$other_vhost" "$RABBITMQ_PROVISION_USER"
+	fi
+done <<EOF
+$(rabbitmqctl --silent list_vhosts name)
+EOF
+
+rabbitmqctl set_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_PROVISION_USER" \
+	"$RABBITMQ_PROVISION_CONFIGURE" \
+	"$RABBITMQ_PROVISION_WRITE" \
+	"$RABBITMQ_PROVISION_READ"
+if [ -n "$RABBITMQ_PROVISION_TAG" ]; then
+	rabbitmqctl set_user_tags \
+		"$RABBITMQ_PROVISION_USER" "$RABBITMQ_PROVISION_TAG"
+else
+	rabbitmqctl set_user_tags "$RABBITMQ_PROVISION_USER"
+fi
+rabbitmqctl authenticate_user "$RABBITMQ_PROVISION_USER" "$password"
+unset password
+'
+}
+
+provision_rabbitmq_user \
+	"$rabbitmq_admin_user" \
+	"$rabbitmq_admin_password_base64" \
+	'.*' \
+	'.*' \
+	'.*' \
+	'administrator'
+provision_rabbitmq_user \
+	"$publisher_user" \
+	"$publisher_password_base64" \
+	'^winwidget\..*' \
+	'^winwidget\..*' \
+	'^winwidget\..*' \
+	''
+provision_rabbitmq_user \
+	"$integration_user" \
+	"$integration_password_base64" \
+	'^$' \
+	'^(winwidget\.retry|winwidget\.dead-letter)$' \
+	'^winwidget\.(lead-integration|payment-notification|mailing|limit-notification|report)\..*' \
+	''
+provision_rabbitmq_user \
+	"$maintenance_user" \
+	"$maintenance_password_base64" \
+	'^$' \
+	'^(winwidget\.retry|winwidget\.dead-letter)$' \
+	'^winwidget\.maintenance\..*' \
+	''
+provision_rabbitmq_user \
+	"$rabbitmq_monitor_user" \
+	"$rabbitmq_monitor_password_base64" \
+	'^$' \
+	'^$' \
+	'^$' \
+	'monitoring'
+
+echo "RabbitMQ admin/service users and least-privilege permissions are verified"
+
+compose_legacy stop api outbox-publisher integration-worker maintenance-worker
+compose_target --profile migration run --rm migrate
+if [[ "$legacy_project" != "$target_project" ]]; then
+	compose_legacy stop rabbitmq
+fi
+compose_target up -d rabbitmq
 messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+compose_target up -d --force-recreate outbox-publisher
+compose_target up -d --force-recreate integration-worker maintenance-worker
+compose_target up -d --force-recreate api
 
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
-	docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+	compose_target \
 		ps api outbox-publisher integration-worker maintenance-worker rabbitmq || true
-	docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+	compose_target \
 		logs --tail=100 api outbox-publisher integration-worker maintenance-worker rabbitmq || true
 	echo "Processes listening on port 4200:"
 	ss -ltnp 'sport = :4200' || true
@@ -165,8 +592,7 @@ ensure_required_services_running() {
 	local container_id
 	for service in rabbitmq api outbox-publisher integration-worker maintenance-worker; do
 		container_id="$(
-			docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
-				ps --status running -q "$service"
+			compose_target ps --status running -q "$service"
 		)"
 		if [[ -z "$container_id" ]]; then
 			echo "Required service is not running: $service" >&2
@@ -195,8 +621,10 @@ check_deployment_revision() {
 }
 
 check_messaging_readiness() {
-	docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T \
+	compose_target exec -T \
 		-e "MESSAGING_READINESS_STARTED_AT=$messaging_readiness_started_at" \
+		-e "INTEGRATION_WORKER_KINDS=$(get_env_value INTEGRATION_WORKER_KINDS)" \
+		-e "MAINTENANCE_WORKER_KINDS=$(get_env_value MAINTENANCE_WORKER_KINDS)" \
 		api node - <<'NODE'
 const { PrismaClient } = require('@prisma/client');
 const {
@@ -283,19 +711,46 @@ const run = async () => {
 		const baseUrl = (
 			process.env.RABBITMQ_MANAGEMENT_URL || 'http://127.0.0.1:15672'
 		).replace(/\/$/, '');
-		const user = process.env.RABBITMQ_USER;
-		const password = process.env.RABBITMQ_PASSWORD;
+		const user = process.env.RABBITMQ_MONITOR_USER;
+		const password = process.env.RABBITMQ_MONITOR_PASSWORD;
 		const vhost = process.env.RABBITMQ_VHOST || 'winwidget';
 		if (!user || !password) {
 			throw new ReadinessError(
 				'RabbitMQ management credentials are missing'
 			);
 		}
-		const authorization = `Basic ${Buffer.from(`${user}:${password}`).toString(
-			'base64'
-		)}`;
+			const authorization = `Basic ${Buffer.from(`${user}:${password}`).toString(
+				'base64'
+			)}`;
+			const nodesResponse = await fetch(`${baseUrl}/api/nodes`, {
+				headers: { Authorization: authorization },
+				signal: AbortSignal.timeout(4000)
+			});
+			if (!nodesResponse.ok) {
+				await nodesResponse.body?.cancel();
+				throw new ReadinessError(
+					`RabbitMQ nodes returned HTTP ${nodesResponse.status}`
+				);
+			}
+			const nodes = await nodesResponse.json();
+			if (
+				!Array.isArray(nodes) ||
+				!nodes.length ||
+				nodes.some(
+					node =>
+						node.running === false ||
+						node.mem_alarm === true ||
+						node.disk_free_alarm === true ||
+						(Array.isArray(node.partitions) &&
+							node.partitions.length > 0)
+				)
+			) {
+				throw new ReadinessError(
+					'RabbitMQ node is stopped or reports an alarm/partition'
+				);
+			}
 
-		for (const queue of requiredQueues) {
+			for (const queue of requiredQueues) {
 			let response;
 			try {
 				response = await fetch(
@@ -407,7 +862,7 @@ ensure_required_services_running
 
 for service in api outbox-publisher integration-worker maintenance-worker; do
 	container_id="$(
-		docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -q "$service"
+		compose_target ps -q "$service"
 	)"
 	image_revision="$(
 		docker inspect \
@@ -430,7 +885,32 @@ for service in api outbox-publisher integration-worker maintenance-worker; do
 	fi
 done
 
-echo "Backend revision verified locally and publicly: $APP_REVISION"
+retire_rabbitmq_legacy_user() {
+	local rabbitmq_container_id
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps \
+	rabbitmq_container_id="$(compose_target ps --status running -q rabbitmq)"
+	if [[ -z "$rabbitmq_container_id" ]]; then
+		echo "RabbitMQ is not running; legacy user was not retired" >&2
+		exit 1
+	fi
+
+	RABBITMQ_PROVISION_LEGACY_USER="$rabbitmq_legacy_user" \
+		docker exec \
+			-e RABBITMQ_PROVISION_LEGACY_USER \
+			"$rabbitmq_container_id" \
+			sh -ec '
+if rabbitmqctl --silent list_users |
+	cut -f1 |
+	grep -Fqx -- "$RABBITMQ_PROVISION_LEGACY_USER"; then
+	rabbitmqctl delete_user "$RABBITMQ_PROVISION_LEGACY_USER"
+fi
+'
+}
+
+retire_rabbitmq_legacy_user
+
+echo "Backend revision verified locally and publicly: $APP_REVISION"
+echo "RabbitMQ legacy user is absent after the verified cutover"
+
+compose_target ps \
 	api outbox-publisher integration-worker maintenance-worker rabbitmq

@@ -12,6 +12,9 @@ import {
 	MaintenanceKind,
 	RETRY_DELAYS_MS
 } from '@/messaging/messaging.constants';
+import { getCurrentCorrelationId } from '@/messaging/messaging-context';
+import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
+import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
@@ -79,7 +82,8 @@ export class MaintenanceWorkerService
 		private readonly prisma: PrismaService,
 		private readonly scheduledJobs: ScheduledJobsService,
 		private readonly scheduledTasks: ScheduledTasksService,
-		private readonly backup: DatabaseBackupService
+		private readonly backup: DatabaseBackupService,
+		private readonly heartbeat: MessagingHeartbeatService
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -87,13 +91,22 @@ export class MaintenanceWorkerService
 		for (const kind of this.getEnabledKinds()) {
 			await this.rabbitMq.consume(
 				kind,
-				message => this.trackHandler(() => this.handle(kind, message)),
+				message =>
+					this.trackHandler(
+						() => this.handle(kind, message),
+						kind,
+						message
+					),
 				prefetch
 			);
 			await this.rabbitMq.consumeDeadLetter(
 				kind,
 				message =>
-					this.trackHandler(() => this.collectDeadLetter(kind, message)),
+					this.trackHandler(
+						() => this.collectDeadLetter(kind, message),
+						kind,
+						message
+					),
 				prefetch
 			);
 		}
@@ -151,8 +164,23 @@ export class MaintenanceWorkerService
 		}
 	}
 
-	private trackHandler(handler: () => Promise<void>): Promise<void> {
-		const promise = handler();
+	private trackHandler(
+		handler: () => Promise<void>,
+		kind?: MaintenanceKind,
+		message?: ConsumeMessage
+	): Promise<void> {
+		const promise = handler().then(() => {
+			if (!kind || !message) return;
+			this.heartbeat.markSuccessfulConsume(kind);
+			this.logger.log(
+				JSON.stringify({
+					event: 'maintenance_worker.consume_completed',
+					kind,
+					messageId: message.properties.messageId || null,
+					correlationId: getCurrentCorrelationId()
+				})
+			);
+		});
 		this.activeHandlers.add(promise);
 		void promise.then(
 			() => this.activeHandlers.delete(promise),
@@ -616,14 +644,18 @@ export class MaintenanceWorkerService
 		const value = JSON.parse(
 			message.content.toString('utf8')
 		) as DatabaseBackupRequestedEventPayload;
-		if (
-			value?.schemaVersion !== 1 ||
-			value.eventType !== DATABASE_BACKUP_EVENT_TYPE ||
-			!UUID_PATTERN.test(value.jobId || '') ||
-			message.properties.messageId !== value.jobId
-		) {
-			throw new Error('Invalid database backup event payload');
-		}
+		assertMessagingEventContract(value, {
+			eventType:
+				typeof message.properties.type === 'string'
+					? message.properties.type
+					: '',
+			routingKey: message.fields.routingKey,
+			messageId:
+				typeof message.properties.messageId === 'string'
+					? message.properties.messageId
+					: '',
+			kind: 'database-backup'
+		});
 		return value;
 	}
 

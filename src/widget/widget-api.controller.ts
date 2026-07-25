@@ -26,7 +26,7 @@ export class WidgetApiController {
 	constructor(private readonly widgetService: WidgetService) {}
 
 	/**
-	 * GET /api/widget/:key/config
+	 * GET /api/v1/widget/:key/config
 	 * Returns widget config in the wheel runtime format.
 	 */
 	@Get(':key/config')
@@ -49,7 +49,7 @@ export class WidgetApiController {
 	}
 
 	/**
-	 * POST /api/widget/:key/lead
+	 * POST /api/v1/widget/:key/lead
 	 * Accepts lead from the public wheel widget: { phone, email, name, bonus }
 	 */
 	@Post(':key/lead')

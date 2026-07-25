@@ -1,7 +1,9 @@
 import { AppModule } from '@/app.module';
+import { getTrustProxyConfig } from '@/config/trust-proxy.config';
 import { GoogleRecaptchaExceptionFilter } from '@/filters/google-recaptcha-exception.filter';
 import { AppHttpExceptionFilter } from '@/filters/http-exception.filter';
 import { RecaptchaDevLoggingInterceptor } from '@/interceptors/recaptcha-dev-logging.interceptor';
+import { messagingContextMiddleware } from '@/messaging/messaging-context';
 import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { path as appRoot } from 'app-root-path';
@@ -10,25 +12,23 @@ import * as cookieParser from 'cookie-parser';
 import * as express from 'express';
 import { join } from 'path';
 
+const API_PREFIX = 'api/v1';
+const API_BASE_PATH = `/${API_PREFIX}`;
+
 export const bootstrap = async () => {
 	const app = await NestFactory.create(AppModule);
 	app.enableShutdownHooks();
 	const httpAdapter = app.getHttpAdapter();
 	const instance = httpAdapter.getInstance();
 	if (typeof instance?.set === 'function') {
-		instance.set('trust proxy', true);
+		instance.set(
+			'trust proxy',
+			getTrustProxyConfig(process.env.TRUST_PROXY)
+		);
 	}
 
-	app.setGlobalPrefix('api', {
+	app.setGlobalPrefix(API_PREFIX, {
 		exclude: [
-			{ path: 'auth/google', method: RequestMethod.GET },
-			{ path: 'auth/google/redirect', method: RequestMethod.GET },
-			{ path: 'auth/github', method: RequestMethod.GET },
-			{ path: 'auth/github/redirect', method: RequestMethod.GET },
-			{ path: 'auth/yandex', method: RequestMethod.GET },
-			{ path: 'auth/yandex/redirect', method: RequestMethod.GET },
-			{ path: 'auth/vk', method: RequestMethod.GET },
-			{ path: 'auth/vk/redirect', method: RequestMethod.GET },
 			{ path: 'widget/:key', method: RequestMethod.GET },
 			{ path: 'page-wheel/:key', method: RequestMethod.GET },
 			{ path: 'quiz-widget/:key', method: RequestMethod.GET },
@@ -46,56 +46,69 @@ export const bootstrap = async () => {
 		app.use(require('morgan')('dev'));
 	}
 
+	app.use(messagingContextMiddleware);
 	app.use(cookieParser());
-	app.use('/api/widget', (req: any, res: any, next: any) => {
+	app.use(`${API_BASE_PATH}/widget`, (req: any, res: any, next: any) => {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 		if (req.method === 'OPTIONS') return res.status(204).end();
 		next();
 	});
-	app.use('/api/quiz', (req: any, res: any, next: any) => {
+	app.use(`${API_BASE_PATH}/quiz`, (req: any, res: any, next: any) => {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 		if (req.method === 'OPTIONS') return res.status(204).end();
 		next();
 	});
-	app.use('/api/callback', (req: any, res: any, next: any) => {
+	app.use(`${API_BASE_PATH}/callback`, (req: any, res: any, next: any) => {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 		if (req.method === 'OPTIONS') return res.status(204).end();
 		next();
 	});
-	app.use('/api/countdown-timer', (req: any, res: any, next: any) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
-		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-		if (req.method === 'OPTIONS') return res.status(204).end();
-		next();
-	});
-	app.use('/api/stop-offer', (req: any, res: any, next: any) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
-		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-		if (req.method === 'OPTIONS') return res.status(204).end();
-		next();
-	});
-	app.use('/api/online-consultant', (req: any, res: any, next: any) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
-		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-		if (req.method === 'OPTIONS') return res.status(204).end();
-		next();
-	});
-	app.use('/api/calculator', (req: any, res: any, next: any) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
-		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-		if (req.method === 'OPTIONS') return res.status(204).end();
-		next();
-	});
+	app.use(
+		`${API_BASE_PATH}/countdown-timer`,
+		(req: any, res: any, next: any) => {
+			res.setHeader('Access-Control-Allow-Origin', '*');
+			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+			if (req.method === 'OPTIONS') return res.status(204).end();
+			next();
+		}
+	);
+	app.use(
+		`${API_BASE_PATH}/stop-offer`,
+		(req: any, res: any, next: any) => {
+			res.setHeader('Access-Control-Allow-Origin', '*');
+			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+			if (req.method === 'OPTIONS') return res.status(204).end();
+			next();
+		}
+	);
+	app.use(
+		`${API_BASE_PATH}/online-consultant`,
+		(req: any, res: any, next: any) => {
+			res.setHeader('Access-Control-Allow-Origin', '*');
+			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+			if (req.method === 'OPTIONS') return res.status(204).end();
+			next();
+		}
+	);
+	app.use(
+		`${API_BASE_PATH}/calculator`,
+		(req: any, res: any, next: any) => {
+			res.setHeader('Access-Control-Allow-Origin', '*');
+			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+			if (req.method === 'OPTIONS') return res.status(204).end();
+			next();
+		}
+	);
 	// Serve static widget runtime files: /widgets/wheel.js etc.
 	app.use(express.static(join(appRoot, 'public')));
 	app.useGlobalInterceptors(new RecaptchaDevLoggingInterceptor());
@@ -109,7 +122,7 @@ export const bootstrap = async () => {
 				? true
 				: ([process.env.RECAPTCHA_CLIENT_URL].filter(Boolean) as string[]),
 		credentials: true,
-		exposedHeaders: 'set-cookie'
+		exposedHeaders: 'set-cookie, x-request-id, x-correlation-id'
 	});
 
 	const port = process.env.PORT || 5000;

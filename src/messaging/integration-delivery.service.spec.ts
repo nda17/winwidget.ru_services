@@ -182,6 +182,7 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 					? '123456789'
 					: 'user@example.com',
 			status,
+			nextChunkIndex: 0,
 			updatedAt: new Date(),
 			campaign: {
 				id: campaignId,
@@ -195,7 +196,8 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			}
 		};
 		const emailService = {
-			sendAdminBroadcast: jest.fn().mockResolvedValue(undefined)
+			sendAdminBroadcast: jest.fn().mockResolvedValue(undefined),
+			sendLimitReachedNotification: jest.fn().mockResolvedValue(undefined)
 		} as unknown as EmailService;
 		const transaction = {
 			mailingDelivery: {
@@ -293,16 +295,15 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 		await service.deliver(
 			'limit-telegram',
 			{
-				schemaVersion: 1,
-				eventType: 'lead.limit.reached.v1',
+				schemaVersion: 2,
+				eventType: 'lead.limit.reached.telegram.v2',
 				entity: {
 					id: 'widget-1',
 					name: 'Колесо',
 					type: 'WIDGET'
 				},
 				limit: 10,
-				destinations: {
-					emails: [],
+				destination: {
 					telegramChatId: '123456789'
 				}
 			},
@@ -314,6 +315,123 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			expect.any(String),
 			{ parseMode: 'HTML' }
 		);
+	});
+
+	it('sends one limit email per current delivery event', async () => {
+		const { service, emailService } = createService();
+
+		await service.deliver(
+			'limit-email',
+			{
+				schemaVersion: 2,
+				eventType: 'lead.limit.reached.email.v2',
+				entity: {
+					id: 'widget-1',
+					name: 'Колесо',
+					type: 'WIDGET'
+				},
+				limit: 10,
+				destination: {
+					email: 'owner@example.com'
+				}
+			},
+			eventId
+		);
+
+		expect(emailService.sendLimitReachedNotification).toHaveBeenCalledWith(
+			'owner@example.com',
+			'Колесо',
+			10,
+			{ messageId: `<${eventId}.limit@winwidget.ru>` }
+		);
+	});
+
+	it('rejects the retired limit-reached v1 payload', async () => {
+		const { service, emailService } = createService();
+
+		await expect(
+			service.deliver(
+				'limit-email',
+				{
+					schemaVersion: 1,
+					eventType: 'lead.limit.reached.v1',
+					entity: {
+						id: 'widget-1',
+						name: 'Колесо',
+						type: 'WIDGET'
+					},
+					limit: 10,
+					destinations: {
+						emails: ['owner@example.com'],
+						telegramChatId: null
+					}
+				} as never,
+				eventId
+			)
+		).rejects.toThrow('Invalid limit reached event payload');
+		expect(
+			emailService.sendLimitReachedNotification
+		).not.toHaveBeenCalled();
+	});
+
+	it('persists each successful Telegram chunk before sending the next one', async () => {
+		const { service, prisma, deliveryRecord, telegram } = createService(
+			MailingDeliveryStatus.PENDING,
+			MailingCampaignStatus.QUEUED,
+			MailingDeliveryChannel.TELEGRAM
+		);
+		deliveryRecord.campaign.message = 'a'.repeat(3601);
+		(telegram.sendMessage as jest.Mock)
+			.mockResolvedValueOnce(undefined)
+			.mockRejectedValueOnce(
+				new TelegramApiError({
+					httpStatus: 502,
+					description: 'Bad Gateway'
+				})
+			);
+
+		await expect(
+			service.deliver('mailing-telegram', telegramEvent, eventId)
+		).rejects.toThrow('Bad Gateway');
+
+		expect(prisma.mailingDelivery.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: deliveryId,
+				campaignId,
+				status: MailingDeliveryStatus.PROCESSING,
+				nextChunkIndex: 0
+			},
+			data: { nextChunkIndex: 1 }
+		});
+		expect(telegram.sendMessage).toHaveBeenCalledTimes(2);
+	});
+
+	it('resumes a Telegram mailing from its persisted chunk index', async () => {
+		const { service, prisma, deliveryRecord, telegram } = createService(
+			MailingDeliveryStatus.PENDING,
+			MailingCampaignStatus.QUEUED,
+			MailingDeliveryChannel.TELEGRAM
+		);
+		deliveryRecord.campaign.message = 'a'.repeat(3601);
+		deliveryRecord.nextChunkIndex = 1;
+
+		await service.deliver('mailing-telegram', telegramEvent, eventId);
+
+		expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
+		expect(telegram.sendMessage).toHaveBeenCalledWith(
+			'123456789',
+			'a'.repeat(101),
+			{ parseMode: null }
+		);
+		expect(prisma.mailingDelivery.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: deliveryId,
+				campaignId,
+				status: MailingDeliveryStatus.PROCESSING,
+				nextChunkIndex: 1
+			},
+			data: { nextChunkIndex: 2 }
+		});
 	});
 
 	it('does not deactivate a Telegram channel for a formatting-related 400', async () => {

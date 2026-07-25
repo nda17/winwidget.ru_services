@@ -1,7 +1,11 @@
+import {
+	MESSAGING_KINDS,
+	MESSAGING_QUEUE_NAMES
+} from '@/messaging/messaging.constants';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
 import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport } from 'nodemailer';
 
@@ -57,6 +61,27 @@ export class HealthService {
 		};
 	}
 
+	getLivenessHealth() {
+		return {
+			status: 'ok',
+			service: 'api',
+			revision: process.env.APP_REVISION || 'unknown'
+		};
+	}
+
+	async getReadinessHealth() {
+		try {
+			await this.prisma.$queryRaw`SELECT 1`;
+		} catch {
+			throw new ServiceUnavailableException('Database is not ready');
+		}
+		return {
+			status: 'ready',
+			service: 'api',
+			revision: process.env.APP_REVISION || 'unknown'
+		};
+	}
+
 	private async checkBackend(): Promise<HealthCheck> {
 		return {
 			id: 'backend',
@@ -74,9 +99,54 @@ export class HealthService {
 	}
 
 	private async checkRabbitMq(): Promise<HealthCheck> {
-		return this.measure('rabbitmq', 'RabbitMQ', () =>
-			this.rabbitManagement.checkConnection()
-		);
+		const startedAt = Date.now();
+		try {
+			const [version, broker, queues] = await Promise.all([
+				this.rabbitManagement.checkConnection(),
+				this.rabbitManagement.getBrokerHealth(),
+				this.rabbitManagement.getMessagingQueues()
+			]);
+			const requiredQueues = MESSAGING_KINDS.flatMap(kind => {
+				const queue = MESSAGING_QUEUE_NAMES[kind];
+				return [queue, `${queue}.dead-letter`];
+			});
+			const queuesByName = new Map(
+				queues.map(queue => [queue.name, queue])
+			);
+			const missing = requiredQueues.filter(
+				queue => !queuesByName.has(queue)
+			);
+			const consumerless = requiredQueues.filter(
+				queue => queuesByName.get(queue)?.consumers === 0
+			);
+			const alarms = [
+				...broker.alarmNodes,
+				...broker.stoppedNodes,
+				...broker.partitionedNodes
+			];
+			const hasProblem =
+				!broker.nodes.length ||
+				missing.length > 0 ||
+				consumerless.length > 0 ||
+				alarms.length > 0;
+			return {
+				id: 'rabbitmq',
+				title: 'RabbitMQ',
+				status: hasProblem ? 'warning' : 'ok',
+				message: hasProblem
+					? `${version}; отсутствуют очереди: ${missing.length}, без consumers: ${consumerless.length}, alarms/nodes: ${alarms.length + (broker.nodes.length ? 0 : 1)}`
+					: `${version}; ${requiredQueues.length} обязательных очередей готовы`,
+				latencyMs: Date.now() - startedAt
+			};
+		} catch (error) {
+			return {
+				id: 'rabbitmq',
+				title: 'RabbitMQ',
+				status: 'down',
+				message: error instanceof Error ? error.message : String(error),
+				latencyMs: Date.now() - startedAt
+			};
+		}
 	}
 
 	private async checkMessagingHeartbeat(
