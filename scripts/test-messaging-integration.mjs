@@ -37,6 +37,7 @@ const children = [];
 let childFailure;
 let connection;
 let channel;
+let maintenanceScheduleState;
 const createdEventIds = [];
 const createdScheduledJobIds = [];
 const requiredQueues = [
@@ -514,6 +515,34 @@ try {
 		return queues.every(queue => queue.consumerCount > 0);
 	}, 'integration worker consumers');
 
+	// Keep the smoke independent from real time and Telegram schedule settings.
+	const maintenanceScheduleSnapshot =
+		await prisma.telegramBotSettings.findUnique({
+			where: { id: 'singleton' },
+			select: {
+				dailySummaryEnabled: true,
+				databaseBackupEnabled: true
+			}
+		});
+	const suspendedMaintenanceSchedule =
+		await prisma.telegramBotSettings.upsert({
+			where: { id: 'singleton' },
+			update: {
+				dailySummaryEnabled: false,
+				databaseBackupEnabled: false
+			},
+			create: {
+				id: 'singleton',
+				dailySummaryEnabled: false,
+				databaseBackupEnabled: false
+			},
+			select: { updatedAt: true }
+		});
+	maintenanceScheduleState = {
+		snapshot: maintenanceScheduleSnapshot,
+		updatedAt: suspendedMaintenanceSchedule.updatedAt
+	};
+
 	startProcess('dist/src/maintenance-worker-main.js', {
 		MAINTENANCE_WORKER_KINDS: 'database-backup',
 		MAINTENANCE_WORKER_PREFETCH: '1',
@@ -549,7 +578,7 @@ try {
 						id: randomUUID(),
 						createdAt: new Date().toISOString()
 					},
-					destination: { credentialRef: randomUUID() }
+					destination: { email: 'ci-restart@example.com' }
 				}
 			}
 		});
@@ -636,7 +665,7 @@ try {
 						id: randomUUID(),
 						createdAt: new Date().toISOString()
 					},
-					destination: { credentialRef: randomUUID() }
+					destination: { email: 'ci-reconnected@example.com' }
 				}
 			}
 		});
@@ -830,6 +859,7 @@ try {
 		{
 			persistent: true,
 			messageId: duplicateEventId,
+			type: 'lead.integration.requested.v2',
 			contentType: 'application/json'
 		}
 	);
@@ -882,6 +912,26 @@ try {
 	if (channel) await channel.close().catch(() => undefined);
 	if (connection) await connection.close().catch(() => undefined);
 	await stopChildren();
+	if (maintenanceScheduleState) {
+		const where = {
+			id: 'singleton',
+			updatedAt: maintenanceScheduleState.updatedAt,
+			dailySummaryEnabled: false,
+			databaseBackupEnabled: false
+		};
+		if (maintenanceScheduleState.snapshot) {
+			await prisma.telegramBotSettings
+				.updateMany({
+					where,
+					data: maintenanceScheduleState.snapshot
+				})
+				.catch(() => undefined);
+		} else {
+			await prisma.telegramBotSettings
+				.deleteMany({ where })
+				.catch(() => undefined);
+		}
+	}
 	if (createdEventIds.length) {
 		await prisma.integrationDeliveryFailure
 			.deleteMany({ where: { eventId: { in: createdEventIds } } })
