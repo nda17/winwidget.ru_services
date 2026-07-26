@@ -1,4 +1,5 @@
 import { CountdownTimerService } from '@/countdown-timer/countdown-timer.service';
+import { getClientIp } from '@/utils/ip.util';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -14,12 +15,6 @@ import {
 	Res
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-
-function extractIp(req: Request): string {
-	const forwarded = req.headers['x-forwarded-for'];
-	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-	return req.ip || req.socket?.remoteAddress || '';
-}
 
 @Controller('countdown-timer')
 export class CountdownTimerApiController {
@@ -42,7 +37,7 @@ export class CountdownTimerApiController {
 		res.setHeader('Expires', '0');
 		const config = await this.countdownTimerService.getPublicConfig(
 			key,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-timer', key)
 		);
@@ -65,7 +60,7 @@ export class CountdownTimerApiController {
 				email: body.email,
 				url: body.url
 			},
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-timer', key)
 		);

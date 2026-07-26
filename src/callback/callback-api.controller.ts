@@ -1,4 +1,5 @@
 import { CallbackService } from '@/callback/callback.service';
+import { getClientIp } from '@/utils/ip.util';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -15,12 +16,6 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 
-function extractIp(req: Request): string {
-	const forwarded = req.headers['x-forwarded-for'];
-	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-	return req.ip || req.socket?.remoteAddress || '';
-}
-
 @Controller('callback')
 export class CallbackApiController {
 	constructor(private readonly callbackService: CallbackService) {}
@@ -34,7 +29,7 @@ export class CallbackApiController {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.callbackService.getPublicConfig(
 			key,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-callback', key)
 		);
@@ -64,7 +59,7 @@ export class CallbackApiController {
 				timezone: body.timezone,
 				url: body.url
 			},
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-callback', key)
 		);

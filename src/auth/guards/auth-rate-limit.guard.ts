@@ -1,3 +1,4 @@
+import { getClientIp } from '@/utils/ip.util';
 import {
 	CanActivate,
 	ExecutionContext,
@@ -36,7 +37,7 @@ export class AuthRateLimitGuard implements CanActivate {
 
 	canActivate(context: ExecutionContext): boolean {
 		const request = context.switchToHttp().getRequest<Request>();
-		const ip = this.getClientIp(request);
+		const ip = getClientIp(request) ?? 'unknown';
 		const path = request.route?.path ?? request.path;
 		const limitConfig = this.getLimitConfig(path);
 		const key = `${ip}:${path}`;
@@ -73,20 +74,5 @@ export class AuthRateLimitGuard implements CanActivate {
 		}
 
 		return { limit: 10, windowMs: 10 * 60 * 1000 };
-	}
-
-	private getClientIp(request: Request) {
-		const cfIp = request.headers['cf-connecting-ip'];
-		const realIp = request.headers['x-real-ip'];
-		const forwardedFor = request.headers['x-forwarded-for'];
-
-		if (typeof cfIp === 'string' && cfIp.length > 0) return cfIp.trim();
-		if (typeof realIp === 'string' && realIp.length > 0)
-			return realIp.trim();
-		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
-			return forwardedFor.split(',')[0].trim();
-		}
-
-		return request.ip ?? 'unknown';
 	}
 }

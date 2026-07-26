@@ -1,4 +1,5 @@
 import { QuizService } from '@/quiz/quiz.service';
+import { getClientIp } from '@/utils/ip.util';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -14,12 +15,6 @@ import {
 	Res
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-
-function extractIp(req: Request): string {
-	const forwarded = req.headers['x-forwarded-for'];
-	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-	return req.ip || req.socket?.remoteAddress || '';
-}
 
 @Controller('quiz')
 export class QuizApiController {
@@ -38,7 +33,7 @@ export class QuizApiController {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.quizService.getPublicConfig(
 			key,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-quiz', key)
 		);
@@ -75,7 +70,7 @@ export class QuizApiController {
 				answers: body.answers || [],
 				url: body.url
 			},
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-quiz', key)
 		);

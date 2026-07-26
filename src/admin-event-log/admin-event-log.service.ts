@@ -1,4 +1,5 @@
 import { PrismaService } from '@/prisma.service';
+import { getClientIp } from '@/utils/ip.util';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { AuthIdentityType, Prisma } from '@prisma/client';
 import { Request } from 'express';
@@ -332,20 +333,10 @@ export class AdminEventLogService {
 			};
 		}
 
-		const forwardedFor = this.getHeaderValue(
-			request.headers['x-forwarded-for']
-		);
-		const realIp = this.getHeaderValue(request.headers['x-real-ip']);
-		const cfIp = this.getHeaderValue(request.headers['cf-connecting-ip']);
 		const userAgent = this.getHeaderValue(request.headers['user-agent']);
 
 		return {
-			ip:
-				cfIp ||
-				realIp ||
-				(forwardedFor ? forwardedFor.split(',')[0].trim() : null) ||
-				request.ip ||
-				null,
+			ip: getClientIp(request) || null,
 			userAgent: userAgent || null
 		};
 	}

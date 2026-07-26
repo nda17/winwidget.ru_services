@@ -19,6 +19,7 @@ import {
 	USER_DEACTIVATED_MESSAGE
 } from '@/utils/auth.constants';
 import { normalizeEmail } from '@/utils/email.util';
+import { getClientIp } from '@/utils/ip.util';
 import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
@@ -446,7 +447,7 @@ export class AuthService {
 					PASSWORD_SALT_ROUNDS
 				),
 				userAgent: request?.get('user-agent')?.slice(0, 500),
-				ipAddress: this.getClientIp(request),
+				ipAddress: request ? getClientIp(request) : undefined,
 				expiresAt
 			}
 		});
@@ -727,23 +728,6 @@ export class AuthService {
 		if (resendAllowedAt > Date.now()) {
 			throw new BadRequestException('Email verification resend cooldown');
 		}
-	}
-
-	private getClientIp(request?: Request) {
-		if (!request) return undefined;
-
-		const forwardedFor = request.headers['x-forwarded-for'];
-		const realIp = request.headers['x-real-ip'];
-		const cfIp = request.headers['cf-connecting-ip'];
-
-		if (typeof cfIp === 'string' && cfIp.length > 0) return cfIp.trim();
-		if (typeof realIp === 'string' && realIp.length > 0)
-			return realIp.trim();
-		if (typeof forwardedFor === 'string' && forwardedFor.length > 0) {
-			return forwardedFor.split(',')[0].trim();
-		}
-
-		return request.ip ?? undefined;
 	}
 
 	private async validateUser(dto: AuthDto) {

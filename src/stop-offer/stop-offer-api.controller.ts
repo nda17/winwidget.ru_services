@@ -1,4 +1,5 @@
 import { StopOfferService } from '@/stop-offer/stop-offer.service';
+import { getClientIp } from '@/utils/ip.util';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -14,12 +15,6 @@ import {
 	Res
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-
-function extractIp(req: Request): string {
-	const forwarded = req.headers['x-forwarded-for'];
-	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-	return req.ip || req.socket?.remoteAddress || '';
-}
 
 @Controller('stop-offer')
 export class StopOfferApiController {
@@ -40,7 +35,7 @@ export class StopOfferApiController {
 		res.setHeader('Expires', '0');
 		const config = await this.stopOfferService.getPublicConfig(
 			key,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-stop-offer', key)
 		);
@@ -64,7 +59,7 @@ export class StopOfferApiController {
 				email: body.email,
 				url: body.url
 			},
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-stop-offer', key)
 		);

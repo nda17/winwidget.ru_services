@@ -1,4 +1,5 @@
 import { OnlineConsultantService } from '@/online-consultant/online-consultant.service';
+import { getClientIp } from '@/utils/ip.util';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -15,12 +16,6 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 
-function extractIp(req: Request): string {
-	const forwarded = req.headers['x-forwarded-for'];
-	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-	return req.ip || req.socket?.remoteAddress || '';
-}
-
 @Controller('online-consultant')
 export class OnlineConsultantApiController {
 	constructor(
@@ -36,7 +31,7 @@ export class OnlineConsultantApiController {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.onlineConsultantService.getPublicConfig(
 			key,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-online-consultant', key)
 		);
@@ -69,7 +64,7 @@ export class OnlineConsultantApiController {
 				actionValue: body.actionValue,
 				url: body.url
 			},
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-online-consultant', key)
 		);

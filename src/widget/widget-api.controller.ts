@@ -1,3 +1,4 @@
+import { getClientIp } from '@/utils/ip.util';
 import { WidgetService } from '@/widget/widget.service';
 import {
 	getWidgetRequestDomain,
@@ -14,12 +15,6 @@ import {
 	Res
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-
-function extractIp(req: Request): string {
-	const forwarded = req.headers['x-forwarded-for'];
-	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-	return req.ip || req.socket?.remoteAddress || '';
-}
 
 @Controller('widget')
 export class WidgetApiController {
@@ -38,7 +33,7 @@ export class WidgetApiController {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		const config = await this.widgetService.getPublicConfig(
 			key,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-wheel', key)
 		);
@@ -72,7 +67,7 @@ export class WidgetApiController {
 			body.email,
 			body.name,
 			body.bonus,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-wheel', key)
 		);

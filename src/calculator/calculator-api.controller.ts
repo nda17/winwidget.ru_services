@@ -1,5 +1,6 @@
 import { CalculatorService } from '@/calculator/calculator.service';
 import { SubmitCalculatorLeadDto } from '@/calculator/dto/submit-calculator-lead.dto';
+import { getClientIp } from '@/utils/ip.util';
 import {
 	getWidgetRequestDomain,
 	isWidgetDirectPageRequest
@@ -17,12 +18,6 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-
-const extractIp = (req: Request): string => {
-	const forwarded = req.headers['x-forwarded-for'];
-	if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-	return req.ip || req.socket?.remoteAddress || '';
-};
 
 @Controller('calculator')
 export class CalculatorApiController {
@@ -64,7 +59,7 @@ export class CalculatorApiController {
 		return this.calculatorService.submitLead(
 			key,
 			dto,
-			extractIp(req),
+			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-calculator', key)
 		);
