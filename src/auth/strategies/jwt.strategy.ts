@@ -1,8 +1,11 @@
+import {
+	AccessJwtService,
+	type AccessJwtPayload
+} from '@/auth/access-jwt.service';
 import { UserService } from '@/user/user.service';
 import { PrismaService } from '@/prisma.service';
 import { USER_DEACTIVATED_MESSAGE } from '@/utils/auth.constants';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { UserStatus } from '@prisma/client';
 import { ExtractJwt, Strategy } from 'passport-jwt';
@@ -10,26 +13,37 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
 	constructor(
-		private configService: ConfigService,
+		private readonly accessJwtService: AccessJwtService,
 		private userService: UserService,
 		private prisma: PrismaService
 	) {
 		super({
 			jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
 			ignoreExpiration: false,
-			secretOrKey: configService.get('JWT_SECRET')
+			algorithms: ['RS256'],
+			issuer: accessJwtService.issuer,
+			audience: accessJwtService.audience,
+			jsonWebTokenOptions: {
+				clockTolerance: accessJwtService.clockToleranceSeconds
+			},
+			secretOrKeyProvider: (_request, token, done) => {
+				try {
+					done(null, accessJwtService.getVerificationKey(token));
+				} catch (error) {
+					done(error);
+				}
+			}
 		});
 	}
 
-	async validate({ id, sessionId }: { id: string; sessionId: string }) {
-		if (!id || !sessionId) {
-			throw new UnauthorizedException('Invalid session');
-		}
+	async validate(rawPayload: unknown) {
+		const payload: AccessJwtPayload =
+			this.accessJwtService.assertAccessTokenPayload(rawPayload);
 
 		const session = await this.prisma.userSession.findFirst({
 			where: {
-				id: sessionId,
-				userId: id,
+				id: payload.sid,
+				userId: payload.sub,
 				revokedAt: null,
 				expiresAt: { gt: new Date() }
 			}
@@ -39,12 +53,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 			throw new UnauthorizedException('Invalid session');
 		}
 
-		const user = await this.userService.getUserById(id);
+		const user = await this.userService.getUserById(payload.sub);
 
 		if (!user || user.status === UserStatus.DEACTIVATED) {
 			throw new UnauthorizedException(USER_DEACTIVATED_MESSAGE);
 		}
 
-		return { ...user, sessionId };
+		return { ...user, sessionId: payload.sid };
 	}
 }

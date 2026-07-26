@@ -23,7 +23,10 @@ const resetGuardState = () => {
 	}
 };
 
-const createContext = (spoofedIp: string): ExecutionContext =>
+const createContext = (
+	spoofedIp: string,
+	path = '/auth/login'
+): ExecutionContext =>
 	({
 		switchToHttp: () => ({
 			getRequest: () =>
@@ -35,9 +38,9 @@ const createContext = (spoofedIp: string): ExecutionContext =>
 						'cf-connecting-ip': spoofedIp
 					},
 					route: {
-						path: '/auth/login'
+						path
 					},
-					path: '/auth/login',
+					path,
 					socket: {
 						remoteAddress: '127.0.0.1'
 					}
@@ -75,5 +78,19 @@ describe('AuthRateLimitGuard', () => {
 				HttpStatus.TOO_MANY_REQUESTS
 			);
 		}
+	});
+
+	it('uses the refresh-specific limit for the new endpoint', () => {
+		const guard = new AuthRateLimitGuard();
+
+		for (let index = 0; index < 20; index += 1) {
+			expect(
+				guard.canActivate(createContext('198.51.100.1', '/auth/refresh'))
+			).toBe(true);
+		}
+
+		expect(() =>
+			guard.canActivate(createContext('198.51.100.1', '/auth/refresh'))
+		).toThrow(HttpException);
 	});
 });

@@ -1,7 +1,13 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { AffiliateService } from '@/affiliate/affiliate.service';
+import { AccessJwtService } from '@/auth/access-jwt.service';
 import { AuthDto } from '@/auth/dto/auth.dto';
 import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
+import {
+	createOpaqueRefreshToken,
+	getOpaqueRefreshTokenHashInput,
+	parseOpaqueRefreshToken
+} from '@/auth/opaque-refresh-token';
 import { PhoneLoginDto } from '@/auth/dto/phone-login.dto';
 import { PhoneRegisterDto } from '@/auth/dto/phone-register.dto';
 import { ResendEmailCodeDto } from '@/auth/dto/resend-email-code.dto';
@@ -27,7 +33,6 @@ import {
 	NotFoundException,
 	UnauthorizedException
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
 import {
 	Plan,
 	Role,
@@ -44,8 +49,6 @@ import type { Request } from 'express';
 
 @Injectable()
 export class AuthService {
-	private readonly TOKEN_EXPIRATION_ACCESS = '1h';
-	private readonly TOKEN_EXPIRATION_REFRESH = '7d';
 	private readonly SESSION_EXPIRATION_DAYS = 7;
 	private readonly EMAIL_CODE_EXPIRATION_MINUTES = 10;
 	private readonly EMAIL_CODE_MAX_ATTEMPTS = 5;
@@ -54,7 +57,7 @@ export class AuthService {
 	private readonly PHONE_CODE_MAX_ATTEMPTS = 5;
 
 	constructor(
-		private jwt: JwtService,
+		private readonly accessJwtService: AccessJwtService,
 		private userService: UserService,
 		private emailService: EmailService,
 		private prisma: PrismaService,
@@ -273,56 +276,71 @@ export class AuthService {
 		return this.buildResponseObject(user, request);
 	}
 
-	async getNewTokens(refreshToken: string) {
-		let result: { id: string; sessionId: string } | null = null;
+	async refreshSession(refreshToken: string) {
+		const parsedToken = parseOpaqueRefreshToken(refreshToken);
 
-		try {
-			result = await this.jwt.verifyAsync<{
-				id: string;
-				sessionId: string;
-			}>(refreshToken);
-		} catch {
+		if (!parsedToken) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
-		if (!result?.id || !result.sessionId) {
-			throw new UnauthorizedException('Invalid refresh token');
-		}
-
-		const user = await this.userService.getUserById(result.id);
-		if (!user) {
-			throw new UnauthorizedException('Invalid refresh token');
-		}
-
-		this.ensureUserActive(user);
-
-		const session = await this.prisma.userSession.findFirst({
-			where: {
-				id: result.sessionId,
-				userId: user.id,
-				revokedAt: null,
-				expiresAt: { gt: new Date() }
-			}
+		const session = await this.prisma.userSession.findUnique({
+			where: { id: parsedToken.sessionId }
 		});
 
-		if (!session) {
+		if (
+			!session ||
+			session.revokedAt ||
+			session.expiresAt.getTime() <= Date.now()
+		) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
 		const isValidRefreshToken = await compare(
-			refreshToken,
+			getOpaqueRefreshTokenHashInput(refreshToken),
 			session.refreshTokenHash
 		);
 		if (!isValidRefreshToken) {
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 
-		await this.prisma.userSession.update({
-			where: { id: session.id },
-			data: { lastUsedAt: new Date() }
+		const user = await this.userService.getUserById(session.userId);
+		if (!user) {
+			await this.revokeCompromisedSession(session.id);
+			throw new UnauthorizedException('Invalid refresh token');
+		}
+
+		if (user.status === UserStatus.DEACTIVATED) {
+			await this.revokeCompromisedSession(session.id);
+		}
+
+		this.ensureUserActive(user);
+
+		const rotatedRefreshToken = createOpaqueRefreshToken(session.id);
+		const rotatedRefreshTokenHash = await hash(
+			getOpaqueRefreshTokenHashInput(rotatedRefreshToken),
+			PASSWORD_SALT_ROUNDS
+		);
+		const rotatedAt = new Date();
+		const rotationResult = await this.prisma.userSession.updateMany({
+			where: {
+				id: session.id,
+				userId: user.id,
+				refreshTokenHash: session.refreshTokenHash,
+				revokedAt: null,
+				expiresAt: { gt: rotatedAt }
+			},
+			data: {
+				refreshTokenHash: rotatedRefreshTokenHash,
+				lastUsedAt: rotatedAt
+			}
 		});
 
-		const accessToken = this.issueAccessToken(
+		if (rotationResult.count !== 1) {
+			await this.revokeCompromisedSession(session.id);
+			throw new UnauthorizedException('Invalid refresh token');
+		}
+
+		const accessToken = this.accessJwtService.issueAccessToken(
 			user.id,
 			user.rights,
 			session.id
@@ -330,28 +348,46 @@ export class AuthService {
 
 		return {
 			user: this.userService.toPublicUser(user),
-			accessToken
+			accessToken,
+			refreshToken: rotatedRefreshToken
 		};
 	}
 
 	async logout(refreshToken?: string) {
-		if (!refreshToken) {
+		const parsedToken = refreshToken
+			? parseOpaqueRefreshToken(refreshToken)
+			: null;
+
+		if (!refreshToken || !parsedToken) {
 			return true;
 		}
 
-		try {
-			const result = await this.jwt.verifyAsync<{
-				id: string;
-				sessionId: string;
-			}>(refreshToken);
-			if (result?.id && result.sessionId) {
-				await this.prisma.userSession.updateMany({
-					where: { id: result.sessionId, userId: result.id },
-					data: { revokedAt: new Date() }
-				});
-			}
-		} catch {
+		const session = await this.prisma.userSession.findUnique({
+			where: { id: parsedToken.sessionId }
+		});
+
+		if (
+			!session ||
+			session.revokedAt ||
+			!(await compare(
+				getOpaqueRefreshTokenHashInput(refreshToken),
+				session.refreshTokenHash
+			))
+		) {
 			return true;
+		}
+
+		const revokeResult = await this.prisma.userSession.updateMany({
+			where: {
+				id: session.id,
+				refreshTokenHash: session.refreshTokenHash,
+				revokedAt: null
+			},
+			data: { revokedAt: new Date() }
+		});
+
+		if (revokeResult.count !== 1) {
+			await this.revokeCompromisedSession(session.id);
 		}
 
 		return true;
@@ -433,7 +469,7 @@ export class AuthService {
 		this.ensureUserActive(user);
 		await this.ensureTrialSubscription(user.id);
 		const sessionId = randomUUID();
-		const tokens = await this.issueTokens(user.id, user.rights, sessionId);
+		const tokens = this.issueTokens(user.id, user.rights, sessionId);
 		const expiresAt = dayjs()
 			.add(this.SESSION_EXPIRATION_DAYS, 'day')
 			.toDate();
@@ -443,7 +479,7 @@ export class AuthService {
 				id: sessionId,
 				userId: user.id,
 				refreshTokenHash: await hash(
-					tokens.refreshToken,
+					getOpaqueRefreshTokenHashInput(tokens.refreshToken),
 					PASSWORD_SALT_ROUNDS
 				),
 				userAgent: request?.get('user-agent')?.slice(0, 500),
@@ -513,28 +549,22 @@ export class AuthService {
 		}
 	}
 
-	private async issueTokens(
-		userId: string,
-		rights: Role[],
-		sessionId: string
-	) {
-		const accessToken = this.issueAccessToken(userId, rights, sessionId);
-		const payload = { id: userId, rights, sessionId };
-		const refreshToken = this.jwt.sign(payload, {
-			expiresIn: this.TOKEN_EXPIRATION_REFRESH
-		});
-		return { accessToken, refreshToken };
+	private issueTokens(userId: string, rights: Role[], sessionId: string) {
+		return {
+			accessToken: this.accessJwtService.issueAccessToken(
+				userId,
+				rights,
+				sessionId
+			),
+			refreshToken: createOpaqueRefreshToken(sessionId)
+		};
 	}
 
-	private issueAccessToken(
-		userId: string,
-		rights: Role[],
-		sessionId: string
-	) {
-		return this.jwt.sign(
-			{ id: userId, rights, sessionId },
-			{ expiresIn: this.TOKEN_EXPIRATION_ACCESS }
-		);
+	private async revokeCompromisedSession(sessionId: string) {
+		await this.prisma.userSession.updateMany({
+			where: { id: sessionId, revokedAt: null },
+			data: { revokedAt: new Date() }
+		});
 	}
 
 	private generateCode() {

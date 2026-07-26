@@ -8,6 +8,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-$APP_ROOT/winwidget.ru_server/deploy/docker-compos
 HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:4200/api/v1/health/deployment}"
 PUBLIC_HEALTHCHECK_URL="${PUBLIC_HEALTHCHECK_URL:-https://api.winwidget.ru/api/v1/health/deployment}"
 READINESS_URL="${READINESS_URL:-http://127.0.0.1:4200/api/v1/health/ready}"
+GATEWAY_READINESS_URL="${GATEWAY_READINESS_URL:-http://127.0.0.1:4100/health/ready}"
 HEALTHCHECK_ATTEMPTS="${HEALTHCHECK_ATTEMPTS:-30}"
 HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
 
@@ -35,9 +36,71 @@ export APP_VERSION="git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
+echo "Building gateway image: winwidget-api-gateway:$APP_VERSION"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
+	exit 1
+fi
+
+env_mode="$(stat -c '%a' "$ENV_FILE")"
+env_group_digit="${env_mode: -2:1}"
+env_other_digit="${env_mode: -1}"
+if ((10#$env_group_digit != 0 || 10#$env_other_digit != 0)); then
+	echo "Backend env file must not be accessible by group or others: $ENV_FILE (mode $env_mode)" >&2
+	echo "Run: chmod 600 $ENV_FILE" >&2
+	exit 1
+fi
+
+duplicate_env_keys="$(
+	awk '
+		/^[[:space:]]*(#|$)/ { next }
+		{
+			line = $0
+			sub(/^[[:space:]]*/, "", line)
+			if (line !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) next
+
+			name = line
+			sub(/[[:space:]]*=.*/, "", name)
+			count[name] += 1
+		}
+		END {
+			for (name in count) {
+				if (count[name] > 1) print name
+			}
+		}
+	' "$ENV_FILE" | LC_ALL=C sort
+)"
+if [[ -n "$duplicate_env_keys" ]]; then
+	echo "Duplicate environment keys are not allowed in $ENV_FILE:" >&2
+	echo "$duplicate_env_keys" >&2
+	exit 1
+fi
+
+if [[ ! -f "$COMPOSE_FILE" ]]; then
+	echo "Backend Compose file not found: $COMPOSE_FILE" >&2
+	exit 1
+fi
+
+ambient_compose_overrides=()
+while IFS= read -r key; do
+	[[ -n "$key" ]] || continue
+	case "$key" in
+		APP_REVISION | APP_VERSION)
+			continue
+			;;
+	esac
+	if printenv "$key" >/dev/null 2>&1; then
+		ambient_compose_overrides+=("$key")
+	fi
+done < <(
+	LC_ALL=C grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$COMPOSE_FILE" |
+		sed 's/^${//' |
+		LC_ALL=C sort -u
+)
+if ((${#ambient_compose_overrides[@]} > 0)); then
+	echo "Unset shell variables that would override $ENV_FILE in Docker Compose:" >&2
+	printf '%s\n' "${ambient_compose_overrides[@]}" >&2
 	exit 1
 fi
 
@@ -57,7 +120,7 @@ require_env_key() {
 			sub(/^[[:space:]]*/, "", value)
 			sub(/[[:space:]]*$/, "", value)
 
-			if (name == key && value != "" && value != "change_me") ok = 1
+			if (name == key && value != "" && value !~ /^change_me/) ok = 1
 		}
 		END { exit(ok ? 0 : 1) }
 	' "$ENV_FILE"; then
@@ -124,9 +187,35 @@ mode="$(get_env_value "MODE" || true)"
 mode="${mode:-production}"
 mode="${mode,,}"
 
+for key in \
+	JWT_ACCESS_PRIVATE_KEY_BASE64 \
+	JWT_ACCESS_JWKS_BASE64 \
+	JWT_ACCESS_ACTIVE_KID \
+	JWT_ISSUER \
+	JWT_AUDIENCE \
+	JWT_ACCESS_TTL_SECONDS \
+	JWT_CLOCK_TOLERANCE_SECONDS \
+	GATEWAY_LISTEN_HOST \
+	GATEWAY_PORT \
+	API_UPSTREAM_URL \
+	CORS_ALLOWED_ORIGINS \
+	JWT_JWKS_URL; do
+	require_env_key "$key"
+done
+
+if awk -F= '
+	/^[[:space:]]*JWT_SECRET[[:space:]]*=/ { found = 1 }
+	END { exit(found ? 0 : 1) }
+' "$ENV_FILE"; then
+	echo "Legacy JWT_SECRET must be removed from $ENV_FILE" >&2
+	exit 1
+fi
+
 case "$mode" in
 	production)
 		require_env_key "DATABASE_URL_PRODUCTION"
+		require_env_key "PRODUCTION_HOST"
+		require_env_key "AUTH_COOKIE_DOMAIN"
 		require_env_key "COMPOSE_PROJECT_NAME"
 		require_env_key "RABBITMQ_DATA_VOLUME"
 		require_env_key "RABBITMQ_ADMIN_USER"
@@ -151,6 +240,68 @@ case "$mode" in
 			"database-backup"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
+		require_env_key "PORT"
+		require_env_key "API_LISTEN_HOST"
+		require_env_key "TRUST_PROXY"
+		require_env_exact_list \
+			"CORS_ALLOWED_ORIGINS" \
+			"https://winwidget.ru,https://www.winwidget.ru"
+		if [[ "$(get_env_value PORT)" != "4200" ]]; then
+			echo "Production PORT must be 4200" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value API_LISTEN_HOST)" != "127.0.0.1" ]]; then
+			echo "Production API_LISTEN_HOST must be 127.0.0.1" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value TRUST_PROXY)" != "loopback" ]]; then
+			echo "Production TRUST_PROXY must be loopback" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value PRODUCTION_HOST)" != "https://api.winwidget.ru" ]]; then
+			echo "Production PRODUCTION_HOST must be https://api.winwidget.ru" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value AUTH_COOKIE_DOMAIN)" != ".winwidget.ru" ]]; then
+			echo "Production AUTH_COOKIE_DOMAIN must be .winwidget.ru so Next.js middleware and API share the refresh cookie" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value JWT_ISSUER)" != "https://api.winwidget.ru/auth" ]]; then
+			echo "Production JWT_ISSUER must be https://api.winwidget.ru/auth" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value JWT_AUDIENCE)" != "https://api.winwidget.ru" ]]; then
+			echo "Production JWT_AUDIENCE must be https://api.winwidget.ru" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value GATEWAY_LISTEN_HOST)" != "127.0.0.1" ]]; then
+			echo "Production GATEWAY_LISTEN_HOST must be 127.0.0.1" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value GATEWAY_PORT)" != "4100" ]]; then
+			echo "Production GATEWAY_PORT must be 4100" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value API_UPSTREAM_URL)" != "http://127.0.0.1:4200" ]]; then
+			echo "Production API_UPSTREAM_URL must be http://127.0.0.1:4200" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value JWT_JWKS_URL)" != "http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json" ]]; then
+			echo "Production JWT_JWKS_URL must use the loopback Auth endpoint" >&2
+			exit 1
+		fi
+		for oauth_provider in google github yandex vk; do
+			oauth_key="$(
+				printf '%s' "$oauth_provider" |
+					tr '[:lower:]' '[:upper:]'
+			)_CALLBACK_URL"
+			expected_oauth_callback="https://api.winwidget.ru/api/v1/auth/$oauth_provider/redirect"
+			require_env_key "$oauth_key"
+			if [[ "$(get_env_value "$oauth_key")" != "$expected_oauth_callback" ]]; then
+				echo "$oauth_key must be $expected_oauth_callback" >&2
+				exit 1
+			fi
+		done
 		;;
 	development)
 		require_env_key "DATABASE_URL_DEVELOPMENT"
@@ -162,6 +313,19 @@ case "$mode" in
 		exit 1
 		;;
 esac
+
+jwt_access_ttl_seconds="$(get_env_value JWT_ACCESS_TTL_SECONDS)"
+jwt_clock_tolerance_seconds="$(get_env_value JWT_CLOCK_TOLERANCE_SECONDS)"
+if [[ ! "$jwt_access_ttl_seconds" =~ ^[0-9]+$ ]] ||
+	((jwt_access_ttl_seconds < 300 || jwt_access_ttl_seconds > 1800)); then
+	echo "JWT_ACCESS_TTL_SECONDS must be between 300 and 1800" >&2
+	exit 1
+fi
+if [[ ! "$jwt_clock_tolerance_seconds" =~ ^[0-9]+$ ]] ||
+	((jwt_clock_tolerance_seconds < 0 || jwt_clock_tolerance_seconds > 60)); then
+	echo "JWT_CLOCK_TOLERANCE_SECONDS must be between 0 and 60" >&2
+	exit 1
+fi
 
 target_project="$(get_env_value "COMPOSE_PROJECT_NAME" || true)"
 if [[ "$target_project" != "winwidget" ]]; then
@@ -227,7 +391,94 @@ compose_legacy() {
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-compose_target build api
+compose_target config --quiet
+compose_target build api api-gateway
+
+docker run --rm --network none \
+	--env-file "$ENV_FILE" \
+	--entrypoint node \
+	"winwidget-api:$APP_VERSION" \
+	-e '
+const {
+	createPrivateKey,
+	createPublicKey,
+	randomBytes,
+	sign,
+	verify,
+} = require("node:crypto");
+
+const fail = message => {
+	process.stderr.write(`${message}\n`);
+	process.exit(1);
+};
+
+let privateKey;
+let jwks;
+try {
+	privateKey = createPrivateKey(
+		Buffer.from(process.env.JWT_ACCESS_PRIVATE_KEY_BASE64 || "", "base64"),
+	);
+	jwks = JSON.parse(
+		Buffer.from(process.env.JWT_ACCESS_JWKS_BASE64 || "", "base64").toString(
+			"utf8",
+		),
+	);
+} catch {
+	fail("JWT key material is malformed");
+}
+
+if (
+	privateKey.type !== "private" ||
+	privateKey.asymmetricKeyType !== "rsa" ||
+	(privateKey.asymmetricKeyDetails?.modulusLength || 0) < 3072
+) {
+	fail("JWT private key must be an RSA key of at least 3072 bits");
+}
+if (!Array.isArray(jwks?.keys) || !jwks.keys.length) {
+	fail("JWT JWKS must contain at least one public key");
+}
+
+const keyIds = new Set();
+for (const key of jwks.keys) {
+	if (
+		!key ||
+		key.kty !== "RSA" ||
+		key.use !== "sig" ||
+		key.alg !== "RS256" ||
+		typeof key.kid !== "string" ||
+		!key.kid ||
+		typeof key.n !== "string" ||
+		typeof key.e !== "string" ||
+		["d", "p", "q", "dp", "dq", "qi", "oth"].some(name => name in key)
+	) {
+		fail("JWT JWKS contains an invalid or private key");
+	}
+	if (keyIds.has(key.kid)) fail("JWT JWKS contains a duplicate kid");
+	keyIds.add(key.kid);
+}
+
+const activeKid = process.env.JWT_ACCESS_ACTIVE_KID;
+const activeJwk = jwks.keys.find(key => key.kid === activeKid);
+if (!activeJwk) fail("JWT active kid is missing from JWKS");
+
+let publicKey;
+try {
+	publicKey = createPublicKey({ key: activeJwk, format: "jwk" });
+} catch {
+	fail("JWT active public JWK is malformed");
+}
+if ((publicKey.asymmetricKeyDetails?.modulusLength || 0) < 3072) {
+	fail("JWT active public key must be at least 3072 bits");
+}
+
+const challenge = randomBytes(64);
+const signature = sign("sha256", challenge, privateKey);
+if (!verify("sha256", challenge, publicKey, signature)) {
+	fail("JWT private key does not match the active public JWK");
+}
+
+process.stdout.write(`JWT RS256 keyset validated for kid ${activeKid}\n`);
+'
 
 rabbitmq_admin_user="$(get_env_value "RABBITMQ_ADMIN_USER")"
 rabbitmq_admin_password="$(get_env_value "RABBITMQ_ADMIN_PASSWORD")"
@@ -566,7 +817,7 @@ provision_rabbitmq_user \
 
 echo "RabbitMQ admin/service users and least-privilege permissions are verified"
 
-compose_legacy stop api outbox-publisher integration-worker maintenance-worker
+compose_legacy stop api-gateway api outbox-publisher integration-worker maintenance-worker
 compose_target --profile migration run --rm migrate
 if [[ "$legacy_project" != "$target_project" ]]; then
 	compose_legacy stop rabbitmq
@@ -576,21 +827,22 @@ messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
 compose_target up -d --force-recreate outbox-publisher
 compose_target up -d --force-recreate integration-worker maintenance-worker
 compose_target up -d --force-recreate api
+compose_target up -d --force-recreate api-gateway
 
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api outbox-publisher integration-worker maintenance-worker rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq || true
 	compose_target \
-		logs --tail=100 api outbox-publisher integration-worker maintenance-worker rabbitmq || true
-	echo "Processes listening on port 4200:"
-	ss -ltnp 'sport = :4200' || true
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq || true
+	echo "Processes listening on ports 4100 and 4200:"
+	ss -ltnp '( sport = :4100 or sport = :4200 )' || true
 }
 
 ensure_required_services_running() {
 	local service
 	local container_id
-	for service in rabbitmq api outbox-publisher integration-worker maintenance-worker; do
+	for service in rabbitmq api api-gateway outbox-publisher integration-worker maintenance-worker; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -845,6 +1097,20 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 done
 
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if curl -fsS --connect-timeout 3 --max-time 5 "$GATEWAY_READINESS_URL" > /dev/null; then
+		break
+	fi
+
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo "API Gateway readiness check failed: $GATEWAY_READINESS_URL"
+		show_api_diagnostics
+		exit 1
+	fi
+
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if check_messaging_readiness; then
 		break
 	fi
@@ -860,7 +1126,7 @@ done
 
 ensure_required_services_running
 
-for service in api outbox-publisher integration-worker maintenance-worker; do
+for service in api-gateway api outbox-publisher integration-worker maintenance-worker; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -913,4 +1179,4 @@ echo "Backend revision verified locally and publicly: $APP_REVISION"
 echo "RabbitMQ legacy user is absent after the verified cutover"
 
 compose_target ps \
-	api outbox-publisher integration-worker maintenance-worker rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq

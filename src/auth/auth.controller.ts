@@ -1,4 +1,5 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
+import { AccessJwtService } from '@/auth/access-jwt.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { AuthService } from '@/auth/auth.service';
@@ -17,6 +18,7 @@ import {
 	Controller,
 	Delete,
 	Get,
+	Header,
 	HttpCode,
 	NotFoundException,
 	Param,
@@ -37,10 +39,20 @@ import { Request, Response } from 'express';
 export class AuthController {
 	constructor(
 		private readonly authService: AuthService,
+		private readonly accessJwtService: AccessJwtService,
 		private readonly refreshTokenService: RefreshTokenService,
 		private readonly verificationChallengeCleanupService: VerificationChallengeCleanupService,
 		private readonly adminEventLogService: AdminEventLogService
 	) {}
+
+	@Header(
+		'Cache-Control',
+		'public, max-age=300, stale-while-revalidate=300'
+	)
+	@Get('auth/.well-known/jwks.json')
+	getAccessTokenJwks() {
+		return this.accessJwtService.getPublicJwks();
+	}
 
 	@UseGuards(AuthRateLimitGuard)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
@@ -149,8 +161,8 @@ export class AuthController {
 
 	@UseGuards(AuthRateLimitGuard)
 	@HttpCode(200)
-	@Post('auth/access-token')
-	async getNewTokens(
+	@Post('auth/refresh')
+	async refresh(
 		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
@@ -163,7 +175,13 @@ export class AuthController {
 		}
 
 		try {
-			return await this.authService.getNewTokens(refreshTokenFromCookies);
+			const { refreshToken, ...response } =
+				await this.authService.refreshSession(refreshTokenFromCookies);
+			this.refreshTokenService.addRefreshTokenToResponse(
+				res,
+				refreshToken
+			);
+			return response;
 		} catch (error) {
 			if (error instanceof UnauthorizedException) {
 				this.refreshTokenService.removeRefreshTokenFromResponse(res);

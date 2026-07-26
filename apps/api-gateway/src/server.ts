@@ -1,0 +1,667 @@
+import { randomUUID } from 'node:crypto';
+import {
+	Agent as HttpAgent,
+	createServer,
+	request as httpRequest,
+	type IncomingHttpHeaders,
+	type IncomingMessage,
+	type OutgoingHttpHeaders,
+	type Server,
+	type ServerResponse
+} from 'node:http';
+import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
+import { isIP } from 'node:net';
+import type { GatewayConfig } from './config';
+import {
+	JwksStore,
+	JwksUnavailableError,
+	UnknownSigningKeyError,
+	type FetchLike
+} from './jwks';
+import {
+	JwtValidationError,
+	readBearerAuthorization,
+	verifyAccessToken
+} from './jwt';
+import { logger as defaultLogger, type StructuredLogger } from './logger';
+
+const REFRESH_COOKIE_NAME = 'refreshToken';
+const REFRESH_COOKIE_PATHS = new Set([
+	'/api/v1/auth/refresh',
+	'/api/v1/auth/logout'
+]);
+const PUBLIC_WIDGET_API_PREFIXES = [
+	'/api/v1/widget',
+	'/api/v1/quiz',
+	'/api/v1/callback',
+	'/api/v1/countdown-timer',
+	'/api/v1/stop-offer',
+	'/api/v1/online-consultant',
+	'/api/v1/calculator'
+] as const;
+const BASE_HOP_BY_HOP_HEADERS = new Set([
+	'connection',
+	'keep-alive',
+	'proxy-authenticate',
+	'proxy-authorization',
+	'proxy-connection',
+	'te',
+	'trailer',
+	'transfer-encoding',
+	'upgrade'
+]);
+
+interface GatewayOptions {
+	logger?: StructuredLogger;
+	fetch?: FetchLike;
+	now?: () => number;
+}
+
+interface JsonErrorBody {
+	statusCode: number;
+	error: string;
+	message: string;
+	code: string;
+	requestId: string;
+}
+
+export interface GatewayRuntime {
+	readonly server: Server;
+	readonly jwks: JwksStore;
+	initialize(): Promise<boolean>;
+	listen(port?: number, host?: string): Promise<void>;
+	close(): Promise<void>;
+	address(): ReturnType<Server['address']>;
+}
+
+const getRawHeaderValues = (
+	rawHeaders: string[],
+	name: string
+): string[] => {
+	const values: string[] = [];
+	for (let index = 0; index < rawHeaders.length; index += 2) {
+		if (rawHeaders[index]?.toLowerCase() === name) {
+			values.push(rawHeaders[index + 1] ?? '');
+		}
+	}
+	return values;
+};
+
+const normalizeIp = (value: string | undefined): string | undefined => {
+	if (!value) return undefined;
+	const trimmed = value.trim();
+	const withoutMappedPrefix = trimmed.startsWith('::ffff:')
+		? trimmed.slice('::ffff:'.length)
+		: trimmed;
+	return isIP(withoutMappedPrefix) ? withoutMappedPrefix : undefined;
+};
+
+const isLoopback = (value: string | undefined): boolean => {
+	const address = normalizeIp(value);
+	if (!address) return false;
+	if (address === '::1') return true;
+	if (isIP(address) === 4) {
+		const firstOctet = Number(address.split('.')[0]);
+		return firstOctet === 127;
+	}
+	return false;
+};
+
+const readSingleIpHeader = (
+	headers: IncomingHttpHeaders,
+	name: string
+): string | undefined => {
+	const value = headers[name];
+	if (typeof value !== 'string' || value.includes(',')) return undefined;
+	return normalizeIp(value);
+};
+
+export const resolveClientIp = (
+	peerAddress: string | undefined,
+	headers: IncomingHttpHeaders
+): string => {
+	const peerIp = normalizeIp(peerAddress) ?? '0.0.0.0';
+	if (!isLoopback(peerAddress)) return peerIp;
+
+	const realIp = readSingleIpHeader(headers, 'x-real-ip');
+	const forwardedIp = readSingleIpHeader(headers, 'x-forwarded-for');
+	if (realIp && forwardedIp && realIp !== forwardedIp) {
+		return peerIp;
+	}
+	return realIp ?? forwardedIp ?? peerIp;
+};
+
+const resolveForwardedProto = (
+	request: IncomingMessage
+): 'http' | 'https' => {
+	if (isLoopback(request.socket.remoteAddress)) {
+		const value = request.headers['x-forwarded-proto'];
+		if (value === 'http' || value === 'https') return value;
+	}
+	return 'http';
+};
+
+const resolveRequestId = (): string => randomUUID();
+
+const getConnectionHeaderNames = (
+	headers: IncomingHttpHeaders
+): Set<string> => {
+	const names = new Set(BASE_HOP_BY_HOP_HEADERS);
+	const connection = headers.connection;
+	if (typeof connection === 'string') {
+		for (const value of connection.split(',')) {
+			const name = value.trim().toLowerCase();
+			if (name) names.add(name);
+		}
+	}
+	return names;
+};
+
+const stripRefreshCookie = (
+	rawCookie: string,
+	pathname: string
+): string | undefined => {
+	if (REFRESH_COOKIE_PATHS.has(pathname)) return rawCookie;
+
+	const cookies = rawCookie
+		.split(';')
+		.map(cookie => cookie.trim())
+		.filter(Boolean)
+		.filter(cookie => {
+			const separator = cookie.indexOf('=');
+			const name =
+				separator >= 0 ? cookie.slice(0, separator).trim() : cookie;
+			return name !== REFRESH_COOKIE_NAME;
+		});
+
+	return cookies.length > 0 ? cookies.join('; ') : undefined;
+};
+
+const createUpstreamHeaders = (
+	request: IncomingMessage,
+	pathname: string,
+	requestId: string,
+	validAuthorization?: string
+): OutgoingHttpHeaders => {
+	const hopByHopHeaders = getConnectionHeaderNames(request.headers);
+	const headers: OutgoingHttpHeaders = {};
+
+	for (const [name, value] of Object.entries(request.headers)) {
+		const lowerName = name.toLowerCase();
+		if (
+			value === undefined ||
+			hopByHopHeaders.has(lowerName) ||
+			lowerName === 'cf-connecting-ip' ||
+			lowerName === 'forwarded' ||
+			lowerName === 'true-client-ip' ||
+			lowerName === 'x-client-ip' ||
+			lowerName === 'x-real-ip' ||
+			lowerName === 'x-request-id' ||
+			lowerName.startsWith('x-forwarded-') ||
+			lowerName.startsWith('x-user') ||
+			lowerName.startsWith('x-auth')
+		) {
+			continue;
+		}
+		headers[lowerName] = value;
+	}
+
+	const clientIp = resolveClientIp(
+		request.socket.remoteAddress,
+		request.headers
+	);
+	headers['x-forwarded-for'] = clientIp;
+	headers['x-real-ip'] = clientIp;
+	headers['x-forwarded-proto'] = resolveForwardedProto(request);
+	headers['x-request-id'] = requestId;
+	if (validAuthorization) {
+		headers.authorization = validAuthorization;
+	}
+
+	const rawCookie = request.headers.cookie;
+	if (typeof rawCookie === 'string') {
+		const cookie = stripRefreshCookie(rawCookie, pathname);
+		if (cookie) headers.cookie = cookie;
+		else delete headers.cookie;
+	}
+
+	return headers;
+};
+
+const createDownstreamHeaders = (
+	headers: IncomingHttpHeaders,
+	requestId: string
+): OutgoingHttpHeaders => {
+	const hopByHopHeaders = getConnectionHeaderNames(headers);
+	const downstream: OutgoingHttpHeaders = {};
+	for (const [name, value] of Object.entries(headers)) {
+		const lowerName = name.toLowerCase();
+		if (value === undefined || hopByHopHeaders.has(lowerName)) continue;
+		downstream[lowerName] = value;
+	}
+	downstream['x-request-id'] = requestId;
+	return downstream;
+};
+
+const isPublicWidgetApiPath = (pathname: string): boolean =>
+	PUBLIC_WIDGET_API_PREFIXES.some(
+		prefix => pathname === prefix || pathname.startsWith(`${prefix}/`)
+	);
+
+const createGeneratedCorsHeaders = (
+	request: IncomingMessage,
+	pathname: string,
+	config: GatewayConfig
+): OutgoingHttpHeaders => {
+	if (isPublicWidgetApiPath(pathname)) {
+		return {
+			'access-control-allow-origin': '*',
+			'access-control-expose-headers': 'x-request-id'
+		};
+	}
+
+	const origins = getRawHeaderValues(request.rawHeaders, 'origin');
+	if (origins.length !== 1 || !config.corsAllowedOrigins.has(origins[0])) {
+		return {};
+	}
+
+	return {
+		'access-control-allow-origin': origins[0],
+		'access-control-allow-credentials': 'true',
+		'access-control-expose-headers': 'x-request-id',
+		vary: 'Origin'
+	};
+};
+
+const sendJson = (
+	response: ServerResponse,
+	statusCode: number,
+	body: object,
+	requestId: string,
+	headOnly = false,
+	extraHeaders: OutgoingHttpHeaders = {}
+) => {
+	const payload = Buffer.from(JSON.stringify(body));
+	response.writeHead(statusCode, {
+		'content-type': 'application/json; charset=utf-8',
+		'content-length': payload.byteLength,
+		'cache-control': 'no-store',
+		'x-content-type-options': 'nosniff',
+		'x-request-id': requestId,
+		...extraHeaders
+	});
+	response.end(headOnly ? undefined : payload);
+};
+
+const sendError = (
+	request: IncomingMessage,
+	response: ServerResponse,
+	statusCode: number,
+	error: string,
+	message: string,
+	code: string,
+	requestId: string,
+	extraHeaders: OutgoingHttpHeaders = {}
+) => {
+	request.resume();
+	const body: JsonErrorBody = {
+		statusCode,
+		error,
+		message,
+		code,
+		requestId
+	};
+	sendJson(
+		response,
+		statusCode,
+		body,
+		requestId,
+		request.method === 'HEAD',
+		extraHeaders
+	);
+};
+
+const parseRequestTarget = (
+	request: IncomingMessage
+): { rawPath: string; pathname: string } | null => {
+	const rawPath = request.url;
+	if (!rawPath || !rawPath.startsWith('/') || rawPath.startsWith('//')) {
+		return null;
+	}
+
+	try {
+		const parsed = new URL(rawPath, 'http://gateway.invalid');
+		return { rawPath, pathname: parsed.pathname };
+	} catch {
+		return null;
+	}
+};
+
+const isApiV1Path = (pathname: string): boolean =>
+	pathname === '/api/v1' || pathname.startsWith('/api/v1/');
+
+export const createGateway = (
+	config: GatewayConfig,
+	options: GatewayOptions = {}
+): GatewayRuntime => {
+	const log = options.logger ?? defaultLogger;
+	const jwks = new JwksStore({
+		url: config.jwksUrl,
+		fetchTimeoutMs: config.jwksFetchTimeoutMs,
+		refreshMinIntervalMs: config.jwksRefreshMinIntervalMs,
+		cacheTtlMs: config.jwksCacheTtlMs,
+		maxStaleMs: config.jwksMaxStaleMs,
+		maxBytes: config.jwksMaxBytes,
+		logger: log,
+		fetch: options.fetch,
+		now: options.now
+	});
+	const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 256 });
+	const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 256 });
+	const activeProxyRequests = new Set<ReturnType<typeof httpRequest>>();
+
+	const server = createServer((request, response) => {
+		const requestId = resolveRequestId();
+		const startedAt = process.hrtime.bigint();
+		let requestPath = '/';
+		let logged = false;
+		const logCompletion = (event: string) => {
+			if (logged) return;
+			logged = true;
+			const durationMs =
+				Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+			log.log('info', event, {
+				requestId,
+				method: request.method,
+				path: requestPath,
+				statusCode: response.statusCode,
+				durationMs: Math.round(durationMs)
+			});
+		};
+		response.once('finish', () => logCompletion('request_completed'));
+		response.once('close', () => {
+			if (!response.writableEnded) logCompletion('request_aborted');
+		});
+
+		const target = parseRequestTarget(request);
+		const corsHeaders = createGeneratedCorsHeaders(
+			request,
+			target?.pathname ?? '',
+			config
+		);
+		void (async () => {
+			if (!target) {
+				sendError(
+					request,
+					response,
+					400,
+					'Bad Request',
+					'Invalid request target',
+					'invalid_request_target',
+					requestId,
+					corsHeaders
+				);
+				return;
+			}
+			requestPath = target.pathname;
+
+			const isHead = request.method === 'HEAD';
+			if (
+				(request.method === 'GET' || isHead) &&
+				target.pathname === '/health/live'
+			) {
+				sendJson(
+					response,
+					200,
+					{ status: 'ok' },
+					requestId,
+					isHead,
+					corsHeaders
+				);
+				return;
+			}
+			if (
+				(request.method === 'GET' || isHead) &&
+				(target.pathname === '/health/ready' ||
+					target.pathname === '/health')
+			) {
+				const ready = await jwks.ensureReady();
+				sendJson(
+					response,
+					ready ? 200 : 503,
+					{
+						status: ready ? 'ready' : 'not_ready',
+						jwks: jwks.getStatus()
+					},
+					requestId,
+					isHead,
+					corsHeaders
+				);
+				return;
+			}
+
+			if (!isApiV1Path(target.pathname)) {
+				sendError(
+					request,
+					response,
+					404,
+					'Not Found',
+					'Route not found',
+					'route_not_found',
+					requestId,
+					corsHeaders
+				);
+				return;
+			}
+
+			let bearerToken: string | undefined;
+			try {
+				bearerToken = readBearerAuthorization(request.rawHeaders);
+				if (bearerToken) {
+					await verifyAccessToken(bearerToken, jwks, config);
+				}
+			} catch (error) {
+				if (error instanceof JwksUnavailableError) {
+					sendError(
+						request,
+						response,
+						503,
+						'Service Unavailable',
+						'Authentication keys are unavailable',
+						'authentication_keys_unavailable',
+						requestId,
+						corsHeaders
+					);
+					return;
+				}
+
+				const errorCode =
+					error instanceof UnknownSigningKeyError
+						? 'unknown_kid'
+						: error instanceof JwtValidationError
+							? error.code
+							: 'invalid_token';
+				log.log('warn', 'access_token_rejected', {
+					requestId,
+					errorCode
+				});
+				sendError(
+					request,
+					response,
+					401,
+					'Unauthorized',
+					'Invalid access token',
+					'invalid_token',
+					requestId,
+					corsHeaders
+				);
+				return;
+			}
+
+			const upstreamHeaders = createUpstreamHeaders(
+				request,
+				target.pathname,
+				requestId,
+				bearerToken ? request.headers.authorization : undefined
+			);
+			const useTls = config.upstreamUrl.protocol === 'https:';
+			const requestFn = useTls ? httpsRequest : httpRequest;
+			const proxyRequest = requestFn(
+				{
+					protocol: config.upstreamUrl.protocol,
+					hostname: config.upstreamUrl.hostname,
+					port: config.upstreamUrl.port || (useTls ? 443 : 80),
+					method: request.method,
+					path: target.rawPath,
+					headers: upstreamHeaders,
+					agent: useTls ? httpsAgent : httpAgent
+				},
+				upstreamResponse => {
+					clearTimeout(responseHeaderTimeout);
+					const downstreamHeaders = createDownstreamHeaders(
+						upstreamResponse.headers,
+						requestId
+					);
+					response.writeHead(
+						upstreamResponse.statusCode ?? 502,
+						downstreamHeaders
+					);
+
+					upstreamResponse.setTimeout(config.proxyTimeoutMs, () =>
+						upstreamResponse.destroy(
+							new Error('upstream_response_timeout')
+						)
+					);
+					upstreamResponse.pipe(response);
+					upstreamResponse.once('end', () => {
+						activeProxyRequests.delete(proxyRequest);
+					});
+					upstreamResponse.once('error', () => {
+						activeProxyRequests.delete(proxyRequest);
+						if (!response.destroyed) response.destroy();
+					});
+				}
+			);
+			activeProxyRequests.add(proxyRequest);
+			let timedOut = false;
+			const responseHeaderTimeout = setTimeout(() => {
+				timedOut = true;
+				proxyRequest.destroy(new Error('upstream_headers_timeout'));
+			}, config.proxyTimeoutMs);
+
+			proxyRequest.once('error', () => {
+				clearTimeout(responseHeaderTimeout);
+				activeProxyRequests.delete(proxyRequest);
+				if (response.headersSent || response.destroyed) {
+					if (!response.destroyed) response.destroy();
+					return;
+				}
+
+				const statusCode = timedOut ? 504 : 502;
+				sendError(
+					request,
+					response,
+					statusCode,
+					timedOut ? 'Gateway Timeout' : 'Bad Gateway',
+					timedOut
+						? 'Upstream request timed out'
+						: 'Upstream service is unavailable',
+					timedOut ? 'upstream_timeout' : 'upstream_unavailable',
+					requestId,
+					corsHeaders
+				);
+			});
+			request.once('aborted', () => {
+				clearTimeout(responseHeaderTimeout);
+				proxyRequest.destroy(new Error('client_aborted'));
+			});
+			response.once('close', () => {
+				if (!response.writableEnded) {
+					clearTimeout(responseHeaderTimeout);
+					proxyRequest.destroy(new Error('client_closed'));
+				}
+			});
+			request.pipe(proxyRequest);
+		})().catch(() => {
+			if (!response.headersSent && !response.destroyed) {
+				sendError(
+					request,
+					response,
+					500,
+					'Internal Server Error',
+					'Gateway request failed',
+					'gateway_error',
+					requestId,
+					corsHeaders
+				);
+			} else if (!response.destroyed) {
+				response.destroy();
+			}
+		});
+	});
+
+	server.maxHeadersCount = 100;
+	server.headersTimeout = 15_000;
+	server.requestTimeout = 120_000;
+	server.keepAliveTimeout = 5_000;
+	server.on('clientError', (_error, socket) => {
+		if (!socket.writable) return;
+		socket.end(
+			'HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'
+		);
+	});
+
+	const listen = (
+		port = config.port,
+		host = config.listenHost
+	): Promise<void> =>
+		new Promise((resolve, reject) => {
+			const onError = (error: Error) => {
+				server.off('listening', onListening);
+				reject(error);
+			};
+			const onListening = () => {
+				server.off('error', onError);
+				resolve();
+			};
+			server.once('error', onError);
+			server.once('listening', onListening);
+			server.listen(port, host);
+		});
+
+	const close = async (): Promise<void> => {
+		const closePromise = new Promise<void>(resolve => {
+			if (!server.listening) {
+				resolve();
+				return;
+			}
+			server.close(() => resolve());
+			server.closeIdleConnections();
+		});
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		await Promise.race([
+			closePromise,
+			new Promise<void>(resolve => {
+				timeout = setTimeout(() => {
+					for (const request of activeProxyRequests) {
+						request.destroy(new Error('gateway_shutdown'));
+					}
+					server.closeAllConnections();
+					resolve();
+				}, config.shutdownGraceMs);
+			})
+		]);
+		if (timeout) clearTimeout(timeout);
+		httpAgent.destroy();
+		httpsAgent.destroy();
+	};
+
+	return {
+		server,
+		jwks,
+		initialize: () => jwks.initialize(),
+		listen,
+		close,
+		address: () => server.address()
+	};
+};

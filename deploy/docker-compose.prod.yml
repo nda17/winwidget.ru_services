@@ -22,7 +22,14 @@ x-api-env: &api-env
   PRODUCTION_HOST: ${PRODUCTION_HOST}
   AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
   TELEGRAM_WEBHOOK_HOST: ${TELEGRAM_WEBHOOK_HOST:-https://api.winwidget.ru}
-  JWT_SECRET: ${JWT_SECRET}
+  JWT_ACCESS_PRIVATE_KEY_BASE64: ${JWT_ACCESS_PRIVATE_KEY_BASE64}
+  JWT_ACCESS_JWKS_BASE64: ${JWT_ACCESS_JWKS_BASE64}
+  JWT_ACCESS_ACTIVE_KID: ${JWT_ACCESS_ACTIVE_KID}
+  JWT_ISSUER: ${JWT_ISSUER}
+  JWT_AUDIENCE: ${JWT_AUDIENCE}
+  JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
+  JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
   RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY}
   RECAPTCHA_CLIENT_URL: ${RECAPTCHA_CLIENT_URL}
   RECAPTCHA_ENABLED: ${RECAPTCHA_ENABLED:-true}
@@ -69,6 +76,27 @@ x-api-env: &api-env
   MESSAGING_ALERTS_ENABLED: ${MESSAGING_ALERTS_ENABLED:-true}
   MESSAGING_ACTIVITY_STALE_MS: ${MESSAGING_ACTIVITY_STALE_MS:-300000}
   MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD: ${MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD:-100}
+
+x-api-gateway-env: &api-gateway-env
+  APP_REVISION: ${APP_REVISION:-unknown}
+  NODE_ENV: production
+  GATEWAY_LISTEN_HOST: ${GATEWAY_LISTEN_HOST:-127.0.0.1}
+  PORT: ${GATEWAY_PORT:-4100}
+  API_UPSTREAM_URL: ${API_UPSTREAM_URL:-http://127.0.0.1:4200}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://winwidget.ru,https://www.winwidget.ru}
+  JWT_JWKS_URL: ${JWT_JWKS_URL:-http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json}
+  JWT_ISSUER: ${JWT_ISSUER}
+  JWT_AUDIENCE: ${JWT_AUDIENCE}
+  JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
+  JWT_MAX_TOKEN_LIFETIME_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
+  JWT_MAX_TOKEN_BYTES: ${JWT_MAX_TOKEN_BYTES:-16384}
+  JWKS_FETCH_TIMEOUT_MS: ${JWKS_FETCH_TIMEOUT_MS:-3000}
+  JWKS_REFRESH_MIN_INTERVAL_MS: ${JWKS_REFRESH_MIN_INTERVAL_MS:-5000}
+  JWKS_CACHE_TTL_MS: ${JWKS_CACHE_TTL_MS:-300000}
+  JWKS_MAX_STALE_MS: ${JWKS_MAX_STALE_MS:-3600000}
+  JWKS_MAX_BYTES: ${JWKS_MAX_BYTES:-262144}
+  PROXY_TIMEOUT_MS: ${GATEWAY_PROXY_TIMEOUT_MS:-60000}
+  SHUTDOWN_GRACE_MS: ${GATEWAY_SHUTDOWN_GRACE_MS:-10000}
 
 x-integration-worker-env: &integration-worker-env
   <<: [*runtime-env, *smtp-env]
@@ -154,6 +182,32 @@ services:
       timeout: 5s
       retries: 12
     stop_grace_period: 30s
+    restart: unless-stopped
+
+  api-gateway:
+    image: winwidget-api-gateway:${APP_VERSION:-latest}
+    build:
+      context: ../apps/api-gateway
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${APP_REVISION:-unknown}
+    environment: *api-gateway-env
+    network_mode: host
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.PORT||4100)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    stop_grace_period: 15s
     restart: unless-stopped
 
   outbox-publisher:

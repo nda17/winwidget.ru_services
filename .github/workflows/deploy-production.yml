@@ -46,6 +46,8 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
+      APP_REVISION: ${{ github.sha }}
+      APP_VERSION: git-${{ github.sha }}
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       RABBITMQ_URL: amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget
@@ -63,7 +65,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          version: 9.15.9
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -74,7 +76,45 @@ jobs:
       - name: Install dependencies
         env:
           HUSKY: 0
-        run: pnpm install --frozen-lockfile
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir apps/api-gateway install --frozen-lockfile
+
+      - name: Generate ephemeral CI JWT keyset
+        run: |
+          cp .env.example "$RUNNER_TEMP/winwidget-jwt-ci.env"
+          node scripts/generate-jwt-keyset.mjs \
+            --backend-env "$RUNNER_TEMP/winwidget-jwt-ci.env" \
+            --issuer https://api.winwidget.test/auth \
+            --audience https://api.winwidget.test \
+            --kid-prefix winwidget-ci \
+            --keep-previous 0
+          JWT_ENV_FILE="$RUNNER_TEMP/winwidget-jwt-ci.env" node <<'NODE'
+          const { appendFileSync, readFileSync } = require('node:fs');
+          const requiredKeys = new Set([
+            'JWT_ACCESS_PRIVATE_KEY_BASE64',
+            'JWT_ACCESS_JWKS_BASE64',
+            'JWT_ACCESS_ACTIVE_KID',
+            'JWT_ISSUER',
+            'JWT_AUDIENCE',
+            'JWT_ACCESS_TTL_SECONDS',
+            'JWT_CLOCK_TOLERANCE_SECONDS',
+          ]);
+          const values = new Map();
+          for (const line of readFileSync(process.env.JWT_ENV_FILE, 'utf8').split(/\r?\n/)) {
+            const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+            if (match && requiredKeys.has(match[1])) values.set(match[1], match[2]);
+          }
+          for (const key of requiredKeys) {
+            const value = values.get(key);
+            if (!value) throw new Error(`Missing generated ${key}`);
+            appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
+          }
+          appendFileSync(
+            process.env.GITHUB_ENV,
+            'JWT_JWKS_URL=http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json\n',
+          );
+          NODE
 
       - name: Generate Prisma Client
         run: pnpm exec prisma generate
@@ -116,6 +156,7 @@ jobs:
                 .sort();
               const expectedPersistentServiceNames = [
                 "api",
+                "api-gateway",
                 "integration-worker",
                 "maintenance-worker",
                 "outbox-publisher",
@@ -156,6 +197,19 @@ jobs:
                 }
                 return environment;
               };
+              for (const name of ["api", "api-gateway"]) {
+                const service = requireService(name);
+                if (service.build?.args?.APP_REVISION !== process.env.APP_REVISION) {
+                  throw new Error(`${name} image build revision is not pinned`);
+                }
+                const expectedImage =
+                  name === "api"
+                    ? `winwidget-api:${process.env.APP_VERSION}`
+                    : `winwidget-api-gateway:${process.env.APP_VERSION}`;
+                if (service.image !== expectedImage) {
+                  throw new Error(`${name} image tag is not pinned to the revision`);
+                }
+              }
               const requireExactKinds = (environment, key, expected, name) => {
                 const kinds = [...new Set(String(environment[key] ?? "")
                   .split(",")
@@ -188,7 +242,35 @@ jobs:
                 "RABBITMQ_MONITOR_PASSWORD",
                 "RABBITMQ_VHOST",
                 "TRUST_PROXY",
+                "JWT_ACCESS_PRIVATE_KEY_BASE64",
+                "JWT_ACCESS_JWKS_BASE64",
+                "JWT_ACCESS_ACTIVE_KID",
+                "JWT_ISSUER",
+                "JWT_AUDIENCE",
+                "CORS_ALLOWED_ORIGINS",
               ]);
+              const gatewayEnvironment = requireEnvironment("api-gateway", [
+                "API_UPSTREAM_URL",
+                "CORS_ALLOWED_ORIGINS",
+                "JWT_JWKS_URL",
+                "JWT_ISSUER",
+                "JWT_AUDIENCE",
+                "JWT_CLOCK_TOLERANCE_SECONDS",
+                "JWT_MAX_TOKEN_LIFETIME_SECONDS",
+              ]);
+              for (const forbidden of [
+                "DATABASE_URL",
+                "DATABASE_URL_PRODUCTION",
+                "JWT_SECRET",
+                "JWT_ACCESS_PRIVATE_KEY_BASE64",
+                "JWT_ACCESS_JWKS_BASE64",
+                "RABBITMQ_URL",
+                "RABBITMQ_MONITOR_PASSWORD",
+              ]) {
+                if (forbidden in gatewayEnvironment) {
+                  throw new Error(`api-gateway must not receive ${forbidden}`);
+                }
+              }
               requireEnvironment("outbox-publisher", [
                 "DATABASE_URL_PRODUCTION",
                 "RABBITMQ_URL",
@@ -283,7 +365,15 @@ jobs:
               }
               for (const name of ["outbox-publisher", "integration-worker", "maintenance-worker"]) {
                 const environment = services[name].environment ?? {};
-                for (const forbidden of ["JWT_SECRET", "RABBITMQ_MONITOR_PASSWORD"]) {
+                for (const forbidden of [
+                  "JWT_SECRET",
+                  "JWT_ACCESS_PRIVATE_KEY_BASE64",
+                  "JWT_ACCESS_JWKS_BASE64",
+                  "JWT_ACCESS_ACTIVE_KID",
+                  "JWT_ISSUER",
+                  "JWT_AUDIENCE",
+                  "RABBITMQ_MONITOR_PASSWORD",
+                ]) {
                   if (forbidden in environment) {
                     throw new Error(`${name} must not receive ${forbidden}`);
                   }
@@ -311,14 +401,28 @@ jobs:
             '
 
       - name: Build
-        run: pnpm build
+        run: |
+          pnpm build
+          pnpm --dir apps/api-gateway run typecheck
+          pnpm --dir apps/api-gateway test
 
       - name: Build and verify production image
         run: |
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway
+          test "$(
+            docker image inspect "winwidget-api:$APP_VERSION" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$APP_REVISION"
+          test "$(
+            docker image inspect "winwidget-api-gateway:$APP_VERSION" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$APP_REVISION"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh api -lc \
             'pg_dump --version && pg_restore --version && test -f dist/src/maintenance-worker-main.js'
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint node api-gateway \
+            -e "require('node:fs').accessSync('dist/src/main.js')"
 
       - name: Messaging integration smoke
         env:

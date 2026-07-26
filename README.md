@@ -22,7 +22,7 @@ Prisma ORM и обслуживает frontend, публичные страниц
 
 ### Авторизация и валидация
 
-- JWT access/refresh flow;
+- RS256 access JWT через JWKS и rotating opaque refresh token;
 - Passport;
 - OAuth: Google, GitHub, Yandex и VK;
 - авторизация через Telegram;
@@ -92,6 +92,7 @@ winwidget.ru_server/
 │   ├── file/                  # local/S3 uploads
 │   ├── safe-outbound-http/    # защита исходящих webhook/CRM-запросов
 │   └── ...                    # контент, статистика и admin-модули
+├── apps/api-gateway/          # отдельный внешний API ingress без бизнес-логики
 ├── prisma/
 │   ├── schema.prisma
 │   └── migrations/
@@ -195,11 +196,16 @@ winwidget.ru_server/
 
 JWT flow:
 
-- access token используется как Bearer token;
+- access token подписывается `RS256`, содержит строгие `iss`, `aud`, `sub`,
+  `sid`, `roles`, `token_use`, `jti`, `iat`, `nbf`, `exp` и используется как
+  Bearer token;
+- публичные ключи доступны по
+  `/api/v1/auth/.well-known/jwks.json`, private key получает только Auth/API;
 - refresh token хранится в `HttpOnly` cookie `refreshToken`;
-- refresh token ротируется при обновлении;
-- hash refresh token хранится в PostgreSQL;
-- access token действует 1 час;
+- opaque refresh token ротируется через `POST /api/v1/auth/refresh`;
+- bcrypt hash от SHA-256 digest полного refresh token хранится в `UserSession`
+  PostgreSQL;
+- access token действует 15 минут;
 - refresh token действует 7 дней;
 - cookie domain настраивается через `AUTH_COOKIE_DOMAIN`.
 
@@ -891,15 +897,29 @@ Worker-команды запускают файлы из `dist`, поэтому 
 http://localhost:4200
 ```
 
+Gateway запускается отдельным package после API:
+
+```bash
+pnpm --dir apps/api-gateway install --frozen-lockfile
+pnpm --dir apps/api-gateway run build
+pnpm start:api-gateway
+```
+
+По `.env.example` он слушает `http://127.0.0.1:4100`, проксирует только
+`/api/v1` в API на `4200` и получает публичные ключи через JWKS. Локальный
+скрипт читает корневой `.env` и использует `GATEWAY_PORT=4100`, даже когда
+NestJS API использует `PORT=4200`.
+
 ## Production build
 
 ```bash
 pnpm build
+pnpm --dir apps/api-gateway run build
 pnpm start:prod
 ```
 
 Результат NestJS-сборки находится в `dist`, runtime-виджеты — в
-`public/widgets`.
+`public/widgets`, Gateway — в `apps/api-gateway/dist`.
 
 ---
 
@@ -916,7 +936,32 @@ AUTH_COOKIE_DOMAIN
 DATABASE_URL_DEVELOPMENT
 DATABASE_URL_PRODUCTION
 DATABASE_BACKUP_URL
-JWT_SECRET
+TRUST_PROXY
+CORS_ALLOWED_ORIGINS
+```
+
+## Auth, JWT и API Gateway
+
+```text
+JWT_ACCESS_PRIVATE_KEY_BASE64
+JWT_ACCESS_JWKS_BASE64
+JWT_ACCESS_ACTIVE_KID
+JWT_ISSUER
+JWT_AUDIENCE
+JWT_ACCESS_TTL_SECONDS
+JWT_CLOCK_TOLERANCE_SECONDS
+GATEWAY_LISTEN_HOST
+GATEWAY_PORT
+API_UPSTREAM_URL
+JWT_JWKS_URL
+JWT_MAX_TOKEN_BYTES
+JWKS_FETCH_TIMEOUT_MS
+JWKS_REFRESH_MIN_INTERVAL_MS
+JWKS_CACHE_TTL_MS
+JWKS_MAX_STALE_MS
+JWKS_MAX_BYTES
+GATEWAY_PROXY_TIMEOUT_MS
+GATEWAY_SHUTDOWN_GRACE_MS
 ```
 
 ## reCAPTCHA
@@ -1041,26 +1086,28 @@ INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS
 
 # Команды
 
-| Команда                           | Назначение                             |
-| --------------------------------- | -------------------------------------- |
-| `pnpm dev`                        | Development server с watch mode        |
-| `pnpm build`                      | NestJS + runtime-виджеты               |
-| `pnpm build:app`                  | Только NestJS                          |
-| `pnpm build:widgets`              | Сборка и проверка runtime-виджетов     |
-| `pnpm start:prod`                 | Запуск собранного HTTP API             |
-| `pnpm start:outbox-publisher`     | Запуск собранного Outbox publisher     |
-| `pnpm start:integration-worker`   | Запуск собранного integration worker   |
-| `pnpm start:maintenance-worker`   | Запуск собранного maintenance worker   |
-| `pnpm exec tsc --noEmit`          | TypeScript check                       |
-| `pnpm lint`                       | ESLint с автоматическими исправлениями |
-| `pnpm format`                     | Форматирование исходников              |
-| `pnpm test`                       | Unit tests                             |
-| `pnpm test:watch`                 | Unit tests в watch mode                |
-| `pnpm test:cov`                   | Unit tests с coverage                  |
-| `pnpm test:messaging-integration` | RabbitMQ/PostgreSQL integration smoke  |
-| `pnpm email`                      | React Email preview                    |
-| `pnpm prisma-generate`            | Генерация Prisma Client                |
-| `pnpm dev-prisma-migration`       | Применение development migrations      |
+| Команда                            | Назначение                             |
+| ---------------------------------- | -------------------------------------- |
+| `pnpm dev`                         | Development server с watch mode        |
+| `pnpm build`                       | NestJS + runtime-виджеты               |
+| `pnpm build:app`                   | Только NestJS                          |
+| `pnpm build:widgets`               | Сборка и проверка runtime-виджетов     |
+| `pnpm start:prod`                  | Запуск собранного HTTP API             |
+| `pnpm start:outbox-publisher`      | Запуск собранного Outbox publisher     |
+| `pnpm start:integration-worker`    | Запуск собранного integration worker   |
+| `pnpm start:maintenance-worker`    | Запуск собранного maintenance worker   |
+| `pnpm exec tsc --noEmit`           | TypeScript check                       |
+| `pnpm lint`                        | ESLint с автоматическими исправлениями |
+| `pnpm format`                      | Форматирование исходников              |
+| `pnpm test`                        | Unit tests                             |
+| `pnpm test:watch`                  | Unit tests в watch mode                |
+| `pnpm test:cov`                    | Unit tests с coverage                  |
+| `pnpm test:messaging-integration`  | RabbitMQ/PostgreSQL integration smoke  |
+| `pnpm email`                       | React Email preview                    |
+| `pnpm prisma-generate`             | Генерация Prisma Client                |
+| `pnpm dev-prisma-migration`        | Применение development migrations      |
+| `pnpm jwt:keyset:generate -- ...`  | Генерация RSA 3072 keyset              |
+| `pnpm --dir apps/api-gateway test` | Unit/integration tests API Gateway     |
 
 `pnpm lint` и `pnpm format` изменяют файлы.
 
@@ -1132,7 +1179,7 @@ refactor: split subscription cleanup
 
 ## Docker
 
-Production image использует multi-stage build:
+NestJS production image использует multi-stage build:
 
 1. Node.js 20 Alpine и pnpm 9.15.9.
 2. Установка зависимостей через frozen lockfile.
@@ -1141,8 +1188,11 @@ Production image использует multi-stage build:
 5. Удаление development dependencies.
 6. Запуск от непривилегированного пользователя `nestjs`.
 
-Container слушает порт `4200`. `docker-entrypoint.sh` выбирает database URL по
-`MODE` и экспортирует его как `DATABASE_URL` для runtime.
+Контейнер API слушает только `127.0.0.1:4200`.
+`docker-entrypoint.sh` выбирает database URL по `MODE` и экспортирует его как
+`DATABASE_URL` для runtime. Отдельный минимальный image Gateway не получает
+private JWT key, PostgreSQL или RabbitMQ credentials и слушает только
+`127.0.0.1:4100`.
 
 ## CI/CD
 
@@ -1160,12 +1210,14 @@ pnpm exec tsc --noEmit
 pnpm exec jest --runInBand
 docker compose ... config --quiet + semantic validation
 pnpm build
-docker compose ... build api
+pnpm --dir apps/api-gateway run typecheck
+pnpm --dir apps/api-gateway test
+docker compose ... build api api-gateway
 pg_dump --version && pg_restore --version && maintenance entrypoint check
 pnpm run test:messaging-integration
 ```
 
-Semantic compose validation проверяет точный набор пяти постоянных сервисов,
+Semantic compose validation проверяет точный набор шести постоянных сервисов,
 команды worker-процессов, обязательные переменные и consumer kinds, а также
 ограниченный `tmpfs` maintenance worker.
 

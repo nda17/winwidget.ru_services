@@ -15,6 +15,43 @@ import { join } from 'path';
 const API_PREFIX = 'api/v1';
 const API_BASE_PATH = `/${API_PREFIX}`;
 
+const getCorsAllowedOrigins = () => {
+	if (process.env.MODE === 'development') {
+		return true;
+	}
+
+	const values = process.env.CORS_ALLOWED_ORIGINS?.split(',').map(value =>
+		value.trim()
+	);
+
+	if (!values?.length || values.some(value => !value || value === '*')) {
+		throw new Error(
+			'CORS_ALLOWED_ORIGINS must contain exact http/https origins'
+		);
+	}
+
+	const origins = values.map(value => {
+		const url = new URL(value);
+
+		if (
+			!['http:', 'https:'].includes(url.protocol) ||
+			url.username ||
+			url.password ||
+			url.pathname !== '/' ||
+			url.search ||
+			url.hash
+		) {
+			throw new Error(
+				'CORS_ALLOWED_ORIGINS must contain exact http/https origins'
+			);
+		}
+
+		return url.origin;
+	});
+
+	return [...new Set(origins)];
+};
+
 export const bootstrap = async () => {
 	const app = await NestFactory.create(AppModule);
 	app.enableShutdownHooks();
@@ -117,10 +154,7 @@ export const bootstrap = async () => {
 		new AppHttpExceptionFilter()
 	);
 	app.enableCors({
-		origin:
-			process.env.MODE === 'development'
-				? true
-				: ([process.env.RECAPTCHA_CLIENT_URL].filter(Boolean) as string[]),
+		origin: getCorsAllowedOrigins(),
 		credentials: true,
 		exposedHeaders: 'set-cookie, x-request-id, x-correlation-id'
 	});

@@ -65,7 +65,7 @@ export class AuthRateLimitGuard implements CanActivate {
 	}
 
 	private getLimitConfig(path: string) {
-		if (path.includes('access-token')) {
+		if (path.includes('refresh')) {
 			return { limit: 20, windowMs: 60 * 1000 };
 		}
 
