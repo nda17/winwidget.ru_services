@@ -509,6 +509,11 @@ jobs:
 
       - name: Build and verify production image
         run: |
+          ci_rabbitmq_volume="winwidget-ci-rabbitmq-data-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker volume create "$ci_rabbitmq_volume" > /dev/null
+          trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
+          export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
+
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
