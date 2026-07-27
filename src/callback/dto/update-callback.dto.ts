@@ -9,7 +9,7 @@ import {
 export class UpdateCallbackDto {
 	@IsOptional()
 	@IsString()
-	@MaxLength(15)
+	@MaxLength(50)
 	name?: string;
 
 	@IsOptional()

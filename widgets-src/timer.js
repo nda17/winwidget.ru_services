@@ -167,6 +167,23 @@
 		return value == null || value === '' ? fallback : String(value);
 	}
 
+	function getSafeExternalUrl(value, allowContactProtocols) {
+		if (typeof value !== 'string' || !value.trim()) return '';
+		try {
+			var url = new URL(value.trim(), window.location.href);
+			if (url.protocol === 'http:' || url.protocol === 'https:') {
+				return url.href;
+			}
+			if (
+				allowContactProtocols &&
+				(url.protocol === 'tel:' || url.protocol === 'mailto:')
+			) {
+				return url.href;
+			}
+		} catch (e) {}
+		return '';
+	}
+
 	function getConfigUrl() {
 		return (
 			API_BASE +
@@ -183,6 +200,35 @@
 	var deadline = null;
 	var tickTimer = null;
 	var autoOpenTimer = null;
+
+	function firePixelEvent(goalName) {
+		if (cfg && cfg.yandexMetrikaId && typeof window.ym === 'function') {
+			try {
+				window.ym(Number(cfg.yandexMetrikaId), 'reachGoal', goalName);
+			} catch (e) {}
+		}
+		if (
+			cfg &&
+			cfg.vkPixelId &&
+			window.VK &&
+			typeof window.VK.Goal === 'function'
+		) {
+			try {
+				window.VK.Goal(goalName);
+			} catch (e) {}
+		}
+		if (
+			cfg &&
+			cfg.roistatEnabled &&
+			window.roistat &&
+			window.roistat.event &&
+			typeof window.roistat.event.send === 'function'
+		) {
+			try {
+				window.roistat.event.send(goalName);
+			} catch (e) {}
+		}
+	}
 
 	var timerBtn = document.createElement('div');
 	timerBtn.id = 'timer-widget-button';
@@ -563,7 +609,8 @@
 	}
 
 	function buildActionLink(fullWidth) {
-		if (!cfg.actionButtonUrl) return null;
+		var actionUrl = getSafeExternalUrl(cfg.actionButtonUrl, true);
+		if (!actionUrl) return null;
 		var link = el('a', {
 			display: 'inline-flex',
 			alignItems: 'center',
@@ -580,9 +627,14 @@
 			boxSizing: 'border-box',
 			boxShadow: '0 8px 22px rgba(71,5,251,.22)'
 		});
-		link.href = cfg.actionButtonUrl;
-		link.target = '_blank';
-		link.rel = 'noopener noreferrer';
+		link.href = actionUrl;
+		if (
+			actionUrl.indexOf('http:') === 0 ||
+			actionUrl.indexOf('https:') === 0
+		) {
+			link.target = '_blank';
+			link.rel = 'noopener noreferrer';
+		}
 		link.textContent = cfg.actionButtonText || 'Перейти к акции';
 		link.onclick = function () {
 			fireEvent('action');
@@ -738,7 +790,8 @@
 			'Получить предложение'
 		);
 		form.appendChild(submit);
-		if (cfg.privacyUrl) {
+		var privacyUrl = getSafeExternalUrl(cfg.privacyUrl, false);
+		if (privacyUrl) {
 			var privacy = el('p', {
 				margin: '0',
 				fontSize: '11px',
@@ -746,10 +799,16 @@
 				textAlign: 'center',
 				lineHeight: '1.45'
 			});
-			privacy.innerHTML =
-				'Нажимая кнопку, вы соглашаетесь с <a href="' +
-				cfg.privacyUrl +
-				'" target="_blank" style="color:#999">политикой конфиденциальности</a>';
+			privacy.appendChild(
+				document.createTextNode('Нажимая кнопку, вы соглашаетесь с ')
+			);
+			var privacyLink = document.createElement('a');
+			privacyLink.href = privacyUrl;
+			privacyLink.target = '_blank';
+			privacyLink.rel = 'noopener noreferrer';
+			privacyLink.style.color = '#999';
+			privacyLink.textContent = 'политикой конфиденциальности';
+			privacy.appendChild(privacyLink);
 			form.appendChild(privacy);
 		}
 		var isSubmitting = false;
@@ -797,6 +856,7 @@
 					submitted = true;
 					rememberSubmitted();
 					fireEvent('submit');
+					firePixelEvent('wt_send');
 					buildSuccess();
 				})
 				.catch(function () {
@@ -914,8 +974,7 @@
 		timerBtn.style.transform = 'scale(0.8)';
 		stopButtonAnimation();
 		overlay.style.display = 'flex';
-		if (getLeftMs() <= 0 && cfg.expiredBehavior !== 'disableForm')
-			buildExpired();
+		if (getLeftMs() <= 0) buildExpired();
 		else if (submitted && cfg.dataType !== 'NONE') buildSuccess();
 		else buildIntro();
 		requestAnimationFrame(function () {
@@ -925,6 +984,7 @@
 			});
 		});
 		fireEvent('open');
+		firePixelEvent('wt_open');
 	}
 
 	function closeModal() {
@@ -1033,8 +1093,7 @@
 			return;
 		}
 		if (isOpen) {
-			if (getLeftMs() <= 0 && cfg.expiredBehavior !== 'disableForm')
-				buildExpired();
+			if (getLeftMs() <= 0) buildExpired();
 			else if (submitted && cfg.dataType !== 'NONE') buildSuccess();
 			else buildIntro();
 			modal.style.transform = 'translateY(0)';

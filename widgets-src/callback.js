@@ -86,6 +86,17 @@
 		return next;
 	}
 
+	function getSafeExternalUrl(value) {
+		if (typeof value !== 'string' || !value.trim()) return '';
+		try {
+			var url = new URL(value.trim(), window.location.href);
+			if (url.protocol === 'http:' || url.protocol === 'https:') {
+				return url.href;
+			}
+		} catch (e) {}
+		return '';
+	}
+
 	// ─── Phone mask ───────────────────────────────────────────────────────────
 
 	var MASKS = {
@@ -161,6 +172,35 @@
 	var isOpen = false;
 	var submitted = false;
 	var previousBodyStyles = null;
+
+	function firePixelEvent(goalName) {
+		if (cfg && cfg.yandexMetrikaId && typeof window.ym === 'function') {
+			try {
+				window.ym(Number(cfg.yandexMetrikaId), 'reachGoal', goalName);
+			} catch (e) {}
+		}
+		if (
+			cfg &&
+			cfg.vkPixelId &&
+			window.VK &&
+			typeof window.VK.Goal === 'function'
+		) {
+			try {
+				window.VK.Goal(goalName);
+			} catch (e) {}
+		}
+		if (
+			cfg &&
+			cfg.roistatEnabled &&
+			window.roistat &&
+			window.roistat.event &&
+			typeof window.roistat.event.send === 'function'
+		) {
+			try {
+				window.roistat.event.send(goalName);
+			} catch (e) {}
+		}
+	}
 
 	// ─── Floating button ──────────────────────────────────────────────────────
 
@@ -458,6 +498,7 @@
 
 		var accentColor = cfg.color || '#4705fb';
 		var btnColor = cfg.buttonColor || accentColor;
+		var privacyUrl = getSafeExternalUrl(cfg.privacyUrl);
 
 		if (cfg.title) {
 			var titleEl = el('h2', {
@@ -608,7 +649,7 @@
 			cursor: 'pointer',
 			background:
 				'linear-gradient(135deg,' + btnColor + ',' + btnColor + 'cc)',
-			marginBottom: cfg.privacyUrl ? '12px' : '0',
+			marginBottom: privacyUrl ? '12px' : '0',
 			transition: 'opacity 0.2s, transform 0.15s',
 			opacity: '0.5'
 		});
@@ -683,6 +724,7 @@
 				})
 				.then(function () {
 					submitted = true;
+					firePixelEvent('wcb_send');
 					buildSuccess();
 				})
 				.catch(function (error) {
@@ -703,7 +745,7 @@
 		modal.appendChild(submitError);
 
 		// Privacy link
-		if (cfg.privacyUrl) {
+		if (privacyUrl) {
 			var privacyEl = el('p', {
 				margin: '0',
 				fontSize: '11px',
@@ -711,10 +753,16 @@
 				textAlign: 'center',
 				lineHeight: '1.5'
 			});
-			privacyEl.innerHTML =
-				'Нажимая кнопку, вы соглашаетесь с <a href="' +
-				cfg.privacyUrl +
-				'" target="_blank" style="color:#bbb">политикой конфиденциальности</a>';
+			privacyEl.appendChild(
+				document.createTextNode('Нажимая кнопку, вы соглашаетесь с ')
+			);
+			var privacyLink = document.createElement('a');
+			privacyLink.href = privacyUrl;
+			privacyLink.target = '_blank';
+			privacyLink.rel = 'noopener noreferrer';
+			privacyLink.style.color = '#bbb';
+			privacyLink.textContent = 'политикой конфиденциальности';
+			privacyEl.appendChild(privacyLink);
 			modal.appendChild(privacyEl);
 		}
 		modal.appendChild(buildBrand());
@@ -825,6 +873,7 @@
 			});
 		});
 		fireEvent('open');
+		firePixelEvent('wcb_open');
 	}
 
 	function closeModal() {
@@ -912,6 +961,7 @@
 			}
 
 			cfg = data;
+			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
 
 			var size = cfg.buttonSize || 60;
 
@@ -977,8 +1027,6 @@
 					});
 				}, 2000);
 			}
-
-			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
 
 			if (!AUTO_OPEN && !isOpen) {
 				stopButtonAnimation();

@@ -1,11 +1,9 @@
-import { WidgetService } from '@/widget/widget.service';
-import { Controller, Get, Param, Req, Res } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { publicWidgetKeyPipe } from '@/widget/public-widget-key.pipe';
+import { Controller, Get, Param, Res } from '@nestjs/common';
+import { Response } from 'express';
 
 @Controller()
 export class WidgetPublicController {
-	constructor(private readonly widgetService: WidgetService) {}
-
 	/**
 	 * Serves widget loader JS: GET /widget/:key
 	 * Client embeds: <script src="https://winwidget.ru/widget/KEY"></script>
@@ -13,20 +11,23 @@ export class WidgetPublicController {
 	 */
 	@Get('widget/:key')
 	async serveWidgetJs(
-		@Param('key') key: string,
-		@Req() req: Request,
+		@Param('key', publicWidgetKeyPipe) key: string,
 		@Res() res: Response
 	) {
-		const origin = `${req.protocol}://${req.get('host')}`;
+		const serializedKey = JSON.stringify(key);
 
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
 		const js = `(function(){
-  if(window.winwidget==='${key}')return;
-  window.winwidget='${key}';
+  if(window.winwidget===${serializedKey})return;
+  window.winwidget=${serializedKey};
+  var loader=document.currentScript;
+  if(!loader||!loader.src)return;
   var s=document.createElement('script');
-  s.src='${origin}/widgets/wheel.js?v=${Date.now()}';
+  var assetUrl=new URL('/widgets/wheel.js',loader.src);
+  assetUrl.searchParams.set('v','${Date.now()}');
+  s.src=assetUrl.href;
   s.async=true;
   document.head.appendChild(s);
 })();`;
@@ -40,11 +41,10 @@ export class WidgetPublicController {
 	 */
 	@Get('page-wheel/:key')
 	async serveWidgetPage(
-		@Param('key') key: string,
-		@Req() req: Request,
+		@Param('key', publicWidgetKeyPipe) key: string,
 		@Res() res: Response
 	) {
-		const origin = `${req.protocol}://${req.get('host')}`;
+		const serializedKey = JSON.stringify(key);
 
 		res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
 		res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -61,8 +61,8 @@ export class WidgetPublicController {
   </style>
 </head>
 <body>
-  <script>window.winwidget = '${key}'; window.winwidgetAutoOpen = true;</script>
-  <script src="${origin}/widgets/wheel.js" async></script>
+  <script>window.winwidget = ${serializedKey}; window.winwidgetAutoOpen = true;</script>
+  <script src="/widgets/wheel.js" async></script>
 </body>
 </html>`;
 

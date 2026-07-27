@@ -38,6 +38,38 @@
 		}
 	}
 
+	function getSafeColor(value, fallback) {
+		const color = String(value || '').trim();
+		return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+	}
+
+	function getSafeHttpUrl(value, fallback = '') {
+		const rawUrl = String(value || '').trim();
+		if (!rawUrl) return fallback;
+
+		try {
+			const url = new URL(rawUrl, document.baseURI);
+			return url.protocol === 'http:' || url.protocol === 'https:'
+				? url.href
+				: fallback;
+		} catch {
+			return fallback;
+		}
+	}
+
+	function getDisplayText(value, fallback = '') {
+		return value === null || value === undefined
+			? fallback
+			: String(value);
+	}
+
+	function getClampedNumber(value, fallback, min, max) {
+		const number = Number(value);
+		return Number.isFinite(number)
+			? Math.min(max, Math.max(min, number))
+			: fallback;
+	}
+
 	function getColorRgb(color) {
 		const match = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(
 			String(color || '').trim()
@@ -767,8 +799,8 @@
 
       <div id="banner-content">
         <div id='control-wrapper'>
-          <h1 id='title-widget'>${config.title}</h1>
-          <p id='subtitle-widget'>${config.subtitle}</p>
+          <h1 id='title-widget'></h1>
+          <p id='subtitle-widget'></p>
           ${config.nameFieldActive ? `<input type="text"  placeholder="✦  Ваше имя"    id="name-input"  autocomplete="name" />` : ``}
           ${config.phoneFieldActive ? `<input type="tel"   placeholder="✦  Ваш телефон" id="phone-input" autocomplete="tel" />` : ``}
           ${config.emailFieldActive ? `<input type="email" placeholder="✦  Ваш email"   id="email-input" autocomplete="email" />` : ``}
@@ -779,13 +811,13 @@
               <input type="checkbox" id="policy-input" />
               <span id="checkmark"></span>
               <span id="checkbox-text">
-                <a id='link-consent' href='${config.linkConsentText}' target='_blank' rel='noopener noreferrer'>Согласен</a> на обработку персональных данных
+                <a id='link-consent' target='_blank' rel='noopener noreferrer'>Согласен</a> на обработку персональных данных
               </span>
             </label>`
 							: ``
 					}
           <button type='button' id="spin">
-            <span style="margin-right:6px">🎰</span>${config.startBtnText}
+            <span style="margin-right:6px">🎰</span><span id="spin-label"></span>
           </button>
         </div>
 
@@ -830,6 +862,8 @@
 		const title = shadow.querySelector('#title-widget');
 		const subtitle = shadow.querySelector('#subtitle-widget');
 		const policy = shadow.querySelector('#custom-checkbox');
+		const consentLink = shadow.querySelector('#link-consent');
+		const spinLabel = shadow.querySelector('#spin-label');
 		const CENTER = 150;
 		const RADIUS = 150;
 		const textMeasureContext = document
@@ -837,6 +871,19 @@
 			.getContext('2d');
 		let currentRotation = 0;
 		let lastWin = null;
+
+		title.textContent = getDisplayText(config.title);
+		subtitle.textContent = getDisplayText(config.subtitle);
+		spinLabel.textContent = getDisplayText(
+			config.startBtnText,
+			'Крутить!'
+		);
+		if (consentLink) {
+			consentLink.href = getSafeHttpUrl(
+				config.linkConsentText,
+				'https://winwidget.ru/legal-documentation/consent-processing'
+			);
+		}
 
 		// Устанавливаем цвет фона виджета
 		bannerWrapper.style.background = bannerBackground;
@@ -848,10 +895,29 @@
 		}
 
 		/************************ БАРАБАН ************************/
-		// Вставка стрелки SVG
-		if (config.arrowSVG) {
-			wheelArrow.innerHTML = `<svg viewBox="0 0 20 24">${config.arrowSVG}</svg>`;
-		}
+		// Стрелка строится через SVG DOM API, чтобы настройки цвета не попадали в HTML.
+		const svgNamespace = 'http://www.w3.org/2000/svg';
+		const arrowSvg = document.createElementNS(svgNamespace, 'svg');
+		arrowSvg.setAttribute('viewBox', '0 0 20 24');
+		const arrowPolygon = document.createElementNS(svgNamespace, 'polygon');
+		arrowPolygon.setAttribute('points', '0,12 18,5 18,19');
+		arrowPolygon.setAttribute('fill', config.arrowColor);
+		arrowPolygon.setAttribute('filter', 'url(#arrow-shadow)');
+		const arrowDefs = document.createElementNS(svgNamespace, 'defs');
+		const arrowFilter = document.createElementNS(svgNamespace, 'filter');
+		arrowFilter.setAttribute('id', 'arrow-shadow');
+		const arrowShadow = document.createElementNS(
+			svgNamespace,
+			'feDropShadow'
+		);
+		arrowShadow.setAttribute('dx', '0');
+		arrowShadow.setAttribute('dy', '1');
+		arrowShadow.setAttribute('stdDeviation', '2');
+		arrowShadow.setAttribute('flood-color', 'rgba(0,0,0,0.5)');
+		arrowFilter.appendChild(arrowShadow);
+		arrowDefs.appendChild(arrowFilter);
+		arrowSvg.append(arrowPolygon, arrowDefs);
+		wheelArrow.appendChild(arrowSvg);
 
 		// Создание SVG-сектора
 		function createSectorPath(startAngle, endAngle) {
@@ -1094,78 +1160,51 @@
 
 		// Центральный элемент колеса
 		function renderCenter() {
-			if (config.centerSVG) {
-				// Создаём группу для трансформации
-				const g = document.createElementNS(
-					'http://www.w3.org/2000/svg',
-					'g'
-				);
+			const ns = 'http://www.w3.org/2000/svg';
+			const defs = document.createElementNS(ns, 'defs');
+			const grad = document.createElementNS(ns, 'radialGradient');
+			grad.setAttribute('id', 'center-grad');
+			grad.setAttribute('cx', '35%');
+			grad.setAttribute('cy', '35%');
+			const s1 = document.createElementNS(ns, 'stop');
+			s1.setAttribute('offset', '0%');
+			s1.setAttribute('stop-color', '#ffffff');
+			const s2 = document.createElementNS(ns, 'stop');
+			s2.setAttribute('offset', '100%');
+			s2.setAttribute('stop-color', config.centerColor);
+			grad.appendChild(s1);
+			grad.appendChild(s2);
+			defs.appendChild(grad);
+			wheel.appendChild(defs);
 
-				// Здесь центрируем SVG
-				g.setAttribute('transform', `translate(${CENTER}, ${CENTER})`);
+			// Outer glow ring
+			const ring = document.createElementNS(ns, 'circle');
+			ring.setAttribute('cx', CENTER);
+			ring.setAttribute('cy', CENTER);
+			ring.setAttribute('r', 26);
+			ring.setAttribute('fill', 'none');
+			ring.setAttribute('stroke', 'rgba(255,255,255,0.2)');
+			ring.setAttribute('stroke-width', '3');
+			wheel.appendChild(ring);
 
-				// Создаём временный контейнер для парсинга SVG
-				const temp = document.createElement('div');
-				temp.innerHTML = config.centerSVG.trim();
-				const svgElement = temp.firstChild;
+			// Center button
+			const centerCircle = document.createElementNS(ns, 'circle');
+			centerCircle.setAttribute('cx', CENTER);
+			centerCircle.setAttribute('cy', CENTER);
+			centerCircle.setAttribute('r', 22);
+			centerCircle.setAttribute('fill', 'url(#center-grad)');
+			centerCircle.setAttribute('stroke', 'rgba(255,255,255,0.35)');
+			centerCircle.setAttribute('stroke-width', '1.5');
+			centerCircle.setAttribute('filter', 'url(#shadow)');
+			wheel.appendChild(centerCircle);
 
-				// Определяем размеры SVG
-				const width = svgElement.getAttribute('width') || 40;
-				const height = svgElement.getAttribute('height') || 40;
-
-				// Смещаем SVG так, чтобы его центр совпадал с (0,0)
-				svgElement.setAttribute('x', -width / 2);
-				svgElement.setAttribute('y', -height / 2);
-
-				g.appendChild(svgElement);
-				wheel.appendChild(g);
-			} else {
-				const ns = 'http://www.w3.org/2000/svg';
-				const defs = document.createElementNS(ns, 'defs');
-				const grad = document.createElementNS(ns, 'radialGradient');
-				grad.setAttribute('id', 'center-grad');
-				grad.setAttribute('cx', '35%');
-				grad.setAttribute('cy', '35%');
-				const s1 = document.createElementNS(ns, 'stop');
-				s1.setAttribute('offset', '0%');
-				s1.setAttribute('stop-color', '#ffffff');
-				const s2 = document.createElementNS(ns, 'stop');
-				s2.setAttribute('offset', '100%');
-				s2.setAttribute('stop-color', config.centerColor);
-				grad.appendChild(s1);
-				grad.appendChild(s2);
-				defs.appendChild(grad);
-				wheel.appendChild(defs);
-
-				// Outer glow ring
-				const ring = document.createElementNS(ns, 'circle');
-				ring.setAttribute('cx', CENTER);
-				ring.setAttribute('cy', CENTER);
-				ring.setAttribute('r', 26);
-				ring.setAttribute('fill', 'none');
-				ring.setAttribute('stroke', 'rgba(255,255,255,0.2)');
-				ring.setAttribute('stroke-width', '3');
-				wheel.appendChild(ring);
-
-				// Center button
-				const centerCircle = document.createElementNS(ns, 'circle');
-				centerCircle.setAttribute('cx', CENTER);
-				centerCircle.setAttribute('cy', CENTER);
-				centerCircle.setAttribute('r', 22);
-				centerCircle.setAttribute('fill', 'url(#center-grad)');
-				centerCircle.setAttribute('stroke', 'rgba(255,255,255,0.35)');
-				centerCircle.setAttribute('stroke-width', '1.5');
-				centerCircle.setAttribute('filter', 'url(#shadow)');
-				wheel.appendChild(centerCircle);
-
-				// Shine dot
-				const shine = document.createElementNS(ns, 'circle');
-				shine.setAttribute('cx', CENTER - 6);
-				shine.setAttribute('cy', CENTER - 6);
-				shine.setAttribute('r', 4);
-				shine.setAttribute('fill', 'rgba(255,255,255,0.45)');
-				wheel.appendChild(shine);
-			}
+			// Shine dot
+			const shine = document.createElementNS(ns, 'circle');
+			shine.setAttribute('cx', CENTER - 6);
+			shine.setAttribute('cy', CENTER - 6);
+			shine.setAttribute('r', 4);
+			shine.setAttribute('fill', 'rgba(255,255,255,0.45)');
+			wheel.appendChild(shine);
 		}
 
 		// Отрисовка колеса
@@ -1304,13 +1343,6 @@
 
 		// Вращение колеса
 		function spinStartAnimate() {
-			try {
-				const _playedKey =
-					'winwidget_played_' +
-					config._token +
-					(config.spinResetToken ? '_' + config.spinResetToken : '');
-				localStorage.setItem(_playedKey, Date.now().toString());
-			} catch (e) {}
 			const winIndex = weightedRandom(config.sectors);
 			lastWin = config.sectors[winIndex];
 			const count = config.sectors.length;
@@ -1318,7 +1350,12 @@
 			const midAngleSVG =
 				-90 + winIndex * anglePerSector + anglePerSector / 2;
 			const spinTurns = Math.round(6 + (spinDurationSeconds - 4) * 1.5);
-			const targetAngle = 360 * spinTurns - midAngleSVG;
+			const currentAngle = ((currentRotation % 360) + 360) % 360;
+			const winningAngle = ((-midAngleSVG % 360) + 360) % 360;
+			const angleToWinningSector =
+				(winningAngle - currentAngle + 360) % 360;
+			const targetAngle =
+				currentRotation + 360 * spinTurns + angleToWinningSector;
 
 			currentRotation = targetAngle;
 
@@ -1336,6 +1373,10 @@
 			const swingAmplitude = 5;
 			const swingDuration = 1000;
 			const startTime = Date.now();
+			const submission = sendResultToServer().then(
+				() => ({ success: true }),
+				error => ({ success: false, error })
+			);
 
 			function animate() {
 				const elapsed = Date.now() - startTime;
@@ -1351,27 +1392,59 @@
 				if (progress < 1) {
 					requestAnimationFrame(animate);
 				} else {
-					//Анимация выйгрыша
-					if (config.confettiEffectActive) {
-						confettiExplosioneEffect({
-							container: bannerWrapper,
-							count: 180
-						});
-						setTimeout(
-							() => confettiFallsEffect({ container: bannerWrapper }),
-							600
-						);
-					}
+					submission.then(result => {
+						if (!result.success) {
+							showSubmissionError(result.error);
+							return;
+						}
 
-					//Изменение title виджета на название приза
-					title.textContent = `🎊 Вы выиграли: ${config.sectors[winIndex].fullLabel}`;
+						rememberPlayed();
+						firePixelEvent('ip3_send');
 
-					//Скрываем инпуты и кнопки
-					showElements();
+						//Анимация выйгрыша
+						if (config.confettiEffectActive) {
+							confettiExplosioneEffect({
+								container: bannerWrapper,
+								count: 180
+							});
+							setTimeout(
+								() => confettiFallsEffect({ container: bannerWrapper }),
+								600
+							);
+						}
+
+						//Изменение title виджета на название приза
+						title.textContent = `🎊 Вы выиграли: ${config.sectors[winIndex].fullLabel}`;
+
+						//Скрываем инпуты и кнопки
+						showElements();
+					});
 				}
 			}
 			animate();
-			sendResultToServer();
+		}
+
+		function rememberPlayed() {
+			try {
+				const playedKey =
+					'winwidget_played_' +
+					config._token +
+					(config.spinResetToken ? '_' + config.spinResetToken : '');
+				localStorage.setItem(playedKey, Date.now().toString());
+			} catch (e) {}
+		}
+
+		function showSubmissionError(error) {
+			title.textContent = 'Не удалось сохранить результат';
+			subtitle.textContent =
+				error && error.message
+					? error.message
+					: 'Проверьте интернет-соединение и попробуйте ещё раз.';
+			startBtn.disabled = false;
+			startBtn.style.opacity = '1';
+			startBtn.style.cursor = 'pointer';
+			spinLabel.textContent = 'Повторить';
+			lastWin = null;
 		}
 
 		/************************ Изменение виджета после выйгрыша ************************/
@@ -1442,39 +1515,63 @@
 			requestAnimationFrame(animate);
 		}
 
-		//Валидация инпутов
+		function validateField(
+			isActive,
+			isValid,
+			element,
+			animateError = true
+		) {
+			if (!isActive || isValid) return true;
+			if (animateError) shakeInput(element);
+			return false;
+		}
+
+		function validateName(animateError = true) {
+			return validateField(
+				config.nameFieldActive,
+				Boolean(inputName?.value.trim().length),
+				inputName,
+				animateError
+			);
+		}
+
+		function validatePhone(animateError = true) {
+			return validateField(
+				config.phoneFieldActive,
+				Boolean(phoneController?.isValid()),
+				inputPhone,
+				animateError
+			);
+		}
+
+		function validateEmail(animateError = true) {
+			return validateField(
+				config.emailFieldActive,
+				EMAIL_REGEXP.test(inputEmail?.value || ''),
+				inputEmail,
+				animateError
+			);
+		}
+
+		function validatePolicy(animateError = true) {
+			return validateField(
+				config.checkboxPolicyActive,
+				Boolean(inputCheckboxPolicy?.checked),
+				policy,
+				animateError
+			);
+		}
+
+		// Полная форма проверяется только при попытке запуска колеса.
 		function validate() {
-			let isValid = true;
+			if (config.devModeActive) return true;
 
-			if (!config.devModeActive) {
-				if (config.nameFieldActive && !inputName.value.trim().length) {
-					shakeInput(inputName);
-					isValid = false;
-				}
+			const nameIsValid = validateName();
+			const phoneIsValid = validatePhone();
+			const emailIsValid = validateEmail();
+			const policyIsValid = validatePolicy();
 
-				if (
-					config.phoneFieldActive &&
-					(!phoneController || !phoneController.isValid())
-				) {
-					shakeInput(inputPhone);
-					isValid = false;
-				}
-
-				if (
-					config.emailFieldActive &&
-					!EMAIL_REGEXP.test(inputEmail.value)
-				) {
-					shakeInput(inputEmail);
-					isValid = false;
-				}
-
-				if (config.checkboxPolicyActive && !inputCheckboxPolicy.checked) {
-					shakeInput(policy);
-					isValid = false;
-				}
-			}
-
-			return isValid;
+			return nameIsValid && phoneIsValid && emailIsValid && policyIsValid;
 		}
 
 		// Потеря фокуса c инпута с именем
@@ -1483,12 +1580,16 @@
 				return;
 			}
 
-			validate();
+			validateName();
 		}
 
 		// Потеря фокуса c инпута с номером телефона
 		function handleBlurInputPhone() {
-			validate();
+			if (!inputPhone.value.length) {
+				return;
+			}
+
+			validatePhone();
 		}
 
 		// Потеря фокуса c инпута с email
@@ -1497,7 +1598,7 @@
 				return;
 			}
 
-			validate();
+			validateEmail();
 		}
 		/************************/
 
@@ -1524,6 +1625,12 @@
 				return;
 			}
 
+			title.textContent = getDisplayText(config.title);
+			subtitle.textContent = getDisplayText(config.subtitle);
+			spinLabel.textContent = getDisplayText(
+				config.startBtnText,
+				'Крутить!'
+			);
 			startBtn.disabled = true;
 			startBtn.style.opacity = '0.6';
 			startBtn.style.cursor = 'not-allowed';
@@ -1541,18 +1648,34 @@
 				bonus: lastWin?.fullLabel
 			};
 
+			let response;
 			try {
-				await fetch(
-					`${API_BASE}/widget/${config._token}/lead`,
+				response = await fetch(
+					`${API_BASE}/widget/${encodeURIComponent(config._token)}/lead`,
 					getWidgetFetchOptions({
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify(payload)
 					})
 				);
-				firePixelEvent('ip3_send');
 			} catch (e) {
 				console.error('[winwidget] Failed to send lead:', e);
+				throw new Error(
+					'Проверьте интернет-соединение и попробуйте ещё раз.'
+				);
+			}
+
+			if (!response.ok) {
+				let data = null;
+				try {
+					data = await response.json();
+				} catch (e) {}
+				const message = Array.isArray(data?.message)
+					? data.message.join('. ')
+					: typeof data?.message === 'string'
+						? data.message
+						: 'Попробуйте ещё раз через несколько секунд.';
+				throw new Error(message);
 			}
 		}
 		/************************/
@@ -1771,10 +1894,26 @@
 				}
 				const controlWrapper = shadow.querySelector('#control-wrapper');
 				if (controlWrapper) {
-					controlWrapper.innerHTML = `
-					<h1 id='title-widget' style='text-align:center;overflow-wrap:break-word;word-break:break-word'>${config.alreadyPlayedTitle}</h1>
-					<p id='subtitle-widget' style='text-align:center;margin-top:8px'>${config.alreadyPlayedSubtitle}</p>
-				`;
+					const alreadyPlayedTitle = document.createElement('h1');
+					alreadyPlayedTitle.id = 'title-widget';
+					alreadyPlayedTitle.style.cssText =
+						'text-align:center;overflow-wrap:break-word;word-break:break-word';
+					alreadyPlayedTitle.textContent = getDisplayText(
+						config.alreadyPlayedTitle
+					);
+
+					const alreadyPlayedSubtitle = document.createElement('p');
+					alreadyPlayedSubtitle.id = 'subtitle-widget';
+					alreadyPlayedSubtitle.style.cssText =
+						'text-align:center;margin-top:8px';
+					alreadyPlayedSubtitle.textContent = getDisplayText(
+						config.alreadyPlayedSubtitle
+					);
+
+					controlWrapper.replaceChildren(
+						alreadyPlayedTitle,
+						alreadyPlayedSubtitle
+					);
 				}
 			}
 		} catch (e) {}
@@ -1785,7 +1924,7 @@
 
 		// Apply button position and pulse from config
 		_giftPulseEnabled = config.buttonPulse !== false;
-		var sz = config.buttonSize ?? 60;
+		var sz = getClampedNumber(config.buttonSize, 60, 40, 96);
 		var iconEl = giftBtn.querySelector('#ww-btn-icon');
 		if (iconEl) {
 			iconEl.style.width = sz + 'px';
@@ -1794,8 +1933,10 @@
 				iconEl.onerror = null;
 				iconEl.src = getWidgetAssetUrl('gift-button.png');
 			};
-			iconEl.src =
-				config.buttonImageUrl || getWidgetAssetUrl('gift-button.png');
+			iconEl.src = getSafeHttpUrl(
+				config.buttonImageUrl,
+				getWidgetAssetUrl('gift-button.png')
+			);
 		}
 		updateBubbleSide(config.buttonSide || 'right');
 		var bubbleText = document.getElementById('ww-bubble-text');
@@ -1806,13 +1947,15 @@
 		if (bubbleEl && config.bubbleEnabled === false) {
 			bubbleEl.style.display = 'none';
 		}
-		giftBtn.style.bottom = `${config.buttonBottom ?? 3}%`;
+		const buttonBottom = getClampedNumber(config.buttonBottom, 3, 0, 50);
+		const buttonOffset = getClampedNumber(config.buttonOffset, 3, 0, 50);
+		giftBtn.style.bottom = `${buttonBottom}%`;
 		if (config.buttonSide === 'left') {
 			giftBtn.style.right = 'auto';
-			giftBtn.style.left = (config.buttonOffset ?? 3) + '%';
+			giftBtn.style.left = buttonOffset + '%';
 		} else {
 			giftBtn.style.left = 'auto';
-			giftBtn.style.right = (config.buttonOffset ?? 3) + '%';
+			giftBtn.style.right = buttonOffset + '%';
 		}
 
 		if (window.winwidgetAutoOpen) {
@@ -1842,23 +1985,29 @@
 
 	/************************ Загрузка конфига с сервера ************************/
 	function mapServerConfig(server, token) {
-		const color = server.color;
-		const arrowColor = server.arrowColor || '#ffcc00';
-		const wheelBorderColor = server.wheelBorderColor || color;
+		const color = getSafeColor(server.color, '#4705fb');
+		const bgColor = getSafeColor(server.bgColor, color);
+		const arrowColor = getSafeColor(server.arrowColor, '#ffcc00');
+		const wheelBorderColor = getSafeColor(server.wheelBorderColor, color);
 		const dc = server.dataType;
 
 		const raffleBonus = (server.bonuses || []).filter(b => b.active);
 		const sectors =
 			raffleBonus.length > 0
 				? raffleBonus.map((b, i) => {
-						const sectorColor =
-							b.color || (i % 2 === 0 ? color : '#ffffff');
+						const sectorColor = getSafeColor(
+							b.color,
+							i % 2 === 0 ? color : '#ffffff'
+						);
 						return {
 							label: b.wheelLabel || '',
 							fullLabel: b.name,
 							probability: b.neverWin ? 0 : (b.probability ?? 1),
 							color: sectorColor,
-							textColor: b.textColor || getReadableTextColor(sectorColor),
+							textColor: getSafeColor(
+								b.textColor,
+								getReadableTextColor(sectorColor)
+							),
 							fontSize: '14'
 						};
 					})
@@ -1885,11 +2034,16 @@
 			...server,
 			_token: token,
 			widgetColor: color,
-			bgColor: server.bgColor || color,
+			bgColor,
+			buttonColor: getSafeColor(server.buttonColor, ''),
+			textColor: getSafeColor(
+				server.textColor,
+				getReadableTextColor(bgColor)
+			),
+			centerColor: getSafeColor(server.centerColor, '#ffffff'),
+			arrowColor,
 			glassEffect: server.glassEffect === true,
 			sectors,
-			centerSVG: null,
-			arrowSVG: `<polygon points="0,12 18,5 18,19" fill="${arrowColor}" filter="url(#arrow-shadow)"/><defs><filter id="arrow-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="rgba(0,0,0,0.5)"/></filter></defs>`,
 			borderColor: wheelBorderColor,
 			borderWidth: 8,
 			phoneFieldActive: dc === 'PHONE' || dc === 'PHONE_AND_EMAIL',
@@ -1898,8 +2052,9 @@
 			checkboxPolicyActive: true,
 			startBtnText: server.buttonText || 'Крутить!',
 			linkConsentText:
-				server.privacyUrl ||
+				getSafeHttpUrl(server.privacyUrl) ||
 				'https://winwidget.ru/legal-documentation/consent-processing',
+			buttonImageUrl: getSafeHttpUrl(server.buttonImageUrl),
 			winningAdviceActive: !!server.winMessage,
 			winningAdviceText: server.winMessage || '',
 			developInfoActive: server.developInfoActive !== false,
@@ -1946,7 +2101,7 @@
 			const [, res] = await Promise.all([
 				ensurePhoneHelper(),
 				fetch(
-					`${API_BASE}/widget/${token}/config`,
+					`${API_BASE}/widget/${encodeURIComponent(token)}/config`,
 					getWidgetFetchOptions()
 				)
 			]);

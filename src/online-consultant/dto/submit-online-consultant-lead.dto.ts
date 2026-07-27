@@ -1,16 +1,14 @@
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class SubmitOnlineConsultantLeadDto {
-	@IsString()
-	key: string;
-
 	@IsOptional()
 	@IsString()
-	@MaxLength(200)
+	@MaxLength(30)
 	phone?: string;
 
 	@IsOptional()
 	@IsString()
+	@IsEmail({}, { message: 'Укажите корректный email' })
 	@MaxLength(200)
 	email?: string;
 

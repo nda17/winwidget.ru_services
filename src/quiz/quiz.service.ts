@@ -131,6 +131,16 @@ const toNumberValue = (value: unknown, fallback: number): number => {
 	return Number.isFinite(numeric) ? numeric : fallback;
 };
 
+const normalizeHexColor = (
+	value: unknown,
+	fallback: string,
+	allowEmpty = false
+): string => {
+	const color = typeof value === 'string' ? value.trim() : '';
+	if (allowEmpty && !color) return '';
+	return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+};
+
 const clampNumber = (
 	value: unknown,
 	min: number,
@@ -177,6 +187,10 @@ const normalizeQuizConfig = (rawConfig: unknown) => {
 	return {
 		...DEFAULT_CONFIG,
 		...raw,
+		color: normalizeHexColor(raw.color, DEFAULT_CONFIG.color),
+		bgColor: normalizeHexColor(raw.bgColor, '', true),
+		buttonColor: normalizeHexColor(raw.buttonColor, '', true),
+		openButtonColor: normalizeHexColor(raw.openButtonColor, '', true),
 		buttonBottom: clampNumber(
 			raw.buttonBottom,
 			1,

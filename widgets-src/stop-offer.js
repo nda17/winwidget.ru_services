@@ -104,6 +104,23 @@
 		return value == null || value === '' ? fallback : String(value);
 	}
 
+	function getSafeExternalUrl(value, allowContactProtocols) {
+		if (typeof value !== 'string' || !value.trim()) return '';
+		try {
+			var url = new URL(value.trim(), window.location.href);
+			if (url.protocol === 'http:' || url.protocol === 'https:') {
+				return url.href;
+			}
+			if (
+				allowContactProtocols &&
+				(url.protocol === 'tel:' || url.protocol === 'mailto:')
+			) {
+				return url.href;
+			}
+		} catch (e) {}
+		return '';
+	}
+
 	function getConfigUrl() {
 		return (
 			API_BASE +
@@ -354,7 +371,8 @@
 
 	function buildActionLink(fullWidth) {
 		if (cfg.actionButtonEnabled !== true) return null;
-		if (!cfg.actionButtonUrl) return null;
+		var actionUrl = getSafeExternalUrl(cfg.actionButtonUrl, true);
+		if (!actionUrl) return null;
 		var link = el('a', {
 			display: 'inline-flex',
 			alignItems: 'center',
@@ -371,9 +389,14 @@
 			boxSizing: 'border-box',
 			boxShadow: '0 8px 22px rgba(71,5,251,.22)'
 		});
-		link.href = cfg.actionButtonUrl;
-		link.target = '_blank';
-		link.rel = 'noopener noreferrer';
+		link.href = actionUrl;
+		if (
+			actionUrl.indexOf('http:') === 0 ||
+			actionUrl.indexOf('https:') === 0
+		) {
+			link.target = '_blank';
+			link.rel = 'noopener noreferrer';
+		}
 		link.textContent = cfg.actionButtonText || 'Перейти к акции';
 		link.onclick = function () {
 			fireEvent('action');
@@ -536,7 +559,8 @@
 			action.style.minHeight = '34px';
 			form.appendChild(action);
 		}
-		if (cfg.privacyUrl) {
+		var privacyUrl = getSafeExternalUrl(cfg.privacyUrl, false);
+		if (privacyUrl) {
 			var privacy = el('p', {
 				margin: '0',
 				fontSize: '11px',
@@ -544,10 +568,16 @@
 				textAlign: 'center',
 				lineHeight: '1.45'
 			});
-			privacy.innerHTML =
-				'Нажимая кнопку, вы соглашаетесь с <a href="' +
-				cfg.privacyUrl +
-				'" target="_blank" style="color:#999">политикой конфиденциальности</a>';
+			privacy.appendChild(
+				document.createTextNode('Нажимая кнопку, вы соглашаетесь с ')
+			);
+			var privacyLink = document.createElement('a');
+			privacyLink.href = privacyUrl;
+			privacyLink.target = '_blank';
+			privacyLink.rel = 'noopener noreferrer';
+			privacyLink.style.color = '#999';
+			privacyLink.textContent = 'политикой конфиденциальности';
+			privacy.appendChild(privacyLink);
 			form.appendChild(privacy);
 		}
 		var isSubmitting = false;

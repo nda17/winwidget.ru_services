@@ -1,13 +1,14 @@
 import { FileService } from '@/file/file.service';
 import { enqueueLeadIntegrationEvents } from '@/messaging/lead-integration-event';
 import { enqueueEntityLimitReachedEvent } from '@/messaging/limit-reached-event';
+import { CreateOnlineConsultantDto } from '@/online-consultant/dto/create-online-consultant.dto';
+import { SubmitOnlineConsultantLeadDto } from '@/online-consultant/dto/submit-online-consultant-lead.dto';
+import { UpdateOnlineConsultantDto } from '@/online-consultant/dto/update-online-consultant.dto';
 import { PrismaService } from '@/prisma.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
 import { SubscriptionService } from '@/subscription/subscription.service';
-import { CreateOnlineConsultantDto } from '@/online-consultant/dto/create-online-consultant.dto';
-import { SubmitOnlineConsultantLeadDto } from '@/online-consultant/dto/submit-online-consultant-lead.dto';
-import { UpdateOnlineConsultantDto } from '@/online-consultant/dto/update-online-consultant.dto';
+import { normalizePhone } from '@/utils/phone.util';
 import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
@@ -19,6 +20,7 @@ import {
 	NotFoundException
 } from '@nestjs/common';
 import { Plan, SubscriptionStatus } from '@prisma/client';
+import { isEmail } from 'class-validator';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
@@ -568,6 +570,7 @@ export class OnlineConsultantService {
 	}
 
 	async submitLead(
+		publicKey: string,
 		dto: SubmitOnlineConsultantLeadDto,
 		ip?: string,
 		requestDomain: string | null = null,
@@ -575,7 +578,7 @@ export class OnlineConsultantService {
 	) {
 		const onlineConsultant = await this.prisma.onlineConsultant.findUnique(
 			{
-				where: { publicKey: dto.key },
+				where: { publicKey },
 				include: {
 					user: {
 						include: {
@@ -604,7 +607,20 @@ export class OnlineConsultantService {
 		if (dataType === 'NONE') {
 			throw new BadRequestException('Сбор контактов отключён');
 		}
-		this.validateContact(dataType, dto);
+		const normalizedPhone = dto.phone?.trim()
+			? normalizePhone(dto.phone)
+			: undefined;
+		const normalizedEmail = dto.email?.trim().toLowerCase() || undefined;
+		if (
+			normalizedPhone &&
+			!/^[+][1-9][0-9]{7,14}$/.test(normalizedPhone)
+		) {
+			throw new BadRequestException('Укажите корректный телефон');
+		}
+		if (normalizedEmail && !isEmail(normalizedEmail)) {
+			throw new BadRequestException('Укажите корректный email');
+		}
+		this.validateContact(dataType, normalizedPhone, normalizedEmail);
 
 		if (!onlineConsultant.isActive) {
 			throw new ForbiddenException(
@@ -615,10 +631,12 @@ export class OnlineConsultantService {
 		const { lead } = await this.subscriptionService.createLeadWithinLimit(
 			onlineConsultant.userId,
 			async transaction => {
-				if (config?.filterDuplicates && ip) {
+				if (config?.filterDuplicates) {
 					const orConditions: object[] = [];
-					if (dto.phone) orConditions.push({ phone: dto.phone });
-					if (dto.email) orConditions.push({ email: dto.email });
+					if (normalizedPhone)
+						orConditions.push({ phone: normalizedPhone });
+					if (normalizedEmail)
+						orConditions.push({ email: normalizedEmail });
 					if (ip) orConditions.push({ ip });
 
 					const existing =
@@ -638,8 +656,8 @@ export class OnlineConsultantService {
 				const createdLead = await transaction.onlineConsultantLead.create({
 					data: {
 						onlineConsultantId: onlineConsultant.id,
-						phone: dto.phone || null,
-						email: dto.email || null,
+						phone: normalizedPhone || null,
+						email: normalizedEmail || null,
 						actionLabel: dto.actionLabel || '',
 						actionValue: dto.actionValue || '',
 						url: dto.url,
@@ -654,8 +672,8 @@ export class OnlineConsultantService {
 					},
 					lead: {
 						id: createdLead.id,
-						phone: dto.phone,
-						email: dto.email,
+						phone: normalizedPhone,
+						email: normalizedEmail,
 						actionLabel: dto.actionLabel,
 						actionValue: dto.actionValue,
 						url: dto.url,
@@ -684,15 +702,16 @@ export class OnlineConsultantService {
 
 	private validateContact(
 		dataType: string,
-		dto: SubmitOnlineConsultantLeadDto
+		phone?: string,
+		email?: string
 	) {
-		if (dataType === 'PHONE' && !dto.phone) {
+		if (dataType === 'PHONE' && !phone) {
 			throw new BadRequestException('Введите телефон');
 		}
-		if (dataType === 'EMAIL' && !dto.email) {
+		if (dataType === 'EMAIL' && !email) {
 			throw new BadRequestException('Введите email');
 		}
-		if (dataType === 'PHONE_AND_EMAIL' && (!dto.phone || !dto.email)) {
+		if (dataType === 'PHONE_AND_EMAIL' && (!phone || !email)) {
 			throw new BadRequestException('Введите телефон и email');
 		}
 	}

@@ -1,15 +1,14 @@
-import { Controller, Get, Param, Req, Res } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { publicWidgetKeyPipe } from '@/widget/public-widget-key.pipe';
+import { Controller, Get, Param, Res } from '@nestjs/common';
+import { Response } from 'express';
 
 @Controller()
 export class StopOfferPublicController {
 	@Get('page-stop-offer/:key')
 	serveStopOfferPage(
-		@Param('key') key: string,
-		@Req() req: Request,
+		@Param('key', publicWidgetKeyPipe) key: string,
 		@Res() res: Response
 	) {
-		const origin = `${req.protocol}://${req.get('host')}`;
 		res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
 		res.setHeader('X-Frame-Options', 'SAMEORIGIN');
 		res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -25,7 +24,7 @@ export class StopOfferPublicController {
 </head>
 <body>
   <script>window.winstopofferAutoOpen = true;</script>
-  <script src="${origin}/widgets/stop-offer.js" data-key="${key}" async></script>
+  <script src="/widgets/stop-offer.js" data-key="${key}" async></script>
 </body>
 </html>`);
 	}

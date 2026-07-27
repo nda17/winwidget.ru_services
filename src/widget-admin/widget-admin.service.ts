@@ -25,6 +25,8 @@ import { maxLength } from 'class-validator';
 import { Request } from 'express';
 import { isDeepStrictEqual } from 'node:util';
 
+const WIDGET_NAME_MAX_LENGTH = 50;
+
 export enum AdminWidgetType {
 	WHEEL = 'WHEEL',
 	QUIZ = 'QUIZ',
@@ -50,6 +52,11 @@ export interface AdminWidgetEntity {
 	installDomain: string;
 	config: unknown;
 	[key: string]: unknown;
+}
+
+export interface AdminWidgetDeleteResponse {
+	type: AdminWidgetType;
+	id: string;
 }
 
 interface UserWithIdentities {
@@ -112,7 +119,7 @@ export class WidgetAdminService {
 		adminId: string,
 		request?: Request
 	) {
-		this.assertNameLength(type, dto.name);
+		this.assertNameLength(dto.name);
 
 		const { entity: currentEntity, owner } = await this.getEntityAndOwner(
 			type,
@@ -196,6 +203,39 @@ export class WidgetAdminService {
 		return {
 			type,
 			entity: updatedEntity
+		};
+	}
+
+	async deleteWidget(
+		type: AdminWidgetType,
+		widgetId: string,
+		adminId: string,
+		request?: Request
+	): Promise<AdminWidgetDeleteResponse> {
+		const { entity, owner } = await this.getEntityAndOwner(type, widgetId);
+
+		await this.dispatchDelete(type, owner.id, widgetId);
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'WIDGETS',
+			action: 'WIDGET_DELETE',
+			description: `Удалён пользовательский виджет «${entity.name}»`,
+			entityType: 'widget',
+			entityId: widgetId,
+			entityLabel: entity.name,
+			targetUserId: owner.id,
+			metadata: {
+				type,
+				id: widgetId,
+				ownerId: owner.id
+			},
+			request
+		});
+
+		return {
+			type,
+			id: widgetId
 		};
 	}
 
@@ -314,6 +354,42 @@ export class WidgetAdminService {
 		}
 	}
 
+	private async dispatchDelete(
+		type: AdminWidgetType,
+		ownerId: string,
+		widgetId: string
+	): Promise<void> {
+		switch (type) {
+			case AdminWidgetType.WHEEL:
+				await this.widgetService.deleteWidget(ownerId, widgetId);
+				return;
+			case AdminWidgetType.QUIZ:
+				await this.quizService.deleteQuiz(ownerId, widgetId);
+				return;
+			case AdminWidgetType.CALLBACK:
+				await this.callbackService.deleteCallback(ownerId, widgetId);
+				return;
+			case AdminWidgetType.TIMER:
+				await this.countdownTimerService.deleteCountdownTimer(
+					ownerId,
+					widgetId
+				);
+				return;
+			case AdminWidgetType.STOP_OFFER:
+				await this.stopOfferService.deleteStopOffer(ownerId, widgetId);
+				return;
+			case AdminWidgetType.ONLINE_CONSULTANT:
+				await this.onlineConsultantService.deleteOnlineConsultant(
+					ownerId,
+					widgetId
+				);
+				return;
+			case AdminWidgetType.CALCULATOR:
+				await this.calculatorService.deleteCalculator(ownerId, widgetId);
+				return;
+		}
+	}
+
 	private dispatchButtonImageUpload(
 		type: Exclude<AdminWidgetType, AdminWidgetType.STOP_OFFER>,
 		ownerId: string,
@@ -356,24 +432,12 @@ export class WidgetAdminService {
 		}
 	}
 
-	private assertNameLength(type: AdminWidgetType, name?: string) {
-		const maxNameLength = this.getNameMaxLength(type);
-
-		if (name !== undefined && !maxLength(name, maxNameLength)) {
+	private assertNameLength(name?: string) {
+		if (name !== undefined && !maxLength(name, WIDGET_NAME_MAX_LENGTH)) {
 			throw new BadRequestException(
-				`name must be shorter than or equal to ${maxNameLength} characters`
+				`name must be shorter than or equal to ${WIDGET_NAME_MAX_LENGTH} characters`
 			);
 		}
-	}
-
-	private getNameMaxLength(type: AdminWidgetType) {
-		return [
-			AdminWidgetType.WHEEL,
-			AdminWidgetType.QUIZ,
-			AdminWidgetType.CALLBACK
-		].includes(type)
-			? 15
-			: 50;
 	}
 
 	private getChangedFields(

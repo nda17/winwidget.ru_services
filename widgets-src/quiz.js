@@ -428,6 +428,28 @@
 			.replace(/>/g, '&gt;');
 	}
 
+	function getSafeExternalUrl(value, allowContactProtocols) {
+		if (typeof value !== 'string' || !value.trim()) return '';
+		try {
+			var url = new URL(value.trim(), window.location.href);
+			if (url.protocol === 'http:' || url.protocol === 'https:') {
+				return url.href;
+			}
+			if (
+				allowContactProtocols &&
+				(url.protocol === 'tel:' || url.protocol === 'mailto:')
+			) {
+				return url.href;
+			}
+		} catch (e) {}
+		return '';
+	}
+
+	function getSafeColor(value, fallback) {
+		const color = String(value || '').trim();
+		return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+	}
+
 	function hexToRgba(hex, alpha) {
 		var h = String(hex || '#7c3aed').replace('#', '');
 		if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
@@ -497,12 +519,13 @@
 		var _devMode = cfg.devModeActive === true;
 
 		// Dynamic color overrides
-		var _accent = cfg.color || '#7c3aed';
-		var _btn = cfg.buttonColor || _accent;
+		var _accent = getSafeColor(cfg.color, '#7c3aed');
+		var _btn = getSafeColor(cfg.buttonColor, _accent);
+		var _background = getSafeColor(cfg.bgColor, '');
 		var dynStyle = document.createElement('style');
 		dynStyle.textContent = [
-			cfg.bgColor
-				? '#wq-card{background:' + cfg.bgColor + '!important}'
+			_background
+				? '#wq-card{background:' + _background + '!important}'
 				: '',
 			'.wq-bar.done{background:' + _accent + '!important}',
 			'.wq-start-btn,.wq-submit-btn,.wq-result-btn{background:' +
@@ -577,7 +600,7 @@
 			quizBtn.style.pointerEvents = 'none';
 			quizBtn.style.transform = 'scale(0.8)';
 			stopBtnAnim();
-			firePixel('quiz_open');
+			firePixel('wq_open');
 		}
 
 		function closeWidget() {
@@ -734,6 +757,7 @@
 
 		function showContact() {
 			var dc = (cfg.dataType || 'PHONE').toUpperCase();
+			var privacyUrl = getSafeExternalUrl(cfg.privacyUrl, false);
 
 			render(
 				[
@@ -752,9 +776,9 @@
 						: '',
 					'<div id="wq-err" style="font-size:13px;color:rgba(239,120,100,1);min-height:18px"></div>',
 					'<button class="wq-submit-btn" id="wq-submit">Получить результат</button>',
-					cfg.privacyUrl
+					privacyUrl
 						? '<div class="wq-privacy">Нажимая кнопку, вы соглашаетесь с <a href="' +
-							esc(cfg.privacyUrl) +
+							esc(privacyUrl) +
 							'" target="_blank" rel="noopener">политикой конфиденциальности</a></div>'
 						: '',
 					'</div>'
@@ -823,9 +847,58 @@
 			} catch (e) {}
 		}
 
+		function showSubmitting() {
+			render(
+				[
+					'<div class="wq-screen active">',
+					'<div class="wq-result-badge">Отправляем</div>',
+					'<div class="wq-result-title">Сохраняем ваши ответы...</div>',
+					'<div class="wq-result-desc">Пожалуйста, не закрывайте виджет.</div>',
+					'</div>'
+				].join('')
+			);
+		}
+
+		function showSubmitError(message, phone, email) {
+			render(
+				[
+					'<div class="wq-screen active">',
+					'<div class="wq-result-badge">Не отправлено</div>',
+					'<div class="wq-result-title">Не удалось сохранить ответы</div>',
+					'<div class="wq-result-desc">' + esc(message) + '</div>',
+					'<button class="wq-submit-btn" id="wq-retry">Повторить отправку</button>',
+					'</div>'
+				].join('')
+			);
+			shadow
+				.getElementById('wq-retry')
+				.addEventListener('click', function () {
+					submitAndShowResult(phone, email);
+				});
+		}
+
+		function getSubmitError(response) {
+			return response
+				.json()
+				.catch(function () {
+					return null;
+				})
+				.then(function (data) {
+					var message =
+						data && Array.isArray(data.message)
+							? data.message.join('. ')
+							: data && typeof data.message === 'string'
+								? data.message
+								: 'Попробуйте ещё раз через несколько секунд.';
+					var error = new Error(message);
+					error.isServerResponse = true;
+					throw error;
+				});
+		}
+
 		function submitAndShowResult(phone, email) {
 			var resultData = scoreAnswers(answers, questions, results);
-			setPlayedCookie();
+			showSubmitting();
 
 			fetch(
 				API_BASE + '/quiz/' + KEY + '/lead',
@@ -840,13 +913,29 @@
 						url: window.location.href
 					})
 				})
-			).catch(function () {});
-
-			firePixel('quiz_lead');
-			showResult(resultData);
+			)
+				.then(function (response) {
+					if (!response.ok) return getSubmitError(response);
+					return response;
+				})
+				.then(function () {
+					setPlayedCookie();
+					firePixel('wq_send');
+					showResult(resultData);
+				})
+				.catch(function (error) {
+					showSubmitError(
+						error && error.isServerResponse && error.message
+							? error.message
+							: 'Проверьте интернет-соединение и попробуйте ещё раз.',
+						phone,
+						email
+					);
+				});
 		}
 
 		function showResult(rd) {
+			var resultButtonUrl = rd && getSafeExternalUrl(rd.buttonUrl, true);
 			render(
 				[
 					'<div class="wq-screen active" id="s-result">',
@@ -869,10 +958,15 @@
 											'</div>'
 										].join('')
 									: '',
-								rd.buttonText && rd.buttonUrl
+								rd.buttonText && resultButtonUrl
 									? '<a class="wq-result-btn" href="' +
-										esc(rd.buttonUrl) +
-										'" target="_blank" rel="noopener noreferrer">' +
+										esc(resultButtonUrl) +
+										'"' +
+										(resultButtonUrl.indexOf('http:') === 0 ||
+										resultButtonUrl.indexOf('https:') === 0
+											? ' target="_blank" rel="noopener noreferrer"'
+											: '') +
+										'>' +
 										esc(rd.buttonText) +
 										'</a>'
 									: ''
@@ -919,7 +1013,7 @@
 			btnIcon.src =
 				cfg.buttonImageUrl || getWidgetAssetUrl('quiz-button.png');
 		}
-		var _openBtnColor = cfg.openButtonColor || _accent;
+		var _openBtnColor = getSafeColor(cfg.openButtonColor, _accent);
 		var iconEl = quizBtn.querySelector('#wq-btn-icon');
 		if (iconEl) {
 			iconEl.style.filter =

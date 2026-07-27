@@ -1,5 +1,6 @@
-import { Controller, Get, Param, Req, Res } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { publicWidgetKeyPipe } from '@/widget/public-widget-key.pipe';
+import { Controller, Get, Param, Res } from '@nestjs/common';
+import { Response } from 'express';
 
 @Controller()
 export class QuizPublicController {
@@ -9,12 +10,9 @@ export class QuizPublicController {
 	 */
 	@Get('page-quiz/:key')
 	serveQuizPage(
-		@Param('key') key: string,
-		@Req() req: Request,
+		@Param('key', publicWidgetKeyPipe) key: string,
 		@Res() res: Response
 	) {
-		const origin = `${req.protocol}://${req.get('host')}`;
-
 		res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
 		res.setHeader('X-Frame-Options', 'SAMEORIGIN');
 
@@ -31,7 +29,7 @@ export class QuizPublicController {
 </head>
 <body>
   <script>window.winquizAutoOpen = true;</script>
-  <script src="${origin}/widgets/quiz.js" data-key="${key}" async></script>
+  <script src="/widgets/quiz.js" data-key="${key}" async></script>
 </body>
 </html>`;
 

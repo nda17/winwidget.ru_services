@@ -10,6 +10,7 @@ import {
 	BadRequestException,
 	Body,
 	Controller,
+	Delete,
 	Get,
 	HttpCode,
 	Param,
@@ -59,6 +60,23 @@ export class WidgetAdminController {
 			type,
 			widgetId,
 			dto,
+			adminId,
+			request
+		);
+	}
+
+	@Delete(':type/:id')
+	@Auth([Role.ADMIN, Role.DEV])
+	@HttpCode(200)
+	deleteWidget(
+		@Param('type', adminWidgetTypePipe) type: AdminWidgetType,
+		@Param('id') widgetId: string,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		return this.widgetAdminService.deleteWidget(
+			type,
+			widgetId,
 			adminId,
 			request
 		);

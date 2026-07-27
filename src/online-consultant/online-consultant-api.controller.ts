@@ -1,4 +1,5 @@
 import { OnlineConsultantService } from '@/online-consultant/online-consultant.service';
+import { SubmitOnlineConsultantLeadDto } from '@/online-consultant/dto/submit-online-consultant-lead.dto';
 import { getClientIp } from '@/utils/ip.util';
 import {
 	getWidgetRequestDomain,
@@ -12,7 +13,9 @@ import {
 	Param,
 	Post,
 	Req,
-	Res
+	Res,
+	UsePipes,
+	ValidationPipe
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 
@@ -41,29 +44,17 @@ export class OnlineConsultantApiController {
 	}
 
 	@Post(':key/lead')
+	@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 	async submitLead(
 		@Param('key') key: string,
-		@Body()
-		body: {
-			phone?: string;
-			email?: string;
-			actionLabel?: string;
-			actionValue?: string;
-			url?: string;
-		},
+		@Body() dto: SubmitOnlineConsultantLeadDto,
 		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
 	) {
 		res.setHeader('Access-Control-Allow-Origin', '*');
 		return this.onlineConsultantService.submitLead(
-			{
-				key,
-				phone: body.phone,
-				email: body.email,
-				actionLabel: body.actionLabel,
-				actionValue: body.actionValue,
-				url: body.url
-			},
+			key,
+			dto,
 			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
 			isWidgetDirectPageRequest(req, 'page-online-consultant', key)

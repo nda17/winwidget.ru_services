@@ -52,6 +52,23 @@
 		return value == null || value === '' ? fallback : String(value);
 	}
 
+	function getSafeExternalUrl(value, allowContactProtocols) {
+		if (typeof value !== 'string' || !value.trim()) return '';
+		try {
+			var url = new URL(value.trim(), window.location.href);
+			if (url.protocol === 'http:' || url.protocol === 'https:') {
+				return url.href;
+			}
+			if (
+				allowContactProtocols &&
+				(url.protocol === 'tel:' || url.protocol === 'mailto:')
+			) {
+				return url.href;
+			}
+		} catch (e) {}
+		return '';
+	}
+
 	function getActions() {
 		var actions =
 			cfg && Array.isArray(cfg.quickActions) ? cfg.quickActions : [];
@@ -108,6 +125,35 @@
 	var isOpen = false;
 	var selectedAction = null;
 	var submitted = false;
+
+	function firePixelEvent(goalName) {
+		if (cfg && cfg.yandexMetrikaId && typeof window.ym === 'function') {
+			try {
+				window.ym(Number(cfg.yandexMetrikaId), 'reachGoal', goalName);
+			} catch (e) {}
+		}
+		if (
+			cfg &&
+			cfg.vkPixelId &&
+			window.VK &&
+			typeof window.VK.Goal === 'function'
+		) {
+			try {
+				window.VK.Goal(goalName);
+			} catch (e) {}
+		}
+		if (
+			cfg &&
+			cfg.roistatEnabled &&
+			window.roistat &&
+			window.roistat.event &&
+			typeof window.roistat.event.send === 'function'
+		) {
+			try {
+				window.roistat.event.send(goalName);
+			} catch (e) {}
+		}
+	}
 
 	var host = document.createElement('div');
 	host.id = 'online-consultant-widget-host';
@@ -229,6 +275,7 @@
 		isOpen = true;
 		overlay.classList.add('woc-overlay-open');
 		renderModal();
+		firePixelEvent('woc_open');
 	}
 
 	function closeModal() {
@@ -250,11 +297,20 @@
 		submitBtn.textContent = safeText(cfg.submitButtonText, 'Отправить');
 		phoneInput.style.display = isPhoneRequired() ? 'block' : 'none';
 		emailInput.style.display = isEmailRequired() ? 'block' : 'none';
-		privacy.innerHTML = cfg.privacyUrl
-			? 'Нажимая кнопку, вы соглашаетесь с <a href="' +
-				String(cfg.privacyUrl).replace(/"/g, '&quot;') +
-				'" target="_blank" rel="noopener noreferrer">обработкой данных</a>.'
-			: '';
+		privacy.textContent = '';
+		var privacyUrl = getSafeExternalUrl(cfg.privacyUrl, false);
+		if (privacyUrl) {
+			privacy.appendChild(
+				document.createTextNode('Нажимая кнопку, вы соглашаетесь с ')
+			);
+			var privacyLink = document.createElement('a');
+			privacyLink.href = privacyUrl;
+			privacyLink.target = '_blank';
+			privacyLink.rel = 'noopener noreferrer';
+			privacyLink.textContent = 'обработкой данных';
+			privacy.appendChild(privacyLink);
+			privacy.appendChild(document.createTextNode('.'));
+		}
 		brand.style.display =
 			cfg.developInfoActive === false || cfg.hideBranding
 				? 'none'
@@ -291,19 +347,26 @@
 	function renderAnswer(action) {
 		if (!action) return;
 		answer.classList.add('woc-answer-show');
-		var html =
-			'<div>' +
-			safeText(action.answer, '').replace(/</g, '&lt;') +
-			'</div>';
-		if (action.buttonUrl && action.buttonText) {
-			html +=
-				'<a class="woc-action-link" href="' +
-				String(action.buttonUrl).replace(/"/g, '&quot;') +
-				'" target="_blank" rel="noopener noreferrer">' +
-				String(action.buttonText).replace(/</g, '&lt;') +
-				'</a>';
+		answer.textContent = '';
+		var answerText = document.createElement('div');
+		answerText.textContent = safeText(action.answer, '');
+		answer.appendChild(answerText);
+
+		var actionUrl = getSafeExternalUrl(action.buttonUrl, true);
+		if (actionUrl && action.buttonText) {
+			var actionLink = document.createElement('a');
+			actionLink.className = 'woc-action-link';
+			actionLink.href = actionUrl;
+			if (
+				actionUrl.indexOf('http:') === 0 ||
+				actionUrl.indexOf('https:') === 0
+			) {
+				actionLink.target = '_blank';
+				actionLink.rel = 'noopener noreferrer';
+			}
+			actionLink.textContent = String(action.buttonText);
+			answer.appendChild(actionLink);
 		}
-		answer.innerHTML = html;
 		if (isContactDisabled()) {
 			form.classList.remove('woc-form-show');
 		} else {
@@ -369,12 +432,24 @@
 			})
 			.then(function () {
 				submitted = true;
+				button.classList.remove('woc-pulse');
+				button.style.display = 'none';
+				button.style.pointerEvents = 'none';
+				firePixelEvent('woc_send');
 				form.classList.remove('woc-form-show');
-				success.innerHTML =
-					'<strong>' +
-					safeText(cfg.successTitle, 'Спасибо! Заявка отправлена') +
-					'</strong><br>' +
-					safeText(cfg.successSubtitle, 'Мы скоро свяжемся с вами');
+				success.textContent = '';
+				var successTitle = document.createElement('strong');
+				successTitle.textContent = safeText(
+					cfg.successTitle,
+					'Спасибо! Заявка отправлена'
+				);
+				success.appendChild(successTitle);
+				success.appendChild(document.createElement('br'));
+				success.appendChild(
+					document.createTextNode(
+						safeText(cfg.successSubtitle, 'Мы скоро свяжемся с вами')
+					)
+				);
 				success.classList.add('woc-success-show');
 			})
 			.catch(function (error) {

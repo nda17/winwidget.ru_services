@@ -1,16 +1,14 @@
-import { Controller, Get, Param, Req, Res } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { publicWidgetKeyPipe } from '@/widget/public-widget-key.pipe';
+import { Controller, Get, Param, Res } from '@nestjs/common';
+import { Response } from 'express';
 
 @Controller()
 export class OnlineConsultantPublicController {
 	@Get('page-online-consultant/:key')
 	serveOnlineConsultantPage(
-		@Param('key') key: string,
-		@Req() req: Request,
+		@Param('key', publicWidgetKeyPipe) key: string,
 		@Res() res: Response
 	) {
-		const origin = `${req.protocol}://${req.get('host')}`;
-
 		res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
 		res.setHeader('X-Frame-Options', 'SAMEORIGIN');
 
@@ -27,7 +25,7 @@ export class OnlineConsultantPublicController {
 </head>
 <body>
   <script>window.winonlineconsultantAutoOpen = true;</script>
-  <script src="${origin}/widgets/online-consultant.js" data-key="${key}" async></script>
+  <script src="/widgets/online-consultant.js" data-key="${key}" async></script>
 </body>
 </html>`;
 

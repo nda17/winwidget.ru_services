@@ -24,6 +24,8 @@ import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
 const CALLBACK_REPEAT_COOLDOWN_MS = 30 * 60 * 1000;
+const CALLBACK_TIME_SLOTS_MAX = 12;
+const CALLBACK_TIME_SLOT_MAX_LENGTH = 60;
 
 const DEFAULT_CONFIG = {
 	color: '#4705fb',
@@ -92,6 +94,46 @@ const toOptionalDelay = (value: unknown): number | null => {
 	return Math.min(86400, numeric);
 };
 
+const normalizeTimeSlots = (value: unknown): string[] => {
+	if (!Array.isArray(value)) return DEFAULT_CONFIG.timeSlots;
+
+	const slots = value
+		.filter((slot): slot is string => typeof slot === 'string')
+		.map(slot => slot.trim())
+		.filter(Boolean);
+
+	return [...new Set(slots)].slice(0, CALLBACK_TIME_SLOTS_MAX);
+};
+
+const assertValidTimeSlots = (value: unknown): void => {
+	if (!Array.isArray(value)) {
+		throw new BadRequestException('Слоты времени должны быть массивом');
+	}
+
+	if (value.length < 1 || value.length > CALLBACK_TIME_SLOTS_MAX) {
+		throw new BadRequestException(
+			`Укажите от 1 до ${CALLBACK_TIME_SLOTS_MAX} слотов времени`
+		);
+	}
+
+	const normalizedSlots = value.map(slot =>
+		typeof slot === 'string' ? slot.trim() : ''
+	);
+	if (
+		normalizedSlots.some(
+			slot => !slot || slot.length > CALLBACK_TIME_SLOT_MAX_LENGTH
+		)
+	) {
+		throw new BadRequestException(
+			`Каждый слот должен содержать от 1 до ${CALLBACK_TIME_SLOT_MAX_LENGTH} символов`
+		);
+	}
+
+	if (new Set(normalizedSlots).size !== normalizedSlots.length) {
+		throw new BadRequestException('Слоты времени не должны повторяться');
+	}
+};
+
 const normalizeCallbackConfig = (rawConfig: unknown) => {
 	const raw = toPlainObject(rawConfig);
 
@@ -117,9 +159,7 @@ const normalizeCallbackConfig = (rawConfig: unknown) => {
 			DEFAULT_CONFIG.buttonSize
 		),
 		autoOpenDelay: toOptionalDelay(raw.autoOpenDelay),
-		timeSlots: Array.isArray(raw.timeSlots)
-			? raw.timeSlots
-			: DEFAULT_CONFIG.timeSlots,
+		timeSlots: normalizeTimeSlots(raw.timeSlots),
 		integrations: {
 			...DEFAULT_CONFIG.integrations,
 			...toPlainObject(raw.integrations)
@@ -172,6 +212,12 @@ export class CallbackService {
 			dto.config !== undefined
 				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
 				: undefined;
+		if (
+			configPatch &&
+			Object.prototype.hasOwnProperty.call(configPatch, 'timeSlots')
+		) {
+			assertValidTimeSlots(configPatch.timeSlots);
+		}
 		const nextConfig =
 			configPatch !== undefined
 				? normalizeCallbackConfig({

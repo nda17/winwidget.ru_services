@@ -123,6 +123,17 @@
 			.replace(/'/g, '&#039;');
 	}
 
+	function getSafeExternalUrl(value) {
+		if (typeof value !== 'string' || !value.trim()) return '';
+		try {
+			var url = new URL(value.trim(), window.location.href);
+			if (url.protocol === 'http:' || url.protocol === 'https:') {
+				return url.href;
+			}
+		} catch (e) {}
+		return '';
+	}
+
 	function toFiniteNumber(value, fallback) {
 		var number = Number(value);
 		return Number.isFinite(number) ? number : fallback;
@@ -765,6 +776,7 @@
 
 	function showContact(showPriceBeforeSubmit) {
 		var dataType = String(cfg.dataType || 'PHONE').toUpperCase();
+		var privacyUrl = getSafeExternalUrl(cfg.privacyUrl);
 		render(
 			[
 				'<div class="wwc-screen">',
@@ -782,9 +794,9 @@
 				'<button class="wwc-btn" id="wwc-submit" type="button">' +
 					esc(cfg.submitButtonText || 'Получить расчёт') +
 					'</button>',
-				cfg.privacyUrl
+				privacyUrl
 					? '<div class="wwc-privacy">Нажимая кнопку, вы соглашаетесь с <a href="' +
-						esc(cfg.privacyUrl) +
+						esc(privacyUrl) +
 						'" target="_blank" rel="noopener">политикой конфиденциальности</a></div>'
 					: '',
 				'</div>'
