@@ -52,6 +52,10 @@ export interface DeadLetterClassificationMetadata {
 	deliveryToken?: string;
 }
 
+export type MessagingOutboxExchange =
+	| typeof EVENTS_EXCHANGE
+	| typeof DEAD_LETTER_EXCHANGE;
+
 @Injectable()
 export class RabbitMqService
 	implements OnModuleInit, OnApplicationShutdown
@@ -148,6 +152,43 @@ export class RabbitMqService
 			messageId
 		});
 		await this.publishConfirmed(EVENTS_EXCHANGE, routingKey, payload, {
+			contentType: 'application/json',
+			contentEncoding: 'utf-8',
+			deliveryMode: 2,
+			mandatory: true,
+			timestamp: Date.now(),
+			...options
+		});
+	}
+
+	async publishOutboxMessage(
+		exchange: MessagingOutboxExchange,
+		routingKey: string,
+		payload: unknown,
+		options: Options.Publish = {}
+	): Promise<void> {
+		if (
+			exchange !== EVENTS_EXCHANGE &&
+			exchange !== DEAD_LETTER_EXCHANGE
+		) {
+			throw new Error(
+				`Unsupported messaging outbox exchange: ${exchange}`
+			);
+		}
+
+		if (exchange === EVENTS_EXCHANGE) {
+			const messageId =
+				typeof options.messageId === 'string' ? options.messageId : '';
+			const eventType =
+				typeof options.type === 'string' ? options.type : '';
+			assertMessagingEventContract(payload, {
+				eventType,
+				routingKey,
+				messageId
+			});
+		}
+
+		await this.publishConfirmed(exchange, routingKey, payload, {
 			contentType: 'application/json',
 			contentEncoding: 'utf-8',
 			deliveryMode: 2,

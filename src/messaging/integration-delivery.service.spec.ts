@@ -37,12 +37,7 @@ const createEvent = (
 
 describe('IntegrationDeliveryService', () => {
 	const createService = () => {
-		const emailService = {
-			sendLeadNotification: jest.fn().mockResolvedValue(undefined),
-			sendPaymentSucceededNotification: jest
-				.fn()
-				.mockResolvedValue(undefined)
-		} as unknown as EmailService;
+		const emailService = {} as EmailService;
 		const safeOutboundHttpService = {
 			postJson: jest.fn().mockResolvedValue(undefined),
 			getAmoCrmApiUrl: jest.fn()
@@ -52,6 +47,9 @@ describe('IntegrationDeliveryService', () => {
 				findUnique: jest.fn()
 			}
 		} as unknown as PrismaService;
+		const telegram = {
+			sendMessage: jest.fn().mockResolvedValue(undefined)
+		} as unknown as TelegramInfoTransportService;
 
 		return {
 			service: new IntegrationDeliveryService(
@@ -69,12 +67,11 @@ describe('IntegrationDeliveryService', () => {
 						}
 					}))
 				} as unknown as LeadIntegrationDestinationService,
-				{
-					sendMessage: jest.fn().mockResolvedValue(undefined)
-				} as unknown as TelegramInfoTransportService
+				telegram
 			),
 			safeOutboundHttpService,
-			emailService
+			prisma,
+			telegram
 		};
 	};
 
@@ -98,11 +95,17 @@ describe('IntegrationDeliveryService', () => {
 		);
 	});
 
-	it('sends a payment email from the payment consumer', async () => {
-		const { service, emailService } = createService();
+	it('keeps the payment Telegram consumer in the monolith worker', async () => {
+		const { service, prisma, telegram } = createService();
+		(prisma.telegramBotSettings.findUnique as jest.Mock).mockResolvedValue(
+			{
+				dailySummaryChatId: '-100123',
+				paymentsThreadId: 42
+			}
+		);
 
 		await service.deliver(
-			'payment-email',
+			'payment-telegram',
 			{
 				schemaVersion: 1,
 				eventType: 'payment.succeeded.v1',
@@ -127,16 +130,13 @@ describe('IntegrationDeliveryService', () => {
 			'event-1'
 		);
 
-		expect(
-			emailService.sendPaymentSucceededNotification
-		).toHaveBeenCalledWith(
-			'user@example.com',
-			expect.objectContaining({
-				amount: '990.00',
-				planLabel: 'Easy',
-				billingPeriodLabel: 'месяц'
-			}),
-			'event-1'
+		expect(telegram.sendMessage).toHaveBeenCalledWith(
+			'-100123',
+			expect.stringContaining('<b>Новый успешный платёж</b>'),
+			{
+				messageThreadId: 42,
+				parseMode: 'HTML'
+			}
 		);
 	});
 
@@ -144,9 +144,9 @@ describe('IntegrationDeliveryService', () => {
 		const { service } = createService();
 
 		await expect(
-			service.deliver('email', createEvent(), 'event-1')
+			service.deliver('bitrix24', createEvent(), 'event-1')
 		).rejects.toThrow(
-			'Integration mismatch: queue=email, payload=webhook'
+			'Integration mismatch: queue=bitrix24, payload=webhook'
 		);
 	});
 });
@@ -196,8 +196,7 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			}
 		};
 		const emailService = {
-			sendAdminBroadcast: jest.fn().mockResolvedValue(undefined),
-			sendLimitReachedNotification: jest.fn().mockResolvedValue(undefined)
+			sendAdminBroadcast: jest.fn().mockResolvedValue(undefined)
 		} as unknown as EmailService;
 		const transaction = {
 			mailingDelivery: {
@@ -315,63 +314,6 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			expect.any(String),
 			{ parseMode: 'HTML' }
 		);
-	});
-
-	it('sends one limit email per current delivery event', async () => {
-		const { service, emailService } = createService();
-
-		await service.deliver(
-			'limit-email',
-			{
-				schemaVersion: 2,
-				eventType: 'lead.limit.reached.email.v2',
-				entity: {
-					id: 'widget-1',
-					name: 'Колесо',
-					type: 'WIDGET'
-				},
-				limit: 10,
-				destination: {
-					email: 'owner@example.com'
-				}
-			},
-			eventId
-		);
-
-		expect(emailService.sendLimitReachedNotification).toHaveBeenCalledWith(
-			'owner@example.com',
-			'Колесо',
-			10,
-			{ messageId: `<${eventId}.limit@winwidget.ru>` }
-		);
-	});
-
-	it('rejects the retired limit-reached v1 payload', async () => {
-		const { service, emailService } = createService();
-
-		await expect(
-			service.deliver(
-				'limit-email',
-				{
-					schemaVersion: 1,
-					eventType: 'lead.limit.reached.v1',
-					entity: {
-						id: 'widget-1',
-						name: 'Колесо',
-						type: 'WIDGET'
-					},
-					limit: 10,
-					destinations: {
-						emails: ['owner@example.com'],
-						telegramChatId: null
-					}
-				} as never,
-				eventId
-			)
-		).rejects.toThrow('Invalid limit reached event payload');
-		expect(
-			emailService.sendLimitReachedNotification
-		).not.toHaveBeenCalled();
 	});
 
 	it('persists each successful Telegram chunk before sending the next one', async () => {

@@ -1,25 +1,10 @@
 import VerificationEmail from '@email/confirmation.email';
 import AdminBroadcastEmail from '@email/admin-broadcast.email';
-import LeadNotificationEmail from '@email/lead-notification.email';
-import LimitReachedEmail from '@email/limit-reached.email';
-import PaymentSucceededEmail from '@email/payment-succeeded.email';
 import NewPasswordEmail from '@email/restore-password.email';
 import SubscriptionExpiryReminderEmail from '@email/subscription-expiry-reminder.email';
 import { MailerService } from '@nestjs-modules/mailer';
 import { Injectable } from '@nestjs/common';
 import { render } from '@react-email/render';
-
-interface LeadNotificationPayload {
-	widgetName: string;
-	phone?: string;
-	email?: string;
-	name?: string;
-	bonus?: string;
-	detailLabel?: string;
-	detailValue?: string;
-	url?: string;
-	date: Date;
-}
 
 interface AdminBroadcastPayload {
 	subject: string;
@@ -30,13 +15,6 @@ interface SubscriptionExpiryReminderPayload {
 	daysBeforeExpiry: number;
 	planLabel: string;
 	expiresAtLabel: string;
-}
-
-interface PaymentSucceededEmailPayload {
-	amount: string;
-	planLabel: string;
-	billingPeriodLabel: string;
-	expiresAtLabel: string | null;
 }
 
 @Injectable()
@@ -100,71 +78,6 @@ export class EmailService {
 				: `Подписка WinWidget закончится через ${this.getDaysLabel(data.daysBeforeExpiry)}`;
 
 		return this.sendEmail(to, subject, html, options);
-	}
-
-	sendLeadNotification(
-		to: string,
-		data: LeadNotificationPayload,
-		options: { messageId?: string } = {}
-	) {
-		const dateLabel = data.date.toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
-		const html = render(
-			LeadNotificationEmail({
-				widgetName: data.widgetName,
-				phone: data.phone,
-				email: data.email,
-				name: data.name,
-				bonus: data.bonus,
-				detailLabel: data.detailLabel,
-				detailValue: data.detailValue,
-				url: data.url,
-				dateLabel
-			})
-		);
-
-		return this.sendEmail(
-			to,
-			`Новая заявка с виджета "${data.widgetName}"`,
-			html,
-			options
-		);
-	}
-
-	sendPaymentSucceededNotification(
-		to: string,
-		data: PaymentSucceededEmailPayload,
-		eventId: string
-	) {
-		const html = render(PaymentSucceededEmail(data));
-		return this.sendEmail(
-			to,
-			'Оплата WinWidget успешно подтверждена',
-			html,
-			{ messageId: `<${eventId}.payment@winwidget.ru>` }
-		);
-	}
-
-	sendLimitReachedNotification(
-		to: string,
-		widgetName: string,
-		limit: number,
-		options: { messageId?: string } = {}
-	) {
-		const html = render(
-			LimitReachedEmail({
-				widgetName,
-				limit
-			})
-		);
-
-		return this.sendEmail(
-			to,
-			`⚠️ Лимит заявок исчерпан — виджет «${widgetName}»`,
-			html,
-			options
-		);
 	}
 
 	private getDaysLabel(days: number) {

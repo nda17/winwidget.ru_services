@@ -1,8 +1,14 @@
 import {
+	MONOLITH_INTEGRATION_KINDS,
 	MESSAGING_KINDS,
-	MESSAGING_QUEUE_NAMES
+	MESSAGING_QUEUE_NAMES,
+	NOTIFICATION_DELIVERY_KINDS
 } from '@/messaging/messaging.constants';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
+import {
+	NotificationDeliveryClientService,
+	NotificationDeliveryOverview
+} from '@/messaging/notification-delivery-client.service';
 import {
 	RabbitMqManagementService,
 	RabbitQueueInfo
@@ -47,7 +53,8 @@ export class MessagingOperationalAlertService
 		private readonly prisma: PrismaService,
 		private readonly telegramBot: TelegramBotService,
 		private readonly configService: ConfigService,
-		private readonly rabbitManagement: RabbitMqManagementService
+		private readonly rabbitManagement: RabbitMqManagementService,
+		private readonly notificationDelivery: NotificationDeliveryClientService
 	) {}
 
 	onModuleInit(): void {
@@ -79,7 +86,8 @@ export class MessagingOperationalAlertService
 				staleScheduledJobs,
 				heartbeats,
 				queueResult,
-				brokerResult
+				brokerResult,
+				notificationDeliveryResult
 			] = await Promise.all([
 				this.prisma.outboxEvent.count({
 					where: { status: OutboxEventStatus.FAILED }
@@ -101,11 +109,21 @@ export class MessagingOperationalAlertService
 					}
 				}),
 				this.prisma.integrationDeliveryFailure.count({
-					where: { resolvedAt: null }
+					where: {
+						resolvedAt: null,
+						integration: {
+							notIn: [...NOTIFICATION_DELIVERY_KINDS]
+						}
+					}
 				}),
 				this.prisma.integrationDeliveryFailure.groupBy({
 					by: ['category', 'normalizedCode'],
-					where: { resolvedAt: null },
+					where: {
+						resolvedAt: null,
+						integration: {
+							notIn: [...NOTIFICATION_DELIVERY_KINDS]
+						}
+					},
 					_count: { _all: true }
 				}),
 				this.prisma.scheduledJobRun.count({
@@ -157,6 +175,19 @@ export class MessagingOperationalAlertService
 							error instanceof Error
 								? error.message
 								: 'Состояние RabbitMQ недоступно'
+					})),
+				this.notificationDelivery
+					.getOverview()
+					.then(overview => ({
+						overview,
+						error: null as string | null
+					}))
+					.catch(error => ({
+						overview: null,
+						error:
+							error instanceof Error
+								? error.message
+								: 'Notification Delivery недоступен'
 					}))
 			]);
 
@@ -168,6 +199,12 @@ export class MessagingOperationalAlertService
 						: item.category;
 				categoryCounts[key] =
 					(categoryCounts[key] || 0) + item._count._all;
+			}
+			for (const [category, count] of Object.entries(
+				notificationDeliveryResult.overview?.operational
+					.unresolvedFailuresByCategory || {}
+			) as Array<[string, number]>) {
+				categoryCounts[category] = (categoryCounts[category] || 0) + count;
 			}
 
 			const requiredQueues = MESSAGING_KINDS.flatMap(kind => {
@@ -200,6 +237,20 @@ export class MessagingOperationalAlertService
 				(total, queue) => total + queue.messages,
 				0
 			);
+			const getQueueMessages = (
+				kinds: readonly (keyof typeof MESSAGING_QUEUE_NAMES)[]
+			) =>
+				messagingQueues
+					.filter(queue =>
+						kinds.some(kind => {
+							const mainQueue = MESSAGING_QUEUE_NAMES[kind];
+							return (
+								queue.name === mainQueue ||
+								queue.name.startsWith(`${mainQueue}.`)
+							);
+						})
+					)
+					.reduce((total, queue) => total + queue.messages, 0);
 
 			const serviceStates = Object.fromEntries(
 				REQUIRED_SERVICES.map(service => {
@@ -236,12 +287,15 @@ export class MessagingOperationalAlertService
 				(!serviceStates['outbox-publisher'].publishAt ||
 					serviceStates['outbox-publisher'].publishAt <
 						activityStaleBefore);
-			const integrationQueueMessages = messagingQueues
-				.filter(queue => !queue.name.startsWith('winwidget.maintenance.'))
-				.reduce((total, queue) => total + queue.messages, 0);
-			const maintenanceQueueMessages = messagingQueues
-				.filter(queue => queue.name.startsWith('winwidget.maintenance.'))
-				.reduce((total, queue) => total + queue.messages, 0);
+			const integrationQueueMessages = getQueueMessages(
+				MONOLITH_INTEGRATION_KINDS
+			);
+			const notificationDeliveryQueueMessages = getQueueMessages(
+				NOTIFICATION_DELIVERY_KINDS
+			);
+			const maintenanceQueueMessages = getQueueMessages([
+				'database-backup'
+			]);
 			const integrationConsumeStale =
 				integrationQueueMessages > 0 &&
 				(!serviceStates['integration-worker'].consumeAt ||
@@ -252,6 +306,31 @@ export class MessagingOperationalAlertService
 				(!serviceStates['maintenance-worker'].consumeAt ||
 					serviceStates['maintenance-worker'].consumeAt <
 						activityStaleBefore);
+			const deliveryOverview: NotificationDeliveryOverview | null =
+				notificationDeliveryResult.overview;
+			const deliveryHeartbeatFresh =
+				deliveryOverview?.heartbeat.status === 'ok';
+			const deliveryPublishAt = this.parseDate(
+				deliveryOverview?.heartbeat.lastSuccessfulPublishAt || undefined
+			);
+			const deliveryConsumeAt = this.parseDate(
+				deliveryOverview?.heartbeat.lastSuccessfulConsumeAt || undefined
+			);
+			const deliveryPublishStale =
+				(deliveryOverview?.operational.dueOutbox || 0) > 0 &&
+				(!deliveryPublishAt || deliveryPublishAt < activityStaleBefore);
+			const deliveryConsumeStale =
+				notificationDeliveryQueueMessages > 0 &&
+				(!deliveryConsumeAt || deliveryConsumeAt < activityStaleBefore);
+			const combinedFailedOutbox =
+				failedOutbox + (deliveryOverview?.outbox.FAILED || 0);
+			const combinedStaleOutbox =
+				stalePendingOutbox +
+				(deliveryOverview?.operational.staleOutbox || 0);
+			const combinedDueOutbox =
+				dueOutbox + (deliveryOverview?.operational.dueOutbox || 0);
+			const combinedUnresolvedFailures =
+				unresolvedDlq + (deliveryOverview?.unresolvedFailures || 0);
 
 			const brokerProblems = [
 				...(brokerResult.error
@@ -273,9 +352,13 @@ export class MessagingOperationalAlertService
 				service => !serviceStates[service].heartbeatFresh
 			);
 			const problems = [
-				failedOutbox ? `outbox-failed=${failedOutbox}` : '',
-				stalePendingOutbox ? `outbox-stale=${stalePendingOutbox}` : '',
-				unresolvedDlq ? `dlq=${unresolvedDlq}` : '',
+				combinedFailedOutbox
+					? `outbox-failed=${combinedFailedOutbox}`
+					: '',
+				combinedStaleOutbox ? `outbox-stale=${combinedStaleOutbox}` : '',
+				combinedUnresolvedFailures
+					? `dlq=${combinedUnresolvedFailures}`
+					: '',
 				failedScheduledJobs ? `jobs-failed=${failedScheduledJobs}` : '',
 				staleScheduledJobs ? `jobs-stale=${staleScheduledJobs}` : '',
 				...heartbeatProblems.map(service => `heartbeat=${service}`),
@@ -283,6 +366,20 @@ export class MessagingOperationalAlertService
 				...(publisherPublishStale ? ['publisher-publish=stale'] : []),
 				...(integrationConsumeStale ? ['integration-consume=stale'] : []),
 				...(maintenanceConsumeStale ? ['maintenance-consume=stale'] : []),
+				...(notificationDeliveryResult.error
+					? [
+							`notification-delivery-api=${notificationDeliveryResult.error}`
+						]
+					: []),
+				...(!notificationDeliveryResult.error && !deliveryHeartbeatFresh
+					? ['heartbeat=notification-delivery-worker']
+					: []),
+				...(deliveryPublishStale
+					? ['notification-delivery-publish=stale']
+					: []),
+				...(deliveryConsumeStale
+					? ['notification-delivery-consume=stale']
+					: []),
 				...(queueResult.error ? [`queues=${queueResult.error}`] : []),
 				...missingQueues.map(queue => `missing=${queue}`),
 				...consumerlessQueues.map(queue => `consumers=0:${queue}`),
@@ -294,9 +391,10 @@ export class MessagingOperationalAlertService
 
 			const problemMessage = [
 				'<b>Проблема в очередях интеграций</b>',
-				`Outbox FAILED: <b>${failedOutbox}</b>`,
-				`Outbox PENDING/PUBLISHING старше 15 минут: <b>${stalePendingOutbox}</b>`,
-				`DLQ не обработано: <b>${unresolvedDlq}</b>`,
+				`Outbox FAILED: <b>${combinedFailedOutbox}</b>`,
+				`Outbox PENDING/PUBLISHING старше 15 минут: <b>${combinedStaleOutbox}</b>`,
+				`Outbox готов к публикации: <b>${combinedDueOutbox}</b>`,
+				`DLQ не обработано: <b>${combinedUnresolvedFailures}</b>`,
 				`— временные: <b>${categoryCounts.TRANSIENT || 0}</b>`,
 				`— rate limit: <b>${categoryCounts.RATE_LIMIT || 0}</b>`,
 				`— постоянные: <b>${categoryCounts.PERMANENT || 0}</b>`,
@@ -328,7 +426,15 @@ export class MessagingOperationalAlertService
 				`Maintenance worker: <b>${this.describeService(
 					serviceStates['maintenance-worker'].heartbeatFresh,
 					maintenanceConsumeStale
-				)}</b>`
+				)}</b>`,
+				`Notification Delivery: <b>${
+					notificationDeliveryResult.error
+						? `internal API недоступен: ${notificationDeliveryResult.error}`
+						: this.describeService(
+								deliveryHeartbeatFresh,
+								deliveryPublishStale || deliveryConsumeStale
+							)
+				}</b>`
 			].join('\n');
 			await this.sendAlertIfChanged(
 				signature,

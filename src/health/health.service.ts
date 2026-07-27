@@ -1,7 +1,12 @@
 import {
 	MESSAGING_KINDS,
-	MESSAGING_QUEUE_NAMES
+	MESSAGING_QUEUE_NAMES,
+	NOTIFICATION_DELIVERY_KINDS
 } from '@/messaging/messaging.constants';
+import {
+	NotificationDeliveryClientService,
+	NotificationDeliveryOverview
+} from '@/messaging/notification-delivery-client.service';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
 import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
@@ -19,19 +24,28 @@ type HealthCheck = {
 	latencyMs?: number;
 };
 
+type NotificationDeliveryResult = {
+	overview: NotificationDeliveryOverview | null;
+	error: string | null;
+};
+
 @Injectable()
 export class HealthService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
-		private readonly rabbitManagement: RabbitMqManagementService
+		private readonly rabbitManagement: RabbitMqManagementService,
+		private readonly notificationDelivery: NotificationDeliveryClientService
 	) {}
 
 	async getAdminHealth() {
+		const notificationDeliveryResult =
+			this.getNotificationDeliveryResult();
 		const checks = await Promise.all([
 			this.checkBackend(),
 			this.checkDatabase(),
 			this.checkRabbitMq(),
+			this.checkNotificationDelivery(notificationDeliveryResult),
 			this.checkMessagingHeartbeat('outbox-publisher', 'Outbox publisher'),
 			this.checkMessagingHeartbeat(
 				'integration-worker',
@@ -41,7 +55,7 @@ export class HealthService {
 				'maintenance-worker',
 				'Maintenance worker'
 			),
-			this.checkMessagingBacklog(),
+			this.checkMessagingBacklog(notificationDeliveryResult),
 			this.checkScheduledJobs(),
 			this.checkS3(),
 			this.checkSmtp(),
@@ -173,33 +187,147 @@ export class HealthService {
 		};
 	}
 
-	private async checkMessagingBacklog(): Promise<HealthCheck> {
-		const [failedOutbox, unresolvedFailures, oldestPending] =
-			await Promise.all([
-				this.prisma.outboxEvent.count({ where: { status: 'FAILED' } }),
-				this.prisma.integrationDeliveryFailure.count({
-					where: { resolvedAt: null }
-				}),
-				this.prisma.outboxEvent.findFirst({
-					where: { status: { in: ['PENDING', 'PUBLISHING'] } },
-					orderBy: { createdAt: 'asc' },
-					select: { createdAt: true }
-				})
-			]);
-		const oldestAgeSeconds = oldestPending
-			? Math.round((Date.now() - oldestPending.createdAt.getTime()) / 1000)
+	private async checkNotificationDelivery(
+		resultPromise: Promise<NotificationDeliveryResult>
+	): Promise<HealthCheck> {
+		const startedAt = Date.now();
+		const result = await resultPromise;
+		if (!result.overview || result.error) {
+			return {
+				id: 'notification_delivery',
+				title: 'Notification Delivery',
+				status: 'down',
+				message: result.error || 'Internal API вернул пустой ответ',
+				latencyMs: Date.now() - startedAt
+			};
+		}
+
+		const heartbeatAt = this.parseDate(
+			result.overview.heartbeat.lastSeenAt
+		);
+		const heartbeatAgeMs = heartbeatAt
+			? Date.now() - heartbeatAt.getTime()
+			: null;
+		const heartbeatFresh =
+			result.overview.heartbeat.status === 'ok' &&
+			heartbeatAgeMs !== null &&
+			heartbeatAgeMs <= 30_000;
+		const publishAt = this.parseDate(
+			result.overview.heartbeat.lastSuccessfulPublishAt
+		);
+		const publishStale =
+			result.overview.operational.dueOutbox > 0 &&
+			(!publishAt ||
+				Date.now() - publishAt.getTime() > this.getActivityStaleMs());
+		const status: HealthStatus = !heartbeatFresh
+			? 'down'
+			: publishStale
+				? 'warning'
+				: 'ok';
+		const heartbeatDescription =
+			heartbeatAgeMs === null
+				? 'heartbeat отсутствует'
+				: `heartbeat ${Math.max(0, Math.round(heartbeatAgeMs / 1000))} сек. назад`;
+		const activityDescription = publishStale
+			? `publisher activity зависла при ${result.overview.operational.dueOutbox} готовых событиях`
+			: `активных instances: ${result.overview.heartbeat.activeInstances}`;
+
+		return {
+			id: 'notification_delivery',
+			title: 'Notification Delivery',
+			status,
+			message: `${heartbeatDescription}; ${activityDescription}`,
+			latencyMs: Date.now() - startedAt
+		};
+	}
+
+	private async checkMessagingBacklog(
+		resultPromise: Promise<NotificationDeliveryResult>
+	): Promise<HealthCheck> {
+		const [
+			failedOutbox,
+			unresolvedFailures,
+			oldestPending,
+			notificationDelivery
+		] = await Promise.all([
+			this.prisma.outboxEvent.count({ where: { status: 'FAILED' } }),
+			this.prisma.integrationDeliveryFailure.count({
+				where: {
+					resolvedAt: null,
+					integration: {
+						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+					}
+				}
+			}),
+			this.prisma.outboxEvent.findFirst({
+				where: { status: { in: ['PENDING', 'PUBLISHING'] } },
+				orderBy: { createdAt: 'asc' },
+				select: { createdAt: true }
+			}),
+			resultPromise
+		]);
+		const oldestPendingAt = [
+			oldestPending?.createdAt || null,
+			this.parseDate(
+				notificationDelivery.overview?.oldestPendingAt || null
+			)
+		]
+			.filter((value): value is Date => Boolean(value))
+			.sort((left, right) => left.getTime() - right.getTime())[0];
+		const oldestAgeSeconds = oldestPendingAt
+			? Math.max(
+					0,
+					Math.round((Date.now() - oldestPendingAt.getTime()) / 1000)
+				)
 			: 0;
+		const combinedFailedOutbox =
+			failedOutbox + (notificationDelivery.overview?.outbox.FAILED || 0);
+		const combinedUnresolvedFailures =
+			unresolvedFailures +
+			(notificationDelivery.overview?.unresolvedFailures || 0);
 		const hasProblem =
-			failedOutbox > 0 || unresolvedFailures > 0 || oldestAgeSeconds > 60;
+			combinedFailedOutbox > 0 ||
+			combinedUnresolvedFailures > 0 ||
+			oldestAgeSeconds > 60 ||
+			Boolean(notificationDelivery.error);
 
 		return {
 			id: 'messaging_backlog',
 			title: 'Очередь интеграций',
 			status: hasProblem ? 'warning' : 'ok',
 			message: hasProblem
-				? `Outbox FAILED: ${failedOutbox}, DLQ: ${unresolvedFailures}, старейшее ожидание: ${oldestAgeSeconds} сек.`
+				? `Outbox FAILED: ${combinedFailedOutbox}, DLQ: ${combinedUnresolvedFailures}, старейшее ожидание: ${oldestAgeSeconds} сек.${notificationDelivery.error ? `; Notification Delivery metrics недоступны: ${notificationDelivery.error}` : ''}`
 				: 'Задержек и необработанных ошибок нет'
 		};
+	}
+
+	private getNotificationDeliveryResult(): Promise<NotificationDeliveryResult> {
+		return this.notificationDelivery
+			.getOverview()
+			.then(overview => ({ overview, error: null }))
+			.catch(error => ({
+				overview: null,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Notification Delivery недоступен'
+			}));
+	}
+
+	private parseDate(value?: string | null): Date | null {
+		if (!value) return null;
+		const timestamp = Date.parse(value);
+		return Number.isFinite(timestamp) ? new Date(timestamp) : null;
+	}
+
+	private getActivityStaleMs(): number {
+		const configured = Number(
+			this.configService.get<string>('MESSAGING_ACTIVITY_STALE_MS') ||
+				5 * 60 * 1000
+		);
+		return Number.isInteger(configured) && configured >= 30_000
+			? Math.min(configured, 24 * 60 * 60 * 1000)
+			: 5 * 60 * 1000;
 	}
 
 	private async checkScheduledJobs(): Promise<HealthCheck> {

@@ -135,6 +135,38 @@ describe('RabbitMqService topology', () => {
 		expect(JSON.parse(content.toString('utf8'))).toEqual(payload);
 	});
 
+	it('publishes a persisted dead-letter through confirm and mandatory mode', async () => {
+		const publish = jest.fn().mockResolvedValue(true);
+		const service = new RabbitMqService({
+			get: jest.fn()
+		} as unknown as ConfigService);
+		(service as any).channel = { publish };
+		const payload = { malformed: true, contentLength: 123 };
+
+		await service.publishOutboxMessage(
+			'winwidget.dead-letter',
+			'email.dead-letter',
+			payload,
+			{
+				messageId,
+				type: 'unknown'
+			}
+		);
+
+		expect(publish).toHaveBeenCalledWith(
+			'winwidget.dead-letter',
+			'email.dead-letter',
+			expect.any(Buffer),
+			expect.objectContaining({
+				contentType: 'application/json',
+				deliveryMode: 2,
+				mandatory: true,
+				messageId,
+				type: 'unknown'
+			})
+		);
+	});
+
 	it('rejects a mandatory publication returned by RabbitMQ', async () => {
 		const service = new RabbitMqService({
 			get: jest.fn()

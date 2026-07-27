@@ -3,6 +3,7 @@ import { MessagingAdminController } from '@/messaging/messaging-admin.controller
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { MessagingOperationalAlertService } from '@/messaging/messaging-operational-alert.service';
+import { NotificationDeliveryClientModule } from '@/messaging/notification-delivery-client.module';
 import { RabbitMqManagementModule } from '@/messaging/rabbitmq-management.module';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { Module } from '@nestjs/common';
@@ -10,6 +11,7 @@ import { Module } from '@nestjs/common';
 @Module({
 	imports: [
 		AdminEventLogModule,
+		NotificationDeliveryClientModule,
 		RabbitMqManagementModule,
 		TelegramBotModule
 	],

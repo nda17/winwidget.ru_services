@@ -9,11 +9,18 @@ import {
 	LEAD_INTEGRATION_KINDS,
 	MESSAGING_KINDS,
 	MessagingKind,
+	NOTIFICATION_DELIVERY_KINDS,
+	NotificationDeliveryKind,
 	OUTBOX_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
 import { createMessagingHeaders } from '@/messaging/messaging-context';
+import {
+	NotificationDeliveryClientService,
+	NotificationDeliveryFailureView,
+	NotificationDeliveryInternalApiError
+} from '@/messaging/notification-delivery-client.service';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
 import { SCHEDULED_JOB_TYPES } from '@/scheduled-jobs/scheduled-jobs.types';
@@ -21,7 +28,9 @@ import {
 	BadRequestException,
 	ConflictException,
 	Injectable,
-	NotFoundException
+	Logger,
+	NotFoundException,
+	ServiceUnavailableException
 } from '@nestjs/common';
 import {
 	IntegrationDeliveryFailure,
@@ -43,11 +52,14 @@ interface FailureFilters {
 
 @Injectable()
 export class MessagingAdminService {
+	private readonly logger = new Logger(MessagingAdminService.name);
+
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly rabbitManagement: RabbitMqManagementService,
 		private readonly leadDestination: LeadIntegrationDestinationService,
-		private readonly adminEventLog: AdminEventLogService
+		private readonly adminEventLog: AdminEventLogService,
+		private readonly notificationDelivery: NotificationDeliveryClientService
 	) {}
 
 	async getOverview() {
@@ -60,7 +72,8 @@ export class MessagingAdminService {
 			deliveredLast24Hours,
 			completedBackupsLast24Hours,
 			heartbeats,
-			queues
+			queues,
+			notificationDeliveryOverview
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
 				by: ['status'],
@@ -76,17 +89,28 @@ export class MessagingAdminService {
 				select: { createdAt: true }
 			}),
 			this.prisma.integrationDeliveryFailure.count({
-				where: { resolvedAt: null }
+				where: {
+					resolvedAt: null,
+					integration: {
+						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+					}
+				}
 			}),
 			this.prisma.integrationDeliveryFailure.count({
 				where: {
 					resolvedAt: null,
-					retryingAt: { not: null }
+					retryingAt: { not: null },
+					integration: {
+						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+					}
 				}
 			}),
 			this.prisma.integrationDeliveryReceipt.count({
 				where: {
 					status: IntegrationDeliveryReceiptStatus.DELIVERED,
+					integration: {
+						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+					},
 					deliveredAt: {
 						gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
 					}
@@ -111,6 +135,16 @@ export class MessagingAdminService {
 					queues: [],
 					error:
 						error instanceof Error ? error.message : 'RabbitMQ недоступен'
+				})),
+			this.notificationDelivery
+				.getOverview()
+				.then(overview => ({ overview, error: null }))
+				.catch(error => ({
+					overview: null,
+					error:
+						error instanceof Error
+							? error.message
+							: 'Notification Delivery недоступен'
 				}))
 		]);
 
@@ -120,6 +154,20 @@ export class MessagingAdminService {
 		for (const group of outboxGroups) {
 			outbox[group.status] = group._count._all;
 		}
+		if (notificationDeliveryOverview.overview) {
+			for (const status of Object.values(OutboxEventStatus)) {
+				outbox[status] +=
+					notificationDeliveryOverview.overview.outbox[status] || 0;
+			}
+		}
+
+		const oldestPendingAt =
+			[
+				oldestPending?.createdAt.toISOString() || null,
+				notificationDeliveryOverview.overview?.oldestPendingAt || null
+			]
+				.filter((value): value is string => Boolean(value))
+				.sort()[0] || null;
 
 		const serviceHeartbeats = [
 			'outbox-publisher',
@@ -169,16 +217,34 @@ export class MessagingAdminService {
 				lastSuccessfulConsumeAt: activity.lastSuccessfulConsumeAt || null
 			};
 		});
+		serviceHeartbeats.push(
+			notificationDeliveryOverview.overview?.heartbeat || {
+				service: 'notification-delivery-worker',
+				status: 'down',
+				activeInstances: 0,
+				lastSeenAt: null,
+				lastSuccessfulPollAt: null,
+				lastSuccessfulPublishAt: null,
+				lastSuccessfulConsumeAt: null
+			}
+		);
 
 		return {
 			generatedAt: new Date().toISOString(),
 			outbox,
-			oldestPendingAt: oldestPending?.createdAt.toISOString() || null,
-			unresolvedFailures,
-			retryingFailures,
+			oldestPendingAt,
+			unresolvedFailures:
+				unresolvedFailures +
+				(notificationDeliveryOverview.overview?.unresolvedFailures || 0),
+			retryingFailures:
+				retryingFailures +
+				(notificationDeliveryOverview.overview?.retryingFailures || 0),
 			deliveredLast24Hours:
-				deliveredLast24Hours + completedBackupsLast24Hours,
+				deliveredLast24Hours +
+				completedBackupsLast24Hours +
+				(notificationDeliveryOverview.overview?.deliveredLast24Hours || 0),
 			rabbitMqError: queues.error,
+			notificationDeliveryError: notificationDeliveryOverview.error,
 			heartbeats: serviceHeartbeats,
 			queues: queues.queues.map(queue => ({
 				name: queue.name,
@@ -195,19 +261,60 @@ export class MessagingAdminService {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
-		const where = this.getFailureWhere(filters);
-		const [items, total] = await this.prisma.$transaction([
-			this.prisma.integrationDeliveryFailure.findMany({
-				where,
-				orderBy: { failedAt: 'desc' },
-				skip: (normalizedPage - 1) * normalizedLimit,
-				take: normalizedLimit
-			}),
-			this.prisma.integrationDeliveryFailure.count({ where })
+		const normalizedIntegration = filters.integration?.trim()
+			? this.normalizeIntegration(filters.integration.trim())
+			: null;
+		const queryNotificationDelivery =
+			!normalizedIntegration ||
+			this.isNotificationDeliveryKind(normalizedIntegration);
+		const queryLegacy =
+			!normalizedIntegration ||
+			!this.isNotificationDeliveryKind(normalizedIntegration);
+		const offset = (normalizedPage - 1) * normalizedLimit;
+		const windowSize = offset + normalizedLimit;
+		if (!Number.isSafeInteger(windowSize) || windowSize > 10_000) {
+			throw new BadRequestException(
+				'Слишком глубокая страница истории ошибок'
+			);
+		}
+		const where = queryLegacy
+			? this.getFailureWhere(filters, !normalizedIntegration)
+			: null;
+		const [legacyResult, notificationResult] = await Promise.all([
+			where
+				? this.prisma.$transaction([
+						this.prisma.integrationDeliveryFailure.findMany({
+							where,
+							orderBy: [{ failedAt: 'desc' }, { id: 'desc' }],
+							take: windowSize
+						}),
+						this.prisma.integrationDeliveryFailure.count({ where })
+					])
+				: Promise.resolve([[], 0] as const),
+			queryNotificationDelivery
+				? this.notificationDelivery.getFailures(1, windowSize, filters)
+				: Promise.resolve({
+						items: [],
+						total: 0,
+						page: 1,
+						limit: windowSize,
+						totalPages: 1
+					})
 		]);
+		const legacyItems = legacyResult[0].map(item =>
+			this.serializeFailure(item)
+		);
+		const items = [...legacyItems, ...notificationResult.items]
+			.sort((left, right) => {
+				const byDate =
+					Date.parse(right.failedAt) - Date.parse(left.failedAt);
+				return byDate || right.id.localeCompare(left.id);
+			})
+			.slice(offset, offset + normalizedLimit);
+		const total = legacyResult[1] + notificationResult.total;
 
 		return {
-			items: items.map(item => this.serializeFailure(item)),
+			items,
 			total,
 			page: normalizedPage,
 			limit: normalizedLimit,
@@ -216,6 +323,12 @@ export class MessagingAdminService {
 	}
 
 	async retryFailure(id: string, adminId: string, request?: Request) {
+		const notificationDeliveryResult =
+			await this.retryNotificationDeliveryFailure(id, adminId, request);
+		if (notificationDeliveryResult) {
+			return notificationDeliveryResult;
+		}
+
 		const staleRetryBefore = new Date(Date.now() - 5 * 60 * 1000);
 		const retryingAt = new Date();
 		const result = await this.prisma.$transaction(async transaction => {
@@ -383,6 +496,17 @@ export class MessagingAdminService {
 			throw new BadRequestException(
 				'Комментарий должен содержать от 3 до 1000 символов'
 			);
+		}
+
+		const notificationDeliveryResult =
+			await this.closeNotificationDeliveryFailure(
+				id,
+				adminId,
+				normalizedComment,
+				request
+			);
+		if (notificationDeliveryResult) {
+			return notificationDeliveryResult;
 		}
 
 		const resolvedAt = new Date();
@@ -672,7 +796,8 @@ export class MessagingAdminService {
 	}
 
 	private getFailureWhere(
-		filters: FailureFilters
+		filters: FailureFilters,
+		excludeNotificationDelivery = false
 	): Prisma.IntegrationDeliveryFailureWhereInput {
 		const integration = filters.integration?.trim();
 		const category = filters.category?.trim().toUpperCase();
@@ -681,6 +806,10 @@ export class MessagingAdminService {
 
 		if (integration) {
 			where.integration = this.normalizeIntegration(integration);
+		} else if (excludeNotificationDelivery) {
+			where.integration = {
+				notIn: [...NOTIFICATION_DELIVERY_KINDS]
+			};
 		}
 		if (category) {
 			if (
@@ -785,7 +914,162 @@ export class MessagingAdminService {
 		return value as MessagingKind;
 	}
 
-	private serializeFailure(item: IntegrationDeliveryFailure) {
+	private isNotificationDeliveryKind(
+		value: MessagingKind
+	): value is NotificationDeliveryKind {
+		return NOTIFICATION_DELIVERY_KINDS.includes(
+			value as NotificationDeliveryKind
+		);
+	}
+
+	private async retryNotificationDeliveryFailure(
+		id: string,
+		adminId: string,
+		request?: Request
+	) {
+		if (await this.isLegacyFailure(id)) return null;
+		let result: Awaited<
+			ReturnType<NotificationDeliveryClientService['retryFailure']>
+		>;
+		try {
+			result = await this.notificationDelivery.retryFailure(id, adminId);
+		} catch (error) {
+			this.rethrowNotificationDeliveryError(error);
+		}
+		await this.recordNotificationDeliveryAuditBestEffort(
+			{
+				adminId,
+				section: 'MESSAGING',
+				action: 'MESSAGING_FAILURE_RETRY',
+				description: `Повторно отправлено событие Notification Delivery ${result.integration}`,
+				entityType: 'notification_delivery_failure',
+				entityId: result.id,
+				entityLabel: result.integration,
+				metadata: {
+					eventId: result.eventId,
+					integration: result.integration
+				},
+				request
+			},
+			{
+				action: 'RETRY',
+				adminId,
+				failureId: result.id,
+				eventId: result.eventId,
+				integration: result.integration
+			}
+		);
+		return result;
+	}
+
+	private async closeNotificationDeliveryFailure(
+		id: string,
+		adminId: string,
+		comment: string,
+		request?: Request
+	) {
+		if (await this.isLegacyFailure(id)) return null;
+		let result: Awaited<
+			ReturnType<NotificationDeliveryClientService['closeFailure']>
+		>;
+		try {
+			result = await this.notificationDelivery.closeFailure(
+				id,
+				adminId,
+				comment
+			);
+		} catch (error) {
+			this.rethrowNotificationDeliveryError(error);
+		}
+		await this.recordNotificationDeliveryAuditBestEffort(
+			{
+				adminId,
+				section: 'MESSAGING',
+				action: 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
+				description: `Закрыта без повтора ошибка Notification Delivery ${result.integration}`,
+				entityType: 'notification_delivery_failure',
+				entityId: result.id,
+				entityLabel: result.integration,
+				metadata: {
+					eventId: result.eventId,
+					integration: result.integration,
+					comment
+				},
+				request
+			},
+			{
+				action: 'CLOSE',
+				adminId,
+				failureId: result.id,
+				eventId: result.eventId,
+				integration: result.integration
+			}
+		);
+		return result;
+	}
+
+	private async recordNotificationDeliveryAuditBestEffort(
+		entry: Parameters<AdminEventLogService['record']>[0],
+		context: {
+			action: 'RETRY' | 'CLOSE';
+			adminId: string;
+			failureId: string;
+			eventId: string;
+			integration: string;
+		}
+	): Promise<void> {
+		try {
+			await this.adminEventLog.record(entry);
+		} catch (error) {
+			this.logger.error(
+				JSON.stringify({
+					event: 'notification_delivery.global_audit_failed',
+					...context,
+					error:
+						error instanceof Error
+							? error.message.slice(0, 1000)
+							: String(error).slice(0, 1000)
+				})
+			);
+		}
+	}
+
+	private async isLegacyFailure(id: string): Promise<boolean> {
+		const failure = await this.prisma.integrationDeliveryFailure.findFirst(
+			{
+				where: {
+					id,
+					integration: {
+						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+					}
+				},
+				select: { id: true }
+			}
+		);
+		return Boolean(failure);
+	}
+
+	private rethrowNotificationDeliveryError(error: unknown): never {
+		if (!(error instanceof NotificationDeliveryInternalApiError)) {
+			throw error;
+		}
+		if (error.statusCode === 400) {
+			throw new BadRequestException(error.message);
+		}
+		if (error.statusCode === 404) {
+			throw new NotFoundException(error.message);
+		}
+		if (error.statusCode === 409) {
+			throw new ConflictException(error.message);
+		}
+		throw new ServiceUnavailableException(
+			'Notification Delivery не выполнил операцию'
+		);
+	}
+
+	private serializeFailure(
+		item: IntegrationDeliveryFailure
+	): NotificationDeliveryFailureView {
 		const payload = item.payload as unknown as LeadIntegrationEventPayload;
 		const jobPayload = item.payload as {
 			jobId?: string;

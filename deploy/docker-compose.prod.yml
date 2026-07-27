@@ -76,6 +76,9 @@ x-api-env: &api-env
   MESSAGING_ALERTS_ENABLED: ${MESSAGING_ALERTS_ENABLED:-true}
   MESSAGING_ACTIVITY_STALE_MS: ${MESSAGING_ACTIVITY_STALE_MS:-300000}
   MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD: ${MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD:-100}
+  NOTIFICATION_DELIVERY_INTERNAL_URL: ${NOTIFICATION_DELIVERY_INTERNAL_URL:-http://127.0.0.1:4401/internal/notification-delivery}
+  NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ${NOTIFICATION_DELIVERY_INTERNAL_TOKEN:?NOTIFICATION_DELIVERY_INTERNAL_TOKEN is required}
+  NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS: ${NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS:-5000}
 
 x-api-gateway-env: &api-gateway-env
   APP_REVISION: ${APP_REVISION:-unknown}
@@ -106,13 +109,33 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
   SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
   MAILING_EMAIL_RATE_PER_SECOND: ${MAILING_EMAIL_RATE_PER_SECOND:-5}
   MAILING_TELEGRAM_RATE_PER_SECOND: ${MAILING_TELEGRAM_RATE_PER_SECOND:-10}
+
+x-notification-delivery-env: &notification-delivery-env
+  <<: *smtp-env
+  APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
+  MODE: ${MODE:-production}
+  NODE_ENV: production
+  NOTIFICATION_DELIVERY_DATABASE_URL: ${NOTIFICATION_DELIVERY_DATABASE_URL:?NOTIFICATION_DELIVERY_DATABASE_URL is required}
+  NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ${NOTIFICATION_DELIVERY_INTERNAL_TOKEN:?NOTIFICATION_DELIVERY_INTERNAL_TOKEN is required}
+  NOTIFICATION_DELIVERY_LISTEN_HOST: ${NOTIFICATION_DELIVERY_LISTEN_HOST:-127.0.0.1}
+  TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
+  RABBITMQ_URL: ${RABBITMQ_NOTIFICATION_DELIVERY_URL:?RABBITMQ_NOTIFICATION_DELIVERY_URL is required}
+  RABBITMQ_CONNECTION_NAME: winwidget-notification-delivery-worker
+  RABBITMQ_ASSERT_TOPOLOGY: 'false'
+  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+  MESSAGING_SERVICE_NAME: notification-delivery-worker
+  NOTIFICATION_DELIVERY_HEALTH_PORT: ${NOTIFICATION_DELIVERY_HEALTH_PORT:-4401}
+  NOTIFICATION_DELIVERY_PREFETCH: ${NOTIFICATION_DELIVERY_PREFETCH:-5}
+  NOTIFICATION_DELIVERY_KINDS: ${NOTIFICATION_DELIVERY_KINDS:-email,telegram,payment-email,limit-email}
+  NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS: ${NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS:-90}
+  NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS: ${NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS:-30}
 
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
@@ -147,6 +170,11 @@ x-migration-env: &migration-env
   APP_REVISION: ${APP_REVISION:-unknown}
   NODE_ENV: production
   DATABASE_URL: ${DATABASE_MIGRATION_URL_PRODUCTION:?DATABASE_MIGRATION_URL_PRODUCTION is required}
+
+x-notification-delivery-migration-env: &notification-delivery-migration-env
+  APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
+  NODE_ENV: production
+  NOTIFICATION_DELIVERY_DATABASE_URL: ${NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION:?NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION is required}
 
 services:
   rabbitmq:
@@ -241,6 +269,34 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  notification-delivery-worker:
+    image: ${NOTIFICATION_DELIVERY_IMAGE:?NOTIFICATION_DELIVERY_IMAGE is required}
+    build:
+      context: ../apps/notification-delivery
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
+    environment: *notification-delivery-env
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      outbox-publisher:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.NOTIFICATION_DELIVERY_HEALTH_PORT||4401)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -284,6 +340,25 @@ services:
     environment: *migration-env
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy']
+
+  notification-delivery-migrate:
+    image: ${NOTIFICATION_DELIVERY_IMAGE:?NOTIFICATION_DELIVERY_IMAGE is required}
+    build:
+      context: ../apps/notification-delivery
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
+    profiles:
+      - notification-delivery-migration
+    environment: *notification-delivery-migration-env
+    entrypoint: ['./node_modules/.bin/prisma']
+    command:
+      [
+        'migrate',
+        'deploy',
+        '--schema',
+        'prisma/schema.prisma'
+      ]
 
 volumes:
   winwidget-rabbitmq-data:

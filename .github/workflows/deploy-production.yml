@@ -11,6 +11,7 @@ on:
         options:
           - all
           - maintenance
+          - notification-delivery
   push:
     branches:
       - prod
@@ -25,7 +26,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -59,8 +60,20 @@ jobs:
       APP_VERSION: git-${{ github.sha }}
       MAINTENANCE_REVISION: ${{ github.sha }}
       MAINTENANCE_IMAGE: winwidget-maintenance:git-${{ github.sha }}
+      NOTIFICATION_DELIVERY_REVISION: ${{ github.sha }}
+      NOTIFICATION_DELIVERY_IMAGE: winwidget-notification-delivery:git-${{ github.sha }}
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
+      NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://notification_delivery_runtime:notification_delivery_runtime_ci@127.0.0.1:5432/winwidget_ci?schema=notification_delivery
+      NOTIFICATION_DELIVERY_CI_MIGRATION_DATABASE_URL: postgresql://notification_delivery_migration:notification_delivery_migration_ci@127.0.0.1:5432/winwidget_ci?schema=notification_delivery
+      NOTIFICATION_DELIVERY_INTERNAL_URL: http://127.0.0.1:4401/internal/notification-delivery
+      NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ci_notification_delivery_internal_token_at_least_32_chars
+      NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS: 5000
+      NOTIFICATION_DELIVERY_LISTEN_HOST: 127.0.0.1
+      NOTIFICATION_DELIVERY_HEALTH_PORT: 4401
+      NOTIFICATION_DELIVERY_PREFETCH: 5
+      NOTIFICATION_DELIVERY_KINDS: email,telegram,payment-email,limit-email
+      NOTIFICATION_DELIVERY_TEST_RABBITMQ_URL: amqp://notification_delivery_ci:notification_delivery_ci_password@127.0.0.1:5672/winwidget
       RABBITMQ_URL: amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget
       RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
       RABBITMQ_USER: winwidget
@@ -83,6 +96,10 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            apps/api-gateway/pnpm-lock.yaml
+            apps/notification-delivery/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -90,6 +107,56 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm --dir apps/api-gateway install --frozen-lockfile
+          pnpm --dir apps/notification-delivery install --frozen-lockfile
+
+      - name: Create isolated Notification Delivery database roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --username winwidget --dbname winwidget_ci <<'SQL'
+          REVOKE ALL ON DATABASE winwidget_ci FROM PUBLIC;
+
+          CREATE ROLE notification_delivery_migration
+            LOGIN
+            PASSWORD 'notification_delivery_migration_ci'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOREPLICATION;
+          CREATE ROLE notification_delivery_runtime
+            LOGIN
+            PASSWORD 'notification_delivery_runtime_ci'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOREPLICATION;
+
+          GRANT CONNECT, CREATE ON DATABASE winwidget_ci
+            TO notification_delivery_migration;
+          GRANT CONNECT ON DATABASE winwidget_ci
+            TO notification_delivery_runtime;
+
+          CREATE SCHEMA notification_delivery
+            AUTHORIZATION notification_delivery_migration;
+          REVOKE ALL ON SCHEMA notification_delivery FROM PUBLIC;
+          GRANT USAGE ON SCHEMA notification_delivery
+            TO notification_delivery_runtime;
+
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE notification_delivery_migration
+            IN SCHEMA notification_delivery
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
+            TO notification_delivery_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE notification_delivery_migration
+            IN SCHEMA notification_delivery
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES
+            TO notification_delivery_runtime;
+
+          REVOKE CREATE ON DATABASE winwidget_ci
+            FROM notification_delivery_migration;
+          SQL
 
       - name: Generate ephemeral CI JWT keyset
         run: |
@@ -128,24 +195,71 @@ jobs:
           NODE
 
       - name: Generate Prisma Client
-        run: pnpm exec prisma generate
+        run: |
+          pnpm exec prisma generate
+          pnpm --dir apps/notification-delivery run prisma:validate
+          pnpm --dir apps/notification-delivery run prisma:generate
 
       - name: Apply database migrations
-        run: pnpm exec prisma migrate deploy
+        run: |
+          pnpm exec prisma migrate deploy
+          NOTIFICATION_DELIVERY_DATABASE_URL="$NOTIFICATION_DELIVERY_CI_MIGRATION_DATABASE_URL" \
+            pnpm --dir apps/notification-delivery run prisma:migrate:deploy
+
+      - name: Finalize Notification Delivery runtime grants
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i \
+            --env PGPASSWORD=notification_delivery_migration_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username notification_delivery_migration \
+              --dbname winwidget_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF has_database_privilege(
+              current_user,
+              current_database(),
+              'CREATE'
+            ) THEN
+              RAISE EXCEPTION 'migration role must not have database CREATE';
+            END IF;
+            IF NOT has_schema_privilege(
+              current_user,
+              'notification_delivery',
+              'CREATE'
+            ) THEN
+              RAISE EXCEPTION 'migration role must own service schema';
+            END IF;
+          END
+          $$;
+          CREATE SEQUENCE notification_delivery.ci_runtime_sequence;
+          SQL
 
       - name: Verify RabbitMQ Management API
         run: curl --fail --user "$RABBITMQ_USER:$RABBITMQ_PASSWORD" "$RABBITMQ_MANAGEMENT_URL/api/overview"
 
       - name: Type check
-        run: pnpm exec tsc --noEmit
+        run: |
+          pnpm exec tsc --noEmit --incremental false -p tsconfig.build.json
+          pnpm --dir apps/notification-delivery run typecheck
+
+      - name: Lint
+        run: |
+          pnpm exec eslint "{src,libs,test}/**/*.ts" --max-warnings=0
+          pnpm --dir apps/notification-delivery run lint
 
       - name: Test
-        run: pnpm exec jest --runInBand
+        run: |
+          pnpm exec jest --runInBand
+          pnpm --dir apps/notification-delivery test
 
       - name: Validate production compose
         run: |
-          docker compose --profile migration --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
-          docker compose --profile migration --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+          docker compose --profile migration --profile notification-delivery-migration --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+          docker compose --profile migration --profile notification-delivery-migration --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
             node -e '
               const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
               const services = config.services ?? {};
@@ -162,7 +276,7 @@ jobs:
                 throw new Error("RabbitMQ must use a named external volume");
               }
               const persistentServiceNames = Object.entries(services)
-                .filter(([, service]) => !(service.profiles ?? []).includes("migration"))
+                .filter(([, service]) => (service.profiles ?? []).length === 0)
                 .map(([name]) => name)
                 .sort();
               const expectedPersistentServiceNames = [
@@ -170,6 +284,7 @@ jobs:
                 "api-gateway",
                 "integration-worker",
                 "maintenance-worker",
+                "notification-delivery-worker",
                 "outbox-publisher",
                 "rabbitmq",
               ];
@@ -208,15 +323,29 @@ jobs:
                 }
                 return environment;
               };
-              for (const name of ["api", "api-gateway", "maintenance-worker"]) {
+              for (const name of [
+                "api",
+                "api-gateway",
+                "maintenance-worker",
+                "notification-delivery-worker",
+              ]) {
                 const service = requireService(name);
-                if (service.build?.args?.APP_REVISION !== process.env.APP_REVISION) {
+                const expectedRevision = {
+                  api: process.env.APP_REVISION,
+                  "api-gateway": process.env.APP_REVISION,
+                  "maintenance-worker": process.env.MAINTENANCE_REVISION,
+                  "notification-delivery-worker":
+                    process.env.NOTIFICATION_DELIVERY_REVISION,
+                }[name];
+                if (service.build?.args?.APP_REVISION !== expectedRevision) {
                   throw new Error(`${name} image build revision is not pinned`);
                 }
                 const expectedImage = {
                   api: `winwidget-api:${process.env.APP_VERSION}`,
                   "api-gateway": `winwidget-api-gateway:${process.env.APP_VERSION}`,
                   "maintenance-worker": process.env.MAINTENANCE_IMAGE,
+                  "notification-delivery-worker":
+                    process.env.NOTIFICATION_DELIVERY_IMAGE,
                 }[name];
                 if (service.image !== expectedImage) {
                   throw new Error(`${name} image tag is not pinned to the revision`);
@@ -230,6 +359,30 @@ jobs:
                   "maintenance-worker must use the maintenance-runner image target",
                 );
               }
+              const requireStandaloneNotificationBuild = name => {
+                const service = requireService(name);
+                const build = service.build ?? {};
+                if (
+                  !String(build.context ?? "")
+                    .replaceAll("\\", "/")
+                    .endsWith("/apps/notification-delivery") ||
+                  build.dockerfile !== "Dockerfile" ||
+                  build.target != null ||
+                  build.args?.APP_REVISION !==
+                    process.env.NOTIFICATION_DELIVERY_REVISION ||
+                  service.image !== process.env.NOTIFICATION_DELIVERY_IMAGE
+                ) {
+                  throw new Error(
+                    `${name} must use the exact standalone app image and context`,
+                  );
+                }
+              };
+              requireStandaloneNotificationBuild(
+                "notification-delivery-worker",
+              );
+              requireStandaloneNotificationBuild(
+                "notification-delivery-migrate",
+              );
               const requireExactKinds = (environment, key, expected, name) => {
                 const kinds = [...new Set(String(environment[key] ?? "")
                   .split(",")
@@ -254,6 +407,10 @@ jobs:
               requireCommand(
                 "migrate",
                 "migrate deploy",
+              );
+              requireCommand(
+                "notification-delivery-migrate",
+                "migrate deploy --schema prisma/schema.prisma",
               );
               const migration = requireService("migrate");
               const migrationEntrypoint = Array.isArray(migration.entrypoint)
@@ -287,9 +444,64 @@ jobs:
                   `migrate receives unexpected environment: ${unexpectedMigrationKeys.join(",")}`,
                 );
               }
+              const notificationMigration = requireService(
+                "notification-delivery-migrate",
+              );
+              const notificationMigrationEntrypoint = Array.isArray(
+                notificationMigration.entrypoint,
+              )
+                ? notificationMigration.entrypoint.join(" ")
+                : String(notificationMigration.entrypoint ?? "");
+              if (
+                notificationMigrationEntrypoint !==
+                "./node_modules/.bin/prisma"
+              ) {
+                throw new Error(
+                  `Unexpected notification-delivery-migrate entrypoint: ${notificationMigrationEntrypoint}`,
+                );
+              }
+              if (
+                !(notificationMigration.profiles ?? []).includes(
+                  "notification-delivery-migration",
+                )
+              ) {
+                throw new Error(
+                  "notification-delivery-migrate must remain behind its migration profile",
+                );
+              }
+              const notificationMigrationEnvironment = requireEnvironment(
+                "notification-delivery-migrate",
+                [
+                  "APP_REVISION",
+                  "NODE_ENV",
+                  "NOTIFICATION_DELIVERY_DATABASE_URL",
+                ],
+              );
+              const unexpectedNotificationMigrationKeys = Object.keys(
+                notificationMigrationEnvironment,
+              ).filter(
+                key =>
+                  ![
+                    "APP_REVISION",
+                    "NODE_ENV",
+                    "NOTIFICATION_DELIVERY_DATABASE_URL",
+                  ].includes(key),
+              );
+              if (unexpectedNotificationMigrationKeys.length > 0) {
+                throw new Error(
+                  `notification-delivery-migrate receives unexpected environment: ${unexpectedNotificationMigrationKeys.join(",")}`,
+                );
+              }
               if (requireService("maintenance-worker").command != null) {
                 throw new Error(
                   "maintenance-worker command must be owned by its image",
+                );
+              }
+              if (
+                requireService("notification-delivery-worker").command != null
+              ) {
+                throw new Error(
+                  "notification-delivery-worker command must be owned by its image",
                 );
               }
 
@@ -305,7 +517,27 @@ jobs:
                 "JWT_ISSUER",
                 "JWT_AUDIENCE",
                 "CORS_ALLOWED_ORIGINS",
+                "NOTIFICATION_DELIVERY_INTERNAL_URL",
+                "NOTIFICATION_DELIVERY_INTERNAL_TOKEN",
+                "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS",
               ]);
+              const apiEnvironment = requireService("api").environment ?? {};
+              if (
+                apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_URL !==
+                "http://127.0.0.1:4401/internal/notification-delivery"
+              ) {
+                throw new Error(
+                  "api must use the exact loopback notification delivery endpoint",
+                );
+              }
+              if (
+                apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS !==
+                "5000"
+              ) {
+                throw new Error(
+                  "api notification delivery timeout must default to 5000ms",
+                );
+              }
               const gatewayEnvironment = requireEnvironment("api-gateway", [
                 "GATEWAY_ROUTES_JSON",
                 "CORS_ALLOWED_ORIGINS",
@@ -362,6 +594,8 @@ jobs:
                   "RABBITMQ_ASSERT_TOPOLOGY",
                   "MESSAGING_SERVICE_NAME",
                   "INTEGRATION_WORKER_KINDS",
+                  "INTEGRATION_RECEIPT_RETENTION_DAYS",
+                  "INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS",
                 ],
                 ["DATABASE_URL_PRODUCTION"],
               );
@@ -369,21 +603,89 @@ jobs:
                 integrationEnvironment,
                 "INTEGRATION_WORKER_KINDS",
                 [
-                  "email",
                   "webhook",
-                  "telegram",
                   "bitrix24",
                   "amo-crm",
-                  "payment-email",
                   "payment-telegram",
                   "mailing-email",
                   "mailing-telegram",
-                  "limit-email",
                   "limit-telegram",
                   "daily-summary-telegram",
                 ],
                 "integration-worker",
               );
+              if (
+                integrationEnvironment.INTEGRATION_RECEIPT_RETENTION_DAYS !== "90" ||
+                integrationEnvironment.INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS !== "30"
+              ) {
+                throw new Error(
+                  "integration-worker retention defaults must remain receipt=90 and failure-detail=30 days",
+                );
+              }
+              const notificationDelivery = requireService(
+                "notification-delivery-worker",
+              );
+              const notificationDeliveryEnvironment = requireEnvironment(
+                "notification-delivery-worker",
+                [
+                  "APP_REVISION",
+                  "NOTIFICATION_DELIVERY_DATABASE_URL",
+                  "RABBITMQ_URL",
+                  "RABBITMQ_ASSERT_TOPOLOGY",
+                  "MESSAGING_SERVICE_NAME",
+                  "NOTIFICATION_DELIVERY_INTERNAL_TOKEN",
+                  "NOTIFICATION_DELIVERY_LISTEN_HOST",
+                  "NOTIFICATION_DELIVERY_HEALTH_PORT",
+                  "NOTIFICATION_DELIVERY_PREFETCH",
+                  "NOTIFICATION_DELIVERY_KINDS",
+                  "NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS",
+                  "NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS",
+                  "SMTP_LOGIN",
+                  "SMTP_PASSWORD",
+                  "TELEGRAM_INFO_BOT_TOKEN",
+                ],
+                ["TELEGRAM_INFO_BOT_TOKEN"],
+              );
+              requireExactKinds(
+                notificationDeliveryEnvironment,
+                "NOTIFICATION_DELIVERY_KINDS",
+                ["email", "telegram", "payment-email", "limit-email"],
+                "notification-delivery-worker",
+              );
+              if (
+                notificationDeliveryEnvironment.APP_REVISION !==
+                process.env.NOTIFICATION_DELIVERY_REVISION
+              ) {
+                throw new Error(
+                  "notification-delivery-worker runtime revision is not pinned",
+                );
+              }
+              if (
+                notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS !== "90" ||
+                notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS !== "30"
+              ) {
+                throw new Error(
+                  "notification-delivery-worker retention defaults must remain receipt=90 and failure-detail=30 days",
+                );
+              }
+              const internalTokens = [
+                apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
+                notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
+              ];
+              if (
+                internalTokens.some(
+                  token =>
+                    typeof token !== "string" ||
+                    token === "XYZXYZXYZ" ||
+                    token.startsWith("change_me") ||
+                    token.length < 32,
+                ) ||
+                internalTokens[0] !== internalTokens[1]
+              ) {
+                throw new Error(
+                  "api and notification-delivery-worker must share one non-placeholder internal token of at least 32 characters",
+                );
+              }
               const maintenance = requireService("maintenance-worker");
               const maintenanceEnvironment = requireEnvironment(
                 "maintenance-worker",
@@ -414,12 +716,42 @@ jobs:
               if (!maintenance.healthcheck?.test) {
                 throw new Error("maintenance-worker must define readiness healthcheck");
               }
+              if (!notificationDelivery.healthcheck?.test) {
+                throw new Error(
+                  "notification-delivery-worker must define readiness healthcheck",
+                );
+              }
+              if (
+                notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_HEALTH_PORT !==
+                "4401"
+              ) {
+                throw new Error(
+                  "notification-delivery-worker health port must be 4401",
+                );
+              }
+              if (
+                notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_LISTEN_HOST !==
+                "127.0.0.1"
+              ) {
+                throw new Error(
+                  "notification-delivery-worker must bind to loopback",
+                );
+              }
+              if (
+                notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_PREFETCH !==
+                "5"
+              ) {
+                throw new Error(
+                  "notification-delivery-worker prefetch must default to 5",
+                );
+              }
               const rabbitUsers = [
                 services.rabbitmq.environment?.RABBITMQ_DEFAULT_USER,
                 services.api.environment?.RABBITMQ_MONITOR_USER,
                 new URL(services["outbox-publisher"].environment.RABBITMQ_URL).username,
                 new URL(services["integration-worker"].environment.RABBITMQ_URL).username,
                 new URL(services["maintenance-worker"].environment.RABBITMQ_URL).username,
+                new URL(services["notification-delivery-worker"].environment.RABBITMQ_URL).username,
               ];
               if (
                 services.rabbitmq.environment?.RABBITMQ_DEFAULT_VHOST !== "winwidget" ||
@@ -427,7 +759,12 @@ jobs:
               ) {
                 throw new Error("Production RabbitMQ vhost must be winwidget");
               }
-              for (const name of ["outbox-publisher", "integration-worker", "maintenance-worker"]) {
+              for (const name of [
+                "outbox-publisher",
+                "integration-worker",
+                "maintenance-worker",
+                "notification-delivery-worker",
+              ]) {
                 if (new URL(services[name].environment.RABBITMQ_URL).pathname !== "/winwidget") {
                   throw new Error(`${name} must connect to the winwidget vhost`);
                 }
@@ -441,11 +778,17 @@ jobs:
               if (
                 services["outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
                 services["integration-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
-                services["maintenance-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false"
+                services["maintenance-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
+                services["notification-delivery-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false"
               ) {
                 throw new Error("Only outbox-publisher may assert RabbitMQ topology");
               }
-              for (const name of ["outbox-publisher", "integration-worker", "maintenance-worker"]) {
+              for (const name of [
+                "outbox-publisher",
+                "integration-worker",
+                "maintenance-worker",
+                "notification-delivery-worker",
+              ]) {
                 const environment = services[name].environment ?? {};
                 for (const forbidden of [
                   "JWT_SECRET",
@@ -459,6 +802,28 @@ jobs:
                   if (forbidden in environment) {
                     throw new Error(`${name} must not receive ${forbidden}`);
                   }
+                }
+              }
+              for (const forbidden of [
+                "DATABASE_URL",
+                "DATABASE_URL_PRODUCTION",
+                "DATABASE_BACKUP_URL",
+                "NOTIFICATION_DELIVERY_INTERNAL_URL",
+                "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS",
+                "RABBITMQ_WORKER_PREFETCH",
+                "RABBITMQ_ADMIN_PASSWORD",
+                "RABBITMQ_MONITOR_PASSWORD",
+                "S3_ACCESS_KEY_ID",
+                "S3_SECRET_ACCESS_KEY",
+                "GOOGLE_CLIENT_SECRET",
+                "GITHUB_CLIENT_SECRET",
+                "YANDEX_CLIENT_SECRET",
+                "VK_CLIENT_SECRET",
+              ]) {
+                if (forbidden in notificationDeliveryEnvironment) {
+                  throw new Error(
+                    `notification-delivery-worker must not receive ${forbidden}`,
+                  );
                 }
               }
               for (const forbidden of [
@@ -503,9 +868,68 @@ jobs:
         run: |
           bash -n scripts/deploy-production.sh
           bash -n scripts/deploy-maintenance-production.sh
+          bash -n scripts/deploy-notification-delivery-production.sh
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
+          pnpm --dir apps/notification-delivery run build
+
+      - name: Verify Notification Delivery wire contract boundary
+        run: |
+          node <<'NODE'
+          const monolith = require("./dist/src/messaging/messaging.constants.js");
+          const delivery = require(
+            "./apps/notification-delivery/dist/src/messaging/messaging.constants.js",
+          );
+
+          const expectedKinds = [...monolith.NOTIFICATION_DELIVERY_KINDS];
+          const actualKinds = [...delivery.NOTIFICATION_DELIVERY_KINDS];
+          if (
+            JSON.stringify(actualKinds) !== JSON.stringify(expectedKinds) ||
+            Object.keys(delivery.MESSAGING_ROUTING_KEYS).sort().join(",") !==
+              [...expectedKinds].sort().join(",") ||
+            Object.keys(delivery.MESSAGING_QUEUE_NAMES).sort().join(",") !==
+              [...expectedKinds].sort().join(",")
+          ) {
+            throw new Error(
+              "Notification Delivery kind ownership drifted from the producer contract",
+            );
+          }
+
+          for (const kind of expectedKinds) {
+            for (const [label, left, right] of [
+              [
+                "routing key",
+                monolith.MESSAGING_ROUTING_KEYS[kind],
+                delivery.MESSAGING_ROUTING_KEYS[kind],
+              ],
+              [
+                "queue name",
+                monolith.MESSAGING_QUEUE_NAMES[kind],
+                delivery.MESSAGING_QUEUE_NAMES[kind],
+              ],
+              [
+                "manual retry routing key",
+                monolith.getManualRetryRoutingKey(kind),
+                delivery.getManualRetryRoutingKey(kind),
+              ],
+              [
+                "dead-letter routing key",
+                monolith.getDeadLetterRoutingKey(kind),
+                delivery.getDeadLetterRoutingKey(kind),
+              ],
+            ]) {
+              if (left !== right) {
+                throw new Error(
+                  `Notification Delivery ${label} drift for ${kind}: ${left} != ${right}`,
+                );
+              }
+            }
+          }
+          process.stdout.write(
+            "Notification Delivery producer/consumer wire contract verified\n",
+          );
+          NODE
 
       - name: Build and verify production image
         run: |
@@ -514,7 +938,7 @@ jobs:
           trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
           export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
 
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker notification-delivery-worker
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -527,9 +951,16 @@ jobs:
             docker image inspect "$MAINTENANCE_IMAGE" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
           )" = "$MAINTENANCE_REVISION"
+          test "$(
+            docker image inspect "$NOTIFICATION_DELIVERY_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$NOTIFICATION_DELIVERY_REVISION"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version && pg_restore --version && test -f dist/src/maintenance-worker-main.js'
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint node notification-delivery-worker \
+            -e "const fs=require('node:fs'); require('@prisma/notification-delivery-client'); fs.accessSync('dist/src/main.js'); fs.accessSync('prisma/schema.prisma'); for (const path of ['dist/src/app.module.js','dist/src/messaging/notification-delivery-client.service.js','dist/src/outbox-publisher-main.js','public/widgets']) if (fs.existsSync(path)) throw new Error('Standalone image contains monolith artifact: '+path)"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node api-gateway \
             -e "require('./dist/src/config.js').loadConfig()"
@@ -538,6 +969,36 @@ jobs:
         env:
           RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
         run: pnpm run test:messaging-integration
+
+      - name: Create restricted Notification Delivery RabbitMQ user
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl add_user \
+              notification_delivery_ci notification_delivery_ci_password
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_permissions \
+              --vhost winwidget \
+              notification_delivery_ci \
+              '^$' \
+              '^(winwidget\.events|winwidget\.dead-letter)$' \
+              '^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.email|limit-notification\.email)(\..*)?$'
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_user_tags notification_delivery_ci
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl authenticate_user \
+              notification_delivery_ci notification_delivery_ci_password
+
+      - name: Notification Delivery commercial integration smoke
+        env:
+          NOTIFICATION_DELIVERY_INTEGRATION_ALLOW_PURGE: 'true'
+          NOTIFICATION_DELIVERY_TEST_IMAGE: ${{ env.NOTIFICATION_DELIVERY_IMAGE }}
+        run: |
+          if (( "$(sysctl -n net.ipv4.ip_unprivileged_port_start)" > 465 )); then
+            sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0 > /dev/null
+          fi
+          pnpm --dir apps/notification-delivery run test:integration
 
   deploy:
     needs: verify
@@ -584,6 +1045,9 @@ jobs:
               ;;
             maintenance)
               APP_ROOT="$APP_ROOT" bash scripts/deploy-maintenance-production.sh
+              ;;
+            notification-delivery)
+              APP_ROOT="$APP_ROOT" bash scripts/deploy-notification-delivery-production.sh
               ;;
             *)
               echo "Unsupported deploy target: $DEPLOY_TARGET" >&2

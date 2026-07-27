@@ -18,8 +18,6 @@ import {
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
-	BillingPeriod,
-	Plan,
 	type TelegramBotSettings,
 	type TelegramNotificationChannel,
 	type VerificationChallenge,
@@ -63,19 +61,6 @@ export type TelegramSupportBotWebhookUpdate = {
 };
 
 export type TelegramWebhookBot = 'info' | 'auth' | 'support';
-
-export interface PaymentSucceededNotification {
-	paymentId: string;
-	yookassaId: string;
-	amount: string;
-	plan: Plan;
-	billingPeriod: BillingPeriod;
-	userId: string;
-	userName: string | null;
-	email: string | null;
-	phone: string | null;
-	succeededAt: Date;
-}
 
 interface TelegramWebhookConfig {
 	bot: TelegramWebhookBot;
@@ -337,50 +322,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			messageThreadId
 		});
 		return true;
-	}
-
-	async sendPaymentSucceededNotification(
-		data: PaymentSucceededNotification
-	) {
-		const settings = await this.getOrCreateSettings();
-		const chatId = settings.dailySummaryChatId.trim();
-		const messageThreadId = settings.paymentsThreadId;
-		const token = process.env.TELEGRAM_INFO_BOT_TOKEN?.trim();
-
-		if (!chatId) {
-			throw new BadRequestException(
-				'Не настроен ID Telegram-группы для уведомлений о платежах'
-			);
-		}
-
-		if (!messageThreadId) {
-			throw new BadRequestException('Не настроен ID топика Payments');
-		}
-
-		if (!token) {
-			throw new BadRequestException(
-				TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED
-			);
-		}
-
-		const text = [
-			'<b>Новый успешный платёж</b>',
-			'',
-			`<b>Сумма:</b> ${this.escapeTelegramHtml(data.amount)} ₽`,
-			`<b>Тариф:</b> ${this.escapeTelegramHtml(this.getPaymentPlanLabel(data.plan))}`,
-			`<b>Период:</b> ${this.escapeTelegramHtml(this.getPaymentBillingPeriodLabel(data.billingPeriod))}`,
-			`<b>Пользователь:</b> ${this.escapeTelegramHtml(data.userName || '—')}`,
-			`<b>Email:</b> ${this.escapeTelegramHtml(data.email || '—')}`,
-			`<b>Телефон:</b> ${this.escapeTelegramHtml(data.phone || '—')}`,
-			`<b>ID пользователя:</b> <code>${this.escapeTelegramHtml(data.userId)}</code>`,
-			`<b>ID платежа:</b> <code>${this.escapeTelegramHtml(data.paymentId)}</code>`,
-			`<b>ID YooKassa:</b> <code>${this.escapeTelegramHtml(data.yookassaId)}</code>`,
-			`<b>Оплачен:</b> ${this.escapeTelegramHtml(this.formatMoscowDateTime(data.succeededAt))} МСК`
-		].join('\n');
-
-		await this.sendTelegramMessage(token, chatId, text, {
-			messageThreadId
-		});
 	}
 
 	async getNotificationStatus(userId: string) {
@@ -1716,48 +1657,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				`Telegram sendMessage failed: ${data?.description ?? `HTTP ${response.status}`}`
 			);
 		}
-	}
-
-	private getPaymentPlanLabel(plan: Plan) {
-		switch (plan) {
-			case Plan.TRIAL:
-				return 'Тест-драйв';
-			case Plan.EASY:
-				return 'Easy';
-			case Plan.HARD:
-				return 'Hard';
-			default:
-				return plan;
-		}
-	}
-
-	private getPaymentBillingPeriodLabel(billingPeriod: BillingPeriod) {
-		switch (billingPeriod) {
-			case BillingPeriod.MONTHLY:
-				return 'месяц';
-			case BillingPeriod.YEARLY:
-				return 'год';
-			default:
-				return billingPeriod;
-		}
-	}
-
-	private escapeTelegramHtml(value: string | number) {
-		return String(value)
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;');
-	}
-
-	private formatMoscowDateTime(date: Date) {
-		return date.toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow',
-			day: '2-digit',
-			month: '2-digit',
-			year: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit'
-		});
 	}
 
 	private normalizeScheduleTime(value: string, fallback: string) {

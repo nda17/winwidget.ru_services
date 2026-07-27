@@ -6,15 +6,10 @@ import {
 	ResolvedLeadIntegrationEventPayload
 } from '@/messaging/lead-integration-event';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
-import {
-	LimitReachedEmailEventPayload,
-	LimitReachedEventPayload,
-	LimitReachedTelegramEventPayload
-} from '@/messaging/limit-reached-event';
+import { LimitReachedTelegramEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import {
-	IntegrationKind,
-	LIMIT_REACHED_EMAIL_EVENT_TYPE,
+	MonolithIntegrationKind,
 	LIMIT_REACHED_TELEGRAM_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
@@ -35,7 +30,7 @@ type DeliveryEventPayload =
 	| LeadIntegrationEventPayload
 	| PaymentSucceededEventPayload
 	| MailingDeliveryEventPayload
-	| LimitReachedEventPayload
+	| LimitReachedTelegramEventPayload
 	| DailySummaryRequestedEventPayload;
 
 const MAILING_PROCESSING_LEASE_MS = 10 * 60 * 1000;
@@ -54,7 +49,7 @@ export class IntegrationDeliveryService {
 	) {}
 
 	async deliver(
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		event: DeliveryEventPayload,
 		eventId: string
 	): Promise<void> {
@@ -65,21 +60,16 @@ export class IntegrationDeliveryService {
 			);
 			return;
 		}
-		if (kind === 'payment-email' || kind === 'payment-telegram') {
-			const paymentEvent = this.getPaymentEvent(event);
-			if (kind === 'payment-email') {
-				await this.sendPaymentEmail(paymentEvent, eventId);
-			} else {
-				await this.sendPaymentTelegram(paymentEvent);
-			}
+		if (kind === 'payment-telegram') {
+			await this.sendPaymentTelegram(this.getPaymentEvent(event));
 			return;
 		}
 		if (kind === 'mailing-email' || kind === 'mailing-telegram') {
 			await this.sendMailingDelivery(kind, event, eventId);
 			return;
 		}
-		if (kind === 'limit-email' || kind === 'limit-telegram') {
-			await this.sendLimitReached(kind, event, eventId);
+		if (kind === 'limit-telegram') {
+			await this.sendLimitReachedTelegram(event);
 			return;
 		}
 
@@ -94,14 +84,8 @@ export class IntegrationDeliveryService {
 		}
 
 		switch (kind) {
-			case 'email':
-				await this.sendEmail(leadEvent, eventId);
-				return;
 			case 'webhook':
 				await this.sendWebhook(leadEvent, eventId);
-				return;
-			case 'telegram':
-				await this.sendTelegram(leadEvent);
 				return;
 			case 'bitrix24':
 				await this.sendBitrix24(leadEvent);
@@ -276,56 +260,28 @@ export class IntegrationDeliveryService {
 		}
 	}
 
-	private async sendLimitReached(
-		kind: 'limit-email' | 'limit-telegram',
-		event: DeliveryEventPayload,
-		eventId: string
+	private async sendLimitReachedTelegram(
+		event: DeliveryEventPayload
 	): Promise<void> {
-		const payload = event as LimitReachedEventPayload;
+		const payload = event as LimitReachedTelegramEventPayload;
 		if (
 			payload?.schemaVersion !== 2 ||
+			payload.eventType !== LIMIT_REACHED_TELEGRAM_EVENT_TYPE ||
 			!payload.entity?.id ||
 			!payload.entity?.name ||
-			!Number.isInteger(payload.limit)
-		) {
-			throw new Error('Invalid limit reached event payload');
-		}
-
-		if (kind === 'limit-email') {
-			const emailPayload = payload as LimitReachedEmailEventPayload;
-			if (
-				emailPayload.eventType !== LIMIT_REACHED_EMAIL_EVENT_TYPE ||
-				typeof emailPayload.destination?.email !== 'string' ||
-				!emailPayload.destination.email.trim()
-			) {
-				throw new Error('Invalid limit reached email event payload');
-			}
-			await this.emailService.sendLimitReachedNotification(
-				emailPayload.destination.email,
-				emailPayload.entity.name,
-				emailPayload.limit,
-				{
-					messageId: `<${eventId}.limit@winwidget.ru>`
-				}
-			);
-			return;
-		}
-
-		const telegramPayload = payload as LimitReachedTelegramEventPayload;
-		if (
-			telegramPayload.eventType !== LIMIT_REACHED_TELEGRAM_EVENT_TYPE ||
-			typeof telegramPayload.destination?.telegramChatId !== 'string' ||
-			!telegramPayload.destination.telegramChatId.trim()
+			!Number.isInteger(payload.limit) ||
+			typeof payload.destination?.telegramChatId !== 'string' ||
+			!payload.destination.telegramChatId.trim()
 		) {
 			throw new Error('Invalid limit reached Telegram event payload');
 		}
 		await this.sendTelegramMessage(
-			kind,
-			telegramPayload.destination.telegramChatId,
+			'limit-telegram',
+			payload.destination.telegramChatId,
 			[
 				[
 					'⚠️ <b>Лимит заявок исчерпан</b>',
-					`${this.escapeHtml(telegramPayload.entity.name)} принял последнюю заявку (${telegramPayload.limit} из ${telegramPayload.limit}).`,
+					`${this.escapeHtml(payload.entity.name)} принял последнюю заявку (${payload.limit} из ${payload.limit}).`,
 					'',
 					'Новые заявки больше не принимаются.',
 					'Для продолжения работы перейдите на платный тариф:',
@@ -505,29 +461,6 @@ export class IntegrationDeliveryService {
 		}
 	}
 
-	private async sendPaymentEmail(
-		event: PaymentSucceededEventPayload,
-		eventId: string
-	): Promise<void> {
-		if (!event.user.email) return;
-		await this.emailService.sendPaymentSucceededNotification(
-			event.user.email,
-			{
-				amount: event.payment.amount,
-				planLabel: this.getPlanLabel(event.payment.plan),
-				billingPeriodLabel: this.getBillingPeriodLabel(
-					event.payment.billingPeriod
-				),
-				expiresAtLabel: event.subscription.expiresAt
-					? this.formatMoscowDateTime(
-							new Date(event.subscription.expiresAt)
-						)
-					: null
-			},
-			eventId
-		);
-	}
-
 	private async sendPaymentTelegram(
 		event: PaymentSucceededEventPayload
 	): Promise<void> {
@@ -583,31 +516,6 @@ export class IntegrationDeliveryService {
 		});
 	}
 
-	private async sendEmail(
-		event: ResolvedLeadIntegrationEventPayload,
-		eventId: string
-	): Promise<void> {
-		const destination = event.destination.email;
-		if (!destination) throw new Error('Email destination is missing');
-
-		const detail = this.getDetail(event);
-		await this.emailService.sendLeadNotification(
-			destination,
-			{
-				widgetName: event.entity.name,
-				phone: event.lead.phone || undefined,
-				email: event.lead.email || undefined,
-				name: event.lead.name || undefined,
-				bonus: this.getOutcome(event) || undefined,
-				detailLabel: detail?.label,
-				detailValue: detail?.value,
-				url: event.lead.url || undefined,
-				date: new Date(event.lead.createdAt)
-			},
-			{ messageId: `<${eventId}@winwidget.ru>` }
-		);
-	}
-
 	private async sendWebhook(
 		event: ResolvedLeadIntegrationEventPayload,
 		eventId: string
@@ -630,19 +538,6 @@ export class IntegrationDeliveryService {
 					'X-WinWidget-Event-Id': eventId
 				}
 			}
-		);
-	}
-
-	private async sendTelegram(
-		event: ResolvedLeadIntegrationEventPayload
-	): Promise<void> {
-		const chatId = event.destination.telegramChatId;
-		if (!chatId) throw new Error('Telegram chat ID is missing');
-
-		await this.telegram.sendMessage(
-			chatId,
-			this.buildTelegramMessage(event),
-			{ parseMode: 'HTML' }
 		);
 	}
 
@@ -722,46 +617,6 @@ export class IntegrationDeliveryService {
 				headers: { Authorization: `Bearer ${token}` }
 			}
 		);
-	}
-
-	private buildTelegramMessage(
-		event: ResolvedLeadIntegrationEventPayload
-	): string {
-		const lines = [
-			'🎯 <b>Новая заявка</b>',
-			`Источник: ${this.escapeHtml(this.getSourceLabel(event))}`,
-			`Виджет: ${this.escapeHtml(event.entity.name)}`
-		];
-		const fields = [
-			['Имя', event.lead.name],
-			['Телефон', event.lead.phone],
-			['Email', event.lead.email],
-			['Контакт', event.lead.contact],
-			['Результат', this.getOutcome(event)],
-			['Время', event.lead.timeSlot],
-			['Часовой пояс', event.lead.timezone],
-			['Вопрос', event.lead.actionLabel],
-			['Ответ', event.lead.actionValue],
-			[
-				'Стоимость',
-				event.lead.calculatedPrice
-					? `${event.lead.calculatedPrice} ${event.lead.currency || ''}`.trim()
-					: null
-			],
-			['Страница', event.lead.url]
-		] as const;
-
-		for (const [label, value] of fields) {
-			if (value) {
-				lines.push(`${label}: ${this.escapeHtml(String(value))}`);
-			}
-		}
-		lines.push(
-			`Дата: ${new Date(event.lead.createdAt).toLocaleString('ru-RU', {
-				timeZone: 'Europe/Moscow'
-			})}`
-		);
-		return lines.join('\n');
 	}
 
 	private buildLeadTitle(

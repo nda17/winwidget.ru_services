@@ -38,6 +38,26 @@ export const INTEGRATION_KINDS = [
 
 export type IntegrationKind = (typeof INTEGRATION_KINDS)[number];
 
+export const NOTIFICATION_DELIVERY_KINDS = [
+	'email',
+	'telegram',
+	'payment-email',
+	'limit-email'
+] as const satisfies readonly IntegrationKind[];
+
+export type NotificationDeliveryKind =
+	(typeof NOTIFICATION_DELIVERY_KINDS)[number];
+
+export type MonolithIntegrationKind = Exclude<
+	IntegrationKind,
+	NotificationDeliveryKind
+>;
+
+export const MONOLITH_INTEGRATION_KINDS = INTEGRATION_KINDS.filter(
+	(kind): kind is MonolithIntegrationKind =>
+		!NOTIFICATION_DELIVERY_KINDS.includes(kind as NotificationDeliveryKind)
+);
+
 export const MAINTENANCE_KINDS = ['database-backup'] as const;
 
 export type MaintenanceKind = (typeof MAINTENANCE_KINDS)[number];

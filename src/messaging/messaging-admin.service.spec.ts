@@ -1,11 +1,23 @@
 import type { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
+import type { NotificationDeliveryClientService } from '@/messaging/notification-delivery-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import type { PrismaService } from '@/prisma.service';
-import { ConflictException } from '@nestjs/common';
+import {
+	BadRequestException,
+	ConflictException,
+	Logger
+} from '@nestjs/common';
 
 describe('MessagingAdminService', () => {
+	const notificationDelivery =
+		{} as unknown as NotificationDeliveryClientService;
+
+	afterEach(() => {
+		jest.restoreAllMocks();
+	});
+
 	it('queues a manual retry through the transactional Outbox', async () => {
 		const retryingAt = null;
 		const failure = {
@@ -47,7 +59,8 @@ describe('MessagingAdminService', () => {
 		};
 		const prisma = {
 			integrationDeliveryFailure: {
-				findUnique: jest.fn().mockResolvedValue(failure)
+				findUnique: jest.fn().mockResolvedValue(failure),
+				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
 			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
@@ -58,7 +71,8 @@ describe('MessagingAdminService', () => {
 			prisma,
 			{} as RabbitMqManagementService,
 			{} as LeadIntegrationDestinationService,
-			adminEventLog
+			adminEventLog,
+			notificationDelivery
 		);
 
 		const result = await service.retryFailure(failure.id, 'admin-1');
@@ -133,6 +147,9 @@ describe('MessagingAdminService', () => {
 			}
 		};
 		const prisma = {
+			integrationDeliveryFailure: {
+				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
+			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
 		const service = new MessagingAdminService(
@@ -141,7 +158,8 @@ describe('MessagingAdminService', () => {
 			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn()
-			} as unknown as AdminEventLogService
+			} as unknown as AdminEventLogService,
+			notificationDelivery
 		);
 
 		await expect(
@@ -155,7 +173,7 @@ describe('MessagingAdminService', () => {
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'payment-email',
+			integration: 'payment-telegram',
 			payload: {
 				schemaVersion: 1,
 				eventType: 'payment.succeeded.v1',
@@ -178,6 +196,9 @@ describe('MessagingAdminService', () => {
 			}
 		};
 		const prisma = {
+			integrationDeliveryFailure: {
+				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
+			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
 		const service = new MessagingAdminService(
@@ -186,7 +207,8 @@ describe('MessagingAdminService', () => {
 			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn()
-			} as unknown as AdminEventLogService
+			} as unknown as AdminEventLogService,
+			notificationDelivery
 		);
 
 		await expect(
@@ -231,7 +253,8 @@ describe('MessagingAdminService', () => {
 		};
 		const prisma = {
 			integrationDeliveryFailure: {
-				findUnique: jest.fn().mockResolvedValue(failure)
+				findUnique: jest.fn().mockResolvedValue(failure),
+				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
 			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
@@ -241,7 +264,8 @@ describe('MessagingAdminService', () => {
 			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn().mockResolvedValue({})
-			} as unknown as AdminEventLogService
+			} as unknown as AdminEventLogService,
+			notificationDelivery
 		);
 
 		await service.retryFailure(failure.id, 'admin-1');
@@ -315,6 +339,9 @@ describe('MessagingAdminService', () => {
 			}
 		};
 		const prisma = {
+			integrationDeliveryFailure: {
+				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
+			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
 		const adminEventLog = {
@@ -324,7 +351,8 @@ describe('MessagingAdminService', () => {
 			prisma,
 			{} as RabbitMqManagementService,
 			{} as LeadIntegrationDestinationService,
-			adminEventLog
+			adminEventLog,
+			notificationDelivery
 		);
 
 		const result = await service.closeFailure(
@@ -382,6 +410,11 @@ describe('MessagingAdminService', () => {
 			}
 		};
 		const prisma = {
+			integrationDeliveryFailure: {
+				findFirst: jest.fn().mockResolvedValue({
+					id: '22222222-2222-4222-8222-222222222222'
+				})
+			},
 			$transaction: jest.fn(async callback => callback(transaction))
 		} as unknown as PrismaService;
 		const service = new MessagingAdminService(
@@ -390,7 +423,8 @@ describe('MessagingAdminService', () => {
 			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn().mockResolvedValue({})
-			} as unknown as AdminEventLogService
+			} as unknown as AdminEventLogService,
+			notificationDelivery
 		);
 
 		await expect(
@@ -430,13 +464,17 @@ describe('MessagingAdminService', () => {
 		};
 		const service = new MessagingAdminService(
 			{
+				integrationDeliveryFailure: {
+					findFirst: jest.fn().mockResolvedValue({ id: failure.id })
+				},
 				$transaction: jest.fn(async callback => callback(transaction))
 			} as unknown as PrismaService,
 			{} as RabbitMqManagementService,
 			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn().mockResolvedValue({})
-			} as unknown as AdminEventLogService
+			} as unknown as AdminEventLogService,
+			notificationDelivery
 		);
 
 		await expect(
@@ -445,5 +483,111 @@ describe('MessagingAdminService', () => {
 		expect(
 			transaction.integrationDeliveryFailure.updateMany
 		).not.toHaveBeenCalled();
+	});
+
+	it('returns a successful remote retry when the global audit write fails', async () => {
+		const remoteResult = {
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId: '11111111-1111-4111-8111-111111111111',
+			integration: 'email' as const,
+			retryingAt: '2026-07-27T12:00:00.000Z'
+		};
+		const remote = {
+			retryFailure: jest.fn().mockResolvedValue(remoteResult)
+		} as unknown as NotificationDeliveryClientService;
+		const adminEventLog = {
+			record: jest.fn().mockRejectedValue(new Error('audit unavailable'))
+		} as unknown as AdminEventLogService;
+		const logger = jest
+			.spyOn(Logger.prototype, 'error')
+			.mockImplementation(() => undefined);
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findFirst: jest.fn().mockResolvedValue(null)
+				}
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as LeadIntegrationDestinationService,
+			adminEventLog,
+			remote
+		);
+
+		await expect(
+			service.retryFailure(remoteResult.id, 'admin-1')
+		).resolves.toEqual(remoteResult);
+		expect(adminEventLog.record).toHaveBeenCalledTimes(1);
+		expect(logger).toHaveBeenCalledWith(
+			expect.stringContaining(
+				'"event":"notification_delivery.global_audit_failed"'
+			)
+		);
+	});
+
+	it('returns a successful remote close when the global audit write fails', async () => {
+		const remoteResult = {
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId: '11111111-1111-4111-8111-111111111111',
+			integration: 'telegram' as const,
+			resolvedAt: '2026-07-27T12:00:00.000Z',
+			resolution: 'CLOSED_NO_RETRY' as const,
+			resolutionComment: 'Проверено вручную'
+		};
+		const remote = {
+			closeFailure: jest.fn().mockResolvedValue(remoteResult)
+		} as unknown as NotificationDeliveryClientService;
+		const adminEventLog = {
+			record: jest.fn().mockRejectedValue(new Error('audit unavailable'))
+		} as unknown as AdminEventLogService;
+		const logger = jest
+			.spyOn(Logger.prototype, 'error')
+			.mockImplementation(() => undefined);
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findFirst: jest.fn().mockResolvedValue(null)
+				}
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as LeadIntegrationDestinationService,
+			adminEventLog,
+			remote
+		);
+
+		await expect(
+			service.closeFailure(remoteResult.id, 'admin-1', 'Проверено вручную')
+		).resolves.toEqual(remoteResult);
+		expect(adminEventLog.record).toHaveBeenCalledTimes(1);
+		expect(logger).toHaveBeenCalledWith(
+			expect.stringContaining('"action":"CLOSE"')
+		);
+	});
+
+	it('rejects a merged failure window over 10000 before querying either store', async () => {
+		const localFindMany = jest.fn();
+		const localCount = jest.fn();
+		const remoteGetFailures = jest.fn();
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: localFindMany,
+					count: localCount
+				},
+				$transaction: jest.fn()
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as LeadIntegrationDestinationService,
+			{} as AdminEventLogService,
+			{
+				getFailures: remoteGetFailures
+			} as unknown as NotificationDeliveryClientService
+		);
+
+		await expect(service.getFailures(101, 100)).rejects.toBeInstanceOf(
+			BadRequestException
+		);
+		expect(localFindMany).not.toHaveBeenCalled();
+		expect(localCount).not.toHaveBeenCalled();
+		expect(remoteGetFailures).not.toHaveBeenCalled();
 	});
 });

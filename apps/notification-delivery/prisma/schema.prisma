@@ -1,0 +1,184 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/notification-delivery-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("NOTIFICATION_DELIVERY_DATABASE_URL")
+  schemas  = ["notification_delivery"]
+}
+
+model NotificationDeliveryReceipt {
+  id               String                            @id @default(uuid()) @db.Uuid
+  eventId          String                            @map("event_id") @db.Uuid
+  consumer         String
+  status           NotificationDeliveryReceiptStatus
+  lockedAt         DateTime?                         @map("locked_at")
+  lockedBy         String?                           @map("locked_by")
+  lockToken        String?                           @map("lock_token") @db.Uuid
+  leaseExpiresAt   DateTime?                         @map("lease_expires_at")
+  deliveredAt      DateTime?                         @map("delivered_at")
+  retryAttempt     Int?                              @map("retry_attempt")
+  retryAvailableAt DateTime?                         @map("retry_available_at")
+  retryToken       String?                           @map("retry_token") @db.Uuid
+  createdAt        DateTime                          @default(now()) @map("created_at")
+  updatedAt        DateTime                          @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer], map: "delivery_receipts_event_consumer_unique")
+  @@index([status, leaseExpiresAt], map: "delivery_receipts_lease_idx")
+  @@index([status, retryAvailableAt], map: "delivery_receipts_retry_idx")
+  @@index([consumer, deliveredAt], map: "delivery_receipts_consumer_delivered_idx")
+  @@map("delivery_receipts")
+  @@schema("notification_delivery")
+}
+
+model NotificationDeliveryFailure {
+  id                    String                                 @id @default(uuid()) @db.Uuid
+  eventId               String                                 @map("event_id") @db.Uuid
+  consumer              String
+  routingKey            String                                 @map("routing_key")
+  payload               Json
+  headers               Json                                   @default("{}")
+  attempts              Int
+  lastError             String                                 @map("last_error") @db.Text
+  category              NotificationDeliveryErrorCategory
+  normalizedCode        String                                 @map("normalized_code")
+  safeReason            String                                 @map("safe_reason") @db.Text
+  httpStatus            Int?                                   @map("http_status")
+  providerCode          String?                                @map("provider_code")
+  retryable             Boolean
+  classificationVersion Int                                    @map("classification_version")
+  firstFailedAt         DateTime                               @default(now()) @map("first_failed_at")
+  failedAt              DateTime                               @default(now()) @map("failed_at")
+  retryingAt            DateTime?                              @map("retrying_at")
+  activeRetryToken      String?                                @map("active_retry_token") @db.Uuid
+  resolvedAt            DateTime?                              @map("resolved_at")
+  resolution            NotificationDeliveryFailureResolution?
+  resolutionComment     String?                                @map("resolution_comment") @db.Text
+  resolvedById          String?                                @map("resolved_by_id")
+  createdAt             DateTime                               @default(now()) @map("created_at")
+  updatedAt             DateTime                               @updatedAt @map("updated_at")
+  controlActions        NotificationDeliveryControlAction[]
+
+  @@unique([eventId, consumer], map: "delivery_failures_event_consumer_unique")
+  @@index([resolvedAt, failedAt], map: "delivery_failures_status_idx")
+  @@index([consumer, resolvedAt], map: "delivery_failures_consumer_idx")
+  @@index([category, resolvedAt, failedAt], map: "delivery_failures_category_idx")
+  @@index([resolvedById], map: "delivery_failures_resolver_idx")
+  @@map("delivery_failures")
+  @@schema("notification_delivery")
+}
+
+model NotificationDeliveryControlAction {
+  id        String                                @id @default(uuid()) @db.Uuid
+  action    NotificationDeliveryControlActionKind
+  failureId String                                @map("failure_id") @db.Uuid
+  eventId   String                                @map("event_id") @db.Uuid
+  kind      String
+  actorId   String                                @map("actor_id")
+  comment   String?                               @db.Text
+  createdAt DateTime                              @default(now()) @map("created_at")
+  failure   NotificationDeliveryFailure           @relation(fields: [failureId], references: [id], onDelete: Restrict)
+
+  @@index([failureId, createdAt], map: "control_actions_failure_created_idx")
+  @@index([eventId, createdAt], map: "control_actions_event_created_idx")
+  @@index([actorId, createdAt], map: "control_actions_actor_created_idx")
+  @@map("control_actions")
+  @@schema("notification_delivery")
+}
+
+model NotificationDeliveryOutboxEvent {
+  id               String                           @id @default(uuid()) @db.Uuid
+  messageId        String                           @default(uuid()) @map("message_id") @db.Uuid
+  deduplicationKey String?                          @unique(map: "notification_outbox_events_deduplication_key_unique") @map("deduplication_key")
+  exchange         NotificationDeliveryExchange
+  eventType        String                           @map("event_type")
+  routingKey       String                           @map("routing_key")
+  payload          Json
+  headers          Json                             @default("{}")
+  status           NotificationDeliveryOutboxStatus @default(PENDING)
+  attempts         Int                              @default(0)
+  availableAt      DateTime                         @default(now()) @map("available_at")
+  lockedAt         DateTime?                        @map("locked_at")
+  lockedBy         String?                          @map("locked_by")
+  lockToken        String?                          @map("lock_token") @db.Uuid
+  leaseExpiresAt   DateTime?                        @map("lease_expires_at")
+  publishedAt      DateTime?                        @map("published_at")
+  lastError        String?                          @map("last_error") @db.Text
+  createdAt        DateTime                         @default(now()) @map("created_at")
+  updatedAt        DateTime                         @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt], map: "notification_outbox_events_dispatch_idx")
+  @@index([status, leaseExpiresAt], map: "notification_outbox_events_lease_idx")
+  @@index([messageId], map: "notification_outbox_events_message_id_idx")
+  @@index([publishedAt], map: "notification_outbox_events_published_idx")
+  @@map("outbox_events")
+  @@schema("notification_delivery")
+}
+
+model NotificationDeliveryHeartbeat {
+  id         String   @id @default(uuid()) @db.Uuid
+  service    String
+  instanceId String   @map("instance_id")
+  metadata   Json     @default("{}")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([service, instanceId], map: "heartbeats_service_instance_unique")
+  @@index([service, lastSeenAt], map: "heartbeats_service_seen_idx")
+  @@index([lastSeenAt], map: "heartbeats_seen_idx")
+  @@map("heartbeats")
+  @@schema("notification_delivery")
+}
+
+enum NotificationDeliveryReceiptStatus {
+  PROCESSING
+  RETRY_SCHEDULED
+  DELIVERED
+  DEAD_LETTERED
+  CLOSED_NO_RETRY
+
+  @@schema("notification_delivery")
+}
+
+enum NotificationDeliveryErrorCategory {
+  TRANSIENT
+  RATE_LIMIT
+  PERMANENT
+  AUTH_CONFIGURATION
+
+  @@schema("notification_delivery")
+}
+
+enum NotificationDeliveryFailureResolution {
+  DELIVERED
+  CLOSED_NO_RETRY
+
+  @@schema("notification_delivery")
+}
+
+enum NotificationDeliveryControlActionKind {
+  RETRY
+  CLOSE
+
+  @@schema("notification_delivery")
+}
+
+enum NotificationDeliveryOutboxStatus {
+  PENDING
+  PUBLISHING
+  PUBLISHED
+  FAILED
+
+  @@schema("notification_delivery")
+}
+
+enum NotificationDeliveryExchange {
+  EVENTS
+  DEAD_LETTER
+
+  @@schema("notification_delivery")
+}

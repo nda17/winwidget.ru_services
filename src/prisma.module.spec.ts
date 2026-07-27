@@ -135,7 +135,7 @@ describe('PrismaModule', () => {
 			.filter(
 				({ file, source }) =>
 					!allowedFiles.has(relative(sourceRoot, file)) &&
-					source.includes('PrismaService')
+					/\bPrismaService\b/.test(source)
 			)
 			.map(({ file }) => relative(sourceRoot, file));
 

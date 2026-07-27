@@ -1,4 +1,4 @@
-import EmailLayout from '@email/_components/email-layout';
+import EmailLayout from './_components/email-layout';
 import { Text } from '@react-email/components';
 import * as React from 'react';
 

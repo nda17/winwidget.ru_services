@@ -86,16 +86,20 @@ winwidget.ru_server/
 │   ├── calculator/            # Калькулятор
 │   ├── email/ и sms/          # уведомления и коды подтверждения
 │   ├── telegram-bot/          # три Telegram-бота и webhooks
-│   ├── messaging/             # RabbitMQ topology, consumers и Outbox contracts
+│   ├── messaging/             # RabbitMQ topology, monolith consumers и Outbox contracts
 │   ├── scheduled-jobs/        # durable-запуски, уникальность и CAS-lease
 │   ├── maintenance/           # длительные регламентные задачи и backup
 │   ├── file/                  # local/S3 uploads
 │   ├── safe-outbound-http/    # защита исходящих webhook/CRM-запросов
 │   └── ...                    # контент, статистика и admin-модули
-├── apps/api-gateway/          # отдельный внешний API ingress без бизнес-логики
-├── prisma/
-│   ├── schema.prisma
-│   └── migrations/
+├── apps/
+│   ├── api-gateway/           # отдельный внешний API ingress без бизнес-логики
+│   └── notification-delivery/ # автономный NestJS-сервис доставки
+│       ├── src/               # собственный bootstrap, modules и adapters
+│       ├── prisma/            # собственные schema, migrations и Prisma Client
+│       ├── emails/            # только принадлежащие сервису шаблоны
+│       └── Dockerfile         # image только с artifact сервиса
+├── prisma/                    # schema и migrations монолита
 ├── widgets-src/               # читаемые исходники runtime-виджетов
 ├── public/widgets/            # generated runtime-файлы, не коммитятся
 ├── emails/                    # React Email templates
@@ -103,6 +107,12 @@ winwidget.ru_server/
 ├── Dockerfile
 └── docker-entrypoint.sh
 ```
+
+Каталоги внутри `apps/` называются по capability без избыточного суффикса
+`-service`: `apps/notification-delivery`. В архитектурном реестре и package
+metadata компонент может называться `notification-delivery-service`, а
+Compose-процесс — `notification-delivery-worker`; это разные уровни именования,
+а не разные приложения.
 
 ## Правила модульной архитектуры
 
@@ -117,19 +127,19 @@ winwidget.ru_server/
 
 ## Основные модули
 
-| Область             | Модули                                                                                           | Ответственность                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
-| Авторизация         | `auth`, `user`                                                                                   | JWT, OAuth, Telegram auth, профиль и identities |
-| Подписки            | `subscription`, `tariff-prices`                                                                  | тарифы, лимиты, история и expiry                |
-| Платежи             | `payment`, `affiliate`                                                                           | ЮKassa, активация подписок и referrals          |
-| Виджеты             | `widget`, `quiz`, `callback`, `countdown-timer`, `stop-offer`, `online-consultant`, `calculator` | CRUD, config, leads и preview                   |
-| Контент             | `home-page-content`, `legal-pages`, `site-settings`                                              | главная, документы и настройки сайта            |
-| Администрирование   | `statistics`, `admin-alerts`, `admin-event-log`, `notes`, `mailing`, `health`, `dev-tools`       | dashboard, мониторинг и служебные действия      |
-| Уведомления         | `email`, `sms`, `telegram-bot`                                                                   | email, SMS и Telegram                           |
-| Messaging           | `messaging`, `outbox-publisher`, `integration-worker`                                            | RabbitMQ, Outbox, retry и DLQ                   |
-| Регламентные задачи | `scheduled-jobs`, `maintenance`                                                                  | durable scheduler, lease и backup               |
-| Файлы               | `file`                                                                                           | local uploads и S3                              |
-| Интеграции          | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                |
+| Область             | Модули                                                                                           | Ответственность                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------- |
+| Авторизация         | `auth`, `user`                                                                                   | JWT, OAuth, Telegram auth, профиль и identities     |
+| Подписки            | `subscription`, `tariff-prices`                                                                  | тарифы, лимиты, история и expiry                    |
+| Платежи             | `payment`, `affiliate`                                                                           | ЮKassa, активация подписок и referrals              |
+| Виджеты             | `widget`, `quiz`, `callback`, `countdown-timer`, `stop-offer`, `online-consultant`, `calculator` | CRUD, config, leads и preview                       |
+| Контент             | `home-page-content`, `legal-pages`, `site-settings`                                              | главная, документы и настройки сайта                |
+| Администрирование   | `statistics`, `admin-alerts`, `admin-event-log`, `notes`, `mailing`, `health`, `dev-tools`       | dashboard, мониторинг и служебные действия          |
+| Уведомления         | `email`, `sms`, `telegram-bot`                                                                   | email, SMS и Telegram                               |
+| Messaging           | `messaging`, `outbox-publisher`, `integration-worker`, `notification-delivery`                   | RabbitMQ, Outbox, retry, DLQ и доставка уведомлений |
+| Регламентные задачи | `scheduled-jobs`, `maintenance`                                                                  | durable scheduler, lease и backup                   |
+| Файлы               | `file`                                                                                           | local uploads и S3                                  |
+| Интеграции          | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                    |
 
 Единого `AdminModule` нет: административные endpoints находятся внутри
 соответствующих предметных модулей.
@@ -240,13 +250,16 @@ MODE=development -> DATABASE_URL_DEVELOPMENT
 MODE=production  -> DATABASE_URL_PRODUCTION
 ```
 
-Каждый Nest application context (`api`, `outbox-publisher`,
-`integration-worker`, `maintenance-worker`) импортирует глобальный
-`PrismaModule` и владеет ровно одним `PrismaClient`/connection pool.
-Feature-модули только внедряют `PrismaService` и не регистрируют его в
-собственных `providers` или `exports`. Root-модуль отключает свой Prisma client
-после завершения lifecycle-хуков процесса; API обрабатывает `SIGTERM` через
-Nest shutdown hooks.
+Каждый Nest application context владеет ровно одним глобальным Prisma
+module/client и одним connection pool. `api`, `outbox-publisher`,
+`integration-worker` и `maintenance-worker` используют
+`PrismaModule`/`PrismaService`. Автономный
+`apps/notification-delivery` использует собственный Prisma module и
+сгенерированный service client; его зависимости, сборка и Docker context не
+связаны с runtime artifact монолита.
+Feature-модули не регистрируют Prisma service повторно в собственных
+`providers` или `exports`. Root-модуль отключает свой client после завершения
+lifecycle-хуков процесса; API обрабатывает `SIGTERM` через Nest shutdown hooks.
 
 В production Maintenance получает отдельный
 `MAINTENANCE_DATABASE_URL_PRODUCTION`, а `pg_dump` — обязательный
@@ -255,14 +268,42 @@ Nest shutdown hooks.
 передаётся. Одноразовый `migrate` получает только
 `DATABASE_MIGRATION_URL_PRODUCTION`; runtime-роль API не используется для DDL.
 
+`notification-delivery-worker` владеет схемой PostgreSQL
+`notification_delivery` и использует отдельный Prisma Client. Для него
+обязательны две разные роли:
+
+- migration-role из `NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION` владеет
+  схемой и выполняет DDL только внутри неё, но не имеет database `CREATE`;
+- runtime-role из `NOTIFICATION_DELIVERY_DATABASE_URL` имеет только `CONNECT`,
+  `USAGE`, DML на service-таблицах и доступ к их sequences. Она не должна иметь
+  `CREATE` на database/schema и не может изменять или удалять схему.
+
+Первая migration автоматически отзывает у runtime/grantee доступ к служебной
+`notification_delivery._prisma_migrations`, сохраняя default CRUD grants только
+для рабочих таблиц сервиса. Сама schema создаётся bootstrap-процедурой до
+релиза: service migration не выполняет `CREATE SCHEMA` и проходит с
+`database CREATE=false`.
+
+Миграции сервиса нельзя запускать из runtime URL:
+
+```bash
+NOTIFICATION_DELIVERY_DATABASE_URL="$NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION" \
+  pnpm --dir apps/notification-delivery run prisma:migrate:deploy
+```
+
 Production compose отслеживается вместе с backend-кодом в
-`deploy/docker-compose.prod.yml`. Он запускает шесть постоянных
+`deploy/docker-compose.prod.yml`. Он запускает семь постоянных
 backend-контейнеров: `api-gateway`, `api`, `rabbitmq`, `outbox-publisher`,
-`integration-worker`, `maintenance-worker`. Maintenance собирается отдельным
-immutable image, имеет собственный loopback health endpoint на `4300` и может
-выкатываться независимо после первого baseline deploy. Контейнер `migrate`
-запускается только на время полного деплоя. PostgreSQL является внешней
-управляемой базой и в эти контейнеры не входит.
+`integration-worker`, `notification-delivery-worker`, `maintenance-worker`.
+Notification Delivery и Maintenance собираются в отдельные immutable images,
+имеют loopback health endpoints на `4401` и `4300` и могут выкатываться
+независимо после первого baseline deploy. Контейнеры миграций запускаются
+только на время деплоя. PostgreSQL является внешней управляемой базой и в эти
+контейнеры не входит.
+Image Notification Delivery собирается только из
+`apps/notification-delivery`: в нём есть только собственные `dist`, Prisma
+schema/client и production dependencies — без `dist`, Prisma client, виджетов
+или production dependencies монолита.
 RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
 привязаны только к `127.0.0.1` backend VPS.
 
@@ -292,7 +333,15 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram
+NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://notification_delivery_runtime:<password>@127.0.0.1:5432/winwidget?schema=notification_delivery
+NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
+NOTIFICATION_DELIVERY_LISTEN_HOST=127.0.0.1
+NOTIFICATION_DELIVERY_HEALTH_PORT=4401
+NOTIFICATION_DELIVERY_PREFETCH=5
+NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,limit-email
+NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS=90
+NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS=30
 MAINTENANCE_WORKER_KINDS=database-backup
 MAILING_EMAIL_RATE_PER_SECOND=5
 MAILING_TELEGRAM_RATE_PER_SECOND=10
@@ -310,6 +359,11 @@ volume. Полный preflight и permissions runbook находится в
 `deploy/backend/README.md`. Минимальный набор в
 `/opt/winwidget/deploy/backend/.env.production`:
 
+`NOTIFICATION_DELIVERY_IMAGE` и `NOTIFICATION_DELIVERY_REVISION` в этом файле
+не хранятся. Full и service-only deploy сами экспортируют соответственно
+`winwidget-notification-delivery:git-<полный-commit-SHA>` и полный commit SHA;
+так image tag и OCI revision всегда относятся к проверяемому релизу.
+
 ```env
 COMPOSE_PROJECT_NAME=winwidget
 RABBITMQ_DATA_VOLUME=<verified-existing-volume>
@@ -320,6 +374,7 @@ RABBITMQ_MONITOR_USER=winwidget-monitor
 RABBITMQ_MONITOR_PASSWORD=<отдельный-hex-пароль>
 RABBITMQ_PUBLISHER_URL=amqp://winwidget-publisher:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_INTEGRATION_WORKER_URL=amqp://winwidget-integration:<url-encoded-password>@127.0.0.1:5672/winwidget
+RABBITMQ_NOTIFICATION_DELIVERY_URL=amqp://winwidget-notification-delivery:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_MAINTENANCE_WORKER_URL=amqp://winwidget-maintenance:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
 OUTBOX_BATCH_SIZE=50
@@ -335,16 +390,28 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram
+NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://winwidget_notification_delivery_migration:<password>@<db-host>:5432/<database>?schema=notification_delivery
+NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://winwidget_notification_delivery_runtime:<password>@<db-host>:5432/<database>?schema=notification_delivery
+NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
+NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,limit-email
+NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS=90
+NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS=30
 MAINTENANCE_WORKER_KINDS=database-backup
 MAILING_EMAIL_RATE_PER_SECOND=5
 MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
-Production deploy останавливается до миграции, если service credentials,
-verified volume или полный точный список consumers не заданы. Старые
-API/workers останавливаются до Prisma migration, поэтому несовместимые версии
-схемы одновременно не работают.
+Оба Notification Delivery URL должны указывать на одинаковые protocol, host,
+port, database и SSL-параметры; различаются только login/password. Проверенные
+SSL query-параметры добавляются в оба URL одновременно.
+
+Production deploy завершается до изменения runtime, если service credentials,
+verified volume или полный точный список consumers не заданы. Additive
+Notification Delivery migration и privilege smoke выполняются до quiesce.
+Первый cutover запрещает одновременно переносить pending core migration, затем
+останавливает producers, дренирует четыре legacy-очереди и только после этого
+переключает RabbitMQ ownership на новый сервис.
 
 Назначение настроек:
 
@@ -387,6 +454,20 @@ Worker получает сообщения из RabbitMQ по push-модели 
 broker доставляет сообщение сам, а worker подтверждает обработку через `ack`.
 Pull-чтение (`basic.get`) для рабочих очередей не используется. Отдельный
 polling применяется только publisher-процессом при чтении PostgreSQL Outbox.
+
+Текущее владение messaging-процессами:
+
+| Процесс                        | Ответственность                                                                                                            |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `outbox-publisher`             | Публикация transactional Outbox монолита и создание RabbitMQ topology                                                      |
+| `notification-delivery-worker` | Только `email`, `telegram`, `payment-email`, `limit-email`; собственные receipts, failures, retry/DLQ Outbox и control API |
+| `integration-worker`           | `webhook`, `bitrix24`, `amo-crm`, `payment-telegram`, массовые email/Telegram, `limit-telegram`, daily summary             |
+| `maintenance-worker`           | Только durable backup-задачи и их scheduler/lease                                                                          |
+
+Один kind не должен одновременно находиться у `integration-worker` и
+`notification-delivery-worker`. Первичный Outbox остаётся в транзакции
+производящего домена, а сервис доставки владеет только состоянием выполнения
+своих уведомлений.
 
 Успешная оплата обрабатывается следующим образом:
 
@@ -567,9 +648,10 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 недоступности RabbitMQ или внешнего сервиса, но при аварии в момент внешнего
 запроса теоретически возможна повторная доставка.
 
-- worker хранит успешную пару `eventId + consumer` в
-  `integration_delivery_receipts` и не обрабатывает уже завершённую доставку
-  повторно;
+- оставшийся monolith integration worker хранит пару `eventId + consumer` в
+  `integration_delivery_receipts`, а Notification Delivery — в
+  `notification_delivery.delivery_receipts`; оба не обрабатывают уже
+  завершённую доставку повторно;
 - перед внешним вызовом worker атомарно захватывает receipt в состоянии
   `PROCESSING`; параллельный consumer не выполняет тот же вызов, а зависший
   claim можно восстановить по lease;
@@ -580,7 +662,8 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 - Telegram, Битрикс24 и amoCRM не предоставляют общей транзакции с нашей БД,
   поэтому абсолютная exactly-once гарантия для них технически невозможна;
 - старые receipts удаляются worker по
-  `INTEGRATION_RECEIPT_RETENTION_DAYS` ограниченными пакетами.
+  `INTEGRATION_RECEIPT_RETENTION_DAYS` или
+  `NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS` ограниченными пакетами.
 
 ### Production runbook
 
@@ -601,8 +684,8 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
    least-privilege permissions. Затем контейнер `migrate` применит миграции до
    запуска новой версии API и worker.
 5. Открыть `/admin/system` и `/admin/messaging`: RabbitMQ, publisher,
-   integration worker и maintenance worker должны иметь статус `Работает`, а
-   Outbox/DLQ — не накапливаться.
+   integration worker, Notification Delivery и maintenance worker должны иметь
+   статус `Работает`, а объединённые Outbox/DLQ — не накапливаться.
 
 Диагностика:
 
@@ -612,7 +695,8 @@ docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
 
 docker compose --env-file /opt/winwidget/deploy/backend/.env.production \
   -f /opt/winwidget/winwidget.ru_server/deploy/docker-compose.prod.yml \
-  logs --tail=200 outbox-publisher integration-worker maintenance-worker rabbitmq
+  logs --tail=200 outbox-publisher integration-worker \
+  notification-delivery-worker maintenance-worker rabbitmq
 ```
 
 Аварийные сценарии:
@@ -637,6 +721,21 @@ PostgreSQL, цепочки `Outbox → RabbitMQ`, `mandatory return`, маршр
 retry, `RabbitMQ → DLQ → PostgreSQL`, наличие очередей ежедневной сводки и
 backup, а также restart RabbitMQ с проверкой durable-сообщения и reconnect
 publisher/consumers.
+
+Отдельный app-local
+`pnpm --dir apps/notification-delivery run test:integration` запускается с
+реальными PostgreSQL, RabbitMQ и уже собранным production image Notification
+Delivery без переопределения его `CMD`. CI создаёт schema-owner migration-role и
+ограниченную runtime-role, применяет миграцию только первой ролью, а затем
+проверяет runtime CRUD/sequence-права и запрет `CREATE/ALTER/DROP SCHEMA`.
+Service подключается к RabbitMQ отдельным пользователем без configure-прав:
+положительные и отрицательные tests доказывают доступ только к собственным
+очередям и разрешённым exchanges. Smoke использует локальный TLS fake SMTP на
+`127.0.0.1:465` и покрывает success, полный transient retry
+`PENDING → PUBLISHED → DELIVERED`, terminal DLQ collection, duplicate, lease
+recovery, internal auth, полный manual retry и close. Реальные SMTP и Telegram
+endpoints в CI не вызываются; provider sandbox E2E остаётся отдельной
+pre-production проверкой.
 
 При неизвестном `MODE` или отсутствующей выбранной переменной backend
 завершает запуск с ошибкой.
@@ -873,6 +972,8 @@ durable-задач, S3, SMTP, SMS Aero, reCAPTCHA, ЮKassa и три Telegram-б
 corepack enable
 corepack prepare pnpm@9.15.9 --activate
 pnpm install --frozen-lockfile
+pnpm --dir apps/api-gateway install --frozen-lockfile
+pnpm --dir apps/notification-delivery install --frozen-lockfile
 ```
 
 ## Настройка окружения
@@ -892,21 +993,36 @@ pnpm prisma-generate
 pnpm dev
 ```
 
-Для полного локального messaging-контура сначала запустите RabbitMQ с
-пользователем и vhost из `.env`, затем соберите NestJS и в отдельных терминалах
-запустите четыре процесса:
+Для полного локального messaging-контура сначала:
+
+1. создайте схему `notification_delivery`, отдельные migration/runtime роли и
+   выдайте runtime-роли только `CONNECT`, schema `USAGE`, DML и sequence
+   privileges;
+2. примените service migration через migration-role;
+3. запустите RabbitMQ с пользователем и vhost из `.env`;
+4. соберите NestJS и запустите процессы в отдельных терминалах.
 
 ```bash
+NOTIFICATION_DELIVERY_DATABASE_URL="$NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION" \
+  pnpm --dir apps/notification-delivery run prisma:migrate:deploy
+
 pnpm build:app
+pnpm --dir apps/notification-delivery install --frozen-lockfile
+pnpm --dir apps/notification-delivery run build
 pnpm start:prod
 pnpm start:outbox-publisher
 pnpm start:integration-worker
+pnpm --dir apps/notification-delivery run start:local
 pnpm start:maintenance-worker
 ```
 
-Worker-команды запускают файлы из `dist`, поэтому после изменений их исходников
-нужно повторить `pnpm build:app`. HTTP API можно продолжать запускать через
-`pnpm dev`, если watch mode удобнее.
+Monolith worker-команды запускают файлы из корневого `dist`, поэтому после их
+изменений нужно повторить `pnpm build:app`. Notification Delivery собирается в
+свой `apps/notification-delivery/dist` и не попадает в корневую сборку. HTTP API
+можно продолжать запускать через `pnpm dev`, если watch mode удобнее. Для
+runtime запуска
+`NOTIFICATION_DELIVERY_DATABASE_URL` необходимо вернуть на URL ограниченной
+runtime-роли; migration URL сервису не передаётся.
 
 По `.env.example` backend доступен на:
 
@@ -932,11 +1048,13 @@ NestJS API использует `PORT=4200`.
 ```bash
 pnpm build
 pnpm --dir apps/api-gateway run build
+pnpm --dir apps/notification-delivery run build
 pnpm start:prod
 ```
 
 Результат NestJS-сборки находится в `dist`, runtime-виджеты — в
-`public/widgets`, Gateway — в `apps/api-gateway/dist`.
+`public/widgets`, Gateway — в `apps/api-gateway/dist`, Notification Delivery —
+в `apps/notification-delivery/dist`.
 
 ---
 
@@ -1077,6 +1195,7 @@ RABBITMQ_MONITOR_PASSWORD
 RABBITMQ_VHOST
 RABBITMQ_PUBLISHER_URL
 RABBITMQ_INTEGRATION_WORKER_URL
+RABBITMQ_NOTIFICATION_DELIVERY_URL
 RABBITMQ_MAINTENANCE_WORKER_URL
 RABBITMQ_MANAGEMENT_URL
 RABBITMQ_ASSERT_TOPOLOGY
@@ -1098,34 +1217,49 @@ MESSAGING_ACTIVITY_STALE_MS
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD
 INTEGRATION_RECEIPT_RETENTION_DAYS
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS
+NOTIFICATION_DELIVERY_DATABASE_URL
+NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
+NOTIFICATION_DELIVERY_INTERNAL_URL
+NOTIFICATION_DELIVERY_INTERNAL_TOKEN
+NOTIFICATION_DELIVERY_LISTEN_HOST
+NOTIFICATION_DELIVERY_HEALTH_PORT
+NOTIFICATION_DELIVERY_PREFETCH
+NOTIFICATION_DELIVERY_KINDS
+NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS
+NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS
 ```
 
 ---
 
 # Команды
 
-| Команда                            | Назначение                             |
-| ---------------------------------- | -------------------------------------- |
-| `pnpm dev`                         | Development server с watch mode        |
-| `pnpm build`                       | NestJS + runtime-виджеты               |
-| `pnpm build:app`                   | Только NestJS                          |
-| `pnpm build:widgets`               | Сборка и проверка runtime-виджетов     |
-| `pnpm start:prod`                  | Запуск собранного HTTP API             |
-| `pnpm start:outbox-publisher`      | Запуск собранного Outbox publisher     |
-| `pnpm start:integration-worker`    | Запуск собранного integration worker   |
-| `pnpm start:maintenance-worker`    | Запуск собранного maintenance worker   |
-| `pnpm exec tsc --noEmit`           | TypeScript check                       |
-| `pnpm lint`                        | ESLint с автоматическими исправлениями |
-| `pnpm format`                      | Форматирование исходников              |
-| `pnpm test`                        | Unit tests                             |
-| `pnpm test:watch`                  | Unit tests в watch mode                |
-| `pnpm test:cov`                    | Unit tests с coverage                  |
-| `pnpm test:messaging-integration`  | RabbitMQ/PostgreSQL integration smoke  |
-| `pnpm email`                       | React Email preview                    |
-| `pnpm prisma-generate`             | Генерация Prisma Client                |
-| `pnpm dev-prisma-migration`        | Применение development migrations      |
-| `pnpm jwt:keyset:generate -- ...`  | Генерация RSA 3072 keyset              |
-| `pnpm --dir apps/api-gateway test` | Unit/integration tests API Gateway     |
+| Команда                                                      | Назначение                             |
+| ------------------------------------------------------------ | -------------------------------------- |
+| `pnpm dev`                                                   | Development server с watch mode        |
+| `pnpm build`                                                 | NestJS + runtime-виджеты               |
+| `pnpm build:app`                                             | Только NestJS                          |
+| `pnpm build:widgets`                                         | Сборка и проверка runtime-виджетов     |
+| `pnpm start:prod`                                            | Запуск собранного HTTP API             |
+| `pnpm start:outbox-publisher`                                | Запуск собранного Outbox publisher     |
+| `pnpm start:integration-worker`                              | Запуск собранного integration worker   |
+| `pnpm start:maintenance-worker`                              | Запуск собранного maintenance worker   |
+| `pnpm exec tsc --noEmit`                                     | TypeScript check                       |
+| `pnpm lint`                                                  | ESLint с автоматическими исправлениями |
+| `pnpm format`                                                | Форматирование исходников              |
+| `pnpm test`                                                  | Unit tests                             |
+| `pnpm test:watch`                                            | Unit tests в watch mode                |
+| `pnpm test:cov`                                              | Unit tests с coverage                  |
+| `pnpm test:messaging-integration`                            | RabbitMQ/PostgreSQL integration smoke  |
+| `pnpm email`                                                 | React Email preview                    |
+| `pnpm prisma-generate`                                       | Генерация Prisma Client                |
+| `pnpm dev-prisma-migration`                                  | Применение development migrations      |
+| `pnpm jwt:keyset:generate -- ...`                            | Генерация RSA 3072 keyset              |
+| `pnpm --dir apps/api-gateway test`                           | Unit/integration tests API Gateway     |
+| `pnpm --dir apps/notification-delivery build`                | Сборка Notification Delivery           |
+| `pnpm --dir apps/notification-delivery lint`                 | ESLint Notification Delivery           |
+| `pnpm --dir apps/notification-delivery run start:local`      | Локальный запуск Notification Delivery |
+| `pnpm --dir apps/notification-delivery test`                 | Unit-тесты Notification Delivery       |
+| `pnpm --dir apps/notification-delivery run test:integration` | Изолированный DB/Rabbit/service smoke  |
 
 `pnpm lint` и `pnpm format` изменяют файлы.
 
@@ -1212,57 +1346,90 @@ NestJS production image использует multi-stage build:
 private JWT key, PostgreSQL или RabbitMQ credentials и слушает только
 `127.0.0.1:4100`. Maintenance собирается отдельным target/image, получает
 собственные DB/Rabbit credentials и публикует health только на
-`127.0.0.1:4300`.
+`127.0.0.1:4300`. Notification Delivery имеет отдельные `package.json`,
+lockfile, Prisma schema/client, NestJS build и Dockerfile в
+`apps/notification-delivery`; его production image не наследует root
+Dockerfile монолита и публикует health только на `127.0.0.1:4401`.
 
 ## CI/CD
 
 Workflow `.github/workflows/deploy-production.yml` запускается вручную или при
 push в ветку `prod`. Push выполняет полный deploy. Ручной запуск позволяет
-выбрать `all` либо `maintenance`; второй вариант использует изолированный
-rollout с автоматическим возвратом exact previous Maintenance image.
+выбрать `all`, `maintenance` либо `notification-delivery`; два последних
+варианта используют изолированный rollout с возвратом exact previous image.
 
 Verify выполняет:
 
 ```text
 pnpm install --frozen-lockfile
+pnpm --dir apps/notification-delivery install --frozen-lockfile
 pnpm exec prisma generate
+create migration/runtime Notification Delivery DB roles
 pnpm exec prisma migrate deploy
+NOTIFICATION_DELIVERY_DATABASE_URL=<migration-role-url> pnpm --dir apps/notification-delivery run prisma:migrate:deploy
 curl ... "$RABBITMQ_MANAGEMENT_URL/api/overview"
-pnpm exec tsc --noEmit
+pnpm exec tsc --noEmit --incremental false -p tsconfig.build.json
 pnpm exec jest --runInBand
+pnpm --dir apps/notification-delivery run typecheck
+pnpm --dir apps/notification-delivery run lint
+pnpm --dir apps/notification-delivery test
 docker compose ... config --quiet + semantic validation
 pnpm build
+pnpm --dir apps/notification-delivery run build
+compare monolith/app notification kinds, routing keys and queue names
 pnpm --dir apps/api-gateway run typecheck
 pnpm --dir apps/api-gateway test
-docker compose ... build api api-gateway maintenance-worker
+docker compose ... build api api-gateway maintenance-worker notification-delivery-worker
 pg_dump --version && pg_restore --version && maintenance entrypoint check
 pnpm run test:messaging-integration
+pnpm --dir apps/notification-delivery run test:integration
 ```
 
-Semantic compose validation проверяет точный набор шести постоянных сервисов,
-отдельные API/Gateway/Maintenance images, команды оставшихся worker-процессов,
-обязательные переменные и consumer kinds, healthcheck и ограниченный `tmpfs`
-maintenance worker.
+Semantic compose validation проверяет точный набор семи постоянных сервисов,
+отдельные API/Gateway/Maintenance/Notification Delivery images и revisions,
+автономный Docker context Notification Delivery без target/image монолита,
+команды оставшихся worker-процессов, точные consumer kinds, а отдельная
+contract-boundary проверка сравнивает producer/consumer routing keys и queue
+names без общей source-зависимости. Также проверяются обе пары
+`INTEGRATION_*`/`NOTIFICATION_DELIVERY_*` retention-настроек, healthchecks и
+ограниченный `tmpfs` maintenance worker.
 
 После успешного verify deploy по SSH:
 
 1. обновляет ветку `prod` через `git pull --ff-only`, требует чистый checkout и
    точное совпадение с проверенным `${{ github.sha }}`;
-2. собирает отдельные API, Gateway и Maintenance images с тегом и OCI revision
-   полного SHA commit;
-3. останавливает старые API/workers и запускает migration container с отдельной
-   migration-role без mixed-version окна;
-4. сохраняет verified Rabbit volume, запускает RabbitMQ, topology owner
-   Outbox publisher, integration/maintenance workers и API;
-5. ждёт readiness Maintenance, свежие heartbeat трёх worker-процессов, полный
-   набор main/DLQ consumers и отсутствие Rabbit alarm;
-6. сверяет revision через локальный
+2. собирает отдельные API, Gateway, Maintenance и Notification Delivery images
+   с тегом и OCI revision полного SHA commit; Notification Delivery собирается
+   только из `apps/notification-delivery`, а smoke проверяет отсутствие
+   monolith artifacts;
+3. применяет отдельную service-owned Notification Delivery migration
+   migration-ролью и проверяет DML/DDL-границу runtime-роли;
+4. при первом clean cutover останавливает producers, дожидается пустых четырёх
+   main/retry/DLQ-наборов и отсутствия активных старых receipts/failures;
+5. до durable marker запускает только изолированные API/workers без root
+   Outbox publisher и публичного Gateway, проверяет readiness, control API,
+   ownership consumers и повторно доказывает, что moved queues и собственные
+   receipts/failures/Outbox нового сервиса пусты;
+6. атомарно создаёт marker, переключает recovery только в forward-направление
+   и лишь затем включает Outbox publisher и публичный Gateway;
+7. ждёт readiness Maintenance и Notification Delivery, свежие heartbeat всех
+   worker-процессов, полный набор main/DLQ consumers и отсутствие Rabbit alarm;
+8. сверяет revision через локальный
    `http://127.0.0.1:4200/api/v1/health/deployment` и публичный
    `https://api.winwidget.ru/api/v1/health/deployment`;
-7. проверяет OCI-label и отсутствие рестартов у API, Outbox publisher,
-   integration worker и maintenance worker;
-8. при ошибке выводит последние логи и процессы, занимающие порты
-   `4100/4200/4300`.
+9. проверяет authenticated Notification Delivery overview, точное ownership
+   consumers, OCI-label и отсутствие рестартов;
+10. при ошибке выводит последние логи и процессы, занимающие порты
+    `4100/4200/4300/4401`.
+
+Первый переход всегда выполняется target `all`. До создания durable cutover
+marker скрипт восстанавливает прежние exact containers только когда пустота
+moved queues и service-owned state доказана повторно. Неоднозначное состояние
+останавливает recovery fail-closed без запуска двух владельцев одних очередей.
+Marker создаётся после readiness, authenticated control API и Rabbit ownership
+smoke изолированного forward-контура, но до запуска producer и публичного
+Gateway. Target `notification-delivery` разрешён только после этого baseline и
+не применяется для первого перехода.
 
 Production flow:
 

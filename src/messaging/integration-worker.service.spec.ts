@@ -1,5 +1,5 @@
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
-import { INTEGRATION_KINDS } from '@/messaging/messaging.constants';
+import { MONOLITH_INTEGRATION_KINDS } from '@/messaging/messaging.constants';
 import type { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import type { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
@@ -172,25 +172,25 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
-	it('starts consumers for every integration by default', async () => {
+	it('starts consumers only for integrations that remain in the monolith', async () => {
 		const { service, rabbitMq } = createService();
 
 		await service.onModuleInit();
 
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
-			INTEGRATION_KINDS.length
+			MONOLITH_INTEGRATION_KINDS.length
 		);
 		expect(rabbitMq.consumeDeadLetter).toHaveBeenCalledTimes(
-			INTEGRATION_KINDS.length
+			MONOLITH_INTEGRATION_KINDS.length
 		);
 		expect(
 			(rabbitMq.consume as jest.Mock).mock.calls.map(call => call[0])
-		).toEqual(INTEGRATION_KINDS);
+		).toEqual(MONOLITH_INTEGRATION_KINDS);
 	});
 
 	it('can restrict consumers without changing the worker image', async () => {
 		const { service, rabbitMq } = createService({
-			INTEGRATION_WORKER_KINDS: 'email, telegram',
+			INTEGRATION_WORKER_KINDS: 'webhook, amo-crm',
 			RABBITMQ_WORKER_PREFETCH: '4'
 		});
 
@@ -199,21 +199,31 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(2);
 		expect(rabbitMq.consume).toHaveBeenNthCalledWith(
 			1,
-			'email',
+			'webhook',
 			expect.any(Function),
 			4
 		);
 		expect(rabbitMq.consume).toHaveBeenNthCalledWith(
 			2,
-			'telegram',
+			'amo-crm',
 			expect.any(Function),
 			4
 		);
 	});
 
+	it('rejects kinds owned by notification delivery', async () => {
+		const { service } = createService({
+			INTEGRATION_WORKER_KINDS: 'webhook,email'
+		});
+
+		await expect(service.onModuleInit()).rejects.toThrow(
+			'INTEGRATION_WORKER_KINDS cannot include notification-delivery kinds: email'
+		);
+	});
+
 	it('rejects unknown integration names', async () => {
 		const { service } = createService({
-			INTEGRATION_WORKER_KINDS: 'email,unknown'
+			INTEGRATION_WORKER_KINDS: 'webhook,unknown'
 		});
 
 		await expect(service.onModuleInit()).rejects.toThrow(
@@ -1058,55 +1068,6 @@ describe('IntegrationWorkerService', () => {
 			payload,
 			'11111111-1111-4111-8111-111111111111'
 		);
-	});
-
-	it('accepts a current single-recipient limit event and rejects v1', () => {
-		const { service } = createService();
-		const message = createMessage();
-		message.content = Buffer.from(
-			JSON.stringify({
-				schemaVersion: 2,
-				eventType: 'lead.limit.reached.email.v2',
-				entity: {
-					id: 'widget-1',
-					name: 'Колесо',
-					type: 'widget'
-				},
-				limit: 100,
-				destination: { email: 'owner@example.com' }
-			})
-		);
-		message.fields.routingKey = 'lead.limit.reached.email.v2';
-		message.properties.type = 'lead.limit.reached.email.v2';
-
-		expect((service as any).parsePayload('limit-email', message)).toEqual(
-			expect.objectContaining({
-				schemaVersion: 2,
-				destination: { email: 'owner@example.com' }
-			})
-		);
-
-		message.content = Buffer.from(
-			JSON.stringify({
-				schemaVersion: 1,
-				eventType: 'lead.limit.reached.v1',
-				entity: {
-					id: 'widget-1',
-					name: 'Колесо',
-					type: 'widget'
-				},
-				limit: 100,
-				destinations: {
-					emails: ['owner@example.com'],
-					telegramChatId: null
-				}
-			})
-		);
-		message.fields.routingKey = 'lead.limit.reached.email.v1';
-		message.properties.type = 'lead.limit.reached.v1';
-		expect(() =>
-			(service as any).parsePayload('limit-email', message)
-		).toThrow('Unsupported messaging event type');
 	});
 
 	it('redacts only resolved failure details after configured retention', async () => {

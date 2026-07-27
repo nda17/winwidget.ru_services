@@ -1,6 +1,6 @@
 import { Text } from '@react-email/components';
 import * as React from 'react';
-import EmailLayout from '@email/_components/email-layout';
+import EmailLayout from './_components/email-layout';
 
 export interface LimitReachedEmailProps {
 	widgetName: string;

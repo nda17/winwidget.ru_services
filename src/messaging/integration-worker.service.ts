@@ -1,7 +1,11 @@
 import {
 	INTEGRATION_KINDS,
 	INTEGRATION_ROUTING_KEYS,
-	IntegrationKind
+	IntegrationKind,
+	MONOLITH_INTEGRATION_KINDS,
+	MonolithIntegrationKind,
+	NOTIFICATION_DELIVERY_KINDS,
+	NotificationDeliveryKind
 } from '@/messaging/messaging.constants';
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
@@ -9,7 +13,7 @@ import {
 	classifyIntegrationError,
 	IntegrationErrorClassification
 } from '@/messaging/integration-error-classifier';
-import { LimitReachedEventPayload } from '@/messaging/limit-reached-event';
+import { LimitReachedTelegramEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import {
 	createMessagingHeaders,
@@ -62,7 +66,7 @@ type WorkerEventPayload =
 	| LeadIntegrationEventPayload
 	| PaymentSucceededEventPayload
 	| MailingDeliveryEventPayload
-	| LimitReachedEventPayload
+	| LimitReachedTelegramEventPayload
 	| DailySummaryRequestedEventPayload;
 
 interface ScheduledJobStatusRow {
@@ -187,7 +191,7 @@ export class IntegrationWorkerService
 
 	private trackHandler(
 		handler: () => Promise<void>,
-		kind?: IntegrationKind,
+		kind?: MonolithIntegrationKind,
 		message?: ConsumeMessage
 	): Promise<void> {
 		const promise = handler().then(() => {
@@ -211,7 +215,7 @@ export class IntegrationWorkerService
 	}
 
 	private async handle(
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		message: ConsumeMessage
 	): Promise<void> {
 		const eventId = message.properties.messageId;
@@ -1061,7 +1065,7 @@ export class IntegrationWorkerService
 	}
 
 	private parsePayload(
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		message: ConsumeMessage
 	): WorkerEventPayload {
 		const value = JSON.parse(
@@ -1448,7 +1452,7 @@ export class IntegrationWorkerService
 	}
 
 	private async deliverWithRateLimit(
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		payload: WorkerEventPayload,
 		eventId: string
 	): Promise<void> {
@@ -1661,14 +1665,14 @@ export class IntegrationWorkerService
 			: 10;
 	}
 
-	private getEnabledKinds(): IntegrationKind[] {
+	private getEnabledKinds(): MonolithIntegrationKind[] {
 		const configured = this.configService
 			.get<string>('INTEGRATION_WORKER_KINDS')
 			?.split(',')
 			.map(value => value.trim())
 			.filter(Boolean);
 
-		if (!configured?.length) return [...INTEGRATION_KINDS];
+		if (!configured?.length) return [...MONOLITH_INTEGRATION_KINDS];
 
 		const invalid = configured.filter(
 			value => !INTEGRATION_KINDS.includes(value as IntegrationKind)
@@ -1679,6 +1683,17 @@ export class IntegrationWorkerService
 			);
 		}
 
-		return [...new Set(configured as IntegrationKind[])];
+		const extracted = configured.filter(value =>
+			NOTIFICATION_DELIVERY_KINDS.includes(
+				value as NotificationDeliveryKind
+			)
+		);
+		if (extracted.length) {
+			throw new Error(
+				`INTEGRATION_WORKER_KINDS cannot include notification-delivery kinds: ${extracted.join(', ')}`
+			);
+		}
+
+		return [...new Set(configured as MonolithIntegrationKind[])];
 	}
 }

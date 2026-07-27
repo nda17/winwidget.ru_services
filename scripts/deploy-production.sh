@@ -10,6 +10,9 @@ PUBLIC_HEALTHCHECK_URL="${PUBLIC_HEALTHCHECK_URL:-https://api.winwidget.ru/api/v
 READINESS_URL="${READINESS_URL:-http://127.0.0.1:4200/api/v1/health/ready}"
 GATEWAY_READINESS_URL="${GATEWAY_READINESS_URL:-http://127.0.0.1:4100/health/ready}"
 MAINTENANCE_READINESS_URL="${MAINTENANCE_READINESS_URL:-http://127.0.0.1:4300/health/ready}"
+NOTIFICATION_DELIVERY_READINESS_URL="${NOTIFICATION_DELIVERY_READINESS_URL:-http://127.0.0.1:4401/health/ready}"
+NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
+NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-cutover"
 HEALTHCHECK_ATTEMPTS="${HEALTHCHECK_ATTEMPTS:-30}"
 HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
 
@@ -36,11 +39,14 @@ export APP_REVISION="$deploy_revision"
 export APP_VERSION="git-$deploy_revision"
 export MAINTENANCE_REVISION="$deploy_revision"
 export MAINTENANCE_IMAGE="winwidget-maintenance:git-$deploy_revision"
+export NOTIFICATION_DELIVERY_REVISION="$deploy_revision"
+export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
 echo "Building gateway image: winwidget-api-gateway:$APP_VERSION"
 echo "Building maintenance image: $MAINTENANCE_IMAGE"
+echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -90,7 +96,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION)
+		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION)
 			continue
 			;;
 	esac
@@ -177,6 +183,8 @@ assert_distinct_database_roles() {
 	local migration_user
 	local maintenance_user
 	local backup_user
+	local notification_delivery_user
+	local notification_delivery_migration_user
 
 	api_user="$(get_database_username DATABASE_URL_PRODUCTION)"
 	migration_user="$(get_database_username DATABASE_MIGRATION_URL_PRODUCTION)"
@@ -184,14 +192,29 @@ assert_distinct_database_roles() {
 		get_database_username MAINTENANCE_DATABASE_URL_PRODUCTION
 	)"
 	backup_user="$(get_database_username DATABASE_BACKUP_URL)"
+	notification_delivery_user="$(
+		get_database_username NOTIFICATION_DELIVERY_DATABASE_URL
+	)"
+	notification_delivery_migration_user="$(
+		get_database_username NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
+	)"
 
 	if [[ "$api_user" == "$migration_user" ||
 		"$api_user" == "$maintenance_user" ||
 		"$api_user" == "$backup_user" ||
+		"$api_user" == "$notification_delivery_user" ||
+		"$api_user" == "$notification_delivery_migration_user" ||
 		"$migration_user" == "$maintenance_user" ||
 		"$migration_user" == "$backup_user" ||
-		"$maintenance_user" == "$backup_user" ]]; then
-		echo "API, migration, Maintenance runtime and backup must use four distinct PostgreSQL roles" >&2
+		"$migration_user" == "$notification_delivery_user" ||
+		"$migration_user" == "$notification_delivery_migration_user" ||
+		"$maintenance_user" == "$backup_user" ||
+		"$maintenance_user" == "$notification_delivery_user" ||
+		"$maintenance_user" == "$notification_delivery_migration_user" ||
+		"$backup_user" == "$notification_delivery_user" ||
+		"$backup_user" == "$notification_delivery_migration_user" ||
+		"$notification_delivery_user" == "$notification_delivery_migration_user" ]]; then
+		echo "API, core migration, Maintenance runtime, backup, notification delivery runtime and notification delivery migration must use six distinct PostgreSQL roles" >&2
 		exit 1
 	fi
 }
@@ -274,6 +297,8 @@ case "$mode" in
 		require_env_key "DATABASE_MIGRATION_URL_PRODUCTION"
 		require_env_key "MAINTENANCE_DATABASE_URL_PRODUCTION"
 		require_env_key "DATABASE_BACKUP_URL"
+		require_env_key "NOTIFICATION_DELIVERY_DATABASE_URL"
+		require_env_key "NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION"
 		require_env_key "PRODUCTION_HOST"
 		require_env_key "AUTH_COOKIE_DOMAIN"
 		require_env_key "COMPOSE_PROJECT_NAME"
@@ -285,19 +310,37 @@ case "$mode" in
 		require_env_key "RABBITMQ_PUBLISHER_URL"
 		require_env_key "RABBITMQ_INTEGRATION_WORKER_URL"
 		require_env_key "RABBITMQ_MAINTENANCE_WORKER_URL"
+		require_env_key "RABBITMQ_NOTIFICATION_DELIVERY_URL"
+		require_env_key "SMTP_SERVER"
+		require_env_key "SMTP_LOGIN"
+		require_env_key "SMTP_PASSWORD"
+		require_env_key "SMTP_CONNECTION_TIMEOUT_MS"
+		require_env_key "SMTP_GREETING_TIMEOUT_MS"
+		require_env_key "SMTP_SOCKET_TIMEOUT_MS"
+		require_env_key "TELEGRAM_INFO_BOT_TOKEN"
+		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_URL"
+		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_TOKEN"
+		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS"
+		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
 		require_env_key "MAINTENANCE_HEALTH_PORT"
+		require_env_key "NOTIFICATION_DELIVERY_HEALTH_PORT"
+		require_env_key "NOTIFICATION_DELIVERY_PREFETCH"
 		require_env_key "SCHEDULED_JOB_POLL_INTERVAL_MS"
 		require_env_key "SCHEDULED_JOB_LEASE_MS"
 		require_env_key "SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS"
 		require_env_key "INTEGRATION_WORKER_KINDS"
 		require_env_key "MAINTENANCE_WORKER_KINDS"
+		require_env_key "NOTIFICATION_DELIVERY_KINDS"
 		require_env_exact_list \
 			"INTEGRATION_WORKER_KINDS" \
-			"email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram"
+			"webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram"
 		require_env_exact_list \
 			"MAINTENANCE_WORKER_KINDS" \
 			"database-backup"
+		require_env_exact_list \
+			"NOTIFICATION_DELIVERY_KINDS" \
+			"email,telegram,payment-email,limit-email"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
 		require_env_key "PORT"
@@ -346,6 +389,56 @@ case "$mode" in
 			echo "Production MAINTENANCE_HEALTH_PORT must be 4300" >&2
 			exit 1
 		fi
+		if [[ "$(get_env_value NOTIFICATION_DELIVERY_HEALTH_PORT)" != "4401" ]]; then
+			echo "Production NOTIFICATION_DELIVERY_HEALTH_PORT must be 4401" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value NOTIFICATION_DELIVERY_LISTEN_HOST)" != "127.0.0.1" ]]; then
+			echo "Production NOTIFICATION_DELIVERY_LISTEN_HOST must be 127.0.0.1" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value NOTIFICATION_DELIVERY_INTERNAL_URL)" != "http://127.0.0.1:4401/internal/notification-delivery" ]]; then
+			echo "Production NOTIFICATION_DELIVERY_INTERNAL_URL must use the loopback notification delivery endpoint" >&2
+			exit 1
+		fi
+		notification_delivery_internal_token="$(
+			get_env_value NOTIFICATION_DELIVERY_INTERNAL_TOKEN
+		)"
+		if [[ "$notification_delivery_internal_token" == "XYZXYZXYZ" ||
+			"$notification_delivery_internal_token" == change_me* ||
+			${#notification_delivery_internal_token} -lt 32 ]]; then
+			echo "NOTIFICATION_DELIVERY_INTERNAL_TOKEN must be a non-placeholder value of at least 32 characters" >&2
+			exit 1
+		fi
+		notification_delivery_internal_timeout_ms="$(
+			get_env_value NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS || true
+		)"
+		notification_delivery_internal_timeout_ms="${notification_delivery_internal_timeout_ms:-5000}"
+		if [[ ! "$notification_delivery_internal_timeout_ms" =~ ^[0-9]+$ ]] ||
+			((notification_delivery_internal_timeout_ms < 500 ||
+				notification_delivery_internal_timeout_ms > 30000)); then
+			echo "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS must be between 500 and 30000" >&2
+			exit 1
+		fi
+		notification_delivery_prefetch="$(
+			get_env_value NOTIFICATION_DELIVERY_PREFETCH
+		)"
+		if [[ ! "$notification_delivery_prefetch" =~ ^[1-9][0-9]*$ ]] ||
+			((notification_delivery_prefetch > 100)); then
+			echo "NOTIFICATION_DELIVERY_PREFETCH must be between 1 and 100" >&2
+			exit 1
+		fi
+		for smtp_timeout_key in \
+			SMTP_CONNECTION_TIMEOUT_MS \
+			SMTP_GREETING_TIMEOUT_MS \
+			SMTP_SOCKET_TIMEOUT_MS; do
+			smtp_timeout_value="$(get_env_value "$smtp_timeout_key")"
+			if [[ ! "$smtp_timeout_value" =~ ^[0-9]+$ ]] ||
+				((smtp_timeout_value < 1000 || smtp_timeout_value > 60000)); then
+				echo "$smtp_timeout_key must be between 1000 and 60000" >&2
+				exit 1
+			fi
+		done
 		assert_distinct_database_roles
 		if [[ "$(get_env_value JWT_JWKS_URL)" != "http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json" ]]; then
 			echo "Production JWT_JWKS_URL must use the loopback Auth endpoint" >&2
@@ -396,6 +489,14 @@ fi
 rabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"
 if [[ "$rabbitmq_vhost" != "winwidget" ]]; then
 	echo "RABBITMQ_VHOST must be winwidget, got: ${rabbitmq_vhost:-empty}" >&2
+	exit 1
+fi
+rabbitmq_management_url="$(
+	get_env_value "RABBITMQ_MANAGEMENT_URL" || true
+)"
+rabbitmq_management_url="${rabbitmq_management_url:-http://127.0.0.1:15672}"
+if [[ "$rabbitmq_management_url" != "http://127.0.0.1:15672" ]]; then
+	echo "RABBITMQ_MANAGEMENT_URL must use the loopback production endpoint" >&2
 	exit 1
 fi
 rabbitmq_data_volume="$(get_env_value "RABBITMQ_DATA_VOLUME" || true)"
@@ -449,8 +550,471 @@ compose_target() {
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-compose_target --profile migration config --quiet
-compose_target build api api-gateway maintenance-worker
+compose_notification_cutover() {
+	docker compose --project-name "$NOTIFICATION_DELIVERY_CUTOVER_PROJECT" \
+		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+verify_notification_delivery_image_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"$NOTIFICATION_DELIVERY_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of [
+	"dist/src/main.js",
+	"prisma/schema.prisma",
+]) {
+	fs.accessSync(required);
+}
+require("@prisma/notification-delivery-client");
+for (const forbidden of [
+	"dist/src/app.module.js",
+	"dist/src/messaging/notification-delivery-client.service.js",
+	"dist/src/outbox-publisher-main.js",
+	"public/widgets",
+]) {
+	if (fs.existsSync(forbidden)) {
+		throw new Error(
+			`Notification Delivery image contains monolith artifact: ${forbidden}`,
+		);
+	}
+}
+process.stdout.write("Standalone Notification Delivery image artifact verified\n");
+'
+}
+
+compose_target \
+	--profile migration \
+	--profile notification-delivery-migration \
+	config --quiet
+compose_target build \
+	api \
+	api-gateway \
+	maintenance-worker \
+	notification-delivery-worker
+verify_notification_delivery_image_artifact
+
+validate_notification_database_urls() {
+	local parser_image="$1"
+	local runtime_url
+	local migration_url
+
+	runtime_url="$(get_env_value NOTIFICATION_DELIVERY_DATABASE_URL)"
+	migration_url="$(
+		get_env_value NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
+	)"
+
+	if ! printf '%s\n%s\n' "$runtime_url" "$migration_url" |
+		docker run --rm -i --network none \
+			--entrypoint node \
+			"$parser_image" \
+			-e '
+const { readFileSync } = require("node:fs");
+
+const fail = message => {
+	process.stderr.write(`${message}\n`);
+	process.exit(1);
+};
+const input = readFileSync(0, "utf8");
+const lines = input.endsWith("\n")
+	? input.slice(0, -1).split("\n")
+	: input.split("\n");
+if (lines.length !== 2 || lines.some(value => !value)) {
+	fail("Notification delivery PostgreSQL URLs are missing or contain a newline");
+}
+
+const parse = (value, label) => {
+	let url;
+	try {
+		url = new URL(value);
+	} catch {
+		fail(`${label} is not a valid URL`);
+	}
+	if (!["postgres:", "postgresql:"].includes(url.protocol)) {
+		fail(`${label} must use postgres or postgresql`);
+	}
+	if (
+		!url.hostname ||
+		!url.username ||
+		!url.password ||
+		url.hash ||
+		(url.port && !/^[0-9]+$/.test(url.port))
+	) {
+		fail(`${label} must contain explicit credentials, host and a valid port`);
+	}
+
+	let username;
+	let database;
+	try {
+		username = decodeURIComponent(url.username);
+		database = decodeURIComponent(url.pathname.slice(1));
+	} catch {
+		fail(`${label} contains invalid percent-encoding`);
+	}
+	if (
+		!username ||
+		!/^[A-Za-z0-9._-]+$/.test(username) ||
+		!database ||
+		database.includes("/")
+	) {
+		fail(`${label} contains an invalid role or database name`);
+	}
+
+	const schemas = url.searchParams.getAll("schema");
+	if (
+		schemas.length !== 1 ||
+		schemas[0] !== "notification_delivery"
+	) {
+		fail(`${label} must contain exactly schema=notification_delivery`);
+	}
+
+	const ssl = [...url.searchParams.entries()]
+		.filter(([key]) => {
+			const normalized = key.toLowerCase();
+			return (
+				normalized.startsWith("ssl") ||
+				normalized === "channel_binding"
+			);
+		})
+		.map(([key, entryValue]) => [
+			key.toLowerCase(),
+			entryValue,
+		])
+		.sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+			leftKey === rightKey
+				? leftValue.localeCompare(rightValue)
+				: leftKey.localeCompare(rightKey),
+		);
+
+	return {
+		protocol: url.protocol,
+		host: url.hostname.toLowerCase(),
+		port: url.port || "5432",
+		database,
+		username,
+		ssl: JSON.stringify(ssl),
+	};
+};
+
+const runtime = parse(lines[0], "NOTIFICATION_DELIVERY_DATABASE_URL");
+const migration = parse(
+	lines[1],
+	"NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION",
+);
+for (const key of ["protocol", "host", "port", "database", "ssl"]) {
+	if (runtime[key] !== migration[key]) {
+		fail(
+			"Notification delivery runtime and migration URLs must target the same protocol, host, port, database and SSL settings",
+		);
+	}
+}
+if (runtime.username === migration.username) {
+	fail("Notification delivery runtime and migration URLs must use distinct roles");
+}
+process.stdout.write("Notification delivery PostgreSQL URL structure validated\n");
+'; then
+		exit 1
+	fi
+}
+
+normalize_csv() {
+	tr ',' '\n' <<<"$1" |
+		sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+		sed '/^$/d' |
+		LC_ALL=C sort -u |
+		paste -sd, -
+}
+
+container_env_value() {
+	local container_id="$1"
+	local key="$2"
+
+	docker inspect --format '{{ range .Config.Env }}{{ println . }}{{ end }}' \
+		"$container_id" |
+		awk -F= -v key="$key" '
+			$1 == key {
+				sub(/^[^=]*=/, "")
+				print
+				found = 1
+				exit
+			}
+			END { exit(found ? 0 : 1) }
+		'
+}
+
+validate_notification_cutover_marker() {
+	local marker_mode
+	local marker_owner
+
+	if [[ ! -f "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
+		-L "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ]]; then
+		return 1
+	fi
+	marker_mode="$(stat -c '%a' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER")"
+	marker_owner="$(stat -c '%u' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER")"
+	if [[ "$marker_mode" != "600" ||
+		"$marker_owner" != "$(id -u)" ]]; then
+		return 1
+	fi
+	awk '
+		NR == 1 && $0 ~ /^revision=[0-9a-f]{40}$/ { revision = 1; next }
+		NR == 2 &&
+			$0 ~ /^created_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ {
+			created = 1
+			next
+		}
+		{ invalid = 1 }
+		END {
+			exit(revision && created && NR == 2 && !invalid ? 0 : 1)
+		}
+	' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER"
+}
+
+validate_notification_database_urls "winwidget-api:$APP_VERSION"
+
+notification_migration_files="$(
+	git -C "$server_root" ls-files \
+		'apps/notification-delivery/prisma/migrations/*/migration.sql'
+)"
+if [[ -z "$notification_migration_files" ]]; then
+	echo "No versioned notification delivery migration was found." >&2
+	exit 1
+fi
+while IFS= read -r notification_migration_file; do
+	[[ -n "$notification_migration_file" ]] || continue
+	if [[ "$notification_migration_file" == \
+		"apps/notification-delivery/prisma/migrations/20260727000000_init_notification_delivery/migration.sql" ]]; then
+		if grep -Eiq \
+			'(^|[[:space:]])CREATE[[:space:]]+(SCHEMA|EXTENSION)([[:space:]]|$)' \
+			"$server_root/$notification_migration_file"; then
+			echo "Initial Notification Delivery migration must use the pre-provisioned schema without database CREATE privileges." >&2
+			exit 1
+		fi
+		continue
+	fi
+	if ! awk '
+		BEGIN { RS = ";"; failed = 0 }
+		{
+			statement = $0
+			gsub(/--[^\n]*/, "", statement)
+			gsub(/[[:space:]]+/, " ", statement)
+			sub(/^[[:space:]]+/, "", statement)
+			sub(/[[:space:]]+$/, "", statement)
+			if (statement == "") next
+			upper = toupper(statement)
+			if (
+				upper ~ /^CREATE (TYPE|TABLE|INDEX|UNIQUE INDEX) / ||
+				upper ~ /^ALTER TYPE .* ADD VALUE /
+			) next
+			if (
+				upper ~ /^ALTER TABLE .* ADD COLUMN / &&
+				upper !~ / NOT NULL/ &&
+				upper !~ / DEFAULT / &&
+				upper !~ / UNIQUE/ &&
+				upper !~ / PRIMARY KEY/ &&
+				upper !~ / REFERENCES / &&
+				upper !~ / CHECK[[:space:]]*\(/ &&
+				upper !~ / GENERATED / &&
+				upper !~ / IDENTITY/
+			) next
+			failed = 1
+		}
+		END { exit(failed ? 1 : 0) }
+	' "$server_root/$notification_migration_file"; then
+		echo "Notification delivery migration is not provably additive: $notification_migration_file" >&2
+		echo "Production notification migrations must follow the expand/contract policy." >&2
+		exit 1
+	fi
+done <<<"$notification_migration_files"
+
+notification_delivery_first_cutover=false
+notification_forward_candidate_active=false
+notification_cutover_marker_revision=""
+notification_cutover_candidate_services=(
+	outbox-publisher
+	integration-worker
+	maintenance-worker
+	notification-delivery-worker
+	api
+	api-gateway
+)
+notification_cutover_pre_marker_services=(
+	integration-worker
+	maintenance-worker
+	notification-delivery-worker
+	api
+)
+notification_delivery_container_ids="$(
+	compose_target ps -a -q notification-delivery-worker 2>/dev/null || true
+)"
+running_notification_delivery_container_id="$(
+	compose_target ps --status running -q notification-delivery-worker \
+		2>/dev/null || true
+)"
+current_integration_container_id="$(
+	compose_target ps --status running -q integration-worker 2>/dev/null || true
+)"
+notification_cutover_candidate_ids="$(
+	compose_notification_cutover ps -a -q \
+		"${notification_cutover_candidate_services[@]}" 2>/dev/null || true
+)"
+narrow_integration_kinds="$(
+	normalize_csv \
+		"webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram"
+)"
+broad_integration_kinds="$(
+	normalize_csv \
+		"email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram"
+)"
+
+if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
+	-L "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ]]; then
+	if ! validate_notification_cutover_marker; then
+		echo "Notification delivery cutover marker has invalid type, ownership, mode or content." >&2
+		exit 1
+	fi
+	notification_cutover_marker_revision="$(
+		sed -n 's/^revision=//p' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER"
+	)"
+
+	candidate_topology_complete=true
+	for service in "${notification_cutover_candidate_services[@]}"; do
+		candidate_service_id="$(
+			compose_notification_cutover ps --status running -q "$service" \
+				2>/dev/null || true
+		)"
+		if [[ -z "$candidate_service_id" ||
+			"$candidate_service_id" == *$'\n'* ]]; then
+			candidate_topology_complete=false
+			break
+		fi
+	done
+	if [[ "$candidate_topology_complete" == "true" ]]; then
+		if [[ -n "$current_integration_container_id" ]]; then
+			echo "Both canonical and forward-candidate integration workers are running after cutover." >&2
+			exit 1
+		fi
+		candidate_integration_container_id="$(
+			compose_notification_cutover ps --status running -q integration-worker
+		)"
+		candidate_integration_kinds="$(
+			container_env_value \
+				"$candidate_integration_container_id" \
+				INTEGRATION_WORKER_KINDS || true
+		)"
+		if [[ "$(normalize_csv "$candidate_integration_kinds")" != "$narrow_integration_kinds" ]]; then
+			echo "Forward cutover topology has an unexpected integration kind set." >&2
+			exit 1
+		fi
+		notification_forward_candidate_active=true
+	elif [[ -n "$notification_cutover_candidate_ids" ]]; then
+		echo "Cutover marker exists, but the saved forward-candidate topology is incomplete." >&2
+		echo "Do not remove its containers; restore the complete forward topology before retrying." >&2
+		exit 1
+	else
+		if [[ -z "$running_notification_delivery_container_id" ||
+			"$running_notification_delivery_container_id" == *$'\n'* ||
+			-z "$current_integration_container_id" ||
+			"$current_integration_container_id" == *$'\n'* ]]; then
+			echo "Cutover marker exists, but neither canonical nor saved forward topology is complete." >&2
+			echo "Resolve the topology manually; forward-only cutover state cannot be inferred safely." >&2
+			exit 1
+		fi
+		current_integration_kinds="$(
+			container_env_value \
+				"$current_integration_container_id" \
+				INTEGRATION_WORKER_KINDS || true
+		)"
+		if [[ "$(normalize_csv "$current_integration_kinds")" != "$narrow_integration_kinds" ]]; then
+			echo "Cutover marker exists, but the live integration worker still owns an unexpected kind set." >&2
+			echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
+			exit 1
+		fi
+	fi
+else
+	if [[ -n "$notification_cutover_candidate_ids" ]]; then
+		echo "Forward cutover containers exist without the durable marker." >&2
+		echo "Restore the exact legacy containers or remove only the verified stale cutover project." >&2
+		exit 1
+	fi
+	if [[ -n "$notification_delivery_container_ids" ]]; then
+		echo "Notification delivery container state exists without the durable cutover marker." >&2
+		echo "This is ambiguous. Remove only the verified stale candidate or restore the marker manually after an ownership audit." >&2
+		exit 1
+	fi
+	if [[ -z "$current_integration_container_id" ||
+		"$current_integration_container_id" == *$'\n'* ]]; then
+		echo "Exactly one running legacy integration worker is required before the first cutover." >&2
+		exit 1
+	fi
+	current_integration_kinds="$(
+		container_env_value \
+			"$current_integration_container_id" \
+			INTEGRATION_WORKER_KINDS || true
+	)"
+	if [[ "$(normalize_csv "$current_integration_kinds")" != "$broad_integration_kinds" ]]; then
+		echo "Cutover marker is missing and the live integration worker is not the exact legacy owner." >&2
+		echo "Refusing to guess whether a previous cutover partially completed." >&2
+		exit 1
+	fi
+	current_integration_rabbit_url="$(
+		container_env_value \
+			"$current_integration_container_id" \
+			RABBITMQ_URL || true
+	)"
+	current_outbox_container_id="$(
+		compose_target ps --status running -q outbox-publisher 2>/dev/null || true
+	)"
+	if [[ -z "$current_outbox_container_id" ||
+		"$current_outbox_container_id" == *$'\n'* ]]; then
+		echo "Exactly one running legacy Outbox publisher is required before the first cutover." >&2
+		exit 1
+	fi
+	current_outbox_rabbit_url="$(
+		container_env_value \
+			"$current_outbox_container_id" \
+			RABBITMQ_URL || true
+	)"
+	if [[ "$current_integration_rabbit_url" != "$(get_env_value RABBITMQ_INTEGRATION_WORKER_URL)" ||
+		"$current_outbox_rabbit_url" != "$(get_env_value RABBITMQ_PUBLISHER_URL)" ]]; then
+		echo "First cutover cannot rotate the live legacy integration or Outbox RabbitMQ credentials." >&2
+		echo "Deploy the credential rotation separately, then retry the full notification cutover." >&2
+		exit 1
+	fi
+	if ss -H -ltn '( sport = :4401 )' | grep -q .; then
+		echo "Port 4401 is already listening before the first notification delivery candidate starts." >&2
+		exit 1
+	fi
+	notification_delivery_first_cutover=true
+fi
+
+if [[ "$notification_forward_candidate_active" == "true" ]]; then
+	if ! git -C "$server_root" cat-file -e \
+		"${notification_cutover_marker_revision}^{commit}" 2>/dev/null; then
+		echo "The saved forward cutover revision is not available in this checkout." >&2
+		echo "Fetch the marker revision before attempting canonical handoff." >&2
+		exit 1
+	fi
+	if ! git -C "$server_root" merge-base --is-ancestor \
+		"$notification_cutover_marker_revision" "$deploy_revision"; then
+		echo "The current revision is not a descendant of the saved forward cutover revision." >&2
+		echo "Canonicalize the marker revision before deploying a divergent history." >&2
+		exit 1
+	fi
+	forward_recovery_schema_changes="$(
+		git -C "$server_root" diff --name-only \
+			"$notification_cutover_marker_revision" "$deploy_revision" -- \
+			prisma/migrations \
+			apps/notification-delivery/prisma/migrations
+	)"
+	if [[ -n "$forward_recovery_schema_changes" ]]; then
+		echo "A saved forward topology cannot protect a deployment that changes PostgreSQL migrations." >&2
+		echo "Canonicalize the marker revision first, then deploy the newer migrations:" >&2
+		printf '%s\n' "$forward_recovery_schema_changes" >&2
+		exit 1
+	fi
+fi
 
 gateway_validation_env=()
 for key in \
@@ -710,6 +1274,9 @@ integration_credentials="$(
 maintenance_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_MAINTENANCE_WORKER_URL"
 )"
+notification_delivery_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_NOTIFICATION_DELIVERY_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -723,6 +1290,14 @@ maintenance_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$maintenance_credentials")" | base64 --decode
 )"
 maintenance_password_base64="$(sed -n '2p' <<<"$maintenance_credentials")"
+notification_delivery_user="$(
+	printf '%s' \
+		"$(sed -n '1p' <<<"$notification_delivery_credentials")" |
+		base64 --decode
+)"
+notification_delivery_password_base64="$(
+	sed -n '2p' <<<"$notification_delivery_credentials"
+)"
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -736,6 +1311,7 @@ service_users=(
 	"$publisher_user"
 	"$integration_user"
 	"$maintenance_user"
+	"$notification_delivery_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -884,12 +1460,16 @@ provision_rabbitmq_user \
 	'^winwidget\..*' \
 	'^winwidget\..*' \
 	''
+integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram|mailing\..*|limit-notification\.telegram|report\.daily-summary\.telegram)(\..*)?$'
+if [[ "$notification_delivery_first_cutover" == "true" ]]; then
+	integration_worker_read_pattern='^winwidget\.(lead-integration|payment-notification|mailing|limit-notification|report)\..*'
+fi
 provision_rabbitmq_user \
 	"$integration_user" \
 	"$integration_password_base64" \
 	'^$' \
 	'^(winwidget\.retry|winwidget\.dead-letter)$' \
-	'^winwidget\.(lead-integration|payment-notification|mailing|limit-notification|report)\..*' \
+	"$integration_worker_read_pattern" \
 	''
 provision_rabbitmq_user \
 	"$maintenance_user" \
@@ -897,6 +1477,13 @@ provision_rabbitmq_user \
 	'^$' \
 	'^(winwidget\.retry|winwidget\.dead-letter)$' \
 	'^winwidget\.maintenance\..*' \
+	''
+provision_rabbitmq_user \
+	"$notification_delivery_user" \
+	"$notification_delivery_password_base64" \
+	'^$' \
+	'^(winwidget\.events|winwidget\.dead-letter)$' \
+	'^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.email|limit-notification\.email)(\..*)?$' \
 	''
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
@@ -962,30 +1549,1611 @@ for (const kind of MESSAGING_KINDS) {
 	return 1
 }
 
-compose_target stop api-gateway api outbox-publisher integration-worker maintenance-worker
-compose_target --profile migration run --rm migrate
-compose_target up -d rabbitmq
-messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
-compose_target up -d --force-recreate outbox-publisher
-wait_for_rabbitmq_topology
-compose_target up -d --force-recreate integration-worker maintenance-worker
-compose_target up -d --force-recreate api
-compose_target up -d --force-recreate api-gateway
+verify_notification_delivery_runtime_crud() {
+	compose_target run --rm --no-deps \
+		--entrypoint node \
+		notification-delivery-worker \
+		-e '
+const { randomUUID } = require("node:crypto");
+const {
+	PrismaClient,
+} = require("@prisma/notification-delivery-client");
+
+const prisma = new PrismaClient({
+	datasources: {
+		db: {
+			url: process.env.NOTIFICATION_DELIVERY_DATABASE_URL,
+		},
+	},
+});
+const instanceId = `deployment-smoke-${randomUUID()}`;
+
+prisma
+	.$transaction(async transaction => {
+		const grants = await transaction.$queryRawUnsafe(`
+			SELECT
+				tablename,
+				has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$select$SELECT$select$
+				)
+				AND has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$insert$INSERT$insert$
+				)
+				AND has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$update$UPDATE$update$
+				)
+				AND has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$delete$DELETE$delete$
+				) AS allowed
+			FROM pg_tables
+			WHERE schemaname = $schema$notification_delivery$schema$
+				AND tablename <> $migrations$_prisma_migrations$migrations$
+		`);
+		if (
+			!Array.isArray(grants) ||
+			grants.length === 0 ||
+			grants.some(grant => grant.allowed !== true)
+		) {
+			throw new Error("runtime CRUD grants are incomplete");
+		}
+		const migrationTablePrivileges = await transaction.$queryRawUnsafe(`
+			SELECT (
+				has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$select$SELECT$select$
+				)
+				OR has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$insert$INSERT$insert$
+				)
+				OR has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$update$UPDATE$update$
+				)
+				OR has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$delete$DELETE$delete$
+				)
+				OR has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$truncate$TRUNCATE$truncate$
+				)
+				OR has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$references$REFERENCES$references$
+				)
+				OR has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$trigger$TRIGGER$trigger$
+				)
+			) AS allowed
+			FROM pg_tables
+			WHERE schemaname = $schema$notification_delivery$schema$
+				AND tablename = $migrations$_prisma_migrations$migrations$
+		`);
+		if (
+			migrationTablePrivileges.length !== 1 ||
+			migrationTablePrivileges[0]?.allowed !== false
+		) {
+			throw new Error(
+				"runtime role must not access the Prisma migration history table",
+			);
+		}
+		const privilegeRows = await transaction.$queryRawUnsafe(`
+			SELECT
+				roles.rolsuper AS role_super,
+				roles.rolcreatedb AS role_create_database,
+				roles.rolcreaterole AS role_create_role,
+				pg_get_userbyid(databases.datdba) = current_user AS database_owner,
+				pg_get_userbyid(namespaces.nspowner) = current_user AS schema_owner,
+				has_database_privilege(
+					current_user,
+					current_database(),
+					$privilege$CREATE$privilege$
+				) AS database_create,
+				has_schema_privilege(
+					current_user,
+					$schema$notification_delivery$schema$,
+					$privilege$CREATE$privilege$
+				) AS schema_create
+			FROM pg_roles AS roles
+			JOIN pg_database AS databases
+				ON databases.datname = current_database()
+			JOIN pg_namespace AS namespaces
+				ON namespaces.nspname = $schema$notification_delivery$schema$
+			WHERE roles.rolname = current_user
+		`);
+		const privilege = privilegeRows[0];
+		if (
+			privilegeRows.length !== 1 ||
+			privilege?.role_super !== false ||
+			privilege?.role_create_database !== false ||
+			privilege?.role_create_role !== false ||
+			privilege?.database_owner !== false ||
+			privilege?.schema_owner !== false ||
+			privilege?.database_create !== false ||
+			privilege?.schema_create !== false
+		) {
+			throw new Error("runtime role has unsafe PostgreSQL privileges");
+		}
+		const foreignTablePrivileges = await transaction.$queryRawUnsafe(`
+			SELECT schemaname, tablename
+			FROM pg_tables
+			WHERE schemaname <> $schema$notification_delivery$schema$
+				AND schemaname NOT IN (
+					$catalog$pg_catalog$catalog$,
+					$information$information_schema$information$
+				)
+				AND (
+					has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$select$SELECT$select$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$insert$INSERT$insert$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$update$UPDATE$update$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$delete$DELETE$delete$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$truncate$TRUNCATE$truncate$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$references$REFERENCES$references$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$trigger$TRIGGER$trigger$
+					)
+				)
+		`);
+		if (
+			!Array.isArray(foreignTablePrivileges) ||
+			foreignTablePrivileges.length > 0
+		) {
+			throw new Error(
+				"runtime role has table privileges outside notification_delivery",
+			);
+		}
+		const foreignSchemaCreatePrivileges =
+			await transaction.$queryRawUnsafe(`
+				SELECT namespaces.nspname
+				FROM pg_namespace AS namespaces
+				WHERE namespaces.nspname <> $schema$notification_delivery$schema$
+					AND namespaces.nspname <> $information$information_schema$information$
+					AND left(namespaces.nspname, 3) <> $system$pg_$system$
+					AND has_schema_privilege(
+						current_user,
+						namespaces.oid,
+						$privilege$CREATE$privilege$
+					)
+			`);
+		if (
+			!Array.isArray(foreignSchemaCreatePrivileges) ||
+			foreignSchemaCreatePrivileges.length > 0
+		) {
+			throw new Error(
+				"runtime role has CREATE on a schema outside notification_delivery",
+			);
+		}
+		await transaction.notificationDeliveryHeartbeat.create({
+			data: {
+				service: "deployment-runtime-crud-smoke",
+				instanceId,
+				metadata: { phase: "created" },
+			},
+		});
+		const created =
+			await transaction.notificationDeliveryHeartbeat.findUnique({
+				where: {
+					service_instanceId: {
+						service: "deployment-runtime-crud-smoke",
+						instanceId,
+					},
+				},
+			});
+		if (!created) throw new Error("runtime SELECT did not return the smoke row");
+
+		await transaction.notificationDeliveryHeartbeat.update({
+			where: {
+				service_instanceId: {
+					service: "deployment-runtime-crud-smoke",
+					instanceId,
+				},
+			},
+			data: { metadata: { phase: "updated" } },
+		});
+		await transaction.notificationDeliveryHeartbeat.delete({
+			where: {
+				service_instanceId: {
+					service: "deployment-runtime-crud-smoke",
+					instanceId,
+				},
+			},
+		});
+	})
+	.then(() => {
+		process.stdout.write(
+			"Notification delivery runtime CRUD permissions verified\n",
+		);
+	})
+	.catch(() => {
+		process.stderr.write(
+			"Notification delivery runtime role failed the CRUD permissions smoke\n",
+		);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await prisma.$disconnect();
+	});
+	'
+}
+
+verify_notification_delivery_migration_boundary() {
+	compose_target \
+		--profile notification-delivery-migration \
+		run --rm --no-deps \
+		--entrypoint node \
+		notification-delivery-migrate \
+		-e '
+const {
+	PrismaClient,
+} = require("@prisma/notification-delivery-client");
+
+const prisma = new PrismaClient({
+	datasources: {
+		db: {
+			url: process.env.NOTIFICATION_DELIVERY_DATABASE_URL,
+		},
+	},
+});
+
+prisma
+	.$queryRawUnsafe(`
+		SELECT
+			roles.rolsuper AS role_super,
+			roles.rolcreatedb AS role_create_database,
+			roles.rolcreaterole AS role_create_role,
+			pg_get_userbyid(databases.datdba) = current_user AS database_owner,
+			pg_get_userbyid(namespaces.nspowner) = current_user AS schema_owner,
+			has_database_privilege(
+				current_user,
+				current_database(),
+				$privilege$CREATE$privilege$
+			) AS database_create,
+			has_schema_privilege(
+				current_user,
+				$schema$notification_delivery$schema$,
+				$privilege$CREATE$privilege$
+			) AS schema_create
+		FROM pg_roles AS roles
+		JOIN pg_database AS databases
+			ON databases.datname = current_database()
+		JOIN pg_namespace AS namespaces
+			ON namespaces.nspname = $schema$notification_delivery$schema$
+		WHERE roles.rolname = current_user
+	`)
+	.then(rows => {
+		const privilege = rows[0];
+		if (
+			rows.length !== 1 ||
+			privilege?.role_super !== false ||
+			privilege?.role_create_database !== false ||
+			privilege?.role_create_role !== false ||
+			privilege?.database_owner !== false ||
+			privilege?.schema_owner !== true ||
+			privilege?.database_create !== false ||
+			privilege?.schema_create !== true
+		) {
+			throw new Error("migration role has unsafe PostgreSQL privileges");
+		}
+		process.stdout.write(
+			"Notification delivery migration role boundary verified\n",
+		);
+	})
+	.catch(() => {
+		process.stderr.write(
+			"Notification delivery migration role failed its privilege boundary smoke\n",
+		);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await prisma.$disconnect();
+	});
+'
+}
+
+verify_notification_delivery_control_smoke() {
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		--entrypoint node \
+		"winwidget-api:$APP_VERSION" \
+		-e '
+const { randomUUID } = require("node:crypto");
+const {
+	NotificationDeliveryClientService,
+	NotificationDeliveryInternalApiError,
+} = require("./dist/src/messaging/notification-delivery-client.service.js");
+
+const expectValidationFailure = async (operation, label) => {
+	try {
+		await operation();
+	} catch (error) {
+		if (
+			error instanceof NotificationDeliveryInternalApiError &&
+			error.statusCode === 400
+		) {
+			return;
+		}
+		throw error;
+	}
+	throw new Error(`${label} did not preserve its validation contract`);
+};
+const run = async () => {
+	const configService = {
+		get: key => process.env[key],
+	};
+	const client = new NotificationDeliveryClientService(configService);
+	await client.getOverview();
+	await client.getFailures(1, 1, {});
+	const validationId = randomUUID();
+	await expectValidationFailure(
+		() => client.retryFailure(validationId, ""),
+		"retry endpoint",
+	);
+	await expectValidationFailure(
+		() =>
+			client.closeFailure(
+				validationId,
+				"deployment-control-smoke",
+				"x",
+			),
+		"close endpoint",
+	);
+};
+
+run()
+	.then(() => {
+		process.stdout.write(
+			"Notification delivery internal control endpoint verified\n",
+		);
+	})
+	.catch(error => {
+		process.stderr.write(
+			`${error instanceof Error ? error.message : "Notification delivery internal control endpoint smoke failed"}\n`,
+		);
+		process.exitCode = 1;
+	});
+'
+}
+
+verify_exact_worker_consumer_ownership() {
+	local close_legacy_orphans="${1:-false}"
+	local notification_owner="${2:-notification}"
+
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		-e "CLOSE_LEGACY_NOTIFICATION_CONSUMERS=$close_legacy_orphans" \
+		-e "EXPECTED_NOTIFICATION_QUEUE_OWNER=$notification_owner" \
+		--entrypoint node \
+		"winwidget-api:$APP_VERSION" \
+		-e '
+const {
+	MESSAGING_QUEUE_NAMES,
+} = require("./dist/src/messaging/messaging.constants.js");
+
+class OwnershipError extends Error {}
+
+const decodeUser = (value, label) => {
+	try {
+		const url = new URL(value || "");
+		const username = decodeURIComponent(url.username);
+		if (!username) throw new Error();
+		return username;
+	} catch {
+		throw new OwnershipError(`${label} has no valid user`);
+	}
+};
+
+const run = async () => {
+	const baseUrl = (
+		process.env.RABBITMQ_MANAGEMENT_URL ||
+		"http://127.0.0.1:15672"
+	).replace(/\/$/, "");
+	const vhost = process.env.RABBITMQ_VHOST || "winwidget";
+	const adminUser = process.env.RABBITMQ_ADMIN_USER;
+	const adminPassword = process.env.RABBITMQ_ADMIN_PASSWORD;
+	if (!adminUser || !adminPassword) {
+		throw new OwnershipError("RabbitMQ admin credentials are missing");
+	}
+	const authorization = `Basic ${Buffer.from(
+		`${adminUser}:${adminPassword}`,
+	).toString("base64")}`;
+	const request = async (path, options = {}) => {
+		const response = await fetch(`${baseUrl}${path}`, {
+			...options,
+			headers: {
+				Authorization: authorization,
+				...(options.headers || {}),
+			},
+			signal: AbortSignal.timeout(5000),
+		});
+		if (!response.ok) {
+			await response.body?.cancel();
+			throw new OwnershipError(
+				`RabbitMQ Management returned HTTP ${response.status}`,
+			);
+		}
+		if (response.status === 204) return null;
+		return response.json();
+	};
+
+	const connections = await request("/api/connections");
+	if (!Array.isArray(connections)) {
+		throw new OwnershipError("RabbitMQ connections response is invalid");
+	}
+	const bySocketName = new Map(
+		connections.map(connection => [connection.name, connection]),
+	);
+	const integrationUser = decodeUser(
+		process.env.RABBITMQ_INTEGRATION_WORKER_URL,
+		"RABBITMQ_INTEGRATION_WORKER_URL",
+	);
+	const notificationUser = decodeUser(
+		process.env.RABBITMQ_NOTIFICATION_DELIVERY_URL,
+		"RABBITMQ_NOTIFICATION_DELIVERY_URL",
+	);
+	const groups = [
+		{
+			kinds: ["email", "telegram", "payment-email", "limit-email"],
+			user:
+				process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy"
+					? integrationUser
+					: notificationUser,
+			connectionName:
+				process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy"
+					? "winwidget-integration-worker"
+					: "winwidget-notification-delivery-worker",
+			notification: true,
+		},
+		{
+			kinds: [
+				"webhook",
+				"bitrix24",
+				"amo-crm",
+				"payment-telegram",
+				"mailing-email",
+				"mailing-telegram",
+				"limit-telegram",
+				"daily-summary-telegram",
+			],
+			user: integrationUser,
+			connectionName: "winwidget-integration-worker",
+			notification: false,
+		},
+	];
+
+	let closedLegacyOrphan = false;
+	for (const group of groups) {
+		for (const kind of group.kinds) {
+			const baseQueue = MESSAGING_QUEUE_NAMES[kind];
+			for (const queue of [baseQueue, `${baseQueue}.dead-letter`]) {
+				const state = await request(
+					`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(
+						queue,
+					)}`,
+				);
+				const consumers = Array.isArray(state?.consumer_details)
+					? state.consumer_details
+					: [];
+
+				for (const consumer of consumers) {
+					const socketName =
+						consumer?.channel_details?.connection_name;
+					const connection = bySocketName.get(socketName);
+					const clientName =
+						connection?.client_properties?.connection_name;
+					if (
+						group.notification &&
+						process.env.CLOSE_LEGACY_NOTIFICATION_CONSUMERS ===
+							"true" &&
+						connection?.user === integrationUser &&
+						clientName === "winwidget-integration-worker"
+					) {
+						await request(
+							`/api/connections/${encodeURIComponent(
+								connection.name,
+							)}`,
+							{
+								method: "DELETE",
+								headers: {
+									"X-Reason":
+										"WinWidget notification cutover ownership repair",
+								},
+							},
+						);
+						closedLegacyOrphan = true;
+					}
+				}
+
+				if (closedLegacyOrphan) continue;
+				if (consumers.length !== 1) {
+					throw new OwnershipError(
+						`RabbitMQ queue ${queue} must have exactly one consumer`,
+					);
+				}
+				const socketName =
+					consumers[0]?.channel_details?.connection_name;
+				const connection = bySocketName.get(socketName);
+				const clientName =
+					connection?.client_properties?.connection_name;
+				if (
+					connection?.user !== group.user ||
+					clientName !== group.connectionName
+				) {
+					throw new OwnershipError(
+						`RabbitMQ queue ${queue} has an unexpected owner`,
+					);
+				}
+			}
+		}
+	}
+
+	if (closedLegacyOrphan) {
+		throw new OwnershipError(
+			"Closed an orphan legacy notification consumer; ownership must be rechecked",
+		);
+	}
+};
+
+run()
+	.then(() => {
+		process.stdout.write("RabbitMQ consumer ownership verified\n");
+	})
+	.catch(error => {
+		const message =
+			error instanceof OwnershipError
+				? error.message
+				: "RabbitMQ consumer ownership could not be verified";
+		process.stderr.write(`${message}\n`);
+		process.exitCode = 1;
+	});
+'
+}
+
+first_cutover_producer_ids=()
+first_cutover_legacy_worker_id=""
+first_cutover_candidate_started=false
+first_cutover_marker_tmp=""
+first_cutover_recovery_active=false
+forward_cutover_recovery_active=false
+notification_cutover_last_queue_state=""
+notification_cutover_last_database_state=""
+notification_cutover_last_service_state=""
+
+print_notification_cutover_runbook() {
+	cat >&2 <<'RUNBOOK'
+Notification delivery first-cutover preflight did not pass.
+Do not start notification-delivery-worker and the legacy integration-worker on the same four queues.
+
+Manual recovery/runbook:
+1. Keep the current integration-worker running with the four legacy kinds enabled.
+2. Through the existing Messaging admin flow, resolve or retry every unresolved
+   email, telegram, payment-email and limit-email failure.
+3. Wait until their PROCESSING/RETRY_SCHEDULED receipts disappear and every
+   matching main, retry-v2.* and dead-letter RabbitMQ queue reports zero ready
+   and zero unacknowledged messages.
+4. Re-run the full `all` deployment. The script will stop producers, recheck the
+   quiescent boundary, stop the legacy worker, then start the two disjoint workers.
+5. Do not use the notification-delivery service-only target for the first cutover.
+RUNBOOK
+}
+
+notification_cutover_expected_queues() {
+	local base_queue
+	local retry_index
+
+	for base_queue in \
+		winwidget.lead-integration.email \
+		winwidget.lead-integration.telegram \
+		winwidget.payment-notification.email \
+		winwidget.limit-notification.email; do
+		printf '%s\n%s.dead-letter\n' "$base_queue" "$base_queue"
+		for retry_index in 1 2 3; do
+			printf '%s.retry-v2.%s\n' "$base_queue" "$retry_index"
+		done
+	done
+}
+
+notification_cutover_queue_state() {
+	local rabbitmq_container_id
+
+	rabbitmq_container_id="$(
+		compose_target ps --status running -q rabbitmq
+	)"
+	if [[ -z "$rabbitmq_container_id" ||
+		"$rabbitmq_container_id" == *$'\n'* ]]; then
+		echo "Exactly one running RabbitMQ container is required for notification cutover." >&2
+		return 1
+	fi
+
+	docker exec "$rabbitmq_container_id" \
+		rabbitmqctl --silent list_queues \
+			-p "$rabbitmq_vhost" \
+			name messages_ready messages_unacknowledged consumers |
+		awk '
+			$1 ~ /^winwidget\.lead-integration\.(email|telegram)(\.|$)/ ||
+			$1 ~ /^winwidget\.payment-notification\.email(\.|$)/ ||
+			$1 ~ /^winwidget\.limit-notification\.email(\.|$)/
+		'
+}
+
+notification_cutover_database_state() {
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		--entrypoint node \
+		"winwidget-api:$APP_VERSION" \
+		-e '
+const { PrismaClient } = require("@prisma/client");
+
+const prisma = new PrismaClient({
+	datasources: {
+		db: {
+			url: process.env.DATABASE_URL_PRODUCTION,
+		},
+	},
+});
+const kinds = ["email", "telegram", "payment-email", "limit-email"];
+
+Promise.all([
+	prisma.integrationDeliveryFailure.count({
+		where: {
+			integration: { in: kinds },
+			resolvedAt: null,
+		},
+	}),
+	prisma.integrationDeliveryReceipt.count({
+		where: {
+			integration: { in: kinds },
+			status: { in: ["PROCESSING", "RETRY_SCHEDULED"] },
+		},
+	}),
+])
+	.then(([unresolvedFailures, activeReceipts]) => {
+		process.stdout.write(`${unresolvedFailures}\t${activeReceipts}\n`);
+	})
+	.catch(() => {
+		process.stderr.write(
+			"Notification cutover could not query public delivery state\n",
+		);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await prisma.$disconnect();
+	});
+'
+}
+
+notification_delivery_service_state() {
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		--entrypoint node \
+		"$NOTIFICATION_DELIVERY_IMAGE" \
+		-e '
+const {
+	PrismaClient,
+} = require("@prisma/notification-delivery-client");
+const prisma = new PrismaClient({
+	datasources: {
+		db: {
+			url: process.env.NOTIFICATION_DELIVERY_DATABASE_URL,
+		},
+	},
+});
+
+Promise.all([
+	prisma.notificationDeliveryReceipt.count(),
+	prisma.notificationDeliveryFailure.count(),
+	prisma.notificationDeliveryOutboxEvent.count(),
+])
+	.then(([receipts, failures, outbox]) => {
+		process.stdout.write(`${receipts}\t${failures}\t${outbox}\n`);
+	})
+	.catch(() => {
+		process.stderr.write(
+			"Notification cutover could not query service-owned state\n",
+		);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await prisma.$disconnect();
+	});
+'
+}
+
+notification_delivery_service_state_is_empty() {
+	local receipts
+	local failures
+	local outbox
+
+	notification_cutover_last_service_state="$(
+		notification_delivery_service_state
+	)" || return 1
+	IFS=$'\t' read -r receipts failures outbox \
+		<<<"$notification_cutover_last_service_state"
+	if [[ ! "$receipts" =~ ^[0-9]+$ ||
+		! "$failures" =~ ^[0-9]+$ ||
+		! "$outbox" =~ ^[0-9]+$ ]]; then
+		return 1
+	fi
+	[[ "$receipts" == "0" && "$failures" == "0" && "$outbox" == "0" ]]
+}
+
+notification_cutover_consumers_ready() {
+	local state
+	local queue
+	local queue_line
+	local name
+	local ready
+	local unacknowledged
+	local consumers
+
+	state="$(notification_cutover_queue_state)"
+	for queue in \
+		winwidget.lead-integration.email \
+		winwidget.lead-integration.email.dead-letter \
+		winwidget.lead-integration.telegram \
+		winwidget.lead-integration.telegram.dead-letter \
+		winwidget.payment-notification.email \
+		winwidget.payment-notification.email.dead-letter \
+		winwidget.limit-notification.email \
+		winwidget.limit-notification.email.dead-letter; do
+		queue_line="$(
+			awk -v queue="$queue" '$1 == queue { print; exit }' <<<"$state"
+		)"
+		if [[ -z "$queue_line" ]]; then
+			echo "Missing RabbitMQ queue required for first cutover: $queue" >&2
+			return 1
+		fi
+		read -r name ready unacknowledged consumers <<<"$queue_line"
+		if [[ ! "$consumers" =~ ^[1-9][0-9]*$ ]]; then
+			echo "Legacy integration-worker is not consuming queue: $queue" >&2
+			return 1
+		fi
+	done
+}
+
+notification_cutover_is_clear() {
+	local expected_queue
+	local queue_line
+	local name
+	local ready
+	local unacknowledged
+	local consumers
+	local unresolved_failures
+	local active_receipts
+
+	notification_cutover_last_queue_state="$(
+		notification_cutover_queue_state
+	)"
+	while IFS= read -r expected_queue; do
+		[[ -n "$expected_queue" ]] || continue
+		queue_line="$(
+			awk -v queue="$expected_queue" \
+				'$1 == queue { print; exit }' \
+				<<<"$notification_cutover_last_queue_state"
+		)"
+		if [[ -z "$queue_line" ]]; then
+			return 1
+		fi
+		read -r name ready unacknowledged consumers <<<"$queue_line"
+		if [[ ! "$ready" =~ ^[0-9]+$ ||
+			! "$unacknowledged" =~ ^[0-9]+$ ||
+			"$ready" != "0" ||
+			"$unacknowledged" != "0" ]]; then
+			return 1
+		fi
+	done < <(notification_cutover_expected_queues)
+
+	notification_cutover_last_database_state="$(
+		notification_cutover_database_state
+	)"
+	IFS=$'\t' read -r unresolved_failures active_receipts \
+		<<<"$notification_cutover_last_database_state"
+	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
+		! "$active_receipts" =~ ^[0-9]+$ ]]; then
+		return 1
+	fi
+	[[ "$unresolved_failures" == "0" && "$active_receipts" == "0" ]]
+}
+
+restore_first_cutover_producers_on_exit() {
+	local status=$?
+	local recovery_failed=false
+	local container_id
+	local running
+	local attempt
+
+	trap - EXIT INT TERM
+	if [[ "$first_cutover_recovery_active" != "true" ]]; then
+		exit "$status"
+	fi
+
+	set +e
+	echo "First notification delivery cutover failed before its durable marker; restoring the exact legacy runtime." >&2
+	if [[ -n "$first_cutover_marker_tmp" ]]; then
+		rm -f "$first_cutover_marker_tmp"
+	fi
+
+	if [[ "$first_cutover_candidate_started" == "true" ]]; then
+		if ! notification_delivery_service_state_is_empty ||
+			! notification_cutover_is_clear ||
+			! notification_delivery_service_state_is_empty; then
+			echo "CRITICAL: pre-marker state is non-empty or unreadable; refusing automatic legacy rollback." >&2
+			echo "Service state (receipts failures outbox): ${notification_cutover_last_service_state:-unavailable}" >&2
+			echo "Moved queue state:" >&2
+			echo "${notification_cutover_last_queue_state:-unavailable}" >&2
+			echo "Candidate workers stay running while producers and public Gateway remain stopped. Resolve the forward state manually." >&2
+			exit "$status"
+		fi
+		if ! compose_notification_cutover stop --timeout 30 \
+			"${notification_cutover_pre_marker_services[@]}" \
+			>/dev/null 2>&1; then
+			recovery_failed=true
+		fi
+		if ! compose_notification_cutover rm -f \
+			"${notification_cutover_candidate_services[@]}" \
+			>/dev/null 2>&1; then
+			recovery_failed=true
+		fi
+	fi
+
+	if ! provision_rabbitmq_user \
+		"$integration_user" \
+		"$integration_password_base64" \
+		'^$' \
+		'^(winwidget\.retry|winwidget\.dead-letter)$' \
+		'^winwidget\.(lead-integration|payment-notification|mailing|limit-notification|report)\..*' \
+		''; then
+		echo "CRITICAL: broad legacy RabbitMQ permissions could not be restored." >&2
+		recovery_failed=true
+	fi
+
+	if [[ -n "$first_cutover_legacy_worker_id" ]]; then
+		if ! docker image inspect "$(
+			docker inspect --format '{{ .Image }}' \
+				"$first_cutover_legacy_worker_id" 2>/dev/null
+		)" >/dev/null 2>&1 ||
+			! docker start "$first_cutover_legacy_worker_id" >/dev/null; then
+			echo "CRITICAL: the unchanged legacy integration worker could not be restarted." >&2
+			recovery_failed=true
+		fi
+	fi
+
+	if [[ ${#first_cutover_producer_ids[@]} -gt 0 ]] &&
+		! docker start "${first_cutover_producer_ids[@]}" >/dev/null; then
+		echo "CRITICAL: one or more unchanged producer containers could not be restarted." >&2
+		recovery_failed=true
+	fi
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		running=true
+		for container_id in \
+			"$first_cutover_legacy_worker_id" \
+			"${first_cutover_producer_ids[@]}"; do
+			[[ -n "$container_id" ]] || continue
+			if [[ "$(docker inspect --format '{{ .State.Running }}' \
+				"$container_id" 2>/dev/null)" != "true" ]]; then
+				running=false
+				break
+			fi
+		done
+		if [[ "$running" == "true" ]] &&
+			curl -fsS --connect-timeout 3 --max-time 5 \
+				"$HEALTHCHECK_URL" >/dev/null 2>&1 &&
+			curl -fsS --connect-timeout 3 --max-time 5 \
+				"$GATEWAY_READINESS_URL" >/dev/null 2>&1 &&
+			notification_cutover_consumers_ready >/dev/null 2>&1 &&
+			verify_exact_worker_consumer_ownership \
+				false legacy >/dev/null 2>&1; then
+			break
+		fi
+		if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+			echo "CRITICAL: restored legacy containers did not pass readiness verification." >&2
+			recovery_failed=true
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	if [[ "$recovery_failed" == "true" ]]; then
+		echo "CRITICAL: automatic first-cutover recovery was incomplete; keep the marker absent and follow the manual runbook." >&2
+	else
+		echo "The unchanged legacy worker and producers were restored and verified." >&2
+	fi
+	exit "$status"
+}
+
+wait_for_cutover_revision() {
+	local url="$1"
+	local expected_revision="$2"
+	local label="$3"
+	local attempt
+	local response
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		response="$(
+			curl -fsS --connect-timeout 3 --max-time 5 \
+				-H 'Cache-Control: no-cache' "$url" 2>/dev/null || true
+		)"
+		if [[ "$response" == *"\"revision\":\"$expected_revision\""* ]]; then
+			return 0
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	echo "$label did not report revision $expected_revision." >&2
+	return 1
+}
+
+wait_for_cutover_readiness() {
+	local url="$1"
+	local label="$2"
+	local attempt
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if curl -fsS --connect-timeout 3 --max-time 5 \
+			"$url" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	echo "$label did not become ready." >&2
+	return 1
+}
+
+verify_cutover_candidate_heartbeats() {
+	local started_at="$1"
+	local required_services="${2:-outbox-publisher,integration-worker,maintenance-worker}"
+
+	if [[ -z "$started_at" ]]; then
+		echo "Forward candidate heartbeat verification requires a start boundary." >&2
+		return 1
+	fi
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		-e "CUTOVER_CANDIDATE_STARTED_AT=$started_at" \
+		-e "CUTOVER_REQUIRED_HEARTBEATS=$required_services" \
+		--entrypoint node \
+		"winwidget-api:$APP_VERSION" \
+		-e '
+const { PrismaClient } = require("@prisma/client");
+const prisma = new PrismaClient({
+	datasources: {
+		db: {
+			url: process.env.DATABASE_URL_PRODUCTION,
+		},
+	},
+});
+const required = String(process.env.CUTOVER_REQUIRED_HEARTBEATS || "")
+	.split(",")
+	.map(value => value.trim())
+	.filter(Boolean);
+if (!required.length) {
+	throw new Error("candidate heartbeat list is empty");
+}
+const startedAtMs = Date.parse(
+	process.env.CUTOVER_CANDIDATE_STARTED_AT || "",
+);
+if (!Number.isFinite(startedAtMs)) {
+	throw new Error("invalid forward candidate heartbeat boundary");
+}
+const freshAfter = new Date(
+	Math.max(startedAtMs, Date.now() - 30_000),
+);
+
+prisma.messagingHeartbeat
+	.findMany({
+		where: {
+			service: { in: required },
+			lastSeenAt: { gte: freshAfter },
+		},
+		select: { service: true },
+	})
+	.then(rows => {
+		const active = new Set(rows.map(row => row.service));
+		const missing = required.filter(service => !active.has(service));
+		if (missing.length) {
+			throw new Error(`missing candidate heartbeat: ${missing.join(",")}`);
+		}
+		process.stdout.write("Forward candidate heartbeats verified\n");
+	})
+	.catch(() => {
+		process.stderr.write(
+			"Forward candidate messaging heartbeats are incomplete\n",
+		);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await prisma.$disconnect();
+	});
+	'
+}
+
+verify_notification_cutover_containers() {
+	local expected_revision="$1"
+	shift
+	local service
+	local container_id
+	local image_revision
+	local restart_count
+
+	for service in "$@"; do
+		container_id="$(
+			compose_notification_cutover ps --status running -q "$service" \
+				2>/dev/null || true
+		)"
+		if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
+			echo "Forward cutover service is not running exactly once: $service" >&2
+			return 1
+		fi
+		image_revision="$(
+			docker inspect \
+				--format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$image_revision" != "$expected_revision" ]]; then
+			echo "Forward cutover service has an unexpected image revision: $service" >&2
+			return 1
+		fi
+		restart_count="$(
+			docker inspect --format '{{ .RestartCount }}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$restart_count" != "0" ]]; then
+			echo "Forward cutover service restarted before verification: $service restartCount=${restart_count:-unknown}" >&2
+			return 1
+		fi
+	done
+}
+
+verify_notification_cutover_candidate_containers() {
+	verify_notification_cutover_containers \
+		"$1" \
+		"${notification_cutover_candidate_services[@]}"
+}
+
+verify_notification_cutover_pre_marker_containers() {
+	verify_notification_cutover_containers \
+		"$1" \
+		"${notification_cutover_pre_marker_services[@]}"
+}
+
+verify_notification_cutover_pre_marker_topology() {
+	local expected_revision="$1"
+	local started_at="$2"
+	local attempt
+
+	if ! verify_notification_cutover_pre_marker_containers \
+		"$expected_revision"; then
+		return 1
+	fi
+	if ! wait_for_cutover_revision \
+		"$HEALTHCHECK_URL" "$expected_revision" \
+		"Pre-marker candidate API"; then
+		return 1
+	fi
+	if ! wait_for_cutover_readiness \
+		"$READINESS_URL" "Pre-marker candidate API"; then
+		return 1
+	fi
+	if ! wait_for_cutover_revision \
+		"$MAINTENANCE_READINESS_URL" "$expected_revision" \
+		"Pre-marker candidate Maintenance worker"; then
+		return 1
+	fi
+	if ! wait_for_cutover_revision \
+		"$NOTIFICATION_DELIVERY_READINESS_URL" "$expected_revision" \
+		"Pre-marker candidate Notification Delivery"; then
+		return 1
+	fi
+	if ! verify_notification_delivery_control_smoke; then
+		return 1
+	fi
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if verify_cutover_candidate_heartbeats \
+			"$started_at" \
+			"integration-worker,maintenance-worker"; then
+			break
+		fi
+		if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+			return 1
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if verify_exact_worker_consumer_ownership true; then
+			break
+		fi
+		if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+			echo "Pre-marker candidate RabbitMQ ownership was not established." >&2
+			return 1
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+	if ! notification_cutover_is_clear; then
+		echo "Moved queues or legacy delivery state changed during pre-marker verification." >&2
+		return 1
+	fi
+	if ! notification_delivery_service_state_is_empty; then
+		echo "Notification Delivery created service-owned state before the durable marker." >&2
+		echo "Service state (receipts failures outbox): ${notification_cutover_last_service_state:-unavailable}" >&2
+		return 1
+	fi
+	verify_notification_cutover_pre_marker_containers "$expected_revision"
+}
+
+verify_notification_cutover_candidate_topology() {
+	local expected_revision="$1"
+	local started_at="$2"
+	local attempt
+
+	if ! verify_notification_cutover_candidate_containers \
+		"$expected_revision"; then
+		return 1
+	fi
+
+	if ! wait_for_cutover_revision \
+		"$HEALTHCHECK_URL" "$expected_revision" \
+		"Forward candidate API"; then
+		return 1
+	fi
+	if ! wait_for_cutover_revision \
+		"$PUBLIC_HEALTHCHECK_URL" "$expected_revision" \
+		"Forward candidate public API"; then
+		return 1
+	fi
+	if ! wait_for_cutover_readiness \
+		"$READINESS_URL" "Forward candidate API"; then
+		return 1
+	fi
+	if ! wait_for_cutover_readiness \
+		"$GATEWAY_READINESS_URL" "Forward candidate API Gateway"; then
+		return 1
+	fi
+	if ! wait_for_cutover_revision \
+		"$MAINTENANCE_READINESS_URL" "$expected_revision" \
+		"Forward candidate Maintenance worker"; then
+		return 1
+	fi
+	if ! wait_for_cutover_revision \
+		"$NOTIFICATION_DELIVERY_READINESS_URL" "$expected_revision" \
+		"Forward candidate Notification Delivery"; then
+		return 1
+	fi
+	if ! verify_notification_delivery_control_smoke; then
+		return 1
+	fi
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if verify_cutover_candidate_heartbeats "$started_at"; then
+			break
+		fi
+		if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+			return 1
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if verify_exact_worker_consumer_ownership true; then
+			if ! verify_notification_cutover_candidate_containers \
+				"$expected_revision"; then
+				return 1
+			fi
+			return 0
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	echo "Forward candidate RabbitMQ ownership was not established." >&2
+	return 1
+}
+
+restore_forward_cutover_on_exit() {
+	local status=$?
+	local recovery_failed=false
+	local recovery_started_at
+
+	trap - EXIT INT TERM
+	if [[ "$forward_cutover_recovery_active" != "true" ]]; then
+		exit "$status"
+	fi
+
+	set +e
+	echo "Canonical handoff failed after the durable marker; restoring the saved forward topology." >&2
+	if ! compose_target stop --timeout 30 \
+		api-gateway \
+		api \
+		outbox-publisher \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker >/dev/null 2>&1; then
+		recovery_failed=true
+	fi
+	recovery_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+	if ! compose_notification_cutover start outbox-publisher >/dev/null; then
+		recovery_failed=true
+	fi
+	if ! compose_notification_cutover start \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker \
+		api >/dev/null; then
+		recovery_failed=true
+	fi
+	if ! wait_for_cutover_revision \
+		"$HEALTHCHECK_URL" \
+		"$notification_cutover_marker_revision" \
+		"Restored forward candidate API" >/dev/null 2>&1; then
+		recovery_failed=true
+	fi
+	if ! compose_notification_cutover start api-gateway >/dev/null; then
+		recovery_failed=true
+	fi
+	if ! verify_notification_cutover_candidate_topology \
+		"$notification_cutover_marker_revision" \
+		"$recovery_started_at"; then
+		recovery_failed=true
+	fi
+
+	if [[ "$recovery_failed" == "true" ]]; then
+		echo "CRITICAL: saved forward topology could not be restored completely; keep the durable marker and repair forward." >&2
+	else
+		echo "Saved forward topology is running; retry the full deployment to canonicalize it." >&2
+	fi
+	exit "$status"
+}
+
+perform_notification_first_cutover_preflight() {
+	local legacy_integration_container_id
+	local service
+	local container_id
+	local initial_database_state
+	local unresolved_failures
+	local active_receipts
+	local attempt
+
+	if [[ "$notification_delivery_first_cutover" != "true" ]]; then
+		return
+	fi
+
+	legacy_integration_container_id="$(
+		compose_target ps --status running -q integration-worker
+	)"
+	if [[ -z "$legacy_integration_container_id" ||
+		"$legacy_integration_container_id" == *$'\n'* ]]; then
+		echo "Exactly one running legacy integration-worker is required for the first notification delivery cutover." >&2
+		print_notification_cutover_runbook
+		return 1
+	fi
+	first_cutover_legacy_worker_id="$legacy_integration_container_id"
+
+	wait_for_rabbitmq_topology
+	if ! notification_cutover_consumers_ready; then
+		print_notification_cutover_runbook
+		return 1
+	fi
+	if ! verify_exact_worker_consumer_ownership false legacy; then
+		echo "The moved queues are not owned exclusively by the exact legacy integration connection." >&2
+		print_notification_cutover_runbook
+		return 1
+	fi
+
+	initial_database_state="$(notification_cutover_database_state)"
+	IFS=$'\t' read -r unresolved_failures active_receipts \
+		<<<"$initial_database_state"
+	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
+		! "$active_receipts" =~ ^[0-9]+$ ]]; then
+		echo "Public delivery state returned an invalid first-cutover result." >&2
+		print_notification_cutover_runbook
+		return 1
+	fi
+	if [[ "$unresolved_failures" != "0" ]]; then
+		echo "First cutover is blocked by $unresolved_failures unresolved public delivery failure(s)." >&2
+		print_notification_cutover_runbook
+		return 1
+	fi
+
+	for service in outbox-publisher api api-gateway maintenance-worker; do
+		container_id="$(
+			compose_target ps --status running -q "$service"
+		)"
+		if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
+			echo "Exactly one running $service is required before first cutover." >&2
+			print_notification_cutover_runbook
+			return 1
+		fi
+		first_cutover_producer_ids+=("$container_id")
+	done
+
+	echo "First notification delivery cutover: stopping producers and draining four legacy queues."
+	first_cutover_recovery_active=true
+	trap restore_first_cutover_producers_on_exit EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	compose_target stop api-gateway
+	compose_target stop api outbox-publisher
+	compose_target stop maintenance-worker
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if notification_cutover_is_clear; then
+			break
+		fi
+		if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+			echo "Legacy notification queues did not reach a safe empty boundary." >&2
+			echo "Queue state (name ready unacknowledged consumers):" >&2
+			echo "$notification_cutover_last_queue_state" >&2
+			echo "Database state (unresolved_failures active_receipts): ${notification_cutover_last_database_state:-unavailable}" >&2
+			print_notification_cutover_runbook
+			return 1
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	compose_target stop integration-worker
+	if ! notification_cutover_is_clear; then
+		echo "Moved notification state changed while stopping the legacy integration-worker." >&2
+		echo "$notification_cutover_last_queue_state" >&2
+		print_notification_cutover_runbook
+		return 1
+	fi
+
+	echo "First notification delivery cutover boundary is quiescent and verified."
+}
+
+verify_notification_delivery_migration_boundary
+if [[ "$notification_forward_candidate_active" == "true" ]]; then
+	compose_target \
+		--profile notification-delivery-migration \
+		run --rm notification-delivery-migrate \
+		migrate status \
+		--schema prisma/schema.prisma
+else
+	compose_target \
+		--profile notification-delivery-migration \
+		run --rm notification-delivery-migrate
+fi
+verify_notification_delivery_runtime_crud
+
+if [[ "$notification_delivery_first_cutover" == "true" ]]; then
+	if ! compose_target --profile migration run --rm \
+		migrate migrate status; then
+		echo "The first notification cutover cannot carry a pending core schema migration." >&2
+		echo "Deploy the core expand migration separately, then rerun the full cutover." >&2
+		exit 1
+	fi
+fi
+
+perform_notification_first_cutover_preflight
+
+if [[ "$notification_delivery_first_cutover" == "true" ]]; then
+	provision_rabbitmq_user \
+		"$integration_user" \
+		"$integration_password_base64" \
+		'^$' \
+		'^(winwidget\.retry|winwidget\.dead-letter)$' \
+		'^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram|mailing\..*|limit-notification\.telegram|report\.daily-summary\.telegram)(\..*)?$' \
+		''
+	echo "Legacy integration RabbitMQ read permissions were narrowed after the verified cutover boundary."
+
+	notification_cutover_candidate_started_at="$(
+		date -u +'%Y-%m-%dT%H:%M:%S.%3NZ'
+	)"
+	first_cutover_candidate_started=true
+	compose_notification_cutover create \
+		--no-deps \
+		outbox-publisher \
+		api-gateway
+	compose_notification_cutover up \
+		-d \
+		--no-deps \
+		--force-recreate \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker \
+		api
+
+	verify_notification_cutover_pre_marker_topology \
+		"$APP_REVISION" \
+		"$notification_cutover_candidate_started_at"
+
+	umask 077
+	first_cutover_marker_tmp="$(
+		mktemp "${NOTIFICATION_DELIVERY_CUTOVER_MARKER}.tmp.XXXXXX"
+	)"
+	{
+		printf 'revision=%s\n' "$APP_REVISION"
+		printf 'created_at=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+	} >"$first_cutover_marker_tmp"
+	chmod 600 "$first_cutover_marker_tmp"
+	# From this point a marker means the isolated worker/API topology was
+	# verified and rollback must continue forward. Ignore termination only
+	# across the atomic marker/trap state transition.
+	trap '' INT TERM
+	mv "$first_cutover_marker_tmp" "$NOTIFICATION_DELIVERY_CUTOVER_MARKER"
+	first_cutover_marker_tmp=""
+	notification_cutover_marker_revision="$APP_REVISION"
+	notification_forward_candidate_active=true
+	first_cutover_recovery_active=false
+	forward_cutover_recovery_active=true
+	trap restore_forward_cutover_on_exit EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	echo "Durable notification delivery cutover marker created before enabling producers or public traffic."
+	compose_notification_cutover start outbox-publisher
+	wait_for_rabbitmq_topology
+	compose_notification_cutover start api-gateway
+	echo "The saved cutover project stays available until canonical Compose handoff is fully verified."
+fi
+
+if [[ "$notification_forward_candidate_active" == "true" ]]; then
+	notification_cutover_candidate_verification_started_at="$(
+		date -u +'%Y-%m-%dT%H:%M:%S.%3NZ'
+	)"
+	verify_notification_cutover_candidate_topology \
+		"$notification_cutover_marker_revision" \
+		"$notification_cutover_candidate_verification_started_at"
+	forward_cutover_recovery_active=true
+	trap restore_forward_cutover_on_exit EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	echo "Canonicalizing the verified forward cutover topology service by service."
+	echo "Candidate containers are retained as the post-marker recovery target until final smoke passes."
+	compose_target --profile migration run --rm migrate
+	compose_target up -d rabbitmq
+	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+
+	# Outbox publishers are CAS-safe, so start the canonical instance before
+	# pausing its saved forward counterpart.
+	compose_target up -d --no-deps --force-recreate outbox-publisher
+	if [[ -z "$(compose_target ps --status running -q outbox-publisher)" ]]; then
+		echo "Canonical Outbox publisher did not start." >&2
+		exit 1
+	fi
+	compose_notification_cutover stop --timeout 30 outbox-publisher
+	wait_for_rabbitmq_topology
+
+	# The two narrow integration workers are idempotent; overlap is limited to
+	# startup and ends before exact ownership is checked.
+	compose_target up -d --no-deps --force-recreate integration-worker
+	if [[ -z "$(compose_target ps --status running -q integration-worker)" ]]; then
+		echo "Canonical integration worker did not start." >&2
+		exit 1
+	fi
+	compose_notification_cutover stop --timeout 30 integration-worker
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if verify_exact_worker_consumer_ownership true; then
+			break
+		fi
+		if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+			echo "Canonical integration ownership was not established." >&2
+			exit 1
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	compose_notification_cutover stop --timeout 30 maintenance-worker
+	compose_target up -d --no-deps --force-recreate maintenance-worker
+	wait_for_cutover_revision \
+		"$MAINTENANCE_READINESS_URL" \
+		"$MAINTENANCE_REVISION" \
+		"Canonical Maintenance worker"
+
+	compose_notification_cutover stop --timeout 30 notification-delivery-worker
+	compose_target up -d --no-deps --force-recreate notification-delivery-worker
+	wait_for_cutover_revision \
+		"$NOTIFICATION_DELIVERY_READINESS_URL" \
+		"$NOTIFICATION_DELIVERY_REVISION" \
+		"Canonical Notification Delivery"
+	verify_notification_delivery_control_smoke
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if verify_exact_worker_consumer_ownership true; then
+			break
+		fi
+		if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+			echo "Canonical notification ownership was not established." >&2
+			exit 1
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	compose_notification_cutover stop --timeout 30 api
+	compose_target up -d --no-deps --force-recreate api
+	wait_for_cutover_revision \
+		"$HEALTHCHECK_URL" "$APP_REVISION" "Canonical API"
+	wait_for_cutover_readiness "$READINESS_URL" "Canonical API"
+
+	compose_notification_cutover stop --timeout 30 api-gateway
+	compose_target up -d --no-deps --force-recreate api-gateway
+	wait_for_cutover_readiness \
+		"$GATEWAY_READINESS_URL" "Canonical API Gateway"
+	wait_for_cutover_revision \
+		"$PUBLIC_HEALTHCHECK_URL" "$APP_REVISION" "Canonical public API"
+else
+	compose_target stop \
+		api-gateway \
+		api \
+		outbox-publisher \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker
+	compose_target --profile migration run --rm migrate
+	compose_target up -d rabbitmq
+	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+	compose_target up -d --force-recreate outbox-publisher
+	wait_for_rabbitmq_topology
+	compose_target up -d --force-recreate \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker
+	compose_target up -d --force-recreate api
+	compose_target up -d --force-recreate api-gateway
+fi
 
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq || true
-	echo "Processes listening on ports 4100, 4200 and 4300:"
-	ss -ltnp '( sport = :4100 or sport = :4200 or sport = :4300 )' || true
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300 and 4401:"
+	ss -ltnp \
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 )' ||
+		true
 }
 
 ensure_required_services_running() {
 	local service
 	local container_id
-	for service in rabbitmq api api-gateway outbox-publisher integration-worker maintenance-worker; do
+	for service in \
+		rabbitmq \
+		api \
+		api-gateway \
+		outbox-publisher \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -1020,11 +3188,13 @@ check_messaging_readiness() {
 		-e "MESSAGING_READINESS_STARTED_AT=$messaging_readiness_started_at" \
 		-e "INTEGRATION_WORKER_KINDS=$(get_env_value INTEGRATION_WORKER_KINDS)" \
 		-e "MAINTENANCE_WORKER_KINDS=$(get_env_value MAINTENANCE_WORKER_KINDS)" \
+		-e "NOTIFICATION_DELIVERY_KINDS=$(get_env_value NOTIFICATION_DELIVERY_KINDS)" \
 		api node - <<'NODE'
 const { PrismaClient } = require('@prisma/client');
 const {
 	INTEGRATION_KINDS,
 	MAINTENANCE_KINDS,
+	NOTIFICATION_DELIVERY_KINDS,
 	MESSAGING_QUEUE_NAMES
 } = require('./dist/src/messaging/messaging.constants.js');
 
@@ -1071,7 +3241,11 @@ const run = async () => {
 	}
 	const requiredKinds = [
 		...parseEnabledKinds('INTEGRATION_WORKER_KINDS', INTEGRATION_KINDS),
-		...parseEnabledKinds('MAINTENANCE_WORKER_KINDS', MAINTENANCE_KINDS)
+		...parseEnabledKinds('MAINTENANCE_WORKER_KINDS', MAINTENANCE_KINDS),
+		...parseEnabledKinds(
+			'NOTIFICATION_DELIVERY_KINDS',
+			NOTIFICATION_DELIVERY_KINDS
+		)
 	];
 	const requiredQueues = requiredKinds.flatMap(kind => {
 		const queue = MESSAGING_QUEUE_NAMES[kind];
@@ -1268,6 +3442,20 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 done
 
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if check_deployment_revision "$NOTIFICATION_DELIVERY_READINESS_URL"; then
+		break
+	fi
+
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo "Notification delivery readiness check failed: $NOTIFICATION_DELIVERY_READINESS_URL"
+		show_api_diagnostics
+		exit 1
+	fi
+
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if check_messaging_readiness; then
 		break
 	fi
@@ -1281,9 +3469,27 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	sleep "$HEALTHCHECK_INTERVAL"
 done
 
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if verify_exact_worker_consumer_ownership true; then
+		break
+	fi
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo "Exact RabbitMQ consumer ownership verification failed"
+		show_api_diagnostics
+		exit 1
+	fi
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
 ensure_required_services_running
 
-for service in api-gateway api outbox-publisher integration-worker maintenance-worker; do
+for service in \
+	api-gateway \
+	api \
+	outbox-publisher \
+	integration-worker \
+	maintenance-worker \
+	notification-delivery-worker; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -1295,6 +3501,9 @@ for service in api-gateway api outbox-publisher integration-worker maintenance-w
 	expected_image_revision="$APP_REVISION"
 	if [[ "$service" == "maintenance-worker" ]]; then
 		expected_image_revision="$MAINTENANCE_REVISION"
+	fi
+	if [[ "$service" == "notification-delivery-worker" ]]; then
+		expected_image_revision="$NOTIFICATION_DELIVERY_REVISION"
 	fi
 	if [[ "$image_revision" != "$expected_image_revision" ]]; then
 		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
@@ -1312,7 +3521,39 @@ for service in api-gateway api outbox-publisher integration-worker maintenance-w
 	fi
 done
 
+if [[ "$notification_forward_candidate_active" == "true" ]]; then
+	# Canonical services passed the complete deployment smoke, so the saved
+	# forward topology is no longer the recovery authority.
+	forward_cutover_recovery_active=false
+	trap - EXIT INT TERM
+	notification_cutover_cleanup_complete=false
+	for ((attempt = 1; attempt <= 5; attempt++)); do
+		if compose_notification_cutover rm -f \
+			"${notification_cutover_candidate_services[@]}"; then
+			remaining_cutover_candidate_ids="$(
+				compose_notification_cutover ps -a -q \
+					"${notification_cutover_candidate_services[@]}" \
+					2>/dev/null || true
+			)"
+			if [[ -z "$remaining_cutover_candidate_ids" ]]; then
+				notification_cutover_cleanup_complete=true
+				break
+			fi
+		fi
+		if ((attempt < 5)); then
+			sleep "$HEALTHCHECK_INTERVAL"
+		fi
+	done
+	if [[ "$notification_cutover_cleanup_complete" != "true" ]]; then
+		echo "Canonical topology is healthy, but saved forward containers could not be removed after five attempts." >&2
+		echo "Remove only the stopped $NOTIFICATION_DELIVERY_CUTOVER_PROJECT containers before the next deployment." >&2
+		exit 1
+	fi
+	notification_forward_candidate_active=false
+	echo "Canonical topology verified; saved forward cutover containers removed."
+fi
+
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 compose_target ps \
-	api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker rabbitmq
