@@ -571,8 +571,10 @@ export class AuthService {
 		return `${randomInt(100000, 1000000)}`;
 	}
 
-	private ensureUserActive(user: Pick<UserWithAuthIdentities, 'status'>) {
-		if (user.status === UserStatus.DEACTIVATED) {
+	private ensureUserActive(
+		user: Pick<UserWithAuthIdentities, 'status' | 'deletedAt'>
+	) {
+		if (user.status === UserStatus.DEACTIVATED || user.deletedAt) {
 			throw new UnauthorizedException(USER_DEACTIVATED_MESSAGE);
 		}
 	}

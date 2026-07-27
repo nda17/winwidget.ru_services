@@ -20,7 +20,7 @@ import {
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { AuthIdentityType, Prisma } from '@prisma/client';
+import { AuthIdentityType, Prisma, UserStatus } from '@prisma/client';
 import { maxLength } from 'class-validator';
 import { Request } from 'express';
 import { isDeepStrictEqual } from 'node:util';
@@ -62,6 +62,8 @@ export interface AdminWidgetDeleteResponse {
 interface UserWithIdentities {
 	id: string;
 	name: string | null;
+	status: UserStatus;
+	deletedAt: Date | null;
 	authIdentities: Array<{
 		type: AuthIdentityType;
 		value: string;
@@ -77,6 +79,8 @@ export class WidgetAdminService {
 	private readonly ownerSelect: Prisma.UserSelect = {
 		id: true,
 		name: true,
+		status: true,
+		deletedAt: true,
 		authIdentities: {
 			where: {
 				type: {
@@ -121,10 +125,18 @@ export class WidgetAdminService {
 	) {
 		this.assertNameLength(dto.name);
 
-		const { entity: currentEntity, owner } = await this.getEntityAndOwner(
-			type,
-			widgetId
-		);
+		const {
+			entity: currentEntity,
+			owner,
+			ownerStatus
+		} = await this.getEntityAndOwner(type, widgetId);
+
+		if (dto.isActive === true && ownerStatus !== UserStatus.ACTIVE) {
+			throw new BadRequestException(
+				'Сначала активируйте владельца виджета'
+			);
+		}
+
 		const updatedEntity = await this.dispatchUpdate(
 			type,
 			owner.id,
@@ -245,6 +257,7 @@ export class WidgetAdminService {
 	): Promise<{
 		entity: AdminWidgetEntity;
 		owner: AdminWidgetOwner;
+		ownerStatus: UserStatus;
 	}> {
 		const record = await this.findWidgetWithOwner(type, widgetId);
 
@@ -254,8 +267,15 @@ export class WidgetAdminService {
 
 		const { user, ...entity } = record;
 
+		if (user.deletedAt) {
+			throw new BadRequestException(
+				'Сначала восстановите удалённого владельца виджета'
+			);
+		}
+
 		return {
 			entity,
+			ownerStatus: user.status,
 			owner: {
 				id: user.id,
 				name: user.name,

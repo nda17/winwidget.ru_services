@@ -14,6 +14,7 @@ model User {
   avatarPath                   String?
   status                       UserStatus                   @default(ACTIVE)
   personalDataConsentRevokedAt DateTime?                    @map("personal_data_consent_revoked_at")
+  deletedAt                    DateTime?                    @map("deleted_at")
   rights                       Role[]                       @default([USER])
   authIdentities               AuthIdentity[]
   telegramNotificationChannel  TelegramNotificationChannel?
@@ -41,6 +42,7 @@ model User {
   updatedAt                    DateTime                     @updatedAt @map("updated_at")
 
   @@index([status])
+  @@index([deletedAt])
 }
 
 model UserSession {

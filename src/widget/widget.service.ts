@@ -824,7 +824,7 @@ export class WidgetService {
 			s.status::text AS subscription_status
 		`;
 		const ownerJoinsSql = Prisma.sql`
-			JOIN "User" u ON u.id = entity.user_id
+			JOIN "User" u ON u.id = entity.user_id AND u.deleted_at IS NULL
 			LEFT JOIN subscriptions s ON s.user_id = u.id
 			LEFT JOIN LATERAL (
 				SELECT ai.value

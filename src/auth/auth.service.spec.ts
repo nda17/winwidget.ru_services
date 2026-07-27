@@ -131,6 +131,18 @@ describe('AuthService opaque refresh sessions', () => {
 		).rejects.toBeInstanceOf(UnauthorizedException);
 		expect(fixture.findUnique).not.toHaveBeenCalled();
 	});
+
+	it('rejects refresh for a soft-deleted user even if status is ACTIVE', async () => {
+		const fixture = await createFixture();
+		fixture.user.deletedAt = new Date();
+
+		await expect(
+			fixture.service.refreshSession(fixture.refreshToken)
+		).rejects.toBeInstanceOf(UnauthorizedException);
+		expect(
+			fixture.accessJwtService.issueAccessToken
+		).not.toHaveBeenCalled();
+	});
 });
 
 const createFixture = async () => {
@@ -153,6 +165,7 @@ const createFixture = async () => {
 	const user = {
 		id: session.userId,
 		status: UserStatus.ACTIVE,
+		deletedAt: null as Date | null,
 		rights: [Role.USER]
 	};
 	const findUnique = jest.fn().mockImplementation(async ({ where }) => {

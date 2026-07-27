@@ -142,18 +142,44 @@ export class DailySummaryReportService {
 			expiredActiveSubscriptionsCount,
 			usersWithoutContactsCount
 		] = await Promise.all([
-			this.prisma.user.count(),
-			this.prisma.user.count({ where: { rights: { has: Role.USER } } }),
-			this.prisma.user.count({ where: { rights: { has: Role.ADMIN } } }),
-			this.prisma.user.count({ where: { rights: { has: Role.DEV } } }),
 			this.prisma.user.count({
-				where: { createdAt: range }
+				where: { deletedAt: null }
 			}),
 			this.prisma.user.count({
-				where: { createdAt: previousDayRange }
+				where: {
+					deletedAt: null,
+					rights: { has: Role.USER }
+				}
 			}),
 			this.prisma.user.count({
-				where: { createdAt: last7DaysRange }
+				where: {
+					deletedAt: null,
+					rights: { has: Role.ADMIN }
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					deletedAt: null,
+					rights: { has: Role.DEV }
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					deletedAt: null,
+					createdAt: range
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					deletedAt: null,
+					createdAt: previousDayRange
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					deletedAt: null,
+					createdAt: last7DaysRange
+				}
 			}),
 			this.prisma.payment.findMany({
 				where: {
@@ -255,18 +281,21 @@ export class DailySummaryReportService {
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: { gte: now, lt: todayEndsAt }
 				}
 			}),
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: { gte: now, lt: soonEndsAt3d }
 				}
 			}),
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: {
 						gte: now,
 						lt: soonEndsAt
@@ -276,6 +305,7 @@ export class DailySummaryReportService {
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: {
 						lt: now
 					}
@@ -283,6 +313,7 @@ export class DailySummaryReportService {
 			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
 					authIdentities: {
 						none: {
 							type: {

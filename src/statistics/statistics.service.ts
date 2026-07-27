@@ -101,18 +101,30 @@ export class StatisticsService {
 			onlineConsultantWidgetStats,
 			calculatorWidgetStats
 		] = await Promise.all([
-			this.prisma.user.count(),
 			this.prisma.user.count({
-				where: { updatedAt: { gte: last30DaysStart } }
-			}),
-			this.prisma.user.count({
-				where: { createdAt: { gte: last30DaysStart } }
-			}),
-			this.prisma.user.count({
-				where: { rights: { has: Role.ADMIN } }
+				where: { deletedAt: null }
 			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
+					updatedAt: { gte: last30DaysStart }
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					deletedAt: null,
+					createdAt: { gte: last30DaysStart }
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					deletedAt: null,
+					rights: { has: Role.ADMIN }
+				}
+			}),
+			this.prisma.user.count({
+				where: {
+					deletedAt: null,
 					authIdentities: {
 						none: { type: AuthIdentityType.EMAIL }
 					}
@@ -120,6 +132,7 @@ export class StatisticsService {
 			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
 					authIdentities: {
 						none: { type: AuthIdentityType.PHONE }
 					}
@@ -127,6 +140,7 @@ export class StatisticsService {
 			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
 					authIdentities: {
 						none: {
 							type: {
@@ -138,6 +152,7 @@ export class StatisticsService {
 			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
 					authIdentities: {
 						some: { type: AuthIdentityType.TELEGRAM }
 					}
@@ -181,23 +196,29 @@ export class StatisticsService {
 				}
 			}),
 			this.prisma.subscription.count({
-				where: { status: SubscriptionStatus.ACTIVE }
-			}),
-			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
-					plan: { in: [Plan.EASY, Plan.HARD] }
+					user: { deletedAt: null }
 				}
 			}),
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
-					plan: Plan.TRIAL
+					plan: { in: [Plan.EASY, Plan.HARD] },
+					user: { deletedAt: null }
 				}
 			}),
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					plan: Plan.TRIAL,
+					user: { deletedAt: null }
+				}
+			}),
+			this.prisma.subscription.count({
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: {
 						gte: todayStart,
 						lt: tomorrowStart
@@ -207,6 +228,7 @@ export class StatisticsService {
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: {
 						gte: now,
 						lt: expiresIn3Days
@@ -216,6 +238,7 @@ export class StatisticsService {
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: {
 						gte: now,
 						lt: expiresIn7Days
@@ -225,17 +248,24 @@ export class StatisticsService {
 			this.prisma.subscription.count({
 				where: {
 					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null },
 					expiresAt: { lt: now }
 				}
 			}),
 			this.prisma.subscription.groupBy({
 				by: ['plan'],
 				_count: true,
-				where: { status: SubscriptionStatus.ACTIVE }
+				where: {
+					status: SubscriptionStatus.ACTIVE,
+					user: { deletedAt: null }
+				}
 			}),
 			this.prisma.subscription.groupBy({
 				by: ['status'],
-				_count: true
+				_count: true,
+				where: {
+					user: { deletedAt: null }
+				}
 			}),
 			this.prisma.lead.count({
 				where: { createdAt: { gte: last30DaysStart } }
@@ -586,6 +616,7 @@ export class StatisticsService {
 				createdAt: 'asc'
 			},
 			where: {
+				deletedAt: null,
 				createdAt: {
 					gte: startDate,
 					lte: endDate
@@ -627,18 +658,25 @@ export class StatisticsService {
 			usersWithAuthIdentities,
 			adminUsers
 		] = await Promise.all([
-			this.prisma.user.count(),
+			this.prisma.user.count({
+				where: { deletedAt: null }
+			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
 					updatedAt: { gte: monthAgo }
 				}
 			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
 					createdAt: { gte: monthAgo }
 				}
 			}),
 			this.prisma.user.findMany({
+				where: {
+					deletedAt: null
+				},
 				select: {
 					authIdentities: {
 						select: {
@@ -650,6 +688,7 @@ export class StatisticsService {
 			}),
 			this.prisma.user.count({
 				where: {
+					deletedAt: null,
 					rights: { has: Role.ADMIN }
 				}
 			})

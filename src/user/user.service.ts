@@ -5,13 +5,13 @@ import {
 	IVkProfile,
 	TSocialProfile
 } from '@/auth/social-media/social-media-auth.types';
-import { FileService } from '@/file/file.service';
 import { PrismaService } from '@/prisma.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
 import { UpdateUserDto } from '@/user/dto/update-user.dto';
 import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
@@ -55,6 +55,8 @@ export interface AdminUserListFilters {
 	registeredFrom?: string;
 	registeredTo?: string;
 	subscription?: string;
+	includeDeleted?: boolean;
+	deletedOnly?: boolean;
 }
 
 type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX' | 'VK';
@@ -102,16 +104,14 @@ export interface OverviewWidgetItem {
 
 @Injectable()
 export class UserService {
-	constructor(
-		private prisma: PrismaService,
-		private readonly fileService: FileService
-	) {}
+	constructor(private prisma: PrismaService) {}
 
 	async getUserList(
 		searchTerm?: string,
 		page = 1,
 		limit = 20,
-		filters: AdminUserListFilters = {}
+		filters: AdminUserListFilters = {},
+		adminRights: Role[] = []
 	) {
 		const normalizedSearchTerm = searchTerm?.trim();
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
@@ -119,15 +119,16 @@ export class UserService {
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
 		const where = this.getAdminUserListWhere(
 			normalizedSearchTerm,
-			filters
+			filters,
+			adminRights
 		);
 		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [users, total] = await Promise.all([
 			this.prisma.user.findMany({
 				where,
-				orderBy: {
-					createdAt: 'desc'
-				},
+				orderBy: filters.deletedOnly
+					? { deletedAt: 'desc' }
+					: { createdAt: 'desc' },
 				include: {
 					authIdentities: true
 				},
@@ -162,12 +163,26 @@ export class UserService {
 		return user ? this.toPublicUser(user) : null;
 	}
 
+	async getAdminEditableUserById(id: string) {
+		const user = await this.getUserById(id);
+
+		if (!user) {
+			throw new NotFoundException('User not found');
+		}
+
+		this.ensureUserIsNotDeleted(user);
+
+		return this.toPublicUser(user);
+	}
+
 	async getAdminUserOverview(id: string) {
 		const user = await this.getUserById(id);
 
 		if (!user) {
 			throw new NotFoundException('User not found');
 		}
+
+		this.ensureUserIsNotDeleted(user);
 
 		const [
 			subscription,
@@ -976,6 +991,8 @@ export class UserService {
 			throw new NotFoundException('User not found');
 		}
 
+		this.ensureUserIsNotDeleted(user);
+
 		await this.prisma.user.update({
 			where: {
 				id
@@ -1000,7 +1017,8 @@ export class UserService {
 
 	async updateUser(
 		id: string,
-		dto?: UpdateUserDto,
+		dto: UpdateUserDto | undefined,
+		adminId: string,
 		adminRights: Role[] = []
 	) {
 		const user = await this.getUserById(id);
@@ -1009,14 +1027,8 @@ export class UserService {
 			throw new NotFoundException('User not found');
 		}
 
-		const emailIdentity = this.getIdentityByType(
-			user,
-			AuthIdentityType.EMAIL
-		);
-		const phoneIdentity = this.getIdentityByType(
-			user,
-			AuthIdentityType.PHONE
-		);
+		this.ensureUserIsNotDeleted(user);
+
 		const nextEmail = this.normalizeEditableEmail(dto?.email);
 		const nextPhone = this.normalizeEditablePhone(dto?.phone);
 
@@ -1051,195 +1063,480 @@ export class UserService {
 			}
 		}
 
-		const updatedUser = await this.prisma.$transaction(async tx => {
-			const updated = await tx.user.update({
-				where: {
-					id
-				},
-				data: {
-					password: dto?.password
-						? await hash(dto.password, PASSWORD_SALT_ROUNDS)
-						: user.password,
-					name: typeof dto?.name === 'string' ? dto.name : user.name,
-					avatarPath:
-						dto?.avatarPath === null
-							? null
-							: typeof dto?.avatarPath === 'string' &&
-								  dto.avatarPath.length
-								? dto.avatarPath
-								: user.avatarPath,
-					rights: this.buildEditableRights(user, dto, adminRights)
-				}
-			});
+		let updatedUser: UserWithAuthIdentities | null;
 
-			const targetUserId = updated.id;
-
-			if (nextEmail !== undefined) {
-				if (nextEmail) {
-					await tx.authIdentity.upsert({
-						where: {
-							userId_type: {
-								userId: targetUserId,
-								type: AuthIdentityType.EMAIL
-							}
-						},
-						update: {
-							value: nextEmail,
-							verifiedAt: emailIdentity?.verifiedAt ?? new Date()
-						},
-						create: {
-							userId: targetUserId,
-							type: AuthIdentityType.EMAIL,
-							value: nextEmail,
-							verifiedAt: new Date()
+		try {
+			updatedUser = await this.prisma.$transaction(
+				async tx => {
+					const currentUser = await tx.user.findUnique({
+						where: { id },
+						include: {
+							authIdentities: true
 						}
 					});
-				} else {
-					await tx.authIdentity.deleteMany({
+
+					if (!currentUser) {
+						throw new NotFoundException('User not found');
+					}
+
+					this.ensureUserIsNotDeleted(currentUser);
+
+					const nextRights = this.buildEditableRights(
+						currentUser,
+						dto,
+						adminRights
+					);
+					const removesDevRole =
+						currentUser.rights.includes(Role.DEV) &&
+						!nextRights.includes(Role.DEV);
+
+					if (removesDevRole && id === adminId) {
+						throw new ForbiddenException(
+							'Нельзя снять роль DEV с собственной учётной записи'
+						);
+					}
+
+					if (removesDevRole && currentUser.status === UserStatus.ACTIVE) {
+						await this.ensureAnotherActiveDevExists(
+							tx,
+							'Нельзя снять роль DEV с последней активной DEV-учётной записи'
+						);
+					}
+
+					const emailIdentity = this.getIdentityByType(
+						currentUser,
+						AuthIdentityType.EMAIL
+					);
+					const phoneIdentity = this.getIdentityByType(
+						currentUser,
+						AuthIdentityType.PHONE
+					);
+					const updated = await tx.user.update({
 						where: {
-							userId: targetUserId,
-							type: AuthIdentityType.EMAIL
+							id
+						},
+						data: {
+							password: dto?.password
+								? await hash(dto.password, PASSWORD_SALT_ROUNDS)
+								: currentUser.password,
+							name:
+								typeof dto?.name === 'string'
+									? dto.name
+									: currentUser.name,
+							avatarPath:
+								dto?.avatarPath === null
+									? null
+									: typeof dto?.avatarPath === 'string' &&
+										  dto.avatarPath.length
+										? dto.avatarPath
+										: currentUser.avatarPath,
+							rights: nextRights
 						}
 					});
-				}
-			}
 
-			if (
-				nextPhone !== undefined ||
-				typeof dto?.isPhoneVerified === 'boolean'
-			) {
-				const phoneValue = nextPhone ?? phoneIdentity?.value ?? null;
+					const targetUserId = updated.id;
 
-				if (phoneValue) {
-					const isVerified =
+					if (nextEmail !== undefined) {
+						if (nextEmail) {
+							await tx.authIdentity.upsert({
+								where: {
+									userId_type: {
+										userId: targetUserId,
+										type: AuthIdentityType.EMAIL
+									}
+								},
+								update: {
+									value: nextEmail,
+									verifiedAt: emailIdentity?.verifiedAt ?? new Date()
+								},
+								create: {
+									userId: targetUserId,
+									type: AuthIdentityType.EMAIL,
+									value: nextEmail,
+									verifiedAt: new Date()
+								}
+							});
+						} else {
+							await tx.authIdentity.deleteMany({
+								where: {
+									userId: targetUserId,
+									type: AuthIdentityType.EMAIL
+								}
+							});
+						}
+					}
+
+					if (
+						nextPhone !== undefined ||
 						typeof dto?.isPhoneVerified === 'boolean'
-							? dto.isPhoneVerified
-							: Boolean(phoneIdentity?.verifiedAt);
+					) {
+						const phoneValue = nextPhone ?? phoneIdentity?.value ?? null;
 
-					await tx.authIdentity.upsert({
+						if (phoneValue) {
+							const isVerified =
+								typeof dto?.isPhoneVerified === 'boolean'
+									? dto.isPhoneVerified
+									: Boolean(phoneIdentity?.verifiedAt);
+
+							await tx.authIdentity.upsert({
+								where: {
+									userId_type: {
+										userId: targetUserId,
+										type: AuthIdentityType.PHONE
+									}
+								},
+								update: {
+									value: phoneValue,
+									verifiedAt: isVerified
+										? (phoneIdentity?.verifiedAt ?? new Date())
+										: null
+								},
+								create: {
+									userId: targetUserId,
+									type: AuthIdentityType.PHONE,
+									value: phoneValue,
+									verifiedAt: isVerified ? new Date() : null
+								}
+							});
+						} else {
+							await tx.authIdentity.deleteMany({
+								where: {
+									userId: targetUserId,
+									type: AuthIdentityType.PHONE
+								}
+							});
+						}
+					}
+
+					return tx.user.findUnique({
 						where: {
-							userId_type: {
-								userId: targetUserId,
-								type: AuthIdentityType.PHONE
-							}
+							id: targetUserId
 						},
-						update: {
-							value: phoneValue,
-							verifiedAt: isVerified
-								? (phoneIdentity?.verifiedAt ?? new Date())
-								: null
-						},
-						create: {
-							userId: targetUserId,
-							type: AuthIdentityType.PHONE,
-							value: phoneValue,
-							verifiedAt: isVerified ? new Date() : null
+						include: {
+							authIdentities: true
 						}
 					});
-				} else {
-					await tx.authIdentity.deleteMany({
-						where: {
-							userId: targetUserId,
-							type: AuthIdentityType.PHONE
-						}
-					});
+				},
+				{
+					isolationLevel: Prisma.TransactionIsolationLevel.Serializable
 				}
+			);
+		} catch (error) {
+			if (this.isSerializableTransactionConflict(error)) {
+				throw new ConflictException(
+					'Данные DEV-учёток изменились параллельно. Обновите страницу и повторите действие'
+				);
 			}
 
-			return tx.user.findUnique({
-				where: {
-					id: targetUserId
-				},
-				include: {
-					authIdentities: true
-				}
-			});
-		});
+			throw error;
+		}
 
 		return updatedUser ? this.toPublicUser(updatedUser) : null;
 	}
 
-	async deleteUser(id: string) {
-		const buttonImageUrls = await this.getUserWidgetButtonImageUrls(id);
+	async deleteUser(id: string, adminId: string, adminRights: Role[]) {
+		if (id === adminId) {
+			throw new ForbiddenException(
+				'Нельзя удалить собственную учётную запись'
+			);
+		}
 
-		await Promise.all(
-			buttonImageUrls.map(url =>
-				this.fileService.deleteWidgetButtonImage(url)
-			)
+		const deletedAt = new Date();
+		const deletedUser = await this.prisma.$transaction(
+			async tx => {
+				const user = await tx.user.findUnique({
+					where: { id },
+					include: {
+						authIdentities: true
+					}
+				});
+
+				if (!user) {
+					throw new NotFoundException('User not found');
+				}
+
+				if (user.deletedAt) {
+					throw new BadRequestException('Пользователь уже удалён');
+				}
+
+				const targetIsDev = user.rights.includes(Role.DEV);
+
+				if (targetIsDev && !adminRights.includes(Role.DEV)) {
+					throw new ForbiddenException(
+						'Удалить пользователя с ролью DEV может только DEV'
+					);
+				}
+
+				if (targetIsDev && user.status === UserStatus.ACTIVE) {
+					const activeDevCount = await tx.user.count({
+						where: {
+							status: UserStatus.ACTIVE,
+							deletedAt: null,
+							rights: {
+								has: Role.DEV
+							}
+						}
+					});
+
+					if (activeDevCount <= 1) {
+						throw new ForbiddenException(
+							'Нельзя удалить последнего активного DEV'
+						);
+					}
+				}
+
+				const updated = await tx.user.update({
+					where: { id },
+					data: {
+						status: UserStatus.DEACTIVATED,
+						personalDataConsentRevokedAt:
+							user.personalDataConsentRevokedAt ?? deletedAt,
+						deletedAt
+					},
+					include: {
+						authIdentities: true
+					}
+				});
+
+				await this.revokeSessionsAndDeactivateWidgets(tx, id, deletedAt);
+
+				return updated;
+			},
+			{
+				isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+			}
 		);
 
-		return this.prisma.user.delete({
-			where: {
-				id
-			}
-		});
+		return this.toPublicUser(deletedUser);
 	}
 
-	async toggleUserActivation(id: string) {
+	async restoreUser(id: string) {
 		const user = await this.prisma.user.findUnique({
 			where: { id },
-			select: { status: true }
+			include: {
+				authIdentities: true
+			}
 		});
 
 		if (!user) {
 			throw new NotFoundException('User not found');
 		}
 
-		const shouldDeactivate = user.status === UserStatus.ACTIVE;
+		if (!user.deletedAt) {
+			throw new BadRequestException('Пользователь не удалён');
+		}
 
-		const updatedUser = await this.prisma.$transaction(async tx => {
-			const updated = await tx.user.update({
-				where: { id },
-				data: shouldDeactivate
-					? {
-							status: UserStatus.DEACTIVATED,
-							personalDataConsentRevokedAt: new Date()
-						}
-					: {
-							status: UserStatus.ACTIVE,
-							personalDataConsentRevokedAt: null
-						},
-				include: {
-					authIdentities: true
-				}
-			});
-
-			if (shouldDeactivate) {
-				await tx.userSession.updateMany({
-					where: { userId: id, revokedAt: null },
-					data: { revokedAt: new Date() }
-				});
-
-				await tx.widget.updateMany({
-					where: { userId: id },
-					data: { isActive: false }
-				});
-				await tx.quiz.updateMany({
-					where: { userId: id },
-					data: { isActive: false }
-				});
-				await tx.callback.updateMany({
-					where: { userId: id },
-					data: { isActive: false }
-				});
-				await tx.countdownTimer.updateMany({
-					where: { userId: id },
-					data: { isActive: false }
-				});
-				await tx.stopOffer.updateMany({
-					where: { userId: id },
-					data: { isActive: false }
-				});
-				await tx.calculator.updateMany({
-					where: { userId: id },
-					data: { isActive: false }
-				});
+		const restoredUser = await this.prisma.user.update({
+			where: { id },
+			data: {
+				deletedAt: null,
+				status: UserStatus.DEACTIVATED
+			},
+			include: {
+				authIdentities: true
 			}
-
-			return updated;
 		});
 
+		return this.toPublicUser(restoredUser);
+	}
+
+	async toggleUserActivation(
+		id: string,
+		adminId: string,
+		adminRights: Role[]
+	) {
+		const user = await this.prisma.user.findUnique({
+			where: { id },
+			select: {
+				status: true,
+				deletedAt: true
+			}
+		});
+
+		if (!user) {
+			throw new NotFoundException('User not found');
+		}
+
+		this.ensureUserIsNotDeleted(user);
+
+		const statusChangedAt = new Date();
+
+		let updatedUser: UserWithAuthIdentities;
+
+		try {
+			updatedUser = await this.prisma.$transaction(
+				async tx => {
+					const currentUser = await tx.user.findUnique({
+						where: { id },
+						include: {
+							authIdentities: true
+						}
+					});
+
+					if (!currentUser) {
+						throw new NotFoundException('User not found');
+					}
+
+					this.ensureUserIsNotDeleted(currentUser);
+
+					const shouldDeactivate =
+						currentUser.status === UserStatus.ACTIVE;
+					const targetIsDev = currentUser.rights.includes(Role.DEV);
+
+					if (targetIsDev && !adminRights.includes(Role.DEV)) {
+						throw new ForbiddenException(
+							'Изменять статус пользователя с ролью DEV может только DEV'
+						);
+					}
+
+					if (shouldDeactivate && id === adminId) {
+						throw new ForbiddenException(
+							'Нельзя деактивировать собственную учётную запись'
+						);
+					}
+
+					if (shouldDeactivate && targetIsDev) {
+						await this.ensureAnotherActiveDevExists(
+							tx,
+							'Нельзя деактивировать последнюю активную DEV-учётную запись'
+						);
+					}
+
+					const updateResult = await tx.user.updateMany({
+						where: {
+							id,
+							status: currentUser.status,
+							deletedAt: null
+						},
+						data: shouldDeactivate
+							? {
+									status: UserStatus.DEACTIVATED,
+									personalDataConsentRevokedAt: statusChangedAt
+								}
+							: {
+									status: UserStatus.ACTIVE,
+									personalDataConsentRevokedAt: null
+								}
+					});
+
+					if (updateResult.count !== 1) {
+						throw new ConflictException(
+							'Статус пользователя уже изменён. Обновите страницу и повторите действие'
+						);
+					}
+
+					const updated = await tx.user.findUnique({
+						where: { id },
+						include: {
+							authIdentities: true
+						}
+					});
+
+					if (!updated) {
+						throw new NotFoundException('User not found');
+					}
+
+					if (shouldDeactivate) {
+						await this.revokeSessionsAndDeactivateWidgets(
+							tx,
+							id,
+							statusChangedAt
+						);
+					} else {
+						await this.deactivateWidgets(tx, id);
+					}
+
+					return updated;
+				},
+				{
+					isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+				}
+			);
+		} catch (error) {
+			if (this.isSerializableTransactionConflict(error)) {
+				throw new ConflictException(
+					'Данные DEV-учёток изменились параллельно. Обновите страницу и повторите действие'
+				);
+			}
+
+			throw error;
+		}
+
 		return this.toPublicUser(updatedUser);
+	}
+
+	private async revokeSessionsAndDeactivateWidgets(
+		tx: Prisma.TransactionClient,
+		userId: string,
+		revokedAt: Date
+	) {
+		await tx.userSession.updateMany({
+			where: { userId, revokedAt: null },
+			data: { revokedAt }
+		});
+		await this.deactivateWidgets(tx, userId);
+	}
+
+	private async deactivateWidgets(
+		tx: Prisma.TransactionClient,
+		userId: string
+	) {
+		await tx.widget.updateMany({
+			where: { userId },
+			data: { isActive: false }
+		});
+		await tx.quiz.updateMany({
+			where: { userId },
+			data: { isActive: false }
+		});
+		await tx.callback.updateMany({
+			where: { userId },
+			data: { isActive: false }
+		});
+		await tx.countdownTimer.updateMany({
+			where: { userId },
+			data: { isActive: false }
+		});
+		await tx.stopOffer.updateMany({
+			where: { userId },
+			data: { isActive: false }
+		});
+		await tx.onlineConsultant.updateMany({
+			where: { userId },
+			data: { isActive: false }
+		});
+		await tx.calculator.updateMany({
+			where: { userId },
+			data: { isActive: false }
+		});
+	}
+
+	private async ensureAnotherActiveDevExists(
+		tx: Prisma.TransactionClient,
+		message: string
+	) {
+		const activeDevCount = await tx.user.count({
+			where: {
+				status: UserStatus.ACTIVE,
+				deletedAt: null,
+				rights: {
+					has: Role.DEV
+				}
+			}
+		});
+
+		if (activeDevCount <= 1) {
+			throw new ForbiddenException(message);
+		}
+	}
+
+	private isSerializableTransactionConflict(error: unknown) {
+		return (
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			error.code === 'P2034'
+		);
 	}
 
 	private buildWidgetTypeCount(
@@ -1274,69 +1571,10 @@ export class UserService {
 		};
 	}
 
-	private async getUserWidgetButtonImageUrls(userId: string) {
-		const [
-			widgets,
-			quizzes,
-			callbacks,
-			countdownTimers,
-			onlineConsultants,
-			calculators
-		] = await Promise.all([
-			this.prisma.widget.findMany({
-				where: { userId },
-				select: { config: true }
-			}),
-			this.prisma.quiz.findMany({
-				where: { userId },
-				select: { config: true }
-			}),
-			this.prisma.callback.findMany({
-				where: { userId },
-				select: { config: true }
-			}),
-			this.prisma.countdownTimer.findMany({
-				where: { userId },
-				select: { config: true }
-			}),
-			this.prisma.onlineConsultant.findMany({
-				where: { userId },
-				select: { config: true }
-			}),
-			this.prisma.calculator.findMany({
-				where: { userId },
-				select: { config: true }
-			})
-		]);
-
-		return [
-			...widgets,
-			...quizzes,
-			...callbacks,
-			...countdownTimers,
-			...onlineConsultants,
-			...calculators
-		]
-			.map(({ config }) => this.getButtonImageUrlFromConfig(config))
-			.filter((url): url is string => Boolean(url));
-	}
-
-	private getButtonImageUrlFromConfig(config: Prisma.JsonValue) {
-		if (!config || typeof config !== 'object' || Array.isArray(config)) {
-			return null;
-		}
-
-		const buttonImageUrl = (config as Record<string, unknown>)
-			.buttonImageUrl;
-
-		return typeof buttonImageUrl === 'string' && buttonImageUrl.trim()
-			? buttonImageUrl
-			: null;
-	}
-
 	private getAdminUserListWhere(
 		normalizedSearchTerm: string | undefined,
-		filters: AdminUserListFilters
+		filters: AdminUserListFilters,
+		adminRights: Role[]
 	): Prisma.UserWhereInput | undefined {
 		const and: Prisma.UserWhereInput[] = [];
 		const role = this.normalizeUserRole(filters.role);
@@ -1347,6 +1585,21 @@ export class UserService {
 			filters.registeredFrom,
 			filters.registeredTo
 		);
+
+		if (
+			(filters.includeDeleted || filters.deletedOnly) &&
+			!adminRights.includes(Role.DEV)
+		) {
+			throw new ForbiddenException(
+				'Удалённых пользователей может просматривать только DEV'
+			);
+		}
+
+		if (filters.deletedOnly) {
+			and.push({ deletedAt: { not: null } });
+		} else if (!filters.includeDeleted) {
+			and.push({ deletedAt: null });
+		}
 
 		if (normalizedSearchTerm) {
 			and.push({
@@ -1467,6 +1720,14 @@ export class UserService {
 		return rights;
 	}
 
+	private ensureUserIsNotDeleted(user: { deletedAt: Date | null }) {
+		if (user.deletedAt) {
+			throw new BadRequestException(
+				'Сначала восстановите удалённого пользователя'
+			);
+		}
+	}
+
 	private normalizeSubscriptionPresence(value?: string) {
 		const normalized = value?.trim().toUpperCase();
 
@@ -1531,6 +1792,7 @@ export class UserService {
 			avatarPath: user.avatarPath,
 			status: user.status,
 			personalDataConsentRevokedAt: user.personalDataConsentRevokedAt,
+			deletedAt: user.deletedAt,
 			rights: user.rights,
 			createdAt: user.createdAt,
 			updatedAt: user.updatedAt,

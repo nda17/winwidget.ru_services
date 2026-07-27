@@ -1,5 +1,5 @@
 import { SubscriptionService } from './subscription.service';
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import {
 	BillingPeriod,
 	Plan,
@@ -73,6 +73,30 @@ describe('SubscriptionService atomic limits', () => {
 			limitReached: true
 		});
 		expect(createLead).toHaveBeenCalledWith(transaction);
+	});
+
+	it('блокирует подписку только для активного неудалённого владельца', async () => {
+		await service.checkAndResetPeriod(subscription.userId);
+
+		const query = transaction.$queryRaw.mock.calls[0][0];
+		const queryText = query.strings.join(' ');
+
+		expect(queryText).toContain('JOIN "User" u');
+		expect(queryText).toContain(`u."status" = 'ACTIVE'`);
+		expect(queryText).toContain('u."deleted_at" IS NULL');
+		expect(queryText).toContain('FOR UPDATE OF s, u');
+	});
+
+	it('не создаёт заявку, если владелец не прошёл operational-проверку', async () => {
+		transaction.$queryRaw.mockResolvedValue([]);
+		const createLead = jest.fn();
+
+		await expect(
+			service.createLeadWithinLimit(subscription.userId, createLead)
+		).rejects.toBeInstanceOf(ForbiddenException);
+
+		expect(createLead).not.toHaveBeenCalled();
+		expect(transaction.subscription.update).not.toHaveBeenCalled();
 	});
 
 	it('не создаёт заявку после исчерпания лимита', async () => {
@@ -205,5 +229,155 @@ describe('SubscriptionService atomic limits', () => {
 			service.createWidgetWithinLimit(subscription.userId, createWidget)
 		).resolves.toEqual({ id: 'widget-1' });
 		expect(createWidget).toHaveBeenCalledWith(transaction);
+	});
+});
+
+describe('SubscriptionService admin soft-delete protection', () => {
+	let prisma: any;
+	let service: SubscriptionService;
+
+	beforeEach(() => {
+		prisma = {
+			user: {
+				findUnique: jest.fn(),
+				findMany: jest.fn()
+			},
+			subscription: {
+				findUnique: jest.fn(),
+				findMany: jest.fn(),
+				count: jest.fn(),
+				upsert: jest.fn()
+			},
+			subscriptionHistory: {
+				findMany: jest.fn(),
+				count: jest.fn()
+			},
+			$transaction: jest.fn()
+		};
+		service = new SubscriptionService(prisma);
+	});
+
+	it('не активирует подписку soft-deleted пользователя', async () => {
+		prisma.user.findUnique.mockResolvedValue({
+			deletedAt: new Date('2026-07-28T00:00:00.000Z')
+		});
+
+		await expect(
+			service.adminActivateSubscription(
+				'deleted-user',
+				Plan.EASY,
+				BillingPeriod.MONTHLY
+			)
+		).rejects.toThrow(
+			new BadRequestException(
+				'Нельзя изменить подписку удалённого пользователя'
+			)
+		);
+		expect(prisma.user.findUnique).toHaveBeenCalledWith({
+			where: { id: 'deleted-user' },
+			select: { deletedAt: true }
+		});
+		expect(prisma.subscription.findUnique).not.toHaveBeenCalled();
+		expect(prisma.subscription.upsert).not.toHaveBeenCalled();
+	});
+
+	it('не начисляет бонусные дни soft-deleted пользователю по ID', async () => {
+		prisma.user.findUnique.mockResolvedValue({
+			deletedAt: new Date('2026-07-28T00:00:00.000Z')
+		});
+
+		await expect(
+			service.adminExtendSubscriptionDays({
+				userId: 'deleted-user',
+				days: 3,
+				adminId: 'admin-user',
+				audience: 'SINGLE'
+			})
+		).rejects.toThrow('Нельзя изменить подписку удалённого пользователя');
+		expect(prisma.subscription.findUnique).not.toHaveBeenCalled();
+		expect(prisma.$transaction).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		[
+			'ACTIVE_SUBSCRIPTION',
+			{
+				deletedAt: null,
+				subscription: {
+					is: {
+						status: SubscriptionStatus.ACTIVE,
+						OR: [
+							{ expiresAt: null },
+							{ expiresAt: { gt: expect.any(Date) } }
+						]
+					}
+				}
+			}
+		],
+		[
+			'INACTIVE_SUBSCRIPTION',
+			{
+				deletedAt: null,
+				OR: [
+					{ subscription: { is: null } },
+					{
+						subscription: {
+							isNot: {
+								status: SubscriptionStatus.ACTIVE,
+								OR: [
+									{ expiresAt: null },
+									{ expiresAt: { gt: expect.any(Date) } }
+								]
+							}
+						}
+					}
+				]
+			}
+		],
+		['ALL', { deletedAt: null }]
+	] as const)(
+		'исключает soft-deleted пользователей из аудитории %s',
+		async (audience, expectedWhere) => {
+			prisma.user.findMany.mockResolvedValue([]);
+
+			await expect(
+				service.adminExtendSubscriptionDays({
+					days: 3,
+					adminId: 'admin-user',
+					audience
+				})
+			).rejects.toThrow('Пользователи для начисления не найдены');
+			expect(prisma.user.findMany).toHaveBeenCalledWith({
+				where: expectedWhere,
+				select: {
+					id: true,
+					subscription: true
+				},
+				orderBy: {
+					createdAt: 'asc'
+				}
+			});
+		}
+	);
+
+	it('сохраняет удалённых пользователей в исторических списках подписок', async () => {
+		prisma.subscription.findMany.mockResolvedValue([]);
+		prisma.subscription.count.mockResolvedValue(0);
+		prisma.subscriptionHistory.findMany.mockResolvedValue([]);
+		prisma.subscriptionHistory.count.mockResolvedValue(0);
+
+		await service.adminGetAllSubscriptions();
+		await service.adminGetSubscriptionHistory();
+
+		expect(prisma.subscription.findMany).toHaveBeenCalledWith(
+			expect.objectContaining({ where: {} })
+		);
+		expect(prisma.subscription.count).toHaveBeenCalledWith({ where: {} });
+		expect(prisma.subscriptionHistory.findMany).toHaveBeenCalledWith(
+			expect.objectContaining({ where: {} })
+		);
+		expect(prisma.subscriptionHistory.count).toHaveBeenCalledWith({
+			where: {}
+		});
 	});
 });

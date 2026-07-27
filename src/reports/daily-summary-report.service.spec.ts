@@ -47,18 +47,25 @@ describe('DailySummaryReportService', () => {
 			.mockResolvedValueOnce([{ amount: '50' }])
 			.mockResolvedValueOnce([{ amount: '350.50' }])
 			.mockResolvedValueOnce([{ userId: 'user-1' }]);
+		const userCount = jest
+			.fn()
+			.mockResolvedValueOnce(100)
+			.mockResolvedValueOnce(90)
+			.mockResolvedValueOnce(5)
+			.mockResolvedValueOnce(2)
+			.mockResolvedValueOnce(3)
+			.mockResolvedValueOnce(2)
+			.mockResolvedValueOnce(14)
+			.mockResolvedValueOnce(4);
+		const subscriptionCount = jest
+			.fn()
+			.mockResolvedValueOnce(1)
+			.mockResolvedValueOnce(2)
+			.mockResolvedValueOnce(3)
+			.mockResolvedValueOnce(4);
 		const prisma = {
 			user: {
-				count: jest
-					.fn()
-					.mockResolvedValueOnce(100)
-					.mockResolvedValueOnce(90)
-					.mockResolvedValueOnce(5)
-					.mockResolvedValueOnce(2)
-					.mockResolvedValueOnce(3)
-					.mockResolvedValueOnce(2)
-					.mockResolvedValueOnce(14)
-					.mockResolvedValueOnce(4)
+				count: userCount
 			},
 			payment: {
 				findMany: paymentFindMany,
@@ -77,12 +84,7 @@ describe('DailySummaryReportService', () => {
 			onlineConsultantLead: createLeadDelegate(6, 7, 42),
 			calculatorLead: createLeadDelegate(7, 8, 49),
 			subscription: {
-				count: jest
-					.fn()
-					.mockResolvedValueOnce(1)
-					.mockResolvedValueOnce(2)
-					.mockResolvedValueOnce(3)
-					.mockResolvedValueOnce(4)
+				count: subscriptionCount
 			}
 		} as unknown as PrismaService;
 		const service = new DailySummaryReportService(prisma);
@@ -153,5 +155,69 @@ describe('DailySummaryReportService', () => {
 			select: { userId: true },
 			distinct: ['userId']
 		});
+		expect(userCount).toHaveBeenNthCalledWith(1, {
+			where: { deletedAt: null }
+		});
+		expect(userCount).toHaveBeenNthCalledWith(2, {
+			where: {
+				deletedAt: null,
+				rights: { has: 'USER' }
+			}
+		});
+		expect(userCount).toHaveBeenNthCalledWith(3, {
+			where: {
+				deletedAt: null,
+				rights: { has: 'ADMIN' }
+			}
+		});
+		expect(userCount).toHaveBeenNthCalledWith(4, {
+			where: {
+				deletedAt: null,
+				rights: { has: 'DEV' }
+			}
+		});
+		expect(userCount).toHaveBeenNthCalledWith(5, {
+			where: {
+				deletedAt: null,
+				createdAt: {
+					gte: periodStart,
+					lt: periodEnd
+				}
+			}
+		});
+		expect(userCount).toHaveBeenNthCalledWith(6, {
+			where: {
+				deletedAt: null,
+				createdAt: {
+					gte: new Date('2026-07-21T21:00:00.000Z'),
+					lt: periodStart
+				}
+			}
+		});
+		expect(userCount).toHaveBeenNthCalledWith(7, {
+			where: {
+				deletedAt: null,
+				createdAt: {
+					gte: new Date('2026-07-16T21:00:00.000Z'),
+					lt: periodEnd
+				}
+			}
+		});
+		expect(userCount).toHaveBeenNthCalledWith(8, {
+			where: {
+				deletedAt: null,
+				authIdentities: {
+					none: {
+						type: {
+							in: ['EMAIL', 'PHONE']
+						}
+					}
+				}
+			}
+		});
+		expect(subscriptionCount).toHaveBeenCalledTimes(4);
+		for (const [args] of subscriptionCount.mock.calls) {
+			expect(args.where.user).toEqual({ deletedAt: null });
+		}
 	});
 });

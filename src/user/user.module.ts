@@ -1,6 +1,5 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { EmailModule } from '@/email/email.module';
-import { FileModule } from '@/file/file.module';
 import { SmsModule } from '@/sms/sms.module';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { UserController } from '@/user/user.controller';
@@ -13,7 +12,6 @@ import { Module } from '@nestjs/common';
 		EmailModule,
 		SmsModule,
 		AdminEventLogModule,
-		FileModule,
 		TelegramBotModule
 	],
 	controllers: [UserController],

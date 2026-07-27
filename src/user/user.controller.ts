@@ -164,7 +164,10 @@ export class UserController {
 		@Query('role') role?: string,
 		@Query('registeredFrom') registeredFrom?: string,
 		@Query('registeredTo') registeredTo?: string,
-		@Query('subscription') subscription?: string
+		@Query('subscription') subscription?: string,
+		@Query('includeDeleted') includeDeleted?: string,
+		@Query('deletedOnly') deletedOnly?: string,
+		@CurrentUser('rights') adminRights: Role[] = []
 	) {
 		return this.userService.getUserList(
 			searchTerm,
@@ -174,8 +177,11 @@ export class UserController {
 				role,
 				registeredFrom,
 				registeredTo,
-				subscription
-			}
+				subscription,
+				includeDeleted: includeDeleted === 'true',
+				deletedOnly: deletedOnly === 'true'
+			},
+			adminRights
 		);
 	}
 
@@ -190,7 +196,7 @@ export class UserController {
 	@Auth(Role.ADMIN)
 	@Get('edit/:id')
 	async getUserById(@Param('id') id: string) {
-		return this.userService.getPublicUserById(id);
+		return this.userService.getAdminEditableUserById(id);
 	}
 
 	@HttpCode(200)
@@ -203,7 +209,12 @@ export class UserController {
 		@CurrentUser('rights') adminRights: Role[],
 		@Req() request: Request
 	) {
-		const user = await this.userService.updateUser(id, dto, adminRights);
+		const user = await this.userService.updateUser(
+			id,
+			dto,
+			adminId,
+			adminRights
+		);
 		const updatedFields = Object.keys(dto).filter(
 			field => field !== 'password'
 		);
@@ -235,9 +246,14 @@ export class UserController {
 	async toggleUserActivation(
 		@Param('id') id: string,
 		@CurrentUser('id') adminId: string,
+		@CurrentUser('rights') adminRights: Role[],
 		@Req() request: Request
 	) {
-		const user = await this.userService.toggleUserActivation(id);
+		const user = await this.userService.toggleUserActivation(
+			id,
+			adminId,
+			adminRights
+		);
 
 		await this.adminEventLogService.record({
 			adminId,
@@ -268,27 +284,67 @@ export class UserController {
 	async deleteUser(
 		@Param('id') id: string,
 		@CurrentUser('id') adminId: string,
+		@CurrentUser('rights') adminRights: Role[],
 		@Req() request: Request
 	) {
-		const target = await this.userService.getPublicUserById(id);
-		const deletedUser = await this.userService.deleteUser(id);
+		const deletedUser = await this.userService.deleteUser(
+			id,
+			adminId,
+			adminRights
+		);
 
 		await this.adminEventLogService.record({
-			adminId: adminId === id ? null : adminId,
+			adminId,
 			section: 'USERS',
-			action: 'USER_DELETE',
-			description: 'Удаление пользователя',
+			action: 'USER_SOFT_DELETE',
+			description: 'Soft delete пользователя',
 			entityType: 'user',
 			entityId: id,
-			entityLabel: target?.name || target?.email || target?.phone || id,
+			entityLabel:
+				deletedUser.name || deletedUser.email || deletedUser.phone || id,
+			targetUserId: id,
 			metadata: {
 				targetUserId: id,
-				targetUserName: target?.name ?? null,
-				targetUserEmail: target?.email ?? null
+				targetUserName: deletedUser.name ?? null,
+				targetUserEmail: deletedUser.email ?? null,
+				deletedAt: deletedUser.deletedAt?.toISOString() ?? null
 			},
 			request
 		});
 
 		return deletedUser;
+	}
+
+	@HttpCode(200)
+	@Auth(Role.DEV)
+	@Patch('user/:id/restore')
+	async restoreUser(
+		@Param('id') id: string,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		const restoredUser = await this.userService.restoreUser(id);
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'USERS',
+			action: 'USER_RESTORE',
+			description: 'Восстановление пользователя после soft delete',
+			entityType: 'user',
+			entityId: id,
+			entityLabel:
+				restoredUser.name ||
+				restoredUser.email ||
+				restoredUser.phone ||
+				id,
+			targetUserId: id,
+			metadata: {
+				status: restoredUser.status,
+				deletedAt: null
+			},
+			request
+		});
+
+		return restoredUser;
 	}
 }

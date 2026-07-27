@@ -55,7 +55,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
 		const user = await this.userService.getUserById(payload.sub);
 
-		if (!user || user.status === UserStatus.DEACTIVATED) {
+		if (
+			!user ||
+			user.status === UserStatus.DEACTIVATED ||
+			user.deletedAt
+		) {
 			throw new UnauthorizedException(USER_DEACTIVATED_MESSAGE);
 		}
 

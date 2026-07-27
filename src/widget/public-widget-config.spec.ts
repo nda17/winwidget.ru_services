@@ -26,6 +26,27 @@ const SERVER_ONLY_INTEGRATION_KEYS = [
 	'amoCrmToken'
 ];
 
+interface SqlFragment {
+	strings: readonly string[];
+	values: readonly unknown[];
+}
+
+const isSqlFragment = (value: unknown): value is SqlFragment =>
+	Boolean(
+		value &&
+		typeof value === 'object' &&
+		'strings' in value &&
+		'values' in value
+	);
+
+const flattenSql = (fragment: SqlFragment): string =>
+	fragment.strings.reduce((result, part, index) => {
+		const nestedValue = fragment.values[index];
+		return `${result}${part}${
+			isSqlFragment(nestedValue) ? flattenSql(nestedValue) : ''
+		}`;
+	}, '');
+
 function collectKeys(
 	value: unknown,
 	keys = new Set<string>()
@@ -201,4 +222,22 @@ describe('public widget config projections', () => {
 			});
 		}
 	);
+
+	it('excludes deleted owners from admin widget monitoring SQL', () => {
+		const widgetService = new WidgetService(
+			{} as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+		const monitoringSql = (
+			widgetService as unknown as {
+				getAdminWidgetMonitoringBaseSql(): SqlFragment;
+			}
+		).getAdminWidgetMonitoringBaseSql();
+
+		expect(flattenSql(monitoringSql)).toContain(
+			'JOIN "User" u ON u.id = entity.user_id AND u.deleted_at IS NULL'
+		);
+	});
 });

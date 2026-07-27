@@ -14,7 +14,7 @@ import {
 } from '@/widget-admin/widget-admin.service';
 import type { WidgetService } from '@/widget/widget.service';
 import { BadRequestException } from '@nestjs/common';
-import { AuthIdentityType, Role } from '@prisma/client';
+import { AuthIdentityType, Role, UserStatus } from '@prisma/client';
 import type { Request } from 'express';
 import { validate } from 'class-validator';
 
@@ -116,6 +116,8 @@ describe('WidgetAdminService', () => {
 		user: {
 			id: ownerId,
 			name: 'Владелец',
+			status: UserStatus.ACTIVE as UserStatus,
+			deletedAt: null as Date | null,
 			authIdentities: [
 				{
 					type: AuthIdentityType.EMAIL,
@@ -349,6 +351,55 @@ describe('WidgetAdminService', () => {
 				phone: '+79990000000'
 			}
 		});
+	});
+
+	it('does not expose or mutate widgets of a deleted owner', async () => {
+		const fixture = createFixture();
+		const record = createRecord();
+		record.user.deletedAt = new Date('2026-07-28T08:00:00.000Z');
+		fixture.prisma.widget.findUnique.mockResolvedValue(record);
+
+		await expect(
+			fixture.service.getWidget(AdminWidgetType.WHEEL, widgetId)
+		).rejects.toThrow('Сначала восстановите удалённого владельца виджета');
+		await expect(
+			fixture.service.updateWidget(
+				AdminWidgetType.WHEEL,
+				widgetId,
+				{ isActive: true },
+				adminId
+			)
+		).rejects.toThrow('Сначала восстановите удалённого владельца виджета');
+		await expect(
+			fixture.service.deleteWidget(
+				AdminWidgetType.WHEEL,
+				widgetId,
+				adminId
+			)
+		).rejects.toThrow('Сначала восстановите удалённого владельца виджета');
+
+		expect(fixture.widgetService.updateWidget).not.toHaveBeenCalled();
+		expect(fixture.widgetService.deleteWidget).not.toHaveBeenCalled();
+		expect(fixture.adminEventLogService.record).not.toHaveBeenCalled();
+	});
+
+	it('does not activate a widget while its owner is deactivated', async () => {
+		const fixture = createFixture();
+		const record = createRecord();
+		record.user.status = UserStatus.DEACTIVATED;
+		fixture.prisma.widget.findUnique.mockResolvedValue(record);
+
+		await expect(
+			fixture.service.updateWidget(
+				AdminWidgetType.WHEEL,
+				widgetId,
+				{ isActive: true },
+				adminId
+			)
+		).rejects.toThrow('Сначала активируйте владельца виджета');
+
+		expect(fixture.widgetService.updateWidget).not.toHaveBeenCalled();
+		expect(fixture.adminEventLogService.record).not.toHaveBeenCalled();
 	});
 
 	it('uses the common 50-character name limit for wheel, quiz and callback', async () => {

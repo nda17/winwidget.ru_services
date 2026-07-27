@@ -186,7 +186,7 @@ export class SubscriptionService {
 
 	async checkAndResetPeriod(userId: string) {
 		return this.prisma.$transaction(async transaction => {
-			const subscription = await this.lockSubscription(
+			const subscription = await this.lockOperationalSubscription(
 				transaction,
 				userId
 			);
@@ -201,7 +201,7 @@ export class SubscriptionService {
 		createWidget: TransactionOperation<T>
 	): Promise<T> {
 		const result = await this.prisma.$transaction(async transaction => {
-			const subscription = await this.lockSubscription(
+			const subscription = await this.lockOperationalSubscription(
 				transaction,
 				userId
 			);
@@ -264,7 +264,7 @@ export class SubscriptionService {
 		) => Promise<unknown>
 	): Promise<AtomicLeadCreationResult<T>> {
 		const result = await this.prisma.$transaction(async transaction => {
-			const subscription = await this.lockSubscription(
+			const subscription = await this.lockOperationalSubscription(
 				transaction,
 				userId
 			);
@@ -323,16 +323,20 @@ export class SubscriptionService {
 		};
 	}
 
-	private async lockSubscription(
+	private async lockOperationalSubscription(
 		transaction: Prisma.TransactionClient,
 		userId: string
 	): Promise<Subscription | null> {
+		// Lock both rows so soft delete cannot race with config, widget or lead access.
 		const rows = await transaction.$queryRaw<Array<{ id: string }>>(
 			Prisma.sql`
-				SELECT "id"
-				FROM "subscriptions"
-				WHERE "user_id" = ${userId}
-				FOR UPDATE
+				SELECT s."id"
+				FROM "subscriptions" s
+				JOIN "User" u ON u."id" = s."user_id"
+				WHERE s."user_id" = ${userId}
+					AND u."status" = 'ACTIVE'
+					AND u."deleted_at" IS NULL
+				FOR UPDATE OF s, u
 			`
 		);
 		if (!rows.length) return null;
@@ -506,6 +510,8 @@ export class SubscriptionService {
 		startsAt?: Date,
 		extendIfActive?: boolean
 	) {
+		await this.assertUserCanReceiveAdminSubscriptionChange(userId);
+
 		const start = dayjs(startsAt ?? new Date());
 
 		const addPeriod = (base: dayjs.Dayjs) =>
@@ -576,6 +582,8 @@ export class SubscriptionService {
 		if (!userId) {
 			throw new BadRequestException('Выберите пользователя');
 		}
+
+		await this.assertUserCanReceiveAdminSubscriptionChange(userId);
 
 		const subscription = await this.prisma.subscription.findUnique({
 			where: { userId }
@@ -695,12 +703,14 @@ export class SubscriptionService {
 		const where: Prisma.UserWhereInput =
 			audience === 'ACTIVE_SUBSCRIPTION'
 				? {
+						deletedAt: null,
 						subscription: {
 							is: activeSubscriptionWhere
 						}
 					}
 				: audience === 'INACTIVE_SUBSCRIPTION'
 					? {
+							deletedAt: null,
 							OR: [
 								{
 									subscription: {
@@ -714,7 +724,7 @@ export class SubscriptionService {
 								}
 							]
 						}
-					: {};
+					: { deletedAt: null };
 
 		return this.prisma.user.findMany({
 			where,
@@ -778,6 +788,25 @@ export class SubscriptionService {
 			where: { userId },
 			data: { status: SubscriptionStatus.CANCELLED }
 		});
+	}
+
+	private async assertUserCanReceiveAdminSubscriptionChange(
+		userId: string
+	) {
+		const user = await this.prisma.user.findUnique({
+			where: { id: userId },
+			select: { deletedAt: true }
+		});
+
+		if (!user) {
+			throw new BadRequestException('Пользователь не найден');
+		}
+
+		if (user.deletedAt) {
+			throw new BadRequestException(
+				'Нельзя изменить подписку удалённого пользователя'
+			);
+		}
 	}
 
 	private getAdminSubscriptionWhere(
