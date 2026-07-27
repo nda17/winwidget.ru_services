@@ -1372,11 +1372,13 @@ unexpected_broad_users="$(
 			-e RABBITMQ_PROVISION_ADMIN_USER \
 			"$provisioning_rabbitmq_container_id" \
 			sh -ec '
-rabbitmqctl --silent list_permissions \
-	-p "$RABBITMQ_PROVISION_VHOST" user configure write read |
+permissions="$(
+	rabbitmqctl --silent list_permissions \
+		-p "$RABBITMQ_PROVISION_VHOST" --no-table-headers
+)"
+printf "%s\n" "$permissions" |
 awk -v admin="$RABBITMQ_PROVISION_ADMIN_USER" \
-	'\''NR == 1 && $1 == "user" { next }
-	$2 == ".*" && $3 == ".*" && $4 == ".*" &&
+	'\''$2 == ".*" && $3 == ".*" && $4 == ".*" &&
 		$1 != admin { print $1 }'\''
 '
 )"
@@ -2980,8 +2982,12 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 		date -u +'%Y-%m-%dT%H:%M:%S.%3NZ'
 	)"
 	first_cutover_candidate_started=true
-	compose_notification_cutover create \
+	# Production Compose does not support --no-deps on `create`.
+	# `up --no-start` pre-creates the two post-marker services in isolation.
+	compose_notification_cutover up \
+		--no-start \
 		--no-deps \
+		--force-recreate \
 		outbox-publisher \
 		api-gateway
 	compose_notification_cutover up \
