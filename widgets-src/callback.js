@@ -4,6 +4,9 @@
 	if (window.__wincallbackScriptRunning) return;
 	window.__wincallbackScriptRunning = true;
 
+	var SYSTEM_FONT_STACK =
+		"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+
 	var _currentScript = document.currentScript;
 
 	var API_BASE = (function () {
@@ -215,7 +218,7 @@
 		'box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);',
 		'cursor:pointer;opacity:0;',
 		'transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);',
-		'font-family:system-ui,-apple-system,sans-serif;',
+		'font-family:' + SYSTEM_FONT_STACK + ';',
 		'">',
 		'<button id="wcb-bubble-close" style="',
 		'position:absolute;top:7px;right:8px;background:none;border:none;',
@@ -367,7 +370,7 @@
 		'padding:28px 24px 24px',
 		'box-sizing:border-box',
 		'box-shadow:0 24px 80px rgba(0,0,0,0.22)',
-		'font-family:system-ui,-apple-system,sans-serif',
+		'font-family:' + SYSTEM_FONT_STACK,
 		'max-height:calc(100svh - 48px)',
 		'overflow-y:auto',
 		'-webkit-overflow-scrolling:touch',
@@ -929,7 +932,9 @@
 		var el = document.createElement('div');
 		el.id = 'callback-widget-disabled';
 		el.style.cssText =
-			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
+			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:' +
+			SYSTEM_FONT_STACK +
+			';text-align:center;padding:24px;z-index:2147483647';
 		el.innerHTML =
 			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">Виджет временно отключен</h1>';
 		document.body.appendChild(el);

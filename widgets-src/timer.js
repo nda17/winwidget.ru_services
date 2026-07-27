@@ -4,6 +4,9 @@
 	if (window.__wintimerScriptRunning) return;
 	window.__wintimerScriptRunning = true;
 
+	var SYSTEM_FONT_STACK =
+		"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+
 	var _currentScript = document.currentScript;
 	var API_BASE = (function () {
 		try {
@@ -233,7 +236,9 @@
 	var timerBtn = document.createElement('div');
 	timerBtn.id = 'timer-widget-button';
 	timerBtn.innerHTML = [
-		'<div id="wt-bubble" style="display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);background:#fff;border-radius:18px;padding:12px 34px 12px 16px;width:172px;box-sizing:border-box;border:1px solid rgba(71,5,251,0.12);box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);cursor:pointer;opacity:0;transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);font-family:system-ui,-apple-system,sans-serif;">',
+		'<div id="wt-bubble" style="display:none;position:absolute;top:50%;transform:translateY(-50%) scale(0.85);background:#fff;border-radius:18px;padding:12px 34px 12px 16px;width:172px;box-sizing:border-box;border:1px solid rgba(71,5,251,0.12);box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);cursor:pointer;opacity:0;transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);font-family:' +
+			SYSTEM_FONT_STACK +
+			';">',
 		'<button id="wt-bubble-close" style="position:absolute;top:7px;right:8px;background:none;border:none;font-size:11px;cursor:pointer;color:#ccc;line-height:1;padding:2px;display:flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;">✕</button>',
 		'<p id="wt-bubble-text" style="margin:0;font-size:13px;font-weight:600;color:#1a1a1a;line-height:1.4;"></p>',
 		'<span style="position:absolute;left:12px;top:-6px;width:12px;height:12px;border-radius:50%;background:#22c55e;border:2px solid #fff;box-shadow:0 0 0 4px rgba(34,197,94,.14);"></span>',
@@ -345,7 +350,7 @@
 		'padding:28px 24px 22px',
 		'box-sizing:border-box',
 		'box-shadow:0 28px 80px rgba(0,0,0,.28)',
-		'font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+		'font-family:' + SYSTEM_FONT_STACK,
 		'transform:translateY(28px)',
 		'opacity:0',
 		'transition:transform .3s cubic-bezier(.22,1,.36,1),opacity .25s ease',
@@ -1023,7 +1028,9 @@
 		var el = document.createElement('div');
 		el.id = 'timer-widget-disabled';
 		el.style.cssText =
-			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
+			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:' +
+			SYSTEM_FONT_STACK +
+			';text-align:center;padding:24px;z-index:2147483647';
 		el.innerHTML =
 			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">Виджет временно отключен</h1>';
 		document.body.appendChild(el);

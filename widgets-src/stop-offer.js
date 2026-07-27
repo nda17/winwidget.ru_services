@@ -4,6 +4,9 @@
 	if (window.__winstopofferScriptRunning) return;
 	window.__winstopofferScriptRunning = true;
 
+	var SYSTEM_FONT_STACK =
+		"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+
 	var _currentScript = document.currentScript;
 	var API_BASE = (function () {
 		try {
@@ -192,7 +195,7 @@
 			'padding:30px 24px 22px',
 			'box-sizing:border-box',
 			'box-shadow:0 28px 80px rgba(0,0,0,.3)',
-			'font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+			'font-family:' + SYSTEM_FONT_STACK,
 			'transform:translateY(28px) scale(.98)',
 			'opacity:0',
 			'transition:transform .3s cubic-bezier(.22,1,.36,1),opacity .25s ease',
@@ -895,7 +898,9 @@
 		var disabled = document.createElement('div');
 		disabled.id = 'stop-offer-widget-disabled';
 		disabled.style.cssText =
-			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
+			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:' +
+			SYSTEM_FONT_STACK +
+			';text-align:center;padding:24px;z-index:2147483647';
 		disabled.innerHTML =
 			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.3rem;font-weight:700;margin-bottom:10px">Виджет временно отключен</h1>';
 		document.body.appendChild(disabled);

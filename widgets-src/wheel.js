@@ -5,6 +5,9 @@
 	}
 	window.__winwidgetScriptRunning = true;
 
+	var SYSTEM_FONT_STACK =
+		"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+
 	// Захватываем currentScript синхронно — после async он будет null
 	var _currentScript = document.currentScript;
 
@@ -152,7 +155,7 @@
     box-shadow:0 16px 40px rgba(71,5,251,0.18),0 8px 18px rgba(15,23,42,0.08);
     cursor:pointer;opacity:0;
     transition:opacity 0.3s ease,transform 0.35s cubic-bezier(.22,1,.36,1);
-    font-family:system-ui,-apple-system,sans-serif;
+    font-family:${SYSTEM_FONT_STACK};
   ">
     <button id="ww-bubble-close" style="
       position:absolute;top:7px;right:8px;background:none;border:none;
@@ -406,6 +409,7 @@
       --spin-duration: ${spinDurationSeconds}s;
       --wheel-size: 300px;
       --accent: ${config.widgetColor};
+      font-family: ${SYSTEM_FONT_STACK};
       position: fixed;
       z-index: ${window.winwidgetAutoOpen ? 2147483647 : 10000};
       top: 0;
@@ -958,7 +962,7 @@
 
 		function measureSectorTextWidth(value, fontSize) {
 			if (textMeasureContext) {
-				textMeasureContext.font = `700 ${fontSize}px Arial, sans-serif`;
+				textMeasureContext.font = `700 ${fontSize}px ${SYSTEM_FONT_STACK}`;
 				return textMeasureContext.measureText(String(value || '')).width;
 			}
 
@@ -1279,7 +1283,7 @@
 					'transform',
 					`rotate(${midAngle}, ${tx}, ${ty})`
 				);
-				text.style.fontFamily = "'Arial', sans-serif";
+				text.style.fontFamily = SYSTEM_FONT_STACK;
 				text.style.fontWeight = '700';
 				text.style.fill = sector.textColor;
 				const fittedText = fitSectorLabel(
@@ -2076,7 +2080,7 @@
 			'justify-content:center',
 			'background:#0d0d1a',
 			'color:#fff',
-			'font-family:sans-serif',
+			'font-family:' + SYSTEM_FONT_STACK,
 			'text-align:center',
 			'padding:24px',
 			'z-index:2147483647'

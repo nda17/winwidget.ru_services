@@ -4,6 +4,9 @@
 	if (window.__winonlineconsultantScriptRunning) return;
 	window.__winonlineconsultantScriptRunning = true;
 
+	var SYSTEM_FONT_STACK =
+		"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+
 	var _currentScript = document.currentScript;
 	var API_BASE = (function () {
 		try {
@@ -169,7 +172,9 @@
 		'.woc-btn img{display:block;width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 10px 22px rgba(239,43,23,.35)) drop-shadow(0 3px 8px rgba(0,0,0,.28))}',
 		'.woc-pulse img{animation:wocPulse 2.8s ease-in-out infinite}',
 		'@keyframes wocPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}',
-		'.woc-overlay{position:fixed;inset:0;z-index:2147483647;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(9,5,22,.76);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
+		'.woc-overlay{position:fixed;inset:0;z-index:2147483647;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(9,5,22,.76);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);font-family:' +
+			SYSTEM_FONT_STACK +
+			'}',
 		'.woc-overlay-open{display:flex}',
 		'.woc-modal{position:relative;width:min(440px,100%);max-height:calc(100vh - 32px);overflow:auto;background:#fff;border-radius:24px;padding:24px;box-shadow:0 28px 80px rgba(0,0,0,.32);transform:translateY(18px) scale(.98);opacity:0;transition:transform .25s ease,opacity .2s ease}',
 		'.woc-overlay-open .woc-modal{transform:translateY(0) scale(1);opacity:1}',
@@ -468,7 +473,9 @@
 		var node = document.createElement('div');
 		node.id = 'online-consultant-widget-disabled';
 		node.style.cssText =
-			'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
+			'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:' +
+			SYSTEM_FONT_STACK +
+			';text-align:center;padding:24px;z-index:2147483647';
 		node.innerHTML =
 			'<div><div style="font-size:42px;margin-bottom:12px">🔒</div><h1 style="font-size:22px">Виджет временно отключён</h1></div>';
 		document.body.appendChild(node);

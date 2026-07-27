@@ -4,6 +4,9 @@
 	if (window.__wincalculatorScriptRunning) return;
 	window.__wincalculatorScriptRunning = true;
 
+	var SYSTEM_FONT_STACK =
+		"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+
 	var currentScript = document.currentScript;
 	var API_BASE = (function () {
 		try {
@@ -274,7 +277,7 @@
 
 		var style = document.createElement('style');
 		style.textContent = [
-			':host{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}',
+			':host{font-family:' + SYSTEM_FONT_STACK + '}',
 			'*{box-sizing:border-box}',
 			'#wwc-launcher{position:fixed;z-index:9999;display:none;align-items:center;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}',
 			'#wwc-button{width:60px;height:60px;border:0;border-radius:20px;display:flex;align-items:center;justify-content:center;color:#fff;background:linear-gradient(145deg,#7438d4,#4705fb);box-shadow:0 12px 30px rgba(71,5,251,.38);cursor:pointer;animation:wwcPulse 2.8s ease-in-out infinite;transition:transform .2s,filter .2s}',
@@ -957,7 +960,9 @@
 		var disabled = document.createElement('div');
 		disabled.id = 'calculator-widget-disabled';
 		disabled.style.cssText =
-			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:24px;z-index:2147483647';
+			'position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0d0d1a;color:#fff;font-family:' +
+			SYSTEM_FONT_STACK +
+			';text-align:center;padding:24px;z-index:2147483647';
 		disabled.innerHTML =
 			'<div style="font-size:3rem;margin-bottom:16px">🔒</div><h1 style="font-size:1.3rem;font-weight:700">Виджет временно отключен</h1>';
 		document.body.appendChild(disabled);
