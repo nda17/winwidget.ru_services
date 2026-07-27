@@ -555,6 +555,150 @@ compose_notification_cutover() {
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+notification_cutover_container_id() {
+	local service="$1"
+	local container_id
+
+	container_id="$(
+		compose_notification_cutover ps -a -q "$service" 2>/dev/null || true
+	)"
+	if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
+		echo "Saved forward cutover service does not have exactly one container: $service" >&2
+		return 1
+	fi
+	printf '%s\n' "$container_id"
+}
+
+verify_saved_notification_cutover_containers() {
+	local expected_revision="$1"
+	local service
+	local container_id
+	local image_revision
+	local restart_count
+
+	for service in "${notification_cutover_candidate_services[@]}"; do
+		container_id="$(
+			notification_cutover_container_id "$service"
+		)" || return 1
+		image_revision="$(
+			docker inspect \
+				--format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$image_revision" != "$expected_revision" ]]; then
+			echo "Saved forward cutover service has an unexpected image revision: $service" >&2
+			return 1
+		fi
+		restart_count="$(
+			docker inspect --format '{{ .RestartCount }}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$restart_count" != "0" ]]; then
+			echo "Saved forward cutover service restarted before recovery: $service restartCount=${restart_count:-unknown}" >&2
+			return 1
+		fi
+	done
+}
+
+start_notification_cutover_services() {
+	local service
+	local container_id
+	local running
+
+	for service in "$@"; do
+		container_id="$(
+			notification_cutover_container_id "$service"
+		)" || return 1
+		running="$(
+			docker inspect --format '{{ .State.Running }}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$running" == "true" ]]; then
+			continue
+		fi
+		if [[ "$running" != "false" ]]; then
+			echo "Saved forward cutover service has an unreadable state: $service" >&2
+			return 1
+		fi
+		if ! docker start "$container_id" >/dev/null; then
+			echo "Saved forward cutover service could not be started: $service" >&2
+			return 1
+		fi
+	done
+}
+
+stop_notification_cutover_services() {
+	local timeout="$1"
+	local allow_missing="$2"
+	shift 2
+	local service
+	local container_id
+	local running
+
+	for service in "$@"; do
+		container_id="$(
+			compose_notification_cutover ps -a -q "$service" \
+				2>/dev/null || true
+		)"
+		if [[ -z "$container_id" && "$allow_missing" == "true" ]]; then
+			continue
+		fi
+		if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
+			echo "Saved forward cutover service does not have exactly one container: $service" >&2
+			return 1
+		fi
+		running="$(
+			docker inspect --format '{{ .State.Running }}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$running" == "false" ]]; then
+			continue
+		fi
+		if [[ "$running" != "true" ]]; then
+			echo "Saved forward cutover service has an unreadable state: $service" >&2
+			return 1
+		fi
+		if ! docker stop --timeout "$timeout" "$container_id" >/dev/null; then
+			echo "Saved forward cutover service could not be stopped: $service" >&2
+			return 1
+		fi
+	done
+}
+
+remove_notification_cutover_services() {
+	local service
+	local container_id
+	local running
+	local container_ids=()
+
+	for service in "$@"; do
+		container_id="$(
+			compose_notification_cutover ps -a -q "$service" \
+				2>/dev/null || true
+		)"
+		if [[ -z "$container_id" ]]; then
+			continue
+		fi
+		if [[ "$container_id" == *$'\n'* ]]; then
+			echo "Saved forward cutover service has multiple containers: $service" >&2
+			return 1
+		fi
+		running="$(
+			docker inspect --format '{{ .State.Running }}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$running" != "false" ]]; then
+			echo "Saved forward cutover service must be stopped before removal: $service" >&2
+			return 1
+		fi
+		container_ids+=("$container_id")
+	done
+
+	if [[ ${#container_ids[@]} -gt 0 ]]; then
+		docker rm "${container_ids[@]}" >/dev/null
+	fi
+}
+
 verify_notification_delivery_image_artifact() {
 	docker run --rm --network none \
 		--entrypoint node \
@@ -830,6 +974,7 @@ done <<<"$notification_migration_files"
 
 notification_delivery_first_cutover=false
 notification_forward_candidate_active=false
+notification_forward_candidate_needs_recovery=false
 notification_cutover_marker_revision=""
 notification_cutover_candidate_services=(
 	outbox-publisher
@@ -891,6 +1036,11 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 		fi
 	done
 	if [[ "$candidate_topology_complete" == "true" ]]; then
+		if ! verify_saved_notification_cutover_containers \
+			"$notification_cutover_marker_revision"; then
+			echo "Running forward cutover topology does not match its durable marker." >&2
+			exit 1
+		fi
 		if [[ -n "$current_integration_container_id" ]]; then
 			echo "Both canonical and forward-candidate integration workers are running after cutover." >&2
 			exit 1
@@ -909,9 +1059,37 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 		fi
 		notification_forward_candidate_active=true
 	elif [[ -n "$notification_cutover_candidate_ids" ]]; then
-		echo "Cutover marker exists, but the saved forward-candidate topology is incomplete." >&2
-		echo "Do not remove its containers; restore the complete forward topology before retrying." >&2
-		exit 1
+		if ! verify_saved_notification_cutover_containers \
+			"$notification_cutover_marker_revision"; then
+			echo "Cutover marker exists, but the saved forward-candidate topology is incomplete or has drifted." >&2
+			echo "Do not remove its containers; repair the exact saved topology before retrying." >&2
+			exit 1
+		fi
+		canonical_cutover_service_ids="$(
+			compose_target ps --status running -q \
+				"${notification_cutover_candidate_services[@]}" \
+				2>/dev/null || true
+		)"
+		if [[ -n "$canonical_cutover_service_ids" ]]; then
+			echo "Cutover marker exists with an incomplete saved topology and running canonical services." >&2
+			echo "Refusing automatic recovery while service ownership is ambiguous." >&2
+			exit 1
+		fi
+		candidate_integration_container_id="$(
+			notification_cutover_container_id integration-worker
+		)"
+		candidate_integration_kinds="$(
+			container_env_value \
+				"$candidate_integration_container_id" \
+				INTEGRATION_WORKER_KINDS || true
+		)"
+		if [[ "$(normalize_csv "$candidate_integration_kinds")" != "$narrow_integration_kinds" ]]; then
+			echo "Saved forward cutover integration worker has an unexpected kind set." >&2
+			exit 1
+		fi
+		notification_forward_candidate_active=true
+		notification_forward_candidate_needs_recovery=true
+		echo "Saved forward cutover topology is incomplete but exact and recoverable."
 	else
 		if [[ -z "$running_notification_delivery_container_id" ||
 			"$running_notification_delivery_container_id" == *$'\n'* ||
@@ -2428,12 +2606,12 @@ restore_first_cutover_producers_on_exit() {
 			echo "Candidate workers stay running while producers and public Gateway remain stopped. Resolve the forward state manually." >&2
 			exit "$status"
 		fi
-		if ! compose_notification_cutover stop --timeout 30 \
+		if ! stop_notification_cutover_services 30 true \
 			"${notification_cutover_pre_marker_services[@]}" \
 			>/dev/null 2>&1; then
 			recovery_failed=true
 		fi
-		if ! compose_notification_cutover rm -f \
+		if ! remove_notification_cutover_services \
 			"${notification_cutover_candidate_services[@]}" \
 			>/dev/null 2>&1; then
 			recovery_failed=true
@@ -2813,10 +2991,13 @@ restore_forward_cutover_on_exit() {
 		recovery_failed=true
 	fi
 	recovery_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
-	if ! compose_notification_cutover start outbox-publisher >/dev/null; then
+	if ! start_notification_cutover_services outbox-publisher >/dev/null; then
 		recovery_failed=true
 	fi
-	if ! compose_notification_cutover start \
+	if ! wait_for_rabbitmq_topology >/dev/null 2>&1; then
+		recovery_failed=true
+	fi
+	if ! start_notification_cutover_services \
 		integration-worker \
 		maintenance-worker \
 		notification-delivery-worker \
@@ -2829,7 +3010,7 @@ restore_forward_cutover_on_exit() {
 		"Restored forward candidate API" >/dev/null 2>&1; then
 		recovery_failed=true
 	fi
-	if ! compose_notification_cutover start api-gateway >/dev/null; then
+	if ! start_notification_cutover_services api-gateway >/dev/null; then
 		recovery_failed=true
 	fi
 	if ! verify_notification_cutover_candidate_topology \
@@ -2968,6 +3149,27 @@ fi
 
 perform_notification_first_cutover_preflight
 
+if [[ "$notification_forward_candidate_needs_recovery" == "true" ]]; then
+	echo "Restoring the exact saved forward topology before canonical handoff."
+	forward_cutover_recovery_active=true
+	trap restore_forward_cutover_on_exit EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	start_notification_cutover_services outbox-publisher
+	wait_for_rabbitmq_topology
+	start_notification_cutover_services \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker \
+		api
+	wait_for_cutover_revision \
+		"$HEALTHCHECK_URL" \
+		"$notification_cutover_marker_revision" \
+		"Recovered forward candidate API"
+	start_notification_cutover_services api-gateway
+	echo "Exact saved forward topology was restarted."
+fi
+
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	provision_rabbitmq_user \
 		"$integration_user" \
@@ -3026,9 +3228,9 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	echo "Durable notification delivery cutover marker created before enabling producers or public traffic."
-	compose_notification_cutover start outbox-publisher
+	start_notification_cutover_services outbox-publisher
 	wait_for_rabbitmq_topology
-	compose_notification_cutover start api-gateway
+	start_notification_cutover_services api-gateway
 	echo "The saved cutover project stays available until canonical Compose handoff is fully verified."
 fi
 
@@ -3057,7 +3259,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		echo "Canonical Outbox publisher did not start." >&2
 		exit 1
 	fi
-	compose_notification_cutover stop --timeout 30 outbox-publisher
+	stop_notification_cutover_services 30 false outbox-publisher
 	wait_for_rabbitmq_topology
 
 	# The two narrow integration workers are idempotent; overlap is limited to
@@ -3067,7 +3269,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		echo "Canonical integration worker did not start." >&2
 		exit 1
 	fi
-	compose_notification_cutover stop --timeout 30 integration-worker
+	stop_notification_cutover_services 30 false integration-worker
 	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 		if verify_exact_worker_consumer_ownership true; then
 			break
@@ -3079,14 +3281,14 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		sleep "$HEALTHCHECK_INTERVAL"
 	done
 
-	compose_notification_cutover stop --timeout 30 maintenance-worker
+	stop_notification_cutover_services 30 false maintenance-worker
 	compose_target up -d --no-deps --force-recreate maintenance-worker
 	wait_for_cutover_revision \
 		"$MAINTENANCE_READINESS_URL" \
 		"$MAINTENANCE_REVISION" \
 		"Canonical Maintenance worker"
 
-	compose_notification_cutover stop --timeout 30 notification-delivery-worker
+	stop_notification_cutover_services 30 false notification-delivery-worker
 	compose_target up -d --no-deps --force-recreate notification-delivery-worker
 	wait_for_cutover_revision \
 		"$NOTIFICATION_DELIVERY_READINESS_URL" \
@@ -3104,13 +3306,13 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		sleep "$HEALTHCHECK_INTERVAL"
 	done
 
-	compose_notification_cutover stop --timeout 30 api
+	stop_notification_cutover_services 30 false api
 	compose_target up -d --no-deps --force-recreate api
 	wait_for_cutover_revision \
 		"$HEALTHCHECK_URL" "$APP_REVISION" "Canonical API"
 	wait_for_cutover_readiness "$READINESS_URL" "Canonical API"
 
-	compose_notification_cutover stop --timeout 30 api-gateway
+	stop_notification_cutover_services 30 false api-gateway
 	compose_target up -d --no-deps --force-recreate api-gateway
 	wait_for_cutover_readiness \
 		"$GATEWAY_READINESS_URL" "Canonical API Gateway"
@@ -3534,7 +3736,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	trap - EXIT INT TERM
 	notification_cutover_cleanup_complete=false
 	for ((attempt = 1; attempt <= 5; attempt++)); do
-		if compose_notification_cutover rm -f \
+		if remove_notification_cutover_services \
 			"${notification_cutover_candidate_services[@]}"; then
 			remaining_cutover_candidate_ids="$(
 				compose_notification_cutover ps -a -q \
