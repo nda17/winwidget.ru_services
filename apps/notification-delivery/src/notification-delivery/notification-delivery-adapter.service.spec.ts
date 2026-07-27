@@ -79,6 +79,57 @@ describe('NotificationDeliveryAdapterService', () => {
 		);
 	});
 
+	it('does not repeat a normalized phone as the generic contact', async () => {
+		await service.deliver(
+			'telegram',
+			{
+				schemaVersion: 2,
+				eventType: 'lead.integration.requested.v2',
+				integration: 'telegram',
+				source: 'widget',
+				entity: { id: 'widget-1', name: 'Колесо фортуны' },
+				lead: {
+					id: 'lead-1',
+					phone: '+7 995 151-01-01',
+					contact: '+79951510101',
+					createdAt: '2026-07-27T10:00:00.000Z'
+				},
+				destination: { telegramChatId: '12345' }
+			},
+			'11111111-1111-4111-8111-111111111111'
+		);
+
+		const message = (telegram.sendMessage as jest.Mock).mock.calls[0][1];
+
+		expect(message).toContain('Телефон: +7 995 151-01-01');
+		expect(message).not.toContain('Контакт:');
+	});
+
+	it('keeps a distinct generic contact in the Telegram notification', async () => {
+		await service.deliver(
+			'telegram',
+			{
+				schemaVersion: 2,
+				eventType: 'lead.integration.requested.v2',
+				integration: 'telegram',
+				source: 'widget',
+				entity: { id: 'widget-1', name: 'Колесо фортуны' },
+				lead: {
+					id: 'lead-1',
+					phone: '+79951510101',
+					contact: '@winwidget_client',
+					createdAt: '2026-07-27T10:00:00.000Z'
+				},
+				destination: { telegramChatId: '12345' }
+			},
+			'11111111-1111-4111-8111-111111111111'
+		);
+
+		const message = (telegram.sendMessage as jest.Mock).mock.calls[0][1];
+
+		expect(message).toContain('Контакт: @winwidget_client');
+	});
+
 	it('delivers a payment email and skips it when email is null', async () => {
 		const payload = {
 			schemaVersion: 1 as const,

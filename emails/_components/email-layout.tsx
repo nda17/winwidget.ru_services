@@ -26,7 +26,10 @@ const brandGradient =
 const siteUrl = process.env.RECAPTCHA_CLIENT_URL || 'https://winwidget.ru';
 const apiPublicUrl =
 	process.env.API_PUBLIC_URL || 'https://api.winwidget.ru';
-const logoUrl = new URL('/email/logo.png', apiPublicUrl).toString();
+const logoUrl = new URL(
+	'/widgets/email-logo.png',
+	apiPublicUrl
+).toString();
 
 const bodyStyle = {
 	backgroundColor: '#f5f5f7',

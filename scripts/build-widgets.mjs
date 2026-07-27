@@ -24,6 +24,7 @@ const copiedAssets = [
 	['timer-button.png', 'timer-button.png'],
 	['online-consultant-button.png', 'online-consultant-button.png'],
 	['calculator-button.png', 'calculator-button.png'],
+	['../public/email/logo.png', 'email-logo.png'],
 	['helpers/libphonenumber-min.js', 'helpers/libphonenumber-min.js']
 ];
 

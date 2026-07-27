@@ -187,7 +187,7 @@ export class NotificationDeliveryAdapterService {
 			['Имя', event.lead.name],
 			['Телефон', event.lead.phone],
 			['Email', event.lead.email],
-			['Контакт', event.lead.contact],
+			['Контакт', this.getDistinctContact(event)],
 			['Результат', this.getOutcome(event)],
 			['Время', event.lead.timeSlot],
 			['Часовой пояс', event.lead.timezone],
@@ -209,6 +209,45 @@ export class NotificationDeliveryAdapterService {
 			`Дата: ${this.formatMoscowDateTime(new Date(event.lead.createdAt))}`
 		);
 		return lines.join('\n');
+	}
+
+	private getDistinctContact(
+		event: ResolvedLeadIntegrationEventPayload
+	): string | null {
+		const contact = event.lead.contact?.trim();
+		if (!contact) return null;
+
+		const duplicatesKnownField = [
+			event.lead.name,
+			event.lead.phone,
+			event.lead.email
+		].some(value => this.areContactValuesEquivalent(contact, value));
+
+		return duplicatesKnownField ? null : contact;
+	}
+
+	private areContactValuesEquivalent(
+		left: string,
+		right: string | null | undefined
+	): boolean {
+		if (!right) return false;
+
+		const normalizedLeft = left.trim().toLowerCase();
+		const normalizedRight = right.trim().toLowerCase();
+		if (normalizedLeft === normalizedRight) return true;
+
+		const phonePattern = /^[+\d\s().-]+$/;
+		if (
+			!phonePattern.test(normalizedLeft) ||
+			!phonePattern.test(normalizedRight)
+		) {
+			return false;
+		}
+
+		const leftDigits = normalizedLeft.replace(/\D/g, '');
+		const rightDigits = normalizedRight.replace(/\D/g, '');
+
+		return leftDigits.length >= 7 && leftDigits === rightDigits;
 	}
 
 	private getOutcome(
