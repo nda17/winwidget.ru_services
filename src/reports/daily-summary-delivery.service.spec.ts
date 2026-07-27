@@ -88,7 +88,10 @@ describe('DailySummaryDeliveryService', () => {
 			payload.jobId,
 			expect.stringMatching(/^daily-summary:/),
 			120_000,
-			'DAILY_TELEGRAM_SUMMARY'
+			'DAILY_TELEGRAM_SUMMARY',
+			expect.objectContaining({
+				deadLetterRoutingKey: 'daily-summary-telegram.dead-letter'
+			})
 		);
 		expect(report.render).not.toHaveBeenCalled();
 		expect(scheduledJobs.saveCheckpoint).not.toHaveBeenCalled();
@@ -136,7 +139,13 @@ describe('DailySummaryDeliveryService', () => {
 				eventType: 'report.daily-summary.requested.v1',
 				routingKey: 'report.daily-summary.requested.v1'
 			}),
-			{ allowRetry: true }
+			expect.objectContaining({
+				allowRetry: true,
+				deadLetterHeaders: expect.objectContaining({
+					'x-error-category': 'TRANSIENT',
+					'x-error-code': 'UNCLASSIFIED'
+				})
+			})
 		);
 	});
 
@@ -176,7 +185,14 @@ describe('DailySummaryDeliveryService', () => {
 			telegramError,
 			120_000,
 			expect.any(Object),
-			{ allowRetry: true }
+			expect.objectContaining({
+				allowRetry: true,
+				deadLetterHeaders: expect.objectContaining({
+					'x-error-category': 'RATE_LIMIT',
+					'x-error-code': 'TELEGRAM_RATE_LIMIT',
+					'x-error-retryable': true
+				})
+			})
 		);
 	});
 
@@ -232,7 +248,14 @@ describe('DailySummaryDeliveryService', () => {
 				telegramError,
 				30_000,
 				expect.any(Object),
-				{ allowRetry: false }
+				expect.objectContaining({
+					allowRetry: false,
+					deadLetterHeaders: expect.objectContaining({
+						'x-error-category': category,
+						'x-error-code': normalizedCode,
+						'x-error-retryable': false
+					})
+				})
 			);
 		}
 	);

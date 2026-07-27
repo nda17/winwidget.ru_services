@@ -16,6 +16,7 @@ describe('ScheduledJobsService', () => {
 	const event: ScheduledJobOutboxEvent = {
 		eventType: 'telegram.daily-summary.requested.v1',
 		routingKey: 'telegram.daily-summary.requested.v1',
+		deadLetterRoutingKey: 'daily-summary-telegram.dead-letter',
 		payload: { schemaVersion: 1 }
 	};
 
@@ -243,7 +244,7 @@ describe('ScheduledJobsService', () => {
 		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
 	});
 
-	it('marks an exhausted job failed without creating another retry event', async () => {
+	it('atomically marks an exhausted job failed and creates its DLQ intent', async () => {
 		const jobId = randomUUID();
 		const leaseToken = randomUUID();
 		const job = createJob({
@@ -262,7 +263,7 @@ describe('ScheduledJobsService', () => {
 				findUniqueOrThrow: jest.fn().mockResolvedValue(job)
 			},
 			outboxEvent: {
-				create: jest.fn()
+				create: jest.fn().mockResolvedValue({})
 			}
 		};
 		const prisma = {
@@ -279,7 +280,17 @@ describe('ScheduledJobsService', () => {
 		);
 
 		expect(result.state).toBe('failed');
-		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
+		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				messageId: jobId,
+				deduplicationKey: `scheduled-job:${jobId}:dead-letter:4`,
+				routingKey: event.deadLetterRoutingKey,
+				headers: expect.objectContaining({
+					'x-retry-attempt': 4,
+					'x-last-error': 'Backup failed'
+				})
+			})
+		});
 	});
 
 	it('forces a non-exhausted job to fail when retry is not allowed', async () => {
@@ -302,7 +313,7 @@ describe('ScheduledJobsService', () => {
 				findUniqueOrThrow: jest.fn().mockResolvedValue(job)
 			},
 			outboxEvent: {
-				create: jest.fn()
+				create: jest.fn().mockResolvedValue({})
 			}
 		};
 		const prisma = {
@@ -321,7 +332,13 @@ describe('ScheduledJobsService', () => {
 
 		expect(result.state).toBe('failed');
 		expect(transaction.$executeRaw).toHaveBeenCalledTimes(1);
-		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
+		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				messageId: jobId,
+				deduplicationKey: `scheduled-job:${jobId}:dead-letter:1`,
+				routingKey: event.deadLetterRoutingKey
+			})
+		});
 	});
 
 	it('persists one terminal Outbox event when an expired job is exhausted', async () => {
@@ -368,6 +385,12 @@ describe('ScheduledJobsService', () => {
 		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
 			data: expect.objectContaining({
 				messageId: failedJob.id,
+				deduplicationKey: `scheduled-job:${failedJob.id}:dead-letter:4`,
+				routingKey: event.deadLetterRoutingKey,
+				headers: expect.objectContaining({
+					'x-retry-attempt': 4,
+					'x-last-error': 'Scheduled job lease expired'
+				}),
 				availableAt: now
 			})
 		});
@@ -382,6 +405,60 @@ describe('ScheduledJobsService', () => {
 		expect(query).toContain(
 			`AND "status" = 'PROCESSING'::"ScheduledJobRunStatus"`
 		);
+	});
+
+	it('atomically creates a DLQ intent when claim discovers an exhausted job', async () => {
+		const failedJob = createJob({
+			status: ScheduledJobRunStatus.FAILED,
+			attempts: 4,
+			maxAttempts: 4,
+			finishedAt: now,
+			lastError: 'Maximum scheduled job attempts exhausted'
+		});
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([{ id: failedJob.id }]),
+			scheduledJobRun: {
+				findUniqueOrThrow: jest.fn().mockResolvedValue(failedJob)
+			},
+			outboxEvent: {
+				create: jest.fn().mockResolvedValue({})
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(callback => callback(transaction)),
+			$queryRaw: jest.fn().mockResolvedValue([]),
+			scheduledJobRun: {
+				findUnique: jest.fn().mockResolvedValue(failedJob)
+			}
+		} as unknown as PrismaService;
+		const service = new ScheduledJobsService(prisma);
+
+		await expect(
+			service.claim(
+				failedJob.id,
+				'daily-summary:test',
+				120_000,
+				SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+				event
+			)
+		).resolves.toEqual({
+			state: 'terminal',
+			job: expect.objectContaining({
+				id: failedJob.id,
+				status: ScheduledJobRunStatus.FAILED
+			})
+		});
+		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				messageId: failedJob.id,
+				deduplicationKey: `scheduled-job:${failedJob.id}:dead-letter:4`,
+				routingKey: event.deadLetterRoutingKey,
+				headers: expect.objectContaining({
+					'x-retry-attempt': 4,
+					'x-last-error': 'Maximum scheduled job attempts exhausted'
+				})
+			})
+		});
 	});
 
 	it('rejects a period with only one boundary before touching the database', async () => {
@@ -453,8 +530,17 @@ describe('ScheduledJobsService', () => {
 
 	it('includes the expected job type in exhausted-state and claim CAS updates', async () => {
 		const job = createJob();
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([]),
+			scheduledJobRun: {
+				findUniqueOrThrow: jest.fn()
+			},
+			outboxEvent: {
+				create: jest.fn()
+			}
+		};
 		const prisma = {
-			$executeRaw: jest.fn().mockResolvedValue(0),
+			$transaction: jest.fn(callback => callback(transaction)),
 			$queryRaw: jest.fn().mockResolvedValue([]),
 			scheduledJobRun: {
 				findUnique: jest.fn().mockResolvedValue(job)
@@ -466,11 +552,11 @@ describe('ScheduledJobsService', () => {
 			job.id,
 			'daily-summary:test',
 			120_000,
-			SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY
+			SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+			event
 		);
 
-		const exhaustedSql = (prisma.$executeRaw as jest.Mock).mock
-			.calls[0][0] as {
+		const exhaustedSql = transaction.$queryRaw.mock.calls[0][0] as {
 			strings: string[];
 			values: unknown[];
 		};

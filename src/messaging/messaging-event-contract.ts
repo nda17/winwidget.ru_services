@@ -1,6 +1,7 @@
 import {
 	DAILY_SUMMARY_EVENT_TYPE,
 	DATABASE_BACKUP_EVENT_TYPE,
+	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
 	IntegrationKind,
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
@@ -489,6 +490,7 @@ export function assertMessagingEventContract(
 	const routingMatches = expectedKinds.some(kind =>
 		[
 			MESSAGING_ROUTING_KEYS[kind],
+			getDeadLetterRoutingKey(kind),
 			getManualRetryRoutingKey(kind),
 			kind
 		].includes(metadata.routingKey)

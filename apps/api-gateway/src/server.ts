@@ -11,7 +11,7 @@ import {
 } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
-import type { GatewayConfig } from './config';
+import type { GatewayConfig, GatewayRouteConfig } from './config';
 import {
 	JwksStore,
 	JwksUnavailableError,
@@ -63,6 +63,7 @@ interface JsonErrorBody {
 	message: string;
 	code: string;
 	requestId: string;
+	correlationId: string;
 }
 
 export interface GatewayRuntime {
@@ -141,7 +142,13 @@ const resolveForwardedProto = (
 	return 'http';
 };
 
-const resolveRequestId = (): string => randomUUID();
+const createRequestContext = (): {
+	requestId: string;
+	correlationId: string;
+} => ({
+	requestId: randomUUID(),
+	correlationId: randomUUID()
+});
 
 const getConnectionHeaderNames = (
 	headers: IncomingHttpHeaders
@@ -181,6 +188,7 @@ const createUpstreamHeaders = (
 	request: IncomingMessage,
 	pathname: string,
 	requestId: string,
+	correlationId: string,
 	validAuthorization?: string
 ): OutgoingHttpHeaders => {
 	const hopByHopHeaders = getConnectionHeaderNames(request.headers);
@@ -197,6 +205,7 @@ const createUpstreamHeaders = (
 			lowerName === 'x-client-ip' ||
 			lowerName === 'x-real-ip' ||
 			lowerName === 'x-request-id' ||
+			lowerName === 'x-correlation-id' ||
 			lowerName.startsWith('x-forwarded-') ||
 			lowerName.startsWith('x-user') ||
 			lowerName.startsWith('x-auth')
@@ -214,6 +223,7 @@ const createUpstreamHeaders = (
 	headers['x-real-ip'] = clientIp;
 	headers['x-forwarded-proto'] = resolveForwardedProto(request);
 	headers['x-request-id'] = requestId;
+	headers['x-correlation-id'] = correlationId;
 	if (validAuthorization) {
 		headers.authorization = validAuthorization;
 	}
@@ -230,7 +240,8 @@ const createUpstreamHeaders = (
 
 const createDownstreamHeaders = (
 	headers: IncomingHttpHeaders,
-	requestId: string
+	requestId: string,
+	correlationId: string
 ): OutgoingHttpHeaders => {
 	const hopByHopHeaders = getConnectionHeaderNames(headers);
 	const downstream: OutgoingHttpHeaders = {};
@@ -240,6 +251,7 @@ const createDownstreamHeaders = (
 		downstream[lowerName] = value;
 	}
 	downstream['x-request-id'] = requestId;
+	downstream['x-correlation-id'] = correlationId;
 	return downstream;
 };
 
@@ -256,7 +268,7 @@ const createGeneratedCorsHeaders = (
 	if (isPublicWidgetApiPath(pathname)) {
 		return {
 			'access-control-allow-origin': '*',
-			'access-control-expose-headers': 'x-request-id'
+			'access-control-expose-headers': 'x-request-id, x-correlation-id'
 		};
 	}
 
@@ -268,7 +280,7 @@ const createGeneratedCorsHeaders = (
 	return {
 		'access-control-allow-origin': origins[0],
 		'access-control-allow-credentials': 'true',
-		'access-control-expose-headers': 'x-request-id',
+		'access-control-expose-headers': 'x-request-id, x-correlation-id',
 		vary: 'Origin'
 	};
 };
@@ -278,6 +290,7 @@ const sendJson = (
 	statusCode: number,
 	body: object,
 	requestId: string,
+	correlationId: string,
 	headOnly = false,
 	extraHeaders: OutgoingHttpHeaders = {}
 ) => {
@@ -288,6 +301,7 @@ const sendJson = (
 		'cache-control': 'no-store',
 		'x-content-type-options': 'nosniff',
 		'x-request-id': requestId,
+		'x-correlation-id': correlationId,
 		...extraHeaders
 	});
 	response.end(headOnly ? undefined : payload);
@@ -301,6 +315,7 @@ const sendError = (
 	message: string,
 	code: string,
 	requestId: string,
+	correlationId: string,
 	extraHeaders: OutgoingHttpHeaders = {}
 ) => {
 	request.resume();
@@ -309,21 +324,45 @@ const sendError = (
 		error,
 		message,
 		code,
-		requestId
+		requestId,
+		correlationId
 	};
 	sendJson(
 		response,
 		statusCode,
 		body,
 		requestId,
+		correlationId,
 		request.method === 'HEAD',
 		extraHeaders
 	);
 };
 
+export const normalizeGatewayRoutingPathname = (
+	pathname: string
+): string | null => {
+	try {
+		const normalized = decodeURIComponent(pathname);
+		if (
+			normalized.includes('\0') ||
+			normalized.includes('\\') ||
+			normalized.startsWith('//')
+		) {
+			return null;
+		}
+		return normalized;
+	} catch {
+		return null;
+	}
+};
+
 const parseRequestTarget = (
 	request: IncomingMessage
-): { rawPath: string; pathname: string } | null => {
+): {
+	rawPath: string;
+	pathname: string;
+	routingPathname: string;
+} | null => {
 	const rawPath = request.url;
 	if (!rawPath || !rawPath.startsWith('/') || rawPath.startsWith('//')) {
 		return null;
@@ -331,7 +370,11 @@ const parseRequestTarget = (
 
 	try {
 		const parsed = new URL(rawPath, 'http://gateway.invalid');
-		return { rawPath, pathname: parsed.pathname };
+		const routingPathname = normalizeGatewayRoutingPathname(
+			parsed.pathname
+		);
+		if (!routingPathname) return null;
+		return { rawPath, pathname: parsed.pathname, routingPathname };
 	} catch {
 		return null;
 	}
@@ -339,6 +382,25 @@ const parseRequestTarget = (
 
 const isApiV1Path = (pathname: string): boolean =>
 	pathname === '/api/v1' || pathname.startsWith('/api/v1/');
+
+export const matchGatewayRoute = (
+	pathname: string,
+	routes: readonly GatewayRouteConfig[]
+): GatewayRouteConfig | undefined => {
+	let match: GatewayRouteConfig | undefined;
+	for (const route of routes) {
+		const matchesBoundary =
+			pathname === route.pathPrefix ||
+			pathname.startsWith(`${route.pathPrefix}/`);
+		if (
+			matchesBoundary &&
+			(!match || route.pathPrefix.length > match.pathPrefix.length)
+		) {
+			match = route;
+		}
+	}
+	return match;
+};
 
 export const createGateway = (
 	config: GatewayConfig,
@@ -361,9 +423,10 @@ export const createGateway = (
 	const activeProxyRequests = new Set<ReturnType<typeof httpRequest>>();
 
 	const server = createServer((request, response) => {
-		const requestId = resolveRequestId();
+		const { requestId, correlationId } = createRequestContext();
 		const startedAt = process.hrtime.bigint();
 		let requestPath = '/';
+		let routeId = 'unmatched';
 		let logged = false;
 		const logCompletion = (event: string) => {
 			if (logged) return;
@@ -372,6 +435,8 @@ export const createGateway = (
 				Number(process.hrtime.bigint() - startedAt) / 1_000_000;
 			log.log('info', event, {
 				requestId,
+				correlationId,
+				routeId,
 				method: request.method,
 				path: requestPath,
 				statusCode: response.statusCode,
@@ -386,7 +451,7 @@ export const createGateway = (
 		const target = parseRequestTarget(request);
 		const corsHeaders = createGeneratedCorsHeaders(
 			request,
-			target?.pathname ?? '',
+			target?.routingPathname ?? '',
 			config
 		);
 		void (async () => {
@@ -399,6 +464,7 @@ export const createGateway = (
 					'Invalid request target',
 					'invalid_request_target',
 					requestId,
+					correlationId,
 					corsHeaders
 				);
 				return;
@@ -410,11 +476,13 @@ export const createGateway = (
 				(request.method === 'GET' || isHead) &&
 				target.pathname === '/health/live'
 			) {
+				routeId = 'gateway-health';
 				sendJson(
 					response,
 					200,
 					{ status: 'ok' },
 					requestId,
+					correlationId,
 					isHead,
 					corsHeaders
 				);
@@ -425,6 +493,7 @@ export const createGateway = (
 				(target.pathname === '/health/ready' ||
 					target.pathname === '/health')
 			) {
+				routeId = 'gateway-health';
 				const ready = await jwks.ensureReady();
 				sendJson(
 					response,
@@ -434,13 +503,14 @@ export const createGateway = (
 						jwks: jwks.getStatus()
 					},
 					requestId,
+					correlationId,
 					isHead,
 					corsHeaders
 				);
 				return;
 			}
 
-			if (!isApiV1Path(target.pathname)) {
+			if (!isApiV1Path(target.routingPathname)) {
 				sendError(
 					request,
 					response,
@@ -449,14 +519,53 @@ export const createGateway = (
 					'Route not found',
 					'route_not_found',
 					requestId,
+					correlationId,
 					corsHeaders
 				);
 				return;
 			}
 
+			const route = matchGatewayRoute(
+				target.routingPathname,
+				config.routes
+			);
+			if (!route) {
+				sendError(
+					request,
+					response,
+					404,
+					'Not Found',
+					'Route not found',
+					'route_not_found',
+					requestId,
+					correlationId,
+					corsHeaders
+				);
+				return;
+			}
+			routeId = route.id;
+
 			let bearerToken: string | undefined;
 			try {
 				bearerToken = readBearerAuthorization(request.rawHeaders);
+				if (
+					!bearerToken &&
+					route.authPolicy === 'required' &&
+					request.method !== 'OPTIONS'
+				) {
+					sendError(
+						request,
+						response,
+						401,
+						'Unauthorized',
+						'Access token is required',
+						'authentication_required',
+						requestId,
+						correlationId,
+						corsHeaders
+					);
+					return;
+				}
 				if (bearerToken) {
 					await verifyAccessToken(bearerToken, jwks, config);
 				}
@@ -470,6 +579,7 @@ export const createGateway = (
 						'Authentication keys are unavailable',
 						'authentication_keys_unavailable',
 						requestId,
+						correlationId,
 						corsHeaders
 					);
 					return;
@@ -483,6 +593,8 @@ export const createGateway = (
 							: 'invalid_token';
 				log.log('warn', 'access_token_rejected', {
 					requestId,
+					correlationId,
+					routeId,
 					errorCode
 				});
 				sendError(
@@ -493,6 +605,7 @@ export const createGateway = (
 					'Invalid access token',
 					'invalid_token',
 					requestId,
+					correlationId,
 					corsHeaders
 				);
 				return;
@@ -500,17 +613,18 @@ export const createGateway = (
 
 			const upstreamHeaders = createUpstreamHeaders(
 				request,
-				target.pathname,
+				target.routingPathname,
 				requestId,
+				correlationId,
 				bearerToken ? request.headers.authorization : undefined
 			);
-			const useTls = config.upstreamUrl.protocol === 'https:';
+			const useTls = route.upstreamUrl.protocol === 'https:';
 			const requestFn = useTls ? httpsRequest : httpRequest;
 			const proxyRequest = requestFn(
 				{
-					protocol: config.upstreamUrl.protocol,
-					hostname: config.upstreamUrl.hostname,
-					port: config.upstreamUrl.port || (useTls ? 443 : 80),
+					protocol: route.upstreamUrl.protocol,
+					hostname: route.upstreamUrl.hostname,
+					port: route.upstreamUrl.port || (useTls ? 443 : 80),
 					method: request.method,
 					path: target.rawPath,
 					headers: upstreamHeaders,
@@ -520,14 +634,15 @@ export const createGateway = (
 					clearTimeout(responseHeaderTimeout);
 					const downstreamHeaders = createDownstreamHeaders(
 						upstreamResponse.headers,
-						requestId
+						requestId,
+						correlationId
 					);
 					response.writeHead(
 						upstreamResponse.statusCode ?? 502,
 						downstreamHeaders
 					);
 
-					upstreamResponse.setTimeout(config.proxyTimeoutMs, () =>
+					upstreamResponse.setTimeout(route.timeoutMs, () =>
 						upstreamResponse.destroy(
 							new Error('upstream_response_timeout')
 						)
@@ -547,7 +662,7 @@ export const createGateway = (
 			const responseHeaderTimeout = setTimeout(() => {
 				timedOut = true;
 				proxyRequest.destroy(new Error('upstream_headers_timeout'));
-			}, config.proxyTimeoutMs);
+			}, route.timeoutMs);
 
 			proxyRequest.once('error', () => {
 				clearTimeout(responseHeaderTimeout);
@@ -568,6 +683,7 @@ export const createGateway = (
 						: 'Upstream service is unavailable',
 					timedOut ? 'upstream_timeout' : 'upstream_unavailable',
 					requestId,
+					correlationId,
 					corsHeaders
 				);
 			});
@@ -592,6 +708,7 @@ export const createGateway = (
 					'Gateway request failed',
 					'gateway_error',
 					requestId,
+					correlationId,
 					corsHeaders
 				);
 			} else if (!response.destroyed) {

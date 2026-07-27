@@ -6,6 +6,7 @@ import {
 } from '@/messaging/integration-error-classifier';
 import {
 	DAILY_SUMMARY_EVENT_TYPE,
+	getDeadLetterRoutingKey,
 	MESSAGING_ROUTING_KEYS,
 	RETRY_DELAYS_MS
 } from '@/messaging/messaging.constants';
@@ -13,6 +14,7 @@ import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import {
 	SCHEDULED_JOB_TYPES,
+	ScheduledJobOutboxEvent,
 	ScheduledJobRunView
 } from '@/scheduled-jobs/scheduled-jobs.types';
 import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
@@ -49,6 +51,16 @@ interface DailySummaryCheckpoint {
 	text?: string;
 }
 
+const DAILY_SUMMARY_OUTBOX_EVENT: ScheduledJobOutboxEvent = {
+	eventType: DAILY_SUMMARY_EVENT_TYPE,
+	routingKey: MESSAGING_ROUTING_KEYS['daily-summary-telegram'],
+	deadLetterRoutingKey: getDeadLetterRoutingKey('daily-summary-telegram'),
+	payload: {
+		schemaVersion: 1,
+		eventType: DAILY_SUMMARY_EVENT_TYPE
+	}
+};
+
 @Injectable()
 export class DailySummaryDeliveryService {
 	private readonly workerId = `daily-summary:${hostname()}:${process.pid}`;
@@ -74,7 +86,8 @@ export class DailySummaryDeliveryService {
 			payload.jobId,
 			this.workerId,
 			this.getLeaseMs(),
-			SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY
+			SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+			DAILY_SUMMARY_OUTBOX_EVENT
 		);
 		if (claim.state === 'not_found') {
 			throw new ScheduledJobDispatchRejectedError(
@@ -215,15 +228,21 @@ export class DailySummaryDeliveryService {
 				claim.leaseToken,
 				error,
 				retryDelay,
+				DAILY_SUMMARY_OUTBOX_EVENT,
 				{
-					eventType: DAILY_SUMMARY_EVENT_TYPE,
-					routingKey: MESSAGING_ROUTING_KEYS['daily-summary-telegram'],
-					payload: {
-						schemaVersion: 1,
-						eventType: DAILY_SUMMARY_EVENT_TYPE
+					allowRetry: classification.retryable,
+					deadLetterHeaders: {
+						'x-error-category': classification.category,
+						'x-error-code': classification.normalizedCode,
+						'x-safe-reason': classification.safeReason,
+						'x-error-retryable': classification.retryable,
+						'x-classification-version':
+							classification.classificationVersion,
+						...(claim.job.startedAt
+							? { 'x-first-failed-at': claim.job.startedAt }
+							: {})
 					}
-				},
-				{ allowRetry: classification.retryable }
+				}
 			);
 			if (result.state === 'lost') throw error;
 			throw new ScheduledJobDispatchHandledError(

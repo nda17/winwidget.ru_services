@@ -11,7 +11,7 @@ const run = async () => {
 	logger.log('info', 'gateway_started', {
 		listenHost: config.listenHost,
 		port: config.port,
-		upstreamOrigin: config.upstreamUrl.origin,
+		routeCount: config.routes.length,
 		jwksReady
 	});
 

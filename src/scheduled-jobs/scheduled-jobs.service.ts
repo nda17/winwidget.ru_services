@@ -4,6 +4,7 @@ import {
 	EnqueueScheduledJobInput,
 	RecoverExpiredScheduledJobsResult,
 	ScheduledJobClaimResult,
+	ScheduledJobFailureOptions,
 	ScheduledJobFailureResult,
 	ScheduledJobInterruptionResult,
 	ScheduledJobOutboxEvent,
@@ -142,14 +143,16 @@ export class ScheduledJobsService {
 		id: string,
 		workerId: string,
 		leaseMs: number,
-		expectedJobType: string
+		expectedJobType: string,
+		event: ScheduledJobOutboxEvent
 	): Promise<ScheduledJobClaimResult> {
 		this.validateUuid(id, 'job id');
 		this.validateIdentifier(workerId, 'worker id');
 		this.validateLeaseMs(leaseMs);
 		this.validateIdentifier(expectedJobType, 'expected job type');
+		this.validateEvent(event);
 
-		await this.markExhaustedJobFailed(id, expectedJobType);
+		await this.markExhaustedJobFailed(id, expectedJobType, event);
 
 		const leaseToken = randomUUID();
 		const claimed = await this.prisma.$queryRaw<ClaimUpdateRow[]>(
@@ -341,7 +344,7 @@ export class ScheduledJobsService {
 		error: unknown,
 		retryDelayMs: number,
 		event: ScheduledJobOutboxEvent,
-		options: { allowRetry?: boolean } = {}
+		options: ScheduledJobFailureOptions = {}
 	): Promise<ScheduledJobFailureResult> {
 		this.validateUuid(id, 'job id');
 		this.validateUuid(leaseToken, 'lease token');
@@ -392,6 +395,14 @@ export class ScheduledJobsService {
 					{
 						where: { id }
 					}
+				);
+				await this.createDeadLetterOutboxEvent(
+					transaction,
+					failed,
+					event,
+					failed.finishedAt || new Date(),
+					lastError,
+					options.deadLetterHeaders
 				);
 				return {
 					state: 'failed',
@@ -594,11 +605,12 @@ export class ScheduledJobsService {
 						});
 					const event = eventFor(serializeScheduledJobRun(failedJob));
 					this.validateEvent(event);
-					await this.createOutboxEvent(
+					await this.createDeadLetterOutboxEvent(
 						transaction,
 						failedJob,
 						event,
-						failedAt[0].availableAt
+						failedAt[0].availableAt,
+						leaseError
 					);
 					failed += 1;
 					continue;
@@ -644,41 +656,61 @@ export class ScheduledJobsService {
 
 	private async markExhaustedJobFailed(
 		id: string,
-		expectedJobType: string
+		expectedJobType: string,
+		event: ScheduledJobOutboxEvent
 	): Promise<void> {
-		await this.prisma.$executeRaw(
-			Prisma.sql`
-				UPDATE "scheduled_job_runs"
-				SET
-					"status" = 'FAILED'::"ScheduledJobRunStatus",
-					"finished_at" = NOW(),
-					"last_error" = COALESCE(
-						"last_error",
-						'Maximum scheduled job attempts exhausted'
-					),
-					"lease_owner" = NULL,
-					"lease_token" = NULL,
-					"lease_expires_at" = NULL,
-					"updated_at" = NOW()
-				WHERE "id" = ${id}::uuid
-					AND "job_type" = ${expectedJobType}
-					AND "attempts" >= "max_attempts"
-					AND (
-						"status" = 'QUEUED'::"ScheduledJobRunStatus"
-						OR (
-							"status" = 'PROCESSING'::"ScheduledJobRunStatus"
-							AND "lease_expires_at" < NOW()
+		await this.prisma.$transaction(async transaction => {
+			const failed = await transaction.$queryRaw<ClaimUpdateRow[]>(
+				Prisma.sql`
+					UPDATE "scheduled_job_runs"
+					SET
+						"status" = 'FAILED'::"ScheduledJobRunStatus",
+						"finished_at" = NOW(),
+						"last_error" = COALESCE(
+							"last_error",
+							'Maximum scheduled job attempts exhausted'
+						),
+						"lease_owner" = NULL,
+						"lease_token" = NULL,
+						"lease_expires_at" = NULL,
+						"updated_at" = NOW()
+					WHERE "id" = ${id}::uuid
+						AND "job_type" = ${expectedJobType}
+						AND "attempts" >= "max_attempts"
+						AND (
+							"status" = 'QUEUED'::"ScheduledJobRunStatus"
+							OR (
+								"status" = 'PROCESSING'::"ScheduledJobRunStatus"
+								AND "lease_expires_at" < NOW()
+							)
 						)
-					)
-			`
-		);
+					RETURNING "id"
+				`
+			);
+			if (!failed.length) return;
+
+			const job = await transaction.scheduledJobRun.findUniqueOrThrow({
+				where: { id }
+			});
+			await this.createDeadLetterOutboxEvent(
+				transaction,
+				job,
+				event,
+				job.finishedAt || new Date(),
+				job.lastError || 'Maximum scheduled job attempts exhausted'
+			);
+		});
 	}
 
 	private async createOutboxEvent(
 		transaction: Prisma.TransactionClient,
 		job: ScheduledJobRun,
 		event: ScheduledJobOutboxEvent,
-		availableAt: Date
+		availableAt: Date,
+		options: {
+			deduplicationKey?: string;
+			headers?: Record<string, string | number | boolean>;
+		} = {}
 	): Promise<void> {
 		const payload = {
 			...(event.payload ?? {}),
@@ -691,13 +723,50 @@ export class ScheduledJobsService {
 		await transaction.outboxEvent.create({
 			data: {
 				messageId: job.id,
+				...(options.deduplicationKey
+					? { deduplicationKey: options.deduplicationKey }
+					: {}),
 				eventType: event.eventType,
 				routingKey: event.routingKey,
 				availableAt,
-				headers: createMessagingHeaders({ messageId: job.id }),
+				headers: createMessagingHeaders({
+					messageId: job.id,
+					headers: options.headers
+				}),
 				payload
 			}
 		});
+	}
+
+	private createDeadLetterOutboxEvent(
+		transaction: Prisma.TransactionClient,
+		job: ScheduledJobRun,
+		event: ScheduledJobOutboxEvent,
+		availableAt: Date,
+		lastError: string,
+		headers: Record<string, string | number | boolean> = {}
+	): Promise<void> {
+		return this.createOutboxEvent(
+			transaction,
+			job,
+			{
+				...event,
+				routingKey: event.deadLetterRoutingKey
+			},
+			availableAt,
+			{
+				deduplicationKey: this.getDeadLetterDeduplicationKey(job),
+				headers: {
+					...headers,
+					'x-retry-attempt': job.attempts,
+					'x-last-error': lastError.slice(0, 1000)
+				}
+			}
+		);
+	}
+
+	private getDeadLetterDeduplicationKey(job: ScheduledJobRun): string {
+		return `scheduled-job:${job.id}:dead-letter:${job.attempts}`;
 	}
 
 	private validateEnqueueInput(input: EnqueueScheduledJobInput): void {
@@ -734,6 +803,10 @@ export class ScheduledJobsService {
 	private validateEvent(event: ScheduledJobOutboxEvent): void {
 		this.validateIdentifier(event.eventType, 'event type');
 		this.validateIdentifier(event.routingKey, 'routing key');
+		this.validateIdentifier(
+			event.deadLetterRoutingKey,
+			'dead-letter routing key'
+		);
 	}
 
 	private validateIdentifier(value: string, label: string): void {

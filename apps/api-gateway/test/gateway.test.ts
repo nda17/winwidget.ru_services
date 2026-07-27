@@ -3,13 +3,19 @@ import type { IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config';
-import { createGateway, resolveClientIp } from '../src/server';
+import {
+	createGateway,
+	matchGatewayRoute,
+	normalizeGatewayRoutingPathname,
+	resolveClientIp
+} from '../src/server';
 import {
 	closeServer,
 	createJwksFetch,
 	createServer,
 	createSigningFixture,
 	createTestConfig,
+	createTestRoute,
 	listenServer,
 	makeRequest,
 	signAccessToken,
@@ -24,24 +30,184 @@ interface CapturedRequest {
 }
 
 describe('API Gateway config', () => {
-	it('prefers the dedicated Gateway port in a shared local env', () => {
+	const baseEnv = {
+		PORT: '4200',
+		GATEWAY_PORT: '4100',
+		JWT_JWKS_URL:
+			'http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json',
+		JWT_ISSUER: 'http://localhost:4100/auth',
+		JWT_AUDIENCE: 'http://localhost:4100',
+		CORS_ALLOWED_ORIGINS: 'http://localhost:3000,http://127.0.0.1:3000'
+	};
+
+	it('loads and orders the declarative route table by specificity', () => {
 		const config = loadConfig({
-			PORT: '4200',
-			GATEWAY_PORT: '4100',
-			JWT_JWKS_URL:
-				'http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json',
-			JWT_ISSUER: 'http://localhost:4100/auth',
-			JWT_AUDIENCE: 'http://localhost:4100',
-			CORS_ALLOWED_ORIGINS: 'http://localhost:3000,http://127.0.0.1:3000'
+			...baseEnv,
+			GATEWAY_ROUTES_JSON: JSON.stringify([
+				{
+					id: 'monolith',
+					pathPrefix: '/api/v1',
+					upstreamUrl: 'http://127.0.0.1:4200',
+					authPolicy: 'optional',
+					timeoutMs: 60_000
+				},
+				{
+					id: 'users',
+					pathPrefix: '/api/v1/users',
+					upstreamUrl: 'http://127.0.0.1:4300',
+					authPolicy: 'required',
+					timeoutMs: 10_000
+				}
+			])
 		});
 
 		assert.equal(config.port, 4100);
+		assert.deepEqual(
+			config.routes.map(route => route.id),
+			['users', 'monolith']
+		);
+		assert.equal(
+			config.routes[0].upstreamUrl.origin,
+			'http://127.0.0.1:4300'
+		);
+	});
+
+	it('accepts a non-empty manifest without a monolith catch-all', () => {
+		const config = loadConfig({
+			...baseEnv,
+			GATEWAY_ROUTES_JSON: JSON.stringify([
+				{
+					id: 'users',
+					pathPrefix: '/api/v1/users',
+					upstreamUrl: 'http://127.0.0.1:4300',
+					authPolicy: 'required',
+					timeoutMs: 10_000
+				}
+			])
+		});
+
+		assert.deepEqual(
+			config.routes.map(route => route.id),
+			['users']
+		);
+	});
+
+	it('fails fast for legacy, malformed and incomplete route config', () => {
+		assert.throws(
+			() =>
+				loadConfig({
+					...baseEnv,
+					API_UPSTREAM_URL: 'http://127.0.0.1:4200',
+					GATEWAY_ROUTES_JSON: '[]'
+				}),
+			/API_UPSTREAM_URL is no longer supported/
+		);
+		assert.throws(
+			() =>
+				loadConfig({
+					...baseEnv,
+					GATEWAY_ROUTES_JSON: '{not-json'
+				}),
+			/must contain valid JSON/
+		);
+		assert.throws(
+			() =>
+				loadConfig({
+					...baseEnv,
+					GATEWAY_ROUTES_JSON: JSON.stringify([
+						{
+							id: 'monolith',
+							pathPrefix: '/api/v1',
+							upstreamUrl: 'http://127.0.0.1:4200',
+							authPolicy: 'optional'
+						}
+					])
+				}),
+			/must contain exactly/
+		);
+		assert.throws(
+			() =>
+				loadConfig({
+					...baseEnv,
+					GATEWAY_ROUTES_JSON: JSON.stringify([
+						{
+							id: 'monolith',
+							pathPrefix: '/api/v1',
+							upstreamUrl: 'http://127.0.0.1:4200',
+							authPolicy: 'public',
+							timeoutMs: 60_000
+						}
+					])
+				}),
+			/authPolicy must be required or optional/
+		);
+		assert.throws(
+			() =>
+				loadConfig({
+					...baseEnv,
+					GATEWAY_ROUTES_JSON: JSON.stringify([
+						{
+							id: 'encoded',
+							pathPrefix: '/api/v1/%75sers',
+							upstreamUrl: 'http://127.0.0.1:4200',
+							authPolicy: 'required',
+							timeoutMs: 60_000
+						}
+					])
+				}),
+			/must be \/api\/v1 or a canonical path/
+		);
+	});
+
+	it('matches the longest prefix only on an exact path boundary', () => {
+		const routes = [
+			createTestRoute({
+				id: 'widgets',
+				pathPrefix: '/api/v1/widgets'
+			}),
+			createTestRoute({
+				id: 'widget-admin',
+				pathPrefix: '/api/v1/widgets/admin'
+			})
+		];
+
+		assert.equal(
+			matchGatewayRoute('/api/v1/widgets/admin/42', routes)?.id,
+			'widget-admin'
+		);
+		assert.equal(
+			matchGatewayRoute('/api/v1/widgets/42', routes)?.id,
+			'widgets'
+		);
+		assert.equal(
+			matchGatewayRoute('/api/v1/widgets-admin', routes)?.id,
+			undefined
+		);
+	});
+
+	it('normalizes encoded path segments before route selection', () => {
+		assert.equal(
+			normalizeGatewayRoutingPathname('/api/v1/%70rotected-route'),
+			'/api/v1/protected-route'
+		);
+		assert.equal(
+			normalizeGatewayRoutingPathname('/api/v1/%E0%A4%A'),
+			null
+		);
+		assert.equal(
+			normalizeGatewayRoutingPathname('/api/v1/%5Cadmin'),
+			null
+		);
 	});
 });
 
 describe('API Gateway proxy', () => {
 	const signingKey = createSigningFixture('gateway-key');
 	const captured: CapturedRequest[] = [];
+	const capturedLogs: Array<{
+		event: string;
+		fields?: Record<string, unknown>;
+	}> = [];
 	const upstream = createServer((request, response) => {
 		const chunks: Buffer[] = [];
 		request.on('data', chunk => chunks.push(Buffer.from(chunk)));
@@ -62,15 +228,42 @@ describe('API Gateway proxy', () => {
 			setImmediate(() => response.end('complete'));
 		});
 	});
+	const routedUpstream = createServer((request, response) => {
+		response.statusCode = 202;
+		response.end(`routed:${request.url}`);
+	});
 	let gateway: ReturnType<typeof createGateway>;
 	let gatewayUrl: URL;
 
 	before(async () => {
 		const upstreamUrl = await listenServer(upstream);
-		gateway = createGateway(createTestConfig({ upstreamUrl }), {
-			logger: silentLogger,
-			fetch: createJwksFetch(() => [signingKey.publicJwk])
-		});
+		const routedUpstreamUrl = await listenServer(routedUpstream);
+		gateway = createGateway(
+			createTestConfig({
+				routes: [
+					createTestRoute({
+						id: 'routed',
+						pathPrefix: '/api/v1/routed',
+						upstreamUrl: routedUpstreamUrl
+					}),
+					createTestRoute({
+						id: 'protected',
+						pathPrefix: '/api/v1/protected-route',
+						upstreamUrl,
+						authPolicy: 'required'
+					}),
+					createTestRoute({ upstreamUrl })
+				]
+			}),
+			{
+				logger: {
+					log(_level, event, fields) {
+						capturedLogs.push({ event, fields });
+					}
+				},
+				fetch: createJwksFetch(() => [signingKey.publicJwk])
+			}
+		);
 		assert.equal(await gateway.initialize(), true);
 		await gateway.listen(0, '127.0.0.1');
 		const address = gateway.address() as AddressInfo;
@@ -80,6 +273,7 @@ describe('API Gateway proxy', () => {
 	after(async () => {
 		await gateway.close();
 		await closeServer(upstream);
+		await closeServer(routedUpstream);
 	});
 
 	it('preserves path, body, streaming, Set-Cookie and valid Authorization', async () => {
@@ -99,6 +293,7 @@ describe('API Gateway proxy', () => {
 					'x-user-id': 'spoofed-user',
 					'x-auth-roles': 'ADMIN',
 					'x-request-id': 'attacker-controlled',
+					'x-correlation-id': 'attacker-correlation',
 					connection: 'authorization'
 				},
 				body: '{"ok":true}'
@@ -137,10 +332,45 @@ describe('API Gateway proxy', () => {
 			proxied.headers['x-request-id'],
 			'attacker-controlled'
 		);
+		assert.match(
+			String(proxied.headers['x-correlation-id']),
+			/^[0-9a-f-]{36}$/
+		);
+		assert.notEqual(
+			proxied.headers['x-correlation-id'],
+			'attacker-correlation'
+		);
 		assert.equal(
 			result.headers['x-request-id'],
 			proxied.headers['x-request-id']
 		);
+		assert.equal(
+			result.headers['x-correlation-id'],
+			proxied.headers['x-correlation-id']
+		);
+		assert.notEqual(
+			result.headers['x-request-id'],
+			result.headers['x-correlation-id']
+		);
+		const completionLog = capturedLogs.find(
+			entry =>
+				entry.event === 'request_completed' &&
+				entry.fields?.requestId === result.headers['x-request-id']
+		);
+		assert.equal(
+			completionLog?.fields?.correlationId,
+			result.headers['x-correlation-id']
+		);
+		assert.equal(completionLog?.fields?.routeId, 'monolith');
+	});
+
+	it('dispatches to the longest matching route upstream', async () => {
+		const result = await makeRequest(
+			new URL('/api/v1/routed/item?key=value', gatewayUrl)
+		);
+
+		assert.equal(result.statusCode, 202);
+		assert.equal(result.body, 'routed:/api/v1/routed/item?key=value');
 	});
 
 	it('allows refresh cookie only on the explicit refresh/logout paths', async () => {
@@ -164,7 +394,7 @@ describe('API Gateway proxy', () => {
 		assert.equal(captured.at(-1)?.headers.cookie, 'refreshToken=allowed');
 	});
 
-	it('lets the monolith decide routes without Authorization but rejects invalid Bearer', async () => {
+	it('enforces required and optional auth policies and rejects any invalid Bearer', async () => {
 		const beforeCount = captured.length;
 		const anonymous = await makeRequest(
 			new URL('/api/v1/public-route', gatewayUrl)
@@ -172,7 +402,37 @@ describe('API Gateway proxy', () => {
 		assert.equal(anonymous.statusCode, 201);
 		assert.equal(captured.length, beforeCount + 1);
 
-		const rejected = await makeRequest(
+		const missingRequired = await makeRequest(
+			new URL('/api/v1/protected-route', gatewayUrl)
+		);
+		assert.equal(missingRequired.statusCode, 401);
+		const missingRequiredBody = JSON.parse(missingRequired.body);
+		assert.equal(missingRequiredBody.code, 'authentication_required');
+		assert.equal(
+			missingRequiredBody.requestId,
+			missingRequired.headers['x-request-id']
+		);
+		assert.equal(
+			missingRequiredBody.correlationId,
+			missingRequired.headers['x-correlation-id']
+		);
+
+		const encodedRequired = await makeRequest(
+			new URL('/api/v1/%70rotected-route', gatewayUrl)
+		);
+		assert.equal(encodedRequired.statusCode, 401);
+		assert.equal(
+			JSON.parse(encodedRequired.body).code,
+			'authentication_required'
+		);
+
+		const preflight = await makeRequest(
+			new URL('/api/v1/protected-route', gatewayUrl),
+			{ method: 'OPTIONS' }
+		);
+		assert.equal(preflight.statusCode, 201);
+
+		const invalidRequired = await makeRequest(
 			new URL('/api/v1/protected-route', gatewayUrl),
 			{
 				headers: {
@@ -180,9 +440,20 @@ describe('API Gateway proxy', () => {
 				}
 			}
 		);
-		assert.equal(rejected.statusCode, 401);
-		assert.equal(JSON.parse(rejected.body).code, 'invalid_token');
-		assert.equal(captured.length, beforeCount + 1);
+		assert.equal(invalidRequired.statusCode, 401);
+		assert.equal(JSON.parse(invalidRequired.body).code, 'invalid_token');
+
+		const invalidOptional = await makeRequest(
+			new URL('/api/v1/public-route', gatewayUrl),
+			{
+				headers: {
+					authorization: 'Bearer not-a-jwt'
+				}
+			}
+		);
+		assert.equal(invalidOptional.statusCode, 401);
+		assert.equal(JSON.parse(invalidOptional.body).code, 'invalid_token');
+		assert.equal(captured.length, beforeCount + 2);
 	});
 
 	it('adds CORS only to generated responses using the exact origin/widget policy', async () => {
@@ -206,7 +477,7 @@ describe('API Gateway proxy', () => {
 		);
 		assert.equal(
 			allowed.headers['access-control-expose-headers'],
-			'x-request-id'
+			'x-request-id, x-correlation-id'
 		);
 		assert.equal(allowed.headers.vary, 'Origin');
 
@@ -239,7 +510,7 @@ describe('API Gateway proxy', () => {
 		assert.equal(widget.headers['access-control-allow-origin'], '*');
 		assert.equal(
 			widget.headers['access-control-expose-headers'],
-			'x-request-id'
+			'x-request-id, x-correlation-id'
 		);
 		assert.equal(
 			widget.headers['access-control-allow-credentials'],
@@ -287,19 +558,56 @@ describe('Gateway trust boundary', () => {
 		);
 	});
 
+	it('returns a Gateway 404 when a manifest has no matching route', async () => {
+		const signingKey = createSigningFixture('unmatched-route-key');
+		const gateway = createGateway(
+			createTestConfig({
+				routes: [
+					createTestRoute({
+						id: 'users',
+						pathPrefix: '/api/v1/users'
+					})
+				]
+			}),
+			{
+				logger: silentLogger,
+				fetch: createJwksFetch(() => [signingKey.publicJwk])
+			}
+		);
+
+		try {
+			await gateway.initialize();
+			await gateway.listen(0, '127.0.0.1');
+			const address = gateway.address() as AddressInfo;
+			const response = await makeRequest(
+				new URL('/api/v1/payments', `http://127.0.0.1:${address.port}`)
+			);
+
+			assert.equal(response.statusCode, 404);
+			assert.equal(JSON.parse(response.body).code, 'route_not_found');
+		} finally {
+			await gateway.close();
+		}
+	});
+
 	it('stays live but not ready and fails closed for Bearer when JWKS is cold', async () => {
 		const signingKey = createSigningFixture('cold-key');
 		const upstream = createServer((_request, response) => {
 			response.end('anonymous');
 		});
 		const upstreamUrl = await listenServer(upstream);
-		const gateway = createGateway(createTestConfig({ upstreamUrl }), {
-			logger: silentLogger,
-			fetch: createJwksFetch(
-				() => [signingKey.publicJwk],
-				() => false
-			)
-		});
+		const gateway = createGateway(
+			createTestConfig({
+				routes: [createTestRoute({ upstreamUrl })]
+			}),
+			{
+				logger: silentLogger,
+				fetch: createJwksFetch(
+					() => [signingKey.publicJwk],
+					() => false
+				)
+			}
+		);
 
 		try {
 			assert.equal(await gateway.initialize(), false);
@@ -337,8 +645,12 @@ describe('Gateway trust boundary', () => {
 		await closeServer(releasedPortServer);
 		const unavailableGateway = createGateway(
 			createTestConfig({
-				upstreamUrl: releasedUrl,
-				proxyTimeoutMs: 100
+				routes: [
+					createTestRoute({
+						upstreamUrl: releasedUrl,
+						timeoutMs: 100
+					})
+				]
 			}),
 			{
 				logger: silentLogger,
@@ -350,8 +662,12 @@ describe('Gateway trust boundary', () => {
 		const hangingUrl = await listenServer(hangingUpstream);
 		const timeoutGateway = createGateway(
 			createTestConfig({
-				upstreamUrl: hangingUrl,
-				proxyTimeoutMs: 50
+				routes: [
+					createTestRoute({
+						upstreamUrl: hangingUrl,
+						timeoutMs: 50
+					})
+				]
 			}),
 			{
 				logger: silentLogger,

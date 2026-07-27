@@ -1,7 +1,17 @@
+export type GatewayAuthPolicy = 'required' | 'optional';
+
+export interface GatewayRouteConfig {
+	id: string;
+	pathPrefix: string;
+	upstreamUrl: URL;
+	authPolicy: GatewayAuthPolicy;
+	timeoutMs: number;
+}
+
 export interface GatewayConfig {
 	listenHost: string;
 	port: number;
-	upstreamUrl: URL;
+	routes: readonly GatewayRouteConfig[];
 	jwksUrl: URL;
 	issuer: string;
 	audience: string;
@@ -14,9 +24,20 @@ export interface GatewayConfig {
 	jwksCacheTtlMs: number;
 	jwksMaxStaleMs: number;
 	jwksMaxBytes: number;
-	proxyTimeoutMs: number;
 	shutdownGraceMs: number;
 }
+
+const ROUTES_ENV_NAME = 'GATEWAY_ROUTES_JSON';
+const ROUTE_FIELDS = new Set([
+	'id',
+	'pathPrefix',
+	'upstreamUrl',
+	'authPolicy',
+	'timeoutMs'
+]);
+const ROUTE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const MAX_ROUTES_JSON_BYTES = 256 * 1024;
+const MAX_ROUTES = 256;
 
 const readRequired = (env: NodeJS.ProcessEnv, name: string): string => {
 	const value = env[name]?.trim();
@@ -98,6 +119,148 @@ const readCorsAllowedOrigins = (
 	return origins;
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const readRoutePathPrefix = (value: unknown, index: number): string => {
+	const name = `${ROUTES_ENV_NAME}[${index}].pathPrefix`;
+	if (typeof value !== 'string' || !value) {
+		throw new Error(`${name} must be a non-empty string`);
+	}
+	if (
+		(value !== '/api/v1' && !value.startsWith('/api/v1/')) ||
+		(value.length > '/api/v1'.length && value.endsWith('/')) ||
+		value.includes('//') ||
+		value.includes('%') ||
+		value.includes('\\') ||
+		value.includes('?') ||
+		value.includes('#')
+	) {
+		throw new Error(
+			`${name} must be /api/v1 or a canonical path below /api/v1 without a trailing slash`
+		);
+	}
+
+	let parsed: URL;
+	try {
+		parsed = new URL(value, 'http://gateway.invalid');
+	} catch {
+		throw new Error(`${name} must be a valid path`);
+	}
+	if (parsed.pathname !== value) {
+		throw new Error(`${name} must be a canonical path`);
+	}
+	return value;
+};
+
+const readRoutes = (
+	env: NodeJS.ProcessEnv
+): readonly GatewayRouteConfig[] => {
+	if (env.API_UPSTREAM_URL?.trim()) {
+		throw new Error(
+			'API_UPSTREAM_URL is no longer supported; use GATEWAY_ROUTES_JSON'
+		);
+	}
+
+	const raw = readRequired(env, ROUTES_ENV_NAME);
+	if (Buffer.byteLength(raw) > MAX_ROUTES_JSON_BYTES) {
+		throw new Error(`${ROUTES_ENV_NAME} is too large`);
+	}
+
+	let document: unknown;
+	try {
+		document = JSON.parse(raw);
+	} catch {
+		throw new Error(`${ROUTES_ENV_NAME} must contain valid JSON`);
+	}
+	if (
+		!Array.isArray(document) ||
+		document.length === 0 ||
+		document.length > MAX_ROUTES
+	) {
+		throw new Error(
+			`${ROUTES_ENV_NAME} must contain between 1 and ${MAX_ROUTES} routes`
+		);
+	}
+
+	const ids = new Set<string>();
+	const pathPrefixes = new Set<string>();
+	const routes = document.map((candidate, index): GatewayRouteConfig => {
+		const name = `${ROUTES_ENV_NAME}[${index}]`;
+		if (!isRecord(candidate)) {
+			throw new Error(`${name} must be an object`);
+		}
+
+		const fields = Object.keys(candidate);
+		const unknownFields = fields.filter(field => !ROUTE_FIELDS.has(field));
+		const missingFields = [...ROUTE_FIELDS].filter(
+			field => !(field in candidate)
+		);
+		if (unknownFields.length > 0 || missingFields.length > 0) {
+			throw new Error(
+				`${name} must contain exactly id, pathPrefix, upstreamUrl, authPolicy and timeoutMs`
+			);
+		}
+
+		if (
+			typeof candidate.id !== 'string' ||
+			!ROUTE_ID_PATTERN.test(candidate.id)
+		) {
+			throw new Error(`${name}.id is invalid`);
+		}
+		if (ids.has(candidate.id)) {
+			throw new Error(`${ROUTES_ENV_NAME} contains duplicate route id`);
+		}
+		ids.add(candidate.id);
+
+		const pathPrefix = readRoutePathPrefix(candidate.pathPrefix, index);
+		if (pathPrefixes.has(pathPrefix)) {
+			throw new Error(
+				`${ROUTES_ENV_NAME} contains duplicate route pathPrefix`
+			);
+		}
+		pathPrefixes.add(pathPrefix);
+
+		if (typeof candidate.upstreamUrl !== 'string') {
+			throw new Error(`${name}.upstreamUrl must be a string`);
+		}
+		const upstreamUrl = readHttpUrl(
+			`${name}.upstreamUrl`,
+			candidate.upstreamUrl,
+			{ originOnly: true }
+		);
+
+		if (
+			candidate.authPolicy !== 'required' &&
+			candidate.authPolicy !== 'optional'
+		) {
+			throw new Error(`${name}.authPolicy must be required or optional`);
+		}
+		if (
+			typeof candidate.timeoutMs !== 'number' ||
+			!Number.isSafeInteger(candidate.timeoutMs) ||
+			candidate.timeoutMs < 1000 ||
+			candidate.timeoutMs > 10 * 60 * 1000
+		) {
+			throw new Error(
+				`${name}.timeoutMs must be an integer between 1000 and 600000`
+			);
+		}
+
+		return {
+			id: candidate.id,
+			pathPrefix,
+			upstreamUrl,
+			authPolicy: candidate.authPolicy,
+			timeoutMs: candidate.timeoutMs
+		};
+	});
+
+	return routes.sort(
+		(left, right) => right.pathPrefix.length - left.pathPrefix.length
+	);
+};
+
 export const loadConfig = (
 	env: NodeJS.ProcessEnv = process.env
 ): GatewayConfig => {
@@ -125,11 +288,7 @@ export const loadConfig = (
 	return {
 		listenHost,
 		port: readInteger(env, portVariable, 4100, 1, 65535),
-		upstreamUrl: readHttpUrl(
-			'API_UPSTREAM_URL',
-			env.API_UPSTREAM_URL?.trim() || 'http://127.0.0.1:4200',
-			{ originOnly: true }
-		),
+		routes: readRoutes(env),
 		jwksUrl: readHttpUrl(
 			'JWT_JWKS_URL',
 			readRequired(env, 'JWT_JWKS_URL')
@@ -180,13 +339,6 @@ export const loadConfig = (
 			256 * 1024,
 			1024,
 			1024 * 1024
-		),
-		proxyTimeoutMs: readInteger(
-			env,
-			'PROXY_TIMEOUT_MS',
-			60 * 1000,
-			1000,
-			10 * 60 * 1000
 		),
 		shutdownGraceMs: readInteger(
 			env,

@@ -106,6 +106,7 @@ describe('MaintenanceWorkerService', () => {
 			getEventForType: jest.fn().mockReturnValue({
 				eventType: 'database.backup.requested.v1',
 				routingKey: 'database.backup.requested.v1',
+				deadLetterRoutingKey: 'database-backup.dead-letter',
 				payload: {
 					schemaVersion: 1,
 					eventType: 'database.backup.requested.v1'
@@ -117,7 +118,7 @@ describe('MaintenanceWorkerService', () => {
 				const sql = statement.strings.join('?');
 				return sql.includes('integration_delivery_failures')
 					? []
-					: [{ status: ScheduledJobRunStatus.FAILED }];
+					: [{ status: ScheduledJobRunStatus.FAILED, attempts: 0 }];
 			}),
 			telegramBotSettings: {
 				update: jest.fn().mockResolvedValue({})
@@ -281,6 +282,45 @@ describe('MaintenanceWorkerService', () => {
 		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
+	it('does not republish a DLQ message after the terminal intent was persisted', async () => {
+		const { service, rabbitMq, scheduledJobs, backup } = createService();
+		(scheduledJobs.claim as jest.Mock).mockResolvedValue({
+			state: 'terminal',
+			job: createJob({
+				status: ScheduledJobRunStatus.FAILED,
+				finishedAt: now,
+				lastError: 'Backup failed'
+			})
+		});
+
+		await (service as any).handle('database-backup', createMessage());
+
+		expect(backup.createAndSend).not.toHaveBeenCalled();
+		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('acks a newly failed job without direct DLQ publication', async () => {
+		const { service, rabbitMq, scheduledJobs, backup } = createService();
+		(backup.createAndSend as jest.Mock).mockRejectedValue(
+			new Error('Backup failed')
+		);
+		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
+			state: 'failed',
+			job: createJob({
+				status: ScheduledJobRunStatus.FAILED,
+				finishedAt: now,
+				lastError: 'Backup failed'
+			})
+		});
+
+		await (service as any).handle('database-backup', createMessage());
+
+		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
 	it('dead-letters a missing durable job instead of requeueing forever', async () => {
 		const { service, rabbitMq, scheduledJobs } = createService();
 		(scheduledJobs.claim as jest.Mock).mockResolvedValue({
@@ -334,7 +374,10 @@ describe('MaintenanceWorkerService', () => {
 			jobId,
 			expect.any(String),
 			120_000,
-			'DATABASE_BACKUP'
+			'DATABASE_BACKUP',
+			expect.objectContaining({
+				deadLetterRoutingKey: 'database-backup.dead-letter'
+			})
 		);
 		expect(backup.createAndSend).not.toHaveBeenCalled();
 		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
@@ -362,9 +405,13 @@ describe('MaintenanceWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
-	it('replaces an invalid Rabbit message id before sending malformed input to DLQ', async () => {
+	it('uses the same deterministic ID for malformed redeliveries', async () => {
 		const { service, rabbitMq } = createService();
 
+		await (service as any).handle(
+			'database-backup',
+			createMessage('not-a-uuid')
+		);
 		await (service as any).handle(
 			'database-backup',
 			createMessage('not-a-uuid')
@@ -383,7 +430,10 @@ describe('MaintenanceWorkerService', () => {
 		expect(
 			(rabbitMq.publishDeadLetter as jest.Mock).mock.calls[0][3]
 		).not.toBe('not-a-uuid');
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(
+			(rabbitMq.publishDeadLetter as jest.Mock).mock.calls[1][3]
+		).toBe((rabbitMq.publishDeadLetter as jest.Mock).mock.calls[0][3]);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(2);
 	});
 
 	it('does not let a stale DLQ delivery fail a job reopened for manual retry', async () => {
@@ -421,6 +471,29 @@ describe('MaintenanceWorkerService', () => {
 		).toContain('FOR UPDATE');
 		expect(transaction.scheduledJobRun.updateMany).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not let an older DLQ attempt overwrite a newer terminal failure', async () => {
+		const { service, rabbitMq, transaction } = createService();
+		transaction.$queryRaw.mockImplementation(statement => {
+			const sql = statement.strings.join('?');
+			return sql.includes('integration_delivery_failures')
+				? [{ resolvedAt: null }]
+				: [{ status: ScheduledJobRunStatus.FAILED, attempts: 8 }];
+		});
+		const message = createMessage();
+		message.properties.headers = {
+			'x-retry-attempt': 4,
+			'x-last-error': 'Old backup failure'
+		};
+
+		await (service as any).collectDeadLetter('database-backup', message);
+
+		expect(
+			transaction.integrationDeliveryFailure.upsert
+		).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
 	it('ignores a late backup DLQ event after the failure was closed', async () => {
@@ -479,6 +552,26 @@ describe('MaintenanceWorkerService', () => {
 			expect.any(Function),
 			1
 		);
+	});
+
+	it('is ready only after initialization and becomes unready before shutdown drains', async () => {
+		const { service, rabbitMq } = createService();
+		let finishCancellation!: () => void;
+		(rabbitMq.cancelConsumers as jest.Mock).mockReturnValue(
+			new Promise<void>(resolve => {
+				finishCancellation = resolve;
+			})
+		);
+
+		expect(service.isReady()).toBe(false);
+		await service.onModuleInit();
+		expect(service.isReady()).toBe(true);
+
+		const shutdown = service.beforeApplicationShutdown('SIGTERM');
+		expect(service.isReady()).toBe(false);
+
+		finishCancellation();
+		await shutdown;
 	});
 
 	it('waits for active handlers before shutdown', async () => {

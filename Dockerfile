@@ -56,3 +56,13 @@ EXPOSE 4200
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/src/main.js"]
+
+FROM runner AS maintenance-runner
+
+ENV MAINTENANCE_HEALTH_PORT=4300
+
+EXPOSE 4300
+
+CMD ["node", "dist/src/maintenance-worker-main.js"]
+
+FROM runner AS api-runner

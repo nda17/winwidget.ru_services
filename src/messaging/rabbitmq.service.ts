@@ -1,8 +1,8 @@
 import {
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
+	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
-	LEAD_INTEGRATION_KINDS,
 	MANUAL_RETRY_EXCHANGE,
 	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
@@ -37,6 +37,7 @@ const DEFAULT_MAX_MESSAGE_BYTES = 256 * 1024;
 interface ConsumerRegistration {
 	setup: SetupFunc;
 	consumerTag: string | null;
+	channel: ConfirmChannel | null;
 }
 
 export interface DeadLetterClassificationMetadata {
@@ -63,6 +64,7 @@ export class RabbitMqService
 	private readonly returnedPublications = new Map<string, Error | null>();
 	private readonly consumerRegistrations = new Set<ConsumerRegistration>();
 	private consumersStopping = false;
+	private consumerRecoveryRequested = false;
 	private assertTopologyEnabled = false;
 	private connection!: AmqpConnectionManager;
 	private channel!: ChannelWrapper;
@@ -87,9 +89,10 @@ export class RabbitMqService
 				}
 			}
 		});
-		this.connection.on('connect', () =>
-			this.logger.log('Connected to RabbitMQ')
-		);
+		this.connection.on('connect', () => {
+			this.consumerRecoveryRequested = false;
+			this.logger.log('Connected to RabbitMQ');
+		});
 		this.connection.on('disconnect', ({ err }) =>
 			this.logger.warn(`RabbitMQ disconnected: ${err.message}`)
 		);
@@ -116,6 +119,19 @@ export class RabbitMqService
 
 		await this.connection.connect({ timeout: 15_000 });
 		await this.channel.waitForConnect();
+	}
+
+	isConnected(): boolean {
+		return this.connection?.isConnected() ?? false;
+	}
+
+	areConsumersReady(): boolean {
+		return (
+			this.consumerRegistrations.size > 0 &&
+			[...this.consumerRegistrations].every(
+				registration => registration.consumerTag !== null
+			)
+		);
 	}
 
 	async publishEvent(
@@ -178,7 +194,7 @@ export class RabbitMqService
 	): Promise<void> {
 		await this.publishConfirmed(
 			DEAD_LETTER_EXCHANGE,
-			this.getDeadLetterRoutingKey(kind),
+			getDeadLetterRoutingKey(kind),
 			payload,
 			{
 				contentType: 'application/json',
@@ -346,14 +362,26 @@ export class RabbitMqService
 
 		const registration: ConsumerRegistration = {
 			consumerTag: null,
+			channel: null,
 			setup: async channel => {
 				registration.consumerTag = null;
 				const deliveryChannel = channel as ConfirmChannel;
+				registration.channel = deliveryChannel;
+				deliveryChannel.once('close', () => {
+					if (registration.channel === deliveryChannel) {
+						registration.channel = null;
+						registration.consumerTag = null;
+					}
+				});
 				await deliveryChannel.prefetch(prefetch, false);
 				const consumer = await deliveryChannel.consume(
 					queue,
 					message => {
-						if (!message) return;
+						if (!message) {
+							registration.consumerTag = null;
+							this.requestConsumerRecovery(consumerName);
+							return;
+						}
 						this.deliveryChannels.set(message, deliveryChannel);
 						if (this.consumersStopping) {
 							return;
@@ -378,19 +406,36 @@ export class RabbitMqService
 		try {
 			await this.channel.addSetup(registration.setup);
 		} catch (error) {
-			if (!this.assertTopologyEnabled) {
-				this.logger.warn(
-					`RabbitMQ ${consumerName} queue is not ready; consumer registration will retry after reconnect: ${
-						error instanceof Error ? error.message : String(error)
-					}`
-				);
-				return;
-			}
 			this.consumerRegistrations.delete(registration);
 			await this.channel
 				.removeSetup(registration.setup)
 				.catch(() => undefined);
 			throw error;
+		}
+	}
+
+	private requestConsumerRecovery(consumerName: string): void {
+		if (this.consumersStopping || this.consumerRecoveryRequested) {
+			return;
+		}
+
+		this.consumerRecoveryRequested = true;
+		this.logger.warn(
+			`RabbitMQ cancelled the ${consumerName} consumer; reconnecting to restore subscriptions`
+		);
+		if (!this.connection.isConnected()) {
+			return;
+		}
+
+		try {
+			this.connection.reconnect();
+		} catch (error) {
+			this.consumerRecoveryRequested = false;
+			this.logger.error(
+				`Failed to request RabbitMQ consumer recovery: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
 		}
 	}
 
@@ -403,6 +448,7 @@ export class RabbitMqService
 				this.channel.removeSetup(registration.setup, async channel => {
 					const consumerTag = registration.consumerTag;
 					registration.consumerTag = null;
+					registration.channel = null;
 					if (consumerTag) {
 						await (channel as ConfirmChannel).cancel(consumerTag);
 					}
@@ -528,19 +574,6 @@ export class RabbitMqService
 					: {})
 			});
 			await channel.bindQueue(queue, EVENTS_EXCHANGE, routingKey);
-			if (
-				LEAD_INTEGRATION_KINDS.includes(
-					kind as (typeof LEAD_INTEGRATION_KINDS)[number]
-				)
-			) {
-				// Reconcile durable broker topology left by the retired v1
-				// contract. This removes routing; it does not consume v1 events.
-				await channel.unbindQueue(
-					queue,
-					EVENTS_EXCHANGE,
-					`lead.integration.${kind}.v1`
-				);
-			}
 			await channel.bindQueue(
 				queue,
 				EVENTS_EXCHANGE,
@@ -552,7 +585,12 @@ export class RabbitMqService
 			await channel.bindQueue(
 				deadLetterQueue,
 				DEAD_LETTER_EXCHANGE,
-				this.getDeadLetterRoutingKey(kind)
+				getDeadLetterRoutingKey(kind)
+			);
+			await channel.bindQueue(
+				deadLetterQueue,
+				EVENTS_EXCHANGE,
+				getDeadLetterRoutingKey(kind)
 			);
 
 			for (const [index, delay] of RETRY_DELAYS_MS.entries()) {
@@ -588,9 +626,5 @@ export class RabbitMqService
 
 	private getRetryRoutingKey(kind: MessagingKind, index: number): string {
 		return `${kind}.retry.${index + 1}`;
-	}
-
-	private getDeadLetterRoutingKey(kind: MessagingKind): string {
-		return `${kind}.dead-letter`;
 	}
 }

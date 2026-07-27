@@ -24,7 +24,13 @@ export const TERMINAL_SCHEDULED_JOB_STATUSES: ScheduledJobRunStatus[] = [
 export interface ScheduledJobOutboxEvent {
 	eventType: string;
 	routingKey: string;
+	deadLetterRoutingKey: string;
 	payload?: Prisma.InputJsonObject;
+}
+
+export interface ScheduledJobFailureOptions {
+	allowRetry?: boolean;
+	deadLetterHeaders?: Record<string, string | number | boolean>;
 }
 
 export interface EnqueueScheduledJobInput {

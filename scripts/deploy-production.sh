@@ -9,6 +9,7 @@ HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://127.0.0.1:4200/api/v1/health/deployme
 PUBLIC_HEALTHCHECK_URL="${PUBLIC_HEALTHCHECK_URL:-https://api.winwidget.ru/api/v1/health/deployment}"
 READINESS_URL="${READINESS_URL:-http://127.0.0.1:4200/api/v1/health/ready}"
 GATEWAY_READINESS_URL="${GATEWAY_READINESS_URL:-http://127.0.0.1:4100/health/ready}"
+MAINTENANCE_READINESS_URL="${MAINTENANCE_READINESS_URL:-http://127.0.0.1:4300/health/ready}"
 HEALTHCHECK_ATTEMPTS="${HEALTHCHECK_ATTEMPTS:-30}"
 HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
 
@@ -33,10 +34,13 @@ fi
 
 export APP_REVISION="$deploy_revision"
 export APP_VERSION="git-$deploy_revision"
+export MAINTENANCE_REVISION="$deploy_revision"
+export MAINTENANCE_IMAGE="winwidget-maintenance:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
 echo "Building gateway image: winwidget-api-gateway:$APP_VERSION"
+echo "Building maintenance image: $MAINTENANCE_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -86,7 +90,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-		APP_REVISION | APP_VERSION)
+		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION)
 			continue
 			;;
 	esac
@@ -155,6 +159,43 @@ get_env_value() {
 	' "$ENV_FILE"
 }
 
+get_database_username() {
+	local key="$1"
+	local value
+
+	value="$(get_env_value "$key")"
+	if [[ "$value" =~ ^postgres(ql)?://([A-Za-z0-9._-]+):[^@]+@ ]]; then
+		printf '%s' "${BASH_REMATCH[2]}"
+		return
+	fi
+	echo "$key must be a PostgreSQL URL with an explicit non-encoded username and password" >&2
+	exit 1
+}
+
+assert_distinct_database_roles() {
+	local api_user
+	local migration_user
+	local maintenance_user
+	local backup_user
+
+	api_user="$(get_database_username DATABASE_URL_PRODUCTION)"
+	migration_user="$(get_database_username DATABASE_MIGRATION_URL_PRODUCTION)"
+	maintenance_user="$(
+		get_database_username MAINTENANCE_DATABASE_URL_PRODUCTION
+	)"
+	backup_user="$(get_database_username DATABASE_BACKUP_URL)"
+
+	if [[ "$api_user" == "$migration_user" ||
+		"$api_user" == "$maintenance_user" ||
+		"$api_user" == "$backup_user" ||
+		"$migration_user" == "$maintenance_user" ||
+		"$migration_user" == "$backup_user" ||
+		"$maintenance_user" == "$backup_user" ]]; then
+		echo "API, migration, Maintenance runtime and backup must use four distinct PostgreSQL roles" >&2
+		exit 1
+	fi
+}
+
 require_env_exact_list() {
 	local key="$1"
 	local expected="$2"
@@ -197,36 +238,55 @@ for key in \
 	JWT_CLOCK_TOLERANCE_SECONDS \
 	GATEWAY_LISTEN_HOST \
 	GATEWAY_PORT \
-	API_UPSTREAM_URL \
+	GATEWAY_ROUTES_JSON \
 	CORS_ALLOWED_ORIGINS \
-	JWT_JWKS_URL; do
+	JWT_JWKS_URL \
+	GATEWAY_SHUTDOWN_GRACE_MS; do
 	require_env_key "$key"
 done
 
-if awk -F= '
-	/^[[:space:]]*JWT_SECRET[[:space:]]*=/ { found = 1 }
-	END { exit(found ? 0 : 1) }
-' "$ENV_FILE"; then
-	echo "Legacy JWT_SECRET must be removed from $ENV_FILE" >&2
-	exit 1
-fi
+for legacy_key in \
+	JWT_SECRET \
+	API_UPSTREAM_URL \
+	GATEWAY_PROXY_TIMEOUT_MS \
+	RABBITMQ_LEGACY_USER \
+	RABBITMQ_USER \
+	RABBITMQ_PASSWORD \
+	RABBITMQ_URL; do
+	if awk -F= -v key="$legacy_key" '
+		/^[[:space:]]*(#|$)/ { next }
+		{
+			name = $1
+			sub(/^[[:space:]]*/, "", name)
+			sub(/[[:space:]]*$/, "", name)
+			if (name == key) found = 1
+		}
+		END { exit(found ? 0 : 1) }
+	' "$ENV_FILE"; then
+		echo "$legacy_key must be removed from $ENV_FILE" >&2
+		exit 1
+	fi
+done
 
 case "$mode" in
 	production)
 		require_env_key "DATABASE_URL_PRODUCTION"
+		require_env_key "DATABASE_MIGRATION_URL_PRODUCTION"
+		require_env_key "MAINTENANCE_DATABASE_URL_PRODUCTION"
+		require_env_key "DATABASE_BACKUP_URL"
 		require_env_key "PRODUCTION_HOST"
 		require_env_key "AUTH_COOKIE_DOMAIN"
 		require_env_key "COMPOSE_PROJECT_NAME"
 		require_env_key "RABBITMQ_DATA_VOLUME"
 		require_env_key "RABBITMQ_ADMIN_USER"
 		require_env_key "RABBITMQ_ADMIN_PASSWORD"
-		require_env_key "RABBITMQ_LEGACY_USER"
 		require_env_key "RABBITMQ_MONITOR_USER"
 		require_env_key "RABBITMQ_MONITOR_PASSWORD"
 		require_env_key "RABBITMQ_PUBLISHER_URL"
 		require_env_key "RABBITMQ_INTEGRATION_WORKER_URL"
 		require_env_key "RABBITMQ_MAINTENANCE_WORKER_URL"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
+		require_env_key "MAINTENANCE_HEALTH_PORT"
 		require_env_key "SCHEDULED_JOB_POLL_INTERVAL_MS"
 		require_env_key "SCHEDULED_JOB_LEASE_MS"
 		require_env_key "SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS"
@@ -282,10 +342,11 @@ case "$mode" in
 			echo "Production GATEWAY_PORT must be 4100" >&2
 			exit 1
 		fi
-		if [[ "$(get_env_value API_UPSTREAM_URL)" != "http://127.0.0.1:4200" ]]; then
-			echo "Production API_UPSTREAM_URL must be http://127.0.0.1:4200" >&2
+		if [[ "$(get_env_value MAINTENANCE_HEALTH_PORT)" != "4300" ]]; then
+			echo "Production MAINTENANCE_HEALTH_PORT must be 4300" >&2
 			exit 1
 		fi
+		assert_distinct_database_roles
 		if [[ "$(get_env_value JWT_JWKS_URL)" != "http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json" ]]; then
 			echo "Production JWT_JWKS_URL must use the loopback Auth endpoint" >&2
 			exit 1
@@ -351,9 +412,9 @@ rabbitmq_container_ids="$(
 		--filter label=com.docker.compose.service=rabbitmq \
 		--format '{{.ID}}'
 )"
-legacy_project="$target_project"
 matched_rabbitmq_containers=0
 matched_rabbitmq_container_id=""
+matched_rabbitmq_project=""
 while IFS= read -r container_id; do
 	[[ -n "$container_id" ]] || continue
 	mounted_volume="$(
@@ -366,7 +427,7 @@ while IFS= read -r container_id; do
 	fi
 	matched_rabbitmq_containers=$((matched_rabbitmq_containers + 1))
 	matched_rabbitmq_container_id="$container_id"
-	legacy_project="$(
+	matched_rabbitmq_project="$(
 		docker inspect --format \
 			'{{ index .Config.Labels "com.docker.compose.project" }}' \
 			"$container_id"
@@ -376,8 +437,10 @@ if ((matched_rabbitmq_containers > 1)); then
 	echo "More than one RabbitMQ container uses volume $rabbitmq_data_volume" >&2
 	exit 1
 fi
-if [[ -z "$legacy_project" ]]; then
-	echo "Could not determine the existing RabbitMQ Compose project" >&2
+if [[ -n "$matched_rabbitmq_container_id" &&
+	"$matched_rabbitmq_project" != "$target_project" ]]; then
+	echo "RabbitMQ volume is attached to non-canonical Compose project: ${matched_rabbitmq_project:-unknown}" >&2
+	echo "Resolve the stale project manually before deployment; automatic legacy cutover is not supported." >&2
 	exit 1
 fi
 
@@ -386,13 +449,58 @@ compose_target() {
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
-compose_legacy() {
-	docker compose --project-name "$legacy_project" \
-		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
-}
+compose_target --profile migration config --quiet
+compose_target build api api-gateway maintenance-worker
 
-compose_target config --quiet
-compose_target build api api-gateway
+gateway_validation_env=()
+for key in \
+	GATEWAY_LISTEN_HOST \
+	GATEWAY_PORT \
+	GATEWAY_ROUTES_JSON \
+	CORS_ALLOWED_ORIGINS \
+	JWT_JWKS_URL \
+	JWT_ISSUER \
+	JWT_AUDIENCE \
+	JWT_CLOCK_TOLERANCE_SECONDS \
+	JWT_MAX_TOKEN_BYTES \
+	JWKS_FETCH_TIMEOUT_MS \
+	JWKS_REFRESH_MIN_INTERVAL_MS \
+	JWKS_CACHE_TTL_MS \
+	JWKS_MAX_STALE_MS \
+	JWKS_MAX_BYTES; do
+	value="$(get_env_value "$key" || true)"
+	if [[ -n "$value" ]]; then
+		gateway_validation_env+=(--env "$key=$value")
+	fi
+done
+gateway_validation_env+=(
+	--env "JWT_MAX_TOKEN_LIFETIME_SECONDS=$(get_env_value JWT_ACCESS_TTL_SECONDS)"
+	--env "SHUTDOWN_GRACE_MS=$(get_env_value GATEWAY_SHUTDOWN_GRACE_MS)"
+)
+
+docker run --rm --network none \
+	"${gateway_validation_env[@]}" \
+	--entrypoint node \
+	"winwidget-api-gateway:$APP_VERSION" \
+	-e '
+const { loadConfig } = require("./dist/src/config.js");
+const config = loadConfig();
+const monolith = config.routes.find(route => route.id === "monolith");
+if (
+	!monolith ||
+	monolith.pathPrefix !== "/api/v1" ||
+	monolith.upstreamUrl.origin !== "http://127.0.0.1:4200" ||
+	monolith.authPolicy !== "optional" ||
+	monolith.timeoutMs !== 60000
+) {
+	throw new Error(
+		"Current production phase requires the explicit monolith /api/v1 catch-all route",
+	);
+}
+process.stdout.write(
+	`API Gateway route manifest validated: ${config.routes.length} route(s)\n`,
+);
+'
 
 docker run --rm --network none \
 	--env-file "$ENV_FILE" \
@@ -482,16 +590,8 @@ process.stdout.write(`JWT RS256 keyset validated for kid ${activeKid}\n`);
 
 rabbitmq_admin_user="$(get_env_value "RABBITMQ_ADMIN_USER")"
 rabbitmq_admin_password="$(get_env_value "RABBITMQ_ADMIN_PASSWORD")"
-rabbitmq_legacy_user="$(get_env_value "RABBITMQ_LEGACY_USER")"
 rabbitmq_monitor_user="$(get_env_value "RABBITMQ_MONITOR_USER")"
 rabbitmq_monitor_password="$(get_env_value "RABBITMQ_MONITOR_PASSWORD")"
-previous_shared_user="$(get_env_value "RABBITMQ_USER" || true)"
-if [[ -n "$previous_shared_user" &&
-	"$previous_shared_user" != "change_me" &&
-	"$previous_shared_user" != "$rabbitmq_legacy_user" ]]; then
-	echo "RABBITMQ_LEGACY_USER must match the previous RABBITMQ_USER during cutover" >&2
-	exit 1
-fi
 
 validate_rabbitmq_username() {
 	local variable_name="$1"
@@ -504,7 +604,6 @@ validate_rabbitmq_username() {
 }
 
 validate_rabbitmq_username "RABBITMQ_ADMIN_USER" "$rabbitmq_admin_user"
-validate_rabbitmq_username "RABBITMQ_LEGACY_USER" "$rabbitmq_legacy_user"
 validate_rabbitmq_username "RABBITMQ_MONITOR_USER" "$rabbitmq_monitor_user"
 if [[ ! "$rabbitmq_vhost" =~ ^[A-Za-z0-9._/-]+$ ]]; then
 	echo "RABBITMQ_VHOST contains unsupported characters" >&2
@@ -639,10 +738,6 @@ service_users=(
 	"$maintenance_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
-	if [[ "$rabbitmq_legacy_user" == "${service_users[$left]}" ]]; then
-		echo "RABBITMQ_LEGACY_USER must differ from all current RabbitMQ users" >&2
-		exit 1
-	fi
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
 		if [[ "${service_users[$left]}" == "${service_users[$right]}" ]]; then
 			echo "RabbitMQ admin, monitor and service URLs must use distinct users" >&2
@@ -696,26 +791,22 @@ fi
 unexpected_broad_users="$(
 	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
 	RABBITMQ_PROVISION_ADMIN_USER="$rabbitmq_admin_user" \
-	RABBITMQ_PROVISION_LEGACY_USER="$rabbitmq_legacy_user" \
 		docker exec \
 			-e RABBITMQ_PROVISION_VHOST \
 			-e RABBITMQ_PROVISION_ADMIN_USER \
-			-e RABBITMQ_PROVISION_LEGACY_USER \
 			"$provisioning_rabbitmq_container_id" \
 			sh -ec '
 rabbitmqctl --silent list_permissions \
 	-p "$RABBITMQ_PROVISION_VHOST" user configure write read |
 awk -v admin="$RABBITMQ_PROVISION_ADMIN_USER" \
-	-v legacy="$RABBITMQ_PROVISION_LEGACY_USER" \
 	'\''NR == 1 && $1 == "user" { next }
 	$2 == ".*" && $3 == ".*" && $4 == ".*" &&
-		$1 != admin && $1 != legacy { print $1 }'\''
+		$1 != admin { print $1 }'\''
 '
 )"
 if [[ -n "$unexpected_broad_users" ]]; then
 	echo "Unexpected broad RabbitMQ user(s) on vhost $rabbitmq_vhost:" >&2
 	echo "$unexpected_broad_users" >&2
-	echo "Verify RABBITMQ_LEGACY_USER before deployment" >&2
 	exit 1
 fi
 
@@ -817,14 +908,66 @@ provision_rabbitmq_user \
 
 echo "RabbitMQ admin/service users and least-privilege permissions are verified"
 
-compose_legacy stop api-gateway api outbox-publisher integration-worker maintenance-worker
+wait_for_rabbitmq_topology() {
+	local rabbitmq_container_id
+	local required_queues
+	local actual_queues
+	local required_queue
+	local all_ready
+	local attempt
+
+	rabbitmq_container_id="$(compose_target ps --status running -q rabbitmq)"
+	if [[ -z "$rabbitmq_container_id" ]]; then
+		echo "RabbitMQ is not running while waiting for topology" >&2
+		return 1
+	fi
+	required_queues="$(
+		docker run --rm --network none \
+			--entrypoint node \
+			"winwidget-api:$APP_VERSION" \
+			-e '
+const {
+	MESSAGING_KINDS,
+	MESSAGING_QUEUE_NAMES
+} = require("./dist/src/messaging/messaging.constants.js");
+for (const kind of MESSAGING_KINDS) {
+	const queue = MESSAGING_QUEUE_NAMES[kind];
+	process.stdout.write(`${queue}\n${queue}.dead-letter\n`);
+}
+'
+	)"
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		actual_queues="$(
+			docker exec "$rabbitmq_container_id" \
+				rabbitmqctl --silent list_queues -p "$rabbitmq_vhost" name \
+				2>/dev/null || true
+		)"
+		all_ready=true
+		while IFS= read -r required_queue; do
+			[[ -n "$required_queue" ]] || continue
+			if ! grep -Fqx -- "$required_queue" <<<"$actual_queues"; then
+				all_ready=false
+				break
+			fi
+		done <<<"$required_queues"
+		if [[ "$all_ready" == "true" ]]; then
+			return 0
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	echo "RabbitMQ topology owner did not create all worker queues" >&2
+	compose_target logs --tail=100 outbox-publisher rabbitmq || true
+	return 1
+}
+
+compose_target stop api-gateway api outbox-publisher integration-worker maintenance-worker
 compose_target --profile migration run --rm migrate
-if [[ "$legacy_project" != "$target_project" ]]; then
-	compose_legacy stop rabbitmq
-fi
 compose_target up -d rabbitmq
 messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
 compose_target up -d --force-recreate outbox-publisher
+wait_for_rabbitmq_topology
 compose_target up -d --force-recreate integration-worker maintenance-worker
 compose_target up -d --force-recreate api
 compose_target up -d --force-recreate api-gateway
@@ -835,8 +978,8 @@ show_api_diagnostics() {
 		ps api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq || true
 	compose_target \
 		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq || true
-	echo "Processes listening on ports 4100 and 4200:"
-	ss -ltnp '( sport = :4100 or sport = :4200 )' || true
+	echo "Processes listening on ports 4100, 4200 and 4300:"
+	ss -ltnp '( sport = :4100 or sport = :4200 or sport = :4300 )' || true
 }
 
 ensure_required_services_running() {
@@ -1111,6 +1254,20 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 done
 
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if check_deployment_revision "$MAINTENANCE_READINESS_URL"; then
+		break
+	fi
+
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo "Maintenance readiness check failed: $MAINTENANCE_READINESS_URL"
+		show_api_diagnostics
+		exit 1
+	fi
+
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if check_messaging_readiness; then
 		break
 	fi
@@ -1135,8 +1292,12 @@ for service in api-gateway api outbox-publisher integration-worker maintenance-w
 			--format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
 			"$container_id"
 	)"
-	if [[ "$image_revision" != "$APP_REVISION" ]]; then
-		echo "$service image revision mismatch: expected $APP_REVISION, got $image_revision"
+	expected_image_revision="$APP_REVISION"
+	if [[ "$service" == "maintenance-worker" ]]; then
+		expected_image_revision="$MAINTENANCE_REVISION"
+	fi
+	if [[ "$image_revision" != "$expected_image_revision" ]]; then
+		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
 		show_api_diagnostics
 		exit 1
 	fi
@@ -1151,32 +1312,7 @@ for service in api-gateway api outbox-publisher integration-worker maintenance-w
 	fi
 done
 
-retire_rabbitmq_legacy_user() {
-	local rabbitmq_container_id
-
-	rabbitmq_container_id="$(compose_target ps --status running -q rabbitmq)"
-	if [[ -z "$rabbitmq_container_id" ]]; then
-		echo "RabbitMQ is not running; legacy user was not retired" >&2
-		exit 1
-	fi
-
-	RABBITMQ_PROVISION_LEGACY_USER="$rabbitmq_legacy_user" \
-		docker exec \
-			-e RABBITMQ_PROVISION_LEGACY_USER \
-			"$rabbitmq_container_id" \
-			sh -ec '
-if rabbitmqctl --silent list_users |
-	cut -f1 |
-	grep -Fqx -- "$RABBITMQ_PROVISION_LEGACY_USER"; then
-	rabbitmqctl delete_user "$RABBITMQ_PROVISION_LEGACY_USER"
-fi
-'
-}
-
-retire_rabbitmq_legacy_user
-
 echo "Backend revision verified locally and publicly: $APP_REVISION"
-echo "RabbitMQ legacy user is absent after the verified cutover"
 
 compose_target ps \
 	api-gateway api outbox-publisher integration-worker maintenance-worker rabbitmq

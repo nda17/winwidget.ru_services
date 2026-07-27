@@ -18,6 +18,7 @@ import {
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
+import { getStableMessageId } from '@/messaging/poison-message-id';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
@@ -67,6 +68,7 @@ type WorkerEventPayload =
 interface ScheduledJobStatusRow {
 	jobType: string;
 	status: ScheduledJobRunStatus;
+	attempts: number;
 }
 
 interface DeliveryFailureLockRow {
@@ -335,23 +337,6 @@ export class IntegrationWorkerService
 				}
 				if (error instanceof ScheduledJobDispatchHandledError) {
 					if (error.state === 'failed') {
-						const classification =
-							error.classification ||
-							this.classifyDeliveryError(kind, error);
-						await this.rabbitMq.publishDeadLetter(
-							kind,
-							payload,
-							error.job.attempts,
-							eventId,
-							error.message,
-							this.getEventType(payload),
-							this.getDeadLetterMetadata(
-								error,
-								classification,
-								firstFailedAt,
-								this.getStringHeader(message, 'x-delivery-token')
-							)
-						);
 						await this.markDeliveryDeadLettered(
 							eventId,
 							kind,
@@ -359,7 +344,7 @@ export class IntegrationWorkerService
 						);
 						receiptClaim = null;
 						this.logger.error(
-							`Scheduled integration moved to dead-letter eventId=${eventId} kind=${kind}: ${error.message}`
+							`Scheduled integration terminal DLQ intent persisted eventId=${eventId} kind=${kind}: ${error.message}`
 						);
 					} else {
 						await this.releaseDeliveryClaimIfOwned(
@@ -437,12 +422,12 @@ export class IntegrationWorkerService
 					);
 				}
 				this.rabbitMq.ack(message);
-			} catch (publishError) {
+			} catch (failureHandlingError) {
 				this.logger.error(
-					`Failed to republish eventId=${eventId} kind=${kind}: ${
-						publishError instanceof Error
-							? publishError.message
-							: String(publishError)
+					`Failed to finalize failed delivery eventId=${eventId} kind=${kind}: ${
+						failureHandlingError instanceof Error
+							? failureHandlingError.message
+							: String(failureHandlingError)
 					}`
 				);
 				await this.releaseDeliveryClaimIfOwned(
@@ -1102,7 +1087,7 @@ export class IntegrationWorkerService
 		message: ConsumeMessage,
 		error: string
 	): Promise<void> {
-		const eventId = this.normalizeEventId(message.properties.messageId);
+		const eventId = getStableMessageId(message, kind);
 		const payload = {
 			malformed: true,
 			contentLength: message.content.length
@@ -1142,7 +1127,7 @@ export class IntegrationWorkerService
 		kind: IntegrationKind,
 		message: ConsumeMessage
 	): Promise<void> {
-		const eventId = this.normalizeEventId(message.properties.messageId);
+		const eventId = getStableMessageId(message, kind);
 		const rawPayload = message.content.toString('utf8');
 		let payload: Prisma.InputJsonValue = {
 			malformed: true,
@@ -1250,7 +1235,8 @@ export class IntegrationWorkerService
 					eventId,
 					payload,
 					upsert,
-					deliveryToken
+					deliveryToken,
+					this.getRetryAttempt(message)
 				);
 			} else {
 				persisted = await this.persistIntegrationDeadLetter(
@@ -1311,7 +1297,8 @@ export class IntegrationWorkerService
 		eventId: string,
 		payload: Prisma.InputJsonValue,
 		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs,
-		deliveryToken: string | null
+		deliveryToken: string | null,
+		retryAttempt: number
 	): Promise<boolean> {
 		const jobId = this.getDailySummaryJobId(payload);
 		return this.prisma.$transaction(async transaction => {
@@ -1325,7 +1312,8 @@ export class IntegrationWorkerService
 						Prisma.sql`
 							SELECT
 								"job_type" AS "jobType",
-								"status"
+								"status",
+								"attempts"
 							FROM "scheduled_job_runs"
 							WHERE "id" = ${jobId}::uuid
 							FOR SHARE
@@ -1336,7 +1324,8 @@ export class IntegrationWorkerService
 				jobs[0] &&
 				eventId === jobId &&
 				jobs[0].jobType === 'DAILY_TELEGRAM_SUMMARY' &&
-				jobs[0].status !== ScheduledJobRunStatus.FAILED
+				(jobs[0].status !== ScheduledJobRunStatus.FAILED ||
+					jobs[0].attempts !== retryAttempt)
 			) {
 				return false;
 			}
@@ -1652,10 +1641,6 @@ export class IntegrationWorkerService
 	private getRetryAttempt(message: ConsumeMessage): number {
 		const value = Number(message.properties.headers?.['x-retry-attempt']);
 		return Number.isInteger(value) && value >= 0 ? value : 0;
-	}
-
-	private normalizeEventId(value: unknown): string {
-		return this.isUuid(value) ? value : randomUUID();
 	}
 
 	private isUuid(value: unknown): value is string {

@@ -15,6 +15,7 @@ import {
 import { getCurrentCorrelationId } from '@/messaging/messaging-context';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
+import { getStableMessageId } from '@/messaging/poison-message-id';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
@@ -40,6 +41,7 @@ const SHUTDOWN_DRAIN_TIMEOUT_MS = 20_000;
 
 interface ScheduledJobStatusRow {
 	status: ScheduledJobRunStatus;
+	attempts: number;
 }
 
 interface DeliveryFailureStatusRow {
@@ -72,6 +74,7 @@ export class MaintenanceWorkerService
 	private readonly workerId = `maintenance:${hostname()}:${process.pid}:${randomUUID()}`;
 	private readonly activeHandlers = new Set<Promise<void>>();
 	private readonly activeLeases = new Map<string, BackupLease>();
+	private initialized = false;
 	private shuttingDown = false;
 	private shutdownReason: MaintenanceWorkerShutdownError | null = null;
 	private shutdownPromise: Promise<void> | null = null;
@@ -87,6 +90,7 @@ export class MaintenanceWorkerService
 	) {}
 
 	async onModuleInit(): Promise<void> {
+		this.initialized = false;
 		const prefetch = this.getPrefetch();
 		for (const kind of this.getEnabledKinds()) {
 			await this.rabbitMq.consume(
@@ -110,12 +114,19 @@ export class MaintenanceWorkerService
 				prefetch
 			);
 		}
+		this.initialized = true;
 		this.logger.log(
 			`Maintenance consumers started kinds=${this.getEnabledKinds().join(',')} prefetch=${prefetch}`
 		);
 	}
 
+	isReady(): boolean {
+		return this.initialized && !this.shuttingDown;
+	}
+
 	beforeApplicationShutdown(signal?: string): Promise<void> {
+		this.initialized = false;
+		this.shuttingDown = true;
 		if (!this.shutdownPromise) {
 			this.shutdownPromise = this.shutdown(signal);
 		}
@@ -123,6 +134,7 @@ export class MaintenanceWorkerService
 	}
 
 	private async shutdown(signal?: string): Promise<void> {
+		this.initialized = false;
 		this.shuttingDown = true;
 		this.shutdownReason = new MaintenanceWorkerShutdownError(signal);
 		let consumersCancelled = true;
@@ -219,7 +231,10 @@ export class MaintenanceWorkerService
 				payload.jobId,
 				this.workerId,
 				this.getLeaseMs(),
-				SCHEDULED_JOB_TYPES.DATABASE_BACKUP
+				SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+				this.scheduledTasks.getEventForType(
+					SCHEDULED_JOB_TYPES.DATABASE_BACKUP
+				)
 			);
 			if (claim.state === 'not_found') {
 				await this.publishDeadLetter(
@@ -244,15 +259,7 @@ export class MaintenanceWorkerService
 				return;
 			}
 			if (claim.state === 'terminal') {
-				if (claim.job.status === ScheduledJobRunStatus.FAILED) {
-					await this.publishDeadLetter(
-						kind,
-						payload,
-						eventId,
-						claim.job.attempts,
-						claim.job.lastError || 'Database backup job failed'
-					);
-				} else if (claim.job.status === ScheduledJobRunStatus.SUCCEEDED) {
+				if (claim.job.status === ScheduledJobRunStatus.SUCCEEDED) {
 					await this.resolveFailure(eventId, kind);
 				}
 				this.rabbitMq.ack(message);
@@ -441,15 +448,8 @@ export class MaintenanceWorkerService
 				return;
 			}
 			if (result.state === 'failed') {
-				await this.publishDeadLetter(
-					kind,
-					payload,
-					eventId,
-					result.job.attempts,
-					result.job.lastError || 'Database backup failed'
-				);
 				this.logger.error(
-					`Database backup moved to dead-letter jobId=${job.id}: ${result.job.lastError}`
+					`Database backup terminal DLQ intent persisted jobId=${job.id}: ${result.job.lastError}`
 				);
 			} else {
 				this.logger.warn(
@@ -514,10 +514,7 @@ export class MaintenanceWorkerService
 					: (parsed as Prisma.InputJsonValue);
 		} catch {}
 		const payloadJobId = this.getPayloadJobId(payload);
-		const eventId = this.getSafeEventId(
-			message.properties.messageId,
-			payloadJobId
-		);
+		const eventId = getStableMessageId(message, kind, payloadJobId);
 		const header = message.properties.headers?.['x-last-error'];
 		const lastError =
 			typeof header === 'string'
@@ -544,7 +541,7 @@ export class MaintenanceWorkerService
 				const jobs = payloadJobId
 					? await transaction.$queryRaw<ScheduledJobStatusRow[]>(
 							Prisma.sql`
-								SELECT "status"
+								SELECT "status", "attempts"
 								FROM "scheduled_job_runs"
 								WHERE "id" = ${payloadJobId}::uuid
 								FOR SHARE
@@ -555,7 +552,8 @@ export class MaintenanceWorkerService
 				if (
 					job &&
 					eventId === payloadJobId &&
-					job.status !== ScheduledJobRunStatus.FAILED
+					(job.status !== ScheduledJobRunStatus.FAILED ||
+						job.attempts !== this.getRetryAttempt(message))
 				) {
 					return;
 				}
@@ -600,7 +598,7 @@ export class MaintenanceWorkerService
 		message: ConsumeMessage,
 		error: string
 	): Promise<void> {
-		const eventId = this.getSafeEventId(message.properties.messageId);
+		const eventId = getStableMessageId(message, kind);
 		let payload: unknown = {
 			raw: message.content.toString('utf8').slice(0, 10_000)
 		};
@@ -797,15 +795,6 @@ export class MaintenanceWorkerService
 	private getRetryAttempt(message: ConsumeMessage): number {
 		const value = Number(message.properties.headers?.['x-retry-attempt']);
 		return Number.isInteger(value) && value >= 0 ? value : 0;
-	}
-
-	private getSafeEventId(
-		messageId: string | undefined,
-		fallback?: string | null
-	): string {
-		if (messageId && UUID_PATTERN.test(messageId)) return messageId;
-		if (fallback && UUID_PATTERN.test(fallback)) return fallback;
-		return randomUUID();
 	}
 
 	private getPayloadJobId(payload: Prisma.InputJsonValue): string | null {

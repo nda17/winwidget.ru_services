@@ -248,18 +248,21 @@ Feature-модули только внедряют `PrismaService` и не ре�
 после завершения lifecycle-хуков процесса; API обрабатывает `SIGTERM` через
 Nest shutdown hooks.
 
-Для `pg_dump` maintenance worker сначала использует необязательный
-`DATABASE_BACKUP_URL`. Указывайте в нём прямой PostgreSQL endpoint, если
-основной Prisma URL ведёт через PgBouncer/pooler. Если переменная пустая,
-используется URL, выбранный через `MODE`; deploy не требует
-`DATABASE_BACKUP_URL`.
+В production Maintenance получает отдельный
+`MAINTENANCE_DATABASE_URL_PRODUCTION`, а `pg_dump` — обязательный
+`DATABASE_BACKUP_URL` отдельной read-only роли на прямом PostgreSQL endpoint
+без transaction pooler. Основной `DATABASE_URL_PRODUCTION` этому контейнеру не
+передаётся. Одноразовый `migrate` получает только
+`DATABASE_MIGRATION_URL_PRODUCTION`; runtime-роль API не используется для DDL.
 
 Production compose отслеживается вместе с backend-кодом в
-`deploy/docker-compose.prod.yml`. Он запускает пять постоянных
-backend-контейнеров: `api`, `rabbitmq`, `outbox-publisher`,
-`integration-worker`, `maintenance-worker`. Контейнер `migrate` запускается
-только на время деплоя. PostgreSQL является внешней управляемой базой и в эти
-пять контейнеров не входит.
+`deploy/docker-compose.prod.yml`. Он запускает шесть постоянных
+backend-контейнеров: `api-gateway`, `api`, `rabbitmq`, `outbox-publisher`,
+`integration-worker`, `maintenance-worker`. Maintenance собирается отдельным
+immutable image, имеет собственный loopback health endpoint на `4300` и может
+выкатываться независимо после первого baseline deploy. Контейнер `migrate`
+запускается только на время полного деплоя. PostgreSQL является внешней
+управляемой базой и в эти контейнеры не входит.
 RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
 привязаны только к `127.0.0.1` backend VPS.
 
@@ -313,7 +316,6 @@ RABBITMQ_DATA_VOLUME=<verified-existing-volume>
 RABBITMQ_VHOST=winwidget
 RABBITMQ_ADMIN_USER=winwidget-admin
 RABBITMQ_ADMIN_PASSWORD=<полученный-hex-пароль>
-RABBITMQ_LEGACY_USER=winwidget
 RABBITMQ_MONITOR_USER=winwidget-monitor
 RABBITMQ_MONITOR_PASSWORD=<отдельный-hex-пароль>
 RABBITMQ_PUBLISHER_URL=amqp://winwidget-publisher:<url-encoded-password>@127.0.0.1:5672/winwidget
@@ -402,10 +404,14 @@ Publisher подтверждает публикацию только после 
 недоступен, Outbox остаётся в `PENDING` и повторяется с ограниченным backoff без
 необратимого лимита транспортных попыток.
 
-Независимые retry-очереди используют суффикс `retry-v2`. Старые пустые
-`*.retry.1..3`, если они остались после обновления существующего RabbitMQ,
-больше не получают сообщения; удаляйте их вручную только после проверки, что
-в них нет отложенных сообщений.
+Переход scheduled job в окончательный `FAILED` и намерение доставки в его DLQ
+фиксируются одной PostgreSQL-транзакцией. Outbox publisher отправляет это
+намерение через `winwidget.events` по `<kind>.dead-letter`; соответствующая
+durable DLQ привязана и к events exchange, и к обычному dead-letter exchange
+consumer’а. Поэтому сбой RabbitMQ после terminal commit не оставляет ошибку
+только в PostgreSQL. Для malformed/poison-сообщения без валидного `messageId`
+используется детерминированный UUIDv8 от AMQP envelope и содержимого: redelivery
+не создаёт новую failure-запись.
 
 Бизнес-критичные изменения платежа и подписки остаются синхронными в
 PostgreSQL. Через RabbitMQ выполняются только побочные уведомления.
@@ -466,10 +472,9 @@ Outbox-событие. API только ставит ручной запуск �
 файл backup или секреты подключения. В production временный dump создаётся в
 отдельном `tmpfs` maintenance-контейнера с лимитом 64 МБ и удаляется в
 `finally`; максимальный размер отправляемого файла ограничен 49 МБ.
-Если провайдер выдаёт отдельный direct endpoint, задайте его в
-`DATABASE_BACKUP_URL`: `pg_dump` не должен идти через transaction pooler.
-Переменная необязательна и при отсутствии использует обычный URL текущего
-`MODE`. Пароль удаляется из аргументов процесса и передаётся `pg_dump` только
+В production `DATABASE_BACKUP_URL` обязателен и должен принадлежать отдельной
+read-only роли на direct endpoint: `pg_dump` не должен идти через transaction
+pooler. Пароль удаляется из аргументов процесса и передаётся `pg_dump` только
 через `PGPASSWORD`; Prisma-only параметры подключения удаляются.
 
 Контракт ручного запуска изменён намеренно: endpoint возвращает принятое в
@@ -512,6 +517,18 @@ lease; состояние и окончательные ошибки остаю�
 увеличенная при claim попытка компенсируется. Production compose оставляет
 контейнеру 30 секунд на завершение; lease recovery остаётся аварийным fallback
 при `SIGKILL`, недоступной PostgreSQL или превышении shutdown-окна.
+
+Maintenance публикует собственные loopback endpoints:
+
+```text
+GET http://127.0.0.1:4300/health/live
+GET http://127.0.0.1:4300/health/ready
+```
+
+Readiness становится успешным только после регистрации consumers и проверяет
+текущие RabbitMQ connection, shared Prisma connection и shutdown-state. Ответ
+содержит точную OCI revision; перед drain readiness переключается в
+неуспешное состояние.
 
 Для всех scheduler не вводится общий PostgreSQL-lock. Уникальный ключ периода
 защищает расписание от дублей, длительный backup использует возобновляемый
@@ -935,6 +952,8 @@ PRODUCTION_HOST
 AUTH_COOKIE_DOMAIN
 DATABASE_URL_DEVELOPMENT
 DATABASE_URL_PRODUCTION
+DATABASE_MIGRATION_URL_PRODUCTION
+MAINTENANCE_DATABASE_URL_PRODUCTION
 DATABASE_BACKUP_URL
 TRUST_PROXY
 CORS_ALLOWED_ORIGINS
@@ -952,7 +971,7 @@ JWT_ACCESS_TTL_SECONDS
 JWT_CLOCK_TOLERANCE_SECONDS
 GATEWAY_LISTEN_HOST
 GATEWAY_PORT
-API_UPSTREAM_URL
+GATEWAY_ROUTES_JSON
 JWT_JWKS_URL
 JWT_MAX_TOKEN_BYTES
 JWKS_FETCH_TIMEOUT_MS
@@ -960,7 +979,6 @@ JWKS_REFRESH_MIN_INTERVAL_MS
 JWKS_CACHE_TTL_MS
 JWKS_MAX_STALE_MS
 JWKS_MAX_BYTES
-GATEWAY_PROXY_TIMEOUT_MS
 GATEWAY_SHUTDOWN_GRACE_MS
 ```
 
@@ -1054,7 +1072,6 @@ COMPOSE_PROJECT_NAME
 RABBITMQ_DATA_VOLUME
 RABBITMQ_ADMIN_USER
 RABBITMQ_ADMIN_PASSWORD
-RABBITMQ_LEGACY_USER
 RABBITMQ_MONITOR_USER
 RABBITMQ_MONITOR_PASSWORD
 RABBITMQ_VHOST
@@ -1068,6 +1085,7 @@ OUTBOX_POLL_INTERVAL_MS
 OUTBOX_RETENTION_DAYS
 RABBITMQ_WORKER_PREFETCH
 MAINTENANCE_WORKER_PREFETCH
+MAINTENANCE_HEALTH_PORT
 SCHEDULED_JOB_POLL_INTERVAL_MS
 SCHEDULED_JOB_LEASE_MS
 SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS
@@ -1192,12 +1210,16 @@ NestJS production image использует multi-stage build:
 `docker-entrypoint.sh` выбирает database URL по `MODE` и экспортирует его как
 `DATABASE_URL` для runtime. Отдельный минимальный image Gateway не получает
 private JWT key, PostgreSQL или RabbitMQ credentials и слушает только
-`127.0.0.1:4100`.
+`127.0.0.1:4100`. Maintenance собирается отдельным target/image, получает
+собственные DB/Rabbit credentials и публикует health только на
+`127.0.0.1:4300`.
 
 ## CI/CD
 
 Workflow `.github/workflows/deploy-production.yml` запускается вручную или при
-push в ветку `prod`.
+push в ветку `prod`. Push выполняет полный deploy. Ручной запуск позволяет
+выбрать `all` либо `maintenance`; второй вариант использует изолированный
+rollout с автоматическим возвратом exact previous Maintenance image.
 
 Verify выполняет:
 
@@ -1212,32 +1234,35 @@ docker compose ... config --quiet + semantic validation
 pnpm build
 pnpm --dir apps/api-gateway run typecheck
 pnpm --dir apps/api-gateway test
-docker compose ... build api api-gateway
+docker compose ... build api api-gateway maintenance-worker
 pg_dump --version && pg_restore --version && maintenance entrypoint check
 pnpm run test:messaging-integration
 ```
 
 Semantic compose validation проверяет точный набор шести постоянных сервисов,
-команды worker-процессов, обязательные переменные и consumer kinds, а также
-ограниченный `tmpfs` maintenance worker.
+отдельные API/Gateway/Maintenance images, команды оставшихся worker-процессов,
+обязательные переменные и consumer kinds, healthcheck и ограниченный `tmpfs`
+maintenance worker.
 
 После успешного verify deploy по SSH:
 
 1. обновляет ветку `prod` через `git pull --ff-only`, требует чистый checkout и
    точное совпадение с проверенным `${{ github.sha }}`;
-2. собирает backend image с тегом и OCI revision полного SHA commit;
-3. останавливает старые API/workers и запускает migration container без
-   mixed-version окна;
+2. собирает отдельные API, Gateway и Maintenance images с тегом и OCI revision
+   полного SHA commit;
+3. останавливает старые API/workers и запускает migration container с отдельной
+   migration-role без mixed-version окна;
 4. сохраняет verified Rabbit volume, запускает RabbitMQ, topology owner
    Outbox publisher, integration/maintenance workers и API;
-5. ждёт свежие heartbeat трёх worker-процессов, полный набор main/DLQ
-   consumers и отсутствие Rabbit alarm;
+5. ждёт readiness Maintenance, свежие heartbeat трёх worker-процессов, полный
+   набор main/DLQ consumers и отсутствие Rabbit alarm;
 6. сверяет revision через локальный
    `http://127.0.0.1:4200/api/v1/health/deployment` и публичный
    `https://api.winwidget.ru/api/v1/health/deployment`;
 7. проверяет OCI-label и отсутствие рестартов у API, Outbox publisher,
    integration worker и maintenance worker;
-8. при ошибке выводит последние логи API и процесс, занимающий порт `4200`.
+8. при ошибке выводит последние логи и процессы, занимающие порты
+   `4100/4200/4300`.
 
 Production flow:
 
@@ -1258,5 +1283,6 @@ Production flow:
 - [`docker-entrypoint.sh`](docker-entrypoint.sh);
 - [`.github/workflows/deploy-production.yml`](.github/workflows/deploy-production.yml);
 - [`scripts/deploy-production.sh`](scripts/deploy-production.sh);
+- [`scripts/deploy-maintenance-production.sh`](scripts/deploy-maintenance-production.sh);
 - `../deploy/backend` — production compose и nginx в общем checkout;
 - `../DOCUMENTATION` — общая документация проекта с аналитическими артефактами.

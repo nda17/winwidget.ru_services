@@ -61,6 +61,7 @@ describe('ScheduledTasksService', () => {
 			{
 				eventType: 'report.daily-summary.requested.v1',
 				routingKey: 'report.daily-summary.requested.v1',
+				deadLetterRoutingKey: 'daily-summary-telegram.dead-letter',
 				payload: {
 					schemaVersion: 1,
 					eventType: 'report.daily-summary.requested.v1'

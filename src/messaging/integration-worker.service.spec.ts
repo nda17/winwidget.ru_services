@@ -53,7 +53,13 @@ describe('IntegrationWorkerService', () => {
 				const sql = statement.strings.join('?');
 				return sql.includes('integration_delivery_failures')
 					? []
-					: [{ jobType: 'DAILY_TELEGRAM_SUMMARY', status: 'FAILED' }];
+					: [
+							{
+								jobType: 'DAILY_TELEGRAM_SUMMARY',
+								status: 'FAILED',
+								attempts: 4
+							}
+						];
 			}),
 			integrationDeliveryFailure: {
 				upsert: failureUpsert,
@@ -552,6 +558,41 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
+	it('does not directly publish a DLQ event after a scheduled job persisted its terminal intent', async () => {
+		const { service, rabbitMq, delivery, prisma } = createService();
+		(delivery.deliver as jest.Mock).mockRejectedValue(
+			new ScheduledJobDispatchHandledError(
+				'failed',
+				{
+					id: '11111111-1111-4111-8111-111111111111',
+					attempts: 4
+				} as ScheduledJobRunView,
+				'Telegram destination is no longer available'
+			)
+		);
+
+		await (service as any).handle(
+			'daily-summary-telegram',
+			createDailySummaryMessage()
+		);
+
+		expect(
+			prisma.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith({
+			where: expect.objectContaining({
+				eventId: '11111111-1111-4111-8111-111111111111',
+				integration: 'daily-summary-telegram',
+				status: IntegrationDeliveryReceiptStatus.PROCESSING
+			}),
+			data: expect.objectContaining({
+				status: IntegrationDeliveryReceiptStatus.DEAD_LETTERED
+			})
+		});
+		expect(rabbitMq.publishRetry).not.toHaveBeenCalled();
+		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
 	it('dead-letters an unclassified daily-summary error after its short retry budget', async () => {
 		const { service, rabbitMq, delivery } = createService();
 		const message = createDailySummaryMessage();
@@ -664,11 +705,12 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
-	it('replaces an invalid messageId before publishing malformed data to the DLQ', async () => {
+	it('uses the same deterministic ID for malformed redeliveries', async () => {
 		const { service, rabbitMq, delivery, prisma } = createService();
 		const message = createMessage();
 		message.properties.messageId = 'not-a-uuid';
 
+		await (service as any).handle('webhook', message);
 		await (service as any).handle('webhook', message);
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
@@ -698,10 +740,13 @@ describe('IntegrationWorkerService', () => {
 			expect.anything(),
 			expect.anything()
 		);
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(
+			(rabbitMq.publishDeadLetter as jest.Mock).mock.calls[1][3]
+		).toBe((rabbitMq.publishDeadLetter as jest.Mock).mock.calls[0][3]);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(2);
 	});
 
-	it('normalizes an invalid DLQ messageId before persisting the failure', async () => {
+	it('uses the same deterministic ID when an invalid DLQ message is redelivered', async () => {
 		const { service, rabbitMq, prisma } = createService();
 		const message = createMessage();
 		message.properties.messageId = 'not-a-uuid';
@@ -709,6 +754,7 @@ describe('IntegrationWorkerService', () => {
 			'x-last-error': 'Malformed source event'
 		};
 
+		await (service as any).collectDeadLetter('webhook', message);
 		await (service as any).collectDeadLetter('webhook', message);
 
 		expect(prisma.integrationDeliveryFailure.upsert).toHaveBeenCalledWith(
@@ -723,7 +769,14 @@ describe('IntegrationWorkerService', () => {
 				}
 			})
 		);
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		const firstEventId = (
+			prisma.integrationDeliveryFailure.upsert as jest.Mock
+		).mock.calls[0][0].where.eventId_integration.eventId;
+		const secondEventId = (
+			prisma.integrationDeliveryFailure.upsert as jest.Mock
+		).mock.calls[1][0].where.eventId_integration.eventId;
+		expect(secondEventId).toBe(firstEventId);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(2);
 		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
@@ -770,6 +823,38 @@ describe('IntegrationWorkerService', () => {
 			).strings.join('?')
 		).toContain('FOR SHARE');
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not let an older daily-summary DLQ attempt overwrite a newer terminal failure', async () => {
+		const { service, rabbitMq, prisma, transaction } = createService();
+		transaction.$queryRaw.mockImplementation(statement => {
+			const sql = statement.strings.join('?');
+			return sql.includes('integration_delivery_failures')
+				? []
+				: [
+						{
+							jobType: 'DAILY_TELEGRAM_SUMMARY',
+							status: 'FAILED',
+							attempts: 8
+						}
+					];
+		});
+		const message = createDailySummaryMessage();
+		message.properties.headers = {
+			'x-last-error': 'Old daily summary failure',
+			'x-retry-attempt': 4
+		};
+
+		await (service as any).collectDeadLetter(
+			'daily-summary-telegram',
+			message
+		);
+
+		expect(
+			prisma.integrationDeliveryFailure.upsert
+		).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
 	it('persists a daily-summary DLQ message while its job is still failed', async () => {

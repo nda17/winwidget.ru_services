@@ -87,6 +87,9 @@ export const INTEGRATION_QUEUE_NAMES = MESSAGING_QUEUE_NAMES;
 export const getManualRetryRoutingKey = (kind: MessagingKind): string =>
 	`manual.${kind}`;
 
+export const getDeadLetterRoutingKey = (kind: MessagingKind): string =>
+	`${kind}.dead-letter`;
+
 export const RETRY_DELAYS_MS = [30_000, 300_000, 1_800_000] as const;
 export const OUTBOX_DEFAULT_BATCH_SIZE = 50;
 export const OUTBOX_DEFAULT_POLL_INTERVAL_MS = 1000;

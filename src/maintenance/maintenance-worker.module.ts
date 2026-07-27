@@ -1,4 +1,6 @@
 import { DatabaseBackupService } from '@/maintenance/database-backup.service';
+import { MaintenanceHealthController } from '@/maintenance/maintenance-health.controller';
+import { MaintenanceHealthService } from '@/maintenance/maintenance-health.service';
 import { MaintenanceSchedulerService } from '@/maintenance/maintenance-scheduler.service';
 import { ScheduledTasksModule } from '@/maintenance/scheduled-tasks.module';
 import { MaintenanceWorkerService } from '@/maintenance/maintenance-worker.service';
@@ -18,9 +20,11 @@ import { ConfigModule } from '@nestjs/config';
 		ScheduledTasksModule,
 		TelegramInfoTransportModule
 	],
+	controllers: [MaintenanceHealthController],
 	providers: [
 		MessagingHeartbeatService,
 		DatabaseBackupService,
+		MaintenanceHealthService,
 		MaintenanceSchedulerService,
 		MaintenanceWorkerService
 	]

@@ -26,13 +26,25 @@ describe('RabbitMqService topology', () => {
 	};
 	const messageId = '11111111-1111-4111-8111-111111111111';
 
+	it('reports the current RabbitMQ connection state', () => {
+		const service = new RabbitMqService({
+			get: jest.fn()
+		} as unknown as ConfigService);
+
+		expect(service.isConnected()).toBe(false);
+
+		(service as any).connection = {
+			isConnected: jest.fn().mockReturnValue(true)
+		};
+		expect(service.isConnected()).toBe(true);
+	});
+
 	it('fans out payment events but keeps retries consumer-specific', async () => {
 		const channel = {
 			on: jest.fn(),
 			assertExchange: jest.fn().mockResolvedValue(undefined),
 			assertQueue: jest.fn().mockResolvedValue(undefined),
-			bindQueue: jest.fn().mockResolvedValue(undefined),
-			unbindQueue: jest.fn().mockResolvedValue(undefined)
+			bindQueue: jest.fn().mockResolvedValue(undefined)
 		} as unknown as ConfirmChannel;
 		const service = new RabbitMqService({
 			get: jest.fn()
@@ -45,12 +57,6 @@ describe('RabbitMqService topology', () => {
 			'winwidget.events',
 			'lead.integration.webhook.v2'
 		);
-		expect(channel.unbindQueue).toHaveBeenCalledWith(
-			'winwidget.lead-integration.webhook',
-			'winwidget.events',
-			'lead.integration.webhook.v1'
-		);
-		expect(channel.unbindQueue).toHaveBeenCalledTimes(5);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
 			'winwidget.payment-notification.email',
 			'winwidget.events',
@@ -94,6 +100,11 @@ describe('RabbitMqService topology', () => {
 			'winwidget.limit-notification.telegram',
 			'winwidget.events',
 			'manual.limit-telegram'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.maintenance.database-backup.dead-letter',
+			'winwidget.events',
+			'database-backup.dead-letter'
 		);
 	});
 
@@ -226,6 +237,7 @@ describe('RabbitMqService topology', () => {
 			| ((message: ConsumeMessage | null) => void)
 			| undefined;
 		const deliveryChannel = {
+			once: jest.fn(),
 			prefetch: jest.fn().mockResolvedValue(undefined),
 			consume: jest
 				.fn()
@@ -251,8 +263,10 @@ describe('RabbitMqService topology', () => {
 		(service as any).channel = channel;
 
 		await service.consume('database-backup', handler, 1);
+		expect(service.areConsumersReady()).toBe(true);
 		await service.cancelConsumers();
 
+		expect(service.areConsumersReady()).toBe(false);
 		expect(channel.removeSetup).toHaveBeenCalledTimes(1);
 		expect(deliveryChannel.cancel).toHaveBeenCalledWith('consumer-1');
 
@@ -260,6 +274,68 @@ describe('RabbitMqService topology', () => {
 		deliveryHandler?.(message);
 		expect(handler).not.toHaveBeenCalled();
 		expect(deliveryChannel.nack).not.toHaveBeenCalled();
+	});
+
+	it('becomes unready when the delivery channel closes', async () => {
+		let closeHandler: (() => void) | undefined;
+		const deliveryChannel = {
+			once: jest.fn((event: string, handler: () => void) => {
+				if (event === 'close') closeHandler = handler;
+			}),
+			prefetch: jest.fn().mockResolvedValue(undefined),
+			consume: jest.fn().mockResolvedValue({ consumerTag: 'consumer-1' })
+		} as unknown as ConfirmChannel;
+		const service = new RabbitMqService({
+			get: jest.fn()
+		} as unknown as ConfigService);
+		(service as any).channel = {
+			addSetup: jest.fn(async setup => setup(deliveryChannel))
+		};
+
+		await service.consume('database-backup', jest.fn(), 1);
+		expect(service.areConsumersReady()).toBe(true);
+
+		closeHandler?.();
+
+		expect(service.areConsumersReady()).toBe(false);
+	});
+
+	it('reconnects once when RabbitMQ cancels a consumer', async () => {
+		let deliveryHandler:
+			| ((message: ConsumeMessage | null) => void)
+			| undefined;
+		const deliveryChannel = {
+			once: jest.fn(),
+			prefetch: jest.fn().mockResolvedValue(undefined),
+			consume: jest
+				.fn()
+				.mockImplementation(
+					(_queue, handler: (message: ConsumeMessage | null) => void) => {
+						deliveryHandler = handler;
+						return Promise.resolve({ consumerTag: 'consumer-1' });
+					}
+				)
+		} as unknown as ConfirmChannel;
+		const reconnect = jest.fn();
+		const service = new RabbitMqService({
+			get: jest.fn()
+		} as unknown as ConfigService);
+		(service as any).connection = {
+			isConnected: jest.fn().mockReturnValue(true),
+			reconnect
+		};
+		(service as any).channel = {
+			addSetup: jest.fn(async setup => setup(deliveryChannel))
+		};
+
+		await service.consume('database-backup', jest.fn(), 1);
+		expect(service.areConsumersReady()).toBe(true);
+
+		deliveryHandler?.(null);
+		deliveryHandler?.(null);
+
+		expect(service.areConsumersReady()).toBe(false);
+		expect(reconnect).toHaveBeenCalledTimes(1);
 	});
 
 	it('requires an explicit topology ownership setting', () => {
@@ -285,11 +361,11 @@ describe('RabbitMqService topology', () => {
 		expect((service as any).getAssertTopologyEnabled()).toBe(expected);
 	});
 
-	it('keeps a worker consumer setup registered while the topology owner is starting', async () => {
+	it('fails fast when a worker queue is not ready', async () => {
 		const setupError = new Error('NOT_FOUND - no queue');
 		const channel = {
 			addSetup: jest.fn().mockRejectedValue(setupError),
-			removeSetup: jest.fn()
+			removeSetup: jest.fn().mockResolvedValue(undefined)
 		};
 		const service = new RabbitMqService({
 			get: jest.fn()
@@ -299,10 +375,11 @@ describe('RabbitMqService topology', () => {
 
 		await expect(
 			service.consume('database-backup', jest.fn(), 1)
-		).resolves.toBeUndefined();
+		).rejects.toThrow('NOT_FOUND - no queue');
 
-		expect((service as any).consumerRegistrations.size).toBe(1);
-		expect(channel.removeSetup).not.toHaveBeenCalled();
+		expect((service as any).consumerRegistrations.size).toBe(0);
+		expect(service.areConsumersReady()).toBe(false);
+		expect(channel.removeSetup).toHaveBeenCalledTimes(1);
 	});
 
 	it('fails fast when topology owner setup cannot be registered', async () => {

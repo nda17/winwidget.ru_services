@@ -2,6 +2,7 @@ import { DatabaseBackupInput } from '@/maintenance/database-backup.service';
 import {
 	DAILY_SUMMARY_EVENT_TYPE,
 	DATABASE_BACKUP_EVENT_TYPE,
+	getDeadLetterRoutingKey,
 	MESSAGING_ROUTING_KEYS
 } from '@/messaging/messaging.constants';
 import { PrismaService } from '@/prisma.service';
@@ -206,6 +207,9 @@ export class ScheduledTasksService {
 			return {
 				eventType: DAILY_SUMMARY_EVENT_TYPE,
 				routingKey: MESSAGING_ROUTING_KEYS['daily-summary-telegram'],
+				deadLetterRoutingKey: getDeadLetterRoutingKey(
+					'daily-summary-telegram'
+				),
 				payload: {
 					schemaVersion: 1,
 					eventType: DAILY_SUMMARY_EVENT_TYPE
@@ -216,6 +220,7 @@ export class ScheduledTasksService {
 			return {
 				eventType: DATABASE_BACKUP_EVENT_TYPE,
 				routingKey: MESSAGING_ROUTING_KEYS['database-backup'],
+				deadLetterRoutingKey: getDeadLetterRoutingKey('database-backup'),
 				payload: {
 					schemaVersion: 1,
 					eventType: DATABASE_BACKUP_EVENT_TYPE

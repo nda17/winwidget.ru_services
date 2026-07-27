@@ -117,6 +117,27 @@ describe('messaging event contract', () => {
 		).toThrow('jobId must match');
 	});
 
+	it('accepts a scheduled event routed to its Outbox-backed dead letter', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'database.backup.requested.v1',
+			jobId: MESSAGE_ID,
+			jobType: 'DATABASE_BACKUP',
+			scheduleKey: 'scheduled:test',
+			periodStart: null,
+			periodEnd: null
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'database-backup.dead-letter',
+				messageId: MESSAGE_ID,
+				kind: 'database-backup'
+			})
+		).not.toThrow();
+	});
+
 	it('rejects a backup period with only one boundary', () => {
 		const payload = {
 			schemaVersion: 1,

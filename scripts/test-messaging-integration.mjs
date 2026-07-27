@@ -609,9 +609,9 @@ try {
 		});
 		await waitFor(
 			() =>
-				getRabbitManagementStatus('/api/overview').then(
-					status => status >= 200 && status < 300
-				).catch(() => false),
+				getRabbitManagementStatus('/api/overview')
+					.then(status => status >= 200 && status < 300)
+					.catch(() => false),
 			'RabbitMQ after container restart',
 			60_000
 		);
@@ -631,19 +631,23 @@ try {
 		);
 		channel.ack(durableMessage);
 
-		await waitFor(async () => {
-			const queues = await Promise.all(
-				[
-					'winwidget.lead-integration.webhook',
-					'winwidget.lead-integration.webhook.dead-letter',
-					'winwidget.report.daily-summary.telegram',
-					'winwidget.report.daily-summary.telegram.dead-letter',
-					'winwidget.maintenance.database-backup',
-					'winwidget.maintenance.database-backup.dead-letter'
-				].map(queue => channel.checkQueue(queue))
-			);
-			return queues.every(queue => queue.consumerCount > 0);
-		}, 'worker consumers after RabbitMQ restart', 60_000);
+		await waitFor(
+			async () => {
+				const queues = await Promise.all(
+					[
+						'winwidget.lead-integration.webhook',
+						'winwidget.lead-integration.webhook.dead-letter',
+						'winwidget.report.daily-summary.telegram',
+						'winwidget.report.daily-summary.telegram.dead-letter',
+						'winwidget.maintenance.database-backup',
+						'winwidget.maintenance.database-backup.dead-letter'
+					].map(queue => channel.checkQueue(queue))
+				);
+				return queues.every(queue => queue.consumerCount > 0);
+			},
+			'worker consumers after RabbitMQ restart',
+			60_000
+		);
 
 		const postRestartEventId = randomUUID();
 		createdEventIds.push(postRestartEventId);
@@ -770,7 +774,7 @@ try {
 				jobType: 'DATABASE_BACKUP',
 				scheduleKey: terminalBackupScheduleKey,
 				trigger: 'MANUAL',
-				status: 'FAILED',
+				status: 'QUEUED',
 				scheduledFor: terminalBackupCreatedAt,
 				input: {
 					chatId: 'ci-terminal-backup',
@@ -780,7 +784,6 @@ try {
 				},
 				attempts: 4,
 				maxAttempts: 4,
-				finishedAt: terminalBackupCreatedAt,
 				lastError: 'CI terminal database backup'
 			}
 		}),
@@ -818,6 +821,25 @@ try {
 					failure?.lastError.includes('CI terminal database backup')
 				),
 		'terminal database backup dead-letter'
+	);
+	await waitFor(
+		() =>
+			prisma.outboxEvent
+				.findUnique({
+					where: {
+						deduplicationKey: `scheduled-job:${terminalBackupJobId}:dead-letter:4`
+					},
+					select: {
+						routingKey: true,
+						status: true
+					}
+				})
+				.then(
+					event =>
+						event?.routingKey === 'database-backup.dead-letter' &&
+						event.status === 'PUBLISHED'
+				),
+		'published terminal database backup DLQ Outbox event'
 	);
 
 	const duplicateEventId = randomUUID();
@@ -940,7 +962,14 @@ try {
 			.deleteMany({ where: { eventId: { in: createdEventIds } } })
 			.catch(() => undefined);
 		await prisma.outboxEvent
-			.deleteMany({ where: { id: { in: createdEventIds } } })
+			.deleteMany({
+				where: {
+					OR: [
+						{ id: { in: createdEventIds } },
+						{ messageId: { in: createdEventIds } }
+					]
+				}
+			})
 			.catch(() => undefined);
 	}
 	if (createdScheduledJobIds.length) {

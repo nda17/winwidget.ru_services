@@ -7,7 +7,7 @@ import {
 	type Server
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { GatewayConfig } from '../src/config';
+import type { GatewayConfig, GatewayRouteConfig } from '../src/config';
 import type { FetchLike } from '../src/jwks';
 import type { StructuredLogger } from '../src/logger';
 
@@ -104,12 +104,23 @@ export const createJwksFetch =
 		};
 	};
 
+export const createTestRoute = (
+	overrides: Partial<GatewayRouteConfig> = {}
+): GatewayRouteConfig => ({
+	id: 'monolith',
+	pathPrefix: '/api/v1',
+	upstreamUrl: new URL('http://127.0.0.1:4200'),
+	authPolicy: 'optional',
+	timeoutMs: 1000,
+	...overrides
+});
+
 export const createTestConfig = (
 	overrides: Partial<GatewayConfig> = {}
 ): GatewayConfig => ({
 	listenHost: '127.0.0.1',
 	port: 4100,
-	upstreamUrl: new URL('http://127.0.0.1:4200'),
+	routes: [createTestRoute()],
 	jwksUrl: new URL('http://127.0.0.1:4201/.well-known/jwks.json'),
 	issuer: 'https://api.winwidget.test/auth',
 	audience: 'https://api.winwidget.test',
@@ -125,7 +136,6 @@ export const createTestConfig = (
 	jwksCacheTtlMs: 1000,
 	jwksMaxStaleMs: 10_000,
 	jwksMaxBytes: 256 * 1024,
-	proxyTimeoutMs: 1000,
 	shutdownGraceMs: 1000,
 	...overrides
 });

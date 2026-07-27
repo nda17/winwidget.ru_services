@@ -2,6 +2,15 @@ name: Deploy Production
 
 on:
   workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: Production deployment target
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - maintenance
   push:
     branches:
       - prod
@@ -48,6 +57,8 @@ jobs:
     env:
       APP_REVISION: ${{ github.sha }}
       APP_VERSION: git-${{ github.sha }}
+      MAINTENANCE_REVISION: ${{ github.sha }}
+      MAINTENANCE_IMAGE: winwidget-maintenance:git-${{ github.sha }}
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       RABBITMQ_URL: amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget
@@ -133,8 +144,8 @@ jobs:
 
       - name: Validate production compose
         run: |
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+          docker compose --profile migration --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+          docker compose --profile migration --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
             node -e '
               const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
               const services = config.services ?? {};
@@ -197,18 +208,27 @@ jobs:
                 }
                 return environment;
               };
-              for (const name of ["api", "api-gateway"]) {
+              for (const name of ["api", "api-gateway", "maintenance-worker"]) {
                 const service = requireService(name);
                 if (service.build?.args?.APP_REVISION !== process.env.APP_REVISION) {
                   throw new Error(`${name} image build revision is not pinned`);
                 }
-                const expectedImage =
-                  name === "api"
-                    ? `winwidget-api:${process.env.APP_VERSION}`
-                    : `winwidget-api-gateway:${process.env.APP_VERSION}`;
+                const expectedImage = {
+                  api: `winwidget-api:${process.env.APP_VERSION}`,
+                  "api-gateway": `winwidget-api-gateway:${process.env.APP_VERSION}`,
+                  "maintenance-worker": process.env.MAINTENANCE_IMAGE,
+                }[name];
                 if (service.image !== expectedImage) {
                   throw new Error(`${name} image tag is not pinned to the revision`);
                 }
+              }
+              if (
+                requireService("maintenance-worker").build?.target !==
+                "maintenance-runner"
+              ) {
+                throw new Error(
+                  "maintenance-worker must use the maintenance-runner image target",
+                );
               }
               const requireExactKinds = (environment, key, expected, name) => {
                 const kinds = [...new Set(String(environment[key] ?? "")
@@ -232,9 +252,46 @@ jobs:
                 "node dist/src/integration-worker-main.js",
               );
               requireCommand(
-                "maintenance-worker",
-                "node dist/src/maintenance-worker-main.js",
+                "migrate",
+                "migrate deploy",
               );
+              const migration = requireService("migrate");
+              const migrationEntrypoint = Array.isArray(migration.entrypoint)
+                ? migration.entrypoint.join(" ")
+                : String(migration.entrypoint ?? "");
+              if (migrationEntrypoint !== "./node_modules/.bin/prisma") {
+                throw new Error(
+                  `Unexpected migrate entrypoint: ${migrationEntrypoint}`,
+                );
+              }
+              if (!(migration.profiles ?? []).includes("migration")) {
+                throw new Error("migrate must remain behind the migration profile");
+              }
+              const migrationEnvironment = requireEnvironment("migrate", [
+                "APP_REVISION",
+                "NODE_ENV",
+                "DATABASE_URL",
+              ]);
+              const unexpectedMigrationKeys = Object.keys(
+                migrationEnvironment,
+              ).filter(
+                key =>
+                  ![
+                    "APP_REVISION",
+                    "NODE_ENV",
+                    "DATABASE_URL",
+                  ].includes(key),
+              );
+              if (unexpectedMigrationKeys.length > 0) {
+                throw new Error(
+                  `migrate receives unexpected environment: ${unexpectedMigrationKeys.join(",")}`,
+                );
+              }
+              if (requireService("maintenance-worker").command != null) {
+                throw new Error(
+                  "maintenance-worker command must be owned by its image",
+                );
+              }
 
               requireEnvironment("api", [
                 "RABBITMQ_MANAGEMENT_URL",
@@ -250,7 +307,7 @@ jobs:
                 "CORS_ALLOWED_ORIGINS",
               ]);
               const gatewayEnvironment = requireEnvironment("api-gateway", [
-                "API_UPSTREAM_URL",
+                "GATEWAY_ROUTES_JSON",
                 "CORS_ALLOWED_ORIGINS",
                 "JWT_JWKS_URL",
                 "JWT_ISSUER",
@@ -266,10 +323,30 @@ jobs:
                 "JWT_ACCESS_JWKS_BASE64",
                 "RABBITMQ_URL",
                 "RABBITMQ_MONITOR_PASSWORD",
+                "API_UPSTREAM_URL",
+                "PROXY_TIMEOUT_MS",
               ]) {
                 if (forbidden in gatewayEnvironment) {
                   throw new Error(`api-gateway must not receive ${forbidden}`);
                 }
+              }
+              const gatewayRoutes = JSON.parse(
+                gatewayEnvironment.GATEWAY_ROUTES_JSON,
+              );
+              const expectedGatewayRoutes = [{
+                id: "monolith",
+                pathPrefix: "/api/v1",
+                upstreamUrl: "http://127.0.0.1:4200",
+                authPolicy: "optional",
+                timeoutMs: 60000,
+              }];
+              if (
+                JSON.stringify(gatewayRoutes) !==
+                JSON.stringify(expectedGatewayRoutes)
+              ) {
+                throw new Error(
+                  "Production example must define the explicit monolith /api/v1 catch-all route",
+                );
               }
               requireEnvironment("outbox-publisher", [
                 "DATABASE_URL_PRODUCTION",
@@ -315,13 +392,15 @@ jobs:
                   "RABBITMQ_URL",
                   "RABBITMQ_ASSERT_TOPOLOGY",
                   "MESSAGING_SERVICE_NAME",
+                  "DATABASE_BACKUP_URL",
                   "MAINTENANCE_WORKER_PREFETCH",
+                  "MAINTENANCE_HEALTH_PORT",
                   "SCHEDULED_JOB_POLL_INTERVAL_MS",
                   "SCHEDULED_JOB_LEASE_MS",
                   "SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS",
                   "MAINTENANCE_WORKER_KINDS",
                 ],
-                ["DATABASE_URL_PRODUCTION"],
+                [],
               );
               requireExactKinds(
                 maintenanceEnvironment,
@@ -331,6 +410,9 @@ jobs:
               );
               if ("RABBITMQ_URL" in (services.api.environment ?? {})) {
                 throw new Error("api must not receive an AMQP URL");
+              }
+              if (!maintenance.healthcheck?.test) {
+                throw new Error("maintenance-worker must define readiness healthcheck");
               }
               const rabbitUsers = [
                 services.rabbitmq.environment?.RABBITMQ_DEFAULT_USER,
@@ -379,6 +461,23 @@ jobs:
                   }
                 }
               }
+              for (const forbidden of [
+                "SMTP_LOGIN",
+                "SMTP_PASSWORD",
+                "S3_ACCESS_KEY_ID",
+                "S3_SECRET_ACCESS_KEY",
+                "GOOGLE_CLIENT_SECRET",
+                "GITHUB_CLIENT_SECRET",
+                "YANDEX_CLIENT_SECRET",
+                "VK_CLIENT_SECRET",
+                "RABBITMQ_ADMIN_PASSWORD",
+              ]) {
+                if (forbidden in maintenanceEnvironment) {
+                  throw new Error(
+                    `maintenance-worker must not receive ${forbidden}`,
+                  );
+                }
+              }
               const tmpfs = Array.isArray(maintenance.tmpfs)
                 ? maintenance.tmpfs.map(value =>
                     typeof value === "string" ? value : JSON.stringify(value),
@@ -402,13 +501,15 @@ jobs:
 
       - name: Build
         run: |
+          bash -n scripts/deploy-production.sh
+          bash -n scripts/deploy-maintenance-production.sh
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
 
       - name: Build and verify production image
         run: |
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -417,12 +518,16 @@ jobs:
             docker image inspect "winwidget-api-gateway:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
           )" = "$APP_REVISION"
+          test "$(
+            docker image inspect "$MAINTENANCE_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$MAINTENANCE_REVISION"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
-            run --rm --no-deps --entrypoint sh api -lc \
+            run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version && pg_restore --version && test -f dist/src/maintenance-worker-main.js'
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node api-gateway \
-            -e "require('node:fs').accessSync('dist/src/main.js')"
+            -e "require('./dist/src/config.js').loadConfig()"
 
       - name: Messaging integration smoke
         env:
@@ -455,17 +560,29 @@ jobs:
         env:
           APP_ROOT: /opt/winwidget
           DEPLOY_REVISION: ${{ github.sha }}
+          DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           git fetch origin prod
           git checkout prod
           git pull --ff-only origin prod
-          APP_ROOT="$APP_ROOT" bash scripts/deploy-production.sh
+          case "$DEPLOY_TARGET" in
+            all)
+              APP_ROOT="$APP_ROOT" bash scripts/deploy-production.sh
+              ;;
+            maintenance)
+              APP_ROOT="$APP_ROOT" bash scripts/deploy-maintenance-production.sh
+              ;;
+            *)
+              echo "Unsupported deploy target: $DEPLOY_TARGET" >&2
+              exit 1
+              ;;
+          esac
           EOF
