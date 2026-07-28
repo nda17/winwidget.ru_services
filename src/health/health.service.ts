@@ -1,7 +1,8 @@
 import {
 	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
-	NOTIFICATION_DELIVERY_KINDS
+	NOTIFICATION_DELIVERY_KINDS,
+	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
 import {
 	NotificationDeliveryClientService,
@@ -244,10 +245,15 @@ export class HealthService {
 	private async checkMessagingBacklog(
 		resultPromise: Promise<NotificationDeliveryResult>
 	): Promise<HealthCheck> {
+		const now = new Date();
+		const expiredPublishingBefore = new Date(
+			now.getTime() - OUTBOX_LOCK_TIMEOUT_MS
+		);
 		const [
 			failedOutbox,
 			unresolvedFailures,
-			oldestPending,
+			oldestDuePending,
+			oldestExpiredPublishing,
 			notificationDelivery
 		] = await Promise.all([
 			this.prisma.outboxEvent.count({ where: { status: 'FAILED' } }),
@@ -260,14 +266,31 @@ export class HealthService {
 				}
 			}),
 			this.prisma.outboxEvent.findFirst({
-				where: { status: { in: ['PENDING', 'PUBLISHING'] } },
-				orderBy: { createdAt: 'asc' },
-				select: { createdAt: true }
+				where: {
+					status: 'PENDING',
+					availableAt: { lte: now }
+				},
+				orderBy: { availableAt: 'asc' },
+				select: { availableAt: true }
+			}),
+			this.prisma.outboxEvent.findFirst({
+				where: {
+					status: 'PUBLISHING',
+					lockedAt: { lte: expiredPublishingBefore }
+				},
+				orderBy: { lockedAt: 'asc' },
+				select: { lockedAt: true }
 			}),
 			resultPromise
 		]);
 		const oldestPendingAt = [
-			oldestPending?.createdAt || null,
+			oldestDuePending?.availableAt || null,
+			oldestExpiredPublishing?.lockedAt
+				? new Date(
+						oldestExpiredPublishing.lockedAt.getTime() +
+							OUTBOX_LOCK_TIMEOUT_MS
+					)
+				: null,
 			this.parseDate(
 				notificationDelivery.overview?.oldestPendingAt || null
 			)

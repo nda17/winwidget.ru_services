@@ -233,6 +233,52 @@ describe('MessagingOperationalAlertService', () => {
 		const [signature] = (service as any).sendAlertIfChanged.mock.calls[0];
 		expect(signature).toContain('notification-delivery-consume=stale');
 		expect(signature).not.toContain('integration-consume=stale');
+		expect(prisma.outboxEvent.count).toHaveBeenNthCalledWith(2, {
+			where: {
+				OR: [
+					{
+						status: 'PENDING',
+						availableAt: {
+							lt: new Date('2026-07-27T11:45:00.000Z')
+						}
+					},
+					{
+						status: 'PUBLISHING',
+						OR: [
+							{ lockedAt: null },
+							{
+								lockedAt: {
+									lt: new Date('2026-07-27T11:44:00.000Z')
+								}
+							}
+						]
+					}
+				]
+			}
+		});
+		expect(prisma.outboxEvent.count).toHaveBeenNthCalledWith(3, {
+			where: {
+				OR: [
+					{
+						status: 'PENDING',
+						availableAt: {
+							lte: new Date('2026-07-27T12:00:00.000Z')
+						}
+					},
+					{
+						status: 'PUBLISHING',
+						OR: [
+							{ lockedAt: null },
+							{
+								lockedAt: {
+									lte: new Date('2026-07-27T11:59:00.000Z')
+								}
+							}
+						]
+					}
+				]
+			}
+		});
 		expect(prisma.integrationDeliveryFailure.count).toHaveBeenCalledWith({
 			where: {
 				resolvedAt: null,

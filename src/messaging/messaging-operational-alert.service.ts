@@ -2,7 +2,8 @@ import {
 	MONOLITH_INTEGRATION_KINDS,
 	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
-	NOTIFICATION_DELIVERY_KINDS
+	NOTIFICATION_DELIVERY_KINDS,
+	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
 import {
@@ -76,6 +77,12 @@ export class MessagingOperationalAlertService
 				now.getTime() - this.getActivityStaleMs()
 			);
 			const oldPendingBefore = new Date(now.getTime() - 15 * 60 * 1000);
+			const expiredPublishingBefore = new Date(
+				now.getTime() - OUTBOX_LOCK_TIMEOUT_MS
+			);
+			const stalePublishingBefore = new Date(
+				oldPendingBefore.getTime() - OUTBOX_LOCK_TIMEOUT_MS
+			);
 			const [
 				failedOutbox,
 				stalePendingOutbox,
@@ -94,18 +101,36 @@ export class MessagingOperationalAlertService
 				}),
 				this.prisma.outboxEvent.count({
 					where: {
-						status: {
-							in: [OutboxEventStatus.PENDING, OutboxEventStatus.PUBLISHING]
-						},
-						createdAt: { lt: oldPendingBefore }
+						OR: [
+							{
+								status: OutboxEventStatus.PENDING,
+								availableAt: { lt: oldPendingBefore }
+							},
+							{
+								status: OutboxEventStatus.PUBLISHING,
+								OR: [
+									{ lockedAt: null },
+									{ lockedAt: { lt: stalePublishingBefore } }
+								]
+							}
+						]
 					}
 				}),
 				this.prisma.outboxEvent.count({
 					where: {
-						status: {
-							in: [OutboxEventStatus.PENDING, OutboxEventStatus.PUBLISHING]
-						},
-						availableAt: { lte: now }
+						OR: [
+							{
+								status: OutboxEventStatus.PENDING,
+								availableAt: { lte: now }
+							},
+							{
+								status: OutboxEventStatus.PUBLISHING,
+								OR: [
+									{ lockedAt: null },
+									{ lockedAt: { lte: expiredPublishingBefore } }
+								]
+							}
+						]
 					}
 				}),
 				this.prisma.integrationDeliveryFailure.count({

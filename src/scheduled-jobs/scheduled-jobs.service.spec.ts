@@ -528,6 +528,54 @@ describe('ScheduledJobsService', () => {
 		).not.toHaveBeenCalled();
 	});
 
+	it('atomically stores the delivery checkpoint before releasing the lease', async () => {
+		const jobId = randomUUID();
+		const leaseToken = randomUUID();
+		const deliveryEventId = randomUUID();
+		const waitingJob = createJob({
+			id: jobId,
+			status: ScheduledJobRunStatus.PROCESSING,
+			checkpoint: { deliveryEventId },
+			leaseOwner: null,
+			leaseToken: null,
+			leaseExpiresAt: null
+		});
+		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			scheduledJobRun: {
+				findUniqueOrThrow: jest.fn().mockResolvedValue(waitingJob)
+			}
+		};
+		const service = new ScheduledJobsService({} as PrismaService);
+
+		await expect(
+			service.awaitExternalDeliveryInTransaction(
+				transaction as any,
+				jobId,
+				leaseToken,
+				deliveryEventId,
+				{ deliveryEventId }
+			)
+		).resolves.toEqual(
+			expect.objectContaining({
+				id: jobId,
+				checkpoint: { deliveryEventId },
+				leaseToken: null
+			})
+		);
+
+		const sql = transaction.$executeRaw.mock.calls[0][0] as {
+			strings: string[];
+			values: unknown[];
+		};
+		const query = sql.strings.join('?');
+		expect(query).toContain(`"checkpoint" = CAST(? AS jsonb)`);
+		expect(query).toContain(`"lease_owner" = NULL`);
+		expect(query).toContain(`"lease_token" = NULL`);
+		expect(query).toContain(`"lease_expires_at" = NULL`);
+		expect(sql.values).toContain(JSON.stringify({ deliveryEventId }));
+	});
+
 	it('includes the expected job type in exhausted-state and claim CAS updates', async () => {
 		const job = createJob();
 		const transaction = {

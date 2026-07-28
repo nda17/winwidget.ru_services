@@ -11,7 +11,8 @@ import {
 	MessagingKind,
 	NOTIFICATION_DELIVERY_KINDS,
 	NotificationDeliveryKind,
-	OUTBOX_EVENT_TYPE
+	OUTBOX_EVENT_TYPE,
+	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
@@ -63,10 +64,15 @@ export class MessagingAdminService {
 	) {}
 
 	async getOverview() {
-		const staleBefore = new Date(Date.now() - 30_000);
+		const now = new Date();
+		const staleBefore = new Date(now.getTime() - 30_000);
+		const expiredPublishingBefore = new Date(
+			now.getTime() - OUTBOX_LOCK_TIMEOUT_MS
+		);
 		const [
 			outboxGroups,
-			oldestPending,
+			oldestDuePending,
+			oldestExpiredPublishing,
 			unresolvedFailures,
 			retryingFailures,
 			deliveredLast24Hours,
@@ -81,12 +87,19 @@ export class MessagingAdminService {
 			}),
 			this.prisma.outboxEvent.findFirst({
 				where: {
-					status: {
-						in: [OutboxEventStatus.PENDING, OutboxEventStatus.PUBLISHING]
-					}
+					status: OutboxEventStatus.PENDING,
+					availableAt: { lte: now }
 				},
-				orderBy: { createdAt: 'asc' },
-				select: { createdAt: true }
+				orderBy: { availableAt: 'asc' },
+				select: { availableAt: true }
+			}),
+			this.prisma.outboxEvent.findFirst({
+				where: {
+					status: OutboxEventStatus.PUBLISHING,
+					lockedAt: { lte: expiredPublishingBefore }
+				},
+				orderBy: { lockedAt: 'asc' },
+				select: { lockedAt: true }
 			}),
 			this.prisma.integrationDeliveryFailure.count({
 				where: {
@@ -163,7 +176,13 @@ export class MessagingAdminService {
 
 		const oldestPendingAt =
 			[
-				oldestPending?.createdAt.toISOString() || null,
+				oldestDuePending?.availableAt.toISOString() || null,
+				oldestExpiredPublishing?.lockedAt
+					? new Date(
+							oldestExpiredPublishing.lockedAt.getTime() +
+								OUTBOX_LOCK_TIMEOUT_MS
+						).toISOString()
+					: null,
 				notificationDeliveryOverview.overview?.oldestPendingAt || null
 			]
 				.filter((value): value is string => Boolean(value))

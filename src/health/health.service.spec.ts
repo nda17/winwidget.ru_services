@@ -45,9 +45,7 @@ const createService = (
 		$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 		outboxEvent: {
 			count: jest.fn().mockResolvedValue(1),
-			findFirst: jest.fn().mockResolvedValue({
-				createdAt: new Date('2026-07-27T11:59:00.000Z')
-			})
+			findFirst: jest.fn().mockResolvedValue(null)
 		},
 		integrationDeliveryFailure: {
 			count: jest.fn().mockResolvedValue(4)
@@ -102,6 +100,26 @@ describe('HealthService notification delivery monitoring', () => {
 			id: 'messaging_backlog',
 			status: 'warning',
 			message: 'Outbox FAILED: 3, DLQ: 7, старейшее ожидание: 120 сек.'
+		});
+		expect(prisma.outboxEvent.findFirst).toHaveBeenNthCalledWith(1, {
+			where: {
+				status: 'PENDING',
+				availableAt: {
+					lte: new Date('2026-07-27T12:00:00.000Z')
+				}
+			},
+			orderBy: { availableAt: 'asc' },
+			select: { availableAt: true }
+		});
+		expect(prisma.outboxEvent.findFirst).toHaveBeenNthCalledWith(2, {
+			where: {
+				status: 'PUBLISHING',
+				lockedAt: {
+					lte: new Date('2026-07-27T11:59:00.000Z')
+				}
+			},
+			orderBy: { lockedAt: 'asc' },
+			select: { lockedAt: true }
 		});
 	});
 
