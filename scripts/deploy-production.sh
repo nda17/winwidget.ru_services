@@ -990,7 +990,7 @@ while IFS= read -r notification_migration_file; do
 			for (i = 1; i <= 4; i += 1) {
 				name = constraint_names[i]
 				table_name = table_names[i]
-				pattern = "^ALTER TABLE \\\"NOTIFICATION_DELIVERY\\\"\\.\\\"" table_name "\\\" DROP CONSTRAINT \\\"" name "\\\", ADD CONSTRAINT \\\"" name "\\\" CHECK[[:space:]]*\\("
+				pattern = "^ALTER TABLE \"NOTIFICATION_DELIVERY\"\\.\"" table_name "\" DROP CONSTRAINT \"" name "\", ADD CONSTRAINT \"" name "\" CHECK[[:space:]]*\\("
 				candidate = upper
 				constraint_replacement = candidate ~ pattern
 				constraint_replacement = constraint_replacement && gsub(/DROP CONSTRAINT/, "", candidate) == 1
@@ -3392,6 +3392,7 @@ perform_notification_first_cutover_preflight() {
 		return 1
 	fi
 
+	assert_cutover_rabbitmq_topology
 	wait_for_rabbitmq_topology
 	if ! notification_cutover_consumers_ready; then
 		print_notification_cutover_runbook
