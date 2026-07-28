@@ -613,6 +613,7 @@ jobs:
                   "daily-summary-telegram",
                   "telegram-destination-unavailable",
                   "notification-delivery-outcome",
+                  "auto-renewal",
                 ],
                 "integration-worker",
               );
@@ -907,6 +908,7 @@ jobs:
             "daily-summary-telegram",
             "telegram-destination-unavailable",
             "notification-delivery-outcome",
+            "auto-renewal",
           ];
           if (
             JSON.stringify(actualKinds) !== JSON.stringify(expectedKinds) ||
