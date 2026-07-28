@@ -1,10 +1,16 @@
 import {
+	CampaignEmailNotificationRequestedEventPayload,
+	CampaignTelegramNotificationRequestedEventPayload,
+	DailySummaryTelegramNotificationRequestedEventPayload,
 	LeadIntegrationEventPayloadV2,
 	LimitReachedEmailEventPayload,
 	LimitReachedTelegramEventPayload,
 	NotificationDeliveryEventPayload,
+	NotificationDeliveryOutcomeEventPayload,
 	PaymentTelegramNotificationEventPayload,
-	PaymentSucceededEventPayload
+	PaymentSucceededEventPayload,
+	SubscriptionExpiryEmailNotificationRequestedEventPayload,
+	SubscriptionExpiryTelegramNotificationRequestedEventPayload
 } from '../messaging/delivery-event.types';
 import {
 	NotificationDeliveryKind,
@@ -17,12 +23,18 @@ const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type {
+	CampaignEmailNotificationRequestedEventPayload,
+	CampaignTelegramNotificationRequestedEventPayload,
+	DailySummaryTelegramNotificationRequestedEventPayload,
 	LeadIntegrationEventPayloadV2,
 	LimitReachedEmailEventPayload,
 	LimitReachedTelegramEventPayload,
 	NotificationDeliveryEventPayload,
+	NotificationDeliveryOutcomeEventPayload,
 	PaymentTelegramNotificationEventPayload,
-	PaymentSucceededEventPayload
+	PaymentSucceededEventPayload,
+	SubscriptionExpiryEmailNotificationRequestedEventPayload,
+	SubscriptionExpiryTelegramNotificationRequestedEventPayload
 };
 
 export interface ParsedNotificationDeliveryMessage {

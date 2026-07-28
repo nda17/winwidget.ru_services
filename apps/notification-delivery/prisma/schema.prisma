@@ -23,6 +23,7 @@ model NotificationDeliveryReceipt {
   retryAttempt     Int?                              @map("retry_attempt")
   retryAvailableAt DateTime?                         @map("retry_available_at")
   retryToken       String?                           @map("retry_token") @db.Uuid
+  checkpoint       Json?
   createdAt        DateTime                          @default(now()) @map("created_at")
   updatedAt        DateTime                          @updatedAt @map("updated_at")
 

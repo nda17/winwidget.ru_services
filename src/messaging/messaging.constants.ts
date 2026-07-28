@@ -13,6 +13,18 @@ export const DAILY_SUMMARY_EVENT_TYPE =
 	'report.daily-summary.requested.v1';
 export const TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE =
 	'notification.telegram.destination-unavailable.v1';
+export const CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE =
+	'notification.campaign.email.requested.v1';
+export const CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE =
+	'notification.campaign.telegram.requested.v1';
+export const DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
+	'notification.daily-summary.telegram.requested.v1';
+export const SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE =
+	'notification.subscription-expiry.email.requested.v1';
+export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
+	'notification.subscription-expiry.telegram.requested.v1';
+export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
+	'notification.delivery.outcome.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
 export const EVENTS_EXCHANGE = 'winwidget.events';
 export const RETRY_EXCHANGE = 'winwidget.retry';
@@ -38,7 +50,13 @@ export const INTEGRATION_KINDS = [
 	'limit-email',
 	'limit-telegram',
 	'daily-summary-telegram',
-	'telegram-destination-unavailable'
+	'telegram-destination-unavailable',
+	'campaign-email',
+	'campaign-telegram',
+	'daily-summary-delivery-telegram',
+	'subscription-expiry-email',
+	'subscription-expiry-telegram',
+	'notification-delivery-outcome'
 ] as const;
 
 export type IntegrationKind = (typeof INTEGRATION_KINDS)[number];
@@ -49,7 +67,12 @@ export const NOTIFICATION_DELIVERY_KINDS = [
 	'payment-email',
 	'payment-telegram',
 	'limit-email',
-	'limit-telegram'
+	'limit-telegram',
+	'campaign-email',
+	'campaign-telegram',
+	'daily-summary-delivery-telegram',
+	'subscription-expiry-email',
+	'subscription-expiry-telegram'
 ] as const satisfies readonly IntegrationKind[];
 
 export type NotificationDeliveryKind =
@@ -91,6 +114,16 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'daily-summary-telegram': DAILY_SUMMARY_EVENT_TYPE,
 	'telegram-destination-unavailable':
 		TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
+	'campaign-email': CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+	'campaign-telegram': CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	'daily-summary-delivery-telegram':
+		DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	'subscription-expiry-email':
+		SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
+	'subscription-expiry-telegram':
+		SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	'notification-delivery-outcome':
+		NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE
 };
 
@@ -109,6 +142,16 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'daily-summary-telegram': 'winwidget.report.daily-summary.telegram',
 	'telegram-destination-unavailable':
 		'winwidget.notification.telegram-destination-unavailable',
+	'campaign-email': 'winwidget.notification.campaign.email',
+	'campaign-telegram': 'winwidget.notification.campaign.telegram',
+	'daily-summary-delivery-telegram':
+		'winwidget.notification.daily-summary.telegram',
+	'subscription-expiry-email':
+		'winwidget.notification.subscription-expiry.email',
+	'subscription-expiry-telegram':
+		'winwidget.notification.subscription-expiry.telegram',
+	'notification-delivery-outcome':
+		'winwidget.notification.delivery-outcome',
 	'database-backup': 'winwidget.maintenance.database-backup'
 };
 

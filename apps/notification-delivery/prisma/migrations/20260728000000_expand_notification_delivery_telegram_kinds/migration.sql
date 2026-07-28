@@ -10,7 +10,12 @@ ALTER TABLE "notification_delivery"."delivery_receipts"
 			'payment-email',
 			'payment-telegram',
 			'limit-email',
-			'limit-telegram'
+			'limit-telegram',
+			'campaign-email',
+			'campaign-telegram',
+			'daily-summary-delivery-telegram',
+			'subscription-expiry-email',
+			'subscription-expiry-telegram'
 		)
 	);
 ALTER TABLE "notification_delivery"."delivery_failures"
@@ -23,7 +28,12 @@ ALTER TABLE "notification_delivery"."delivery_failures"
 			'payment-email',
 			'payment-telegram',
 			'limit-email',
-			'limit-telegram'
+			'limit-telegram',
+			'campaign-email',
+			'campaign-telegram',
+			'daily-summary-delivery-telegram',
+			'subscription-expiry-email',
+			'subscription-expiry-telegram'
 		)
 		AND char_length(btrim("routing_key")) BETWEEN 1 AND 255
 		AND char_length(btrim("normalized_code")) BETWEEN 1 AND 255
@@ -43,7 +53,12 @@ ALTER TABLE "notification_delivery"."control_actions"
 			'payment-email',
 			'payment-telegram',
 			'limit-email',
-			'limit-telegram'
+			'limit-telegram',
+			'campaign-email',
+			'campaign-telegram',
+			'daily-summary-delivery-telegram',
+			'subscription-expiry-email',
+			'subscription-expiry-telegram'
 		)
 		AND char_length(btrim("actor_id")) BETWEEN 1 AND 255
 	);
@@ -68,11 +83,20 @@ ALTER TABLE "notification_delivery"."outbox_events"
 						'manual.payment-email',
 						'manual.payment-telegram',
 						'manual.limit-email',
-						'manual.limit-telegram'
+						'manual.limit-telegram',
+						'manual.campaign-email',
+						'manual.campaign-telegram',
+						'manual.daily-summary-delivery-telegram',
+						'manual.subscription-expiry-email',
+						'manual.subscription-expiry-telegram'
 					)
 					OR (
 						"routing_key" = 'notification.telegram.destination-unavailable.v1'
 						AND "event_type" = 'notification.telegram.destination-unavailable.v1'
+					)
+					OR (
+						"routing_key" = 'notification.delivery.outcome.v1'
+						AND "event_type" = 'notification.delivery.outcome.v1'
 					)
 				)
 			)
@@ -84,7 +108,12 @@ ALTER TABLE "notification_delivery"."outbox_events"
 					'payment-email.dead-letter',
 					'payment-telegram.dead-letter',
 					'limit-email.dead-letter',
-					'limit-telegram.dead-letter'
+					'limit-telegram.dead-letter',
+					'campaign-email.dead-letter',
+					'campaign-telegram.dead-letter',
+					'daily-summary-delivery-telegram.dead-letter',
+					'subscription-expiry-email.dead-letter',
+					'subscription-expiry-telegram.dead-letter'
 				)
 			)
 		)

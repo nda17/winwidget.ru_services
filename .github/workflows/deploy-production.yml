@@ -72,7 +72,7 @@ jobs:
       NOTIFICATION_DELIVERY_LISTEN_HOST: 127.0.0.1
       NOTIFICATION_DELIVERY_HEALTH_PORT: 4401
       NOTIFICATION_DELIVERY_PREFETCH: 5
-      NOTIFICATION_DELIVERY_KINDS: email,telegram,payment-email,payment-telegram,limit-email,limit-telegram
+      NOTIFICATION_DELIVERY_KINDS: email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram
       NOTIFICATION_DELIVERY_TEST_RABBITMQ_URL: amqp://notification_delivery_ci:notification_delivery_ci_password@127.0.0.1:5672/winwidget
       RABBITMQ_URL: amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget
       RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
@@ -610,6 +610,7 @@ jobs:
                   "mailing-telegram",
                   "daily-summary-telegram",
                   "telegram-destination-unavailable",
+                  "notification-delivery-outcome",
                 ],
                 "integration-worker",
               );
@@ -655,6 +656,11 @@ jobs:
                   "payment-telegram",
                   "limit-email",
                   "limit-telegram",
+                  "campaign-email",
+                  "campaign-telegram",
+                  "daily-summary-delivery-telegram",
+                  "subscription-expiry-email",
+                  "subscription-expiry-telegram",
                 ],
                 "notification-delivery-worker",
               );
@@ -898,6 +904,7 @@ jobs:
             "mailing-telegram",
             "daily-summary-telegram",
             "telegram-destination-unavailable",
+            "notification-delivery-outcome",
           ];
           if (
             JSON.stringify(actualKinds) !== JSON.stringify(expectedKinds) ||

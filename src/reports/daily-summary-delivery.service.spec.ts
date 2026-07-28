@@ -5,10 +5,6 @@ import {
 import type { DailySummaryReportService } from '@/reports/daily-summary-report.service';
 import type { PrismaService } from '@/prisma.service';
 import type { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
-import {
-	TelegramApiError,
-	TelegramInfoTransportService
-} from '@/telegram-bot/telegram-info-transport.service';
 import type { ConfigService } from '@nestjs/config';
 import { ScheduledJobRunStatus } from '@prisma/client';
 
@@ -20,6 +16,7 @@ describe('DailySummaryDeliveryService', () => {
 		periodStart: '2026-07-22T21:00:00.000Z',
 		periodEnd: '2026-07-23T21:00:00.000Z'
 	};
+	const leaseToken = '22222222-2222-4222-8222-222222222222';
 
 	const createService = (checkpoint: Record<string, unknown> = {}) => {
 		const job = {
@@ -39,24 +36,22 @@ describe('DailySummaryDeliveryService', () => {
 			claim: jest.fn().mockResolvedValue({
 				state: 'claimed',
 				job,
-				leaseToken: '22222222-2222-4222-8222-222222222222'
+				leaseToken
 			}),
 			saveCheckpoint: jest.fn().mockResolvedValue(job),
 			renewLease: jest.fn().mockResolvedValue(new Date()),
-			completeInTransaction: jest
-				.fn()
-				.mockResolvedValue({ ...job, status: 'SUCCEEDED' }),
-			releaseOrFail: jest.fn()
+			awaitExternalDeliveryInTransaction: jest.fn().mockResolvedValue(job),
+			releaseOrFail: jest.fn().mockResolvedValue({
+				state: 'retry_scheduled',
+				job
+			})
 		} as unknown as ScheduledJobsService;
 		const report = {
 			render: jest.fn().mockResolvedValue('rendered report')
 		} as unknown as DailySummaryReportService;
-		const telegram = {
-			sendMessage: jest.fn().mockResolvedValue(undefined)
-		} as unknown as TelegramInfoTransportService;
 		const transaction = {
-			telegramBotSettings: {
-				update: jest.fn().mockResolvedValue({})
+			outboxEvent: {
+				createMany: jest.fn().mockResolvedValue({ count: 1 })
 			}
 		};
 		const prisma = {
@@ -66,61 +61,124 @@ describe('DailySummaryDeliveryService', () => {
 			prisma,
 			{ get: jest.fn() } as unknown as ConfigService,
 			scheduledJobs,
-			report,
-			telegram
+			report
 		);
+
 		return {
 			service,
+			job,
 			scheduledJobs,
 			report,
-			telegram,
 			transaction
 		};
 	};
 
-	it('reuses the persisted report text on retry instead of recalculating it', async () => {
-		const { service, report, telegram, scheduledJobs, transaction } =
-			createService({ text: 'stable checkpoint' });
+	it('reuses the report checkpoint and transactionally dispatches physical delivery', async () => {
+		const { service, report, scheduledJobs, transaction } = createService({
+			text: 'stable checkpoint'
+		});
 
 		await service.deliver(payload, payload.jobId);
 
-		expect(scheduledJobs.claim).toHaveBeenCalledWith(
-			payload.jobId,
-			expect.stringMatching(/^daily-summary:/),
-			120_000,
-			'DAILY_TELEGRAM_SUMMARY',
-			expect.objectContaining({
-				deadLetterRoutingKey: 'daily-summary-telegram.dead-letter'
-			})
-		);
 		expect(report.render).not.toHaveBeenCalled();
 		expect(scheduledJobs.saveCheckpoint).not.toHaveBeenCalled();
-		expect(telegram.sendMessage).toHaveBeenCalledWith(
-			'-100123',
-			'stable checkpoint',
-			expect.objectContaining({ messageThreadId: 42 })
-		);
-		expect(transaction.telegramBotSettings.update).toHaveBeenCalledWith({
-			where: { id: 'singleton' },
-			data: {
-				dailySummaryLastSentPeriodStart: new Date(payload.periodStart),
-				dailySummaryLastSentAt: expect.any(Date)
+		expect(
+			scheduledJobs.awaitExternalDeliveryInTransaction
+		).toHaveBeenCalledWith(
+			transaction,
+			payload.jobId,
+			leaseToken,
+			payload.jobId,
+			{
+				text: 'stable checkpoint',
+				deliveryEventId: payload.jobId
 			}
+		);
+		const outbox =
+			transaction.outboxEvent.createMany.mock.calls[0][0].data;
+		expect(outbox).toEqual(
+			expect.objectContaining({
+				messageId: payload.jobId,
+				eventType: 'notification.daily-summary.telegram.requested.v1',
+				routingKey: 'notification.daily-summary.telegram.requested.v1'
+			})
+		);
+		expect(outbox.payload).toEqual({
+			schemaVersion: 1,
+			eventType: 'notification.daily-summary.telegram.requested.v1',
+			reference: {
+				type: 'daily-summary-job',
+				id: payload.jobId
+			},
+			destination: {
+				telegramChatId: '-100123',
+				messageThreadId: 42
+			},
+			content: { text: 'stable checkpoint' }
 		});
 	});
 
-	it('persists a delayed Outbox retry and signals the worker not to duplicate it', async () => {
-		const { service, telegram, scheduledJobs } = createService({
-			text: 'stable checkpoint'
-		});
-		(telegram.sendMessage as jest.Mock).mockRejectedValue(
-			new Error('Telegram unavailable')
+	it('renders and persists the report before external dispatch', async () => {
+		const { service, report, scheduledJobs } = createService();
+
+		await service.deliver(payload, payload.jobId);
+
+		expect(report.render).toHaveBeenCalledWith(
+			new Date(payload.periodStart),
+			new Date(payload.periodEnd)
 		);
-		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
-			state: 'retry_scheduled',
+		expect(scheduledJobs.saveCheckpoint).toHaveBeenCalledWith(
+			payload.jobId,
+			leaseToken,
+			{ text: 'rendered report' }
+		);
+		expect(
+			scheduledJobs.awaitExternalDeliveryInTransaction
+		).toHaveBeenCalledWith(
+			expect.any(Object),
+			payload.jobId,
+			leaseToken,
+			payload.jobId,
+			{
+				text: 'rendered report',
+				deliveryEventId: payload.jobId
+			}
+		);
+	});
+
+	it('acknowledges a duplicate already waiting for the same delivery outcome', async () => {
+		const { service, job, scheduledJobs, report } = createService();
+		(scheduledJobs.claim as jest.Mock).mockResolvedValue({
+			state: 'busy',
 			job: {
-				id: payload.jobId,
-				attempts: 1
+				...job,
+				checkpoint: {
+					text: 'stable checkpoint',
+					deliveryEventId: payload.jobId
+				}
+			}
+		});
+
+		await expect(
+			service.deliver(payload, payload.jobId)
+		).resolves.toBeUndefined();
+		expect(report.render).not.toHaveBeenCalled();
+		expect(
+			scheduledJobs.awaitExternalDeliveryInTransaction
+		).not.toHaveBeenCalled();
+		expect(scheduledJobs.releaseOrFail).not.toHaveBeenCalled();
+	});
+
+	it('keeps unrelated busy jobs on the handled retry path', async () => {
+		const { service, job, scheduledJobs } = createService();
+		(scheduledJobs.claim as jest.Mock).mockResolvedValue({
+			state: 'busy',
+			job: {
+				...job,
+				checkpoint: {
+					text: 'stable checkpoint',
+					deliveryEventId: 'another-event'
+				}
 			}
 		});
 
@@ -130,143 +188,15 @@ describe('DailySummaryDeliveryService', () => {
 				state: 'retry_scheduled'
 			})
 		);
-		expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
-			payload.jobId,
-			'22222222-2222-4222-8222-222222222222',
-			expect.any(Error),
-			30_000,
-			expect.objectContaining({
-				eventType: 'report.daily-summary.requested.v1',
-				routingKey: 'report.daily-summary.requested.v1'
-			}),
-			expect.objectContaining({
-				allowRetry: true,
-				deadLetterHeaders: expect.objectContaining({
-					'x-error-category': 'TRANSIENT',
-					'x-error-code': 'UNCLASSIFIED'
-				})
-			})
-		);
 	});
 
-	it('uses Telegram Retry-After when it exceeds the scheduled backoff', async () => {
-		const { service, telegram, scheduledJobs } = createService({
-			text: 'stable checkpoint'
-		});
-		const telegramError = new TelegramApiError({
-			httpStatus: 429,
-			description: 'Too Many Requests: retry later',
-			parameters: { retry_after: 120 }
-		});
-		(telegram.sendMessage as jest.Mock).mockRejectedValue(telegramError);
-		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
-			state: 'retry_scheduled',
-			job: {
-				id: payload.jobId,
-				attempts: 1
-			}
-		});
-
-		await expect(service.deliver(payload, payload.jobId)).rejects.toEqual(
-			expect.objectContaining({
-				name: ScheduledJobDispatchHandledError.name,
-				state: 'retry_scheduled',
-				classification: expect.objectContaining({
-					category: 'RATE_LIMIT',
-					normalizedCode: 'TELEGRAM_RATE_LIMIT',
-					retryable: true,
-					retryDelayMs: 120_000
-				})
-			})
-		);
-		expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
-			payload.jobId,
-			'22222222-2222-4222-8222-222222222222',
-			telegramError,
-			120_000,
-			expect.any(Object),
-			expect.objectContaining({
-				allowRetry: true,
-				deadLetterHeaders: expect.objectContaining({
-					'x-error-category': 'RATE_LIMIT',
-					'x-error-code': 'TELEGRAM_RATE_LIMIT',
-					'x-error-retryable': true
-				})
-			})
-		);
-	});
-
-	it.each([
-		[
-			'PERMANENT',
-			'TELEGRAM_CHAT_NOT_FOUND',
-			new TelegramApiError({
-				httpStatus: 400,
-				description: 'Bad Request: chat not found'
-			})
-		],
-		[
-			'AUTH_CONFIGURATION',
-			'TELEGRAM_BOT_AUTHENTICATION_FAILED',
-			new TelegramApiError({
-				httpStatus: 401,
-				description: 'Unauthorized'
-			})
-		]
-	])(
-		'fails the durable job immediately for a %s Telegram error',
-		async (category, normalizedCode, telegramError) => {
-			const { service, telegram, scheduledJobs } = createService({
-				text: 'stable checkpoint'
-			});
-			(telegram.sendMessage as jest.Mock).mockRejectedValue(telegramError);
-			(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
-				state: 'failed',
-				job: {
-					id: payload.jobId,
-					attempts: 1
-				}
-			});
-
-			await expect(
-				service.deliver(payload, payload.jobId)
-			).rejects.toEqual(
-				expect.objectContaining({
-					name: ScheduledJobDispatchHandledError.name,
-					state: 'failed',
-					classification: expect.objectContaining({
-						category,
-						normalizedCode,
-						retryable: false,
-						retryDelayMs: null
-					})
-				})
-			);
-			expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
-				payload.jobId,
-				'22222222-2222-4222-8222-222222222222',
-				telegramError,
-				30_000,
-				expect.any(Object),
-				expect.objectContaining({
-					allowRetry: false,
-					deadLetterHeaders: expect.objectContaining({
-						'x-error-category': category,
-						'x-error-code': normalizedCode,
-						'x-error-retryable': false
-					})
-				})
-			);
-		}
-	);
-
-	it('does not send a terminal job again after RabbitMQ redelivery', async () => {
-		const { service, scheduledJobs, report, telegram } = createService();
+	it('does not dispatch a terminal job again after RabbitMQ redelivery', async () => {
+		const { service, job, scheduledJobs, report, transaction } =
+			createService();
 		(scheduledJobs.claim as jest.Mock).mockResolvedValue({
 			state: 'terminal',
 			job: {
-				id: payload.jobId,
-				jobType: 'DAILY_TELEGRAM_SUMMARY',
+				...job,
 				status: ScheduledJobRunStatus.SUCCEEDED
 			}
 		});
@@ -274,143 +204,47 @@ describe('DailySummaryDeliveryService', () => {
 		await service.deliver(payload, payload.jobId);
 
 		expect(report.render).not.toHaveBeenCalled();
-		expect(telegram.sendMessage).not.toHaveBeenCalled();
-		expect(scheduledJobs.releaseOrFail).not.toHaveBeenCalled();
+		expect(transaction.outboxEvent.createMany).not.toHaveBeenCalled();
 	});
 
-	it('rejects a missing job as a permanent scheduled dispatch error', async () => {
-		const { service, scheduledJobs, report, telegram } = createService();
-		(scheduledJobs.claim as jest.Mock).mockResolvedValue({
-			state: 'not_found'
-		});
+	it('persists a delayed retry when preparation fails before dispatch', async () => {
+		const { service, scheduledJobs, report, transaction } =
+			createService();
+		(report.render as jest.Mock).mockRejectedValue(
+			new Error('Report query failed')
+		);
 
 		await expect(service.deliver(payload, payload.jobId)).rejects.toEqual(
-			expect.objectContaining({
-				name: 'ScheduledJobDispatchRejectedError'
-			})
-		);
-		expect(report.render).not.toHaveBeenCalled();
-		expect(telegram.sendMessage).not.toHaveBeenCalled();
-	});
-
-	it('rejects a period that does not match the persisted scheduled job', async () => {
-		const { service, scheduledJobs, report, telegram } = createService();
-		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
-			state: 'retry_scheduled',
-			job: {
-				id: payload.jobId,
-				attempts: 1
-			}
-		});
-
-		await expect(
-			service.deliver(
-				{
-					...payload,
-					periodStart: '2026-07-21T21:00:00.000Z'
-				},
-				payload.jobId
-			)
-		).rejects.toEqual(
 			expect.objectContaining({
 				name: ScheduledJobDispatchHandledError.name,
 				state: 'retry_scheduled'
 			})
 		);
-		expect(report.render).not.toHaveBeenCalled();
-		expect(telegram.sendMessage).not.toHaveBeenCalled();
-		expect(scheduledJobs.releaseOrFail).toHaveBeenCalledTimes(1);
+		expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
+			payload.jobId,
+			leaseToken,
+			expect.objectContaining({ message: 'Report query failed' }),
+			30_000,
+			expect.any(Object),
+			expect.objectContaining({
+				allowRetry: true
+			})
+		);
+		expect(transaction.outboxEvent.createMany).not.toHaveBeenCalled();
 	});
 
-	it.each(['busy', 'not_due'] as const)(
-		'acknowledges a %s duplicate through the handled scheduled-job path',
-		async state => {
-			const { service, scheduledJobs, report, telegram } = createService();
-			(scheduledJobs.claim as jest.Mock).mockResolvedValue({
-				state,
-				job: {
-					id: payload.jobId,
-					jobType: 'DAILY_TELEGRAM_SUMMARY',
-					status: ScheduledJobRunStatus.PROCESSING,
-					attempts: 1
-				}
-			});
+	it('does not enqueue delivery after losing the durable-job lease', async () => {
+		const { service, scheduledJobs, transaction } = createService({
+			text: 'stable checkpoint'
+		});
+		(scheduledJobs.renewLease as jest.Mock).mockResolvedValue(null);
+		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
+			state: 'lost'
+		});
 
-			await expect(
-				service.deliver(payload, payload.jobId)
-			).rejects.toEqual(
-				expect.objectContaining({
-					name: ScheduledJobDispatchHandledError.name,
-					state: 'retry_scheduled'
-				})
-			);
-			expect(report.render).not.toHaveBeenCalled();
-			expect(telegram.sendMessage).not.toHaveBeenCalled();
-			expect(scheduledJobs.releaseOrFail).not.toHaveBeenCalled();
-		}
-	);
-
-	it('renews the lease while a report is still rendering', async () => {
-		jest.useFakeTimers();
-		try {
-			const { service, scheduledJobs, report, telegram } = createService();
-			let resolveReport!: (value: string) => void;
-			(report.render as jest.Mock).mockReturnValue(
-				new Promise<string>(resolve => {
-					resolveReport = resolve;
-				})
-			);
-
-			const delivery = service.deliver(payload, payload.jobId);
-			await Promise.resolve();
-			await Promise.resolve();
-			await jest.advanceTimersByTimeAsync(30_000);
-
-			expect(scheduledJobs.renewLease).toHaveBeenCalledTimes(1);
-			resolveReport('rendered after lease heartbeat');
-			await delivery;
-
-			expect(scheduledJobs.renewLease).toHaveBeenCalledTimes(2);
-			expect(telegram.sendMessage).toHaveBeenCalledWith(
-				'-100123',
-				'rendered after lease heartbeat',
-				expect.objectContaining({
-					messageThreadId: 42,
-					signal: expect.any(AbortSignal)
-				})
-			);
-		} finally {
-			jest.useRealTimers();
-		}
-	});
-
-	it('does not call Telegram after losing the lease during report rendering', async () => {
-		jest.useFakeTimers();
-		try {
-			const { service, scheduledJobs, report, telegram } = createService();
-			let resolveReport!: (value: string) => void;
-			(report.render as jest.Mock).mockReturnValue(
-				new Promise<string>(resolve => {
-					resolveReport = resolve;
-				})
-			);
-			(scheduledJobs.renewLease as jest.Mock).mockResolvedValueOnce(null);
-			(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
-				state: 'lost'
-			});
-
-			const delivery = service.deliver(payload, payload.jobId);
-			await Promise.resolve();
-			await Promise.resolve();
-			await jest.advanceTimersByTimeAsync(30_000);
-			resolveReport('must not be sent');
-
-			await expect(delivery).rejects.toThrow(
-				'Daily summary lease renewal failed'
-			);
-			expect(telegram.sendMessage).not.toHaveBeenCalled();
-		} finally {
-			jest.useRealTimers();
-		}
+		await expect(service.deliver(payload, payload.jobId)).rejects.toThrow(
+			'Daily summary lease was lost before Telegram delivery'
+		);
+		expect(transaction.outboxEvent.createMany).not.toHaveBeenCalled();
 	});
 });

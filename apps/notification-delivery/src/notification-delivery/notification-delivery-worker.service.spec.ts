@@ -141,6 +141,35 @@ describe('NotificationDeliveryWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createCampaignEmailMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'notification.campaign.email.requested.v1',
+					reference: {
+						type: 'mailing-delivery',
+						id: '22222222-2222-4222-8222-222222222222',
+						aggregateId: '33333333-3333-4333-8333-333333333333'
+					},
+					destination: { email: 'owner@example.com' },
+					content: {
+						subject: 'Новости',
+						message: 'Текст рассылки'
+					}
+				})
+			),
+			fields: {
+				exchange: 'winwidget.events',
+				routingKey: 'notification.campaign.email.requested.v1'
+			},
+			properties: {
+				messageId: eventId,
+				type: 'notification.campaign.email.requested.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	const createService = (configuredKinds?: string) => {
 		const rabbitMq = {
 			consume: jest.fn().mockResolvedValue(undefined),
@@ -218,13 +247,13 @@ describe('NotificationDeliveryWorkerService', () => {
 		jest.restoreAllMocks();
 	});
 
-	it('subscribes to all six queues and their DLQs by default', async () => {
+	it('subscribes to all owned queues and their DLQs by default', async () => {
 		const { service, rabbitMq, heartbeat } = createService();
 
 		await service.onModuleInit();
 
-		expect(rabbitMq.consume).toHaveBeenCalledTimes(6);
-		expect(rabbitMq.consumeDeadLetter).toHaveBeenCalledTimes(6);
+		expect(rabbitMq.consume).toHaveBeenCalledTimes(11);
+		expect(rabbitMq.consumeDeadLetter).toHaveBeenCalledTimes(11);
 		expect(
 			(rabbitMq.consume as jest.Mock).mock.calls.map(call => call[0])
 		).toEqual([
@@ -233,7 +262,12 @@ describe('NotificationDeliveryWorkerService', () => {
 			'payment-email',
 			'payment-telegram',
 			'limit-email',
-			'limit-telegram'
+			'limit-telegram',
+			'campaign-email',
+			'campaign-telegram',
+			'daily-summary-delivery-telegram',
+			'subscription-expiry-email',
+			'subscription-expiry-telegram'
 		]);
 		expect(heartbeat.setConsumerKinds).toHaveBeenCalledWith([
 			'email',
@@ -241,7 +275,12 @@ describe('NotificationDeliveryWorkerService', () => {
 			'payment-email',
 			'payment-telegram',
 			'limit-email',
-			'limit-telegram'
+			'limit-telegram',
+			'campaign-email',
+			'campaign-telegram',
+			'daily-summary-delivery-telegram',
+			'subscription-expiry-email',
+			'subscription-expiry-telegram'
 		]);
 	});
 
@@ -323,6 +362,48 @@ describe('NotificationDeliveryWorkerService', () => {
 		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
+	it('emits a durable delivered outcome for campaign orchestration', async () => {
+		const { service, rabbitMq, adapter, transaction } = createService();
+
+		await (service as any).handle(
+			'campaign-email',
+			createCampaignEmailMessage()
+		);
+
+		expect(adapter.deliver).toHaveBeenCalledWith(
+			'campaign-email',
+			expect.objectContaining({
+				reference: {
+					type: 'mailing-delivery',
+					id: '22222222-2222-4222-8222-222222222222',
+					aggregateId: '33333333-3333-4333-8333-333333333333'
+				}
+			}),
+			eventId,
+			expect.any(String)
+		);
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).toHaveBeenCalledWith({
+			data: [
+				expect.objectContaining({
+					deduplicationKey: `notification:${eventId}:campaign-email:outcome:delivered:v1`,
+					exchange: NotificationDeliveryExchange.EVENTS,
+					eventType: 'notification.delivery.outcome.v1',
+					routingKey: 'notification.delivery.outcome.v1',
+					payload: expect.objectContaining({
+						sourceEventId: eventId,
+						sourceKind: 'campaign-email',
+						status: 'DELIVERED',
+						failure: null
+					})
+				})
+			],
+			skipDuplicates: true
+		});
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
 	it('persists retry state and a manual-route outbox event atomically', async () => {
 		const { service, rabbitMq, adapter, prisma, transaction } =
 			createService();
@@ -393,6 +474,43 @@ describe('NotificationDeliveryWorkerService', () => {
 				exchange: NotificationDeliveryExchange.DEAD_LETTER,
 				routingKey: 'payment-email.dead-letter'
 			})
+		});
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('emits a durable failed outcome with terminal campaign failure', async () => {
+		const { service, rabbitMq, adapter, transaction } = createService();
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('Invalid envelope'), {
+				code: 'EENVELOPE'
+			})
+		);
+
+		await (service as any).handle(
+			'campaign-email',
+			createCampaignEmailMessage()
+		);
+
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).toHaveBeenCalledWith({
+			data: [
+				expect.objectContaining({
+					deduplicationKey: `notification:${eventId}:campaign-email:outcome:failed:v1`,
+					eventType: 'notification.delivery.outcome.v1',
+					routingKey: 'notification.delivery.outcome.v1',
+					payload: expect.objectContaining({
+						sourceEventId: eventId,
+						sourceKind: 'campaign-email',
+						status: 'FAILED',
+						failure: {
+							normalizedCode: 'SMTP_EENVELOPE',
+							safeReason: 'SMTP rejected the message permanently'
+						}
+					})
+				})
+			],
+			skipDuplicates: true
 		});
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});

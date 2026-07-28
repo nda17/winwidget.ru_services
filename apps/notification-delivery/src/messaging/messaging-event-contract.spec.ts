@@ -1,4 +1,5 @@
 import { assertMessagingEventContract } from './messaging-event-contract';
+import type { NotificationDeliveryKind } from './messaging.constants';
 
 describe('notification delivery messaging contracts', () => {
 	const messageId = '11111111-1111-4111-8111-111111111111';
@@ -111,6 +112,130 @@ describe('notification delivery messaging contracts', () => {
 				}
 			)
 		).not.toThrow();
+	});
+
+	it.each([
+		[
+			'campaign-email',
+			'notification.campaign.email.requested.v1',
+			{
+				reference: {
+					type: 'mailing-delivery',
+					id: '22222222-2222-4222-8222-222222222222',
+					aggregateId: '33333333-3333-4333-8333-333333333333'
+				},
+				destination: { email: 'owner@example.com' },
+				content: { subject: 'Новости', message: 'Текст' }
+			}
+		],
+		[
+			'campaign-telegram',
+			'notification.campaign.telegram.requested.v1',
+			{
+				reference: {
+					type: 'mailing-delivery',
+					id: '22222222-2222-4222-8222-222222222222',
+					aggregateId: '33333333-3333-4333-8333-333333333333'
+				},
+				destination: { telegramChatId: '12345' },
+				content: { subject: 'Новости', message: 'Текст' }
+			}
+		],
+		[
+			'daily-summary-delivery-telegram',
+			'notification.daily-summary.telegram.requested.v1',
+			{
+				reference: {
+					type: 'daily-summary-job',
+					id: '22222222-2222-4222-8222-222222222222'
+				},
+				destination: {
+					telegramChatId: '-100123',
+					messageThreadId: 42
+				},
+				content: { text: '<b>Итоги</b>' }
+			}
+		],
+		[
+			'subscription-expiry-email',
+			'notification.subscription-expiry.email.requested.v1',
+			{
+				reference: {
+					type: 'subscription-expiry-reminder',
+					id: '22222222-2222-4222-8222-222222222222'
+				},
+				destination: { email: 'owner@example.com' },
+				content: {
+					daysBeforeExpiry: 3,
+					planLabel: 'Easy',
+					expiresAtLabel: '31.07.2026, 12:00'
+				}
+			}
+		],
+		[
+			'subscription-expiry-telegram',
+			'notification.subscription-expiry.telegram.requested.v1',
+			{
+				reference: {
+					type: 'subscription-expiry-reminder',
+					id: '22222222-2222-4222-8222-222222222222'
+				},
+				destination: { telegramChatId: '12345' },
+				content: {
+					daysBeforeExpiry: 3,
+					planLabel: 'Easy',
+					expiresAtLabel: '31.07.2026, 12:00'
+				}
+			}
+		]
+	])('accepts the strict %s request contract', (kind, eventType, data) => {
+		expect(() =>
+			assertMessagingEventContract(
+				{
+					schemaVersion: 1,
+					eventType,
+					...data
+				},
+				{
+					eventType,
+					routingKey: eventType,
+					messageId,
+					kind: kind as NotificationDeliveryKind
+				}
+			)
+		).not.toThrow();
+	});
+
+	it('accepts only the exact outbound delivery outcome route', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'notification.delivery.outcome.v1',
+			sourceEventId: messageId,
+			sourceKind: 'campaign-email',
+			reference: {
+				type: 'mailing-delivery',
+				id: '22222222-2222-4222-8222-222222222222',
+				aggregateId: '33333333-3333-4333-8333-333333333333'
+			},
+			status: 'DELIVERED',
+			failure: null,
+			occurredAt: '2026-07-28T10:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId
+			})
+		).not.toThrow();
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'manual.campaign-email',
+				messageId
+			})
+		).toThrow();
 	});
 
 	it('accepts only the exact outbound destination-unavailable route', () => {

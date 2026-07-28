@@ -597,6 +597,11 @@ const run = async () => {
 		"payment-telegram",
 		"limit-email",
 		"limit-telegram",
+		"campaign-email",
+		"campaign-telegram",
+		"daily-summary-delivery-telegram",
+		"subscription-expiry-email",
+		"subscription-expiry-telegram",
 	]) {
 		const baseQueue = MESSAGING_QUEUE_NAMES[kind];
 		for (const queue of [baseQueue, `${baseQueue}.dead-letter`]) {
@@ -1160,7 +1165,7 @@ if [[ "$(get_env_value NOTIFICATION_DELIVERY_INTERNAL_URL)" != "http://127.0.0.1
 fi
 require_env_exact_list \
 	"NOTIFICATION_DELIVERY_KINDS" \
-	"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram"
+	"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram"
 if [[ ! "$HEALTHCHECK_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
 	echo "NOTIFICATION_DELIVERY_HEALTHCHECK_ATTEMPTS must be a positive integer." >&2
 	exit 1
@@ -1223,7 +1228,7 @@ live_integration_kinds="$(
 		"$live_integration_container_id" \
 		INTEGRATION_WORKER_KINDS || true
 )"
-if [[ "$(normalize_csv "$live_integration_kinds")" != "$(normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable")" ]]; then
+if [[ "$(normalize_csv "$live_integration_kinds")" != "$(normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome")" ]]; then
 	echo "The live integration worker does not match the post-cutover kind boundary." >&2
 	echo "Use the full deployment target to repair topology ownership." >&2
 	exit 1

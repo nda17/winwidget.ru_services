@@ -1,8 +1,15 @@
-import { EmailService } from '@/email/email.service';
-import { classifyIntegrationError } from '@/messaging/integration-error-classifier';
+import {
+	MESSAGING_ROUTING_KEYS,
+	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
+	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE
+} from '@/messaging/messaging.constants';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
+import {
+	serializeNotificationDeliveryEvent,
+	SubscriptionExpiryEmailNotificationRequestedEventPayload,
+	SubscriptionExpiryTelegramNotificationRequestedEventPayload
+} from '@/messaging/notification-delivery-event';
 import { PrismaService } from '@/prisma.service';
-import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
-import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
 import {
 	Injectable,
 	Logger,
@@ -21,7 +28,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 
 interface SubscriptionExpiryReminderResult {
-	sentCount: number;
+	dispatchedCount: number;
 	failedCount: number;
 }
 
@@ -97,21 +104,13 @@ export class SubscriptionExpiryService
 	private readonly RUN_HOURS_MOSCOW = [3, 15]; // 03:00 и 15:00 МСК
 	private readonly REMINDER_DAYS_BEFORE_EXPIRY = [6, 3, 0] as const;
 	private readonly MOSCOW_UTC_OFFSET_HOURS = 3;
-	private readonly REMINDER_LEASE_MS = 5 * 60 * 1000;
 	private readonly REMINDER_BATCH_SIZE = 500;
-	private readonly MAX_RECOGNIZED_ATTEMPTS = 4;
-	private readonly MAX_UNCLASSIFIED_ATTEMPTS = 2;
 	private readonly logger = new Logger(SubscriptionExpiryService.name);
 	private readonly workerId = `subscription-expiry:${hostname()}:${process.pid}:${randomUUID()}`;
 	private expiryTimeout: NodeJS.Timeout | null = null;
 	private destroyed = false;
 
-	constructor(
-		private prisma: PrismaService,
-		private readonly emailService: EmailService,
-		private readonly telegramBotService: TelegramBotService,
-		private readonly telegramInfoTransport: TelegramInfoTransportService
-	) {}
+	constructor(private prisma: PrismaService) {}
 
 	onModuleInit(): void {
 		this.expiryTimeout = setTimeout(() => {
@@ -153,7 +152,7 @@ export class SubscriptionExpiryService
 		try {
 			const result = await this.runSubscriptionMaintenance();
 			this.logger.log(
-				`Startup check: deactivated ${result.expiredCount} expired subscription(s), sent ${result.reminders.sentCount} expiry reminder(s), failed ${result.reminders.failedCount}.`
+				`Startup check: deactivated ${result.expiredCount} expired subscription(s), queued ${result.reminders.dispatchedCount} expiry reminder(s), failed ${result.reminders.failedCount}.`
 			);
 		} catch (error) {
 			this.logger.error(
@@ -180,55 +179,18 @@ export class SubscriptionExpiryService
 	private async sendExpiryReminders(): Promise<SubscriptionExpiryReminderResult> {
 		await this.seedExpiryReminders();
 
-		let sentCount = 0;
+		let dispatchedCount = 0;
 		let failedCount = 0;
 		const reminders = await this.findClaimableReminders();
 
 		for (const reminder of reminders) {
-			const claimedReminder = await this.claimReminder(reminder.id);
-			if (!claimedReminder) continue;
-
-			const recipient = this.getStoredReminderRecipient(
-				claimedReminder.sentTo
-			);
-			const invalidReason = this.getInvalidReminderReason(
-				claimedReminder,
-				recipient
-			);
-			if (invalidReason) {
-				await this.markReminderFailed(claimedReminder.id, invalidReason);
-				failedCount += 1;
-				continue;
-			}
-
-			const payload = {
-				daysBeforeExpiry: claimedReminder.daysBeforeExpiry,
-				planLabel: this.getPlanLabel(claimedReminder.subscription.plan),
-				expiresAtLabel: this.formatMoscowDateTime(
-					claimedReminder.expiresAt
-				)
-			};
-
-			try {
-				await this.sendReminder(recipient, payload, claimedReminder.id);
-			} catch (error) {
-				await this.handleReminderDeliveryFailure(
-					claimedReminder.id,
-					claimedReminder.userId,
-					recipient,
-					claimedReminder.attempts,
-					error
-				);
-				failedCount += 1;
-				continue;
-			}
-
-			await this.markReminderSent(claimedReminder.id);
-			sentCount += 1;
+			const state = await this.dispatchReminder(reminder.id);
+			if (state === 'dispatched') dispatchedCount += 1;
+			if (state === 'failed') failedCount += 1;
 		}
 
 		return {
-			sentCount,
+			dispatchedCount,
 			failedCount
 		};
 	}
@@ -269,25 +231,11 @@ export class SubscriptionExpiryService
 
 	private async findClaimableReminders() {
 		const now = new Date();
-		const staleBefore = new Date(now.getTime() - this.REMINDER_LEASE_MS);
 
 		return this.prisma.subscriptionExpiryReminder.findMany({
 			where: {
-				OR: [
-					{
-						status: SubscriptionExpiryReminderStatus.PENDING,
-						availableAt: { lte: now }
-					},
-					{
-						status: SubscriptionExpiryReminderStatus.PROCESSING,
-						OR: [
-							{ lockedAt: null },
-							{
-								lockedAt: { lte: staleBefore }
-							}
-						]
-					}
-				]
+				status: SubscriptionExpiryReminderStatus.PENDING,
+				availableAt: { lte: now }
 			},
 			select: EXPIRY_REMINDER_SELECT,
 			orderBy: [{ availableAt: 'asc' }, { id: 'asc' }],
@@ -295,50 +243,132 @@ export class SubscriptionExpiryService
 		});
 	}
 
-	private async claimReminder(
+	private async dispatchReminder(
 		reminderId: string
-	): Promise<ExpiryReminderCandidate | null> {
+	): Promise<'dispatched' | 'failed' | 'skipped'> {
 		const now = new Date();
-		const staleBefore = new Date(now.getTime() - this.REMINDER_LEASE_MS);
-		const result = await this.prisma.subscriptionExpiryReminder.updateMany(
-			{
-				where: {
-					id: reminderId,
-					OR: [
-						{
-							status: SubscriptionExpiryReminderStatus.PENDING,
-							availableAt: { lte: now }
-						},
-						{
-							status: SubscriptionExpiryReminderStatus.PROCESSING,
-							OR: [
-								{ lockedAt: null },
-								{
-									lockedAt: { lte: staleBefore }
-								}
-							]
-						}
-					]
-				},
-				data: {
-					status: SubscriptionExpiryReminderStatus.PROCESSING,
-					lockedAt: now,
-					lockedBy: this.workerId,
-					attempts: { increment: 1 }
-				}
+		const eventId = randomUUID();
+
+		return this.prisma.$transaction(async transaction => {
+			const claimed =
+				await transaction.subscriptionExpiryReminder.updateMany({
+					where: {
+						id: reminderId,
+						status: SubscriptionExpiryReminderStatus.PENDING,
+						availableAt: { lte: now }
+					},
+					data: {
+						status: SubscriptionExpiryReminderStatus.PROCESSING,
+						lockedAt: now,
+						lockedBy: this.workerId,
+						attempts: { increment: 1 }
+					}
+				});
+			if (claimed.count !== 1) return 'skipped';
+
+			const reminder =
+				await transaction.subscriptionExpiryReminder.findFirst({
+					where: {
+						id: reminderId,
+						status: SubscriptionExpiryReminderStatus.PROCESSING,
+						lockedBy: this.workerId,
+						lockedAt: now
+					},
+					select: EXPIRY_REMINDER_SELECT
+				});
+			if (!reminder) {
+				throw new Error(
+					`Claimed subscription expiry reminder disappeared: ${reminderId}`
+				);
 			}
-		);
 
-		if (result.count !== 1) return null;
+			const recipient = this.getStoredReminderRecipient(reminder.sentTo);
+			const invalidReason = this.getInvalidReminderReason(
+				reminder,
+				recipient
+			);
+			if (invalidReason) {
+				await transaction.subscriptionExpiryReminder.update({
+					where: { id: reminder.id },
+					data: {
+						status: SubscriptionExpiryReminderStatus.FAILED,
+						lockedAt: null,
+						lockedBy: null,
+						lastError: invalidReason.slice(0, 1000)
+					}
+				});
+				return 'failed';
+			}
 
-		return this.prisma.subscriptionExpiryReminder.findFirst({
-			where: {
-				id: reminderId,
-				status: SubscriptionExpiryReminderStatus.PROCESSING,
-				lockedBy: this.workerId,
-				lockedAt: now
-			},
-			select: EXPIRY_REMINDER_SELECT
+			const content = {
+				daysBeforeExpiry: reminder.daysBeforeExpiry,
+				planLabel: this.getPlanLabel(reminder.subscription.plan),
+				expiresAtLabel: this.formatMoscowDateTime(reminder.expiresAt)
+			};
+			const notificationKind =
+				recipient.channel === 'email'
+					? ('subscription-expiry-email' as const)
+					: ('subscription-expiry-telegram' as const);
+			const payload:
+				| SubscriptionExpiryEmailNotificationRequestedEventPayload
+				| SubscriptionExpiryTelegramNotificationRequestedEventPayload =
+				recipient.channel === 'email'
+					? {
+							schemaVersion: 1,
+							eventType: SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
+							reference: {
+								type: 'subscription-expiry-reminder',
+								id: reminder.id
+							},
+							destination: { email: recipient.value },
+							content
+						}
+					: {
+							schemaVersion: 1,
+							eventType:
+								SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+							reference: {
+								type: 'subscription-expiry-reminder',
+								id: reminder.id
+							},
+							destination: {
+								telegramChatId: recipient.value
+							},
+							content
+						};
+
+			await transaction.outboxEvent.create({
+				data: {
+					messageId: eventId,
+					deduplicationKey: `notification-dispatch:subscription-expiry:${reminder.id}:v1`,
+					eventType: payload.eventType,
+					routingKey: MESSAGING_ROUTING_KEYS[notificationKind],
+					payload: serializeNotificationDeliveryEvent(payload),
+					headers: createMessagingHeaders({
+						messageId: eventId
+					})
+				}
+			});
+			const released =
+				await transaction.subscriptionExpiryReminder.updateMany({
+					where: {
+						id: reminder.id,
+						status: SubscriptionExpiryReminderStatus.PROCESSING,
+						lockedBy: this.workerId,
+						lockedAt: now
+					},
+					data: {
+						lockedAt: null,
+						lockedBy: null,
+						lastError: null
+					}
+				});
+			if (released.count !== 1) {
+				throw new Error(
+					`Lost subscription expiry reminder before dispatch: ${reminder.id}`
+				);
+			}
+			return 'dispatched';
 		});
 	}
 
@@ -399,138 +429,6 @@ export class SubscriptionExpiryService
 		}
 
 		return null;
-	}
-
-	private async markReminderSent(reminderId: string): Promise<void> {
-		const result = await this.prisma.subscriptionExpiryReminder.updateMany(
-			{
-				where: {
-					id: reminderId,
-					status: SubscriptionExpiryReminderStatus.PROCESSING,
-					lockedBy: this.workerId
-				},
-				data: {
-					status: SubscriptionExpiryReminderStatus.SENT,
-					sentAt: new Date(),
-					lockedAt: null,
-					lockedBy: null,
-					lastError: null
-				}
-			}
-		);
-
-		if (result.count !== 1) {
-			throw new Error(
-				`Lost subscription expiry reminder lease after delivery: ${reminderId}`
-			);
-		}
-	}
-
-	private async markReminderFailed(
-		reminderId: string,
-		reason: string
-	): Promise<void> {
-		await this.updateClaimedReminder(reminderId, {
-			status: SubscriptionExpiryReminderStatus.FAILED,
-			lockedAt: null,
-			lockedBy: null,
-			lastError: reason.slice(0, 1000)
-		});
-	}
-
-	private async handleReminderDeliveryFailure(
-		reminderId: string,
-		userId: string,
-		recipient: SubscriptionExpiryReminderRecipient,
-		attempt: number,
-		error: unknown
-	): Promise<void> {
-		const kind =
-			recipient.channel === 'email' ? 'mailing-email' : 'mailing-telegram';
-		const classification = classifyIntegrationError(kind, error);
-		const maxAttempts = classification.recognized
-			? this.MAX_RECOGNIZED_ATTEMPTS
-			: this.MAX_UNCLASSIFIED_ATTEMPTS;
-		const shouldRetry = classification.retryable && attempt < maxAttempts;
-		const safeError =
-			`${classification.normalizedCode}: ${classification.safeReason}`.slice(
-				0,
-				1000
-			);
-
-		if (
-			recipient.channel === 'telegram' &&
-			classification.mayDisableDestination
-		) {
-			try {
-				await this.telegramBotService.deactivateNotificationChannelByChatId(
-					recipient.value
-				);
-			} catch (deactivationError) {
-				this.logger.error(
-					`Failed to deactivate unavailable Telegram reminder destination for user ${userId}: ${
-						deactivationError instanceof Error
-							? deactivationError.message
-							: String(deactivationError)
-					}`
-				);
-			}
-		}
-
-		await this.updateClaimedReminder(reminderId, {
-			status: shouldRetry
-				? SubscriptionExpiryReminderStatus.PENDING
-				: SubscriptionExpiryReminderStatus.FAILED,
-			availableAt: shouldRetry
-				? new Date(
-						Date.now() +
-							this.getReminderRetryDelayMs(
-								classification.retryDelayMs,
-								attempt
-							)
-					)
-				: new Date(),
-			lockedAt: null,
-			lockedBy: null,
-			lastError: safeError
-		});
-
-		this.logger.warn(
-			`Subscription expiry ${recipient.channel} reminder failed for user ${userId}; code=${classification.normalizedCode} attempt=${attempt}/${maxAttempts} retry=${shouldRetry}`
-		);
-	}
-
-	private async updateClaimedReminder(
-		reminderId: string,
-		data: Prisma.SubscriptionExpiryReminderUpdateManyMutationInput
-	): Promise<void> {
-		const result = await this.prisma.subscriptionExpiryReminder.updateMany(
-			{
-				where: {
-					id: reminderId,
-					status: SubscriptionExpiryReminderStatus.PROCESSING,
-					lockedBy: this.workerId
-				},
-				data
-			}
-		);
-
-		if (result.count !== 1) {
-			throw new Error(
-				`Lost subscription expiry reminder lease: ${reminderId}`
-			);
-		}
-	}
-
-	private getReminderRetryDelayMs(
-		providerDelayMs: number | null,
-		attempt: number
-	): number {
-		const baseDelay = Math.max(providerDelayMs || 30_000, 1_000);
-		return Math.min(
-			baseDelay * 2 ** Math.max(attempt - 1, 0),
-			24 * 60 * 60 * 1000
-		);
 	}
 
 	private async findSubscriptionsForReminder(daysBeforeExpiry: number) {
@@ -669,32 +567,6 @@ export class SubscriptionExpiryService
 		return channel.chatId.trim() || null;
 	}
 
-	private async sendReminder(
-		recipient: SubscriptionExpiryReminderRecipient,
-		payload: {
-			daysBeforeExpiry: number;
-			planLabel: string;
-			expiresAtLabel: string;
-		},
-		reminderId: string
-	) {
-		if (recipient.channel === 'email') {
-			await this.emailService.sendSubscriptionExpiryReminder(
-				recipient.value,
-				payload,
-				{
-					messageId: `<${reminderId}.subscription-expiry@winwidget.ru>`
-				}
-			);
-			return;
-		}
-
-		await this.telegramInfoTransport.sendMessage(
-			recipient.value,
-			this.buildTelegramExpiryReminderMessage(payload)
-		);
-	}
-
 	private getPlanLabel(plan: Plan) {
 		switch (plan) {
 			case Plan.TRIAL:
@@ -719,72 +591,22 @@ export class SubscriptionExpiryService
 		});
 	}
 
-	private buildTelegramExpiryReminderMessage(payload: {
-		daysBeforeExpiry: number;
-		planLabel: string;
-		expiresAtLabel: string;
-	}) {
-		const statusText =
-			payload.daysBeforeExpiry === 0
-				? 'Сегодня последний день подписки.'
-				: `До окончания подписки осталось ${payload.daysBeforeExpiry} ${this.getDayWord(payload.daysBeforeExpiry)}.`;
-
-		return [
-			'<b>Подписка winwidget.ru</b>',
-			`Тариф: ${payload.planLabel}`,
-			`Дата окончания: ${payload.expiresAtLabel} МСК`,
-			'',
-			statusText,
-			'',
-			'Продлить доступ можно в личном кабинете.'
-		].join('\n');
-	}
-
-	private getDayWord(value: number) {
-		const mod10 = value % 10;
-		const mod100 = value % 100;
-
-		if (mod10 === 1 && mod100 !== 11) return 'день';
-		if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) {
-			return 'дня';
-		}
-
-		return 'дней';
-	}
-
 	private async scheduleNext(): Promise<void> {
 		if (this.destroyed) return;
 
 		let nextRun = this.getNextRunDate();
 		try {
-			const [pending, processing] = await Promise.all([
-				this.prisma.subscriptionExpiryReminder.aggregate({
+			const pending =
+				await this.prisma.subscriptionExpiryReminder.aggregate({
 					where: {
 						status: SubscriptionExpiryReminderStatus.PENDING
 					},
 					_min: {
 						availableAt: true
 					}
-				}),
-				this.prisma.subscriptionExpiryReminder.aggregate({
-					where: {
-						status: SubscriptionExpiryReminderStatus.PROCESSING
-					},
-					_min: {
-						lockedAt: true
-					}
-				})
-			]);
-			const candidates = [
-				pending._min.availableAt,
-				processing._min.lockedAt
-					? new Date(
-							processing._min.lockedAt.getTime() + this.REMINDER_LEASE_MS
-						)
-					: null
-			].filter((value): value is Date => Boolean(value));
-			for (const candidate of candidates) {
-				if (candidate < nextRun) nextRun = candidate;
+				});
+			if (pending._min.availableAt && pending._min.availableAt < nextRun) {
+				nextRun = pending._min.availableAt;
 			}
 		} catch (error) {
 			this.logger.warn(
@@ -807,7 +629,7 @@ export class SubscriptionExpiryService
 			try {
 				const result = await this.runSubscriptionMaintenance();
 				this.logger.log(
-					`Scheduled check complete: deactivated ${result.expiredCount} expired subscription(s), sent ${result.reminders.sentCount} expiry reminder(s), failed ${result.reminders.failedCount}.`
+					`Scheduled check complete: deactivated ${result.expiredCount} expired subscription(s), queued ${result.reminders.dispatchedCount} expiry reminder(s), failed ${result.reminders.failedCount}.`
 				);
 			} catch (err) {
 				this.logger.error('Subscription expiry check failed:', err);

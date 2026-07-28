@@ -5,16 +5,22 @@ import {
 	PLAN_VALUES
 } from './delivery-event.types';
 import {
+	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
 	LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	MESSAGING_ROUTING_KEYS,
+	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NotificationDeliveryKind,
 	OUTBOX_EVENT_TYPE,
 	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
-	PAYMENT_SUCCEEDED_EVENT_TYPE
+	PAYMENT_SUCCEEDED_EVENT_TYPE,
+	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
+	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from './messaging.constants';
 
 const UUID_PATTERN =
@@ -402,9 +408,185 @@ const assertLimitEvent = (
 	throw new Error('Invalid limit event type');
 };
 
+const OUTCOME_NOTIFICATION_DELIVERY_KINDS = [
+	'campaign-email',
+	'campaign-telegram',
+	'daily-summary-delivery-telegram',
+	'subscription-expiry-email',
+	'subscription-expiry-telegram'
+] as const;
+
+const assertNotificationReference = (
+	value: unknown,
+	expectedType:
+		| 'mailing-delivery'
+		| 'daily-summary-job'
+		| 'subscription-expiry-reminder'
+): JsonRecord => {
+	const reference = assertRecord(value, 'payload.reference');
+	assertExactKeys(
+		reference,
+		expectedType === 'mailing-delivery'
+			? ['type', 'id', 'aggregateId']
+			: ['type', 'id'],
+		[],
+		'payload.reference'
+	);
+	if (reference.type !== expectedType) {
+		throw new Error(`payload.reference.type must be ${expectedType}`);
+	}
+	if (
+		expectedType === 'mailing-delivery' ||
+		expectedType === 'daily-summary-job'
+	) {
+		assertUuid(reference.id, 'payload.reference.id');
+	} else {
+		assertString(reference.id, 'payload.reference.id', {
+			maxLength: 255
+		});
+	}
+	if (expectedType === 'mailing-delivery') {
+		assertUuid(reference.aggregateId, 'payload.reference.aggregateId');
+	}
+	return reference;
+};
+
+const assertPreparedNotificationEvent = (
+	payload: JsonRecord
+): NotificationDeliveryKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'reference',
+		'destination',
+		'content'
+	]);
+	if (payload.schemaVersion !== 1) {
+		throw new Error('Invalid prepared notification contract version');
+	}
+
+	const destination = assertRecord(
+		payload.destination,
+		'payload.destination'
+	);
+	const content = assertRecord(payload.content, 'payload.content');
+
+	switch (payload.eventType) {
+		case CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE:
+		case CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE: {
+			assertNotificationReference(payload.reference, 'mailing-delivery');
+			assertExactKeys(
+				content,
+				['subject', 'message'],
+				[],
+				'payload.content'
+			);
+			assertString(content.subject, 'payload.content.subject', {
+				maxLength: 120
+			});
+			assertString(content.message, 'payload.content.message', {
+				maxLength: 5000
+			});
+			if (payload.eventType === CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE) {
+				assertExactKeys(destination, ['email'], [], 'payload.destination');
+				assertString(destination.email, 'payload.destination.email');
+				return 'campaign-email';
+			}
+			assertExactKeys(
+				destination,
+				['telegramChatId'],
+				[],
+				'payload.destination'
+			);
+			assertString(
+				destination.telegramChatId,
+				'payload.destination.telegramChatId'
+			);
+			return 'campaign-telegram';
+		}
+		case DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
+			assertNotificationReference(payload.reference, 'daily-summary-job');
+			assertExactKeys(
+				destination,
+				['telegramChatId', 'messageThreadId'],
+				[],
+				'payload.destination'
+			);
+			assertString(
+				destination.telegramChatId,
+				'payload.destination.telegramChatId'
+			);
+			if (
+				!Number.isInteger(destination.messageThreadId) ||
+				Number(destination.messageThreadId) < 1
+			) {
+				throw new Error(
+					'payload.destination.messageThreadId must be a positive integer'
+				);
+			}
+			assertExactKeys(content, ['text'], [], 'payload.content');
+			assertString(content.text, 'payload.content.text', {
+				maxLength: 10_000
+			});
+			return 'daily-summary-delivery-telegram';
+		case SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE:
+		case SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE: {
+			assertNotificationReference(
+				payload.reference,
+				'subscription-expiry-reminder'
+			);
+			assertExactKeys(
+				content,
+				['daysBeforeExpiry', 'planLabel', 'expiresAtLabel'],
+				[],
+				'payload.content'
+			);
+			if (
+				!Number.isInteger(content.daysBeforeExpiry) ||
+				Number(content.daysBeforeExpiry) < 0 ||
+				Number(content.daysBeforeExpiry) > 365
+			) {
+				throw new Error(
+					'payload.content.daysBeforeExpiry must be an integer between 0 and 365'
+				);
+			}
+			assertString(content.planLabel, 'payload.content.planLabel', {
+				maxLength: 100
+			});
+			assertString(
+				content.expiresAtLabel,
+				'payload.content.expiresAtLabel',
+				{ maxLength: 100 }
+			);
+			if (
+				payload.eventType ===
+				SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE
+			) {
+				assertExactKeys(destination, ['email'], [], 'payload.destination');
+				assertString(destination.email, 'payload.destination.email');
+				return 'subscription-expiry-email';
+			}
+			assertExactKeys(
+				destination,
+				['telegramChatId'],
+				[],
+				'payload.destination'
+			);
+			assertString(
+				destination.telegramChatId,
+				'payload.destination.telegramChatId'
+			);
+			return 'subscription-expiry-telegram';
+		}
+		default:
+			throw new Error('Invalid prepared notification event type');
+	}
+};
+
 type ResolvedContractKind =
 	| NotificationDeliveryKind
-	| 'telegram-destination-unavailable-outcome';
+	| 'telegram-destination-unavailable-outcome'
+	| 'notification-delivery-outcome';
 
 const assertTelegramDestinationUnavailableEvent = (
 	payload: JsonRecord
@@ -429,7 +611,9 @@ const assertTelegramDestinationUnavailableEvent = (
 	assertUuid(payload.sourceEventId, 'payload.sourceEventId');
 	if (
 		payload.sourceKind !== 'telegram' &&
-		payload.sourceKind !== 'limit-telegram'
+		payload.sourceKind !== 'limit-telegram' &&
+		payload.sourceKind !== 'campaign-telegram' &&
+		payload.sourceKind !== 'subscription-expiry-telegram'
 	) {
 		throw new Error('payload.sourceKind is invalid');
 	}
@@ -454,6 +638,76 @@ const assertTelegramDestinationUnavailableEvent = (
 	return 'telegram-destination-unavailable-outcome';
 };
 
+const assertNotificationDeliveryOutcome = (
+	payload: JsonRecord
+): ResolvedContractKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'sourceEventId',
+		'sourceKind',
+		'reference',
+		'status',
+		'failure',
+		'occurredAt'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE
+	) {
+		throw new Error(
+			'Invalid notification delivery outcome contract version'
+		);
+	}
+	assertUuid(payload.sourceEventId, 'payload.sourceEventId');
+	if (
+		!OUTCOME_NOTIFICATION_DELIVERY_KINDS.includes(
+			payload.sourceKind as (typeof OUTCOME_NOTIFICATION_DELIVERY_KINDS)[number]
+		)
+	) {
+		throw new Error('payload.sourceKind is invalid');
+	}
+	if (
+		payload.sourceKind === 'campaign-email' ||
+		payload.sourceKind === 'campaign-telegram'
+	) {
+		assertNotificationReference(payload.reference, 'mailing-delivery');
+	} else if (payload.sourceKind === 'daily-summary-delivery-telegram') {
+		assertNotificationReference(payload.reference, 'daily-summary-job');
+	} else {
+		assertNotificationReference(
+			payload.reference,
+			'subscription-expiry-reminder'
+		);
+	}
+	if (payload.status !== 'DELIVERED' && payload.status !== 'FAILED') {
+		throw new Error('payload.status is invalid');
+	}
+	if (payload.status === 'DELIVERED') {
+		if (payload.failure !== null) {
+			throw new Error('payload.failure must be null for DELIVERED');
+		}
+	} else {
+		const failure = assertRecord(payload.failure, 'payload.failure');
+		assertExactKeys(
+			failure,
+			['normalizedCode', 'safeReason'],
+			[],
+			'payload.failure'
+		);
+		assertString(
+			failure.normalizedCode,
+			'payload.failure.normalizedCode',
+			{ maxLength: 255 }
+		);
+		assertString(failure.safeReason, 'payload.failure.safeReason', {
+			maxLength: 2000
+		});
+	}
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	return 'notification-delivery-outcome';
+};
+
 const resolveExpectedKind = (
 	payload: JsonRecord
 ): ResolvedContractKind => {
@@ -467,8 +721,16 @@ const resolveExpectedKind = (
 		case LIMIT_REACHED_EMAIL_EVENT_TYPE:
 		case LIMIT_REACHED_TELEGRAM_EVENT_TYPE:
 			return assertLimitEvent(payload);
+		case CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE:
+		case CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE:
+		case DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
+		case SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE:
+		case SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
+			return assertPreparedNotificationEvent(payload);
 		case TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE:
 			return assertTelegramDestinationUnavailableEvent(payload);
+		case NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE:
+			return assertNotificationDeliveryOutcome(payload);
 		default:
 			throw new Error(
 				`Unsupported notification event type: ${String(payload.eventType)}`
@@ -502,6 +764,19 @@ export function assertMessagingEventContract(
 		if (
 			metadata.routingKey !== TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 		) {
+			throw new Error(
+				`Routing key ${metadata.routingKey} does not match ${metadata.eventType}`
+			);
+		}
+		return;
+	}
+	if (expectedKind === 'notification-delivery-outcome') {
+		if (metadata.kind) {
+			throw new Error(
+				`${metadata.eventType} is not a notification delivery input`
+			);
+		}
+		if (metadata.routingKey !== NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE) {
 			throw new Error(
 				`Routing key ${metadata.routingKey} does not match ${metadata.eventType}`
 			);

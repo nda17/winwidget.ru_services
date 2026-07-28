@@ -1,23 +1,19 @@
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
-import type { LeadIntegrationEventPayloadV2 } from '@/messaging/lead-integration-event';
 import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
-import type { EmailService } from '@/email/email.service';
-import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
+import type { LeadIntegrationEventPayloadV2 } from '@/messaging/lead-integration-event';
 import type { PrismaService } from '@/prisma.service';
 import type { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
-import {
-	TelegramApiError,
-	type TelegramInfoTransportService
-} from '@/telegram-bot/telegram-info-transport.service';
+import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
+import type { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import {
 	MailingCampaignStatus,
 	MailingDeliveryChannel,
-	MailingDeliveryStatus
+	MailingDeliveryStatus,
+	ScheduledJobRunStatus,
+	SubscriptionExpiryReminderStatus
 } from '@prisma/client';
 
-const createEvent = (
-	overrides: Partial<LeadIntegrationEventPayloadV2> = {}
-): LeadIntegrationEventPayloadV2 => ({
+const createLeadEvent = (): LeadIntegrationEventPayloadV2 => ({
 	schemaVersion: 2,
 	eventType: 'lead.integration.requested.v2',
 	integration: 'webhook',
@@ -26,71 +22,142 @@ const createEvent = (
 	lead: {
 		id: 'lead-1',
 		contact: '+79990000000',
-		phone: '+79990000000',
 		createdAt: '2026-07-23T12:00:00.000Z'
 	},
 	destination: {
 		credentialRef: '11111111-1111-4111-8111-111111111111'
-	},
-	...overrides
+	}
 });
 
 describe('IntegrationDeliveryService', () => {
-	const createService = () => {
-		const emailService = {} as EmailService;
+	const campaignId = '11111111-1111-4111-8111-111111111111';
+	const deliveryId = '22222222-2222-4222-8222-222222222222';
+	const eventId = '33333333-3333-4333-8333-333333333333';
+
+	const createService = (
+		options: {
+			deliveryStatus?: MailingDeliveryStatus;
+			campaignStatus?: MailingCampaignStatus;
+			channel?: MailingDeliveryChannel;
+			failedCount?: number;
+		} = {}
+	) => {
+		const channel = options.channel ?? MailingDeliveryChannel.EMAIL;
+		const deliveryRecord = {
+			id: deliveryId,
+			campaignId,
+			channel,
+			recipient:
+				channel === MailingDeliveryChannel.EMAIL
+					? 'owner@example.com'
+					: '123456789',
+			status: options.deliveryStatus ?? MailingDeliveryStatus.PENDING,
+			campaign: {
+				id: campaignId,
+				status: options.campaignStatus ?? MailingCampaignStatus.QUEUED,
+				cancelRequestedAt:
+					options.campaignStatus === MailingCampaignStatus.CANCELLED
+						? new Date()
+						: null,
+				subject: 'Новости',
+				message: 'Текст рассылки'
+			}
+		};
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([
+				{
+					id: deliveryId,
+					campaignId,
+					status:
+						options.deliveryStatus ?? MailingDeliveryStatus.PROCESSING
+				}
+			]),
+			mailingDelivery: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+				update: jest.fn().mockResolvedValue({}),
+				count: jest.fn().mockResolvedValue(0)
+			},
+			mailingCampaign: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+				update: jest.fn().mockResolvedValue({
+					failedCount: options.failedCount ?? 0
+				})
+			},
+			outboxEvent: {
+				createMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			telegramBotSettings: {
+				update: jest.fn().mockResolvedValue({})
+			}
+		};
+		const prisma = {
+			mailingDelivery: {
+				findUnique: jest.fn().mockResolvedValue(deliveryRecord)
+			},
+			telegramNotificationChannel: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			subscriptionExpiryReminder: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			$transaction: jest.fn(async callback => callback(transaction))
+		} as unknown as PrismaService;
 		const safeOutboundHttpService = {
 			postJson: jest.fn().mockResolvedValue(undefined),
 			getAmoCrmApiUrl: jest.fn()
 		} as unknown as SafeOutboundHttpService;
-		const prisma = {
-			telegramNotificationChannel: {
-				updateMany: jest.fn().mockResolvedValue({ count: 1 })
-			}
-		} as unknown as PrismaService;
-		const telegram = {
-			sendMessage: jest.fn().mockResolvedValue(undefined)
-		} as unknown as TelegramInfoTransportService;
-
-		return {
-			service: new IntegrationDeliveryService(
-				emailService,
-				safeOutboundHttpService,
-				prisma,
-				{
-					deliver: jest.fn().mockResolvedValue(undefined)
-				} as unknown as DailySummaryDeliveryService,
-				{
-					resolve: jest.fn(async (_eventId, event) => ({
-						...event,
-						destination: {
-							webhookUrl: 'https://example.com/webhook'
-						}
-					}))
-				} as unknown as LeadIntegrationDestinationService,
-				telegram
-			),
+		const dailySummary = {
+			deliver: jest.fn().mockResolvedValue(undefined)
+		} as unknown as DailySummaryDeliveryService;
+		const leadDestination = {
+			resolve: jest.fn(async (_sourceEventId, event) => ({
+				...event,
+				destination: {
+					webhookUrl: 'https://example.com/webhook'
+				}
+			}))
+		} as unknown as LeadIntegrationDestinationService;
+		const scheduledJobs = {
+			completeExternalDeliveryInTransaction: jest.fn().mockResolvedValue({
+				id: eventId,
+				jobType: 'DAILY_TELEGRAM_SUMMARY',
+				status: ScheduledJobRunStatus.SUCCEEDED,
+				periodStart: '2026-07-22T21:00:00.000Z'
+			}),
+			failExternalDeliveryInTransaction: jest.fn().mockResolvedValue({})
+		} as unknown as ScheduledJobsService;
+		const service = new IntegrationDeliveryService(
 			safeOutboundHttpService,
 			prisma,
-			telegram
+			dailySummary,
+			leadDestination,
+			scheduledJobs
+		);
+
+		return {
+			service,
+			prisma,
+			transaction,
+			safeOutboundHttpService,
+			scheduledJobs
 		};
 	};
 
 	it('sends a versioned webhook with a stable event id', async () => {
 		const { service, safeOutboundHttpService } = createService();
 
-		await service.deliver('webhook', createEvent(), 'event-1');
+		await service.deliver('webhook', createLeadEvent(), eventId);
 
 		expect(safeOutboundHttpService.postJson).toHaveBeenCalledWith(
 			'https://example.com/webhook',
 			expect.objectContaining({
-				eventId: 'event-1',
+				eventId,
 				eventType: 'lead.created.v1',
-				source: 'widget',
 				lead: expect.objectContaining({ id: 'lead-1' })
 			}),
 			{
 				policy: 'webhook',
-				headers: { 'X-WinWidget-Event-Id': 'event-1' }
+				headers: { 'X-WinWidget-Event-Id': eventId }
 			}
 		);
 	});
@@ -98,25 +165,26 @@ describe('IntegrationDeliveryService', () => {
 	it('applies a destination-unavailable outcome with a stale-safe CAS', async () => {
 		const { service, prisma } = createService();
 		const occurredAt = '2026-07-23T12:00:00.000Z';
+
 		await service.deliver(
 			'telegram-destination-unavailable',
 			{
 				schemaVersion: 1,
 				eventType: 'notification.telegram.destination-unavailable.v1',
-				sourceEventId: '11111111-1111-4111-8111-111111111111',
-				sourceKind: 'telegram',
-				destination: { telegramChatId: '-100123' },
+				sourceEventId: eventId,
+				sourceKind: 'campaign-telegram',
+				destination: { telegramChatId: '123456789' },
 				normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
 				occurredAt
 			},
-			'event-1'
+			'outcome-1'
 		);
 
 		expect(
 			prisma.telegramNotificationChannel.updateMany
 		).toHaveBeenCalledWith({
 			where: {
-				chatId: '-100123',
+				chatId: '123456789',
 				isActive: true,
 				updatedAt: { lte: new Date(occurredAt) }
 			},
@@ -127,147 +195,32 @@ describe('IntegrationDeliveryService', () => {
 		});
 	});
 
-	it('treats an already changed Telegram destination as a successful no-op', async () => {
-		const { service, prisma } = createService();
-		(
-			prisma.telegramNotificationChannel.updateMany as jest.Mock
-		).mockResolvedValue({ count: 0 });
+	it.each([
+		[
+			MailingDeliveryChannel.EMAIL,
+			'mailing-email' as const,
+			'notification.campaign.email.requested.v1'
+		],
+		[
+			MailingDeliveryChannel.TELEGRAM,
+			'mailing-telegram' as const,
+			'notification.campaign.telegram.requested.v1'
+		]
+	])(
+		'atomically dispatches %s mailing delivery through Notification Delivery',
+		async (channel, monolithKind, eventType) => {
+			const { service, transaction } = createService({ channel });
+			const event = {
+				schemaVersion: 1 as const,
+				eventType: 'mailing.delivery.requested.v1' as const,
+				campaignId,
+				deliveryId,
+				channel
+			};
 
-		await expect(
-			service.deliver(
-				'telegram-destination-unavailable',
-				{
-					schemaVersion: 1,
-					eventType: 'notification.telegram.destination-unavailable.v1',
-					sourceEventId: '11111111-1111-4111-8111-111111111111',
-					sourceKind: 'limit-telegram',
-					destination: { telegramChatId: '123456789' },
-					normalizedCode: 'TELEGRAM_BOT_BLOCKED',
-					occurredAt: '2026-07-23T12:00:00.000Z'
-				},
-				'event-1'
-			)
-		).resolves.toBeUndefined();
-	});
+			await service.deliver(monolithKind, event, eventId);
 
-	it('rejects a message routed to the wrong integration consumer', async () => {
-		const { service } = createService();
-
-		await expect(
-			service.deliver('bitrix24', createEvent(), 'event-1')
-		).rejects.toThrow(
-			'Integration mismatch: queue=bitrix24, payload=webhook'
-		);
-	});
-});
-
-describe('IntegrationDeliveryService mailing delivery', () => {
-	const campaignId = '11111111-1111-4111-8111-111111111111';
-	const deliveryId = '22222222-2222-4222-8222-222222222222';
-	const eventId = '33333333-3333-4333-8333-333333333333';
-	const event = {
-		schemaVersion: 1 as const,
-		eventType: 'mailing.delivery.requested.v1' as const,
-		campaignId,
-		deliveryId,
-		channel: MailingDeliveryChannel.EMAIL
-	};
-	const telegramEvent = {
-		...event,
-		channel: MailingDeliveryChannel.TELEGRAM
-	};
-
-	const createService = (
-		status: MailingDeliveryStatus = MailingDeliveryStatus.PENDING,
-		campaignStatus: MailingCampaignStatus = MailingCampaignStatus.QUEUED,
-		channel: MailingDeliveryChannel = MailingDeliveryChannel.EMAIL,
-		telegramError?: Error
-	) => {
-		const deliveryRecord = {
-			id: deliveryId,
-			campaignId,
-			channel,
-			recipient:
-				channel === MailingDeliveryChannel.TELEGRAM
-					? '123456789'
-					: 'user@example.com',
-			status,
-			nextChunkIndex: 0,
-			updatedAt: new Date(),
-			campaign: {
-				id: campaignId,
-				status: campaignStatus,
-				cancelRequestedAt:
-					campaignStatus === MailingCampaignStatus.CANCELLED
-						? new Date()
-						: null,
-				subject: 'Новости',
-				message: 'Текст рассылки'
-			}
-		};
-		const emailService = {
-			sendAdminBroadcast: jest.fn().mockResolvedValue(undefined)
-		} as unknown as EmailService;
-		const transaction = {
-			mailingDelivery: {
-				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-				count: jest.fn().mockResolvedValue(0)
-			},
-			mailingCampaign: {
-				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-				update: jest.fn().mockResolvedValue({ failedCount: 0 })
-			}
-		};
-		const notificationChannelUpdateMany = jest
-			.fn()
-			.mockResolvedValue({ count: 1 });
-		const prisma = {
-			mailingDelivery: {
-				findUnique: jest.fn().mockResolvedValue(deliveryRecord),
-				updateMany: jest.fn().mockResolvedValue({ count: 1 })
-			},
-			telegramNotificationChannel: {
-				updateMany: notificationChannelUpdateMany
-			},
-			$transaction: jest.fn(async callback => callback(transaction))
-		} as unknown as PrismaService;
-		const telegram = {
-			sendMessage: telegramError
-				? jest.fn().mockRejectedValue(telegramError)
-				: jest.fn().mockResolvedValue(undefined)
-		} as unknown as TelegramInfoTransportService;
-		const service = new IntegrationDeliveryService(
-			emailService,
-			{} as SafeOutboundHttpService,
-			prisma,
-			{
-				deliver: jest.fn().mockResolvedValue(undefined)
-			} as unknown as DailySummaryDeliveryService,
-			{
-				resolve: jest.fn(async (_eventId, event) => event)
-			} as unknown as LeadIntegrationDestinationService,
-			telegram
-		);
-
-		return {
-			service,
-			emailService,
-			prisma,
-			transaction,
-			deliveryRecord,
-			notificationChannelUpdateMany,
-			telegram
-		};
-	};
-
-	it('sends only after an atomic PENDING to PROCESSING claim', async () => {
-		const { service, emailService, transaction } = createService();
-
-		await service.deliver('mailing-email', event, eventId);
-
-		expect(transaction.mailingDelivery.updateMany).toHaveBeenNthCalledWith(
-			1,
-			{
+			expect(transaction.mailingDelivery.updateMany).toHaveBeenCalledWith({
 				where: {
 					id: deliveryId,
 					campaignId,
@@ -275,200 +228,51 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 				},
 				data: {
 					status: MailingDeliveryStatus.PROCESSING,
-					attempts: { increment: 1 }
+					attempts: { increment: 1 },
+					lastError: null
 				}
-			}
-		);
-		expect(emailService.sendAdminBroadcast).toHaveBeenCalledTimes(1);
-	});
-
-	it('omits parse_mode from a plain-text Telegram mailing request', async () => {
-		const { service, telegram } = createService(
-			MailingDeliveryStatus.PENDING,
-			MailingCampaignStatus.QUEUED,
-			MailingDeliveryChannel.TELEGRAM
-		);
-
-		await service.deliver('mailing-telegram', telegramEvent, eventId);
-
-		expect(telegram.sendMessage).toHaveBeenCalledWith(
-			'123456789',
-			'Новости\n\nТекст рассылки',
-			{ parseMode: null }
-		);
-	});
-
-	it('persists each successful Telegram chunk before sending the next one', async () => {
-		const { service, prisma, deliveryRecord, telegram } = createService(
-			MailingDeliveryStatus.PENDING,
-			MailingCampaignStatus.QUEUED,
-			MailingDeliveryChannel.TELEGRAM
-		);
-		deliveryRecord.campaign.message = 'a'.repeat(3601);
-		(telegram.sendMessage as jest.Mock)
-			.mockResolvedValueOnce(undefined)
-			.mockRejectedValueOnce(
-				new TelegramApiError({
-					httpStatus: 502,
-					description: 'Bad Gateway'
+			});
+			const outbox =
+				transaction.outboxEvent.createMany.mock.calls[0][0].data[0];
+			expect(outbox).toEqual(
+				expect.objectContaining({
+					messageId: eventId,
+					eventType,
+					routingKey: eventType
 				})
 			);
-
-		await expect(
-			service.deliver('mailing-telegram', telegramEvent, eventId)
-		).rejects.toThrow('Bad Gateway');
-
-		expect(prisma.mailingDelivery.updateMany).toHaveBeenCalledWith({
-			where: {
-				id: deliveryId,
-				campaignId,
-				status: MailingDeliveryStatus.PROCESSING,
-				nextChunkIndex: 0
-			},
-			data: { nextChunkIndex: 1 }
-		});
-		expect(telegram.sendMessage).toHaveBeenCalledTimes(2);
-	});
-
-	it('resumes a Telegram mailing from its persisted chunk index', async () => {
-		const { service, prisma, deliveryRecord, telegram } = createService(
-			MailingDeliveryStatus.PENDING,
-			MailingCampaignStatus.QUEUED,
-			MailingDeliveryChannel.TELEGRAM
-		);
-		deliveryRecord.campaign.message = 'a'.repeat(3601);
-		deliveryRecord.nextChunkIndex = 1;
-
-		await service.deliver('mailing-telegram', telegramEvent, eventId);
-
-		expect(telegram.sendMessage).toHaveBeenCalledTimes(1);
-		expect(telegram.sendMessage).toHaveBeenCalledWith(
-			'123456789',
-			'a'.repeat(101),
-			{ parseMode: null }
-		);
-		expect(prisma.mailingDelivery.updateMany).toHaveBeenCalledWith({
-			where: {
-				id: deliveryId,
-				campaignId,
-				status: MailingDeliveryStatus.PROCESSING,
-				nextChunkIndex: 1
-			},
-			data: { nextChunkIndex: 2 }
-		});
-	});
-
-	it('does not deactivate a Telegram channel for a formatting-related 400', async () => {
-		const { service, notificationChannelUpdateMany } = createService(
-			MailingDeliveryStatus.PENDING,
-			MailingCampaignStatus.QUEUED,
-			MailingDeliveryChannel.TELEGRAM,
-			new TelegramApiError({
-				httpStatus: 400,
-				description: 'Bad Request: unsupported parse_mode'
-			})
-		);
-
-		await expect(
-			service.deliver('mailing-telegram', telegramEvent, eventId)
-		).rejects.toThrow('Bad Request: unsupported parse_mode');
-
-		expect(notificationChannelUpdateMany).not.toHaveBeenCalled();
-	});
-
-	it.each([
-		[400, 'Bad Request'],
-		[429, 'Too Many Requests: retry later'],
-		[502, 'Bad Gateway']
-	])(
-		'does not deactivate a Telegram channel for transient or unclassified error %i',
-		async (status, description) => {
-			const { service, notificationChannelUpdateMany } = createService(
-				MailingDeliveryStatus.PENDING,
-				MailingCampaignStatus.QUEUED,
-				MailingDeliveryChannel.TELEGRAM,
-				new TelegramApiError({
-					httpStatus: status,
-					description
+			expect(outbox.payload).toEqual(
+				expect.objectContaining({
+					schemaVersion: 1,
+					eventType,
+					reference: {
+						type: 'mailing-delivery',
+						id: deliveryId,
+						aggregateId: campaignId
+					}
 				})
 			);
-
-			await expect(
-				service.deliver('mailing-telegram', telegramEvent, eventId)
-			).rejects.toThrow(description);
-
-			expect(notificationChannelUpdateMany).not.toHaveBeenCalled();
 		}
 	);
 
-	it.each([
-		[400, 'Bad Request: chat not found'],
-		[400, 'Bad Request: user is deactivated'],
-		[403, 'Forbidden: bot was blocked by the user']
-	])(
-		'deactivates a Telegram channel for permanent error %i %s',
-		async (status, description) => {
-			const { service, notificationChannelUpdateMany } = createService(
-				MailingDeliveryStatus.PENDING,
-				MailingCampaignStatus.QUEUED,
-				MailingDeliveryChannel.TELEGRAM,
-				new TelegramApiError({
-					httpStatus: status,
-					description
-				})
-			);
+	it('cancels a pending mailing delivery before dispatch', async () => {
+		const { service, transaction } = createService({
+			campaignStatus: MailingCampaignStatus.CANCELLED
+		});
 
-			await expect(
-				service.deliver('mailing-telegram', telegramEvent, eventId)
-			).rejects.toThrow(description);
-
-			expect(notificationChannelUpdateMany).toHaveBeenCalledWith({
-				where: { chatId: '123456789' },
-				data: {
-					isActive: false,
-					disabledAt: expect.any(Date)
-				}
-			});
-		}
-	);
-
-	it('does not send when cancellation wins the claim race', async () => {
-		const { service, emailService, prisma, transaction, deliveryRecord } =
-			createService();
-		(
-			transaction.mailingDelivery.updateMany as jest.Mock
-		).mockResolvedValueOnce({ count: 0 });
-		(prisma.mailingDelivery.findUnique as jest.Mock)
-			.mockResolvedValueOnce(deliveryRecord)
-			.mockResolvedValueOnce({
-				status: MailingDeliveryStatus.CANCELLED
-			});
-
-		await service.deliver('mailing-email', event, eventId);
-
-		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
-	});
-
-	it('does not treat a FAILED delivery as successful', async () => {
-		const { service, emailService } = createService(
-			MailingDeliveryStatus.FAILED
+		await service.deliver(
+			'mailing-email',
+			{
+				schemaVersion: 1,
+				eventType: 'mailing.delivery.requested.v1',
+				campaignId,
+				deliveryId,
+				channel: MailingDeliveryChannel.EMAIL
+			},
+			eventId
 		);
 
-		await expect(
-			service.deliver('mailing-email', event, eventId)
-		).rejects.toThrow('Mailing delivery is in FAILED state');
-		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
-	});
-
-	it('cancels a pending delivery and increments the campaign atomically', async () => {
-		const { service, emailService, prisma, transaction } = createService(
-			MailingDeliveryStatus.PENDING,
-			MailingCampaignStatus.CANCELLED
-		);
-
-		await service.deliver('mailing-email', event, eventId);
-
-		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+		expect(transaction.outboxEvent.createMany).not.toHaveBeenCalled();
 		expect(transaction.mailingDelivery.updateMany).toHaveBeenCalledWith({
 			where: {
 				id: deliveryId,
@@ -485,66 +289,174 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 				cancelledAt: expect.any(Date)
 			}
 		});
-		expect(transaction.mailingCampaign.update).toHaveBeenCalledWith({
-			where: { id: campaignId },
-			data: { cancelledCount: { increment: 1 } }
-		});
-		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
 	});
 
-	it('does not leave a stale PROCESSING delivery behind after campaign cancellation', async () => {
-		const { service, emailService, transaction, deliveryRecord } =
-			createService(
-				MailingDeliveryStatus.PROCESSING,
-				MailingCampaignStatus.CANCELLED
-			);
-		deliveryRecord.updatedAt = new Date(Date.now() - 11 * 60 * 1000);
+	it('applies a successful mailing outcome exactly once', async () => {
+		const { service, transaction } = createService({
+			deliveryStatus: MailingDeliveryStatus.PROCESSING
+		});
+		const occurredAt = '2026-07-28T08:00:00.000Z';
 
-		await service.deliver('mailing-email', event, eventId);
-
-		expect(transaction.mailingDelivery.updateMany).toHaveBeenCalledWith(
-			expect.objectContaining({
-				where: {
+		await service.deliver(
+			'notification-delivery-outcome',
+			{
+				schemaVersion: 1,
+				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: eventId,
+				sourceKind: 'campaign-email',
+				reference: {
+					type: 'mailing-delivery',
 					id: deliveryId,
-					campaignId,
-					status: {
-						in: [
-							MailingDeliveryStatus.PENDING,
-							MailingDeliveryStatus.PROCESSING
-						]
-					}
+					aggregateId: campaignId
 				},
-				data: {
-					status: MailingDeliveryStatus.CANCELLED,
-					cancelledAt: expect.any(Date)
-				}
+				status: 'DELIVERED',
+				failure: null,
+				occurredAt
+			},
+			'outcome-1'
+		);
+
+		expect(transaction.mailingDelivery.update).toHaveBeenCalledWith({
+			where: { id: deliveryId },
+			data: {
+				status: MailingDeliveryStatus.SENT,
+				sentAt: new Date(occurredAt),
+				lastError: null
+			}
+		});
+		expect(transaction.mailingCampaign.update).toHaveBeenCalledWith({
+			where: { id: campaignId },
+			data: { sentCount: { increment: 1 } }
+		});
+		expect(transaction.mailingCampaign.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: MailingCampaignStatus.COMPLETED
+				})
 			})
 		);
-		expect(transaction.mailingCampaign.update).toHaveBeenCalledWith({
-			where: { id: campaignId },
-			data: { cancelledCount: { increment: 1 } }
-		});
-		expect(emailService.sendAdminBroadcast).not.toHaveBeenCalled();
 	});
 
-	it('returns a failed send to PENDING for the scheduled retry', async () => {
-		const { service, emailService, prisma } = createService();
-		(emailService.sendAdminBroadcast as jest.Mock).mockRejectedValue(
-			new Error('SMTP unavailable')
+	it('applies a terminal mailing failure and completes the campaign as partial', async () => {
+		const { service, transaction } = createService({
+			deliveryStatus: MailingDeliveryStatus.PROCESSING,
+			failedCount: 1
+		});
+
+		await service.deliver(
+			'notification-delivery-outcome',
+			{
+				schemaVersion: 1,
+				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: eventId,
+				sourceKind: 'campaign-telegram',
+				reference: {
+					type: 'mailing-delivery',
+					id: deliveryId,
+					aggregateId: campaignId
+				},
+				status: 'FAILED',
+				failure: {
+					normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+					safeReason: 'Telegram destination is unavailable'
+				},
+				occurredAt: '2026-07-28T08:00:00.000Z'
+			},
+			'outcome-2'
 		);
 
-		await expect(
-			service.deliver('mailing-email', event, eventId)
-		).rejects.toThrow('SMTP unavailable');
-		expect(prisma.mailingDelivery.updateMany).toHaveBeenCalledWith({
+		expect(transaction.mailingDelivery.update).toHaveBeenCalledWith({
+			where: { id: deliveryId },
+			data: {
+				status: MailingDeliveryStatus.FAILED,
+				lastError:
+					'TELEGRAM_CHAT_NOT_FOUND: Telegram destination is unavailable',
+				sentAt: null
+			}
+		});
+		expect(transaction.mailingCampaign.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: MailingCampaignStatus.PARTIAL_FAILED
+				})
+			})
+		);
+	});
+
+	it('completes the durable daily-summary job only after delivery outcome', async () => {
+		const { service, scheduledJobs, transaction } = createService();
+		const occurredAt = '2026-07-28T08:00:00.000Z';
+
+		await service.deliver(
+			'notification-delivery-outcome',
+			{
+				schemaVersion: 1,
+				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: eventId,
+				sourceKind: 'daily-summary-delivery-telegram',
+				reference: { type: 'daily-summary-job', id: eventId },
+				status: 'DELIVERED',
+				failure: null,
+				occurredAt
+			},
+			'outcome-3'
+		);
+
+		expect(
+			scheduledJobs.completeExternalDeliveryInTransaction
+		).toHaveBeenCalledWith(
+			transaction,
+			eventId,
+			eventId,
+			expect.objectContaining({ telegramSent: true })
+		);
+		expect(transaction.telegramBotSettings.update).toHaveBeenCalledWith({
+			where: { id: 'singleton' },
+			data: {
+				dailySummaryLastSentPeriodStart: new Date(
+					'2026-07-22T21:00:00.000Z'
+				),
+				dailySummaryLastSentAt: new Date(occurredAt)
+			}
+		});
+	});
+
+	it('marks a subscription reminder from a terminal delivery outcome', async () => {
+		const { service, prisma } = createService();
+
+		await service.deliver(
+			'notification-delivery-outcome',
+			{
+				schemaVersion: 1,
+				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: eventId,
+				sourceKind: 'subscription-expiry-email',
+				reference: {
+					type: 'subscription-expiry-reminder',
+					id: 'reminder-1'
+				},
+				status: 'FAILED',
+				failure: {
+					normalizedCode: 'SMTP_REJECTED',
+					safeReason: 'Mailbox rejected the message'
+				},
+				occurredAt: '2026-07-28T08:00:00.000Z'
+			},
+			'outcome-4'
+		);
+
+		expect(
+			prisma.subscriptionExpiryReminder.updateMany
+		).toHaveBeenCalledWith({
 			where: {
-				id: deliveryId,
-				campaignId,
-				status: MailingDeliveryStatus.PROCESSING
+				id: 'reminder-1',
+				status: SubscriptionExpiryReminderStatus.PROCESSING
 			},
 			data: {
-				status: MailingDeliveryStatus.PENDING,
-				lastError: 'SMTP unavailable'
+				status: SubscriptionExpiryReminderStatus.FAILED,
+				lockedAt: null,
+				lockedBy: null,
+				lastError: 'SMTP_REJECTED: Mailbox rejected the message'
 			}
 		});
 	});

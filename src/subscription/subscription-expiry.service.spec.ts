@@ -1,11 +1,5 @@
-import { EmailService } from '@/email/email.service';
 import { PrismaService } from '@/prisma.service';
 import { SubscriptionExpiryService } from '@/subscription/subscription-expiry.service';
-import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
-import {
-	TelegramApiError,
-	TelegramInfoTransportService
-} from '@/telegram-bot/telegram-info-transport.service';
 import {
 	AuthIdentityType,
 	Plan,
@@ -57,7 +51,17 @@ const createReminder = (overrides: Record<string, any> = {}) => {
 	};
 };
 
-describe('SubscriptionExpiryService durable delivery', () => {
+describe('SubscriptionExpiryService durable dispatch', () => {
+	let transaction: {
+		subscriptionExpiryReminder: {
+			updateMany: jest.Mock;
+			findFirst: jest.Mock;
+			update: jest.Mock;
+		};
+		outboxEvent: {
+			create: jest.Mock;
+		};
+	};
 	let prisma: {
 		subscription: {
 			findMany: jest.Mock;
@@ -66,19 +70,9 @@ describe('SubscriptionExpiryService durable delivery', () => {
 		subscriptionExpiryReminder: {
 			createMany: jest.Mock;
 			findMany: jest.Mock;
-			findFirst: jest.Mock;
-			updateMany: jest.Mock;
 			aggregate: jest.Mock;
 		};
-	};
-	let emailService: {
-		sendSubscriptionExpiryReminder: jest.Mock;
-	};
-	let telegramBotService: {
-		deactivateNotificationChannelByChatId: jest.Mock;
-	};
-	let telegramInfoTransport: {
-		sendMessage: jest.Mock;
+		$transaction: jest.Mock;
 	};
 	let service: SubscriptionExpiryService;
 
@@ -86,6 +80,16 @@ describe('SubscriptionExpiryService durable delivery', () => {
 		jest.useFakeTimers();
 		jest.setSystemTime(NOW);
 
+		transaction = {
+			subscriptionExpiryReminder: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+				findFirst: jest.fn().mockResolvedValue(null),
+				update: jest.fn().mockResolvedValue({})
+			},
+			outboxEvent: {
+				create: jest.fn().mockResolvedValue({})
+			}
+		};
 		prisma = {
 			subscription: {
 				findMany: jest.fn().mockResolvedValue([]),
@@ -94,50 +98,34 @@ describe('SubscriptionExpiryService durable delivery', () => {
 			subscriptionExpiryReminder: {
 				createMany: jest.fn().mockResolvedValue({ count: 0 }),
 				findMany: jest.fn().mockResolvedValue([]),
-				findFirst: jest.fn().mockResolvedValue(null),
-				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
 				aggregate: jest.fn().mockResolvedValue({
-					_min: { availableAt: null, lockedAt: null }
+					_min: { availableAt: null }
 				})
-			}
-		};
-		emailService = {
-			sendSubscriptionExpiryReminder: jest
-				.fn()
-				.mockResolvedValue(undefined)
-		};
-		telegramBotService = {
-			deactivateNotificationChannelByChatId: jest
-				.fn()
-				.mockResolvedValue(undefined)
-		};
-		telegramInfoTransport = {
-			sendMessage: jest.fn().mockResolvedValue(undefined)
+			},
+			$transaction: jest.fn(callback => callback(transaction))
 		};
 		service = new SubscriptionExpiryService(
-			prisma as unknown as PrismaService,
-			emailService as unknown as EmailService,
-			telegramBotService as unknown as TelegramBotService,
-			telegramInfoTransport as unknown as TelegramInfoTransportService
+			prisma as unknown as PrismaService
 		);
 	});
 
 	afterEach(() => {
+		service.onModuleDestroy();
 		jest.useRealTimers();
 	});
 
 	const sendExpiryReminders = () =>
 		(service as any).sendExpiryReminders() as Promise<{
-			sentCount: number;
+			dispatchedCount: number;
 			failedCount: number;
 		}>;
 
-	it('does not block application bootstrap on startup deliveries', async () => {
+	it('does not block application bootstrap on startup maintenance', async () => {
 		const maintenance = jest
 			.spyOn(service as any, 'runSubscriptionMaintenance')
 			.mockResolvedValue({
 				expiredCount: 0,
-				reminders: { sentCount: 0, failedCount: 0 }
+				reminders: { dispatchedCount: 0, failedCount: 0 }
 			});
 		const scheduleNext = jest
 			.spyOn(service as any, 'scheduleNext')
@@ -151,7 +139,7 @@ describe('SubscriptionExpiryService durable delivery', () => {
 		expect(scheduleNext).toHaveBeenCalledTimes(1);
 	});
 
-	it('seeds a reminder, claims it with CAS, sends deterministic email and marks it SENT', async () => {
+	it('seeds, claims and transactionally dispatches an email reminder', async () => {
 		const reminder = createReminder();
 		prisma.subscription.findMany
 			.mockResolvedValueOnce([])
@@ -171,16 +159,13 @@ describe('SubscriptionExpiryService durable delivery', () => {
 		prisma.subscriptionExpiryReminder.findMany.mockResolvedValue([
 			reminder
 		]);
-		prisma.subscriptionExpiryReminder.findFirst.mockResolvedValue({
+		transaction.subscriptionExpiryReminder.findFirst.mockResolvedValue({
 			...reminder,
 			attempts: 1
 		});
-		prisma.subscriptionExpiryReminder.updateMany
-			.mockResolvedValueOnce({ count: 1 })
-			.mockResolvedValueOnce({ count: 1 });
 
 		await expect(sendExpiryReminders()).resolves.toEqual({
-			sentCount: 1,
+			dispatchedCount: 1,
 			failedCount: 0
 		});
 
@@ -200,42 +185,53 @@ describe('SubscriptionExpiryService durable delivery', () => {
 			skipDuplicates: true
 		});
 		expect(
-			prisma.subscriptionExpiryReminder.updateMany
+			transaction.subscriptionExpiryReminder.updateMany
 		).toHaveBeenNthCalledWith(1, {
 			where: {
 				id: reminder.id,
-				OR: expect.any(Array)
+				status: SubscriptionExpiryReminderStatus.PENDING,
+				availableAt: { lte: NOW }
 			},
 			data: {
 				status: SubscriptionExpiryReminderStatus.PROCESSING,
 				lockedAt: NOW,
-				lockedBy: expect.any(String),
+				lockedBy: expect.stringMatching(/^subscription-expiry:/),
 				attempts: { increment: 1 }
 			}
 		});
-		expect(
-			emailService.sendSubscriptionExpiryReminder
-		).toHaveBeenCalledWith(
-			reminder.sentTo,
+		const outbox = transaction.outboxEvent.create.mock.calls[0][0].data;
+		expect(outbox).toEqual(
 			expect.objectContaining({
-				daysBeforeExpiry: reminder.daysBeforeExpiry,
-				planLabel: 'Easy'
-			}),
-			{
-				messageId: `<${reminder.id}.subscription-expiry@winwidget.ru>`
-			}
+				eventType: 'notification.subscription-expiry.email.requested.v1',
+				routingKey: 'notification.subscription-expiry.email.requested.v1',
+				deduplicationKey:
+					'notification-dispatch:subscription-expiry:reminder-1:v1'
+			})
 		);
+		expect(outbox.payload).toEqual({
+			schemaVersion: 1,
+			eventType: 'notification.subscription-expiry.email.requested.v1',
+			reference: {
+				type: 'subscription-expiry-reminder',
+				id: reminder.id
+			},
+			destination: { email: reminder.sentTo },
+			content: {
+				daysBeforeExpiry: 3,
+				planLabel: 'Easy',
+				expiresAtLabel: expect.any(String)
+			}
+		});
 		expect(
-			prisma.subscriptionExpiryReminder.updateMany
+			transaction.subscriptionExpiryReminder.updateMany
 		).toHaveBeenNthCalledWith(2, {
 			where: {
 				id: reminder.id,
 				status: SubscriptionExpiryReminderStatus.PROCESSING,
-				lockedBy: expect.any(String)
+				lockedBy: expect.stringMatching(/^subscription-expiry:/),
+				lockedAt: NOW
 			},
 			data: {
-				status: SubscriptionExpiryReminderStatus.SENT,
-				sentAt: NOW,
 				lockedAt: null,
 				lockedBy: null,
 				lastError: null
@@ -243,114 +239,7 @@ describe('SubscriptionExpiryService durable delivery', () => {
 		});
 	});
 
-	it('does not send when another replica wins the claim race', async () => {
-		const reminder = createReminder();
-		prisma.subscriptionExpiryReminder.findMany.mockResolvedValue([
-			reminder
-		]);
-		prisma.subscriptionExpiryReminder.updateMany.mockResolvedValue({
-			count: 0
-		});
-
-		await expect(sendExpiryReminders()).resolves.toEqual({
-			sentCount: 0,
-			failedCount: 0
-		});
-
-		expect(
-			prisma.subscriptionExpiryReminder.updateMany
-		).toHaveBeenCalledTimes(1);
-		expect(
-			emailService.sendSubscriptionExpiryReminder
-		).not.toHaveBeenCalled();
-		expect(telegramInfoTransport.sendMessage).not.toHaveBeenCalled();
-	});
-
-	it('returns a transient SMTP failure to PENDING with backoff and cleared locks', async () => {
-		const reminder = createReminder();
-		const smtpError = Object.assign(
-			new Error('SMTP connection timed out'),
-			{
-				code: 'ETIMEDOUT'
-			}
-		);
-		prisma.subscriptionExpiryReminder.findMany.mockResolvedValue([
-			reminder
-		]);
-		prisma.subscriptionExpiryReminder.findFirst.mockResolvedValue({
-			...reminder,
-			attempts: 1
-		});
-		prisma.subscriptionExpiryReminder.updateMany
-			.mockResolvedValueOnce({ count: 1 })
-			.mockResolvedValueOnce({ count: 1 });
-		emailService.sendSubscriptionExpiryReminder.mockRejectedValue(
-			smtpError
-		);
-
-		await expect(sendExpiryReminders()).resolves.toEqual({
-			sentCount: 0,
-			failedCount: 1
-		});
-
-		expect(
-			prisma.subscriptionExpiryReminder.updateMany
-		).toHaveBeenNthCalledWith(2, {
-			where: {
-				id: reminder.id,
-				status: SubscriptionExpiryReminderStatus.PROCESSING,
-				lockedBy: expect.any(String)
-			},
-			data: {
-				status: SubscriptionExpiryReminderStatus.PENDING,
-				availableAt: new Date(NOW.getTime() + 30_000),
-				lockedAt: null,
-				lockedBy: null,
-				lastError: 'SMTP_ETIMEDOUT: SMTP delivery failed temporarily'
-			}
-		});
-	});
-
-	it('uses the attempts value reloaded after the claim to enforce the retry budget', async () => {
-		const candidate = createReminder({ attempts: 0 });
-		const claimed = createReminder({ attempts: 4 });
-		prisma.subscriptionExpiryReminder.findMany.mockResolvedValue([
-			candidate
-		]);
-		prisma.subscriptionExpiryReminder.findFirst.mockResolvedValue(claimed);
-		prisma.subscriptionExpiryReminder.updateMany
-			.mockResolvedValueOnce({ count: 1 })
-			.mockResolvedValueOnce({ count: 1 });
-		emailService.sendSubscriptionExpiryReminder.mockRejectedValue(
-			Object.assign(new Error('SMTP connection timed out'), {
-				code: 'ETIMEDOUT'
-			})
-		);
-
-		await expect(sendExpiryReminders()).resolves.toEqual({
-			sentCount: 0,
-			failedCount: 1
-		});
-
-		expect(
-			prisma.subscriptionExpiryReminder.updateMany
-		).toHaveBeenNthCalledWith(2, {
-			where: {
-				id: claimed.id,
-				status: SubscriptionExpiryReminderStatus.PROCESSING,
-				lockedBy: expect.any(String)
-			},
-			data: {
-				status: SubscriptionExpiryReminderStatus.FAILED,
-				availableAt: NOW,
-				lockedAt: null,
-				lockedBy: null,
-				lastError: 'SMTP_ETIMEDOUT: SMTP delivery failed temporarily'
-			}
-		});
-	});
-
-	it('marks an unavailable Telegram destination FAILED and deactivates it', async () => {
+	it('dispatches a Telegram reminder without calling Telegram from the monolith', async () => {
 		const reminder = createReminder({
 			sentTo: 'telegram:123456789',
 			user: {
@@ -364,49 +253,39 @@ describe('SubscriptionExpiryService durable delivery', () => {
 		prisma.subscriptionExpiryReminder.findMany.mockResolvedValue([
 			reminder
 		]);
-		prisma.subscriptionExpiryReminder.findFirst.mockResolvedValue({
-			...reminder,
-			attempts: 1
-		});
-		prisma.subscriptionExpiryReminder.updateMany
-			.mockResolvedValueOnce({ count: 1 })
-			.mockResolvedValueOnce({ count: 1 });
-		telegramInfoTransport.sendMessage.mockRejectedValue(
-			new TelegramApiError({
-				httpStatus: 403,
-				description: 'Forbidden: bot was blocked by the user'
-			})
+		transaction.subscriptionExpiryReminder.findFirst.mockResolvedValue(
+			reminder
 		);
 
 		await expect(sendExpiryReminders()).resolves.toEqual({
-			sentCount: 0,
-			failedCount: 1
+			dispatchedCount: 1,
+			failedCount: 0
 		});
 
-		expect(telegramInfoTransport.sendMessage).toHaveBeenCalledWith(
-			'123456789',
-			expect.any(String)
+		const outbox = transaction.outboxEvent.create.mock.calls[0][0].data;
+		expect(outbox.eventType).toBe(
+			'notification.subscription-expiry.telegram.requested.v1'
 		);
-		expect(
-			telegramBotService.deactivateNotificationChannelByChatId
-		).toHaveBeenCalledWith('123456789');
-		expect(
-			prisma.subscriptionExpiryReminder.updateMany
-		).toHaveBeenNthCalledWith(2, {
-			where: {
-				id: reminder.id,
-				status: SubscriptionExpiryReminderStatus.PROCESSING,
-				lockedBy: expect.any(String)
-			},
-			data: {
-				status: SubscriptionExpiryReminderStatus.FAILED,
-				availableAt: NOW,
-				lockedAt: null,
-				lockedBy: null,
-				lastError:
-					'TELEGRAM_BOT_BLOCKED: Telegram destination is no longer available'
-			}
+		expect(outbox.payload).toEqual(
+			expect.objectContaining({
+				destination: { telegramChatId: '123456789' }
+			})
+		);
+	});
+
+	it('does not dispatch when another replica wins the claim race', async () => {
+		prisma.subscriptionExpiryReminder.findMany.mockResolvedValue([
+			createReminder()
+		]);
+		transaction.subscriptionExpiryReminder.updateMany.mockResolvedValue({
+			count: 0
 		});
+
+		await expect(sendExpiryReminders()).resolves.toEqual({
+			dispatchedCount: 0,
+			failedCount: 0
+		});
+		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
 	});
 
 	it.each([
@@ -434,37 +313,24 @@ describe('SubscriptionExpiryService durable delivery', () => {
 			'SUBSCRIPTION_CHANGED: Reminder no longer matches the active subscription'
 		]
 	])(
-		'marks %s FAILED without an external call',
+		'marks %s failed before creating an external delivery event',
 		async (_caseName, overrides, expectedReason) => {
 			const reminder = createReminder(overrides);
 			prisma.subscriptionExpiryReminder.findMany.mockResolvedValue([
 				reminder
 			]);
-			prisma.subscriptionExpiryReminder.findFirst.mockResolvedValue({
-				...reminder,
-				attempts: 1
-			});
-			prisma.subscriptionExpiryReminder.updateMany
-				.mockResolvedValueOnce({ count: 1 })
-				.mockResolvedValueOnce({ count: 1 });
+			transaction.subscriptionExpiryReminder.findFirst.mockResolvedValue(
+				reminder
+			);
 
 			await expect(sendExpiryReminders()).resolves.toEqual({
-				sentCount: 0,
+				dispatchedCount: 0,
 				failedCount: 1
 			});
-
 			expect(
-				emailService.sendSubscriptionExpiryReminder
-			).not.toHaveBeenCalled();
-			expect(telegramInfoTransport.sendMessage).not.toHaveBeenCalled();
-			expect(
-				prisma.subscriptionExpiryReminder.updateMany
-			).toHaveBeenNthCalledWith(2, {
-				where: {
-					id: reminder.id,
-					status: SubscriptionExpiryReminderStatus.PROCESSING,
-					lockedBy: expect.any(String)
-				},
+				transaction.subscriptionExpiryReminder.update
+			).toHaveBeenCalledWith({
+				where: { id: reminder.id },
 				data: {
 					status: SubscriptionExpiryReminderStatus.FAILED,
 					lockedAt: null,
@@ -472,6 +338,7 @@ describe('SubscriptionExpiryService durable delivery', () => {
 					lastError: expectedReason
 				}
 			});
+			expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
 		}
 	);
 });

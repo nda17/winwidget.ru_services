@@ -333,13 +333,13 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome
 NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://notification_delivery_runtime:<password>@127.0.0.1:5432/winwidget?schema=notification_delivery
 NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
 NOTIFICATION_DELIVERY_LISTEN_HOST=127.0.0.1
 NOTIFICATION_DELIVERY_HEALTH_PORT=4401
 NOTIFICATION_DELIVERY_PREFETCH=5
-NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,limit-email
+NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram
 NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS=90
 NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS=30
 MAINTENANCE_WORKER_KINDS=database-backup
@@ -390,11 +390,11 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome
 NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://winwidget_notification_delivery_migration:<password>@<db-host>:5432/<database>?schema=notification_delivery
 NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://winwidget_notification_delivery_runtime:<password>@<db-host>:5432/<database>?schema=notification_delivery
 NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
-NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,limit-email
+NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram
 NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS=90
 NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS=30
 MAINTENANCE_WORKER_KINDS=database-backup
@@ -409,9 +409,10 @@ SSL query-параметры добавляются в оба URL одновре
 Production deploy завершается до изменения runtime, если service credentials,
 verified volume или полный точный список consumers не заданы. Additive
 Notification Delivery migration и privilege smoke выполняются до quiesce.
-Первый cutover запрещает одновременно переносить pending core migration, затем
-останавливает producers, дренирует четыре legacy-очереди и только после этого
-переключает RabbitMQ ownership на новый сервис.
+Provider cutover запрещает одновременно переносить pending core migration,
+затем останавливает producers, дренирует legacy payment/limit, mailing и daily
+summary очереди, проверяет отсутствие `PROCESSING` subscription reminders и
+только после этого переключает физическую доставку на новый сервис.
 
 Назначение настроек:
 
@@ -457,12 +458,12 @@ polling применяется только publisher-процессом при 
 
 Текущее владение messaging-процессами:
 
-| Процесс                        | Ответственность                                                                                                            |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `outbox-publisher`             | Публикация transactional Outbox монолита и создание RabbitMQ topology                                                      |
-| `notification-delivery-worker` | Только `email`, `telegram`, `payment-email`, `limit-email`; собственные receipts, failures, retry/DLQ Outbox и control API |
-| `integration-worker`           | `webhook`, `bitrix24`, `amo-crm`, `payment-telegram`, массовые email/Telegram, `limit-telegram`, daily summary             |
-| `maintenance-worker`           | Только durable backup-задачи и их scheduler/lease                                                                          |
+| Процесс                        | Ответственность                                                                                                                                                                               |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `outbox-publisher`             | Публикация transactional Outbox монолита и создание RabbitMQ topology                                                                                                                         |
+| `notification-delivery-worker` | Физическая email/Telegram-доставка лидов, платежей, лимитов, кампаний, daily summary и subscription expiry; собственные receipts, failures, retry/DLQ Outbox, delivery outcomes и control API |
+| `integration-worker`           | CRM/webhook, оркестрация campaign/daily delivery, применение delivery outcomes и outcome недоступности пользовательского Telegram-канала                                                      |
+| `maintenance-worker`           | Только durable backup-задачи и их scheduler/lease                                                                                                                                             |
 
 Один kind не должен одновременно находиться у `integration-worker` и
 `notification-delivery-worker`. Первичный Outbox остаётся в транзакции

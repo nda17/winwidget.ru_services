@@ -1,44 +1,59 @@
-import { EmailService } from '@/email/email.service';
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
-import { classifyIntegrationError } from '@/messaging/integration-error-classifier';
 import {
 	LeadIntegrationEventPayload,
 	ResolvedLeadIntegrationEventPayload
 } from '@/messaging/lead-integration-event';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
-import { MonolithIntegrationKind } from '@/messaging/messaging.constants';
+import {
+	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	MESSAGING_ROUTING_KEYS,
+	MonolithIntegrationKind
+} from '@/messaging/messaging.constants';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
+import {
+	CampaignEmailNotificationRequestedEventPayload,
+	CampaignTelegramNotificationRequestedEventPayload,
+	NotificationDeliveryOutcomeEventPayload,
+	serializeNotificationDeliveryEvent
+} from '@/messaging/notification-delivery-event';
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
 import { PrismaService } from '@/prisma.service';
 import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
-import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
-import { Injectable, Logger } from '@nestjs/common';
+import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
+import { SCHEDULED_JOB_TYPES } from '@/scheduled-jobs/scheduled-jobs.types';
+import { Injectable } from '@nestjs/common';
 import {
 	MailingCampaignStatus,
 	MailingDeliveryChannel,
-	MailingDeliveryStatus
+	MailingDeliveryStatus,
+	Prisma,
+	SubscriptionExpiryReminderStatus
 } from '@prisma/client';
 
 type DeliveryEventPayload =
 	| LeadIntegrationEventPayload
 	| MailingDeliveryEventPayload
 	| TelegramDestinationUnavailableEventPayload
+	| NotificationDeliveryOutcomeEventPayload
 	| DailySummaryRequestedEventPayload;
 
-const MAILING_PROCESSING_LEASE_MS = 10 * 60 * 1000;
+interface MailingDeliveryOutcomeRow {
+	id: string;
+	campaignId: string;
+	status: MailingDeliveryStatus;
+}
 
 @Injectable()
 export class IntegrationDeliveryService {
-	private readonly logger = new Logger(IntegrationDeliveryService.name);
-
 	constructor(
-		private readonly emailService: EmailService,
 		private readonly safeOutboundHttpService: SafeOutboundHttpService,
 		private readonly prisma: PrismaService,
 		private readonly dailySummaryDelivery: DailySummaryDeliveryService,
 		private readonly leadDestination: LeadIntegrationDestinationService,
-		private readonly telegram: TelegramInfoTransportService
+		private readonly scheduledJobs: ScheduledJobsService
 	) {}
 
 	async deliver(
@@ -59,8 +74,14 @@ export class IntegrationDeliveryService {
 			);
 			return;
 		}
+		if (kind === 'notification-delivery-outcome') {
+			await this.applyNotificationDeliveryOutcome(
+				event as NotificationDeliveryOutcomeEventPayload
+			);
+			return;
+		}
 		if (kind === 'mailing-email' || kind === 'mailing-telegram') {
-			await this.sendMailingDelivery(kind, event, eventId);
+			await this.dispatchMailingDelivery(kind, event, eventId);
 			return;
 		}
 
@@ -104,7 +125,7 @@ export class IntegrationDeliveryService {
 		});
 	}
 
-	private async sendMailingDelivery(
+	private async dispatchMailingDelivery(
 		kind: 'mailing-email' | 'mailing-telegram',
 		event: DeliveryEventPayload,
 		eventId: string
@@ -136,7 +157,8 @@ export class IntegrationDeliveryService {
 		}
 		if (
 			delivery.status === MailingDeliveryStatus.SENT ||
-			delivery.status === MailingDeliveryStatus.CANCELLED
+			delivery.status === MailingDeliveryStatus.CANCELLED ||
+			delivery.status === MailingDeliveryStatus.PROCESSING
 		) {
 			return;
 		}
@@ -150,25 +172,45 @@ export class IntegrationDeliveryService {
 			);
 			return;
 		}
-		if (delivery.status === MailingDeliveryStatus.PROCESSING) {
-			const reclaimed = await this.prisma.mailingDelivery.updateMany({
-				where: {
-					id: delivery.id,
-					campaignId: delivery.campaignId,
-					status: MailingDeliveryStatus.PROCESSING,
-					updatedAt: {
-						equals: delivery.updatedAt,
-						lt: new Date(Date.now() - MAILING_PROCESSING_LEASE_MS)
+
+		const notificationKind =
+			expectedChannel === MailingDeliveryChannel.EMAIL
+				? ('campaign-email' as const)
+				: ('campaign-telegram' as const);
+		const notificationPayload:
+			| CampaignEmailNotificationRequestedEventPayload
+			| CampaignTelegramNotificationRequestedEventPayload =
+			expectedChannel === MailingDeliveryChannel.EMAIL
+				? {
+						schemaVersion: 1,
+						eventType: CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+						reference: {
+							type: 'mailing-delivery',
+							id: delivery.id,
+							aggregateId: delivery.campaignId
+						},
+						destination: { email: delivery.recipient },
+						content: {
+							subject: delivery.campaign.subject,
+							message: delivery.campaign.message
+						}
 					}
-				},
-				data: {
-					status: MailingDeliveryStatus.PENDING
-				}
-			});
-			if (reclaimed.count !== 1) {
-				throw new Error('Mailing delivery is already processing');
-			}
-		}
+				: {
+						schemaVersion: 1,
+						eventType: CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+						reference: {
+							type: 'mailing-delivery',
+							id: delivery.id,
+							aggregateId: delivery.campaignId
+						},
+						destination: {
+							telegramChatId: delivery.recipient
+						},
+						content: {
+							subject: delivery.campaign.subject,
+							message: delivery.campaign.message
+						}
+					};
 
 		const claimed = await this.prisma.$transaction(async transaction => {
 			const result = await transaction.mailingDelivery.updateMany({
@@ -179,7 +221,8 @@ export class IntegrationDeliveryService {
 				},
 				data: {
 					status: MailingDeliveryStatus.PROCESSING,
-					attempts: { increment: 1 }
+					attempts: { increment: 1 },
+					lastError: null
 				}
 			});
 			if (result.count !== 1) return false;
@@ -193,6 +236,24 @@ export class IntegrationDeliveryService {
 					startedAt: new Date()
 				}
 			});
+			await transaction.outboxEvent.createMany({
+				data: [
+					{
+						messageId: eventId,
+						deduplicationKey: `notification-dispatch:${eventId}:${notificationKind}:v1`,
+						eventType: notificationPayload.eventType,
+						routingKey: MESSAGING_ROUTING_KEYS[notificationKind],
+						payload: serializeNotificationDeliveryEvent(
+							notificationPayload
+						),
+						headers: createMessagingHeaders({
+							messageId: eventId,
+							causationId: eventId
+						})
+					}
+				],
+				skipDuplicates: true
+			});
 			return true;
 		});
 		if (!claimed) {
@@ -202,114 +263,105 @@ export class IntegrationDeliveryService {
 			});
 			if (
 				current?.status === MailingDeliveryStatus.SENT ||
-				current?.status === MailingDeliveryStatus.CANCELLED
+				current?.status === MailingDeliveryStatus.CANCELLED ||
+				current?.status === MailingDeliveryStatus.PROCESSING
 			) {
 				return;
 			}
 			throw new Error('Mailing delivery could not be claimed');
 		}
+	}
 
-		try {
-			if (expectedChannel === MailingDeliveryChannel.EMAIL) {
-				await this.emailService.sendAdminBroadcast(
-					delivery.recipient,
-					{
-						subject: delivery.campaign.subject,
-						message: delivery.campaign.message
-					},
-					{ messageId: `<${eventId}.mailing@winwidget.ru>` }
-				);
-			} else {
-				await this.sendMailingTelegramMessages(
-					delivery.id,
-					delivery.campaignId,
-					delivery.recipient,
-					this.buildTelegramBroadcastMessages(
-						delivery.campaign.subject,
-						delivery.campaign.message
-					),
-					delivery.nextChunkIndex
-				);
-			}
-
-			await this.completeMailingDelivery(delivery.id, delivery.campaignId);
-		} catch (error) {
-			await this.prisma.mailingDelivery.updateMany({
-				where: {
-					id: delivery.id,
-					campaignId: delivery.campaignId,
-					status: MailingDeliveryStatus.PROCESSING
-				},
-				data: {
-					status: MailingDeliveryStatus.PENDING,
-					lastError:
-						error instanceof Error
-							? error.message.slice(0, 10_000)
-							: String(error).slice(0, 10_000)
-				}
-			});
-			throw error;
+	private async applyNotificationDeliveryOutcome(
+		event: NotificationDeliveryOutcomeEventPayload
+	): Promise<void> {
+		switch (event.reference.type) {
+			case 'mailing-delivery':
+				await this.applyMailingDeliveryOutcome(event);
+				return;
+			case 'daily-summary-job':
+				await this.applyDailySummaryDeliveryOutcome(event);
+				return;
+			case 'subscription-expiry-reminder':
+				await this.applySubscriptionExpiryDeliveryOutcome(event);
+				return;
 		}
 	}
 
-	private async sendMailingTelegramMessages(
-		deliveryId: string,
-		campaignId: string,
-		chatId: string,
-		messages: string[],
-		nextChunkIndex: number
+	private async applyMailingDeliveryOutcome(
+		event: NotificationDeliveryOutcomeEventPayload
 	): Promise<void> {
 		if (
-			!Number.isInteger(nextChunkIndex) ||
-			nextChunkIndex < 0 ||
-			nextChunkIndex > messages.length
+			event.reference.type !== 'mailing-delivery' ||
+			(event.sourceKind !== 'campaign-email' &&
+				event.sourceKind !== 'campaign-telegram')
 		) {
-			throw new Error('Invalid Telegram mailing chunk progress');
+			throw new Error('Invalid mailing delivery outcome');
 		}
-
-		for (let index = nextChunkIndex; index < messages.length; index += 1) {
-			await this.sendTelegramMessage('mailing-telegram', chatId, [
-				messages[index]
-			]);
-			const checkpoint = await this.prisma.mailingDelivery.updateMany({
-				where: {
-					id: deliveryId,
-					campaignId,
-					status: MailingDeliveryStatus.PROCESSING,
-					nextChunkIndex: index
-				},
-				data: { nextChunkIndex: index + 1 }
-			});
-			if (checkpoint.count !== 1) {
-				throw new Error('Telegram mailing chunk progress was lost');
-			}
-		}
-	}
-
-	private async completeMailingDelivery(
-		deliveryId: string,
-		campaignId: string
-	): Promise<void> {
+		const reference = event.reference;
 		await this.prisma.$transaction(async transaction => {
-			const updated = await transaction.mailingDelivery.updateMany({
-				where: {
-					id: deliveryId,
-					status: MailingDeliveryStatus.PROCESSING
-				},
-				data: {
-					status: MailingDeliveryStatus.SENT,
-					sentAt: new Date(),
-					lastError: null
+			const rows = await transaction.$queryRaw<
+				MailingDeliveryOutcomeRow[]
+			>(
+				Prisma.sql`
+					SELECT
+						"id",
+						"campaign_id" AS "campaignId",
+						"status"
+					FROM "mailing_deliveries"
+						WHERE "id" = ${reference.id}::uuid
+					FOR UPDATE
+				`
+			);
+			const delivery = rows[0];
+			if (!delivery || delivery.campaignId !== reference.aggregateId) {
+				throw new Error('Mailing delivery outcome reference not found');
+			}
+
+			let campaign;
+			if (event.status === 'FAILED') {
+				if (delivery.status !== MailingDeliveryStatus.PROCESSING) return;
+				await transaction.mailingDelivery.update({
+					where: { id: delivery.id },
+					data: {
+						status: MailingDeliveryStatus.FAILED,
+						lastError: this.getOutcomeError(event),
+						sentAt: null
+					}
+				});
+				campaign = await transaction.mailingCampaign.update({
+					where: { id: delivery.campaignId },
+					data: { failedCount: { increment: 1 } }
+				});
+			} else {
+				if (
+					delivery.status !== MailingDeliveryStatus.PROCESSING &&
+					delivery.status !== MailingDeliveryStatus.FAILED
+				) {
+					return;
 				}
-			});
-			if (updated.count !== 1) return;
-			const campaign = await transaction.mailingCampaign.update({
-				where: { id: campaignId },
-				data: { sentCount: { increment: 1 } }
-			});
+				await transaction.mailingDelivery.update({
+					where: { id: delivery.id },
+					data: {
+						status: MailingDeliveryStatus.SENT,
+						sentAt: new Date(event.occurredAt),
+						lastError: null
+					}
+				});
+				campaign = await transaction.mailingCampaign.update({
+					where: { id: delivery.campaignId },
+					data: {
+						sentCount: { increment: 1 },
+						...(delivery.status === MailingDeliveryStatus.FAILED
+							? { failedCount: { decrement: 1 } }
+							: {})
+					}
+				});
+			}
+
 			const pending = await transaction.mailingDelivery.count({
 				where: {
-					campaignId,
+					campaignId: delivery.campaignId,
 					status: {
 						in: [
 							MailingDeliveryStatus.PENDING,
@@ -321,7 +373,7 @@ export class IntegrationDeliveryService {
 			if (pending !== 0) return;
 			await transaction.mailingCampaign.updateMany({
 				where: {
-					id: campaignId,
+					id: delivery.campaignId,
 					status: { not: MailingCampaignStatus.CANCELLED }
 				},
 				data: {
@@ -333,6 +385,110 @@ export class IntegrationDeliveryService {
 				}
 			});
 		});
+	}
+
+	private async applyDailySummaryDeliveryOutcome(
+		event: NotificationDeliveryOutcomeEventPayload
+	): Promise<void> {
+		if (
+			event.reference.type !== 'daily-summary-job' ||
+			event.sourceKind !== 'daily-summary-delivery-telegram'
+		) {
+			throw new Error('Invalid daily summary delivery outcome');
+		}
+		await this.prisma.$transaction(async transaction => {
+			if (event.status === 'FAILED') {
+				await this.scheduledJobs.failExternalDeliveryInTransaction(
+					transaction,
+					event.reference.id,
+					event.sourceEventId,
+					this.getOutcomeError(event)
+				);
+				return;
+			}
+
+			const job =
+				await this.scheduledJobs.completeExternalDeliveryInTransaction(
+					transaction,
+					event.reference.id,
+					event.sourceEventId,
+					{
+						telegramSent: true,
+						sentAt: event.occurredAt
+					}
+				);
+			if (!job) return;
+			if (
+				job.jobType !== SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY ||
+				!job.periodStart
+			) {
+				throw new Error('Daily summary outcome references an invalid job');
+			}
+			await transaction.telegramBotSettings.update({
+				where: { id: 'singleton' },
+				data: {
+					dailySummaryLastSentPeriodStart: new Date(job.periodStart),
+					dailySummaryLastSentAt: new Date(event.occurredAt)
+				}
+			});
+		});
+	}
+
+	private async applySubscriptionExpiryDeliveryOutcome(
+		event: NotificationDeliveryOutcomeEventPayload
+	): Promise<void> {
+		if (
+			event.reference.type !== 'subscription-expiry-reminder' ||
+			(event.sourceKind !== 'subscription-expiry-email' &&
+				event.sourceKind !== 'subscription-expiry-telegram')
+		) {
+			throw new Error('Invalid subscription expiry delivery outcome');
+		}
+		if (event.status === 'FAILED') {
+			await this.prisma.subscriptionExpiryReminder.updateMany({
+				where: {
+					id: event.reference.id,
+					status: SubscriptionExpiryReminderStatus.PROCESSING
+				},
+				data: {
+					status: SubscriptionExpiryReminderStatus.FAILED,
+					lockedAt: null,
+					lockedBy: null,
+					lastError: this.getOutcomeError(event)
+				}
+			});
+			return;
+		}
+		await this.prisma.subscriptionExpiryReminder.updateMany({
+			where: {
+				id: event.reference.id,
+				status: {
+					in: [
+						SubscriptionExpiryReminderStatus.PROCESSING,
+						SubscriptionExpiryReminderStatus.FAILED
+					]
+				}
+			},
+			data: {
+				status: SubscriptionExpiryReminderStatus.SENT,
+				sentAt: new Date(event.occurredAt),
+				lockedAt: null,
+				lockedBy: null,
+				lastError: null
+			}
+		});
+	}
+
+	private getOutcomeError(
+		event: NotificationDeliveryOutcomeEventPayload
+	): string {
+		if (event.status !== 'FAILED' || !event.failure) {
+			throw new Error('Failed notification outcome is missing failure');
+		}
+		return `${event.failure.normalizedCode}: ${event.failure.safeReason}`.slice(
+			0,
+			10_000
+		);
 	}
 
 	private async cancelPendingMailingDelivery(
@@ -362,63 +518,6 @@ export class IntegrationDeliveryService {
 				data: { cancelledCount: { increment: 1 } }
 			});
 		});
-	}
-
-	private buildTelegramBroadcastMessages(
-		subject: string,
-		message: string
-	) {
-		const chunks: string[] = [];
-		let rest = message;
-		while (rest.length > 3500) {
-			const slice = rest.slice(0, 3500);
-			const lastLineBreak = slice.lastIndexOf('\n');
-			const splitAt = lastLineBreak > 2100 ? lastLineBreak + 1 : 3500;
-			chunks.push(rest.slice(0, splitAt).trimEnd());
-			rest = rest.slice(splitAt).trimStart();
-		}
-		if (rest) chunks.push(rest);
-		if (!chunks.length) chunks.push('');
-		return chunks.map((chunk, index) =>
-			index === 0 ? [subject, '', chunk].join('\n') : chunk
-		);
-	}
-
-	private async sendTelegramMessage(
-		kind: 'mailing-telegram',
-		chatId: string,
-		messages: string[],
-		parseMode: 'HTML' | null = null
-	): Promise<void> {
-		for (const text of messages) {
-			try {
-				await this.telegram.sendMessage(chatId, text, {
-					parseMode
-				});
-			} catch (error) {
-				const classification = classifyIntegrationError(kind, error);
-				if (classification.mayDisableDestination) {
-					try {
-						await this.prisma.telegramNotificationChannel.updateMany({
-							where: { chatId },
-							data: {
-								isActive: false,
-								disabledAt: new Date()
-							}
-						});
-					} catch (updateError) {
-						this.logger.warn(
-							`Could not deactivate Telegram destination chatId=${chatId}: ${
-								updateError instanceof Error
-									? updateError.message
-									: String(updateError)
-							}`
-						);
-					}
-				}
-				throw error;
-			}
-		}
 	}
 
 	private async sendWebhook(
@@ -601,14 +700,5 @@ export class IntegrationDeliveryService {
 			calculator: 'Калькулятор стоимости'
 		};
 		return labels[event.source];
-	}
-
-	private escapeHtml(value: string): string {
-		return value
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;')
-			.replace(/'/g, '&#039;');
 	}
 }

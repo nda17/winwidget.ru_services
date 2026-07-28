@@ -1,9 +1,15 @@
 import {
+	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
 	LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
+	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	OUTBOX_EVENT_TYPE,
 	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	PAYMENT_SUCCEEDED_EVENT_TYPE,
+	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
+	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from './messaging.constants';
 
@@ -135,11 +141,130 @@ export interface TelegramDestinationUnavailableEventPayload {
 	schemaVersion: 1;
 	eventType: typeof TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE;
 	sourceEventId: string;
-	sourceKind: 'telegram' | 'limit-telegram';
+	sourceKind:
+		| 'telegram'
+		| 'limit-telegram'
+		| 'campaign-telegram'
+		| 'subscription-expiry-telegram';
 	destination: {
 		telegramChatId: string;
 	};
 	normalizedCode: string;
+	occurredAt: string;
+}
+
+export type NotificationDeliveryReference =
+	| {
+			type: 'mailing-delivery';
+			id: string;
+			aggregateId: string;
+	  }
+	| {
+			type: 'daily-summary-job';
+			id: string;
+	  }
+	| {
+			type: 'subscription-expiry-reminder';
+			id: string;
+	  };
+
+interface CampaignNotificationContent {
+	subject: string;
+	message: string;
+}
+
+interface SubscriptionExpiryNotificationContent {
+	daysBeforeExpiry: number;
+	planLabel: string;
+	expiresAtLabel: string;
+}
+
+export interface CampaignEmailNotificationRequestedEventPayload {
+	schemaVersion: 1;
+	eventType: typeof CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE;
+	reference: Extract<
+		NotificationDeliveryReference,
+		{ type: 'mailing-delivery' }
+	>;
+	destination: {
+		email: string;
+	};
+	content: CampaignNotificationContent;
+}
+
+export interface CampaignTelegramNotificationRequestedEventPayload {
+	schemaVersion: 1;
+	eventType: typeof CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE;
+	reference: Extract<
+		NotificationDeliveryReference,
+		{ type: 'mailing-delivery' }
+	>;
+	destination: {
+		telegramChatId: string;
+	};
+	content: CampaignNotificationContent;
+}
+
+export interface DailySummaryTelegramNotificationRequestedEventPayload {
+	schemaVersion: 1;
+	eventType: typeof DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE;
+	reference: Extract<
+		NotificationDeliveryReference,
+		{ type: 'daily-summary-job' }
+	>;
+	destination: {
+		telegramChatId: string;
+		messageThreadId: number;
+	};
+	content: {
+		text: string;
+	};
+}
+
+export interface SubscriptionExpiryEmailNotificationRequestedEventPayload {
+	schemaVersion: 1;
+	eventType: typeof SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE;
+	reference: Extract<
+		NotificationDeliveryReference,
+		{ type: 'subscription-expiry-reminder' }
+	>;
+	destination: {
+		email: string;
+	};
+	content: SubscriptionExpiryNotificationContent;
+}
+
+export interface SubscriptionExpiryTelegramNotificationRequestedEventPayload {
+	schemaVersion: 1;
+	eventType: typeof SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE;
+	reference: Extract<
+		NotificationDeliveryReference,
+		{ type: 'subscription-expiry-reminder' }
+	>;
+	destination: {
+		telegramChatId: string;
+	};
+	content: SubscriptionExpiryNotificationContent;
+}
+
+export type OutcomeNotificationDeliveryKind =
+	| 'campaign-email'
+	| 'campaign-telegram'
+	| 'daily-summary-delivery-telegram'
+	| 'subscription-expiry-email'
+	| 'subscription-expiry-telegram';
+
+export interface NotificationDeliveryOutcomeEventPayload {
+	schemaVersion: 1;
+	eventType: typeof NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
+	sourceEventId: string;
+	sourceKind: OutcomeNotificationDeliveryKind;
+	reference: NotificationDeliveryReference;
+	status: 'DELIVERED' | 'FAILED';
+	failure: {
+		normalizedCode: string;
+		safeReason: string;
+	} | null;
 	occurredAt: string;
 }
 
@@ -149,4 +274,9 @@ export type NotificationDeliveryEventPayload =
 	| PaymentTelegramNotificationEventPayload
 	| LimitReachedEmailEventPayload
 	| LimitReachedTelegramEventPayload
+	| CampaignEmailNotificationRequestedEventPayload
+	| CampaignTelegramNotificationRequestedEventPayload
+	| DailySummaryTelegramNotificationRequestedEventPayload
+	| SubscriptionExpiryEmailNotificationRequestedEventPayload
+	| SubscriptionExpiryTelegramNotificationRequestedEventPayload
 	| TelegramDestinationUnavailableEventPayload;

@@ -209,7 +209,12 @@ describe('IntegrationWorkerService', () => {
 			'payment-email',
 			'payment-telegram',
 			'limit-email',
-			'limit-telegram'
+			'limit-telegram',
+			'campaign-email',
+			'campaign-telegram',
+			'daily-summary-delivery-telegram',
+			'subscription-expiry-email',
+			'subscription-expiry-telegram'
 		]);
 		expect(MONOLITH_INTEGRATION_KINDS).toEqual([
 			'webhook',
@@ -218,7 +223,8 @@ describe('IntegrationWorkerService', () => {
 			'mailing-email',
 			'mailing-telegram',
 			'daily-summary-telegram',
-			'telegram-destination-unavailable'
+			'telegram-destination-unavailable',
+			'notification-delivery-outcome'
 		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
 			MONOLITH_INTEGRATION_KINDS.length

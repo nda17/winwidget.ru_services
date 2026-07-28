@@ -588,7 +588,12 @@ describe('NotificationDeliveryControlService', () => {
 						'payment-email',
 						'payment-telegram',
 						'limit-email',
-						'limit-telegram'
+						'limit-telegram',
+						'campaign-email',
+						'campaign-telegram',
+						'daily-summary-delivery-telegram',
+						'subscription-expiry-email',
+						'subscription-expiry-telegram'
 					]
 				}
 			},

@@ -2,6 +2,7 @@ import {
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
 	MESSAGING_ROUTING_KEYS,
+	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NotificationDeliveryKind,
 	NOTIFICATION_DELIVERY_KINDS,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
@@ -308,7 +309,7 @@ export class NotificationDeliveryWorkerService
 		}
 
 		try {
-			await this.adapter.deliver(kind, payload, eventId);
+			await this.adapter.deliver(kind, payload, eventId, claim.lockToken);
 		} catch (deliveryError) {
 			await this.handleDeliveryFailure({
 				kind,
@@ -325,7 +326,7 @@ export class NotificationDeliveryWorkerService
 		}
 
 		try {
-			await this.markDelivered(eventId, kind, claim.lockToken);
+			await this.markDelivered(eventId, kind, claim.lockToken, payload);
 			this.ackMessage(message);
 			this.logger.log(
 				`Notification delivered eventId=${eventId} kind=${kind}`
@@ -559,7 +560,8 @@ export class NotificationDeliveryWorkerService
 	private async markDelivered(
 		eventId: string,
 		consumer: NotificationDeliveryKind,
-		lockToken: string
+		lockToken: string,
+		payload: NotificationDeliveryEventPayload
 	): Promise<void> {
 		await this.prisma.$transaction(async transaction => {
 			const now = new Date();
@@ -599,6 +601,13 @@ export class NotificationDeliveryWorkerService
 					retryingAt: null,
 					activeRetryToken: null
 				}
+			});
+			await this.createNotificationDeliveryOutcome(transaction, {
+				kind: consumer,
+				eventId,
+				payload,
+				status: 'DELIVERED',
+				failure: null
 			});
 		});
 	}
@@ -753,6 +762,80 @@ export class NotificationDeliveryWorkerService
 				transaction,
 				input
 			);
+			await this.createNotificationDeliveryOutcome(transaction, {
+				kind: input.kind,
+				eventId: input.eventId,
+				payload: input.payload,
+				status: 'FAILED',
+				failure: {
+					normalizedCode: input.classification.normalizedCode,
+					safeReason: input.classification.safeReason
+				}
+			});
+		});
+	}
+
+	private async createNotificationDeliveryOutcome(
+		transaction: Prisma.TransactionClient,
+		input: {
+			kind: NotificationDeliveryKind;
+			eventId: string;
+			payload: NotificationDeliveryEventPayload;
+			status: 'DELIVERED' | 'FAILED';
+			failure: {
+				normalizedCode: string;
+				safeReason: string;
+			} | null;
+		}
+	): Promise<void> {
+		if (
+			input.kind !== 'campaign-email' &&
+			input.kind !== 'campaign-telegram' &&
+			input.kind !== 'daily-summary-delivery-telegram' &&
+			input.kind !== 'subscription-expiry-email' &&
+			input.kind !== 'subscription-expiry-telegram'
+		) {
+			return;
+		}
+		const reference = (
+			input.payload as {
+				reference?: unknown;
+			}
+		).reference;
+		if (!reference || typeof reference !== 'object') return;
+
+		const messageId = randomUUID();
+		const payload = {
+			schemaVersion: 1 as const,
+			eventType: NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+			sourceEventId: input.eventId,
+			sourceKind: input.kind,
+			reference,
+			status: input.status,
+			failure: input.failure
+				? {
+						normalizedCode: input.failure.normalizedCode.slice(0, 255),
+						safeReason: input.failure.safeReason.slice(0, 2000)
+					}
+				: null,
+			occurredAt: new Date().toISOString()
+		};
+		await transaction.notificationDeliveryOutboxEvent.createMany({
+			data: [
+				{
+					messageId,
+					deduplicationKey: `notification:${input.eventId}:${input.kind}:outcome:${input.status.toLowerCase()}:v1`,
+					exchange: NotificationDeliveryExchange.EVENTS,
+					eventType: NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+					routingKey: NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+					payload: payload as unknown as Prisma.InputJsonValue,
+					headers: createMessagingHeaders({
+						messageId,
+						causationId: input.eventId
+					}) as Prisma.InputJsonObject
+				}
+			],
+			skipDuplicates: true
 		});
 	}
 
@@ -767,7 +850,10 @@ export class NotificationDeliveryWorkerService
 	): Promise<void> {
 		if (
 			!input.classification.mayDisableDestination ||
-			(input.kind !== 'telegram' && input.kind !== 'limit-telegram')
+			(input.kind !== 'telegram' &&
+				input.kind !== 'limit-telegram' &&
+				input.kind !== 'campaign-telegram' &&
+				input.kind !== 'subscription-expiry-telegram')
 		) {
 			return;
 		}
@@ -1078,9 +1164,14 @@ export class NotificationDeliveryWorkerService
 			malformed: true,
 			contentLength: message.content.length
 		};
+		let notificationPayload: NotificationDeliveryEventPayload | null =
+			null;
 		try {
-			payload = parseNotificationDeliveryMessage(kind, message)
-				.payload as unknown as Prisma.InputJsonValue;
+			notificationPayload = parseNotificationDeliveryMessage(
+				kind,
+				message
+			).payload;
+			payload = notificationPayload as unknown as Prisma.InputJsonValue;
 		} catch {}
 
 		try {
@@ -1198,6 +1289,18 @@ export class NotificationDeliveryWorkerService
 						},
 						update: failureData
 					});
+					if (notificationPayload) {
+						await this.createNotificationDeliveryOutcome(transaction, {
+							kind,
+							eventId,
+							payload: notificationPayload,
+							status: 'FAILED',
+							failure: {
+								normalizedCode,
+								safeReason
+							}
+						});
+					}
 					return true;
 				}
 			);

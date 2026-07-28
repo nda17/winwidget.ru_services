@@ -1,4 +1,3 @@
-import { EmailModule } from '@/email/email.module';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
@@ -10,7 +9,6 @@ import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.se
 import { DailySummaryReportService } from '@/reports/daily-summary-report.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { ScheduledJobsModule } from '@/scheduled-jobs/scheduled-jobs.module';
-import { TelegramInfoTransportModule } from '@/telegram-bot/telegram-info-transport.module';
 import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
@@ -21,10 +19,8 @@ import { ConfigModule } from '@nestjs/config';
 		}),
 		PrismaModule,
 		RabbitMqModule,
-		EmailModule,
 		SafeOutboundHttpModule,
-		ScheduledJobsModule,
-		TelegramInfoTransportModule
+		ScheduledJobsModule
 	],
 	providers: [
 		MessagingHeartbeatService,

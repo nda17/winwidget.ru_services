@@ -1,35 +1,49 @@
 import { EmailService } from '../email/email.service';
 import {
+	CampaignEmailNotificationRequestedEventPayload,
+	CampaignTelegramNotificationRequestedEventPayload,
+	DailySummaryTelegramNotificationRequestedEventPayload,
 	LeadIntegrationEventPayloadV2,
 	LimitReachedEmailEventPayload,
 	LimitReachedTelegramEventPayload,
 	PaymentTelegramNotificationEventPayload,
 	PaymentSucceededEventPayload,
-	ResolvedLeadIntegrationEventPayload
+	ResolvedLeadIntegrationEventPayload,
+	SubscriptionExpiryEmailNotificationRequestedEventPayload,
+	SubscriptionExpiryTelegramNotificationRequestedEventPayload
 } from '../messaging/delivery-event.types';
 import {
+	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
 	LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	NotificationDeliveryKind,
 	OUTBOX_EVENT_TYPE,
 	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-	PAYMENT_SUCCEEDED_EVENT_TYPE
+	PAYMENT_SUCCEEDED_EVENT_TYPE,
+	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
+	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE
 } from '../messaging/messaging.constants';
 import { NotificationDeliveryEventPayload } from './notification-delivery-contract';
+import { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import { TelegramInfoTransportService } from '../telegram/telegram-info-transport.service';
 import { Injectable } from '@nestjs/common';
+import { NotificationDeliveryReceiptStatus } from '@prisma/notification-delivery-client';
 
 @Injectable()
 export class NotificationDeliveryAdapterService {
 	constructor(
 		private readonly emailService: EmailService,
-		private readonly telegram: TelegramInfoTransportService
+		private readonly telegram: TelegramInfoTransportService,
+		private readonly prisma: NotificationDeliveryPrismaService
 	) {}
 
 	async deliver(
 		kind: NotificationDeliveryKind,
 		event: NotificationDeliveryEventPayload,
-		eventId: string
+		eventId: string,
+		lockToken?: string
 	): Promise<void> {
 		switch (kind) {
 			case 'email':
@@ -52,7 +66,114 @@ export class NotificationDeliveryAdapterService {
 			case 'limit-telegram':
 				await this.sendLimitTelegram(this.getLimitTelegramEvent(event));
 				return;
+			case 'campaign-email':
+				await this.sendCampaignEmail(
+					this.getCampaignEmailEvent(event),
+					eventId
+				);
+				return;
+			case 'campaign-telegram':
+				if (!lockToken) {
+					throw new Error(
+						'Campaign Telegram delivery requires an active claim'
+					);
+				}
+				await this.sendCampaignTelegram(
+					this.getCampaignTelegramEvent(event),
+					eventId,
+					lockToken
+				);
+				return;
+			case 'daily-summary-delivery-telegram':
+				await this.sendDailySummaryTelegram(
+					this.getDailySummaryTelegramEvent(event)
+				);
+				return;
+			case 'subscription-expiry-email':
+				await this.sendSubscriptionExpiryEmail(
+					this.getSubscriptionExpiryEmailEvent(event),
+					eventId
+				);
+				return;
+			case 'subscription-expiry-telegram':
+				await this.sendSubscriptionExpiryTelegram(
+					this.getSubscriptionExpiryTelegramEvent(event)
+				);
+				return;
 		}
+	}
+
+	private getCampaignEmailEvent(
+		event: NotificationDeliveryEventPayload
+	): CampaignEmailNotificationRequestedEventPayload {
+		const value = event as CampaignEmailNotificationRequestedEventPayload;
+		if (
+			value?.schemaVersion !== 1 ||
+			value?.eventType !== CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE
+		) {
+			throw new Error('Invalid campaign email event payload');
+		}
+		return value;
+	}
+
+	private getCampaignTelegramEvent(
+		event: NotificationDeliveryEventPayload
+	): CampaignTelegramNotificationRequestedEventPayload {
+		const value =
+			event as CampaignTelegramNotificationRequestedEventPayload;
+		if (
+			value?.schemaVersion !== 1 ||
+			value?.eventType !== CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE
+		) {
+			throw new Error('Invalid campaign Telegram event payload');
+		}
+		return value;
+	}
+
+	private getDailySummaryTelegramEvent(
+		event: NotificationDeliveryEventPayload
+	): DailySummaryTelegramNotificationRequestedEventPayload {
+		const value =
+			event as DailySummaryTelegramNotificationRequestedEventPayload;
+		if (
+			value?.schemaVersion !== 1 ||
+			value?.eventType !== DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE
+		) {
+			throw new Error('Invalid daily summary Telegram event payload');
+		}
+		return value;
+	}
+
+	private getSubscriptionExpiryEmailEvent(
+		event: NotificationDeliveryEventPayload
+	): SubscriptionExpiryEmailNotificationRequestedEventPayload {
+		const value =
+			event as SubscriptionExpiryEmailNotificationRequestedEventPayload;
+		if (
+			value?.schemaVersion !== 1 ||
+			value?.eventType !==
+				SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE
+		) {
+			throw new Error('Invalid subscription expiry email event payload');
+		}
+		return value;
+	}
+
+	private getSubscriptionExpiryTelegramEvent(
+		event: NotificationDeliveryEventPayload
+	): SubscriptionExpiryTelegramNotificationRequestedEventPayload {
+		const value =
+			event as SubscriptionExpiryTelegramNotificationRequestedEventPayload;
+		if (
+			value?.schemaVersion !== 1 ||
+			value?.eventType !==
+				SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE
+		) {
+			throw new Error(
+				'Invalid subscription expiry Telegram event payload'
+			);
+		}
+		return value;
 	}
 
 	private getLeadEvent(
@@ -272,6 +393,179 @@ export class NotificationDeliveryAdapterService {
 			event.limit,
 			{ messageId: `<${eventId}.limit@winwidget.ru>` }
 		);
+	}
+
+	private async sendCampaignEmail(
+		event: CampaignEmailNotificationRequestedEventPayload,
+		eventId: string
+	): Promise<void> {
+		await this.emailService.sendAdminBroadcast(
+			event.destination.email,
+			event.content,
+			{ messageId: `<${eventId}.mailing@winwidget.ru>` }
+		);
+	}
+
+	private async sendCampaignTelegram(
+		event: CampaignTelegramNotificationRequestedEventPayload,
+		eventId: string,
+		lockToken: string
+	): Promise<void> {
+		const messages = this.buildTelegramBroadcastMessages(
+			event.content.subject,
+			event.content.message
+		);
+		const nextChunkIndex = await this.getCampaignTelegramCheckpoint(
+			eventId,
+			lockToken,
+			messages.length
+		);
+
+		for (let index = nextChunkIndex; index < messages.length; index += 1) {
+			await this.telegram.sendMessage(
+				event.destination.telegramChatId,
+				messages[index],
+				{ parseMode: null }
+			);
+			const checkpoint =
+				await this.prisma.notificationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						consumer: 'campaign-telegram',
+						status: NotificationDeliveryReceiptStatus.PROCESSING,
+						lockToken
+					},
+					data: {
+						checkpoint: { nextChunkIndex: index + 1 }
+					}
+				});
+			if (checkpoint.count !== 1) {
+				throw new Error(
+					'Campaign Telegram delivery checkpoint claim was lost'
+				);
+			}
+		}
+	}
+
+	private async getCampaignTelegramCheckpoint(
+		eventId: string,
+		lockToken: string,
+		messageCount: number
+	): Promise<number> {
+		const receipt =
+			await this.prisma.notificationDeliveryReceipt.findFirst({
+				where: {
+					eventId,
+					consumer: 'campaign-telegram',
+					status: NotificationDeliveryReceiptStatus.PROCESSING,
+					lockToken
+				},
+				select: { checkpoint: true }
+			});
+		if (!receipt) {
+			throw new Error('Campaign Telegram delivery claim was lost');
+		}
+		const checkpoint = receipt.checkpoint;
+		const value =
+			checkpoint &&
+			typeof checkpoint === 'object' &&
+			!Array.isArray(checkpoint)
+				? checkpoint.nextChunkIndex
+				: 0;
+		if (
+			!Number.isInteger(value) ||
+			Number(value) < 0 ||
+			Number(value) > messageCount
+		) {
+			throw new Error('Invalid campaign Telegram delivery checkpoint');
+		}
+		return Number(value);
+	}
+
+	private async sendDailySummaryTelegram(
+		event: DailySummaryTelegramNotificationRequestedEventPayload
+	): Promise<void> {
+		await this.telegram.sendMessage(
+			event.destination.telegramChatId,
+			event.content.text,
+			{
+				messageThreadId: event.destination.messageThreadId,
+				parseMode: 'HTML'
+			}
+		);
+	}
+
+	private async sendSubscriptionExpiryEmail(
+		event: SubscriptionExpiryEmailNotificationRequestedEventPayload,
+		eventId: string
+	): Promise<void> {
+		await this.emailService.sendSubscriptionExpiryReminder(
+			event.destination.email,
+			event.content,
+			{
+				messageId: `<${eventId}.subscription-expiry@winwidget.ru>`
+			}
+		);
+	}
+
+	private async sendSubscriptionExpiryTelegram(
+		event: SubscriptionExpiryTelegramNotificationRequestedEventPayload
+	): Promise<void> {
+		await this.telegram.sendMessage(
+			event.destination.telegramChatId,
+			this.buildSubscriptionExpiryTelegramMessage(event.content),
+			{ parseMode: 'HTML' }
+		);
+	}
+
+	private buildTelegramBroadcastMessages(
+		subject: string,
+		message: string
+	): string[] {
+		const chunks: string[] = [];
+		let rest = message;
+		while (rest.length > 3500) {
+			const slice = rest.slice(0, 3500);
+			const lastLineBreak = slice.lastIndexOf('\n');
+			const splitAt = lastLineBreak > 2100 ? lastLineBreak + 1 : 3500;
+			chunks.push(rest.slice(0, splitAt).trimEnd());
+			rest = rest.slice(splitAt).trimStart();
+		}
+		if (rest) chunks.push(rest);
+		if (!chunks.length) chunks.push('');
+		return chunks.map((chunk, index) =>
+			index === 0 ? [subject, '', chunk].join('\n') : chunk
+		);
+	}
+
+	private buildSubscriptionExpiryTelegramMessage(content: {
+		daysBeforeExpiry: number;
+		planLabel: string;
+		expiresAtLabel: string;
+	}): string {
+		const statusText =
+			content.daysBeforeExpiry === 0
+				? 'Сегодня последний день подписки.'
+				: `До окончания подписки осталось ${content.daysBeforeExpiry} ${this.getDayWord(content.daysBeforeExpiry)}.`;
+		return [
+			'<b>Подписка winwidget.ru</b>',
+			`Тариф: ${this.escapeHtml(content.planLabel)}`,
+			`Дата окончания: ${this.escapeHtml(content.expiresAtLabel)} МСК`,
+			'',
+			statusText,
+			'',
+			'Продлить доступ можно в личном кабинете.'
+		].join('\n');
+	}
+
+	private getDayWord(value: number): string {
+		const mod10 = value % 10;
+		const mod100 = value % 100;
+		if (mod10 === 1 && mod100 !== 11) return 'день';
+		if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) {
+			return 'дня';
+		}
+		return 'дней';
 	}
 
 	private buildTelegramMessage(

@@ -6,10 +6,16 @@ import {
 } from '@/messaging/integration-error-classifier';
 import {
 	DAILY_SUMMARY_EVENT_TYPE,
+	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	getDeadLetterRoutingKey,
 	MESSAGING_ROUTING_KEYS,
 	RETRY_DELAYS_MS
 } from '@/messaging/messaging.constants';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
+import {
+	DailySummaryTelegramNotificationRequestedEventPayload,
+	serializeNotificationDeliveryEvent
+} from '@/messaging/notification-delivery-event';
 import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import {
@@ -17,7 +23,6 @@ import {
 	ScheduledJobOutboxEvent,
 	ScheduledJobRunView
 } from '@/scheduled-jobs/scheduled-jobs.types';
-import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, ScheduledJobRunStatus } from '@prisma/client';
@@ -49,6 +54,7 @@ interface DailySummaryJobInput {
 
 interface DailySummaryCheckpoint {
 	text?: string;
+	deliveryEventId?: string;
 }
 
 const DAILY_SUMMARY_OUTBOX_EVENT: ScheduledJobOutboxEvent = {
@@ -69,8 +75,7 @@ export class DailySummaryDeliveryService {
 		private readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
 		private readonly scheduledJobs: ScheduledJobsService,
-		private readonly report: DailySummaryReportService,
-		private readonly telegram: TelegramInfoTransportService
+		private readonly report: DailySummaryReportService
 	) {}
 
 	async deliver(
@@ -110,6 +115,13 @@ export class DailySummaryDeliveryService {
 			return;
 		}
 		if (claim.state === 'busy' || claim.state === 'not_due') {
+			const checkpoint = this.parseCheckpoint(claim.job.checkpoint);
+			if (
+				claim.state === 'busy' &&
+				checkpoint.deliveryEventId === eventId
+			) {
+				return;
+			}
 			throw new ScheduledJobDispatchHandledError(
 				'retry_scheduled',
 				claim.job,
@@ -171,38 +183,52 @@ export class DailySummaryDeliveryService {
 				);
 			}
 			lease.assertOwned();
-			await this.telegram.sendMessage(input.chatId, text, {
-				messageThreadId: input.messageThreadId,
-				signal: lease.signal
-			});
-			lease.assertOwned();
-
-			const sentAt = new Date();
-			const completed = await this.prisma.$transaction(
+			const deliveryPayload: DailySummaryTelegramNotificationRequestedEventPayload =
+				{
+					schemaVersion: 1,
+					eventType: DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+					reference: {
+						type: 'daily-summary-job',
+						id: claim.job.id
+					},
+					destination: {
+						telegramChatId: input.chatId,
+						messageThreadId: input.messageThreadId
+					},
+					content: { text }
+				};
+			const dispatched = await this.prisma.$transaction(
 				async transaction => {
-					const job = await this.scheduledJobs.completeInTransaction(
-						transaction,
-						claim.job.id,
-						claim.leaseToken,
-						{
-							telegramSent: true,
-							sentAt: sentAt.toISOString()
-						}
-					);
+					const job =
+						await this.scheduledJobs.awaitExternalDeliveryInTransaction(
+							transaction,
+							claim.job.id,
+							claim.leaseToken,
+							eventId,
+							{ text, deliveryEventId: eventId }
+						);
 					if (!job) return null;
-					await transaction.telegramBotSettings.update({
-						where: { id: 'singleton' },
+					await transaction.outboxEvent.createMany({
 						data: {
-							dailySummaryLastSentPeriodStart: periodStart,
-							dailySummaryLastSentAt: sentAt
-						}
+							messageId: eventId,
+							deduplicationKey: `notification-dispatch:${eventId}:daily-summary-delivery-telegram:v1`,
+							eventType: DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+							routingKey:
+								MESSAGING_ROUTING_KEYS['daily-summary-delivery-telegram'],
+							payload: serializeNotificationDeliveryEvent(deliveryPayload),
+							headers: createMessagingHeaders({
+								messageId: eventId,
+								causationId: eventId
+							})
+						},
+						skipDuplicates: true
 					});
 					return job;
 				}
 			);
-			if (!completed) {
+			if (!dispatched) {
 				throw new Error(
-					'Daily summary lease was lost after Telegram delivery'
+					'Daily summary lease was lost before notification dispatch'
 				);
 			}
 		} catch (error) {
@@ -280,9 +306,15 @@ export class DailySummaryDeliveryService {
 		if (!value || typeof value !== 'object' || Array.isArray(value)) {
 			return {};
 		}
-		return typeof value.text === 'string' && value.text
-			? { text: value.text }
-			: {};
+		return {
+			...(typeof value.text === 'string' && value.text
+				? { text: value.text }
+				: {}),
+			...(typeof value.deliveryEventId === 'string' &&
+			value.deliveryEventId
+				? { deliveryEventId: value.deliveryEventId }
+				: {})
+		};
 	}
 
 	private parsePeriodBoundary(value: string | null, label: string): Date {

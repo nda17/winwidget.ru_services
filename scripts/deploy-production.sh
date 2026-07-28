@@ -335,13 +335,13 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_KINDS"
 		require_env_exact_list \
 			"INTEGRATION_WORKER_KINDS" \
-			"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable"
+			"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome"
 		require_env_exact_list \
 			"MAINTENANCE_WORKER_KINDS" \
 			"database-backup"
 		require_env_exact_list \
 			"NOTIFICATION_DELIVERY_KINDS" \
-			"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram"
+			"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
 		require_env_key "PORT"
@@ -975,62 +975,51 @@ while IFS= read -r notification_migration_file; do
 				transaction_commit += 1
 				next
 			}
-			if (
-				upper ~ /^CREATE (TYPE|TABLE|INDEX|UNIQUE INDEX) / ||
-				upper ~ /^ALTER TYPE .* ADD VALUE /
-			) next
-			if (
-				upper ~ /^ALTER TABLE .* ADD COLUMN / &&
-				upper !~ / NOT NULL/ &&
-				upper !~ / DEFAULT / &&
-				upper !~ / UNIQUE/ &&
-				upper !~ / PRIMARY KEY/ &&
-				upper !~ / REFERENCES / &&
-				upper !~ / CHECK[[:space:]]*\(/ &&
-				upper !~ / GENERATED / &&
-				upper !~ / IDENTITY/
-			) next
-			for (index = 1; index <= 4; index += 1) {
-				name = constraint_names[index]
-				table_name = table_names[index]
-				if (
-					upper ~ (
-						"^ALTER TABLE \\\"NOTIFICATION_DELIVERY\\\"\\.\\\"" \
-						table_name "\\\" DROP CONSTRAINT \\\"" name \
-						"\\\", ADD CONSTRAINT \\\"" name \
-						"\\\" CHECK[[:space:]]*\\("
-					) &&
-					gsub(/DROP CONSTRAINT/, "", upper) == 1 &&
-					gsub(/ADD CONSTRAINT/, "", upper) == 1 &&
-					gsub(/ALTER TABLE/, "", upper) == 1 &&
-					upper !~ /( CASCADE| DROP COLUMN| TRUNCATE | DELETE FROM | UPDATE | INSERT INTO | CREATE )/
-				) {
+			if (upper ~ /^CREATE (TYPE|TABLE|INDEX|UNIQUE INDEX) / || upper ~ /^ALTER TYPE .* ADD VALUE /) next
+			additive_column = upper ~ /^ALTER TABLE .* ADD COLUMN /
+			additive_column = additive_column && upper !~ / NOT NULL/
+			additive_column = additive_column && upper !~ / DEFAULT /
+			additive_column = additive_column && upper !~ / UNIQUE/
+			additive_column = additive_column && upper !~ / PRIMARY KEY/
+			additive_column = additive_column && upper !~ / REFERENCES /
+			additive_column = additive_column && upper !~ / CHECK[[:space:]]*\(/
+			additive_column = additive_column && upper !~ / GENERATED /
+			additive_column = additive_column && upper !~ / IDENTITY/
+			if (additive_column) next
+			accepted_replacement = 0
+			for (i = 1; i <= 4; i += 1) {
+				name = constraint_names[i]
+				table_name = table_names[i]
+				pattern = "^ALTER TABLE \\\"NOTIFICATION_DELIVERY\\\"\\.\\\"" table_name "\\\" DROP CONSTRAINT \\\"" name "\\\", ADD CONSTRAINT \\\"" name "\\\" CHECK[[:space:]]*\\("
+				candidate = upper
+				constraint_replacement = candidate ~ pattern
+				constraint_replacement = constraint_replacement && gsub(/DROP CONSTRAINT/, "", candidate) == 1
+				constraint_replacement = constraint_replacement && gsub(/ADD CONSTRAINT/, "", candidate) == 1
+				constraint_replacement = constraint_replacement && gsub(/ALTER TABLE/, "", candidate) == 1
+				constraint_replacement = constraint_replacement && candidate !~ /( CASCADE| DROP COLUMN| TRUNCATE | DELETE FROM | UPDATE | INSERT INTO | CREATE )/
+				if (constraint_replacement) {
 					replaced[name] += 1
 					replaced_constraints = 1
-					next
+					accepted_replacement = 1
+					break
 				}
 			}
+			if (accepted_replacement) next
 			failed = 1
 		}
 		END {
 			if (replaced_constraints) {
-				for (index = 1; index <= 4; index += 1) {
-					name = constraint_names[index]
-					if (replaced[name] != 1) {
-						failed = 1
-					}
+				for (i = 1; i <= 4; i += 1) {
+					name = constraint_names[i]
+					if (replaced[name] != 1) failed = 1
 				}
 			}
-			if (
-				transaction_begin != transaction_commit ||
-				transaction_begin > 1 ||
-				transaction_commit > 1 ||
-				(transaction_begin && !replaced_constraints) ||
-				(replaced_constraints &&
-					(transaction_begin != 1 || transaction_commit != 1))
-			) {
-				failed = 1
-			}
+			invalid_transaction = transaction_begin != transaction_commit
+			invalid_transaction = invalid_transaction || transaction_begin > 1
+			invalid_transaction = invalid_transaction || transaction_commit > 1
+			invalid_transaction = invalid_transaction || (transaction_begin && !replaced_constraints)
+			invalid_transaction = invalid_transaction || (replaced_constraints && (transaction_begin != 1 || transaction_commit != 1))
+			if (invalid_transaction) failed = 1
 			exit(failed ? 1 : 0)
 		}
 	' "$server_root/$notification_migration_file"; then
@@ -1074,7 +1063,7 @@ notification_cutover_candidate_ids="$(
 )"
 narrow_integration_kinds="$(
 	normalize_csv \
-		"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable"
+		"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome"
 )"
 broad_integration_kinds="$(
 	normalize_csv \
@@ -1086,7 +1075,7 @@ legacy_notification_delivery_kinds="$(
 )"
 expanded_notification_delivery_kinds="$(
 	normalize_csv \
-		"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram"
+		"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram"
 )"
 
 if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
@@ -1756,7 +1745,7 @@ provision_rabbitmq_user \
 	'^winwidget\..*' \
 	'^winwidget\..*' \
 	''
-integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.telegram-destination-unavailable)(\..*)?$'
+integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$'
 fi
@@ -1779,7 +1768,7 @@ provision_rabbitmq_user \
 	"$notification_delivery_password_base64" \
 	'^$' \
 	'^(winwidget\.events|winwidget\.dead-letter)$' \
-	'^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.(email|telegram\.v2)|limit-notification\.(email|telegram))(\..*)?$' \
+	'^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.(email|telegram\.v2)|limit-notification\.(email|telegram)|notification\.(campaign\.(email|telegram)|daily-summary\.telegram|subscription-expiry\.(email|telegram)))(\..*)?$' \
 	''
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
@@ -2375,7 +2364,21 @@ const run = async () => {
 		process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy";
 	const groups = [
 		{
-			kinds: ["email", "telegram", "payment-email", "limit-email"],
+			kinds: [
+				"email",
+				"telegram",
+				"payment-email",
+				"limit-email",
+				...(legacyTelegramOwner
+					? []
+					: [
+							"campaign-email",
+							"campaign-telegram",
+							"daily-summary-delivery-telegram",
+							"subscription-expiry-email",
+							"subscription-expiry-telegram",
+						]),
+			],
 			user: notificationUser,
 			connectionName: "winwidget-notification-delivery-worker",
 			notification: true,
@@ -2406,7 +2409,10 @@ const run = async () => {
 				"daily-summary-telegram",
 				...(legacyTelegramOwner
 					? []
-					: ["telegram-destination-unavailable"]),
+					: [
+							"telegram-destination-unavailable",
+							"notification-delivery-outcome",
+						]),
 			],
 			user: integrationUser,
 			connectionName: "winwidget-integration-worker",
@@ -2522,16 +2528,18 @@ notification_cutover_last_service_state=""
 
 print_notification_cutover_runbook() {
 	cat >&2 <<'RUNBOOK'
-Notification Delivery Telegram ownership cutover did not pass.
-Do not start Notification Delivery and the legacy integration worker on the same payment/limit Telegram queues.
+Notification Delivery provider-ownership cutover did not pass.
+Do not start the expanded Notification Delivery worker while legacy provider
+calls can still be in flight.
 
 Manual recovery/runbook:
 1. Keep the current v1 Notification Delivery worker and integration worker running.
 2. Through the existing Messaging admin flow, resolve or retry every unresolved
    payment-telegram and limit-telegram failure.
-3. Wait until their PROCESSING/RETRY_SCHEDULED receipts disappear and every
-   matching main, retry-v2.* and dead-letter RabbitMQ queue reports zero ready
-   and zero unacknowledged messages.
+3. Wait until PROCESSING/RETRY_SCHEDULED receipts for payment/limit Telegram,
+   campaigns and daily summary disappear, subscription reminders have no
+   PROCESSING rows, and every matching main, retry-v2.* and dead-letter queue
+   reports zero ready and zero unacknowledged messages.
 4. Re-run the full `all` deployment. The script will stop producers, recheck the
    quiescent boundary, stop both old workers, then start the disjoint workers.
 5. Do not use the notification-delivery service-only target until
@@ -2545,7 +2553,10 @@ notification_cutover_expected_queues() {
 
 	for base_queue in \
 		winwidget.payment-notification.telegram \
-		winwidget.limit-notification.telegram; do
+		winwidget.limit-notification.telegram \
+		winwidget.mailing.email \
+		winwidget.mailing.telegram \
+		winwidget.report.daily-summary.telegram; do
 		printf '%s\n%s.dead-letter\n' "$base_queue" "$base_queue"
 		for retry_index in 1 2 3; do
 			printf '%s.retry-v2.%s\n' "$base_queue" "$retry_index"
@@ -2578,7 +2589,9 @@ notification_cutover_queue_state() {
 			name messages_ready messages_unacknowledged consumers |
 		awk '
 			$1 ~ /^winwidget\.payment-notification\.telegram(\.v2)?(\.|$)/ ||
-			$1 ~ /^winwidget\.limit-notification\.telegram(\.|$)/
+			$1 ~ /^winwidget\.limit-notification\.telegram(\.|$)/ ||
+			$1 ~ /^winwidget\.mailing\.(email|telegram)(\.|$)/ ||
+			$1 ~ /^winwidget\.report\.daily-summary\.telegram(\.|$)/
 		'
 }
 
@@ -2597,18 +2610,24 @@ const prisma = new PrismaClient({
 		},
 	},
 });
-const kinds = ["payment-telegram", "limit-telegram"];
+const ownershipKinds = ["payment-telegram", "limit-telegram"];
+const providerBoundaryKinds = [
+	...ownershipKinds,
+	"mailing-email",
+	"mailing-telegram",
+	"daily-summary-telegram",
+];
 
 Promise.all([
 	prisma.integrationDeliveryFailure.count({
 		where: {
-			integration: { in: kinds },
+			integration: { in: ownershipKinds },
 			resolvedAt: null,
 		},
 	}),
 	prisma.integrationDeliveryReceipt.count({
 		where: {
-			integration: { in: kinds },
+			integration: { in: providerBoundaryKinds },
 			status: { in: ["PROCESSING", "RETRY_SCHEDULED"] },
 		},
 	}),
@@ -2618,17 +2637,32 @@ Promise.all([
 				in: [
 					"payment.succeeded.v1",
 					"lead.limit.reached.telegram.v2",
+					"mailing.delivery.email.v1",
+					"mailing.delivery.telegram.v1",
+					"report.daily-summary.requested.v1",
 				],
 			},
 			status: { in: ["PENDING", "PUBLISHING", "FAILED"] },
 		},
 	}),
+	prisma.subscriptionExpiryReminder.count({
+		where: {
+			status: "PROCESSING",
+		},
+	}),
 ])
-	.then(([unresolvedFailures, activeReceipts, pendingOutbox]) => {
+	.then(
+		([
+			unresolvedFailures,
+			activeReceipts,
+			pendingOutbox,
+			processingReminders,
+		]) => {
 		process.stdout.write(
-			`${unresolvedFailures}\t${activeReceipts}\t${pendingOutbox}\n`,
+				`${unresolvedFailures}\t${activeReceipts}\t${pendingOutbox}\t${processingReminders}\n`,
 		);
-	})
+		},
+	)
 	.catch(() => {
 		process.stderr.write(
 			"Notification cutover could not query public delivery state\n",
@@ -2723,7 +2757,13 @@ notification_cutover_consumers_ready() {
 		winwidget.payment-notification.telegram \
 		winwidget.payment-notification.telegram.dead-letter \
 		winwidget.limit-notification.telegram \
-		winwidget.limit-notification.telegram.dead-letter; do
+		winwidget.limit-notification.telegram.dead-letter \
+		winwidget.mailing.email \
+		winwidget.mailing.email.dead-letter \
+		winwidget.mailing.telegram \
+		winwidget.mailing.telegram.dead-letter \
+		winwidget.report.daily-summary.telegram \
+		winwidget.report.daily-summary.telegram.dead-letter; do
 		queue_line="$(
 			awk -v queue="$queue" '$1 == queue { print; exit }' <<<"$state"
 		)"
@@ -2749,6 +2789,7 @@ notification_cutover_is_clear() {
 	local unresolved_failures
 	local active_receipts
 	local pending_outbox
+	local processing_reminders
 
 	notification_cutover_last_queue_state="$(
 		notification_cutover_queue_state
@@ -2775,16 +2816,18 @@ notification_cutover_is_clear() {
 	notification_cutover_last_database_state="$(
 		notification_cutover_database_state
 	)"
-	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox \
+	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox processing_reminders \
 		<<<"$notification_cutover_last_database_state"
 	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
 		! "$active_receipts" =~ ^[0-9]+$ ||
-		! "$pending_outbox" =~ ^[0-9]+$ ]]; then
+		! "$pending_outbox" =~ ^[0-9]+$ ||
+		! "$processing_reminders" =~ ^[0-9]+$ ]]; then
 		return 1
 	fi
 	[[ "$unresolved_failures" == "0" &&
 		"$active_receipts" == "0" &&
-		"$pending_outbox" == "0" ]]
+		"$pending_outbox" == "0" &&
+		"$processing_reminders" == "0" ]]
 }
 
 delete_legacy_payment_telegram_queues() {
@@ -3322,6 +3365,7 @@ perform_notification_first_cutover_preflight() {
 	local unresolved_failures
 	local active_receipts
 	local pending_outbox
+	local processing_reminders
 	local attempt
 
 	if [[ "$notification_delivery_first_cutover" != "true" ]]; then
@@ -3360,12 +3404,13 @@ perform_notification_first_cutover_preflight() {
 	fi
 
 	initial_database_state="$(notification_cutover_database_state)"
-	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox \
+	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox processing_reminders \
 		<<<"$initial_database_state"
 	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
 		! "$active_receipts" =~ ^[0-9]+$ ||
-		! "$pending_outbox" =~ ^[0-9]+$ ]]; then
-		echo "Public delivery state returned an invalid Telegram-cutover result." >&2
+		! "$pending_outbox" =~ ^[0-9]+$ ||
+		! "$processing_reminders" =~ ^[0-9]+$ ]]; then
+		echo "Public delivery state returned an invalid provider-cutover result." >&2
 		print_notification_cutover_runbook
 		return 1
 	fi
@@ -3386,7 +3431,7 @@ perform_notification_first_cutover_preflight() {
 		first_cutover_producer_ids+=("$container_id")
 	done
 
-	echo "Notification Delivery Telegram cutover: stopping producers and draining two legacy queues."
+	echo "Notification Delivery provider cutover: stopping producers and draining legacy provider work."
 	first_cutover_recovery_active=true
 	trap restore_first_cutover_producers_on_exit EXIT
 	trap 'exit 130' INT

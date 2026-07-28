@@ -20,6 +20,7 @@ import {
 } from '@/messaging/messaging-context';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
+import { NotificationDeliveryOutcomeEventPayload } from '@/messaging/notification-delivery-event';
 import { getStableMessageId } from '@/messaging/poison-message-id';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
@@ -65,6 +66,7 @@ type WorkerEventPayload =
 	| LeadIntegrationEventPayload
 	| MailingDeliveryEventPayload
 	| TelegramDestinationUnavailableEventPayload
+	| NotificationDeliveryOutcomeEventPayload
 	| DailySummaryRequestedEventPayload;
 
 interface ScheduledJobStatusRow {

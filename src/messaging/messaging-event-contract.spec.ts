@@ -289,6 +289,55 @@ describe('messaging event contract', () => {
 		).not.toThrow();
 	});
 
+	it('accepts campaign Telegram as a destination-unavailable source', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'notification.telegram.destination-unavailable.v1',
+			sourceEventId: '22222222-2222-4222-8222-222222222222',
+			sourceKind: 'campaign-telegram',
+			destination: { telegramChatId: '123456789' },
+			normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+			occurredAt: '2026-07-25T00:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'telegram-destination-unavailable'
+			})
+		).not.toThrow();
+	});
+
+	it('accepts a strict Notification Delivery outcome', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'notification.delivery.outcome.v1',
+			sourceEventId: '22222222-2222-4222-8222-222222222222',
+			sourceKind: 'subscription-expiry-email',
+			reference: {
+				type: 'subscription-expiry-reminder',
+				id: '33333333-3333-4333-8333-333333333333'
+			},
+			status: 'FAILED',
+			failure: {
+				normalizedCode: 'SMTP_REJECTED',
+				safeReason: 'Mailbox rejected the message'
+			},
+			occurredAt: '2026-07-25T00:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'notification-delivery-outcome'
+			})
+		).not.toThrow();
+	});
+
 	it('rejects unsupported source kinds in destination outcomes', () => {
 		const payload = {
 			schemaVersion: 1,

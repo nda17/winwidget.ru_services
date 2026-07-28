@@ -8,6 +8,18 @@ export const LIMIT_REACHED_TELEGRAM_EVENT_TYPE =
 	'lead.limit.reached.telegram.v2';
 export const TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE =
 	'notification.telegram.destination-unavailable.v1';
+export const CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE =
+	'notification.campaign.email.requested.v1';
+export const CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE =
+	'notification.campaign.telegram.requested.v1';
+export const DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
+	'notification.daily-summary.telegram.requested.v1';
+export const SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE =
+	'notification.subscription-expiry.email.requested.v1';
+export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
+	'notification.subscription-expiry.telegram.requested.v1';
+export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
+	'notification.delivery.outcome.v1';
 
 export const EVENTS_EXCHANGE = 'winwidget.events';
 export const RETRY_EXCHANGE = 'winwidget.retry';
@@ -20,7 +32,12 @@ export const NOTIFICATION_DELIVERY_KINDS = [
 	'payment-email',
 	'payment-telegram',
 	'limit-email',
-	'limit-telegram'
+	'limit-telegram',
+	'campaign-email',
+	'campaign-telegram',
+	'daily-summary-delivery-telegram',
+	'subscription-expiry-email',
+	'subscription-expiry-telegram'
 ] as const;
 
 export type NotificationDeliveryKind =
@@ -36,7 +53,15 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'payment-email': PAYMENT_SUCCEEDED_EVENT_TYPE,
 	'payment-telegram': PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	'limit-email': LIMIT_REACHED_EMAIL_EVENT_TYPE,
-	'limit-telegram': LIMIT_REACHED_TELEGRAM_EVENT_TYPE
+	'limit-telegram': LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
+	'campaign-email': CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+	'campaign-telegram': CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	'daily-summary-delivery-telegram':
+		DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	'subscription-expiry-email':
+		SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
+	'subscription-expiry-telegram':
+		SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
@@ -45,7 +70,15 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'payment-email': 'winwidget.payment-notification.email',
 	'payment-telegram': 'winwidget.payment-notification.telegram.v2',
 	'limit-email': 'winwidget.limit-notification.email',
-	'limit-telegram': 'winwidget.limit-notification.telegram'
+	'limit-telegram': 'winwidget.limit-notification.telegram',
+	'campaign-email': 'winwidget.notification.campaign.email',
+	'campaign-telegram': 'winwidget.notification.campaign.telegram',
+	'daily-summary-delivery-telegram':
+		'winwidget.notification.daily-summary.telegram',
+	'subscription-expiry-email':
+		'winwidget.notification.subscription-expiry.email',
+	'subscription-expiry-telegram':
+		'winwidget.notification.subscription-expiry.telegram'
 };
 
 export const getManualRetryRoutingKey = (kind: MessagingKind): string =>

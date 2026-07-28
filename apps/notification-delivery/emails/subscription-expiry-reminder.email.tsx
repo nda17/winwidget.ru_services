@@ -1,6 +1,6 @@
+import EmailLayout from './_components/email-layout';
 import { Text } from '@react-email/components';
 import * as React from 'react';
-import EmailLayout from '@email/_components/email-layout';
 
 export interface SubscriptionExpiryReminderEmailProps {
 	daysBeforeExpiry: number;
@@ -35,24 +35,12 @@ const noteTextStyle = {
 const getDaysLabel = (days: number) => {
 	const mod10 = days % 10;
 	const mod100 = days % 100;
-
 	if (mod10 === 1 && mod100 !== 11) return `${days} день`;
 	if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) {
 		return `${days} дня`;
 	}
-
 	return `${days} дней`;
 };
-
-const getTitle = (daysBeforeExpiry: number) =>
-	daysBeforeExpiry === 0
-		? 'Сегодня последний день подписки'
-		: `Подписка закончится через ${getDaysLabel(daysBeforeExpiry)}`;
-
-const getPreview = (daysBeforeExpiry: number) =>
-	daysBeforeExpiry === 0
-		? 'Сегодня последний день вашей подписки Winwidget'
-		: `До окончания подписки Winwidget осталось ${getDaysLabel(daysBeforeExpiry)}`;
 
 const SubscriptionExpiryReminderEmail = ({
 	daysBeforeExpiry,
@@ -63,8 +51,16 @@ const SubscriptionExpiryReminderEmail = ({
 
 	return (
 		<EmailLayout
-			preview={getPreview(daysBeforeExpiry)}
-			title={getTitle(daysBeforeExpiry)}
+			preview={
+				isLastDay
+					? 'Сегодня последний день вашей подписки Winwidget'
+					: `До окончания подписки Winwidget осталось ${getDaysLabel(daysBeforeExpiry)}`
+			}
+			title={
+				isLastDay
+					? 'Сегодня последний день подписки'
+					: `Подписка закончится через ${getDaysLabel(daysBeforeExpiry)}`
+			}
 			subtitle={`Тариф ${planLabel} действует до ${expiresAtLabel} МСК`}
 			actionLabel="Продлить подписку"
 			actionHref={`${SITE_URL}/payment`}
@@ -74,12 +70,10 @@ const SubscriptionExpiryReminderEmail = ({
 					? 'Сегодня последний день действия вашей подписки Winwidget.'
 					: `До окончания вашей подписки Winwidget осталось ${getDaysLabel(daysBeforeExpiry)}.`}
 			</Text>
-
 			<Text style={secondaryTextStyle} className="ww-secondary-text">
 				Продлите подписку заранее, чтобы виджеты продолжили работать без
 				паузы.
 			</Text>
-
 			<Text style={noteTextStyle} className="ww-note-text">
 				Если вы уже продлили подписку, это письмо можно игнорировать.
 			</Text>

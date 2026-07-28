@@ -2,7 +2,9 @@ import { TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE } from '@/messaging/messagi
 
 export const TELEGRAM_DESTINATION_SOURCE_KINDS = [
 	'telegram',
-	'limit-telegram'
+	'limit-telegram',
+	'campaign-telegram',
+	'subscription-expiry-telegram'
 ] as const;
 
 export type TelegramDestinationSourceKind =

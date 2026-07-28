@@ -264,6 +264,125 @@ export class ScheduledJobsService {
 		return updated === 1 ? this.getJob(id) : null;
 	}
 
+	async awaitExternalDeliveryInTransaction(
+		transaction: Prisma.TransactionClient,
+		id: string,
+		leaseToken: string,
+		deliveryEventId: string,
+		checkpoint: Prisma.InputJsonValue
+	): Promise<ScheduledJobRunView | null> {
+		this.validateUuid(id, 'job id');
+		this.validateUuid(leaseToken, 'lease token');
+		this.validateUuid(deliveryEventId, 'delivery event id');
+		const checkpointJson = this.stringifyJson(
+			checkpoint,
+			'job checkpoint'
+		);
+		const updated = await transaction.$executeRaw(
+			Prisma.sql`
+				UPDATE "scheduled_job_runs"
+				SET
+					"checkpoint" = CAST(${checkpointJson} AS jsonb),
+					"lease_owner" = NULL,
+					"lease_token" = NULL,
+					"lease_expires_at" = NULL,
+					"updated_at" = NOW()
+				WHERE "id" = ${id}::uuid
+					AND "status" = 'PROCESSING'::"ScheduledJobRunStatus"
+					AND "lease_token" = ${leaseToken}::uuid
+					AND "lease_expires_at" > NOW()
+			`
+		);
+		if (updated !== 1) return null;
+		const job = await transaction.scheduledJobRun.findUniqueOrThrow({
+			where: { id }
+		});
+		const persistedCheckpoint = job.checkpoint;
+		if (
+			!persistedCheckpoint ||
+			typeof persistedCheckpoint !== 'object' ||
+			Array.isArray(persistedCheckpoint) ||
+			persistedCheckpoint.deliveryEventId !== deliveryEventId
+		) {
+			throw new Error(
+				`Scheduled job checkpoint is missing deliveryEventId: ${id}`
+			);
+		}
+		return serializeScheduledJobRun(job);
+	}
+
+	async completeExternalDeliveryInTransaction(
+		transaction: Prisma.TransactionClient,
+		id: string,
+		deliveryEventId: string,
+		result?: Prisma.InputJsonValue
+	): Promise<ScheduledJobRunView | null> {
+		this.validateUuid(id, 'job id');
+		this.validateUuid(deliveryEventId, 'delivery event id');
+		const resultSql =
+			result === undefined
+				? Prisma.sql`NULL`
+				: Prisma.sql`CAST(${this.stringifyJson(result, 'job result')} AS jsonb)`;
+		const completed = await transaction.$executeRaw(
+			Prisma.sql`
+				UPDATE "scheduled_job_runs"
+				SET
+					"status" = 'SUCCEEDED'::"ScheduledJobRunStatus",
+					"result" = ${resultSql},
+					"finished_at" = NOW(),
+					"last_error" = NULL,
+					"lease_owner" = NULL,
+					"lease_token" = NULL,
+					"lease_expires_at" = NULL,
+					"updated_at" = NOW()
+				WHERE "id" = ${id}::uuid
+					AND "status" IN (
+						'PROCESSING'::"ScheduledJobRunStatus",
+						'FAILED'::"ScheduledJobRunStatus"
+					)
+					AND "lease_token" IS NULL
+					AND "checkpoint" ->> 'deliveryEventId' = ${deliveryEventId}
+			`
+		);
+		if (completed !== 1) return null;
+		const job = await transaction.scheduledJobRun.findUniqueOrThrow({
+			where: { id }
+		});
+		return serializeScheduledJobRun(job);
+	}
+
+	async failExternalDeliveryInTransaction(
+		transaction: Prisma.TransactionClient,
+		id: string,
+		deliveryEventId: string,
+		error: string
+	): Promise<ScheduledJobRunView | null> {
+		this.validateUuid(id, 'job id');
+		this.validateUuid(deliveryEventId, 'delivery event id');
+		const failed = await transaction.$executeRaw(
+			Prisma.sql`
+				UPDATE "scheduled_job_runs"
+				SET
+					"status" = 'FAILED'::"ScheduledJobRunStatus",
+					"finished_at" = NOW(),
+					"last_error" = ${this.normalizeError(error)},
+					"lease_owner" = NULL,
+					"lease_token" = NULL,
+					"lease_expires_at" = NULL,
+					"updated_at" = NOW()
+				WHERE "id" = ${id}::uuid
+					AND "status" = 'PROCESSING'::"ScheduledJobRunStatus"
+					AND "lease_token" IS NULL
+					AND "checkpoint" ->> 'deliveryEventId' = ${deliveryEventId}
+			`
+		);
+		if (failed !== 1) return null;
+		const job = await transaction.scheduledJobRun.findUniqueOrThrow({
+			where: { id }
+		});
+		return serializeScheduledJobRun(job);
+	}
+
 	async complete(
 		id: string,
 		leaseToken: string,
