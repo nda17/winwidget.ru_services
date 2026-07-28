@@ -1051,7 +1051,7 @@ jobs:
               notification_delivery_ci \
               '^$' \
               '^(winwidget\.events|winwidget\.dead-letter)$' \
-              '^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.(email|telegram\.v2)|limit-notification\.(email|telegram))(\..*)?$'
+              '^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.(email|telegram\.v2)|limit-notification\.(email|telegram)|notification\.(campaign\.(email|telegram)|daily-summary\.telegram|subscription-expiry\.(email|telegram)))(\..*)?$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_user_tags notification_delivery_ci
           docker exec "$RABBITMQ_CONTAINER_ID" \
