@@ -29,14 +29,27 @@
 		return;
 	}
 
-	var RUNTIME_VERSION = '2026.07';
+	var RUNTIME_VERSION = '2026.08';
+	var PUBLISHED_VERSION = 0;
 	var telemetryEventsSent = Object.create(null);
+
+	function updatePublishedVersion(value) {
+		var nextVersion = Number(value);
+		if (!Number.isInteger(nextVersion) || nextVersion < 1) nextVersion = 0;
+		if (nextVersion !== PUBLISHED_VERSION) {
+			telemetryEventsSent = Object.create(null);
+		}
+		PUBLISHED_VERSION = nextVersion;
+	}
 
 	function sendTelemetryEvent(eventName) {
 		if (
+			!Number.isInteger(PUBLISHED_VERSION) ||
+			PUBLISHED_VERSION < 1 ||
 			(eventName !== 'IMPRESSION' &&
 				eventName !== 'OPEN' &&
-				eventName !== 'START') ||
+				eventName !== 'START' &&
+				eventName !== 'COMPLETE') ||
 			telemetryEventsSent[eventName]
 		) {
 			return;
@@ -47,6 +60,8 @@
 		} else if (eventName === 'START') {
 			sendTelemetryEvent('IMPRESSION');
 			sendTelemetryEvent('OPEN');
+		} else if (eventName === 'COMPLETE') {
+			sendTelemetryEvent('START');
 		}
 
 		telemetryEventsSent[eventName] = true;
@@ -60,7 +75,8 @@
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
 						event: eventName,
-						runtimeVersion: RUNTIME_VERSION
+						runtimeVersion: RUNTIME_VERSION,
+						publishedVersion: PUBLISHED_VERSION
 					}),
 					keepalive: true,
 					credentials: 'omit',
@@ -385,6 +401,9 @@
 				);
 				btn.classList.add('woc-action-active');
 				renderAnswer(action);
+				if (isContactDisabled()) {
+					sendTelemetryEvent('COMPLETE');
+				}
 			});
 			actionsWrap.appendChild(btn);
 			if (index === 0 && !selectedAction) {
@@ -486,6 +505,7 @@
 				return response.json();
 			})
 			.then(function () {
+				sendTelemetryEvent('COMPLETE');
 				submitted = true;
 				button.classList.remove('woc-pulse');
 				button.style.display = 'none';
@@ -574,6 +594,7 @@
 			}
 
 			cfg = data;
+			updatePublishedVersion(cfg.publishedVersion);
 			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
 			sendTelemetryEvent('IMPRESSION');
 			setTheme();

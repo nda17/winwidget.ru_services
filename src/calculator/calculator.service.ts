@@ -597,6 +597,12 @@ export class CalculatorService {
 						widgetId: calculator.id
 					}
 				});
+				await transaction.widgetRuntimeDailyStepMetric.deleteMany({
+					where: {
+						widgetType: WidgetType.CALCULATOR,
+						widgetId: calculator.id
+					}
+				});
 				await transaction.widgetRuntimePresence.deleteMany({
 					where: {
 						widgetType: WidgetType.CALCULATOR,
@@ -841,6 +847,7 @@ export class CalculatorService {
 
 		return {
 			isActive: true,
+			publishedVersion: calculator.publishedVersion,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
 			buttonColor: config.buttonColor || '',

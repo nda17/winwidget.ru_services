@@ -21,15 +21,28 @@
 		}
 	})();
 
-	var RUNTIME_VERSION = '2026.07';
+	var RUNTIME_VERSION = '2026.08';
+	var PUBLISHED_VERSION = 0;
 	var telemetryEventsSent = Object.create(null);
+
+	function updatePublishedVersion(value) {
+		var nextVersion = Number(value);
+		if (!Number.isInteger(nextVersion) || nextVersion < 1) nextVersion = 0;
+		if (nextVersion !== PUBLISHED_VERSION) {
+			telemetryEventsSent = Object.create(null);
+		}
+		PUBLISHED_VERSION = nextVersion;
+	}
 
 	function sendTelemetryEvent(eventName, publicKey) {
 		if (
 			!publicKey ||
+			!Number.isInteger(PUBLISHED_VERSION) ||
+			PUBLISHED_VERSION < 1 ||
 			(eventName !== 'IMPRESSION' &&
 				eventName !== 'OPEN' &&
-				eventName !== 'START') ||
+				eventName !== 'START' &&
+				eventName !== 'COMPLETE') ||
 			telemetryEventsSent[eventName]
 		) {
 			return;
@@ -40,6 +53,8 @@
 		} else if (eventName === 'START') {
 			sendTelemetryEvent('IMPRESSION', publicKey);
 			sendTelemetryEvent('OPEN', publicKey);
+		} else if (eventName === 'COMPLETE') {
+			sendTelemetryEvent('START', publicKey);
 		}
 
 		telemetryEventsSent[eventName] = true;
@@ -51,7 +66,8 @@
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
 						event: eventName,
-						runtimeVersion: RUNTIME_VERSION
+						runtimeVersion: RUNTIME_VERSION,
+						publishedVersion: PUBLISHED_VERSION
 					}),
 					keepalive: true,
 					credentials: 'omit',
@@ -1446,6 +1462,7 @@
 							return;
 						}
 
+						sendTelemetryEvent('COMPLETE', config._token);
 						rememberPlayed();
 						firePixelEvent('ip3_send');
 
@@ -2068,7 +2085,7 @@
 			phoneFieldActive: dc === 'PHONE' || dc === 'PHONE_AND_EMAIL',
 			emailFieldActive: dc === 'EMAIL' || dc === 'PHONE_AND_EMAIL',
 			nameFieldActive: dc !== 'NONE',
-			checkboxPolicyActive: true,
+			checkboxPolicyActive: dc !== 'NONE',
 			startBtnText: server.buttonText || 'Крутить!',
 			linkConsentText:
 				getSafeHttpUrl(server.privacyUrl) ||
@@ -2138,6 +2155,7 @@
 				}
 				return;
 			}
+			updatePublishedVersion(server.publishedVersion);
 			initWidget(mapServerConfig(server, token));
 		} catch (e) {
 			console.error('[winwidget] Failed to load config:', e);

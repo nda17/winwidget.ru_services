@@ -10,7 +10,7 @@ import {
 	WidgetTypeSlug
 } from '@/widget-domain/widget-lifecycle';
 import { WidgetSettingsService } from '@/widget-settings/widget-settings.service';
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Plan, SubscriptionStatus } from '@prisma/client';
 
 const CREATED_AT = new Date('2026-07-27T10:00:00.000Z');
@@ -53,6 +53,32 @@ const IMAGE_WIDGET_CASES = WIDGET_CASES.filter(
 	widgetCase => widgetCase.type !== WidgetType.STOP_OFFER
 );
 
+const createValidQuizStructure = () => ({
+	questions: [
+		{
+			id: 'question-1',
+			text: 'Какой вариант вам подходит?',
+			type: 'radio',
+			options: [
+				{
+					id: 'option-1',
+					text: 'Первый',
+					scores: { 'result-1': 10, 'result-2': 0 }
+				},
+				{
+					id: 'option-2',
+					text: 'Второй',
+					scores: { 'result-1': 0, 'result-2': 10 }
+				}
+			]
+		}
+	],
+	results: [
+		{ id: 'result-1', title: 'Первый результат' },
+		{ id: 'result-2', title: 'Второй результат' }
+	]
+});
+
 const createEntity = () => ({
 	id: 'widget-id',
 	userId: 'user-id',
@@ -64,7 +90,13 @@ const createEntity = () => ({
 	draftInstallDomain: 'draft.example.test',
 	draftConfig: {
 		title: 'Черновик',
-		items: [{ id: 1 }]
+		items: [{ id: 1 }],
+		dataType: 'NONE',
+		buttonSide: 'right',
+		desktopExitIntent: true,
+		successTitle: 'Готово',
+		privacyUrl: 'https://example.test/privacy',
+		...createValidQuizStructure()
 	} as Record<string, unknown>,
 	draftRevision: 2,
 	publishedVersion: 1,
@@ -380,6 +412,261 @@ describe('WidgetSettingsService', () => {
 		}
 	);
 
+	it.each([
+		{
+			type: WidgetType.WHEEL,
+			successConfig: { winMessage: 'Вы выиграли' }
+		},
+		{
+			type: WidgetType.QUIZ,
+			successConfig: createValidQuizStructure()
+		},
+		{
+			type: WidgetType.CALLBACK,
+			successConfig: { successTitle: 'Заявка отправлена' }
+		},
+		{
+			type: WidgetType.TIMER,
+			successConfig: { successTitle: 'Заявка отправлена' }
+		},
+		{
+			type: WidgetType.STOP_OFFER,
+			successConfig: { successTitle: 'Заявка отправлена' }
+		},
+		{
+			type: WidgetType.ONLINE_CONSULTANT,
+			successConfig: { successTitle: 'Заявка отправлена' }
+		},
+		{
+			type: WidgetType.CALCULATOR,
+			successConfig: { resultTitle: 'Стоимость рассчитана' }
+		}
+	])(
+		'checks the contact success state before publishing $type',
+		async ({ type, successConfig }) => {
+			const fixture = createFixture();
+			fixture.setEntity({
+				...createEntity(),
+				draftConfig: {
+					dataType: 'PHONE',
+					buttonSide: 'right',
+					desktopExitIntent: true,
+					privacyUrl: 'https://example.test/privacy',
+					...successConfig
+				}
+			});
+
+			const readyState = await fixture.service.getState(
+				type,
+				'widget-id',
+				'user-id'
+			);
+			expect(readyState.readiness.ready).toBe(true);
+
+			fixture.setEntity({
+				...fixture.getEntity(),
+				draftConfig: {
+					dataType: 'PHONE',
+					buttonSide: 'right',
+					desktopExitIntent: true,
+					privacyUrl: 'https://example.test/privacy'
+				}
+			});
+
+			const incompleteState = await fixture.service.getState(
+				type,
+				'widget-id',
+				'user-id'
+			);
+			expect(incompleteState.readiness).toMatchObject({
+				ready: false,
+				blockers: expect.arrayContaining([
+					expect.objectContaining({
+						code:
+							type === WidgetType.QUIZ
+								? 'QUIZ_QUESTIONS_REQUIRED'
+								: 'SUCCESS_MESSAGE_REQUIRED'
+					})
+				])
+			});
+		}
+	);
+
+	it('requires consent details and a stop-offer display scenario', async () => {
+		const fixture = createFixture();
+		fixture.setEntity({
+			...createEntity(),
+			draftConfig: {
+				dataType: 'PHONE',
+				successTitle: 'Заявка отправлена',
+				desktopExitIntent: false,
+				mobileAutoOpenDelay: 0,
+				scrollPercent: 0,
+				privacyUrl: ''
+			}
+		});
+
+		const state = await fixture.service.getState(
+			WidgetType.STOP_OFFER,
+			'widget-id',
+			'user-id'
+		);
+
+		expect(state.readiness.ready).toBe(false);
+		expect(state.readiness.blockers).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ code: 'CONSENT_REQUIRED' }),
+				expect.objectContaining({ code: 'DISPLAY_SCENARIO_REQUIRED' })
+			])
+		);
+	});
+
+	it.each([
+		{
+			name: 'без вопросов',
+			patch: { questions: [] },
+			code: 'QUIZ_QUESTIONS_REQUIRED'
+		},
+		{
+			name: 'с пустым текстом вопроса',
+			patch: {
+				questions: [
+					{
+						...createValidQuizStructure().questions[0],
+						text: ' '
+					}
+				]
+			},
+			code: 'QUIZ_QUESTION_TEXT_REQUIRED'
+		},
+		{
+			name: 'без вариантов ответа',
+			patch: {
+				questions: [
+					{
+						...createValidQuizStructure().questions[0],
+						options: []
+					}
+				]
+			},
+			code: 'QUIZ_OPTIONS_REQUIRED'
+		},
+		{
+			name: 'с пустым вариантом ответа',
+			patch: {
+				questions: [
+					{
+						...createValidQuizStructure().questions[0],
+						options: [
+							{
+								...createValidQuizStructure().questions[0].options[0],
+								text: ' '
+							},
+							createValidQuizStructure().questions[0].options[1]
+						]
+					}
+				]
+			},
+			code: 'QUIZ_OPTION_TEXT_REQUIRED'
+		},
+		{
+			name: 'без результатов',
+			patch: { results: [] },
+			code: 'QUIZ_RESULTS_REQUIRED'
+		},
+		{
+			name: 'с пустым заголовком результата',
+			patch: {
+				results: [
+					{
+						...createValidQuizStructure().results[0],
+						title: ' '
+					},
+					createValidQuizStructure().results[1]
+				]
+			},
+			code: 'QUIZ_RESULT_TITLE_REQUIRED'
+		},
+		{
+			name: 'с неполной связью варианта и результатов',
+			patch: {
+				questions: [
+					{
+						...createValidQuizStructure().questions[0],
+						options: [
+							{
+								...createValidQuizStructure().questions[0].options[0],
+								scores: { 'result-1': 10 }
+							},
+							createValidQuizStructure().questions[0].options[1]
+						]
+					}
+				]
+			},
+			code: 'QUIZ_RESULT_LINKS_INVALID'
+		},
+		{
+			name: 'со связью на несуществующий результат',
+			patch: {
+				questions: [
+					{
+						...createValidQuizStructure().questions[0],
+						options: [
+							{
+								...createValidQuizStructure().questions[0].options[0],
+								scores: {
+									'result-1': 10,
+									'result-2': 0,
+									'deleted-result': 5
+								}
+							},
+							createValidQuizStructure().questions[0].options[1]
+						]
+					}
+				]
+			},
+			code: 'QUIZ_RESULT_LINKS_INVALID'
+		}
+	])('blocks an invalid quiz $name', async ({ patch, code }) => {
+		const fixture = createFixture();
+		fixture.setEntity({
+			...createEntity(),
+			draftConfig: {
+				...createEntity().draftConfig,
+				...createValidQuizStructure(),
+				...patch
+			}
+		});
+
+		const state = await fixture.service.getState(
+			WidgetType.QUIZ,
+			'widget-id',
+			'user-id'
+		);
+
+		expect(state.readiness.ready).toBe(false);
+		expect(state.readiness.blockers).toEqual(
+			expect.arrayContaining([expect.objectContaining({ code })])
+		);
+	});
+
+	it('does not publish an invalid quiz draft', async () => {
+		const fixture = createFixture();
+		fixture.setEntity({
+			...createEntity(),
+			draftConfig: {
+				...createEntity().draftConfig,
+				...createValidQuizStructure(),
+				questions: []
+			}
+		});
+
+		await expect(
+			fixture.service.publish(WidgetType.QUIZ, 'widget-id', 'user-id', 2)
+		).rejects.toBeInstanceOf(BadRequestException);
+		expect(fixture.widgetConfigRevision.create).not.toHaveBeenCalled();
+	});
+
 	it.each(WIDGET_CASES)(
 		'publishes an immutable next version for $slug',
 		async ({ type, delegate }) => {
@@ -397,7 +684,10 @@ describe('WidgetSettingsService', () => {
 					widgetType: type,
 					widgetId: 'widget-id',
 					version: 2,
-					config: { title: 'Черновик', items: [{ id: 1 }] },
+					config: expect.objectContaining({
+						title: 'Черновик',
+						items: [{ id: 1 }]
+					}),
 					installDomain: 'draft.example.test'
 				}
 			});

@@ -744,6 +744,7 @@ export class WidgetService {
 
 		return {
 			isActive: true,
+			publishedVersion: widget.publishedVersion,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
 			glassEffect: config.glassEffect === true,

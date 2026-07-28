@@ -92,7 +92,7 @@ export class WidgetSettingsService {
 				);
 			}
 
-			const readiness = this.getReadiness(entity);
+			const readiness = this.getReadiness(type, entity);
 			if (!readiness.ready) {
 				throw new BadRequestException({
 					message: 'Виджет пока не готов к публикации',
@@ -346,21 +346,30 @@ export class WidgetSettingsService {
 			publishedAt: projected.publishedAt,
 			status: projected.status,
 			hasUnpublishedChanges: projected.hasUnpublishedChanges,
-			readiness: this.getReadiness(entity)
+			readiness: this.getReadiness(type, entity)
 		};
 	}
 
-	private getReadiness(entity: WidgetLifecycleEntity): WidgetReadiness {
+	private getReadiness(
+		type: WidgetType,
+		entity: WidgetLifecycleEntity
+	): WidgetReadiness {
 		const blockers: WidgetReadinessItem[] = [];
 		const warnings: WidgetReadinessItem[] = [];
 		const config = getWidgetDraftConfig(entity);
 		const installDomain = getWidgetDraftInstallDomain(entity).trim();
+		const configRecord =
+			config && typeof config === 'object' && !Array.isArray(config)
+				? (config as Record<string, unknown>)
+				: null;
 
-		if (!config || typeof config !== 'object' || Array.isArray(config)) {
+		if (!configRecord) {
 			blockers.push({
 				code: 'CONFIG_REQUIRED',
 				message: 'Заполните настройки виджета'
 			});
+		} else {
+			this.appendConfigurationReadiness(type, configRecord, blockers);
 		}
 		if (!installDomain) {
 			blockers.push({
@@ -386,6 +395,267 @@ export class WidgetSettingsService {
 			blockers,
 			warnings
 		};
+	}
+
+	private appendConfigurationReadiness(
+		type: WidgetType,
+		config: Record<string, unknown>,
+		blockers: WidgetReadinessItem[]
+	) {
+		if (type === WidgetType.QUIZ) {
+			this.appendQuizReadiness(config, blockers);
+		}
+
+		const rawDataType =
+			typeof config.dataType === 'string'
+				? config.dataType.trim().toUpperCase()
+				: '';
+		const allowedDataTypes = new Set([
+			'PHONE',
+			'EMAIL',
+			'PHONE_AND_EMAIL',
+			'NONE'
+		]);
+		const dataType = type === WidgetType.CALLBACK ? 'PHONE' : rawDataType;
+
+		if (type !== WidgetType.CALLBACK && !allowedDataTypes.has(dataType)) {
+			blockers.push({
+				code: 'CONTACT_METHOD_REQUIRED',
+				message: 'Выберите способ связи с клиентом'
+			});
+		}
+
+		const collectsContacts =
+			type === WidgetType.CALLBACK ||
+			(allowedDataTypes.has(dataType) && dataType !== 'NONE');
+		if (
+			collectsContacts &&
+			type !== WidgetType.QUIZ &&
+			!this.hasSuccessMessage(type, config)
+		) {
+			blockers.push({
+				code: 'SUCCESS_MESSAGE_REQUIRED',
+				message: 'Заполните сообщение после отправки формы'
+			});
+		}
+		if (collectsContacts && !this.isHttpUrl(config.privacyUrl)) {
+			blockers.push({
+				code: 'CONSENT_REQUIRED',
+				message: 'Укажите ссылку на согласие на обработку данных'
+			});
+		}
+
+		if (
+			type === WidgetType.STOP_OFFER &&
+			config.desktopExitIntent !== true &&
+			!this.isPositiveNumber(config.mobileAutoOpenDelay) &&
+			!this.isPositiveNumber(config.scrollPercent)
+		) {
+			blockers.push({
+				code: 'DISPLAY_SCENARIO_REQUIRED',
+				message: 'Выберите хотя бы один сценарий показа виджета'
+			});
+		}
+	}
+
+	private appendQuizReadiness(
+		config: Record<string, unknown>,
+		blockers: WidgetReadinessItem[]
+	) {
+		const questions = config.questions;
+		const results = config.results;
+
+		if (!Array.isArray(questions) || questions.length === 0) {
+			blockers.push({
+				code: 'QUIZ_QUESTIONS_REQUIRED',
+				message: 'Добавьте хотя бы один вопрос'
+			});
+		}
+
+		const resultIds = this.getValidQuizResultIds(results, blockers);
+		if (!Array.isArray(questions) || questions.length === 0) return;
+
+		const questionIds = new Set<string>();
+		questions.forEach((question, questionIndex) => {
+			const questionNumber = questionIndex + 1;
+			if (!this.isRecord(question)) {
+				blockers.push({
+					code: 'QUIZ_QUESTION_INVALID',
+					message: `Вопрос ${questionNumber}: заполните настройки вопроса`
+				});
+				return;
+			}
+
+			const questionId = this.getUniqueQuizId(question.id, questionIds);
+			if (!questionId) {
+				blockers.push({
+					code: 'QUIZ_QUESTION_INVALID',
+					message: `Вопрос ${questionNumber}: пересоздайте вопрос`
+				});
+			}
+			if (!this.hasText(question.text)) {
+				blockers.push({
+					code: 'QUIZ_QUESTION_TEXT_REQUIRED',
+					message: `Вопрос ${questionNumber}: заполните текст вопроса`
+				});
+			}
+
+			const options = question.options;
+			if (!Array.isArray(options) || options.length < 2) {
+				blockers.push({
+					code: 'QUIZ_OPTIONS_REQUIRED',
+					message: `Вопрос ${questionNumber}: добавьте минимум два варианта ответа`
+				});
+				return;
+			}
+
+			const optionIds = new Set<string>();
+			options.forEach((option, optionIndex) => {
+				const optionNumber = optionIndex + 1;
+				if (!this.isRecord(option)) {
+					blockers.push({
+						code: 'QUIZ_OPTION_INVALID',
+						message: `Вопрос ${questionNumber}, вариант ${optionNumber}: заполните настройки варианта`
+					});
+					return;
+				}
+
+				if (!this.getUniqueQuizId(option.id, optionIds)) {
+					blockers.push({
+						code: 'QUIZ_OPTION_INVALID',
+						message: `Вопрос ${questionNumber}, вариант ${optionNumber}: пересоздайте вариант`
+					});
+				}
+				if (!this.hasText(option.text)) {
+					blockers.push({
+						code: 'QUIZ_OPTION_TEXT_REQUIRED',
+						message: `Вопрос ${questionNumber}, вариант ${optionNumber}: заполните текст`
+					});
+				}
+
+				if (
+					resultIds &&
+					!this.hasValidQuizScores(option.scores, resultIds)
+				) {
+					blockers.push({
+						code: 'QUIZ_RESULT_LINKS_INVALID',
+						message: `Вопрос ${questionNumber}, вариант ${optionNumber}: проверьте связи с результатами`
+					});
+				}
+			});
+		});
+	}
+
+	private getValidQuizResultIds(
+		value: unknown,
+		blockers: WidgetReadinessItem[]
+	): Set<string> | null {
+		if (!Array.isArray(value) || value.length < 2) {
+			blockers.push({
+				code: 'QUIZ_RESULTS_REQUIRED',
+				message: 'Добавьте минимум два результата'
+			});
+			return null;
+		}
+
+		const resultIds = new Set<string>();
+		let structurallyValid = true;
+		value.forEach((result, resultIndex) => {
+			const resultNumber = resultIndex + 1;
+			if (!this.isRecord(result)) {
+				structurallyValid = false;
+				blockers.push({
+					code: 'QUIZ_RESULT_INVALID',
+					message: `Результат ${resultNumber}: заполните настройки результата`
+				});
+				return;
+			}
+
+			if (!this.getUniqueQuizId(result.id, resultIds)) {
+				structurallyValid = false;
+				blockers.push({
+					code: 'QUIZ_RESULT_INVALID',
+					message: `Результат ${resultNumber}: пересоздайте результат`
+				});
+			}
+			if (!this.hasText(result.title)) {
+				structurallyValid = false;
+				blockers.push({
+					code: 'QUIZ_RESULT_TITLE_REQUIRED',
+					message: `Результат ${resultNumber}: заполните заголовок`
+				});
+			}
+		});
+
+		return structurallyValid ? resultIds : null;
+	}
+
+	private getUniqueQuizId(value: unknown, seenIds: Set<string>) {
+		if (!this.hasText(value)) return null;
+
+		const id = (value as string).trim();
+		if (seenIds.has(id)) return null;
+		seenIds.add(id);
+		return id;
+	}
+
+	private hasValidQuizScores(value: unknown, resultIds: Set<string>) {
+		if (!this.isRecord(value)) return false;
+
+		const scoreKeys = Object.keys(value);
+		if (scoreKeys.some(resultId => !resultIds.has(resultId))) return false;
+
+		return [...resultIds].every(
+			resultId =>
+				Object.prototype.hasOwnProperty.call(value, resultId) &&
+				Number.isFinite(Number(value[resultId]))
+		);
+	}
+
+	private hasSuccessMessage(
+		type: WidgetType,
+		config: Record<string, unknown>
+	) {
+		switch (type) {
+			case WidgetType.WHEEL:
+				return this.hasText(config.winMessage);
+			case WidgetType.QUIZ:
+				return Array.isArray(config.results) && config.results.length > 0;
+			case WidgetType.CALCULATOR:
+				return this.hasText(config.resultTitle);
+			case WidgetType.CALLBACK:
+			case WidgetType.TIMER:
+			case WidgetType.STOP_OFFER:
+			case WidgetType.ONLINE_CONSULTANT:
+				return this.hasText(config.successTitle);
+		}
+
+		return false;
+	}
+
+	private hasText(value: unknown) {
+		return typeof value === 'string' && value.trim().length > 0;
+	}
+
+	private isRecord(value: unknown): value is Record<string, unknown> {
+		return (
+			Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+		);
+	}
+
+	private isPositiveNumber(value: unknown) {
+		return Number.isFinite(Number(value)) && Number(value) > 0;
+	}
+
+	private isHttpUrl(value: unknown) {
+		if (!this.hasText(value)) return false;
+
+		try {
+			const url = new URL(value as string);
+			return url.protocol === 'http:' || url.protocol === 'https:';
+		} catch {
+			return false;
+		}
 	}
 
 	private async getOwnedEntity(

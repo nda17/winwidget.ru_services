@@ -529,6 +529,7 @@ export class CountdownTimerService {
 
 		return {
 			isActive: true,
+			publishedVersion: timer.publishedVersion,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
 			buttonColor: config.buttonColor || '',

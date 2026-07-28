@@ -2,7 +2,7 @@ import { PrismaService } from '@/prisma.service';
 import { SubscriptionService } from '@/subscription/subscription.service';
 import {
 	RecordWidgetRuntimeEventDto,
-	WidgetRuntimeEvent
+	WidgetRuntimeFunnelEvent
 } from '@/widget-runtime/widget-runtime.dto';
 import {
 	getWidgetRequestDomain,
@@ -40,9 +40,9 @@ interface RuntimeWidgetRecord {
 	publishedAt: Date | null;
 }
 
-interface SubmissionRow {
-	date: Date;
-	count: bigint;
+interface RuntimeStepDefinition {
+	key: string;
+	label: string;
 }
 
 type RuntimePersistenceClient = Pick<
@@ -56,6 +56,7 @@ type RuntimePersistenceClient = Pick<
 	| 'calculator'
 	| 'widgetRuntimePresence'
 	| 'widgetRuntimeDailyMetric'
+	| 'widgetRuntimeDailyStepMetric'
 	| '$queryRaw'
 >;
 
@@ -94,6 +95,48 @@ const dateKey = (date: Date) => date.toISOString().slice(0, 10);
 const percentage = (value: number, total: number) =>
 	total > 0 ? Math.round((value / total) * 1000) / 10 : null;
 
+const supportsStepAnalytics = (type: RuntimeWidgetType) =>
+	type === 'QUIZ' || type === 'CALCULATOR';
+
+const getRuntimeStepDefinitions = (
+	type: RuntimeWidgetType,
+	config: unknown
+): RuntimeStepDefinition[] => {
+	if (
+		!supportsStepAnalytics(type) ||
+		!config ||
+		typeof config !== 'object'
+	) {
+		return [];
+	}
+
+	const configRecord = config as Record<string, unknown>;
+	const source =
+		type === 'QUIZ' ? configRecord.questions : configRecord.fields;
+	if (!Array.isArray(source)) return [];
+
+	const prefix = type === 'QUIZ' ? 'question' : 'field';
+	const labelProperty = type === 'QUIZ' ? 'text' : 'label';
+	const maxSteps = type === 'QUIZ' ? 10 : 20;
+
+	return source.slice(0, maxSteps).map((item, index) => {
+		const fallback = `${type === 'QUIZ' ? 'Вопрос' : 'Поле'} ${index + 1}`;
+		const rawLabel =
+			item && typeof item === 'object'
+				? (item as Record<string, unknown>)[labelProperty]
+				: null;
+		const label =
+			typeof rawLabel === 'string' && rawLabel.trim()
+				? rawLabel.trim().slice(0, 100)
+				: fallback;
+
+		return {
+			key: `${prefix}:${index + 1}`,
+			label
+		};
+	});
+};
+
 @Injectable()
 export class WidgetRuntimeService {
 	constructor(
@@ -113,6 +156,16 @@ export class WidgetRuntimeService {
 		const date = startOfUtcDay(now);
 		const runtimeVersion = dto.runtimeVersion.trim().slice(0, 32);
 		if (!runtimeVersion) return;
+		if (dto.event !== 'STEP' && dto.stepKey !== undefined) {
+			throw new BadRequestException(
+				'stepKey допустим только для события STEP'
+			);
+		}
+		if (dto.event === 'STEP' && !supportsStepAnalytics(type)) {
+			throw new BadRequestException(
+				'Шаги доступны только для квиза и калькулятора'
+			);
+		}
 
 		await this.prisma.$transaction(async transaction => {
 			const widgetId = await this.lockWidgetByPublicKey(
@@ -128,11 +181,32 @@ export class WidgetRuntimeService {
 				!widget.isActive ||
 				!widget.publishedAt ||
 				widget.publishedVersion < 1 ||
+				dto.publishedVersion !== widget.publishedVersion ||
 				!isWidgetDomainAllowed(widget.installDomain, requestDomain)
 			) {
 				return;
 			}
+			if (
+				dto.event === 'STEP' &&
+				!getRuntimeStepDefinitions(type, widget.config).some(
+					step => step.key === dto.stepKey
+				)
+			) {
+				throw new BadRequestException('Некорректный шаг виджета');
+			}
 
+			const currentPresence =
+				await transaction.widgetRuntimePresence.findUnique({
+					where: {
+						widgetType_widgetId: {
+							widgetType: type,
+							widgetId: widget.id
+						}
+					},
+					select: {
+						publishedVersion: true
+					}
+				});
 			await transaction.widgetRuntimePresence.upsert({
 				where: {
 					widgetType_widgetId: {
@@ -145,22 +219,39 @@ export class WidgetRuntimeService {
 					widgetId: widget.id,
 					installDomain: widget.installDomain,
 					runtimeVersion,
+					publishedVersion: widget.publishedVersion,
 					firstSeenAt: now,
 					lastSeenAt: now
 				},
 				update: {
 					installDomain: widget.installDomain,
 					runtimeVersion,
+					publishedVersion: widget.publishedVersion,
+					...(currentPresence?.publishedVersion !== widget.publishedVersion
+						? { firstSeenAt: now }
+						: {}),
 					lastSeenAt: now
 				}
 			});
-			await this.incrementMetric(
-				transaction,
-				type,
-				widget.id,
-				date,
-				dto.event
-			);
+			if (dto.event === 'STEP') {
+				await this.incrementStepMetric(
+					transaction,
+					type,
+					widget.id,
+					widget.publishedVersion,
+					date,
+					dto.stepKey as string
+				);
+			} else {
+				await this.incrementMetric(
+					transaction,
+					type,
+					widget.id,
+					widget.publishedVersion,
+					date,
+					dto.event
+				);
+			}
 		});
 	}
 
@@ -177,7 +268,8 @@ export class WidgetRuntimeService {
 		});
 		const matchesPublishedDomain =
 			Boolean(widget.installDomain) &&
-			presence?.installDomain === widget.installDomain;
+			presence?.installDomain === widget.installDomain &&
+			presence.publishedVersion === widget.publishedVersion;
 
 		return {
 			serverTime: new Date().toISOString(),
@@ -219,7 +311,8 @@ export class WidgetRuntimeService {
 		const today = startOfUtcDay(new Date());
 		const fromDate = addUtcDays(today, -(days - 1));
 		const untilDate = addUtcDays(today, 1);
-		const [presence, metrics] = await Promise.all([
+		const stepDefinitions = getRuntimeStepDefinitions(type, widget.config);
+		const [presence, metrics, stepMetrics] = await Promise.all([
 			this.prisma.widgetRuntimePresence.findUnique({
 				where: {
 					widgetType_widgetId: {
@@ -232,33 +325,42 @@ export class WidgetRuntimeService {
 				where: {
 					widgetType: type,
 					widgetId: widget.id,
+					publishedVersion: widget.publishedVersion,
 					date: {
 						gte: fromDate,
 						lt: untilDate
 					}
 				},
 				orderBy: { date: 'asc' }
-			})
+			}),
+			stepDefinitions.length
+				? this.prisma.widgetRuntimeDailyStepMetric.findMany({
+						where: {
+							widgetType: type,
+							widgetId: widget.id,
+							publishedVersion: widget.publishedVersion,
+							date: {
+								gte: fromDate,
+								lt: untilDate
+							},
+							stepKey: {
+								in: stepDefinitions.map(step => step.key)
+							}
+						},
+						select: {
+							stepKey: true,
+							count: true
+						}
+					})
+				: Promise.resolve([])
 		]);
 		const submitAvailable = this.isSubmitAvailable(type, widget.config);
-		const trackingStartedAt = presence?.firstSeenAt ?? null;
-		const leadFromDate =
-			trackingStartedAt && trackingStartedAt > fromDate
-				? trackingStartedAt
-				: fromDate;
-		const submissionRows = trackingStartedAt
-			? await this.getSubmissionRows(
-					type,
-					widget.id,
-					leadFromDate,
-					untilDate
-				)
-			: [];
+		const trackingStartedAt =
+			presence?.publishedVersion === widget.publishedVersion
+				? presence.firstSeenAt
+				: null;
 		const metricsByDate = new Map(
 			metrics.map(metric => [dateKey(metric.date), metric])
-		);
-		const submissionsByDate = new Map(
-			submissionRows.map(row => [dateKey(row.date), Number(row.count)])
 		);
 		const daily = Array.from({ length: days }, (_, index) => {
 			const date = addUtcDays(fromDate, index);
@@ -270,7 +372,7 @@ export class WidgetRuntimeService {
 				impressions: metric?.impressions ?? 0,
 				opens: metric?.opens ?? 0,
 				starts: metric?.starts ?? 0,
-				submits: submissionsByDate.get(key) ?? 0
+				submits: metric?.completions ?? 0
 			};
 		});
 		const totals = daily.reduce(
@@ -287,6 +389,27 @@ export class WidgetRuntimeService {
 				submits: 0
 			}
 		);
+		const stepCounts = stepMetrics.reduce((result, metric) => {
+			result.set(
+				metric.stepKey,
+				(result.get(metric.stepKey) ?? 0) + metric.count
+			);
+			return result;
+		}, new Map<string, number>());
+		let previousQuizStepCount = totals.starts;
+		const steps = stepDefinitions.map(step => {
+			const count = stepCounts.get(step.key) ?? 0;
+			const result = {
+				...step,
+				count,
+				conversionRate: percentage(
+					count,
+					type === 'CALCULATOR' ? totals.starts : previousQuizStepCount
+				)
+			};
+			if (type === 'QUIZ') previousQuizStepCount = count;
+			return result;
+		});
 
 		return {
 			from: dateKey(fromDate),
@@ -295,13 +418,21 @@ export class WidgetRuntimeService {
 			trackingStartedAt: trackingStartedAt?.toISOString() ?? null,
 			isPartialPeriod: !trackingStartedAt || trackingStartedAt > fromDate,
 			submitAvailable,
+			completionLabel: submitAvailable ? 'Заявки' : 'Завершения',
+			stepRateBasis:
+				type === 'CALCULATOR'
+					? 'START'
+					: type === 'QUIZ'
+						? 'PREVIOUS_STEP'
+						: null,
 			totals,
 			conversion: {
 				openRate: percentage(totals.opens, totals.impressions),
 				startRate: percentage(totals.starts, totals.opens),
 				submitRate: percentage(totals.submits, totals.starts)
 			},
-			daily
+			daily,
+			steps
 		};
 	}
 
@@ -309,34 +440,72 @@ export class WidgetRuntimeService {
 		client: RuntimePersistenceClient,
 		type: RuntimeWidgetType,
 		widgetId: string,
+		publishedVersion: number,
 		date: Date,
-		event: WidgetRuntimeEvent
+		event: WidgetRuntimeFunnelEvent
 	) {
 		const create = {
 			widgetType: type,
 			widgetId,
+			publishedVersion,
 			date,
 			impressions: event === 'IMPRESSION' ? 1 : 0,
 			opens: event === 'OPEN' ? 1 : 0,
-			starts: event === 'START' ? 1 : 0
+			starts: event === 'START' ? 1 : 0,
+			completions: event === 'COMPLETE' ? 1 : 0
 		};
 		const update =
 			event === 'IMPRESSION'
 				? { impressions: { increment: 1 } }
 				: event === 'OPEN'
 					? { opens: { increment: 1 } }
-					: { starts: { increment: 1 } };
+					: event === 'START'
+						? { starts: { increment: 1 } }
+						: { completions: { increment: 1 } };
 
 		return client.widgetRuntimeDailyMetric.upsert({
 			where: {
-				widgetType_widgetId_date: {
+				widgetType_widgetId_publishedVersion_date: {
 					widgetType: type,
 					widgetId,
+					publishedVersion,
 					date
 				}
 			},
 			create,
 			update
+		});
+	}
+
+	private incrementStepMetric(
+		client: RuntimePersistenceClient,
+		type: RuntimeWidgetType,
+		widgetId: string,
+		publishedVersion: number,
+		date: Date,
+		stepKey: string
+	) {
+		return client.widgetRuntimeDailyStepMetric.upsert({
+			where: {
+				widgetType_widgetId_publishedVersion_date_stepKey: {
+					widgetType: type,
+					widgetId,
+					publishedVersion,
+					date,
+					stepKey
+				}
+			},
+			create: {
+				widgetType: type,
+				widgetId,
+				publishedVersion,
+				date,
+				stepKey,
+				count: 1
+			},
+			update: {
+				count: { increment: 1 }
+			}
 		});
 	}
 
@@ -477,79 +646,6 @@ export class WidgetRuntimeService {
 			throw new ForbiddenException(
 				'Аналитика виджетов доступна только на активном тарифе Hard'
 			);
-		}
-	}
-
-	private getSubmissionRows(
-		type: RuntimeWidgetType,
-		widgetId: string,
-		fromDate: Date,
-		untilDate: Date
-	): Promise<SubmissionRow[]> {
-		switch (type) {
-			case 'WHEEL':
-				return this.prisma.$queryRaw<SubmissionRow[]>`
-					SELECT "created_at"::date AS "date", COUNT(*)::bigint AS "count"
-					FROM "leads"
-					WHERE "widget_id" = ${widgetId}
-					  AND "created_at" >= ${fromDate}
-					  AND "created_at" < ${untilDate}
-					GROUP BY "created_at"::date
-				`;
-			case 'QUIZ':
-				return this.prisma.$queryRaw<SubmissionRow[]>`
-					SELECT "created_at"::date AS "date", COUNT(*)::bigint AS "count"
-					FROM "quiz_leads"
-					WHERE "quiz_id" = ${widgetId}
-					  AND "created_at" >= ${fromDate}
-					  AND "created_at" < ${untilDate}
-					GROUP BY "created_at"::date
-				`;
-			case 'CALLBACK':
-				return this.prisma.$queryRaw<SubmissionRow[]>`
-					SELECT "created_at"::date AS "date", COUNT(*)::bigint AS "count"
-					FROM "callback_leads"
-					WHERE "callback_id" = ${widgetId}
-					  AND "created_at" >= ${fromDate}
-					  AND "created_at" < ${untilDate}
-					GROUP BY "created_at"::date
-				`;
-			case 'TIMER':
-				return this.prisma.$queryRaw<SubmissionRow[]>`
-					SELECT "created_at"::date AS "date", COUNT(*)::bigint AS "count"
-					FROM "countdown_timer_leads"
-					WHERE "countdown_timer_id" = ${widgetId}
-					  AND "created_at" >= ${fromDate}
-					  AND "created_at" < ${untilDate}
-					GROUP BY "created_at"::date
-				`;
-			case 'STOP_OFFER':
-				return this.prisma.$queryRaw<SubmissionRow[]>`
-					SELECT "created_at"::date AS "date", COUNT(*)::bigint AS "count"
-					FROM "stop_offer_leads"
-					WHERE "stop_offer_id" = ${widgetId}
-					  AND "created_at" >= ${fromDate}
-					  AND "created_at" < ${untilDate}
-					GROUP BY "created_at"::date
-				`;
-			case 'ONLINE_CONSULTANT':
-				return this.prisma.$queryRaw<SubmissionRow[]>`
-					SELECT "created_at"::date AS "date", COUNT(*)::bigint AS "count"
-					FROM "online_consultant_leads"
-					WHERE "online_consultant_id" = ${widgetId}
-					  AND "created_at" >= ${fromDate}
-					  AND "created_at" < ${untilDate}
-					GROUP BY "created_at"::date
-				`;
-			case 'CALCULATOR':
-				return this.prisma.$queryRaw<SubmissionRow[]>`
-					SELECT "created_at"::date AS "date", COUNT(*)::bigint AS "count"
-					FROM "calculator_leads"
-					WHERE "calculator_id" = ${widgetId}
-					  AND "created_at" >= ${fromDate}
-					  AND "created_at" < ${untilDate}
-					GROUP BY "created_at"::date
-				`;
 		}
 	}
 }

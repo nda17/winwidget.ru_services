@@ -366,15 +366,16 @@ model WidgetConfigRevision {
 }
 
 model WidgetRuntimePresence {
-  id             String   @id @default(cuid())
-  widgetType     String   @map("widget_type")
-  widgetId       String   @map("widget_id")
-  installDomain  String   @map("install_domain")
-  runtimeVersion String   @map("runtime_version")
-  firstSeenAt    DateTime @default(now()) @map("first_seen_at")
-  lastSeenAt     DateTime @default(now()) @map("last_seen_at")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  id               String   @id @default(cuid())
+  widgetType       String   @map("widget_type")
+  widgetId         String   @map("widget_id")
+  installDomain    String   @map("install_domain")
+  runtimeVersion   String   @map("runtime_version")
+  publishedVersion Int      @map("published_version")
+  firstSeenAt      DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt       DateTime @default(now()) @map("last_seen_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@unique([widgetType, widgetId])
   @@index([lastSeenAt])
@@ -382,19 +383,37 @@ model WidgetRuntimePresence {
 }
 
 model WidgetRuntimeDailyMetric {
-  id          String   @id @default(cuid())
-  widgetType  String   @map("widget_type")
-  widgetId    String   @map("widget_id")
-  date        DateTime @db.Date
-  impressions Int      @default(0)
-  opens       Int      @default(0)
-  starts      Int      @default(0)
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id               String   @id @default(cuid())
+  widgetType       String   @map("widget_type")
+  widgetId         String   @map("widget_id")
+  publishedVersion Int      @map("published_version")
+  date             DateTime @db.Date
+  impressions      Int      @default(0)
+  opens            Int      @default(0)
+  starts           Int      @default(0)
+  completions      Int      @default(0)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
 
-  @@unique([widgetType, widgetId, date])
-  @@index([widgetType, widgetId, date])
+  @@unique([widgetType, widgetId, publishedVersion, date], map: "widget_runtime_metric_unique")
+  @@index([widgetType, widgetId, publishedVersion, date], map: "widget_runtime_metric_lookup_idx")
   @@map("widget_runtime_daily_metrics")
+}
+
+model WidgetRuntimeDailyStepMetric {
+  id               String   @id @default(cuid())
+  widgetType       String   @map("widget_type")
+  widgetId         String   @map("widget_id")
+  publishedVersion Int      @map("published_version")
+  date             DateTime @db.Date
+  stepKey          String   @map("step_key")
+  count            Int      @default(0)
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@unique([widgetType, widgetId, publishedVersion, date, stepKey], map: "widget_runtime_step_metric_unique")
+  @@index([widgetType, widgetId, publishedVersion, date], map: "widget_runtime_step_metric_lookup_idx")
+  @@map("widget_runtime_daily_step_metrics")
 }
 
 model Subscription {

@@ -29,14 +29,27 @@
 		return;
 	}
 
-	var RUNTIME_VERSION = '2026.07';
+	var RUNTIME_VERSION = '2026.08';
+	var PUBLISHED_VERSION = 0;
 	var telemetryEventsSent = Object.create(null);
+
+	function updatePublishedVersion(value) {
+		var nextVersion = Number(value);
+		if (!Number.isInteger(nextVersion) || nextVersion < 1) nextVersion = 0;
+		if (nextVersion !== PUBLISHED_VERSION) {
+			telemetryEventsSent = Object.create(null);
+		}
+		PUBLISHED_VERSION = nextVersion;
+	}
 
 	function sendTelemetryEvent(eventName) {
 		if (
+			!Number.isInteger(PUBLISHED_VERSION) ||
+			PUBLISHED_VERSION < 1 ||
 			(eventName !== 'IMPRESSION' &&
 				eventName !== 'OPEN' &&
-				eventName !== 'START') ||
+				eventName !== 'START' &&
+				eventName !== 'COMPLETE') ||
 			telemetryEventsSent[eventName]
 		) {
 			return;
@@ -47,6 +60,8 @@
 		} else if (eventName === 'START') {
 			sendTelemetryEvent('IMPRESSION');
 			sendTelemetryEvent('OPEN');
+		} else if (eventName === 'COMPLETE') {
+			sendTelemetryEvent('START');
 		}
 
 		telemetryEventsSent[eventName] = true;
@@ -60,7 +75,8 @@
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
 						event: eventName,
-						runtimeVersion: RUNTIME_VERSION
+						runtimeVersion: RUNTIME_VERSION,
+						publishedVersion: PUBLISHED_VERSION
 					}),
 					keepalive: true,
 					credentials: 'omit',
@@ -687,6 +703,9 @@
 		link.textContent = cfg.actionButtonText || 'Перейти к акции';
 		link.onclick = function () {
 			sendTelemetryEvent('START');
+			if (cfg.dataType === 'NONE') {
+				sendTelemetryEvent('COMPLETE');
+			}
 			fireEvent('action');
 		};
 		return link;
@@ -906,6 +925,7 @@
 					return r.json();
 				})
 				.then(function () {
+					sendTelemetryEvent('COMPLETE');
 					submitted = true;
 					rememberSubmitted();
 					fireEvent('submit');
@@ -1187,12 +1207,14 @@
 					if (tickTimer) clearInterval(tickTimer);
 					if (autoOpenTimer) clearTimeout(autoOpenTimer);
 					cfg = null;
+					updatePublishedVersion(0);
 					timerBtn.style.display = 'none';
 					closeModal();
 					if (AUTO_OPEN) showDisabledPage();
 					return;
 				}
 				cfg = data;
+				updatePublishedVersion(cfg.publishedVersion);
 				submitted = cfg.dataType === 'NONE' ? false : isAlreadySubmitted();
 				deadline = getDeadline();
 				applyLoadedConfig(options);

@@ -26,15 +26,33 @@
 		(_currentScript && _currentScript.getAttribute('data-key')) || '';
 	if (!KEY) return;
 
-	var RUNTIME_VERSION = '2026.07';
+	var RUNTIME_VERSION = '2026.08';
+	var PUBLISHED_VERSION = 0;
 	var telemetryEventsSent = Object.create(null);
 
-	function sendTelemetryEvent(eventName) {
+	function updatePublishedVersion(value) {
+		var nextVersion = Number(value);
+		if (!Number.isInteger(nextVersion) || nextVersion < 1) nextVersion = 0;
+		if (nextVersion !== PUBLISHED_VERSION) {
+			telemetryEventsSent = Object.create(null);
+		}
+		PUBLISHED_VERSION = nextVersion;
+	}
+
+	function sendTelemetryEvent(eventName, stepKey) {
+		var isStepEvent = eventName === 'STEP';
+		var telemetryKey = isStepEvent ? eventName + ':' + stepKey : eventName;
 		if (
+			!Number.isInteger(PUBLISHED_VERSION) ||
+			PUBLISHED_VERSION < 1 ||
 			(eventName !== 'IMPRESSION' &&
 				eventName !== 'OPEN' &&
-				eventName !== 'START') ||
-			telemetryEventsSent[eventName]
+				eventName !== 'START' &&
+				eventName !== 'COMPLETE' &&
+				!isStepEvent) ||
+			(isStepEvent &&
+				!/^question:(?:[1-9]|10)$/.test(String(stepKey || ''))) ||
+			telemetryEventsSent[telemetryKey]
 		) {
 			return;
 		}
@@ -44,19 +62,26 @@
 		} else if (eventName === 'START') {
 			sendTelemetryEvent('IMPRESSION');
 			sendTelemetryEvent('OPEN');
+		} else if (eventName === 'COMPLETE') {
+			sendTelemetryEvent('START');
+		} else if (isStepEvent) {
+			sendTelemetryEvent('START');
 		}
 
-		telemetryEventsSent[eventName] = true;
+		telemetryEventsSent[telemetryKey] = true;
 		try {
+			var payload = {
+				event: eventName,
+				runtimeVersion: RUNTIME_VERSION,
+				publishedVersion: PUBLISHED_VERSION
+			};
+			if (isStepEvent) payload.stepKey = stepKey;
 			var request = fetch(
 				API_BASE + '/widget-events/quiz/' + encodeURIComponent(KEY),
 				{
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						event: eventName,
-						runtimeVersion: RUNTIME_VERSION
-					}),
+					body: JSON.stringify(payload),
 					keepalive: true,
 					credentials: 'omit',
 					referrerPolicy: 'no-referrer'
@@ -723,6 +748,7 @@
 			var q = questions[idx];
 			var isCheckbox = q.type === 'checkbox';
 			var selected = [];
+			sendTelemetryEvent('STEP', 'question:' + (idx + 1));
 
 			inner.innerHTML = '';
 			inner.appendChild(makeProgress(idx, questions.length));
@@ -966,6 +992,7 @@
 					return response;
 				})
 				.then(function () {
+					sendTelemetryEvent('COMPLETE');
 					setPlayedCookie();
 					firePixel('wq_send');
 					showResult(resultData);
@@ -1201,6 +1228,7 @@
 				if (window.winquizAutoOpen) showDisabledPage();
 				return;
 			}
+			updatePublishedVersion(server.publishedVersion);
 			initWidget(server);
 		})
 		.catch(function (e) {

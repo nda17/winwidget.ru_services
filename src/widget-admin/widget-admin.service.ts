@@ -12,14 +12,17 @@ import { UpdateQuizDto } from '@/quiz/dto/update-quiz.dto';
 import { QuizService } from '@/quiz/quiz.service';
 import { UpdateStopOfferDto } from '@/stop-offer/dto/update-stop-offer.dto';
 import { StopOfferService } from '@/stop-offer/stop-offer.service';
+import { SubscriptionService } from '@/subscription/subscription.service';
 import { UpdateAdminWidgetDto } from '@/widget-admin/dto/update-admin-widget.dto';
 import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
 import { WidgetService } from '@/widget/widget.service';
 import {
 	projectWidgetDraft,
-	WidgetLifecycleEntity,
+	widgetTypeToSlug,
+	type WidgetLifecycleEntity,
 	WidgetType
 } from '@/widget-domain/widget-lifecycle';
+import { WidgetRuntimeService } from '@/widget-runtime/widget-runtime.service';
 import { WidgetSettingsService } from '@/widget-settings/widget-settings.service';
 import {
 	BadRequestException,
@@ -99,18 +102,84 @@ export class WidgetAdminService {
 		private readonly stopOfferService: StopOfferService,
 		private readonly onlineConsultantService: OnlineConsultantService,
 		private readonly calculatorService: CalculatorService,
+		private readonly subscriptionService: SubscriptionService,
 		private readonly widgetSettingsService: WidgetSettingsService,
+		private readonly widgetRuntimeService: WidgetRuntimeService,
 		private readonly adminEventLogService: AdminEventLogService
 	) {}
 
 	async getWidget(type: WidgetType, widgetId: string) {
-		const { entity, owner } = await this.getEntityAndOwner(type, widgetId);
+		const { entity, owner, ownerStatus } = await this.getEntityAndOwner(
+			type,
+			widgetId
+		);
+		const [lifecycle, operationalSubscription] = await Promise.all([
+			this.widgetSettingsService.getState(type, widgetId, owner.id),
+			this.subscriptionService.checkAndResetPeriod(owner.id)
+		]);
+		const subscription =
+			operationalSubscription ??
+			(await this.subscriptionService.getSubscription(owner.id));
 
 		return {
 			type,
 			entity,
-			owner
+			owner,
+			ownerStatus,
+			lifecycle,
+			ownerPlan: subscription?.plan ?? null,
+			subscriptionStatus: subscription?.status ?? null
 		};
+	}
+
+	async getVersions(
+		type: WidgetType,
+		widgetId: string,
+		page = 1,
+		limit = 20
+	) {
+		const { owner } = await this.getEntityAndOwner(type, widgetId);
+
+		return this.widgetSettingsService.getVersions(
+			type,
+			widgetId,
+			owner.id,
+			page,
+			limit
+		);
+	}
+
+	async getRuntimeStatus(type: WidgetType, widgetId: string) {
+		const { owner } = await this.getEntityAndOwner(type, widgetId);
+
+		return this.widgetRuntimeService.getStatus(
+			owner.id,
+			widgetTypeToSlug(type),
+			widgetId
+		);
+	}
+
+	async getAnalytics(
+		type: WidgetType,
+		widgetId: string,
+		requestedDays: number
+	) {
+		const { owner, ownerStatus } = await this.getEntityAndOwner(
+			type,
+			widgetId
+		);
+		if (ownerStatus !== UserStatus.ACTIVE) {
+			throw new BadRequestException(
+				'Аналитика недоступна, пока владелец деактивирован'
+			);
+		}
+
+		return this.widgetRuntimeService.getAnalytics(
+			owner.id,
+			widgetTypeToSlug(type),
+			widgetId,
+			requestedDays
+		);
 	}
 
 	async updateWidget(
@@ -204,6 +273,81 @@ export class WidgetAdminService {
 		});
 
 		return published;
+	}
+
+	async restoreVersion(
+		type: WidgetType,
+		widgetId: string,
+		version: number,
+		expectedDraftRevision: number,
+		adminId: string,
+		request?: Request
+	) {
+		const { entity, owner } = await this.getEntityAndOwner(type, widgetId);
+		const restored = await this.widgetSettingsService.restoreVersion(
+			type,
+			widgetId,
+			version,
+			owner.id,
+			expectedDraftRevision
+		);
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'WIDGETS',
+			action: 'WIDGET_VERSION_RESTORE',
+			description: `Восстановлена версия ${version} пользовательского виджета «${entity.name}»`,
+			entityType: 'widget',
+			entityId: widgetId,
+			entityLabel: entity.name,
+			targetUserId: owner.id,
+			metadata: {
+				type,
+				id: widgetId,
+				ownerId: owner.id,
+				version,
+				draftRevision: restored.draftRevision
+			},
+			request
+		});
+
+		return restored;
+	}
+
+	async cloneWidget(
+		type: WidgetType,
+		widgetId: string,
+		requestedName: string | undefined,
+		adminId: string,
+		request?: Request
+	) {
+		const { entity, owner } = await this.getEntityAndOwner(type, widgetId);
+		const cloned = await this.widgetSettingsService.clone(
+			type,
+			widgetId,
+			owner.id,
+			requestedName
+		);
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'WIDGETS',
+			action: 'WIDGET_CLONE',
+			description: `Клонирован пользовательский виджет «${entity.name}» как «${cloned.name}»`,
+			entityType: 'widget',
+			entityId: cloned.id,
+			entityLabel: cloned.name,
+			targetUserId: owner.id,
+			metadata: {
+				type,
+				id: cloned.id,
+				sourceId: widgetId,
+				ownerId: owner.id
+			},
+			request
+		});
+
+		return cloned;
 	}
 
 	async discardDraft(

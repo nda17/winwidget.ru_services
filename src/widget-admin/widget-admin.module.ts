@@ -5,9 +5,11 @@ import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
 import { OnlineConsultantModule } from '@/online-consultant/online-consultant.module';
 import { QuizModule } from '@/quiz/quiz.module';
 import { StopOfferModule } from '@/stop-offer/stop-offer.module';
+import { SubscriptionModule } from '@/subscription/subscription.module';
 import { WidgetAdminController } from '@/widget-admin/widget-admin.controller';
 import { WidgetAdminService } from '@/widget-admin/widget-admin.service';
 import { WidgetModule } from '@/widget/widget.module';
+import { WidgetRuntimeModule } from '@/widget-runtime/widget-runtime.module';
 import { WidgetSettingsModule } from '@/widget-settings/widget-settings.module';
 import { Module } from '@nestjs/common';
 
@@ -21,7 +23,9 @@ import { Module } from '@nestjs/common';
 		StopOfferModule,
 		OnlineConsultantModule,
 		CalculatorModule,
-		WidgetSettingsModule
+		WidgetSettingsModule,
+		WidgetRuntimeModule,
+		SubscriptionModule
 	],
 	controllers: [WidgetAdminController],
 	providers: [WidgetAdminService]

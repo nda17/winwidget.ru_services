@@ -659,6 +659,7 @@ export class OnlineConsultantService {
 
 		return {
 			isActive: true,
+			publishedVersion: onlineConsultant.publishedVersion,
 			color: config.color || DEFAULT_CONFIG.color,
 			bgColor: config.bgColor || null,
 			buttonColor: config.buttonColor || '',

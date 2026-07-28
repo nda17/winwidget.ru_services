@@ -213,6 +213,7 @@ describe('public widget config projections', () => {
 
 			expect(config).toMatchObject({
 				isActive: true,
+				publishedVersion: 1,
 				yandexMetrikaId: '123456',
 				vkPixelId: '654321',
 				roistatEnabled: true

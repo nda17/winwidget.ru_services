@@ -30,15 +30,33 @@
 		return;
 	}
 
-	var RUNTIME_VERSION = '2026.07';
+	var RUNTIME_VERSION = '2026.08';
+	var PUBLISHED_VERSION = 0;
 	var telemetryEventsSent = Object.create(null);
 
-	function sendTelemetryEvent(eventName) {
+	function updatePublishedVersion(value) {
+		var nextVersion = Number(value);
+		if (!Number.isInteger(nextVersion) || nextVersion < 1) nextVersion = 0;
+		if (nextVersion !== PUBLISHED_VERSION) {
+			telemetryEventsSent = Object.create(null);
+		}
+		PUBLISHED_VERSION = nextVersion;
+	}
+
+	function sendTelemetryEvent(eventName, stepKey) {
+		var isStepEvent = eventName === 'STEP';
+		var telemetryKey = isStepEvent ? eventName + ':' + stepKey : eventName;
 		if (
+			!Number.isInteger(PUBLISHED_VERSION) ||
+			PUBLISHED_VERSION < 1 ||
 			(eventName !== 'IMPRESSION' &&
 				eventName !== 'OPEN' &&
-				eventName !== 'START') ||
-			telemetryEventsSent[eventName]
+				eventName !== 'START' &&
+				eventName !== 'COMPLETE' &&
+				!isStepEvent) ||
+			(isStepEvent &&
+				!/^field:(?:[1-9]|1[0-9]|20)$/.test(String(stepKey || ''))) ||
+			telemetryEventsSent[telemetryKey]
 		) {
 			return;
 		}
@@ -48,19 +66,26 @@
 		} else if (eventName === 'START') {
 			sendTelemetryEvent('IMPRESSION');
 			sendTelemetryEvent('OPEN');
+		} else if (eventName === 'COMPLETE') {
+			sendTelemetryEvent('START');
+		} else if (isStepEvent) {
+			sendTelemetryEvent('START');
 		}
 
-		telemetryEventsSent[eventName] = true;
+		telemetryEventsSent[telemetryKey] = true;
 		try {
+			var payload = {
+				event: eventName,
+				runtimeVersion: RUNTIME_VERSION,
+				publishedVersion: PUBLISHED_VERSION
+			};
+			if (isStepEvent) payload.stepKey = stepKey;
 			var request = fetch(
 				API_BASE + '/widget-events/calculator/' + encodeURIComponent(KEY),
 				{
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						event: eventName,
-						runtimeVersion: RUNTIME_VERSION
-					}),
+					body: JSON.stringify(payload),
 					keepalive: true,
 					credentials: 'omit',
 					referrerPolicy: 'no-referrer'
@@ -633,10 +658,13 @@
 		var fieldsContainer = document.createElement('div');
 		fieldsContainer.className = 'wwc-fields';
 		var fieldElements = Object.create(null);
-		fields.forEach(function (field) {
+		fields.forEach(function (field, fieldIndex) {
 			var fieldElement = document.createElement('div');
 			fieldElement.className = 'wwc-field';
 			fieldElement.setAttribute('data-field-id', field.id);
+			fieldElement.addEventListener('focusin', function () {
+				sendTelemetryEvent('STEP', 'field:' + (fieldIndex + 1));
+			});
 			fieldElements[field.id] = fieldElement;
 
 			var label = document.createElement('label');
@@ -975,6 +1003,7 @@
 	function showResult() {
 		var collectsContacts =
 			String(cfg.dataType || 'NONE').toUpperCase() !== 'NONE';
+		sendTelemetryEvent('COMPLETE');
 		render(
 			[
 				'<div class="wwc-screen">',
@@ -1044,10 +1073,12 @@
 				if (!data || !data.isActive) {
 					console.warn('[wincalculator] Widget is inactive');
 					cfg = null;
+					updatePublishedVersion(0);
 					if (AUTO_OPEN) showDisabledPage();
 					return;
 				}
 				cfg = data;
+				updatePublishedVersion(cfg.publishedVersion);
 				applyConfig();
 				sendTelemetryEvent('IMPRESSION');
 			})

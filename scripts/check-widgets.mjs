@@ -195,7 +195,8 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 			'API_BASE',
 			'KEY',
 			[
-				"var RUNTIME_VERSION = '2026.07';",
+				"var RUNTIME_VERSION = '2026.08';",
+				'var PUBLISHED_VERSION = 1;',
 				'var telemetryEventsSent = Object.create(null);',
 				telemetryFunctionSource,
 				'return sendTelemetryEvent;'
@@ -211,18 +212,24 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 		file === 'wheel.js'
 			? sendTelemetryEvent('START', 'public-key')
 			: sendTelemetryEvent('START');
+	const sendComplete = () =>
+		file === 'wheel.js'
+			? sendTelemetryEvent('COMPLETE', 'public-key')
+			: sendTelemetryEvent('COMPLETE');
 
 	sendStart();
 	sendStart();
+	sendComplete();
+	sendComplete();
 
-	if (requests.length !== 3) {
+	if (requests.length !== 4) {
 		console.error(
 			`widgets: ${file} must send each runtime event at most once`
 		);
 		process.exit(1);
 	}
 
-	const expectedEvents = ['IMPRESSION', 'OPEN', 'START'];
+	const expectedEvents = ['IMPRESSION', 'OPEN', 'START', 'COMPLETE'];
 	requests.forEach((request, index) => {
 		const payload = JSON.parse(request.options.body);
 		const payloadKeys = Object.keys(payload).sort();
@@ -239,8 +246,10 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 			request.options.referrerPolicy !== 'no-referrer' ||
 			request.options.headers?.['Content-Type'] !== 'application/json' ||
 			payload.event !== expectedEvents[index] ||
-			payload.runtimeVersion !== '2026.07' ||
-			payloadKeys.join(',') !== 'event,runtimeVersion'
+			payload.runtimeVersion !== '2026.08' ||
+			payload.publishedVersion !== 1 ||
+			payloadKeys.join(',') !==
+				'event,publishedVersion,runtimeVersion'
 		) {
 			console.error(`widgets: ${file} has an invalid telemetry contract`);
 			process.exit(1);
@@ -260,6 +269,12 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 		console.error(`widgets: ${file} telemetry is not fail-open`);
 		process.exit(1);
 	}
+
+	requireRuntimeSource(
+		file,
+		"sendTelemetryEvent('COMPLETE'",
+		'completion telemetry'
+	);
 }
 
 for (const [file, eventFunction, openGoal, submitGoal] of [

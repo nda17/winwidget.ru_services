@@ -560,6 +560,7 @@ export class CallbackService {
 
 		return {
 			isActive: true,
+			publishedVersion: callback.publishedVersion,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
 			buttonColor: config.buttonColor || '',

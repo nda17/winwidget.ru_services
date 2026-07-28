@@ -6,6 +6,7 @@ import { Module } from '@nestjs/common';
 @Module({
 	imports: [SubscriptionModule],
 	controllers: [WidgetRuntimeController],
-	providers: [WidgetRuntimeService]
+	providers: [WidgetRuntimeService],
+	exports: [WidgetRuntimeService]
 })
 export class WidgetRuntimeModule {}

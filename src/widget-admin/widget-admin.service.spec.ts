@@ -6,14 +6,22 @@ import type { OnlineConsultantService } from '@/online-consultant/online-consult
 import type { PrismaService } from '@/prisma.service';
 import type { QuizService } from '@/quiz/quiz.service';
 import type { StopOfferService } from '@/stop-offer/stop-offer.service';
+import type { SubscriptionService } from '@/subscription/subscription.service';
 import { UpdateAdminWidgetDto } from '@/widget-admin/dto/update-admin-widget.dto';
 import { WidgetAdminController } from '@/widget-admin/widget-admin.controller';
 import { WidgetAdminService } from '@/widget-admin/widget-admin.service';
 import type { WidgetService } from '@/widget/widget.service';
 import { WidgetType } from '@/widget-domain/widget-lifecycle';
+import type { WidgetRuntimeService } from '@/widget-runtime/widget-runtime.service';
 import type { WidgetSettingsService } from '@/widget-settings/widget-settings.service';
 import { BadRequestException } from '@nestjs/common';
-import { AuthIdentityType, Role, UserStatus } from '@prisma/client';
+import {
+	AuthIdentityType,
+	Plan,
+	Role,
+	SubscriptionStatus,
+	UserStatus
+} from '@prisma/client';
 import type { Request } from 'express';
 import { validate } from 'class-validator';
 
@@ -70,9 +78,28 @@ describe('WidgetAdminService', () => {
 		const adminEventLogService = {
 			record: jest.fn().mockResolvedValue(undefined)
 		};
+		const subscriptionService = {
+			checkAndResetPeriod: jest.fn().mockResolvedValue({
+				plan: Plan.HARD,
+				status: SubscriptionStatus.ACTIVE
+			}),
+			getSubscription: jest.fn()
+		};
 		const widgetSettingsService = {
+			getState: jest.fn().mockResolvedValue({
+				type: 'wheel',
+				id: widgetId,
+				status: 'PUBLISHED'
+			}),
 			publish: jest.fn(),
+			getVersions: jest.fn(),
+			restoreVersion: jest.fn(),
+			clone: jest.fn(),
 			discardDraft: jest.fn()
+		};
+		const widgetRuntimeService = {
+			getStatus: jest.fn(),
+			getAnalytics: jest.fn()
 		};
 		const service = new WidgetAdminService(
 			prisma as unknown as PrismaService,
@@ -83,7 +110,9 @@ describe('WidgetAdminService', () => {
 			stopOfferService as unknown as StopOfferService,
 			onlineConsultantService as unknown as OnlineConsultantService,
 			calculatorService as unknown as CalculatorService,
+			subscriptionService as unknown as SubscriptionService,
 			widgetSettingsService as unknown as WidgetSettingsService,
+			widgetRuntimeService as unknown as WidgetRuntimeService,
 			adminEventLogService as unknown as AdminEventLogService
 		);
 
@@ -97,7 +126,9 @@ describe('WidgetAdminService', () => {
 			stopOfferService,
 			onlineConsultantService,
 			calculatorService,
+			subscriptionService,
 			widgetSettingsService,
+			widgetRuntimeService,
 			adminEventLogService
 		};
 	};
@@ -336,9 +367,15 @@ describe('WidgetAdminService', () => {
 		}
 	);
 
-	it('returns a full entity with only minimal owner fields', async () => {
+	it('returns additive lifecycle and subscription data with the existing entity and owner', async () => {
 		const fixture = createFixture();
 		fixture.prisma.calculator.findUnique.mockResolvedValue(createRecord());
+		const lifecycle = {
+			type: 'calculator',
+			id: widgetId,
+			status: 'CHANGES_PENDING'
+		};
+		fixture.widgetSettingsService.getState.mockResolvedValue(lifecycle);
 
 		await expect(
 			fixture.service.getWidget(WidgetType.CALCULATOR, widgetId)
@@ -354,8 +391,263 @@ describe('WidgetAdminService', () => {
 				name: 'Владелец',
 				email: 'owner@example.com',
 				phone: '+79990000000'
+			},
+			ownerStatus: UserStatus.ACTIVE,
+			lifecycle,
+			ownerPlan: Plan.HARD,
+			subscriptionStatus: SubscriptionStatus.ACTIVE
+		});
+		expect(fixture.widgetSettingsService.getState).toHaveBeenCalledWith(
+			WidgetType.CALCULATOR,
+			widgetId,
+			ownerId
+		);
+		expect(
+			fixture.subscriptionService.checkAndResetPeriod
+		).toHaveBeenCalledWith(ownerId);
+		expect(
+			fixture.subscriptionService.getSubscription
+		).not.toHaveBeenCalled();
+	});
+
+	it('keeps the stored owner plan available when the owner is deactivated', async () => {
+		const fixture = createFixture();
+		fixture.prisma.calculator.findUnique.mockResolvedValue({
+			...createRecord(),
+			user: {
+				...createRecord().user,
+				status: UserStatus.DEACTIVATED
 			}
 		});
+		fixture.subscriptionService.checkAndResetPeriod.mockResolvedValue(
+			null
+		);
+		fixture.subscriptionService.getSubscription.mockResolvedValue({
+			plan: Plan.HARD,
+			status: SubscriptionStatus.ACTIVE
+		});
+
+		const result = await fixture.service.getWidget(
+			WidgetType.CALCULATOR,
+			widgetId
+		);
+
+		expect(result.ownerPlan).toBe(Plan.HARD);
+		expect(result.subscriptionStatus).toBe(SubscriptionStatus.ACTIVE);
+		expect(result.ownerStatus).toBe(UserStatus.DEACTIVATED);
+		expect(
+			fixture.subscriptionService.getSubscription
+		).toHaveBeenCalledWith(ownerId);
+	});
+
+	it('does not request analytics for a deactivated owner', async () => {
+		const fixture = createFixture();
+		fixture.prisma.onlineConsultant.findUnique.mockResolvedValue({
+			...createRecord(),
+			user: {
+				...createRecord().user,
+				status: UserStatus.DEACTIVATED
+			}
+		});
+
+		await expect(
+			fixture.service.getAnalytics(
+				WidgetType.ONLINE_CONSULTANT,
+				widgetId,
+				30
+			)
+		).rejects.toThrow('Аналитика недоступна, пока владелец деактивирован');
+		expect(
+			fixture.widgetRuntimeService.getAnalytics
+		).not.toHaveBeenCalled();
+	});
+
+	it('delegates versions and runtime reads using the resolved owner', async () => {
+		const fixture = createFixture();
+		fixture.prisma.onlineConsultant.findUnique.mockResolvedValue(
+			createRecord()
+		);
+		const versions = { items: [], page: 2, limit: 25, total: 0 };
+		const runtimeStatus = { installation: { state: 'SIGNAL_RECEIVED' } };
+		const analytics = { days: 14, totals: { impressions: 10 } };
+		fixture.widgetSettingsService.getVersions.mockResolvedValue(versions);
+		fixture.widgetRuntimeService.getStatus.mockResolvedValue(
+			runtimeStatus
+		);
+		fixture.widgetRuntimeService.getAnalytics.mockResolvedValue(analytics);
+
+		await expect(
+			fixture.service.getVersions(
+				WidgetType.ONLINE_CONSULTANT,
+				widgetId,
+				2,
+				25
+			)
+		).resolves.toBe(versions);
+		await expect(
+			fixture.service.getRuntimeStatus(
+				WidgetType.ONLINE_CONSULTANT,
+				widgetId
+			)
+		).resolves.toBe(runtimeStatus);
+		await expect(
+			fixture.service.getAnalytics(
+				WidgetType.ONLINE_CONSULTANT,
+				widgetId,
+				14
+			)
+		).resolves.toBe(analytics);
+
+		expect(fixture.widgetSettingsService.getVersions).toHaveBeenCalledWith(
+			WidgetType.ONLINE_CONSULTANT,
+			widgetId,
+			ownerId,
+			2,
+			25
+		);
+		expect(fixture.widgetRuntimeService.getStatus).toHaveBeenCalledWith(
+			ownerId,
+			'online-consultant',
+			widgetId
+		);
+		expect(fixture.widgetRuntimeService.getAnalytics).toHaveBeenCalledWith(
+			ownerId,
+			'online-consultant',
+			widgetId,
+			14
+		);
+		expect(fixture.adminEventLogService.record).not.toHaveBeenCalled();
+	});
+
+	it('restores a version through the owner lifecycle and audits success', async () => {
+		const fixture = createFixture();
+		fixture.prisma.quiz.findUnique.mockResolvedValue(createRecord());
+		const restored = {
+			type: 'quiz',
+			id: widgetId,
+			name: 'Старое имя',
+			draftRevision: 6
+		};
+		fixture.widgetSettingsService.restoreVersion.mockResolvedValue(
+			restored
+		);
+
+		await expect(
+			fixture.service.restoreVersion(
+				WidgetType.QUIZ,
+				widgetId,
+				4,
+				5,
+				adminId,
+				request
+			)
+		).resolves.toBe(restored);
+		expect(
+			fixture.widgetSettingsService.restoreVersion
+		).toHaveBeenCalledWith(WidgetType.QUIZ, widgetId, 4, ownerId, 5);
+		expect(fixture.adminEventLogService.record).toHaveBeenCalledWith({
+			adminId,
+			section: 'WIDGETS',
+			action: 'WIDGET_VERSION_RESTORE',
+			description:
+				'Восстановлена версия 4 пользовательского виджета «Старое имя»',
+			entityType: 'widget',
+			entityId: widgetId,
+			entityLabel: 'Старое имя',
+			targetUserId: ownerId,
+			metadata: {
+				type: WidgetType.QUIZ,
+				id: widgetId,
+				ownerId,
+				version: 4,
+				draftRevision: 6
+			},
+			request
+		});
+	});
+
+	it('clones through the owner lifecycle and audits only non-secret identifiers', async () => {
+		const fixture = createFixture();
+		fixture.prisma.widget.findUnique.mockResolvedValue(createRecord());
+		const cloned = {
+			id: 'cloned-widget-id',
+			type: 'wheel',
+			name: 'Копия'
+		};
+		fixture.widgetSettingsService.clone.mockResolvedValue(cloned);
+
+		await expect(
+			fixture.service.cloneWidget(
+				WidgetType.WHEEL,
+				widgetId,
+				'Копия',
+				adminId,
+				request
+			)
+		).resolves.toBe(cloned);
+		expect(fixture.widgetSettingsService.clone).toHaveBeenCalledWith(
+			WidgetType.WHEEL,
+			widgetId,
+			ownerId,
+			'Копия'
+		);
+		expect(fixture.adminEventLogService.record).toHaveBeenCalledWith({
+			adminId,
+			section: 'WIDGETS',
+			action: 'WIDGET_CLONE',
+			description:
+				'Клонирован пользовательский виджет «Старое имя» как «Копия»',
+			entityType: 'widget',
+			entityId: 'cloned-widget-id',
+			entityLabel: 'Копия',
+			targetUserId: ownerId,
+			metadata: {
+				type: WidgetType.WHEEL,
+				id: 'cloned-widget-id',
+				sourceId: widgetId,
+				ownerId
+			},
+			request
+		});
+
+		const logPayload =
+			fixture.adminEventLogService.record.mock.calls[0][0];
+		expect(JSON.stringify(logPayload)).not.toContain('secret-token');
+		expect(JSON.stringify(logPayload)).not.toContain(
+			'https://secret.example/webhook'
+		);
+	});
+
+	it('does not audit a failed version restore or clone', async () => {
+		const fixture = createFixture();
+		fixture.prisma.callback.findUnique.mockResolvedValue(createRecord());
+		fixture.widgetSettingsService.restoreVersion.mockRejectedValue(
+			new BadRequestException('Версия не восстановлена')
+		);
+
+		await expect(
+			fixture.service.restoreVersion(
+				WidgetType.CALLBACK,
+				widgetId,
+				2,
+				3,
+				adminId
+			)
+		).rejects.toThrow('Версия не восстановлена');
+		expect(fixture.adminEventLogService.record).not.toHaveBeenCalled();
+
+		fixture.widgetSettingsService.clone.mockRejectedValue(
+			new BadRequestException('Клон не создан')
+		);
+		await expect(
+			fixture.service.cloneWidget(
+				WidgetType.CALLBACK,
+				widgetId,
+				undefined,
+				adminId
+			)
+		).rejects.toThrow('Клон не создан');
+		expect(fixture.adminEventLogService.record).not.toHaveBeenCalled();
 	});
 
 	it('does not expose or mutate widgets of a deleted owner', async () => {
@@ -618,6 +910,109 @@ describe('WidgetAdminService', () => {
 			fixture.service.deleteWidget(WidgetType.QUIZ, widgetId, adminId)
 		).rejects.toThrow('Удаление не выполнено');
 		expect(fixture.adminEventLogService.record).not.toHaveBeenCalled();
+	});
+});
+
+describe('WidgetAdminController settings delegation', () => {
+	const widgetId = 'widget-id';
+	const adminId = 'admin-id';
+	const request = {} as Request;
+
+	const createController = () => {
+		const service = {
+			getVersions: jest.fn(),
+			restoreVersion: jest.fn(),
+			cloneWidget: jest.fn(),
+			getRuntimeStatus: jest.fn(),
+			getAnalytics: jest.fn()
+		};
+
+		return {
+			controller: new WidgetAdminController(
+				service as unknown as WidgetAdminService
+			),
+			service
+		};
+	};
+
+	it('exposes the dedicated admin settings routes', () => {
+		const prototype = WidgetAdminController.prototype;
+
+		expect(Reflect.getMetadata('path', prototype.getVersions)).toBe(
+			':type/:id/versions'
+		);
+		expect(Reflect.getMetadata('path', prototype.restoreVersion)).toBe(
+			':type/:id/versions/:version/restore'
+		);
+		expect(Reflect.getMetadata('path', prototype.cloneWidget)).toBe(
+			':type/:id/clone'
+		);
+		expect(Reflect.getMetadata('path', prototype.getRuntimeStatus)).toBe(
+			':type/:id/runtime-status'
+		);
+		expect(Reflect.getMetadata('path', prototype.getAnalytics)).toBe(
+			':type/:id/analytics'
+		);
+	});
+
+	it('normalizes read query values before service delegation', () => {
+		const { controller, service } = createController();
+
+		controller.getVersions(WidgetType.TIMER, widgetId, '2', '25');
+		controller.getRuntimeStatus(WidgetType.TIMER, widgetId);
+		controller.getAnalytics(WidgetType.TIMER, widgetId, '14');
+
+		expect(service.getVersions).toHaveBeenCalledWith(
+			WidgetType.TIMER,
+			widgetId,
+			2,
+			25
+		);
+		expect(service.getRuntimeStatus).toHaveBeenCalledWith(
+			WidgetType.TIMER,
+			widgetId
+		);
+		expect(service.getAnalytics).toHaveBeenCalledWith(
+			WidgetType.TIMER,
+			widgetId,
+			14
+		);
+	});
+
+	it('passes admin identity and request to restore and clone mutations', () => {
+		const { controller, service } = createController();
+
+		controller.restoreVersion(
+			WidgetType.WHEEL,
+			widgetId,
+			4,
+			{ expectedDraftRevision: 3 },
+			adminId,
+			request
+		);
+		controller.cloneWidget(
+			WidgetType.WHEEL,
+			widgetId,
+			{ name: 'Копия' },
+			adminId,
+			request
+		);
+
+		expect(service.restoreVersion).toHaveBeenCalledWith(
+			WidgetType.WHEEL,
+			widgetId,
+			4,
+			3,
+			adminId,
+			request
+		);
+		expect(service.cloneWidget).toHaveBeenCalledWith(
+			WidgetType.WHEEL,
+			widgetId,
+			'Копия',
+			adminId,
+			request
+		);
 	});
 });
 

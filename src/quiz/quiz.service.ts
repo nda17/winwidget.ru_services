@@ -375,6 +375,9 @@ export class QuizService {
 				await transaction.widgetRuntimeDailyMetric.deleteMany({
 					where: { widgetType: WidgetType.QUIZ, widgetId: quiz.id }
 				});
+				await transaction.widgetRuntimeDailyStepMetric.deleteMany({
+					where: { widgetType: WidgetType.QUIZ, widgetId: quiz.id }
+				});
 				await transaction.widgetRuntimePresence.deleteMany({
 					where: { widgetType: WidgetType.QUIZ, widgetId: quiz.id }
 				});
@@ -650,6 +653,7 @@ export class QuizService {
 
 		return {
 			isActive: true,
+			publishedVersion: quiz.publishedVersion,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || null,
 			buttonColor: config.buttonColor || '',

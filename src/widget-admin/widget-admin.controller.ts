@@ -4,7 +4,10 @@ import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
 import { UpdateAdminWidgetDto } from '@/widget-admin/dto/update-admin-widget.dto';
 import { WidgetAdminService } from '@/widget-admin/widget-admin.service';
 import { WidgetType } from '@/widget-domain/widget-lifecycle';
-import { ExpectedDraftRevisionDto } from '@/widget-settings/dto/widget-settings.dto';
+import {
+	CloneWidgetSettingsDto,
+	ExpectedDraftRevisionDto
+} from '@/widget-settings/dto/widget-settings.dto';
 import {
 	BadRequestException,
 	Body,
@@ -17,6 +20,7 @@ import {
 	ParseIntPipe,
 	Patch,
 	Post,
+	Query,
 	Req,
 	UploadedFile,
 	UseInterceptors,
@@ -44,6 +48,85 @@ export class WidgetAdminController {
 		@Param('id') widgetId: string
 	) {
 		return this.widgetAdminService.getWidget(type, widgetId);
+	}
+
+	@Get(':type/:id/versions')
+	@HttpCode(200)
+	getVersions(
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
+		@Param('id') widgetId: string,
+		@Query('page') page?: string,
+		@Query('limit') limit?: string
+	) {
+		return this.widgetAdminService.getVersions(
+			type,
+			widgetId,
+			page ? Number(page) : 1,
+			limit ? Number(limit) : 20
+		);
+	}
+
+	@Post(':type/:id/versions/:version/restore')
+	@HttpCode(200)
+	@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+	restoreVersion(
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
+		@Param('id') widgetId: string,
+		@Param('version', ParseIntPipe) version: number,
+		@Body() dto: ExpectedDraftRevisionDto,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		return this.widgetAdminService.restoreVersion(
+			type,
+			widgetId,
+			version,
+			dto.expectedDraftRevision,
+			adminId,
+			request
+		);
+	}
+
+	@Post(':type/:id/clone')
+	@HttpCode(201)
+	@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+	cloneWidget(
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
+		@Param('id') widgetId: string,
+		@Body() dto: CloneWidgetSettingsDto,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		return this.widgetAdminService.cloneWidget(
+			type,
+			widgetId,
+			dto?.name,
+			adminId,
+			request
+		);
+	}
+
+	@Get(':type/:id/runtime-status')
+	@HttpCode(200)
+	getRuntimeStatus(
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
+		@Param('id') widgetId: string
+	) {
+		return this.widgetAdminService.getRuntimeStatus(type, widgetId);
+	}
+
+	@Get(':type/:id/analytics')
+	@HttpCode(200)
+	getAnalytics(
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
+		@Param('id') widgetId: string,
+		@Query('days') days?: string
+	) {
+		return this.widgetAdminService.getAnalytics(
+			type,
+			widgetId,
+			days ? Number(days) : 30
+		);
 	}
 
 	@Patch(':type/:id')

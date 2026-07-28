@@ -509,6 +509,7 @@ export class StopOfferService {
 
 		return {
 			isActive: true,
+			publishedVersion: stopOffer.publishedVersion,
 			color: config.color || '#4705fb',
 			bgColor: config.bgColor || '',
 			buttonColor: config.buttonColor || '',
