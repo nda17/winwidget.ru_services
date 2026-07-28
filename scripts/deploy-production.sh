@@ -335,7 +335,7 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_KINDS"
 		require_env_exact_list \
 			"INTEGRATION_WORKER_KINDS" \
-			"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome"
+			"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal"
 		require_env_exact_list \
 			"MAINTENANCE_WORKER_KINDS" \
 			"database-backup"
@@ -344,6 +344,17 @@ case "$mode" in
 			"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
+		require_env_key "PAYMENT_METHOD_ENCRYPTION_KEY"
+		payment_method_key_bytes="$(
+			printf '%s' "$(get_env_value PAYMENT_METHOD_ENCRYPTION_KEY)" |
+				base64 -d 2>/dev/null |
+				wc -c |
+				tr -d '[:space:]'
+		)"
+		if [[ "$payment_method_key_bytes" != "32" ]]; then
+			echo "PAYMENT_METHOD_ENCRYPTION_KEY must be standard base64 for exactly 32 bytes" >&2
+			exit 1
+		fi
 		require_env_key "PORT"
 		require_env_key "API_LISTEN_HOST"
 		require_env_key "TRUST_PROXY"
@@ -1063,6 +1074,10 @@ notification_cutover_candidate_ids="$(
 )"
 narrow_integration_kinds="$(
 	normalize_csv \
+		"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal"
+)"
+legacy_narrow_integration_kinds="$(
+	normalize_csv \
 		"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome"
 )"
 broad_integration_kinds="$(
@@ -1194,7 +1209,11 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 				"$current_integration_container_id" \
 				INTEGRATION_WORKER_KINDS || true
 		)"
-		if [[ "$(normalize_csv "$current_integration_kinds")" != "$narrow_integration_kinds" ]]; then
+		current_integration_kinds_normalized="$(
+			normalize_csv "$current_integration_kinds"
+		)"
+		if [[ "$current_integration_kinds_normalized" != "$narrow_integration_kinds" &&
+			"$current_integration_kinds_normalized" != "$legacy_narrow_integration_kinds" ]]; then
 			echo "Cutover marker exists, but the live integration worker still owns an unexpected kind set." >&2
 			echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
 			exit 1

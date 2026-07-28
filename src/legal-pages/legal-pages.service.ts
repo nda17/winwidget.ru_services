@@ -1,6 +1,14 @@
+import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { UpdateLegalPageDto } from '@/legal-pages/dto/update-legal-page.dto';
+import { isAutoRenewalOfferCompatible } from '@/payment/payment.constants';
 import { PrismaService } from '@/prisma.service';
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+	BadRequestException,
+	Injectable,
+	NotFoundException
+} from '@nestjs/common';
+import { Request } from 'express';
+import { createHash } from 'node:crypto';
 
 const VALID_SLUGS = [
 	'personal-policy',
@@ -11,7 +19,10 @@ const VALID_SLUGS = [
 
 @Injectable()
 export class LegalPagesService {
-	constructor(private readonly prisma: PrismaService) {}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly adminEventLogService: AdminEventLogService
+	) {}
 
 	async getAll() {
 		const pages = await this.prisma.legalPage.findMany();
@@ -31,14 +42,42 @@ export class LegalPagesService {
 		return page ?? { slug, content: '', updatedAt: new Date() };
 	}
 
-	async update(slug: string, dto: UpdateLegalPageDto) {
+	async update(
+		slug: string,
+		dto: UpdateLegalPageDto,
+		audit: { adminId: string; request: Request }
+	) {
 		if (!VALID_SLUGS.includes(slug as (typeof VALID_SLUGS)[number])) {
 			throw new NotFoundException('Legal page not found');
 		}
-		return this.prisma.legalPage.upsert({
-			where: { slug },
-			update: { content: dto.content },
-			create: { slug, content: dto.content }
+		if (slug === 'oferta' && !isAutoRenewalOfferCompatible(dto.content)) {
+			throw new BadRequestException(
+				'Раздел автопродления защищён версией согласия. Измените его через релиз с новой версией условий или сохраните без изменений'
+			);
+		}
+		return this.prisma.$transaction(async transaction => {
+			const page = await transaction.legalPage.upsert({
+				where: { slug },
+				update: { content: dto.content },
+				create: { slug, content: dto.content }
+			});
+			await this.adminEventLogService.recordInTransaction(transaction, {
+				adminId: audit.adminId,
+				section: 'SITE_SETTINGS',
+				action: 'LEGAL_PAGE_UPDATE',
+				description: `Обновлена юридическая страница ${slug}`,
+				entityType: 'legal_page',
+				entityId: slug,
+				entityLabel: slug,
+				metadata: {
+					contentLength: dto.content.length,
+					contentSha256: createHash('sha256')
+						.update(dto.content)
+						.digest('hex')
+				},
+				request: audit.request
+			});
+			return page;
 		});
 	}
 }

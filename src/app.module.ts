@@ -6,6 +6,7 @@ import { getGoogleRecaptchaConfig } from '@/config/google-recaptcha.config';
 import { FileModule } from '@/file/file.module';
 import { LegalPagesModule } from '@/legal-pages/legal-pages.module';
 import { NotesModule } from '@/notes/notes.module';
+import { AutoRenewalSchedulerModule } from '@/payment/auto-renewal-scheduler.module';
 import { PaymentModule } from '@/payment/payment.module';
 import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
@@ -49,6 +50,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		UserModule,
 		FileModule,
 		PaymentModule,
+		AutoRenewalSchedulerModule,
 		SubscriptionModule,
 		WidgetModule,
 		WidgetAdminModule,

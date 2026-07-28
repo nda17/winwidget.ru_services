@@ -4,6 +4,8 @@ export const OUTBOX_EVENT_TYPE = 'lead.integration.requested.v2';
 export const PAYMENT_SUCCEEDED_EVENT_TYPE = 'payment.succeeded.v1';
 export const PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'payment.notification.telegram.requested.v1';
+export const AUTO_RENEWAL_CHARGE_EVENT_TYPE =
+	'payment.auto-renewal.charge.requested.v1';
 export const MAILING_DELIVERY_EVENT_TYPE = 'mailing.delivery.requested.v1';
 export const LIMIT_REACHED_EMAIL_EVENT_TYPE =
 	'lead.limit.reached.email.v2';
@@ -56,7 +58,8 @@ export const INTEGRATION_KINDS = [
 	'daily-summary-delivery-telegram',
 	'subscription-expiry-email',
 	'subscription-expiry-telegram',
-	'notification-delivery-outcome'
+	'notification-delivery-outcome',
+	'auto-renewal'
 ] as const;
 
 export type IntegrationKind = (typeof INTEGRATION_KINDS)[number];
@@ -124,6 +127,7 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 		SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	'notification-delivery-outcome':
 		NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+	'auto-renewal': AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE
 };
 
@@ -152,6 +156,7 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 		'winwidget.notification.subscription-expiry.telegram',
 	'notification-delivery-outcome':
 		'winwidget.notification.delivery-outcome',
+	'auto-renewal': 'winwidget.payment.auto-renewal',
 	'database-backup': 'winwidget.maintenance.database-backup'
 };
 

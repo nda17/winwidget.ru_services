@@ -193,7 +193,14 @@ export class AffiliateService {
 	}
 
 	async cancelRewardForPayment(paymentId: string) {
-		await this.prisma.affiliateReferral.updateMany({
+		await this.cancelRewardForPaymentInTransaction(this.prisma, paymentId);
+	}
+
+	async cancelRewardForPaymentInTransaction(
+		transaction: Prisma.TransactionClient,
+		paymentId: string
+	) {
+		await transaction.affiliateReferral.updateMany({
 			where: {
 				firstPaymentId: paymentId,
 				status: AffiliateReferralStatus.REWARD_PENDING

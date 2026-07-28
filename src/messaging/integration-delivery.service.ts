@@ -5,6 +5,7 @@ import {
 } from '@/messaging/lead-integration-event';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
+import { IntegrationErrorClassification } from '@/messaging/integration-error-classifier';
 import {
 	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
 	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
@@ -19,6 +20,7 @@ import {
 	serializeNotificationDeliveryEvent
 } from '@/messaging/notification-delivery-event';
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
+import { PaymentService } from '@/payment/payment.service';
 import { PrismaService } from '@/prisma.service';
 import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
@@ -38,7 +40,8 @@ type DeliveryEventPayload =
 	| MailingDeliveryEventPayload
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
-	| DailySummaryRequestedEventPayload;
+	| DailySummaryRequestedEventPayload
+	| AutoRenewalChargeRequestedEventPayload;
 
 interface MailingDeliveryOutcomeRow {
 	id: string;
@@ -53,7 +56,8 @@ export class IntegrationDeliveryService {
 		private readonly prisma: PrismaService,
 		private readonly dailySummaryDelivery: DailySummaryDeliveryService,
 		private readonly leadDestination: LeadIntegrationDestinationService,
-		private readonly scheduledJobs: ScheduledJobsService
+		private readonly scheduledJobs: ScheduledJobsService,
+		private readonly paymentService: PaymentService
 	) {}
 
 	async deliver(
@@ -61,6 +65,12 @@ export class IntegrationDeliveryService {
 		event: DeliveryEventPayload,
 		eventId: string
 	): Promise<void> {
+		if (kind === 'auto-renewal') {
+			await this.paymentService.executeRecurringCharge(
+				(event as AutoRenewalChargeRequestedEventPayload).paymentId
+			);
+			return;
+		}
 		if (kind === 'daily-summary-telegram') {
 			await this.dailySummaryDelivery.deliver(
 				event as DailySummaryRequestedEventPayload,
@@ -106,6 +116,20 @@ export class IntegrationDeliveryService {
 				await this.sendAmoCrm(leadEvent);
 				return;
 		}
+	}
+
+	async handleTerminalFailure(
+		kind: MonolithIntegrationKind,
+		event: DeliveryEventPayload,
+		classification: IntegrationErrorClassification
+	): Promise<void> {
+		if (kind !== 'auto-renewal') return;
+		const payload = event as AutoRenewalChargeRequestedEventPayload;
+		await this.paymentService.handleRecurringDeliveryTerminalFailure(
+			payload.paymentId,
+			classification.normalizedCode,
+			classification.safeReason
+		);
 	}
 
 	private async applyTelegramDestinationUnavailable(
@@ -702,3 +726,4 @@ export class IntegrationDeliveryService {
 		return labels[event.source];
 	}
 }
+import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';

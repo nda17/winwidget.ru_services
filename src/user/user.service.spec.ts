@@ -42,7 +42,13 @@ describe('UserService soft delete', () => {
 			countdownTimer: { updateMany: createUpdateMany() },
 			stopOffer: { updateMany: createUpdateMany() },
 			onlineConsultant: { updateMany: createUpdateMany() },
-			calculator: { updateMany: createUpdateMany() }
+			calculator: { updateMany: createUpdateMany() },
+			autoRenewal: {
+				findUnique: jest.fn().mockResolvedValue(null),
+				updateMany: createUpdateMany()
+			},
+			payment: { updateMany: createUpdateMany() },
+			autoRenewalConsentEvent: { create: jest.fn() }
 		};
 		const prisma = {
 			user: {

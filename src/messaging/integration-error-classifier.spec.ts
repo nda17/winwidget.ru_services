@@ -50,6 +50,40 @@ describe('classifyIntegrationError', () => {
 			}
 		],
 		[
+			'temporary YooKassa transport failure',
+			'auto-renewal',
+			Object.assign(new Error('ЮKassa временно недоступна'), {
+				code: 'YOOKASSA_NETWORK',
+				httpStatus: null,
+				retryAfterMs: 30_000
+			}),
+			{
+				category: 'TRANSIENT',
+				normalizedCode: 'YOOKASSA_NETWORK',
+				retryable: true,
+				retryDelayMs: 30_000,
+				recognized: true,
+				mayDisableDestination: false
+			}
+		],
+		[
+			'permanent YooKassa request rejection',
+			'auto-renewal',
+			Object.assign(new Error('ЮKassa отклонила запрос'), {
+				code: 'YOOKASSA_HTTP_400',
+				httpStatus: 400,
+				retryAfterMs: null
+			}),
+			{
+				category: 'PERMANENT',
+				normalizedCode: 'YOOKASSA_HTTP_400',
+				retryable: false,
+				retryDelayMs: null,
+				recognized: true,
+				mayDisableDestination: false
+			}
+		],
+		[
 			'Telegram formatting error',
 			'limit-telegram',
 			new Error(

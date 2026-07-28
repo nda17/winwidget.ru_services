@@ -1,4 +1,5 @@
 import {
+	AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
 	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	DAILY_SUMMARY_EVENT_TYPE,
@@ -401,6 +402,36 @@ const assertPaymentTelegramEvent = (
 		);
 	}
 	return 'payment-telegram';
+};
+
+const assertAutoRenewalChargeEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'paymentId',
+		'autoRenewalId',
+		'cycleKey',
+		'scheduledFor'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== AUTO_RENEWAL_CHARGE_EVENT_TYPE
+	) {
+		throw new Error('Invalid auto-renewal charge event contract version');
+	}
+	assertString(payload.paymentId, 'payload.paymentId', {
+		maxLength: 255
+	});
+	assertString(payload.autoRenewalId, 'payload.autoRenewalId', {
+		maxLength: 255
+	});
+	assertString(payload.cycleKey, 'payload.cycleKey', {
+		maxLength: 1000
+	});
+	assertIsoDate(payload.scheduledFor, 'payload.scheduledFor');
+	return 'auto-renewal';
 };
 
 const assertTelegramDestinationUnavailableEvent = (
@@ -820,6 +851,8 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 			return assertPaymentEvent(payload);
 		case PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE:
 			return [assertPaymentTelegramEvent(payload)];
+		case AUTO_RENEWAL_CHARGE_EVENT_TYPE:
+			return [assertAutoRenewalChargeEvent(payload)];
 		case MAILING_DELIVERY_EVENT_TYPE:
 			return [assertMailingEvent(payload)];
 		case LIMIT_REACHED_EMAIL_EVENT_TYPE:

@@ -1,4 +1,5 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
+import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { UpdateLegalPageDto } from '@/legal-pages/dto/update-legal-page.dto';
 import { LegalPagesService } from '@/legal-pages/legal-pages.service';
 import {
@@ -7,9 +8,11 @@ import {
 	Get,
 	HttpCode,
 	Param,
-	Patch
+	Patch,
+	Req
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
+import { Request } from 'express';
 
 @Controller('/legal-pages')
 export class LegalPagesController {
@@ -30,7 +33,15 @@ export class LegalPagesController {
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	@Patch(':slug')
-	update(@Param('slug') slug: string, @Body() dto: UpdateLegalPageDto) {
-		return this.legalPagesService.update(slug, dto);
+	async update(
+		@Param('slug') slug: string,
+		@Body() dto: UpdateLegalPageDto,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		return this.legalPagesService.update(slug, dto, {
+			adminId,
+			request
+		});
 	}
 }

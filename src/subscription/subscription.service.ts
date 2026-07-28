@@ -1,3 +1,4 @@
+import { disableAutoRenewalForLifecycleInTransaction } from '@/payment/auto-renewal-state';
 import { PrismaService } from '@/prisma.service';
 import type { AdminBonusAudience } from '@/subscription/dto/admin-activate-subscription.dto';
 import { PLAN_LIMITS } from '@/subscription/subscription.constants';
@@ -8,8 +9,11 @@ import {
 } from '@nestjs/common';
 import {
 	BillingPeriod,
+	AutoRenewalConsentEventType,
+	AutoRenewalStatus,
 	Plan,
 	Prisma,
+	Role,
 	Subscription,
 	SubscriptionBonusAudience,
 	SubscriptionHistoryAction,
@@ -141,7 +145,8 @@ export class SubscriptionService {
 		const isActiveSub =
 			existing &&
 			existing.status === SubscriptionStatus.ACTIVE &&
-			existing.expiresAt != null;
+			existing.expiresAt != null &&
+			dayjs(existing.expiresAt).isAfter(now);
 
 		const isSamePlan = isActiveSub && existing.plan === plan;
 
@@ -783,10 +788,31 @@ export class SubscriptionService {
 		return { data, newExpiresAt };
 	}
 
-	async adminCancelSubscription(userId: string) {
-		return this.prisma.subscription.update({
-			where: { userId },
-			data: { status: SubscriptionStatus.CANCELLED }
+	async adminCancelSubscription(userId: string, adminId: string) {
+		return this.prisma.$transaction(async transaction => {
+			await transaction.$queryRaw(
+				Prisma.sql`
+					SELECT "id"
+					FROM "User"
+					WHERE "id" = ${userId}
+					FOR UPDATE
+				`
+			);
+			const subscription = await transaction.subscription.update({
+				where: { userId },
+				data: { status: SubscriptionStatus.CANCELLED }
+			});
+			await disableAutoRenewalForLifecycleInTransaction(transaction, {
+				userId,
+				status: AutoRenewalStatus.REVOKED,
+				eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
+				source: 'SUBSCRIPTION_ADMIN_CANCEL',
+				reason:
+					'Автопродление отозвано при административной отмене подписки',
+				actorUserId: adminId,
+				actorRole: Role.ADMIN
+			});
+			return subscription;
 		});
 	}
 

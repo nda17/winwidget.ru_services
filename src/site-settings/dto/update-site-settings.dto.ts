@@ -25,6 +25,14 @@ export class UpdateSiteSettingsDto {
 
 	@IsOptional()
 	@IsBoolean()
+	autoRenewalSignupEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	autoRenewalChargesEnabled?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
 	recaptchaEnabled?: boolean;
 
 	@IsOptional()

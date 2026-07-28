@@ -1228,7 +1228,15 @@ live_integration_kinds="$(
 		"$live_integration_container_id" \
 		INTEGRATION_WORKER_KINDS || true
 )"
-if [[ "$(normalize_csv "$live_integration_kinds")" != "$(normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome")" ]]; then
+live_integration_kinds_normalized="$(normalize_csv "$live_integration_kinds")"
+legacy_integration_kinds_normalized="$(
+	normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome"
+)"
+auto_renewal_integration_kinds_normalized="$(
+	normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal"
+)"
+if [[ "$live_integration_kinds_normalized" != "$legacy_integration_kinds_normalized" &&
+	"$live_integration_kinds_normalized" != "$auto_renewal_integration_kinds_normalized" ]]; then
 	echo "The live integration worker does not match the post-cutover kind boundary." >&2
 	echo "Use the full deployment target to repair topology ownership." >&2
 	exit 1

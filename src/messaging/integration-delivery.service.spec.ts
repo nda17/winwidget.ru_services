@@ -126,12 +126,19 @@ describe('IntegrationDeliveryService', () => {
 			}),
 			failExternalDeliveryInTransaction: jest.fn().mockResolvedValue({})
 		} as unknown as ScheduledJobsService;
+		const paymentService = {
+			executeRecurringCharge: jest.fn().mockResolvedValue(undefined),
+			handleRecurringDeliveryTerminalFailure: jest
+				.fn()
+				.mockResolvedValue(undefined)
+		};
 		const service = new IntegrationDeliveryService(
 			safeOutboundHttpService,
 			prisma,
 			dailySummary,
 			leadDestination,
-			scheduledJobs
+			scheduledJobs,
+			paymentService as never
 		);
 
 		return {
@@ -139,9 +146,62 @@ describe('IntegrationDeliveryService', () => {
 			prisma,
 			transaction,
 			safeOutboundHttpService,
-			scheduledJobs
+			scheduledJobs,
+			paymentService
 		};
 	};
+
+	it('executes an auto-renewal charge by local payment reference', async () => {
+		const { service, paymentService } = createService();
+
+		await service.deliver(
+			'auto-renewal',
+			{
+				schemaVersion: 1,
+				eventType: 'payment.auto-renewal.charge.requested.v1',
+				paymentId: 'payment-1',
+				autoRenewalId: 'renewal-1',
+				cycleKey: 'renewal-1:2026-08-28T09:00:00.000Z',
+				scheduledFor: '2026-08-28T09:00:00.000Z'
+			},
+			eventId
+		);
+
+		expect(paymentService.executeRecurringCharge).toHaveBeenCalledWith(
+			'payment-1'
+		);
+	});
+
+	it('pauses auto-renewal after a terminal worker failure', async () => {
+		const { service, paymentService } = createService();
+		const event = {
+			schemaVersion: 1 as const,
+			eventType: 'payment.auto-renewal.charge.requested.v1' as const,
+			paymentId: 'payment-1',
+			autoRenewalId: 'renewal-1',
+			cycleKey: 'renewal-1:2026-08-28T09:00:00.000Z',
+			scheduledFor: '2026-08-28T09:00:00.000Z'
+		};
+
+		await service.handleTerminalFailure('auto-renewal', event, {
+			category: 'PERMANENT',
+			normalizedCode: 'YOOKASSA_HTTP_402',
+			retryable: false,
+			retryDelayMs: null,
+			safeReason: 'ЮKassa отклонила запрос автопродления',
+			recognized: true,
+			mayDisableDestination: false,
+			classificationVersion: 1
+		});
+
+		expect(
+			paymentService.handleRecurringDeliveryTerminalFailure
+		).toHaveBeenCalledWith(
+			'payment-1',
+			'YOOKASSA_HTTP_402',
+			'ЮKassa отклонила запрос автопродления'
+		);
+	});
 
 	it('sends a versioned webhook with a stable event id', async () => {
 		const { service, safeOutboundHttpService } = createService();

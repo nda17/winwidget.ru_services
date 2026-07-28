@@ -2,6 +2,7 @@ import { IntegrationDeliveryService } from '@/messaging/integration-delivery.ser
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
+import { PaymentWorkerModule } from '@/payment/payment-worker.module';
 import { RabbitMqModule } from '@/messaging/rabbitmq.module';
 import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
@@ -19,6 +20,7 @@ import { ConfigModule } from '@nestjs/config';
 		}),
 		PrismaModule,
 		RabbitMqModule,
+		PaymentWorkerModule,
 		SafeOutboundHttpModule,
 		ScheduledJobsModule
 	],

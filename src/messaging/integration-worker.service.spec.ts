@@ -36,7 +36,8 @@ describe('IntegrationWorkerService', () => {
 			cancelConsumers: jest.fn().mockResolvedValue(undefined)
 		} as unknown as RabbitMqService;
 		const delivery = {
-			deliver: jest.fn().mockResolvedValue(undefined)
+			deliver: jest.fn().mockResolvedValue(undefined),
+			handleTerminalFailure: jest.fn().mockResolvedValue(undefined)
 		} as unknown as IntegrationDeliveryService;
 		const configService = {
 			get: jest.fn((key: string) => values[key])
@@ -224,7 +225,8 @@ describe('IntegrationWorkerService', () => {
 			'mailing-telegram',
 			'daily-summary-telegram',
 			'telegram-destination-unavailable',
-			'notification-delivery-outcome'
+			'notification-delivery-outcome',
+			'auto-renewal'
 		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
 			MONOLITH_INTEGRATION_KINDS.length

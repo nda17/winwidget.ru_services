@@ -20,6 +20,8 @@ model User {
   telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
   payments                     Payment[]
+  autoRenewal                  AutoRenewal?
+  autoRenewalConsentEvents     AutoRenewalConsentEvent[]
   widgets                      Widget[]
   quizzes                      Quiz[]
   callbacks                    Callback[]
@@ -443,21 +445,140 @@ model AdminEventLog {
 }
 
 model Payment {
-  id                String             @id @default(cuid())
-  userId            String             @map("user_id")
-  yookassaId        String             @unique @map("yookassa_id")
-  amount            String
-  confirmationUrl   String?            @map("confirmation_url")
-  status            PaymentStatus      @default(PENDING)
-  plan              Plan?
-  billingPeriod     BillingPeriod?     @map("billing_period")
-  affiliateReferral AffiliateReferral?
-  createdAt         DateTime           @default(now()) @map("created_at")
-  updatedAt         DateTime           @updatedAt @map("updated_at")
-  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                      String             @id @default(cuid())
+  userId                  String             @map("user_id")
+  yookassaId              String?            @unique @map("yookassa_id")
+  providerIdempotencyKey  String?            @unique @map("provider_idempotency_key")
+  recurringCycleKey       String?            @unique @map("recurring_cycle_key")
+  recurringAttempt        Int                @default(0) @map("recurring_attempt")
+  kind                    PaymentKind        @default(ONE_TIME)
+  amount                  String
+  currency                String             @default("RUB")
+  confirmationUrl         String?            @map("confirmation_url")
+  status                  PaymentStatus      @default(PENDING)
+  providerStatus          String?            @map("provider_status")
+  plan                    Plan?
+  billingPeriod           BillingPeriod?     @map("billing_period")
+  autoRenew               Boolean            @default(false) @map("auto_renew")
+  consentVersion          String?            @map("consent_version")
+  consentText             String?            @map("consent_text") @db.Text
+  consentedAt             DateTime?          @map("consented_at")
+  consentIp               String?            @map("consent_ip")
+  consentUserAgent        String?            @map("consent_user_agent")
+  offerSnapshot           String?            @map("offer_snapshot") @db.Text
+  offerSha256             String?            @map("offer_sha256")
+  offerUpdatedAt          DateTime?          @map("offer_updated_at")
+  customerEmail           String?            @map("customer_email")
+  customerPhone           String?            @map("customer_phone")
+  paymentMethodCiphertext String?            @map("payment_method_ciphertext") @db.Text
+  providerCreatedAt       DateTime?          @map("provider_created_at")
+  checkoutExpiresAt       DateTime           @map("checkout_expires_at")
+  providerExpiresAt       DateTime?          @map("provider_expires_at")
+  lastProviderCheckedAt   DateTime?          @map("last_provider_checked_at")
+  succeededAt             DateTime?          @map("succeeded_at")
+  cancelledAt             DateTime?          @map("cancelled_at")
+  cancellationReason      String?            @map("cancellation_reason")
+  receiptSyncEligible     Boolean            @default(true) @map("receipt_sync_eligible")
+  affiliateReferral       AffiliateReferral?
+  receipts                PaymentReceipt[]
+  createdAt               DateTime           @default(now()) @map("created_at")
+  updatedAt               DateTime           @updatedAt @map("updated_at")
+  user                    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
+  @@index([userId, createdAt])
+  @@index([status, checkoutExpiresAt])
+  @@index([kind, status, createdAt])
   @@map("payments")
+}
+
+model AutoRenewal {
+  id                      String                    @id @default(cuid())
+  userId                  String                    @unique @map("user_id")
+  status                  AutoRenewalStatus         @default(ACTIVE)
+  plan                    Plan
+  billingPeriod           BillingPeriod             @map("billing_period")
+  amount                  String
+  pendingAmount           String?                   @map("pending_amount")
+  priceChangeDetectedAt   DateTime?                 @map("price_change_detected_at")
+  currency                String                    @default("RUB")
+  paymentMethodCiphertext String?                   @map("payment_method_ciphertext") @db.Text
+  paymentMethodType       String?                   @map("payment_method_type")
+  paymentMethodTitle      String?                   @map("payment_method_title")
+  paymentMethodLast4      String?                   @map("payment_method_last4")
+  paymentMethodSavedAt    DateTime?                 @map("payment_method_saved_at")
+  consentVersion          String                    @map("consent_version")
+  consentText             String                    @map("consent_text") @db.Text
+  consentedAt             DateTime                  @map("consented_at")
+  offerSnapshot           String?                   @map("offer_snapshot") @db.Text
+  offerSha256             String?                   @map("offer_sha256")
+  offerUpdatedAt          DateTime?                 @map("offer_updated_at")
+  nextChargeAt            DateTime                  @map("next_charge_at")
+  retryStartedAt          DateTime?                 @map("retry_started_at")
+  retryAttempt            Int                       @default(0) @map("retry_attempt")
+  nextRetryAt             DateTime?                 @map("next_retry_at")
+  dispatchPending         Boolean                   @default(false) @map("dispatch_pending")
+  disabledAt              DateTime?                 @map("disabled_at")
+  disableReason           String?                   @map("disable_reason") @db.Text
+  lastChargeAttemptAt     DateTime?                 @map("last_charge_attempt_at")
+  lastChargeErrorCode     String?                   @map("last_charge_error_code")
+  stateVersion            Int                       @default(1) @map("state_version")
+  user                    User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  consentEvents           AutoRenewalConsentEvent[]
+  createdAt               DateTime                  @default(now()) @map("created_at")
+  updatedAt               DateTime                  @updatedAt @map("updated_at")
+
+  @@index([status, nextChargeAt])
+  @@index([status, nextRetryAt])
+  @@map("auto_renewals")
+}
+
+model AutoRenewalConsentEvent {
+  id             String                      @id @default(cuid())
+  autoRenewalId  String                      @map("auto_renewal_id")
+  userId         String                      @map("user_id")
+  type           AutoRenewalConsentEventType
+  actorUserId    String?                     @map("actor_user_id")
+  actorRole      String?                     @map("actor_role")
+  source         String
+  reason         String?                     @db.Text
+  consentVersion String                      @map("consent_version")
+  consentText    String                      @map("consent_text") @db.Text
+  offerSnapshot  String?                     @map("offer_snapshot") @db.Text
+  offerSha256    String?                     @map("offer_sha256")
+  offerUpdatedAt DateTime?                   @map("offer_updated_at")
+  plan           Plan
+  billingPeriod  BillingPeriod               @map("billing_period")
+  amount         String
+  currency       String                      @default("RUB")
+  ip             String?
+  userAgent      String?                     @map("user_agent")
+  metadata       Json                        @default("{}")
+  autoRenewal    AutoRenewal                 @relation(fields: [autoRenewalId], references: [id], onDelete: Cascade)
+  user           User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime                    @default(now()) @map("created_at")
+
+  @@index([autoRenewalId, createdAt])
+  @@index([userId, createdAt])
+  @@map("auto_renewal_consent_events")
+}
+
+model PaymentReceipt {
+  id                   String    @id @default(cuid())
+  paymentId            String    @map("payment_id")
+  providerReceiptId    String    @unique @map("provider_receipt_id")
+  status               String
+  type                 String?
+  fiscalDocumentNumber String?   @map("fiscal_document_number")
+  fiscalStorageNumber  String?   @map("fiscal_storage_number")
+  fiscalAttribute      String?   @map("fiscal_attribute")
+  registeredAt         DateTime? @map("registered_at")
+  publicUrl            String?   @map("public_url") @db.Text
+  payment              Payment   @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@index([paymentId, registeredAt])
+  @@map("payment_receipts")
 }
 
 model OutboxEvent {
@@ -732,6 +853,36 @@ enum PaymentStatus {
   PENDING
   SUCCEEDED
   CANCELLED
+  EXPIRED
+}
+
+enum PaymentKind {
+  ONE_TIME
+  RECURRING
+}
+
+enum AutoRenewalStatus {
+  ACTIVE
+  USER_DISABLED
+  ADMIN_PAUSED
+  TECHNICAL_PAUSE
+  REVOKED
+}
+
+enum AutoRenewalConsentEventType {
+  CONSENT_GRANTED
+  USER_DISABLED
+  ADMIN_PAUSED
+  ADMIN_RESUMED
+  ADMIN_REVOKED
+  TECHNICAL_PAUSED
+  TECHNICAL_RESUMED
+  PAYMENT_METHOD_UPDATED
+  PRICE_CHANGE_REQUIRED
+  PRICE_CHANGE_CONFIRMED
+  RETRY_SCHEDULED
+  RETRY_EXHAUSTED
+  RETRY_CANCELLED
 }
 
 enum OutboxEventStatus {
@@ -873,20 +1024,23 @@ enum IntegrationFailureResolution {
 }
 
 model SiteSettings {
-  id                       String   @id @default("singleton")
-  bannerEnabled            Boolean  @default(false) @map("banner_enabled")
-  bannerText               String   @default("") @map("banner_text")
-  snowflakeEnabled         Boolean  @default(false) @map("snowflake_enabled")
-  paymentEnabled           Boolean  @default(true) @map("payment_enabled")
-  recaptchaEnabled         Boolean  @default(true) @map("recaptcha_enabled")
-  googleAuthEnabled        Boolean  @default(true) @map("google_auth_enabled")
-  yandexAuthEnabled        Boolean  @default(true) @map("yandex_auth_enabled")
-  githubAuthEnabled        Boolean  @default(true) @map("github_auth_enabled")
-  vkAuthEnabled            Boolean  @default(false) @map("vk_auth_enabled")
-  telegramAuthEnabled      Boolean  @default(true) @map("telegram_auth_enabled")
-  affiliateProgramEnabled  Boolean  @default(false) @map("affiliate_program_enabled")
-  affiliateCashbackPercent Int      @default(10) @map("affiliate_cashback_percent")
-  updatedAt                DateTime @updatedAt @map("updated_at")
+  id                          String   @id @default("singleton")
+  bannerEnabled               Boolean  @default(false) @map("banner_enabled")
+  bannerText                  String   @default("") @map("banner_text")
+  snowflakeEnabled            Boolean  @default(false) @map("snowflake_enabled")
+  paymentEnabled              Boolean  @default(true) @map("payment_enabled")
+  autoRenewalSignupEnabled    Boolean  @default(false) @map("auto_renewal_signup_enabled")
+  autoRenewalChargesEnabled   Boolean  @default(false) @map("auto_renewal_charges_enabled")
+  autoRenewalChargesEnabledAt DateTime @default(now()) @map("auto_renewal_charges_enabled_at")
+  recaptchaEnabled            Boolean  @default(true) @map("recaptcha_enabled")
+  googleAuthEnabled           Boolean  @default(true) @map("google_auth_enabled")
+  yandexAuthEnabled           Boolean  @default(true) @map("yandex_auth_enabled")
+  githubAuthEnabled           Boolean  @default(true) @map("github_auth_enabled")
+  vkAuthEnabled               Boolean  @default(false) @map("vk_auth_enabled")
+  telegramAuthEnabled         Boolean  @default(true) @map("telegram_auth_enabled")
+  affiliateProgramEnabled     Boolean  @default(false) @map("affiliate_program_enabled")
+  affiliateCashbackPercent    Int      @default(10) @map("affiliate_cashback_percent")
+  updatedAt                   DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
 }

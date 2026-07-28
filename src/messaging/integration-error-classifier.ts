@@ -134,6 +134,10 @@ export function classifyIntegrationError(
 	kind: IntegrationKind,
 	error: unknown
 ): IntegrationErrorClassification {
+	if (kind === 'auto-renewal') {
+		const yookassa = classifyYookassaError(error);
+		if (yookassa) return yookassa;
+	}
 	const destination = classifyDestinationError(error);
 	if (destination) return destination;
 
@@ -151,6 +155,53 @@ export function classifyIntegrationError(
 	if (outbound) return classifyOutboundError(outbound);
 
 	return unclassified();
+}
+
+function classifyYookassaError(
+	error: unknown
+): IntegrationErrorClassification | null {
+	const record = toRecord(error);
+	const code = normalizeCode(readString(record?.code));
+	const httpStatus = readNumber(record?.httpStatus);
+	const retryAfterMs = readNumber(record?.retryAfterMs);
+	if (!code?.startsWith('YOOKASSA_')) return null;
+
+	if (code === 'YOOKASSA_NETWORK' || httpStatus === 408) {
+		return createClassification({
+			category: 'TRANSIENT',
+			normalizedCode: code,
+			safeReason: 'ЮKassa временно недоступна',
+			retryDelayMs: retryAfterMs
+		});
+	}
+	if (httpStatus === 429) {
+		return createClassification({
+			category: 'RATE_LIMIT',
+			normalizedCode: code,
+			safeReason: 'ЮKassa временно ограничила частоту запросов',
+			retryDelayMs: retryAfterMs
+		});
+	}
+	if (httpStatus === 401 || httpStatus === 403) {
+		return createClassification({
+			category: 'AUTH_CONFIGURATION',
+			normalizedCode: code,
+			safeReason: 'Учётные данные ЮKassa отклонены'
+		});
+	}
+	if (httpStatus !== null && httpStatus >= 500) {
+		return createClassification({
+			category: 'TRANSIENT',
+			normalizedCode: code,
+			safeReason: 'ЮKassa временно не обработала запрос',
+			retryDelayMs: retryAfterMs
+		});
+	}
+	return createClassification({
+		category: 'PERMANENT',
+		normalizedCode: code,
+		safeReason: 'ЮKassa отклонила запрос автопродления'
+	});
 }
 
 function classifyDestinationError(

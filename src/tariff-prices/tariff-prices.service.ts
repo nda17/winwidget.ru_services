@@ -1,8 +1,20 @@
 import { PrismaService } from '@/prisma.service';
 import { PLAN_PRICES } from '@/subscription/subscription.constants';
 import { UpdateTariffPricesDto } from '@/tariff-prices/dto/update-tariff-prices.dto';
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { BillingPeriod, Plan, TariffPrice } from '@prisma/client';
+import {
+	BadRequestException,
+	ConflictException,
+	Injectable
+} from '@nestjs/common';
+import {
+	AutoRenewalConsentEventType,
+	AutoRenewalStatus,
+	BillingPeriod,
+	Plan,
+	Prisma,
+	Role,
+	TariffPrice
+} from '@prisma/client';
 
 const PAID_PLANS = [Plan.EASY, Plan.HARD] as const;
 const BILLING_PERIODS = [
@@ -57,27 +69,123 @@ export class TariffPricesService {
 		return price.amount;
 	}
 
-	async updateAll(dto: UpdateTariffPricesDto) {
+	/*
+	 * The tariff price and the auto-renewal confirmation gate must change in
+	 * the same serializable transaction.
+	 */
+	async updateAll(
+		dto: UpdateTariffPricesDto,
+		actor?: { id: string; role: Role }
+	) {
 		const normalized = this.normalizePrices(dto.prices);
 
 		await this.prisma.$transaction(
-			normalized.map(price =>
-				this.prisma.tariffPrice.upsert({
-					where: {
-						plan_billingPeriod: {
+			async transaction => {
+				for (const price of normalized) {
+					await transaction.tariffPrice.upsert({
+						where: {
+							plan_billingPeriod: {
+								plan: price.plan,
+								billingPeriod: price.billingPeriod
+							}
+						},
+						update: {
+							amount: price.amount
+						},
+						create: price
+					});
+
+					const renewals = await transaction.autoRenewal.findMany({
+						where: {
 							plan: price.plan,
-							billingPeriod: price.billingPeriod
+							billingPeriod: price.billingPeriod,
+							status: {
+								in: [
+									AutoRenewalStatus.ACTIVE,
+									AutoRenewalStatus.ADMIN_PAUSED,
+									AutoRenewalStatus.TECHNICAL_PAUSE
+								]
+							}
 						}
-					},
-					update: {
-						amount: price.amount
-					},
-					create: price
-				})
-			)
+					});
+					const newAmount = this.formatAmount(price.amount);
+
+					for (const renewal of renewals) {
+						if (renewal.amount === newAmount) {
+							if (renewal.pendingAmount) {
+								await transaction.autoRenewal.updateMany({
+									where: {
+										id: renewal.id,
+										stateVersion: renewal.stateVersion
+									},
+									data: {
+										pendingAmount: null,
+										priceChangeDetectedAt: null,
+										stateVersion: { increment: 1 }
+									}
+								});
+							}
+							continue;
+						}
+						if (renewal.pendingAmount === newAmount) continue;
+
+						const detectedAt = new Date();
+						const changed = await transaction.autoRenewal.updateMany({
+							where: {
+								id: renewal.id,
+								stateVersion: renewal.stateVersion
+							},
+							data: {
+								pendingAmount: newAmount,
+								priceChangeDetectedAt: detectedAt,
+								stateVersion: { increment: 1 }
+							}
+						});
+						if (changed.count !== 1) {
+							throw new ConflictException(
+								'Состояние автопродления изменилось параллельно. Повторите изменение цен'
+							);
+						}
+
+						await transaction.autoRenewalConsentEvent.create({
+							data: {
+								autoRenewalId: renewal.id,
+								userId: renewal.userId,
+								type: AutoRenewalConsentEventType.PRICE_CHANGE_REQUIRED,
+								actorUserId: actor?.id ?? null,
+								actorRole: actor?.role ?? null,
+								source: 'ADMIN_TARIFF_PRICE_UPDATE',
+								reason:
+									'Новая стоимость требует явного подтверждения пользователя',
+								consentVersion: renewal.consentVersion,
+								consentText: renewal.consentText,
+								plan: renewal.plan,
+								billingPeriod: renewal.billingPeriod,
+								amount: renewal.amount,
+								currency: renewal.currency,
+								metadata: {
+									previousAmount: renewal.pendingAmount ?? renewal.amount,
+									consentedAmount: renewal.amount,
+									newAmount,
+									detectedAt: detectedAt.toISOString()
+								}
+							}
+						});
+					}
+				}
+			},
+			{
+				isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+				maxWait: 5000,
+				timeout: 30000
+			}
 		);
 
 		return this.getAll();
+	}
+
+	private formatAmount(amount: number) {
+		return `${amount}.00`;
 	}
 
 	private async ensureDefaults() {

@@ -1,4 +1,6 @@
+import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
+import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { UpdateTariffPricesDto } from '@/tariff-prices/dto/update-tariff-prices.dto';
 import { TariffPricesService } from '@/tariff-prices/tariff-prices.service';
 import {
@@ -7,14 +9,19 @@ import {
 	Get,
 	HttpCode,
 	Patch,
+	Req,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
+import { Request } from 'express';
 
 @Controller('/tariff-prices')
 export class TariffPricesController {
-	constructor(private readonly tariffPricesService: TariffPricesService) {}
+	constructor(
+		private readonly tariffPricesService: TariffPricesService,
+		private readonly adminEventLogService: AdminEventLogService
+	) {}
 
 	@HttpCode(200)
 	@Get()
@@ -26,7 +33,34 @@ export class TariffPricesController {
 	@Auth(Role.ADMIN)
 	@Patch()
 	@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
-	update(@Body() dto: UpdateTariffPricesDto) {
-		return this.tariffPricesService.updateAll(dto);
+	async update(
+		@Body() dto: UpdateTariffPricesDto,
+		@CurrentUser('id') adminId: string,
+		@CurrentUser('rights') adminRights: Role[] = [],
+		@Req() request: Request
+	) {
+		const result = await this.tariffPricesService.updateAll(dto, {
+			id: adminId,
+			role: adminRights.includes(Role.DEV) ? Role.DEV : Role.ADMIN
+		});
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'PAYMENTS',
+			action: 'TARIFF_PRICES_UPDATE',
+			description:
+				'Обновлены тарифные цены; новые суммы автопродления требуют подтверждения пользователей',
+			entityType: 'tariff_prices',
+			entityId: 'paid-plans',
+			entityLabel: 'Цены платных тарифов',
+			metadata: {
+				prices: dto.prices.map(price => ({
+					plan: price.plan,
+					billingPeriod: price.billingPeriod,
+					amount: price.amount
+				}))
+			},
+			request
+		});
+		return result;
 	}
 }

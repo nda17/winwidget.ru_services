@@ -1,5 +1,14 @@
 import { BillingPeriod, Plan } from '@prisma/client';
-import { IsEnum, IsString } from 'class-validator';
+import {
+	IsBoolean,
+	IsEnum,
+	IsInt,
+	IsOptional,
+	IsString,
+	MaxLength,
+	Min,
+	MinLength
+} from 'class-validator';
 
 export class CreatePaymentDto {
 	@IsEnum(Plan)
@@ -7,9 +16,35 @@ export class CreatePaymentDto {
 
 	@IsEnum(BillingPeriod)
 	billingPeriod: BillingPeriod;
+
+	@IsInt()
+	@Min(1)
+	expectedAmount: number;
+
+	@IsBoolean()
+	@IsOptional()
+	autoRenew?: boolean;
+
+	@IsString()
+	@MaxLength(100)
+	@IsOptional()
+	consentVersion?: string;
 }
 
 export class AdminCheckPaymentDto {
 	@IsString()
 	paymentId: string;
+}
+
+export class VerifyPaymentDto {
+	@IsString()
+	@IsOptional()
+	paymentId?: string;
+}
+
+export class AdminAutoRenewalActionDto {
+	@IsString()
+	@MinLength(3)
+	@MaxLength(500)
+	reason: string;
 }

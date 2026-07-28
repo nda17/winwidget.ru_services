@@ -50,6 +50,34 @@ describe('messaging event contract', () => {
 		).toThrow('Routing key');
 	});
 
+	it('accepts the auto-renewal charge reference without payment secrets', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'payment.auto-renewal.charge.requested.v1',
+			paymentId: 'payment-1',
+			autoRenewalId: 'renewal-1',
+			cycleKey: 'renewal-1:2026-08-28T09:00:00.000Z',
+			scheduledFor: '2026-08-28T09:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'auto-renewal'
+			})
+		).not.toThrow();
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'webhook'
+			})
+		).toThrow('cannot be consumed by webhook');
+	});
+
 	it('rejects event type mismatches', () => {
 		expect(() =>
 			assertMessagingEventContract(

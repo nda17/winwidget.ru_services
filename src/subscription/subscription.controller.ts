@@ -189,7 +189,10 @@ export class SubscriptionController {
 		@Req() request: Request
 	) {
 		const subscription =
-			await this.subscriptionService.adminCancelSubscription(userId);
+			await this.subscriptionService.adminCancelSubscription(
+				userId,
+				adminId
+			);
 
 		await this.adminEventLogService.record({
 			adminId,

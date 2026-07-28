@@ -5,6 +5,7 @@ import {
 	IVkProfile,
 	TSocialProfile
 } from '@/auth/social-media/social-media-auth.types';
+import { disableAutoRenewalForLifecycleInTransaction } from '@/payment/auto-renewal-state';
 import { PrismaService } from '@/prisma.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
 import { UpdateUserDto } from '@/user/dto/update-user.dto';
@@ -18,6 +19,8 @@ import {
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
+	AutoRenewalConsentEventType,
+	AutoRenewalStatus,
 	PaymentStatus,
 	Prisma,
 	Role,
@@ -189,6 +192,7 @@ export class UserService {
 			pendingPaymentsCount,
 			succeededPaymentsCount,
 			cancelledPaymentsCount,
+			expiredPaymentsCount,
 			latestPayments,
 			wheelWidgetsCount,
 			activeWheelWidgetsCount,
@@ -238,6 +242,9 @@ export class UserService {
 			}),
 			this.prisma.payment.count({
 				where: { userId: id, status: PaymentStatus.CANCELLED }
+			}),
+			this.prisma.payment.count({
+				where: { userId: id, status: PaymentStatus.EXPIRED }
 			}),
 			this.prisma.payment.findMany({
 				where: { userId: id },
@@ -531,7 +538,8 @@ export class UserService {
 		const paymentCounts = {
 			[PaymentStatus.PENDING]: pendingPaymentsCount,
 			[PaymentStatus.SUCCEEDED]: succeededPaymentsCount,
-			[PaymentStatus.CANCELLED]: cancelledPaymentsCount
+			[PaymentStatus.CANCELLED]: cancelledPaymentsCount,
+			[PaymentStatus.EXPIRED]: expiredPaymentsCount
 		};
 		const widgetTypes = [
 			this.buildWidgetTypeCount(
@@ -1299,6 +1307,15 @@ export class UserService {
 				});
 
 				await this.revokeSessionsAndDeactivateWidgets(tx, id, deletedAt);
+				await disableAutoRenewalForLifecycleInTransaction(tx, {
+					userId: id,
+					status: AutoRenewalStatus.REVOKED,
+					eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
+					source: 'USER_SOFT_DELETE',
+					reason: 'Автопродление отозвано при удалении пользователя',
+					actorUserId: adminId,
+					actorRole: adminRights.includes(Role.DEV) ? Role.DEV : Role.ADMIN
+				});
 
 				return updated;
 			},
@@ -1442,6 +1459,18 @@ export class UserService {
 							id,
 							statusChangedAt
 						);
+						await disableAutoRenewalForLifecycleInTransaction(tx, {
+							userId: id,
+							status: AutoRenewalStatus.REVOKED,
+							eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
+							source: 'USER_DEACTIVATION',
+							reason:
+								'Автопродление отозвано при деактивации пользователя',
+							actorUserId: adminId,
+							actorRole: adminRights.includes(Role.DEV)
+								? Role.DEV
+								: Role.ADMIN
+						});
 					} else {
 						await this.deactivateWidgets(tx, id);
 					}

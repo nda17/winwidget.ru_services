@@ -67,7 +67,8 @@ type WorkerEventPayload =
 	| MailingDeliveryEventPayload
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
-	| DailySummaryRequestedEventPayload;
+	| DailySummaryRequestedEventPayload
+	| AutoRenewalChargeRequestedEventPayload;
 
 interface ScheduledJobStatusRow {
 	jobType: string;
@@ -405,6 +406,11 @@ export class IntegrationWorkerService
 							safeReason: `${classification.safeReason}; automatic retry budget exhausted`
 						};
 					}
+					await this.delivery.handleTerminalFailure(
+						kind,
+						payload,
+						classification
+					);
 					await this.rabbitMq.publishDeadLetter(
 						kind,
 						payload,
@@ -1697,3 +1703,4 @@ export class IntegrationWorkerService
 		return [...new Set(configured as MonolithIntegrationKind[])];
 	}
 }
+import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';
