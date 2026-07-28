@@ -37,15 +37,14 @@ export class RabbitMqManagementService {
 		const queues = await this.request<RabbitQueueInfo[]>(
 			`/api/queues/${this.getEncodedVhost()}`
 		);
+		const messagingQueueNames = Object.values(MESSAGING_QUEUE_NAMES);
 		return queues
-			.filter(
-				queue =>
-					queue.name.startsWith('winwidget.lead-integration.') ||
-					queue.name.startsWith('winwidget.payment-notification.') ||
-					queue.name.startsWith('winwidget.mailing.') ||
-					queue.name.startsWith('winwidget.limit-notification.') ||
-					queue.name.startsWith('winwidget.report.') ||
-					queue.name.startsWith('winwidget.maintenance.')
+			.filter(queue =>
+				messagingQueueNames.some(
+					mainQueue =>
+						queue.name === mainQueue ||
+						queue.name.startsWith(`${mainQueue}.`)
+				)
 			)
 			.sort((left, right) => left.name.localeCompare(right.name));
 	}
