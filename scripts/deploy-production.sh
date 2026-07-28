@@ -1745,9 +1745,11 @@ provision_rabbitmq_user \
 	'^winwidget\..*' \
 	'^winwidget\..*' \
 	''
-integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$'
+integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
-	integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$'
+	integration_worker_read_pattern="$legacy_integration_read_pattern"
 fi
 provision_rabbitmq_user \
 	"$integration_user" \
@@ -2941,7 +2943,7 @@ restore_first_cutover_producers_on_exit() {
 		"$integration_password_base64" \
 		'^$' \
 		'^(winwidget\.retry|winwidget\.dead-letter)$' \
-		'^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$' \
+		"$legacy_integration_read_pattern" \
 		''; then
 		echo "CRITICAL: broad legacy RabbitMQ permissions could not be restored." >&2
 		recovery_failed=true
@@ -3538,7 +3540,7 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 		"$integration_password_base64" \
 		'^$' \
 		'^(winwidget\.retry|winwidget\.dead-letter)$' \
-		'^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.telegram-destination-unavailable)(\..*)?$' \
+		"$post_cutover_integration_read_pattern" \
 		''
 	echo "Integration RabbitMQ read permissions were narrowed after the verified Telegram cutover boundary."
 
