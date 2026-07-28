@@ -62,6 +62,8 @@ jobs:
       MAINTENANCE_IMAGE: winwidget-maintenance:git-${{ github.sha }}
       NOTIFICATION_DELIVERY_REVISION: ${{ github.sha }}
       NOTIFICATION_DELIVERY_IMAGE: winwidget-notification-delivery:git-${{ github.sha }}
+      # CI-only 32-byte key. Production uses deploy/backend/.env.production.
+      PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://notification_delivery_runtime:notification_delivery_runtime_ci@127.0.0.1:5432/winwidget_ci?schema=notification_delivery
