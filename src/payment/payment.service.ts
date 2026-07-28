@@ -260,104 +260,85 @@ export class PaymentService {
 
 		const synchronized = await this.syncPaymentWithProvider(payment);
 		if (!synchronized) return null;
-		if (
-			synchronized.status !== PaymentStatus.PENDING &&
-			synchronized.status !== PaymentStatus.EXPIRED
-		) {
+		if (synchronized.status !== PaymentStatus.PENDING) {
 			return null;
 		}
 		return this.serializePendingPayment(synchronized);
 	}
 
-	async cancelPendingPayment(userId: string) {
-		await this.paymentCleanupService.cleanupStalePendingPaymentsForUser(
-			userId
-		);
-		let payment = await this.findBlockingPayment(userId);
-		if (!payment) {
+	async cancelPendingPayment(userId: string, paymentId: string) {
+		const normalizedPaymentId = paymentId.trim();
+		if (!normalizedPaymentId) {
 			throw new BadRequestException('Незавершённый платёж не найден');
 		}
 
-		let recoveredProviderPayment: IYookassaPaymentResponse | null = null;
-		if (!payment.yookassaId) {
-			if (
-				payment.providerStatus !== 'creating' ||
-				Date.now() - payment.createdAt.getTime() >
-					PROVIDER_IDEMPOTENCY_RETRY_WINDOW_MS
-			) {
-				throw new ServiceUnavailableException(
-					'Не удалось безопасно определить статус платежа. Обратитесь в поддержку'
+		return this.withSerializableRetry(async transaction => {
+			await transaction.$queryRaw(
+				Prisma.sql`
+					SELECT "id"
+					FROM "User"
+					WHERE "id" = ${userId}
+					FOR UPDATE
+				`
+			);
+			await transaction.$queryRaw(
+				Prisma.sql`
+					SELECT "id"
+					FROM "payments"
+					WHERE "id" = ${normalizedPaymentId}
+						AND "user_id" = ${userId}
+						AND "kind" = 'ONE_TIME'
+					FOR UPDATE
+				`
+			);
+			const payment = await transaction.payment.findFirst({
+				where: {
+					id: normalizedPaymentId,
+					userId,
+					kind: PaymentKind.ONE_TIME
+				}
+			});
+			if (!payment) {
+				throw new BadRequestException('Незавершённый платёж не найден');
+			}
+			if (payment.status === PaymentStatus.CANCELLED) {
+				return {
+					cancelled: true,
+					message: 'Незавершённый платёж уже отменён.',
+					cancelledAt: (
+						payment.cancelledAt ?? payment.updatedAt
+					).toISOString()
+				};
+			}
+			if (payment.status === PaymentStatus.EXPIRED) {
+				return {
+					cancelled: true,
+					message: 'Срок незавершённого платежа уже истёк.',
+					cancelledAt: payment.updatedAt.toISOString()
+				};
+			}
+			if (payment.status === PaymentStatus.SUCCEEDED) {
+				throw new BadRequestException(
+					'Платёж уже подтверждён, отменить его нельзя'
 				);
 			}
-			try {
-				const recovered =
-					await this.createOrRecoverOneTimeProviderPayment(payment);
-				payment = recovered.payment;
-				recoveredProviderPayment = recovered.providerPayment;
-			} catch {
-				throw new ServiceUnavailableException(
-					'Не удалось проверить платёж в ЮKassa. Повторите попытку'
-				);
-			}
-		}
 
-		let providerPayment: IYookassaPaymentResponse;
-		if (recoveredProviderPayment) {
-			providerPayment = recoveredProviderPayment;
-		} else {
-			try {
-				providerPayment = await this.yookassa.getPayment(
-					payment.yookassaId!
-				);
-			} catch {
-				throw new ServiceUnavailableException(
-					'Не удалось проверить платёж в ЮKassa. Повторите попытку'
-				);
-			}
-		}
-
-		if (providerPayment.status === 'succeeded') {
-			await this.handlePaymentSucceeded(
-				payment.yookassaId,
-				providerPayment
-			);
-			throw new BadRequestException(
-				'Платёж уже подтверждён, подписка будет активирована'
-			);
-		}
-		if (providerPayment.status === 'canceled') {
-			await this.handlePaymentCanceled(
-				payment.yookassaId,
-				providerPayment
-			);
+			const cancelledAt = new Date();
+			await transaction.payment.update({
+				where: { id: payment.id },
+				data: {
+					status: PaymentStatus.CANCELLED,
+					confirmationUrl: null,
+					cancelledAt,
+					cancellationReason: 'user_cancelled'
+				}
+			});
 			return {
 				cancelled: true,
-				awaitingProvider: false,
 				message: 'Незавершённый платёж отменён.',
-				cancelledAt: new Date().toISOString()
+				cancelledAt: cancelledAt.toISOString()
 			};
-		}
-
-		// YooKassa does not allow cancelling a one-stage payment while it waits
-		// for user confirmation. Hide the stale link, but keep the provider
-		// attempt as a blocker so a second charge cannot be created in parallel.
-		await this.prisma.payment.update({
-			where: { id: payment.id },
-			data: {
-				status: PaymentStatus.EXPIRED,
-				providerStatus: providerPayment.status,
-				confirmationUrl: null,
-				lastProviderCheckedAt: new Date(),
-				cancellationReason: 'user_cancel_requested'
-			}
 		});
-		return {
-			cancelled: false,
-			awaitingProvider: true,
-			message:
-				'Ссылка скрыта. Ждём финальный статус ЮKassa, чтобы исключить двойное списание. Позднее подтверждение будет учтено один раз.',
-			cancelledAt: new Date().toISOString()
-		};
 	}
 
 	async verifyPayment(userId: string, paymentId?: string) {
@@ -510,15 +491,31 @@ export class PaymentService {
 		const payments = await this.prisma.payment.findMany({
 			where: {
 				yookassaId: { not: null },
-				status: {
-					in: [PaymentStatus.PENDING, PaymentStatus.EXPIRED]
-				},
-				OR: [
-					{ lastProviderCheckedAt: null },
+				AND: [
 					{
-						lastProviderCheckedAt: {
-							lte: new Date(Date.now() - 30_000)
-						}
+						OR: [
+							{
+								status: {
+									in: [PaymentStatus.PENDING, PaymentStatus.EXPIRED]
+								}
+							},
+							{
+								kind: PaymentKind.ONE_TIME,
+								status: PaymentStatus.CANCELLED,
+								providerStatus: 'pending',
+								cancellationReason: 'user_cancelled'
+							}
+						]
+					},
+					{
+						OR: [
+							{ lastProviderCheckedAt: null },
+							{
+								lastProviderCheckedAt: {
+									lte: new Date(Date.now() - 30_000)
+								}
+							}
+						]
 					}
 				]
 			},
@@ -1492,18 +1489,19 @@ export class PaymentService {
 				);
 			}
 
+			const now = new Date();
 			const blocking = await transaction.payment.findFirst({
 				where: {
 					userId: input.userId,
 					OR: [
-						{ status: PaymentStatus.PENDING },
 						{
-							status: PaymentStatus.EXPIRED,
-							OR: [{ providerStatus: 'pending' }, { yookassaId: null }]
+							kind: PaymentKind.RECURRING,
+							status: PaymentStatus.PENDING
 						},
 						{
-							status: PaymentStatus.CANCELLED,
-							providerStatus: 'pending'
+							kind: PaymentKind.ONE_TIME,
+							status: PaymentStatus.PENDING,
+							checkoutExpiresAt: { gt: now }
 						}
 					]
 				},
@@ -1519,11 +1517,10 @@ export class PaymentService {
 					blocking.status === PaymentStatus.PENDING;
 				if (sameRequest) return blocking;
 				throw new ConflictException(
-					'Предыдущий платёж ещё сверяется с ЮKassa. Дождитесь финального статуса, чтобы избежать двойного списания.'
+					'Другой активный платёж ещё не завершён. Повторите попытку после его завершения.'
 				);
 			}
 
-			const now = new Date();
 			const offer = input.autoRenew
 				? await transaction.legalPage.findUnique({
 						where: { slug: 'oferta' },
@@ -1819,6 +1816,19 @@ export class PaymentService {
 						FOR UPDATE
 					`
 			);
+			const currentPayment = await transaction.payment.findUnique({
+				where: { id: localPayment.id }
+			});
+			if (
+				!currentPayment ||
+				currentPayment.status === PaymentStatus.SUCCEEDED
+			) {
+				return null;
+			}
+			const wasLocallyClosed =
+				currentPayment.kind === PaymentKind.ONE_TIME &&
+				(currentPayment.status === PaymentStatus.CANCELLED ||
+					currentPayment.status === PaymentStatus.EXPIRED);
 			const transition = await transaction.payment.updateMany({
 				where: {
 					id: localPayment.id,
@@ -1830,6 +1840,7 @@ export class PaymentService {
 					paymentMethodCiphertext: null,
 					confirmationUrl: null,
 					succeededAt,
+					cancelledAt: null,
 					lastProviderCheckedAt: new Date(),
 					cancellationReason: null
 				}
@@ -1853,7 +1864,7 @@ export class PaymentService {
 						localPayment.userId,
 						subscription.expiresAt
 					);
-				} else if (updatedPayment.autoRenew) {
+				} else if (updatedPayment.autoRenew && !wasLocallyClosed) {
 					const activated =
 						await this.autoRenewalService.activateFromSuccessfulPaymentInTransaction(
 							transaction,
@@ -2111,17 +2122,8 @@ export class PaymentService {
 			where: {
 				userId,
 				kind: PaymentKind.ONE_TIME,
-				OR: [
-					{ status: PaymentStatus.PENDING },
-					{
-						status: PaymentStatus.EXPIRED,
-						OR: [{ providerStatus: 'pending' }, { yookassaId: null }]
-					},
-					{
-						status: PaymentStatus.CANCELLED,
-						providerStatus: 'pending'
-					}
-				]
+				status: PaymentStatus.PENDING,
+				checkoutExpiresAt: { gt: new Date() }
 			},
 			orderBy: { createdAt: 'desc' }
 		});
@@ -2203,16 +2205,17 @@ export class PaymentService {
 		const status =
 			payment.status === PaymentStatus.SUCCEEDED
 				? 'succeeded'
-				: payment.status === PaymentStatus.CANCELLED
+				: payment.status === PaymentStatus.CANCELLED ||
+					  payment.status === PaymentStatus.EXPIRED
 					? 'cancelled'
 					: 'pending';
 		const message =
-			status === 'succeeded'
-				? 'Оплата подтверждена'
-				: status === 'cancelled'
-					? 'Оплата отменена или не завершена'
-					: payment.status === PaymentStatus.EXPIRED
-						? 'Срок ссылки истёк. Ожидаем финальный статус ЮKassa'
+			payment.status === PaymentStatus.EXPIRED
+				? 'Срок ссылки истёк. Создайте новый платёж.'
+				: status === 'succeeded'
+					? 'Оплата подтверждена'
+					: status === 'cancelled'
+						? 'Оплата отменена или не завершена'
 						: 'Ожидаем подтверждение оплаты';
 		return {
 			activated,

@@ -42,6 +42,13 @@ export class VerifyPaymentDto {
 	paymentId?: string;
 }
 
+export class CancelPendingPaymentDto {
+	@IsString()
+	@MinLength(1)
+	@MaxLength(100)
+	paymentId: string;
+}
+
 export class AdminAutoRenewalActionDto {
 	@IsString()
 	@MinLength(3)

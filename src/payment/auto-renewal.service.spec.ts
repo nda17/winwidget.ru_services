@@ -242,6 +242,43 @@ describe('AutoRenewalService public status copy', () => {
 });
 
 describe('AutoRenewalSchedulerService retry deadline', () => {
+	it('stops treating a one-time payment as blocking at the exact checkout deadline', () => {
+		const service = new AutoRenewalSchedulerService(
+			{} as never,
+			{} as never
+		);
+		const now = new Date('2026-07-29T09:00:00.000Z');
+		const getBlockingPaymentWhere = Reflect.get(
+			service,
+			'getBlockingPaymentWhere'
+		) as (userId: string, checkedAt: Date) => unknown;
+
+		expect(getBlockingPaymentWhere.call(service, 'user-1', now)).toEqual({
+			userId: 'user-1',
+			OR: [
+				{
+					kind: PaymentKind.RECURRING,
+					status: PaymentStatus.PENDING
+				},
+				{
+					kind: PaymentKind.ONE_TIME,
+					status: PaymentStatus.PENDING,
+					checkoutExpiresAt: { gt: now }
+				},
+				{
+					kind: PaymentKind.RECURRING,
+					status: PaymentStatus.EXPIRED,
+					OR: [{ providerStatus: 'pending' }, { yookassaId: null }]
+				},
+				{
+					kind: PaymentKind.RECURRING,
+					status: PaymentStatus.CANCELLED,
+					providerStatus: 'pending'
+				}
+			]
+		});
+	});
+
 	it('anchors the retry checkout deadline to dueAt instead of dispatch time', () => {
 		const service = new AutoRenewalSchedulerService(
 			{} as never,

@@ -4,6 +4,7 @@ import { CurrentUser } from '@/auth/decorators/user.decorator';
 import {
 	AdminAutoRenewalActionDto,
 	AdminCheckPaymentDto,
+	CancelPendingPaymentDto,
 	CreatePaymentDto,
 	VerifyPaymentDto
 } from '@/payment/dto/create-payment.dto';
@@ -75,8 +76,12 @@ export class PaymentController {
 	@HttpCode(200)
 	@Post('pending/cancel')
 	@Auth()
-	async cancelPendingPayment(@CurrentUser('id') userId: string) {
-		return this.paymentService.cancelPendingPayment(userId);
+	@UsePipes(new ValidationPipe({ whitelist: true }))
+	async cancelPendingPayment(
+		@CurrentUser('id') userId: string,
+		@Body() dto: CancelPendingPaymentDto
+	) {
+		return this.paymentService.cancelPendingPayment(userId, dto.paymentId);
 	}
 
 	@HttpCode(200)

@@ -392,20 +392,7 @@ export class AutoRenewalSchedulerService
 			}
 
 			const blocking = await transaction.payment.findFirst({
-				where: {
-					userId: renewal.userId,
-					OR: [
-						{ status: PaymentStatus.PENDING },
-						{
-							status: PaymentStatus.EXPIRED,
-							OR: [{ providerStatus: 'pending' }, { yookassaId: null }]
-						},
-						{
-							status: PaymentStatus.CANCELLED,
-							providerStatus: 'pending'
-						}
-					]
-				},
+				where: this.getBlockingPaymentWhere(renewal.userId, now),
 				select: { id: true }
 			});
 			if (blocking) {
@@ -468,6 +455,36 @@ export class AutoRenewalSchedulerService
 				? dueAt.getTime() + AUTO_RENEWAL_RETRY_DISPATCH_GRACE_MS
 				: Math.min(providerWindowDeadline, cycleDeadline)
 		);
+	}
+
+	private getBlockingPaymentWhere(
+		userId: string,
+		now: Date
+	): Prisma.PaymentWhereInput {
+		return {
+			userId,
+			OR: [
+				{
+					kind: PaymentKind.RECURRING,
+					status: PaymentStatus.PENDING
+				},
+				{
+					kind: PaymentKind.ONE_TIME,
+					status: PaymentStatus.PENDING,
+					checkoutExpiresAt: { gt: now }
+				},
+				{
+					kind: PaymentKind.RECURRING,
+					status: PaymentStatus.EXPIRED,
+					OR: [{ providerStatus: 'pending' }, { yookassaId: null }]
+				},
+				{
+					kind: PaymentKind.RECURRING,
+					status: PaymentStatus.CANCELLED,
+					providerStatus: 'pending'
+				}
+			]
+		};
 	}
 
 	private isMissedDuringGlobalPause(
