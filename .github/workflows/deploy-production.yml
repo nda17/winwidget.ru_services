@@ -892,6 +892,7 @@ jobs:
       - name: Verify Notification Delivery wire contract boundary
         run: |
           node <<'NODE'
+          const fs = require("node:fs");
           const monolith = require("./dist/src/messaging/messaging.constants.js");
           const delivery = require(
             "./apps/notification-delivery/dist/src/messaging/messaging.constants.js",
@@ -962,9 +963,51 @@ jobs:
               ],
               "winwidget.notification.telegram-destination-unavailable",
             ],
+            [
+              "auto-renewal routing key",
+              monolith.MESSAGING_ROUTING_KEYS["auto-renewal"],
+              "payment.auto-renewal.charge.requested.v1",
+            ],
+            [
+              "auto-renewal queue",
+              monolith.MESSAGING_QUEUE_NAMES["auto-renewal"],
+              "winwidget.payment.auto-renewal",
+            ],
           ]) {
             if (actual !== expected) {
               throw new Error(`${label} drift: ${actual} != ${expected}`);
+            }
+          }
+
+          const deployScript = fs.readFileSync(
+            "scripts/deploy-production.sh",
+            "utf8",
+          );
+          const autoRenewalQueue =
+            monolith.MESSAGING_QUEUE_NAMES["auto-renewal"];
+          for (const patternName of [
+            "post_cutover_integration_read_pattern",
+            "legacy_integration_read_pattern",
+          ]) {
+            const match = deployScript.match(
+              new RegExp(`^${patternName}='([^']+)'$`, "m"),
+            );
+            if (!match) {
+              throw new Error(
+                `RabbitMQ permission pattern is missing: ${patternName}`,
+              );
+            }
+            const permissionPattern = new RegExp(match[1]);
+            for (const queue of [
+              autoRenewalQueue,
+              `${autoRenewalQueue}.dead-letter`,
+              `${autoRenewalQueue}.retry-v2.1`,
+            ]) {
+              if (!permissionPattern.test(queue)) {
+                throw new Error(
+                  `${patternName} does not permit auto-renewal queue ${queue}`,
+                );
+              }
             }
           }
 

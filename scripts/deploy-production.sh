@@ -1764,8 +1764,8 @@ provision_rabbitmq_user \
 	'^winwidget\..*' \
 	'^winwidget\..*' \
 	''
-post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
-legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$'
+post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|mailing\..*|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	integration_worker_read_pattern="$legacy_integration_read_pattern"
@@ -2434,6 +2434,7 @@ const run = async () => {
 							"telegram-destination-unavailable",
 							"notification-delivery-outcome",
 						]),
+				"auto-renewal",
 			],
 			user: integrationUser,
 			connectionName: "winwidget-integration-worker",
