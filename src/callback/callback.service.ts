@@ -12,14 +12,22 @@ import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
+import { cleanupUnreferencedWidgetButtonImage } from '@/widget-domain/widget-button-image-lifecycle';
+import {
+	assertExpectedDraftRevision,
+	getWidgetDraftConfig,
+	projectWidgetDraft,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
 import { normalizePhone } from '@/utils/phone.util';
 import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { Plan, SubscriptionStatus } from '@prisma/client';
+import { Plan, Prisma, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
@@ -183,7 +191,10 @@ export class CallbackService {
 			orderBy: { createdAt: 'desc' },
 			include: { _count: { select: { leads: true } } }
 		});
-		return { callbacks, subscription: sub };
+		return {
+			callbacks: callbacks.map(callback => projectWidgetDraft(callback)),
+			subscription: sub
+		};
 	}
 
 	async createCallback(userId: string, dto: CreateCallbackDto) {
@@ -195,7 +206,10 @@ export class CallbackService {
 						userId,
 						publicKey: this.generatePublicKey(),
 						name: dto.name || 'Обратный звонок',
-						config: DEFAULT_CONFIG
+						config: DEFAULT_CONFIG,
+						draftConfig: DEFAULT_CONFIG,
+						draftInstallDomain: '',
+						draftRevision: 1
 					}
 				})
 		);
@@ -207,7 +221,15 @@ export class CallbackService {
 		dto: UpdateCallbackDto
 	) {
 		const callback = await this.getByIdAndOwner(callbackId, userId);
-		const currentConfig = callback.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(callback) as Record<
+			string,
+			any
+		>;
+		const hasDraftChanges =
+			dto.config !== undefined || dto.installDomain !== undefined;
+		if (hasDraftChanges) {
+			assertExpectedDraftRevision(callback, dto.expectedDraftRevision);
+		}
 		const configPatch =
 			dto.config !== undefined
 				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
@@ -236,43 +258,119 @@ export class CallbackService {
 			);
 		}
 
-		const updated = await this.prisma.callback.update({
-			where: { id: callback.id },
-			data: {
-				...(dto.name !== undefined && { name: dto.name }),
-				...(dto.isActive !== undefined && { isActive: dto.isActive }),
-				...(dto.installDomain !== undefined && {
-					installDomain: normalizeInstallDomain(dto.installDomain)
-				}),
-				...(nextConfig !== undefined && { config: nextConfig })
+		const data: Prisma.CallbackUpdateManyMutationInput = {
+			...(dto.name !== undefined && { name: dto.name }),
+			...(dto.isActive !== undefined && { isActive: dto.isActive }),
+			...(dto.installDomain !== undefined && {
+				draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+			}),
+			...(nextConfig !== undefined && { draftConfig: nextConfig }),
+			...(hasDraftChanges && { draftRevision: { increment: 1 } })
+		};
+		if (hasDraftChanges) {
+			const result = await this.prisma.callback.updateMany({
+				where: {
+					id: callback.id,
+					userId,
+					draftRevision: dto.expectedDraftRevision
+				},
+				data
+			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
 			}
-		});
-
-		if (nextConfig) {
-			await this.deleteButtonImageIfRemoved(currentConfig, nextConfig);
+		} else {
+			await this.prisma.callback.update({
+				where: { id: callback.id },
+				data
+			});
 		}
 
-		return updated;
+		const updated = await this.prisma.callback.findUniqueOrThrow({
+			where: { id: callback.id }
+		});
+		if (nextConfig !== undefined) {
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.CALLBACK,
+				callback.id,
+				currentConfig.buttonImageUrl
+			);
+		}
+		return projectWidgetDraft(updated);
 	}
 
 	async deleteCallback(userId: string, callbackId: string) {
 		const callback = await this.getByIdAndOwner(callbackId, userId);
-		await this.fileService.deleteWidgetButtonImage(
-			(callback.config as Record<string, any>).buttonImageUrl
+		const { deleted, imageUrls } = await this.prisma.$transaction(
+			async transaction => {
+				const deleted = await transaction.callback.delete({
+					where: { id: callback.id }
+				});
+				const revisions = await transaction.widgetConfigRevision.findMany({
+					where: {
+						widgetType: WidgetType.CALLBACK,
+						widgetId: callback.id
+					},
+					select: { config: true }
+				});
+				await transaction.widgetConfigRevision.deleteMany({
+					where: {
+						widgetType: WidgetType.CALLBACK,
+						widgetId: callback.id
+					}
+				});
+				await transaction.widgetRuntimeDailyMetric.deleteMany({
+					where: {
+						widgetType: WidgetType.CALLBACK,
+						widgetId: callback.id
+					}
+				});
+				await transaction.widgetRuntimePresence.deleteMany({
+					where: {
+						widgetType: WidgetType.CALLBACK,
+						widgetId: callback.id
+					}
+				});
+				return {
+					deleted,
+					imageUrls: this.collectButtonImageUrls([
+						deleted.config,
+						deleted.draftConfig,
+						...revisions.map(revision => revision.config)
+					])
+				};
+			}
 		);
-		return this.prisma.callback.delete({ where: { id: callback.id } });
+		await Promise.all(
+			imageUrls.map(url =>
+				this.fileService
+					.deleteWidgetButtonImage(url)
+					.catch(() => undefined)
+			)
+		);
+		return deleted;
 	}
 
 	async uploadButtonImage(
 		userId: string,
 		callbackId: string,
-		file: Express.Multer.File | undefined
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number
 	) {
 		const callback = await this.getByIdAndOwner(callbackId, userId);
+		assertExpectedDraftRevision(callback, expectedDraftRevision);
 		await this.assertCanUseButtonImage(userId);
 
-		const currentConfig = callback.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(callback) as Record<
+			string,
+			any
+		>;
 		let uploadedUrl = '';
+		let draftUpdated = false;
 
 		try {
 			const uploadedFile = await this.fileService.saveWidgetButtonImage(
@@ -282,23 +380,42 @@ export class CallbackService {
 			);
 			uploadedUrl = uploadedFile.url;
 
-			const updated = await this.prisma.callback.update({
-				where: { id: callback.id },
-				data: {
-					config: normalizeCallbackConfig({
-						...currentConfig,
-						buttonImageUrl: uploadedUrl
-					})
+			const updated = await this.prisma.$transaction(async transaction => {
+				const result = await transaction.callback.updateMany({
+					where: {
+						id: callback.id,
+						userId,
+						draftRevision: expectedDraftRevision
+					},
+					data: {
+						draftConfig: normalizeCallbackConfig({
+							...currentConfig,
+							buttonImageUrl: uploadedUrl
+						}),
+						draftRevision: { increment: 1 }
+					}
+				});
+				if (result.count !== 1) {
+					throw new ConflictException(
+						'Настройки уже изменены в другой сессии. Обновите страницу'
+					);
 				}
+				return transaction.callback.findUniqueOrThrow({
+					where: { id: callback.id }
+				});
 			});
+			draftUpdated = true;
 
-			await this.fileService
-				.deleteWidgetButtonImage(currentConfig.buttonImageUrl)
-				.catch(() => undefined);
-
-			return updated;
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.CALLBACK,
+				callback.id,
+				currentConfig.buttonImageUrl
+			);
+			return projectWidgetDraft(updated);
 		} catch (error) {
-			if (uploadedUrl) {
+			if (uploadedUrl && !draftUpdated) {
 				await this.fileService
 					.deleteWidgetButtonImage(uploadedUrl)
 					.catch(() => undefined);
@@ -402,6 +519,9 @@ export class CallbackService {
 		});
 
 		if (!callback) return null;
+		if (!callback.publishedAt || callback.publishedVersion === 0) {
+			return { isActive: false };
+		}
 
 		const config = normalizeCallbackConfig(callback.config);
 		if (
@@ -493,6 +613,9 @@ export class CallbackService {
 		});
 
 		if (!callback) throw new NotFoundException('Виджет не найден');
+		if (!callback.publishedAt || callback.publishedVersion === 0) {
+			throw new ForbiddenException('Виджет ещё не опубликован');
+		}
 		if (!callback.isActive) {
 			throw new ForbiddenException(
 				'Лимит заявок исчерпан или подписка неактивна'
@@ -667,18 +790,21 @@ export class CallbackService {
 		return nextPatch;
 	}
 
-	private async deleteButtonImageIfRemoved(
-		previousConfig: Record<string, any>,
-		nextConfig: Record<string, any>
-	) {
-		const previousUrl = previousConfig.buttonImageUrl;
-		const nextUrl = nextConfig.buttonImageUrl;
-
-		if (previousUrl && previousUrl !== nextUrl) {
-			await this.fileService
-				.deleteWidgetButtonImage(previousUrl)
-				.catch(() => undefined);
-		}
+	private collectButtonImageUrls(configs: unknown[]) {
+		return Array.from(
+			new Set(
+				configs
+					.map(config =>
+						config && typeof config === 'object' && !Array.isArray(config)
+							? (config as Record<string, unknown>).buttonImageUrl
+							: null
+					)
+					.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.trim().length > 0
+					)
+			)
+		);
 	}
 
 	private generatePublicKey(): string {

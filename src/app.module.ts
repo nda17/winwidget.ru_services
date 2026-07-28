@@ -19,6 +19,8 @@ import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { UserModule } from '@/user/user.module';
 import { WidgetModule } from '@/widget/widget.module';
 import { WidgetAdminModule } from '@/widget-admin/widget-admin.module';
+import { WidgetSettingsModule } from '@/widget-settings/widget-settings.module';
+import { WidgetRuntimeModule } from '@/widget-runtime/widget-runtime.module';
 import { QuizModule } from '@/quiz/quiz.module';
 import { CallbackModule } from '@/callback/callback.module';
 import { CalculatorModule } from '@/calculator/calculator.module';
@@ -54,6 +56,8 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		SubscriptionModule,
 		WidgetModule,
 		WidgetAdminModule,
+		WidgetSettingsModule,
+		WidgetRuntimeModule,
 		QuizModule,
 		CallbackModule,
 		CalculatorModule,

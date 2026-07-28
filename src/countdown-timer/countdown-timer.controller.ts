@@ -10,6 +10,7 @@ import {
 	Delete,
 	Get,
 	Param,
+	ParseIntPipe,
 	Patch,
 	Post,
 	Query,
@@ -62,12 +63,15 @@ export class CountdownTimerController {
 	async uploadButtonImage(
 		@CurrentUser('id') userId: string,
 		@Param('id') countdownTimerId: string,
+		@Body('expectedDraftRevision', ParseIntPipe)
+		expectedDraftRevision: number,
 		@UploadedFile() file?: Express.Multer.File
 	) {
 		return this.countdownTimerService.uploadButtonImage(
 			userId,
 			countdownTimerId,
-			file
+			file,
+			expectedDraftRevision
 		);
 	}
 

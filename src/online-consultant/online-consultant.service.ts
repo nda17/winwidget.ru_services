@@ -13,13 +13,21 @@ import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
+import { cleanupUnreferencedWidgetButtonImage } from '@/widget-domain/widget-button-image-lifecycle';
+import {
+	assertExpectedDraftRevision,
+	getWidgetDraftConfig,
+	projectWidgetDraft,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
 import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { Plan, SubscriptionStatus } from '@prisma/client';
+import { Plan, Prisma, SubscriptionStatus } from '@prisma/client';
 import { isEmail } from 'class-validator';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
@@ -248,13 +256,19 @@ export class OnlineConsultantService {
 			orderBy: { createdAt: 'desc' },
 			include: { _count: { select: { leads: true } } }
 		});
-		return { onlineConsultants, subscription: sub };
+		return {
+			onlineConsultants: onlineConsultants.map(onlineConsultant =>
+				projectWidgetDraft(onlineConsultant)
+			),
+			subscription: sub
+		};
 	}
 
 	async createOnlineConsultant(
 		userId: string,
 		dto: CreateOnlineConsultantDto
 	) {
+		const config = DEFAULT_CONFIG;
 		return this.subscriptionService.createWidgetWithinLimit(
 			userId,
 			transaction =>
@@ -263,7 +277,10 @@ export class OnlineConsultantService {
 						userId,
 						publicKey: this.generatePublicKey(),
 						name: dto.name || 'Онлайн-консультант',
-						config: DEFAULT_CONFIG
+						config,
+						draftConfig: config,
+						draftInstallDomain: '',
+						draftRevision: 1
 					}
 				})
 		);
@@ -278,7 +295,18 @@ export class OnlineConsultantService {
 			onlineConsultantId,
 			userId
 		);
-		const currentConfig = onlineConsultant.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(onlineConsultant) as Record<
+			string,
+			any
+		>;
+		const hasDraftChanges =
+			dto.config !== undefined || dto.installDomain !== undefined;
+		if (hasDraftChanges) {
+			assertExpectedDraftRevision(
+				onlineConsultant,
+				dto.expectedDraftRevision
+			);
+		}
 		const configPatch =
 			dto.config !== undefined
 				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
@@ -306,23 +334,49 @@ export class OnlineConsultantService {
 			);
 		}
 
-		const updated = await this.prisma.onlineConsultant.update({
-			where: { id: onlineConsultant.id },
-			data: {
-				...(dto.name !== undefined && { name: dto.name }),
-				...(dto.isActive !== undefined && { isActive: dto.isActive }),
-				...(dto.installDomain !== undefined && {
-					installDomain: normalizeInstallDomain(dto.installDomain)
-				}),
-				...(nextConfig !== undefined && { config: nextConfig })
+		const data: Prisma.OnlineConsultantUpdateManyMutationInput = {
+			...(dto.name !== undefined && { name: dto.name }),
+			...(dto.isActive !== undefined && { isActive: dto.isActive }),
+			...(dto.installDomain !== undefined && {
+				draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+			}),
+			...(nextConfig !== undefined && { draftConfig: nextConfig }),
+			...(hasDraftChanges && { draftRevision: { increment: 1 } })
+		};
+		if (hasDraftChanges) {
+			const result = await this.prisma.onlineConsultant.updateMany({
+				where: {
+					id: onlineConsultant.id,
+					userId,
+					draftRevision: dto.expectedDraftRevision
+				},
+				data
+			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
 			}
-		});
-
-		if (nextConfig) {
-			await this.deleteButtonImageIfRemoved(currentConfig, nextConfig);
+		} else {
+			await this.prisma.onlineConsultant.update({
+				where: { id: onlineConsultant.id },
+				data
+			});
 		}
 
-		return updated;
+		const updated = await this.prisma.onlineConsultant.findUniqueOrThrow({
+			where: { id: onlineConsultant.id }
+		});
+		if (nextConfig !== undefined) {
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.ONLINE_CONSULTANT,
+				onlineConsultant.id,
+				currentConfig.buttonImageUrl
+			);
+		}
+		return projectWidgetDraft(updated);
 	}
 
 	async deleteOnlineConsultant(
@@ -333,27 +387,75 @@ export class OnlineConsultantService {
 			onlineConsultantId,
 			userId
 		);
-		await this.fileService.deleteWidgetButtonImage(
-			(onlineConsultant.config as Record<string, any>).buttonImageUrl
+		const { deleted, imageUrls } = await this.prisma.$transaction(
+			async transaction => {
+				const deleted = await transaction.onlineConsultant.delete({
+					where: { id: onlineConsultant.id }
+				});
+				const revisions = await transaction.widgetConfigRevision.findMany({
+					where: {
+						widgetType: WidgetType.ONLINE_CONSULTANT,
+						widgetId: onlineConsultant.id
+					},
+					select: { config: true }
+				});
+				await transaction.widgetConfigRevision.deleteMany({
+					where: {
+						widgetType: WidgetType.ONLINE_CONSULTANT,
+						widgetId: onlineConsultant.id
+					}
+				});
+				await transaction.widgetRuntimeDailyMetric.deleteMany({
+					where: {
+						widgetType: WidgetType.ONLINE_CONSULTANT,
+						widgetId: onlineConsultant.id
+					}
+				});
+				await transaction.widgetRuntimePresence.deleteMany({
+					where: {
+						widgetType: WidgetType.ONLINE_CONSULTANT,
+						widgetId: onlineConsultant.id
+					}
+				});
+				return {
+					deleted,
+					imageUrls: this.collectButtonImageUrls([
+						deleted.config,
+						deleted.draftConfig,
+						...revisions.map(revision => revision.config)
+					])
+				};
+			}
 		);
-		return this.prisma.onlineConsultant.delete({
-			where: { id: onlineConsultant.id }
-		});
+		await Promise.all(
+			imageUrls.map(url =>
+				this.fileService
+					.deleteWidgetButtonImage(url)
+					.catch(() => undefined)
+			)
+		);
+		return deleted;
 	}
 
 	async uploadButtonImage(
 		userId: string,
 		onlineConsultantId: string,
-		file: Express.Multer.File | undefined
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number
 	) {
 		const onlineConsultant = await this.getByIdAndOwner(
 			onlineConsultantId,
 			userId
 		);
+		assertExpectedDraftRevision(onlineConsultant, expectedDraftRevision);
 		await this.assertCanUseButtonImage(userId);
 
-		const currentConfig = onlineConsultant.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(onlineConsultant) as Record<
+			string,
+			any
+		>;
 		let uploadedUrl = '';
+		let draftUpdated = false;
 
 		try {
 			const uploadedFile = await this.fileService.saveWidgetButtonImage(
@@ -363,23 +465,42 @@ export class OnlineConsultantService {
 			);
 			uploadedUrl = uploadedFile.url;
 
-			const updated = await this.prisma.onlineConsultant.update({
-				where: { id: onlineConsultant.id },
+			const result = await this.prisma.onlineConsultant.updateMany({
+				where: {
+					id: onlineConsultant.id,
+					userId,
+					draftRevision: expectedDraftRevision
+				},
 				data: {
-					config: normalizeOnlineConsultantConfig({
+					draftConfig: normalizeOnlineConsultantConfig({
 						...currentConfig,
 						buttonImageUrl: uploadedUrl
-					})
+					}),
+					draftRevision: { increment: 1 }
 				}
 			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
+			}
+			draftUpdated = true;
 
-			await this.fileService
-				.deleteWidgetButtonImage(currentConfig.buttonImageUrl)
-				.catch(() => undefined);
-
-			return updated;
+			const updated = await this.prisma.onlineConsultant.findUniqueOrThrow(
+				{
+					where: { id: onlineConsultant.id }
+				}
+			);
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.ONLINE_CONSULTANT,
+				onlineConsultant.id,
+				currentConfig.buttonImageUrl
+			);
+			return projectWidgetDraft(updated);
 		} catch (error) {
-			if (uploadedUrl) {
+			if (uploadedUrl && !draftUpdated) {
 				await this.fileService
 					.deleteWidgetButtonImage(uploadedUrl)
 					.catch(() => undefined);
@@ -491,6 +612,12 @@ export class OnlineConsultantService {
 		);
 
 		if (!onlineConsultant) return null;
+		if (
+			!onlineConsultant.publishedAt ||
+			onlineConsultant.publishedVersion === 0
+		) {
+			return { isActive: false };
+		}
 
 		const config = normalizeOnlineConsultantConfig(
 			onlineConsultant.config
@@ -592,6 +719,12 @@ export class OnlineConsultantService {
 
 		if (!onlineConsultant)
 			throw new NotFoundException('Онлайн-консультант не найден');
+		if (
+			!onlineConsultant.publishedAt ||
+			onlineConsultant.publishedVersion === 0
+		) {
+			throw new ForbiddenException('Виджет ещё не опубликован');
+		}
 
 		const config = normalizeOnlineConsultantConfig(
 			onlineConsultant.config
@@ -808,18 +941,17 @@ export class OnlineConsultantService {
 		return nextPatch;
 	}
 
-	private async deleteButtonImageIfRemoved(
-		previousConfig: Record<string, any>,
-		nextConfig: Record<string, any>
-	) {
-		const previousUrl = previousConfig.buttonImageUrl;
-		const nextUrl = nextConfig.buttonImageUrl;
-
-		if (previousUrl && previousUrl !== nextUrl) {
-			await this.fileService
-				.deleteWidgetButtonImage(previousUrl)
-				.catch(() => undefined);
-		}
+	private collectButtonImageUrls(configs: unknown[]) {
+		return [
+			...new Set(
+				configs
+					.map(config => toPlainObject(config).buttonImageUrl)
+					.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.length > 0
+					)
+			)
+		];
 	}
 
 	private generatePublicKey(): string {

@@ -21,6 +21,49 @@
 		}
 	})();
 
+	var RUNTIME_VERSION = '2026.07';
+	var telemetryEventsSent = Object.create(null);
+
+	function sendTelemetryEvent(eventName, publicKey) {
+		if (
+			!publicKey ||
+			(eventName !== 'IMPRESSION' &&
+				eventName !== 'OPEN' &&
+				eventName !== 'START') ||
+			telemetryEventsSent[eventName]
+		) {
+			return;
+		}
+
+		if (eventName === 'OPEN') {
+			sendTelemetryEvent('IMPRESSION', publicKey);
+		} else if (eventName === 'START') {
+			sendTelemetryEvent('IMPRESSION', publicKey);
+			sendTelemetryEvent('OPEN', publicKey);
+		}
+
+		telemetryEventsSent[eventName] = true;
+		try {
+			var request = fetch(
+				`${API_BASE}/widget-events/wheel/${encodeURIComponent(publicKey)}`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						event: eventName,
+						runtimeVersion: RUNTIME_VERSION
+					}),
+					keepalive: true,
+					credentials: 'omit',
+					referrerPolicy: 'no-referrer'
+				}
+			);
+			if (request && typeof request.catch === 'function') {
+				request.catch(function () {});
+			}
+		} catch (e) {}
+	}
+
 	function getWidgetFetchOptions(options = {}) {
 		if (!window.winwidgetAutoOpen) return options;
 		return { ...options, referrerPolicy: 'unsafe-url' };
@@ -344,6 +387,7 @@
 			giftBtn.style.pointerEvents = 'none';
 			giftBtn.style.transform = 'scale(0.8)';
 			stopGiftAnimation();
+			sendTelemetryEvent('OPEN', config._token);
 			firePixelEvent('ip3_open');
 		}
 
@@ -1578,32 +1622,6 @@
 			return nameIsValid && phoneIsValid && emailIsValid && policyIsValid;
 		}
 
-		// Потеря фокуса c инпута с именем
-		function handleBlurInputName() {
-			if (!inputName.value.length) {
-				return;
-			}
-
-			validateName();
-		}
-
-		// Потеря фокуса c инпута с номером телефона
-		function handleBlurInputPhone() {
-			if (!inputPhone.value.length) {
-				return;
-			}
-
-			validatePhone();
-		}
-
-		// Потеря фокуса c инпута с email
-		function handleBlurInputEmail() {
-			if (!inputEmail.value.length) {
-				return;
-			}
-
-			validateEmail();
-		}
 		/************************/
 
 		/************************ Получение и форматирование данных с инпутов ************************/
@@ -1623,6 +1641,7 @@
 		}
 
 		async function pushBtn() {
+			sendTelemetryEvent('START', config._token);
 			const isValid = validate();
 
 			if (!isValid) {
@@ -1843,12 +1862,6 @@
 		renderWheel();
 
 		//Обработчики событий
-		config.nameFieldActive &&
-			inputName.addEventListener('blur', handleBlurInputName);
-		config.phoneFieldActive &&
-			inputPhone.addEventListener('blur', handleBlurInputPhone);
-		config.emailFieldActive &&
-			inputEmail.addEventListener('blur', handleBlurInputEmail);
 		closeBtn.addEventListener('click', closeWidget);
 		startBtn.addEventListener('click', pushBtn);
 		giftBtn.addEventListener('click', openWidget);
@@ -1921,6 +1934,8 @@
 				}
 			}
 		} catch (e) {}
+
+		sendTelemetryEvent('IMPRESSION', config._token);
 
 		if (config.autoOpenSeconds && !hasPlayed) {
 			setTimeout(openWidget, config.autoOpenSeconds * 1000);

@@ -12,13 +12,21 @@ import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
+import { cleanupUnreferencedWidgetButtonImage } from '@/widget-domain/widget-button-image-lifecycle';
+import {
+	assertExpectedDraftRevision,
+	getWidgetDraftConfig,
+	projectWidgetDraft,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
 import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { Plan, SubscriptionStatus } from '@prisma/client';
+import { Plan, Prisma, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
@@ -246,7 +254,10 @@ export class QuizService {
 			}
 		});
 
-		return { quizzes, subscription: sub };
+		return {
+			quizzes: quizzes.map(quiz => projectWidgetDraft(quiz)),
+			subscription: sub
+		};
 	}
 
 	async createQuiz(userId: string, dto: CreateQuizDto) {
@@ -260,7 +271,10 @@ export class QuizService {
 						userId,
 						publicKey,
 						name: dto.name || 'Квиз',
-						config: DEFAULT_CONFIG
+						config: DEFAULT_CONFIG,
+						draftConfig: DEFAULT_CONFIG,
+						draftInstallDomain: '',
+						draftRevision: 1
 					}
 				})
 		);
@@ -268,7 +282,15 @@ export class QuizService {
 
 	async updateQuiz(userId: string, quizId: string, dto: UpdateQuizDto) {
 		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
-		const currentConfig = quiz.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(quiz) as Record<
+			string,
+			any
+		>;
+		const hasDraftChanges =
+			dto.config !== undefined || dto.installDomain !== undefined;
+		if (hasDraftChanges) {
+			assertExpectedDraftRevision(quiz, dto.expectedDraftRevision);
+		}
 		const configPatch =
 			dto.config !== undefined
 				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
@@ -291,43 +313,107 @@ export class QuizService {
 			);
 		}
 
-		const updated = await this.prisma.quiz.update({
-			where: { id: quiz.id },
-			data: {
-				...(dto.name !== undefined && { name: dto.name }),
-				...(dto.isActive !== undefined && { isActive: dto.isActive }),
-				...(dto.installDomain !== undefined && {
-					installDomain: normalizeInstallDomain(dto.installDomain)
-				}),
-				...(nextConfig !== undefined && { config: nextConfig })
+		const data: Prisma.QuizUpdateManyMutationInput = {
+			...(dto.name !== undefined && { name: dto.name }),
+			...(dto.isActive !== undefined && { isActive: dto.isActive }),
+			...(dto.installDomain !== undefined && {
+				draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+			}),
+			...(nextConfig !== undefined && { draftConfig: nextConfig }),
+			...(hasDraftChanges && { draftRevision: { increment: 1 } })
+		};
+		if (hasDraftChanges) {
+			const result = await this.prisma.quiz.updateMany({
+				where: {
+					id: quiz.id,
+					userId,
+					draftRevision: dto.expectedDraftRevision
+				},
+				data
+			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
 			}
-		});
-
-		if (nextConfig) {
-			await this.deleteButtonImageIfRemoved(currentConfig, nextConfig);
+		} else {
+			await this.prisma.quiz.update({ where: { id: quiz.id }, data });
 		}
 
-		return updated;
+		const updated = await this.prisma.quiz.findUniqueOrThrow({
+			where: { id: quiz.id }
+		});
+		if (nextConfig !== undefined) {
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.QUIZ,
+				quiz.id,
+				currentConfig.buttonImageUrl
+			);
+		}
+		return projectWidgetDraft(updated);
 	}
 
 	async deleteQuiz(userId: string, quizId: string) {
 		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
-		await this.fileService.deleteWidgetButtonImage(
-			(quiz.config as Record<string, any>).buttonImageUrl
+		const { deleted, imageUrls } = await this.prisma.$transaction(
+			async transaction => {
+				const deleted = await transaction.quiz.delete({
+					where: { id: quiz.id }
+				});
+				const revisions = await transaction.widgetConfigRevision.findMany({
+					where: {
+						widgetType: WidgetType.QUIZ,
+						widgetId: quiz.id
+					},
+					select: { config: true }
+				});
+				await transaction.widgetConfigRevision.deleteMany({
+					where: { widgetType: WidgetType.QUIZ, widgetId: quiz.id }
+				});
+				await transaction.widgetRuntimeDailyMetric.deleteMany({
+					where: { widgetType: WidgetType.QUIZ, widgetId: quiz.id }
+				});
+				await transaction.widgetRuntimePresence.deleteMany({
+					where: { widgetType: WidgetType.QUIZ, widgetId: quiz.id }
+				});
+				return {
+					deleted,
+					imageUrls: this.collectButtonImageUrls([
+						deleted.config,
+						deleted.draftConfig,
+						...revisions.map(revision => revision.config)
+					])
+				};
+			}
 		);
-		return this.prisma.quiz.delete({ where: { id: quiz.id } });
+		await Promise.all(
+			imageUrls.map(url =>
+				this.fileService
+					.deleteWidgetButtonImage(url)
+					.catch(() => undefined)
+			)
+		);
+		return deleted;
 	}
 
 	async uploadButtonImage(
 		userId: string,
 		quizId: string,
-		file: Express.Multer.File | undefined
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number
 	) {
 		const quiz = await this.getQuizByIdAndOwner(quizId, userId);
+		assertExpectedDraftRevision(quiz, expectedDraftRevision);
 		await this.assertCanUseButtonImage(userId);
 
-		const currentConfig = quiz.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(quiz) as Record<
+			string,
+			any
+		>;
 		let uploadedUrl = '';
+		let draftUpdated = false;
 
 		try {
 			const uploadedFile = await this.fileService.saveWidgetButtonImage(
@@ -337,23 +423,42 @@ export class QuizService {
 			);
 			uploadedUrl = uploadedFile.url;
 
-			const updated = await this.prisma.quiz.update({
-				where: { id: quiz.id },
-				data: {
-					config: normalizeQuizConfig({
-						...currentConfig,
-						buttonImageUrl: uploadedUrl
-					})
+			const updated = await this.prisma.$transaction(async transaction => {
+				const result = await transaction.quiz.updateMany({
+					where: {
+						id: quiz.id,
+						userId,
+						draftRevision: expectedDraftRevision
+					},
+					data: {
+						draftConfig: normalizeQuizConfig({
+							...currentConfig,
+							buttonImageUrl: uploadedUrl
+						}),
+						draftRevision: { increment: 1 }
+					}
+				});
+				if (result.count !== 1) {
+					throw new ConflictException(
+						'Настройки уже изменены в другой сессии. Обновите страницу'
+					);
 				}
+				return transaction.quiz.findUniqueOrThrow({
+					where: { id: quiz.id }
+				});
 			});
+			draftUpdated = true;
 
-			await this.fileService
-				.deleteWidgetButtonImage(currentConfig.buttonImageUrl)
-				.catch(() => undefined);
-
-			return updated;
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.QUIZ,
+				quiz.id,
+				currentConfig.buttonImageUrl
+			);
+			return projectWidgetDraft(updated);
 		} catch (error) {
-			if (uploadedUrl) {
+			if (uploadedUrl && !draftUpdated) {
 				await this.fileService
 					.deleteWidgetButtonImage(uploadedUrl)
 					.catch(() => undefined);
@@ -492,6 +597,9 @@ export class QuizService {
 		});
 
 		if (!quiz) return null;
+		if (!quiz.publishedAt || quiz.publishedVersion === 0) {
+			return { isActive: false };
+		}
 
 		const config = normalizeQuizConfig(quiz.config);
 		if (
@@ -602,6 +710,9 @@ export class QuizService {
 				}
 			}
 		});
+		if (quiz && (!quiz.publishedAt || quiz.publishedVersion === 0)) {
+			throw new ForbiddenException('Виджет ещё не опубликован');
+		}
 
 		if (!quiz) throw new NotFoundException('Квиз не найден');
 
@@ -836,18 +947,21 @@ export class QuizService {
 		return nextPatch;
 	}
 
-	private async deleteButtonImageIfRemoved(
-		previousConfig: Record<string, any>,
-		nextConfig: Record<string, any>
-	) {
-		const previousUrl = previousConfig.buttonImageUrl;
-		const nextUrl = nextConfig.buttonImageUrl;
-
-		if (previousUrl && previousUrl !== nextUrl) {
-			await this.fileService
-				.deleteWidgetButtonImage(previousUrl)
-				.catch(() => undefined);
-		}
+	private collectButtonImageUrls(configs: unknown[]) {
+		return Array.from(
+			new Set(
+				configs
+					.map(config =>
+						config && typeof config === 'object' && !Array.isArray(config)
+							? (config as Record<string, unknown>).buttonImageUrl
+							: null
+					)
+					.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.trim().length > 0
+					)
+			)
+		);
 	}
 
 	private generatePublicKey(): string {

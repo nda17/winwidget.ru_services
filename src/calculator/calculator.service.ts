@@ -16,8 +16,16 @@ import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
+import { cleanupUnreferencedWidgetButtonImage } from '@/widget-domain/widget-button-image-lifecycle';
+import {
+	assertExpectedDraftRevision,
+	getWidgetDraftConfig,
+	projectWidgetDraft,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
 import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
@@ -456,10 +464,16 @@ export class CalculatorService {
 			include: { _count: { select: { leads: true } } }
 		});
 
-		return { calculators, subscription };
+		return {
+			calculators: calculators.map(calculator =>
+				projectWidgetDraft(calculator)
+			),
+			subscription
+		};
 	}
 
 	async createCalculator(userId: string, dto: CreateCalculatorDto) {
+		const config = DEFAULT_CONFIG as unknown as Prisma.InputJsonValue;
 		return this.subscriptionService.createWidgetWithinLimit(
 			userId,
 			transaction =>
@@ -468,7 +482,10 @@ export class CalculatorService {
 						userId,
 						publicKey: this.generatePublicKey(),
 						name: dto.name || 'Калькулятор',
-						config: DEFAULT_CONFIG as unknown as Prisma.InputJsonValue
+						config,
+						draftConfig: config,
+						draftInstallDomain: '',
+						draftRevision: 1
 					}
 				})
 		);
@@ -480,7 +497,12 @@ export class CalculatorService {
 		dto: UpdateCalculatorDto
 	) {
 		const calculator = await this.getByIdAndOwner(calculatorId, userId);
-		const currentConfig = toPlainObject(calculator.config);
+		const currentConfig = toPlainObject(getWidgetDraftConfig(calculator));
+		const hasDraftChanges =
+			dto.config !== undefined || dto.installDomain !== undefined;
+		if (hasDraftChanges) {
+			assertExpectedDraftRevision(calculator, dto.expectedDraftRevision);
+		}
 		const configPatch =
 			dto.config !== undefined
 				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
@@ -502,45 +524,118 @@ export class CalculatorService {
 			);
 		}
 
-		const updated = await this.prisma.calculator.update({
-			where: { id: calculator.id },
-			data: {
-				...(dto.name !== undefined && { name: dto.name }),
-				...(dto.isActive !== undefined && { isActive: dto.isActive }),
-				...(dto.installDomain !== undefined && {
-					installDomain: normalizeInstallDomain(dto.installDomain)
-				}),
-				...(nextConfig !== undefined && {
-					config: nextConfig as unknown as Prisma.InputJsonValue
-				})
+		const data: Prisma.CalculatorUpdateManyMutationInput = {
+			...(dto.name !== undefined && { name: dto.name }),
+			...(dto.isActive !== undefined && { isActive: dto.isActive }),
+			...(dto.installDomain !== undefined && {
+				draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+			}),
+			...(nextConfig !== undefined && {
+				draftConfig: nextConfig as unknown as Prisma.InputJsonValue
+			}),
+			...(hasDraftChanges && { draftRevision: { increment: 1 } })
+		};
+		if (hasDraftChanges) {
+			const result = await this.prisma.calculator.updateMany({
+				where: {
+					id: calculator.id,
+					userId,
+					draftRevision: dto.expectedDraftRevision
+				},
+				data
+			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
 			}
-		});
-
-		if (nextConfig) {
-			await this.deleteButtonImageIfRemoved(currentConfig, nextConfig);
+		} else {
+			await this.prisma.calculator.update({
+				where: { id: calculator.id },
+				data
+			});
 		}
 
-		return updated;
+		const updated = await this.prisma.calculator.findUniqueOrThrow({
+			where: { id: calculator.id }
+		});
+		if (nextConfig !== undefined) {
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.CALCULATOR,
+				calculator.id,
+				currentConfig.buttonImageUrl
+			);
+		}
+		return projectWidgetDraft(updated);
 	}
 
 	async deleteCalculator(userId: string, calculatorId: string) {
 		const calculator = await this.getByIdAndOwner(calculatorId, userId);
-		await this.fileService.deleteWidgetButtonImage(
-			toPlainObject(calculator.config).buttonImageUrl
+		const { deleted, imageUrls } = await this.prisma.$transaction(
+			async transaction => {
+				const deleted = await transaction.calculator.delete({
+					where: { id: calculator.id }
+				});
+				const revisions = await transaction.widgetConfigRevision.findMany({
+					where: {
+						widgetType: WidgetType.CALCULATOR,
+						widgetId: calculator.id
+					},
+					select: { config: true }
+				});
+				await transaction.widgetConfigRevision.deleteMany({
+					where: {
+						widgetType: WidgetType.CALCULATOR,
+						widgetId: calculator.id
+					}
+				});
+				await transaction.widgetRuntimeDailyMetric.deleteMany({
+					where: {
+						widgetType: WidgetType.CALCULATOR,
+						widgetId: calculator.id
+					}
+				});
+				await transaction.widgetRuntimePresence.deleteMany({
+					where: {
+						widgetType: WidgetType.CALCULATOR,
+						widgetId: calculator.id
+					}
+				});
+				return {
+					deleted,
+					imageUrls: this.collectButtonImageUrls([
+						deleted.config,
+						deleted.draftConfig,
+						...revisions.map(revision => revision.config)
+					])
+				};
+			}
 		);
-		return this.prisma.calculator.delete({ where: { id: calculator.id } });
+		await Promise.all(
+			imageUrls.map(url =>
+				this.fileService
+					.deleteWidgetButtonImage(url)
+					.catch(() => undefined)
+			)
+		);
+		return deleted;
 	}
 
 	async uploadButtonImage(
 		userId: string,
 		calculatorId: string,
-		file: Express.Multer.File | undefined
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number
 	) {
 		const calculator = await this.getByIdAndOwner(calculatorId, userId);
+		assertExpectedDraftRevision(calculator, expectedDraftRevision);
 		await this.assertCanUseButtonImage(userId);
 
-		const currentConfig = toPlainObject(calculator.config);
+		const currentConfig = toPlainObject(getWidgetDraftConfig(calculator));
 		let uploadedUrl = '';
+		let draftUpdated = false;
 
 		try {
 			const uploaded = await this.fileService.saveWidgetButtonImage(
@@ -553,17 +648,37 @@ export class CalculatorService {
 				...currentConfig,
 				buttonImageUrl: uploadedUrl
 			});
-			const updated = await this.prisma.calculator.update({
-				where: { id: calculator.id },
-				data: { config: config as unknown as Prisma.InputJsonValue }
+			const result = await this.prisma.calculator.updateMany({
+				where: {
+					id: calculator.id,
+					userId,
+					draftRevision: expectedDraftRevision
+				},
+				data: {
+					draftConfig: config as unknown as Prisma.InputJsonValue,
+					draftRevision: { increment: 1 }
+				}
 			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
+			}
+			draftUpdated = true;
 
-			await this.fileService
-				.deleteWidgetButtonImage(currentConfig.buttonImageUrl)
-				.catch(() => undefined);
-			return updated;
+			const updated = await this.prisma.calculator.findUniqueOrThrow({
+				where: { id: calculator.id }
+			});
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.CALCULATOR,
+				calculator.id,
+				currentConfig.buttonImageUrl
+			);
+			return projectWidgetDraft(updated);
 		} catch (error) {
-			if (uploadedUrl) {
+			if (uploadedUrl && !draftUpdated) {
 				await this.fileService
 					.deleteWidgetButtonImage(uploadedUrl)
 					.catch(() => undefined);
@@ -689,6 +804,9 @@ export class CalculatorService {
 			include: { user: { include: { subscription: true } } }
 		});
 		if (!calculator) return null;
+		if (!calculator.publishedAt || calculator.publishedVersion === 0) {
+			return { isActive: false };
+		}
 
 		const config = normalizeCalculatorConfig(calculator.config);
 		if (
@@ -780,6 +898,9 @@ export class CalculatorService {
 			}
 		});
 		if (!calculator) throw new NotFoundException('Калькулятор не найден');
+		if (!calculator.publishedAt || calculator.publishedVersion === 0) {
+			throw new ForbiddenException('Виджет ещё не опубликован');
+		}
 
 		if (!calculator.isActive) {
 			throw new ForbiddenException(
@@ -1147,18 +1268,17 @@ export class CalculatorService {
 		return patch;
 	}
 
-	private async deleteButtonImageIfRemoved(
-		currentConfig: Record<string, any>,
-		nextConfig: Record<string, any>
-	) {
-		if (
-			currentConfig.buttonImageUrl &&
-			currentConfig.buttonImageUrl !== nextConfig.buttonImageUrl
-		) {
-			await this.fileService.deleteWidgetButtonImage(
-				currentConfig.buttonImageUrl
-			);
-		}
+	private collectButtonImageUrls(configs: unknown[]) {
+		return [
+			...new Set(
+				configs
+					.map(config => toPlainObject(config).buttonImageUrl)
+					.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.length > 0
+					)
+			)
+		];
 	}
 
 	private escapeHtml(value: unknown) {

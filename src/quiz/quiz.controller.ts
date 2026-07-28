@@ -11,6 +11,7 @@ import {
 	Get,
 	HttpCode,
 	Param,
+	ParseIntPipe,
 	Patch,
 	Post,
 	Query,
@@ -68,9 +69,16 @@ export class QuizController {
 	async uploadButtonImage(
 		@CurrentUser('id') userId: string,
 		@Param('id') quizId: string,
+		@Body('expectedDraftRevision', ParseIntPipe)
+		expectedDraftRevision: number,
 		@UploadedFile() file?: Express.Multer.File
 	) {
-		return this.quizService.uploadButtonImage(userId, quizId, file);
+		return this.quizService.uploadButtonImage(
+			userId,
+			quizId,
+			file,
+			expectedDraftRevision
+		);
 	}
 
 	@HttpCode(200)

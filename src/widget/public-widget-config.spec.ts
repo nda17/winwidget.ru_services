@@ -65,7 +65,7 @@ function collectKeys(
 }
 
 describe('public widget config projections', () => {
-	const createCases = () => {
+	const createCases = (recordOverrides: Record<string, unknown> = {}) => {
 		const record = {
 			id: 'widget-id',
 			userId: 'user-id',
@@ -73,6 +73,8 @@ describe('public widget config projections', () => {
 			name: 'Widget',
 			isActive: true,
 			installDomain: null,
+			publishedAt: new Date('2026-07-27T12:00:00.000Z'),
+			publishedVersion: 1,
 			config: {
 				integrations: {
 					...SECRET_INTEGRATION_VALUES,
@@ -80,7 +82,8 @@ describe('public widget config projections', () => {
 					vkPixelId: '654321',
 					roistatEnabled: true
 				}
-			}
+			},
+			...recordOverrides
 		};
 		const prisma = {
 			widget: { findUnique: jest.fn().mockResolvedValue(record) },
@@ -220,6 +223,13 @@ describe('public widget config projections', () => {
 			Object.values(SECRET_INTEGRATION_VALUES).forEach(secret => {
 				expect(serializedConfig).not.toContain(secret);
 			});
+		}
+	);
+
+	it.each(createCases({ publishedAt: null, publishedVersion: 0 }))(
+		'$name stays inactive before its first publication',
+		async ({ load }) => {
+			await expect(load()).resolves.toEqual({ isActive: false });
 		}
 	);
 

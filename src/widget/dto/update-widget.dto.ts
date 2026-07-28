@@ -1,12 +1,19 @@
 import {
 	IsBoolean,
+	IsInt,
 	IsObject,
 	IsOptional,
 	IsString,
-	MaxLength
+	MaxLength,
+	Min
 } from 'class-validator';
 
 export class UpdateWidgetDto {
+	@IsOptional()
+	@IsInt()
+	@Min(0)
+	expectedDraftRevision?: number;
+
 	@IsOptional()
 	@IsString()
 	@MaxLength(50)

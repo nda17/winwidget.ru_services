@@ -65,34 +65,46 @@ model UserSession {
 }
 
 model Widget {
-  id            String   @id @default(cuid())
-  userId        String   @map("user_id")
-  publicKey     String   @unique @map("public_key")
-  name          String   @default("Виджет")
-  isActive      Boolean  @default(true) @map("is_active")
-  installDomain String   @default("") @map("install_domain")
-  config        Json     @default("{}")
-  leads         Lead[]
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  id                         String    @id @default(cuid())
+  userId                     String    @map("user_id")
+  publicKey                  String    @unique @map("public_key")
+  name                       String    @default("Виджет")
+  isActive                   Boolean   @default(true) @map("is_active")
+  installDomain              String    @default("") @map("install_domain")
+  config                     Json      @default("{}")
+  draftConfig                Json?     @map("draft_config")
+  draftInstallDomain         String?   @map("draft_install_domain")
+  draftRevision              Int       @default(0) @map("draft_revision")
+  publishedVersion           Int       @default(0) @map("published_version")
+  publishedFromDraftRevision Int       @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime? @map("published_at")
+  leads                      Lead[]
+  user                       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime  @default(now()) @map("created_at")
+  updatedAt                  DateTime  @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("widgets")
 }
 
 model Callback {
-  id            String         @id @default(cuid())
-  userId        String         @map("user_id")
-  publicKey     String         @unique @map("public_key")
-  name          String         @default("Обратный звонок")
-  isActive      Boolean        @default(true) @map("is_active")
-  installDomain String         @default("") @map("install_domain")
-  config        Json           @default("{}")
-  leads         CallbackLead[]
-  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
+  id                         String         @id @default(cuid())
+  userId                     String         @map("user_id")
+  publicKey                  String         @unique @map("public_key")
+  name                       String         @default("Обратный звонок")
+  isActive                   Boolean        @default(true) @map("is_active")
+  installDomain              String         @default("") @map("install_domain")
+  config                     Json           @default("{}")
+  draftConfig                Json?          @map("draft_config")
+  draftInstallDomain         String?        @map("draft_install_domain")
+  draftRevision              Int            @default(0) @map("draft_revision")
+  publishedVersion           Int            @default(0) @map("published_version")
+  publishedFromDraftRevision Int            @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime?      @map("published_at")
+  leads                      CallbackLead[]
+  user                       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime       @default(now()) @map("created_at")
+  updatedAt                  DateTime       @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("callbacks")
@@ -115,17 +127,23 @@ model CallbackLead {
 }
 
 model CountdownTimer {
-  id            String               @id @default(cuid())
-  userId        String               @map("user_id")
-  publicKey     String               @unique @map("public_key")
-  name          String               @default("Таймер")
-  isActive      Boolean              @default(true) @map("is_active")
-  installDomain String               @default("") @map("install_domain")
-  config        Json                 @default("{}")
-  leads         CountdownTimerLead[]
-  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt     DateTime             @default(now()) @map("created_at")
-  updatedAt     DateTime             @updatedAt @map("updated_at")
+  id                         String               @id @default(cuid())
+  userId                     String               @map("user_id")
+  publicKey                  String               @unique @map("public_key")
+  name                       String               @default("Таймер")
+  isActive                   Boolean              @default(true) @map("is_active")
+  installDomain              String               @default("") @map("install_domain")
+  config                     Json                 @default("{}")
+  draftConfig                Json?                @map("draft_config")
+  draftInstallDomain         String?              @map("draft_install_domain")
+  draftRevision              Int                  @default(0) @map("draft_revision")
+  publishedVersion           Int                  @default(0) @map("published_version")
+  publishedFromDraftRevision Int                  @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime?            @map("published_at")
+  leads                      CountdownTimerLead[]
+  user                       User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime             @default(now()) @map("created_at")
+  updatedAt                  DateTime             @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("countdown_timers")
@@ -150,17 +168,23 @@ model CountdownTimerLead {
 }
 
 model StopOffer {
-  id            String          @id @default(cuid())
-  userId        String          @map("user_id")
-  publicKey     String          @unique @map("public_key")
-  name          String          @default("Стоп-оффер")
-  isActive      Boolean         @default(true) @map("is_active")
-  installDomain String          @default("") @map("install_domain")
-  config        Json            @default("{}")
-  leads         StopOfferLead[]
-  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime        @updatedAt @map("updated_at")
+  id                         String          @id @default(cuid())
+  userId                     String          @map("user_id")
+  publicKey                  String          @unique @map("public_key")
+  name                       String          @default("Стоп-оффер")
+  isActive                   Boolean         @default(true) @map("is_active")
+  installDomain              String          @default("") @map("install_domain")
+  config                     Json            @default("{}")
+  draftConfig                Json?           @map("draft_config")
+  draftInstallDomain         String?         @map("draft_install_domain")
+  draftRevision              Int             @default(0) @map("draft_revision")
+  publishedVersion           Int             @default(0) @map("published_version")
+  publishedFromDraftRevision Int             @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime?       @map("published_at")
+  leads                      StopOfferLead[]
+  user                       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime        @default(now()) @map("created_at")
+  updatedAt                  DateTime        @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("stop_offers")
@@ -185,17 +209,23 @@ model StopOfferLead {
 }
 
 model OnlineConsultant {
-  id            String                 @id @default(cuid())
-  userId        String                 @map("user_id")
-  publicKey     String                 @unique @map("public_key")
-  name          String                 @default("Онлайн-консультант")
-  isActive      Boolean                @default(true) @map("is_active")
-  installDomain String                 @default("") @map("install_domain")
-  config        Json                   @default("{}")
-  leads         OnlineConsultantLead[]
-  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt     DateTime               @default(now()) @map("created_at")
-  updatedAt     DateTime               @updatedAt @map("updated_at")
+  id                         String                 @id @default(cuid())
+  userId                     String                 @map("user_id")
+  publicKey                  String                 @unique @map("public_key")
+  name                       String                 @default("Онлайн-консультант")
+  isActive                   Boolean                @default(true) @map("is_active")
+  installDomain              String                 @default("") @map("install_domain")
+  config                     Json                   @default("{}")
+  draftConfig                Json?                  @map("draft_config")
+  draftInstallDomain         String?                @map("draft_install_domain")
+  draftRevision              Int                    @default(0) @map("draft_revision")
+  publishedVersion           Int                    @default(0) @map("published_version")
+  publishedFromDraftRevision Int                    @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime?              @map("published_at")
+  leads                      OnlineConsultantLead[]
+  user                       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime               @default(now()) @map("created_at")
+  updatedAt                  DateTime               @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("online_consultants")
@@ -219,17 +249,23 @@ model OnlineConsultantLead {
 }
 
 model Calculator {
-  id            String           @id @default(cuid())
-  userId        String           @map("user_id")
-  publicKey     String           @unique @map("public_key")
-  name          String           @default("Калькулятор")
-  isActive      Boolean          @default(true) @map("is_active")
-  installDomain String           @default("") @map("install_domain")
-  config        Json             @default("{}")
-  leads         CalculatorLead[]
-  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt     DateTime         @default(now()) @map("created_at")
-  updatedAt     DateTime         @updatedAt @map("updated_at")
+  id                         String           @id @default(cuid())
+  userId                     String           @map("user_id")
+  publicKey                  String           @unique @map("public_key")
+  name                       String           @default("Калькулятор")
+  isActive                   Boolean          @default(true) @map("is_active")
+  installDomain              String           @default("") @map("install_domain")
+  config                     Json             @default("{}")
+  draftConfig                Json?            @map("draft_config")
+  draftInstallDomain         String?          @map("draft_install_domain")
+  draftRevision              Int              @default(0) @map("draft_revision")
+  publishedVersion           Int              @default(0) @map("published_version")
+  publishedFromDraftRevision Int              @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime?        @map("published_at")
+  leads                      CalculatorLead[]
+  user                       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime         @default(now()) @map("created_at")
+  updatedAt                  DateTime         @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("calculators")
@@ -255,17 +291,23 @@ model CalculatorLead {
 }
 
 model Quiz {
-  id            String     @id @default(cuid())
-  userId        String     @map("user_id")
-  publicKey     String     @unique @map("public_key")
-  name          String     @default("Квиз")
-  isActive      Boolean    @default(true) @map("is_active")
-  installDomain String     @default("") @map("install_domain")
-  config        Json       @default("{}")
-  leads         QuizLead[]
-  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
+  id                         String     @id @default(cuid())
+  userId                     String     @map("user_id")
+  publicKey                  String     @unique @map("public_key")
+  name                       String     @default("Квиз")
+  isActive                   Boolean    @default(true) @map("is_active")
+  installDomain              String     @default("") @map("install_domain")
+  config                     Json       @default("{}")
+  draftConfig                Json?      @map("draft_config")
+  draftInstallDomain         String?    @map("draft_install_domain")
+  draftRevision              Int        @default(0) @map("draft_revision")
+  publishedVersion           Int        @default(0) @map("published_version")
+  publishedFromDraftRevision Int        @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime?  @map("published_at")
+  leads                      QuizLead[]
+  user                       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt                  DateTime   @default(now()) @map("created_at")
+  updatedAt                  DateTime   @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("quizzes")
@@ -306,6 +348,53 @@ model Lead {
   @@index([widgetId])
   @@index([widgetId, ip])
   @@map("leads")
+}
+
+model WidgetConfigRevision {
+  id            String   @id @default(cuid())
+  widgetType    String   @map("widget_type")
+  widgetId      String   @map("widget_id")
+  version       Int
+  config        Json
+  installDomain String   @map("install_domain")
+  sourceVersion Int?     @map("source_version")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@unique([widgetType, widgetId, version])
+  @@index([widgetType, widgetId, createdAt])
+  @@map("widget_config_revisions")
+}
+
+model WidgetRuntimePresence {
+  id             String   @id @default(cuid())
+  widgetType     String   @map("widget_type")
+  widgetId       String   @map("widget_id")
+  installDomain  String   @map("install_domain")
+  runtimeVersion String   @map("runtime_version")
+  firstSeenAt    DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt     DateTime @default(now()) @map("last_seen_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([widgetType, widgetId])
+  @@index([lastSeenAt])
+  @@map("widget_runtime_presence")
+}
+
+model WidgetRuntimeDailyMetric {
+  id          String   @id @default(cuid())
+  widgetType  String   @map("widget_type")
+  widgetId    String   @map("widget_id")
+  date        DateTime @db.Date
+  impressions Int      @default(0)
+  opens       Int      @default(0)
+  starts      Int      @default(0)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([widgetType, widgetId, date])
+  @@index([widgetType, widgetId, date])
+  @@map("widget_runtime_daily_metrics")
 }
 
 model Subscription {

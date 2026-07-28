@@ -8,6 +8,7 @@ import { StopOfferModule } from '@/stop-offer/stop-offer.module';
 import { WidgetAdminController } from '@/widget-admin/widget-admin.controller';
 import { WidgetAdminService } from '@/widget-admin/widget-admin.service';
 import { WidgetModule } from '@/widget/widget.module';
+import { WidgetSettingsModule } from '@/widget-settings/widget-settings.module';
 import { Module } from '@nestjs/common';
 
 @Module({
@@ -19,7 +20,8 @@ import { Module } from '@nestjs/common';
 		CountdownTimerModule,
 		StopOfferModule,
 		OnlineConsultantModule,
-		CalculatorModule
+		CalculatorModule,
+		WidgetSettingsModule
 	],
 	controllers: [WidgetAdminController],
 	providers: [WidgetAdminService]

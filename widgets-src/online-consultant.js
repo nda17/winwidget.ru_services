@@ -29,6 +29,50 @@
 		return;
 	}
 
+	var RUNTIME_VERSION = '2026.07';
+	var telemetryEventsSent = Object.create(null);
+
+	function sendTelemetryEvent(eventName) {
+		if (
+			(eventName !== 'IMPRESSION' &&
+				eventName !== 'OPEN' &&
+				eventName !== 'START') ||
+			telemetryEventsSent[eventName]
+		) {
+			return;
+		}
+
+		if (eventName === 'OPEN') {
+			sendTelemetryEvent('IMPRESSION');
+		} else if (eventName === 'START') {
+			sendTelemetryEvent('IMPRESSION');
+			sendTelemetryEvent('OPEN');
+		}
+
+		telemetryEventsSent[eventName] = true;
+		try {
+			var request = fetch(
+				API_BASE +
+					'/widget-events/online-consultant/' +
+					encodeURIComponent(KEY),
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						event: eventName,
+						runtimeVersion: RUNTIME_VERSION
+					}),
+					keepalive: true,
+					credentials: 'omit',
+					referrerPolicy: 'no-referrer'
+				}
+			);
+			if (request && typeof request.catch === 'function') {
+				request.catch(function () {});
+			}
+		} catch (e) {}
+	}
+
 	function getWidgetAssetUrl(fileName) {
 		try {
 			var src = new URL(
@@ -280,6 +324,7 @@
 		isOpen = true;
 		overlay.classList.add('woc-overlay-open');
 		renderModal();
+		sendTelemetryEvent('OPEN');
 		firePixelEvent('woc_open');
 	}
 
@@ -330,6 +375,7 @@
 			btn.className = 'woc-action';
 			btn.textContent = safeText(action.label, 'Вопрос');
 			btn.addEventListener('click', function () {
+				sendTelemetryEvent('START');
 				selectedAction = action;
 				Array.prototype.forEach.call(
 					actionsWrap.querySelectorAll('.woc-action'),
@@ -370,6 +416,9 @@
 				actionLink.rel = 'noopener noreferrer';
 			}
 			actionLink.textContent = String(action.buttonText);
+			actionLink.addEventListener('click', function () {
+				sendTelemetryEvent('START');
+			});
 			answer.appendChild(actionLink);
 		}
 		if (isContactDisabled()) {
@@ -390,6 +439,7 @@
 
 	function handleSubmit(event) {
 		event.preventDefault();
+		sendTelemetryEvent('START');
 		if (!cfg || !selectedAction || isContactDisabled()) return;
 
 		var phone = phoneInput.value.trim();
@@ -489,6 +539,12 @@
 		if (event.target === overlay && !AUTO_OPEN) closeModal();
 	});
 	form.addEventListener('submit', handleSubmit);
+	phoneInput.addEventListener('input', function () {
+		sendTelemetryEvent('START');
+	});
+	emailInput.addEventListener('input', function () {
+		sendTelemetryEvent('START');
+	});
 
 	fetch(
 		API_BASE +
@@ -519,6 +575,7 @@
 
 			cfg = data;
 			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
+			sendTelemetryEvent('IMPRESSION');
 			setTheme();
 			applyPosition();
 			button.classList.toggle('woc-pulse', cfg.buttonPulse !== false);

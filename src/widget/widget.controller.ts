@@ -11,6 +11,7 @@ import {
 	Get,
 	HttpCode,
 	Param,
+	ParseIntPipe,
 	Patch,
 	Post,
 	Query,
@@ -87,9 +88,16 @@ export class WidgetController {
 	async uploadButtonImage(
 		@CurrentUser('id') userId: string,
 		@Param('id') widgetId: string,
+		@Body('expectedDraftRevision', ParseIntPipe)
+		expectedDraftRevision: number,
 		@UploadedFile() file?: Express.Multer.File
 	) {
-		return this.widgetService.uploadButtonImage(userId, widgetId, file);
+		return this.widgetService.uploadButtonImage(
+			userId,
+			widgetId,
+			file,
+			expectedDraftRevision
+		);
 	}
 
 	@HttpCode(200)

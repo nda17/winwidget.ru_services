@@ -12,13 +12,21 @@ import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
+import { cleanupUnreferencedWidgetButtonImage } from '@/widget-domain/widget-button-image-lifecycle';
+import {
+	assertExpectedDraftRevision,
+	getWidgetDraftConfig,
+	projectWidgetDraft,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
 import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { Plan, SubscriptionStatus } from '@prisma/client';
+import { Plan, Prisma, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
@@ -151,13 +159,19 @@ export class CountdownTimerService {
 			orderBy: { createdAt: 'desc' },
 			include: { _count: { select: { leads: true } } }
 		});
-		return { countdownTimers, subscription: sub };
+		return {
+			countdownTimers: countdownTimers.map(timer =>
+				projectWidgetDraft(timer)
+			),
+			subscription: sub
+		};
 	}
 
 	async createCountdownTimer(
 		userId: string,
 		dto: CreateCountdownTimerDto
 	) {
+		const config = createDefaultConfig();
 		return this.subscriptionService.createWidgetWithinLimit(
 			userId,
 			transaction =>
@@ -166,7 +180,10 @@ export class CountdownTimerService {
 						userId,
 						publicKey: this.generatePublicKey(),
 						name: dto.name || 'Таймер',
-						config: createDefaultConfig()
+						config,
+						draftConfig: config,
+						draftInstallDomain: '',
+						draftRevision: 1
 					}
 				})
 		);
@@ -178,7 +195,15 @@ export class CountdownTimerService {
 		dto: UpdateCountdownTimerDto
 	) {
 		const timer = await this.getByIdAndOwner(countdownTimerId, userId);
-		const currentConfig = timer.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(timer) as Record<
+			string,
+			any
+		>;
+		const hasDraftChanges =
+			dto.config !== undefined || dto.installDomain !== undefined;
+		if (hasDraftChanges) {
+			assertExpectedDraftRevision(timer, dto.expectedDraftRevision);
+		}
 		const configPatch =
 			dto.config !== undefined
 				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
@@ -201,43 +226,110 @@ export class CountdownTimerService {
 			);
 		}
 
-		const updated = await this.prisma.countdownTimer.update({
-			where: { id: timer.id },
-			data: {
-				...(dto.name !== undefined && { name: dto.name }),
-				...(dto.isActive !== undefined && { isActive: dto.isActive }),
-				...(dto.installDomain !== undefined && {
-					installDomain: normalizeInstallDomain(dto.installDomain)
-				}),
-				...(nextConfig !== undefined && { config: nextConfig })
+		const data: Prisma.CountdownTimerUpdateManyMutationInput = {
+			...(dto.name !== undefined && { name: dto.name }),
+			...(dto.isActive !== undefined && { isActive: dto.isActive }),
+			...(dto.installDomain !== undefined && {
+				draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+			}),
+			...(nextConfig !== undefined && { draftConfig: nextConfig }),
+			...(hasDraftChanges && { draftRevision: { increment: 1 } })
+		};
+		if (hasDraftChanges) {
+			const result = await this.prisma.countdownTimer.updateMany({
+				where: {
+					id: timer.id,
+					userId,
+					draftRevision: dto.expectedDraftRevision
+				},
+				data
+			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
 			}
-		});
-
-		if (nextConfig) {
-			await this.deleteButtonImageIfRemoved(currentConfig, nextConfig);
+		} else {
+			await this.prisma.countdownTimer.update({
+				where: { id: timer.id },
+				data
+			});
 		}
 
-		return updated;
+		const updated = await this.prisma.countdownTimer.findUniqueOrThrow({
+			where: { id: timer.id }
+		});
+		if (nextConfig !== undefined) {
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.TIMER,
+				timer.id,
+				currentConfig.buttonImageUrl
+			);
+		}
+		return projectWidgetDraft(updated);
 	}
 
 	async deleteCountdownTimer(userId: string, countdownTimerId: string) {
 		const timer = await this.getByIdAndOwner(countdownTimerId, userId);
-		await this.fileService.deleteWidgetButtonImage(
-			(timer.config as Record<string, any>).buttonImageUrl
+		const { deleted, imageUrls } = await this.prisma.$transaction(
+			async transaction => {
+				const deleted = await transaction.countdownTimer.delete({
+					where: { id: timer.id }
+				});
+				const revisions = await transaction.widgetConfigRevision.findMany({
+					where: {
+						widgetType: WidgetType.TIMER,
+						widgetId: timer.id
+					},
+					select: { config: true }
+				});
+				await transaction.widgetConfigRevision.deleteMany({
+					where: { widgetType: WidgetType.TIMER, widgetId: timer.id }
+				});
+				await transaction.widgetRuntimeDailyMetric.deleteMany({
+					where: { widgetType: WidgetType.TIMER, widgetId: timer.id }
+				});
+				await transaction.widgetRuntimePresence.deleteMany({
+					where: { widgetType: WidgetType.TIMER, widgetId: timer.id }
+				});
+				return {
+					deleted,
+					imageUrls: this.collectButtonImageUrls([
+						deleted.config,
+						deleted.draftConfig,
+						...revisions.map(revision => revision.config)
+					])
+				};
+			}
 		);
-		return this.prisma.countdownTimer.delete({ where: { id: timer.id } });
+		await Promise.all(
+			imageUrls.map(url =>
+				this.fileService
+					.deleteWidgetButtonImage(url)
+					.catch(() => undefined)
+			)
+		);
+		return deleted;
 	}
 
 	async uploadButtonImage(
 		userId: string,
 		countdownTimerId: string,
-		file: Express.Multer.File | undefined
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number
 	) {
 		const timer = await this.getByIdAndOwner(countdownTimerId, userId);
+		assertExpectedDraftRevision(timer, expectedDraftRevision);
 		await this.assertCanUseButtonImage(userId);
 
-		const currentConfig = timer.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(timer) as Record<
+			string,
+			any
+		>;
 		let uploadedUrl = '';
+		let draftUpdated = false;
 
 		try {
 			const uploadedFile = await this.fileService.saveWidgetButtonImage(
@@ -247,23 +339,40 @@ export class CountdownTimerService {
 			);
 			uploadedUrl = uploadedFile.url;
 
-			const updated = await this.prisma.countdownTimer.update({
-				where: { id: timer.id },
+			const result = await this.prisma.countdownTimer.updateMany({
+				where: {
+					id: timer.id,
+					userId,
+					draftRevision: expectedDraftRevision
+				},
 				data: {
-					config: normalizeCountdownTimerConfig({
+					draftConfig: normalizeCountdownTimerConfig({
 						...currentConfig,
 						buttonImageUrl: uploadedUrl
-					})
+					}),
+					draftRevision: { increment: 1 }
 				}
 			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
+			}
+			draftUpdated = true;
 
-			await this.fileService
-				.deleteWidgetButtonImage(currentConfig.buttonImageUrl)
-				.catch(() => undefined);
-
-			return updated;
+			const updated = await this.prisma.countdownTimer.findUniqueOrThrow({
+				where: { id: timer.id }
+			});
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.TIMER,
+				timer.id,
+				currentConfig.buttonImageUrl
+			);
+			return projectWidgetDraft(updated);
 		} catch (error) {
-			if (uploadedUrl) {
+			if (uploadedUrl && !draftUpdated) {
 				await this.fileService
 					.deleteWidgetButtonImage(uploadedUrl)
 					.catch(() => undefined);
@@ -365,6 +474,9 @@ export class CountdownTimerService {
 			include: { user: { include: { subscription: true } } }
 		});
 		if (!timer) return null;
+		if (!timer.publishedAt || timer.publishedVersion === 0) {
+			return { isActive: false };
+		}
 
 		const config = normalizeCountdownTimerConfig(timer.config);
 		if (
@@ -481,6 +593,9 @@ export class CountdownTimerService {
 			}
 		});
 		if (!timer) throw new NotFoundException('Таймер не найден');
+		if (!timer.publishedAt || timer.publishedVersion === 0) {
+			throw new ForbiddenException('Виджет ещё не опубликован');
+		}
 		if (!timer.isActive) {
 			throw new ForbiddenException(
 				'Лимит заявок исчерпан или подписка неактивна'
@@ -669,18 +784,21 @@ export class CountdownTimerService {
 		return nextPatch;
 	}
 
-	private async deleteButtonImageIfRemoved(
-		previousConfig: Record<string, any>,
-		nextConfig: Record<string, any>
-	) {
-		const previousUrl = previousConfig.buttonImageUrl;
-		const nextUrl = nextConfig.buttonImageUrl;
-
-		if (previousUrl && previousUrl !== nextUrl) {
-			await this.fileService
-				.deleteWidgetButtonImage(previousUrl)
-				.catch(() => undefined);
-		}
+	private collectButtonImageUrls(configs: unknown[]) {
+		return Array.from(
+			new Set(
+				configs
+					.map(config =>
+						config && typeof config === 'object' && !Array.isArray(config)
+							? (config as Record<string, unknown>).buttonImageUrl
+							: null
+					)
+					.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.trim().length > 0
+					)
+			)
+		);
 	}
 
 	private generatePublicKey(): string {

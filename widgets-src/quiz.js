@@ -26,6 +26,48 @@
 		(_currentScript && _currentScript.getAttribute('data-key')) || '';
 	if (!KEY) return;
 
+	var RUNTIME_VERSION = '2026.07';
+	var telemetryEventsSent = Object.create(null);
+
+	function sendTelemetryEvent(eventName) {
+		if (
+			(eventName !== 'IMPRESSION' &&
+				eventName !== 'OPEN' &&
+				eventName !== 'START') ||
+			telemetryEventsSent[eventName]
+		) {
+			return;
+		}
+
+		if (eventName === 'OPEN') {
+			sendTelemetryEvent('IMPRESSION');
+		} else if (eventName === 'START') {
+			sendTelemetryEvent('IMPRESSION');
+			sendTelemetryEvent('OPEN');
+		}
+
+		telemetryEventsSent[eventName] = true;
+		try {
+			var request = fetch(
+				API_BASE + '/widget-events/quiz/' + encodeURIComponent(KEY),
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						event: eventName,
+						runtimeVersion: RUNTIME_VERSION
+					}),
+					keepalive: true,
+					credentials: 'omit',
+					referrerPolicy: 'no-referrer'
+				}
+			);
+			if (request && typeof request.catch === 'function') {
+				request.catch(function () {});
+			}
+		} catch (e) {}
+	}
+
 	function getWidgetFetchOptions(options) {
 		var next = options || {};
 		if (window.winquizAutoOpen) next.referrerPolicy = 'unsafe-url';
@@ -603,6 +645,7 @@
 			quizBtn.style.pointerEvents = 'none';
 			quizBtn.style.transform = 'scale(0.8)';
 			stopBtnAnim();
+			sendTelemetryEvent('OPEN');
 			firePixel('wq_open');
 		}
 
@@ -662,6 +705,7 @@
 				.getElementById('wq-start')
 				.addEventListener('click', function () {
 					if (!questions.length) return;
+					sendTelemetryEvent('START');
 					showQuestion(0);
 				});
 		}
@@ -1083,6 +1127,8 @@
 			quizBtn.style.display = 'none';
 			return;
 		}
+
+		sendTelemetryEvent('IMPRESSION');
 
 		if (cfg.autoOpenDelay && !hasPlayed)
 			setTimeout(openWidget, cfg.autoOpenDelay * 1000);

@@ -11,6 +11,7 @@ import {
 	Get,
 	HttpCode,
 	Param,
+	ParseIntPipe,
 	Patch,
 	Post,
 	Query,
@@ -77,12 +78,15 @@ export class OnlineConsultantController {
 	async uploadButtonImage(
 		@CurrentUser('id') userId: string,
 		@Param('id') onlineConsultantId: string,
+		@Body('expectedDraftRevision', ParseIntPipe)
+		expectedDraftRevision: number,
 		@UploadedFile() file?: Express.Multer.File
 	) {
 		return this.onlineConsultantService.uploadButtonImage(
 			userId,
 			onlineConsultantId,
-			file
+			file,
+			expectedDraftRevision
 		);
 	}
 

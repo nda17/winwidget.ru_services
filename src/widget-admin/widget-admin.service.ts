@@ -16,6 +16,12 @@ import { UpdateAdminWidgetDto } from '@/widget-admin/dto/update-admin-widget.dto
 import { UpdateWidgetDto } from '@/widget/dto/update-widget.dto';
 import { WidgetService } from '@/widget/widget.service';
 import {
+	projectWidgetDraft,
+	WidgetLifecycleEntity,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
+import { WidgetSettingsService } from '@/widget-settings/widget-settings.service';
+import {
 	BadRequestException,
 	Injectable,
 	NotFoundException
@@ -26,16 +32,6 @@ import { Request } from 'express';
 import { isDeepStrictEqual } from 'node:util';
 
 const WIDGET_NAME_MAX_LENGTH = 50;
-
-export enum AdminWidgetType {
-	WHEEL = 'WHEEL',
-	QUIZ = 'QUIZ',
-	CALLBACK = 'CALLBACK',
-	TIMER = 'TIMER',
-	STOP_OFFER = 'STOP_OFFER',
-	ONLINE_CONSULTANT = 'ONLINE_CONSULTANT',
-	CALCULATOR = 'CALCULATOR'
-}
 
 export interface AdminWidgetOwner {
 	id: string;
@@ -55,7 +51,7 @@ export interface AdminWidgetEntity {
 }
 
 export interface AdminWidgetDeleteResponse {
-	type: AdminWidgetType;
+	type: WidgetType;
 	id: string;
 }
 
@@ -103,10 +99,11 @@ export class WidgetAdminService {
 		private readonly stopOfferService: StopOfferService,
 		private readonly onlineConsultantService: OnlineConsultantService,
 		private readonly calculatorService: CalculatorService,
+		private readonly widgetSettingsService: WidgetSettingsService,
 		private readonly adminEventLogService: AdminEventLogService
 	) {}
 
-	async getWidget(type: AdminWidgetType, widgetId: string) {
+	async getWidget(type: WidgetType, widgetId: string) {
 		const { entity, owner } = await this.getEntityAndOwner(type, widgetId);
 
 		return {
@@ -117,7 +114,7 @@ export class WidgetAdminService {
 	}
 
 	async updateWidget(
-		type: AdminWidgetType,
+		type: WidgetType,
 		widgetId: string,
 		dto: UpdateAdminWidgetDto,
 		adminId: string,
@@ -173,14 +170,87 @@ export class WidgetAdminService {
 		};
 	}
 
-	async uploadButtonImage(
-		type: AdminWidgetType,
+	async publishWidget(
+		type: WidgetType,
 		widgetId: string,
-		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number,
 		adminId: string,
 		request?: Request
 	) {
-		if (type === AdminWidgetType.STOP_OFFER) {
+		const { entity, owner } = await this.getEntityAndOwner(type, widgetId);
+		const published = await this.widgetSettingsService.publish(
+			type,
+			widgetId,
+			owner.id,
+			expectedDraftRevision
+		);
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'WIDGETS',
+			action: 'WIDGET_PUBLISH',
+			description: `Опубликован пользовательский виджет «${entity.name}»`,
+			entityType: 'widget',
+			entityId: widgetId,
+			entityLabel: entity.name,
+			targetUserId: owner.id,
+			metadata: {
+				type,
+				id: widgetId,
+				ownerId: owner.id,
+				publishedVersion: published.publishedVersion
+			},
+			request
+		});
+
+		return published;
+	}
+
+	async discardDraft(
+		type: WidgetType,
+		widgetId: string,
+		expectedDraftRevision: number,
+		adminId: string,
+		request?: Request
+	) {
+		const { entity, owner } = await this.getEntityAndOwner(type, widgetId);
+		const discarded = await this.widgetSettingsService.discardDraft(
+			type,
+			widgetId,
+			owner.id,
+			expectedDraftRevision
+		);
+
+		await this.adminEventLogService.record({
+			adminId,
+			section: 'WIDGETS',
+			action: 'WIDGET_DRAFT_DISCARD',
+			description: `Отменены черновые изменения пользовательского виджета «${entity.name}»`,
+			entityType: 'widget',
+			entityId: widgetId,
+			entityLabel: entity.name,
+			targetUserId: owner.id,
+			metadata: {
+				type,
+				id: widgetId,
+				ownerId: owner.id,
+				draftRevision: discarded.draftRevision
+			},
+			request
+		});
+
+		return discarded;
+	}
+
+	async uploadButtonImage(
+		type: WidgetType,
+		widgetId: string,
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number,
+		adminId: string,
+		request?: Request
+	) {
+		if (type === WidgetType.STOP_OFFER) {
 			throw new BadRequestException(
 				'Загрузка изображения кнопки для стоп-оффера не поддерживается'
 			);
@@ -191,7 +261,8 @@ export class WidgetAdminService {
 			type,
 			owner.id,
 			widgetId,
-			file
+			file,
+			expectedDraftRevision
 		);
 
 		await this.adminEventLogService.record({
@@ -219,7 +290,7 @@ export class WidgetAdminService {
 	}
 
 	async deleteWidget(
-		type: AdminWidgetType,
+		type: WidgetType,
 		widgetId: string,
 		adminId: string,
 		request?: Request
@@ -252,7 +323,7 @@ export class WidgetAdminService {
 	}
 
 	private async getEntityAndOwner(
-		type: AdminWidgetType,
+		type: WidgetType,
 		widgetId: string
 	): Promise<{
 		entity: AdminWidgetEntity;
@@ -274,7 +345,9 @@ export class WidgetAdminService {
 		}
 
 		return {
-			entity,
+			entity: projectWidgetDraft(
+				entity as unknown as WidgetLifecycleEntity
+			) as unknown as AdminWidgetEntity,
 			ownerStatus: user.status,
 			owner: {
 				id: user.id,
@@ -292,7 +365,7 @@ export class WidgetAdminService {
 	}
 
 	private async findWidgetWithOwner(
-		type: AdminWidgetType,
+		type: WidgetType,
 		widgetId: string
 	): Promise<AdminWidgetEntityWithUser | null> {
 		const args = {
@@ -305,67 +378,67 @@ export class WidgetAdminService {
 		};
 
 		switch (type) {
-			case AdminWidgetType.WHEEL:
+			case WidgetType.WHEEL:
 				return this.prisma.widget.findUnique(args);
-			case AdminWidgetType.QUIZ:
+			case WidgetType.QUIZ:
 				return this.prisma.quiz.findUnique(args);
-			case AdminWidgetType.CALLBACK:
+			case WidgetType.CALLBACK:
 				return this.prisma.callback.findUnique(args);
-			case AdminWidgetType.TIMER:
+			case WidgetType.TIMER:
 				return this.prisma.countdownTimer.findUnique(args);
-			case AdminWidgetType.STOP_OFFER:
+			case WidgetType.STOP_OFFER:
 				return this.prisma.stopOffer.findUnique(args);
-			case AdminWidgetType.ONLINE_CONSULTANT:
+			case WidgetType.ONLINE_CONSULTANT:
 				return this.prisma.onlineConsultant.findUnique(args);
-			case AdminWidgetType.CALCULATOR:
+			case WidgetType.CALCULATOR:
 				return this.prisma.calculator.findUnique(args);
 		}
 	}
 
 	private dispatchUpdate(
-		type: AdminWidgetType,
+		type: WidgetType,
 		ownerId: string,
 		widgetId: string,
 		dto: UpdateAdminWidgetDto
 	): Promise<AdminWidgetEntity> {
 		switch (type) {
-			case AdminWidgetType.WHEEL:
+			case WidgetType.WHEEL:
 				return this.widgetService.updateWidget(
 					ownerId,
 					widgetId,
 					dto as UpdateWidgetDto
 				);
-			case AdminWidgetType.QUIZ:
+			case WidgetType.QUIZ:
 				return this.quizService.updateQuiz(
 					ownerId,
 					widgetId,
 					dto as UpdateQuizDto
 				);
-			case AdminWidgetType.CALLBACK:
+			case WidgetType.CALLBACK:
 				return this.callbackService.updateCallback(
 					ownerId,
 					widgetId,
 					dto as UpdateCallbackDto
 				);
-			case AdminWidgetType.TIMER:
+			case WidgetType.TIMER:
 				return this.countdownTimerService.updateCountdownTimer(
 					ownerId,
 					widgetId,
 					dto as UpdateCountdownTimerDto
 				);
-			case AdminWidgetType.STOP_OFFER:
+			case WidgetType.STOP_OFFER:
 				return this.stopOfferService.updateStopOffer(
 					ownerId,
 					widgetId,
 					dto as UpdateStopOfferDto
 				);
-			case AdminWidgetType.ONLINE_CONSULTANT:
+			case WidgetType.ONLINE_CONSULTANT:
 				return this.onlineConsultantService.updateOnlineConsultant(
 					ownerId,
 					widgetId,
 					dto as UpdateOnlineConsultantDto
 				);
-			case AdminWidgetType.CALCULATOR:
+			case WidgetType.CALCULATOR:
 				return this.calculatorService.updateCalculator(
 					ownerId,
 					widgetId,
@@ -375,79 +448,90 @@ export class WidgetAdminService {
 	}
 
 	private async dispatchDelete(
-		type: AdminWidgetType,
+		type: WidgetType,
 		ownerId: string,
 		widgetId: string
 	): Promise<void> {
 		switch (type) {
-			case AdminWidgetType.WHEEL:
+			case WidgetType.WHEEL:
 				await this.widgetService.deleteWidget(ownerId, widgetId);
 				return;
-			case AdminWidgetType.QUIZ:
+			case WidgetType.QUIZ:
 				await this.quizService.deleteQuiz(ownerId, widgetId);
 				return;
-			case AdminWidgetType.CALLBACK:
+			case WidgetType.CALLBACK:
 				await this.callbackService.deleteCallback(ownerId, widgetId);
 				return;
-			case AdminWidgetType.TIMER:
+			case WidgetType.TIMER:
 				await this.countdownTimerService.deleteCountdownTimer(
 					ownerId,
 					widgetId
 				);
 				return;
-			case AdminWidgetType.STOP_OFFER:
+			case WidgetType.STOP_OFFER:
 				await this.stopOfferService.deleteStopOffer(ownerId, widgetId);
 				return;
-			case AdminWidgetType.ONLINE_CONSULTANT:
+			case WidgetType.ONLINE_CONSULTANT:
 				await this.onlineConsultantService.deleteOnlineConsultant(
 					ownerId,
 					widgetId
 				);
 				return;
-			case AdminWidgetType.CALCULATOR:
+			case WidgetType.CALCULATOR:
 				await this.calculatorService.deleteCalculator(ownerId, widgetId);
 				return;
 		}
 	}
 
 	private dispatchButtonImageUpload(
-		type: Exclude<AdminWidgetType, AdminWidgetType.STOP_OFFER>,
+		type: Exclude<WidgetType, WidgetType.STOP_OFFER>,
 		ownerId: string,
 		widgetId: string,
-		file: Express.Multer.File | undefined
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number
 	): Promise<AdminWidgetEntity> {
 		switch (type) {
-			case AdminWidgetType.WHEEL:
+			case WidgetType.WHEEL:
 				return this.widgetService.uploadButtonImage(
 					ownerId,
 					widgetId,
-					file
+					file,
+					expectedDraftRevision
 				);
-			case AdminWidgetType.QUIZ:
-				return this.quizService.uploadButtonImage(ownerId, widgetId, file);
-			case AdminWidgetType.CALLBACK:
+			case WidgetType.QUIZ:
+				return this.quizService.uploadButtonImage(
+					ownerId,
+					widgetId,
+					file,
+					expectedDraftRevision
+				);
+			case WidgetType.CALLBACK:
 				return this.callbackService.uploadButtonImage(
 					ownerId,
 					widgetId,
-					file
+					file,
+					expectedDraftRevision
 				);
-			case AdminWidgetType.TIMER:
+			case WidgetType.TIMER:
 				return this.countdownTimerService.uploadButtonImage(
 					ownerId,
 					widgetId,
-					file
+					file,
+					expectedDraftRevision
 				);
-			case AdminWidgetType.ONLINE_CONSULTANT:
+			case WidgetType.ONLINE_CONSULTANT:
 				return this.onlineConsultantService.uploadButtonImage(
 					ownerId,
 					widgetId,
-					file
+					file,
+					expectedDraftRevision
 				);
-			case AdminWidgetType.CALCULATOR:
+			case WidgetType.CALCULATOR:
 				return this.calculatorService.uploadButtonImage(
 					ownerId,
 					widgetId,
-					file
+					file,
+					expectedDraftRevision
 				);
 		}
 	}
@@ -478,21 +562,21 @@ export class WidgetAdminService {
 		return isDeepStrictEqual(first, second);
 	}
 
-	private getNotFoundMessage(type: AdminWidgetType) {
+	private getNotFoundMessage(type: WidgetType) {
 		switch (type) {
-			case AdminWidgetType.WHEEL:
+			case WidgetType.WHEEL:
 				return 'Колесо фортуны не найдено';
-			case AdminWidgetType.QUIZ:
+			case WidgetType.QUIZ:
 				return 'Квиз не найден';
-			case AdminWidgetType.CALLBACK:
+			case WidgetType.CALLBACK:
 				return 'Виджет обратного звонка не найден';
-			case AdminWidgetType.TIMER:
+			case WidgetType.TIMER:
 				return 'Таймер не найден';
-			case AdminWidgetType.STOP_OFFER:
+			case WidgetType.STOP_OFFER:
 				return 'Стоп-оффер не найден';
-			case AdminWidgetType.ONLINE_CONSULTANT:
+			case WidgetType.ONLINE_CONSULTANT:
 				return 'Онлайн-консультант не найден';
-			case AdminWidgetType.CALCULATOR:
+			case WidgetType.CALCULATOR:
 				return 'Калькулятор не найден';
 		}
 	}

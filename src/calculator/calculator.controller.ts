@@ -11,6 +11,7 @@ import {
 	Get,
 	HttpCode,
 	Param,
+	ParseIntPipe,
 	Patch,
 	Post,
 	Query,
@@ -72,12 +73,15 @@ export class CalculatorController {
 	uploadButtonImage(
 		@CurrentUser('id') userId: string,
 		@Param('id') calculatorId: string,
+		@Body('expectedDraftRevision', ParseIntPipe)
+		expectedDraftRevision: number,
 		@UploadedFile() file?: Express.Multer.File
 	) {
 		return this.calculatorService.uploadButtonImage(
 			userId,
 			calculatorId,
-			file
+			file,
+			expectedDraftRevision
 		);
 	}
 

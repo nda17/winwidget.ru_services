@@ -2,10 +2,9 @@ import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '@/file/file.service';
 import { UpdateAdminWidgetDto } from '@/widget-admin/dto/update-admin-widget.dto';
-import {
-	AdminWidgetType,
-	WidgetAdminService
-} from '@/widget-admin/widget-admin.service';
+import { WidgetAdminService } from '@/widget-admin/widget-admin.service';
+import { WidgetType } from '@/widget-domain/widget-lifecycle';
+import { ExpectedDraftRevisionDto } from '@/widget-settings/dto/widget-settings.dto';
 import {
 	BadRequestException,
 	Body,
@@ -15,6 +14,7 @@ import {
 	HttpCode,
 	Param,
 	ParseEnumPipe,
+	ParseIntPipe,
 	Patch,
 	Post,
 	Req,
@@ -27,7 +27,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/client';
 import { Request } from 'express';
 
-const adminWidgetTypePipe = new ParseEnumPipe(AdminWidgetType, {
+const adminWidgetTypePipe = new ParseEnumPipe(WidgetType, {
 	exceptionFactory: () =>
 		new BadRequestException('Некорректный тип виджета')
 });
@@ -40,7 +40,7 @@ export class WidgetAdminController {
 	@Get(':type/:id')
 	@HttpCode(200)
 	getWidget(
-		@Param('type', adminWidgetTypePipe) type: AdminWidgetType,
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
 		@Param('id') widgetId: string
 	) {
 		return this.widgetAdminService.getWidget(type, widgetId);
@@ -50,7 +50,7 @@ export class WidgetAdminController {
 	@HttpCode(200)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	updateWidget(
-		@Param('type', adminWidgetTypePipe) type: AdminWidgetType,
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
 		@Param('id') widgetId: string,
 		@Body() dto: UpdateAdminWidgetDto,
 		@CurrentUser('id') adminId: string,
@@ -69,7 +69,7 @@ export class WidgetAdminController {
 	@Auth([Role.ADMIN, Role.DEV])
 	@HttpCode(200)
 	deleteWidget(
-		@Param('type', adminWidgetTypePipe) type: AdminWidgetType,
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
 		@Param('id') widgetId: string,
 		@CurrentUser('id') adminId: string,
 		@Req() request: Request
@@ -77,6 +77,44 @@ export class WidgetAdminController {
 		return this.widgetAdminService.deleteWidget(
 			type,
 			widgetId,
+			adminId,
+			request
+		);
+	}
+
+	@Post(':type/:id/publish')
+	@HttpCode(200)
+	@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+	publishWidget(
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
+		@Param('id') widgetId: string,
+		@Body() dto: ExpectedDraftRevisionDto,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		return this.widgetAdminService.publishWidget(
+			type,
+			widgetId,
+			dto.expectedDraftRevision,
+			adminId,
+			request
+		);
+	}
+
+	@Post(':type/:id/discard-draft')
+	@HttpCode(200)
+	@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+	discardDraft(
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
+		@Param('id') widgetId: string,
+		@Body() dto: ExpectedDraftRevisionDto,
+		@CurrentUser('id') adminId: string,
+		@Req() request: Request
+	) {
+		return this.widgetAdminService.discardDraft(
+			type,
+			widgetId,
+			dto.expectedDraftRevision,
 			adminId,
 			request
 		);
@@ -90,8 +128,10 @@ export class WidgetAdminController {
 		})
 	)
 	uploadButtonImage(
-		@Param('type', adminWidgetTypePipe) type: AdminWidgetType,
+		@Param('type', adminWidgetTypePipe) type: WidgetType,
 		@Param('id') widgetId: string,
+		@Body('expectedDraftRevision', ParseIntPipe)
+		expectedDraftRevision: number,
 		@UploadedFile() file: Express.Multer.File | undefined,
 		@CurrentUser('id') adminId: string,
 		@Req() request: Request
@@ -100,6 +140,7 @@ export class WidgetAdminController {
 			type,
 			widgetId,
 			file,
+			expectedDraftRevision,
 			adminId,
 			request
 		);

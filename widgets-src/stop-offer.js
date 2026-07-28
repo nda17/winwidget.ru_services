@@ -29,6 +29,48 @@
 		return;
 	}
 
+	var RUNTIME_VERSION = '2026.07';
+	var telemetryEventsSent = Object.create(null);
+
+	function sendTelemetryEvent(eventName) {
+		if (
+			(eventName !== 'IMPRESSION' &&
+				eventName !== 'OPEN' &&
+				eventName !== 'START') ||
+			telemetryEventsSent[eventName]
+		) {
+			return;
+		}
+
+		if (eventName === 'OPEN') {
+			sendTelemetryEvent('IMPRESSION');
+		} else if (eventName === 'START') {
+			sendTelemetryEvent('IMPRESSION');
+			sendTelemetryEvent('OPEN');
+		}
+
+		telemetryEventsSent[eventName] = true;
+		try {
+			var request = fetch(
+				API_BASE + '/widget-events/stop-offer/' + encodeURIComponent(KEY),
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						event: eventName,
+						runtimeVersion: RUNTIME_VERSION
+					}),
+					keepalive: true,
+					credentials: 'omit',
+					referrerPolicy: 'no-referrer'
+				}
+			);
+			if (request && typeof request.catch === 'function') {
+				request.catch(function () {});
+			}
+		} catch (e) {}
+	}
+
 	function getWidgetAssetUrl(fileName) {
 		try {
 			var src = new URL(
@@ -402,6 +444,7 @@
 		}
 		link.textContent = cfg.actionButtonText || 'Перейти к акции';
 		link.onclick = function () {
+			sendTelemetryEvent('START');
 			fireEvent('action');
 		};
 		return link;
@@ -529,6 +572,7 @@
 				});
 			}
 			phoneInput.addEventListener('input', function () {
+				sendTelemetryEvent('START');
 				phoneInput.classList.remove('wso-input-error');
 			});
 			form.appendChild(phoneInput);
@@ -536,6 +580,7 @@
 		if (cfg.dataType === 'EMAIL' || cfg.dataType === 'PHONE_AND_EMAIL') {
 			emailInput = makeInput('email', 'Email');
 			emailInput.addEventListener('input', function () {
+				sendTelemetryEvent('START');
 				emailInput.classList.remove('wso-input-error');
 			});
 			form.appendChild(emailInput);
@@ -585,6 +630,7 @@
 		}
 		var isSubmitting = false;
 		submit.onclick = function () {
+			sendTelemetryEvent('START');
 			if (isSubmitting) return;
 			var phone = '';
 			var email = '';
@@ -702,6 +748,7 @@
 				modal.style.opacity = '1';
 			});
 		});
+		sendTelemetryEvent('OPEN');
 		fireEvent('open');
 	}
 
@@ -937,6 +984,9 @@
 				}
 				cfg = data;
 				hasTriggered = false;
+				if (!shouldSkipBySeenState() && !shouldSkipBySubmittedState()) {
+					sendTelemetryEvent('IMPRESSION');
+				}
 				setupTriggers();
 				if (isOpen) {
 					buildIntro();

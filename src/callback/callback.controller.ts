@@ -11,6 +11,7 @@ import {
 	Get,
 	HttpCode,
 	Param,
+	ParseIntPipe,
 	Patch,
 	Post,
 	Query,
@@ -68,12 +69,15 @@ export class CallbackController {
 	async uploadButtonImage(
 		@CurrentUser('id') userId: string,
 		@Param('id') callbackId: string,
+		@Body('expectedDraftRevision', ParseIntPipe)
+		expectedDraftRevision: number,
 		@UploadedFile() file?: Express.Multer.File
 	) {
 		return this.callbackService.uploadButtonImage(
 			userId,
 			callbackId,
-			file
+			file,
+			expectedDraftRevision
 		);
 	}
 

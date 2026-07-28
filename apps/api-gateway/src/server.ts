@@ -37,7 +37,8 @@ const PUBLIC_WIDGET_API_PREFIXES = [
 	'/api/v1/countdown-timer',
 	'/api/v1/stop-offer',
 	'/api/v1/online-consultant',
-	'/api/v1/calculator'
+	'/api/v1/calculator',
+	'/api/v1/widget-events'
 ] as const;
 const BASE_HOP_BY_HOP_HEADERS = new Set([
 	'connection',
@@ -64,6 +65,167 @@ interface JsonErrorBody {
 	code: string;
 	requestId: string;
 	correlationId: string;
+}
+
+interface WidgetEventRateLimitEntry {
+	count: number;
+	expiresAt: number;
+}
+
+interface WidgetEventRateLimiterOptions {
+	now?: () => number;
+	windowMs?: number;
+	perSourceLimit?: number;
+	perSourceWidgetLimit?: number;
+	perWidgetLimit?: number;
+	maxEntries?: number;
+}
+
+interface WidgetEventRateLimitResult {
+	allowed: boolean;
+	retryAfterSeconds: number;
+}
+
+const WIDGET_EVENT_PATH_PATTERN =
+	/^\/api\/v1\/widget-events\/([^/]{1,64})\/([^/]{1,128})\/?$/i;
+
+const normalizeWidgetEventType = (value: string): string | null => {
+	const normalized = value.trim().toLowerCase();
+	switch (normalized) {
+		case 'wheel':
+		case 'quiz':
+		case 'callback':
+		case 'stop-offer':
+		case 'online-consultant':
+		case 'calculator':
+			return normalized;
+		case 'timer':
+		case 'countdown-timer':
+			return 'timer';
+		default:
+			return null;
+	}
+};
+
+export class WidgetEventRateLimiter {
+	private readonly entries = new Map<string, WidgetEventRateLimitEntry>();
+	private readonly now: () => number;
+	private readonly windowMs: number;
+	private readonly perSourceLimit: number;
+	private readonly perSourceWidgetLimit: number;
+	private readonly perWidgetLimit: number;
+	private readonly maxEntries: number;
+	private operations = 0;
+
+	constructor(options: WidgetEventRateLimiterOptions = {}) {
+		this.now = options.now ?? Date.now;
+		this.windowMs = options.windowMs ?? 60_000;
+		this.perSourceLimit = options.perSourceLimit ?? 3_000;
+		this.perSourceWidgetLimit = options.perSourceWidgetLimit ?? 180;
+		this.perWidgetLimit = options.perWidgetLimit ?? 3_000;
+		this.maxEntries = Math.max(2, options.maxEntries ?? 50_000);
+	}
+
+	consume(
+		pathname: string,
+		clientIp: string
+	): WidgetEventRateLimitResult | null {
+		const match = WIDGET_EVENT_PATH_PATTERN.exec(pathname);
+		if (!match) return null;
+
+		const now = this.now();
+		this.operations += 1;
+		if (this.operations % 512 === 0) this.cleanup(now);
+
+		const sourceKey = `source:${clientIp}`;
+		const sourceResult = this.consumeKey(
+			sourceKey,
+			this.perSourceLimit,
+			now
+		);
+		if (!sourceResult.allowed) return sourceResult;
+
+		const widgetType = normalizeWidgetEventType(match[1]);
+		if (!widgetType) return sourceResult;
+
+		const widgetKey = `${widgetType}:${match[2]}`;
+		const sourceWidgetResult = this.consumeKey(
+			`source-widget:${clientIp}:${widgetKey}`,
+			this.perSourceWidgetLimit,
+			now,
+			sourceKey
+		);
+		if (!sourceWidgetResult.allowed) return sourceWidgetResult;
+
+		return this.consumeKey(
+			`widget:${widgetKey}`,
+			this.perWidgetLimit,
+			now,
+			sourceKey
+		);
+	}
+
+	private consumeKey(
+		key: string,
+		limit: number,
+		now: number,
+		protectedKey?: string
+	): WidgetEventRateLimitResult {
+		const current = this.entries.get(key);
+		if (!current || current.expiresAt <= now) {
+			if (current) this.entries.delete(key);
+			this.ensureCapacity(now, protectedKey);
+			this.entries.set(key, {
+				count: 1,
+				expiresAt: now + this.windowMs
+			});
+			return {
+				allowed: true,
+				retryAfterSeconds: Math.ceil(this.windowMs / 1000)
+			};
+		}
+
+		const retryAfterSeconds = Math.max(
+			1,
+			Math.ceil((current.expiresAt - now) / 1000)
+		);
+		this.entries.delete(key);
+		this.entries.set(key, current);
+		if (current.count >= limit) {
+			return { allowed: false, retryAfterSeconds };
+		}
+
+		current.count += 1;
+		return { allowed: true, retryAfterSeconds };
+	}
+
+	private ensureCapacity(now: number, protectedKey?: string) {
+		if (this.entries.size < this.maxEntries) return;
+		this.cleanup(now);
+
+		while (this.entries.size >= this.maxEntries) {
+			let fallbackKey: string | undefined;
+			let evictionKey: string | undefined;
+			for (const key of this.entries.keys()) {
+				if (key === protectedKey) continue;
+				fallbackKey ??= key;
+				if (key.startsWith('widget:')) {
+					evictionKey = key;
+					break;
+				}
+			}
+
+			const key = evictionKey ?? fallbackKey;
+			if (!key) return;
+			this.entries.delete(key);
+		}
+	}
+
+	private cleanup(now: number) {
+		for (const [key, entry] of this.entries) {
+			if (entry.expiresAt <= now) this.entries.delete(key);
+		}
+	}
 }
 
 export interface GatewayRuntime {
@@ -421,6 +583,9 @@ export const createGateway = (
 	const httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 256 });
 	const httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 256 });
 	const activeProxyRequests = new Set<ReturnType<typeof httpRequest>>();
+	const widgetEventRateLimiter = new WidgetEventRateLimiter({
+		now: options.now
+	});
 
 	const server = createServer((request, response) => {
 		const { requestId, correlationId } = createRequestContext();
@@ -544,6 +709,36 @@ export const createGateway = (
 				return;
 			}
 			routeId = route.id;
+
+			if (request.method === 'POST') {
+				const rateLimit = widgetEventRateLimiter.consume(
+					target.routingPathname,
+					resolveClientIp(request.socket.remoteAddress, request.headers)
+				);
+				if (rateLimit && !rateLimit.allowed) {
+					log.log('warn', 'widget_event_rate_limited', {
+						requestId,
+						correlationId,
+						routeId,
+						path: target.pathname
+					});
+					sendError(
+						request,
+						response,
+						429,
+						'Too Many Requests',
+						'Widget event rate limit exceeded',
+						'widget_event_rate_limited',
+						requestId,
+						correlationId,
+						{
+							...corsHeaders,
+							'retry-after': String(rateLimit.retryAfterSeconds)
+						}
+					);
+					return;
+				}
+			}
 
 			let bearerToken: string | undefined;
 			try {

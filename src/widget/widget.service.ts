@@ -12,8 +12,16 @@ import {
 	isWidgetDomainAllowed,
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
+import { cleanupUnreferencedWidgetButtonImage } from '@/widget-domain/widget-button-image-lifecycle';
+import {
+	assertExpectedDraftRevision,
+	getWidgetDraftConfig,
+	projectWidgetDraft,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
 import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
@@ -220,15 +228,6 @@ const normalizeWheelConfig = (rawConfig: unknown) => {
 	};
 };
 
-type AdminWidgetType =
-	| 'WHEEL'
-	| 'QUIZ'
-	| 'CALLBACK'
-	| 'TIMER'
-	| 'STOP_OFFER'
-	| 'ONLINE_CONSULTANT'
-	| 'CALCULATOR';
-
 interface AdminWidgetMonitoringFilters {
 	type?: string;
 	isActive?: string;
@@ -237,7 +236,7 @@ interface AdminWidgetMonitoringFilters {
 }
 
 interface AdminWidgetMonitoringRow {
-	widget_type: AdminWidgetType;
+	widget_type: WidgetType;
 	id: string;
 	name: string;
 	public_key: string;
@@ -274,7 +273,10 @@ export class WidgetService {
 			}
 		});
 
-		return { widgets, subscription: sub };
+		return {
+			widgets: widgets.map(widget => projectWidgetDraft(widget)),
+			subscription: sub
+		};
 	}
 
 	async getAdminWidgetMonitoring(
@@ -327,7 +329,10 @@ export class WidgetService {
 						userId,
 						publicKey,
 						name: dto.name || 'Виджет',
-						config: DEFAULT_CONFIG
+						config: DEFAULT_CONFIG,
+						draftConfig: DEFAULT_CONFIG,
+						draftInstallDomain: '',
+						draftRevision: 1
 					}
 				})
 		);
@@ -339,7 +344,15 @@ export class WidgetService {
 		dto: UpdateWidgetDto
 	) {
 		const widget = await this.getWidgetByIdAndOwner(widgetId, userId);
-		const currentConfig = widget.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(widget) as Record<
+			string,
+			any
+		>;
+		const hasDraftChanges =
+			dto.config !== undefined || dto.installDomain !== undefined;
+		if (hasDraftChanges) {
+			assertExpectedDraftRevision(widget, dto.expectedDraftRevision);
+		}
 		const configPatch =
 			dto.config !== undefined
 				? this.prepareButtonImageConfigPatch(currentConfig, dto.config)
@@ -362,43 +375,119 @@ export class WidgetService {
 			);
 		}
 
-		const updated = await this.prisma.widget.update({
-			where: { id: widget.id },
-			data: {
-				...(dto.name !== undefined && { name: dto.name }),
-				...(dto.isActive !== undefined && { isActive: dto.isActive }),
-				...(dto.installDomain !== undefined && {
-					installDomain: normalizeInstallDomain(dto.installDomain)
-				}),
-				...(nextConfig !== undefined && { config: nextConfig })
+		const data: Prisma.WidgetUpdateManyMutationInput = {
+			...(dto.name !== undefined && { name: dto.name }),
+			...(dto.isActive !== undefined && { isActive: dto.isActive }),
+			...(dto.installDomain !== undefined && {
+				draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+			}),
+			...(nextConfig !== undefined && { draftConfig: nextConfig }),
+			...(hasDraftChanges && { draftRevision: { increment: 1 } })
+		};
+		if (hasDraftChanges) {
+			const result = await this.prisma.widget.updateMany({
+				where: {
+					id: widget.id,
+					userId,
+					draftRevision: dto.expectedDraftRevision
+				},
+				data
+			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
 			}
-		});
-
-		if (nextConfig) {
-			await this.deleteButtonImageIfRemoved(currentConfig, nextConfig);
+		} else {
+			await this.prisma.widget.update({
+				where: { id: widget.id },
+				data
+			});
 		}
 
-		return updated;
+		const updated = await this.prisma.widget.findUniqueOrThrow({
+			where: { id: widget.id }
+		});
+		if (nextConfig !== undefined) {
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.WHEEL,
+				widget.id,
+				currentConfig.buttonImageUrl
+			);
+		}
+		return projectWidgetDraft(updated);
 	}
 
 	async deleteWidget(userId: string, widgetId: string) {
 		const widget = await this.getWidgetByIdAndOwner(widgetId, userId);
-		await this.fileService.deleteWidgetButtonImage(
-			(widget.config as Record<string, any>).buttonImageUrl
+		const { deleted, imageUrls } = await this.prisma.$transaction(
+			async transaction => {
+				const deleted = await transaction.widget.delete({
+					where: { id: widget.id }
+				});
+				const revisions = await transaction.widgetConfigRevision.findMany({
+					where: {
+						widgetType: WidgetType.WHEEL,
+						widgetId: widget.id
+					},
+					select: { config: true }
+				});
+				await transaction.widgetConfigRevision.deleteMany({
+					where: {
+						widgetType: WidgetType.WHEEL,
+						widgetId: widget.id
+					}
+				});
+				await transaction.widgetRuntimeDailyMetric.deleteMany({
+					where: {
+						widgetType: WidgetType.WHEEL,
+						widgetId: widget.id
+					}
+				});
+				await transaction.widgetRuntimePresence.deleteMany({
+					where: {
+						widgetType: WidgetType.WHEEL,
+						widgetId: widget.id
+					}
+				});
+				return {
+					deleted,
+					imageUrls: this.collectButtonImageUrls([
+						deleted.config,
+						deleted.draftConfig,
+						...revisions.map(revision => revision.config)
+					])
+				};
+			}
 		);
-		return this.prisma.widget.delete({ where: { id: widget.id } });
+		await Promise.all(
+			imageUrls.map(url =>
+				this.fileService
+					.deleteWidgetButtonImage(url)
+					.catch(() => undefined)
+			)
+		);
+		return deleted;
 	}
 
 	async uploadButtonImage(
 		userId: string,
 		widgetId: string,
-		file: Express.Multer.File | undefined
+		file: Express.Multer.File | undefined,
+		expectedDraftRevision: number
 	) {
 		const widget = await this.getWidgetByIdAndOwner(widgetId, userId);
+		assertExpectedDraftRevision(widget, expectedDraftRevision);
 		await this.assertCanUseButtonImage(userId);
 
-		const currentConfig = widget.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(widget) as Record<
+			string,
+			any
+		>;
 		let uploadedUrl = '';
+		let draftUpdated = false;
 
 		try {
 			const uploadedFile = await this.fileService.saveWidgetButtonImage(
@@ -408,23 +497,42 @@ export class WidgetService {
 			);
 			uploadedUrl = uploadedFile.url;
 
-			const updated = await this.prisma.widget.update({
-				where: { id: widget.id },
-				data: {
-					config: normalizeWheelConfig({
-						...currentConfig,
-						buttonImageUrl: uploadedUrl
-					})
+			const updated = await this.prisma.$transaction(async transaction => {
+				const result = await transaction.widget.updateMany({
+					where: {
+						id: widget.id,
+						userId,
+						draftRevision: expectedDraftRevision
+					},
+					data: {
+						draftConfig: normalizeWheelConfig({
+							...currentConfig,
+							buttonImageUrl: uploadedUrl
+						}),
+						draftRevision: { increment: 1 }
+					}
+				});
+				if (result.count !== 1) {
+					throw new ConflictException(
+						'Настройки уже изменены в другой сессии. Обновите страницу'
+					);
 				}
+				return transaction.widget.findUniqueOrThrow({
+					where: { id: widget.id }
+				});
 			});
+			draftUpdated = true;
 
-			await this.fileService
-				.deleteWidgetButtonImage(currentConfig.buttonImageUrl)
-				.catch(() => undefined);
-
-			return updated;
+			await cleanupUnreferencedWidgetButtonImage(
+				this.prisma,
+				this.fileService,
+				WidgetType.WHEEL,
+				widget.id,
+				currentConfig.buttonImageUrl
+			);
+			return projectWidgetDraft(updated);
 		} catch (error) {
-			if (uploadedUrl) {
+			if (uploadedUrl && !draftUpdated) {
 				await this.fileService
 					.deleteWidgetButtonImage(uploadedUrl)
 					.catch(() => undefined);
@@ -578,6 +686,9 @@ export class WidgetService {
 		});
 
 		if (!widget) return null;
+		if (!widget.publishedAt || widget.publishedVersion === 0) {
+			return { isActive: false };
+		}
 
 		const config = normalizeWheelConfig(widget.config);
 		if (
@@ -731,6 +842,9 @@ export class WidgetService {
 
 		if (!widget) {
 			throw new NotFoundException('Виджет не найден');
+		}
+		if (!widget.publishedAt || widget.publishedVersion === 0) {
+			throw new ForbiddenException('Виджет ещё не опубликован');
 		}
 
 		if (!widget.isActive) {
@@ -1003,22 +1117,14 @@ export class WidgetService {
 
 	private normalizeAdminWidgetType(value?: string) {
 		const normalized = value?.trim().toUpperCase();
-		const allowed: AdminWidgetType[] = [
-			'WHEEL',
-			'QUIZ',
-			'CALLBACK',
-			'TIMER',
-			'STOP_OFFER',
-			'ONLINE_CONSULTANT',
-			'CALCULATOR'
-		];
+		const allowed = Object.values(WidgetType);
 
 		if (!normalized) return undefined;
-		if (!allowed.includes(normalized as AdminWidgetType)) {
+		if (!allowed.includes(normalized as WidgetType)) {
 			throw new BadRequestException('Некорректный тип виджета');
 		}
 
-		return normalized as AdminWidgetType;
+		return normalized as WidgetType;
 	}
 
 	private normalizeAdminWidgetActive(value?: string) {
@@ -1127,18 +1233,21 @@ export class WidgetService {
 		return nextPatch;
 	}
 
-	private async deleteButtonImageIfRemoved(
-		previousConfig: Record<string, any>,
-		nextConfig: Record<string, any>
-	) {
-		const previousUrl = previousConfig.buttonImageUrl;
-		const nextUrl = nextConfig.buttonImageUrl;
-
-		if (previousUrl && previousUrl !== nextUrl) {
-			await this.fileService
-				.deleteWidgetButtonImage(previousUrl)
-				.catch(() => undefined);
-		}
+	private collectButtonImageUrls(configs: unknown[]) {
+		return Array.from(
+			new Set(
+				configs
+					.map(config =>
+						config && typeof config === 'object' && !Array.isArray(config)
+							? (config as Record<string, unknown>).buttonImageUrl
+							: null
+					)
+					.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.trim().length > 0
+					)
+			)
+		);
 	}
 
 	private generatePublicKey(): string {

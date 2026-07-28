@@ -26,6 +26,48 @@
 		(_currentScript && _currentScript.getAttribute('data-key')) || '';
 	if (!KEY) return;
 
+	var RUNTIME_VERSION = '2026.07';
+	var telemetryEventsSent = Object.create(null);
+
+	function sendTelemetryEvent(eventName) {
+		if (
+			(eventName !== 'IMPRESSION' &&
+				eventName !== 'OPEN' &&
+				eventName !== 'START') ||
+			telemetryEventsSent[eventName]
+		) {
+			return;
+		}
+
+		if (eventName === 'OPEN') {
+			sendTelemetryEvent('IMPRESSION');
+		} else if (eventName === 'START') {
+			sendTelemetryEvent('IMPRESSION');
+			sendTelemetryEvent('OPEN');
+		}
+
+		telemetryEventsSent[eventName] = true;
+		try {
+			var request = fetch(
+				API_BASE + '/widget-events/callback/' + encodeURIComponent(KEY),
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						event: eventName,
+						runtimeVersion: RUNTIME_VERSION
+					}),
+					keepalive: true,
+					credentials: 'omit',
+					referrerPolicy: 'no-referrer'
+				}
+			);
+			if (request && typeof request.catch === 'function') {
+				request.catch(function () {});
+			}
+		} catch (e) {}
+	}
+
 	function getWidgetAssetUrl(fileName) {
 		try {
 			var src = new URL(
@@ -578,6 +620,9 @@
 				phoneInput.style.boxShadow = 'none';
 			}
 		});
+		phoneInput.addEventListener('input', function () {
+			sendTelemetryEvent('START');
+		});
 
 		phoneWrap.appendChild(phoneInput);
 		phoneWrap.appendChild(phoneErrText);
@@ -625,6 +670,9 @@
 			timeSelect.addEventListener('blur', function () {
 				timeSelect.style.borderColor = '#e0d6f0';
 				timeSelect.style.boxShadow = 'none';
+			});
+			timeSelect.addEventListener('change', function () {
+				sendTelemetryEvent('START');
 			});
 
 			cfg.timeSlots.forEach(function (slot) {
@@ -681,6 +729,7 @@
 
 		var isSubmitting = false;
 		submitBtn.addEventListener('click', function () {
+			sendTelemetryEvent('START');
 			if (isSubmitting) return;
 			submitError.classList.remove('wcb-err-show');
 			if (!phoneValid) {
@@ -875,6 +924,7 @@
 				modal.style.opacity = '1';
 			});
 		});
+		sendTelemetryEvent('OPEN');
 		fireEvent('open');
 		firePixelEvent('wcb_open');
 	}
@@ -967,6 +1017,8 @@
 
 			cfg = data;
 			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
+
+			sendTelemetryEvent('IMPRESSION');
 
 			var size = cfg.buttonSize || 60;
 

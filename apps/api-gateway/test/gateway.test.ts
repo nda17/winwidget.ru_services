@@ -7,7 +7,8 @@ import {
 	createGateway,
 	matchGatewayRoute,
 	normalizeGatewayRoutingPathname,
-	resolveClientIp
+	resolveClientIp,
+	WidgetEventRateLimiter
 } from '../src/server';
 import {
 	closeServer,
@@ -28,6 +29,167 @@ interface CapturedRequest {
 	headers: IncomingHttpHeaders;
 	body: string;
 }
+
+describe('Widget event rate limiter', () => {
+	it('limits one source and resets its fixed window', () => {
+		let now = 1_000;
+		const limiter = new WidgetEventRateLimiter({
+			now: () => now,
+			windowMs: 10_000,
+			perSourceLimit: 2,
+			perWidgetLimit: 10
+		});
+		const path = '/api/v1/widget-events/wheel/public-key';
+
+		assert.equal(limiter.consume(path, '203.0.113.1')?.allowed, true);
+		assert.equal(limiter.consume(path, '203.0.113.1')?.allowed, true);
+		assert.equal(limiter.consume(path, '203.0.113.1')?.allowed, false);
+		assert.equal(limiter.consume(path, '203.0.113.2')?.allowed, true);
+
+		now += 10_000;
+		assert.equal(limiter.consume(path, '203.0.113.1')?.allowed, true);
+	});
+
+	it('applies a shared widget budget across sources', () => {
+		const limiter = new WidgetEventRateLimiter({
+			perSourceLimit: 10,
+			perWidgetLimit: 2
+		});
+		const path = '/api/v1/widget-events/quiz/public-key';
+
+		assert.equal(limiter.consume(path, '203.0.113.1')?.allowed, true);
+		assert.equal(limiter.consume(path, '203.0.113.2')?.allowed, true);
+		assert.equal(limiter.consume(path, '203.0.113.3')?.allowed, false);
+		assert.equal(
+			limiter.consume('/api/v1/widget/wheel', '203.0.113.3'),
+			null
+		);
+	});
+
+	it('normalizes backend-compatible route and type variants', () => {
+		const limiter = new WidgetEventRateLimiter({
+			perSourceLimit: 10,
+			perWidgetLimit: 2
+		});
+
+		assert.equal(
+			limiter.consume(
+				'/api/v1/WIDGET-EVENTS/TIMER/public-key',
+				'203.0.113.1'
+			)?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume(
+				'/api/v1/widget-events/countdown-timer/public-key/',
+				'203.0.113.2'
+			)?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume(
+				'/api/v1/widget-events/tImEr/public-key',
+				'203.0.113.3'
+			)?.allowed,
+			false
+		);
+	});
+
+	it('applies one source budget across widget keys', () => {
+		const limiter = new WidgetEventRateLimiter({
+			perSourceLimit: 2,
+			perWidgetLimit: 10
+		});
+
+		assert.equal(
+			limiter.consume(
+				'/api/v1/widget-events/wheel/fake-key-1',
+				'203.0.113.1'
+			)?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume(
+				'/api/v1/widget-events/quiz/fake-key-2',
+				'203.0.113.1'
+			)?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume(
+				'/api/v1/widget-events/calculator/fake-key-3',
+				'203.0.113.1'
+			)?.allowed,
+			false
+		);
+		assert.equal(
+			limiter.consume(
+				'/api/v1/widget-events/calculator/real-key',
+				'203.0.113.2'
+			)?.allowed,
+			true
+		);
+	});
+
+	it('keeps a stricter source-and-widget budget', () => {
+		const limiter = new WidgetEventRateLimiter({
+			perSourceLimit: 10,
+			perSourceWidgetLimit: 2,
+			perWidgetLimit: 10
+		});
+		const firstWidget = '/api/v1/widget-events/wheel/public-key';
+
+		assert.equal(
+			limiter.consume(firstWidget, '203.0.113.1')?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume(firstWidget, '203.0.113.1')?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume(firstWidget, '203.0.113.1')?.allowed,
+			false
+		);
+		assert.equal(
+			limiter.consume(
+				'/api/v1/widget-events/quiz/another-key',
+				'203.0.113.1'
+			)?.allowed,
+			true
+		);
+	});
+
+	it('evicts bounded entries instead of denying unrelated sources', () => {
+		const limiter = new WidgetEventRateLimiter({
+			perSourceLimit: 100,
+			perWidgetLimit: 100,
+			maxEntries: 4
+		});
+
+		for (let index = 0; index < 20; index += 1) {
+			assert.equal(
+				limiter.consume(
+					`/api/v1/widget-events/wheel/fake-key-${index}`,
+					'203.0.113.1'
+				)?.allowed,
+				true
+			);
+		}
+
+		assert.equal(
+			limiter.consume('/api/v1/widget-events/quiz/real-key', '203.0.113.2')
+				?.allowed,
+			true
+		);
+		const entries = (
+			limiter as unknown as {
+				entries: Map<string, unknown>;
+			}
+		).entries;
+		assert.equal(entries.size, 4);
+	});
+});
 
 describe('API Gateway config', () => {
 	const baseEnv = {

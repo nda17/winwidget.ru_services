@@ -8,11 +8,10 @@ import type { QuizService } from '@/quiz/quiz.service';
 import type { StopOfferService } from '@/stop-offer/stop-offer.service';
 import { UpdateAdminWidgetDto } from '@/widget-admin/dto/update-admin-widget.dto';
 import { WidgetAdminController } from '@/widget-admin/widget-admin.controller';
-import {
-	AdminWidgetType,
-	WidgetAdminService
-} from '@/widget-admin/widget-admin.service';
+import { WidgetAdminService } from '@/widget-admin/widget-admin.service';
 import type { WidgetService } from '@/widget/widget.service';
+import { WidgetType } from '@/widget-domain/widget-lifecycle';
+import type { WidgetSettingsService } from '@/widget-settings/widget-settings.service';
 import { BadRequestException } from '@nestjs/common';
 import { AuthIdentityType, Role, UserStatus } from '@prisma/client';
 import type { Request } from 'express';
@@ -71,6 +70,10 @@ describe('WidgetAdminService', () => {
 		const adminEventLogService = {
 			record: jest.fn().mockResolvedValue(undefined)
 		};
+		const widgetSettingsService = {
+			publish: jest.fn(),
+			discardDraft: jest.fn()
+		};
 		const service = new WidgetAdminService(
 			prisma as unknown as PrismaService,
 			widgetService as unknown as WidgetService,
@@ -80,6 +83,7 @@ describe('WidgetAdminService', () => {
 			stopOfferService as unknown as StopOfferService,
 			onlineConsultantService as unknown as OnlineConsultantService,
 			calculatorService as unknown as CalculatorService,
+			widgetSettingsService as unknown as WidgetSettingsService,
 			adminEventLogService as unknown as AdminEventLogService
 		);
 
@@ -93,6 +97,7 @@ describe('WidgetAdminService', () => {
 			stopOfferService,
 			onlineConsultantService,
 			calculatorService,
+			widgetSettingsService,
 			adminEventLogService
 		};
 	};
@@ -133,43 +138,43 @@ describe('WidgetAdminService', () => {
 
 	const updateCases = [
 		{
-			type: AdminWidgetType.WHEEL,
+			type: WidgetType.WHEEL,
 			delegate: 'widget',
 			service: 'widgetService',
 			method: 'updateWidget'
 		},
 		{
-			type: AdminWidgetType.QUIZ,
+			type: WidgetType.QUIZ,
 			delegate: 'quiz',
 			service: 'quizService',
 			method: 'updateQuiz'
 		},
 		{
-			type: AdminWidgetType.CALLBACK,
+			type: WidgetType.CALLBACK,
 			delegate: 'callback',
 			service: 'callbackService',
 			method: 'updateCallback'
 		},
 		{
-			type: AdminWidgetType.TIMER,
+			type: WidgetType.TIMER,
 			delegate: 'countdownTimer',
 			service: 'countdownTimerService',
 			method: 'updateCountdownTimer'
 		},
 		{
-			type: AdminWidgetType.STOP_OFFER,
+			type: WidgetType.STOP_OFFER,
 			delegate: 'stopOffer',
 			service: 'stopOfferService',
 			method: 'updateStopOffer'
 		},
 		{
-			type: AdminWidgetType.ONLINE_CONSULTANT,
+			type: WidgetType.ONLINE_CONSULTANT,
 			delegate: 'onlineConsultant',
 			service: 'onlineConsultantService',
 			method: 'updateOnlineConsultant'
 		},
 		{
-			type: AdminWidgetType.CALCULATOR,
+			type: WidgetType.CALCULATOR,
 			delegate: 'calculator',
 			service: 'calculatorService',
 			method: 'updateCalculator'
@@ -178,43 +183,43 @@ describe('WidgetAdminService', () => {
 
 	const deleteCases = [
 		{
-			type: AdminWidgetType.WHEEL,
+			type: WidgetType.WHEEL,
 			delegate: 'widget',
 			service: 'widgetService',
 			method: 'deleteWidget'
 		},
 		{
-			type: AdminWidgetType.QUIZ,
+			type: WidgetType.QUIZ,
 			delegate: 'quiz',
 			service: 'quizService',
 			method: 'deleteQuiz'
 		},
 		{
-			type: AdminWidgetType.CALLBACK,
+			type: WidgetType.CALLBACK,
 			delegate: 'callback',
 			service: 'callbackService',
 			method: 'deleteCallback'
 		},
 		{
-			type: AdminWidgetType.TIMER,
+			type: WidgetType.TIMER,
 			delegate: 'countdownTimer',
 			service: 'countdownTimerService',
 			method: 'deleteCountdownTimer'
 		},
 		{
-			type: AdminWidgetType.STOP_OFFER,
+			type: WidgetType.STOP_OFFER,
 			delegate: 'stopOffer',
 			service: 'stopOfferService',
 			method: 'deleteStopOffer'
 		},
 		{
-			type: AdminWidgetType.ONLINE_CONSULTANT,
+			type: WidgetType.ONLINE_CONSULTANT,
 			delegate: 'onlineConsultant',
 			service: 'onlineConsultantService',
 			method: 'deleteOnlineConsultant'
 		},
 		{
-			type: AdminWidgetType.CALCULATOR,
+			type: WidgetType.CALCULATOR,
 			delegate: 'calculator',
 			service: 'calculatorService',
 			method: 'deleteCalculator'
@@ -336,9 +341,9 @@ describe('WidgetAdminService', () => {
 		fixture.prisma.calculator.findUnique.mockResolvedValue(createRecord());
 
 		await expect(
-			fixture.service.getWidget(AdminWidgetType.CALCULATOR, widgetId)
+			fixture.service.getWidget(WidgetType.CALCULATOR, widgetId)
 		).resolves.toEqual({
-			type: AdminWidgetType.CALCULATOR,
+			type: WidgetType.CALCULATOR,
 			entity: expect.objectContaining({
 				id: widgetId,
 				userId: ownerId,
@@ -360,22 +365,18 @@ describe('WidgetAdminService', () => {
 		fixture.prisma.widget.findUnique.mockResolvedValue(record);
 
 		await expect(
-			fixture.service.getWidget(AdminWidgetType.WHEEL, widgetId)
+			fixture.service.getWidget(WidgetType.WHEEL, widgetId)
 		).rejects.toThrow('Сначала восстановите удалённого владельца виджета');
 		await expect(
 			fixture.service.updateWidget(
-				AdminWidgetType.WHEEL,
+				WidgetType.WHEEL,
 				widgetId,
 				{ isActive: true },
 				adminId
 			)
 		).rejects.toThrow('Сначала восстановите удалённого владельца виджета');
 		await expect(
-			fixture.service.deleteWidget(
-				AdminWidgetType.WHEEL,
-				widgetId,
-				adminId
-			)
+			fixture.service.deleteWidget(WidgetType.WHEEL, widgetId, adminId)
 		).rejects.toThrow('Сначала восстановите удалённого владельца виджета');
 
 		expect(fixture.widgetService.updateWidget).not.toHaveBeenCalled();
@@ -391,7 +392,7 @@ describe('WidgetAdminService', () => {
 
 		await expect(
 			fixture.service.updateWidget(
-				AdminWidgetType.WHEEL,
+				WidgetType.WHEEL,
 				widgetId,
 				{ isActive: true },
 				adminId
@@ -410,18 +411,18 @@ describe('WidgetAdminService', () => {
 
 		await expect(
 			fixture.service.updateWidget(
-				AdminWidgetType.WHEEL,
+				WidgetType.WHEEL,
 				widgetId,
 				{ name: 'x'.repeat(50) },
 				adminId
 			)
 		).resolves.toEqual(
-			expect.objectContaining({ type: AdminWidgetType.WHEEL })
+			expect.objectContaining({ type: WidgetType.WHEEL })
 		);
 
 		await expect(
 			fixture.service.updateWidget(
-				AdminWidgetType.WHEEL,
+				WidgetType.WHEEL,
 				widgetId,
 				{ name: 'x'.repeat(51) },
 				adminId
@@ -441,7 +442,7 @@ describe('WidgetAdminService', () => {
 		expect(errors[0].constraints?.maxLength).toBeDefined();
 		await expect(
 			fixture.service.updateWidget(
-				AdminWidgetType.CALCULATOR,
+				WidgetType.CALCULATOR,
 				widgetId,
 				dto,
 				adminId
@@ -455,9 +456,10 @@ describe('WidgetAdminService', () => {
 
 		await expect(
 			fixture.service.uploadButtonImage(
-				AdminWidgetType.STOP_OFFER,
+				WidgetType.STOP_OFFER,
 				widgetId,
 				undefined,
+				2,
 				adminId
 			)
 		).rejects.toThrow(
@@ -483,9 +485,10 @@ describe('WidgetAdminService', () => {
 		const file = { originalname: 'image.png' } as Express.Multer.File;
 
 		await fixture.service.uploadButtonImage(
-			AdminWidgetType.WHEEL,
+			WidgetType.WHEEL,
 			widgetId,
 			file,
+			2,
 			adminId,
 			request
 		);
@@ -493,17 +496,95 @@ describe('WidgetAdminService', () => {
 		expect(fixture.widgetService.uploadButtonImage).toHaveBeenCalledWith(
 			ownerId,
 			widgetId,
-			file
+			file,
+			2
 		);
 		expect(fixture.adminEventLogService.record).toHaveBeenCalledWith(
 			expect.objectContaining({
 				action: 'WIDGET_BUTTON_IMAGE_UPDATE',
 				metadata: {
-					type: AdminWidgetType.WHEEL,
+					type: WidgetType.WHEEL,
 					id: widgetId,
 					ownerId,
 					changedFields: ['config.buttonImageUrl']
 				}
+			})
+		);
+	});
+
+	it('publishes a user widget through the shared lifecycle and records it', async () => {
+		const fixture = createFixture();
+		const record = createRecord();
+		const published = {
+			type: 'wheel',
+			id: widgetId,
+			name: record.name,
+			publishedVersion: 2,
+			draftRevision: 3
+		};
+		fixture.prisma.widget.findUnique.mockResolvedValue(record);
+		fixture.widgetSettingsService.publish.mockResolvedValue(published);
+
+		await expect(
+			fixture.service.publishWidget(
+				WidgetType.WHEEL,
+				widgetId,
+				3,
+				adminId,
+				request
+			)
+		).resolves.toBe(published);
+		expect(fixture.widgetSettingsService.publish).toHaveBeenCalledWith(
+			WidgetType.WHEEL,
+			widgetId,
+			ownerId,
+			3
+		);
+		expect(fixture.adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				action: 'WIDGET_PUBLISH',
+				metadata: expect.objectContaining({
+					type: WidgetType.WHEEL,
+					publishedVersion: 2
+				})
+			})
+		);
+	});
+
+	it('discards a user widget draft through the shared lifecycle and records it', async () => {
+		const fixture = createFixture();
+		const record = createRecord();
+		const discarded = {
+			type: 'calculator',
+			id: widgetId,
+			name: record.name,
+			publishedVersion: 1,
+			draftRevision: 4
+		};
+		fixture.prisma.calculator.findUnique.mockResolvedValue(record);
+		fixture.widgetSettingsService.discardDraft.mockResolvedValue(
+			discarded
+		);
+
+		await expect(
+			fixture.service.discardDraft(
+				WidgetType.CALCULATOR,
+				widgetId,
+				3,
+				adminId,
+				request
+			)
+		).resolves.toBe(discarded);
+		expect(
+			fixture.widgetSettingsService.discardDraft
+		).toHaveBeenCalledWith(WidgetType.CALCULATOR, widgetId, ownerId, 3);
+		expect(fixture.adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				action: 'WIDGET_DRAFT_DISCARD',
+				metadata: expect.objectContaining({
+					type: WidgetType.CALCULATOR,
+					draftRevision: 4
+				})
 			})
 		);
 	});
@@ -517,7 +598,7 @@ describe('WidgetAdminService', () => {
 
 		await expect(
 			fixture.service.updateWidget(
-				AdminWidgetType.QUIZ,
+				WidgetType.QUIZ,
 				widgetId,
 				{ config: { title: 'Новое значение' } },
 				adminId
@@ -534,7 +615,7 @@ describe('WidgetAdminService', () => {
 		);
 
 		await expect(
-			fixture.service.deleteWidget(AdminWidgetType.QUIZ, widgetId, adminId)
+			fixture.service.deleteWidget(WidgetType.QUIZ, widgetId, adminId)
 		).rejects.toThrow('Удаление не выполнено');
 		expect(fixture.adminEventLogService.record).not.toHaveBeenCalled();
 	});

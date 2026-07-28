@@ -169,6 +169,99 @@ const requireOrderedRuntimeSource = (file, functionName, sources) => {
 	}
 };
 
+const telemetryRuntimeTypes = {
+	'wheel.js': 'wheel',
+	'quiz.js': 'quiz',
+	'callback.js': 'callback',
+	'timer.js': 'countdown-timer',
+	'stop-offer.js': 'stop-offer',
+	'online-consultant.js': 'online-consultant',
+	'calculator.js': 'calculator'
+};
+
+for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
+	const telemetryFunctionSource = getNamedFunctionSource(
+		runtimeSources[file],
+		'sendTelemetryEvent'
+	);
+	if (!telemetryFunctionSource) {
+		console.error(`widgets: ${file} is missing runtime telemetry`);
+		process.exit(1);
+	}
+
+	const createTelemetry = fetchStub =>
+		new Function(
+			'fetch',
+			'API_BASE',
+			'KEY',
+			[
+				"var RUNTIME_VERSION = '2026.07';",
+				'var telemetryEventsSent = Object.create(null);',
+				telemetryFunctionSource,
+				'return sendTelemetryEvent;'
+			].join('\n')
+		)(fetchStub, 'https://api.example/api/v1', 'public-key');
+
+	const requests = [];
+	const sendTelemetryEvent = createTelemetry((url, options) => {
+		requests.push({ url, options });
+		return Promise.resolve();
+	});
+	const sendStart = () =>
+		file === 'wheel.js'
+			? sendTelemetryEvent('START', 'public-key')
+			: sendTelemetryEvent('START');
+
+	sendStart();
+	sendStart();
+
+	if (requests.length !== 3) {
+		console.error(
+			`widgets: ${file} must send each runtime event at most once`
+		);
+		process.exit(1);
+	}
+
+	const expectedEvents = ['IMPRESSION', 'OPEN', 'START'];
+	requests.forEach((request, index) => {
+		const payload = JSON.parse(request.options.body);
+		const payloadKeys = Object.keys(payload).sort();
+		const expectedUrl =
+			'https://api.example/api/v1/widget-events/' +
+			runtimeType +
+			'/public-key';
+
+		if (
+			request.url !== expectedUrl ||
+			request.options.method !== 'POST' ||
+			request.options.keepalive !== true ||
+			request.options.credentials !== 'omit' ||
+			request.options.referrerPolicy !== 'no-referrer' ||
+			request.options.headers?.['Content-Type'] !== 'application/json' ||
+			payload.event !== expectedEvents[index] ||
+			payload.runtimeVersion !== '2026.07' ||
+			payloadKeys.join(',') !== 'event,runtimeVersion'
+		) {
+			console.error(`widgets: ${file} has an invalid telemetry contract`);
+			process.exit(1);
+		}
+	});
+
+	const failOpenTelemetry = createTelemetry(() => {
+		throw new Error('network unavailable');
+	});
+	try {
+		if (file === 'wheel.js') {
+			failOpenTelemetry('START', 'public-key');
+		} else {
+			failOpenTelemetry('START');
+		}
+	} catch {
+		console.error(`widgets: ${file} telemetry is not fail-open`);
+		process.exit(1);
+	}
+}
+
 for (const [file, eventFunction, openGoal, submitGoal] of [
 	['callback.js', 'firePixelEvent', 'wcb_open', 'wcb_send'],
 	['timer.js', 'firePixelEvent', 'wt_open', 'wt_send'],
@@ -222,25 +315,16 @@ for (const file of ['wheel.js', 'quiz.js']) {
 	}
 }
 
-for (const [blurHandler, fieldValidator] of [
-	['handleBlurInputName', 'validateName();'],
-	['handleBlurInputPhone', 'validatePhone();'],
-	['handleBlurInputEmail', 'validateEmail();']
+for (const blurListener of [
+	"inputName.addEventListener('blur'",
+	"inputPhone.addEventListener('blur'",
+	"inputEmail.addEventListener('blur'"
 ]) {
-	const blurHandlerSource = getNamedFunctionSource(
-		runtimeSources['wheel.js'],
-		blurHandler
+	if (!runtimeSources['wheel.js'].includes(blurListener)) continue;
+	console.error(
+		'widgets: wheel.js must animate field errors only after an explicit submit'
 	);
-
-	if (
-		!blurHandlerSource.includes(fieldValidator) ||
-		/\bvalidate\(\);/.test(blurHandlerSource)
-	) {
-		console.error(
-			`widgets: wheel.js ${blurHandler} must validate only its own field`
-		);
-		process.exit(1);
-	}
+	process.exit(1);
 }
 
 requireOrderedRuntimeSource('wheel.js', 'swingEffect', [

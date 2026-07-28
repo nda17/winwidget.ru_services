@@ -26,6 +26,8 @@ describe('OnlineConsultantService public lead contract', () => {
 					name: 'Онлайн-консультант',
 					isActive: true,
 					installDomain: null,
+					publishedAt: createdAt,
+					publishedVersion: 1,
 					config: {
 						dataType,
 						filterDuplicates: true

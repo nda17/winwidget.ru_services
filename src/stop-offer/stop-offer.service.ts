@@ -12,12 +12,19 @@ import {
 	normalizeInstallDomain
 } from '@/widget-domain/widget-domain.util';
 import {
+	assertExpectedDraftRevision,
+	getWidgetDraftConfig,
+	projectWidgetDraft,
+	WidgetType
+} from '@/widget-domain/widget-lifecycle';
+import {
 	BadRequestException,
+	ConflictException,
 	ForbiddenException,
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { Plan, SubscriptionStatus } from '@prisma/client';
+import { Plan, Prisma, SubscriptionStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import * as XLSX from 'xlsx';
 
@@ -226,10 +233,16 @@ export class StopOfferService {
 			include: { _count: { select: { leads: true } } }
 		});
 
-		return { stopOffers, subscription: sub };
+		return {
+			stopOffers: stopOffers.map(stopOffer =>
+				projectWidgetDraft(stopOffer)
+			),
+			subscription: sub
+		};
 	}
 
 	async createStopOffer(userId: string, dto: CreateStopOfferDto) {
+		const config = createDefaultConfig();
 		return this.subscriptionService.createWidgetWithinLimit(
 			userId,
 			transaction =>
@@ -238,7 +251,10 @@ export class StopOfferService {
 						userId,
 						publicKey: this.generatePublicKey(),
 						name: dto.name || 'Стоп-оффер',
-						config: createDefaultConfig()
+						config,
+						draftConfig: config,
+						draftInstallDomain: '',
+						draftRevision: 1
 					}
 				})
 		);
@@ -250,7 +266,15 @@ export class StopOfferService {
 		dto: UpdateStopOfferDto
 	) {
 		const stopOffer = await this.getByIdAndOwner(stopOfferId, userId);
-		const currentConfig = stopOffer.config as Record<string, any>;
+		const currentConfig = getWidgetDraftConfig(stopOffer) as Record<
+			string,
+			any
+		>;
+		const hasDraftChanges =
+			dto.config !== undefined || dto.installDomain !== undefined;
+		if (hasDraftChanges) {
+			assertExpectedDraftRevision(stopOffer, dto.expectedDraftRevision);
+		}
 		const nextConfig =
 			dto.config !== undefined
 				? normalizeStopOfferConfig({
@@ -268,23 +292,70 @@ export class StopOfferService {
 			);
 		}
 
-		return this.prisma.stopOffer.update({
-			where: { id: stopOffer.id },
-			data: {
-				...(dto.name !== undefined && { name: dto.name }),
-				...(dto.isActive !== undefined && { isActive: dto.isActive }),
-				...(dto.installDomain !== undefined && {
-					installDomain: normalizeInstallDomain(dto.installDomain)
-				}),
-				...(nextConfig !== undefined && { config: nextConfig })
+		const data: Prisma.StopOfferUpdateManyMutationInput = {
+			...(dto.name !== undefined && { name: dto.name }),
+			...(dto.isActive !== undefined && { isActive: dto.isActive }),
+			...(dto.installDomain !== undefined && {
+				draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+			}),
+			...(nextConfig !== undefined && { draftConfig: nextConfig }),
+			...(hasDraftChanges && { draftRevision: { increment: 1 } })
+		};
+		if (hasDraftChanges) {
+			const result = await this.prisma.stopOffer.updateMany({
+				where: {
+					id: stopOffer.id,
+					userId,
+					draftRevision: dto.expectedDraftRevision
+				},
+				data
+			});
+			if (result.count !== 1) {
+				throw new ConflictException(
+					'Настройки уже изменены в другой сессии. Обновите страницу'
+				);
 			}
-		});
+		} else {
+			await this.prisma.stopOffer.update({
+				where: { id: stopOffer.id },
+				data
+			});
+		}
+
+		return projectWidgetDraft(
+			await this.prisma.stopOffer.findUniqueOrThrow({
+				where: { id: stopOffer.id }
+			})
+		);
 	}
 
 	async deleteStopOffer(userId: string, stopOfferId: string) {
 		const stopOffer = await this.getByIdAndOwner(stopOfferId, userId);
 
-		return this.prisma.stopOffer.delete({ where: { id: stopOffer.id } });
+		return this.prisma.$transaction(async transaction => {
+			const deleted = await transaction.stopOffer.delete({
+				where: { id: stopOffer.id }
+			});
+			await transaction.widgetConfigRevision.deleteMany({
+				where: {
+					widgetType: WidgetType.STOP_OFFER,
+					widgetId: stopOffer.id
+				}
+			});
+			await transaction.widgetRuntimeDailyMetric.deleteMany({
+				where: {
+					widgetType: WidgetType.STOP_OFFER,
+					widgetId: stopOffer.id
+				}
+			});
+			await transaction.widgetRuntimePresence.deleteMany({
+				where: {
+					widgetType: WidgetType.STOP_OFFER,
+					widgetId: stopOffer.id
+				}
+			});
+			return deleted;
+		});
 	}
 
 	async getLeads(
@@ -379,6 +450,9 @@ export class StopOfferService {
 			include: { user: { include: { subscription: true } } }
 		});
 		if (!stopOffer) return null;
+		if (!stopOffer.publishedAt || stopOffer.publishedVersion === 0) {
+			return { isActive: false };
+		}
 
 		const config = normalizeStopOfferConfig(stopOffer.config);
 		if (
@@ -490,6 +564,9 @@ export class StopOfferService {
 			}
 		});
 		if (!stopOffer) throw new NotFoundException('Стоп-оффер не найден');
+		if (!stopOffer.publishedAt || stopOffer.publishedVersion === 0) {
+			throw new ForbiddenException('Виджет ещё не опубликован');
+		}
 
 		const config = normalizeStopOfferConfig(stopOffer.config);
 		if (

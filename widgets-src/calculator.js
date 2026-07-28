@@ -30,6 +30,48 @@
 		return;
 	}
 
+	var RUNTIME_VERSION = '2026.07';
+	var telemetryEventsSent = Object.create(null);
+
+	function sendTelemetryEvent(eventName) {
+		if (
+			(eventName !== 'IMPRESSION' &&
+				eventName !== 'OPEN' &&
+				eventName !== 'START') ||
+			telemetryEventsSent[eventName]
+		) {
+			return;
+		}
+
+		if (eventName === 'OPEN') {
+			sendTelemetryEvent('IMPRESSION');
+		} else if (eventName === 'START') {
+			sendTelemetryEvent('IMPRESSION');
+			sendTelemetryEvent('OPEN');
+		}
+
+		telemetryEventsSent[eventName] = true;
+		try {
+			var request = fetch(
+				API_BASE + '/widget-events/calculator/' + encodeURIComponent(KEY),
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						event: eventName,
+						runtimeVersion: RUNTIME_VERSION
+					}),
+					keepalive: true,
+					credentials: 'omit',
+					referrerPolicy: 'no-referrer'
+				}
+			);
+			if (request && typeof request.catch === 'function') {
+				request.catch(function () {});
+			}
+		} catch (e) {}
+	}
+
 	var AUTO_OPEN = Boolean(
 		window.wincalculatorAutoOpen ||
 		window.winwidgetCalculatorAutoOpen ||
@@ -412,6 +454,7 @@
 		launcher.style.pointerEvents = 'none';
 		lockBody();
 		showWelcome();
+		sendTelemetryEvent('OPEN');
 		firePixel('calculator_open');
 	}
 
@@ -564,7 +607,10 @@
 		);
 		shadow
 			.getElementById('wwc-start')
-			.addEventListener('click', showFields);
+			.addEventListener('click', function () {
+				sendTelemetryEvent('START');
+				showFields();
+			});
 	}
 
 	function showFields() {
@@ -1003,6 +1049,7 @@
 				}
 				cfg = data;
 				applyConfig();
+				sendTelemetryEvent('IMPRESSION');
 			})
 			.catch(function (error) {
 				console.error('[wincalculator] Failed to load config:', error);
