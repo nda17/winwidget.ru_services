@@ -280,7 +280,7 @@ describe('NotificationDeliveryClientService', () => {
 			response: {
 				id: failure.id,
 				eventId: failure.eventId,
-				integration: 'payment-telegram',
+				integration: 'webhook',
 				retryingAt: '2026-07-27T12:00:00.000Z'
 			},
 			call: (service: NotificationDeliveryClientService) =>

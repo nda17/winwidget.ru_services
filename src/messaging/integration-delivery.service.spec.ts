@@ -43,8 +43,8 @@ describe('IntegrationDeliveryService', () => {
 			getAmoCrmApiUrl: jest.fn()
 		} as unknown as SafeOutboundHttpService;
 		const prisma = {
-			telegramBotSettings: {
-				findUnique: jest.fn()
+			telegramNotificationChannel: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
 			}
 		} as unknown as PrismaService;
 		const telegram = {
@@ -95,49 +95,59 @@ describe('IntegrationDeliveryService', () => {
 		);
 	});
 
-	it('keeps the payment Telegram consumer in the monolith worker', async () => {
-		const { service, prisma, telegram } = createService();
-		(prisma.telegramBotSettings.findUnique as jest.Mock).mockResolvedValue(
-			{
-				dailySummaryChatId: '-100123',
-				paymentsThreadId: 42
-			}
-		);
-
+	it('applies a destination-unavailable outcome with a stale-safe CAS', async () => {
+		const { service, prisma } = createService();
+		const occurredAt = '2026-07-23T12:00:00.000Z';
 		await service.deliver(
-			'payment-telegram',
+			'telegram-destination-unavailable',
 			{
 				schemaVersion: 1,
-				eventType: 'payment.succeeded.v1',
-				payment: {
-					id: 'payment-1',
-					yookassaId: 'yookassa-1',
-					amount: '990.00',
-					plan: 'EASY',
-					billingPeriod: 'MONTHLY',
-					succeededAt: '2026-07-23T12:00:00.000Z'
-				},
-				user: {
-					id: 'user-1',
-					name: 'Иван',
-					email: 'user@example.com',
-					phone: null
-				},
-				subscription: {
-					expiresAt: '2026-08-23T12:00:00.000Z'
-				}
+				eventType: 'notification.telegram.destination-unavailable.v1',
+				sourceEventId: '11111111-1111-4111-8111-111111111111',
+				sourceKind: 'telegram',
+				destination: { telegramChatId: '-100123' },
+				normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+				occurredAt
 			},
 			'event-1'
 		);
 
-		expect(telegram.sendMessage).toHaveBeenCalledWith(
-			'-100123',
-			expect.stringContaining('<b>Новый успешный платёж</b>'),
-			{
-				messageThreadId: 42,
-				parseMode: 'HTML'
+		expect(
+			prisma.telegramNotificationChannel.updateMany
+		).toHaveBeenCalledWith({
+			where: {
+				chatId: '-100123',
+				isActive: true,
+				updatedAt: { lte: new Date(occurredAt) }
+			},
+			data: {
+				isActive: false,
+				disabledAt: new Date(occurredAt)
 			}
-		);
+		});
+	});
+
+	it('treats an already changed Telegram destination as a successful no-op', async () => {
+		const { service, prisma } = createService();
+		(
+			prisma.telegramNotificationChannel.updateMany as jest.Mock
+		).mockResolvedValue({ count: 0 });
+
+		await expect(
+			service.deliver(
+				'telegram-destination-unavailable',
+				{
+					schemaVersion: 1,
+					eventType: 'notification.telegram.destination-unavailable.v1',
+					sourceEventId: '11111111-1111-4111-8111-111111111111',
+					sourceKind: 'limit-telegram',
+					destination: { telegramChatId: '123456789' },
+					normalizedCode: 'TELEGRAM_BOT_BLOCKED',
+					occurredAt: '2026-07-23T12:00:00.000Z'
+				},
+				'event-1'
+			)
+		).resolves.toBeUndefined();
 	});
 
 	it('rejects a message routed to the wrong integration consumer', async () => {
@@ -285,34 +295,6 @@ describe('IntegrationDeliveryService mailing delivery', () => {
 			'123456789',
 			'Новости\n\nТекст рассылки',
 			{ parseMode: null }
-		);
-	});
-
-	it('keeps HTML parse_mode for Telegram messages that require formatting', async () => {
-		const { service, telegram } = createService();
-
-		await service.deliver(
-			'limit-telegram',
-			{
-				schemaVersion: 2,
-				eventType: 'lead.limit.reached.telegram.v2',
-				entity: {
-					id: 'widget-1',
-					name: 'Колесо',
-					type: 'WIDGET'
-				},
-				limit: 10,
-				destination: {
-					telegramChatId: '123456789'
-				}
-			},
-			eventId
-		);
-
-		expect(telegram.sendMessage).toHaveBeenCalledWith(
-			'123456789',
-			expect.any(String),
-			{ parseMode: 'HTML' }
 		);
 	});
 

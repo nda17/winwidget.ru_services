@@ -21,10 +21,20 @@ describe('Notification delivery control DTOs', () => {
 		expect(dto.limit).toBe(10_000);
 	});
 
+	it('accepts the newly owned Telegram notification consumers', async () => {
+		for (const integration of ['payment-telegram', 'limit-telegram']) {
+			const dto = plainToInstance(NotificationDeliveryFailuresQueryDto, {
+				integration
+			});
+
+			expect(await validate(dto)).toEqual([]);
+		}
+	});
+
 	it('rejects an oversized limit and a consumer outside this service', async () => {
 		const dto = plainToInstance(NotificationDeliveryFailuresQueryDto, {
 			limit: '10001',
-			integration: 'payment-telegram'
+			integration: 'webhook'
 		});
 
 		const errors = await validate(dto);

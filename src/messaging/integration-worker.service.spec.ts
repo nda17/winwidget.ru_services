@@ -1,5 +1,8 @@
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
-import { MONOLITH_INTEGRATION_KINDS } from '@/messaging/messaging.constants';
+import {
+	MONOLITH_INTEGRATION_KINDS,
+	NOTIFICATION_DELIVERY_KINDS
+} from '@/messaging/messaging.constants';
 import type { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import type { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
@@ -172,11 +175,51 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createDestinationUnavailableMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'notification.telegram.destination-unavailable.v1',
+					sourceEventId: '22222222-2222-4222-8222-222222222222',
+					sourceKind: 'telegram',
+					destination: { telegramChatId: '123456789' },
+					normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+					occurredAt: '2026-07-23T12:00:00.000Z'
+				})
+			),
+			fields: {
+				routingKey: 'notification.telegram.destination-unavailable.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'notification.telegram.destination-unavailable.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	it('starts consumers only for integrations that remain in the monolith', async () => {
 		const { service, rabbitMq } = createService();
 
 		await service.onModuleInit();
 
+		expect(NOTIFICATION_DELIVERY_KINDS).toEqual([
+			'email',
+			'telegram',
+			'payment-email',
+			'payment-telegram',
+			'limit-email',
+			'limit-telegram'
+		]);
+		expect(MONOLITH_INTEGRATION_KINDS).toEqual([
+			'webhook',
+			'bitrix24',
+			'amo-crm',
+			'mailing-email',
+			'mailing-telegram',
+			'daily-summary-telegram',
+			'telegram-destination-unavailable'
+		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
 			MONOLITH_INTEGRATION_KINDS.length
 		);
@@ -213,11 +256,11 @@ describe('IntegrationWorkerService', () => {
 
 	it('rejects kinds owned by notification delivery', async () => {
 		const { service } = createService({
-			INTEGRATION_WORKER_KINDS: 'webhook,email'
+			INTEGRATION_WORKER_KINDS: 'webhook,payment-telegram,limit-telegram'
 		});
 
 		await expect(service.onModuleInit()).rejects.toThrow(
-			'INTEGRATION_WORKER_KINDS cannot include notification-delivery kinds: email'
+			'INTEGRATION_WORKER_KINDS cannot include notification-delivery kinds: payment-telegram, limit-telegram'
 		);
 	});
 
@@ -311,6 +354,40 @@ describe('IntegrationWorkerService', () => {
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('consumes a destination outcome once and skips its redelivery', async () => {
+		const { service, rabbitMq, delivery, prisma } = createService();
+		(prisma.integrationDeliveryReceipt.create as jest.Mock)
+			.mockResolvedValueOnce({ id: 'receipt-1' })
+			.mockRejectedValueOnce(uniqueConstraintError());
+		(
+			prisma.integrationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValue({
+			status: IntegrationDeliveryReceiptStatus.DELIVERED,
+			lockedAt: new Date()
+		});
+		const message = createDestinationUnavailableMessage();
+
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
+
+		expect(delivery.deliver).toHaveBeenCalledTimes(1);
+		expect(delivery.deliver).toHaveBeenCalledWith(
+			'telegram-destination-unavailable',
+			expect.objectContaining({
+				sourceKind: 'telegram',
+				destination: { telegramChatId: '123456789' }
+			}),
+			'11111111-1111-4111-8111-111111111111'
+		);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(2);
 	});
 
 	it('does not deliver an event closed without retry', async () => {

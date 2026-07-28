@@ -150,10 +150,41 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 		);
 	});
 
+	it('publishes a strictly validated destination-unavailable outcome', async () => {
+		const { service, rabbitMq } = createService();
+		const outcome = {
+			...event,
+			messageId: '33333333-3333-4333-8333-333333333333',
+			eventType: 'notification.telegram.destination-unavailable.v1',
+			routingKey: 'notification.telegram.destination-unavailable.v1',
+			payload: {
+				schemaVersion: 1,
+				eventType: 'notification.telegram.destination-unavailable.v1',
+				sourceEventId: event.messageId,
+				sourceKind: 'limit-telegram',
+				destination: { telegramChatId: '12345' },
+				normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+				occurredAt: '2026-07-28T10:00:00.000Z'
+			}
+		};
+
+		await (service as any).publish(outcome);
+
+		expect(rabbitMq.publishOutboxMessage).toHaveBeenCalledWith(
+			'winwidget.events',
+			'notification.telegram.destination-unavailable.v1',
+			outcome.payload,
+			expect.objectContaining({
+				messageId: outcome.messageId,
+				type: outcome.eventType
+			})
+		);
+	});
+
 	it.each([
 		{
 			label: 'a route owned by the legacy worker',
-			overrides: { routingKey: 'manual.payment-telegram' },
+			overrides: { routingKey: 'manual.webhook' },
 			reason: 'INVALID_NOTIFICATION_DELIVERY_ROUTE'
 		},
 		{

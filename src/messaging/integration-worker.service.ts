@@ -13,7 +13,6 @@ import {
 	classifyIntegrationError,
 	IntegrationErrorClassification
 } from '@/messaging/integration-error-classifier';
-import { LimitReachedTelegramEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import {
 	createMessagingHeaders,
@@ -21,10 +20,10 @@ import {
 } from '@/messaging/messaging-context';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
-import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
 import { getStableMessageId } from '@/messaging/poison-message-id';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
+import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
 import { PrismaService } from '@/prisma.service';
 import {
 	ScheduledJobDispatchHandledError,
@@ -64,9 +63,8 @@ type DeliveryClaim =
 
 type WorkerEventPayload =
 	| LeadIntegrationEventPayload
-	| PaymentSucceededEventPayload
 	| MailingDeliveryEventPayload
-	| LimitReachedTelegramEventPayload
+	| TelegramDestinationUnavailableEventPayload
 	| DailySummaryRequestedEventPayload;
 
 interface ScheduledJobStatusRow {

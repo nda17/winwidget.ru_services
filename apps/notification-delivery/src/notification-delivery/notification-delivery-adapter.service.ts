@@ -2,13 +2,17 @@ import { EmailService } from '../email/email.service';
 import {
 	LeadIntegrationEventPayloadV2,
 	LimitReachedEmailEventPayload,
+	LimitReachedTelegramEventPayload,
+	PaymentTelegramNotificationEventPayload,
 	PaymentSucceededEventPayload,
 	ResolvedLeadIntegrationEventPayload
 } from '../messaging/delivery-event.types';
 import {
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
+	LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	NotificationDeliveryKind,
 	OUTBOX_EVENT_TYPE,
+	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	PAYMENT_SUCCEEDED_EVENT_TYPE
 } from '../messaging/messaging.constants';
 import { NotificationDeliveryEventPayload } from './notification-delivery-contract';
@@ -37,8 +41,16 @@ export class NotificationDeliveryAdapterService {
 			case 'payment-email':
 				await this.sendPaymentEmail(this.getPaymentEvent(event), eventId);
 				return;
+			case 'payment-telegram':
+				await this.sendPaymentTelegram(
+					this.getPaymentTelegramEvent(event)
+				);
+				return;
 			case 'limit-email':
 				await this.sendLimitEmail(this.getLimitEmailEvent(event), eventId);
+				return;
+			case 'limit-telegram':
+				await this.sendLimitTelegram(this.getLimitTelegramEvent(event));
 				return;
 		}
 	}
@@ -77,6 +89,27 @@ export class NotificationDeliveryAdapterService {
 		return value;
 	}
 
+	private getPaymentTelegramEvent(
+		event: NotificationDeliveryEventPayload
+	): PaymentTelegramNotificationEventPayload {
+		const value = event as PaymentTelegramNotificationEventPayload;
+		if (
+			value?.schemaVersion !== 1 ||
+			value?.eventType !== PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE ||
+			!value.payment?.id ||
+			!value.payment?.yookassaId ||
+			!value.user?.id ||
+			!value.destination ||
+			!('telegramChatId' in value.destination) ||
+			!('messageThreadId' in value.destination)
+		) {
+			throw new Error(
+				'Invalid payment Telegram notification event payload'
+			);
+		}
+		return value;
+	}
+
 	private getLimitEmailEvent(
 		event: NotificationDeliveryEventPayload
 	): LimitReachedEmailEventPayload {
@@ -91,6 +124,24 @@ export class NotificationDeliveryAdapterService {
 			!value.destination.email.trim()
 		) {
 			throw new Error('Invalid limit reached email event payload');
+		}
+		return value;
+	}
+
+	private getLimitTelegramEvent(
+		event: NotificationDeliveryEventPayload
+	): LimitReachedTelegramEventPayload {
+		const value = event as LimitReachedTelegramEventPayload;
+		if (
+			value?.schemaVersion !== 2 ||
+			value?.eventType !== LIMIT_REACHED_TELEGRAM_EVENT_TYPE ||
+			!value.entity?.id ||
+			!value.entity?.name ||
+			!Number.isInteger(value.limit) ||
+			typeof value.destination?.telegramChatId !== 'string' ||
+			!value.destination.telegramChatId.trim()
+		) {
+			throw new Error('Invalid limit reached Telegram event payload');
 		}
 		return value;
 	}
@@ -121,6 +172,37 @@ export class NotificationDeliveryAdapterService {
 		);
 	}
 
+	private async sendPaymentTelegram(
+		event: PaymentTelegramNotificationEventPayload
+	): Promise<void> {
+		const chatId = event.destination.telegramChatId?.trim() || null;
+		const messageThreadId = event.destination.messageThreadId;
+		if (!chatId || !messageThreadId) {
+			throw this.createDestinationConfigurationError(
+				'Telegram payment destination is not configured'
+			);
+		}
+		const text = [
+			'<b>Новый успешный платёж</b>',
+			'',
+			`<b>Сумма:</b> ${this.escapeHtml(event.payment.amount)} ₽`,
+			`<b>Тариф:</b> ${this.escapeHtml(this.getPlanLabel(event.payment.plan))}`,
+			`<b>Период:</b> ${this.escapeHtml(this.getBillingPeriodLabel(event.payment.billingPeriod))}`,
+			`<b>Пользователь:</b> ${this.escapeHtml(event.user.name || '—')}`,
+			`<b>Email:</b> ${this.escapeHtml(event.user.email || '—')}`,
+			`<b>Телефон:</b> ${this.escapeHtml(event.user.phone || '—')}`,
+			`<b>ID пользователя:</b> <code>${this.escapeHtml(event.user.id)}</code>`,
+			`<b>ID платежа:</b> <code>${this.escapeHtml(event.payment.id)}</code>`,
+			`<b>ID YooKassa:</b> <code>${this.escapeHtml(event.payment.yookassaId)}</code>`,
+			`<b>Оплачен:</b> ${this.escapeHtml(this.formatMoscowDateTime(new Date(event.payment.succeededAt)))} МСК`
+		].join('\n');
+
+		await this.telegram.sendMessage(chatId, text, {
+			messageThreadId,
+			parseMode: 'HTML'
+		});
+	}
+
 	private async sendLeadTelegram(
 		event: ResolvedLeadIntegrationEventPayload
 	): Promise<void> {
@@ -136,6 +218,23 @@ export class NotificationDeliveryAdapterService {
 			{
 				parseMode: 'HTML'
 			}
+		);
+	}
+
+	private async sendLimitTelegram(
+		event: LimitReachedTelegramEventPayload
+	): Promise<void> {
+		await this.telegram.sendMessage(
+			event.destination.telegramChatId,
+			[
+				'⚠️ <b>Лимит заявок исчерпан</b>',
+				`${this.escapeHtml(event.entity.name)} принял последнюю заявку (${event.limit} из ${event.limit}).`,
+				'',
+				'Новые заявки больше не принимаются.',
+				'Для продолжения работы перейдите на платный тариф:',
+				'👉 https://winwidget.ru/#pricing'
+			].join('\n'),
+			{ parseMode: 'HTML' }
 		);
 	}
 
@@ -322,6 +421,12 @@ export class NotificationDeliveryAdapterService {
 	private formatMoscowDateTime(value: Date): string {
 		return value.toLocaleString('ru-RU', {
 			timeZone: 'Europe/Moscow'
+		});
+	}
+
+	private createDestinationConfigurationError(message: string): Error {
+		return Object.assign(new Error(message), {
+			code: 'DESTINATION_CONFIGURATION_MISSING'
 		});
 	}
 

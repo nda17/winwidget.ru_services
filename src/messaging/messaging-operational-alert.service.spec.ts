@@ -237,7 +237,14 @@ describe('MessagingOperationalAlertService', () => {
 			where: {
 				resolvedAt: null,
 				integration: {
-					notIn: ['email', 'telegram', 'payment-email', 'limit-email']
+					notIn: [
+						'email',
+						'telegram',
+						'payment-email',
+						'payment-telegram',
+						'limit-email',
+						'limit-telegram'
+					]
 				}
 			}
 		});

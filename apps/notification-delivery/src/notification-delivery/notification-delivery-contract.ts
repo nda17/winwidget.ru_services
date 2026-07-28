@@ -1,7 +1,9 @@
 import {
 	LeadIntegrationEventPayloadV2,
 	LimitReachedEmailEventPayload,
+	LimitReachedTelegramEventPayload,
 	NotificationDeliveryEventPayload,
+	PaymentTelegramNotificationEventPayload,
 	PaymentSucceededEventPayload
 } from '../messaging/delivery-event.types';
 import {
@@ -17,7 +19,9 @@ const UUID_PATTERN =
 export type {
 	LeadIntegrationEventPayloadV2,
 	LimitReachedEmailEventPayload,
+	LimitReachedTelegramEventPayload,
 	NotificationDeliveryEventPayload,
+	PaymentTelegramNotificationEventPayload,
 	PaymentSucceededEventPayload
 };
 

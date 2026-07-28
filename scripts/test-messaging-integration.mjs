@@ -47,12 +47,13 @@ const requiredQueues = [
 	'winwidget.lead-integration.bitrix24',
 	'winwidget.lead-integration.amo-crm',
 	'winwidget.payment-notification.email',
-	'winwidget.payment-notification.telegram',
+	'winwidget.payment-notification.telegram.v2',
 	'winwidget.mailing.email',
 	'winwidget.mailing.telegram',
 	'winwidget.limit-notification.email',
 	'winwidget.limit-notification.telegram',
 	'winwidget.report.daily-summary.telegram',
+	'winwidget.notification.telegram-destination-unavailable',
 	'winwidget.maintenance.database-backup'
 ];
 
@@ -415,8 +416,9 @@ try {
 	);
 	await channel.cancel(manualRetryConsumerTag);
 
-	const paymentEventId = randomUUID();
-	createdEventIds.push(paymentEventId);
+	const paymentEmailEventId = randomUUID();
+	const paymentTelegramEventId = randomUUID();
+	createdEventIds.push(paymentEmailEventId, paymentTelegramEventId);
 	const pendingPaymentQueues = new Set([
 		'payment-email',
 		'payment-telegram'
@@ -424,22 +426,34 @@ try {
 	const paymentConsumerTags = [];
 	for (const [kind, queue] of [
 		['payment-email', 'winwidget.payment-notification.email'],
-		['payment-telegram', 'winwidget.payment-notification.telegram']
+		['payment-telegram', 'winwidget.payment-notification.telegram.v2']
 	]) {
 		const { consumerTag } = await channel.consume(
 			queue,
 			message => {
 				if (!message) return;
-				if (message.properties.messageId !== paymentEventId) {
+				const expectedEventId =
+					kind === 'payment-email'
+						? paymentEmailEventId
+						: paymentTelegramEventId;
+				if (message.properties.messageId !== expectedEventId) {
 					channel.nack(message, false, true);
 					return;
 				}
 				try {
 					const payload = JSON.parse(message.content.toString('utf8'));
+					const expectedType =
+						kind === 'payment-email'
+							? 'payment.succeeded.v1'
+							: 'payment.notification.telegram.requested.v1';
 					if (
 						payload?.schemaVersion !== 1 ||
-						payload?.eventType !== 'payment.succeeded.v1' ||
-						payload?.payment?.id !== 'ci-payment'
+						payload?.eventType !== expectedType ||
+						payload?.payment?.id !== 'ci-payment' ||
+						(kind === 'payment-telegram' &&
+							(payload?.destination?.telegramChatId !==
+								'ci-payment-chat' ||
+								payload?.destination?.messageThreadId !== 17))
 					) {
 						throw new Error('Unexpected payment event payload');
 					}
@@ -457,63 +471,142 @@ try {
 		);
 		paymentConsumerTags.push(consumerTag);
 	}
-	await prisma.outboxEvent.create({
-		data: {
-			id: paymentEventId,
-			eventType: 'payment.succeeded.v1',
-			routingKey: 'payment.succeeded.v1',
-			payload: {
-				schemaVersion: 1,
+	const paymentSucceededAt = new Date().toISOString();
+	await prisma.$transaction([
+		prisma.outboxEvent.create({
+			data: {
+				id: paymentEmailEventId,
+				messageId: paymentEmailEventId,
 				eventType: 'payment.succeeded.v1',
-				payment: {
-					id: 'ci-payment',
-					yookassaId: 'ci-yookassa',
-					amount: '990.00',
-					plan: 'EASY',
-					billingPeriod: 'MONTHLY',
-					succeededAt: new Date().toISOString()
-				},
-				user: {
-					id: 'ci-user',
-					name: 'CI',
-					email: 'ci@example.com',
-					phone: null
-				},
-				subscription: { expiresAt: null }
+				routingKey: 'payment.succeeded.v1',
+				payload: {
+					schemaVersion: 1,
+					eventType: 'payment.succeeded.v1',
+					payment: {
+						id: 'ci-payment',
+						yookassaId: 'ci-yookassa',
+						amount: '990.00',
+						plan: 'EASY',
+						billingPeriod: 'MONTHLY',
+						succeededAt: paymentSucceededAt
+					},
+					user: {
+						id: 'ci-user',
+						name: 'CI',
+						email: 'ci@example.com',
+						phone: null
+					},
+					subscription: { expiresAt: null }
+				}
 			}
-		}
-	});
+		}),
+		prisma.outboxEvent.create({
+			data: {
+				id: paymentTelegramEventId,
+				messageId: paymentTelegramEventId,
+				eventType: 'payment.notification.telegram.requested.v1',
+				routingKey: 'payment.notification.telegram.requested.v1',
+				payload: {
+					schemaVersion: 1,
+					eventType: 'payment.notification.telegram.requested.v1',
+					payment: {
+						id: 'ci-payment',
+						yookassaId: 'ci-yookassa',
+						amount: '990.00',
+						plan: 'EASY',
+						billingPeriod: 'MONTHLY',
+						succeededAt: paymentSucceededAt
+					},
+					user: {
+						id: 'ci-user',
+						name: 'CI',
+						email: 'ci@example.com',
+						phone: null
+					},
+					destination: {
+						telegramChatId: 'ci-payment-chat',
+						messageThreadId: 17
+					}
+				}
+			}
+		})
+	]);
 	await waitFor(
 		() => pendingPaymentQueues.size === 0,
-		'payment event fan-out'
+		'separate payment email and prepared Telegram events'
 	);
 	await waitFor(
 		() =>
 			prisma.outboxEvent
-				.findUnique({
-					where: { id: paymentEventId },
-					select: { status: true }
+				.count({
+					where: {
+						id: { in: [paymentEmailEventId, paymentTelegramEventId] },
+						status: 'PUBLISHED'
+					}
 				})
-				.then(event => event?.status === 'PUBLISHED'),
-		'published payment outbox status'
+				.then(count => count === 2),
+		'published prepared payment Outbox statuses'
 	);
 	for (const consumerTag of paymentConsumerTags) {
 		await channel.cancel(consumerTag);
 	}
 
 	startProcess('dist/src/integration-worker-main.js', {
-		INTEGRATION_WORKER_KINDS: 'webhook,daily-summary-telegram'
+		INTEGRATION_WORKER_KINDS:
+			'webhook,daily-summary-telegram,telegram-destination-unavailable'
 	});
 	await waitFor(async () => {
 		const queues = await Promise.all(
 			[
 				'winwidget.lead-integration.webhook.dead-letter',
 				'winwidget.report.daily-summary.telegram',
-				'winwidget.report.daily-summary.telegram.dead-letter'
+				'winwidget.report.daily-summary.telegram.dead-letter',
+				'winwidget.notification.telegram-destination-unavailable',
+				'winwidget.notification.telegram-destination-unavailable.dead-letter'
 			].map(queue => channel.checkQueue(queue))
 		);
 		return queues.every(queue => queue.consumerCount > 0);
 	}, 'integration worker consumers');
+
+	const destinationUnavailableEventId = randomUUID();
+	createdEventIds.push(destinationUnavailableEventId);
+	const destinationUnavailablePayload = {
+		schemaVersion: 1,
+		eventType: 'notification.telegram.destination-unavailable.v1',
+		sourceEventId: randomUUID(),
+		sourceKind: 'limit-telegram',
+		destination: {
+			telegramChatId: `ci-missing-chat-${destinationUnavailableEventId}`
+		},
+		normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+		occurredAt: new Date().toISOString()
+	};
+	channel.publish(
+		'winwidget.events',
+		'notification.telegram.destination-unavailable.v1',
+		Buffer.from(JSON.stringify(destinationUnavailablePayload)),
+		{
+			persistent: true,
+			messageId: destinationUnavailableEventId,
+			type: 'notification.telegram.destination-unavailable.v1',
+			contentType: 'application/json'
+		}
+	);
+	await waitFor(
+		() =>
+			prisma.integrationDeliveryReceipt
+				.findUnique({
+					where: {
+						eventId_integration: {
+							eventId: destinationUnavailableEventId,
+							integration: 'telegram-destination-unavailable'
+						}
+					},
+					select: { status: true }
+				})
+				.then(receipt => receipt?.status === 'DELIVERED'),
+		'destination-unavailable outcome delivery'
+	);
 
 	// Keep the smoke independent from real time and Telegram schedule settings.
 	const maintenanceScheduleSnapshot =
@@ -639,6 +732,8 @@ try {
 						'winwidget.lead-integration.webhook.dead-letter',
 						'winwidget.report.daily-summary.telegram',
 						'winwidget.report.daily-summary.telegram.dead-letter',
+						'winwidget.notification.telegram-destination-unavailable',
+						'winwidget.notification.telegram-destination-unavailable.dead-letter',
 						'winwidget.maintenance.database-backup',
 						'winwidget.maintenance.database-backup.dead-letter'
 					].map(queue => channel.checkQueue(queue))

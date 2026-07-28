@@ -202,4 +202,111 @@ describe('NotificationDeliveryAdapterService', () => {
 			}
 		);
 	});
+
+	it('delivers a prepared payment Telegram notification to its snapshotted topic', async () => {
+		await service.deliver(
+			'payment-telegram',
+			{
+				schemaVersion: 1,
+				eventType: 'payment.notification.telegram.requested.v1',
+				payment: {
+					id: 'payment-<1>',
+					yookassaId: 'yookassa-&1',
+					amount: '1000',
+					plan: 'EASY',
+					billingPeriod: 'MONTHLY',
+					succeededAt: '2026-07-27T10:00:00.000Z'
+				},
+				user: {
+					id: 'user-<1>',
+					name: 'Анна & Иван',
+					email: 'owner@example.com',
+					phone: null
+				},
+				destination: {
+					telegramChatId: '-1001234567890',
+					messageThreadId: 42
+				}
+			},
+			'11111111-1111-4111-8111-111111111111'
+		);
+
+		expect(telegram.sendMessage).toHaveBeenCalledWith(
+			'-1001234567890',
+			expect.stringContaining(
+				'<b>ID платежа:</b> <code>payment-&lt;1&gt;</code>'
+			),
+			{ messageThreadId: 42, parseMode: 'HTML' }
+		);
+		const text = (telegram.sendMessage as jest.Mock).mock.calls[0][1];
+		expect(text).toContain('<b>Пользователь:</b> Анна &amp; Иван');
+		expect(text).toContain(
+			'<b>ID YooKassa:</b> <code>yookassa-&amp;1</code>'
+		);
+	});
+
+	it('rejects a payment Telegram event without a complete destination snapshot', async () => {
+		const promise = service.deliver(
+			'payment-telegram',
+			{
+				schemaVersion: 1,
+				eventType: 'payment.notification.telegram.requested.v1',
+				payment: {
+					id: 'payment-1',
+					yookassaId: 'yookassa-1',
+					amount: '1000',
+					plan: 'EASY',
+					billingPeriod: 'MONTHLY',
+					succeededAt: '2026-07-27T10:00:00.000Z'
+				},
+				user: {
+					id: 'user-1',
+					name: null,
+					email: null,
+					phone: null
+				},
+				destination: {
+					telegramChatId: null,
+					messageThreadId: null
+				}
+			},
+			'11111111-1111-4111-8111-111111111111'
+		);
+
+		await expect(promise).rejects.toMatchObject({
+			code: 'DESTINATION_CONFIGURATION_MISSING'
+		});
+		expect(telegram.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it('delivers the limit Telegram notification with escaped entity name', async () => {
+		await service.deliver(
+			'limit-telegram',
+			{
+				schemaVersion: 2,
+				eventType: 'lead.limit.reached.telegram.v2',
+				entity: {
+					id: 'widget-1',
+					name: 'Колесо <продаж>',
+					type: 'widget'
+				},
+				limit: 10,
+				destination: { telegramChatId: '12345' }
+			},
+			'11111111-1111-4111-8111-111111111111'
+		);
+
+		expect(telegram.sendMessage).toHaveBeenCalledWith(
+			'12345',
+			[
+				'⚠️ <b>Лимит заявок исчерпан</b>',
+				'Колесо &lt;продаж&gt; принял последнюю заявку (10 из 10).',
+				'',
+				'Новые заявки больше не принимаются.',
+				'Для продолжения работы перейдите на платный тариф:',
+				'👉 https://winwidget.ru/#pricing'
+			].join('\n'),
+			{ parseMode: 'HTML' }
+		);
+	});
 });

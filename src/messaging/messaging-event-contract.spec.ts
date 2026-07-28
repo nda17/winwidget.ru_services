@@ -158,4 +158,155 @@ describe('messaging event contract', () => {
 			})
 		).toThrow('must be null or dates together');
 	});
+
+	it('keeps payment.succeeded.v1 exclusive to payment email', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'payment.succeeded.v1',
+			payment: {
+				id: 'payment-1',
+				yookassaId: 'yookassa-1',
+				amount: '990.00',
+				plan: 'EASY',
+				billingPeriod: 'MONTHLY',
+				succeededAt: '2026-07-25T00:00:00.000Z'
+			},
+			user: {
+				id: 'user-1',
+				name: null,
+				email: 'owner@example.com',
+				phone: null
+			},
+			subscription: {
+				expiresAt: '2026-08-25T00:00:00.000Z'
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'payment.succeeded.v1',
+				messageId: MESSAGE_ID,
+				kind: 'payment-email'
+			})
+		).not.toThrow();
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'payment.succeeded.v1',
+				messageId: MESSAGE_ID,
+				kind: 'payment-telegram'
+			})
+		).toThrow('cannot be consumed by payment-telegram');
+	});
+
+	it('accepts the prepared payment Telegram contract with a nullable destination', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'payment.notification.telegram.requested.v1',
+			payment: {
+				id: 'payment-1',
+				yookassaId: 'yookassa-1',
+				amount: '990.00',
+				plan: 'EASY',
+				billingPeriod: 'MONTHLY',
+				succeededAt: '2026-07-25T00:00:00.000Z'
+			},
+			user: {
+				id: 'user-1',
+				name: null,
+				email: 'owner@example.com',
+				phone: null
+			},
+			destination: {
+				telegramChatId: null,
+				messageThreadId: null
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'payment.notification.telegram.requested.v1',
+				messageId: MESSAGE_ID,
+				kind: 'payment-telegram'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects non-positive payment Telegram topic IDs', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'payment.notification.telegram.requested.v1',
+			payment: {
+				id: 'payment-1',
+				yookassaId: 'yookassa-1',
+				amount: '990.00',
+				plan: 'EASY',
+				billingPeriod: 'MONTHLY',
+				succeededAt: '2026-07-25T00:00:00.000Z'
+			},
+			user: {
+				id: 'user-1',
+				name: null,
+				email: null,
+				phone: null
+			},
+			destination: {
+				telegramChatId: '-100123',
+				messageThreadId: 0
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'payment-telegram'
+			})
+		).toThrow('positive integer or null');
+	});
+
+	it('accepts the strict Telegram destination-unavailable outcome', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'notification.telegram.destination-unavailable.v1',
+			sourceEventId: '22222222-2222-4222-8222-222222222222',
+			sourceKind: 'limit-telegram',
+			destination: { telegramChatId: '123456789' },
+			normalizedCode: 'TELEGRAM_BOT_BLOCKED',
+			occurredAt: '2026-07-25T00:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'notification.telegram.destination-unavailable.v1',
+				messageId: MESSAGE_ID,
+				kind: 'telegram-destination-unavailable'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects unsupported source kinds in destination outcomes', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'notification.telegram.destination-unavailable.v1',
+			sourceEventId: '22222222-2222-4222-8222-222222222222',
+			sourceKind: 'payment-telegram',
+			destination: { telegramChatId: '123456789' },
+			normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+			occurredAt: '2026-07-25T00:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'telegram-destination-unavailable'
+			})
+		).toThrow('sourceKind is invalid');
+	});
 });

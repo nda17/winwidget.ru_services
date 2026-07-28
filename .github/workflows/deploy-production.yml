@@ -72,7 +72,7 @@ jobs:
       NOTIFICATION_DELIVERY_LISTEN_HOST: 127.0.0.1
       NOTIFICATION_DELIVERY_HEALTH_PORT: 4401
       NOTIFICATION_DELIVERY_PREFETCH: 5
-      NOTIFICATION_DELIVERY_KINDS: email,telegram,payment-email,limit-email
+      NOTIFICATION_DELIVERY_KINDS: email,telegram,payment-email,payment-telegram,limit-email,limit-telegram
       NOTIFICATION_DELIVERY_TEST_RABBITMQ_URL: amqp://notification_delivery_ci:notification_delivery_ci_password@127.0.0.1:5672/winwidget
       RABBITMQ_URL: amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget
       RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
@@ -606,11 +606,10 @@ jobs:
                   "webhook",
                   "bitrix24",
                   "amo-crm",
-                  "payment-telegram",
                   "mailing-email",
                   "mailing-telegram",
-                  "limit-telegram",
                   "daily-summary-telegram",
+                  "telegram-destination-unavailable",
                 ],
                 "integration-worker",
               );
@@ -649,7 +648,14 @@ jobs:
               requireExactKinds(
                 notificationDeliveryEnvironment,
                 "NOTIFICATION_DELIVERY_KINDS",
-                ["email", "telegram", "payment-email", "limit-email"],
+                [
+                  "email",
+                  "telegram",
+                  "payment-email",
+                  "payment-telegram",
+                  "limit-email",
+                  "limit-telegram",
+                ],
                 "notification-delivery-worker",
               );
               if (
@@ -884,6 +890,15 @@ jobs:
 
           const expectedKinds = [...monolith.NOTIFICATION_DELIVERY_KINDS];
           const actualKinds = [...delivery.NOTIFICATION_DELIVERY_KINDS];
+          const expectedMonolithKinds = [
+            "webhook",
+            "bitrix24",
+            "amo-crm",
+            "mailing-email",
+            "mailing-telegram",
+            "daily-summary-telegram",
+            "telegram-destination-unavailable",
+          ];
           if (
             JSON.stringify(actualKinds) !== JSON.stringify(expectedKinds) ||
             Object.keys(delivery.MESSAGING_ROUTING_KEYS).sort().join(",") !==
@@ -894,6 +909,52 @@ jobs:
             throw new Error(
               "Notification Delivery kind ownership drifted from the producer contract",
             );
+          }
+          if (
+            JSON.stringify([...monolith.MONOLITH_INTEGRATION_KINDS]) !==
+              JSON.stringify(expectedMonolithKinds) ||
+            expectedKinds.some(kind =>
+              monolith.MONOLITH_INTEGRATION_KINDS.includes(kind)
+            ) ||
+            [...new Set([
+              ...expectedKinds,
+              ...monolith.MONOLITH_INTEGRATION_KINDS,
+            ])].sort().join(",") !==
+              [...monolith.INTEGRATION_KINDS].sort().join(",")
+          ) {
+            throw new Error(
+              "Monolith and Notification Delivery kind ownership must be an exact disjoint union",
+            );
+          }
+          for (const [label, actual, expected] of [
+            [
+              "prepared payment routing key",
+              delivery.MESSAGING_ROUTING_KEYS["payment-telegram"],
+              "payment.notification.telegram.requested.v1",
+            ],
+            [
+              "prepared payment queue",
+              delivery.MESSAGING_QUEUE_NAMES["payment-telegram"],
+              "winwidget.payment-notification.telegram.v2",
+            ],
+            [
+              "destination-unavailable routing key",
+              monolith.MESSAGING_ROUTING_KEYS[
+                "telegram-destination-unavailable"
+              ],
+              "notification.telegram.destination-unavailable.v1",
+            ],
+            [
+              "destination-unavailable queue",
+              monolith.MESSAGING_QUEUE_NAMES[
+                "telegram-destination-unavailable"
+              ],
+              "winwidget.notification.telegram-destination-unavailable",
+            ],
+          ]) {
+            if (actual !== expected) {
+              throw new Error(`${label} drift: ${actual} != ${expected}`);
+            }
           }
 
           for (const kind of expectedKinds) {
@@ -983,7 +1044,7 @@ jobs:
               notification_delivery_ci \
               '^$' \
               '^(winwidget\.events|winwidget\.dead-letter)$' \
-              '^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.email|limit-notification\.email)(\..*)?$'
+              '^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.(email|telegram\.v2)|limit-notification\.(email|telegram))(\..*)?$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_user_tags notification_delivery_ci
           docker exec "$RABBITMQ_CONTAINER_ID" \

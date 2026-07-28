@@ -6,31 +6,24 @@ import {
 	ResolvedLeadIntegrationEventPayload
 } from '@/messaging/lead-integration-event';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
-import { LimitReachedTelegramEventPayload } from '@/messaging/limit-reached-event';
 import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
-import {
-	MonolithIntegrationKind,
-	LIMIT_REACHED_TELEGRAM_EVENT_TYPE
-} from '@/messaging/messaging.constants';
-import { PaymentSucceededEventPayload } from '@/messaging/payment-succeeded-event';
+import { MonolithIntegrationKind } from '@/messaging/messaging.constants';
+import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
 import { PrismaService } from '@/prisma.service';
 import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
 import { Injectable, Logger } from '@nestjs/common';
 import {
-	BillingPeriod,
 	MailingCampaignStatus,
 	MailingDeliveryChannel,
-	MailingDeliveryStatus,
-	Plan
+	MailingDeliveryStatus
 } from '@prisma/client';
 
 type DeliveryEventPayload =
 	| LeadIntegrationEventPayload
-	| PaymentSucceededEventPayload
 	| MailingDeliveryEventPayload
-	| LimitReachedTelegramEventPayload
+	| TelegramDestinationUnavailableEventPayload
 	| DailySummaryRequestedEventPayload;
 
 const MAILING_PROCESSING_LEASE_MS = 10 * 60 * 1000;
@@ -60,16 +53,14 @@ export class IntegrationDeliveryService {
 			);
 			return;
 		}
-		if (kind === 'payment-telegram') {
-			await this.sendPaymentTelegram(this.getPaymentEvent(event));
+		if (kind === 'telegram-destination-unavailable') {
+			await this.applyTelegramDestinationUnavailable(
+				event as TelegramDestinationUnavailableEventPayload
+			);
 			return;
 		}
 		if (kind === 'mailing-email' || kind === 'mailing-telegram') {
 			await this.sendMailingDelivery(kind, event, eventId);
-			return;
-		}
-		if (kind === 'limit-telegram') {
-			await this.sendLimitReachedTelegram(event);
 			return;
 		}
 
@@ -96,20 +87,21 @@ export class IntegrationDeliveryService {
 		}
 	}
 
-	private getPaymentEvent(
-		event: DeliveryEventPayload
-	): PaymentSucceededEventPayload {
-		const value = event as PaymentSucceededEventPayload;
-		if (
-			value?.schemaVersion !== 1 ||
-			value?.eventType !== 'payment.succeeded.v1' ||
-			!value.payment?.id ||
-			!value.payment?.yookassaId ||
-			!value.user?.id
-		) {
-			throw new Error('Invalid payment succeeded event payload');
-		}
-		return value;
+	private async applyTelegramDestinationUnavailable(
+		event: TelegramDestinationUnavailableEventPayload
+	): Promise<void> {
+		const occurredAt = new Date(event.occurredAt);
+		await this.prisma.telegramNotificationChannel.updateMany({
+			where: {
+				chatId: event.destination.telegramChatId,
+				isActive: true,
+				updatedAt: { lte: occurredAt }
+			},
+			data: {
+				isActive: false,
+				disabledAt: occurredAt
+			}
+		});
 	}
 
 	private async sendMailingDelivery(
@@ -260,38 +252,6 @@ export class IntegrationDeliveryService {
 		}
 	}
 
-	private async sendLimitReachedTelegram(
-		event: DeliveryEventPayload
-	): Promise<void> {
-		const payload = event as LimitReachedTelegramEventPayload;
-		if (
-			payload?.schemaVersion !== 2 ||
-			payload.eventType !== LIMIT_REACHED_TELEGRAM_EVENT_TYPE ||
-			!payload.entity?.id ||
-			!payload.entity?.name ||
-			!Number.isInteger(payload.limit) ||
-			typeof payload.destination?.telegramChatId !== 'string' ||
-			!payload.destination.telegramChatId.trim()
-		) {
-			throw new Error('Invalid limit reached Telegram event payload');
-		}
-		await this.sendTelegramMessage(
-			'limit-telegram',
-			payload.destination.telegramChatId,
-			[
-				[
-					'⚠️ <b>Лимит заявок исчерпан</b>',
-					`${this.escapeHtml(payload.entity.name)} принял последнюю заявку (${payload.limit} из ${payload.limit}).`,
-					'',
-					'Новые заявки больше не принимаются.',
-					'Для продолжения работы перейдите на платный тариф:',
-					'👉 https://winwidget.ru/#pricing'
-				].join('\n')
-			],
-			'HTML'
-		);
-	}
-
 	private async sendMailingTelegramMessages(
 		deliveryId: string,
 		campaignId: string,
@@ -425,7 +385,7 @@ export class IntegrationDeliveryService {
 	}
 
 	private async sendTelegramMessage(
-		kind: 'mailing-telegram' | 'limit-telegram',
+		kind: 'mailing-telegram',
 		chatId: string,
 		messages: string[],
 		parseMode: 'HTML' | null = null
@@ -459,61 +419,6 @@ export class IntegrationDeliveryService {
 				throw error;
 			}
 		}
-	}
-
-	private async sendPaymentTelegram(
-		event: PaymentSucceededEventPayload
-	): Promise<void> {
-		const settings = await this.prisma.telegramBotSettings.findUnique({
-			where: { id: 'singleton' },
-			select: {
-				dailySummaryChatId: true,
-				paymentsThreadId: true
-			}
-		});
-		const chatId = settings?.dailySummaryChatId.trim();
-		const messageThreadId = settings?.paymentsThreadId;
-		if (!chatId)
-			throw new Error('Telegram payment chat ID is not configured');
-		if (!messageThreadId) {
-			throw new Error('Telegram Payments topic is not configured');
-		}
-		const text = [
-			'<b>Новый успешный платёж</b>',
-			'',
-			`<b>Сумма:</b> ${this.escapeHtml(event.payment.amount)} ₽`,
-			`<b>Тариф:</b> ${this.escapeHtml(this.getPlanLabel(event.payment.plan))}`,
-			`<b>Период:</b> ${this.escapeHtml(this.getBillingPeriodLabel(event.payment.billingPeriod))}`,
-			`<b>Пользователь:</b> ${this.escapeHtml(event.user.name || '—')}`,
-			`<b>Email:</b> ${this.escapeHtml(event.user.email || '—')}`,
-			`<b>Телефон:</b> ${this.escapeHtml(event.user.phone || '—')}`,
-			`<b>ID пользователя:</b> <code>${this.escapeHtml(event.user.id)}</code>`,
-			`<b>ID платежа:</b> <code>${this.escapeHtml(event.payment.id)}</code>`,
-			`<b>ID YooKassa:</b> <code>${this.escapeHtml(event.payment.yookassaId)}</code>`,
-			`<b>Оплачен:</b> ${this.escapeHtml(this.formatMoscowDateTime(new Date(event.payment.succeededAt)))} МСК`
-		].join('\n');
-		await this.telegram.sendMessage(chatId, text, {
-			messageThreadId,
-			parseMode: 'HTML'
-		});
-	}
-
-	private getPlanLabel(plan: Plan): string {
-		return plan === Plan.TRIAL
-			? 'Тест-драйв'
-			: plan === Plan.EASY
-				? 'Easy'
-				: 'Hard';
-	}
-
-	private getBillingPeriodLabel(period: BillingPeriod): string {
-		return period === BillingPeriod.MONTHLY ? 'месяц' : 'год';
-	}
-
-	private formatMoscowDateTime(value: Date): string {
-		return value.toLocaleString('ru-RU', {
-			timeZone: 'Europe/Moscow'
-		});
 	}
 
 	private async sendWebhook(

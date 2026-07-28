@@ -11,8 +11,11 @@ import {
 	MESSAGING_ROUTING_KEYS,
 	MessagingKind,
 	OUTBOX_EVENT_TYPE,
-	PAYMENT_SUCCEEDED_EVENT_TYPE
+	PAYMENT_SUCCEEDED_EVENT_TYPE,
+	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '@/messaging/messaging.constants';
+import { TELEGRAM_DESTINATION_SOURCE_KINDS } from '@/messaging/telegram-destination-unavailable-event';
 import {
 	BillingPeriod,
 	MailingDeliveryChannel,
@@ -313,7 +316,133 @@ const assertPaymentEvent = (payload: JsonRecord): IntegrationKind[] => {
 		'payload.subscription.expiresAt',
 		true
 	);
-	return ['payment-email', 'payment-telegram'];
+	return ['payment-email'];
+};
+
+const assertPaymentTelegramEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'payment',
+		'user',
+		'destination'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE
+	) {
+		throw new Error('Invalid payment Telegram event contract version');
+	}
+	const payment = assertRecord(payload.payment, 'payload.payment');
+	assertExactKeys(
+		payment,
+		['id', 'yookassaId', 'amount', 'plan', 'billingPeriod', 'succeededAt'],
+		[],
+		'payload.payment'
+	);
+	assertString(payment.id, 'payload.payment.id');
+	assertString(payment.yookassaId, 'payload.payment.yookassaId');
+	assertString(payment.amount, 'payload.payment.amount');
+	if (!Object.values(Plan).includes(payment.plan as Plan)) {
+		throw new Error('payload.payment.plan is invalid');
+	}
+	if (
+		!Object.values(BillingPeriod).includes(
+			payment.billingPeriod as BillingPeriod
+		)
+	) {
+		throw new Error('payload.payment.billingPeriod is invalid');
+	}
+	assertIsoDate(payment.succeededAt, 'payload.payment.succeededAt');
+
+	const user = assertRecord(payload.user, 'payload.user');
+	assertExactKeys(
+		user,
+		['id', 'name', 'email', 'phone'],
+		[],
+		'payload.user'
+	);
+	assertString(user.id, 'payload.user.id');
+	assertOptionalString(user.name, 'payload.user.name');
+	assertOptionalString(user.email, 'payload.user.email');
+	assertOptionalString(user.phone, 'payload.user.phone');
+
+	const destination = assertRecord(
+		payload.destination,
+		'payload.destination'
+	);
+	assertExactKeys(
+		destination,
+		['telegramChatId', 'messageThreadId'],
+		[],
+		'payload.destination'
+	);
+	assertString(
+		destination.telegramChatId,
+		'payload.destination.telegramChatId',
+		{ nullable: true }
+	);
+	if (
+		destination.messageThreadId !== null &&
+		(!Number.isInteger(destination.messageThreadId) ||
+			Number(destination.messageThreadId) < 1)
+	) {
+		throw new Error(
+			'payload.destination.messageThreadId must be a positive integer or null'
+		);
+	}
+	return 'payment-telegram';
+};
+
+const assertTelegramDestinationUnavailableEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'sourceEventId',
+		'sourceKind',
+		'destination',
+		'normalizedCode',
+		'occurredAt'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
+	) {
+		throw new Error(
+			'Invalid Telegram destination unavailable event contract version'
+		);
+	}
+	assertUuid(payload.sourceEventId, 'payload.sourceEventId');
+	if (
+		!TELEGRAM_DESTINATION_SOURCE_KINDS.includes(
+			payload.sourceKind as (typeof TELEGRAM_DESTINATION_SOURCE_KINDS)[number]
+		)
+	) {
+		throw new Error('payload.sourceKind is invalid');
+	}
+	const destination = assertRecord(
+		payload.destination,
+		'payload.destination'
+	);
+	assertExactKeys(
+		destination,
+		['telegramChatId'],
+		[],
+		'payload.destination'
+	);
+	assertString(
+		destination.telegramChatId,
+		'payload.destination.telegramChatId'
+	);
+	assertString(payload.normalizedCode, 'payload.normalizedCode', {
+		maxLength: 255
+	});
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	return 'telegram-destination-unavailable';
 };
 
 const assertMailingEvent = (payload: JsonRecord): IntegrationKind => {
@@ -445,6 +574,8 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 			return [assertLeadEvent(payload)];
 		case PAYMENT_SUCCEEDED_EVENT_TYPE:
 			return assertPaymentEvent(payload);
+		case PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE:
+			return [assertPaymentTelegramEvent(payload)];
 		case MAILING_DELIVERY_EVENT_TYPE:
 			return [assertMailingEvent(payload)];
 		case LIMIT_REACHED_EMAIL_EVENT_TYPE:
@@ -453,6 +584,8 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 		case DAILY_SUMMARY_EVENT_TYPE:
 		case DATABASE_BACKUP_EVENT_TYPE:
 			return [assertScheduledEvent(payload)];
+		case TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE:
+			return [assertTelegramDestinationUnavailableEvent(payload)];
 		default:
 			throw new Error(
 				`Unsupported messaging event type: ${String(payload.eventType)}`

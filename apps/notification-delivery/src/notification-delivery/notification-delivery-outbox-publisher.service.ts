@@ -4,7 +4,8 @@ import {
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
 	NOTIFICATION_DELIVERY_KINDS,
-	NotificationDeliveryKind
+	NotificationDeliveryKind,
+	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '../messaging/messaging.constants';
 import { assertMessagingEventContract } from '../messaging/messaging-event-contract';
 import { RabbitMqService } from '../messaging/rabbitmq.service';
@@ -333,6 +334,22 @@ export class NotificationDeliveryOutboxPublisherService
 	}
 
 	private getValidationError(event: ClaimedOutboxEvent): string | null {
+		if (
+			event.exchange === NotificationDeliveryExchange.EVENTS &&
+			event.routingKey === TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
+		) {
+			try {
+				assertMessagingEventContract(event.payload, {
+					eventType: event.eventType,
+					routingKey: event.routingKey,
+					messageId: event.messageId
+				});
+				return null;
+			} catch {
+				return 'INVALID_NOTIFICATION_DELIVERY_CONTRACT';
+			}
+		}
+
 		const kind = this.getOwnedKind(event);
 		if (!kind) {
 			return 'INVALID_NOTIFICATION_DELIVERY_ROUTE';

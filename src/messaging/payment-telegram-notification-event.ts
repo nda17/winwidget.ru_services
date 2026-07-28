@@ -1,11 +1,15 @@
 import { createMessagingHeaders } from '@/messaging/messaging-context';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
+import {
+	MESSAGING_ROUTING_KEYS,
+	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE
+} from '@/messaging/messaging.constants';
 import { BillingPeriod, Plan, Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 
-export interface PaymentSucceededEventPayload {
+export interface PaymentTelegramNotificationEventPayload {
 	schemaVersion: 1;
-	eventType: 'payment.succeeded.v1';
+	eventType: typeof PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE;
 	payment: {
 		id: string;
 		yookassaId: string;
@@ -20,28 +24,29 @@ export interface PaymentSucceededEventPayload {
 		email: string | null;
 		phone: string | null;
 	};
-	subscription: {
-		expiresAt: string | null;
+	destination: {
+		telegramChatId: string | null;
+		messageThreadId: number | null;
 	};
 }
 
-export function enqueuePaymentSucceededEvent(
+export function enqueuePaymentTelegramNotificationEvent(
 	transaction: Prisma.TransactionClient,
-	payload: PaymentSucceededEventPayload
+	payload: PaymentTelegramNotificationEventPayload
 ) {
 	const eventId = randomUUID();
 	assertMessagingEventContract(payload, {
-		eventType: 'payment.succeeded.v1',
-		routingKey: 'payment.succeeded.v1',
+		eventType: PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+		routingKey: MESSAGING_ROUTING_KEYS['payment-telegram'],
 		messageId: eventId,
-		kind: 'payment-email'
+		kind: 'payment-telegram'
 	});
 	return transaction.outboxEvent.create({
 		data: {
 			id: eventId,
 			messageId: eventId,
-			eventType: 'payment.succeeded.v1',
-			routingKey: 'payment.succeeded.v1',
+			eventType: PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+			routingKey: MESSAGING_ROUTING_KEYS['payment-telegram'],
 			payload: payload as unknown as Prisma.InputJsonValue,
 			headers: createMessagingHeaders({ messageId: eventId })
 		}

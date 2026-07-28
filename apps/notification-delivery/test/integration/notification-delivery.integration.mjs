@@ -50,9 +50,17 @@ const KINDS = {
 		queue: 'winwidget.payment-notification.email',
 		routingKey: 'payment.succeeded.v1'
 	},
+	'payment-telegram': {
+		queue: 'winwidget.payment-notification.telegram.v2',
+		routingKey: 'payment.notification.telegram.requested.v1'
+	},
 	'limit-email': {
 		queue: 'winwidget.limit-notification.email',
 		routingKey: 'lead.limit.reached.email.v2'
+	},
+	'limit-telegram': {
+		queue: 'winwidget.limit-notification.telegram',
+		routingKey: 'lead.limit.reached.telegram.v2'
 	}
 };
 
@@ -548,6 +556,43 @@ async function main() {
 		() => telegramMessages.find(message => message.chat_id === '123456')
 	);
 
+	const paymentTelegramId = randomUUID();
+	await publish('payment-telegram', paymentTelegramId, {
+		schemaVersion: 1,
+		eventType: 'payment.notification.telegram.requested.v1',
+		payment: {
+			id: 'payment-telegram-integration',
+			yookassaId: 'yookassa-telegram-integration',
+			amount: '1000',
+			plan: 'EASY',
+			billingPeriod: 'MONTHLY',
+			succeededAt: new Date().toISOString()
+		},
+		user: {
+			id: 'user-telegram-integration',
+			name: 'Integration User',
+			email: 'integration@example.test',
+			phone: null
+		},
+		destination: {
+			telegramChatId: '-1001234567890',
+			messageThreadId: 42
+		}
+	});
+	await waitForReceipt(
+		paymentTelegramId,
+		'payment-telegram',
+		'DELIVERED'
+	);
+	await waitFor('payment Telegram delivery', () =>
+		telegramMessages.find(
+			message =>
+				message.chat_id === '-1001234567890' &&
+				message.message_thread_id === 42 &&
+				message.text.includes('Новый успешный платёж')
+		)
+	);
+
 	const limitId = randomUUID();
 	const limitRecipient = 'limit-success@example.test';
 	await publish('limit-email', limitId, {
@@ -565,6 +610,31 @@ async function main() {
 	await waitFor('limit SMTP delivery', () =>
 		smtpMessages.some(message =>
 			message.recipients.includes(limitRecipient)
+		)
+	);
+
+	const limitTelegramId = randomUUID();
+	await publish('limit-telegram', limitTelegramId, {
+		schemaVersion: 2,
+		eventType: 'lead.limit.reached.telegram.v2',
+		entity: {
+			id: 'widget-limit-telegram-integration',
+			name: 'Limited Telegram Widget',
+			type: 'widget'
+		},
+		limit: 10,
+		destination: { telegramChatId: '654321' }
+	});
+	await waitForReceipt(
+		limitTelegramId,
+		'limit-telegram',
+		'DELIVERED'
+	);
+	await waitFor('limit Telegram delivery', () =>
+		telegramMessages.find(
+			message =>
+				message.chat_id === '654321' &&
+				message.text.includes('Лимит заявок исчерпан')
 		)
 	);
 
@@ -689,7 +759,7 @@ async function main() {
 	if (
 		overview.status !== 200 ||
 		overview.body?.heartbeat?.status !== 'ok' ||
-		overview.body?.deliveredLast24Hours < 4
+		overview.body?.deliveredLast24Hours < 6
 	) {
 		throw new Error(
 			`invalid control overview: ${JSON.stringify(overview.body)}`
@@ -706,7 +776,9 @@ async function main() {
 				'email',
 				'telegram',
 				'payment-email',
+				'payment-telegram',
 				'limit-email',
+				'limit-telegram',
 				'idempotency',
 				'dead-letter',
 				'manual-retry',

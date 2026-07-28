@@ -5,7 +5,8 @@ set -Eeuo pipefail
 APP_ROOT="${APP_ROOT:-/opt/winwidget}"
 ENV_FILE="${ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 COMPOSE_FILE="${COMPOSE_FILE:-$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml}"
-NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
+NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
+NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 HEALTHCHECK_ATTEMPTS="${NOTIFICATION_DELIVERY_HEALTHCHECK_ATTEMPTS:-60}"
 HEALTHCHECK_INTERVAL="${NOTIFICATION_DELIVERY_HEALTHCHECK_INTERVAL:-2}"
 
@@ -593,7 +594,9 @@ const run = async () => {
 		"email",
 		"telegram",
 		"payment-email",
+		"payment-telegram",
 		"limit-email",
+		"limit-telegram",
 	]) {
 		const baseQueue = MESSAGING_QUEUE_NAMES[kind];
 		for (const queue of [baseQueue, `${baseQueue}.dead-letter`]) {
@@ -866,15 +869,16 @@ container_env_value() {
 }
 
 validate_notification_cutover_marker() {
+	local marker_path="${1:-$NOTIFICATION_DELIVERY_CUTOVER_MARKER}"
 	local marker_mode
 	local marker_owner
 
-	if [[ ! -f "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
-		-L "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ]]; then
+	if [[ ! -f "$marker_path" ||
+		-L "$marker_path" ]]; then
 		return 1
 	fi
-	marker_mode="$(stat -c '%a' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER")"
-	marker_owner="$(stat -c '%u' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER")"
+	marker_mode="$(stat -c '%a' "$marker_path")"
+	marker_owner="$(stat -c '%u' "$marker_path")"
 	if [[ "$marker_mode" != "600" ||
 		"$marker_owner" != "$(id -u)" ]]; then
 		return 1
@@ -890,7 +894,7 @@ validate_notification_cutover_marker() {
 		END {
 			exit(revision && created && NR == 2 && !invalid ? 0 : 1)
 		}
-	' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER"
+	' "$marker_path"
 }
 
 assert_live_env_matches() {
@@ -1156,7 +1160,7 @@ if [[ "$(get_env_value NOTIFICATION_DELIVERY_INTERNAL_URL)" != "http://127.0.0.1
 fi
 require_env_exact_list \
 	"NOTIFICATION_DELIVERY_KINDS" \
-	"email,telegram,payment-email,limit-email"
+	"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram"
 if [[ ! "$HEALTHCHECK_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
 	echo "NOTIFICATION_DELIVERY_HEALTHCHECK_ATTEMPTS must be a positive integer." >&2
 	exit 1
@@ -1198,9 +1202,11 @@ compose_target \
 	--profile notification-delivery-migration \
 	config --quiet
 
-if ! validate_notification_cutover_marker; then
-	echo "The durable notification delivery cutover marker is missing or invalid." >&2
-	echo "Use the full deployment target for the first cutover or for ambiguous recovery." >&2
+if ! validate_notification_cutover_marker \
+	"$NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER" ||
+	! validate_notification_cutover_marker; then
+	echo "Both durable Notification Delivery ownership markers are required for a service-only rollout." >&2
+	echo "Use the full deployment target to complete or recover an ownership cutover." >&2
 	exit 1
 fi
 
@@ -1217,7 +1223,7 @@ live_integration_kinds="$(
 		"$live_integration_container_id" \
 		INTEGRATION_WORKER_KINDS || true
 )"
-if [[ "$(normalize_csv "$live_integration_kinds")" != "$(normalize_csv "webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram")" ]]; then
+if [[ "$(normalize_csv "$live_integration_kinds")" != "$(normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable")" ]]; then
 	echo "The live integration worker does not match the post-cutover kind boundary." >&2
 	echo "Use the full deployment target to repair topology ownership." >&2
 	exit 1
@@ -1228,7 +1234,7 @@ previous_container_id="$(
 )"
 if [[ -z "$previous_container_id" || "$previous_container_id" == *$'\n'* ]]; then
 	echo "Exactly one running notification-delivery-worker is required before a service-only rollout." >&2
-	echo "Use the full baseline deployment for the first notification delivery cutover." >&2
+	echo "Use the full deployment to establish both Notification Delivery cutover markers." >&2
 	exit 1
 fi
 

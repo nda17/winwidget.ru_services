@@ -11,8 +11,9 @@ READINESS_URL="${READINESS_URL:-http://127.0.0.1:4200/api/v1/health/ready}"
 GATEWAY_READINESS_URL="${GATEWAY_READINESS_URL:-http://127.0.0.1:4100/health/ready}"
 MAINTENANCE_READINESS_URL="${MAINTENANCE_READINESS_URL:-http://127.0.0.1:4300/health/ready}"
 NOTIFICATION_DELIVERY_READINESS_URL="${NOTIFICATION_DELIVERY_READINESS_URL:-http://127.0.0.1:4401/health/ready}"
-NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
-NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-cutover"
+NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
+NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
+NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
 HEALTHCHECK_ATTEMPTS="${HEALTHCHECK_ATTEMPTS:-30}"
 HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
 
@@ -334,13 +335,13 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_KINDS"
 		require_env_exact_list \
 			"INTEGRATION_WORKER_KINDS" \
-			"webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram"
+			"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable"
 		require_env_exact_list \
 			"MAINTENANCE_WORKER_KINDS" \
 			"database-backup"
 		require_env_exact_list \
 			"NOTIFICATION_DELIVERY_KINDS" \
-			"email,telegram,payment-email,limit-email"
+			"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram"
 		require_env_key "YOOKASSA_PRODUCTION_SHOP_ID"
 		require_env_key "YOOKASSA_PRODUCTION_SECRET_KEY"
 		require_env_key "PORT"
@@ -888,15 +889,16 @@ container_env_value() {
 }
 
 validate_notification_cutover_marker() {
+	local marker_path="${1:-$NOTIFICATION_DELIVERY_CUTOVER_MARKER}"
 	local marker_mode
 	local marker_owner
 
-	if [[ ! -f "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
-		-L "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ]]; then
+	if [[ ! -f "$marker_path" ||
+		-L "$marker_path" ]]; then
 		return 1
 	fi
-	marker_mode="$(stat -c '%a' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER")"
-	marker_owner="$(stat -c '%u' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER")"
+	marker_mode="$(stat -c '%a' "$marker_path")"
+	marker_owner="$(stat -c '%u' "$marker_path")"
 	if [[ "$marker_mode" != "600" ||
 		"$marker_owner" != "$(id -u)" ]]; then
 		return 1
@@ -912,10 +914,17 @@ validate_notification_cutover_marker() {
 		END {
 			exit(revision && created && NR == 2 && !invalid ? 0 : 1)
 		}
-	' "$NOTIFICATION_DELIVERY_CUTOVER_MARKER"
+	' "$marker_path"
 }
 
 validate_notification_database_urls "winwidget-api:$APP_VERSION"
+
+if ! validate_notification_cutover_marker \
+	"$NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER"; then
+	echo "The verified initial Notification Delivery cutover marker is required before moving Telegram payment/limit delivery." >&2
+	echo "Restore $NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER from the completed first cutover; do not infer ownership automatically." >&2
+	exit 1
+fi
 
 notification_migration_files="$(
 	git -C "$server_root" ls-files \
@@ -938,7 +947,18 @@ while IFS= read -r notification_migration_file; do
 		continue
 	fi
 	if ! awk '
-		BEGIN { RS = ";"; failed = 0 }
+		BEGIN {
+			RS = ";"
+			failed = 0
+			constraint_names[1] = "DELIVERY_RECEIPTS_IDENTITY_CHECK"
+			constraint_names[2] = "DELIVERY_FAILURES_CLASSIFICATION_CHECK"
+			constraint_names[3] = "CONTROL_ACTIONS_IDENTITY_CHECK"
+			constraint_names[4] = "NOTIFICATION_OUTBOX_EVENTS_IDENTITY_CHECK"
+			table_names[1] = "DELIVERY_RECEIPTS"
+			table_names[2] = "DELIVERY_FAILURES"
+			table_names[3] = "CONTROL_ACTIONS"
+			table_names[4] = "OUTBOX_EVENTS"
+		}
 		{
 			statement = $0
 			gsub(/--[^\n]*/, "", statement)
@@ -947,6 +967,14 @@ while IFS= read -r notification_migration_file; do
 			sub(/[[:space:]]+$/, "", statement)
 			if (statement == "") next
 			upper = toupper(statement)
+			if (upper == "BEGIN") {
+				transaction_begin += 1
+				next
+			}
+			if (upper == "COMMIT") {
+				transaction_commit += 1
+				next
+			}
 			if (
 				upper ~ /^CREATE (TYPE|TABLE|INDEX|UNIQUE INDEX) / ||
 				upper ~ /^ALTER TYPE .* ADD VALUE /
@@ -962,9 +990,49 @@ while IFS= read -r notification_migration_file; do
 				upper !~ / GENERATED / &&
 				upper !~ / IDENTITY/
 			) next
+			for (index = 1; index <= 4; index += 1) {
+				name = constraint_names[index]
+				table_name = table_names[index]
+				if (
+					upper ~ (
+						"^ALTER TABLE \\\"NOTIFICATION_DELIVERY\\\"\\.\\\"" \
+						table_name "\\\" DROP CONSTRAINT \\\"" name \
+						"\\\", ADD CONSTRAINT \\\"" name \
+						"\\\" CHECK[[:space:]]*\\("
+					) &&
+					gsub(/DROP CONSTRAINT/, "", upper) == 1 &&
+					gsub(/ADD CONSTRAINT/, "", upper) == 1 &&
+					gsub(/ALTER TABLE/, "", upper) == 1 &&
+					upper !~ /( CASCADE| DROP COLUMN| TRUNCATE | DELETE FROM | UPDATE | INSERT INTO | CREATE )/
+				) {
+					replaced[name] += 1
+					replaced_constraints = 1
+					next
+				}
+			}
 			failed = 1
 		}
-		END { exit(failed ? 1 : 0) }
+		END {
+			if (replaced_constraints) {
+				for (index = 1; index <= 4; index += 1) {
+					name = constraint_names[index]
+					if (replaced[name] != 1) {
+						failed = 1
+					}
+				}
+			}
+			if (
+				transaction_begin != transaction_commit ||
+				transaction_begin > 1 ||
+				transaction_commit > 1 ||
+				(transaction_begin && !replaced_constraints) ||
+				(replaced_constraints &&
+					(transaction_begin != 1 || transaction_commit != 1))
+			) {
+				failed = 1
+			}
+			exit(failed ? 1 : 0)
+		}
 	' "$server_root/$notification_migration_file"; then
 		echo "Notification delivery migration is not provably additive: $notification_migration_file" >&2
 		echo "Production notification migrations must follow the expand/contract policy." >&2
@@ -1006,11 +1074,19 @@ notification_cutover_candidate_ids="$(
 )"
 narrow_integration_kinds="$(
 	normalize_csv \
-		"webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram"
+		"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable"
 )"
 broad_integration_kinds="$(
 	normalize_csv \
-		"email,webhook,telegram,bitrix24,amo-crm,payment-email,payment-telegram,mailing-email,mailing-telegram,limit-email,limit-telegram,daily-summary-telegram"
+		"webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram"
+)"
+legacy_notification_delivery_kinds="$(
+	normalize_csv \
+		"email,telegram,payment-email,limit-email"
+)"
+expanded_notification_delivery_kinds="$(
+	normalize_csv \
+		"email,telegram,payment-email,payment-telegram,limit-email,limit-telegram"
 )"
 
 if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
@@ -1057,6 +1133,19 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 			echo "Forward cutover topology has an unexpected integration kind set." >&2
 			exit 1
 		fi
+		candidate_notification_container_id="$(
+			compose_notification_cutover ps --status running -q \
+				notification-delivery-worker
+		)"
+		candidate_notification_kinds="$(
+			container_env_value \
+				"$candidate_notification_container_id" \
+				NOTIFICATION_DELIVERY_KINDS || true
+		)"
+		if [[ "$(normalize_csv "$candidate_notification_kinds")" != "$expanded_notification_delivery_kinds" ]]; then
+			echo "Forward cutover topology has an unexpected Notification Delivery kind set." >&2
+			exit 1
+		fi
 		notification_forward_candidate_active=true
 	elif [[ -n "$notification_cutover_candidate_ids" ]]; then
 		if ! verify_saved_notification_cutover_containers \
@@ -1087,6 +1176,18 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 			echo "Saved forward cutover integration worker has an unexpected kind set." >&2
 			exit 1
 		fi
+		candidate_notification_container_id="$(
+			notification_cutover_container_id notification-delivery-worker
+		)"
+		candidate_notification_kinds="$(
+			container_env_value \
+				"$candidate_notification_container_id" \
+				NOTIFICATION_DELIVERY_KINDS || true
+		)"
+		if [[ "$(normalize_csv "$candidate_notification_kinds")" != "$expanded_notification_delivery_kinds" ]]; then
+			echo "Saved forward cutover Notification Delivery worker has an unexpected kind set." >&2
+			exit 1
+		fi
 		notification_forward_candidate_active=true
 		notification_forward_candidate_needs_recovery=true
 		echo "Saved forward cutover topology is incomplete but exact and recoverable."
@@ -1109,6 +1210,15 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 			echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
 			exit 1
 		fi
+		current_notification_delivery_kinds="$(
+			container_env_value \
+				"$running_notification_delivery_container_id" \
+				NOTIFICATION_DELIVERY_KINDS || true
+		)"
+		if [[ "$(normalize_csv "$current_notification_delivery_kinds")" != "$expanded_notification_delivery_kinds" ]]; then
+			echo "Cutover marker exists, but the live Notification Delivery worker has an unexpected kind set." >&2
+			exit 1
+		fi
 	fi
 else
 	if [[ -n "$notification_cutover_candidate_ids" ]]; then
@@ -1116,14 +1226,15 @@ else
 		echo "Restore the exact legacy containers or remove only the verified stale cutover project." >&2
 		exit 1
 	fi
-	if [[ -n "$notification_delivery_container_ids" ]]; then
-		echo "Notification delivery container state exists without the durable cutover marker." >&2
-		echo "This is ambiguous. Remove only the verified stale candidate or restore the marker manually after an ownership audit." >&2
+	if [[ -z "$running_notification_delivery_container_id" ||
+		"$running_notification_delivery_container_id" == *$'\n'* ||
+		"$notification_delivery_container_ids" == *$'\n'* ]]; then
+		echo "Exactly one running canonical Notification Delivery worker is required before the Telegram ownership cutover." >&2
 		exit 1
 	fi
 	if [[ -z "$current_integration_container_id" ||
 		"$current_integration_container_id" == *$'\n'* ]]; then
-		echo "Exactly one running legacy integration worker is required before the first cutover." >&2
+		echo "Exactly one running v1 integration worker is required before the Telegram cutover." >&2
 		exit 1
 	fi
 	current_integration_kinds="$(
@@ -1132,8 +1243,17 @@ else
 			INTEGRATION_WORKER_KINDS || true
 	)"
 	if [[ "$(normalize_csv "$current_integration_kinds")" != "$broad_integration_kinds" ]]; then
-		echo "Cutover marker is missing and the live integration worker is not the exact legacy owner." >&2
+		echo "Telegram cutover marker is missing and the live integration worker is not the exact v1 owner." >&2
 		echo "Refusing to guess whether a previous cutover partially completed." >&2
+		exit 1
+	fi
+	current_notification_delivery_kinds="$(
+		container_env_value \
+			"$running_notification_delivery_container_id" \
+			NOTIFICATION_DELIVERY_KINDS || true
+	)"
+	if [[ "$(normalize_csv "$current_notification_delivery_kinds")" != "$legacy_notification_delivery_kinds" ]]; then
+		echo "Telegram cutover marker is missing and the live Notification Delivery worker is not the exact four-kind v1 owner." >&2
 		exit 1
 	fi
 	current_integration_rabbit_url="$(
@@ -1146,7 +1266,7 @@ else
 	)"
 	if [[ -z "$current_outbox_container_id" ||
 		"$current_outbox_container_id" == *$'\n'* ]]; then
-		echo "Exactly one running legacy Outbox publisher is required before the first cutover." >&2
+		echo "Exactly one running v1 Outbox publisher is required before the Telegram cutover." >&2
 		exit 1
 	fi
 	current_outbox_rabbit_url="$(
@@ -1158,10 +1278,6 @@ else
 		"$current_outbox_rabbit_url" != "$(get_env_value RABBITMQ_PUBLISHER_URL)" ]]; then
 		echo "First cutover cannot rotate the live legacy integration or Outbox RabbitMQ credentials." >&2
 		echo "Deploy the credential rotation separately, then retry the full notification cutover." >&2
-		exit 1
-	fi
-	if ss -H -ltn '( sport = :4401 )' | grep -q .; then
-		echo "Port 4401 is already listening before the first notification delivery candidate starts." >&2
 		exit 1
 	fi
 	notification_delivery_first_cutover=true
@@ -1640,9 +1756,9 @@ provision_rabbitmq_user \
 	'^winwidget\..*' \
 	'^winwidget\..*' \
 	''
-integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram|mailing\..*|limit-notification\.telegram|report\.daily-summary\.telegram)(\..*)?$'
+integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.telegram-destination-unavailable)(\..*)?$'
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
-	integration_worker_read_pattern='^winwidget\.(lead-integration|payment-notification|mailing|limit-notification|report)\..*'
+	integration_worker_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$'
 fi
 provision_rabbitmq_user \
 	"$integration_user" \
@@ -1663,7 +1779,7 @@ provision_rabbitmq_user \
 	"$notification_delivery_password_base64" \
 	'^$' \
 	'^(winwidget\.events|winwidget\.dead-letter)$' \
-	'^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.email|limit-notification\.email)(\..*)?$' \
+	'^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.(email|telegram\.v2)|limit-notification\.(email|telegram))(\..*)?$' \
 	''
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
@@ -1674,6 +1790,48 @@ provision_rabbitmq_user \
 	'monitoring'
 
 echo "RabbitMQ admin/service users and least-privilege permissions are verified"
+
+assert_cutover_rabbitmq_topology() {
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		-e RABBITMQ_ASSERT_TOPOLOGY=true \
+		-e RABBITMQ_CONNECTION_NAME=winwidget-notification-telegram-cutover-topology \
+		--entrypoint node \
+		"winwidget-api:$APP_VERSION" \
+		-e '
+const {
+	RabbitMqService,
+} = require("./dist/src/messaging/rabbitmq.service.js");
+
+const configService = {
+	get(key) {
+		if (key === "RABBITMQ_URL") {
+			return process.env.RABBITMQ_PUBLISHER_URL;
+		}
+		return process.env[key];
+	},
+};
+const rabbitMq = new RabbitMqService(configService);
+
+rabbitMq
+	.onModuleInit()
+	.then(async () => {
+		process.stdout.write(
+			"Telegram ownership cutover RabbitMQ topology asserted\n",
+		);
+		await rabbitMq.onApplicationShutdown();
+	})
+	.catch(async error => {
+		process.stderr.write(
+			`${error instanceof Error ? error.message : "RabbitMQ topology assertion failed"}\n`,
+		);
+		try {
+			await rabbitMq.onApplicationShutdown();
+		} catch {}
+		process.exitCode = 1;
+	});
+'
+}
 
 wait_for_rabbitmq_topology() {
 	local rabbitmq_container_id
@@ -2213,17 +2371,29 @@ const run = async () => {
 		process.env.RABBITMQ_NOTIFICATION_DELIVERY_URL,
 		"RABBITMQ_NOTIFICATION_DELIVERY_URL",
 	);
+	const legacyTelegramOwner =
+		process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy";
 	const groups = [
 		{
 			kinds: ["email", "telegram", "payment-email", "limit-email"],
-			user:
-				process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy"
-					? integrationUser
-					: notificationUser,
-			connectionName:
-				process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy"
-					? "winwidget-integration-worker"
-					: "winwidget-notification-delivery-worker",
+			user: notificationUser,
+			connectionName: "winwidget-notification-delivery-worker",
+			notification: true,
+		},
+		{
+			queues: legacyTelegramOwner
+				? [
+						"winwidget.payment-notification.telegram",
+						"winwidget.limit-notification.telegram",
+					]
+				: [
+						MESSAGING_QUEUE_NAMES["payment-telegram"],
+						MESSAGING_QUEUE_NAMES["limit-telegram"],
+					],
+			user: legacyTelegramOwner ? integrationUser : notificationUser,
+			connectionName: legacyTelegramOwner
+				? "winwidget-integration-worker"
+				: "winwidget-notification-delivery-worker",
 			notification: true,
 		},
 		{
@@ -2231,11 +2401,12 @@ const run = async () => {
 				"webhook",
 				"bitrix24",
 				"amo-crm",
-				"payment-telegram",
 				"mailing-email",
 				"mailing-telegram",
-				"limit-telegram",
 				"daily-summary-telegram",
+				...(legacyTelegramOwner
+					? []
+					: ["telegram-destination-unavailable"]),
 			],
 			user: integrationUser,
 			connectionName: "winwidget-integration-worker",
@@ -2245,8 +2416,15 @@ const run = async () => {
 
 	let closedLegacyOrphan = false;
 	for (const group of groups) {
-		for (const kind of group.kinds) {
-			const baseQueue = MESSAGING_QUEUE_NAMES[kind];
+		const baseQueues =
+			group.queues ??
+			group.kinds.map(kind => MESSAGING_QUEUE_NAMES[kind]);
+		for (const baseQueue of baseQueues) {
+			if (!baseQueue) {
+				throw new OwnershipError(
+					"RabbitMQ ownership group contains an unknown queue",
+				);
+			}
 			for (const queue of [baseQueue, `${baseQueue}.dead-letter`]) {
 				const state = await request(
 					`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(
@@ -2333,6 +2511,7 @@ run()
 
 first_cutover_producer_ids=()
 first_cutover_legacy_worker_id=""
+first_cutover_legacy_notification_worker_id=""
 first_cutover_candidate_started=false
 first_cutover_marker_tmp=""
 first_cutover_recovery_active=false
@@ -2343,19 +2522,20 @@ notification_cutover_last_service_state=""
 
 print_notification_cutover_runbook() {
 	cat >&2 <<'RUNBOOK'
-Notification delivery first-cutover preflight did not pass.
-Do not start notification-delivery-worker and the legacy integration-worker on the same four queues.
+Notification Delivery Telegram ownership cutover did not pass.
+Do not start Notification Delivery and the legacy integration worker on the same payment/limit Telegram queues.
 
 Manual recovery/runbook:
-1. Keep the current integration-worker running with the four legacy kinds enabled.
+1. Keep the current v1 Notification Delivery worker and integration worker running.
 2. Through the existing Messaging admin flow, resolve or retry every unresolved
-   email, telegram, payment-email and limit-email failure.
+   payment-telegram and limit-telegram failure.
 3. Wait until their PROCESSING/RETRY_SCHEDULED receipts disappear and every
    matching main, retry-v2.* and dead-letter RabbitMQ queue reports zero ready
    and zero unacknowledged messages.
 4. Re-run the full `all` deployment. The script will stop producers, recheck the
-   quiescent boundary, stop the legacy worker, then start the two disjoint workers.
-5. Do not use the notification-delivery service-only target for the first cutover.
+   quiescent boundary, stop both old workers, then start the disjoint workers.
+5. Do not use the notification-delivery service-only target until
+   `.notification-delivery-telegram-cutover-v1` exists.
 RUNBOOK
 }
 
@@ -2364,15 +2544,20 @@ notification_cutover_expected_queues() {
 	local retry_index
 
 	for base_queue in \
-		winwidget.lead-integration.email \
-		winwidget.lead-integration.telegram \
-		winwidget.payment-notification.email \
-		winwidget.limit-notification.email; do
+		winwidget.payment-notification.telegram \
+		winwidget.limit-notification.telegram; do
 		printf '%s\n%s.dead-letter\n' "$base_queue" "$base_queue"
 		for retry_index in 1 2 3; do
 			printf '%s.retry-v2.%s\n' "$base_queue" "$retry_index"
 		done
 	done
+	if [[ "$first_cutover_candidate_started" == "true" ]]; then
+		base_queue="winwidget.payment-notification.telegram.v2"
+		printf '%s\n%s.dead-letter\n' "$base_queue" "$base_queue"
+		for retry_index in 1 2 3; do
+			printf '%s.retry-v2.%s\n' "$base_queue" "$retry_index"
+		done
+	fi
 }
 
 notification_cutover_queue_state() {
@@ -2392,9 +2577,8 @@ notification_cutover_queue_state() {
 			-p "$rabbitmq_vhost" \
 			name messages_ready messages_unacknowledged consumers |
 		awk '
-			$1 ~ /^winwidget\.lead-integration\.(email|telegram)(\.|$)/ ||
-			$1 ~ /^winwidget\.payment-notification\.email(\.|$)/ ||
-			$1 ~ /^winwidget\.limit-notification\.email(\.|$)/
+			$1 ~ /^winwidget\.payment-notification\.telegram(\.v2)?(\.|$)/ ||
+			$1 ~ /^winwidget\.limit-notification\.telegram(\.|$)/
 		'
 }
 
@@ -2413,7 +2597,7 @@ const prisma = new PrismaClient({
 		},
 	},
 });
-const kinds = ["email", "telegram", "payment-email", "limit-email"];
+const kinds = ["payment-telegram", "limit-telegram"];
 
 Promise.all([
 	prisma.integrationDeliveryFailure.count({
@@ -2428,9 +2612,22 @@ Promise.all([
 			status: { in: ["PROCESSING", "RETRY_SCHEDULED"] },
 		},
 	}),
+	prisma.outboxEvent.count({
+		where: {
+			routingKey: {
+				in: [
+					"payment.succeeded.v1",
+					"lead.limit.reached.telegram.v2",
+				],
+			},
+			status: { in: ["PENDING", "PUBLISHING", "FAILED"] },
+		},
+	}),
 ])
-	.then(([unresolvedFailures, activeReceipts]) => {
-		process.stdout.write(`${unresolvedFailures}\t${activeReceipts}\n`);
+	.then(([unresolvedFailures, activeReceipts, pendingOutbox]) => {
+		process.stdout.write(
+			`${unresolvedFailures}\t${activeReceipts}\t${pendingOutbox}\n`,
+		);
 	})
 	.catch(() => {
 		process.stderr.write(
@@ -2461,10 +2658,23 @@ const prisma = new PrismaClient({
 	},
 });
 
+const kinds = ["payment-telegram", "limit-telegram"];
 Promise.all([
-	prisma.notificationDeliveryReceipt.count(),
-	prisma.notificationDeliveryFailure.count(),
-	prisma.notificationDeliveryOutboxEvent.count(),
+	prisma.notificationDeliveryReceipt.count({
+		where: { consumer: { in: kinds } },
+	}),
+	prisma.notificationDeliveryFailure.count({
+		where: { consumer: { in: kinds } },
+	}),
+	prisma.notificationDeliveryOutboxEvent.count({
+		where: {
+			OR: [
+				{ routingKey: { in: ["manual.payment-telegram", "manual.limit-telegram"] } },
+				{ routingKey: { in: ["payment-telegram.dead-letter", "limit-telegram.dead-letter"] } },
+				{ routingKey: "notification.telegram.destination-unavailable.v1" },
+			],
+		},
+	}),
 ])
 	.then(([receipts, failures, outbox]) => {
 		process.stdout.write(`${receipts}\t${failures}\t${outbox}\n`);
@@ -2510,19 +2720,15 @@ notification_cutover_consumers_ready() {
 
 	state="$(notification_cutover_queue_state)"
 	for queue in \
-		winwidget.lead-integration.email \
-		winwidget.lead-integration.email.dead-letter \
-		winwidget.lead-integration.telegram \
-		winwidget.lead-integration.telegram.dead-letter \
-		winwidget.payment-notification.email \
-		winwidget.payment-notification.email.dead-letter \
-		winwidget.limit-notification.email \
-		winwidget.limit-notification.email.dead-letter; do
+		winwidget.payment-notification.telegram \
+		winwidget.payment-notification.telegram.dead-letter \
+		winwidget.limit-notification.telegram \
+		winwidget.limit-notification.telegram.dead-letter; do
 		queue_line="$(
 			awk -v queue="$queue" '$1 == queue { print; exit }' <<<"$state"
 		)"
 		if [[ -z "$queue_line" ]]; then
-			echo "Missing RabbitMQ queue required for first cutover: $queue" >&2
+			echo "Missing RabbitMQ queue required for Telegram cutover: $queue" >&2
 			return 1
 		fi
 		read -r name ready unacknowledged consumers <<<"$queue_line"
@@ -2542,6 +2748,7 @@ notification_cutover_is_clear() {
 	local consumers
 	local unresolved_failures
 	local active_receipts
+	local pending_outbox
 
 	notification_cutover_last_queue_state="$(
 		notification_cutover_queue_state
@@ -2568,13 +2775,81 @@ notification_cutover_is_clear() {
 	notification_cutover_last_database_state="$(
 		notification_cutover_database_state
 	)"
-	IFS=$'\t' read -r unresolved_failures active_receipts \
+	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox \
 		<<<"$notification_cutover_last_database_state"
 	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
-		! "$active_receipts" =~ ^[0-9]+$ ]]; then
+		! "$active_receipts" =~ ^[0-9]+$ ||
+		! "$pending_outbox" =~ ^[0-9]+$ ]]; then
 		return 1
 	fi
-	[[ "$unresolved_failures" == "0" && "$active_receipts" == "0" ]]
+	[[ "$unresolved_failures" == "0" &&
+		"$active_receipts" == "0" &&
+		"$pending_outbox" == "0" ]]
+}
+
+delete_legacy_payment_telegram_queues() {
+	local rabbitmq_container_id
+	local queue
+	local queue_line
+	local name
+	local ready
+	local unacknowledged
+	local consumers
+	local state
+
+	if ! validate_notification_cutover_marker; then
+		echo "Refusing to delete legacy payment Telegram queues before the durable Telegram cutover marker." >&2
+		return 1
+	fi
+	rabbitmq_container_id="$(
+		compose_target ps --status running -q rabbitmq
+	)"
+	if [[ -z "$rabbitmq_container_id" ||
+		"$rabbitmq_container_id" == *$'\n'* ]]; then
+		echo "Exactly one running RabbitMQ container is required to retire legacy queues." >&2
+		return 1
+	fi
+	state="$(
+		docker exec "$rabbitmq_container_id" \
+			rabbitmqctl --silent list_queues \
+				-p "$rabbitmq_vhost" \
+				name messages_ready messages_unacknowledged consumers
+	)"
+	for queue in \
+		winwidget.payment-notification.telegram \
+		winwidget.payment-notification.telegram.dead-letter \
+		winwidget.payment-notification.telegram.retry-v2.1 \
+		winwidget.payment-notification.telegram.retry-v2.2 \
+		winwidget.payment-notification.telegram.retry-v2.3; do
+		queue_line="$(
+			awk -v queue="$queue" '$1 == queue { print; exit }' <<<"$state"
+		)"
+		if [[ -z "$queue_line" ]]; then
+			continue
+		fi
+		read -r name ready unacknowledged consumers <<<"$queue_line"
+		if [[ "$ready" != "0" ||
+			"$unacknowledged" != "0" ||
+			"$consumers" != "0" ]]; then
+			echo "Legacy queue is not strictly empty/unowned and cannot be deleted: $queue" >&2
+			return 1
+		fi
+	done
+	for queue in \
+		winwidget.payment-notification.telegram \
+		winwidget.payment-notification.telegram.dead-letter \
+		winwidget.payment-notification.telegram.retry-v2.1 \
+		winwidget.payment-notification.telegram.retry-v2.2 \
+		winwidget.payment-notification.telegram.retry-v2.3; do
+		if awk -v queue="$queue" '$1 == queue { found = 1 } END { exit(found ? 0 : 1) }' \
+			<<<"$state"; then
+			docker exec "$rabbitmq_container_id" \
+				rabbitmqctl delete_queue -p "$rabbitmq_vhost" \
+					"$queue" --if-empty --if-unused \
+				>/dev/null
+		fi
+	done
+	echo "Strictly empty legacy payment Telegram queues were retired."
 }
 
 restore_first_cutover_producers_on_exit() {
@@ -2623,7 +2898,7 @@ restore_first_cutover_producers_on_exit() {
 		"$integration_password_base64" \
 		'^$' \
 		'^(winwidget\.retry|winwidget\.dead-letter)$' \
-		'^winwidget\.(lead-integration|payment-notification|mailing|limit-notification|report)\..*' \
+		'^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$' \
 		''; then
 		echo "CRITICAL: broad legacy RabbitMQ permissions could not be restored." >&2
 		recovery_failed=true
@@ -2639,6 +2914,17 @@ restore_first_cutover_producers_on_exit() {
 			recovery_failed=true
 		fi
 	fi
+	if [[ -n "$first_cutover_legacy_notification_worker_id" ]]; then
+		if ! docker image inspect "$(
+			docker inspect --format '{{ .Image }}' \
+				"$first_cutover_legacy_notification_worker_id" 2>/dev/null
+		)" >/dev/null 2>&1 ||
+			! docker start \
+				"$first_cutover_legacy_notification_worker_id" >/dev/null; then
+			echo "CRITICAL: the unchanged v1 Notification Delivery worker could not be restarted." >&2
+			recovery_failed=true
+		fi
+	fi
 
 	if [[ ${#first_cutover_producer_ids[@]} -gt 0 ]] &&
 		! docker start "${first_cutover_producer_ids[@]}" >/dev/null; then
@@ -2650,6 +2936,7 @@ restore_first_cutover_producers_on_exit() {
 		running=true
 		for container_id in \
 			"$first_cutover_legacy_worker_id" \
+			"$first_cutover_legacy_notification_worker_id" \
 			"${first_cutover_producer_ids[@]}"; do
 			[[ -n "$container_id" ]] || continue
 			if [[ "$(docker inspect --format '{{ .State.Running }}' \
@@ -3034,6 +3321,7 @@ perform_notification_first_cutover_preflight() {
 	local initial_database_state
 	local unresolved_failures
 	local active_receipts
+	local pending_outbox
 	local attempt
 
 	if [[ "$notification_delivery_first_cutover" != "true" ]]; then
@@ -3050,6 +3338,15 @@ perform_notification_first_cutover_preflight() {
 		return 1
 	fi
 	first_cutover_legacy_worker_id="$legacy_integration_container_id"
+	first_cutover_legacy_notification_worker_id="$(
+		compose_target ps --status running -q notification-delivery-worker
+	)"
+	if [[ -z "$first_cutover_legacy_notification_worker_id" ||
+		"$first_cutover_legacy_notification_worker_id" == *$'\n'* ]]; then
+		echo "Exactly one running v1 Notification Delivery worker is required for the Telegram cutover." >&2
+		print_notification_cutover_runbook
+		return 1
+	fi
 
 	wait_for_rabbitmq_topology
 	if ! notification_cutover_consumers_ready; then
@@ -3063,11 +3360,12 @@ perform_notification_first_cutover_preflight() {
 	fi
 
 	initial_database_state="$(notification_cutover_database_state)"
-	IFS=$'\t' read -r unresolved_failures active_receipts \
+	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox \
 		<<<"$initial_database_state"
 	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
-		! "$active_receipts" =~ ^[0-9]+$ ]]; then
-		echo "Public delivery state returned an invalid first-cutover result." >&2
+		! "$active_receipts" =~ ^[0-9]+$ ||
+		! "$pending_outbox" =~ ^[0-9]+$ ]]; then
+		echo "Public delivery state returned an invalid Telegram-cutover result." >&2
 		print_notification_cutover_runbook
 		return 1
 	fi
@@ -3076,26 +3374,25 @@ perform_notification_first_cutover_preflight() {
 		print_notification_cutover_runbook
 		return 1
 	fi
-
 	for service in outbox-publisher api api-gateway maintenance-worker; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
 		if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
-			echo "Exactly one running $service is required before first cutover." >&2
+			echo "Exactly one running $service is required before the Telegram cutover." >&2
 			print_notification_cutover_runbook
 			return 1
 		fi
 		first_cutover_producer_ids+=("$container_id")
 	done
 
-	echo "First notification delivery cutover: stopping producers and draining four legacy queues."
+	echo "Notification Delivery Telegram cutover: stopping producers and draining two legacy queues."
 	first_cutover_recovery_active=true
 	trap restore_first_cutover_producers_on_exit EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	compose_target stop api-gateway
-	compose_target stop api outbox-publisher
+	compose_target stop api
 	compose_target stop maintenance-worker
 
 	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
@@ -3113,6 +3410,14 @@ perform_notification_first_cutover_preflight() {
 		sleep "$HEALTHCHECK_INTERVAL"
 	done
 
+	compose_target stop outbox-publisher
+	if ! notification_cutover_is_clear; then
+		echo "Moved Telegram state changed while stopping the legacy Outbox publisher." >&2
+		echo "$notification_cutover_last_queue_state" >&2
+		print_notification_cutover_runbook
+		return 1
+	fi
+
 	compose_target stop integration-worker
 	if ! notification_cutover_is_clear; then
 		echo "Moved notification state changed while stopping the legacy integration-worker." >&2
@@ -3120,8 +3425,9 @@ perform_notification_first_cutover_preflight() {
 		print_notification_cutover_runbook
 		return 1
 	fi
+	compose_target stop notification-delivery-worker
 
-	echo "First notification delivery cutover boundary is quiescent and verified."
+	echo "Notification Delivery Telegram cutover boundary is quiescent and verified."
 }
 
 verify_notification_delivery_migration_boundary
@@ -3148,6 +3454,16 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 fi
 
 perform_notification_first_cutover_preflight
+
+if [[ "$notification_delivery_first_cutover" == "true" ]]; then
+	assert_cutover_rabbitmq_topology
+	wait_for_rabbitmq_topology
+fi
+
+if [[ "$notification_delivery_first_cutover" != "true" ]] &&
+	validate_notification_cutover_marker; then
+	delete_legacy_payment_telegram_queues
+fi
 
 if [[ "$notification_forward_candidate_needs_recovery" == "true" ]]; then
 	echo "Restoring the exact saved forward topology before canonical handoff."
@@ -3176,9 +3492,9 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 		"$integration_password_base64" \
 		'^$' \
 		'^(winwidget\.retry|winwidget\.dead-letter)$' \
-		'^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment-notification\.telegram|mailing\..*|limit-notification\.telegram|report\.daily-summary\.telegram)(\..*)?$' \
+		'^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|mailing\..*|report\.daily-summary\.telegram|notification\.telegram-destination-unavailable)(\..*)?$' \
 		''
-	echo "Legacy integration RabbitMQ read permissions were narrowed after the verified cutover boundary."
+	echo "Integration RabbitMQ read permissions were narrowed after the verified Telegram cutover boundary."
 
 	notification_cutover_candidate_started_at="$(
 		date -u +'%Y-%m-%dT%H:%M:%S.%3NZ'
@@ -3223,11 +3539,16 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	notification_cutover_marker_revision="$APP_REVISION"
 	notification_forward_candidate_active=true
 	first_cutover_recovery_active=false
+	echo "Durable notification delivery cutover marker created before enabling producers or public traffic."
+	# Keep every producer stopped until the legacy payment queue and its
+	# payment.succeeded.v1 binding are gone. If retirement fails, exit
+	# fail-closed with the marker present; the next full deploy resumes forward
+	# before any publisher or public Gateway is started.
+	delete_legacy_payment_telegram_queues
 	forward_cutover_recovery_active=true
 	trap restore_forward_cutover_on_exit EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
-	echo "Durable notification delivery cutover marker created before enabling producers or public traffic."
 	start_notification_cutover_services outbox-publisher
 	wait_for_rabbitmq_topology
 	start_notification_cutover_services api-gateway

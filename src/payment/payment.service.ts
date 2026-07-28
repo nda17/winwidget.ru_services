@@ -1,5 +1,6 @@
 import { AffiliateService } from '@/affiliate/affiliate.service';
 import { enqueuePaymentSucceededEvent } from '@/messaging/payment-succeeded-event';
+import { enqueuePaymentTelegramNotificationEvent } from '@/messaging/payment-telegram-notification-event';
 import { PaymentCleanupService } from '@/payment/payment-cleanup.service';
 import { YookassaService } from '@/payment/yookassa.service';
 import { PrismaService } from '@/prisma.service';
@@ -626,26 +627,54 @@ export class PaymentService {
 			const phoneIdentity = user?.authIdentities.find(
 				identity => identity.type === AuthIdentityType.PHONE
 			);
+			const telegramSettings =
+				await transaction.telegramBotSettings.findUnique({
+					where: { id: 'singleton' },
+					select: {
+						dailySummaryChatId: true,
+						paymentsThreadId: true
+					}
+				});
+			const telegramChatId =
+				telegramSettings?.dailySummaryChatId?.trim() || null;
+			const messageThreadId =
+				Number.isInteger(telegramSettings?.paymentsThreadId) &&
+				Number(telegramSettings?.paymentsThreadId) > 0
+					? Number(telegramSettings?.paymentsThreadId)
+					: null;
+			const succeededAt = updatedPayment.updatedAt.toISOString();
+			const paymentEvent = {
+				id: updatedPayment.id,
+				yookassaId: updatedPayment.yookassaId,
+				amount: updatedPayment.amount,
+				plan: payment.plan,
+				billingPeriod: payment.billingPeriod,
+				succeededAt
+			};
+			const userEvent = {
+				id: userId,
+				name: user?.name ?? null,
+				email: emailIdentity?.value ?? null,
+				phone: phoneIdentity?.value ?? null
+			};
 
 			await enqueuePaymentSucceededEvent(transaction, {
 				schemaVersion: 1,
 				eventType: 'payment.succeeded.v1',
-				payment: {
-					id: updatedPayment.id,
-					yookassaId: updatedPayment.yookassaId,
-					amount: updatedPayment.amount,
-					plan: payment.plan,
-					billingPeriod: payment.billingPeriod,
-					succeededAt: updatedPayment.updatedAt.toISOString()
-				},
-				user: {
-					id: userId,
-					name: user?.name ?? null,
-					email: emailIdentity?.value ?? null,
-					phone: phoneIdentity?.value ?? null
-				},
+				payment: paymentEvent,
+				user: userEvent,
 				subscription: {
 					expiresAt: subscription.expiresAt?.toISOString() ?? null
+				}
+			});
+			await enqueuePaymentTelegramNotificationEvent(transaction, {
+				schemaVersion: 1,
+				eventType: 'payment.notification.telegram.requested.v1',
+				payment: paymentEvent,
+				user: userEvent,
+				destination: {
+					telegramChatId,
+					messageThreadId
 				}
 			});
 

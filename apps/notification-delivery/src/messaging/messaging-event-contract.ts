@@ -8,9 +8,12 @@ import {
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
+	LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	MESSAGING_ROUTING_KEYS,
 	NotificationDeliveryKind,
 	OUTBOX_EVENT_TYPE,
+	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
 	PAYMENT_SUCCEEDED_EVENT_TYPE
 } from './messaging.constants';
 
@@ -85,6 +88,12 @@ const assertOptionalString = (value: unknown, path: string): void => {
 	if (value === undefined || value === null) return;
 	if (typeof value !== 'string' || value.length > 10_000) {
 		throw new Error(`${path} must be a string or null`);
+	}
+};
+
+const assertUuid = (value: unknown, path: string): void => {
+	if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+		throw new Error(`${path} must be a UUID`);
 	}
 };
 
@@ -244,7 +253,74 @@ const assertPaymentEvent = (
 	) {
 		throw new Error('Invalid payment event contract version');
 	}
-	const payment = assertRecord(payload.payment, 'payload.payment');
+	assertPaymentDetails(payload.payment);
+	assertPaymentUser(payload.user);
+
+	const subscription = assertRecord(
+		payload.subscription,
+		'payload.subscription'
+	);
+	assertExactKeys(subscription, ['expiresAt'], [], 'payload.subscription');
+	assertIsoDate(
+		subscription.expiresAt,
+		'payload.subscription.expiresAt',
+		true
+	);
+	return 'payment-email';
+};
+
+const assertPaymentTelegramEvent = (
+	payload: JsonRecord
+): NotificationDeliveryKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'payment',
+		'user',
+		'destination'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE
+	) {
+		throw new Error(
+			'Invalid payment Telegram notification contract version'
+		);
+	}
+	assertPaymentDetails(payload.payment);
+	assertPaymentUser(payload.user);
+
+	const destination = assertRecord(
+		payload.destination,
+		'payload.destination'
+	);
+	assertExactKeys(
+		destination,
+		['telegramChatId', 'messageThreadId'],
+		[],
+		'payload.destination'
+	);
+	assertString(
+		destination.telegramChatId,
+		'payload.destination.telegramChatId',
+		{
+			nullable: true
+		}
+	);
+	if (
+		destination.messageThreadId !== null &&
+		(!Number.isInteger(destination.messageThreadId) ||
+			Number(destination.messageThreadId) < 1)
+	) {
+		throw new Error(
+			'payload.destination.messageThreadId must be a positive integer or null'
+		);
+	}
+	return 'payment-telegram';
+};
+
+const assertPaymentDetails = (value: unknown): void => {
+	const payment = assertRecord(value, 'payload.payment');
 	assertExactKeys(
 		payment,
 		['id', 'yookassaId', 'amount', 'plan', 'billingPeriod', 'succeededAt'],
@@ -267,8 +343,10 @@ const assertPaymentEvent = (
 		throw new Error('payload.payment.billingPeriod is invalid');
 	}
 	assertIsoDate(payment.succeededAt, 'payload.payment.succeededAt');
+};
 
-	const user = assertRecord(payload.user, 'payload.user');
+const assertPaymentUser = (value: unknown): void => {
+	const user = assertRecord(value, 'payload.user');
 	assertExactKeys(
 		user,
 		['id', 'name', 'email', 'phone'],
@@ -279,18 +357,6 @@ const assertPaymentEvent = (
 	assertOptionalString(user.name, 'payload.user.name');
 	assertOptionalString(user.email, 'payload.user.email');
 	assertOptionalString(user.phone, 'payload.user.phone');
-
-	const subscription = assertRecord(
-		payload.subscription,
-		'payload.subscription'
-	);
-	assertExactKeys(subscription, ['expiresAt'], [], 'payload.subscription');
-	assertIsoDate(
-		subscription.expiresAt,
-		'payload.subscription.expiresAt',
-		true
-	);
-	return 'payment-email';
 };
 
 const assertLimitEvent = (
@@ -305,32 +371,104 @@ const assertLimitEvent = (
 	]);
 	if (
 		payload.schemaVersion !== 2 ||
-		payload.eventType !== LIMIT_REACHED_EMAIL_EVENT_TYPE ||
 		!Number.isInteger(payload.limit) ||
 		Number(payload.limit) < 1
 	) {
-		throw new Error('Invalid limit email event contract');
+		throw new Error('Invalid limit event contract');
 	}
 	assertEntity(payload.entity, true);
 	const destination = assertRecord(
 		payload.destination,
 		'payload.destination'
 	);
-	assertExactKeys(destination, ['email'], [], 'payload.destination');
-	assertString(destination.email, 'payload.destination.email');
-	return 'limit-email';
+	if (payload.eventType === LIMIT_REACHED_EMAIL_EVENT_TYPE) {
+		assertExactKeys(destination, ['email'], [], 'payload.destination');
+		assertString(destination.email, 'payload.destination.email');
+		return 'limit-email';
+	}
+	if (payload.eventType === LIMIT_REACHED_TELEGRAM_EVENT_TYPE) {
+		assertExactKeys(
+			destination,
+			['telegramChatId'],
+			[],
+			'payload.destination'
+		);
+		assertString(
+			destination.telegramChatId,
+			'payload.destination.telegramChatId'
+		);
+		return 'limit-telegram';
+	}
+	throw new Error('Invalid limit event type');
+};
+
+type ResolvedContractKind =
+	| NotificationDeliveryKind
+	| 'telegram-destination-unavailable-outcome';
+
+const assertTelegramDestinationUnavailableEvent = (
+	payload: JsonRecord
+): ResolvedContractKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'sourceEventId',
+		'sourceKind',
+		'destination',
+		'normalizedCode',
+		'occurredAt'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
+	) {
+		throw new Error(
+			'Invalid Telegram destination unavailable contract version'
+		);
+	}
+	assertUuid(payload.sourceEventId, 'payload.sourceEventId');
+	if (
+		payload.sourceKind !== 'telegram' &&
+		payload.sourceKind !== 'limit-telegram'
+	) {
+		throw new Error('payload.sourceKind is invalid');
+	}
+	const destination = assertRecord(
+		payload.destination,
+		'payload.destination'
+	);
+	assertExactKeys(
+		destination,
+		['telegramChatId'],
+		[],
+		'payload.destination'
+	);
+	assertString(
+		destination.telegramChatId,
+		'payload.destination.telegramChatId'
+	);
+	assertString(payload.normalizedCode, 'payload.normalizedCode', {
+		maxLength: 255
+	});
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	return 'telegram-destination-unavailable-outcome';
 };
 
 const resolveExpectedKind = (
 	payload: JsonRecord
-): NotificationDeliveryKind => {
+): ResolvedContractKind => {
 	switch (payload.eventType) {
 		case OUTBOX_EVENT_TYPE:
 			return assertLeadEvent(payload);
 		case PAYMENT_SUCCEEDED_EVENT_TYPE:
 			return assertPaymentEvent(payload);
+		case PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE:
+			return assertPaymentTelegramEvent(payload);
 		case LIMIT_REACHED_EMAIL_EVENT_TYPE:
+		case LIMIT_REACHED_TELEGRAM_EVENT_TYPE:
 			return assertLimitEvent(payload);
+		case TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE:
+			return assertTelegramDestinationUnavailableEvent(payload);
 		default:
 			throw new Error(
 				`Unsupported notification event type: ${String(payload.eventType)}`
@@ -355,6 +493,21 @@ export function assertMessagingEventContract(
 	}
 
 	const expectedKind = resolveExpectedKind(payload);
+	if (expectedKind === 'telegram-destination-unavailable-outcome') {
+		if (metadata.kind) {
+			throw new Error(
+				`${metadata.eventType} is not a notification delivery input`
+			);
+		}
+		if (
+			metadata.routingKey !== TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
+		) {
+			throw new Error(
+				`Routing key ${metadata.routingKey} does not match ${metadata.eventType}`
+			);
+		}
+		return;
+	}
 	if (metadata.kind && expectedKind !== metadata.kind) {
 		throw new Error(
 			`Event type ${metadata.eventType} cannot be consumed by ${metadata.kind}`

@@ -1,7 +1,10 @@
 import {
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
+	LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	OUTBOX_EVENT_TYPE,
-	PAYMENT_SUCCEEDED_EVENT_TYPE
+	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	PAYMENT_SUCCEEDED_EVENT_TYPE,
+	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from './messaging.constants';
 
 export const PLAN_VALUES = ['TRIAL', 'EASY', 'HARD'] as const;
@@ -77,6 +80,29 @@ export interface PaymentSucceededEventPayload {
 	};
 }
 
+export interface PaymentTelegramNotificationEventPayload {
+	schemaVersion: 1;
+	eventType: typeof PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE;
+	payment: {
+		id: string;
+		yookassaId: string;
+		amount: string;
+		plan: Plan;
+		billingPeriod: BillingPeriod;
+		succeededAt: string;
+	};
+	user: {
+		id: string;
+		name: string | null;
+		email: string | null;
+		phone: string | null;
+	};
+	destination: {
+		telegramChatId: string | null;
+		messageThreadId: number | null;
+	};
+}
+
 export interface LimitReachedEmailEventPayload {
 	schemaVersion: 2;
 	eventType: typeof LIMIT_REACHED_EMAIL_EVENT_TYPE;
@@ -91,7 +117,36 @@ export interface LimitReachedEmailEventPayload {
 	};
 }
 
+export interface LimitReachedTelegramEventPayload {
+	schemaVersion: 2;
+	eventType: typeof LIMIT_REACHED_TELEGRAM_EVENT_TYPE;
+	entity: {
+		id: string;
+		name: string;
+		type: string;
+	};
+	limit: number;
+	destination: {
+		telegramChatId: string;
+	};
+}
+
+export interface TelegramDestinationUnavailableEventPayload {
+	schemaVersion: 1;
+	eventType: typeof TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE;
+	sourceEventId: string;
+	sourceKind: 'telegram' | 'limit-telegram';
+	destination: {
+		telegramChatId: string;
+	};
+	normalizedCode: string;
+	occurredAt: string;
+}
+
 export type NotificationDeliveryEventPayload =
 	| LeadIntegrationEventPayloadV2
 	| PaymentSucceededEventPayload
-	| LimitReachedEmailEventPayload;
+	| PaymentTelegramNotificationEventPayload
+	| LimitReachedEmailEventPayload
+	| LimitReachedTelegramEventPayload
+	| TelegramDestinationUnavailableEventPayload;

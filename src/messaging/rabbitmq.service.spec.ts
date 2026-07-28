@@ -39,7 +39,7 @@ describe('RabbitMqService topology', () => {
 		expect(service.isConnected()).toBe(true);
 	});
 
-	it('fans out payment events but keeps retries consumer-specific', async () => {
+	it('binds prepared payment Telegram and destination outcome queues', async () => {
 		const channel = {
 			on: jest.fn(),
 			assertExchange: jest.fn().mockResolvedValue(undefined),
@@ -63,9 +63,9 @@ describe('RabbitMqService topology', () => {
 			'payment.succeeded.v1'
 		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.payment-notification.telegram',
+			'winwidget.payment-notification.telegram.v2',
 			'winwidget.events',
-			'payment.succeeded.v1'
+			'payment.notification.telegram.requested.v1'
 		);
 		expect(channel.assertQueue).toHaveBeenCalledWith(
 			'winwidget.payment-notification.email.retry-v2.1',
@@ -75,7 +75,7 @@ describe('RabbitMqService topology', () => {
 			})
 		);
 		expect(channel.assertQueue).toHaveBeenCalledWith(
-			'winwidget.payment-notification.telegram.retry-v2.1',
+			'winwidget.payment-notification.telegram.v2.retry-v2.1',
 			expect.objectContaining({
 				deadLetterExchange: 'winwidget.manual-retry',
 				deadLetterRoutingKey: 'payment-telegram'
@@ -100,6 +100,11 @@ describe('RabbitMqService topology', () => {
 			'winwidget.limit-notification.telegram',
 			'winwidget.events',
 			'manual.limit-telegram'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.notification.telegram-destination-unavailable',
+			'winwidget.events',
+			'notification.telegram.destination-unavailable.v1'
 		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
 			'winwidget.maintenance.database-backup.dead-letter',

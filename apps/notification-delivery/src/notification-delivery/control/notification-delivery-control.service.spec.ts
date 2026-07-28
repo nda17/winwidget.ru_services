@@ -463,9 +463,7 @@ describe('NotificationDeliveryControlService', () => {
 			notificationDeliveryFailure: {
 				findUnique: jest
 					.fn()
-					.mockResolvedValue(
-						createFailure({ consumer: 'payment-telegram' })
-					)
+					.mockResolvedValue(createFailure({ consumer: 'webhook' }))
 			}
 		};
 		const prisma = {
@@ -584,7 +582,14 @@ describe('NotificationDeliveryControlService', () => {
 		expect(findMany).toHaveBeenCalledWith({
 			where: {
 				consumer: {
-					in: ['email', 'telegram', 'payment-email', 'limit-email']
+					in: [
+						'email',
+						'telegram',
+						'payment-email',
+						'payment-telegram',
+						'limit-email',
+						'limit-telegram'
+					]
 				}
 			},
 			orderBy: [{ failedAt: 'desc' }, { id: 'desc' }],

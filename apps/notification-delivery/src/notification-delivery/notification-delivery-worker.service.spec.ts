@@ -51,7 +51,97 @@ describe('NotificationDeliveryWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
-	const createService = () => {
+	const createTelegramMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 2,
+					eventType: 'lead.integration.requested.v2',
+					integration: 'telegram',
+					source: 'widget',
+					entity: { id: 'widget-1', name: 'Колесо' },
+					lead: {
+						id: 'lead-1',
+						createdAt: '2026-07-27T10:00:00.000Z'
+					},
+					destination: { telegramChatId: '12345' }
+				})
+			),
+			fields: {
+				exchange: 'winwidget.events',
+				routingKey: 'lead.integration.telegram.v2'
+			},
+			properties: {
+				messageId: eventId,
+				type: 'lead.integration.requested.v2',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
+	const createLimitTelegramMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 2,
+					eventType: 'lead.limit.reached.telegram.v2',
+					entity: {
+						id: 'widget-1',
+						name: 'Колесо',
+						type: 'widget'
+					},
+					limit: 10,
+					destination: { telegramChatId: '12345' }
+				})
+			),
+			fields: {
+				exchange: 'winwidget.events',
+				routingKey: 'lead.limit.reached.telegram.v2'
+			},
+			properties: {
+				messageId: eventId,
+				type: 'lead.limit.reached.telegram.v2',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
+	const createPaymentTelegramMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'payment.notification.telegram.requested.v1',
+					payment: {
+						id: 'payment-1',
+						yookassaId: 'yookassa-1',
+						amount: '1000',
+						plan: 'EASY',
+						billingPeriod: 'MONTHLY',
+						succeededAt: '2026-07-27T10:00:00.000Z'
+					},
+					user: {
+						id: 'user-1',
+						name: null,
+						email: null,
+						phone: null
+					},
+					destination: {
+						telegramChatId: '-1001234567890',
+						messageThreadId: 42
+					}
+				})
+			),
+			fields: {
+				exchange: 'winwidget.events',
+				routingKey: 'payment.notification.telegram.requested.v1'
+			},
+			properties: {
+				messageId: eventId,
+				type: 'payment.notification.telegram.requested.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
+	const createService = (configuredKinds?: string) => {
 		const rabbitMq = {
 			consume: jest.fn().mockResolvedValue(undefined),
 			consumeDeadLetter: jest.fn().mockResolvedValue(undefined),
@@ -63,7 +153,8 @@ describe('NotificationDeliveryWorkerService', () => {
 			deliver: jest.fn().mockResolvedValue(undefined)
 		} as unknown as NotificationDeliveryAdapterService;
 		const heartbeat = {
-			markSuccessfulConsume: jest.fn()
+			markSuccessfulConsume: jest.fn(),
+			setConsumerKinds: jest.fn()
 		} as unknown as NotificationDeliveryHeartbeatService;
 		const receiptUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const failureUpsert = jest.fn().mockResolvedValue({});
@@ -99,7 +190,11 @@ describe('NotificationDeliveryWorkerService', () => {
 			$transaction: jest.fn(callback => callback(transaction))
 		} as unknown as NotificationDeliveryPrismaService;
 		const configService = {
-			get: jest.fn()
+			get: jest.fn((name: string) =>
+				name === 'NOTIFICATION_DELIVERY_KINDS'
+					? configuredKinds
+					: undefined
+			)
 		} as unknown as ConfigService;
 		const service = new NotificationDeliveryWorkerService(
 			rabbitMq,
@@ -123,16 +218,75 @@ describe('NotificationDeliveryWorkerService', () => {
 		jest.restoreAllMocks();
 	});
 
-	it('subscribes to the four main queues and their DLQs', async () => {
-		const { service, rabbitMq } = createService();
+	it('subscribes to all six queues and their DLQs by default', async () => {
+		const { service, rabbitMq, heartbeat } = createService();
 
 		await service.onModuleInit();
 
-		expect(rabbitMq.consume).toHaveBeenCalledTimes(4);
-		expect(rabbitMq.consumeDeadLetter).toHaveBeenCalledTimes(4);
+		expect(rabbitMq.consume).toHaveBeenCalledTimes(6);
+		expect(rabbitMq.consumeDeadLetter).toHaveBeenCalledTimes(6);
 		expect(
 			(rabbitMq.consume as jest.Mock).mock.calls.map(call => call[0])
-		).toEqual(['email', 'telegram', 'payment-email', 'limit-email']);
+		).toEqual([
+			'email',
+			'telegram',
+			'payment-email',
+			'payment-telegram',
+			'limit-email',
+			'limit-telegram'
+		]);
+		expect(heartbeat.setConsumerKinds).toHaveBeenCalledWith([
+			'email',
+			'telegram',
+			'payment-email',
+			'payment-telegram',
+			'limit-email',
+			'limit-telegram'
+		]);
+	});
+
+	it('subscribes only to the configured deduplicated subset', async () => {
+		const { service, rabbitMq, heartbeat } = createService(
+			'payment-telegram, limit-telegram,payment-telegram'
+		);
+
+		await service.onModuleInit();
+
+		expect(
+			(rabbitMq.consume as jest.Mock).mock.calls.map(call => call[0])
+		).toEqual(['payment-telegram', 'limit-telegram']);
+		expect(
+			(rabbitMq.consumeDeadLetter as jest.Mock).mock.calls.map(
+				call => call[0]
+			)
+		).toEqual(['payment-telegram', 'limit-telegram']);
+		expect(heartbeat.setConsumerKinds).toHaveBeenCalledWith([
+			'payment-telegram',
+			'limit-telegram'
+		]);
+	});
+
+	it.each(['', ' , '])(
+		'rejects an explicitly empty consumer allowlist %p',
+		async configuredKinds => {
+			const { service, rabbitMq } = createService(configuredKinds);
+
+			await expect(service.onModuleInit()).rejects.toThrow(
+				'NOTIFICATION_DELIVERY_KINDS must not be empty'
+			);
+			expect(rabbitMq.consume).not.toHaveBeenCalled();
+		}
+	);
+
+	it('rejects unknown consumer kinds before subscribing', async () => {
+		const { service, rabbitMq } = createService(
+			'email,legacy-payment-telegram'
+		);
+
+		await expect(service.onModuleInit()).rejects.toThrow(
+			'NOTIFICATION_DELIVERY_KINDS contains unsupported kinds: legacy-payment-telegram'
+		);
+		expect(rabbitMq.consume).not.toHaveBeenCalled();
 	});
 
 	it('marks a successful provider delivery before acknowledging', async () => {
@@ -241,6 +395,150 @@ describe('NotificationDeliveryWorkerService', () => {
 			})
 		});
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('persists a destination-unavailable outcome atomically with a terminal Telegram failure', async () => {
+		const { service, rabbitMq, adapter, prisma, transaction } =
+			createService();
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('Telegram destination failed'), {
+				httpStatus: 400,
+				description: 'Bad Request: chat not found'
+			})
+		);
+
+		await (service as any).handle('telegram', createTelegramMessage());
+
+		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+		expect(
+			transaction.notificationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: NotificationDeliveryReceiptStatus.DEAD_LETTERED
+				})
+			})
+		);
+		expect(
+			transaction.notificationDeliveryOutboxEvent.create
+		).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				exchange: NotificationDeliveryExchange.DEAD_LETTER,
+				routingKey: 'telegram.dead-letter'
+			})
+		});
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).toHaveBeenCalledWith({
+			data: [
+				expect.objectContaining({
+					messageId: expect.any(String),
+					deduplicationKey: `notification:${eventId}:telegram:telegram-destination-unavailable:v1`,
+					exchange: NotificationDeliveryExchange.EVENTS,
+					eventType: 'notification.telegram.destination-unavailable.v1',
+					routingKey: 'notification.telegram.destination-unavailable.v1',
+					payload: {
+						schemaVersion: 1,
+						eventType: 'notification.telegram.destination-unavailable.v1',
+						sourceEventId: eventId,
+						sourceKind: 'telegram',
+						destination: { telegramChatId: '12345' },
+						normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+						occurredAt: expect.any(String)
+					},
+					headers: expect.objectContaining({
+						'x-causation-id': eventId,
+						'x-correlation-id': expect.any(String),
+						'x-request-id': expect.any(String)
+					})
+				})
+			],
+			skipDuplicates: true
+		});
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('persists a destination-unavailable outcome for a terminal limit Telegram failure', async () => {
+		const { service, adapter, transaction } = createService();
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('Telegram destination failed'), {
+				httpStatus: 400,
+				description: 'Bad Request: bot was blocked by the user'
+			})
+		);
+
+		await (service as any).handle(
+			'limit-telegram',
+			createLimitTelegramMessage()
+		);
+
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).toHaveBeenCalledWith({
+			data: [
+				expect.objectContaining({
+					deduplicationKey: `notification:${eventId}:limit-telegram:telegram-destination-unavailable:v1`,
+					payload: expect.objectContaining({
+						sourceEventId: eventId,
+						sourceKind: 'limit-telegram',
+						destination: { telegramChatId: '12345' },
+						normalizedCode: 'TELEGRAM_BOT_BLOCKED'
+					})
+				})
+			],
+			skipDuplicates: true
+		});
+	});
+
+	it('does not create a destination-unavailable outcome for a transient Telegram retry', async () => {
+		const { service, adapter, transaction } = createService();
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('Telegram temporarily unavailable'), {
+				httpStatus: 503,
+				description: 'Service Unavailable'
+			})
+		);
+
+		await (service as any).handle('telegram', createTelegramMessage());
+
+		expect(
+			transaction.notificationDeliveryOutboxEvent.create
+		).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				exchange: NotificationDeliveryExchange.EVENTS,
+				routingKey: 'manual.telegram'
+			})
+		});
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).not.toHaveBeenCalled();
+	});
+
+	it('does not create a public-channel outcome for payment Telegram destination failures', async () => {
+		const { service, adapter, transaction } = createService();
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('Telegram destination failed'), {
+				httpStatus: 400,
+				description: 'Bad Request: chat not found'
+			})
+		);
+
+		await (service as any).handle(
+			'payment-telegram',
+			createPaymentTelegramMessage()
+		);
+
+		expect(
+			transaction.notificationDeliveryOutboxEvent.create
+		).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				exchange: NotificationDeliveryExchange.DEAD_LETTER,
+				routingKey: 'payment-telegram.dead-letter'
+			})
+		});
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).not.toHaveBeenCalled();
 	});
 
 	it('acks a DLQ message only after its canonical failure is persisted', async () => {

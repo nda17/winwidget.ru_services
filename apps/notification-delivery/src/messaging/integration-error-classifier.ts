@@ -64,6 +64,11 @@ const SMTP_TRANSIENT_CODES = new Set([
 	'ETIMEDOUT'
 ]);
 const SMTP_PERMANENT_CODES = new Set(['EENVELOPE', 'EMESSAGE']);
+const TELEGRAM_KINDS = new Set<NotificationDeliveryKind>([
+	'telegram',
+	'payment-telegram',
+	'limit-telegram'
+]);
 
 export function classifyIntegrationError(
 	kind: NotificationDeliveryKind,
@@ -72,7 +77,7 @@ export function classifyIntegrationError(
 	const destination = classifyDestinationError(error);
 	if (destination) return destination;
 
-	if (kind === 'telegram') {
+	if (TELEGRAM_KINDS.has(kind)) {
 		const telegram = classifyTelegramError(error);
 		if (telegram) return telegram;
 	} else {

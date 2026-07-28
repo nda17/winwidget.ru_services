@@ -2,6 +2,8 @@ export const RABBITMQ_CONNECTION = Symbol('RABBITMQ_CONNECTION');
 
 export const OUTBOX_EVENT_TYPE = 'lead.integration.requested.v2';
 export const PAYMENT_SUCCEEDED_EVENT_TYPE = 'payment.succeeded.v1';
+export const PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE =
+	'payment.notification.telegram.requested.v1';
 export const MAILING_DELIVERY_EVENT_TYPE = 'mailing.delivery.requested.v1';
 export const LIMIT_REACHED_EMAIL_EVENT_TYPE =
 	'lead.limit.reached.email.v2';
@@ -9,6 +11,8 @@ export const LIMIT_REACHED_TELEGRAM_EVENT_TYPE =
 	'lead.limit.reached.telegram.v2';
 export const DAILY_SUMMARY_EVENT_TYPE =
 	'report.daily-summary.requested.v1';
+export const TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE =
+	'notification.telegram.destination-unavailable.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
 export const EVENTS_EXCHANGE = 'winwidget.events';
 export const RETRY_EXCHANGE = 'winwidget.retry';
@@ -33,7 +37,8 @@ export const INTEGRATION_KINDS = [
 	'mailing-telegram',
 	'limit-email',
 	'limit-telegram',
-	'daily-summary-telegram'
+	'daily-summary-telegram',
+	'telegram-destination-unavailable'
 ] as const;
 
 export type IntegrationKind = (typeof INTEGRATION_KINDS)[number];
@@ -42,7 +47,9 @@ export const NOTIFICATION_DELIVERY_KINDS = [
 	'email',
 	'telegram',
 	'payment-email',
-	'limit-email'
+	'payment-telegram',
+	'limit-email',
+	'limit-telegram'
 ] as const satisfies readonly IntegrationKind[];
 
 export type NotificationDeliveryKind =
@@ -76,12 +83,14 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	bitrix24: 'lead.integration.bitrix24.v2',
 	'amo-crm': 'lead.integration.amo-crm.v2',
 	'payment-email': PAYMENT_SUCCEEDED_EVENT_TYPE,
-	'payment-telegram': PAYMENT_SUCCEEDED_EVENT_TYPE,
+	'payment-telegram': PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	'mailing-email': 'mailing.delivery.email.v1',
 	'mailing-telegram': 'mailing.delivery.telegram.v1',
 	'limit-email': LIMIT_REACHED_EMAIL_EVENT_TYPE,
 	'limit-telegram': LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	'daily-summary-telegram': DAILY_SUMMARY_EVENT_TYPE,
+	'telegram-destination-unavailable':
+		TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE
 };
 
@@ -92,12 +101,14 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	bitrix24: 'winwidget.lead-integration.bitrix24',
 	'amo-crm': 'winwidget.lead-integration.amo-crm',
 	'payment-email': 'winwidget.payment-notification.email',
-	'payment-telegram': 'winwidget.payment-notification.telegram',
+	'payment-telegram': 'winwidget.payment-notification.telegram.v2',
 	'mailing-email': 'winwidget.mailing.email',
 	'mailing-telegram': 'winwidget.mailing.telegram',
 	'limit-email': 'winwidget.limit-notification.email',
 	'limit-telegram': 'winwidget.limit-notification.telegram',
 	'daily-summary-telegram': 'winwidget.report.daily-summary.telegram',
+	'telegram-destination-unavailable':
+		'winwidget.notification.telegram-destination-unavailable',
 	'database-backup': 'winwidget.maintenance.database-backup'
 };
 

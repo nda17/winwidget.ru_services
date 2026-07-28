@@ -1,4 +1,5 @@
 import { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
+import type { NotificationDeliveryKind } from '../messaging/messaging.constants';
 import {
 	Injectable,
 	Logger,
@@ -24,6 +25,7 @@ export class NotificationDeliveryHeartbeatService
 	private timer: NodeJS.Timeout | null = null;
 	private lastSuccessfulConsumeAt: Date | null = null;
 	private lastSuccessfulPublishAt: Date | null = null;
+	private consumerKinds: readonly NotificationDeliveryKind[] = [];
 	private stopped = false;
 
 	constructor(
@@ -47,6 +49,10 @@ export class NotificationDeliveryHeartbeatService
 		this.lastSuccessfulPublishAt = new Date();
 	}
 
+	setConsumerKinds(kinds: readonly NotificationDeliveryKind[]): void {
+		this.consumerKinds = [...kinds];
+	}
+
 	async onApplicationShutdown(): Promise<void> {
 		this.stopped = true;
 		if (this.timer) clearInterval(this.timer);
@@ -61,7 +67,8 @@ export class NotificationDeliveryHeartbeatService
 			lastSuccessfulConsumeAt:
 				this.lastSuccessfulConsumeAt?.toISOString() || null,
 			lastSuccessfulPublishAt:
-				this.lastSuccessfulPublishAt?.toISOString() || null
+				this.lastSuccessfulPublishAt?.toISOString() || null,
+			consumerKinds: [...this.consumerKinds]
 		} as Prisma.InputJsonObject;
 
 		try {

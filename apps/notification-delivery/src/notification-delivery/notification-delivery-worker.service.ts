@@ -3,7 +3,8 @@ import {
 	getManualRetryRoutingKey,
 	MESSAGING_ROUTING_KEYS,
 	NotificationDeliveryKind,
-	NOTIFICATION_DELIVERY_KINDS
+	NOTIFICATION_DELIVERY_KINDS,
+	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '../messaging/messaging.constants';
 import { createMessagingHeaders } from '../messaging/messaging-context';
 import {
@@ -64,6 +65,36 @@ const SAFE_HEADER_NAMES = new Set([
 	'x-provider-code'
 ]);
 
+export function parseNotificationDeliveryKinds(
+	value: string | undefined
+): readonly NotificationDeliveryKind[] {
+	if (value === undefined) return [...NOTIFICATION_DELIVERY_KINDS];
+
+	const configured = value
+		.split(',')
+		.map(kind => kind.trim())
+		.filter(Boolean);
+	if (!configured.length) {
+		throw new Error('NOTIFICATION_DELIVERY_KINDS must not be empty');
+	}
+
+	const unknown = configured.filter(
+		kind =>
+			!NOTIFICATION_DELIVERY_KINDS.includes(
+				kind as NotificationDeliveryKind
+			)
+	);
+	if (unknown.length) {
+		throw new Error(
+			`NOTIFICATION_DELIVERY_KINDS contains unsupported kinds: ${Array.from(
+				new Set(unknown)
+			).join(',')}`
+		);
+	}
+
+	return Array.from(new Set(configured as NotificationDeliveryKind[]));
+}
+
 type DeliveryClaim =
 	| { state: 'claimed'; lockToken: string }
 	| { state: 'delivered' }
@@ -91,6 +122,7 @@ export class NotificationDeliveryWorkerService
 	private readonly workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
 	private readonly activeHandlers = new Set<Promise<void>>();
 	private shutdownPromise: Promise<void> | null = null;
+	private effectiveKinds: readonly NotificationDeliveryKind[] = [];
 	private ready = false;
 	private shuttingDown = false;
 
@@ -104,7 +136,11 @@ export class NotificationDeliveryWorkerService
 
 	async onModuleInit(): Promise<void> {
 		const prefetch = this.getPrefetch();
-		for (const kind of NOTIFICATION_DELIVERY_KINDS) {
+		this.effectiveKinds = parseNotificationDeliveryKinds(
+			this.configService.get<string>('NOTIFICATION_DELIVERY_KINDS')
+		);
+		this.heartbeat.setConsumerKinds(this.effectiveKinds);
+		for (const kind of this.effectiveKinds) {
 			await this.rabbitMq.consume(
 				kind,
 				message =>
@@ -123,7 +159,7 @@ export class NotificationDeliveryWorkerService
 		}
 		this.ready = true;
 		this.logger.log(
-			`Notification delivery consumers started kinds=${NOTIFICATION_DELIVERY_KINDS.join(',')} prefetch=${prefetch}`
+			`Notification delivery consumers started kinds=${this.effectiveKinds.join(',')} prefetch=${prefetch}`
 		);
 	}
 
@@ -713,6 +749,67 @@ export class NotificationDeliveryWorkerService
 					headers
 				}
 			});
+			await this.createTelegramDestinationUnavailableOutcome(
+				transaction,
+				input
+			);
+		});
+	}
+
+	private async createTelegramDestinationUnavailableOutcome(
+		transaction: Prisma.TransactionClient,
+		input: {
+			kind: NotificationDeliveryKind;
+			eventId: string;
+			payload: NotificationDeliveryEventPayload;
+			classification: IntegrationErrorClassification;
+		}
+	): Promise<void> {
+		if (
+			!input.classification.mayDisableDestination ||
+			(input.kind !== 'telegram' && input.kind !== 'limit-telegram')
+		) {
+			return;
+		}
+
+		const destination = (
+			input.payload as {
+				destination?: { telegramChatId?: unknown };
+			}
+		).destination;
+		const telegramChatId =
+			typeof destination?.telegramChatId === 'string'
+				? destination.telegramChatId.trim()
+				: '';
+		if (!telegramChatId) return;
+
+		const messageId = randomUUID();
+		const occurredAt = new Date().toISOString();
+		const payload = {
+			schemaVersion: 1 as const,
+			eventType: TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
+			sourceEventId: input.eventId,
+			sourceKind: input.kind,
+			destination: { telegramChatId },
+			normalizedCode: input.classification.normalizedCode,
+			occurredAt
+		};
+		await transaction.notificationDeliveryOutboxEvent.createMany({
+			data: [
+				{
+					messageId,
+					deduplicationKey: `notification:${input.eventId}:${input.kind}:telegram-destination-unavailable:v1`,
+					exchange: NotificationDeliveryExchange.EVENTS,
+					eventType: TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
+					routingKey: TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
+					payload: payload as unknown as Prisma.InputJsonValue,
+					headers: createMessagingHeaders({
+						messageId,
+						causationId: input.eventId
+					}) as Prisma.InputJsonObject
+				}
+			],
+			skipDuplicates: true
 		});
 	}
 
