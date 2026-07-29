@@ -566,6 +566,15 @@ run_pg_dump() {
 		"$@"
 }
 
+verify_pg_dump_access() {
+	local password="$1"
+	local database_url="$2"
+	shift 2
+
+	# Keep the probe on stdout: pg_dump fsyncs a named /dev/null and fails.
+	run_pg_dump "$password" "$database_url" "$@" >/dev/null
+}
+
 run_pg_restore() {
 	local password="$1"
 	shift
@@ -1192,14 +1201,13 @@ verify_source_roles_and_schema() {
 	[[ "$schema_boundary" == "t" ]] ||
 		fail "Source Notification Delivery schema ownership or migration history is invalid."
 
-	run_pg_dump \
+	verify_pg_dump_access \
 		"$backup_password" \
 		"$backup_source_libpq_url" \
 		--format=custom \
 		--no-owner \
 		--no-privileges \
-		--schema "$TARGET_SCHEMA" \
-		--file /dev/null
+		--schema "$TARGET_SCHEMA"
 }
 
 load_expected_queues() {
@@ -2756,14 +2764,13 @@ verify_target_acl_boundary() {
 	[[ "$boundary" == "t" ]] ||
 		fail "Target Notification Delivery database ACL boundary is invalid."
 
-	run_pg_dump \
+	verify_pg_dump_access \
 		"$backup_password" \
 		"$backup_target_libpq_url" \
 		--format=custom \
 		--no-owner \
 		--no-privileges \
-		--schema "$TARGET_SCHEMA" \
-		--file /dev/null
+		--schema "$TARGET_SCHEMA"
 }
 
 build_data_manifest() {
