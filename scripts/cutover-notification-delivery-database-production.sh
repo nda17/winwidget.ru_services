@@ -2817,7 +2817,7 @@ build_data_manifest() {
 					COPY (
 						SELECT to_jsonb(source_row)::text
 						FROM \"$TARGET_SCHEMA\".\"$table\" AS source_row
-						ORDER BY to_jsonb(source_row)::text COLLATE "C"
+						ORDER BY to_jsonb(source_row)::text COLLATE \"C\"
 					) TO STDOUT;
 				" |
 				sha256sum |
