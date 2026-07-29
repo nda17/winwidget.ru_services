@@ -1,7 +1,9 @@
 import { NotificationDeliveryAdapterService } from './notification-delivery-adapter.service';
+import LeadNotificationEmail from '../../emails/lead-notification.email';
 import type { EmailService } from '../email/email.service';
 import type { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import type { TelegramInfoTransportService } from '../telegram/telegram-info-transport.service';
+import { render } from '@react-email/render';
 
 describe('NotificationDeliveryAdapterService', () => {
 	const email = {
@@ -40,6 +42,8 @@ describe('NotificationDeliveryAdapterService', () => {
 					id: 'lead-1',
 					name: 'Анна',
 					phone: '+79990000000',
+					bonus: 'Скидку 10%',
+					url: 'https://example.com/catalog?utm_source=widget',
 					createdAt: '2026-07-27T10:00:00.000Z'
 				},
 				destination: { email: 'owner@example.com' }
@@ -52,12 +56,71 @@ describe('NotificationDeliveryAdapterService', () => {
 			expect.objectContaining({
 				widgetName: 'Колесо',
 				name: 'Анна',
-				phone: '+79990000000'
+				phone: '+79990000000',
+				bonus: 'Скидку 10%',
+				bonusLabel: 'Клиент выиграл',
+				url: 'https://example.com/catalog?utm_source=widget'
 			}),
 			{
 				messageId: '<11111111-1111-4111-8111-111111111111@winwidget.ru>'
 			}
 		);
+	});
+
+	it('labels the calculator price as cost in email', async () => {
+		await service.deliver(
+			'email',
+			{
+				schemaVersion: 2,
+				eventType: 'lead.integration.requested.v2',
+				integration: 'email',
+				source: 'calculator',
+				entity: { id: 'calculator-1', name: 'Калькулятор' },
+				lead: {
+					id: 'lead-1',
+					calculatedPrice: '5000',
+					currency: '₽',
+					createdAt: '2026-07-27T10:00:00.000Z'
+				},
+				destination: { email: 'owner@example.com' }
+			},
+			'11111111-1111-4111-8111-111111111111'
+		);
+
+		expect(email.sendLeadNotification).toHaveBeenCalledWith(
+			'owner@example.com',
+			expect.objectContaining({
+				widgetName: 'Калькулятор',
+				bonus: '5000 ₽',
+				bonusLabel: 'Стоимость'
+			}),
+			{
+				messageId: '<11111111-1111-4111-8111-111111111111@winwidget.ru>'
+			}
+		);
+	});
+
+	it('renders the custom wheel prize label and keeps the email fallback', () => {
+		const wheelHtml = render(
+			LeadNotificationEmail({
+				widgetName: 'Колесо',
+				bonus: 'Скидку 10%',
+				bonusLabel: 'Клиент выиграл',
+				dateLabel: '29.07.2026, 21:37:46'
+			})
+		);
+		const fallbackHtml = render(
+			LeadNotificationEmail({
+				widgetName: 'Квиз',
+				bonus: 'Промокод',
+				dateLabel: '29.07.2026, 21:37:46'
+			})
+		);
+
+		expect(wheelHtml).toContain('Клиент выиграл');
+		expect(wheelHtml).toContain('Скидку 10%');
+		expect(wheelHtml).not.toContain('Выигранный приз');
+		expect(fallbackHtml).toContain('Выигранный приз');
 	});
 
 	it('delivers a lead Telegram notification using the inline chat id', async () => {
@@ -80,11 +143,18 @@ describe('NotificationDeliveryAdapterService', () => {
 			'11111111-1111-4111-8111-111111111111'
 		);
 
+		const message = (telegram.sendMessage as jest.Mock).mock.calls[0][1];
+
 		expect(telegram.sendMessage).toHaveBeenCalledWith(
 			'12345',
 			expect.stringContaining('Расчёт &lt;стоимости&gt;'),
 			{ parseMode: 'HTML' }
 		);
+		expect(message).toContain('Расчёт &lt;стоимости&gt;');
+		expect(message).toContain('Стоимость: 5000 ₽');
+		expect(message.match(/Стоимость: 5000 ₽/g)).toHaveLength(1);
+		expect(message).not.toContain('Результат:');
+		expect(message).not.toContain('Клиент выиграл:');
 	});
 
 	it('does not repeat a normalized phone as the generic contact', async () => {
@@ -405,6 +475,35 @@ describe('NotificationDeliveryAdapterService', () => {
 				checkpoint: { nextChunkIndex: 2 }
 			}
 		});
+	});
+
+	it('shows the wheel prize and full page URL in Telegram', async () => {
+		await service.deliver(
+			'telegram',
+			{
+				schemaVersion: 2,
+				eventType: 'lead.integration.requested.v2',
+				integration: 'telegram',
+				source: 'widget',
+				entity: { id: 'widget-1', name: 'Колесо фортуны' },
+				lead: {
+					id: 'lead-1',
+					bonus: 'Скидку 10%',
+					url: 'https://example.com/catalog?utm_source=widget',
+					createdAt: '2026-07-27T10:00:00.000Z'
+				},
+				destination: { telegramChatId: '12345' }
+			},
+			'11111111-1111-4111-8111-111111111111'
+		);
+
+		const message = (telegram.sendMessage as jest.Mock).mock.calls[0][1];
+
+		expect(message).toContain('Клиент выиграл: Скидку 10%');
+		expect(message).toContain(
+			'Страница: https://example.com/catalog?utm_source=widget'
+		);
+		expect(message).not.toContain('Результат:');
 	});
 
 	it('delivers daily summary and subscription expiry Telegram events', async () => {

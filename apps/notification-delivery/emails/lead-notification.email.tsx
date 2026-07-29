@@ -8,6 +8,7 @@ export interface LeadNotificationEmailProps {
 	email?: string;
 	name?: string;
 	bonus?: string;
+	bonusLabel?: string;
 	detailLabel?: string;
 	detailValue?: string;
 	url?: string;
@@ -73,6 +74,7 @@ const LeadNotificationEmail = ({
 	email,
 	name,
 	bonus,
+	bonusLabel,
 	detailLabel,
 	detailValue,
 	url,
@@ -87,7 +89,7 @@ const LeadNotificationEmail = ({
 	if (email) rows.push({ label: 'Email', value: email });
 	if (bonus) {
 		rows.push({
-			label: 'Выигранный приз',
+			label: bonusLabel || 'Выигранный приз',
 			value: <span style={accentValueStyle}>{bonus}</span>
 		});
 	}

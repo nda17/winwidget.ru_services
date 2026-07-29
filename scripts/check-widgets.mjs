@@ -248,8 +248,7 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 			payload.event !== expectedEvents[index] ||
 			payload.runtimeVersion !== '2026.08' ||
 			payload.publishedVersion !== 1 ||
-			payloadKeys.join(',') !==
-				'event,publishedVersion,runtimeVersion'
+			payloadKeys.join(',') !== 'event,publishedVersion,runtimeVersion'
 		) {
 			console.error(`widgets: ${file} has an invalid telemetry contract`);
 			process.exit(1);
@@ -325,6 +324,15 @@ for (const file of ['wheel.js', 'quiz.js']) {
 	if (!submitFunction.includes('if (!response.ok)')) {
 		console.error(
 			`widgets: ${file} does not check the lead response status`
+		);
+		process.exit(1);
+	}
+	if (
+		file === 'wheel.js' &&
+		!submitFunction.includes('url: window.location.href')
+	) {
+		console.error(
+			'widgets: wheel.js does not include the current page URL in the lead payload'
 		);
 		process.exit(1);
 	}

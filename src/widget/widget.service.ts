@@ -812,11 +812,12 @@ export class WidgetService {
 		bonus?: string,
 		ip?: string,
 		requestDomain: string | null = null,
-		directPageAccessAllowed = false
+		directPageAccessAllowed = false,
+		url?: string
 	) {
 		const contact = phone ? phone : email || name || 'unknown';
 		return this.submitLead(
-			{ key, contact, phone, email, name, bonus, url: undefined },
+			{ key, contact, phone, email, name, bonus, url },
 			ip,
 			requestDomain,
 			directPageAccessAllowed

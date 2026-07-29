@@ -1685,7 +1685,8 @@
 				phone: getFormatPhone(),
 				email: getEmail(),
 				name: getName(),
-				bonus: lastWin?.fullLabel
+				bonus: lastWin?.fullLabel,
+				url: window.location.href
 			};
 
 			let response;

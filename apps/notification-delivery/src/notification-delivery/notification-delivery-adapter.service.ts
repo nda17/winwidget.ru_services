@@ -284,6 +284,12 @@ export class NotificationDeliveryAdapterService {
 				email: event.lead.email || undefined,
 				name: event.lead.name || undefined,
 				bonus: this.getOutcome(event) || undefined,
+				bonusLabel:
+					event.source === 'widget'
+						? 'Клиент выиграл'
+						: event.source === 'calculator'
+							? 'Стоимость'
+							: undefined,
 				detailLabel: detail?.label,
 				detailValue: detail?.value,
 				url: event.lead.url || undefined,
@@ -581,7 +587,10 @@ export class NotificationDeliveryAdapterService {
 			['Телефон', event.lead.phone],
 			['Email', event.lead.email],
 			['Контакт', this.getDistinctContact(event)],
-			['Результат', this.getOutcome(event)],
+			[
+				event.source === 'widget' ? 'Клиент выиграл' : 'Результат',
+				event.source === 'calculator' ? null : this.getOutcome(event)
+			],
 			['Время', event.lead.timeSlot],
 			['Часовой пояс', event.lead.timezone],
 			['Вопрос', event.lead.actionLabel],

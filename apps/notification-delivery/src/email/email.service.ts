@@ -13,6 +13,7 @@ interface LeadNotificationPayload {
 	email?: string;
 	name?: string;
 	bonus?: string;
+	bonusLabel?: string;
 	detailLabel?: string;
 	detailValue?: string;
 	url?: string;
@@ -65,6 +66,7 @@ export class EmailService {
 				email: data.email,
 				name: data.name,
 				bonus: data.bonus,
+				bonusLabel: data.bonusLabel,
 				detailLabel: data.detailLabel,
 				detailValue: data.detailValue,
 				url: data.url,

@@ -45,7 +45,8 @@ export class WidgetApiController {
 
 	/**
 	 * POST /api/v1/widget/:key/lead
-	 * Accepts lead from the public wheel widget: { phone, email, name, bonus }
+	 * Accepts lead from the public wheel widget:
+	 * { phone, email, name, bonus, url }
 	 */
 	@Post(':key/lead')
 	async submitLead(
@@ -56,6 +57,7 @@ export class WidgetApiController {
 			email?: string;
 			name?: string;
 			bonus?: string;
+			url?: string;
 		},
 		@Req() req: Request,
 		@Res({ passthrough: true }) res: Response
@@ -69,7 +71,8 @@ export class WidgetApiController {
 			body.bonus,
 			getClientIp(req) ?? '',
 			getWidgetRequestDomain(req),
-			isWidgetDirectPageRequest(req, 'page-wheel', key)
+			isWidgetDirectPageRequest(req, 'page-wheel', key),
+			body.url
 		);
 	}
 }
