@@ -1423,6 +1423,12 @@ cutover разрешён только вручную из защищённой �
 `complete`. После forward boundary recovery выполняется только вперёд на новой
 database.
 
+Source-роли, созданные `gen_user` через PostgreSQL 18 `CREATEROLE`, сохраняют
+только автоматические административные memberships
+`ADMIN=true, SET=false, INHERIT=false`. Они нужны cutover для атомарного
+`LOGIN`-fencing, но не дают `gen_user` наследовать права service-ролей или
+выполнять `SET ROLE`; любые дополнительные memberships отклоняются.
+
 Verify выполняет:
 
 ```text

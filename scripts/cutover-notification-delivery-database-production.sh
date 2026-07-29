@@ -1015,6 +1015,108 @@ assert_current_urls_are_consistent() {
 	fi
 }
 
+verify_source_role_membership_boundary() {
+	local boundary
+
+	boundary="$(
+		run_psql "$admin_password" "$admin_source_libpq_url" \
+			--quiet --tuples-only --no-align \
+			--command "
+				SELECT (
+					(
+						SELECT count(*) = 3
+							AND count(DISTINCT granted_roles.rolname) = 3
+							AND bool_and(
+								member_roles.rolname = '$admin_user'
+								AND memberships.admin_option
+								AND NOT memberships.inherit_option
+								AND NOT memberships.set_option
+							)
+						FROM pg_auth_members AS memberships
+						JOIN pg_roles AS granted_roles
+							ON granted_roles.oid = memberships.roleid
+						JOIN pg_roles AS member_roles
+							ON member_roles.oid = memberships.member
+						WHERE granted_roles.rolname IN (
+							'$runtime_user',
+							'$migration_user',
+							'$backup_user'
+						)
+					)
+					AND NOT EXISTS (
+						SELECT 1
+						FROM pg_auth_members AS memberships
+						JOIN pg_roles AS member_roles
+							ON member_roles.oid = memberships.member
+						WHERE member_roles.rolname IN (
+							'$runtime_user',
+							'$migration_user',
+							'$backup_user'
+						)
+					)
+				);
+			"
+	)"
+	[[ "$boundary" == "t" ]]
+}
+
+report_source_role_boundary() {
+	echo "Source Notification Delivery role diagnostics:" >&2
+	run_psql "$admin_password" "$admin_source_libpq_url" \
+		--quiet --tuples-only --no-align --field-separator '|' \
+		--command "
+			SELECT
+				'role',
+				roles.rolname::text,
+				roles.rolcanlogin::text,
+				roles.rolsuper::text,
+				roles.rolcreatedb::text,
+				roles.rolcreaterole::text,
+				roles.rolreplication::text,
+				roles.rolbypassrls::text,
+				has_database_privilege(
+					roles.rolname,
+					current_database(),
+					'CONNECT'
+				)::text
+			FROM pg_roles AS roles
+			WHERE roles.rolname IN (
+				'$runtime_user',
+				'$migration_user',
+				'$backup_user'
+			)
+			UNION ALL
+			SELECT
+				'membership',
+				granted_roles.rolname::text,
+				member_roles.rolname::text,
+				grantor_roles.rolname::text,
+				memberships.admin_option::text,
+				memberships.inherit_option::text,
+				memberships.set_option::text,
+				'',
+				''
+			FROM pg_auth_members AS memberships
+			JOIN pg_roles AS granted_roles
+				ON granted_roles.oid = memberships.roleid
+			JOIN pg_roles AS member_roles
+				ON member_roles.oid = memberships.member
+			JOIN pg_roles AS grantor_roles
+				ON grantor_roles.oid = memberships.grantor
+			WHERE granted_roles.rolname IN (
+					'$runtime_user',
+					'$migration_user',
+					'$backup_user'
+				)
+				OR member_roles.rolname IN (
+					'$runtime_user',
+					'$migration_user',
+					'$backup_user'
+				)
+			ORDER BY 1, 2;
+		" >&2 || true
+}
+
 verify_source_roles_and_schema() {
 	local role_boundary
 	local schema_boundary
@@ -1057,22 +1159,14 @@ verify_source_roles_and_schema() {
 							'$backup_user'
 						)
 					)
-					AND NOT EXISTS (
-						SELECT 1
-						FROM pg_auth_members AS memberships
-						JOIN pg_roles AS granted_roles
-							ON granted_roles.oid = memberships.roleid
-						WHERE granted_roles.rolname IN (
-							'$runtime_user',
-							'$migration_user',
-							'$backup_user'
-						)
-					)
 				);
 			"
 	)"
-	[[ "$role_boundary" == "t" ]] ||
+	if [[ "$role_boundary" != "t" ]] ||
+		! verify_source_role_membership_boundary; then
+		report_source_role_boundary
 		fail "Source Notification Delivery role boundary is incomplete."
+	fi
 
 	schema_boundary="$(
 		run_psql "$migration_password" "$migration_source_libpq_url" \
@@ -1311,22 +1405,14 @@ fence_source_service_access() {
 									'$backup_user'
 								)
 					)
-					AND NOT EXISTS (
-						SELECT 1
-						FROM pg_auth_members AS memberships
-						JOIN pg_roles AS granted_roles
-							ON granted_roles.oid = memberships.roleid
-						WHERE granted_roles.rolname IN (
-							'$runtime_user',
-							'$migration_user',
-							'$backup_user'
-						)
-					)
 				);
 			"
 	)"
-	[[ "$boundary" == "t" ]] ||
+	if [[ "$boundary" != "t" ]] ||
+		! verify_source_role_membership_boundary; then
+		report_source_role_boundary
 		fail "Source Notification Delivery service roles were not fenced before copying."
+	fi
 }
 
 restore_source_database_access() {
@@ -1376,8 +1462,11 @@ restore_source_database_access() {
 				);
 			"
 	)"
-	[[ "$boundary" == "t" ]] ||
+	if [[ "$boundary" != "t" ]] ||
+		! verify_source_role_membership_boundary; then
+		report_source_role_boundary
 		return 1
+	fi
 }
 
 revoke_source_database_access() {
@@ -1419,22 +1508,14 @@ revoke_source_database_access() {
 								'$backup_user'
 							)
 					)
-					AND NOT EXISTS (
-						SELECT 1
-						FROM pg_auth_members AS memberships
-						JOIN pg_roles AS granted_roles
-							ON granted_roles.oid = memberships.roleid
-						WHERE granted_roles.rolname IN (
-							'$runtime_user',
-							'$migration_user',
-							'$backup_user'
-						)
-					)
 				);
 			"
 	)"
-	[[ "$boundary" == "t" ]] ||
+	if [[ "$boundary" != "t" ]] ||
+		! verify_source_role_membership_boundary; then
+		report_source_role_boundary
 		fail "Source database still permits a Notification Delivery role to connect."
+	fi
 }
 
 verify_source_cleanup_complete() {
@@ -1467,21 +1548,11 @@ verify_source_cleanup_complete() {
 								'$backup_user'
 							)
 					)
-					AND NOT EXISTS (
-						SELECT 1
-						FROM pg_auth_members AS memberships
-						JOIN pg_roles AS granted_roles
-							ON granted_roles.oid = memberships.roleid
-						WHERE granted_roles.rolname IN (
-							'$runtime_user',
-							'$migration_user',
-							'$backup_user'
-						)
-					)
 				);
 			"
 	)"
-	[[ "$boundary" == "t" ]]
+	[[ "$boundary" == "t" ]] &&
+		verify_source_role_membership_boundary
 }
 
 revoke_source_cleanup_access() {
