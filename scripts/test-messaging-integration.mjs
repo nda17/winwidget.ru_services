@@ -161,6 +161,7 @@ const verifyManualBackupAdvisoryLock = async () => {
 
 		const service = new ScheduledTasksService(prisma, {}, {});
 		const result = await service.enqueueManualDatabaseBackup(
+			'core',
 			adminId,
 			idempotencyKey
 		);
