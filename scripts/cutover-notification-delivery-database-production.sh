@@ -2619,6 +2619,7 @@ verify_target_acl_boundary() {
 							AND privileges.grantee = 0
 							AND privileges.privilege_type IN (
 								'CONNECT',
+								'CREATE',
 								'TEMPORARY'
 							)
 					)
@@ -2657,9 +2658,9 @@ verify_target_acl_boundary() {
 								classes.relacl,
 								acldefault(
 									CASE
-										WHEN classes.relkind = 'S' THEN 'S'
+										WHEN classes.relkind = 'S' THEN 's'
 										ELSE 'r'
-									END,
+									END::\"char\",
 									classes.relowner
 								)
 							)
@@ -2675,6 +2676,10 @@ verify_target_acl_boundary() {
 								AND has_table_privilege('$runtime_user', object_name, 'INSERT')
 								AND has_table_privilege('$runtime_user', object_name, 'UPDATE')
 								AND has_table_privilege('$runtime_user', object_name, 'DELETE')
+								AND NOT has_table_privilege('$runtime_user', object_name, 'TRUNCATE')
+								AND NOT has_table_privilege('$runtime_user', object_name, 'REFERENCES')
+								AND NOT has_table_privilege('$runtime_user', object_name, 'TRIGGER')
+								AND NOT has_table_privilege('$runtime_user', object_name, 'MAINTAIN')
 							)
 						FROM application_tables
 					)
@@ -2699,6 +2704,26 @@ verify_target_acl_boundary() {
 							'$TARGET_SCHEMA._prisma_migrations',
 							'DELETE'
 						)
+						OR has_table_privilege(
+							'$runtime_user',
+							'$TARGET_SCHEMA._prisma_migrations',
+							'TRUNCATE'
+						)
+						OR has_table_privilege(
+							'$runtime_user',
+							'$TARGET_SCHEMA._prisma_migrations',
+							'REFERENCES'
+						)
+						OR has_table_privilege(
+							'$runtime_user',
+							'$TARGET_SCHEMA._prisma_migrations',
+							'TRIGGER'
+						)
+						OR has_table_privilege(
+							'$runtime_user',
+							'$TARGET_SCHEMA._prisma_migrations',
+							'MAINTAIN'
+						)
 					)
 					AND (
 						SELECT count(*) > 1
@@ -2708,6 +2733,9 @@ verify_target_acl_boundary() {
 								AND NOT has_table_privilege('$backup_user', object_name, 'UPDATE')
 								AND NOT has_table_privilege('$backup_user', object_name, 'DELETE')
 								AND NOT has_table_privilege('$backup_user', object_name, 'TRUNCATE')
+								AND NOT has_table_privilege('$backup_user', object_name, 'REFERENCES')
+								AND NOT has_table_privilege('$backup_user', object_name, 'TRIGGER')
+								AND NOT has_table_privilege('$backup_user', object_name, 'MAINTAIN')
 							)
 						FROM all_service_tables
 					)
@@ -2771,6 +2799,77 @@ verify_target_acl_boundary() {
 		--no-owner \
 		--no-privileges \
 		--schema "$TARGET_SCHEMA"
+}
+
+build_schema_manifest() {
+	local database_url="$1"
+	local password="$2"
+	local artifact_prefix="$3"
+	local output_file="$4"
+	local dump_file="$temporary_directory/$artifact_prefix.schema.dump"
+	local list_file="$temporary_directory/$artifact_prefix.schema.list"
+
+	[[ "$artifact_prefix" =~ ^[a-z][a-z0-9-]*$ ]] ||
+		fail "Schema manifest artifact prefix is invalid."
+	run_pg_dump \
+		"$password" \
+		"$database_url" \
+		--format=custom \
+		--schema-only \
+		--no-owner \
+		--no-privileges \
+		--schema "$TARGET_SCHEMA" \
+		--file "/cutover/$artifact_prefix.schema.dump"
+	[[ -s "$dump_file" ]] ||
+		fail "Notification Delivery schema-only dump is empty."
+	run_pg_restore \
+		"$password" \
+		--list \
+		"/cutover/$artifact_prefix.schema.dump" >"$list_file"
+	# The archive TOC keeps source owners even though --no-owner restores every
+	# target object as the migration role. Ownership is verified separately.
+	sed -E \
+		-e '/^;/d' \
+		-e '/^[[:space:]]*$/d' \
+		-e 's/^[0-9]+; [0-9]+ [0-9]+ //' \
+		-e 's/[[:space:]][^[:space:]]+$//' \
+		"$list_file" |
+		LC_ALL=C sort >"$output_file"
+	[[ -s "$output_file" ]] ||
+		fail "Notification Delivery schema object manifest is empty."
+	chmod 600 "$output_file"
+	rm -f -- "$dump_file" "$list_file"
+}
+
+build_schema_definition_manifest() {
+	local database_url="$1"
+	local password="$2"
+	local artifact_prefix="$3"
+	local output_file="$4"
+	local dump_file="$temporary_directory/$artifact_prefix.schema.sql"
+
+	[[ "$artifact_prefix" =~ ^[a-z][a-z0-9-]*$ ]] ||
+		fail "Schema definition artifact prefix is invalid."
+	run_pg_dump \
+		"$password" \
+		"$database_url" \
+		--format=plain \
+		--schema-only \
+		--no-owner \
+		--no-privileges \
+		--schema "$TARGET_SCHEMA" \
+		--file "/cutover/$artifact_prefix.schema.sql"
+	[[ -s "$dump_file" ]] ||
+		fail "Notification Delivery schema definition dump is empty."
+	sed -E \
+		-e '/^-- Dumped from database version /d' \
+		-e '/^-- Dumped by pg_dump version /d' \
+		-e '/^\\(un)?restrict /d' \
+		"$dump_file" >"$output_file"
+	[[ -s "$output_file" ]] ||
+		fail "Notification Delivery schema definition manifest is empty."
+	chmod 600 "$output_file"
+	rm -f -- "$dump_file"
 }
 
 build_data_manifest() {
@@ -2876,8 +2975,7 @@ build_data_manifest() {
 }
 
 verify_frozen_source_snapshot() {
-	local source_schema_dump="$temporary_directory/source.final.schema.sql"
-	local source_schema_manifest="$temporary_directory/source.final.schema.manifest.sql"
+	local source_schema_manifest="$temporary_directory/source.final.schema.definitions.sql"
 	local source_manifest="$temporary_directory/source.final.manifest"
 	local observed_schema_sha256
 	local observed_manifest_sha256
@@ -2926,20 +3024,11 @@ verify_frozen_source_snapshot() {
 	[[ "$frozen_boundary" == "t|0|0" ]] ||
 		fail "Source Notification Delivery snapshot is not frozen."
 
-	run_pg_dump \
-		"$admin_password" \
+	build_schema_definition_manifest \
 		"$admin_source_libpq_url" \
-		--format=plain \
-		--schema-only \
-		--no-owner \
-		--no-privileges \
-		--schema "$TARGET_SCHEMA" \
-		--file /cutover/source.final.schema.sql
-	sed -E \
-		-e '/^-- Dumped from database version /d' \
-		-e '/^-- Dumped by pg_dump version /d' \
-		-e '/^\\(un)?restrict /d' \
-		"$source_schema_dump" >"$source_schema_manifest"
+		"$admin_password" \
+		source-final \
+		"$source_schema_manifest"
 	observed_schema_sha256="$(
 		sha256sum "$source_schema_manifest" | awk '{ print $1 }'
 	)"
@@ -2960,28 +3049,29 @@ verify_frozen_source_snapshot() {
 dump_and_restore_target() {
 	local dump_file="$temporary_directory/notification-delivery.dump"
 	local dump_list_file="$temporary_directory/notification-delivery.dump.list"
-	local source_schema_dump="$temporary_directory/source.schema.sql"
-	local target_schema_dump="$temporary_directory/target.schema.sql"
-	local source_schema_manifest="$temporary_directory/source.schema.manifest.sql"
-	local target_schema_manifest="$temporary_directory/target.schema.manifest.sql"
+	local source_schema_manifest="$temporary_directory/source.schema.objects"
+	local target_schema_manifest="$temporary_directory/target.schema.objects"
+	local source_schema_definition_manifest="$temporary_directory/source.schema.definitions.sql"
 	local source_manifest="$temporary_directory/source.manifest"
 	local target_manifest="$temporary_directory/target.manifest"
-	local target_schema_sha256
+	local source_schema_objects_sha256
+	local target_schema_objects_sha256
 
 	verify_source_database_quiescence
 	build_data_manifest \
 		"$admin_source_libpq_url" \
 		"$admin_password" \
 		"$source_manifest"
-	run_pg_dump \
-		"$admin_password" \
+	build_schema_manifest \
 		"$admin_source_libpq_url" \
-		--format=plain \
-		--schema-only \
-		--no-owner \
-		--no-privileges \
-		--schema "$TARGET_SCHEMA" \
-		--file /cutover/source.schema.sql
+		"$admin_password" \
+		source \
+		"$source_schema_manifest"
+	build_schema_definition_manifest \
+		"$admin_source_libpq_url" \
+		"$admin_password" \
+		source-definitions \
+		"$source_schema_definition_manifest"
 
 	run_pg_dump \
 		"$admin_password" \
@@ -3016,38 +3106,29 @@ dump_and_restore_target() {
 		/cutover/notification-delivery.dump
 	apply_strict_target_acls
 	verify_target_acl_boundary
-	run_pg_dump \
-		"$migration_password" \
+	build_schema_manifest \
 		"$migration_target_libpq_url" \
-		--format=plain \
-		--schema-only \
-		--no-owner \
-		--no-privileges \
-		--schema "$TARGET_SCHEMA" \
-		--file /cutover/target.schema.sql
-	sed -E \
-		-e '/^-- Dumped from database version /d' \
-		-e '/^-- Dumped by pg_dump version /d' \
-		-e '/^\\(un)?restrict /d' \
-		"$source_schema_dump" >"$source_schema_manifest"
-	sed -E \
-		-e '/^-- Dumped from database version /d' \
-		-e '/^-- Dumped by pg_dump version /d' \
-		-e '/^\\(un)?restrict /d' \
-		"$target_schema_dump" >"$target_schema_manifest"
+		"$migration_password" \
+		target \
+		"$target_schema_manifest"
 	if ! cmp -s "$source_schema_manifest" "$target_schema_manifest"; then
 		diff -u "$source_schema_manifest" "$target_schema_manifest" >&2 || true
-		fail "Notification Delivery source and target schema definitions differ."
+		fail "Notification Delivery source and target schema object manifests differ."
 	fi
-	source_schema_sha256="$(
+	source_schema_objects_sha256="$(
 		sha256sum "$source_schema_manifest" | awk '{ print $1 }'
 	)"
-	target_schema_sha256="$(
+	target_schema_objects_sha256="$(
 		sha256sum "$target_schema_manifest" | awk '{ print $1 }'
 	)"
-	[[ "$source_schema_sha256" =~ ^[0-9a-f]{64}$ &&
-		"$target_schema_sha256" == "$source_schema_sha256" ]] ||
-		fail "Notification Delivery schema checksum comparison failed."
+	[[ "$source_schema_objects_sha256" =~ ^[0-9a-f]{64}$ &&
+		"$target_schema_objects_sha256" == "$source_schema_objects_sha256" ]] ||
+		fail "Notification Delivery schema object checksum comparison failed."
+	source_schema_sha256="$(
+		sha256sum "$source_schema_definition_manifest" | awk '{ print $1 }'
+	)"
+	[[ "$source_schema_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+		fail "Notification Delivery source schema definition checksum is invalid."
 
 	build_data_manifest \
 		"$migration_target_libpq_url" \
