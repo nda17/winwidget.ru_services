@@ -317,7 +317,9 @@ schema/client и production dependencies — без `dist`, Prisma client, ви�
 RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
 привязаны только к `127.0.0.1` backend VPS. PostgreSQL Notification Delivery
 аналогично публикует `5432` только на `127.0.0.1:55432`; наружу VPS этот порт
-не открывается.
+не открывается. Для этой публикации используется выделенная обычная
+bridge-сеть, а не `internal`: worker и migration-контейнеры работают в host
+network и подключаются к PostgreSQL через loopback.
 
 ## RabbitMQ и transactional outbox
 

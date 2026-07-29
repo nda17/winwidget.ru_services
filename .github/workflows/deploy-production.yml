@@ -965,7 +965,7 @@ jobs:
                 notificationPostgresNetwork?.name !==
                   "winwidget-notification-delivery-postgres" ||
                 notificationPostgresNetwork.driver !== "bridge" ||
-                notificationPostgresNetwork.internal !== true ||
+                notificationPostgresNetwork.internal === true ||
                 notificationPostgresNetwork.labels?.["com.winwidget.owner"] !==
                   "notification-delivery" ||
                 notificationPostgresNetwork.labels?.[
@@ -973,7 +973,7 @@ jobs:
                 ] !== "postgres-network"
               ) {
                 throw new Error(
-                  "Notification Delivery PostgreSQL must use only its internal network",
+                  "Notification Delivery PostgreSQL must use only its dedicated loopback-published bridge network",
                 );
               }
               const notificationPostgresDataMounts = (

@@ -416,7 +416,7 @@ networks:
   notification-delivery-postgres:
     name: winwidget-notification-delivery-postgres
     driver: bridge
-    internal: true
+    internal: false
     labels:
       com.winwidget.owner: notification-delivery
       com.winwidget.purpose: postgres-network

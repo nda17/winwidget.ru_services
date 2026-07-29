@@ -350,7 +350,7 @@ verify_canonical_notification_database() {
 		"$purpose_label" != "postgres" ||
 		"$pgdata_env" != "/var/lib/postgresql/18/docker" ||
 		"$network_attachment" != "winwidget-notification-delivery-postgres" ||
-		"$network_identity" != "bridge|local|true|notification-delivery|postgres-network" ||
+		"$network_identity" != "bridge|local|false|notification-delivery|postgres-network" ||
 		"$network_container_ids" != "$container_id" ||
 		"$volume_mount" != "/var/lib/postgresql|volume|$expected_volume|true" ||
 		"$port_binding" != "127.0.0.1|$expected_port" ||

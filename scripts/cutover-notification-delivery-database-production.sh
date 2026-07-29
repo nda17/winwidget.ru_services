@@ -13,6 +13,9 @@ TARGET_DATABASE="winwidget_notification_delivery"
 TARGET_SCHEMA="notification_delivery"
 TARGET_HOST="127.0.0.1"
 POSTGRES_SERVICE="notification-delivery-postgres"
+POSTGRES_NETWORK="winwidget-notification-delivery-postgres"
+POSTGRES_NETWORK_IDENTITY="bridge|local|false|notification-delivery|postgres-network"
+LEGACY_POSTGRES_NETWORK_IDENTITY="bridge|local|true|notification-delivery|postgres-network"
 HEALTHCHECK_ATTEMPTS="${NOTIFICATION_DELIVERY_DATABASE_HEALTHCHECK_ATTEMPTS:-60}"
 HEALTHCHECK_INTERVAL="${NOTIFICATION_DELIVERY_DATABASE_HEALTHCHECK_INTERVAL:-2}"
 FINALIZE_CUTOVER="${NOTIFICATION_DELIVERY_DATABASE_FINALIZE:-false}"
@@ -1777,14 +1780,14 @@ verify_target_postgres_container() {
 			'{{ range $name, $_ := .NetworkSettings.Networks }}{{ println $name }}{{ end }}' \
 			"$container_id"
 	)"
-	[[ "$network_attachment" == "winwidget-notification-delivery-postgres" ]] ||
+	[[ "$network_attachment" == "$POSTGRES_NETWORK" ]] ||
 		return 1
 	network_identity="$(
 		docker network inspect \
 			--format '{{ .Driver }}|{{ .Scope }}|{{ .Internal }}|{{ index .Labels "com.winwidget.owner" }}|{{ index .Labels "com.winwidget.purpose" }}' \
 			"$network_attachment"
 	)"
-	[[ "$network_identity" == "bridge|local|true|notification-delivery|postgres-network" ]] ||
+	[[ "$network_identity" == "$POSTGRES_NETWORK_IDENTITY" ]] ||
 		return 1
 	network_container_ids="$(
 		docker network inspect \
@@ -1853,11 +1856,167 @@ verify_target_postgres_container() {
 	target_system_identifier="$observed_system_identifier"
 }
 
+recover_legacy_pre_cutover_postgres_network() {
+	local network_identity
+	local network_container_ids
+	local container_id
+	local container_networks
+	local project_label
+	local service_label
+	local owner_label
+	local purpose_label
+	local image_ref
+	local pgdata_env
+	local database_env
+	local admin_user_env
+	local password_file_env
+	local volume_mount
+	local secret_mount
+	local attached_container_ids
+	local worker_database_url
+	local running
+
+	if ! docker network inspect "$POSTGRES_NETWORK" >/dev/null 2>&1; then
+		return
+	fi
+	network_identity="$(
+		docker network inspect \
+			--format '{{ .Driver }}|{{ .Scope }}|{{ .Internal }}|{{ index .Labels "com.winwidget.owner" }}|{{ index .Labels "com.winwidget.purpose" }}' \
+			"$POSTGRES_NETWORK"
+	)"
+	if [[ "$network_identity" == "$POSTGRES_NETWORK_IDENTITY" ]]; then
+		return
+	fi
+	[[ ! -e "$MARKER_FILE" && ! -L "$MARKER_FILE" ]] ||
+		fail "Refusing to repair the legacy PostgreSQL network after cutover state was created."
+	[[ "$network_identity" == "$LEGACY_POSTGRES_NETWORK_IDENTITY" ]] ||
+		fail "Notification Delivery PostgreSQL network identity is invalid."
+
+	network_container_ids="$(
+		docker network inspect \
+			--format '{{ range $id, $_ := .Containers }}{{ println $id }}{{ end }}' \
+			"$POSTGRES_NETWORK"
+	)"
+	container_id="$(
+		resolve_project_container "$POSTGRES_SERVICE" true true
+	)"
+	attached_container_ids="$(
+		docker ps -a --no-trunc \
+			--filter "volume=$target_volume" \
+			--format '{{ .ID }}'
+	)"
+	if [[ -z "$container_id" ]]; then
+		[[ -z "$network_container_ids" && -z "$attached_container_ids" ]] ||
+			fail "Legacy Notification Delivery PostgreSQL network or volume is used by an unexpected container."
+	else
+		container_networks="$(
+			docker inspect --format \
+				'{{ range $name, $_ := .NetworkSettings.Networks }}{{ println $name }}{{ end }}' \
+				"$container_id"
+		)"
+		project_label="$(
+			docker inspect \
+				--format '{{ index .Config.Labels "com.docker.compose.project" }}' \
+				"$container_id"
+		)"
+		service_label="$(
+			docker inspect \
+				--format '{{ index .Config.Labels "com.docker.compose.service" }}' \
+				"$container_id"
+		)"
+		owner_label="$(
+			docker inspect \
+				--format '{{ index .Config.Labels "com.winwidget.owner" }}' \
+				"$container_id"
+		)"
+		purpose_label="$(
+			docker inspect \
+				--format '{{ index .Config.Labels "com.winwidget.purpose" }}' \
+				"$container_id"
+		)"
+		image_ref="$(
+			docker inspect --format '{{ .Config.Image }}' "$container_id"
+		)"
+		pgdata_env="$(container_env_value "$container_id" PGDATA)"
+		database_env="$(container_env_value "$container_id" POSTGRES_DB)"
+		admin_user_env="$(container_env_value "$container_id" POSTGRES_USER)"
+		password_file_env="$(
+			container_env_value "$container_id" POSTGRES_PASSWORD_FILE
+		)"
+		volume_mount="$(
+			docker inspect --format \
+				'{{ range .Mounts }}{{ printf "%s|%s|%s|%t\n" .Destination .Type .Name .RW }}{{ end }}' \
+				"$container_id" |
+				awk -F'|' '$1 == "/var/lib/postgresql" || index($1, "/var/lib/postgresql/") == 1'
+		)"
+		secret_mount="$(
+			docker inspect --format \
+				'{{ range .Mounts }}{{ printf "%s|%s|%s|%t\n" .Destination .Type .Source .RW }}{{ end }}' \
+				"$container_id" |
+				awk -F'|' '$1 == "/run/secrets/notification-delivery-postgres-admin-password"'
+		)"
+		worker_database_url="$(
+			container_env_value \
+				"$worker_container_id" \
+				NOTIFICATION_DELIVERY_DATABASE_URL 2>/dev/null || true
+		)"
+		[[ "$runtime_current_location" == "source" &&
+			"$project_label" == "winwidget" &&
+			"$service_label" == "$POSTGRES_SERVICE" &&
+			"$owner_label" == "notification-delivery" &&
+			"$purpose_label" == "postgres" &&
+			"$image_ref" == "$target_postgres_image" &&
+			"$pgdata_env" == "/var/lib/postgresql/18/docker" &&
+			"$database_env" == "$TARGET_DATABASE" &&
+			"$admin_user_env" == "$target_admin_user" &&
+			"$password_file_env" == "/run/secrets/notification-delivery-postgres-admin-password" &&
+			"$container_networks" == "$POSTGRES_NETWORK" &&
+			"$network_container_ids" == "$container_id" &&
+			"$volume_mount" == "/var/lib/postgresql|volume|$target_volume|true" &&
+			"$secret_mount" == "/run/secrets/notification-delivery-postgres-admin-password|bind|$target_admin_password_file|false" &&
+			"$attached_container_ids" == "$container_id" &&
+			"$worker_database_url" == "$(get_env_value NOTIFICATION_DELIVERY_DATABASE_URL)" ]] ||
+			fail "Legacy Notification Delivery PostgreSQL resources do not match the safe pre-cutover recovery identity."
+		running="$(
+			docker inspect --format '{{ .State.Running }}' "$container_id"
+		)"
+		if [[ "$running" == "true" ]]; then
+			docker stop --timeout 60 "$container_id" >/dev/null
+		fi
+		docker rm "$container_id" >/dev/null
+	fi
+	docker network rm "$POSTGRES_NETWORK" >/dev/null
+	docker volume inspect "$target_volume" >/dev/null
+	[[ -f "$target_admin_password_file" && ! -L "$target_admin_password_file" ]] ||
+		fail "Notification Delivery PostgreSQL admin secret disappeared during network recovery."
+	echo "Recovered the failed pre-cutover PostgreSQL layout without removing its external volume."
+}
+
+report_target_postgres_diagnostics() {
+	local container_id
+
+	container_id="$(
+		compose_target ps -a -q "$POSTGRES_SERVICE" 2>/dev/null || true
+	)"
+	if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
+		echo "Notification Delivery PostgreSQL diagnostics: canonical container is missing or ambiguous." >&2
+		return
+	fi
+	docker inspect --format \
+		'status={{ .State.Status }} running={{ .State.Running }} health={{ if .State.Health }}{{ .State.Health.Status }}{{ else }}missing{{ end }} image={{ .Config.Image }}' \
+		"$container_id" >&2 || true
+	docker inspect --format \
+		'{{ range .Mounts }}mount={{ .Destination }}|{{ .Type }}|{{ .Name }}|rw={{ .RW }}{{ println }}{{ end }}{{ range $name, $_ := .NetworkSettings.Networks }}network={{ $name }}{{ println }}{{ end }}ports={{ json .NetworkSettings.Ports }}' \
+		"$container_id" >&2 || true
+	docker logs --tail 100 "$container_id" >&2 || true
+}
+
 start_target_postgres() {
 	local attempt
 	local existing_container_id
 	local running
 
+	recover_legacy_pre_cutover_postgres_network
 	existing_container_id="$(
 		compose_target ps -a -q "$POSTGRES_SERVICE" 2>/dev/null || true
 	)"
@@ -1879,7 +2038,8 @@ start_target_postgres() {
 		fi
 		sleep "$HEALTHCHECK_INTERVAL"
 	done
-	fail "Notification Delivery PostgreSQL container did not become healthy."
+	report_target_postgres_diagnostics
+	fail "Notification Delivery PostgreSQL container failed its canonical health, network, volume, port or identity checks."
 }
 
 verify_postgres_compatibility_and_capacity() {
