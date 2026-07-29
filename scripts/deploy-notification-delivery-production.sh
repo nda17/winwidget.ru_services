@@ -803,11 +803,9 @@ require_env_key() {
 			sub(/^[[:space:]]*/, "", value)
 			sub(/[[:space:]]*$/, "", value)
 
-			if (
-				name == key &&
+			if (name == key &&
 				value != "" &&
-				value !~ /^(change_me|XYZXYZXYZ)/
-			) ok = 1
+				value !~ /^(change_me|XYZXYZXYZ)/) ok = 1
 		}
 		END { exit(ok ? 0 : 1) }
 	' "$ENV_FILE"; then

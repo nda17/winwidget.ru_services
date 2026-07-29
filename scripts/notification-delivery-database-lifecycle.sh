@@ -58,8 +58,7 @@ validate_notification_database_cutover_marker() {
 		{
 			count[$1] += 1
 			value[$1] = substr($0, index($0, "=") + 1)
-			if (
-				$1 != "version" &&
+			if ($1 != "version" &&
 				$1 != "phase" &&
 				$1 != "source_schema_state" &&
 				$1 != "source_database" &&
@@ -80,15 +79,13 @@ validate_notification_database_cutover_marker() {
 				$1 != "source_schema_sha256" &&
 				$1 != "source_manifest_sha256" &&
 				$1 != "target_manifest_sha256" &&
-				$1 != "updated_at"
-			) invalid = 1
+				$1 != "updated_at") invalid = 1
 		}
 		END {
 			for (key in count) {
 				if (count[key] != 1) invalid = 1
 			}
-			if (
-				NR != 22 ||
+			if (NR != 22 ||
 				value["version"] != "7" ||
 				value["phase"] !~ /^(preparing|restoring|prepared|forward_only|complete)$/ ||
 				value["source_schema_state"] !~ /^(retained|dropped)$/ ||
@@ -111,22 +108,15 @@ validate_notification_database_cutover_marker() {
 				!valid_hash(value["source_schema_sha256"]) ||
 				!valid_hash(value["source_manifest_sha256"]) ||
 				!valid_hash(value["target_manifest_sha256"]) ||
-				value["updated_at"] !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
-			) invalid = 1
-			if (
-				value["phase"] ~ /^(prepared|forward_only|complete)$/ &&
-				(
-					value["dump_sha256"] == "pending" ||
+				value["updated_at"] !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/) invalid = 1
+			if (value["phase"] ~ /^(prepared|forward_only|complete)$/ &&
+				(value["dump_sha256"] == "pending" ||
 					value["source_schema_sha256"] == "pending" ||
 					value["source_manifest_sha256"] == "pending" ||
 					value["target_manifest_sha256"] == "pending" ||
-					value["target_manifest_sha256"] != value["source_manifest_sha256"]
-				)
-			) invalid = 1
-			if (
-				(value["phase"] == "complete" && value["source_schema_state"] != "dropped") ||
-				(value["phase"] != "complete" && value["source_schema_state"] != "retained")
-			) invalid = 1
+					value["target_manifest_sha256"] != value["source_manifest_sha256"])) invalid = 1
+			if ((value["phase"] == "complete" && value["source_schema_state"] != "dropped") ||
+				(value["phase"] != "complete" && value["source_schema_state"] != "retained")) invalid = 1
 			exit(invalid ? 1 : 0)
 		}
 	' "$NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER"
