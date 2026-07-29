@@ -24,6 +24,7 @@ import {
 } from '@/messaging/messaging.constants';
 import { OUTCOME_NOTIFICATION_DELIVERY_KINDS } from '@/messaging/notification-delivery-event';
 import { TELEGRAM_DESTINATION_SOURCE_KINDS } from '@/messaging/telegram-destination-unavailable-event';
+import { isDatabaseBackupJobType } from '@/scheduled-jobs/scheduled-jobs.types';
 import {
 	BillingPeriod,
 	MailingDeliveryChannel,
@@ -819,7 +820,10 @@ const assertScheduledEvent = (payload: JsonRecord): MessagingKind => {
 		return 'daily-summary-telegram';
 	}
 	if (payload.eventType === DATABASE_BACKUP_EVENT_TYPE) {
-		if (payload.jobType !== 'DATABASE_BACKUP') {
+		if (
+			typeof payload.jobType !== 'string' ||
+			!isDatabaseBackupJobType(payload.jobType)
+		) {
 			throw new Error('Invalid database backup job type');
 		}
 		assertIsoDate(payload.periodStart, 'payload.periodStart', true);

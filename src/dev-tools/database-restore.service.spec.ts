@@ -8,6 +8,17 @@ import { BadRequestException } from '@nestjs/common';
 describe('DatabaseRestoreService', () => {
 	const originalMode = process.env.MODE;
 	const originalDevelopmentUrl = process.env.DATABASE_URL_DEVELOPMENT;
+	const coreTableOfContents = [
+		'; Archive created at 2026-07-29 12:00:00 UTC',
+		'5; 2615 2200 SCHEMA - public postgres',
+		'215; 1259 16401 TABLE public users postgres',
+		'216; 0 16401 TABLE DATA public users postgres'
+	].join('\n');
+	const notificationDeliveryTableOfContents = [
+		'; Archive created at 2026-07-29 12:00:00 UTC',
+		'5; 2615 2200 SCHEMA - notification_delivery postgres',
+		'215; 1259 16401 TABLE notification_delivery delivery_receipts postgres'
+	].join('\n');
 
 	const createService = () => {
 		const prisma = {
@@ -34,7 +45,7 @@ describe('DatabaseRestoreService', () => {
 	beforeEach(() => {
 		process.env.MODE = 'development';
 		process.env.DATABASE_URL_DEVELOPMENT =
-			'postgresql://postgres:secret@localhost:5432/winwidget?schema=custom';
+			'postgresql://postgres:secret@localhost:5432/winwidget?schema=public';
 	});
 
 	afterEach(() => {
@@ -90,7 +101,8 @@ describe('DatabaseRestoreService', () => {
 			.mockResolvedValue('/tmp/winwidget.dump');
 		const runPostgresCommand = jest
 			.spyOn(internals, 'runPostgresCommand')
-			.mockResolvedValue(undefined);
+			.mockResolvedValueOnce(coreTableOfContents)
+			.mockResolvedValueOnce('');
 		const deleteTempFile = jest
 			.spyOn(internals, 'deleteTempFile')
 			.mockResolvedValue(undefined);
@@ -105,20 +117,75 @@ describe('DatabaseRestoreService', () => {
 			restoredAt: expect.any(String)
 		});
 		expect(prisma.$disconnect).toHaveBeenCalledTimes(1);
-		expect(runPostgresCommand).toHaveBeenCalledWith('pg_restore', [
+		expect(runPostgresCommand).toHaveBeenNthCalledWith(1, 'pg_restore', [
+			'--list',
+			'/tmp/winwidget.dump'
+		]);
+		expect(runPostgresCommand).toHaveBeenNthCalledWith(2, 'pg_restore', [
 			'--exit-on-error',
 			'--clean',
 			'--if-exists',
 			'--no-owner',
 			'--no-privileges',
 			'--schema',
-			'custom',
+			'public',
 			'--dbname',
 			'postgresql://postgres:secret@localhost:5432/winwidget',
 			'/tmp/winwidget.dump'
 		]);
 		expect(prisma.$connect).toHaveBeenCalledTimes(1);
 		expect(deleteTempFile).toHaveBeenCalledWith('/tmp/winwidget.dump');
+	});
+
+	it('rejects a Notification Delivery dump before destructive restore', async () => {
+		const { service, prisma } = createService();
+		const internals = service as any;
+		jest
+			.spyOn(internals, 'writeUploadedBackupFile')
+			.mockResolvedValue('/tmp/notification-delivery.dump');
+		const runPostgresCommand = jest
+			.spyOn(internals, 'runPostgresCommand')
+			.mockResolvedValue(notificationDeliveryTableOfContents);
+		const deleteTempFile = jest
+			.spyOn(internals, 'deleteTempFile')
+			.mockResolvedValue(undefined);
+
+		await expect(
+			service.restore(createFile(), 'ВОССТАНОВИТЬ БД')
+		).rejects.toThrow(
+			'Dump Notification Delivery нельзя восстанавливать в основную БД'
+		);
+		expect(runPostgresCommand).toHaveBeenCalledTimes(1);
+		expect(runPostgresCommand).toHaveBeenCalledWith('pg_restore', [
+			'--list',
+			'/tmp/notification-delivery.dump'
+		]);
+		expect(prisma.$disconnect).not.toHaveBeenCalled();
+		expect(prisma.$connect).not.toHaveBeenCalled();
+		expect(deleteTempFile).toHaveBeenCalledWith(
+			'/tmp/notification-delivery.dump'
+		);
+	});
+
+	it('rejects a dump without the core public schema before destructive restore', async () => {
+		const { service, prisma } = createService();
+		const internals = service as any;
+		jest
+			.spyOn(internals, 'writeUploadedBackupFile')
+			.mockResolvedValue('/tmp/analytics.dump');
+		const runPostgresCommand = jest
+			.spyOn(internals, 'runPostgresCommand')
+			.mockResolvedValue(
+				'5; 2615 2200 SCHEMA - analytics postgres\n215; 1259 16401 TABLE analytics metrics postgres'
+			);
+		jest.spyOn(internals, 'deleteTempFile').mockResolvedValue(undefined);
+
+		await expect(
+			service.restore(createFile(), 'ВОССТАНОВИТЬ БД')
+		).rejects.toThrow('Разрешён только dump основной БД со схемой public');
+		expect(runPostgresCommand).toHaveBeenCalledTimes(1);
+		expect(prisma.$disconnect).not.toHaveBeenCalled();
+		expect(prisma.$connect).not.toHaveBeenCalled();
 	});
 
 	it('releases the in-process guard when preparing the upload fails', async () => {
@@ -130,7 +197,9 @@ describe('DatabaseRestoreService', () => {
 			.mockResolvedValueOnce('/tmp/winwidget.dump');
 		jest
 			.spyOn(internals, 'runPostgresCommand')
-			.mockResolvedValue(undefined);
+			.mockImplementation((_command: string, args: string[]) =>
+				Promise.resolve(args.includes('--list') ? coreTableOfContents : '')
+			);
 		jest.spyOn(internals, 'deleteTempFile').mockResolvedValue(undefined);
 		const file = createFile();
 

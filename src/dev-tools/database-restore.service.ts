@@ -10,6 +10,8 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 export const DATABASE_RESTORE_MAX_FILE_SIZE_BYTES = 49 * 1024 * 1024;
+const CORE_DATABASE_SCHEMA = 'public';
+const NOTIFICATION_DELIVERY_DATABASE_SCHEMA = 'notification_delivery';
 
 @Injectable()
 export class DatabaseRestoreService {
@@ -58,12 +60,19 @@ export class DatabaseRestoreService {
 
 		this.restoreInProgress = true;
 		let backupPath: string | null = null;
+		let prismaDisconnected = false;
 
 		try {
 			backupPath = await this.writeUploadedBackupFile(file);
 			const database = this.getPostgresCommandConnection();
+			const tableOfContents = await this.runPostgresCommand('pg_restore', [
+				'--list',
+				backupPath
+			]);
+			this.assertCoreBackupTableOfContents(tableOfContents);
 
 			await this.prisma.$disconnect();
+			prismaDisconnected = true;
 			await this.runPostgresCommand('pg_restore', [
 				'--exit-on-error',
 				'--clean',
@@ -85,7 +94,9 @@ export class DatabaseRestoreService {
 			};
 		} finally {
 			try {
-				await this.prisma.$connect();
+				if (prismaDisconnected) {
+					await this.prisma.$connect();
+				}
 			} finally {
 				if (backupPath) {
 					await this.deleteTempFile(backupPath);
@@ -118,15 +129,55 @@ export class DatabaseRestoreService {
 		await unlink(filePath).catch(() => undefined);
 	}
 
-	private async runPostgresCommand(command: string, args: string[]) {
+	private async runPostgresCommand(
+		command: string,
+		args: string[]
+	): Promise<string> {
 		try {
-			await execFileAsync(command, args, {
+			const { stdout } = await execFileAsync(command, args, {
 				timeout: this.commandTimeoutMs,
 				maxBuffer: 1024 * 1024
 			});
+			return stdout;
 		} catch (error) {
 			const message = this.getPostgresCommandErrorMessage(command, error);
 			throw new BadRequestException(message);
+		}
+	}
+
+	private assertCoreBackupTableOfContents(tableOfContents: string): void {
+		const entries = tableOfContents
+			.split(/\r?\n/)
+			.map(entry => entry.trim())
+			.filter(entry => entry && !entry.startsWith(';'));
+		if (!entries.length) {
+			throw new BadRequestException(
+				'Файл backup не содержит PostgreSQL TOC'
+			);
+		}
+
+		const containsNotificationDeliverySchema = entries.some(entry =>
+			new RegExp(
+				`(^|\\s)${NOTIFICATION_DELIVERY_DATABASE_SCHEMA}(\\s|$)`,
+				'i'
+			).test(entry)
+		);
+		if (containsNotificationDeliverySchema) {
+			throw new BadRequestException(
+				'Dump Notification Delivery нельзя восстанавливать в основную БД'
+			);
+		}
+
+		const containsCoreSchema = entries.some(entry =>
+			new RegExp(
+				`^\\d+;\\s+\\d+\\s+\\d+\\s+SCHEMA\\s+-\\s+${CORE_DATABASE_SCHEMA}(\\s|$)`,
+				'i'
+			).test(entry)
+		);
+		if (!containsCoreSchema) {
+			throw new BadRequestException(
+				'Разрешён только dump основной БД со схемой public'
+			);
 		}
 	}
 
@@ -153,6 +204,11 @@ export class DatabaseRestoreService {
 		const rawDatabaseUrl = this.getDatabaseUrl();
 		const url = new URL(rawDatabaseUrl);
 		const schema = url.searchParams.get('schema')?.trim() || 'public';
+		if (schema !== CORE_DATABASE_SCHEMA) {
+			throw new BadRequestException(
+				'Восстановление разрешено только для основной схемы public'
+			);
+		}
 
 		url.searchParams.delete('schema');
 

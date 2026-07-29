@@ -166,6 +166,48 @@ describe('messaging event contract', () => {
 		).not.toThrow();
 	});
 
+	it('accepts the dedicated notification-delivery database backup job type', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'database.backup.requested.v1',
+			jobId: MESSAGE_ID,
+			jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
+			scheduleKey: 'scheduled:test',
+			periodStart: '2026-07-25T00:00:00.000Z',
+			periodEnd: '2026-07-26T00:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'database-backup'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects an unknown database backup job type', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'database.backup.requested.v1',
+			jobId: MESSAGE_ID,
+			jobType: 'UNKNOWN_DATABASE_BACKUP',
+			scheduleKey: 'scheduled:test',
+			periodStart: null,
+			periodEnd: null
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'database-backup'
+			})
+		).toThrow('Invalid database backup job type');
+	});
+
 	it('rejects a backup period with only one boundary', () => {
 		const payload = {
 			schemaVersion: 1,

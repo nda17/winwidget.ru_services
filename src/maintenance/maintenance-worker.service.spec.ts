@@ -76,9 +76,10 @@ describe('MaintenanceWorkerService', () => {
 		}) as ConsumeMessage;
 
 	const createService = (
-		config: Record<string, string | undefined> = {}
+		config: Record<string, string | undefined> = {},
+		jobOverrides: Partial<ScheduledJobRunView> = {}
 	) => {
-		const job = createJob();
+		const job = createJob(jobOverrides);
 		const rabbitMq = {
 			consume: jest.fn().mockResolvedValue(undefined),
 			consumeDeadLetter: jest.fn().mockResolvedValue(undefined),
@@ -139,7 +140,7 @@ describe('MaintenanceWorkerService', () => {
 		} as unknown as PrismaService;
 		const backup = {
 			createAndSend: jest.fn().mockResolvedValue({
-				fileName: 'winwidget.dump',
+				fileName: 'winwidget-db.dump',
 				fileSize: 123,
 				createdAt: now,
 				telegramSent: true
@@ -184,6 +185,7 @@ describe('MaintenanceWorkerService', () => {
 
 		expect(backup.createAndSend).toHaveBeenCalledWith(
 			jobId,
+			'core',
 			expect.objectContaining({
 				chatId: '-100123',
 				messageThreadId: 42
@@ -194,7 +196,12 @@ describe('MaintenanceWorkerService', () => {
 			expect.any(Object),
 			jobId,
 			leaseToken,
-			expect.objectContaining({ telegramSent: true })
+			{
+				fileName: 'winwidget-db.dump',
+				fileSize: 123,
+				createdAt: now,
+				telegramSent: true
+			}
 		);
 		expect(
 			transaction.integrationDeliveryFailure.updateMany
@@ -218,6 +225,54 @@ describe('MaintenanceWorkerService', () => {
 		});
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('executes notification-delivery as an independent backup target', async () => {
+		const notificationJobType = 'NOTIFICATION_DELIVERY_DATABASE_BACKUP';
+		const { service, backup, scheduledJobs, transaction } = createService(
+			{},
+			{
+				jobType: notificationJobType,
+				scheduleKey: '2026-07-24',
+				trigger: ScheduledJobRunTrigger.SCHEDULED,
+				periodStart: now,
+				periodEnd: '2026-07-25T00:00:00.000Z',
+				input: {
+					chatId: '-100123',
+					messageThreadId: 42,
+					trigger: 'SCHEDULED',
+					periodStart: now
+				}
+			}
+		);
+		const message = createMessage(jobId, {
+			schemaVersion: 1,
+			eventType: 'database.backup.requested.v1',
+			jobId,
+			jobType: notificationJobType,
+			scheduleKey: '2026-07-24',
+			periodStart: now,
+			periodEnd: '2026-07-25T00:00:00.000Z'
+		});
+
+		await (service as any).handle('database-backup', message);
+
+		expect(scheduledJobs.claim).toHaveBeenCalledWith(
+			jobId,
+			expect.any(String),
+			120_000,
+			notificationJobType,
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(backup.createAndSend).toHaveBeenCalledWith(
+			jobId,
+			'notification-delivery',
+			expect.objectContaining({ trigger: 'SCHEDULED' }),
+			expect.any(AbortSignal)
+		);
+		expect(transaction.telegramBotSettings.update).not.toHaveBeenCalled();
 	});
 
 	it('keeps a completed backup successful when resolving an old DLQ record fails', async () => {
@@ -613,7 +668,7 @@ describe('MaintenanceWorkerService', () => {
 			backupStarted = resolve;
 		});
 		(backup.createAndSend as jest.Mock).mockImplementation(
-			(_jobId, _input, signal: AbortSignal) =>
+			(_jobId, _target, _input, signal: AbortSignal) =>
 				new Promise((_resolve, reject) => {
 					backupStarted();
 					signal.addEventListener(
@@ -759,7 +814,7 @@ describe('MaintenanceWorkerService', () => {
 			})
 		);
 		(backup.createAndSend as jest.Mock).mockImplementation(
-			(_jobId, _input, signal: AbortSignal) => {
+			(_jobId, _target, _input, signal: AbortSignal) => {
 				expect(signal.aborted).toBe(true);
 				return Promise.reject(signal.reason);
 			}
@@ -790,6 +845,7 @@ describe('MaintenanceWorkerService', () => {
 
 		expect(backup.createAndSend).toHaveBeenCalledWith(
 			jobId,
+			'core',
 			expect.any(Object),
 			expect.objectContaining({ aborted: true })
 		);

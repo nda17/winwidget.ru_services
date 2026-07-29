@@ -1,3 +1,8 @@
+import {
+	DatabaseBackupInput,
+	DatabaseBackupResult,
+	DatabaseBackupTarget
+} from '@/maintenance/database-backup.types';
 import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -17,19 +22,25 @@ const PRISMA_ONLY_CONNECTION_PARAMS = [
 	'schema',
 	'statement_cache_size'
 ] as const;
+const DATABASE_URL_ENV_KEYS = [
+	'DATABASE_BACKUP_URL',
+	'DATABASE_MIGRATION_URL_PRODUCTION',
+	'DATABASE_URL',
+	'DATABASE_URL_DEVELOPMENT',
+	'DATABASE_URL_PRODUCTION',
+	'MAINTENANCE_DATABASE_URL_PRODUCTION',
+	'NOTIFICATION_DELIVERY_BACKUP_URL',
+	'NOTIFICATION_DELIVERY_DATABASE_URL',
+	'NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION'
+] as const;
 
-export interface DatabaseBackupInput {
-	chatId: string;
-	messageThreadId: number;
-	trigger: 'MANUAL' | 'SCHEDULED';
-	periodStart?: string | null;
-}
-
-export interface DatabaseBackupResult {
-	fileName: string;
-	fileSize: number;
-	createdAt: string;
-	telegramSent: true;
+interface PostgresConnection {
+	target: DatabaseBackupTarget;
+	label: string;
+	databaseName: string;
+	url: string;
+	schema: string;
+	password: string | null;
 }
 
 @Injectable()
@@ -49,6 +60,7 @@ export class DatabaseBackupService implements OnModuleInit {
 
 	async createAndSend(
 		jobId: string,
+		target: DatabaseBackupTarget,
 		input: DatabaseBackupInput,
 		signal: AbortSignal
 	): Promise<DatabaseBackupResult> {
@@ -58,11 +70,14 @@ export class DatabaseBackupService implements OnModuleInit {
 		try {
 			await chmod(directory, 0o700);
 			const createdAt = new Date();
-			const fileName = `winwidget-db-${createdAt
-				.toISOString()
-				.replace(/[:.]/g, '-')}.dump`;
+			const timestamp = createdAt.toISOString().replace(/[:.]/g, '-');
+			const database = this.getPostgresConnection(target);
+			const fileName =
+				target === 'core'
+					? `winwidget-db-${timestamp}.dump`
+					: `winwidget-notification-delivery-db-${timestamp}.dump`;
 			const filePath = join(directory, fileName);
-			const database = this.getPostgresConnection();
+
 			await this.runCommand(
 				'pg_dump',
 				[
@@ -94,6 +109,7 @@ export class DatabaseBackupService implements OnModuleInit {
 				filePath,
 				[
 					'<b>Backup базы данных WinWidget</b>',
+					`База: <b>${database.label}</b>`,
 					`Создано: ${this.formatMoscowDateTime(createdAt)} МСК`,
 					`Тип: ${input.trigger === 'MANUAL' ? 'ручной' : 'ежедневный'}`,
 					`Job ID: <code>${jobId}</code>`
@@ -105,6 +121,9 @@ export class DatabaseBackupService implements OnModuleInit {
 			);
 
 			return {
+				target: database.target,
+				databaseName: database.databaseName,
+				schema: database.schema,
 				fileName,
 				fileSize: file.size,
 				createdAt: createdAt.toISOString(),
@@ -133,11 +152,23 @@ export class DatabaseBackupService implements OnModuleInit {
 		}
 	}
 
-	private getPostgresConnection(): {
-		url: string;
-		schema: string;
-		password: string | null;
-	} {
+	private getPostgresConnection(
+		target: DatabaseBackupTarget
+	): PostgresConnection {
+		if (target === 'notification-delivery') {
+			const key = 'NOTIFICATION_DELIVERY_BACKUP_URL';
+			const raw = this.configService.get<string>(key)?.trim();
+			if (!raw || ['change_me', 'XYZXYZXYZ'].includes(raw)) {
+				throw new Error(`${key} is not configured`);
+			}
+			return this.parsePostgresConnection(
+				key,
+				raw,
+				target,
+				'Notification Delivery'
+			);
+		}
+
 		const mode =
 			this.configService.get<string>('MODE')?.trim().toLowerCase() ||
 			'development';
@@ -155,15 +186,38 @@ export class DatabaseBackupService implements OnModuleInit {
 			?.trim();
 		const key = backupUrl ? 'DATABASE_BACKUP_URL' : modeKey;
 		const raw = this.configService.get<string>(key)?.trim();
-		if (!raw || raw === 'change_me') {
+		if (!raw || ['change_me', 'XYZXYZXYZ'].includes(raw)) {
 			throw new Error(`${key} is not configured`);
 		}
 
+		return this.parsePostgresConnection(
+			key,
+			raw,
+			'core',
+			'основная (core)'
+		);
+	}
+
+	private parsePostgresConnection(
+		key: string,
+		raw: string,
+		target: DatabaseBackupTarget,
+		label: string
+	): PostgresConnection {
+		if (['change_me', 'XYZXYZXYZ'].includes(raw)) {
+			throw new Error(`${key} is not configured`);
+		}
 		const url = new URL(raw);
 		if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
 			throw new Error(`${key} must be a PostgreSQL connection URL`);
 		}
 		const schema = url.searchParams.get('schema')?.trim() || 'public';
+		const databaseName = decodeURIComponent(
+			url.pathname.replace(/^\/+/, '')
+		);
+		if (!databaseName) {
+			throw new Error(`${key} must include a PostgreSQL database name`);
+		}
 		const passwordParameter = url.searchParams.get('password');
 		const password = url.password
 			? decodeURIComponent(url.password)
@@ -175,6 +229,9 @@ export class DatabaseBackupService implements OnModuleInit {
 		}
 
 		return {
+			target,
+			label,
+			databaseName,
 			url: url.toString(),
 			schema,
 			password
@@ -197,10 +254,9 @@ export class DatabaseBackupService implements OnModuleInit {
 
 		await new Promise<void>((resolve, reject) => {
 			const childEnvironment = { ...process.env };
-			delete childEnvironment.DATABASE_BACKUP_URL;
-			delete childEnvironment.DATABASE_URL;
-			delete childEnvironment.DATABASE_URL_DEVELOPMENT;
-			delete childEnvironment.DATABASE_URL_PRODUCTION;
+			for (const key of DATABASE_URL_ENV_KEYS) {
+				delete childEnvironment[key];
+			}
 			delete childEnvironment.PGPASSWORD;
 			if (password) childEnvironment.PGPASSWORD = password;
 			const child = spawn(command, args, {

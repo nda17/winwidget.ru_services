@@ -35,6 +35,7 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
 
 export APP_REVISION="$deploy_revision"
 export APP_VERSION="git-$deploy_revision"
@@ -186,6 +187,7 @@ assert_distinct_database_roles() {
 	local backup_user
 	local notification_delivery_user
 	local notification_delivery_migration_user
+	local notification_delivery_backup_user
 
 	api_user="$(get_database_username DATABASE_URL_PRODUCTION)"
 	migration_user="$(get_database_username DATABASE_MIGRATION_URL_PRODUCTION)"
@@ -199,23 +201,32 @@ assert_distinct_database_roles() {
 	notification_delivery_migration_user="$(
 		get_database_username NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
 	)"
+	notification_delivery_backup_user="$(
+		get_database_username NOTIFICATION_DELIVERY_BACKUP_URL
+	)"
 
 	if [[ "$api_user" == "$migration_user" ||
 		"$api_user" == "$maintenance_user" ||
 		"$api_user" == "$backup_user" ||
 		"$api_user" == "$notification_delivery_user" ||
 		"$api_user" == "$notification_delivery_migration_user" ||
+		"$api_user" == "$notification_delivery_backup_user" ||
 		"$migration_user" == "$maintenance_user" ||
 		"$migration_user" == "$backup_user" ||
 		"$migration_user" == "$notification_delivery_user" ||
 		"$migration_user" == "$notification_delivery_migration_user" ||
+		"$migration_user" == "$notification_delivery_backup_user" ||
 		"$maintenance_user" == "$backup_user" ||
 		"$maintenance_user" == "$notification_delivery_user" ||
 		"$maintenance_user" == "$notification_delivery_migration_user" ||
+		"$maintenance_user" == "$notification_delivery_backup_user" ||
 		"$backup_user" == "$notification_delivery_user" ||
 		"$backup_user" == "$notification_delivery_migration_user" ||
-		"$notification_delivery_user" == "$notification_delivery_migration_user" ]]; then
-		echo "API, core migration, Maintenance runtime, backup, notification delivery runtime and notification delivery migration must use six distinct PostgreSQL roles" >&2
+		"$backup_user" == "$notification_delivery_backup_user" ||
+		"$notification_delivery_user" == "$notification_delivery_migration_user" ||
+		"$notification_delivery_user" == "$notification_delivery_backup_user" ||
+		"$notification_delivery_migration_user" == "$notification_delivery_backup_user" ]]; then
+		echo "API, core migration, Maintenance runtime, core backup, notification delivery runtime, migration and backup must use seven distinct PostgreSQL roles" >&2
 		exit 1
 	fi
 }
@@ -300,6 +311,12 @@ case "$mode" in
 		require_env_key "DATABASE_BACKUP_URL"
 		require_env_key "NOTIFICATION_DELIVERY_DATABASE_URL"
 		require_env_key "NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION"
+		require_env_key "NOTIFICATION_DELIVERY_BACKUP_URL"
+		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_IMAGE"
+		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_PORT"
+		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME"
+		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER"
+		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "PRODUCTION_HOST"
 		require_env_key "AUTH_COOKIE_DOMAIN"
 		require_env_key "COMPOSE_PROJECT_NAME"
@@ -498,6 +515,7 @@ if [[ "$target_project" != "winwidget" ]]; then
 	echo "COMPOSE_PROJECT_NAME must be winwidget, got: ${target_project:-empty}" >&2
 	exit 1
 fi
+assert_notification_database_postgres_identity
 rabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"
 if [[ "$rabbitmq_vhost" != "winwidget" ]]; then
 	echo "RABBITMQ_VHOST must be winwidget, got: ${rabbitmq_vhost:-empty}" >&2
@@ -740,6 +758,10 @@ process.stdout.write("Standalone Notification Delivery image artifact verified\n
 '
 }
 
+initialize_notification_database_lifecycle_guard \
+	true \
+	"a routine full deployment"
+
 compose_target \
 	--profile migration \
 	--profile notification-delivery-migration \
@@ -755,14 +777,18 @@ validate_notification_database_urls() {
 	local parser_image="$1"
 	local runtime_url
 	local migration_url
+	local backup_url
 
 	runtime_url="$(get_env_value NOTIFICATION_DELIVERY_DATABASE_URL)"
 	migration_url="$(
 		get_env_value NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
 	)"
+	backup_url="$(get_env_value NOTIFICATION_DELIVERY_BACKUP_URL)"
 
-	if ! printf '%s\n%s\n' "$runtime_url" "$migration_url" |
+	if ! printf '%s\n%s\n%s\n' "$runtime_url" "$migration_url" "$backup_url" |
 		docker run --rm -i --network none \
+			-e "NOTIFICATION_DATABASE_CUTOVER_ACTIVE=$notification_database_cutover_active" \
+			-e "NOTIFICATION_DATABASE_TARGET_PORT=$(get_env_value NOTIFICATION_DELIVERY_POSTGRES_PORT)" \
 			--entrypoint node \
 			"$parser_image" \
 			-e '
@@ -776,7 +802,7 @@ const input = readFileSync(0, "utf8");
 const lines = input.endsWith("\n")
 	? input.slice(0, -1).split("\n")
 	: input.split("\n");
-if (lines.length !== 2 || lines.some(value => !value)) {
+if (lines.length !== 3 || lines.some(value => !value)) {
 	fail("Notification delivery PostgreSQL URLs are missing or contain a newline");
 }
 
@@ -858,15 +884,54 @@ const migration = parse(
 	lines[1],
 	"NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION",
 );
-for (const key of ["protocol", "host", "port", "database", "ssl"]) {
-	if (runtime[key] !== migration[key]) {
+const backup = parse(lines[2], "NOTIFICATION_DELIVERY_BACKUP_URL");
+const targetPort = process.env.NOTIFICATION_DATABASE_TARGET_PORT;
+const cutoverActive =
+	process.env.NOTIFICATION_DATABASE_CUTOVER_ACTIVE === "true";
+const targetsCanonicalEndpoint =
+	runtime.host === "127.0.0.1" && runtime.port === targetPort;
+const targetsLocalEndpoint =
+	["127.0.0.1", "localhost", "[::1]"].includes(runtime.host) &&
+	runtime.port === targetPort;
+const targetsLocalDatabase =
+	targetsCanonicalEndpoint &&
+	runtime.database === "winwidget_notification_delivery";
+if (cutoverActive && !targetsLocalDatabase) {
+	fail(
+		"After database cutover, Notification delivery PostgreSQL URLs must target 127.0.0.1, the canonical port and database winwidget_notification_delivery",
+	);
+}
+if (
+	cutoverActive &&
+	runtime.ssl !== JSON.stringify([["sslmode", "disable"]])
+) {
+	fail(
+		"After database cutover, Notification delivery PostgreSQL URLs must contain exactly sslmode=disable",
+	);
+}
+if (
+	!cutoverActive &&
+	(
+		targetsLocalEndpoint ||
+		runtime.database === "winwidget_notification_delivery"
+	)
+) {
+	fail(
+		"The local Notification Delivery database cannot be selected before the durable database cutover marker",
+	);
+}
+for (const candidate of [migration, backup]) {
+	for (const key of ["protocol", "host", "port", "database", "ssl"]) {
+		if (runtime[key] === candidate[key]) continue;
 		fail(
-			"Notification delivery runtime and migration URLs must target the same protocol, host, port, database and SSL settings",
+			"Notification delivery runtime, migration and backup URLs must target the same protocol, host, port, database and SSL settings",
 		);
 	}
 }
-if (runtime.username === migration.username) {
-	fail("Notification delivery runtime and migration URLs must use distinct roles");
+if (new Set([runtime.username, migration.username, backup.username]).size !== 3) {
+	fail(
+		"Notification delivery runtime, migration and backup URLs must use distinct roles",
+	);
 }
 process.stdout.write("Notification delivery PostgreSQL URL structure validated\n");
 '; then
@@ -2241,6 +2306,238 @@ prisma
 '
 }
 
+finalize_notification_delivery_backup_grants() {
+	local backup_role
+
+	backup_role="$(get_database_username NOTIFICATION_DELIVERY_BACKUP_URL)"
+	compose_target \
+		--profile notification-delivery-migration \
+		run --rm --no-deps \
+		-e "NOTIFICATION_DELIVERY_BACKUP_ROLE=$backup_role" \
+		--entrypoint node \
+		notification-delivery-migrate \
+		-e '
+const {
+	PrismaClient,
+} = require("@prisma/notification-delivery-client");
+
+const backupRole = process.env.NOTIFICATION_DELIVERY_BACKUP_ROLE?.trim();
+if (!backupRole || !/^[A-Za-z0-9._-]+$/.test(backupRole)) {
+	throw new Error("Notification delivery backup role name is invalid");
+}
+const quotedRole = `"${backupRole.replaceAll("\"", "\"\"")}"`;
+const prisma = new PrismaClient({
+	datasources: {
+		db: {
+			url: process.env.NOTIFICATION_DELIVERY_DATABASE_URL,
+		},
+	},
+});
+
+prisma
+	.$transaction([
+		prisma.$executeRawUnsafe(
+			`REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA notification_delivery FROM ${quotedRole}`,
+		),
+		prisma.$executeRawUnsafe(
+			`REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA notification_delivery FROM ${quotedRole}`,
+		),
+		prisma.$executeRawUnsafe(
+			`GRANT USAGE ON SCHEMA notification_delivery TO ${quotedRole}`,
+		),
+		prisma.$executeRawUnsafe(
+			`GRANT SELECT ON ALL TABLES IN SCHEMA notification_delivery TO ${quotedRole}`,
+		),
+		prisma.$executeRawUnsafe(
+			`GRANT SELECT ON ALL SEQUENCES IN SCHEMA notification_delivery TO ${quotedRole}`,
+		),
+		prisma.$executeRawUnsafe(
+			`ALTER DEFAULT PRIVILEGES IN SCHEMA notification_delivery GRANT SELECT ON TABLES TO ${quotedRole}`,
+		),
+		prisma.$executeRawUnsafe(
+			`ALTER DEFAULT PRIVILEGES IN SCHEMA notification_delivery GRANT SELECT ON SEQUENCES TO ${quotedRole}`,
+		),
+	])
+	.then(() => {
+		process.stdout.write(
+			"Notification delivery backup grants finalized\n",
+		);
+	})
+	.catch(error => {
+		process.stderr.write(
+			`${error instanceof Error ? error.message : "Notification delivery backup grant finalization failed"}\n`,
+		);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await prisma.$disconnect();
+	});
+'
+}
+
+verify_notification_delivery_backup_boundary() {
+	compose_target run --rm --no-deps \
+		--entrypoint node \
+		maintenance-worker \
+		-e '
+const { PrismaClient } = require("@prisma/client");
+
+const backupUrl = new URL(process.env.NOTIFICATION_DELIVERY_BACKUP_URL);
+const expectedDatabase = decodeURIComponent(backupUrl.pathname.slice(1));
+if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(expectedDatabase)) {
+	throw new Error("notification delivery backup database name is invalid");
+}
+
+const prisma = new PrismaClient({
+	datasources: {
+		db: {
+			url: process.env.NOTIFICATION_DELIVERY_BACKUP_URL,
+		},
+	},
+});
+
+prisma
+	.$transaction(async transaction => {
+		const tables = await transaction.$queryRawUnsafe(`
+			SELECT
+				tablename,
+				has_table_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, tablename),
+					$select$SELECT$select$
+				) AS can_select,
+				(
+					has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$insert$INSERT$insert$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$update$UPDATE$update$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$delete$DELETE$delete$
+					)
+					OR has_table_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, tablename),
+						$truncate$TRUNCATE$truncate$
+					)
+				) AS can_write
+			FROM pg_tables
+			WHERE schemaname = $schema$notification_delivery$schema$
+		`);
+		if (
+			!Array.isArray(tables) ||
+			tables.length === 0 ||
+			tables.some(
+				table => table.can_select !== true || table.can_write !== false,
+			)
+		) {
+			throw new Error(
+				"notification delivery backup role must have read-only access to every service table",
+			);
+		}
+
+		const sequences = await transaction.$queryRawUnsafe(`
+			SELECT
+				sequencename,
+				has_sequence_privilege(
+					current_user,
+					format($fmt$%I.%I$fmt$, schemaname, sequencename),
+					$select$SELECT$select$
+				) AS can_select,
+				(
+					has_sequence_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, sequencename),
+						$usage$USAGE$usage$
+					)
+					OR has_sequence_privilege(
+						current_user,
+						format($fmt$%I.%I$fmt$, schemaname, sequencename),
+						$update$UPDATE$update$
+					)
+				) AS can_advance
+			FROM pg_sequences
+			WHERE schemaname = $schema$notification_delivery$schema$
+		`);
+		if (
+			!Array.isArray(sequences) ||
+			sequences.some(
+				sequence =>
+					sequence.can_select !== true ||
+					sequence.can_advance !== false,
+			)
+		) {
+			throw new Error(
+				"notification delivery backup role has unsafe sequence privileges",
+			);
+		}
+
+		const privilegeRows = await transaction.$queryRawUnsafe(`
+			SELECT
+				current_database() AS database_name,
+				roles.rolsuper AS role_super,
+				roles.rolcreatedb AS role_create_database,
+				roles.rolcreaterole AS role_create_role,
+				pg_get_userbyid(databases.datdba) = current_user AS database_owner,
+				pg_get_userbyid(namespaces.nspowner) = current_user AS schema_owner,
+				has_database_privilege(
+					current_user,
+					current_database(),
+					$privilege$CREATE$privilege$
+				) AS database_create,
+				has_schema_privilege(
+					current_user,
+					$schema$notification_delivery$schema$,
+					$privilege$CREATE$privilege$
+				) AS schema_create
+			FROM pg_roles AS roles
+			JOIN pg_database AS databases
+				ON databases.datname = current_database()
+			JOIN pg_namespace AS namespaces
+				ON namespaces.nspname = $schema$notification_delivery$schema$
+			WHERE roles.rolname = current_user
+		`);
+		const privilege = privilegeRows[0];
+		if (
+			privilegeRows.length !== 1 ||
+			privilege?.database_name !== expectedDatabase ||
+			privilege?.role_super !== false ||
+			privilege?.role_create_database !== false ||
+			privilege?.role_create_role !== false ||
+			privilege?.database_owner !== false ||
+			privilege?.schema_owner !== false ||
+			privilege?.database_create !== false ||
+			privilege?.schema_create !== false
+		) {
+			throw new Error(
+				"notification delivery backup role has unsafe PostgreSQL privileges",
+			);
+		}
+	})
+	.then(() => {
+		process.stdout.write(
+			"Notification delivery backup role boundary verified\n",
+		);
+	})
+	.catch(error => {
+		process.stderr.write(
+			`${error instanceof Error ? error.message : "Notification delivery backup role verification failed"}\n`,
+		);
+		process.exitCode = 1;
+	})
+	.finally(async () => {
+		await prisma.$disconnect();
+	});
+'
+}
+
 verify_notification_delivery_control_smoke() {
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
@@ -3502,18 +3799,20 @@ verify_notification_delivery_migration_boundary
 if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	compose_target \
 		--profile notification-delivery-migration \
-		run --rm notification-delivery-migrate \
+		run --rm --no-deps notification-delivery-migrate \
 		migrate status \
 		--schema prisma/schema.prisma
 else
 	compose_target \
 		--profile notification-delivery-migration \
-		run --rm notification-delivery-migrate
+		run --rm --no-deps notification-delivery-migrate
 fi
+finalize_notification_delivery_backup_grants
 verify_notification_delivery_runtime_crud
+verify_notification_delivery_backup_boundary
 
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
-	if ! compose_target --profile migration run --rm \
+	if ! compose_target --profile migration run --rm --no-deps \
 		migrate migrate status; then
 		echo "The first notification cutover cannot carry a pending core schema migration." >&2
 		echo "Deploy the core expand migration separately, then rerun the full cutover." >&2
@@ -3637,7 +3936,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 
 	echo "Canonicalizing the verified forward cutover topology service by service."
 	echo "Candidate containers are retained as the post-marker recovery target until final smoke passes."
-	compose_target --profile migration run --rm migrate
+	compose_target --profile migration run --rm --no-deps migrate
 	compose_target up -d rabbitmq
 	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
 
@@ -3715,17 +4014,17 @@ else
 		integration-worker \
 		maintenance-worker \
 		notification-delivery-worker
-	compose_target --profile migration run --rm migrate
+	compose_target --profile migration run --rm --no-deps migrate
 	compose_target up -d rabbitmq
 	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
-	compose_target up -d --force-recreate outbox-publisher
+	compose_target up -d --no-deps --force-recreate outbox-publisher
 	wait_for_rabbitmq_topology
-	compose_target up -d --force-recreate \
+	compose_target up -d --no-deps --force-recreate \
 		integration-worker \
 		maintenance-worker \
 		notification-delivery-worker
-	compose_target up -d --force-recreate api
-	compose_target up -d --force-recreate api-gateway
+	compose_target up -d --no-deps --force-recreate api
+	compose_target up -d --no-deps --force-recreate api-gateway
 fi
 
 show_api_diagnostics() {
@@ -4149,6 +4448,10 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	notification_forward_candidate_active=false
 	echo "Canonical topology verified; saved forward cutover containers removed."
 fi
+
+verify_notification_database_lifecycle_unchanged \
+	"the routine full deployment" \
+	"$notification_database_phase_before"
 
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 

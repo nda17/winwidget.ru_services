@@ -14,6 +14,7 @@ rollout_verified=false
 previous_image_ref=""
 previous_image_id=""
 previous_revision=""
+previous_restart_count=""
 health_port=""
 
 compose_target() {
@@ -27,6 +28,7 @@ compose_target() {
 verify_maintenance_worker() {
 	local expected_image_id="$1"
 	local expected_revision="$2"
+	local expected_restart_count="${3:-0}"
 	local attempt
 	local container_id
 	local health_status
@@ -70,7 +72,7 @@ verify_maintenance_worker() {
 
 					[[ "$image_id" == "$expected_image_id" ]] || return 1
 					[[ "$image_revision" == "$expected_revision" ]] || return 1
-					[[ "$restart_count" == "0" ]] || return 1
+					[[ "$restart_count" == "$expected_restart_count" ]] || return 1
 					return 0
 				fi
 			fi
@@ -158,6 +160,7 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend production env file was not found." >&2
@@ -267,6 +270,7 @@ assert_distinct_database_roles() {
 	local migration_user
 	local maintenance_user
 	local backup_user
+	local notification_delivery_backup_user
 
 	api_user="$(get_database_username DATABASE_URL_PRODUCTION)"
 	migration_user="$(get_database_username DATABASE_MIGRATION_URL_PRODUCTION)"
@@ -274,14 +278,21 @@ assert_distinct_database_roles() {
 		get_database_username MAINTENANCE_DATABASE_URL_PRODUCTION
 	)"
 	backup_user="$(get_database_username DATABASE_BACKUP_URL)"
+	notification_delivery_backup_user="$(
+		get_database_username NOTIFICATION_DELIVERY_BACKUP_URL
+	)"
 
 	if [[ "$api_user" == "$migration_user" ||
 		"$api_user" == "$maintenance_user" ||
 		"$api_user" == "$backup_user" ||
+		"$api_user" == "$notification_delivery_backup_user" ||
 		"$migration_user" == "$maintenance_user" ||
 		"$migration_user" == "$backup_user" ||
-		"$maintenance_user" == "$backup_user" ]]; then
-		echo "API, migration, Maintenance runtime and backup must use four distinct PostgreSQL roles" >&2
+		"$migration_user" == "$notification_delivery_backup_user" ||
+		"$maintenance_user" == "$backup_user" ||
+		"$maintenance_user" == "$notification_delivery_backup_user" ||
+		"$backup_user" == "$notification_delivery_backup_user" ]]; then
+		echo "API, migration, Maintenance runtime, core backup and notification delivery backup must use five distinct PostgreSQL roles" >&2
 		exit 1
 	fi
 }
@@ -293,6 +304,12 @@ for key in \
 	DATABASE_MIGRATION_URL_PRODUCTION \
 	MAINTENANCE_DATABASE_URL_PRODUCTION \
 	DATABASE_BACKUP_URL \
+	NOTIFICATION_DELIVERY_BACKUP_URL \
+	NOTIFICATION_DELIVERY_POSTGRES_IMAGE \
+	NOTIFICATION_DELIVERY_POSTGRES_PORT \
+	NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME \
+	NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER \
+	NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE \
 	RABBITMQ_MAINTENANCE_WORKER_URL \
 	MAINTENANCE_HEALTH_PORT; do
 	require_env_key "$key"
@@ -326,6 +343,7 @@ if [[ "$(get_env_value COMPOSE_PROJECT_NAME)" != "winwidget" ]]; then
 	echo "Maintenance rollout requires COMPOSE_PROJECT_NAME=winwidget." >&2
 	exit 1
 fi
+assert_notification_database_postgres_identity
 assert_distinct_database_roles
 
 health_port="$(get_env_value MAINTENANCE_HEALTH_PORT)"
@@ -371,6 +389,11 @@ export APP_VERSION="git-$deploy_revision"
 export MAINTENANCE_REVISION="$deploy_revision"
 export MAINTENANCE_IMAGE="winwidget-maintenance:git-$deploy_revision"
 
+initialize_notification_database_lifecycle_guard \
+	false \
+	"a maintenance-only rollout"
+assert_notification_database_backup_target_url
+
 compose_target config --quiet
 
 previous_container_id="$(
@@ -387,12 +410,17 @@ previous_image_ref="$(
 previous_image_id="$(
 	docker inspect --format '{{ .Image }}' "$previous_container_id"
 )"
+previous_restart_count="$(
+	docker inspect --format '{{ .RestartCount }}' "$previous_container_id"
+)"
 previous_revision="$(
 	docker image inspect \
 		--format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
 		"$previous_image_id"
 )"
-if [[ -z "$previous_image_ref" || -z "$previous_image_id" ]]; then
+if [[ -z "$previous_image_ref" ||
+	-z "$previous_image_id" ||
+	! "$previous_restart_count" =~ ^[0-9]+$ ]]; then
 	echo "Previous maintenance image could not be resolved." >&2
 	exit 1
 fi
@@ -421,7 +449,8 @@ unsafe_contract_changes="$(
 		src/messaging/database-backup-event.ts \
 		src/messaging/messaging.constants.ts \
 		src/messaging/messaging-event-contract.ts \
-		src/messaging/rabbitmq.service.ts
+		src/messaging/rabbitmq.service.ts \
+		scripts/notification-delivery-database-lifecycle.sh
 )"
 if [[ -n "$unsafe_contract_changes" ]]; then
 	echo "Maintenance-only rollout cannot include schema, topology or shared event contract changes:" >&2
@@ -429,7 +458,10 @@ if [[ -n "$unsafe_contract_changes" ]]; then
 	echo "Use the full baseline deployment." >&2
 	exit 1
 fi
-if ! verify_maintenance_worker "$previous_image_id" "$previous_revision"; then
+if ! verify_maintenance_worker \
+	"$previous_image_id" \
+	"$previous_revision" \
+	"$previous_restart_count"; then
 	echo "Current maintenance worker is not a healthy rollback target." >&2
 	exit 1
 fi
@@ -458,5 +490,8 @@ if ! verify_maintenance_worker "$candidate_image_id" "$deploy_revision"; then
 	exit 1
 fi
 
+verify_notification_database_lifecycle_unchanged \
+	"the maintenance-only rollout" \
+	"complete"
 rollout_verified=true
 echo "Maintenance worker rollout verified for revision $deploy_revision."

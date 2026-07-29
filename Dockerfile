@@ -7,7 +7,7 @@ WORKDIR /app
 ENV HUSKY=0
 ENV PNPM_VERSION=9.15.9
 
-RUN apk add --no-cache openssl postgresql-client \
+RUN apk add --no-cache openssl postgresql18-client \
 	&& corepack enable \
 	&& corepack prepare pnpm@${PNPM_VERSION} --activate
 

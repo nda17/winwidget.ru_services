@@ -18,13 +18,18 @@ describe('ScheduledTasksService', () => {
 	const scheduledFor = new Date('2026-07-23T22:50:00.000Z');
 
 	const createService = (lastSentPeriodStart: Date | null = null) => {
+		const transaction = {};
 		const prisma = {
+			$transaction: jest.fn(callback => callback(transaction)),
 			telegramBotSettings: {
 				upsert: jest.fn().mockResolvedValue({
 					dailySummaryEnabled: true,
 					dailySummaryChatId: ' -100123 ',
 					reportsThreadId: 42,
-					dailySummaryLastSentPeriodStart: lastSentPeriodStart
+					dailySummaryLastSentPeriodStart: lastSentPeriodStart,
+					databaseBackupEnabled: true,
+					databaseBackupThreadId: 43,
+					databaseBackupLastSentPeriodStart: lastSentPeriodStart
 				})
 			}
 		} as unknown as PrismaService;
@@ -32,12 +37,27 @@ describe('ScheduledTasksService', () => {
 			enqueueUnique: jest.fn().mockResolvedValue({
 				created: true,
 				job: { id: '11111111-1111-4111-8111-111111111111' }
-			})
+			}),
+			enqueueUniqueInTransaction: jest
+				.fn()
+				.mockImplementation((_transaction, input) =>
+					Promise.resolve({
+						created: true,
+						job: {
+							id:
+								input.jobType === 'DATABASE_BACKUP'
+									? '11111111-1111-4111-8111-111111111111'
+									: '22222222-2222-4222-8222-222222222222'
+						}
+					})
+				)
 		} as unknown as ScheduledJobsService;
 		const service = new ScheduledTasksService(prisma, scheduledJobs, {
-			get: jest.fn()
+			get: jest.fn((key: string) =>
+				key === 'TELEGRAM_INFO_BOT_TOKEN' ? 'telegram-token' : undefined
+			)
 		} as unknown as ConfigService);
-		return { service, scheduledJobs };
+		return { service, scheduledJobs, transaction };
 	};
 
 	it('creates the scheduled run and Outbox event with a snapshotted destination', async () => {
@@ -77,6 +97,163 @@ describe('ScheduledTasksService', () => {
 
 		expect(result).toBeNull();
 		expect(scheduledJobs.enqueueUnique).not.toHaveBeenCalled();
+	});
+
+	it('creates independent core and Notification Delivery backup jobs 15 minutes apart', async () => {
+		const { service, scheduledJobs, transaction } = createService();
+		const coreScheduledFor = new Date('2026-07-23T22:45:00.000Z');
+		const notificationScheduledFor = new Date('2026-07-23T23:00:00.000Z');
+
+		const result = await service.enqueueDailyDatabaseBackups(
+			period,
+			coreScheduledFor
+		);
+
+		expect(result?.core.job.id).toBe(
+			'11111111-1111-4111-8111-111111111111'
+		);
+		expect(result?.notificationDelivery.job.id).toBe(
+			'22222222-2222-4222-8222-222222222222'
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			1,
+			transaction,
+			expect.objectContaining({
+				jobType: 'DATABASE_BACKUP',
+				scheduledFor: coreScheduledFor
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			2,
+			transaction,
+			expect.objectContaining({
+				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
+				scheduledFor: notificationScheduledFor,
+				availableAt: notificationScheduledFor
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+	});
+
+	it('enqueues core and notification-delivery backups as separate jobs in one transaction', async () => {
+		const transaction = {};
+		const prisma = {
+			telegramBotSettings: {
+				upsert: jest.fn().mockResolvedValue({
+					databaseBackupEnabled: true,
+					databaseBackupLastSentPeriodStart: null,
+					dailySummaryChatId: ' -100123 ',
+					databaseBackupThreadId: 43
+				})
+			},
+			$transaction: jest.fn(callback => callback(transaction))
+		} as unknown as PrismaService;
+		const scheduledJobs = {
+			enqueueUniqueInTransaction: jest.fn((_transaction, input) =>
+				Promise.resolve({
+					created: true,
+					job: {
+						id:
+							input.jobType === 'DATABASE_BACKUP'
+								? '11111111-1111-4111-8111-111111111111'
+								: '22222222-2222-4222-8222-222222222222'
+					}
+				})
+			)
+		} as unknown as ScheduledJobsService;
+		const service = new ScheduledTasksService(prisma, scheduledJobs, {
+			get: jest.fn().mockReturnValue('telegram-token')
+		} as unknown as ConfigService);
+
+		const result = await service.enqueueDailyDatabaseBackups(
+			period,
+			scheduledFor
+		);
+
+		expect(result).toEqual({
+			core: expect.objectContaining({ created: true }),
+			notificationDelivery: expect.objectContaining({ created: true })
+		});
+		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledTimes(
+			2
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			1,
+			transaction,
+			{
+				jobType: 'DATABASE_BACKUP',
+				scheduleKey: period.key,
+				trigger: ScheduledJobRunTrigger.SCHEDULED,
+				scheduledFor,
+				periodStart: period.start,
+				periodEnd: period.end,
+				input: {
+					chatId: '-100123',
+					messageThreadId: 43,
+					trigger: 'SCHEDULED',
+					periodStart: period.start.toISOString()
+				}
+			},
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			2,
+			transaction,
+			expect.objectContaining({
+				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
+				scheduleKey: period.key,
+				input: expect.objectContaining({
+					trigger: 'SCHEDULED'
+				})
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+	});
+
+	it('does not enqueue either backup when the daily period is already complete', async () => {
+		const prisma = {
+			telegramBotSettings: {
+				upsert: jest.fn().mockResolvedValue({
+					databaseBackupEnabled: true,
+					databaseBackupLastSentPeriodStart: period.start
+				})
+			},
+			$transaction: jest.fn()
+		} as unknown as PrismaService;
+		const scheduledJobs = {
+			enqueueUniqueInTransaction: jest.fn()
+		} as unknown as ScheduledJobsService;
+		const service = new ScheduledTasksService(
+			prisma,
+			scheduledJobs,
+			{} as ConfigService
+		);
+
+		await expect(
+			service.enqueueDailyDatabaseBackups(period, scheduledFor)
+		).resolves.toBeNull();
+		expect(prisma.$transaction).not.toHaveBeenCalled();
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).not.toHaveBeenCalled();
 	});
 
 	const createManualBackupJob = (
@@ -195,11 +372,13 @@ describe('ScheduledTasksService', () => {
 		(configService.get as jest.Mock).mockReturnValue(undefined);
 
 		const result = await service.enqueueManualDatabaseBackup(
+			'core',
 			adminId,
 			idempotencyKey.toUpperCase()
 		);
 
 		expect(result).toEqual({
+			target: 'core',
 			jobId: job.id,
 			status: ScheduledJobRunStatus.SUCCEEDED,
 			queuedAt: job.createdAt.toISOString(),
@@ -238,6 +417,7 @@ describe('ScheduledTasksService', () => {
 			createManualBackupService(null, activeJob);
 
 		const result = await service.enqueueManualDatabaseBackup(
+			'core',
 			adminId,
 			randomUUID()
 		);
@@ -286,6 +466,7 @@ describe('ScheduledTasksService', () => {
 			createManualBackupService(null, null, job);
 
 		const result = await service.enqueueManualDatabaseBackup(
+			'core',
 			adminId,
 			idempotencyKey
 		);
@@ -296,7 +477,7 @@ describe('ScheduledTasksService', () => {
 			transaction,
 			expect.objectContaining({
 				jobType: 'DATABASE_BACKUP',
-				scheduleKey: `manual:${adminId}:${idempotencyKey}`,
+				scheduleKey: `manual:core:${adminId}:${idempotencyKey}`,
 				trigger: ScheduledJobRunTrigger.MANUAL,
 				input: expect.objectContaining({
 					requestedByAdminId: adminId
@@ -312,6 +493,54 @@ describe('ScheduledTasksService', () => {
 			data: {
 				adminId,
 				jobType: 'DATABASE_BACKUP',
+				idempotencyKey,
+				jobId: job.id
+			}
+		});
+	});
+
+	it('creates Notification Delivery manual jobs under an independent job type', async () => {
+		const adminId = randomUUID();
+		const idempotencyKey = randomUUID();
+		const job = createManualBackupJob(
+			adminId,
+			`manual:notification-delivery:${adminId}:${idempotencyKey}`,
+			{
+				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP'
+			}
+		);
+		const { service, transaction, scheduledJobs } =
+			createManualBackupService(null, null, job);
+
+		const result = await service.enqueueManualDatabaseBackup(
+			'notification-delivery',
+			adminId,
+			idempotencyKey
+		);
+
+		expect(result).toEqual(
+			expect.objectContaining({
+				target: 'notification-delivery',
+				jobId: job.id,
+				created: true
+			})
+		);
+		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
+				scheduleKey: `manual:notification-delivery:${adminId}:${idempotencyKey}`
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			transaction.scheduledJobIdempotencyKey.create
+		).toHaveBeenCalledWith({
+			data: {
+				adminId,
+				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 				idempotencyKey,
 				jobId: job.id
 			}
@@ -403,10 +632,12 @@ describe('ScheduledTasksService', () => {
 		} as unknown as ConfigService);
 
 		const first = await service.enqueueManualDatabaseBackup(
+			'core',
 			adminId,
 			firstKey
 		);
 		const second = await service.enqueueManualDatabaseBackup(
+			'core',
 			adminId,
 			secondKey
 		);
@@ -454,6 +685,7 @@ describe('ScheduledTasksService', () => {
 		);
 
 		const result = await service.enqueueManualDatabaseBackup(
+			'core',
 			adminId,
 			newKey
 		);
@@ -483,8 +715,10 @@ describe('ScheduledTasksService', () => {
 			{} as ConfigService
 		);
 
-		const result =
-			await service.getLatestActiveManualDatabaseBackup(adminId);
+		const result = await service.getLatestActiveManualDatabaseBackup(
+			'core',
+			adminId
+		);
 
 		expect(result?.jobId).toBe(job.id);
 		expect(prisma.scheduledJobRun.findFirst).toHaveBeenCalledWith({
@@ -534,7 +768,7 @@ describe('ScheduledTasksService', () => {
 		);
 
 		await expect(
-			service.getDatabaseBackupJob(job.id, currentAdminId)
+			service.getDatabaseBackupJob('core', job.id, currentAdminId)
 		).resolves.toBeNull();
 	});
 });

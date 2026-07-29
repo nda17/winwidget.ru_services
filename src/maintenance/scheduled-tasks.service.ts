@@ -1,4 +1,8 @@
-import { DatabaseBackupInput } from '@/maintenance/database-backup.service';
+import {
+	DatabaseBackupInput,
+	DatabaseBackupTarget,
+	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES
+} from '@/maintenance/database-backup.types';
 import {
 	DAILY_SUMMARY_EVENT_TYPE,
 	DATABASE_BACKUP_EVENT_TYPE,
@@ -8,6 +12,7 @@ import {
 import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import {
+	isDatabaseBackupJobType,
 	SCHEDULED_JOB_TYPES,
 	ScheduledJobOutboxEvent,
 	ScheduledJobRunView,
@@ -36,18 +41,20 @@ export class ScheduledTasksService {
 	) {}
 
 	async enqueueManualDatabaseBackup(
+		target: DatabaseBackupTarget,
 		adminId: string,
 		idempotencyKey: string
 	) {
+		const jobType = this.getDatabaseBackupJobType(target);
 		const normalizedIdempotencyKey = idempotencyKey.trim().toLowerCase();
-		const scheduleKey = `manual:${adminId}:${normalizedIdempotencyKey}`;
+		const scheduleKey = `manual:${target}:${adminId}:${normalizedIdempotencyKey}`;
 		const result = await this.prisma.$transaction(
 			async transaction => {
 				await transaction.$executeRaw(
 					Prisma.sql`
 						SELECT pg_advisory_xact_lock(
 							hashtextextended(
-								CAST(${`database-backup:${adminId}`} AS text),
+								CAST(${`database-backup:${target}:${adminId}`} AS text),
 								0::bigint
 							)
 						)
@@ -59,7 +66,7 @@ export class ScheduledTasksService {
 						where: {
 							adminId_jobType_idempotencyKey: {
 								adminId,
-								jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+								jobType,
 								idempotencyKey: normalizedIdempotencyKey
 							}
 						},
@@ -73,14 +80,14 @@ export class ScheduledTasksService {
 				}
 
 				const activeJob = await transaction.scheduledJobRun.findFirst({
-					where: this.getActiveManualBackupWhere(adminId),
+					where: this.getActiveManualBackupWhere(target, adminId),
 					orderBy: { createdAt: 'desc' }
 				});
 				if (activeJob) {
 					await transaction.scheduledJobIdempotencyKey.create({
 						data: {
 							adminId,
-							jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+							jobType,
 							idempotencyKey: normalizedIdempotencyKey,
 							jobId: activeJob.id
 						}
@@ -101,7 +108,7 @@ export class ScheduledTasksService {
 					await this.scheduledJobs.enqueueUniqueInTransaction(
 						transaction,
 						{
-							jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+							jobType,
 							scheduleKey,
 							trigger: ScheduledJobRunTrigger.MANUAL,
 							scheduledFor: queuedAt,
@@ -110,12 +117,12 @@ export class ScheduledTasksService {
 								requestedByAdminId: adminId
 							} as Prisma.InputJsonObject
 						},
-						this.getEventForType(SCHEDULED_JOB_TYPES.DATABASE_BACKUP)
+						this.getEventForType(jobType)
 					);
 				await transaction.scheduledJobIdempotencyKey.create({
 					data: {
 						adminId,
-						jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+						jobType,
 						idempotencyKey: normalizedIdempotencyKey,
 						jobId: enqueued.job.id
 					}
@@ -128,6 +135,7 @@ export class ScheduledTasksService {
 		);
 
 		return {
+			target,
 			jobId: result.job.id,
 			status: result.job.status,
 			queuedAt: result.job.createdAt,
@@ -171,10 +179,16 @@ export class ScheduledTasksService {
 		);
 	}
 
-	async enqueueDailyDatabaseBackup(
+	async enqueueDailyDatabaseBackups(
 		period: MoscowDayPeriod,
 		scheduledFor: Date
-	): Promise<{ created: boolean; job: ScheduledJobRunView } | null> {
+	): Promise<{
+		core: { created: boolean; job: ScheduledJobRunView };
+		notificationDelivery: {
+			created: boolean;
+			job: ScheduledJobRunView;
+		};
+	} | null> {
 		const settings = await this.getSettings();
 		if (!settings.databaseBackupEnabled) return null;
 		if (
@@ -187,18 +201,46 @@ export class ScheduledTasksService {
 			'SCHEDULED',
 			period.start
 		);
+		const notificationDeliveryScheduledFor = new Date(
+			scheduledFor.getTime() +
+				NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES * 60_000
+		);
 
-		return this.scheduledJobs.enqueueUnique(
-			{
-				jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
-				scheduleKey: period.key,
-				trigger: ScheduledJobRunTrigger.SCHEDULED,
-				scheduledFor,
-				periodStart: period.start,
-				periodEnd: period.end,
-				input: input as unknown as Prisma.InputJsonObject
-			},
-			this.getEventForType(SCHEDULED_JOB_TYPES.DATABASE_BACKUP)
+		return this.prisma.$transaction(
+			async transaction => ({
+				core: await this.scheduledJobs.enqueueUniqueInTransaction(
+					transaction,
+					{
+						jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+						scheduleKey: period.key,
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						scheduledFor,
+						periodStart: period.start,
+						periodEnd: period.end,
+						input: input as unknown as Prisma.InputJsonObject
+					},
+					this.getEventForType(SCHEDULED_JOB_TYPES.DATABASE_BACKUP)
+				),
+				notificationDelivery:
+					await this.scheduledJobs.enqueueUniqueInTransaction(
+						transaction,
+						{
+							jobType:
+								SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP,
+							scheduleKey: period.key,
+							trigger: ScheduledJobRunTrigger.SCHEDULED,
+							scheduledFor: notificationDeliveryScheduledFor,
+							periodStart: period.start,
+							periodEnd: period.end,
+							input: input as unknown as Prisma.InputJsonObject,
+							availableAt: notificationDeliveryScheduledFor
+						},
+						this.getEventForType(
+							SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP
+						)
+					)
+			}),
+			{ timeout: 10_000 }
 		);
 	}
 
@@ -216,7 +258,7 @@ export class ScheduledTasksService {
 				}
 			};
 		}
-		if (jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP) {
+		if (isDatabaseBackupJobType(jobType)) {
 			return {
 				eventType: DATABASE_BACKUP_EVENT_TYPE,
 				routingKey: MESSAGING_ROUTING_KEYS['database-backup'],
@@ -234,31 +276,43 @@ export class ScheduledTasksService {
 		return this.scheduledJobs.getJob(id);
 	}
 
-	async getDatabaseBackupJob(id: string, adminId: string) {
+	async getDatabaseBackupJob(
+		target: DatabaseBackupTarget,
+		id: string,
+		adminId: string
+	) {
+		const jobType = this.getDatabaseBackupJobType(target);
 		const job = await this.getJob(id);
 		if (
 			!job ||
-			job.jobType !== SCHEDULED_JOB_TYPES.DATABASE_BACKUP ||
+			job.jobType !== jobType ||
 			job.trigger !== ScheduledJobRunTrigger.MANUAL ||
 			this.getRequestedByAdminId(job.input) !== adminId
 		) {
 			return null;
 		}
-		return this.toDatabaseBackupJob(job);
+		return this.toDatabaseBackupJob(target, job);
 	}
 
-	async getLatestActiveManualDatabaseBackup(adminId: string) {
+	async getLatestActiveManualDatabaseBackup(
+		target: DatabaseBackupTarget,
+		adminId: string
+	) {
 		const job = await this.prisma.scheduledJobRun.findFirst({
-			where: this.getActiveManualBackupWhere(adminId),
+			where: this.getActiveManualBackupWhere(target, adminId),
 			orderBy: { createdAt: 'desc' }
 		});
 		return job
-			? this.toDatabaseBackupJob(serializeScheduledJobRun(job))
+			? this.toDatabaseBackupJob(target, serializeScheduledJobRun(job))
 			: null;
 	}
 
-	private toDatabaseBackupJob(job: ScheduledJobRunView) {
+	private toDatabaseBackupJob(
+		target: DatabaseBackupTarget,
+		job: ScheduledJobRunView
+	) {
 		return {
+			target,
 			jobId: job.id,
 			status: job.status,
 			queuedAt: job.createdAt,
@@ -270,10 +324,11 @@ export class ScheduledTasksService {
 	}
 
 	private getActiveManualBackupWhere(
+		target: DatabaseBackupTarget,
 		adminId: string
 	): Prisma.ScheduledJobRunWhereInput {
 		return {
-			jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+			jobType: this.getDatabaseBackupJobType(target),
 			trigger: ScheduledJobRunTrigger.MANUAL,
 			status: {
 				in: [
@@ -286,6 +341,12 @@ export class ScheduledTasksService {
 				equals: adminId
 			}
 		};
+	}
+
+	private getDatabaseBackupJobType(target: DatabaseBackupTarget) {
+		return target === 'core'
+			? SCHEDULED_JOB_TYPES.DATABASE_BACKUP
+			: SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP;
 	}
 
 	private getRequestedByAdminId(input: Prisma.JsonValue) {

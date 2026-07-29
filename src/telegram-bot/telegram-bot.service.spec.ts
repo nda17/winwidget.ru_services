@@ -1,5 +1,6 @@
 import type { PrismaService } from '@/prisma.service';
 import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
+import { BadRequestException } from '@nestjs/common';
 
 describe('TelegramBotService webhook URLs', () => {
 	const originalMode = process.env.MODE;
@@ -25,5 +26,22 @@ describe('TelegramBotService webhook URLs', () => {
 			support:
 				'https://hooks.example.test/api/v1/telegram-bot/support-webhook'
 		});
+	});
+
+	it('derives the Notification Delivery backup time across midnight', () => {
+		const service = new TelegramBotService({} as PrismaService);
+
+		expect((service as any).addMinutesToTime('23:55', 15)).toBe('00:10');
+	});
+
+	it('keeps the summary away from both backup times across midnight', () => {
+		const service = new TelegramBotService({} as PrismaService);
+
+		expect(() =>
+			(service as any).ensureScheduleTimesSeparated('00:08', '23:55')
+		).toThrow(BadRequestException);
+		expect(() =>
+			(service as any).ensureScheduleTimesSeparated('00:20', '23:55')
+		).not.toThrow();
 	});
 });

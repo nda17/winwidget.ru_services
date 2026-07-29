@@ -146,6 +146,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
   DATABASE_URL_PRODUCTION: ${MAINTENANCE_DATABASE_URL_PRODUCTION:?MAINTENANCE_DATABASE_URL_PRODUCTION is required}
   DATABASE_BACKUP_URL: ${DATABASE_BACKUP_URL:?DATABASE_BACKUP_URL is required}
+  NOTIFICATION_DELIVERY_BACKUP_URL: ${NOTIFICATION_DELIVERY_BACKUP_URL:?NOTIFICATION_DELIVERY_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
@@ -181,6 +182,50 @@ x-notification-delivery-migration-env: &notification-delivery-migration-env
   NOTIFICATION_DELIVERY_DATABASE_URL: ${NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION:?NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION is required}
 
 services:
+  notification-delivery-postgres:
+    image: ${NOTIFICATION_DELIVERY_POSTGRES_IMAGE:?NOTIFICATION_DELIVERY_POSTGRES_IMAGE is required}
+    profiles:
+      - notification-delivery-database
+    labels:
+      com.winwidget.owner: notification-delivery
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_notification_delivery
+      POSTGRES_USER: ${NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER:?NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/notification-delivery-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${NOTIFICATION_DELIVERY_POSTGRES_PORT:?NOTIFICATION_DELIVERY_POSTGRES_PORT is required}:5432'
+    volumes:
+      - winwidget-notification-delivery-postgres-data:/var/lib/postgresql
+    networks:
+      - notification-delivery-postgres
+    secrets:
+      - notification-delivery-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${NOTIFICATION_DELIVERY_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${NOTIFICATION_DELIVERY_POSTGRES_MEMORY_LIMIT:-768m}
+    mem_reservation: ${NOTIFICATION_DELIVERY_POSTGRES_MEMORY_RESERVATION:-256m}
+    cpus: ${NOTIFICATION_DELIVERY_POSTGRES_CPUS:-1.0}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:4.2-management-alpine
     hostname: winwidget-rabbitmq
@@ -355,10 +400,27 @@ services:
     profiles:
       - notification-delivery-migration
     environment: *notification-delivery-migration-env
+    network_mode: host
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
 volumes:
+  winwidget-notification-delivery-postgres-data:
+    external: true
+    name: ${NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME:?NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME must name the verified Notification Delivery PostgreSQL volume}
   winwidget-rabbitmq-data:
     external: true
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
+
+networks:
+  notification-delivery-postgres:
+    name: winwidget-notification-delivery-postgres
+    driver: bridge
+    internal: true
+    labels:
+      com.winwidget.owner: notification-delivery
+      com.winwidget.purpose: postgres-network
+
+secrets:
+  notification-delivery-postgres-admin-password:
+    file: ${NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE:?NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE is required}

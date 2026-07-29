@@ -3,6 +3,7 @@ import {
 	EVENTS_EXCHANGE,
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
+	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NOTIFICATION_DELIVERY_KINDS,
 	NotificationDeliveryKind,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
@@ -334,10 +335,14 @@ export class NotificationDeliveryOutboxPublisherService
 	}
 
 	private getValidationError(event: ClaimedOutboxEvent): string | null {
-		if (
+		const isStrictOutcomeRoute =
 			event.exchange === NotificationDeliveryExchange.EVENTS &&
-			event.routingKey === TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
-		) {
+			((event.eventType === TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE &&
+				event.routingKey ===
+					TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE) ||
+				(event.eventType === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE &&
+					event.routingKey === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE));
+		if (isStrictOutcomeRoute) {
 			try {
 				assertMessagingEventContract(event.payload, {
 					eventType: event.eventType,

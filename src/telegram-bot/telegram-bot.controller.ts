@@ -1,6 +1,10 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
+import {
+	DATABASE_BACKUP_TARGETS,
+	DatabaseBackupTarget
+} from '@/maintenance/database-backup.types';
 import { ScheduledTasksService } from '@/maintenance/scheduled-tasks.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
@@ -18,6 +22,7 @@ import {
 	HttpCode,
 	NotFoundException,
 	Param,
+	ParseEnumPipe,
 	ParseUUIDPipe,
 	Patch,
 	Post,
@@ -145,8 +150,10 @@ export class TelegramBotController {
 
 	@HttpCode(202)
 	@Auth(Role.ADMIN)
-	@Post('admin/database-backup/send')
+	@Post('admin/database-backups/:target/send')
 	async sendDatabaseBackup(
+		@Param('target', new ParseEnumPipe(DATABASE_BACKUP_TARGETS))
+		target: DatabaseBackupTarget,
 		@CurrentUser('id') adminId: string,
 		@Headers('idempotency-key') idempotencyKey: string | undefined,
 		@Req() request: Request
@@ -159,20 +166,26 @@ export class TelegramBotController {
 
 		const result =
 			await this.scheduledTasksService.enqueueManualDatabaseBackup(
+				target,
 				adminId,
 				idempotencyKey
 			);
 
 		if (result.created) {
+			const targetLabel =
+				target === DATABASE_BACKUP_TARGETS.CORE
+					? 'основной БД'
+					: 'БД Notification Delivery';
 			await this.adminEventLogService.record({
 				adminId,
 				section: 'TELEGRAM_BOT',
 				action: 'TELEGRAM_DATABASE_BACKUP_CREATE',
-				description: 'Backup базы данных поставлен в очередь',
+				description: `Backup ${targetLabel} поставлен в очередь`,
 				entityType: 'scheduled_job',
 				entityId: result.jobId,
-				entityLabel: 'Backup PostgreSQL',
+				entityLabel: `Backup PostgreSQL: ${targetLabel}`,
 				metadata: {
+					target,
 					jobId: result.jobId,
 					status: result.status,
 					queuedAt: result.queuedAt
@@ -186,21 +199,29 @@ export class TelegramBotController {
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
-	@Get('admin/database-backup/jobs/active')
-	getLatestActiveManualDatabaseBackup(@CurrentUser('id') adminId: string) {
+	@Get('admin/database-backups/:target/jobs/active')
+	getLatestActiveManualDatabaseBackup(
+		@Param('target', new ParseEnumPipe(DATABASE_BACKUP_TARGETS))
+		target: DatabaseBackupTarget,
+		@CurrentUser('id') adminId: string
+	) {
 		return this.scheduledTasksService.getLatestActiveManualDatabaseBackup(
+			target,
 			adminId
 		);
 	}
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
-	@Get('admin/database-backup/jobs/:jobId')
+	@Get('admin/database-backups/:target/jobs/:jobId')
 	async getDatabaseBackupJob(
+		@Param('target', new ParseEnumPipe(DATABASE_BACKUP_TARGETS))
+		target: DatabaseBackupTarget,
 		@Param('jobId', new ParseUUIDPipe()) jobId: string,
 		@CurrentUser('id') adminId: string
 	) {
 		const job = await this.scheduledTasksService.getDatabaseBackupJob(
+			target,
 			jobId,
 			adminId
 		);

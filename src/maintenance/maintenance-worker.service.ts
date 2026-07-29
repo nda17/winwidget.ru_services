@@ -1,8 +1,9 @@
+import { DatabaseBackupService } from '@/maintenance/database-backup.service';
 import {
 	DatabaseBackupInput,
 	DatabaseBackupResult,
-	DatabaseBackupService
-} from '@/maintenance/database-backup.service';
+	DatabaseBackupTarget
+} from '@/maintenance/database-backup.types';
 import { ScheduledTasksService } from '@/maintenance/scheduled-tasks.service';
 import { DatabaseBackupRequestedEventPayload } from '@/messaging/database-backup-event';
 import {
@@ -20,6 +21,7 @@ import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import {
+	DatabaseBackupJobType,
 	SCHEDULED_JOB_TYPES,
 	ScheduledJobRunView
 } from '@/scheduled-jobs/scheduled-jobs.types';
@@ -231,10 +233,8 @@ export class MaintenanceWorkerService
 				payload.jobId,
 				this.workerId,
 				this.getLeaseMs(),
-				SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
-				this.scheduledTasks.getEventForType(
-					SCHEDULED_JOB_TYPES.DATABASE_BACKUP
-				)
+				payload.jobType,
+				this.scheduledTasks.getEventForType(payload.jobType)
 			);
 			if (claim.state === 'not_found') {
 				await this.publishDeadLetter(
@@ -247,7 +247,7 @@ export class MaintenanceWorkerService
 				this.rabbitMq.ack(message);
 				return;
 			}
-			if (claim.job.jobType !== SCHEDULED_JOB_TYPES.DATABASE_BACKUP) {
+			if (claim.job.jobType !== payload.jobType) {
 				await this.publishDeadLetter(
 					kind,
 					payload,
@@ -282,6 +282,7 @@ export class MaintenanceWorkerService
 			try {
 				result = await this.backup.createAndSend(
 					claim.job.id,
+					this.getBackupTarget(payload.jobType),
 					input,
 					lease.signal
 				);
@@ -299,7 +300,11 @@ export class MaintenanceWorkerService
 							result as unknown as Prisma.InputJsonObject
 						);
 						if (!job) return null;
-						if (job.trigger === 'SCHEDULED' && job.periodStart) {
+						if (
+							job.jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP &&
+							job.trigger === 'SCHEDULED' &&
+							job.periodStart
+						) {
 							await transaction.telegramBotSettings.update({
 								where: { id: 'singleton' },
 								data: {
@@ -315,7 +320,7 @@ export class MaintenanceWorkerService
 				);
 				if (!completed) {
 					throw new Error(
-						'Database backup lease was lost after Telegram delivery'
+						'Database backup lease was lost after artifact delivery'
 					);
 				}
 			} finally {
@@ -324,7 +329,9 @@ export class MaintenanceWorkerService
 			await this.resolveFailure(eventId, kind);
 			this.rabbitMq.ack(message);
 			this.logger.log(
-				`Database backup completed jobId=${payload.jobId} file=${result?.fileName}`
+				`Database backup completed jobId=${payload.jobId} target=${this.getBackupTarget(
+					payload.jobType
+				)} file=${result?.fileName}`
 			);
 		} catch (error) {
 			await this.handleFailure(
@@ -684,6 +691,14 @@ export class MaintenanceWorkerService
 			trigger,
 			periodStart: typeof periodStart === 'string' ? periodStart : null
 		};
+	}
+
+	private getBackupTarget(
+		jobType: DatabaseBackupJobType
+	): DatabaseBackupTarget {
+		return jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP
+			? 'core'
+			: 'notification-delivery';
 	}
 
 	private startLeaseRenewal(

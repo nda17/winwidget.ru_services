@@ -12,6 +12,7 @@ on:
           - all
           - maintenance
           - notification-delivery
+          - notification-delivery-database-cutover
   push:
     branches:
       - prod
@@ -29,11 +30,12 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
         env:
           POSTGRES_DB: winwidget_ci
           POSTGRES_USER: winwidget
           POSTGRES_PASSWORD: winwidget_ci
+          POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --data-checksums
         ports:
           - 5432:5432
         options: >-
@@ -66,8 +68,12 @@ jobs:
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
-      NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://notification_delivery_runtime:notification_delivery_runtime_ci@127.0.0.1:5432/winwidget_ci?schema=notification_delivery
-      NOTIFICATION_DELIVERY_CI_MIGRATION_DATABASE_URL: postgresql://notification_delivery_migration:notification_delivery_migration_ci@127.0.0.1:5432/winwidget_ci?schema=notification_delivery
+      NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://notification_delivery_runtime:notification_delivery_runtime_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
+      NOTIFICATION_DELIVERY_CI_MIGRATION_DATABASE_URL: postgresql://notification_delivery_migration:notification_delivery_migration_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
+      NOTIFICATION_DELIVERY_BACKUP_URL: postgresql://notification_delivery_backup:notification_delivery_backup_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
+      NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER: winwidget-notification-delivery-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME: winwidget-notification-delivery-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
       NOTIFICATION_DELIVERY_INTERNAL_URL: http://127.0.0.1:4401/internal/notification-delivery
       NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ci_notification_delivery_internal_token_at_least_32_chars
       NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS: 5000
@@ -87,6 +93,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Guard Notification Delivery database cutover branch
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.deploy_target == 'notification-delivery-database-cutover' &&
+          github.ref != 'refs/heads/prod'
+        run: |
+          echo "Notification Delivery database cutover can run only from refs/heads/prod." >&2
+          exit 1
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -111,13 +126,68 @@ jobs:
           pnpm --dir apps/api-gateway install --frozen-lockfile
           pnpm --dir apps/notification-delivery install --frozen-lockfile
 
-      - name: Create isolated Notification Delivery database roles
+      - name: Start isolated Notification Delivery PostgreSQL
+        run: |
+          test ! -e "$NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE"
+          umask 077
+          openssl rand -hex 32 > "$NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE"
+
+          docker volume create \
+            --label com.winwidget.owner=notification-delivery \
+            --label com.winwidget.purpose=ci-postgres-data \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            "$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME" > /dev/null
+
+          docker run --detach \
+            --name "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER" \
+            --label com.winwidget.owner=notification-delivery \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55432:5432 \
+            --mount \
+              "type=volume,source=$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount \
+              "type=bind,source=$NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/notification-delivery-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_notification_delivery_ci \
+            --env POSTGRES_USER=winwidget_notification_delivery_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/notification-delivery-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd \
+              "pg_isready --username winwidget_notification_delivery_admin --dbname winwidget_notification_delivery_ci" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+
+          for attempt in $(seq 1 30); do
+            status="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$status" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$status" == "unhealthy" || "$attempt" == "30" ]]; then
+              docker logs "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER" >&2
+              echo "Isolated Notification Delivery PostgreSQL is $status." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Create isolated Notification Delivery roles
         env:
-          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER_ID: ${{ env.NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER }}
         run: |
           docker exec -i "$POSTGRES_CONTAINER_ID" \
-            psql --set ON_ERROR_STOP=1 --username winwidget --dbname winwidget_ci <<'SQL'
-          REVOKE ALL ON DATABASE winwidget_ci FROM PUBLIC;
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_notification_delivery_admin \
+              --dbname winwidget_notification_delivery_ci <<'SQL'
+          REVOKE ALL
+            ON DATABASE winwidget_notification_delivery_ci
+            FROM PUBLIC;
 
           CREATE ROLE notification_delivery_migration
             LOGIN
@@ -133,17 +203,29 @@ jobs:
             NOCREATEDB
             NOCREATEROLE
             NOREPLICATION;
+          CREATE ROLE notification_delivery_backup
+            LOGIN
+            PASSWORD 'notification_delivery_backup_ci'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOREPLICATION;
 
-          GRANT CONNECT, CREATE ON DATABASE winwidget_ci
+          GRANT CONNECT ON DATABASE winwidget_notification_delivery_ci
             TO notification_delivery_migration;
-          GRANT CONNECT ON DATABASE winwidget_ci
+          GRANT CONNECT ON DATABASE winwidget_notification_delivery_ci
             TO notification_delivery_runtime;
+          GRANT CONNECT ON DATABASE winwidget_notification_delivery_ci
+            TO notification_delivery_backup;
 
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
           CREATE SCHEMA notification_delivery
             AUTHORIZATION notification_delivery_migration;
           REVOKE ALL ON SCHEMA notification_delivery FROM PUBLIC;
           GRANT USAGE ON SCHEMA notification_delivery
             TO notification_delivery_runtime;
+          GRANT USAGE ON SCHEMA notification_delivery
+            TO notification_delivery_backup;
 
           ALTER DEFAULT PRIVILEGES
             FOR ROLE notification_delivery_migration
@@ -155,8 +237,18 @@ jobs:
             IN SCHEMA notification_delivery
             GRANT USAGE, SELECT, UPDATE ON SEQUENCES
             TO notification_delivery_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE notification_delivery_migration
+            IN SCHEMA notification_delivery
+            GRANT SELECT ON TABLES
+            TO notification_delivery_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE notification_delivery_migration
+            IN SCHEMA notification_delivery
+            GRANT SELECT ON SEQUENCES
+            TO notification_delivery_backup;
 
-          REVOKE CREATE ON DATABASE winwidget_ci
+          REVOKE CREATE ON DATABASE winwidget_notification_delivery_ci
             FROM notification_delivery_migration;
           SQL
 
@@ -210,15 +302,75 @@ jobs:
 
       - name: Finalize Notification Delivery runtime grants
         env:
-          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          MONOLITH_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER_ID: ${{ env.NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER }}
         run: |
+          test "$POSTGRES_CONTAINER_ID" != "$MONOLITH_POSTGRES_CONTAINER_ID"
+          test "$(
+            docker inspect \
+              --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostIp}}:{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' \
+              "$POSTGRES_CONTAINER_ID"
+          )" = "127.0.0.1:55432"
+          test "$(
+            docker inspect \
+              --format '{{range .Mounts}}{{printf "%s|%s|%s|%t\n" .Destination .Type .Name .RW}}{{end}}' \
+              "$POSTGRES_CONTAINER_ID" |
+              awk -F'|' '$1 == "/var/lib/postgresql" || index($1, "/var/lib/postgresql/") == 1'
+          )" = "/var/lib/postgresql|volume|$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME|true"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --username winwidget_notification_delivery_admin \
+                --dbname winwidget_notification_delivery_ci \
+                --field-separator '|' \
+                --command "
+                  SELECT
+                    current_setting('server_version_num')::integer / 10000,
+                    pg_encoding_to_char(encoding),
+                    datlocprovider,
+                    datcollate,
+                    datctype,
+                    COALESCE(datcollversion, ''),
+                    current_setting('data_checksums'),
+                    current_setting('data_directory')
+                  FROM pg_database
+                  WHERE datname = current_database();
+                "
+          )" = "18|UTF8|c|C.UTF-8|C.UTF-8||on|/var/lib/postgresql/18/docker"
+
+          docker exec -i "$MONOLITH_POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --username winwidget --dbname winwidget_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF to_regnamespace('notification_delivery') IS NOT NULL THEN
+              RAISE EXCEPTION
+                'monolith database must not contain notification_delivery schema';
+            END IF;
+          END
+          $$;
+          SQL
+
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_notification_delivery_admin \
+              --dbname winwidget_notification_delivery_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF to_regnamespace('notification_delivery') IS NULL THEN
+              RAISE EXCEPTION
+                'notification database must contain notification_delivery schema';
+            END IF;
+          END
+          $$;
+          SQL
+
           docker exec -i \
             --env PGPASSWORD=notification_delivery_migration_ci \
             "$POSTGRES_CONTAINER_ID" \
             psql --set ON_ERROR_STOP=1 \
               --host 127.0.0.1 \
               --username notification_delivery_migration \
-              --dbname winwidget_ci <<'SQL'
+              --dbname winwidget_notification_delivery_ci <<'SQL'
           DO $$
           BEGIN
             IF has_database_privilege(
@@ -237,8 +389,398 @@ jobs:
             END IF;
           END
           $$;
+          REVOKE ALL
+            ON TABLE notification_delivery._prisma_migrations
+            FROM notification_delivery_runtime;
+          GRANT SELECT ON ALL TABLES IN SCHEMA notification_delivery
+            TO notification_delivery_backup;
+          GRANT SELECT ON ALL SEQUENCES IN SCHEMA notification_delivery
+            TO notification_delivery_backup;
           CREATE SEQUENCE notification_delivery.ci_runtime_sequence;
           SQL
+
+          docker exec -i \
+            --env PGPASSWORD=notification_delivery_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username notification_delivery_runtime \
+              --dbname winwidget_notification_delivery_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF has_database_privilege(
+              current_user,
+              current_database(),
+              'CREATE'
+            ) THEN
+              RAISE EXCEPTION 'runtime role must not have database CREATE';
+            END IF;
+            IF NOT has_schema_privilege(
+              current_user,
+              'notification_delivery',
+              'USAGE'
+            ) THEN
+              RAISE EXCEPTION 'runtime role must use service schema';
+            END IF;
+            IF has_schema_privilege(
+              current_user,
+              'notification_delivery',
+              'CREATE'
+            ) THEN
+              RAISE EXCEPTION 'runtime role must not create in service schema';
+            END IF;
+            IF NOT has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'SELECT'
+            ) OR NOT has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'INSERT'
+            ) OR NOT has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'UPDATE'
+            ) OR NOT has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'DELETE'
+            ) THEN
+              RAISE EXCEPTION 'runtime role must have service table CRUD';
+            END IF;
+            IF has_table_privilege(
+              current_user,
+              'notification_delivery._prisma_migrations',
+              'SELECT'
+            ) THEN
+              RAISE EXCEPTION
+                'runtime role must not read Prisma migration history';
+            END IF;
+            IF NOT has_sequence_privilege(
+              current_user,
+              'notification_delivery.ci_runtime_sequence',
+              'USAGE'
+            ) OR NOT has_sequence_privilege(
+              current_user,
+              'notification_delivery.ci_runtime_sequence',
+              'SELECT'
+            ) OR NOT has_sequence_privilege(
+              current_user,
+              'notification_delivery.ci_runtime_sequence',
+              'UPDATE'
+            ) THEN
+              RAISE EXCEPTION 'runtime role must use service sequences';
+            END IF;
+          END
+          $$;
+          SQL
+
+          docker exec -i \
+            --env PGPASSWORD=notification_delivery_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username notification_delivery_backup \
+              --dbname winwidget_notification_delivery_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF has_database_privilege(
+              current_user,
+              current_database(),
+              'CREATE'
+            ) OR has_schema_privilege(
+              current_user,
+              'notification_delivery',
+              'CREATE'
+            ) THEN
+              RAISE EXCEPTION 'backup role must not have DDL privileges';
+            END IF;
+            IF NOT has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'SELECT'
+            ) OR NOT has_table_privilege(
+              current_user,
+              'notification_delivery._prisma_migrations',
+              'SELECT'
+            ) THEN
+              RAISE EXCEPTION 'backup role must read all service tables';
+            END IF;
+            IF has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'INSERT'
+            ) OR has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'UPDATE'
+            ) OR has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'DELETE'
+            ) OR has_table_privilege(
+              current_user,
+              'notification_delivery.delivery_receipts',
+              'TRUNCATE'
+            ) THEN
+              RAISE EXCEPTION 'backup role must remain read-only';
+            END IF;
+            IF NOT has_sequence_privilege(
+              current_user,
+              'notification_delivery.ci_runtime_sequence',
+              'SELECT'
+            ) OR has_sequence_privilege(
+              current_user,
+              'notification_delivery.ci_runtime_sequence',
+              'USAGE'
+            ) OR has_sequence_privilege(
+              current_user,
+              'notification_delivery.ci_runtime_sequence',
+              'UPDATE'
+            ) THEN
+              RAISE EXCEPTION 'backup sequence privileges are unsafe';
+            END IF;
+          END
+          $$;
+          SQL
+
+      - name: Verify Notification Delivery PostgreSQL persistence and restore
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER }}
+        run: |
+          sentinel_id=00000000-0000-4000-8000-000000000001
+          source_dump="$RUNNER_TEMP/notification-delivery-ci.dump"
+          source_manifest="$RUNNER_TEMP/notification-delivery-source.manifest"
+          restore_manifest="$RUNNER_TEMP/notification-delivery-restore.manifest"
+
+          docker exec -i \
+            --env PGPASSWORD=notification_delivery_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username notification_delivery_runtime \
+              --dbname winwidget_notification_delivery_ci <<SQL
+          INSERT INTO notification_delivery.heartbeats (
+            id,
+            service,
+            instance_id,
+            metadata,
+            updated_at
+          ) VALUES (
+            '$sentinel_id',
+            'ci-persistence-probe',
+            'ci-persistence-probe',
+            '{"persisted":true}'::jsonb,
+            CURRENT_TIMESTAMP
+          );
+          SELECT setval(
+            'notification_delivery.ci_runtime_sequence',
+            4242,
+            true
+          );
+          SQL
+
+          system_identifier="$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --username winwidget_notification_delivery_admin \
+                --dbname postgres \
+                --command "SELECT system_identifier FROM pg_control_system()"
+          )"
+          test -n "$system_identifier"
+
+          docker rm --force "$POSTGRES_CONTAINER_ID" > /dev/null
+          docker run --detach \
+            --name "$POSTGRES_CONTAINER_ID" \
+            --label com.winwidget.owner=notification-delivery \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55432:5432 \
+            --mount \
+              "type=volume,source=$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount \
+              "type=bind,source=$NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/notification-delivery-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_notification_delivery_ci \
+            --env POSTGRES_USER=winwidget_notification_delivery_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/notification-delivery-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd \
+              "pg_isready --username winwidget_notification_delivery_admin --dbname winwidget_notification_delivery_ci" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+          for attempt in $(seq 1 30); do
+            health="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$POSTGRES_CONTAINER_ID"
+            )"
+            if [[ "$health" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$health" == "unhealthy" || "$attempt" == "30" ]]; then
+              docker logs "$POSTGRES_CONTAINER_ID" >&2
+              echo "Notification Delivery PostgreSQL did not recover after restart." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --username winwidget_notification_delivery_admin \
+                --dbname postgres \
+                --command "SELECT system_identifier FROM pg_control_system()"
+          )" = "$system_identifier"
+          test "$(
+            docker inspect \
+              --format '{{range .Mounts}}{{printf "%s|%s|%s|%t\n" .Destination .Type .Name .RW}}{{end}}' \
+              "$POSTGRES_CONTAINER_ID" |
+              awk -F'|' '$1 == "/var/lib/postgresql" || index($1, "/var/lib/postgresql/") == 1'
+          )" = "/var/lib/postgresql|volume|$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME|true"
+          test "$(
+            docker exec \
+              --env PGPASSWORD=notification_delivery_runtime_ci \
+              "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --host 127.0.0.1 \
+                --username notification_delivery_runtime \
+                --dbname winwidget_notification_delivery_ci \
+                --command "
+                  SELECT count(*)
+                  FROM notification_delivery.heartbeats
+                  WHERE id = '$sentinel_id'
+                    AND metadata = '{\"persisted\":true}'::jsonb;
+                "
+          )" = "1"
+
+          docker exec \
+            --env PGPASSWORD=notification_delivery_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            pg_dump \
+              --host 127.0.0.1 \
+              --username notification_delivery_backup \
+              --dbname winwidget_notification_delivery_ci \
+              --format custom \
+              --no-owner \
+              --no-privileges \
+              --schema notification_delivery \
+              --file /tmp/notification-delivery-ci.dump
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore --list /tmp/notification-delivery-ci.dump > /dev/null
+          docker cp \
+            "$POSTGRES_CONTAINER_ID:/tmp/notification-delivery-ci.dump" \
+            "$source_dump"
+          test -s "$source_dump"
+          docker cp \
+            "$source_dump" \
+            "$POSTGRES_CONTAINER_ID:/tmp/notification-delivery-restore.dump"
+
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_notification_delivery_admin \
+              --dbname postgres \
+              --command "
+                CREATE DATABASE winwidget_notification_delivery_restore_ci
+                  WITH TEMPLATE template0;
+              "
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore \
+              --exit-on-error \
+              --single-transaction \
+              --no-owner \
+              --no-privileges \
+              --username winwidget_notification_delivery_admin \
+              --dbname winwidget_notification_delivery_restore_ci \
+              /tmp/notification-delivery-restore.dump
+
+          build_manifest() {
+            local database="$1"
+            local output="$2"
+            local tables
+            local table
+
+            tables="$(
+              docker exec "$POSTGRES_CONTAINER_ID" \
+                psql --tuples-only --no-align \
+                  --username winwidget_notification_delivery_admin \
+                  --dbname "$database" \
+                  --command "
+                    SELECT tablename
+                    FROM pg_tables
+                    WHERE schemaname = 'notification_delivery'
+                    ORDER BY tablename;
+                  "
+            )"
+            test -n "$tables"
+            : > "$output"
+            while IFS= read -r table; do
+              [[ "$table" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+              docker exec "$POSTGRES_CONTAINER_ID" \
+                psql --tuples-only --no-align --field-separator '|' \
+                  --username winwidget_notification_delivery_admin \
+                  --dbname "$database" \
+                  --command "
+                    SELECT
+                      '$table',
+                      count(*),
+                      md5(
+                        COALESCE(
+                          string_agg(
+                            row_json,
+                            E'\\n'
+                            ORDER BY row_json COLLATE \"C\"
+                          ),
+                          ''
+                        )
+                      )
+                    FROM (
+                      SELECT to_jsonb(source_row)::text AS row_json
+                      FROM notification_delivery.\"$table\" AS source_row
+                    ) AS rows;
+                  " >> "$output"
+            done <<< "$tables"
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --field-separator '|' \
+                --username winwidget_notification_delivery_admin \
+                --dbname "$database" \
+                --command "
+                  SELECT
+                    '@sequence',
+                    sequencename,
+                    COALESCE(last_value::text, 'NULL'),
+                    start_value,
+                    increment_by,
+                    min_value,
+                    max_value,
+                    cache_size,
+                    cycle
+                  FROM pg_sequences
+                  WHERE schemaname = 'notification_delivery'
+                  ORDER BY sequencename;
+                " >> "$output"
+          }
+
+          build_manifest winwidget_notification_delivery_ci "$source_manifest"
+          build_manifest \
+            winwidget_notification_delivery_restore_ci \
+            "$restore_manifest"
+          diff -u "$source_manifest" "$restore_manifest"
+          grep -Eq '^_prisma_migrations\|[1-9][0-9]*\|' "$restore_manifest"
+          grep -Eq '^heartbeats\|1\|' "$restore_manifest"
+          grep -Eq '^@sequence\|ci_runtime_sequence\|4242\|' "$restore_manifest"
+
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_notification_delivery_admin \
+              --dbname postgres \
+              --command "
+                DROP DATABASE winwidget_notification_delivery_restore_ci
+                  WITH (FORCE);
+              "
 
       - name: Verify RabbitMQ Management API
         run: curl --fail --user "$RABBITMQ_USER:$RABBITMQ_PASSWORD" "$RABBITMQ_MANAGEMENT_URL/api/overview"
@@ -259,9 +801,19 @@ jobs:
           pnpm --dir apps/notification-delivery test
 
       - name: Validate production compose
+        env:
+          NOTIFICATION_DELIVERY_POSTGRES_IMAGE: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+          NOTIFICATION_DELIVERY_POSTGRES_PORT: '55432'
+          NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME: winwidget-notification-delivery-postgres-data
+          NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER: winwidget_notification_delivery_admin
+          NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE: /tmp/winwidget-notification-delivery-postgres-admin-password
+          NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://notification_delivery_runtime:notification_delivery_runtime_ci@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+          NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION: postgresql://notification_delivery_migration:notification_delivery_migration_ci@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+          NOTIFICATION_DELIVERY_BACKUP_URL: postgresql://notification_delivery_backup:notification_delivery_backup_ci@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
         run: |
-          docker compose --profile migration --profile notification-delivery-migration --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
-          docker compose --profile migration --profile notification-delivery-migration --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+          # shellcheck disable=SC2016
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
             node -e '
               const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
               const services = config.services ?? {};
@@ -276,6 +828,29 @@ jobs:
               const rabbitVolume = config.volumes?.["winwidget-rabbitmq-data"];
               if (!rabbitVolume?.external || !rabbitVolume.name) {
                 throw new Error("RabbitMQ must use a named external volume");
+              }
+              const notificationPostgresVolume =
+                config.volumes?.["winwidget-notification-delivery-postgres-data"];
+              if (
+                !notificationPostgresVolume?.external ||
+                notificationPostgresVolume.name !==
+                  process.env.NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL must use its exact external volume",
+                );
+              }
+              const notificationPostgresSecret =
+                config.secrets?.[
+                  "notification-delivery-postgres-admin-password"
+                ];
+              if (
+                notificationPostgresSecret?.file !==
+                process.env.NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL must use its admin password file secret",
+                );
               }
               const persistentServiceNames = Object.entries(services)
                 .filter(([, service]) => (service.profiles ?? []).length === 0)
@@ -325,6 +900,178 @@ jobs:
                 }
                 return environment;
               };
+              const notificationPostgres = requireService(
+                "notification-delivery-postgres",
+              );
+              if (
+                notificationPostgres.image !==
+                process.env.NOTIFICATION_DELIVERY_POSTGRES_IMAGE
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL image must be explicitly configured",
+                );
+              }
+              const notificationPostgresEnvironment = requireEnvironment(
+                "notification-delivery-postgres",
+                [
+                  "POSTGRES_DB",
+                  "POSTGRES_USER",
+                  "POSTGRES_PASSWORD_FILE",
+                  "POSTGRES_INITDB_ARGS",
+                  "PGDATA",
+                ],
+              );
+              if (
+                notificationPostgresEnvironment.POSTGRES_DB !==
+                  "winwidget_notification_delivery" ||
+                notificationPostgresEnvironment.POSTGRES_USER !==
+                  process.env.NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER ||
+                notificationPostgresEnvironment.POSTGRES_PASSWORD_FILE !==
+                  "/run/secrets/notification-delivery-postgres-admin-password" ||
+                notificationPostgresEnvironment.POSTGRES_INITDB_ARGS !==
+                  "--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" ||
+                notificationPostgresEnvironment.PGDATA !==
+                  "/var/lib/postgresql/18/docker"
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL initialization is unsafe",
+                );
+              }
+              const notificationPostgresPorts =
+                notificationPostgres.ports ?? [];
+              if (
+                notificationPostgresPorts.length !== 1 ||
+                notificationPostgresPorts[0].host_ip !== "127.0.0.1" ||
+                String(notificationPostgresPorts[0].published) !==
+                  process.env.NOTIFICATION_DELIVERY_POSTGRES_PORT ||
+                Number(notificationPostgresPorts[0].target) !== 5432
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL must publish only 127.0.0.1:55432",
+                );
+              }
+              const notificationPostgresNetworks =
+                notificationPostgres.networks ?? {};
+              const notificationPostgresNetwork =
+                config.networks?.["notification-delivery-postgres"];
+              if (
+                Object.keys(notificationPostgresNetworks).length !== 1 ||
+                !Object.hasOwn(
+                  notificationPostgresNetworks,
+                  "notification-delivery-postgres",
+                ) ||
+                notificationPostgresNetwork?.name !==
+                  "winwidget-notification-delivery-postgres" ||
+                notificationPostgresNetwork.driver !== "bridge" ||
+                notificationPostgresNetwork.internal !== true ||
+                notificationPostgresNetwork.labels?.["com.winwidget.owner"] !==
+                  "notification-delivery" ||
+                notificationPostgresNetwork.labels?.[
+                  "com.winwidget.purpose"
+                ] !== "postgres-network"
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL must use only its internal network",
+                );
+              }
+              const notificationPostgresDataMounts = (
+                notificationPostgres.volumes ?? []
+              ).filter(
+                mount =>
+                  mount.type === "volume" &&
+                  mount.target === "/var/lib/postgresql",
+              );
+              if (
+                (notificationPostgres.volumes ?? []).length !== 1 ||
+                notificationPostgresDataMounts.length !== 1 ||
+                notificationPostgresDataMounts[0].source !==
+                  process.env.NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL data mount is not isolated",
+                );
+              }
+              const notificationPostgresSecrets =
+                notificationPostgres.secrets ?? [];
+              if (
+                notificationPostgresSecrets.length !== 1 ||
+                notificationPostgresSecrets[0].source !==
+                  "notification-delivery-postgres-admin-password"
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL receives an unexpected secret set",
+                );
+              }
+              if (
+                notificationPostgres.network_mode != null ||
+                notificationPostgres.depends_on != null ||
+                notificationPostgres.restart !== "unless-stopped" ||
+                JSON.stringify(notificationPostgres.profiles ?? []) !==
+                  JSON.stringify(["notification-delivery-database"])
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL must stay behind its independent lifecycle profile",
+                );
+              }
+              const expectedPostgresHealthcheck = {
+                test: [
+                  "CMD-SHELL",
+                  "pg_isready --username \"$$POSTGRES_USER\" --dbname \"$$POSTGRES_DB\"",
+                ],
+                timeout: "5s",
+                interval: "10s",
+                retries: 12,
+                start_period: "10s",
+              };
+              if (
+                JSON.stringify(notificationPostgres.healthcheck) !==
+                  JSON.stringify(expectedPostgresHealthcheck) ||
+                notificationPostgres.stop_grace_period !== "1m0s" ||
+                notificationPostgres.shm_size !== "268435456" ||
+                notificationPostgres.mem_limit !== "805306368" ||
+                notificationPostgres.mem_reservation !== "268435456" ||
+                notificationPostgres.cpus !== 1 ||
+                notificationPostgres.pids_limit !== 200 ||
+                notificationPostgres.logging?.driver !== "json-file" ||
+                notificationPostgres.logging?.options?.["max-size"] !== "10m" ||
+                notificationPostgres.logging?.options?.["max-file"] !== "5" ||
+                notificationPostgres.labels?.["com.winwidget.owner"] !==
+                  "notification-delivery" ||
+                notificationPostgres.labels?.["com.winwidget.purpose"] !==
+                  "postgres" ||
+                Object.keys(notificationPostgres.labels ?? {}).length !== 2
+              ) {
+                throw new Error(
+                  "Notification Delivery PostgreSQL runtime safeguards drifted",
+                );
+              }
+              for (const [name, service] of Object.entries(services)) {
+                if (name === "notification-delivery-postgres") continue;
+                if (
+                  (service.volumes ?? []).some(
+                    mount =>
+                      mount.source ===
+                      process.env.NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME,
+                  ) ||
+                  (service.secrets ?? []).some(
+                    secret =>
+                      secret.source ===
+                      "notification-delivery-postgres-admin-password",
+                  ) ||
+                  Object.hasOwn(
+                    service.networks ?? {},
+                    "notification-delivery-postgres",
+                  ) ||
+                  Object.hasOwn(
+                    service.depends_on ?? {},
+                    "notification-delivery-postgres",
+                  )
+                ) {
+                  throw new Error(
+                    `${name} must not share the Notification Delivery PostgreSQL lifecycle`,
+                  );
+                }
+              }
               for (const name of [
                 "api",
                 "api-gateway",
@@ -710,6 +1457,7 @@ jobs:
                   "RABBITMQ_ASSERT_TOPOLOGY",
                   "MESSAGING_SERVICE_NAME",
                   "DATABASE_BACKUP_URL",
+                  "NOTIFICATION_DELIVERY_BACKUP_URL",
                   "MAINTENANCE_WORKER_PREFETCH",
                   "MAINTENANCE_HEALTH_PORT",
                   "SCHEDULED_JOB_POLL_INTERVAL_MS",
@@ -725,6 +1473,34 @@ jobs:
                 ["database-backup"],
                 "maintenance-worker",
               );
+              const notificationDatabaseUrls = [
+                notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_DATABASE_URL,
+                requireService("notification-delivery-migrate").environment
+                  ?.NOTIFICATION_DELIVERY_DATABASE_URL,
+                maintenanceEnvironment.NOTIFICATION_DELIVERY_BACKUP_URL,
+              ].map(value => new URL(value));
+              for (const url of notificationDatabaseUrls) {
+                if (
+                  url.protocol !== "postgresql:" ||
+                  url.hostname !== "127.0.0.1" ||
+                  url.port !== "55432" ||
+                  url.pathname !== "/winwidget_notification_delivery" ||
+                  url.searchParams.get("schema") !== "notification_delivery" ||
+                  url.searchParams.get("sslmode") !== "disable"
+                ) {
+                  throw new Error(
+                    "Notification Delivery roles must use the dedicated loopback PostgreSQL database",
+                  );
+                }
+              }
+              if (
+                new Set(notificationDatabaseUrls.map(url => url.username)).size !==
+                notificationDatabaseUrls.length
+              ) {
+                throw new Error(
+                  "Notification Delivery runtime, migration and backup must use distinct roles",
+                );
+              }
               if ("RABBITMQ_URL" in (services.api.environment ?? {})) {
                 throw new Error("api must not receive an AMQP URL");
               }
@@ -884,6 +1660,8 @@ jobs:
           bash -n scripts/deploy-production.sh
           bash -n scripts/deploy-maintenance-production.sh
           bash -n scripts/deploy-notification-delivery-production.sh
+          bash -n scripts/cutover-notification-delivery-database-production.sh
+          bash -n scripts/notification-delivery-database-lifecycle.sh
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
@@ -1072,7 +1850,7 @@ jobs:
           )" = "$NOTIFICATION_DELIVERY_REVISION"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
-            'pg_dump --version && pg_restore --version && test -f dist/src/maintenance-worker-main.js'
+            'pg_dump --version | grep -Eq " 18[.]" && pg_restore --version | grep -Eq " 18[.]" && test -f dist/src/maintenance-worker-main.js'
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node notification-delivery-worker \
             -e "const fs=require('node:fs'); require('@prisma/notification-delivery-client'); fs.accessSync('dist/src/main.js'); fs.accessSync('prisma/schema.prisma'); for (const path of ['dist/src/app.module.js','dist/src/messaging/notification-delivery-client.service.js','dist/src/outbox-publisher-main.js','public/widgets']) if (fs.existsSync(path)) throw new Error('Standalone image contains monolith artifact: '+path)"
@@ -1115,8 +1893,81 @@ jobs:
           fi
           pnpm --dir apps/notification-delivery run test:integration
 
+      - name: Cleanup isolated Notification Delivery PostgreSQL
+        if: ${{ always() }}
+        run: |
+          cleanup_failed=false
+
+          if docker container inspect \
+            "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER" > /dev/null 2>&1; then
+            container_owner="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.owner"}}' \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER"
+            )"
+            container_purpose="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.purpose"}}' \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER"
+            )"
+            container_run="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.github-run"}}' \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER"
+            )"
+            if [[
+              "$container_owner" != "notification-delivery" ||
+              "$container_purpose" != "ci-postgres" ||
+              "$container_run" != "$GITHUB_RUN_ID"
+            ]]; then
+              echo "Refusing to remove an unverified PostgreSQL container." >&2
+              cleanup_failed=true
+            else
+              docker container rm --force \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER" > /dev/null
+            fi
+          fi
+
+          if docker volume inspect \
+            "$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME" > /dev/null 2>&1; then
+            volume_owner="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.owner"}}' \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME"
+            )"
+            volume_purpose="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.purpose"}}' \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME"
+            )"
+            volume_run="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.github-run"}}' \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME"
+            )"
+            if [[
+              "$volume_owner" != "notification-delivery" ||
+              "$volume_purpose" != "ci-postgres-data" ||
+              "$volume_run" != "$GITHUB_RUN_ID"
+            ]]; then
+              echo "Refusing to remove an unverified PostgreSQL volume." >&2
+              cleanup_failed=true
+            else
+              docker volume rm \
+                "$NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME" > /dev/null
+            fi
+          fi
+
+          rm -f -- "$NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE"
+          if [[ "$cleanup_failed" == "true" ]]; then
+            exit 1
+          fi
+
   deploy:
     needs: verify
+    if: >-
+      github.event_name == 'push' ||
+      inputs.deploy_target != 'notification-delivery-database-cutover'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -1151,17 +2002,23 @@ jobs:
             "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
-          git fetch origin prod
-          git checkout prod
-          git pull --ff-only origin prod
           case "$DEPLOY_TARGET" in
             all)
+              git fetch origin prod
+              git checkout prod
+              git pull --ff-only origin prod
               APP_ROOT="$APP_ROOT" bash scripts/deploy-production.sh
               ;;
             maintenance)
+              git fetch origin prod
+              git checkout prod
+              git pull --ff-only origin prod
               APP_ROOT="$APP_ROOT" bash scripts/deploy-maintenance-production.sh
               ;;
             notification-delivery)
+              git fetch origin prod
+              git checkout prod
+              git pull --ff-only origin prod
               APP_ROOT="$APP_ROOT" bash scripts/deploy-notification-delivery-production.sh
               ;;
             *)
@@ -1169,4 +2026,212 @@ jobs:
               exit 1
               ;;
           esac
+          EOF
+
+  notification-delivery-database-cutover:
+    needs: verify
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_target == 'notification-delivery-database-cutover' &&
+      github.ref == 'refs/heads/prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+
+    steps:
+      - name: Configure SSH private key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
+
+      - name: Add VPS host to known_hosts
+        env:
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+        run: |
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Cut over Notification Delivery database on VPS
+        env:
+          APP_ROOT: /opt/winwidget
+          EXPECTED_PROD_REVISION: ${{ github.sha }}
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "APP_ROOT='$APP_ROOT' EXPECTED_PROD_REVISION='$EXPECTED_PROD_REVISION' bash -s" <<'EOF'
+          set -euo pipefail
+          cd "$APP_ROOT/winwidget.ru_server"
+
+          git fetch origin prod
+          git checkout prod
+          git pull --ff-only origin prod
+          deployed_source_revision="$(git rev-parse HEAD)"
+          if [[ "$deployed_source_revision" != "$EXPECTED_PROD_REVISION" ]]; then
+            echo "The checked-out prod revision changed after workflow start." >&2
+            exit 1
+          fi
+
+          compose=(
+            docker compose
+            --project-name winwidget
+            --env-file "$APP_ROOT/deploy/backend/.env.production"
+            --file deploy/docker-compose.prod.yml
+          )
+          cutover_marker="$APP_ROOT/deploy/backend/.notification-delivery-database-cutover-v1"
+          ENV_FILE="$APP_ROOT/deploy/backend/.env.production"
+          get_env_value() {
+            local key="$1"
+
+            awk -F= -v key="$key" '
+              /^[[:space:]]*(#|$)/ { next }
+              {
+                name = $1
+                sub(/^[[:space:]]*/, "", name)
+                sub(/[[:space:]]*$/, "", name)
+                value = $0
+                sub(/^[^=]*=/, "", value)
+                sub(/\r$/, "", value)
+                sub(/^[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+                if (name == key) {
+                  print value
+                  found += 1
+                }
+              }
+              END { exit(found == 1 ? 0 : 1) }
+            ' "$ENV_FILE"
+          }
+          # shellcheck source=scripts/notification-delivery-database-lifecycle.sh
+          source scripts/notification-delivery-database-lifecycle.sh
+          cutover_phase=""
+          marker_worker_image_id=""
+          marker_worker_revision=""
+          if [[ -e "$cutover_marker" || -L "$cutover_marker" ]]; then
+            if ! validate_notification_database_cutover_marker; then
+              echo "Notification Delivery database cutover marker is invalid." >&2
+              exit 1
+            fi
+            cutover_phase="$(notification_database_marker_value phase)"
+            marker_worker_image_id="$(
+              notification_database_marker_value worker_image_id
+            )"
+            marker_worker_revision="$(
+              notification_database_marker_value revision
+            )"
+          fi
+
+          require_marker_worker_image() {
+            if [[ ! "$marker_worker_image_id" =~ ^sha256:[0-9a-f]{64}$ ||
+              ! "$marker_worker_revision" =~ ^[0-9a-f]{40}$ ||
+              "$(
+                docker image inspect \
+                  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+                  "$marker_worker_image_id" 2>/dev/null || true
+              )" != "$marker_worker_revision" ]]; then
+              echo "The immutable worker image required for cutover recovery is unavailable." >&2
+              exit 1
+            fi
+          }
+
+          require_expand_service_revision() {
+            local service="$1"
+            local allow_marker_revision="${2:-false}"
+            local allow_worker_recovery="${3:-false}"
+            local marker_revision_allowed=false
+            local container_ids container_count container_id revision health
+
+            if [[ "$allow_marker_revision" == "true" &&
+              -n "$marker_worker_revision" ]]; then
+              marker_revision_allowed=true
+            fi
+            if [[ "$allow_worker_recovery" == "true" && -n "$cutover_phase" ]]; then
+              container_ids="$("${compose[@]}" ps -a -q "$service")"
+            else
+              container_ids="$("${compose[@]}" ps --status running -q "$service")"
+            fi
+            container_count="$(
+              printf '%s\n' "$container_ids" |
+                sed '/^$/d' |
+                wc -l |
+              tr -d ' '
+            )"
+            if [[ "$service" == "notification-delivery-worker" &&
+              "$cutover_phase" =~ ^(preparing|restoring|prepared)$ ]]; then
+              if [[ "$container_count" != "0" && "$container_count" != "1" ]]; then
+                echo "Pre-forward recovery allows at most one Notification Delivery worker container." >&2
+                exit 1
+              fi
+              require_marker_worker_image
+              approved_worker_revision="$marker_worker_revision"
+              return
+            fi
+            if [[ "$container_count" == "0" &&
+              "$allow_worker_recovery" == "true" &&
+              -n "$marker_worker_revision" ]]; then
+              require_marker_worker_image
+              approved_worker_revision="$marker_worker_revision"
+              return
+            fi
+            if [[ "$container_count" != "1" ]]; then
+              echo "Expand release requires exactly one approved $service container." >&2
+              exit 1
+            fi
+            container_id="$(printf '%s\n' "$container_ids" | sed -n '1p')"
+            revision="$(
+              docker inspect \
+                --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                "$container_id" |
+                sed -n 's/^APP_REVISION=//p'
+            )"
+            if [[ "$revision" != "$EXPECTED_PROD_REVISION" &&
+              (
+                "$marker_revision_allowed" != "true" ||
+                "$revision" != "$marker_worker_revision"
+              ) ]]; then
+              echo "$service is not running the verified prod expand revision." >&2
+              exit 1
+            fi
+            health="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$container_id"
+            )"
+            if [[ "$health" != "healthy" &&
+              "$allow_worker_recovery" != "true" ]]; then
+              echo "$service must be healthy before database cutover." >&2
+              exit 1
+            fi
+            if [[ "$service" == "notification-delivery-worker" ]]; then
+              approved_worker_revision="$revision"
+            fi
+          }
+
+          approved_worker_revision=""
+          require_expand_service_revision api true
+          if [[ "$cutover_phase" != "complete" ]]; then
+            require_expand_service_revision maintenance-worker true
+          fi
+          require_expand_service_revision notification-delivery-worker true true
+          [[ "$approved_worker_revision" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Approved Notification Delivery worker revision is missing." >&2
+            exit 1
+          }
+
+          finalize_cutover=false
+          if [[ "$cutover_phase" == "forward_only" || "$cutover_phase" == "complete" ]]; then
+            finalize_cutover=true
+          fi
+
+          APP_ROOT="$APP_ROOT" \
+            EXPECTED_REVISION="$EXPECTED_PROD_REVISION" \
+            EXPECTED_WORKER_REVISION="$approved_worker_revision" \
+            NOTIFICATION_DELIVERY_DATABASE_FINALIZE="$finalize_cutover" \
+            bash scripts/cutover-notification-delivery-database-production.sh
           EOF

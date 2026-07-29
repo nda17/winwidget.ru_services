@@ -1,3 +1,4 @@
+import { NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES } from '@/maintenance/database-backup.types';
 import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
@@ -922,6 +923,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			settings.databaseBackupTime,
 			this.DEFAULT_DATABASE_BACKUP_TIME
 		);
+		const notificationDeliveryDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryEnabled: settings.dailySummaryEnabled,
@@ -939,6 +944,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupEnabled: settings.databaseBackupEnabled,
 			databaseBackupTime,
 			databaseBackupTimeLabel: `${databaseBackupTime} МСК`,
+			notificationDeliveryDatabaseBackupDelayMinutes:
+				NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
+			notificationDeliveryDatabaseBackupTime,
+			notificationDeliveryDatabaseBackupTimeLabel: `${notificationDeliveryDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:
@@ -1688,14 +1697,45 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupTime,
 			this.DEFAULT_DATABASE_BACKUP_TIME
 		);
-		const directGap = Math.abs(summaryMinutes - backupMinutes);
-		const gap = Math.min(directGap, 24 * 60 - directGap);
+		const notificationDeliveryBackupMinutes =
+			(backupMinutes +
+				NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES) %
+			(24 * 60);
+		const coreGap = this.getCircularTimeGapMinutes(
+			summaryMinutes,
+			backupMinutes
+		);
+		const notificationDeliveryGap = this.getCircularTimeGapMinutes(
+			summaryMinutes,
+			notificationDeliveryBackupMinutes
+		);
 
-		if (gap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES) {
+		if (
+			coreGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES ||
+			notificationDeliveryGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES
+		) {
 			throw new BadRequestException(
-				`Разнесите отправку сводки и backup минимум на ${this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES} минут`
+				`Разнесите отправку сводки и оба backup минимум на ${this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES} минут`
 			);
 		}
+	}
+
+	private getCircularTimeGapMinutes(first: number, second: number) {
+		const directGap = Math.abs(first - second);
+		return Math.min(directGap, 24 * 60 - directGap);
+	}
+
+	private addMinutesToTime(value: string, minutesToAdd: number) {
+		const minutes =
+			(this.getScheduleTimeMinutes(
+				value,
+				this.DEFAULT_DATABASE_BACKUP_TIME
+			) +
+				minutesToAdd) %
+			(24 * 60);
+		return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(
+			minutes % 60
+		).padStart(2, '0')}`;
 	}
 
 	private getScheduleTimeMinutes(value: string, fallback: string) {

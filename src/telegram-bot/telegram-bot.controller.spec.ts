@@ -15,6 +15,7 @@ describe('TelegramBotController manual database backup', () => {
 	const createController = (created: boolean) => {
 		const scheduledTasksService = {
 			enqueueManualDatabaseBackup: jest.fn().mockResolvedValue({
+				target: 'core',
 				jobId: randomUUID(),
 				status: ScheduledJobRunStatus.QUEUED,
 				queuedAt: '2026-07-24T00:00:00.000Z',
@@ -43,10 +44,10 @@ describe('TelegramBotController manual database backup', () => {
 		const { controller, scheduledTasksService } = createController(true);
 
 		await expect(
-			controller.sendDatabaseBackup(adminId, undefined, request)
+			controller.sendDatabaseBackup('core', adminId, undefined, request)
 		).rejects.toBeInstanceOf(BadRequestException);
 		await expect(
-			controller.sendDatabaseBackup(adminId, 'invalid', request)
+			controller.sendDatabaseBackup('core', adminId, 'invalid', request)
 		).rejects.toBeInstanceOf(BadRequestException);
 		expect(
 			scheduledTasksService.enqueueManualDatabaseBackup
@@ -58,6 +59,7 @@ describe('TelegramBotController manual database backup', () => {
 			createController(true);
 
 		const result = await controller.sendDatabaseBackup(
+			'core',
 			adminId,
 			idempotencyKey,
 			request
@@ -65,7 +67,7 @@ describe('TelegramBotController manual database backup', () => {
 
 		expect(
 			scheduledTasksService.enqueueManualDatabaseBackup
-		).toHaveBeenCalledWith(adminId, idempotencyKey);
+		).toHaveBeenCalledWith('core', adminId, idempotencyKey);
 		expect(adminEventLogService.record).toHaveBeenCalledTimes(1);
 		expect(result.created).toBe(true);
 	});
@@ -74,6 +76,7 @@ describe('TelegramBotController manual database backup', () => {
 		const { controller, adminEventLogService } = createController(false);
 
 		const result = await controller.sendDatabaseBackup(
+			'core',
 			adminId,
 			idempotencyKey,
 			request
@@ -93,15 +96,43 @@ describe('TelegramBotController manual database backup', () => {
 		});
 
 		await expect(
-			controller.getDatabaseBackupJob(jobId, adminId)
+			controller.getDatabaseBackupJob('core', jobId, adminId)
 		).resolves.toEqual({ jobId });
 		expect(
 			scheduledTasksService.getDatabaseBackupJob
-		).toHaveBeenCalledWith(jobId, adminId);
+		).toHaveBeenCalledWith('core', jobId, adminId);
 
-		await controller.getLatestActiveManualDatabaseBackup(adminId);
+		await controller.getLatestActiveManualDatabaseBackup('core', adminId);
 		expect(
 			scheduledTasksService.getLatestActiveManualDatabaseBackup
-		).toHaveBeenCalledWith(adminId);
+		).toHaveBeenCalledWith('core', adminId);
+	});
+
+	it('keeps Notification Delivery manual jobs isolated from core jobs', async () => {
+		const { controller, scheduledTasksService, adminEventLogService } =
+			createController(true);
+
+		await controller.sendDatabaseBackup(
+			'notification-delivery',
+			adminId,
+			idempotencyKey,
+			request
+		);
+
+		expect(
+			scheduledTasksService.enqueueManualDatabaseBackup
+		).toHaveBeenCalledWith(
+			'notification-delivery',
+			adminId,
+			idempotencyKey
+		);
+		expect(adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				description: expect.stringContaining('Notification Delivery'),
+				metadata: expect.objectContaining({
+					target: 'notification-delivery'
+				})
+			})
+		);
 	});
 });

@@ -7,12 +7,27 @@ import {
 
 export const SCHEDULED_JOB_TYPES = {
 	DAILY_TELEGRAM_SUMMARY: 'DAILY_TELEGRAM_SUMMARY',
-	DATABASE_BACKUP: 'DATABASE_BACKUP'
+	DATABASE_BACKUP: 'DATABASE_BACKUP',
+	NOTIFICATION_DELIVERY_DATABASE_BACKUP:
+		'NOTIFICATION_DELIVERY_DATABASE_BACKUP'
 } as const;
 
 export type ScheduledJobType =
 	| (typeof SCHEDULED_JOB_TYPES)[keyof typeof SCHEDULED_JOB_TYPES]
 	| string;
+
+export const DATABASE_BACKUP_JOB_TYPES = [
+	SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+	SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP
+] as const;
+
+export type DatabaseBackupJobType =
+	(typeof DATABASE_BACKUP_JOB_TYPES)[number];
+
+export const isDatabaseBackupJobType = (
+	value: string
+): value is DatabaseBackupJobType =>
+	DATABASE_BACKUP_JOB_TYPES.includes(value as DatabaseBackupJobType);
 
 export const TERMINAL_SCHEDULED_JOB_STATUSES: ScheduledJobRunStatus[] = [
 	ScheduledJobRunStatus.SUCCEEDED,

@@ -24,7 +24,10 @@ import {
 } from '@/messaging/notification-delivery-client.service';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import { PrismaService } from '@/prisma.service';
-import { SCHEDULED_JOB_TYPES } from '@/scheduled-jobs/scheduled-jobs.types';
+import {
+	isDatabaseBackupJobType,
+	SCHEDULED_JOB_TYPES
+} from '@/scheduled-jobs/scheduled-jobs.types';
 import {
 	BadRequestException,
 	ConflictException,
@@ -388,7 +391,7 @@ export class MessagingAdminService {
 				);
 			}
 			const retryToken = kind === 'database-backup' ? null : randomUUID();
-			const scheduledJobId = this.getScheduledJobId(
+			const scheduledJob = this.getScheduledJobReference(
 				kind,
 				failure.eventId,
 				retryPayload
@@ -444,8 +447,12 @@ export class MessagingAdminService {
 					mailingDelivery.campaignId
 				);
 			}
-			if (scheduledJobId) {
-				await this.reopenScheduledJob(transaction, scheduledJobId, kind);
+			if (scheduledJob) {
+				await this.reopenScheduledJob(
+					transaction,
+					scheduledJob.id,
+					scheduledJob.jobType
+				);
 			}
 
 			if (retryToken) {
@@ -858,11 +865,11 @@ export class MessagingAdminService {
 		return where;
 	}
 
-	private getScheduledJobId(
+	private getScheduledJobReference(
 		kind: MessagingKind,
 		eventId: string,
 		payload: Prisma.JsonValue
-	): string | null {
+	): { id: string; jobType: string } | null {
 		if (kind !== 'daily-summary-telegram' && kind !== 'database-backup') {
 			return null;
 		}
@@ -877,18 +884,23 @@ export class MessagingAdminService {
 				'Некорректное событие фонового задания'
 			);
 		}
-		return payload.jobId;
+		const jobType = payload.jobType;
+		if (
+			typeof jobType !== 'string' ||
+			(kind === 'daily-summary-telegram' &&
+				jobType !== SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY) ||
+			(kind === 'database-backup' && !isDatabaseBackupJobType(jobType))
+		) {
+			throw new BadRequestException('Некорректный тип фонового задания');
+		}
+		return { id: payload.jobId, jobType };
 	}
 
 	private async reopenScheduledJob(
 		transaction: Prisma.TransactionClient,
 		jobId: string,
-		kind: MessagingKind
+		jobType: string
 	): Promise<void> {
-		const jobType =
-			kind === 'daily-summary-telegram'
-				? SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY
-				: SCHEDULED_JOB_TYPES.DATABASE_BACKUP;
 		const reopened = await transaction.scheduledJobRun.updateMany({
 			where: {
 				id: jobId,
@@ -1094,18 +1106,21 @@ export class MessagingAdminService {
 			jobId?: string;
 			jobType?: string;
 		};
-		const scheduledJobEntity =
-			jobPayload.jobType === 'DAILY_TELEGRAM_SUMMARY'
-				? {
-						id: jobPayload.jobId || item.eventId,
-						name: 'Ежедневная Telegram-сводка'
-					}
-				: jobPayload.jobType === 'DATABASE_BACKUP'
-					? {
-							id: jobPayload.jobId || item.eventId,
-							name: 'Backup PostgreSQL'
-						}
-					: null;
+		const scheduledJobName =
+			jobPayload.jobType === SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY
+				? 'Ежедневная Telegram-сводка'
+				: jobPayload.jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP
+					? 'Backup PostgreSQL'
+					: jobPayload.jobType ===
+						  SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP
+						? 'Backup PostgreSQL Notification Delivery'
+						: null;
+		const scheduledJobEntity = scheduledJobName
+			? {
+					id: jobPayload.jobId || item.eventId,
+					name: scheduledJobName
+				}
+			: null;
 		return {
 			id: item.id,
 			eventId: item.eventId,

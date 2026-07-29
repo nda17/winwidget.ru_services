@@ -16,6 +16,7 @@ rollout_verified=false
 previous_image_ref=""
 previous_image_id=""
 previous_revision=""
+previous_restart_count=""
 health_port=""
 
 compose_target() {
@@ -58,6 +59,7 @@ process.stdout.write("Standalone Notification Delivery image artifact verified\n
 verify_notification_delivery_worker() {
 	local expected_image_id="$1"
 	local expected_revision="$2"
+	local expected_restart_count="${3:-0}"
 	local attempt
 	local container_id
 	local health_status
@@ -101,7 +103,7 @@ verify_notification_delivery_worker() {
 
 					[[ "$image_id" == "$expected_image_id" ]] || return 1
 					[[ "$image_revision" == "$expected_revision" ]] || return 1
-					[[ "$restart_count" == "0" ]] || return 1
+					[[ "$restart_count" == "$expected_restart_count" ]] || return 1
 					return 0
 				fi
 			fi
@@ -744,6 +746,7 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend production env file was not found." >&2
@@ -922,14 +925,18 @@ validate_notification_database_urls() {
 	local parser_image="$1"
 	local runtime_url
 	local migration_url
+	local backup_url
 
 	runtime_url="$(get_env_value NOTIFICATION_DELIVERY_DATABASE_URL)"
 	migration_url="$(
 		get_env_value NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
 	)"
+	backup_url="$(get_env_value NOTIFICATION_DELIVERY_BACKUP_URL)"
 
-	if ! printf '%s\n%s\n' "$runtime_url" "$migration_url" |
+	if ! printf '%s\n%s\n%s\n' "$runtime_url" "$migration_url" "$backup_url" |
 		docker run --rm -i --network none \
+			-e "NOTIFICATION_DATABASE_CUTOVER_ACTIVE=$notification_database_cutover_active" \
+			-e "NOTIFICATION_DATABASE_TARGET_PORT=$(get_env_value NOTIFICATION_DELIVERY_POSTGRES_PORT)" \
 			--entrypoint node \
 			"$parser_image" \
 			-e '
@@ -943,7 +950,7 @@ const input = readFileSync(0, "utf8");
 const lines = input.endsWith("\n")
 	? input.slice(0, -1).split("\n")
 	: input.split("\n");
-if (lines.length !== 2 || lines.some(value => !value)) {
+if (lines.length !== 3 || lines.some(value => !value)) {
 	fail("Notification delivery PostgreSQL URLs are missing or contain a newline");
 }
 const parse = (value, label) => {
@@ -1019,15 +1026,54 @@ const migration = parse(
 	lines[1],
 	"NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION",
 );
-for (const key of ["protocol", "host", "port", "database", "ssl"]) {
-	if (runtime[key] !== migration[key]) {
+const backup = parse(lines[2], "NOTIFICATION_DELIVERY_BACKUP_URL");
+const targetPort = process.env.NOTIFICATION_DATABASE_TARGET_PORT;
+const cutoverActive =
+	process.env.NOTIFICATION_DATABASE_CUTOVER_ACTIVE === "true";
+const targetsCanonicalEndpoint =
+	runtime.host === "127.0.0.1" && runtime.port === targetPort;
+const targetsLocalEndpoint =
+	["127.0.0.1", "localhost", "[::1]"].includes(runtime.host) &&
+	runtime.port === targetPort;
+const targetsLocalDatabase =
+	targetsCanonicalEndpoint &&
+	runtime.database === "winwidget_notification_delivery";
+if (cutoverActive && !targetsLocalDatabase) {
+	fail(
+		"After database cutover, Notification delivery PostgreSQL URLs must target 127.0.0.1, the canonical port and database winwidget_notification_delivery",
+	);
+}
+if (
+	cutoverActive &&
+	runtime.ssl !== JSON.stringify([["sslmode", "disable"]])
+) {
+	fail(
+		"After database cutover, Notification delivery PostgreSQL URLs must contain exactly sslmode=disable",
+	);
+}
+if (
+	!cutoverActive &&
+	(
+		targetsLocalEndpoint ||
+		runtime.database === "winwidget_notification_delivery"
+	)
+) {
+	fail(
+		"The local Notification Delivery database cannot be selected before the durable database cutover marker",
+	);
+}
+for (const candidate of [migration, backup]) {
+	for (const key of ["protocol", "host", "port", "database", "ssl"]) {
+		if (runtime[key] === candidate[key]) continue;
 		fail(
-			"Notification delivery runtime and migration URLs must target the same protocol, host, port, database and SSL settings",
+			"Notification delivery runtime, migration and backup URLs must target the same protocol, host, port, database and SSL settings",
 		);
 	}
 }
-if (runtime.username === migration.username) {
-	fail("Notification delivery runtime and migration URLs must use distinct roles");
+if (new Set([runtime.username, migration.username, backup.username]).size !== 3) {
+	fail(
+		"Notification delivery runtime, migration and backup URLs must use distinct roles",
+	);
 }
 process.stdout.write("Notification delivery PostgreSQL URL structure validated\n");
 '; then
@@ -1068,6 +1114,12 @@ for key in \
 	COMPOSE_PROJECT_NAME \
 	NOTIFICATION_DELIVERY_DATABASE_URL \
 	NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION \
+	NOTIFICATION_DELIVERY_BACKUP_URL \
+	NOTIFICATION_DELIVERY_POSTGRES_IMAGE \
+	NOTIFICATION_DELIVERY_POSTGRES_PORT \
+	NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME \
+	NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER \
+	NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE \
 	RABBITMQ_NOTIFICATION_DELIVERY_URL \
 	RABBITMQ_INTEGRATION_WORKER_URL \
 	RABBITMQ_MANAGEMENT_URL \
@@ -1099,6 +1151,7 @@ if [[ "$(get_env_value COMPOSE_PROJECT_NAME)" != "winwidget" ]]; then
 	echo "Notification delivery rollout requires COMPOSE_PROJECT_NAME=winwidget." >&2
 	exit 1
 fi
+assert_notification_database_postgres_identity
 if [[ "$(get_env_value RABBITMQ_MANAGEMENT_URL)" != "http://127.0.0.1:15672" ]]; then
 	echo "RABBITMQ_MANAGEMENT_URL must use the loopback production endpoint." >&2
 	exit 1
@@ -1203,6 +1256,10 @@ export APP_VERSION="git-$deploy_revision"
 export NOTIFICATION_DELIVERY_REVISION="$deploy_revision"
 export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$deploy_revision"
 
+initialize_notification_database_lifecycle_guard \
+	false \
+	"a service-only rollout"
+
 compose_target \
 	--profile notification-delivery-migration \
 	config --quiet
@@ -1257,12 +1314,17 @@ previous_image_ref="$(
 previous_image_id="$(
 	docker inspect --format '{{ .Image }}' "$previous_container_id"
 )"
+previous_restart_count="$(
+	docker inspect --format '{{ .RestartCount }}' "$previous_container_id"
+)"
 previous_revision="$(
 	docker image inspect \
 		--format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
 		"$previous_image_id"
 )"
-if [[ -z "$previous_image_ref" || -z "$previous_image_id" ]]; then
+if [[ -z "$previous_image_ref" ||
+	-z "$previous_image_id" ||
+	! "$previous_restart_count" =~ ^[0-9]+$ ]]; then
 	echo "Previous notification delivery image could not be resolved." >&2
 	exit 1
 fi
@@ -1437,7 +1499,8 @@ if [[ "$notification_schema_changed" == "true" ||
 fi
 if ! verify_notification_delivery_worker \
 	"$previous_image_id" \
-	"$previous_revision"; then
+	"$previous_revision" \
+	"$previous_restart_count"; then
 	echo "Current notification delivery worker is not a healthy rollback target." >&2
 	exit 1
 fi
@@ -1463,7 +1526,7 @@ echo "Verifying the unchanged notification delivery schema before worker recreat
 verify_notification_delivery_migration_boundary
 compose_target \
 	--profile notification-delivery-migration \
-	run --rm notification-delivery-migrate \
+	run --rm --no-deps notification-delivery-migrate \
 	migrate status \
 	--schema prisma/schema.prisma
 verify_notification_delivery_runtime_crud
@@ -1494,5 +1557,8 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	sleep "$HEALTHCHECK_INTERVAL"
 done
 
+verify_notification_database_lifecycle_unchanged \
+	"the service-only rollout" \
+	"complete"
 rollout_verified=true
 echo "Notification delivery worker rollout verified for revision $deploy_revision."

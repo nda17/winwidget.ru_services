@@ -268,15 +268,20 @@ lifecycle-хуков процесса; API обрабатывает `SIGTERM` ч
 передаётся. Одноразовый `migrate` получает только
 `DATABASE_MIGRATION_URL_PRODUCTION`; runtime-роль API не используется для DDL.
 
-`notification-delivery-worker` владеет схемой PostgreSQL
-`notification_delivery` и использует отдельный Prisma Client. Для него
-обязательны две разные роли:
+`notification-delivery-worker` владеет отдельным PostgreSQL-контейнером,
+database `winwidget_notification_delivery`, схемой `notification_delivery` и
+собственным external data volume. Сейчас контейнер работает на том же backend
+VPS, но его database, роли, migrations и backup-контур принадлежат только
+Notification Delivery. Сервис использует отдельный Prisma Client и три разные
+роли:
 
 - migration-role из `NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION` владеет
   схемой и выполняет DDL только внутри неё, но не имеет database `CREATE`;
 - runtime-role из `NOTIFICATION_DELIVERY_DATABASE_URL` имеет только `CONNECT`,
   `USAGE`, DML на service-таблицах и доступ к их sequences. Она не должна иметь
-  `CREATE` на database/schema и не может изменять или удалять схему.
+  `CREATE` на database/schema и не может изменять или удалять схему;
+- backup-role из `NOTIFICATION_DELIVERY_BACKUP_URL` имеет только `CONNECT`,
+  schema `USAGE` и `SELECT` на всех service-таблицах/sequences.
 
 Первая migration автоматически отзывает у runtime/grantee доступ к служебной
 `notification_delivery._prisma_migrations`, сохраняя default CRUD grants только
@@ -292,20 +297,27 @@ NOTIFICATION_DELIVERY_DATABASE_URL="$NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCT
 ```
 
 Production compose отслеживается вместе с backend-кодом в
-`deploy/docker-compose.prod.yml`. Он запускает семь постоянных
-backend-контейнеров: `api-gateway`, `api`, `rabbitmq`, `outbox-publisher`,
-`integration-worker`, `notification-delivery-worker`, `maintenance-worker`.
+`deploy/docker-compose.prod.yml`. До database cutover он запускает семь
+постоянных backend-контейнеров: `api-gateway`, `api`, `rabbitmq`,
+`outbox-publisher`, `integration-worker`, `notification-delivery-worker`,
+`maintenance-worker`. После cutover восьмым постоянным контейнером становится
+`notification-delivery-postgres`.
 Notification Delivery и Maintenance собираются в отдельные immutable images,
 имеют loopback health endpoints на `4401` и `4300` и могут выкатываться
 независимо после первого baseline deploy. Контейнеры миграций запускаются
-только на время деплоя. PostgreSQL является внешней управляемой базой и в эти
-контейнеры не входит.
+только на время деплоя. Основная БД монолита пока остаётся управляемой
+облачной PostgreSQL. PostgreSQL Notification Delivery запускается только
+явным one-time database cutover через profile
+`notification-delivery-database`: обычные app deploy/rollback не создают, не
+останавливают и не пересоздают его, а также не удаляют external volume.
 Image Notification Delivery собирается только из
 `apps/notification-delivery`: в нём есть только собственные `dist`, Prisma
 schema/client и production dependencies — без `dist`, Prisma client, виджетов
 или production dependencies монолита.
 RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
-привязаны только к `127.0.0.1` backend VPS.
+привязаны только к `127.0.0.1` backend VPS. PostgreSQL Notification Delivery
+аналогично публикует `5432` только на `127.0.0.1:55432`; наружу VPS этот порт
+не открывается.
 
 ## RabbitMQ и transactional outbox
 
@@ -334,7 +346,9 @@ MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
 INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome
-NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://notification_delivery_runtime:<password>@127.0.0.1:5432/winwidget?schema=notification_delivery
+NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://notification_delivery_runtime:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://notification_delivery_migration:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+NOTIFICATION_DELIVERY_BACKUP_URL=postgresql://notification_delivery_backup:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
 NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
 NOTIFICATION_DELIVERY_LISTEN_HOST=127.0.0.1
 NOTIFICATION_DELIVERY_HEALTH_PORT=4401
@@ -354,8 +368,8 @@ hex-пароль: он не требует percent-encoding внутри URL.
 openssl rand -hex 32
 ```
 
-В production используются отдельные service accounts и verified external
-volume. Полный preflight и permissions runbook находится в
+В production используются отдельные service accounts, локальный loopback-порт
+и verified external volume. Полный preflight и permissions runbook находится в
 `deploy/backend/README.md`. Минимальный набор в
 `/opt/winwidget/deploy/backend/.env.production`:
 
@@ -391,8 +405,14 @@ MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
 INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome
-NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://winwidget_notification_delivery_migration:<password>@<db-host>:5432/<database>?schema=notification_delivery
-NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://winwidget_notification_delivery_runtime:<password>@<db-host>:5432/<database>?schema=notification_delivery
+NOTIFICATION_DELIVERY_POSTGRES_IMAGE=postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+NOTIFICATION_DELIVERY_POSTGRES_PORT=55432
+NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME=winwidget-notification-delivery-postgres-data
+NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER=winwidget_notification_delivery_admin
+NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE=/opt/winwidget/deploy/backend/.notification-delivery-postgres-admin-password
+NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://winwidget_notification_delivery_migration:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://winwidget_notification_delivery_runtime:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+NOTIFICATION_DELIVERY_BACKUP_URL=postgresql://winwidget_notification_delivery_backup:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
 NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
 NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram
 NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS=90
@@ -402,9 +422,19 @@ MAILING_EMAIL_RATE_PER_SECOND=5
 MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
-Оба Notification Delivery URL должны указывать на одинаковые protocol, host,
-port, database и SSL-параметры; различаются только login/password. Проверенные
-SSL query-параметры добавляются в оба URL одновременно.
+Все три Notification Delivery URL должны указывать на одинаковые protocol,
+host, port, database и SSL-параметры; различаются только login/password.
+После cutover они обязаны использовать
+`127.0.0.1:55432/winwidget_notification_delivery` и ровно
+`sslmode=disable`, потому что соединение не выходит за пределы VPS. До cutover
+скрипт принимает текущие три URL облачной source database и атомарно заменяет
+их target-значениями.
+
+Production source проверена как PostgreSQL 18 с locale identity
+`UTF8/libc/C.UTF-8`. Поэтому target использует PostgreSQL 18 Bookworm по
+immutable multi-arch digest и создаётся с той же locale; несовпадение major,
+encoding, provider, `LC_COLLATE` или `LC_CTYPE` fail-closed останавливает
+cutover.
 
 Production deploy завершается до изменения runtime, если service credentials,
 verified volume или полный точный список consumers не заданы. Additive
@@ -546,37 +576,54 @@ Telegram и PostgreSQL.
 
 ### Backup PostgreSQL
 
-Плановый и ручной backup сначала создают durable-задание в PostgreSQL и
-Outbox-событие. API только ставит ручной запуск в очередь и не выполняет
+Для основной БД (`core`) и БД Notification Delivery
+(`notification-delivery`) создаются независимые durable-задания:
+`DATABASE_BACKUP` и `NOTIFICATION_DELIVERY_DATABASE_BACKUP`. Плановый backup
+основной БД запускается в настроенное время, а Notification Delivery — через
+15 минут, чтобы два `pg_dump` не конкурировали за CPU, disk I/O и Telegram
+upload. Оба результата отправляются отдельными документами в настроенную
+Telegram-тему вне VPS.
+
+Плановый и ручной backup сначала создают durable-задание в основной PostgreSQL
+и Outbox-событие. API только ставит ручной запуск в очередь и не выполняет
 `pg_dump` внутри HTTP-запроса. Отдельный `maintenance-worker` получает ID
 задания из `winwidget.maintenance.database-backup`, атомарно захватывает его
 через CAS и продлевает lease во время длительной работы. RabbitMQ не содержит
 файл backup или секреты подключения. В production временный dump создаётся в
 отдельном `tmpfs` maintenance-контейнера с лимитом 64 МБ и удаляется в
-`finally`; максимальный размер отправляемого файла ограничен 49 МБ.
-В production `DATABASE_BACKUP_URL` обязателен и должен принадлежать отдельной
-read-only роли на direct endpoint: `pg_dump` не должен идти через transaction
-pooler. Пароль удаляется из аргументов процесса и передаётся `pg_dump` только
-через `PGPASSWORD`; Prisma-only параметры подключения удаляются.
+`finally`; максимальный размер каждого отправляемого файла ограничен 49 МБ.
 
-Контракт ручного запуска изменён намеренно: endpoint возвращает принятое в
-очередь задание, а не готовый файл. Совместимость со старым синхронным ответом
-не сохраняется. `POST /api/v1/telegram-bot/admin/database-backup/send` требует
-заголовок `Idempotency-Key` с UUID. Ключ сохраняется в детерминированном
-`scheduleKey` вместе с ID администратора и в отдельной таблице соответствий
+В production обязательны два независимых read-only подключения на прямые
+PostgreSQL endpoints:
+
+- `DATABASE_BACKUP_URL` — основная БД;
+- `NOTIFICATION_DELIVERY_BACKUP_URL` — отдельный PostgreSQL-контейнер
+  Notification Delivery.
+
+`pg_dump` не должен идти через transaction pooler. Пароль удаляется из
+аргументов процесса и передаётся `pg_dump` только через `PGPASSWORD`;
+Prisma-only параметры подключения удаляются.
+
+Контракт ручного запуска возвращает принятое в очередь задание, а не готовый
+файл. Для каждого target используется
+`POST /api/v1/telegram-bot/admin/database-backups/:target/send`, где `target` —
+`core` или `notification-delivery`; запрос требует заголовок
+`Idempotency-Key` с UUID. Ключ сохраняется в детерминированном `scheduleKey`
+вместе с ID администратора и target, а также в отдельной таблице соответствий
 `adminId + jobType + idempotencyKey → jobId`. Поэтому повтор HTTP-запроса
 возвращает тот же job даже после его завершения и не создаёт второй Outbox или
-audit event. Если у этого администратора уже есть активный ручной backup, новый
-ключ атомарно связывается с текущим job; новый job появляется только после
-завершения активного. FK с `ON DELETE RESTRICT` защищает соответствие от
-случайного удаления job. Проверка и создание защищены коротким
-transaction-scoped advisory lock только на команду данного администратора;
-этот lock завершается до `pg_dump`.
+audit event. Если у этого администратора уже есть активный ручной backup того
+же target, новый ключ атомарно связывается с текущим job; новый job появляется
+только после завершения активного. FK с `ON DELETE RESTRICT` защищает
+соответствие от случайного удаления job. Проверка и создание защищены коротким
+transaction-scoped advisory lock только на команду данного администратора и
+target; этот lock завершается до `pg_dump`.
 
-Интерфейс ручного запуска и polling расположен на странице
-`/admin/databases`. Админка восстанавливает polling после reload через
-`GET /api/v1/telegram-bot/admin/database-backup/jobs/active` и локальный marker.
-Endpoint и получение конкретного ручного job проверяют
+Интерфейс ручного запуска и polling обоих targets расположен на странице
+`/admin/databases`. Для каждого target есть отдельная кнопка и независимый
+статус. Админка восстанавливает polling после reload через
+`GET /api/v1/telegram-bot/admin/database-backups/:target/jobs/active` и
+локальный marker. Endpoint и получение конкретного ручного job проверяют
 `input.requestedByAdminId`, поэтому один администратор не получает состояние
 чужого запуска.
 
@@ -585,7 +632,12 @@ Endpoint и получение конкретного ручного job про�
 получается через `GET /api/v1/dev-tools/database-backup/restore-settings` и больше
 не входит в настройки Telegram-бота. Поэтому DEV-блок страницы «Базы данных»
 не зависит от загрузки Telegram settings; ограничение файла 49 МБ, проверка
-формата `.dump` и audit event восстановления сохранены.
+формата `.dump` и audit event восстановления сохранены. До destructive
+`pg_restore --clean` сервер читает TOC: требует схему `public` и fail-closed
+отклоняет dump со схемой `notification_delivery`.
+Проверка TOC не подтверждает происхождение произвольного архива со схемой
+`public`: перед запуском DEV обязан проверить, что выбран актуальный core dump
+WinWidget из доверенного backup-контура.
 
 Для Telegram-документа действует тот же `at-least-once` предел: авария после
 успешной загрузки файла, но до фиксации результата job может привести к
@@ -618,11 +670,13 @@ lease, а короткие идемпотентные очистки остаю�
 Транзакция и advisory lock не удерживаются во время `pg_dump` или сетевой
 отправки.
 
-Telegram-копия backup является дополнительным операционным каналом. Основной
-защитой production-данных должны оставаться проверяемые backup и point-in-time
-recovery управляемой PostgreSQL с шифрованием и retention. Восстановление базы
-не выполняется worker автоматически: это отдельная защищённая операция по
-runbook.
+На текущем бюджетном single-VPS этапе два Telegram-документа приняты как
+off-VPS защита: потеря VPS вместе с Docker volumes не уничтожает единственную
+копию dump. Эта схема не даёт PITR, имеет жёсткий лимит 49 МБ на файл и требует
+регулярного restore drill. При росте данных или требований к RPO/RTO backups
+нужно перенести в зашифрованное versioned object storage и отдельно внедрить
+WAL/PITR либо managed PostgreSQL. Восстановление базы не выполняется worker
+автоматически: это отдельная защищённая операция по runbook.
 
 Напоминания об окончании подписки пока остаются в существующем scheduler:
 у них уже есть PostgreSQL-дедупликация. Остальные отчёты и административные
@@ -996,9 +1050,10 @@ pnpm dev
 
 Для полного локального messaging-контура сначала:
 
-1. создайте схему `notification_delivery`, отдельные migration/runtime роли и
-   выдайте runtime-роли только `CONNECT`, schema `USAGE`, DML и sequence
-   privileges;
+1. создайте database `winwidget_notification_delivery`, схему
+   `notification_delivery` и отдельные migration/runtime/backup роли;
+   runtime выдайте только `CONNECT`, schema `USAGE`, DML и sequence privileges,
+   backup — только `CONNECT`, `USAGE` и `SELECT`;
 2. примените service migration через migration-role;
 3. запустите RabbitMQ с пользователем и vhost из `.env`;
 4. соберите NestJS и запустите процессы в отдельных терминалах.
@@ -1356,8 +1411,15 @@ Dockerfile монолита и публикует health только на `127.
 
 Workflow `.github/workflows/deploy-production.yml` запускается вручную или при
 push в ветку `prod`. Push выполняет полный deploy. Ручной запуск позволяет
-выбрать `all`, `maintenance` либо `notification-delivery`; два последних
-варианта используют изолированный rollout с возвратом exact previous image.
+выбрать `all`, `maintenance`, `notification-delivery` либо одноразовый
+`notification-delivery-database-cutover`. Maintenance и Notification Delivery
+используют изолированный rollout с возвратом exact previous image. Database
+cutover разрешён только вручную из защищённой ветки `prod` и проходит в два
+явных запуска. Первый переносит данные и останавливается в фазе
+`forward_only`; после полного deploy и двух подтверждённых Telegram-backups
+повторный запуск удаляет исходную service schema и переводит marker в
+`complete`. После forward boundary recovery выполняется только вперёд на новой
+database.
 
 Verify выполняет:
 
@@ -1365,9 +1427,11 @@ Verify выполняет:
 pnpm install --frozen-lockfile
 pnpm --dir apps/notification-delivery install --frozen-lockfile
 pnpm exec prisma generate
-create migration/runtime Notification Delivery DB roles
+create isolated Notification Delivery database and migration/runtime/backup roles
 pnpm exec prisma migrate deploy
 NOTIFICATION_DELIVERY_DATABASE_URL=<migration-role-url> pnpm --dir apps/notification-delivery run prisma:migrate:deploy
+recreate isolated Notification Delivery PostgreSQL and verify volume/system identifier/sentinel
+pg_dump with backup role -> clean scratch pg_restore -> compare migrations/tables/rows/sequences
 curl ... "$RABBITMQ_MANAGEMENT_URL/api/overview"
 pnpm exec tsc --noEmit --incremental false -p tsconfig.build.json
 pnpm exec jest --runInBand
@@ -1386,12 +1450,15 @@ pnpm run test:messaging-integration
 pnpm --dir apps/notification-delivery run test:integration
 ```
 
-Semantic compose validation проверяет точный набор семи постоянных сервисов,
-отдельные API/Gateway/Maintenance/Notification Delivery images и revisions,
-автономный Docker context Notification Delivery без target/image монолита,
-команды оставшихся worker-процессов, точные consumer kinds, а отдельная
-contract-boundary проверка сравнивает producer/consumer routing keys и queue
-names без общей source-зависимости. Также проверяются обе пары
+Semantic compose validation проверяет семь постоянных app/broker-сервисов
+обычного profile и отдельный profile
+`notification-delivery-database` с PostgreSQL-контейнером и external volume.
+Также проверяются отдельные API/Gateway/Maintenance/Notification Delivery
+images и revisions, автономный Docker context Notification Delivery без
+target/image монолита, команды оставшихся worker-процессов, точные consumer
+kinds, обе backup-цели, а отдельная contract-boundary проверка сравнивает
+producer/consumer routing keys и queue names без общей source-зависимости.
+Дополнительно проверяются обе пары
 `INTEGRATION_*`/`NOTIFICATION_DELIVERY_*` retention-настроек, healthchecks и
 ограниченный `tmpfs` maintenance worker.
 
@@ -1423,14 +1490,15 @@ names без общей source-зависимости. Также проверя
 10. при ошибке выводит последние логи и процессы, занимающие порты
     `4100/4200/4300/4401`.
 
-Первый переход всегда выполняется target `all`. До создания durable cutover
-marker скрипт восстанавливает прежние exact containers только когда пустота
-moved queues и service-owned state доказана повторно. Неоднозначное состояние
-останавливает recovery fail-closed без запуска двух владельцев одних очередей.
-Marker создаётся после readiness, authenticated control API и Rabbit ownership
-smoke изолированного forward-контура, но до запуска producer и публичного
-Gateway. Target `notification-delivery` разрешён только после этого baseline и
-не применяется для первого перехода.
+Первый provider cutover Notification Delivery всегда выполняется target `all`.
+До создания durable provider marker скрипт восстанавливает прежние exact
+containers только когда пустота moved queues и service-owned state доказана
+повторно. Неоднозначное состояние останавливает recovery fail-closed без
+запуска двух владельцев одних очередей. Provider marker создаётся после
+readiness, authenticated control API и Rabbit ownership smoke изолированного
+forward-контура, но до запуска producer и публичного Gateway. Target
+`notification-delivery` разрешён только после этого baseline и не применяется
+для первого provider cutover. Отдельный database cutover описан ниже.
 
 Production flow:
 
@@ -1443,6 +1511,59 @@ Production flow:
 -> API healthcheck
 -> production smoke-test
 ```
+
+### One-time database cutover Notification Delivery
+
+Cutover выполняется отдельно от обычного rollout и только после merge нужного
+SHA в защищённую ветку `prod`:
+
+1. Запустить обычный target `all` для этого SHA и дождаться успешных verify,
+   migrations, rollout и production healthchecks. Cutover откажется работать,
+   если `api`, `maintenance-worker` или `notification-delivery-worker` не
+   запущены в проверенной revision.
+2. В GitHub Actions вручную выбрать ветку `prod` и target
+   `notification-delivery-database-cutover`. Первый запуск создаст отдельный
+   PostgreSQL-контейнер, database, роли и persistent external volume на текущем
+   VPS, перенесёт данные, переключит URLs и worker на новую БД и сохранит
+   marker в фазе `forward_only`. Marker привязывает source к нормализованному
+   endpoint fingerprint, PostgreSQL system identifier и OID базы. После
+   подтверждения target health и точного RabbitMQ queue ownership доступ
+   service-ролей к source отзывается сразу; сама исходная схема сохраняется
+   только до финального запуска.
+3. Проверить readiness Notification Delivery, RabbitMQ ownership и
+   функциональную доставку email/Telegram. После первой записи в новую БД
+   возврат к исходной схеме запрещён; исправления выполняются только
+   forward-recovery.
+4. Ещё раз запустить target `all` из той же актуальной `prod`. Полный deploy
+   проверит fingerprint PostgreSQL-контейнера и volume, применит service-owned
+   migrations и подтвердит, что `maintenance-worker` видит обе независимые
+   backup-цели. PostgreSQL-контейнер и volume при этом не пересоздаются и не
+   останавливаются.
+5. Открыть `/admin/databases`, по отдельности запустить ручной backup `core` и
+   `notification-delivery`, дождаться `SUCCEEDED` и убедиться, что в Telegram
+   пришли два непустых `.dump`-документа. Эти backups должны быть созданы после
+   перехода marker в `forward_only`.
+6. Повторно вручную запустить
+   `notification-delivery-database-cutover` из `prod`. Скрипт проверит
+   readiness, текущий target backup URL и наличие обоих успешных post-cutover
+   Telegram-backups, повторно сверит frozen schema/data checksums, удалит
+   точный набор service-owned объектов через `RESTRICT`, отключит dedicated
+   source-роли и только затем переведёт marker в `complete`.
+7. Выполнить финальный smoke и убедиться, что marker содержит одновременно
+   `phase=complete` и `source_schema_state=dropped`. После первой записи в
+   target и удаления source schema rollback выполняется только вперёд на новой
+   БД или из проверенного off-VPS backup.
+
+Обычные targets `all`, `maintenance` и `notification-delivery` не управляют
+lifecycle PostgreSQL Notification Delivery: не создают, не останавливают, не
+пересоздают контейнер и не удаляют external volume. Эти операции разрешены
+только явному database cutover/runbook.
+
+На production VPS запрещено выполнять `docker compose down`,
+`docker compose down -v` и
+`docker volume rm winwidget-notification-delivery-postgres-data`. Для
+rollout/recovery используются только versioned deploy/cutover scripts; routine
+deploy не управляет lifecycle service database.
 
 Связанные файлы:
 

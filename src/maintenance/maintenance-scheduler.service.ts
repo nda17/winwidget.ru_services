@@ -76,13 +76,18 @@ export class MaintenanceSchedulerService
 			}
 
 			if (this.isDue(now, settings.databaseBackupTime, '01:45')) {
-				const backup = await this.tasks.enqueueDailyDatabaseBackup(
+				const backups = await this.tasks.enqueueDailyDatabaseBackups(
 					period,
 					this.getScheduledFor(now, settings.databaseBackupTime, '01:45')
 				);
-				if (backup?.created) {
+				if (backups?.core.created) {
 					this.logger.log(
-						`Daily database backup scheduled period=${period.key} jobId=${backup.job.id}`
+						`Daily core database backup scheduled period=${period.key} jobId=${backups.core.job.id}`
+					);
+				}
+				if (backups?.notificationDelivery.created) {
+					this.logger.log(
+						`Daily Notification Delivery database backup scheduled period=${period.key} jobId=${backups.notificationDelivery.job.id}`
 					);
 				}
 			}

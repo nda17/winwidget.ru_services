@@ -181,10 +181,71 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 		);
 	});
 
+	it('publishes a strictly validated notification delivery outcome', async () => {
+		const { service, prisma, rabbitMq } = createService();
+		const outcome = {
+			...event,
+			messageId: '44444444-4444-4444-8444-444444444444',
+			eventType: 'notification.delivery.outcome.v1',
+			routingKey: 'notification.delivery.outcome.v1',
+			payload: {
+				schemaVersion: 1,
+				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: event.messageId,
+				sourceKind: 'daily-summary-delivery-telegram',
+				reference: {
+					type: 'daily-summary-job',
+					id: event.messageId
+				},
+				status: 'DELIVERED',
+				failure: null,
+				occurredAt: '2026-07-29T00:31:18.176Z'
+			}
+		};
+
+		await (service as any).publish(outcome);
+
+		expect(rabbitMq.publishOutboxMessage).toHaveBeenCalledWith(
+			'winwidget.events',
+			'notification.delivery.outcome.v1',
+			outcome.payload,
+			expect.objectContaining({
+				messageId: outcome.messageId,
+				type: outcome.eventType
+			})
+		);
+		expect(
+			prisma.notificationDeliveryOutboxEvent.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: NotificationDeliveryOutboxStatus.PUBLISHED,
+					lastError: null
+				})
+			})
+		);
+	});
+
 	it.each([
 		{
 			label: 'a route owned by the legacy worker',
 			overrides: { routingKey: 'manual.webhook' },
+			reason: 'INVALID_NOTIFICATION_DELIVERY_ROUTE'
+		},
+		{
+			label: 'an outcome routing key with a mismatched event type',
+			overrides: {
+				routingKey: 'notification.delivery.outcome.v1'
+			},
+			reason: 'INVALID_NOTIFICATION_DELIVERY_ROUTE'
+		},
+		{
+			label: 'a notification delivery outcome on the dead-letter exchange',
+			overrides: {
+				exchange: NotificationDeliveryExchange.DEAD_LETTER,
+				eventType: 'notification.delivery.outcome.v1',
+				routingKey: 'notification.delivery.outcome.v1'
+			},
 			reason: 'INVALID_NOTIFICATION_DELIVERY_ROUTE'
 		},
 		{
@@ -194,6 +255,18 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 				routingKey: 'email.dead-letter.extra'
 			},
 			reason: 'INVALID_NOTIFICATION_DELIVERY_ROUTE'
+		},
+		{
+			label: 'an invalid notification delivery outcome contract',
+			overrides: {
+				eventType: 'notification.delivery.outcome.v1',
+				routingKey: 'notification.delivery.outcome.v1',
+				payload: {
+					schemaVersion: 1,
+					eventType: 'notification.delivery.outcome.v1'
+				}
+			},
+			reason: 'INVALID_NOTIFICATION_DELIVERY_CONTRACT'
 		},
 		{
 			label: 'an invalid owned event contract',
