@@ -111,6 +111,12 @@
 		(window.winwidget && window.winwidget.autoOpen)
 	);
 
+	function getWidgetFetchOptions(options) {
+		var next = options || {};
+		if (AUTO_OPEN) next.referrerPolicy = 'unsafe-url';
+		return next;
+	}
+
 	function safeText(value, fallback) {
 		return value == null || value === '' ? fallback : String(value);
 	}
@@ -481,7 +487,7 @@
 		submitBtn.disabled = true;
 		fetch(
 			API_BASE + '/online-consultant/' + encodeURIComponent(KEY) + '/lead',
-			{
+			getWidgetFetchOptions({
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
@@ -492,7 +498,7 @@
 					actionValue: selectedAction.answer || '',
 					url: location.href
 				})
-			}
+			})
 		)
 			.then(function (response) {
 				if (!response.ok) {
@@ -572,7 +578,7 @@
 			encodeURIComponent(KEY) +
 			'/config?_=' +
 			Date.now(),
-		AUTO_OPEN ? { referrerPolicy: 'unsafe-url' } : undefined
+		getWidgetFetchOptions()
 	)
 		.then(function (response) {
 			if (!response.ok) {

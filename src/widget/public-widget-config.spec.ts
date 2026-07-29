@@ -65,7 +65,10 @@ function collectKeys(
 }
 
 describe('public widget config projections', () => {
-	const createCases = (recordOverrides: Record<string, unknown> = {}) => {
+	const createCases = (
+		recordOverrides: Record<string, unknown> = {},
+		subscriptionOverrides: Record<string, unknown> = {}
+	) => {
 		const record = {
 			id: 'widget-id',
 			userId: 'user-id',
@@ -76,6 +79,7 @@ describe('public widget config projections', () => {
 			publishedAt: new Date('2026-07-27T12:00:00.000Z'),
 			publishedVersion: 1,
 			config: {
+				dataType: 'PHONE',
 				integrations: {
 					...SECRET_INTEGRATION_VALUES,
 					yandexMetrikaId: '123456',
@@ -100,7 +104,8 @@ describe('public widget config projections', () => {
 			checkAndResetPeriod: jest.fn().mockResolvedValue({
 				status: SubscriptionStatus.ACTIVE,
 				plan: Plan.HARD,
-				leadsThisPeriod: 0
+				leadsThisPeriod: 0,
+				...subscriptionOverrides
 			})
 		};
 		const fileService = {
@@ -229,6 +234,28 @@ describe('public widget config projections', () => {
 
 	it.each(createCases({ publishedAt: null, publishedVersion: 0 }))(
 		'$name stays inactive before its first publication',
+		async ({ load }) => {
+			await expect(load()).resolves.toEqual({ isActive: false });
+		}
+	);
+
+	it.each(createCases({}, { status: SubscriptionStatus.EXPIRED }))(
+		'$name stays inactive on its direct page after subscription expiry',
+		async ({ load }) => {
+			await expect(load()).resolves.toEqual({ isActive: false });
+		}
+	);
+
+	it.each(
+		createCases(
+			{},
+			{
+				plan: Plan.TRIAL,
+				leadsThisPeriod: 10
+			}
+		)
+	)(
+		'$name stays inactive on its direct page after reaching the lead limit',
 		async ({ load }) => {
 			await expect(load()).resolves.toEqual({ isActive: false });
 		}

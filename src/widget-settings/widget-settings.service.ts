@@ -372,9 +372,10 @@ export class WidgetSettingsService {
 			this.appendConfigurationReadiness(type, configRecord, blockers);
 		}
 		if (!installDomain) {
-			blockers.push({
+			warnings.push({
 				code: 'INSTALL_DOMAIN_REQUIRED',
-				message: 'Укажите домен установки виджета'
+				message:
+					'Домен не указан — виджет будет работать только по прямой ссылке'
 			});
 		}
 		if ((entity.publishedVersion ?? 0) === 0) {

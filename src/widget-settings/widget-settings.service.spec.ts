@@ -412,6 +412,81 @@ describe('WidgetSettingsService', () => {
 		}
 	);
 
+	it.each(WIDGET_CASES)(
+		'allows the first $slug publication without an install domain',
+		async ({ type, delegate }) => {
+			const fixture = createFixture();
+			fixture.setEntity({
+				...createEntity(),
+				installDomain: '',
+				draftInstallDomain: '',
+				publishedVersion: 0,
+				publishedFromDraftRevision: 0
+			});
+
+			const draftState = await fixture.service.getState(
+				type,
+				'widget-id',
+				'user-id'
+			);
+
+			expect(draftState.readiness).toMatchObject({
+				ready: true,
+				blockers: [],
+				warnings: expect.arrayContaining([
+					expect.objectContaining({
+						code: 'INSTALL_DOMAIN_REQUIRED'
+					}),
+					expect.objectContaining({ code: 'NOT_PUBLISHED' })
+				])
+			});
+
+			const publishedState = await fixture.service.publish(
+				type,
+				'widget-id',
+				'user-id',
+				2
+			);
+
+			expect(fixture.widgetConfigRevision.create).toHaveBeenCalledWith({
+				data: expect.objectContaining({
+					widgetType: type,
+					widgetId: 'widget-id',
+					version: 1,
+					installDomain: ''
+				})
+			});
+			expect(fixture.prisma[delegate].updateMany).toHaveBeenCalledWith(
+				expect.objectContaining({
+					where: expect.objectContaining({
+						draftRevision: 2,
+						publishedVersion: 0
+					}),
+					data: expect.objectContaining({
+						installDomain: '',
+						publishedVersion: 1
+					})
+				})
+			);
+			expect(publishedState).toMatchObject({
+				installDomain: '',
+				publishedVersion: 1,
+				publishedFromDraftRevision: 2,
+				status: 'PUBLISHED',
+				hasUnpublishedChanges: false,
+				readiness: {
+					ready: true,
+					blockers: [],
+					warnings: expect.arrayContaining([
+						expect.objectContaining({
+							code: 'INSTALL_DOMAIN_REQUIRED'
+						})
+					])
+				}
+			});
+		}
+	);
+
 	it.each([
 		{
 			type: WidgetType.WHEEL,

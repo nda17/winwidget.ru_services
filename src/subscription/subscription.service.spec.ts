@@ -110,6 +110,19 @@ describe('SubscriptionService atomic limits', () => {
 		expect(transaction.subscription.update).not.toHaveBeenCalled();
 	});
 
+	it('не создаёт заявку при неактивном статусе подписки', async () => {
+		subscription = createSubscription({
+			status: SubscriptionStatus.CANCELLED
+		});
+		const createLead = jest.fn();
+
+		await expect(
+			service.createLeadWithinLimit(subscription.userId, createLead)
+		).rejects.toBeInstanceOf(ForbiddenException);
+		expect(createLead).not.toHaveBeenCalled();
+		expect(transaction.subscription.update).not.toHaveBeenCalled();
+	});
+
 	it('учитывает заявки unlimited-тарифа без сигнала о лимите', async () => {
 		subscription = createSubscription({
 			plan: Plan.HARD,

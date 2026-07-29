@@ -12,7 +12,6 @@ type AdminAlertType =
 	| 'SUCCEEDED_PAYMENT_WITHOUT_ACCESS'
 	| 'MULTIPLE_PENDING_PAYMENTS'
 	| 'ACTIVE_WIDGET_WITHOUT_ACCESS'
-	| 'ACTIVE_WIDGET_WITHOUT_DOMAIN'
 	| 'WIDGET_DOMAIN_CONFLICT'
 	| 'WIDGET_INVALID_DOMAIN'
 	| 'INTEGRATION_PROBLEM'
@@ -285,22 +284,6 @@ export class AdminAlertsService {
 			UNION ALL
 
 			SELECT
-				'ACTIVE_WIDGET_WITHOUT_DOMAIN'::text AS alert_type,
-				'MEDIUM'::text AS severity,
-				w.id AS reference_id,
-				${userFieldsSql},
-				'Активный виджет без домена установки'::text AS title,
-				concat(w.widget_label, ' "', w.name, '" активен, но домен установки не задан') AS message,
-				w.updated_at AS alert_at
-			FROM (${widgetsSql}) w
-			JOIN "User" u ON u.id = w.user_id
-			${userIdentityJoinsSql}
-			WHERE w.is_active = true
-				AND btrim(w.install_domain) = ''
-
-			UNION ALL
-
-			SELECT
 				'WIDGET_DOMAIN_CONFLICT'::text AS alert_type,
 				'HIGH'::text AS severity,
 				w.id AS reference_id,
@@ -564,7 +547,6 @@ export class AdminAlertsService {
 			'SUCCEEDED_PAYMENT_WITHOUT_ACCESS',
 			'MULTIPLE_PENDING_PAYMENTS',
 			'ACTIVE_WIDGET_WITHOUT_ACCESS',
-			'ACTIVE_WIDGET_WITHOUT_DOMAIN',
 			'WIDGET_DOMAIN_CONFLICT',
 			'WIDGET_INVALID_DOMAIN',
 			'INTEGRATION_PROBLEM',
