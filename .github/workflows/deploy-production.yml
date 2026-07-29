@@ -73,7 +73,6 @@ jobs:
       NOTIFICATION_DELIVERY_BACKUP_URL: postgresql://notification_delivery_backup:notification_delivery_backup_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
       NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER: winwidget-notification-delivery-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME: winwidget-notification-delivery-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
-      NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
       NOTIFICATION_DELIVERY_INTERNAL_URL: http://127.0.0.1:4401/internal/notification-delivery
       NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ci_notification_delivery_internal_token_at_least_32_chars
       NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS: 5000
@@ -127,6 +126,8 @@ jobs:
           pnpm --dir apps/notification-delivery install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
+        env:
+          NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           test ! -e "$NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE"
           umask 077
@@ -546,6 +547,7 @@ jobs:
 
       - name: Verify Notification Delivery PostgreSQL persistence and restore
         env:
+          NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
           POSTGRES_CONTAINER_ID: ${{ env.NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER }}
         run: |
           sentinel_id=00000000-0000-4000-8000-000000000001
@@ -1895,6 +1897,8 @@ jobs:
 
       - name: Cleanup isolated Notification Delivery PostgreSQL
         if: ${{ always() }}
+        env:
+          NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           cleanup_failed=false
 
