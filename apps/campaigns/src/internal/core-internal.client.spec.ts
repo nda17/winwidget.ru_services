@@ -1,15 +1,21 @@
 import { CoreInternalClient } from './core-internal.client';
-import { ConfigService } from '@nestjs/config';
 import { ServiceUnavailableException } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
 
 const TOKEN = 'campaigns-test-token-at-least-32-characters';
+
+function createConfig(values: Record<string, string>) {
+	return {
+		get: jest.fn((key: string) => values[key])
+	} as unknown as ConfigService;
+}
 
 function createClient(
 	overrides: Record<string, string> = {},
 	runtime = { apiEnabled: true, workerEnabled: false }
 ) {
 	return new CoreInternalClient(
-		new ConfigService({
+		createConfig({
 			CAMPAIGNS_INTERNAL_TOKEN: TOKEN,
 			CAMPAIGNS_CORE_INTERNAL_BASE_URL: 'http://127.0.0.1:4200',
 			...overrides
@@ -48,14 +54,11 @@ describe('CoreInternalClient hardening', () => {
 	});
 
 	it('does not require an internal token in publisher-only role', () => {
-		expect(
-			() =>
-				new CoreInternalClient(
-					new ConfigService({
-						CAMPAIGNS_CORE_INTERNAL_BASE_URL: 'http://127.0.0.1:4200'
-					}),
-					{ apiEnabled: false, workerEnabled: false } as never
-				)
+		expect(() =>
+			createClient(
+				{ CAMPAIGNS_INTERNAL_TOKEN: '' },
+				{ apiEnabled: false, workerEnabled: false }
+			)
 		).not.toThrow();
 	});
 

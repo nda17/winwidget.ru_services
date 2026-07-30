@@ -1561,8 +1561,8 @@ lifecycle marker выполняет только verify и staged-only checkout:
 image, не применяет migrations, не перезапускает контейнеры и не запускает
 порт `4500`. Ручной запуск позволяет выбрать `all`, `maintenance`,
 `notification-delivery`,
-`notification-delivery-database-cutover`, `campaigns` либо
-`campaigns-database-cutover`. Maintenance, Notification Delivery и routine
+`notification-delivery-database`, `campaigns` либо
+`campaigns-database`. Maintenance, Notification Delivery и routine
 Campaigns используют изолированный rollout с возвратом exact previous image.
 Database cutover разрешён только вручную из защищённой ветки `prod` и проходит
 явными фазами соответствующего runbook. После forward boundary recovery
@@ -1590,8 +1590,8 @@ prepare → frontend → production smoke → Telegram audit (completed)
 3. Заморозить backend deploy/campaign writes, проверить очереди и получить
    off-VPS backups core и Notification Delivery.
 4. Вручную запустить из `prod`
-   `deploy_target=campaigns-database-cutover`,
-   `campaigns_cutover_action=prepare`. Успех означает marker
+   `deploy_target=campaigns-database`,
+   `campaigns_database_action=prepare`. Успех означает marker
    `phase=switched`, а legacy source ещё сохранён. Backend prepare переключает
    backend/Gateway/RabbitMQ contour, но не деплоит frontend. Перед публикацией
    нового runtime marker находится в recoverable `phase=switching`: после
@@ -1628,7 +1628,7 @@ prepare → frontend → production smoke → Telegram audit (completed)
    `switch-generation:<N>:<reviewable-id>@sha256:<64-hex>` для того же
    generation.
 8. Явно подтвердить необратимую операцию ручным workflow input
-   `campaigns_cutover_action=finalize` и approval защищённого GitHub
+   `campaigns_database_action=finalize` и approval защищённого GitHub
    `production` environment; отдельного технического gate/secret нет. Finalize
    удаляет legacy SQL tables/enums/FK migration-ролью, а точные legacy RabbitMQ
    queues — отдельной RabbitMQ-операцией после проверки отсутствия
@@ -1760,7 +1760,7 @@ SHA в защищённую ветку `prod`:
    если `api`, `maintenance-worker` или `notification-delivery-worker` не
    запущены в проверенной revision.
 2. В GitHub Actions вручную выбрать ветку `prod` и target
-   `notification-delivery-database-cutover`. Первый запуск создаст отдельный
+   `notification-delivery-database`. Первый запуск создаст отдельный
    PostgreSQL-контейнер, database, роли и persistent external volume на текущем
    VPS, перенесёт данные, переключит URLs и worker на новую БД и сохранит
    marker в фазе `forward_only`. Marker привязывает source к нормализованному
@@ -1782,7 +1782,7 @@ SHA в защищённую ветку `prod`:
    пришли два непустых `.dump`-документа. Эти backups должны быть созданы после
    перехода marker в `forward_only`.
 6. Повторно вручную запустить
-   `notification-delivery-database-cutover` из `prod`. Скрипт проверит
+   `notification-delivery-database` из `prod`. Скрипт проверит
    readiness, текущий target backup URL и наличие обоих успешных post-cutover
    Telegram-backups, повторно сверит frozen schema/data checksums, удалит
    точный набор service-owned объектов через `RESTRICT`, отключит dedicated

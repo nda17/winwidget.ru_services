@@ -12,11 +12,11 @@ on:
           - all
           - maintenance
           - notification-delivery
-          - notification-delivery-database-cutover
+          - notification-delivery-database
           - campaigns
-          - campaigns-database-cutover
-      campaigns_cutover_action:
-        description: Campaigns database cutover phase
+          - campaigns-database
+      campaigns_database_action:
+        description: Campaigns database lifecycle action
         required: true
         default: prepare
         type: choice
@@ -95,7 +95,6 @@ jobs:
       CAMPAIGNS_LISTEN_HOST: 127.0.0.1
       CAMPAIGNS_HEALTH_PORT: 4500
       CAMPAIGNS_CORE_INTERNAL_BASE_URL: http://127.0.0.1:4200
-      CAMPAIGNS_INTERNAL_TOKEN: ci_campaigns_internal_token_at_least_32_chars
       CAMPAIGNS_INTERNAL_TIMEOUT_MS: 5000
       CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE: 500
       CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: 300000
@@ -120,22 +119,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Guard Notification Delivery database cutover branch
+      - name: Generate CI-only Campaigns internal token
+        run: |
+          campaigns_internal_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$campaigns_internal_token"
+          printf 'CAMPAIGNS_INTERNAL_TOKEN=%s\n' \
+            "$campaigns_internal_token" >> "$GITHUB_ENV"
+
+      - name: Guard Notification Delivery database branch
         if: >-
           github.event_name == 'workflow_dispatch' &&
-          inputs.deploy_target == 'notification-delivery-database-cutover' &&
+          inputs.deploy_target == 'notification-delivery-database' &&
           github.ref != 'refs/heads/prod'
         run: |
-          echo "Notification Delivery database cutover can run only from refs/heads/prod." >&2
+          echo "Notification Delivery database lifecycle can run only from refs/heads/prod." >&2
           exit 1
 
-      - name: Guard Campaigns database cutover branch
+      - name: Guard Campaigns database branch
         if: >-
           github.event_name == 'workflow_dispatch' &&
-          inputs.deploy_target == 'campaigns-database-cutover' &&
+          inputs.deploy_target == 'campaigns-database' &&
           github.ref != 'refs/heads/prod'
         run: |
-          echo "Campaigns database cutover can run only from refs/heads/prod." >&2
+          echo "Campaigns database lifecycle can run only from refs/heads/prod." >&2
           exit 1
 
       - name: Setup pnpm
@@ -2407,7 +2413,7 @@ jobs:
             3,
           );
           const campaignsCutoverJob = workflow.slice(
-            workflow.indexOf("\n  campaigns-database-cutover:"),
+            workflow.indexOf("\n  campaigns-database:"),
           );
           const requireStagedIndex = campaignsCutoverJob.indexOf(
             '--require-staged-revision "$expected_revision"',
@@ -2918,8 +2924,8 @@ jobs:
     if: >-
       github.event_name == 'push' ||
       (
-        inputs.deploy_target != 'notification-delivery-database-cutover' &&
-        inputs.deploy_target != 'campaigns-database-cutover'
+        inputs.deploy_target != 'notification-delivery-database' &&
+        inputs.deploy_target != 'campaigns-database'
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -3039,11 +3045,11 @@ jobs:
           esac
           EOF
 
-  notification-delivery-database-cutover:
+  notification-delivery-database:
     needs: verify
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'notification-delivery-database-cutover' &&
+      inputs.deploy_target == 'notification-delivery-database' &&
       github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -3066,7 +3072,7 @@ jobs:
         run: |
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Cut over Notification Delivery database on VPS
+      - name: Run Notification Delivery database lifecycle on VPS
         env:
           APP_ROOT: /opt/winwidget
           EXPECTED_PROD_REVISION: ${{ github.sha }}
@@ -3297,11 +3303,11 @@ jobs:
             bash scripts/cutover-notification-delivery-database-production.sh
           EOF
 
-  campaigns-database-cutover:
+  campaigns-database:
     needs: verify
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'campaigns-database-cutover' &&
+      inputs.deploy_target == 'campaigns-database' &&
       github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -3324,25 +3330,25 @@ jobs:
         run: |
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Run resumable Campaigns database cutover phase
+      - name: Run resumable Campaigns database lifecycle action
         env:
           APP_ROOT: /opt/winwidget
-          CUTOVER_ACTION: ${{ inputs.campaigns_cutover_action }}
+          DATABASE_ACTION: ${{ inputs.campaigns_database_action }}
           DEPLOY_REVISION: ${{ github.sha }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
-          case "$CUTOVER_ACTION" in
+          case "$DATABASE_ACTION" in
             prepare|rollback|finalize) ;;
             *)
-              echo "Unsupported Campaigns cutover action: $CUTOVER_ACTION" >&2
+              echo "Unsupported Campaigns database action: $DATABASE_ACTION" >&2
               exit 1
               ;;
           esac
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' CUTOVER_ACTION='$CUTOVER_ACTION' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' DATABASE_ACTION='$DATABASE_ACTION' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           guard_campaigns_checkout_before_pull() {
@@ -3410,5 +3416,5 @@ jobs:
           APP_ROOT="$APP_ROOT" \
             EXPECTED_REVISION="$EXPECTED_REVISION" \
             bash scripts/cutover-campaigns-database-production.sh \
-              "$CUTOVER_ACTION"
+              "$DATABASE_ACTION"
           EOF
