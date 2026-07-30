@@ -2385,6 +2385,14 @@ jobs:
           requireCount("guard_campaigns_checkout_before_pull() {", 3);
           requireCount("checkout_verified_prod_revision() {", 3);
           requireCount(
+            'git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||',
+            3,
+          );
+          requireCount(
+            'git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true',
+            0,
+          );
+          requireCount(
             'guard_campaigns_checkout_before_pull "$expected_revision"',
             3,
           );
@@ -2974,7 +2982,8 @@ jobs:
               return 1
             }
             tracked_blob="$(
-              git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
+                true
             )"
             if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
               [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
@@ -3098,7 +3107,8 @@ jobs:
               return 1
             }
             tracked_blob="$(
-              git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
+                true
             )"
             if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
               [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
@@ -3363,7 +3373,8 @@ jobs:
               return 1
             }
             tracked_blob="$(
-              git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
+                true
             )"
             if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
               [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
