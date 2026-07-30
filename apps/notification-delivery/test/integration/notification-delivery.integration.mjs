@@ -35,8 +35,7 @@ const RETRY_EXCHANGE = 'winwidget.retry';
 const DEAD_LETTER_EXCHANGE = 'winwidget.dead-letter';
 const MANUAL_RETRY_EXCHANGE = 'winwidget.manual-retry';
 const RETRY_DELAYS_MS = [30_000, 300_000, 1_800_000];
-const INTERNAL_TOKEN =
-	'notification_delivery_integration_token_32_chars';
+const INTERNAL_TOKEN = 'notification_delivery_integration_token_32_chars';
 const KINDS = {
 	email: {
 		queue: 'winwidget.lead-integration.email',
@@ -61,6 +60,14 @@ const KINDS = {
 	'limit-telegram': {
 		queue: 'winwidget.limit-notification.telegram',
 		routingKey: 'lead.limit.reached.telegram.v2'
+	},
+	'campaign-email': {
+		queue: 'winwidget.notification.campaign.email.v2',
+		routingKey: 'notification.campaign.email.requested.v2'
+	},
+	'campaign-telegram': {
+		queue: 'winwidget.notification.campaign.telegram.v2',
+		routingKey: 'notification.campaign.telegram.requested.v2'
 	}
 };
 
@@ -242,6 +249,64 @@ async function cleanupDatabase() {
 	]);
 }
 
+async function assertOutcomeConstraintMatrix() {
+	const probePrefix = `integration-outcome-constraint:${randomUUID()}`;
+	const createProbe = (eventType, routingKey, suffix) =>
+		prisma.notificationDeliveryOutboxEvent.create({
+			data: {
+				messageId: randomUUID(),
+				deduplicationKey: `${probePrefix}:${suffix}`,
+				exchange: 'EVENTS',
+				eventType,
+				routingKey,
+				payload: { probe: true },
+				headers: {}
+			}
+		});
+
+	try {
+		await createProbe(
+			'notification.delivery.outcome.v1',
+			'notification.delivery.outcome.v1',
+			'v1'
+		);
+		await createProbe(
+			'notification.delivery.outcome.v2',
+			'notification.delivery.outcome.v2',
+			'v2'
+		);
+
+		let mismatchRejected = false;
+		try {
+			await createProbe(
+				'notification.delivery.outcome.v1',
+				'notification.delivery.outcome.v2',
+				'mismatch'
+			);
+		} catch (error) {
+			if (
+				!String(error).includes(
+					'notification_outbox_events_identity_check'
+				)
+			) {
+				throw error;
+			}
+			mismatchRejected = true;
+		}
+		if (!mismatchRejected) {
+			throw new Error(
+				'Notification Delivery outcome constraint accepted a mismatched version'
+			);
+		}
+	} finally {
+		await prisma.notificationDeliveryOutboxEvent.deleteMany({
+			where: {
+				deduplicationKey: { startsWith: probePrefix }
+			}
+		});
+	}
+}
+
 function appendServiceLog(chunk) {
 	serviceLogs = `${serviceLogs}${chunk.toString('utf8')}`.slice(-20_000);
 }
@@ -410,10 +475,9 @@ async function publish(kind, eventId, payload) {
 
 async function waitForReceipt(eventId, consumer, status) {
 	return waitFor(`${consumer} receipt ${status}`, async () => {
-		const receipt =
-			await prisma.notificationDeliveryReceipt.findUnique({
-				where: { eventId_consumer: { eventId, consumer } }
-			});
+		const receipt = await prisma.notificationDeliveryReceipt.findUnique({
+			where: { eventId_consumer: { eventId, consumer } }
+		});
 		return receipt?.status === status ? receipt : null;
 	});
 }
@@ -448,6 +512,7 @@ async function main() {
 
 	await prisma.$connect();
 	await cleanupDatabase();
+	await assertOutcomeConstraintMatrix();
 	rabbitConnection = await amqp.connect(adminRabbitUrl);
 	rabbitChannel = await rabbitConnection.createConfirmChannel();
 	await assertTopologyAndPurge();
@@ -466,6 +531,27 @@ async function main() {
 		probeQueue,
 		message => {
 			if (message) deadLetters.push(message);
+		},
+		{ noAck: true }
+	);
+	const { queue: outcomeProbeQueue } = await rabbitChannel.assertQueue(
+		'',
+		{
+			exclusive: true,
+			autoDelete: true
+		}
+	);
+	await rabbitChannel.bindQueue(
+		outcomeProbeQueue,
+		EVENTS_EXCHANGE,
+		'notification.delivery.outcome.v2'
+	);
+	const campaignOutcomes = [];
+	await rabbitChannel.consume(
+		outcomeProbeQueue,
+		message => {
+			if (!message) return;
+			campaignOutcomes.push(JSON.parse(message.content.toString('utf8')));
 		},
 		{ noAck: true }
 	);
@@ -535,6 +621,53 @@ async function main() {
 		throw new Error('duplicate lead event was delivered twice');
 	}
 
+	const campaignEmailId = randomUUID();
+	const campaignId = randomUUID();
+	const campaignDeliveryId = randomUUID();
+	const campaignCorrelationId = randomUUID();
+	const campaignRecipient = 'campaign-success@example.test';
+	await publish('campaign-email', campaignEmailId, {
+		schemaVersion: 2,
+		eventType: 'notification.campaign.email.requested.v2',
+		eventId: campaignEmailId,
+		occurredAt: new Date().toISOString(),
+		correlationId: campaignCorrelationId,
+		campaignId,
+		deliveryId: campaignDeliveryId,
+		dispatchGeneration: 1,
+		reference: {
+			type: 'campaign-delivery',
+			id: campaignDeliveryId,
+			aggregateId: campaignId,
+			dispatchGeneration: 1
+		},
+		destination: { email: campaignRecipient },
+		content: {
+			subject: 'Campaign integration',
+			message: 'Campaign delivery outcome v2'
+		}
+	});
+	await waitForReceipt(campaignEmailId, 'campaign-email', 'DELIVERED');
+	await waitFor('campaign SMTP delivery', () =>
+		smtpMessages.some(message =>
+			message.recipients.includes(campaignRecipient)
+		)
+	);
+	await waitFor('campaign delivery outcome v2', () =>
+		campaignOutcomes.find(
+			outcome =>
+				outcome?.schemaVersion === 2 &&
+				outcome?.eventType === 'notification.delivery.outcome.v2' &&
+				outcome?.sourceEventId === campaignEmailId &&
+				outcome?.sourceKind === 'campaign-email' &&
+				outcome?.campaignId === campaignId &&
+				outcome?.deliveryId === campaignDeliveryId &&
+				outcome?.dispatchGeneration === 1 &&
+				outcome?.status === 'DELIVERED' &&
+				outcome?.failure === null
+		)
+	);
+
 	const telegramId = randomUUID();
 	await publish('telegram', telegramId, {
 		schemaVersion: 2,
@@ -551,9 +684,8 @@ async function main() {
 		destination: { telegramChatId: '123456' }
 	});
 	await waitForReceipt(telegramId, 'telegram', 'DELIVERED');
-	await waitFor(
-		'Telegram delivery',
-		() => telegramMessages.find(message => message.chat_id === '123456')
+	await waitFor('Telegram delivery', () =>
+		telegramMessages.find(message => message.chat_id === '123456')
 	);
 
 	const paymentTelegramId = randomUUID();
@@ -579,11 +711,7 @@ async function main() {
 			messageThreadId: 42
 		}
 	});
-	await waitForReceipt(
-		paymentTelegramId,
-		'payment-telegram',
-		'DELIVERED'
-	);
+	await waitForReceipt(paymentTelegramId, 'payment-telegram', 'DELIVERED');
 	await waitFor('payment Telegram delivery', () =>
 		telegramMessages.find(
 			message =>
@@ -625,11 +753,7 @@ async function main() {
 		limit: 10,
 		destination: { telegramChatId: '654321' }
 	});
-	await waitForReceipt(
-		limitTelegramId,
-		'limit-telegram',
-		'DELIVERED'
-	);
+	await waitForReceipt(limitTelegramId, 'limit-telegram', 'DELIVERED');
 	await waitFor('limit Telegram delivery', () =>
 		telegramMessages.find(
 			message =>
@@ -658,9 +782,7 @@ async function main() {
 		})
 	);
 	await waitFor('dead-letter publication', () =>
-		deadLetters.some(
-			message => message.properties.messageId === retryId
-		)
+		deadLetters.some(message => message.properties.messageId === retryId)
 	);
 
 	const failuresResponse = await requestJson(
@@ -694,10 +816,9 @@ async function main() {
 	}
 	await waitForReceipt(retryId, 'payment-email', 'DELIVERED');
 	await waitFor('manual retry resolution', async () => {
-		const failure =
-			await prisma.notificationDeliveryFailure.findUnique({
-				where: { id: retryFailure.id }
-			});
+		const failure = await prisma.notificationDeliveryFailure.findUnique({
+			where: { id: retryFailure.id }
+		});
 		return failure?.resolution === 'DELIVERED';
 	});
 	await waitFor('retried SMTP delivery', () =>
@@ -779,6 +900,9 @@ async function main() {
 				'payment-telegram',
 				'limit-email',
 				'limit-telegram',
+				'campaign-email',
+				'campaign-outcome-v2',
+				'outcome-constraint-matrix',
 				'idempotency',
 				'dead-letter',
 				'manual-retry',
