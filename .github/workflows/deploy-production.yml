@@ -793,7 +793,7 @@ jobs:
               --username winwidget_campaigns_backup \
               --dbname winwidget_campaigns_ci \
               --command \
-                "INSERT INTO campaigns.campaigns (id, actor_id, idempotency_key, subject, message, audience, requested_channel) VALUES (gen_random_uuid(), 'ci', gen_random_uuid(), 'blocked', 'blocked backup insert', 'ALL', 'EMAIL');" \
+                "INSERT INTO campaigns.campaigns (id, actor_id, idempotency_key, subject, message, audience, requested_channel, updated_at) VALUES (gen_random_uuid(), 'ci', gen_random_uuid(), 'blocked', 'blocked backup insert', 'ALL', 'EMAIL', CURRENT_TIMESTAMP);" \
               > /dev/null 2>&1; then
             echo "Campaigns backup role can mutate campaign data." >&2
             exit 1
@@ -1061,11 +1061,11 @@ jobs:
               --command "
                 INSERT INTO campaigns.campaigns (
                   id, actor_id, idempotency_key, subject, message,
-                  audience, requested_channel
+                  audience, requested_channel, updated_at
                 ) VALUES (
                   '$campaign_id', 'ci-admin', '$idempotency_key',
                   'CI Campaign', 'Campaign persistence payload',
-                  'ALL', 'EMAIL'
+                  'ALL', 'EMAIL', CURRENT_TIMESTAMP
                 );
               "
 
