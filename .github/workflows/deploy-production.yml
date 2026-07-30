@@ -3451,7 +3451,7 @@ jobs:
               APP_ROOT="$APP_ROOT" \
                 EXPECTED_NEXT_REVISION="$EXPECTED_NEXT_REVISION" \
                 bash "$temporary_script"
-              RESTART_EOF
+          RESTART_EOF
               exit 0
               ;;
             *)
