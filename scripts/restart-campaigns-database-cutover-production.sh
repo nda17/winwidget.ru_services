@@ -29,6 +29,21 @@ fail() {
 	exit 1
 }
 
+encode_text_base64() {
+	printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+run_self_test() {
+	local fixture='{"routes":[]}'
+	[[ "$(encode_text_base64 "$fixture")" == \
+		"eyJyb3V0ZXMiOltdfQ==" ]] ||
+		fail "Campaigns restart Base64 encoding changed the exact text fixture."
+	[[ "$(encode_text_base64 "$fixture")" != \
+		"eyJyb3V0ZXMiOltdfQo=" ]] ||
+		fail "Campaigns restart Base64 encoding retained a trailing newline."
+	echo "Campaigns restart self-test passed."
+}
+
 validate_context() {
 	local rehearsal="${CAMPAIGNS_CUTOVER_REHEARSAL:-}"
 	local run_id="${CAMPAIGNS_CUTOVER_REHEARSAL_RUN_ID:-}"
@@ -398,7 +413,7 @@ assert_legacy_runtime() {
 	local previous_image_id previous_revision previous_gateway_image_id
 	local previous_maintenance_image_id previous_notification_image_id
 	local maintenance_revision notification_revision gateway_routes_base64
-	local api_id gateway_id integration_id integration_kinds
+	local gateway_routes_json api_id gateway_id integration_id integration_kinds
 
 	previous_image_id="$(file_value "$marker_file" previous_image_id)"
 	previous_revision="$(file_value "$marker_file" previous_revision)"
@@ -443,11 +458,11 @@ assert_legacy_runtime() {
 		"$previous_notification_image_id" \
 		"$notification_revision" >/dev/null
 
-	[[ "$(
-		container_env_value "$gateway_id" GATEWAY_ROUTES_JSON |
-			base64 |
-			tr -d '\n'
-	)" == "$gateway_routes_base64" ]] ||
+	gateway_routes_json="$(
+		container_env_value "$gateway_id" GATEWAY_ROUTES_JSON
+	)"
+	[[ "$(encode_text_base64 "$gateway_routes_json")" == \
+		"$gateway_routes_base64" ]] ||
 		fail "Legacy API Gateway route manifest was not restored."
 	integration_kinds="$(
 		container_env_value "$integration_id" INTEGRATION_WORKER_KINDS
@@ -748,6 +763,15 @@ recognize_completed_restart() {
 	assert_target_queues_absent
 	echo "Campaigns restart is already complete and ready for prepare."
 }
+
+if [[ "${1:-}" == "--self-test" ]]; then
+	[[ "$#" == "1" ]] ||
+		fail "Usage: $0 --self-test"
+	run_self_test
+	exit 0
+fi
+[[ "$#" == "0" ]] ||
+	fail "Usage: $0 [--self-test]"
 
 validate_context
 for tracked_file in \

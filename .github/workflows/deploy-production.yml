@@ -2374,6 +2374,8 @@ jobs:
             -euc '
               APP_ROOT=/tmp/campaigns-lifecycle \
                 bash scripts/campaigns-database-lifecycle.sh --self-test
+              bash scripts/restart-campaigns-database-cutover-production.sh \
+                --self-test
               APP_ROOT=/tmp/notification-lifecycle \
                 bash scripts/notification-delivery-database-lifecycle.sh --self-test
               bash scripts/audit-legacy-telegram-channels-production.sh --self-test
