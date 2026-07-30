@@ -11,6 +11,28 @@ interface TelegramErrorParameters {
 	migrate_to_chat_id?: number;
 }
 
+interface TelegramSentDocument {
+	message_id?: unknown;
+	message_thread_id?: unknown;
+	chat?: {
+		id?: unknown;
+		username?: unknown;
+	};
+	document?: {
+		file_id?: unknown;
+		file_unique_id?: unknown;
+		file_size?: unknown;
+	};
+}
+
+export interface TelegramDocumentReceipt {
+	messageId: number;
+	chatId: string;
+	messageThreadId: number;
+	fileId: string;
+	fileUniqueId: string;
+}
+
 export class TelegramApiError extends Error {
 	readonly code: string;
 	readonly httpStatus: number;
@@ -95,8 +117,17 @@ export class TelegramInfoTransportService {
 			messageThreadId: number;
 			signal?: AbortSignal;
 		}
-	): Promise<void> {
+	): Promise<TelegramDocumentReceipt> {
 		const token = this.getToken();
+		const normalizedChatId = chatId.trim();
+		if (
+			!/^-?[1-9]\d*$/.test(normalizedChatId) &&
+			!/^@[A-Za-z][A-Za-z0-9_]{4,31}$/.test(normalizedChatId)
+		) {
+			throw new Error(
+				'Telegram document chat ID must be a numeric ID or @username'
+			);
+		}
 		const file = await stat(filePath);
 		const boundary = `winwidget-${randomBytes(18).toString('hex')}`;
 		const fileName = basename(filePath).replace(/["\r\n]/g, '_');
@@ -118,7 +149,7 @@ export class TelegramInfoTransportService {
 		const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
 		const contentLength = prefix.length + file.size + suffix.length;
 
-		await this.withTimeout(
+		return this.withTimeout(
 			this.documentTimeoutMs,
 			options.signal,
 			async signal => {
@@ -144,7 +175,17 @@ export class TelegramInfoTransportService {
 						signal
 					} as RequestInit & { duplex: 'half' }
 				);
-				await this.assertTelegramResponse(response, 'sendDocument');
+				const result =
+					await this.assertTelegramResponse<TelegramSentDocument>(
+						response,
+						'sendDocument'
+					);
+				return this.toDocumentReceipt(
+					result,
+					chatId,
+					options.messageThreadId,
+					file.size
+				);
 			}
 		);
 	}
@@ -171,15 +212,16 @@ export class TelegramInfoTransportService {
 		return token;
 	}
 
-	private async assertTelegramResponse(
+	private async assertTelegramResponse<T = unknown>(
 		response: Response,
 		method: string
-	): Promise<void> {
+	): Promise<T | undefined> {
 		const data = (await response.json().catch(() => null)) as {
 			ok?: boolean;
 			error_code?: number;
 			description?: string;
 			parameters?: TelegramErrorParameters;
+			result?: T;
 		} | null;
 		if (!response.ok || !data?.ok) {
 			throw new TelegramApiError({
@@ -191,6 +233,75 @@ export class TelegramInfoTransportService {
 				parameters: data?.parameters
 			});
 		}
+		return data.result;
+	}
+
+	private toDocumentReceipt(
+		result: TelegramSentDocument | undefined,
+		expectedChatId: string,
+		expectedMessageThreadId: number,
+		expectedFileSize: number
+	): TelegramDocumentReceipt {
+		const messageId = result?.message_id;
+		const chatId = result?.chat?.id;
+		const messageThreadId = result?.message_thread_id;
+		const fileId = result?.document?.file_id;
+		const fileUniqueId = result?.document?.file_unique_id;
+		const fileSize = result?.document?.file_size;
+		const normalizedExpectedChatId = expectedChatId.trim();
+		const expectedNumericChatId = /^-?[1-9]\d*$/.test(
+			normalizedExpectedChatId
+		)
+			? Number(normalizedExpectedChatId)
+			: null;
+		const expectedUsername =
+			expectedNumericChatId === null
+				? normalizedExpectedChatId.slice(1).toLowerCase()
+				: null;
+		const actualUsername =
+			typeof result?.chat?.username === 'string'
+				? result.chat.username.trim().toLowerCase()
+				: null;
+		if (
+			typeof messageId !== 'number' ||
+			!Number.isSafeInteger(messageId) ||
+			messageId < 1 ||
+			typeof chatId !== 'number' ||
+			!Number.isSafeInteger(chatId) ||
+			chatId === 0 ||
+			(expectedNumericChatId !== null &&
+				(!Number.isSafeInteger(expectedNumericChatId) ||
+					expectedNumericChatId === 0 ||
+					chatId !== expectedNumericChatId)) ||
+			(expectedUsername !== null && actualUsername !== expectedUsername) ||
+			typeof messageThreadId !== 'number' ||
+			!Number.isSafeInteger(messageThreadId) ||
+			messageThreadId < 1 ||
+			messageThreadId !== expectedMessageThreadId ||
+			typeof fileId !== 'string' ||
+			!fileId.trim() ||
+			typeof fileUniqueId !== 'string' ||
+			!fileUniqueId.trim() ||
+			(fileSize !== undefined &&
+				(typeof fileSize !== 'number' ||
+					!Number.isSafeInteger(fileSize) ||
+					fileSize !== expectedFileSize))
+		) {
+			throw new TelegramApiError({
+				httpStatus: 502,
+				code: 'TELEGRAM_INVALID_RESPONSE',
+				description:
+					'Telegram sendDocument returned an invalid document receipt'
+			});
+		}
+
+		return {
+			messageId,
+			chatId: String(chatId),
+			messageThreadId,
+			fileId: fileId.trim(),
+			fileUniqueId: fileUniqueId.trim()
+		};
 	}
 
 	private async withTimeout<T>(

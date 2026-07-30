@@ -142,8 +142,16 @@ describe('MaintenanceWorkerService', () => {
 			createAndSend: jest.fn().mockResolvedValue({
 				fileName: 'winwidget-db.dump',
 				fileSize: 123,
+				fileSha256: 'a'.repeat(64),
 				createdAt: now,
-				telegramSent: true
+				telegramSent: true,
+				telegramReceipt: {
+					messageId: 41,
+					chatId: '-100123',
+					messageThreadId: 42,
+					fileId: 'telegram-file-id',
+					fileUniqueId: 'telegram-file-unique-id'
+				}
 			})
 		} as unknown as DatabaseBackupService;
 		const configService = {
@@ -199,8 +207,16 @@ describe('MaintenanceWorkerService', () => {
 			{
 				fileName: 'winwidget-db.dump',
 				fileSize: 123,
+				fileSha256: 'a'.repeat(64),
 				createdAt: now,
-				telegramSent: true
+				telegramSent: true,
+				telegramReceipt: {
+					messageId: 41,
+					chatId: '-100123',
+					messageThreadId: 42,
+					fileId: 'telegram-file-id',
+					fileUniqueId: 'telegram-file-unique-id'
+				}
 			}
 		);
 		expect(

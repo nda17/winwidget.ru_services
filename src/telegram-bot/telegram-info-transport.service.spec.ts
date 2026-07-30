@@ -3,6 +3,9 @@ import {
 	TelegramInfoTransportService
 } from '@/telegram-bot/telegram-info-transport.service';
 import type { ConfigService } from '@nestjs/config';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('TelegramInfoTransportService', () => {
 	afterEach(() => {
@@ -73,5 +76,186 @@ describe('TelegramInfoTransportService', () => {
 			description: 'Telegram transport request failed'
 		});
 		await expect(result).rejects.not.toThrow(/botsecret/);
+	});
+
+	it.each([
+		['a matching numeric chat', '-100123'],
+		['a configured username chat', '@configured_chat']
+	])(
+		'returns a validated sanitized receipt for %s',
+		async (_case, configuredChatId) => {
+			const directory = await mkdtemp(
+				join(tmpdir(), 'telegram-document-')
+			);
+			const filePath = join(directory, 'backup.dump');
+			await writeFile(filePath, 'dump');
+			jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+				ok: true,
+				status: 200,
+				json: jest.fn().mockResolvedValue({
+					ok: true,
+					result: {
+						message_id: 41,
+						message_thread_id: 42,
+						chat: {
+							id: -100123,
+							username:
+								configuredChatId === '@configured_chat'
+									? 'configured_chat'
+									: undefined
+						},
+						document: {
+							file_id: 'telegram-file-id',
+							file_unique_id: 'telegram-file-unique-id',
+							file_size: 4,
+							file_name: 'backup.dump'
+						}
+					}
+				})
+			} as unknown as Response);
+
+			try {
+				await expect(
+					createService().sendDocument(
+						configuredChatId,
+						filePath,
+						'Backup',
+						{
+							messageThreadId: 42
+						}
+					)
+				).resolves.toEqual({
+					messageId: 41,
+					chatId: '-100123',
+					messageThreadId: 42,
+					fileId: 'telegram-file-id',
+					fileUniqueId: 'telegram-file-unique-id'
+				});
+			} finally {
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it('rejects a document receipt sent to another numeric chat', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'telegram-document-'));
+		const filePath = join(directory, 'backup.dump');
+		await writeFile(filePath, 'dump');
+		jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				ok: true,
+				result: {
+					message_id: 41,
+					message_thread_id: 42,
+					chat: { id: -100124 },
+					document: {
+						file_id: 'telegram-file-id',
+						file_unique_id: 'telegram-file-unique-id',
+						file_size: 4
+					}
+				}
+			})
+		} as unknown as Response);
+
+		try {
+			await expect(
+				createService().sendDocument('-100123', filePath, 'Backup', {
+					messageThreadId: 42
+				})
+			).rejects.toMatchObject<Partial<TelegramApiError>>({
+				code: 'TELEGRAM_INVALID_RESPONSE',
+				httpStatus: 502,
+				description:
+					'Telegram sendDocument returned an invalid document receipt'
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('rejects a document receipt sent to another username chat', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'telegram-document-'));
+		const filePath = join(directory, 'backup.dump');
+		await writeFile(filePath, 'dump');
+		jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				ok: true,
+				result: {
+					message_id: 41,
+					message_thread_id: 42,
+					chat: {
+						id: -100123,
+						username: 'another_chat'
+					},
+					document: {
+						file_id: 'telegram-file-id',
+						file_unique_id: 'telegram-file-unique-id',
+						file_size: 4
+					}
+				}
+			})
+		} as unknown as Response);
+
+		try {
+			await expect(
+				createService().sendDocument(
+					'@configured_chat',
+					filePath,
+					'Backup',
+					{
+						messageThreadId: 42
+					}
+				)
+			).rejects.toMatchObject<Partial<TelegramApiError>>({
+				code: 'TELEGRAM_INVALID_RESPONSE',
+				httpStatus: 502,
+				description:
+					'Telegram sendDocument returned an invalid document receipt'
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('rejects a document receipt with mismatched artifact metadata', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'telegram-document-'));
+		const filePath = join(directory, 'backup.dump');
+		await writeFile(filePath, 'dump');
+		jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				ok: true,
+				result: {
+					message_id: 41,
+					message_thread_id: 42,
+					chat: { id: -100123 },
+					document: {
+						file_id: 'telegram-file-id',
+						file_unique_id: 'telegram-file-unique-id',
+						file_size: 5
+					}
+				}
+			})
+		} as unknown as Response);
+
+		try {
+			await expect(
+				createService().sendDocument('-100123', filePath, 'Backup', {
+					messageThreadId: 42
+				})
+			).rejects.toMatchObject<Partial<TelegramApiError>>({
+				code: 'TELEGRAM_INVALID_RESPONSE',
+				httpStatus: 502,
+				description:
+					'Telegram sendDocument returned an invalid document receipt'
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 });

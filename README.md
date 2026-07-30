@@ -1600,11 +1600,16 @@ prepare → frontend → production smoke → Telegram audit (completed)
    import.
 5. Сразу задеплоить согласованный frontend SHA и выполнить production smoke.
    До `forward-only` при ошибке из `switching|switched` запустить action
-   `rollback` и вернуть frontend на предыдущий SHA. После нового `prepare`
-   заново задеплоить frontend и повторить весь smoke, Telegram-аудит, новый
-   Campaigns backup и clean restore; evidence предыдущего switched-окна не
-   переиспользовать, потому что новый `prepare` увеличивает durable
-   `switch_generation`.
+   `rollback` и вернуть frontend на предыдущий SHA. Если исправление требует
+   нового backend SHA, до его push сначала завершить rollback на старом SHA,
+   затем отправить исправление в `prod` и вручную выполнить
+   `campaigns_database_action=restart`. Restart проверяет legacy runtime и
+   source, удаляет только abandoned Campaigns target container/volume,
+   безопасно staging-ует новый exact SHA и сохраняет предыдущее значение как
+   seed для монотонного `switch_generation`; core DB, legacy source и cutover
+   artifacts не удаляются. После этого снова запустить `prepare`, задеплоить
+   frontend и повторить весь smoke, Telegram-аудит, новый Campaigns backup и
+   clean restore. Evidence предыдущего switched-окна не переиспользовать.
 6. В `phase=switched` выполнить read-only Telegram audit:
 
    ```bash

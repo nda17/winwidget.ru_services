@@ -1,3 +1,5 @@
+import type { TelegramDocumentReceipt } from '@/telegram-bot/telegram-info-transport.service';
+
 export const DATABASE_BACKUP_TARGETS = {
 	CORE: 'core',
 	NOTIFICATION_DELIVERY: 'notification-delivery',
@@ -23,6 +25,8 @@ export interface DatabaseBackupResult {
 	schema: string;
 	fileName: string;
 	fileSize: number;
+	fileSha256: string;
 	createdAt: string;
 	telegramSent: true;
+	telegramReceipt: TelegramDocumentReceipt;
 }

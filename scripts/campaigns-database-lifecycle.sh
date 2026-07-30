@@ -30,15 +30,18 @@ validate_campaigns_first_cutover_staged_marker() {
 	awk -F= '
 		{
 			if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*=[^[:cntrl:]]*$/ ||
-				($1 != "revision" && $1 != "staged_at") ||
+				($1 != "revision" && $1 != "switch_generation_seed" &&
+				 $1 != "staged_at") ||
 				seen[$1]++) invalid = 1
 			value[$1] = substr($0, index($0, "=") + 1)
 		}
 		END {
 			if (seen["revision"] != 1 ||
+				seen["switch_generation_seed"] != 1 ||
 				seen["staged_at"] != 1 ||
 				length(value["revision"]) != 40 ||
 				value["revision"] !~ /^[0-9a-f]+$/ ||
+				value["switch_generation_seed"] !~ /^(0|[1-9][0-9]{0,17})$/ ||
 				value["staged_at"] !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T/) {
 				invalid = 1
 			}
@@ -70,8 +73,9 @@ require_campaigns_first_cutover_staged_revision() {
 
 write_campaigns_first_cutover_staged_marker() {
 	local revision="$1"
+	local requested_switch_generation_seed="${2-}"
 	local marker="$CAMPAIGNS_FIRST_CUTOVER_STAGED_MARKER"
-	local marker_directory temporary_marker
+	local marker_directory switch_generation_seed temporary_marker
 
 	[[ "$revision" =~ ^[0-9a-f]{40}$ ]] || {
 		echo "Campaigns staged revision is invalid." >&2
@@ -79,8 +83,22 @@ write_campaigns_first_cutover_staged_marker() {
 	}
 	if [[ -e "$marker" || -L "$marker" ]]; then
 		require_campaigns_first_cutover_staged_revision "$revision"
+		switch_generation_seed="$(
+			campaigns_first_cutover_staged_value switch_generation_seed
+		)"
+		[[ -z "$requested_switch_generation_seed" ||
+			"$switch_generation_seed" == \
+			"$requested_switch_generation_seed" ]] || {
+			echo "Campaigns staged switch generation seed differs from the existing marker." >&2
+			return 1
+		}
 		return
 	fi
+	switch_generation_seed="${requested_switch_generation_seed:-0}"
+	[[ "$switch_generation_seed" =~ ^(0|[1-9][0-9]{0,17})$ ]] || {
+		echo "Campaigns staged switch generation seed is invalid." >&2
+		return 1
+	}
 	marker_directory="$(dirname "$marker")"
 	[[ -d "$marker_directory" && ! -L "$marker_directory" ]] || {
 		echo "Campaigns staged marker directory is missing or unsafe." >&2
@@ -96,6 +114,7 @@ write_campaigns_first_cutover_staged_marker() {
 			umask 077
 			{
 				printf 'revision=%s\n' "$revision"
+				printf 'switch_generation_seed=%s\n' "$switch_generation_seed"
 				printf 'staged_at=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
 			} >"$temporary_marker"
 		) &&
@@ -853,6 +872,15 @@ campaigns_database_lifecycle_self_test() {
 	fi
 	write_campaigns_first_cutover_staged_marker "$revision"
 	require_campaigns_first_cutover_staged_revision "$revision"
+	[[ "$(campaigns_first_cutover_staged_value switch_generation_seed)" == "0" ]] || {
+		echo "Campaigns self-test staged an invalid initial switch generation seed." >&2
+		return 1
+	}
+	if write_campaigns_first_cutover_staged_marker "$revision" 1 \
+		>/dev/null 2>&1; then
+		echo "Campaigns self-test changed an existing switch generation seed." >&2
+		return 1
+	fi
 	guard_campaigns_cutover_checkout_revision "$revision"
 	if guard_campaigns_cutover_checkout_revision "$other_revision" \
 		>/dev/null 2>&1; then
@@ -866,7 +894,12 @@ campaigns_database_lifecycle_self_test() {
 		return 1
 	fi
 	rm -f -- "$CAMPAIGNS_FIRST_CUTOVER_STAGED_MARKER"
+	write_campaigns_first_cutover_staged_marker "$revision" 7
 	write_campaigns_first_cutover_staged_marker "$revision"
+	[[ "$(campaigns_first_cutover_staged_value switch_generation_seed)" == "7" ]] || {
+		echo "Campaigns self-test did not retain an existing switch generation seed." >&2
+		return 1
+	}
 
 	campaigns_lifecycle_self_test_write_cutover_marker preflight "$revision"
 	validate_campaigns_database_cutover_marker

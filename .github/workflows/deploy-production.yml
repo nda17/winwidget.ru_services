@@ -23,6 +23,7 @@ on:
         options:
           - prepare
           - rollback
+          - restart
           - finalize
   push:
     branches:
@@ -1989,6 +1990,7 @@ jobs:
                 "campaigns-service",
                 [
                   "APP_REVISION",
+                  "CORS_ALLOWED_ORIGINS",
                   "CAMPAIGNS_DATABASE_URL",
                   "CAMPAIGNS_PROCESS_ROLE",
                   "CAMPAIGNS_LISTEN_HOST",
@@ -2022,6 +2024,16 @@ jobs:
               ) {
                 throw new Error(
                   "Campaigns must use the reviewed loopback all-role runtime boundary",
+                );
+              }
+              if (
+                campaignsEnvironment.CORS_ALLOWED_ORIGINS !==
+                  gatewayEnvironment.CORS_ALLOWED_ORIGINS ||
+                campaignsEnvironment.CORS_ALLOWED_ORIGINS !==
+                  apiEnvironment.CORS_ALLOWED_ORIGINS
+              ) {
+                throw new Error(
+                  "API, API Gateway and Campaigns must share one exact CORS origin policy",
                 );
               }
               const internalTokens = [
@@ -2344,6 +2356,7 @@ jobs:
             scripts/notification-delivery-database-lifecycle.sh \
             scripts/deploy-campaigns-production.sh \
             scripts/cutover-campaigns-database-production.sh \
+            scripts/restart-campaigns-database-cutover-production.sh \
             scripts/campaigns-database-lifecycle.sh \
             scripts/campaigns-contract-migration-guard.sh \
             scripts/production-deploy-lock.sh \
@@ -2396,7 +2409,7 @@ jobs:
             'guard_campaigns_checkout_before_pull "$expected_revision"',
             3,
           );
-          requireCount("git fetch origin prod", 3);
+          requireCount("git fetch origin prod", 4);
           requireCount("git checkout prod", 3);
           requireCount('git merge --ff-only "$fetched_revision"', 3);
           requireCount(
@@ -2426,7 +2439,8 @@ jobs:
           const requireStagedIndex = campaignsCutoverJob.indexOf(
             '--require-staged-revision "$expected_revision"',
           );
-          const fetchIndex = campaignsCutoverJob.indexOf("git fetch origin prod");
+          const fetchIndex =
+            campaignsCutoverJob.lastIndexOf("git fetch origin prod");
           if (
             requireStagedIndex < 0 ||
             fetchIndex < 0 ||
@@ -2434,6 +2448,24 @@ jobs:
           ) {
             throw new Error(
               "Campaigns cutover must require the exact staged revision before fetch",
+            );
+          }
+          if (
+            !campaignsCutoverJob.includes(
+              'git show "$EXPECTED_NEXT_REVISION:$restart_script"',
+            ) ||
+            !campaignsCutoverJob.includes(
+              'acquire_production_deploy_lock "Campaigns database restart bootstrap"',
+            ) ||
+            !campaignsCutoverJob.includes(
+              'git hash-object "$temporary_script"',
+            ) ||
+            !campaignsCutoverJob.includes(
+              'git merge-base --is-ancestor "$current_revision" "$EXPECTED_NEXT_REVISION"',
+            )
+          ) {
+            throw new Error(
+              "Campaigns restart must verify and run the exact new-revision recovery script under the production lock",
             );
           }
           process.stdout.write(
@@ -2450,6 +2482,7 @@ jobs:
           bash -n scripts/notification-delivery-database-lifecycle.sh
           bash -n scripts/deploy-campaigns-production.sh
           bash -n scripts/cutover-campaigns-database-production.sh
+          bash -n scripts/restart-campaigns-database-cutover-production.sh
           bash -n scripts/campaigns-database-lifecycle.sh
           bash -n scripts/campaigns-contract-migration-guard.sh
           bash -n scripts/production-deploy-lock.sh
@@ -3028,6 +3061,17 @@ jobs:
               return 1
             }
           }
+          current_revision="$(git rev-parse HEAD)"
+          if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
+            "$current_revision" != "$EXPECTED_REVISION" ]]; then
+            guard_campaigns_checkout_before_pull "$current_revision"
+            if ! guard_campaigns_checkout_before_pull \
+              "$EXPECTED_REVISION" > /dev/null 2>&1; then
+              echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
+              echo "Run the protected campaigns-database restart action for $EXPECTED_REVISION."
+              exit 0
+            fi
+          fi
           case "$DEPLOY_TARGET" in
             all)
               checkout_verified_prod_revision "$EXPECTED_REVISION"
@@ -3351,6 +3395,65 @@ jobs:
         run: |
           case "$DATABASE_ACTION" in
             prepare|rollback|finalize) ;;
+            restart)
+              ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
+                "$SSH_USER@$SSH_HOST" \
+                "APP_ROOT='$APP_ROOT' EXPECTED_NEXT_REVISION='$DEPLOY_REVISION' bash -s" <<'RESTART_EOF'
+              set -euo pipefail
+              umask 077
+              cd "$APP_ROOT/winwidget.ru_server"
+              lifecycle_script="scripts/campaigns-database-lifecycle.sh"
+              lock_script="scripts/production-deploy-lock.sh"
+              restart_script="scripts/restart-campaigns-database-cutover-production.sh"
+              temporary_script="$APP_ROOT/deploy/backend/.campaigns-restart.$$"
+              trap 'rm -f -- "$temporary_script"' EXIT
+              [[ "$(id -u)" == "0" &&
+                "$EXPECTED_NEXT_REVISION" =~ ^[0-9a-f]{40}$ ]] || {
+                echo "Campaigns restart bootstrap identity is invalid." >&2
+                exit 1
+              }
+              for tracked_file in "$lifecycle_script" "$lock_script"; do
+                [[ -f "$tracked_file" && ! -L "$tracked_file" ]] || {
+                  echo "Campaigns restart bootstrap file is unsafe: $tracked_file" >&2
+                  exit 1
+                }
+                tracked_blob="$(git rev-parse --verify "HEAD:$tracked_file")"
+                [[ "$(git hash-object "$tracked_file")" == "$tracked_blob" ]] || {
+                  echo "Campaigns restart bootstrap file differs from HEAD: $tracked_file" >&2
+                  exit 1
+                }
+              done
+              # shellcheck source=/dev/null
+              source "$lock_script"
+              acquire_production_deploy_lock "Campaigns database restart bootstrap"
+              git fetch origin prod
+              fetched_revision="$(git rev-parse FETCH_HEAD)"
+              [[ "$fetched_revision" == "$EXPECTED_NEXT_REVISION" ]] || {
+                echo "Origin prod changed after restart workflow began." >&2
+                exit 1
+              }
+              current_revision="$(git rev-parse HEAD)"
+              git merge-base --is-ancestor "$current_revision" "$EXPECTED_NEXT_REVISION" || {
+                echo "Campaigns next revision is not a fast-forward of the active production checkout." >&2
+                exit 1
+              }
+              restart_blob="$(
+                git rev-parse --verify "$EXPECTED_NEXT_REVISION:$restart_script"
+              )"
+              git show "$EXPECTED_NEXT_REVISION:$restart_script" \
+                > "$temporary_script"
+              chown 0:0 "$temporary_script"
+              chmod 700 "$temporary_script"
+              [[ "$(git hash-object "$temporary_script")" == "$restart_blob" ]] || {
+                echo "Campaigns restart script blob verification failed." >&2
+                exit 1
+              }
+              APP_ROOT="$APP_ROOT" \
+                EXPECTED_NEXT_REVISION="$EXPECTED_NEXT_REVISION" \
+                bash "$temporary_script"
+              RESTART_EOF
+              exit 0
+              ;;
             *)
               echo "Unsupported Campaigns database action: $DATABASE_ACTION" >&2
               exit 1

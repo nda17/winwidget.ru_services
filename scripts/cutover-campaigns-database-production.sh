@@ -340,6 +340,9 @@ verify_live_service_image() {
 
 verify_live_campaigns_gateway() {
 	local container_id live_manifest image_id restart_count
+	local allowed_origins allowed_origin preflight_response preflight_headers
+	local preflight_status allow_methods allow_headers denied_response
+	local denied_headers denied_status
 	container_id="$(
 		compose_target ps --status running -q api-gateway 2>/dev/null || true
 	)"
@@ -352,6 +355,99 @@ verify_live_campaigns_gateway() {
 	live_manifest="$(container_env_value "$container_id" GATEWAY_ROUTES_JSON)"
 	[[ -n "$live_manifest" ]] || fail "Live API Gateway route manifest is missing."
 	validate_campaigns_gateway_manifest "$live_manifest"
+
+	allowed_origins="$(get_env_value CORS_ALLOWED_ORIGINS)" ||
+		fail "CORS_ALLOWED_ORIGINS is missing or duplicated."
+	allowed_origin="${allowed_origins%%,*}"
+	allowed_origin="$(
+		printf '%s' "$allowed_origin" |
+			sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+	)"
+	[[ "$allowed_origin" =~ ^https?://[^/[:space:]]+(:[0-9]+)?$ ]] ||
+		fail "The first Campaigns CORS origin is invalid."
+	preflight_response="$(
+		curl -sS --connect-timeout 2 --max-time 10 \
+			--request OPTIONS \
+			--header "Origin: $allowed_origin" \
+			--header 'Access-Control-Request-Method: GET' \
+			--header 'Access-Control-Request-Headers: authorization,content-type' \
+			--dump-header - \
+			--output /dev/null \
+			--write-out $'\n%{http_code}' \
+			http://127.0.0.1:4100/api/v1/admin/campaigns |
+			tr -d '\r'
+	)" || fail "Campaigns Gateway CORS preflight request failed."
+	preflight_status="${preflight_response##*$'\n'}"
+	preflight_headers="${preflight_response%$'\n'*}"
+	[[ "$preflight_status" == "204" ]] ||
+		fail "Campaigns Gateway CORS preflight returned HTTP $preflight_status."
+	[[ "$(
+		printf '%s\n' "$preflight_headers" |
+			awk -F: '
+				tolower($1) == "access-control-allow-origin" {
+					sub(/^[^:]*:[[:space:]]*/, "")
+					print
+				}
+			'
+	)" == "$allowed_origin" &&
+		"$(
+			printf '%s\n' "$preflight_headers" |
+				awk -F: '
+					tolower($1) == "access-control-allow-credentials" {
+						sub(/^[^:]*:[[:space:]]*/, "")
+						print tolower($0)
+					}
+				'
+		)" == "true" ]] ||
+		fail "Campaigns Gateway CORS preflight rejected the reviewed origin."
+	allow_methods="$(
+		printf '%s\n' "$preflight_headers" |
+			awk -F: '
+				tolower($1) == "access-control-allow-methods" {
+					sub(/^[^:]*:[[:space:]]*/, "")
+					print tolower($0)
+				}
+			'
+	)"
+	allow_headers="$(
+		printf '%s\n' "$preflight_headers" |
+			awk -F: '
+				tolower($1) == "access-control-allow-headers" {
+					sub(/^[^:]*:[[:space:]]*/, "")
+					print tolower($0)
+				}
+			'
+	)"
+	[[ ",${allow_methods// /}," == *",get,"* &&
+		",${allow_headers// /}," == *",authorization,"* &&
+		",${allow_headers// /}," == *",content-type,"* ]] ||
+		fail "Campaigns Gateway CORS preflight omitted required method or headers."
+
+	denied_response="$(
+		curl -sS --connect-timeout 2 --max-time 10 \
+			--request OPTIONS \
+			--header 'Origin: https://not-allowed.invalid' \
+			--header 'Access-Control-Request-Method: GET' \
+			--header 'Access-Control-Request-Headers: authorization' \
+			--dump-header - \
+			--output /dev/null \
+			--write-out $'\n%{http_code}' \
+			http://127.0.0.1:4100/api/v1/admin/campaigns |
+			tr -d '\r'
+	)" || fail "Campaigns Gateway denied-origin preflight request failed."
+	denied_status="${denied_response##*$'\n'}"
+	denied_headers="${denied_response%$'\n'*}"
+	[[ "$denied_status" == "204" &&
+		-z "$(
+			printf '%s\n' "$denied_headers" |
+				awk -F: '
+					tolower($1) == "access-control-allow-origin" {
+						sub(/^[^:]*:[[:space:]]*/, "")
+						print
+					}
+				'
+		)" ]] ||
+		fail "Campaigns Gateway CORS preflight allowed an unknown origin."
 }
 
 hash_text() {
@@ -2223,6 +2319,7 @@ for key in \
 	CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE CAMPAIGNS_INTERNAL_TOKEN \
 	CAMPAIGNS_PROCESS_ROLE CAMPAIGNS_LISTEN_HOST CAMPAIGNS_HEALTH_PORT \
 	CAMPAIGNS_CORE_INTERNAL_BASE_URL \
+	CORS_ALLOWED_ORIGINS \
 	CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS \
 	CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE RABBITMQ_CAMPAIGNS_URL \
 	GATEWAY_ROUTES_JSON RABBITMQ_PUBLISHER_URL \
@@ -2330,6 +2427,11 @@ if [[ -e "$CAMPAIGNS_DATABASE_CUTOVER_MARKER" ||
 else
 	[[ "$ACTION" == "prepare" ]] ||
 		fail "Campaigns rollback/finalize requires an existing cutover marker."
+	switch_generation="$(
+		campaigns_first_cutover_staged_value switch_generation_seed
+	)"
+	[[ "$switch_generation" =~ ^(0|[1-9][0-9]{0,17})$ ]] ||
+		fail "Campaigns staged switch generation seed is invalid."
 	cutover_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
 	artifact_directory="$APP_ROOT/deploy/backend/campaigns-database-cutover.$EXPECTED_REVISION.$(date -u +'%Y%m%dT%H%M%SZ')"
 	mkdir -m 700 "$artifact_directory"

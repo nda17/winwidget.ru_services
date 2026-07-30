@@ -2,6 +2,7 @@ import { DatabaseBackupService } from '@/maintenance/database-backup.service';
 import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-transport.service';
 import { ConfigService } from '@nestjs/config';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { access, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,10 +14,17 @@ jest.mock('node:child_process', () => ({
 }));
 
 describe('DatabaseBackupService', () => {
+	const telegramReceipt = {
+		messageId: 41,
+		chatId: '-1001',
+		messageThreadId: 42,
+		fileId: 'telegram-file-id',
+		fileUniqueId: 'telegram-file-unique-id'
+	};
 	const createService = (
 		values: Record<string, string | undefined>,
 		telegram: Pick<TelegramInfoTransportService, 'sendDocument'> = {
-			sendDocument: jest.fn()
+			sendDocument: jest.fn().mockResolvedValue(telegramReceipt)
 		}
 	) =>
 		new DatabaseBackupService(
@@ -107,6 +115,12 @@ describe('DatabaseBackupService', () => {
 					sequence.push('send:notification-delivery');
 					expect((await stat(filePath)).isFile()).toBe(true);
 					expect(caption).toContain('База: <b>Notification Delivery</b>');
+					expect(caption).toContain(
+						`SHA-256: <code>${createHash('sha256')
+							.update('delivery-dump')
+							.digest('hex')}</code>`
+					);
+					return telegramReceipt;
 				}
 			)
 		};
@@ -170,8 +184,12 @@ describe('DatabaseBackupService', () => {
 				/^winwidget-notification-delivery-db-.+\.dump$/
 			),
 			fileSize: Buffer.byteLength('delivery-dump'),
+			fileSha256: createHash('sha256')
+				.update('delivery-dump')
+				.digest('hex'),
 			createdAt: expect.any(String),
-			telegramSent: true
+			telegramSent: true,
+			telegramReceipt
 		});
 		expect(telegram.sendDocument).toHaveBeenCalledTimes(1);
 		expect(telegram.sendDocument).toHaveBeenCalledWith(
@@ -190,7 +208,7 @@ describe('DatabaseBackupService', () => {
 
 	it('returns source metadata for the selected core target', async () => {
 		const telegram = {
-			sendDocument: jest.fn().mockResolvedValue(undefined)
+			sendDocument: jest.fn().mockResolvedValue(telegramReceipt)
 		};
 		const service = createService(
 			{
@@ -233,8 +251,10 @@ describe('DatabaseBackupService', () => {
 			schema: 'public',
 			fileName: expect.stringMatching(/^winwidget-db-.+\.dump$/),
 			fileSize: 4,
+			fileSha256: createHash('sha256').update('core').digest('hex'),
 			createdAt: expect.any(String),
-			telegramSent: true
+			telegramSent: true,
+			telegramReceipt
 		});
 		expect(telegram.sendDocument).toHaveBeenCalledTimes(1);
 	});

@@ -7,7 +7,8 @@ import { TelegramInfoTransportService } from '@/telegram-bot/telegram-info-trans
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { spawn } from 'node:child_process';
-import { createWriteStream } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { chmod, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -121,7 +122,8 @@ export class DatabaseBackupService implements OnModuleInit {
 				null,
 				signal
 			);
-			await this.telegram.sendDocument(
+			const fileSha256 = await this.calculateSha256(filePath);
+			const telegramReceipt = await this.telegram.sendDocument(
 				input.chatId,
 				filePath,
 				[
@@ -129,7 +131,8 @@ export class DatabaseBackupService implements OnModuleInit {
 					`База: <b>${database.label}</b>`,
 					`Создано: ${this.formatMoscowDateTime(createdAt)} МСК`,
 					`Тип: ${input.trigger === 'MANUAL' ? 'ручной' : 'ежедневный'}`,
-					`Job ID: <code>${jobId}</code>`
+					`Job ID: <code>${jobId}</code>`,
+					`SHA-256: <code>${fileSha256}</code>`
 				].join('\n'),
 				{
 					messageThreadId: input.messageThreadId,
@@ -143,8 +146,10 @@ export class DatabaseBackupService implements OnModuleInit {
 				schema: database.schema,
 				fileName,
 				fileSize: file.size,
+				fileSha256,
 				createdAt: createdAt.toISOString(),
-				telegramSent: true
+				telegramSent: true,
+				telegramReceipt
 			};
 		} finally {
 			await rm(directory, { recursive: true, force: true }).catch(error =>
@@ -155,6 +160,14 @@ export class DatabaseBackupService implements OnModuleInit {
 				)
 			);
 		}
+	}
+
+	private async calculateSha256(filePath: string): Promise<string> {
+		const hash = createHash('sha256');
+		for await (const chunk of createReadStream(filePath)) {
+			hash.update(chunk);
+		}
+		return hash.digest('hex');
 	}
 
 	private assertInput(input: DatabaseBackupInput): void {

@@ -1480,6 +1480,157 @@ run_cutover() {
 			"$action" >"$log_file" 2>&1
 }
 
+restart_cutover_attempt() {
+	local previous_generation="$1"
+	local archived_cutover archived_staged checkpoint final_receipt log_file
+	local final_receipt_sha previous_artifact_directory restart_receipt
+	local staged_marker staged_marker_sha status
+	previous_artifact_directory="$(marker_value artifact_directory)"
+	archived_cutover="$previous_artifact_directory/restart-cutover-marker"
+	archived_staged="$previous_artifact_directory/restart-staged-marker"
+	final_receipt="$previous_artifact_directory/restart-receipt-final"
+	restart_receipt="$APP_ROOT/deploy/backend/.campaigns-database-restart-v1"
+	staged_marker="$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
+
+	for checkpoint in \
+		archived-cutover-marker \
+		target-volume-removed \
+		next-checkout \
+		next-marker-staged \
+		old-marker-removed \
+		final-receipt; do
+		log_file="$APP_ROOT/restart-cutover-$checkpoint.log"
+		set +e
+		APP_ROOT="$APP_ROOT" \
+		ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" \
+		EXPECTED_NEXT_REVISION="$TARGET_REVISION" \
+		CAMPAIGNS_CUTOVER_REHEARSAL=true \
+		CAMPAIGNS_CUTOVER_REHEARSAL_RUN_ID="$RUN_ID" \
+		CAMPAIGNS_RESTART_REHEARSAL_FAIL_AFTER_CHECKPOINT="$checkpoint" \
+			bash "$SERVER_ROOT/scripts/restart-campaigns-database-cutover-production.sh" \
+				>"$log_file" 2>&1
+		status=$?
+		set -e
+		[[ "$status" == "86" ]] ||
+			fail "Campaigns restart checkpoint $checkpoint returned status $status."
+		grep -Fq \
+			"Campaigns restart rehearsal injected a failure at checkpoint=$checkpoint." \
+			"$log_file" ||
+			fail "Campaigns restart checkpoint $checkpoint was not reached."
+
+		case "$checkpoint" in
+		archived-cutover-marker)
+			[[ -f "$MARKER_FILE" && -f "$staged_marker" &&
+				-f "$archived_cutover" && ! -e "$archived_staged" &&
+				! -e "$restart_receipt" ]] ||
+				fail "Campaigns partial marker archive is not safely resumable."
+			docker volume inspect "$CAMPAIGNS_VOLUME" >/dev/null 2>&1 ||
+				fail "Campaigns restart removed the target before durable validation."
+			;;
+		target-volume-removed)
+			[[ "$(awk -F= '$1 == "status" { print $2 }' "$restart_receipt")" == \
+				"validated" &&
+				-f "$MARKER_FILE" && -f "$staged_marker" &&
+				-f "$archived_cutover" && -f "$archived_staged" ]] ||
+				fail "Campaigns target removal lost its validated restart receipt."
+			! docker volume inspect "$CAMPAIGNS_VOLUME" >/dev/null 2>&1 ||
+				fail "Campaigns target volume remains after the removal checkpoint."
+			[[ -z "$(compose_target ps -a -q campaigns-postgres)" &&
+				-z "$(compose_target ps -a -q campaigns-service)" ]] ||
+				fail "Campaigns target container remains after the removal checkpoint."
+			;;
+		next-checkout)
+			[[ "$(awk -F= '$1 == "status" { print $2 }' "$restart_receipt")" == \
+				"target-removed" &&
+				-f "$MARKER_FILE" && ! -e "$staged_marker" ]] ||
+				fail "Campaigns next checkout checkpoint has an invalid marker state."
+			;;
+		next-marker-staged)
+			[[ "$(awk -F= '$1 == "status" { print $2 }' "$restart_receipt")" == \
+				"target-removed" &&
+				-f "$MARKER_FILE" && -f "$staged_marker" &&
+				"$(awk -F= '$1 == "switch_generation_seed" { print $2 }' \
+					"$staged_marker")" == "$previous_generation" ]] ||
+				fail "Campaigns next staged marker is not resumable."
+			;;
+		old-marker-removed)
+			[[ "$(awk -F= '$1 == "status" { print $2 }' "$restart_receipt")" == \
+				"new-staged" &&
+				! -e "$MARKER_FILE" && -f "$staged_marker" ]] ||
+				fail "Campaigns old marker removal is not resumable."
+			;;
+		final-receipt)
+			[[ "$(awk -F= '$1 == "status" { print $2 }' "$restart_receipt")" == \
+				"staged" &&
+				-f "$final_receipt" ]] ||
+				fail "Campaigns final restart receipt is not resumable."
+			cmp -s "$restart_receipt" "$final_receipt" ||
+				fail "Campaigns final restart receipt content changed."
+			;;
+		esac
+	done
+
+	APP_ROOT="$APP_ROOT" \
+	ENV_FILE="$ENV_FILE" \
+	COMPOSE_FILE="$COMPOSE_FILE" \
+	EXPECTED_NEXT_REVISION="$TARGET_REVISION" \
+	CAMPAIGNS_CUTOVER_REHEARSAL=true \
+	CAMPAIGNS_CUTOVER_REHEARSAL_RUN_ID="$RUN_ID" \
+		bash "$SERVER_ROOT/scripts/restart-campaigns-database-cutover-production.sh" \
+			>"$APP_ROOT/restart-cutover-complete.log" 2>&1
+	grep -Fq "was safely restarted for revision $TARGET_REVISION." \
+		"$APP_ROOT/restart-cutover-complete.log" ||
+		fail "Campaigns restart did not report its completed transition."
+	final_receipt_sha="$(sha256sum "$final_receipt" | awk '{ print $1 }')"
+	staged_marker_sha="$(sha256sum "$staged_marker" | awk '{ print $1 }')"
+
+	APP_ROOT="$APP_ROOT" \
+	ENV_FILE="$ENV_FILE" \
+	COMPOSE_FILE="$COMPOSE_FILE" \
+	EXPECTED_NEXT_REVISION="$TARGET_REVISION" \
+	CAMPAIGNS_CUTOVER_REHEARSAL=true \
+	CAMPAIGNS_CUTOVER_REHEARSAL_RUN_ID="$RUN_ID" \
+		bash "$SERVER_ROOT/scripts/restart-campaigns-database-cutover-production.sh" \
+			>"$APP_ROOT/restart-cutover-idempotent-repeat.log" 2>&1
+	grep -Fq "Campaigns restart is already complete and ready for prepare." \
+		"$APP_ROOT/restart-cutover-idempotent-repeat.log" ||
+		fail "Campaigns completed restart was not idempotent."
+	[[ "$(sha256sum "$final_receipt" | awk '{ print $1 }')" == \
+			"$final_receipt_sha" &&
+		"$(sha256sum "$staged_marker" | awk '{ print $1 }')" == \
+			"$staged_marker_sha" ]] ||
+		fail "Campaigns idempotent restart changed durable evidence."
+
+	[[ ! -e "$MARKER_FILE" && ! -L "$MARKER_FILE" ]] ||
+		fail "Campaigns restart retained the abandoned cutover marker."
+	[[ ! -e "$restart_receipt" && ! -L "$restart_receipt" ]] ||
+		fail "Campaigns restart retained its active receipt after completion."
+	APP_ROOT="$APP_ROOT" \
+		bash "$SERVER_ROOT/scripts/campaigns-database-lifecycle.sh" \
+			--require-staged-revision "$TARGET_REVISION"
+	[[ "$(
+		awk -F= '$1 == "switch_generation_seed" { print $2 }' \
+			"$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
+	)" == "$previous_generation" ]] ||
+		fail "Campaigns restart did not preserve the switch generation seed."
+	! docker volume inspect "$CAMPAIGNS_VOLUME" >/dev/null 2>&1 ||
+		fail "Campaigns restart retained the abandoned target volume."
+	[[ -z "$(compose_target ps -a -q campaigns-postgres)" &&
+		-z "$(compose_target ps -a -q campaigns-service)" ]] ||
+		fail "Campaigns restart retained an abandoned target container."
+	[[ -f "$final_receipt" && ! -L "$final_receipt" &&
+		"$(stat -c '%u:%g:%a' "$final_receipt")" == "0:0:600" ]] ||
+		fail "Campaigns restart did not retain a safe audit receipt."
+	[[ -f "$previous_artifact_directory/restart-cutover-marker" &&
+		-f "$previous_artifact_directory/restart-staged-marker" ]] ||
+		fail "Campaigns restart did not archive the abandoned markers."
+
+	CAMPAIGNS_VOLUME_IDENTITY=""
+	rm -f -- "$CAMPAIGNS_VOLUME_IDENTITY_FILE"
+	assert_baseline_runtime
+}
+
 campaigns_query() {
 	local sql="$1"
 	docker run --rm --network host \
@@ -3133,6 +3284,7 @@ cleanup_rehearsal() {
 }
 
 run_rehearsal() {
+	local previous_switch_generation
 	validate_rehearsal_paths
 	[[ "$(id -u)" == "0" ]] ||
 		fail "Campaigns cutover rehearsal must run as root inside Colima."
@@ -3187,10 +3339,15 @@ SELECT
 	assert_legacy_runtime_restored
 	assert_rollback_target_queues_absent
 	assert_campaigns_volume_unchanged
+	previous_switch_generation="$(marker_value switch_generation)"
+	restart_cutover_attempt "$previous_switch_generation"
 	set_rehearsal_env_value CAMPAIGNS_TELEGRAM_AUDIT_DECISION pending
 	set_rehearsal_env_value CAMPAIGNS_TELEGRAM_AUDIT_REFERENCE ''
 	set_rehearsal_env_value CAMPAIGNS_RESTORE_DRILL_REFERENCE ''
 	expect_phase_failure prepare switched
+	[[ "$(marker_value switch_generation)" == \
+		"$((previous_switch_generation + 1))" ]] ||
+		fail "Restarted Campaigns cutover did not advance switch_generation."
 	run_telegram_audit_fixture
 	restore_campaigns_backup
 

@@ -20,6 +20,7 @@ assertLocalTestDatabase(
 );
 
 const internalToken = `campaigns-integration-${randomUUID()}`;
+const corsAllowedOrigin = 'http://127.0.0.1:3000';
 const apiPort = await getFreePort();
 const corePort = await getFreePort();
 const migration = spawnSync('pnpm', ['run', 'prisma:migrate:deploy'], {
@@ -73,6 +74,7 @@ const app = spawn('node', ['dist/src/main.js'], {
 		CAMPAIGNS_HEALTH_PORT: String(apiPort),
 		CAMPAIGNS_CORE_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
 		CAMPAIGNS_INTERNAL_TOKEN: internalToken,
+		CORS_ALLOWED_ORIGINS: corsAllowedOrigin,
 		APP_REVISION: 'integration-test'
 	},
 	stdio: 'inherit'
@@ -81,6 +83,7 @@ const app = spawn('node', ['dist/src/main.js'], {
 let campaignId;
 try {
 	await waitForReady(apiPort);
+	await assertCorsPreflight(apiPort, corsAllowedOrigin);
 	const idempotencyKey = randomUUID();
 	const body = {
 		subject: 'Integration campaign',
@@ -266,6 +269,7 @@ async function runRabbitMqSmoke(databaseUrl, rabbitUrl, token, corePort) {
 			CAMPAIGNS_HEALTH_PORT: String(port),
 			CAMPAIGNS_CORE_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
 			CAMPAIGNS_INTERNAL_TOKEN: token,
+			CORS_ALLOWED_ORIGINS: corsAllowedOrigin,
 			RABBITMQ_URL: rabbitUrl,
 			RABBITMQ_ASSERT_TOPOLOGY: 'true',
 			RABBITMQ_CONNECTION_NAME: 'campaigns-ci-restricted-smoke',
@@ -319,6 +323,64 @@ async function runRabbitMqSmoke(databaseUrl, rabbitUrl, token, corePort) {
 			new Promise(resolve => service.once('exit', resolve)),
 			new Promise(resolve => setTimeout(resolve, 5000))
 		]);
+	}
+}
+
+async function assertCorsPreflight(port, allowedOrigin) {
+	const path = '/api/v1/admin/campaigns?page=1&limit=20';
+	const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+		method: 'OPTIONS',
+		headers: {
+			origin: allowedOrigin,
+			'access-control-request-method': 'GET',
+			'access-control-request-headers': 'authorization,content-type'
+		}
+	});
+	if (response.status !== 204) {
+		throw new Error(
+			`Campaigns CORS preflight expected 204, received ${response.status}`
+		);
+	}
+	if (
+		response.headers.get('access-control-allow-origin') !==
+			allowedOrigin ||
+		response.headers.get('access-control-allow-credentials') !== 'true'
+	) {
+		throw new Error(
+			'Campaigns CORS preflight rejected the allowed origin'
+		);
+	}
+	const methods = new Set(
+		(response.headers.get('access-control-allow-methods') || '')
+			.split(',')
+			.map(value => value.trim().toUpperCase())
+			.filter(Boolean)
+	);
+	if (!methods.has('GET')) {
+		throw new Error('Campaigns CORS preflight does not allow GET');
+	}
+	const headers = new Set(
+		(response.headers.get('access-control-allow-headers') || '')
+			.split(',')
+			.map(value => value.trim().toLowerCase())
+			.filter(Boolean)
+	);
+	if (!headers.has('authorization') || !headers.has('content-type')) {
+		throw new Error(
+			'Campaigns CORS preflight does not allow authorization/content-type'
+		);
+	}
+
+	const denied = await fetch(`http://127.0.0.1:${port}${path}`, {
+		method: 'OPTIONS',
+		headers: {
+			origin: 'https://not-allowed.example',
+			'access-control-request-method': 'GET',
+			'access-control-request-headers': 'authorization'
+		}
+	});
+	if (denied.headers.has('access-control-allow-origin')) {
+		throw new Error('Campaigns CORS preflight allowed an unknown origin');
 	}
 }
 
