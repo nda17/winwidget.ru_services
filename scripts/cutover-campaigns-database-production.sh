@@ -833,7 +833,13 @@ to_libpq_url() {
 			--entrypoint node "$CAMPAIGNS_IMAGE" -e '
 const { readFileSync } = require("node:fs");
 const url = new URL(readFileSync(0, "utf8"));
-for (const key of ["schema", "connection_limit", "pool_timeout", "pgbouncer"]) {
+for (const key of [
+  "schema",
+  "connection_limit",
+  "pool_timeout",
+  "pgbouncer",
+  "statement_cache_size",
+]) {
   url.searchParams.delete(key);
 }
 process.stdout.write(url.toString());

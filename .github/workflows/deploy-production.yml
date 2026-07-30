@@ -145,6 +145,43 @@ jobs:
           echo "Campaigns database lifecycle can run only from refs/heads/prod." >&2
           exit 1
 
+      - name: Fast-check Campaigns production recovery
+        run: |
+          for script in \
+            scripts/production-deploy-lock.sh \
+            scripts/campaigns-database-lifecycle.sh \
+            scripts/cutover-campaigns-database-production.sh \
+            scripts/restart-campaigns-database-cutover-production.sh \
+            scripts/test-campaigns-cutover-rehearsal.sh \
+            scripts/audit-legacy-telegram-channels-production.sh; do
+            bash -n "$script"
+          done
+          bash scripts/restart-campaigns-database-cutover-production.sh \
+            --self-test
+          bash scripts/audit-legacy-telegram-channels-production.sh --self-test
+          docker run --rm \
+            --network none \
+            --read-only \
+            --security-opt no-new-privileges \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+          docker run --rm \
+            --network none \
+            --read-only \
+            --security-opt no-new-privileges \
+            --entrypoint shellcheck \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+            --severity=warning \
+            scripts/production-deploy-lock.sh \
+            scripts/campaigns-database-lifecycle.sh \
+            scripts/cutover-campaigns-database-production.sh \
+            scripts/restart-campaigns-database-cutover-production.sh \
+            scripts/test-campaigns-cutover-rehearsal.sh \
+            scripts/audit-legacy-telegram-channels-production.sh
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:

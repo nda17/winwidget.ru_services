@@ -7,7 +7,7 @@ SOURCE_ROOT="${CAMPAIGNS_REHEARSAL_SOURCE_ROOT:-$(
 	cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
 )}"
 RUN_ID="${CAMPAIGNS_REHEARSAL_RUN_ID:-local}"
-BASELINE_REF="${CAMPAIGNS_REHEARSAL_BASELINE_REF:-origin/prod}"
+BASELINE_REF="${CAMPAIGNS_REHEARSAL_BASELINE_REF:-20b2de69c58f0a0aa5435c5d93eab24525a32a34}"
 APP_ROOT="/tmp/winwidget-campaigns-cutover-rehearsal-$RUN_ID"
 SERVER_ROOT="$APP_ROOT/winwidget.ru_server"
 BASELINE_ROOT="$APP_ROOT/baseline"
@@ -1627,6 +1627,7 @@ restart_cutover_attempt() {
 		fail "Campaigns restart did not archive the abandoned markers."
 
 	CAMPAIGNS_VOLUME_IDENTITY=""
+	CAMPAIGNS_SYSTEM_IDENTIFIER=""
 	rm -f -- "$CAMPAIGNS_VOLUME_IDENTITY_FILE"
 	assert_baseline_runtime
 }
@@ -2948,20 +2949,36 @@ remove_validated_network() {
 cleanup_rollback_compose_file=""
 
 load_cleanup_rollback_compose_file() {
-	local artifact_directory artifact_name expected_revision
+	local artifact_directory artifact_name expected_revision nullglob_was_set=false
+	local -a rollback_candidates=()
 	cleanup_rollback_compose_file=""
-	[[ -e "$MARKER_FILE" || -L "$MARKER_FILE" ]] || return 0
-	[[ -f "$MARKER_FILE" && ! -L "$MARKER_FILE" &&
-		"$(stat -c '%u:%g:%a' "$MARKER_FILE")" == "0:0:600" ]] ||
-		fail "Campaigns marker is unsafe; refusing rehearsal cleanup."
-	artifact_directory="$(marker_value artifact_directory)" ||
-		fail "Campaigns marker artifact directory is invalid."
 	expected_revision="$(
 		sed -n '1p' "$APP_ROOT/deploy/backend/.rehearsal-target-revision"
 	)"
+	[[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] ||
+		fail "Campaigns rehearsal target revision is invalid."
+	if [[ -e "$MARKER_FILE" || -L "$MARKER_FILE" ]]; then
+		[[ -f "$MARKER_FILE" && ! -L "$MARKER_FILE" &&
+			"$(stat -c '%u:%g:%a' "$MARKER_FILE")" == "0:0:600" ]] ||
+			fail "Campaigns marker is unsafe; refusing rehearsal cleanup."
+		artifact_directory="$(marker_value artifact_directory)" ||
+			fail "Campaigns marker artifact directory is invalid."
+	else
+		if shopt -q nullglob; then
+			nullglob_was_set=true
+		fi
+		shopt -s nullglob
+		rollback_candidates=(
+			"$APP_ROOT/deploy/backend/campaigns-database-cutover.$expected_revision."*/rollback-compose.json
+		)
+		[[ "$nullglob_was_set" == "true" ]] || shopt -u nullglob
+		((${#rollback_candidates[@]} <= 1)) ||
+			fail "Multiple Campaigns rollback Compose files exist without an active marker."
+		((${#rollback_candidates[@]} == 1)) || return 0
+		artifact_directory="$(dirname -- "${rollback_candidates[0]}")"
+	fi
 	artifact_name="$(basename -- "$artifact_directory")"
-	[[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
-		"$(dirname -- "$artifact_directory")" == "$APP_ROOT/deploy/backend" &&
+	[[ "$(dirname -- "$artifact_directory")" == "$APP_ROOT/deploy/backend" &&
 		"$artifact_name" =~ ^campaigns-database-cutover\.$expected_revision\.[0-9]{8}T[0-9]{6}Z$ &&
 		-d "$artifact_directory" && ! -L "$artifact_directory" &&
 		"$(realpath -e -- "$artifact_directory")" == "$artifact_directory" &&

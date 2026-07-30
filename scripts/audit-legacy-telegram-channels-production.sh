@@ -178,7 +178,7 @@ validate_backup_url() {
 				((sslmode_count += 1))
 				sslmode="$parameter_value"
 				;;
-			connection_limit | pool_timeout | pgbouncer) ;;
+			connection_limit | pool_timeout | pgbouncer | statement_cache_size) ;;
 			*)
 				fail "$key contains an unsupported query parameter."
 				;;
@@ -316,7 +316,7 @@ to_libpq_url() {
 	for pair in "${parameters[@]}"; do
 		parameter_name="${pair%%=*}"
 		case "$parameter_name" in
-			schema | connection_limit | pool_timeout | pgbouncer) ;;
+			schema | connection_limit | pool_timeout | pgbouncer | statement_cache_size) ;;
 			*) retained_parameters+=("$pair") ;;
 		esac
 	done

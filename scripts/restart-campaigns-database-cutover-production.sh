@@ -33,14 +33,54 @@ encode_text_base64() {
 	printf '%s' "$1" | base64 | tr -d '\n'
 }
 
+to_libpq_url() {
+	local value="$1"
+	local base query pair parameter_name joined
+	local -a parameters=()
+	local -a retained_parameters=()
+
+	if [[ "$value" != *'?'* ]]; then
+		printf '%s' "$value"
+		return
+	fi
+	base="${value%%\?*}"
+	query="${value#*\?}"
+	IFS='&' read -r -a parameters <<<"$query"
+	for pair in "${parameters[@]}"; do
+		parameter_name="${pair%%=*}"
+		case "$parameter_name" in
+		schema | connection_limit | pool_timeout | pgbouncer | statement_cache_size) ;;
+		*) retained_parameters+=("$pair") ;;
+		esac
+	done
+	printf '%s' "$base"
+	if ((${#retained_parameters[@]} > 0)); then
+		joined="$(
+			IFS='&'
+			printf '%s' "${retained_parameters[*]}"
+		)"
+		printf '?%s' "$joined"
+	fi
+}
+
 run_self_test() {
 	local fixture='{"routes":[]}'
+	local prisma_url libpq_url
 	[[ "$(encode_text_base64 "$fixture")" == \
 		"eyJyb3V0ZXMiOltdfQ==" ]] ||
 		fail "Campaigns restart Base64 encoding changed the exact text fixture."
 	[[ "$(encode_text_base64 "$fixture")" != \
 		"eyJyb3V0ZXMiOltdfQo=" ]] ||
 		fail "Campaigns restart Base64 encoding retained a trailing newline."
+	prisma_url="postgresql://backup:p%40ss@127.0.0.1:55431/winwidget?schema=public&connection_limit=2&pool_timeout=5&pgbouncer=true&statement_cache_size=0&sslmode=disable"
+	libpq_url="$(to_libpq_url "$prisma_url")"
+	[[ "$libpq_url" == \
+		"postgresql://backup:p%40ss@127.0.0.1:55431/winwidget?sslmode=disable" ]] ||
+		fail "Campaigns restart did not remove Prisma-only URL parameters."
+	[[ "$(to_libpq_url \
+		'postgresql://backup:password@127.0.0.1:55431/winwidget?schema=public')" == \
+		"postgresql://backup:password@127.0.0.1:55431/winwidget" ]] ||
+		fail "Campaigns restart retained a dangling URL query separator."
 	echo "Campaigns restart self-test passed."
 }
 
@@ -50,6 +90,7 @@ validate_context() {
 	local failure_checkpoint="${CAMPAIGNS_RESTART_REHEARSAL_FAIL_AFTER_CHECKPOINT:-}"
 	local expected_root="/opt/winwidget"
 	local expected_compose="$server_root/deploy/docker-compose.prod.yml"
+	local expected_lock_file="$marker_directory/.production-deploy.lock"
 	local canonical_root
 
 	if [[ "$rehearsal" == "true" ]]; then
@@ -82,6 +123,18 @@ validate_context() {
 		fail "Campaigns restart paths are outside the reviewed deployment boundary."
 	[[ "$EXPECTED_NEXT_REVISION" =~ ^[0-9a-f]{40}$ ]] ||
 		fail "EXPECTED_NEXT_REVISION must be an exact 40-character Git SHA."
+	[[ -z "${CAMPAIGNS_DATABASE_CUTOVER_MARKER:-}" ||
+		"$CAMPAIGNS_DATABASE_CUTOVER_MARKER" == "$cutover_marker" ]] ||
+		fail "Campaigns restart cutover marker override is outside the reviewed boundary."
+	[[ -z "${CAMPAIGNS_FIRST_CUTOVER_STAGED_MARKER:-}" ||
+		"$CAMPAIGNS_FIRST_CUTOVER_STAGED_MARKER" == "$staged_marker" ]] ||
+		fail "Campaigns restart staged marker override is outside the reviewed boundary."
+	[[ -z "${PRODUCTION_DEPLOY_LOCK_FILE:-}" ||
+		"$PRODUCTION_DEPLOY_LOCK_FILE" == "$expected_lock_file" ]] ||
+		fail "Campaigns restart deploy lock override is outside the reviewed boundary."
+	export CAMPAIGNS_DATABASE_CUTOVER_MARKER="$cutover_marker"
+	export CAMPAIGNS_FIRST_CUTOVER_STAGED_MARKER="$staged_marker"
+	export PRODUCTION_DEPLOY_LOCK_FILE="$expected_lock_file"
 }
 
 restart_rehearsal_checkpoint() {
@@ -331,13 +384,20 @@ verify_running_service() {
 wait_for_revision() {
 	local url="$1"
 	local expected_revision="$2"
-	local response
-	response="$(curl -fsS --connect-timeout 2 --max-time 5 "$url")" ||
-		fail "Legacy runtime health request failed: $url"
-	[[ -z "$expected_revision" ||
-		"$response" == *"\"revision\":\"$expected_revision\""* ||
-		"$response" == *"\"revision\": \"$expected_revision\""* ]] ||
-		fail "Legacy runtime health revision is invalid: $url"
+	local attempt response
+	for ((attempt = 1; attempt <= 3; attempt += 1)); do
+		response="$(
+			curl -fsS --connect-timeout 2 --max-time 5 "$url" 2>/dev/null
+		)" || response=""
+		if [[ -n "$response" ]] &&
+			[[ -z "$expected_revision" ||
+				"$response" == *"\"revision\":\"$expected_revision\""* ||
+				"$response" == *"\"revision\": \"$expected_revision\""* ]]; then
+			return
+		fi
+		((attempt == 3)) || sleep 1
+	done
+	fail "Legacy runtime did not reach the expected healthy revision: $url"
 }
 
 target_queue_names() {
@@ -388,6 +448,7 @@ assert_legacy_source_present() {
 	local source_url source_state
 	source_url="$(get_env_value DATABASE_BACKUP_URL)" ||
 		fail "DATABASE_BACKUP_URL is missing or duplicated."
+	source_url="$(to_libpq_url "$source_url")"
 	(
 		export PGURL="$source_url"
 		source_state="$(
@@ -489,8 +550,9 @@ assert_legacy_runtime() {
 }
 
 prepare_initial_restart() {
-	local current_revision phase source_schema_state marker_revision
+	local current_branch current_revision phase source_schema_state marker_revision
 	local marker_target_volume marker_artifact
+	local required_next_file required_next_type
 
 	[[ ! -e "$restart_receipt" && ! -L "$restart_receipt" ]] ||
 		fail "Campaigns restart receipt already exists."
@@ -512,12 +574,45 @@ prepare_initial_restart() {
 	[[ "$current_revision" == "$marker_revision" ]] ||
 		fail "Campaigns restart checkout differs from the cutover revision."
 	if [[ "${CAMPAIGNS_CUTOVER_REHEARSAL:-}" != "true" ]]; then
+		current_branch="$(
+			git -C "$server_root" symbolic-ref --quiet --short HEAD
+		)" || fail "Campaigns restart requires an attached production branch."
+		[[ "$current_branch" == "prod" &&
+			"$(git -C "$server_root" rev-parse --verify prod)" == "$marker_revision" ]] ||
+			fail "Campaigns restart requires the rollback revision on the local prod branch."
 		git -C "$server_root" cat-file -e \
 			"$EXPECTED_NEXT_REVISION^{commit}" 2>/dev/null ||
 			fail "Campaigns next revision was not fetched before restart."
 		git -C "$server_root" merge-base --is-ancestor \
 			"$marker_revision" "$EXPECTED_NEXT_REVISION" ||
 			fail "Campaigns next revision is not a fast-forward of the active cutover revision."
+		for required_next_file in \
+			scripts/production-deploy-lock.sh \
+			scripts/campaigns-database-lifecycle.sh \
+			scripts/cutover-campaigns-database-production.sh \
+			scripts/restart-campaigns-database-cutover-production.sh \
+			deploy/docker-compose.prod.yml; do
+			required_next_type="$(
+				git -C "$server_root" ls-tree \
+					"$EXPECTED_NEXT_REVISION" -- "$required_next_file" |
+					awk '
+						NF {
+							print $1 ":" $2
+							found += 1
+						}
+						END { exit(found == 1 ? 0 : 1) }
+					'
+			)" || fail "Campaigns next revision is missing $required_next_file."
+			[[ "$required_next_type" == "100644:blob" ||
+				"$required_next_type" == "100755:blob" ]] ||
+				fail "Campaigns next revision has an unsafe $required_next_file."
+			if [[ "$required_next_file" == *.sh ]]; then
+				git -C "$server_root" show \
+					"$EXPECTED_NEXT_REVISION:$required_next_file" |
+					bash -n ||
+					fail "Campaigns next revision has invalid shell syntax in $required_next_file."
+			fi
+		done
 	fi
 	require_campaigns_first_cutover_staged_revision "$marker_revision" ||
 		fail "Campaigns staged revision differs from the cutover marker."
