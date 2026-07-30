@@ -1,5 +1,6 @@
 import {
 	CampaignEmailNotificationRequestedEventPayload,
+	CampaignNotificationDeliveryOutcomeEventPayload,
 	CampaignTelegramNotificationRequestedEventPayload,
 	DailySummaryTelegramNotificationRequestedEventPayload,
 	LeadIntegrationEventPayloadV2,
@@ -24,6 +25,7 @@ const UUID_PATTERN =
 
 export type {
 	CampaignEmailNotificationRequestedEventPayload,
+	CampaignNotificationDeliveryOutcomeEventPayload,
 	CampaignTelegramNotificationRequestedEventPayload,
 	DailySummaryTelegramNotificationRequestedEventPayload,
 	LeadIntegrationEventPayloadV2,

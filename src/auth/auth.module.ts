@@ -62,6 +62,7 @@ import { JwtModule } from '@nestjs/jwt';
 		GoogleStrategy,
 		GithubStrategy,
 		SocialMediaAuthService
-	]
+	],
+	exports: [AccessJwtService]
 })
 export class AuthModule {}

@@ -23,11 +23,13 @@ EXPECTED_REVISION="${EXPECTED_REVISION:-}"
 EXPECTED_WORKER_REVISION="${EXPECTED_WORKER_REVISION:-$EXPECTED_REVISION}"
 
 server_root="$APP_ROOT/winwidget.ru_server"
+# shellcheck source=scripts/production-deploy-lock.sh
+source "$server_root/scripts/production-deploy-lock.sh"
+acquire_production_deploy_lock "Notification Delivery database cutover"
 temporary_directory=""
 worker_stop_started=false
 target_accepted=false
 forward_only=false
-cutover_complete=false
 preparing_marker_created=false
 new_cutover=false
 marker_phase=""
@@ -78,7 +80,6 @@ target_postgres_image=""
 target_admin_user=""
 target_admin_password_file=""
 target_admin_password=""
-target_admin_url=""
 target_admin_libpq_url=""
 target_admin_server_libpq_url=""
 target_postgres_image_id=""
@@ -398,13 +399,24 @@ validate_marker() {
 		-v source_database_oid="$source_database_oid" \
 		-v target_host="$TARGET_HOST" \
 		-v target_port="$target_port" \
-		-v target_volume="$target_volume" \
-		-v postgres_image="$target_postgres_image" \
-		-v postgres_image_id="$target_postgres_image_id" \
-		-v postgres_system_identifier="$target_system_identifier" '
-		function valid_hash(value) {
-			return value == "pending" || value ~ /^[0-9a-f]{64}$/
-		}
+			-v target_volume="$target_volume" \
+			-v postgres_image="$target_postgres_image" \
+			-v postgres_image_id="$target_postgres_image_id" \
+			-v postgres_system_identifier="$target_system_identifier" '
+			function valid_hex(value, expected_length) {
+				return length(value) == expected_length && value ~ /^[0-9a-f]+$/
+			}
+			function valid_hash(value) {
+				return value == "pending" || valid_hex(value, 64)
+			}
+			function valid_image(value) {
+				return substr(value, 1, 7) == "sha256:" &&
+					valid_hex(substr(value, 8), 64)
+			}
+			function valid_timestamp(value) {
+				return length(value) == 20 &&
+					value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/
+			}
 		{
 			count[$1] += 1
 			value[$1] = substr($0, index($0, "=") + 1)
@@ -439,31 +451,31 @@ validate_marker() {
 				value["version"] != "7" ||
 				value["phase"] !~ /^(preparing|restoring|prepared|forward_only|complete)$/ ||
 				value["source_schema_state"] !~ /^(retained|dropped)$/ ||
-				value["source_database"] !~ /^[A-Za-z_][A-Za-z0-9_]*$/ ||
-				value["source_database"] == target ||
-				value["source_endpoint_sha256"] != source_endpoint_sha256 ||
-				value["source_endpoint_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				value["source_system_identifier"] != source_system_identifier ||
-				value["source_system_identifier"] !~ /^[0-9]+$/ ||
+					value["source_database"] !~ /^[A-Za-z_][A-Za-z0-9_]*$/ ||
+					value["source_database"] == target ||
+					value["source_endpoint_sha256"] != source_endpoint_sha256 ||
+					!valid_hex(value["source_endpoint_sha256"], 64) ||
+					value["source_system_identifier"] != source_system_identifier ||
+					value["source_system_identifier"] !~ /^[0-9]+$/ ||
 				value["source_database_oid"] != source_database_oid ||
 				value["source_database_oid"] !~ /^[0-9]+$/ ||
 				value["source_admin_audit_access_preexisting"] !~ /^(true|false)$/ ||
 				value["target_database"] != target ||
 				value["target_host"] != target_host ||
 				value["target_port"] != target_port ||
-				value["target_volume"] != target_volume ||
-				value["postgres_image"] != postgres_image ||
-				value["postgres_image_id"] != postgres_image_id ||
-				value["postgres_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
-				value["postgres_system_identifier"] != postgres_system_identifier ||
-				value["postgres_system_identifier"] !~ /^[0-9]+$/ ||
-				value["worker_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
-				value["revision"] !~ /^[0-9a-f]{40}$/ ||
-				!valid_hash(value["dump_sha256"]) ||
-				!valid_hash(value["source_schema_sha256"]) ||
-				!valid_hash(value["source_manifest_sha256"]) ||
-				!valid_hash(value["target_manifest_sha256"]) ||
-				value["updated_at"] !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/) invalid = 1
+					value["target_volume"] != target_volume ||
+					value["postgres_image"] != postgres_image ||
+					value["postgres_image_id"] != postgres_image_id ||
+					!valid_image(value["postgres_image_id"]) ||
+					value["postgres_system_identifier"] != postgres_system_identifier ||
+					value["postgres_system_identifier"] !~ /^[0-9]+$/ ||
+					!valid_image(value["worker_image_id"]) ||
+					!valid_hex(value["revision"], 40) ||
+					!valid_hash(value["dump_sha256"]) ||
+					!valid_hash(value["source_schema_sha256"]) ||
+					!valid_hash(value["source_manifest_sha256"]) ||
+					!valid_hash(value["target_manifest_sha256"]) ||
+					!valid_timestamp(value["updated_at"])) invalid = 1
 			if (value["phase"] ~ /^(prepared|forward_only|complete)$/ &&
 				(value["dump_sha256"] == "pending" ||
 					value["source_schema_sha256"] == "pending" ||
@@ -949,7 +961,6 @@ process.stdout.write(
 					parsed_target_libpq_url parsed_target_server_libpq_url \
 					password_base64 <<<"$line"
 				target_admin_user="$parsed_user"
-				target_admin_url="$parsed_target_url"
 				target_admin_libpq_url="$parsed_target_libpq_url"
 				target_admin_server_libpq_url="$parsed_target_server_libpq_url"
 				target_admin_password="$(
@@ -3705,7 +3716,6 @@ if [[ -f "$MARKER_FILE" || -L "$MARKER_FILE" ]]; then
 			fi
 			verify_source_cleanup_complete ||
 				fail "Completed cutover source schema or role isolation drifted."
-			cutover_complete=true
 			echo "Notification Delivery database cutover is already complete."
 			exit 0
 			;;
@@ -3739,7 +3749,6 @@ if [[ -f "$MARKER_FILE" || -L "$MARKER_FILE" ]]; then
 			verify_maintenance_backup_target true
 			drop_source_schema_and_disable_roles
 			write_marker "complete"
-			cutover_complete=true
 			echo "Notification Delivery database cutover finalized; the source schema was removed and its dedicated source roles were disabled."
 			exit 0
 			;;

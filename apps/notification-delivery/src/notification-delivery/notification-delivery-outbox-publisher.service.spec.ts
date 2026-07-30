@@ -226,6 +226,55 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 		);
 	});
 
+	it('publishes a strictly validated Campaigns delivery outcome v2', async () => {
+		const { service, prisma, rabbitMq } = createService();
+		const outcome = {
+			...event,
+			messageId: '44444444-4444-4444-8444-444444444444',
+			eventType: 'notification.delivery.outcome.v2',
+			routingKey: 'notification.delivery.outcome.v2',
+			payload: {
+				schemaVersion: 2,
+				eventType: 'notification.delivery.outcome.v2',
+				eventId: '44444444-4444-4444-8444-444444444444',
+				occurredAt: '2026-07-30T10:00:00.000Z',
+				correlationId: '55555555-5555-4555-8555-555555555555',
+				sourceEventId: event.messageId,
+				sourceKind: 'campaign-email',
+				campaignId: '66666666-6666-4666-8666-666666666666',
+				deliveryId: '77777777-7777-4777-8777-777777777777',
+				dispatchGeneration: 2,
+				status: 'FAILED',
+				failure: {
+					normalizedCode: 'SMTP_REJECTED',
+					safeReason: 'Mailbox rejected the message'
+				}
+			}
+		};
+
+		await (service as any).publish(outcome);
+
+		expect(rabbitMq.publishOutboxMessage).toHaveBeenCalledWith(
+			'winwidget.events',
+			'notification.delivery.outcome.v2',
+			outcome.payload,
+			expect.objectContaining({
+				messageId: outcome.messageId,
+				type: outcome.eventType
+			})
+		);
+		expect(
+			prisma.notificationDeliveryOutboxEvent.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: NotificationDeliveryOutboxStatus.PUBLISHED,
+					lastError: null
+				})
+			})
+		);
+	});
+
 	it.each([
 		{
 			label: 'a route owned by the legacy worker',

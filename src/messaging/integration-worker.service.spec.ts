@@ -4,6 +4,7 @@ import {
 	NOTIFICATION_DELIVERY_KINDS
 } from '@/messaging/messaging.constants';
 import type { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
+import type { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import type { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
 import type { PrismaService } from '@/prisma.service';
@@ -45,6 +46,9 @@ describe('IntegrationWorkerService', () => {
 		const heartbeat = {
 			markSuccessfulConsume: jest.fn()
 		} as unknown as MessagingHeartbeatService;
+		const adminEventLog = {
+			recordInTransaction: jest.fn().mockResolvedValue({})
+		} as unknown as AdminEventLogService;
 		const failureUpsert = jest.fn().mockResolvedValue({});
 		const receiptUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const receiptDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
@@ -102,10 +106,6 @@ describe('IntegrationWorkerService', () => {
 			scheduledJobRun: {
 				updateMany: jest.fn().mockResolvedValue({ count: 0 })
 			},
-			mailingDelivery: {
-				findUnique: jest.fn()
-			},
-			$queryRaw: jest.fn().mockResolvedValue([{ waitMs: 0 }]),
 			$executeRaw: jest.fn().mockResolvedValue(0),
 			$transaction: jest.fn(callback => callback(transaction))
 		} as unknown as PrismaService;
@@ -116,12 +116,14 @@ describe('IntegrationWorkerService', () => {
 				delivery,
 				configService,
 				prisma,
-				heartbeat
+				heartbeat,
+				adminEventLog
 			),
 			rabbitMq,
 			delivery,
 			prisma,
-			transaction
+			transaction,
+			adminEventLog
 		};
 	};
 
@@ -199,6 +201,37 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createCampaignAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-07-30T12:00:00.000Z',
+					correlationId: '22222222-2222-4222-8222-222222222222',
+					actorId: 'admin-user-id',
+					action: 'CAMPAIGN_DELIVERY_RETRY',
+					target: {
+						campaignId: '33333333-3333-4333-8333-333333333333',
+						deliveryId: '44444444-4444-4444-8444-444444444444'
+					},
+					metadata: {
+						channel: 'EMAIL',
+						dispatchGeneration: 2
+					}
+				})
+			),
+			fields: {
+				routingKey: 'admin.audit.event.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	it('starts consumers only for integrations that remain in the monolith', async () => {
 		const { service, rabbitMq } = createService();
 
@@ -221,11 +254,10 @@ describe('IntegrationWorkerService', () => {
 			'webhook',
 			'bitrix24',
 			'amo-crm',
-			'mailing-email',
-			'mailing-telegram',
 			'daily-summary-telegram',
 			'telegram-destination-unavailable',
 			'notification-delivery-outcome',
+			'campaign-admin-audit',
 			'auto-renewal'
 		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
@@ -260,6 +292,47 @@ describe('IntegrationWorkerService', () => {
 			expect.any(Function),
 			4
 		);
+	});
+
+	it('writes a Campaigns audit and its delivered receipt atomically', async () => {
+		const { service, rabbitMq, delivery, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'campaign-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createCampaignAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				adminId: 'admin-user-id',
+				section: 'CAMPAIGNS',
+				action: 'CAMPAIGN_DELIVERY_RETRY',
+				entityType: 'campaign-delivery',
+				entityId: '44444444-4444-4444-8444-444444444444'
+			})
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					eventId: '11111111-1111-4111-8111-111111111111',
+					integration: 'campaign-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
 	});
 
 	it('rejects kinds owned by notification delivery', async () => {
@@ -1087,72 +1160,6 @@ describe('IntegrationWorkerService', () => {
 		});
 		expect(delivery.deliver).toHaveBeenCalledTimes(1);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-	});
-
-	it('does not spend mailing rate limit on cancelled deliveries', async () => {
-		const { service, prisma } = createService();
-		(prisma.mailingDelivery.findUnique as jest.Mock).mockResolvedValue({
-			status: 'CANCELLED',
-			updatedAt: new Date(),
-			campaign: {
-				status: 'CANCELLED',
-				cancelRequestedAt: new Date()
-			}
-		});
-
-		const bypass = await (service as any).shouldBypassMailingRateLimit(
-			'mailing-email',
-			{
-				schemaVersion: 1,
-				eventType: 'mailing.delivery.requested.v1',
-				campaignId: '22222222-2222-4222-8222-222222222222',
-				deliveryId: '33333333-3333-4333-8333-333333333333',
-				channel: 'EMAIL'
-			}
-		);
-
-		expect(bypass).toBe(true);
-	});
-
-	it('reserves a shared PostgreSQL slot before a mailing delivery', async () => {
-		const { service, prisma, delivery } = createService({
-			MAILING_EMAIL_RATE_PER_SECOND: '5'
-		});
-		(prisma.mailingDelivery.findUnique as jest.Mock).mockResolvedValue({
-			status: 'PENDING',
-			updatedAt: new Date(),
-			campaign: {
-				status: 'RUNNING',
-				cancelRequestedAt: null
-			}
-		});
-		const payload = {
-			schemaVersion: 1,
-			eventType: 'mailing.delivery.requested.v1',
-			campaignId: '22222222-2222-4222-8222-222222222222',
-			deliveryId: '33333333-3333-4333-8333-333333333333',
-			channel: 'EMAIL'
-		};
-
-		await (service as any).deliverWithRateLimit(
-			'mailing-email',
-			payload,
-			'11111111-1111-4111-8111-111111111111'
-		);
-
-		expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
-		const statement = (prisma.$queryRaw as jest.Mock).mock.calls[0][0];
-		const sql = statement.strings.join('?');
-		expect(sql).toContain('INSERT INTO "messaging_rate_limits"');
-		expect(sql).toContain('ON CONFLICT ("key") DO UPDATE');
-		expect(sql).toContain('GREATEST');
-		expect(statement.values).toContain('mailing-email');
-		expect(statement.values).toContain(200);
-		expect(delivery.deliver).toHaveBeenCalledWith(
-			'mailing-email',
-			payload,
-			'11111111-1111-4111-8111-111111111111'
-		);
 	});
 
 	it('redacts only resolved failure details after configured retention', async () => {

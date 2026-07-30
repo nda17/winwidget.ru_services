@@ -24,13 +24,13 @@ import { WidgetRuntimeModule } from '@/widget-runtime/widget-runtime.module';
 import { QuizModule } from '@/quiz/quiz.module';
 import { CallbackModule } from '@/callback/callback.module';
 import { CalculatorModule } from '@/calculator/calculator.module';
+import { CampaignsInternalModule } from '@/campaigns-internal/campaigns-internal.module';
 import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
 import { StopOfferModule } from '@/stop-offer/stop-offer.module';
 import { OnlineConsultantModule } from '@/online-consultant/online-consultant.module';
 import { DevToolsModule } from '@/dev-tools/dev-tools.module';
 import { HealthModule } from '@/health/health.module';
 import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
-import { MailingModule } from '@/mailing/mailing.module';
 import { MessagingAdminModule } from '@/messaging/messaging-admin.module';
 import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -69,7 +69,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		LegalPagesModule,
 		HomePageContentModule,
 		NotesModule,
-		MailingModule,
+		CampaignsInternalModule,
 		MessagingAdminModule,
 		HealthModule,
 		TelegramBotModule,

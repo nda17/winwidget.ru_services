@@ -31,8 +31,24 @@ const DATABASE_URL_ENV_KEYS = [
 	'MAINTENANCE_DATABASE_URL_PRODUCTION',
 	'NOTIFICATION_DELIVERY_BACKUP_URL',
 	'NOTIFICATION_DELIVERY_DATABASE_URL',
-	'NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION'
+	'NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION',
+	'CAMPAIGNS_BACKUP_URL',
+	'CAMPAIGNS_DATABASE_URL',
+	'CAMPAIGNS_MIGRATION_DATABASE_URL'
 ] as const;
+
+const SERVICE_DATABASE_CONFIG = {
+	'notification-delivery': {
+		key: 'NOTIFICATION_DELIVERY_BACKUP_URL',
+		label: 'Notification Delivery',
+		filePrefix: 'winwidget-notification-delivery-db'
+	},
+	campaigns: {
+		key: 'CAMPAIGNS_BACKUP_URL',
+		label: 'Campaigns',
+		filePrefix: 'winwidget-campaigns-db'
+	}
+} as const;
 
 interface PostgresConnection {
 	target: DatabaseBackupTarget;
@@ -72,10 +88,11 @@ export class DatabaseBackupService implements OnModuleInit {
 			const createdAt = new Date();
 			const timestamp = createdAt.toISOString().replace(/[:.]/g, '-');
 			const database = this.getPostgresConnection(target);
-			const fileName =
+			const filePrefix =
 				target === 'core'
-					? `winwidget-db-${timestamp}.dump`
-					: `winwidget-notification-delivery-db-${timestamp}.dump`;
+					? 'winwidget-db'
+					: SERVICE_DATABASE_CONFIG[target].filePrefix;
+			const fileName = `${filePrefix}-${timestamp}.dump`;
 			const filePath = join(directory, fileName);
 
 			await this.runCommand(
@@ -155,18 +172,14 @@ export class DatabaseBackupService implements OnModuleInit {
 	private getPostgresConnection(
 		target: DatabaseBackupTarget
 	): PostgresConnection {
-		if (target === 'notification-delivery') {
-			const key = 'NOTIFICATION_DELIVERY_BACKUP_URL';
+		if (target !== 'core') {
+			const config = SERVICE_DATABASE_CONFIG[target];
+			const key = config.key;
 			const raw = this.configService.get<string>(key)?.trim();
 			if (!raw || ['change_me', 'XYZXYZXYZ'].includes(raw)) {
 				throw new Error(`${key} is not configured`);
 			}
-			return this.parsePostgresConnection(
-				key,
-				raw,
-				target,
-				'Notification Delivery'
-			);
+			return this.parsePostgresConnection(key, raw, target, config.label);
 		}
 
 		const mode =

@@ -145,12 +145,19 @@ describe('NotificationDeliveryWorkerService', () => {
 		({
 			content: Buffer.from(
 				JSON.stringify({
-					schemaVersion: 1,
-					eventType: 'notification.campaign.email.requested.v1',
+					schemaVersion: 2,
+					eventType: 'notification.campaign.email.requested.v2',
+					eventId,
+					occurredAt: '2026-07-30T10:00:00.000Z',
+					correlationId: '44444444-4444-4444-8444-444444444444',
+					campaignId: '33333333-3333-4333-8333-333333333333',
+					deliveryId: '22222222-2222-4222-8222-222222222222',
+					dispatchGeneration: 1,
 					reference: {
-						type: 'mailing-delivery',
+						type: 'campaign-delivery',
 						id: '22222222-2222-4222-8222-222222222222',
-						aggregateId: '33333333-3333-4333-8333-333333333333'
+						aggregateId: '33333333-3333-4333-8333-333333333333',
+						dispatchGeneration: 1
 					},
 					destination: { email: 'owner@example.com' },
 					content: {
@@ -161,11 +168,11 @@ describe('NotificationDeliveryWorkerService', () => {
 			),
 			fields: {
 				exchange: 'winwidget.events',
-				routingKey: 'notification.campaign.email.requested.v1'
+				routingKey: 'notification.campaign.email.requested.v2'
 			},
 			properties: {
 				messageId: eventId,
-				type: 'notification.campaign.email.requested.v1',
+				type: 'notification.campaign.email.requested.v2',
 				headers: {}
 			}
 		}) as ConsumeMessage;
@@ -373,10 +380,15 @@ describe('NotificationDeliveryWorkerService', () => {
 		expect(adapter.deliver).toHaveBeenCalledWith(
 			'campaign-email',
 			expect.objectContaining({
+				eventId,
+				campaignId: '33333333-3333-4333-8333-333333333333',
+				deliveryId: '22222222-2222-4222-8222-222222222222',
+				dispatchGeneration: 1,
 				reference: {
-					type: 'mailing-delivery',
+					type: 'campaign-delivery',
 					id: '22222222-2222-4222-8222-222222222222',
-					aggregateId: '33333333-3333-4333-8333-333333333333'
+					aggregateId: '33333333-3333-4333-8333-333333333333',
+					dispatchGeneration: 1
 				}
 			}),
 			eventId,
@@ -387,13 +399,20 @@ describe('NotificationDeliveryWorkerService', () => {
 		).toHaveBeenCalledWith({
 			data: [
 				expect.objectContaining({
-					deduplicationKey: `notification:${eventId}:campaign-email:outcome:delivered:v1`,
+					deduplicationKey: `notification:${eventId}:campaign-email:generation:1:outcome:delivered:v2`,
 					exchange: NotificationDeliveryExchange.EVENTS,
-					eventType: 'notification.delivery.outcome.v1',
-					routingKey: 'notification.delivery.outcome.v1',
+					eventType: 'notification.delivery.outcome.v2',
+					routingKey: 'notification.delivery.outcome.v2',
 					payload: expect.objectContaining({
+						schemaVersion: 2,
+						eventType: 'notification.delivery.outcome.v2',
+						eventId: expect.any(String),
+						correlationId: '44444444-4444-4444-8444-444444444444',
 						sourceEventId: eventId,
 						sourceKind: 'campaign-email',
+						campaignId: '33333333-3333-4333-8333-333333333333',
+						deliveryId: '22222222-2222-4222-8222-222222222222',
+						dispatchGeneration: 1,
 						status: 'DELIVERED',
 						failure: null
 					})
@@ -496,12 +515,18 @@ describe('NotificationDeliveryWorkerService', () => {
 		).toHaveBeenCalledWith({
 			data: [
 				expect.objectContaining({
-					deduplicationKey: `notification:${eventId}:campaign-email:outcome:failed:v1`,
-					eventType: 'notification.delivery.outcome.v1',
-					routingKey: 'notification.delivery.outcome.v1',
+					deduplicationKey: `notification:${eventId}:campaign-email:generation:1:outcome:failed:v2`,
+					eventType: 'notification.delivery.outcome.v2',
+					routingKey: 'notification.delivery.outcome.v2',
 					payload: expect.objectContaining({
+						schemaVersion: 2,
+						eventType: 'notification.delivery.outcome.v2',
+						correlationId: '44444444-4444-4444-8444-444444444444',
 						sourceEventId: eventId,
 						sourceKind: 'campaign-email',
+						campaignId: '33333333-3333-4333-8333-333333333333',
+						deliveryId: '22222222-2222-4222-8222-222222222222',
+						dispatchGeneration: 1,
 						status: 'FAILED',
 						failure: {
 							normalizedCode: 'SMTP_EENVELOPE',

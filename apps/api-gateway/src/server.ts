@@ -370,7 +370,9 @@ const createUpstreamHeaders = (
 			lowerName === 'x-correlation-id' ||
 			lowerName.startsWith('x-forwarded-') ||
 			lowerName.startsWith('x-user') ||
-			lowerName.startsWith('x-auth')
+			lowerName.startsWith('x-auth') ||
+			lowerName === 'x-winwidget-internal-token' ||
+			lowerName.startsWith('x-internal-')
 		) {
 			continue;
 		}

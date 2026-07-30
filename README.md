@@ -94,6 +94,10 @@ winwidget.ru_server/
 │   └── ...                    # контент, статистика и admin-модули
 ├── apps/
 │   ├── api-gateway/           # отдельный внешний API ingress без бизнес-логики
+│   ├── campaigns/             # автономный NestJS-сервис кампаний
+│   │   ├── src/               # API, snapshot worker, Outbox publisher и health
+│   │   ├── prisma/            # собственные schema, migrations и Prisma Client
+│   │   └── Dockerfile         # image только с artifact сервиса
 │   └── notification-delivery/ # автономный NestJS-сервис доставки
 │       ├── src/               # собственный bootstrap, modules и adapters
 │       ├── prisma/            # собственные schema, migrations и Prisma Client
@@ -109,10 +113,11 @@ winwidget.ru_server/
 ```
 
 Каталоги внутри `apps/` называются по capability без избыточного суффикса
-`-service`: `apps/notification-delivery`. В архитектурном реестре и package
-metadata компонент может называться `notification-delivery-service`, а
-Compose-процесс — `notification-delivery-worker`; это разные уровни именования,
-а не разные приложения.
+`-service`: `apps/campaigns` и `apps/notification-delivery`. В архитектурном
+реестре и package metadata компонент может называться `campaigns-service` или
+`notification-delivery-service`, а Compose-процесс — `campaigns-service` или
+`notification-delivery-worker`; это разные уровни именования, а не разные
+приложения.
 
 ## Правила модульной архитектуры
 
@@ -134,9 +139,10 @@ Compose-процесс — `notification-delivery-worker`; это разные �
 | Платежи             | `payment`, `affiliate`                                                                           | ЮKassa, активация подписок и referrals              |
 | Виджеты             | `widget`, `quiz`, `callback`, `countdown-timer`, `stop-offer`, `online-consultant`, `calculator` | CRUD, config, leads и preview                       |
 | Контент             | `home-page-content`, `legal-pages`, `site-settings`                                              | главная, документы и настройки сайта                |
-| Администрирование   | `statistics`, `admin-alerts`, `admin-event-log`, `notes`, `mailing`, `health`, `dev-tools`       | dashboard, мониторинг и служебные действия          |
+| Администрирование   | `statistics`, `admin-alerts`, `admin-event-log`, `notes`, `health`, `dev-tools`                  | dashboard, мониторинг и служебные действия          |
 | Уведомления         | `email`, `sms`, `telegram-bot`                                                                   | email, SMS и Telegram                               |
 | Messaging           | `messaging`, `outbox-publisher`, `integration-worker`, `notification-delivery`                   | RabbitMQ, Outbox, retry, DLQ и доставка уведомлений |
+| Кампании            | `apps/campaigns`                                                                                 | кампании, снимки аудитории и статусы доставок       |
 | Регламентные задачи | `scheduled-jobs`, `maintenance`                                                                  | durable scheduler, lease и backup                   |
 | Файлы               | `file`                                                                                           | local uploads и S3                                  |
 | Интеграции          | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                    |
@@ -254,9 +260,9 @@ MODE=production  -> DATABASE_URL_PRODUCTION
 module/client и одним connection pool. `api`, `outbox-publisher`,
 `integration-worker` и `maintenance-worker` используют
 `PrismaModule`/`PrismaService`. Автономный
-`apps/notification-delivery` использует собственный Prisma module и
-сгенерированный service client; его зависимости, сборка и Docker context не
-связаны с runtime artifact монолита.
+`apps/notification-delivery` и `apps/campaigns` используют по одному
+собственному глобальному Prisma module и сгенерированному service client; их
+зависимости, сборка и Docker context не связаны с runtime artifact монолита.
 Feature-модули не регистрируют Prisma service повторно в собственных
 `providers` или `exports`. Root-модуль отключает свой client после завершения
 lifecycle-хуков процесса; API обрабатывает `SIGTERM` через Nest shutdown hooks.
@@ -296,12 +302,37 @@ NOTIFICATION_DELIVERY_DATABASE_URL="$NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCT
   pnpm --dir apps/notification-delivery run prisma:migrate:deploy
 ```
 
+Campaigns владеет отдельной database `winwidget_campaigns`, schema
+`campaigns`, PostgreSQL-контейнером на loopback
+`127.0.0.1:55433` и external volume
+`winwidget-campaigns-postgres-data`. Для него также обязательны три разные
+least-privilege роли:
+
+- migration-role из `CAMPAIGNS_MIGRATION_DATABASE_URL` применяет DDL только
+  через one-shot `campaigns-migrate`;
+- runtime-role из `CAMPAIGNS_DATABASE_URL` доступна только
+  `campaigns-service` и не получает DDL-права;
+- backup-role из `CAMPAIGNS_BACKUP_URL` получает только чтение для
+  `maintenance-worker`.
+
+Schema `campaigns` создаётся bootstrap-процедурой с владельцем
+migration-role до запуска Prisma. Initial migration не выполняет
+`CREATE SCHEMA`, поэтому migration-role работает с
+`database CREATE=false` и не может создавать произвольные schemas.
+
+Миграции Campaigns нельзя запускать из runtime URL:
+
+```bash
+CAMPAIGNS_DATABASE_URL="$CAMPAIGNS_MIGRATION_DATABASE_URL" \
+  pnpm --dir apps/campaigns run prisma:migrate:deploy
+```
+
 Production compose отслеживается вместе с backend-кодом в
-`deploy/docker-compose.prod.yml`. До database cutover он запускает семь
-постоянных backend-контейнеров: `api-gateway`, `api`, `rabbitmq`,
-`outbox-publisher`, `integration-worker`, `notification-delivery-worker`,
-`maintenance-worker`. После cutover восьмым постоянным контейнером становится
-`notification-delivery-postgres`.
+`deploy/docker-compose.prod.yml`. В нём подготовлены отдельные
+`campaigns-service`, `campaigns-migrate` и `campaigns-postgres`, но их
+production-включение выполняется только согласованным Campaigns cutover.
+Наличие service/image/Compose-конфигурации не означает, что перенос данных,
+переключение Gateway, restore drill и production smoke уже выполнены.
 Notification Delivery и Maintenance собираются в отдельные immutable images,
 имеют loopback health endpoints на `4401` и `4300` и могут выкатываться
 независимо после первого baseline deploy. Контейнеры миграций запускаются
@@ -314,12 +345,16 @@ Image Notification Delivery собирается только из
 `apps/notification-delivery`: в нём есть только собственные `dist`, Prisma
 schema/client и production dependencies — без `dist`, Prisma client, виджетов
 или production dependencies монолита.
+Image Campaigns аналогично собирается только из `apps/campaigns`, использует
+собственный Prisma Client и публикует API/health только на
+`127.0.0.1:4500`.
 RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
 привязаны только к `127.0.0.1` backend VPS. PostgreSQL Notification Delivery
 аналогично публикует `5432` только на `127.0.0.1:55432`; наружу VPS этот порт
-не открывается. Для этой публикации используется выделенная обычная
-bridge-сеть, а не `internal`: worker и migration-контейнеры работают в host
-network и подключаются к PostgreSQL через loopback.
+не открывается. PostgreSQL Campaigns использует тот же принцип на
+`127.0.0.1:55433`. Для каждой service database используется отдельная
+bridge-сеть; service и migration-контейнеры работают в host network и
+подключаются к PostgreSQL через loopback.
 
 ## RabbitMQ и transactional outbox
 
@@ -347,7 +382,7 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal
 NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://notification_delivery_runtime:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
 NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://notification_delivery_migration:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
 NOTIFICATION_DELIVERY_BACKUP_URL=postgresql://notification_delivery_backup:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
@@ -358,9 +393,22 @@ NOTIFICATION_DELIVERY_PREFETCH=5
 NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram
 NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS=90
 NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS=30
+CAMPAIGNS_DATABASE_URL=postgresql://winwidget_campaigns_runtime:<password>@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+CAMPAIGNS_MIGRATION_DATABASE_URL=postgresql://winwidget_campaigns_migration:<password>@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+CAMPAIGNS_BACKUP_URL=postgresql://winwidget_campaigns_backup:<password>@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+CAMPAIGNS_PROCESS_ROLE=all
+CAMPAIGNS_LISTEN_HOST=127.0.0.1
+CAMPAIGNS_HEALTH_PORT=4500
+CAMPAIGNS_CORE_INTERNAL_BASE_URL=http://127.0.0.1:4200
+CAMPAIGNS_INTERNAL_TOKEN=<random-token-at-least-32-chars>
+CAMPAIGNS_INTERNAL_TIMEOUT_MS=10000
+CAMPAIGNS_PREFETCH=10
+CAMPAIGNS_EMAIL_RATE_PER_SECOND=10
+CAMPAIGNS_TELEGRAM_RATE_PER_SECOND=5
+CAMPAIGNS_OUTBOX_BATCH_SIZE=50
+CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS=1000
+CAMPAIGNS_OUTBOX_RETENTION_DAYS=7
 MAINTENANCE_WORKER_KINDS=database-backup
-MAILING_EMAIL_RATE_PER_SECOND=5
-MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
 В production пароль должен отличаться от локального. Удобно использовать
@@ -372,13 +420,15 @@ openssl rand -hex 32
 
 В production используются отдельные service accounts, локальный loopback-порт
 и verified external volume. Полный preflight и permissions runbook находится в
-`deploy/backend/README.md`. Минимальный набор в
+`../deploy/backend/README.md`. Минимальный набор в
 `/opt/winwidget/deploy/backend/.env.production`:
 
-`NOTIFICATION_DELIVERY_IMAGE` и `NOTIFICATION_DELIVERY_REVISION` в этом файле
-не хранятся. Full и service-only deploy сами экспортируют соответственно
-`winwidget-notification-delivery:git-<полный-commit-SHA>` и полный commit SHA;
-так image tag и OCI revision всегда относятся к проверяемому релизу.
+`NOTIFICATION_DELIVERY_IMAGE`/`NOTIFICATION_DELIVERY_REVISION` и
+`CAMPAIGNS_IMAGE`/`CAMPAIGNS_REVISION` в этом файле не хранятся.
+Соответствующие deploy-скрипты экспортируют immutable image tag и полный
+commit SHA, поэтому OCI revision всегда относится к проверяемому релизу.
+Отдельный Campaigns deploy разрешён только после завершённого согласованного
+cutover и durable lifecycle marker.
 
 ```env
 COMPOSE_PROJECT_NAME=winwidget
@@ -390,6 +440,7 @@ RABBITMQ_MONITOR_USER=winwidget-monitor
 RABBITMQ_MONITOR_PASSWORD=<отдельный-hex-пароль>
 RABBITMQ_PUBLISHER_URL=amqp://winwidget-publisher:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_INTEGRATION_WORKER_URL=amqp://winwidget-integration:<url-encoded-password>@127.0.0.1:5672/winwidget
+RABBITMQ_CAMPAIGNS_URL=amqp://winwidget-campaigns:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_NOTIFICATION_DELIVERY_URL=amqp://winwidget-notification-delivery:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_MAINTENANCE_WORKER_URL=amqp://winwidget-maintenance:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
@@ -406,7 +457,7 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal
 NOTIFICATION_DELIVERY_POSTGRES_IMAGE=postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
 NOTIFICATION_DELIVERY_POSTGRES_PORT=55432
 NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME=winwidget-notification-delivery-postgres-data
@@ -419,9 +470,27 @@ NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
 NOTIFICATION_DELIVERY_KINDS=email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram
 NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS=90
 NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS=30
+CAMPAIGNS_POSTGRES_IMAGE=postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+CAMPAIGNS_POSTGRES_PORT=55433
+CAMPAIGNS_POSTGRES_DATA_VOLUME=winwidget-campaigns-postgres-data
+CAMPAIGNS_POSTGRES_ADMIN_USER=winwidget_campaigns_admin
+CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE=/opt/winwidget/deploy/backend/.campaigns-postgres-admin-password
+CAMPAIGNS_MIGRATION_DATABASE_URL=postgresql://winwidget_campaigns_migration:<password>@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+CAMPAIGNS_DATABASE_URL=postgresql://winwidget_campaigns_runtime:<password>@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+CAMPAIGNS_BACKUP_URL=postgresql://winwidget_campaigns_backup:<password>@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+CAMPAIGNS_PROCESS_ROLE=all
+CAMPAIGNS_LISTEN_HOST=127.0.0.1
+CAMPAIGNS_HEALTH_PORT=4500
+CAMPAIGNS_CORE_INTERNAL_BASE_URL=http://127.0.0.1:4200
+CAMPAIGNS_INTERNAL_TOKEN=<random-token-at-least-32-chars>
+CAMPAIGNS_INTERNAL_TIMEOUT_MS=10000
+CAMPAIGNS_PREFETCH=10
+CAMPAIGNS_EMAIL_RATE_PER_SECOND=10
+CAMPAIGNS_TELEGRAM_RATE_PER_SECOND=5
+CAMPAIGNS_OUTBOX_BATCH_SIZE=50
+CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS=1000
+CAMPAIGNS_OUTBOX_RETENTION_DAYS=7
 MAINTENANCE_WORKER_KINDS=database-backup
-MAILING_EMAIL_RATE_PER_SECOND=5
-MAILING_TELEGRAM_RATE_PER_SECOND=10
 ```
 
 Все три Notification Delivery URL должны указывать на одинаковые protocol,
@@ -431,6 +500,13 @@ host, port, database и SSL-параметры; различаются толь�
 `sslmode=disable`, потому что соединение не выходит за пределы VPS. До cutover
 скрипт принимает текущие три URL облачной source database и атомарно заменяет
 их target-значениями.
+
+Три Campaigns URL подчиняются той же границе и после согласованного cutover
+обязаны указывать на
+`127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable`,
+различаясь только логином и паролем. До cutover routine
+`scripts/deploy-campaigns-production.sh` заблокирован lifecycle marker и не
+создаёт service database автоматически.
 
 Production source проверена как PostgreSQL 18 с locale identity
 `UTF8/libc/C.UTF-8`. Поэтому target использует PostgreSQL 18 Bookworm по
@@ -476,8 +552,13 @@ summary очереди, проверяет отсутствие `PROCESSING` sub
 - `INTEGRATION_WORKER_KINDS` — consumers, запускаемые integration worker;
 - `MAINTENANCE_WORKER_KINDS` — consumers длительных регламентных задач,
   запускаемые maintenance worker;
-- `MAILING_EMAIL_RATE_PER_SECOND` — максимальная скорость массовой email-рассылки в одном worker-процессе;
-- `MAILING_TELEGRAM_RATE_PER_SECOND` — максимальная скорость массовой Telegram-рассылки в одном worker-процессе.
+- `CAMPAIGNS_EMAIL_RATE_PER_SECOND` и
+  `CAMPAIGNS_TELEGRAM_RATE_PER_SECOND` — независимые service-owned лимиты
+  публикации запросов на физическую доставку;
+- `CAMPAIGNS_PREFETCH` — число сообщений, одновременно захватываемых каждым
+  Campaigns consumer;
+- `CAMPAIGNS_OUTBOX_*` — batch, polling и retention собственного
+  transactional Outbox Campaigns.
 
 Административный health и operational alert дополнительно контролируют
 `scheduled_job_runs`: окончательные `FAILED`, задания `QUEUED` с задержкой
@@ -488,14 +569,15 @@ broker доставляет сообщение сам, а worker подтвер�
 Pull-чтение (`basic.get`) для рабочих очередей не используется. Отдельный
 polling применяется только publisher-процессом при чтении PostgreSQL Outbox.
 
-Текущее владение messaging-процессами:
+Целевое владение messaging-процессами после Campaigns cutover:
 
 | Процесс                        | Ответственность                                                                                                                                                                               |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `outbox-publisher`             | Публикация transactional Outbox монолита и создание RabbitMQ topology                                                                                                                         |
+| `outbox-publisher`             | Публикация transactional Outbox монолита и создание принадлежащей монолиту RabbitMQ topology                                                                                                  |
+| `campaigns-service`            | Снимки аудитории, состояние кампаний и доставок, service-owned Outbox/rate limits, snapshot/outcome consumers и их receipts/retry/DLQ                                                         |
 | `notification-delivery-worker` | Физическая email/Telegram-доставка лидов, платежей, лимитов, кампаний, daily summary и subscription expiry; собственные receipts, failures, retry/DLQ Outbox, delivery outcomes и control API |
-| `integration-worker`           | CRM/webhook, оркестрация campaign/daily delivery, применение delivery outcomes и outcome недоступности пользовательского Telegram-канала                                                      |
-| `maintenance-worker`           | Только durable backup-задачи и их scheduler/lease                                                                                                                                             |
+| `integration-worker`           | CRM/webhook, daily summary, монолитный `notification-delivery-outcome`, недоступность пользовательского Telegram-канала, campaign admin audit и auto-renewal; без campaign lifecycle/outcomes |
+| `maintenance-worker`           | Durable scheduler/lease и независимые backup-задачи для core, Notification Delivery и Campaigns                                                                                               |
 
 Один kind не должен одновременно находиться у `integration-worker` и
 `notification-delivery-worker`. Первичный Outbox остаётся в транзакции
@@ -530,26 +612,48 @@ consumer’а. Поэтому сбой RabbitMQ после terminal commit не 
 Бизнес-критичные изменения платежа и подписки остаются синхронными в
 PostgreSQL. Через RabbitMQ выполняются только побочные уведомления.
 
-### Массовые рассылки
+### Campaigns Service
 
-Администратор создаёт кампанию, после чего API сразу возвращает её идентификатор
-и снимок количества получателей. Кампания, получатели и Outbox-события
-создаются одной транзакцией PostgreSQL. Email и Telegram обрабатываются
-независимыми очередями `winwidget.mailing.email` и
-`winwidget.mailing.telegram`.
+`apps/campaigns` владеет campaign lifecycle, immutable-снимками аудитории,
+доставками, control actions, idempotency, rate limits, transactional Outbox,
+consumer receipts и heartbeat. В целевой single-VPS схеме сервис запускается
+с `CAMPAIGNS_PROCESS_ROLE=all`; роли `api`, `worker` и `publisher` позволяют
+разделить процессы позднее без изменения доменного контракта.
 
-- создание требует UUID в `Idempotency-Key`; повтор с тем же ключом и тем же
-  запросом возвращает исходную кампанию;
-- для каждого получателя хранится отдельный статус;
-- Telegram-части сообщения имеют PostgreSQL-checkpoint, поэтому retry продолжает
-  отправку с первой незафиксированной части;
-- worker ограничивает скорость отправки через
-  `MAILING_*_RATE_PER_SECOND`;
-- после перезапуска необработанные сообщения остаются в RabbitMQ;
-- окончательная ошибка попадает в DLQ и отражается в кампании;
-- ручной retry восстанавливает только выбранную доставку;
-- отмена помечает ещё не начатые доставки как отменённые; сообщение, которое
-  уже отправляется, может успеть уйти.
+После согласованного cutover внешний контракт проходит через Gateway по
+префиксу `/api/v1/admin/campaigns`:
+
+- `POST /` — создать кампанию; ADMIN, обязательный UUID
+  `Idempotency-Key`;
+- `GET /` и `GET /:id` — список и детали; ADMIN;
+- `POST /:id/cancel` — отменить кампанию; ADMIN;
+- `GET /:id/deliveries?page=&limit=&status=` — серверная пагинация доставок;
+  ADMIN;
+- `POST /:id/deliveries/:deliveryId/retry` — retry одной доставки; DEV,
+  обязательный UUID `Idempotency-Key`.
+
+Detail DTO возвращает `snapshots` как массив по каналам:
+`{id, sourceSnapshotId, channel, status, recipientCount, sha256, asOf,
+completedAt}`. Campaigns получает авторизацию и NDJSON export аудитории только
+через fail-closed internal API монолита с отдельным
+`CAMPAIGNS_INTERNAL_TOKEN`; destination, count и SHA-256 проверяются в
+каноническом отсортированном виде.
+
+Физическая email/Telegram-доставка остаётся у Notification Delivery через
+`notification.campaign.*.requested.v2`. Результаты возвращаются в отдельную
+Campaigns outcome queue, а `admin.audit.event.v1` обрабатывает
+`integration-worker`. Campaigns публикует зависимые события только из
+собственного transactional Outbox с publisher confirm и `mandatory return`.
+
+Production cutover ещё не выполнен: до переключения обязательны backup и
+restore drill, проверка ролей, миграций, очередей, health/revision, rollback и
+smoke. Отдельным блокирующим pre-source-drop gate остаётся P1-аудит ошибочно
+отключённых Telegram-каналов по legacy delivery/failure данным. Старые URL,
+dual-write и compatibility aliases не сохраняются; источник удаляется только
+после подтверждённого forward-only этапа. Полный порядок находится в
+`../DOCUMENTATION/DEPLOYMENT.md`, чек-лист — в
+`../DOCUMENTATION/DEPLOY_CHECKLIST.md`, незавершённые production gates — в
+`../DOCUMENTATION/BACKLOG.md`.
 
 ### Уведомление о лимите заявок
 
@@ -578,12 +682,14 @@ Telegram и PostgreSQL.
 
 ### Backup PostgreSQL
 
-Для основной БД (`core`) и БД Notification Delivery
-(`notification-delivery`) создаются независимые durable-задания:
-`DATABASE_BACKUP` и `NOTIFICATION_DELIVERY_DATABASE_BACKUP`. Плановый backup
-основной БД запускается в настроенное время, а Notification Delivery — через
-15 минут, чтобы два `pg_dump` не конкурировали за CPU, disk I/O и Telegram
-upload. Оба результата отправляются отдельными документами в настроенную
+Для основной БД (`core`), Notification Delivery
+(`notification-delivery`) и Campaigns (`campaigns`) создаются независимые
+durable-задания: `DATABASE_BACKUP`,
+`NOTIFICATION_DELIVERY_DATABASE_BACKUP` и
+`CAMPAIGNS_DATABASE_BACKUP`. Плановый backup основной БД запускается в
+настроенное время, Notification Delivery — через 15 минут, Campaigns — через
+30 минут, чтобы три `pg_dump` не конкурировали за CPU, disk I/O и Telegram
+upload. Результаты отправляются отдельными документами в настроенную
 Telegram-тему вне VPS.
 
 Плановый и ручной backup сначала создают durable-задание в основной PostgreSQL
@@ -595,12 +701,13 @@ Telegram-тему вне VPS.
 отдельном `tmpfs` maintenance-контейнера с лимитом 64 МБ и удаляется в
 `finally`; максимальный размер каждого отправляемого файла ограничен 49 МБ.
 
-В production обязательны два независимых read-only подключения на прямые
+В production обязательны три независимых read-only подключения на прямые
 PostgreSQL endpoints:
 
 - `DATABASE_BACKUP_URL` — основная БД;
 - `NOTIFICATION_DELIVERY_BACKUP_URL` — отдельный PostgreSQL-контейнер
-  Notification Delivery.
+  Notification Delivery;
+- `CAMPAIGNS_BACKUP_URL` — отдельный PostgreSQL-контейнер Campaigns.
 
 `pg_dump` не должен идти через transaction pooler. Пароль удаляется из
 аргументов процесса и передаётся `pg_dump` только через `PGPASSWORD`;
@@ -609,7 +716,7 @@ Prisma-only параметры подключения удаляются.
 Контракт ручного запуска возвращает принятое в очередь задание, а не готовый
 файл. Для каждого target используется
 `POST /api/v1/telegram-bot/admin/database-backups/:target/send`, где `target` —
-`core` или `notification-delivery`; запрос требует заголовок
+`core`, `notification-delivery` или `campaigns`; запрос требует заголовок
 `Idempotency-Key` с UUID. Ключ сохраняется в детерминированном `scheduleKey`
 вместе с ID администратора и target, а также в отдельной таблице соответствий
 `adminId + jobType + idempotencyKey → jobId`. Поэтому повтор HTTP-запроса
@@ -621,7 +728,7 @@ audit event. Если у этого администратора уже есть
 transaction-scoped advisory lock только на команду данного администратора и
 target; этот lock завершается до `pg_dump`.
 
-Интерфейс ручного запуска и polling обоих targets расположен на странице
+Интерфейс ручного запуска и polling трёх targets расположен на странице
 `/admin/databases`. Для каждого target есть отдельная кнопка и независимый
 статус. Админка восстанавливает polling после reload через
 `GET /api/v1/telegram-bot/admin/database-backups/:target/jobs/active` и
@@ -933,14 +1040,14 @@ pnpm build
 
 ## Email templates
 
-React Email templates находятся в `emails`:
+Auth templates монолита находятся в `emails`:
 
 - подтверждение email;
-- восстановление пароля;
-- уведомление о новой заявке;
-- достижение лимита заявок;
-- напоминание об окончании подписки;
-- административная рассылка.
+- восстановление пароля.
+
+Шаблоны физической доставки находятся у владельца provider-контракта в
+`apps/notification-delivery/emails`: заявки, платежи, лимиты, subscription
+expiry и email кампаний (`admin-broadcast.email.tsx`).
 
 Локальный preview:
 
@@ -987,11 +1094,15 @@ MODE=production  -> S3-совместимое хранилище
 Durable-задачи выполняются отдельными процессами:
 
 - `maintenance-worker` создаёт уникальные периодические запуски ежедневной
-  Telegram-сводки и backup, выполняет `pg_dump` и восстанавливает зависшие
-  задания по CAS-lease;
+  Telegram-сводки и трёх backup, выполняет `pg_dump` и восстанавливает
+  зависшие задания по CAS-lease;
 - `outbox-publisher` читает PostgreSQL Outbox и публикует события в RabbitMQ;
-- `integration-worker` отправляет сводку и остальные внешние уведомления через
-  независимые очереди, retry и DLQ.
+- после coordinated cutover `campaigns-service` в роли `all` обслуживает HTTP
+  API, импортирует снимки, публикует собственный Outbox и применяет delivery
+  outcomes;
+- `integration-worker` обрабатывает сводку, CRM/webhook, монолитный
+  `notification-delivery-outcome`, campaign admin audit и остальные
+  принадлежащие монолиту consumers через независимые очереди, retry и DLQ.
 
 Общий distributed lock для всех scheduler не используется. Очистки
 verification challenges и зависших платежей идемпотентны, а durable-задачи
@@ -1010,6 +1121,11 @@ GET /api/v1/health/admin
 durable-задач, S3, SMTP, SMS Aero, reCAPTCHA, ЮKassa и три Telegram-бота. Итог
 каждой проверки находится в массиве `checks` со статусом `ok`, `warning`,
 `down` или `disabled`.
+
+Campaigns имеет отдельные loopback endpoints
+`http://127.0.0.1:4500/health/live` и `/health/ready`. Их production-проверка
+вместе с revision/heartbeat обязательна при согласованном cutover и не
+подтверждается одним admin health монолита.
 
 ---
 
@@ -1253,6 +1369,7 @@ RABBITMQ_MONITOR_PASSWORD
 RABBITMQ_VHOST
 RABBITMQ_PUBLISHER_URL
 RABBITMQ_INTEGRATION_WORKER_URL
+RABBITMQ_CAMPAIGNS_URL
 RABBITMQ_NOTIFICATION_DELIVERY_URL
 RABBITMQ_MAINTENANCE_WORKER_URL
 RABBITMQ_MANAGEMENT_URL
@@ -1268,8 +1385,6 @@ SCHEDULED_JOB_LEASE_MS
 SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS
 INTEGRATION_WORKER_KINDS
 MAINTENANCE_WORKER_KINDS
-MAILING_EMAIL_RATE_PER_SECOND
-MAILING_TELEGRAM_RATE_PER_SECOND
 MESSAGING_ALERTS_ENABLED
 MESSAGING_ACTIVITY_STALE_MS
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD
@@ -1285,6 +1400,26 @@ NOTIFICATION_DELIVERY_PREFETCH
 NOTIFICATION_DELIVERY_KINDS
 NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS
 NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS
+CAMPAIGNS_POSTGRES_IMAGE
+CAMPAIGNS_POSTGRES_PORT
+CAMPAIGNS_POSTGRES_DATA_VOLUME
+CAMPAIGNS_POSTGRES_ADMIN_USER
+CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE
+CAMPAIGNS_DATABASE_URL
+CAMPAIGNS_MIGRATION_DATABASE_URL
+CAMPAIGNS_BACKUP_URL
+CAMPAIGNS_PROCESS_ROLE
+CAMPAIGNS_LISTEN_HOST
+CAMPAIGNS_HEALTH_PORT
+CAMPAIGNS_CORE_INTERNAL_BASE_URL
+CAMPAIGNS_INTERNAL_TOKEN
+CAMPAIGNS_INTERNAL_TIMEOUT_MS
+CAMPAIGNS_PREFETCH
+CAMPAIGNS_EMAIL_RATE_PER_SECOND
+CAMPAIGNS_TELEGRAM_RATE_PER_SECOND
+CAMPAIGNS_OUTBOX_BATCH_SIZE
+CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS
+CAMPAIGNS_OUTBOX_RETENTION_DAYS
 ```
 
 ---
@@ -1313,6 +1448,11 @@ NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS
 | `pnpm dev-prisma-migration`                                  | Применение development migrations      |
 | `pnpm jwt:keyset:generate -- ...`                            | Генерация RSA 3072 keyset              |
 | `pnpm --dir apps/api-gateway test`                           | Unit/integration tests API Gateway     |
+| `pnpm --dir apps/campaigns build`                            | Сборка Campaigns Service               |
+| `pnpm --dir apps/campaigns lint`                             | ESLint Campaigns Service               |
+| `pnpm --dir apps/campaigns run start:local`                  | Локальный запуск Campaigns Service     |
+| `pnpm --dir apps/campaigns test`                             | Unit-тесты Campaigns Service           |
+| `pnpm --dir apps/campaigns run test:integration`             | Изолированный DB/Rabbit/service smoke  |
 | `pnpm --dir apps/notification-delivery build`                | Сборка Notification Delivery           |
 | `pnpm --dir apps/notification-delivery lint`                 | ESLint Notification Delivery           |
 | `pnpm --dir apps/notification-delivery run start:local`      | Локальный запуск Notification Delivery |
@@ -1408,20 +1548,99 @@ private JWT key, PostgreSQL или RabbitMQ credentials и слушает тол
 lockfile, Prisma schema/client, NestJS build и Dockerfile в
 `apps/notification-delivery`; его production image не наследует root
 Dockerfile монолита и публикует health только на `127.0.0.1:4401`.
+Campaigns также имеет собственные `package.json`, lockfile, Prisma
+schema/client, NestJS build и Dockerfile в `apps/campaigns`; его image не
+содержит monolith artifacts и слушает только `127.0.0.1:4500`.
 
 ## CI/CD
 
 Workflow `.github/workflows/deploy-production.yml` запускается вручную или при
-push в ветку `prod`. Push выполняет полный deploy. Ручной запуск позволяет
-выбрать `all`, `maintenance`, `notification-delivery` либо одноразовый
-`notification-delivery-database-cutover`. Maintenance и Notification Delivery
-используют изолированный rollout с возвратом exact previous image. Database
-cutover разрешён только вручную из защищённой ветки `prod` и проходит в два
-явных запуска. Первый переносит данные и останавливается в фазе
-`forward_only`; после полного deploy и двух подтверждённых Telegram-backups
-повторный запуск удаляет исходную service schema и переводит marker в
-`complete`. После forward boundary recovery выполняется только вперёд на новой
-database.
+push в ветку `prod`. После завершённого Campaigns lifecycle push выполняет
+обычный полный deploy. Первый push Campaigns-ревизии при отсутствующем
+lifecycle marker выполняет только verify и staged-only checkout: не собирает
+image, не применяет migrations, не перезапускает контейнеры и не запускает
+порт `4500`. Ручной запуск позволяет выбрать `all`, `maintenance`,
+`notification-delivery`,
+`notification-delivery-database-cutover`, `campaigns` либо
+`campaigns-database-cutover`. Maintenance, Notification Delivery и routine
+Campaigns используют изолированный rollout с возвратом exact previous image.
+Database cutover разрешён только вручную из защищённой ветки `prod` и проходит
+явными фазами соответствующего runbook. После forward boundary recovery
+выполняется только вперёд на новой database.
+
+Для Campaigns уже подготовлены routine
+`scripts/deploy-campaigns-production.sh`, resumable многофазный
+`scripts/cutover-campaigns-database-production.sh`, lifecycle/contract guards,
+общий production deploy lock и защищённые workflow targets. Routine разрешён
+только после завершённого Campaigns lifecycle marker. До production-like
+rehearsal, smoke, Telegram-аудита и restore drill выполнять Campaigns
+production finalize запрещено.
+
+Первый Campaigns cutover выполняется в таком порядке:
+
+```text
+prepare → frontend → production smoke → Telegram audit (completed)
+→ Campaigns backup + clean restore → finalize
+```
+
+1. Подготовить Campaigns credentials и target env по
+   `../DOCUMENTATION/ENV_PRODUCTION_TEMPLATE.md`.
+2. Merge backend в `prod`; автоматический workflow должен завершиться
+   staged-only и создать `.campaigns-first-cutover-staged-v1` с exact SHA.
+3. Заморозить backend deploy/campaign writes, проверить очереди и получить
+   off-VPS backups core и Notification Delivery.
+4. Вручную запустить из `prod`
+   `deploy_target=campaigns-database-cutover`,
+   `campaigns_cutover_action=prepare`. Успех означает marker
+   `phase=switched`, а legacy source ещё сохранён. Backend prepare переключает
+   backend/Gateway/RabbitMQ contour, но не деплоит frontend. Перед публикацией
+   нового runtime marker находится в recoverable `phase=switching`: после
+   прерывания legacy runtime восстанавливается, а следующий `prepare` или
+   `rollback` удаляет target-only queues и exact-восстанавливает verified
+   import.
+5. Сразу задеплоить согласованный frontend SHA и выполнить production smoke.
+   До `forward-only` при ошибке из `switching|switched` запустить action
+   `rollback` и вернуть frontend на предыдущий SHA. После нового `prepare`
+   заново задеплоить frontend и повторить весь smoke, Telegram-аудит, новый
+   Campaigns backup и clean restore; evidence предыдущего switched-окна не
+   переиспользовать, потому что новый `prepare` увеличивает durable
+   `switch_generation`.
+6. В `phase=switched` выполнить read-only Telegram audit:
+
+   ```bash
+   cd /opt/winwidget/winwidget.ru_server
+   bash scripts/audit-legacy-telegram-channels-production.sh --self-test
+   DEPLOY_SHA="$(git rev-parse HEAD)"
+   sudo env EXPECTED_REVISION="$DEPLOY_SHA" \
+     bash scripts/audit-legacy-telegram-channels-production.sh
+   ```
+
+   Точные значения двух строк `CAMPAIGNS_TELEGRAM_AUDIT_*` из вывода записать
+   в root-owned mode-600 production env. Для finalize принимается только
+   `CAMPAIGNS_TELEGRAM_AUDIT_DECISION=completed`; `waived` запрещён. Audit
+   reference имеет формат
+   `switch-generation:<N>:<absolute-path>/SHA256SUMS@sha256:<64-hex>` для
+   текущего `switch_generation`.
+
+7. Через `/admin/databases` получить реальный Campaigns Telegram backup,
+   вручную восстановить его в чистую PostgreSQL 18 и зафиксировать
+   `CAMPAIGNS_RESTORE_DRILL_REFERENCE` вида
+   `switch-generation:<N>:<reviewable-id>@sha256:<64-hex>` для того же
+   generation.
+8. Явно подтвердить необратимую операцию ручным workflow input
+   `campaigns_cutover_action=finalize` и approval защищённого GitHub
+   `production` environment; отдельного технического gate/secret нет. Finalize
+   удаляет legacy SQL tables/enums/FK migration-ролью, а точные legacy RabbitMQ
+   queues — отдельной RabbitMQ-операцией после проверки отсутствия
+   consumers/messages. Затем проверить `phase=complete` и
+   `source_schema_state=dropped`.
+
+Ручной target `all` до `phase=complete` блокируется до чтения env, build,
+migrations и restart. Все backend workflow paths проверяют staged/in-progress
+revision до `git fetch`, поэтому другой SHA не может незаметно изменить
+checkout во время cutover. Полный checklist, smoke и recovery приведены в
+`../DOCUMENTATION/DEPLOYMENT.md` и
+`../DOCUMENTATION/DEPLOY_CHECKLIST.md`.
 
 Source-роли, созданные `gen_user` через PostgreSQL 18 `CREATEROLE`, сохраняют
 только автоматические административные memberships
@@ -1434,11 +1653,15 @@ Verify выполняет:
 ```text
 pnpm install --frozen-lockfile
 pnpm --dir apps/notification-delivery install --frozen-lockfile
+pnpm --dir apps/campaigns install --frozen-lockfile
 pnpm exec prisma generate
 create isolated Notification Delivery database and migration/runtime/backup roles
+create isolated Campaigns database and migration/runtime/backup roles
 pnpm exec prisma migrate deploy
 NOTIFICATION_DELIVERY_DATABASE_URL=<migration-role-url> pnpm --dir apps/notification-delivery run prisma:migrate:deploy
+CAMPAIGNS_DATABASE_URL=<migration-role-url> pnpm --dir apps/campaigns run prisma:migrate:deploy
 recreate isolated Notification Delivery PostgreSQL and verify volume/system identifier/sentinel
+recreate isolated Campaigns PostgreSQL and verify volume/system identifier/sentinel
 pg_dump with backup role -> clean scratch pg_restore -> compare migrations/tables/rows/sequences
 curl ... "$RABBITMQ_MANAGEMENT_URL/api/overview"
 pnpm exec tsc --noEmit --incremental false -p tsconfig.build.json
@@ -1446,9 +1669,13 @@ pnpm exec jest --runInBand
 pnpm --dir apps/notification-delivery run typecheck
 pnpm --dir apps/notification-delivery run lint
 pnpm --dir apps/notification-delivery test
+pnpm --dir apps/campaigns run typecheck
+pnpm --dir apps/campaigns run lint
+pnpm --dir apps/campaigns test
 docker compose ... config --quiet + semantic validation
 pnpm build
 pnpm --dir apps/notification-delivery run build
+pnpm --dir apps/campaigns run build
 compare monolith/app notification kinds, routing keys and queue names
 pnpm --dir apps/api-gateway run typecheck
 pnpm --dir apps/api-gateway test
@@ -1456,27 +1683,30 @@ docker compose ... build api api-gateway maintenance-worker notification-deliver
 pg_dump --version && pg_restore --version && maintenance entrypoint check
 pnpm run test:messaging-integration
 pnpm --dir apps/notification-delivery run test:integration
+pnpm --dir apps/campaigns run test:integration
 ```
 
-Semantic compose validation проверяет семь постоянных app/broker-сервисов
-обычного profile и отдельный profile
-`notification-delivery-database` с PostgreSQL-контейнером и external volume.
-Также проверяются отдельные API/Gateway/Maintenance/Notification Delivery
-images и revisions, автономный Docker context Notification Delivery без
+Semantic compose validation проверяет восемь постоянных app/broker-сервисов
+обычного profile и отдельные profiles `notification-delivery-database` и
+`campaigns-database` с PostgreSQL-контейнерами и external volumes. Также
+проверяются отдельные API/Gateway/Maintenance/Notification Delivery/Campaigns
+images и revisions, автономные Docker contexts выделенных сервисов без
 target/image монолита, команды оставшихся worker-процессов, точные consumer
-kinds, обе backup-цели, а отдельная contract-boundary проверка сравнивает
+kinds, три backup-цели, а отдельная contract-boundary проверка сравнивает
 producer/consumer routing keys и queue names без общей source-зависимости.
 Дополнительно проверяются обе пары
 `INTEGRATION_*`/`NOTIFICATION_DELIVERY_*` retention-настроек, healthchecks и
 ограниченный `tmpfs` maintenance worker.
 
-После успешного verify deploy по SSH:
+После успешного verify обычный deploy по SSH (после Campaigns
+`phase=complete`):
 
-1. обновляет ветку `prod` через `git pull --ff-only`, требует чистый checkout и
-   точное совпадение с проверенным `${{ github.sha }}`;
-2. собирает отдельные API, Gateway, Maintenance и Notification Delivery images
-   с тегом и OCI revision полного SHA commit; Notification Delivery собирается
-   только из `apps/notification-delivery`, а smoke проверяет отсутствие
+1. до изменения checkout проверяет Campaigns staged/lifecycle marker, затем
+   обновляет `prod` только до exact `${{ github.sha }}` и требует чистый
+   checkout;
+2. собирает отдельные API, Gateway, Maintenance, Notification Delivery и
+   Campaigns images с тегом и OCI revision полного SHA commit; standalone
+   images собираются только из своих app contexts, а smoke проверяет отсутствие
    monolith artifacts;
 3. применяет отдельную service-owned Notification Delivery migration
    migration-ролью и проверяет DML/DDL-границу runtime-роли;

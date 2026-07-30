@@ -1,4 +1,5 @@
 import {
+	CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
 	getDeadLetterRoutingKey,
@@ -341,7 +342,11 @@ export class NotificationDeliveryOutboxPublisherService
 				event.routingKey ===
 					TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE) ||
 				(event.eventType === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE &&
-					event.routingKey === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE));
+					event.routingKey === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE) ||
+				(event.eventType ===
+					CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE &&
+					event.routingKey ===
+						CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE));
 		if (isStrictOutcomeRoute) {
 			try {
 				assertMessagingEventContract(event.payload, {

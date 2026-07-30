@@ -1,5 +1,6 @@
 import {
 	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+	CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
@@ -155,11 +156,6 @@ export interface TelegramDestinationUnavailableEventPayload {
 
 export type NotificationDeliveryReference =
 	| {
-			type: 'mailing-delivery';
-			id: string;
-			aggregateId: string;
-	  }
-	| {
 			type: 'daily-summary-job';
 			id: string;
 	  }
@@ -173,6 +169,13 @@ interface CampaignNotificationContent {
 	message: string;
 }
 
+export interface CampaignDeliveryReference {
+	type: 'campaign-delivery';
+	id: string;
+	aggregateId: string;
+	dispatchGeneration: number;
+}
+
 interface SubscriptionExpiryNotificationContent {
 	daysBeforeExpiry: number;
 	planLabel: string;
@@ -180,12 +183,15 @@ interface SubscriptionExpiryNotificationContent {
 }
 
 export interface CampaignEmailNotificationRequestedEventPayload {
-	schemaVersion: 1;
+	schemaVersion: 2;
 	eventType: typeof CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE;
-	reference: Extract<
-		NotificationDeliveryReference,
-		{ type: 'mailing-delivery' }
-	>;
+	eventId: string;
+	occurredAt: string;
+	correlationId: string;
+	campaignId: string;
+	deliveryId: string;
+	dispatchGeneration: number;
+	reference: CampaignDeliveryReference;
 	destination: {
 		email: string;
 	};
@@ -193,12 +199,15 @@ export interface CampaignEmailNotificationRequestedEventPayload {
 }
 
 export interface CampaignTelegramNotificationRequestedEventPayload {
-	schemaVersion: 1;
+	schemaVersion: 2;
 	eventType: typeof CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE;
-	reference: Extract<
-		NotificationDeliveryReference,
-		{ type: 'mailing-delivery' }
-	>;
+	eventId: string;
+	occurredAt: string;
+	correlationId: string;
+	campaignId: string;
+	deliveryId: string;
+	dispatchGeneration: number;
+	reference: CampaignDeliveryReference;
 	destination: {
 		telegramChatId: string;
 	};
@@ -248,8 +257,6 @@ export interface SubscriptionExpiryTelegramNotificationRequestedEventPayload {
 }
 
 export type OutcomeNotificationDeliveryKind =
-	| 'campaign-email'
-	| 'campaign-telegram'
 	| 'daily-summary-delivery-telegram'
 	| 'subscription-expiry-email'
 	| 'subscription-expiry-telegram';
@@ -266,6 +273,24 @@ export interface NotificationDeliveryOutcomeEventPayload {
 		safeReason: string;
 	} | null;
 	occurredAt: string;
+}
+
+export interface CampaignNotificationDeliveryOutcomeEventPayload {
+	schemaVersion: 2;
+	eventType: typeof CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
+	eventId: string;
+	occurredAt: string;
+	correlationId: string;
+	sourceEventId: string;
+	sourceKind: 'campaign-email' | 'campaign-telegram';
+	campaignId: string;
+	deliveryId: string;
+	dispatchGeneration: number;
+	status: 'DELIVERED' | 'FAILED';
+	failure: {
+		normalizedCode: string;
+		safeReason: string;
+	} | null;
 }
 
 export type NotificationDeliveryEventPayload =

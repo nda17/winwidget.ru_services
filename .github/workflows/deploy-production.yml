@@ -13,6 +13,17 @@ on:
           - maintenance
           - notification-delivery
           - notification-delivery-database-cutover
+          - campaigns
+          - campaigns-database-cutover
+      campaigns_cutover_action:
+        description: Campaigns database cutover phase
+        required: true
+        default: prepare
+        type: choice
+        options:
+          - prepare
+          - rollback
+          - finalize
   push:
     branches:
       - prod
@@ -64,6 +75,8 @@ jobs:
       MAINTENANCE_IMAGE: winwidget-maintenance:git-${{ github.sha }}
       NOTIFICATION_DELIVERY_REVISION: ${{ github.sha }}
       NOTIFICATION_DELIVERY_IMAGE: winwidget-notification-delivery:git-${{ github.sha }}
+      CAMPAIGNS_REVISION: ${{ github.sha }}
+      CAMPAIGNS_IMAGE: winwidget-campaigns:git-${{ github.sha }}
       # CI-only 32-byte key. Production uses deploy/backend/.env.production.
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
@@ -73,6 +86,20 @@ jobs:
       NOTIFICATION_DELIVERY_BACKUP_URL: postgresql://notification_delivery_backup:notification_delivery_backup_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
       NOTIFICATION_DELIVERY_CI_POSTGRES_CONTAINER: winwidget-notification-delivery-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       NOTIFICATION_DELIVERY_CI_POSTGRES_VOLUME: winwidget-notification-delivery-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      CAMPAIGNS_DATABASE_URL: postgresql://winwidget_campaigns_runtime:campaigns_runtime_ci@127.0.0.1:55433/winwidget_campaigns_ci?schema=campaigns&sslmode=disable
+      CAMPAIGNS_CI_MIGRATION_DATABASE_URL: postgresql://winwidget_campaigns_migration:campaigns_migration_ci@127.0.0.1:55433/winwidget_campaigns_ci?schema=campaigns&sslmode=disable
+      CAMPAIGNS_BACKUP_URL: postgresql://winwidget_campaigns_backup:campaigns_backup_ci@127.0.0.1:55433/winwidget_campaigns_ci?schema=campaigns&sslmode=disable
+      CAMPAIGNS_CI_POSTGRES_CONTAINER: winwidget-campaigns-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      CAMPAIGNS_CI_POSTGRES_VOLUME: winwidget-campaigns-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      CAMPAIGNS_PROCESS_ROLE: all
+      CAMPAIGNS_LISTEN_HOST: 127.0.0.1
+      CAMPAIGNS_HEALTH_PORT: 4500
+      CAMPAIGNS_CORE_INTERNAL_BASE_URL: http://127.0.0.1:4200
+      CAMPAIGNS_INTERNAL_TOKEN: ci_campaigns_internal_token_at_least_32_chars
+      CAMPAIGNS_INTERNAL_TIMEOUT_MS: 5000
+      CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE: 500
+      CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: 300000
+      CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE: 1000
       NOTIFICATION_DELIVERY_INTERNAL_URL: http://127.0.0.1:4401/internal/notification-delivery
       NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ci_notification_delivery_internal_token_at_least_32_chars
       NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS: 5000
@@ -102,6 +129,15 @@ jobs:
           echo "Notification Delivery database cutover can run only from refs/heads/prod." >&2
           exit 1
 
+      - name: Guard Campaigns database cutover branch
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.deploy_target == 'campaigns-database-cutover' &&
+          github.ref != 'refs/heads/prod'
+        run: |
+          echo "Campaigns database cutover can run only from refs/heads/prod." >&2
+          exit 1
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -116,6 +152,7 @@ jobs:
             pnpm-lock.yaml
             apps/api-gateway/pnpm-lock.yaml
             apps/notification-delivery/pnpm-lock.yaml
+            apps/campaigns/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -124,6 +161,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --dir apps/api-gateway install --frozen-lockfile
           pnpm --dir apps/notification-delivery install --frozen-lockfile
+          pnpm --dir apps/campaigns install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
         env:
@@ -253,6 +291,109 @@ jobs:
             FROM notification_delivery_migration;
           SQL
 
+      - name: Start isolated Campaigns PostgreSQL
+        env:
+          CAMPAIGNS_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-campaigns-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          test ! -e "$CAMPAIGNS_CI_POSTGRES_PASSWORD_FILE"
+          umask 077
+          openssl rand -hex 32 > "$CAMPAIGNS_CI_POSTGRES_PASSWORD_FILE"
+
+          docker volume create \
+            --label com.winwidget.owner=campaigns \
+            --label com.winwidget.purpose=ci-postgres-data \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            "$CAMPAIGNS_CI_POSTGRES_VOLUME" > /dev/null
+
+          docker run --detach \
+            --name "$CAMPAIGNS_CI_POSTGRES_CONTAINER" \
+            --label com.winwidget.owner=campaigns \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55433:5432 \
+            --mount \
+              "type=volume,source=$CAMPAIGNS_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount \
+              "type=bind,source=$CAMPAIGNS_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/campaigns-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_campaigns_ci \
+            --env POSTGRES_USER=winwidget_campaigns_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/campaigns-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd \
+              "pg_isready --username winwidget_campaigns_admin --dbname winwidget_campaigns_ci" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+
+          for attempt in $(seq 1 30); do
+            status="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$CAMPAIGNS_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$status" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$status" == "unhealthy" || "$attempt" == "30" ]]; then
+              docker logs "$CAMPAIGNS_CI_POSTGRES_CONTAINER" >&2
+              echo "Isolated Campaigns PostgreSQL is $status." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Create isolated Campaigns roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.CAMPAIGNS_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_campaigns_admin \
+              --dbname winwidget_campaigns_ci <<'SQL'
+          REVOKE ALL ON DATABASE winwidget_campaigns_ci FROM PUBLIC;
+
+          CREATE ROLE winwidget_campaigns_migration
+            LOGIN PASSWORD 'campaigns_migration_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          CREATE ROLE winwidget_campaigns_runtime
+            LOGIN PASSWORD 'campaigns_runtime_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          CREATE ROLE winwidget_campaigns_backup
+            LOGIN PASSWORD 'campaigns_backup_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+          GRANT CONNECT ON DATABASE winwidget_campaigns_ci
+            TO winwidget_campaigns_migration;
+          GRANT CONNECT ON DATABASE winwidget_campaigns_ci
+            TO winwidget_campaigns_runtime;
+          GRANT CONNECT ON DATABASE winwidget_campaigns_ci
+            TO winwidget_campaigns_backup;
+
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA campaigns AUTHORIZATION winwidget_campaigns_migration;
+          REVOKE ALL ON SCHEMA campaigns FROM PUBLIC;
+          GRANT USAGE ON SCHEMA campaigns TO winwidget_campaigns_runtime;
+          GRANT USAGE ON SCHEMA campaigns TO winwidget_campaigns_backup;
+
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_campaigns_migration IN SCHEMA campaigns
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
+            TO winwidget_campaigns_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_campaigns_migration IN SCHEMA campaigns
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES
+            TO winwidget_campaigns_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_campaigns_migration IN SCHEMA campaigns
+            GRANT SELECT ON TABLES TO winwidget_campaigns_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_campaigns_migration IN SCHEMA campaigns
+            GRANT SELECT ON SEQUENCES TO winwidget_campaigns_backup;
+
+          SQL
+
       - name: Generate ephemeral CI JWT keyset
         run: |
           cp .env.example "$RUNNER_TEMP/winwidget-jwt-ci.env"
@@ -294,12 +435,17 @@ jobs:
           pnpm exec prisma generate
           pnpm --dir apps/notification-delivery run prisma:validate
           pnpm --dir apps/notification-delivery run prisma:generate
+          pnpm --dir apps/campaigns run prisma:validate
+          pnpm --dir apps/campaigns run prisma:generate
 
       - name: Apply database migrations
         run: |
-          pnpm exec prisma migrate deploy
+          DATABASE_URL="${DATABASE_URL}&options=-c%20winwidget.campaigns_contract_cutover%3Dproduction-destructive-approved%20-c%20winwidget.campaigns_forward_boundary%3Dforward-only%20-c%20winwidget.campaigns_source_manifest_sha256%3D0000000000000000000000000000000000000000000000000000000000000000%20-c%20winwidget.campaigns_telegram_audit_decision%3Dcompleted%20-c%20winwidget.campaigns_telegram_audit_reference%3Dci-test" \
+            pnpm exec prisma migrate deploy
           NOTIFICATION_DELIVERY_DATABASE_URL="$NOTIFICATION_DELIVERY_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/notification-delivery run prisma:migrate:deploy
+          CAMPAIGNS_DATABASE_URL="$CAMPAIGNS_CI_MIGRATION_DATABASE_URL" \
+            pnpm --dir apps/campaigns run prisma:migrate:deploy
 
       - name: Finalize Notification Delivery runtime grants
         env:
@@ -545,6 +691,114 @@ jobs:
           $$;
           SQL
 
+      - name: Finalize and verify Campaigns database roles
+        env:
+          MONOLITH_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER_ID: ${{ env.CAMPAIGNS_CI_POSTGRES_CONTAINER }}
+        run: |
+          test "$POSTGRES_CONTAINER_ID" != "$MONOLITH_POSTGRES_CONTAINER_ID"
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_campaigns_admin \
+              --dbname winwidget_campaigns_ci <<'SQL'
+          GRANT SELECT, INSERT, UPDATE, DELETE
+            ON ALL TABLES IN SCHEMA campaigns
+            TO winwidget_campaigns_runtime;
+          GRANT USAGE, SELECT, UPDATE
+            ON ALL SEQUENCES IN SCHEMA campaigns
+            TO winwidget_campaigns_runtime;
+          GRANT SELECT
+            ON ALL TABLES IN SCHEMA campaigns
+            TO winwidget_campaigns_backup;
+          GRANT SELECT
+            ON ALL SEQUENCES IN SCHEMA campaigns
+            TO winwidget_campaigns_backup;
+          REVOKE ALL ON TABLE campaigns._prisma_migrations
+            FROM winwidget_campaigns_runtime;
+          REVOKE CREATE ON DATABASE winwidget_campaigns_ci
+            FROM winwidget_campaigns_migration;
+          REVOKE CREATE ON DATABASE winwidget_campaigns_ci
+            FROM winwidget_campaigns_runtime;
+          REVOKE CREATE ON DATABASE winwidget_campaigns_ci
+            FROM winwidget_campaigns_backup;
+
+          DO $$
+          DECLARE
+            table_name text;
+          BEGIN
+            FOR table_name IN
+              SELECT tablename
+              FROM pg_tables
+              WHERE schemaname = 'campaigns'
+                AND tablename <> '_prisma_migrations'
+            LOOP
+              IF NOT has_table_privilege(
+                'winwidget_campaigns_runtime',
+                format('campaigns.%I', table_name),
+                'SELECT,INSERT,UPDATE,DELETE'
+              ) THEN
+                RAISE EXCEPTION 'runtime ACL missing for %', table_name;
+              END IF;
+              IF NOT has_table_privilege(
+                'winwidget_campaigns_backup',
+                format('campaigns.%I', table_name),
+                'SELECT'
+              ) THEN
+                RAISE EXCEPTION 'backup ACL missing for %', table_name;
+              END IF;
+            END LOOP;
+            IF has_table_privilege(
+              'winwidget_campaigns_runtime',
+              'campaigns._prisma_migrations',
+              'SELECT'
+            ) THEN
+              RAISE EXCEPTION '_prisma_migrations leaked to runtime';
+            END IF;
+          END $$;
+          SQL
+
+          docker exec \
+            -e PGPASSWORD=campaigns_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username winwidget_campaigns_runtime \
+              --dbname winwidget_campaigns_ci \
+              --command 'SELECT count(*) FROM campaigns.campaigns;' > /dev/null
+          if docker exec \
+            -e PGPASSWORD=campaigns_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username winwidget_campaigns_runtime \
+              --dbname winwidget_campaigns_ci \
+              --command 'SELECT count(*) FROM campaigns._prisma_migrations;' \
+              > /dev/null 2>&1; then
+            echo "Campaigns runtime can read _prisma_migrations." >&2
+            exit 1
+          fi
+          docker exec \
+            -e PGPASSWORD=campaigns_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username winwidget_campaigns_backup \
+              --dbname winwidget_campaigns_ci \
+              --command 'SELECT count(*) FROM campaigns.campaigns;' > /dev/null
+          if docker exec \
+            -e PGPASSWORD=campaigns_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username winwidget_campaigns_backup \
+              --dbname winwidget_campaigns_ci \
+              --command \
+                "INSERT INTO campaigns.campaigns (id, actor_id, idempotency_key, subject, message, audience, requested_channel) VALUES (gen_random_uuid(), 'ci', gen_random_uuid(), 'blocked', 'blocked backup insert', 'ALL', 'EMAIL');" \
+              > /dev/null 2>&1; then
+            echo "Campaigns backup role can mutate campaign data." >&2
+            exit 1
+          fi
+
       - name: Verify Notification Delivery PostgreSQL persistence and restore
         env:
           NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
@@ -784,6 +1038,118 @@ jobs:
                   WITH (FORCE);
               "
 
+      - name: Verify Campaigns PostgreSQL persistence and restore
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.CAMPAIGNS_CI_POSTGRES_CONTAINER }}
+        run: |
+          campaign_id=11111111-1111-4111-8111-111111111111
+          idempotency_key=22222222-2222-4222-8222-222222222222
+          before_system_id="$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --username winwidget_campaigns_admin \
+                --dbname postgres \
+                --command 'SELECT system_identifier FROM pg_control_system();'
+          )"
+          docker exec \
+            -e PGPASSWORD=campaigns_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username winwidget_campaigns_runtime \
+              --dbname winwidget_campaigns_ci \
+              --command "
+                INSERT INTO campaigns.campaigns (
+                  id, actor_id, idempotency_key, subject, message,
+                  audience, requested_channel
+                ) VALUES (
+                  '$campaign_id', 'ci-admin', '$idempotency_key',
+                  'CI Campaign', 'Campaign persistence payload',
+                  'ALL', 'EMAIL'
+                );
+              "
+
+          docker restart "$POSTGRES_CONTAINER_ID" > /dev/null
+          for attempt in $(seq 1 30); do
+            status="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$POSTGRES_CONTAINER_ID"
+            )"
+            [[ "$status" == "healthy" ]] && break
+            [[ "$status" != "unhealthy" && "$attempt" != "30" ]] || exit 1
+            sleep 2
+          done
+          after_system_id="$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --username winwidget_campaigns_admin \
+                --dbname postgres \
+                --command 'SELECT system_identifier FROM pg_control_system();'
+          )"
+          test "$before_system_id" = "$after_system_id"
+          test "$(
+            docker exec \
+              -e PGPASSWORD=campaigns_runtime_ci \
+              "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --host 127.0.0.1 \
+                --username winwidget_campaigns_runtime \
+                --dbname winwidget_campaigns_ci \
+                --command \
+                  "SELECT count(*) FROM campaigns.campaigns WHERE id = '$campaign_id';"
+          )" = "1"
+
+          docker exec \
+            -e PGPASSWORD=campaigns_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            pg_dump \
+              --host 127.0.0.1 \
+              --username winwidget_campaigns_backup \
+              --dbname winwidget_campaigns_ci \
+              --format custom \
+              --no-owner \
+              --no-privileges \
+              --schema campaigns \
+              --file /tmp/campaigns-ci.dump
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore --list /tmp/campaigns-ci.dump > /dev/null
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_campaigns_admin \
+              --dbname postgres \
+              --command \
+                'CREATE DATABASE winwidget_campaigns_restore_ci WITH TEMPLATE template0;'
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore \
+              --exit-on-error \
+              --single-transaction \
+              --no-owner \
+              --no-privileges \
+              --username winwidget_campaigns_admin \
+              --dbname winwidget_campaigns_restore_ci \
+              /tmp/campaigns-ci.dump
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --username winwidget_campaigns_admin \
+                --dbname winwidget_campaigns_restore_ci \
+                --command \
+                  "SELECT count(*) FROM campaigns.campaigns WHERE id = '$campaign_id';"
+          )" = "1"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align \
+                --username winwidget_campaigns_admin \
+                --dbname winwidget_campaigns_restore_ci \
+                --command 'SELECT count(*) FROM campaigns._prisma_migrations;'
+          )" -ge 1
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_campaigns_admin \
+              --dbname postgres \
+              --command 'DROP DATABASE winwidget_campaigns_restore_ci WITH (FORCE);'
+
       - name: Verify RabbitMQ Management API
         run: curl --fail --user "$RABBITMQ_USER:$RABBITMQ_PASSWORD" "$RABBITMQ_MANAGEMENT_URL/api/overview"
 
@@ -791,16 +1157,19 @@ jobs:
         run: |
           pnpm exec tsc --noEmit --incremental false -p tsconfig.build.json
           pnpm --dir apps/notification-delivery run typecheck
+          pnpm --dir apps/campaigns run typecheck
 
       - name: Lint
         run: |
           pnpm exec eslint "{src,libs,test}/**/*.ts" --max-warnings=0
           pnpm --dir apps/notification-delivery run lint
+          pnpm --dir apps/campaigns run lint
 
       - name: Test
         run: |
           pnpm exec jest --runInBand
           pnpm --dir apps/notification-delivery test
+          pnpm --dir apps/campaigns test
 
       - name: Validate production compose
         env:
@@ -812,10 +1181,18 @@ jobs:
           NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://notification_delivery_runtime:notification_delivery_runtime_ci@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
           NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION: postgresql://notification_delivery_migration:notification_delivery_migration_ci@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
           NOTIFICATION_DELIVERY_BACKUP_URL: postgresql://notification_delivery_backup:notification_delivery_backup_ci@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+          CAMPAIGNS_POSTGRES_IMAGE: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+          CAMPAIGNS_POSTGRES_PORT: '55433'
+          CAMPAIGNS_POSTGRES_DATA_VOLUME: winwidget-campaigns-postgres-data
+          CAMPAIGNS_POSTGRES_ADMIN_USER: winwidget_campaigns_admin
+          CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE: /tmp/winwidget-campaigns-postgres-admin-password
+          CAMPAIGNS_DATABASE_URL: postgresql://winwidget_campaigns_runtime:campaigns_runtime_ci@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+          CAMPAIGNS_MIGRATION_DATABASE_URL: postgresql://winwidget_campaigns_migration:campaigns_migration_ci@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
+          CAMPAIGNS_BACKUP_URL: postgresql://winwidget_campaigns_backup:campaigns_backup_ci@127.0.0.1:55433/winwidget_campaigns?schema=campaigns&sslmode=disable
         run: |
-          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
           # shellcheck disable=SC2016
-          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
             node -e '
               const config = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
               const services = config.services ?? {};
@@ -854,6 +1231,27 @@ jobs:
                   "Notification Delivery PostgreSQL must use its admin password file secret",
                 );
               }
+              const campaignsPostgresVolume =
+                config.volumes?.["winwidget-campaigns-postgres-data"];
+              if (
+                !campaignsPostgresVolume?.external ||
+                campaignsPostgresVolume.name !==
+                  process.env.CAMPAIGNS_POSTGRES_DATA_VOLUME
+              ) {
+                throw new Error(
+                  "Campaigns PostgreSQL must use its exact external volume",
+                );
+              }
+              const campaignsPostgresSecret =
+                config.secrets?.["campaigns-postgres-admin-password"];
+              if (
+                campaignsPostgresSecret?.file !==
+                process.env.CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE
+              ) {
+                throw new Error(
+                  "Campaigns PostgreSQL must use its admin password file secret",
+                );
+              }
               const persistentServiceNames = Object.entries(services)
                 .filter(([, service]) => (service.profiles ?? []).length === 0)
                 .map(([name]) => name)
@@ -861,6 +1259,7 @@ jobs:
               const expectedPersistentServiceNames = [
                 "api",
                 "api-gateway",
+                "campaigns-service",
                 "integration-worker",
                 "maintenance-worker",
                 "notification-delivery-worker",
@@ -1047,8 +1446,60 @@ jobs:
                   "Notification Delivery PostgreSQL runtime safeguards drifted",
                 );
               }
+              const campaignsPostgres = requireService("campaigns-postgres");
+              const campaignsPostgresEnvironment = requireEnvironment(
+                "campaigns-postgres",
+                [
+                  "POSTGRES_DB",
+                  "POSTGRES_USER",
+                  "POSTGRES_PASSWORD_FILE",
+                  "POSTGRES_INITDB_ARGS",
+                  "PGDATA",
+                ],
+              );
+              const campaignsPorts = campaignsPostgres.ports ?? [];
+              const campaignsNetwork = config.networks?.["campaigns-postgres"];
+              if (
+                campaignsPostgres.image !==
+                  process.env.CAMPAIGNS_POSTGRES_IMAGE ||
+                campaignsPostgresEnvironment.POSTGRES_DB !==
+                  "winwidget_campaigns" ||
+                campaignsPostgresEnvironment.POSTGRES_USER !==
+                  process.env.CAMPAIGNS_POSTGRES_ADMIN_USER ||
+                campaignsPostgresEnvironment.POSTGRES_PASSWORD_FILE !==
+                  "/run/secrets/campaigns-postgres-admin-password" ||
+                campaignsPostgresEnvironment.POSTGRES_INITDB_ARGS !==
+                  "--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" ||
+                campaignsPostgresEnvironment.PGDATA !==
+                  "/var/lib/postgresql/18/docker" ||
+                campaignsPorts.length !== 1 ||
+                campaignsPorts[0].host_ip !== "127.0.0.1" ||
+                String(campaignsPorts[0].published) !==
+                  process.env.CAMPAIGNS_POSTGRES_PORT ||
+                Number(campaignsPorts[0].target) !== 5432 ||
+                campaignsNetwork?.name !== "winwidget-campaigns-postgres" ||
+                campaignsNetwork.driver !== "bridge" ||
+                campaignsNetwork.internal === true ||
+                campaignsPostgres.profiles?.[0] !== "campaigns-database" ||
+                campaignsPostgres.restart !== "unless-stopped" ||
+                (campaignsPostgres.volumes ?? []).length !== 1 ||
+                campaignsPostgres.volumes[0].source !==
+                  process.env.CAMPAIGNS_POSTGRES_DATA_VOLUME ||
+                campaignsPostgres.volumes[0].target !==
+                  "/var/lib/postgresql" ||
+                (campaignsPostgres.secrets ?? []).length !== 1 ||
+                campaignsPostgres.secrets[0].source !==
+                  "campaigns-postgres-admin-password"
+              ) {
+                throw new Error(
+                  "Campaigns PostgreSQL dedicated loopback network or lifecycle safeguards drifted",
+                );
+              }
               for (const [name, service] of Object.entries(services)) {
-                if (name === "notification-delivery-postgres") continue;
+                if (
+                  name === "notification-delivery-postgres" ||
+                  name === "campaigns-postgres"
+                ) continue;
                 if (
                   (service.volumes ?? []).some(
                     mount =>
@@ -1067,10 +1518,28 @@ jobs:
                   Object.hasOwn(
                     service.depends_on ?? {},
                     "notification-delivery-postgres",
+                  ) ||
+                  (service.volumes ?? []).some(
+                    mount =>
+                      mount.source ===
+                      process.env.CAMPAIGNS_POSTGRES_DATA_VOLUME,
+                  ) ||
+                  (service.secrets ?? []).some(
+                    secret =>
+                      secret.source ===
+                      "campaigns-postgres-admin-password",
+                  ) ||
+                  Object.hasOwn(
+                    service.networks ?? {},
+                    "campaigns-postgres",
+                  ) ||
+                  Object.hasOwn(
+                    service.depends_on ?? {},
+                    "campaigns-postgres",
                   )
                 ) {
                   throw new Error(
-                    `${name} must not share the Notification Delivery PostgreSQL lifecycle`,
+                    `${name} must not share a standalone PostgreSQL lifecycle`,
                   );
                 }
               }
@@ -1079,6 +1548,7 @@ jobs:
                 "api-gateway",
                 "maintenance-worker",
                 "notification-delivery-worker",
+                "campaigns-service",
               ]) {
                 const service = requireService(name);
                 const expectedRevision = {
@@ -1087,6 +1557,7 @@ jobs:
                   "maintenance-worker": process.env.MAINTENANCE_REVISION,
                   "notification-delivery-worker":
                     process.env.NOTIFICATION_DELIVERY_REVISION,
+                  "campaigns-service": process.env.CAMPAIGNS_REVISION,
                 }[name];
                 if (service.build?.args?.APP_REVISION !== expectedRevision) {
                   throw new Error(`${name} image build revision is not pinned`);
@@ -1097,6 +1568,7 @@ jobs:
                   "maintenance-worker": process.env.MAINTENANCE_IMAGE,
                   "notification-delivery-worker":
                     process.env.NOTIFICATION_DELIVERY_IMAGE,
+                  "campaigns-service": process.env.CAMPAIGNS_IMAGE,
                 }[name];
                 if (service.image !== expectedImage) {
                   throw new Error(`${name} image tag is not pinned to the revision`);
@@ -1134,6 +1606,26 @@ jobs:
               requireStandaloneNotificationBuild(
                 "notification-delivery-migrate",
               );
+              const requireStandaloneCampaignsBuild = name => {
+                const service = requireService(name);
+                const build = service.build ?? {};
+                if (
+                  !String(build.context ?? "")
+                    .replaceAll("\\", "/")
+                    .endsWith("/apps/campaigns") ||
+                  build.dockerfile !== "Dockerfile" ||
+                  build.target != null ||
+                  build.args?.APP_REVISION !==
+                    process.env.CAMPAIGNS_REVISION ||
+                  service.image !== process.env.CAMPAIGNS_IMAGE
+                ) {
+                  throw new Error(
+                    `${name} must use the exact standalone Campaigns image and context`,
+                  );
+                }
+              };
+              requireStandaloneCampaignsBuild("campaigns-service");
+              requireStandaloneCampaignsBuild("campaigns-migrate");
               const requireExactKinds = (environment, key, expected, name) => {
                 const kinds = [...new Set(String(environment[key] ?? "")
                   .split(",")
@@ -1161,6 +1653,10 @@ jobs:
               );
               requireCommand(
                 "notification-delivery-migrate",
+                "migrate deploy --schema prisma/schema.prisma",
+              );
+              requireCommand(
+                "campaigns-migrate",
                 "migrate deploy --schema prisma/schema.prisma",
               );
               const migration = requireService("migrate");
@@ -1243,6 +1739,40 @@ jobs:
                   `notification-delivery-migrate receives unexpected environment: ${unexpectedNotificationMigrationKeys.join(",")}`,
                 );
               }
+              const campaignsMigration = requireService("campaigns-migrate");
+              const campaignsMigrationEntrypoint = Array.isArray(
+                campaignsMigration.entrypoint,
+              )
+                ? campaignsMigration.entrypoint.join(" ")
+                : String(campaignsMigration.entrypoint ?? "");
+              if (
+                campaignsMigrationEntrypoint !== "./node_modules/.bin/prisma" ||
+                !(campaignsMigration.profiles ?? []).includes(
+                  "campaigns-migration",
+                )
+              ) {
+                throw new Error(
+                  "campaigns-migrate must use Prisma behind its migration profile",
+                );
+              }
+              const campaignsMigrationEnvironment = requireEnvironment(
+                "campaigns-migrate",
+                ["APP_REVISION", "NODE_ENV", "CAMPAIGNS_DATABASE_URL"],
+              );
+              if (
+                Object.keys(campaignsMigrationEnvironment).some(
+                  key =>
+                    ![
+                      "APP_REVISION",
+                      "NODE_ENV",
+                      "CAMPAIGNS_DATABASE_URL",
+                    ].includes(key),
+                )
+              ) {
+                throw new Error(
+                  "campaigns-migrate receives an unexpected environment",
+                );
+              }
               if (requireService("maintenance-worker").command != null) {
                 throw new Error(
                   "maintenance-worker command must be owned by its image",
@@ -1253,6 +1783,11 @@ jobs:
               ) {
                 throw new Error(
                   "notification-delivery-worker command must be owned by its image",
+                );
+              }
+              if (requireService("campaigns-service").command != null) {
+                throw new Error(
+                  "campaigns-service command must be owned by its image",
                 );
               }
 
@@ -1271,6 +1806,9 @@ jobs:
                 "NOTIFICATION_DELIVERY_INTERNAL_URL",
                 "NOTIFICATION_DELIVERY_INTERNAL_TOKEN",
                 "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS",
+                "CAMPAIGNS_INTERNAL_TOKEN",
+                "CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE",
+                "CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS",
               ]);
               const apiEnvironment = requireService("api").environment ?? {};
               if (
@@ -1316,19 +1854,28 @@ jobs:
               const gatewayRoutes = JSON.parse(
                 gatewayEnvironment.GATEWAY_ROUTES_JSON,
               );
-              const expectedGatewayRoutes = [{
-                id: "monolith",
-                pathPrefix: "/api/v1",
-                upstreamUrl: "http://127.0.0.1:4200",
-                authPolicy: "optional",
-                timeoutMs: 60000,
-              }];
+              const expectedGatewayRoutes = [
+                {
+                  id: "campaigns",
+                  pathPrefix: "/api/v1/admin/campaigns",
+                  upstreamUrl: "http://127.0.0.1:4500",
+                  authPolicy: "required",
+                  timeoutMs: 60000,
+                },
+                {
+                  id: "monolith",
+                  pathPrefix: "/api/v1",
+                  upstreamUrl: "http://127.0.0.1:4200",
+                  authPolicy: "optional",
+                  timeoutMs: 60000,
+                },
+              ];
               if (
                 JSON.stringify(gatewayRoutes) !==
                 JSON.stringify(expectedGatewayRoutes)
               ) {
                 throw new Error(
-                  "Production example must define the explicit monolith /api/v1 catch-all route",
+                  "Production example must define the exact Campaigns and monolith Gateway routes",
                 );
               }
               requireEnvironment("outbox-publisher", [
@@ -1357,11 +1904,10 @@ jobs:
                   "webhook",
                   "bitrix24",
                   "amo-crm",
-                  "mailing-email",
-                  "mailing-telegram",
                   "daily-summary-telegram",
                   "telegram-destination-unavailable",
                   "notification-delivery-outcome",
+                  "campaign-admin-audit",
                   "auto-renewal",
                 ],
                 "integration-worker",
@@ -1432,6 +1978,46 @@ jobs:
                   "notification-delivery-worker retention defaults must remain receipt=90 and failure-detail=30 days",
                 );
               }
+              const campaigns = requireService("campaigns-service");
+              const campaignsEnvironment = requireEnvironment(
+                "campaigns-service",
+                [
+                  "APP_REVISION",
+                  "CAMPAIGNS_DATABASE_URL",
+                  "CAMPAIGNS_PROCESS_ROLE",
+                  "CAMPAIGNS_LISTEN_HOST",
+                  "CAMPAIGNS_HEALTH_PORT",
+                  "CAMPAIGNS_CORE_INTERNAL_BASE_URL",
+                  "CAMPAIGNS_INTERNAL_TOKEN",
+                  "CAMPAIGNS_INTERNAL_TIMEOUT_MS",
+                  "CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS",
+                  "CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE",
+                  "CAMPAIGNS_PREFETCH",
+                  "CAMPAIGNS_EMAIL_RATE_PER_SECOND",
+                  "CAMPAIGNS_TELEGRAM_RATE_PER_SECOND",
+                  "CAMPAIGNS_OUTBOX_BATCH_SIZE",
+                  "CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS",
+                  "CAMPAIGNS_OUTBOX_RETENTION_DAYS",
+                  "RABBITMQ_URL",
+                  "RABBITMQ_ASSERT_TOPOLOGY",
+                  "MESSAGING_SERVICE_NAME",
+                ],
+              );
+              if (
+                campaignsEnvironment.APP_REVISION !==
+                  process.env.CAMPAIGNS_REVISION ||
+                campaignsEnvironment.CAMPAIGNS_PROCESS_ROLE !== "all" ||
+                campaignsEnvironment.CAMPAIGNS_LISTEN_HOST !== "127.0.0.1" ||
+                campaignsEnvironment.CAMPAIGNS_HEALTH_PORT !== "4500" ||
+                campaignsEnvironment.CAMPAIGNS_CORE_INTERNAL_BASE_URL !==
+                  "http://127.0.0.1:4200" ||
+                campaigns.network_mode !== "host" ||
+                !campaigns.healthcheck?.test
+              ) {
+                throw new Error(
+                  "Campaigns must use the reviewed loopback all-role runtime boundary",
+                );
+              }
               const internalTokens = [
                 apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
                 notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
@@ -1450,6 +2036,23 @@ jobs:
                   "api and notification-delivery-worker must share one non-placeholder internal token of at least 32 characters",
                 );
               }
+              const campaignsInternalTokens = [
+                apiEnvironment.CAMPAIGNS_INTERNAL_TOKEN,
+                campaignsEnvironment.CAMPAIGNS_INTERNAL_TOKEN,
+              ];
+              if (
+                campaignsInternalTokens.some(
+                  token =>
+                    typeof token !== "string" ||
+                    token.startsWith("change_me") ||
+                    token.length < 32,
+                ) ||
+                campaignsInternalTokens[0] !== campaignsInternalTokens[1]
+              ) {
+                throw new Error(
+                  "Core and Campaigns must share one non-placeholder internal token",
+                );
+              }
               const maintenance = requireService("maintenance-worker");
               const maintenanceEnvironment = requireEnvironment(
                 "maintenance-worker",
@@ -1460,6 +2063,7 @@ jobs:
                   "MESSAGING_SERVICE_NAME",
                   "DATABASE_BACKUP_URL",
                   "NOTIFICATION_DELIVERY_BACKUP_URL",
+                  "CAMPAIGNS_BACKUP_URL",
                   "MAINTENANCE_WORKER_PREFETCH",
                   "MAINTENANCE_HEALTH_PORT",
                   "SCHEDULED_JOB_POLL_INTERVAL_MS",
@@ -1495,12 +2099,58 @@ jobs:
                   );
                 }
               }
+              for (const forbidden of [
+                "DATABASE_URL",
+                "DATABASE_URL_PRODUCTION",
+                "DATABASE_BACKUP_URL",
+                "NOTIFICATION_DELIVERY_DATABASE_URL",
+                "NOTIFICATION_DELIVERY_BACKUP_URL",
+                "NOTIFICATION_DELIVERY_INTERNAL_TOKEN",
+                "SMTP_LOGIN",
+                "SMTP_PASSWORD",
+                "TELEGRAM_INFO_BOT_TOKEN",
+                "S3_ACCESS_KEY_ID",
+                "S3_SECRET_ACCESS_KEY",
+              ]) {
+                if (forbidden in campaignsEnvironment) {
+                  throw new Error(
+                    `campaigns-service must not receive ${forbidden}`,
+                  );
+                }
+              }
               if (
                 new Set(notificationDatabaseUrls.map(url => url.username)).size !==
                 notificationDatabaseUrls.length
               ) {
                 throw new Error(
                   "Notification Delivery runtime, migration and backup must use distinct roles",
+                );
+              }
+              const campaignsDatabaseUrls = [
+                campaignsEnvironment.CAMPAIGNS_DATABASE_URL,
+                campaignsMigrationEnvironment.CAMPAIGNS_DATABASE_URL,
+                maintenanceEnvironment.CAMPAIGNS_BACKUP_URL,
+              ].map(value => new URL(value));
+              for (const url of campaignsDatabaseUrls) {
+                if (
+                  url.protocol !== "postgresql:" ||
+                  url.hostname !== "127.0.0.1" ||
+                  url.port !== "55433" ||
+                  url.pathname !== "/winwidget_campaigns" ||
+                  url.searchParams.get("schema") !== "campaigns" ||
+                  url.searchParams.get("sslmode") !== "disable"
+                ) {
+                  throw new Error(
+                    "Campaigns roles must use the dedicated loopback PostgreSQL database",
+                  );
+                }
+              }
+              if (
+                new Set(campaignsDatabaseUrls.map(url => url.username)).size !==
+                campaignsDatabaseUrls.length
+              ) {
+                throw new Error(
+                  "Campaigns runtime, migration and backup must use distinct roles",
                 );
               }
               if ("RABBITMQ_URL" in (services.api.environment ?? {})) {
@@ -1545,6 +2195,7 @@ jobs:
                 new URL(services["integration-worker"].environment.RABBITMQ_URL).username,
                 new URL(services["maintenance-worker"].environment.RABBITMQ_URL).username,
                 new URL(services["notification-delivery-worker"].environment.RABBITMQ_URL).username,
+                new URL(services["campaigns-service"].environment.RABBITMQ_URL).username,
               ];
               if (
                 services.rabbitmq.environment?.RABBITMQ_DEFAULT_VHOST !== "winwidget" ||
@@ -1557,6 +2208,7 @@ jobs:
                 "integration-worker",
                 "maintenance-worker",
                 "notification-delivery-worker",
+                "campaigns-service",
               ]) {
                 if (new URL(services[name].environment.RABBITMQ_URL).pathname !== "/winwidget") {
                   throw new Error(`${name} must connect to the winwidget vhost`);
@@ -1572,15 +2224,19 @@ jobs:
                 services["outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
                 services["integration-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
                 services["maintenance-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
-                services["notification-delivery-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false"
+                services["notification-delivery-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
+                services["campaigns-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true"
               ) {
-                throw new Error("Only outbox-publisher may assert RabbitMQ topology");
+                throw new Error(
+                  "Only the core and Campaigns topology owners may assert RabbitMQ topology",
+                );
               }
               for (const name of [
                 "outbox-publisher",
                 "integration-worker",
                 "maintenance-worker",
                 "notification-delivery-worker",
+                "campaigns-service",
               ]) {
                 const environment = services[name].environment ?? {};
                 for (const forbidden of [
@@ -1657,6 +2313,120 @@ jobs:
               }
             '
 
+      - name: Static-check workflows and deployment shell
+        run: |
+          docker run --rm \
+            --network none \
+            --read-only \
+            --security-opt no-new-privileges \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+          docker run --rm \
+            --network none \
+            --read-only \
+            --security-opt no-new-privileges \
+            --entrypoint shellcheck \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+            --severity=warning \
+            scripts/deploy-production.sh \
+            scripts/deploy-maintenance-production.sh \
+            scripts/deploy-notification-delivery-production.sh \
+            scripts/cutover-notification-delivery-database-production.sh \
+            scripts/notification-delivery-database-lifecycle.sh \
+            scripts/deploy-campaigns-production.sh \
+            scripts/cutover-campaigns-database-production.sh \
+            scripts/campaigns-database-lifecycle.sh \
+            scripts/campaigns-contract-migration-guard.sh \
+            scripts/production-deploy-lock.sh \
+            scripts/test-campaigns-cutover-rehearsal.sh \
+            scripts/audit-legacy-telegram-channels-production.sh
+          docker run --rm \
+            --network none \
+            --read-only \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=1m \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            --entrypoint bash \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 \
+            -euc '
+              APP_ROOT=/tmp/campaigns-lifecycle \
+                bash scripts/campaigns-database-lifecycle.sh --self-test
+              APP_ROOT=/tmp/notification-lifecycle \
+                bash scripts/notification-delivery-database-lifecycle.sh --self-test
+              bash scripts/audit-legacy-telegram-channels-production.sh --self-test
+            '
+          node <<'NODE'
+          const { readFileSync } = require("node:fs");
+          const workflow = readFileSync(
+            ".github/workflows/deploy-production.yml",
+            "utf8",
+          );
+          const lines = workflow.split("\n").map(line => line.trim());
+          const count = needle => lines.filter(line => line === needle).length;
+          const requireCount = (needle, expected) => {
+            const actual = count(needle);
+            if (actual !== expected) {
+              throw new Error(
+                `Expected ${expected} occurrences of ${JSON.stringify(needle)}, got ${actual}`,
+              );
+            }
+          };
+
+          requireCount("guard_campaigns_checkout_before_pull() {", 3);
+          requireCount("checkout_verified_prod_revision() {", 3);
+          requireCount(
+            'guard_campaigns_checkout_before_pull "$expected_revision"',
+            3,
+          );
+          requireCount("git fetch origin prod", 3);
+          requireCount("git checkout prod", 3);
+          requireCount('git merge --ff-only "$fetched_revision"', 3);
+          requireCount(
+            'checkout_verified_prod_revision "$EXPECTED_REVISION"',
+            5,
+          );
+          requireCount(
+            'checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"',
+            1,
+          );
+          requireCount(
+            '--require-staged-revision "$expected_revision"',
+            1,
+          );
+          requireCount("git pull --ff-only origin prod", 0);
+          requireCount(
+            'echo "Campaigns marker exists but its checkout guard is unavailable." >&2',
+            3,
+          );
+          requireCount(
+            'echo "Tracked Campaigns lifecycle guard script is missing." >&2',
+            3,
+          );
+          const campaignsCutoverJob = workflow.slice(
+            workflow.indexOf("\n  campaigns-database-cutover:"),
+          );
+          const requireStagedIndex = campaignsCutoverJob.indexOf(
+            '--require-staged-revision "$expected_revision"',
+          );
+          const fetchIndex = campaignsCutoverJob.indexOf("git fetch origin prod");
+          if (
+            requireStagedIndex < 0 ||
+            fetchIndex < 0 ||
+            requireStagedIndex >= fetchIndex
+          ) {
+            throw new Error(
+              "Campaigns cutover must require the exact staged revision before fetch",
+            );
+          }
+          process.stdout.write(
+            "All backend production checkout paths use the Campaigns pre-pull guard\n",
+          );
+          NODE
+
       - name: Build
         run: |
           bash -n scripts/deploy-production.sh
@@ -1664,10 +2434,20 @@ jobs:
           bash -n scripts/deploy-notification-delivery-production.sh
           bash -n scripts/cutover-notification-delivery-database-production.sh
           bash -n scripts/notification-delivery-database-lifecycle.sh
+          bash -n scripts/deploy-campaigns-production.sh
+          bash -n scripts/cutover-campaigns-database-production.sh
+          bash -n scripts/campaigns-database-lifecycle.sh
+          bash -n scripts/campaigns-contract-migration-guard.sh
+          bash -n scripts/production-deploy-lock.sh
+          bash -n scripts/test-campaigns-cutover-rehearsal.sh
+          bash -n scripts/audit-legacy-telegram-channels-production.sh
+          pnpm exec prettier --check .github/workflows/deploy-production.yml
+          bash scripts/campaigns-contract-migration-guard.sh --self-test
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
           pnpm --dir apps/notification-delivery run build
+          pnpm --dir apps/campaigns run build
 
       - name: Verify Notification Delivery wire contract boundary
         run: |
@@ -1684,11 +2464,10 @@ jobs:
             "webhook",
             "bitrix24",
             "amo-crm",
-            "mailing-email",
-            "mailing-telegram",
             "daily-summary-telegram",
             "telegram-destination-unavailable",
             "notification-delivery-outcome",
+            "campaign-admin-audit",
             "auto-renewal",
           ];
           if (
@@ -1826,6 +2605,54 @@ jobs:
           );
           NODE
 
+      - name: Verify Campaigns wire contract boundary
+        run: |
+          node <<'NODE'
+          const campaigns = require(
+            "./apps/campaigns/dist/src/messaging/campaigns-messaging.constants.js",
+          );
+          const delivery = require(
+            "./apps/notification-delivery/dist/src/messaging/messaging.constants.js",
+          );
+          const monolith = require("./dist/src/messaging/messaging.constants.js");
+          for (const [label, actual, expected] of [
+            [
+              "email request",
+              campaigns.CAMPAIGN_EMAIL_REQUESTED_EVENT_TYPE,
+              delivery.CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
+            ],
+            [
+              "telegram request",
+              campaigns.CAMPAIGN_TELEGRAM_REQUESTED_EVENT_TYPE,
+              delivery.CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+            ],
+            [
+              "delivery outcome",
+              campaigns.NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+              delivery.CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+            ],
+            [
+              "admin audit",
+              campaigns.ADMIN_AUDIT_EVENT_TYPE,
+              monolith.CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
+            ],
+          ]) {
+            if (!actual || actual !== expected) {
+              throw new Error(
+                `Campaigns ${label} contract drift: ${actual} != ${expected}`,
+              );
+            }
+          }
+          if (
+            JSON.stringify(campaigns).includes("mailing.delivery.requested.v1")
+          ) {
+            throw new Error("Campaigns standalone contract contains legacy mailing v1");
+          }
+          process.stdout.write(
+            "Campaigns/Notification Delivery/Admin audit contracts verified\n",
+          );
+          NODE
+
       - name: Build and verify production image
         run: |
           ci_rabbitmq_volume="winwidget-ci-rabbitmq-data-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -1833,7 +2660,7 @@ jobs:
           trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
           export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
 
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker notification-delivery-worker
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker notification-delivery-worker campaigns-service
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -1850,12 +2677,19 @@ jobs:
             docker image inspect "$NOTIFICATION_DELIVERY_IMAGE" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
           )" = "$NOTIFICATION_DELIVERY_REVISION"
+          test "$(
+            docker image inspect "$CAMPAIGNS_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$CAMPAIGNS_REVISION"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version | grep -Eq " 18[.]" && pg_restore --version | grep -Eq " 18[.]" && test -f dist/src/maintenance-worker-main.js'
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node notification-delivery-worker \
             -e "const fs=require('node:fs'); require('@prisma/notification-delivery-client'); fs.accessSync('dist/src/main.js'); fs.accessSync('prisma/schema.prisma'); for (const path of ['dist/src/app.module.js','dist/src/messaging/notification-delivery-client.service.js','dist/src/outbox-publisher-main.js','public/widgets']) if (fs.existsSync(path)) throw new Error('Standalone image contains monolith artifact: '+path)"
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint node campaigns-service \
+            -e "const fs=require('node:fs'); require('@prisma/campaigns-client'); fs.accessSync('dist/src/main.js'); fs.accessSync('prisma/schema.prisma'); for (const path of ['dist/src/app.module.js','dist/src/mailing/mailing.service.js','dist/src/outbox-publisher-main.js','public/widgets']) if (fs.existsSync(path)) throw new Error('Campaigns image contains monolith artifact: '+path)"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node api-gateway \
             -e "require('./dist/src/config.js').loadConfig()"
@@ -1894,6 +2728,80 @@ jobs:
             sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0 > /dev/null
           fi
           pnpm --dir apps/notification-delivery run test:integration
+
+      - name: Create restricted Campaigns RabbitMQ user
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl add_user \
+              campaigns_ci campaigns_ci_password_at_least_32_characters
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_permissions \
+              --vhost winwidget \
+              campaigns_ci \
+              '^winwidget\.campaigns(\..*)?$' \
+              '^(winwidget\.(events|dead-letter)|winwidget\.campaigns(\..*)?)$' \
+              '^(winwidget\.(events|dead-letter)|winwidget\.campaigns(\..*)?)$'
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl clear_topic_permissions \
+              --vhost winwidget \
+              campaigns_ci
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_topic_permissions \
+              --vhost winwidget \
+              campaigns_ci \
+              winwidget.events \
+              '^(admin\.audit\.event\.v1|campaign\.snapshot\.requested\.v1|notification\.campaign\.(email|telegram)\.requested\.v2|notification\.delivery\.outcome\.v2)$' \
+              '^(campaign\.snapshot\.requested\.v1|notification\.delivery\.outcome\.v2)$'
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_topic_permissions \
+              --vhost winwidget \
+              campaigns_ci \
+              winwidget.dead-letter \
+              '^campaigns\.(snapshot|outcome)\.dead-letter$' \
+              '^campaigns\.(snapshot|outcome)\.dead-letter$'
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_user_tags campaigns_ci
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl authenticate_user \
+              campaigns_ci campaigns_ci_password_at_least_32_characters
+          regular_permissions="$(
+            docker exec "$RABBITMQ_CONTAINER_ID" \
+              rabbitmqctl --silent list_user_permissions campaigns_ci |
+              awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }'
+          )"
+          test "$regular_permissions" = \
+            'winwidget|^winwidget\.campaigns(\..*)?$|^(winwidget\.(events|dead-letter)|winwidget\.campaigns(\..*)?)$|^(winwidget\.(events|dead-letter)|winwidget\.campaigns(\..*)?)$'
+          topic_permissions="$(
+            docker exec "$RABBITMQ_CONTAINER_ID" \
+              rabbitmqctl --silent list_user_topic_permissions campaigns_ci |
+              awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }' |
+              sort
+          )"
+          expected_topic_permissions="$(
+            printf '%s\n' \
+              'winwidget|winwidget.dead-letter|^campaigns\.(snapshot|outcome)\.dead-letter$|^campaigns\.(snapshot|outcome)\.dead-letter$' \
+              'winwidget|winwidget.events|^(admin\.audit\.event\.v1|campaign\.snapshot\.requested\.v1|notification\.campaign\.(email|telegram)\.requested\.v2|notification\.delivery\.outcome\.v2)$|^(campaign\.snapshot\.requested\.v1|notification\.delivery\.outcome\.v2)$' |
+              sort
+          )"
+          test "$topic_permissions" = "$expected_topic_permissions"
+
+      - name: Campaigns API integration smoke
+        env:
+          CAMPAIGNS_TEST_DATABASE_URL: ${{ env.CAMPAIGNS_DATABASE_URL }}
+          CAMPAIGNS_TEST_MIGRATION_DATABASE_URL: ${{ env.CAMPAIGNS_CI_MIGRATION_DATABASE_URL }}
+          CAMPAIGNS_TEST_RABBITMQ_URL: amqp://campaigns_ci:campaigns_ci_password_at_least_32_characters@127.0.0.1:5672/winwidget
+        run: |
+          pnpm --dir apps/campaigns run test:integration
+          docker exec "${{ job.services.rabbitmq.id }}" \
+            rabbitmqctl --silent list_exchanges --vhost winwidget name type |
+            awk '
+              $1 == "winwidget.campaigns.retry" && $2 == "direct" {
+                found += 1
+              }
+              END { exit(found == 1 ? 0 : 1) }
+            '
 
       - name: Cleanup isolated Notification Delivery PostgreSQL
         if: ${{ always() }}
@@ -1967,11 +2875,52 @@ jobs:
             exit 1
           fi
 
+      - name: Cleanup isolated Campaigns PostgreSQL
+        if: ${{ always() }}
+        env:
+          CAMPAIGNS_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-campaigns-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          cleanup_failed=false
+          if docker container inspect \
+            "$CAMPAIGNS_CI_POSTGRES_CONTAINER" > /dev/null 2>&1; then
+            container_identity="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{index .Config.Labels "com.winwidget.github-run"}}' \
+                "$CAMPAIGNS_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$container_identity" != "campaigns|ci-postgres|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Campaigns container." >&2
+              cleanup_failed=true
+            else
+              docker container rm --force \
+                "$CAMPAIGNS_CI_POSTGRES_CONTAINER" > /dev/null
+            fi
+          fi
+          if docker volume inspect \
+            "$CAMPAIGNS_CI_POSTGRES_VOLUME" > /dev/null 2>&1; then
+            volume_identity="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}|{{index .Labels "com.winwidget.github-run"}}' \
+                "$CAMPAIGNS_CI_POSTGRES_VOLUME"
+            )"
+            if [[ "$volume_identity" != "campaigns|ci-postgres-data|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Campaigns volume." >&2
+              cleanup_failed=true
+            else
+              docker volume rm "$CAMPAIGNS_CI_POSTGRES_VOLUME" > /dev/null
+            fi
+          fi
+          rm -f -- "$CAMPAIGNS_CI_POSTGRES_PASSWORD_FILE"
+          [[ "$cleanup_failed" == "false" ]]
+
   deploy:
     needs: verify
     if: >-
       github.event_name == 'push' ||
-      inputs.deploy_target != 'notification-delivery-database-cutover'
+      (
+        inputs.deploy_target != 'notification-delivery-database-cutover' &&
+        inputs.deploy_target != 'campaigns-database-cutover'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -1992,9 +2941,10 @@ jobs:
         run: |
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
 
-      - name: Deploy backend on VPS
+      - name: Stage or deploy backend on VPS
         env:
           APP_ROOT: /opt/winwidget
+          AUTOMATIC_PROD_PUSH: ${{ github.event_name == 'push' && 'true' || 'false' }}
           DEPLOY_REVISION: ${{ github.sha }}
           DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
@@ -2003,27 +2953,84 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
+          guard_campaigns_checkout_before_pull() {
+            local expected_revision="$1"
+            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
+            local staged_marker="$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
+            local cutover_marker="$APP_ROOT/deploy/backend/.campaigns-database-cutover-v1"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "Expected production revision is invalid." >&2
+              return 1
+            }
+            tracked_blob="$(
+              git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
+                echo "Campaigns lifecycle guard script is unsafe." >&2
+                return 1
+              }
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
+                echo "Campaigns lifecycle guard script differs from the checked-out revision." >&2
+                return 1
+              }
+              APP_ROOT="$APP_ROOT" \
+                bash "$lifecycle_script" \
+                  --guard-checkout-revision "$expected_revision"
+              return
+            fi
+            if [[ -n "$tracked_blob" ]]; then
+              echo "Tracked Campaigns lifecycle guard script is missing." >&2
+              return 1
+            fi
+            if [[ -e "$staged_marker" || -L "$staged_marker" ||
+              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
+              echo "Campaigns marker exists but its checkout guard is unavailable." >&2
+              return 1
+            fi
+          }
+          checkout_verified_prod_revision() {
+            local expected_revision="$1"
+            local fetched_revision
+
+            guard_campaigns_checkout_before_pull "$expected_revision"
+            git fetch origin prod
+            fetched_revision="$(git rev-parse FETCH_HEAD)"
+            [[ "$fetched_revision" == "$expected_revision" ]] || {
+              echo "Origin prod changed after workflow start; checkout was not modified." >&2
+              return 1
+            }
+            git checkout prod
+            git merge --ff-only "$fetched_revision"
+            [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
+              echo "Verified prod checkout revision mismatch." >&2
+              return 1
+            }
+          }
           case "$DEPLOY_TARGET" in
             all)
-              git fetch origin prod
-              git checkout prod
-              git pull --ff-only origin prod
-              APP_ROOT="$APP_ROOT" bash scripts/deploy-production.sh
+              checkout_verified_prod_revision "$EXPECTED_REVISION"
+              APP_ROOT="$APP_ROOT" \
+                CAMPAIGNS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
+                bash scripts/deploy-production.sh
               ;;
             maintenance)
-              git fetch origin prod
-              git checkout prod
-              git pull --ff-only origin prod
+              checkout_verified_prod_revision "$EXPECTED_REVISION"
               APP_ROOT="$APP_ROOT" bash scripts/deploy-maintenance-production.sh
               ;;
             notification-delivery)
-              git fetch origin prod
-              git checkout prod
-              git pull --ff-only origin prod
+              checkout_verified_prod_revision "$EXPECTED_REVISION"
               APP_ROOT="$APP_ROOT" bash scripts/deploy-notification-delivery-production.sh
+              ;;
+            campaigns)
+              checkout_verified_prod_revision "$EXPECTED_REVISION"
+              APP_ROOT="$APP_ROOT" bash scripts/deploy-campaigns-production.sh
               ;;
             *)
               echo "Unsupported deploy target: $DEPLOY_TARGET" >&2
@@ -2073,14 +3080,64 @@ jobs:
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
 
-          git fetch origin prod
-          git checkout prod
-          git pull --ff-only origin prod
-          deployed_source_revision="$(git rev-parse HEAD)"
-          if [[ "$deployed_source_revision" != "$EXPECTED_PROD_REVISION" ]]; then
-            echo "The checked-out prod revision changed after workflow start." >&2
-            exit 1
-          fi
+          guard_campaigns_checkout_before_pull() {
+            local expected_revision="$1"
+            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
+            local staged_marker="$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
+            local cutover_marker="$APP_ROOT/deploy/backend/.campaigns-database-cutover-v1"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "Expected production revision is invalid." >&2
+              return 1
+            }
+            tracked_blob="$(
+              git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
+                echo "Campaigns lifecycle guard script is unsafe." >&2
+                return 1
+              }
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
+                echo "Campaigns lifecycle guard script differs from the checked-out revision." >&2
+                return 1
+              }
+              APP_ROOT="$APP_ROOT" \
+                bash "$lifecycle_script" \
+                  --guard-checkout-revision "$expected_revision"
+              return
+            fi
+            if [[ -n "$tracked_blob" ]]; then
+              echo "Tracked Campaigns lifecycle guard script is missing." >&2
+              return 1
+            fi
+            if [[ -e "$staged_marker" || -L "$staged_marker" ||
+              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
+              echo "Campaigns marker exists but its checkout guard is unavailable." >&2
+              return 1
+            fi
+          }
+          checkout_verified_prod_revision() {
+            local expected_revision="$1"
+            local fetched_revision
+
+            guard_campaigns_checkout_before_pull "$expected_revision"
+            git fetch origin prod
+            fetched_revision="$(git rev-parse FETCH_HEAD)"
+            [[ "$fetched_revision" == "$expected_revision" ]] || {
+              echo "Origin prod changed after workflow start; checkout was not modified." >&2
+              return 1
+            }
+            git checkout prod
+            git merge --ff-only "$fetched_revision"
+            [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
+              echo "Verified prod checkout revision mismatch." >&2
+              return 1
+            }
+          }
+          checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"
 
           compose=(
             docker compose
@@ -2238,4 +3295,120 @@ jobs:
             EXPECTED_WORKER_REVISION="$approved_worker_revision" \
             NOTIFICATION_DELIVERY_DATABASE_FINALIZE="$finalize_cutover" \
             bash scripts/cutover-notification-delivery-database-production.sh
+          EOF
+
+  campaigns-database-cutover:
+    needs: verify
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_target == 'campaigns-database-cutover' &&
+      github.ref == 'refs/heads/prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: production
+
+    steps:
+      - name: Configure SSH private key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
+
+      - name: Add VPS host to known_hosts
+        env:
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+        run: |
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run resumable Campaigns database cutover phase
+        env:
+          APP_ROOT: /opt/winwidget
+          CUTOVER_ACTION: ${{ inputs.campaigns_cutover_action }}
+          DEPLOY_REVISION: ${{ github.sha }}
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+        run: |
+          case "$CUTOVER_ACTION" in
+            prepare|rollback|finalize) ;;
+            *)
+              echo "Unsupported Campaigns cutover action: $CUTOVER_ACTION" >&2
+              exit 1
+              ;;
+          esac
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' CUTOVER_ACTION='$CUTOVER_ACTION' bash -s" <<'EOF'
+          set -euo pipefail
+          cd "$APP_ROOT/winwidget.ru_server"
+          guard_campaigns_checkout_before_pull() {
+            local expected_revision="$1"
+            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
+            local staged_marker="$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
+            local cutover_marker="$APP_ROOT/deploy/backend/.campaigns-database-cutover-v1"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "Expected production revision is invalid." >&2
+              return 1
+            }
+            tracked_blob="$(
+              git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
+                echo "Campaigns lifecycle guard script is unsafe." >&2
+                return 1
+              }
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
+                echo "Campaigns lifecycle guard script differs from the checked-out revision." >&2
+                return 1
+              }
+              APP_ROOT="$APP_ROOT" \
+                bash "$lifecycle_script" \
+                  --guard-checkout-revision "$expected_revision"
+              return
+            fi
+            if [[ -n "$tracked_blob" ]]; then
+              echo "Tracked Campaigns lifecycle guard script is missing." >&2
+              return 1
+            fi
+            if [[ -e "$staged_marker" || -L "$staged_marker" ||
+              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
+              echo "Campaigns marker exists but its checkout guard is unavailable." >&2
+              return 1
+            fi
+          }
+          checkout_verified_prod_revision() {
+            local expected_revision="$1"
+            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
+            local fetched_revision
+
+            guard_campaigns_checkout_before_pull "$expected_revision"
+            APP_ROOT="$APP_ROOT" \
+              bash "$lifecycle_script" \
+                --require-staged-revision "$expected_revision"
+            git fetch origin prod
+            fetched_revision="$(git rev-parse FETCH_HEAD)"
+            [[ "$fetched_revision" == "$expected_revision" ]] || {
+              echo "Origin prod changed after workflow start; checkout was not modified." >&2
+              return 1
+            }
+            git checkout prod
+            git merge --ff-only "$fetched_revision"
+            [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
+              echo "Verified prod checkout revision mismatch." >&2
+              return 1
+            }
+          }
+          checkout_verified_prod_revision "$EXPECTED_REVISION"
+          APP_ROOT="$APP_ROOT" \
+            EXPECTED_REVISION="$EXPECTED_REVISION" \
+            bash scripts/cutover-campaigns-database-production.sh \
+              "$CUTOVER_ACTION"
           EOF

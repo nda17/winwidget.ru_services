@@ -36,7 +36,7 @@ describe('classifyIntegrationError', () => {
 		],
 		[
 			'current Telegram blocked-user error',
-			'mailing-telegram',
+			'telegram',
 			new Error(
 				'Telegram API returned 403: {"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}'
 			),
@@ -149,7 +149,7 @@ describe('classifyIntegrationError', () => {
 		],
 		[
 			'SMTP permanent recipient failure',
-			'mailing-email',
+			'email',
 			Object.assign(new Error('delivery rejected'), {
 				responseCode: 550,
 				response: '550 5.1.1 Mailbox does not exist'

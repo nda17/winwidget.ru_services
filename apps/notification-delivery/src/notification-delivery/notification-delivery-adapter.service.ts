@@ -108,7 +108,7 @@ export class NotificationDeliveryAdapterService {
 	): CampaignEmailNotificationRequestedEventPayload {
 		const value = event as CampaignEmailNotificationRequestedEventPayload;
 		if (
-			value?.schemaVersion !== 1 ||
+			value?.schemaVersion !== 2 ||
 			value?.eventType !== CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE
 		) {
 			throw new Error('Invalid campaign email event payload');
@@ -122,7 +122,7 @@ export class NotificationDeliveryAdapterService {
 		const value =
 			event as CampaignTelegramNotificationRequestedEventPayload;
 		if (
-			value?.schemaVersion !== 1 ||
+			value?.schemaVersion !== 2 ||
 			value?.eventType !== CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE
 		) {
 			throw new Error('Invalid campaign Telegram event payload');
@@ -408,7 +408,7 @@ export class NotificationDeliveryAdapterService {
 		await this.emailService.sendAdminBroadcast(
 			event.destination.email,
 			event.content,
-			{ messageId: `<${eventId}.mailing@winwidget.ru>` }
+			{ messageId: `<${eventId}.campaign@winwidget.ru>` }
 		);
 	}
 

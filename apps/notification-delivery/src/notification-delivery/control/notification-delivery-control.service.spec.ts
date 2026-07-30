@@ -476,6 +476,37 @@ describe('NotificationDeliveryControlService', () => {
 		).rejects.toThrow(NotFoundException);
 	});
 
+	it('requires campaign retries to go through Campaigns API', async () => {
+		const updateFailure = jest.fn();
+		const updateReceipt = jest.fn();
+		const createOutbox = jest.fn();
+		const transaction = {
+			notificationDeliveryFailure: {
+				findUnique: jest
+					.fn()
+					.mockResolvedValue(
+						createFailure({ consumer: 'campaign-email' })
+					),
+				updateMany: updateFailure
+			},
+			notificationDeliveryReceipt: { updateMany: updateReceipt },
+			notificationDeliveryOutboxEvent: { create: createOutbox }
+		};
+		const prisma = {
+			$transaction: jest.fn(async callback => callback(transaction))
+		} as unknown as NotificationDeliveryPrismaService;
+		const service = new NotificationDeliveryControlService(prisma);
+
+		await expect(
+			service.retryFailure(FAILURE_ID, 'admin-user-id')
+		).rejects.toThrow(
+			'Повтор доставки кампании доступен только через Campaigns API'
+		);
+		expect(updateFailure).not.toHaveBeenCalled();
+		expect(updateReceipt).not.toHaveBeenCalled();
+		expect(createOutbox).not.toHaveBeenCalled();
+	});
+
 	it('closes the receipt and failure atomically without publishing', async () => {
 		const failure = createFailure();
 		const transaction = {

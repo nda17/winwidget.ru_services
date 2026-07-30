@@ -6,7 +6,7 @@ import { Request } from 'express';
 
 export type AdminEventLogSection =
 	| 'PAYMENTS'
-	| 'MAILINGS'
+	| 'CAMPAIGNS'
 	| 'TASKS'
 	| 'SUBSCRIPTIONS'
 	| 'USERS'
@@ -28,8 +28,9 @@ export type AdminEventLogAction =
 	| 'AUTO_RENEWAL_TECHNICAL_RESUME'
 	| 'TARIFF_PRICES_UPDATE'
 	| 'LEGAL_PAGE_UPDATE'
-	| 'MAILING_BROADCAST_SEND'
-	| 'MAILING_BROADCAST_CANCEL'
+	| 'CAMPAIGN_CREATE'
+	| 'CAMPAIGN_CANCEL'
+	| 'CAMPAIGN_DELIVERY_RETRY'
 	| 'SUBSCRIPTION_ACTIVATE'
 	| 'SUBSCRIPTION_EXTEND_DAYS'
 	| 'SUBSCRIPTION_CANCEL'
@@ -62,7 +63,7 @@ export type AdminEventLogAction =
 
 const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
 	'PAYMENTS',
-	'MAILINGS',
+	'CAMPAIGNS',
 	'TASKS',
 	'SUBSCRIPTIONS',
 	'USERS',
@@ -85,8 +86,9 @@ const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
 	'AUTO_RENEWAL_TECHNICAL_RESUME',
 	'TARIFF_PRICES_UPDATE',
 	'LEGAL_PAGE_UPDATE',
-	'MAILING_BROADCAST_SEND',
-	'MAILING_BROADCAST_CANCEL',
+	'CAMPAIGN_CREATE',
+	'CAMPAIGN_CANCEL',
+	'CAMPAIGN_DELIVERY_RETRY',
 	'SUBSCRIPTION_ACTIVATE',
 	'SUBSCRIPTION_EXTEND_DAYS',
 	'SUBSCRIPTION_CANCEL',
@@ -304,7 +306,7 @@ export class AdminEventLogService {
 
 		return client.adminEventLog.create({
 			data: {
-				adminId: input.adminId || null,
+				adminId: adminSnapshot ? input.adminId || null : null,
 				adminName: adminSnapshot?.name ?? null,
 				adminEmail: adminSnapshot?.email ?? null,
 				section: input.section,
@@ -313,7 +315,9 @@ export class AdminEventLogService {
 				entityType: input.entityType || null,
 				entityId: input.entityId || null,
 				entityLabel: input.entityLabel || null,
-				targetUserId: input.targetUserId || null,
+				targetUserId: targetUserSnapshot
+					? input.targetUserId || null
+					: null,
 				targetUserName: targetUserSnapshot?.name ?? null,
 				targetUserEmail: targetUserSnapshot?.email ?? null,
 				metadata: input.metadata ?? {},

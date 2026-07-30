@@ -1,0 +1,302 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/campaigns-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("CAMPAIGNS_DATABASE_URL")
+  schemas  = ["campaigns"]
+}
+
+model Campaign {
+  id                String                   @id @default(uuid()) @db.Uuid
+  actorId           String                   @map("actor_id")
+  idempotencyKey    String                   @map("idempotency_key") @db.Uuid
+  subject           String
+  message           String                   @db.Text
+  audience          CampaignAudience
+  requestedChannel  CampaignRequestedChannel @map("requested_channel")
+  status            CampaignStatus           @default(SNAPSHOTTING)
+  recipientCount    Int                      @default(0) @map("recipient_count")
+  sentCount         Int                      @default(0) @map("sent_count")
+  failedCount       Int                      @default(0) @map("failed_count")
+  cancelledCount    Int                      @default(0) @map("cancelled_count")
+  emailCount        Int                      @default(0) @map("email_count")
+  telegramCount     Int                      @default(0) @map("telegram_count")
+  startedAt         DateTime?                @map("started_at")
+  completedAt       DateTime?                @map("completed_at")
+  cancelRequestedAt DateTime?                @map("cancel_requested_at")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+  updatedAt         DateTime                 @updatedAt @map("updated_at")
+  snapshots         AudienceSnapshot[]
+  deliveries        CampaignDelivery[]
+  controlActions    CampaignControlAction[]
+
+  @@unique([actorId, idempotencyKey], map: "campaigns_actor_idempotency_unique")
+  @@index([status, createdAt], map: "campaigns_status_created_idx")
+  @@index([createdAt], map: "campaigns_created_idx")
+  @@map("campaigns")
+  @@schema("campaigns")
+}
+
+model AudienceSnapshot {
+  id                   String                  @id @default(uuid()) @db.Uuid
+  sourceSnapshotId     String?                 @unique(map: "audience_snapshots_source_id_unique") @map("source_snapshot_id") @db.Uuid
+  campaignId           String                  @map("campaign_id") @db.Uuid
+  channel              CampaignDeliveryChannel
+  audience             CampaignAudience
+  status               AudienceSnapshotStatus  @default(CREATING)
+  asOf                 DateTime?               @map("as_of")
+  recipientCount       Int                     @default(0) @map("recipient_count")
+  sha256               String?                 @db.Char(64)
+  lastError            String?                 @map("last_error") @db.Text
+  importToken          String?                 @map("import_token") @db.Uuid
+  importLeaseExpiresAt DateTime?               @map("import_lease_expires_at")
+  completedAt          DateTime?               @map("completed_at")
+  createdAt            DateTime                @default(now()) @map("created_at")
+  updatedAt            DateTime                @updatedAt @map("updated_at")
+  campaign             Campaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  deliveries           CampaignDelivery[]
+
+  @@unique([campaignId, channel], map: "audience_snapshots_campaign_channel_unique")
+  @@index([status, createdAt], map: "audience_snapshots_status_created_idx")
+  @@index([status, importLeaseExpiresAt], map: "audience_snapshots_import_lease_idx")
+  @@map("audience_snapshots")
+  @@schema("campaigns")
+}
+
+model CampaignDelivery {
+  id                 String                  @id @default(uuid()) @db.Uuid
+  campaignId         String                  @map("campaign_id") @db.Uuid
+  snapshotId         String                  @map("snapshot_id") @db.Uuid
+  channel            CampaignDeliveryChannel
+  destination        String                  @db.Text
+  destinationKey     String                  @map("destination_key") @db.Char(64)
+  status             CampaignDeliveryStatus  @default(PENDING)
+  dispatchGeneration Int                     @default(1) @map("dispatch_generation")
+  attempts           Int                     @default(0)
+  requestEventId     String?                 @map("request_event_id") @db.Uuid
+  lastOutcomeEventId String?                 @map("last_outcome_event_id") @db.Uuid
+  lastErrorCode      String?                 @map("last_error_code")
+  lastErrorReason    String?                 @map("last_error_reason") @db.Text
+  sentAt             DateTime?               @map("sent_at")
+  cancelledAt        DateTime?               @map("cancelled_at")
+  createdAt          DateTime                @default(now()) @map("created_at")
+  updatedAt          DateTime                @updatedAt @map("updated_at")
+  campaign           Campaign                @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  snapshot           AudienceSnapshot        @relation(fields: [snapshotId], references: [id], onDelete: Restrict)
+  controlActions     CampaignControlAction[]
+
+  @@unique([campaignId, channel, destinationKey], map: "deliveries_campaign_channel_destination_unique")
+  @@index([campaignId, status, createdAt], map: "deliveries_campaign_status_created_idx")
+  @@index([status, createdAt], map: "deliveries_status_created_idx")
+  @@index([requestEventId], map: "deliveries_request_event_idx")
+  @@map("deliveries")
+  @@schema("campaigns")
+}
+
+model CampaignControlAction {
+  id                 String                    @id @default(uuid()) @db.Uuid
+  campaignId         String                    @map("campaign_id") @db.Uuid
+  deliveryId         String?                   @map("delivery_id") @db.Uuid
+  actorId            String                    @map("actor_id")
+  action             CampaignControlActionKind
+  idempotencyKey     String?                   @map("idempotency_key") @db.Uuid
+  dispatchGeneration Int?                      @map("dispatch_generation")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  campaign           Campaign                  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  delivery           CampaignDelivery?         @relation(fields: [deliveryId], references: [id], onDelete: Restrict)
+
+  @@unique([actorId, idempotencyKey], map: "control_actions_actor_idempotency_unique")
+  @@index([campaignId, createdAt], map: "control_actions_campaign_created_idx")
+  @@index([deliveryId, createdAt], map: "control_actions_delivery_created_idx")
+  @@map("control_actions")
+  @@schema("campaigns")
+}
+
+model CampaignOutboxEvent {
+  id               String                 @id @default(uuid()) @db.Uuid
+  messageId        String                 @default(uuid()) @map("message_id") @db.Uuid
+  deduplicationKey String?                @unique(map: "outbox_events_deduplication_key_unique") @map("deduplication_key")
+  exchange         CampaignOutboxExchange
+  eventType        String                 @map("event_type")
+  routingKey       String                 @map("routing_key")
+  payload          Json
+  headers          Json                   @default("{}")
+  aggregateType    String?                @map("aggregate_type")
+  aggregateId      String?                @map("aggregate_id") @db.Uuid
+  generation       Int?
+  status           CampaignOutboxStatus   @default(PENDING)
+  attempts         Int                    @default(0)
+  availableAt      DateTime               @default(now()) @map("available_at")
+  lockedAt         DateTime?              @map("locked_at")
+  lockedBy         String?                @map("locked_by")
+  lockToken        String?                @map("lock_token") @db.Uuid
+  leaseExpiresAt   DateTime?              @map("lease_expires_at")
+  publishedAt      DateTime?              @map("published_at")
+  lastError        String?                @map("last_error") @db.Text
+  createdAt        DateTime               @default(now()) @map("created_at")
+  updatedAt        DateTime               @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt], map: "outbox_events_dispatch_idx")
+  @@index([status, leaseExpiresAt], map: "outbox_events_lease_idx")
+  @@index([messageId], map: "outbox_events_message_id_idx")
+  @@index([aggregateType, aggregateId, generation], map: "outbox_events_aggregate_idx")
+  @@map("outbox_events")
+  @@schema("campaigns")
+}
+
+model CampaignConsumerReceipt {
+  id             String                        @id @default(uuid()) @db.Uuid
+  eventId        String                        @map("event_id") @db.Uuid
+  consumer       String
+  payloadHash    String                        @map("payload_hash") @db.Char(64)
+  status         CampaignConsumerReceiptStatus
+  lockedAt       DateTime?                     @map("locked_at")
+  lockedBy       String?                       @map("locked_by")
+  lockToken      String?                       @map("lock_token") @db.Uuid
+  leaseExpiresAt DateTime?                     @map("lease_expires_at")
+  retryAttempt   Int?                          @map("retry_attempt")
+  deliveredAt    DateTime?                     @map("delivered_at")
+  createdAt      DateTime                      @default(now()) @map("created_at")
+  updatedAt      DateTime                      @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer], map: "consumer_receipts_event_consumer_unique")
+  @@index([status, leaseExpiresAt], map: "consumer_receipts_lease_idx")
+  @@map("consumer_receipts")
+  @@schema("campaigns")
+}
+
+model CampaignIdempotencyRecord {
+  id           String   @id @default(uuid()) @db.Uuid
+  scope        String
+  actorId      String   @map("actor_id")
+  key          String   @db.Uuid
+  requestHash  String   @map("request_hash") @db.Char(64)
+  resourceType String   @map("resource_type")
+  resourceId   String   @map("resource_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+  expiresAt    DateTime @map("expires_at")
+
+  @@unique([scope, actorId, key], map: "idempotency_scope_actor_key_unique")
+  @@index([expiresAt], map: "idempotency_expires_idx")
+  @@map("idempotency_records")
+  @@schema("campaigns")
+}
+
+model CampaignRateLimit {
+  id              String                  @id @default(uuid()) @db.Uuid
+  campaignId      String                  @map("campaign_id") @db.Uuid
+  channel         CampaignDeliveryChannel
+  nextAvailableAt DateTime                @map("next_available_at")
+  updatedAt       DateTime                @updatedAt @map("updated_at")
+
+  @@unique([campaignId, channel], map: "rate_limits_campaign_channel_unique")
+  @@index([nextAvailableAt], map: "rate_limits_next_available_idx")
+  @@map("rate_limits")
+  @@schema("campaigns")
+}
+
+model CampaignHeartbeat {
+  id         String   @id @default(uuid()) @db.Uuid
+  role       String
+  instanceId String   @map("instance_id")
+  metadata   Json     @default("{}")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([role, instanceId], map: "heartbeats_role_instance_unique")
+  @@index([role, lastSeenAt], map: "heartbeats_role_seen_idx")
+  @@map("heartbeats")
+  @@schema("campaigns")
+}
+
+enum CampaignStatus {
+  SNAPSHOTTING
+  QUEUED
+  RUNNING
+  CANCEL_REQUESTED
+  COMPLETED
+  PARTIAL_FAILED
+  FAILED
+  CANCELLED
+
+  @@schema("campaigns")
+}
+
+enum CampaignAudience {
+  ALL
+  ACTIVE_SUBSCRIPTION
+
+  @@schema("campaigns")
+}
+
+enum CampaignRequestedChannel {
+  EMAIL
+  TELEGRAM
+  BOTH
+
+  @@schema("campaigns")
+}
+
+enum CampaignDeliveryChannel {
+  EMAIL
+  TELEGRAM
+
+  @@schema("campaigns")
+}
+
+enum CampaignDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  CANCELLED
+
+  @@schema("campaigns")
+}
+
+enum AudienceSnapshotStatus {
+  CREATING
+  READY
+  FAILED
+  CANCELLED
+
+  @@schema("campaigns")
+}
+
+enum CampaignControlActionKind {
+  CANCEL
+  RETRY
+
+  @@schema("campaigns")
+}
+
+enum CampaignOutboxStatus {
+  PENDING
+  PUBLISHING
+  PUBLISHED
+  CANCELLED
+
+  @@schema("campaigns")
+}
+
+enum CampaignOutboxExchange {
+  EVENTS
+  RETRY
+  DEAD_LETTER
+
+  @@schema("campaigns")
+}
+
+enum CampaignConsumerReceiptStatus {
+  PROCESSING
+  RETRY_SCHEDULED
+  DELIVERED
+  DEAD_LETTERED
+
+  @@schema("campaigns")
+}

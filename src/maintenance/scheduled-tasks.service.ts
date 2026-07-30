@@ -1,4 +1,5 @@
 import {
+	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 	DatabaseBackupInput,
 	DatabaseBackupTarget,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES
@@ -188,6 +189,10 @@ export class ScheduledTasksService {
 			created: boolean;
 			job: ScheduledJobRunView;
 		};
+		campaigns: {
+			created: boolean;
+			job: ScheduledJobRunView;
+		};
 	} | null> {
 		const settings = await this.getSettings();
 		if (!settings.databaseBackupEnabled) return null;
@@ -204,6 +209,10 @@ export class ScheduledTasksService {
 		const notificationDeliveryScheduledFor = new Date(
 			scheduledFor.getTime() +
 				NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES * 60_000
+		);
+		const campaignsScheduledFor = new Date(
+			scheduledFor.getTime() +
+				CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES * 60_000
 		);
 
 		return this.prisma.$transaction(
@@ -238,7 +247,23 @@ export class ScheduledTasksService {
 						this.getEventForType(
 							SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP
 						)
+					),
+				campaigns: await this.scheduledJobs.enqueueUniqueInTransaction(
+					transaction,
+					{
+						jobType: SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP,
+						scheduleKey: period.key,
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						scheduledFor: campaignsScheduledFor,
+						periodStart: period.start,
+						periodEnd: period.end,
+						input: input as unknown as Prisma.InputJsonObject,
+						availableAt: campaignsScheduledFor
+					},
+					this.getEventForType(
+						SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP
 					)
+				)
 			}),
 			{ timeout: 10_000 }
 		);
@@ -344,9 +369,14 @@ export class ScheduledTasksService {
 	}
 
 	private getDatabaseBackupJobType(target: DatabaseBackupTarget) {
-		return target === 'core'
-			? SCHEDULED_JOB_TYPES.DATABASE_BACKUP
-			: SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP;
+		switch (target) {
+			case 'core':
+				return SCHEDULED_JOB_TYPES.DATABASE_BACKUP;
+			case 'notification-delivery':
+				return SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP;
+			case 'campaigns':
+				return SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP;
+		}
 	}
 
 	private getRequestedByAdminId(input: Prisma.JsonValue) {

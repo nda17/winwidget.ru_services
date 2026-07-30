@@ -117,30 +117,52 @@ describe('notification delivery messaging contracts', () => {
 	it.each([
 		[
 			'campaign-email',
-			'notification.campaign.email.requested.v1',
+			'notification.campaign.email.requested.v2',
 			{
-				reference: {
-					type: 'mailing-delivery',
-					id: '22222222-2222-4222-8222-222222222222',
-					aggregateId: '33333333-3333-4333-8333-333333333333'
-				},
-				destination: { email: 'owner@example.com' },
-				content: { subject: 'Новости', message: 'Текст' }
+				destination: { email: 'owner@example.com' }
 			}
 		],
 		[
 			'campaign-telegram',
-			'notification.campaign.telegram.requested.v1',
+			'notification.campaign.telegram.requested.v2',
 			{
-				reference: {
-					type: 'mailing-delivery',
-					id: '22222222-2222-4222-8222-222222222222',
-					aggregateId: '33333333-3333-4333-8333-333333333333'
-				},
-				destination: { telegramChatId: '12345' },
-				content: { subject: 'Новости', message: 'Текст' }
+				destination: { telegramChatId: '12345' }
 			}
-		],
+		]
+	])('accepts the strict %s request contract', (kind, eventType, data) => {
+		const campaignId = '33333333-3333-4333-8333-333333333333';
+		const deliveryId = '22222222-2222-4222-8222-222222222222';
+		expect(() =>
+			assertMessagingEventContract(
+				{
+					schemaVersion: 2,
+					eventType,
+					eventId: messageId,
+					occurredAt: '2026-07-30T10:00:00.000Z',
+					correlationId: '44444444-4444-4444-8444-444444444444',
+					campaignId,
+					deliveryId,
+					dispatchGeneration: 2,
+					reference: {
+						type: 'campaign-delivery',
+						id: deliveryId,
+						aggregateId: campaignId,
+						dispatchGeneration: 2
+					},
+					...data,
+					content: { subject: 'Новости', message: 'Текст' }
+				},
+				{
+					eventType,
+					routingKey: eventType,
+					messageId,
+					kind: kind as NotificationDeliveryKind
+				}
+			)
+		).not.toThrow();
+	});
+
+	it.each([
 		[
 			'daily-summary-delivery-telegram',
 			'notification.daily-summary.telegram.requested.v1',
@@ -206,20 +228,20 @@ describe('notification delivery messaging contracts', () => {
 		).not.toThrow();
 	});
 
-	it('accepts only the exact outbound delivery outcome route', () => {
+	it('accepts only the exact outbound campaign delivery outcome route', () => {
 		const payload = {
-			schemaVersion: 1,
-			eventType: 'notification.delivery.outcome.v1',
+			schemaVersion: 2,
+			eventType: 'notification.delivery.outcome.v2',
+			eventId: messageId,
+			occurredAt: '2026-07-28T10:00:00.000Z',
+			correlationId: '44444444-4444-4444-8444-444444444444',
 			sourceEventId: messageId,
 			sourceKind: 'campaign-email',
-			reference: {
-				type: 'mailing-delivery',
-				id: '22222222-2222-4222-8222-222222222222',
-				aggregateId: '33333333-3333-4333-8333-333333333333'
-			},
+			campaignId: '33333333-3333-4333-8333-333333333333',
+			deliveryId: '22222222-2222-4222-8222-222222222222',
+			dispatchGeneration: 2,
 			status: 'DELIVERED',
-			failure: null,
-			occurredAt: '2026-07-28T10:00:00.000Z'
+			failure: null
 		};
 
 		expect(() =>

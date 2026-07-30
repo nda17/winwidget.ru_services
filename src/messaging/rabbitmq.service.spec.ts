@@ -82,11 +82,6 @@ describe('RabbitMqService topology', () => {
 			})
 		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.mailing.email',
-			'winwidget.events',
-			'mailing.delivery.email.v1'
-		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
 			'winwidget.limit-notification.email',
 			'winwidget.events',
 			'lead.limit.reached.email.v2'

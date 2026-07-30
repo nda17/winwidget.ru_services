@@ -696,9 +696,14 @@ export class MaintenanceWorkerService
 	private getBackupTarget(
 		jobType: DatabaseBackupJobType
 	): DatabaseBackupTarget {
-		return jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP
-			? 'core'
-			: 'notification-delivery';
+		switch (jobType) {
+			case SCHEDULED_JOB_TYPES.DATABASE_BACKUP:
+				return 'core';
+			case SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP:
+				return 'notification-delivery';
+			case SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP:
+				return 'campaigns';
+		}
 	}
 
 	private startLeaseRenewal(

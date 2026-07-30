@@ -1,4 +1,5 @@
 import {
+	CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
 	MESSAGING_ROUTING_KEYS,
@@ -795,6 +796,58 @@ export class NotificationDeliveryWorkerService
 			input.kind !== 'subscription-expiry-email' &&
 			input.kind !== 'subscription-expiry-telegram'
 		) {
+			return;
+		}
+		if (
+			input.kind === 'campaign-email' ||
+			input.kind === 'campaign-telegram'
+		) {
+			const request = input.payload as {
+				correlationId: string;
+				campaignId: string;
+				deliveryId: string;
+				dispatchGeneration: number;
+			};
+			const messageId = randomUUID();
+			const payload = {
+				schemaVersion: 2 as const,
+				eventType: CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+				eventId: messageId,
+				occurredAt: new Date().toISOString(),
+				correlationId: request.correlationId,
+				sourceEventId: input.eventId,
+				sourceKind: input.kind,
+				campaignId: request.campaignId,
+				deliveryId: request.deliveryId,
+				dispatchGeneration: request.dispatchGeneration,
+				status: input.status,
+				failure: input.failure
+					? {
+							normalizedCode: input.failure.normalizedCode.slice(0, 255),
+							safeReason: input.failure.safeReason.slice(0, 2000)
+						}
+					: null
+			};
+			await transaction.notificationDeliveryOutboxEvent.createMany({
+				data: [
+					{
+						messageId,
+						deduplicationKey: `notification:${input.eventId}:${input.kind}:generation:${request.dispatchGeneration}:outcome:${input.status.toLowerCase()}:v2`,
+						exchange: NotificationDeliveryExchange.EVENTS,
+						eventType: CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+						routingKey: CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+						payload: payload as unknown as Prisma.InputJsonValue,
+						headers: createMessagingHeaders({
+							messageId,
+							causationId: input.eventId,
+							headers: {
+								'x-correlation-id': request.correlationId
+							}
+						}) as Prisma.InputJsonObject
+					}
+				],
+				skipDuplicates: true
+			});
 			return;
 		}
 		const reference = (

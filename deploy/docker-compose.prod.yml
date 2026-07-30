@@ -80,6 +80,9 @@ x-api-env: &api-env
   NOTIFICATION_DELIVERY_INTERNAL_URL: ${NOTIFICATION_DELIVERY_INTERNAL_URL:-http://127.0.0.1:4401/internal/notification-delivery}
   NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ${NOTIFICATION_DELIVERY_INTERNAL_TOKEN:?NOTIFICATION_DELIVERY_INTERNAL_TOKEN is required}
   NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS: ${NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS:-5000}
+  CAMPAIGNS_INTERNAL_TOKEN: ${CAMPAIGNS_INTERNAL_TOKEN:?CAMPAIGNS_INTERNAL_TOKEN is required}
+  CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE: ${CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE:-500}
+  CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: ${CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS:-300000}
 
 x-api-gateway-env: &api-gateway-env
   APP_REVISION: ${APP_REVISION:-unknown}
@@ -113,14 +116,11 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
   SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
-  MAILING_EMAIL_RATE_PER_SECOND: ${MAILING_EMAIL_RATE_PER_SECOND:-5}
-  MAILING_TELEGRAM_RATE_PER_SECOND: ${MAILING_TELEGRAM_RATE_PER_SECOND:-10}
-
 x-notification-delivery-env: &notification-delivery-env
   <<: *smtp-env
   APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
@@ -141,12 +141,37 @@ x-notification-delivery-env: &notification-delivery-env
   NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS: ${NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS:-90}
   NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS: ${NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS:-30}
 
+x-campaigns-env: &campaigns-env
+  APP_REVISION: ${CAMPAIGNS_REVISION:?CAMPAIGNS_REVISION is required}
+  NODE_ENV: production
+  CAMPAIGNS_DATABASE_URL: ${CAMPAIGNS_DATABASE_URL:?CAMPAIGNS_DATABASE_URL is required}
+  CAMPAIGNS_PROCESS_ROLE: ${CAMPAIGNS_PROCESS_ROLE:-all}
+  CAMPAIGNS_LISTEN_HOST: ${CAMPAIGNS_LISTEN_HOST:-127.0.0.1}
+  CAMPAIGNS_HEALTH_PORT: ${CAMPAIGNS_HEALTH_PORT:-4500}
+  CAMPAIGNS_CORE_INTERNAL_BASE_URL: ${CAMPAIGNS_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
+  CAMPAIGNS_INTERNAL_TOKEN: ${CAMPAIGNS_INTERNAL_TOKEN:?CAMPAIGNS_INTERNAL_TOKEN is required}
+  CAMPAIGNS_INTERNAL_TIMEOUT_MS: ${CAMPAIGNS_INTERNAL_TIMEOUT_MS:-10000}
+  CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: ${CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS:-300000}
+  CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE: ${CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE:-1000}
+  CAMPAIGNS_PREFETCH: ${CAMPAIGNS_PREFETCH:-10}
+  CAMPAIGNS_EMAIL_RATE_PER_SECOND: ${CAMPAIGNS_EMAIL_RATE_PER_SECOND:-10}
+  CAMPAIGNS_TELEGRAM_RATE_PER_SECOND: ${CAMPAIGNS_TELEGRAM_RATE_PER_SECOND:-5}
+  CAMPAIGNS_OUTBOX_BATCH_SIZE: ${CAMPAIGNS_OUTBOX_BATCH_SIZE:-50}
+  CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS: ${CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS:-1000}
+  CAMPAIGNS_OUTBOX_RETENTION_DAYS: ${CAMPAIGNS_OUTBOX_RETENTION_DAYS:-7}
+  RABBITMQ_URL: ${RABBITMQ_CAMPAIGNS_URL:?RABBITMQ_CAMPAIGNS_URL is required}
+  RABBITMQ_CONNECTION_NAME: winwidget-campaigns-service
+  RABBITMQ_ASSERT_TOPOLOGY: 'true'
+  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+  MESSAGING_SERVICE_NAME: campaigns-service
+
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
   APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
   DATABASE_URL_PRODUCTION: ${MAINTENANCE_DATABASE_URL_PRODUCTION:?MAINTENANCE_DATABASE_URL_PRODUCTION is required}
   DATABASE_BACKUP_URL: ${DATABASE_BACKUP_URL:?DATABASE_BACKUP_URL is required}
   NOTIFICATION_DELIVERY_BACKUP_URL: ${NOTIFICATION_DELIVERY_BACKUP_URL:?NOTIFICATION_DELIVERY_BACKUP_URL is required}
+  CAMPAIGNS_BACKUP_URL: ${CAMPAIGNS_BACKUP_URL:?CAMPAIGNS_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
@@ -180,6 +205,11 @@ x-notification-delivery-migration-env: &notification-delivery-migration-env
   APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
   NODE_ENV: production
   NOTIFICATION_DELIVERY_DATABASE_URL: ${NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION:?NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION is required}
+
+x-campaigns-migration-env: &campaigns-migration-env
+  APP_REVISION: ${CAMPAIGNS_REVISION:?CAMPAIGNS_REVISION is required}
+  NODE_ENV: production
+  CAMPAIGNS_DATABASE_URL: ${CAMPAIGNS_MIGRATION_DATABASE_URL:?CAMPAIGNS_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -218,6 +248,50 @@ services:
     mem_limit: ${NOTIFICATION_DELIVERY_POSTGRES_MEMORY_LIMIT:-768m}
     mem_reservation: ${NOTIFICATION_DELIVERY_POSTGRES_MEMORY_RESERVATION:-256m}
     cpus: ${NOTIFICATION_DELIVERY_POSTGRES_CPUS:-1.0}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
+  campaigns-postgres:
+    image: ${CAMPAIGNS_POSTGRES_IMAGE:?CAMPAIGNS_POSTGRES_IMAGE is required}
+    profiles:
+      - campaigns-database
+    labels:
+      com.winwidget.owner: campaigns
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_campaigns
+      POSTGRES_USER: ${CAMPAIGNS_POSTGRES_ADMIN_USER:?CAMPAIGNS_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/campaigns-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${CAMPAIGNS_POSTGRES_PORT:?CAMPAIGNS_POSTGRES_PORT is required}:5432'
+    volumes:
+      - winwidget-campaigns-postgres-data:/var/lib/postgresql
+    networks:
+      - campaigns-postgres
+    secrets:
+      - campaigns-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${CAMPAIGNS_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${CAMPAIGNS_POSTGRES_MEMORY_LIMIT:-768m}
+    mem_reservation: ${CAMPAIGNS_POSTGRES_MEMORY_RESERVATION:-256m}
+    cpus: ${CAMPAIGNS_POSTGRES_CPUS:-1.0}
     pids_limit: 200
     logging:
       driver: json-file
@@ -346,6 +420,32 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  campaigns-service:
+    image: ${CAMPAIGNS_IMAGE:?CAMPAIGNS_IMAGE is required}
+    build:
+      context: ../apps/campaigns
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${CAMPAIGNS_REVISION:?CAMPAIGNS_REVISION is required}
+    environment: *campaigns-env
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.CAMPAIGNS_HEALTH_PORT||4500)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -387,6 +487,7 @@ services:
     profiles:
       - migration
     environment: *migration-env
+    network_mode: host
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy']
 
@@ -404,7 +505,24 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  campaigns-migrate:
+    image: ${CAMPAIGNS_IMAGE:?CAMPAIGNS_IMAGE is required}
+    build:
+      context: ../apps/campaigns
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${CAMPAIGNS_REVISION:?CAMPAIGNS_REVISION is required}
+    profiles:
+      - campaigns-migration
+    environment: *campaigns-migration-env
+    network_mode: host
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
+  winwidget-campaigns-postgres-data:
+    external: true
+    name: ${CAMPAIGNS_POSTGRES_DATA_VOLUME:?CAMPAIGNS_POSTGRES_DATA_VOLUME must name the verified Campaigns PostgreSQL volume}
   winwidget-notification-delivery-postgres-data:
     external: true
     name: ${NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME:?NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME must name the verified Notification Delivery PostgreSQL volume}
@@ -413,6 +531,13 @@ volumes:
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
 
 networks:
+  campaigns-postgres:
+    name: winwidget-campaigns-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: campaigns
+      com.winwidget.purpose: postgres-network
   notification-delivery-postgres:
     name: winwidget-notification-delivery-postgres
     driver: bridge
@@ -422,5 +547,7 @@ networks:
       com.winwidget.purpose: postgres-network
 
 secrets:
+  campaigns-postgres-admin-password:
+    file: ${CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE:?CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE is required}
   notification-delivery-postgres-admin-password:
     file: ${NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE:?NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE is required}

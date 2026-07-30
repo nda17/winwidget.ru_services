@@ -9,6 +9,9 @@ HEALTHCHECK_ATTEMPTS="${MAINTENANCE_HEALTHCHECK_ATTEMPTS:-60}"
 HEALTHCHECK_INTERVAL="${MAINTENANCE_HEALTHCHECK_INTERVAL:-2}"
 
 server_root="$APP_ROOT/winwidget.ru_server"
+# shellcheck source=scripts/production-deploy-lock.sh
+source "$server_root/scripts/production-deploy-lock.sh"
+acquire_production_deploy_lock "maintenance deployment"
 recreate_started=false
 rollout_verified=false
 previous_image_ref=""
@@ -161,6 +164,8 @@ if [[ -n "$dirty_files" ]]; then
 	exit 1
 fi
 source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
+# shellcheck source=scripts/campaigns-database-lifecycle.sh
+source "$server_root/scripts/campaigns-database-lifecycle.sh"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend production env file was not found." >&2
@@ -265,12 +270,69 @@ get_database_username() {
 	exit 1
 }
 
+verify_campaigns_backup_target() {
+	local parser_image="$1"
+	local backup_state
+
+	printf '%s\n' "$(get_env_value CAMPAIGNS_BACKUP_URL)" |
+		docker run --rm -i --network none \
+			--entrypoint node \
+			-e "EXPECTED_PORT=$(get_env_value CAMPAIGNS_POSTGRES_PORT)" \
+			"$parser_image" \
+			-e '
+const { readFileSync } = require("node:fs");
+const url = new URL(readFileSync(0, "utf8").trim());
+const password = decodeURIComponent(url.password);
+if (
+  !["postgres:", "postgresql:"].includes(url.protocol) ||
+  decodeURIComponent(url.username) !== "winwidget_campaigns_backup" ||
+  url.hostname !== "127.0.0.1" ||
+  url.port !== process.env.EXPECTED_PORT ||
+  url.pathname !== "/winwidget_campaigns" ||
+  url.searchParams.get("schema") !== "campaigns" ||
+  password.length < 16 ||
+  /[\0\r\n]/.test(password)
+) {
+  throw new Error("Invalid Campaigns backup database URL boundary");
+}
+'
+
+	backup_state="$(
+		CAMPAIGNS_IMAGE="$parser_image" \
+			campaigns_database_psql CAMPAIGNS_BACKUP_URL \
+			--tuples-only --no-align --command '
+SELECT CASE WHEN
+	current_user = '"'"'winwidget_campaigns_backup'"'"'
+	AND NOT (SELECT rolsuper OR rolcreatedb OR rolcreaterole FROM pg_roles WHERE rolname = current_user)
+	AND NOT has_database_privilege(current_user, current_database(), '"'"'CREATE'"'"')
+	AND NOT has_schema_privilege(current_user, '"'"'campaigns'"'"', '"'"'CREATE'"'"')
+	AND NOT EXISTS (
+		SELECT 1
+		FROM pg_tables
+		WHERE schemaname = '"'"'campaigns'"'"'
+			AND (
+				NOT has_table_privilege(current_user, format('"'"'%I.%I'"'"', schemaname, tablename), '"'"'SELECT'"'"')
+				OR has_table_privilege(current_user, format('"'"'%I.%I'"'"', schemaname, tablename), '"'"'INSERT'"'"')
+				OR has_table_privilege(current_user, format('"'"'%I.%I'"'"', schemaname, tablename), '"'"'UPDATE'"'"')
+				OR has_table_privilege(current_user, format('"'"'%I.%I'"'"', schemaname, tablename), '"'"'DELETE'"'"')
+			)
+	)
+THEN '"'"'ok'"'"' ELSE '"'"'unsafe'"'"' END;
+'
+	)"
+	[[ "$backup_state" == "ok" ]] || {
+		echo "Campaigns backup database boundary is unsafe." >&2
+		return 1
+	}
+}
+
 assert_distinct_database_roles() {
 	local api_user
 	local migration_user
 	local maintenance_user
 	local backup_user
 	local notification_delivery_backup_user
+	local campaigns_backup_user
 
 	api_user="$(get_database_username DATABASE_URL_PRODUCTION)"
 	migration_user="$(get_database_username DATABASE_MIGRATION_URL_PRODUCTION)"
@@ -281,18 +343,24 @@ assert_distinct_database_roles() {
 	notification_delivery_backup_user="$(
 		get_database_username NOTIFICATION_DELIVERY_BACKUP_URL
 	)"
+	campaigns_backup_user="$(get_database_username CAMPAIGNS_BACKUP_URL)"
 
 	if [[ "$api_user" == "$migration_user" ||
 		"$api_user" == "$maintenance_user" ||
 		"$api_user" == "$backup_user" ||
 		"$api_user" == "$notification_delivery_backup_user" ||
+		"$api_user" == "$campaigns_backup_user" ||
 		"$migration_user" == "$maintenance_user" ||
 		"$migration_user" == "$backup_user" ||
 		"$migration_user" == "$notification_delivery_backup_user" ||
+		"$migration_user" == "$campaigns_backup_user" ||
 		"$maintenance_user" == "$backup_user" ||
 		"$maintenance_user" == "$notification_delivery_backup_user" ||
-		"$backup_user" == "$notification_delivery_backup_user" ]]; then
-		echo "API, migration, Maintenance runtime, core backup and notification delivery backup must use five distinct PostgreSQL roles" >&2
+		"$maintenance_user" == "$campaigns_backup_user" ||
+		"$backup_user" == "$notification_delivery_backup_user" ||
+		"$backup_user" == "$campaigns_backup_user" ||
+		"$notification_delivery_backup_user" == "$campaigns_backup_user" ]]; then
+		echo "API, migration, Maintenance runtime, core backup, notification delivery backup and Campaigns backup must use six distinct PostgreSQL roles" >&2
 		exit 1
 	fi
 }
@@ -305,11 +373,17 @@ for key in \
 	MAINTENANCE_DATABASE_URL_PRODUCTION \
 	DATABASE_BACKUP_URL \
 	NOTIFICATION_DELIVERY_BACKUP_URL \
+	CAMPAIGNS_BACKUP_URL \
 	NOTIFICATION_DELIVERY_POSTGRES_IMAGE \
 	NOTIFICATION_DELIVERY_POSTGRES_PORT \
 	NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME \
 	NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER \
 	NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE \
+	CAMPAIGNS_POSTGRES_IMAGE \
+	CAMPAIGNS_POSTGRES_PORT \
+	CAMPAIGNS_POSTGRES_DATA_VOLUME \
+	CAMPAIGNS_POSTGRES_ADMIN_USER \
+	CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE \
 	RABBITMQ_MAINTENANCE_WORKER_URL \
 	MAINTENANCE_HEALTH_PORT; do
 	require_env_key "$key"
@@ -344,6 +418,7 @@ if [[ "$(get_env_value COMPOSE_PROJECT_NAME)" != "winwidget" ]]; then
 	exit 1
 fi
 assert_notification_database_postgres_identity
+assert_campaigns_database_postgres_identity
 assert_distinct_database_roles
 
 health_port="$(get_env_value MAINTENANCE_HEALTH_PORT)"
@@ -393,6 +468,7 @@ initialize_notification_database_lifecycle_guard \
 	false \
 	"a maintenance-only rollout"
 assert_notification_database_backup_target_url
+initialize_campaigns_database_lifecycle_guard "a maintenance-only rollout"
 
 compose_target config --quiet
 
@@ -450,7 +526,10 @@ unsafe_contract_changes="$(
 		src/messaging/messaging.constants.ts \
 		src/messaging/messaging-event-contract.ts \
 		src/messaging/rabbitmq.service.ts \
-		scripts/notification-delivery-database-lifecycle.sh
+		scripts/notification-delivery-database-lifecycle.sh \
+		apps/campaigns/prisma/schema.prisma \
+		apps/campaigns/prisma/migrations \
+		scripts/campaigns-database-lifecycle.sh
 )"
 if [[ -n "$unsafe_contract_changes" ]]; then
 	echo "Maintenance-only rollout cannot include schema, topology or shared event contract changes:" >&2
@@ -465,6 +544,7 @@ if ! verify_maintenance_worker \
 	echo "Current maintenance worker is not a healthy rollback target." >&2
 	exit 1
 fi
+verify_campaigns_backup_target "$previous_image_id"
 
 echo "Building maintenance image for revision $deploy_revision."
 compose_target build maintenance-worker
@@ -493,5 +573,6 @@ fi
 verify_notification_database_lifecycle_unchanged \
 	"the maintenance-only rollout" \
 	"complete"
+verify_campaigns_database_lifecycle_unchanged
 rollout_verified=true
 echo "Maintenance worker rollout verified for revision $deploy_revision."

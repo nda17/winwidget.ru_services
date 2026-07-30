@@ -1,24 +1,14 @@
+import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';
 import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
+import { CampaignAdminAuditEventPayload } from '@/messaging/campaign-admin-audit-event';
 import {
 	LeadIntegrationEventPayload,
 	ResolvedLeadIntegrationEventPayload
 } from '@/messaging/lead-integration-event';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
-import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import { IntegrationErrorClassification } from '@/messaging/integration-error-classifier';
-import {
-	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
-	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-	MESSAGING_ROUTING_KEYS,
-	MonolithIntegrationKind
-} from '@/messaging/messaging.constants';
-import { createMessagingHeaders } from '@/messaging/messaging-context';
-import {
-	CampaignEmailNotificationRequestedEventPayload,
-	CampaignTelegramNotificationRequestedEventPayload,
-	NotificationDeliveryOutcomeEventPayload,
-	serializeNotificationDeliveryEvent
-} from '@/messaging/notification-delivery-event';
+import { MonolithIntegrationKind } from '@/messaging/messaging.constants';
+import { NotificationDeliveryOutcomeEventPayload } from '@/messaging/notification-delivery-event';
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
 import { PaymentService } from '@/payment/payment.service';
 import { PrismaService } from '@/prisma.service';
@@ -27,27 +17,15 @@ import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import { SCHEDULED_JOB_TYPES } from '@/scheduled-jobs/scheduled-jobs.types';
 import { Injectable } from '@nestjs/common';
-import {
-	MailingCampaignStatus,
-	MailingDeliveryChannel,
-	MailingDeliveryStatus,
-	Prisma,
-	SubscriptionExpiryReminderStatus
-} from '@prisma/client';
+import { SubscriptionExpiryReminderStatus } from '@prisma/client';
 
 type DeliveryEventPayload =
 	| LeadIntegrationEventPayload
-	| MailingDeliveryEventPayload
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
 	| DailySummaryRequestedEventPayload
-	| AutoRenewalChargeRequestedEventPayload;
-
-interface MailingDeliveryOutcomeRow {
-	id: string;
-	campaignId: string;
-	status: MailingDeliveryStatus;
-}
+	| AutoRenewalChargeRequestedEventPayload
+	| CampaignAdminAuditEventPayload;
 
 @Injectable()
 export class IntegrationDeliveryService {
@@ -90,11 +68,6 @@ export class IntegrationDeliveryService {
 			);
 			return;
 		}
-		if (kind === 'mailing-email' || kind === 'mailing-telegram') {
-			await this.dispatchMailingDelivery(kind, event, eventId);
-			return;
-		}
-
 		const leadEvent = await this.leadDestination.resolve(
 			eventId,
 			event as LeadIntegrationEventPayload
@@ -149,160 +122,10 @@ export class IntegrationDeliveryService {
 		});
 	}
 
-	private async dispatchMailingDelivery(
-		kind: 'mailing-email' | 'mailing-telegram',
-		event: DeliveryEventPayload,
-		eventId: string
-	): Promise<void> {
-		const payload = event as MailingDeliveryEventPayload;
-		const expectedChannel =
-			kind === 'mailing-email'
-				? MailingDeliveryChannel.EMAIL
-				: MailingDeliveryChannel.TELEGRAM;
-		if (
-			payload?.schemaVersion !== 1 ||
-			payload?.eventType !== 'mailing.delivery.requested.v1' ||
-			!payload.campaignId ||
-			!payload.deliveryId ||
-			payload.channel !== expectedChannel
-		) {
-			throw new Error('Invalid mailing delivery event payload');
-		}
-
-		const delivery = await this.prisma.mailingDelivery.findUnique({
-			where: { id: payload.deliveryId },
-			include: { campaign: true }
-		});
-		if (!delivery || delivery.campaignId !== payload.campaignId) {
-			throw new Error('Mailing delivery not found');
-		}
-		if (delivery.status === MailingDeliveryStatus.FAILED) {
-			throw new Error('Mailing delivery is in FAILED state');
-		}
-		if (
-			delivery.status === MailingDeliveryStatus.SENT ||
-			delivery.status === MailingDeliveryStatus.CANCELLED ||
-			delivery.status === MailingDeliveryStatus.PROCESSING
-		) {
-			return;
-		}
-		if (
-			delivery.campaign.status === MailingCampaignStatus.CANCELLED ||
-			delivery.campaign.cancelRequestedAt
-		) {
-			await this.cancelPendingMailingDelivery(
-				delivery.id,
-				delivery.campaignId
-			);
-			return;
-		}
-
-		const notificationKind =
-			expectedChannel === MailingDeliveryChannel.EMAIL
-				? ('campaign-email' as const)
-				: ('campaign-telegram' as const);
-		const notificationPayload:
-			| CampaignEmailNotificationRequestedEventPayload
-			| CampaignTelegramNotificationRequestedEventPayload =
-			expectedChannel === MailingDeliveryChannel.EMAIL
-				? {
-						schemaVersion: 1,
-						eventType: CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
-						reference: {
-							type: 'mailing-delivery',
-							id: delivery.id,
-							aggregateId: delivery.campaignId
-						},
-						destination: { email: delivery.recipient },
-						content: {
-							subject: delivery.campaign.subject,
-							message: delivery.campaign.message
-						}
-					}
-				: {
-						schemaVersion: 1,
-						eventType: CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-						reference: {
-							type: 'mailing-delivery',
-							id: delivery.id,
-							aggregateId: delivery.campaignId
-						},
-						destination: {
-							telegramChatId: delivery.recipient
-						},
-						content: {
-							subject: delivery.campaign.subject,
-							message: delivery.campaign.message
-						}
-					};
-
-		const claimed = await this.prisma.$transaction(async transaction => {
-			const result = await transaction.mailingDelivery.updateMany({
-				where: {
-					id: delivery.id,
-					campaignId: delivery.campaignId,
-					status: MailingDeliveryStatus.PENDING
-				},
-				data: {
-					status: MailingDeliveryStatus.PROCESSING,
-					attempts: { increment: 1 },
-					lastError: null
-				}
-			});
-			if (result.count !== 1) return false;
-			await transaction.mailingCampaign.updateMany({
-				where: {
-					id: delivery.campaignId,
-					status: MailingCampaignStatus.QUEUED
-				},
-				data: {
-					status: MailingCampaignStatus.RUNNING,
-					startedAt: new Date()
-				}
-			});
-			await transaction.outboxEvent.createMany({
-				data: [
-					{
-						messageId: eventId,
-						deduplicationKey: `notification-dispatch:${eventId}:${notificationKind}:v1`,
-						eventType: notificationPayload.eventType,
-						routingKey: MESSAGING_ROUTING_KEYS[notificationKind],
-						payload: serializeNotificationDeliveryEvent(
-							notificationPayload
-						),
-						headers: createMessagingHeaders({
-							messageId: eventId,
-							causationId: eventId
-						})
-					}
-				],
-				skipDuplicates: true
-			});
-			return true;
-		});
-		if (!claimed) {
-			const current = await this.prisma.mailingDelivery.findUnique({
-				where: { id: delivery.id },
-				select: { status: true }
-			});
-			if (
-				current?.status === MailingDeliveryStatus.SENT ||
-				current?.status === MailingDeliveryStatus.CANCELLED ||
-				current?.status === MailingDeliveryStatus.PROCESSING
-			) {
-				return;
-			}
-			throw new Error('Mailing delivery could not be claimed');
-		}
-	}
-
 	private async applyNotificationDeliveryOutcome(
 		event: NotificationDeliveryOutcomeEventPayload
 	): Promise<void> {
 		switch (event.reference.type) {
-			case 'mailing-delivery':
-				await this.applyMailingDeliveryOutcome(event);
-				return;
 			case 'daily-summary-job':
 				await this.applyDailySummaryDeliveryOutcome(event);
 				return;
@@ -310,105 +133,6 @@ export class IntegrationDeliveryService {
 				await this.applySubscriptionExpiryDeliveryOutcome(event);
 				return;
 		}
-	}
-
-	private async applyMailingDeliveryOutcome(
-		event: NotificationDeliveryOutcomeEventPayload
-	): Promise<void> {
-		if (
-			event.reference.type !== 'mailing-delivery' ||
-			(event.sourceKind !== 'campaign-email' &&
-				event.sourceKind !== 'campaign-telegram')
-		) {
-			throw new Error('Invalid mailing delivery outcome');
-		}
-		const reference = event.reference;
-		await this.prisma.$transaction(async transaction => {
-			const rows = await transaction.$queryRaw<
-				MailingDeliveryOutcomeRow[]
-			>(
-				Prisma.sql`
-					SELECT
-						"id",
-						"campaign_id" AS "campaignId",
-						"status"
-					FROM "mailing_deliveries"
-						WHERE "id" = ${reference.id}::uuid
-					FOR UPDATE
-				`
-			);
-			const delivery = rows[0];
-			if (!delivery || delivery.campaignId !== reference.aggregateId) {
-				throw new Error('Mailing delivery outcome reference not found');
-			}
-
-			let campaign;
-			if (event.status === 'FAILED') {
-				if (delivery.status !== MailingDeliveryStatus.PROCESSING) return;
-				await transaction.mailingDelivery.update({
-					where: { id: delivery.id },
-					data: {
-						status: MailingDeliveryStatus.FAILED,
-						lastError: this.getOutcomeError(event),
-						sentAt: null
-					}
-				});
-				campaign = await transaction.mailingCampaign.update({
-					where: { id: delivery.campaignId },
-					data: { failedCount: { increment: 1 } }
-				});
-			} else {
-				if (
-					delivery.status !== MailingDeliveryStatus.PROCESSING &&
-					delivery.status !== MailingDeliveryStatus.FAILED
-				) {
-					return;
-				}
-				await transaction.mailingDelivery.update({
-					where: { id: delivery.id },
-					data: {
-						status: MailingDeliveryStatus.SENT,
-						sentAt: new Date(event.occurredAt),
-						lastError: null
-					}
-				});
-				campaign = await transaction.mailingCampaign.update({
-					where: { id: delivery.campaignId },
-					data: {
-						sentCount: { increment: 1 },
-						...(delivery.status === MailingDeliveryStatus.FAILED
-							? { failedCount: { decrement: 1 } }
-							: {})
-					}
-				});
-			}
-
-			const pending = await transaction.mailingDelivery.count({
-				where: {
-					campaignId: delivery.campaignId,
-					status: {
-						in: [
-							MailingDeliveryStatus.PENDING,
-							MailingDeliveryStatus.PROCESSING
-						]
-					}
-				}
-			});
-			if (pending !== 0) return;
-			await transaction.mailingCampaign.updateMany({
-				where: {
-					id: delivery.campaignId,
-					status: { not: MailingCampaignStatus.CANCELLED }
-				},
-				data: {
-					status:
-						campaign.failedCount > 0
-							? MailingCampaignStatus.PARTIAL_FAILED
-							: MailingCampaignStatus.COMPLETED,
-					completedAt: new Date()
-				}
-			});
-		});
 	}
 
 	private async applyDailySummaryDeliveryOutcome(
@@ -513,35 +237,6 @@ export class IntegrationDeliveryService {
 			0,
 			10_000
 		);
-	}
-
-	private async cancelPendingMailingDelivery(
-		deliveryId: string,
-		campaignId: string
-	): Promise<void> {
-		await this.prisma.$transaction(async transaction => {
-			const updated = await transaction.mailingDelivery.updateMany({
-				where: {
-					id: deliveryId,
-					campaignId,
-					status: {
-						in: [
-							MailingDeliveryStatus.PENDING,
-							MailingDeliveryStatus.PROCESSING
-						]
-					}
-				},
-				data: {
-					status: MailingDeliveryStatus.CANCELLED,
-					cancelledAt: new Date()
-				}
-			});
-			if (updated.count !== 1) return;
-			await transaction.mailingCampaign.update({
-				where: { id: campaignId },
-				data: { cancelledCount: { increment: 1 } }
-			});
-		});
 	}
 
 	private async sendWebhook(
@@ -726,4 +421,3 @@ export class IntegrationDeliveryService {
 		return labels[event.source];
 	}
 }
-import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';

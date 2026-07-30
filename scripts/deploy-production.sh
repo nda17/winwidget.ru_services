@@ -11,6 +11,7 @@ READINESS_URL="${READINESS_URL:-http://127.0.0.1:4200/api/v1/health/ready}"
 GATEWAY_READINESS_URL="${GATEWAY_READINESS_URL:-http://127.0.0.1:4100/health/ready}"
 MAINTENANCE_READINESS_URL="${MAINTENANCE_READINESS_URL:-http://127.0.0.1:4300/health/ready}"
 NOTIFICATION_DELIVERY_READINESS_URL="${NOTIFICATION_DELIVERY_READINESS_URL:-http://127.0.0.1:4401/health/ready}"
+CAMPAIGNS_READINESS_URL="${CAMPAIGNS_READINESS_URL:-http://127.0.0.1:4500/health/ready}"
 NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
@@ -20,6 +21,11 @@ HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
 cd "$APP_ROOT"
 
 server_root="$APP_ROOT/winwidget.ru_server"
+# shellcheck source=scripts/production-deploy-lock.sh
+source "$server_root/scripts/production-deploy-lock.sh"
+acquire_production_deploy_lock "full backend deployment"
+# shellcheck source=scripts/campaigns-contract-migration-guard.sh
+source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
 expected_revision="${EXPECTED_REVISION:-$deploy_revision}"
 if [[ "$deploy_revision" != "$expected_revision" ]]; then
@@ -35,7 +41,58 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+# Defaults are owned by the sourced lifecycle; keep them explicit here so
+# static analysis can follow their later use through the dynamic source path.
+notification_database_cutover_active=false
+notification_database_phase_before=""
+# shellcheck source=scripts/notification-delivery-database-lifecycle.sh
 source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
+# shellcheck source=scripts/campaigns-database-lifecycle.sh
+source "$server_root/scripts/campaigns-database-lifecycle.sh"
+
+campaigns_automatic_prod_push="${CAMPAIGNS_AUTOMATIC_PROD_PUSH:-false}"
+campaigns_cutover_phase="missing"
+if [[ -e "$CAMPAIGNS_DATABASE_CUTOVER_MARKER" ||
+	-L "$CAMPAIGNS_DATABASE_CUTOVER_MARKER" ]]; then
+	if ! validate_campaigns_database_cutover_marker; then
+		echo "Campaigns database cutover marker is invalid; refusing full deployment." >&2
+		exit 1
+	fi
+	campaigns_cutover_phase="$(campaigns_database_marker_value phase)"
+fi
+campaigns_deploy_action="$(
+	campaigns_full_deploy_action \
+		"$campaigns_automatic_prod_push" \
+		"$campaigns_cutover_phase"
+)" || {
+	echo "Campaigns full deployment trigger or cutover phase is invalid." >&2
+	exit 1
+}
+case "$campaigns_deploy_action" in
+	stage)
+		guard_campaigns_cutover_checkout_revision "$deploy_revision"
+		write_campaigns_first_cutover_staged_marker "$deploy_revision"
+		echo "Campaigns first-cutover revision $deploy_revision is staged on the VPS."
+		echo "No image was built, container restarted or migration applied."
+		echo "Run the manual campaigns-database-cutover prepare workflow next."
+		exit 0
+		;;
+	block)
+		if [[ "$campaigns_cutover_phase" == "missing" ]]; then
+			echo "Manual full deployment is blocked before the Campaigns cutover is complete." >&2
+			echo "Run the staged automatic prod workflow and manual campaigns-database-cutover prepare first." >&2
+		else
+			echo "Campaigns database cutover is in phase $campaigns_cutover_phase." >&2
+		fi
+		echo "Production pushes must remain frozen until phase=complete; changing revision requires reviewed cutover recovery." >&2
+		exit 1
+		;;
+	deploy) ;;
+	*)
+		echo "Campaigns full deployment action is invalid." >&2
+		exit 1
+		;;
+esac
 
 export APP_REVISION="$deploy_revision"
 export APP_VERSION="git-$deploy_revision"
@@ -43,12 +100,15 @@ export MAINTENANCE_REVISION="$deploy_revision"
 export MAINTENANCE_IMAGE="winwidget-maintenance:git-$deploy_revision"
 export NOTIFICATION_DELIVERY_REVISION="$deploy_revision"
 export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$deploy_revision"
+export CAMPAIGNS_REVISION="$deploy_revision"
+export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
 echo "Building gateway image: winwidget-api-gateway:$APP_VERSION"
 echo "Building maintenance image: $MAINTENANCE_IMAGE"
 echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
+echo "Building Campaigns image: $CAMPAIGNS_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -98,7 +158,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION)
+		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION)
 			continue
 			;;
 	esac
@@ -181,54 +241,34 @@ get_database_username() {
 }
 
 assert_distinct_database_roles() {
-	local api_user
-	local migration_user
-	local maintenance_user
-	local backup_user
-	local notification_delivery_user
-	local notification_delivery_migration_user
-	local notification_delivery_backup_user
+	local -a role_keys=(
+		DATABASE_URL_PRODUCTION
+		DATABASE_MIGRATION_URL_PRODUCTION
+		MAINTENANCE_DATABASE_URL_PRODUCTION
+		DATABASE_BACKUP_URL
+		NOTIFICATION_DELIVERY_DATABASE_URL
+		NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
+		NOTIFICATION_DELIVERY_BACKUP_URL
+		CAMPAIGNS_DATABASE_URL
+		CAMPAIGNS_MIGRATION_DATABASE_URL
+		CAMPAIGNS_BACKUP_URL
+	)
+	local -a role_users=()
+	local key
+	local left
+	local right
 
-	api_user="$(get_database_username DATABASE_URL_PRODUCTION)"
-	migration_user="$(get_database_username DATABASE_MIGRATION_URL_PRODUCTION)"
-	maintenance_user="$(
-		get_database_username MAINTENANCE_DATABASE_URL_PRODUCTION
-	)"
-	backup_user="$(get_database_username DATABASE_BACKUP_URL)"
-	notification_delivery_user="$(
-		get_database_username NOTIFICATION_DELIVERY_DATABASE_URL
-	)"
-	notification_delivery_migration_user="$(
-		get_database_username NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
-	)"
-	notification_delivery_backup_user="$(
-		get_database_username NOTIFICATION_DELIVERY_BACKUP_URL
-	)"
-
-	if [[ "$api_user" == "$migration_user" ||
-		"$api_user" == "$maintenance_user" ||
-		"$api_user" == "$backup_user" ||
-		"$api_user" == "$notification_delivery_user" ||
-		"$api_user" == "$notification_delivery_migration_user" ||
-		"$api_user" == "$notification_delivery_backup_user" ||
-		"$migration_user" == "$maintenance_user" ||
-		"$migration_user" == "$backup_user" ||
-		"$migration_user" == "$notification_delivery_user" ||
-		"$migration_user" == "$notification_delivery_migration_user" ||
-		"$migration_user" == "$notification_delivery_backup_user" ||
-		"$maintenance_user" == "$backup_user" ||
-		"$maintenance_user" == "$notification_delivery_user" ||
-		"$maintenance_user" == "$notification_delivery_migration_user" ||
-		"$maintenance_user" == "$notification_delivery_backup_user" ||
-		"$backup_user" == "$notification_delivery_user" ||
-		"$backup_user" == "$notification_delivery_migration_user" ||
-		"$backup_user" == "$notification_delivery_backup_user" ||
-		"$notification_delivery_user" == "$notification_delivery_migration_user" ||
-		"$notification_delivery_user" == "$notification_delivery_backup_user" ||
-		"$notification_delivery_migration_user" == "$notification_delivery_backup_user" ]]; then
-		echo "API, core migration, Maintenance runtime, core backup, notification delivery runtime, migration and backup must use seven distinct PostgreSQL roles" >&2
-		exit 1
-	fi
+	for key in "${role_keys[@]}"; do
+		role_users+=("$(get_database_username "$key")")
+	done
+	for ((left = 0; left < ${#role_users[@]}; left++)); do
+		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
+			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
+				echo "Core, Notification Delivery and Campaigns runtime, migration and backup URLs must use ten distinct PostgreSQL roles." >&2
+				exit 1
+			fi
+		done
+	done
 }
 
 require_env_exact_list() {
@@ -312,11 +352,19 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_DATABASE_URL"
 		require_env_key "NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION"
 		require_env_key "NOTIFICATION_DELIVERY_BACKUP_URL"
+		require_env_key "CAMPAIGNS_DATABASE_URL"
+		require_env_key "CAMPAIGNS_MIGRATION_DATABASE_URL"
+		require_env_key "CAMPAIGNS_BACKUP_URL"
 		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_IMAGE"
 		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_PORT"
 		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME"
 		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER"
 		require_env_key "NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "CAMPAIGNS_POSTGRES_IMAGE"
+		require_env_key "CAMPAIGNS_POSTGRES_PORT"
+		require_env_key "CAMPAIGNS_POSTGRES_DATA_VOLUME"
+		require_env_key "CAMPAIGNS_POSTGRES_ADMIN_USER"
+		require_env_key "CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "PRODUCTION_HOST"
 		require_env_key "AUTH_COOKIE_DOMAIN"
 		require_env_key "COMPOSE_PROJECT_NAME"
@@ -329,6 +377,7 @@ case "$mode" in
 		require_env_key "RABBITMQ_INTEGRATION_WORKER_URL"
 		require_env_key "RABBITMQ_MAINTENANCE_WORKER_URL"
 		require_env_key "RABBITMQ_NOTIFICATION_DELIVERY_URL"
+		require_env_key "RABBITMQ_CAMPAIGNS_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -339,6 +388,21 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_URL"
 		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_TOKEN"
 		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS"
+		require_env_key "CAMPAIGNS_INTERNAL_TOKEN"
+		require_env_key "CAMPAIGNS_INTERNAL_TIMEOUT_MS"
+		require_env_key "CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE"
+		require_env_key "CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS"
+		require_env_key "CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE"
+		require_env_key "CAMPAIGNS_PROCESS_ROLE"
+		require_env_key "CAMPAIGNS_LISTEN_HOST"
+		require_env_key "CAMPAIGNS_HEALTH_PORT"
+		require_env_key "CAMPAIGNS_CORE_INTERNAL_BASE_URL"
+		require_env_key "CAMPAIGNS_PREFETCH"
+		require_env_key "CAMPAIGNS_EMAIL_RATE_PER_SECOND"
+		require_env_key "CAMPAIGNS_TELEGRAM_RATE_PER_SECOND"
+		require_env_key "CAMPAIGNS_OUTBOX_BATCH_SIZE"
+		require_env_key "CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "CAMPAIGNS_OUTBOX_RETENTION_DAYS"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
 		require_env_key "MAINTENANCE_HEALTH_PORT"
@@ -352,7 +416,7 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_KINDS"
 		require_env_exact_list \
 			"INTEGRATION_WORKER_KINDS" \
-			"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal"
+			"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
 		require_env_exact_list \
 			"MAINTENANCE_WORKER_KINDS" \
 			"database-backup"
@@ -456,6 +520,62 @@ case "$mode" in
 			((notification_delivery_prefetch > 100)); then
 			echo "NOTIFICATION_DELIVERY_PREFETCH must be between 1 and 100" >&2
 			exit 1
+			fi
+		campaigns_internal_token="$(get_env_value CAMPAIGNS_INTERNAL_TOKEN)"
+		if [[ "$campaigns_internal_token" == change_me* ||
+			"$campaigns_internal_token" == "ci_campaigns_internal_token_at_least_32_chars" ||
+			${#campaigns_internal_token} -lt 32 ]]; then
+			echo "CAMPAIGNS_INTERNAL_TOKEN must be a production-only secret of at least 32 characters" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value CAMPAIGNS_PROCESS_ROLE)" != "all" ||
+			"$(get_env_value CAMPAIGNS_LISTEN_HOST)" != "127.0.0.1" ||
+			"$(get_env_value CAMPAIGNS_HEALTH_PORT)" != "4500" ||
+			"$(get_env_value CAMPAIGNS_CORE_INTERNAL_BASE_URL)" != "http://127.0.0.1:4200" ]]; then
+			echo "Campaigns must run as the loopback-only single-VPS all role on ports 4200/4500" >&2
+			exit 1
+		fi
+		campaigns_internal_timeout_ms="$(
+			get_env_value CAMPAIGNS_INTERNAL_TIMEOUT_MS
+		)"
+		campaigns_export_chunk_size="$(
+			get_env_value CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE
+		)"
+		campaigns_export_timeout_ms="$(
+			get_env_value CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS
+		)"
+		campaigns_import_batch_size="$(
+			get_env_value CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE
+		)"
+		campaigns_prefetch="$(get_env_value CAMPAIGNS_PREFETCH)"
+		if [[ ! "$campaigns_internal_timeout_ms" =~ ^[0-9]+$ ]] ||
+			((campaigns_internal_timeout_ms < 500 ||
+				campaigns_internal_timeout_ms > 30000)); then
+			echo "CAMPAIGNS_INTERNAL_TIMEOUT_MS must be between 500 and 30000" >&2
+			exit 1
+		fi
+		if [[ ! "$campaigns_export_chunk_size" =~ ^[0-9]+$ ]] ||
+			((campaigns_export_chunk_size < 1 ||
+				campaigns_export_chunk_size > 5000)); then
+			echo "CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE must be between 1 and 5000" >&2
+			exit 1
+		fi
+		if [[ ! "$campaigns_export_timeout_ms" =~ ^[0-9]+$ ]] ||
+			((campaigns_export_timeout_ms < 30000 ||
+				campaigns_export_timeout_ms > 900000)); then
+			echo "CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS must be between 30000 and 900000" >&2
+			exit 1
+		fi
+		if [[ ! "$campaigns_import_batch_size" =~ ^[0-9]+$ ]] ||
+			((campaigns_import_batch_size < 1 ||
+				campaigns_import_batch_size > 5000)); then
+			echo "CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE must be between 1 and 5000" >&2
+			exit 1
+		fi
+		if [[ ! "$campaigns_prefetch" =~ ^[1-9][0-9]*$ ]] ||
+			((campaigns_prefetch > 100)); then
+			echo "CAMPAIGNS_PREFETCH must be between 1 and 100" >&2
+			exit 1
 		fi
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
@@ -516,6 +636,7 @@ if [[ "$target_project" != "winwidget" ]]; then
 	exit 1
 fi
 assert_notification_database_postgres_identity
+assert_campaigns_database_postgres_identity
 rabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"
 if [[ "$rabbitmq_vhost" != "winwidget" ]]; then
 	echo "RABBITMQ_VHOST must be winwidget, got: ${rabbitmq_vhost:-empty}" >&2
@@ -755,6 +876,65 @@ for (const forbidden of [
 	}
 }
 process.stdout.write("Standalone Notification Delivery image artifact verified\n");
+	'
+}
+
+verify_campaigns_image_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"$CAMPAIGNS_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of ["dist/src/main.js", "prisma/schema.prisma"]) {
+	fs.accessSync(required);
+}
+require("@prisma/campaigns-client");
+for (const forbidden of [
+	"dist/src/app.module.js",
+	"dist/src/mailing/mailing.service.js",
+	"dist/src/outbox-publisher-main.js",
+	"public/widgets",
+]) {
+	if (fs.existsSync(forbidden)) {
+		throw new Error(`Campaigns image contains monolith artifact: ${forbidden}`);
+	}
+}
+process.stdout.write("Standalone Campaigns image artifact verified\n");
+	'
+}
+
+validate_campaigns_database_urls() {
+	printf '%s\n%s\n%s\n' \
+		"$(get_env_value CAMPAIGNS_DATABASE_URL)" \
+		"$(get_env_value CAMPAIGNS_MIGRATION_DATABASE_URL)" \
+		"$(get_env_value CAMPAIGNS_BACKUP_URL)" |
+		docker run --rm -i --network none \
+			-e "EXPECTED_PORT=$(get_env_value CAMPAIGNS_POSTGRES_PORT)" \
+			--entrypoint node "$CAMPAIGNS_IMAGE" -e '
+const { readFileSync } = require("node:fs");
+const urls = readFileSync(0, "utf8").trim().split("\n").map(value => new URL(value));
+const expectedUsers = [
+	"winwidget_campaigns_runtime",
+	"winwidget_campaigns_migration",
+	"winwidget_campaigns_backup",
+];
+for (const [index, url] of urls.entries()) {
+	const user = decodeURIComponent(url.username);
+	const password = decodeURIComponent(url.password);
+	if (
+		url.protocol !== "postgresql:" ||
+		user !== expectedUsers[index] ||
+		url.hostname !== "127.0.0.1" ||
+		url.port !== process.env.EXPECTED_PORT ||
+		url.pathname !== "/winwidget_campaigns" ||
+		url.searchParams.get("schema") !== "campaigns" ||
+		password.length < 16 ||
+		/[\0\r\n]/.test(password)
+	) {
+		throw new Error(`Invalid Campaigns database URL boundary at index ${index}`);
+	}
+}
+process.stdout.write("Campaigns runtime, migration and backup URL boundaries verified\n");
 '
 }
 
@@ -765,13 +945,19 @@ initialize_notification_database_lifecycle_guard \
 compose_target \
 	--profile migration \
 	--profile notification-delivery-migration \
+	--profile campaigns-migration \
 	config --quiet
 compose_target build \
 	api \
 	api-gateway \
 	maintenance-worker \
-	notification-delivery-worker
+	notification-delivery-worker \
+	campaigns-service
 verify_notification_delivery_image_artifact
+verify_campaigns_image_artifact
+validate_campaigns_database_urls
+assert_campaigns_contract_migration_applied_for_routine_deploy
+initialize_campaigns_database_lifecycle_guard "a routine full deployment"
 
 validate_notification_database_urls() {
 	local parser_image="$1"
@@ -1139,15 +1325,15 @@ notification_cutover_candidate_ids="$(
 )"
 narrow_integration_kinds="$(
 	normalize_csv \
-		"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal"
+		"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
 )"
 legacy_narrow_integration_kinds="$(
 	normalize_csv \
-		"webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome"
+		"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit"
 )"
 broad_integration_kinds="$(
 	normalize_csv \
-		"webhook,bitrix24,amo-crm,payment-telegram,mailing-email,mailing-telegram,limit-telegram,daily-summary-telegram"
+		"webhook,bitrix24,amo-crm,payment-telegram,limit-telegram,daily-summary-telegram"
 )"
 legacy_notification_delivery_kinds="$(
 	normalize_csv \
@@ -1416,8 +1602,14 @@ docker run --rm --network none \
 	-e '
 const { loadConfig } = require("./dist/src/config.js");
 const config = loadConfig();
+const campaigns = config.routes.find(route => route.id === "campaigns");
 const monolith = config.routes.find(route => route.id === "monolith");
 if (
+	!campaigns ||
+	campaigns.pathPrefix !== "/api/v1/admin/campaigns" ||
+	campaigns.upstreamUrl.origin !== "http://127.0.0.1:4500" ||
+	campaigns.authPolicy !== "required" ||
+	campaigns.timeoutMs !== 60000 ||
 	!monolith ||
 	monolith.pathPrefix !== "/api/v1" ||
 	monolith.upstreamUrl.origin !== "http://127.0.0.1:4200" ||
@@ -1425,7 +1617,7 @@ if (
 	monolith.timeoutMs !== 60000
 ) {
 	throw new Error(
-		"Current production phase requires the explicit monolith /api/v1 catch-all route",
+		"Production requires the Campaigns route before the explicit monolith /api/v1 catch-all",
 	);
 }
 process.stdout.write(
@@ -1644,6 +1836,9 @@ maintenance_credentials="$(
 notification_delivery_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_NOTIFICATION_DELIVERY_URL"
 )"
+campaigns_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_CAMPAIGNS_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -1665,6 +1860,11 @@ notification_delivery_user="$(
 notification_delivery_password_base64="$(
 	sed -n '2p' <<<"$notification_delivery_credentials"
 )"
+campaigns_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$campaigns_credentials")" |
+		base64 --decode
+)"
+campaigns_password_base64="$(sed -n '2p' <<<"$campaigns_credentials")"
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -1679,6 +1879,7 @@ service_users=(
 	"$integration_user"
 	"$maintenance_user"
 	"$notification_delivery_user"
+	"$campaigns_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -1793,6 +1994,8 @@ while IFS= read -r other_vhost; do
 	if [ "$other_vhost" != "$RABBITMQ_PROVISION_VHOST" ]; then
 		rabbitmqctl clear_permissions \
 			-p "$other_vhost" "$RABBITMQ_PROVISION_USER"
+		rabbitmqctl clear_topic_permissions \
+			-p "$other_vhost" "$RABBITMQ_PROVISION_USER"
 	fi
 done <<EOF
 $(rabbitmqctl --silent list_vhosts name)
@@ -1815,6 +2018,85 @@ unset password
 '
 }
 
+provision_campaigns_rabbitmq_topic_permissions() {
+	local username="$1"
+	local events_write_pattern
+	local events_read_pattern
+	local dead_letter_pattern
+	events_write_pattern='^(admin\.audit\.event\.v1|campaign\.snapshot\.requested\.v1|notification\.campaign\.(email|telegram)\.requested\.v2|notification\.delivery\.outcome\.v2)$'
+	events_read_pattern='^(campaign\.snapshot\.requested\.v1|notification\.delivery\.outcome\.v2)$'
+	dead_letter_pattern='^campaigns\.(snapshot|outcome)\.dead-letter$'
+
+	RABBITMQ_PROVISION_USER="$username" \
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_CAMPAIGNS_EVENTS_WRITE="$events_write_pattern" \
+	RABBITMQ_CAMPAIGNS_EVENTS_READ="$events_read_pattern" \
+	RABBITMQ_CAMPAIGNS_DEAD_LETTER="$dead_letter_pattern" \
+		docker exec \
+			-e RABBITMQ_PROVISION_USER \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_CAMPAIGNS_EVENTS_WRITE \
+			-e RABBITMQ_CAMPAIGNS_EVENTS_READ \
+			-e RABBITMQ_CAMPAIGNS_DEAD_LETTER \
+			"$provisioning_rabbitmq_container_id" \
+			sh -ec '
+rabbitmqctl clear_topic_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_PROVISION_USER"
+rabbitmqctl set_topic_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_PROVISION_USER" \
+	"winwidget.events" \
+	"$RABBITMQ_CAMPAIGNS_EVENTS_WRITE" \
+	"$RABBITMQ_CAMPAIGNS_EVENTS_READ"
+rabbitmqctl set_topic_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_PROVISION_USER" \
+	"winwidget.dead-letter" \
+	"$RABBITMQ_CAMPAIGNS_DEAD_LETTER" \
+	"$RABBITMQ_CAMPAIGNS_DEAD_LETTER"
+'
+}
+
+assert_campaigns_shared_rabbitmq_topology() {
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		--entrypoint node \
+		"$CAMPAIGNS_IMAGE" \
+		-e '
+const amqp = require("amqplib");
+const {
+	DEAD_LETTER_EXCHANGE,
+	EVENTS_EXCHANGE,
+} = require("./dist/src/messaging/campaigns-messaging.constants.js");
+
+(async () => {
+	const connection = await amqp.connect(process.env.RABBITMQ_PUBLISHER_URL);
+	try {
+		const channel = await connection.createConfirmChannel();
+		try {
+			await channel.assertExchange(EVENTS_EXCHANGE, "topic", {
+				durable: true,
+			});
+			await channel.assertExchange(DEAD_LETTER_EXCHANGE, "topic", {
+				durable: true,
+			});
+		} finally {
+			await channel.close();
+		}
+	} finally {
+		await connection.close();
+	}
+	process.stdout.write("Shared Campaigns RabbitMQ exchanges verified\n");
+})().catch(error => {
+	process.stderr.write(
+		`${error instanceof Error ? error.message : "Shared RabbitMQ topology assertion failed"}\n`,
+	);
+	process.exitCode = 1;
+});
+'
+}
+
 provision_rabbitmq_user \
 	"$rabbitmq_admin_user" \
 	"$rabbitmq_admin_password_base64" \
@@ -1829,8 +2111,9 @@ provision_rabbitmq_user \
 	'^winwidget\..*' \
 	'^winwidget\..*' \
 	''
-post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|mailing\..*|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
-legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|report\.daily-summary\.telegram)(\..*)?$'
+assert_campaigns_shared_rabbitmq_topology
+post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	integration_worker_read_pattern="$legacy_integration_read_pattern"
@@ -1856,6 +2139,14 @@ provision_rabbitmq_user \
 	'^(winwidget\.events|winwidget\.dead-letter)$' \
 	'^winwidget\.(lead-integration\.(email|telegram)|payment-notification\.(email|telegram\.v2)|limit-notification\.(email|telegram)|notification\.(campaign\.(email|telegram)|daily-summary\.telegram|subscription-expiry\.(email|telegram)))(\..*)?$' \
 	''
+provision_rabbitmq_user \
+	"$campaigns_user" \
+	"$campaigns_password_base64" \
+	'^winwidget\.campaigns(\..*)?$' \
+	'^(winwidget\.(events|dead-letter)|winwidget\.campaigns(\..*)?)$' \
+	'^(winwidget\.(events|dead-letter)|winwidget\.campaigns(\..*)?)$' \
+	''
+provision_campaigns_rabbitmq_topic_permissions "$campaigns_user"
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
 	"$rabbitmq_monitor_password_base64" \
@@ -1911,6 +2202,7 @@ rabbitMq
 wait_for_rabbitmq_topology() {
 	local rabbitmq_container_id
 	local required_queues
+	local campaigns_required_queues
 	local actual_queues
 	local required_queue
 	local all_ready
@@ -1936,6 +2228,26 @@ for (const kind of MESSAGING_KINDS) {
 }
 '
 	)"
+	campaigns_required_queues="$(
+		docker run --rm --network none \
+			--entrypoint node \
+			"$CAMPAIGNS_IMAGE" \
+			-e '
+const {
+	CAMPAIGNS_CONSUMER_KINDS,
+	CAMPAIGNS_QUEUE_NAMES,
+	CAMPAIGNS_RETRY_DELAYS_MS,
+} = require("./dist/src/messaging/campaigns-messaging.constants.js");
+for (const kind of CAMPAIGNS_CONSUMER_KINDS) {
+	const queue = CAMPAIGNS_QUEUE_NAMES[kind];
+	process.stdout.write(`${queue}\n${queue}.dead-letter\n`);
+	for (let index = 0; index < CAMPAIGNS_RETRY_DELAYS_MS.length; index += 1) {
+		process.stdout.write(`${queue}.retry.${index + 1}\n`);
+	}
+}
+'
+	)"
+	required_queues+=$'\n'"$campaigns_required_queues"
 
 	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 		actual_queues="$(
@@ -2605,11 +2917,23 @@ run()
 verify_exact_worker_consumer_ownership() {
 	local close_legacy_orphans="${1:-false}"
 	local notification_owner="${2:-notification}"
+	local campaigns_queue_names_json
+	campaigns_queue_names_json="$(
+		docker run --rm --network none \
+			--entrypoint node "$CAMPAIGNS_IMAGE" \
+			-e '
+const {
+	CAMPAIGNS_QUEUE_NAMES,
+} = require("./dist/src/messaging/campaigns-messaging.constants.js");
+process.stdout.write(JSON.stringify(Object.values(CAMPAIGNS_QUEUE_NAMES)));
+'
+	)"
 
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
 		-e "CLOSE_LEGACY_NOTIFICATION_CONSUMERS=$close_legacy_orphans" \
 		-e "EXPECTED_NOTIFICATION_QUEUE_OWNER=$notification_owner" \
+		-e "CAMPAIGNS_QUEUE_NAMES_JSON=$campaigns_queue_names_json" \
 		--entrypoint node \
 		"winwidget-api:$APP_VERSION" \
 		-e '
@@ -2678,6 +3002,23 @@ const run = async () => {
 		process.env.RABBITMQ_NOTIFICATION_DELIVERY_URL,
 		"RABBITMQ_NOTIFICATION_DELIVERY_URL",
 	);
+	const campaignsUser = decodeUser(
+		process.env.RABBITMQ_CAMPAIGNS_URL,
+		"RABBITMQ_CAMPAIGNS_URL",
+	);
+	let campaignsQueues;
+	try {
+		campaignsQueues = JSON.parse(process.env.CAMPAIGNS_QUEUE_NAMES_JSON || "");
+	} catch {
+		throw new OwnershipError("Campaigns queue contract is invalid");
+	}
+	if (
+		!Array.isArray(campaignsQueues) ||
+		campaignsQueues.length !== 2 ||
+		campaignsQueues.some(queue => typeof queue !== "string" || !queue)
+	) {
+		throw new OwnershipError("Campaigns queue contract is incomplete");
+	}
 	const legacyTelegramOwner =
 		process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy";
 	const groups = [
@@ -2722,8 +3063,6 @@ const run = async () => {
 				"webhook",
 				"bitrix24",
 				"amo-crm",
-				"mailing-email",
-				"mailing-telegram",
 				"daily-summary-telegram",
 				...(legacyTelegramOwner
 					? []
@@ -2731,11 +3070,19 @@ const run = async () => {
 							"telegram-destination-unavailable",
 							"notification-delivery-outcome",
 						]),
+				"campaign-admin-audit",
 				"auto-renewal",
 			],
 			user: integrationUser,
 			connectionName: "winwidget-integration-worker",
 			notification: false,
+		},
+		{
+			queues: campaignsQueues,
+			user: campaignsUser,
+			connectionName: "winwidget-campaigns-service",
+			notification: false,
+			includeDeadLetter: false,
 		},
 	];
 
@@ -2750,7 +3097,11 @@ const run = async () => {
 					"RabbitMQ ownership group contains an unknown queue",
 				);
 			}
-			for (const queue of [baseQueue, `${baseQueue}.dead-letter`]) {
+			const consumedQueues =
+				group.includeDeadLetter === false
+					? [baseQueue]
+					: [baseQueue, `${baseQueue}.dead-letter`];
+			for (const queue of consumedQueues) {
 				const state = await request(
 					`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(
 						queue,
@@ -2808,6 +3159,29 @@ const run = async () => {
 						`RabbitMQ queue ${queue} has an unexpected owner`,
 					);
 				}
+			}
+		}
+	}
+
+	for (const baseQueue of campaignsQueues) {
+		for (const queue of [
+			`${baseQueue}.dead-letter`,
+			`${baseQueue}.retry.1`,
+			`${baseQueue}.retry.2`,
+			`${baseQueue}.retry.3`,
+		]) {
+			const state = await request(
+				`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(
+					queue,
+				)}`,
+			);
+			const consumers = Array.isArray(state?.consumer_details)
+				? state.consumer_details
+				: [];
+			if (consumers.length !== 0) {
+				throw new OwnershipError(
+					`RabbitMQ Campaigns parking queue ${queue} must have no consumers`,
+				);
 			}
 		}
 	}
@@ -2873,8 +3247,6 @@ notification_cutover_expected_queues() {
 	for base_queue in \
 		winwidget.payment-notification.telegram \
 		winwidget.limit-notification.telegram \
-		winwidget.mailing.email \
-		winwidget.mailing.telegram \
 		winwidget.report.daily-summary.telegram; do
 		printf '%s\n%s.dead-letter\n' "$base_queue" "$base_queue"
 		for retry_index in 1 2 3; do
@@ -2909,7 +3281,6 @@ notification_cutover_queue_state() {
 		awk '
 			$1 ~ /^winwidget\.payment-notification\.telegram(\.v2)?(\.|$)/ ||
 			$1 ~ /^winwidget\.limit-notification\.telegram(\.|$)/ ||
-			$1 ~ /^winwidget\.mailing\.(email|telegram)(\.|$)/ ||
 			$1 ~ /^winwidget\.report\.daily-summary\.telegram(\.|$)/
 		'
 }
@@ -2932,8 +3303,6 @@ const prisma = new PrismaClient({
 const ownershipKinds = ["payment-telegram", "limit-telegram"];
 const providerBoundaryKinds = [
 	...ownershipKinds,
-	"mailing-email",
-	"mailing-telegram",
 	"daily-summary-telegram",
 ];
 
@@ -2956,8 +3325,6 @@ Promise.all([
 				in: [
 					"payment.succeeded.v1",
 					"lead.limit.reached.telegram.v2",
-					"mailing.delivery.email.v1",
-					"mailing.delivery.telegram.v1",
 					"report.daily-summary.requested.v1",
 				],
 			},
@@ -3066,7 +3433,7 @@ notification_cutover_consumers_ready() {
 	local state
 	local queue
 	local queue_line
-	local name
+	local _name
 	local ready
 	local unacknowledged
 	local consumers
@@ -3077,10 +3444,6 @@ notification_cutover_consumers_ready() {
 		winwidget.payment-notification.telegram.dead-letter \
 		winwidget.limit-notification.telegram \
 		winwidget.limit-notification.telegram.dead-letter \
-		winwidget.mailing.email \
-		winwidget.mailing.email.dead-letter \
-		winwidget.mailing.telegram \
-		winwidget.mailing.telegram.dead-letter \
 		winwidget.report.daily-summary.telegram \
 		winwidget.report.daily-summary.telegram.dead-letter; do
 		queue_line="$(
@@ -3090,7 +3453,7 @@ notification_cutover_consumers_ready() {
 			echo "Missing RabbitMQ queue required for Telegram cutover: $queue" >&2
 			return 1
 		fi
-		read -r name ready unacknowledged consumers <<<"$queue_line"
+		read -r _name ready unacknowledged consumers <<<"$queue_line"
 		if [[ ! "$consumers" =~ ^[1-9][0-9]*$ ]]; then
 			echo "Legacy integration-worker is not consuming queue: $queue" >&2
 			return 1
@@ -3101,10 +3464,10 @@ notification_cutover_consumers_ready() {
 notification_cutover_is_clear() {
 	local expected_queue
 	local queue_line
-	local name
+	local _name
 	local ready
 	local unacknowledged
-	local consumers
+	local _consumers
 	local unresolved_failures
 	local active_receipts
 	local pending_outbox
@@ -3123,7 +3486,7 @@ notification_cutover_is_clear() {
 		if [[ -z "$queue_line" ]]; then
 			return 1
 		fi
-		read -r name ready unacknowledged consumers <<<"$queue_line"
+		read -r _name ready unacknowledged _consumers <<<"$queue_line"
 		if [[ ! "$ready" =~ ^[0-9]+$ ||
 			! "$unacknowledged" =~ ^[0-9]+$ ||
 			"$ready" != "0" ||
@@ -3153,7 +3516,7 @@ delete_legacy_payment_telegram_queues() {
 	local rabbitmq_container_id
 	local queue
 	local queue_line
-	local name
+	local _name
 	local ready
 	local unacknowledged
 	local consumers
@@ -3189,7 +3552,7 @@ delete_legacy_payment_telegram_queues() {
 		if [[ -z "$queue_line" ]]; then
 			continue
 		fi
-		read -r name ready unacknowledged consumers <<<"$queue_line"
+		read -r _name ready unacknowledged consumers <<<"$queue_line"
 		if [[ "$ready" != "0" ||
 			"$unacknowledged" != "0" ||
 			"$consumers" != "0" ]]; then
@@ -3739,7 +4102,12 @@ perform_notification_first_cutover_preflight() {
 		print_notification_cutover_runbook
 		return 1
 	fi
-	for service in outbox-publisher api api-gateway maintenance-worker; do
+	for service in \
+		outbox-publisher \
+		api \
+		api-gateway \
+		maintenance-worker \
+		campaigns-service; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -3759,6 +4127,7 @@ perform_notification_first_cutover_preflight() {
 	compose_target stop api-gateway
 	compose_target stop api
 	compose_target stop maintenance-worker
+	compose_target stop campaigns-service
 
 	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 		if notification_cutover_is_clear; then
@@ -3810,6 +4179,53 @@ fi
 finalize_notification_delivery_backup_grants
 verify_notification_delivery_runtime_crud
 verify_notification_delivery_backup_boundary
+current_campaigns_container_id="$(
+	compose_target ps --status running -q campaigns-service 2>/dev/null || true
+)"
+[[ -n "$current_campaigns_container_id" &&
+	"$current_campaigns_container_id" != *$'\n'* ]] || {
+	echo "Routine full deploy requires one running Campaigns service." >&2
+	exit 1
+}
+current_campaigns_revision="$(
+	docker image inspect \
+		--format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+		"$(docker inspect --format '{{.Image}}' "$current_campaigns_container_id")"
+)"
+[[ "$current_campaigns_revision" =~ ^[0-9a-f]{40}$ ]] ||
+	{
+		echo "Current Campaigns image revision is invalid." >&2
+		exit 1
+	}
+git -C "$server_root" merge-base --is-ancestor \
+	"$current_campaigns_revision" "$CAMPAIGNS_REVISION" || {
+	echo "Routine full deploy does not accept divergent Campaigns history." >&2
+	exit 1
+}
+changed_campaigns_migrations="$(
+	git -C "$server_root" diff --name-only \
+		"$current_campaigns_revision" "$CAMPAIGNS_REVISION" -- \
+		'apps/campaigns/prisma/migrations/*/migration.sql'
+)"
+while IFS= read -r migration; do
+	[[ -z "$migration" ]] && continue
+	if git -C "$server_root" diff --unified=0 \
+		"$current_campaigns_revision" "$CAMPAIGNS_REVISION" -- "$migration" |
+		sed -n 's/^+//p' |
+		grep -Eiq \
+			'(^|[[:space:]])(DROP|TRUNCATE)[[:space:]]|RENAME[[:space:]]|ALTER[[:space:]]+COLUMN|SET[[:space:]]+NOT[[:space:]]+NULL|DROP[[:space:]]+NOT[[:space:]]+NULL'; then
+		echo "Routine full deploy found a breaking Campaigns migration: $migration" >&2
+		echo "Use a separately reviewed coordinated Campaigns migration plan." >&2
+		exit 1
+	fi
+done <<<"$changed_campaigns_migrations"
+if [[ -n "$changed_campaigns_migrations" ]]; then
+	create_campaigns_pre_migration_backup
+fi
+compose_target \
+	--profile campaigns-migration \
+	run --rm --no-deps campaigns-migrate
+verify_campaigns_database_access_boundaries
 
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	if ! compose_target --profile migration run --rm --no-deps \
@@ -3994,6 +4410,12 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		sleep "$HEALTHCHECK_INTERVAL"
 	done
 
+	compose_target up -d --no-deps --force-recreate campaigns-service
+	wait_for_cutover_revision \
+		"$CAMPAIGNS_READINESS_URL" \
+		"$CAMPAIGNS_REVISION" \
+		"Canonical Campaigns"
+
 	stop_notification_cutover_services 30 false api
 	compose_target up -d --no-deps --force-recreate api
 	wait_for_cutover_revision \
@@ -4013,7 +4435,8 @@ else
 		outbox-publisher \
 		integration-worker \
 		maintenance-worker \
-		notification-delivery-worker
+		notification-delivery-worker \
+		campaigns-service
 	compose_target --profile migration run --rm --no-deps migrate
 	compose_target up -d rabbitmq
 	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
@@ -4022,7 +4445,8 @@ else
 	compose_target up -d --no-deps --force-recreate \
 		integration-worker \
 		maintenance-worker \
-		notification-delivery-worker
+		notification-delivery-worker \
+		campaigns-service
 	compose_target up -d --no-deps --force-recreate api
 	compose_target up -d --no-deps --force-recreate api-gateway
 fi
@@ -4030,12 +4454,12 @@ fi
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker campaigns-service rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker rabbitmq || true
-	echo "Processes listening on ports 4100, 4200, 4300 and 4401:"
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker campaigns-service rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300, 4401 and 4500:"
 	ss -ltnp \
-		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 )' ||
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 )' ||
 		true
 }
 
@@ -4049,7 +4473,8 @@ ensure_required_services_running() {
 		outbox-publisher \
 		integration-worker \
 		maintenance-worker \
-		notification-delivery-worker; do
+		notification-delivery-worker \
+		campaigns-service; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -4352,6 +4777,20 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 done
 
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if check_deployment_revision "$CAMPAIGNS_READINESS_URL"; then
+		break
+	fi
+
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo "Campaigns readiness check failed: $CAMPAIGNS_READINESS_URL"
+		show_api_diagnostics
+		exit 1
+	fi
+
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if check_messaging_readiness; then
 		break
 	fi
@@ -4385,7 +4824,8 @@ for service in \
 	outbox-publisher \
 	integration-worker \
 	maintenance-worker \
-	notification-delivery-worker; do
+	notification-delivery-worker \
+	campaigns-service; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -4400,6 +4840,9 @@ for service in \
 	fi
 	if [[ "$service" == "notification-delivery-worker" ]]; then
 		expected_image_revision="$NOTIFICATION_DELIVERY_REVISION"
+	fi
+	if [[ "$service" == "campaigns-service" ]]; then
+		expected_image_revision="$CAMPAIGNS_REVISION"
 	fi
 	if [[ "$image_revision" != "$expected_image_revision" ]]; then
 		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
@@ -4452,8 +4895,9 @@ fi
 verify_notification_database_lifecycle_unchanged \
 	"the routine full deployment" \
 	"$notification_database_phase_before"
+verify_campaigns_database_lifecycle_unchanged
 
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 compose_target ps \
-	api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker campaigns-service rabbitmq

@@ -1,3 +1,4 @@
+import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
@@ -19,6 +20,7 @@ import { ConfigModule } from '@nestjs/config';
 			isGlobal: true
 		}),
 		PrismaModule,
+		AdminEventLogModule,
 		RabbitMqModule,
 		PaymentWorkerModule,
 		SafeOutboundHttpModule,

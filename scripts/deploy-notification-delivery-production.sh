@@ -11,6 +11,9 @@ HEALTHCHECK_ATTEMPTS="${NOTIFICATION_DELIVERY_HEALTHCHECK_ATTEMPTS:-60}"
 HEALTHCHECK_INTERVAL="${NOTIFICATION_DELIVERY_HEALTHCHECK_INTERVAL:-2}"
 
 server_root="$APP_ROOT/winwidget.ru_server"
+# shellcheck source=scripts/production-deploy-lock.sh
+source "$server_root/scripts/production-deploy-lock.sh"
+acquire_production_deploy_lock "Notification Delivery deployment"
 recreate_started=false
 rollout_verified=false
 previous_image_ref=""
@@ -1285,10 +1288,10 @@ live_integration_kinds="$(
 )"
 live_integration_kinds_normalized="$(normalize_csv "$live_integration_kinds")"
 legacy_integration_kinds_normalized="$(
-	normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome"
+	normalize_csv "webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit"
 )"
 auto_renewal_integration_kinds_normalized="$(
-	normalize_csv "webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal"
+	normalize_csv "webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
 )"
 if [[ "$live_integration_kinds_normalized" != "$legacy_integration_kinds_normalized" &&
 	"$live_integration_kinds_normalized" != "$auto_renewal_integration_kinds_normalized" ]]; then

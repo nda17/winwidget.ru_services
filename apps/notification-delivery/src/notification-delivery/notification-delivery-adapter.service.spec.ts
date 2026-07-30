@@ -392,12 +392,19 @@ describe('NotificationDeliveryAdapterService', () => {
 		await service.deliver(
 			'campaign-email',
 			{
-				schemaVersion: 1,
-				eventType: 'notification.campaign.email.requested.v1',
+				schemaVersion: 2,
+				eventType: 'notification.campaign.email.requested.v2',
+				eventId: '11111111-1111-4111-8111-111111111111',
+				occurredAt: '2026-07-30T10:00:00.000Z',
+				correlationId: '44444444-4444-4444-8444-444444444444',
+				campaignId: '33333333-3333-4333-8333-333333333333',
+				deliveryId: '22222222-2222-4222-8222-222222222222',
+				dispatchGeneration: 1,
 				reference: {
-					type: 'mailing-delivery',
+					type: 'campaign-delivery',
 					id: '22222222-2222-4222-8222-222222222222',
-					aggregateId: '33333333-3333-4333-8333-333333333333'
+					aggregateId: '33333333-3333-4333-8333-333333333333',
+					dispatchGeneration: 1
 				},
 				destination: { email: 'owner@example.com' },
 				content: {
@@ -416,7 +423,7 @@ describe('NotificationDeliveryAdapterService', () => {
 			},
 			{
 				messageId:
-					'<11111111-1111-4111-8111-111111111111.mailing@winwidget.ru>'
+					'<11111111-1111-4111-8111-111111111111.campaign@winwidget.ru>'
 			}
 		);
 	});
@@ -439,12 +446,19 @@ describe('NotificationDeliveryAdapterService', () => {
 		await checkpointService.deliver(
 			'campaign-telegram',
 			{
-				schemaVersion: 1,
-				eventType: 'notification.campaign.telegram.requested.v1',
+				schemaVersion: 2,
+				eventType: 'notification.campaign.telegram.requested.v2',
+				eventId: '11111111-1111-4111-8111-111111111111',
+				occurredAt: '2026-07-30T10:00:00.000Z',
+				correlationId: '44444444-4444-4444-8444-444444444444',
+				campaignId: '33333333-3333-4333-8333-333333333333',
+				deliveryId: '22222222-2222-4222-8222-222222222222',
+				dispatchGeneration: 1,
 				reference: {
-					type: 'mailing-delivery',
+					type: 'campaign-delivery',
 					id: '22222222-2222-4222-8222-222222222222',
-					aggregateId: '33333333-3333-4333-8333-333333333333'
+					aggregateId: '33333333-3333-4333-8333-333333333333',
+					dispatchGeneration: 1
 				},
 				destination: { telegramChatId: '12345' },
 				content: {

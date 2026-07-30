@@ -52,8 +52,19 @@ validate_notification_database_cutover_marker() {
 		-v target_port="$expected_port" \
 		-v target_volume="$expected_volume" \
 		-v postgres_image="$expected_image" '
+		function valid_hex(value, expected_length) {
+			return length(value) == expected_length && value ~ /^[0-9a-f]+$/
+		}
 		function valid_hash(value) {
-			return value == "pending" || value ~ /^[0-9a-f]{64}$/
+			return value == "pending" || valid_hex(value, 64)
+		}
+		function valid_image(value) {
+			return substr(value, 1, 7) == "sha256:" &&
+				valid_hex(substr(value, 8), 64)
+		}
+		function valid_timestamp(value) {
+			return length(value) == 20 &&
+				value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/
 		}
 		{
 			count[$1] += 1
@@ -91,7 +102,7 @@ validate_notification_database_cutover_marker() {
 				value["source_schema_state"] !~ /^(retained|dropped)$/ ||
 				value["source_database"] !~ /^[A-Za-z_][A-Za-z0-9_]*$/ ||
 				value["source_database"] == "winwidget_notification_delivery" ||
-				value["source_endpoint_sha256"] !~ /^[0-9a-f]{64}$/ ||
+				!valid_hex(value["source_endpoint_sha256"], 64) ||
 				value["source_system_identifier"] !~ /^[0-9]+$/ ||
 				value["source_database_oid"] !~ /^[0-9]+$/ ||
 				value["source_admin_audit_access_preexisting"] !~ /^(true|false)$/ ||
@@ -100,15 +111,15 @@ validate_notification_database_cutover_marker() {
 				value["target_port"] != target_port ||
 				value["target_volume"] != target_volume ||
 				value["postgres_image"] != postgres_image ||
-				value["postgres_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				!valid_image(value["postgres_image_id"]) ||
 				value["postgres_system_identifier"] !~ /^[0-9]+$/ ||
-				value["worker_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
-				value["revision"] !~ /^[0-9a-f]{40}$/ ||
+				!valid_image(value["worker_image_id"]) ||
+				!valid_hex(value["revision"], 40) ||
 				!valid_hash(value["dump_sha256"]) ||
 				!valid_hash(value["source_schema_sha256"]) ||
 				!valid_hash(value["source_manifest_sha256"]) ||
 				!valid_hash(value["target_manifest_sha256"]) ||
-				value["updated_at"] !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/) invalid = 1
+				!valid_timestamp(value["updated_at"])) invalid = 1
 			if (value["phase"] ~ /^(prepared|forward_only|complete)$/ &&
 				(value["dump_sha256"] == "pending" ||
 					value["source_schema_sha256"] == "pending" ||
@@ -411,6 +422,8 @@ initialize_notification_database_lifecycle_guard() {
 		exit 1
 	fi
 	phase="$(notification_database_marker_value phase)"
+	# This sourced guard exposes the phase to the full deployment script.
+	# shellcheck disable=SC2034
 	notification_database_phase_before="$phase"
 	case "$phase" in
 		complete)
@@ -618,3 +631,85 @@ verify_notification_database_lifecycle_unchanged() {
 		exit 1
 	fi
 }
+
+notification_database_lifecycle_self_test() {
+	local self_test_root
+
+	[[ "$(id -u)" == "0" ]] || {
+		echo "Notification Delivery lifecycle self-test must run as root in an isolated container." >&2
+		return 1
+	}
+	self_test_root="$(
+		mktemp -d /tmp/winwidget-notification-lifecycle.XXXXXX
+	)"
+	[[ "$self_test_root" == /tmp/winwidget-notification-lifecycle.* ]] ||
+		return 1
+	APP_ROOT="$self_test_root"
+	mkdir -p "$APP_ROOT/deploy/backend"
+	NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-database-cutover-v1"
+
+	get_env_value() {
+		case "$1" in
+		NOTIFICATION_DELIVERY_POSTGRES_PORT)
+			printf '55432\n'
+			;;
+		NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME)
+			printf 'winwidget-notification-delivery-postgres-data\n'
+			;;
+		NOTIFICATION_DELIVERY_POSTGRES_IMAGE)
+			printf '%s\n' \
+				'postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
+			;;
+		*)
+			return 1
+			;;
+		esac
+	}
+
+	{
+		printf 'version=7\n'
+		printf 'phase=preparing\n'
+		printf 'source_schema_state=retained\n'
+		printf 'source_database=winwidget\n'
+		printf 'source_endpoint_sha256=%064d\n' 0
+		printf 'source_system_identifier=123456789\n'
+		printf 'source_database_oid=12345\n'
+		printf 'source_admin_audit_access_preexisting=false\n'
+		printf 'target_database=winwidget_notification_delivery\n'
+		printf 'target_host=127.0.0.1\n'
+		printf 'target_port=55432\n'
+		printf 'target_volume=winwidget-notification-delivery-postgres-data\n'
+		printf '%s\n' \
+			'postgres_image=postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
+		printf 'postgres_image_id=sha256:%064d\n' 1
+		printf 'postgres_system_identifier=987654321\n'
+		printf 'worker_image_id=sha256:%064d\n' 2
+		printf 'revision=3333333333333333333333333333333333333333\n'
+		printf 'dump_sha256=pending\n'
+		printf 'source_schema_sha256=pending\n'
+		printf 'source_manifest_sha256=pending\n'
+		printf 'target_manifest_sha256=pending\n'
+		printf 'updated_at=2026-07-30T00:00:00Z\n'
+	} >"$NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER"
+	chown 0:0 "$NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER"
+	chmod 600 "$NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER"
+
+	validate_notification_database_cutover_marker
+	printf 'unexpected=value\n' \
+		>>"$NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER"
+	if validate_notification_database_cutover_marker; then
+		echo "Notification Delivery self-test accepted an invalid lifecycle marker." >&2
+		return 1
+	fi
+
+	rm -rf -- "$self_test_root"
+	echo "Notification Delivery lifecycle marker portability verified"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	[[ "${1:-}" == "--self-test" && $# == 1 ]] || {
+		echo "Usage: $0 --self-test" >&2
+		exit 1
+	}
+	notification_database_lifecycle_self_test
+fi

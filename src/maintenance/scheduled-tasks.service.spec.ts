@@ -47,7 +47,10 @@ describe('ScheduledTasksService', () => {
 							id:
 								input.jobType === 'DATABASE_BACKUP'
 									? '11111111-1111-4111-8111-111111111111'
-									: '22222222-2222-4222-8222-222222222222'
+									: input.jobType ===
+										  'NOTIFICATION_DELIVERY_DATABASE_BACKUP'
+										? '22222222-2222-4222-8222-222222222222'
+										: '33333333-3333-4333-8333-333333333333'
 						}
 					})
 				)
@@ -99,10 +102,11 @@ describe('ScheduledTasksService', () => {
 		expect(scheduledJobs.enqueueUnique).not.toHaveBeenCalled();
 	});
 
-	it('creates independent core and Notification Delivery backup jobs 15 minutes apart', async () => {
+	it('creates independent core, Notification Delivery and Campaigns backup jobs', async () => {
 		const { service, scheduledJobs, transaction } = createService();
 		const coreScheduledFor = new Date('2026-07-23T22:45:00.000Z');
 		const notificationScheduledFor = new Date('2026-07-23T23:00:00.000Z');
+		const campaignsScheduledFor = new Date('2026-07-23T23:15:00.000Z');
 
 		const result = await service.enqueueDailyDatabaseBackups(
 			period,
@@ -114,6 +118,9 @@ describe('ScheduledTasksService', () => {
 		);
 		expect(result?.notificationDelivery.job.id).toBe(
 			'22222222-2222-4222-8222-222222222222'
+		);
+		expect(result?.campaigns.job.id).toBe(
+			'33333333-3333-4333-8333-333333333333'
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
@@ -142,9 +149,23 @@ describe('ScheduledTasksService', () => {
 				eventType: 'database.backup.requested.v1'
 			})
 		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			3,
+			transaction,
+			expect.objectContaining({
+				jobType: 'CAMPAIGNS_DATABASE_BACKUP',
+				scheduledFor: campaignsScheduledFor,
+				availableAt: campaignsScheduledFor
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
 	});
 
-	it('enqueues core and notification-delivery backups as separate jobs in one transaction', async () => {
+	it('enqueues all database backups as separate jobs in one transaction', async () => {
 		const transaction = {};
 		const prisma = {
 			telegramBotSettings: {
@@ -165,7 +186,9 @@ describe('ScheduledTasksService', () => {
 						id:
 							input.jobType === 'DATABASE_BACKUP'
 								? '11111111-1111-4111-8111-111111111111'
-								: '22222222-2222-4222-8222-222222222222'
+								: input.jobType === 'NOTIFICATION_DELIVERY_DATABASE_BACKUP'
+									? '22222222-2222-4222-8222-222222222222'
+									: '33333333-3333-4333-8333-333333333333'
 					}
 				})
 			)
@@ -181,11 +204,12 @@ describe('ScheduledTasksService', () => {
 
 		expect(result).toEqual({
 			core: expect.objectContaining({ created: true }),
-			notificationDelivery: expect.objectContaining({ created: true })
+			notificationDelivery: expect.objectContaining({ created: true }),
+			campaigns: expect.objectContaining({ created: true })
 		});
 		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledTimes(
-			2
+			3
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
@@ -206,6 +230,22 @@ describe('ScheduledTasksService', () => {
 					periodStart: period.start.toISOString()
 				}
 			},
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			3,
+			transaction,
+			expect.objectContaining({
+				jobType: 'CAMPAIGNS_DATABASE_BACKUP',
+				scheduleKey: period.key,
+				input: expect.objectContaining({
+					trigger: 'SCHEDULED'
+				})
+			}),
 			expect.objectContaining({
 				eventType: 'database.backup.requested.v1'
 			})

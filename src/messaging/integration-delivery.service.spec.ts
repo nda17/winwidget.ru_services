@@ -6,9 +6,6 @@ import type { DailySummaryDeliveryService } from '@/reports/daily-summary-delive
 import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
 import type { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import {
-	MailingCampaignStatus,
-	MailingDeliveryChannel,
-	MailingDeliveryStatus,
 	ScheduledJobRunStatus,
 	SubscriptionExpiryReminderStatus
 } from '@prisma/client';
@@ -30,70 +27,15 @@ const createLeadEvent = (): LeadIntegrationEventPayloadV2 => ({
 });
 
 describe('IntegrationDeliveryService', () => {
-	const campaignId = '11111111-1111-4111-8111-111111111111';
-	const deliveryId = '22222222-2222-4222-8222-222222222222';
 	const eventId = '33333333-3333-4333-8333-333333333333';
 
-	const createService = (
-		options: {
-			deliveryStatus?: MailingDeliveryStatus;
-			campaignStatus?: MailingCampaignStatus;
-			channel?: MailingDeliveryChannel;
-			failedCount?: number;
-		} = {}
-	) => {
-		const channel = options.channel ?? MailingDeliveryChannel.EMAIL;
-		const deliveryRecord = {
-			id: deliveryId,
-			campaignId,
-			channel,
-			recipient:
-				channel === MailingDeliveryChannel.EMAIL
-					? 'owner@example.com'
-					: '123456789',
-			status: options.deliveryStatus ?? MailingDeliveryStatus.PENDING,
-			campaign: {
-				id: campaignId,
-				status: options.campaignStatus ?? MailingCampaignStatus.QUEUED,
-				cancelRequestedAt:
-					options.campaignStatus === MailingCampaignStatus.CANCELLED
-						? new Date()
-						: null,
-				subject: 'Новости',
-				message: 'Текст рассылки'
-			}
-		};
+	const createService = () => {
 		const transaction = {
-			$queryRaw: jest.fn().mockResolvedValue([
-				{
-					id: deliveryId,
-					campaignId,
-					status:
-						options.deliveryStatus ?? MailingDeliveryStatus.PROCESSING
-				}
-			]),
-			mailingDelivery: {
-				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-				update: jest.fn().mockResolvedValue({}),
-				count: jest.fn().mockResolvedValue(0)
-			},
-			mailingCampaign: {
-				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
-				update: jest.fn().mockResolvedValue({
-					failedCount: options.failedCount ?? 0
-				})
-			},
-			outboxEvent: {
-				createMany: jest.fn().mockResolvedValue({ count: 1 })
-			},
 			telegramBotSettings: {
 				update: jest.fn().mockResolvedValue({})
 			}
 		};
 		const prisma = {
-			mailingDelivery: {
-				findUnique: jest.fn().mockResolvedValue(deliveryRecord)
-			},
 			telegramNotificationChannel: {
 				updateMany: jest.fn().mockResolvedValue({ count: 1 })
 			},
@@ -253,194 +195,6 @@ describe('IntegrationDeliveryService', () => {
 				disabledAt: new Date(occurredAt)
 			}
 		});
-	});
-
-	it.each([
-		[
-			MailingDeliveryChannel.EMAIL,
-			'mailing-email' as const,
-			'notification.campaign.email.requested.v1'
-		],
-		[
-			MailingDeliveryChannel.TELEGRAM,
-			'mailing-telegram' as const,
-			'notification.campaign.telegram.requested.v1'
-		]
-	])(
-		'atomically dispatches %s mailing delivery through Notification Delivery',
-		async (channel, monolithKind, eventType) => {
-			const { service, transaction } = createService({ channel });
-			const event = {
-				schemaVersion: 1 as const,
-				eventType: 'mailing.delivery.requested.v1' as const,
-				campaignId,
-				deliveryId,
-				channel
-			};
-
-			await service.deliver(monolithKind, event, eventId);
-
-			expect(transaction.mailingDelivery.updateMany).toHaveBeenCalledWith({
-				where: {
-					id: deliveryId,
-					campaignId,
-					status: MailingDeliveryStatus.PENDING
-				},
-				data: {
-					status: MailingDeliveryStatus.PROCESSING,
-					attempts: { increment: 1 },
-					lastError: null
-				}
-			});
-			const outbox =
-				transaction.outboxEvent.createMany.mock.calls[0][0].data[0];
-			expect(outbox).toEqual(
-				expect.objectContaining({
-					messageId: eventId,
-					eventType,
-					routingKey: eventType
-				})
-			);
-			expect(outbox.payload).toEqual(
-				expect.objectContaining({
-					schemaVersion: 1,
-					eventType,
-					reference: {
-						type: 'mailing-delivery',
-						id: deliveryId,
-						aggregateId: campaignId
-					}
-				})
-			);
-		}
-	);
-
-	it('cancels a pending mailing delivery before dispatch', async () => {
-		const { service, transaction } = createService({
-			campaignStatus: MailingCampaignStatus.CANCELLED
-		});
-
-		await service.deliver(
-			'mailing-email',
-			{
-				schemaVersion: 1,
-				eventType: 'mailing.delivery.requested.v1',
-				campaignId,
-				deliveryId,
-				channel: MailingDeliveryChannel.EMAIL
-			},
-			eventId
-		);
-
-		expect(transaction.outboxEvent.createMany).not.toHaveBeenCalled();
-		expect(transaction.mailingDelivery.updateMany).toHaveBeenCalledWith({
-			where: {
-				id: deliveryId,
-				campaignId,
-				status: {
-					in: [
-						MailingDeliveryStatus.PENDING,
-						MailingDeliveryStatus.PROCESSING
-					]
-				}
-			},
-			data: {
-				status: MailingDeliveryStatus.CANCELLED,
-				cancelledAt: expect.any(Date)
-			}
-		});
-	});
-
-	it('applies a successful mailing outcome exactly once', async () => {
-		const { service, transaction } = createService({
-			deliveryStatus: MailingDeliveryStatus.PROCESSING
-		});
-		const occurredAt = '2026-07-28T08:00:00.000Z';
-
-		await service.deliver(
-			'notification-delivery-outcome',
-			{
-				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
-				sourceEventId: eventId,
-				sourceKind: 'campaign-email',
-				reference: {
-					type: 'mailing-delivery',
-					id: deliveryId,
-					aggregateId: campaignId
-				},
-				status: 'DELIVERED',
-				failure: null,
-				occurredAt
-			},
-			'outcome-1'
-		);
-
-		expect(transaction.mailingDelivery.update).toHaveBeenCalledWith({
-			where: { id: deliveryId },
-			data: {
-				status: MailingDeliveryStatus.SENT,
-				sentAt: new Date(occurredAt),
-				lastError: null
-			}
-		});
-		expect(transaction.mailingCampaign.update).toHaveBeenCalledWith({
-			where: { id: campaignId },
-			data: { sentCount: { increment: 1 } }
-		});
-		expect(transaction.mailingCampaign.updateMany).toHaveBeenCalledWith(
-			expect.objectContaining({
-				data: expect.objectContaining({
-					status: MailingCampaignStatus.COMPLETED
-				})
-			})
-		);
-	});
-
-	it('applies a terminal mailing failure and completes the campaign as partial', async () => {
-		const { service, transaction } = createService({
-			deliveryStatus: MailingDeliveryStatus.PROCESSING,
-			failedCount: 1
-		});
-
-		await service.deliver(
-			'notification-delivery-outcome',
-			{
-				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
-				sourceEventId: eventId,
-				sourceKind: 'campaign-telegram',
-				reference: {
-					type: 'mailing-delivery',
-					id: deliveryId,
-					aggregateId: campaignId
-				},
-				status: 'FAILED',
-				failure: {
-					normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
-					safeReason: 'Telegram destination is unavailable'
-				},
-				occurredAt: '2026-07-28T08:00:00.000Z'
-			},
-			'outcome-2'
-		);
-
-		expect(transaction.mailingDelivery.update).toHaveBeenCalledWith({
-			where: { id: deliveryId },
-			data: {
-				status: MailingDeliveryStatus.FAILED,
-				lastError:
-					'TELEGRAM_CHAT_NOT_FOUND: Telegram destination is unavailable',
-				sentAt: null
-			}
-		});
-		expect(transaction.mailingCampaign.updateMany).toHaveBeenCalledWith(
-			expect.objectContaining({
-				data: expect.objectContaining({
-					status: MailingCampaignStatus.PARTIAL_FAILED
-				})
-			})
-		);
 	});
 
 	it('completes the durable daily-summary job only after delivery outcome', async () => {

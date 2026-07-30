@@ -1,3 +1,6 @@
+import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
+import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';
+import { CampaignAdminAuditEventPayload } from '@/messaging/campaign-admin-audit-event';
 import {
 	INTEGRATION_KINDS,
 	INTEGRATION_ROUTING_KEYS,
@@ -13,7 +16,6 @@ import {
 	classifyIntegrationError,
 	IntegrationErrorClassification
 } from '@/messaging/integration-error-classifier';
-import { MailingDeliveryEventPayload } from '@/messaging/mailing-delivery-event';
 import {
 	createMessagingHeaders,
 	getCurrentCorrelationId
@@ -40,8 +42,6 @@ import { ConfigService } from '@nestjs/config';
 import {
 	IntegrationDeliveryReceiptStatus,
 	IntegrationErrorCategory,
-	MailingCampaignStatus,
-	MailingDeliveryStatus,
 	Prisma,
 	ScheduledJobRunStatus
 } from '@prisma/client';
@@ -64,11 +64,11 @@ type DeliveryClaim =
 
 type WorkerEventPayload =
 	| LeadIntegrationEventPayload
-	| MailingDeliveryEventPayload
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
 	| DailySummaryRequestedEventPayload
-	| AutoRenewalChargeRequestedEventPayload;
+	| AutoRenewalChargeRequestedEventPayload
+	| CampaignAdminAuditEventPayload;
 
 interface ScheduledJobStatusRow {
 	jobType: string;
@@ -80,10 +80,6 @@ interface DeliveryFailureLockRow {
 	resolvedAt: Date | null;
 	retryingAt: Date | null;
 	activeRetryToken: string | null;
-}
-
-interface MessagingRateLimitReservationRow {
-	waitMs: number;
 }
 
 @Injectable()
@@ -103,7 +99,8 @@ export class IntegrationWorkerService
 		private readonly delivery: IntegrationDeliveryService,
 		private readonly configService: ConfigService,
 		private readonly prisma: PrismaService,
-		private readonly heartbeat: MessagingHeartbeatService
+		private readonly heartbeat: MessagingHeartbeatService,
+		private readonly adminEventLog: AdminEventLogService
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -293,7 +290,22 @@ export class IntegrationWorkerService
 			}
 			receiptClaim = claim.lockedAt;
 
-			await this.deliverWithRateLimit(kind, payload, eventId);
+			if (kind === 'campaign-admin-audit') {
+				await this.deliverCampaignAdminAudit(
+					payload as CampaignAdminAuditEventPayload,
+					eventId,
+					receiptClaim
+				);
+				receiptClaim = null;
+				await this.runCleanup();
+				this.rabbitMq.ack(message);
+				this.logger.log(
+					`Campaign admin audit delivered eventId=${eventId}`
+				);
+				return;
+			}
+
+			await this.delivery.deliver(kind, payload, eventId);
 			await this.markDeliveryDelivered(eventId, kind, receiptClaim);
 			receiptClaim = null;
 			await this.runCleanup();
@@ -620,6 +632,81 @@ export class IntegrationWorkerService
 			});
 			await transaction.integrationCredentialSnapshot.deleteMany({
 				where: { eventId, integration }
+			});
+		});
+	}
+
+	private async deliverCampaignAdminAudit(
+		payload: CampaignAdminAuditEventPayload,
+		eventId: string,
+		lockedAt: Date
+	): Promise<void> {
+		const descriptions: Record<
+			CampaignAdminAuditEventPayload['action'],
+			string
+		> = {
+			CAMPAIGN_CREATE: `Создана кампания ${payload.target.campaignId}`,
+			CAMPAIGN_CANCEL: `Запрошена отмена кампании ${payload.target.campaignId}`,
+			CAMPAIGN_DELIVERY_RETRY: `Повтор доставки ${payload.target.deliveryId} кампании ${payload.target.campaignId}`
+		};
+
+		await this.prisma.$transaction(async transaction => {
+			await this.adminEventLog.recordInTransaction(transaction, {
+				adminId: payload.actorId,
+				section: 'CAMPAIGNS',
+				action: payload.action,
+				description: descriptions[payload.action],
+				entityType:
+					payload.action === 'CAMPAIGN_DELIVERY_RETRY'
+						? 'campaign-delivery'
+						: 'campaign',
+				entityId: payload.target.deliveryId || payload.target.campaignId,
+				metadata: {
+					eventId: payload.eventId,
+					correlationId: payload.correlationId,
+					campaignId: payload.target.campaignId,
+					...(payload.target.deliveryId
+						? { deliveryId: payload.target.deliveryId }
+						: {}),
+					...payload.metadata
+				}
+			});
+
+			const delivered =
+				await transaction.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration: 'campaign-admin-audit',
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.DELIVERED,
+						deliveredAt: new Date(),
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			if (delivered.count !== 1) {
+				throw new Error(
+					`Campaign audit receipt claim was lost eventId=${eventId}`
+				);
+			}
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: {
+					eventId,
+					integration: 'campaign-admin-audit',
+					resolvedAt: null
+				},
+				data: {
+					resolvedAt: new Date(),
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
+				}
 			});
 		});
 	}
@@ -1263,7 +1350,6 @@ export class IntegrationWorkerService
 				);
 				return;
 			}
-			await this.markMailingDeliveryFailed(kind, payload, lastError);
 			this.rabbitMq.ack(message);
 			this.logger.error(
 				`Dead-letter persisted eventId=${eventId} kind=${kind}`
@@ -1457,197 +1543,6 @@ export class IntegrationWorkerService
 		return null;
 	}
 
-	private async deliverWithRateLimit(
-		kind: MonolithIntegrationKind,
-		payload: WorkerEventPayload,
-		eventId: string
-	): Promise<void> {
-		const intervalMs = this.getRateLimitInterval(kind);
-		if (
-			!intervalMs ||
-			(await this.shouldBypassMailingRateLimit(kind, payload))
-		) {
-			await this.delivery.deliver(kind, payload, eventId);
-			return;
-		}
-
-		const waitMs = await this.reserveRateLimitSlot(kind, intervalMs);
-		if (waitMs > 0) {
-			await new Promise<void>(resolve => {
-				setTimeout(resolve, waitMs);
-			});
-		}
-		await this.delivery.deliver(kind, payload, eventId);
-	}
-
-	private async reserveRateLimitSlot(
-		key: string,
-		intervalMs: number
-	): Promise<number> {
-		const [reservation] = await this.prisma.$queryRaw<
-			MessagingRateLimitReservationRow[]
-		>(
-			Prisma.sql`
-				WITH "reservation" AS (
-					INSERT INTO "messaging_rate_limits" (
-						"key",
-						"next_available_at",
-						"updated_at"
-					)
-					VALUES (
-						${key},
-						LOCALTIMESTAMP + ${intervalMs} * INTERVAL '1 millisecond',
-						LOCALTIMESTAMP
-					)
-					ON CONFLICT ("key") DO UPDATE
-					SET
-						"next_available_at" =
-							GREATEST(
-								"messaging_rate_limits"."next_available_at",
-								LOCALTIMESTAMP
-							) + ${intervalMs} * INTERVAL '1 millisecond',
-						"updated_at" = LOCALTIMESTAMP
-					RETURNING
-						"next_available_at" -
-							${intervalMs} * INTERVAL '1 millisecond'
-							AS "available_at"
-				)
-				SELECT
-					GREATEST(
-						0,
-						CEIL(
-							EXTRACT(
-								EPOCH FROM ("available_at" - LOCALTIMESTAMP)
-							) * 1000
-						)
-					)::integer AS "waitMs"
-				FROM "reservation"
-			`
-		);
-		if (!reservation) {
-			throw new Error(
-				`Failed to reserve messaging rate-limit slot for ${key}`
-			);
-		}
-		return reservation.waitMs;
-	}
-
-	private async shouldBypassMailingRateLimit(
-		kind: IntegrationKind,
-		payload: WorkerEventPayload
-	): Promise<boolean> {
-		if (kind !== 'mailing-email' && kind !== 'mailing-telegram') {
-			return false;
-		}
-
-		const deliveryId = (payload as MailingDeliveryEventPayload).deliveryId;
-		if (!deliveryId) return true;
-		const delivery = await this.prisma.mailingDelivery.findUnique({
-			where: { id: deliveryId },
-			select: {
-				status: true,
-				updatedAt: true,
-				campaign: {
-					select: {
-						status: true,
-						cancelRequestedAt: true
-					}
-				}
-			}
-		});
-		if (!delivery) return true;
-		if (
-			delivery.campaign.status === MailingCampaignStatus.CANCELLED ||
-			delivery.campaign.cancelRequestedAt
-		) {
-			return true;
-		}
-		if (delivery.status === MailingDeliveryStatus.PENDING) return false;
-		if (delivery.status === MailingDeliveryStatus.PROCESSING) {
-			return (
-				delivery.updatedAt.getTime() >
-				Date.now() - DELIVERY_RECEIPT_LEASE_MS
-			);
-		}
-		return true;
-	}
-
-	private getRateLimitInterval(kind: IntegrationKind): number {
-		const key =
-			kind === 'mailing-email'
-				? 'MAILING_EMAIL_RATE_PER_SECOND'
-				: kind === 'mailing-telegram'
-					? 'MAILING_TELEGRAM_RATE_PER_SECOND'
-					: null;
-		if (!key) return 0;
-		const fallback = kind === 'mailing-email' ? 5 : 10;
-		const configured = Number(
-			this.configService.get<string>(key) || fallback
-		);
-		const rate =
-			Number.isFinite(configured) && configured > 0
-				? Math.min(configured, 50)
-				: fallback;
-		return Math.ceil(1000 / rate);
-	}
-
-	private async markMailingDeliveryFailed(
-		kind: IntegrationKind,
-		payload: Prisma.InputJsonValue,
-		lastError: string
-	): Promise<void> {
-		if (kind !== 'mailing-email' && kind !== 'mailing-telegram') return;
-		const deliveryId = (payload as { deliveryId?: string }).deliveryId;
-		const campaignId = (payload as { campaignId?: string }).campaignId;
-		if (!deliveryId || !campaignId) return;
-
-		await this.prisma.$transaction(async transaction => {
-			const failed = await transaction.mailingDelivery.updateMany({
-				where: {
-					id: deliveryId,
-					campaignId,
-					status: {
-						in: [
-							MailingDeliveryStatus.PENDING,
-							MailingDeliveryStatus.PROCESSING
-						]
-					}
-				},
-				data: {
-					status: MailingDeliveryStatus.FAILED,
-					lastError: lastError.slice(0, 10_000)
-				}
-			});
-			if (failed.count !== 1) return;
-			await transaction.mailingCampaign.update({
-				where: { id: campaignId },
-				data: { failedCount: { increment: 1 } }
-			});
-			const pending = await transaction.mailingDelivery.count({
-				where: {
-					campaignId,
-					status: {
-						in: [
-							MailingDeliveryStatus.PENDING,
-							MailingDeliveryStatus.PROCESSING
-						]
-					}
-				}
-			});
-			if (pending !== 0) return;
-			await transaction.mailingCampaign.updateMany({
-				where: {
-					id: campaignId,
-					status: { not: MailingCampaignStatus.CANCELLED }
-				},
-				data: {
-					status: MailingCampaignStatus.PARTIAL_FAILED,
-					completedAt: new Date()
-				}
-			});
-		});
-	}
-
 	private getRetryAttempt(message: ConsumeMessage): number {
 		const value = Number(message.properties.headers?.['x-retry-attempt']);
 		return Number.isInteger(value) && value >= 0 ? value : 0;
@@ -1703,4 +1598,3 @@ export class IntegrationWorkerService
 		return [...new Set(configured as MonolithIntegrationKind[])];
 	}
 }
-import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';

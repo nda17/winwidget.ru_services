@@ -90,6 +90,11 @@ export class MaintenanceSchedulerService
 						`Daily Notification Delivery database backup scheduled period=${period.key} jobId=${backups.notificationDelivery.job.id}`
 					);
 				}
+				if (backups?.campaigns.created) {
+					this.logger.log(
+						`Daily Campaigns database backup scheduled period=${period.key} jobId=${backups.campaigns.job.id}`
+					);
+				}
 			}
 		} catch (error) {
 			this.logger.error(

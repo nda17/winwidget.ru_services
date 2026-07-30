@@ -78,7 +78,7 @@ describe('messaging event contract', () => {
 		).toThrow('cannot be consumed by webhook');
 	});
 
-	it('rejects event type mismatches', () => {
+	it('rejects the removed legacy mailing contract', () => {
 		expect(() =>
 			assertMessagingEventContract(
 				{
@@ -89,12 +89,82 @@ describe('messaging event contract', () => {
 					channel: 'EMAIL'
 				},
 				{
-					eventType: 'payment.succeeded.v1',
+					eventType: 'mailing.delivery.requested.v1',
 					routingKey: 'mailing.delivery.email.v1',
 					messageId: MESSAGE_ID
 				}
 			)
-		).toThrow('does not match');
+		).toThrow('Unsupported messaging event type');
+	});
+
+	it('accepts a strict Campaigns audit event without campaign content', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-07-30T12:00:00.000Z',
+			correlationId: '22222222-2222-4222-8222-222222222222',
+			actorId: 'admin-user-id',
+			action: 'CAMPAIGN_CREATE',
+			target: {
+				campaignId: '33333333-3333-4333-8333-333333333333'
+			},
+			metadata: {
+				channel: 'BOTH',
+				audience: 'ACTIVE_SUBSCRIBERS'
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.event.v1',
+				messageId: MESSAGE_ID,
+				kind: 'campaign-admin-audit'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects mismatched and content-bearing Campaigns audit events', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-07-30T12:00:00.000Z',
+			correlationId: '22222222-2222-4222-8222-222222222222',
+			actorId: 'admin-user-id',
+			action: 'CAMPAIGN_CANCEL',
+			target: {
+				campaignId: '33333333-3333-4333-8333-333333333333'
+			},
+			metadata: {
+				recipientCount: 42,
+				subject: 'must not leave Campaigns'
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.event.v1',
+				messageId: MESSAGE_ID,
+				kind: 'campaign-admin-audit'
+			})
+		).toThrow('unexpected fields');
+		expect(() =>
+			assertMessagingEventContract(
+				{
+					...payload,
+					metadata: { recipientCount: 42 }
+				},
+				{
+					eventType: payload.eventType,
+					routingKey: 'admin.audit.event.v1',
+					messageId: '44444444-4444-4444-8444-444444444444',
+					kind: 'campaign-admin-audit'
+				}
+			)
+		).toThrow('eventId must match');
 	});
 
 	it('rejects server credentials anywhere in a payload', () => {

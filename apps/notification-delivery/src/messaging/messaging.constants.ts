@@ -9,9 +9,9 @@ export const LIMIT_REACHED_TELEGRAM_EVENT_TYPE =
 export const TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE =
 	'notification.telegram.destination-unavailable.v1';
 export const CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE =
-	'notification.campaign.email.requested.v1';
+	'notification.campaign.email.requested.v2';
 export const CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE =
-	'notification.campaign.telegram.requested.v1';
+	'notification.campaign.telegram.requested.v2';
 export const DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.daily-summary.telegram.requested.v1';
 export const SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE =
@@ -20,6 +20,8 @@ export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.telegram.requested.v1';
 export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v1';
+export const CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
+	'notification.delivery.outcome.v2';
 
 export const EVENTS_EXCHANGE = 'winwidget.events';
 export const RETRY_EXCHANGE = 'winwidget.retry';
@@ -71,8 +73,8 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'payment-telegram': 'winwidget.payment-notification.telegram.v2',
 	'limit-email': 'winwidget.limit-notification.email',
 	'limit-telegram': 'winwidget.limit-notification.telegram',
-	'campaign-email': 'winwidget.notification.campaign.email',
-	'campaign-telegram': 'winwidget.notification.campaign.telegram',
+	'campaign-email': 'winwidget.notification.campaign.email.v2',
+	'campaign-telegram': 'winwidget.notification.campaign.telegram.v2',
 	'daily-summary-delivery-telegram':
 		'winwidget.notification.daily-summary.telegram',
 	'subscription-expiry-email':

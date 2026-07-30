@@ -6,7 +6,6 @@ export const PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'payment.notification.telegram.requested.v1';
 export const AUTO_RENEWAL_CHARGE_EVENT_TYPE =
 	'payment.auto-renewal.charge.requested.v1';
-export const MAILING_DELIVERY_EVENT_TYPE = 'mailing.delivery.requested.v1';
 export const LIMIT_REACHED_EMAIL_EVENT_TYPE =
 	'lead.limit.reached.email.v2';
 export const LIMIT_REACHED_TELEGRAM_EVENT_TYPE =
@@ -16,9 +15,9 @@ export const DAILY_SUMMARY_EVENT_TYPE =
 export const TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE =
 	'notification.telegram.destination-unavailable.v1';
 export const CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE =
-	'notification.campaign.email.requested.v1';
+	'notification.campaign.email.requested.v2';
 export const CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE =
-	'notification.campaign.telegram.requested.v1';
+	'notification.campaign.telegram.requested.v2';
 export const DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.daily-summary.telegram.requested.v1';
 export const SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE =
@@ -27,6 +26,7 @@ export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.telegram.requested.v1';
 export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v1';
+export const CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE = 'admin.audit.event.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
 export const EVENTS_EXCHANGE = 'winwidget.events';
 export const RETRY_EXCHANGE = 'winwidget.retry';
@@ -47,8 +47,6 @@ export const INTEGRATION_KINDS = [
 	...LEAD_INTEGRATION_KINDS,
 	'payment-email',
 	'payment-telegram',
-	'mailing-email',
-	'mailing-telegram',
 	'limit-email',
 	'limit-telegram',
 	'daily-summary-telegram',
@@ -59,6 +57,7 @@ export const INTEGRATION_KINDS = [
 	'subscription-expiry-email',
 	'subscription-expiry-telegram',
 	'notification-delivery-outcome',
+	'campaign-admin-audit',
 	'auto-renewal'
 ] as const;
 
@@ -110,8 +109,6 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'amo-crm': 'lead.integration.amo-crm.v2',
 	'payment-email': PAYMENT_SUCCEEDED_EVENT_TYPE,
 	'payment-telegram': PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-	'mailing-email': 'mailing.delivery.email.v1',
-	'mailing-telegram': 'mailing.delivery.telegram.v1',
 	'limit-email': LIMIT_REACHED_EMAIL_EVENT_TYPE,
 	'limit-telegram': LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	'daily-summary-telegram': DAILY_SUMMARY_EVENT_TYPE,
@@ -127,6 +124,7 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 		SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	'notification-delivery-outcome':
 		NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+	'campaign-admin-audit': CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
 	'auto-renewal': AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE
 };
@@ -139,15 +137,13 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'amo-crm': 'winwidget.lead-integration.amo-crm',
 	'payment-email': 'winwidget.payment-notification.email',
 	'payment-telegram': 'winwidget.payment-notification.telegram.v2',
-	'mailing-email': 'winwidget.mailing.email',
-	'mailing-telegram': 'winwidget.mailing.telegram',
 	'limit-email': 'winwidget.limit-notification.email',
 	'limit-telegram': 'winwidget.limit-notification.telegram',
 	'daily-summary-telegram': 'winwidget.report.daily-summary.telegram',
 	'telegram-destination-unavailable':
 		'winwidget.notification.telegram-destination-unavailable',
-	'campaign-email': 'winwidget.notification.campaign.email',
-	'campaign-telegram': 'winwidget.notification.campaign.telegram',
+	'campaign-email': 'winwidget.notification.campaign.email.v2',
+	'campaign-telegram': 'winwidget.notification.campaign.telegram.v2',
 	'daily-summary-delivery-telegram':
 		'winwidget.notification.daily-summary.telegram',
 	'subscription-expiry-email':
@@ -156,6 +152,7 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 		'winwidget.notification.subscription-expiry.telegram',
 	'notification-delivery-outcome':
 		'winwidget.notification.delivery-outcome',
+	'campaign-admin-audit': 'winwidget.admin.audit.campaigns.v1',
 	'auto-renewal': 'winwidget.payment.auto-renewal',
 	'database-backup': 'winwidget.maintenance.database-backup'
 };

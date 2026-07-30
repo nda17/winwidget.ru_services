@@ -41,7 +41,6 @@ import {
 	IntegrationDeliveryReceiptStatus,
 	IntegrationErrorCategory,
 	IntegrationFailureResolution,
-	MailingCampaignStatus,
 	OutboxEventStatus,
 	Prisma
 } from '@prisma/client';
@@ -396,10 +395,6 @@ export class MessagingAdminService {
 				failure.eventId,
 				retryPayload
 			);
-			const mailingDelivery =
-				kind === 'mailing-email' || kind === 'mailing-telegram'
-					? this.getMailingDeliveryReference(retryPayload)
-					: null;
 			const claimed =
 				await transaction.integrationDeliveryFailure.updateMany({
 					where: {
@@ -440,13 +435,6 @@ export class MessagingAdminService {
 				}
 			}
 
-			if (mailingDelivery) {
-				await this.reopenMailingDelivery(
-					transaction,
-					mailingDelivery.deliveryId,
-					mailingDelivery.campaignId
-				);
-			}
 			if (scheduledJob) {
 				await this.reopenScheduledJob(
 					transaction,
@@ -755,70 +743,6 @@ export class MessagingAdminService {
 			return payload.eventType;
 		}
 		return OUTBOX_EVENT_TYPE;
-	}
-
-	private getMailingDeliveryReference(payload: Prisma.JsonValue) {
-		if (
-			!payload ||
-			typeof payload !== 'object' ||
-			Array.isArray(payload)
-		) {
-			throw new BadRequestException('Некорректное событие рассылки');
-		}
-		const deliveryId = payload.deliveryId;
-		const campaignId = payload.campaignId;
-		if (typeof deliveryId !== 'string' || typeof campaignId !== 'string') {
-			throw new BadRequestException('Некорректное событие рассылки');
-		}
-		return { deliveryId, campaignId };
-	}
-
-	private async reopenMailingDelivery(
-		transaction: Prisma.TransactionClient,
-		deliveryId: string,
-		campaignId: string
-	): Promise<void> {
-		const campaign = await transaction.mailingCampaign.findUnique({
-			where: { id: campaignId },
-			select: {
-				status: true,
-				cancelRequestedAt: true,
-				failedCount: true
-			}
-		});
-		if (
-			!campaign ||
-			campaign.status === MailingCampaignStatus.CANCELLED ||
-			campaign.cancelRequestedAt ||
-			campaign.failedCount < 1
-		) {
-			throw new ConflictException('Рассылка уже обработана или отменена');
-		}
-
-		const reopened = await transaction.mailingDelivery.updateMany({
-			where: {
-				id: deliveryId,
-				campaignId,
-				status: 'FAILED'
-			},
-			data: {
-				status: 'PENDING',
-				lastError: null
-			}
-		});
-		if (reopened.count !== 1) {
-			throw new ConflictException(
-				'Доставка рассылки уже обработана или отменена'
-			);
-		}
-		await transaction.mailingCampaign.update({
-			where: { id: campaignId },
-			data: {
-				failedCount: { decrement: 1 },
-				status: MailingCampaignStatus.RUNNING,
-				completedAt: null
-			}
-		});
 	}
 
 	private getFailureWhere(

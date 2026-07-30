@@ -257,6 +257,11 @@ export class NotificationDeliveryControlService {
 			}
 
 			const kind = failure.consumer;
+			if (kind === 'campaign-email' || kind === 'campaign-telegram') {
+				throw new ConflictException(
+					'Повтор доставки кампании доступен только через Campaigns API'
+				);
+			}
 			const eventType = this.getFailureEventType(failure.payload);
 			const routingKey = getManualRetryRoutingKey(kind);
 			try {

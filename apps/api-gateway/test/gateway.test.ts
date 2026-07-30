@@ -454,6 +454,8 @@ describe('API Gateway proxy', () => {
 					'cf-connecting-ip': '203.0.113.99',
 					'x-user-id': 'spoofed-user',
 					'x-auth-roles': 'ADMIN',
+					'x-winwidget-internal-token': 'spoofed-service-token',
+					'x-internal-control': 'spoofed-control-token',
 					'x-request-id': 'attacker-controlled',
 					'x-correlation-id': 'attacker-correlation',
 					connection: 'authorization'
@@ -485,6 +487,8 @@ describe('API Gateway proxy', () => {
 		assert.equal(proxied.headers['cf-connecting-ip'], undefined);
 		assert.equal(proxied.headers['x-user-id'], undefined);
 		assert.equal(proxied.headers['x-auth-roles'], undefined);
+		assert.equal(proxied.headers['x-winwidget-internal-token'], undefined);
+		assert.equal(proxied.headers['x-internal-control'], undefined);
 		assert.equal(proxied.headers.cookie, 'theme=dark; session=current');
 		assert.match(
 			String(proxied.headers['x-request-id']),

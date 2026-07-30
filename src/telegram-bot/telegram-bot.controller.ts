@@ -172,10 +172,12 @@ export class TelegramBotController {
 			);
 
 		if (result.created) {
-			const targetLabel =
-				target === DATABASE_BACKUP_TARGETS.CORE
-					? 'основной БД'
-					: 'БД Notification Delivery';
+			const targetLabel = {
+				[DATABASE_BACKUP_TARGETS.CORE]: 'основной БД',
+				[DATABASE_BACKUP_TARGETS.NOTIFICATION_DELIVERY]:
+					'БД Notification Delivery',
+				[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns'
+			}[target];
 			await this.adminEventLogService.record({
 				adminId,
 				section: 'TELEGRAM_BOT',

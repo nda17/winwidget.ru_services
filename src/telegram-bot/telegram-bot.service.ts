@@ -1,4 +1,7 @@
-import { NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES } from '@/maintenance/database-backup.types';
+import {
+	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
+	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES
+} from '@/maintenance/database-backup.types';
 import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
@@ -927,6 +930,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupTime,
 			NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES
 		);
+		const campaignsDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryEnabled: settings.dailySummaryEnabled,
@@ -948,6 +955,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
 			notificationDeliveryDatabaseBackupTime,
 			notificationDeliveryDatabaseBackupTimeLabel: `${notificationDeliveryDatabaseBackupTime} МСК`,
+			campaignsDatabaseBackupDelayMinutes:
+				CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
+			campaignsDatabaseBackupTime,
+			campaignsDatabaseBackupTimeLabel: `${campaignsDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:
@@ -1701,6 +1712,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			(backupMinutes +
 				NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES) %
 			(24 * 60);
+		const campaignsBackupMinutes =
+			(backupMinutes + CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES) %
+			(24 * 60);
 		const coreGap = this.getCircularTimeGapMinutes(
 			summaryMinutes,
 			backupMinutes
@@ -1709,13 +1723,18 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			summaryMinutes,
 			notificationDeliveryBackupMinutes
 		);
+		const campaignsGap = this.getCircularTimeGapMinutes(
+			summaryMinutes,
+			campaignsBackupMinutes
+		);
 
 		if (
 			coreGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES ||
-			notificationDeliveryGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES
+			notificationDeliveryGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES ||
+			campaignsGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES
 		) {
 			throw new BadRequestException(
-				`Разнесите отправку сводки и оба backup минимум на ${this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES} минут`
+				`Разнесите отправку сводки и все backup минимум на ${this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES} минут`
 			);
 		}
 	}

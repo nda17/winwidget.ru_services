@@ -1,7 +1,6 @@
 import {
 	AUTO_RENEWAL_CHARGE_EVENT_TYPE,
-	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
-	CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
 	DAILY_SUMMARY_EVENT_TYPE,
 	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	DATABASE_BACKUP_EVENT_TYPE,
@@ -11,7 +10,6 @@ import {
 	LIMIT_REACHED_EMAIL_EVENT_TYPE,
 	LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
 	MAINTENANCE_KINDS,
-	MAILING_DELIVERY_EVENT_TYPE,
 	MESSAGING_ROUTING_KEYS,
 	MessagingKind,
 	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
@@ -22,14 +20,11 @@ import {
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '@/messaging/messaging.constants';
+import { CAMPAIGN_ADMIN_AUDIT_ACTIONS } from '@/messaging/campaign-admin-audit-event';
 import { OUTCOME_NOTIFICATION_DELIVERY_KINDS } from '@/messaging/notification-delivery-event';
 import { TELEGRAM_DESTINATION_SOURCE_KINDS } from '@/messaging/telegram-destination-unavailable-event';
 import { isDatabaseBackupJobType } from '@/scheduled-jobs/scheduled-jobs.types';
-import {
-	BillingPeriod,
-	MailingDeliveryChannel,
-	Plan
-} from '@prisma/client';
+import { BillingPeriod, Plan } from '@prisma/client';
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -484,62 +479,21 @@ const assertTelegramDestinationUnavailableEvent = (
 	return 'telegram-destination-unavailable';
 };
 
-const assertMailingEvent = (payload: JsonRecord): IntegrationKind => {
-	assertExactKeys(payload, [
-		'schemaVersion',
-		'eventType',
-		'campaignId',
-		'deliveryId',
-		'channel'
-	]);
-	if (
-		payload.schemaVersion !== 1 ||
-		payload.eventType !== MAILING_DELIVERY_EVENT_TYPE
-	) {
-		throw new Error('Invalid mailing event contract version');
-	}
-	assertUuid(payload.campaignId, 'payload.campaignId');
-	assertUuid(payload.deliveryId, 'payload.deliveryId');
-	if (payload.channel === MailingDeliveryChannel.EMAIL) {
-		return 'mailing-email';
-	}
-	if (payload.channel === MailingDeliveryChannel.TELEGRAM) {
-		return 'mailing-telegram';
-	}
-	throw new Error('payload.channel is invalid');
-};
-
 const assertNotificationReference = (
 	value: unknown,
-	expectedType:
-		| 'mailing-delivery'
-		| 'daily-summary-job'
-		| 'subscription-expiry-reminder'
+	expectedType: 'daily-summary-job' | 'subscription-expiry-reminder'
 ): JsonRecord => {
 	const reference = assertRecord(value, 'payload.reference');
-	assertExactKeys(
-		reference,
-		expectedType === 'mailing-delivery'
-			? ['type', 'id', 'aggregateId']
-			: ['type', 'id'],
-		[],
-		'payload.reference'
-	);
+	assertExactKeys(reference, ['type', 'id'], [], 'payload.reference');
 	if (reference.type !== expectedType) {
 		throw new Error(`payload.reference.type must be ${expectedType}`);
 	}
-	if (
-		expectedType === 'mailing-delivery' ||
-		expectedType === 'daily-summary-job'
-	) {
+	if (expectedType === 'daily-summary-job') {
 		assertUuid(reference.id, 'payload.reference.id');
 	} else {
 		assertString(reference.id, 'payload.reference.id', {
 			maxLength: 255
 		});
-	}
-	if (expectedType === 'mailing-delivery') {
-		assertUuid(reference.aggregateId, 'payload.reference.aggregateId');
 	}
 	return reference;
 };
@@ -565,38 +519,6 @@ const assertPreparedNotificationEvent = (
 	const content = assertRecord(payload.content, 'payload.content');
 
 	switch (payload.eventType) {
-		case CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE:
-		case CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE: {
-			assertNotificationReference(payload.reference, 'mailing-delivery');
-			assertExactKeys(
-				content,
-				['subject', 'message'],
-				[],
-				'payload.content'
-			);
-			assertString(content.subject, 'payload.content.subject', {
-				maxLength: 120
-			});
-			assertString(content.message, 'payload.content.message', {
-				maxLength: 5000
-			});
-			if (payload.eventType === CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE) {
-				assertExactKeys(destination, ['email'], [], 'payload.destination');
-				assertString(destination.email, 'payload.destination.email');
-				return 'campaign-email';
-			}
-			assertExactKeys(
-				destination,
-				['telegramChatId'],
-				[],
-				'payload.destination'
-			);
-			assertString(
-				destination.telegramChatId,
-				'payload.destination.telegramChatId'
-			);
-			return 'campaign-telegram';
-		}
 		case DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
 			assertNotificationReference(payload.reference, 'daily-summary-job');
 			assertExactKeys(
@@ -705,12 +627,7 @@ const assertNotificationDeliveryOutcome = (
 	) {
 		throw new Error('payload.sourceKind is invalid');
 	}
-	if (
-		payload.sourceKind === 'campaign-email' ||
-		payload.sourceKind === 'campaign-telegram'
-	) {
-		assertNotificationReference(payload.reference, 'mailing-delivery');
-	} else if (payload.sourceKind === 'daily-summary-delivery-telegram') {
+	if (payload.sourceKind === 'daily-summary-delivery-telegram') {
 		assertNotificationReference(payload.reference, 'daily-summary-job');
 	} else {
 		assertNotificationReference(
@@ -744,6 +661,108 @@ const assertNotificationDeliveryOutcome = (
 	}
 	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
 	return 'notification-delivery-outcome';
+};
+
+const assertCampaignAdminAuditEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'occurredAt',
+		'correlationId',
+		'actorId',
+		'action',
+		'target',
+		'metadata'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE
+	) {
+		throw new Error('Invalid campaign admin audit contract version');
+	}
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	assertUuid(payload.correlationId, 'payload.correlationId');
+	assertString(payload.actorId, 'payload.actorId', { maxLength: 256 });
+	if (
+		!CAMPAIGN_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as (typeof CAMPAIGN_ADMIN_AUDIT_ACTIONS)[number]
+		)
+	) {
+		throw new Error('payload.action is invalid');
+	}
+
+	const target = assertRecord(payload.target, 'payload.target');
+	const metadata = assertRecord(payload.metadata, 'payload.metadata');
+	if (payload.action === 'CAMPAIGN_DELIVERY_RETRY') {
+		assertExactKeys(
+			target,
+			['campaignId', 'deliveryId'],
+			[],
+			'payload.target'
+		);
+		assertExactKeys(
+			metadata,
+			['channel', 'dispatchGeneration'],
+			[],
+			'payload.metadata'
+		);
+		assertUuid(target.deliveryId, 'payload.target.deliveryId');
+		if (metadata.channel !== 'EMAIL' && metadata.channel !== 'TELEGRAM') {
+			throw new Error('payload.metadata.channel is invalid');
+		}
+		if (
+			!Number.isInteger(metadata.dispatchGeneration) ||
+			Number(metadata.dispatchGeneration) < 1
+		) {
+			throw new Error(
+				'payload.metadata.dispatchGeneration must be a positive integer'
+			);
+		}
+	} else {
+		assertExactKeys(target, ['campaignId'], [], 'payload.target');
+		if (payload.action === 'CAMPAIGN_CREATE') {
+			assertExactKeys(
+				metadata,
+				['channel', 'audience'],
+				[],
+				'payload.metadata'
+			);
+			if (
+				metadata.channel !== 'EMAIL' &&
+				metadata.channel !== 'TELEGRAM' &&
+				metadata.channel !== 'BOTH'
+			) {
+				throw new Error('payload.metadata.channel is invalid');
+			}
+			if (
+				metadata.audience !== 'ALL' &&
+				metadata.audience !== 'ACTIVE_SUBSCRIBERS'
+			) {
+				throw new Error('payload.metadata.audience is invalid');
+			}
+		} else {
+			assertExactKeys(
+				metadata,
+				['recipientCount'],
+				[],
+				'payload.metadata'
+			);
+			if (
+				!Number.isInteger(metadata.recipientCount) ||
+				Number(metadata.recipientCount) < 0
+			) {
+				throw new Error(
+					'payload.metadata.recipientCount must be a non-negative integer'
+				);
+			}
+		}
+	}
+	assertUuid(target.campaignId, 'payload.target.campaignId');
+	return 'campaign-admin-audit';
 };
 
 const assertLimitEvent = (payload: JsonRecord): IntegrationKind => {
@@ -857,8 +876,6 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 			return [assertPaymentTelegramEvent(payload)];
 		case AUTO_RENEWAL_CHARGE_EVENT_TYPE:
 			return [assertAutoRenewalChargeEvent(payload)];
-		case MAILING_DELIVERY_EVENT_TYPE:
-			return [assertMailingEvent(payload)];
 		case LIMIT_REACHED_EMAIL_EVENT_TYPE:
 		case LIMIT_REACHED_TELEGRAM_EVENT_TYPE:
 			return [assertLimitEvent(payload)];
@@ -867,14 +884,14 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 			return [assertScheduledEvent(payload)];
 		case TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE:
 			return [assertTelegramDestinationUnavailableEvent(payload)];
-		case CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE:
-		case CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE:
 		case DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
 		case SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE:
 		case SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
 			return [assertPreparedNotificationEvent(payload)];
 		case NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE:
 			return [assertNotificationDeliveryOutcome(payload)];
+		case CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE:
+			return [assertCampaignAdminAuditEvent(payload)];
 		default:
 			throw new Error(
 				`Unsupported messaging event type: ${String(payload.eventType)}`
@@ -903,6 +920,14 @@ export function assertMessagingEventContract(
 		payload.jobId !== metadata.messageId
 	) {
 		throw new Error('Scheduled event jobId must match the AMQP messageId');
+	}
+	if (
+		payload.eventType === CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE &&
+		payload.eventId !== metadata.messageId
+	) {
+		throw new Error(
+			'Campaign admin audit eventId must match the AMQP messageId'
+		);
 	}
 	if (metadata.kind && !expectedKinds.includes(metadata.kind)) {
 		throw new Error(
