@@ -1420,7 +1420,18 @@ while IFS= read -r notification_migration_file; do
 		fi
 		continue
 	fi
-	if ! awk '
+	# Review CHECK replacements per immutable migration so future changes fail closed.
+	expected_notification_constraint_replacements=""
+	case "$notification_migration_file" in
+		apps/notification-delivery/prisma/migrations/20260728000000_expand_notification_delivery_telegram_kinds/migration.sql)
+			expected_notification_constraint_replacements="DELIVERY_RECEIPTS_IDENTITY_CHECK,DELIVERY_FAILURES_CLASSIFICATION_CHECK,CONTROL_ACTIONS_IDENTITY_CHECK,NOTIFICATION_OUTBOX_EVENTS_IDENTITY_CHECK"
+			;;
+		apps/notification-delivery/prisma/migrations/20260730020000_allow_campaign_delivery_outcome_v2/migration.sql)
+			expected_notification_constraint_replacements="NOTIFICATION_OUTBOX_EVENTS_IDENTITY_CHECK"
+			;;
+	esac
+	if ! awk \
+		-v expected_replacements="$expected_notification_constraint_replacements" '
 		BEGIN {
 			RS = ";"
 			failed = 0
@@ -1432,6 +1443,12 @@ while IFS= read -r notification_migration_file; do
 			table_names[2] = "DELIVERY_FAILURES"
 			table_names[3] = "CONTROL_ACTIONS"
 			table_names[4] = "OUTBOX_EVENTS"
+			expected_count = split(expected_replacements, expected_names, ",")
+			for (i = 1; i <= expected_count; i += 1) {
+				if (expected_names[i] != "") {
+					expected[expected_names[i]] = 1
+				}
+			}
 		}
 		{
 			statement = $0
@@ -1472,6 +1489,7 @@ while IFS= read -r notification_migration_file; do
 				constraint_replacement = constraint_replacement && gsub(/ALTER TABLE/, "", candidate) == 1
 				constraint_replacement = constraint_replacement && candidate !~ /( CASCADE| DROP COLUMN| TRUNCATE | DELETE FROM | UPDATE | INSERT INTO | CREATE )/
 				if (constraint_replacement) {
+					if (!expected[name]) failed = 1
 					replaced[name] += 1
 					replaced_constraints = 1
 					accepted_replacement = 1
@@ -1482,11 +1500,10 @@ while IFS= read -r notification_migration_file; do
 			failed = 1
 		}
 		END {
-			if (replaced_constraints) {
-				for (i = 1; i <= 4; i += 1) {
-					name = constraint_names[i]
-					if (replaced[name] != 1) failed = 1
-				}
+			for (i = 1; i <= 4; i += 1) {
+				name = constraint_names[i]
+				required_replacements = expected[name] ? 1 : 0
+				if (replaced[name] != required_replacements) failed = 1
 			}
 			invalid_transaction = transaction_begin != transaction_commit
 			invalid_transaction = invalid_transaction || transaction_begin > 1
