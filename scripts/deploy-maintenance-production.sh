@@ -166,6 +166,8 @@ fi
 source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
 # shellcheck source=scripts/campaigns-database-lifecycle.sh
 source "$server_root/scripts/campaigns-database-lifecycle.sh"
+# shellcheck source=scripts/core-database-production-guard.sh
+source "$server_root/scripts/core-database-production-guard.sh"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend production env file was not found." >&2
@@ -417,6 +419,7 @@ if [[ "$(get_env_value COMPOSE_PROJECT_NAME)" != "winwidget" ]]; then
 	echo "Maintenance rollout requires COMPOSE_PROJECT_NAME=winwidget." >&2
 	exit 1
 fi
+assert_core_database_production_boundary
 assert_notification_database_postgres_identity
 assert_campaigns_database_postgres_identity
 assert_distinct_database_roles

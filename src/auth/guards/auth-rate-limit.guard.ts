@@ -32,6 +32,7 @@ export class AuthRateLimitGuard implements CanActivate {
 				},
 				5 * 60 * 1000
 			);
+			AuthRateLimitGuard.cleanupInterval.unref();
 		}
 	}
 

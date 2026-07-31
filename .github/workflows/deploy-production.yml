@@ -149,6 +149,7 @@ jobs:
         run: |
           for script in \
             scripts/production-deploy-lock.sh \
+            scripts/core-database-production-guard.sh \
             scripts/campaigns-database-lifecycle.sh \
             scripts/cutover-campaigns-database-production.sh \
             scripts/restart-campaigns-database-cutover-production.sh \
@@ -176,6 +177,7 @@ jobs:
             koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
             --severity=warning \
             scripts/production-deploy-lock.sh \
+            scripts/core-database-production-guard.sh \
             scripts/campaigns-database-lifecycle.sh \
             scripts/cutover-campaigns-database-production.sh \
             scripts/restart-campaigns-database-cutover-production.sh \
@@ -2396,6 +2398,7 @@ jobs:
             scripts/restart-campaigns-database-cutover-production.sh \
             scripts/campaigns-database-lifecycle.sh \
             scripts/campaigns-contract-migration-guard.sh \
+            scripts/core-database-production-guard.sh \
             scripts/production-deploy-lock.sh \
             scripts/test-campaigns-cutover-rehearsal.sh \
             scripts/audit-legacy-telegram-channels-production.sh
@@ -2507,8 +2510,60 @@ jobs:
               "Campaigns restart must verify and run the exact new-revision recovery script under the production lock",
             );
           }
+          const deployScript = readFileSync(
+            "scripts/deploy-production.sh",
+            "utf8",
+          );
+          const maintenanceScript = readFileSync(
+            "scripts/deploy-maintenance-production.sh",
+            "utf8",
+          );
+          for (const [label, script] of [
+            ["full deployment", deployScript],
+            ["maintenance deployment", maintenanceScript],
+          ]) {
+            if (
+              !script.includes(
+                'source "$server_root/scripts/core-database-production-guard.sh"',
+              ) ||
+              !script.includes("assert_core_database_production_boundary")
+            ) {
+              throw new Error(
+                `${label} must fail closed on the standalone core database boundary`,
+              );
+            }
+          }
+          for (const requiredBoundary of [
+            "stop_routine_topology_for_core_migration",
+            ".State.ExitCode",
+            ".State.OOMKilled",
+            "verify_core_database_sessions_drained",
+            "LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION",
+            "exited|137|false|",
+          ]) {
+            if (!deployScript.includes(requiredBoundary)) {
+              throw new Error(
+                `Full deployment is missing clean-stop boundary: ${requiredBoundary}`,
+              );
+            }
+          }
+          const apiMain = readFileSync("src/main.ts", "utf8");
+          if (!apiMain.includes("forceCloseConnections: true")) {
+            throw new Error(
+              "Monolith API must force-close residual HTTP connections during shutdown",
+            );
+          }
+          const compose = readFileSync(
+            "deploy/docker-compose.prod.yml",
+            "utf8",
+          );
+          if (compose.includes("winwidget-core-postgres-temporary")) {
+            throw new Error(
+              "Routine production Compose must not own the temporary core PostgreSQL lifecycle",
+            );
+          }
           process.stdout.write(
-            "All backend production checkout paths use the Campaigns pre-pull guard\n",
+            "Backend checkout and standalone core database guards verified\n",
           );
           NODE
 
@@ -2524,6 +2579,7 @@ jobs:
           bash -n scripts/restart-campaigns-database-cutover-production.sh
           bash -n scripts/campaigns-database-lifecycle.sh
           bash -n scripts/campaigns-contract-migration-guard.sh
+          bash -n scripts/core-database-production-guard.sh
           bash -n scripts/production-deploy-lock.sh
           bash -n scripts/test-campaigns-cutover-rehearsal.sh
           bash -n scripts/audit-legacy-telegram-channels-production.sh

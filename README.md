@@ -336,9 +336,12 @@ production-включение выполняется только согласо
 Notification Delivery и Maintenance собираются в отдельные immutable images,
 имеют loopback health endpoints на `4401` и `4300` и могут выкатываться
 независимо после первого baseline deploy. Контейнеры миграций запускаются
-только на время деплоя. Основная БД монолита пока остаётся управляемой
-облачной PostgreSQL. PostgreSQL Notification Delivery запускается только
-явным one-time database cutover через profile
+только на время деплоя. Основная БД монолита временно работает в standalone
+PostgreSQL `winwidget-core-postgres-temporary` на `127.0.0.1:55434` и не
+входит в обычный Compose lifecycle; deploy до остановки приложений проверяет
+её URL, container/image, external volume и cluster fingerprint. PostgreSQL
+Notification Delivery запускается только явным one-time database cutover через
+profile
 `notification-delivery-database`: обычные app deploy/rollback не создают, не
 останавливают и не пересоздают его, а также не удаляют external volume.
 Image Notification Delivery собирается только из
@@ -836,9 +839,10 @@ ssh -L 15672:127.0.0.1:15672 <user>@<backend-vps>
 `deploy/backend/docker-compose.prod.yml` содержит только Compose `include` на
 канонический файл и не дублирует services.
 
-Перед первым production-деплоем:
+Перед production-деплоем:
 
-1. Убедиться, что у облачной PostgreSQL есть актуальный backup/snapshot.
+1. Убедиться, что standalone core PostgreSQL и его external volume проходят
+   production guard, а актуальный dump сохранён вне backend VPS.
 2. Заполнить RabbitMQ-переменные в
    `/opt/winwidget/deploy/backend/.env.production`.
 3. Проверить, что management-порт `15672` и AMQP-порт `5672` доступны только

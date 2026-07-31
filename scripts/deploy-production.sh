@@ -24,6 +24,8 @@ server_root="$APP_ROOT/winwidget.ru_server"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$server_root/scripts/production-deploy-lock.sh"
 acquire_production_deploy_lock "full backend deployment"
+# shellcheck source=scripts/core-database-production-guard.sh
+source "$server_root/scripts/core-database-production-guard.sh"
 # shellcheck source=scripts/campaigns-contract-migration-guard.sh
 source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
@@ -635,6 +637,7 @@ if [[ "$target_project" != "winwidget" ]]; then
 	echo "COMPOSE_PROJECT_NAME must be winwidget, got: ${target_project:-empty}" >&2
 	exit 1
 fi
+assert_core_database_production_boundary
 assert_notification_database_postgres_identity
 assert_campaigns_database_postgres_identity
 rabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"
@@ -704,6 +707,215 @@ compose_target() {
 compose_notification_cutover() {
 	docker compose --project-name "$NOTIFICATION_DELIVERY_CUTOVER_PROJECT" \
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+}
+
+routine_stop_services=(
+	api-gateway
+	campaigns-service
+	api
+	outbox-publisher
+	integration-worker
+	maintenance-worker
+	notification-delivery-worker
+)
+declare -A routine_stop_container_ids=()
+# Remove this exact-image bootstrap after the first successful rollout verifies
+# that the replacement API exits without Docker SIGKILL.
+LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION="42c422ca4c2c3a8ce758a37773d6cb0e6b689db7"
+LEGACY_API_SHUTDOWN_BOOTSTRAP_IMAGE_ID="sha256:e64d78b3dc511dde592641e979eb0b506b815f0e83c4eb943ac45b1780c3f554"
+legacy_api_shutdown_bootstrap_observed=false
+
+capture_routine_stop_containers() {
+	local service
+	local container_id
+
+	routine_stop_container_ids=()
+	for service in "${routine_stop_services[@]}"; do
+		container_id="$(
+			compose_target ps --status running -q "$service" \
+				2>/dev/null || true
+		)"
+		if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
+			echo "Exactly one running $service is required before the core migration boundary." >&2
+			return 1
+		fi
+		routine_stop_container_ids["$service"]="$container_id"
+	done
+}
+
+restore_routine_containers_after_failed_stop() {
+	local service
+	local container_id
+	local running
+	local recovery_failed=false
+	local attempt
+	local all_running
+
+	echo "Restoring the exact pre-migration runtime after an unsafe stop." >&2
+	for service in \
+		outbox-publisher \
+		integration-worker \
+		maintenance-worker \
+		notification-delivery-worker \
+		campaigns-service \
+		api \
+		api-gateway; do
+		container_id="${routine_stop_container_ids[$service]:-}"
+		if [[ -z "$container_id" ]]; then
+			recovery_failed=true
+			continue
+		fi
+		running="$(
+			docker inspect --format '{{.State.Running}}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		if [[ "$running" == "true" ]]; then
+			continue
+		fi
+		if [[ "$running" != "false" ]] ||
+			! docker start "$container_id" >/dev/null; then
+			echo "Could not restart exact pre-migration container: $service" >&2
+			recovery_failed=true
+		fi
+	done
+
+	if [[ "$recovery_failed" == "true" ]]; then
+		echo "CRITICAL: the exact pre-migration runtime could not be restored completely." >&2
+		return 1
+	fi
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		all_running=true
+		for service in "${routine_stop_services[@]}"; do
+			container_id="${routine_stop_container_ids[$service]:-}"
+			running="$(
+				docker inspect --format '{{.State.Running}}' \
+					"$container_id" 2>/dev/null || true
+			)"
+			if [[ "$running" != "true" ]]; then
+				all_running=false
+				break
+			fi
+		done
+		if [[ "$all_running" == "true" ]] &&
+			curl -fsS --connect-timeout 2 --max-time 5 \
+				"$READINESS_URL" >/dev/null &&
+			curl -fsS --connect-timeout 2 --max-time 5 \
+				"$GATEWAY_READINESS_URL" >/dev/null &&
+			curl -fsS --connect-timeout 2 --max-time 5 \
+				"$MAINTENANCE_READINESS_URL" >/dev/null &&
+			curl -fsS --connect-timeout 2 --max-time 5 \
+				"$NOTIFICATION_DELIVERY_READINESS_URL" >/dev/null &&
+			curl -fsS --connect-timeout 2 --max-time 5 \
+				"$CAMPAIGNS_READINESS_URL" >/dev/null; then
+			echo "Exact pre-migration containers restored and healthy; no core migration was executed." >&2
+			return 0
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	echo "CRITICAL: the exact pre-migration runtime restarted but did not become healthy." >&2
+	return 1
+}
+
+stop_routine_service_cleanly() {
+	local service="$1"
+	local timeout="$2"
+	local container_id
+	local stopped_state
+	local legacy_api_identity
+	local expected_legacy_api_identity
+
+	container_id="${routine_stop_container_ids[$service]:-}"
+	if [[ ! "$container_id" =~ ^[0-9a-f]{64}$ ]]; then
+		echo "Captured container ID is invalid for $service." >&2
+		return 1
+	fi
+	if ! docker stop --time "$timeout" "$container_id" >/dev/null; then
+		echo "Could not stop $service before the core migration boundary." >&2
+		return 1
+	fi
+	stopped_state="$(
+		docker inspect --format \
+			'{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}' \
+			"$container_id" 2>/dev/null || true
+	)"
+	case "$stopped_state" in
+	"exited|0|false|" | "exited|143|false|")
+		return 0
+		;;
+	esac
+	if [[ "$service" == "api" && "$stopped_state" == "exited|137|false|" ]]; then
+		legacy_api_identity="$(
+			docker inspect --format \
+				'{{.Config.Image}}|{{.Image}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+				"$container_id" 2>/dev/null || true
+		)"
+		expected_legacy_api_identity="winwidget-api:git-$LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION|$LEGACY_API_SHUTDOWN_BOOTSTRAP_IMAGE_ID|$LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION|winwidget|api"
+		if [[ "$legacy_api_identity" == "$expected_legacy_api_identity" ]]; then
+			legacy_api_shutdown_bootstrap_observed=true
+			echo "Known legacy API image required SIGKILL; continuing only to the zero-session core database boundary." >&2
+			return 0
+		fi
+	fi
+
+	echo "$service did not stop cleanly: ${stopped_state:-unavailable}" >&2
+	return 1
+}
+
+verify_core_database_sessions_drained() {
+	local session_count
+
+	if ! session_count="$(
+		docker run --rm --network host \
+			--env-file "$ENV_FILE" \
+			--entrypoint node \
+			"winwidget-api:$APP_VERSION" \
+			-e '
+const { PrismaClient } = require("@prisma/client");
+const url = process.env.DATABASE_MIGRATION_URL_PRODUCTION;
+if (!url) throw new Error("Core migration URL is missing");
+const prisma = new PrismaClient({ datasources: { db: { url } } });
+prisma.$queryRawUnsafe(
+  `SELECT COUNT(*)::int AS count
+   FROM pg_stat_activity
+   WHERE datname = current_database()
+     AND backend_type = $type$client backend$type$
+     AND pid <> pg_backend_pid()`,
+).then(rows => {
+  process.stdout.write(String(rows[0]?.count ?? "invalid"));
+}).finally(() => prisma.$disconnect());
+'
+	)"; then
+		echo "Could not verify drained core PostgreSQL sessions." >&2
+		return 1
+	fi
+	if [[ "$session_count" != "0" ]]; then
+		echo "Core PostgreSQL still has $session_count other session(s); migration is blocked." >&2
+		return 1
+	fi
+
+	if [[ "$legacy_api_shutdown_bootstrap_observed" == "true" ]]; then
+		echo "Legacy API bootstrap accepted only after all other core sessions drained." >&2
+	fi
+	echo "Core PostgreSQL sessions drained."
+}
+
+stop_routine_topology_for_core_migration() {
+	local service
+
+	capture_routine_stop_containers || return 1
+	for service in "${routine_stop_services[@]}"; do
+		if stop_routine_service_cleanly "$service" 30; then
+			continue
+		fi
+		restore_routine_containers_after_failed_stop || true
+		return 1
+	done
+	if ! verify_core_database_sessions_drained; then
+		restore_routine_containers_after_failed_stop || true
+		return 1
+	fi
 }
 
 notification_cutover_container_id() {
@@ -4429,14 +4641,10 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	wait_for_cutover_revision \
 		"$PUBLIC_HEALTHCHECK_URL" "$APP_REVISION" "Canonical public API"
 else
-	compose_target stop \
-		api-gateway \
-		api \
-		outbox-publisher \
-		integration-worker \
-		maintenance-worker \
-		notification-delivery-worker \
-		campaigns-service
+	if ! stop_routine_topology_for_core_migration; then
+		echo "Routine production topology did not reach a safe core migration boundary." >&2
+		exit 1
+	fi
 	compose_target --profile migration run --rm --no-deps migrate
 	compose_target up -d rabbitmq
 	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"

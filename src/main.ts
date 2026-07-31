@@ -53,7 +53,9 @@ const getCorsAllowedOrigins = () => {
 };
 
 export const bootstrap = async () => {
-	const app = await NestFactory.create(AppModule);
+	const app = await NestFactory.create(AppModule, {
+		forceCloseConnections: true
+	});
 	app.enableShutdownHooks();
 	const httpAdapter = app.getHttpAdapter();
 	const instance = httpAdapter.getInstance();
