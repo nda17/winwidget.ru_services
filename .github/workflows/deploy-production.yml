@@ -5150,10 +5150,17 @@ jobs:
             fi
             sleep 1
           done
-          test "$(
+          restore_singleton_init_process="$(
             docker exec "$restore_singleton_container" \
               sh -c 'cat /proc/1/comm'
-          )" = 'tini'
+          )"
+          case "$restore_singleton_init_process" in
+            docker-init | tini) ;;
+            *)
+              echo "Unexpected database restore singleton init process: $restore_singleton_init_process" >&2
+              exit 1
+              ;;
+          esac
           test "$(
             docker exec "$restore_singleton_container" \
               sh -euc '
