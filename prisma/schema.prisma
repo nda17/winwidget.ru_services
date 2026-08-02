@@ -712,6 +712,39 @@ model OutboxEvent {
   @@map("outbox_events")
 }
 
+model ReportingProducerState {
+  id                               String    @id
+  enabled                          Boolean   @default(false)
+  activatedAt                      DateTime? @map("activated_at")
+  dailySummaryOwner                String    @default("CORE") @map("daily_summary_owner")
+  dailySummarySwitchGeneration     BigInt    @default(0) @map("daily_summary_switch_generation")
+  dailySummarySwitchedAt           DateTime? @map("daily_summary_switched_at")
+  // Fail-closed Core policy fence only. Reporting DB remains the sole source
+  // read by the Reporting API and scheduler after ownership switches.
+  dailySummaryPolicyReservationTime       String    @default("01:50") @map("daily_summary_schedule_time")
+  dailySummaryPolicyReservationGeneration BigInt    @default(0) @map("daily_summary_schedule_generation")
+  dailySummaryPolicyConfirmedChangeId      String?   @map("daily_summary_policy_confirmed_change_id") @db.Uuid
+  dailySummaryPolicyPendingChangeId        String?   @map("daily_summary_policy_pending_change_id") @db.Uuid
+  dailySummaryPolicyPendingTime            String?   @map("daily_summary_policy_pending_time")
+  dailySummaryPolicyPendingGeneration      BigInt?   @map("daily_summary_policy_pending_generation")
+  updatedAt                        DateTime  @updatedAt @map("updated_at")
+
+  @@map("reporting_producer_state")
+}
+
+model ReportingProjectionVersion {
+  aggregateType  String   @map("aggregate_type")
+  aggregateId    String   @map("aggregate_id")
+  version        BigInt
+  sourceSequence BigInt   @map("source_sequence")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([aggregateType, aggregateId])
+  @@index([sourceSequence], map: "reporting_projection_versions_source_sequence_idx")
+  @@map("reporting_projection_versions")
+}
+
 model ScheduledJobRun {
   id              String                       @id @default(uuid()) @db.Uuid
   jobType         String                       @map("job_type")
@@ -1104,6 +1137,7 @@ model TelegramBotSettings {
   supportThreadId                   Int?      @map("support_thread_id")
   databaseBackupThreadId            Int?      @map("database_backup_thread_id")
   paymentsThreadId                  Int?      @map("payments_thread_id")
+  operationalAlertsThreadId         Int?      @map("operational_alerts_thread_id")
   reportsThreadId                   Int?      @map("reports_thread_id")
   dailySummaryTime                  String    @default("01:50") @map("daily_summary_time")
   dailySummaryLastSentPeriodStart   DateTime? @map("daily_summary_last_sent_period_start")

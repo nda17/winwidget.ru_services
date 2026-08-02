@@ -1,6 +1,7 @@
 import {
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
-	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES
+	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
+	REPORTING_DATABASE_BACKUP_DELAY_MINUTES
 } from '@/maintenance/database-backup.types';
 import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
@@ -14,6 +15,7 @@ import {
 } from '@/utils/auth.constants';
 import {
 	BadRequestException,
+	ConflictException,
 	Injectable,
 	Logger,
 	OnModuleDestroy,
@@ -22,6 +24,7 @@ import {
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
+	Prisma,
 	type TelegramBotSettings,
 	type TelegramNotificationChannel,
 	type VerificationChallenge,
@@ -95,11 +98,74 @@ type TelegramBotInfo = {
 	};
 };
 
+export const DEFAULT_DAILY_SUMMARY_TIME = '01:50';
+export const DEFAULT_DATABASE_BACKUP_TIME = '01:45';
+export const MIN_TELEGRAM_TASK_TIME_GAP_MINUTES = 5;
+export const DAILY_SUMMARY_SCHEDULE_TIMEZONE = 'Europe/Moscow';
+
+const normalizeScheduleTimeValue = (value: string, fallback: string) => {
+	const trimmed = value.trim();
+	return /^([01]\d|2[0-3]):[0-5]\d$/.test(trimmed) ? trimmed : fallback;
+};
+
+const scheduleTimeMinutes = (value: string, fallback: string) => {
+	const [hour, minute] = normalizeScheduleTimeValue(value, fallback)
+		.split(':')
+		.map(Number);
+	return hour * 60 + minute;
+};
+
+const circularTimeGapMinutes = (first: number, second: number) => {
+	const directGap = Math.abs(first - second);
+	return Math.min(directGap, 24 * 60 - directGap);
+};
+
+export const ensureDailySummaryBackupScheduleSeparated = (
+	dailySummaryTime: string,
+	databaseBackupTime: string
+) => {
+	const summaryMinutes = scheduleTimeMinutes(
+		dailySummaryTime,
+		DEFAULT_DAILY_SUMMARY_TIME
+	);
+	const backupMinutes = scheduleTimeMinutes(
+		databaseBackupTime,
+		DEFAULT_DATABASE_BACKUP_TIME
+	);
+	const backupSchedule = [
+		backupMinutes,
+		(backupMinutes + NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES) %
+			(24 * 60),
+		(backupMinutes + CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
+		(backupMinutes + REPORTING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
+	];
+
+	if (
+		backupSchedule.some(
+			backup =>
+				circularTimeGapMinutes(summaryMinutes, backup) <
+				MIN_TELEGRAM_TASK_TIME_GAP_MINUTES
+		)
+	) {
+		throw new BadRequestException(
+			`Разнесите отправку сводки и все backup минимум на ${MIN_TELEGRAM_TASK_TIME_GAP_MINUTES} минут`
+		);
+	}
+};
+
+interface ReportingScheduleAuthorityState {
+	dailySummaryOwner: string;
+	dailySummaryPolicyReservationTime: string;
+	dailySummaryPolicyReservationGeneration: bigint;
+	dailySummaryPolicyPendingTime: string | null;
+	dailySummaryPolicyPendingGeneration: bigint | null;
+}
+
 @Injectable()
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
-	private readonly DEFAULT_DAILY_SUMMARY_TIME = '01:50';
-	private readonly DEFAULT_DATABASE_BACKUP_TIME = '01:45';
-	private readonly MIN_TELEGRAM_TASK_TIME_GAP_MINUTES = 5;
+	private readonly DEFAULT_DAILY_SUMMARY_TIME = DEFAULT_DAILY_SUMMARY_TIME;
+	private readonly DEFAULT_DATABASE_BACKUP_TIME =
+		DEFAULT_DATABASE_BACKUP_TIME;
 	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
 	private readonly TELEGRAM_SEND_TIMEOUT_MS = 5_000;
 	private readonly TELEGRAM_API_STATUS_TIMEOUT_MS = 10_000;
@@ -129,8 +195,89 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async updateSettings(dto: UpdateTelegramBotSettingsDto) {
-		const currentSettings = await this.getOrCreateSettings();
+		return this.prisma.$transaction(async transaction => {
+			await transaction.telegramBotSettings.upsert({
+				where: { id: 'singleton' },
+				update: {},
+				create: { id: 'singleton' }
+			});
+			const lockedSettings = await transaction.$queryRaw<
+				Array<{ id: string }>
+			>(Prisma.sql`
+				SELECT "id"
+				FROM "telegram_bot_settings"
+				WHERE "id" = 'singleton'
+				FOR UPDATE
+			`);
+			if (lockedSettings.length !== 1) {
+				throw new Error('Telegram settings row is missing');
+			}
+			const currentSettings =
+				await transaction.telegramBotSettings.findUniqueOrThrow({
+					where: { id: 'singleton' }
+				});
+			const authorities = await transaction.$queryRaw<
+				ReportingScheduleAuthorityState[]
+			>(Prisma.sql`
+				SELECT
+					"daily_summary_owner" AS "dailySummaryOwner",
+					"daily_summary_schedule_time" AS "dailySummaryPolicyReservationTime",
+					"daily_summary_schedule_generation" AS "dailySummaryPolicyReservationGeneration",
+					"daily_summary_policy_pending_time" AS "dailySummaryPolicyPendingTime",
+					"daily_summary_policy_pending_generation" AS "dailySummaryPolicyPendingGeneration"
+				FROM "reporting_producer_state"
+				WHERE "id" = 'singleton'
+				FOR UPDATE
+			`);
+			if (
+				authorities.length !== 1 ||
+				!['CORE', 'REPORTING'].includes(
+					authorities[0].dailySummaryOwner
+				) ||
+				!/^([01]\d|2[0-3]):[0-5]\d$/.test(
+					authorities[0].dailySummaryPolicyReservationTime
+				) ||
+				authorities[0].dailySummaryPolicyReservationGeneration < 0n ||
+				(authorities[0].dailySummaryPolicyPendingTime !== null &&
+					(!/^([01]\d|2[0-3]):[0-5]\d$/.test(
+						authorities[0].dailySummaryPolicyPendingTime
+					) ||
+						authorities[0].dailySummaryPolicyPendingGeneration !==
+							authorities[0].dailySummaryPolicyReservationGeneration +
+								1n)) ||
+				(authorities[0].dailySummaryPolicyPendingTime === null) !==
+					(authorities[0].dailySummaryPolicyPendingGeneration === null)
+			) {
+				throw new Error(
+					'Daily Summary backup-policy state is missing or invalid'
+				);
+			}
+			return this.updateSettingsLocked(
+				transaction,
+				dto,
+				authorities[0],
+				currentSettings
+			);
+		});
+	}
+
+	private async updateSettingsLocked(
+		transaction: Prisma.TransactionClient,
+		dto: UpdateTelegramBotSettingsDto,
+		authority: ReportingScheduleAuthorityState,
+		currentSettings: TelegramBotSettings
+	) {
+		const { dailySummaryOwner } = authority;
 		const data = this.getSettingsPatch(dto);
+		const updatesReportingOwnedSettings =
+			'dailySummaryEnabled' in data ||
+			'dailySummaryTime' in data ||
+			'reportsThreadId' in data;
+		if (dailySummaryOwner !== 'CORE' && updatesReportingOwnedSettings) {
+			throw new ConflictException(
+				'Daily Summary settings are owned by Reporting'
+			);
+		}
 		const nextDailySummaryEnabled =
 			data.dailySummaryEnabled ?? currentSettings.dailySummaryEnabled;
 		const nextDatabaseBackupEnabled =
@@ -149,6 +296,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			data.paymentsThreadId !== undefined
 				? data.paymentsThreadId
 				: currentSettings.paymentsThreadId;
+		const nextOperationalAlertsThreadId =
+			data.operationalAlertsThreadId !== undefined
+				? data.operationalAlertsThreadId
+				: currentSettings.operationalAlertsThreadId;
 		const nextReportsThreadId =
 			data.reportsThreadId !== undefined
 				? data.reportsThreadId
@@ -158,10 +309,19 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const nextDatabaseBackupTime =
 			data.databaseBackupTime ?? currentSettings.databaseBackupTime;
 
-		this.ensureScheduleTimesSeparated(
-			nextDailySummaryTime,
-			nextDatabaseBackupTime
-		);
+		const schedulesProtectedByCorePolicy =
+			dailySummaryOwner === 'CORE'
+				? [nextDailySummaryTime]
+				: [
+						authority.dailySummaryPolicyReservationTime,
+						authority.dailySummaryPolicyPendingTime
+					].filter((value): value is string => value !== null);
+		for (const scheduleTime of schedulesProtectedByCorePolicy) {
+			this.ensureScheduleTimesSeparated(
+				scheduleTime,
+				nextDatabaseBackupTime
+			);
+		}
 
 		if (
 			!nextDailySummaryChatId.trim() &&
@@ -169,19 +329,36 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				nextSupportThreadId,
 				nextDatabaseBackupThreadId,
 				nextPaymentsThreadId,
-				nextReportsThreadId
+				nextOperationalAlertsThreadId,
+				...(dailySummaryOwner === 'CORE' ? [nextReportsThreadId] : [])
 			].some(Boolean)
 		) {
 			throw new BadRequestException(
 				'Укажите ID Telegram-группы для настроенных топиков'
 			);
 		}
+		if (dailySummaryOwner !== 'CORE' && !nextOperationalAlertsThreadId) {
+			throw new BadRequestException(
+				'Укажите ID топика системных уведомлений Core'
+			);
+		}
+		if (
+			dailySummaryOwner === 'CORE' &&
+			nextOperationalAlertsThreadId &&
+			nextReportsThreadId &&
+			nextOperationalAlertsThreadId === nextReportsThreadId
+		) {
+			throw new BadRequestException(
+				'Daily Summary и системные уведомления должны использовать разные топики'
+			);
+		}
 
 		const updatesDailySummaryDelivery =
-			'dailySummaryEnabled' in data ||
-			'dailySummaryChatId' in data ||
-			'dailySummaryTime' in data ||
-			'reportsThreadId' in data;
+			dailySummaryOwner === 'CORE' &&
+			('dailySummaryEnabled' in data ||
+				'dailySummaryChatId' in data ||
+				'dailySummaryTime' in data ||
+				'reportsThreadId' in data);
 		const updatesDatabaseBackupDelivery =
 			'databaseBackupEnabled' in data ||
 			'dailySummaryChatId' in data ||
@@ -212,7 +389,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			}
 		}
 
-		const settings = await this.prisma.telegramBotSettings.upsert({
+		const settings = await transaction.telegramBotSettings.upsert({
 			where: { id: 'singleton' },
 			update: data,
 			create: {
@@ -220,6 +397,18 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				...data
 			}
 		});
+		if (
+			dailySummaryOwner === 'CORE' &&
+			nextDailySummaryTime !== authority.dailySummaryPolicyReservationTime
+		) {
+			await transaction.reportingProducerState.update({
+				where: { id: 'singleton' },
+				data: {
+					dailySummaryPolicyReservationTime: nextDailySummaryTime,
+					dailySummaryPolicyReservationGeneration: { increment: 1 }
+				}
+			});
+		}
 
 		return this.serializeSettings(settings);
 	}
@@ -314,10 +503,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	async sendMessagingOperationalAlert(text: string): Promise<boolean> {
 		const settings = await this.getOrCreateSettings();
 		const chatId = settings.dailySummaryChatId.trim();
-		const messageThreadId = settings.reportsThreadId;
+		const messageThreadId = settings.operationalAlertsThreadId;
 		if (!chatId || !messageThreadId) {
 			this.logger.warn(
-				'Messaging alert skipped: Reports topic is not configured.'
+				'Messaging alert skipped: operational alerts topic is not configured.'
 			);
 			return false;
 		}
@@ -882,6 +1071,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			typeof dto.paymentsThreadId === 'number'
 				? { paymentsThreadId: dto.paymentsThreadId }
 				: {}),
+			...(dto.operationalAlertsThreadId === null ||
+			typeof dto.operationalAlertsThreadId === 'number'
+				? { operationalAlertsThreadId: dto.operationalAlertsThreadId }
+				: {}),
 			...(dto.reportsThreadId === null ||
 			typeof dto.reportsThreadId === 'number'
 				? { reportsThreadId: dto.reportsThreadId }
@@ -934,6 +1127,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupTime,
 			CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES
 		);
+		const reportingDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			REPORTING_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryEnabled: settings.dailySummaryEnabled,
@@ -941,6 +1138,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			supportThreadId: settings.supportThreadId,
 			databaseBackupThreadId: settings.databaseBackupThreadId,
 			paymentsThreadId: settings.paymentsThreadId,
+			operationalAlertsThreadId: settings.operationalAlertsThreadId,
 			reportsThreadId: settings.reportsThreadId,
 			dailySummaryTime,
 			dailySummaryTimeLabel: `${dailySummaryTime} МСК`,
@@ -959,6 +1157,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 			campaignsDatabaseBackupTime,
 			campaignsDatabaseBackupTimeLabel: `${campaignsDatabaseBackupTime} МСК`,
+			reportingDatabaseBackupDelayMinutes:
+				REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
+			reportingDatabaseBackupTime,
+			reportingDatabaseBackupTimeLabel: `${reportingDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:
@@ -1700,48 +1902,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		dailySummaryTime: string,
 		databaseBackupTime: string
 	) {
-		const summaryMinutes = this.getScheduleTimeMinutes(
+		ensureDailySummaryBackupScheduleSeparated(
 			dailySummaryTime,
-			this.DEFAULT_DAILY_SUMMARY_TIME
+			databaseBackupTime
 		);
-		const backupMinutes = this.getScheduleTimeMinutes(
-			databaseBackupTime,
-			this.DEFAULT_DATABASE_BACKUP_TIME
-		);
-		const notificationDeliveryBackupMinutes =
-			(backupMinutes +
-				NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES) %
-			(24 * 60);
-		const campaignsBackupMinutes =
-			(backupMinutes + CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES) %
-			(24 * 60);
-		const coreGap = this.getCircularTimeGapMinutes(
-			summaryMinutes,
-			backupMinutes
-		);
-		const notificationDeliveryGap = this.getCircularTimeGapMinutes(
-			summaryMinutes,
-			notificationDeliveryBackupMinutes
-		);
-		const campaignsGap = this.getCircularTimeGapMinutes(
-			summaryMinutes,
-			campaignsBackupMinutes
-		);
-
-		if (
-			coreGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES ||
-			notificationDeliveryGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES ||
-			campaignsGap < this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES
-		) {
-			throw new BadRequestException(
-				`Разнесите отправку сводки и все backup минимум на ${this.MIN_TELEGRAM_TASK_TIME_GAP_MINUTES} минут`
-			);
-		}
-	}
-
-	private getCircularTimeGapMinutes(first: number, second: number) {
-		const directGap = Math.abs(first - second);
-		return Math.min(directGap, 24 * 60 - directGap);
 	}
 
 	private addMinutesToTime(value: string, minutesToAdd: number) {

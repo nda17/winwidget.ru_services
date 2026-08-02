@@ -16,18 +16,41 @@ import {
 	OUTBOX_EVENT_TYPE,
 	PAYMENT_SUCCEEDED_EVENT_TYPE,
 	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	REPORTING_BILLING_PAYMENT_EVENT_TYPE,
+	REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE,
+	REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE,
+	REPORTING_IDENTITY_USER_EVENT_TYPE,
+	REPORTING_LEAD_EVENT_TYPE,
+	ReportingProjectionKind,
+	REPORTING_SETTINGS_EVENT_TYPE,
+	REPORTING_WIDGET_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { CAMPAIGN_ADMIN_AUDIT_ACTIONS } from '@/messaging/campaign-admin-audit-event';
 import { OUTCOME_NOTIFICATION_DELIVERY_KINDS } from '@/messaging/notification-delivery-event';
+import {
+	REPORTING_ADMIN_AUDIT_ACTIONS,
+	REPORTING_AUDIT_CONSUMER_KINDS,
+	REPORTING_SETTINGS_AUDIT_FIELDS,
+	ReportingAuditConsumerKind,
+	ReportingSettingsAuditField
+} from '@/messaging/reporting-admin-audit-event';
 import { TELEGRAM_DESTINATION_SOURCE_KINDS } from '@/messaging/telegram-destination-unavailable-event';
 import { isDatabaseBackupJobType } from '@/scheduled-jobs/scheduled-jobs.types';
-import { BillingPeriod, Plan } from '@prisma/client';
+import {
+	BillingPeriod,
+	PaymentStatus,
+	Plan,
+	Role,
+	SubscriptionStatus,
+	UserStatus
+} from '@prisma/client';
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SAFE_CONTEXT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const FORBIDDEN_PAYLOAD_KEYS = new Set([
 	'amocrmtoken',
 	'apikey',
@@ -118,6 +141,469 @@ const assertUuid = (value: unknown, path: string): void => {
 	if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
 		throw new Error(`${path} must be a UUID`);
 	}
+};
+
+const assertIdentifier = (value: unknown, path: string): void =>
+	assertString(value, path, { maxLength: 255 });
+
+const assertBoolean = (value: unknown, path: string): void => {
+	if (typeof value !== 'boolean') {
+		throw new Error(`${path} must be a boolean`);
+	}
+};
+
+const assertDecimalString = (
+	value: unknown,
+	path: string,
+	allowZero: boolean
+): void => {
+	const pattern = allowZero ? /^(?:0|[1-9]\d{0,64})$/ : /^[1-9]\d{0,64}$/;
+	if (typeof value !== 'string' || !pattern.test(value)) {
+		throw new Error(
+			`${path} must be a ${allowZero ? 'non-negative' : 'positive'} decimal string`
+		);
+	}
+};
+
+const assertEnumValue = <T extends string>(
+	value: unknown,
+	values: readonly T[],
+	path: string,
+	nullable = false
+): void => {
+	if (value === null && nullable) return;
+	if (typeof value !== 'string' || !values.includes(value as T)) {
+		throw new Error(`${path} is invalid`);
+	}
+};
+
+const REPORTING_WIDGET_TYPES = [
+	'wheel',
+	'quiz',
+	'callback',
+	'countdownTimer',
+	'stopOffer',
+	'onlineConsultant',
+	'calculator'
+] as const;
+
+const REPORTING_EVENT_KINDS: Record<string, ReportingProjectionKind> = {
+	[REPORTING_IDENTITY_USER_EVENT_TYPE]: 'reporting-identity-user',
+	[REPORTING_BILLING_PAYMENT_EVENT_TYPE]: 'reporting-billing-payment',
+	[REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE]:
+		'reporting-billing-subscription',
+	[REPORTING_WIDGET_EVENT_TYPE]: 'reporting-widget',
+	[REPORTING_LEAD_EVENT_TYPE]: 'reporting-lead',
+	[REPORTING_SETTINGS_EVENT_TYPE]: 'reporting-settings',
+	[REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE]: 'reporting-settings'
+};
+
+const assertNamespacedWidgetAggregateId = (
+	value: string,
+	path: string
+): void => {
+	const separator = value.indexOf(':');
+	const widgetType = value.slice(0, separator);
+	const rawId = value.slice(separator + 1);
+	if (
+		separator < 1 ||
+		!REPORTING_WIDGET_TYPES.includes(
+			widgetType as (typeof REPORTING_WIDGET_TYPES)[number]
+		) ||
+		!rawId.trim()
+	) {
+		throw new Error(`${path} must namespace a widget type and raw id`);
+	}
+};
+
+const assertReportingIdentityState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'status',
+			'deletedAt',
+			'roles',
+			'hasEmailIdentity',
+			'hasPhoneIdentity',
+			'hasTelegramIdentity',
+			'loginMethodCount',
+			'createdAt',
+			'updatedAt'
+		],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId) {
+		throw new Error('payload.state.id must match payload.aggregateId');
+	}
+	assertEnumValue(
+		state.status,
+		Object.values(UserStatus),
+		'payload.state.status'
+	);
+	assertIsoDate(state.deletedAt, 'payload.state.deletedAt', true);
+	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+	if (!Array.isArray(state.roles)) {
+		throw new Error('payload.state.roles must be an array');
+	}
+	state.roles.forEach((role, index) =>
+		assertEnumValue(
+			role,
+			Object.values(Role),
+			`payload.state.roles[${index}]`
+		)
+	);
+	if (new Set(state.roles).size !== state.roles.length) {
+		throw new Error('payload.state.roles must be unique');
+	}
+	assertBoolean(state.hasEmailIdentity, 'payload.state.hasEmailIdentity');
+	assertBoolean(state.hasPhoneIdentity, 'payload.state.hasPhoneIdentity');
+	assertBoolean(
+		state.hasTelegramIdentity,
+		'payload.state.hasTelegramIdentity'
+	);
+	if (
+		!Number.isInteger(state.loginMethodCount) ||
+		Number(state.loginMethodCount) < 0 ||
+		Number(state.loginMethodCount) > 20
+	) {
+		throw new Error(
+			'payload.state.loginMethodCount must be a non-negative integer'
+		);
+	}
+};
+
+const assertReportingPaymentState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		['id', 'userId', 'status', 'amount', 'createdAt', 'updatedAt'],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId) {
+		throw new Error('payload.state.id must match payload.aggregateId');
+	}
+	assertIdentifier(state.userId, 'payload.state.userId');
+	assertEnumValue(
+		state.status,
+		Object.values(PaymentStatus),
+		'payload.state.status'
+	);
+	if (
+		typeof state.amount !== 'string' ||
+		!state.amount.trim() ||
+		state.amount.length > 128 ||
+		/[\u0000-\u001f\u007f]/.test(state.amount)
+	) {
+		throw new Error(
+			'payload.state.amount must be a non-empty bounded string without control characters'
+		);
+	}
+	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+};
+
+const assertReportingSubscriptionState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		['id', 'userId', 'plan', 'status', 'expiresAt', 'createdAt'],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId) {
+		throw new Error('payload.state.id must match payload.aggregateId');
+	}
+	assertIdentifier(state.userId, 'payload.state.userId');
+	assertEnumValue(state.plan, Object.values(Plan), 'payload.state.plan');
+	assertEnumValue(
+		state.status,
+		Object.values(SubscriptionStatus),
+		'payload.state.status'
+	);
+	assertIsoDate(state.expiresAt, 'payload.state.expiresAt', true);
+	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+};
+
+const assertReportingWidgetState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'userId',
+			'widgetType',
+			'isActive',
+			'hasInstallDomain',
+			'createdAt'
+		],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	assertIdentifier(state.userId, 'payload.state.userId');
+	assertEnumValue(
+		state.widgetType,
+		REPORTING_WIDGET_TYPES,
+		'payload.state.widgetType'
+	);
+	if (`${String(state.widgetType)}:${String(state.id)}` !== aggregateId) {
+		throw new Error(
+			'payload.aggregateId must namespace the widget type and state id'
+		);
+	}
+	assertBoolean(state.isActive, 'payload.state.isActive');
+	assertBoolean(state.hasInstallDomain, 'payload.state.hasInstallDomain');
+	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+};
+
+const assertReportingLeadState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		['id', 'widgetId', 'widgetType', 'createdAt'],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	assertIdentifier(state.widgetId, 'payload.state.widgetId');
+	assertEnumValue(
+		state.widgetType,
+		REPORTING_WIDGET_TYPES,
+		'payload.state.widgetType'
+	);
+	if (`${String(state.widgetType)}:${String(state.id)}` !== aggregateId) {
+		throw new Error(
+			'payload.aggregateId must namespace the widget type and state id'
+		);
+	}
+	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+};
+
+const assertReportingSettingsState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'enabled',
+			'destinationChatId',
+			'messageThreadId',
+			'coreOperationalAlertsThreadId',
+			'scheduleTime',
+			'timezone',
+			'lastSuccessfulPeriodStart',
+			'lastSuccessfulAt'
+		],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId) {
+		throw new Error('payload.state.id must match payload.aggregateId');
+	}
+	assertBoolean(state.enabled, 'payload.state.enabled');
+	if (
+		typeof state.destinationChatId !== 'string' ||
+		state.destinationChatId.length > 255
+	) {
+		throw new Error('payload.state.destinationChatId must be a string');
+	}
+	if (
+		state.messageThreadId !== null &&
+		(!Number.isInteger(state.messageThreadId) ||
+			Number(state.messageThreadId) < 1)
+	) {
+		throw new Error(
+			'payload.state.messageThreadId must be a positive integer or null'
+		);
+	}
+	if (
+		state.coreOperationalAlertsThreadId !== null &&
+		(!Number.isInteger(state.coreOperationalAlertsThreadId) ||
+			Number(state.coreOperationalAlertsThreadId) < 1)
+	) {
+		throw new Error(
+			'payload.state.coreOperationalAlertsThreadId must be a positive integer or null'
+		);
+	}
+	if (
+		typeof state.scheduleTime !== 'string' ||
+		!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(state.scheduleTime)
+	) {
+		throw new Error('payload.state.scheduleTime must use HH:mm');
+	}
+	assertString(state.timezone, 'payload.state.timezone', {
+		maxLength: 100
+	});
+	try {
+		new Intl.DateTimeFormat('en-US', {
+			timeZone: String(state.timezone)
+		}).format();
+	} catch {
+		throw new Error(
+			'payload.state.timezone must be a valid IANA timezone'
+		);
+	}
+	assertIsoDate(
+		state.lastSuccessfulPeriodStart,
+		'payload.state.lastSuccessfulPeriodStart',
+		true
+	);
+	assertIsoDate(
+		state.lastSuccessfulAt,
+		'payload.state.lastSuccessfulAt',
+		true
+	);
+};
+
+const assertReportingCoreOperationalRoutingState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'coreOperationalAlertsDestinationChatId',
+			'coreOperationalAlertsThreadId'
+		],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId || aggregateId !== 'singleton') {
+		throw new Error(
+			'payload.state.id and aggregateId must equal singleton for Core operational routing'
+		);
+	}
+	if (
+		typeof state.coreOperationalAlertsDestinationChatId !== 'string' ||
+		state.coreOperationalAlertsDestinationChatId.length > 255
+	) {
+		throw new Error(
+			'payload.state.coreOperationalAlertsDestinationChatId must be a string'
+		);
+	}
+	if (
+		state.coreOperationalAlertsThreadId !== null &&
+		(!Number.isInteger(state.coreOperationalAlertsThreadId) ||
+			Number(state.coreOperationalAlertsThreadId) < 1)
+	) {
+		throw new Error(
+			'payload.state.coreOperationalAlertsThreadId must be a positive integer or null'
+		);
+	}
+};
+
+export const assertReportingProjectionEvent = (
+	payload: JsonRecord,
+	options: { allowZeroVersion?: boolean } = {}
+): ReportingProjectionKind => {
+	assertNoForbiddenFields(payload);
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'aggregateId',
+		'aggregateVersion',
+		'sourceSequence',
+		'occurredAt',
+		'tombstone',
+		'state'
+	]);
+	if (payload.schemaVersion !== 1) {
+		throw new Error('Invalid reporting projection contract version');
+	}
+	const kind = REPORTING_EVENT_KINDS[String(payload.eventType)];
+	if (!kind) throw new Error('Invalid reporting projection event type');
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertString(payload.aggregateId, 'payload.aggregateId', {
+		maxLength: 255
+	});
+	if (
+		payload.eventType === REPORTING_WIDGET_EVENT_TYPE ||
+		payload.eventType === REPORTING_LEAD_EVENT_TYPE
+	) {
+		assertNamespacedWidgetAggregateId(
+			String(payload.aggregateId),
+			'payload.aggregateId'
+		);
+	}
+	assertDecimalString(
+		payload.aggregateVersion,
+		'payload.aggregateVersion',
+		Boolean(options.allowZeroVersion)
+	);
+	assertDecimalString(
+		payload.sourceSequence,
+		'payload.sourceSequence',
+		Boolean(options.allowZeroVersion)
+	);
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	assertBoolean(payload.tombstone, 'payload.tombstone');
+	if (
+		(payload.eventType === REPORTING_SETTINGS_EVENT_TYPE ||
+			payload.eventType ===
+				REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE) &&
+		payload.aggregateId !== 'singleton'
+	) {
+		throw new Error(
+			'payload.aggregateId must equal singleton for reporting settings'
+		);
+	}
+	if (payload.tombstone === true) {
+		if (payload.state !== null) {
+			throw new Error('payload.state must be null for a tombstone');
+		}
+		return kind;
+	}
+
+	const state = assertRecord(payload.state, 'payload.state');
+	const aggregateId = String(payload.aggregateId);
+	switch (payload.eventType) {
+		case REPORTING_IDENTITY_USER_EVENT_TYPE:
+			assertReportingIdentityState(state, aggregateId);
+			break;
+		case REPORTING_BILLING_PAYMENT_EVENT_TYPE:
+			assertReportingPaymentState(state, aggregateId);
+			break;
+		case REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE:
+			assertReportingSubscriptionState(state, aggregateId);
+			break;
+		case REPORTING_WIDGET_EVENT_TYPE:
+			assertReportingWidgetState(state, aggregateId);
+			break;
+		case REPORTING_LEAD_EVENT_TYPE:
+			assertReportingLeadState(state, aggregateId);
+			break;
+		case REPORTING_SETTINGS_EVENT_TYPE:
+			assertReportingSettingsState(state, aggregateId);
+			break;
+		case REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE:
+			assertReportingCoreOperationalRoutingState(state, aggregateId);
+			break;
+	}
+	return kind;
 };
 
 const assertEntity = (value: unknown): void => {
@@ -663,9 +1149,7 @@ const assertNotificationDeliveryOutcome = (
 	return 'notification-delivery-outcome';
 };
 
-const assertCampaignAdminAuditEvent = (
-	payload: JsonRecord
-): IntegrationKind => {
+const assertAdminAuditEvent = (payload: JsonRecord): IntegrationKind => {
 	assertExactKeys(payload, [
 		'schemaVersion',
 		'eventType',
@@ -681,10 +1165,80 @@ const assertCampaignAdminAuditEvent = (
 		payload.schemaVersion !== 1 ||
 		payload.eventType !== CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE
 	) {
-		throw new Error('Invalid campaign admin audit contract version');
+		throw new Error('Invalid admin audit contract version');
 	}
 	assertUuid(payload.eventId, 'payload.eventId');
 	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+
+	const target = assertRecord(payload.target, 'payload.target');
+	const metadata = assertRecord(payload.metadata, 'payload.metadata');
+	if (
+		REPORTING_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as (typeof REPORTING_ADMIN_AUDIT_ACTIONS)[number]
+		)
+	) {
+		if (
+			typeof payload.correlationId !== 'string' ||
+			!SAFE_CONTEXT_ID_PATTERN.test(payload.correlationId)
+		) {
+			throw new Error('payload.correlationId is invalid');
+		}
+		assertString(payload.actorId, 'payload.actorId', { maxLength: 255 });
+		if (payload.action === 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE') {
+			assertExactKeys(
+				target,
+				['reportingSettingsId'],
+				[],
+				'payload.target'
+			);
+			if (target.reportingSettingsId !== 'daily-summary') {
+				throw new Error('payload.target.reportingSettingsId is invalid');
+			}
+			assertExactKeys(metadata, ['changedFields'], [], 'payload.metadata');
+			if (
+				!Array.isArray(metadata.changedFields) ||
+				metadata.changedFields.length < 1 ||
+				metadata.changedFields.length >
+					REPORTING_SETTINGS_AUDIT_FIELDS.length
+			) {
+				throw new Error('payload.metadata.changedFields is invalid');
+			}
+			const fields = metadata.changedFields;
+			if (
+				fields.some(
+					field =>
+						typeof field !== 'string' ||
+						!REPORTING_SETTINGS_AUDIT_FIELDS.includes(
+							field as ReportingSettingsAuditField
+						)
+				) ||
+				new Set(fields).size !== fields.length ||
+				fields.join(',') !== [...fields].sort().join(',')
+			) {
+				throw new Error(
+					'payload.metadata.changedFields must be sorted and unique'
+				);
+			}
+		} else {
+			assertExactKeys(
+				target,
+				['eventId', 'consumerKind'],
+				[],
+				'payload.target'
+			);
+			assertUuid(target.eventId, 'payload.target.eventId');
+			if (
+				!REPORTING_AUDIT_CONSUMER_KINDS.includes(
+					target.consumerKind as ReportingAuditConsumerKind
+				)
+			) {
+				throw new Error('payload.target.consumerKind is invalid');
+			}
+			assertExactKeys(metadata, [], [], 'payload.metadata');
+		}
+		return 'reporting-admin-audit';
+	}
+
 	assertUuid(payload.correlationId, 'payload.correlationId');
 	assertString(payload.actorId, 'payload.actorId', { maxLength: 256 });
 	if (
@@ -695,8 +1249,6 @@ const assertCampaignAdminAuditEvent = (
 		throw new Error('payload.action is invalid');
 	}
 
-	const target = assertRecord(payload.target, 'payload.target');
-	const metadata = assertRecord(payload.metadata, 'payload.metadata');
 	if (payload.action === 'CAMPAIGN_DELIVERY_RETRY') {
 		assertExactKeys(
 			target,
@@ -891,7 +1443,15 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 		case NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE:
 			return [assertNotificationDeliveryOutcome(payload)];
 		case CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE:
-			return [assertCampaignAdminAuditEvent(payload)];
+			return [assertAdminAuditEvent(payload)];
+		case REPORTING_IDENTITY_USER_EVENT_TYPE:
+		case REPORTING_BILLING_PAYMENT_EVENT_TYPE:
+		case REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE:
+		case REPORTING_WIDGET_EVENT_TYPE:
+		case REPORTING_LEAD_EVENT_TYPE:
+		case REPORTING_SETTINGS_EVENT_TYPE:
+		case REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE:
+			return [assertReportingProjectionEvent(payload)];
 		default:
 			throw new Error(
 				`Unsupported messaging event type: ${String(payload.eventType)}`
@@ -925,8 +1485,14 @@ export function assertMessagingEventContract(
 		payload.eventType === CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE &&
 		payload.eventId !== metadata.messageId
 	) {
+		throw new Error('Admin audit eventId must match the AMQP messageId');
+	}
+	if (
+		String(payload.eventType) in REPORTING_EVENT_KINDS &&
+		payload.eventId !== metadata.messageId
+	) {
 		throw new Error(
-			'Campaign admin audit eventId must match the AMQP messageId'
+			'Reporting projection eventId must match the AMQP messageId'
 		);
 	}
 	if (metadata.kind && !expectedKinds.includes(metadata.kind)) {
@@ -934,14 +1500,18 @@ export function assertMessagingEventContract(
 			`Event type ${metadata.eventType} cannot be consumed by ${metadata.kind}`
 		);
 	}
-	const routingMatches = expectedKinds.some(kind =>
-		[
-			MESSAGING_ROUTING_KEYS[kind],
-			getDeadLetterRoutingKey(kind),
-			getManualRetryRoutingKey(kind),
-			kind
-		].includes(metadata.routingKey)
-	);
+	const routingMatches =
+		(payload.eventType === REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE &&
+			metadata.routingKey ===
+				REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE) ||
+		expectedKinds.some(kind =>
+			[
+				MESSAGING_ROUTING_KEYS[kind],
+				getDeadLetterRoutingKey(kind),
+				getManualRetryRoutingKey(kind),
+				kind
+			].includes(metadata.routingKey)
+		);
 	if (!routingMatches) {
 		throw new Error(
 			`Routing key ${metadata.routingKey} does not match ${metadata.eventType}`

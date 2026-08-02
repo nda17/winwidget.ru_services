@@ -12,8 +12,12 @@ server_root="$APP_ROOT/winwidget.ru_server"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$server_root/scripts/production-deploy-lock.sh"
 acquire_production_deploy_lock "Campaigns deployment"
+# shellcheck source=scripts/database-restore-production-guard.sh
+source "$server_root/scripts/database-restore-production-guard.sh"
 # shellcheck source=scripts/campaigns-database-lifecycle.sh
 source "$server_root/scripts/campaigns-database-lifecycle.sh"
+# shellcheck source=scripts/reporting-cutover-lifecycle.sh
+source "$server_root/scripts/reporting-cutover-lifecycle.sh"
 
 recreate_started=false
 rollout_verified=false
@@ -163,6 +167,9 @@ trap 'on_error "$LINENO"' ERR
 	exit 1
 }
 
+# database-restore-production-guard: before-mutation
+database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
+
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
 expected_revision="${EXPECTED_REVISION:-$deploy_revision}"
 checkout_branch="$(git -C "$server_root" branch --show-current)"
@@ -173,6 +180,10 @@ checkout_dirty="$(
 	"$checkout_branch" == "prod" &&
 	-z "$checkout_dirty" ]] || {
 	echo "Campaigns deploy requires a clean protected prod checkout at EXPECTED_REVISION." >&2
+	exit 1
+}
+reporting_guard_before_checkout_revision "$deploy_revision" || {
+	echo 'Campaigns deployment revision conflicts with the active Reporting lifecycle.' >&2
 	exit 1
 }
 

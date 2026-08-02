@@ -35,7 +35,10 @@ const DATABASE_URL_ENV_KEYS = [
 	'NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION',
 	'CAMPAIGNS_BACKUP_URL',
 	'CAMPAIGNS_DATABASE_URL',
-	'CAMPAIGNS_MIGRATION_DATABASE_URL'
+	'CAMPAIGNS_MIGRATION_DATABASE_URL',
+	'REPORTING_BACKUP_URL',
+	'REPORTING_DATABASE_URL',
+	'REPORTING_MIGRATION_DATABASE_URL'
 ] as const;
 
 const SERVICE_DATABASE_CONFIG = {
@@ -48,6 +51,11 @@ const SERVICE_DATABASE_CONFIG = {
 		key: 'CAMPAIGNS_BACKUP_URL',
 		label: 'Campaigns',
 		filePrefix: 'winwidget-campaigns-db'
+	},
+	reporting: {
+		key: 'REPORTING_BACKUP_URL',
+		label: 'Reporting',
+		filePrefix: 'winwidget-reporting-db'
 	}
 } as const;
 

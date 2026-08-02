@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+campaigns_database_restore_guard_script_directory="$(
+	cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P
+)"
+# shellcheck source=scripts/database-restore-production-guard.sh
+source "$campaigns_database_restore_guard_script_directory/database-restore-production-guard.sh"
+
 CAMPAIGNS_DATABASE_CUTOVER_MARKER="${CAMPAIGNS_DATABASE_CUTOVER_MARKER:-${APP_ROOT:-/opt/winwidget}/deploy/backend/.campaigns-database-cutover-v1}"
 CAMPAIGNS_FIRST_CUTOVER_STAGED_MARKER="${CAMPAIGNS_FIRST_CUTOVER_STAGED_MARKER:-${APP_ROOT:-/opt/winwidget}/deploy/backend/.campaigns-first-cutover-staged-v1}"
 CAMPAIGNS_POSTGRES_SERVICE="campaigns-postgres"
@@ -669,7 +675,13 @@ verify_campaigns_postgres_container() {
 
 initialize_campaigns_database_lifecycle_guard() {
 	local operation="${1:-routine Campaigns deployment}"
+	local restore_worker_mode="${2:-healthy-required}"
 	local marker_image_id marker_system_identifier
+
+	# database-restore-production-guard: before-mutation
+	database_restore_guard_assert_before_mutation \
+		"$restore_worker_mode" \
+		"${ENV_FILE:-${APP_ROOT:-/opt/winwidget}/deploy/backend/.env.production}"
 
 	assert_campaigns_database_postgres_identity || return 1
 	validate_campaigns_database_cutover_marker || {

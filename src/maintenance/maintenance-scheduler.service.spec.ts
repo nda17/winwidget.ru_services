@@ -68,7 +68,7 @@ describe('MaintenanceSchedulerService', () => {
 		expect(tasks.enqueueDailyDatabaseBackups).not.toHaveBeenCalled();
 	});
 
-	it('enqueues both daily database jobs through one task boundary', async () => {
+	it('enqueues all daily database jobs through one task boundary', async () => {
 		jest.setSystemTime(new Date('2026-07-24T00:00:00.000Z'));
 		const { service, tasks } = createService('01:45');
 		(tasks.enqueueDailyDatabaseBackups as jest.Mock).mockResolvedValue({
@@ -79,6 +79,14 @@ describe('MaintenanceSchedulerService', () => {
 			notificationDelivery: {
 				created: true,
 				job: { id: '22222222-2222-4222-8222-222222222222' }
+			},
+			campaigns: {
+				created: true,
+				job: { id: '33333333-3333-4333-8333-333333333333' }
+			},
+			reporting: {
+				created: true,
+				job: { id: '44444444-4444-4444-8444-444444444444' }
 			}
 		});
 

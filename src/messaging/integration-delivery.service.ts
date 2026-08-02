@@ -9,6 +9,7 @@ import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-
 import { IntegrationErrorClassification } from '@/messaging/integration-error-classifier';
 import { MonolithIntegrationKind } from '@/messaging/messaging.constants';
 import { NotificationDeliveryOutcomeEventPayload } from '@/messaging/notification-delivery-event';
+import { ReportingAdminAuditEventPayload } from '@/messaging/reporting-admin-audit-event';
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
 import { PaymentService } from '@/payment/payment.service';
 import { PrismaService } from '@/prisma.service';
@@ -25,7 +26,8 @@ type DeliveryEventPayload =
 	| NotificationDeliveryOutcomeEventPayload
 	| DailySummaryRequestedEventPayload
 	| AutoRenewalChargeRequestedEventPayload
-	| CampaignAdminAuditEventPayload;
+	| CampaignAdminAuditEventPayload
+	| ReportingAdminAuditEventPayload;
 
 @Injectable()
 export class IntegrationDeliveryService {

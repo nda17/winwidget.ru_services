@@ -4,6 +4,12 @@
 # The database cutover script is the only owner allowed to create or replace
 # the Notification Delivery PostgreSQL container and its persistent volume.
 
+notification_database_restore_guard_script_directory="$(
+	cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P
+)"
+# shellcheck source=scripts/database-restore-production-guard.sh
+source "$notification_database_restore_guard_script_directory/database-restore-production-guard.sh"
+
 NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER="${NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER:-$APP_ROOT/deploy/backend/.notification-delivery-database-cutover-v1}"
 notification_database_cutover_active=false
 notification_database_phase_before=""
@@ -410,8 +416,14 @@ notification_database_secret_snapshot() {
 initialize_notification_database_lifecycle_guard() {
 	local allow_forward_only="$1"
 	local rollout_label="$2"
+	local restore_worker_mode="${3:-healthy-required}"
 	local phase
 	local volume_name
+
+	# database-restore-production-guard: before-mutation
+	database_restore_guard_assert_before_mutation \
+		"$restore_worker_mode" \
+		"${ENV_FILE:-${APP_ROOT:-/opt/winwidget}/deploy/backend/.env.production}"
 
 	if [[ ! -e "$NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER" &&
 		! -L "$NOTIFICATION_DELIVERY_DATABASE_CUTOVER_MARKER" ]]; then

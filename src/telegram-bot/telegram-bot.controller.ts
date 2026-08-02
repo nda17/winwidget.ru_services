@@ -16,6 +16,7 @@ import {
 import {
 	Body,
 	BadRequestException,
+	ConflictException,
 	Controller,
 	Get,
 	Headers,
@@ -58,7 +59,30 @@ export class TelegramBotController {
 		@CurrentUser('id') adminId: string,
 		@Req() request: Request
 	) {
-		const settings = await this.telegramBotService.updateSettings(dto);
+		let settings;
+		try {
+			settings = await this.telegramBotService.updateSettings(dto);
+		} catch (error) {
+			if ('dailySummaryTime' in dto || 'databaseBackupTime' in dto) {
+				await this.adminEventLogService.record({
+					adminId,
+					section: 'TELEGRAM_BOT',
+					action: 'TELEGRAM_SCHEDULE_SETTINGS_REJECTED',
+					description: 'Отклонено изменение расписания Telegram-задач',
+					entityType: 'telegram_schedule_policy',
+					entityId: 'singleton',
+					entityLabel: 'Daily Summary и backup',
+					metadata: {
+						reasonCode:
+							error instanceof ConflictException
+								? 'OWNER_CONFLICT'
+								: 'SCHEDULE_VALIDATION_FAILED'
+					},
+					request
+				});
+			}
+			throw error;
+		}
 
 		await this.adminEventLogService.record({
 			adminId,
@@ -78,6 +102,9 @@ export class TelegramBotController {
 					settings.databaseBackupThreadId
 				),
 				paymentsThreadIdConfigured: Boolean(settings.paymentsThreadId),
+				operationalAlertsThreadIdConfigured: Boolean(
+					settings.operationalAlertsThreadId
+				),
 				reportsThreadIdConfigured: Boolean(settings.reportsThreadId),
 				dailySummaryTime: settings.dailySummaryTime,
 				databaseBackupEnabled: settings.databaseBackupEnabled,
@@ -176,7 +203,8 @@ export class TelegramBotController {
 				[DATABASE_BACKUP_TARGETS.CORE]: 'основной БД',
 				[DATABASE_BACKUP_TARGETS.NOTIFICATION_DELIVERY]:
 					'БД Notification Delivery',
-				[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns'
+				[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns',
+				[DATABASE_BACKUP_TARGETS.REPORTING]: 'БД Reporting'
 			}[target];
 			await this.adminEventLogService.record({
 				adminId,

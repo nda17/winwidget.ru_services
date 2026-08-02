@@ -98,6 +98,10 @@ winwidget.ru_server/
 │   │   ├── src/               # API, snapshot worker, Outbox publisher и health
 │   │   ├── prisma/            # собственные schema, migrations и Prisma Client
 │   │   └── Dockerfile         # image только с artifact сервиса
+│   ├── reporting/             # автономный NestJS-сервис отчётности
+│   │   ├── src/               # API, projections, scheduler, Outbox publisher и health
+│   │   ├── prisma/            # собственные schema, migrations и Prisma Client
+│   │   └── Dockerfile         # image только с artifact сервиса
 │   └── notification-delivery/ # автономный NestJS-сервис доставки
 │       ├── src/               # собственный bootstrap, modules и adapters
 │       ├── prisma/            # собственные schema, migrations и Prisma Client
@@ -113,11 +117,12 @@ winwidget.ru_server/
 ```
 
 Каталоги внутри `apps/` называются по capability без избыточного суффикса
-`-service`: `apps/campaigns` и `apps/notification-delivery`. В архитектурном
-реестре и package metadata компонент может называться `campaigns-service` или
-`notification-delivery-service`, а Compose-процесс — `campaigns-service` или
-`notification-delivery-worker`; это разные уровни именования, а не разные
-приложения.
+`-service`: `apps/campaigns`, `apps/reporting` и
+`apps/notification-delivery`. В архитектурном реестре и package metadata
+компонент может называться `campaigns-service`, `reporting-service` или
+`notification-delivery-service`, а Compose-процесс — `campaigns-service`,
+`reporting-service` или `notification-delivery-worker`; это разные уровни
+именования, а не разные приложения.
 
 ## Правила модульной архитектуры
 
@@ -143,6 +148,7 @@ winwidget.ru_server/
 | Уведомления         | `email`, `sms`, `telegram-bot`                                                                   | email, SMS и Telegram                               |
 | Messaging           | `messaging`, `outbox-publisher`, `integration-worker`, `notification-delivery`                   | RabbitMQ, Outbox, retry, DLQ и доставка уведомлений |
 | Кампании            | `apps/campaigns`                                                                                 | кампании, снимки аудитории и статусы доставок       |
+| Отчётность          | `apps/reporting`                                                                                 | проекции, аналитика и Daily Summary                 |
 | Регламентные задачи | `scheduled-jobs`, `maintenance`                                                                  | durable scheduler, lease и backup                   |
 | Файлы               | `file`                                                                                           | local uploads и S3                                  |
 | Интеграции          | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                    |
@@ -260,9 +266,10 @@ MODE=production  -> DATABASE_URL_PRODUCTION
 module/client и одним connection pool. `api`, `outbox-publisher`,
 `integration-worker` и `maintenance-worker` используют
 `PrismaModule`/`PrismaService`. Автономный
-`apps/notification-delivery` и `apps/campaigns` используют по одному
-собственному глобальному Prisma module и сгенерированному service client; их
-зависимости, сборка и Docker context не связаны с runtime artifact монолита.
+`apps/notification-delivery`, `apps/campaigns` и `apps/reporting` используют
+по одному собственному глобальному Prisma module и сгенерированному service
+client; их зависимости, сборка и Docker context не связаны с runtime artifact
+монолита.
 Feature-модули не регистрируют Prisma service повторно в собственных
 `providers` или `exports`. Root-модуль отключает свой client после завершения
 lifecycle-хуков процесса; API обрабатывает `SIGTERM` через Nest shutdown hooks.
@@ -327,10 +334,22 @@ CAMPAIGNS_DATABASE_URL="$CAMPAIGNS_MIGRATION_DATABASE_URL" \
   pnpm --dir apps/campaigns run prisma:migrate:deploy
 ```
 
+Reporting владеет отдельной database `winwidget_reporting`, schema
+`reporting`, PostgreSQL-контейнером на loopback `127.0.0.1:55435` и external
+volume `winwidget-reporting-postgres-data`. Его migration/runtime/backup роли
+разделены между `REPORTING_MIGRATION_DATABASE_URL`, `REPORTING_DATABASE_URL` и
+`REPORTING_BACKUP_URL`; backup-role доступна только `maintenance-worker` и
+имеет read-only права. Миграции применяет one-shot `reporting-migrate`, а
+`reporting-service` использует собственный Prisma Client без доступа к БД
+монолита.
+
 Production compose отслеживается вместе с backend-кодом в
 `deploy/docker-compose.prod.yml`. В нём подготовлены отдельные
 `campaigns-service`, `campaigns-migrate` и `campaigns-postgres`, но их
 production-включение выполняется только согласованным Campaigns cutover.
+Для Reporting аналогично определены `reporting-service`, `reporting-migrate`
+и `reporting-postgres`; runtime и публичный маршрут включаются только по фазам
+согласованного Reporting cutover.
 Наличие service/image/Compose-конфигурации не означает, что перенос данных,
 переключение Gateway, restore drill и production smoke уже выполнены.
 Notification Delivery и Maintenance собираются в отдельные immutable images,
@@ -351,13 +370,16 @@ schema/client и production dependencies — без `dist`, Prisma client, ви�
 Image Campaigns аналогично собирается только из `apps/campaigns`, использует
 собственный Prisma Client и публикует API/health только на
 `127.0.0.1:4500`.
+Image Reporting собирается только из `apps/reporting`, использует собственный
+Prisma Client и публикует API/health только на `127.0.0.1:4600`.
 RabbitMQ хранит данные в persistent volume, а его AMQP и management-порты
 привязаны только к `127.0.0.1` backend VPS. PostgreSQL Notification Delivery
 аналогично публикует `5432` только на `127.0.0.1:55432`; наружу VPS этот порт
 не открывается. PostgreSQL Campaigns использует тот же принцип на
-`127.0.0.1:55433`. Для каждой service database используется отдельная
-bridge-сеть; service и migration-контейнеры работают в host network и
-подключаются к PostgreSQL через loopback.
+`127.0.0.1:55433`, а PostgreSQL Reporting — на `127.0.0.1:55435`. Для каждой
+service database используется отдельная bridge-сеть; service и
+migration-контейнеры работают в host network и подключаются к PostgreSQL через
+loopback.
 
 ## RabbitMQ и transactional outbox
 
@@ -385,10 +407,10 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal
-NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://notification_delivery_runtime:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
-NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://notification_delivery_migration:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
-NOTIFICATION_DELIVERY_BACKUP_URL=postgresql://notification_delivery_backup:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal
+NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://winwidget_notification_delivery_runtime:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://winwidget_notification_delivery_migration:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
+NOTIFICATION_DELIVERY_BACKUP_URL=postgresql://winwidget_notification_delivery_backup:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
 NOTIFICATION_DELIVERY_INTERNAL_TOKEN=<random-token-at-least-32-chars>
 NOTIFICATION_DELIVERY_LISTEN_HOST=127.0.0.1
 NOTIFICATION_DELIVERY_HEALTH_PORT=4401
@@ -411,6 +433,20 @@ CAMPAIGNS_TELEGRAM_RATE_PER_SECOND=5
 CAMPAIGNS_OUTBOX_BATCH_SIZE=50
 CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS=1000
 CAMPAIGNS_OUTBOX_RETENTION_DAYS=7
+REPORTING_DATABASE_URL=postgresql://winwidget_reporting_runtime:<password>@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
+REPORTING_MIGRATION_DATABASE_URL=postgresql://winwidget_reporting_migration:<password>@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
+REPORTING_BACKUP_URL=postgresql://winwidget_reporting_backup:<password>@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
+REPORTING_PROCESS_ROLE=all
+REPORTING_LISTEN_HOST=127.0.0.1
+REPORTING_PORT=4600
+REPORTING_CORE_INTERNAL_BASE_URL=http://127.0.0.1:4200
+REPORTING_INTERNAL_TOKEN=<random-token-at-least-32-chars>
+REPORTING_INTERNAL_TIMEOUT_MS=10000
+REPORTING_SCHEDULER_ENABLED=false
+REPORTING_PREFETCH=10
+REPORTING_OUTBOX_BATCH_SIZE=50
+REPORTING_OUTBOX_POLL_INTERVAL_MS=1000
+REPORTING_OUTBOX_RETENTION_DAYS=7
 MAINTENANCE_WORKER_KINDS=database-backup
 ```
 
@@ -426,8 +462,10 @@ openssl rand -hex 32
 `../deploy/backend/README.md`. Минимальный набор в
 `/opt/winwidget/deploy/backend/.env.production`:
 
-`NOTIFICATION_DELIVERY_IMAGE`/`NOTIFICATION_DELIVERY_REVISION` и
-`CAMPAIGNS_IMAGE`/`CAMPAIGNS_REVISION` в этом файле не хранятся.
+`NOTIFICATION_DELIVERY_IMAGE`/`NOTIFICATION_DELIVERY_REVISION`,
+`CAMPAIGNS_IMAGE`/`CAMPAIGNS_REVISION` и
+`REPORTING_IMAGE`/`REPORTING_REVISION`, а также
+`DATABASE_RESTORE_IMAGE`/`DATABASE_RESTORE_REVISION` в этом файле не хранятся.
 Соответствующие deploy-скрипты экспортируют immutable image tag и полный
 commit SHA, поэтому OCI revision всегда относится к проверяемому релизу.
 Отдельный Campaigns deploy разрешён только после завершённого согласованного
@@ -435,6 +473,13 @@ cutover и durable lifecycle marker.
 
 ```env
 COMPOSE_PROJECT_NAME=winwidget
+CORE_POSTGRES_ADMIN_PASSWORD_FILE=/opt/winwidget/deploy/backend/.core-postgres-temporary-admin-password
+DATABASE_RESTORE_STORAGE_DIR=/opt/winwidget/deploy/backend/database-restores
+DATABASE_RESTORE_QUEUE_SECRET=<separate-base64url-secret-43-to-128-characters>
+DATABASE_RESTORE_PRODUCTION_ENABLED=false
+DATABASE_RESTORE_PRODUCTION_PERMIT=
+DATABASE_RESTORE_POLL_INTERVAL_MS=1000
+DATABASE_RESTORE_COMMAND_TIMEOUT_MS=1800000
 RABBITMQ_DATA_VOLUME=<verified-existing-volume>
 RABBITMQ_VHOST=winwidget
 RABBITMQ_ADMIN_USER=winwidget-admin
@@ -444,6 +489,7 @@ RABBITMQ_MONITOR_PASSWORD=<отдельный-hex-пароль>
 RABBITMQ_PUBLISHER_URL=amqp://winwidget-publisher:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_INTEGRATION_WORKER_URL=amqp://winwidget-integration:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_CAMPAIGNS_URL=amqp://winwidget-campaigns:<url-encoded-password>@127.0.0.1:5672/winwidget
+RABBITMQ_REPORTING_URL=amqp://winwidget-reporting:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_NOTIFICATION_DELIVERY_URL=amqp://winwidget-notification-delivery:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_MAINTENANCE_WORKER_URL=amqp://winwidget-maintenance:<url-encoded-password>@127.0.0.1:5672/winwidget
 RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
@@ -460,7 +506,7 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal
+INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal
 NOTIFICATION_DELIVERY_POSTGRES_IMAGE=postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
 NOTIFICATION_DELIVERY_POSTGRES_PORT=55432
 NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME=winwidget-notification-delivery-postgres-data
@@ -493,6 +539,25 @@ CAMPAIGNS_TELEGRAM_RATE_PER_SECOND=5
 CAMPAIGNS_OUTBOX_BATCH_SIZE=50
 CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS=1000
 CAMPAIGNS_OUTBOX_RETENTION_DAYS=7
+REPORTING_POSTGRES_IMAGE=postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+REPORTING_POSTGRES_PORT=55435
+REPORTING_POSTGRES_DATA_VOLUME=winwidget-reporting-postgres-data
+REPORTING_POSTGRES_ADMIN_USER=winwidget_reporting_admin
+REPORTING_POSTGRES_ADMIN_PASSWORD_FILE=/opt/winwidget/deploy/backend/.reporting-postgres-admin-password
+REPORTING_MIGRATION_DATABASE_URL=postgresql://winwidget_reporting_migration:<password>@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
+REPORTING_DATABASE_URL=postgresql://winwidget_reporting_runtime:<password>@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
+REPORTING_BACKUP_URL=postgresql://winwidget_reporting_backup:<password>@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
+REPORTING_PROCESS_ROLE=all
+REPORTING_LISTEN_HOST=127.0.0.1
+REPORTING_PORT=4600
+REPORTING_CORE_INTERNAL_BASE_URL=http://127.0.0.1:4200
+REPORTING_INTERNAL_TOKEN=<random-token-at-least-32-chars>
+REPORTING_INTERNAL_TIMEOUT_MS=10000
+REPORTING_SCHEDULER_ENABLED=false
+REPORTING_PREFETCH=10
+REPORTING_OUTBOX_BATCH_SIZE=50
+REPORTING_OUTBOX_POLL_INTERVAL_MS=1000
+REPORTING_OUTBOX_RETENTION_DAYS=7
 MAINTENANCE_WORKER_KINDS=database-backup
 ```
 
@@ -510,6 +575,24 @@ host, port, database и SSL-параметры; различаются толь�
 различаясь только логином и паролем. До cutover routine
 `scripts/deploy-campaigns-production.sh` заблокирован lifecycle marker и не
 создаёт service database автоматически.
+
+Три Reporting URL после protected `reporting-database prepare` обязаны
+указывать на
+`127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable` и
+различаться только отдельными runtime/migration/backup credentials. Image и
+revision Reporting выводятся из exact reviewed Git SHA lifecycle-скриптами, а
+не сохраняются в production env. Каждый из трёх DB-паролей и отдельный пароль
+`RABBITMQ_REPORTING_URL` должны содержать минимум 32 декодированных символа;
+рекомендуемый формат — отдельный результат `openssl rand -hex 32` для каждой
+роли.
+
+Restore storage обязан совпадать с каноническим scoped path, а HMAC secret —
+быть отдельным production-only base64url значением длиной 43–128 символов.
+Четыре существующих admin password files монтируются только в
+`database-restore-worker`; API получает лишь storage, secret очереди и только на
+время согласованной операции точный одноразовый
+`DATABASE_RESTORE_PRODUCTION_PERMIT`. Worker эту env-переменную не получает.
+Обычный deploy обязан хранить permit пустым.
 
 Production source проверена как PostgreSQL 18 с locale identity
 `UTF8/libc/C.UTF-8`. Поэтому target использует PostgreSQL 18 Bookworm по
@@ -572,15 +655,17 @@ broker доставляет сообщение сам, а worker подтвер�
 Pull-чтение (`basic.get`) для рабочих очередей не используется. Отдельный
 polling применяется только publisher-процессом при чтении PostgreSQL Outbox.
 
-Целевое владение messaging-процессами после Campaigns cutover:
+Целевое владение messaging-процессами после Campaigns cutover и при выделении
+Reporting:
 
-| Процесс                        | Ответственность                                                                                                                                                                               |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `outbox-publisher`             | Публикация transactional Outbox монолита и создание принадлежащей монолиту RabbitMQ topology                                                                                                  |
-| `campaigns-service`            | Снимки аудитории, состояние кампаний и доставок, service-owned Outbox/rate limits, snapshot/outcome consumers и их receipts/retry/DLQ                                                         |
-| `notification-delivery-worker` | Физическая email/Telegram-доставка лидов, платежей, лимитов, кампаний, daily summary и subscription expiry; собственные receipts, failures, retry/DLQ Outbox, delivery outcomes и control API |
-| `integration-worker`           | CRM/webhook, daily summary, монолитный `notification-delivery-outcome`, недоступность пользовательского Telegram-канала, campaign admin audit и auto-renewal; без campaign lifecycle/outcomes |
-| `maintenance-worker`           | Durable scheduler/lease и независимые backup-задачи для core, Notification Delivery и Campaigns                                                                                               |
+| Процесс                        | Ответственность                                                                                                                                                                                                                     |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `outbox-publisher`             | Публикация transactional Outbox монолита и создание принадлежащей монолиту RabbitMQ topology                                                                                                                                        |
+| `campaigns-service`            | Снимки аудитории, состояние кампаний и доставок, service-owned Outbox/rate limits, snapshot/outcome consumers и их receipts/retry/DLQ                                                                                               |
+| `reporting-service`            | Проекции отчётных данных, аналитика, Reporting-owned Outbox и независимые projection consumers с receipts/retry/DLQ                                                                                                                 |
+| `notification-delivery-worker` | Физическая email/Telegram-доставка лидов, платежей, лимитов, кампаний, daily summary и subscription expiry; собственные receipts, failures, retry/DLQ Outbox, delivery outcomes и control API                                       |
+| `integration-worker`           | CRM/webhook, daily summary, монолитный `notification-delivery-outcome`, недоступность пользовательского Telegram-канала, `campaign-admin-audit`, `reporting-admin-audit` и auto-renewal; без lifecycle/outcomes выделенных сервисов |
+| `maintenance-worker`           | Durable scheduler/lease и независимые backup-задачи для core, Notification Delivery, Campaigns и Reporting                                                                                                                          |
 
 Один kind не должен одновременно находиться у `integration-worker` и
 `notification-delivery-worker`. Первичный Outbox остаётся в транзакции
@@ -668,32 +753,42 @@ dual-write и compatibility aliases не сохраняются; источни�
 
 ### Ежедневная Telegram-сводка
 
-Scheduler работает в `maintenance-worker`, а не в API. Для отчётного периода
-он одной транзакцией PostgreSQL создаёт durable-запуск с уникальным ключом и
-Outbox-событие. Событие фиксирует границы периода и поступает в отдельную
-очередь `winwidget.report.daily-summary.telegram`; отправку, retry и DLQ
-обрабатывает `integration-worker`. Поэтому повтор после сбоя не выбирает уже
-другой день, несколько replicas scheduler не создают два запуска, а startup API
-не ждёт формирования или отправки сводки.
+До coordinated owner switch legacy scheduler работает в `maintenance-worker`,
+одной транзакцией Core PostgreSQL создаёт durable-запуск с уникальным ключом и
+Outbox-событие, а старую очередь
+`winwidget.report.daily-summary.telegram` обрабатывает `integration-worker`.
+
+После switch единственным владельцем scheduler/run state становится
+`reporting-service`: он формирует отчёт из своей PostgreSQL, создаёт собственный
+Outbox и делегирует физический `sendMessage` Notification Delivery через
+`notification.daily-summary.telegram.requested.v1`. Core остаётся authority
+общего Telegram chat ID и отдельного topic системных уведомлений; Reporting
+получает их one-way projection и владеет только topic Daily Summary. Lifecycle
+не разрешает switch, пока chat не совпадает, оба topic ID не заполнены или они
+равны. Для текущего Reporting cutover целевой Core-owned topic инцидентов и
+operational alerts имеет ID `2024`; до owner switch это значение должно быть
+установлено и подтверждено smoke, но наличие кода не означает, что настройка
+уже применена в production.
 
 Доставка остаётся `at-least-once`: Telegram Bot API не поддерживает
 идемпотентный ключ. Если процесс завершится после успешного `sendMessage`, но до
 фиксации `SUCCEEDED` в PostgreSQL, retry может повторно отправить сводку. Lease,
 receipt и checkpoint предотвращают параллельную обработку и повторное
 формирование после сохранённого checkpoint, но не могут атомарно объединить
-Telegram и PostgreSQL.
+Telegram и PostgreSQL. После owner switch обычный Core PATCH не меняет общий
+chat и operational topic: для их смены нужна coordinated maintenance-процедура.
 
 ### Backup PostgreSQL
 
 Для основной БД (`core`), Notification Delivery
-(`notification-delivery`) и Campaigns (`campaigns`) создаются независимые
-durable-задания: `DATABASE_BACKUP`,
-`NOTIFICATION_DELIVERY_DATABASE_BACKUP` и
-`CAMPAIGNS_DATABASE_BACKUP`. Плановый backup основной БД запускается в
+(`notification-delivery`), Campaigns (`campaigns`) и Reporting (`reporting`)
+создаются независимые durable-задания: `DATABASE_BACKUP`,
+`NOTIFICATION_DELIVERY_DATABASE_BACKUP`, `CAMPAIGNS_DATABASE_BACKUP` и
+`REPORTING_DATABASE_BACKUP`. Плановый backup основной БД запускается в
 настроенное время, Notification Delivery — через 15 минут, Campaigns — через
-30 минут, чтобы три `pg_dump` не конкурировали за CPU, disk I/O и Telegram
-upload. Результаты отправляются отдельными документами в настроенную
-Telegram-тему вне VPS.
+30 минут, Reporting — через 45 минут, чтобы четыре `pg_dump` не конкурировали
+за CPU, disk I/O и Telegram upload. Результаты отправляются отдельными
+документами в настроенную Telegram-тему вне VPS.
 
 Плановый и ручной backup сначала создают durable-задание в основной PostgreSQL
 и Outbox-событие. API только ставит ручной запуск в очередь и не выполняет
@@ -704,24 +799,88 @@ Telegram-тему вне VPS.
 отдельном `tmpfs` maintenance-контейнера с лимитом 64 МБ и удаляется в
 `finally`; максимальный размер каждого отправляемого файла ограничен 49 МБ.
 
-В production обязательны три независимых read-only подключения на прямые
+В production обязательны четыре независимых read-only подключения на прямые
 PostgreSQL endpoints:
 
 - `DATABASE_BACKUP_URL` — основная БД;
 - `NOTIFICATION_DELIVERY_BACKUP_URL` — отдельный PostgreSQL-контейнер
   Notification Delivery;
 - `CAMPAIGNS_BACKUP_URL` — отдельный PostgreSQL-контейнер Campaigns.
+- `REPORTING_BACKUP_URL` — отдельный PostgreSQL-контейнер Reporting.
 
 `pg_dump` не должен идти через transaction pooler. Пароль удаляется из
 аргументов процесса и передаётся `pg_dump` только через `PGPASSWORD`;
 Prisma-only параметры подключения удаляются.
 
+После `routes-switched`, но до Reporting source cleanup, оператор обязан через
+`/admin/databases` создать новый ручной backup target `core`, дождаться
+`SUCCEEDED` и скачать именно его Telegram `.dump` на VPS в
+`/opt/winwidget/deploy/backend/reporting-core-cleanup-backup-v1.dump`. Файл
+должен быть обычным root-owned файлом `root:root` с mode `0600`. Затем manual
+workflow запускается с `deploy_target=reporting-cutover`, action
+`verify-core-cleanup-backup` и точным UUID этого job в
+`reporting_core_backup_job_id`. Lifecycle сверяет durable job/Telegram receipt
+и bytes dump, восстанавливает его в изолированную PostgreSQL 18 и сохраняет
+root-only evidence
+`/opt/winwidget/deploy/backend/reporting-core-cleanup-backup-v1.json`.
+Evidence фиксирует `migrationManifestSha256`, `schemaManifestSha256`,
+`rowAnchorManifestSha256`, `rowContentManifestSha256`,
+`sequenceManifestSha256` и digest повторного dump. Полные row anchors,
+логическое содержимое и sequences доказывают корректность backup/restore;
+`rowContentManifestSha256` покрывает все таблицы Core schema `public`, кроме
+volatile `messaging_heartbeats` и строки самого текущего backup job в
+`scheduled_job_runs`.
+
+SHA-256 этого evidence обязателен в cleanup review как
+`coreBackupEvidenceSha256` и входит в exact `stage-cleanup` confirmation token.
+И `stage-cleanup`, и shared cleanup deploy повторно проверяют digest,
+`switch_generation`, live job/dump и 24-часовую freshness. После остановки
+writers live pre-migration gate заново вычисляет только exact migration и schema
+manifests и требует их совпадения с `migrationManifestSha256` и
+`schemaManifestSha256`. Row anchors/content/sequences остаются доказательством
+изолированного restore и не сравниваются с live Core: несвязанные canonical rows
+и sequences могут штатно измениться после создания backup. Cleanup-sensitive
+граница отдельно проверяет остановленные writers, RabbitMQ drain/topology,
+producer continuity и отсутствие legacy state. При ошибке любого gate migration
+не запускается, а старые writers остаются остановленными; отдельных
+resume/quiesce actions для cleanup recovery нет. Новый Core backup, review и
+повторный `stage-cleanup` нужны только при фактической просрочке/невалидности
+evidence либо drift migration/schema manifests, но не из-за обычного row drift.
+Cleanup revision и manifest SHA при таком refresh менять запрещено. После
+доказанного применения exact cleanup migration retry выполняется только forward:
+проверяются applied state и неизменные digest архивных review/evidence, без
+сравнения новой live schema с pre-migration manifests.
+
+Если остановившийся Prisma run оставил ровно одну exact-checksum попытку в
+состоянии `unfinished-transition` или `unfinished-steady`, обычный deploy
+завершается fail closed, а старые writer-контейнеры не запускаются. Из exact
+clean `prod` checkout pinned cleanup revision сначала вручную запустите
+`prepare-core-cleanup-resolve`, независимо проверьте выведенный proof и только
+затем передайте его без изменений в `reporting_cleanup_resolve_confirmation`
+для `resolve-core-cleanup-migration`. Proof token имеет формат
+`resolve-core-cleanup:<originalRevision>:<cleanupRevision>:<switchGeneration>:<unfinished-transition|unfinished-steady>:<migrationName>:<failedMigrationUuid>:<migrationChecksum>:<cleanupImageDigest>:<embeddedMigrationChecksum>:<ledgerProofSha256>:<stoppedWritersProofSha256>`
+и связывает exact failed ledger row с digest cleanup API image, checksum
+встроенной в него migration и доказательством остановленных writers.
+Ручной `prisma migrate resolve` вне этой процедуры запрещён.
+
+Для `unfinished-transition` защищённая action выполняет только
+`migrate resolve --rolled-back` и возвращает state в `pending`; старые writers
+во время recovery не запускаются. Exact cleanup повторяется с теми же pinned
+revision/review/evidence, если evidence ещё valid/fresh и exact migration/schema
+manifests не изменились: историческая ledger-запись `rolled_back` сама по себе не
+требует нового backup. Refresh выполняется только при фактической
+просрочке/невалидности evidence или drift manifests. Для `unfinished-steady`
+action выполняет только `migrate resolve --applied`; до и после resolve заново
+проверяются stopped writers и cleanup boundary, после чего допустим исключительно
+forward retry exact cleanup deploy без восстановления старого runtime.
+
 Контракт ручного запуска возвращает принятое в очередь задание, а не готовый
 файл. Для каждого target используется
 `POST /api/v1/telegram-bot/admin/database-backups/:target/send`, где `target` —
-`core`, `notification-delivery` или `campaigns`; запрос требует заголовок
-`Idempotency-Key` с UUID. Ключ сохраняется в детерминированном `scheduleKey`
-вместе с ID администратора и target, а также в отдельной таблице соответствий
+`core`, `notification-delivery`, `campaigns` или `reporting`; запрос требует
+заголовок `Idempotency-Key` с UUID. Ключ сохраняется в детерминированном
+`scheduleKey` вместе с ID администратора и target, а также в отдельной таблице
+соответствий
 `adminId + jobType + idempotencyKey → jobId`. Поэтому повтор HTTP-запроса
 возвращает тот же job даже после его завершения и не создаёт второй Outbox или
 audit event. Если у этого администратора уже есть активный ручной backup того
@@ -731,7 +890,7 @@ audit event. Если у этого администратора уже есть
 transaction-scoped advisory lock только на команду данного администратора и
 target; этот lock завершается до `pg_dump`.
 
-Интерфейс ручного запуска и polling трёх targets расположен на странице
+Интерфейс ручного запуска и polling четырёх targets расположен на странице
 `/admin/databases`. Для каждого target есть отдельная кнопка и независимый
 статус. Админка восстанавливает polling после reload через
 `GET /api/v1/telegram-bot/admin/database-backups/:target/jobs/active` и
@@ -739,17 +898,88 @@ target; этот lock завершается до `pg_dump`.
 `input.requestedByAdminId`, поэтому один администратор не получает состояние
 чужого запуска.
 
-Восстановление остаётся отдельной операцией только для роли `DEV`:
-`POST /api/v1/dev-tools/database-backup/restore`. Строка повторного подтверждения
-получается через `GET /api/v1/dev-tools/database-backup/restore-settings` и больше
-не входит в настройки Telegram-бота. Поэтому DEV-блок страницы «Базы данных»
-не зависит от загрузки Telegram settings; ограничение файла 49 МБ, проверка
-формата `.dump` и audit event восстановления сохранены. До destructive
-`pg_restore --clean` сервер читает TOC: требует схему `public` и fail-closed
-отклоняет dump со схемой `notification_delivery`.
-Проверка TOC не подтверждает происхождение произвольного архива со схемой
-`public`: перед запуском DEV обязан проверить, что выбран актуальный core dump
-WinWidget из доверенного backup-контура.
+Восстановление остаётся отдельной опасной операцией только для роли `DEV` и не
+использует RabbitMQ. Для четырёх targets (`core`, `notification-delivery`,
+`campaigns`, `reporting`) API предоставляет:
+
+```text
+GET  /api/v1/dev-tools/database-restores/settings
+POST /api/v1/dev-tools/database-restores/:target
+GET  /api/v1/dev-tools/database-restores/jobs/:jobId
+POST /api/v1/dev-tools/database-restores/jobs/:jobId/cancel
+```
+
+Каждый target имеет собственную confirmation-фразу. POST принимает `.dump` не
+больше 49 МБ, вычисляет SHA-256, fail-closed записывает request-intent в Журнал
+событий и только после этого атомарно публикует HMAC-подписанный manifest в
+защищённую filesystem-очередь. Публикация одновременно захватывает target lock
+и общий HMAC-подписанный `global.lock`, поэтому non-terminal restore может быть
+только один сразу для всех четырёх баз. После durable publish API записывает
+отдельный audit результата и создаёт HMAC-подписанный publish receipt. Только
+`publicationConfirmed=true` доказывает завершённую публикацию; предварительный
+request-intent и один manifest этого не доказывают. API не получает admin
+credentials PostgreSQL и не запускает `pg_restore`.
+
+Frontend до POST создаёт UUID `requestId`, сохраняет его локально и передаёт
+API; тот же UUID становится `jobId`. Поэтому после потери HTTP response или
+reload UI опрашивает точный `GET jobs/:jobId`, не выбирая задание по времени,
+target или «последнему» пользователю. Если процесс упал после публикации
+manifest, но до receipt, UI повторно отправляет только тот же файл, target и
+`requestId`: backend сверяет SHA-256 и identity, дописывает receipt и не создаёт
+второй job. Другой файл или jobId отклоняются. Страница показывает статусы
+`QUEUED`, `PROCESSING`, `CANCELLED`, `SUCCEEDED`, `FAILED` и `FAILED_FENCED`, а
+также отдельное состояние неподтверждённой публикации.
+
+В `MODE=production` одного
+`DATABASE_RESTORE_PRODUCTION_ENABLED=true` недостаточно. API принимает только
+HMAC-подписанный одноразовый permit с точными `appRevision`, `target`, `jobId`,
+`expiresAt`, `runId`, `evidence` и `incident`; permit должен совпасть с текущим
+40-символьным `APP_REVISION`, быть не просрочен и ранее не использован. Обычный
+production deploy fail closed требует одновременно literal `false` и пустой
+`DATABASE_RESTORE_PRODUCTION_PERMIT`. Кратковременные `true` и permit разрешит
+только отдельный reviewed restore-control action на exact revision после
+полного four-target rehearsal, отдельного согласования текущего in-place риска
+и наличия reviewed `FAILED_FENCED` recovery-action. Такой action в текущем
+release ещё не реализован, поэтому production restore остаётся выключенным.
+Read-only статус существующего job и безопасная отмена до destructive-фазы
+остаются доступны.
+
+Отмена использует подписанный transition gate и отдельный fail-closed audit.
+Она доступна, пока job находится в queue/preflight: worker завершает его как
+`CANCELLED`, не выполняет PostgreSQL-команд и освобождает target lock. Worker
+атомарно переводит gate в destructive перед первым fence/safety dump/restore;
+после этого cancel endpoint возвращает конфликт и не пытается автоматически
+открыть или изменить БД.
+
+Отдельный `database-restore-worker` опрашивает filesystem-очередь; это worker,
+но не RabbitMQ consumer. В production он не захватывает job без валидных
+publish receipt, exact permit metadata и `global.lock`; отсутствие receipt
+оставляет job безопасно в ожидании и не запускает ни одной PostgreSQL-команды.
+Перед destructive-этапом worker проверяет подпись manifest, upload SHA-256,
+размер/свободное место, TOC только ожидаемой schema и точное соответствие
+migration ledger репозиторию. Затем он запрещает новые подключения к выбранной
+БД, завершает её существующие прикладные sessions, создаёт проверяемый safety
+dump, выполняет restore без owner/ACL, возвращает target-specific
+ownership/grants и проверяет migrations, anchor tables и ACL-инварианты.
+Подключения открываются только после полного успеха. Общий gate освобождается
+для `SUCCEEDED`, `FAILED` до fence и `CANCELLED`, но сохраняется вместе с target
+lock и fence для `FAILED_FENCED`. Такую БД нельзя открывать без operator runbook
+из `DOCUMENTATION/DEPLOYMENT.md` и reviewed recovery-action.
+
+Legacy endpoints
+`GET /api/v1/dev-tools/database-backup/restore-settings` и
+`POST /api/v1/dev-tools/database-backup/restore` сохранены для локальной
+обратной совместимости. Синхронный POST в `MODE=production` всегда отклоняется:
+production restore разрешён только через очередь. В текущей рабочей ветке
+очередь ещё должна пройти полный real PostgreSQL 18 rehearsal всех четырёх
+targets, включая cancel/destructive race, и согласованный production rollout.
+
+При добавлении следующего service-owned PostgreSQL его restore-регистрация
+входит в тот же релиз: target/confirmation в UI и API, точная конфигурация
+database/schema/roles/migrations/anchor tables и ACL repair в worker, отдельный
+admin-secret mount, backup target, pre-destructive cancel, CI/rehearsal matrix
+и recovery runbook.
+Выносить эту работу в задачу после cutover нельзя.
 
 Для Telegram-документа действует тот же `at-least-once` предел: авария после
 успешной загрузки файла, но до фиксации результата job может привести к
@@ -782,7 +1012,7 @@ lease, а короткие идемпотентные очистки остаю�
 Транзакция и advisory lock не удерживаются во время `pg_dump` или сетевой
 отправки.
 
-На текущем бюджетном single-VPS этапе два Telegram-документа приняты как
+На текущем бюджетном single-VPS этапе четыре Telegram-документа приняты как
 off-VPS защита: потеря VPS вместе с Docker volumes не уничтожает единственную
 копию dump. Эта схема не даёт PITR, имеет жёсткий лимит 49 МБ на файл и требует
 регулярного restore drill. При росте данных или требований к RPO/RTO backups
@@ -1097,16 +1327,23 @@ MODE=production  -> S3-совместимое хранилище
 
 Durable-задачи выполняются отдельными процессами:
 
-- `maintenance-worker` создаёт уникальные периодические запуски ежедневной
-  Telegram-сводки и трёх backup, выполняет `pg_dump` и восстанавливает
-  зависшие задания по CAS-lease;
+- `maintenance-worker` до Reporting owner switch создаёт уникальные
+  периодические запуски ежедневной Telegram-сводки, всегда планирует четыре
+  backup, выполняет `pg_dump` и восстанавливает зависшие задания по CAS-lease;
+- `database-restore-worker` опрашивает подписанную filesystem-очередь и
+  выполняет target-scoped PostgreSQL restore; RabbitMQ сообщений он не
+  потребляет, а API не передаёт ему dump или DB credentials через broker;
 - `outbox-publisher` читает PostgreSQL Outbox и публикует события в RabbitMQ;
 - после coordinated cutover `campaigns-service` в роли `all` обслуживает HTTP
   API, импортирует снимки, публикует собственный Outbox и применяет delivery
   outcomes;
-- `integration-worker` обрабатывает сводку, CRM/webhook, монолитный
-  `notification-delivery-outcome`, campaign admin audit и остальные
-  принадлежащие монолиту consumers через независимые очереди, retry и DLQ.
+- `reporting-service` в роли `all` обслуживает API отчётности, projection
+  consumers, собственный Outbox и после отдельного owner switch — Daily
+  Summary scheduler;
+- `integration-worker` до owner switch обрабатывает legacy-сводку, а также
+  CRM/webhook, монолитный `notification-delivery-outcome`, campaign/reporting
+  admin audit и остальные принадлежащие монолиту consumers через независимые
+  очереди, retry и DLQ.
 
 Общий distributed lock для всех scheduler не используется. Очистки
 verification challenges и зависших платежей идемпотентны, а durable-задачи
@@ -1555,6 +1792,9 @@ Dockerfile монолита и публикует health только на `127.
 Campaigns также имеет собственные `package.json`, lockfile, Prisma
 schema/client, NestJS build и Dockerfile в `apps/campaigns`; его image не
 содержит monolith artifacts и слушает только `127.0.0.1:4500`.
+Reporting имеет собственные `package.json`, lockfile, Prisma schema/client,
+NestJS build и Dockerfile в `apps/reporting`; его image не содержит monolith
+artifacts и слушает только `127.0.0.1:4600`.
 
 ## CI/CD
 
@@ -1565,12 +1805,31 @@ lifecycle marker выполняет только verify и staged-only checkout:
 image, не применяет migrations, не перезапускает контейнеры и не запускает
 порт `4500`. Ручной запуск позволяет выбрать `all`, `maintenance`,
 `notification-delivery`,
-`notification-delivery-database`, `campaigns` либо
-`campaigns-database`. Maintenance, Notification Delivery и routine
-Campaigns используют изолированный rollout с возвратом exact previous image.
-Database cutover разрешён только вручную из защищённой ветки `prod` и проходит
-явными фазами соответствующего runbook. После forward boundary recovery
+`notification-delivery-database`, `campaigns`, `campaigns-database`,
+`reporting` либо `reporting-database`. Maintenance, Notification Delivery,
+routine Campaigns и Reporting используют изолированный rollout с возвратом
+exact previous image.
+Database cutover разрешён только вручную из защищённой ветки `prod`. Campaigns
+проходит явными фазами существующего runbook. Для Reporting в рабочей ветке
+подготовлен полный resumable lifecycle, включая exact cleanup revision,
+`cleanup-staged`, `source-cleaned`, post-cleanup restore и `complete`. Это не
+является разрешением на production cutover: сначала обязательны полный
+Linux/Docker verify, отдельный Reporting rehearsal, review точного cleanup-
+контракта и operator runbook из `DOCUMENTATION/BACKLOG.md`, затем отдельное
+согласование каждой необратимой фазы. После forward boundary recovery
 выполняется только вперёд на новой database.
+
+Для ручного `deploy_target=reporting-database` защищённый read-only job
+`reporting_env_preflight` выполняется до полного `verify`: он требует уже
+staged exact clean SHA на VPS, проверяет production env, канонические
+Reporting PostgreSQL/RabbitMQ URL, точный набор integration consumers и
+`docker compose config --quiet` и admin-secret path. До создания database
+marker он требует staged marker и отсутствие target container/volume; при
+prepared marker read-only сверяет tracked container/volume/network, роли и
+secret. Preflight не делает checkout/build, не создаёт БД/marker и не запускает
+контейнеры; после полного verify та же проверка повторяется под production lock
+непосредственно перед build. Ошибка env или lifecycle state поэтому
+обнаруживается до дорогой части либо до любой мутации.
 
 Для Campaigns уже подготовлены routine
 `scripts/deploy-campaigns-production.sh`, resumable многофазный
@@ -1663,15 +1922,20 @@ Verify выполняет:
 pnpm install --frozen-lockfile
 pnpm --dir apps/notification-delivery install --frozen-lockfile
 pnpm --dir apps/campaigns install --frozen-lockfile
+pnpm --dir apps/reporting install --frozen-lockfile
 pnpm exec prisma generate
 create isolated Notification Delivery database and migration/runtime/backup roles
 create isolated Campaigns database and migration/runtime/backup roles
+create isolated Reporting database and migration/runtime/backup roles
 pnpm exec prisma migrate deploy
 NOTIFICATION_DELIVERY_DATABASE_URL=<migration-role-url> pnpm --dir apps/notification-delivery run prisma:migrate:deploy
 CAMPAIGNS_DATABASE_URL=<migration-role-url> pnpm --dir apps/campaigns run prisma:migrate:deploy
+REPORTING_DATABASE_URL=<migration-role-url> pnpm --dir apps/reporting run prisma:migrate:deploy
 recreate isolated Notification Delivery PostgreSQL and verify volume/system identifier/sentinel
 recreate isolated Campaigns PostgreSQL and verify volume/system identifier/sentinel
+recreate isolated Reporting PostgreSQL and verify volume/system identifier/sentinel
 pg_dump with backup role -> clean scratch pg_restore -> compare migrations/tables/rows/sequences
+pnpm run test:reporting-producer-boundaries
 curl ... "$RABBITMQ_MANAGEMENT_URL/api/overview"
 pnpm exec tsc --noEmit --incremental false -p tsconfig.build.json
 pnpm exec jest --runInBand
@@ -1681,31 +1945,38 @@ pnpm --dir apps/notification-delivery test
 pnpm --dir apps/campaigns run typecheck
 pnpm --dir apps/campaigns run lint
 pnpm --dir apps/campaigns test
+pnpm --dir apps/reporting run typecheck
+pnpm --dir apps/reporting run lint
+pnpm --dir apps/reporting test
 docker compose ... config --quiet + semantic validation
 pnpm build
 pnpm --dir apps/notification-delivery run build
 pnpm --dir apps/campaigns run build
+pnpm --dir apps/reporting run build
 compare monolith/app notification kinds, routing keys and queue names
 pnpm --dir apps/api-gateway run typecheck
 pnpm --dir apps/api-gateway test
-docker compose ... build api api-gateway maintenance-worker notification-delivery-worker
+docker compose ... build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service
 pg_dump --version && pg_restore --version && maintenance entrypoint check
-pnpm run test:messaging-integration
-pnpm --dir apps/notification-delivery run test:integration
-pnpm --dir apps/campaigns run test:integration
+MESSAGING_INTEGRATION_ALLOW_MUTATION=true pnpm run test:messaging-integration
+NOTIFICATION_DELIVERY_INTEGRATION_ALLOW_PURGE=true pnpm --dir apps/notification-delivery run test:integration
+CAMPAIGNS_INTEGRATION_ALLOW_MUTATION=true pnpm --dir apps/campaigns run test:integration
+REPORTING_INTEGRATION_ALLOW_MUTATION=true pnpm --dir apps/reporting run test:integration
 ```
 
-Semantic compose validation проверяет восемь постоянных app/broker-сервисов
+Semantic compose validation проверяет десять постоянных app/broker-сервисов
 обычного profile и отдельные profiles `notification-delivery-database` и
-`campaigns-database` с PostgreSQL-контейнерами и external volumes. Также
-проверяются отдельные API/Gateway/Maintenance/Notification Delivery/Campaigns
-images и revisions, автономные Docker contexts выделенных сервисов без
-target/image монолита, команды оставшихся worker-процессов, точные consumer
-kinds, три backup-цели, а отдельная contract-boundary проверка сравнивает
+`campaigns-database`/`reporting-database` с PostgreSQL-контейнерами и external
+volumes. Также проверяются отдельные
+API/Gateway/Maintenance/Database Restore/Notification Delivery/Campaigns/
+Reporting images и revisions, автономные Docker contexts выделенных сервисов
+без target/image монолита, команды оставшихся worker-процессов, точные consumer
+kinds, четыре backup/restore targets, а отдельная contract-boundary проверка
+сравнивает
 producer/consumer routing keys и queue names без общей source-зависимости.
 Дополнительно проверяются обе пары
 `INTEGRATION_*`/`NOTIFICATION_DELIVERY_*` retention-настроек, healthchecks и
-ограниченный `tmpfs` maintenance worker.
+ограниченные `tmpfs` maintenance и database restore workers.
 
 После успешного verify обычный deploy по SSH (после Campaigns
 `phase=complete`):
@@ -1713,10 +1984,11 @@ producer/consumer routing keys и queue names без общей source-зави�
 1. до изменения checkout проверяет Campaigns staged/lifecycle marker, затем
    обновляет `prod` только до exact `${{ github.sha }}` и требует чистый
    checkout;
-2. собирает отдельные API, Gateway, Maintenance, Notification Delivery и
-   Campaigns images с тегом и OCI revision полного SHA commit; standalone
-   images собираются только из своих app contexts, а smoke проверяет отсутствие
-   monolith artifacts;
+2. собирает отдельные API, Gateway, Maintenance, Database Restore,
+   Notification Delivery, Campaigns и Reporting images с тегом и OCI revision
+   полного SHA commit;
+   standalone images собираются только из своих app contexts, а smoke
+   проверяет отсутствие monolith artifacts;
 3. применяет отдельную service-owned Notification Delivery migration
    migration-ролью и проверяет DML/DDL-границу runtime-роли;
 4. при первом clean cutover останавливает producers, дожидается пустых четырёх
@@ -1727,8 +1999,9 @@ producer/consumer routing keys и queue names без общей source-зави�
    receipts/failures/Outbox нового сервиса пусты;
 6. атомарно создаёт marker, переключает recovery только в forward-направление
    и лишь затем включает Outbox publisher и публичный Gateway;
-7. ждёт readiness Maintenance и Notification Delivery, свежие heartbeat всех
-   worker-процессов, полный набор main/DLQ consumers и отсутствие Rabbit alarm;
+7. ждёт readiness Maintenance, Database Restore и Notification Delivery,
+   свежие heartbeat всех RabbitMQ worker-процессов, полный набор main/DLQ
+   consumers и отсутствие Rabbit alarm;
 8. сверяет revision через локальный
    `http://127.0.0.1:4200/api/v1/health/deployment` и публичный
    `https://api.winwidget.ru/api/v1/health/deployment`;

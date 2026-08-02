@@ -65,4 +65,20 @@ EXPOSE 4300
 
 CMD ["node", "dist/src/maintenance-worker-main.js"]
 
+FROM runner AS database-restore-runner
+
+USER root
+
+RUN apk add --no-cache flock su-exec
+
+COPY --from=builder --chown=nestjs:nodejs /app/apps/notification-delivery/prisma ./apps/notification-delivery/prisma
+COPY --from=builder --chown=nestjs:nodejs /app/apps/campaigns/prisma ./apps/campaigns/prisma
+COPY --from=builder --chown=nestjs:nodejs /app/apps/reporting/prisma ./apps/reporting/prisma
+COPY database-restore-entrypoint.sh /usr/local/bin/database-restore-entrypoint.sh
+
+RUN chmod 755 /usr/local/bin/database-restore-entrypoint.sh
+
+ENTRYPOINT ["database-restore-entrypoint.sh"]
+CMD ["node", "dist/src/database-restore-worker-main.js"]
+
 FROM runner AS api-runner

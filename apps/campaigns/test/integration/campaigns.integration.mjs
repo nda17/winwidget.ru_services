@@ -10,6 +10,9 @@ if (!databaseUrl) {
 	);
 	process.exit(0);
 }
+if (process.env.CAMPAIGNS_INTEGRATION_ALLOW_MUTATION !== 'true') {
+	throw new Error('CAMPAIGNS_INTEGRATION_ALLOW_MUTATION=true is required');
+}
 
 const migrationDatabaseUrl =
 	process.env.CAMPAIGNS_TEST_MIGRATION_DATABASE_URL?.trim() || databaseUrl;
@@ -18,6 +21,10 @@ assertLocalTestDatabase(
 	migrationDatabaseUrl,
 	'CAMPAIGNS_TEST_MIGRATION_DATABASE_URL'
 );
+const testRabbitUrl = process.env.CAMPAIGNS_TEST_RABBITMQ_URL?.trim();
+if (testRabbitUrl) {
+	assertLocalTestRabbit(testRabbitUrl, 'CAMPAIGNS_TEST_RABBITMQ_URL');
+}
 
 const internalToken = `campaigns-integration-${randomUUID()}`;
 const corsAllowedOrigin = 'http://127.0.0.1:3000';
@@ -203,6 +210,34 @@ function assertLocalTestDatabase(url, variableName) {
 		throw new Error(
 			`${variableName} must point to a local test or CI database`
 		);
+	}
+}
+
+function assertLocalTestRabbit(url, variableName) {
+	let parsed;
+	try {
+		parsed = new URL(url);
+	} catch {
+		throw new Error(`${variableName} must be a valid URL`);
+	}
+	if (
+		parsed.protocol !== 'amqp:' ||
+		!['127.0.0.1', 'localhost', '[::1]', '::1'].includes(
+			parsed.hostname.toLowerCase()
+		) ||
+		decodeURIComponent(parsed.pathname.replace(/^\//, '')) !==
+			'winwidget' ||
+		!parsed.username ||
+		!parsed.password
+	) {
+		throw new Error(
+			`${variableName} must use authenticated local vhost winwidget`
+		);
+	}
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.includes('PRODUCTION') && value?.trim() === url.trim()) {
+			throw new Error(`${variableName} must not reuse ${key}`);
+		}
 	}
 }
 

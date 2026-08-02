@@ -15,6 +15,7 @@ export type AdminEventLogSection =
 	| 'TELEGRAM_BOT'
 	| 'AFFILIATE'
 	| 'MESSAGING'
+	| 'REPORTING'
 	| 'DEV_TOOLS'
 	| 'WIDGETS';
 
@@ -47,12 +48,18 @@ export type AdminEventLogAction =
 	| 'SITE_SETTINGS_UPDATE'
 	| 'AFFILIATE_SETTINGS_UPDATE'
 	| 'TELEGRAM_BOT_SETTINGS_UPDATE'
+	| 'TELEGRAM_SCHEDULE_SETTINGS_REJECTED'
 	| 'TELEGRAM_BOT_WEBHOOK_REINSTALL'
 	| 'TELEGRAM_DATABASE_BACKUP_CREATE'
 	| 'TELEGRAM_DATABASE_RESTORE'
 	| 'MESSAGING_FAILURE_RETRY'
 	| 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY'
+	| 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE'
+	| 'REPORTING_DAILY_SUMMARY_SCHEDULE_UPDATE'
+	| 'REPORTING_DAILY_SUMMARY_SCHEDULE_REJECTED'
+	| 'REPORTING_DELIVERY_RETRY'
 	| 'DEV_DATABASE_RESTORE'
+	| 'DEV_DATABASE_RESTORE_PUBLISHED'
 	| 'WIDGET_UPDATE'
 	| 'WIDGET_PUBLISH'
 	| 'WIDGET_DRAFT_DISCARD'
@@ -72,6 +79,7 @@ const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
 	'TELEGRAM_BOT',
 	'AFFILIATE',
 	'MESSAGING',
+	'REPORTING',
 	'DEV_TOOLS',
 	'WIDGETS'
 ];
@@ -105,12 +113,18 @@ const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
 	'SITE_SETTINGS_UPDATE',
 	'AFFILIATE_SETTINGS_UPDATE',
 	'TELEGRAM_BOT_SETTINGS_UPDATE',
+	'TELEGRAM_SCHEDULE_SETTINGS_REJECTED',
 	'TELEGRAM_BOT_WEBHOOK_REINSTALL',
 	'TELEGRAM_DATABASE_BACKUP_CREATE',
 	'TELEGRAM_DATABASE_RESTORE',
 	'MESSAGING_FAILURE_RETRY',
 	'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
+	'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+	'REPORTING_DAILY_SUMMARY_SCHEDULE_UPDATE',
+	'REPORTING_DAILY_SUMMARY_SCHEDULE_REJECTED',
+	'REPORTING_DELIVERY_RETRY',
 	'DEV_DATABASE_RESTORE',
+	'DEV_DATABASE_RESTORE_PUBLISHED',
 	'WIDGET_UPDATE',
 	'WIDGET_PUBLISH',
 	'WIDGET_DRAFT_DISCARD',
@@ -287,6 +301,41 @@ export class AdminEventLogService {
 		}
 	}
 
+	async recordOnce(recordId: string, input: AdminEventLogRecordInput) {
+		const normalizedRecordId = recordId.trim();
+		if (!/^[A-Za-z0-9_-]{1,128}$/.test(normalizedRecordId)) {
+			this.logger.warn('Admin event log idempotency id is invalid');
+			return null;
+		}
+		try {
+			return await this.recordWithClient(
+				this.prisma,
+				input,
+				normalizedRecordId
+			);
+		} catch (error) {
+			try {
+				const existing = await this.prisma.adminEventLog.findUnique({
+					where: { id: normalizedRecordId }
+				});
+				if (
+					existing?.action === input.action &&
+					existing.entityId === (input.entityId || null)
+				) {
+					return existing;
+				}
+			} catch {
+				// The original error is logged below without exposing audit payloads.
+			}
+			this.logger.warn(
+				`Idempotent admin event log failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`
+			);
+			return null;
+		}
+	}
+
 	recordInTransaction(
 		transaction: Prisma.TransactionClient,
 		input: AdminEventLogRecordInput
@@ -296,7 +345,8 @@ export class AdminEventLogService {
 
 	private async recordWithClient(
 		client: Prisma.TransactionClient | PrismaService,
-		input: AdminEventLogRecordInput
+		input: AdminEventLogRecordInput,
+		recordId?: string
 	) {
 		const [adminSnapshot, targetUserSnapshot] = await Promise.all([
 			this.getUserSnapshot(input.adminId, client),
@@ -306,6 +356,7 @@ export class AdminEventLogService {
 
 		return client.adminEventLog.create({
 			data: {
+				...(recordId ? { id: recordId } : {}),
 				adminId: adminSnapshot ? input.adminId || null : null,
 				adminName: adminSnapshot?.name ?? null,
 				adminEmail: adminSnapshot?.email ?? null,

@@ -12,6 +12,10 @@ server_root="$APP_ROOT/winwidget.ru_server"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$server_root/scripts/production-deploy-lock.sh"
 acquire_production_deploy_lock "maintenance deployment"
+# shellcheck source=scripts/database-restore-production-guard.sh
+source "$server_root/scripts/database-restore-production-guard.sh"
+# shellcheck source=scripts/reporting-cutover-lifecycle.sh
+source "$server_root/scripts/reporting-cutover-lifecycle.sh"
 recreate_started=false
 rollout_verified=false
 previous_image_ref=""
@@ -163,6 +167,10 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+reporting_guard_before_checkout_revision "$deploy_revision" || {
+	echo 'Maintenance deployment revision conflicts with the active Reporting lifecycle.' >&2
+	exit 1
+}
 source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
 # shellcheck source=scripts/campaigns-database-lifecycle.sh
 source "$server_root/scripts/campaigns-database-lifecycle.sh"
@@ -182,6 +190,9 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
 	echo "Backend production Compose file was not found." >&2
 	exit 1
 fi
+
+# database-restore-production-guard: before-mutation
+database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
 
 duplicate_env_keys="$(
 	awk '
@@ -529,6 +540,7 @@ unsafe_contract_changes="$(
 		src/messaging/messaging.constants.ts \
 		src/messaging/messaging-event-contract.ts \
 		src/messaging/rabbitmq.service.ts \
+		scripts/database-restore-production-guard.sh \
 		scripts/notification-delivery-database-lifecycle.sh \
 		apps/campaigns/prisma/schema.prisma \
 		apps/campaigns/prisma/migrations \

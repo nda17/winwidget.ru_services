@@ -106,6 +106,33 @@ describe('RabbitMqService topology', () => {
 			'winwidget.events',
 			'database-backup.dead-letter'
 		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.reporting.v1',
+			'winwidget.events',
+			'admin.audit.reporting.v1'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.reporting.v1',
+			'winwidget.events',
+			'manual.reporting-admin-audit'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.reporting.v1',
+			'winwidget.manual-retry',
+			'reporting-admin-audit'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.reporting.v1.dead-letter',
+			'winwidget.dead-letter',
+			'reporting-admin-audit.dead-letter'
+		);
+		expect(channel.assertQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.reporting.v1.retry-v2.1',
+			expect.objectContaining({
+				deadLetterExchange: 'winwidget.manual-retry',
+				deadLetterRoutingKey: 'reporting-admin-audit'
+			})
+		);
 	});
 
 	it('publishes event payload as JSON bytes', async () => {
@@ -296,6 +323,12 @@ describe('RabbitMqService topology', () => {
 
 		await service.consume('database-backup', handler, 1);
 		expect(service.areConsumersReady()).toBe(true);
+		const [queue, , options] = (deliveryChannel.consume as jest.Mock).mock
+			.calls[0];
+		expect(options).toEqual({
+			noAck: false,
+			consumerTag: (service as any).getConsumerTag(queue)
+		});
 		await service.cancelConsumers();
 
 		expect(service.areConsumersReady()).toBe(false);
@@ -391,6 +424,38 @@ describe('RabbitMqService topology', () => {
 		} as unknown as ConfigService);
 
 		expect((service as any).getAssertTopologyEnabled()).toBe(expected);
+	});
+
+	it('builds a consumer tag bound to the runtime revision and container hostname', () => {
+		const revision = '0123456789abcdef0123456789abcdef01234567';
+		const service = new RabbitMqService({
+			get: jest.fn((key: string) => {
+				if (key === 'RABBITMQ_CONNECTION_NAME')
+					return 'winwidget-integration-worker';
+				if (key === 'APP_REVISION') return revision;
+				return undefined;
+			})
+		} as unknown as ConfigService);
+
+		expect(
+			(service as any).getConsumerTag('winwidget.admin.audit.reporting.v1')
+		).toMatch(
+			new RegExp(
+				`^winwidget-integration-worker:${revision}:[^:]+:winwidget\\.admin\\.audit\\.reporting\\.v1$`
+			)
+		);
+	});
+
+	it('rejects a consumer tag above the AMQP short-string byte limit', () => {
+		const service = new RabbitMqService({
+			get: jest.fn((key: string) =>
+				key === 'RABBITMQ_CONNECTION_NAME' ? 'x'.repeat(256) : undefined
+			)
+		} as unknown as ConfigService);
+
+		expect(() => (service as any).getConsumerTag('queue')).toThrow(
+			'RabbitMQ consumer tag exceeds the AMQP short-string limit'
+		);
 	});
 
 	it('fails fast when a worker queue is not ready', async () => {

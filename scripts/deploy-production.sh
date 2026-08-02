@@ -2,6 +2,76 @@
 
 set -euo pipefail
 
+validate_routine_database_restore_create_gate() {
+	local env_file="$1"
+	local matching_lines
+
+	matching_lines="$(
+		LC_ALL=C grep -Ec '^DATABASE_RESTORE_PRODUCTION_ENABLED=' "$env_file" || true
+	)"
+	if [[ "$matching_lines" != '1' ]]; then
+		echo 'Routine production deployment requires exactly one literal DATABASE_RESTORE_PRODUCTION_ENABLED=false line.' >&2
+		return 1
+	fi
+	if LC_ALL=C grep -Fxq 'DATABASE_RESTORE_PRODUCTION_ENABLED=false' "$env_file"; then
+		return 0
+	fi
+	if LC_ALL=C grep -Fxq 'DATABASE_RESTORE_PRODUCTION_ENABLED=true' "$env_file"; then
+		echo 'Routine production deployment rejects DATABASE_RESTORE_PRODUCTION_ENABLED=true. Use a separate reviewed restore-control action; it is not implemented in this release.' >&2
+		return 1
+	fi
+
+	echo 'Routine production deployment requires the literal DATABASE_RESTORE_PRODUCTION_ENABLED=false line.' >&2
+	return 1
+}
+
+run_database_restore_create_gate_self_test() {
+	local self_test_directory
+	local false_env
+	local true_env
+	local invalid_env
+	local rejection
+
+	self_test_directory="$(
+		mktemp -d "${TMPDIR:-/tmp}/winwidget-restore-create-gate.XXXXXX"
+	)"
+	false_env="$self_test_directory/false.env"
+	true_env="$self_test_directory/true.env"
+	invalid_env="$self_test_directory/invalid.env"
+	trap 'rm -f "$false_env" "$true_env" "$invalid_env"; rmdir "$self_test_directory"' RETURN
+
+	printf '%s\n' 'DATABASE_RESTORE_PRODUCTION_ENABLED=false' >"$false_env"
+	printf '%s\n' 'DATABASE_RESTORE_PRODUCTION_ENABLED=true' >"$true_env"
+	printf '%s\n' 'DATABASE_RESTORE_PRODUCTION_ENABLED= false' >"$invalid_env"
+
+	validate_routine_database_restore_create_gate "$false_env"
+	if rejection="$(
+		validate_routine_database_restore_create_gate "$true_env" 2>&1
+	)"; then
+		echo 'Database restore create-gate self-test accepted true.' >&2
+		return 1
+	fi
+	if [[ "$rejection" != *'separate reviewed restore-control action'* ]]; then
+		echo 'Database restore create-gate self-test lost the reviewed-action guidance.' >&2
+		return 1
+	fi
+	if validate_routine_database_restore_create_gate "$invalid_env" >/dev/null 2>&1; then
+		echo 'Database restore create-gate self-test accepted a non-literal false value.' >&2
+		return 1
+	fi
+
+	printf 'database_restore_routine_create_gate=passed\n'
+}
+
+if [[ "${1:-}" == '--self-test-database-restore-create-gate' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'Database restore create-gate self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_database_restore_create_gate_self_test
+	exit 0
+fi
+
 APP_ROOT="${APP_ROOT:-/opt/winwidget}"
 ENV_FILE="${ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 COMPOSE_FILE="${COMPOSE_FILE:-$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml}"
@@ -12,6 +82,7 @@ GATEWAY_READINESS_URL="${GATEWAY_READINESS_URL:-http://127.0.0.1:4100/health/rea
 MAINTENANCE_READINESS_URL="${MAINTENANCE_READINESS_URL:-http://127.0.0.1:4300/health/ready}"
 NOTIFICATION_DELIVERY_READINESS_URL="${NOTIFICATION_DELIVERY_READINESS_URL:-http://127.0.0.1:4401/health/ready}"
 CAMPAIGNS_READINESS_URL="${CAMPAIGNS_READINESS_URL:-http://127.0.0.1:4500/health/ready}"
+REPORTING_READINESS_URL="${REPORTING_READINESS_URL:-http://127.0.0.1:4600/health/ready}"
 NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
@@ -24,8 +95,14 @@ server_root="$APP_ROOT/winwidget.ru_server"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$server_root/scripts/production-deploy-lock.sh"
 acquire_production_deploy_lock "full backend deployment"
+# shellcheck source=scripts/database-restore-production-guard.sh
+source "$server_root/scripts/database-restore-production-guard.sh"
 # shellcheck source=scripts/core-database-production-guard.sh
 source "$server_root/scripts/core-database-production-guard.sh"
+# shellcheck source=scripts/reporting-database-lifecycle.sh
+source "$server_root/scripts/reporting-database-lifecycle.sh"
+# shellcheck source=scripts/reporting-cutover-lifecycle.sh
+source "$server_root/scripts/reporting-cutover-lifecycle.sh"
 # shellcheck source=scripts/campaigns-contract-migration-guard.sh
 source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
@@ -43,6 +120,52 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+
+# database-restore-production-guard: before-mutation
+database_restore_guard_assert_before_mutation \
+	identity-if-present "$ENV_FILE"
+
+reporting_automatic_prod_push="${REPORTING_AUTOMATIC_PROD_PUSH:-false}"
+reporting_deploy_action="$(
+	reporting_first_rollout_deploy_action \
+		"$reporting_automatic_prod_push" \
+		"$deploy_revision"
+)" || {
+	echo "Reporting first-rollout marker state is invalid." >&2
+	exit 1
+}
+case "$reporting_deploy_action" in
+	stage)
+		reporting_write_first_rollout_staged_marker "$deploy_revision"
+		echo "Reporting first-rollout revision $deploy_revision is staged on the VPS."
+		echo "Restore safety state was verified; no Compose configuration was evaluated, image built, runtime changed or database accessed."
+		echo "Run the manual reporting-database prepare workflow next."
+		exit 0
+		;;
+	prepare)
+		echo "Manual full deployment is blocked until the staged Reporting database is prepared." >&2
+		echo "Run the reporting-database prepare workflow for revision $deploy_revision." >&2
+		exit 1
+		;;
+	block)
+		echo "Reporting database preparation is incomplete at revision $deploy_revision." >&2
+		echo "Resume the pinned reporting-database prepare workflow before any deployment." >&2
+		exit 1
+		;;
+	deploy) ;;
+	*)
+		echo "Reporting first-rollout action is invalid." >&2
+		exit 1
+		;;
+esac
+reporting_scheduler_policy="$(reporting_cutover_runtime_scheduler_policy)" || {
+	echo 'Reporting cutover scheduler policy is invalid.' >&2
+	exit 1
+}
+reporting_gateway_policy="$(reporting_cutover_runtime_gateway_policy)" || {
+	echo 'Reporting cutover Gateway policy is invalid.' >&2
+	exit 1
+}
 # Defaults are owned by the sourced lifecycle; keep them explicit here so
 # static analysis can follow their later use through the dynamic source path.
 notification_database_cutover_active=false
@@ -100,17 +223,23 @@ export APP_REVISION="$deploy_revision"
 export APP_VERSION="git-$deploy_revision"
 export MAINTENANCE_REVISION="$deploy_revision"
 export MAINTENANCE_IMAGE="winwidget-maintenance:git-$deploy_revision"
+export DATABASE_RESTORE_REVISION="$deploy_revision"
+export DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$deploy_revision"
 export NOTIFICATION_DELIVERY_REVISION="$deploy_revision"
 export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$deploy_revision"
 export CAMPAIGNS_REVISION="$deploy_revision"
 export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$deploy_revision"
+export REPORTING_REVISION="$deploy_revision"
+export REPORTING_IMAGE="winwidget-reporting:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
 echo "Building gateway image: winwidget-api-gateway:$APP_VERSION"
 echo "Building maintenance image: $MAINTENANCE_IMAGE"
+echo "Building isolated database restore image: $DATABASE_RESTORE_IMAGE"
 echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
 echo "Building Campaigns image: $CAMPAIGNS_IMAGE"
+echo "Building Reporting image; its runtime remains independent except for the exact staged cleanup revision: $REPORTING_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -160,7 +289,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION)
+		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION)
 			continue
 			;;
 	esac
@@ -254,6 +383,9 @@ assert_distinct_database_roles() {
 		CAMPAIGNS_DATABASE_URL
 		CAMPAIGNS_MIGRATION_DATABASE_URL
 		CAMPAIGNS_BACKUP_URL
+		REPORTING_DATABASE_URL
+		REPORTING_MIGRATION_DATABASE_URL
+		REPORTING_BACKUP_URL
 	)
 	local -a role_users=()
 	local key
@@ -266,7 +398,7 @@ assert_distinct_database_roles() {
 	for ((left = 0; left < ${#role_users[@]}; left++)); do
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
-				echo "Core, Notification Delivery and Campaigns runtime, migration and backup URLs must use ten distinct PostgreSQL roles." >&2
+				echo "Core, Notification Delivery, Campaigns and Reporting database URLs must use thirteen distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -299,6 +431,93 @@ require_env_exact_list() {
 		echo "$key in $ENV_FILE must contain exactly: $expected" >&2
 		exit 1
 	fi
+}
+
+require_env_base64url_secret() {
+	local key="$1"
+	local minimum_length="$2"
+	local maximum_length="$3"
+
+	if ! awk -v key="$key" -v minimum="$minimum_length" \
+		-v maximum="$maximum_length" '
+		/^[[:space:]]*(#|$)/ { next }
+		{
+			prefix = key "="
+			if (index($0, prefix) != 1) next
+			value = substr($0, length(prefix) + 1)
+			if (value ~ /^[A-Za-z0-9_-]+$/ &&
+				length(value) >= minimum && length(value) <= maximum) ok = 1
+		}
+		END { exit(ok ? 0 : 1) }
+	' "$ENV_FILE"; then
+		echo "$key must be an unquoted base64url secret between $minimum_length and $maximum_length characters with no surrounding whitespace" >&2
+		exit 1
+	fi
+}
+
+assert_database_restore_admin_secret_file() {
+	local key="$1"
+	local expected_path="$2"
+	local secret_path
+	local secret_identity
+	local secret_size
+
+	secret_path="$(get_env_value "$key")"
+	if [[ "$secret_path" != "$expected_path" ||
+		! -f "$secret_path" || -L "$secret_path" ]]; then
+		echo "$key must reference its canonical regular production secret file." >&2
+		exit 1
+	fi
+	secret_identity="$(stat -c '%a|%U:%G' "$secret_path")"
+	secret_size="$(stat -c '%s' "$secret_path")"
+	if [[ "$secret_identity" != '600|root:root' ||
+		! "$secret_size" =~ ^[0-9]+$ ]] ||
+		((secret_size < 16 || secret_size > 4096)); then
+		echo "$key must be a root-owned mode-600 secret between 16 and 4096 bytes." >&2
+		exit 1
+	fi
+}
+
+prepare_database_restore_storage() {
+	local storage_path
+	local active_entry
+	local directory
+
+	storage_path="$(get_env_value DATABASE_RESTORE_STORAGE_DIR)"
+	if [[ "$storage_path" != "$APP_ROOT/deploy/backend/database-restores" ]]; then
+		echo 'DATABASE_RESTORE_STORAGE_DIR must use the canonical scoped production path.' >&2
+		exit 1
+	fi
+	if [[ -e "$storage_path" || -L "$storage_path" ]]; then
+		if [[ ! -d "$storage_path" || -L "$storage_path" ||
+			"$(stat -c '%u:%g:%a' "$storage_path")" != '1001:1001:700' ]]; then
+			echo 'Database restore storage must be a UID/GID 1001 private directory with mode 700.' >&2
+			exit 1
+		fi
+	else
+		install -d -m 700 -o 1001 -g 1001 "$storage_path"
+	fi
+
+	for directory in queued processing locks gates fences; do
+		if [[ ! -e "$storage_path/$directory" &&
+			! -L "$storage_path/$directory" ]]; then
+			continue
+		fi
+		if [[ ! -d "$storage_path/$directory" ||
+			-L "$storage_path/$directory" ||
+			"$(stat -c '%u:%g:%a' "$storage_path/$directory")" != '1001:1001:700' ]]; then
+			echo "Unsafe database restore queue directory: $directory" >&2
+			exit 1
+		fi
+		active_entry="$(
+			find "$storage_path/$directory" -mindepth 1 -maxdepth 1 \
+				-print -quit 2>/dev/null || true
+		)"
+		if [[ -n "$active_entry" ]]; then
+			echo "Deployment is blocked by active or fenced database restore state in $directory." >&2
+			exit 1
+		fi
+	done
 }
 
 mode="$(get_env_value "MODE" || true)"
@@ -367,6 +586,20 @@ case "$mode" in
 		require_env_key "CAMPAIGNS_POSTGRES_DATA_VOLUME"
 		require_env_key "CAMPAIGNS_POSTGRES_ADMIN_USER"
 		require_env_key "CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "REPORTING_DATABASE_URL"
+		require_env_key "REPORTING_MIGRATION_DATABASE_URL"
+		require_env_key "REPORTING_BACKUP_URL"
+		require_env_key "REPORTING_POSTGRES_IMAGE"
+		require_env_key "REPORTING_POSTGRES_PORT"
+		require_env_key "REPORTING_POSTGRES_DATA_VOLUME"
+		require_env_key "REPORTING_POSTGRES_ADMIN_USER"
+		require_env_key "REPORTING_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "CORE_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "DATABASE_RESTORE_STORAGE_DIR"
+		require_env_key "DATABASE_RESTORE_QUEUE_SECRET"
+		require_env_key "DATABASE_RESTORE_PRODUCTION_ENABLED"
+		require_env_key "DATABASE_RESTORE_POLL_INTERVAL_MS"
+		require_env_key "DATABASE_RESTORE_COMMAND_TIMEOUT_MS"
 		require_env_key "PRODUCTION_HOST"
 		require_env_key "AUTH_COOKIE_DOMAIN"
 		require_env_key "COMPOSE_PROJECT_NAME"
@@ -380,6 +613,7 @@ case "$mode" in
 		require_env_key "RABBITMQ_MAINTENANCE_WORKER_URL"
 		require_env_key "RABBITMQ_NOTIFICATION_DELIVERY_URL"
 		require_env_key "RABBITMQ_CAMPAIGNS_URL"
+		require_env_key "RABBITMQ_REPORTING_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -405,6 +639,17 @@ case "$mode" in
 		require_env_key "CAMPAIGNS_OUTBOX_BATCH_SIZE"
 		require_env_key "CAMPAIGNS_OUTBOX_POLL_INTERVAL_MS"
 		require_env_key "CAMPAIGNS_OUTBOX_RETENTION_DAYS"
+		require_env_key "REPORTING_INTERNAL_TOKEN"
+		require_env_key "REPORTING_INTERNAL_TIMEOUT_MS"
+		require_env_key "REPORTING_PROCESS_ROLE"
+		require_env_key "REPORTING_LISTEN_HOST"
+		require_env_key "REPORTING_PORT"
+		require_env_key "REPORTING_CORE_INTERNAL_BASE_URL"
+		require_env_key "REPORTING_SCHEDULER_ENABLED"
+		require_env_key "REPORTING_PREFETCH"
+		require_env_key "REPORTING_OUTBOX_BATCH_SIZE"
+		require_env_key "REPORTING_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "REPORTING_OUTBOX_RETENTION_DAYS"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
 		require_env_key "MAINTENANCE_HEALTH_PORT"
@@ -418,7 +663,7 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_KINDS"
 		require_env_exact_list \
 			"INTEGRATION_WORKER_KINDS" \
-			"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
+			"$(reporting_expected_integration_worker_kinds)"
 		require_env_exact_list \
 			"MAINTENANCE_WORKER_KINDS" \
 			"database-backup"
@@ -579,6 +824,112 @@ case "$mode" in
 			echo "CAMPAIGNS_PREFETCH must be between 1 and 100" >&2
 			exit 1
 		fi
+		reporting_validate_preflight_secret_isolation || {
+			echo 'Reporting credential isolation preflight failed.' >&2
+			exit 1
+		}
+		if [[ "$(get_env_value REPORTING_PROCESS_ROLE)" != "all" ||
+			"$(get_env_value REPORTING_LISTEN_HOST)" != "127.0.0.1" ||
+			"$(get_env_value REPORTING_PORT)" != "4600" ||
+			"$(get_env_value REPORTING_CORE_INTERNAL_BASE_URL)" != "http://127.0.0.1:4200" ]]; then
+			echo "Reporting must run as the loopback-only single-VPS all role on ports 4200/4600" >&2
+			exit 1
+		fi
+		reporting_scheduler_enabled="$(get_env_value REPORTING_SCHEDULER_ENABLED)"
+		if [[ "$reporting_scheduler_policy" == 'transitional' ||
+			"$reporting_scheduler_policy" == 'fenced' ]]; then
+			echo 'A coordinated full deployment is blocked during the Daily Summary owner hand-off; use the Reporting-only target.' >&2
+			exit 1
+		fi
+		if ! reporting_cutover_scheduler_value_allowed \
+			"$reporting_scheduler_policy" "$reporting_scheduler_enabled"; then
+			echo "REPORTING_SCHEDULER_ENABLED=$reporting_scheduler_enabled conflicts with cutover policy $reporting_scheduler_policy" >&2
+			exit 1
+		fi
+		reporting_internal_token="$(get_env_value REPORTING_INTERNAL_TOKEN)"
+		if [[ "$reporting_internal_token" == change_me* ||
+			"$reporting_internal_token" == "ci_reporting_internal_token_at_least_32_chars" ||
+			${#reporting_internal_token} -lt 32 ]]; then
+			echo "REPORTING_INTERNAL_TOKEN must be a production-only secret of at least 32 characters" >&2
+			exit 1
+		fi
+		unset reporting_internal_token
+		reporting_internal_timeout_ms="$(get_env_value REPORTING_INTERNAL_TIMEOUT_MS)"
+		reporting_prefetch="$(get_env_value REPORTING_PREFETCH)"
+		reporting_outbox_batch_size="$(get_env_value REPORTING_OUTBOX_BATCH_SIZE)"
+		reporting_outbox_poll_interval_ms="$(get_env_value REPORTING_OUTBOX_POLL_INTERVAL_MS)"
+		reporting_outbox_retention_days="$(get_env_value REPORTING_OUTBOX_RETENTION_DAYS)"
+		if [[ ! "$reporting_internal_timeout_ms" =~ ^[0-9]+$ ]] ||
+			((reporting_internal_timeout_ms < 500 ||
+				reporting_internal_timeout_ms > 60000)); then
+			echo "REPORTING_INTERNAL_TIMEOUT_MS must be between 500 and 60000" >&2
+			exit 1
+		fi
+		if [[ ! "$reporting_prefetch" =~ ^[1-9][0-9]*$ ]] ||
+			((reporting_prefetch > 100)); then
+			echo "REPORTING_PREFETCH must be between 1 and 100" >&2
+			exit 1
+		fi
+		if [[ ! "$reporting_outbox_batch_size" =~ ^[1-9][0-9]*$ ]] ||
+			((reporting_outbox_batch_size > 500)); then
+			echo "REPORTING_OUTBOX_BATCH_SIZE must be between 1 and 500" >&2
+			exit 1
+		fi
+		if [[ ! "$reporting_outbox_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((reporting_outbox_poll_interval_ms < 100 ||
+				reporting_outbox_poll_interval_ms > 60000)); then
+			echo "REPORTING_OUTBOX_POLL_INTERVAL_MS must be between 100 and 60000" >&2
+			exit 1
+		fi
+		if [[ ! "$reporting_outbox_retention_days" =~ ^[1-9][0-9]*$ ]] ||
+			((reporting_outbox_retention_days > 365)); then
+			echo "REPORTING_OUTBOX_RETENTION_DAYS must be between 1 and 365" >&2
+			exit 1
+		fi
+		require_env_base64url_secret DATABASE_RESTORE_QUEUE_SECRET 43 128
+		database_restore_queue_secret="$(
+			get_env_value DATABASE_RESTORE_QUEUE_SECRET
+		)"
+		if [[ "$database_restore_queue_secret" == 'ci_database_restore_queue_secret_at_least_32_chars' ||
+			"$database_restore_queue_secret" == "$(get_env_value NOTIFICATION_DELIVERY_INTERNAL_TOKEN)" ||
+			"$database_restore_queue_secret" == "$(get_env_value CAMPAIGNS_INTERNAL_TOKEN)" ||
+			"$database_restore_queue_secret" == "$(get_env_value REPORTING_INTERNAL_TOKEN)" ||
+			"$database_restore_queue_secret" == "$(get_env_value PAYMENT_METHOD_ENCRYPTION_KEY)" ]]; then
+			echo 'DATABASE_RESTORE_QUEUE_SECRET must be a unique production-only secret.' >&2
+			exit 1
+		fi
+		unset database_restore_queue_secret
+		validate_routine_database_restore_create_gate "$ENV_FILE" || exit 1
+		database_restore_poll_interval_ms="$(
+			get_env_value DATABASE_RESTORE_POLL_INTERVAL_MS
+		)"
+		database_restore_command_timeout_ms="$(
+			get_env_value DATABASE_RESTORE_COMMAND_TIMEOUT_MS
+		)"
+		if [[ ! "$database_restore_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((database_restore_poll_interval_ms < 250 ||
+				database_restore_poll_interval_ms > 60000)); then
+			echo 'DATABASE_RESTORE_POLL_INTERVAL_MS must be between 250 and 60000.' >&2
+			exit 1
+		fi
+		if [[ ! "$database_restore_command_timeout_ms" =~ ^[0-9]+$ ]] ||
+			((database_restore_command_timeout_ms < 60000 ||
+				database_restore_command_timeout_ms > 7200000)); then
+			echo 'DATABASE_RESTORE_COMMAND_TIMEOUT_MS must be between 60000 and 7200000.' >&2
+			exit 1
+		fi
+		assert_database_restore_admin_secret_file \
+			CORE_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.core-postgres-temporary-admin-password"
+		assert_database_restore_admin_secret_file \
+			NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.notification-delivery-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.campaigns-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			REPORTING_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.reporting-postgres-admin-password"
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
 			SMTP_GREETING_TIMEOUT_MS \
@@ -640,6 +991,9 @@ fi
 assert_core_database_production_boundary
 assert_notification_database_postgres_identity
 assert_campaigns_database_postgres_identity
+if [[ "$mode" == 'production' ]]; then
+	prepare_database_restore_storage
+fi
 rabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"
 if [[ "$rabbitmq_vhost" != "winwidget" ]]; then
 	echo "RABBITMQ_VHOST must be winwidget, got: ${rabbitmq_vhost:-empty}" >&2
@@ -716,9 +1070,11 @@ routine_stop_services=(
 	outbox-publisher
 	integration-worker
 	maintenance-worker
+	database-restore-worker
 	notification-delivery-worker
 )
 declare -A routine_stop_container_ids=()
+reporting_cleanup_stop_recovery_active=false
 # Remove this exact-image bootstrap after the first successful rollout verifies
 # that the replacement API exits without Docker SIGKILL.
 LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION="42c422ca4c2c3a8ce758a37773d6cb0e6b689db7"
@@ -735,6 +1091,10 @@ capture_routine_stop_containers() {
 			compose_target ps --status running -q "$service" \
 				2>/dev/null || true
 		)"
+		if [[ -z "$container_id" && "$service" == 'database-restore-worker' &&
+			-z "$(compose_target ps -a -q "$service" 2>/dev/null || true)" ]]; then
+			continue
+		fi
 		if [[ -z "$container_id" || "$container_id" == *$'\n'* ]]; then
 			echo "Exactly one running $service is required before the core migration boundary." >&2
 			return 1
@@ -753,16 +1113,17 @@ restore_routine_containers_after_failed_stop() {
 
 	echo "Restoring the exact pre-migration runtime after an unsafe stop." >&2
 	for service in \
+		reporting-service \
 		outbox-publisher \
 		integration-worker \
 		maintenance-worker \
+		database-restore-worker \
 		notification-delivery-worker \
 		campaigns-service \
 		api \
 		api-gateway; do
 		container_id="${routine_stop_container_ids[$service]:-}"
 		if [[ -z "$container_id" ]]; then
-			recovery_failed=true
 			continue
 		fi
 		running="$(
@@ -788,6 +1149,9 @@ restore_routine_containers_after_failed_stop() {
 		all_running=true
 		for service in "${routine_stop_services[@]}"; do
 			container_id="${routine_stop_container_ids[$service]:-}"
+			if [[ -z "$container_id" ]]; then
+				continue
+			fi
 			running="$(
 				docker inspect --format '{{.State.Running}}' \
 					"$container_id" 2>/dev/null || true
@@ -798,17 +1162,31 @@ restore_routine_containers_after_failed_stop() {
 			fi
 		done
 		if [[ "$all_running" == "true" ]] &&
-			curl -fsS --connect-timeout 2 --max-time 5 \
-				"$READINESS_URL" >/dev/null &&
-			curl -fsS --connect-timeout 2 --max-time 5 \
-				"$GATEWAY_READINESS_URL" >/dev/null &&
-			curl -fsS --connect-timeout 2 --max-time 5 \
-				"$MAINTENANCE_READINESS_URL" >/dev/null &&
-			curl -fsS --connect-timeout 2 --max-time 5 \
-				"$NOTIFICATION_DELIVERY_READINESS_URL" >/dev/null &&
-			curl -fsS --connect-timeout 2 --max-time 5 \
-				"$CAMPAIGNS_READINESS_URL" >/dev/null; then
-			echo "Exact pre-migration containers restored and healthy; no core migration was executed." >&2
+			{ [[ -z "${routine_stop_container_ids[api]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[api-gateway]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$GATEWAY_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[maintenance-worker]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$MAINTENANCE_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[notification-delivery-worker]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$NOTIFICATION_DELIVERY_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[campaigns-service]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$CAMPAIGNS_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[reporting-service]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$REPORTING_READINESS_URL" >/dev/null; }; then
+			if [[ -n "${routine_stop_container_ids[reporting-service]:-}" ]]; then
+				reporting_require_rabbitmq_topology || {
+					echo 'Restored Reporting runtime did not recreate the exact transitional topology.' >&2
+					return 1
+				}
+			fi
+			echo "Exact containers which were running at entry were restored; no Core cleanup migration was executed." >&2
 			return 0
 		fi
 		sleep "$HEALTHCHECK_INTERVAL"
@@ -906,16 +1284,129 @@ stop_routine_topology_for_core_migration() {
 
 	capture_routine_stop_containers || return 1
 	for service in "${routine_stop_services[@]}"; do
+		if [[ -z "${routine_stop_container_ids[$service]:-}" &&
+			"$service" == 'database-restore-worker' ]]; then
+			continue
+		fi
 		if stop_routine_service_cleanly "$service" 30; then
 			continue
 		fi
 		restore_routine_containers_after_failed_stop || true
 		return 1
 	done
+	if [[ "$mode" == 'production' ]]; then
+		if ! prepare_database_restore_storage; then
+			restore_routine_containers_after_failed_stop || true
+			return 1
+		fi
+	fi
 	if ! verify_core_database_sessions_drained; then
 		restore_routine_containers_after_failed_stop || true
 		return 1
 	fi
+}
+
+stop_reporting_cleanup_topology_for_core_migration() {
+	local migration_state="$1" previous_revision service container_id
+	local container_state image_id image_revision identity compose_project compose_service
+	local -a cleanup_services=(reporting-service "${routine_stop_services[@]}")
+
+	[[ "$migration_state" == 'pending' || "$migration_state" == 'applied' ]] || return 1
+	previous_revision="$(reporting_cutover_marker_value revision)" || return 1
+	routine_stop_container_ids=()
+	for service in "${cleanup_services[@]}"; do
+		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+		if [[ -z "$container_id" ]]; then
+			if [[ "$service" == 'database-restore-worker' ||
+				( "$service" == 'reporting-service' && "$migration_state" == 'applied' ) ]]; then
+				continue
+			fi
+			echo "Reporting cleanup recovery requires one exact existing container for $service." >&2
+			return 1
+		fi
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+			echo "Reporting cleanup container identity is ambiguous for $service." >&2
+			return 1
+		}
+		identity="$(docker inspect --format \
+			'{{.State.Status}}|{{.Image}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+			"$container_id" 2>/dev/null || true)"
+		IFS='|' read -r container_state image_id compose_project compose_service <<<"$identity"
+		[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+			"$compose_project" == "$target_project" && "$compose_service" == "$service" ]] || {
+			echo "Reporting cleanup found an untrusted container identity for $service." >&2
+			return 1
+		}
+		image_revision="$(docker image inspect --format \
+			'{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+			"$image_id" 2>/dev/null || true)"
+		if [[ ! "$image_revision" =~ ^[0-9a-f]{40}$ ]] ||
+			! git -C "$server_root" cat-file -e \
+				"$image_revision^{commit}" 2>/dev/null ||
+			! git -C "$server_root" merge-base --is-ancestor \
+				"$image_revision" "$APP_REVISION"; then
+			echo "Reporting cleanup found an unknown or divergent image for $service." >&2
+			return 1
+		fi
+		if [[ "$migration_state" == 'pending' ]]; then
+			[[ "$image_revision" != "$APP_REVISION" &&
+				( "$service" != 'reporting-service' || "$image_revision" == "$previous_revision" ) ]] || {
+				echo "Pending Reporting cleanup found a non-rollback image for $service." >&2
+				return 1
+			}
+		elif [[ "$service" == 'reporting-service' ]]; then
+			[[ "$image_revision" == "$previous_revision" ||
+				"$image_revision" == "$APP_REVISION" ]] || {
+				echo 'Applied cleanup found a Reporting image outside the pinned old/new boundary.' >&2
+				return 1
+			}
+		fi
+		case "$container_state" in
+		running | restarting)
+			routine_stop_container_ids["$service"]="$container_id"
+			stop_routine_service_cleanly "$service" 30 || return 1
+			;;
+		exited)
+			;;
+		created)
+			[[ "$migration_state" == 'applied' && "$image_revision" == "$APP_REVISION" ]] || {
+				echo "Pending cleanup cannot trust a merely created container for $service." >&2
+				return 1
+			}
+			;;
+		*)
+			echo "Reporting cleanup found an unsafe container state for $service: ${container_state:-unknown}." >&2
+			return 1
+			;;
+		esac
+	done
+	if [[ "$mode" == 'production' ]]; then
+		prepare_database_restore_storage || return 1
+	fi
+	verify_core_database_sessions_drained
+}
+
+recover_reporting_cleanup_stop_on_exit() {
+	local status=$? current_state='unsafe'
+	trap - EXIT INT TERM
+	if [[ "$reporting_cleanup_stop_recovery_active" != 'true' ]]; then
+		exit "$status"
+	fi
+	set +e
+	current_state="$(reporting_cutover_core_cleanup_migration_state "$APP_REVISION" 2>/dev/null)"
+	case "$current_state" in
+	pending)
+		echo 'Reporting cleanup stopped before the destructive migration committed; restoring only the exact containers which were running at entry.' >&2
+		restore_routine_containers_after_failed_stop || true
+		;;
+	applied)
+		echo 'Reporting cleanup migration is applied; old Core writers will not be restored. Retry the exact cleanup revision to continue forward.' >&2
+		;;
+	*)
+		echo 'Reporting cleanup migration state is ambiguous; all Core writers remain stopped for reviewed recovery.' >&2
+		;;
+	esac
+	exit "$status"
 }
 
 notification_cutover_container_id() {
@@ -1115,6 +1606,54 @@ process.stdout.write("Standalone Campaigns image artifact verified\n");
 	'
 }
 
+verify_reporting_image_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"$REPORTING_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of ["dist/src/main.js", "prisma/schema.prisma"]) {
+	fs.accessSync(required);
+}
+require("@prisma/reporting-client");
+for (const forbidden of [
+	"dist/src/app.module.js",
+	"dist/src/statistics/statistics.service.js",
+	"dist/src/outbox-publisher-main.js",
+	"public/widgets",
+]) {
+	if (fs.existsSync(forbidden)) {
+		throw new Error(`Reporting image contains monolith artifact: ${forbidden}`);
+	}
+}
+process.stdout.write("Standalone Reporting image artifact verified\n");
+		'
+}
+
+verify_database_restore_image_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"$DATABASE_RESTORE_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of [
+	"dist/src/database-restore-worker-main.js",
+	"prisma/migrations",
+	"apps/notification-delivery/prisma/migrations",
+	"apps/campaigns/prisma/migrations",
+	"apps/reporting/prisma/migrations",
+	"/usr/bin/pg_dump",
+	"/usr/bin/pg_restore",
+	"/usr/bin/psql",
+	"/usr/bin/flock",
+	"/usr/local/bin/database-restore-entrypoint.sh",
+]) {
+	fs.accessSync(required);
+}
+process.stdout.write("Isolated database restore worker image artifact verified\n");
+		'
+}
+
 validate_campaigns_database_urls() {
 	printf '%s\n%s\n%s\n' \
 		"$(get_env_value CAMPAIGNS_DATABASE_URL)" \
@@ -1152,24 +1691,33 @@ process.stdout.write("Campaigns runtime, migration and backup URL boundaries ver
 
 initialize_notification_database_lifecycle_guard \
 	true \
-	"a routine full deployment"
+	"a routine full deployment" \
+	identity-if-present
 
 compose_target \
 	--profile migration \
 	--profile notification-delivery-migration \
 	--profile campaigns-migration \
+	--profile reporting-migration \
 	config --quiet
 compose_target build \
 	api \
 	api-gateway \
 	maintenance-worker \
+	database-restore-worker \
 	notification-delivery-worker \
-	campaigns-service
+	campaigns-service \
+	reporting-service
 verify_notification_delivery_image_artifact
 verify_campaigns_image_artifact
+verify_reporting_image_artifact
+verify_database_restore_image_artifact
 validate_campaigns_database_urls
 assert_campaigns_contract_migration_applied_for_routine_deploy
-initialize_campaigns_database_lifecycle_guard "a routine full deployment"
+initialize_campaigns_database_lifecycle_guard \
+	"a routine full deployment" identity-if-present
+reporting_initialize_database_guard "a routine full deployment" \
+	identity-if-present
 
 validate_notification_database_urls() {
 	local parser_image="$1"
@@ -1554,11 +2102,11 @@ notification_cutover_candidate_ids="$(
 )"
 narrow_integration_kinds="$(
 	normalize_csv \
-		"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
+		"$(reporting_expected_integration_worker_kinds)"
 )"
-legacy_narrow_integration_kinds="$(
+pre_reporting_narrow_integration_kinds="$(
 	normalize_csv \
-		"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit"
+		"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
 )"
 broad_integration_kinds="$(
 	normalize_csv \
@@ -1692,11 +2240,16 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 		current_integration_kinds_normalized="$(
 			normalize_csv "$current_integration_kinds"
 		)"
-		if [[ "$current_integration_kinds_normalized" != "$narrow_integration_kinds" &&
-			"$current_integration_kinds_normalized" != "$legacy_narrow_integration_kinds" ]]; then
+		if ! reporting_cutover_worker_kinds_allowed \
+			"$current_integration_kinds_normalized" \
+			"$narrow_integration_kinds" \
+			"$pre_reporting_narrow_integration_kinds"; then
 			echo "Cutover marker exists, but the live integration worker still owns an unexpected kind set." >&2
 			echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
 			exit 1
+		fi
+		if [[ "$current_integration_kinds_normalized" != "$narrow_integration_kinds" ]]; then
+			echo 'Allowing the pre-Reporting integration worker only for its one-way audit-consumer bootstrap.'
 		fi
 		current_notification_delivery_kinds="$(
 			container_env_value \
@@ -1709,6 +2262,15 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 		fi
 	fi
 else
+	if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
+		reporting_cutover_validate_marker || {
+			echo 'Reporting cutover marker is invalid while Notification Delivery marker is missing.' >&2
+			exit 1
+		}
+		echo 'Notification Delivery marker is missing after the Reporting cutover started.' >&2
+		echo 'Routine deploy must not replay the historical provider cutover or recreate legacy Reporting topology.' >&2
+		exit 1
+	fi
 	if [[ -n "$notification_cutover_candidate_ids" ]]; then
 		echo "Forward cutover containers exist without the durable marker." >&2
 		echo "Restore the exact legacy containers or remove only the verified stale cutover project." >&2
@@ -1822,6 +2384,7 @@ done
 gateway_validation_env+=(
 	--env "JWT_MAX_TOKEN_LIFETIME_SECONDS=$(get_env_value JWT_ACCESS_TTL_SECONDS)"
 	--env "SHUTDOWN_GRACE_MS=$(get_env_value GATEWAY_SHUTDOWN_GRACE_MS)"
+	--env "REPORTING_GATEWAY_POLICY=$reporting_gateway_policy"
 )
 
 docker run --rm --network none \
@@ -1831,9 +2394,17 @@ docker run --rm --network none \
 	-e '
 const { loadConfig } = require("./dist/src/config.js");
 const config = loadConfig();
+const databaseRestores = config.routes.find(route => route.id === "database-restores");
 const campaigns = config.routes.find(route => route.id === "campaigns");
+const reporting = config.routes.find(route => route.id === "reporting");
 const monolith = config.routes.find(route => route.id === "monolith");
-if (
+const policy = process.env.REPORTING_GATEWAY_POLICY;
+const commonInvalid =
+	!databaseRestores ||
+	databaseRestores.pathPrefix !== "/api/v1/dev-tools/database-restores" ||
+	databaseRestores.upstreamUrl.origin !== "http://127.0.0.1:4200" ||
+	databaseRestores.authPolicy !== "required" ||
+	databaseRestores.timeoutMs !== 120000 ||
 	!campaigns ||
 	campaigns.pathPrefix !== "/api/v1/admin/campaigns" ||
 	campaigns.upstreamUrl.origin !== "http://127.0.0.1:4500" ||
@@ -1843,16 +2414,52 @@ if (
 	monolith.pathPrefix !== "/api/v1" ||
 	monolith.upstreamUrl.origin !== "http://127.0.0.1:4200" ||
 	monolith.authPolicy !== "optional" ||
-	monolith.timeoutMs !== 60000
+	monolith.timeoutMs !== 60000;
+const darkInvalid =
+	policy === "dark" &&
+	(config.routes.length !== 3 ||
+		config.routes[0]?.id !== "database-restores" ||
+		config.routes[1]?.id !== "campaigns" ||
+		config.routes[2]?.id !== "monolith" ||
+		reporting ||
+		config.routes.some(
+			route =>
+				route.pathPrefix === "/api/v1/admin/reporting" ||
+				route.upstreamUrl.origin === "http://127.0.0.1:4600",
+		));
+const reportingInvalid =
+	policy === "reporting" &&
+	(config.routes.length !== 4 ||
+		config.routes[0]?.id !== "database-restores" ||
+		config.routes[1]?.id !== "campaigns" ||
+		config.routes[2]?.id !== "reporting" ||
+		config.routes[3]?.id !== "monolith" ||
+		!reporting ||
+		reporting.pathPrefix !== "/api/v1/admin/reporting" ||
+		reporting.upstreamUrl.origin !== "http://127.0.0.1:4600" ||
+		reporting.authPolicy !== "required" ||
+		reporting.timeoutMs !== 60000);
+if (
+	!["dark", "reporting"].includes(policy) ||
+	commonInvalid ||
+	darkInvalid ||
+	reportingInvalid
 ) {
 	throw new Error(
-		"Production requires the Campaigns route before the explicit monolith /api/v1 catch-all",
+		`Gateway route manifest conflicts with Reporting cutover policy ${policy}`,
 	);
 }
 process.stdout.write(
-	`API Gateway route manifest validated: ${config.routes.length} route(s)\n`,
+	`API Gateway route manifest validated for Reporting policy ${policy}\n`,
 );
 '
+
+if [[ "$reporting_gateway_policy" == 'reporting' ]]; then
+	reporting_cutover_require_forward_scheduler_ready || {
+		echo 'Reporting runtime/owner preflight failed before the public Gateway route switch.' >&2
+		exit 1
+	}
+fi
 
 docker run --rm --network none \
 	--env-file "$ENV_FILE" \
@@ -2068,6 +2675,9 @@ notification_delivery_credentials="$(
 campaigns_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_CAMPAIGNS_URL"
 )"
+reporting_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_REPORTING_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -2094,6 +2704,15 @@ campaigns_user="$(
 		base64 --decode
 )"
 campaigns_password_base64="$(sed -n '2p' <<<"$campaigns_credentials")"
+reporting_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$reporting_credentials")" |
+		base64 --decode
+)"
+reporting_password_base64="$(sed -n '2p' <<<"$reporting_credentials")"
+if [[ "$reporting_user" != "winwidget-reporting" ]]; then
+	echo "RABBITMQ_REPORTING_URL must use the dedicated winwidget-reporting user" >&2
+	exit 1
+fi
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -2109,6 +2728,7 @@ service_users=(
 	"$maintenance_user"
 	"$notification_delivery_user"
 	"$campaigns_user"
+	"$reporting_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -2287,6 +2907,46 @@ rabbitmqctl set_topic_permissions \
 '
 }
 
+provision_reporting_rabbitmq_topic_permissions() {
+	local username="$1"
+	local events_write_pattern
+	local events_read_pattern
+	local dead_letter_pattern
+	events_write_pattern='^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$'
+	events_read_pattern='^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|notification\.delivery\.outcome\.v1)$'
+	dead_letter_pattern='^reporting\.(identityUser|billingPayment|billingSubscription|widget|lead|reportingSettings|deliveryOutcome)\.dead-letter$'
+
+	RABBITMQ_PROVISION_USER="$username" \
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_REPORTING_EVENTS_WRITE="$events_write_pattern" \
+	RABBITMQ_REPORTING_EVENTS_READ="$events_read_pattern" \
+	RABBITMQ_REPORTING_DEAD_LETTER="$dead_letter_pattern" \
+		docker exec \
+			-e RABBITMQ_PROVISION_USER \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_REPORTING_EVENTS_WRITE \
+			-e RABBITMQ_REPORTING_EVENTS_READ \
+			-e RABBITMQ_REPORTING_DEAD_LETTER \
+			"$provisioning_rabbitmq_container_id" \
+			sh -ec '
+rabbitmqctl clear_topic_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_PROVISION_USER"
+rabbitmqctl set_topic_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_PROVISION_USER" \
+	"winwidget.events" \
+	"$RABBITMQ_REPORTING_EVENTS_WRITE" \
+	"$RABBITMQ_REPORTING_EVENTS_READ"
+rabbitmqctl set_topic_permissions \
+	-p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_PROVISION_USER" \
+	"winwidget.dead-letter" \
+	"$RABBITMQ_REPORTING_DEAD_LETTER" \
+	"$RABBITMQ_REPORTING_DEAD_LETTER"
+'
+}
+
 assert_campaigns_shared_rabbitmq_topology() {
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
@@ -2326,6 +2986,45 @@ const {
 '
 }
 
+assert_reporting_shared_rabbitmq_topology() {
+	docker run --rm --network host \
+		--env-file "$ENV_FILE" \
+		--entrypoint node \
+		"$REPORTING_IMAGE" \
+		-e '
+const amqp = require("amqplib");
+const {
+	REPORTING_DEAD_LETTER_EXCHANGE,
+	REPORTING_EVENTS_EXCHANGE,
+} = require("./dist/src/messaging/reporting-messaging.constants.js");
+
+(async () => {
+	const connection = await amqp.connect(process.env.RABBITMQ_PUBLISHER_URL);
+	try {
+		const channel = await connection.createConfirmChannel();
+		try {
+			await channel.assertExchange(REPORTING_EVENTS_EXCHANGE, "topic", {
+				durable: true,
+			});
+			await channel.assertExchange(REPORTING_DEAD_LETTER_EXCHANGE, "topic", {
+				durable: true,
+			});
+		} finally {
+			await channel.close();
+		}
+	} finally {
+		await connection.close();
+	}
+	process.stdout.write("Shared Reporting RabbitMQ exchanges verified\n");
+})().catch(error => {
+	process.stderr.write(
+		`${error instanceof Error ? error.message : "Shared Reporting RabbitMQ topology assertion failed"}\n`,
+	);
+	process.exitCode = 1;
+});
+'
+}
+
 provision_rabbitmq_user \
 	"$rabbitmq_admin_user" \
 	"$rabbitmq_admin_password_base64" \
@@ -2341,7 +3040,8 @@ provision_rabbitmq_user \
 	'^winwidget\..*' \
 	''
 assert_campaigns_shared_rabbitmq_topology
-post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+assert_reporting_shared_rabbitmq_topology
+post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|admin\.audit\.(campaigns|reporting)\.v1|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
@@ -2376,6 +3076,14 @@ provision_rabbitmq_user \
 	'^(winwidget\.(events|dead-letter)|winwidget\.campaigns(\..*)?)$' \
 	''
 provision_campaigns_rabbitmq_topic_permissions "$campaigns_user"
+provision_rabbitmq_user \
+	"$reporting_user" \
+	"$reporting_password_base64" \
+	'^winwidget\.reporting(\..*)?$' \
+	'^(winwidget\.(events|dead-letter)|winwidget\.reporting(\..*)?)$' \
+	'^(winwidget\.(events|dead-letter)|winwidget\.reporting(\..*)?)$' \
+	''
+provision_reporting_rabbitmq_topic_permissions "$reporting_user"
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
 	"$rabbitmq_monitor_password_base64" \
@@ -3162,6 +3870,7 @@ process.stdout.write(JSON.stringify(Object.values(CAMPAIGNS_QUEUE_NAMES)));
 		--env-file "$ENV_FILE" \
 		-e "CLOSE_LEGACY_NOTIFICATION_CONSUMERS=$close_legacy_orphans" \
 		-e "EXPECTED_NOTIFICATION_QUEUE_OWNER=$notification_owner" \
+		-e "EXPECTED_INTEGRATION_KINDS=$(reporting_expected_integration_worker_kinds)" \
 		-e "CAMPAIGNS_QUEUE_NAMES_JSON=$campaigns_queue_names_json" \
 		--entrypoint node \
 		"winwidget-api:$APP_VERSION" \
@@ -3250,6 +3959,15 @@ const run = async () => {
 	}
 	const legacyTelegramOwner =
 		process.env.EXPECTED_NOTIFICATION_QUEUE_OWNER === "legacy";
+	const expectedIntegrationKinds = (
+		process.env.EXPECTED_INTEGRATION_KINDS || ""
+	)
+		.split(",")
+		.map(value => value.trim())
+		.filter(Boolean);
+	if (!expectedIntegrationKinds.length) {
+		throw new OwnershipError("Expected integration kind contract is missing");
+	}
 	const groups = [
 		{
 			kinds: [
@@ -3288,20 +4006,7 @@ const run = async () => {
 			notification: true,
 		},
 		{
-			kinds: [
-				"webhook",
-				"bitrix24",
-				"amo-crm",
-				"daily-summary-telegram",
-				...(legacyTelegramOwner
-					? []
-					: [
-							"telegram-destination-unavailable",
-							"notification-delivery-outcome",
-						]),
-				"campaign-admin-audit",
-				"auto-renewal",
-			],
+			kinds: expectedIntegrationKinds,
 			user: integrationUser,
 			connectionName: "winwidget-integration-worker",
 			notification: false,
@@ -3458,8 +4163,8 @@ Manual recovery/runbook:
 1. Keep the current v1 Notification Delivery worker and integration worker running.
 2. Through the existing Messaging admin flow, resolve or retry every unresolved
    payment-telegram and limit-telegram failure.
-3. Wait until PROCESSING/RETRY_SCHEDULED receipts for payment/limit Telegram,
-   campaigns and daily summary disappear, subscription reminders have no
+3. Wait until PROCESSING/RETRY_SCHEDULED receipts for payment/limit Telegram
+   and campaigns disappear, subscription reminders have no
    PROCESSING rows, and every matching main, retry-v2.* and dead-letter queue
    reports zero ready and zero unacknowledged messages.
 4. Re-run the full `all` deployment. The script will stop producers, recheck the
@@ -3475,8 +4180,7 @@ notification_cutover_expected_queues() {
 
 	for base_queue in \
 		winwidget.payment-notification.telegram \
-		winwidget.limit-notification.telegram \
-		winwidget.report.daily-summary.telegram; do
+		winwidget.limit-notification.telegram; do
 		printf '%s\n%s.dead-letter\n' "$base_queue" "$base_queue"
 		for retry_index in 1 2 3; do
 			printf '%s.retry-v2.%s\n' "$base_queue" "$retry_index"
@@ -3509,8 +4213,7 @@ notification_cutover_queue_state() {
 			name messages_ready messages_unacknowledged consumers |
 		awk '
 			$1 ~ /^winwidget\.payment-notification\.telegram(\.v2)?(\.|$)/ ||
-			$1 ~ /^winwidget\.limit-notification\.telegram(\.|$)/ ||
-			$1 ~ /^winwidget\.report\.daily-summary\.telegram(\.|$)/
+			$1 ~ /^winwidget\.limit-notification\.telegram(\.|$)/
 		'
 }
 
@@ -3530,10 +4233,6 @@ const prisma = new PrismaClient({
 	},
 });
 const ownershipKinds = ["payment-telegram", "limit-telegram"];
-const providerBoundaryKinds = [
-	...ownershipKinds,
-	"daily-summary-telegram",
-];
 
 Promise.all([
 	prisma.integrationDeliveryFailure.count({
@@ -3544,18 +4243,17 @@ Promise.all([
 	}),
 	prisma.integrationDeliveryReceipt.count({
 		where: {
-			integration: { in: providerBoundaryKinds },
+			integration: { in: ownershipKinds },
 			status: { in: ["PROCESSING", "RETRY_SCHEDULED"] },
 		},
 	}),
 	prisma.outboxEvent.count({
 		where: {
-			routingKey: {
-				in: [
-					"payment.succeeded.v1",
-					"lead.limit.reached.telegram.v2",
-					"report.daily-summary.requested.v1",
-				],
+				routingKey: {
+					in: [
+						"payment.succeeded.v1",
+						"lead.limit.reached.telegram.v2",
+					],
 			},
 			status: { in: ["PENDING", "PUBLISHING", "FAILED"] },
 		},
@@ -3672,9 +4370,7 @@ notification_cutover_consumers_ready() {
 		winwidget.payment-notification.telegram \
 		winwidget.payment-notification.telegram.dead-letter \
 		winwidget.limit-notification.telegram \
-		winwidget.limit-notification.telegram.dead-letter \
-		winwidget.report.daily-summary.telegram \
-		winwidget.report.daily-summary.telegram.dead-letter; do
+		winwidget.limit-notification.telegram.dead-letter; do
 		queue_line="$(
 			awk -v queue="$queue" '$1 == queue { print; exit }' <<<"$state"
 		)"
@@ -3963,6 +4659,118 @@ wait_for_cutover_readiness() {
 	return 1
 }
 
+wait_for_database_restore_worker() {
+	local attempt
+	local container_id
+	local health
+	local image_revision
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		container_id="$(
+			compose_target ps -q database-restore-worker 2>/dev/null || true
+		)"
+		if [[ "$container_id" =~ ^[0-9a-f]{64}$ ]]; then
+			health="$(
+				docker inspect --format \
+					'{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+					"$container_id" 2>/dev/null || true
+			)"
+			image_revision="$(
+				docker inspect --format \
+					'{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+					"$container_id" 2>/dev/null || true
+			)"
+			if [[ "$health" == 'healthy' &&
+				"$image_revision" == "$DATABASE_RESTORE_REVISION" ]]; then
+				return 0
+			fi
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	echo 'Database restore worker did not publish revision-bound readiness.' >&2
+	return 1
+}
+
+verify_active_reporting_runtime() {
+	local expected_container_id="${1:-}" expected_image_id="${2:-}"
+	local container_id health image_id image_revision app_revision restart_count
+	local process_role scheduler_enabled expected_scheduler listen_host response
+	local phase phase_index migrated_index scheduler_index
+	container_id="$(compose_target ps -a -q reporting-service 2>/dev/null || true)"
+	if [[ -z "$container_id" ]]; then
+		[[ -z "$expected_container_id" || "$expected_container_id" == 'absent' ]] || {
+			echo 'Reporting runtime disappeared during the coordinated deployment.' >&2
+			return 1
+		}
+		if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
+			echo 'Reporting cutover is active but reporting-service is absent.' >&2
+			return 1
+		fi
+		return 0
+	fi
+	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+		echo 'Reporting runtime identity is ambiguous.' >&2
+		return 1
+	}
+	[[ "$expected_container_id" != 'absent' ]] || {
+		echo 'Reporting runtime appeared during a full deployment which must not manage it.' >&2
+		return 1
+	}
+	[[ -z "$expected_container_id" || "$container_id" == "$expected_container_id" ]] || {
+		echo 'Reporting container identity changed during a full deployment.' >&2
+		return 1
+	}
+	health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container_id")"
+	image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+	image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id")"
+	app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" | sed -n 's/^APP_REVISION=//p')"
+	restart_count="$(docker inspect --format '{{.RestartCount}}' "$container_id")"
+	process_role="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" | sed -n 's/^REPORTING_PROCESS_ROLE=//p')"
+	scheduler_enabled="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" | sed -n 's/^REPORTING_SCHEDULER_ENABLED=//p')"
+	listen_host="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" | sed -n 's/^REPORTING_LISTEN_HOST=//p')"
+	expected_scheduler="$(get_env_value REPORTING_SCHEDULER_ENABLED)"
+	response="$(curl -fsS --connect-timeout 2 --max-time 5 "$REPORTING_READINESS_URL" 2>/dev/null || true)"
+	[[ -z "$expected_image_id" || "$image_id" == "$expected_image_id" ]] || {
+		echo 'Reporting image identity changed during a full deployment.' >&2
+		return 1
+	}
+	[[ "$image_revision" =~ ^[0-9a-f]{40}$ ]] &&
+		git -C "$server_root" cat-file -e "$image_revision^{commit}" 2>/dev/null &&
+		git -C "$server_root" merge-base --is-ancestor \
+			"$image_revision" "$REPORTING_REVISION" || {
+		echo 'Active Reporting revision is unknown, divergent or newer than the full deployment.' >&2
+		return 1
+	}
+	[[ "$health" == 'healthy' && "$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$app_revision" == "$image_revision" && "$restart_count" == '0' &&
+		"$process_role" == 'all' && "$listen_host" == '127.0.0.1' &&
+		"$scheduler_enabled" == "$expected_scheduler" ]] && {
+		printf '%s' "$response" |
+			grep -Eq "\"revision\"[[:space:]]*:[[:space:]]*\"$image_revision\""
+	} || {
+		echo 'Active Reporting runtime failed exact image, config, health or restart verification.' >&2
+		return 1
+	}
+	if [[ ! -e "$REPORTING_CUTOVER_MARKER" && ! -L "$REPORTING_CUTOVER_MARKER" ]]; then
+		[[ "$scheduler_enabled" == 'false' ]] || return 1
+		return 0
+	fi
+	reporting_cutover_validate_marker || return 1
+	phase="$(reporting_cutover_marker_value phase)"
+	phase_index="$(reporting_cutover_phase_index "$phase")"
+	migrated_index="$(reporting_cutover_phase_index migrated)"
+	scheduler_index="$(reporting_cutover_phase_index scheduler-switched)"
+	if ((phase_index >= scheduler_index)); then
+		reporting_cutover_require_switch_generation REPORTING
+		reporting_cutover_schedule_authority_generation REPORTING REPORTING >/dev/null
+		reporting_cutover_require_telegram_topic_split REPORTING
+	elif ((phase_index >= migrated_index)); then
+		reporting_cutover_schedule_authority_generation CORE CORE_SHADOW >/dev/null
+		reporting_cutover_require_telegram_topic_split CORE_SHADOW
+	fi
+}
+
 verify_cutover_candidate_heartbeats() {
 	local started_at="$1"
 	local required_services="${2:-outbox-publisher,integration-worker,maintenance-worker}"
@@ -4228,6 +5036,7 @@ restore_forward_cutover_on_exit() {
 		outbox-publisher \
 		integration-worker \
 		maintenance-worker \
+		database-restore-worker \
 		notification-delivery-worker >/dev/null 2>&1; then
 		recovery_failed=true
 	fi
@@ -4393,6 +5202,65 @@ perform_notification_first_cutover_preflight() {
 	echo "Notification Delivery Telegram cutover boundary is quiescent and verified."
 }
 
+reporting_runtime_container_before="$(
+	compose_target ps -a -q reporting-service 2>/dev/null || true
+)"
+if [[ "$reporting_runtime_container_before" =~ ^[0-9a-f]{64}$ ]]; then
+	reporting_runtime_image_before="$(
+		docker inspect --format '{{.Image}}' "$reporting_runtime_container_before"
+	)"
+elif [[ -z "$reporting_runtime_container_before" ]]; then
+	reporting_runtime_container_before='absent'
+	reporting_runtime_image_before=''
+else
+	reporting_runtime_image_before=''
+fi
+reporting_cleanup_runtime_deploy=false
+reporting_cleanup_migration_state='not-applicable'
+if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
+	reporting_cutover_validate_marker || exit 1
+	if [[ "$(reporting_cutover_marker_value phase)" == 'cleanup-staged' &&
+		"$(reporting_cutover_marker_value cleanup_revision)" == "$APP_REVISION" ]]; then
+		reporting_cleanup_migration_state="$(
+			reporting_cutover_core_cleanup_migration_state "$APP_REVISION"
+		)" || exit 1
+		case "$reporting_cleanup_migration_state" in
+		pending | applied) ;;
+		unfinished-transition | unfinished-steady)
+			echo 'Reporting cleanup has an exact unfinished Prisma attempt; keep writers stopped and use the separately reviewed resolve procedure.' >&2
+			exit 1
+			;;
+		*)
+			echo 'Reporting cleanup migration ledger/schema/checksum state is unsafe.' >&2
+			exit 1
+			;;
+		esac
+		reporting_cleanup_runtime_deploy=true
+		if [[ "$reporting_cleanup_migration_state" == 'pending' ]]; then
+			echo 'Exact staged cleanup will stop or adopt the pinned rollback containers before the Core migration.'
+		else
+			echo 'Exact cleanup migration is already applied; all old writers are fenced and recovery is forward-only.'
+		fi
+	fi
+fi
+if [[ "$reporting_cleanup_runtime_deploy" != 'true' ]]; then
+	verify_active_reporting_runtime \
+		"$reporting_runtime_container_before" \
+		"$reporting_runtime_image_before" || {
+		echo 'Reporting runtime preflight failed before any database migration or runtime handoff.' >&2
+		exit 1
+	}
+fi
+
+if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
+	[[ "$notification_delivery_first_cutover" != 'true' &&
+		"$notification_forward_candidate_active" != 'true' &&
+		"$notification_forward_candidate_needs_recovery" != 'true' ]] || {
+		echo 'Reporting cleanup cannot overlap a Notification Delivery cutover or recovery.' >&2
+		exit 1
+	}
+	echo 'Pinned Reporting cleanup revision skips already-completed service migrations; its reviewed Git contract permits only the exact Core cleanup migration.'
+else
 verify_notification_delivery_migration_boundary
 if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	compose_target \
@@ -4566,6 +5434,7 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	start_notification_cutover_services api-gateway
 	echo "The saved cutover project stays available until canonical Compose handoff is fully verified."
 fi
+fi
 
 if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	notification_cutover_candidate_verification_started_at="$(
@@ -4621,6 +5490,9 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		"$MAINTENANCE_REVISION" \
 		"Canonical Maintenance worker"
 
+	compose_target up -d --no-deps --force-recreate database-restore-worker
+	wait_for_database_restore_worker
+
 	stop_notification_cutover_services 30 false notification-delivery-worker
 	compose_target up -d --no-deps --force-recreate notification-delivery-worker
 	wait_for_cutover_revision \
@@ -4658,18 +5530,95 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	wait_for_cutover_revision \
 		"$PUBLIC_HEALTHCHECK_URL" "$APP_REVISION" "Canonical public API"
 else
-	if ! stop_routine_topology_for_core_migration; then
+	if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
+		reporting_cleanup_stop_recovery_active=true
+		trap recover_reporting_cleanup_stop_on_exit EXIT
+		trap 'exit 130' INT
+		trap 'exit 143' TERM
+		if ! stop_reporting_cleanup_topology_for_core_migration \
+			"$reporting_cleanup_migration_state"; then
+			echo 'Reporting cleanup topology did not reach an exact quiescent recovery boundary.' >&2
+			exit 1
+		fi
+	elif ! stop_routine_topology_for_core_migration; then
 		echo "Routine production topology did not reach a safe core migration boundary." >&2
 		exit 1
 	fi
-	compose_target --profile migration run --rm --no-deps migrate
+	if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
+		reporting_cutover_validate_marker || {
+			if [[ "$reporting_cleanup_runtime_deploy" != 'true' ]]; then
+				restore_routine_containers_after_failed_stop || true
+			fi
+			exit 1
+		}
+		if [[ "$(reporting_cutover_marker_value phase)" == 'cleanup-staged' &&
+			"$(reporting_cutover_marker_value cleanup_revision)" == "$APP_REVISION" ]]; then
+			if [[ "$reporting_cleanup_migration_state" == 'pending' ]]; then
+				core_cleanup_backup_gate='reporting_cutover_require_core_cleanup_backup_from_review'
+			else
+				core_cleanup_backup_gate='reporting_cutover_require_core_cleanup_backup_archive_from_review'
+			fi
+			if ! "$core_cleanup_backup_gate"; then
+				echo 'Verified Core cleanup backup evidence changed, expired or no longer matches the pre-migration boundary.' >&2
+				exit 1
+			fi
+			if ! reporting_cutover_require_cleanup_legacy_drain_after_stop; then
+				echo 'Legacy Reporting drain changed at the destructive migration boundary; no migration was executed.' >&2
+				exit 1
+			fi
+			if ! reporting_cutover_prepare_settings_topology_cleanup_after_stop; then
+				echo 'Reporting settings topology could not converge at the stopped cleanup boundary.' >&2
+				exit 1
+			fi
+		fi
+	fi
+	if [[ "$reporting_cleanup_runtime_deploy" == 'true' &&
+		"$reporting_cleanup_migration_state" == 'applied' ]]; then
+		echo 'Exact Core cleanup migration is already applied; Prisma deploy is skipped during forward-only recovery.'
+	elif ! compose_target --profile migration run --rm --no-deps migrate; then
+		if [[ "$reporting_cleanup_runtime_deploy" != 'true' ]]; then
+			exit 1
+		fi
+		reporting_cleanup_migration_state="$(
+			reporting_cutover_core_cleanup_migration_state "$APP_REVISION" 2>/dev/null ||
+				printf 'unsafe\n'
+		)"
+		if [[ "$reporting_cleanup_migration_state" != 'applied' ]]; then
+			echo "Core cleanup migrate failed with post-command state=$reporting_cleanup_migration_state; recovery remains fail-closed." >&2
+			exit 1
+		fi
+		echo 'Prisma command failed after the exact cleanup migration became applied; continuing forward without restoring old writers.' >&2
+	fi
+	if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
+		reporting_cleanup_migration_state="$(
+			reporting_cutover_core_cleanup_migration_state "$APP_REVISION"
+		)" || exit 1
+		[[ "$reporting_cleanup_migration_state" == 'applied' ]] || {
+			echo "Cleanup Reporting cannot start until the exact migration state is applied; got $reporting_cleanup_migration_state." >&2
+			exit 1
+		}
+	fi
 	compose_target up -d rabbitmq
 	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+	if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
+		compose_target up -d --no-deps --force-recreate reporting-service
+		wait_for_cutover_revision \
+			"$REPORTING_READINESS_URL" "$REPORTING_REVISION" \
+			"Cleanup Reporting"
+		reporting_require_rabbitmq_topology
+		reporting_runtime_container_before="$(
+			compose_target ps --status running -q reporting-service
+		)"
+		reporting_runtime_image_before="$(
+			docker inspect --format '{{.Image}}' "$reporting_runtime_container_before"
+		)"
+	fi
 	compose_target up -d --no-deps --force-recreate outbox-publisher
 	wait_for_rabbitmq_topology
 	compose_target up -d --no-deps --force-recreate \
 		integration-worker \
 		maintenance-worker \
+		database-restore-worker \
 		notification-delivery-worker \
 		campaigns-service
 	compose_target up -d --no-deps --force-recreate api
@@ -4679,12 +5628,12 @@ fi
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker campaigns-service rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker campaigns-service rabbitmq || true
-	echo "Processes listening on ports 4100, 4200, 4300, 4401 and 4500:"
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500 and 4600:"
 	ss -ltnp \
-		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 )' ||
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 )' ||
 		true
 }
 
@@ -4698,6 +5647,7 @@ ensure_required_services_running() {
 		outbox-publisher \
 		integration-worker \
 		maintenance-worker \
+		database-restore-worker \
 		notification-delivery-worker \
 		campaigns-service; do
 		container_id="$(
@@ -4931,6 +5881,14 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	sleep "$HEALTHCHECK_INTERVAL"
 done
 
+if ! verify_active_reporting_runtime \
+	"$reporting_runtime_container_before" \
+	"$reporting_runtime_image_before"; then
+	echo "Reporting runtime verification failed: $REPORTING_READINESS_URL"
+	show_api_diagnostics
+	exit 1
+fi
+
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if check_deployment_revision "$PUBLIC_HEALTHCHECK_URL"; then
 		break
@@ -4986,6 +5944,11 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 
 	sleep "$HEALTHCHECK_INTERVAL"
 done
+
+if ! wait_for_database_restore_worker; then
+	show_api_diagnostics
+	exit 1
+fi
 
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if check_deployment_revision "$NOTIFICATION_DELIVERY_READINESS_URL"; then
@@ -5049,6 +6012,7 @@ for service in \
 	outbox-publisher \
 	integration-worker \
 	maintenance-worker \
+	database-restore-worker \
 	notification-delivery-worker \
 	campaigns-service; do
 	container_id="$(
@@ -5062,6 +6026,9 @@ for service in \
 	expected_image_revision="$APP_REVISION"
 	if [[ "$service" == "maintenance-worker" ]]; then
 		expected_image_revision="$MAINTENANCE_REVISION"
+	fi
+	if [[ "$service" == "database-restore-worker" ]]; then
+		expected_image_revision="$DATABASE_RESTORE_REVISION"
 	fi
 	if [[ "$service" == "notification-delivery-worker" ]]; then
 		expected_image_revision="$NOTIFICATION_DELIVERY_REVISION"
@@ -5117,12 +6084,24 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	echo "Canonical topology verified; saved forward cutover containers removed."
 fi
 
+if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
+	reporting_require_rabbitmq_topology
+	reporting_cutover_require_cleanup_runtime_revision "$APP_REVISION"
+	echo 'Reporting cleanup runtime and steady-state RabbitMQ topology verified.'
+fi
+
 verify_notification_database_lifecycle_unchanged \
 	"the routine full deployment" \
 	"$notification_database_phase_before"
 verify_campaigns_database_lifecycle_unchanged
+reporting_verify_database_lifecycle_unchanged
+
+if [[ "$reporting_cleanup_stop_recovery_active" == 'true' ]]; then
+	reporting_cleanup_stop_recovery_active=false
+	trap - EXIT INT TERM
+fi
 
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 compose_target ps \
-	api-gateway api outbox-publisher integration-worker maintenance-worker notification-delivery-worker campaigns-service rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service rabbitmq

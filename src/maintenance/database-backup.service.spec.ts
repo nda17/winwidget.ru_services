@@ -106,6 +106,30 @@ describe('DatabaseBackupService', () => {
 		expect(connection.url).not.toContain('schema=');
 	});
 
+	it('uses the dedicated least-privilege Reporting backup connection', () => {
+		const service = createService({
+			REPORTING_BACKUP_URL:
+				'postgresql://reporting_backup:reporting-secret@reporting.example:5432/winwidget_reporting?schema=reporting&sslmode=require'
+		});
+
+		const connection = (service as any).getPostgresConnection('reporting');
+
+		expect(connection).toEqual(
+			expect.objectContaining({
+				target: 'reporting',
+				label: 'Reporting',
+				databaseName: 'winwidget_reporting',
+				schema: 'reporting',
+				password: 'reporting-secret'
+			})
+		);
+		expect(connection.url).toContain(
+			'reporting.example:5432/winwidget_reporting'
+		);
+		expect(connection.url).not.toContain('reporting-secret');
+		expect(connection.url).not.toContain('schema=');
+	});
+
 	it('backs up only the selected notification-delivery target', async () => {
 		const sequence: string[] = [];
 		let dumpedPath = '';
@@ -259,7 +283,7 @@ describe('DatabaseBackupService', () => {
 		expect(telegram.sendDocument).toHaveBeenCalledTimes(1);
 	});
 
-	it('requires a dedicated URL only for notification-delivery jobs', async () => {
+	it('requires a dedicated URL for each service-owned database', async () => {
 		const service = createService({
 			MODE: 'development',
 			DATABASE_BACKUP_URL:
@@ -281,6 +305,19 @@ describe('DatabaseBackupService', () => {
 			'NOTIFICATION_DELIVERY_BACKUP_URL is not configured'
 		);
 		expect(spawn).not.toHaveBeenCalled();
+
+		await expect(
+			service.createAndSend(
+				'job-3',
+				'reporting',
+				{
+					chatId: '-1001',
+					messageThreadId: 42,
+					trigger: 'SCHEDULED'
+				},
+				new AbortController().signal
+			)
+		).rejects.toThrow('REPORTING_BACKUP_URL is not configured');
 	});
 
 	it('stops pg_dump as soon as streamed output exceeds the disk limit', async () => {
@@ -338,6 +375,8 @@ describe('DatabaseBackupService', () => {
 			process.env.NOTIFICATION_DELIVERY_BACKUP_URL;
 		const previousNotificationDeliveryRuntimeUrl =
 			process.env.NOTIFICATION_DELIVERY_DATABASE_URL;
+		const previousReportingBackupUrl = process.env.REPORTING_BACKUP_URL;
+		const previousReportingRuntimeUrl = process.env.REPORTING_DATABASE_URL;
 		process.env.DATABASE_URL_PRODUCTION =
 			'postgresql://user:full-secret@db.example/app';
 		process.env.DATABASE_BACKUP_URL =
@@ -346,6 +385,10 @@ describe('DatabaseBackupService', () => {
 			'postgresql://user:notification-backup-secret@db.example/app';
 		process.env.NOTIFICATION_DELIVERY_DATABASE_URL =
 			'postgresql://user:notification-runtime-secret@db.example/app';
+		process.env.REPORTING_BACKUP_URL =
+			'postgresql://user:reporting-backup-secret@db.example/app';
+		process.env.REPORTING_DATABASE_URL =
+			'postgresql://user:reporting-runtime-secret@db.example/app';
 
 		try {
 			const execution = (service as any).runCommand(
@@ -369,6 +412,8 @@ describe('DatabaseBackupService', () => {
 			expect(
 				options.env.NOTIFICATION_DELIVERY_DATABASE_URL
 			).toBeUndefined();
+			expect(options.env.REPORTING_BACKUP_URL).toBeUndefined();
+			expect(options.env.REPORTING_DATABASE_URL).toBeUndefined();
 		} finally {
 			if (previousUrl === undefined) {
 				delete process.env.DATABASE_URL_PRODUCTION;
@@ -391,6 +436,16 @@ describe('DatabaseBackupService', () => {
 			} else {
 				process.env.NOTIFICATION_DELIVERY_DATABASE_URL =
 					previousNotificationDeliveryRuntimeUrl;
+			}
+			if (previousReportingBackupUrl === undefined) {
+				delete process.env.REPORTING_BACKUP_URL;
+			} else {
+				process.env.REPORTING_BACKUP_URL = previousReportingBackupUrl;
+			}
+			if (previousReportingRuntimeUrl === undefined) {
+				delete process.env.REPORTING_DATABASE_URL;
+			} else {
+				process.env.REPORTING_DATABASE_URL = previousReportingRuntimeUrl;
 			}
 		}
 	});

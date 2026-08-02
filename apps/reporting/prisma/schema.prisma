@@ -1,0 +1,404 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/reporting-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("REPORTING_DATABASE_URL")
+  schemas  = ["reporting"]
+}
+
+model IdentityUserProjection {
+  id                  String    @id
+  createdAt           DateTime? @map("created_at")
+  sourceUpdatedAt     DateTime? @map("source_updated_at")
+  deletedAt           DateTime? @map("deleted_at")
+  status              String?
+  roles               String[]  @default([])
+  hasEmailIdentity    Boolean?  @map("has_email_identity")
+  hasPhoneIdentity    Boolean?  @map("has_phone_identity")
+  hasTelegramIdentity Boolean?  @map("has_telegram_identity")
+  loginMethodCount    Int?      @map("login_method_count")
+  tombstoned          Boolean   @default(false)
+  stateHash           String    @map("state_hash") @db.Char(64)
+  aggregateVersion    Decimal   @map("aggregate_version") @db.Decimal(65, 0)
+  sourceSequence      Decimal   @map("source_sequence") @db.Decimal(65, 0)
+  sourceOccurredAt    DateTime  @map("source_occurred_at")
+  appliedAt           DateTime  @default(now()) @map("applied_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  @@index([tombstoned, deletedAt, createdAt], map: "identity_users_reporting_idx")
+  @@index([tombstoned, sourceUpdatedAt], map: "identity_users_active_idx")
+  @@map("identity_user_projections")
+  @@schema("reporting")
+}
+
+model BillingPaymentFact {
+  id               String    @id
+  userId           String?   @map("user_id")
+  amount           String?
+  normalizedAmount Float?    @map("normalized_amount")
+  status           String?
+  sourceCreatedAt  DateTime? @map("source_created_at")
+  sourceUpdatedAt  DateTime? @map("source_updated_at")
+  tombstoned       Boolean   @default(false)
+  stateHash        String    @map("state_hash") @db.Char(64)
+  aggregateVersion Decimal   @map("aggregate_version") @db.Decimal(65, 0)
+  sourceSequence   Decimal   @map("source_sequence") @db.Decimal(65, 0)
+  sourceOccurredAt DateTime  @map("source_occurred_at")
+  appliedAt        DateTime  @default(now()) @map("applied_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([tombstoned, status, sourceUpdatedAt], map: "payment_facts_status_updated_idx")
+  @@index([tombstoned, userId, sourceUpdatedAt], map: "payment_facts_user_updated_idx")
+  @@map("billing_payment_facts")
+  @@schema("reporting")
+}
+
+model BillingSubscriptionProjection {
+  id               String    @id
+  userId           String?   @map("user_id")
+  plan             String?
+  status           String?
+  expiresAt        DateTime? @map("expires_at")
+  sourceCreatedAt  DateTime? @map("source_created_at")
+  tombstoned       Boolean   @default(false)
+  stateHash        String    @map("state_hash") @db.Char(64)
+  aggregateVersion Decimal   @map("aggregate_version") @db.Decimal(65, 0)
+  sourceSequence   Decimal   @map("source_sequence") @db.Decimal(65, 0)
+  sourceOccurredAt DateTime  @map("source_occurred_at")
+  appliedAt        DateTime  @default(now()) @map("applied_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([tombstoned, status, expiresAt], map: "subscriptions_status_expiry_idx")
+  @@index([tombstoned, userId], map: "subscriptions_user_idx")
+  @@map("billing_subscription_projections")
+  @@schema("reporting")
+}
+
+model WidgetProjection {
+  widgetType        String    @map("widget_type")
+  id                String
+  sourceAggregateId String    @unique(map: "widgets_source_aggregate_unique") @map("source_aggregate_id")
+  userId            String?   @map("user_id")
+  isActive          Boolean?  @map("is_active")
+  hasInstallDomain  Boolean?  @map("has_install_domain")
+  sourceCreatedAt   DateTime? @map("source_created_at")
+  tombstoned        Boolean   @default(false)
+  stateHash         String    @map("state_hash") @db.Char(64)
+  aggregateVersion  Decimal   @map("aggregate_version") @db.Decimal(65, 0)
+  sourceSequence    Decimal   @map("source_sequence") @db.Decimal(65, 0)
+  sourceOccurredAt  DateTime  @map("source_occurred_at")
+  appliedAt         DateTime  @default(now()) @map("applied_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  @@id([widgetType, id])
+  @@index([tombstoned, widgetType, isActive], map: "widgets_type_active_idx")
+  @@index([tombstoned, sourceCreatedAt], map: "widgets_created_idx")
+  @@map("widget_projections")
+  @@schema("reporting")
+}
+
+model LeadFact {
+  widgetType        String    @map("widget_type")
+  id                String
+  sourceAggregateId String    @unique(map: "leads_source_aggregate_unique") @map("source_aggregate_id")
+  widgetId          String?   @map("widget_id")
+  sourceCreatedAt   DateTime? @map("source_created_at")
+  tombstoned        Boolean   @default(false)
+  stateHash         String    @map("state_hash") @db.Char(64)
+  aggregateVersion  Decimal   @map("aggregate_version") @db.Decimal(65, 0)
+  sourceSequence    Decimal   @map("source_sequence") @db.Decimal(65, 0)
+  sourceOccurredAt  DateTime  @map("source_occurred_at")
+  appliedAt         DateTime  @default(now()) @map("applied_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  @@id([widgetType, id])
+  @@index([tombstoned, widgetType, sourceCreatedAt], map: "lead_facts_type_created_idx")
+  @@map("lead_facts")
+  @@schema("reporting")
+}
+
+model ProjectionReceipt {
+  id               String                  @id @default(uuid()) @db.Uuid
+  eventId          String                  @map("event_id") @db.Uuid
+  projection       String
+  eventType        String                  @map("event_type")
+  aggregateId      String                  @map("aggregate_id")
+  aggregateVersion Decimal                 @map("aggregate_version") @db.Decimal(65, 0)
+  sourceSequence   Decimal                 @map("source_sequence") @db.Decimal(65, 0)
+  tombstone        Boolean
+  stateHash        String                  @map("state_hash") @db.Char(64)
+  result           ProjectionReceiptResult
+  appliedAt        DateTime                @default(now()) @map("applied_at")
+
+  @@unique([eventId, projection], map: "projection_receipts_event_projection_unique")
+  @@index([projection, sourceSequence], map: "projection_receipts_watermark_idx")
+  @@index([projection, aggregateId, aggregateVersion], map: "projection_receipts_aggregate_idx")
+  @@map("projection_receipts")
+  @@schema("reporting")
+}
+
+model ProjectionWatermark {
+  stream           String   @id
+  sourceSequence   Decimal  @map("source_sequence") @db.Decimal(65, 0)
+  eventId          String   @map("event_id") @db.Uuid
+  aggregateVersion Decimal  @map("aggregate_version") @db.Decimal(65, 0)
+  occurredAt       DateTime @map("occurred_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("projection_watermarks")
+  @@schema("reporting")
+}
+
+model ConsumerReceipt {
+  id             String                         @id @default(uuid()) @db.Uuid
+  eventId        String                         @map("event_id") @db.Uuid
+  consumer       String
+  payloadHash    String                         @map("payload_hash") @db.Char(64)
+  status         ReportingConsumerReceiptStatus
+  lockedAt       DateTime?                      @map("locked_at")
+  lockedBy       String?                        @map("locked_by")
+  lockToken      String?                        @map("lock_token") @db.Uuid
+  leaseExpiresAt DateTime?                      @map("lease_expires_at")
+  retryAttempt   Int?                           @map("retry_attempt")
+  retryCycle     Int                            @default(0) @map("retry_cycle")
+  deliveredAt    DateTime?                      @map("delivered_at")
+  lastError      String?                        @map("last_error") @db.Text
+  createdAt      DateTime                       @default(now()) @map("created_at")
+  updatedAt      DateTime                       @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer], map: "consumer_receipts_event_consumer_unique")
+  @@index([status, leaseExpiresAt], map: "consumer_receipts_lease_idx")
+  @@map("consumer_receipts")
+  @@schema("reporting")
+}
+
+model ReportingConsumerFailure {
+  id                   String                         @id @default(uuid()) @db.Uuid
+  eventId              String                         @map("event_id") @db.Uuid
+  consumer             String
+  consumerKind         String                         @map("consumer_kind")
+  eventType            String                         @map("event_type")
+  payload              Json
+  payloadHash          String                         @map("payload_hash") @db.Char(64)
+  correlationId        String                         @map("correlation_id")
+  status               ReportingConsumerFailureStatus @default(OPEN)
+  manualRetryCount     Int                            @default(0) @map("manual_retry_count")
+  lastError            String                         @map("last_error") @db.Text
+  lastFailedAt         DateTime                       @default(now()) @map("last_failed_at")
+  retryRequestedAt     DateTime?                      @map("retry_requested_at")
+  resolvedAt           DateTime?                      @map("resolved_at")
+  createdAt            DateTime                       @default(now()) @map("created_at")
+  updatedAt            DateTime                       @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer], map: "reporting_consumer_failures_event_consumer_unique")
+  @@index([status, lastFailedAt], map: "reporting_consumer_failures_status_failed_idx")
+  @@map("consumer_failures")
+  @@schema("reporting")
+}
+
+model ReportingSettings {
+  id                        String         @id @default("daily-summary")
+  owner                     ReportingOwner @default(CORE_SHADOW)
+  enabled                   Boolean        @default(false)
+  destinationChatId         String?        @map("destination_chat_id")
+  messageThreadId           Int?           @map("message_thread_id")
+  coreOperationalAlertsDestinationChatId String? @map("core_operational_alerts_destination_chat_id")
+  coreOperationalAlertsThreadId Int?       @map("core_operational_alerts_thread_id")
+  scheduleTime              String         @default("01:50") @map("schedule_time")
+  // Local Reporting CAS version. Core only fences backup-policy conflicts and
+  // is never read as a schedule source after the ownership switch.
+  scheduleGeneration          BigInt       @default(0) @map("schedule_authority_generation")
+  schedulePolicyChangeId      String?      @map("schedule_policy_change_id") @db.Uuid
+  timezone                  String         @default("Europe/Moscow")
+  sourceAggregateVersion    Decimal?       @map("source_aggregate_version") @db.Decimal(65, 0)
+  sourceSequence            Decimal?       @map("source_sequence") @db.Decimal(65, 0)
+  stateHash                 String?        @map("state_hash") @db.Char(64)
+  coreOperationalRoutingSourceAggregateVersion Decimal? @map("core_operational_routing_source_aggregate_version") @db.Decimal(65, 0)
+  coreOperationalRoutingSourceSequence Decimal? @map("core_operational_routing_source_sequence") @db.Decimal(65, 0)
+  coreOperationalRoutingStateHash String? @map("core_operational_routing_state_hash") @db.Char(64)
+  lastSuccessfulPeriodStart DateTime?      @map("last_successful_period_start")
+  lastSuccessfulAt          DateTime?      @map("last_successful_at")
+  lastFailedPeriodStart     DateTime?      @map("last_failed_period_start")
+  lastFailedAt              DateTime?      @map("last_failed_at")
+  lastFailureCode           String?        @map("last_failure_code")
+  lastFailureReason         String?        @map("last_failure_reason") @db.Text
+  createdAt                 DateTime       @default(now()) @map("created_at")
+  updatedAt                 DateTime       @updatedAt @map("updated_at")
+
+  @@map("reporting_settings")
+  @@schema("reporting")
+}
+
+model ReportRun {
+  id                String          @id @default(uuid()) @db.Uuid
+  periodKey         String          @unique(map: "report_runs_period_key_unique") @map("period_key")
+  periodStart       DateTime        @map("period_start")
+  periodEnd         DateTime        @map("period_end")
+  timezone          String
+  status            ReportRunStatus @default(PENDING)
+  checkpoint        String          @default("CREATED")
+  attempts          Int             @default(0)
+  availableAt       DateTime        @default(now()) @map("available_at")
+  destinationChatId String          @map("destination_chat_id")
+  messageThreadId   Int             @map("message_thread_id")
+  messageText       String?         @map("message_text") @db.Text
+  messageSha256     String?         @map("message_sha256") @db.Char(64)
+  requestEventId    String?         @unique(map: "report_runs_request_event_unique") @map("request_event_id") @db.Uuid
+  outcomeEventId    String?         @unique(map: "report_runs_outcome_event_unique") @map("outcome_event_id") @db.Uuid
+  failureCode       String?         @map("failure_code")
+  failureReason     String?         @map("failure_reason") @db.Text
+  lockedAt          DateTime?       @map("locked_at")
+  lockedBy          String?         @map("locked_by")
+  lockToken         String?         @map("lock_token") @db.Uuid
+  leaseExpiresAt    DateTime?       @map("lease_expires_at")
+  completedAt       DateTime?       @map("completed_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt], map: "report_runs_dispatch_idx")
+  @@index([status, leaseExpiresAt], map: "report_runs_lease_idx")
+  @@map("report_runs")
+  @@schema("reporting")
+}
+
+model ReportingOutboxEvent {
+  id               String                  @id @default(uuid()) @db.Uuid
+  messageId        String                  @default(uuid()) @map("message_id") @db.Uuid
+  deduplicationKey String?                 @unique(map: "reporting_outbox_dedup_unique") @map("deduplication_key")
+  exchange         ReportingOutboxExchange @default(EVENTS)
+  eventType        String                  @map("event_type")
+  routingKey       String                  @map("routing_key")
+  payload          Json
+  headers          Json                    @default("{}")
+  status           ReportingOutboxStatus   @default(PENDING)
+  attempts         Int                     @default(0)
+  availableAt      DateTime                @default(now()) @map("available_at")
+  lockedAt         DateTime?               @map("locked_at")
+  lockedBy         String?                 @map("locked_by")
+  lockToken        String?                 @map("lock_token") @db.Uuid
+  leaseExpiresAt   DateTime?               @map("lease_expires_at")
+  publishedAt      DateTime?               @map("published_at")
+  lastError        String?                 @map("last_error") @db.Text
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt], map: "reporting_outbox_dispatch_idx")
+  @@index([status, leaseExpiresAt], map: "reporting_outbox_lease_idx")
+  @@index([messageId], map: "reporting_outbox_message_idx")
+  @@map("outbox_events")
+  @@schema("reporting")
+}
+
+model ReportingHeartbeat {
+  id         String   @id @default(uuid()) @db.Uuid
+  role       String
+  instanceId String   @map("instance_id")
+  metadata   Json     @default("{}")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([role, instanceId], map: "reporting_heartbeats_role_instance_unique")
+  @@index([role, lastSeenAt], map: "reporting_heartbeats_role_seen_idx")
+  @@map("heartbeats")
+  @@schema("reporting")
+}
+
+model ReportingBackfillRun {
+  id             String                  @id @default(uuid()) @db.Uuid
+  snapshotId     String                  @unique(map: "reporting_backfill_runs_snapshot_unique") @map("snapshot_id") @db.Uuid
+  status         ReportingBackfillStatus @default(RUNNING)
+  watermarks     Json
+  counts         Json                    @default("{}")
+  recordCount    Int                     @default(0) @map("record_count")
+  appliedCount   Int                     @default(0) @map("applied_count")
+  duplicateCount Int                     @default(0) @map("duplicate_count")
+  staleCount     Int                     @default(0) @map("stale_count")
+  sha256         String?                 @db.Char(64)
+  expectedSha256 String?                 @map("expected_sha256") @db.Char(64)
+  lockedBy       String?                 @map("locked_by")
+  lockToken      String?                 @map("lock_token") @db.Uuid
+  leaseExpiresAt DateTime?               @map("lease_expires_at")
+  lastError      String?                 @map("last_error") @db.Text
+  startedAt      DateTime                @default(now()) @map("started_at")
+  verifiedAt     DateTime?               @map("verified_at")
+  failedAt       DateTime?               @map("failed_at")
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+
+  @@index([status, leaseExpiresAt], map: "reporting_backfill_runs_lease_idx")
+  @@map("backfill_runs")
+  @@schema("reporting")
+}
+
+enum ProjectionReceiptResult {
+  APPLIED
+  DUPLICATE
+  STALE
+
+  @@schema("reporting")
+}
+
+enum ReportingConsumerReceiptStatus {
+  PROCESSING
+  RETRY_SCHEDULED
+  DELIVERED
+  DEAD_LETTERED
+
+  @@schema("reporting")
+}
+
+enum ReportingOwner {
+  CORE_SHADOW
+  REPORTING
+
+  @@schema("reporting")
+}
+
+enum ReportRunStatus {
+  PENDING
+  PROCESSING
+  WAITING_DELIVERY
+  COMPLETED
+  FAILED
+
+  @@schema("reporting")
+}
+
+enum ReportingOutboxStatus {
+  PENDING
+  PUBLISHING
+  PUBLISHED
+  QUARANTINED
+
+  @@schema("reporting")
+}
+
+enum ReportingOutboxExchange {
+  EVENTS
+  RETRY
+  MANUAL_RETRY
+  DEAD_LETTER
+
+  @@schema("reporting")
+}
+
+enum ReportingConsumerFailureStatus {
+  OPEN
+  RETRY_REQUESTED
+  RESOLVED
+
+  @@schema("reporting")
+}
+
+enum ReportingBackfillStatus {
+  RUNNING
+  VERIFIED
+  FAILED
+
+  @@schema("reporting")
+}

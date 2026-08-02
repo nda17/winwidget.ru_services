@@ -31,6 +31,7 @@ import {
 import type { SetupFunc } from 'amqp-connection-manager';
 import type { ConfirmChannel, ConsumeMessage, Options } from 'amqplib';
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 
 const DEFAULT_MAX_MESSAGE_BYTES = 256 * 1024;
 
@@ -438,7 +439,10 @@ export class RabbitMqService
 							this.nack(message, true);
 						});
 					},
-					{ noAck: false }
+					{
+						noAck: false,
+						consumerTag: this.getConsumerTag(queue)
+					}
 				);
 				registration.consumerTag = consumer.consumerTag;
 			}
@@ -663,6 +667,22 @@ export class RabbitMqService
 		throw new Error(
 			'RABBITMQ_ASSERT_TOPOLOGY must be explicitly set to true for the topology owner or false for workers'
 		);
+	}
+
+	private getConsumerTag(queue: string): string {
+		const connectionName =
+			this.configService.get<string>('RABBITMQ_CONNECTION_NAME')?.trim() ||
+			'winwidget';
+		const revision =
+			this.configService.get<string>('APP_REVISION')?.trim() || 'unknown';
+		const instanceHostname = hostname().trim() || 'unknown-host';
+		const tag = `${connectionName}:${revision}:${instanceHostname}:${queue}`;
+		if (Buffer.byteLength(tag, 'utf8') > 255) {
+			throw new Error(
+				'RabbitMQ consumer tag exceeds the AMQP short-string limit'
+			);
+		}
+		return tag;
 	}
 
 	private getRetryRoutingKey(kind: MessagingKind, index: number): string {

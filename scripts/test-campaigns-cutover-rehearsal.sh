@@ -57,7 +57,7 @@ RABBITMQ_CAMPAIGNS_PASSWORD='rehearsal_rabbitmq_campaigns_password_32'
 LEGACY_GATEWAY_ROUTES='[{"id":"monolith","pathPrefix":"/api/v1","upstreamUrl":"http://127.0.0.1:4200","authPolicy":"optional","timeoutMs":60000}]'
 TARGET_GATEWAY_ROUTES='[{"id":"campaigns","pathPrefix":"/api/v1/admin/campaigns","upstreamUrl":"http://127.0.0.1:4500","authPolicy":"required","timeoutMs":60000},{"id":"monolith","pathPrefix":"/api/v1","upstreamUrl":"http://127.0.0.1:4200","authPolicy":"optional","timeoutMs":60000}]'
 LEGACY_INTEGRATION_KINDS='webhook,bitrix24,amo-crm,mailing-email,mailing-telegram,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,auto-renewal'
-TARGET_INTEGRATION_KINDS='webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal'
+TARGET_INTEGRATION_KINDS='webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
 LEGACY_MAILING_EMAIL_RATE=5
 LEGACY_MAILING_TELEGRAM_RATE=10
 

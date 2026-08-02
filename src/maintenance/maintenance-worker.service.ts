@@ -703,6 +703,8 @@ export class MaintenanceWorkerService
 				return 'notification-delivery';
 			case SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP:
 				return 'campaigns';
+			case SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP:
+				return 'reporting';
 		}
 	}
 

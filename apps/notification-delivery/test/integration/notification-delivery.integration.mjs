@@ -29,6 +29,77 @@ if (!databaseUrl || !adminRabbitUrl || !workerRabbitUrl) {
 		'NOTIFICATION_DELIVERY_DATABASE_URL, RABBITMQ_URL and NOTIFICATION_DELIVERY_TEST_RABBITMQ_URL are required'
 	);
 }
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+function parseLocalUrl(rawValue, variableName, protocols) {
+	let parsed;
+	try {
+		parsed = new URL(rawValue);
+	} catch {
+		throw new Error(`${variableName} must be a valid URL`);
+	}
+	if (
+		!protocols.includes(parsed.protocol) ||
+		!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())
+	) {
+		throw new Error(
+			`${variableName} must point to an allowed loopback test service`
+		);
+	}
+	return parsed;
+}
+
+function assertNotProductionValue(rawValue, variableName) {
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.includes('PRODUCTION') && value?.trim() === rawValue.trim()) {
+			throw new Error(`${variableName} must not reuse ${key}`);
+		}
+	}
+}
+
+function assertLocalTestDatabase(rawValue, variableName) {
+	const parsed = parseLocalUrl(rawValue, variableName, [
+		'postgres:',
+		'postgresql:'
+	]);
+	const databaseName = decodeURIComponent(
+		parsed.pathname.replace(/^\//, '')
+	).toLowerCase();
+	if (!/(?:_ci|_test)$/.test(databaseName)) {
+		throw new Error(
+			`${variableName} database name must end with _ci or _test`
+		);
+	}
+	assertNotProductionValue(rawValue, variableName);
+}
+
+function assertLocalTestRabbit(rawValue, variableName) {
+	const parsed = parseLocalUrl(rawValue, variableName, ['amqp:']);
+	if (
+		decodeURIComponent(parsed.pathname.replace(/^\//, '')) !==
+			'winwidget' ||
+		!parsed.username ||
+		!parsed.password
+	) {
+		throw new Error(
+			`${variableName} must use authenticated local vhost winwidget`
+		);
+	}
+	assertNotProductionValue(rawValue, variableName);
+	return parsed;
+}
+
+assertLocalTestDatabase(databaseUrl, 'NOTIFICATION_DELIVERY_DATABASE_URL');
+const adminRabbit = assertLocalTestRabbit(adminRabbitUrl, 'RABBITMQ_URL');
+const workerRabbit = assertLocalTestRabbit(
+	workerRabbitUrl,
+	'NOTIFICATION_DELIVERY_TEST_RABBITMQ_URL'
+);
+if (adminRabbit.username === workerRabbit.username) {
+	throw new Error(
+		'Notification Delivery admin and restricted RabbitMQ users must differ'
+	);
+}
 
 const EVENTS_EXCHANGE = 'winwidget.events';
 const RETRY_EXCHANGE = 'winwidget.retry';

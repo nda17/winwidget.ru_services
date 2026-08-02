@@ -10,6 +10,12 @@ const execFileAsync = promisify(execFile);
 const {
 	ScheduledTasksService
 } = require('../dist/src/maintenance/scheduled-tasks.service.js');
+const {
+	assertMessagingEventContract
+} = require('../dist/src/messaging/messaging-event-contract.js');
+const {
+	ReportingProjectionSnapshotService
+} = require('../dist/src/reporting-internal/reporting-projection-snapshot.service.js');
 
 const databaseUrl = process.env.DATABASE_URL_DEVELOPMENT;
 const rabbitUrl = process.env.RABBITMQ_URL;
@@ -18,6 +24,9 @@ const rabbitUser = process.env.RABBITMQ_USER;
 const rabbitPassword = process.env.RABBITMQ_PASSWORD;
 const rabbitVhost = process.env.RABBITMQ_VHOST || 'winwidget';
 const rabbitContainerId = process.env.RABBITMQ_CONTAINER_ID;
+if (process.env.MESSAGING_INTEGRATION_ALLOW_MUTATION !== 'true') {
+	throw new Error('MESSAGING_INTEGRATION_ALLOW_MUTATION=true is required');
+}
 if (
 	!databaseUrl ||
 	!rabbitUrl ||
@@ -30,6 +39,84 @@ if (
 	);
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+const parseLocalUrl = (rawValue, variableName, protocols) => {
+	let parsed;
+	try {
+		parsed = new URL(rawValue);
+	} catch {
+		throw new Error(`${variableName} must be a valid URL`);
+	}
+	if (
+		!protocols.includes(parsed.protocol) ||
+		!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())
+	) {
+		throw new Error(
+			`${variableName} must point to an allowed loopback test service`
+		);
+	}
+	return parsed;
+};
+
+const assertLocalTestDatabase = (rawValue, variableName) => {
+	const parsed = parseLocalUrl(rawValue, variableName, [
+		'postgres:',
+		'postgresql:'
+	]);
+	const databaseName = decodeURIComponent(
+		parsed.pathname.replace(/^\//, '')
+	).toLowerCase();
+	if (!/(?:_ci|_test)$/.test(databaseName)) {
+		throw new Error(
+			`${variableName} database name must end with _ci or _test`
+		);
+	}
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.includes('PRODUCTION') && value?.trim() === rawValue.trim()) {
+			throw new Error(`${variableName} must not reuse ${key}`);
+		}
+	}
+};
+
+const assertLocalTestRabbit = (rawValue, variableName) => {
+	const parsed = parseLocalUrl(rawValue, variableName, ['amqp:']);
+	if (
+		decodeURIComponent(parsed.pathname.replace(/^\//, '')) !==
+			'winwidget' ||
+		!parsed.username ||
+		!parsed.password
+	) {
+		throw new Error(
+			`${variableName} must use authenticated local vhost winwidget`
+		);
+	}
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.includes('PRODUCTION') && value?.trim() === rawValue.trim()) {
+			throw new Error(`${variableName} must not reuse ${key}`);
+		}
+	}
+};
+
+const assertLocalManagementUrl = (rawValue, variableName) => {
+	const parsed = parseLocalUrl(rawValue, variableName, ['http:']);
+	if (
+		parsed.username ||
+		parsed.password ||
+		(parsed.pathname !== '/' && parsed.pathname !== '') ||
+		parsed.search ||
+		parsed.hash
+	) {
+		throw new Error(
+			`${variableName} must be a credential-free local origin`
+		);
+	}
+};
+
+assertLocalTestDatabase(databaseUrl, 'DATABASE_URL_DEVELOPMENT');
+assertLocalTestRabbit(rabbitUrl, 'RABBITMQ_URL');
+assertLocalManagementUrl(rabbitManagementUrl, 'RABBITMQ_MANAGEMENT_URL');
+
 const prisma = new PrismaClient({
 	datasources: { db: { url: databaseUrl } }
 });
@@ -38,6 +125,7 @@ let childFailure;
 let connection;
 let channel;
 let maintenanceScheduleState;
+let reportingAuditActorId;
 const createdEventIds = [];
 const createdScheduledJobIds = [];
 const requiredQueues = [
@@ -51,12 +139,40 @@ const requiredQueues = [
 	'winwidget.notification.campaign.email.v2',
 	'winwidget.notification.campaign.telegram.v2',
 	'winwidget.admin.audit.campaigns.v1',
+	'winwidget.admin.audit.reporting.v1',
 	'winwidget.limit-notification.email',
 	'winwidget.limit-notification.telegram',
 	'winwidget.report.daily-summary.telegram',
 	'winwidget.notification.telegram-destination-unavailable',
 	'winwidget.maintenance.database-backup'
 ];
+
+const reportingEventTypes = [
+	'identity.user.changed.v1',
+	'billing.payment.changed.v1',
+	'billing.subscription.changed.v1',
+	'widgets.widget.changed.v1',
+	'widgets.lead.changed.v1',
+	'reporting.settings.changed.v1'
+];
+
+const streamReportingProjectionSnapshot = async () => {
+	const chunks = [];
+	const request = { aborted: false };
+	const response = {
+		destroyed: false,
+		writableEnded: false,
+		write(value) {
+			chunks.push(value);
+			return true;
+		}
+	};
+	await new ReportingProjectionSnapshotService(prisma).stream(
+		request,
+		response
+	);
+	return chunks;
+};
 
 const getRabbitManagementStatus = async path => {
 	const response = await fetch(
@@ -179,8 +295,434 @@ const verifyManualBackupAdvisoryLock = async () => {
 	}
 };
 
+const verifyReportingProjectionProducers = async () => {
+	const suffix = randomUUID();
+	const disabledUserId = `ci-reporting-disabled-${suffix}`;
+	const rollbackUserId = `ci-reporting-rollback-${suffix}`;
+	const userId = `ci-reporting-user-${suffix}`;
+	const emailIdentityId = `ci-reporting-email-${suffix}`;
+	const phoneIdentityId = `ci-reporting-phone-${suffix}`;
+	const paymentId = `ci-reporting-payment-${suffix}`;
+	const subscriptionId = `ci-reporting-subscription-${suffix}`;
+	const widgetId = `ci-reporting-widget-${suffix}`;
+	const leadId = `ci-reporting-lead-${suffix}`;
+	const widgetTypes = [
+		'wheel',
+		'quiz',
+		'callback',
+		'countdownTimer',
+		'stopOffer',
+		'onlineConsultant',
+		'calculator'
+	];
+	const widgetAggregateIds = widgetTypes.map(
+		type => `${type}:${widgetId}`
+	);
+	const leadAggregateIds = widgetTypes.map(type => `${type}:${leadId}`);
+	const emailValue = `projection-${suffix}@example.invalid`;
+	const phoneValue = `+7000${suffix.replaceAll('-', '').slice(0, 10)}`;
+	const leadContact = `private-contact-${suffix}`;
+	const installDomain = `private-${suffix}.example.invalid`;
+	const aggregateIds = [
+		disabledUserId,
+		rollbackUserId,
+		userId,
+		paymentId,
+		subscriptionId,
+		...widgetAggregateIds,
+		...leadAggregateIds
+	];
+	let originalState;
+
+	try {
+		originalState = await prisma.reportingProducerState.findUniqueOrThrow({
+			where: { id: 'singleton' }
+		});
+		if (originalState.enabled) {
+			throw new Error(
+				'Reporting projection producer must be disabled before integration smoke'
+			);
+		}
+		try {
+			await streamReportingProjectionSnapshot();
+			throw new Error(
+				'Disabled Reporting producer allowed a projection snapshot'
+			);
+		} catch (error) {
+			if (
+				!error?.message?.includes(
+					'Reporting projection snapshot requires enabled producers'
+				)
+			) {
+				throw error;
+			}
+		}
+
+		await prisma.user.create({
+			data: {
+				id: disabledUserId,
+				password: 'not-a-real-password'
+			}
+		});
+		const disabledEvents = await prisma.outboxEvent.count({
+			where: {
+				eventType: { in: reportingEventTypes },
+				payload: { path: ['aggregateId'], equals: disabledUserId }
+			}
+		});
+		if (disabledEvents !== 0) {
+			throw new Error(
+				'Disabled Reporting producer created an Outbox event'
+			);
+		}
+		await prisma.user.delete({ where: { id: disabledUserId } });
+
+		await prisma.reportingProducerState.update({
+			where: { id: 'singleton' },
+			data: { enabled: true, activatedAt: new Date() }
+		});
+		const snapshotChunks = await streamReportingProjectionSnapshot();
+		const snapshotLines = snapshotChunks.map(chunk => JSON.parse(chunk));
+		if (
+			snapshotLines[0]?.kind !== 'header' ||
+			snapshotLines.at(-1)?.kind !== 'footer'
+		) {
+			throw new Error(
+				'Enabled Reporting producer did not produce a complete snapshot'
+			);
+		}
+		try {
+			await prisma.$transaction(async transaction => {
+				await transaction.user.create({
+					data: {
+						id: rollbackUserId,
+						password: 'not-a-real-password'
+					}
+				});
+				throw new Error('EXPECTED_REPORTING_PRODUCER_ROLLBACK');
+			});
+			throw new Error('Reporting rollback smoke unexpectedly committed');
+		} catch (error) {
+			if (error?.message !== 'EXPECTED_REPORTING_PRODUCER_ROLLBACK') {
+				throw error;
+			}
+		}
+		const rolledBackArtifacts = await Promise.all([
+			prisma.user.count({ where: { id: rollbackUserId } }),
+			prisma.outboxEvent.count({
+				where: {
+					eventType: 'identity.user.changed.v1',
+					payload: { path: ['aggregateId'], equals: rollbackUserId }
+				}
+			}),
+			prisma.reportingProjectionVersion.count({
+				where: {
+					aggregateType: 'identity.user',
+					aggregateId: rollbackUserId
+				}
+			})
+		]);
+		if (rolledBackArtifacts.some(count => count !== 0)) {
+			throw new Error(
+				'Reporting producer artifacts survived a rolled-back transaction'
+			);
+		}
+		await prisma.user.create({
+			data: { id: userId, password: 'not-a-real-password' }
+		});
+		await prisma.authIdentity.create({
+			data: {
+				id: emailIdentityId,
+				userId,
+				type: 'EMAIL',
+				value: emailValue
+			}
+		});
+		await prisma.user.updateMany({
+			where: { id: userId },
+			data: { status: 'DEACTIVATED' }
+		});
+		await prisma.authIdentity.create({
+			data: {
+				id: phoneIdentityId,
+				userId,
+				type: 'PHONE',
+				value: phoneValue
+			}
+		});
+		await prisma.authIdentity.updateMany({
+			where: { id: phoneIdentityId },
+			data: { verifiedAt: new Date() }
+		});
+		await prisma.payment.create({
+			data: {
+				id: paymentId,
+				userId,
+				amount: '990.00',
+				checkoutExpiresAt: new Date(Date.now() + 60_000)
+			}
+		});
+		await prisma.subscription.create({
+			data: { id: subscriptionId, userId }
+		});
+		await prisma.widget.create({
+			data: {
+				id: widgetId,
+				userId,
+				publicKey: `ci-reporting-${suffix}`,
+				installDomain
+			}
+		});
+		await prisma.lead.create({
+			data: { id: leadId, widgetId, contact: leadContact }
+		});
+		await prisma.$transaction([
+			prisma.quiz.create({
+				data: {
+					id: widgetId,
+					userId,
+					publicKey: `ci-reporting-quiz-${suffix}`,
+					installDomain
+				}
+			}),
+			prisma.callback.create({
+				data: {
+					id: widgetId,
+					userId,
+					publicKey: `ci-reporting-callback-${suffix}`,
+					installDomain
+				}
+			}),
+			prisma.countdownTimer.create({
+				data: {
+					id: widgetId,
+					userId,
+					publicKey: `ci-reporting-countdown-${suffix}`,
+					installDomain
+				}
+			}),
+			prisma.stopOffer.create({
+				data: {
+					id: widgetId,
+					userId,
+					publicKey: `ci-reporting-stop-${suffix}`,
+					installDomain
+				}
+			}),
+			prisma.onlineConsultant.create({
+				data: {
+					id: widgetId,
+					userId,
+					publicKey: `ci-reporting-consultant-${suffix}`,
+					installDomain
+				}
+			}),
+			prisma.calculator.create({
+				data: {
+					id: widgetId,
+					userId,
+					publicKey: `ci-reporting-calculator-${suffix}`,
+					installDomain
+				}
+			})
+		]);
+		await prisma.$transaction([
+			prisma.quizLead.create({
+				data: { id: leadId, quizId: widgetId, contact: leadContact }
+			}),
+			prisma.callbackLead.create({
+				data: { id: leadId, callbackId: widgetId, phone: phoneValue }
+			}),
+			prisma.countdownTimerLead.create({
+				data: { id: leadId, countdownTimerId: widgetId, phone: phoneValue }
+			}),
+			prisma.stopOfferLead.create({
+				data: { id: leadId, stopOfferId: widgetId, email: emailValue }
+			}),
+			prisma.onlineConsultantLead.create({
+				data: {
+					id: leadId,
+					onlineConsultantId: widgetId,
+					phone: phoneValue
+				}
+			}),
+			prisma.calculatorLead.create({
+				data: {
+					id: leadId,
+					calculatorId: widgetId,
+					contact: leadContact,
+					calculatedPrice: '123.45'
+				}
+			})
+		]);
+
+		const identityEvents = await prisma.outboxEvent.findMany({
+			where: {
+				eventType: 'identity.user.changed.v1',
+				payload: { path: ['aggregateId'], equals: userId }
+			},
+			orderBy: { createdAt: 'asc' },
+			select: { payload: true }
+		});
+		const versions = identityEvents.map(event =>
+			Number(event.payload.aggregateVersion)
+		);
+		if (
+			versions.length !== 5 ||
+			versions.some((version, index) => version !== index + 1)
+		) {
+			throw new Error(
+				`Reporting aggregate versions are not gapless: ${versions.join(',')}`
+			);
+		}
+		const sequences = identityEvents.map(event =>
+			BigInt(event.payload.sourceSequence)
+		);
+		if (
+			sequences.some(
+				(sequence, index) => index > 0 && sequence <= sequences[index - 1]
+			)
+		) {
+			throw new Error('Reporting sourceSequence is not monotonic');
+		}
+		const lastIdentityState = identityEvents.at(-1)?.payload.state;
+		const expectedIdentityKeys = [
+			'createdAt',
+			'deletedAt',
+			'hasEmailIdentity',
+			'hasPhoneIdentity',
+			'hasTelegramIdentity',
+			'id',
+			'loginMethodCount',
+			'roles',
+			'status',
+			'updatedAt'
+		];
+		if (
+			!lastIdentityState ||
+			Object.keys(lastIdentityState).sort().join('|') !==
+				expectedIdentityKeys.join('|') ||
+			lastIdentityState.loginMethodCount !== 2
+		) {
+			throw new Error('Reporting identity state contract drifted');
+		}
+
+		await prisma.user.delete({ where: { id: userId } });
+		const cascadeEvents = await prisma.outboxEvent.findMany({
+			where: {
+				eventType: { in: reportingEventTypes },
+				OR: [
+					userId,
+					paymentId,
+					subscriptionId,
+					...widgetAggregateIds,
+					...leadAggregateIds
+				].map(id => ({
+					payload: { path: ['aggregateId'], equals: id }
+				}))
+			},
+			select: {
+				id: true,
+				messageId: true,
+				eventType: true,
+				routingKey: true,
+				payload: true
+			}
+		});
+		for (const event of cascadeEvents) {
+			assertMessagingEventContract(event.payload, {
+				eventType: event.eventType,
+				routingKey: event.routingKey,
+				messageId: event.messageId || event.id
+			});
+		}
+		const postCascadeIdentityEvents = cascadeEvents
+			.filter(
+				event =>
+					event.eventType === 'identity.user.changed.v1' &&
+					event.payload.aggregateId === userId
+			)
+			.sort(
+				(left, right) =>
+					Number(left.payload.aggregateVersion) -
+					Number(right.payload.aggregateVersion)
+			);
+		if (
+			postCascadeIdentityEvents.length !== 6 ||
+			postCascadeIdentityEvents.at(-1)?.payload.tombstone !== true
+		) {
+			throw new Error(
+				'AuthIdentity cascade emitted a missing or resurrecting user projection'
+			);
+		}
+		for (const [eventType, aggregateId] of [
+			['identity.user.changed.v1', userId],
+			['billing.payment.changed.v1', paymentId],
+			['billing.subscription.changed.v1', subscriptionId],
+			...widgetAggregateIds.map(id => ['widgets.widget.changed.v1', id]),
+			...leadAggregateIds.map(id => ['widgets.lead.changed.v1', id])
+		]) {
+			const tombstone = cascadeEvents.find(
+				event =>
+					event.eventType === eventType &&
+					event.payload.aggregateId === aggregateId &&
+					event.payload.tombstone === true &&
+					event.payload.state === null
+			);
+			if (!tombstone) {
+				throw new Error(
+					`Reporting cascade tombstone is missing for ${eventType}`
+				);
+			}
+		}
+
+		const serializedPayloads = JSON.stringify(
+			cascadeEvents.map(event => event.payload)
+		);
+		for (const forbiddenValue of [
+			emailValue,
+			phoneValue,
+			leadContact,
+			installDomain
+		]) {
+			if (serializedPayloads.includes(forbiddenValue)) {
+				throw new Error(
+					'Reporting projection payload contains source PII'
+				);
+			}
+		}
+	} finally {
+		await prisma.reportingProducerState.updateMany({
+			where: { id: 'singleton' },
+			data: {
+				enabled: false,
+				activatedAt: originalState?.activatedAt || null
+			}
+		});
+		await prisma.user.deleteMany({
+			where: { id: { in: [disabledUserId, rollbackUserId, userId] } }
+		});
+		const events = await prisma.outboxEvent.findMany({
+			where: {
+				eventType: { in: reportingEventTypes },
+				OR: aggregateIds.map(id => ({
+					payload: { path: ['aggregateId'], equals: id }
+				}))
+			},
+			select: { id: true }
+		});
+		await prisma.outboxEvent.deleteMany({
+			where: { id: { in: events.map(event => event.id) } }
+		});
+		await prisma.reportingProjectionVersion.deleteMany({
+			where: { aggregateId: { in: aggregateIds } }
+		});
+	}
+};
+
 try {
 	await prisma.$connect();
+	await verifyReportingProjectionProducers();
 	await verifyManualBackupAdvisoryLock();
 	connection = await amqp.connect(rabbitUrl);
 
@@ -555,7 +1097,8 @@ try {
 
 	startProcess('dist/src/integration-worker-main.js', {
 		INTEGRATION_WORKER_KINDS:
-			'webhook,daily-summary-telegram,telegram-destination-unavailable'
+			'webhook,daily-summary-telegram,telegram-destination-unavailable,reporting-admin-audit',
+		RABBITMQ_WORKER_PREFETCH: '1'
 	});
 	await waitFor(async () => {
 		const queues = await Promise.all(
@@ -564,7 +1107,9 @@ try {
 				'winwidget.report.daily-summary.telegram',
 				'winwidget.report.daily-summary.telegram.dead-letter',
 				'winwidget.notification.telegram-destination-unavailable',
-				'winwidget.notification.telegram-destination-unavailable.dead-letter'
+				'winwidget.notification.telegram-destination-unavailable.dead-letter',
+				'winwidget.admin.audit.reporting.v1',
+				'winwidget.admin.audit.reporting.v1.dead-letter'
 			].map(queue => channel.checkQueue(queue))
 		);
 		return queues.every(queue => queue.consumerCount > 0);
@@ -609,6 +1154,128 @@ try {
 				.then(receipt => receipt?.status === 'DELIVERED'),
 		'destination-unavailable outcome delivery'
 	);
+
+	reportingAuditActorId = `ci-reporting-audit-${randomUUID()}`;
+	await prisma.user.create({
+		data: {
+			id: reportingAuditActorId,
+			password: 'not-a-real-password'
+		}
+	});
+	const reportingAuditEventId = randomUUID();
+	createdEventIds.push(reportingAuditEventId);
+	const reportingAuditPayload = {
+		schemaVersion: 1,
+		eventType: 'admin.audit.event.v1',
+		eventId: reportingAuditEventId,
+		occurredAt: new Date().toISOString(),
+		correlationId: `ci:reporting-audit:${reportingAuditEventId}`,
+		actorId: reportingAuditActorId,
+		action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+		target: { reportingSettingsId: 'daily-summary' },
+		metadata: { changedFields: ['enabled', 'scheduleTime'] }
+	};
+	await prisma.outboxEvent.create({
+		data: {
+			id: reportingAuditEventId,
+			messageId: reportingAuditEventId,
+			eventType: 'admin.audit.event.v1',
+			routingKey: 'admin.audit.reporting.v1',
+			payload: reportingAuditPayload
+		}
+	});
+	const reportingAuditLog = await waitFor(
+		() =>
+			prisma.adminEventLog.findFirst({
+				where: {
+					adminId: reportingAuditActorId,
+					section: 'REPORTING',
+					action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+					entityType: 'reporting-settings',
+					entityId: 'daily-summary'
+				}
+			}),
+		'Reporting settings ActivityLog delivery'
+	);
+	if (
+		JSON.stringify(reportingAuditLog.metadata) !==
+		JSON.stringify({ changedFields: ['enabled', 'scheduleTime'] })
+	) {
+		throw new Error('Reporting settings ActivityLog leaked values or PII');
+	}
+	await waitFor(
+		() =>
+			prisma.integrationDeliveryReceipt
+				.findUnique({
+					where: {
+						eventId_integration: {
+							eventId: reportingAuditEventId,
+							integration: 'reporting-admin-audit'
+						}
+					},
+					select: { status: true }
+				})
+				.then(receipt => receipt?.status === 'DELIVERED'),
+		'Reporting settings audit receipt'
+	);
+	channel.publish(
+		'winwidget.events',
+		'admin.audit.reporting.v1',
+		Buffer.from(JSON.stringify(reportingAuditPayload)),
+		{
+			persistent: true,
+			messageId: reportingAuditEventId,
+			type: 'admin.audit.event.v1',
+			contentType: 'application/json'
+		}
+	);
+
+	const malformedReportingAuditEventId = randomUUID();
+	createdEventIds.push(malformedReportingAuditEventId);
+	channel.publish(
+		'winwidget.events',
+		'admin.audit.reporting.v1',
+		Buffer.from(
+			JSON.stringify({
+				...reportingAuditPayload,
+				eventId: malformedReportingAuditEventId,
+				metadata: {
+					changedFields: ['enabled'],
+					destinationChatId: '-100-not-allowed-in-audit'
+				}
+			})
+		),
+		{
+			persistent: true,
+			messageId: malformedReportingAuditEventId,
+			type: 'admin.audit.event.v1',
+			contentType: 'application/json'
+		}
+	);
+	await waitFor(
+		() =>
+			prisma.integrationDeliveryFailure.findUnique({
+				where: {
+					eventId_integration: {
+						eventId: malformedReportingAuditEventId,
+						integration: 'reporting-admin-audit'
+					}
+				}
+			}),
+		'Reporting audit malformed event DLQ persistence'
+	);
+	const duplicateReportingAuditCount = await prisma.adminEventLog.count({
+		where: {
+			adminId: reportingAuditActorId,
+			action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+			entityId: 'daily-summary'
+		}
+	});
+	if (duplicateReportingAuditCount !== 1) {
+		throw new Error(
+			`Reporting audit duplicate was not idempotent: count=${duplicateReportingAuditCount}`
+		);
+	}
 
 	// Keep the smoke independent from real time and Telegram schedule settings.
 	const maintenanceScheduleSnapshot =
@@ -736,6 +1403,8 @@ try {
 						'winwidget.report.daily-summary.telegram.dead-letter',
 						'winwidget.notification.telegram-destination-unavailable',
 						'winwidget.notification.telegram-destination-unavailable.dead-letter',
+						'winwidget.admin.audit.reporting.v1',
+						'winwidget.admin.audit.reporting.v1.dead-letter',
 						'winwidget.maintenance.database-backup',
 						'winwidget.maintenance.database-backup.dead-letter'
 					].map(queue => channel.checkQueue(queue))
@@ -1025,7 +1694,7 @@ try {
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: manual backup advisory lock, ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, terminal scheduled jobs, malformed -> DLQ -> PostgreSQL${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
+		`Messaging integration smoke passed: manual backup advisory lock, ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, Reporting audit Outbox -> idempotent ActivityLog and malformed -> isolated DLQ -> PostgreSQL, terminal scheduled jobs, malformed -> DLQ -> PostgreSQL${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);
@@ -1072,6 +1741,19 @@ try {
 	if (createdScheduledJobIds.length) {
 		await prisma.scheduledJobRun
 			.deleteMany({ where: { id: { in: createdScheduledJobIds } } })
+			.catch(() => undefined);
+	}
+	if (reportingAuditActorId) {
+		await prisma.adminEventLog
+			.deleteMany({
+				where: {
+					adminId: reportingAuditActorId,
+					action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE'
+				}
+			})
+			.catch(() => undefined);
+		await prisma.user
+			.deleteMany({ where: { id: reportingAuditActorId } })
 			.catch(() => undefined);
 	}
 	await prisma.$disconnect();

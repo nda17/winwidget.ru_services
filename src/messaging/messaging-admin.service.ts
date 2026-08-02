@@ -6,6 +6,7 @@ import {
 import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import {
 	getManualRetryRoutingKey,
+	CoreMessagingKind,
 	LEAD_INTEGRATION_KINDS,
 	MESSAGING_KINDS,
 	MessagingKind,
@@ -862,11 +863,11 @@ export class MessagingAdminService {
 		);
 	}
 
-	private normalizeIntegration(value: string): MessagingKind {
-		if (!MESSAGING_KINDS.includes(value as MessagingKind)) {
+	private normalizeIntegration(value: string): CoreMessagingKind {
+		if (!MESSAGING_KINDS.includes(value as CoreMessagingKind)) {
 			throw new BadRequestException('Некорректный тип интеграции');
 		}
-		return value as MessagingKind;
+		return value as CoreMessagingKind;
 	}
 
 	private isNotificationDeliveryKind(

@@ -21,6 +21,7 @@
 		"start:outbox-publisher": "node dist/src/outbox-publisher-main.js",
 		"start:integration-worker": "node dist/src/integration-worker-main.js",
 		"start:maintenance-worker": "node dist/src/maintenance-worker-main.js",
+		"start:database-restore-worker": "node dist/src/database-restore-worker-main.js",
 		"start:api-gateway": "pnpm --dir apps/api-gateway run start:local",
 		"lint": "eslint \"{src,libs,test}/**/*.ts\" --fix",
 		"test": "jest",
@@ -29,6 +30,8 @@
 		"test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
 		"test:e2e": "jest --config ./test/jest-e2e.json",
 		"test:messaging-integration": "node scripts/test-messaging-integration.mjs",
+		"test:reporting-producer-boundaries": "node scripts/test-reporting-producer-boundaries.mjs",
+		"test:reporting-cutover-rehearsal": "bash scripts/test-reporting-cutover-rehearsal.sh",
 		"jwt:keyset:generate": "node scripts/generate-jwt-keyset.mjs",
 		"email": "emails dev",
 		"prepare": "husky"

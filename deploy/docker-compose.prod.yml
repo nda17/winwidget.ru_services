@@ -83,6 +83,11 @@ x-api-env: &api-env
   CAMPAIGNS_INTERNAL_TOKEN: ${CAMPAIGNS_INTERNAL_TOKEN:?CAMPAIGNS_INTERNAL_TOKEN is required}
   CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE: ${CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE:-500}
   CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: ${CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS:-300000}
+  REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
+  DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
+  DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
+  DATABASE_RESTORE_PRODUCTION_ENABLED: ${DATABASE_RESTORE_PRODUCTION_ENABLED:-false}
+  DATABASE_RESTORE_PRODUCTION_PERMIT: ${DATABASE_RESTORE_PRODUCTION_PERMIT:-}
 
 x-api-gateway-env: &api-gateway-env
   APP_REVISION: ${APP_REVISION:-unknown}
@@ -116,7 +121,7 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
@@ -166,6 +171,29 @@ x-campaigns-env: &campaigns-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   MESSAGING_SERVICE_NAME: campaigns-service
 
+x-reporting-env: &reporting-env
+  APP_REVISION: ${REPORTING_REVISION:?REPORTING_REVISION is required}
+  NODE_ENV: production
+  MODE: ${MODE:-production}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+  REPORTING_DATABASE_URL: ${REPORTING_DATABASE_URL:?REPORTING_DATABASE_URL is required}
+  REPORTING_PROCESS_ROLE: ${REPORTING_PROCESS_ROLE:-all}
+  REPORTING_LISTEN_HOST: ${REPORTING_LISTEN_HOST:-127.0.0.1}
+  REPORTING_PORT: ${REPORTING_PORT:-4600}
+  REPORTING_CORE_INTERNAL_BASE_URL: ${REPORTING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
+  REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
+  REPORTING_INTERNAL_TIMEOUT_MS: ${REPORTING_INTERNAL_TIMEOUT_MS:-10000}
+  REPORTING_SCHEDULER_ENABLED: ${REPORTING_SCHEDULER_ENABLED:-false}
+  REPORTING_PREFETCH: ${REPORTING_PREFETCH:-10}
+  REPORTING_OUTBOX_BATCH_SIZE: ${REPORTING_OUTBOX_BATCH_SIZE:-50}
+  REPORTING_OUTBOX_POLL_INTERVAL_MS: ${REPORTING_OUTBOX_POLL_INTERVAL_MS:-1000}
+  REPORTING_OUTBOX_RETENTION_DAYS: ${REPORTING_OUTBOX_RETENTION_DAYS:-7}
+  RABBITMQ_URL: ${RABBITMQ_REPORTING_URL:?RABBITMQ_REPORTING_URL is required}
+  RABBITMQ_CONNECTION_NAME: winwidget-reporting-service
+  RABBITMQ_ASSERT_TOPOLOGY: 'true'
+  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+  MESSAGING_SERVICE_NAME: reporting-service
+
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
   APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
@@ -173,6 +201,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   DATABASE_BACKUP_URL: ${DATABASE_BACKUP_URL:?DATABASE_BACKUP_URL is required}
   NOTIFICATION_DELIVERY_BACKUP_URL: ${NOTIFICATION_DELIVERY_BACKUP_URL:?NOTIFICATION_DELIVERY_BACKUP_URL is required}
   CAMPAIGNS_BACKUP_URL: ${CAMPAIGNS_BACKUP_URL:?CAMPAIGNS_BACKUP_URL is required}
+  REPORTING_BACKUP_URL: ${REPORTING_BACKUP_URL:?REPORTING_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
@@ -185,6 +214,23 @@ x-maintenance-worker-env: &maintenance-worker-env
   SCHEDULED_JOB_POLL_INTERVAL_MS: ${SCHEDULED_JOB_POLL_INTERVAL_MS:-30000}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
   SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
+
+x-database-restore-worker-env: &database-restore-worker-env
+  APP_REVISION: ${DATABASE_RESTORE_REVISION:?DATABASE_RESTORE_REVISION is required}
+  NODE_ENV: production
+  DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
+  DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
+  DATABASE_RESTORE_POLL_INTERVAL_MS: ${DATABASE_RESTORE_POLL_INTERVAL_MS:-1000}
+  DATABASE_RESTORE_COMMAND_TIMEOUT_MS: ${DATABASE_RESTORE_COMMAND_TIMEOUT_MS:-1800000}
+  DATABASE_RESTORE_MIGRATIONS_ROOT: /app
+  DATABASE_RESTORE_CORE_PORT: '55434'
+  DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: ${NOTIFICATION_DELIVERY_POSTGRES_PORT:?NOTIFICATION_DELIVERY_POSTGRES_PORT is required}
+  DATABASE_RESTORE_CAMPAIGNS_PORT: ${CAMPAIGNS_POSTGRES_PORT:?CAMPAIGNS_POSTGRES_PORT is required}
+  DATABASE_RESTORE_REPORTING_PORT: ${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}
+  DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/core-admin-password
+  DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
+  DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
+  DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/reporting-admin-password
 
 x-outbox-publisher-env: &outbox-publisher-env
   <<: *runtime-env
@@ -211,6 +257,11 @@ x-campaigns-migration-env: &campaigns-migration-env
   APP_REVISION: ${CAMPAIGNS_REVISION:?CAMPAIGNS_REVISION is required}
   NODE_ENV: production
   CAMPAIGNS_DATABASE_URL: ${CAMPAIGNS_MIGRATION_DATABASE_URL:?CAMPAIGNS_MIGRATION_DATABASE_URL is required}
+
+x-reporting-migration-env: &reporting-migration-env
+  APP_REVISION: ${REPORTING_REVISION:?REPORTING_REVISION is required}
+  NODE_ENV: production
+  REPORTING_DATABASE_URL: ${REPORTING_MIGRATION_DATABASE_URL:?REPORTING_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -301,6 +352,50 @@ services:
         max-file: '5'
     restart: unless-stopped
 
+  reporting-postgres:
+    image: ${REPORTING_POSTGRES_IMAGE:?REPORTING_POSTGRES_IMAGE is required}
+    profiles:
+      - reporting-database
+    labels:
+      com.winwidget.owner: reporting
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_reporting
+      POSTGRES_USER: ${REPORTING_POSTGRES_ADMIN_USER:?REPORTING_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/reporting-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}:5432'
+    volumes:
+      - winwidget-reporting-postgres-data:/var/lib/postgresql
+    networks:
+      - reporting-postgres
+    secrets:
+      - reporting-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${REPORTING_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${REPORTING_POSTGRES_MEMORY_LIMIT:-768m}
+    mem_reservation: ${REPORTING_POSTGRES_MEMORY_RESERVATION:-256m}
+    cpus: ${REPORTING_POSTGRES_CPUS:-1.0}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:4.2-management-alpine
     hostname: winwidget-rabbitmq
@@ -329,6 +424,10 @@ services:
         APP_REVISION: ${APP_REVISION:-unknown}
     environment: *api-env
     network_mode: host
+    volumes:
+      - type: bind
+        source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
+        target: /var/lib/winwidget/database-restores
     healthcheck:
       test:
         [
@@ -447,6 +546,43 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  reporting-service:
+    image: ${REPORTING_IMAGE:?REPORTING_IMAGE is required}
+    build:
+      context: ../apps/reporting
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${REPORTING_REVISION:?REPORTING_REVISION is required}
+    environment: *reporting-env
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.REPORTING_PORT||4600)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    # The all-role process drains scheduler, consumers, Outbox, RabbitMQ and
+    # Prisma hooks. Keep a margin above their bounded aggregate shutdown time.
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${REPORTING_MEMORY_LIMIT:-512m}
+    mem_reservation: ${REPORTING_MEMORY_RESERVATION:-128m}
+    cpus: ${REPORTING_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -477,6 +613,70 @@ services:
       retries: 12
     stop_grace_period: 30s
     restart: unless-stopped
+
+  database-restore-worker:
+    image: ${DATABASE_RESTORE_IMAGE:?DATABASE_RESTORE_IMAGE is required}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: database-restore-runner
+      args:
+        APP_REVISION: ${DATABASE_RESTORE_REVISION:?DATABASE_RESTORE_REVISION is required}
+    labels:
+      com.winwidget.owner: maintenance
+      com.winwidget.purpose: database-restore-worker
+    environment: *database-restore-worker-env
+    network_mode: host
+    volumes:
+      - type: bind
+        source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
+        target: /var/lib/winwidget/database-restores
+    secrets:
+      - source: core-postgres-admin-password
+        target: database-restore-core-admin-password
+      - source: notification-delivery-postgres-admin-password
+        target: database-restore-notification-delivery-admin-password
+      - source: campaigns-postgres-admin-password
+        target: database-restore-campaigns-admin-password
+      - source: reporting-postgres-admin-password
+        target: database-restore-reporting-admin-password
+    tmpfs:
+      - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    read_only: true
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - KILL
+      - SETGID
+      - SETUID
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["campaigns","core","notification-delivery","reporting"]''||fences.length!==0)process.exit(1)'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 45s
+    restart: unless-stopped
+    mem_limit: ${DATABASE_RESTORE_MEMORY_LIMIT:-256m}
+    mem_reservation: ${DATABASE_RESTORE_MEMORY_RESERVATION:-64m}
+    cpus: ${DATABASE_RESTORE_CPUS:-0.5}
+    pids_limit: 100
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
 
   migrate:
     image: winwidget-api:${APP_VERSION:-latest}
@@ -520,7 +720,24 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  reporting-migrate:
+    image: ${REPORTING_IMAGE:?REPORTING_IMAGE is required}
+    build:
+      context: ../apps/reporting
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${REPORTING_REVISION:?REPORTING_REVISION is required}
+    profiles:
+      - reporting-migration
+    environment: *reporting-migration-env
+    network_mode: host
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
+  winwidget-reporting-postgres-data:
+    external: true
+    name: ${REPORTING_POSTGRES_DATA_VOLUME:?REPORTING_POSTGRES_DATA_VOLUME must name the verified Reporting PostgreSQL volume}
   winwidget-campaigns-postgres-data:
     external: true
     name: ${CAMPAIGNS_POSTGRES_DATA_VOLUME:?CAMPAIGNS_POSTGRES_DATA_VOLUME must name the verified Campaigns PostgreSQL volume}
@@ -532,6 +749,13 @@ volumes:
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
 
 networks:
+  reporting-postgres:
+    name: winwidget-reporting-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: reporting
+      com.winwidget.purpose: postgres-network
   campaigns-postgres:
     name: winwidget-campaigns-postgres
     driver: bridge
@@ -548,6 +772,10 @@ networks:
       com.winwidget.purpose: postgres-network
 
 secrets:
+  core-postgres-admin-password:
+    file: ${CORE_POSTGRES_ADMIN_PASSWORD_FILE:?CORE_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  reporting-postgres-admin-password:
+    file: ${REPORTING_POSTGRES_ADMIN_PASSWORD_FILE:?REPORTING_POSTGRES_ADMIN_PASSWORD_FILE is required}
   campaigns-postgres-admin-password:
     file: ${CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE:?CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE is required}
   notification-delivery-postgres-admin-password:

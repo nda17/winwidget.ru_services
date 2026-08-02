@@ -26,8 +26,23 @@ export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.telegram.requested.v1';
 export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v1';
-export const CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE = 'admin.audit.event.v1';
+export const ADMIN_AUDIT_EVENT_TYPE = 'admin.audit.event.v1';
+export const CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE = ADMIN_AUDIT_EVENT_TYPE;
+export const REPORTING_ADMIN_AUDIT_ROUTING_KEY =
+	'admin.audit.reporting.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
+export const REPORTING_IDENTITY_USER_EVENT_TYPE =
+	'identity.user.changed.v1';
+export const REPORTING_BILLING_PAYMENT_EVENT_TYPE =
+	'billing.payment.changed.v1';
+export const REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE =
+	'billing.subscription.changed.v1';
+export const REPORTING_WIDGET_EVENT_TYPE = 'widgets.widget.changed.v1';
+export const REPORTING_LEAD_EVENT_TYPE = 'widgets.lead.changed.v1';
+export const REPORTING_SETTINGS_EVENT_TYPE =
+	'reporting.settings.changed.v1';
+export const REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE =
+	'reporting.core-operational-routing.changed.v1';
 export const EVENTS_EXCHANGE = 'winwidget.events';
 export const RETRY_EXCHANGE = 'winwidget.retry';
 export const DEAD_LETTER_EXCHANGE = 'winwidget.dead-letter';
@@ -58,6 +73,7 @@ export const INTEGRATION_KINDS = [
 	'subscription-expiry-telegram',
 	'notification-delivery-outcome',
 	'campaign-admin-audit',
+	'reporting-admin-audit',
 	'auto-renewal'
 ] as const;
 
@@ -94,12 +110,25 @@ export const MAINTENANCE_KINDS = ['database-backup'] as const;
 
 export type MaintenanceKind = (typeof MAINTENANCE_KINDS)[number];
 
+export const REPORTING_PROJECTION_KINDS = [
+	'reporting-identity-user',
+	'reporting-billing-payment',
+	'reporting-billing-subscription',
+	'reporting-widget',
+	'reporting-lead',
+	'reporting-settings'
+] as const;
+
+export type ReportingProjectionKind =
+	(typeof REPORTING_PROJECTION_KINDS)[number];
+
 export const MESSAGING_KINDS = [
 	...INTEGRATION_KINDS,
 	...MAINTENANCE_KINDS
 ] as const;
 
-export type MessagingKind = (typeof MESSAGING_KINDS)[number];
+export type CoreMessagingKind = (typeof MESSAGING_KINDS)[number];
+export type MessagingKind = CoreMessagingKind | ReportingProjectionKind;
 
 export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	email: 'lead.integration.email.v2',
@@ -125,8 +154,16 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'notification-delivery-outcome':
 		NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	'campaign-admin-audit': CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
+	'reporting-admin-audit': REPORTING_ADMIN_AUDIT_ROUTING_KEY,
 	'auto-renewal': AUTO_RENEWAL_CHARGE_EVENT_TYPE,
-	'database-backup': DATABASE_BACKUP_EVENT_TYPE
+	'database-backup': DATABASE_BACKUP_EVENT_TYPE,
+	'reporting-identity-user': REPORTING_IDENTITY_USER_EVENT_TYPE,
+	'reporting-billing-payment': REPORTING_BILLING_PAYMENT_EVENT_TYPE,
+	'reporting-billing-subscription':
+		REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE,
+	'reporting-widget': REPORTING_WIDGET_EVENT_TYPE,
+	'reporting-lead': REPORTING_LEAD_EVENT_TYPE,
+	'reporting-settings': REPORTING_SETTINGS_EVENT_TYPE
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
@@ -153,8 +190,16 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'notification-delivery-outcome':
 		'winwidget.notification.delivery-outcome',
 	'campaign-admin-audit': 'winwidget.admin.audit.campaigns.v1',
+	'reporting-admin-audit': 'winwidget.admin.audit.reporting.v1',
 	'auto-renewal': 'winwidget.payment.auto-renewal',
-	'database-backup': 'winwidget.maintenance.database-backup'
+	'database-backup': 'winwidget.maintenance.database-backup',
+	'reporting-identity-user': 'winwidget.reporting.identity-user',
+	'reporting-billing-payment': 'winwidget.reporting.billing-payment',
+	'reporting-billing-subscription':
+		'winwidget.reporting.billing-subscription',
+	'reporting-widget': 'winwidget.reporting.widget',
+	'reporting-lead': 'winwidget.reporting.lead',
+	'reporting-settings': 'winwidget.reporting.settings'
 };
 
 export const INTEGRATION_ROUTING_KEYS = MESSAGING_ROUTING_KEYS;

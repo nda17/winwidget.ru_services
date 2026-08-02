@@ -25,6 +25,7 @@ import { QuizModule } from '@/quiz/quiz.module';
 import { CallbackModule } from '@/callback/callback.module';
 import { CalculatorModule } from '@/calculator/calculator.module';
 import { CampaignsInternalModule } from '@/campaigns-internal/campaigns-internal.module';
+import { ReportingInternalModule } from '@/reporting-internal/reporting-internal.module';
 import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
 import { StopOfferModule } from '@/stop-offer/stop-offer.module';
 import { OnlineConsultantModule } from '@/online-consultant/online-consultant.module';
@@ -70,6 +71,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		HomePageContentModule,
 		NotesModule,
 		CampaignsInternalModule,
+		ReportingInternalModule,
 		MessagingAdminModule,
 		HealthModule,
 		TelegramBotModule,

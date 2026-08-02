@@ -566,6 +566,21 @@ export const matchGatewayRoute = (
 	return match;
 };
 
+const LEGACY_STATISTICS_PATH_PREFIX = '/api/v1/statistics';
+const REPORTING_PATH_PREFIX = '/api/v1/admin/reporting';
+
+export const isLegacyStatisticsRouteTombstoned = (
+	pathname: string,
+	routes: readonly GatewayRouteConfig[]
+): boolean =>
+	routes.some(
+		route =>
+			route.id === 'reporting' &&
+			route.pathPrefix === REPORTING_PATH_PREFIX
+	) &&
+	(pathname === LEGACY_STATISTICS_PATH_PREFIX ||
+		pathname.startsWith(`${LEGACY_STATISTICS_PATH_PREFIX}/`));
+
 export const createGateway = (
 	config: GatewayConfig,
 	options: GatewayOptions = {}
@@ -678,6 +693,44 @@ export const createGateway = (
 			}
 
 			if (!isApiV1Path(target.routingPathname)) {
+				sendError(
+					request,
+					response,
+					404,
+					'Not Found',
+					'Route not found',
+					'route_not_found',
+					requestId,
+					correlationId,
+					corsHeaders
+				);
+				return;
+			}
+
+			if (
+				target.routingPathname === '/api/v1/internal' ||
+				target.routingPathname.startsWith('/api/v1/internal/')
+			) {
+				sendError(
+					request,
+					response,
+					404,
+					'Not Found',
+					'Route not found',
+					'route_not_found',
+					requestId,
+					correlationId,
+					corsHeaders
+				);
+				return;
+			}
+			if (
+				isLegacyStatisticsRouteTombstoned(
+					target.routingPathname,
+					config.routes
+				)
+			) {
+				routeId = 'reporting-legacy-tombstone';
 				sendError(
 					request,
 					response,

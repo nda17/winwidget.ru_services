@@ -24,6 +24,7 @@ import { assertMessagingEventContract } from '@/messaging/messaging-event-contra
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
 import { NotificationDeliveryOutcomeEventPayload } from '@/messaging/notification-delivery-event';
 import { getStableMessageId } from '@/messaging/poison-message-id';
+import { ReportingAdminAuditEventPayload } from '@/messaging/reporting-admin-audit-event';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
@@ -68,7 +69,8 @@ type WorkerEventPayload =
 	| NotificationDeliveryOutcomeEventPayload
 	| DailySummaryRequestedEventPayload
 	| AutoRenewalChargeRequestedEventPayload
-	| CampaignAdminAuditEventPayload;
+	| CampaignAdminAuditEventPayload
+	| ReportingAdminAuditEventPayload;
 
 interface ScheduledJobStatusRow {
 	jobType: string;
@@ -301,6 +303,20 @@ export class IntegrationWorkerService
 				this.rabbitMq.ack(message);
 				this.logger.log(
 					`Campaign admin audit delivered eventId=${eventId}`
+				);
+				return;
+			}
+			if (kind === 'reporting-admin-audit') {
+				await this.deliverReportingAdminAudit(
+					payload as ReportingAdminAuditEventPayload,
+					eventId,
+					receiptClaim
+				);
+				receiptClaim = null;
+				await this.runCleanup();
+				this.rabbitMq.ack(message);
+				this.logger.log(
+					`Reporting admin audit delivered eventId=${eventId}`
 				);
 				return;
 			}
@@ -697,6 +713,77 @@ export class IntegrationWorkerService
 				where: {
 					eventId,
 					integration: 'campaign-admin-audit',
+					resolvedAt: null
+				},
+				data: {
+					resolvedAt: new Date(),
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
+				}
+			});
+		});
+	}
+
+	private async deliverReportingAdminAudit(
+		payload: ReportingAdminAuditEventPayload,
+		eventId: string,
+		lockedAt: Date
+	): Promise<void> {
+		await this.prisma.$transaction(async transaction => {
+			if (payload.action === 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE') {
+				await this.adminEventLog.recordInTransaction(transaction, {
+					adminId: payload.actorId,
+					section: 'REPORTING',
+					action: payload.action,
+					description: 'Обновлены настройки ежедневной сводки Reporting',
+					entityType: 'reporting-settings',
+					entityId: payload.target.reportingSettingsId,
+					entityLabel: 'Ежедневная сводка',
+					metadata: {
+						changedFields: payload.metadata.changedFields
+					}
+				});
+			} else {
+				await this.adminEventLog.recordInTransaction(transaction, {
+					adminId: payload.actorId,
+					section: 'REPORTING',
+					action: payload.action,
+					description: 'Запрошен повтор обработки события Reporting',
+					entityType: 'reporting-delivery',
+					entityId: payload.target.eventId,
+					entityLabel: payload.target.consumerKind,
+					metadata: {}
+				});
+			}
+
+			const delivered =
+				await transaction.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration: 'reporting-admin-audit',
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.DELIVERED,
+						deliveredAt: new Date(),
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			if (delivered.count !== 1) {
+				throw new Error(
+					`Reporting audit receipt claim was lost eventId=${eventId}`
+				);
+			}
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: {
+					eventId,
+					integration: 'reporting-admin-audit',
 					resolvedAt: null
 				},
 				data: {

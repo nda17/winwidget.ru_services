@@ -232,6 +232,61 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createReportingAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-07-31T12:00:00.000Z',
+					correlationId: 'request:reporting-settings-42',
+					actorId: 'admin-user-id',
+					action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+					target: { reportingSettingsId: 'daily-summary' },
+					metadata: {
+						changedFields: ['enabled', 'scheduleTime']
+					}
+				})
+			),
+			fields: {
+				routingKey: 'admin.audit.reporting.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
+	const createReportingRetryAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-07-31T12:00:00.000Z',
+					correlationId: 'request:reporting-retry-42',
+					actorId: 'dev-user-id',
+					action: 'REPORTING_DELIVERY_RETRY',
+					target: {
+						eventId: '22222222-2222-4222-8222-222222222222',
+						consumerKind: 'lead'
+					},
+					metadata: {}
+				})
+			),
+			fields: {
+				routingKey: 'admin.audit.reporting.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	it('starts consumers only for integrations that remain in the monolith', async () => {
 		const { service, rabbitMq } = createService();
 
@@ -258,6 +313,7 @@ describe('IntegrationWorkerService', () => {
 			'telegram-destination-unavailable',
 			'notification-delivery-outcome',
 			'campaign-admin-audit',
+			'reporting-admin-audit',
 			'auto-renewal'
 		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
@@ -324,6 +380,106 @@ describe('IntegrationWorkerService', () => {
 				where: expect.objectContaining({
 					eventId: '11111111-1111-4111-8111-111111111111',
 					integration: 'campaign-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
+	it('writes a value-free Reporting audit and its receipt atomically', async () => {
+		const { service, rabbitMq, delivery, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'reporting-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createReportingAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			{
+				adminId: 'admin-user-id',
+				section: 'REPORTING',
+				action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+				description: 'Обновлены настройки ежедневной сводки Reporting',
+				entityType: 'reporting-settings',
+				entityId: 'daily-summary',
+				entityLabel: 'Ежедневная сводка',
+				metadata: {
+					changedFields: ['enabled', 'scheduleTime']
+				}
+			}
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					eventId: '11111111-1111-4111-8111-111111111111',
+					integration: 'reporting-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(
+			transaction.integrationDeliveryFailure.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					eventId: '11111111-1111-4111-8111-111111111111',
+					integration: 'reporting-admin-audit',
+					resolvedAt: null
+				}
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
+	it('writes a value-free Reporting retry audit with the durable delivery target', async () => {
+		const { service, rabbitMq, delivery, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'reporting-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createReportingRetryAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			{
+				adminId: 'dev-user-id',
+				section: 'REPORTING',
+				action: 'REPORTING_DELIVERY_RETRY',
+				description: 'Запрошен повтор обработки события Reporting',
+				entityType: 'reporting-delivery',
+				entityId: '22222222-2222-4222-8222-222222222222',
+				entityLabel: 'lead',
+				metadata: {}
+			}
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					integration: 'reporting-admin-audit',
 					status: IntegrationDeliveryReceiptStatus.PROCESSING
 				}),
 				data: expect.objectContaining({

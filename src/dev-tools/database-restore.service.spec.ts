@@ -3,7 +3,7 @@ import {
 	DatabaseRestoreService
 } from '@/dev-tools/database-restore.service';
 import type { PrismaService } from '@/prisma.service';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 
 describe('DatabaseRestoreService', () => {
 	const originalMode = process.env.MODE;
@@ -93,6 +93,16 @@ describe('DatabaseRestoreService', () => {
 		expect(prisma.$disconnect).not.toHaveBeenCalled();
 	});
 
+	it('keeps the legacy endpoint fail-closed in production', async () => {
+		process.env.MODE = 'production';
+		const { service, prisma } = createService();
+
+		await expect(
+			service.restore(createFile(), 'ВОССТАНОВИТЬ БД')
+		).rejects.toBeInstanceOf(ConflictException);
+		expect(prisma.$disconnect).not.toHaveBeenCalled();
+	});
+
 	it('restores a valid dump and reconnects the global Prisma client', async () => {
 		const { service, prisma } = createService();
 		const internals = service as any;
@@ -102,6 +112,7 @@ describe('DatabaseRestoreService', () => {
 		const runPostgresCommand = jest
 			.spyOn(internals, 'runPostgresCommand')
 			.mockResolvedValueOnce(coreTableOfContents)
+			.mockResolvedValueOnce('')
 			.mockResolvedValueOnce('');
 		const deleteTempFile = jest
 			.spyOn(internals, 'deleteTempFile')
@@ -133,6 +144,21 @@ describe('DatabaseRestoreService', () => {
 			'postgresql://postgres:secret@localhost:5432/winwidget',
 			'/tmp/winwidget.dump'
 		]);
+		expect(runPostgresCommand).toHaveBeenNthCalledWith(3, 'psql', [
+			'--no-psqlrc',
+			'--set',
+			'ON_ERROR_STOP=1',
+			'--dbname',
+			'postgresql://postgres:secret@localhost:5432/winwidget',
+			'--command',
+			expect.stringContaining('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC')
+		]);
+		expect(runPostgresCommand.mock.calls[2][1][6]).toContain(
+			'public.reporting_record_projection_event(text,text,text,text,jsonb,boolean)'
+		);
+		expect(runPostgresCommand.mock.calls[2][1][6]).toContain(
+			'privilege.grantee = 0'
+		);
 		expect(prisma.$connect).toHaveBeenCalledTimes(1);
 		expect(deleteTempFile).toHaveBeenCalledWith('/tmp/winwidget.dump');
 	});
@@ -209,5 +235,26 @@ describe('DatabaseRestoreService', () => {
 		await expect(
 			service.restore(file, 'ВОССТАНОВИТЬ БД')
 		).resolves.toMatchObject({ restored: true });
+	});
+
+	it('fails closed and reconnects Prisma when producer ACL hardening fails', async () => {
+		const { service, prisma } = createService();
+		const internals = service as any;
+		jest
+			.spyOn(internals, 'writeUploadedBackupFile')
+			.mockResolvedValue('/tmp/winwidget.dump');
+		const runPostgresCommand = jest
+			.spyOn(internals, 'runPostgresCommand')
+			.mockResolvedValueOnce(coreTableOfContents)
+			.mockResolvedValueOnce('')
+			.mockRejectedValueOnce(new Error('PUBLIC EXECUTE remains'));
+		jest.spyOn(internals, 'deleteTempFile').mockResolvedValue(undefined);
+
+		await expect(
+			service.restore(createFile(), 'ВОССТАНОВИТЬ БД')
+		).rejects.toThrow('PUBLIC EXECUTE remains');
+		expect(runPostgresCommand).toHaveBeenCalledTimes(3);
+		expect(prisma.$disconnect).toHaveBeenCalledTimes(1);
+		expect(prisma.$connect).toHaveBeenCalledTimes(1);
 	});
 });

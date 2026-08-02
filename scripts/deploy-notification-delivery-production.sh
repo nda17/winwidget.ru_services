@@ -14,6 +14,10 @@ server_root="$APP_ROOT/winwidget.ru_server"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$server_root/scripts/production-deploy-lock.sh"
 acquire_production_deploy_lock "Notification Delivery deployment"
+# shellcheck source=scripts/database-restore-production-guard.sh
+source "$server_root/scripts/database-restore-production-guard.sh"
+# shellcheck source=scripts/reporting-cutover-lifecycle.sh
+source "$server_root/scripts/reporting-cutover-lifecycle.sh"
 recreate_started=false
 rollout_verified=false
 previous_image_ref=""
@@ -749,6 +753,10 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+reporting_guard_before_checkout_revision "$deploy_revision" || {
+	echo 'Notification Delivery deployment revision conflicts with the active Reporting lifecycle.' >&2
+	exit 1
+}
 source "$server_root/scripts/notification-delivery-database-lifecycle.sh"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -764,6 +772,9 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
 	echo "Backend production Compose file was not found." >&2
 	exit 1
 fi
+
+# database-restore-production-guard: before-mutation
+database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
 
 duplicate_env_keys="$(
 	awk '
@@ -924,6 +935,7 @@ assert_live_env_matches() {
 
 validate_notification_database_urls() {
 	local parser_image="$1"
+	local notification_database_cutover_active=true
 	local runtime_url
 	local migration_url
 	local backup_url
@@ -1287,17 +1299,26 @@ live_integration_kinds="$(
 		INTEGRATION_WORKER_KINDS || true
 )"
 live_integration_kinds_normalized="$(normalize_csv "$live_integration_kinds")"
-legacy_integration_kinds_normalized="$(
-	normalize_csv "webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit"
+current_integration_kinds_normalized="$(
+	normalize_csv "$(reporting_expected_integration_worker_kinds)"
 )"
-auto_renewal_integration_kinds_normalized="$(
+pre_reporting_integration_kinds_normalized="$(
 	normalize_csv "webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
 )"
-if [[ "$live_integration_kinds_normalized" != "$legacy_integration_kinds_normalized" &&
-	"$live_integration_kinds_normalized" != "$auto_renewal_integration_kinds_normalized" ]]; then
-	echo "The live integration worker does not match the post-cutover kind boundary." >&2
+if [[ "$live_integration_kinds_normalized" == "$pre_reporting_integration_kinds_normalized" ]]; then
+	assert_core_database_url_boundaries
+	assert_core_database_postgres_identity
+fi
+if ! reporting_cutover_worker_kinds_allowed \
+	"$live_integration_kinds_normalized" \
+	"$current_integration_kinds_normalized" \
+	"$pre_reporting_integration_kinds_normalized"; then
+	echo "The live integration worker does not match the safe Reporting bootstrap boundary." >&2
 	echo "Use the full deployment target to repair topology ownership." >&2
 	exit 1
+fi
+if [[ "$live_integration_kinds_normalized" != "$current_integration_kinds_normalized" ]]; then
+	echo 'Allowing the pre-Reporting integration worker only for its one-way audit-consumer bootstrap.'
 fi
 
 previous_container_id="$(

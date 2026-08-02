@@ -167,6 +167,149 @@ describe('messaging event contract', () => {
 		).toThrow('eventId must match');
 	});
 
+	it('accepts the strict Reporting settings audit on its isolated route', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-07-31T12:00:00.000Z',
+			correlationId: 'request:reporting-settings-42',
+			actorId: 'admin-user-id',
+			action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+			target: { reportingSettingsId: 'daily-summary' },
+			metadata: {
+				changedFields: ['destinationChatId', 'enabled', 'timezone']
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.reporting.v1',
+				messageId: MESSAGE_ID,
+				kind: 'reporting-admin-audit'
+			})
+		).not.toThrow();
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.event.v1',
+				messageId: MESSAGE_ID,
+				kind: 'reporting-admin-audit'
+			})
+		).toThrow('Routing key');
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.reporting.v1',
+				messageId: MESSAGE_ID,
+				kind: 'campaign-admin-audit'
+			})
+		).toThrow('cannot be consumed by campaign-admin-audit');
+	});
+
+	it('rejects Reporting audit values, PII, and unstable changedFields', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-07-31T12:00:00.000Z',
+			correlationId: 'request.reporting-settings',
+			actorId: 'admin-user-id',
+			action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+			target: { reportingSettingsId: 'daily-summary' },
+			metadata: { changedFields: ['enabled', 'timezone'] }
+		};
+		const assertPayload = (value: unknown) =>
+			assertMessagingEventContract(value, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.reporting.v1',
+				messageId: MESSAGE_ID,
+				kind: 'reporting-admin-audit'
+			});
+
+		expect(() =>
+			assertPayload({
+				...payload,
+				metadata: { changedFields: ['timezone', 'enabled'] }
+			})
+		).toThrow('sorted and unique');
+		expect(() =>
+			assertPayload({
+				...payload,
+				metadata: { changedFields: ['enabled', 'enabled'] }
+			})
+		).toThrow('sorted and unique');
+		expect(() =>
+			assertPayload({
+				...payload,
+				metadata: {
+					changedFields: ['enabled'],
+					destinationChatId: '-100123'
+				}
+			})
+		).toThrow('unexpected fields');
+		expect(() =>
+			assertPayload({
+				...payload,
+				target: {
+					reportingSettingsId: 'daily-summary',
+					adminEmail: 'admin@example.com'
+				}
+			})
+		).toThrow('unexpected fields');
+		expect(() =>
+			assertPayload({
+				...payload,
+				correlationId: 'contains spaces'
+			})
+		).toThrow('correlationId is invalid');
+	});
+
+	it('accepts a value-free Reporting delivery retry audit', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-07-31T12:00:00.000Z',
+			correlationId: 'request:reporting-retry-42',
+			actorId: 'dev-user-id',
+			action: 'REPORTING_DELIVERY_RETRY',
+			target: {
+				eventId: '22222222-2222-4222-8222-222222222222',
+				consumerKind: 'lead'
+			},
+			metadata: {}
+		};
+		const assertPayload = (value: unknown) =>
+			assertMessagingEventContract(value, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.reporting.v1',
+				messageId: MESSAGE_ID,
+				kind: 'reporting-admin-audit'
+			});
+
+		expect(() => assertPayload(payload)).not.toThrow();
+		expect(() =>
+			assertPayload({
+				...payload,
+				target: { ...payload.target, consumerKind: 'unknown' }
+			})
+		).toThrow('consumerKind is invalid');
+		expect(() =>
+			assertPayload({
+				...payload,
+				target: { ...payload.target, eventId: 'not-a-uuid' }
+			})
+		).toThrow('target.eventId must be a UUID');
+		expect(() =>
+			assertPayload({
+				...payload,
+				metadata: { payload: { contact: '+79990000000' } }
+			})
+		).toThrow('unexpected fields');
+	});
+
 	it('rejects server credentials anywhere in a payload', () => {
 		expect(() =>
 			assertMessagingEventContract(

@@ -5,6 +5,7 @@ import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config';
 import {
 	createGateway,
+	isLegacyStatisticsRouteTombstoned,
 	matchGatewayRoute,
 	normalizeGatewayRoutingPathname,
 	resolveClientIp,
@@ -254,6 +255,71 @@ describe('API Gateway config', () => {
 		);
 	});
 
+	it('keeps protected restore and Reporting routes ahead of the monolith', () => {
+		const config = loadConfig({
+			...baseEnv,
+			GATEWAY_ROUTES_JSON: JSON.stringify([
+				{
+					id: 'database-restores',
+					pathPrefix: '/api/v1/dev-tools/database-restores',
+					upstreamUrl: 'http://127.0.0.1:4200',
+					authPolicy: 'required',
+					timeoutMs: 120_000
+				},
+				{
+					id: 'campaigns',
+					pathPrefix: '/api/v1/admin/campaigns',
+					upstreamUrl: 'http://127.0.0.1:4500',
+					authPolicy: 'required',
+					timeoutMs: 60_000
+				},
+				{
+					id: 'reporting',
+					pathPrefix: '/api/v1/admin/reporting',
+					upstreamUrl: 'http://127.0.0.1:4600',
+					authPolicy: 'required',
+					timeoutMs: 60_000
+				},
+				{
+					id: 'monolith',
+					pathPrefix: '/api/v1',
+					upstreamUrl: 'http://127.0.0.1:4200',
+					authPolicy: 'optional',
+					timeoutMs: 60_000
+				}
+			])
+		});
+
+		assert.deepEqual(
+			config.routes.map(route => route.id),
+			['database-restores', 'campaigns', 'reporting', 'monolith']
+		);
+		assert.equal(
+			matchGatewayRoute(
+				'/api/v1/dev-tools/database-restores/reporting',
+				config.routes
+			)?.id,
+			'database-restores'
+		);
+		assert.equal(config.routes[0].authPolicy, 'required');
+		assert.equal(config.routes[0].timeoutMs, 120_000);
+		for (const path of [
+			'/api/v1/admin/reporting',
+			'/api/v1/admin/reporting/dashboard',
+			'/api/v1/admin/reporting/daily-summary/settings'
+		]) {
+			assert.equal(
+				matchGatewayRoute(path, config.routes)?.id,
+				'reporting'
+			);
+		}
+		assert.equal(
+			matchGatewayRoute('/api/v1/admin/reporting-export', config.routes)
+				?.id,
+			'monolith'
+		);
+	});
+
 	it('fails fast for legacy, malformed and incomplete route config', () => {
 		assert.throws(
 			() =>
@@ -359,6 +425,38 @@ describe('API Gateway config', () => {
 		assert.equal(
 			normalizeGatewayRoutingPathname('/api/v1/%5Cadmin'),
 			null
+		);
+	});
+
+	it('tombstones only the exact legacy statistics boundary when Reporting is routed', () => {
+		const darkRoutes = [createTestRoute()];
+		const reportingRoutes = [
+			createTestRoute({
+				id: 'reporting',
+				pathPrefix: '/api/v1/admin/reporting'
+			}),
+			...darkRoutes
+		];
+		for (const path of [
+			'/api/v1/statistics',
+			'/api/v1/statistics/dashboard',
+			'/api/v1/statistics/dashboard/export'
+		]) {
+			assert.equal(
+				isLegacyStatisticsRouteTombstoned(path, darkRoutes),
+				false
+			);
+			assert.equal(
+				isLegacyStatisticsRouteTombstoned(path, reportingRoutes),
+				true
+			);
+		}
+		assert.equal(
+			isLegacyStatisticsRouteTombstoned(
+				'/api/v1/statistics-export',
+				reportingRoutes
+			),
+			false
 		);
 	});
 });
@@ -530,6 +628,66 @@ describe('API Gateway proxy', () => {
 		assert.equal(completionLog?.fields?.routeId, 'monolith');
 	});
 
+	it('keeps dark legacy routes proxied and tombstones them after Reporting routing', async () => {
+		const accessToken = signAccessToken(signingKey, { roles: ['ADMIN'] });
+		const darkResult = await makeRequest(
+			new URL('/api/v1/statistics/dashboard', gatewayUrl),
+			{ headers: { authorization: `Bearer ${accessToken}` } }
+		);
+		assert.equal(darkResult.statusCode, 201);
+
+		const reportingGateway = createGateway(
+			createTestConfig({
+				routes: [
+					createTestRoute({
+						id: 'reporting',
+						pathPrefix: '/api/v1/admin/reporting',
+						upstreamUrl: new URL(
+							`http://127.0.0.1:${(routedUpstream.address() as AddressInfo).port}`
+						),
+						authPolicy: 'required'
+					}),
+					createTestRoute({
+						upstreamUrl: new URL(
+							`http://127.0.0.1:${(upstream.address() as AddressInfo).port}`
+						)
+					})
+				]
+			}),
+			{
+				logger: silentLogger,
+				fetch: createJwksFetch(() => [signingKey.publicJwk])
+			}
+		);
+		assert.equal(await reportingGateway.initialize(), true);
+		await reportingGateway.listen(0, '127.0.0.1');
+		try {
+			const address = reportingGateway.address() as AddressInfo;
+			const origin = new URL(`http://127.0.0.1:${address.port}`);
+			const current = await makeRequest(
+				new URL('/api/v1/admin/reporting/overview', origin),
+				{ headers: { authorization: `Bearer ${accessToken}` } }
+			);
+			assert.equal(current.statusCode, 202);
+			const capturedBefore = captured.length;
+			for (const path of [
+				'/api/v1/statistics/dashboard',
+				'/api/v1/statistics/overview',
+				'/api/v1/statistics/registrations-by-month',
+				'/api/v1/statistics/dashboard/export'
+			]) {
+				const result = await makeRequest(new URL(path, origin), {
+					headers: { authorization: `Bearer ${accessToken}` }
+				});
+				assert.equal(result.statusCode, 404);
+				assert.equal(JSON.parse(result.body).code, 'route_not_found');
+			}
+			assert.equal(captured.length, capturedBefore);
+		} finally {
+			await reportingGateway.close();
+		}
+	});
+
 	it('dispatches to the longest matching route upstream', async () => {
 		const result = await makeRequest(
 			new URL('/api/v1/routed/item?key=value', gatewayUrl)
@@ -537,6 +695,25 @@ describe('API Gateway proxy', () => {
 
 		assert.equal(result.statusCode, 202);
 		assert.equal(result.body, 'routed:/api/v1/routed/item?key=value');
+	});
+
+	it('never publishes internal service endpoints through the catch-all route', async () => {
+		const capturedBefore = captured.length;
+		for (const path of [
+			'/api/v1/internal/reporting/auth/introspect',
+			'/api/v1/%69nternal/reporting/snapshot',
+			'/api/v1%2Finternal/reporting/snapshot',
+			'/api/v1/internal%2Freporting%2Fsnapshot'
+		]) {
+			const result = await makeRequest(new URL(path, gatewayUrl), {
+				headers: {
+					'x-winwidget-internal-token': 'attacker-controlled'
+				}
+			});
+			assert.equal(result.statusCode, 404);
+			assert.equal(JSON.parse(result.body).code, 'route_not_found');
+		}
+		assert.equal(captured.length, capturedBefore);
 	});
 
 	it('allows refresh cookie only on the explicit refresh/logout paths', async () => {

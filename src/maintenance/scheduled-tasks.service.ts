@@ -2,7 +2,8 @@ import {
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 	DatabaseBackupInput,
 	DatabaseBackupTarget,
-	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES
+	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
+	REPORTING_DATABASE_BACKUP_DELAY_MINUTES
 } from '@/maintenance/database-backup.types';
 import {
 	DAILY_SUMMARY_EVENT_TYPE,
@@ -148,35 +149,79 @@ export class ScheduledTasksService {
 		period: MoscowDayPeriod,
 		scheduledFor: Date
 	): Promise<{ created: boolean; job: ScheduledJobRunView } | null> {
-		const settings = await this.getSettings();
-		if (
-			!settings.dailySummaryEnabled ||
-			!settings.dailySummaryChatId.trim() ||
-			!settings.reportsThreadId
-		) {
-			return null;
-		}
-		if (
-			settings.dailySummaryLastSentPeriodStart?.getTime() ===
-			period.start.getTime()
-		) {
-			return null;
-		}
-
-		return this.scheduledJobs.enqueueUnique(
-			{
-				jobType: SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
-				scheduleKey: period.key,
-				trigger: ScheduledJobRunTrigger.SCHEDULED,
-				scheduledFor,
-				periodStart: period.start,
-				periodEnd: period.end,
-				input: {
-					chatId: settings.dailySummaryChatId.trim(),
-					messageThreadId: settings.reportsThreadId
+		const owner = await this.prisma.reportingProducerState.findUnique({
+			where: { id: 'singleton' },
+			select: { dailySummaryOwner: true }
+		});
+		if (owner?.dailySummaryOwner !== 'CORE') return null;
+		return this.prisma.$transaction(
+			async transaction => {
+				await this.getSettings(transaction);
+				const lockedSettings = await transaction.$queryRaw<
+					Array<{ id: string }>
+				>(Prisma.sql`
+					SELECT "id"
+					FROM "telegram_bot_settings"
+					WHERE "id" = 'singleton'
+					FOR UPDATE
+				`);
+				if (lockedSettings.length !== 1) {
+					throw new Error('Telegram settings row is missing');
 				}
+				const settings =
+					await transaction.telegramBotSettings.findUniqueOrThrow({
+						where: { id: 'singleton' }
+					});
+
+				// The owner row remains locked through the unique job + Outbox insert.
+				// A cutover UPDATE therefore cannot race a final legacy enqueue.
+				await transaction.$queryRaw(
+					Prisma.sql`
+						SELECT "id"
+						FROM "reporting_producer_state"
+						WHERE "id" = 'singleton'
+							AND "daily_summary_owner" = 'CORE'
+						FOR UPDATE
+					`
+				);
+				const lockedOwner =
+					await transaction.reportingProducerState.findUnique({
+						where: { id: 'singleton' },
+						select: { dailySummaryOwner: true }
+					});
+				if (lockedOwner?.dailySummaryOwner !== 'CORE') return null;
+				if (
+					!settings.dailySummaryEnabled ||
+					!settings.dailySummaryChatId.trim() ||
+					!settings.reportsThreadId
+				) {
+					return null;
+				}
+				if (
+					settings.dailySummaryLastSentPeriodStart?.getTime() ===
+					period.start.getTime()
+				) {
+					return null;
+				}
+
+				return this.scheduledJobs.enqueueUniqueInTransaction(
+					transaction,
+					{
+						jobType: SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+						scheduleKey: period.key,
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						scheduledFor,
+						periodStart: period.start,
+						periodEnd: period.end,
+						input: {
+							chatId: settings.dailySummaryChatId.trim(),
+							messageThreadId: settings.reportsThreadId
+						}
+					},
+					this.getEventForType(SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY)
+				);
 			},
-			this.getEventForType(SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY)
+			{ timeout: 10_000 }
 		);
 	}
 
@@ -190,6 +235,10 @@ export class ScheduledTasksService {
 			job: ScheduledJobRunView;
 		};
 		campaigns: {
+			created: boolean;
+			job: ScheduledJobRunView;
+		};
+		reporting: {
 			created: boolean;
 			job: ScheduledJobRunView;
 		};
@@ -213,6 +262,10 @@ export class ScheduledTasksService {
 		const campaignsScheduledFor = new Date(
 			scheduledFor.getTime() +
 				CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES * 60_000
+		);
+		const reportingScheduledFor = new Date(
+			scheduledFor.getTime() +
+				REPORTING_DATABASE_BACKUP_DELAY_MINUTES * 60_000
 		);
 
 		return this.prisma.$transaction(
@@ -262,6 +315,22 @@ export class ScheduledTasksService {
 					},
 					this.getEventForType(
 						SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP
+					)
+				),
+				reporting: await this.scheduledJobs.enqueueUniqueInTransaction(
+					transaction,
+					{
+						jobType: SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP,
+						scheduleKey: period.key,
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						scheduledFor: reportingScheduledFor,
+						periodStart: period.start,
+						periodEnd: period.end,
+						input: input as unknown as Prisma.InputJsonObject,
+						availableAt: reportingScheduledFor
+					},
+					this.getEventForType(
+						SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP
 					)
 				)
 			}),
@@ -376,6 +445,8 @@ export class ScheduledTasksService {
 				return SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP;
 			case 'campaigns':
 				return SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP;
+			case 'reporting':
+				return SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP;
 		}
 	}
 

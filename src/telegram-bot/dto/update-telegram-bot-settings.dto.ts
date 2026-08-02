@@ -41,6 +41,12 @@ export class UpdateTelegramBotSettingsDto {
 	@IsInt()
 	@Min(1)
 	@Max(2147483647)
+	operationalAlertsThreadId?: number | null;
+
+	@IsOptional()
+	@IsInt()
+	@Min(1)
+	@Max(2147483647)
 	reportsThreadId?: number | null;
 
 	@IsOptional()

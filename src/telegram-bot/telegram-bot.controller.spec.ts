@@ -135,4 +135,65 @@ describe('TelegramBotController manual database backup', () => {
 			})
 		);
 	});
+
+	it('keeps Reporting manual jobs isolated and records the target', async () => {
+		const { controller, scheduledTasksService, adminEventLogService } =
+			createController(true);
+
+		await controller.sendDatabaseBackup(
+			'reporting',
+			adminId,
+			idempotencyKey,
+			request
+		);
+
+		expect(
+			scheduledTasksService.enqueueManualDatabaseBackup
+		).toHaveBeenCalledWith('reporting', adminId, idempotencyKey);
+		expect(adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				description: expect.stringContaining('Reporting'),
+				metadata: expect.objectContaining({ target: 'reporting' })
+			})
+		);
+	});
+});
+
+describe('TelegramBotController schedule audit', () => {
+	it('records a rejected direct backup schedule change without values', async () => {
+		const error = new BadRequestException('schedule conflict');
+		const telegramBotService = {
+			updateSettings: jest.fn().mockRejectedValue(error)
+		} as unknown as TelegramBotService;
+		const adminEventLogService = {
+			record: jest.fn().mockResolvedValue(undefined)
+		} as unknown as AdminEventLogService;
+		const controller = new TelegramBotController(
+			telegramBotService,
+			adminEventLogService,
+			{} as ScheduledTasksService
+		);
+		const adminId = randomUUID();
+
+		await expect(
+			controller.updateSettings(
+				{ databaseBackupTime: '01:48' },
+				adminId,
+				{} as Request
+			)
+		).rejects.toBe(error);
+		expect(adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				adminId,
+				action: 'TELEGRAM_SCHEDULE_SETTINGS_REJECTED',
+				metadata: { reasonCode: 'SCHEDULE_VALIDATION_FAILED' }
+			})
+		);
+		expect(
+			JSON.stringify(
+				(adminEventLogService.record as jest.Mock).mock.calls[0][0]
+					.metadata
+			)
+		).not.toContain('01:48');
+	});
 });

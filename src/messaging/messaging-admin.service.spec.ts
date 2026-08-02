@@ -116,6 +116,82 @@ describe('MessagingAdminService', () => {
 		);
 	});
 
+	it('queues a Reporting audit retry through the same transaction as its receipt claim', async () => {
+		const eventId = '11111111-1111-4111-8111-111111111111';
+		const failure = {
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId,
+			integration: 'reporting-admin-audit',
+			payload: {
+				schemaVersion: 1,
+				eventType: 'admin.audit.event.v1',
+				eventId,
+				occurredAt: '2026-07-31T12:00:00.000Z',
+				correlationId: 'request:reporting-settings-42',
+				actorId: 'admin-user-id',
+				action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
+				target: { reportingSettingsId: 'daily-summary' },
+				metadata: { changedFields: ['enabled'] }
+			},
+			category: 'TRANSIENT',
+			resolvedAt: null,
+			retryingAt: null
+		};
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([{ id: 'receipt-1' }]),
+			integrationDeliveryFailure: {
+				findUnique: jest.fn().mockResolvedValue(failure),
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			outboxEvent: {
+				create: jest.fn().mockResolvedValue({ id: 'outbox-1' })
+			}
+		};
+		const prisma = {
+			integrationDeliveryFailure: {
+				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
+			},
+			$transaction: jest.fn(async callback => callback(transaction))
+		} as unknown as PrismaService;
+		const adminEventLog = {
+			recordInTransaction: jest.fn().mockResolvedValue({})
+		} as unknown as AdminEventLogService;
+		const service = new MessagingAdminService(
+			prisma,
+			{} as RabbitMqManagementService,
+			{} as LeadIntegrationDestinationService,
+			adminEventLog,
+			notificationDelivery
+		);
+
+		await service.retryFailure(failure.id, 'dev-user-id');
+
+		expect(transaction.$queryRaw).toHaveBeenCalledTimes(1);
+		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				messageId: eventId,
+				eventType: 'admin.audit.event.v1',
+				routingKey: 'manual.reporting-admin-audit',
+				payload: failure.payload,
+				headers: expect.objectContaining({
+					'x-retry-attempt': 0,
+					'x-delivery-token': expect.any(String)
+				})
+			})
+		});
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				adminId: 'dev-user-id',
+				action: 'MESSAGING_FAILURE_RETRY',
+				metadata: {
+					eventId,
+					integration: 'reporting-admin-audit'
+				}
+			})
+		);
+	});
+
 	it('rejects a retired v1 lead retry before changing its state', async () => {
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
