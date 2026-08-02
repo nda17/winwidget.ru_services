@@ -5661,13 +5661,19 @@ jobs:
   deploy:
     needs: verify
     if: >-
-      github.event_name == 'push' ||
-      (
-        inputs.deploy_target != 'notification-delivery-database' &&
-        inputs.deploy_target != 'campaigns-database' &&
-        inputs.deploy_target != 'reporting-database' &&
-        inputs.deploy_target != 'reporting-cutover'
-      )
+      ${{
+        !cancelled() &&
+        needs.verify.result == 'success' &&
+        (
+          github.event_name == 'push' ||
+          (
+            inputs.deploy_target != 'notification-delivery-database' &&
+            inputs.deploy_target != 'campaigns-database' &&
+            inputs.deploy_target != 'reporting-database' &&
+            inputs.deploy_target != 'reporting-cutover'
+          )
+        )
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -5881,9 +5887,13 @@ jobs:
   notification-delivery-database:
     needs: verify
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'notification-delivery-database' &&
-      github.ref == 'refs/heads/prod'
+      ${{
+        !cancelled() &&
+        needs.verify.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.deploy_target == 'notification-delivery-database' &&
+        github.ref == 'refs/heads/prod'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: production
@@ -6206,9 +6216,13 @@ jobs:
   campaigns-database:
     needs: verify
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'campaigns-database' &&
-      github.ref == 'refs/heads/prod'
+      ${{
+        !cancelled() &&
+        needs.verify.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.deploy_target == 'campaigns-database' &&
+        github.ref == 'refs/heads/prod'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: production
@@ -6620,10 +6634,14 @@ jobs:
   reporting-cutover-verify-core-cleanup-backup:
     needs: verify
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-cutover' &&
-      inputs.reporting_cutover_action == 'verify-core-cleanup-backup' &&
-      github.ref == 'refs/heads/prod'
+      ${{
+        !cancelled() &&
+        needs.verify.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.deploy_target == 'reporting-cutover' &&
+        inputs.reporting_cutover_action == 'verify-core-cleanup-backup' &&
+        github.ref == 'refs/heads/prod'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
@@ -6807,10 +6825,14 @@ jobs:
   reporting-cutover-stage-cleanup:
     needs: verify
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-cutover' &&
-      inputs.reporting_cutover_action == 'stage-cleanup' &&
-      github.ref == 'refs/heads/prod'
+      ${{
+        !cancelled() &&
+        needs.verify.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.deploy_target == 'reporting-cutover' &&
+        inputs.reporting_cutover_action == 'stage-cleanup' &&
+        github.ref == 'refs/heads/prod'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -6926,10 +6948,14 @@ jobs:
   reporting-database:
     needs: verify
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-database' &&
-      inputs.reporting_database_action == 'prepare' &&
-      github.ref == 'refs/heads/prod'
+      ${{
+        !cancelled() &&
+        needs.verify.result == 'success' &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.deploy_target == 'reporting-database' &&
+        inputs.reporting_database_action == 'prepare' &&
+        github.ref == 'refs/heads/prod'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: production
