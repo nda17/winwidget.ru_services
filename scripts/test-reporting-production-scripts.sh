@@ -507,11 +507,4 @@ lifecycle_line="$(workflow_line 'bash "$lifecycle_script" "$DATABASE_ACTION"')"
 unset reporting_database_job
 printf 'reporting_workflow_lock_order=passed\n'
 
-if command -v shellcheck >/dev/null 2>&1; then
-	shellcheck --severity=warning "${scripts[@]}" "$0"
-	printf 'shellcheck=passed\n'
-else
-	printf 'shellcheck=not-installed (CI must run it before deploy)\n'
-fi
-
 printf 'reporting_production_scripts=passed\n'

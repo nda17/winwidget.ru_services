@@ -474,21 +474,26 @@ jobs:
           done
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
-          docker run --rm \
-            --network none \
-            --read-only \
-            --security-opt no-new-privileges \
-            --entrypoint shellcheck \
-            --volume "$GITHUB_WORKSPACE:/repo:ro" \
-            --workdir /repo \
-            koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
-            --severity=warning \
+          for script in \
             scripts/reporting-database-lifecycle.sh \
             scripts/deploy-reporting-production.sh \
             scripts/reporting-producer-lifecycle.sh \
             scripts/reporting-cutover-lifecycle.sh \
             scripts/test-reporting-cutover-rehearsal.sh \
-            scripts/test-reporting-production-scripts.sh
+            scripts/test-reporting-production-scripts.sh; do
+            printf 'reporting_shellcheck_start=%s\n' "$script"
+            docker run --rm \
+              --network none \
+              --read-only \
+              --security-opt no-new-privileges \
+              --entrypoint shellcheck \
+              --volume "$GITHUB_WORKSPACE:/repo:ro" \
+              --workdir /repo \
+              koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+              --severity=warning \
+              "$script"
+            printf 'reporting_shellcheck_passed=%s\n' "$script"
+          done
 
       - name: Fast-check database restore worker rehearsal
         run: |
@@ -3728,12 +3733,6 @@ jobs:
             scripts/production-deploy-lock.sh \
             scripts/test-campaigns-cutover-rehearsal.sh \
             scripts/audit-legacy-telegram-channels-production.sh \
-            scripts/reporting-database-lifecycle.sh \
-            scripts/deploy-reporting-production.sh \
-            scripts/reporting-producer-lifecycle.sh \
-            scripts/reporting-cutover-lifecycle.sh \
-            scripts/test-reporting-cutover-rehearsal.sh \
-            scripts/test-reporting-production-scripts.sh \
             scripts/database-restore-production-guard.sh \
             database-restore-entrypoint.sh
           docker run --rm \
