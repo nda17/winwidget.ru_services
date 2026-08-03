@@ -4324,8 +4324,14 @@ jobs:
           const cleanupExactFetchIndex = reportingCleanupStageJob.indexOf(
             '"$fetched_revision" == "$CLEANUP_REVISION"',
           );
+          const cleanupWorktreeIndex = reportingCleanupStageJob.indexOf(
+            'git worktree add --detach "$candidate_root" "$CLEANUP_REVISION"',
+          );
+          const cleanupSourceIndex = reportingCleanupStageJob.indexOf(
+            'REPORTING_LIFECYCLE_SOURCE_ROOT="$candidate_root"',
+          );
           const cleanupStageActionIndex = reportingCleanupStageJob.indexOf(
-            'bash "$cutover_lifecycle_script" stage-cleanup',
+            'bash "$candidate_root/$cutover_lifecycle_script" stage-cleanup',
           );
           const cleanupPostFetchGuardIndex =
             reportingCleanupStageJob.indexOf(
@@ -4337,12 +4343,16 @@ jobs:
             cleanupPreFetchGuardIndex < 0 ||
             cleanupFetchIndex < 0 ||
             cleanupExactFetchIndex < 0 ||
+            cleanupWorktreeIndex < 0 ||
+            cleanupSourceIndex < 0 ||
             cleanupStageActionIndex < 0 ||
             cleanupPostFetchGuardIndex < 0 ||
             cleanupStageLockIndex >= cleanupPreFetchGuardIndex ||
             cleanupPreFetchGuardIndex >= cleanupFetchIndex ||
             cleanupFetchIndex >= cleanupExactFetchIndex ||
-            cleanupExactFetchIndex >= cleanupStageActionIndex ||
+            cleanupExactFetchIndex >= cleanupWorktreeIndex ||
+            cleanupWorktreeIndex >= cleanupSourceIndex ||
+            cleanupSourceIndex >= cleanupStageActionIndex ||
             cleanupStageActionIndex >= cleanupPostFetchGuardIndex ||
             reportingCleanupStageJob.includes("git checkout ") ||
             reportingCleanupStageJob.includes("git merge --ff-only") ||
@@ -4360,10 +4370,16 @@ jobs:
             ) ||
             !reportingCleanupStageJob.includes(
               '"$(git rev-parse HEAD)" == "$current_revision"',
+            ) ||
+            !reportingCleanupStageJob.includes(
+              'git worktree remove --force "$candidate_root"',
+            ) ||
+            !reportingCleanupStageJob.includes(
+              'git -C "$candidate_root" hash-object --no-filters',
             )
           ) {
             throw new Error(
-              "Reporting cleanup staging must pin reviewed VPS evidence from the original revision without checking out the candidate",
+              "Reporting cleanup staging must pin reviewed VPS evidence through a clean detached candidate worktree without switching the active checkout",
             );
           }
           const deployScript = readFileSync(
