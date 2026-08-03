@@ -139,6 +139,18 @@ const KINDS = {
 	'campaign-telegram': {
 		queue: 'winwidget.notification.campaign.telegram.v2',
 		routingKey: 'notification.campaign.telegram.requested.v2'
+	},
+	'daily-summary-delivery-telegram': {
+		queue: 'winwidget.notification.daily-summary.telegram',
+		routingKey: 'notification.daily-summary.telegram.requested.v1'
+	},
+	'subscription-expiry-email': {
+		queue: 'winwidget.notification.subscription-expiry.email',
+		routingKey: 'notification.subscription-expiry.email.requested.v1'
+	},
+	'subscription-expiry-telegram': {
+		queue: 'winwidget.notification.subscription-expiry.telegram',
+		routingKey: 'notification.subscription-expiry.telegram.requested.v1'
 	}
 };
 
