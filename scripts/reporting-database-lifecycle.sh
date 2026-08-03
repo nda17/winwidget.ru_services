@@ -736,9 +736,12 @@ reporting_export_pinned_runtime_identity() {
 	NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$revision"
 	CAMPAIGNS_REVISION="$revision"
 	CAMPAIGNS_IMAGE="winwidget-campaigns:git-$revision"
+	DATABASE_RESTORE_REVISION="$revision"
+	DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"
 	export REPORTING_REVISION REPORTING_IMAGE
 	export NOTIFICATION_DELIVERY_REVISION NOTIFICATION_DELIVERY_IMAGE
 	export CAMPAIGNS_REVISION CAMPAIGNS_IMAGE
+	export DATABASE_RESTORE_REVISION DATABASE_RESTORE_IMAGE
 }
 
 reporting_resolve_image_id_for_revision() {
@@ -1296,7 +1299,8 @@ reporting_preflight_env_contract() {
 	reporting_assert_no_ambient_compose_overrides \
 		REPORTING_IMAGE REPORTING_REVISION \
 		NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION \
-		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION
+		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION \
+		DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION
 	for key in \
 		REPORTING_POSTGRES_IMAGE REPORTING_POSTGRES_PORT \
 		REPORTING_POSTGRES_DATA_VOLUME REPORTING_POSTGRES_ADMIN_USER \
@@ -2459,7 +2463,9 @@ reporting_database_lifecycle_self_test() {
 			"$NOTIFICATION_DELIVERY_REVISION" == "$revision" &&
 			"$NOTIFICATION_DELIVERY_IMAGE" == "winwidget-notification-delivery:git-$revision" &&
 			"$CAMPAIGNS_REVISION" == "$revision" &&
-			"$CAMPAIGNS_IMAGE" == "winwidget-campaigns:git-$revision" ]]
+			"$CAMPAIGNS_IMAGE" == "winwidget-campaigns:git-$revision" &&
+			"$DATABASE_RESTORE_REVISION" == "$revision" &&
+			"$DATABASE_RESTORE_IMAGE" == "winwidget-database-restore:git-$revision" ]]
 	) || {
 		echo 'Reporting lifecycle self-test did not derive all immutable Compose identities.' >&2
 		return 1

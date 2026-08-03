@@ -7115,6 +7115,8 @@ jobs:
             export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$EXPECTED_REVISION"
             export CAMPAIGNS_REVISION="$EXPECTED_REVISION"
             export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$EXPECTED_REVISION"
+            export DATABASE_RESTORE_REVISION="$EXPECTED_REVISION"
+            export DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$EXPECTED_REVISION"
             docker compose \
               --env-file "$APP_ROOT/deploy/backend/.env.production" \
               -f deploy/docker-compose.prod.yml \

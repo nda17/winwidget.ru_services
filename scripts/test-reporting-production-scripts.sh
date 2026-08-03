@@ -479,6 +479,8 @@ lifecycle_line="$(workflow_line 'bash "$lifecycle_script" "$DATABASE_ACTION"')"
 [[ "$reporting_database_job" == *'git hash-object "$lock_script"'* &&
 	"$reporting_database_job" == *"inputs.reporting_database_action == 'prepare'"* &&
 	"$reporting_database_job" == *'unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER'* &&
+	"$reporting_database_job" == *'export DATABASE_RESTORE_REVISION="$EXPECTED_REVISION"'* &&
+	"$reporting_database_job" == *'export DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$EXPECTED_REVISION"'* &&
 	"$lock_trust_line" =~ ^[0-9]+$ && "$lock_line" =~ ^[0-9]+$ &&
 	"$checkout_line" =~ ^[0-9]+$ && "$pre_fetch_guard_line" =~ ^[0-9]+$ &&
 	"$fetch_line" =~ ^[0-9]+$ && "$post_fetch_guard_line" =~ ^[0-9]+$ &&
