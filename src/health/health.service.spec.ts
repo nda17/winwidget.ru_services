@@ -89,7 +89,6 @@ describe('HealthService notification delivery monitoring', () => {
 						'limit-telegram',
 						'campaign-email',
 						'campaign-telegram',
-						'daily-summary-delivery-telegram',
 						'subscription-expiry-email',
 						'subscription-expiry-telegram'
 					]

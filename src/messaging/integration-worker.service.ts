@@ -10,7 +10,6 @@ import {
 	NOTIFICATION_DELIVERY_KINDS,
 	NotificationDeliveryKind
 } from '@/messaging/messaging.constants';
-import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
 import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
 import {
 	classifyIntegrationError,
@@ -30,10 +29,6 @@ import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
 import { PrismaService } from '@/prisma.service';
 import {
-	ScheduledJobDispatchHandledError,
-	ScheduledJobDispatchRejectedError
-} from '@/reports/daily-summary-delivery.service';
-import {
 	BeforeApplicationShutdown,
 	Injectable,
 	Logger,
@@ -43,8 +38,7 @@ import { ConfigService } from '@nestjs/config';
 import {
 	IntegrationDeliveryReceiptStatus,
 	IntegrationErrorCategory,
-	Prisma,
-	ScheduledJobRunStatus
+	Prisma
 } from '@prisma/client';
 import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'crypto';
@@ -67,16 +61,9 @@ type WorkerEventPayload =
 	| LeadIntegrationEventPayload
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
-	| DailySummaryRequestedEventPayload
 	| AutoRenewalChargeRequestedEventPayload
 	| CampaignAdminAuditEventPayload
 	| ReportingAdminAuditEventPayload;
-
-interface ScheduledJobStatusRow {
-	jobType: string;
-	status: ScheduledJobRunStatus;
-	attempts: number;
-}
 
 interface DeliveryFailureLockRow {
 	resolvedAt: Date | null;
@@ -335,65 +322,6 @@ export class IntegrationWorkerService
 			const firstFailedAt = this.getFirstFailedAt(message);
 
 			try {
-				if (error instanceof ScheduledJobDispatchRejectedError) {
-					const classification: IntegrationErrorClassification = {
-						category: 'PERMANENT',
-						normalizedCode: 'SCHEDULED_JOB_REFERENCE_INVALID',
-						retryable: false,
-						retryDelayMs: null,
-						safeReason: error.message.slice(0, 1000),
-						recognized: true,
-						mayDisableDestination: false,
-						classificationVersion: 1
-					};
-					await this.rabbitMq.publishDeadLetter(
-						kind,
-						payload,
-						nextAttempt,
-						eventId,
-						error.message,
-						this.getEventType(payload),
-						this.getDeadLetterMetadata(
-							error,
-							classification,
-							firstFailedAt,
-							this.getStringHeader(message, 'x-delivery-token')
-						)
-					);
-					await this.markDeliveryDeadLettered(eventId, kind, receiptClaim);
-					receiptClaim = null;
-					this.rabbitMq.ack(message);
-					this.logger.error(
-						`Scheduled integration rejected eventId=${eventId} kind=${kind}: ${error.message}`
-					);
-					return;
-				}
-				if (error instanceof ScheduledJobDispatchHandledError) {
-					if (error.state === 'failed') {
-						await this.markDeliveryDeadLettered(
-							eventId,
-							kind,
-							receiptClaim
-						);
-						receiptClaim = null;
-						this.logger.error(
-							`Scheduled integration terminal DLQ intent persisted eventId=${eventId} kind=${kind}: ${error.message}`
-						);
-					} else {
-						await this.releaseDeliveryClaimIfOwned(
-							eventId,
-							kind,
-							receiptClaim
-						);
-						receiptClaim = null;
-						this.logger.warn(
-							`Scheduled integration retry persisted eventId=${eventId} kind=${kind} attempt=${error.job.attempts}: ${error.message}`
-						);
-					}
-					this.rabbitMq.ack(message);
-					return;
-				}
-
 				let classification = this.classifyDeliveryError(kind, error);
 				const retryDelayMs = this.getRetryDelayMs(
 					classification,
@@ -1413,23 +1341,12 @@ export class IntegrationWorkerService
 		};
 
 		try {
-			let persisted = true;
-			if (kind === 'daily-summary-telegram') {
-				persisted = await this.persistDailySummaryDeadLetter(
-					eventId,
-					payload,
-					upsert,
-					deliveryToken,
-					this.getRetryAttempt(message)
-				);
-			} else {
-				persisted = await this.persistIntegrationDeadLetter(
-					eventId,
-					kind,
-					upsert,
-					deliveryToken
-				);
-			}
+			const persisted = await this.persistIntegrationDeadLetter(
+				eventId,
+				kind,
+				upsert,
+				deliveryToken
+			);
 			if (!persisted) {
 				this.rabbitMq.ack(message);
 				this.logger.warn(
@@ -1468,59 +1385,6 @@ export class IntegrationWorkerService
 			}
 			if (
 				!(await this.ensureDeadLetterReceipt(transaction, eventId, kind))
-			) {
-				return false;
-			}
-			await transaction.integrationDeliveryFailure.upsert(upsert);
-			return true;
-		});
-	}
-
-	private async persistDailySummaryDeadLetter(
-		eventId: string,
-		payload: Prisma.InputJsonValue,
-		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs,
-		deliveryToken: string | null,
-		retryAttempt: number
-	): Promise<boolean> {
-		const jobId = this.getDailySummaryJobId(payload);
-		return this.prisma.$transaction(async transaction => {
-			const failures = await this.lockDeliveryFailure(
-				transaction,
-				eventId,
-				'daily-summary-telegram'
-			);
-			const jobs = jobId
-				? await transaction.$queryRaw<ScheduledJobStatusRow[]>(
-						Prisma.sql`
-							SELECT
-								"job_type" AS "jobType",
-								"status",
-								"attempts"
-							FROM "scheduled_job_runs"
-							WHERE "id" = ${jobId}::uuid
-							FOR SHARE
-						`
-					)
-				: [];
-			if (
-				jobs[0] &&
-				eventId === jobId &&
-				jobs[0].jobType === 'DAILY_TELEGRAM_SUMMARY' &&
-				(jobs[0].status !== ScheduledJobRunStatus.FAILED ||
-					jobs[0].attempts !== retryAttempt)
-			) {
-				return false;
-			}
-			if (!this.canPersistDeadLetter(failures[0], deliveryToken, true)) {
-				return false;
-			}
-			if (
-				!(await this.ensureDeadLetterReceipt(
-					transaction,
-					eventId,
-					'daily-summary-telegram'
-				))
 			) {
 				return false;
 			}
@@ -1614,20 +1478,6 @@ export class IntegrationWorkerService
 			`
 		);
 		return rows.length === 1;
-	}
-
-	private getDailySummaryJobId(
-		payload: Prisma.InputJsonValue
-	): string | null {
-		if (
-			payload &&
-			typeof payload === 'object' &&
-			!Array.isArray(payload)
-		) {
-			const jobId = (payload as Record<string, unknown>).jobId;
-			if (this.isUuid(jobId)) return jobId;
-		}
-		return null;
 	}
 
 	private getRetryAttempt(message: ConsumeMessage): number {

@@ -1,5 +1,4 @@
 import {
-	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NotificationDeliveryKind,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
@@ -8,7 +7,6 @@ import {
 import { Prisma } from '@prisma/client';
 
 export const OUTCOME_NOTIFICATION_DELIVERY_KINDS = [
-	'daily-summary-delivery-telegram',
 	'subscription-expiry-email',
 	'subscription-expiry-telegram'
 ] as const satisfies readonly NotificationDeliveryKind[];
@@ -16,36 +14,15 @@ export const OUTCOME_NOTIFICATION_DELIVERY_KINDS = [
 export type OutcomeNotificationDeliveryKind =
 	(typeof OUTCOME_NOTIFICATION_DELIVERY_KINDS)[number];
 
-export type NotificationDeliveryReference =
-	| {
-			type: 'daily-summary-job';
-			id: string;
-	  }
-	| {
-			type: 'subscription-expiry-reminder';
-			id: string;
-	  };
+export type NotificationDeliveryReference = {
+	type: 'subscription-expiry-reminder';
+	id: string;
+};
 
 interface SubscriptionExpiryNotificationContent {
 	daysBeforeExpiry: number;
 	planLabel: string;
 	expiresAtLabel: string;
-}
-
-export interface DailySummaryTelegramNotificationRequestedEventPayload {
-	schemaVersion: 1;
-	eventType: typeof DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE;
-	reference: Extract<
-		NotificationDeliveryReference,
-		{ type: 'daily-summary-job' }
-	>;
-	destination: {
-		telegramChatId: string;
-		messageThreadId: number;
-	};
-	content: {
-		text: string;
-	};
 }
 
 export interface SubscriptionExpiryEmailNotificationRequestedEventPayload {
@@ -75,7 +52,6 @@ export interface SubscriptionExpiryTelegramNotificationRequestedEventPayload {
 }
 
 export type PreparedNotificationDeliveryEventPayload =
-	| DailySummaryTelegramNotificationRequestedEventPayload
 	| SubscriptionExpiryEmailNotificationRequestedEventPayload
 	| SubscriptionExpiryTelegramNotificationRequestedEventPayload;
 

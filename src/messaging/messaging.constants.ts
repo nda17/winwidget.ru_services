@@ -10,16 +10,12 @@ export const LIMIT_REACHED_EMAIL_EVENT_TYPE =
 	'lead.limit.reached.email.v2';
 export const LIMIT_REACHED_TELEGRAM_EVENT_TYPE =
 	'lead.limit.reached.telegram.v2';
-export const DAILY_SUMMARY_EVENT_TYPE =
-	'report.daily-summary.requested.v1';
 export const TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE =
 	'notification.telegram.destination-unavailable.v1';
 export const CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE =
 	'notification.campaign.email.requested.v2';
 export const CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.campaign.telegram.requested.v2';
-export const DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
-	'notification.daily-summary.telegram.requested.v1';
 export const SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.email.requested.v1';
 export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
@@ -39,8 +35,6 @@ export const REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE =
 	'billing.subscription.changed.v1';
 export const REPORTING_WIDGET_EVENT_TYPE = 'widgets.widget.changed.v1';
 export const REPORTING_LEAD_EVENT_TYPE = 'widgets.lead.changed.v1';
-export const REPORTING_SETTINGS_EVENT_TYPE =
-	'reporting.settings.changed.v1';
 export const REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE =
 	'reporting.core-operational-routing.changed.v1';
 export const EVENTS_EXCHANGE = 'winwidget.events';
@@ -64,11 +58,9 @@ export const INTEGRATION_KINDS = [
 	'payment-telegram',
 	'limit-email',
 	'limit-telegram',
-	'daily-summary-telegram',
 	'telegram-destination-unavailable',
 	'campaign-email',
 	'campaign-telegram',
-	'daily-summary-delivery-telegram',
 	'subscription-expiry-email',
 	'subscription-expiry-telegram',
 	'notification-delivery-outcome',
@@ -88,7 +80,6 @@ export const NOTIFICATION_DELIVERY_KINDS = [
 	'limit-telegram',
 	'campaign-email',
 	'campaign-telegram',
-	'daily-summary-delivery-telegram',
 	'subscription-expiry-email',
 	'subscription-expiry-telegram'
 ] as const satisfies readonly IntegrationKind[];
@@ -140,13 +131,10 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'payment-telegram': PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	'limit-email': LIMIT_REACHED_EMAIL_EVENT_TYPE,
 	'limit-telegram': LIMIT_REACHED_TELEGRAM_EVENT_TYPE,
-	'daily-summary-telegram': DAILY_SUMMARY_EVENT_TYPE,
 	'telegram-destination-unavailable':
 		TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
 	'campaign-email': CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
 	'campaign-telegram': CAMPAIGN_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-	'daily-summary-delivery-telegram':
-		DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	'subscription-expiry-email':
 		SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	'subscription-expiry-telegram':
@@ -163,7 +151,7 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 		REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE,
 	'reporting-widget': REPORTING_WIDGET_EVENT_TYPE,
 	'reporting-lead': REPORTING_LEAD_EVENT_TYPE,
-	'reporting-settings': REPORTING_SETTINGS_EVENT_TYPE
+	'reporting-settings': REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
@@ -176,13 +164,10 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'payment-telegram': 'winwidget.payment-notification.telegram.v2',
 	'limit-email': 'winwidget.limit-notification.email',
 	'limit-telegram': 'winwidget.limit-notification.telegram',
-	'daily-summary-telegram': 'winwidget.report.daily-summary.telegram',
 	'telegram-destination-unavailable':
 		'winwidget.notification.telegram-destination-unavailable',
 	'campaign-email': 'winwidget.notification.campaign.email.v2',
 	'campaign-telegram': 'winwidget.notification.campaign.telegram.v2',
-	'daily-summary-delivery-telegram':
-		'winwidget.notification.daily-summary.telegram',
 	'subscription-expiry-email':
 		'winwidget.notification.subscription-expiry.email',
 	'subscription-expiry-telegram':

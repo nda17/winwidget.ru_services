@@ -2,13 +2,8 @@ import { IntegrationDeliveryService } from '@/messaging/integration-delivery.ser
 import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
 import type { LeadIntegrationEventPayloadV2 } from '@/messaging/lead-integration-event';
 import type { PrismaService } from '@/prisma.service';
-import type { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import type { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
-import type { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
-import {
-	ScheduledJobRunStatus,
-	SubscriptionExpiryReminderStatus
-} from '@prisma/client';
+import { SubscriptionExpiryReminderStatus } from '@prisma/client';
 
 const createLeadEvent = (): LeadIntegrationEventPayloadV2 => ({
 	schemaVersion: 2,
@@ -30,27 +25,18 @@ describe('IntegrationDeliveryService', () => {
 	const eventId = '33333333-3333-4333-8333-333333333333';
 
 	const createService = () => {
-		const transaction = {
-			telegramBotSettings: {
-				update: jest.fn().mockResolvedValue({})
-			}
-		};
 		const prisma = {
 			telegramNotificationChannel: {
 				updateMany: jest.fn().mockResolvedValue({ count: 1 })
 			},
 			subscriptionExpiryReminder: {
 				updateMany: jest.fn().mockResolvedValue({ count: 1 })
-			},
-			$transaction: jest.fn(async callback => callback(transaction))
+			}
 		} as unknown as PrismaService;
 		const safeOutboundHttpService = {
 			postJson: jest.fn().mockResolvedValue(undefined),
 			getAmoCrmApiUrl: jest.fn()
 		} as unknown as SafeOutboundHttpService;
-		const dailySummary = {
-			deliver: jest.fn().mockResolvedValue(undefined)
-		} as unknown as DailySummaryDeliveryService;
 		const leadDestination = {
 			resolve: jest.fn(async (_sourceEventId, event) => ({
 				...event,
@@ -59,15 +45,6 @@ describe('IntegrationDeliveryService', () => {
 				}
 			}))
 		} as unknown as LeadIntegrationDestinationService;
-		const scheduledJobs = {
-			completeExternalDeliveryInTransaction: jest.fn().mockResolvedValue({
-				id: eventId,
-				jobType: 'DAILY_TELEGRAM_SUMMARY',
-				status: ScheduledJobRunStatus.SUCCEEDED,
-				periodStart: '2026-07-22T21:00:00.000Z'
-			}),
-			failExternalDeliveryInTransaction: jest.fn().mockResolvedValue({})
-		} as unknown as ScheduledJobsService;
 		const paymentService = {
 			executeRecurringCharge: jest.fn().mockResolvedValue(undefined),
 			handleRecurringDeliveryTerminalFailure: jest
@@ -77,18 +54,14 @@ describe('IntegrationDeliveryService', () => {
 		const service = new IntegrationDeliveryService(
 			safeOutboundHttpService,
 			prisma,
-			dailySummary,
 			leadDestination,
-			scheduledJobs,
 			paymentService as never
 		);
 
 		return {
 			service,
 			prisma,
-			transaction,
 			safeOutboundHttpService,
-			scheduledJobs,
 			paymentService
 		};
 	};
@@ -193,44 +166,6 @@ describe('IntegrationDeliveryService', () => {
 			data: {
 				isActive: false,
 				disabledAt: new Date(occurredAt)
-			}
-		});
-	});
-
-	it('completes the durable daily-summary job only after delivery outcome', async () => {
-		const { service, scheduledJobs, transaction } = createService();
-		const occurredAt = '2026-07-28T08:00:00.000Z';
-
-		await service.deliver(
-			'notification-delivery-outcome',
-			{
-				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
-				sourceEventId: eventId,
-				sourceKind: 'daily-summary-delivery-telegram',
-				reference: { type: 'daily-summary-job', id: eventId },
-				status: 'DELIVERED',
-				failure: null,
-				occurredAt
-			},
-			'outcome-3'
-		);
-
-		expect(
-			scheduledJobs.completeExternalDeliveryInTransaction
-		).toHaveBeenCalledWith(
-			transaction,
-			eventId,
-			eventId,
-			expect.objectContaining({ telegramSent: true })
-		);
-		expect(transaction.telegramBotSettings.update).toHaveBeenCalledWith({
-			where: { id: 'singleton' },
-			data: {
-				dailySummaryLastSentPeriodStart: new Date(
-					'2026-07-22T21:00:00.000Z'
-				),
-				dailySummaryLastSentAt: new Date(occurredAt)
 			}
 		});
 	});

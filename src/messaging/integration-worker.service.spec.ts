@@ -8,11 +8,6 @@ import type { AdminEventLogService } from '@/admin-event-log/admin-event-log.ser
 import type { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import type { RabbitMqService } from '@/messaging/rabbitmq.service';
 import type { PrismaService } from '@/prisma.service';
-import {
-	ScheduledJobDispatchHandledError,
-	ScheduledJobDispatchRejectedError
-} from '@/reports/daily-summary-delivery.service';
-import type { ScheduledJobRunView } from '@/scheduled-jobs/scheduled-jobs.types';
 import type { ConfigService } from '@nestjs/config';
 import { IntegrationDeliveryReceiptStatus, Prisma } from '@prisma/client';
 import type { ConsumeMessage } from 'amqplib';
@@ -57,18 +52,7 @@ describe('IntegrationWorkerService', () => {
 		const outboxCreate = jest.fn().mockResolvedValue({ id: 'outbox-1' });
 		const outboxCreateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const transaction = {
-			$queryRaw: jest.fn().mockImplementation(statement => {
-				const sql = statement.strings.join('?');
-				return sql.includes('integration_delivery_failures')
-					? []
-					: [
-							{
-								jobType: 'DAILY_TELEGRAM_SUMMARY',
-								status: 'FAILED',
-								attempts: 4
-							}
-						];
-			}),
+			$queryRaw: jest.fn().mockResolvedValue([]),
 			integrationDeliveryFailure: {
 				upsert: failureUpsert,
 				updateMany: failureUpdateMany
@@ -102,9 +86,6 @@ describe('IntegrationWorkerService', () => {
 			},
 			outboxEvent: {
 				create: outboxCreate
-			},
-			scheduledJobRun: {
-				updateMany: jest.fn().mockResolvedValue({ count: 0 })
 			},
 			$executeRaw: jest.fn().mockResolvedValue(0),
 			$transaction: jest.fn(callback => callback(transaction))
@@ -151,29 +132,6 @@ describe('IntegrationWorkerService', () => {
 			properties: {
 				messageId: '11111111-1111-4111-8111-111111111111',
 				type: 'lead.integration.requested.v2',
-				headers: {}
-			}
-		}) as ConsumeMessage;
-
-	const createDailySummaryMessage = (): ConsumeMessage =>
-		({
-			content: Buffer.from(
-				JSON.stringify({
-					schemaVersion: 1,
-					eventType: 'report.daily-summary.requested.v1',
-					jobId: '11111111-1111-4111-8111-111111111111',
-					jobType: 'DAILY_TELEGRAM_SUMMARY',
-					scheduleKey: 'daily:2026-07-23',
-					periodStart: '2026-07-22T21:00:00.000Z',
-					periodEnd: '2026-07-23T21:00:00.000Z'
-				})
-			),
-			fields: {
-				routingKey: 'report.daily-summary.requested.v1'
-			},
-			properties: {
-				messageId: '11111111-1111-4111-8111-111111111111',
-				type: 'report.daily-summary.requested.v1',
 				headers: {}
 			}
 		}) as ConsumeMessage;
@@ -301,7 +259,6 @@ describe('IntegrationWorkerService', () => {
 			'limit-telegram',
 			'campaign-email',
 			'campaign-telegram',
-			'daily-summary-delivery-telegram',
 			'subscription-expiry-email',
 			'subscription-expiry-telegram'
 		]);
@@ -309,7 +266,6 @@ describe('IntegrationWorkerService', () => {
 			'webhook',
 			'bitrix24',
 			'amo-crm',
-			'daily-summary-telegram',
 			'telegram-destination-unavailable',
 			'notification-delivery-outcome',
 			'campaign-admin-audit',
@@ -856,94 +812,6 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
-	it('does not schedule a second retry after a scheduled job persisted it', async () => {
-		const { service, rabbitMq, delivery, prisma } = createService();
-		(delivery.deliver as jest.Mock).mockRejectedValue(
-			new ScheduledJobDispatchHandledError(
-				'retry_scheduled',
-				{
-					id: '11111111-1111-4111-8111-111111111111',
-					attempts: 1
-				} as ScheduledJobRunView,
-				'Telegram unavailable'
-			)
-		);
-
-		await (service as any).handle(
-			'daily-summary-telegram',
-			createDailySummaryMessage()
-		);
-
-		expect(
-			prisma.integrationDeliveryReceipt.deleteMany
-		).toHaveBeenCalledTimes(1);
-		expect(rabbitMq.publishRetry).not.toHaveBeenCalled();
-		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-	});
-
-	it('does not directly publish a DLQ event after a scheduled job persisted its terminal intent', async () => {
-		const { service, rabbitMq, delivery, prisma } = createService();
-		(delivery.deliver as jest.Mock).mockRejectedValue(
-			new ScheduledJobDispatchHandledError(
-				'failed',
-				{
-					id: '11111111-1111-4111-8111-111111111111',
-					attempts: 4
-				} as ScheduledJobRunView,
-				'Telegram destination is no longer available'
-			)
-		);
-
-		await (service as any).handle(
-			'daily-summary-telegram',
-			createDailySummaryMessage()
-		);
-
-		expect(
-			prisma.integrationDeliveryReceipt.updateMany
-		).toHaveBeenCalledWith({
-			where: expect.objectContaining({
-				eventId: '11111111-1111-4111-8111-111111111111',
-				integration: 'daily-summary-telegram',
-				status: IntegrationDeliveryReceiptStatus.PROCESSING
-			}),
-			data: expect.objectContaining({
-				status: IntegrationDeliveryReceiptStatus.DEAD_LETTERED
-			})
-		});
-		expect(rabbitMq.publishRetry).not.toHaveBeenCalled();
-		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-	});
-
-	it('dead-letters an unclassified daily-summary error after its short retry budget', async () => {
-		const { service, rabbitMq, delivery } = createService();
-		const message = createDailySummaryMessage();
-		message.properties.headers = { 'x-retry-attempt': 3 };
-		(delivery.deliver as jest.Mock).mockRejectedValue(
-			new Error('PostgreSQL temporarily unavailable')
-		);
-
-		await (service as any).handle('daily-summary-telegram', message);
-
-		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
-			'daily-summary-telegram',
-			expect.any(Object),
-			4,
-			'11111111-1111-4111-8111-111111111111',
-			'Unclassified integration error; automatic retry budget exhausted',
-			'report.daily-summary.requested.v1',
-			expect.objectContaining({
-				category: 'TRANSIENT',
-				normalizedCode: 'UNCLASSIFIED',
-				retryable: false
-			})
-		);
-		expect(rabbitMq.publishRetry).not.toHaveBeenCalled();
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-	});
-
 	it('stops automatic retries after the delivery window expires', async () => {
 		const { service, rabbitMq, delivery, transaction } = createService();
 		const message = createMessage();
@@ -972,61 +840,6 @@ describe('IntegrationWorkerService', () => {
 				retryable: false
 			})
 		);
-	});
-
-	it('dead-letters a permanently rejected scheduled-job reference', async () => {
-		const { service, rabbitMq, delivery } = createService();
-		(delivery.deliver as jest.Mock).mockRejectedValue(
-			new ScheduledJobDispatchRejectedError('Daily summary job not found')
-		);
-
-		await (service as any).handle(
-			'daily-summary-telegram',
-			createDailySummaryMessage()
-		);
-
-		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
-			'daily-summary-telegram',
-			expect.any(Object),
-			1,
-			'11111111-1111-4111-8111-111111111111',
-			'Daily summary job not found',
-			'report.daily-summary.requested.v1',
-			expect.objectContaining({
-				category: 'PERMANENT',
-				normalizedCode: 'SCHEDULED_JOB_REFERENCE_INVALID'
-			})
-		);
-		expect(rabbitMq.publishRetry).not.toHaveBeenCalled();
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-	});
-
-	it('dead-letters a daily summary whose messageId does not match its job', async () => {
-		const { service, rabbitMq, delivery, prisma } = createService();
-		const message = createDailySummaryMessage();
-		message.properties.messageId = '22222222-2222-4222-8222-222222222222';
-
-		await (service as any).handle('daily-summary-telegram', message);
-
-		expect(delivery.deliver).not.toHaveBeenCalled();
-		expect(
-			prisma.integrationDeliveryReceipt.create
-		).not.toHaveBeenCalled();
-		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
-			'daily-summary-telegram',
-			expect.objectContaining({
-				malformed: true
-			}),
-			0,
-			'22222222-2222-4222-8222-222222222222',
-			'Scheduled event jobId must match the AMQP messageId',
-			'report.daily-summary.requested.v1',
-			expect.objectContaining({
-				category: 'PERMANENT',
-				normalizedCode: 'INVALID_EVENT_PAYLOAD'
-			})
-		);
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
 	it('uses the same deterministic ID for malformed redeliveries', async () => {
@@ -1071,7 +884,13 @@ describe('IntegrationWorkerService', () => {
 	});
 
 	it('uses the same deterministic ID when an invalid DLQ message is redelivered', async () => {
-		const { service, rabbitMq, prisma } = createService();
+		const { service, rabbitMq, prisma, transaction } = createService();
+		transaction.$queryRaw.mockImplementation(statement => {
+			const sql = statement.strings.join('?');
+			return sql.includes('INSERT INTO "integration_delivery_receipts"')
+				? [{ id: 'receipt-1' }]
+				: [];
+		});
 		const message = createMessage();
 		message.properties.messageId = 'not-a-uuid';
 		message.properties.headers = {
@@ -1102,128 +921,6 @@ describe('IntegrationWorkerService', () => {
 		expect(secondEventId).toBe(firstEventId);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(2);
 		expect(rabbitMq.nack).not.toHaveBeenCalled();
-	});
-
-	it('does not let a stale daily-summary DLQ message fail a retried job', async () => {
-		const { service, rabbitMq, prisma, transaction } = createService();
-		transaction.$queryRaw.mockImplementation(statement => {
-			const sql = statement.strings.join('?');
-			return sql.includes('integration_delivery_failures')
-				? [{ id: 'failure-1' }]
-				: [
-						{
-							jobType: 'DAILY_TELEGRAM_SUMMARY',
-							status: 'QUEUED'
-						}
-					];
-		});
-		const message = createDailySummaryMessage();
-		message.properties.headers = {
-			'x-last-error': 'Old delivery failure',
-			'x-retry-attempt': 4
-		};
-
-		await (service as any).collectDeadLetter(
-			'daily-summary-telegram',
-			message
-		);
-
-		expect(
-			prisma.integrationDeliveryFailure.upsert
-		).not.toHaveBeenCalled();
-		expect(prisma.scheduledJobRun.updateMany).not.toHaveBeenCalled();
-		expect(
-			(
-				transaction.$queryRaw.mock.calls[0][0] as {
-					strings: string[];
-				}
-			).strings.join('?')
-		).toContain('FOR UPDATE');
-		expect(
-			(
-				transaction.$queryRaw.mock.calls[1][0] as {
-					strings: string[];
-				}
-			).strings.join('?')
-		).toContain('FOR SHARE');
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-	});
-
-	it('does not let an older daily-summary DLQ attempt overwrite a newer terminal failure', async () => {
-		const { service, rabbitMq, prisma, transaction } = createService();
-		transaction.$queryRaw.mockImplementation(statement => {
-			const sql = statement.strings.join('?');
-			return sql.includes('integration_delivery_failures')
-				? []
-				: [
-						{
-							jobType: 'DAILY_TELEGRAM_SUMMARY',
-							status: 'FAILED',
-							attempts: 8
-						}
-					];
-		});
-		const message = createDailySummaryMessage();
-		message.properties.headers = {
-			'x-last-error': 'Old daily summary failure',
-			'x-retry-attempt': 4
-		};
-
-		await (service as any).collectDeadLetter(
-			'daily-summary-telegram',
-			message
-		);
-
-		expect(
-			prisma.integrationDeliveryFailure.upsert
-		).not.toHaveBeenCalled();
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-		expect(rabbitMq.nack).not.toHaveBeenCalled();
-	});
-
-	it('persists a daily-summary DLQ message while its job is still failed', async () => {
-		const { service, rabbitMq, prisma } = createService();
-		const message = createDailySummaryMessage();
-		message.properties.headers = {
-			'x-last-error': 'Telegram unavailable',
-			'x-retry-attempt': 4
-		};
-
-		await (service as any).collectDeadLetter(
-			'daily-summary-telegram',
-			message
-		);
-
-		expect(prisma.integrationDeliveryFailure.upsert).toHaveBeenCalledTimes(
-			1
-		);
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-		expect(rabbitMq.nack).not.toHaveBeenCalled();
-	});
-
-	it('persists a rejected daily event that points to a different job type', async () => {
-		const { service, rabbitMq, prisma, transaction } = createService();
-		transaction.$queryRaw.mockImplementation(statement => {
-			const sql = statement.strings.join('?');
-			return sql.includes('integration_delivery_failures')
-				? []
-				: [{ jobType: 'DATABASE_BACKUP', status: 'QUEUED' }];
-		});
-		const message = createDailySummaryMessage();
-		message.properties.headers = {
-			'x-last-error': 'Unexpected daily summary job type',
-			'x-retry-attempt': 1
-		};
-
-		await (service as any).collectDeadLetter(
-			'daily-summary-telegram',
-			message
-		);
-
-		expect(prisma.integrationDeliveryFailure.upsert).toHaveBeenCalledTimes(
-			1
-		);
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
 	it('does not overwrite an already resolved failure from a late DLQ message', async () => {

@@ -12,6 +12,10 @@ scripts=(
 	"$script_directory/deploy-reporting-production.sh"
 	"$script_directory/reporting-producer-lifecycle.sh"
 	"$script_directory/reporting-cutover-lifecycle.sh"
+	"$script_directory/generate-reporting-frontend-runtime-attestation.sh"
+	"$script_directory/run-reporting-scheduler-cutover-smoke.sh"
+	"$script_directory/run-reporting-route-cutover-smoke.sh"
+	"$script_directory/run-reporting-restore-cutover-smoke.sh"
 	"$script_directory/test-reporting-cutover-rehearsal.sh"
 )
 
@@ -57,7 +61,10 @@ unset deployment_entrypoint entrypoint_text
 printf 'reporting_active_revision_entrypoints=passed\n'
 
 deploy_entrypoint_text="$(<"$script_directory/deploy-production.sh")"
-[[ "$deploy_entrypoint_text" == *'reporting_validate_preflight_secret_isolation'* ]] || {
+[[ "$deploy_entrypoint_text" == *'reporting_validate_preflight_secret_isolation'* &&
+	"$deploy_entrypoint_text" == *'reporting_transition_cleanup_integration_worker_env "$deploy_revision"'* &&
+	"$deploy_entrypoint_text" == *'CORE_NOTIFICATION_DELIVERY_READINESS_KINDS=$(reporting_expected_core_notification_delivery_kinds)'* &&
+	"$deploy_entrypoint_text" == *"'CORE_NOTIFICATION_DELIVERY_READINESS_KINDS',"* ]] || {
 	echo 'Full deployment is missing the Reporting credential isolation gate.' >&2
 	exit 1
 }
@@ -97,7 +104,9 @@ lifecycle_text="$(<"$lifecycle_script")"
 	"$lifecycle_text" != *'${ENV_FILE:-'* &&
 	"$lifecycle_text" != *'${COMPOSE_FILE:-'* &&
 	"$lifecycle_text" != *'${REPORTING_DATABASE_MARKER:-'* &&
-	"$lifecycle_text" != *'${REPORTING_FIRST_ROLLOUT_STAGED_MARKER:-'* ]] || {
+	"$lifecycle_text" != *'${REPORTING_FIRST_ROLLOUT_STAGED_MARKER:-'* &&
+	"$lifecycle_text" == *'reporting_transition_cleanup_integration_worker_env()'* &&
+	"$lifecycle_text" == *'REPORTING_POST_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS'* ]] || {
 	echo 'Reporting lifecycle production paths are ambient-overridable.' >&2
 	exit 1
 }
@@ -149,6 +158,13 @@ unset reporting_topic_read_pattern standalone_permission_count \
 printf 'reporting_operational_routing_topic_permissions=passed\n'
 APP_ROOT="$app_root" bash "$script_directory/reporting-producer-lifecycle.sh" --self-test
 APP_ROOT="$app_root" bash "$script_directory/reporting-cutover-lifecycle.sh" --self-test
+bash "$script_directory/generate-reporting-frontend-runtime-attestation.sh" --self-test
+APP_ROOT="$app_root" \
+	bash "$script_directory/run-reporting-scheduler-cutover-smoke.sh" --self-test
+APP_ROOT="$app_root" \
+	bash "$script_directory/run-reporting-route-cutover-smoke.sh" --self-test
+APP_ROOT="$app_root" \
+	bash "$script_directory/run-reporting-restore-cutover-smoke.sh" --self-test
 bash "$script_directory/test-reporting-cutover-rehearsal.sh" --self-test
 
 schedule_authority_service="$server_root/src/reporting-internal/reporting-schedule-authority.service.ts"
@@ -158,7 +174,7 @@ telegram_service="$server_root/src/telegram-bot/telegram-bot.service.ts"
 cutover_text="$(<"$script_directory/reporting-cutover-lifecycle.sh")"
 [[ -f "$schedule_authority_service" &&
 	"$(<"$schedule_authority_service")" == *'FOR UPDATE'* &&
-	"$(<"$schedule_authority_service")" == *'ensureDailySummaryBackupScheduleSeparated'* &&
+	"$(<"$schedule_authority_service")" == *'ensureReportingBackupScheduleSeparated'* &&
 	"$(<"$schedule_authority_service")" == *'REPORTING_DAILY_SUMMARY_SCHEDULE_REJECTED'* &&
 	"$(<"$reporting_settings_service")" == *'scheduleGeneration'* &&
 	"$(<"$reporting_settings_service")" == *'expectedScheduleGeneration'* &&
@@ -166,6 +182,8 @@ cutover_text="$(<"$script_directory/reporting-cutover-lifecycle.sh")"
 	"$(<"$reporting_settings_service")" == *'confirmDailySummarySchedulePolicy'* &&
 	"$(<"$reporting_scheduler_service")" == *'getSchedulerSettings()'* &&
 	"$(<"$telegram_service")" == *'dailySummaryPolicyReservationGeneration'* &&
+	"$(<"$telegram_service")" == *'ensureReportingBackupScheduleSeparated'* &&
+	"$(<"$telegram_service")" != *'ensureDailySummaryBackupScheduleSeparated'* &&
 	"$cutover_text" == *'reporting_cutover_schedule_authority_generation REPORTING REPORTING'* &&
 	-f "$server_root/prisma/migrations/20260731030000_add_reporting_schedule_authority/migration.sql" &&
 	-f "$server_root/apps/reporting/prisma/migrations/20260731020000_add_schedule_authority_generation/migration.sql" ]] || {
@@ -265,6 +283,10 @@ recovery_exclusion="!(github.event_name == 'workflow_dispatch' && inputs.deploy_
 	"$lifecycle_checkout_preflight_job" == *"inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'"* &&
 	"$lifecycle_checkout_preflight_job" == *'guard_campaigns_checkout_before_pull "$current_revision"'* &&
 	"$lifecycle_checkout_preflight_job" == *'guard_reporting_checkout_before_pull "$EXPECTED_REVISION"'* &&
+	"$lifecycle_checkout_preflight_job" == *"AUTOMATIC_PROD_PUSH: \${{ github.event_name == 'push' && 'true' || 'false' }}"* &&
+	"$lifecycle_checkout_preflight_job" == *'if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||'* &&
+	"$lifecycle_checkout_preflight_job" == *'"$current_revision" == "$EXPECTED_REVISION" ]]; then'* &&
+	"$lifecycle_checkout_preflight_job" == *'Automatic push will verify before the deploy job evaluates the active Reporting revision guard.'* &&
 	"$lifecycle_checkout_preflight_job" == *'local guard_action="${2:---guard-before-fetch-revision}"'* &&
 	"$lifecycle_checkout_preflight_job" != *'git fetch '* &&
 	"$lifecycle_checkout_preflight_job" != *'git checkout '* &&
@@ -434,7 +456,9 @@ cleanup_lock_line="$(cleanup_stage_line 'acquire_production_deploy_lock "Reporti
 cleanup_pre_fetch_line="$(cleanup_stage_line '--guard-before-fetch-revision "$CLEANUP_REVISION"')"
 cleanup_fetch_line="$(cleanup_stage_line 'git fetch origin prod')"
 cleanup_exact_fetch_line="$(cleanup_stage_line '"$fetched_revision" == "$CLEANUP_REVISION"')"
-cleanup_action_line="$(cleanup_stage_line 'bash "$cutover_lifecycle_script" stage-cleanup')"
+cleanup_worktree_line="$(cleanup_stage_line 'git worktree add --detach "$candidate_root" "$CLEANUP_REVISION"')"
+cleanup_source_line="$(cleanup_stage_line 'REPORTING_LIFECYCLE_SOURCE_ROOT="$candidate_root"')"
+cleanup_action_line="$(cleanup_stage_line 'bash "$candidate_root/$cutover_lifecycle_script" stage-cleanup')"
 cleanup_post_fetch_line="$(cleanup_stage_line '--guard-before-checkout-revision "$CLEANUP_REVISION"')"
 [[ "$reporting_cleanup_stage_job" == *'needs: verify'* &&
 	"$reporting_cleanup_stage_job" == *'stage-cleanup:[0-9a-f]{40}:[0-9a-f]{40}:[0-9]+:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}'* &&
@@ -442,16 +466,21 @@ cleanup_post_fetch_line="$(cleanup_stage_line '--guard-before-checkout-revision 
 	"$reporting_cleanup_stage_job" == *'REPORTING_CLEANUP_MANIFEST_FILE="$manifest_file"'* &&
 	"$reporting_cleanup_stage_job" == *'scripts/reporting-producer-lifecycle.sh'* &&
 	"$reporting_cleanup_stage_job" == *'scripts/core-database-production-guard.sh'* &&
+	"$reporting_cleanup_stage_job" == *'git worktree remove --force "$candidate_root"'* &&
+	"$reporting_cleanup_stage_job" == *'hash-object --no-filters "$candidate_file"'* &&
 	"$reporting_cleanup_stage_job" == *'"$(git rev-parse HEAD)" == "$current_revision"'* &&
 	"$reporting_cleanup_stage_job" != *'git checkout '* &&
 	"$reporting_cleanup_stage_job" != *'git merge --ff-only'* &&
 	"$cleanup_lock_line" =~ ^[0-9]+$ && "$cleanup_pre_fetch_line" =~ ^[0-9]+$ &&
 	"$cleanup_fetch_line" =~ ^[0-9]+$ && "$cleanup_exact_fetch_line" =~ ^[0-9]+$ &&
+	"$cleanup_worktree_line" =~ ^[0-9]+$ && "$cleanup_source_line" =~ ^[0-9]+$ &&
 	"$cleanup_action_line" =~ ^[0-9]+$ && "$cleanup_post_fetch_line" =~ ^[0-9]+$ &&
 	"$cleanup_lock_line" -lt "$cleanup_pre_fetch_line" &&
 	"$cleanup_pre_fetch_line" -lt "$cleanup_fetch_line" &&
 	"$cleanup_fetch_line" -lt "$cleanup_exact_fetch_line" &&
-	"$cleanup_exact_fetch_line" -lt "$cleanup_action_line" &&
+	"$cleanup_exact_fetch_line" -lt "$cleanup_worktree_line" &&
+	"$cleanup_worktree_line" -lt "$cleanup_source_line" &&
+	"$cleanup_source_line" -lt "$cleanup_action_line" &&
 	"$cleanup_action_line" -lt "$cleanup_post_fetch_line" ]] || {
 	echo 'Reporting cleanup staging is not pinned under lock before any separate checkout.' >&2
 	exit 1

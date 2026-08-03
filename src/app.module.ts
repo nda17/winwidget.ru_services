@@ -12,7 +12,6 @@ import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
 import { SiteSettingsModule } from '@/site-settings/site-settings.module';
 import { SiteSettingsService } from '@/site-settings/site-settings.service';
-import { StatisticsModule } from '@/statistics/statistics.module';
 import { SubscriptionModule } from '@/subscription/subscription.module';
 import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
@@ -49,7 +48,6 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 			inject: [ConfigService, SiteSettingsService]
 		}),
 		AuthModule,
-		StatisticsModule,
 		UserModule,
 		FileModule,
 		PaymentModule,

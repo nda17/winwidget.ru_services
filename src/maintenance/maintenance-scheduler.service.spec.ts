@@ -21,13 +21,11 @@ describe('MaintenanceSchedulerService', () => {
 		} as unknown as ScheduledJobsService;
 		const tasks = {
 			getEventForType: jest.fn(),
-			enqueueDailySummary: jest.fn().mockResolvedValue(null),
 			enqueueDailyDatabaseBackups: jest.fn().mockResolvedValue(null)
 		} as unknown as ScheduledTasksService;
 		const prisma = {
 			telegramBotSettings: {
 				upsert: jest.fn().mockResolvedValue({
-					dailySummaryTime: '01:50',
 					databaseBackupTime
 				})
 			}
@@ -41,30 +39,12 @@ describe('MaintenanceSchedulerService', () => {
 		return { service, scheduledJobs, tasks };
 	};
 
-	it('schedules the previous Moscow calendar day with a stable period key', async () => {
-		jest.setSystemTime(new Date('2026-07-24T00:00:00.000Z'));
-		const { service, tasks } = createService();
-
-		await (service as any).tick();
-
-		expect(tasks.enqueueDailySummary).toHaveBeenCalledWith(
-			{
-				start: new Date('2026-07-22T21:00:00.000Z'),
-				end: new Date('2026-07-23T21:00:00.000Z'),
-				key: '2026-07-23'
-			},
-			new Date('2026-07-23T22:50:00.000Z')
-		);
-		expect(tasks.enqueueDailyDatabaseBackups).not.toHaveBeenCalled();
-	});
-
-	it('does not enqueue the summary before the configured Moscow time', async () => {
+	it('does not enqueue backups before the configured Moscow time', async () => {
 		jest.setSystemTime(new Date('2026-07-23T21:30:00.000Z'));
 		const { service, tasks } = createService();
 
 		await (service as any).tick();
 
-		expect(tasks.enqueueDailySummary).not.toHaveBeenCalled();
 		expect(tasks.enqueueDailyDatabaseBackups).not.toHaveBeenCalled();
 	});
 

@@ -6,6 +6,15 @@ APP_ROOT="${APP_ROOT:-/opt/winwidget}"
 ENV_FILE="${ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 
 server_root="$APP_ROOT/winwidget.ru_server"
+reporting_lifecycle_source_root="${REPORTING_LIFECYCLE_SOURCE_ROOT:-$server_root}"
+if [[ "$reporting_lifecycle_source_root" != /* ||
+	! -d "$reporting_lifecycle_source_root" ||
+	-L "$reporting_lifecycle_source_root" ||
+	"$(cd -- "$reporting_lifecycle_source_root" && pwd -P)" != \
+		"$reporting_lifecycle_source_root" ]]; then
+	echo 'Reporting lifecycle source root must be an exact absolute non-symlink directory.' >&2
+	return 1 2>/dev/null || exit 1
+fi
 readonly REPORTING_EVIDENCE_ROOT="$APP_ROOT/deploy/backend/reporting-evidence"
 readonly REPORTING_CANONICAL_OPERATIONAL_ALERTS_THREAD_ID='2024'
 readonly REPORTING_LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION='42c422ca4c2c3a8ce758a37773d6cb0e6b689db7'
@@ -13,6 +22,10 @@ readonly REPORTING_LEGACY_API_SHUTDOWN_BOOTSTRAP_IMAGE_ID='sha256:e64d78b3dc511d
 readonly REPORTING_CORE_CLEANUP_BACKUP_DUMP="$APP_ROOT/deploy/backend/reporting-core-cleanup-backup-v1.dump"
 readonly REPORTING_CORE_CLEANUP_BACKUP_EVIDENCE="$APP_ROOT/deploy/backend/reporting-core-cleanup-backup-v1.json"
 readonly REPORTING_CORE_CLEANUP_BACKUP_MAX_AGE_SECONDS='86400'
+readonly REPORTING_FRONTEND_RUNTIME_ATTESTATION="${REPORTING_FRONTEND_RUNTIME_ATTESTATION:-$APP_ROOT/deploy/backend/reporting-frontend-runtime-attestation-v1.json}"
+readonly REPORTING_FRONTEND_RUNTIME_ATTESTATION_SIGNATURE="${REPORTING_FRONTEND_RUNTIME_ATTESTATION_SIGNATURE:-$APP_ROOT/deploy/backend/reporting-frontend-runtime-attestation-v1.sig}"
+readonly REPORTING_FRONTEND_RUNTIME_ATTESTATION_PUBLIC_KEY="${REPORTING_FRONTEND_RUNTIME_ATTESTATION_PUBLIC_KEY:-$APP_ROOT/deploy/backend/reporting-frontend-runtime-attestation-v1.public.pem}"
+readonly REPORTING_FRONTEND_RUNTIME_ATTESTATION_MAX_AGE_SECONDS='3600'
 REPORTING_CLEANUP_LEGACY_QUEUES=(
 	winwidget.report.daily-summary.telegram
 	winwidget.report.daily-summary.telegram.dead-letter
@@ -41,21 +54,79 @@ REPORTING_CLEANUP_PRESERVED_PATHS=(
 	apps/reporting/prisma/schema.prisma
 	prisma/migrations/20260731010000_add_reporting_projection_producers
 	src/messaging/reporting-admin-audit-event.ts
-	src/reporting-internal
+	src/reporting-internal/reporting-auth-introspection.service.spec.ts
+	src/reporting-internal/reporting-auth-introspection.service.ts
+	src/reporting-internal/reporting-internal-token.guard.spec.ts
+	src/reporting-internal/reporting-internal-token.guard.ts
+	src/reporting-internal/reporting-internal.constants.ts
+	src/reporting-internal/reporting-internal.controller.spec.ts
+	src/reporting-internal/reporting-internal.controller.ts
+	src/reporting-internal/reporting-internal.module.ts
+	src/reporting-internal/reporting-producer-migration.spec.ts
+	src/reporting-internal/reporting-projection-snapshot.service.spec.ts
+	src/reporting-internal/reporting-schedule-authority.service.spec.ts
 )
 REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS=(
 	apps/reporting/src/messaging/reporting-messaging.constants.spec.ts
 	apps/reporting/src/messaging/reporting-messaging.constants.ts
 	apps/reporting/src/messaging/reporting-rabbitmq.service.spec.ts
 	apps/reporting/src/projections/projection.service.spec.ts
+	apps/reporting/src/projections/projection.service.ts
 	apps/reporting/src/projections/reporting-event.contract.spec.ts
 	apps/reporting/src/projections/reporting-event.contract.ts
 	apps/reporting/src/shadow-evidence/reporting-shadow-evidence.service.ts
 	apps/reporting/test/integration/reporting.integration.mjs
 )
+REPORTING_CLEANUP_MUTABLE_CORE_PATHS=(
+	prisma/schema.prisma
+	src/app.module.ts
+	src/health/health.service.spec.ts
+	src/maintenance/maintenance-scheduler.service.spec.ts
+	src/maintenance/maintenance-scheduler.service.ts
+	src/maintenance/maintenance-worker.service.spec.ts
+	src/maintenance/scheduled-tasks.service.spec.ts
+	src/maintenance/scheduled-tasks.service.ts
+	src/messaging/integration-delivery.service.spec.ts
+	src/messaging/integration-delivery.service.ts
+	src/messaging/integration-error-classifier.ts
+	src/messaging/integration-worker.module.ts
+	src/messaging/integration-worker.service.spec.ts
+	src/messaging/integration-worker.service.ts
+	src/messaging/messaging-admin.service.ts
+	src/messaging/messaging-event-contract.ts
+	src/messaging/messaging-operational-alert.service.spec.ts
+	src/messaging/messaging.constants.ts
+	src/messaging/notification-delivery-event.ts
+	src/messaging/reporting-projection-contract.spec.ts
+	src/reporting-internal/reporting-projection-snapshot.service.ts
+	src/reporting-internal/reporting-schedule-authority.service.ts
+	src/scheduled-jobs/scheduled-jobs.service.spec.ts
+	src/scheduled-jobs/scheduled-jobs.types.ts
+	src/telegram-bot/dto/update-telegram-bot-settings.dto.ts
+	src/telegram-bot/telegram-bot.controller.ts
+	src/telegram-bot/telegram-bot.service.spec.ts
+	src/telegram-bot/telegram-bot.service.ts
+)
+REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS=(
+	.env.example
+	.github/workflows/deploy-production.yml
+	deploy/docker-compose.prod.yml
+	scripts/deploy-production.sh
+	scripts/deploy-reporting-production.sh
+	scripts/reporting-cutover-lifecycle.sh
+	scripts/reporting-database-lifecycle.sh
+	scripts/reporting-producer-lifecycle.sh
+	scripts/test-messaging-integration.mjs
+	scripts/test-reporting-production-scripts.sh
+)
+REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS=(
+	scripts/generate-reporting-frontend-runtime-attestation.sh
+	scripts/run-reporting-restore-cutover-smoke.sh
+	scripts/run-reporting-route-cutover-smoke.sh
+	scripts/run-reporting-scheduler-cutover-smoke.sh
+)
 REPORTING_CLEANUP_TRUSTED_PATHS=(
 	.dockerignore
-	.github/workflows/deploy-production.yml
 	Dockerfile
 	apps/api-gateway
 	apps/campaigns
@@ -63,7 +134,6 @@ REPORTING_CLEANUP_TRUSTED_PATHS=(
 	apps/reporting/Dockerfile
 	apps/reporting/package.json
 	apps/reporting/pnpm-lock.yaml
-	deploy/docker-compose.prod.yml
 	deploy/nginx.conf
 	docker-entrypoint.sh
 	nest-cli.json
@@ -71,27 +141,29 @@ REPORTING_CLEANUP_TRUSTED_PATHS=(
 	pnpm-lock.yaml
 	scripts/core-database-production-guard.sh
 	scripts/database-restore-production-guard.sh
-	scripts/deploy-production.sh
-	scripts/deploy-reporting-production.sh
 	scripts/production-deploy-lock.sh
-	scripts/reporting-cutover-lifecycle.sh
-	scripts/reporting-database-lifecycle.sh
-	scripts/reporting-producer-lifecycle.sh
-	scripts/test-reporting-production-scripts.sh
 	tsconfig.build.json
 	tsconfig.json
 )
 
 # shellcheck source=scripts/production-deploy-lock.sh
-source "$server_root/scripts/production-deploy-lock.sh"
+source "$reporting_lifecycle_source_root/scripts/production-deploy-lock.sh"
 # shellcheck source=scripts/database-restore-production-guard.sh
-source "$server_root/scripts/database-restore-production-guard.sh"
+source "$reporting_lifecycle_source_root/scripts/database-restore-production-guard.sh"
 # shellcheck source=scripts/reporting-database-lifecycle.sh
 if ! declare -F reporting_validate_database_marker >/dev/null; then
-	source "$server_root/scripts/reporting-database-lifecycle.sh"
+	source "$reporting_lifecycle_source_root/scripts/reporting-database-lifecycle.sh"
 fi
 # shellcheck source=scripts/reporting-producer-lifecycle.sh
-source "$server_root/scripts/reporting-producer-lifecycle.sh"
+source "$reporting_lifecycle_source_root/scripts/reporting-producer-lifecycle.sh"
+
+reporting_cutover_export_pinned_runtime_identity() {
+	local revision="$1"
+	reporting_export_pinned_runtime_identity "$revision"
+	DATABASE_RESTORE_REVISION="$revision"
+	DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"
+	export DATABASE_RESTORE_REVISION DATABASE_RESTORE_IMAGE
+}
 
 reporting_cutover_validate_transition() {
 	local current="$1" next="$2" current_index next_index
@@ -1911,7 +1983,8 @@ const exact = (object, keys) => object && typeof object === "object" &&
   !Array.isArray(object) && Object.keys(object).sort().join("|") === [...keys].sort().join("|");
 const checks = [
   "gatewayRoute", "frontendReportingApi", "adminDashboard", "adminOverview",
-  "adminRegistrations", "dailySummarySettings", "allowedCors", "deniedCors",
+  "adminRegistrations", "dailySummarySettings", "legacyStatisticsRetained",
+  "allowedCors", "deniedCors",
   "databaseRestoreSettings", "databaseRestoreUnauthenticatedRejected",
   "logoutRejected", "blockedUserRejected", "revokedSessionRejected",
   "roleChangeRejected", "jwtKeyRotationAccepted", "introspectionFailClosed",
@@ -1920,11 +1993,20 @@ const checks = [
 let origin;
 try { origin = new URL(value.origin); } catch { process.exit(1); }
 const allowed = new Set((process.env.ALLOWED_ORIGINS || "").split(",").map(v => v.trim()));
-if (!exact(value, ["version", "backendRevision", "frontendRevision", "switchGeneration", "origin", "verifiedAt", "checks"]) ||
+if (!exact(value, [
+      "version", "backendRevision", "frontendRevision", "switchGeneration",
+      "origin", "frontendRuntimeAttestationSha256",
+      "frontendRuntimeSignatureSha256", "frontendRuntimePublicKeySha256",
+      "frontendRuntimeChallenge", "verifiedAt", "checks",
+    ]) ||
     value.version !== 1 || value.backendRevision !== process.env.EXPECTED_REVISION ||
     !/^[0-9a-f]{40}$/.test(value.frontendRevision) ||
 	value.switchGeneration !== process.env.EXPECTED_SWITCH_GENERATION ||
 	!/^[1-9][0-9]*$/.test(value.switchGeneration) ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimeAttestationSha256) ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimeSignatureSha256) ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimePublicKeySha256) ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimeChallenge) ||
     origin.origin !== value.origin || origin.username || origin.password ||
     !allowed.has(value.origin) || !Number.isFinite(Date.parse(value.verifiedAt)) ||
     !exact(value.checks, checks) || checks.some(key => value.checks[key] !== true)) process.exit(1);
@@ -1943,10 +2025,131 @@ reporting_cutover_route_evidence_identity() {
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/evidence.json", "utf8"));
 if (!/^[0-9a-f]{40}$/.test(value.frontendRevision) ||
-    typeof value.origin !== "string") process.exit(1);
-process.stdout.write(`${value.frontendRevision}|${new URL(value.origin).origin}`);
+    typeof value.origin !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimeAttestationSha256) ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimeSignatureSha256) ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimePublicKeySha256) ||
+    !/^[0-9a-f]{64}$/.test(value.frontendRuntimeChallenge)) process.exit(1);
+process.stdout.write([
+  value.frontendRevision,
+  new URL(value.origin).origin,
+  value.frontendRuntimeAttestationSha256,
+  value.frontendRuntimeSignatureSha256,
+  value.frontendRuntimePublicKeySha256,
+  value.frontendRuntimeChallenge,
+].join("|"));
 ' -v "$evidence:/evidence.json:ro"
 }
+
+reporting_cutover_validate_frontend_runtime_attestation() (
+	set -Eeuo pipefail
+	[[ $# == 11 ]] || return 1
+	local attestation="$1" signature="$2" public_key="$3"
+	local backend_revision="$4" frontend_revision="$5" origin="$6"
+	local switch_generation="$7" challenge="$8"
+	local expected_attestation_sha="$9" expected_signature_sha="${10}"
+	local expected_public_key_sha="${11}" image value size key_text
+	local attestation_sha signature_sha public_key_sha asset_path asset_sha asset_tmp
+	for value in "$attestation" "$signature" "$public_key"; do
+		[[ "$value" == /* && -f "$value" && ! -L "$value" &&
+			"$(reporting_stat_mode "$value")" == '600' &&
+			"$(reporting_stat_owner "$value")" == '0:0' ]] || {
+			echo 'Cross-VPS frontend runtime attestation, signature and public key must be absolute root-owned mode-600 regular files.' >&2
+			return 1
+		}
+	done
+	for value in "$attestation" "$signature" "$public_key"; do
+		size="$(wc -c <"$value" | tr -d '[:space:]')" || return 1
+		[[ "$size" =~ ^[0-9]+$ && "$size" -ge 32 && "$size" -le 16384 ]] || {
+			echo 'Cross-VPS frontend runtime attestation artifact has an unsafe size.' >&2
+			return 1
+		}
+	done
+	attestation_sha="$(reporting_sha256_file "$attestation")" || return 1
+	signature_sha="$(reporting_sha256_file "$signature")" || return 1
+	public_key_sha="$(reporting_sha256_file "$public_key")" || return 1
+	[[ "$public_key_sha" == "$expected_public_key_sha" &&
+		( -z "$expected_attestation_sha" || "$attestation_sha" == "$expected_attestation_sha" ) &&
+		( -z "$expected_signature_sha" || "$signature_sha" == "$expected_signature_sha" ) ]] || {
+		echo 'Cross-VPS frontend runtime attestation artifacts differ from the route evidence.' >&2
+		return 1
+	}
+	key_text="$(openssl pkey -pubin -in "$public_key" -text -noout 2>/dev/null)" || return 1
+	[[ "$key_text" == ED25519\ Public-Key:* ]] || {
+		echo 'Cross-VPS frontend runtime attestation key must be Ed25519.' >&2
+		return 1
+	}
+	openssl pkeyutl -verify -pubin -inkey "$public_key" -rawin \
+		-in "$attestation" -sigfile "$signature" >/dev/null 2>&1 || {
+		echo 'Cross-VPS frontend runtime attestation signature is invalid.' >&2
+		return 1
+	}
+	image="$(reporting_resolve_image_id_for_revision "$backend_revision")" || return 1
+	value="$(reporting_run_isolated_node_validator "$image" '
+const { readFileSync } = require("node:fs");
+const value = JSON.parse(readFileSync("/attestation.json", "utf8"));
+const keys = [
+  "version", "backendRevision", "frontendRevision", "switchGeneration",
+  "origin", "challenge", "composeProject", "composeService", "containerId",
+  "imageId", "appRevision", "imageRevision", "status", "health",
+  "restarting", "restartCount", "contractScan", "legacyContractAbsent",
+  "localHttp", "publicHttp", "assetPath", "assetSha256", "verifiedAt",
+];
+const verifiedAt = Date.parse(value.verifiedAt);
+const ageMs = Date.now() - verifiedAt;
+if (Object.keys(value).sort().join("|") !== keys.sort().join("|") ||
+    value.version !== 1 ||
+    value.backendRevision !== process.env.EXPECTED_BACKEND_REVISION ||
+    value.frontendRevision !== process.env.EXPECTED_FRONTEND_REVISION ||
+    value.switchGeneration !== process.env.EXPECTED_SWITCH_GENERATION ||
+    value.origin !== process.env.EXPECTED_ORIGIN ||
+    value.challenge !== process.env.EXPECTED_CHALLENGE ||
+    value.composeProject !== "winwidget" || value.composeService !== "client" ||
+    !/^[0-9a-f]{64}$/.test(value.containerId) ||
+    !/^sha256:[0-9a-f]{64}$/.test(value.imageId) ||
+    value.appRevision !== value.frontendRevision ||
+    value.imageRevision !== value.frontendRevision ||
+    value.status !== "running" ||
+    !["healthy", "not-configured"].includes(value.health) ||
+    value.restarting !== false || value.restartCount !== 0 ||
+    value.contractScan !== true || value.legacyContractAbsent !== true ||
+    value.localHttp !== true || value.publicHttp !== true ||
+    typeof value.assetPath !== "string" ||
+    !/^\/_next\/static\/[A-Za-z0-9._/-]+$/.test(value.assetPath) ||
+    value.assetPath.split("/").includes("..") ||
+    !/^[0-9a-f]{64}$/.test(value.assetSha256) ||
+    !Number.isFinite(verifiedAt) || ageMs < -120000 ||
+    ageMs > Number(process.env.MAX_AGE_SECONDS) * 1000) process.exit(1);
+process.stdout.write(`${value.assetPath}|${value.assetSha256}`);
+' \
+		-e "EXPECTED_BACKEND_REVISION=$backend_revision" \
+		-e "EXPECTED_FRONTEND_REVISION=$frontend_revision" \
+		-e "EXPECTED_SWITCH_GENERATION=$switch_generation" \
+		-e "EXPECTED_ORIGIN=$origin" \
+		-e "EXPECTED_CHALLENGE=$challenge" \
+		-e "MAX_AGE_SECONDS=$REPORTING_FRONTEND_RUNTIME_ATTESTATION_MAX_AGE_SECONDS" \
+		-v "$attestation:/attestation.json:ro")" || {
+		echo 'Cross-VPS frontend runtime attestation is stale or does not match the live cutover identity.' >&2
+		return 1
+	}
+	IFS='|' read -r asset_path asset_sha <<<"$value"
+	[[ "$asset_path" =~ ^/_next/static/[A-Za-z0-9._/-]+$ &&
+		"$asset_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+	asset_tmp="$(mktemp "${TMPDIR:-/tmp}/winwidget-reporting-frontend-asset.XXXXXX")" || return 1
+	trap 'rm -f -- "$asset_tmp"' EXIT
+	curl --proto '=https' --tlsv1.2 -fsS --connect-timeout 5 --max-time 20 \
+		"$origin$asset_path" -o "$asset_tmp" || {
+		echo 'Signed frontend runtime asset is not reachable through the reviewed public origin.' >&2
+		return 1
+	}
+	[[ "$(reporting_sha256_file "$asset_tmp")" == "$asset_sha" ]] || {
+		echo 'Public frontend asset does not match the signed frontend runtime image.' >&2
+		return 1
+	}
+	reporting_cutover_require_stable_digest frontend-runtime "$attestation" "$attestation_sha"
+	reporting_cutover_require_stable_digest frontend-runtime-signature "$signature" "$signature_sha"
+	reporting_cutover_require_stable_digest frontend-runtime-public-key "$public_key" "$public_key_sha"
+)
 
 reporting_cutover_route_evidence_verified_at() {
 	local revision route_sha evidence image
@@ -1964,83 +2167,45 @@ process.stdout.write(value.verifiedAt);
 }
 
 reporting_cutover_require_live_frontend_runtime() {
-	local evidence="$1" backend_revision="$2" identity frontend_revision origin
-	local container_id status restarting app_revision image_id image_revision
+	local evidence="$1" backend_revision="$2" pin_digests="${3:-false}"
+	local identity frontend_revision origin attestation_sha signature_sha
+	local public_key_sha challenge switch_generation expected_attestation_sha
+	local expected_signature_sha
 	identity="$(reporting_cutover_route_evidence_identity \
 		"$evidence" "$backend_revision")" || return 1
-	IFS='|' read -r frontend_revision origin <<<"$identity"
+	IFS='|' read -r frontend_revision origin attestation_sha signature_sha \
+		public_key_sha challenge <<<"$identity"
 	[[ "$frontend_revision" =~ ^[0-9a-f]{40}$ &&
-		"$origin" =~ ^https://[^/]+$ ]] || return 1
-
-	container_id="$(docker ps --no-trunc -q \
-		--filter label=com.docker.compose.project=winwidget \
-		--filter label=com.docker.compose.service=client)" || return 1
-	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
-		echo 'Reporting route switch requires exactly one running WinWidget frontend container.' >&2
-		return 1
-	}
-	status="$(docker inspect --format '{{.State.Status}}' "$container_id")" || return 1
-	restarting="$(docker inspect --format '{{.State.Restarting}}' "$container_id")" || return 1
-	app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" |
-		sed -n 's/^APP_REVISION=//p')" || return 1
-	image_id="$(docker inspect --format '{{.Image}}' "$container_id")" || return 1
-	image_revision="$(docker image inspect --format \
-		'{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-		"$image_id")" || return 1
-	[[ "$status" == 'running' && "$restarting" == 'false' &&
-		"$app_revision" == "$frontend_revision" &&
-		"$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
-		"$image_revision" == "$frontend_revision" ]] || {
-		echo 'Live frontend container env, image label or evidence revision does not match.' >&2
-		return 1
-	}
-
-	reporting_run_isolated_node_validator "$image_id" '
-const { existsSync, readFileSync, readdirSync } = require("node:fs");
-const root = "/app/.next";
-if (!existsSync(root)) process.exit(1);
-const forbidden = [
-  "/statistics/dashboard",
-  "/statistics/overview",
-  "/statistics/registrations-by-month",
-];
-const required = [
-  "/admin/reporting",
-  "/admin/reporting/daily-summary/settings",
-];
-const found = new Set();
-const visit = directory => {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = `${directory}/${entry.name}`;
-    if (entry.isDirectory()) visit(path);
-    else if (entry.isFile() && /\.(?:js|json|html)$/.test(entry.name)) {
-      const text = readFileSync(path, "utf8");
-      if (forbidden.some(token => text.includes(token)) ||
-          /(?:=|:)"\/statistics"/.test(text)) process.exit(1);
-      for (const token of required) if (text.includes(token)) found.add(token);
-    }
-  }
-};
-visit(root);
-if (required.some(token => !found.has(token))) process.exit(1);
-' >/dev/null || {
-		echo 'Live frontend image does not contain the exact Reporting API contract.' >&2
-		return 1
-	}
-	curl -fsS --connect-timeout 2 --max-time 5 \
-		http://127.0.0.1:3000/ >/dev/null || {
-		echo 'Live frontend container is not reachable on the canonical local port.' >&2
-		return 1
-	}
+		"$origin" =~ ^https://[^/]+$ &&
+		"$attestation_sha" =~ ^[0-9a-f]{64}$ &&
+		"$signature_sha" =~ ^[0-9a-f]{64}$ &&
+		"$public_key_sha" =~ ^[0-9a-f]{64}$ &&
+		"$challenge" =~ ^[0-9a-f]{64}$ ]] || return 1
+	[[ "$pin_digests" == 'true' || "$pin_digests" == 'false' ]] || return 1
+	switch_generation="$(reporting_cutover_marker_value switch_generation)" || return 1
+	expected_attestation_sha=''
+	expected_signature_sha=''
+	if [[ "$pin_digests" == 'true' ]]; then
+		expected_attestation_sha="$attestation_sha"
+		expected_signature_sha="$signature_sha"
+	fi
+	reporting_cutover_validate_frontend_runtime_attestation \
+		"$REPORTING_FRONTEND_RUNTIME_ATTESTATION" \
+		"$REPORTING_FRONTEND_RUNTIME_ATTESTATION_SIGNATURE" \
+		"$REPORTING_FRONTEND_RUNTIME_ATTESTATION_PUBLIC_KEY" \
+		"$backend_revision" "$frontend_revision" "$origin" \
+		"$switch_generation" "$challenge" "$expected_attestation_sha" \
+		"$expected_signature_sha" "$public_key_sha" || return 1
 	curl -fsS --connect-timeout 5 --max-time 15 "$origin/" >/dev/null || {
 		echo 'Reviewed public frontend origin is not reachable from the cutover host.' >&2
 		return 1
 	}
 }
 
-reporting_cutover_require_live_legacy_routes_absent() {
-	local runtime_revision="$1" token_file image_id public_origin token_size
-	token_file="${REPORTING_CUTOVER_ADMIN_ACCESS_TOKEN_FILE:-}"
+reporting_cutover_require_live_legacy_routes() {
+	local runtime_revision="$1" policy="$2" token_file image_id public_origin token_size
+	[[ "$policy" == 'retained' || "$policy" == 'absent' ]] || return 1
+	token_file="${REPORTING_CUTOVER_ADMIN_ACCESS_TOKEN_FILE:-$APP_ROOT/deploy/backend/.reporting-cutover-admin-access-token}"
 	[[ "$token_file" == /* && -f "$token_file" && ! -L "$token_file" &&
 		"$(reporting_stat_owner "$token_file")" == '0:0' &&
 		"$(reporting_stat_mode "$token_file")" == '600' ]] || {
@@ -2064,6 +2229,7 @@ reporting_cutover_require_live_legacy_routes_absent() {
 		--pids-limit 64 --memory 128m --cpus 0.5 \
 		--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
 		-e "EXPECTED_PUBLIC_API_ORIGIN=$public_origin" \
+		-e "EXPECTED_LEGACY_POLICY=$policy" \
 		-v "$token_file:/run/secrets/reporting-cutover-admin-token:ro" \
 		--entrypoint node "$image_id" -e '
 const { readFileSync } = require("node:fs");
@@ -2083,20 +2249,88 @@ const request = async (origin, path) => fetch(`${origin}${path}`, {
   redirect: "error",
   signal: AbortSignal.timeout(15000),
 });
+const parseJson = async response => {
+  try { return await response.json(); } catch { process.exit(1); }
+};
 (async () => {
+  if (!["retained", "absent"].includes(process.env.EXPECTED_LEGACY_POLICY)) {
+    process.exit(1);
+  }
   for (const origin of origins) {
     const currentResponse = await request(origin, current);
     if (currentResponse.status !== 200) process.exit(1);
     for (const path of legacy) {
       const response = await request(origin, path);
-      if (response.status !== 404) process.exit(1);
+      if (process.env.EXPECTED_LEGACY_POLICY === "absent") {
+        if (response.status !== 404 || (await parseJson(response)).code !== "route_not_found") {
+          process.exit(1);
+        }
+        continue;
+      }
+      if (response.status !== 200) process.exit(1);
+      const value = await parseJson(response);
+      if (path.endsWith("/dashboard") &&
+          (!value || typeof value !== "object" || typeof value.generatedAt !== "string")) {
+        process.exit(1);
+      }
+      if (path.endsWith("/overview") &&
+          (!value || typeof value !== "object" || Array.isArray(value))) {
+        process.exit(1);
+      }
+      if (path.endsWith("/registrations-by-month") && !Array.isArray(value)) {
+        process.exit(1);
+      }
     }
   }
 })().catch(() => { process.exitCode = 1; });
 ' >/dev/null || {
-		echo 'Authenticated live smoke did not prove exact Reporting routes and 404 for every legacy statistics route.' >&2
+		echo "Authenticated live smoke did not prove the $policy legacy statistics route policy." >&2
 		return 1
 	}
+}
+
+reporting_cutover_require_live_legacy_routes_retained() {
+	reporting_cutover_require_live_legacy_routes "$1" retained
+}
+
+reporting_cutover_require_live_legacy_routes_absent() {
+	reporting_cutover_require_live_legacy_routes "$1" absent
+}
+
+reporting_cutover_archive_frontend_runtime_attestation() {
+	local evidence="$1" backend_revision="$2" identity frontend_revision origin
+	local attestation_sha signature_sha public_key_sha challenge
+	identity="$(reporting_cutover_route_evidence_identity \
+		"$evidence" "$backend_revision")" || return 1
+	IFS='|' read -r frontend_revision origin attestation_sha signature_sha \
+		public_key_sha challenge <<<"$identity"
+	[[ "$(reporting_sha256_file "$REPORTING_FRONTEND_RUNTIME_ATTESTATION")" == "$attestation_sha" &&
+		"$(reporting_sha256_file "$REPORTING_FRONTEND_RUNTIME_ATTESTATION_SIGNATURE")" == "$signature_sha" &&
+		"$(reporting_sha256_file "$REPORTING_FRONTEND_RUNTIME_ATTESTATION_PUBLIC_KEY")" == "$public_key_sha" ]] || {
+		echo 'Frontend runtime attestation changed before archival.' >&2
+		return 1
+	}
+	reporting_cutover_archive_evidence frontend-runtime-attestation \
+		"$REPORTING_FRONTEND_RUNTIME_ATTESTATION" "$attestation_sha"
+	reporting_cutover_archive_evidence frontend-runtime-signature \
+		"$REPORTING_FRONTEND_RUNTIME_ATTESTATION_SIGNATURE" "$signature_sha"
+	reporting_cutover_archive_evidence frontend-runtime-public-key \
+		"$REPORTING_FRONTEND_RUNTIME_ATTESTATION_PUBLIC_KEY" "$public_key_sha"
+}
+
+reporting_cutover_require_archived_frontend_runtime_attestation() {
+	local evidence="$1" backend_revision="$2" identity frontend_revision origin
+	local attestation_sha signature_sha public_key_sha challenge
+	identity="$(reporting_cutover_route_evidence_identity \
+		"$evidence" "$backend_revision")" || return 1
+	IFS='|' read -r frontend_revision origin attestation_sha signature_sha \
+		public_key_sha challenge <<<"$identity"
+	reporting_cutover_require_archived_evidence \
+		frontend-runtime-attestation "$attestation_sha"
+	reporting_cutover_require_archived_evidence \
+		frontend-runtime-signature "$signature_sha"
+	reporting_cutover_require_archived_evidence \
+		frontend-runtime-public-key "$public_key_sha"
 }
 
 reporting_cutover_require_archived_route_runtime() {
@@ -2104,8 +2338,14 @@ reporting_cutover_require_archived_route_runtime() {
 	route_sha="$(reporting_cutover_marker_value route_evidence_sha256)" || return 1
 	reporting_cutover_require_archived_evidence routes "$route_sha" || return 1
 	route_evidence="$(reporting_cutover_evidence_path routes "$route_sha")" || return 1
+	reporting_cutover_require_archived_frontend_runtime_attestation \
+		"$route_evidence" "$evidence_revision" || return 1
 	reporting_cutover_require_live_frontend_runtime "$route_evidence" "$evidence_revision"
-	reporting_cutover_require_live_legacy_routes_absent "$runtime_revision"
+	if [[ "$runtime_revision" == "$evidence_revision" ]]; then
+		reporting_cutover_require_live_legacy_routes_retained "$runtime_revision"
+	else
+		reporting_cutover_require_live_legacy_routes_absent "$runtime_revision"
+	fi
 }
 
 reporting_cutover_verify_routes() {
@@ -2144,13 +2384,15 @@ reporting_cutover_verify_routes() {
 	}
 	sha256="$(reporting_sha256_file "$evidence")"
 	reporting_cutover_validate_route_evidence "$evidence" "$revision" "$switch_generation"
-	reporting_cutover_require_live_frontend_runtime "$evidence" "$revision"
-	reporting_cutover_require_live_legacy_routes_absent "$revision"
+	reporting_cutover_require_live_frontend_runtime "$evidence" "$revision" true
+	reporting_cutover_require_live_legacy_routes_retained "$revision"
 	reporting_cutover_require_stable_digest routes "$evidence" "$sha256"
 	[[ "${CONFIRM_REPORTING_ROUTES_VERIFIED:-}" == "routes:$revision:$switch_generation:$sha256" ]] || {
 		echo "Set CONFIRM_REPORTING_ROUTES_VERIFIED=routes:$revision:$switch_generation:$sha256 after reviewing frontend/auth/CORS smoke." >&2
 		return 1
 	}
+	reporting_cutover_archive_frontend_runtime_attestation \
+		"$evidence" "$revision"
 	reporting_cutover_archive_evidence routes "$evidence" "$sha256"
 	system_identifier="$(reporting_cutover_marker_value database_system_identifier)"
 	snapshot_id="$(reporting_cutover_marker_value backfill_snapshot_id)"
@@ -3489,17 +3731,77 @@ const removedPaths = [
 const preservedPaths = [
   "apps/reporting/prisma/schema.prisma",
   "prisma/migrations/20260731010000_add_reporting_projection_producers",
-  "src/messaging/reporting-admin-audit-event.ts", "src/reporting-internal",
+  "src/messaging/reporting-admin-audit-event.ts",
+  "src/reporting-internal/reporting-auth-introspection.service.spec.ts",
+  "src/reporting-internal/reporting-auth-introspection.service.ts",
+  "src/reporting-internal/reporting-internal-token.guard.spec.ts",
+  "src/reporting-internal/reporting-internal-token.guard.ts",
+  "src/reporting-internal/reporting-internal.constants.ts",
+  "src/reporting-internal/reporting-internal.controller.spec.ts",
+  "src/reporting-internal/reporting-internal.controller.ts",
+  "src/reporting-internal/reporting-internal.module.ts",
+  "src/reporting-internal/reporting-producer-migration.spec.ts",
+  "src/reporting-internal/reporting-projection-snapshot.service.spec.ts",
+  "src/reporting-internal/reporting-schedule-authority.service.spec.ts",
 ];
 const modifiedReportingPaths = [
   "apps/reporting/src/messaging/reporting-messaging.constants.spec.ts",
   "apps/reporting/src/messaging/reporting-messaging.constants.ts",
   "apps/reporting/src/messaging/reporting-rabbitmq.service.spec.ts",
   "apps/reporting/src/projections/projection.service.spec.ts",
+  "apps/reporting/src/projections/projection.service.ts",
   "apps/reporting/src/projections/reporting-event.contract.spec.ts",
   "apps/reporting/src/projections/reporting-event.contract.ts",
   "apps/reporting/src/shadow-evidence/reporting-shadow-evidence.service.ts",
   "apps/reporting/test/integration/reporting.integration.mjs",
+];
+const modifiedCorePaths = [
+  "prisma/schema.prisma",
+  "src/app.module.ts",
+  "src/health/health.service.spec.ts",
+  "src/maintenance/maintenance-scheduler.service.spec.ts",
+  "src/maintenance/maintenance-scheduler.service.ts",
+  "src/maintenance/maintenance-worker.service.spec.ts",
+  "src/maintenance/scheduled-tasks.service.spec.ts",
+  "src/maintenance/scheduled-tasks.service.ts",
+  "src/messaging/integration-delivery.service.spec.ts",
+  "src/messaging/integration-delivery.service.ts",
+  "src/messaging/integration-error-classifier.ts",
+  "src/messaging/integration-worker.module.ts",
+  "src/messaging/integration-worker.service.spec.ts",
+  "src/messaging/integration-worker.service.ts",
+  "src/messaging/messaging-admin.service.ts",
+  "src/messaging/messaging-event-contract.ts",
+  "src/messaging/messaging-operational-alert.service.spec.ts",
+  "src/messaging/messaging.constants.ts",
+  "src/messaging/notification-delivery-event.ts",
+  "src/messaging/reporting-projection-contract.spec.ts",
+  "src/reporting-internal/reporting-projection-snapshot.service.ts",
+  "src/reporting-internal/reporting-schedule-authority.service.ts",
+  "src/scheduled-jobs/scheduled-jobs.service.spec.ts",
+  "src/scheduled-jobs/scheduled-jobs.types.ts",
+  "src/telegram-bot/dto/update-telegram-bot-settings.dto.ts",
+  "src/telegram-bot/telegram-bot.controller.ts",
+  "src/telegram-bot/telegram-bot.service.spec.ts",
+  "src/telegram-bot/telegram-bot.service.ts",
+];
+const modifiedControlPlanePaths = [
+  ".env.example",
+  ".github/workflows/deploy-production.yml",
+  "deploy/docker-compose.prod.yml",
+  "scripts/deploy-production.sh",
+  "scripts/deploy-reporting-production.sh",
+  "scripts/reporting-cutover-lifecycle.sh",
+  "scripts/reporting-database-lifecycle.sh",
+  "scripts/reporting-producer-lifecycle.sh",
+  "scripts/test-messaging-integration.mjs",
+  "scripts/test-reporting-production-scripts.sh",
+];
+const addedControlPlanePaths = [
+  "scripts/generate-reporting-frontend-runtime-attestation.sh",
+  "scripts/run-reporting-restore-cutover-smoke.sh",
+  "scripts/run-reporting-route-cutover-smoke.sh",
+  "scripts/run-reporting-scheduler-cutover-smoke.sh",
 ];
 const removedQueues = [
   "winwidget.report.daily-summary.telegram",
@@ -3520,6 +3822,26 @@ const retainedQueues = [
   "winwidget.notification.daily-summary.telegram.retry-v2.2",
   "winwidget.notification.daily-summary.telegram.retry-v2.3",
 ];
+const modifiedPaths = new Set([
+  ...modifiedReportingPaths, ...modifiedCorePaths, ...modifiedControlPlanePaths,
+]);
+const addedPaths = new Set(addedControlPlanePaths);
+const removedPath = path => removedPaths.some(root =>
+  path === root || path.startsWith(`${root}/`));
+const cleanupMigrationPath = path =>
+  /^prisma\/migrations\/[0-9]{14}_remove_legacy_reporting_state\/migration[.]sql$/.test(path);
+if (changedFiles.some(file =>
+      (modifiedPaths.has(file.path) && file.status !== "M") ||
+      (addedPaths.has(file.path) && (file.status !== "A" || file.newMode !== "100755")) ||
+      (removedPath(file.path) && file.status !== "D") ||
+      (cleanupMigrationPath(file.path) && (file.status !== "A" || file.newMode !== "100644")) ||
+      (!modifiedPaths.has(file.path) && !addedPaths.has(file.path) &&
+        !removedPath(file.path) && !cleanupMigrationPath(file.path))) ||
+    [...modifiedPaths].some(path => !changedFiles.some(file => file.path === path)) ||
+    [...addedPaths].some(path => !changedFiles.some(file => file.path === path)) ||
+    !removedPaths.every(root => changedFiles.some(file => removedPath(file.path) &&
+      (file.path === root || file.path.startsWith(`${root}/`)))) ||
+    changedFiles.filter(file => cleanupMigrationPath(file.path)).length !== 1) process.exit(1);
 if (!exact(review, ["version", "previousRevision", "cleanupRevision", "switchGeneration", "coreBackupEvidenceSha256", "approvedBy", "approvedAt", "checks"]) ||
     review.version !== 1 || review.previousRevision !== process.env.EXPECTED_PREVIOUS_REVISION ||
     review.cleanupRevision !== process.env.EXPECTED_CLEANUP_REVISION ||
@@ -3529,7 +3851,7 @@ if (!exact(review, ["version", "previousRevision", "cleanupRevision", "switchGen
     review.approvedBy.length > 128 || /[\u0000-\u001f\u007f]/.test(review.approvedBy) ||
     !Number.isFinite(Date.parse(review.approvedAt)) || !exact(review.checks, checks) ||
     checks.some(key => review.checks[key] !== true)) process.exit(1);
-if (!exact(manifest, ["version", "previousRevision", "cleanupRevision", "switchGeneration", "changedFiles", "removedPaths", "preservedPaths", "modifiedReportingPaths", "removedQueues", "retainedQueues", "createdAt"]) ||
+if (!exact(manifest, ["version", "previousRevision", "cleanupRevision", "switchGeneration", "changedFiles", "removedPaths", "preservedPaths", "modifiedReportingPaths", "modifiedCorePaths", "modifiedControlPlanePaths", "addedControlPlanePaths", "removedQueues", "retainedQueues", "createdAt"]) ||
     manifest.version !== 1 || manifest.previousRevision !== process.env.EXPECTED_PREVIOUS_REVISION ||
     manifest.cleanupRevision !== process.env.EXPECTED_CLEANUP_REVISION ||
     manifest.switchGeneration !== process.env.EXPECTED_SWITCH_GENERATION ||
@@ -3540,6 +3862,9 @@ if (!exact(manifest, ["version", "previousRevision", "cleanupRevision", "switchG
     !exactArray(manifest.removedPaths, removedPaths) ||
     !exactArray(manifest.preservedPaths, preservedPaths) ||
     !exactArray(manifest.modifiedReportingPaths, modifiedReportingPaths) ||
+    !exactArray(manifest.modifiedCorePaths, modifiedCorePaths) ||
+    !exactArray(manifest.modifiedControlPlanePaths, modifiedControlPlanePaths) ||
+    !exactArray(manifest.addedControlPlanePaths, addedControlPlanePaths) ||
     !exactArray(manifest.removedQueues, removedQueues) ||
     !exactArray(manifest.retainedQueues, retainedQueues)) process.exit(1);
 ' \
@@ -3599,7 +3924,26 @@ BEGIN
         AND NOT EXISTS (SELECT 1 FROM "integration_credential_snapshots")
         AND NOT EXISTS (SELECT 1 FROM "integration_delivery_receipts")
         AND NOT EXISTS (SELECT 1 FROM "integration_delivery_failures")
-        AND NOT EXISTS (SELECT 1 FROM "telegram_bot_settings")
+        AND (SELECT count(*) = 1 FROM "telegram_bot_settings")
+        AND EXISTS (
+            SELECT 1
+            FROM "telegram_bot_settings"
+            WHERE "id" = 'singleton'
+              AND "daily_summary_enabled" = false
+              AND "daily_summary_chat_id" = ''
+              AND "daily_summary_last_sent_period_start" IS NULL
+              AND "daily_summary_last_sent_at" IS NULL
+              AND "daily_summary_time" = '01:50'
+              AND "reports_thread_id" IS NULL
+              AND "database_backup_enabled" = true
+              AND "database_backup_time" = '01:45'
+              AND "database_backup_last_sent_period_start" IS NULL
+              AND "database_backup_last_sent_at" IS NULL
+              AND "support_thread_id" IS NULL
+              AND "database_backup_thread_id" IS NULL
+              AND "payments_thread_id" IS NULL
+              AND "operational_alerts_thread_id" = 2024
+        )
         AND NOT EXISTS (SELECT 1 FROM "User")
         AND NOT EXISTS (SELECT 1 FROM "auth_identities")
         AND NOT EXISTS (SELECT 1 FROM "payments")
@@ -3838,6 +4182,26 @@ reporting_cutover_require_cleanup_git_contract() {
 			"$cleanup_blob" =~ ^[0-9a-f]{40}$ &&
 			"$cleanup_blob" != "$previous_blob" ]] || {
 			echo "Reporting cleanup did not make the required transitional source change: $path" >&2
+			return 1
+		}
+	done
+	for path in "${REPORTING_CLEANUP_MUTABLE_CORE_PATHS[@]}" \
+		"${REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS[@]}"; do
+		previous_blob="$(git -C "$server_root" rev-parse "$previous_revision:$path" 2>/dev/null || true)"
+		cleanup_blob="$(git -C "$server_root" rev-parse "$cleanup_revision:$path" 2>/dev/null || true)"
+		[[ "$previous_blob" =~ ^[0-9a-f]{40}$ &&
+			"$cleanup_blob" =~ ^[0-9a-f]{40}$ &&
+			"$cleanup_blob" != "$previous_blob" ]] || {
+			echo "Reporting cleanup did not make the required reviewed change: $path" >&2
+			return 1
+		}
+	done
+	for path in "${REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS[@]}"; do
+		previous_blob="$(git -C "$server_root" rev-parse "$previous_revision:$path" 2>/dev/null || true)"
+		cleanup_blob="$(git -C "$server_root" rev-parse "$cleanup_revision:$path" 2>/dev/null || true)"
+		[[ -z "$previous_blob" && "$cleanup_blob" =~ ^[0-9a-f]{40}$ &&
+			"$(git -C "$server_root" ls-tree "$cleanup_revision" -- "$path")" =~ ^100755[[:space:]]blob[[:space:]][0-9a-f]{40}[[:space:]] ]] || {
+			echo "Reporting cleanup control-plane addition is missing or unsafe: $path" >&2
 			return 1
 		}
 	done
@@ -4996,6 +5360,31 @@ reporting_cutover_self_test() {
 		echo 'Reporting cutover self-test accepted an ambient evidence archive path.' >&2
 		return 1
 	}
+	(
+		policy_calls="$root/route-policy-calls"
+		reporting_cutover_marker_value() {
+			[[ "$1" == 'route_evidence_sha256' ]] || return 1
+			printf '%064d\n' 1
+		}
+		reporting_cutover_require_archived_evidence() { :; }
+		reporting_cutover_evidence_path() { printf '%s\n' "$root/routes.json"; }
+		reporting_cutover_require_archived_frontend_runtime_attestation() { :; }
+		reporting_cutover_require_live_frontend_runtime() { :; }
+		reporting_cutover_require_live_legacy_routes_retained() {
+			printf 'retained:%s\n' "$1" >>"$policy_calls"
+		}
+		reporting_cutover_require_live_legacy_routes_absent() {
+			printf 'absent:%s\n' "$1" >>"$policy_calls"
+		}
+		reporting_cutover_require_archived_route_runtime "$revision" "$revision"
+		reporting_cutover_require_archived_route_runtime "$revision" \
+			'89abcdef0123456789abcdef0123456789abcdef'
+		[[ "$(cat "$policy_calls")" == \
+			$'retained:0123456789abcdef0123456789abcdef01234567\nabsent:89abcdef0123456789abcdef0123456789abcdef' ]]
+	) || {
+		echo 'Reporting cutover self-test rejected the pre/post-cleanup legacy route policy split.' >&2
+		return 1
+	}
 	stable_file="$root/stable-evidence.json"
 	printf '{"version":1}\n' >"$stable_file"
 	stable_sha="$(reporting_sha256_file "$stable_file")"
@@ -5140,6 +5529,8 @@ reporting_cutover_self_test() {
 			"$root/core-cleanup-backup.fixture.json" >/dev/null
 	)
 	main_text="$(declare -f reporting_cutover_main)"
+	local runtime_identity_text
+	runtime_identity_text="$(declare -f reporting_cutover_export_pinned_runtime_identity)"
 	evidence_text="$(declare -f reporting_cutover_validate_shadow_evidence reporting_cutover_validate_scheduler_evidence reporting_cutover_validate_gateway_manifest_value reporting_cutover_validate_route_evidence reporting_cutover_validate_restore_evidence)"
 	evidence_actions_text="$(declare -f reporting_cutover_verify_shadow reporting_cutover_verify_scheduler reporting_cutover_verify_routes reporting_cutover_verify_restore reporting_cutover_stage_cleanup reporting_cutover_mark_source_cleaned reporting_cutover_verify_cleanup_restore reporting_cutover_complete)"
 	shadow_prepare_text="$(declare -f reporting_cutover_prepare_shadow_evidence)"
@@ -5153,7 +5544,7 @@ reporting_cutover_self_test() {
 	core_cleanup_resolve_text="$(declare -f reporting_cutover_core_cleanup_image_identity reporting_cutover_core_cleanup_stopped_exit_is_safe reporting_cutover_write_core_cleanup_stopped_writer_proof reporting_cutover_require_settings_topology_cleanup_converged_after_stop reporting_cutover_core_cleanup_resolve)"
 	live_core_match_text="$(declare -f reporting_cutover_require_live_core_matches_backup_evidence)"
 	legacy_state_text="$(declare -f reporting_cutover_require_legacy_core_state_absent)"
-	route_runtime_text="$(declare -f reporting_cutover_route_evidence_identity reporting_cutover_require_live_frontend_runtime reporting_cutover_verify_routes)"
+	route_runtime_text="$(declare -f reporting_cutover_validate_route_evidence reporting_cutover_route_evidence_identity reporting_cutover_validate_frontend_runtime_attestation reporting_cutover_require_live_frontend_runtime reporting_cutover_require_live_legacy_routes reporting_cutover_require_live_legacy_routes_retained reporting_cutover_require_live_legacy_routes_absent reporting_cutover_archive_frontend_runtime_attestation reporting_cutover_require_archived_frontend_runtime_attestation reporting_cutover_require_archived_route_runtime reporting_cutover_verify_routes)"
 	complete_text="$(declare -f reporting_cutover_complete)"
 	drain_text="$(declare -f reporting_cutover_require_legacy_daily_summary_drained)"
 	claim_text="$(declare -f reporting_cutover_claim_scheduler_target)"
@@ -5180,7 +5571,7 @@ reporting_cutover_self_test() {
 	claim_projection_barrier_count="$(printf '%s\n' "$claim_text" | awk \
 		'/reporting_cutover_require_projection_barrier/ { count += 1 } END { print count + 0 }')"
 	mutable_paths_actual="$(printf '%s\n' "${REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS[@]}")"
-	mutable_paths_expected=$'apps/reporting/src/messaging/reporting-messaging.constants.spec.ts\napps/reporting/src/messaging/reporting-messaging.constants.ts\napps/reporting/src/messaging/reporting-rabbitmq.service.spec.ts\napps/reporting/src/projections/projection.service.spec.ts\napps/reporting/src/projections/reporting-event.contract.spec.ts\napps/reporting/src/projections/reporting-event.contract.ts\napps/reporting/src/shadow-evidence/reporting-shadow-evidence.service.ts\napps/reporting/test/integration/reporting.integration.mjs'
+	mutable_paths_expected=$'apps/reporting/src/messaging/reporting-messaging.constants.spec.ts\napps/reporting/src/messaging/reporting-messaging.constants.ts\napps/reporting/src/messaging/reporting-rabbitmq.service.spec.ts\napps/reporting/src/projections/projection.service.spec.ts\napps/reporting/src/projections/projection.service.ts\napps/reporting/src/projections/reporting-event.contract.spec.ts\napps/reporting/src/projections/reporting-event.contract.ts\napps/reporting/src/shadow-evidence/reporting-shadow-evidence.service.ts\napps/reporting/test/integration/reporting.integration.mjs'
 	[[ "$mutable_paths_actual" == "$mutable_paths_expected" ]] || {
 		echo 'Reporting cutover self-test found an unexpected mutable Reporting cleanup path set.' >&2
 		return 1
@@ -5197,7 +5588,27 @@ capture {
 		echo 'Reporting cleanup manifest validator mutable path set is not exact.' >&2
 		return 1
 	}
-	[[ "$main_text" == *'reporting_export_pinned_runtime_identity "$revision"'* &&
+	manifest_array_values() {
+		local declaration="$1"
+		printf '%s\n' "$cleanup_contract_text" | awk -v declaration="$declaration" '
+$0 == "const " declaration " = [" { capture = 1; next }
+capture && /^];$/ { exit }
+capture {
+  sub(/^[[:space:]]*"/, "")
+  sub(/",?[[:space:]]*$/, "")
+  print
+}'
+	}
+	[[ "$(manifest_array_values modifiedCorePaths)" == \
+		"$(printf '%s\n' "${REPORTING_CLEANUP_MUTABLE_CORE_PATHS[@]}")" &&
+		"$(manifest_array_values modifiedControlPlanePaths)" == \
+		"$(printf '%s\n' "${REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS[@]}")" &&
+		"$(manifest_array_values addedControlPlanePaths)" == \
+		"$(printf '%s\n' "${REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS[@]}")" ]] || {
+		echo 'Reporting cleanup manifest validator Core/control-plane path sets are not exact.' >&2
+		return 1
+	}
+	[[ "$main_text" == *'reporting_cutover_export_pinned_runtime_identity "$revision"'* &&
 		"$main_text" == *'reporting_assert_no_ambient_compose_overrides'* &&
 		"$main_text" == *'NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION'* &&
 		"$main_text" == *'CAMPAIGNS_IMAGE CAMPAIGNS_REVISION'* &&
@@ -5208,7 +5619,10 @@ capture {
 		"$main_text" == *'reporting_cutover_core_cleanup_resolve prepare'* &&
 		"$main_text" == *'resolve-core-cleanup-migration)'* &&
 		"$main_text" == *'reporting_cutover_core_cleanup_resolve resolve'* &&
-		"$main_text" == *'reporting_export_pinned_runtime_identity "$marker_revision"'* &&
+		"$main_text" == *'reporting_cutover_export_pinned_runtime_identity "$marker_revision"'* &&
+		"$runtime_identity_text" == *'reporting_export_pinned_runtime_identity "$revision"'* &&
+		"$runtime_identity_text" == *'DATABASE_RESTORE_REVISION="$revision"'* &&
+		"$runtime_identity_text" == *'DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"'* &&
 		"$main_text" == *'stage-cleanup)'* &&
 		"$main_text" == *'reporting_cutover_stage_cleanup'* &&
 		"$main_text" == *'source-cleaned)'* &&
@@ -5235,6 +5649,13 @@ capture {
 		"$cleanup_contract_text" == *'diff-tree --no-commit-id --raw -r -z --no-renames'* &&
 		"$cleanup_contract_text" == *'manifest.changedFiles'* &&
 		"$cleanup_contract_text" == *'manifest.modifiedReportingPaths'* &&
+		"$cleanup_contract_text" == *'manifest.modifiedCorePaths'* &&
+		"$cleanup_contract_text" == *'manifest.modifiedControlPlanePaths'* &&
+		"$cleanup_contract_text" == *'manifest.addedControlPlanePaths'* &&
+		"$cleanup_contract_text" == *'changedFiles.some'* &&
+		"$cleanup_contract_text" == *'REPORTING_CLEANUP_MUTABLE_CORE_PATHS'* &&
+		"$cleanup_contract_text" == *'REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS'* &&
+		"$cleanup_contract_text" == *'REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS'* &&
 		"$cleanup_contract_text" == *'coreBackupEvidenceSha256'* &&
 		"$cleanup_contract_text" == *'EXPECTED_CORE_BACKUP_SHA'* &&
 		"$cleanup_contract_text" == *'REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS'* &&
@@ -5327,11 +5748,32 @@ capture {
 		"$legacy_state_text" == *'DAILY_TELEGRAM_SUMMARY'* &&
 		"$legacy_state_text" == *'daily_summary_last_sent_period_start'* &&
 		"$evidence_actions_text" == *'reporting_cutover_require_legacy_core_state_absent'* &&
-		"$route_runtime_text" == *'com.docker.compose.project=winwidget'* &&
-		"$route_runtime_text" == *'com.docker.compose.service=client'* &&
-		"$route_runtime_text" == *'"$app_revision" == "$frontend_revision"'* &&
-		"$route_runtime_text" == *'/admin/reporting/daily-summary/settings'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_live_frontend_runtime "$evidence" "$revision"'* &&
+		"$route_runtime_text" == *'frontendRuntimeAttestationSha256'* &&
+		"$route_runtime_text" == *'frontendRuntimeSignatureSha256'* &&
+		"$route_runtime_text" == *'frontendRuntimePublicKeySha256'* &&
+		"$route_runtime_text" == *'frontendRuntimeChallenge'* &&
+		"$route_runtime_text" == *'legacyStatisticsRetained'* &&
+		"$route_runtime_text" == *'EXPECTED_LEGACY_POLICY'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes "$1" retained'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes "$1" absent'* &&
+		"$route_runtime_text" == *'REPORTING_CUTOVER_ADMIN_ACCESS_TOKEN_FILE:-$APP_ROOT/deploy/backend/.reporting-cutover-admin-access-token'* &&
+		"$route_runtime_text" == *'if [[ "$runtime_revision" == "$evidence_revision" ]]'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes_retained "$revision"'* &&
+		"$route_runtime_text" != *'docker ps --no-trunc -q'* &&
+		"$route_runtime_text" == *'Cross-VPS frontend runtime attestation, signature and public key must be absolute root-owned mode-600 regular files.'* &&
+		"$route_runtime_text" == *'value.backendRevision !== process.env.EXPECTED_BACKEND_REVISION'* &&
+		"$route_runtime_text" == *'value.switchGeneration !== process.env.EXPECTED_SWITCH_GENERATION'* &&
+		"$route_runtime_text" == *'value.composeProject !== "winwidget"'* &&
+		"$route_runtime_text" == *'value.contractScan !== true'* &&
+		"$route_runtime_text" == *'value.challenge !== process.env.EXPECTED_CHALLENGE'* &&
+		"$route_runtime_text" == *'openssl pkeyutl -verify'* &&
+		"$route_runtime_text" == *'value.assetPath.split("/").includes("..")'* &&
+		"$route_runtime_text" == *'Public frontend asset does not match the signed frontend runtime image.'* &&
+		"$route_runtime_text" == *'ageMs > Number(process.env.MAX_AGE_SECONDS) * 1000'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_stable_digest frontend-runtime'* &&
+		"$route_runtime_text" == *'reporting_cutover_archive_evidence frontend-runtime-attestation'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_archived_evidence'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_live_frontend_runtime "$evidence" "$revision" true'* &&
 		"$complete_text" == *'reporting_cutover_require_post_cleanup_queue_topology'* ]] || {
 		echo 'Reporting cutover self-test found an unsafe validator, evidence, cleanup or completion guard.' >&2
 		return 1
@@ -5718,7 +6160,7 @@ reporting_cutover_main() {
 	revision="${EXPECTED_REVISION:-}"
 	reporting_validate_production_files
 	reporting_validate_exact_revision "$revision"
-	reporting_export_pinned_runtime_identity "$revision"
+	reporting_cutover_export_pinned_runtime_identity "$revision"
 	reporting_assert_no_ambient_compose_overrides \
 		REPORTING_IMAGE REPORTING_REVISION \
 		NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION \
@@ -5756,7 +6198,7 @@ reporting_cutover_main() {
 				}
 			fi
 			if [[ "$revision" != "$marker_revision" ]]; then
-				reporting_export_pinned_runtime_identity "$marker_revision"
+				reporting_cutover_export_pinned_runtime_identity "$marker_revision"
 			fi
 			;;
 		*)

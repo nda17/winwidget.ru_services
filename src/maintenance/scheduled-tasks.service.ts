@@ -6,7 +6,6 @@ import {
 	REPORTING_DATABASE_BACKUP_DELAY_MINUTES
 } from '@/maintenance/database-backup.types';
 import {
-	DAILY_SUMMARY_EVENT_TYPE,
 	DATABASE_BACKUP_EVENT_TYPE,
 	getDeadLetterRoutingKey,
 	MESSAGING_ROUTING_KEYS
@@ -145,86 +144,6 @@ export class ScheduledTasksService {
 		};
 	}
 
-	async enqueueDailySummary(
-		period: MoscowDayPeriod,
-		scheduledFor: Date
-	): Promise<{ created: boolean; job: ScheduledJobRunView } | null> {
-		const owner = await this.prisma.reportingProducerState.findUnique({
-			where: { id: 'singleton' },
-			select: { dailySummaryOwner: true }
-		});
-		if (owner?.dailySummaryOwner !== 'CORE') return null;
-		return this.prisma.$transaction(
-			async transaction => {
-				await this.getSettings(transaction);
-				const lockedSettings = await transaction.$queryRaw<
-					Array<{ id: string }>
-				>(Prisma.sql`
-					SELECT "id"
-					FROM "telegram_bot_settings"
-					WHERE "id" = 'singleton'
-					FOR UPDATE
-				`);
-				if (lockedSettings.length !== 1) {
-					throw new Error('Telegram settings row is missing');
-				}
-				const settings =
-					await transaction.telegramBotSettings.findUniqueOrThrow({
-						where: { id: 'singleton' }
-					});
-
-				// The owner row remains locked through the unique job + Outbox insert.
-				// A cutover UPDATE therefore cannot race a final legacy enqueue.
-				await transaction.$queryRaw(
-					Prisma.sql`
-						SELECT "id"
-						FROM "reporting_producer_state"
-						WHERE "id" = 'singleton'
-							AND "daily_summary_owner" = 'CORE'
-						FOR UPDATE
-					`
-				);
-				const lockedOwner =
-					await transaction.reportingProducerState.findUnique({
-						where: { id: 'singleton' },
-						select: { dailySummaryOwner: true }
-					});
-				if (lockedOwner?.dailySummaryOwner !== 'CORE') return null;
-				if (
-					!settings.dailySummaryEnabled ||
-					!settings.dailySummaryChatId.trim() ||
-					!settings.reportsThreadId
-				) {
-					return null;
-				}
-				if (
-					settings.dailySummaryLastSentPeriodStart?.getTime() ===
-					period.start.getTime()
-				) {
-					return null;
-				}
-
-				return this.scheduledJobs.enqueueUniqueInTransaction(
-					transaction,
-					{
-						jobType: SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
-						scheduleKey: period.key,
-						trigger: ScheduledJobRunTrigger.SCHEDULED,
-						scheduledFor,
-						periodStart: period.start,
-						periodEnd: period.end,
-						input: {
-							chatId: settings.dailySummaryChatId.trim(),
-							messageThreadId: settings.reportsThreadId
-						}
-					},
-					this.getEventForType(SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY)
-				);
-			},
-			{ timeout: 10_000 }
-		);
-	}
-
 	async enqueueDailyDatabaseBackups(
 		period: MoscowDayPeriod,
 		scheduledFor: Date
@@ -339,19 +258,6 @@ export class ScheduledTasksService {
 	}
 
 	getEventForType(jobType: string): ScheduledJobOutboxEvent {
-		if (jobType === SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY) {
-			return {
-				eventType: DAILY_SUMMARY_EVENT_TYPE,
-				routingKey: MESSAGING_ROUTING_KEYS['daily-summary-telegram'],
-				deadLetterRoutingKey: getDeadLetterRoutingKey(
-					'daily-summary-telegram'
-				),
-				payload: {
-					schemaVersion: 1,
-					eventType: DAILY_SUMMARY_EVENT_TYPE
-				}
-			};
-		}
 		if (isDatabaseBackupJobType(jobType)) {
 			return {
 				eventType: DATABASE_BACKUP_EVENT_TYPE,

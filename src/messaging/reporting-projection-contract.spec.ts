@@ -60,14 +60,8 @@ const states: Record<ReportingProjectionKind, Record<string, unknown>> = {
 	},
 	'reporting-settings': {
 		id: 'singleton',
-		enabled: true,
-		destinationChatId: '-100123',
-		messageThreadId: 42,
-		coreOperationalAlertsThreadId: 43,
-		scheduleTime: '01:50',
-		timezone: 'Europe/Moscow',
-		lastSuccessfulPeriodStart: null,
-		lastSuccessfulAt: null
+		coreOperationalAlertsDestinationChatId: '-100123',
+		coreOperationalAlertsThreadId: 43
 	}
 };
 
@@ -212,7 +206,7 @@ describe('Reporting projection messaging contract', () => {
 		).toThrow('must be a non-empty string');
 	});
 
-	it('rejects stale optional state fields and invalid settings timezone', () => {
+	it('rejects stale optional state fields and invalid settings routing', () => {
 		const subscription = eventFor('reporting-billing-subscription');
 		expect(() =>
 			assertReportingProjectionEvent({
@@ -233,12 +227,6 @@ describe('Reporting projection messaging contract', () => {
 		expect(() =>
 			assertReportingProjectionEvent({
 				...settings,
-				state: { ...settings.state, timezone: 'Invalid/Timezone' }
-			})
-		).toThrow('valid IANA timezone');
-		expect(() =>
-			assertReportingProjectionEvent({
-				...settings,
 				state: {
 					...settings.state,
 					coreOperationalAlertsThreadId: 0
@@ -250,10 +238,10 @@ describe('Reporting projection messaging contract', () => {
 	it('requires the singleton aggregate for settings events and tombstones', () => {
 		const settings = eventFor('reporting-settings');
 		for (const payload of [
-			{ ...settings, aggregateId: 'legacy-settings' },
+			{ ...settings, aggregateId: 'other-settings' },
 			{
 				...settings,
-				aggregateId: 'legacy-settings',
+				aggregateId: 'other-settings',
 				tombstone: true,
 				state: null
 			}

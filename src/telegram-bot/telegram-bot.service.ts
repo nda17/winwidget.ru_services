@@ -15,7 +15,6 @@ import {
 } from '@/utils/auth.constants';
 import {
 	BadRequestException,
-	ConflictException,
 	Injectable,
 	Logger,
 	OnModuleDestroy,
@@ -98,10 +97,9 @@ type TelegramBotInfo = {
 	};
 };
 
-export const DEFAULT_DAILY_SUMMARY_TIME = '01:50';
+export const DEFAULT_REPORTING_SCHEDULE_TIME = '01:50';
 export const DEFAULT_DATABASE_BACKUP_TIME = '01:45';
 export const MIN_TELEGRAM_TASK_TIME_GAP_MINUTES = 5;
-export const DAILY_SUMMARY_SCHEDULE_TIMEZONE = 'Europe/Moscow';
 
 const normalizeScheduleTimeValue = (value: string, fallback: string) => {
 	const trimmed = value.trim();
@@ -120,13 +118,13 @@ const circularTimeGapMinutes = (first: number, second: number) => {
 	return Math.min(directGap, 24 * 60 - directGap);
 };
 
-export const ensureDailySummaryBackupScheduleSeparated = (
-	dailySummaryTime: string,
+export const ensureReportingBackupScheduleSeparated = (
+	reportingScheduleTime: string,
 	databaseBackupTime: string
 ) => {
 	const summaryMinutes = scheduleTimeMinutes(
-		dailySummaryTime,
-		DEFAULT_DAILY_SUMMARY_TIME
+		reportingScheduleTime,
+		DEFAULT_REPORTING_SCHEDULE_TIME
 	);
 	const backupMinutes = scheduleTimeMinutes(
 		databaseBackupTime,
@@ -163,7 +161,6 @@ interface ReportingScheduleAuthorityState {
 
 @Injectable()
 export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
-	private readonly DEFAULT_DAILY_SUMMARY_TIME = DEFAULT_DAILY_SUMMARY_TIME;
 	private readonly DEFAULT_DATABASE_BACKUP_TIME =
 		DEFAULT_DATABASE_BACKUP_TIME;
 	private readonly NOTIFICATION_BINDING_EXPIRATION_MINUTES = 15;
@@ -267,19 +264,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		authority: ReportingScheduleAuthorityState,
 		currentSettings: TelegramBotSettings
 	) {
-		const { dailySummaryOwner } = authority;
 		const data = this.getSettingsPatch(dto);
-		const updatesReportingOwnedSettings =
-			'dailySummaryEnabled' in data ||
-			'dailySummaryTime' in data ||
-			'reportsThreadId' in data;
-		if (dailySummaryOwner !== 'CORE' && updatesReportingOwnedSettings) {
-			throw new ConflictException(
-				'Daily Summary settings are owned by Reporting'
-			);
-		}
-		const nextDailySummaryEnabled =
-			data.dailySummaryEnabled ?? currentSettings.dailySummaryEnabled;
 		const nextDatabaseBackupEnabled =
 			data.databaseBackupEnabled ?? currentSettings.databaseBackupEnabled;
 		const nextDailySummaryChatId =
@@ -300,22 +285,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			data.operationalAlertsThreadId !== undefined
 				? data.operationalAlertsThreadId
 				: currentSettings.operationalAlertsThreadId;
-		const nextReportsThreadId =
-			data.reportsThreadId !== undefined
-				? data.reportsThreadId
-				: currentSettings.reportsThreadId;
-		const nextDailySummaryTime =
-			data.dailySummaryTime ?? currentSettings.dailySummaryTime;
 		const nextDatabaseBackupTime =
 			data.databaseBackupTime ?? currentSettings.databaseBackupTime;
 
-		const schedulesProtectedByCorePolicy =
-			dailySummaryOwner === 'CORE'
-				? [nextDailySummaryTime]
-				: [
-						authority.dailySummaryPolicyReservationTime,
-						authority.dailySummaryPolicyPendingTime
-					].filter((value): value is string => value !== null);
+		const schedulesProtectedByCorePolicy = [
+			authority.dailySummaryPolicyReservationTime,
+			authority.dailySummaryPolicyPendingTime
+		].filter((value): value is string => value !== null);
 		for (const scheduleTime of schedulesProtectedByCorePolicy) {
 			this.ensureScheduleTimesSeparated(
 				scheduleTime,
@@ -329,53 +305,23 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				nextSupportThreadId,
 				nextDatabaseBackupThreadId,
 				nextPaymentsThreadId,
-				nextOperationalAlertsThreadId,
-				...(dailySummaryOwner === 'CORE' ? [nextReportsThreadId] : [])
+				nextOperationalAlertsThreadId
 			].some(Boolean)
 		) {
 			throw new BadRequestException(
 				'Укажите ID Telegram-группы для настроенных топиков'
 			);
 		}
-		if (dailySummaryOwner !== 'CORE' && !nextOperationalAlertsThreadId) {
+		if (!nextOperationalAlertsThreadId) {
 			throw new BadRequestException(
 				'Укажите ID топика системных уведомлений Core'
 			);
 		}
-		if (
-			dailySummaryOwner === 'CORE' &&
-			nextOperationalAlertsThreadId &&
-			nextReportsThreadId &&
-			nextOperationalAlertsThreadId === nextReportsThreadId
-		) {
-			throw new BadRequestException(
-				'Daily Summary и системные уведомления должны использовать разные топики'
-			);
-		}
-
-		const updatesDailySummaryDelivery =
-			dailySummaryOwner === 'CORE' &&
-			('dailySummaryEnabled' in data ||
-				'dailySummaryChatId' in data ||
-				'dailySummaryTime' in data ||
-				'reportsThreadId' in data);
 		const updatesDatabaseBackupDelivery =
 			'databaseBackupEnabled' in data ||
 			'dailySummaryChatId' in data ||
 			'databaseBackupTime' in data ||
 			'databaseBackupThreadId' in data;
-
-		if (updatesDailySummaryDelivery && nextDailySummaryEnabled) {
-			if (!nextDailySummaryChatId.trim()) {
-				throw new BadRequestException(
-					'Укажите ID Telegram-группы для отправки отчётов'
-				);
-			}
-
-			if (!nextReportsThreadId) {
-				throw new BadRequestException('Укажите ID топика Reports');
-			}
-		}
 
 		if (updatesDatabaseBackupDelivery && nextDatabaseBackupEnabled) {
 			if (!nextDailySummaryChatId.trim()) {
@@ -397,19 +343,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				...data
 			}
 		});
-		if (
-			dailySummaryOwner === 'CORE' &&
-			nextDailySummaryTime !== authority.dailySummaryPolicyReservationTime
-		) {
-			await transaction.reportingProducerState.update({
-				where: { id: 'singleton' },
-				data: {
-					dailySummaryPolicyReservationTime: nextDailySummaryTime,
-					dailySummaryPolicyReservationGeneration: { increment: 1 }
-				}
-			});
-		}
-
 		return this.serializeSettings(settings);
 	}
 
@@ -1053,9 +986,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	private getSettingsPatch(dto: UpdateTelegramBotSettingsDto) {
 		return {
-			...(typeof dto.dailySummaryEnabled === 'boolean'
-				? { dailySummaryEnabled: dto.dailySummaryEnabled }
-				: {}),
 			...(typeof dto.dailySummaryChatId === 'string'
 				? { dailySummaryChatId: dto.dailySummaryChatId.trim() }
 				: {}),
@@ -1074,18 +1004,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			...(dto.operationalAlertsThreadId === null ||
 			typeof dto.operationalAlertsThreadId === 'number'
 				? { operationalAlertsThreadId: dto.operationalAlertsThreadId }
-				: {}),
-			...(dto.reportsThreadId === null ||
-			typeof dto.reportsThreadId === 'number'
-				? { reportsThreadId: dto.reportsThreadId }
-				: {}),
-			...(typeof dto.dailySummaryTime === 'string'
-				? {
-						dailySummaryTime: this.normalizeScheduleTime(
-							dto.dailySummaryTime,
-							this.DEFAULT_DAILY_SUMMARY_TIME
-						)
-					}
 				: {}),
 			...(typeof dto.databaseBackupEnabled === 'boolean'
 				? { databaseBackupEnabled: dto.databaseBackupEnabled }
@@ -1111,10 +1029,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	private serializeSettings(settings: TelegramBotSettings) {
 		const webhookHost = this.getConfiguredWebhookHost();
-		const dailySummaryTime = this.normalizeScheduleTime(
-			settings.dailySummaryTime,
-			this.DEFAULT_DAILY_SUMMARY_TIME
-		);
 		const databaseBackupTime = this.normalizeScheduleTime(
 			settings.databaseBackupTime,
 			this.DEFAULT_DATABASE_BACKUP_TIME
@@ -1133,19 +1047,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		);
 
 		return {
-			dailySummaryEnabled: settings.dailySummaryEnabled,
 			dailySummaryChatId: settings.dailySummaryChatId,
 			supportThreadId: settings.supportThreadId,
 			databaseBackupThreadId: settings.databaseBackupThreadId,
 			paymentsThreadId: settings.paymentsThreadId,
 			operationalAlertsThreadId: settings.operationalAlertsThreadId,
-			reportsThreadId: settings.reportsThreadId,
-			dailySummaryTime,
-			dailySummaryTimeLabel: `${dailySummaryTime} МСК`,
-			dailySummaryLastSentPeriodStart:
-				settings.dailySummaryLastSentPeriodStart?.toISOString() ?? null,
-			dailySummaryLastSentAt:
-				settings.dailySummaryLastSentAt?.toISOString() ?? null,
 			databaseBackupEnabled: settings.databaseBackupEnabled,
 			databaseBackupTime,
 			databaseBackupTimeLabel: `${databaseBackupTime} МСК`,
@@ -1899,11 +1805,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private ensureScheduleTimesSeparated(
-		dailySummaryTime: string,
+		reportingScheduleTime: string,
 		databaseBackupTime: string
 	) {
-		ensureDailySummaryBackupScheduleSeparated(
-			dailySummaryTime,
+		ensureReportingBackupScheduleSeparated(
+			reportingScheduleTime,
 			databaseBackupTime
 		);
 	}

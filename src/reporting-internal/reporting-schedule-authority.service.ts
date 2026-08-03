@@ -1,6 +1,6 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { PrismaService } from '@/prisma.service';
-import { ensureDailySummaryBackupScheduleSeparated } from '@/telegram-bot/telegram-bot.service';
+import { ensureReportingBackupScheduleSeparated } from '@/telegram-bot/telegram-bot.service';
 import {
 	BadRequestException,
 	ConflictException,
@@ -113,7 +113,7 @@ export class ReportingSchedulePolicyService {
 						where: { id: 'singleton' },
 						select: { databaseBackupTime: true }
 					});
-				ensureDailySummaryBackupScheduleSeparated(
+				ensureReportingBackupScheduleSeparated(
 					request.scheduleTime,
 					settings.databaseBackupTime
 				);

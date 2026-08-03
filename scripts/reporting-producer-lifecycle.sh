@@ -9,18 +9,27 @@ REPORTING_PRODUCER_HEALTHCHECK_ATTEMPTS="${REPORTING_PRODUCER_HEALTHCHECK_ATTEMP
 REPORTING_PRODUCER_HEALTHCHECK_INTERVAL="${REPORTING_PRODUCER_HEALTHCHECK_INTERVAL:-2}"
 
 server_root="$APP_ROOT/winwidget.ru_server"
+reporting_lifecycle_source_root="${REPORTING_LIFECYCLE_SOURCE_ROOT:-$server_root}"
+if [[ "$reporting_lifecycle_source_root" != /* ||
+	! -d "$reporting_lifecycle_source_root" ||
+	-L "$reporting_lifecycle_source_root" ||
+	"$(cd -- "$reporting_lifecycle_source_root" && pwd -P)" != \
+		"$reporting_lifecycle_source_root" ]]; then
+	echo 'Reporting lifecycle source root must be an exact absolute non-symlink directory.' >&2
+	return 1 2>/dev/null || exit 1
+fi
 REPORTING_CUTOVER_MARKER="${REPORTING_CUTOVER_MARKER:-$APP_ROOT/deploy/backend/.reporting-database-cutover-v1}"
 readonly REPORTING_LEGACY_SETTINGS_ROUTING_KEY='reporting.settings.changed.v1'
 readonly REPORTING_OPERATIONAL_ROUTING_KEY='reporting.core-operational-routing.changed.v1'
 
 # shellcheck source=scripts/production-deploy-lock.sh
-source "$server_root/scripts/production-deploy-lock.sh"
+source "$reporting_lifecycle_source_root/scripts/production-deploy-lock.sh"
 # shellcheck source=scripts/database-restore-production-guard.sh
-source "$server_root/scripts/database-restore-production-guard.sh"
+source "$reporting_lifecycle_source_root/scripts/database-restore-production-guard.sh"
 # shellcheck source=scripts/reporting-database-lifecycle.sh
-source "$server_root/scripts/reporting-database-lifecycle.sh"
+source "$reporting_lifecycle_source_root/scripts/reporting-database-lifecycle.sh"
 # shellcheck source=scripts/core-database-production-guard.sh
-source "$server_root/scripts/core-database-production-guard.sh"
+source "$reporting_lifecycle_source_root/scripts/core-database-production-guard.sh"
 
 reporting_core_libpq_url() {
 	local key="$1" url
@@ -726,7 +735,7 @@ reporting_require_admin_audit_consumer_ready() {
 	local consumer_state consumers expected_dead_letter_tag expected_main_tag
 	local heartbeat_state image_id image_revision integration_container
 	local integration_kinds queues rabbitmq_container restart_count retry_index
-	local retry_queue
+	local retry_queue runtime_hostname
 	integration_container="$(
 		reporting_compose ps --status running -q integration-worker 2>/dev/null || true
 	)"
@@ -747,11 +756,13 @@ reporting_require_admin_audit_consumer_ready() {
 	image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id")"
 	restart_count="$(docker inspect --format '{{.RestartCount}}' "$integration_container")"
 	container_hostname="$(docker inspect --format '{{.Config.Hostname}}' "$integration_container")"
+	runtime_hostname="$(docker exec "$integration_container" hostname)"
 	[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
 		"$image_revision" =~ ^[0-9a-f]{40}$ &&
 		"$app_revision" == "$image_revision" &&
 		"$restart_count" == '0' &&
-		"$container_hostname" =~ ^[0-9a-f]{12}$ &&
+		"$container_hostname" =~ ^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$ &&
+		"$runtime_hostname" == "$container_hostname" &&
 		"$connection_name" == 'winwidget-integration-worker' &&
 		( -z "$expected_revision" || "$image_revision" == "$expected_revision" ) ]] || {
 		echo 'Integration worker runtime/image/restart identity is unsafe for Reporting audit.' >&2
@@ -841,9 +852,11 @@ WHERE \"service\" = 'integration-worker'
 reporting_admin_audit_consumer_self_test() (
 	local expected_revision='0123456789abcdef0123456789abcdef01234567'
 	local test_app_revision="$expected_revision" test_heartbeat='fresh'
+	local test_container_hostname='msk-1-vm-bzt3'
 	local test_image_revision="$expected_revision"
 	local test_integration_kinds test_main_consumers='1'
 	local test_owner='exact' test_restart_count='0'
+	local test_runtime_hostname="$test_container_hostname"
 	test_integration_kinds='auto-renewal, reporting-admin-audit,campaign-admin-audit,notification-delivery-outcome,telegram-destination-unavailable,daily-summary-telegram,amo-crm,bitrix24,webhook'
 	reporting_compose() {
 		case "$*" in
@@ -865,7 +878,7 @@ reporting_admin_audit_consumer_self_test() (
 			elif [[ "$3" == *'.RestartCount'* ]]; then
 				printf '%s\n' "$test_restart_count"
 			elif [[ "$3" == *'.Config.Hostname'* ]]; then
-				printf '0123456789ab\n'
+				printf '%s\n' "$test_container_hostname"
 			else
 				return 1
 			fi
@@ -876,6 +889,9 @@ reporting_admin_audit_consumer_self_test() (
 			;;
 		exec)
 			case "$*" in
+			*'integration-container hostname'*)
+				printf '%s\n' "$test_runtime_hostname"
+				;;
 			*list_queues*)
 				printf 'winwidget.admin.audit.reporting.v1\ttrue\t%s\n' "$test_main_consumers"
 				printf 'winwidget.admin.audit.reporting.v1.dead-letter\ttrue\t1\n'
@@ -895,13 +911,13 @@ reporting_admin_audit_consumer_self_test() (
 				;;
 			*list_consumers*)
 				for ((index = 1; index <= test_main_consumers; index++)); do
-					tag="winwidget-integration-worker:$test_image_revision:0123456789ab:winwidget.admin.audit.reporting.v1"
+					tag="winwidget-integration-worker:$test_image_revision:$test_container_hostname:winwidget.admin.audit.reporting.v1"
 					if [[ "$test_owner" != 'exact' || "$index" -gt 1 ]]; then
 						tag="orphan-worker:$test_image_revision:fedcba987654:winwidget.admin.audit.reporting.v1"
 					fi
 					printf 'winwidget.admin.audit.reporting.v1\t%s\ttrue\t10\ttrue\n' "$tag"
 				done
-				printf 'winwidget.admin.audit.reporting.v1.dead-letter\twinwidget-integration-worker:%s:0123456789ab:winwidget.admin.audit.reporting.v1.dead-letter\ttrue\t10\ttrue\n' "$test_image_revision"
+				printf 'winwidget.admin.audit.reporting.v1.dead-letter\twinwidget-integration-worker:%s:%s:winwidget.admin.audit.reporting.v1.dead-letter\ttrue\t10\ttrue\n' "$test_image_revision" "$test_container_hostname"
 				;;
 			*) return 1 ;;
 			esac
@@ -928,6 +944,13 @@ reporting_admin_audit_consumer_self_test() (
 		return 1
 	fi
 	test_owner='exact'
+	test_runtime_hostname='different-host'
+	if reporting_require_admin_audit_consumer_ready "$expected_revision" \
+		>/dev/null 2>&1; then
+		echo 'Reporting audit consumer self-test accepted mismatched runtime metadata.' >&2
+		return 1
+	fi
+	test_runtime_hostname="$test_container_hostname"
 	test_image_revision='fedcba9876543210fedcba9876543210fedcba98'
 	if reporting_require_admin_audit_consumer_ready "$expected_revision" \
 		>/dev/null 2>&1; then

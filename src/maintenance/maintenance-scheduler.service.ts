@@ -63,18 +63,6 @@ export class MaintenanceSchedulerService
 			const now = new Date();
 			const period = this.getPreviousMoscowDay(now);
 
-			if (this.isDue(now, settings.dailySummaryTime, '01:50')) {
-				const summary = await this.tasks.enqueueDailySummary(
-					period,
-					this.getScheduledFor(now, settings.dailySummaryTime, '01:50')
-				);
-				if (summary?.created) {
-					this.logger.log(
-						`Daily Telegram summary scheduled period=${period.key} jobId=${summary.job.id}`
-					);
-				}
-			}
-
 			if (this.isDue(now, settings.databaseBackupTime, '01:45')) {
 				const backups = await this.tasks.enqueueDailyDatabaseBackups(
 					period,

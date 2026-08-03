@@ -60,7 +60,7 @@ export const REPORTING_ROUTING_KEYS: Record<
 	billingSubscription: 'billing.subscription.changed.v1',
 	widget: 'widgets.widget.changed.v1',
 	lead: 'widgets.lead.changed.v1',
-	reportingSettings: 'reporting.settings.changed.v1',
+	reportingSettings: CORE_OPERATIONAL_ROUTING_EVENT_TYPE,
 	deliveryOutcome: DELIVERY_OUTCOME_EVENT_TYPE
 };
 
@@ -76,10 +76,7 @@ export const REPORTING_ACCEPTED_ROUTING_KEYS: Record<
 	billingSubscription: ['billing.subscription.changed.v1'],
 	widget: ['widgets.widget.changed.v1'],
 	lead: ['widgets.lead.changed.v1'],
-	reportingSettings: [
-		'reporting.settings.changed.v1',
-		CORE_OPERATIONAL_ROUTING_EVENT_TYPE
-	],
+	reportingSettings: [CORE_OPERATIONAL_ROUTING_EVENT_TYPE],
 	deliveryOutcome: [DELIVERY_OUTCOME_EVENT_TYPE]
 };
 
@@ -92,10 +89,7 @@ export const REPORTING_ACCEPTED_PROJECTION_EVENT_TYPES: Record<
 	billingSubscription: ['billing.subscription.changed.v1'],
 	widget: ['widgets.widget.changed.v1'],
 	lead: ['widgets.lead.changed.v1'],
-	reportingSettings: [
-		'reporting.settings.changed.v1',
-		CORE_OPERATIONAL_ROUTING_EVENT_TYPE
-	]
+	reportingSettings: [CORE_OPERATIONAL_ROUTING_EVENT_TYPE]
 };
 
 export const REPORTING_CONSUMERS: Record<ReportingConsumerKind, string> = {

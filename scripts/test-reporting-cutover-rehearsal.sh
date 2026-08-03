@@ -766,6 +766,17 @@ wait_for_container_health() {
 	fail "Container did not become healthy: $container"
 }
 
+wait_for_rabbitmq_app() {
+	local container="$1" attempt
+	for ((attempt = 1; attempt <= 90; attempt++)); do
+		if docker exec "$container" rabbitmq-diagnostics -q ping >/dev/null 2>&1; then
+			return
+		fi
+		sleep 1
+	done
+	fail "RabbitMQ application did not become ready: $container"
+}
+
 create_shared_rabbitmq_exchanges() {
 	local container="$1"
 	RABBITMQ_REHEARSAL_ADMIN_PASSWORD="$RABBITMQ_ADMIN_PASSWORD" \
@@ -926,6 +937,7 @@ exercise_rabbitmq_phase_a() {
 
 	compose restart rabbitmq >/dev/null
 	wait_for_container_health "$rabbitmq_container"
+	wait_for_rabbitmq_app "$rabbitmq_container"
 	(
 		source "$SERVER_ROOT/scripts/deploy-reporting-production.sh" --self-test >/dev/null
 		REPORTING_COMPOSE_FILE="$COMPOSE_FILE"
@@ -1239,6 +1251,8 @@ reporting_rehearsal_self_test() {
 		"$source_text" == *'Reporting RabbitMQ preflight accepted an administrator-tagged user.'* &&
 		"$source_text" == *'Running Reporting container did not block credential rotation.'* &&
 		"$source_text" == *'Stopped Reporting container did not block credential rotation.'* &&
+		"$source_text" == *'wait_for_rabbitmq_app "$rabbitmq_container"'* &&
+		"$source_text" == *'rabbitmq-diagnostics -q ping'* &&
 		"$source_text" == *'source_git status --porcelain --untracked-files=all'* &&
 		"$source_text" == *'REVISION_A="$source_head"'* &&
 		"$source_text" == *'Reporting database/RabbitMQ phase-A rehearsal passed'* &&

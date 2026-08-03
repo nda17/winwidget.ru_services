@@ -33,6 +33,8 @@ REPORTING_CANONICAL_MIGRATION_USER='winwidget_reporting_migration'
 REPORTING_CANONICAL_BACKUP_USER='winwidget_reporting_backup'
 REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
 REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
+REPORTING_PRE_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram'
+REPORTING_POST_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,subscription-expiry-email,subscription-expiry-telegram'
 REPORTING_STEADY_STATE_REMOVED_PATHS=(
 	src/messaging/daily-summary-event.ts
 	src/reports
@@ -124,6 +126,27 @@ reporting_expected_integration_worker_kinds() {
 		printf '%s\n' "$REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS"
 	else
 		printf '%s\n' "$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS"
+	fi
+}
+
+reporting_expected_core_notification_delivery_kinds() {
+	local phase phase_index cleanup_staged_index
+	if [[ ! -e "$REPORTING_CUTOVER_MARKER" &&
+		! -L "$REPORTING_CUTOVER_MARKER" ]]; then
+		printf '%s\n' "$REPORTING_PRE_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS"
+		return
+	fi
+	reporting_cutover_validate_marker || {
+		echo 'Reporting cutover marker is invalid while resolving Core notification readiness ownership.' >&2
+		return 1
+	}
+	phase="$(reporting_cutover_marker_value phase)" || return 1
+	phase_index="$(reporting_cutover_phase_index "$phase")" || return 1
+	cleanup_staged_index="$(reporting_cutover_phase_index cleanup-staged)" || return 1
+	if ((phase_index >= cleanup_staged_index)); then
+		printf '%s\n' "$REPORTING_POST_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS"
+	else
+		printf '%s\n' "$REPORTING_PRE_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS"
 	fi
 }
 
@@ -701,6 +724,90 @@ reporting_validate_production_files() {
 		echo 'Backend production Compose file was not found.' >&2
 		return 1
 	}
+}
+
+reporting_transition_cleanup_integration_worker_env() {
+	local revision="${1:-}" phase cleanup_revision current_value temporary
+	[[ "$(id -u)" == '0' ]] || {
+		echo 'Reporting cleanup env transition must run as root.' >&2
+		return 1
+	}
+	reporting_validate_exact_revision "$revision" || return 1
+	reporting_validate_production_files || return 1
+	reporting_validate_root_owned_directory "$(dirname -- "$REPORTING_ENV_FILE")" || {
+		echo 'Reporting cleanup env directory is unsafe.' >&2
+		return 1
+	}
+	if [[ ! -e "$REPORTING_CUTOVER_MARKER" &&
+		! -L "$REPORTING_CUTOVER_MARKER" ]]; then
+		return 0
+	fi
+	reporting_cutover_validate_marker || return 1
+	phase="$(reporting_cutover_marker_value phase)" || return 1
+	[[ "$phase" == 'cleanup-staged' ]] || return 0
+	cleanup_revision="$(reporting_cutover_marker_value cleanup_revision)" || return 1
+	[[ "$cleanup_revision" == "$revision" ]] || {
+		echo 'Reporting cleanup env transition revision differs from the staged cleanup revision.' >&2
+		return 1
+	}
+	current_value="$(reporting_get_env_value INTEGRATION_WORKER_KINDS)" || {
+		echo 'Reporting cleanup env transition requires exactly one INTEGRATION_WORKER_KINDS line.' >&2
+		return 1
+	}
+	if [[ "$current_value" == "$REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS" ]]; then
+		return 0
+	fi
+	[[ "$current_value" == "$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS" ]] || {
+		echo 'Reporting cleanup env transition rejected an unexpected integration-worker kind set.' >&2
+		return 1
+	}
+	temporary="${REPORTING_ENV_FILE}.reporting-cleanup.$$"
+	[[ ! -e "$temporary" && ! -L "$temporary" ]] || {
+		echo 'Reporting cleanup env staging path already exists.' >&2
+		return 1
+	}
+	umask 077
+	if ! awk -F= -v replacement="$REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS" '
+		/^[[:space:]]*(#|$)/ { print; next }
+		{
+			name = $1
+			sub(/^[[:space:]]*/, "", name)
+			sub(/[[:space:]]*$/, "", name)
+			if (name == "INTEGRATION_WORKER_KINDS") {
+				print "INTEGRATION_WORKER_KINDS=" replacement
+				replaced += 1
+			} else {
+				print
+			}
+		}
+		END { exit(replaced == 1 ? 0 : 1) }
+	' "$REPORTING_ENV_FILE" >"$temporary"; then
+		rm -f -- "$temporary"
+		echo 'Reporting cleanup env transition could not stage the exact line replacement.' >&2
+		return 1
+	fi
+	chown 0:0 "$temporary"
+	chmod 600 "$temporary"
+	[[ -f "$temporary" && ! -L "$temporary" &&
+		"$(reporting_stat_owner "$temporary")" == '0:0' &&
+		"$(reporting_stat_mode "$temporary")" == '600' &&
+		"$(awk -F= '$1 == "INTEGRATION_WORKER_KINDS" { print $0; found += 1 } END { exit(found == 1 ? 0 : 1) }' "$temporary")" == \
+			"INTEGRATION_WORKER_KINDS=$REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS" ]] || {
+		rm -f -- "$temporary"
+		echo 'Reporting cleanup env staging file failed exact validation.' >&2
+		return 1
+	}
+	if ! mv -- "$temporary" "$REPORTING_ENV_FILE"; then
+		rm -f -- "$temporary"
+		echo 'Reporting cleanup env transition could not replace the production env atomically.' >&2
+		return 1
+	fi
+	[[ "$(reporting_get_env_value INTEGRATION_WORKER_KINDS)" == \
+		"$REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS" ]] || {
+		echo 'Reporting cleanup env transition did not persist the exact target value.' >&2
+		return 1
+	}
+	echo 'Reporting cleanup integration-worker env ownership transitioned to steady state.'
 }
 
 reporting_validate_exact_revision() {
@@ -2457,6 +2564,49 @@ reporting_database_lifecycle_self_test() {
 	reporting_assert_no_ambient_compose_overrides REPORTING_AMBIENT_SELF_TEST
 	unset REPORTING_AMBIENT_SELF_TEST
 	REPORTING_COMPOSE_FILE="$original_compose_file"
+	(
+		REPORTING_ENV_FILE="$temporary_root/cleanup-env"
+		REPORTING_CUTOVER_MARKER="$temporary_root/cleanup-cutover-marker"
+		cleanup_phase='cleanup-staged'
+		printf '# preserved\nINTEGRATION_WORKER_KINDS=%s\nUNCHANGED=value\n' \
+			"$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS" >"$REPORTING_ENV_FILE"
+		printf 'marker\n' >"$REPORTING_CUTOVER_MARKER"
+		id() { printf '0\n'; }
+		chown() { :; }
+		reporting_stat_owner() { printf '0:0\n'; }
+		reporting_validate_exact_revision() { [[ "$1" == "$revision" ]]; }
+		reporting_validate_production_files() { :; }
+		reporting_validate_root_owned_directory() { :; }
+		reporting_cutover_validate_marker() { :; }
+		reporting_cutover_marker_value() {
+			case "$1" in
+			phase) printf '%s\n' "$cleanup_phase" ;;
+			cleanup_revision) printf '%s\n' "$revision" ;;
+			*) return 1 ;;
+			esac
+		}
+		reporting_transition_cleanup_integration_worker_env "$revision" >/dev/null
+		[[ "$(reporting_get_env_value INTEGRATION_WORKER_KINDS)" == \
+			"$REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS" &&
+			"$(grep -c '^INTEGRATION_WORKER_KINDS=' "$REPORTING_ENV_FILE")" == '1' &&
+			"$(grep -c '^# preserved$' "$REPORTING_ENV_FILE")" == '1' &&
+			"$(grep -c '^UNCHANGED=value$' "$REPORTING_ENV_FILE")" == '1' ]]
+		reporting_transition_cleanup_integration_worker_env "$revision" >/dev/null
+		printf 'INTEGRATION_WORKER_KINDS=unexpected\n' >"$REPORTING_ENV_FILE"
+		if reporting_transition_cleanup_integration_worker_env "$revision" >/dev/null 2>&1; then
+			echo 'Reporting lifecycle self-test accepted an unexpected cleanup env value.' >&2
+			return 1
+		fi
+		printf 'INTEGRATION_WORKER_KINDS=%s\n' \
+			"$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS" >"$REPORTING_ENV_FILE"
+		cleanup_phase='routes-switched'
+		reporting_transition_cleanup_integration_worker_env "$revision" >/dev/null
+		[[ "$(reporting_get_env_value INTEGRATION_WORKER_KINDS)" == \
+			"$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS" ]]
+	) || {
+		echo 'Reporting cleanup env transition self-test failed.' >&2
+		return 1
+	}
 	(
 		reporting_export_pinned_runtime_identity "$revision"
 		[[ "$REPORTING_REVISION" == "$revision" &&

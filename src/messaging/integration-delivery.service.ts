@@ -1,5 +1,4 @@
 import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';
-import { DailySummaryRequestedEventPayload } from '@/messaging/daily-summary-event';
 import { CampaignAdminAuditEventPayload } from '@/messaging/campaign-admin-audit-event';
 import {
 	LeadIntegrationEventPayload,
@@ -13,10 +12,7 @@ import { ReportingAdminAuditEventPayload } from '@/messaging/reporting-admin-aud
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
 import { PaymentService } from '@/payment/payment.service';
 import { PrismaService } from '@/prisma.service';
-import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
 import { SafeOutboundHttpService } from '@/safe-outbound-http/safe-outbound-http.service';
-import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
-import { SCHEDULED_JOB_TYPES } from '@/scheduled-jobs/scheduled-jobs.types';
 import { Injectable } from '@nestjs/common';
 import { SubscriptionExpiryReminderStatus } from '@prisma/client';
 
@@ -24,7 +20,6 @@ type DeliveryEventPayload =
 	| LeadIntegrationEventPayload
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
-	| DailySummaryRequestedEventPayload
 	| AutoRenewalChargeRequestedEventPayload
 	| CampaignAdminAuditEventPayload
 	| ReportingAdminAuditEventPayload;
@@ -34,9 +29,7 @@ export class IntegrationDeliveryService {
 	constructor(
 		private readonly safeOutboundHttpService: SafeOutboundHttpService,
 		private readonly prisma: PrismaService,
-		private readonly dailySummaryDelivery: DailySummaryDeliveryService,
 		private readonly leadDestination: LeadIntegrationDestinationService,
-		private readonly scheduledJobs: ScheduledJobsService,
 		private readonly paymentService: PaymentService
 	) {}
 
@@ -48,13 +41,6 @@ export class IntegrationDeliveryService {
 		if (kind === 'auto-renewal') {
 			await this.paymentService.executeRecurringCharge(
 				(event as AutoRenewalChargeRequestedEventPayload).paymentId
-			);
-			return;
-		}
-		if (kind === 'daily-summary-telegram') {
-			await this.dailySummaryDelivery.deliver(
-				event as DailySummaryRequestedEventPayload,
-				eventId
 			);
 			return;
 		}
@@ -128,60 +114,10 @@ export class IntegrationDeliveryService {
 		event: NotificationDeliveryOutcomeEventPayload
 	): Promise<void> {
 		switch (event.reference.type) {
-			case 'daily-summary-job':
-				await this.applyDailySummaryDeliveryOutcome(event);
-				return;
 			case 'subscription-expiry-reminder':
 				await this.applySubscriptionExpiryDeliveryOutcome(event);
 				return;
 		}
-	}
-
-	private async applyDailySummaryDeliveryOutcome(
-		event: NotificationDeliveryOutcomeEventPayload
-	): Promise<void> {
-		if (
-			event.reference.type !== 'daily-summary-job' ||
-			event.sourceKind !== 'daily-summary-delivery-telegram'
-		) {
-			throw new Error('Invalid daily summary delivery outcome');
-		}
-		await this.prisma.$transaction(async transaction => {
-			if (event.status === 'FAILED') {
-				await this.scheduledJobs.failExternalDeliveryInTransaction(
-					transaction,
-					event.reference.id,
-					event.sourceEventId,
-					this.getOutcomeError(event)
-				);
-				return;
-			}
-
-			const job =
-				await this.scheduledJobs.completeExternalDeliveryInTransaction(
-					transaction,
-					event.reference.id,
-					event.sourceEventId,
-					{
-						telegramSent: true,
-						sentAt: event.occurredAt
-					}
-				);
-			if (!job) return;
-			if (
-				job.jobType !== SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY ||
-				!job.periodStart
-			) {
-				throw new Error('Daily summary outcome references an invalid job');
-			}
-			await transaction.telegramBotSettings.update({
-				where: { id: 'singleton' },
-				data: {
-					dailySummaryLastSentPeriodStart: new Date(job.periodStart),
-					dailySummaryLastSentAt: new Date(event.occurredAt)
-				}
-			});
-		});
 	}
 
 	private async applySubscriptionExpiryDeliveryOutcome(

@@ -1,19 +1,14 @@
 import type { PrismaService } from '@/prisma.service';
 import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 
 const telegramSettings = {
 	id: 'singleton',
-	dailySummaryEnabled: true,
 	dailySummaryChatId: '-100123',
 	supportThreadId: 1,
 	databaseBackupThreadId: 2,
 	paymentsThreadId: 3,
 	operationalAlertsThreadId: 5,
-	reportsThreadId: 4,
-	dailySummaryTime: '01:50',
-	dailySummaryLastSentPeriodStart: null,
-	dailySummaryLastSentAt: null,
 	databaseBackupEnabled: true,
 	databaseBackupTime: '01:45',
 	databaseBackupLastSentPeriodStart: null,
@@ -114,19 +109,7 @@ describe('TelegramBotService webhook URLs', () => {
 		).toThrow(BadRequestException);
 	});
 
-	it('fences legacy Daily Summary writes after Reporting claims ownership', async () => {
-		const { prisma, transaction, upsert } =
-			createSettingsPrisma('REPORTING');
-		const service = new TelegramBotService(prisma);
-
-		await expect(
-			service.updateSettings({ dailySummaryTime: '02:00' })
-		).rejects.toBeInstanceOf(ConflictException);
-		expect(transaction.$queryRaw).toHaveBeenCalledTimes(2);
-		expect(upsert).toHaveBeenCalledTimes(1);
-	});
-
-	it('lets Core-owned backup time change ignore the stale legacy summary after cutover', async () => {
+	it('lets Core-owned backup time change use the Reporting schedule reservation', async () => {
 		const { prisma, upsert } = createSettingsPrisma('REPORTING');
 		const service = new TelegramBotService(prisma);
 
@@ -164,43 +147,13 @@ describe('TelegramBotService webhook URLs', () => {
 		expect(upsert).toHaveBeenCalledTimes(1);
 	});
 
-	it('still enforces the schedule gap while Core owns Daily Summary', async () => {
+	it('still enforces the schedule gap while the authority row is transitional', async () => {
 		const { prisma, upsert } = createSettingsPrisma('CORE');
 		const service = new TelegramBotService(prisma);
 
 		await expect(
 			service.updateSettings({ databaseBackupTime: '01:48' })
 		).rejects.toBeInstanceOf(BadRequestException);
-		expect(upsert).toHaveBeenCalledTimes(1);
-	});
-
-	it('updates the pre-cutover policy baseline in the same Core transaction', async () => {
-		const { prisma, transaction } = createSettingsPrisma('CORE');
-		const service = new TelegramBotService(prisma);
-
-		await service.updateSettings({ dailySummaryTime: '02:20' });
-
-		expect(transaction.reportingProducerState.update).toHaveBeenCalledWith(
-			{
-				where: { id: 'singleton' },
-				data: {
-					dailySummaryPolicyReservationTime: '02:20',
-					dailySummaryPolicyReservationGeneration: { increment: 1 }
-				}
-			}
-		);
-		expect(
-			transaction.telegramBotSettings.upsert.mock.invocationCallOrder[0]
-		).toBeLessThan(transaction.$queryRaw.mock.invocationCallOrder[0]);
-	});
-
-	it('rejects one shared topic while Core owns both routes', async () => {
-		const { prisma, upsert } = createSettingsPrisma('CORE');
-		const service = new TelegramBotService(prisma);
-
-		await expect(
-			service.updateSettings({ operationalAlertsThreadId: 4 })
-		).rejects.toThrow('должны использовать разные топики');
 		expect(upsert).toHaveBeenCalledTimes(1);
 	});
 

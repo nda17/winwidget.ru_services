@@ -63,15 +63,15 @@ export class TelegramBotController {
 		try {
 			settings = await this.telegramBotService.updateSettings(dto);
 		} catch (error) {
-			if ('dailySummaryTime' in dto || 'databaseBackupTime' in dto) {
+			if ('databaseBackupTime' in dto) {
 				await this.adminEventLogService.record({
 					adminId,
 					section: 'TELEGRAM_BOT',
 					action: 'TELEGRAM_SCHEDULE_SETTINGS_REJECTED',
-					description: 'Отклонено изменение расписания Telegram-задач',
+					description: 'Отклонено изменение расписания backup',
 					entityType: 'telegram_schedule_policy',
 					entityId: 'singleton',
-					entityLabel: 'Daily Summary и backup',
+					entityLabel: 'Backup',
 					metadata: {
 						reasonCode:
 							error instanceof ConflictException
@@ -93,7 +93,6 @@ export class TelegramBotController {
 			entityId: 'singleton',
 			entityLabel: 'Telegram-боты',
 			metadata: {
-				dailySummaryEnabled: settings.dailySummaryEnabled,
 				dailySummaryChatIdConfigured: Boolean(
 					settings.dailySummaryChatId.trim()
 				),
@@ -105,8 +104,6 @@ export class TelegramBotController {
 				operationalAlertsThreadIdConfigured: Boolean(
 					settings.operationalAlertsThreadId
 				),
-				reportsThreadIdConfigured: Boolean(settings.reportsThreadId),
-				dailySummaryTime: settings.dailySummaryTime,
 				databaseBackupEnabled: settings.databaseBackupEnabled,
 				databaseBackupTime: settings.databaseBackupTime,
 				telegramBotTokenConfigured: settings.telegramBotTokenConfigured,

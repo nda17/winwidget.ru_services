@@ -108,6 +108,7 @@ jobs:
       - name: Reject a checkout that would strand an active lifecycle
         env:
           APP_ROOT: /opt/winwidget
+          AUTOMATIC_PROD_PUSH: ${{ github.event_name == 'push' && 'true' || 'false' }}
           CAMPAIGNS_RESTART: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'campaigns-database' && inputs.campaigns_database_action == 'restart' && 'true' || 'false' }}
           DEPLOY_REVISION: ${{ github.sha }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
@@ -116,7 +117,7 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' CAMPAIGNS_RESTART='$CAMPAIGNS_RESTART' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' CAMPAIGNS_RESTART='$CAMPAIGNS_RESTART' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -185,12 +186,18 @@ jobs:
           }
 
           current_revision="$(git rev-parse HEAD)"
+          [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           guard_campaigns_checkout_before_pull "$current_revision"
           guard_reporting_checkout_before_pull "$current_revision"
           if [[ "$CAMPAIGNS_RESTART" != "true" ]]; then
             guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           fi
-          guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
+          if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
+            "$current_revision" == "$EXPECTED_REVISION" ]]; then
+            guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
+          else
+            echo "Automatic push will verify before the deploy job evaluates the active Reporting revision guard."
+          fi
           echo "Active lifecycle checkout preflight passed without changing VPS state."
           EOF
 
@@ -441,17 +448,29 @@ jobs:
             scripts/deploy-reporting-production.sh \
             scripts/reporting-producer-lifecycle.sh \
             scripts/reporting-cutover-lifecycle.sh \
+            scripts/generate-reporting-frontend-runtime-attestation.sh \
+            scripts/run-reporting-scheduler-cutover-smoke.sh \
+            scripts/run-reporting-route-cutover-smoke.sh \
+            scripts/run-reporting-restore-cutover-smoke.sh \
             scripts/test-reporting-cutover-rehearsal.sh \
             scripts/test-reporting-production-scripts.sh; do
             bash -n "$script"
           done
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test
+          bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
+          bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
+          bash scripts/run-reporting-route-cutover-smoke.sh --self-test
+          bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
           for script in \
             scripts/reporting-database-lifecycle.sh \
             scripts/deploy-reporting-production.sh \
             scripts/reporting-producer-lifecycle.sh \
             scripts/reporting-cutover-lifecycle.sh \
+            scripts/generate-reporting-frontend-runtime-attestation.sh \
+            scripts/run-reporting-scheduler-cutover-smoke.sh \
+            scripts/run-reporting-route-cutover-smoke.sh \
+            scripts/run-reporting-restore-cutover-smoke.sh \
             scripts/test-reporting-cutover-rehearsal.sh \
             scripts/test-reporting-production-scripts.sh; do
             printf 'reporting_shellcheck_start=%s\n' "$script"
@@ -2910,6 +2929,13 @@ jobs:
                   timeoutMs: 60000,
                 },
                 {
+                  id: "reporting",
+                  pathPrefix: "/api/v1/admin/reporting",
+                  upstreamUrl: "http://127.0.0.1:4600",
+                  authPolicy: "required",
+                  timeoutMs: 60000,
+                },
+                {
                   id: "monolith",
                   pathPrefix: "/api/v1",
                   upstreamUrl: "http://127.0.0.1:4200",
@@ -2922,7 +2948,7 @@ jobs:
                 JSON.stringify(expectedGatewayRoutes)
               ) {
                 throw new Error(
-                  "Phase-A production example must keep restore protected and Reporting behind the exact monolith route",
+                  "Production example must keep restore protected and route Reporting before the monolith catch-all",
                 );
               }
               requireEnvironment("outbox-publisher", [
@@ -4096,6 +4122,13 @@ jobs:
             !lifecyclePreflightHeader.includes(
               "Validate Reporting production env before full verify",
             ) ||
+            !lifecyclePreflightHeader.includes("AUTOMATIC_PROD_PUSH:") ||
+            !lifecyclePreflightHeader.includes(
+              'if [[ "$AUTOMATIC_PROD_PUSH" != "true" || "$current_revision" == "$EXPECTED_REVISION" ]]; then',
+            ) ||
+            !lifecyclePreflightHeader.includes(
+              "Automatic push will verify before the deploy job evaluates the active Reporting revision guard.",
+            ) ||
             !lifecyclePreflightHeader.includes(
               "inputs.deploy_target == 'reporting-database'",
             ) ||
@@ -4539,6 +4572,10 @@ jobs:
           bash -n scripts/deploy-reporting-production.sh
           bash -n scripts/reporting-producer-lifecycle.sh
           bash -n scripts/reporting-cutover-lifecycle.sh
+          bash -n scripts/generate-reporting-frontend-runtime-attestation.sh
+          bash -n scripts/run-reporting-scheduler-cutover-smoke.sh
+          bash -n scripts/run-reporting-route-cutover-smoke.sh
+          bash -n scripts/run-reporting-restore-cutover-smoke.sh
           bash -n scripts/test-reporting-cutover-rehearsal.sh
           bash -n scripts/test-reporting-production-scripts.sh
           bash -n scripts/database-restore-production-guard.sh
@@ -4547,6 +4584,10 @@ jobs:
           bash scripts/deploy-production.sh --self-test-database-restore-create-gate
           bash scripts/campaigns-contract-migration-guard.sh --self-test
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test
+          bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
+          bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
+          bash scripts/run-reporting-route-cutover-smoke.sh --self-test
+          bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
           bash scripts/database-restore-production-guard.sh --self-test
           bash scripts/test-database-restore-worker-rehearsal.sh --self-test
@@ -6904,13 +6945,50 @@ jobs:
             echo "Reporting cleanup candidate is not a forward descendant of the active revision." >&2
             exit 1
           }
+          candidate_stage_root="$(
+            mktemp -d /tmp/winwidget-reporting-cleanup-stage.XXXXXX
+          )"
+          candidate_root="$candidate_stage_root/candidate"
+          cleanup_candidate_worktree() {
+            if [[ -d "$candidate_root" && ! -L "$candidate_root" ]]; then
+              git worktree remove --force "$candidate_root" > /dev/null 2>&1 || true
+            fi
+            rmdir "$candidate_stage_root" > /dev/null 2>&1 || true
+          }
+          trap cleanup_candidate_worktree EXIT
+          chmod 700 "$candidate_stage_root"
+          git worktree add --detach "$candidate_root" "$CLEANUP_REVISION" > /dev/null
+          [[ -d "$candidate_root" && ! -L "$candidate_root" &&
+            "$(stat -c '%u' "$candidate_root")" == '0' &&
+            "$(git -C "$candidate_root" rev-parse HEAD)" == "$CLEANUP_REVISION" &&
+            -z "$(git -C "$candidate_root" status --porcelain --untracked-files=all)" ]] || {
+            echo "Reporting cleanup candidate worktree is unsafe." >&2
+            exit 1
+          }
+          for candidate_file in \
+            scripts/production-deploy-lock.sh \
+            scripts/database-restore-production-guard.sh \
+            scripts/reporting-database-lifecycle.sh \
+            scripts/reporting-producer-lifecycle.sh \
+            scripts/core-database-production-guard.sh \
+            scripts/reporting-cutover-lifecycle.sh; do
+            candidate_path="$candidate_root/$candidate_file"
+            [[ -f "$candidate_path" && ! -L "$candidate_path" &&
+              "$(stat -c '%u' "$candidate_path")" == '0' &&
+              "$(git -C "$candidate_root" hash-object --no-filters "$candidate_file")" == \
+                "$(git rev-parse "$CLEANUP_REVISION:$candidate_file")" ]] || {
+              echo "Reporting cleanup candidate lifecycle file is unsafe: $candidate_file" >&2
+              exit 1
+            }
+          done
           APP_ROOT="$APP_ROOT" \
             EXPECTED_REVISION="$current_revision" \
+            REPORTING_LIFECYCLE_SOURCE_ROOT="$candidate_root" \
             REPORTING_CLEANUP_REVISION="$CLEANUP_REVISION" \
             REPORTING_CLEANUP_REVIEW_FILE="$review_file" \
             REPORTING_CLEANUP_MANIFEST_FILE="$manifest_file" \
             CONFIRM_REPORTING_CLEANUP_STAGE="$cleanup_confirmation" \
-            bash "$cutover_lifecycle_script" stage-cleanup
+            bash "$candidate_root/$cutover_lifecycle_script" stage-cleanup
           APP_ROOT="$APP_ROOT" \
             bash "$database_lifecycle_script" \
               --guard-before-checkout-revision "$CLEANUP_REVISION"

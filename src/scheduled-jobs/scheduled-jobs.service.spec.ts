@@ -14,9 +14,9 @@ import { randomUUID } from 'node:crypto';
 describe('ScheduledJobsService', () => {
 	const now = new Date('2026-07-24T00:00:00.000Z');
 	const event: ScheduledJobOutboxEvent = {
-		eventType: 'telegram.daily-summary.requested.v1',
-		routingKey: 'telegram.daily-summary.requested.v1',
-		deadLetterRoutingKey: 'daily-summary-telegram.dead-letter',
+		eventType: 'database.backup.requested.v1',
+		routingKey: 'database.backup.requested.v1',
+		deadLetterRoutingKey: 'database-backup.dead-letter',
 		payload: { schemaVersion: 1 }
 	};
 
@@ -24,7 +24,7 @@ describe('ScheduledJobsService', () => {
 		overrides: Partial<ScheduledJobRun> = {}
 	): ScheduledJobRun => ({
 		id: randomUUID(),
-		jobType: SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+		jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
 		scheduleKey: '2026-07-23T21:00:00.000Z',
 		trigger: ScheduledJobRunTrigger.SCHEDULED,
 		status: ScheduledJobRunStatus.QUEUED,
@@ -49,7 +49,7 @@ describe('ScheduledJobsService', () => {
 	});
 
 	const enqueueInput = {
-		jobType: SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+		jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
 		scheduleKey: '2026-07-23T21:00:00.000Z',
 		scheduledFor: now,
 		periodStart: new Date('2026-07-22T21:00:00.000Z'),
@@ -436,9 +436,9 @@ describe('ScheduledJobsService', () => {
 		await expect(
 			service.claim(
 				failedJob.id,
-				'daily-summary:test',
+				'database-backup:test',
 				120_000,
-				SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+				SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
 				event
 			)
 		).resolves.toEqual({
@@ -598,9 +598,9 @@ describe('ScheduledJobsService', () => {
 
 		await service.claim(
 			job.id,
-			'daily-summary:test',
+			'database-backup:test',
 			120_000,
-			SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY,
+			SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
 			event
 		);
 
@@ -615,7 +615,7 @@ describe('ScheduledJobsService', () => {
 		for (const statement of [exhaustedSql, claimSql]) {
 			expect(statement.strings.join('?')).toContain('AND "job_type" = ?');
 			expect(statement.values).toContain(
-				SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY
+				SCHEDULED_JOB_TYPES.DATABASE_BACKUP
 			);
 		}
 	});

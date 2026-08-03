@@ -2,9 +2,9 @@ import { assertReportingProjectionEvent } from '@/messaging/messaging-event-cont
 import {
 	REPORTING_BILLING_PAYMENT_EVENT_TYPE,
 	REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE,
+	REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE,
 	REPORTING_IDENTITY_USER_EVENT_TYPE,
 	REPORTING_LEAD_EVENT_TYPE,
-	REPORTING_SETTINGS_EVENT_TYPE,
 	REPORTING_WIDGET_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { PrismaService } from '@/prisma.service';
@@ -225,7 +225,7 @@ export class ReportingProjectionSnapshotService {
 			})),
 			{
 				stream: 'reportingSettings',
-				eventType: REPORTING_SETTINGS_EVENT_TYPE,
+				eventType: REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE,
 				fetchPage: (transaction, cursor, limit) =>
 					this.getSettingsRows(transaction, cursor, limit)
 			}
@@ -306,7 +306,7 @@ export class ReportingProjectionSnapshotService {
 						WHERE "aggregate_type" LIKE 'widgets.lead.%'
 					), 0)::TEXT AS "lead",
 					COALESCE(MAX("source_sequence") FILTER (
-						WHERE "aggregate_type" = 'reporting.settings'
+						WHERE "aggregate_type" = 'reporting.core-operational-routing.changed.v1'
 					), 0)::TEXT AS "reportingSettings"
 				FROM "reporting_projection_versions"
 			`
@@ -524,24 +524,12 @@ export class ReportingProjectionSnapshotService {
 				COALESCE("version"."source_sequence", 0)::TEXT AS "sourceSequence",
 				jsonb_build_object(
 					'id', "source"."id",
-					'enabled', "source"."daily_summary_enabled",
-					'destinationChatId', "source"."daily_summary_chat_id",
-					'messageThreadId', "source"."reports_thread_id",
-					'coreOperationalAlertsThreadId', "source"."operational_alerts_thread_id",
-					'scheduleTime', "source"."daily_summary_time",
-					'timezone', 'Europe/Moscow',
-					'lastSuccessfulPeriodStart', CASE
-						WHEN "source"."daily_summary_last_sent_period_start" IS NULL THEN NULL
-						ELSE "reporting_iso_timestamp"("source"."daily_summary_last_sent_period_start")
-					END,
-					'lastSuccessfulAt', CASE
-						WHEN "source"."daily_summary_last_sent_at" IS NULL THEN NULL
-						ELSE "reporting_iso_timestamp"("source"."daily_summary_last_sent_at")
-					END
+					'coreOperationalAlertsDestinationChatId', "source"."daily_summary_chat_id",
+					'coreOperationalAlertsThreadId', "source"."operational_alerts_thread_id"
 				) AS "state"
 				FROM "telegram_bot_settings" AS "source"
 				LEFT JOIN "reporting_projection_versions" AS "version"
-					ON "version"."aggregate_type" = 'reporting.settings'
+					ON "version"."aggregate_type" = 'reporting.core-operational-routing.changed.v1'
 					AND "version"."aggregate_id" = "source"."id"
 				WHERE "source"."id" = 'singleton'
 					AND "source"."id" > ${cursor}

@@ -909,34 +909,28 @@ export class ReportingShadowEvidenceService {
 			where: { id: 'daily-summary' }
 		});
 		if (
-			!row?.sourceAggregateVersion ||
-			!row.sourceSequence ||
-			!row.stateHash
+			!row?.coreOperationalRoutingSourceAggregateVersion ||
+			!row.coreOperationalRoutingSourceSequence ||
+			!row.coreOperationalRoutingStateHash
 		) {
 			return;
 		}
 		const state = {
 			id: 'singleton',
-			enabled: row.enabled,
-			destinationChatId: row.destinationChatId || '',
-			messageThreadId: row.messageThreadId,
-			coreOperationalAlertsThreadId: row.coreOperationalAlertsThreadId,
-			scheduleTime: row.scheduleTime,
-			timezone: row.timezone,
-			lastSuccessfulPeriodStart:
-				row.lastSuccessfulPeriodStart?.toISOString() || null,
-			lastSuccessfulAt: row.lastSuccessfulAt?.toISOString() || null
+			coreOperationalAlertsDestinationChatId:
+				row.coreOperationalAlertsDestinationChatId || '',
+			coreOperationalAlertsThreadId: row.coreOperationalAlertsThreadId
 		};
 		accumulator.add(
 			this.targetEvent(
-				'reporting.settings.changed.v1',
+				'reporting.core-operational-routing.changed.v1',
 				'singleton',
-				row.sourceAggregateVersion.toFixed(0),
-				row.sourceSequence.toFixed(0),
+				row.coreOperationalRoutingSourceAggregateVersion.toFixed(0),
+				row.coreOperationalRoutingSourceSequence.toFixed(0),
 				new Date(0),
 				state
 			),
-			row.stateHash.trim()
+			row.coreOperationalRoutingStateHash.trim()
 		);
 	}
 

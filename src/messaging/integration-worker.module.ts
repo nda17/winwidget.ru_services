@@ -7,8 +7,6 @@ import { PaymentWorkerModule } from '@/payment/payment-worker.module';
 import { RabbitMqModule } from '@/messaging/rabbitmq.module';
 import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
-import { DailySummaryDeliveryService } from '@/reports/daily-summary-delivery.service';
-import { DailySummaryReportService } from '@/reports/daily-summary-report.service';
 import { SafeOutboundHttpModule } from '@/safe-outbound-http/safe-outbound-http.module';
 import { ScheduledJobsModule } from '@/scheduled-jobs/scheduled-jobs.module';
 import { Module, OnApplicationShutdown } from '@nestjs/common';
@@ -28,8 +26,6 @@ import { ConfigModule } from '@nestjs/config';
 	],
 	providers: [
 		MessagingHeartbeatService,
-		DailySummaryReportService,
-		DailySummaryDeliveryService,
 		LeadIntegrationDestinationService,
 		IntegrationDeliveryService,
 		IntegrationWorkerService

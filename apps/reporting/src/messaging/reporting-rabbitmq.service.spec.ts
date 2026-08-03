@@ -60,15 +60,9 @@ describe('ReportingRabbitMqService topology ownership', () => {
 				exchange === REPORTING_EVENTS_EXCHANGE
 		);
 		expect(REPORTING_ACCEPTED_ROUTING_KEYS.reportingSettings).toEqual([
-			'reporting.settings.changed.v1',
 			'reporting.core-operational-routing.changed.v1'
 		]);
 		expect(settingsEventBindings).toEqual([
-			[
-				REPORTING_QUEUE_NAMES.reportingSettings,
-				REPORTING_EVENTS_EXCHANGE,
-				'reporting.settings.changed.v1'
-			],
 			[
 				REPORTING_QUEUE_NAMES.reportingSettings,
 				REPORTING_EVENTS_EXCHANGE,
@@ -82,7 +76,8 @@ describe('ReportingRabbitMqService topology ownership', () => {
 					durable: true,
 					messageTtl: delay,
 					deadLetterExchange: REPORTING_EVENTS_EXCHANGE,
-					deadLetterRoutingKey: 'reporting.settings.changed.v1'
+					deadLetterRoutingKey:
+						'reporting.core-operational-routing.changed.v1'
 				}
 			);
 		}

@@ -484,7 +484,7 @@ describe('MaintenanceWorkerService', () => {
 		const { service, rabbitMq, scheduledJobs, backup } = createService();
 		(scheduledJobs.claim as jest.Mock).mockResolvedValue({
 			state: 'busy',
-			job: createJob({ jobType: 'DAILY_TELEGRAM_SUMMARY' })
+			job: createJob({ jobType: 'UNSUPPORTED_MAINTENANCE_JOB' })
 		});
 
 		await (service as any).handle('database-backup', createMessage());
@@ -504,7 +504,7 @@ describe('MaintenanceWorkerService', () => {
 			expect.any(Object),
 			0,
 			jobId,
-			'Unexpected database backup job type: DAILY_TELEGRAM_SUMMARY',
+			'Unexpected database backup job type: UNSUPPORTED_MAINTENANCE_JOB',
 			'database.backup.requested.v1'
 		);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);

@@ -19,27 +19,15 @@ describe('ScheduledTasksService', () => {
 
 	const createService = (lastSentPeriodStart: Date | null = null) => {
 		const transaction = {
-			reportingProducerState: {
-				findUnique: jest
-					.fn()
-					.mockResolvedValue({ dailySummaryOwner: 'CORE' })
-			},
-			$queryRaw: jest.fn().mockResolvedValue([{ id: 'singleton' }]),
 			telegramBotSettings: {
 				upsert: jest.fn().mockResolvedValue({
-					dailySummaryEnabled: true,
 					dailySummaryChatId: ' -100123 ',
-					reportsThreadId: 42,
-					dailySummaryLastSentPeriodStart: lastSentPeriodStart,
 					databaseBackupEnabled: true,
 					databaseBackupThreadId: 43,
 					databaseBackupLastSentPeriodStart: lastSentPeriodStart
 				}),
 				findUniqueOrThrow: jest.fn().mockResolvedValue({
-					dailySummaryEnabled: true,
 					dailySummaryChatId: ' -100123 ',
-					reportsThreadId: 42,
-					dailySummaryLastSentPeriodStart: lastSentPeriodStart,
 					databaseBackupEnabled: true,
 					databaseBackupThreadId: 43,
 					databaseBackupLastSentPeriodStart: lastSentPeriodStart
@@ -48,17 +36,9 @@ describe('ScheduledTasksService', () => {
 		};
 		const prisma = {
 			$transaction: jest.fn(callback => callback(transaction)),
-			reportingProducerState: {
-				findUnique: jest
-					.fn()
-					.mockResolvedValue({ dailySummaryOwner: 'CORE' })
-			},
 			telegramBotSettings: {
 				upsert: jest.fn().mockResolvedValue({
-					dailySummaryEnabled: true,
 					dailySummaryChatId: ' -100123 ',
-					reportsThreadId: 42,
-					dailySummaryLastSentPeriodStart: lastSentPeriodStart,
 					databaseBackupEnabled: true,
 					databaseBackupThreadId: 43,
 					databaseBackupLastSentPeriodStart: lastSentPeriodStart
@@ -96,63 +76,6 @@ describe('ScheduledTasksService', () => {
 		} as unknown as ConfigService);
 		return { service, scheduledJobs, transaction, prisma };
 	};
-
-	it('creates the scheduled run and Outbox event with a snapshotted destination', async () => {
-		const { service, scheduledJobs, transaction } = createService();
-
-		await service.enqueueDailySummary(period, scheduledFor);
-
-		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledWith(
-			transaction,
-			{
-				jobType: 'DAILY_TELEGRAM_SUMMARY',
-				scheduleKey: '2026-07-23',
-				trigger: ScheduledJobRunTrigger.SCHEDULED,
-				scheduledFor,
-				periodStart: period.start,
-				periodEnd: period.end,
-				input: {
-					chatId: '-100123',
-					messageThreadId: 42
-				}
-			},
-			{
-				eventType: 'report.daily-summary.requested.v1',
-				routingKey: 'report.daily-summary.requested.v1',
-				deadLetterRoutingKey: 'daily-summary-telegram.dead-letter',
-				payload: {
-					schemaVersion: 1,
-					eventType: 'report.daily-summary.requested.v1'
-				}
-			}
-		);
-	});
-
-	it('honors the legacy last-sent period without creating a startup duplicate', async () => {
-		const { service, scheduledJobs } = createService(period.start);
-
-		const result = await service.enqueueDailySummary(period, scheduledFor);
-
-		expect(result).toBeNull();
-		expect(
-			scheduledJobs.enqueueUniqueInTransaction
-		).not.toHaveBeenCalled();
-	});
-
-	it('does not enqueue a legacy Daily Summary after ownership moved to Reporting', async () => {
-		const { service, scheduledJobs, prisma } = createService();
-		(prisma as any).reportingProducerState.findUnique.mockResolvedValue({
-			dailySummaryOwner: 'REPORTING'
-		});
-
-		await expect(
-			service.enqueueDailySummary(period, scheduledFor)
-		).resolves.toBeNull();
-		expect(
-			scheduledJobs.enqueueUniqueInTransaction
-		).not.toHaveBeenCalled();
-		expect((prisma as any).$transaction).not.toHaveBeenCalled();
-	});
 
 	it('creates independent core, Notification Delivery, Campaigns and Reporting backup jobs', async () => {
 		const { service, scheduledJobs, transaction } = createService();

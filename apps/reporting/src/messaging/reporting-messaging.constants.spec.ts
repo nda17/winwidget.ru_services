@@ -94,9 +94,8 @@ describe('reporting RabbitMQ topology contract', () => {
 		).toBe(DAILY_SUMMARY_NOTIFICATION_EVENT_TYPE);
 	});
 
-	it('accepts both transitional settings routes on the same queue', () => {
+	it('accepts only the steady-state Core routing event', () => {
 		expect(REPORTING_ACCEPTED_ROUTING_KEYS.reportingSettings).toEqual([
-			'reporting.settings.changed.v1',
 			'reporting.core-operational-routing.changed.v1'
 		]);
 	});

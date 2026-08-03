@@ -631,47 +631,11 @@ async function assertReportingOwnedSettingsProjection() {
 	try {
 		await projectionService.applyEvent({
 			schemaVersion: 1,
-			eventType: 'reporting.settings.changed.v1',
-			eventId: randomUUID(),
-			aggregateId: 'singleton',
-			aggregateVersion: '1',
-			sourceSequence: '1',
-			occurredAt: new Date().toISOString(),
-			tombstone: false,
-			state: {
-				id: 'singleton',
-				enabled: false,
-				destinationChatId: '-100999',
-				messageThreadId: 4,
-				coreOperationalAlertsThreadId: 88,
-				scheduleTime: '01:50',
-				timezone: 'UTC',
-				lastSuccessfulPeriodStart: null,
-				lastSuccessfulAt: null
-			}
-		});
-		const projected = await prisma.reportingSettings.findUniqueOrThrow({
-			where: { id: 'daily-summary' }
-		});
-		assert.equal(projected.destinationChatId, '-100111');
-		assert.equal(
-			projected.coreOperationalAlertsDestinationChatId,
-			'-100999'
-		);
-		assert.equal(projected.coreOperationalAlertsThreadId, 88);
-		assert.equal(projected.enabled, true);
-		assert.equal(projected.messageThreadId, 77);
-		assert.equal(projected.scheduleTime, '02:20');
-		assert.equal(projected.timezone, 'Europe/Moscow');
-		assert.equal(projected.scheduleGeneration, 2n);
-
-		await projectionService.applyEvent({
-			schemaVersion: 1,
 			eventType: 'reporting.core-operational-routing.changed.v1',
 			eventId: randomUUID(),
 			aggregateId: 'singleton',
 			aggregateVersion: '1',
-			sourceSequence: '2',
+			sourceSequence: '1',
 			occurredAt: new Date().toISOString(),
 			tombstone: false,
 			state: {

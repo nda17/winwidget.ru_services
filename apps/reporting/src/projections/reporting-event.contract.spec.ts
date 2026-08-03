@@ -180,9 +180,9 @@ describe('reporting source event contract', () => {
 			expect(() =>
 				parseReportingSourceEvent({
 					schemaVersion: 1,
-					eventType: 'reporting.settings.changed.v1',
+					eventType: 'reporting.core-operational-routing.changed.v1',
 					eventId: '99999999-9999-4999-8999-999999999999',
-					aggregateId: 'legacy-settings',
+					aggregateId: 'other-settings',
 					aggregateVersion: '1',
 					sourceSequence: '14',
 					occurredAt: '2026-07-31T00:00:00.000Z',
@@ -190,15 +190,9 @@ describe('reporting source event contract', () => {
 					state: tombstone
 						? null
 						: {
-								id: 'legacy-settings',
-								enabled: false,
-								destinationChatId: '',
-								messageThreadId: null,
-								coreOperationalAlertsThreadId: null,
-								scheduleTime: '01:50',
-								timezone: 'Europe/Moscow',
-								lastSuccessfulPeriodStart: null,
-								lastSuccessfulAt: null
+								id: 'other-settings',
+								coreOperationalAlertsDestinationChatId: '',
+								coreOperationalAlertsThreadId: null
 							}
 				})
 			).toThrow('aggregateId must equal singleton');

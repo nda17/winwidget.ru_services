@@ -142,7 +142,6 @@ const requiredQueues = [
 	'winwidget.admin.audit.reporting.v1',
 	'winwidget.limit-notification.email',
 	'winwidget.limit-notification.telegram',
-	'winwidget.report.daily-summary.telegram',
 	'winwidget.notification.telegram-destination-unavailable',
 	'winwidget.maintenance.database-backup'
 ];
@@ -153,7 +152,7 @@ const reportingEventTypes = [
 	'billing.subscription.changed.v1',
 	'widgets.widget.changed.v1',
 	'widgets.lead.changed.v1',
-	'reporting.settings.changed.v1'
+	'reporting.core-operational-routing.changed.v1'
 ];
 
 const streamReportingProjectionSnapshot = async () => {
@@ -1097,15 +1096,13 @@ try {
 
 	startProcess('dist/src/integration-worker-main.js', {
 		INTEGRATION_WORKER_KINDS:
-			'webhook,daily-summary-telegram,telegram-destination-unavailable,reporting-admin-audit',
+			'webhook,telegram-destination-unavailable,reporting-admin-audit',
 		RABBITMQ_WORKER_PREFETCH: '1'
 	});
 	await waitFor(async () => {
 		const queues = await Promise.all(
 			[
 				'winwidget.lead-integration.webhook.dead-letter',
-				'winwidget.report.daily-summary.telegram',
-				'winwidget.report.daily-summary.telegram.dead-letter',
 				'winwidget.notification.telegram-destination-unavailable',
 				'winwidget.notification.telegram-destination-unavailable.dead-letter',
 				'winwidget.admin.audit.reporting.v1',
@@ -1277,12 +1274,11 @@ try {
 		);
 	}
 
-	// Keep the smoke independent from real time and Telegram schedule settings.
+	// Keep the smoke independent from the real database-backup schedule.
 	const maintenanceScheduleSnapshot =
 		await prisma.telegramBotSettings.findUnique({
 			where: { id: 'singleton' },
 			select: {
-				dailySummaryEnabled: true,
 				databaseBackupEnabled: true
 			}
 		});
@@ -1290,12 +1286,10 @@ try {
 		await prisma.telegramBotSettings.upsert({
 			where: { id: 'singleton' },
 			update: {
-				dailySummaryEnabled: false,
 				databaseBackupEnabled: false
 			},
 			create: {
 				id: 'singleton',
-				dailySummaryEnabled: false,
 				databaseBackupEnabled: false
 			},
 			select: { updatedAt: true }
@@ -1399,8 +1393,6 @@ try {
 					[
 						'winwidget.lead-integration.webhook',
 						'winwidget.lead-integration.webhook.dead-letter',
-						'winwidget.report.daily-summary.telegram',
-						'winwidget.report.daily-summary.telegram.dead-letter',
 						'winwidget.notification.telegram-destination-unavailable',
 						'winwidget.notification.telegram-destination-unavailable.dead-letter',
 						'winwidget.admin.audit.reporting.v1',
@@ -1463,70 +1455,6 @@ try {
 		);
 		channel.ack(postRestartMessage);
 	}
-
-	const terminalDailySummaryJobId = randomUUID();
-	const terminalDailySummaryPeriodEnd = new Date();
-	const terminalDailySummaryPeriodStart = new Date(
-		terminalDailySummaryPeriodEnd.getTime() - 24 * 60 * 60 * 1000
-	);
-	const terminalDailySummaryScheduleKey = `ci:${terminalDailySummaryJobId}`;
-	createdEventIds.push(terminalDailySummaryJobId);
-	createdScheduledJobIds.push(terminalDailySummaryJobId);
-	await prisma.$transaction([
-		prisma.scheduledJobRun.create({
-			data: {
-				id: terminalDailySummaryJobId,
-				jobType: 'DAILY_TELEGRAM_SUMMARY',
-				scheduleKey: terminalDailySummaryScheduleKey,
-				trigger: 'SCHEDULED',
-				status: 'SUCCEEDED',
-				scheduledFor: terminalDailySummaryPeriodEnd,
-				periodStart: terminalDailySummaryPeriodStart,
-				periodEnd: terminalDailySummaryPeriodEnd,
-				input: {
-					chatId: 'ci-terminal-summary',
-					messageThreadId: 1
-				},
-				result: {
-					telegramSent: true,
-					smoke: true
-				},
-				finishedAt: terminalDailySummaryPeriodEnd
-			}
-		}),
-		prisma.outboxEvent.create({
-			data: {
-				id: terminalDailySummaryJobId,
-				messageId: terminalDailySummaryJobId,
-				eventType: 'report.daily-summary.requested.v1',
-				routingKey: 'report.daily-summary.requested.v1',
-				payload: {
-					schemaVersion: 1,
-					eventType: 'report.daily-summary.requested.v1',
-					jobId: terminalDailySummaryJobId,
-					jobType: 'DAILY_TELEGRAM_SUMMARY',
-					scheduleKey: terminalDailySummaryScheduleKey,
-					periodStart: terminalDailySummaryPeriodStart.toISOString(),
-					periodEnd: terminalDailySummaryPeriodEnd.toISOString()
-				}
-			}
-		})
-	]);
-	await waitFor(
-		() =>
-			prisma.integrationDeliveryReceipt
-				.findUnique({
-					where: {
-						eventId_integration: {
-							eventId: terminalDailySummaryJobId,
-							integration: 'daily-summary-telegram'
-						}
-					},
-					select: { status: true }
-				})
-				.then(receipt => receipt?.status === 'DELIVERED'),
-		'terminal daily summary delivery'
-	);
 
 	const terminalBackupJobId = randomUUID();
 	const terminalBackupCreatedAt = new Date();
@@ -1694,7 +1622,7 @@ try {
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: manual backup advisory lock, ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, Reporting audit Outbox -> idempotent ActivityLog and malformed -> isolated DLQ -> PostgreSQL, terminal scheduled jobs, malformed -> DLQ -> PostgreSQL${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
+		`Messaging integration smoke passed: manual backup advisory lock, ${smokeEventCount} lead events, mandatory return, manual retry routing, payment fan-out, Reporting audit Outbox -> idempotent ActivityLog and malformed -> isolated DLQ -> PostgreSQL, terminal database-backup job, malformed -> DLQ -> PostgreSQL${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);
@@ -1704,7 +1632,6 @@ try {
 		const where = {
 			id: 'singleton',
 			updatedAt: maintenanceScheduleState.updatedAt,
-			dailySummaryEnabled: false,
 			databaseBackupEnabled: false
 		};
 		if (maintenanceScheduleState.snapshot) {

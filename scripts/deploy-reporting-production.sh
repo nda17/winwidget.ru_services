@@ -86,7 +86,7 @@ reporting_capture_previous_runtime_config() {
 			LC_ALL=C sort
 	)"
 	previous_runtime_resource_snapshot="$(
-		docker inspect --format '{{printf "%d|%d|%d" .HostConfig.Memory .HostConfig.MemoryReservation .HostConfig.NanoCpus}}' "$container_id"
+		docker inspect --format '{{.HostConfig.Memory}}|{{.HostConfig.MemoryReservation}}|{{.HostConfig.NanoCpus}}' "$container_id"
 	)"
 	for key in APP_REVISION MODE CORS_ALLOWED_ORIGINS REPORTING_DATABASE_URL \
 		REPORTING_PROCESS_ROLE REPORTING_LISTEN_HOST REPORTING_PORT \
@@ -154,7 +154,7 @@ reporting_verify_previous_runtime_config() {
 			LC_ALL=C sort
 	)"
 	actual_resource_snapshot="$(
-		docker inspect --format '{{printf "%d|%d|%d" .HostConfig.Memory .HostConfig.MemoryReservation .HostConfig.NanoCpus}}' "$container_id"
+		docker inspect --format '{{.HostConfig.Memory}}|{{.HostConfig.MemoryReservation}}|{{.HostConfig.NanoCpus}}' "$container_id"
 	)"
 	[[ "$actual_env_snapshot" == "$previous_runtime_env_snapshot" &&
 		"$actual_resource_snapshot" == "$previous_runtime_resource_snapshot" ]]
@@ -489,7 +489,7 @@ reporting_deploy_self_test() {
 	local ambient_index numeric_index build_index provision_index trap_index recreate_index
 	local temporary_root rollback_marker exit_status rabbitmq_user_row
 	local signal expected_signal_status
-	source_text="$(declare -f reporting_deploy_main reporting_rollback_service reporting_create_pre_migration_backup reporting_deploy_on_exit reporting_capture_previous_runtime_config reporting_apply_previous_runtime_config reporting_provision_initial_rabbitmq_user reporting_extract_unique_rabbitmq_user_row reporting_rabbitmq_user_row_is_unprivileged reporting_require_rabbitmq_preflight reporting_validate_runtime_numeric_env reporting_parse_rabbitmq_credentials)"
+	source_text="$(declare -f reporting_deploy_main reporting_rollback_service reporting_create_pre_migration_backup reporting_deploy_on_exit reporting_capture_previous_runtime_config reporting_apply_previous_runtime_config reporting_verify_previous_runtime_config reporting_provision_initial_rabbitmq_user reporting_extract_unique_rabbitmq_user_row reporting_rabbitmq_user_row_is_unprivileged reporting_require_rabbitmq_preflight reporting_validate_runtime_numeric_env reporting_parse_rabbitmq_credentials)"
 	main_text="$(declare -f reporting_deploy_main)"
 	[[ "$source_text" != *'DATABASE_URL_PRODUCTION migrate'* &&
 		"$source_text" != *'--profile reporting-database up'* &&
@@ -500,6 +500,8 @@ reporting_deploy_self_test() {
 	}
 	[[ "$source_text" == *'REPORTING_MIGRATION_DATABASE_URL'* &&
 		"$source_text" == *'REPORTING_SCHEDULER_ENABLED'* &&
+		"$source_text" == *'{{.HostConfig.Memory}}|{{.HostConfig.MemoryReservation}}|{{.HostConfig.NanoCpus}}'* &&
+		"$source_text" != *'printf "%d|%d|%d" .HostConfig.Memory'* &&
 		"$source_text" == *'AUTOMATIC_PROD_PUSH'* &&
 		"$source_text" == *'reporting_first_rollout_deploy_action'* &&
 		"$source_text" == *'reporting_validate_preflight_secret_isolation'* &&
@@ -522,7 +524,8 @@ reporting_deploy_self_test() {
 		"$source_text" == *'list_exchanges'* &&
 		"$source_text" == *'"$rabbit_url" "$new_image_id" "$deploy_revision"'* &&
 		"$source_text" == *'REPORTING_IMAGE="$new_image_id"'* &&
-		"$source_text" == *'--no-deps --no-build reporting-migrate'* &&
+		"$source_text" == *'--no-deps reporting-migrate'* &&
+		"$source_text" != *'run --rm --no-deps --no-build reporting-migrate'* &&
 		"$source_text" == *'"$new_image_id" sh -euc'* &&
 		"$source_text" == *'--security-opt no-new-privileges'* &&
 		"$source_text" != *'--entrypoint node "$REPORTING_IMAGE"'* ]] || {
@@ -961,8 +964,8 @@ test ! -e public/widgets
 		( "$previous_container_present" == 'true' || "$reporting_migration_table_present" == 'true' ) ]]; then
 		reporting_create_pre_migration_backup "$deploy_revision"
 	fi
-	reporting_compose --profile reporting-migration run --rm --no-deps --no-build reporting-migrate
-	reporting_compose --profile reporting-migration run --rm --no-deps --no-build reporting-migrate \
+	reporting_compose --profile reporting-migration run --rm --no-deps reporting-migrate
+	reporting_compose --profile reporting-migration run --rm --no-deps reporting-migrate \
 		migrate status --schema prisma/schema.prisma
 	reporting_reconcile_database_acl
 	reporting_verify_database_access_boundaries

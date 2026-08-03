@@ -795,7 +795,7 @@ export class MessagingAdminService {
 		eventId: string,
 		payload: Prisma.JsonValue
 	): { id: string; jobType: string } | null {
-		if (kind !== 'daily-summary-telegram' && kind !== 'database-backup') {
+		if (kind !== 'database-backup') {
 			return null;
 		}
 		if (
@@ -810,12 +810,7 @@ export class MessagingAdminService {
 			);
 		}
 		const jobType = payload.jobType;
-		if (
-			typeof jobType !== 'string' ||
-			(kind === 'daily-summary-telegram' &&
-				jobType !== SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY) ||
-			(kind === 'database-backup' && !isDatabaseBackupJobType(jobType))
-		) {
+		if (typeof jobType !== 'string' || !isDatabaseBackupJobType(jobType)) {
 			throw new BadRequestException('Некорректный тип фонового задания');
 		}
 		return { id: payload.jobId, jobType };
@@ -1032,14 +1027,12 @@ export class MessagingAdminService {
 			jobType?: string;
 		};
 		const scheduledJobName =
-			jobPayload.jobType === SCHEDULED_JOB_TYPES.DAILY_TELEGRAM_SUMMARY
-				? 'Ежедневная Telegram-сводка'
-				: jobPayload.jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP
-					? 'Backup PostgreSQL'
-					: jobPayload.jobType ===
-						  SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP
-						? 'Backup PostgreSQL Notification Delivery'
-						: null;
+			jobPayload.jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP
+				? 'Backup PostgreSQL'
+				: jobPayload.jobType ===
+					  SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP
+					? 'Backup PostgreSQL Notification Delivery'
+					: null;
 		const scheduledJobEntity = scheduledJobName
 			? {
 					id: jobPayload.jobId || item.eventId,

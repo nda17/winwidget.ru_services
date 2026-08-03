@@ -7,7 +7,6 @@ export const REPORTING_SOURCE_EVENT_TYPES = [
 	'billing.subscription.changed.v1',
 	'widgets.widget.changed.v1',
 	'widgets.lead.changed.v1',
-	'reporting.settings.changed.v1',
 	'reporting.core-operational-routing.changed.v1'
 ] as const;
 
@@ -85,18 +84,6 @@ export interface LeadState {
 	createdAt: string;
 }
 
-export interface ReportingSettingsState {
-	id: string;
-	enabled: boolean;
-	destinationChatId: string;
-	messageThreadId: number | null;
-	coreOperationalAlertsThreadId: number | null;
-	scheduleTime: string;
-	timezone: string;
-	lastSuccessfulPeriodStart: string | null;
-	lastSuccessfulAt: string | null;
-}
-
 export interface CoreOperationalRoutingState {
 	id: 'singleton';
 	coreOperationalAlertsDestinationChatId: string;
@@ -109,7 +96,6 @@ type SourceStateByType = {
 	'billing.subscription.changed.v1': BillingSubscriptionState;
 	'widgets.widget.changed.v1': WidgetState;
 	'widgets.lead.changed.v1': LeadState;
-	'reporting.settings.changed.v1': ReportingSettingsState;
 	'reporting.core-operational-routing.changed.v1': CoreOperationalRoutingState;
 };
 
@@ -165,7 +151,6 @@ const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DECIMAL_PATTERN = /^(0|[1-9][0-9]{0,64})$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
-const TIME_PATTERN = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 const MAX_AUTOMATIC_RETRY_ATTEMPT = 3;
 const MAX_MANUAL_RETRY_CYCLE = 1_000_000;
 
@@ -185,7 +170,6 @@ export function sourceEventTypeToStream(
 		'billing.subscription.changed.v1': 'billingSubscription',
 		'widgets.widget.changed.v1': 'widget',
 		'widgets.lead.changed.v1': 'lead',
-		'reporting.settings.changed.v1': 'reportingSettings',
 		'reporting.core-operational-routing.changed.v1': 'reportingSettings'
 	};
 	return mapping[eventType];
@@ -230,9 +214,7 @@ export function parseReportingSourceEvent(
 	}
 	assertIsoDate(record.occurredAt, 'occurredAt');
 	if (
-		(record.eventType === 'reporting.settings.changed.v1' ||
-			record.eventType ===
-				'reporting.core-operational-routing.changed.v1') &&
+		record.eventType === 'reporting.core-operational-routing.changed.v1' &&
 		record.aggregateId !== 'singleton'
 	) {
 		throw new InvalidReportingEventError(
@@ -636,57 +618,9 @@ function parseSourceState(
 		}
 		return;
 	}
-	const state = exactRecord(value, [
-		'id',
-		'enabled',
-		'destinationChatId',
-		'messageThreadId',
-		'coreOperationalAlertsThreadId',
-		'scheduleTime',
-		'timezone',
-		'lastSuccessfulPeriodStart',
-		'lastSuccessfulAt'
-	]);
-	if (state.id !== 'singleton') {
-		throw new InvalidReportingEventError(
-			'state.id must equal singleton for reporting settings'
-		);
-	}
-	if (typeof state.enabled !== 'boolean') {
-		throw new InvalidReportingEventError(
-			'state.enabled must be a boolean'
-		);
-	}
-	if (
-		typeof state.destinationChatId !== 'string' ||
-		state.destinationChatId.length > 255
-	) {
-		throw new InvalidReportingEventError(
-			'state.destinationChatId is invalid'
-		);
-	}
-	if (state.messageThreadId !== null) {
-		assertPositiveInteger(state.messageThreadId, 'state.messageThreadId');
-	}
-	if (state.coreOperationalAlertsThreadId !== null) {
-		assertPositiveInteger(
-			state.coreOperationalAlertsThreadId,
-			'state.coreOperationalAlertsThreadId'
-		);
-	}
-	if (
-		typeof state.scheduleTime !== 'string' ||
-		!TIME_PATTERN.test(state.scheduleTime)
-	) {
-		throw new InvalidReportingEventError('state.scheduleTime is invalid');
-	}
-	assertBoundedString(state.timezone, 'state.timezone', 100);
-	assertTimeZone(state.timezone);
-	assertNullableIsoDate(
-		state.lastSuccessfulPeriodStart,
-		'state.lastSuccessfulPeriodStart'
+	throw new InvalidReportingEventError(
+		'Unsupported Reporting source event'
 	);
-	assertNullableIsoDate(state.lastSuccessfulAt, 'state.lastSuccessfulAt');
 }
 
 function assertIdAndDates(
@@ -811,16 +745,5 @@ function assertPositiveInteger(
 		throw new InvalidReportingEventError(
 			`${field} must be a positive integer`
 		);
-	}
-}
-
-function assertTimeZone(value: unknown): asserts value is string {
-	if (typeof value !== 'string') {
-		throw new InvalidReportingEventError('state.timezone is invalid');
-	}
-	try {
-		new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
-	} catch {
-		throw new InvalidReportingEventError('state.timezone is invalid');
 	}
 }

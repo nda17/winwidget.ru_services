@@ -67,8 +67,7 @@ const MAX_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
 const TELEGRAM_KINDS = new Set<IntegrationKind>([
 	'telegram',
 	'payment-telegram',
-	'limit-telegram',
-	'daily-summary-telegram'
+	'limit-telegram'
 ]);
 const EMAIL_KINDS = new Set<IntegrationKind>([
 	'email',

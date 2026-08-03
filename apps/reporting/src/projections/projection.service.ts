@@ -8,7 +8,6 @@ import {
 	InvalidReportingEventError,
 	LeadState,
 	ReportingProjectionStream,
-	ReportingSettingsState,
 	ReportingSourceEvent,
 	WidgetState,
 	parseWidgetAggregateId,
@@ -332,17 +331,9 @@ export class ProjectionService {
 					}
 				: null;
 		}
-		const current = await transaction.reportingSettings.findUnique({
-			where: { id: 'daily-summary' },
-			select: { sourceAggregateVersion: true, stateHash: true }
-		});
-		return current?.sourceAggregateVersion !== null &&
-			current?.sourceAggregateVersion !== undefined
-			? {
-					aggregateVersion: current.sourceAggregateVersion,
-					stateHash: current.stateHash
-				}
-			: null;
+		throw new InvalidReportingEventError(
+			'Unsupported reporting settings event type'
+		);
 	}
 
 	private async applyNewerEvent(
@@ -554,76 +545,9 @@ export class ProjectionService {
 			});
 			return ProjectionReceiptResult.APPLIED;
 		}
-		const state = event.state as ReportingSettingsState | null;
-		await transaction.reportingSettings.upsert({
-			where: { id: 'daily-summary' },
-			create: {
-				id: 'daily-summary',
-				owner: ReportingOwner.CORE_SHADOW,
-				enabled: false,
-				sourceAggregateVersion: new Prisma.Decimal(0),
-				sourceSequence: new Prisma.Decimal(0)
-			},
-			update: {}
-		});
-		const lockedRows = await transaction.$queryRaw<Array<{ id: string }>>(
-			Prisma.sql`
-				SELECT "id"
-				FROM reporting."reporting_settings"
-				WHERE "id" = 'daily-summary'
-				FOR UPDATE
-			`
+		throw new InvalidReportingEventError(
+			'Unsupported reporting settings event type'
 		);
-		if (lockedRows.length !== 1) {
-			throw new Error('Daily Summary settings row is missing');
-		}
-		const current = await transaction.reportingSettings.findUniqueOrThrow({
-			where: { id: 'daily-summary' }
-		});
-		if (current.owner === ReportingOwner.REPORTING) {
-			// After the explicit switch, Core projects only its own operational
-			// alerts route. Reporting-owned Daily Summary fields must never be
-			// overwritten by a later Core projection.
-			await transaction.reportingSettings.update({
-				where: { id: 'daily-summary' },
-				data: {
-					coreOperationalAlertsDestinationChatId:
-						state?.destinationChatId.trim() || null,
-					coreOperationalAlertsThreadId:
-						state?.coreOperationalAlertsThreadId ?? null,
-					sourceAggregateVersion: new Prisma.Decimal(
-						event.aggregateVersion
-					),
-					sourceSequence: new Prisma.Decimal(event.sourceSequence),
-					stateHash
-				}
-			});
-			return ProjectionReceiptResult.APPLIED;
-		}
-		await transaction.reportingSettings.update({
-			where: { id: 'daily-summary' },
-			data: {
-				enabled: state?.enabled ?? false,
-				destinationChatId: state?.destinationChatId.trim() || null,
-				messageThreadId: state?.messageThreadId ?? null,
-				coreOperationalAlertsDestinationChatId:
-					state?.destinationChatId.trim() || null,
-				coreOperationalAlertsThreadId:
-					state?.coreOperationalAlertsThreadId ?? null,
-				scheduleTime: state?.scheduleTime || '01:50',
-				timezone: state?.timezone || 'Europe/Moscow',
-				lastSuccessfulPeriodStart: state?.lastSuccessfulPeriodStart
-					? new Date(state.lastSuccessfulPeriodStart)
-					: null,
-				lastSuccessfulAt: state?.lastSuccessfulAt
-					? new Date(state.lastSuccessfulAt)
-					: null,
-				sourceAggregateVersion: new Prisma.Decimal(event.aggregateVersion),
-				sourceSequence: new Prisma.Decimal(event.sourceSequence),
-				stateHash
-			}
-		});
-		return ProjectionReceiptResult.APPLIED;
 	}
 
 	private async advanceDiagnosticWatermark(

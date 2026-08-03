@@ -124,6 +124,7 @@ fi
 # database-restore-production-guard: before-mutation
 database_restore_guard_assert_before_mutation \
 	identity-if-present "$ENV_FILE"
+reporting_transition_cleanup_integration_worker_env "$deploy_revision"
 
 reporting_automatic_prod_push="${REPORTING_AUTOMATIC_PROD_PUSH:-false}"
 reporting_deploy_action="$(
@@ -5685,6 +5686,7 @@ check_messaging_readiness() {
 		-e "INTEGRATION_WORKER_KINDS=$(get_env_value INTEGRATION_WORKER_KINDS)" \
 		-e "MAINTENANCE_WORKER_KINDS=$(get_env_value MAINTENANCE_WORKER_KINDS)" \
 		-e "NOTIFICATION_DELIVERY_KINDS=$(get_env_value NOTIFICATION_DELIVERY_KINDS)" \
+		-e "CORE_NOTIFICATION_DELIVERY_READINESS_KINDS=$(reporting_expected_core_notification_delivery_kinds)" \
 		api node - <<'NODE'
 const { PrismaClient } = require('@prisma/client');
 const {
@@ -5739,7 +5741,7 @@ const run = async () => {
 		...parseEnabledKinds('INTEGRATION_WORKER_KINDS', INTEGRATION_KINDS),
 		...parseEnabledKinds('MAINTENANCE_WORKER_KINDS', MAINTENANCE_KINDS),
 		...parseEnabledKinds(
-			'NOTIFICATION_DELIVERY_KINDS',
+			'CORE_NOTIFICATION_DELIVERY_READINESS_KINDS',
 			NOTIFICATION_DELIVERY_KINDS
 		)
 	];

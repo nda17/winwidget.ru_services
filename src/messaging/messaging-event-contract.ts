@@ -1,8 +1,6 @@
 import {
 	AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
-	DAILY_SUMMARY_EVENT_TYPE,
-	DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	DATABASE_BACKUP_EVENT_TYPE,
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
@@ -22,7 +20,6 @@ import {
 	REPORTING_IDENTITY_USER_EVENT_TYPE,
 	REPORTING_LEAD_EVENT_TYPE,
 	ReportingProjectionKind,
-	REPORTING_SETTINGS_EVENT_TYPE,
 	REPORTING_WIDGET_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
@@ -194,7 +191,6 @@ const REPORTING_EVENT_KINDS: Record<string, ReportingProjectionKind> = {
 		'reporting-billing-subscription',
 	[REPORTING_WIDGET_EVENT_TYPE]: 'reporting-widget',
 	[REPORTING_LEAD_EVENT_TYPE]: 'reporting-lead',
-	[REPORTING_SETTINGS_EVENT_TYPE]: 'reporting-settings',
 	[REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE]: 'reporting-settings'
 };
 
@@ -397,85 +393,6 @@ const assertReportingLeadState = (
 	assertIsoDate(state.createdAt, 'payload.state.createdAt');
 };
 
-const assertReportingSettingsState = (
-	state: JsonRecord,
-	aggregateId: string
-): void => {
-	assertExactKeys(
-		state,
-		[
-			'id',
-			'enabled',
-			'destinationChatId',
-			'messageThreadId',
-			'coreOperationalAlertsThreadId',
-			'scheduleTime',
-			'timezone',
-			'lastSuccessfulPeriodStart',
-			'lastSuccessfulAt'
-		],
-		[],
-		'payload.state'
-	);
-	assertIdentifier(state.id, 'payload.state.id');
-	if (state.id !== aggregateId) {
-		throw new Error('payload.state.id must match payload.aggregateId');
-	}
-	assertBoolean(state.enabled, 'payload.state.enabled');
-	if (
-		typeof state.destinationChatId !== 'string' ||
-		state.destinationChatId.length > 255
-	) {
-		throw new Error('payload.state.destinationChatId must be a string');
-	}
-	if (
-		state.messageThreadId !== null &&
-		(!Number.isInteger(state.messageThreadId) ||
-			Number(state.messageThreadId) < 1)
-	) {
-		throw new Error(
-			'payload.state.messageThreadId must be a positive integer or null'
-		);
-	}
-	if (
-		state.coreOperationalAlertsThreadId !== null &&
-		(!Number.isInteger(state.coreOperationalAlertsThreadId) ||
-			Number(state.coreOperationalAlertsThreadId) < 1)
-	) {
-		throw new Error(
-			'payload.state.coreOperationalAlertsThreadId must be a positive integer or null'
-		);
-	}
-	if (
-		typeof state.scheduleTime !== 'string' ||
-		!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(state.scheduleTime)
-	) {
-		throw new Error('payload.state.scheduleTime must use HH:mm');
-	}
-	assertString(state.timezone, 'payload.state.timezone', {
-		maxLength: 100
-	});
-	try {
-		new Intl.DateTimeFormat('en-US', {
-			timeZone: String(state.timezone)
-		}).format();
-	} catch {
-		throw new Error(
-			'payload.state.timezone must be a valid IANA timezone'
-		);
-	}
-	assertIsoDate(
-		state.lastSuccessfulPeriodStart,
-		'payload.state.lastSuccessfulPeriodStart',
-		true
-	);
-	assertIsoDate(
-		state.lastSuccessfulAt,
-		'payload.state.lastSuccessfulAt',
-		true
-	);
-};
-
 const assertReportingCoreOperationalRoutingState = (
 	state: JsonRecord,
 	aggregateId: string
@@ -562,9 +479,7 @@ export const assertReportingProjectionEvent = (
 	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
 	assertBoolean(payload.tombstone, 'payload.tombstone');
 	if (
-		(payload.eventType === REPORTING_SETTINGS_EVENT_TYPE ||
-			payload.eventType ===
-				REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE) &&
+		payload.eventType === REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE &&
 		payload.aggregateId !== 'singleton'
 	) {
 		throw new Error(
@@ -595,9 +510,6 @@ export const assertReportingProjectionEvent = (
 			break;
 		case REPORTING_LEAD_EVENT_TYPE:
 			assertReportingLeadState(state, aggregateId);
-			break;
-		case REPORTING_SETTINGS_EVENT_TYPE:
-			assertReportingSettingsState(state, aggregateId);
 			break;
 		case REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE:
 			assertReportingCoreOperationalRoutingState(state, aggregateId);
@@ -967,20 +879,16 @@ const assertTelegramDestinationUnavailableEvent = (
 
 const assertNotificationReference = (
 	value: unknown,
-	expectedType: 'daily-summary-job' | 'subscription-expiry-reminder'
+	expectedType: 'subscription-expiry-reminder'
 ): JsonRecord => {
 	const reference = assertRecord(value, 'payload.reference');
 	assertExactKeys(reference, ['type', 'id'], [], 'payload.reference');
 	if (reference.type !== expectedType) {
 		throw new Error(`payload.reference.type must be ${expectedType}`);
 	}
-	if (expectedType === 'daily-summary-job') {
-		assertUuid(reference.id, 'payload.reference.id');
-	} else {
-		assertString(reference.id, 'payload.reference.id', {
-			maxLength: 255
-		});
-	}
+	assertString(reference.id, 'payload.reference.id', {
+		maxLength: 255
+	});
 	return reference;
 };
 
@@ -1005,31 +913,6 @@ const assertPreparedNotificationEvent = (
 	const content = assertRecord(payload.content, 'payload.content');
 
 	switch (payload.eventType) {
-		case DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
-			assertNotificationReference(payload.reference, 'daily-summary-job');
-			assertExactKeys(
-				destination,
-				['telegramChatId', 'messageThreadId'],
-				[],
-				'payload.destination'
-			);
-			assertString(
-				destination.telegramChatId,
-				'payload.destination.telegramChatId'
-			);
-			if (
-				!Number.isInteger(destination.messageThreadId) ||
-				Number(destination.messageThreadId) < 1
-			) {
-				throw new Error(
-					'payload.destination.messageThreadId must be a positive integer'
-				);
-			}
-			assertExactKeys(content, ['text'], [], 'payload.content');
-			assertString(content.text, 'payload.content.text', {
-				maxLength: 10_000
-			});
-			return 'daily-summary-delivery-telegram';
 		case SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE:
 		case SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE: {
 			assertNotificationReference(
@@ -1113,14 +996,10 @@ const assertNotificationDeliveryOutcome = (
 	) {
 		throw new Error('payload.sourceKind is invalid');
 	}
-	if (payload.sourceKind === 'daily-summary-delivery-telegram') {
-		assertNotificationReference(payload.reference, 'daily-summary-job');
-	} else {
-		assertNotificationReference(
-			payload.reference,
-			'subscription-expiry-reminder'
-		);
-	}
+	assertNotificationReference(
+		payload.reference,
+		'subscription-expiry-reminder'
+	);
 	if (payload.status !== 'DELIVERED' && payload.status !== 'FAILED') {
 		throw new Error('payload.status is invalid');
 	}
@@ -1374,22 +1253,6 @@ const assertScheduledEvent = (payload: JsonRecord): MessagingKind => {
 	assertUuid(payload.jobId, 'payload.jobId');
 	assertString(payload.jobType, 'payload.jobType');
 	assertString(payload.scheduleKey, 'payload.scheduleKey');
-	if (payload.eventType === DAILY_SUMMARY_EVENT_TYPE) {
-		if (payload.jobType !== 'DAILY_TELEGRAM_SUMMARY') {
-			throw new Error('Invalid daily summary job type');
-		}
-		assertIsoDate(payload.periodStart, 'payload.periodStart');
-		assertIsoDate(payload.periodEnd, 'payload.periodEnd');
-		if (
-			Date.parse(payload.periodEnd as string) <=
-			Date.parse(payload.periodStart as string)
-		) {
-			throw new Error(
-				'payload.periodEnd must be after payload.periodStart'
-			);
-		}
-		return 'daily-summary-telegram';
-	}
 	if (payload.eventType === DATABASE_BACKUP_EVENT_TYPE) {
 		if (
 			typeof payload.jobType !== 'string' ||
@@ -1431,12 +1294,10 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 		case LIMIT_REACHED_EMAIL_EVENT_TYPE:
 		case LIMIT_REACHED_TELEGRAM_EVENT_TYPE:
 			return [assertLimitEvent(payload)];
-		case DAILY_SUMMARY_EVENT_TYPE:
 		case DATABASE_BACKUP_EVENT_TYPE:
 			return [assertScheduledEvent(payload)];
 		case TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE:
 			return [assertTelegramDestinationUnavailableEvent(payload)];
-		case DAILY_SUMMARY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
 		case SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE:
 		case SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE:
 			return [assertPreparedNotificationEvent(payload)];
@@ -1449,7 +1310,6 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 		case REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE:
 		case REPORTING_WIDGET_EVENT_TYPE:
 		case REPORTING_LEAD_EVENT_TYPE:
-		case REPORTING_SETTINGS_EVENT_TYPE:
 		case REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE:
 			return [assertReportingProjectionEvent(payload)];
 		default:
@@ -1475,8 +1335,7 @@ export function assertMessagingEventContract(
 
 	const expectedKinds = resolveExpectedKinds(payload);
 	if (
-		(payload.eventType === DAILY_SUMMARY_EVENT_TYPE ||
-			payload.eventType === DATABASE_BACKUP_EVENT_TYPE) &&
+		payload.eventType === DATABASE_BACKUP_EVENT_TYPE &&
 		payload.jobId !== metadata.messageId
 	) {
 		throw new Error('Scheduled event jobId must match the AMQP messageId');
