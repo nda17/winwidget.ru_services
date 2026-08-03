@@ -847,7 +847,8 @@ reporting_cutover_validate_shadow_evidence() {
 		echo 'Shadow evidence must be a root-owned regular file with mode 600.' >&2
 		return 1
 	}
-	[[ "$image_id" == "$(reporting_resolve_image_id_for_revision "$revision")" ]] || return 1
+	[[ "$image_id" == "$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" ]] || return 1
 	reporting_run_isolated_node_validator "$image_id" '
 const { readFileSync } = require("node:fs");
 const { parseReportingShadowEvidence } = require(
@@ -1801,7 +1802,8 @@ reporting_cutover_validate_scheduler_evidence() {
 	[[ -f "$evidence" && ! -L "$evidence" &&
 		"$(reporting_stat_mode "$evidence")" == '600' &&
 		"$(reporting_stat_owner "$evidence")" == '0:0' ]] || return 1
-	image="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
+	image="$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" || return 1
 	reporting_run_isolated_node_validator "$image" '
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/evidence.json", "utf8"));
@@ -1988,7 +1990,8 @@ reporting_cutover_validate_route_evidence() {
 	[[ -f "$evidence" && ! -L "$evidence" &&
 		"$(reporting_stat_mode "$evidence")" == '600' &&
 		"$(reporting_stat_owner "$evidence")" == '0:0' ]] || return 1
-	image="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
+	image="$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" || return 1
 	allowed_origins="$(reporting_get_env_value CORS_ALLOWED_ORIGINS)"
 	reporting_run_isolated_node_validator "$image" '
 const { readFileSync } = require("node:fs");
@@ -1997,7 +2000,7 @@ const exact = (object, keys) => object && typeof object === "object" &&
   !Array.isArray(object) && Object.keys(object).sort().join("|") === [...keys].sort().join("|");
 const checks = [
   "gatewayRoute", "frontendReportingApi", "adminDashboard", "adminOverview",
-  "adminRegistrations", "dailySummarySettings", "legacyStatisticsRetained",
+  "adminRegistrations", "dailySummarySettings", "legacyStatisticsTombstoned",
   "allowedCors", "deniedCors",
   "databaseRestoreSettings", "databaseRestoreUnauthenticatedRejected",
   "logoutRejected", "blockedUserRejected", "revokedSessionRejected",
@@ -2098,7 +2101,8 @@ reporting_cutover_validate_frontend_runtime_attestation() (
 		echo 'Cross-VPS frontend runtime attestation signature is invalid.' >&2
 		return 1
 	}
-	image="$(reporting_resolve_image_id_for_revision "$backend_revision")" || return 1
+	image="$(reporting_resolve_image_id_for_revision \
+		"$backend_revision" "winwidget-reporting:git-$backend_revision")" || return 1
 	value="$(reporting_run_isolated_node_validator "$image" '
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/attestation.json", "utf8"));
@@ -2171,7 +2175,8 @@ reporting_cutover_route_evidence_verified_at() {
 	route_sha="$(reporting_cutover_marker_value route_evidence_sha256)" || return 1
 	reporting_cutover_require_archived_evidence routes "$route_sha" || return 1
 	evidence="$(reporting_cutover_evidence_path routes "$route_sha")" || return 1
-	image="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
+	image="$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" || return 1
 	reporting_run_isolated_node_validator "$image" '
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/evidence.json", "utf8"));
@@ -2270,9 +2275,11 @@ const parseJson = async response => {
   if (!["retained", "absent"].includes(process.env.EXPECTED_LEGACY_POLICY)) {
     process.exit(1);
   }
-  for (const origin of origins) {
-    const currentResponse = await request(origin, current);
-    if (currentResponse.status !== 200) process.exit(1);
+	for (const origin of origins) {
+		if (process.env.EXPECTED_LEGACY_POLICY === "retained") {
+			const currentResponse = await request(origin, current);
+			if (currentResponse.status !== 200) process.exit(1);
+		}
     for (const path of legacy) {
       const response = await request(origin, path);
       if (process.env.EXPECTED_LEGACY_POLICY === "absent") {
@@ -2355,11 +2362,7 @@ reporting_cutover_require_archived_route_runtime() {
 	reporting_cutover_require_archived_frontend_runtime_attestation \
 		"$route_evidence" "$evidence_revision" || return 1
 	reporting_cutover_require_live_frontend_runtime "$route_evidence" "$evidence_revision"
-	if [[ "$runtime_revision" == "$evidence_revision" ]]; then
-		reporting_cutover_require_live_legacy_routes_retained "$runtime_revision"
-	else
-		reporting_cutover_require_live_legacy_routes_absent "$runtime_revision"
-	fi
+	reporting_cutover_require_live_legacy_routes_absent "$runtime_revision"
 }
 
 reporting_cutover_verify_routes() {
@@ -2399,7 +2402,7 @@ reporting_cutover_verify_routes() {
 	sha256="$(reporting_sha256_file "$evidence")"
 	reporting_cutover_validate_route_evidence "$evidence" "$revision" "$switch_generation"
 	reporting_cutover_require_live_frontend_runtime "$evidence" "$revision" true
-	reporting_cutover_require_live_legacy_routes_retained "$revision"
+	reporting_cutover_require_live_legacy_routes_absent "$revision"
 	reporting_cutover_require_stable_digest routes "$evidence" "$sha256"
 	[[ "${CONFIRM_REPORTING_ROUTES_VERIFIED:-}" == "routes:$revision:$switch_generation:$sha256" ]] || {
 		echo "Set CONFIRM_REPORTING_ROUTES_VERIFIED=routes:$revision:$switch_generation:$sha256 after reviewing frontend/auth/CORS smoke." >&2
@@ -2425,7 +2428,8 @@ reporting_cutover_validate_restore_evidence() {
 	[[ -f "$evidence" && ! -L "$evidence" &&
 		"$(reporting_stat_mode "$evidence")" == '600' &&
 		"$(reporting_stat_owner "$evidence")" == '0:0' ]] || return 1
-	image="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
+	image="$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" || return 1
 	reporting_run_isolated_node_validator "$image" '
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/evidence.json", "utf8"));
@@ -2490,6 +2494,9 @@ reporting_cutover_verify_restore() {
 
 reporting_cutover_core_content_manifest_sql() {
 	cat <<'SQL'
+WITH params AS (
+  SELECT :'backup_job_id'::TEXT AS backup_job_id
+)
 SELECT format(
   $statement$
 SELECT %L || '|' || count(*)::TEXT || '|' ||
@@ -2511,7 +2518,7 @@ $statement$,
   source_row.id = %L::UUID
   AND source_row.job_type = 'DATABASE_BACKUP'
 )$filter$,
-      :'backup_job_id'
+      params.backup_job_id
     )
     WHEN 'outbox_events' THEN format(
       $filter$WHERE NOT (
@@ -2527,8 +2534,8 @@ $statement$,
   AND source_row.payload ->> 'jobId' = %L
   AND source_row.payload ->> 'jobType' = 'DATABASE_BACKUP'
 )$filter$,
-      :'backup_job_id',
-      :'backup_job_id'
+      params.backup_job_id,
+      params.backup_job_id
     )
     WHEN 'admin_event_logs' THEN format(
       $filter$WHERE NOT (
@@ -2548,9 +2555,9 @@ $statement$,
     AND source_row.metadata ->> 'integration' = 'database-backup'
   )
 )$filter$,
-      :'backup_job_id',
-      :'backup_job_id',
-      :'backup_job_id'
+      params.backup_job_id,
+      params.backup_job_id,
+      params.backup_job_id
     )
     WHEN 'integration_delivery_failures' THEN format(
       $filter$WHERE NOT (
@@ -2562,13 +2569,14 @@ $statement$,
   AND source_row.payload ->> 'jobId' = %L
   AND source_row.payload ->> 'jobType' = 'DATABASE_BACKUP'
 )$filter$,
-      :'backup_job_id',
-      :'backup_job_id'
+      params.backup_job_id,
+      params.backup_job_id
     )
     ELSE ''
   END
 )
 FROM pg_tables
+CROSS JOIN params
 WHERE schemaname = 'public'
   AND tablename <> 'messaging_heartbeats'
 ORDER BY tablename::TEXT COLLATE "C"
@@ -2656,7 +2664,8 @@ reporting_cutover_core_backup_job_summary() {
 	local job_json="$1" job_id="$2" route_boundary="$3" expected_database="$4"
 	local revision image_id
 	revision="$(reporting_cutover_marker_value revision)" || return 1
-	image_id="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
+	image_id="$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" || return 1
 	printf '%s\n' "$job_json" | reporting_run_isolated_node_validator "$image_id" '
 const { createHash } = require("node:crypto");
 const { readFileSync } = require("node:fs");
@@ -2738,14 +2747,16 @@ reporting_cutover_validate_core_cleanup_backup_evidence() {
 		"$revision" "winwidget-database-restore:git-$revision")" || return 1
 	expected_database="$(printf '%s\n' "$(reporting_get_env_value DATABASE_BACKUP_URL)" | \
 		reporting_run_isolated_node_validator \
-			"$(reporting_resolve_image_id_for_revision "$revision")" '
+			"$(reporting_resolve_image_id_for_revision \
+				"$revision" "winwidget-reporting:git-$revision")" '
 const { readFileSync } = require("node:fs");
 const value = new URL(readFileSync(0, "utf8").trim());
 if (!value.pathname || value.pathname === "/") process.exit(1);
 process.stdout.write(decodeURIComponent(value.pathname.slice(1)));
 ')" || return 1
 	job_id="$(reporting_run_isolated_node_validator \
-		"$(reporting_resolve_image_id_for_revision "$revision")" '
+		"$(reporting_resolve_image_id_for_revision \
+			"$revision" "winwidget-reporting:git-$revision")" '
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/evidence.json", "utf8"));
 if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -2764,7 +2775,8 @@ process.stdout.write(value.jobId);
 		return 1
 	}
 	reporting_run_isolated_node_validator \
-		"$(reporting_resolve_image_id_for_revision "$revision")" '
+		"$(reporting_resolve_image_id_for_revision \
+			"$revision" "winwidget-reporting:git-$revision")" '
 const { readFileSync } = require("node:fs");
 const exact = (value, keys) => value && typeof value === "object" &&
   !Array.isArray(value) && Object.keys(value).sort().join("|") === [...keys].sort().join("|");
@@ -3470,12 +3482,11 @@ process.stdout.write(decodeURIComponent(value.pathname.slice(1)));
 		--dbname core_restore_drill \
 		--command "$(reporting_cutover_core_schema_manifest_sql)" \
 		>"$schema_manifest"
-	docker exec "$container_id" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-		--set="backup_job_id=$job_id" \
-		--tuples-only --no-align --field-separator='|' --username postgres \
-		--dbname core_restore_drill \
-		--command "$(reporting_cutover_core_row_anchor_manifest_sql)" \
-		>"$row_manifest"
+	reporting_cutover_core_row_anchor_manifest_sql | \
+		docker exec -i "$container_id" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+			--set="backup_job_id=$job_id" \
+			--tuples-only --no-align --field-separator='|' --username postgres \
+			--dbname core_restore_drill >"$row_manifest"
 	reporting_cutover_core_content_manifest_sql | \
 		docker exec -i "$container_id" psql --no-psqlrc --set ON_ERROR_STOP=1 \
 			--set="backup_job_id=$job_id" \
@@ -3590,7 +3601,8 @@ reporting_cutover_core_backup_sha_from_review() {
 	[[ $# == 1 ]] || return 1
 	local review="$1" revision image_id
 	revision="$(reporting_cutover_marker_value revision)" || return 1
-	image_id="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
+	image_id="$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" || return 1
 	reporting_run_isolated_node_validator "$image_id" '
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/review.json", "utf8"));
@@ -3606,7 +3618,8 @@ reporting_cutover_require_live_core_matches_backup_evidence() (
 	local expected_migration_sha expected_schema_sha
 	local migration_manifest schema_manifest actual_sha
 	revision="$(reporting_cutover_marker_value revision)" || return 1
-	image_id="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
+	image_id="$(reporting_resolve_image_id_for_revision \
+		"$revision" "winwidget-reporting:git-$revision")" || return 1
 	expected_value="$(reporting_run_isolated_node_validator "$image_id" '
 const { readFileSync } = require("node:fs");
 const value = JSON.parse(readFileSync("/evidence.json", "utf8"));
@@ -3720,7 +3733,8 @@ for (let index = 0; index < rawFields.length; index += 2) {
   if (!match || !/^[A-Za-z0-9._/-]+$/.test(path) || path.startsWith("/") ||
       path.split("/").includes("..") || !allowedModes.has(match[1]) ||
       !allowedModes.has(match[2]) ||
-      (match[5] === "A" && (match[1] !== "000000" || match[3] !== zeroBlob || match[2] !== "100644")) ||
+      (match[5] === "A" && (match[1] !== "000000" || match[3] !== zeroBlob ||
+        match[2] === "000000" || match[4] === zeroBlob)) ||
       (match[5] === "D" && (match[2] !== "000000" || match[4] !== zeroBlob || match[1] === "000000")) ||
       (match[5] === "M" && (match[1] !== match[2] || match[1] === "000000" ||
         match[3] === zeroBlob || match[4] === zeroBlob))) process.exit(1);
@@ -4213,7 +4227,7 @@ reporting_cutover_require_cleanup_git_contract() {
 		}
 	done
 	for path in "${REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS[@]}"; do
-		previous_blob="$(git -C "$server_root" rev-parse "$previous_revision:$path" 2>/dev/null || true)"
+		previous_blob="$(git -C "$server_root" rev-parse --verify "$previous_revision:$path" 2>/dev/null || true)"
 		cleanup_blob="$(git -C "$server_root" rev-parse "$cleanup_revision:$path" 2>/dev/null || true)"
 		[[ -z "$previous_blob" && "$cleanup_blob" =~ ^[0-9a-f]{40}$ &&
 			"$(git -C "$server_root" ls-tree "$cleanup_revision" -- "$path")" =~ ^100755[[:space:]]blob[[:space:]][0-9a-f]{40}[[:space:]] ]] || {
@@ -4499,7 +4513,7 @@ for (const token of [
 ]) {
   if (schema.includes(token)) process.exit(1);
 }
-' >/dev/null || {
+' --user 1001:1001 >/dev/null || {
 		echo 'Database restore worker does not contain the exact cleanup migration and steady-state Core schema.' >&2
 		return 1
 	}
@@ -4811,7 +4825,7 @@ reporting_cutover_cleanup_legacy_queues() {
 
 reporting_cutover_validate_retained_queue_line() {
 	local queue="$1" line="$2"
-	if [[ "$queue" == *.dead-letter || "$queue" == *.retry-v2.* ]]; then
+	if [[ "$queue" == *.retry-v2.* ]]; then
 		[[ "$line" =~ ^[^[:space:]]+[[:space:]]+0[[:space:]]+0[[:space:]]+0$ ]]
 		return
 	fi
@@ -5768,13 +5782,13 @@ capture {
 		"$route_runtime_text" == *'frontendRuntimeSignatureSha256'* &&
 		"$route_runtime_text" == *'frontendRuntimePublicKeySha256'* &&
 		"$route_runtime_text" == *'frontendRuntimeChallenge'* &&
-		"$route_runtime_text" == *'legacyStatisticsRetained'* &&
+		"$route_runtime_text" == *'legacyStatisticsTombstoned'* &&
 		"$route_runtime_text" == *'EXPECTED_LEGACY_POLICY'* &&
 		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes "$1" retained'* &&
 		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes "$1" absent'* &&
 		"$route_runtime_text" == *'REPORTING_CUTOVER_ADMIN_ACCESS_TOKEN_FILE:-$APP_ROOT/deploy/backend/.reporting-cutover-admin-access-token'* &&
-		"$route_runtime_text" == *'if [[ "$runtime_revision" == "$evidence_revision" ]]'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes_retained "$revision"'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes_absent "$runtime_revision"'* &&
+		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes_absent "$revision"'* &&
 		"$route_runtime_text" != *'docker ps --no-trunc -q'* &&
 		"$route_runtime_text" == *'Cross-VPS frontend runtime attestation, signature and public key must be absolute root-owned mode-600 regular files.'* &&
 		"$route_runtime_text" == *'value.backendRevision !== process.env.EXPECTED_BACKEND_REVISION'* &&

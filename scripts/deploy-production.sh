@@ -1701,7 +1701,7 @@ compose_target \
 	--profile campaigns-migration \
 	--profile reporting-migration \
 	config --quiet
-compose_target build \
+compose_target build --provenance=false \
 	api \
 	api-gateway \
 	maintenance-worker \
@@ -3855,7 +3855,21 @@ run()
 verify_exact_worker_consumer_ownership() {
 	local close_legacy_orphans="${1:-false}"
 	local notification_owner="${2:-notification}"
+	local notification_queue_names_json
 	local campaigns_queue_names_json
+	notification_queue_names_json="$(
+		docker run --rm --network none \
+			--entrypoint node "$NOTIFICATION_DELIVERY_IMAGE" \
+			-e '
+const {
+	MESSAGING_QUEUE_NAMES,
+	NOTIFICATION_DELIVERY_KINDS,
+} = require("./dist/src/messaging/messaging.constants.js");
+process.stdout.write(JSON.stringify(Object.fromEntries(
+	NOTIFICATION_DELIVERY_KINDS.map(kind => [kind, MESSAGING_QUEUE_NAMES[kind]]),
+)));
+'
+	)"
 	campaigns_queue_names_json="$(
 		docker run --rm --network none \
 			--entrypoint node "$CAMPAIGNS_IMAGE" \
@@ -3872,6 +3886,7 @@ process.stdout.write(JSON.stringify(Object.values(CAMPAIGNS_QUEUE_NAMES)));
 		-e "CLOSE_LEGACY_NOTIFICATION_CONSUMERS=$close_legacy_orphans" \
 		-e "EXPECTED_NOTIFICATION_QUEUE_OWNER=$notification_owner" \
 		-e "EXPECTED_INTEGRATION_KINDS=$(reporting_expected_integration_worker_kinds)" \
+		-e "NOTIFICATION_QUEUE_NAMES_JSON=$notification_queue_names_json" \
 		-e "CAMPAIGNS_QUEUE_NAMES_JSON=$campaigns_queue_names_json" \
 		--entrypoint node \
 		"winwidget-api:$APP_VERSION" \
@@ -3969,9 +3984,24 @@ const run = async () => {
 	if (!expectedIntegrationKinds.length) {
 		throw new OwnershipError("Expected integration kind contract is missing");
 	}
+	let notificationQueueNames;
+	try {
+		notificationQueueNames = JSON.parse(
+			process.env.NOTIFICATION_QUEUE_NAMES_JSON || "",
+		);
+	} catch {
+		throw new OwnershipError("Notification Delivery queue contract is invalid");
+	}
+	if (
+		!notificationQueueNames ||
+		typeof notificationQueueNames !== "object" ||
+		Array.isArray(notificationQueueNames)
+	) {
+		throw new OwnershipError("Notification Delivery queue contract is incomplete");
+	}
 	const groups = [
 		{
-			kinds: [
+			queues: [
 				"email",
 				"telegram",
 				"payment-email",
@@ -3985,7 +4015,7 @@ const run = async () => {
 							"subscription-expiry-email",
 							"subscription-expiry-telegram",
 						]),
-			],
+			].map(kind => notificationQueueNames[kind]),
 			user: notificationUser,
 			connectionName: "winwidget-notification-delivery-worker",
 			notification: true,
@@ -3997,8 +4027,8 @@ const run = async () => {
 						"winwidget.limit-notification.telegram",
 					]
 				: [
-						MESSAGING_QUEUE_NAMES["payment-telegram"],
-						MESSAGING_QUEUE_NAMES["limit-telegram"],
+						notificationQueueNames["payment-telegram"],
+						notificationQueueNames["limit-telegram"],
 					],
 			user: legacyTelegramOwner ? integrationUser : notificationUser,
 			connectionName: legacyTelegramOwner

@@ -255,7 +255,7 @@ INSERT INTO reporting.heartbeats (
   id, role, instance_id, metadata, last_seen_at, created_at, updated_at
 ) VALUES (
   '\''00000000-0000-4000-8000-000000000099'\'',
-  '\''restore-smoke'\'', '\''isolated'\'', '\''{"stage":"inserted"}'\''::jsonb,
+  '\''api'\'', '\''restore-smoke-isolated'\'', '\''{"stage":"inserted"}'\''::jsonb,
   CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 );
 DO $runtime_crud$
@@ -476,6 +476,7 @@ chmod 600 /evidence/reporting.dump /evidence/reporting.restore-list
 		--tmpfs /var/run/postgresql:rw,nosuid,nodev,size=16m \
 		--tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m \
 		--mount "type=bind,source=$work_root/reporting.dump,target=/evidence/reporting.dump,readonly" \
+		--mount "type=bind,source=$work_root,target=/restore-output" \
 		--label com.winwidget.owner=reporting \
 		--label com.winwidget.purpose=restore-cutover-smoke \
 		--label "com.winwidget.revision=$revision" \
@@ -520,22 +521,19 @@ chmod 600 /evidence/reporting.dump /evidence/reporting.restore-list
 	reporting_restore_row_manifest winwidget_reporting_restore "$work_root/restored.rows"
 	reporting_restore_sequence_manifest winwidget_reporting_restore "$work_root/restored.sequences"
 
-	docker exec "$restore_container" pg_dump \
+	docker exec --user 0:0 "$restore_container" pg_dump \
 		--username postgres --dbname winwidget_reporting_restore \
 		--format custom --compress=6 --no-owner --no-acl --schema reporting \
-		--file /tmp/reporting-redump.dump
-	docker exec "$restore_container" pg_restore --list /tmp/reporting-redump.dump \
+		--file /restore-output/reporting-redump.dump
+	docker exec "$restore_container" pg_restore --list /restore-output/reporting-redump.dump \
 		>"$work_root/reporting-redump.restore-list"
-	docker cp "$restore_container:/tmp/reporting-redump.dump" \
-		"$work_root/reporting-redump.dump" >/dev/null
 	[[ -s "$work_root/reporting-redump.dump" &&
 		-s "$work_root/reporting-redump.restore-list" ]] ||
 		reporting_restore_fail 'Reporting restored database redump is empty.'
 	reporting_restore_psql postgres --command 'CREATE DATABASE winwidget_reporting_redump WITH TEMPLATE template0;'
-	docker cp "$work_root/reporting-redump.dump" "$restore_container:/tmp/reporting-redump-copy.dump"
 	docker exec "$restore_container" pg_restore --exit-on-error --single-transaction \
 		--no-owner --no-acl --username postgres --dbname winwidget_reporting_redump \
-		/tmp/reporting-redump-copy.dump
+		/restore-output/reporting-redump.dump
 	reporting_restore_verify_expected_tables winwidget_reporting_redump
 	reporting_restore_verify_migrations winwidget_reporting_redump
 	reporting_restore_verify_invariants winwidget_reporting_redump

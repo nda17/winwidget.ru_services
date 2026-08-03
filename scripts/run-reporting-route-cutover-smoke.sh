@@ -409,23 +409,15 @@ const authenticated = { headers: { authorization } };
   }
 
   for (const origin of [localGateway, publicApi]) {
-    const legacyDashboard = json(await call(origin, "/api/v1/statistics/dashboard", 200, authenticated));
-    if (!legacyDashboard || typeof legacyDashboard !== "object" ||
-        typeof legacyDashboard.generatedAt !== "string") {
-      throw new Error("Legacy dashboard was removed before cleanup");
-    }
-    const legacyOverview = json(await call(origin, "/api/v1/statistics/overview", 200, authenticated));
-    if (!legacyOverview || typeof legacyOverview !== "object" || Array.isArray(legacyOverview)) {
-      throw new Error("Legacy overview was removed before cleanup");
-    }
-    const legacyRegistrations = json(await call(
-      origin,
+    for (const path of [
+      "/api/v1/statistics/dashboard",
+      "/api/v1/statistics/overview",
       "/api/v1/statistics/registrations-by-month",
-      200,
-      authenticated,
-    ));
-    if (!Array.isArray(legacyRegistrations)) {
-      throw new Error("Legacy registrations were removed before cleanup");
+    ]) {
+      const legacy = json(await call(origin, path, 404, authenticated));
+      if (legacy.code !== "route_not_found") {
+        throw new Error("Legacy statistics route was not tombstoned at Gateway");
+      }
     }
   }
 
@@ -527,7 +519,7 @@ const value = {
     adminOverview: true,
     adminRegistrations: true,
     dailySummarySettings: true,
-    legacyStatisticsRetained: true,
+    legacyStatisticsTombstoned: true,
     allowedCors: true,
     deniedCors: true,
     databaseRestoreSettings: true,
@@ -1211,8 +1203,8 @@ reporting_route_smoke_self_test() {
 		"$source_text" == *'/api/v1/admin/reporting/registrations-by-month'* &&
 		"$source_text" == *'/api/v1/admin/reporting/daily-summary/settings'* &&
 		"$source_text" == *'/api/v1/dev-tools/database-restores/settings'* &&
-		"$source_text" == *'Legacy dashboard was removed before cleanup'* &&
-		"$source_text" == *'legacyStatisticsRetained: true'* &&
+		"$source_text" == *'Legacy statistics route was not tombstoned at Gateway'* &&
+		"$source_text" == *'legacyStatisticsTombstoned: true'* &&
 		"$source_text" == *'forged.code !== "authentication_required"'* &&
 		"$source_text" == *'reporting_cutover_validate_frontend_runtime_attestation'* &&
 		"$source_text" == *'reporting_cutover_validate_route_evidence'* &&
