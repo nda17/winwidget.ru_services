@@ -621,6 +621,73 @@ describe('messaging event contract', () => {
 		).not.toThrow();
 	});
 
+	it('accepts a Reporting daily summary delivery outcome', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'notification.delivery.outcome.v1',
+			sourceEventId: '22222222-2222-4222-8222-222222222222',
+			sourceKind: 'daily-summary-delivery-telegram',
+			reference: {
+				type: 'daily-summary-job',
+				id: '33333333-3333-4333-8333-333333333333'
+			},
+			status: 'DELIVERED',
+			failure: null,
+			occurredAt: '2026-08-03T22:50:14.915Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'notification-delivery-outcome'
+			})
+		).not.toThrow();
+	});
+
+	it.each([
+		{
+			sourceKind: 'daily-summary-delivery-telegram',
+			reference: {
+				type: 'subscription-expiry-reminder',
+				id: 'reminder-1'
+			},
+			expectedType: 'daily-summary-job'
+		},
+		{
+			sourceKind: 'subscription-expiry-email',
+			reference: {
+				type: 'daily-summary-job',
+				id: '33333333-3333-4333-8333-333333333333'
+			},
+			expectedType: 'subscription-expiry-reminder'
+		}
+	])(
+		'rejects a $sourceKind outcome with a mismatched reference',
+		({ sourceKind, reference, expectedType }) => {
+			const payload = {
+				schemaVersion: 1,
+				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: '22222222-2222-4222-8222-222222222222',
+				sourceKind,
+				reference,
+				status: 'DELIVERED',
+				failure: null,
+				occurredAt: '2026-08-03T22:50:14.915Z'
+			};
+
+			expect(() =>
+				assertMessagingEventContract(payload, {
+					eventType: payload.eventType,
+					routingKey: payload.eventType,
+					messageId: MESSAGE_ID,
+					kind: 'notification-delivery-outcome'
+				})
+			).toThrow(`payload.reference.type must be ${expectedType}`);
+		}
+	);
+
 	it('rejects unsupported source kinds in destination outcomes', () => {
 		const payload = {
 			schemaVersion: 1,

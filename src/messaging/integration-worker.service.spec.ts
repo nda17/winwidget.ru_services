@@ -159,6 +159,33 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createDailySummaryOutcomeMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'notification.delivery.outcome.v1',
+					sourceEventId: '22222222-2222-4222-8222-222222222222',
+					sourceKind: 'daily-summary-delivery-telegram',
+					reference: {
+						type: 'daily-summary-job',
+						id: '33333333-3333-4333-8333-333333333333'
+					},
+					status: 'DELIVERED',
+					failure: null,
+					occurredAt: '2026-08-03T22:50:14.915Z'
+				})
+			),
+			fields: {
+				routingKey: 'notification.delivery.outcome.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'notification.delivery.outcome.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	const createCampaignAuditMessage = (): ConsumeMessage =>
 		({
 			content: Buffer.from(
@@ -714,6 +741,39 @@ describe('IntegrationWorkerService', () => {
 			}
 		});
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('acknowledges a Reporting daily summary outcome without dead-lettering it', async () => {
+		const { service, rabbitMq, delivery, prisma } = createService();
+		const message = createDailySummaryOutcomeMessage();
+
+		await (service as any).handle(
+			'notification-delivery-outcome',
+			message
+		);
+
+		expect(delivery.deliver).toHaveBeenCalledWith(
+			'notification-delivery-outcome',
+			expect.objectContaining({
+				sourceKind: 'daily-summary-delivery-telegram',
+				reference: {
+					type: 'daily-summary-job',
+					id: '33333333-3333-4333-8333-333333333333'
+				}
+			}),
+			'11111111-1111-4111-8111-111111111111'
+		);
+		expect(
+			prisma.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
 	});
 
 	it('does not release a fresh claim owned by another handler', async () => {

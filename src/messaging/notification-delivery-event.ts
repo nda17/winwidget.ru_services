@@ -1,23 +1,28 @@
 import {
 	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
-	NotificationDeliveryKind,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { Prisma } from '@prisma/client';
 
 export const OUTCOME_NOTIFICATION_DELIVERY_KINDS = [
+	'daily-summary-delivery-telegram',
 	'subscription-expiry-email',
 	'subscription-expiry-telegram'
-] as const satisfies readonly NotificationDeliveryKind[];
+] as const;
 
 export type OutcomeNotificationDeliveryKind =
 	(typeof OUTCOME_NOTIFICATION_DELIVERY_KINDS)[number];
 
-export type NotificationDeliveryReference = {
-	type: 'subscription-expiry-reminder';
-	id: string;
-};
+export type NotificationDeliveryReference =
+	| {
+			type: 'daily-summary-job';
+			id: string;
+	  }
+	| {
+			type: 'subscription-expiry-reminder';
+			id: string;
+	  };
 
 interface SubscriptionExpiryNotificationContent {
 	daysBeforeExpiry: number;

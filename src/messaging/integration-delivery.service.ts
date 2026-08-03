@@ -114,6 +114,8 @@ export class IntegrationDeliveryService {
 		event: NotificationDeliveryOutcomeEventPayload
 	): Promise<void> {
 		switch (event.reference.type) {
+			case 'daily-summary-job':
+				return;
 			case 'subscription-expiry-reminder':
 				await this.applySubscriptionExpiryDeliveryOutcome(event);
 				return;

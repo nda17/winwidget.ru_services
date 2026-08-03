@@ -879,16 +879,20 @@ const assertTelegramDestinationUnavailableEvent = (
 
 const assertNotificationReference = (
 	value: unknown,
-	expectedType: 'subscription-expiry-reminder'
+	expectedType: 'daily-summary-job' | 'subscription-expiry-reminder'
 ): JsonRecord => {
 	const reference = assertRecord(value, 'payload.reference');
 	assertExactKeys(reference, ['type', 'id'], [], 'payload.reference');
 	if (reference.type !== expectedType) {
 		throw new Error(`payload.reference.type must be ${expectedType}`);
 	}
-	assertString(reference.id, 'payload.reference.id', {
-		maxLength: 255
-	});
+	if (expectedType === 'daily-summary-job') {
+		assertUuid(reference.id, 'payload.reference.id');
+	} else {
+		assertString(reference.id, 'payload.reference.id', {
+			maxLength: 255
+		});
+	}
 	return reference;
 };
 
@@ -996,10 +1000,14 @@ const assertNotificationDeliveryOutcome = (
 	) {
 		throw new Error('payload.sourceKind is invalid');
 	}
-	assertNotificationReference(
-		payload.reference,
-		'subscription-expiry-reminder'
-	);
+	if (payload.sourceKind === 'daily-summary-delivery-telegram') {
+		assertNotificationReference(payload.reference, 'daily-summary-job');
+	} else {
+		assertNotificationReference(
+			payload.reference,
+			'subscription-expiry-reminder'
+		);
+	}
 	if (payload.status !== 'DELIVERED' && payload.status !== 'FAILED') {
 		throw new Error('payload.status is invalid');
 	}
