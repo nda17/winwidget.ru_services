@@ -85,7 +85,7 @@ jobs:
       inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve' ||
       inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'))
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment: production
 
     steps:
@@ -194,35 +194,12 @@ jobs:
           echo "Active lifecycle checkout preflight passed without changing VPS state."
           EOF
 
-  reporting_env_preflight:
-    name: Reporting production env preflight
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-database' &&
-      inputs.reporting_database_action == 'prepare' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
       - name: Validate Reporting production env before full verify
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.deploy_target == 'reporting-database' &&
+          inputs.reporting_database_action == 'prepare' &&
+          github.ref == 'refs/heads/prod'
         env:
           APP_ROOT: /opt/winwidget
           DATABASE_ACTION: ${{ inputs.reporting_database_action }}
@@ -264,9 +241,7 @@ jobs:
           EOF
 
   verify:
-    needs:
-      - lifecycle_checkout_preflight
-      - reporting_env_preflight
+    needs: lifecycle_checkout_preflight
     if: >-
       ${{
         !cancelled() &&
@@ -278,9 +253,7 @@ jobs:
         (inputs.reporting_cutover_action == 'status' ||
         inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve' ||
         inputs.reporting_cutover_action == 'resolve-core-cleanup-migration')) &&
-        needs.lifecycle_checkout_preflight.result == 'success' &&
-        (needs.reporting_env_preflight.result == 'success' ||
-        needs.reporting_env_preflight.result == 'skipped')
+        needs.lifecycle_checkout_preflight.result == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -3849,6 +3822,15 @@ jobs:
             workflow.indexOf("\n  campaigns-database:"),
             workflow.indexOf("\n  reporting-database-status:"),
           );
+          if (
+            !deployJob.includes("needs: verify") ||
+            !deployJob.includes("github.event_name == 'push'") ||
+            deployJob.includes("needs.verify.result")
+          ) {
+            throw new Error(
+              "Ordinary pushes must keep the simple mandatory preflight to verify to deploy chain",
+            );
+          }
           const assertCheckoutOrder = (job, lockNeedle, label) => {
             const lockIndex = job.indexOf(lockNeedle);
             const reportingPreFetchGuardIndex = job.lastIndexOf(
@@ -4040,9 +4022,6 @@ jobs:
           const lifecyclePreflightStart = workflow.indexOf(
             "\n  lifecycle_checkout_preflight:",
           );
-          const reportingEnvPreflightStart = workflow.indexOf(
-            "\n  reporting_env_preflight:",
-          );
           const verifyStart = workflow.indexOf("\n  verify:");
           const verifyServicesStart = workflow.indexOf(
             "\n    services:",
@@ -4062,15 +4041,14 @@ jobs:
           );
           if (
             lifecyclePreflightStart < 0 ||
-            reportingEnvPreflightStart <= lifecyclePreflightStart ||
-            verifyStart <= reportingEnvPreflightStart ||
+            verifyStart <= lifecyclePreflightStart ||
             verifyServicesStart <= verifyStart ||
             reportingCoreBackupStart <= verifyServicesStart ||
             reportingCleanupResolveStart <= reportingCoreBackupStart ||
             reportingCleanupStageStart <= reportingCleanupResolveStart ||
             reportingDatabaseStart <= reportingCleanupStageStart ||
             substringCount(workflow, "\n  lifecycle_checkout_preflight:") !== 1 ||
-            substringCount(workflow, "\n  reporting_env_preflight:") !== 1 ||
+            substringCount(workflow, "\n  reporting_env_preflight:") !== 0 ||
             substringCount(workflow, "\n  verify:") !== 1 ||
             substringCount(
               workflow,
@@ -4098,7 +4076,7 @@ jobs:
             inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'))
           `);
           const lifecyclePreflightHeader = compactWhitespace(
-            workflow.slice(lifecyclePreflightStart, reportingEnvPreflightStart),
+            workflow.slice(lifecyclePreflightStart, verifyStart),
           );
           const verifyHeader = compactWhitespace(
             workflow.slice(verifyStart, verifyServicesStart),
@@ -4109,6 +4087,23 @@ jobs:
           ) {
             throw new Error(
               "Core cleanup recovery actions must bypass checkout preflight and full verify",
+            );
+          }
+          if (
+            !lifecyclePreflightHeader.includes(
+              "Validate Reporting production env before full verify",
+            ) ||
+            !lifecyclePreflightHeader.includes(
+              "inputs.deploy_target == 'reporting-database'",
+            ) ||
+            !lifecyclePreflightHeader.includes(
+              "inputs.reporting_database_action == 'prepare'",
+            ) ||
+            !verifyHeader.includes("needs: lifecycle_checkout_preflight") ||
+            verifyHeader.includes("reporting_env_preflight")
+          ) {
+            throw new Error(
+              "Reporting env validation must remain a conditional step inside the mandatory preflight dependency",
             );
           }
           const reportingCoreBackupJob = workflow.slice(
@@ -5661,19 +5656,13 @@ jobs:
   deploy:
     needs: verify
     if: >-
-      ${{
-        !cancelled() &&
-        needs.verify.result == 'success' &&
-        (
-          github.event_name == 'push' ||
-          (
-            inputs.deploy_target != 'notification-delivery-database' &&
-            inputs.deploy_target != 'campaigns-database' &&
-            inputs.deploy_target != 'reporting-database' &&
-            inputs.deploy_target != 'reporting-cutover'
-          )
-        )
-      }}
+      github.event_name == 'push' ||
+      (
+        inputs.deploy_target != 'notification-delivery-database' &&
+        inputs.deploy_target != 'campaigns-database' &&
+        inputs.deploy_target != 'reporting-database' &&
+        inputs.deploy_target != 'reporting-cutover'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -5887,13 +5876,9 @@ jobs:
   notification-delivery-database:
     needs: verify
     if: >-
-      ${{
-        !cancelled() &&
-        needs.verify.result == 'success' &&
-        github.event_name == 'workflow_dispatch' &&
-        inputs.deploy_target == 'notification-delivery-database' &&
-        github.ref == 'refs/heads/prod'
-      }}
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_target == 'notification-delivery-database' &&
+      github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: production
@@ -6216,13 +6201,9 @@ jobs:
   campaigns-database:
     needs: verify
     if: >-
-      ${{
-        !cancelled() &&
-        needs.verify.result == 'success' &&
-        github.event_name == 'workflow_dispatch' &&
-        inputs.deploy_target == 'campaigns-database' &&
-        github.ref == 'refs/heads/prod'
-      }}
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_target == 'campaigns-database' &&
+      github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: production
@@ -6634,14 +6615,10 @@ jobs:
   reporting-cutover-verify-core-cleanup-backup:
     needs: verify
     if: >-
-      ${{
-        !cancelled() &&
-        needs.verify.result == 'success' &&
-        github.event_name == 'workflow_dispatch' &&
-        inputs.deploy_target == 'reporting-cutover' &&
-        inputs.reporting_cutover_action == 'verify-core-cleanup-backup' &&
-        github.ref == 'refs/heads/prod'
-      }}
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_target == 'reporting-cutover' &&
+      inputs.reporting_cutover_action == 'verify-core-cleanup-backup' &&
+      github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
@@ -6825,14 +6802,10 @@ jobs:
   reporting-cutover-stage-cleanup:
     needs: verify
     if: >-
-      ${{
-        !cancelled() &&
-        needs.verify.result == 'success' &&
-        github.event_name == 'workflow_dispatch' &&
-        inputs.deploy_target == 'reporting-cutover' &&
-        inputs.reporting_cutover_action == 'stage-cleanup' &&
-        github.ref == 'refs/heads/prod'
-      }}
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_target == 'reporting-cutover' &&
+      inputs.reporting_cutover_action == 'stage-cleanup' &&
+      github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -6948,14 +6921,10 @@ jobs:
   reporting-database:
     needs: verify
     if: >-
-      ${{
-        !cancelled() &&
-        needs.verify.result == 'success' &&
-        github.event_name == 'workflow_dispatch' &&
-        inputs.deploy_target == 'reporting-database' &&
-        inputs.reporting_database_action == 'prepare' &&
-        github.ref == 'refs/heads/prod'
-      }}
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_target == 'reporting-database' &&
+      inputs.reporting_database_action == 'prepare' &&
+      github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: production

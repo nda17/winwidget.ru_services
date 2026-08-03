@@ -1819,17 +1819,18 @@ Linux/Docker verify, отдельный Reporting rehearsal, review точног
 согласование каждой необратимой фазы. После forward boundary recovery
 выполняется только вперёд на новой database.
 
-Для ручного `deploy_target=reporting-database` защищённый read-only job
-`reporting_env_preflight` выполняется до полного `verify`: он требует уже
-staged exact clean SHA на VPS, проверяет production env, канонические
-Reporting PostgreSQL/RabbitMQ URL, точный набор integration consumers и
-`docker compose config --quiet` и admin-secret path. До создания database
-marker он требует staged marker и отсутствие target container/volume; при
-prepared marker read-only сверяет tracked container/volume/network, роли и
-secret. Preflight не делает checkout/build, не создаёт БД/marker и не запускает
-контейнеры; после полного verify та же проверка повторяется под production lock
-непосредственно перед build. Ошибка env или lifecycle state поэтому
-обнаруживается до дорогой части либо до любой мутации.
+Для ручного `deploy_target=reporting-database` обязательный
+`lifecycle_checkout_preflight` перед полным `verify` условно выполняет
+защищённую read-only проверку Reporting. Она требует уже staged exact clean SHA
+на VPS, проверяет production env, канонические Reporting PostgreSQL/RabbitMQ
+URL, точный набор integration consumers, `docker compose config --quiet` и
+admin-secret path. До создания database marker проверка требует staged marker и
+отсутствие target container/volume; при prepared marker read-only сверяет
+tracked container/volume/network, роли и secret. Preflight не делает
+checkout/build, не создаёт БД/marker и не запускает контейнеры; после полного
+verify та же проверка повторяется под production lock непосредственно перед
+build. Ошибка env или lifecycle state поэтому обнаруживается до дорогой части
+либо до любой мутации.
 
 Для Campaigns уже подготовлены routine
 `scripts/deploy-campaigns-production.sh`, resumable многофазный

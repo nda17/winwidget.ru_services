@@ -245,24 +245,21 @@ workflow_job_line() {
 		}
 	' "$workflow_file"
 }
-lifecycle_checkout_preflight_job="$(sed -n '/^  lifecycle_checkout_preflight:/,/^  reporting_env_preflight:/p' "$workflow_file")"
-reporting_preflight_job="$(sed -n '/^  reporting_env_preflight:/,/^  verify:/p' "$workflow_file")"
+lifecycle_checkout_preflight_job="$(sed -n '/^  lifecycle_checkout_preflight:/,/^  verify:/p' "$workflow_file")"
 verify_header="$(sed -n '/^  verify:/,/^    services:/p' "$workflow_file")"
 lifecycle_checkout_preflight_line="$(workflow_job_line 'lifecycle_checkout_preflight:')"
-reporting_env_preflight_line="$(workflow_job_line 'reporting_env_preflight:')"
 verify_job_line="$(workflow_job_line 'verify:')"
 lifecycle_checkout_preflight_compact="$(printf '%s\n' "$lifecycle_checkout_preflight_job" | compact_workflow_text)"
 verify_header_compact="$(printf '%s\n' "$verify_header" | compact_workflow_text)"
 recovery_exclusion="!(github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'reporting-cutover' && (inputs.reporting_cutover_action == 'status' || inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve' || inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'))"
 [[ "$(workflow_exact_line_count 'lifecycle_checkout_preflight:')" == '1' &&
-	"$(workflow_exact_line_count 'reporting_env_preflight:')" == '1' &&
+	"$(workflow_exact_line_count 'reporting_env_preflight:')" == '0' &&
 	"$(workflow_exact_line_count 'verify:')" == '1' &&
 	"$lifecycle_checkout_preflight_line" =~ ^[0-9]+$ &&
-	"$reporting_env_preflight_line" =~ ^[0-9]+$ &&
 	"$verify_job_line" =~ ^[0-9]+$ &&
-	"$lifecycle_checkout_preflight_line" -lt "$reporting_env_preflight_line" &&
-	"$reporting_env_preflight_line" -lt "$verify_job_line" &&
+	"$lifecycle_checkout_preflight_line" -lt "$verify_job_line" &&
 	"$lifecycle_checkout_preflight_job" == *'environment: production'* &&
+	"$lifecycle_checkout_preflight_job" == *"(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"* &&
 	"$lifecycle_checkout_preflight_job" == *"inputs.reporting_database_action == 'status'"* &&
 	"$lifecycle_checkout_preflight_job" == *"inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve'"* &&
 	"$lifecycle_checkout_preflight_job" == *"inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'"* &&
@@ -273,24 +270,21 @@ recovery_exclusion="!(github.event_name == 'workflow_dispatch' && inputs.deploy_
 	"$lifecycle_checkout_preflight_job" != *'git checkout '* &&
 	"$lifecycle_checkout_preflight_job" != *'git merge '* &&
 	"$lifecycle_checkout_preflight_job" != *'docker '* &&
-	"$reporting_preflight_job" == *'environment: production'* &&
-	"$reporting_preflight_job" == *"inputs.deploy_target == 'reporting-database'"* &&
-	"$reporting_preflight_job" == *"inputs.reporting_database_action == 'prepare'"* &&
-	"$reporting_preflight_job" == *'git status --porcelain --untracked-files=all'* &&
-	"$reporting_preflight_job" == *'git hash-object "$tracked_file"'* &&
-	"$reporting_preflight_job" == *'unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER'* &&
-	"$reporting_preflight_job" == *'DATABASE_ACTION: ${{ inputs.reporting_database_action }}'* &&
-	"$reporting_preflight_job" == *'preflight-env "$DATABASE_ACTION"'* &&
-	"$reporting_preflight_job" != *'git fetch '* &&
-	"$reporting_preflight_job" != *'git checkout '* &&
-	"$reporting_preflight_job" != *'git merge '* &&
-	"$verify_header" == *'- lifecycle_checkout_preflight'* &&
-	"$verify_header" == *'- reporting_env_preflight'* &&
+	"$lifecycle_checkout_preflight_job" == *'Validate Reporting production env before full verify'* &&
+	"$lifecycle_checkout_preflight_job" == *"inputs.deploy_target == 'reporting-database'"* &&
+	"$lifecycle_checkout_preflight_job" == *"inputs.reporting_database_action == 'prepare'"* &&
+	"$lifecycle_checkout_preflight_job" == *"github.ref == 'refs/heads/prod'"* &&
+	"$lifecycle_checkout_preflight_job" == *'"$(git rev-parse HEAD)" == "$EXPECTED_REVISION"'* &&
+	"$lifecycle_checkout_preflight_job" == *'git status --porcelain --untracked-files=all'* &&
+	"$lifecycle_checkout_preflight_job" == *'git hash-object "$tracked_file"'* &&
+	"$lifecycle_checkout_preflight_job" == *'unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER'* &&
+	"$lifecycle_checkout_preflight_job" == *'DATABASE_ACTION: ${{ inputs.reporting_database_action }}'* &&
+	"$lifecycle_checkout_preflight_job" == *'preflight-env "$DATABASE_ACTION"'* &&
+	"$verify_header" == *'needs: lifecycle_checkout_preflight'* &&
+	"$verify_header" != *'reporting_env_preflight'* &&
 	"$verify_header" == *'!cancelled()'* &&
 	"$verify_header" == *"needs.lifecycle_checkout_preflight.result == 'success'"* &&
 	"$verify_header" == *"inputs.reporting_database_action == 'status'"* &&
-	"$verify_header" == *"needs.reporting_env_preflight.result == 'success'"* &&
-	"$verify_header" == *"needs.reporting_env_preflight.result == 'skipped'"* &&
 	"$verify_header" == *"inputs.reporting_cutover_action == 'status'"* &&
 	"$verify_header" == *"inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve'"* &&
 	"$verify_header" == *"inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'"* &&
@@ -302,8 +296,8 @@ recovery_exclusion="!(github.event_name == 'workflow_dispatch' && inputs.deploy_
 	echo 'Reporting protected env preflight is not an immutable fail-fast dependency of verify.' >&2
 	exit 1
 }
-unset lifecycle_checkout_preflight_job reporting_preflight_job verify_header \
-	lifecycle_checkout_preflight_line reporting_env_preflight_line verify_job_line \
+unset lifecycle_checkout_preflight_job verify_header \
+	lifecycle_checkout_preflight_line verify_job_line \
 	lifecycle_checkout_preflight_compact verify_header_compact recovery_exclusion
 printf 'reporting_protected_env_preflight=passed\n'
 
