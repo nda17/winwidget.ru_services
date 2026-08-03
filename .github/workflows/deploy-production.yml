@@ -443,6 +443,8 @@ jobs:
 
       - name: Fast-check Reporting phase-A production scripts
         run: |
+          reporting_ci_app_root="$(cd "$GITHUB_WORKSPACE/.." && pwd -P)"
+          [[ "$reporting_ci_app_root/winwidget.ru_server" == "$GITHUB_WORKSPACE" ]]
           for script in \
             scripts/reporting-database-lifecycle.sh \
             scripts/deploy-reporting-production.sh \
@@ -458,9 +460,12 @@ jobs:
           done
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test
           bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
-          bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
-          bash scripts/run-reporting-route-cutover-smoke.sh --self-test
-          bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/run-reporting-route-cutover-smoke.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
           for script in \
             scripts/reporting-database-lifecycle.sh \
@@ -4554,6 +4559,8 @@ jobs:
 
       - name: Build
         run: |
+          reporting_ci_app_root="$(cd "$GITHUB_WORKSPACE/.." && pwd -P)"
+          [[ "$reporting_ci_app_root/winwidget.ru_server" == "$GITHUB_WORKSPACE" ]]
           bash -n scripts/deploy-production.sh
           bash -n scripts/deploy-maintenance-production.sh
           bash -n scripts/deploy-notification-delivery-production.sh
@@ -4585,9 +4592,12 @@ jobs:
           bash scripts/campaigns-contract-migration-guard.sh --self-test
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test
           bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
-          bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
-          bash scripts/run-reporting-route-cutover-smoke.sh --self-test
-          bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/run-reporting-route-cutover-smoke.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
           bash scripts/database-restore-production-guard.sh --self-test
           bash scripts/test-database-restore-worker-rehearsal.sh --self-test
