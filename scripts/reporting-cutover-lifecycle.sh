@@ -5201,6 +5201,7 @@ capture {
 		"$main_text" == *'reporting_assert_no_ambient_compose_overrides'* &&
 		"$main_text" == *'NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION'* &&
 		"$main_text" == *'CAMPAIGNS_IMAGE CAMPAIGNS_REVISION'* &&
+		"$main_text" == *'DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION'* &&
 		"$main_text" == *'verify-core-cleanup-backup)'* &&
 		"$main_text" == *'reporting_cutover_verify_core_cleanup_backup'* &&
 		"$main_text" == *'prepare-core-cleanup-resolve)'* &&
@@ -5721,7 +5722,8 @@ reporting_cutover_main() {
 	reporting_assert_no_ambient_compose_overrides \
 		REPORTING_IMAGE REPORTING_REVISION \
 		NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION \
-		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION
+		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION \
+		DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION
 	acquire_production_deploy_lock "Reporting cutover $action"
 	# database-restore-production-guard: before-mutation
 	database_restore_guard_assert_before_mutation \

@@ -1383,6 +1383,7 @@ reporting_producer_lifecycle_self_test() {
 		"$main_text" == *'reporting_assert_no_ambient_compose_overrides'* &&
 		"$main_text" == *'NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION'* &&
 		"$main_text" == *'CAMPAIGNS_IMAGE CAMPAIGNS_REVISION'* &&
+		"$main_text" == *'DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION'* &&
 		"$source_text" != *'DELETE FROM "reporting_projection_versions"'* &&
 		"$source_text" != *'TRUNCATE'* ]] || {
 		echo 'Reporting producer self-test found an unsafe phase-A action.' >&2
@@ -1423,7 +1424,8 @@ reporting_producer_lifecycle_main() {
 	reporting_assert_no_ambient_compose_overrides \
 		REPORTING_IMAGE REPORTING_REVISION \
 		NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION \
-		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION
+		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION \
+		DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION
 	for key in DATABASE_URL_PRODUCTION DATABASE_MIGRATION_URL_PRODUCTION \
 		MAINTENANCE_DATABASE_URL_PRODUCTION DATABASE_BACKUP_URL; do
 		reporting_require_env_key "$key"

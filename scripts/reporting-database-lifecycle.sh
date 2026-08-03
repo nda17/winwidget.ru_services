@@ -2112,7 +2112,8 @@ reporting_prepare_database() {
 	reporting_assert_no_ambient_compose_overrides \
 		REPORTING_IMAGE REPORTING_REVISION \
 		NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION \
-		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION
+		CAMPAIGNS_IMAGE CAMPAIGNS_REVISION \
+		DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION
 	reporting_require_staged_revision "$revision"
 	for key in REPORTING_POSTGRES_IMAGE REPORTING_POSTGRES_PORT REPORTING_POSTGRES_DATA_VOLUME \
 		REPORTING_POSTGRES_ADMIN_USER REPORTING_POSTGRES_ADMIN_PASSWORD_FILE REPORTING_DATABASE_URL \
@@ -2978,10 +2979,11 @@ reporting_database_lifecycle_self_test() {
 	prepare_text="$(declare -f reporting_prepare_database)"
 	admin_precondition_index="$(printf '%s\n' "$prepare_text" | grep -n 'reporting_validate_admin_secret_precondition' | cut -d: -f1)"
 	marker_write_index="$(printf '%s\n' "$prepare_text" | grep -n 'reporting_write_database_marker preparing' | cut -d: -f1)"
-	[[ "$admin_precondition_index" =~ ^[0-9]+$ &&
+	[[ "$prepare_text" == *'DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION'* &&
+		"$admin_precondition_index" =~ ^[0-9]+$ &&
 		"$marker_write_index" =~ ^[0-9]+$ &&
 		"$admin_precondition_index" -lt "$marker_write_index" ]] || {
-		echo 'Reporting database prepare can write its marker before validating the admin secret path.' >&2
+		echo 'Reporting database prepare identity or admin-secret ordering is unsafe.' >&2
 		return 1
 	}
 
