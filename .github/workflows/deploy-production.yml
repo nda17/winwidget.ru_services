@@ -16,8 +16,6 @@ on:
           - campaigns
           - campaigns-database
           - reporting
-          - reporting-database
-          - reporting-cutover
       campaigns_database_action:
         description: Campaigns database lifecycle action
         required: true
@@ -28,37 +26,6 @@ on:
           - rollback
           - restart
           - finalize
-      reporting_database_action:
-        description: Reporting database lifecycle action
-        required: true
-        default: prepare
-        type: choice
-        options:
-          - prepare
-          - status
-      reporting_cutover_action:
-        description: Reporting cutover lifecycle action
-        required: true
-        default: status
-        type: choice
-        options:
-          - status
-          - verify-core-cleanup-backup
-          - stage-cleanup
-          - prepare-core-cleanup-resolve
-          - resolve-core-cleanup-migration
-      reporting_core_backup_job_id:
-        description: Exact successful manual Core DATABASE_BACKUP job UUID for the cleanup restore drill
-        required: false
-        type: string
-      reporting_cleanup_confirmation:
-        description: Exact stage-cleanup confirmation token bound to Core restore evidence and reviewed cleanup files
-        required: false
-        type: string
-      reporting_cleanup_resolve_confirmation:
-        description: Exact proof token printed by prepare-core-cleanup-resolve for one unfinished cleanup migration
-        required: false
-        type: string
   push:
     branches:
       - prod
@@ -75,15 +42,7 @@ jobs:
     name: Active lifecycle checkout preflight
     if: >-
       github.ref == 'refs/heads/prod' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      !(github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-database' &&
-      inputs.reporting_database_action == 'status') &&
-      !(github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-cutover' &&
-      (inputs.reporting_cutover_action == 'status' ||
-      inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve' ||
-      inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'))
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
@@ -201,65 +160,11 @@ jobs:
           echo "Active lifecycle checkout preflight passed without changing VPS state."
           EOF
 
-      - name: Validate Reporting production env before full verify
-        if: >-
-          github.event_name == 'workflow_dispatch' &&
-          inputs.deploy_target == 'reporting-database' &&
-          inputs.reporting_database_action == 'prepare' &&
-          github.ref == 'refs/heads/prod'
-        env:
-          APP_ROOT: /opt/winwidget
-          DATABASE_ACTION: ${{ inputs.reporting_database_action }}
-          DEPLOY_REVISION: ${{ github.sha }}
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' DATABASE_ACTION='$DATABASE_ACTION' bash -s" <<'EOF'
-          set -euo pipefail
-          unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
-            REPORTING_FIRST_ROLLOUT_STAGED_MARKER
-          cd "$APP_ROOT/winwidget.ru_server"
-          [[ "$(id -u)" == "0" &&
-            "$(git branch --show-current)" == "prod" &&
-            "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Reporting env preflight requires the staged exact clean prod revision." >&2
-            exit 1
-          }
-          for tracked_file in \
-            scripts/reporting-database-lifecycle.sh \
-            deploy/docker-compose.prod.yml; do
-            [[ -f "$tracked_file" && ! -L "$tracked_file" ]] || {
-              echo "Reporting env preflight file is missing or unsafe: $tracked_file" >&2
-              exit 1
-            }
-            tracked_blob="$(git rev-parse --verify "HEAD:$tracked_file")"
-            [[ "$(git hash-object "$tracked_file")" == "$tracked_blob" ]] || {
-              echo "Reporting env preflight file differs from the staged revision: $tracked_file" >&2
-              exit 1
-            }
-          done
-          APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
-            bash scripts/reporting-database-lifecycle.sh \
-              preflight-env "$DATABASE_ACTION"
-          EOF
-
   verify:
     needs: lifecycle_checkout_preflight
     if: >-
       ${{
         !cancelled() &&
-        !(github.event_name == 'workflow_dispatch' &&
-        inputs.deploy_target == 'reporting-database' &&
-        inputs.reporting_database_action == 'status') &&
-        !(github.event_name == 'workflow_dispatch' &&
-        inputs.deploy_target == 'reporting-cutover' &&
-        (inputs.reporting_cutover_action == 'status' ||
-        inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve' ||
-        inputs.reporting_cutover_action == 'resolve-core-cleanup-migration')) &&
         needs.lifecycle_checkout_preflight.result == 'success'
       }}
     runs-on: ubuntu-latest
@@ -391,15 +296,6 @@ jobs:
           github.ref != 'refs/heads/prod'
         run: |
           echo "Campaigns database lifecycle can run only from refs/heads/prod." >&2
-          exit 1
-
-      - name: Guard Reporting database branch
-        if: >-
-          github.event_name == 'workflow_dispatch' &&
-          inputs.deploy_target == 'reporting-database' &&
-          github.ref != 'refs/heads/prod'
-        run: |
-          echo "Reporting database lifecycle can run only from refs/heads/prod." >&2
           exit 1
 
       - name: Fast-check Campaigns production recovery
@@ -3780,11 +3676,11 @@ jobs:
             }
           };
 
-          requireCount("guard_campaigns_checkout_before_pull() {", 5);
+          requireCount("guard_campaigns_checkout_before_pull() {", 4);
           requireCount("checkout_verified_prod_revision() {", 3);
           requireCount(
             'git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||',
-            13,
+            9,
           );
           requireCount(
             'git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true',
@@ -3792,11 +3688,11 @@ jobs:
           );
           requireCount(
             'guard_campaigns_checkout_before_pull "$expected_revision"',
-            4,
+            3,
           );
-          requireCount("git fetch origin prod", 6);
-          requireCount("git checkout prod", 4);
-          requireCount('git merge --ff-only "$fetched_revision"', 4);
+          requireCount("git fetch origin prod", 4);
+          requireCount("git checkout prod", 3);
+          requireCount('git merge --ff-only "$fetched_revision"', 3);
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_REVISION"',
             6,
@@ -3818,15 +3714,15 @@ jobs:
             'echo "Tracked Campaigns lifecycle guard script is missing." >&2',
             3,
           );
-          requireCount("guard_reporting_checkout_before_pull() {", 6);
+          requireCount("guard_reporting_checkout_before_pull() {", 5);
           requireCount(
             'local guard_action="${2:---guard-before-fetch-revision}"',
-            6,
+            5,
           );
-          requireCount('"$guard_action" "$expected_revision"', 6);
+          requireCount('"$guard_action" "$expected_revision"', 5);
           requireCount(
             '"$expected_revision" --guard-before-checkout-revision',
-            4,
+            3,
           );
           requireCount(
             '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
@@ -3834,15 +3730,15 @@ jobs:
           );
           requireCount(
             'guard_reporting_checkout_before_pull "$expected_revision"',
-            4,
+            3,
           );
           requireCount(
             'echo "Reporting marker exists but its checkout guard is unavailable." >&2',
-            3,
+            2,
           );
           requireCount(
             'echo "Tracked Reporting lifecycle guard script is missing." >&2',
-            3,
+            2,
           );
           const deployJob = workflow.slice(
             workflow.indexOf("\n  deploy:"),
@@ -3854,7 +3750,6 @@ jobs:
           );
           const campaignsCutoverJob = workflow.slice(
             workflow.indexOf("\n  campaigns-database:"),
-            workflow.indexOf("\n  reporting-database-status:"),
           );
           if (
             !deployJob.includes("needs: verify") ||
@@ -3970,89 +3865,6 @@ jobs:
               "Campaigns restart must verify and run the exact new-revision recovery script under the production lock",
             );
           }
-          const reportingDatabaseJob = workflow.slice(
-            workflow.indexOf("\n  reporting-database:"),
-          );
-          const reportingGuardIndex = reportingDatabaseJob.indexOf(
-            'guard_reporting_checkout_before_pull "$expected_revision"',
-          );
-          const reportingCampaignsGuardIndex = reportingDatabaseJob.indexOf(
-            'guard_campaigns_checkout_before_pull "$expected_revision"',
-          );
-          const reportingFetchIndex =
-            reportingDatabaseJob.indexOf("git fetch origin prod");
-          const reportingPostFetchGuardIndex = reportingDatabaseJob.indexOf(
-            '"$expected_revision" --guard-before-checkout-revision',
-          );
-          const reportingBuildIndex = reportingDatabaseJob.indexOf(
-            "build reporting-service",
-          );
-          const reportingLockIndex = reportingDatabaseJob.indexOf(
-            'acquire_production_deploy_lock "Reporting database $DATABASE_ACTION"',
-          );
-          const reportingCheckoutIndex = reportingDatabaseJob.indexOf(
-            'checkout_verified_reporting_revision "$EXPECTED_REVISION"',
-          );
-          const reportingLifecycleIndex = reportingDatabaseJob.indexOf(
-            'bash "$lifecycle_script" "$DATABASE_ACTION"',
-          );
-          if (
-            reportingGuardIndex < 0 ||
-            reportingCampaignsGuardIndex < 0 ||
-            reportingFetchIndex < 0 ||
-            reportingPostFetchGuardIndex < 0 ||
-            reportingGuardIndex >= reportingFetchIndex ||
-            reportingCampaignsGuardIndex >= reportingFetchIndex ||
-            reportingFetchIndex >= reportingPostFetchGuardIndex ||
-            reportingLockIndex < 0 ||
-            reportingCheckoutIndex < 0 ||
-            reportingLockIndex >= reportingCheckoutIndex ||
-            reportingLockIndex >= reportingGuardIndex ||
-            reportingLockIndex >= reportingCampaignsGuardIndex ||
-            reportingBuildIndex < 0 ||
-            reportingLifecycleIndex < 0 ||
-            reportingCheckoutIndex >= reportingBuildIndex ||
-            reportingBuildIndex >= reportingLifecycleIndex ||
-            !reportingDatabaseJob.includes(
-              'git hash-object "$lock_script"',
-            ) ||
-            !reportingDatabaseJob.includes(
-              'export REPORTING_IMAGE="winwidget-reporting:git-$EXPECTED_REVISION"',
-            ) ||
-            !reportingDatabaseJob.includes(
-              'export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$EXPECTED_REVISION"',
-            ) ||
-            !reportingDatabaseJob.includes(
-              'export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$EXPECTED_REVISION"',
-            )
-          ) {
-            throw new Error(
-              "Reporting database prepare must hold the production lock across guarded checkout, exact image build and lifecycle prepare",
-            );
-          }
-          const reportingCutoverStatusJob = workflow.slice(
-            workflow.indexOf("\n  reporting-cutover-status:"),
-            workflow.indexOf(
-              "\n  reporting-cutover-verify-core-cleanup-backup:",
-            ),
-          );
-          if (
-            !reportingCutoverStatusJob.includes(
-              "inputs.reporting_cutover_action == 'status'",
-            ) ||
-            !reportingCutoverStatusJob.includes(
-              'bash "$lifecycle_script" status',
-            ) ||
-            reportingCutoverStatusJob.includes("needs: verify") ||
-            reportingCutoverStatusJob.includes("git fetch ") ||
-            reportingCutoverStatusJob.includes("git checkout ") ||
-            reportingCutoverStatusJob.includes("git merge ") ||
-            reportingCutoverStatusJob.includes("docker ")
-          ) {
-            throw new Error(
-              "Reporting cutover status must stay a trusted read-only path independent of verify and checkout",
-            );
-          }
           const lifecyclePreflightStart = workflow.indexOf(
             "\n  lifecycle_checkout_preflight:",
           );
@@ -4061,54 +3873,17 @@ jobs:
             "\n    services:",
             verifyStart,
           );
-          const reportingCoreBackupStart = workflow.indexOf(
-            "\n  reporting-cutover-verify-core-cleanup-backup:",
-          );
-          const reportingCleanupResolveStart = workflow.indexOf(
-            "\n  reporting-cutover-resolve-core-cleanup:",
-          );
-          const reportingCleanupStageStart = workflow.indexOf(
-            "\n  reporting-cutover-stage-cleanup:",
-          );
-          const reportingDatabaseStart = workflow.indexOf(
-            "\n  reporting-database:",
-          );
           if (
             lifecyclePreflightStart < 0 ||
             verifyStart <= lifecyclePreflightStart ||
             verifyServicesStart <= verifyStart ||
-            reportingCoreBackupStart <= verifyServicesStart ||
-            reportingCleanupResolveStart <= reportingCoreBackupStart ||
-            reportingCleanupStageStart <= reportingCleanupResolveStart ||
-            reportingDatabaseStart <= reportingCleanupStageStart ||
             substringCount(workflow, "\n  lifecycle_checkout_preflight:") !== 1 ||
-            substringCount(workflow, "\n  reporting_env_preflight:") !== 0 ||
-            substringCount(workflow, "\n  verify:") !== 1 ||
-            substringCount(
-              workflow,
-              "\n  reporting-cutover-verify-core-cleanup-backup:",
-            ) !== 1 ||
-            substringCount(
-              workflow,
-              "\n  reporting-cutover-resolve-core-cleanup:",
-            ) !== 1 ||
-            substringCount(
-              workflow,
-              "\n  reporting-cutover-stage-cleanup:",
-            ) !== 1 ||
-            substringCount(workflow, "\n  reporting-database:") !== 1
+            substringCount(workflow, "\n  verify:") !== 1
           ) {
             throw new Error(
-              "Reporting recovery workflow sections are missing or out of order",
+              "The mandatory production preflight and verify chain is missing or out of order",
             );
           }
-          const recoveryExclusion = compactWhitespace(`
-            !(github.event_name == 'workflow_dispatch' &&
-            inputs.deploy_target == 'reporting-cutover' &&
-            (inputs.reporting_cutover_action == 'status' ||
-            inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve' ||
-            inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'))
-          `);
           const lifecyclePreflightHeader = compactWhitespace(
             workflow.slice(lifecyclePreflightStart, verifyStart),
           );
@@ -4116,271 +3891,44 @@ jobs:
             workflow.slice(verifyStart, verifyServicesStart),
           );
           if (
-            !lifecyclePreflightHeader.includes(recoveryExclusion) ||
-            !verifyHeader.includes(recoveryExclusion)
-          ) {
-            throw new Error(
-              "Core cleanup recovery actions must bypass checkout preflight and full verify",
-            );
-          }
-          if (
             !lifecyclePreflightHeader.includes(
-              "Validate Reporting production env before full verify",
-            ) ||
-            !lifecyclePreflightHeader.includes("AUTOMATIC_PROD_PUSH:") ||
-            !lifecyclePreflightHeader.includes(
-              'if [[ "$AUTOMATIC_PROD_PUSH" != "true" || "$current_revision" == "$EXPECTED_REVISION" ]]; then',
-            ) ||
-            !lifecyclePreflightHeader.includes(
-              "Automatic push will verify before the deploy job evaluates the active Reporting revision guard.",
-            ) ||
-            !lifecyclePreflightHeader.includes(
-              "inputs.deploy_target == 'reporting-database'",
-            ) ||
-            !lifecyclePreflightHeader.includes(
-              "inputs.reporting_database_action == 'prepare'",
+              "github.event_name == 'push' || github.event_name == 'workflow_dispatch'",
             ) ||
             !verifyHeader.includes("needs: lifecycle_checkout_preflight") ||
-            verifyHeader.includes("reporting_env_preflight")
-          ) {
-            throw new Error(
-              "Reporting env validation must remain a conditional step inside the mandatory preflight dependency",
-            );
-          }
-          const reportingCoreBackupJob = workflow.slice(
-            reportingCoreBackupStart,
-            reportingCleanupResolveStart,
-          );
-          if (
-            !reportingCoreBackupJob.includes("needs: verify") ||
-            !reportingCoreBackupJob.includes(
-              "inputs.reporting_cutover_action == 'verify-core-cleanup-backup'",
-            ) ||
-            !reportingCoreBackupJob.includes("BACKUP_JOB_ID:") ||
-            !reportingCoreBackupJob.includes(
-              "inputs.reporting_core_backup_job_id",
-            ) ||
-            !reportingCoreBackupJob.includes(
-              'REPORTING_CORE_CLEANUP_BACKUP_JOB_ID="$BACKUP_JOB_ID"',
-            ) ||
-            !reportingCoreBackupJob.includes(
-              'bash "$lifecycle_script" verify-core-cleanup-backup',
-            ) ||
-            !reportingCoreBackupJob.includes(
-              "scripts/reporting-producer-lifecycle.sh",
-            ) ||
-            !reportingCoreBackupJob.includes(
-              "scripts/core-database-production-guard.sh",
-            ) ||
-            !reportingCoreBackupJob.includes(
-              '"$(git rev-parse HEAD)" == "$current_revision"',
-            ) ||
-            reportingCoreBackupJob.includes("git fetch ") ||
-            reportingCoreBackupJob.includes("git checkout ") ||
-            reportingCoreBackupJob.includes("git merge ")
-          ) {
-            throw new Error(
-              "Core cleanup backup verification must restore the exact durable job under the pinned production lifecycle without changing checkout",
-            );
-          }
-          const reportingCleanupResolveJob = workflow.slice(
-            reportingCleanupResolveStart,
-            reportingCleanupStageStart,
-          );
-          const cleanupResolveConfirmationExpression =
-            "$" + "{{ inputs.reporting_cleanup_resolve_confirmation }}";
-          const cleanupResolveTokenRegex =
-            "^resolve-core-cleanup:[0-9a-f]{40}:[0-9a-f]{40}:[1-9][0-9]*:unfinished-(transition|steady):[0-9]{14}_remove_legacy_reporting_state:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}$";
-          const cleanupResolveFinalCheckoutGuard = compactWhitespace(`
-            [[ "$(git rev-parse HEAD)" == "$current_revision" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-          `);
-          const reportingCleanupResolveJobCompact = compactWhitespace(
-            reportingCleanupResolveJob,
-          );
-          const cleanupResolveTrustIndex = reportingCleanupResolveJob.indexOf(
-            'tracked_blob="$(git rev-parse --verify "HEAD:$tracked_file")"',
-          );
-          const cleanupResolveActionIndex = reportingCleanupResolveJob.indexOf(
-            'bash "$lifecycle_script" "$CLEANUP_ACTION"',
-          );
-          const cleanupResolveFinalGuardIndex =
-            reportingCleanupResolveJob.indexOf(
-              '[[ "$(git rev-parse HEAD)" == "$current_revision" &&',
-            );
-          if (
-            reportingCleanupResolveJob.includes("\n    needs:") ||
-            !reportingCleanupResolveJob.includes(
-              "github.event_name == 'workflow_dispatch'",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "inputs.deploy_target == 'reporting-cutover'",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "github.ref == 'refs/heads/prod'",
-            ) ||
-            !reportingCleanupResolveJob.includes("environment: production") ||
-            !reportingCleanupResolveJob.includes(
-              "inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve'",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "inputs.reporting_cutover_action == 'resolve-core-cleanup-migration'",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              `CLEANUP_CONFIRMATION: ${cleanupResolveConfirmationExpression}`,
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              '"$current_revision" =~ ^[0-9a-f]{40}$',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              '"$(id -u)" == \'0\'',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              '"$(git branch --show-current)" == \'prod\'',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              'lifecycle_script="scripts/reporting-cutover-lifecycle.sh"',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "scripts/reporting-producer-lifecycle.sh",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "scripts/reporting-database-lifecycle.sh",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "scripts/production-deploy-lock.sh",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "scripts/core-database-production-guard.sh",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "deploy/docker-compose.prod.yml",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              '[[ -f "$tracked_file" && ! -L "$tracked_file" ]]',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              'git hash-object "$tracked_file"',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              'export CONFIRM_REPORTING_CORE_CLEANUP_RESOLVE="$cleanup_confirmation"',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              'bash "$lifecycle_script" "$CLEANUP_ACTION"',
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              `confirmation_b64="$(printf '%s' "$CLEANUP_CONFIRMATION" | base64 -w 0)"`,
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              "CONFIRMATION_B64='$confirmation_b64'",
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              `printf '%s' "$CONFIRMATION_B64" | base64 --decode`,
-            ) ||
-            !reportingCleanupResolveJob.includes(
-              '[[ -z "$CONFIRMATION_B64" ]] || exit 1',
-            ) ||
-            substringCount(
-              reportingCleanupResolveJob,
-              cleanupResolveTokenRegex,
-            ) !== 2 ||
-            !reportingCleanupResolveJobCompact.includes(
-              cleanupResolveFinalCheckoutGuard,
-            ) ||
-            cleanupResolveTrustIndex < 0 ||
-            cleanupResolveActionIndex < 0 ||
-            cleanupResolveFinalGuardIndex < 0 ||
-            cleanupResolveTrustIndex >= cleanupResolveActionIndex ||
-            cleanupResolveActionIndex >= cleanupResolveFinalGuardIndex ||
-            reportingCleanupResolveJob.includes("git fetch ") ||
-            reportingCleanupResolveJob.includes("git checkout ") ||
-            reportingCleanupResolveJob.includes("git merge ") ||
-            reportingCleanupResolveJob.includes("github.sha") ||
-            reportingCleanupResolveJob.includes("EXPECTED_CLEANUP_REVISION") ||
-            reportingCleanupResolveJob.includes("migrate resolve") ||
-            reportingCleanupResolveJob.includes("prisma migrate resolve") ||
-            reportingCleanupResolveJob.includes("build ") ||
-            reportingCleanupResolveJob.includes("docker build ") ||
-            reportingCleanupResolveJob.includes("docker compose build ") ||
-            reportingCleanupResolveJob.includes("reporting_compose build ")
-          ) {
-            throw new Error(
-              "Core cleanup migration resolve must require the exact reviewed proof under the pinned clean production checkout",
-            );
-          }
-          const reportingCleanupStageJob = workflow.slice(
-            workflow.indexOf("\n  reporting-cutover-stage-cleanup:"),
-            workflow.indexOf("\n  reporting-database:"),
-          );
-          const cleanupStageLockIndex = reportingCleanupStageJob.indexOf(
-            'acquire_production_deploy_lock "Reporting cleanup revision staging"',
-          );
-          const cleanupPreFetchGuardIndex =
-            reportingCleanupStageJob.indexOf(
-              '--guard-before-fetch-revision "$CLEANUP_REVISION"',
-            );
-          const cleanupFetchIndex =
-            reportingCleanupStageJob.indexOf("git fetch origin prod");
-          const cleanupExactFetchIndex = reportingCleanupStageJob.indexOf(
-            '"$fetched_revision" == "$CLEANUP_REVISION"',
-          );
-          const cleanupWorktreeIndex = reportingCleanupStageJob.indexOf(
-            'git worktree add --detach "$candidate_root" "$CLEANUP_REVISION"',
-          );
-          const cleanupSourceIndex = reportingCleanupStageJob.indexOf(
-            'REPORTING_LIFECYCLE_SOURCE_ROOT="$candidate_root"',
-          );
-          const cleanupStageActionIndex = reportingCleanupStageJob.indexOf(
-            'bash "$candidate_root/$cutover_lifecycle_script" stage-cleanup',
-          );
-          const cleanupPostFetchGuardIndex =
-            reportingCleanupStageJob.indexOf(
-              '--guard-before-checkout-revision "$CLEANUP_REVISION"',
-            );
-          if (
-            !reportingCleanupStageJob.includes("needs: verify") ||
-            cleanupStageLockIndex < 0 ||
-            cleanupPreFetchGuardIndex < 0 ||
-            cleanupFetchIndex < 0 ||
-            cleanupExactFetchIndex < 0 ||
-            cleanupWorktreeIndex < 0 ||
-            cleanupSourceIndex < 0 ||
-            cleanupStageActionIndex < 0 ||
-            cleanupPostFetchGuardIndex < 0 ||
-            cleanupStageLockIndex >= cleanupPreFetchGuardIndex ||
-            cleanupPreFetchGuardIndex >= cleanupFetchIndex ||
-            cleanupFetchIndex >= cleanupExactFetchIndex ||
-            cleanupExactFetchIndex >= cleanupWorktreeIndex ||
-            cleanupWorktreeIndex >= cleanupSourceIndex ||
-            cleanupSourceIndex >= cleanupStageActionIndex ||
-            cleanupStageActionIndex >= cleanupPostFetchGuardIndex ||
-            reportingCleanupStageJob.includes("git checkout ") ||
-            reportingCleanupStageJob.includes("git merge --ff-only") ||
-            !reportingCleanupStageJob.includes(
-              'REPORTING_CLEANUP_REVIEW_FILE="$review_file"',
-            ) ||
-            !reportingCleanupStageJob.includes(
-              'REPORTING_CLEANUP_MANIFEST_FILE="$manifest_file"',
-            ) ||
-            !reportingCleanupStageJob.includes(
-              "scripts/reporting-producer-lifecycle.sh",
-            ) ||
-            !reportingCleanupStageJob.includes(
-              "scripts/core-database-production-guard.sh",
-            ) ||
-            !reportingCleanupStageJob.includes(
-              '"$(git rev-parse HEAD)" == "$current_revision"',
-            ) ||
-            !reportingCleanupStageJob.includes(
-              'git worktree remove --force "$candidate_root"',
-            ) ||
-            !reportingCleanupStageJob.includes(
-              'git -C "$candidate_root" hash-object --no-filters',
+            !verifyHeader.includes(
+              "needs.lifecycle_checkout_preflight.result == 'success'",
             )
           ) {
             throw new Error(
-              "Reporting cleanup staging must pin reviewed VPS evidence through a clean detached candidate worktree without switching the active checkout",
+              "Every ordinary and manual deployment must pass mandatory preflight and verify",
             );
+          }
+          for (const retiredToken of [
+            "\n          - reporting-" + "database",
+            "\n          - reporting-" + "cutover",
+            "\n      reporting_" + "database_action:",
+            "\n      reporting_" + "cutover_action:",
+            "\n      reporting_" + "core_backup_job_id:",
+            "\n      reporting_" + "cleanup_confirmation:",
+            "\n      reporting_" + "cleanup_resolve_confirmation:",
+            "\n  reporting-" + "database-status:",
+            "\n  reporting-" + "cutover-status:",
+            "\n  reporting-" + "cutover-verify-core-cleanup-backup:",
+            "\n  reporting-" + "cutover-resolve-core-cleanup:",
+            "\n  reporting-" + "cutover-stage-cleanup:",
+            "\n  reporting-" + "database:",
+            "inputs.reporting_" + "database_action",
+            "inputs.reporting_" + "cutover_action",
+            "inputs.reporting_" + "core_backup_job_id",
+            "inputs.reporting_" + "cleanup_confirmation",
+            "inputs.reporting_" + "cleanup_resolve_confirmation",
+            "Validate Reporting production " + "env before full verify",
+          ]) {
+            if (workflow.includes(retiredToken)) {
+              throw new Error(
+                `Completed Reporting lifecycle workflow surface remains: ${retiredToken}`,
+              );
+            }
           }
           const deployScript = readFileSync(
             "scripts/deploy-production.sh",
@@ -5729,9 +5277,7 @@ jobs:
       github.event_name == 'push' ||
       (
         inputs.deploy_target != 'notification-delivery-database' &&
-        inputs.deploy_target != 'campaigns-database' &&
-        inputs.deploy_target != 'reporting-database' &&
-        inputs.deploy_target != 'reporting-cutover'
+        inputs.deploy_target != 'campaigns-database'
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -5907,7 +5453,7 @@ jobs:
             if ! guard_reporting_checkout_before_pull \
               "$EXPECTED_REVISION" > /dev/null 2>&1; then
               echo "Automatic backend deploy is verified but deferred: Reporting first-rollout preparation is pinned to $current_revision."
-              echo "Finish the pinned reporting-database prepare before deploying another revision."
+              echo "Resolve the pinned Reporting lifecycle guard before deploying another revision."
               exit 0
             fi
           fi
@@ -6525,723 +6071,4 @@ jobs:
             EXPECTED_REVISION="$EXPECTED_REVISION" \
             bash scripts/cutover-campaigns-database-production.sh \
               "$DATABASE_ACTION"
-          EOF
-
-  reporting-database-status:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-database' &&
-      inputs.reporting_database_action == 'status' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Show trusted read-only Reporting database status
-        env:
-          APP_ROOT: /opt/winwidget
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' bash -s" <<'EOF'
-          set -euo pipefail
-          cd "$APP_ROOT/winwidget.ru_server"
-          lifecycle_script="scripts/reporting-database-lifecycle.sh"
-          staged_marker="$APP_ROOT/deploy/backend/.reporting-first-rollout-staged-v1"
-          database_marker="$APP_ROOT/deploy/backend/.reporting-database-lifecycle-v1"
-          cutover_marker="$APP_ROOT/deploy/backend/.reporting-database-cutover-v1"
-          [[ "$(id -u)" == "0" &&
-            "$(git branch --show-current)" == "prod" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Reporting status requires the trusted current clean prod checkout." >&2
-            exit 1
-          }
-          tracked_blob="$(
-            git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-              true
-          )"
-          if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-            [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
-              echo "Reporting status lifecycle script is unsafe." >&2
-              exit 1
-            }
-            [[ -n "$tracked_blob" &&
-              "$(git hash-object "$lifecycle_script")" == "$tracked_blob" ]] || {
-              echo "Reporting status lifecycle script differs from current HEAD." >&2
-              exit 1
-            }
-            APP_ROOT="$APP_ROOT" bash "$lifecycle_script" status
-            exit $?
-          fi
-          [[ -z "$tracked_blob" ]] || {
-            echo "Tracked Reporting status lifecycle script is missing." >&2
-            exit 1
-          }
-          if [[ -e "$staged_marker" || -L "$staged_marker" ||
-            -e "$database_marker" || -L "$database_marker" ||
-            -e "$cutover_marker" || -L "$cutover_marker" ]]; then
-            echo "Reporting marker exists but its trusted status script is unavailable." >&2
-            exit 1
-          fi
-          printf 'status_version=1\n'
-          printf 'staged_marker=absent\n'
-          printf 'database_marker=absent\n'
-          printf 'cutover_marker=absent\n'
-          printf 'database_identity=absent\n'
-          EOF
-
-  reporting-cutover-status:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-cutover' &&
-      inputs.reporting_cutover_action == 'status' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Show trusted read-only Reporting cutover status
-        env:
-          APP_ROOT: /opt/winwidget
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' bash -s" <<'EOF'
-          set -euo pipefail
-          cd "$APP_ROOT/winwidget.ru_server"
-          lifecycle_script="scripts/reporting-cutover-lifecycle.sh"
-          cutover_marker="$APP_ROOT/deploy/backend/.reporting-database-cutover-v1"
-          [[ "$(id -u)" == "0" &&
-            "$(git branch --show-current)" == "prod" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Reporting cutover status requires the trusted current clean prod checkout." >&2
-            exit 1
-          }
-          tracked_blob="$(
-            git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-              true
-          )"
-          if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-            [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" &&
-              -n "$tracked_blob" &&
-              "$(git hash-object "$lifecycle_script")" == "$tracked_blob" ]] || {
-              echo "Reporting cutover status lifecycle script is unsafe or differs from current HEAD." >&2
-              exit 1
-            }
-            APP_ROOT="$APP_ROOT" bash "$lifecycle_script" status
-            exit $?
-          fi
-          [[ -z "$tracked_blob" ]] || {
-            echo "Tracked Reporting cutover status script is missing." >&2
-            exit 1
-          }
-          [[ ! -e "$cutover_marker" && ! -L "$cutover_marker" ]] || {
-            echo "Reporting cutover marker exists but its trusted status script is unavailable." >&2
-            exit 1
-          }
-          printf 'cutover_marker=absent\n'
-          EOF
-
-  reporting-cutover-verify-core-cleanup-backup:
-    needs: verify
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-cutover' &&
-      inputs.reporting_cutover_action == 'verify-core-cleanup-backup' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Restore and verify the exact Core cleanup backup
-        env:
-          APP_ROOT: /opt/winwidget
-          BACKUP_JOB_ID: ${{ inputs.reporting_core_backup_job_id }}
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          [[ "$BACKUP_JOB_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || {
-            echo "The exact successful manual Core backup job UUID is required." >&2
-            exit 1
-          }
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' BACKUP_JOB_ID='$BACKUP_JOB_ID' bash -s" <<'EOF'
-          set -euo pipefail
-          umask 077
-          unset ENV_FILE COMPOSE_FILE
-          cd "$APP_ROOT/winwidget.ru_server"
-          lifecycle_script="scripts/reporting-cutover-lifecycle.sh"
-          current_revision="$(git rev-parse HEAD)"
-          [[ "$(id -u)" == "0" &&
-            "$BACKUP_JOB_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ &&
-            "$(git branch --show-current)" == "prod" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Core cleanup backup verification requires the trusted current clean prod checkout." >&2
-            exit 1
-          }
-          for tracked_file in \
-            "$lifecycle_script" \
-            scripts/reporting-producer-lifecycle.sh \
-            scripts/reporting-database-lifecycle.sh \
-            scripts/production-deploy-lock.sh \
-            scripts/core-database-production-guard.sh; do
-            [[ -f "$tracked_file" && ! -L "$tracked_file" ]] || {
-              echo "Core cleanup backup trust-chain file is missing or unsafe: $tracked_file" >&2
-              exit 1
-            }
-            tracked_blob="$(git rev-parse --verify "HEAD:$tracked_file")"
-            [[ "$(git hash-object "$tracked_file")" == "$tracked_blob" ]] || {
-              echo "Core cleanup backup trust-chain file differs from current HEAD: $tracked_file" >&2
-              exit 1
-            }
-          done
-          APP_ROOT="$APP_ROOT" \
-            EXPECTED_REVISION="$current_revision" \
-            REPORTING_CORE_CLEANUP_BACKUP_JOB_ID="$BACKUP_JOB_ID" \
-            bash "$lifecycle_script" verify-core-cleanup-backup
-          [[ "$(git rev-parse HEAD)" == "$current_revision" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Core cleanup backup verification unexpectedly changed the checkout." >&2
-            exit 1
-          }
-          EOF
-
-  reporting-cutover-resolve-core-cleanup:
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-cutover' &&
-      (inputs.reporting_cutover_action == 'prepare-core-cleanup-resolve' ||
-      inputs.reporting_cutover_action == 'resolve-core-cleanup-migration') &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Prepare or execute reviewed Core cleanup migration resolve
-        env:
-          APP_ROOT: /opt/winwidget
-          CLEANUP_ACTION: ${{ inputs.reporting_cutover_action }}
-          CLEANUP_CONFIRMATION: ${{ inputs.reporting_cleanup_resolve_confirmation }}
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          [[ "$CLEANUP_ACTION" == 'prepare-core-cleanup-resolve' ||
-            "$CLEANUP_ACTION" == 'resolve-core-cleanup-migration' ]] || exit 1
-          confirmation_b64=''
-          if [[ "$CLEANUP_ACTION" == 'resolve-core-cleanup-migration' ]]; then
-            [[ "$CLEANUP_CONFIRMATION" =~ ^resolve-core-cleanup:[0-9a-f]{40}:[0-9a-f]{40}:[1-9][0-9]*:unfinished-(transition|steady):[0-9]{14}_remove_legacy_reporting_state:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}$ ]] || {
-              echo "The exact prepare-core-cleanup-resolve proof token is required." >&2
-              exit 1
-            }
-            confirmation_b64="$(printf '%s' "$CLEANUP_CONFIRMATION" | base64 -w 0)"
-            [[ "$confirmation_b64" =~ ^[A-Za-z0-9+/]+=*$ ]] || exit 1
-          fi
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' CLEANUP_ACTION='$CLEANUP_ACTION' CONFIRMATION_B64='$confirmation_b64' bash -s" <<'EOF'
-          set -euo pipefail
-          umask 077
-          unset ENV_FILE COMPOSE_FILE
-          cd "$APP_ROOT/winwidget.ru_server"
-          lifecycle_script="scripts/reporting-cutover-lifecycle.sh"
-          current_revision="$(git rev-parse HEAD)"
-          [[ "$(id -u)" == '0' &&
-            "$CLEANUP_ACTION" =~ ^(prepare-core-cleanup-resolve|resolve-core-cleanup-migration)$ &&
-            "$current_revision" =~ ^[0-9a-f]{40}$ &&
-            "$(git branch --show-current)" == 'prod' &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Core cleanup resolve requires the exact trusted clean prod checkout." >&2
-            exit 1
-          }
-          for tracked_file in \
-            "$lifecycle_script" \
-            scripts/reporting-producer-lifecycle.sh \
-            scripts/reporting-database-lifecycle.sh \
-            scripts/production-deploy-lock.sh \
-            scripts/core-database-production-guard.sh \
-            deploy/docker-compose.prod.yml; do
-            [[ -f "$tracked_file" && ! -L "$tracked_file" ]] || {
-              echo "Core cleanup resolve trust-chain file is missing or unsafe: $tracked_file" >&2
-              exit 1
-            }
-            tracked_blob="$(git rev-parse --verify "HEAD:$tracked_file")"
-            [[ "$(git hash-object "$tracked_file")" == "$tracked_blob" ]] || {
-              echo "Core cleanup resolve trust-chain file differs from current HEAD: $tracked_file" >&2
-              exit 1
-            }
-          done
-          if [[ "$CLEANUP_ACTION" == 'resolve-core-cleanup-migration' ]]; then
-            cleanup_confirmation="$(
-              printf '%s' "$CONFIRMATION_B64" | base64 --decode
-            )"
-            [[ "$cleanup_confirmation" =~ ^resolve-core-cleanup:[0-9a-f]{40}:[0-9a-f]{40}:[1-9][0-9]*:unfinished-(transition|steady):[0-9]{14}_remove_legacy_reporting_state:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}$ ]] || {
-              echo "Decoded Core cleanup resolve proof token is invalid." >&2
-              exit 1
-            }
-            export CONFIRM_REPORTING_CORE_CLEANUP_RESOLVE="$cleanup_confirmation"
-          else
-            [[ -z "$CONFIRMATION_B64" ]] || exit 1
-          fi
-          APP_ROOT="$APP_ROOT" \
-            EXPECTED_REVISION="$current_revision" \
-            bash "$lifecycle_script" "$CLEANUP_ACTION"
-          [[ "$(git rev-parse HEAD)" == "$current_revision" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Core cleanup resolve unexpectedly changed the checkout." >&2
-            exit 1
-          }
-          EOF
-
-  reporting-cutover-stage-cleanup:
-    needs: verify
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-cutover' &&
-      inputs.reporting_cutover_action == 'stage-cleanup' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Pin reviewed Reporting cleanup revision without checkout
-        env:
-          APP_ROOT: /opt/winwidget
-          CLEANUP_CONFIRMATION: ${{ inputs.reporting_cleanup_confirmation }}
-          CLEANUP_REVISION: ${{ github.sha }}
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          [[ "$CLEANUP_CONFIRMATION" =~ ^stage-cleanup:[0-9a-f]{40}:[0-9a-f]{40}:[0-9]+:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}$ ]] || {
-            echo "The exact stage-cleanup confirmation token is required." >&2
-            exit 1
-          }
-          confirmation_b64="$(printf '%s' "$CLEANUP_CONFIRMATION" | base64 -w 0)"
-          [[ "$confirmation_b64" =~ ^[A-Za-z0-9+/]+=*$ ]] || exit 1
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' CLEANUP_REVISION='$CLEANUP_REVISION' CONFIRMATION_B64='$confirmation_b64' bash -s" <<'EOF'
-          set -euo pipefail
-          umask 077
-          cd "$APP_ROOT/winwidget.ru_server"
-          lock_script="scripts/production-deploy-lock.sh"
-          database_lifecycle_script="scripts/reporting-database-lifecycle.sh"
-          cutover_lifecycle_script="scripts/reporting-cutover-lifecycle.sh"
-          review_file="$APP_ROOT/deploy/backend/reporting-cleanup-review-v1.json"
-          manifest_file="$APP_ROOT/deploy/backend/reporting-cleanup-manifest-v1.json"
-          current_revision="$(git rev-parse HEAD)"
-          [[ "$(id -u)" == "0" &&
-            "$CLEANUP_REVISION" =~ ^[0-9a-f]{40}$ &&
-            "$CONFIRMATION_B64" =~ ^[A-Za-z0-9+/]+=*$ &&
-            "$(git branch --show-current)" == "prod" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Reporting cleanup staging requires a trusted clean prod checkout." >&2
-            exit 1
-          }
-          cleanup_confirmation="$(
-            printf '%s' "$CONFIRMATION_B64" | base64 --decode
-          )"
-          [[ "$cleanup_confirmation" =~ ^stage-cleanup:[0-9a-f]{40}:[0-9a-f]{40}:[0-9]+:[0-9a-f]{64}:[0-9a-f]{64}:[0-9a-f]{64}$ ]] || {
-            echo "Reporting cleanup confirmation token is invalid." >&2
-            exit 1
-          }
-          for tracked_file in \
-            "$lock_script" \
-            "$database_lifecycle_script" \
-            "$cutover_lifecycle_script" \
-            scripts/reporting-producer-lifecycle.sh \
-            scripts/core-database-production-guard.sh; do
-            [[ -f "$tracked_file" && ! -L "$tracked_file" ]] || {
-              echo "Reporting cleanup staging file is missing or unsafe: $tracked_file" >&2
-              exit 1
-            }
-            tracked_blob="$(git rev-parse --verify "HEAD:$tracked_file")"
-            [[ "$(git hash-object "$tracked_file")" == "$tracked_blob" ]] || {
-              echo "Reporting cleanup staging file differs from current HEAD: $tracked_file" >&2
-              exit 1
-            }
-          done
-          # shellcheck source=/dev/null
-          source "$lock_script"
-          acquire_production_deploy_lock "Reporting cleanup revision staging"
-          APP_ROOT="$APP_ROOT" \
-            bash "$database_lifecycle_script" \
-              --guard-before-fetch-revision "$CLEANUP_REVISION"
-          git fetch origin prod
-          fetched_revision="$(git rev-parse FETCH_HEAD)"
-          [[ "$fetched_revision" == "$CLEANUP_REVISION" ]] || {
-            echo "Origin prod changed after Reporting cleanup workflow start." >&2
-            exit 1
-          }
-          git merge-base --is-ancestor "$current_revision" "$CLEANUP_REVISION" || {
-            echo "Reporting cleanup candidate is not a forward descendant of the active revision." >&2
-            exit 1
-          }
-          candidate_stage_root="$(
-            mktemp -d /tmp/winwidget-reporting-cleanup-stage.XXXXXX
-          )"
-          candidate_root="$candidate_stage_root/candidate"
-          cleanup_candidate_worktree() {
-            if [[ -d "$candidate_root" && ! -L "$candidate_root" ]]; then
-              git worktree remove --force "$candidate_root" > /dev/null 2>&1 || true
-            fi
-            rmdir "$candidate_stage_root" > /dev/null 2>&1 || true
-          }
-          trap cleanup_candidate_worktree EXIT
-          chmod 700 "$candidate_stage_root"
-          git worktree add --detach "$candidate_root" "$CLEANUP_REVISION" > /dev/null
-          [[ -d "$candidate_root" && ! -L "$candidate_root" &&
-            "$(stat -c '%u' "$candidate_root")" == '0' &&
-            "$(git -C "$candidate_root" rev-parse HEAD)" == "$CLEANUP_REVISION" &&
-            -z "$(git -C "$candidate_root" status --porcelain --untracked-files=all)" ]] || {
-            echo "Reporting cleanup candidate worktree is unsafe." >&2
-            exit 1
-          }
-          for candidate_file in \
-            scripts/production-deploy-lock.sh \
-            scripts/database-restore-production-guard.sh \
-            scripts/reporting-database-lifecycle.sh \
-            scripts/reporting-producer-lifecycle.sh \
-            scripts/core-database-production-guard.sh \
-            scripts/reporting-cutover-lifecycle.sh; do
-            candidate_path="$candidate_root/$candidate_file"
-            [[ -f "$candidate_path" && ! -L "$candidate_path" &&
-              "$(stat -c '%u' "$candidate_path")" == '0' &&
-              "$(git -C "$candidate_root" hash-object --no-filters "$candidate_file")" == \
-                "$(git rev-parse "$CLEANUP_REVISION:$candidate_file")" ]] || {
-              echo "Reporting cleanup candidate lifecycle file is unsafe: $candidate_file" >&2
-              exit 1
-            }
-          done
-          APP_ROOT="$APP_ROOT" \
-            EXPECTED_REVISION="$current_revision" \
-            REPORTING_LIFECYCLE_SOURCE_ROOT="$candidate_root" \
-            REPORTING_CLEANUP_REVISION="$CLEANUP_REVISION" \
-            REPORTING_CLEANUP_REVIEW_FILE="$review_file" \
-            REPORTING_CLEANUP_MANIFEST_FILE="$manifest_file" \
-            CONFIRM_REPORTING_CLEANUP_STAGE="$cleanup_confirmation" \
-            bash "$candidate_root/$cutover_lifecycle_script" stage-cleanup
-          APP_ROOT="$APP_ROOT" \
-            bash "$database_lifecycle_script" \
-              --guard-before-checkout-revision "$CLEANUP_REVISION"
-          [[ "$(git rev-parse HEAD)" == "$current_revision" ]] || {
-            echo "Reporting cleanup staging unexpectedly changed the checkout." >&2
-            exit 1
-          }
-          echo "Reporting cleanup revision is pinned; checkout and deployment remain separate protected actions."
-          EOF
-
-  reporting-database:
-    needs: verify
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'reporting-database' &&
-      inputs.reporting_database_action == 'prepare' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Run Reporting database lifecycle on VPS
-        env:
-          APP_ROOT: /opt/winwidget
-          DATABASE_ACTION: ${{ inputs.reporting_database_action }}
-          DEPLOY_REVISION: ${{ github.sha }}
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          case "$DATABASE_ACTION" in
-            prepare|status) ;;
-            *)
-              echo "Unsupported Reporting database action: $DATABASE_ACTION" >&2
-              exit 1
-              ;;
-          esac
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' DATABASE_ACTION='$DATABASE_ACTION' bash -s" <<'EOF'
-          set -euo pipefail
-          umask 077
-          unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
-            REPORTING_FIRST_ROLLOUT_STAGED_MARKER
-          cd "$APP_ROOT/winwidget.ru_server"
-          lock_script="scripts/production-deploy-lock.sh"
-          [[ "$(id -u)" == "0" && -f "$lock_script" && ! -L "$lock_script" ]] || {
-            echo "Reporting database workflow requires the trusted root lock bootstrap." >&2
-            exit 1
-          }
-          [[ "$(git branch --show-current)" == "prod" &&
-            "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Reporting database lock bootstrap requires the staged exact clean revision." >&2
-            exit 1
-          }
-          tracked_lock_blob="$(
-            git rev-parse --verify "$EXPECTED_REVISION:$lock_script"
-          )"
-          [[ "$(git hash-object "$lock_script")" == "$tracked_lock_blob" ]] || {
-            echo "Reporting production lock script differs from the expected revision." >&2
-            exit 1
-          }
-          # shellcheck source=/dev/null
-          source "$lock_script"
-          acquire_production_deploy_lock "Reporting database $DATABASE_ACTION"
-          guard_campaigns_checkout_before_pull() {
-            local expected_revision="$1"
-            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
-            local staged_marker="$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
-            local cutover_marker="$APP_ROOT/deploy/backend/.campaigns-database-cutover-v1"
-            local tracked_blob actual_blob
-
-            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] || return 1
-            tracked_blob="$(
-              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-                true
-            )"
-            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || return 1
-              actual_blob="$(git hash-object "$lifecycle_script")"
-              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || return 1
-              APP_ROOT="$APP_ROOT" \
-                bash "$lifecycle_script" \
-                  --guard-checkout-revision "$expected_revision"
-              return
-            fi
-            [[ -z "$tracked_blob" ]] || return 1
-            [[ ! -e "$staged_marker" && ! -L "$staged_marker" &&
-              ! -e "$cutover_marker" && ! -L "$cutover_marker" ]]
-          }
-          guard_reporting_checkout_before_pull() {
-            local expected_revision="$1"
-            local guard_action="${2:---guard-before-fetch-revision}"
-            local lifecycle_script="scripts/reporting-database-lifecycle.sh"
-            local staged_marker="$APP_ROOT/deploy/backend/.reporting-first-rollout-staged-v1"
-            local database_marker="$APP_ROOT/deploy/backend/.reporting-database-lifecycle-v1"
-            local cutover_marker="$APP_ROOT/deploy/backend/.reporting-database-cutover-v1"
-            local tracked_blob actual_blob
-
-            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
-              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || {
-              echo "Expected Reporting revision is invalid." >&2
-              return 1
-            }
-            tracked_blob="$(
-              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-                true
-            )"
-            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
-                echo "Reporting lifecycle guard script is unsafe." >&2
-                return 1
-              }
-              actual_blob="$(git hash-object "$lifecycle_script")"
-              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
-                echo "Reporting lifecycle guard script differs from the checked-out revision." >&2
-                return 1
-              }
-              APP_ROOT="$APP_ROOT" \
-                bash "$lifecycle_script" \
-                  "$guard_action" "$expected_revision"
-              return
-            fi
-            if [[ -n "$tracked_blob" ]]; then
-              echo "Tracked Reporting lifecycle guard script is missing." >&2
-              return 1
-            fi
-            if [[ -e "$staged_marker" || -L "$staged_marker" ||
-              -e "$database_marker" || -L "$database_marker" ||
-              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
-              echo "Reporting marker exists but its checkout guard is unavailable." >&2
-              return 1
-            fi
-          }
-          checkout_verified_reporting_revision() {
-            local expected_revision="$1"
-            local current_revision fetched_revision
-
-            current_revision="$(git rev-parse HEAD)"
-            guard_campaigns_checkout_before_pull "$current_revision"
-            guard_reporting_checkout_before_pull "$current_revision"
-            guard_campaigns_checkout_before_pull "$expected_revision"
-            guard_reporting_checkout_before_pull "$expected_revision"
-            git fetch origin prod
-            fetched_revision="$(git rev-parse FETCH_HEAD)"
-            [[ "$fetched_revision" == "$expected_revision" ]] || {
-              echo "Origin prod changed after Reporting database workflow start." >&2
-              return 1
-            }
-            guard_reporting_checkout_before_pull \
-              "$expected_revision" --guard-before-checkout-revision
-            git checkout prod
-            git merge --ff-only "$fetched_revision"
-            [[ "$(git rev-parse HEAD)" == "$expected_revision" &&
-              -z "$(git status --porcelain --untracked-files=all)" ]] || {
-              echo "Verified Reporting database checkout is not exact and clean." >&2
-              return 1
-            }
-          }
-          checkout_verified_reporting_revision "$EXPECTED_REVISION"
-          for tracked_file in \
-            scripts/reporting-database-lifecycle.sh \
-            deploy/docker-compose.prod.yml; do
-            [[ -f "$tracked_file" && ! -L "$tracked_file" ]] || {
-              echo "Reporting trusted lifecycle file is missing or unsafe: $tracked_file" >&2
-              exit 1
-            }
-            tracked_blob="$(
-              git rev-parse --verify "$EXPECTED_REVISION:$tracked_file"
-            )"
-            [[ "$(git hash-object "$tracked_file")" == "$tracked_blob" ]] || {
-              echo "Reporting trusted lifecycle file differs from the expected revision: $tracked_file" >&2
-              exit 1
-            }
-          done
-          lifecycle_script="scripts/reporting-database-lifecycle.sh"
-          [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
-            echo "Reporting lifecycle script is missing after verified checkout." >&2
-            exit 1
-          }
-          APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
-            bash "$lifecycle_script" preflight-env "$DATABASE_ACTION"
-          if [[ "$DATABASE_ACTION" == "prepare" ]]; then
-            export REPORTING_REVISION="$EXPECTED_REVISION"
-            export REPORTING_IMAGE="winwidget-reporting:git-$EXPECTED_REVISION"
-            export NOTIFICATION_DELIVERY_REVISION="$EXPECTED_REVISION"
-            export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$EXPECTED_REVISION"
-            export CAMPAIGNS_REVISION="$EXPECTED_REVISION"
-            export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$EXPECTED_REVISION"
-            export DATABASE_RESTORE_REVISION="$EXPECTED_REVISION"
-            export DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$EXPECTED_REVISION"
-            docker compose \
-              --env-file "$APP_ROOT/deploy/backend/.env.production" \
-              -f deploy/docker-compose.prod.yml \
-              build reporting-service
-            image_id="$(
-              docker image inspect "$REPORTING_IMAGE" --format '{{.Id}}'
-            )"
-            image_revision="$(
-              docker image inspect "$REPORTING_IMAGE" \
-                --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
-            )"
-            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
-              "$image_revision" == "$EXPECTED_REVISION" ]] || {
-              echo "Prepared Reporting image identity is invalid." >&2
-              exit 1
-            }
-          fi
-          APP_ROOT="$APP_ROOT" \
-            EXPECTED_REVISION="$EXPECTED_REVISION" \
-            bash "$lifecycle_script" "$DATABASE_ACTION"
           EOF

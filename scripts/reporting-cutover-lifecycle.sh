@@ -5410,9 +5410,9 @@ reporting_cutover_self_test() {
 		reporting_cutover_require_archived_route_runtime "$revision" \
 			'89abcdef0123456789abcdef0123456789abcdef'
 		[[ "$(cat "$policy_calls")" == \
-			$'retained:0123456789abcdef0123456789abcdef01234567\nabsent:89abcdef0123456789abcdef0123456789abcdef' ]]
+			$'absent:0123456789abcdef0123456789abcdef01234567\nabsent:89abcdef0123456789abcdef0123456789abcdef' ]]
 	) || {
-		echo 'Reporting cutover self-test rejected the pre/post-cleanup legacy route policy split.' >&2
+		echo 'Reporting cutover self-test rejected the archived legacy route absence policy.' >&2
 		return 1
 	}
 	stable_file="$root/stable-evidence.json"
