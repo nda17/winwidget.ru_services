@@ -110,6 +110,7 @@ REPORTING_CLEANUP_MUTABLE_CORE_PATHS=(
 REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS=(
 	.env.example
 	.github/workflows/deploy-production.yml
+	apps/notification-delivery/test/integration/notification-delivery.integration.mjs
 	deploy/docker-compose.prod.yml
 	scripts/deploy-production.sh
 	scripts/deploy-reporting-production.sh
@@ -117,6 +118,7 @@ REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS=(
 	scripts/reporting-database-lifecycle.sh
 	scripts/reporting-producer-lifecycle.sh
 	scripts/test-messaging-integration.mjs
+	scripts/test-reporting-cutover-rehearsal.sh
 	scripts/test-reporting-production-scripts.sh
 )
 REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS=(
@@ -130,7 +132,19 @@ REPORTING_CLEANUP_TRUSTED_PATHS=(
 	Dockerfile
 	apps/api-gateway
 	apps/campaigns
-	apps/notification-delivery
+	apps/notification-delivery/.dockerignore
+	apps/notification-delivery/.eslintrc.cjs
+	apps/notification-delivery/.gitignore
+	apps/notification-delivery/.prettierignore
+	apps/notification-delivery/Dockerfile
+	apps/notification-delivery/emails
+	apps/notification-delivery/nest-cli.json
+	apps/notification-delivery/package.json
+	apps/notification-delivery/pnpm-lock.yaml
+	apps/notification-delivery/prisma
+	apps/notification-delivery/src
+	apps/notification-delivery/tsconfig.build.json
+	apps/notification-delivery/tsconfig.json
 	apps/reporting/Dockerfile
 	apps/reporting/package.json
 	apps/reporting/pnpm-lock.yaml
@@ -3788,6 +3802,7 @@ const modifiedCorePaths = [
 const modifiedControlPlanePaths = [
   ".env.example",
   ".github/workflows/deploy-production.yml",
+  "apps/notification-delivery/test/integration/notification-delivery.integration.mjs",
   "deploy/docker-compose.prod.yml",
   "scripts/deploy-production.sh",
   "scripts/deploy-reporting-production.sh",
@@ -3795,6 +3810,7 @@ const modifiedControlPlanePaths = [
   "scripts/reporting-database-lifecycle.sh",
   "scripts/reporting-producer-lifecycle.sh",
   "scripts/test-messaging-integration.mjs",
+  "scripts/test-reporting-cutover-rehearsal.sh",
   "scripts/test-reporting-production-scripts.sh",
 ];
 const addedControlPlanePaths = [

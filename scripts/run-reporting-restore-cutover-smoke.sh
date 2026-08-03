@@ -4,10 +4,34 @@ set -Eeuo pipefail
 
 APP_ROOT="${APP_ROOT:-/opt/winwidget}"
 readonly REPORTING_RESTORE_SERVER_ROOT="$APP_ROOT/winwidget.ru_server"
-readonly REPORTING_RESTORE_CUTOVER_SCRIPT="$REPORTING_RESTORE_SERVER_ROOT/scripts/reporting-cutover-lifecycle.sh"
+readonly REPORTING_RESTORE_DEFAULT_CUTOVER_SCRIPT="$REPORTING_RESTORE_SERVER_ROOT/scripts/reporting-cutover-lifecycle.sh"
 readonly REPORTING_RESTORE_DEFAULT_EVIDENCE="$APP_ROOT/deploy/backend/reporting-restore-evidence-v1.json"
 readonly REPORTING_CLEANUP_RESTORE_DEFAULT_EVIDENCE="$APP_ROOT/deploy/backend/reporting-cleanup-restore-evidence-v1.json"
 readonly REPORTING_RESTORE_MAX_SECONDS='3600'
+
+reporting_restore_stat_mode_before_source() {
+	stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
+}
+
+reporting_restore_stat_owner_before_source() {
+	stat -c '%u:%g' "$1" 2>/dev/null || stat -f '%u:%g' "$1"
+}
+
+reporting_restore_resolve_cutover_script() {
+	local override="${REPORTING_CUTOVER_LIFECYCLE_SCRIPT:-}"
+	if [[ -z "$override" ]]; then
+		printf '%s\n' "$REPORTING_RESTORE_DEFAULT_CUTOVER_SCRIPT"
+		return
+	fi
+	[[ "$override" == /* && "$override" != *$'\n'* &&
+		-f "$override" && ! -L "$override" &&
+		"$(reporting_restore_stat_owner_before_source "$override")" == '0:0' &&
+		"$(reporting_restore_stat_mode_before_source "$override")" == '600' ]] || {
+		echo 'REPORTING_CUTOVER_LIFECYCLE_SCRIPT must be an absolute root-owned mode-600 regular non-symlink file.' >&2
+		return 1
+	}
+	printf '%s\n' "$override"
+}
 
 reporting_restore_fail() {
 	echo "$*" >&2
@@ -312,6 +336,13 @@ reporting_restore_self_test() {
 		"$source_text" == *'reporting_restore_verify_migrations'* &&
 		"$source_text" == *'reporting_restore_verify_invariants'* &&
 		"$source_text" == *'REPORTING_RESTORE_MODE'* &&
+		"$source_text" == *'REPORTING_CUTOVER_LIFECYCLE_SCRIPT'* &&
+		"$source_text" == *'reporting_restore_resolve_cutover_script'* &&
+		"$source_text" == *'reporting_restore_stat_owner_before_source'* &&
+		"$source_text" == *'reporting_restore_stat_mode_before_source'* &&
+		"$source_text" == *"== '0:0'"* &&
+		"$source_text" == *"== '600'"* &&
+		"$source_text" == *'! -L "$override"'* &&
 		"$source_text" == *'cleanup-restore:$revision:$switch_generation:$evidence_sha'* &&
 		"$source_text" != *"$forbidden_marker_function"* ]] ||
 		reporting_restore_fail 'Reporting restore runner static self-test failed.'
@@ -323,6 +354,7 @@ reporting_restore_self_test() {
 }
 
 reporting_restore_main() {
+	local reporting_restore_cutover_script
 	[[ $# == 0 ]] || {
 		if [[ $# == 1 && "$1" == '--self-test' ]]; then
 			reporting_restore_self_test
@@ -332,11 +364,12 @@ reporting_restore_main() {
 		return 1
 	}
 	[[ "$(id -u)" == '0' ]] || reporting_restore_fail 'Reporting restore cutover smoke must run as root.'
-	[[ -f "$REPORTING_RESTORE_CUTOVER_SCRIPT" && ! -L "$REPORTING_RESTORE_CUTOVER_SCRIPT" ]] ||
+	reporting_restore_cutover_script="$(reporting_restore_resolve_cutover_script)"
+	[[ -f "$reporting_restore_cutover_script" && ! -L "$reporting_restore_cutover_script" ]] ||
 		reporting_restore_fail 'Tracked Reporting cutover lifecycle is missing or unsafe.'
 
 	# shellcheck source=scripts/reporting-cutover-lifecycle.sh
-	source "$REPORTING_RESTORE_CUTOVER_SCRIPT"
+	source "$reporting_restore_cutover_script"
 
 	revision="${EXPECTED_REVISION:-}"
 	restore_mode="${REPORTING_RESTORE_MODE:-initial}"
