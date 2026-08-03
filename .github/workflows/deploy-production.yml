@@ -3313,6 +3313,8 @@ jobs:
               const databaseRestoreHealthcheck = JSON.stringify(
                 databaseRestoreWorker.healthcheck?.test ?? [],
               );
+              const databaseRestoreHealthcheckCommand =
+                databaseRestoreWorker.healthcheck?.test ?? [];
               const expectedDatabaseRestoreSecrets = [
                 [
                   "campaigns-postgres-admin-password",
@@ -3354,7 +3356,8 @@ jobs:
                 Number(databaseRestoreWorker.mem_reservation) !== 67108864 ||
                 Number(databaseRestoreWorker.cpus) !== 0.5 ||
                 Number(databaseRestoreWorker.pids_limit) !== 100 ||
-                !databaseRestoreWorker.healthcheck?.test ||
+                JSON.stringify(databaseRestoreHealthcheckCommand.slice(0, 4)) !==
+                  JSON.stringify(["CMD", "su-exec", "nestjs:nodejs", "node"]) ||
                 !databaseRestoreHealthcheck.includes("/fences") ||
                 !databaseRestoreHealthcheck.includes("fences.length!==0") ||
                 databaseRestoreWorker.labels?.["com.winwidget.owner"] !==

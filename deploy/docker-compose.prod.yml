@@ -658,6 +658,8 @@ services:
       test:
         [
           'CMD',
+          'su-exec',
+          'nestjs:nodejs',
           'node',
           '-e',
           'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["campaigns","core","notification-delivery","reporting"]''||fences.length!==0)process.exit(1)'
