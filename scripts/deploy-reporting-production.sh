@@ -272,7 +272,7 @@ rabbitmqctl set_topic_permissions \
 	"$RABBITMQ_PROVISION_USER" \
 	winwidget.events \
 	"^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$" \
-	"^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|notification\.delivery\.outcome\.v1)$"
+	"^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|reporting\.notification\.delivery\.outcome\.v1)$"
 rabbitmqctl set_topic_permissions \
 	-p winwidget \
 	"$RABBITMQ_PROVISION_USER" \
@@ -352,7 +352,7 @@ reporting_require_rabbitmq_preflight() {
 	expected_topic_permissions="$(
 		printf '%s\n' \
 			'winwidget|winwidget.dead-letter|^reporting\.(identityUser|billingPayment|billingSubscription|widget|lead|reportingSettings|deliveryOutcome)\.dead-letter$|^reporting\.(identityUser|billingPayment|billingSubscription|widget|lead|reportingSettings|deliveryOutcome)\.dead-letter$' \
-			'winwidget|winwidget.events|^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$|^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|notification\.delivery\.outcome\.v1)$' |
+			'winwidget|winwidget.events|^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$|^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|reporting\.notification\.delivery\.outcome\.v1)$' |
 			LC_ALL=C sort
 	)"
 	[[ "$topic_permissions" == "$expected_topic_permissions" ]] || {

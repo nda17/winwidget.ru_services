@@ -10,6 +10,7 @@ import {
 	NotificationDeliveryOutcomeEventPayload,
 	PaymentTelegramNotificationEventPayload,
 	PaymentSucceededEventPayload,
+	ReportingNotificationDeliveryOutcomeEventPayload,
 	SubscriptionExpiryEmailNotificationRequestedEventPayload,
 	SubscriptionExpiryTelegramNotificationRequestedEventPayload
 } from '../messaging/delivery-event.types';
@@ -35,6 +36,7 @@ export type {
 	NotificationDeliveryOutcomeEventPayload,
 	PaymentTelegramNotificationEventPayload,
 	PaymentSucceededEventPayload,
+	ReportingNotificationDeliveryOutcomeEventPayload,
 	SubscriptionExpiryEmailNotificationRequestedEventPayload,
 	SubscriptionExpiryTelegramNotificationRequestedEventPayload
 };

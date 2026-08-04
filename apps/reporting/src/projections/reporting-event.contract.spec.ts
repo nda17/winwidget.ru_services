@@ -311,7 +311,7 @@ describe('notification delivery outcome contract', () => {
 		expect(
 			parseNotificationDeliveryOutcome({
 				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
+				eventType: 'reporting.notification.delivery.outcome.v1',
 				sourceEventId,
 				sourceKind: 'daily-summary-delivery-telegram',
 				reference: { type: 'daily-summary-job', id: sourceEventId },
@@ -322,11 +322,29 @@ describe('notification delivery outcome contract', () => {
 		).toEqual(expect.objectContaining({ status: 'DELIVERED' }));
 	});
 
-	it('accepts a shared subscription-expiry outcome for safe ignore', () => {
-		expect(
+	it('rejects the Core delivery outcome event type', () => {
+		expect(() =>
 			parseNotificationDeliveryOutcome({
 				schemaVersion: 1,
 				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: '22222222-2222-4222-8222-222222222222',
+				sourceKind: 'daily-summary-delivery-telegram',
+				reference: {
+					type: 'daily-summary-job',
+					id: '22222222-2222-4222-8222-222222222222'
+				},
+				status: 'DELIVERED',
+				failure: null,
+				occurredAt: '2026-07-31T00:00:00.000Z'
+			})
+		).toThrow('eventType');
+	});
+
+	it('rejects a Core-owned outcome on the Reporting event type', () => {
+		expect(() =>
+			parseNotificationDeliveryOutcome({
+				schemaVersion: 1,
+				eventType: 'reporting.notification.delivery.outcome.v1',
 				sourceEventId: '55555555-5555-4555-8555-555555555555',
 				sourceKind: 'subscription-expiry-email',
 				reference: {
@@ -337,8 +355,6 @@ describe('notification delivery outcome contract', () => {
 				failure: null,
 				occurredAt: '2026-07-31T00:00:00.000Z'
 			})
-		).toEqual(
-			expect.objectContaining({ sourceKind: 'subscription-expiry-email' })
-		);
+		).toThrow('sourceKind');
 	});
 });

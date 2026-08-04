@@ -6,6 +6,7 @@ import {
 	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NotificationDeliveryKind,
 	NOTIFICATION_DELIVERY_KINDS,
+	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '../messaging/messaging.constants';
 import { createMessagingHeaders } from '../messaging/messaging-context';
@@ -858,9 +859,13 @@ export class NotificationDeliveryWorkerService
 		if (!reference || typeof reference !== 'object') return;
 
 		const messageId = randomUUID();
+		const outcomeEventType =
+			input.kind === 'daily-summary-delivery-telegram'
+				? REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE
+				: NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
 		const payload = {
 			schemaVersion: 1 as const,
-			eventType: NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+			eventType: outcomeEventType,
 			sourceEventId: input.eventId,
 			sourceKind: input.kind,
 			reference,
@@ -879,8 +884,8 @@ export class NotificationDeliveryWorkerService
 					messageId,
 					deduplicationKey: `notification:${input.eventId}:${input.kind}:outcome:${input.status.toLowerCase()}:v1`,
 					exchange: NotificationDeliveryExchange.EVENTS,
-					eventType: NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
-					routingKey: NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+					eventType: outcomeEventType,
+					routingKey: outcomeEventType,
 					payload: payload as unknown as Prisma.InputJsonValue,
 					headers: createMessagingHeaders({
 						messageId,

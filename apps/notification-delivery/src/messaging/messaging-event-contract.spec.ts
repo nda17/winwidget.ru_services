@@ -228,6 +228,68 @@ describe('notification delivery messaging contracts', () => {
 		).not.toThrow();
 	});
 
+	it('separates Core and Reporting delivery outcome routes', () => {
+		const corePayload = {
+			schemaVersion: 1,
+			eventType: 'notification.delivery.outcome.v1',
+			sourceEventId: messageId,
+			sourceKind: 'subscription-expiry-email',
+			reference: {
+				type: 'subscription-expiry-reminder',
+				id: 'subscription-reminder-1'
+			},
+			status: 'DELIVERED',
+			failure: null,
+			occurredAt: '2026-08-04T00:00:00.000Z'
+		};
+		const reportingPayload = {
+			schemaVersion: 1,
+			eventType: 'reporting.notification.delivery.outcome.v1',
+			sourceEventId: messageId,
+			sourceKind: 'daily-summary-delivery-telegram',
+			reference: { type: 'daily-summary-job', id: messageId },
+			status: 'DELIVERED',
+			failure: null,
+			occurredAt: '2026-08-04T00:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(corePayload, {
+				eventType: corePayload.eventType,
+				routingKey: corePayload.eventType,
+				messageId: '22222222-2222-4222-8222-222222222222'
+			})
+		).not.toThrow();
+		expect(() =>
+			assertMessagingEventContract(reportingPayload, {
+				eventType: reportingPayload.eventType,
+				routingKey: reportingPayload.eventType,
+				messageId: '22222222-2222-4222-8222-222222222222'
+			})
+		).not.toThrow();
+		expect(() =>
+			assertMessagingEventContract(
+				{
+					...corePayload,
+					sourceKind: 'daily-summary-delivery-telegram',
+					reference: { type: 'daily-summary-job', id: messageId }
+				},
+				{
+					eventType: corePayload.eventType,
+					routingKey: corePayload.eventType,
+					messageId: '22222222-2222-4222-8222-222222222222'
+				}
+			)
+		).toThrow('payload.sourceKind is invalid');
+		expect(() =>
+			assertMessagingEventContract(reportingPayload, {
+				eventType: reportingPayload.eventType,
+				routingKey: 'notification.delivery.outcome.v1',
+				messageId: '22222222-2222-4222-8222-222222222222'
+			})
+		).toThrow();
+	});
+
 	it('accepts only the exact outbound campaign delivery outcome route', () => {
 		const payload = {
 			schemaVersion: 2,

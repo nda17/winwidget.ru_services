@@ -14,13 +14,8 @@ export const OUTCOME_NOTIFICATION_DELIVERY_KINDS = [
 export type OutcomeNotificationDeliveryKind =
 	(typeof OUTCOME_NOTIFICATION_DELIVERY_KINDS)[number];
 
-export interface SubscriptionExpiryNotificationReference {
-	type: 'subscription-expiry-reminder';
-	id: string;
-}
-
 export interface NotificationDeliveryReference {
-	type: string;
+	type: 'subscription-expiry-reminder';
 	id: string;
 }
 
@@ -33,7 +28,7 @@ interface SubscriptionExpiryNotificationContent {
 export interface SubscriptionExpiryEmailNotificationRequestedEventPayload {
 	schemaVersion: 1;
 	eventType: typeof SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE;
-	reference: SubscriptionExpiryNotificationReference;
+	reference: NotificationDeliveryReference;
 	destination: {
 		email: string;
 	};
@@ -43,7 +38,7 @@ export interface SubscriptionExpiryEmailNotificationRequestedEventPayload {
 export interface SubscriptionExpiryTelegramNotificationRequestedEventPayload {
 	schemaVersion: 1;
 	eventType: typeof SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE;
-	reference: SubscriptionExpiryNotificationReference;
+	reference: NotificationDeliveryReference;
 	destination: {
 		telegramChatId: string;
 	};
@@ -58,7 +53,7 @@ export interface NotificationDeliveryOutcomeEventPayload {
 	schemaVersion: 1;
 	eventType: typeof NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
 	sourceEventId: string;
-	sourceKind: string;
+	sourceKind: OutcomeNotificationDeliveryKind;
 	reference: NotificationDeliveryReference;
 	status: 'DELIVERED' | 'FAILED';
 	failure: {

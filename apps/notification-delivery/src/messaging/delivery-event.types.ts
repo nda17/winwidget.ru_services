@@ -9,6 +9,7 @@ import {
 	OUTBOX_EVENT_TYPE,
 	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	PAYMENT_SUCCEEDED_EVENT_TYPE,
+	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
@@ -257,7 +258,6 @@ export interface SubscriptionExpiryTelegramNotificationRequestedEventPayload {
 }
 
 export type OutcomeNotificationDeliveryKind =
-	| 'daily-summary-delivery-telegram'
 	| 'subscription-expiry-email'
 	| 'subscription-expiry-telegram';
 
@@ -266,7 +266,27 @@ export interface NotificationDeliveryOutcomeEventPayload {
 	eventType: typeof NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
 	sourceEventId: string;
 	sourceKind: OutcomeNotificationDeliveryKind;
-	reference: NotificationDeliveryReference;
+	reference: Extract<
+		NotificationDeliveryReference,
+		{ type: 'subscription-expiry-reminder' }
+	>;
+	status: 'DELIVERED' | 'FAILED';
+	failure: {
+		normalizedCode: string;
+		safeReason: string;
+	} | null;
+	occurredAt: string;
+}
+
+export interface ReportingNotificationDeliveryOutcomeEventPayload {
+	schemaVersion: 1;
+	eventType: typeof REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
+	sourceEventId: string;
+	sourceKind: 'daily-summary-delivery-telegram';
+	reference: Extract<
+		NotificationDeliveryReference,
+		{ type: 'daily-summary-job' }
+	>;
 	status: 'DELIVERED' | 'FAILED';
 	failure: {
 		normalizedCode: string;

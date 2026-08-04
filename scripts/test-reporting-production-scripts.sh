@@ -64,8 +64,13 @@ deploy_entrypoint_text="$(<"$script_directory/deploy-production.sh")"
 [[ "$deploy_entrypoint_text" == *'reporting_validate_preflight_secret_isolation'* &&
 	"$deploy_entrypoint_text" == *'reporting_transition_cleanup_integration_worker_env "$deploy_revision"'* &&
 	"$deploy_entrypoint_text" == *'CORE_NOTIFICATION_DELIVERY_READINESS_KINDS=$(reporting_expected_core_notification_delivery_kinds)'* &&
-	"$deploy_entrypoint_text" == *"'CORE_NOTIFICATION_DELIVERY_READINESS_KINDS',"* ]] || {
-	echo 'Full deployment is missing the Reporting credential isolation gate.' >&2
+	"$deploy_entrypoint_text" == *"'CORE_NOTIFICATION_DELIVERY_READINESS_KINDS',"* &&
+	"$deploy_entrypoint_text" == *'prepare_reporting_outcome_route_cutover_after_stop'* &&
+	"$deploy_entrypoint_text" == *'reporting.notification.delivery.outcome.v1'* &&
+	"$deploy_entrypoint_text" == *'channel.unbindQueue('* &&
+	"$deploy_entrypoint_text" == *'rabbitmqctl delete_queue'* &&
+	"$deploy_entrypoint_text" == *'start_canonical_reporting_runtime "Reporting"'* ]] || {
+	echo 'Full deployment is missing the Reporting credential or outcome-route gate.' >&2
 	exit 1
 }
 reporting_runtime_guard="$(
@@ -89,7 +94,7 @@ notification_migration_line="$(
 	"$reporting_runtime_capture_line" =~ ^[0-9]+$ &&
 	"$notification_migration_line" =~ ^[0-9]+$ &&
 	"$reporting_runtime_capture_line" -lt "$notification_migration_line" ]] || {
-	echo 'Full deployment does not preserve and preflight the independent Reporting runtime identity.' >&2
+	echo 'Full deployment does not preflight and replace the canonical Reporting runtime safely.' >&2
 	exit 1
 }
 unset reporting_runtime_guard reporting_runtime_capture_line notification_migration_line

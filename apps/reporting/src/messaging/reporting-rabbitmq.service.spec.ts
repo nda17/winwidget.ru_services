@@ -5,7 +5,8 @@ import {
 	REPORTING_MANUAL_RETRY_EXCHANGE,
 	REPORTING_QUEUE_NAMES,
 	REPORTING_RETRY_DELAYS_MS,
-	REPORTING_RETRY_EXCHANGE
+	REPORTING_RETRY_EXCHANGE,
+	REPORTING_ROUTING_KEYS
 } from './reporting-messaging.constants';
 import { ReportingRabbitMqService } from './reporting-rabbitmq.service';
 import type { ConfirmChannel } from 'amqplib';
@@ -78,6 +79,33 @@ describe('ReportingRabbitMqService topology ownership', () => {
 					deadLetterExchange: REPORTING_EVENTS_EXCHANGE,
 					deadLetterRoutingKey:
 						'reporting.core-operational-routing.changed.v1'
+				}
+			);
+		}
+
+		const deliveryOutcomeBindings = channel.bindQueue.mock.calls.filter(
+			([queue, exchange]) =>
+				queue === REPORTING_QUEUE_NAMES.deliveryOutcome &&
+				exchange === REPORTING_EVENTS_EXCHANGE
+		);
+		expect(REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome).toEqual([
+			'reporting.notification.delivery.outcome.v1'
+		]);
+		expect(deliveryOutcomeBindings).toEqual([
+			[
+				REPORTING_QUEUE_NAMES.deliveryOutcome,
+				REPORTING_EVENTS_EXCHANGE,
+				'reporting.notification.delivery.outcome.v1'
+			]
+		]);
+		for (const [index, delay] of REPORTING_RETRY_DELAYS_MS.entries()) {
+			expect(channel.assertQueue).toHaveBeenCalledWith(
+				`${REPORTING_QUEUE_NAMES.deliveryOutcome}.retry.${index + 1}`,
+				{
+					durable: true,
+					messageTtl: delay,
+					deadLetterExchange: REPORTING_EVENTS_EXCHANGE,
+					deadLetterRoutingKey: REPORTING_ROUTING_KEYS.deliveryOutcome
 				}
 			);
 		}

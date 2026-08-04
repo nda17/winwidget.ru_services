@@ -240,7 +240,7 @@ echo "Building maintenance image: $MAINTENANCE_IMAGE"
 echo "Building isolated database restore image: $DATABASE_RESTORE_IMAGE"
 echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
 echo "Building Campaigns image: $CAMPAIGNS_IMAGE"
-echo "Building Reporting image; its runtime remains independent except for the exact staged cleanup revision: $REPORTING_IMAGE"
+echo "Building Reporting image for the coordinated backend revision: $REPORTING_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -1064,17 +1064,313 @@ compose_notification_cutover() {
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+readonly CORE_NOTIFICATION_DELIVERY_OUTCOME_ROUTING_KEY='notification.delivery.outcome.v1'
+readonly REPORTING_NOTIFICATION_DELIVERY_OUTCOME_ROUTING_KEY='reporting.notification.delivery.outcome.v1'
+readonly CORE_NOTIFICATION_DELIVERY_OUTCOME_QUEUE='winwidget.notification.delivery-outcome'
+readonly REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE='winwidget.reporting.delivery-outcome'
+
+reporting_outcome_route_topology_state() {
+	local rabbitmq_container_id bindings old_count new_count
+
+	rabbitmq_container_id="$(
+		compose_target ps --status running -q rabbitmq 2>/dev/null || true
+	)"
+	[[ -n "$rabbitmq_container_id" &&
+		"$rabbitmq_container_id" != *$'\n'* ]] || {
+		echo 'Exactly one running RabbitMQ container is required to inspect Reporting outcome routing.' >&2
+		return 1
+	}
+	bindings="$(
+		docker exec "$rabbitmq_container_id" \
+			rabbitmqctl --silent list_bindings -p "$rabbitmq_vhost" \
+				source_name destination_name routing_key
+	)"
+	old_count="$(
+		reporting_binding_count "$bindings" winwidget.events \
+			"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE" \
+			"$CORE_NOTIFICATION_DELIVERY_OUTCOME_ROUTING_KEY"
+	)"
+	new_count="$(
+		reporting_binding_count "$bindings" winwidget.events \
+			"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE" \
+			"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_ROUTING_KEY"
+	)"
+	[[ "$old_count" =~ ^[01]$ && "$new_count" =~ ^[01]$ ]] || {
+		echo "Reporting outcome binding count is ambiguous: old=$old_count new=$new_count." >&2
+		return 1
+	}
+	case "$old_count|$new_count" in
+	1\|0) printf 'legacy\n' ;;
+	0\|1) printf 'steady\n' ;;
+	1\|1) printf 'dual\n' ;;
+	0\|0) printf 'forward\n' ;;
+	esac
+}
+
+reporting_outcome_route_data_state() {
+	local notification_state core_state reporting_state
+
+	notification_state="$(
+		docker run --rm --network host \
+			--env-file "$ENV_FILE" \
+			--entrypoint node \
+			"$NOTIFICATION_DELIVERY_IMAGE" \
+			-e '
+const {
+	PrismaClient,
+} = require("@prisma/notification-delivery-client");
+const prisma = new PrismaClient({
+	datasources: {
+		db: { url: process.env.NOTIFICATION_DELIVERY_DATABASE_URL },
+	},
+});
+
+prisma.notificationDeliveryOutboxEvent
+	.count({
+		where: {
+			eventType: "notification.delivery.outcome.v1",
+			status: { not: "PUBLISHED" },
+			payload: {
+				path: ["sourceKind"],
+				equals: "daily-summary-delivery-telegram",
+			},
+		},
+	})
+	.then(count => process.stdout.write(String(count)))
+	.finally(() => prisma.$disconnect());
+'
+	)" || {
+		echo 'Could not inspect Notification Delivery state for the Reporting outcome route split.' >&2
+		return 1
+	}
+	core_state="$(
+		reporting_core_psql --tuples-only --no-align --field-separator='|' <<'SQL'
+SELECT
+  (
+    SELECT COUNT(*)::TEXT
+    FROM "integration_delivery_failures"
+    WHERE "integration" = 'notification-delivery-outcome'
+      AND "resolved_at" IS NULL
+      AND "payload"->>'sourceKind' = 'daily-summary-delivery-telegram'
+  ),
+  (
+    SELECT COUNT(*)::TEXT
+    FROM "outbox_events"
+    WHERE "routing_key" = 'notification.delivery.outcome.v1'
+      AND "status"::TEXT <> 'PUBLISHED'
+      AND "payload"->>'sourceKind' = 'daily-summary-delivery-telegram'
+  );
+SQL
+	)" || {
+		echo 'Could not inspect Core outcome state for the Reporting route split.' >&2
+		return 1
+	}
+	reporting_state="$(
+		reporting_database_psql REPORTING_DATABASE_URL \
+			--tuples-only --no-align --field-separator='|' <<'SQL'
+SELECT
+  (
+    SELECT COUNT(*)::TEXT
+    FROM reporting.consumer_failures
+    WHERE consumer_kind = 'deliveryOutcome'
+      AND status::TEXT <> 'RESOLVED'
+  ),
+  (
+    SELECT COUNT(*)::TEXT
+    FROM reporting.consumer_receipts
+    WHERE consumer = 'reporting-delivery-outcome-v1'
+      AND status::TEXT IN ('PROCESSING', 'RETRY_SCHEDULED')
+  ),
+  (
+    SELECT COUNT(*)::TEXT
+    FROM reporting.report_runs
+    WHERE status::TEXT = 'WAITING_DELIVERY'
+  );
+SQL
+	)" || {
+		echo 'Could not inspect Reporting delivery outcome state.' >&2
+		return 1
+	}
+	printf '%s|%s|%s\n' "$notification_state" "$core_state" "$reporting_state"
+}
+
+reporting_outcome_route_is_drained() {
+	local state notification_outbox core_failures core_outbox
+	local reporting_failures reporting_receipts
+	local reporting_waiting value
+
+	state="$(reporting_outcome_route_data_state)" || return 1
+	IFS='|' read -r \
+		notification_outbox core_failures core_outbox \
+		reporting_failures reporting_receipts \
+		reporting_waiting <<<"$state"
+	for value in \
+		"$notification_outbox" "$core_failures" "$core_outbox" \
+		"$reporting_failures" \
+		"$reporting_receipts" "$reporting_waiting"; do
+		[[ "$value" =~ ^[0-9]+$ ]] || {
+			echo "Reporting outcome drain state is invalid: $state" >&2
+			return 1
+		}
+	done
+	if [[ "$state" != '0|0|0|0|0|0' ]]; then
+		echo "Reporting outcome route split is blocked by durable state: $state" >&2
+		echo 'Expected old Notification/Core outbox, unresolved Core/Reporting failures, active Reporting receipts and waiting runs to all be zero.' >&2
+		echo 'Resolve the existing daily-summary error with Close without retry, then run the deployment again.' >&2
+		return 1
+	fi
+	return 0
+}
+
+reporting_outcome_route_queue_state() {
+	local rabbitmq_container_id
+
+	rabbitmq_container_id="$(
+		compose_target ps --status running -q rabbitmq 2>/dev/null || true
+	)"
+	[[ -n "$rabbitmq_container_id" &&
+		"$rabbitmq_container_id" != *$'\n'* ]] || {
+		echo 'Exactly one running RabbitMQ container is required to inspect outcome queues.' >&2
+		return 1
+	}
+	docker exec "$rabbitmq_container_id" \
+		rabbitmqctl --silent list_queues -p "$rabbitmq_vhost" \
+			name messages_ready messages_unacknowledged consumers
+}
+
+reporting_outcome_route_queues_are_empty() {
+	local require_unused="${1:-false}" state queue queue_line
+	local _name ready unacknowledged consumers
+
+	state="$(reporting_outcome_route_queue_state)" || return 1
+	for queue in \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE" \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.dead-letter" \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry.1" \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry.2" \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry.3" \
+		"$CORE_NOTIFICATION_DELIVERY_OUTCOME_QUEUE" \
+		"$CORE_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.dead-letter" \
+		"$CORE_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry-v2.1" \
+		"$CORE_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry-v2.2" \
+		"$CORE_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry-v2.3"; do
+		queue_line="$(
+			awk -v queue="$queue" '$1 == queue { print; exit }' <<<"$state"
+		)"
+		if [[ -z "$queue_line" ]]; then
+			if [[ "$queue" == "$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE" ||
+				"$queue" == "$CORE_NOTIFICATION_DELIVERY_OUTCOME_QUEUE" ]]; then
+				echo "Required outcome queue is missing: $queue" >&2
+				return 1
+			fi
+			continue
+		fi
+		read -r _name ready unacknowledged consumers <<<"$queue_line"
+		[[ "$ready" == '0' && "$unacknowledged" == '0' ]] || {
+			echo "Outcome queue is not empty: $queue ready=$ready unacknowledged=$unacknowledged." >&2
+			return 1
+		}
+		if [[ "$require_unused" == 'true' && "$consumers" != '0' ]]; then
+			echo "Outcome queue still has consumers: $queue consumers=$consumers." >&2
+			return 1
+		fi
+	done
+	return 0
+}
+
+wait_for_reporting_outcome_route_drain() {
+	local attempt
+
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if reporting_outcome_route_is_drained &&
+			reporting_outcome_route_queues_are_empty false; then
+			echo 'Legacy Reporting outcome state and queues are drained.'
+			return 0
+		fi
+		if ((attempt < HEALTHCHECK_ATTEMPTS)); then
+			sleep "$HEALTHCHECK_INTERVAL"
+		fi
+	done
+	echo 'Reporting outcome state did not drain before the route split.' >&2
+	return 1
+}
+
+prepare_reporting_outcome_route_cutover_after_stop() {
+	local topology_state rabbitmq_container_id queue
+
+	topology_state="$(reporting_outcome_route_topology_state)" || return 1
+	if [[ "$topology_state" == 'steady' ]]; then
+		return 0
+	fi
+	reporting_outcome_route_is_drained || return 1
+	reporting_outcome_route_queues_are_empty true || return 1
+	rabbitmq_container_id="$(
+		compose_target ps --status running -q rabbitmq 2>/dev/null || true
+	)"
+
+	if [[ "$topology_state" == 'legacy' || "$topology_state" == 'dual' ]]; then
+		docker run --rm --network host \
+			--env-file "$ENV_FILE" \
+			-e "REPORTING_OLD_OUTCOME_ROUTE=$CORE_NOTIFICATION_DELIVERY_OUTCOME_ROUTING_KEY" \
+			-e "REPORTING_OUTCOME_QUEUE=$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE" \
+			--entrypoint node \
+			"$REPORTING_IMAGE" \
+			-e '
+const amqp = require("amqplib");
+
+(async () => {
+	const connection = await amqp.connect(process.env.RABBITMQ_REPORTING_URL);
+	try {
+		const channel = await connection.createChannel();
+		await channel.unbindQueue(
+			process.env.REPORTING_OUTCOME_QUEUE,
+			"winwidget.events",
+			process.env.REPORTING_OLD_OUTCOME_ROUTE,
+		);
+		await channel.close();
+	} finally {
+		await connection.close();
+	}
+})().catch(error => {
+	process.stderr.write(String(error && error.message ? error.message : error) + "\n");
+	process.exitCode = 1;
+});
+'
+	fi
+
+	for queue in \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry.1" \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry.2" \
+		"$REPORTING_NOTIFICATION_DELIVERY_OUTCOME_QUEUE.retry.3"; do
+		if docker exec "$rabbitmq_container_id" \
+			rabbitmqctl --silent list_queues -p "$rabbitmq_vhost" name |
+			grep -Fqx -- "$queue"; then
+			docker exec "$rabbitmq_container_id" \
+				rabbitmqctl delete_queue -p "$rabbitmq_vhost" \
+					"$queue" --if-empty --if-unused >/dev/null
+		fi
+	done
+	topology_state="$(reporting_outcome_route_topology_state)" || return 1
+	[[ "$topology_state" == 'forward' || "$topology_state" == 'steady' ]] || {
+		echo "Reporting outcome route did not reach a forward-safe state: $topology_state." >&2
+		return 1
+	}
+	echo 'Old Reporting outcome binding and immutable retry topology were retired.'
+}
+
 routine_stop_services=(
 	api-gateway
 	campaigns-service
 	api
 	outbox-publisher
-	integration-worker
 	maintenance-worker
 	database-restore-worker
 	notification-delivery-worker
+	integration-worker
+	reporting-service
 )
 declare -A routine_stop_container_ids=()
+reporting_outcome_route_state_before='unknown'
 reporting_cleanup_stop_recovery_active=false
 # Remove this exact-image bootstrap after the first successful rollout verifies
 # that the replacement API exits without Docker SIGKILL.
@@ -1111,6 +1407,7 @@ restore_routine_containers_after_failed_stop() {
 	local recovery_failed=false
 	local attempt
 	local all_running
+	local restored_reporting_outcome_state
 
 	echo "Restoring the exact pre-migration runtime after an unsafe stop." >&2
 	for service in \
@@ -1182,10 +1479,21 @@ restore_routine_containers_after_failed_stop() {
 				curl -fsS --connect-timeout 2 --max-time 5 \
 					"$REPORTING_READINESS_URL" >/dev/null; }; then
 			if [[ -n "${routine_stop_container_ids[reporting-service]:-}" ]]; then
-				reporting_require_rabbitmq_topology || {
-					echo 'Restored Reporting runtime did not recreate the exact transitional topology.' >&2
-					return 1
-				}
+				if [[ "$reporting_outcome_route_state_before" == 'steady' ]]; then
+					reporting_require_rabbitmq_topology || {
+						echo 'Restored Reporting runtime did not recreate the steady topology.' >&2
+						return 1
+					}
+				else
+					restored_reporting_outcome_state="$(
+						reporting_outcome_route_topology_state
+					)"
+					[[ "$restored_reporting_outcome_state" == 'legacy' ||
+						"$restored_reporting_outcome_state" == 'dual' ]] || {
+						echo 'Restored Reporting runtime did not recreate the legacy outcome route.' >&2
+						return 1
+					}
+				fi
 			fi
 			echo "Exact containers which were running at entry were restored; no Core cleanup migration was executed." >&2
 			return 0
@@ -1290,6 +1598,12 @@ stop_routine_topology_for_core_migration() {
 			continue
 		fi
 		if stop_routine_service_cleanly "$service" 30; then
+			if [[ "$service" == 'notification-delivery-worker' &&
+				"$reporting_outcome_route_state_before" != 'steady' ]] &&
+				! wait_for_reporting_outcome_route_drain; then
+				restore_routine_containers_after_failed_stop || true
+				return 1
+			fi
 			continue
 		fi
 		restore_routine_containers_after_failed_stop || true
@@ -1310,7 +1624,7 @@ stop_routine_topology_for_core_migration() {
 stop_reporting_cleanup_topology_for_core_migration() {
 	local migration_state="$1" previous_revision service container_id
 	local container_state image_id image_revision identity compose_project compose_service
-	local -a cleanup_services=(reporting-service "${routine_stop_services[@]}")
+	local -a cleanup_services=("${routine_stop_services[@]}")
 
 	[[ "$migration_state" == 'pending' || "$migration_state" == 'applied' ]] || return 1
 	previous_revision="$(reporting_cutover_marker_value revision)" || return 1
@@ -1976,6 +2290,9 @@ while IFS= read -r notification_migration_file; do
 			expected_notification_constraint_replacements="DELIVERY_RECEIPTS_IDENTITY_CHECK,DELIVERY_FAILURES_CLASSIFICATION_CHECK,CONTROL_ACTIONS_IDENTITY_CHECK,NOTIFICATION_OUTBOX_EVENTS_IDENTITY_CHECK"
 			;;
 		apps/notification-delivery/prisma/migrations/20260730020000_allow_campaign_delivery_outcome_v2/migration.sql)
+			expected_notification_constraint_replacements="NOTIFICATION_OUTBOX_EVENTS_IDENTITY_CHECK"
+			;;
+		apps/notification-delivery/prisma/migrations/20260804030000_split_reporting_delivery_outcome_route/migration.sql)
 			expected_notification_constraint_replacements="NOTIFICATION_OUTBOX_EVENTS_IDENTITY_CHECK"
 			;;
 	esac
@@ -2910,11 +3227,23 @@ rabbitmqctl set_topic_permissions \
 
 provision_reporting_rabbitmq_topic_permissions() {
 	local username="$1"
+	local mode="${2:-steady}"
 	local events_write_pattern
 	local events_read_pattern
 	local dead_letter_pattern
 	events_write_pattern='^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$'
-	events_read_pattern='^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|notification\.delivery\.outcome\.v1)$'
+	case "$mode" in
+	transition)
+		events_read_pattern='^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|notification\.delivery\.outcome\.v1|reporting\.notification\.delivery\.outcome\.v1)$'
+		;;
+	steady)
+		events_read_pattern='^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|reporting\.notification\.delivery\.outcome\.v1)$'
+		;;
+	*)
+		echo "Unsupported Reporting topic permission mode: $mode" >&2
+		return 1
+		;;
+	esac
 	dead_letter_pattern='^reporting\.(identityUser|billingPayment|billingSubscription|widget|lead|reportingSettings|deliveryOutcome)\.dead-letter$'
 
 	RABBITMQ_PROVISION_USER="$username" \
@@ -3084,7 +3413,14 @@ provision_rabbitmq_user \
 	'^(winwidget\.(events|dead-letter)|winwidget\.reporting(\..*)?)$' \
 	'^(winwidget\.(events|dead-letter)|winwidget\.reporting(\..*)?)$' \
 	''
-provision_reporting_rabbitmq_topic_permissions "$reporting_user"
+initial_reporting_outcome_route_state="$(
+	reporting_outcome_route_topology_state
+)"
+if [[ "$initial_reporting_outcome_route_state" == 'steady' ]]; then
+	provision_reporting_rabbitmq_topic_permissions "$reporting_user" steady
+else
+	provision_reporting_rabbitmq_topic_permissions "$reporting_user" transition
+fi
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
 	"$rabbitmq_monitor_password_base64" \
@@ -4690,6 +5026,22 @@ wait_for_cutover_readiness() {
 	return 1
 }
 
+start_canonical_reporting_runtime() {
+	local label="${1:-Reporting}"
+
+	compose_target up -d --no-deps --force-recreate reporting-service
+	wait_for_cutover_revision \
+		"$REPORTING_READINESS_URL" "$REPORTING_REVISION" "$label"
+	reporting_require_rabbitmq_topology
+	provision_reporting_rabbitmq_topic_permissions "$reporting_user" steady
+	reporting_runtime_container_before="$(
+		compose_target ps --status running -q reporting-service
+	)"
+	reporting_runtime_image_before="$(
+		docker inspect --format '{{.Image}}' "$reporting_runtime_container_before"
+	)"
+}
+
 wait_for_database_restore_worker() {
 	local attempt
 	local container_id
@@ -5283,6 +5635,21 @@ if [[ "$reporting_cleanup_runtime_deploy" != 'true' ]]; then
 	}
 fi
 
+reporting_outcome_route_state_before="$(
+	reporting_outcome_route_topology_state
+)" || exit 1
+if [[ "$reporting_outcome_route_state_before" != 'steady' ]]; then
+	[[ "$reporting_cleanup_runtime_deploy" != 'true' &&
+		"$notification_delivery_first_cutover" != 'true' &&
+		"$notification_forward_candidate_active" != 'true' &&
+		"$notification_forward_candidate_needs_recovery" != 'true' ]] || {
+		echo 'The Reporting outcome route split cannot overlap another production cutover or recovery.' >&2
+		exit 1
+	}
+	reporting_outcome_route_is_drained || exit 1
+	reporting_outcome_route_queues_are_empty false || exit 1
+fi
+
 if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
 	[[ "$notification_delivery_first_cutover" != 'true' &&
 		"$notification_forward_candidate_active" != 'true' &&
@@ -5548,6 +5915,8 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		"$CAMPAIGNS_REVISION" \
 		"Canonical Campaigns"
 
+	start_canonical_reporting_runtime "Canonical Reporting"
+
 	stop_notification_cutover_services 30 false api
 	compose_target up -d --no-deps --force-recreate api
 	wait_for_cutover_revision \
@@ -5629,21 +5998,13 @@ else
 			exit 1
 		}
 	fi
+	if ! prepare_reporting_outcome_route_cutover_after_stop; then
+		echo 'Reporting outcome routing could not reach the forward-safe boundary.' >&2
+		exit 1
+	fi
 	compose_target up -d rabbitmq
 	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
-	if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
-		compose_target up -d --no-deps --force-recreate reporting-service
-		wait_for_cutover_revision \
-			"$REPORTING_READINESS_URL" "$REPORTING_REVISION" \
-			"Cleanup Reporting"
-		reporting_require_rabbitmq_topology
-		reporting_runtime_container_before="$(
-			compose_target ps --status running -q reporting-service
-		)"
-		reporting_runtime_image_before="$(
-			docker inspect --format '{{.Image}}' "$reporting_runtime_container_before"
-		)"
-	fi
+	start_canonical_reporting_runtime "Reporting"
 	compose_target up -d --no-deps --force-recreate outbox-publisher
 	wait_for_rabbitmq_topology
 	compose_target up -d --no-deps --force-recreate \
@@ -5680,7 +6041,8 @@ ensure_required_services_running() {
 		maintenance-worker \
 		database-restore-worker \
 		notification-delivery-worker \
-		campaigns-service; do
+		campaigns-service \
+		reporting-service; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -6046,7 +6408,8 @@ for service in \
 	maintenance-worker \
 	database-restore-worker \
 	notification-delivery-worker \
-	campaigns-service; do
+	campaigns-service \
+	reporting-service; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -6067,6 +6430,9 @@ for service in \
 	fi
 	if [[ "$service" == "campaigns-service" ]]; then
 		expected_image_revision="$CAMPAIGNS_REVISION"
+	fi
+	if [[ "$service" == "reporting-service" ]]; then
+		expected_image_revision="$REPORTING_REVISION"
 	fi
 	if [[ "$image_revision" != "$expected_image_revision" ]]; then
 		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
@@ -6116,10 +6482,12 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	echo "Canonical topology verified; saved forward cutover containers removed."
 fi
 
+reporting_require_rabbitmq_topology
 if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
-	reporting_require_rabbitmq_topology
 	reporting_cutover_require_cleanup_runtime_revision "$APP_REVISION"
 	echo 'Reporting cleanup runtime and steady-state RabbitMQ topology verified.'
+else
+	echo 'Reporting runtime and isolated delivery outcome topology verified.'
 fi
 
 verify_notification_database_lifecycle_unchanged \

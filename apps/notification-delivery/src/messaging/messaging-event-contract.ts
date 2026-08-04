@@ -19,6 +19,7 @@ import {
 	OUTBOX_EVENT_TYPE,
 	PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	PAYMENT_SUCCEEDED_EVENT_TYPE,
+	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
@@ -410,9 +411,6 @@ const assertLimitEvent = (
 };
 
 const OUTCOME_NOTIFICATION_DELIVERY_KINDS = [
-	'campaign-email',
-	'campaign-telegram',
-	'daily-summary-delivery-telegram',
 	'subscription-expiry-email',
 	'subscription-expiry-telegram'
 ] as const;
@@ -628,6 +626,7 @@ type ResolvedContractKind =
 	| NotificationDeliveryKind
 	| 'telegram-destination-unavailable-outcome'
 	| 'notification-delivery-outcome'
+	| 'reporting-notification-delivery-outcome'
 	| 'campaign-notification-delivery-outcome';
 
 const assertTelegramDestinationUnavailableEvent = (
@@ -709,14 +708,10 @@ const assertNotificationDeliveryOutcome = (
 	) {
 		throw new Error('payload.sourceKind is invalid');
 	}
-	if (payload.sourceKind === 'daily-summary-delivery-telegram') {
-		assertNotificationReference(payload.reference, 'daily-summary-job');
-	} else {
-		assertNotificationReference(
-			payload.reference,
-			'subscription-expiry-reminder'
-		);
-	}
+	assertNotificationReference(
+		payload.reference,
+		'subscription-expiry-reminder'
+	);
 	if (payload.status !== 'DELIVERED' && payload.status !== 'FAILED') {
 		throw new Error('payload.status is invalid');
 	}
@@ -743,6 +738,61 @@ const assertNotificationDeliveryOutcome = (
 	}
 	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
 	return 'notification-delivery-outcome';
+};
+
+const assertReportingNotificationDeliveryOutcome = (
+	payload: JsonRecord
+): ResolvedContractKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'sourceEventId',
+		'sourceKind',
+		'reference',
+		'status',
+		'failure',
+		'occurredAt'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !==
+			REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE
+	) {
+		throw new Error(
+			'Invalid Reporting notification delivery outcome contract version'
+		);
+	}
+	assertUuid(payload.sourceEventId, 'payload.sourceEventId');
+	if (payload.sourceKind !== 'daily-summary-delivery-telegram') {
+		throw new Error('payload.sourceKind is invalid');
+	}
+	assertNotificationReference(payload.reference, 'daily-summary-job');
+	if (payload.status !== 'DELIVERED' && payload.status !== 'FAILED') {
+		throw new Error('payload.status is invalid');
+	}
+	if (payload.status === 'DELIVERED') {
+		if (payload.failure !== null) {
+			throw new Error('payload.failure must be null for DELIVERED');
+		}
+	} else {
+		const failure = assertRecord(payload.failure, 'payload.failure');
+		assertExactKeys(
+			failure,
+			['normalizedCode', 'safeReason'],
+			[],
+			'payload.failure'
+		);
+		assertString(
+			failure.normalizedCode,
+			'payload.failure.normalizedCode',
+			{ maxLength: 255 }
+		);
+		assertString(failure.safeReason, 'payload.failure.safeReason', {
+			maxLength: 2000
+		});
+	}
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	return 'reporting-notification-delivery-outcome';
 };
 
 const assertCampaignNotificationDeliveryOutcome = (
@@ -841,6 +891,8 @@ const resolveExpectedKind = (
 			return assertTelegramDestinationUnavailableEvent(payload);
 		case NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE:
 			return assertNotificationDeliveryOutcome(payload);
+		case REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE:
+			return assertReportingNotificationDeliveryOutcome(payload);
 		case CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE:
 			return assertCampaignNotificationDeliveryOutcome(payload);
 		default:
@@ -889,6 +941,22 @@ export function assertMessagingEventContract(
 			);
 		}
 		if (metadata.routingKey !== NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE) {
+			throw new Error(
+				`Routing key ${metadata.routingKey} does not match ${metadata.eventType}`
+			);
+		}
+		return;
+	}
+	if (expectedKind === 'reporting-notification-delivery-outcome') {
+		if (metadata.kind) {
+			throw new Error(
+				`${metadata.eventType} is not a notification delivery input`
+			);
+		}
+		if (
+			metadata.routingKey !==
+			REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE
+		) {
 			throw new Error(
 				`Routing key ${metadata.routingKey} does not match ${metadata.eventType}`
 			);

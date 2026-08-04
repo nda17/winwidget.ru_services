@@ -658,14 +658,14 @@ polling применяется только publisher-процессом при 
 Целевое владение messaging-процессами после Campaigns cutover и при выделении
 Reporting:
 
-| Процесс                        | Ответственность                                                                                                                                                                                                                     |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `outbox-publisher`             | Публикация transactional Outbox монолита и создание принадлежащей монолиту RabbitMQ topology                                                                                                                                        |
-| `campaigns-service`            | Снимки аудитории, состояние кампаний и доставок, service-owned Outbox/rate limits, snapshot/outcome consumers и их receipts/retry/DLQ                                                                                               |
-| `reporting-service`            | Проекции отчётных данных, аналитика, Reporting-owned Outbox и независимые projection consumers с receipts/retry/DLQ                                                                                                                 |
-| `notification-delivery-worker` | Физическая email/Telegram-доставка лидов, платежей, лимитов, кампаний, daily summary и subscription expiry; собственные receipts, failures, retry/DLQ Outbox, delivery outcomes и control API                                       |
-| `integration-worker`           | CRM/webhook, daily summary, монолитный `notification-delivery-outcome`, недоступность пользовательского Telegram-канала, `campaign-admin-audit`, `reporting-admin-audit` и auto-renewal; без lifecycle/outcomes выделенных сервисов |
-| `maintenance-worker`           | Durable scheduler/lease и независимые backup-задачи для core, Notification Delivery, Campaigns и Reporting                                                                                                                          |
+| Процесс                        | Ответственность                                                                                                                                                                                                      |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `outbox-publisher`             | Публикация transactional Outbox монолита и создание принадлежащей монолиту RabbitMQ topology                                                                                                                         |
+| `campaigns-service`            | Снимки аудитории, состояние кампаний и доставок, service-owned Outbox/rate limits, snapshot/outcome consumers и их receipts/retry/DLQ                                                                                |
+| `reporting-service`            | Проекции отчётных данных, аналитика, Reporting-owned Outbox и независимые projection/delivery-outcome consumers с receipts/retry/DLQ                                                                                 |
+| `notification-delivery-worker` | Физическая email/Telegram-доставка лидов, платежей, лимитов, кампаний, daily summary и subscription expiry; собственные receipts, failures, retry/DLQ Outbox, delivery outcomes и control API                        |
+| `integration-worker`           | CRM/webhook, outcomes уведомлений об окончании подписки, недоступность пользовательского Telegram-канала, `campaign-admin-audit`, `reporting-admin-audit` и auto-renewal; без lifecycle/outcomes выделенных сервисов |
+| `maintenance-worker`           | Durable scheduler/lease и независимые backup-задачи для core, Notification Delivery, Campaigns и Reporting                                                                                                           |
 
 Один kind не должен одновременно находиться у `integration-worker` и
 `notification-delivery-worker`. Первичный Outbox остаётся в транзакции
@@ -1340,10 +1340,10 @@ Durable-задачи выполняются отдельными процесс�
 - `reporting-service` в роли `all` обслуживает API отчётности, projection
   consumers, собственный Outbox и после отдельного owner switch — Daily
   Summary scheduler;
-- `integration-worker` до owner switch обрабатывает legacy-сводку, а также
-  CRM/webhook, монолитный `notification-delivery-outcome`, campaign/reporting
-  admin audit и остальные принадлежащие монолиту consumers через независимые
-  очереди, retry и DLQ.
+- `integration-worker` обрабатывает CRM/webhook, outcomes уведомлений об
+  окончании подписки, campaign/reporting admin audit и остальные принадлежащие
+  Core consumers через независимые очереди, retry и DLQ. Reporting outcomes
+  маршрутизируются напрямую в `reporting-service`.
 
 Общий distributed lock для всех scheduler не используется. Очистки
 verification challenges и зависших платежей идемпотентны, а durable-задачи

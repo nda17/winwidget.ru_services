@@ -989,27 +989,17 @@ const assertNotificationDeliveryOutcome = (
 		);
 	}
 	assertUuid(payload.sourceEventId, 'payload.sourceEventId');
-	assertString(payload.sourceKind, 'payload.sourceKind', {
-		maxLength: 255
-	});
-	const reference = assertRecord(payload.reference, 'payload.reference');
-	assertExactKeys(reference, ['type', 'id'], [], 'payload.reference');
-	assertString(reference.type, 'payload.reference.type', {
-		maxLength: 255
-	});
-	assertString(reference.id, 'payload.reference.id', {
-		maxLength: 255
-	});
-	const isCoreSourceKind = OUTCOME_NOTIFICATION_DELIVERY_KINDS.includes(
-		payload.sourceKind as (typeof OUTCOME_NOTIFICATION_DELIVERY_KINDS)[number]
-	);
-	const isCoreReference =
-		reference.type === 'subscription-expiry-reminder';
-	if (isCoreSourceKind !== isCoreReference) {
-		throw new Error(
-			'payload sourceKind and reference ownership do not match'
-		);
+	if (
+		!OUTCOME_NOTIFICATION_DELIVERY_KINDS.includes(
+			payload.sourceKind as (typeof OUTCOME_NOTIFICATION_DELIVERY_KINDS)[number]
+		)
+	) {
+		throw new Error('payload.sourceKind is invalid');
 	}
+	assertNotificationReference(
+		payload.reference,
+		'subscription-expiry-reminder'
+	);
 	if (payload.status !== 'DELIVERED' && payload.status !== 'FAILED') {
 		throw new Error('payload.status is invalid');
 	}

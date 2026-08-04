@@ -621,7 +621,7 @@ describe('messaging event contract', () => {
 		).not.toThrow();
 	});
 
-	it('accepts a delivery outcome owned by another service', () => {
+	it('rejects a delivery outcome owned by another service', () => {
 		const payload = {
 			schemaVersion: 1,
 			eventType: 'notification.delivery.outcome.v1',
@@ -643,48 +643,35 @@ describe('messaging event contract', () => {
 				messageId: MESSAGE_ID,
 				kind: 'notification-delivery-outcome'
 			})
-		).not.toThrow();
+		).toThrow('payload.sourceKind is invalid');
 	});
 
-	it.each([
-		{
-			sourceKind: 'external-notification',
-			reference: {
-				type: 'subscription-expiry-reminder',
-				id: 'reminder-1'
-			}
-		},
-		{
+	it('rejects a Core outcome with a non-Core reference', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'notification.delivery.outcome.v1',
+			sourceEventId: '22222222-2222-4222-8222-222222222222',
 			sourceKind: 'subscription-expiry-email',
 			reference: {
 				type: 'external-job',
 				id: '33333333-3333-4333-8333-333333333333'
-			}
-		}
-	])(
-		'rejects a $sourceKind outcome with a mismatched reference',
-		({ sourceKind, reference }) => {
-			const payload = {
-				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
-				sourceEventId: '22222222-2222-4222-8222-222222222222',
-				sourceKind,
-				reference,
-				status: 'DELIVERED',
-				failure: null,
-				occurredAt: '2026-08-03T22:50:14.915Z'
-			};
+			},
+			status: 'DELIVERED',
+			failure: null,
+			occurredAt: '2026-08-03T22:50:14.915Z'
+		};
 
-			expect(() =>
-				assertMessagingEventContract(payload, {
-					eventType: payload.eventType,
-					routingKey: payload.eventType,
-					messageId: MESSAGE_ID,
-					kind: 'notification-delivery-outcome'
-				})
-			).toThrow('payload sourceKind and reference ownership do not match');
-		}
-	);
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'notification-delivery-outcome'
+			})
+		).toThrow(
+			'payload.reference.type must be subscription-expiry-reminder'
+		);
+	});
 
 	it('rejects unsupported source kinds in destination outcomes', () => {
 		const payload = {

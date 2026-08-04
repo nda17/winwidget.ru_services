@@ -181,16 +181,16 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 		);
 	});
 
-	it('publishes a strictly validated notification delivery outcome', async () => {
+	it('publishes a strictly validated Reporting delivery outcome', async () => {
 		const { service, prisma, rabbitMq } = createService();
 		const outcome = {
 			...event,
 			messageId: '44444444-4444-4444-8444-444444444444',
-			eventType: 'notification.delivery.outcome.v1',
-			routingKey: 'notification.delivery.outcome.v1',
+			eventType: 'reporting.notification.delivery.outcome.v1',
+			routingKey: 'reporting.notification.delivery.outcome.v1',
 			payload: {
 				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
+				eventType: 'reporting.notification.delivery.outcome.v1',
 				sourceEventId: event.messageId,
 				sourceKind: 'daily-summary-delivery-telegram',
 				reference: {
@@ -207,7 +207,7 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 
 		expect(rabbitMq.publishOutboxMessage).toHaveBeenCalledWith(
 			'winwidget.events',
-			'notification.delivery.outcome.v1',
+			'reporting.notification.delivery.outcome.v1',
 			outcome.payload,
 			expect.objectContaining({
 				messageId: outcome.messageId,
@@ -222,6 +222,41 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 					status: NotificationDeliveryOutboxStatus.PUBLISHED,
 					lastError: null
 				})
+			})
+		);
+	});
+
+	it('publishes a strictly validated Core delivery outcome', async () => {
+		const { service, rabbitMq } = createService();
+		const outcome = {
+			...event,
+			messageId: '44444444-4444-4444-8444-444444444444',
+			eventType: 'notification.delivery.outcome.v1',
+			routingKey: 'notification.delivery.outcome.v1',
+			payload: {
+				schemaVersion: 1,
+				eventType: 'notification.delivery.outcome.v1',
+				sourceEventId: event.messageId,
+				sourceKind: 'subscription-expiry-email',
+				reference: {
+					type: 'subscription-expiry-reminder',
+					id: 'subscription-reminder-1'
+				},
+				status: 'DELIVERED',
+				failure: null,
+				occurredAt: '2026-08-04T00:00:00.000Z'
+			}
+		};
+
+		await (service as any).publish(outcome);
+
+		expect(rabbitMq.publishOutboxMessage).toHaveBeenCalledWith(
+			'winwidget.events',
+			'notification.delivery.outcome.v1',
+			outcome.payload,
+			expect.objectContaining({
+				messageId: outcome.messageId,
+				type: outcome.eventType
 			})
 		);
 	});

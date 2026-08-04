@@ -113,7 +113,6 @@ export class IntegrationDeliveryService {
 	private async applyNotificationDeliveryOutcome(
 		event: NotificationDeliveryOutcomeEventPayload
 	): Promise<void> {
-		if (event.reference.type !== 'subscription-expiry-reminder') return;
 		await this.applySubscriptionExpiryDeliveryOutcome(event);
 	}
 

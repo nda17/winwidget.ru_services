@@ -3966,7 +3966,7 @@ jobs:
             )
           ) {
             throw new Error(
-              "Full deployment must stage Reporting before env access, guard its database, and only replace its runtime for the exact staged cleanup revision",
+              "Full deployment must guard Reporting state and start one canonical runtime after the stopped migration boundary",
             );
           }
           for (const [label, script] of [
@@ -4076,6 +4076,9 @@ jobs:
           node <<'NODE'
           const fs = require("node:fs");
           const monolith = require("./dist/src/messaging/messaging.constants.js");
+          const coreDeliveryOutcome = require(
+            "./dist/src/messaging/notification-delivery-event.js",
+          );
           const delivery = require(
             "./apps/notification-delivery/dist/src/messaging/messaging.constants.js",
           );
@@ -4142,6 +4145,7 @@ jobs:
             const forbiddenTokens = [
               "report.daily-summary.requested.v1",
               "notification.daily-summary.telegram.requested.v1",
+              "reporting.notification.delivery.outcome.v1",
               "reporting.settings.changed.v1",
               "daily-summary-telegram",
               "daily-summary-delivery-telegram",
@@ -4234,6 +4238,47 @@ jobs:
           ) {
             throw new Error(
               "Core and Reporting producer ownership does not form the exact Notification Delivery consumer catalog",
+            );
+          }
+          if (
+            delivery.NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE !==
+              "notification.delivery.outcome.v1" ||
+            monolith.MESSAGING_ROUTING_KEYS[
+              "notification-delivery-outcome"
+            ] !== delivery.NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE ||
+            monolith.MESSAGING_QUEUE_NAMES[
+              "notification-delivery-outcome"
+            ] !== "winwidget.notification.delivery-outcome" ||
+            JSON.stringify(
+              coreDeliveryOutcome.OUTCOME_NOTIFICATION_DELIVERY_KINDS,
+            ) !==
+              JSON.stringify([
+                "subscription-expiry-email",
+                "subscription-expiry-telegram",
+              ])
+          ) {
+            throw new Error(
+              "Core subscription-expiry delivery outcome route drifted",
+            );
+          }
+          if (
+            delivery.REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE !==
+              "reporting.notification.delivery.outcome.v1" ||
+            reporting.DELIVERY_OUTCOME_EVENT_TYPE !==
+              delivery.REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE ||
+            reporting.REPORTING_ROUTING_KEYS.deliveryOutcome !==
+              delivery.REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE ||
+            JSON.stringify(
+              reporting.REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome,
+            ) !==
+              JSON.stringify([
+                delivery.REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+              ]) ||
+            reporting.REPORTING_QUEUE_NAMES.deliveryOutcome !==
+              "winwidget.reporting.delivery-outcome"
+          ) {
+            throw new Error(
+              "Reporting delivery outcome must use its dedicated route and queue",
             );
           }
           const expectedProjectionRoutingKey = legacyPathsPresent
@@ -4979,7 +5024,7 @@ jobs:
               reporting_ci \
               winwidget.events \
               '^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$' \
-              '^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|notification\.delivery\.outcome\.v1)$'
+              '^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|reporting\.notification\.delivery\.outcome\.v1)$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_topic_permissions \
               --vhost winwidget \
@@ -5008,7 +5053,7 @@ jobs:
           expected_topic_permissions="$(
             printf '%s\n' \
               'winwidget|winwidget.dead-letter|^reporting\.(identityUser|billingPayment|billingSubscription|widget|lead|reportingSettings|deliveryOutcome)\.dead-letter$|^reporting\.(identityUser|billingPayment|billingSubscription|widget|lead|reportingSettings|deliveryOutcome)\.dead-letter$' \
-              'winwidget|winwidget.events|^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$|^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|notification\.delivery\.outcome\.v1)$' |
+              'winwidget|winwidget.events|^(notification\.daily-summary\.telegram\.requested\.v1|admin\.audit\.reporting\.v1)$|^(identity\.user\.changed\.v1|billing\.(payment|subscription)\.changed\.v1|widgets\.(widget|lead)\.changed\.v1|reporting\.(settings|core-operational-routing)\.changed\.v1|reporting\.notification\.delivery\.outcome\.v1)$' |
               sort
           )"
           test "$topic_permissions" = "$expected_topic_permissions"

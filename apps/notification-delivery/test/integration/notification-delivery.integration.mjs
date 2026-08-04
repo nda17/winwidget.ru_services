@@ -334,7 +334,7 @@ async function cleanupDatabase() {
 
 async function assertOutcomeConstraintMatrix() {
 	const probePrefix = `integration-outcome-constraint:${randomUUID()}`;
-	const createProbe = (eventType, routingKey, suffix) =>
+	const createProbe = (eventType, routingKey, suffix, sourceKind) =>
 		prisma.notificationDeliveryOutboxEvent.create({
 			data: {
 				messageId: randomUUID(),
@@ -342,7 +342,7 @@ async function assertOutcomeConstraintMatrix() {
 				exchange: 'EVENTS',
 				eventType,
 				routingKey,
-				payload: { probe: true },
+				payload: { probe: true, sourceKind },
 				headers: {}
 			}
 		});
@@ -351,12 +351,20 @@ async function assertOutcomeConstraintMatrix() {
 		await createProbe(
 			'notification.delivery.outcome.v1',
 			'notification.delivery.outcome.v1',
-			'v1'
+			'v1',
+			'subscription-expiry-email'
 		);
 		await createProbe(
 			'notification.delivery.outcome.v2',
 			'notification.delivery.outcome.v2',
-			'v2'
+			'v2',
+			'campaign-email'
+		);
+		await createProbe(
+			'reporting.notification.delivery.outcome.v1',
+			'reporting.notification.delivery.outcome.v1',
+			'reporting-v1',
+			'daily-summary-delivery-telegram'
 		);
 
 		let mismatchRejected = false;
@@ -364,7 +372,8 @@ async function assertOutcomeConstraintMatrix() {
 			await createProbe(
 				'notification.delivery.outcome.v1',
 				'notification.delivery.outcome.v2',
-				'mismatch'
+				'mismatch',
+				'subscription-expiry-email'
 			);
 		} catch (error) {
 			if (
@@ -638,6 +647,25 @@ async function main() {
 		},
 		{ noAck: true }
 	);
+	const { queue: reportingOutcomeProbeQueue } =
+		await rabbitChannel.assertQueue('', {
+			exclusive: true,
+			autoDelete: true
+		});
+	await rabbitChannel.bindQueue(
+		reportingOutcomeProbeQueue,
+		EVENTS_EXCHANGE,
+		'reporting.notification.delivery.outcome.v1'
+	);
+	const reportingOutcomes = [];
+	await rabbitChannel.consume(
+		reportingOutcomeProbeQueue,
+		message => {
+			if (!message) return;
+			reportingOutcomes.push(JSON.parse(message.content.toString('utf8')));
+		},
+		{ noAck: true }
+	);
 
 	await startService({ smtpPort, telegramPort, healthPort });
 	await waitFor('service liveness', async () => {
@@ -801,6 +829,40 @@ async function main() {
 				message.chat_id === '-1001234567890' &&
 				message.message_thread_id === 42 &&
 				message.text.includes('Новый успешный платёж')
+		)
+	);
+
+	const dailySummaryId = randomUUID();
+	await publish('daily-summary-delivery-telegram', dailySummaryId, {
+		schemaVersion: 1,
+		eventType: 'notification.daily-summary.telegram.requested.v1',
+		reference: {
+			type: 'daily-summary-job',
+			id: dailySummaryId
+		},
+		destination: {
+			telegramChatId: '-1009876543210',
+			messageThreadId: 2024
+		},
+		content: { text: '<b>Reporting integration summary</b>' }
+	});
+	await waitForReceipt(
+		dailySummaryId,
+		'daily-summary-delivery-telegram',
+		'DELIVERED'
+	);
+	await waitFor('Reporting delivery outcome v1', () =>
+		reportingOutcomes.find(
+			outcome =>
+				outcome?.schemaVersion === 1 &&
+				outcome?.eventType ===
+					'reporting.notification.delivery.outcome.v1' &&
+				outcome?.sourceEventId === dailySummaryId &&
+				outcome?.sourceKind === 'daily-summary-delivery-telegram' &&
+				outcome?.reference?.type === 'daily-summary-job' &&
+				outcome?.reference?.id === dailySummaryId &&
+				outcome?.status === 'DELIVERED' &&
+				outcome?.failure === null
 		)
 	);
 
@@ -985,6 +1047,7 @@ async function main() {
 				'limit-telegram',
 				'campaign-email',
 				'campaign-outcome-v2',
+				'reporting-outcome-v1',
 				'outcome-constraint-matrix',
 				'idempotency',
 				'dead-letter',

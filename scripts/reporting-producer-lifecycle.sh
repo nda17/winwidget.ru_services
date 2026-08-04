@@ -478,7 +478,7 @@ billingSubscription|winwidget.reporting.billing-subscription|billing.subscriptio
 widget|winwidget.reporting.widget|widgets.widget.changed.v1
 lead|winwidget.reporting.lead|widgets.lead.changed.v1
 reportingSettings|winwidget.reporting.settings|reporting.core-operational-routing.changed.v1
-deliveryOutcome|winwidget.reporting.delivery-outcome|notification.delivery.outcome.v1
+deliveryOutcome|winwidget.reporting.delivery-outcome|reporting.notification.delivery.outcome.v1
 EOF
 }
 
@@ -558,6 +558,15 @@ reporting_require_rabbitmq_topology() {
 				echo 'Reporting steady state still has the legacy settings binding.' >&2
 				return 1
 			fi
+		fi
+		if [[ "$kind" == 'deliveryOutcome' ]]; then
+			binding_count="$(reporting_binding_count \
+				"$bindings" winwidget.events "$queue" \
+				'notification.delivery.outcome.v1')" || return 1
+			[[ "$binding_count" == '0' ]] || {
+				echo 'Reporting steady state still has the Core delivery outcome binding.' >&2
+				return 1
+			}
 		fi
 		queue_line="$(printf '%s\n' "$queues" | grep -E "^${queue//./\.}\.dead-letter[[:space:]]+true[[:space:]]+[0-9]+$" || true)"
 		[[ -n "$queue_line" && "$queue_line" != *$'\n'* ]] || {

@@ -100,6 +100,18 @@ describe('reporting RabbitMQ topology contract', () => {
 		]);
 	});
 
+	it('accepts only the Reporting-owned delivery outcome event', () => {
+		expect(REPORTING_ROUTING_KEYS.deliveryOutcome).toBe(
+			'reporting.notification.delivery.outcome.v1'
+		);
+		expect(REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome).toEqual([
+			'reporting.notification.delivery.outcome.v1'
+		]);
+		expect(REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome).not.toContain(
+			'notification.delivery.outcome.v1'
+		);
+	});
+
 	it('accepts only exact manual retry routes and headers', () => {
 		const event = {
 			exchange: 'MANUAL_RETRY' as const,

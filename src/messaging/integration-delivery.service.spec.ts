@@ -209,30 +209,4 @@ describe('IntegrationDeliveryService', () => {
 			}
 		});
 	});
-
-	it('ignores a delivery outcome owned by another service', async () => {
-		const { service, prisma } = createService();
-
-		await service.deliver(
-			'notification-delivery-outcome',
-			{
-				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
-				sourceEventId: eventId,
-				sourceKind: 'external-notification',
-				reference: {
-					type: 'external-job',
-					id: '44444444-4444-4444-8444-444444444444'
-				},
-				status: 'DELIVERED',
-				failure: null,
-				occurredAt: '2026-08-03T22:50:14.915Z'
-			},
-			'outcome-5'
-		);
-
-		expect(
-			prisma.subscriptionExpiryReminder.updateMany
-		).not.toHaveBeenCalled();
-	});
 });

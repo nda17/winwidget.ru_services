@@ -1,6 +1,7 @@
-import type {
-	ReportingProjectionStream,
-	ReportingSourceEventType
+import {
+	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+	type ReportingProjectionStream,
+	type ReportingSourceEventType
 } from '../projections/reporting-event.contract';
 
 export const REPORTING_EVENTS_EXCHANGE = 'winwidget.events';
@@ -23,7 +24,7 @@ export const ADMIN_AUDIT_EVENT_TYPE = 'admin.audit.event.v1';
 export const REPORTING_ADMIN_AUDIT_ROUTING_KEY =
 	'admin.audit.reporting.v1';
 export const DELIVERY_OUTCOME_EVENT_TYPE =
-	'notification.delivery.outcome.v1';
+	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
 export const CORE_OPERATIONAL_ROUTING_EVENT_TYPE =
 	'reporting.core-operational-routing.changed.v1';
 

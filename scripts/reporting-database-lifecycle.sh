@@ -43,6 +43,7 @@ REPORTING_STEADY_STATE_REMOVED_PATHS=(
 REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS=(
 	report.daily-summary.requested.v1
 	notification.daily-summary.telegram.requested.v1
+	reporting.notification.delivery.outcome.v1
 	reporting.settings.changed.v1
 	daily-summary-telegram
 	daily-summary-delivery-telegram

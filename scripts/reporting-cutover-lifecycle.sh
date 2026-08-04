@@ -4554,11 +4554,16 @@ reporting_cutover_require_reporting_steady_runtime_contract() {
 const { existsSync, readFileSync, readdirSync } = require("node:fs");
 const contract = require("/app/dist/src/messaging/reporting-messaging.constants.js");
 const operational = "reporting.core-operational-routing.changed.v1";
+const deliveryOutcome = "reporting.notification.delivery.outcome.v1";
 if (contract.REPORTING_ROUTING_KEYS.reportingSettings !== operational ||
     JSON.stringify(contract.REPORTING_ACCEPTED_ROUTING_KEYS.reportingSettings) !==
       JSON.stringify([operational]) ||
     JSON.stringify(contract.REPORTING_ACCEPTED_PROJECTION_EVENT_TYPES.reportingSettings) !==
       JSON.stringify([operational]) ||
+    contract.DELIVERY_OUTCOME_EVENT_TYPE !== deliveryOutcome ||
+    contract.REPORTING_ROUTING_KEYS.deliveryOutcome !== deliveryOutcome ||
+    JSON.stringify(contract.REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome) !==
+      JSON.stringify([deliveryOutcome]) ||
     JSON.stringify(contract.REPORTING_NOTIFICATION_DELIVERY_KINDS) !==
       JSON.stringify(["daily-summary-delivery-telegram"]) ||
     contract.REPORTING_NOTIFICATION_DELIVERY_ROUTING_KEYS[
@@ -5700,6 +5705,9 @@ capture {
 		"$cleanup_runtime_text" == *'reporting_cutover_require_legacy_code_absent_from_image "$core_image_id"'* &&
 		"$cleanup_runtime_text" == *'reporting_cutover_require_reporting_steady_runtime_contract'* &&
 		"$cleanup_runtime_text" == *'REPORTING_ACCEPTED_ROUTING_KEYS.reportingSettings'* &&
+		"$cleanup_runtime_text" == *'DELIVERY_OUTCOME_EVENT_TYPE !== deliveryOutcome'* &&
+		"$cleanup_runtime_text" == *'REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome'* &&
+		"$cleanup_runtime_text" == *'reporting.notification.delivery.outcome.v1'* &&
 		"$cleanup_runtime_text" == *'/app/dist/src/statistics'* &&
 		"$cleanup_runtime_text" == *'daily-summary-job'* &&
 		"$cleanup_topology_text" == *'reporting_cutover_require_target_daily_summary_drained'* &&

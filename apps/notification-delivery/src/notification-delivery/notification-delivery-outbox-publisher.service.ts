@@ -7,6 +7,7 @@ import {
 	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NOTIFICATION_DELIVERY_KINDS,
 	NotificationDeliveryKind,
+	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '../messaging/messaging.constants';
 import { assertMessagingEventContract } from '../messaging/messaging-event-contract';
@@ -343,6 +344,10 @@ export class NotificationDeliveryOutboxPublisherService
 					TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE) ||
 				(event.eventType === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE &&
 					event.routingKey === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE) ||
+				(event.eventType ===
+					REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE &&
+					event.routingKey ===
+						REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE) ||
 				(event.eventType ===
 					CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE &&
 					event.routingKey ===

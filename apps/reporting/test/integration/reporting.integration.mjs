@@ -864,6 +864,21 @@ async function runRabbitSmoke(port) {
 				'configure'
 			);
 			await assertForeignQueueDenied(restricted, foreignQueue, 'read');
+
+			const outcomeEventId = randomUUID();
+			await publishDeliveryOutcome(publisher, outcomeEventId);
+			await waitFor('Reporting-owned delivery outcome', async () => {
+				const receipt = await prisma.consumerReceipt.findUnique({
+					where: {
+						eventId_consumer: {
+							eventId: outcomeEventId,
+							consumer: 'reporting-delivery-outcome-v1'
+						}
+					}
+				});
+				return receipt?.status === 'DELIVERED';
+			});
+
 			await assertConcurrentLiveAndBackfillBatch(publisher);
 
 			const aggregateId = `integration-user-${randomUUID()}`;
@@ -1323,6 +1338,35 @@ async function publishProjection(channel, input) {
 			messageId: payload.eventId,
 			type: payload.eventType,
 			correlationId: payload.eventId,
+			headers: { 'x-retry-attempt': 0, 'x-retry-cycle': 0 }
+		}
+	);
+	await channel.waitForConfirms();
+}
+
+async function publishDeliveryOutcome(channel, messageId) {
+	const sourceEventId = randomUUID();
+	const payload = {
+		schemaVersion: 1,
+		eventType: 'reporting.notification.delivery.outcome.v1',
+		sourceEventId,
+		sourceKind: 'daily-summary-delivery-telegram',
+		reference: { type: 'daily-summary-job', id: randomUUID() },
+		status: 'DELIVERED',
+		failure: null,
+		occurredAt: new Date().toISOString()
+	};
+	channel.publish(
+		'winwidget.events',
+		payload.eventType,
+		Buffer.from(JSON.stringify(payload)),
+		{
+			mandatory: true,
+			persistent: true,
+			contentType: 'application/json',
+			messageId,
+			type: payload.eventType,
+			correlationId: sourceEventId,
 			headers: { 'x-retry-attempt': 0, 'x-retry-cycle': 0 }
 		}
 	);

@@ -25,6 +25,9 @@ export const REPORTING_PROJECTION_STREAMS = [
 export type ReportingProjectionStream =
 	(typeof REPORTING_PROJECTION_STREAMS)[number];
 
+export const REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
+	'reporting.notification.delivery.outcome.v1';
+
 export const REPORTING_WIDGET_TYPES = [
 	'wheel',
 	'quiz',
@@ -117,21 +120,13 @@ export type ReportingSourceEvent<
 
 export interface NotificationDeliveryOutcomeEvent {
 	schemaVersion: 1;
-	eventType: 'notification.delivery.outcome.v1';
+	eventType: typeof REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
 	sourceEventId: string;
-	sourceKind:
-		| 'daily-summary-delivery-telegram'
-		| 'subscription-expiry-email'
-		| 'subscription-expiry-telegram';
-	reference:
-		| {
-				type: 'daily-summary-job';
-				id: string;
-		  }
-		| {
-				type: 'subscription-expiry-reminder';
-				id: string;
-		  };
+	sourceKind: 'daily-summary-delivery-telegram';
+	reference: {
+		type: 'daily-summary-job';
+		id: string;
+	};
 	status: 'DELIVERED' | 'FAILED';
 	failure: {
 		normalizedCode: string;
@@ -295,27 +290,17 @@ export function parseNotificationDeliveryOutcome(
 	assertLiteral(record.schemaVersion, 1, 'schemaVersion');
 	assertLiteral(
 		record.eventType,
-		'notification.delivery.outcome.v1',
+		REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 		'eventType'
 	);
 	assertUuid(record.sourceEventId, 'sourceEventId');
-	assertOneOf(
+	assertLiteral(
 		record.sourceKind,
-		[
-			'daily-summary-delivery-telegram',
-			'subscription-expiry-email',
-			'subscription-expiry-telegram'
-		],
+		'daily-summary-delivery-telegram',
 		'sourceKind'
 	);
 	const reference = exactRecord(record.reference, ['type', 'id']);
-	assertLiteral(
-		reference.type,
-		record.sourceKind === 'daily-summary-delivery-telegram'
-			? 'daily-summary-job'
-			: 'subscription-expiry-reminder',
-		'reference.type'
-	);
+	assertLiteral(reference.type, 'daily-summary-job', 'reference.type');
 	assertUuid(reference.id, 'reference.id');
 	assertOneOf(record.status, ['DELIVERED', 'FAILED'], 'status');
 	if (record.status === 'DELIVERED') {
@@ -345,7 +330,7 @@ export function parseReportingConsumeMessage(
 	expected:
 		| ReportingSourceEventType
 		| readonly ReportingSourceEventType[]
-		| 'notification.delivery.outcome.v1'
+		| typeof REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE
 ): {
 	eventId: string;
 	eventType: string;
@@ -363,7 +348,7 @@ export function parseReportingConsumeMessage(
 		throw new InvalidReportingEventError('Event payload is not JSON');
 	}
 	const isDeliveryOutcome =
-		expected === 'notification.delivery.outcome.v1';
+		expected === REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
 	const expectedTypes: readonly ReportingSourceEventType[] = Array.isArray(
 		expected
 	)
@@ -393,7 +378,8 @@ export function parseReportingConsumeMessage(
 		eventType !== payload.eventType ||
 		(!isDeliveryOutcome &&
 			!expectedTypes.includes(eventType as ReportingSourceEventType)) ||
-		(isDeliveryOutcome && eventType !== 'notification.delivery.outcome.v1')
+		(isDeliveryOutcome &&
+			eventType !== REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE)
 	) {
 		throw new InvalidReportingEventError(
 			'AMQP type must equal the expected payload eventType'

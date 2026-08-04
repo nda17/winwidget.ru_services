@@ -254,6 +254,55 @@ describe('NotificationDeliveryWorkerService', () => {
 		jest.restoreAllMocks();
 	});
 
+	it.each([
+		{
+			kind: 'daily-summary-delivery-telegram',
+			eventType: 'reporting.notification.delivery.outcome.v1',
+			reference: { type: 'daily-summary-job', id: eventId }
+		},
+		{
+			kind: 'subscription-expiry-email',
+			eventType: 'notification.delivery.outcome.v1',
+			reference: {
+				type: 'subscription-expiry-reminder',
+				id: 'subscription-reminder-1'
+			}
+		}
+	] as const)(
+		'emits $kind outcomes on $eventType',
+		async ({ kind, eventType, reference }) => {
+			const { service, transaction } = createService();
+
+			await (service as any).createNotificationDeliveryOutcome(
+				transaction,
+				{
+					kind,
+					eventId,
+					payload: { reference },
+					status: 'DELIVERED',
+					failure: null
+				}
+			);
+
+			expect(
+				transaction.notificationDeliveryOutboxEvent.createMany
+			).toHaveBeenCalledWith({
+				data: [
+					expect.objectContaining({
+						eventType,
+						routingKey: eventType,
+						payload: expect.objectContaining({
+							eventType,
+							sourceKind: kind,
+							reference
+						})
+					})
+				],
+				skipDuplicates: true
+			});
+		}
+	);
+
 	it('subscribes to all owned queues and their DLQs by default', async () => {
 		const { service, rabbitMq, heartbeat } = createService();
 

@@ -1,64 +1,7 @@
 import { DailySummaryRunService } from './daily-summary-run.service';
 
-describe('DailySummaryRunService shared outcome handling', () => {
-	it('ACKs and ignores a valid subscription outcome without touching report runs', async () => {
-		const transaction = {
-			consumerReceipt: {
-				updateMany: jest.fn().mockResolvedValue({ count: 1 })
-			},
-			reportingConsumerFailure: {
-				updateMany: jest.fn().mockResolvedValue({ count: 0 })
-			},
-			reportRun: { findFirst: jest.fn() }
-		};
-		const prisma = {
-			$transaction: jest.fn(
-				(callback: (tx: typeof transaction) => unknown) =>
-					callback(transaction)
-			)
-		};
-		const metrics = { increment: jest.fn() };
-		const service = new DailySummaryRunService(
-			prisma as never,
-			{} as never,
-			metrics as never
-		);
-		await service.applyOutcome(
-			{
-				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
-				sourceEventId: '11111111-1111-4111-8111-111111111111',
-				sourceKind: 'subscription-expiry-email',
-				reference: {
-					type: 'subscription-expiry-reminder',
-					id: '22222222-2222-4222-8222-222222222222'
-				},
-				status: 'DELIVERED',
-				failure: null,
-				occurredAt: '2026-07-31T00:00:00.000Z'
-			},
-			'33333333-3333-4333-8333-333333333333',
-			{
-				eventId: '33333333-3333-4333-8333-333333333333',
-				consumer: 'reporting-delivery-outcome-v1',
-				lockToken: '44444444-4444-4444-8444-444444444444'
-			}
-		);
-		expect(transaction.reportRun.findFirst).not.toHaveBeenCalled();
-		expect(transaction.consumerReceipt.updateMany).toHaveBeenCalled();
-		expect(
-			transaction.reportingConsumerFailure.updateMany
-		).toHaveBeenCalledWith(
-			expect.objectContaining({
-				data: expect.objectContaining({ status: 'RESOLVED' })
-			})
-		);
-		expect(metrics.increment).toHaveBeenCalledWith(
-			'delivery_outcomes_ignored_total'
-		);
-	});
-
-	it('ACKs a shadow-era daily outcome whose run is not Reporting-owned', async () => {
+describe('DailySummaryRunService outcome handling', () => {
+	it('ACKs a late Reporting outcome whose run is no longer retained', async () => {
 		const transaction = {
 			consumerReceipt: {
 				updateMany: jest.fn().mockResolvedValue({ count: 1 })
@@ -84,7 +27,7 @@ describe('DailySummaryRunService shared outcome handling', () => {
 		await service.applyOutcome(
 			{
 				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
+				eventType: 'reporting.notification.delivery.outcome.v1',
 				sourceEventId: id,
 				sourceKind: 'daily-summary-delivery-telegram',
 				reference: { type: 'daily-summary-job', id },
@@ -146,7 +89,7 @@ describe('DailySummaryRunService shared outcome handling', () => {
 			await service.applyOutcome(
 				{
 					schemaVersion: 1,
-					eventType: 'notification.delivery.outcome.v1',
+					eventType: 'reporting.notification.delivery.outcome.v1',
 					sourceEventId,
 					sourceKind: 'daily-summary-delivery-telegram',
 					reference: { type: 'daily-summary-job', id: runId },
@@ -231,7 +174,7 @@ describe('DailySummaryRunService shared outcome handling', () => {
 		await service.applyOutcome(
 			{
 				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
+				eventType: 'reporting.notification.delivery.outcome.v1',
 				sourceEventId,
 				sourceKind: 'daily-summary-delivery-telegram',
 				reference: { type: 'daily-summary-job', id: runId },
@@ -298,7 +241,7 @@ describe('DailySummaryRunService shared outcome handling', () => {
 		await service.applyOutcome(
 			{
 				schemaVersion: 1,
-				eventType: 'notification.delivery.outcome.v1',
+				eventType: 'reporting.notification.delivery.outcome.v1',
 				sourceEventId,
 				sourceKind: 'daily-summary-delivery-telegram',
 				reference: { type: 'daily-summary-job', id: runId },

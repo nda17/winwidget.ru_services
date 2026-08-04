@@ -88,13 +88,6 @@ export class DailySummaryRunService {
 		completion: ConsumerReceiptCompletion
 	): Promise<void> {
 		const result = await this.prisma.$transaction(async transaction => {
-			if (
-				outcome.sourceKind !== 'daily-summary-delivery-telegram' ||
-				outcome.reference.type !== 'daily-summary-job'
-			) {
-				await this.completeConsumerReceipt(transaction, completion);
-				return 'ignored' as const;
-			}
 			const run = await transaction.reportRun.findFirst({
 				where: {
 					requestEventId: outcome.sourceEventId,
@@ -102,9 +95,8 @@ export class DailySummaryRunService {
 				}
 			});
 			if (!run) {
-				// During shadow mode the monolith still emits valid outcomes on the
-				// shared routing key. They are outside Reporting ownership and are
-				// acknowledged without retry or DLQ pollution.
+				// A late duplicate can outlive the retained run row. It is already a
+				// valid Reporting-owned outcome, so acknowledge it idempotently.
 				await this.completeConsumerReceipt(transaction, completion);
 				return 'ignored' as const;
 			}

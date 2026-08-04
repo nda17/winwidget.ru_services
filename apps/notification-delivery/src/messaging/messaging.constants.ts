@@ -20,6 +20,8 @@ export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.telegram.requested.v1';
 export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v1';
+export const REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
+	'reporting.notification.delivery.outcome.v1';
 export const CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v2';
 
