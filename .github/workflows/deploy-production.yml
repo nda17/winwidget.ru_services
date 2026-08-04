@@ -12,20 +12,8 @@ on:
           - all
           - maintenance
           - notification-delivery
-          - notification-delivery-database
           - campaigns
-          - campaigns-database
           - reporting
-      campaigns_database_action:
-        description: Campaigns database lifecycle action
-        required: true
-        default: prepare
-        type: choice
-        options:
-          - prepare
-          - rollback
-          - restart
-          - finalize
   push:
     branches:
       - prod
@@ -68,7 +56,6 @@ jobs:
         env:
           APP_ROOT: /opt/winwidget
           AUTOMATIC_PROD_PUSH: ${{ github.event_name == 'push' && 'true' || 'false' }}
-          CAMPAIGNS_RESTART: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'campaigns-database' && inputs.campaigns_database_action == 'restart' && 'true' || 'false' }}
           DEPLOY_REVISION: ${{ github.sha }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
@@ -76,12 +63,11 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' CAMPAIGNS_RESTART='$CAMPAIGNS_RESTART' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
             "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ &&
-            "$CAMPAIGNS_RESTART" =~ ^(true|false)$ &&
             "$(git branch --show-current)" == "prod" &&
             -z "$(git status --porcelain --untracked-files=all)" ]] || {
             echo "Lifecycle preflight requires a trusted clean prod checkout." >&2
@@ -148,9 +134,7 @@ jobs:
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           guard_campaigns_checkout_before_pull "$current_revision"
           guard_reporting_checkout_before_pull "$current_revision"
-          if [[ "$CAMPAIGNS_RESTART" != "true" ]]; then
-            guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
-          fi
+          guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
             "$current_revision" == "$EXPECTED_REVISION" ]]; then
             guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
@@ -279,24 +263,6 @@ jobs:
           echo "::add-mask::$reporting_internal_token"
           printf 'REPORTING_INTERNAL_TOKEN=%s\n' \
             "$reporting_internal_token" >> "$GITHUB_ENV"
-
-      - name: Guard Notification Delivery database branch
-        if: >-
-          github.event_name == 'workflow_dispatch' &&
-          inputs.deploy_target == 'notification-delivery-database' &&
-          github.ref != 'refs/heads/prod'
-        run: |
-          echo "Notification Delivery database lifecycle can run only from refs/heads/prod." >&2
-          exit 1
-
-      - name: Guard Campaigns database branch
-        if: >-
-          github.event_name == 'workflow_dispatch' &&
-          inputs.deploy_target == 'campaigns-database' &&
-          github.ref != 'refs/heads/prod'
-        run: |
-          echo "Campaigns database lifecycle can run only from refs/heads/prod." >&2
-          exit 1
 
       - name: Fast-check Campaigns production recovery
         run: |
@@ -3679,11 +3645,11 @@ jobs:
             }
           };
 
-          requireCount("guard_campaigns_checkout_before_pull() {", 4);
-          requireCount("checkout_verified_prod_revision() {", 3);
+          requireCount("guard_campaigns_checkout_before_pull() {", 2);
+          requireCount("checkout_verified_prod_revision() {", 1);
           requireCount(
             'git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||',
-            9,
+            4,
           );
           requireCount(
             'git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true',
@@ -3691,69 +3657,59 @@ jobs:
           );
           requireCount(
             'guard_campaigns_checkout_before_pull "$expected_revision"',
-            3,
+            1,
           );
-          requireCount("git fetch origin prod", 4);
-          requireCount("git checkout prod", 3);
-          requireCount('git merge --ff-only "$fetched_revision"', 3);
+          requireCount("git fetch origin prod", 1);
+          requireCount("git checkout prod", 1);
+          requireCount('git merge --ff-only "$fetched_revision"', 1);
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-            6,
+            5,
           );
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"',
-            1,
+            0,
           );
           requireCount(
             '--require-staged-revision "$expected_revision"',
-            1,
+            0,
           );
           requireCount("git pull --ff-only origin prod", 0);
           requireCount(
             'echo "Campaigns marker exists but its checkout guard is unavailable." >&2',
-            3,
-          );
-          requireCount(
-            'echo "Tracked Campaigns lifecycle guard script is missing." >&2',
-            3,
-          );
-          requireCount("guard_reporting_checkout_before_pull() {", 5);
-          requireCount(
-            'local guard_action="${2:---guard-before-fetch-revision}"',
-            5,
-          );
-          requireCount('"$guard_action" "$expected_revision"', 5);
-          requireCount(
-            '"$expected_revision" --guard-before-checkout-revision',
-            3,
-          );
-          requireCount(
-            '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
             1,
           );
           requireCount(
+            'echo "Tracked Campaigns lifecycle guard script is missing." >&2',
+            1,
+          );
+          requireCount("guard_reporting_checkout_before_pull() {", 2);
+          requireCount(
+            'local guard_action="${2:---guard-before-fetch-revision}"',
+            2,
+          );
+          requireCount('"$guard_action" "$expected_revision"', 2);
+          requireCount(
+            '"$expected_revision" --guard-before-checkout-revision',
+            1,
+          );
+          requireCount(
+            '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
+            0,
+          );
+          requireCount(
             'guard_reporting_checkout_before_pull "$expected_revision"',
-            3,
+            1,
           );
           requireCount(
             'echo "Reporting marker exists but its checkout guard is unavailable." >&2',
-            2,
+            1,
           );
           requireCount(
             'echo "Tracked Reporting lifecycle guard script is missing." >&2',
-            2,
+            1,
           );
-          const deployJob = workflow.slice(
-            workflow.indexOf("\n  deploy:"),
-            workflow.indexOf("\n  notification-delivery-database:"),
-          );
-          const notificationDatabaseJob = workflow.slice(
-            workflow.indexOf("\n  notification-delivery-database:"),
-            workflow.indexOf("\n  campaigns-database:"),
-          );
-          const campaignsCutoverJob = workflow.slice(
-            workflow.indexOf("\n  campaigns-database:"),
-          );
+          const deployJob = workflow.slice(workflow.indexOf("\n  deploy:"));
           if (
             !deployJob.includes("needs: verify") ||
             !deployJob.includes("github.event_name == 'push'") ||
@@ -3800,74 +3756,6 @@ jobs:
             'acquire_production_deploy_lock "backend checkout and deployment"',
             "Backend deploy checkout",
           );
-          assertCheckoutOrder(
-            notificationDatabaseJob,
-            'acquire_production_deploy_lock "Notification Delivery database checkout"',
-            "Notification Delivery database checkout",
-          );
-          assertCheckoutOrder(
-            campaignsCutoverJob,
-            'acquire_production_deploy_lock "Campaigns database checkout"',
-            "Campaigns database checkout",
-          );
-          const campaignsRestartLockIndex = campaignsCutoverJob.indexOf(
-            'acquire_production_deploy_lock "Campaigns database restart bootstrap"',
-          );
-          const campaignsRestartReportingGuardIndex =
-            campaignsCutoverJob.indexOf(
-              'guard_reporting_checkout_before_pull "$EXPECTED_NEXT_REVISION"',
-            );
-          const campaignsRestartFetchIndex =
-            campaignsCutoverJob.indexOf("git fetch origin prod");
-          const campaignsRestartPostFetchGuardIndex =
-            campaignsCutoverJob.indexOf(
-              '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
-            );
-          if (
-            campaignsRestartLockIndex < 0 ||
-            campaignsRestartReportingGuardIndex < 0 ||
-            campaignsRestartFetchIndex < 0 ||
-            campaignsRestartPostFetchGuardIndex < 0 ||
-            campaignsRestartLockIndex >= campaignsRestartReportingGuardIndex ||
-            campaignsRestartReportingGuardIndex >= campaignsRestartFetchIndex ||
-            campaignsRestartFetchIndex >= campaignsRestartPostFetchGuardIndex
-          ) {
-            throw new Error(
-              "Campaigns restart must pass both Reporting revision guards around its exact fetch",
-            );
-          }
-          const requireStagedIndex = campaignsCutoverJob.indexOf(
-            '--require-staged-revision "$expected_revision"',
-          );
-          const fetchIndex =
-            campaignsCutoverJob.lastIndexOf("git fetch origin prod");
-          if (
-            requireStagedIndex < 0 ||
-            fetchIndex < 0 ||
-            requireStagedIndex >= fetchIndex
-          ) {
-            throw new Error(
-              "Campaigns cutover must require the exact staged revision before fetch",
-            );
-          }
-          if (
-            !campaignsCutoverJob.includes(
-              'git show "$EXPECTED_NEXT_REVISION:$restart_script"',
-            ) ||
-            !campaignsCutoverJob.includes(
-              'acquire_production_deploy_lock "Campaigns database restart bootstrap"',
-            ) ||
-            !campaignsCutoverJob.includes(
-              'git hash-object "$temporary_script"',
-            ) ||
-            !campaignsCutoverJob.includes(
-              'git merge-base --is-ancestor "$current_revision" "$EXPECTED_NEXT_REVISION"',
-            )
-          ) {
-            throw new Error(
-              "Campaigns restart must verify and run the exact new-revision recovery script under the production lock",
-            );
-          }
           const lifecyclePreflightStart = workflow.indexOf(
             "\n  lifecycle_checkout_preflight:",
           );
@@ -3907,6 +3795,12 @@ jobs:
             );
           }
           for (const retiredToken of [
+            "\n          - notification-delivery-" + "database",
+            "\n          - campaigns-" + "database",
+            "\n      campaigns_" + "database_action:",
+            "\n  notification-delivery-" + "database:",
+            "\n  campaigns-" + "database:",
+            "inputs.campaigns_" + "database_action",
             "\n          - reporting-" + "database",
             "\n          - reporting-" + "cutover",
             "\n      reporting_" + "database_action:",
@@ -4275,24 +4169,51 @@ jobs:
               "dailySummaryTime",
               "dailySummaryLastSent",
             ];
-            const readSourceTree = directory =>
+            const readSourceTree = (directory, ignoredPaths = new Set()) =>
               fs
                 .readdirSync(directory, { withFileTypes: true })
                 .flatMap(entry => {
                   const path = `${directory}/${entry.name}`;
-                  if (entry.isDirectory()) return readSourceTree(path);
-                  return entry.isFile() && entry.name.endsWith(".ts")
+                  if (entry.isDirectory()) {
+                    return readSourceTree(path, ignoredPaths);
+                  }
+                  return entry.isFile() &&
+                    entry.name.endsWith(".ts") &&
+                    !ignoredPaths.has(path)
                     ? [fs.readFileSync(path, "utf8")]
                     : [];
                 })
                 .join("\n");
+            // Core and Reporting have independent queues bound to the shared
+            // outcome route. Core validates and acknowledges the Reporting
+            // subtype without mutating Reporting state, so these exact
+            // boundary files may retain only the shared wire identifiers.
+            const reportingOutcomeBoundaryPaths = new Set([
+              "src/messaging/notification-delivery-event.ts",
+              "src/messaging/messaging-event-contract.ts",
+              "src/messaging/integration-delivery.service.ts",
+              "src/messaging/messaging-event-contract.spec.ts",
+              "src/messaging/integration-delivery.service.spec.ts",
+              "src/messaging/integration-worker.service.spec.ts",
+            ]);
+            const reportingOutcomeBoundaryTokens = new Set([
+              "daily-summary-delivery-telegram",
+              "daily-summary-job",
+            ]);
             const sourceText = [
               readSourceTree("src"),
               fs.readFileSync("prisma/schema.prisma", "utf8"),
             ].join("\n");
-            const reintroducedToken = forbiddenTokens.find(token =>
-              sourceText.includes(token),
-            );
+            const sourceTextWithoutReportingOutcomeBoundary = [
+              readSourceTree("src", reportingOutcomeBoundaryPaths),
+              fs.readFileSync("prisma/schema.prisma", "utf8"),
+            ].join("\n");
+            const reintroducedToken = forbiddenTokens.find(token => {
+              const inspectedSource = reportingOutcomeBoundaryTokens.has(token)
+                ? sourceTextWithoutReportingOutcomeBoundary
+                : sourceText;
+              return inspectedSource.includes(token);
+            });
             if (reintroducedToken) {
               throw new Error(
                 `Reporting post-cleanup source contains legacy token: ${reintroducedToken}`,
@@ -5278,12 +5199,7 @@ jobs:
 
   deploy:
     needs: verify
-    if: >-
-      github.event_name == 'push' ||
-      (
-        inputs.deploy_target != 'notification-delivery-database' &&
-        inputs.deploy_target != 'campaigns-database'
-      )
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -5452,7 +5368,7 @@ jobs:
             if ! guard_campaigns_checkout_before_pull \
               "$EXPECTED_REVISION" > /dev/null 2>&1; then
               echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
-              echo "Run the protected campaigns-database restart action for $EXPECTED_REVISION."
+              echo "Resolve the pinned Campaigns lifecycle guard from the production runbook before deploying $EXPECTED_REVISION."
               exit 0
             fi
             if ! guard_reporting_checkout_before_pull \
@@ -5492,588 +5408,4 @@ jobs:
               exit 1
               ;;
           esac
-          EOF
-
-  notification-delivery-database:
-    needs: verify
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'notification-delivery-database' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Run Notification Delivery database lifecycle on VPS
-        env:
-          APP_ROOT: /opt/winwidget
-          EXPECTED_PROD_REVISION: ${{ github.sha }}
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_PROD_REVISION='$EXPECTED_PROD_REVISION' bash -s" <<'EOF'
-          set -euo pipefail
-          cd "$APP_ROOT/winwidget.ru_server"
-
-          lock_script="scripts/production-deploy-lock.sh"
-          [[ "$(id -u)" == "0" && -f "$lock_script" && ! -L "$lock_script" &&
-            "$(git branch --show-current)" == "prod" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Notification Delivery database checkout requires a trusted clean prod bootstrap." >&2
-            exit 1
-          }
-          tracked_lock_blob="$(git rev-parse --verify "HEAD:$lock_script")"
-          [[ "$(git hash-object "$lock_script")" == "$tracked_lock_blob" ]] || {
-            echo "Production lock script differs from the checked-out revision." >&2
-            exit 1
-          }
-          # shellcheck source=/dev/null
-          source "$lock_script"
-          acquire_production_deploy_lock "Notification Delivery database checkout"
-
-          guard_campaigns_checkout_before_pull() {
-            local expected_revision="$1"
-            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
-            local staged_marker="$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
-            local cutover_marker="$APP_ROOT/deploy/backend/.campaigns-database-cutover-v1"
-            local tracked_blob actual_blob
-
-            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] || {
-              echo "Expected production revision is invalid." >&2
-              return 1
-            }
-            tracked_blob="$(
-              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-                true
-            )"
-            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
-                echo "Campaigns lifecycle guard script is unsafe." >&2
-                return 1
-              }
-              actual_blob="$(git hash-object "$lifecycle_script")"
-              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
-                echo "Campaigns lifecycle guard script differs from the checked-out revision." >&2
-                return 1
-              }
-              APP_ROOT="$APP_ROOT" \
-                bash "$lifecycle_script" \
-                  --guard-checkout-revision "$expected_revision"
-              return
-            fi
-            if [[ -n "$tracked_blob" ]]; then
-              echo "Tracked Campaigns lifecycle guard script is missing." >&2
-              return 1
-            fi
-            if [[ -e "$staged_marker" || -L "$staged_marker" ||
-              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
-              echo "Campaigns marker exists but its checkout guard is unavailable." >&2
-              return 1
-            fi
-          }
-          guard_reporting_checkout_before_pull() {
-            local expected_revision="$1"
-            local guard_action="${2:---guard-before-fetch-revision}"
-            local lifecycle_script="scripts/reporting-database-lifecycle.sh"
-            local staged_marker="$APP_ROOT/deploy/backend/.reporting-first-rollout-staged-v1"
-            local database_marker="$APP_ROOT/deploy/backend/.reporting-database-lifecycle-v1"
-            local cutover_marker="$APP_ROOT/deploy/backend/.reporting-database-cutover-v1"
-            local tracked_blob actual_blob
-
-            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
-              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || {
-              echo "Expected Reporting revision is invalid." >&2
-              return 1
-            }
-            tracked_blob="$(
-              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-                true
-            )"
-            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
-                echo "Reporting lifecycle guard script is unsafe." >&2
-                return 1
-              }
-              actual_blob="$(git hash-object "$lifecycle_script")"
-              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
-                echo "Reporting lifecycle guard script differs from the checked-out revision." >&2
-                return 1
-              }
-              APP_ROOT="$APP_ROOT" \
-                bash "$lifecycle_script" \
-                  "$guard_action" "$expected_revision"
-              return
-            fi
-            if [[ -n "$tracked_blob" ]]; then
-              echo "Tracked Reporting lifecycle guard script is missing." >&2
-              return 1
-            fi
-            if [[ -e "$staged_marker" || -L "$staged_marker" ||
-              -e "$database_marker" || -L "$database_marker" ||
-              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
-              echo "Reporting marker exists but its checkout guard is unavailable." >&2
-              return 1
-            fi
-          }
-          checkout_verified_prod_revision() {
-            local expected_revision="$1"
-            local current_revision fetched_revision
-
-            current_revision="$(git rev-parse HEAD)"
-            guard_campaigns_checkout_before_pull "$current_revision"
-            guard_reporting_checkout_before_pull "$current_revision"
-            guard_campaigns_checkout_before_pull "$expected_revision"
-            guard_reporting_checkout_before_pull "$expected_revision"
-            git fetch origin prod
-            fetched_revision="$(git rev-parse FETCH_HEAD)"
-            [[ "$fetched_revision" == "$expected_revision" ]] || {
-              echo "Origin prod changed after workflow start; checkout was not modified." >&2
-              return 1
-            }
-            guard_reporting_checkout_before_pull \
-              "$expected_revision" --guard-before-checkout-revision
-            git checkout prod
-            git merge --ff-only "$fetched_revision"
-            [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
-              echo "Verified prod checkout revision mismatch." >&2
-              return 1
-            }
-          }
-          checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"
-
-          compose=(
-            docker compose
-            --project-name winwidget
-            --env-file "$APP_ROOT/deploy/backend/.env.production"
-            --file deploy/docker-compose.prod.yml
-          )
-          cutover_marker="$APP_ROOT/deploy/backend/.notification-delivery-database-cutover-v1"
-          ENV_FILE="$APP_ROOT/deploy/backend/.env.production"
-          get_env_value() {
-            local key="$1"
-
-            awk -F= -v key="$key" '
-              /^[[:space:]]*(#|$)/ { next }
-              {
-                name = $1
-                sub(/^[[:space:]]*/, "", name)
-                sub(/[[:space:]]*$/, "", name)
-                value = $0
-                sub(/^[^=]*=/, "", value)
-                sub(/\r$/, "", value)
-                sub(/^[[:space:]]*/, "", value)
-                sub(/[[:space:]]*$/, "", value)
-                if (name == key) {
-                  print value
-                  found += 1
-                }
-              }
-              END { exit(found == 1 ? 0 : 1) }
-            ' "$ENV_FILE"
-          }
-          # shellcheck source=scripts/notification-delivery-database-lifecycle.sh
-          source scripts/notification-delivery-database-lifecycle.sh
-          cutover_phase=""
-          marker_worker_image_id=""
-          marker_worker_revision=""
-          if [[ -e "$cutover_marker" || -L "$cutover_marker" ]]; then
-            if ! validate_notification_database_cutover_marker; then
-              echo "Notification Delivery database cutover marker is invalid." >&2
-              exit 1
-            fi
-            cutover_phase="$(notification_database_marker_value phase)"
-            marker_worker_image_id="$(
-              notification_database_marker_value worker_image_id
-            )"
-            marker_worker_revision="$(
-              notification_database_marker_value revision
-            )"
-          fi
-
-          require_marker_worker_image() {
-            if [[ ! "$marker_worker_image_id" =~ ^sha256:[0-9a-f]{64}$ ||
-              ! "$marker_worker_revision" =~ ^[0-9a-f]{40}$ ||
-              "$(
-                docker image inspect \
-                  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-                  "$marker_worker_image_id" 2>/dev/null || true
-              )" != "$marker_worker_revision" ]]; then
-              echo "The immutable worker image required for cutover recovery is unavailable." >&2
-              exit 1
-            fi
-          }
-
-          require_expand_service_revision() {
-            local service="$1"
-            local allow_marker_revision="${2:-false}"
-            local allow_worker_recovery="${3:-false}"
-            local marker_revision_allowed=false
-            local container_ids container_count container_id revision health
-
-            if [[ "$allow_marker_revision" == "true" &&
-              -n "$marker_worker_revision" ]]; then
-              marker_revision_allowed=true
-            fi
-            if [[ "$allow_worker_recovery" == "true" && -n "$cutover_phase" ]]; then
-              container_ids="$("${compose[@]}" ps -a -q "$service")"
-            else
-              container_ids="$("${compose[@]}" ps --status running -q "$service")"
-            fi
-            container_count="$(
-              printf '%s\n' "$container_ids" |
-                sed '/^$/d' |
-                wc -l |
-              tr -d ' '
-            )"
-            if [[ "$service" == "notification-delivery-worker" &&
-              "$cutover_phase" =~ ^(preparing|restoring|prepared)$ ]]; then
-              if [[ "$container_count" != "0" && "$container_count" != "1" ]]; then
-                echo "Pre-forward recovery allows at most one Notification Delivery worker container." >&2
-                exit 1
-              fi
-              require_marker_worker_image
-              approved_worker_revision="$marker_worker_revision"
-              return
-            fi
-            if [[ "$container_count" == "0" &&
-              "$allow_worker_recovery" == "true" &&
-              -n "$marker_worker_revision" ]]; then
-              require_marker_worker_image
-              approved_worker_revision="$marker_worker_revision"
-              return
-            fi
-            if [[ "$container_count" != "1" ]]; then
-              echo "Expand release requires exactly one approved $service container." >&2
-              exit 1
-            fi
-            container_id="$(printf '%s\n' "$container_ids" | sed -n '1p')"
-            revision="$(
-              docker inspect \
-                --format '{{range .Config.Env}}{{println .}}{{end}}' \
-                "$container_id" |
-                sed -n 's/^APP_REVISION=//p'
-            )"
-            if [[ "$revision" != "$EXPECTED_PROD_REVISION" &&
-              (
-                "$marker_revision_allowed" != "true" ||
-                "$revision" != "$marker_worker_revision"
-              ) ]]; then
-              echo "$service is not running the verified prod expand revision." >&2
-              exit 1
-            fi
-            health="$(
-              docker inspect \
-                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
-                "$container_id"
-            )"
-            if [[ "$health" != "healthy" &&
-              "$allow_worker_recovery" != "true" ]]; then
-              echo "$service must be healthy before database cutover." >&2
-              exit 1
-            fi
-            if [[ "$service" == "notification-delivery-worker" ]]; then
-              approved_worker_revision="$revision"
-            fi
-          }
-
-          approved_worker_revision=""
-          require_expand_service_revision api true
-          if [[ "$cutover_phase" != "complete" ]]; then
-            require_expand_service_revision maintenance-worker true
-          fi
-          require_expand_service_revision notification-delivery-worker true true
-          [[ "$approved_worker_revision" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "Approved Notification Delivery worker revision is missing." >&2
-            exit 1
-          }
-
-          finalize_cutover=false
-          if [[ "$cutover_phase" == "forward_only" || "$cutover_phase" == "complete" ]]; then
-            finalize_cutover=true
-          fi
-
-          APP_ROOT="$APP_ROOT" \
-            EXPECTED_REVISION="$EXPECTED_PROD_REVISION" \
-            EXPECTED_WORKER_REVISION="$approved_worker_revision" \
-            NOTIFICATION_DELIVERY_DATABASE_FINALIZE="$finalize_cutover" \
-            bash scripts/cutover-notification-delivery-database-production.sh
-          EOF
-
-  campaigns-database:
-    needs: verify
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.deploy_target == 'campaigns-database' &&
-      github.ref == 'refs/heads/prod'
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    environment: production
-
-    steps:
-      - name: Configure SSH private key
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
-
-      - name: Add VPS host to known_hosts
-        env:
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-        run: |
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-
-      - name: Run resumable Campaigns database lifecycle action
-        env:
-          APP_ROOT: /opt/winwidget
-          DATABASE_ACTION: ${{ inputs.campaigns_database_action }}
-          DEPLOY_REVISION: ${{ github.sha }}
-          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: |
-          case "$DATABASE_ACTION" in
-            prepare|rollback|finalize) ;;
-            restart)
-              ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-                "$SSH_USER@$SSH_HOST" \
-                "APP_ROOT='$APP_ROOT' EXPECTED_NEXT_REVISION='$DEPLOY_REVISION' bash -s" <<'RESTART_EOF'
-              set -euo pipefail
-              umask 077
-              cd "$APP_ROOT/winwidget.ru_server"
-              lifecycle_script="scripts/campaigns-database-lifecycle.sh"
-              lock_script="scripts/production-deploy-lock.sh"
-              restart_script="scripts/restart-campaigns-database-cutover-production.sh"
-              temporary_script="$APP_ROOT/deploy/backend/.campaigns-restart.$$"
-              trap 'rm -f -- "$temporary_script"' EXIT
-              [[ "$(id -u)" == "0" &&
-                "$EXPECTED_NEXT_REVISION" =~ ^[0-9a-f]{40}$ ]] || {
-                echo "Campaigns restart bootstrap identity is invalid." >&2
-                exit 1
-              }
-              for tracked_file in "$lifecycle_script" "$lock_script"; do
-                [[ -f "$tracked_file" && ! -L "$tracked_file" ]] || {
-                  echo "Campaigns restart bootstrap file is unsafe: $tracked_file" >&2
-                  exit 1
-                }
-                tracked_blob="$(git rev-parse --verify "HEAD:$tracked_file")"
-                [[ "$(git hash-object "$tracked_file")" == "$tracked_blob" ]] || {
-                  echo "Campaigns restart bootstrap file differs from HEAD: $tracked_file" >&2
-                  exit 1
-                }
-              done
-              # shellcheck source=/dev/null
-              source "$lock_script"
-              acquire_production_deploy_lock "Campaigns database restart bootstrap"
-              guard_reporting_checkout_before_pull() {
-                local expected_revision="$1"
-                local guard_action="${2:---guard-before-fetch-revision}"
-                local lifecycle_script="scripts/reporting-database-lifecycle.sh"
-                local staged_marker="$APP_ROOT/deploy/backend/.reporting-first-rollout-staged-v1"
-                local database_marker="$APP_ROOT/deploy/backend/.reporting-database-lifecycle-v1"
-                local cutover_marker="$APP_ROOT/deploy/backend/.reporting-database-cutover-v1"
-                local tracked_blob actual_blob
-
-                [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
-                  "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
-                tracked_blob="$(
-                  git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-                    true
-                )"
-                if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-                  [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || return 1
-                  actual_blob="$(git hash-object "$lifecycle_script")"
-                  [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || return 1
-                  APP_ROOT="$APP_ROOT" \
-                    bash "$lifecycle_script" \
-                      "$guard_action" "$expected_revision"
-                  return
-                fi
-                [[ -z "$tracked_blob" ]] || return 1
-                [[ ! -e "$staged_marker" && ! -L "$staged_marker" &&
-                  ! -e "$database_marker" && ! -L "$database_marker" &&
-                  ! -e "$cutover_marker" && ! -L "$cutover_marker" ]]
-              }
-              current_revision="$(git rev-parse HEAD)"
-              guard_reporting_checkout_before_pull "$current_revision"
-              guard_reporting_checkout_before_pull "$EXPECTED_NEXT_REVISION"
-              git fetch origin prod
-              fetched_revision="$(git rev-parse FETCH_HEAD)"
-              [[ "$fetched_revision" == "$EXPECTED_NEXT_REVISION" ]] || {
-                echo "Origin prod changed after restart workflow began." >&2
-                exit 1
-              }
-              guard_reporting_checkout_before_pull \
-                "$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision
-              git merge-base --is-ancestor "$current_revision" "$EXPECTED_NEXT_REVISION" || {
-                echo "Campaigns next revision is not a fast-forward of the active production checkout." >&2
-                exit 1
-              }
-              restart_blob="$(
-                git rev-parse --verify "$EXPECTED_NEXT_REVISION:$restart_script"
-              )"
-              git show "$EXPECTED_NEXT_REVISION:$restart_script" \
-                > "$temporary_script"
-              chown 0:0 "$temporary_script"
-              chmod 700 "$temporary_script"
-              [[ "$(git hash-object "$temporary_script")" == "$restart_blob" ]] || {
-                echo "Campaigns restart script blob verification failed." >&2
-                exit 1
-              }
-              APP_ROOT="$APP_ROOT" \
-                EXPECTED_NEXT_REVISION="$EXPECTED_NEXT_REVISION" \
-                bash "$temporary_script"
-          RESTART_EOF
-              exit 0
-              ;;
-            *)
-              echo "Unsupported Campaigns database action: $DATABASE_ACTION" >&2
-              exit 1
-              ;;
-          esac
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' DATABASE_ACTION='$DATABASE_ACTION' bash -s" <<'EOF'
-          set -euo pipefail
-          cd "$APP_ROOT/winwidget.ru_server"
-          lock_script="scripts/production-deploy-lock.sh"
-          [[ "$(id -u)" == "0" && -f "$lock_script" && ! -L "$lock_script" &&
-            "$(git branch --show-current)" == "prod" &&
-            -z "$(git status --porcelain --untracked-files=all)" ]] || {
-            echo "Campaigns database checkout requires a trusted clean prod bootstrap." >&2
-            exit 1
-          }
-          tracked_lock_blob="$(git rev-parse --verify "HEAD:$lock_script")"
-          [[ "$(git hash-object "$lock_script")" == "$tracked_lock_blob" ]] || {
-            echo "Production lock script differs from the checked-out revision." >&2
-            exit 1
-          }
-          # shellcheck source=/dev/null
-          source "$lock_script"
-          acquire_production_deploy_lock "Campaigns database checkout"
-          guard_campaigns_checkout_before_pull() {
-            local expected_revision="$1"
-            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
-            local staged_marker="$APP_ROOT/deploy/backend/.campaigns-first-cutover-staged-v1"
-            local cutover_marker="$APP_ROOT/deploy/backend/.campaigns-database-cutover-v1"
-            local tracked_blob actual_blob
-
-            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] || {
-              echo "Expected production revision is invalid." >&2
-              return 1
-            }
-            tracked_blob="$(
-              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-                true
-            )"
-            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
-                echo "Campaigns lifecycle guard script is unsafe." >&2
-                return 1
-              }
-              actual_blob="$(git hash-object "$lifecycle_script")"
-              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
-                echo "Campaigns lifecycle guard script differs from the checked-out revision." >&2
-                return 1
-              }
-              APP_ROOT="$APP_ROOT" \
-                bash "$lifecycle_script" \
-                  --guard-checkout-revision "$expected_revision"
-              return
-            fi
-            if [[ -n "$tracked_blob" ]]; then
-              echo "Tracked Campaigns lifecycle guard script is missing." >&2
-              return 1
-            fi
-            if [[ -e "$staged_marker" || -L "$staged_marker" ||
-              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
-              echo "Campaigns marker exists but its checkout guard is unavailable." >&2
-              return 1
-            fi
-          }
-          guard_reporting_checkout_before_pull() {
-            local expected_revision="$1"
-            local guard_action="${2:---guard-before-fetch-revision}"
-            local lifecycle_script="scripts/reporting-database-lifecycle.sh"
-            local staged_marker="$APP_ROOT/deploy/backend/.reporting-first-rollout-staged-v1"
-            local database_marker="$APP_ROOT/deploy/backend/.reporting-database-lifecycle-v1"
-            local cutover_marker="$APP_ROOT/deploy/backend/.reporting-database-cutover-v1"
-            local tracked_blob actual_blob
-
-            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
-              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
-            tracked_blob="$(
-              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
-                true
-            )"
-            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
-              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || return 1
-              actual_blob="$(git hash-object "$lifecycle_script")"
-              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || return 1
-              APP_ROOT="$APP_ROOT" \
-                bash "$lifecycle_script" \
-                  "$guard_action" "$expected_revision"
-              return
-            fi
-            [[ -z "$tracked_blob" ]] || return 1
-            [[ ! -e "$staged_marker" && ! -L "$staged_marker" &&
-              ! -e "$database_marker" && ! -L "$database_marker" &&
-              ! -e "$cutover_marker" && ! -L "$cutover_marker" ]]
-          }
-          checkout_verified_prod_revision() {
-            local expected_revision="$1"
-            local lifecycle_script="scripts/campaigns-database-lifecycle.sh"
-            local current_revision fetched_revision
-
-            current_revision="$(git rev-parse HEAD)"
-            guard_campaigns_checkout_before_pull "$current_revision"
-            guard_reporting_checkout_before_pull "$current_revision"
-            guard_campaigns_checkout_before_pull "$expected_revision"
-            guard_reporting_checkout_before_pull "$expected_revision"
-            APP_ROOT="$APP_ROOT" \
-              bash "$lifecycle_script" \
-                --require-staged-revision "$expected_revision"
-            git fetch origin prod
-            fetched_revision="$(git rev-parse FETCH_HEAD)"
-            [[ "$fetched_revision" == "$expected_revision" ]] || {
-              echo "Origin prod changed after workflow start; checkout was not modified." >&2
-              return 1
-            }
-            guard_reporting_checkout_before_pull \
-              "$expected_revision" --guard-before-checkout-revision
-            git checkout prod
-            git merge --ff-only "$fetched_revision"
-            [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
-              echo "Verified prod checkout revision mismatch." >&2
-              return 1
-            }
-          }
-          checkout_verified_prod_revision "$EXPECTED_REVISION"
-          APP_ROOT="$APP_ROOT" \
-            EXPECTED_REVISION="$EXPECTED_REVISION" \
-            bash scripts/cutover-campaigns-database-production.sh \
-              "$DATABASE_ACTION"
           EOF

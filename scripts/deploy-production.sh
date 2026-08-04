@@ -200,13 +200,13 @@ case "$campaigns_deploy_action" in
 		write_campaigns_first_cutover_staged_marker "$deploy_revision"
 		echo "Campaigns first-cutover revision $deploy_revision is staged on the VPS."
 		echo "No image was built, container restarted or migration applied."
-		echo "Run the manual campaigns-database-cutover prepare workflow next."
+		echo "The completed Campaigns database action is retired; follow the production recovery runbook before continuing."
 		exit 0
 		;;
 	block)
 		if [[ "$campaigns_cutover_phase" == "missing" ]]; then
 			echo "Manual full deployment is blocked before the Campaigns cutover is complete." >&2
-			echo "Run the staged automatic prod workflow and manual campaigns-database-cutover prepare first." >&2
+			echo "Recover the completed Campaigns lifecycle marker from reviewed production evidence before continuing." >&2
 		else
 			echo "Campaigns database cutover is in phase $campaigns_cutover_phase." >&2
 		fi

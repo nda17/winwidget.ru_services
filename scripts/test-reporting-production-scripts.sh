@@ -231,7 +231,7 @@ lifecycle_checkout_preflight_job="$(
 )"
 verify_header="$(sed -n '/^  verify:/,/^    services:/p' "$workflow_file")"
 deploy_job="$(
-	sed -n '/^  deploy:/,/^  notification-delivery-database:/p' "$workflow_file"
+	sed -n '/^  deploy:/,$p' "$workflow_file"
 )"
 
 [[
@@ -259,6 +259,11 @@ deploy_job="$(
 }
 
 for retired_line in \
+	'- notification-delivery-database' \
+	'- campaigns-database' \
+	'campaigns_database_action:' \
+	'notification-delivery-database:' \
+	'campaigns-database:' \
 	'- reporting-database' \
 	'- reporting-cutover' \
 	'reporting_database_action:' \
