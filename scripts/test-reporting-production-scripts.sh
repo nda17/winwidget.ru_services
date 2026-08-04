@@ -86,7 +86,8 @@ reporting_diagnostics_function="$(
 		"$script_directory/deploy-production.sh"
 )"
 reporting_outcome_cutover_function="$(
-	sed -n '/^prepare_reporting_outcome_route_cutover_after_stop()/,/^}/p' \
+	sed -n \
+		'/^prepare_reporting_outcome_route_cutover_after_stop()/,/^routine_stop_services=/p' \
 		"$script_directory/deploy-production.sh"
 )"
 reporting_routine_start_line="$(
