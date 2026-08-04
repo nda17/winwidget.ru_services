@@ -1371,6 +1371,7 @@ routine_stop_services=(
 )
 declare -A routine_stop_container_ids=()
 reporting_outcome_route_state_before='unknown'
+reporting_interrupted_routine_recovery=false
 reporting_cleanup_stop_recovery_active=false
 # Remove this exact-image bootstrap after the first successful rollout verifies
 # that the replacement API exits without Docker SIGKILL.
@@ -1398,6 +1399,48 @@ capture_routine_stop_containers() {
 		fi
 		routine_stop_container_ids["$service"]="$container_id"
 	done
+}
+
+detect_interrupted_reporting_outcome_deploy() {
+	local route_state="$1"
+	local service container_id running status image_id image_revision app_revision identity
+
+	[[ "$route_state" == 'forward' || "$route_state" == 'steady' ]] ||
+		return 1
+	[[ -e "$REPORTING_CUTOVER_MARKER" && ! -L "$REPORTING_CUTOVER_MARKER" ]] ||
+		return 1
+	reporting_cutover_validate_marker >/dev/null 2>&1 || return 1
+	[[ "$(reporting_cutover_marker_value phase)" == 'complete' ]] || return 1
+	[[ "$(compose_target ps --status running -q rabbitmq 2>/dev/null || true)" =~ ^[0-9a-f]{64}$ ]] ||
+		return 1
+
+	for service in "${routine_stop_services[@]}"; do
+		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+		if [[ -z "$container_id" && "$service" == 'database-restore-worker' ]]; then
+			continue
+		fi
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+		identity="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)"
+		[[ "$identity" == "$target_project|$service" ]] || return 1
+		image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+		image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id" 2>/dev/null || true)"
+		app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>/dev/null | sed -n 's/^APP_REVISION=//p')"
+		[[ "$image_revision" =~ ^[0-9a-f]{40}$ ]] &&
+			[[ "$app_revision" == "$image_revision" ]] &&
+			git -C "$server_root" cat-file -e "$image_revision^{commit}" 2>/dev/null &&
+			git -C "$server_root" merge-base --is-ancestor \
+				"$image_revision" "$APP_REVISION" || return 1
+		status="$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+		if [[ "$service" != 'reporting-service' ]]; then
+			running="$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)"
+			[[ "$running" == 'false' && "$status" == 'exited' ]] || return 1
+		else
+			[[ "$status" =~ ^(created|running|restarting|exited)$ ]] || return 1
+		fi
+	done
+
+	echo 'Detected an interrupted forward-only Reporting outcome deployment; canonical stopped containers will be recovered without restoring the legacy route.' >&2
+	return 0
 }
 
 restore_routine_containers_after_failed_stop() {
@@ -2546,37 +2589,47 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 			"$running_notification_delivery_container_id" == *$'\n'* ||
 			-z "$current_integration_container_id" ||
 			"$current_integration_container_id" == *$'\n'* ]]; then
-			echo "Cutover marker exists, but neither canonical nor saved forward topology is complete." >&2
-			echo "Resolve the topology manually; forward-only cutover state cannot be inferred safely." >&2
-			exit 1
+			reporting_outcome_route_state_before="$(
+				reporting_outcome_route_topology_state
+			)" || exit 1
+			if detect_interrupted_reporting_outcome_deploy \
+				"$reporting_outcome_route_state_before"; then
+				reporting_interrupted_routine_recovery=true
+			else
+				echo "Cutover marker exists, but neither canonical nor saved forward topology is complete." >&2
+				echo "Resolve the topology manually; forward-only cutover state cannot be inferred safely." >&2
+				exit 1
+			fi
 		fi
-		current_integration_kinds="$(
-			container_env_value \
-				"$current_integration_container_id" \
-				INTEGRATION_WORKER_KINDS || true
-		)"
-		current_integration_kinds_normalized="$(
-			normalize_csv "$current_integration_kinds"
-		)"
-		if ! reporting_cutover_worker_kinds_allowed \
-			"$current_integration_kinds_normalized" \
-			"$narrow_integration_kinds" \
-			"$pre_reporting_narrow_integration_kinds"; then
-			echo "Cutover marker exists, but the live integration worker still owns an unexpected kind set." >&2
-			echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
-			exit 1
-		fi
-		if [[ "$current_integration_kinds_normalized" != "$narrow_integration_kinds" ]]; then
-			echo 'Allowing the pre-Reporting integration worker only for its one-way audit-consumer bootstrap.'
-		fi
-		current_notification_delivery_kinds="$(
-			container_env_value \
-				"$running_notification_delivery_container_id" \
-				NOTIFICATION_DELIVERY_KINDS || true
-		)"
-		if [[ "$(normalize_csv "$current_notification_delivery_kinds")" != "$expanded_notification_delivery_kinds" ]]; then
-			echo "Cutover marker exists, but the live Notification Delivery worker has an unexpected kind set." >&2
-			exit 1
+		if [[ "$reporting_interrupted_routine_recovery" != 'true' ]]; then
+			current_integration_kinds="$(
+				container_env_value \
+					"$current_integration_container_id" \
+					INTEGRATION_WORKER_KINDS || true
+			)"
+			current_integration_kinds_normalized="$(
+				normalize_csv "$current_integration_kinds"
+			)"
+			if ! reporting_cutover_worker_kinds_allowed \
+				"$current_integration_kinds_normalized" \
+				"$narrow_integration_kinds" \
+				"$pre_reporting_narrow_integration_kinds"; then
+				echo "Cutover marker exists, but the live integration worker still owns an unexpected kind set." >&2
+				echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
+				exit 1
+			fi
+			if [[ "$current_integration_kinds_normalized" != "$narrow_integration_kinds" ]]; then
+				echo 'Allowing the pre-Reporting integration worker only for its one-way audit-consumer bootstrap.'
+			fi
+			current_notification_delivery_kinds="$(
+				container_env_value \
+					"$running_notification_delivery_container_id" \
+					NOTIFICATION_DELIVERY_KINDS || true
+			)"
+			if [[ "$(normalize_csv "$current_notification_delivery_kinds")" != "$expanded_notification_delivery_kinds" ]]; then
+				echo "Cutover marker exists, but the live Notification Delivery worker has an unexpected kind set." >&2
+				exit 1
+			fi
 		fi
 	fi
 else
@@ -5026,12 +5079,31 @@ wait_for_cutover_readiness() {
 	return 1
 }
 
+show_reporting_startup_diagnostics() {
+	echo 'Reporting startup diagnostics:' >&2
+	compose_target ps reporting-service rabbitmq >&2 || true
+	echo 'Reporting readiness response:' >&2
+	curl -sS --connect-timeout 2 --max-time 5 -i \
+		"$REPORTING_READINESS_URL" >&2 || true
+	echo 'Reporting logs:' >&2
+	compose_target logs --tail=200 reporting-service >&2 || true
+}
+
 start_canonical_reporting_runtime() {
+	if ! compose_target up -d --no-deps --force-recreate reporting-service; then
+		show_reporting_startup_diagnostics
+		return 1
+	fi
+}
+
+finish_canonical_reporting_runtime() {
 	local label="${1:-Reporting}"
 
-	compose_target up -d --no-deps --force-recreate reporting-service
-	wait_for_cutover_revision \
-		"$REPORTING_READINESS_URL" "$REPORTING_REVISION" "$label"
+	if ! wait_for_cutover_revision \
+		"$REPORTING_READINESS_URL" "$REPORTING_REVISION" "$label"; then
+		show_reporting_startup_diagnostics
+		return 1
+	fi
 	reporting_require_rabbitmq_topology
 	provision_reporting_rabbitmq_topic_permissions "$reporting_user" steady
 	reporting_runtime_container_before="$(
@@ -5626,7 +5698,8 @@ if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
 		fi
 	fi
 fi
-if [[ "$reporting_cleanup_runtime_deploy" != 'true' ]]; then
+if [[ "$reporting_cleanup_runtime_deploy" != 'true' &&
+	"$reporting_interrupted_routine_recovery" != 'true' ]]; then
 	verify_active_reporting_runtime \
 		"$reporting_runtime_container_before" \
 		"$reporting_runtime_image_before" || {
@@ -5638,6 +5711,15 @@ fi
 reporting_outcome_route_state_before="$(
 	reporting_outcome_route_topology_state
 )" || exit 1
+if [[ "$reporting_interrupted_routine_recovery" == 'true' ]]; then
+	[[ "$reporting_outcome_route_state_before" == 'forward' ||
+		"$reporting_outcome_route_state_before" == 'steady' ]] || {
+		echo 'Interrupted Reporting recovery lost its forward-only RabbitMQ boundary.' >&2
+		exit 1
+	}
+	reporting_outcome_route_is_drained || exit 1
+	reporting_outcome_route_queues_are_empty false || exit 1
+fi
 if [[ "$reporting_outcome_route_state_before" != 'steady' ]]; then
 	[[ "$reporting_cleanup_runtime_deploy" != 'true' &&
 		"$notification_delivery_first_cutover" != 'true' &&
@@ -5674,12 +5756,18 @@ fi
 finalize_notification_delivery_backup_grants
 verify_notification_delivery_runtime_crud
 verify_notification_delivery_backup_boundary
-current_campaigns_container_id="$(
-	compose_target ps --status running -q campaigns-service 2>/dev/null || true
-)"
+if [[ "$reporting_interrupted_routine_recovery" == 'true' ]]; then
+	current_campaigns_container_id="$(
+		compose_target ps -a -q campaigns-service 2>/dev/null || true
+	)"
+else
+	current_campaigns_container_id="$(
+		compose_target ps --status running -q campaigns-service 2>/dev/null || true
+	)"
+fi
 [[ -n "$current_campaigns_container_id" &&
 	"$current_campaigns_container_id" != *$'\n'* ]] || {
-	echo "Routine full deploy requires one running Campaigns service." >&2
+	echo "Routine full deploy requires one canonical Campaigns service container." >&2
 	exit 1
 }
 current_campaigns_revision="$(
@@ -5916,6 +6004,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		"Canonical Campaigns"
 
 	start_canonical_reporting_runtime "Canonical Reporting"
+	finish_canonical_reporting_runtime "Canonical Reporting"
 
 	stop_notification_cutover_services 30 false api
 	compose_target up -d --no-deps --force-recreate api
@@ -5940,6 +6029,12 @@ else
 			echo 'Reporting cleanup topology did not reach an exact quiescent recovery boundary.' >&2
 			exit 1
 		fi
+	elif [[ "$reporting_interrupted_routine_recovery" == 'true' ]]; then
+		prepare_database_restore_storage
+		verify_core_database_sessions_drained || {
+			echo 'Interrupted Reporting recovery did not retain the quiescent Core database boundary.' >&2
+			exit 1
+		}
 	elif ! stop_routine_topology_for_core_migration; then
 		echo "Routine production topology did not reach a safe core migration boundary." >&2
 		exit 1
@@ -6004,9 +6099,11 @@ else
 	fi
 	compose_target up -d rabbitmq
 	messaging_readiness_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
-	start_canonical_reporting_runtime "Reporting"
+	reporting_start_failed=false
+	if ! start_canonical_reporting_runtime "Reporting"; then
+		reporting_start_failed=true
+	fi
 	compose_target up -d --no-deps --force-recreate outbox-publisher
-	wait_for_rabbitmq_topology
 	compose_target up -d --no-deps --force-recreate \
 		integration-worker \
 		maintenance-worker \
@@ -6015,6 +6112,32 @@ else
 		campaigns-service
 	compose_target up -d --no-deps --force-recreate api
 	compose_target up -d --no-deps --force-recreate api-gateway
+	core_runtime_recovered=true
+	if ! wait_for_cutover_revision \
+		"$HEALTHCHECK_URL" "$APP_REVISION" "Recovered canonical API"; then
+		core_runtime_recovered=false
+	fi
+	if ! wait_for_cutover_readiness \
+		"$READINESS_URL" "Recovered canonical API"; then
+		core_runtime_recovered=false
+	fi
+	if ! wait_for_cutover_readiness \
+		"$GATEWAY_READINESS_URL" "Recovered canonical API Gateway"; then
+		core_runtime_recovered=false
+	fi
+	if [[ "$core_runtime_recovered" != 'true' ]]; then
+		echo 'Canonical API, Gateway or workers did not recover after the Reporting outcome handoff.' >&2
+		exit 1
+	fi
+	if [[ "$reporting_start_failed" == 'true' ]]; then
+		echo 'Reporting failed to launch; canonical API, Gateway and workers were restored and verified.' >&2
+		exit 1
+	fi
+	if ! finish_canonical_reporting_runtime "Reporting"; then
+		echo 'Reporting failed readiness; canonical API, Gateway and workers remain ready.' >&2
+		exit 1
+	fi
+	wait_for_rabbitmq_topology
 fi
 
 show_api_diagnostics() {

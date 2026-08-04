@@ -73,6 +73,50 @@ deploy_entrypoint_text="$(<"$script_directory/deploy-production.sh")"
 	echo 'Full deployment is missing the Reporting credential or outcome-route gate.' >&2
 	exit 1
 }
+reporting_start_function="$(
+	sed -n '/^start_canonical_reporting_runtime()/,/^}/p' \
+		"$script_directory/deploy-production.sh"
+)"
+reporting_finish_function="$(
+	sed -n '/^finish_canonical_reporting_runtime()/,/^}/p' \
+		"$script_directory/deploy-production.sh"
+)"
+reporting_diagnostics_function="$(
+	sed -n '/^show_reporting_startup_diagnostics()/,/^}/p' \
+		"$script_directory/deploy-production.sh"
+)"
+reporting_routine_start_line="$(
+	grep -n 'if ! start_canonical_reporting_runtime "Reporting"; then' \
+		"$script_directory/deploy-production.sh" | cut -d: -f1
+)"
+reporting_routine_gateway_line="$(
+	grep -n 'compose_target up -d --no-deps --force-recreate api-gateway' \
+		"$script_directory/deploy-production.sh" | tail -1 | cut -d: -f1
+)"
+reporting_routine_finish_line="$(
+	grep -n 'if ! finish_canonical_reporting_runtime "Reporting"; then' \
+		"$script_directory/deploy-production.sh" | cut -d: -f1
+)"
+[[ "$reporting_start_function" == *'if ! compose_target up -d --no-deps --force-recreate reporting-service; then'* &&
+	"$reporting_start_function" == *'show_reporting_startup_diagnostics'* &&
+	"$reporting_finish_function" == *'if ! wait_for_cutover_revision'* &&
+	"$reporting_finish_function" == *'show_reporting_startup_diagnostics'* &&
+	"$reporting_finish_function" == *'provision_reporting_rabbitmq_topic_permissions "$reporting_user" steady'* &&
+	"$reporting_diagnostics_function" == *'compose_target ps reporting-service rabbitmq'* &&
+	"$reporting_diagnostics_function" == *'compose_target logs --tail=200 reporting-service'* &&
+	"$deploy_entrypoint_text" == *'detect_interrupted_reporting_outcome_deploy'* &&
+	"$deploy_entrypoint_text" == *'reporting_interrupted_routine_recovery=true'* &&
+	"$reporting_routine_start_line" =~ ^[0-9]+$ &&
+	"$reporting_routine_gateway_line" =~ ^[0-9]+$ &&
+	"$reporting_routine_finish_line" =~ ^[0-9]+$ &&
+	"$reporting_routine_start_line" -lt "$reporting_routine_gateway_line" &&
+	"$reporting_routine_gateway_line" -lt "$reporting_routine_finish_line" ]] || {
+	echo 'Full deployment can strand canonical services on Reporting startup failure.' >&2
+	exit 1
+}
+unset reporting_start_function reporting_finish_function
+unset reporting_diagnostics_function reporting_routine_start_line
+unset reporting_routine_gateway_line reporting_routine_finish_line
 reporting_runtime_guard="$(
 	sed -n '/^verify_active_reporting_runtime()/,/^}/p' \
 		"$script_directory/deploy-production.sh"
