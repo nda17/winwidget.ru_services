@@ -17,7 +17,7 @@ validate_routine_database_restore_create_gate() {
 		return 0
 	fi
 	if LC_ALL=C grep -Fxq 'DATABASE_RESTORE_PRODUCTION_ENABLED=true' "$env_file"; then
-		echo 'Routine production deployment rejects DATABASE_RESTORE_PRODUCTION_ENABLED=true. Use a separate reviewed restore-control action; it is not implemented in this release.' >&2
+		echo 'Routine production deployment rejects DATABASE_RESTORE_PRODUCTION_ENABLED=true. Use the separate reviewed restore-control action.' >&2
 		return 1
 	fi
 

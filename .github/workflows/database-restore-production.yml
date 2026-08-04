@@ -1,0 +1,140 @@
+name: Database Restore Production Control
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Database restore target
+        required: true
+        type: choice
+        options:
+          - core
+          - notification-delivery
+          - campaigns
+          - reporting
+      evidence:
+        description: Reviewed rehearsal evidence reference containing exact SHA
+        required: true
+        type: string
+      incident:
+        description: Exact incident or approved change reference
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production-server
+  cancel-in-progress: false
+
+jobs:
+  database-restore-control:
+    if: github.ref == 'refs/heads/prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    steps:
+      - name: Configure SSH private key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
+
+      - name: Add VPS host to known_hosts
+        env:
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+        run: |
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run reviewed database restore control on VPS
+        env:
+          APP_ROOT: /opt/winwidget
+          DATABASE_RESTORE_EVIDENCE: ${{ inputs.evidence }}
+          DATABASE_RESTORE_INCIDENT: ${{ inputs.incident }}
+          DATABASE_RESTORE_TARGET: ${{ inputs.target }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+        run: |
+          case "$DATABASE_RESTORE_TARGET" in
+            core|notification-delivery|campaigns|reporting) ;;
+            *)
+              echo "Unsupported database restore target." >&2
+              exit 1
+              ;;
+          esac
+          node <<'NODE'
+          for (const name of [
+            "DATABASE_RESTORE_EVIDENCE",
+            "DATABASE_RESTORE_INCIDENT",
+          ]) {
+            const value = process.env[name];
+            if (
+              !value ||
+              value !== value.trim() ||
+              Buffer.byteLength(value, "utf8") > 512 ||
+              /[\u0000-\u001f\u007f]/.test(value)
+            ) {
+              throw new Error(`${name} must be a 1-512 byte exact reference`);
+            }
+          }
+          NODE
+          case "$DATABASE_RESTORE_EVIDENCE" in
+            *"$EXPECTED_REVISION"*) ;;
+            *)
+              echo "Evidence must pin the exact workflow revision." >&2
+              exit 1
+              ;;
+          esac
+
+          evidence_base64="$(
+            printf '%s' "$DATABASE_RESTORE_EVIDENCE" | base64 | tr -d '\n'
+          )"
+          incident_base64="$(
+            printf '%s' "$DATABASE_RESTORE_INCIDENT" | base64 | tr -d '\n'
+          )"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$EXPECTED_REVISION' DATABASE_RESTORE_TARGET='$DATABASE_RESTORE_TARGET' DATABASE_RESTORE_EVIDENCE_BASE64='$evidence_base64' DATABASE_RESTORE_INCIDENT_BASE64='$incident_base64' bash -s" <<'EOF'
+          set -euo pipefail
+          umask 077
+
+          decode_reference() {
+            local encoded="$1"
+            local decoded
+
+            decoded="$(printf '%s' "$encoded" | base64 --decode)" || {
+              echo "Database restore control reference is not valid Base64." >&2
+              return 1
+            }
+            [[ -n "$decoded" ]] || {
+              echo "Database restore control reference is empty." >&2
+              return 1
+            }
+            printf '%s' "$decoded"
+          }
+
+          DATABASE_RESTORE_EVIDENCE="$(
+            decode_reference "$DATABASE_RESTORE_EVIDENCE_BASE64"
+          )"
+          DATABASE_RESTORE_INCIDENT="$(
+            decode_reference "$DATABASE_RESTORE_INCIDENT_BASE64"
+          )"
+          unset DATABASE_RESTORE_EVIDENCE_BASE64 DATABASE_RESTORE_INCIDENT_BASE64
+
+          cd "$APP_ROOT/winwidget.ru_server"
+          APP_ROOT="$APP_ROOT" \
+            EXPECTED_REVISION="$EXPECTED_REVISION" \
+            DATABASE_RESTORE_TARGET="$DATABASE_RESTORE_TARGET" \
+            DATABASE_RESTORE_EVIDENCE="$DATABASE_RESTORE_EVIDENCE" \
+            DATABASE_RESTORE_INCIDENT="$DATABASE_RESTORE_INCIDENT" \
+            DATABASE_RESTORE_WAIT_SECONDS=600 \
+            bash scripts/database-restore-control.sh --run
+          EOF

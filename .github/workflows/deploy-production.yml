@@ -390,8 +390,10 @@ jobs:
 
       - name: Fast-check database restore worker rehearsal
         run: |
+          bash -n scripts/database-restore-control.sh
           bash -n scripts/database-restore-production-guard.sh
           bash -n scripts/test-database-restore-worker-rehearsal.sh
+          bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
           bash scripts/test-database-restore-worker-rehearsal.sh --self-test
           docker run --rm \
@@ -403,6 +405,7 @@ jobs:
             --workdir /repo \
             koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
             --severity=warning \
+            scripts/database-restore-control.sh \
             scripts/database-restore-production-guard.sh \
             scripts/test-database-restore-worker-rehearsal.sh
 
@@ -3959,7 +3962,7 @@ jobs:
               'validate_routine_database_restore_create_gate "$ENV_FILE" || exit 1',
             ) ||
             !deployScript.includes(
-              "Routine production deployment rejects DATABASE_RESTORE_PRODUCTION_ENABLED=true. Use a separate reviewed restore-control action; it is not implemented in this release.",
+              "Routine production deployment rejects DATABASE_RESTORE_PRODUCTION_ENABLED=true. Use the separate reviewed restore-control action.",
             ) ||
             deployScript.includes(
               "^DATABASE_RESTORE_PRODUCTION_ENABLED=(true|false)$",
@@ -4151,7 +4154,9 @@ jobs:
           bash -n scripts/test-reporting-production-scripts.sh
           bash -n scripts/database-restore-production-guard.sh
           bash -n scripts/test-database-restore-worker-rehearsal.sh
-          pnpm exec prettier --check .github/workflows/deploy-production.yml
+          pnpm exec prettier --check \
+            .github/workflows/database-restore-production.yml \
+            .github/workflows/deploy-production.yml
           bash scripts/deploy-production.sh --self-test-database-restore-create-gate
           bash scripts/campaigns-contract-migration-guard.sh --self-test
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test

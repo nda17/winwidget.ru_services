@@ -458,6 +458,7 @@ database_restore_guard_static_integration_self_test() {
 	script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 	server_root="$(cd -- "$script_directory/.." && pwd -P)"
 	scripts_with_mutation_guard=(
+		scripts/database-restore-control.sh
 		scripts/deploy-production.sh
 		scripts/deploy-maintenance-production.sh
 		scripts/deploy-notification-delivery-production.sh
