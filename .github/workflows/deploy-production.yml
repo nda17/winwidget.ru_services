@@ -4169,51 +4169,24 @@ jobs:
               "dailySummaryTime",
               "dailySummaryLastSent",
             ];
-            const readSourceTree = (directory, ignoredPaths = new Set()) =>
+            const readSourceTree = directory =>
               fs
                 .readdirSync(directory, { withFileTypes: true })
                 .flatMap(entry => {
                   const path = `${directory}/${entry.name}`;
-                  if (entry.isDirectory()) {
-                    return readSourceTree(path, ignoredPaths);
-                  }
-                  return entry.isFile() &&
-                    entry.name.endsWith(".ts") &&
-                    !ignoredPaths.has(path)
+                  if (entry.isDirectory()) return readSourceTree(path);
+                  return entry.isFile() && entry.name.endsWith(".ts")
                     ? [fs.readFileSync(path, "utf8")]
                     : [];
                 })
                 .join("\n");
-            // Core and Reporting have independent queues bound to the shared
-            // outcome route. Core validates and acknowledges the Reporting
-            // subtype without mutating Reporting state, so these exact
-            // boundary files may retain only the shared wire identifiers.
-            const reportingOutcomeBoundaryPaths = new Set([
-              "src/messaging/notification-delivery-event.ts",
-              "src/messaging/messaging-event-contract.ts",
-              "src/messaging/integration-delivery.service.ts",
-              "src/messaging/messaging-event-contract.spec.ts",
-              "src/messaging/integration-delivery.service.spec.ts",
-              "src/messaging/integration-worker.service.spec.ts",
-            ]);
-            const reportingOutcomeBoundaryTokens = new Set([
-              "daily-summary-delivery-telegram",
-              "daily-summary-job",
-            ]);
             const sourceText = [
               readSourceTree("src"),
               fs.readFileSync("prisma/schema.prisma", "utf8"),
             ].join("\n");
-            const sourceTextWithoutReportingOutcomeBoundary = [
-              readSourceTree("src", reportingOutcomeBoundaryPaths),
-              fs.readFileSync("prisma/schema.prisma", "utf8"),
-            ].join("\n");
-            const reintroducedToken = forbiddenTokens.find(token => {
-              const inspectedSource = reportingOutcomeBoundaryTokens.has(token)
-                ? sourceTextWithoutReportingOutcomeBoundary
-                : sourceText;
-              return inspectedSource.includes(token);
-            });
+            const reintroducedToken = forbiddenTokens.find(token =>
+              sourceText.includes(token),
+            );
             if (reintroducedToken) {
               throw new Error(
                 `Reporting post-cleanup source contains legacy token: ${reintroducedToken}`,

@@ -621,14 +621,14 @@ describe('messaging event contract', () => {
 		).not.toThrow();
 	});
 
-	it('accepts a Reporting daily summary delivery outcome', () => {
+	it('accepts a delivery outcome owned by another service', () => {
 		const payload = {
 			schemaVersion: 1,
 			eventType: 'notification.delivery.outcome.v1',
 			sourceEventId: '22222222-2222-4222-8222-222222222222',
-			sourceKind: 'daily-summary-delivery-telegram',
+			sourceKind: 'external-notification',
 			reference: {
-				type: 'daily-summary-job',
+				type: 'external-job',
 				id: '33333333-3333-4333-8333-333333333333'
 			},
 			status: 'DELIVERED',
@@ -648,24 +648,22 @@ describe('messaging event contract', () => {
 
 	it.each([
 		{
-			sourceKind: 'daily-summary-delivery-telegram',
+			sourceKind: 'external-notification',
 			reference: {
 				type: 'subscription-expiry-reminder',
 				id: 'reminder-1'
-			},
-			expectedType: 'daily-summary-job'
+			}
 		},
 		{
 			sourceKind: 'subscription-expiry-email',
 			reference: {
-				type: 'daily-summary-job',
+				type: 'external-job',
 				id: '33333333-3333-4333-8333-333333333333'
-			},
-			expectedType: 'subscription-expiry-reminder'
+			}
 		}
 	])(
 		'rejects a $sourceKind outcome with a mismatched reference',
-		({ sourceKind, reference, expectedType }) => {
+		({ sourceKind, reference }) => {
 			const payload = {
 				schemaVersion: 1,
 				eventType: 'notification.delivery.outcome.v1',
@@ -684,7 +682,7 @@ describe('messaging event contract', () => {
 					messageId: MESSAGE_ID,
 					kind: 'notification-delivery-outcome'
 				})
-			).toThrow(`payload.reference.type must be ${expectedType}`);
+			).toThrow('payload sourceKind and reference ownership do not match');
 		}
 	);
 

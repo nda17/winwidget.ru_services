@@ -210,7 +210,7 @@ describe('IntegrationDeliveryService', () => {
 		});
 	});
 
-	it('ignores a Reporting-owned daily summary delivery outcome', async () => {
+	it('ignores a delivery outcome owned by another service', async () => {
 		const { service, prisma } = createService();
 
 		await service.deliver(
@@ -219,9 +219,9 @@ describe('IntegrationDeliveryService', () => {
 				schemaVersion: 1,
 				eventType: 'notification.delivery.outcome.v1',
 				sourceEventId: eventId,
-				sourceKind: 'daily-summary-delivery-telegram',
+				sourceKind: 'external-notification',
 				reference: {
-					type: 'daily-summary-job',
+					type: 'external-job',
 					id: '44444444-4444-4444-8444-444444444444'
 				},
 				status: 'DELIVERED',

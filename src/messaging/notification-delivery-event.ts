@@ -1,28 +1,28 @@
 import {
 	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
+	NotificationDeliveryKind,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE
 } from '@/messaging/messaging.constants';
 import { Prisma } from '@prisma/client';
 
 export const OUTCOME_NOTIFICATION_DELIVERY_KINDS = [
-	'daily-summary-delivery-telegram',
 	'subscription-expiry-email',
 	'subscription-expiry-telegram'
-] as const;
+] as const satisfies readonly NotificationDeliveryKind[];
 
 export type OutcomeNotificationDeliveryKind =
 	(typeof OUTCOME_NOTIFICATION_DELIVERY_KINDS)[number];
 
-export type NotificationDeliveryReference =
-	| {
-			type: 'daily-summary-job';
-			id: string;
-	  }
-	| {
-			type: 'subscription-expiry-reminder';
-			id: string;
-	  };
+export interface SubscriptionExpiryNotificationReference {
+	type: 'subscription-expiry-reminder';
+	id: string;
+}
+
+export interface NotificationDeliveryReference {
+	type: string;
+	id: string;
+}
 
 interface SubscriptionExpiryNotificationContent {
 	daysBeforeExpiry: number;
@@ -33,10 +33,7 @@ interface SubscriptionExpiryNotificationContent {
 export interface SubscriptionExpiryEmailNotificationRequestedEventPayload {
 	schemaVersion: 1;
 	eventType: typeof SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE;
-	reference: Extract<
-		NotificationDeliveryReference,
-		{ type: 'subscription-expiry-reminder' }
-	>;
+	reference: SubscriptionExpiryNotificationReference;
 	destination: {
 		email: string;
 	};
@@ -46,10 +43,7 @@ export interface SubscriptionExpiryEmailNotificationRequestedEventPayload {
 export interface SubscriptionExpiryTelegramNotificationRequestedEventPayload {
 	schemaVersion: 1;
 	eventType: typeof SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE;
-	reference: Extract<
-		NotificationDeliveryReference,
-		{ type: 'subscription-expiry-reminder' }
-	>;
+	reference: SubscriptionExpiryNotificationReference;
 	destination: {
 		telegramChatId: string;
 	};
@@ -64,7 +58,7 @@ export interface NotificationDeliveryOutcomeEventPayload {
 	schemaVersion: 1;
 	eventType: typeof NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
 	sourceEventId: string;
-	sourceKind: OutcomeNotificationDeliveryKind;
+	sourceKind: string;
 	reference: NotificationDeliveryReference;
 	status: 'DELIVERED' | 'FAILED';
 	failure: {

@@ -159,16 +159,16 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
-	const createDailySummaryOutcomeMessage = (): ConsumeMessage =>
+	const createExternalOutcomeMessage = (): ConsumeMessage =>
 		({
 			content: Buffer.from(
 				JSON.stringify({
 					schemaVersion: 1,
 					eventType: 'notification.delivery.outcome.v1',
 					sourceEventId: '22222222-2222-4222-8222-222222222222',
-					sourceKind: 'daily-summary-delivery-telegram',
+					sourceKind: 'external-notification',
 					reference: {
-						type: 'daily-summary-job',
+						type: 'external-job',
 						id: '33333333-3333-4333-8333-333333333333'
 					},
 					status: 'DELIVERED',
@@ -743,9 +743,9 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
-	it('acknowledges a Reporting daily summary outcome without dead-lettering it', async () => {
+	it('acknowledges an external outcome without dead-lettering it', async () => {
 		const { service, rabbitMq, delivery, prisma } = createService();
-		const message = createDailySummaryOutcomeMessage();
+		const message = createExternalOutcomeMessage();
 
 		await (service as any).handle(
 			'notification-delivery-outcome',
@@ -755,9 +755,9 @@ describe('IntegrationWorkerService', () => {
 		expect(delivery.deliver).toHaveBeenCalledWith(
 			'notification-delivery-outcome',
 			expect.objectContaining({
-				sourceKind: 'daily-summary-delivery-telegram',
+				sourceKind: 'external-notification',
 				reference: {
-					type: 'daily-summary-job',
+					type: 'external-job',
 					id: '33333333-3333-4333-8333-333333333333'
 				}
 			}),
