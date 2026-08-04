@@ -85,6 +85,10 @@ reporting_diagnostics_function="$(
 	sed -n '/^show_reporting_startup_diagnostics()/,/^}/p' \
 		"$script_directory/deploy-production.sh"
 )"
+reporting_outcome_cutover_function="$(
+	sed -n '/^prepare_reporting_outcome_route_cutover_after_stop()/,/^}/p' \
+		"$script_directory/deploy-production.sh"
+)"
 reporting_routine_start_line="$(
 	grep -n 'if ! start_canonical_reporting_runtime "Reporting"; then' \
 		"$script_directory/deploy-production.sh" | cut -d: -f1
@@ -104,6 +108,9 @@ reporting_routine_finish_line="$(
 	"$reporting_finish_function" == *'provision_reporting_rabbitmq_topic_permissions "$reporting_user" steady'* &&
 	"$reporting_diagnostics_function" == *'compose_target ps reporting-service rabbitmq'* &&
 	"$reporting_diagnostics_function" == *'compose_target logs --tail=200 reporting-service'* &&
+	"$reporting_outcome_cutover_function" == *'"$reporting_interrupted_routine_recovery" != '* &&
+	"$reporting_outcome_cutover_function" == *'reporting_outcome_route_queues_are_empty true'* &&
+	"$reporting_outcome_cutover_function" == *'"$queue" --if-empty --if-unused'* &&
 	"$deploy_entrypoint_text" == *'detect_interrupted_reporting_outcome_deploy'* &&
 	"$deploy_entrypoint_text" == *'reporting_interrupted_routine_recovery=true'* &&
 	"$reporting_routine_start_line" =~ ^[0-9]+$ &&
@@ -115,7 +122,8 @@ reporting_routine_finish_line="$(
 	exit 1
 }
 unset reporting_start_function reporting_finish_function
-unset reporting_diagnostics_function reporting_routine_start_line
+unset reporting_diagnostics_function reporting_outcome_cutover_function
+unset reporting_routine_start_line
 unset reporting_routine_gateway_line reporting_routine_finish_line
 reporting_runtime_guard="$(
 	sed -n '/^verify_active_reporting_runtime()/,/^}/p' \

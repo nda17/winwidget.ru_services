@@ -1299,7 +1299,8 @@ prepare_reporting_outcome_route_cutover_after_stop() {
 	local topology_state rabbitmq_container_id queue
 
 	topology_state="$(reporting_outcome_route_topology_state)" || return 1
-	if [[ "$topology_state" == 'steady' ]]; then
+	if [[ "$topology_state" == 'steady' &&
+		"$reporting_interrupted_routine_recovery" != 'true' ]]; then
 		return 0
 	fi
 	reporting_outcome_route_is_drained || return 1
@@ -1355,7 +1356,7 @@ const amqp = require("amqplib");
 		echo "Reporting outcome route did not reach a forward-safe state: $topology_state." >&2
 		return 1
 	}
-	echo 'Old Reporting outcome binding and immutable retry topology were retired.'
+	echo 'Reporting outcome route and immutable retry topology converged.'
 }
 
 routine_stop_services=(
