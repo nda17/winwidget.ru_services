@@ -49,6 +49,7 @@ import { WidgetsPrismaService } from './prisma/widgets-prisma.service';
 import { WidgetsProjectionService } from './projections/widgets-projection.service';
 import { WidgetsQuotaService } from './quota/widgets-quota.service';
 import { WidgetsReportingSequenceService } from './reporting/widgets-reporting-sequence.service';
+import { WidgetsRetentionService } from './retention/widgets-retention.service';
 import { WidgetsRuntimeModule } from './runtime/widgets-runtime.module';
 import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 
@@ -99,6 +100,7 @@ import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 		WidgetsAdminMonitoringService,
 		WidgetsTelemetryService,
 		WidgetsHeartbeatService,
+		WidgetsRetentionService,
 		WidgetsHealthService
 	]
 })

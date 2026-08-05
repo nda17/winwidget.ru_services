@@ -4,6 +4,7 @@ import { WidgetsOutboxPublisherService } from '../messaging/widgets-outbox-publi
 import { WidgetsProjectionWorkerService } from '../messaging/widgets-projection-worker.service';
 import { WidgetsRabbitMqService } from '../messaging/widgets-rabbitmq.service';
 import { WidgetsPrismaService } from '../prisma/widgets-prisma.service';
+import { WidgetsRetentionService } from '../retention/widgets-retention.service';
 import { WidgetsRuntimeService } from '../runtime/widgets-runtime.service';
 
 @Injectable()
@@ -14,7 +15,8 @@ export class WidgetsHealthService {
 		private readonly rabbit: WidgetsRabbitMqService,
 		private readonly projections: WidgetsProjectionWorkerService,
 		private readonly integrations: WidgetsIntegrationWorkerService,
-		private readonly outbox: WidgetsOutboxPublisherService
+		private readonly outbox: WidgetsOutboxPublisherService,
+		private readonly retention: WidgetsRetentionService
 	) {}
 
 	liveness() {
@@ -59,7 +61,8 @@ export class WidgetsHealthService {
 			status,
 			service: 'widgets',
 			role: this.runtime.role,
-			revision: process.env.APP_REVISION || 'unknown'
+			revision: process.env.APP_REVISION || 'unknown',
+			retention: this.retention.status()
 		};
 	}
 }

@@ -34,14 +34,10 @@ import {
 	expiredWidgetsRetryClassification,
 	WidgetsIntegrationErrorClassification
 } from './widgets-integration-error-classifier';
-import {
-	cleanupTerminalWidgetsCredentialSnapshots,
-	deleteTerminalWidgetsCredentialSnapshot
-} from './widgets-credential-snapshot-lifecycle';
+import { deleteTerminalWidgetsCredentialSnapshot } from './widgets-credential-snapshot-lifecycle';
 
 const LEASE_MS = 5 * 60_000;
 const AUTOMATIC_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
-const SNAPSHOT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 class InvalidWidgetsIntegrationMessageError extends Error {}
 type Claim =
 	| { state: 'claimed'; token: string }
@@ -57,7 +53,6 @@ export class WidgetsIntegrationWorkerService
 	);
 	private readonly workerId = `${hostname()}:${process.pid}:${randomUUID()}`;
 	private readonly active = new Set<Promise<void>>();
-	private cleanupTimer: NodeJS.Timeout | null = null;
 	private ready = false;
 	private stopping = false;
 
@@ -72,7 +67,6 @@ export class WidgetsIntegrationWorkerService
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
 		this.maxMessageBytes();
-		this.snapshotRetentionDays();
 		for (const kind of WIDGETS_PROVIDER_KINDS) {
 			await this.rabbit.consume(
 				kind,
@@ -80,12 +74,6 @@ export class WidgetsIntegrationWorkerService
 				this.prefetch()
 			);
 		}
-		void this.track(this.runSnapshotCleanup());
-		this.cleanupTimer = setInterval(
-			() => void this.track(this.runSnapshotCleanup()),
-			SNAPSHOT_CLEANUP_INTERVAL_MS
-		);
-		this.cleanupTimer.unref();
 		this.ready = true;
 	}
 	isReady(): boolean {
@@ -94,7 +82,6 @@ export class WidgetsIntegrationWorkerService
 	async beforeApplicationShutdown(): Promise<void> {
 		this.ready = false;
 		this.stopping = true;
-		if (this.cleanupTimer) clearInterval(this.cleanupTimer);
 		if (this.active.size)
 			await Promise.race([
 				Promise.allSettled([...this.active]),
@@ -571,7 +558,8 @@ export class WidgetsIntegrationWorkerService
 						resolvedAt: null,
 						resolution: null,
 						resolutionComment: null,
-						resolvedById: null
+						resolvedById: null,
+						detailsPurgedAt: null
 					}
 				});
 		});
@@ -694,31 +682,6 @@ export class WidgetsIntegrationWorkerService
 		return value;
 	}
 
-	private async runSnapshotCleanup(): Promise<void> {
-		if (this.stopping) return;
-		try {
-			const cutoff = new Date(
-				Date.now() - this.snapshotRetentionDays() * 24 * 60 * 60 * 1000
-			);
-			const removed = await cleanupTerminalWidgetsCredentialSnapshots(
-				this.prisma,
-				{
-					cutoff,
-					batchSize: 100
-				}
-			);
-			if (removed) {
-				this.logger.log(
-					`Removed terminal Widgets credential snapshots count=${removed}`
-				);
-			}
-		} catch (error) {
-			this.logger.warn(
-				`Widgets credential snapshot cleanup failed: ${this.error(error)}`
-			);
-		}
-	}
-
 	private canonical(value: unknown): string {
 		if (value === null || typeof value !== 'object')
 			return JSON.stringify(value);
@@ -771,16 +734,6 @@ export class WidgetsIntegrationWorkerService
 		)
 			throw new Error(
 				'RABBITMQ_MAX_MESSAGE_BYTES must be between 1024 and 10485760'
-			);
-		return value;
-	}
-	private snapshotRetentionDays(): number {
-		const value = Number(
-			this.config.get<string>('WIDGETS_RECEIPT_RETENTION_DAYS') || 90
-		);
-		if (!Number.isInteger(value) || value < 1 || value > 3650)
-			throw new Error(
-				'WIDGETS_RECEIPT_RETENTION_DAYS must be between 1 and 3650'
 			);
 		return value;
 	}

@@ -2455,6 +2455,7 @@ jobs:
           test -n "$widgets_browser_executable"
           WIDGETS_TEST_DATABASE_URL="$WIDGETS_DATABASE_URL" \
             WIDGETS_INTEGRATION_ALLOW_MUTATION=true \
+            WIDGETS_INTEGRATION_ALLOW_PURGE=true \
             WIDGETS_BROWSER_EXECUTABLE="$widgets_browser_executable" \
             pnpm --dir apps/widgets run test:integration
 

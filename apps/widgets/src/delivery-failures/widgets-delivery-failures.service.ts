@@ -335,6 +335,8 @@ export class WidgetsDeliveryFailuresService {
 			});
 		if (!failure)
 			throw new NotFoundException('Ошибка доставки не найдена');
+		if (failure.resolvedAt)
+			throw new ConflictException('Ошибка уже обработана');
 		const kind = this.kind(failure.integration);
 		let event: ReturnType<WidgetsIntegrationDeliveryService['parse']>;
 		try {
@@ -399,6 +401,7 @@ export class WidgetsDeliveryFailuresService {
 	}
 
 	private serialize(item: IntegrationDeliveryFailure) {
+		const detailsPurged = Boolean(item.detailsPurgedAt);
 		const payload = asJsonObject(item.payload);
 		const lead = asJsonObject(payload.lead);
 		return {
@@ -409,15 +412,16 @@ export class WidgetsDeliveryFailuresService {
 			lastError: item.lastError,
 			category: item.category,
 			normalizedCode: item.normalizedCode,
-			safeReason: item.safeReason,
+			safeReason: detailsPurged ? null : item.safeReason,
 			httpStatus: item.httpStatus,
-			providerCode: item.providerCode,
+			providerCode: detailsPurged ? null : item.providerCode,
 			retryable: item.retryable,
 			failedAt: item.failedAt.toISOString(),
 			retryingAt: item.retryingAt?.toISOString() || null,
 			resolvedAt: item.resolvedAt?.toISOString() || null,
+			detailsPurgedAt: item.detailsPurgedAt?.toISOString() || null,
 			resolution: item.resolution,
-			resolutionComment: item.resolutionComment,
+			resolutionComment: detailsPurged ? null : item.resolutionComment,
 			source: typeof payload.source === 'string' ? payload.source : null,
 			entity: asJsonObject(payload.entity),
 			lead: {

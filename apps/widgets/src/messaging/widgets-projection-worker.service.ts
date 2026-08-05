@@ -422,7 +422,8 @@ export class WidgetsProjectionWorkerService
 						retryRequestedById: null,
 						retryToken: null,
 						retryLeaseExpiresAt: null,
-						resolvedAt: null
+						resolvedAt: null,
+						detailsPurgedAt: null
 					}
 				});
 		});

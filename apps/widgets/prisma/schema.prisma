@@ -11,22 +11,22 @@ datasource db {
 }
 
 model Widget {
-  id                         String   @id @default(cuid())
-  userId                     String   @map("user_id")
-  publicKey                  String   @unique @map("public_key")
-  name                       String   @default("Виджет")
-  isActive                   Boolean  @default(true) @map("is_active")
-  installDomain              String   @default("") @map("install_domain")
-  config                     Json     @default("{}")
-  draftConfig                Json?    @map("draft_config")
-  draftInstallDomain         String?  @map("draft_install_domain")
-  draftRevision              Int      @default(0) @map("draft_revision")
-  publishedVersion           Int      @default(0) @map("published_version")
-  publishedFromDraftRevision Int      @default(0) @map("published_from_draft_revision")
+  id                         String    @id @default(cuid())
+  userId                     String    @map("user_id")
+  publicKey                  String    @unique @map("public_key")
+  name                       String    @default("Виджет")
+  isActive                   Boolean   @default(true) @map("is_active")
+  installDomain              String    @default("") @map("install_domain")
+  config                     Json      @default("{}")
+  draftConfig                Json?     @map("draft_config")
+  draftInstallDomain         String?   @map("draft_install_domain")
+  draftRevision              Int       @default(0) @map("draft_revision")
+  publishedVersion           Int       @default(0) @map("published_version")
+  publishedFromDraftRevision Int       @default(0) @map("published_from_draft_revision")
   publishedAt                DateTime? @map("published_at")
   leads                      Lead[]
-  createdAt                  DateTime @default(now()) @map("created_at")
-  updatedAt                  DateTime @updatedAt @map("updated_at")
+  createdAt                  DateTime  @default(now()) @map("created_at")
+  updatedAt                  DateTime  @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("widgets")
@@ -46,10 +46,10 @@ model Callback {
   draftRevision              Int            @default(0) @map("draft_revision")
   publishedVersion           Int            @default(0) @map("published_version")
   publishedFromDraftRevision Int            @default(0) @map("published_from_draft_revision")
-  publishedAt                DateTime?       @map("published_at")
+  publishedAt                DateTime?      @map("published_at")
   leads                      CallbackLead[]
-  createdAt                  DateTime        @default(now()) @map("created_at")
-  updatedAt                  DateTime        @updatedAt @map("updated_at")
+  createdAt                  DateTime       @default(now()) @map("created_at")
+  updatedAt                  DateTime       @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("callbacks")
@@ -213,8 +213,8 @@ model Calculator {
   publishedFromDraftRevision Int              @default(0) @map("published_from_draft_revision")
   publishedAt                DateTime?        @map("published_at")
   leads                      CalculatorLead[]
-  createdAt                  DateTime          @default(now()) @map("created_at")
-  updatedAt                  DateTime          @updatedAt @map("updated_at")
+  createdAt                  DateTime         @default(now()) @map("created_at")
+  updatedAt                  DateTime         @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("calculators")
@@ -418,20 +418,20 @@ model WidgetUsageCounter {
 }
 
 model WidgetUsageLedgerEntry {
-  id                String         @id @default(uuid()) @db.Uuid
-  userId            String         @map("user_id")
-  kind              UsageKind
-  operation         UsageOperation
-  delta             Int
-  counterAfter      Int            @map("counter_after")
-  periodKey         String?        @map("period_key")
-  aggregateType     String?        @map("aggregate_type")
-  aggregateId       String?        @map("aggregate_id")
-  idempotencyKey    String         @unique(map: "usage_ledger_idempotency_unique") @map("idempotency_key")
-  entitlementVersion BigInt        @map("entitlement_version")
-  correlationId     String?        @map("correlation_id")
-  occurredAt        DateTime       @default(now()) @map("occurred_at")
-  createdAt         DateTime       @default(now()) @map("created_at")
+  id                 String         @id @default(uuid()) @db.Uuid
+  userId             String         @map("user_id")
+  kind               UsageKind
+  operation          UsageOperation
+  delta              Int
+  counterAfter       Int            @map("counter_after")
+  periodKey          String?        @map("period_key")
+  aggregateType      String?        @map("aggregate_type")
+  aggregateId        String?        @map("aggregate_id")
+  idempotencyKey     String         @unique(map: "usage_ledger_idempotency_unique") @map("idempotency_key")
+  entitlementVersion BigInt         @map("entitlement_version")
+  correlationId      String?        @map("correlation_id")
+  occurredAt         DateTime       @default(now()) @map("occurred_at")
+  createdAt          DateTime       @default(now()) @map("created_at")
 
   @@index([userId, kind, occurredAt], map: "usage_ledger_user_kind_occurred_idx")
   @@index([aggregateType, aggregateId], map: "usage_ledger_aggregate_idx")
@@ -440,16 +440,16 @@ model WidgetUsageLedgerEntry {
 }
 
 model WidgetOwnerProjection {
-  userId            String      @id @map("user_id")
-  status            OwnerStatus
-  deletedAt         DateTime?   @map("deleted_at")
-  tombstoned        Boolean     @default(false)
-  aggregateVersion  BigInt      @map("aggregate_version")
-  sourceSequence    BigInt      @map("source_sequence")
-  sourceOccurredAt  DateTime    @map("source_occurred_at")
-  appliedAt         DateTime    @default(now()) @map("applied_at")
-  createdAt         DateTime    @default(now()) @map("created_at")
-  updatedAt         DateTime    @updatedAt @map("updated_at")
+  userId           String      @id @map("user_id")
+  status           OwnerStatus
+  deletedAt        DateTime?   @map("deleted_at")
+  tombstoned       Boolean     @default(false)
+  aggregateVersion BigInt      @map("aggregate_version")
+  sourceSequence   BigInt      @map("source_sequence")
+  sourceOccurredAt DateTime    @map("source_occurred_at")
+  appliedAt        DateTime    @default(now()) @map("applied_at")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
 
   @@index([status], map: "owner_projections_status_idx")
   @@index([sourceSequence], map: "owner_projections_source_sequence_idx")
@@ -483,89 +483,94 @@ model WidgetSourceSequence {
 }
 
 model WidgetsOutboxEvent {
-  id               String              @id @default(uuid()) @db.Uuid
-  messageId        String              @default(uuid()) @map("message_id") @db.Uuid
-  deduplicationKey String?             @unique(map: "outbox_events_deduplication_unique") @map("deduplication_key")
+  id               String                @id @default(uuid()) @db.Uuid
+  messageId        String                @default(uuid()) @map("message_id") @db.Uuid
+  deduplicationKey String?               @unique(map: "outbox_events_deduplication_unique") @map("deduplication_key")
   exchange         WidgetsOutboxExchange @default(EVENTS)
-  eventType        String              @map("event_type")
-  routingKey       String              @map("routing_key")
+  eventType        String                @map("event_type")
+  routingKey       String                @map("routing_key")
   payload          Json
-  headers          Json                @default("{}")
-  aggregateType    String?             @map("aggregate_type")
-  aggregateId      String?             @map("aggregate_id")
-  aggregateVersion BigInt?             @map("aggregate_version")
-  sourceSequence   BigInt?             @map("source_sequence")
-  status           WidgetsOutboxStatus @default(PENDING)
-  attempts         Int                 @default(0)
-  availableAt      DateTime            @default(now()) @map("available_at")
-  lockedAt         DateTime?           @map("locked_at")
-  lockedBy         String?             @map("locked_by")
-  lockToken        String?             @map("lock_token") @db.Uuid
-  leaseExpiresAt   DateTime?           @map("lease_expires_at")
-  publishedAt      DateTime?           @map("published_at")
-  lastError        String?             @map("last_error") @db.Text
-  createdAt        DateTime            @default(now()) @map("created_at")
-  updatedAt        DateTime            @updatedAt @map("updated_at")
+  headers          Json                  @default("{}")
+  aggregateType    String?               @map("aggregate_type")
+  aggregateId      String?               @map("aggregate_id")
+  aggregateVersion BigInt?               @map("aggregate_version")
+  sourceSequence   BigInt?               @map("source_sequence")
+  status           WidgetsOutboxStatus   @default(PENDING)
+  attempts         Int                   @default(0)
+  availableAt      DateTime              @default(now()) @map("available_at")
+  lockedAt         DateTime?             @map("locked_at")
+  lockedBy         String?               @map("locked_by")
+  lockToken        String?               @map("lock_token") @db.Uuid
+  leaseExpiresAt   DateTime?             @map("lease_expires_at")
+  publishedAt      DateTime?             @map("published_at")
+  lastError        String?               @map("last_error") @db.Text
+  createdAt        DateTime              @default(now()) @map("created_at")
+  updatedAt        DateTime              @updatedAt @map("updated_at")
 
   @@index([status, availableAt, createdAt], map: "outbox_events_dispatch_idx")
   @@index([status, leaseExpiresAt], map: "outbox_events_lease_idx")
   @@index([messageId], map: "outbox_events_message_idx")
   @@index([aggregateType, aggregateId, aggregateVersion], map: "outbox_events_aggregate_idx")
   @@index([sourceSequence], map: "outbox_events_source_sequence_idx")
+  @@index([status, publishedAt, id], map: "outbox_events_retention_idx")
   @@map("outbox_events")
   @@schema("widgets")
 }
 
 model WidgetsConsumerReceipt {
-  id             String                       @id @default(uuid()) @db.Uuid
-  eventId        String                       @map("event_id") @db.Uuid
-  consumer       String
-  payloadHash    String                       @map("payload_hash") @db.Char(64)
-  status         WidgetsConsumerReceiptStatus
-  lockedAt       DateTime?                    @map("locked_at")
-  lockedBy       String?                      @map("locked_by")
-  lockToken      String?                      @map("lock_token") @db.Uuid
-  leaseExpiresAt DateTime?                    @map("lease_expires_at")
-  retryAttempt   Int?                         @map("retry_attempt")
-  retryCycle     Int                          @default(0) @map("retry_cycle")
-  deliveredAt    DateTime?                    @map("delivered_at")
-  lastError      String?                      @map("last_error") @db.Text
-  createdAt      DateTime                     @default(now()) @map("created_at")
-  updatedAt      DateTime                     @updatedAt @map("updated_at")
+  id              String                       @id @default(uuid()) @db.Uuid
+  eventId         String                       @map("event_id") @db.Uuid
+  consumer        String
+  payloadHash     String                       @map("payload_hash") @db.Char(64)
+  status          WidgetsConsumerReceiptStatus
+  lockedAt        DateTime?                    @map("locked_at")
+  lockedBy        String?                      @map("locked_by")
+  lockToken       String?                      @map("lock_token") @db.Uuid
+  leaseExpiresAt  DateTime?                    @map("lease_expires_at")
+  retryAttempt    Int?                         @map("retry_attempt")
+  retryCycle      Int                          @default(0) @map("retry_cycle")
+  deliveredAt     DateTime?                    @map("delivered_at")
+  lastError       String?                      @map("last_error") @db.Text
+  detailsPurgedAt DateTime?                    @map("details_purged_at")
+  createdAt       DateTime                     @default(now()) @map("created_at")
+  updatedAt       DateTime                     @updatedAt @map("updated_at")
 
   @@unique([eventId, consumer], map: "consumer_receipts_event_consumer_unique")
   @@index([status, leaseExpiresAt], map: "consumer_receipts_lease_idx")
   @@index([consumer, deliveredAt], map: "consumer_receipts_consumer_delivered_idx")
+  @@index([status, detailsPurgedAt, deliveredAt, id], map: "consumer_receipts_retention_idx")
   @@map("consumer_receipts")
   @@schema("widgets")
 }
 
 model WidgetsConsumerFailure {
-  id                 String                       @id @default(uuid()) @db.Uuid
-  eventId            String                       @map("event_id") @db.Uuid
-  consumer           String
-  eventType          String                       @map("event_type")
-  routingKey         String                       @map("routing_key")
-  payload            Json
-  headers            Json                         @default("{}")
-  payloadHash        String                       @map("payload_hash") @db.Char(64)
-  correlationId      String                       @map("correlation_id")
-  status             WidgetsConsumerFailureStatus @default(OPEN)
-  manualRetryCount   Int                          @default(0) @map("manual_retry_count")
-  lastError          String                       @map("last_error") @db.Text
-  lastFailedAt       DateTime                     @default(now()) @map("last_failed_at")
-  retryRequestedAt   DateTime?                    @map("retry_requested_at")
-  retryRequestedById String?                      @map("retry_requested_by_id")
-  retryToken         String?                      @map("retry_token") @db.Uuid
-  retryLeaseExpiresAt DateTime?                   @map("retry_lease_expires_at")
-  resolvedAt         DateTime?                    @map("resolved_at")
-  createdAt          DateTime                     @default(now()) @map("created_at")
-  updatedAt          DateTime                     @updatedAt @map("updated_at")
+  id                  String                       @id @default(uuid()) @db.Uuid
+  eventId             String                       @map("event_id") @db.Uuid
+  consumer            String
+  eventType           String                       @map("event_type")
+  routingKey          String                       @map("routing_key")
+  payload             Json
+  headers             Json                         @default("{}")
+  payloadHash         String                       @map("payload_hash") @db.Char(64)
+  correlationId       String                       @map("correlation_id")
+  status              WidgetsConsumerFailureStatus @default(OPEN)
+  manualRetryCount    Int                          @default(0) @map("manual_retry_count")
+  lastError           String                       @map("last_error") @db.Text
+  lastFailedAt        DateTime                     @default(now()) @map("last_failed_at")
+  retryRequestedAt    DateTime?                    @map("retry_requested_at")
+  retryRequestedById  String?                      @map("retry_requested_by_id")
+  retryToken          String?                      @map("retry_token") @db.Uuid
+  retryLeaseExpiresAt DateTime?                    @map("retry_lease_expires_at")
+  resolvedAt          DateTime?                    @map("resolved_at")
+  detailsPurgedAt     DateTime?                    @map("details_purged_at")
+  createdAt           DateTime                     @default(now()) @map("created_at")
+  updatedAt           DateTime                     @updatedAt @map("updated_at")
 
   @@unique([eventId, consumer], map: "consumer_failures_event_consumer_unique")
   @@index([status, lastFailedAt], map: "consumer_failures_status_failed_idx")
   @@index([status, retryLeaseExpiresAt], map: "consumer_failures_retry_lease_idx")
   @@index([retryRequestedById], map: "consumer_failures_retry_actor_idx")
+  @@index([status, detailsPurgedAt, resolvedAt, id], map: "consumer_failures_retention_idx")
   @@map("consumer_failures")
   @@schema("widgets")
 }
@@ -604,6 +609,7 @@ model IntegrationDeliveryReceipt {
   retryAvailableAt DateTime?                        @map("retry_available_at")
   retryToken       String?                          @map("retry_token") @db.Uuid
   lastError        String?                          @map("last_error") @db.Text
+  detailsPurgedAt  DateTime?                        @map("details_purged_at")
   createdAt        DateTime                         @default(now()) @map("created_at")
   updatedAt        DateTime                         @updatedAt @map("updated_at")
 
@@ -611,6 +617,10 @@ model IntegrationDeliveryReceipt {
   @@index([status, leaseExpiresAt], map: "integration_delivery_receipts_lease_idx")
   @@index([status, retryAvailableAt], map: "integration_delivery_receipts_retry_idx")
   @@index([integration, deliveredAt], map: "integration_delivery_receipts_integration_delivered_idx")
+  @@index([status, detailsPurgedAt, deliveredAt, id], map: "integration_delivery_receipts_delivered_retention_idx")
+  @@index([status, detailsPurgedAt, updatedAt, id], map: "integration_delivery_receipts_closed_retention_idx")
+  @@index([status, deliveredAt, id], map: "integration_delivery_receipts_snapshot_delivered_retention_idx")
+  @@index([status, updatedAt, id], map: "integration_delivery_receipts_snapshot_closed_retention_idx")
   @@map("integration_delivery_receipts")
   @@schema("widgets")
 }
@@ -641,6 +651,7 @@ model IntegrationDeliveryFailure {
   resolution            IntegrationFailureResolution?
   resolutionComment     String?                       @map("resolution_comment") @db.Text
   resolvedById          String?                       @map("resolved_by_id")
+  detailsPurgedAt       DateTime?                     @map("details_purged_at")
   createdAt             DateTime                      @default(now()) @map("created_at")
   updatedAt             DateTime                      @updatedAt @map("updated_at")
 
@@ -650,6 +661,7 @@ model IntegrationDeliveryFailure {
   @@index([category, resolvedAt, failedAt], map: "integration_delivery_failures_category_idx")
   @@index([retryLeaseExpiresAt], map: "integration_delivery_failures_retry_lease_idx")
   @@index([resolvedById], map: "integration_delivery_failures_resolver_idx")
+  @@index([detailsPurgedAt, resolvedAt, id], map: "integration_delivery_failures_retention_idx")
   @@map("integration_delivery_failures")
   @@schema("widgets")
 }
