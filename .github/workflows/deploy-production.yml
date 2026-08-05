@@ -88,6 +88,7 @@ jobs:
             --workdir /repo \
             rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
             -shellcheck=
+          printf 'widgets_actionlint=passed\n'
           docker run --rm \
             --network none \
             --read-only \
@@ -101,18 +102,29 @@ jobs:
             scripts/deploy-widgets-production.sh \
             scripts/widgets-cutover-production.sh \
             scripts/test-widgets-cutover-rehearsal.sh
+          printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
             local command="$1" flag="$2"
-            docker compose "$command" --help | grep -F -- "$flag" > /dev/null
+            if ! docker compose "$command" --help | grep -F -- "$flag" > /dev/null; then
+              printf 'Missing required Docker Compose flag: %s %s\n' \
+                "$command" "$flag" >&2
+              docker compose version >&2
+              return 1
+            fi
           }
-          docker compose --help | grep -F -- '--profile' > /dev/null
-          require_compose_flag build --provenance
+          docker compose version
+          if ! docker compose --help | grep -F -- '--profile' > /dev/null; then
+            echo 'Missing required Docker Compose root flag: --profile' >&2
+            docker compose version >&2
+            exit 1
+          fi
           require_compose_flag config --quiet
           require_compose_flag ps --status
           require_compose_flag run --no-deps
           require_compose_flag up --force-recreate
           require_compose_flag up --no-build
+          printf 'widgets_compose_capabilities=passed\n'
           docker compose \
             --profile migration \
             --profile notification-delivery-migration \
@@ -125,10 +137,20 @@ jobs:
             --profile widgets-database \
             --env-file .env.example \
             -f deploy/docker-compose.prod.yml config --quiet
+          printf 'widgets_compose_config=passed\n'
 
           available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
-          [[ "$available_kib" =~ ^[0-9]+$ ]] &&
-            ((available_kib >= 10 * 1024 * 1024))
+          required_kib="$((10 * 1024 * 1024))"
+          if ! [[ "$available_kib" =~ ^[0-9]+$ ]]; then
+            echo 'Unable to determine preflight runner free disk space.' >&2
+            exit 1
+          fi
+          if ((available_kib < required_kib)); then
+            printf 'Insufficient preflight runner disk: available_kib=%s required_kib=%s\n' \
+              "$available_kib" "$required_kib" >&2
+            exit 1
+          fi
+          printf 'widgets_preflight_disk_kib=%s\n' "$available_kib"
           for port in 5432 5672 15672 55432 55433 55435 55436; do
             if ss -H -ltn "sport = :$port" | grep -q .; then
               echo "Preflight runner port is already occupied: $port" >&2
@@ -210,6 +232,12 @@ jobs:
             echo "Lifecycle preflight requires a trusted clean prod checkout." >&2
             exit 1
           }
+          if ! docker compose build --help | grep -F -- '--provenance' > /dev/null; then
+            echo 'Production Docker Compose lacks required build --provenance support.' >&2
+            docker compose version >&2
+            exit 1
+          fi
+          echo 'Production Docker Compose provenance capability passed.'
 
           production_env="$APP_ROOT/deploy/backend/.env.production"
           [[ -f "$production_env" && ! -L "$production_env" &&
@@ -4573,7 +4601,7 @@ jobs:
           requireCount("checkout_verified_prod_revision() {", 1);
           requireCount(
             'git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||',
-            4,
+            6,
           );
           requireCount(
             'git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true',
@@ -4588,7 +4616,7 @@ jobs:
           requireCount('git merge --ff-only "$fetched_revision"', 1);
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-            5,
+            6,
           );
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"',
@@ -4608,14 +4636,19 @@ jobs:
             1,
           );
           requireCount("guard_reporting_checkout_before_pull() {", 2);
+          requireCount("guard_widgets_checkout_before_pull() {", 2);
+          requireCount(
+            'local lifecycle_script="scripts/widgets-database-lifecycle.sh"',
+            2,
+          );
           requireCount(
             'local guard_action="${2:---guard-before-fetch-revision}"',
-            2,
+            4,
           );
           requireCount('"$guard_action" "$expected_revision"', 2);
           requireCount(
             '"$expected_revision" --guard-before-checkout-revision',
-            1,
+            2,
           );
           requireCount(
             '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
@@ -4626,11 +4659,19 @@ jobs:
             1,
           );
           requireCount(
+            'guard_widgets_checkout_before_pull "$expected_revision"',
+            1,
+          );
+          requireCount(
             'echo "Reporting marker exists but its checkout guard is unavailable." >&2',
             1,
           );
           requireCount(
             'echo "Tracked Reporting lifecycle guard script is missing." >&2',
+            1,
+          );
+          requireCount(
+            'echo "Tracked Widgets lifecycle guard script is missing." >&2',
             1,
           );
           const deployJob = workflow.slice(workflow.indexOf("\n  deploy:"));
@@ -4651,27 +4692,40 @@ jobs:
             const campaignsGuardIndex = job.lastIndexOf(
               'guard_campaigns_checkout_before_pull "$expected_revision"',
             );
+            const widgetsPreFetchGuardIndex = job.lastIndexOf(
+              'guard_widgets_checkout_before_pull "$expected_revision"',
+            );
             const fetchIndex = job.lastIndexOf("git fetch origin prod");
-            const reportingPostFetchGuardIndex = job.lastIndexOf(
-              '"$expected_revision" --guard-before-checkout-revision',
+            const reportingPostFetchGuardIndex = job.indexOf(
+              "guard_reporting_checkout_before_pull",
+              fetchIndex,
+            );
+            const widgetsPostFetchGuardIndex = job.indexOf(
+              "guard_widgets_checkout_before_pull",
+              fetchIndex,
             );
             const checkoutIndex = job.lastIndexOf("git checkout prod");
             if (
               lockIndex < 0 ||
               reportingPreFetchGuardIndex < 0 ||
               campaignsGuardIndex < 0 ||
+              widgetsPreFetchGuardIndex < 0 ||
               fetchIndex < 0 ||
               reportingPostFetchGuardIndex < 0 ||
+              widgetsPostFetchGuardIndex < 0 ||
               checkoutIndex < 0 ||
               lockIndex >= reportingPreFetchGuardIndex ||
               lockIndex >= campaignsGuardIndex ||
+              lockIndex >= widgetsPreFetchGuardIndex ||
               reportingPreFetchGuardIndex >= fetchIndex ||
               campaignsGuardIndex >= fetchIndex ||
+              widgetsPreFetchGuardIndex >= fetchIndex ||
               fetchIndex >= reportingPostFetchGuardIndex ||
-              reportingPostFetchGuardIndex >= checkoutIndex
+              reportingPostFetchGuardIndex >= widgetsPostFetchGuardIndex ||
+              widgetsPostFetchGuardIndex >= checkoutIndex
             ) {
               throw new Error(
-                `${label} must hold the production lock and pass the Reporting guards on both sides of the exact fetch`,
+                `${label} must hold the production lock and pass every lifecycle guard around the exact fetch`,
               );
             }
           };
