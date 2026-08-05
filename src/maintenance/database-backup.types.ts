@@ -4,7 +4,8 @@ export const DATABASE_BACKUP_TARGETS = {
 	CORE: 'core',
 	NOTIFICATION_DELIVERY: 'notification-delivery',
 	CAMPAIGNS: 'campaigns',
-	REPORTING: 'reporting'
+	REPORTING: 'reporting',
+	WIDGETS: 'widgets'
 } as const;
 
 export type DatabaseBackupTarget =
@@ -13,6 +14,7 @@ export type DatabaseBackupTarget =
 export const NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES = 15;
 export const CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES = 30;
 export const REPORTING_DATABASE_BACKUP_DELAY_MINUTES = 45;
+export const WIDGETS_DATABASE_BACKUP_DELAY_MINUTES = 60;
 
 export interface DatabaseBackupInput {
 	chatId: string;

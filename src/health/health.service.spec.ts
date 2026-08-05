@@ -1,6 +1,7 @@
 import { HealthService } from '@/health/health.service';
 import type { NotificationDeliveryClientService } from '@/messaging/notification-delivery-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
+import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
 import type { PrismaService } from '@/prisma.service';
 import type { ConfigService } from '@nestjs/config';
 
@@ -36,9 +37,53 @@ const createOverview = () => ({
 	}
 });
 
+const createWidgetsOverview = () => ({
+	outbox: { PENDING: 0, PUBLISHING: 0, PUBLISHED: 0, FAILED: 0 },
+	oldestPendingAt: null,
+	operational: {
+		staleOutbox: 0,
+		dueOutbox: 0,
+		unresolvedFailuresByCategory: {
+			TRANSIENT: 0,
+			RATE_LIMIT: 0,
+			PERMANENT: 0,
+			AUTH_CONFIGURATION: 0,
+			UNCLASSIFIED: 0
+		}
+	},
+	unresolvedFailures: 0,
+	retryingFailures: 0,
+	deliveredLast24Hours: 0,
+	heartbeats: [
+		{
+			service: 'widgets-api' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z'
+		},
+		{
+			service: 'widgets-worker' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z',
+			lastSuccessfulConsumeAt: null
+		},
+		{
+			service: 'widgets-publisher' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z',
+			lastSuccessfulPublishAt: null
+		}
+	]
+});
+
 const createService = (
 	notificationDelivery: Partial<NotificationDeliveryClientService> = {
 		getOverview: jest.fn().mockResolvedValue(createOverview())
+	},
+	widgets: Partial<WidgetsDeliveryFailuresClientService> = {
+		getOverview: jest.fn().mockResolvedValue(createWidgetsOverview())
 	}
 ) => {
 	const prisma = {
@@ -55,7 +100,8 @@ const createService = (
 		prisma,
 		{ get: jest.fn() } as unknown as ConfigService,
 		{} as RabbitMqManagementService,
-		notificationDelivery as NotificationDeliveryClientService
+		notificationDelivery as NotificationDeliveryClientService,
+		widgets as WidgetsDeliveryFailuresClientService
 	);
 	return { service, prisma };
 };
@@ -71,26 +117,25 @@ describe('HealthService notification delivery monitoring', () => {
 			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
 		const { service, prisma } = createService();
 		const resultPromise = (service as any).getNotificationDeliveryResult();
+		const widgetsResultPromise = (service as any).getWidgetsResult();
 
 		const check = await (service as any).checkMessagingBacklog(
-			resultPromise
+			resultPromise,
+			widgetsResultPromise
 		);
 
 		expect(prisma.integrationDeliveryFailure.count).toHaveBeenCalledWith({
 			where: {
 				resolvedAt: null,
 				integration: {
-					notIn: [
-						'email',
-						'telegram',
-						'payment-email',
-						'payment-telegram',
-						'limit-email',
-						'limit-telegram',
-						'campaign-email',
-						'campaign-telegram',
-						'subscription-expiry-email',
-						'subscription-expiry-telegram'
+					in: [
+						'telegram-destination-unavailable',
+						'notification-delivery-outcome',
+						'campaign-admin-audit',
+						'reporting-admin-audit',
+						'widgets-admin-audit',
+						'auto-renewal',
+						'database-backup'
 					]
 				}
 			}
@@ -129,6 +174,7 @@ describe('HealthService notification delivery monitoring', () => {
 				.mockRejectedValue(new Error('connect ECONNREFUSED'))
 		});
 		const resultPromise = (service as any).getNotificationDeliveryResult();
+		const widgetsResultPromise = (service as any).getWidgetsResult();
 
 		await expect(
 			(service as any).checkNotificationDelivery(resultPromise)
@@ -138,12 +184,47 @@ describe('HealthService notification delivery monitoring', () => {
 			message: 'connect ECONNREFUSED'
 		});
 		await expect(
-			(service as any).checkMessagingBacklog(resultPromise)
+			(service as any).checkMessagingBacklog(
+				resultPromise,
+				widgetsResultPromise
+			)
 		).resolves.toMatchObject({
 			status: 'warning',
 			message: expect.stringContaining(
 				'Notification Delivery metrics недоступны'
 			)
+		});
+	});
+
+	it('degrades Widgets health and backlog when its internal API is unavailable', async () => {
+		const { service } = createService(
+			{ getOverview: jest.fn().mockResolvedValue(createOverview()) },
+			{
+				getOverview: jest
+					.fn()
+					.mockRejectedValue(new Error('widgets connect ECONNREFUSED'))
+			}
+		);
+		const notificationResultPromise = (
+			service as any
+		).getNotificationDeliveryResult();
+		const widgetsResultPromise = (service as any).getWidgetsResult();
+
+		await expect(
+			(service as any).checkWidgets(widgetsResultPromise)
+		).resolves.toMatchObject({
+			id: 'widgets',
+			status: 'down',
+			message: 'widgets connect ECONNREFUSED'
+		});
+		await expect(
+			(service as any).checkMessagingBacklog(
+				notificationResultPromise,
+				widgetsResultPromise
+			)
+		).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('Widgets metrics недоступны')
 		});
 	});
 

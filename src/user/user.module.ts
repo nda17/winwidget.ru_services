@@ -5,6 +5,7 @@ import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { UserController } from '@/user/user.controller';
 import { UserIdentityBindingService } from '@/user/user-identity-binding.service';
 import { UserService } from '@/user/user.service';
+import { WidgetsAdminOverviewClient } from '@/widgets-internal/widgets-admin-overview.client';
 import { Module } from '@nestjs/common';
 
 @Module({
@@ -15,7 +16,11 @@ import { Module } from '@nestjs/common';
 		TelegramBotModule
 	],
 	controllers: [UserController],
-	providers: [UserService, UserIdentityBindingService],
+	providers: [
+		UserService,
+		UserIdentityBindingService,
+		WidgetsAdminOverviewClient
+	],
 	exports: [UserService]
 })
 export class UserModule {}

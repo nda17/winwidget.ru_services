@@ -19,6 +19,11 @@ describe('DatabaseRestoreService', () => {
 		'5; 2615 2200 SCHEMA - notification_delivery postgres',
 		'215; 1259 16401 TABLE notification_delivery delivery_receipts postgres'
 	].join('\n');
+	const widgetsTableOfContents = [
+		'; Archive created at 2026-08-04 12:00:00 UTC',
+		'5; 2615 2200 SCHEMA - widgets postgres',
+		'215; 1259 16401 TABLE widgets widgets postgres'
+	].join('\n');
 
 	const createService = () => {
 		const prisma = {
@@ -212,6 +217,39 @@ describe('DatabaseRestoreService', () => {
 		expect(runPostgresCommand).toHaveBeenCalledTimes(1);
 		expect(prisma.$disconnect).not.toHaveBeenCalled();
 		expect(prisma.$connect).not.toHaveBeenCalled();
+	});
+
+	it('rejects a Widgets dump before destructive restore', async () => {
+		const { service, prisma } = createService();
+		const internals = service as any;
+		jest
+			.spyOn(internals, 'writeUploadedBackupFile')
+			.mockResolvedValue('/tmp/widgets.dump');
+		const runPostgresCommand = jest
+			.spyOn(internals, 'runPostgresCommand')
+			.mockResolvedValue(widgetsTableOfContents);
+		jest.spyOn(internals, 'deleteTempFile').mockResolvedValue(undefined);
+
+		await expect(
+			service.restore(createFile(), 'ВОССТАНОВИТЬ БД')
+		).rejects.toThrow('Dump Widgets нельзя восстанавливать в основную БД');
+		expect(runPostgresCommand).toHaveBeenCalledTimes(1);
+		expect(prisma.$disconnect).not.toHaveBeenCalled();
+		expect(prisma.$connect).not.toHaveBeenCalled();
+	});
+
+	it('does not confuse a Core table name with the Widgets schema', () => {
+		const { service } = createService();
+		const coreWithWidgetsNamedTable = [
+			coreTableOfContents,
+			'217; 1259 16402 TABLE public widgets postgres'
+		].join('\n');
+
+		expect(() =>
+			(service as any).assertCoreBackupTableOfContents(
+				coreWithWidgetsNamedTable
+			)
+		).not.toThrow();
 	});
 
 	it('releases the in-process guard when preparing the upload fails', async () => {

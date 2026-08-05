@@ -56,15 +56,17 @@ describe('ScheduledTasksService', () => {
 					Promise.resolve({
 						created: true,
 						job: {
-							id:
-								input.jobType === 'DATABASE_BACKUP'
-									? '11111111-1111-4111-8111-111111111111'
-									: input.jobType ===
-										  'NOTIFICATION_DELIVERY_DATABASE_BACKUP'
-										? '22222222-2222-4222-8222-222222222222'
-										: input.jobType === 'CAMPAIGNS_DATABASE_BACKUP'
-											? '33333333-3333-4333-8333-333333333333'
-											: '44444444-4444-4444-8444-444444444444'
+							id: {
+								DATABASE_BACKUP: '11111111-1111-4111-8111-111111111111',
+								NOTIFICATION_DELIVERY_DATABASE_BACKUP:
+									'22222222-2222-4222-8222-222222222222',
+								CAMPAIGNS_DATABASE_BACKUP:
+									'33333333-3333-4333-8333-333333333333',
+								REPORTING_DATABASE_BACKUP:
+									'44444444-4444-4444-8444-444444444444',
+								WIDGETS_DATABASE_BACKUP:
+									'55555555-5555-4555-8555-555555555555'
+							}[input.jobType]
 						}
 					})
 				)
@@ -77,12 +79,13 @@ describe('ScheduledTasksService', () => {
 		return { service, scheduledJobs, transaction, prisma };
 	};
 
-	it('creates independent core, Notification Delivery, Campaigns and Reporting backup jobs', async () => {
+	it('creates independent core and service database backup jobs', async () => {
 		const { service, scheduledJobs, transaction } = createService();
 		const coreScheduledFor = new Date('2026-07-23T22:45:00.000Z');
 		const notificationScheduledFor = new Date('2026-07-23T23:00:00.000Z');
 		const campaignsScheduledFor = new Date('2026-07-23T23:15:00.000Z');
 		const reportingScheduledFor = new Date('2026-07-23T23:30:00.000Z');
+		const widgetsScheduledFor = new Date('2026-07-23T23:45:00.000Z');
 
 		const result = await service.enqueueDailyDatabaseBackups(
 			period,
@@ -100,6 +103,9 @@ describe('ScheduledTasksService', () => {
 		);
 		expect(result?.reporting.job.id).toBe(
 			'44444444-4444-4444-8444-444444444444'
+		);
+		expect(result?.widgets.job.id).toBe(
+			'55555555-5555-4555-8555-555555555555'
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
@@ -156,6 +162,20 @@ describe('ScheduledTasksService', () => {
 				eventType: 'database.backup.requested.v1'
 			})
 		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			5,
+			transaction,
+			expect.objectContaining({
+				jobType: 'WIDGETS_DATABASE_BACKUP',
+				scheduledFor: widgetsScheduledFor,
+				availableAt: widgetsScheduledFor
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
 	});
 
 	it('enqueues all database backups as separate jobs in one transaction', async () => {
@@ -176,14 +196,17 @@ describe('ScheduledTasksService', () => {
 				Promise.resolve({
 					created: true,
 					job: {
-						id:
-							input.jobType === 'DATABASE_BACKUP'
-								? '11111111-1111-4111-8111-111111111111'
-								: input.jobType === 'NOTIFICATION_DELIVERY_DATABASE_BACKUP'
-									? '22222222-2222-4222-8222-222222222222'
-									: input.jobType === 'CAMPAIGNS_DATABASE_BACKUP'
-										? '33333333-3333-4333-8333-333333333333'
-										: '44444444-4444-4444-8444-444444444444'
+						id: {
+							DATABASE_BACKUP: '11111111-1111-4111-8111-111111111111',
+							NOTIFICATION_DELIVERY_DATABASE_BACKUP:
+								'22222222-2222-4222-8222-222222222222',
+							CAMPAIGNS_DATABASE_BACKUP:
+								'33333333-3333-4333-8333-333333333333',
+							REPORTING_DATABASE_BACKUP:
+								'44444444-4444-4444-8444-444444444444',
+							WIDGETS_DATABASE_BACKUP:
+								'55555555-5555-4555-8555-555555555555'
+						}[input.jobType]
 					}
 				})
 			)
@@ -201,11 +224,12 @@ describe('ScheduledTasksService', () => {
 			core: expect.objectContaining({ created: true }),
 			notificationDelivery: expect.objectContaining({ created: true }),
 			campaigns: expect.objectContaining({ created: true }),
-			reporting: expect.objectContaining({ created: true })
+			reporting: expect.objectContaining({ created: true }),
+			widgets: expect.objectContaining({ created: true })
 		});
 		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledTimes(
-			4
+			5
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
@@ -278,9 +302,25 @@ describe('ScheduledTasksService', () => {
 				eventType: 'database.backup.requested.v1'
 			})
 		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			5,
+			transaction,
+			expect.objectContaining({
+				jobType: 'WIDGETS_DATABASE_BACKUP',
+				scheduleKey: period.key,
+				input: expect.objectContaining({
+					trigger: 'SCHEDULED'
+				})
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
 	});
 
-	it('does not enqueue either backup when the daily period is already complete', async () => {
+	it('does not enqueue any backup when the daily period is already complete', async () => {
 		const prisma = {
 			telegramBotSettings: {
 				upsert: jest.fn().mockResolvedValue({
@@ -597,6 +637,42 @@ describe('ScheduledTasksService', () => {
 				jobId: job.id
 			}
 		});
+	});
+
+	it('creates Widgets manual jobs under an independent job type', async () => {
+		const adminId = randomUUID();
+		const idempotencyKey = randomUUID();
+		const job = createManualBackupJob(
+			adminId,
+			`manual:widgets:${adminId}:${idempotencyKey}`,
+			{ jobType: 'WIDGETS_DATABASE_BACKUP' }
+		);
+		const { service, transaction, scheduledJobs } =
+			createManualBackupService(null, null, job);
+
+		const result = await service.enqueueManualDatabaseBackup(
+			'widgets',
+			adminId,
+			idempotencyKey
+		);
+
+		expect(result).toEqual(
+			expect.objectContaining({
+				target: 'widgets',
+				jobId: job.id,
+				created: true
+			})
+		);
+		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				jobType: 'WIDGETS_DATABASE_BACKUP',
+				scheduleKey: `manual:widgets:${adminId}:${idempotencyKey}`
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
 	});
 
 	it('maps two different active request keys to one job and one Outbox creation', async () => {

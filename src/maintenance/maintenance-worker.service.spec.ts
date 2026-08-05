@@ -339,6 +339,54 @@ describe('MaintenanceWorkerService', () => {
 		expect(transaction.telegramBotSettings.update).not.toHaveBeenCalled();
 	});
 
+	it('executes Widgets as an independent backup target', async () => {
+		const widgetsJobType = 'WIDGETS_DATABASE_BACKUP';
+		const { service, backup, scheduledJobs, transaction } = createService(
+			{},
+			{
+				jobType: widgetsJobType,
+				scheduleKey: '2026-07-24',
+				trigger: ScheduledJobRunTrigger.SCHEDULED,
+				periodStart: now,
+				periodEnd: '2026-07-25T00:00:00.000Z',
+				input: {
+					chatId: '-100123',
+					messageThreadId: 42,
+					trigger: 'SCHEDULED',
+					periodStart: now
+				}
+			}
+		);
+		const message = createMessage(jobId, {
+			schemaVersion: 1,
+			eventType: 'database.backup.requested.v1',
+			jobId,
+			jobType: widgetsJobType,
+			scheduleKey: '2026-07-24',
+			periodStart: now,
+			periodEnd: '2026-07-25T00:00:00.000Z'
+		});
+
+		await (service as any).handle('database-backup', message);
+
+		expect(scheduledJobs.claim).toHaveBeenCalledWith(
+			jobId,
+			expect.any(String),
+			120_000,
+			widgetsJobType,
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(backup.createAndSend).toHaveBeenCalledWith(
+			jobId,
+			'widgets',
+			expect.objectContaining({ trigger: 'SCHEDULED' }),
+			expect.any(AbortSignal)
+		);
+		expect(transaction.telegramBotSettings.update).not.toHaveBeenCalled();
+	});
+
 	it('keeps a completed backup successful when resolving an old DLQ record fails', async () => {
 		const { service, rabbitMq, scheduledJobs, prisma } = createService();
 		(

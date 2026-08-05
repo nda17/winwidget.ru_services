@@ -5,9 +5,51 @@ import {
 } from '@/messaging/messaging.constants';
 import type { NotificationDeliveryClientService } from '@/messaging/notification-delivery-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
+import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
 import type { PrismaService } from '@/prisma.service';
 import type { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import type { ConfigService } from '@nestjs/config';
+
+const createWidgetsOverview = () => ({
+	outbox: { PENDING: 0, PUBLISHING: 0, PUBLISHED: 0, FAILED: 0 },
+	oldestPendingAt: null,
+	operational: {
+		staleOutbox: 0,
+		dueOutbox: 0,
+		unresolvedFailuresByCategory: {
+			TRANSIENT: 0,
+			RATE_LIMIT: 0,
+			PERMANENT: 0,
+			AUTH_CONFIGURATION: 0,
+			UNCLASSIFIED: 0
+		}
+	},
+	unresolvedFailures: 0,
+	retryingFailures: 0,
+	deliveredLast24Hours: 0,
+	heartbeats: [
+		{
+			service: 'widgets-api' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z'
+		},
+		{
+			service: 'widgets-worker' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z',
+			lastSuccessfulConsumeAt: '2026-07-27T11:59:45.000Z'
+		},
+		{
+			service: 'widgets-publisher' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z',
+			lastSuccessfulPublishAt: '2026-07-27T11:59:50.000Z'
+		}
+	]
+});
 
 describe('MessagingOperationalAlertService', () => {
 	afterEach(() => {
@@ -44,13 +86,19 @@ describe('MessagingOperationalAlertService', () => {
 			{} as RabbitMqManagementService,
 			{
 				getOverview: jest.fn()
-			} as unknown as NotificationDeliveryClientService
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getOverview: jest.fn()
+			} as unknown as WidgetsDeliveryFailuresClientService
 		);
 		return { service, prisma, telegramBot, transaction };
 	};
 
 	const createCheckService = (
-		notificationDelivery: Partial<NotificationDeliveryClientService>
+		notificationDelivery: Partial<NotificationDeliveryClientService>,
+		widgets: Partial<WidgetsDeliveryFailuresClientService> = {
+			getOverview: jest.fn().mockResolvedValue(createWidgetsOverview())
+		}
 	) => {
 		const now = new Date('2026-07-27T12:00:00.000Z');
 		const prisma = {
@@ -132,7 +180,8 @@ describe('MessagingOperationalAlertService', () => {
 				)
 			} as unknown as ConfigService,
 			rabbitManagement,
-			notificationDelivery as NotificationDeliveryClientService
+			notificationDelivery as NotificationDeliveryClientService,
+			widgets as WidgetsDeliveryFailuresClientService
 		);
 		jest
 			.spyOn(service as any, 'sendAlertIfChanged')
@@ -283,17 +332,14 @@ describe('MessagingOperationalAlertService', () => {
 			where: {
 				resolvedAt: null,
 				integration: {
-					notIn: [
-						'email',
-						'telegram',
-						'payment-email',
-						'payment-telegram',
-						'limit-email',
-						'limit-telegram',
-						'campaign-email',
-						'campaign-telegram',
-						'subscription-expiry-email',
-						'subscription-expiry-telegram'
+					in: [
+						'telegram-destination-unavailable',
+						'notification-delivery-outcome',
+						'campaign-admin-audit',
+						'reporting-admin-audit',
+						'widgets-admin-audit',
+						'auto-renewal',
+						'database-backup'
 					]
 				}
 			}
@@ -319,6 +365,60 @@ describe('MessagingOperationalAlertService', () => {
 		);
 		expect(message).toContain(
 			'Notification Delivery: <b>internal API недоступен: connect ECONNREFUSED'
+		);
+	});
+
+	it('turns an unavailable Widgets API into an alert problem', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const { service } = createCheckService(
+			{
+				getOverview: jest.fn().mockResolvedValue({
+					outbox: {
+						PENDING: 0,
+						PUBLISHING: 0,
+						PUBLISHED: 0,
+						FAILED: 0
+					},
+					operational: {
+						staleOutbox: 0,
+						dueOutbox: 0,
+						unresolvedFailuresByCategory: {
+							TRANSIENT: 0,
+							RATE_LIMIT: 0,
+							PERMANENT: 0,
+							AUTH_CONFIGURATION: 0,
+							UNCLASSIFIED: 0
+						}
+					},
+					unresolvedFailures: 0,
+					heartbeat: {
+						service: 'notification-delivery-worker',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-07-27T11:59:55.000Z',
+						lastSuccessfulPublishAt: null,
+						lastSuccessfulConsumeAt: '2026-07-27T11:59:50.000Z'
+					}
+				})
+			},
+			{
+				getOverview: jest
+					.fn()
+					.mockRejectedValue(new Error('widgets connect ECONNREFUSED'))
+			}
+		);
+
+		await expect((service as any).check()).resolves.toBeUndefined();
+
+		const [signature, message] = (service as any).sendAlertIfChanged.mock
+			.calls[0];
+		expect(signature).toContain(
+			'widgets-api=widgets connect ECONNREFUSED'
+		);
+		expect(message).toContain(
+			'Widgets: <b>internal API недоступен: widgets connect ECONNREFUSED'
 		);
 	});
 });

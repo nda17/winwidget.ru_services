@@ -7,6 +7,7 @@ import {
 } from '@/subscription/dto/admin-activate-subscription.dto';
 import { SubscriptionExpiryService } from '@/subscription/subscription-expiry.service';
 import { SubscriptionService } from '@/subscription/subscription.service';
+import { WidgetsAdminOverviewClient } from '@/widgets-internal/widgets-admin-overview.client';
 import {
 	Body,
 	Controller,
@@ -28,20 +29,29 @@ export class SubscriptionController {
 	constructor(
 		private readonly subscriptionService: SubscriptionService,
 		private readonly subscriptionExpiryService: SubscriptionExpiryService,
-		private readonly adminEventLogService: AdminEventLogService
+		private readonly adminEventLogService: AdminEventLogService,
+		private readonly widgetsAdminOverviewClient: WidgetsAdminOverviewClient
 	) {}
 
 	@HttpCode(200)
 	@Auth()
 	@Get('me')
 	async getMySubscription(@CurrentUser('id') userId: string) {
-		const sub = await this.subscriptionService.checkAndResetPeriod(userId);
+		const existing =
+			await this.subscriptionService.checkAndResetPeriod(userId);
+		const subscription =
+			existing ||
+			(await this.subscriptionService.getOrCreateTrialSubscription(
+				userId
+			));
+		const [usage] = await this.widgetsAdminOverviewClient.getOwnerUsage([
+			userId
+		]);
 
-		if (!sub) {
-			return this.subscriptionService.getOrCreateTrialSubscription(userId);
-		}
-
-		return sub;
+		return {
+			...subscription,
+			leadsThisPeriod: usage.leadCount
+		};
 	}
 
 	@HttpCode(200)
@@ -56,7 +66,7 @@ export class SubscriptionController {
 		@Query('expiresFrom') expiresFrom?: string,
 		@Query('expiresTo') expiresTo?: string
 	) {
-		return this.subscriptionService.adminGetAllSubscriptions(
+		const result = await this.subscriptionService.adminGetAllSubscriptions(
 			page ? parseInt(page, 10) : 1,
 			limit ? parseInt(limit, 10) : 15,
 			{
@@ -67,6 +77,22 @@ export class SubscriptionController {
 				expiresTo
 			}
 		);
+		if (!result.items.length) return result;
+
+		const usage = await this.widgetsAdminOverviewClient.getOwnerUsage(
+			result.items.map(subscription => subscription.userId)
+		);
+		const usageByUserId = new Map(
+			usage.map(item => [item.userId, item.leadCount])
+		);
+
+		return {
+			...result,
+			items: result.items.map(subscription => ({
+				...subscription,
+				leadsThisPeriod: usageByUserId.get(subscription.userId) ?? 0
+			}))
+		};
 	}
 
 	@HttpCode(200)

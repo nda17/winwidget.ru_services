@@ -93,9 +93,22 @@ describe('TelegramBotService webhook URLs', () => {
 
 		expect((service as any).addMinutesToTime('23:55', 15)).toBe('00:10');
 		expect((service as any).addMinutesToTime('23:55', 45)).toBe('00:40');
+		expect((service as any).addMinutesToTime('23:55', 60)).toBe('00:55');
 	});
 
-	it('keeps the summary away from both backup times across midnight', () => {
+	it('exposes the delayed Widgets backup schedule in settings', () => {
+		const service = new TelegramBotService({} as PrismaService);
+
+		expect(
+			(service as any).serializeSettings(telegramSettings)
+		).toMatchObject({
+			widgetsDatabaseBackupDelayMinutes: 60,
+			widgetsDatabaseBackupTime: '02:45',
+			widgetsDatabaseBackupTimeLabel: '02:45 МСК'
+		});
+	});
+
+	it('keeps the summary away from every backup time across midnight', () => {
 		const service = new TelegramBotService({} as PrismaService);
 
 		expect(() =>
@@ -106,6 +119,9 @@ describe('TelegramBotService webhook URLs', () => {
 		).not.toThrow();
 		expect(() =>
 			(service as any).ensureScheduleTimesSeparated('00:38', '23:55')
+		).toThrow(BadRequestException);
+		expect(() =>
+			(service as any).ensureScheduleTimesSeparated('00:53', '23:55')
 		).toThrow(BadRequestException);
 	});
 

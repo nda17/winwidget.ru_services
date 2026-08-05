@@ -299,6 +299,7 @@ deploy_job="$(
 	"$(workflow_exact_line_count '- notification-delivery')" == '1' &&
 	"$(workflow_exact_line_count '- campaigns')" == '1' &&
 	"$(workflow_exact_line_count '- reporting')" == '1' &&
+	"$(workflow_exact_line_count '- widgets')" == '1' &&
 	"$lifecycle_checkout_preflight_job" == *'environment: production'* &&
 	"$lifecycle_checkout_preflight_job" == *"(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"* &&
 	"$lifecycle_checkout_preflight_job" == *'guard_reporting_checkout_before_pull "$EXPECTED_REVISION"'* &&
@@ -310,7 +311,12 @@ deploy_job="$(
 	"$deploy_job" == *$'            campaigns)\n'* &&
 	"$deploy_job" == *'bash scripts/deploy-campaigns-production.sh'* &&
 	"$deploy_job" == *$'            reporting)\n'* &&
-	"$deploy_job" == *'bash scripts/deploy-reporting-production.sh'*
+	"$deploy_job" == *'bash scripts/deploy-reporting-production.sh'* &&
+	"$deploy_job" == *$'            widgets)\n'* &&
+	"$deploy_job" == *'WIDGETS_FIRST_CUTOVER_APPROVED="$widgets_cutover_approved"'* &&
+	"$deploy_job" == *'WIDGETS_FIRST_CUTOVER_CONFIRMATION="$WIDGETS_CUTOVER_CONFIRMATION"'* &&
+	"$deploy_job" == *'if [[ "$WIDGETS_CUTOVER_CONFIRMATION" == '\''CUTOVER WIDGETS OWNERSHIP'\'' ]]; then'* &&
+	"$deploy_job" == *'bash scripts/deploy-widgets-production.sh'*
 ]] || {
 	echo 'Reporting is not wired through the common verified service deployment job.' >&2
 	exit 1

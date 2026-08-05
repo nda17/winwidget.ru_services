@@ -1890,6 +1890,35 @@ THEN 'ready' ELSE 'unsafe' END;
 	printf '%s' "$value" | reporting_run_isolated_node_validator "$image" '
 const { readFileSync } = require("node:fs");
 const routes = JSON.parse(readFileSync(0, "utf8"));
+const widgets = [
+  ["widgets-admin", "/api/v1/widgets/admin", "required"],
+  ["widgets-management", "/api/v1/widgets", "required"],
+  ["quizzes-management", "/api/v1/quizzes", "required"],
+  ["callbacks-management", "/api/v1/callbacks", "required"],
+  ["countdown-timers-management", "/api/v1/countdown-timers", "required"],
+  ["stop-offers-management", "/api/v1/stop-offers", "required"],
+  ["online-consultants-management", "/api/v1/online-consultants", "required"],
+  ["calculators-management", "/api/v1/calculators", "required"],
+  ["widget-settings", "/api/v1/widget-settings", "required"],
+  ["widget-runtime", "/api/v1/widget-runtime", "required"],
+  ["widget-public", "/api/v1/widget", "optional"],
+  ["quiz-public", "/api/v1/quiz", "optional"],
+  ["callback-public", "/api/v1/callback", "optional"],
+  ["countdown-timer-public", "/api/v1/countdown-timer", "optional"],
+  ["stop-offer-public", "/api/v1/stop-offer", "optional"],
+  ["online-consultant-public", "/api/v1/online-consultant", "optional"],
+  ["calculator-public", "/api/v1/calculator", "optional"],
+  ["widget-events", "/api/v1/widget-events", "optional"],
+].map(([id, pathPrefix, authPolicy]) => ({
+  id,
+  pathPrefix,
+  upstreamUrl: "http://127.0.0.1:4700",
+  authPolicy,
+  timeoutMs: 60000,
+}));
+const includeWidgets = routes.some(
+  route => route.upstreamUrl === "http://127.0.0.1:4700",
+);
 const expected = [
   {
     id: "database-restores",
@@ -1912,6 +1941,7 @@ const expected = [
     authPolicy: "required",
     timeoutMs: 60000,
   }] : []),
+  ...(includeWidgets ? widgets : []),
   {
     id: "monolith",
     pathPrefix: "/api/v1",

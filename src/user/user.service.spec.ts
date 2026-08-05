@@ -1,5 +1,6 @@
 import type { PrismaService } from '@/prisma.service';
 import { UserService } from '@/user/user.service';
+import type { WidgetsAdminOverviewClient } from '@/widgets-internal/widgets-admin-overview.client';
 import {
 	BadRequestException,
 	ConflictException,
@@ -36,13 +37,6 @@ describe('UserService soft delete', () => {
 				updateMany: createUpdateMany()
 			},
 			userSession: { updateMany: createUpdateMany() },
-			widget: { updateMany: createUpdateMany() },
-			quiz: { updateMany: createUpdateMany() },
-			callback: { updateMany: createUpdateMany() },
-			countdownTimer: { updateMany: createUpdateMany() },
-			stopOffer: { updateMany: createUpdateMany() },
-			onlineConsultant: { updateMany: createUpdateMany() },
-			calculator: { updateMany: createUpdateMany() },
 			autoRenewal: {
 				findUnique: jest.fn().mockResolvedValue(null),
 				updateMany: createUpdateMany()
@@ -57,14 +51,27 @@ describe('UserService soft delete', () => {
 				findUnique: jest.fn(),
 				update: jest.fn()
 			},
-			$transaction: jest.fn(async callback => callback(transaction))
+			subscription: { findUnique: jest.fn() },
+			payment: {
+				count: jest.fn(),
+				findMany: jest.fn()
+			},
+			adminEventLog: { findMany: jest.fn() },
+			$transaction: jest.fn(async input =>
+				Array.isArray(input) ? Promise.all(input) : input(transaction)
+			)
 		};
-		const service = new UserService(prisma as unknown as PrismaService);
+		const widgetsOverview = { getOwnerOverview: jest.fn() };
+		const service = new UserService(
+			prisma as unknown as PrismaService,
+			widgetsOverview as unknown as WidgetsAdminOverviewClient
+		);
 
 		return {
 			service,
 			prisma,
-			transaction
+			transaction,
+			widgetsOverview
 		};
 	};
 
@@ -162,7 +169,7 @@ describe('UserService soft delete', () => {
 		expect(result.items[0].deletedAt).toEqual(deletedAt);
 	});
 
-	it('soft deletes a user and deactivates all seven widget types', async () => {
+	it('soft deletes a user and emits lifecycle state for widgets-service', async () => {
 		const { service, prisma, transaction } = createFixture();
 		const user = createUser();
 		transaction.user.findUnique.mockResolvedValue(user);
@@ -198,21 +205,6 @@ describe('UserService soft delete', () => {
 			where: { userId: user.id, revokedAt: null },
 			data: { revokedAt: expect.any(Date) }
 		});
-
-		for (const delegate of [
-			transaction.widget,
-			transaction.quiz,
-			transaction.callback,
-			transaction.countdownTimer,
-			transaction.stopOffer,
-			transaction.onlineConsultant,
-			transaction.calculator
-		]) {
-			expect(delegate.updateMany).toHaveBeenCalledWith({
-				where: { userId: user.id },
-				data: { isActive: false }
-			});
-		}
 
 		expect(result.status).toBe(UserStatus.DEACTIVATED);
 		expect(result.deletedAt).toBeInstanceOf(Date);
@@ -414,7 +406,6 @@ describe('UserService soft delete', () => {
 		expect(result.status).toBe(UserStatus.DEACTIVATED);
 		expect(result.personalDataConsentRevokedAt).toEqual(consentRevokedAt);
 		expect(transaction.userSession.updateMany).not.toHaveBeenCalled();
-		expect(transaction.widget.updateMany).not.toHaveBeenCalled();
 	});
 
 	it('rejects changes and admin details for a deleted user until restore', async () => {
@@ -465,7 +456,70 @@ describe('UserService soft delete', () => {
 		expect(overviewFixture.prisma.$transaction).not.toHaveBeenCalled();
 	});
 
-	it('deactivation revokes sessions and disables online consultant with the other widgets', async () => {
+	it('merges Core account data with the service-owned Widgets overview', async () => {
+		const { service, prisma, widgetsOverview } = createFixture();
+		const user = createUser();
+		const subscription = {
+			id: 'subscription-1',
+			leadsThisPeriod: 999
+		};
+		const payment = { id: 'payment-1' };
+		const activity = {
+			id: 'activity-1',
+			targetUserId: user.id
+		};
+		const widgetData = {
+			widgets: {
+				total: 0,
+				active: 0,
+				inactive: 0,
+				byType: [],
+				latest: []
+			},
+			leads: { total: 0, byType: [], latest: [] },
+			usage: {
+				widgetCount: 0,
+				leadCount: 7,
+				periodKey: 'period-1',
+				periodStartsAt: null,
+				periodEndsAt: null
+			}
+		};
+		prisma.user.findUnique.mockResolvedValue(user);
+		prisma.subscription.findUnique.mockResolvedValue(subscription);
+		prisma.payment.count
+			.mockResolvedValueOnce(1)
+			.mockResolvedValueOnce(2)
+			.mockResolvedValueOnce(3)
+			.mockResolvedValueOnce(4);
+		prisma.payment.findMany.mockResolvedValue([payment]);
+		prisma.adminEventLog.findMany.mockResolvedValue([activity]);
+		widgetsOverview.getOwnerOverview.mockResolvedValue(widgetData);
+
+		await expect(service.getAdminUserOverview(user.id)).resolves.toEqual({
+			subscription: {
+				...subscription,
+				leadsThisPeriod: 7
+			},
+			payments: {
+				total: 6,
+				counts: {
+					PENDING: 1,
+					SUCCEEDED: 2,
+					CANCELLED: 3,
+					EXPIRED: 4
+				},
+				latest: [payment]
+			},
+			...widgetData,
+			activity: {
+				latest: [{ ...activity, role: 'TARGET' }]
+			}
+		});
+		expect(widgetsOverview.getOwnerOverview).toHaveBeenCalledWith(user.id);
+	});
+
+	it('deactivation revokes sessions and leaves widget lifecycle to its event consumer', async () => {
 		const { service, prisma, transaction } = createFixture();
 		const user = createUser();
 		prisma.user.findUnique.mockResolvedValue({
@@ -497,17 +551,6 @@ describe('UserService soft delete', () => {
 			}
 		});
 		expect(transaction.userSession.updateMany).toHaveBeenCalledTimes(1);
-		for (const delegate of [
-			transaction.widget,
-			transaction.quiz,
-			transaction.callback,
-			transaction.countdownTimer,
-			transaction.stopOffer,
-			transaction.onlineConsultant,
-			transaction.calculator
-		]) {
-			expect(delegate.updateMany).toHaveBeenCalledTimes(1);
-		}
 		expect(prisma.$transaction).toHaveBeenCalledWith(
 			expect.any(Function),
 			{
@@ -649,19 +692,7 @@ describe('UserService soft delete', () => {
 		]);
 
 		expect(transaction.userSession.updateMany).not.toHaveBeenCalled();
-		for (const delegate of [
-			transaction.widget,
-			transaction.quiz,
-			transaction.callback,
-			transaction.countdownTimer,
-			transaction.stopOffer,
-			transaction.onlineConsultant,
-			transaction.calculator
-		]) {
-			expect(delegate.updateMany).toHaveBeenCalledWith({
-				where: { userId: user.id },
-				data: { isActive: false }
-			});
-		}
+		// identity.user.changed.v1 is emitted by the User transaction trigger;
+		// widgets-service owns the idempotent deactivation in its own database.
 	});
 });

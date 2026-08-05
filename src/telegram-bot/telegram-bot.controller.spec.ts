@@ -157,6 +157,28 @@ describe('TelegramBotController manual database backup', () => {
 			})
 		);
 	});
+
+	it('keeps Widgets manual jobs isolated and records the target', async () => {
+		const { controller, scheduledTasksService, adminEventLogService } =
+			createController(true);
+
+		await controller.sendDatabaseBackup(
+			'widgets',
+			adminId,
+			idempotencyKey,
+			request
+		);
+
+		expect(
+			scheduledTasksService.enqueueManualDatabaseBackup
+		).toHaveBeenCalledWith('widgets', adminId, idempotencyKey);
+		expect(adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				description: expect.stringContaining('Widgets'),
+				metadata: expect.objectContaining({ target: 'widgets' })
+			})
+		);
+	});
 });
 
 describe('TelegramBotController schedule audit', () => {

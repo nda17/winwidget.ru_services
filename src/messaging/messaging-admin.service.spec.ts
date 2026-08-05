@@ -1,8 +1,12 @@
 import type { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
-import type { NotificationDeliveryClientService } from '@/messaging/notification-delivery-client.service';
+import { CORE_OWNED_MESSAGING_KINDS } from '@/messaging/messaging.constants';
+import {
+	NotificationDeliveryClientService,
+	NotificationDeliveryInternalApiError
+} from '@/messaging/notification-delivery-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
-import type { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
+import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
 import type { PrismaService } from '@/prisma.service';
 import {
 	BadRequestException,
@@ -13,31 +17,151 @@ import {
 describe('MessagingAdminService', () => {
 	const notificationDelivery =
 		{} as unknown as NotificationDeliveryClientService;
+	const widgetsFailures =
+		{} as unknown as WidgetsDeliveryFailuresClientService;
+	const remoteFailure = (
+		id: string,
+		integration: string,
+		failedAt: string
+	) => ({
+		id,
+		eventId: id,
+		integration,
+		attempts: 1,
+		lastError: 'timeout',
+		category: 'TRANSIENT',
+		normalizedCode: 'TIMEOUT',
+		safeReason: 'Provider request timed out',
+		httpStatus: null,
+		providerCode: null,
+		retryable: true,
+		failedAt,
+		retryingAt: null,
+		resolvedAt: null,
+		resolution: null,
+		resolutionComment: null,
+		source: null,
+		entity: {},
+		lead: {
+			id: null,
+			contact: null,
+			phone: null,
+			email: null,
+			url: null,
+			createdAt: null
+		}
+	});
 
 	afterEach(() => {
 		jest.restoreAllMocks();
 	});
 
-	it('queues a manual retry through the transactional Outbox', async () => {
+	it('aggregates service-owned Widgets metrics and heartbeats', async () => {
+		const prisma = {
+			outboxEvent: {
+				groupBy: jest.fn().mockResolvedValue([
+					{ status: 'PENDING', _count: { _all: 1 } },
+					{ status: 'PUBLISHED', _count: { _all: 5 } }
+				]),
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			integrationDeliveryFailure: {
+				count: jest.fn().mockResolvedValueOnce(2).mockResolvedValueOnce(1)
+			},
+			integrationDeliveryReceipt: {
+				count: jest.fn().mockResolvedValue(3)
+			},
+			scheduledJobRun: {
+				count: jest.fn().mockResolvedValue(4)
+			},
+			messagingHeartbeat: {
+				findMany: jest.fn().mockResolvedValue([])
+			}
+		} as unknown as PrismaService;
+		const notification = {
+			getOverview: jest.fn().mockResolvedValue({
+				outbox: { PENDING: 2, PUBLISHING: 0, PUBLISHED: 6, FAILED: 0 },
+				oldestPendingAt: null,
+				unresolvedFailures: 5,
+				retryingFailures: 2,
+				deliveredLast24Hours: 7,
+				heartbeat: {
+					service: 'notification-delivery-worker',
+					status: 'ok',
+					activeInstances: 1,
+					lastSeenAt: '2026-08-05T11:59:55.000Z'
+				}
+			})
+		} as unknown as NotificationDeliveryClientService;
+		const widgets = {
+			getOverview: jest.fn().mockResolvedValue({
+				outbox: { PENDING: 3, PUBLISHING: 1, PUBLISHED: 8, FAILED: 1 },
+				oldestPendingAt: '2026-08-05T11:58:00.000Z',
+				unresolvedFailures: 6,
+				retryingFailures: 3,
+				deliveredLast24Hours: 9,
+				heartbeats: [
+					{
+						service: 'widgets-api',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-08-05T11:59:55.000Z'
+					},
+					{
+						service: 'widgets-worker',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-08-05T11:59:55.000Z'
+					},
+					{
+						service: 'widgets-publisher',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-08-05T11:59:55.000Z'
+					}
+				]
+			})
+		} as unknown as WidgetsDeliveryFailuresClientService;
+		const service = new MessagingAdminService(
+			prisma,
+			{
+				getMessagingQueues: jest.fn().mockResolvedValue([])
+			} as unknown as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			notification,
+			widgets
+		);
+
+		await expect(service.getOverview()).resolves.toEqual(
+			expect.objectContaining({
+				outbox: { PENDING: 6, PUBLISHING: 1, PUBLISHED: 19, FAILED: 1 },
+				oldestPendingAt: '2026-08-05T11:58:00.000Z',
+				unresolvedFailures: 13,
+				retryingFailures: 6,
+				deliveredLast24Hours: 23,
+				widgetsError: null,
+				heartbeats: expect.arrayContaining([
+					expect.objectContaining({ service: 'widgets-publisher' })
+				])
+			})
+		);
+	});
+
+	it('queues a Core-owned manual retry through the transactional Outbox', async () => {
 		const retryingAt = null;
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'webhook',
-			routingKey: 'lead.integration.webhook.v2',
+			integration: 'telegram-destination-unavailable',
+			routingKey: 'notification.telegram.destination-unavailable.v1',
 			payload: {
-				schemaVersion: 2,
-				eventType: 'lead.integration.requested.v2',
-				integration: 'webhook',
-				source: 'widget',
-				entity: { id: 'widget-1', name: 'Колесо' },
-				lead: {
-					id: 'lead-1',
-					createdAt: '2026-07-24T00:00:00.000Z'
-				},
-				destination: {
-					credentialRef: '33333333-3333-4333-8333-333333333333'
-				}
+				schemaVersion: 1,
+				eventType: 'notification.telegram.destination-unavailable.v1',
+				sourceEventId: '44444444-4444-4444-8444-444444444444',
+				sourceKind: 'telegram',
+				destination: { telegramChatId: '123456789' },
+				normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
+				occurredAt: '2026-07-24T00:00:00.000Z'
 			},
 			attempts: 4,
 			lastError: 'timeout',
@@ -70,9 +194,9 @@ describe('MessagingAdminService', () => {
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			adminEventLog,
-			notificationDelivery
+			notificationDelivery,
+			widgetsFailures
 		);
 
 		const result = await service.retryFailure(failure.id, 'admin-1');
@@ -80,8 +204,8 @@ describe('MessagingAdminService', () => {
 		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
 			data: expect.objectContaining({
 				messageId: failure.eventId,
-				eventType: 'lead.integration.requested.v2',
-				routingKey: 'manual.webhook',
+				eventType: 'notification.telegram.destination-unavailable.v1',
+				routingKey: 'manual.telegram-destination-unavailable',
 				headers: expect.objectContaining({
 					'x-retry-attempt': 0,
 					'x-delivery-token': expect.any(String),
@@ -89,20 +213,14 @@ describe('MessagingAdminService', () => {
 					'x-request-id': failure.eventId,
 					'x-causation-id': failure.eventId
 				}),
-				payload: expect.objectContaining({
-					schemaVersion: 2,
-					eventType: 'lead.integration.requested.v2',
-					destination: {
-						credentialRef: '33333333-3333-4333-8333-333333333333'
-					}
-				})
+				payload: failure.payload
 			})
 		});
 		expect(result).toEqual(
 			expect.objectContaining({
 				id: failure.id,
 				eventId: failure.eventId,
-				integration: 'webhook',
+				integration: 'telegram-destination-unavailable',
 				retryingAt: expect.any(String)
 			})
 		);
@@ -159,9 +277,9 @@ describe('MessagingAdminService', () => {
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			adminEventLog,
-			notificationDelivery
+			notificationDelivery,
+			widgetsFailures
 		);
 
 		await service.retryFailure(failure.id, 'dev-user-id');
@@ -192,64 +310,117 @@ describe('MessagingAdminService', () => {
 		);
 	});
 
-	it('rejects a retired v1 lead retry before changing its state', async () => {
-		const failure = {
-			id: '22222222-2222-4222-8222-222222222222',
+	it('routes a Widgets-owned provider retry without querying Core history', async () => {
+		const id = '22222222-2222-4222-8222-222222222222';
+		const result = {
+			id,
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'webhook',
-			payload: {
-				schemaVersion: 1,
-				integration: 'webhook',
-				source: 'widget',
-				entity: { id: 'widget-1', name: 'Колесо' },
-				lead: {
-					id: 'lead-1',
-					createdAt: '2026-07-24T00:00:00.000Z'
-				},
-				destination: { webhookUrl: 'https://example.com' }
-			},
-			resolvedAt: null,
-			retryingAt: null
+			integration: 'webhook' as const,
+			retryingAt: '2026-08-05T00:00:00.000Z'
 		};
-		const updateMany = jest.fn();
-		const outboxCreate = jest.fn();
-		const transaction = {
-			integrationDeliveryFailure: {
-				findUnique: jest.fn().mockResolvedValue(failure),
-				updateMany
-			},
-			outboxEvent: {
-				create: outboxCreate
-			}
-		};
+		const transaction = jest.fn();
 		const prisma = {
 			integrationDeliveryFailure: {
-				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
+				findFirst: jest.fn().mockResolvedValue(null)
 			},
-			$transaction: jest.fn(async callback => callback(transaction))
+			$transaction: transaction
 		} as unknown as PrismaService;
+		const remote = {
+			retryFailure: jest
+				.fn()
+				.mockRejectedValue(
+					new NotificationDeliveryInternalApiError(404, 'Не найдено')
+				)
+		} as unknown as NotificationDeliveryClientService;
+		const widgets = {
+			retryFailure: jest.fn().mockResolvedValue(result)
+		} as unknown as WidgetsDeliveryFailuresClientService;
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
+			{} as AdminEventLogService,
+			remote,
+			widgets
+		);
+
+		await expect(service.retryFailure(id, 'cuid-admin')).resolves.toEqual(
+			result
+		);
+		expect(
+			prisma.integrationDeliveryFailure.findFirst
+		).toHaveBeenCalledWith({
+			where: {
+				id,
+				integration: {
+					in: [...CORE_OWNED_MESSAGING_KINDS]
+				}
+			},
+			select: { id: true }
+		});
+		expect(transaction).not.toHaveBeenCalled();
+	});
+
+	it('routes a Widgets-owned provider close without writing a duplicate Core audit', async () => {
+		const id = '22222222-2222-4222-8222-222222222222';
+		const result = {
+			id,
+			eventId: '11111111-1111-4111-8111-111111111111',
+			integration: 'amo-crm' as const,
+			resolvedAt: '2026-08-05T00:00:00.000Z',
+			resolution: 'CLOSED_NO_RETRY' as const,
+			resolutionComment: 'Проверено вручную'
+		};
+		const transaction = jest.fn();
+		const prisma = {
+			integrationDeliveryFailure: {
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			$transaction: transaction
+		} as unknown as PrismaService;
+		const notificationClose = jest
+			.fn()
+			.mockRejectedValue(
+				new NotificationDeliveryInternalApiError(404, 'Не найдено')
+			);
+		const widgetsClose = jest.fn().mockResolvedValue(result);
+		const adminEventLog = {
+			record: jest.fn(),
+			recordInTransaction: jest.fn()
+		} as unknown as AdminEventLogService;
+		const service = new MessagingAdminService(
+			prisma,
+			{} as RabbitMqManagementService,
+			adminEventLog,
 			{
-				recordInTransaction: jest.fn()
-			} as unknown as AdminEventLogService,
-			notificationDelivery
+				closeFailure: notificationClose
+			} as unknown as NotificationDeliveryClientService,
+			{
+				closeFailure: widgetsClose
+			} as unknown as WidgetsDeliveryFailuresClientService
 		);
 
 		await expect(
-			service.retryFailure(failure.id, 'admin-1')
-		).rejects.toThrow('Повтор устаревшего события интеграции недоступен');
-		expect(updateMany).not.toHaveBeenCalled();
-		expect(outboxCreate).not.toHaveBeenCalled();
+			service.closeFailure(
+				id,
+				'cm0abc1230000qwertyuiopas',
+				'Проверено вручную'
+			)
+		).resolves.toEqual(result);
+		expect(widgetsClose).toHaveBeenCalledWith(
+			id,
+			'cm0abc1230000qwertyuiopas',
+			'Проверено вручную'
+		);
+		expect(transaction).not.toHaveBeenCalled();
+		expect(adminEventLog.record).not.toHaveBeenCalled();
+		expect(adminEventLog.recordInTransaction).not.toHaveBeenCalled();
 	});
 
 	it('rejects a malformed non-lead retry before changing its state', async () => {
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'payment-telegram',
+			integration: 'telegram-destination-unavailable',
 			payload: {
 				schemaVersion: 1,
 				eventType: 'payment.succeeded.v1',
@@ -280,11 +451,11 @@ describe('MessagingAdminService', () => {
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn()
 			} as unknown as AdminEventLogService,
-			notificationDelivery
+			notificationDelivery,
+			widgetsFailures
 		);
 
 		await expect(
@@ -296,7 +467,13 @@ describe('MessagingAdminService', () => {
 		expect(outboxCreate).not.toHaveBeenCalled();
 	});
 
-	it.each(['DATABASE_BACKUP', 'NOTIFICATION_DELIVERY_DATABASE_BACKUP'])(
+	it.each([
+		'DATABASE_BACKUP',
+		'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
+		'CAMPAIGNS_DATABASE_BACKUP',
+		'REPORTING_DATABASE_BACKUP',
+		'WIDGETS_DATABASE_BACKUP'
+	])(
 		'reopens a failed %s job in the same transaction as manual retry Outbox',
 		async jobType => {
 			const eventId = '11111111-1111-4111-8111-111111111111';
@@ -339,11 +516,11 @@ describe('MessagingAdminService', () => {
 			const service = new MessagingAdminService(
 				prisma,
 				{} as RabbitMqManagementService,
-				{} as LeadIntegrationDestinationService,
 				{
 					recordInTransaction: jest.fn().mockResolvedValue({})
 				} as unknown as AdminEventLogService,
-				notificationDelivery
+				notificationDelivery,
+				widgetsFailures
 			);
 
 			await service.retryFailure(failure.id, 'admin-1');
@@ -379,25 +556,12 @@ describe('MessagingAdminService', () => {
 		}
 	);
 
-	it('closes an unresolved failure without publishing and removes its credential snapshot', async () => {
+	it('closes an unresolved Core-owned failure without publishing', async () => {
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'webhook',
-			payload: {
-				schemaVersion: 2,
-				eventType: 'lead.integration.requested.v2',
-				integration: 'webhook',
-				source: 'widget',
-				entity: { id: 'widget-1', name: 'Колесо' },
-				lead: {
-					id: 'lead-1',
-					createdAt: '2026-07-24T00:00:00.000Z'
-				},
-				destination: {
-					credentialRef: '33333333-3333-4333-8333-333333333333'
-				}
-			},
+			integration: 'widgets-admin-audit',
+			payload: {},
 			resolvedAt: null,
 			retryingAt: null
 		};
@@ -406,9 +570,6 @@ describe('MessagingAdminService', () => {
 			integrationDeliveryFailure: {
 				findUnique: jest.fn().mockResolvedValue(failure),
 				updateMany: jest.fn().mockResolvedValue({ count: 1 })
-			},
-			integrationCredentialSnapshot: {
-				deleteMany: jest.fn().mockResolvedValue({ count: 1 })
 			},
 			integrationDeliveryReceipt: {
 				findUnique: jest.fn()
@@ -429,9 +590,9 @@ describe('MessagingAdminService', () => {
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			adminEventLog,
-			notificationDelivery
+			notificationDelivery,
+			widgetsFailures
 		);
 
 		const result = await service.closeFailure(
@@ -454,14 +615,6 @@ describe('MessagingAdminService', () => {
 				resolutionComment: 'Причина устранена вручную',
 				resolvedById: 'admin-1',
 				activeRetryToken: null
-			}
-		});
-		expect(
-			transaction.integrationCredentialSnapshot.deleteMany
-		).toHaveBeenCalledWith({
-			where: {
-				eventId: failure.eventId,
-				integration: 'webhook'
 			}
 		});
 		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
@@ -499,11 +652,11 @@ describe('MessagingAdminService', () => {
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn().mockResolvedValue({})
 			} as unknown as AdminEventLogService,
-			notificationDelivery
+			notificationDelivery,
+			widgetsFailures
 		);
 
 		await expect(
@@ -522,7 +675,7 @@ describe('MessagingAdminService', () => {
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'webhook',
+			integration: 'widgets-admin-audit',
 			resolvedAt: null,
 			retryingAt: null
 		};
@@ -549,11 +702,11 @@ describe('MessagingAdminService', () => {
 				$transaction: jest.fn(async callback => callback(transaction))
 			} as unknown as PrismaService,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			{
 				recordInTransaction: jest.fn().mockResolvedValue({})
 			} as unknown as AdminEventLogService,
-			notificationDelivery
+			notificationDelivery,
+			widgetsFailures
 		);
 
 		await expect(
@@ -587,9 +740,9 @@ describe('MessagingAdminService', () => {
 				}
 			} as unknown as PrismaService,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			adminEventLog,
-			remote
+			remote,
+			widgetsFailures
 		);
 
 		await expect(
@@ -628,9 +781,9 @@ describe('MessagingAdminService', () => {
 				}
 			} as unknown as PrismaService,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			adminEventLog,
-			remote
+			remote,
+			widgetsFailures
 		);
 
 		await expect(
@@ -655,11 +808,11 @@ describe('MessagingAdminService', () => {
 				$transaction: jest.fn()
 			} as unknown as PrismaService,
 			{} as RabbitMqManagementService,
-			{} as LeadIntegrationDestinationService,
 			{} as AdminEventLogService,
 			{
 				getFailures: remoteGetFailures
-			} as unknown as NotificationDeliveryClientService
+			} as unknown as NotificationDeliveryClientService,
+			widgetsFailures
 		);
 
 		await expect(service.getFailures(101, 100)).rejects.toBeInstanceOf(
@@ -668,5 +821,178 @@ describe('MessagingAdminService', () => {
 		expect(localFindMany).not.toHaveBeenCalled();
 		expect(localCount).not.toHaveBeenCalled();
 		expect(remoteGetFailures).not.toHaveBeenCalled();
+	});
+
+	it('merges Core, Notification Delivery, and Widgets failures before slicing the requested page', async () => {
+		const coreFailures = [
+			{
+				...remoteFailure(
+					'cccccccc-cccc-4ccc-8ccc-ccccccccccc5',
+					'widgets-admin-audit',
+					'2026-08-05T12:05:00.000Z'
+				),
+				failedAt: new Date('2026-08-05T12:05:00.000Z'),
+				payload: {}
+			},
+			{
+				...remoteFailure(
+					'cccccccc-cccc-4ccc-8ccc-ccccccccccc3',
+					'reporting-admin-audit',
+					'2026-08-05T12:03:00.000Z'
+				),
+				failedAt: new Date('2026-08-05T12:03:00.000Z'),
+				payload: {}
+			}
+		];
+		const coreFindMany = jest.fn().mockResolvedValue(coreFailures);
+		const coreCount = jest.fn().mockResolvedValue(2);
+		const transaction = jest.fn(async operations =>
+			Promise.all(operations)
+		);
+		const notificationItems = [
+			remoteFailure(
+				'nnnnnnnn-nnnn-4nnn-8nnn-nnnnnnnnnn04',
+				'email',
+				'2026-08-05T12:04:00.000Z'
+			),
+			remoteFailure(
+				'nnnnnnnn-nnnn-4nnn-8nnn-nnnnnnnnnn01',
+				'telegram',
+				'2026-08-05T12:01:00.000Z'
+			)
+		];
+		const widgetsItems = [
+			remoteFailure(
+				'wwwwwwww-wwww-4www-8www-wwwwwwwwww06',
+				'webhook',
+				'2026-08-05T12:06:00.000Z'
+			),
+			remoteFailure(
+				'wwwwwwww-wwww-4www-8www-wwwwwwwwww02',
+				'bitrix24',
+				'2026-08-05T12:02:00.000Z'
+			)
+		];
+		const notificationGetFailures = jest.fn().mockResolvedValue({
+			items: notificationItems,
+			total: 2,
+			page: 1,
+			limit: 4,
+			totalPages: 1
+		});
+		const widgetsGetFailures = jest.fn().mockResolvedValue({
+			items: widgetsItems,
+			total: 2,
+			page: 1,
+			limit: 4,
+			totalPages: 1
+		});
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: coreFindMany,
+					count: coreCount
+				},
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getFailures: notificationGetFailures
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getFailures: widgetsGetFailures
+			} as unknown as WidgetsDeliveryFailuresClientService
+		);
+
+		const result = await service.getFailures(2, 2);
+		expect(result).toEqual(
+			expect.objectContaining({
+				total: 6,
+				page: 2,
+				limit: 2,
+				totalPages: 3
+			})
+		);
+		expect(result.items.map(item => item.id)).toEqual([
+			notificationItems[0].id,
+			coreFailures[1].id
+		]);
+		expect(coreFindMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					integration: { in: [...CORE_OWNED_MESSAGING_KINDS] }
+				},
+				take: 4
+			})
+		);
+		expect(notificationGetFailures).toHaveBeenCalledWith(1, 4, {});
+		expect(widgetsGetFailures).toHaveBeenCalledWith(1, 4, {});
+	});
+
+	it('queries only Widgets for a provider integration while preserving pagination', async () => {
+		const widgetsItems = [
+			remoteFailure(
+				'widget-failure-1',
+				'webhook',
+				'2026-08-05T12:05:00.000Z'
+			),
+			remoteFailure(
+				'widget-failure-2',
+				'webhook',
+				'2026-08-05T12:04:00.000Z'
+			),
+			remoteFailure(
+				'widget-failure-3',
+				'webhook',
+				'2026-08-05T12:03:00.000Z'
+			),
+			remoteFailure(
+				'widget-failure-4',
+				'webhook',
+				'2026-08-05T12:02:00.000Z'
+			)
+		];
+		const coreTransaction = jest.fn();
+		const notificationGetFailures = jest.fn();
+		const widgetsGetFailures = jest.fn().mockResolvedValue({
+			items: widgetsItems,
+			total: 5,
+			page: 1,
+			limit: 4,
+			totalPages: 2
+		});
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: jest.fn(),
+					count: jest.fn()
+				},
+				$transaction: coreTransaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getFailures: notificationGetFailures
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getFailures: widgetsGetFailures
+			} as unknown as WidgetsDeliveryFailuresClientService
+		);
+
+		await expect(
+			service.getFailures(2, 2, { integration: 'webhook' })
+		).resolves.toEqual({
+			items: widgetsItems.slice(2, 4),
+			total: 5,
+			page: 2,
+			limit: 2,
+			totalPages: 3
+		});
+		expect(coreTransaction).not.toHaveBeenCalled();
+		expect(notificationGetFailures).not.toHaveBeenCalled();
+		expect(widgetsGetFailures).toHaveBeenCalledWith(1, 4, {
+			integration: 'webhook'
+		});
 	});
 });

@@ -15,7 +15,15 @@ const execFileAsync = promisify(execFile);
 
 export const DATABASE_RESTORE_MAX_FILE_SIZE_BYTES = 49 * 1024 * 1024;
 const CORE_DATABASE_SCHEMA = 'public';
-const NOTIFICATION_DELIVERY_DATABASE_SCHEMA = 'notification_delivery';
+const SERVICE_DATABASE_SCHEMAS = [
+	{
+		schema: 'notification_delivery',
+		label: 'Notification Delivery'
+	},
+	{ schema: 'campaigns', label: 'Campaigns' },
+	{ schema: 'reporting', label: 'Reporting' },
+	{ schema: 'widgets', label: 'Widgets' }
+] as const;
 const REPORTING_PRODUCER_FUNCTION_SIGNATURES = [
 	'public.reporting_producers_enabled()',
 	'public.reporting_iso_timestamp(timestamp without time zone)',
@@ -255,15 +263,17 @@ export class DatabaseRestoreService {
 			);
 		}
 
-		const containsNotificationDeliverySchema = entries.some(entry =>
-			new RegExp(
-				`(^|\\s)${NOTIFICATION_DELIVERY_DATABASE_SCHEMA}(\\s|$)`,
-				'i'
-			).test(entry)
+		const serviceDump = SERVICE_DATABASE_SCHEMAS.find(({ schema }) =>
+			entries.some(entry =>
+				new RegExp(
+					`^\\d+;\\s+\\d+\\s+\\d+\\s+SCHEMA\\s+-\\s+${schema}(\\s|$)`,
+					'i'
+				).test(entry)
+			)
 		);
-		if (containsNotificationDeliverySchema) {
+		if (serviceDump) {
 			throw new BadRequestException(
-				'Dump Notification Delivery нельзя восстанавливать в основную БД'
+				`Dump ${serviceDump.label} нельзя восстанавливать в основную БД`
 			);
 		}
 

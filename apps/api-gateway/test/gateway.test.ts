@@ -320,6 +320,94 @@ describe('API Gateway config', () => {
 		);
 	});
 
+	it('routes the complete Widgets API with explicit auth policies', () => {
+		const widgetsOrigin = 'http://127.0.0.1:4700';
+		const protectedRoutes = [
+			['widgets-admin', '/api/v1/widgets/admin'],
+			['widgets-management', '/api/v1/widgets'],
+			['quizzes-management', '/api/v1/quizzes'],
+			['callbacks-management', '/api/v1/callbacks'],
+			['countdown-timers-management', '/api/v1/countdown-timers'],
+			['stop-offers-management', '/api/v1/stop-offers'],
+			['online-consultants-management', '/api/v1/online-consultants'],
+			['calculators-management', '/api/v1/calculators'],
+			['widget-settings', '/api/v1/widget-settings'],
+			['widget-runtime', '/api/v1/widget-runtime']
+		] as const;
+		const publicRoutes = [
+			['widget-public', '/api/v1/widget'],
+			['quiz-public', '/api/v1/quiz'],
+			['callback-public', '/api/v1/callback'],
+			['countdown-timer-public', '/api/v1/countdown-timer'],
+			['stop-offer-public', '/api/v1/stop-offer'],
+			['online-consultant-public', '/api/v1/online-consultant'],
+			['calculator-public', '/api/v1/calculator'],
+			['widget-events', '/api/v1/widget-events']
+		] as const;
+		const widgetRoutes = [
+			...protectedRoutes.map(([id, pathPrefix]) => ({
+				id,
+				pathPrefix,
+				upstreamUrl: widgetsOrigin,
+				authPolicy: 'required',
+				timeoutMs: 60_000
+			})),
+			...publicRoutes.map(([id, pathPrefix]) => ({
+				id,
+				pathPrefix,
+				upstreamUrl: widgetsOrigin,
+				authPolicy: 'optional',
+				timeoutMs: 60_000
+			}))
+		];
+		const config = loadConfig({
+			...baseEnv,
+			GATEWAY_ROUTES_JSON: JSON.stringify([
+				...widgetRoutes,
+				{
+					id: 'monolith',
+					pathPrefix: '/api/v1',
+					upstreamUrl: 'http://127.0.0.1:4200',
+					authPolicy: 'optional',
+					timeoutMs: 60_000
+				}
+			])
+		});
+
+		assert.equal(config.routes.length, 19);
+		const routeIndex = (id: string): number =>
+			config.routes.findIndex(route => route.id === id);
+		assert.ok(
+			routeIndex('widgets-admin') < routeIndex('widgets-management')
+		);
+		assert.ok(
+			routeIndex('online-consultants-management') <
+				routeIndex('online-consultant-public')
+		);
+		for (const [id, pathPrefix] of protectedRoutes) {
+			const route = matchGatewayRoute(
+				`${pathPrefix}/example`,
+				config.routes
+			);
+			assert.equal(route?.id, id);
+			assert.equal(route?.authPolicy, 'required');
+			assert.equal(route?.upstreamUrl.origin, widgetsOrigin);
+		}
+		for (const [id, pathPrefix] of publicRoutes) {
+			const route = matchGatewayRoute(
+				`${pathPrefix}/example`,
+				config.routes
+			);
+			assert.equal(route?.id, id);
+			assert.equal(route?.authPolicy, 'optional');
+			assert.equal(route?.upstreamUrl.origin, widgetsOrigin);
+		}
+		assert.equal(
+			matchGatewayRoute('/api/v1/widgets-admin', config.routes)?.id,
+			'monolith'
+		);
+	});
+
 	it('fails fast for legacy, malformed and incomplete route config', () => {
 		assert.throws(
 			() =>

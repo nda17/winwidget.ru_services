@@ -1,10 +1,10 @@
 import {
+	CORE_RABBITMQ_TOPOLOGY_KINDS,
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
 	MANUAL_RETRY_EXCHANGE,
-	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
 	MESSAGING_ROUTING_KEYS,
 	MessagingKind,
@@ -607,7 +607,7 @@ export class RabbitMqService
 			durable: true
 		});
 
-		for (const kind of MESSAGING_KINDS) {
+		for (const kind of CORE_RABBITMQ_TOPOLOGY_KINDS) {
 			const queue = MESSAGING_QUEUE_NAMES[kind];
 			const routingKey = MESSAGING_ROUTING_KEYS[kind];
 			const deadLetterQueue = `${queue}.dead-letter`;

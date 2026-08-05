@@ -15,7 +15,6 @@ import { randomUUID } from 'node:crypto';
 import { ReportingAuthIntrospectionService } from './reporting-auth-introspection.service';
 import {
 	REPORTING_AUTH_INTROSPECTION_PATH,
-	REPORTING_PROJECTION_SNAPSHOT_CONTENT_TYPE,
 	REPORTING_PROJECTION_SNAPSHOT_PATH,
 	REPORTING_SCHEDULE_POLICY_CONFIRM_PATH,
 	REPORTING_SCHEDULE_POLICY_PATH
@@ -48,31 +47,12 @@ export class ReportingInternalController {
 	}
 
 	@Get(REPORTING_PROJECTION_SNAPSHOT_PATH)
-	@HttpCode(200)
-	async snapshot(
+	snapshot(
 		@Req() request: Request,
-		@Res() response: Response
-	): Promise<void> {
-		response.status(200);
-		response.setHeader(
-			'Content-Type',
-			`${REPORTING_PROJECTION_SNAPSHOT_CONTENT_TYPE}; charset=utf-8`
-		);
-		response.setHeader('Cache-Control', 'no-store');
-		response.setHeader('X-Accel-Buffering', 'no');
+		@Res({ passthrough: true }) response: Response
+	): never {
 		this.setCorrelationId(request, response);
-
-		try {
-			await this.projectionSnapshot.stream(request, response);
-			response.end();
-		} catch (error) {
-			if (!response.headersSent) throw error;
-			response.destroy(
-				error instanceof Error
-					? error
-					: new Error('Reporting projection snapshot failed')
-			);
-		}
+		return this.projectionSnapshot.retired();
 	}
 
 	@Put(REPORTING_SCHEDULE_POLICY_PATH)

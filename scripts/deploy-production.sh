@@ -83,6 +83,7 @@ MAINTENANCE_READINESS_URL="${MAINTENANCE_READINESS_URL:-http://127.0.0.1:4300/he
 NOTIFICATION_DELIVERY_READINESS_URL="${NOTIFICATION_DELIVERY_READINESS_URL:-http://127.0.0.1:4401/health/ready}"
 CAMPAIGNS_READINESS_URL="${CAMPAIGNS_READINESS_URL:-http://127.0.0.1:4500/health/ready}"
 REPORTING_READINESS_URL="${REPORTING_READINESS_URL:-http://127.0.0.1:4600/health/ready}"
+WIDGETS_READINESS_URL="${WIDGETS_READINESS_URL:-http://127.0.0.1:4700/health/ready}"
 NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
@@ -103,6 +104,8 @@ source "$server_root/scripts/core-database-production-guard.sh"
 source "$server_root/scripts/reporting-database-lifecycle.sh"
 # shellcheck source=scripts/reporting-cutover-lifecycle.sh
 source "$server_root/scripts/reporting-cutover-lifecycle.sh"
+# shellcheck source=scripts/widgets-database-lifecycle.sh
+source "$server_root/scripts/widgets-database-lifecycle.sh"
 # shellcheck source=scripts/campaigns-contract-migration-guard.sh
 source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
@@ -120,6 +123,31 @@ if [[ -n "$dirty_files" ]]; then
 	echo "$dirty_files" >&2
 	exit 1
 fi
+
+widgets_automatic_prod_push="${WIDGETS_AUTOMATIC_PROD_PUSH:-false}"
+widgets_deploy_action="$(
+	widgets_full_deploy_action "$widgets_automatic_prod_push"
+)" || {
+	echo 'Widgets ownership state is invalid; refusing full deployment.' >&2
+	exit 1
+}
+case "$widgets_deploy_action" in
+defer)
+	echo "Automatic backend revision $deploy_revision is verified but deferred."
+	echo 'Widgets ownership is not active; only the manual widgets target may perform the first cutover.'
+	exit 0
+	;;
+block)
+	echo 'Manual full deployment is blocked until the one-time Widgets cutover is complete.' >&2
+	echo 'Run the manual widgets deployment target; routine all deployments cannot activate ownership.' >&2
+	exit 1
+	;;
+deploy) ;;
+*)
+	echo 'Widgets full deployment action is invalid.' >&2
+	exit 1
+	;;
+esac
 
 # database-restore-production-guard: before-mutation
 database_restore_guard_assert_before_mutation \
@@ -232,12 +260,15 @@ export CAMPAIGNS_REVISION="$deploy_revision"
 export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$deploy_revision"
 export REPORTING_REVISION="$deploy_revision"
 export REPORTING_IMAGE="winwidget-reporting:git-$deploy_revision"
+export WIDGETS_REVISION="$deploy_revision"
+export WIDGETS_IMAGE="winwidget-widgets:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
 echo "Building gateway image: winwidget-api-gateway:$APP_VERSION"
 echo "Building maintenance image: $MAINTENANCE_IMAGE"
 echo "Building isolated database restore image: $DATABASE_RESTORE_IMAGE"
+echo "Building Widgets image: $WIDGETS_IMAGE"
 echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
 echo "Building Campaigns image: $CAMPAIGNS_IMAGE"
 echo "Building Reporting image for the coordinated backend revision: $REPORTING_IMAGE"
@@ -290,7 +321,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION)
+		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION)
 			continue
 			;;
 	esac
@@ -387,6 +418,9 @@ assert_distinct_database_roles() {
 		REPORTING_DATABASE_URL
 		REPORTING_MIGRATION_DATABASE_URL
 		REPORTING_BACKUP_URL
+		WIDGETS_DATABASE_URL
+		WIDGETS_MIGRATION_DATABASE_URL
+		WIDGETS_BACKUP_URL
 	)
 	local -a role_users=()
 	local key
@@ -399,7 +433,7 @@ assert_distinct_database_roles() {
 	for ((left = 0; left < ${#role_users[@]}; left++)); do
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
-				echo "Core, Notification Delivery, Campaigns and Reporting database URLs must use thirteen distinct PostgreSQL roles." >&2
+				echo "Core, Notification Delivery, Campaigns, Reporting and Widgets database URLs must use sixteen distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -595,6 +629,14 @@ case "$mode" in
 		require_env_key "REPORTING_POSTGRES_DATA_VOLUME"
 		require_env_key "REPORTING_POSTGRES_ADMIN_USER"
 		require_env_key "REPORTING_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "WIDGETS_DATABASE_URL"
+		require_env_key "WIDGETS_MIGRATION_DATABASE_URL"
+		require_env_key "WIDGETS_BACKUP_URL"
+		require_env_key "WIDGETS_POSTGRES_IMAGE"
+		require_env_key "WIDGETS_POSTGRES_PORT"
+		require_env_key "WIDGETS_POSTGRES_DATA_VOLUME"
+		require_env_key "WIDGETS_POSTGRES_ADMIN_USER"
+		require_env_key "WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "CORE_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "DATABASE_RESTORE_STORAGE_DIR"
 		require_env_key "DATABASE_RESTORE_QUEUE_SECRET"
@@ -615,6 +657,7 @@ case "$mode" in
 		require_env_key "RABBITMQ_NOTIFICATION_DELIVERY_URL"
 		require_env_key "RABBITMQ_CAMPAIGNS_URL"
 		require_env_key "RABBITMQ_REPORTING_URL"
+		require_env_key "RABBITMQ_WIDGETS_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -651,6 +694,20 @@ case "$mode" in
 		require_env_key "REPORTING_OUTBOX_BATCH_SIZE"
 		require_env_key "REPORTING_OUTBOX_POLL_INTERVAL_MS"
 		require_env_key "REPORTING_OUTBOX_RETENTION_DAYS"
+		require_env_key "WIDGETS_INTERNAL_TOKEN"
+		require_env_key "WIDGETS_INTERNAL_TIMEOUT_MS"
+		require_env_key "WIDGETS_ENTITLEMENT_MAX_STALENESS_MS"
+		require_env_key "WIDGETS_PROCESS_ROLE"
+		require_env_key "WIDGETS_LISTEN_HOST"
+		require_env_key "WIDGETS_PORT"
+		require_env_key "WIDGETS_CORE_INTERNAL_BASE_URL"
+		require_env_key "WIDGETS_INTERNAL_BASE_URL"
+		require_env_key "WIDGETS_PREFETCH"
+		require_env_key "WIDGETS_OUTBOX_BATCH_SIZE"
+		require_env_key "WIDGETS_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "WIDGETS_OUTBOX_RETENTION_DAYS"
+		require_env_key "WIDGETS_RECEIPT_RETENTION_DAYS"
+		require_env_key "WIDGETS_FAILURE_DETAIL_RETENTION_DAYS"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
 		require_env_key "MAINTENANCE_HEALTH_PORT"
@@ -887,6 +944,45 @@ case "$mode" in
 			echo "REPORTING_OUTBOX_RETENTION_DAYS must be between 1 and 365" >&2
 			exit 1
 		fi
+		if [[ "$(get_env_value WIDGETS_PROCESS_ROLE)" != "all" ||
+			"$(get_env_value WIDGETS_LISTEN_HOST)" != "127.0.0.1" ||
+			"$(get_env_value WIDGETS_PORT)" != "4700" ||
+			"$(get_env_value WIDGETS_CORE_INTERNAL_BASE_URL)" != "http://127.0.0.1:4200" ||
+			"$(get_env_value WIDGETS_INTERNAL_BASE_URL)" != "http://127.0.0.1:4700" ]]; then
+			echo 'Widgets must run as the loopback-only single-VPS all role on ports 4200/4700.' >&2
+			exit 1
+		fi
+		widgets_internal_token="$(get_env_value WIDGETS_INTERNAL_TOKEN)"
+		if [[ "$widgets_internal_token" == change_me* ||
+			"$widgets_internal_token" == 'ci_widgets_internal_token_for_isolated_verify_20260804' ||
+			${#widgets_internal_token} -lt 32 ]]; then
+			echo 'WIDGETS_INTERNAL_TOKEN must be a production-only secret of at least 32 characters.' >&2
+			exit 1
+		fi
+		unset widgets_internal_token
+		widgets_internal_timeout_ms="$(get_env_value WIDGETS_INTERNAL_TIMEOUT_MS)"
+		widgets_entitlement_max_staleness_ms="$(get_env_value WIDGETS_ENTITLEMENT_MAX_STALENESS_MS)"
+		widgets_prefetch="$(get_env_value WIDGETS_PREFETCH)"
+		widgets_outbox_batch_size="$(get_env_value WIDGETS_OUTBOX_BATCH_SIZE)"
+		widgets_outbox_poll_interval_ms="$(get_env_value WIDGETS_OUTBOX_POLL_INTERVAL_MS)"
+		widgets_outbox_retention_days="$(get_env_value WIDGETS_OUTBOX_RETENTION_DAYS)"
+		widgets_receipt_retention_days="$(get_env_value WIDGETS_RECEIPT_RETENTION_DAYS)"
+		widgets_failure_detail_retention_days="$(get_env_value WIDGETS_FAILURE_DETAIL_RETENTION_DAYS)"
+		if [[ ! "$widgets_internal_timeout_ms" =~ ^[0-9]+$ ]] ||
+			((widgets_internal_timeout_ms < 500 || widgets_internal_timeout_ms > 60000)) ||
+			[[ ! "$widgets_entitlement_max_staleness_ms" =~ ^[0-9]+$ ]] ||
+			((widgets_entitlement_max_staleness_ms < 60000 ||
+				widgets_entitlement_max_staleness_ms > 31968000000)) ||
+			[[ ! "$widgets_prefetch" =~ ^[1-9][0-9]*$ ]] || ((widgets_prefetch > 100)) ||
+			[[ ! "$widgets_outbox_batch_size" =~ ^[1-9][0-9]*$ ]] || ((widgets_outbox_batch_size > 500)) ||
+			[[ ! "$widgets_outbox_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((widgets_outbox_poll_interval_ms < 100 || widgets_outbox_poll_interval_ms > 60000)) ||
+			[[ ! "$widgets_outbox_retention_days" =~ ^[1-9][0-9]*$ ]] || ((widgets_outbox_retention_days > 365)) ||
+			[[ ! "$widgets_receipt_retention_days" =~ ^[1-9][0-9]*$ ]] || ((widgets_receipt_retention_days > 730)) ||
+			[[ ! "$widgets_failure_detail_retention_days" =~ ^[1-9][0-9]*$ ]] || ((widgets_failure_detail_retention_days > 365)); then
+			echo 'Widgets timeout, entitlement staleness, prefetch, Outbox and retention settings are outside the reviewed bounds.' >&2
+			exit 1
+		fi
 		require_env_base64url_secret DATABASE_RESTORE_QUEUE_SECRET 43 128
 		database_restore_queue_secret="$(
 			get_env_value DATABASE_RESTORE_QUEUE_SECRET
@@ -895,6 +991,7 @@ case "$mode" in
 			"$database_restore_queue_secret" == "$(get_env_value NOTIFICATION_DELIVERY_INTERNAL_TOKEN)" ||
 			"$database_restore_queue_secret" == "$(get_env_value CAMPAIGNS_INTERNAL_TOKEN)" ||
 			"$database_restore_queue_secret" == "$(get_env_value REPORTING_INTERNAL_TOKEN)" ||
+			"$database_restore_queue_secret" == "$(get_env_value WIDGETS_INTERNAL_TOKEN)" ||
 			"$database_restore_queue_secret" == "$(get_env_value PAYMENT_METHOD_ENCRYPTION_KEY)" ]]; then
 			echo 'DATABASE_RESTORE_QUEUE_SECRET must be a unique production-only secret.' >&2
 			exit 1
@@ -931,6 +1028,9 @@ case "$mode" in
 		assert_database_restore_admin_secret_file \
 			REPORTING_POSTGRES_ADMIN_PASSWORD_FILE \
 			"$APP_ROOT/deploy/backend/.reporting-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.widgets-postgres-admin-password"
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
 			SMTP_GREETING_TIMEOUT_MS \
@@ -1369,6 +1469,7 @@ routine_stop_services=(
 	notification-delivery-worker
 	integration-worker
 	reporting-service
+	widgets-service
 )
 declare -A routine_stop_container_ids=()
 reporting_outcome_route_state_before='unknown'
@@ -1455,6 +1556,7 @@ restore_routine_containers_after_failed_stop() {
 
 	echo "Restoring the exact pre-migration runtime after an unsafe stop." >&2
 	for service in \
+		widgets-service \
 		reporting-service \
 		outbox-publisher \
 		integration-worker \
@@ -1521,7 +1623,10 @@ restore_routine_containers_after_failed_stop() {
 					"$CAMPAIGNS_READINESS_URL" >/dev/null; } &&
 			{ [[ -z "${routine_stop_container_ids[reporting-service]:-}" ]] ||
 				curl -fsS --connect-timeout 2 --max-time 5 \
-					"$REPORTING_READINESS_URL" >/dev/null; }; then
+					"$REPORTING_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[widgets-service]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$WIDGETS_READINESS_URL" >/dev/null; }; then
 			if [[ -n "${routine_stop_container_ids[reporting-service]:-}" ]]; then
 				if [[ "$reporting_outcome_route_state_before" == 'steady' ]]; then
 					reporting_require_rabbitmq_topology || {
@@ -1986,7 +2091,47 @@ for (const forbidden of [
 	}
 }
 process.stdout.write("Standalone Reporting image artifact verified\n");
-		'
+	'
+}
+
+verify_widgets_image_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"$WIDGETS_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of [
+	"dist/src/main.js",
+	"dist/src/cutover-main.js",
+	"prisma/schema.prisma",
+]) fs.accessSync(required);
+require("@prisma/widgets-client");
+for (const forbidden of [
+	"dist/src/app.module.js",
+	"dist/src/widgets/widgets.service.js",
+	"dist/src/outbox-publisher-main.js",
+	"public/email",
+]) {
+	if (fs.existsSync(forbidden)) {
+		throw new Error(`Widgets image contains Core artifact: ${forbidden}`);
+	}
+}
+const expectedAssets = [
+	"calculator-button.png", "calculator.js", "callback-button.png", "callback.js",
+	"email-logo.png", "gift-button.png", "helpers/libphonenumber-min.js",
+	"helpers/winwidget-phone.js", "online-consultant-button.png",
+	"online-consultant.js", "quiz-button.png", "quiz.js", "stop-offer.js",
+	"timer-button.png", "timer.js", "wheel.js",
+];
+const walk = directory => fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+	const relative = `${directory}/${entry.name}`;
+	return entry.isDirectory() ? walk(relative) : [relative.slice("public/widgets/".length)];
+}).sort();
+if (JSON.stringify(walk("public/widgets")) !== JSON.stringify(expectedAssets)) {
+	throw new Error("Widgets runtime asset manifest drifted");
+}
+process.stdout.write("Standalone Widgets image artifact verified\n");
+	'
 }
 
 verify_database_restore_image_artifact() {
@@ -2001,6 +2146,7 @@ for (const required of [
 	"apps/notification-delivery/prisma/migrations",
 	"apps/campaigns/prisma/migrations",
 	"apps/reporting/prisma/migrations",
+	"apps/widgets/prisma/migrations",
 	"/usr/bin/pg_dump",
 	"/usr/bin/pg_restore",
 	"/usr/bin/psql",
@@ -2010,7 +2156,39 @@ for (const required of [
 	fs.accessSync(required);
 }
 process.stdout.write("Isolated database restore worker image artifact verified\n");
-		'
+	'
+}
+
+validate_widgets_database_urls() {
+	printf '%s\n%s\n%s\n' \
+		"$(get_env_value WIDGETS_DATABASE_URL)" \
+		"$(get_env_value WIDGETS_MIGRATION_DATABASE_URL)" \
+		"$(get_env_value WIDGETS_BACKUP_URL)" |
+		docker run --rm -i --network none \
+			-e "EXPECTED_PORT=$(get_env_value WIDGETS_POSTGRES_PORT)" \
+			--entrypoint node "$WIDGETS_IMAGE" -e '
+const { readFileSync } = require("node:fs");
+const urls = readFileSync(0, "utf8").trim().split("\n").map(value => new URL(value));
+const expectedUsers = [
+	"winwidget_widgets_runtime",
+	"winwidget_widgets_migration",
+	"winwidget_widgets_backup",
+];
+for (const [index, url] of urls.entries()) {
+	const password = decodeURIComponent(url.password);
+	if (
+		url.protocol !== "postgresql:" ||
+		decodeURIComponent(url.username) !== expectedUsers[index] ||
+		url.hostname !== "127.0.0.1" ||
+		url.port !== process.env.EXPECTED_PORT ||
+		url.pathname !== "/winwidget_widgets" ||
+		url.searchParams.get("schema") !== "widgets" ||
+		password.length < 16 ||
+		/[\0\r\n]/.test(password)
+	) throw new Error(`Invalid Widgets database URL boundary at index ${index}`);
+}
+process.stdout.write("Widgets runtime, migration and backup URL boundaries verified\n");
+'
 }
 
 validate_campaigns_database_urls() {
@@ -2058,6 +2236,7 @@ compose_target \
 	--profile notification-delivery-migration \
 	--profile campaigns-migration \
 	--profile reporting-migration \
+	--profile widgets-migration \
 	config --quiet
 compose_target build --provenance=false \
 	api \
@@ -2066,12 +2245,15 @@ compose_target build --provenance=false \
 	database-restore-worker \
 	notification-delivery-worker \
 	campaigns-service \
-	reporting-service
+	reporting-service \
+	widgets-service
 verify_notification_delivery_image_artifact
 verify_campaigns_image_artifact
 verify_reporting_image_artifact
+verify_widgets_image_artifact
 verify_database_restore_image_artifact
 validate_campaigns_database_urls
+validate_widgets_database_urls
 assert_campaigns_contract_migration_applied_for_routine_deploy
 initialize_campaigns_database_lifecycle_guard \
 	"a routine full deployment" identity-if-present
@@ -2771,6 +2953,36 @@ const campaigns = config.routes.find(route => route.id === "campaigns");
 const reporting = config.routes.find(route => route.id === "reporting");
 const monolith = config.routes.find(route => route.id === "monolith");
 const policy = process.env.REPORTING_GATEWAY_POLICY;
+const widgetRoutes = [
+	["widgets-admin", "/api/v1/widgets/admin", "required"],
+	["widgets-management", "/api/v1/widgets", "required"],
+	["quizzes-management", "/api/v1/quizzes", "required"],
+	["callbacks-management", "/api/v1/callbacks", "required"],
+	["countdown-timers-management", "/api/v1/countdown-timers", "required"],
+	["stop-offers-management", "/api/v1/stop-offers", "required"],
+	["online-consultants-management", "/api/v1/online-consultants", "required"],
+	["calculators-management", "/api/v1/calculators", "required"],
+	["widget-settings", "/api/v1/widget-settings", "required"],
+	["widget-runtime", "/api/v1/widget-runtime", "required"],
+	["widget-public", "/api/v1/widget", "optional"],
+	["quiz-public", "/api/v1/quiz", "optional"],
+	["callback-public", "/api/v1/callback", "optional"],
+	["countdown-timer-public", "/api/v1/countdown-timer", "optional"],
+	["stop-offer-public", "/api/v1/stop-offer", "optional"],
+	["online-consultant-public", "/api/v1/online-consultant", "optional"],
+	["calculator-public", "/api/v1/calculator", "optional"],
+	["widget-events", "/api/v1/widget-events", "optional"],
+];
+const widgetsInvalid = widgetRoutes.some(([id, pathPrefix, authPolicy]) => {
+	const route = config.routes.find(candidate => candidate.id === id);
+	return !route ||
+		route.pathPrefix !== pathPrefix ||
+		route.upstreamUrl.origin !== "http://127.0.0.1:4700" ||
+		route.authPolicy !== authPolicy ||
+		route.timeoutMs !== 60000;
+}) || config.routes.filter(
+	route => route.upstreamUrl.origin === "http://127.0.0.1:4700",
+).length !== widgetRoutes.length;
 const commonInvalid =
 	!databaseRestores ||
 	databaseRestores.pathPrefix !== "/api/v1/dev-tools/database-restores" ||
@@ -2789,10 +3001,7 @@ const commonInvalid =
 	monolith.timeoutMs !== 60000;
 const darkInvalid =
 	policy === "dark" &&
-	(config.routes.length !== 3 ||
-		config.routes[0]?.id !== "database-restores" ||
-		config.routes[1]?.id !== "campaigns" ||
-		config.routes[2]?.id !== "monolith" ||
+	(config.routes.length !== 3 + widgetRoutes.length ||
 		reporting ||
 		config.routes.some(
 			route =>
@@ -2801,11 +3010,7 @@ const darkInvalid =
 		));
 const reportingInvalid =
 	policy === "reporting" &&
-	(config.routes.length !== 4 ||
-		config.routes[0]?.id !== "database-restores" ||
-		config.routes[1]?.id !== "campaigns" ||
-		config.routes[2]?.id !== "reporting" ||
-		config.routes[3]?.id !== "monolith" ||
+	(config.routes.length !== 4 + widgetRoutes.length ||
 		!reporting ||
 		reporting.pathPrefix !== "/api/v1/admin/reporting" ||
 		reporting.upstreamUrl.origin !== "http://127.0.0.1:4600" ||
@@ -2814,6 +3019,7 @@ const reportingInvalid =
 if (
 	!["dark", "reporting"].includes(policy) ||
 	commonInvalid ||
+	widgetsInvalid ||
 	darkInvalid ||
 	reportingInvalid
 ) {
@@ -3050,6 +3256,9 @@ campaigns_credentials="$(
 reporting_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_REPORTING_URL"
 )"
+widgets_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_WIDGETS_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -3085,6 +3294,15 @@ if [[ "$reporting_user" != "winwidget-reporting" ]]; then
 	echo "RABBITMQ_REPORTING_URL must use the dedicated winwidget-reporting user" >&2
 	exit 1
 fi
+widgets_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$widgets_credentials")" |
+		base64 --decode
+)"
+widgets_password_base64="$(sed -n '2p' <<<"$widgets_credentials")"
+if [[ "$widgets_user" != "winwidget-widgets" ]]; then
+	echo "RABBITMQ_WIDGETS_URL must use the dedicated winwidget-widgets user" >&2
+	exit 1
+fi
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -3101,6 +3319,7 @@ service_users=(
 	"$notification_delivery_user"
 	"$campaigns_user"
 	"$reporting_user"
+	"$widgets_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -3331,6 +3550,36 @@ rabbitmqctl set_topic_permissions \
 '
 }
 
+provision_widgets_rabbitmq_topic_permissions() {
+	local username="$1"
+	local events_write_pattern
+	local events_read_pattern
+	local dead_letter_pattern
+	events_write_pattern="$WIDGETS_CANONICAL_EVENTS_TOPIC_WRITE"
+	events_read_pattern="$WIDGETS_CANONICAL_EVENTS_TOPIC_READ"
+	dead_letter_pattern="$WIDGETS_CANONICAL_DEAD_LETTER_TOPIC"
+
+	RABBITMQ_PROVISION_USER="$username" \
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_WIDGETS_EVENTS_WRITE="$events_write_pattern" \
+	RABBITMQ_WIDGETS_EVENTS_READ="$events_read_pattern" \
+	RABBITMQ_WIDGETS_DEAD_LETTER="$dead_letter_pattern" \
+		docker exec \
+			-e RABBITMQ_PROVISION_USER \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_WIDGETS_EVENTS_WRITE \
+			-e RABBITMQ_WIDGETS_EVENTS_READ \
+			-e RABBITMQ_WIDGETS_DEAD_LETTER \
+			"$provisioning_rabbitmq_container_id" \
+			sh -ec '
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" "$RABBITMQ_PROVISION_USER"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" "$RABBITMQ_PROVISION_USER" \
+	"winwidget.events" "$RABBITMQ_WIDGETS_EVENTS_WRITE" "$RABBITMQ_WIDGETS_EVENTS_READ"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" "$RABBITMQ_PROVISION_USER" \
+	"winwidget.dead-letter" "$RABBITMQ_WIDGETS_DEAD_LETTER" "$RABBITMQ_WIDGETS_DEAD_LETTER"
+'
+}
+
 assert_campaigns_shared_rabbitmq_topology() {
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
@@ -3425,7 +3674,7 @@ provision_rabbitmq_user \
 	''
 assert_campaigns_shared_rabbitmq_topology
 assert_reporting_shared_rabbitmq_topology
-post_cutover_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|admin\.audit\.(campaigns|reporting)\.v1|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
@@ -3475,6 +3724,14 @@ if [[ "$initial_reporting_outcome_route_state" == 'steady' ]]; then
 else
 	provision_reporting_rabbitmq_topic_permissions "$reporting_user" transition
 fi
+provision_rabbitmq_user \
+	"$widgets_user" \
+	"$widgets_password_base64" \
+	"$WIDGETS_CANONICAL_RABBITMQ_CONFIGURE_PATTERN" \
+	"$WIDGETS_CANONICAL_RABBITMQ_WRITE_PATTERN" \
+	"$WIDGETS_CANONICAL_RABBITMQ_READ_PATTERN" \
+	''
+provision_widgets_rabbitmq_topic_permissions "$widgets_user"
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
 	"$rabbitmq_monitor_password_base64" \
@@ -3531,6 +3788,7 @@ wait_for_rabbitmq_topology() {
 	local rabbitmq_container_id
 	local required_queues
 	local campaigns_required_queues
+	local widgets_required_queues
 	local actual_queues
 	local required_queue
 	local all_ready
@@ -3576,6 +3834,26 @@ for (const kind of CAMPAIGNS_CONSUMER_KINDS) {
 '
 	)"
 	required_queues+=$'\n'"$campaigns_required_queues"
+	widgets_required_queues="$(
+		docker run --rm --network none \
+			--entrypoint node \
+			"$WIDGETS_IMAGE" \
+			-e '
+const {
+	WIDGETS_CONSUMER_KINDS,
+	WIDGETS_QUEUE_NAMES,
+	WIDGETS_RETRY_DELAYS_MS,
+} = require("./dist/src/messaging/widgets-messaging.constants.js");
+for (const kind of WIDGETS_CONSUMER_KINDS) {
+	const queue = WIDGETS_QUEUE_NAMES[kind];
+	process.stdout.write(`${queue}\n${queue}.dead-letter\n`);
+	for (let index = 0; index < WIDGETS_RETRY_DELAYS_MS.length; index += 1) {
+		process.stdout.write(`${queue}.retry.${index + 1}\n`);
+	}
+}
+'
+	)"
+	required_queues+=$'\n'"$widgets_required_queues"
 
 	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 		actual_queues="$(
@@ -5810,6 +6088,12 @@ compose_target \
 	--profile campaigns-migration \
 	run --rm --no-deps campaigns-migrate
 verify_campaigns_database_access_boundaries
+compose_target \
+	--profile widgets-migration \
+	run --rm --no-deps widgets-migrate
+docker run --rm --network host --env-file "$ENV_FILE" \
+	--entrypoint node "$WIDGETS_IMAGE" \
+	dist/src/cutover-main.js verify-steady >/dev/null
 
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	if ! compose_target --profile migration run --rm --no-deps \
@@ -6007,6 +6291,12 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	start_canonical_reporting_runtime "Canonical Reporting"
 	finish_canonical_reporting_runtime "Canonical Reporting"
 
+	compose_target up -d --no-deps --force-recreate widgets-service
+	wait_for_cutover_revision \
+		"$WIDGETS_READINESS_URL" \
+		"$WIDGETS_REVISION" \
+		"Canonical Widgets"
+
 	stop_notification_cutover_services 30 false api
 	compose_target up -d --no-deps --force-recreate api
 	wait_for_cutover_revision \
@@ -6110,7 +6400,8 @@ else
 		maintenance-worker \
 		database-restore-worker \
 		notification-delivery-worker \
-		campaigns-service
+		campaigns-service \
+		widgets-service
 	compose_target up -d --no-deps --force-recreate api
 	compose_target up -d --no-deps --force-recreate api-gateway
 	core_runtime_recovered=true
@@ -6138,18 +6429,23 @@ else
 		echo 'Reporting failed readiness; canonical API, Gateway and workers remain ready.' >&2
 		exit 1
 	fi
+	if ! wait_for_cutover_revision \
+		"$WIDGETS_READINESS_URL" "$WIDGETS_REVISION" "Widgets"; then
+		echo 'Widgets failed readiness after the canonical runtime handoff.' >&2
+		exit 1
+	fi
 	wait_for_rabbitmq_topology
 fi
 
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service rabbitmq || true
-	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500 and 4600:"
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600 and 4700:"
 	ss -ltnp \
-		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 )' ||
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 )' ||
 		true
 }
 
@@ -6166,7 +6462,8 @@ ensure_required_services_running() {
 		database-restore-worker \
 		notification-delivery-worker \
 		campaigns-service \
-		reporting-service; do
+		reporting-service \
+		widgets-service; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -6497,6 +6794,24 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 done
 
 for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if check_deployment_revision "$WIDGETS_READINESS_URL"; then
+		break
+	fi
+
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo "Widgets readiness check failed: $WIDGETS_READINESS_URL"
+		show_api_diagnostics
+		exit 1
+	fi
+
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
+docker run --rm --network host --env-file "$ENV_FILE" \
+	--entrypoint node "$WIDGETS_IMAGE" \
+	dist/src/cutover-main.js verify-steady >/dev/null
+
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	if check_messaging_readiness; then
 		break
 	fi
@@ -6533,7 +6848,8 @@ for service in \
 	database-restore-worker \
 	notification-delivery-worker \
 	campaigns-service \
-	reporting-service; do
+	reporting-service \
+	widgets-service; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -6557,6 +6873,9 @@ for service in \
 	fi
 	if [[ "$service" == "reporting-service" ]]; then
 		expected_image_revision="$REPORTING_REVISION"
+	fi
+	if [[ "$service" == "widgets-service" ]]; then
+		expected_image_revision="$WIDGETS_REVISION"
 	fi
 	if [[ "$image_revision" != "$expected_image_revision" ]]; then
 		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
@@ -6619,6 +6938,10 @@ verify_notification_database_lifecycle_unchanged \
 	"$notification_database_phase_before"
 verify_campaigns_database_lifecycle_unchanged
 reporting_verify_database_lifecycle_unchanged
+[[ "$(widgets_service_identity_state)" == 'active' ]] || {
+	echo 'Widgets ownership marker changed during routine deployment.' >&2
+	exit 1
+}
 
 if [[ "$reporting_cleanup_stop_recovery_active" == 'true' ]]; then
 	reporting_cleanup_stop_recovery_active=false
@@ -6628,4 +6951,4 @@ fi
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 compose_target ps \
-	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service rabbitmq

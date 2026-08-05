@@ -1,12 +1,7 @@
 import { disableAutoRenewalForLifecycleInTransaction } from '@/payment/auto-renewal-state';
 import { PrismaService } from '@/prisma.service';
 import type { AdminBonusAudience } from '@/subscription/dto/admin-activate-subscription.dto';
-import { PLAN_LIMITS } from '@/subscription/subscription.constants';
-import {
-	BadRequestException,
-	ForbiddenException,
-	Injectable
-} from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import {
 	BillingPeriod,
 	AutoRenewalConsentEventType,
@@ -61,16 +56,6 @@ export interface AdminSubscriptionHistoryFilters {
 	createdFrom?: string;
 	createdTo?: string;
 }
-
-export interface AtomicLeadCreationResult<T> {
-	lead: T;
-	newCount: number;
-	limitReached: boolean;
-}
-
-type TransactionOperation<T> = (
-	transaction: Prisma.TransactionClient
-) => Promise<T>;
 
 @Injectable()
 export class SubscriptionService {
@@ -173,7 +158,6 @@ export class SubscriptionService {
 				status: SubscriptionStatus.ACTIVE,
 				startsAt: isActiveSub ? existing.startsAt : now.toDate(),
 				expiresAt,
-				leadsThisPeriod: 0,
 				periodResetsAt
 			},
 			create: {
@@ -183,7 +167,6 @@ export class SubscriptionService {
 				status: SubscriptionStatus.ACTIVE,
 				startsAt: now.toDate(),
 				expiresAt,
-				leadsThisPeriod: 0,
 				periodResetsAt
 			}
 		});
@@ -201,138 +184,12 @@ export class SubscriptionService {
 		}, ATOMIC_TRANSACTION_OPTIONS);
 	}
 
-	async createWidgetWithinLimit<T>(
-		userId: string,
-		createWidget: TransactionOperation<T>
-	): Promise<T> {
-		const result = await this.prisma.$transaction(async transaction => {
-			const subscription = await this.lockOperationalSubscription(
-				transaction,
-				userId
-			);
-			if (!subscription) {
-				return { allowed: false as const, reason: 'unavailable' as const };
-			}
-
-			const normalizedSubscription =
-				await this.normalizeLockedSubscription(transaction, subscription);
-			if (normalizedSubscription.status !== SubscriptionStatus.ACTIVE) {
-				return { allowed: false as const, reason: 'expired' as const };
-			}
-
-			const counts = await Promise.all([
-				transaction.widget.count({ where: { userId } }),
-				transaction.quiz.count({ where: { userId } }),
-				transaction.callback.count({ where: { userId } }),
-				transaction.countdownTimer.count({ where: { userId } }),
-				transaction.stopOffer.count({ where: { userId } }),
-				transaction.onlineConsultant.count({ where: { userId } }),
-				transaction.calculator.count({ where: { userId } })
-			]);
-			const widgetCount = counts.reduce(
-				(total, count) => total + count,
-				0
-			);
-			const limits = PLAN_LIMITS[normalizedSubscription.plan];
-
-			if (widgetCount >= limits.maxWidgets) {
-				return { allowed: false as const, reason: 'limit' as const };
-			}
-
-			return {
-				allowed: true as const,
-				widget: await createWidget(transaction)
-			};
-		}, ATOMIC_TRANSACTION_OPTIONS);
-
-		if (!result.allowed) {
-			if (result.reason === 'limit') {
-				throw new ForbiddenException(
-					'Достигнут лимит виджетов для вашего тарифа'
-				);
-			}
-			if (result.reason === 'expired') {
-				throw new ForbiddenException('Ваша подписка истекла');
-			}
-			throw new ForbiddenException('Создание виджета недоступно');
-		}
-
-		return result.widget;
-	}
-
-	async createLeadWithinLimit<T>(
-		userId: string,
-		createLead: TransactionOperation<T>,
-		onLimitReached?: (
-			transaction: Prisma.TransactionClient,
-			limit: number
-		) => Promise<unknown>
-	): Promise<AtomicLeadCreationResult<T>> {
-		const result = await this.prisma.$transaction(async transaction => {
-			const subscription = await this.lockOperationalSubscription(
-				transaction,
-				userId
-			);
-			if (!subscription) {
-				return { allowed: false as const };
-			}
-
-			const normalizedSubscription =
-				await this.normalizeLockedSubscription(transaction, subscription);
-			if (normalizedSubscription.status !== SubscriptionStatus.ACTIVE) {
-				return { allowed: false as const };
-			}
-
-			const limits = PLAN_LIMITS[normalizedSubscription.plan];
-			if (
-				!limits.unlimited &&
-				normalizedSubscription.leadsThisPeriod >= limits.maxLeadsPerPeriod
-			) {
-				return { allowed: false as const };
-			}
-
-			const lead = await createLead(transaction);
-			const updatedSubscription = await transaction.subscription.update({
-				where: { userId },
-				data: { leadsThisPeriod: { increment: 1 } }
-			});
-
-			const limitReached =
-				!limits.unlimited &&
-				updatedSubscription.leadsThisPeriod === limits.maxLeadsPerPeriod;
-			if (limitReached && onLimitReached) {
-				await onLimitReached(
-					transaction,
-					updatedSubscription.leadsThisPeriod
-				);
-			}
-
-			return {
-				allowed: true as const,
-				lead,
-				newCount: updatedSubscription.leadsThisPeriod,
-				limitReached
-			};
-		}, ATOMIC_TRANSACTION_OPTIONS);
-
-		if (!result.allowed) {
-			throw new ForbiddenException(
-				'Лимит заявок исчерпан или подписка неактивна'
-			);
-		}
-
-		return {
-			lead: result.lead,
-			newCount: result.newCount,
-			limitReached: result.limitReached
-		};
-	}
-
 	private async lockOperationalSubscription(
 		transaction: Prisma.TransactionClient,
 		userId: string
 	): Promise<Subscription | null> {
-		// Lock both rows so soft delete cannot race with config, widget or lead access.
+		// Lock both Core rows so account lifecycle cannot race with subscription
+		// normalization and the corresponding projection events.
 		const rows = await transaction.$queryRaw<Array<{ id: string }>>(
 			Prisma.sql`
 				SELECT s."id"
@@ -378,17 +235,12 @@ export class SubscriptionService {
 			return transaction.subscription.update({
 				where: { userId: subscription.userId },
 				data: {
-					leadsThisPeriod: 0,
 					periodResetsAt: nextReset.toDate()
 				}
 			});
 		}
 
 		return subscription;
-	}
-
-	getMaxWidgets(plan: Plan): number {
-		return PLAN_LIMITS[plan].maxWidgets;
 	}
 
 	async adminGetAllSubscriptions(
@@ -550,7 +402,6 @@ export class SubscriptionService {
 				status: SubscriptionStatus.ACTIVE,
 				startsAt: start.toDate(),
 				expiresAt,
-				leadsThisPeriod: 0,
 				periodResetsAt: start.add(1, 'month').toDate()
 			},
 			create: {
@@ -560,7 +411,6 @@ export class SubscriptionService {
 				status: SubscriptionStatus.ACTIVE,
 				startsAt: start.toDate(),
 				expiresAt,
-				leadsThisPeriod: 0,
 				periodResetsAt: start.add(1, 'month').toDate()
 			}
 		});
@@ -670,7 +520,6 @@ export class SubscriptionService {
 					plan: Plan.TRIAL,
 					status: SubscriptionStatus.ACTIVE,
 					expiresAt: newExpiresAt,
-					leadsThisPeriod: 0,
 					periodResetsAt: now.add(1, 'month').toDate()
 				}
 			});
@@ -780,7 +629,6 @@ export class SubscriptionService {
 			...(isActiveFutureSubscription
 				? {}
 				: {
-						leadsThisPeriod: 0,
 						periodResetsAt: now.add(1, 'month').toDate()
 					})
 		};

@@ -705,6 +705,8 @@ export class MaintenanceWorkerService
 				return 'campaigns';
 			case SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP:
 				return 'reporting';
+			case SCHEDULED_JOB_TYPES.WIDGETS_DATABASE_BACKUP:
+				return 'widgets';
 		}
 	}
 

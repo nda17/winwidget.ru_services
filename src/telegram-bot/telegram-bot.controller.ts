@@ -201,7 +201,8 @@ export class TelegramBotController {
 				[DATABASE_BACKUP_TARGETS.NOTIFICATION_DELIVERY]:
 					'БД Notification Delivery',
 				[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns',
-				[DATABASE_BACKUP_TARGETS.REPORTING]: 'БД Reporting'
+				[DATABASE_BACKUP_TARGETS.REPORTING]: 'БД Reporting',
+				[DATABASE_BACKUP_TARGETS.WIDGETS]: 'БД Widgets'
 			}[target];
 			await this.adminEventLogService.record({
 				adminId,

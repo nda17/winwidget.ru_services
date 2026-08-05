@@ -169,4 +169,22 @@ describe('database restore queue contract', () => {
 			signDatabaseRestoreJobPayload({ ...succeeded, result: null }, secret)
 		).toThrow('Invalid SUCCEEDED');
 	});
+
+	it('accepts Widgets as a strict independently signed restore target', () => {
+		const jobId = randomUUID();
+		const payload: DatabaseRestoreJobPayload = {
+			...createQueuedPayload(),
+			jobId,
+			target: 'widgets',
+			uploadFileName: `${jobId}.dump`,
+			originalFileName: 'widgets.dump'
+		};
+
+		expect(() =>
+			parseAndVerifyDatabaseRestoreJobManifest(
+				JSON.stringify(signDatabaseRestoreJobPayload(payload, secret)),
+				secret
+			)
+		).not.toThrow();
+	});
 });

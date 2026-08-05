@@ -20,11 +20,13 @@ function createConfig(): DatabaseRestoreWorkerConfig {
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: '55432',
 			DATABASE_RESTORE_CAMPAIGNS_PORT: '55433',
 			DATABASE_RESTORE_REPORTING_PORT: '55435',
+			DATABASE_RESTORE_WIDGETS_PORT: '55436',
 			DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
 			DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: '/secrets/campaigns',
 			DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: '/secrets/reporting',
+			DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
 			APP_REVISION: 'd'.repeat(40)
 		},
 		'/app'
@@ -145,6 +147,12 @@ describe('database restore PostgreSQL contract', () => {
 			'winwidget_reporting_migration',
 			'reporting',
 			'PUBLIC, "winwidget_reporting_runtime", "winwidget_reporting_backup"'
+		],
+		[
+			'widgets',
+			'winwidget_widgets_migration',
+			'widgets',
+			'PUBLIC, "winwidget_widgets_runtime", "winwidget_widgets_backup"'
 		]
 	] as const)(
 		'hardens future function ACL for %s',
@@ -205,6 +213,31 @@ describe('database restore PostgreSQL contract', () => {
 });
 
 describe('DatabaseRestoreWorkerConfig', () => {
+	it('defines the isolated Widgets database, roles, migrations and anchors', () => {
+		const target = createConfig().targets.widgets;
+
+		expect(target).toMatchObject({
+			target: 'widgets',
+			label: 'Widgets',
+			host: '127.0.0.1',
+			port: 55436,
+			database: 'winwidget_widgets',
+			schema: 'widgets',
+			adminRole: 'winwidget_widgets_admin',
+			migrationRole: 'winwidget_widgets_migration',
+			runtimeRoles: ['winwidget_widgets_runtime'],
+			backupRole: 'winwidget_widgets_backup',
+			passwordFile: '/secrets/widgets',
+			migrationsDirectory: '/app/apps/widgets/prisma/migrations',
+			anchorTables: [
+				'_prisma_migrations',
+				'service_identity',
+				'widgets',
+				'outbox_events'
+			]
+		});
+	});
+
 	it('rejects queue secrets with surrounding whitespace', () => {
 		expect(
 			() =>
@@ -216,6 +249,7 @@ describe('DatabaseRestoreWorkerConfig', () => {
 					DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: '55432',
 					DATABASE_RESTORE_CAMPAIGNS_PORT: '55433',
 					DATABASE_RESTORE_REPORTING_PORT: '55435',
+					DATABASE_RESTORE_WIDGETS_PORT: '55436',
 					DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 					DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 						'/secrets/notification-delivery',
@@ -223,6 +257,7 @@ describe('DatabaseRestoreWorkerConfig', () => {
 						'/secrets/campaigns',
 					DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE:
 						'/secrets/reporting',
+					DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
 					APP_REVISION: 'd'.repeat(40)
 				})
 		).toThrow('must not contain surrounding whitespace');

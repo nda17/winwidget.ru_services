@@ -84,6 +84,8 @@ x-api-env: &api-env
   CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE: ${CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE:-500}
   CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: ${CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS:-300000}
   REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
+  WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
+  WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
   DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
   DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
   DATABASE_RESTORE_PRODUCTION_ENABLED: ${DATABASE_RESTORE_PRODUCTION_ENABLED:-false}
@@ -121,7 +123,7 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-webhook,bitrix24,amo-crm,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,auto-renewal}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
@@ -194,6 +196,39 @@ x-reporting-env: &reporting-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   MESSAGING_SERVICE_NAME: reporting-service
 
+x-widgets-env: &widgets-env
+  APP_REVISION: ${WIDGETS_REVISION:?WIDGETS_REVISION is required}
+  NODE_ENV: production
+  MODE: ${MODE:-production}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+  WIDGETS_DATABASE_URL: ${WIDGETS_DATABASE_URL:?WIDGETS_DATABASE_URL is required}
+  WIDGETS_PROCESS_ROLE: ${WIDGETS_PROCESS_ROLE:-all}
+  WIDGETS_LISTEN_HOST: ${WIDGETS_LISTEN_HOST:-127.0.0.1}
+  WIDGETS_PORT: ${WIDGETS_PORT:-4700}
+  WIDGETS_CORE_INTERNAL_BASE_URL: ${WIDGETS_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
+  WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
+  WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-10000}
+  WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: ${WIDGETS_ENTITLEMENT_MAX_STALENESS_MS:?WIDGETS_ENTITLEMENT_MAX_STALENESS_MS is required}
+  WIDGETS_PREFETCH: ${WIDGETS_PREFETCH:-10}
+  WIDGETS_OUTBOX_BATCH_SIZE: ${WIDGETS_OUTBOX_BATCH_SIZE:-50}
+  WIDGETS_OUTBOX_POLL_INTERVAL_MS: ${WIDGETS_OUTBOX_POLL_INTERVAL_MS:-1000}
+  WIDGETS_OUTBOX_RETENTION_DAYS: ${WIDGETS_OUTBOX_RETENTION_DAYS:-7}
+  WIDGETS_RECEIPT_RETENTION_DAYS: ${WIDGETS_RECEIPT_RETENTION_DAYS:-90}
+  WIDGETS_FAILURE_DETAIL_RETENTION_DAYS: ${WIDGETS_FAILURE_DETAIL_RETENTION_DAYS:-30}
+  S3_ENDPOINT: ${S3_ENDPOINT:-https://s3.twcstorage.ru}
+  S3_REGION: ${S3_REGION:-ru-1}
+  S3_BUCKET: ${S3_BUCKET:?S3_BUCKET is required}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID is required}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
+  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:?S3_PUBLIC_BASE_URL is required}
+  S3_KEY_PREFIX: ${S3_KEY_PREFIX:-}
+  S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+  RABBITMQ_URL: ${RABBITMQ_WIDGETS_URL:?RABBITMQ_WIDGETS_URL is required}
+  RABBITMQ_CONNECTION_NAME: winwidget-widgets-service
+  RABBITMQ_ASSERT_TOPOLOGY: 'true'
+  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+  MESSAGING_SERVICE_NAME: widgets-service
+
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
   APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
@@ -202,6 +237,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   NOTIFICATION_DELIVERY_BACKUP_URL: ${NOTIFICATION_DELIVERY_BACKUP_URL:?NOTIFICATION_DELIVERY_BACKUP_URL is required}
   CAMPAIGNS_BACKUP_URL: ${CAMPAIGNS_BACKUP_URL:?CAMPAIGNS_BACKUP_URL is required}
   REPORTING_BACKUP_URL: ${REPORTING_BACKUP_URL:?REPORTING_BACKUP_URL is required}
+  WIDGETS_BACKUP_URL: ${WIDGETS_BACKUP_URL:?WIDGETS_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
@@ -227,10 +263,12 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: ${NOTIFICATION_DELIVERY_POSTGRES_PORT:?NOTIFICATION_DELIVERY_POSTGRES_PORT is required}
   DATABASE_RESTORE_CAMPAIGNS_PORT: ${CAMPAIGNS_POSTGRES_PORT:?CAMPAIGNS_POSTGRES_PORT is required}
   DATABASE_RESTORE_REPORTING_PORT: ${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}
+  DATABASE_RESTORE_WIDGETS_PORT: ${WIDGETS_POSTGRES_PORT:?WIDGETS_POSTGRES_PORT is required}
   DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/core-admin-password
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
   DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
   DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/reporting-admin-password
+  DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/widgets-admin-password
 
 x-outbox-publisher-env: &outbox-publisher-env
   <<: *runtime-env
@@ -262,6 +300,11 @@ x-reporting-migration-env: &reporting-migration-env
   APP_REVISION: ${REPORTING_REVISION:?REPORTING_REVISION is required}
   NODE_ENV: production
   REPORTING_DATABASE_URL: ${REPORTING_MIGRATION_DATABASE_URL:?REPORTING_MIGRATION_DATABASE_URL is required}
+
+x-widgets-migration-env: &widgets-migration-env
+  APP_REVISION: ${WIDGETS_REVISION:?WIDGETS_REVISION is required}
+  NODE_ENV: production
+  WIDGETS_DATABASE_URL: ${WIDGETS_MIGRATION_DATABASE_URL:?WIDGETS_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -396,6 +439,50 @@ services:
         max-file: '5'
     restart: unless-stopped
 
+  widgets-postgres:
+    image: ${WIDGETS_POSTGRES_IMAGE:?WIDGETS_POSTGRES_IMAGE is required}
+    profiles:
+      - widgets-database
+    labels:
+      com.winwidget.owner: widgets
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_widgets
+      POSTGRES_USER: ${WIDGETS_POSTGRES_ADMIN_USER:?WIDGETS_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/widgets-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${WIDGETS_POSTGRES_PORT:-55436}:5432'
+    volumes:
+      - winwidget-widgets-postgres-data:/var/lib/postgresql
+    networks:
+      - widgets-postgres
+    secrets:
+      - widgets-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${WIDGETS_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${WIDGETS_POSTGRES_MEMORY_LIMIT:-768m}
+    mem_reservation: ${WIDGETS_POSTGRES_MEMORY_RESERVATION:-256m}
+    cpus: ${WIDGETS_POSTGRES_CPUS:-1.0}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:4.2-management-alpine
     hostname: winwidget-rabbitmq
@@ -453,6 +540,8 @@ services:
     network_mode: host
     depends_on:
       api:
+        condition: service_healthy
+      widgets-service:
         condition: service_healthy
     healthcheck:
       test:
@@ -583,6 +672,42 @@ services:
         max-size: 10m
         max-file: '3'
 
+  widgets-service:
+    image: ${WIDGETS_IMAGE:?WIDGETS_IMAGE is required}
+    build:
+      context: ..
+      dockerfile: apps/widgets/Dockerfile
+      args:
+        APP_REVISION: ${WIDGETS_REVISION:?WIDGETS_REVISION is required}
+    environment: *widgets-env
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.WIDGETS_PORT||4700)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${WIDGETS_MEMORY_LIMIT:-512m}
+    mem_reservation: ${WIDGETS_MEMORY_RESERVATION:-128m}
+    cpus: ${WIDGETS_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -640,6 +765,8 @@ services:
         target: database-restore-campaigns-admin-password
       - source: reporting-postgres-admin-password
         target: database-restore-reporting-admin-password
+      - source: widgets-postgres-admin-password
+        target: database-restore-widgets-admin-password
     tmpfs:
       - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -662,7 +789,7 @@ services:
           'nestjs:nodejs',
           'node',
           '-e',
-          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["campaigns","core","notification-delivery","reporting"]''||fences.length!==0)process.exit(1)'
+          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["campaigns","core","notification-delivery","reporting","widgets"]''||fences.length!==0)process.exit(1)'
         ]
       interval: 10s
       timeout: 5s
@@ -736,7 +863,24 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  widgets-migrate:
+    image: ${WIDGETS_IMAGE:?WIDGETS_IMAGE is required}
+    build:
+      context: ..
+      dockerfile: apps/widgets/Dockerfile
+      args:
+        APP_REVISION: ${WIDGETS_REVISION:?WIDGETS_REVISION is required}
+    profiles:
+      - widgets-migration
+    environment: *widgets-migration-env
+    network_mode: host
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
+  winwidget-widgets-postgres-data:
+    external: true
+    name: ${WIDGETS_POSTGRES_DATA_VOLUME:?WIDGETS_POSTGRES_DATA_VOLUME must name the verified Widgets PostgreSQL volume}
   winwidget-reporting-postgres-data:
     external: true
     name: ${REPORTING_POSTGRES_DATA_VOLUME:?REPORTING_POSTGRES_DATA_VOLUME must name the verified Reporting PostgreSQL volume}
@@ -751,6 +895,13 @@ volumes:
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
 
 networks:
+  widgets-postgres:
+    name: winwidget-widgets-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: widgets
+      com.winwidget.purpose: postgres-network
   reporting-postgres:
     name: winwidget-reporting-postgres
     driver: bridge
@@ -782,3 +933,5 @@ secrets:
     file: ${CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE:?CAMPAIGNS_POSTGRES_ADMIN_PASSWORD_FILE is required}
   notification-delivery-postgres-admin-password:
     file: ${NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE:?NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  widgets-postgres-admin-password:
+    file: ${WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE:?WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE is required}

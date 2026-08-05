@@ -22,7 +22,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
 RUN pnpm exec prisma generate
-RUN pnpm build
+RUN pnpm run build:app
 RUN pnpm prune --prod --ignore-scripts
 
 FROM base AS runner
@@ -42,7 +42,7 @@ RUN addgroup -S -g 1001 nodejs \
 COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nestjs:nodejs /app/prisma ./prisma
-COPY --from=builder --chown=nestjs:nodejs /app/public ./public
+COPY --from=builder --chown=nestjs:nodejs /app/public/email ./public/email
 COPY --from=builder --chown=nestjs:nodejs /app/package.json ./package.json
 COPY --chown=nestjs:nodejs docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
@@ -74,6 +74,7 @@ RUN apk add --no-cache flock su-exec
 COPY --from=builder --chown=nestjs:nodejs /app/apps/notification-delivery/prisma ./apps/notification-delivery/prisma
 COPY --from=builder --chown=nestjs:nodejs /app/apps/campaigns/prisma ./apps/campaigns/prisma
 COPY --from=builder --chown=nestjs:nodejs /app/apps/reporting/prisma ./apps/reporting/prisma
+COPY --from=builder --chown=nestjs:nodejs /app/apps/widgets/prisma ./apps/widgets/prisma
 COPY database-restore-entrypoint.sh /usr/local/bin/database-restore-entrypoint.sh
 
 RUN chmod 755 /usr/local/bin/database-restore-entrypoint.sh

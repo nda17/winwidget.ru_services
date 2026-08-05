@@ -1,9 +1,11 @@
 import {
+	CORE_OWNED_MESSAGING_KINDS,
 	MONOLITH_INTEGRATION_KINDS,
 	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
 	NOTIFICATION_DELIVERY_KINDS,
-	OUTBOX_LOCK_TIMEOUT_MS
+	OUTBOX_LOCK_TIMEOUT_MS,
+	WIDGETS_PROVIDER_INTEGRATION_KINDS
 } from '@/messaging/messaging.constants';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
 import {
@@ -14,6 +16,10 @@ import {
 	RabbitMqManagementService,
 	RabbitQueueInfo
 } from '@/messaging/rabbitmq-management.service';
+import {
+	WidgetsDeliveryFailuresClientService,
+	WidgetsMessagingOverview
+} from '@/messaging/widgets-delivery-failures-client.service';
 import { PrismaService } from '@/prisma.service';
 import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import {
@@ -55,7 +61,8 @@ export class MessagingOperationalAlertService
 		private readonly telegramBot: TelegramBotService,
 		private readonly configService: ConfigService,
 		private readonly rabbitManagement: RabbitMqManagementService,
-		private readonly notificationDelivery: NotificationDeliveryClientService
+		private readonly notificationDelivery: NotificationDeliveryClientService,
+		private readonly widgets: WidgetsDeliveryFailuresClientService
 	) {}
 
 	onModuleInit(): void {
@@ -94,7 +101,8 @@ export class MessagingOperationalAlertService
 				heartbeats,
 				queueResult,
 				brokerResult,
-				notificationDeliveryResult
+				notificationDeliveryResult,
+				widgetsResult
 			] = await Promise.all([
 				this.prisma.outboxEvent.count({
 					where: { status: OutboxEventStatus.FAILED }
@@ -137,7 +145,7 @@ export class MessagingOperationalAlertService
 					where: {
 						resolvedAt: null,
 						integration: {
-							notIn: [...NOTIFICATION_DELIVERY_KINDS]
+							in: [...CORE_OWNED_MESSAGING_KINDS]
 						}
 					}
 				}),
@@ -146,7 +154,7 @@ export class MessagingOperationalAlertService
 					where: {
 						resolvedAt: null,
 						integration: {
-							notIn: [...NOTIFICATION_DELIVERY_KINDS]
+							in: [...CORE_OWNED_MESSAGING_KINDS]
 						}
 					},
 					_count: { _all: true }
@@ -213,6 +221,17 @@ export class MessagingOperationalAlertService
 							error instanceof Error
 								? error.message
 								: 'Notification Delivery недоступен'
+					})),
+				this.widgets
+					.getOverview()
+					.then(overview => ({
+						overview,
+						error: null as string | null
+					}))
+					.catch(error => ({
+						overview: null,
+						error:
+							error instanceof Error ? error.message : 'Widgets недоступен'
 					}))
 			]);
 
@@ -228,6 +247,12 @@ export class MessagingOperationalAlertService
 			for (const [category, count] of Object.entries(
 				notificationDeliveryResult.overview?.operational
 					.unresolvedFailuresByCategory || {}
+			) as Array<[string, number]>) {
+				categoryCounts[category] = (categoryCounts[category] || 0) + count;
+			}
+			for (const [category, count] of Object.entries(
+				widgetsResult.overview?.operational.unresolvedFailuresByCategory ||
+					{}
 			) as Array<[string, number]>) {
 				categoryCounts[category] = (categoryCounts[category] || 0) + count;
 			}
@@ -318,6 +343,9 @@ export class MessagingOperationalAlertService
 			const notificationDeliveryQueueMessages = getQueueMessages(
 				NOTIFICATION_DELIVERY_KINDS
 			);
+			const widgetsQueueMessages = getQueueMessages(
+				WIDGETS_PROVIDER_INTEGRATION_KINDS
+			);
 			const maintenanceQueueMessages = getQueueMessages([
 				'database-backup'
 			]);
@@ -347,15 +375,46 @@ export class MessagingOperationalAlertService
 			const deliveryConsumeStale =
 				notificationDeliveryQueueMessages > 0 &&
 				(!deliveryConsumeAt || deliveryConsumeAt < activityStaleBefore);
+			const widgetsOverview: WidgetsMessagingOverview | null =
+				widgetsResult.overview;
+			const widgetsPublisher = widgetsOverview?.heartbeats.find(
+				heartbeat => heartbeat.service === 'widgets-publisher'
+			);
+			const widgetsWorker = widgetsOverview?.heartbeats.find(
+				heartbeat => heartbeat.service === 'widgets-worker'
+			);
+			const widgetsHeartbeatProblems =
+				widgetsOverview?.heartbeats
+					.filter(heartbeat => heartbeat.status === 'down')
+					.map(heartbeat => heartbeat.service) || [];
+			const widgetsPublishAt = this.parseDate(
+				widgetsPublisher?.lastSuccessfulPublishAt || undefined
+			);
+			const widgetsConsumeAt = this.parseDate(
+				widgetsWorker?.lastSuccessfulConsumeAt || undefined
+			);
+			const widgetsPublishStale =
+				(widgetsOverview?.operational.dueOutbox || 0) > 0 &&
+				(!widgetsPublishAt || widgetsPublishAt < activityStaleBefore);
+			const widgetsConsumeStale =
+				widgetsQueueMessages > 0 &&
+				(!widgetsConsumeAt || widgetsConsumeAt < activityStaleBefore);
 			const combinedFailedOutbox =
-				failedOutbox + (deliveryOverview?.outbox.FAILED || 0);
+				failedOutbox +
+				(deliveryOverview?.outbox.FAILED || 0) +
+				(widgetsOverview?.outbox.FAILED || 0);
 			const combinedStaleOutbox =
 				stalePendingOutbox +
-				(deliveryOverview?.operational.staleOutbox || 0);
+				(deliveryOverview?.operational.staleOutbox || 0) +
+				(widgetsOverview?.operational.staleOutbox || 0);
 			const combinedDueOutbox =
-				dueOutbox + (deliveryOverview?.operational.dueOutbox || 0);
+				dueOutbox +
+				(deliveryOverview?.operational.dueOutbox || 0) +
+				(widgetsOverview?.operational.dueOutbox || 0);
 			const combinedUnresolvedFailures =
-				unresolvedDlq + (deliveryOverview?.unresolvedFailures || 0);
+				unresolvedDlq +
+				(deliveryOverview?.unresolvedFailures || 0) +
+				(widgetsOverview?.unresolvedFailures || 0);
 
 			const brokerProblems = [
 				...(brokerResult.error
@@ -405,6 +464,14 @@ export class MessagingOperationalAlertService
 				...(deliveryConsumeStale
 					? ['notification-delivery-consume=stale']
 					: []),
+				...(widgetsResult.error
+					? [`widgets-api=${widgetsResult.error}`]
+					: []),
+				...(!widgetsResult.error
+					? widgetsHeartbeatProblems.map(service => `heartbeat=${service}`)
+					: []),
+				...(widgetsPublishStale ? ['widgets-publish=stale'] : []),
+				...(widgetsConsumeStale ? ['widgets-consume=stale'] : []),
 				...(queueResult.error ? [`queues=${queueResult.error}`] : []),
 				...missingQueues.map(queue => `missing=${queue}`),
 				...consumerlessQueues.map(queue => `consumers=0:${queue}`),
@@ -458,6 +525,14 @@ export class MessagingOperationalAlertService
 						: this.describeService(
 								deliveryHeartbeatFresh,
 								deliveryPublishStale || deliveryConsumeStale
+							)
+				}</b>`,
+				`Widgets: <b>${
+					widgetsResult.error
+						? `internal API недоступен: ${widgetsResult.error}`
+						: this.describeService(
+								widgetsHeartbeatProblems.length === 0,
+								widgetsPublishStale || widgetsConsumeStale
 							)
 				}</b>`
 			].join('\n');

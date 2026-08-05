@@ -33,6 +33,7 @@ REPORTING_CANONICAL_MIGRATION_USER='winwidget_reporting_migration'
 REPORTING_CANONICAL_BACKUP_USER='winwidget_reporting_backup'
 REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
 REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
+WIDGETS_STEADY_INTEGRATION_WORKER_KINDS='telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,auto-renewal'
 REPORTING_PRE_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram'
 REPORTING_POST_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,subscription-expiry-email,subscription-expiry-telegram'
 REPORTING_STEADY_STATE_REMOVED_PATHS=(
@@ -111,6 +112,12 @@ reporting_cutover_phase_index() {
 
 reporting_expected_integration_worker_kinds() {
 	local phase phase_index cleanup_staged_index
+	local widgets_ownership_state
+	widgets_ownership_state="$(reporting_widgets_ownership_marker_state)" || return 1
+	if [[ "$widgets_ownership_state" == 'active' ]]; then
+		printf '%s\n' "$WIDGETS_STEADY_INTEGRATION_WORKER_KINDS"
+		return
+	fi
 	if [[ ! -e "$REPORTING_CUTOVER_MARKER" &&
 		! -L "$REPORTING_CUTOVER_MARKER" ]]; then
 		printf '%s\n' "$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS"
@@ -128,6 +135,57 @@ reporting_expected_integration_worker_kinds() {
 	else
 		printf '%s\n' "$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS"
 	fi
+}
+
+reporting_widgets_ownership_marker_state() {
+	local database_url postgres_image query result volume
+	database_url="$(reporting_get_env_value WIDGETS_DATABASE_URL 2>/dev/null || true)"
+	if [[ -z "$database_url" ]]; then
+		printf 'inactive\n'
+		return
+	fi
+	postgres_image="$(reporting_get_env_value WIDGETS_POSTGRES_IMAGE 2>/dev/null || true)"
+	postgres_image="${postgres_image:-postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296}"
+	query="$(cat <<'SQL'
+SELECT CASE
+  WHEN count(*) = 1
+    AND bool_and(ownership_activated_at IS NOT NULL)
+    AND bool_and(ownership_generation > 0)
+    AND bool_and(source_database_fingerprint IS NOT NULL)
+  THEN 'active'
+  WHEN count(*) = 1
+    AND bool_and(ownership_activated_at IS NULL)
+    AND bool_and(ownership_generation = 0)
+  THEN 'inactive'
+  ELSE 'invalid'
+END
+FROM widgets.service_identity
+WHERE id = 'widgets-service';
+SQL
+)"
+	if result="$(
+		PGURL="$database_url" WIDGETS_IDENTITY_SQL="$query" \
+			docker run --rm --network host -e PGURL -e WIDGETS_IDENTITY_SQL \
+				--entrypoint sh "$postgres_image" -euc '
+					exec psql "$PGURL" --no-psqlrc --tuples-only --no-align \
+						--set ON_ERROR_STOP=1 --command "$WIDGETS_IDENTITY_SQL"
+				' 2>/dev/null
+	)"; then
+		case "$result" in
+		active | inactive) printf '%s\n' "$result" ;;
+		*)
+			echo 'Widgets service_identity is invalid while resolving Core integration ownership.' >&2
+			return 1
+			;;
+		esac
+		return
+	fi
+	volume="$(reporting_get_env_value WIDGETS_POSTGRES_DATA_VOLUME 2>/dev/null || true)"
+	if [[ -n "$volume" ]] && docker volume inspect "$volume" >/dev/null 2>&1; then
+		echo 'Widgets PostgreSQL exists but service_identity cannot be read; refusing to restore legacy integration ownership.' >&2
+		return 1
+	fi
+	printf 'inactive\n'
 }
 
 reporting_expected_core_notification_delivery_kinds() {

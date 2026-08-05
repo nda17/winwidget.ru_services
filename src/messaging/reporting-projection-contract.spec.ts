@@ -40,8 +40,14 @@ const states: Record<ReportingProjectionKind, Record<string, unknown>> = {
 		id: 'subscription-1',
 		userId: 'user-1',
 		plan: 'EASY',
+		billingPeriod: 'MONTHLY',
 		status: 'ACTIVE',
+		startsAt: OCCURRED_AT,
 		expiresAt: null,
+		periodResetsAt: '2026-08-31T12:00:00.000Z',
+		maxWidgets: 1,
+		maxLeadsPerPeriod: 100,
+		unlimited: false,
 		createdAt: OCCURRED_AT
 	},
 	'reporting-widget': {
@@ -233,6 +239,46 @@ describe('Reporting projection messaging contract', () => {
 				}
 			})
 		).toThrow('coreOperationalAlertsThreadId must be a positive integer');
+	});
+
+	it('requires an all-or-nothing Widgets entitlement extension', () => {
+		const subscription = eventFor('reporting-billing-subscription');
+		expect(() =>
+			assertReportingProjectionEvent({
+				...subscription,
+				state: {
+					id: 'subscription-1',
+					userId: 'user-1',
+					plan: 'EASY',
+					status: 'ACTIVE',
+					expiresAt: null,
+					createdAt: OCCURRED_AT
+				}
+			})
+		).not.toThrow();
+		expect(() =>
+			assertReportingProjectionEvent({
+				...subscription,
+				state: {
+					id: 'subscription-1',
+					userId: 'user-1',
+					plan: 'EASY',
+					status: 'ACTIVE',
+					expiresAt: null,
+					createdAt: OCCURRED_AT,
+					maxWidgets: 1
+				}
+			})
+		).toThrow('complete Widgets entitlement snapshot');
+		expect(() =>
+			assertReportingProjectionEvent({
+				...subscription,
+				state: {
+					...(subscription.state as Record<string, unknown>),
+					unlimited: true
+				}
+			})
+		).toThrow('inconsistent');
 	});
 
 	it('requires the singleton aggregate for settings events and tombstones', () => {

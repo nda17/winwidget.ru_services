@@ -34,6 +34,12 @@ import {
 	ReportingAuditConsumerKind,
 	ReportingSettingsAuditField
 } from '@/messaging/reporting-admin-audit-event';
+import {
+	WIDGETS_ADMIN_AUDIT_ACTIONS,
+	WIDGETS_ADMIN_AUDIT_INTEGRATIONS,
+	WIDGETS_ADMIN_AUDIT_TYPES,
+	WidgetsAdminAuditAction
+} from '@/messaging/widgets-admin-audit-event';
 import { TELEGRAM_DESTINATION_SOURCE_KINDS } from '@/messaging/telegram-destination-unavailable-event';
 import { isDatabaseBackupJobType } from '@/scheduled-jobs/scheduled-jobs.types';
 import {
@@ -313,12 +319,31 @@ const assertReportingSubscriptionState = (
 	state: JsonRecord,
 	aggregateId: string
 ): void => {
+	const entitlementFields = [
+		'billingPeriod',
+		'startsAt',
+		'periodResetsAt',
+		'maxWidgets',
+		'maxLeadsPerPeriod',
+		'unlimited'
+	] as const;
+	const hasEntitlementFields = entitlementFields.some(
+		field => field in state
+	);
 	assertExactKeys(
 		state,
 		['id', 'userId', 'plan', 'status', 'expiresAt', 'createdAt'],
-		[],
+		hasEntitlementFields ? entitlementFields : [],
 		'payload.state'
 	);
+	if (
+		hasEntitlementFields &&
+		entitlementFields.some(field => !(field in state))
+	) {
+		throw new Error(
+			'payload.state must contain the complete Widgets entitlement snapshot'
+		);
+	}
 	assertIdentifier(state.id, 'payload.state.id');
 	if (state.id !== aggregateId) {
 		throw new Error('payload.state.id must match payload.aggregateId');
@@ -332,6 +357,41 @@ const assertReportingSubscriptionState = (
 	);
 	assertIsoDate(state.expiresAt, 'payload.state.expiresAt', true);
 	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+	if (!hasEntitlementFields) return;
+	if (state.billingPeriod !== null) {
+		assertEnumValue(
+			state.billingPeriod,
+			Object.values(BillingPeriod),
+			'payload.state.billingPeriod'
+		);
+	}
+	assertIsoDate(state.startsAt, 'payload.state.startsAt');
+	assertIsoDate(
+		state.periodResetsAt,
+		'payload.state.periodResetsAt',
+		true
+	);
+	if (
+		!Number.isInteger(state.maxWidgets) ||
+		Number(state.maxWidgets) < 1
+	) {
+		throw new Error('payload.state.maxWidgets must be a positive integer');
+	}
+	if (
+		state.maxLeadsPerPeriod !== null &&
+		(!Number.isInteger(state.maxLeadsPerPeriod) ||
+			Number(state.maxLeadsPerPeriod) < 1)
+	) {
+		throw new Error(
+			'payload.state.maxLeadsPerPeriod must be a positive integer or null'
+		);
+	}
+	assertBoolean(state.unlimited, 'payload.state.unlimited');
+	if ((state.unlimited === true) !== (state.maxLeadsPerPeriod === null)) {
+		throw new Error(
+			'payload.state unlimited and maxLeadsPerPeriod are inconsistent'
+		);
+	}
 };
 
 const assertReportingWidgetState = (
@@ -1051,6 +1111,140 @@ const assertAdminAuditEvent = (payload: JsonRecord): IntegrationKind => {
 
 	const target = assertRecord(payload.target, 'payload.target');
 	const metadata = assertRecord(payload.metadata, 'payload.metadata');
+	if (
+		WIDGETS_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as WidgetsAdminAuditAction
+		)
+	) {
+		if (
+			typeof payload.correlationId !== 'string' ||
+			!SAFE_CONTEXT_ID_PATTERN.test(payload.correlationId)
+		) {
+			throw new Error('payload.correlationId is invalid');
+		}
+		assertString(payload.actorId, 'payload.actorId', { maxLength: 255 });
+
+		const action = payload.action as WidgetsAdminAuditAction;
+		const targetKeys = ['widgetId', 'widgetType', 'ownerId'];
+		if (
+			action === 'WIDGET_DELIVERY_RETRY' ||
+			action === 'WIDGET_DELIVERY_CLOSE'
+		) {
+			targetKeys.push('failureId', 'integration');
+		}
+		assertExactKeys(target, targetKeys, [], 'payload.target');
+		assertIdentifier(target.widgetId, 'payload.target.widgetId');
+		assertIdentifier(target.ownerId, 'payload.target.ownerId');
+		assertEnumValue(
+			target.widgetType,
+			WIDGETS_ADMIN_AUDIT_TYPES,
+			'payload.target.widgetType'
+		);
+
+		switch (action) {
+			case 'WIDGET_UPDATE': {
+				assertExactKeys(
+					metadata,
+					['changedFields'],
+					[],
+					'payload.metadata'
+				);
+				if (
+					!Array.isArray(metadata.changedFields) ||
+					metadata.changedFields.length < 1 ||
+					metadata.changedFields.length > 100
+				) {
+					throw new Error('payload.metadata.changedFields is invalid');
+				}
+				for (const field of metadata.changedFields) {
+					assertString(field, 'payload.metadata.changedFields[]', {
+						maxLength: 100
+					});
+				}
+				if (
+					new Set(metadata.changedFields).size !==
+						metadata.changedFields.length ||
+					metadata.changedFields.join(',') !==
+						[...metadata.changedFields].sort().join(',')
+				) {
+					throw new Error(
+						'payload.metadata.changedFields must be sorted and unique'
+					);
+				}
+				break;
+			}
+			case 'WIDGET_PUBLISH':
+			case 'WIDGET_VERSION_RESTORE':
+				assertExactKeys(metadata, ['version'], [], 'payload.metadata');
+				if (
+					!Number.isInteger(metadata.version) ||
+					Number(metadata.version) < 1
+				) {
+					throw new Error(
+						'payload.metadata.version must be a positive integer'
+					);
+				}
+				break;
+			case 'WIDGET_CLONE':
+				assertExactKeys(
+					metadata,
+					['sourceWidgetId'],
+					[],
+					'payload.metadata'
+				);
+				assertIdentifier(
+					metadata.sourceWidgetId,
+					'payload.metadata.sourceWidgetId'
+				);
+				break;
+			case 'WIDGET_BUTTON_IMAGE_UPDATE':
+				assertExactKeys(
+					metadata,
+					['imagePresent'],
+					[],
+					'payload.metadata'
+				);
+				assertBoolean(
+					metadata.imagePresent,
+					'payload.metadata.imagePresent'
+				);
+				break;
+			case 'WIDGET_DELIVERY_RETRY':
+			case 'WIDGET_DELIVERY_CLOSE':
+				assertIdentifier(target.failureId, 'payload.target.failureId');
+				assertEnumValue(
+					target.integration,
+					WIDGETS_ADMIN_AUDIT_INTEGRATIONS,
+					'payload.target.integration'
+				);
+				if (action === 'WIDGET_DELIVERY_RETRY') {
+					assertExactKeys(metadata, [], [], 'payload.metadata');
+					break;
+				}
+				assertExactKeys(
+					metadata,
+					['commentPresent', 'commentLength'],
+					[],
+					'payload.metadata'
+				);
+				if (metadata.commentPresent !== true) {
+					throw new Error('payload.metadata.commentPresent must be true');
+				}
+				if (
+					!Number.isInteger(metadata.commentLength) ||
+					Number(metadata.commentLength) < 1 ||
+					Number(metadata.commentLength) > 1_000
+				) {
+					throw new Error('payload.metadata.commentLength is invalid');
+				}
+				break;
+			case 'WIDGET_DRAFT_DISCARD':
+			case 'WIDGET_DELETE':
+				assertExactKeys(metadata, [], [], 'payload.metadata');
+				break;
+		}
+		return 'widgets-admin-audit';
+	}
 	if (
 		REPORTING_ADMIN_AUDIT_ACTIONS.includes(
 			payload.action as (typeof REPORTING_ADMIN_AUDIT_ACTIONS)[number]

@@ -6,11 +6,8 @@ import {
 	INTEGRATION_ROUTING_KEYS,
 	IntegrationKind,
 	MONOLITH_INTEGRATION_KINDS,
-	MonolithIntegrationKind,
-	NOTIFICATION_DELIVERY_KINDS,
-	NotificationDeliveryKind
+	MonolithIntegrationKind
 } from '@/messaging/messaging.constants';
-import { LeadIntegrationEventPayload } from '@/messaging/lead-integration-event';
 import {
 	classifyIntegrationError,
 	IntegrationErrorClassification
@@ -24,6 +21,7 @@ import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.servi
 import { NotificationDeliveryOutcomeEventPayload } from '@/messaging/notification-delivery-event';
 import { getStableMessageId } from '@/messaging/poison-message-id';
 import { ReportingAdminAuditEventPayload } from '@/messaging/reporting-admin-audit-event';
+import { WidgetsAdminAuditEventPayload } from '@/messaging/widgets-admin-audit-event';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { RabbitMqService } from '@/messaging/rabbitmq.service';
 import { TelegramDestinationUnavailableEventPayload } from '@/messaging/telegram-destination-unavailable-event';
@@ -58,12 +56,12 @@ type DeliveryClaim =
 	| { state: 'processing'; lockedAt: Date };
 
 type WorkerEventPayload =
-	| LeadIntegrationEventPayload
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
 	| AutoRenewalChargeRequestedEventPayload
 	| CampaignAdminAuditEventPayload
-	| ReportingAdminAuditEventPayload;
+	| ReportingAdminAuditEventPayload
+	| WidgetsAdminAuditEventPayload;
 
 interface DeliveryFailureLockRow {
 	resolvedAt: Date | null;
@@ -307,8 +305,22 @@ export class IntegrationWorkerService
 				);
 				return;
 			}
+			if (kind === 'widgets-admin-audit') {
+				await this.deliverWidgetsAdminAudit(
+					payload as WidgetsAdminAuditEventPayload,
+					eventId,
+					receiptClaim
+				);
+				receiptClaim = null;
+				await this.runCleanup();
+				this.rabbitMq.ack(message);
+				this.logger.log(
+					`Widgets admin audit delivered eventId=${eventId}`
+				);
+				return;
+			}
 
-			await this.delivery.deliver(kind, payload, eventId);
+			await this.delivery.deliver(kind, payload);
 			await this.markDeliveryDelivered(eventId, kind, receiptClaim);
 			receiptClaim = null;
 			await this.runCleanup();
@@ -416,7 +428,7 @@ export class IntegrationWorkerService
 
 	private async claimDelivery(
 		eventId: string,
-		integration: IntegrationKind,
+		integration: MonolithIntegrationKind,
 		retryAttempt: number,
 		deliveryToken: string | null
 	): Promise<DeliveryClaim> {
@@ -538,7 +550,7 @@ export class IntegrationWorkerService
 
 	private async markDeliveryDelivered(
 		eventId: string,
-		integration: IntegrationKind,
+		integration: MonolithIntegrationKind,
 		lockedAt: Date
 	): Promise<void> {
 		await this.prisma.$transaction(async transaction => {
@@ -573,9 +585,6 @@ export class IntegrationWorkerService
 					resolvedById: null,
 					activeRetryToken: null
 				}
-			});
-			await transaction.integrationCredentialSnapshot.deleteMany({
-				where: { eventId, integration }
 			});
 		});
 	}
@@ -726,9 +735,105 @@ export class IntegrationWorkerService
 		});
 	}
 
+	private async deliverWidgetsAdminAudit(
+		payload: WidgetsAdminAuditEventPayload,
+		eventId: string,
+		lockedAt: Date
+	): Promise<void> {
+		const descriptions: Record<
+			WidgetsAdminAuditEventPayload['action'],
+			string
+		> = {
+			WIDGET_UPDATE: 'Обновлён пользовательский виджет',
+			WIDGET_PUBLISH: 'Опубликован пользовательский виджет',
+			WIDGET_VERSION_RESTORE:
+				'Восстановлена версия пользовательского виджета',
+			WIDGET_CLONE: 'Клонирован пользовательский виджет',
+			WIDGET_DRAFT_DISCARD:
+				'Отброшены изменения черновика пользовательского виджета',
+			WIDGET_BUTTON_IMAGE_UPDATE:
+				'Обновлено изображение кнопки пользовательского виджета',
+			WIDGET_DELETE: 'Удалён пользовательский виджет',
+			WIDGET_DELIVERY_RETRY:
+				'Запрошен повтор интеграции пользовательского виджета',
+			WIDGET_DELIVERY_CLOSE:
+				'Закрыта ошибка интеграции пользовательского виджета'
+		};
+
+		await this.prisma.$transaction(async transaction => {
+			const isDeliveryAction =
+				payload.action === 'WIDGET_DELIVERY_RETRY' ||
+				payload.action === 'WIDGET_DELIVERY_CLOSE';
+			await this.adminEventLog.recordInTransaction(transaction, {
+				adminId: payload.actorId,
+				section: 'WIDGETS',
+				action: payload.action,
+				description: descriptions[payload.action],
+				entityType: isDeliveryAction
+					? 'widget-integration-delivery'
+					: 'widget',
+				entityId: isDeliveryAction
+					? payload.target.failureId
+					: payload.target.widgetId,
+				entityLabel: payload.target.widgetType,
+				targetUserId: payload.target.ownerId,
+				metadata: {
+					eventId: payload.eventId,
+					correlationId: payload.correlationId,
+					widgetId: payload.target.widgetId,
+					widgetType: payload.target.widgetType,
+					...(isDeliveryAction
+						? {
+								failureId: payload.target.failureId,
+								integration: payload.target.integration
+							}
+						: {}),
+					...payload.metadata
+				}
+			});
+
+			const delivered =
+				await transaction.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration: 'widgets-admin-audit',
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.DELIVERED,
+						deliveredAt: new Date(),
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			if (delivered.count !== 1) {
+				throw new Error(
+					`Widgets audit receipt claim was lost eventId=${eventId}`
+				);
+			}
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: {
+					eventId,
+					integration: 'widgets-admin-audit',
+					resolvedAt: null
+				},
+				data: {
+					resolvedAt: new Date(),
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
+				}
+			});
+		});
+	}
+
 	private async markDeliveryDeadLettered(
 		eventId: string,
-		integration: IntegrationKind,
+		integration: MonolithIntegrationKind,
 		lockedAt: Date | null
 	): Promise<void> {
 		if (!lockedAt) {
@@ -774,7 +879,7 @@ export class IntegrationWorkerService
 
 	private async releaseDeliveryClaim(
 		eventId: string,
-		integration: IntegrationKind,
+		integration: MonolithIntegrationKind,
 		lockedAt: Date
 	): Promise<void> {
 		await this.prisma.integrationDeliveryReceipt.deleteMany({
@@ -789,7 +894,7 @@ export class IntegrationWorkerService
 
 	private async releaseDeliveryClaimIfOwned(
 		eventId: string,
-		integration: IntegrationKind,
+		integration: MonolithIntegrationKind,
 		lockedAt: Date | null
 	): Promise<void> {
 		if (!lockedAt) return;
@@ -805,7 +910,7 @@ export class IntegrationWorkerService
 
 	private async resolveFailure(
 		eventId: string,
-		integration: IntegrationKind
+		integration: MonolithIntegrationKind
 	): Promise<void> {
 		await this.prisma.$transaction(async transaction => {
 			await transaction.integrationDeliveryFailure.updateMany({
@@ -823,14 +928,11 @@ export class IntegrationWorkerService
 					activeRetryToken: null
 				}
 			});
-			await transaction.integrationCredentialSnapshot.deleteMany({
-				where: { eventId, integration }
-			});
 		});
 	}
 
 	private async scheduleRetry(
-		integration: IntegrationKind,
+		integration: MonolithIntegrationKind,
 		payload: WorkerEventPayload,
 		attempt: number,
 		eventId: string,
@@ -906,7 +1008,7 @@ export class IntegrationWorkerService
 	}
 
 	private async scheduleClaimRecovery(
-		integration: IntegrationKind,
+		integration: MonolithIntegrationKind,
 		payload: WorkerEventPayload,
 		eventId: string,
 		lockedAt: Date,
@@ -957,7 +1059,7 @@ export class IntegrationWorkerService
 	}
 
 	private classifyDeliveryError(
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		error: unknown
 	): IntegrationErrorClassification {
 		return classifyIntegrationError(kind, error);
@@ -1195,7 +1297,7 @@ export class IntegrationWorkerService
 	}
 
 	private async deadLetterMalformed(
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		message: ConsumeMessage,
 		error: string
 	): Promise<void> {
@@ -1236,7 +1338,7 @@ export class IntegrationWorkerService
 	}
 
 	private async collectDeadLetter(
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		message: ConsumeMessage
 	): Promise<void> {
 		const eventId = getStableMessageId(message, kind);
@@ -1370,7 +1472,7 @@ export class IntegrationWorkerService
 
 	private async persistIntegrationDeadLetter(
 		eventId: string,
-		kind: IntegrationKind,
+		kind: MonolithIntegrationKind,
 		upsert: Prisma.IntegrationDeliveryFailureUpsertArgs,
 		deliveryToken: string | null
 	): Promise<boolean> {
@@ -1396,7 +1498,7 @@ export class IntegrationWorkerService
 	private lockDeliveryFailure(
 		transaction: Prisma.TransactionClient,
 		eventId: string,
-		integration: IntegrationKind
+		integration: MonolithIntegrationKind
 	): Promise<DeliveryFailureLockRow[]> {
 		return transaction.$queryRaw<DeliveryFailureLockRow[]>(
 			Prisma.sql`
@@ -1433,7 +1535,7 @@ export class IntegrationWorkerService
 	private async ensureDeadLetterReceipt(
 		transaction: Prisma.TransactionClient,
 		eventId: string,
-		integration: IntegrationKind
+		integration: MonolithIntegrationKind
 	): Promise<boolean> {
 		const rows = await transaction.$queryRaw<Array<{ id: string }>>(
 			Prisma.sql`
@@ -1521,14 +1623,15 @@ export class IntegrationWorkerService
 			);
 		}
 
-		const extracted = configured.filter(value =>
-			NOTIFICATION_DELIVERY_KINDS.includes(
-				value as NotificationDeliveryKind
-			)
+		const serviceOwned = configured.filter(
+			value =>
+				!MONOLITH_INTEGRATION_KINDS.includes(
+					value as MonolithIntegrationKind
+				)
 		);
-		if (extracted.length) {
+		if (serviceOwned.length) {
 			throw new Error(
-				`INTEGRATION_WORKER_KINDS cannot include notification-delivery kinds: ${extracted.join(', ')}`
+				`INTEGRATION_WORKER_KINDS cannot include service-owned kinds: ${serviceOwned.join(', ')}`
 			);
 		}
 

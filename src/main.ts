@@ -6,14 +6,10 @@ import { RecaptchaDevLoggingInterceptor } from '@/interceptors/recaptcha-dev-log
 import { messagingContextMiddleware } from '@/messaging/messaging-context';
 import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { path as appRoot } from 'app-root-path';
 import 'colors';
 import * as cookieParser from 'cookie-parser';
-import * as express from 'express';
-import { join } from 'path';
 
 const API_PREFIX = 'api/v1';
-const API_BASE_PATH = `/${API_PREFIX}`;
 
 const getCorsAllowedOrigins = () => {
 	if (process.env.MODE === 'development') {
@@ -76,15 +72,18 @@ export const bootstrap = async () => {
 				path: 'internal/v1/campaigns/audience-export',
 				method: RequestMethod.POST
 			},
-			{ path: 'widget/:key', method: RequestMethod.GET },
-			{ path: 'page-wheel/:key', method: RequestMethod.GET },
-			{ path: 'quiz-widget/:key', method: RequestMethod.GET },
-			{ path: 'page-quiz/:key', method: RequestMethod.GET },
-			{ path: 'page-callback/:key', method: RequestMethod.GET },
-			{ path: 'page-timer/:key', method: RequestMethod.GET },
-			{ path: 'page-stop-offer/:key', method: RequestMethod.GET },
-			{ path: 'page-online-consultant/:key', method: RequestMethod.GET },
-			{ path: 'page-calculator/:key', method: RequestMethod.GET }
+			{
+				path: 'internal/v1/widgets/auth/introspect',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/widgets/owners/resolve',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/widgets/owners/search',
+				method: RequestMethod.POST
+			}
 		]
 	});
 
@@ -95,79 +94,6 @@ export const bootstrap = async () => {
 
 	app.use(messagingContextMiddleware);
 	app.use(cookieParser());
-	app.use(`${API_BASE_PATH}/widget`, (req: any, res: any, next: any) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
-		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-		if (req.method === 'OPTIONS') return res.status(204).end();
-		next();
-	});
-	app.use(`${API_BASE_PATH}/quiz`, (req: any, res: any, next: any) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
-		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-		if (req.method === 'OPTIONS') return res.status(204).end();
-		next();
-	});
-	app.use(`${API_BASE_PATH}/callback`, (req: any, res: any, next: any) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
-		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-		res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-		if (req.method === 'OPTIONS') return res.status(204).end();
-		next();
-	});
-	app.use(
-		`${API_BASE_PATH}/countdown-timer`,
-		(req: any, res: any, next: any) => {
-			res.setHeader('Access-Control-Allow-Origin', '*');
-			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-			if (req.method === 'OPTIONS') return res.status(204).end();
-			next();
-		}
-	);
-	app.use(
-		`${API_BASE_PATH}/stop-offer`,
-		(req: any, res: any, next: any) => {
-			res.setHeader('Access-Control-Allow-Origin', '*');
-			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-			if (req.method === 'OPTIONS') return res.status(204).end();
-			next();
-		}
-	);
-	app.use(
-		`${API_BASE_PATH}/online-consultant`,
-		(req: any, res: any, next: any) => {
-			res.setHeader('Access-Control-Allow-Origin', '*');
-			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-			if (req.method === 'OPTIONS') return res.status(204).end();
-			next();
-		}
-	);
-	app.use(
-		`${API_BASE_PATH}/calculator`,
-		(req: any, res: any, next: any) => {
-			res.setHeader('Access-Control-Allow-Origin', '*');
-			res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-			if (req.method === 'OPTIONS') return res.status(204).end();
-			next();
-		}
-	);
-	app.use(
-		`${API_BASE_PATH}/widget-events`,
-		(req: any, res: any, next: any) => {
-			res.setHeader('Access-Control-Allow-Origin', '*');
-			res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-			res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-			if (req.method === 'OPTIONS') return res.status(204).end();
-			next();
-		}
-	);
-	// Serve static widget runtime files: /widgets/wheel.js etc.
-	app.use(express.static(join(appRoot, 'public')));
 	app.useGlobalInterceptors(new RecaptchaDevLoggingInterceptor());
 	app.useGlobalFilters(
 		new GoogleRecaptchaExceptionFilter(),

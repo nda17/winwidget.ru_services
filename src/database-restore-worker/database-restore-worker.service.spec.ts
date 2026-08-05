@@ -63,11 +63,13 @@ function createConfig(
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: '55432',
 			DATABASE_RESTORE_CAMPAIGNS_PORT: '55433',
 			DATABASE_RESTORE_REPORTING_PORT: '55435',
+			DATABASE_RESTORE_WIDGETS_PORT: '55436',
 			DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
 			DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: '/secrets/campaigns',
 			DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: '/secrets/reporting',
+			DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
 			APP_REVISION: 'd'.repeat(40),
 			NODE_ENV: productionMode ? 'production' : 'test'
 		},
@@ -509,6 +511,16 @@ describe('DatabaseRestoreWorkerService', () => {
 		expect(harness.files.has(join(STORAGE, 'worker-ready.json'))).toBe(
 			true
 		);
+		const readiness = JSON.parse(
+			String(harness.files.get(join(STORAGE, 'worker-ready.json')))
+		) as { targets: string[] };
+		expect(readiness.targets).toEqual([
+			'campaigns',
+			'core',
+			'notification-delivery',
+			'reporting',
+			'widgets'
+		]);
 		await harness.service.beforeApplicationShutdown();
 	});
 

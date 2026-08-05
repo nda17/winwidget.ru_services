@@ -1,5 +1,9 @@
 import { PrismaService } from '@/prisma.service';
 import { HealthService } from '@/health/health.service';
+import {
+	WidgetsAdminAlert,
+	WidgetsAdminOverviewClient
+} from '@/widgets-internal/widgets-admin-overview.client';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
@@ -43,7 +47,8 @@ interface AdminAlertRow {
 export class AdminAlertsService {
 	constructor(
 		private readonly prisma: PrismaService,
-		private readonly healthService: HealthService
+		private readonly healthService: HealthService,
+		private readonly widgetsAdminClient: WidgetsAdminOverviewClient
 	) {}
 
 	async getAll(page = 1, limit = 20, filters: AdminAlertFilters = {}) {
@@ -110,8 +115,22 @@ export class AdminAlertsService {
 				LIMIT 1
 			) phone_identity ON true
 		`;
-		const widgetsSql = this.getWidgetsSql();
-		const integrationAlertsSql = await this.getIntegrationAlertsSql();
+		const [widgetAlerts, integrationAlertsSql] = await Promise.all([
+			this.widgetsAdminClient.getAdminAlerts(),
+			this.getIntegrationAlertsSql()
+		]);
+		const widgetAlertsSql = this.getWidgetAlertsSql(
+			widgetAlerts,
+			userFieldsSql,
+			userIdentityJoinsSql
+		);
+		const widgetAlertsUnionSql = widgetAlertsSql
+			? Prisma.sql`
+				UNION ALL
+
+				${widgetAlertsSql}
+			`
+			: Prisma.empty;
 		const integrationAlertsUnionSql = integrationAlertsSql
 			? Prisma.sql`
 				UNION ALL
@@ -260,72 +279,7 @@ export class AdminAlertsService {
 				AND email_identity.value IS NULL
 				AND phone_identity.value IS NULL
 
-			UNION ALL
-
-			SELECT
-				'ACTIVE_WIDGET_WITHOUT_ACCESS'::text AS alert_type,
-				'HIGH'::text AS severity,
-				w.id AS reference_id,
-				${userFieldsSql},
-				'Активный виджет без права доступа'::text AS title,
-				concat(w.widget_label, ' "', w.name, '" активен, но у владельца нет активной подписки') AS message,
-				w.updated_at AS alert_at
-			FROM (${widgetsSql}) w
-			JOIN "User" u ON u.id = w.user_id
-			LEFT JOIN subscriptions s ON s.user_id = u.id
-			${userIdentityJoinsSql}
-			WHERE w.is_active = true
-				AND (
-					s.id IS NULL
-					OR s.status::text <> 'ACTIVE'
-					OR (s.expires_at IS NOT NULL AND s.expires_at < NOW())
-				)
-
-			UNION ALL
-
-			SELECT
-				'WIDGET_DOMAIN_CONFLICT'::text AS alert_type,
-				'HIGH'::text AS severity,
-				w.id AS reference_id,
-				${userFieldsSql},
-				'Домен виджета занят у разных пользователей'::text AS title,
-				concat('Домен ', w.install_domain, ' используется активными виджетами разных пользователей') AS message,
-				w.updated_at AS alert_at
-			FROM (${widgetsSql}) w
-			JOIN (
-				SELECT lower(btrim(domain_widgets.install_domain)) AS install_domain
-				FROM (${widgetsSql}) domain_widgets
-				WHERE domain_widgets.is_active = true
-					AND btrim(domain_widgets.install_domain) <> ''
-				GROUP BY lower(btrim(domain_widgets.install_domain))
-				HAVING COUNT(DISTINCT domain_widgets.user_id) > 1
-			) domain_conflicts
-				ON lower(btrim(w.install_domain)) = domain_conflicts.install_domain
-			JOIN "User" u ON u.id = w.user_id
-			${userIdentityJoinsSql}
-			WHERE w.is_active = true
-
-			UNION ALL
-
-			SELECT
-				'WIDGET_INVALID_DOMAIN'::text AS alert_type,
-				'MEDIUM'::text AS severity,
-				w.id AS reference_id,
-				${userFieldsSql},
-				'Некорректный домен виджета'::text AS title,
-				concat('У ', w.widget_label, ' "', w.name, '" сохранён домен, который не похож на нормализованное значение: ', w.install_domain) AS message,
-				w.updated_at AS alert_at
-			FROM (${widgetsSql}) w
-			JOIN "User" u ON u.id = w.user_id
-			${userIdentityJoinsSql}
-			WHERE w.is_active = true
-				AND btrim(w.install_domain) <> ''
-				AND (
-					w.install_domain <> lower(w.install_domain)
-					OR w.install_domain LIKE '% %'
-					OR w.install_domain LIKE '%/%'
-					OR w.install_domain LIKE '%@%'
-				)
+			${widgetAlertsUnionSql}
 
 			UNION ALL
 
@@ -365,110 +319,42 @@ export class AdminAlertsService {
 		`;
 	}
 
-	private getWidgetsSql() {
+	private getWidgetAlertsSql(
+		alerts: WidgetsAdminAlert[],
+		userFieldsSql: Prisma.Sql,
+		userIdentityJoinsSql: Prisma.Sql
+	): Prisma.Sql | null {
+		if (!alerts.length) return null;
+		const payload = alerts.map(alert => ({
+			alert_type: alert.type,
+			severity: alert.severity,
+			reference_id: alert.referenceId,
+			owner_id: alert.ownerId,
+			title: alert.title,
+			message: alert.message,
+			alert_at: alert.alertAt
+		}));
+
 		return Prisma.sql`
 			SELECT
-				'WHEEL'::text AS widget_type,
-				'Колесо'::text AS widget_label,
-				id,
-				user_id,
-				name,
-				public_key,
-				is_active,
-				install_domain,
-				created_at,
-				updated_at
-			FROM widgets
-
-			UNION ALL
-
-			SELECT
-				'QUIZ'::text AS widget_type,
-				'Квиз'::text AS widget_label,
-				id,
-				user_id,
-				name,
-				public_key,
-				is_active,
-				install_domain,
-				created_at,
-				updated_at
-			FROM quizzes
-
-			UNION ALL
-
-			SELECT
-				'CALLBACK'::text AS widget_type,
-				'Обратный звонок'::text AS widget_label,
-				id,
-				user_id,
-				name,
-				public_key,
-				is_active,
-				install_domain,
-				created_at,
-				updated_at
-			FROM callbacks
-
-			UNION ALL
-
-			SELECT
-				'TIMER'::text AS widget_type,
-				'Таймер'::text AS widget_label,
-				id,
-				user_id,
-				name,
-				public_key,
-				is_active,
-				install_domain,
-				created_at,
-				updated_at
-			FROM countdown_timers
-
-			UNION ALL
-
-			SELECT
-				'STOP_OFFER'::text AS widget_type,
-				'Стоп-оффер'::text AS widget_label,
-				id,
-				user_id,
-				name,
-				public_key,
-				is_active,
-				install_domain,
-				created_at,
-				updated_at
-			FROM stop_offers
-
-			UNION ALL
-
-			SELECT
-				'ONLINE_CONSULTANT'::text AS widget_type,
-				'Онлайн-консультант'::text AS widget_label,
-				id,
-				user_id,
-				name,
-				public_key,
-				is_active,
-				install_domain,
-				created_at,
-				updated_at
-			FROM online_consultants
-
-			UNION ALL
-
-			SELECT
-				'CALCULATOR'::text AS widget_type,
-				'Калькулятор стоимости'::text AS widget_label,
-				id,
-				user_id,
-				name,
-				public_key,
-				is_active,
-				install_domain,
-				created_at,
-				updated_at
-			FROM calculators
+				widget_alert.alert_type,
+				widget_alert.severity,
+				widget_alert.reference_id,
+				${userFieldsSql},
+				widget_alert.title,
+				widget_alert.message,
+				widget_alert.alert_at
+			FROM jsonb_to_recordset(${JSON.stringify(payload)}::jsonb) AS widget_alert(
+				alert_type text,
+				severity text,
+				reference_id text,
+				owner_id text,
+				title text,
+				message text,
+				alert_at timestamptz
+			)
+			JOIN "User" u ON u.id = widget_alert.owner_id
+			${userIdentityJoinsSql}
 		`;
 	}
 

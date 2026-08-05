@@ -69,6 +69,12 @@ export interface BillingSubscriptionState {
 	status: 'ACTIVE' | 'EXPIRED' | 'CANCELLED';
 	expiresAt: string | null;
 	createdAt: string;
+	billingPeriod?: 'MONTHLY' | 'YEARLY' | null;
+	startsAt?: string;
+	periodResetsAt?: string | null;
+	maxWidgets?: number;
+	maxLeadsPerPeriod?: number | null;
+	unlimited?: boolean;
 }
 
 export interface WidgetState {
@@ -516,13 +522,27 @@ function parseSourceState(
 		return;
 	}
 	if (eventType === 'billing.subscription.changed.v1') {
-		const state = exactRecord(value, [
+		const baseKeys = [
 			'id',
 			'userId',
 			'plan',
 			'status',
 			'expiresAt',
 			'createdAt'
+		] as const;
+		const entitlementKeys = [
+			'billingPeriod',
+			'startsAt',
+			'periodResetsAt',
+			'maxWidgets',
+			'maxLeadsPerPeriod',
+			'unlimited'
+		] as const;
+		const candidate = objectRecord(value);
+		const hasEntitlement = entitlementKeys.some(key => key in candidate);
+		const state = exactRecord(value, [
+			...baseKeys,
+			...(hasEntitlement ? entitlementKeys : [])
 		]);
 		assertIdAndDates(state, ['createdAt']);
 		assertBoundedString(state.userId, 'state.userId', 255);
@@ -533,6 +553,36 @@ function parseSourceState(
 			'state.status'
 		);
 		assertNullableIsoDate(state.expiresAt, 'state.expiresAt');
+		if (!hasEntitlement) return;
+		if (state.billingPeriod !== null) {
+			assertOneOf(
+				state.billingPeriod,
+				['MONTHLY', 'YEARLY'],
+				'state.billingPeriod'
+			);
+		}
+		assertIsoDate(state.startsAt, 'state.startsAt');
+		assertNullableIsoDate(state.periodResetsAt, 'state.periodResetsAt');
+		assertPositiveInteger(state.maxWidgets, 'state.maxWidgets');
+		if (state.maxLeadsPerPeriod !== null) {
+			assertPositiveInteger(
+				state.maxLeadsPerPeriod,
+				'state.maxLeadsPerPeriod'
+			);
+		}
+		if (typeof state.unlimited !== 'boolean') {
+			throw new InvalidReportingEventError(
+				'state.unlimited must be a boolean'
+			);
+		}
+		if (
+			(state.unlimited === true) !==
+			(state.maxLeadsPerPeriod === null)
+		) {
+			throw new InvalidReportingEventError(
+				'state entitlement limits are inconsistent'
+			);
+		}
 		return;
 	}
 	if (eventType === 'widgets.widget.changed.v1') {
@@ -636,6 +686,13 @@ function exactRecord(
 		throw new InvalidReportingEventError('Object contains invalid keys');
 	}
 	return record;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		throw new InvalidReportingEventError('Expected an object');
+	}
+	return value as Record<string, unknown>;
 }
 
 function assertUuid(

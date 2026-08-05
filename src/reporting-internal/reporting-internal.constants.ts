@@ -11,17 +11,3 @@ export const REPORTING_SCHEDULE_POLICY_PATH =
 	'internal/reporting/schedule-policy';
 export const REPORTING_SCHEDULE_POLICY_CONFIRM_PATH =
 	'internal/reporting/schedule-policy/confirm';
-export const REPORTING_PROJECTION_SNAPSHOT_CONTENT_TYPE =
-	'application/x-ndjson';
-
-export const REPORTING_PROJECTION_STREAMS = [
-	'identityUser',
-	'billingPayment',
-	'billingSubscription',
-	'widget',
-	'lead',
-	'reportingSettings'
-] as const;
-
-export type ReportingProjectionStream =
-	(typeof REPORTING_PROJECTION_STREAMS)[number];

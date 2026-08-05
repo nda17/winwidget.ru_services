@@ -310,6 +310,113 @@ describe('messaging event contract', () => {
 		).toThrow('unexpected fields');
 	});
 
+	it.each([
+		[
+			'WIDGET_UPDATE',
+			{ widgetId: 'widget-1', widgetType: 'WHEEL', ownerId: 'owner-1' },
+			{ changedFields: ['config', 'name'] }
+		],
+		[
+			'WIDGET_PUBLISH',
+			{ widgetId: 'quiz-1', widgetType: 'QUIZ', ownerId: 'owner-1' },
+			{ version: 2 }
+		],
+		[
+			'WIDGET_DELIVERY_RETRY',
+			{
+				widgetId: 'callback-1',
+				widgetType: 'CALLBACK',
+				ownerId: 'owner-1',
+				failureId: 'failure-1',
+				integration: 'webhook'
+			},
+			{}
+		],
+		[
+			'WIDGET_DELIVERY_CLOSE',
+			{
+				widgetId: 'calculator-1',
+				widgetType: 'CALCULATOR',
+				ownerId: 'owner-1',
+				failureId: 'failure-2',
+				integration: 'amo-crm'
+			},
+			{ commentPresent: true, commentLength: 28 }
+		]
+	] as const)(
+		'accepts a strict %s Widgets audit event on its isolated route',
+		(action, target, metadata) => {
+			const payload = {
+				schemaVersion: 1,
+				eventType: 'admin.audit.event.v1',
+				eventId: MESSAGE_ID,
+				occurredAt: '2026-08-04T18:00:00.000Z',
+				correlationId: 'request:widgets-audit-42',
+				actorId: 'admin-user-id',
+				action,
+				target,
+				metadata
+			};
+
+			expect(() =>
+				assertMessagingEventContract(payload, {
+					eventType: payload.eventType,
+					routingKey: 'admin.audit.widgets.v1',
+					messageId: MESSAGE_ID,
+					kind: 'widgets-admin-audit'
+				})
+			).not.toThrow();
+		}
+	);
+
+	it('rejects cross-routed, unstable or credential-bearing Widgets audits', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-04T18:00:00.000Z',
+			correlationId: 'request:widgets-audit-42',
+			actorId: 'admin-user-id',
+			action: 'WIDGET_UPDATE',
+			target: {
+				widgetId: 'widget-1',
+				widgetType: 'WHEEL',
+				ownerId: 'owner-1'
+			},
+			metadata: { changedFields: ['config', 'name'] }
+		};
+		const assertPayload = (
+			value: unknown,
+			routingKey = 'admin.audit.widgets.v1'
+		) =>
+			assertMessagingEventContract(value, {
+				eventType: payload.eventType,
+				routingKey,
+				messageId: MESSAGE_ID,
+				kind: 'widgets-admin-audit'
+			});
+
+		expect(() => assertPayload(payload)).not.toThrow();
+		expect(() =>
+			assertPayload(payload, 'admin.audit.reporting.v1')
+		).toThrow('Routing key');
+		expect(() =>
+			assertPayload({
+				...payload,
+				metadata: { changedFields: ['name', 'config'] }
+			})
+		).toThrow('sorted and unique');
+		expect(() =>
+			assertPayload({
+				...payload,
+				metadata: {
+					changedFields: ['config'],
+					token: 'must-not-cross-the-boundary'
+				}
+			})
+		).toThrow('forbidden');
+	});
+
 	it('rejects server credentials anywhere in a payload', () => {
 		expect(() =>
 			assertMessagingEventContract(
@@ -388,6 +495,27 @@ describe('messaging event contract', () => {
 			scheduleKey: 'scheduled:test',
 			periodStart: '2026-07-25T00:00:00.000Z',
 			periodEnd: '2026-07-26T00:00:00.000Z'
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'database-backup'
+			})
+		).not.toThrow();
+	});
+
+	it('accepts the dedicated Widgets database backup job type', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'database.backup.requested.v1',
+			jobId: MESSAGE_ID,
+			jobType: 'WIDGETS_DATABASE_BACKUP',
+			scheduleKey: 'scheduled:test',
+			periodStart: '2026-08-03T21:00:00.000Z',
+			periodEnd: '2026-08-04T21:00:00.000Z'
 		};
 
 		expect(() =>

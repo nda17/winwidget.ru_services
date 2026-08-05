@@ -9,14 +9,6 @@ const migration = readFileSync(
 	'utf8'
 );
 
-const snapshotService = readFileSync(
-	resolve(
-		process.cwd(),
-		'src/reporting-internal/reporting-projection-snapshot.service.ts'
-	),
-	'utf8'
-);
-
 const getFunctionCallArgumentCounts = (
 	source: string,
 	functionName: string
@@ -133,17 +125,11 @@ describe('Reporting projection producer migration', () => {
 		expect(argumentCounts.every(count => count === 6)).toBe(true);
 	});
 
-	it('preserves the legacy exact empty-string install-domain metric', () => {
+	it('preserves the historical producer empty-string install-domain metric', () => {
 		const exactExpression = `'hasInstallDomain', NEW."install_domain" <> ''`;
 		expect(migration).toContain(exactExpression);
 		expect(migration).not.toContain(
 			`BTRIM(COALESCE(NEW."install_domain", '')) <> ''`
-		);
-		expect(snapshotService).toContain(
-			`'hasInstallDomain', "source"."install_domain" <> ''`
-		);
-		expect(snapshotService).not.toContain(
-			`BTRIM(COALESCE("source"."install_domain", '')) <> ''`
 		);
 	});
 

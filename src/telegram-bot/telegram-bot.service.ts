@@ -1,7 +1,8 @@
 import {
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
-	REPORTING_DATABASE_BACKUP_DELAY_MINUTES
+	REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
+	WIDGETS_DATABASE_BACKUP_DELAY_MINUTES
 } from '@/maintenance/database-backup.types';
 import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
@@ -135,7 +136,8 @@ export const ensureReportingBackupScheduleSeparated = (
 		(backupMinutes + NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES) %
 			(24 * 60),
 		(backupMinutes + CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
-		(backupMinutes + REPORTING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
+		(backupMinutes + REPORTING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
+		(backupMinutes + WIDGETS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
 	];
 
 	if (
@@ -1045,6 +1047,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupTime,
 			REPORTING_DATABASE_BACKUP_DELAY_MINUTES
 		);
+		const widgetsDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			WIDGETS_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryChatId: settings.dailySummaryChatId,
@@ -1067,6 +1073,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
 			reportingDatabaseBackupTime,
 			reportingDatabaseBackupTimeLabel: `${reportingDatabaseBackupTime} МСК`,
+			widgetsDatabaseBackupDelayMinutes:
+				WIDGETS_DATABASE_BACKUP_DELAY_MINUTES,
+			widgetsDatabaseBackupTime,
+			widgetsDatabaseBackupTimeLabel: `${widgetsDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:

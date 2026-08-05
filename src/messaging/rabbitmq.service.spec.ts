@@ -39,12 +39,14 @@ describe('RabbitMqService topology', () => {
 		expect(service.isConnected()).toBe(true);
 	});
 
-	it('binds prepared payment Telegram and destination outcome queues', async () => {
+	it('asserts non-Widgets queues without reclaiming provider topology', async () => {
+		const assertQueue = jest.fn().mockResolvedValue(undefined);
+		const bindQueue = jest.fn().mockResolvedValue(undefined);
 		const channel = {
 			on: jest.fn(),
 			assertExchange: jest.fn().mockResolvedValue(undefined),
-			assertQueue: jest.fn().mockResolvedValue(undefined),
-			bindQueue: jest.fn().mockResolvedValue(undefined)
+			assertQueue,
+			bindQueue
 		} as unknown as ConfirmChannel;
 		const service = new RabbitMqService({
 			get: jest.fn()
@@ -52,11 +54,6 @@ describe('RabbitMqService topology', () => {
 
 		await (service as any).assertTopology(channel);
 
-		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.lead-integration.webhook',
-			'winwidget.events',
-			'lead.integration.webhook.v2'
-		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
 			'winwidget.payment-notification.email',
 			'winwidget.events',
@@ -133,6 +130,26 @@ describe('RabbitMqService topology', () => {
 				deadLetterRoutingKey: 'reporting-admin-audit'
 			})
 		);
+
+		const assertedQueues = assertQueue.mock.calls.map(([queue]) => queue);
+		const boundQueues = bindQueue.mock.calls.map(([queue]) => queue);
+		for (const provider of ['webhook', 'bitrix24', 'amo-crm']) {
+			const providerQueue = `winwidget.lead-integration.${provider}`;
+			expect(
+				assertedQueues.some(
+					queue =>
+						queue === providerQueue ||
+						queue.startsWith(`${providerQueue}.`)
+				)
+			).toBe(false);
+			expect(
+				boundQueues.some(
+					queue =>
+						queue === providerQueue ||
+						queue.startsWith(`${providerQueue}.`)
+				)
+			).toBe(false);
+		}
 	});
 
 	it('publishes event payload as JSON bytes', async () => {

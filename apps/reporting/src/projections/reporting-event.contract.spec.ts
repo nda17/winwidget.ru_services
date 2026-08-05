@@ -144,6 +144,54 @@ describe('reporting source event contract', () => {
 		}
 	});
 
+	it('accepts historical and complete Widgets entitlement subscription states', () => {
+		const baseEvent = {
+			schemaVersion: 1,
+			eventType: 'billing.subscription.changed.v1',
+			eventId: '66666666-6666-4666-8666-666666666666',
+			aggregateId: 'subscription-1',
+			aggregateVersion: '2',
+			sourceSequence: '10',
+			occurredAt: '2026-08-04T00:00:00.000Z',
+			tombstone: false,
+			state: {
+				id: 'subscription-1',
+				userId: 'user-1',
+				plan: 'EASY',
+				status: 'ACTIVE',
+				expiresAt: null,
+				createdAt: '2026-08-01T00:00:00.000Z'
+			}
+		};
+		expect(parseReportingSourceEvent(baseEvent)).toEqual(baseEvent);
+
+		const extended = {
+			...baseEvent,
+			state: {
+				...baseEvent.state,
+				billingPeriod: 'MONTHLY',
+				startsAt: '2026-08-01T00:00:00.000Z',
+				periodResetsAt: '2026-09-01T00:00:00.000Z',
+				maxWidgets: 1,
+				maxLeadsPerPeriod: 100,
+				unlimited: false
+			}
+		};
+		expect(parseReportingSourceEvent(extended)).toEqual(extended);
+		expect(() =>
+			parseReportingSourceEvent({
+				...extended,
+				state: { ...extended.state, unlimited: true }
+			})
+		).toThrow('inconsistent');
+		expect(() =>
+			parseReportingSourceEvent({
+				...baseEvent,
+				state: { ...baseEvent.state, maxWidgets: 1 }
+			})
+		).toThrow(InvalidReportingEventError);
+	});
+
 	it('requires namespaced widget identities and accepts a state-less tombstone', () => {
 		expect(
 			parseReportingSourceEvent({

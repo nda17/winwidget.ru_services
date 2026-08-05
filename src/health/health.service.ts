@@ -1,7 +1,7 @@
 import {
+	CORE_OWNED_MESSAGING_KINDS,
 	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
-	NOTIFICATION_DELIVERY_KINDS,
 	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
 import {
@@ -9,6 +9,10 @@ import {
 	NotificationDeliveryOverview
 } from '@/messaging/notification-delivery-client.service';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
+import {
+	WidgetsDeliveryFailuresClientService,
+	WidgetsMessagingOverview
+} from '@/messaging/widgets-delivery-failures-client.service';
 import { PrismaService } from '@/prisma.service';
 import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
@@ -30,23 +34,31 @@ type NotificationDeliveryResult = {
 	error: string | null;
 };
 
+type WidgetsOverviewResult = {
+	overview: WidgetsMessagingOverview | null;
+	error: string | null;
+};
+
 @Injectable()
 export class HealthService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly configService: ConfigService,
 		private readonly rabbitManagement: RabbitMqManagementService,
-		private readonly notificationDelivery: NotificationDeliveryClientService
+		private readonly notificationDelivery: NotificationDeliveryClientService,
+		private readonly widgets: WidgetsDeliveryFailuresClientService
 	) {}
 
 	async getAdminHealth() {
 		const notificationDeliveryResult =
 			this.getNotificationDeliveryResult();
+		const widgetsResult = this.getWidgetsResult();
 		const checks = await Promise.all([
 			this.checkBackend(),
 			this.checkDatabase(),
 			this.checkRabbitMq(),
 			this.checkNotificationDelivery(notificationDeliveryResult),
+			this.checkWidgets(widgetsResult),
 			this.checkMessagingHeartbeat('outbox-publisher', 'Outbox publisher'),
 			this.checkMessagingHeartbeat(
 				'integration-worker',
@@ -56,7 +68,10 @@ export class HealthService {
 				'maintenance-worker',
 				'Maintenance worker'
 			),
-			this.checkMessagingBacklog(notificationDeliveryResult),
+			this.checkMessagingBacklog(
+				notificationDeliveryResult,
+				widgetsResult
+			),
 			this.checkScheduledJobs(),
 			this.checkS3(),
 			this.checkSmtp(),
@@ -243,7 +258,8 @@ export class HealthService {
 	}
 
 	private async checkMessagingBacklog(
-		resultPromise: Promise<NotificationDeliveryResult>
+		resultPromise: Promise<NotificationDeliveryResult>,
+		widgetsResultPromise: Promise<WidgetsOverviewResult>
 	): Promise<HealthCheck> {
 		const now = new Date();
 		const expiredPublishingBefore = new Date(
@@ -254,14 +270,15 @@ export class HealthService {
 			unresolvedFailures,
 			oldestDuePending,
 			oldestExpiredPublishing,
-			notificationDelivery
+			notificationDelivery,
+			widgets
 		] = await Promise.all([
 			this.prisma.outboxEvent.count({ where: { status: 'FAILED' } }),
 			this.prisma.integrationDeliveryFailure.count({
 				where: {
 					resolvedAt: null,
 					integration: {
-						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+						in: [...CORE_OWNED_MESSAGING_KINDS]
 					}
 				}
 			}),
@@ -281,7 +298,8 @@ export class HealthService {
 				orderBy: { lockedAt: 'asc' },
 				select: { lockedAt: true }
 			}),
-			resultPromise
+			resultPromise,
+			widgetsResultPromise
 		]);
 		const oldestPendingAt = [
 			oldestDuePending?.availableAt || null,
@@ -293,7 +311,8 @@ export class HealthService {
 				: null,
 			this.parseDate(
 				notificationDelivery.overview?.oldestPendingAt || null
-			)
+			),
+			this.parseDate(widgets.overview?.oldestPendingAt || null)
 		]
 			.filter((value): value is Date => Boolean(value))
 			.sort((left, right) => left.getTime() - right.getTime())[0];
@@ -304,23 +323,74 @@ export class HealthService {
 				)
 			: 0;
 		const combinedFailedOutbox =
-			failedOutbox + (notificationDelivery.overview?.outbox.FAILED || 0);
+			failedOutbox +
+			(notificationDelivery.overview?.outbox.FAILED || 0) +
+			(widgets.overview?.outbox.FAILED || 0);
 		const combinedUnresolvedFailures =
 			unresolvedFailures +
-			(notificationDelivery.overview?.unresolvedFailures || 0);
+			(notificationDelivery.overview?.unresolvedFailures || 0) +
+			(widgets.overview?.unresolvedFailures || 0);
 		const hasProblem =
 			combinedFailedOutbox > 0 ||
 			combinedUnresolvedFailures > 0 ||
 			oldestAgeSeconds > 60 ||
-			Boolean(notificationDelivery.error);
+			Boolean(notificationDelivery.error) ||
+			Boolean(widgets.error);
+		const unavailable = [
+			notificationDelivery.error
+				? `Notification Delivery metrics недоступны: ${notificationDelivery.error}`
+				: '',
+			widgets.error ? `Widgets metrics недоступны: ${widgets.error}` : ''
+		]
+			.filter(Boolean)
+			.join('; ');
 
 		return {
 			id: 'messaging_backlog',
 			title: 'Очередь интеграций',
 			status: hasProblem ? 'warning' : 'ok',
 			message: hasProblem
-				? `Outbox FAILED: ${combinedFailedOutbox}, DLQ: ${combinedUnresolvedFailures}, старейшее ожидание: ${oldestAgeSeconds} сек.${notificationDelivery.error ? `; Notification Delivery metrics недоступны: ${notificationDelivery.error}` : ''}`
+				? `Outbox FAILED: ${combinedFailedOutbox}, DLQ: ${combinedUnresolvedFailures}, старейшее ожидание: ${oldestAgeSeconds} сек.${unavailable ? `; ${unavailable}` : ''}`
 				: 'Задержек и необработанных ошибок нет'
+		};
+	}
+
+	private async checkWidgets(
+		resultPromise: Promise<WidgetsOverviewResult>
+	): Promise<HealthCheck> {
+		const startedAt = Date.now();
+		const result = await resultPromise;
+		if (!result.overview || result.error) {
+			return {
+				id: 'widgets',
+				title: 'Widgets',
+				status: 'down',
+				message: result.error || 'Internal API вернул пустой ответ',
+				latencyMs: Date.now() - startedAt
+			};
+		}
+
+		const down = result.overview.heartbeats.filter(
+			heartbeat => heartbeat.status === 'down'
+		);
+		const publisher = result.overview.heartbeats.find(
+			heartbeat => heartbeat.service === 'widgets-publisher'
+		);
+		const publishAt = this.parseDate(publisher?.lastSuccessfulPublishAt);
+		const publishStale =
+			result.overview.operational.dueOutbox > 0 &&
+			(!publishAt ||
+				Date.now() - publishAt.getTime() > this.getActivityStaleMs());
+		return {
+			id: 'widgets',
+			title: 'Widgets',
+			status: down.length ? 'down' : publishStale ? 'warning' : 'ok',
+			message: down.length
+				? `Нет heartbeat: ${down.map(item => item.service).join(', ')}`
+				: publishStale
+					? `Publisher activity зависла при ${result.overview.operational.dueOutbox} готовых событиях`
+					: 'API, worker и publisher активны',
+			latencyMs: Date.now() - startedAt
 		};
 	}
 
@@ -334,6 +404,17 @@ export class HealthService {
 					error instanceof Error
 						? error.message
 						: 'Notification Delivery недоступен'
+			}));
+	}
+
+	private getWidgetsResult(): Promise<WidgetsOverviewResult> {
+		return this.widgets
+			.getOverview()
+			.then(overview => ({ overview, error: null }))
+			.catch(error => ({
+				overview: null,
+				error:
+					error instanceof Error ? error.message : 'Widgets недоступен'
 			}));
 	}
 

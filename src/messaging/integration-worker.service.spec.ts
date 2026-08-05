@@ -48,7 +48,6 @@ describe('IntegrationWorkerService', () => {
 		const receiptUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const receiptDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
 		const failureUpdateMany = jest.fn().mockResolvedValue({ count: 0 });
-		const snapshotDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
 		const outboxCreate = jest.fn().mockResolvedValue({ id: 'outbox-1' });
 		const outboxCreateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const transaction = {
@@ -60,9 +59,6 @@ describe('IntegrationWorkerService', () => {
 			integrationDeliveryReceipt: {
 				updateMany: receiptUpdateMany,
 				deleteMany: receiptDeleteMany
-			},
-			integrationCredentialSnapshot: {
-				deleteMany: snapshotDeleteMany
 			},
 			outboxEvent: {
 				create: outboxCreate,
@@ -80,9 +76,6 @@ describe('IntegrationWorkerService', () => {
 			integrationDeliveryFailure: {
 				updateMany: failureUpdateMany,
 				upsert: failureUpsert
-			},
-			integrationCredentialSnapshot: {
-				deleteMany: snapshotDeleteMany
 			},
 			outboxEvent: {
 				create: outboxCreate
@@ -107,34 +100,6 @@ describe('IntegrationWorkerService', () => {
 			adminEventLog
 		};
 	};
-
-	const createMessage = (): ConsumeMessage =>
-		({
-			content: Buffer.from(
-				JSON.stringify({
-					schemaVersion: 2,
-					eventType: 'lead.integration.requested.v2',
-					integration: 'webhook',
-					source: 'widget',
-					entity: { id: 'widget-1', name: 'Колесо' },
-					lead: {
-						id: 'lead-1',
-						createdAt: '2026-07-23T12:00:00.000Z'
-					},
-					destination: {
-						credentialRef: '22222222-2222-4222-8222-222222222222'
-					}
-				})
-			),
-			fields: {
-				routingKey: 'lead.integration.webhook.v2'
-			},
-			properties: {
-				messageId: '11111111-1111-4111-8111-111111111111',
-				type: 'lead.integration.requested.v2',
-				headers: {}
-			}
-		}) as ConsumeMessage;
 
 	const createDestinationUnavailableMessage = (): ConsumeMessage =>
 		({
@@ -245,6 +210,64 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createWidgetsAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-08-04T18:00:00.000Z',
+					correlationId: 'request:widgets-publish-42',
+					actorId: 'admin-user-id',
+					action: 'WIDGET_PUBLISH',
+					target: {
+						widgetId: 'widget-1',
+						widgetType: 'WHEEL',
+						ownerId: 'owner-1'
+					},
+					metadata: { version: 3 }
+				})
+			),
+			fields: {
+				routingKey: 'admin.audit.widgets.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
+	const createWidgetsCloseAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '22222222-2222-4222-8222-222222222222',
+					occurredAt: '2026-08-04T18:05:00.000Z',
+					correlationId: 'request:widgets-close-43',
+					actorId: 'admin-user-id',
+					action: 'WIDGET_DELIVERY_CLOSE',
+					target: {
+						widgetId: 'widget-1',
+						widgetType: 'WHEEL',
+						ownerId: 'owner-1',
+						failureId: '33333333-3333-4333-8333-333333333333',
+						integration: 'webhook'
+					},
+					metadata: { commentPresent: true, commentLength: 24 }
+				})
+			),
+			fields: { routingKey: 'admin.audit.widgets.v1' },
+			properties: {
+				messageId: '22222222-2222-4222-8222-222222222222',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	it('starts consumers only for integrations that remain in the monolith', async () => {
 		const { service, rabbitMq } = createService();
 
@@ -263,13 +286,11 @@ describe('IntegrationWorkerService', () => {
 			'subscription-expiry-telegram'
 		]);
 		expect(MONOLITH_INTEGRATION_KINDS).toEqual([
-			'webhook',
-			'bitrix24',
-			'amo-crm',
 			'telegram-destination-unavailable',
 			'notification-delivery-outcome',
 			'campaign-admin-audit',
 			'reporting-admin-audit',
+			'widgets-admin-audit',
 			'auto-renewal'
 		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
@@ -283,9 +304,10 @@ describe('IntegrationWorkerService', () => {
 		).toEqual(MONOLITH_INTEGRATION_KINDS);
 	});
 
-	it('can restrict consumers without changing the worker image', async () => {
+	it('can restrict consumers to explicit Core-owned kinds', async () => {
 		const { service, rabbitMq } = createService({
-			INTEGRATION_WORKER_KINDS: 'webhook, amo-crm',
+			INTEGRATION_WORKER_KINDS:
+				'widgets-admin-audit, reporting-admin-audit',
 			RABBITMQ_WORKER_PREFETCH: '4'
 		});
 
@@ -294,13 +316,13 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(2);
 		expect(rabbitMq.consume).toHaveBeenNthCalledWith(
 			1,
-			'webhook',
+			'widgets-admin-audit',
 			expect.any(Function),
 			4
 		);
 		expect(rabbitMq.consume).toHaveBeenNthCalledWith(
 			2,
-			'amo-crm',
+			'reporting-admin-audit',
 			expect.any(Function),
 			4
 		);
@@ -447,19 +469,96 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
 	});
 
-	it('rejects kinds owned by notification delivery', async () => {
+	it('writes a Widgets audit and its delivered receipt atomically', async () => {
+		const { service, rabbitMq, delivery, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'widgets-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createWidgetsAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				adminId: 'admin-user-id',
+				section: 'WIDGETS',
+				action: 'WIDGET_PUBLISH',
+				entityType: 'widget',
+				entityId: 'widget-1',
+				entityLabel: 'WHEEL',
+				targetUserId: 'owner-1',
+				metadata: expect.objectContaining({
+					widgetId: 'widget-1',
+					widgetType: 'WHEEL',
+					version: 3
+				})
+			})
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					eventId: '11111111-1111-4111-8111-111111111111',
+					integration: 'widgets-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
+	it('writes a Widgets delivery-close audit without exposing its comment', async () => {
+		const { service, rabbitMq, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'widgets-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createWidgetsCloseAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				action: 'WIDGET_DELIVERY_CLOSE',
+				entityType: 'widget-integration-delivery',
+				entityId: '33333333-3333-4333-8333-333333333333',
+				metadata: expect.objectContaining({
+					commentPresent: true,
+					commentLength: 24
+				})
+			})
+		);
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
+	it('rejects kinds owned by extracted services', async () => {
 		const { service } = createService({
-			INTEGRATION_WORKER_KINDS: 'webhook,payment-telegram,limit-telegram'
+			INTEGRATION_WORKER_KINDS:
+				'webhook,bitrix24,amo-crm,payment-telegram,limit-telegram'
 		});
 
 		await expect(service.onModuleInit()).rejects.toThrow(
-			'INTEGRATION_WORKER_KINDS cannot include notification-delivery kinds: payment-telegram, limit-telegram'
+			'INTEGRATION_WORKER_KINDS cannot include service-owned kinds: webhook, bitrix24, amo-crm, payment-telegram, limit-telegram'
 		);
 	});
 
 	it('rejects unknown integration names', async () => {
 		const { service } = createService({
-			INTEGRATION_WORKER_KINDS: 'webhook,unknown'
+			INTEGRATION_WORKER_KINDS: 'widgets-admin-audit,unknown'
 		});
 
 		await expect(service.onModuleInit()).rejects.toThrow(
@@ -492,45 +591,6 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.cancelConsumers).toHaveBeenCalledTimes(1);
 	});
 
-	it('rejects retired v1 lead events before delivery', async () => {
-		const { service, rabbitMq, delivery, prisma } = createService();
-		const message = createMessage();
-		message.content = Buffer.from(
-			JSON.stringify({
-				schemaVersion: 1,
-				integration: 'webhook',
-				source: 'widget',
-				entity: { id: 'widget-1', name: 'Колесо' },
-				lead: {
-					id: 'lead-1',
-					createdAt: '2026-07-23T12:00:00.000Z'
-				},
-				destination: { webhookUrl: 'https://example.com' }
-			})
-		);
-		message.properties.type = 'lead.integration.requested.v1';
-
-		await (service as any).handle('webhook', message);
-
-		expect(delivery.deliver).not.toHaveBeenCalled();
-		expect(
-			prisma.integrationDeliveryReceipt.create
-		).not.toHaveBeenCalled();
-		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
-			'webhook',
-			expect.objectContaining({ malformed: true }),
-			0,
-			'11111111-1111-4111-8111-111111111111',
-			'payload.destination.webhookUrl is forbidden in RabbitMQ payload',
-			'lead.integration.requested.v1',
-			expect.objectContaining({
-				category: 'PERMANENT',
-				normalizedCode: 'INVALID_EVENT_PAYLOAD'
-			})
-		);
-		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
-	});
-
 	it('skips an event that already has a delivery receipt', async () => {
 		const { service, rabbitMq, delivery, prisma } = createService();
 		(
@@ -543,7 +603,10 @@ describe('IntegrationWorkerService', () => {
 			lockedAt: new Date()
 		});
 
-		await (service as any).handle('webhook', createMessage());
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			createDestinationUnavailableMessage()
+		);
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
@@ -577,8 +640,7 @@ describe('IntegrationWorkerService', () => {
 			expect.objectContaining({
 				sourceKind: 'telegram',
 				destination: { telegramChatId: '123456789' }
-			}),
-			'11111111-1111-4111-8111-111111111111'
+			})
 		);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(2);
 	});
@@ -598,7 +660,10 @@ describe('IntegrationWorkerService', () => {
 			retryToken: null
 		});
 
-		await (service as any).handle('webhook', createMessage());
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			createDestinationUnavailableMessage()
+		);
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
@@ -620,20 +685,23 @@ describe('IntegrationWorkerService', () => {
 			retryAvailableAt,
 			retryToken
 		});
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.headers = {
 			'x-retry-attempt': 1,
 			'x-delivery-token': retryToken
 		};
 
-		await (service as any).handle('webhook', message);
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(
 			prisma.integrationDeliveryReceipt.updateMany
 		).toHaveBeenNthCalledWith(1, {
 			where: {
 				eventId: '11111111-1111-4111-8111-111111111111',
-				integration: 'webhook',
+				integration: 'telegram-destination-unavailable',
 				status: IntegrationDeliveryReceiptStatus.RETRY_SCHEDULED,
 				retryAttempt: 1,
 				retryAvailableAt,
@@ -666,13 +734,16 @@ describe('IntegrationWorkerService', () => {
 			retryAvailableAt: new Date(Date.now() - 1000),
 			retryToken: '22222222-2222-4222-8222-222222222222'
 		});
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.headers = {
 			'x-retry-attempt': 1,
 			'x-delivery-token': '33333333-3333-4333-8333-333333333333'
 		};
 
-		await (service as any).handle('webhook', message);
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
@@ -681,13 +752,16 @@ describe('IntegrationWorkerService', () => {
 	it('claims and marks a receipt before acknowledging successful delivery', async () => {
 		const { service, rabbitMq, delivery, prisma } = createService();
 
-		await (service as any).handle('webhook', createMessage());
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			createDestinationUnavailableMessage()
+		);
 
 		expect(delivery.deliver).toHaveBeenCalledTimes(1);
 		expect(prisma.integrationDeliveryReceipt.create).toHaveBeenCalledWith({
 			data: {
 				eventId: '11111111-1111-4111-8111-111111111111',
-				integration: 'webhook',
+				integration: 'telegram-destination-unavailable',
 				status: IntegrationDeliveryReceiptStatus.PROCESSING,
 				lockedAt: expect.any(Date),
 				deliveredAt: null,
@@ -701,7 +775,7 @@ describe('IntegrationWorkerService', () => {
 		).toHaveBeenCalledWith({
 			where: {
 				eventId: '11111111-1111-4111-8111-111111111111',
-				integration: 'webhook',
+				integration: 'telegram-destination-unavailable',
 				status: IntegrationDeliveryReceiptStatus.PROCESSING,
 				lockedAt: expect.any(Date)
 			},
@@ -729,7 +803,10 @@ describe('IntegrationWorkerService', () => {
 			lockedAt: new Date()
 		});
 
-		await (service as any).handle('webhook', createMessage());
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			createDestinationUnavailableMessage()
+		);
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
 		expect(
@@ -750,17 +827,20 @@ describe('IntegrationWorkerService', () => {
 			status: IntegrationDeliveryReceiptStatus.PROCESSING,
 			lockedAt: new Date()
 		});
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.headers = { 'x-retry-attempt': 3 };
 
-		await (service as any).handle('webhook', message);
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(transaction.outboxEvent.createMany).toHaveBeenCalledWith({
 			data: [
 				expect.objectContaining({
 					messageId: '11111111-1111-4111-8111-111111111111',
-					eventType: 'lead.integration.requested.v2',
-					routingKey: 'lead.integration.webhook.v2',
+					eventType: 'notification.telegram.destination-unavailable.v1',
+					routingKey: 'notification.telegram.destination-unavailable.v1',
 					headers: expect.objectContaining({
 						'x-retry-attempt': 3
 					}),
@@ -779,7 +859,10 @@ describe('IntegrationWorkerService', () => {
 			new Error('Remote service unavailable')
 		);
 
-		await (service as any).handle('webhook', createMessage());
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			createDestinationUnavailableMessage()
+		);
 
 		const lockedAt = (
 			prisma.integrationDeliveryReceipt.create as jest.Mock
@@ -792,7 +875,7 @@ describe('IntegrationWorkerService', () => {
 		).toHaveBeenCalledWith({
 			where: {
 				eventId: '11111111-1111-4111-8111-111111111111',
-				integration: 'webhook',
+				integration: 'telegram-destination-unavailable',
 				status: IntegrationDeliveryReceiptStatus.PROCESSING,
 				lockedAt
 			},
@@ -807,14 +890,14 @@ describe('IntegrationWorkerService', () => {
 		const retryOutbox =
 			transaction.outboxEvent.create.mock.calls[0][0].data;
 		expect(retryOutbox.deduplicationKey).toBe(
-			`integration:11111111-1111-4111-8111-111111111111:webhook:retry:1:${retryOutbox.headers['x-delivery-token']}`
+			`integration:11111111-1111-4111-8111-111111111111:telegram-destination-unavailable:retry:1:${retryOutbox.headers['x-delivery-token']}`
 		);
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 
 	it('stops automatic retries after the delivery window expires', async () => {
 		const { service, rabbitMq, delivery, transaction } = createService();
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.headers = {
 			'x-first-failed-at': new Date(
 				Date.now() - 25 * 60 * 60 * 1000
@@ -824,16 +907,19 @@ describe('IntegrationWorkerService', () => {
 			new Error('Remote service unavailable')
 		);
 
-		await (service as any).handle('webhook', message);
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
 		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
-			'webhook',
+			'telegram-destination-unavailable',
 			expect.any(Object),
 			1,
 			'11111111-1111-4111-8111-111111111111',
 			'Automatic retry window expired',
-			'lead.integration.requested.v2',
+			'notification.telegram.destination-unavailable.v1',
 			expect.objectContaining({
 				category: 'PERMANENT',
 				normalizedCode: 'AUTOMATIC_RETRY_WINDOW_EXPIRED',
@@ -844,32 +930,38 @@ describe('IntegrationWorkerService', () => {
 
 	it('uses the same deterministic ID for malformed redeliveries', async () => {
 		const { service, rabbitMq, delivery, prisma } = createService();
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.messageId = 'not-a-uuid';
 
-		await (service as any).handle('webhook', message);
-		await (service as any).handle('webhook', message);
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
 		expect(
 			prisma.integrationDeliveryReceipt.create
 		).not.toHaveBeenCalled();
 		expect(rabbitMq.publishDeadLetter).toHaveBeenCalledWith(
-			'webhook',
+			'telegram-destination-unavailable',
 			expect.any(Object),
 			0,
 			expect.stringMatching(
 				/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 			),
 			'RabbitMQ messageId is missing or invalid',
-			'lead.integration.requested.v2',
+			'notification.telegram.destination-unavailable.v1',
 			expect.objectContaining({
 				category: 'PERMANENT',
 				normalizedCode: 'INVALID_EVENT_PAYLOAD'
 			})
 		);
 		expect(rabbitMq.publishDeadLetter).not.toHaveBeenCalledWith(
-			'webhook',
+			'telegram-destination-unavailable',
 			expect.anything(),
 			expect.anything(),
 			'not-a-uuid',
@@ -891,14 +983,20 @@ describe('IntegrationWorkerService', () => {
 				? [{ id: 'receipt-1' }]
 				: [];
 		});
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.messageId = 'not-a-uuid';
 		message.properties.headers = {
 			'x-last-error': 'Malformed source event'
 		};
 
-		await (service as any).collectDeadLetter('webhook', message);
-		await (service as any).collectDeadLetter('webhook', message);
+		await (service as any).collectDeadLetter(
+			'telegram-destination-unavailable',
+			message
+		);
+		await (service as any).collectDeadLetter(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(prisma.integrationDeliveryFailure.upsert).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -907,7 +1005,7 @@ describe('IntegrationWorkerService', () => {
 						eventId: expect.stringMatching(
 							/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 						),
-						integration: 'webhook'
+						integration: 'telegram-destination-unavailable'
 					}
 				}
 			})
@@ -937,12 +1035,15 @@ describe('IntegrationWorkerService', () => {
 					]
 				: [{ id: 'receipt-1' }];
 		});
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.headers = {
 			'x-last-error': 'Late duplicate'
 		};
 
-		await (service as any).collectDeadLetter('webhook', message);
+		await (service as any).collectDeadLetter(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(
 			prisma.integrationDeliveryFailure.upsert
@@ -965,13 +1066,16 @@ describe('IntegrationWorkerService', () => {
 					]
 				: [{ id: 'receipt-1' }];
 		});
-		const message = createMessage();
+		const message = createDestinationUnavailableMessage();
 		message.properties.headers = {
 			'x-last-error': 'Old delivery failure',
 			'x-delivery-token': '33333333-3333-4333-8333-333333333333'
 		};
 
-		await (service as any).collectDeadLetter('webhook', message);
+		await (service as any).collectDeadLetter(
+			'telegram-destination-unavailable',
+			message
+		);
 
 		expect(
 			prisma.integrationDeliveryFailure.upsert
@@ -993,14 +1097,17 @@ describe('IntegrationWorkerService', () => {
 			lockedAt: staleLockedAt
 		});
 
-		await (service as any).handle('webhook', createMessage());
+		await (service as any).handle(
+			'telegram-destination-unavailable',
+			createDestinationUnavailableMessage()
+		);
 
 		expect(
 			prisma.integrationDeliveryReceipt.updateMany
 		).toHaveBeenNthCalledWith(1, {
 			where: {
 				eventId: '11111111-1111-4111-8111-111111111111',
-				integration: 'webhook',
+				integration: 'telegram-destination-unavailable',
 				status: IntegrationDeliveryReceiptStatus.PROCESSING,
 				lockedAt: staleLockedAt
 			},

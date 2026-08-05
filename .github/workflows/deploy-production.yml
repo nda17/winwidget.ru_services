@@ -14,6 +14,12 @@ on:
           - notification-delivery
           - campaigns
           - reporting
+          - widgets
+      widgets_cutover_confirmation:
+        description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - prod
@@ -34,8 +40,140 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: production
+    env:
+      # CI-only fixture values. Production still comes exclusively from the
+      # protected root-owned backend env on the VPS.
+      PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
+      S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
 
     steps:
+      - name: Checkout candidate revision
+        uses: actions/checkout@v6
+
+      - name: Fast-check Widgets candidate and runner prerequisites
+        run: |
+          required_files=(
+            apps/widgets/Dockerfile
+            deploy/docker-compose.prod.yml
+            deploy/nginx.conf
+            scripts/widgets-database-lifecycle.sh
+            scripts/deploy-widgets-production.sh
+            scripts/widgets-cutover-production.sh
+            scripts/test-widgets-cutover-rehearsal.sh
+            scripts/export-widgets-cutover-snapshot.mjs
+          )
+          for path in "${required_files[@]}"; do
+            test -f "$path"
+          done
+
+          for script in \
+            scripts/widgets-database-lifecycle.sh \
+            scripts/deploy-widgets-production.sh \
+            scripts/widgets-cutover-production.sh \
+            scripts/test-widgets-cutover-rehearsal.sh; do
+            bash -n "$script"
+          done
+          node --check scripts/export-widgets-cutover-snapshot.mjs
+          node scripts/export-widgets-cutover-snapshot.mjs --self-test
+          bash scripts/widgets-database-lifecycle.sh --self-test
+          bash scripts/test-widgets-cutover-rehearsal.sh --self-test
+
+          # ShellCheck runs separately below; its actionlint integration
+          # deadlocks while piping this workflow's large inline scripts.
+          docker run --rm \
+            --network none \
+            --read-only \
+            --security-opt no-new-privileges \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            -shellcheck=
+          docker run --rm \
+            --network none \
+            --read-only \
+            --security-opt no-new-privileges \
+            --entrypoint shellcheck \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --workdir /repo \
+            koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+            --severity=warning \
+            scripts/widgets-database-lifecycle.sh \
+            scripts/deploy-widgets-production.sh \
+            scripts/widgets-cutover-production.sh \
+            scripts/test-widgets-cutover-rehearsal.sh
+
+          require_compose_flag() {
+            local command="$1" flag="$2"
+            docker compose "$command" --help | grep -F -- "$flag" > /dev/null
+          }
+          docker compose --help | grep -F -- '--profile' > /dev/null
+          require_compose_flag build --provenance
+          require_compose_flag config --quiet
+          require_compose_flag ps --status
+          require_compose_flag run --no-deps
+          require_compose_flag up --force-recreate
+          require_compose_flag up --no-build
+          docker compose \
+            --profile migration \
+            --profile notification-delivery-migration \
+            --profile notification-delivery-database \
+            --profile campaigns-migration \
+            --profile campaigns-database \
+            --profile reporting-migration \
+            --profile reporting-database \
+            --profile widgets-migration \
+            --profile widgets-database \
+            --env-file .env.example \
+            -f deploy/docker-compose.prod.yml config --quiet
+
+          available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 { print $4 }')"
+          [[ "$available_kib" =~ ^[0-9]+$ ]] &&
+            ((available_kib >= 10 * 1024 * 1024))
+          for port in 5432 5672 15672 55432 55433 55435 55436; do
+            if ss -H -ltn "sport = :$port" | grep -q .; then
+              echo "Preflight runner port is already occupied: $port" >&2
+              exit 1
+            fi
+          done
+          if docker container ls --all --quiet \
+            --filter label=com.winwidget.owner=widgets | grep -q .; then
+            echo "A pre-existing Widgets-owned container collides with the isolated verify." >&2
+            exit 1
+          fi
+
+          prisma_engine_url='https://binaries.prisma.sh/all_commits/605197351a3c8bdd595af2d2a9bc3025bca48ea2/debian-openssl-3.0.x/schema-engine.gz.sha256'
+          docker run --rm --network bridge node:20-alpine node -e '
+            const { lookup } = require("node:dns").promises;
+            const endpoint = new URL(process.argv[1]);
+            (async () => {
+              const address = await lookup(endpoint.hostname);
+              if (!address.address) throw new Error("Docker DNS returned no address");
+              const response = await fetch(endpoint, { method: "HEAD" });
+              if (!response.ok) throw new Error(`Prisma endpoint returned ${response.status}`);
+            })().catch(error => {
+              console.error(error);
+              process.exitCode = 1;
+            });
+          ' "$prisma_engine_url"
+
+          buildkit_probe_image="winwidget-buildkit-dns-preflight:$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cleanup_buildkit_probe() {
+            docker image rm --force "$buildkit_probe_image" > /dev/null 2>&1 || true
+          }
+          trap cleanup_buildkit_probe EXIT
+          DOCKER_BUILDKIT=1 docker build \
+            --network default \
+            --quiet \
+            --build-arg "PRISMA_ENGINE_URL=$prisma_engine_url" \
+            --tag "$buildkit_probe_image" - <<'DOCKERFILE'
+          FROM node:20-alpine
+          ARG PRISMA_ENGINE_URL
+          RUN node -e 'const {lookup}=require("node:dns").promises;const endpoint=new URL(process.argv[1]);(async()=>{const address=await lookup(endpoint.hostname);if(!address.address)throw new Error("BuildKit DNS returned no address");const response=await fetch(endpoint,{method:"HEAD"});if(!response.ok)throw new Error(`Prisma endpoint returned ${response.status}`)})().catch(error=>{console.error(error);process.exitCode=1})' "$PRISMA_ENGINE_URL"
+          DOCKERFILE
+          cleanup_buildkit_probe
+          trap - EXIT
+
       - name: Configure SSH private key
         env:
           SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
@@ -73,6 +211,69 @@ jobs:
             echo "Lifecycle preflight requires a trusted clean prod checkout." >&2
             exit 1
           }
+
+          production_env="$APP_ROOT/deploy/backend/.env.production"
+          [[ -f "$production_env" && ! -L "$production_env" &&
+            "$(stat -c '%u:%g:%a' "$production_env")" == '0:0:600' ]] || {
+            echo "Backend production env must be a root-owned mode-600 regular file." >&2
+            exit 1
+          }
+          require_production_env_key() {
+            local key="$1"
+            awk -F= -v key="$key" '
+              /^[[:space:]]*(#|$)/ { next }
+              {
+                name = $1
+                sub(/^[[:space:]]*/, "", name)
+                sub(/[[:space:]]*$/, "", name)
+                if (name != key) next
+                value = $0
+                sub(/^[^=]*=/, "", value)
+                sub(/\r$/, "", value)
+                sub(/^[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+                matches += 1
+                if (value != "" && value !~ /^(change_me|XYZXYZXYZ)/) valid += 1
+              }
+              END { exit(matches == 1 && valid == 1 ? 0 : 1) }
+            ' "$production_env"
+          }
+          for key in \
+            DATABASE_URL_PRODUCTION \
+            DATABASE_MIGRATION_URL_PRODUCTION \
+            DATABASE_BACKUP_URL \
+            INTEGRATION_WORKER_KINDS \
+            GATEWAY_ROUTES_JSON \
+            CORS_ALLOWED_ORIGINS \
+            WIDGETS_DATABASE_URL \
+            WIDGETS_MIGRATION_DATABASE_URL \
+            WIDGETS_BACKUP_URL \
+            WIDGETS_POSTGRES_IMAGE \
+            WIDGETS_POSTGRES_PORT \
+            WIDGETS_POSTGRES_DATA_VOLUME \
+            WIDGETS_POSTGRES_ADMIN_USER \
+            WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE \
+            WIDGETS_PROCESS_ROLE \
+            WIDGETS_LISTEN_HOST \
+            WIDGETS_PORT \
+            WIDGETS_CORE_INTERNAL_BASE_URL \
+            WIDGETS_INTERNAL_BASE_URL \
+            WIDGETS_INTERNAL_TOKEN \
+            WIDGETS_INTERNAL_TIMEOUT_MS \
+            WIDGETS_ENTITLEMENT_MAX_STALENESS_MS \
+            RABBITMQ_WIDGETS_URL \
+            RABBITMQ_INTEGRATION_WORKER_URL \
+            RABBITMQ_VHOST \
+            S3_BUCKET \
+            S3_ACCESS_KEY_ID \
+            S3_SECRET_ACCESS_KEY \
+            S3_PUBLIC_BASE_URL; do
+            require_production_env_key "$key" || {
+              echo "Missing, duplicate, empty or placeholder production env key: $key" >&2
+              exit 1
+            }
+          done
+          echo "Backend production env structure passed the Widgets preflight."
 
           guard_campaigns_checkout_before_pull() {
             local expected_revision="$1"
@@ -130,11 +331,36 @@ jobs:
               ! -e "$cutover_marker" && ! -L "$cutover_marker" ]]
           }
 
+          guard_widgets_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local lifecycle_script="scripts/widgets-database-lifecycle.sh"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+            tracked_blob="$(
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
+                true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || return 1
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || return 1
+              APP_ROOT="$APP_ROOT" \
+                bash "$lifecycle_script" "$guard_action" "$expected_revision"
+              return
+            fi
+            [[ -z "$tracked_blob" ]]
+          }
+
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           guard_campaigns_checkout_before_pull "$current_revision"
           guard_reporting_checkout_before_pull "$current_revision"
+          guard_widgets_checkout_before_pull "$current_revision"
           guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
+          guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
             "$current_revision" == "$EXPECTED_REVISION" ]]; then
             guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
@@ -195,8 +421,12 @@ jobs:
       CAMPAIGNS_IMAGE: winwidget-campaigns:git-${{ github.sha }}
       REPORTING_REVISION: ${{ github.sha }}
       REPORTING_IMAGE: winwidget-reporting:git-${{ github.sha }}
+      WIDGETS_REVISION: ${{ github.sha }}
+      WIDGETS_IMAGE: winwidget-widgets:git-${{ github.sha }}
       # CI-only 32-byte key. Production uses deploy/backend/.env.production.
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
+      S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://winwidget_notification_delivery_runtime:winwidget_notification_delivery_runtime_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
@@ -214,6 +444,19 @@ jobs:
       REPORTING_BACKUP_URL: postgresql://winwidget_reporting_backup:reporting_backup_ci@127.0.0.1:55435/winwidget_reporting_ci?schema=reporting&sslmode=disable
       REPORTING_CI_POSTGRES_CONTAINER: winwidget-reporting-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       REPORTING_CI_POSTGRES_VOLUME: winwidget-reporting-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      WIDGETS_DATABASE_URL: postgresql://winwidget_widgets_runtime:widgets_runtime_ci@127.0.0.1:55436/winwidget_widgets_ci?schema=widgets&sslmode=disable
+      WIDGETS_CI_MIGRATION_DATABASE_URL: postgresql://winwidget_widgets_migration:widgets_migration_ci@127.0.0.1:55436/winwidget_widgets_ci?schema=widgets&sslmode=disable
+      WIDGETS_BACKUP_URL: postgresql://winwidget_widgets_backup:widgets_backup_ci@127.0.0.1:55436/winwidget_widgets_ci?schema=widgets&sslmode=disable
+      WIDGETS_CI_POSTGRES_CONTAINER: winwidget-widgets-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      WIDGETS_CI_POSTGRES_VOLUME: winwidget-widgets-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      WIDGETS_PROCESS_ROLE: all
+      WIDGETS_LISTEN_HOST: 127.0.0.1
+      WIDGETS_PORT: 4700
+      WIDGETS_CORE_INTERNAL_BASE_URL: http://127.0.0.1:4200
+      WIDGETS_INTERNAL_BASE_URL: http://127.0.0.1:4700
+      WIDGETS_INTERNAL_TOKEN: ci_widgets_internal_token_for_isolated_verify_20260804
+      WIDGETS_INTERNAL_TIMEOUT_MS: 5000
+      WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: 31968000000
       REPORTING_PROCESS_ROLE: all
       REPORTING_LISTEN_HOST: 127.0.0.1
       REPORTING_PORT: 4600
@@ -279,13 +522,16 @@ jobs:
           bash scripts/restart-campaigns-database-cutover-production.sh \
             --self-test
           bash scripts/audit-legacy-telegram-channels-production.sh --self-test
+          # ShellCheck runs separately below; its actionlint integration
+          # deadlocks while piping this workflow's large inline scripts.
           docker run --rm \
             --network none \
             --read-only \
             --security-opt no-new-privileges \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
             --workdir /repo \
-            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            -shellcheck=
           docker run --rm \
             --network none \
             --read-only \
@@ -391,6 +637,7 @@ jobs:
             apps/notification-delivery/pnpm-lock.yaml
             apps/campaigns/pnpm-lock.yaml
             apps/reporting/pnpm-lock.yaml
+            apps/widgets/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -401,6 +648,7 @@ jobs:
           pnpm --dir apps/notification-delivery install --frozen-lockfile
           pnpm --dir apps/campaigns install --frozen-lockfile
           pnpm --dir apps/reporting install --frozen-lockfile
+          pnpm --dir apps/widgets install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
         env:
@@ -753,6 +1001,122 @@ jobs:
             GRANT SELECT ON SEQUENCES TO winwidget_reporting_backup;
           SQL
 
+      - name: Start isolated Widgets PostgreSQL
+        env:
+          WIDGETS_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-widgets-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          test ! -e "$WIDGETS_CI_POSTGRES_PASSWORD_FILE"
+          umask 077
+          openssl rand -hex 32 > "$WIDGETS_CI_POSTGRES_PASSWORD_FILE"
+
+          docker volume create \
+            --label com.winwidget.owner=widgets \
+            --label com.winwidget.purpose=ci-postgres-data \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            "$WIDGETS_CI_POSTGRES_VOLUME" > /dev/null
+
+          docker run --detach \
+            --name "$WIDGETS_CI_POSTGRES_CONTAINER" \
+            --label com.winwidget.owner=widgets \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55436:5432 \
+            --mount \
+              "type=volume,source=$WIDGETS_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount \
+              "type=bind,source=$WIDGETS_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/widgets-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_widgets_ci \
+            --env POSTGRES_USER=winwidget_widgets_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/widgets-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd \
+              "pg_isready --username winwidget_widgets_admin --dbname winwidget_widgets_ci" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+
+          for attempt in $(seq 1 30); do
+            status="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$WIDGETS_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$status" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$status" == "unhealthy" || "$attempt" == "30" ]]; then
+              docker logs "$WIDGETS_CI_POSTGRES_CONTAINER" >&2
+              echo "Isolated Widgets PostgreSQL is $status." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Create isolated Widgets roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.WIDGETS_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_widgets_admin \
+              --dbname winwidget_widgets_ci <<'SQL'
+          REVOKE ALL ON DATABASE winwidget_widgets_ci FROM PUBLIC;
+
+          CREATE ROLE winwidget_widgets_migration
+            LOGIN PASSWORD 'widgets_migration_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          CREATE ROLE winwidget_widgets_runtime
+            LOGIN PASSWORD 'widgets_runtime_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          CREATE ROLE winwidget_widgets_backup
+            LOGIN PASSWORD 'widgets_backup_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+          GRANT CONNECT ON DATABASE winwidget_widgets_ci
+            TO winwidget_widgets_migration;
+          GRANT CONNECT ON DATABASE winwidget_widgets_ci
+            TO winwidget_widgets_runtime;
+          GRANT CONNECT ON DATABASE winwidget_widgets_ci
+            TO winwidget_widgets_backup;
+
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA widgets AUTHORIZATION winwidget_widgets_migration;
+          REVOKE ALL ON SCHEMA widgets FROM PUBLIC;
+          GRANT USAGE ON SCHEMA widgets TO winwidget_widgets_runtime;
+          GRANT USAGE ON SCHEMA widgets TO winwidget_widgets_backup;
+
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            REVOKE ALL ON TABLES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            REVOKE ALL ON SEQUENCES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            REVOKE ALL ON FUNCTIONS FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
+            TO winwidget_widgets_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES
+            TO winwidget_widgets_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT SELECT ON TABLES TO winwidget_widgets_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT SELECT ON SEQUENCES TO winwidget_widgets_backup;
+          SQL
+
+      - name: Rehearse Widgets exact dump in isolated PostgreSQL 18
+        env:
+          WIDGETS_REHEARSAL_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/test-widgets-cutover-rehearsal.sh --rehearsal
+
       - name: Generate ephemeral CI JWT keyset
         run: |
           cp .env.example "$RUNNER_TEMP/winwidget-jwt-ci.env"
@@ -798,6 +1162,8 @@ jobs:
           pnpm --dir apps/campaigns run prisma:generate
           pnpm --dir apps/reporting run prisma:validate
           pnpm --dir apps/reporting run prisma:generate
+          pnpm --dir apps/widgets run prisma:validate
+          pnpm --dir apps/widgets run prisma:generate
 
       - name: Apply database migrations
         run: |
@@ -809,6 +1175,8 @@ jobs:
             pnpm --dir apps/campaigns run prisma:migrate:deploy
           REPORTING_DATABASE_URL="$REPORTING_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/reporting run prisma:migrate:deploy
+          WIDGETS_DATABASE_URL="$WIDGETS_CI_MIGRATION_DATABASE_URL" \
+            pnpm --dir apps/widgets run prisma:migrate:deploy
 
       - name: Test Reporting producer PostgreSQL boundaries
         env:
@@ -1372,6 +1740,126 @@ jobs:
             exit 1
           fi
 
+      - name: Finalize and verify Widgets database roles
+        env:
+          MONOLITH_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER_ID: ${{ env.WIDGETS_CI_POSTGRES_CONTAINER }}
+        run: |
+          test "$POSTGRES_CONTAINER_ID" != "$MONOLITH_POSTGRES_CONTAINER_ID"
+          docker exec -i "$MONOLITH_POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --username winwidget --dbname winwidget_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF to_regnamespace('widgets') IS NOT NULL THEN
+              RAISE EXCEPTION 'Core database must not contain the Widgets service schema';
+            END IF;
+          END $$;
+          SQL
+
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_widgets_admin \
+              --dbname winwidget_widgets_ci <<'SQL'
+          REVOKE ALL ON ALL TABLES IN SCHEMA widgets
+            FROM PUBLIC, winwidget_widgets_runtime, winwidget_widgets_backup;
+          REVOKE ALL ON ALL SEQUENCES IN SCHEMA widgets
+            FROM PUBLIC, winwidget_widgets_runtime, winwidget_widgets_backup;
+          REVOKE ALL ON ALL FUNCTIONS IN SCHEMA widgets
+            FROM PUBLIC, winwidget_widgets_runtime, winwidget_widgets_backup;
+          GRANT SELECT, INSERT, UPDATE, DELETE
+            ON ALL TABLES IN SCHEMA widgets TO winwidget_widgets_runtime;
+          GRANT USAGE, SELECT, UPDATE
+            ON ALL SEQUENCES IN SCHEMA widgets TO winwidget_widgets_runtime;
+          GRANT SELECT
+            ON ALL TABLES IN SCHEMA widgets TO winwidget_widgets_backup;
+          GRANT SELECT
+            ON ALL SEQUENCES IN SCHEMA widgets TO winwidget_widgets_backup;
+          REVOKE ALL ON TABLE widgets._prisma_migrations
+            FROM winwidget_widgets_runtime;
+          REVOKE CREATE ON DATABASE winwidget_widgets_ci
+            FROM winwidget_widgets_migration, winwidget_widgets_runtime, winwidget_widgets_backup;
+
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            REVOKE ALL ON TABLES FROM PUBLIC, winwidget_widgets_runtime, winwidget_widgets_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            REVOKE ALL ON SEQUENCES FROM PUBLIC, winwidget_widgets_runtime, winwidget_widgets_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            REVOKE ALL ON FUNCTIONS FROM PUBLIC, winwidget_widgets_runtime, winwidget_widgets_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration
+            REVOKE ALL ON FUNCTIONS FROM PUBLIC, winwidget_widgets_runtime, winwidget_widgets_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO winwidget_widgets_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO winwidget_widgets_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT SELECT ON TABLES TO winwidget_widgets_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_widgets_migration IN SCHEMA widgets
+            GRANT SELECT ON SEQUENCES TO winwidget_widgets_backup;
+
+          DO $$
+          DECLARE
+            table_name text;
+          BEGIN
+            FOR table_name IN
+              SELECT tablename FROM pg_tables
+              WHERE schemaname = 'widgets' AND tablename <> '_prisma_migrations'
+            LOOP
+              IF NOT has_table_privilege(
+                'winwidget_widgets_runtime', format('widgets.%I', table_name),
+                'SELECT,INSERT,UPDATE,DELETE'
+              ) THEN
+                RAISE EXCEPTION 'Widgets runtime ACL missing for %', table_name;
+              END IF;
+              IF NOT has_table_privilege(
+                'winwidget_widgets_backup', format('widgets.%I', table_name), 'SELECT'
+              ) THEN
+                RAISE EXCEPTION 'Widgets backup ACL missing for %', table_name;
+              END IF;
+            END LOOP;
+            IF has_table_privilege(
+              'winwidget_widgets_runtime', 'widgets._prisma_migrations', 'SELECT'
+            ) THEN
+              RAISE EXCEPTION 'Widgets migration history leaked to the runtime role';
+            END IF;
+            IF NOT has_table_privilege(
+              'winwidget_widgets_backup', 'widgets._prisma_migrations', 'SELECT'
+            ) THEN
+              RAISE EXCEPTION 'Widgets backup role cannot dump migration history';
+            END IF;
+          END $$;
+          SQL
+
+          docker exec \
+            -e PGPASSWORD=widgets_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_widgets_runtime --dbname winwidget_widgets_ci \
+              --command 'SELECT count(*) FROM widgets.service_identity;' > /dev/null
+          docker exec \
+            -e PGPASSWORD=widgets_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_widgets_backup --dbname winwidget_widgets_ci \
+              --command 'SELECT count(*) FROM widgets.widgets;' > /dev/null
+          if docker exec \
+            -e PGPASSWORD=widgets_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_widgets_backup --dbname winwidget_widgets_ci \
+              --command "INSERT INTO widgets.source_sequences (id, last_value, updated_at) VALUES ('reporting', 1, CURRENT_TIMESTAMP);" \
+              > /dev/null 2>&1; then
+            echo 'Widgets backup role can mutate service data.' >&2
+            exit 1
+          fi
+
       - name: Verify Notification Delivery PostgreSQL persistence and restore
         env:
           NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1815,6 +2303,98 @@ jobs:
               --dbname postgres \
               --command 'DROP DATABASE winwidget_reporting_restore_ci WITH (FORCE);'
 
+      - name: Verify Widgets PostgreSQL persistence and restore rehearsal
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.WIDGETS_CI_POSTGRES_CONTAINER }}
+        run: |
+          sentinel_id=00000000-0000-4000-8000-000000000005
+          docker exec \
+            -e PGPASSWORD=widgets_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username winwidget_widgets_runtime \
+              --dbname winwidget_widgets_ci \
+              --command \
+                "INSERT INTO widgets.heartbeats (id, role, instance_id, metadata, last_seen_at, created_at, updated_at) VALUES ('$sentinel_id', 'all', 'ci-persistence', '{\"persisted\":true}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at, updated_at = EXCLUDED.updated_at;"
+
+          docker restart "$POSTGRES_CONTAINER_ID" > /dev/null
+          for attempt in $(seq 1 30); do
+            status="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$POSTGRES_CONTAINER_ID"
+            )"
+            [[ "$status" == "healthy" ]] && break
+            if [[ "$status" == "unhealthy" || "$attempt" == "30" ]]; then
+              docker logs "$POSTGRES_CONTAINER_ID" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          test "$(
+            docker exec \
+              -e PGPASSWORD=widgets_runtime_ci \
+              "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --host 127.0.0.1 \
+                --username winwidget_widgets_runtime \
+                --dbname winwidget_widgets_ci \
+                --command \
+                  "SELECT count(*) FROM widgets.heartbeats WHERE id = '$sentinel_id';"
+          )" = "1"
+
+          docker exec \
+            -e PGPASSWORD=widgets_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            pg_dump \
+              --host 127.0.0.1 \
+              --username winwidget_widgets_backup \
+              --dbname winwidget_widgets_ci \
+              --format custom \
+              --no-owner \
+              --no-acl \
+              --schema widgets \
+              --file /tmp/widgets-ci.dump
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore --list /tmp/widgets-ci.dump > /dev/null
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_widgets_admin \
+              --dbname postgres \
+              --command \
+                'CREATE DATABASE winwidget_widgets_restore_ci WITH TEMPLATE template0;'
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore \
+              --exit-on-error \
+              --single-transaction \
+              --no-owner \
+              --no-acl \
+              --username winwidget_widgets_admin \
+              --dbname winwidget_widgets_restore_ci \
+              /tmp/widgets-ci.dump
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_widgets_admin \
+                --dbname winwidget_widgets_restore_ci \
+                --command \
+                  "SELECT count(*) FROM widgets.heartbeats WHERE id = '$sentinel_id';"
+          )" = "1"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_widgets_admin \
+                --dbname winwidget_widgets_restore_ci \
+                --command 'SELECT count(*) FROM widgets._prisma_migrations;'
+          )" -ge 1
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_widgets_admin \
+              --dbname postgres \
+              --command 'DROP DATABASE winwidget_widgets_restore_ci WITH (FORCE);'
+
       - name: Verify RabbitMQ Management API
         run: curl --fail --user "$RABBITMQ_USER:$RABBITMQ_PASSWORD" "$RABBITMQ_MANAGEMENT_URL/api/overview"
 
@@ -1824,6 +2404,7 @@ jobs:
           pnpm --dir apps/notification-delivery run typecheck
           pnpm --dir apps/campaigns run typecheck
           pnpm --dir apps/reporting run typecheck
+          pnpm --dir apps/widgets run typecheck
 
       - name: Lint
         run: |
@@ -1831,6 +2412,7 @@ jobs:
           pnpm --dir apps/notification-delivery run lint
           pnpm --dir apps/campaigns run lint
           pnpm --dir apps/reporting run lint
+          pnpm --dir apps/widgets run lint
 
       - name: Test
         run: |
@@ -1838,6 +2420,13 @@ jobs:
           pnpm --dir apps/notification-delivery test
           pnpm --dir apps/campaigns test
           pnpm --dir apps/reporting test
+          pnpm --dir apps/widgets test
+          widgets_browser_executable="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)"
+          test -n "$widgets_browser_executable"
+          WIDGETS_TEST_DATABASE_URL="$WIDGETS_DATABASE_URL" \
+            WIDGETS_INTEGRATION_ALLOW_MUTATION=true \
+            WIDGETS_BROWSER_EXECUTABLE="$widgets_browser_executable" \
+            pnpm --dir apps/widgets run test:integration
 
       - name: Validate production compose
         env:
@@ -1871,10 +2460,18 @@ jobs:
           REPORTING_DATABASE_URL: postgresql://winwidget_reporting_runtime:reporting_runtime_ci@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
           REPORTING_MIGRATION_DATABASE_URL: postgresql://winwidget_reporting_migration:reporting_migration_ci@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
           REPORTING_BACKUP_URL: postgresql://winwidget_reporting_backup:reporting_backup_ci@127.0.0.1:55435/winwidget_reporting?schema=reporting&sslmode=disable
+          WIDGETS_POSTGRES_IMAGE: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+          WIDGETS_POSTGRES_PORT: '55436'
+          WIDGETS_POSTGRES_DATA_VOLUME: winwidget-widgets-postgres-data
+          WIDGETS_POSTGRES_ADMIN_USER: winwidget_widgets_admin
+          WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE: /tmp/winwidget-widgets-postgres-admin-password
+          WIDGETS_DATABASE_URL: postgresql://winwidget_widgets_runtime:widgets_runtime_ci@127.0.0.1:55436/winwidget_widgets?schema=widgets&sslmode=disable
+          WIDGETS_MIGRATION_DATABASE_URL: postgresql://winwidget_widgets_migration:widgets_migration_ci@127.0.0.1:55436/winwidget_widgets?schema=widgets&sslmode=disable
+          WIDGETS_BACKUP_URL: postgresql://winwidget_widgets_backup:widgets_backup_ci@127.0.0.1:55436/winwidget_widgets?schema=widgets&sslmode=disable
         run: |
-          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
           # shellcheck disable=SC2016
-          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
             node -e '
               const { readFileSync } = require("node:fs");
               const config = JSON.parse(readFileSync(0, "utf8"));
@@ -1973,6 +2570,27 @@ jobs:
                   "Reporting PostgreSQL must use its admin password file secret",
                 );
               }
+              const widgetsPostgresVolume =
+                config.volumes?.["winwidget-widgets-postgres-data"];
+              if (
+                !widgetsPostgresVolume?.external ||
+                widgetsPostgresVolume.name !==
+                  process.env.WIDGETS_POSTGRES_DATA_VOLUME
+              ) {
+                throw new Error(
+                  "Widgets PostgreSQL must use its exact external volume",
+                );
+              }
+              const widgetsPostgresSecret =
+                config.secrets?.["widgets-postgres-admin-password"];
+              if (
+                widgetsPostgresSecret?.file !==
+                process.env.WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE
+              ) {
+                throw new Error(
+                  "Widgets PostgreSQL must use its admin password file secret",
+                );
+              }
               const coreRestoreSecret =
                 config.secrets?.["core-postgres-admin-password"];
               if (
@@ -1998,6 +2616,7 @@ jobs:
                 "outbox-publisher",
                 "rabbitmq",
                 "reporting-service",
+                "widgets-service",
               ];
               if (
                 JSON.stringify(persistentServiceNames) !==
@@ -2275,11 +2894,58 @@ jobs:
                   "Reporting PostgreSQL loopback network or lifecycle safeguards drifted",
                 );
               }
+              const widgetsPostgres = requireService("widgets-postgres");
+              const widgetsPostgresEnvironment = requireEnvironment(
+                "widgets-postgres",
+                [
+                  "POSTGRES_DB",
+                  "POSTGRES_USER",
+                  "POSTGRES_PASSWORD_FILE",
+                  "POSTGRES_INITDB_ARGS",
+                  "PGDATA",
+                ],
+              );
+              const widgetsPorts = widgetsPostgres.ports ?? [];
+              const widgetsNetwork = config.networks?.["widgets-postgres"];
+              if (
+                widgetsPostgres.image !== process.env.WIDGETS_POSTGRES_IMAGE ||
+                widgetsPostgresEnvironment.POSTGRES_DB !== "winwidget_widgets" ||
+                widgetsPostgresEnvironment.POSTGRES_USER !==
+                  process.env.WIDGETS_POSTGRES_ADMIN_USER ||
+                widgetsPostgresEnvironment.POSTGRES_PASSWORD_FILE !==
+                  "/run/secrets/widgets-postgres-admin-password" ||
+                widgetsPostgresEnvironment.POSTGRES_INITDB_ARGS !==
+                  "--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" ||
+                widgetsPostgresEnvironment.PGDATA !==
+                  "/var/lib/postgresql/18/docker" ||
+                widgetsPorts.length !== 1 ||
+                widgetsPorts[0].host_ip !== "127.0.0.1" ||
+                String(widgetsPorts[0].published) !==
+                  process.env.WIDGETS_POSTGRES_PORT ||
+                Number(widgetsPorts[0].target) !== 5432 ||
+                widgetsNetwork?.name !== "winwidget-widgets-postgres" ||
+                widgetsNetwork.driver !== "bridge" ||
+                widgetsNetwork.internal === true ||
+                widgetsPostgres.profiles?.[0] !== "widgets-database" ||
+                widgetsPostgres.restart !== "unless-stopped" ||
+                (widgetsPostgres.volumes ?? []).length !== 1 ||
+                widgetsPostgres.volumes[0].source !==
+                  process.env.WIDGETS_POSTGRES_DATA_VOLUME ||
+                widgetsPostgres.volumes[0].target !== "/var/lib/postgresql" ||
+                (widgetsPostgres.secrets ?? []).length !== 1 ||
+                widgetsPostgres.secrets[0].source !==
+                  "widgets-postgres-admin-password"
+              ) {
+                throw new Error(
+                  "Widgets PostgreSQL loopback network or lifecycle safeguards drifted",
+                );
+              }
               for (const [name, service] of Object.entries(services)) {
                 if (
                   name === "notification-delivery-postgres" ||
                   name === "campaigns-postgres" ||
-                  name === "reporting-postgres"
+                  name === "reporting-postgres" ||
+                  name === "widgets-postgres"
                 ) continue;
                 if (
                   (service.volumes ?? []).some(
@@ -2338,6 +3004,25 @@ jobs:
                   Object.hasOwn(
                     service.depends_on ?? {},
                     "reporting-postgres",
+                  ) ||
+                  (service.volumes ?? []).some(
+                    mount =>
+                      mount.source ===
+                      process.env.WIDGETS_POSTGRES_DATA_VOLUME,
+                  ) ||
+                  (name !== "database-restore-worker" &&
+                    (service.secrets ?? []).some(
+                      secret =>
+                        secret.source ===
+                        "widgets-postgres-admin-password",
+                    )) ||
+                  Object.hasOwn(
+                    service.networks ?? {},
+                    "widgets-postgres",
+                  ) ||
+                  Object.hasOwn(
+                    service.depends_on ?? {},
+                    "widgets-postgres",
                   )
                 ) {
                   throw new Error(
@@ -2353,6 +3038,7 @@ jobs:
                 "notification-delivery-worker",
                 "campaigns-service",
                 "reporting-service",
+                "widgets-service",
               ]) {
                 const service = requireService(name);
                 const expectedRevision = {
@@ -2365,6 +3051,7 @@ jobs:
                     process.env.NOTIFICATION_DELIVERY_REVISION,
                   "campaigns-service": process.env.CAMPAIGNS_REVISION,
                   "reporting-service": process.env.REPORTING_REVISION,
+                  "widgets-service": process.env.WIDGETS_REVISION,
                 }[name];
                 if (service.build?.args?.APP_REVISION !== expectedRevision) {
                   throw new Error(`${name} image build revision is not pinned`);
@@ -2378,6 +3065,7 @@ jobs:
                     process.env.NOTIFICATION_DELIVERY_IMAGE,
                   "campaigns-service": process.env.CAMPAIGNS_IMAGE,
                   "reporting-service": process.env.REPORTING_IMAGE,
+                  "widgets-service": process.env.WIDGETS_IMAGE,
                 }[name];
                 if (service.image !== expectedImage) {
                   throw new Error(`${name} image tag is not pinned to the revision`);
@@ -2462,6 +3150,26 @@ jobs:
               };
               requireStandaloneReportingBuild("reporting-service");
               requireStandaloneReportingBuild("reporting-migrate");
+              const requireStandaloneWidgetsBuild = name => {
+                const service = requireService(name);
+                const build = service.build ?? {};
+                if (
+                  !String(build.context ?? "")
+                    .replaceAll("\\", "/")
+                    .endsWith("/winwidget.ru_server") ||
+                  String(build.dockerfile ?? "")
+                    .replaceAll("\\", "/") !== "apps/widgets/Dockerfile" ||
+                  build.target != null ||
+                  build.args?.APP_REVISION !== process.env.WIDGETS_REVISION ||
+                  service.image !== process.env.WIDGETS_IMAGE
+                ) {
+                  throw new Error(
+                    `${name} must build the standalone Widgets image from the repository runtime-asset context`,
+                  );
+                }
+              };
+              requireStandaloneWidgetsBuild("widgets-service");
+              requireStandaloneWidgetsBuild("widgets-migrate");
               const requireExactKinds = (environment, key, expected, name) => {
                 const kinds = [...new Set(String(environment[key] ?? "")
                   .split(",")
@@ -2497,6 +3205,10 @@ jobs:
               );
               requireCommand(
                 "reporting-migrate",
+                "migrate deploy --schema prisma/schema.prisma",
+              );
+              requireCommand(
+                "widgets-migrate",
                 "migrate deploy --schema prisma/schema.prisma",
               );
               const migration = requireService("migrate");
@@ -2647,6 +3359,40 @@ jobs:
                   "reporting-migrate receives an unexpected environment",
                 );
               }
+              const widgetsMigration = requireService("widgets-migrate");
+              const widgetsMigrationEntrypoint = Array.isArray(
+                widgetsMigration.entrypoint,
+              )
+                ? widgetsMigration.entrypoint.join(" ")
+                : String(widgetsMigration.entrypoint ?? "");
+              if (
+                widgetsMigrationEntrypoint !== "./node_modules/.bin/prisma" ||
+                !(widgetsMigration.profiles ?? []).includes(
+                  "widgets-migration",
+                )
+              ) {
+                throw new Error(
+                  "widgets-migrate must use Prisma behind its migration profile",
+                );
+              }
+              const widgetsMigrationEnvironment = requireEnvironment(
+                "widgets-migrate",
+                ["APP_REVISION", "NODE_ENV", "WIDGETS_DATABASE_URL"],
+              );
+              if (
+                Object.keys(widgetsMigrationEnvironment).some(
+                  key =>
+                    ![
+                      "APP_REVISION",
+                      "NODE_ENV",
+                      "WIDGETS_DATABASE_URL",
+                    ].includes(key),
+                )
+              ) {
+                throw new Error(
+                  "widgets-migrate receives an unexpected environment",
+                );
+              }
               if (requireService("maintenance-worker").command != null) {
                 throw new Error(
                   "maintenance-worker command must be owned by its image",
@@ -2674,6 +3420,11 @@ jobs:
                   "reporting-service command must be owned by its image",
                 );
               }
+              if (requireService("widgets-service").command != null) {
+                throw new Error(
+                  "widgets-service command must be owned by its image",
+                );
+              }
 
               requireEnvironment("api", [
                 "RABBITMQ_MANAGEMENT_URL",
@@ -2694,6 +3445,8 @@ jobs:
                 "CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE",
                 "CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS",
                 "REPORTING_INTERNAL_TOKEN",
+                "WIDGETS_INTERNAL_BASE_URL",
+                "WIDGETS_INTERNAL_TOKEN",
                 "DATABASE_RESTORE_STORAGE_DIR",
                 "DATABASE_RESTORE_QUEUE_SECRET",
                 "DATABASE_RESTORE_PRODUCTION_ENABLED",
@@ -2805,6 +3558,32 @@ jobs:
                   authPolicy: "required",
                   timeoutMs: 60000,
                 },
+                ...[
+                  ["widgets-admin", "/api/v1/widgets/admin", "required"],
+                  ["widgets-management", "/api/v1/widgets", "required"],
+                  ["quizzes-management", "/api/v1/quizzes", "required"],
+                  ["callbacks-management", "/api/v1/callbacks", "required"],
+                  ["countdown-timers-management", "/api/v1/countdown-timers", "required"],
+                  ["stop-offers-management", "/api/v1/stop-offers", "required"],
+                  ["online-consultants-management", "/api/v1/online-consultants", "required"],
+                  ["calculators-management", "/api/v1/calculators", "required"],
+                  ["widget-settings", "/api/v1/widget-settings", "required"],
+                  ["widget-runtime", "/api/v1/widget-runtime", "required"],
+                  ["widget-public", "/api/v1/widget", "optional"],
+                  ["quiz-public", "/api/v1/quiz", "optional"],
+                  ["callback-public", "/api/v1/callback", "optional"],
+                  ["countdown-timer-public", "/api/v1/countdown-timer", "optional"],
+                  ["stop-offer-public", "/api/v1/stop-offer", "optional"],
+                  ["online-consultant-public", "/api/v1/online-consultant", "optional"],
+                  ["calculator-public", "/api/v1/calculator", "optional"],
+                  ["widget-events", "/api/v1/widget-events", "optional"],
+                ].map(([id, pathPrefix, authPolicy]) => ({
+                  id,
+                  pathPrefix,
+                  upstreamUrl: "http://127.0.0.1:4700",
+                  authPolicy,
+                  timeoutMs: 60000,
+                })),
                 {
                   id: "monolith",
                   pathPrefix: "/api/v1",
@@ -2818,7 +3597,7 @@ jobs:
                 JSON.stringify(expectedGatewayRoutes)
               ) {
                 throw new Error(
-                  "Production example must keep restore protected and route Reporting before the monolith catch-all",
+                  "Production example must keep protected service routes, public Widgets routes and Reporting before the monolith catch-all",
                 );
               }
               requireEnvironment("outbox-publisher", [
@@ -2844,28 +3623,20 @@ jobs:
                 .split(",")
                 .map(value => value.trim())
                 .filter(Boolean);
-              const preCleanupIntegrationKinds = [
-                "webhook",
-                "bitrix24",
-                "amo-crm",
-                "daily-summary-telegram",
+              const expectedIntegrationKinds = [
                 "telegram-destination-unavailable",
                 "notification-delivery-outcome",
                 "campaign-admin-audit",
                 "reporting-admin-audit",
+                "widgets-admin-audit",
                 "auto-renewal",
               ];
-              const postCleanupIntegrationKinds = preCleanupIntegrationKinds.filter(
-                kind => kind !== "daily-summary-telegram",
-              );
               if (
-                ![preCleanupIntegrationKinds, postCleanupIntegrationKinds].some(
-                  expected =>
-                    JSON.stringify(integrationKinds) === JSON.stringify(expected),
-                )
+                JSON.stringify(integrationKinds) !==
+                JSON.stringify(expectedIntegrationKinds)
               ) {
                 throw new Error(
-                  "integration-worker kinds must match an exact Reporting pre- or post-cleanup contract",
+                  "integration-worker kinds must match the steady Widgets ownership contract",
                 );
               }
               if (
@@ -3043,6 +3814,67 @@ jobs:
                   "API, API Gateway and Reporting must share one exact CORS origin policy",
                 );
               }
+              const widgets = requireService("widgets-service");
+              const widgetsEnvironment = requireEnvironment(
+                "widgets-service",
+                [
+                  "APP_REVISION",
+                  "CORS_ALLOWED_ORIGINS",
+                  "WIDGETS_DATABASE_URL",
+                  "WIDGETS_PROCESS_ROLE",
+                  "WIDGETS_LISTEN_HOST",
+                  "WIDGETS_PORT",
+                  "WIDGETS_CORE_INTERNAL_BASE_URL",
+                  "WIDGETS_INTERNAL_TOKEN",
+                  "WIDGETS_INTERNAL_TIMEOUT_MS",
+                  "WIDGETS_ENTITLEMENT_MAX_STALENESS_MS",
+                  "WIDGETS_PREFETCH",
+                  "WIDGETS_OUTBOX_BATCH_SIZE",
+                  "WIDGETS_OUTBOX_POLL_INTERVAL_MS",
+                  "WIDGETS_OUTBOX_RETENTION_DAYS",
+                  "WIDGETS_RECEIPT_RETENTION_DAYS",
+                  "WIDGETS_FAILURE_DETAIL_RETENTION_DAYS",
+                  "RABBITMQ_URL",
+                  "RABBITMQ_ASSERT_TOPOLOGY",
+                  "MESSAGING_SERVICE_NAME",
+                ],
+              );
+              if (
+                widgetsEnvironment.APP_REVISION !==
+                  process.env.WIDGETS_REVISION ||
+                widgetsEnvironment.WIDGETS_PROCESS_ROLE !== "all" ||
+                widgetsEnvironment.WIDGETS_LISTEN_HOST !== "127.0.0.1" ||
+                widgetsEnvironment.WIDGETS_PORT !== "4700" ||
+                widgetsEnvironment.WIDGETS_CORE_INTERNAL_BASE_URL !==
+                  "http://127.0.0.1:4200" ||
+                widgetsEnvironment.WIDGETS_ENTITLEMENT_MAX_STALENESS_MS !==
+                  "31968000000" ||
+                widgets.network_mode !== "host" ||
+                !widgets.healthcheck?.test ||
+                widgets.stop_grace_period !== "1m30s" ||
+                widgets.restart !== "unless-stopped" ||
+                Number(widgets.mem_limit) !== 536870912 ||
+                Number(widgets.mem_reservation) !== 134217728 ||
+                Number(widgets.cpus) !== 0.75 ||
+                Number(widgets.pids_limit) !== 200 ||
+                widgets.logging?.driver !== "json-file" ||
+                widgets.logging?.options?.["max-size"] !== "10m" ||
+                String(widgets.logging?.options?.["max-file"]) !== "3"
+              ) {
+                throw new Error(
+                  "Widgets must use the reviewed bounded loopback all-role runtime boundary",
+                );
+              }
+              if (
+                widgetsEnvironment.CORS_ALLOWED_ORIGINS !==
+                  gatewayEnvironment.CORS_ALLOWED_ORIGINS ||
+                widgetsEnvironment.CORS_ALLOWED_ORIGINS !==
+                  apiEnvironment.CORS_ALLOWED_ORIGINS
+              ) {
+                throw new Error(
+                  "API, API Gateway and Widgets must share one exact CORS origin policy",
+                );
+              }
               const internalTokens = [
                 apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
                 notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
@@ -3095,6 +3927,25 @@ jobs:
                   "Core and Reporting must share one non-placeholder internal token",
                 );
               }
+              const widgetsInternalTokens = [
+                apiEnvironment.WIDGETS_INTERNAL_TOKEN,
+                widgetsEnvironment.WIDGETS_INTERNAL_TOKEN,
+              ];
+              if (
+                widgetsInternalTokens.some(
+                  token =>
+                    typeof token !== "string" ||
+                    token.startsWith("change_me") ||
+                    token.length < 32,
+                ) ||
+                widgetsInternalTokens[0] !== widgetsInternalTokens[1] ||
+                apiEnvironment.WIDGETS_INTERNAL_BASE_URL !==
+                  "http://127.0.0.1:4700"
+              ) {
+                throw new Error(
+                  "Core and Widgets must share one non-placeholder internal token and loopback origin",
+                );
+              }
               const maintenance = requireService("maintenance-worker");
               const maintenanceEnvironment = requireEnvironment(
                 "maintenance-worker",
@@ -3107,6 +3958,7 @@ jobs:
                   "NOTIFICATION_DELIVERY_BACKUP_URL",
                   "CAMPAIGNS_BACKUP_URL",
                   "REPORTING_BACKUP_URL",
+                  "WIDGETS_BACKUP_URL",
                   "MAINTENANCE_WORKER_PREFETCH",
                   "MAINTENANCE_HEALTH_PORT",
                   "SCHEDULED_JOB_POLL_INTERVAL_MS",
@@ -3139,10 +3991,12 @@ jobs:
                   "DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT",
                   "DATABASE_RESTORE_CAMPAIGNS_PORT",
                   "DATABASE_RESTORE_REPORTING_PORT",
+                  "DATABASE_RESTORE_WIDGETS_PORT",
                   "DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE",
                   "DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE",
                   "DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE",
                   "DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE",
+                  "DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE",
                 ],
               );
               const expectedDatabaseRestoreEnvironmentKeys = [
@@ -3159,6 +4013,8 @@ jobs:
                 "DATABASE_RESTORE_QUEUE_SECRET",
                 "DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE",
                 "DATABASE_RESTORE_REPORTING_PORT",
+                "DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE",
+                "DATABASE_RESTORE_WIDGETS_PORT",
                 "DATABASE_RESTORE_STORAGE_DIR",
                 "NODE_ENV",
               ].sort();
@@ -3186,6 +4042,8 @@ jobs:
                   process.env.CAMPAIGNS_POSTGRES_PORT ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_REPORTING_PORT !==
                   process.env.REPORTING_POSTGRES_PORT ||
+                databaseRestoreEnvironment.DATABASE_RESTORE_WIDGETS_PORT !==
+                  process.env.WIDGETS_POSTGRES_PORT ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE !==
                   "/run/database-restore-secrets/core-admin-password" ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE !==
@@ -3193,7 +4051,9 @@ jobs:
                 databaseRestoreEnvironment.DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE !==
                   "/run/database-restore-secrets/campaigns-admin-password" ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE !==
-                  "/run/database-restore-secrets/reporting-admin-password"
+                  "/run/database-restore-secrets/reporting-admin-password" ||
+                databaseRestoreEnvironment.DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE !==
+                  "/run/database-restore-secrets/widgets-admin-password"
               ) {
                 throw new Error(
                   "database-restore-worker environment or credential boundary drifted",
@@ -3227,6 +4087,10 @@ jobs:
                 [
                   "reporting-postgres-admin-password",
                   "database-restore-reporting-admin-password",
+                ],
+                [
+                  "widgets-postgres-admin-password",
+                  "database-restore-widgets-admin-password",
                 ],
               ];
               if (
@@ -3388,6 +4252,33 @@ jobs:
                   "Reporting runtime, migration and backup must use distinct roles",
                 );
               }
+              const widgetsDatabaseUrls = [
+                widgetsEnvironment.WIDGETS_DATABASE_URL,
+                widgetsMigrationEnvironment.WIDGETS_DATABASE_URL,
+                maintenanceEnvironment.WIDGETS_BACKUP_URL,
+              ].map(value => new URL(value));
+              for (const url of widgetsDatabaseUrls) {
+                if (
+                  url.protocol !== "postgresql:" ||
+                  url.hostname !== "127.0.0.1" ||
+                  url.port !== "55436" ||
+                  url.pathname !== "/winwidget_widgets" ||
+                  url.searchParams.get("schema") !== "widgets" ||
+                  url.searchParams.get("sslmode") !== "disable"
+                ) {
+                  throw new Error(
+                    "Widgets roles must use the dedicated loopback PostgreSQL database",
+                  );
+                }
+              }
+              if (
+                new Set(widgetsDatabaseUrls.map(url => url.username)).size !==
+                widgetsDatabaseUrls.length
+              ) {
+                throw new Error(
+                  "Widgets runtime, migration and backup must use distinct roles",
+                );
+              }
               for (const forbidden of [
                 "DATABASE_URL",
                 "DATABASE_URL_PRODUCTION",
@@ -3405,6 +4296,30 @@ jobs:
                 if (forbidden in reportingEnvironment) {
                   throw new Error(
                     `reporting-service must not receive ${forbidden}`,
+                  );
+                }
+              }
+              for (const forbidden of [
+                "DATABASE_URL",
+                "DATABASE_URL_PRODUCTION",
+                "DATABASE_BACKUP_URL",
+                "NOTIFICATION_DELIVERY_DATABASE_URL",
+                "NOTIFICATION_DELIVERY_BACKUP_URL",
+                "CAMPAIGNS_DATABASE_URL",
+                "CAMPAIGNS_BACKUP_URL",
+                "REPORTING_DATABASE_URL",
+                "REPORTING_BACKUP_URL",
+                "WIDGETS_BACKUP_URL",
+                "WIDGETS_MIGRATION_DATABASE_URL",
+                "WIDGETS_POSTGRES_ADMIN_USER",
+                "WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE",
+                "SMTP_LOGIN",
+                "SMTP_PASSWORD",
+                "TELEGRAM_INFO_BOT_TOKEN",
+              ]) {
+                if (forbidden in widgetsEnvironment) {
+                  throw new Error(
+                    `widgets-service must not receive ${forbidden}`,
                   );
                 }
               }
@@ -3452,6 +4367,7 @@ jobs:
                 new URL(services["notification-delivery-worker"].environment.RABBITMQ_URL).username,
                 new URL(services["campaigns-service"].environment.RABBITMQ_URL).username,
                 new URL(services["reporting-service"].environment.RABBITMQ_URL).username,
+                new URL(services["widgets-service"].environment.RABBITMQ_URL).username,
               ];
               if (
                 services.rabbitmq.environment?.RABBITMQ_DEFAULT_VHOST !== "winwidget" ||
@@ -3466,6 +4382,7 @@ jobs:
                 "notification-delivery-worker",
                 "campaigns-service",
                 "reporting-service",
+                "widgets-service",
               ]) {
                 if (new URL(services[name].environment.RABBITMQ_URL).pathname !== "/winwidget") {
                   throw new Error(`${name} must connect to the winwidget vhost`);
@@ -3483,10 +4400,11 @@ jobs:
                 services["maintenance-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
                 services["notification-delivery-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
                 services["campaigns-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
-                services["reporting-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true"
+                services["reporting-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
+                services["widgets-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true"
               ) {
                 throw new Error(
-                  "Only the core, Campaigns and Reporting topology owners may assert RabbitMQ topology",
+                  "Only the core, Campaigns, Reporting and Widgets topology owners may assert RabbitMQ topology",
                 );
               }
               for (const name of [
@@ -3496,6 +4414,7 @@ jobs:
                 "notification-delivery-worker",
                 "campaigns-service",
                 "reporting-service",
+                "widgets-service",
               ]) {
                 const environment = services[name].environment ?? {};
                 for (const forbidden of [
@@ -3575,13 +4494,16 @@ jobs:
       - name: Static-check workflows and deployment shell
         run: |
           sh -n database-restore-entrypoint.sh
+          # ShellCheck runs separately below; its actionlint integration
+          # deadlocks while piping this workflow's large inline scripts.
           docker run --rm \
             --network none \
             --read-only \
             --security-opt no-new-privileges \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
             --workdir /repo \
-            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            -shellcheck=
           docker run --rm \
             --network none \
             --read-only \
@@ -4070,6 +4992,7 @@ jobs:
           pnpm --dir apps/notification-delivery run build
           pnpm --dir apps/campaigns run build
           pnpm --dir apps/reporting run build
+          pnpm --dir apps/widgets run build
 
       - name: Verify Notification Delivery wire contract boundary
         run: |
@@ -4104,15 +5027,12 @@ jobs:
           const reportingDeliveryKinds = [
             ...reporting.REPORTING_NOTIFICATION_DELIVERY_KINDS,
           ];
-          const preCleanupMonolithKinds = [
-            "webhook",
-            "bitrix24",
-            "amo-crm",
-            "daily-summary-telegram",
+          const steadyMonolithKinds = [
             "telegram-destination-unavailable",
             "notification-delivery-outcome",
             "campaign-admin-audit",
             "reporting-admin-audit",
+            "widgets-admin-audit",
             "auto-renewal",
           ];
           const legacyPaths = [
@@ -4132,10 +5052,8 @@ jobs:
             );
           }
           const expectedMonolithKinds = legacyPathsPresent
-            ? preCleanupMonolithKinds
-            : preCleanupMonolithKinds.filter(
-                kind => kind !== "daily-summary-telegram",
-              );
+            ? ["daily-summary-telegram", ...steadyMonolithKinds]
+            : steadyMonolithKinds;
           const expectedCoreDeliveryKinds = legacyPathsPresent
             ? expectedKinds
             : expectedKinds.filter(
@@ -4492,7 +5410,7 @@ jobs:
           trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
           export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
 
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -4521,6 +5439,10 @@ jobs:
             docker image inspect "$REPORTING_IMAGE" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
           )" = "$REPORTING_REVISION"
+          test "$(
+            docker image inspect "$WIDGETS_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$WIDGETS_REVISION"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version | grep -Eq " 18[.]" && pg_restore --version | grep -Eq " 18[.]" && test -f dist/src/maintenance-worker-main.js'
@@ -4535,6 +5457,7 @@ jobs:
               test -d apps/notification-delivery/prisma/migrations
               test -d apps/campaigns/prisma/migrations
               test -d apps/reporting/prisma/migrations
+              test -d apps/widgets/prisma/migrations
             '
           restore_entrypoint_run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           restore_entrypoint_volume="winwidget-ci-restore-entrypoint-${restore_entrypoint_run_id}"
@@ -4592,7 +5515,8 @@ jobs:
             core-admin-password \
             notification-delivery-admin-password \
             campaigns-admin-password \
-            reporting-admin-password; do
+            reporting-admin-password \
+            widgets-admin-password; do
             sudo install -o root -g root -m 400 \
               "$restore_entrypoint_fixture" \
               "$restore_entrypoint_secret_root/$secret_name"
@@ -4604,7 +5528,8 @@ jobs:
             core-admin-password \
             notification-delivery-admin-password \
             campaigns-admin-password \
-            reporting-admin-password; do
+            reporting-admin-password \
+            widgets-admin-password; do
             test "$(sudo stat -c '%u:%g:%a' "$restore_entrypoint_secret_root/$secret_name")" = '0:0:400'
           done
           docker volume create \
@@ -4638,6 +5563,7 @@ jobs:
             --mount "type=bind,source=$restore_entrypoint_secret_root/notification-delivery-admin-password,target=/run/secrets/database-restore-notification-delivery-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/campaigns-admin-password,target=/run/secrets/database-restore-campaigns-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/reporting-admin-password,target=/run/secrets/database-restore-reporting-admin-password,readonly" \
+            --mount "type=bind,source=$restore_entrypoint_secret_root/widgets-admin-password,target=/run/secrets/database-restore-widgets-admin-password,readonly" \
             --tmpfs /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
             "$DATABASE_RESTORE_IMAGE" \
@@ -4649,7 +5575,8 @@ jobs:
                 /run/database-restore-secrets/core-admin-password \
                 /run/database-restore-secrets/notification-delivery-admin-password \
                 /run/database-restore-secrets/campaigns-admin-password \
-                /run/database-restore-secrets/reporting-admin-password; do
+                /run/database-restore-secrets/reporting-admin-password \
+                /run/database-restore-secrets/widgets-admin-password; do
                 test -f "$secret_file"
                 test ! -L "$secret_file"
                 test -r "$secret_file"
@@ -4658,7 +5585,7 @@ jobs:
                 test -n "$fixture_value"
                 copied=$((copied + 1))
               done
-              test "$copied" -eq 4
+              test "$copied" -eq 5
               printf "database-restore-entrypoint-secret-copy=passed\n"
             '
           cleanup_restore_entrypoint_smoke
@@ -4766,6 +5693,12 @@ jobs:
             run --rm --no-deps --entrypoint node reporting-service \
             -e "const fs=require('node:fs'); require('@prisma/reporting-client'); fs.accessSync('dist/src/main.js'); fs.accessSync('prisma/schema.prisma'); for (const path of ['dist/src/app.module.js','dist/src/statistics/statistics.service.js','dist/src/outbox-publisher-main.js','public/widgets']) if (fs.existsSync(path)) throw new Error('Reporting image contains monolith artifact: '+path)"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint node widgets-service \
+            -e "const fs=require('node:fs'); require('@prisma/widgets-client'); fs.accessSync('dist/src/main.js'); fs.accessSync('dist/src/cutover-main.js'); fs.accessSync('prisma/schema.prisma'); const expected=['calculator-button.png','calculator.js','callback-button.png','callback.js','email-logo.png','gift-button.png','helpers/libphonenumber-min.js','helpers/winwidget-phone.js','online-consultant-button.png','online-consultant.js','quiz-button.png','quiz.js','stop-offer.js','timer-button.png','timer.js','wheel.js']; const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>{const p=d+'/'+e.name;return e.isDirectory()?walk(p):[p.slice('public/widgets/'.length)]}).sort(); if(JSON.stringify(walk('public/widgets'))!==JSON.stringify(expected)) throw new Error('Widgets runtime asset manifest drifted'); for (const path of ['dist/src/app.module.js','dist/src/widget/widget.service.js','dist/src/outbox-publisher-main.js','public/email']) if (fs.existsSync(path)) throw new Error('Widgets image contains Core artifact: '+path)"
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint node api \
+            -e "const fs=require('node:fs'); fs.accessSync('dist/src/main.js'); if (fs.existsSync('public/widgets')) throw new Error('Core image still contains Widgets runtime assets')"
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node api-gateway \
             -e "require('./dist/src/config.js').loadConfig()"
 
@@ -4788,7 +5721,7 @@ jobs:
               integration_ci \
               '^$' \
               '^(winwidget\.retry|winwidget\.dead-letter)$' \
-              '^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|admin\.audit\.(campaigns|reporting)\.v1|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+              '^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_user_tags integration_ci
           docker exec "$RABBITMQ_CONTAINER_ID" \
@@ -4799,7 +5732,7 @@ jobs:
               rabbitmqctl --silent list_user_permissions integration_ci |
               awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }'
           )" = \
-            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|admin\.audit\.(campaigns|reporting)\.v1|report\.daily-summary\.telegram|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
           docker run --rm \
             --network host \
             --env ADMIN_URL=amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget \
@@ -4961,6 +5894,112 @@ jobs:
               }
               END { exit(found == 1 ? 0 : 1) }
             '
+
+      - name: Pre-provision shared Widgets RabbitMQ exchanges
+        run: |
+          docker run --rm \
+            --network host \
+            --env RABBITMQ_URL \
+            --entrypoint node \
+            "$WIDGETS_IMAGE" \
+            -e '
+          const amqp = require("amqplib");
+          const {
+            WIDGETS_DEAD_LETTER_EXCHANGE,
+            WIDGETS_EVENTS_EXCHANGE,
+          } = require("./dist/src/messaging/widgets-messaging.constants.js");
+          (async () => {
+            const connection = await amqp.connect(process.env.RABBITMQ_URL);
+            try {
+              const channel = await connection.createConfirmChannel();
+              try {
+                await channel.assertExchange(WIDGETS_EVENTS_EXCHANGE, "topic", {
+                  durable: true,
+                });
+                await channel.assertExchange(
+                  WIDGETS_DEAD_LETTER_EXCHANGE,
+                  "topic",
+                  { durable: true },
+                );
+              } finally {
+                await channel.close();
+              }
+            } finally {
+              await connection.close();
+            }
+          })().catch(error => {
+            console.error(error);
+            process.exitCode = 1;
+          });
+          '
+
+      - name: Create restricted Widgets RabbitMQ user
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl add_user \
+              widgets_ci widgets_ci_password_at_least_32_characters
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_permissions \
+              --vhost winwidget \
+              widgets_ci \
+              '^(winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$' \
+              '^(winwidget\.(events|dead-letter)|winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$' \
+              '^(winwidget\.(events|dead-letter)|winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$'
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl clear_topic_permissions \
+              --vhost winwidget \
+              widgets_ci
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_topic_permissions \
+              --vhost winwidget \
+              widgets_ci \
+              winwidget.events \
+              '^(widgets\.(widget|lead)\.changed\.v1|lead\.(integration\.(email|telegram|webhook|bitrix24|amo-crm)|limit\.reached\.(email|telegram))\.v2|admin\.audit\.widgets\.v1)$' \
+              '^(identity\.user\.changed\.v1|billing\.subscription\.changed\.v1|lead\.integration\.(webhook|bitrix24|amo-crm)\.v2)$'
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_topic_permissions \
+              --vhost winwidget \
+              widgets_ci \
+              winwidget.dead-letter \
+              '^widgets\.(identity|entitlement|webhook|bitrix24|amo-crm)\.dead-letter$' \
+              '^widgets\.(identity|entitlement|webhook|bitrix24|amo-crm)\.dead-letter$'
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_user_tags widgets_ci
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl authenticate_user \
+              widgets_ci widgets_ci_password_at_least_32_characters
+          regular_permissions="$(
+            docker exec "$RABBITMQ_CONTAINER_ID" \
+              rabbitmqctl --silent list_user_permissions widgets_ci |
+              awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }'
+          )"
+          test "$regular_permissions" = \
+            'winwidget|^(winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$|^(winwidget\.(events|dead-letter)|winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$|^(winwidget\.(events|dead-letter)|winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$'
+          topic_permissions="$(
+            docker exec "$RABBITMQ_CONTAINER_ID" \
+              rabbitmqctl --silent list_user_topic_permissions widgets_ci |
+              awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }' |
+              sort
+          )"
+          expected_topic_permissions="$(
+            printf '%s\n' \
+              'winwidget|winwidget.dead-letter|^widgets\.(identity|entitlement|webhook|bitrix24|amo-crm)\.dead-letter$|^widgets\.(identity|entitlement|webhook|bitrix24|amo-crm)\.dead-letter$' \
+              'winwidget|winwidget.events|^(widgets\.(widget|lead)\.changed\.v1|lead\.(integration\.(email|telegram|webhook|bitrix24|amo-crm)|limit\.reached\.(email|telegram))\.v2|admin\.audit\.widgets\.v1)$|^(identity\.user\.changed\.v1|billing\.subscription\.changed\.v1|lead\.integration\.(webhook|bitrix24|amo-crm)\.v2)$' |
+              sort
+          )"
+          test "$topic_permissions" = "$expected_topic_permissions"
+
+      - name: Widgets restricted RabbitMQ integration smoke
+        env:
+          WIDGETS_INTEGRATION_ALLOW_MUTATION: 'true'
+          WIDGETS_INTEGRATION_ALLOW_PURGE: 'true'
+          WIDGETS_TEST_DATABASE_URL: ${{ env.WIDGETS_DATABASE_URL }}
+          WIDGETS_TEST_MIGRATION_DATABASE_URL: ${{ env.WIDGETS_CI_MIGRATION_DATABASE_URL }}
+          WIDGETS_TEST_RABBITMQ_URL: amqp://widgets_ci:widgets_ci_password_at_least_32_characters@127.0.0.1:5672/winwidget
+          WIDGETS_TEST_RABBITMQ_ADMIN_URL: ${{ env.RABBITMQ_URL }}
+        run: pnpm --dir apps/widgets run test:messaging-integration
 
       - name: Pre-provision shared Reporting RabbitMQ exchanges
         run: |
@@ -5215,6 +6254,44 @@ jobs:
           rm -f -- "$REPORTING_CI_POSTGRES_PASSWORD_FILE"
           [[ "$cleanup_failed" == "false" ]]
 
+      - name: Cleanup isolated Widgets PostgreSQL
+        if: ${{ always() }}
+        env:
+          WIDGETS_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-widgets-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          cleanup_failed=false
+          if docker container inspect \
+            "$WIDGETS_CI_POSTGRES_CONTAINER" > /dev/null 2>&1; then
+            container_identity="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{index .Config.Labels "com.winwidget.github-run"}}' \
+                "$WIDGETS_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$container_identity" != "widgets|ci-postgres|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Widgets container." >&2
+              cleanup_failed=true
+            else
+              docker container rm --force \
+                "$WIDGETS_CI_POSTGRES_CONTAINER" > /dev/null
+            fi
+          fi
+          if docker volume inspect \
+            "$WIDGETS_CI_POSTGRES_VOLUME" > /dev/null 2>&1; then
+            volume_identity="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}|{{index .Labels "com.winwidget.github-run"}}' \
+                "$WIDGETS_CI_POSTGRES_VOLUME"
+            )"
+            if [[ "$volume_identity" != "widgets|ci-postgres-data|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Widgets volume." >&2
+              cleanup_failed=true
+            else
+              docker volume rm "$WIDGETS_CI_POSTGRES_VOLUME" > /dev/null
+            fi
+          fi
+          rm -f -- "$WIDGETS_CI_POSTGRES_PASSWORD_FILE"
+          [[ "$cleanup_failed" == "false" ]]
+
   deploy:
     needs: verify
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -5244,13 +6321,21 @@ jobs:
           AUTOMATIC_PROD_PUSH: ${{ github.event_name == 'push' && 'true' || 'false' }}
           DEPLOY_REVISION: ${{ github.sha }}
           DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
+          WIDGETS_CUTOVER_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.widgets_cutover_confirmation || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
+          case "$WIDGETS_CUTOVER_CONFIRMATION" in
+            ''|'CUTOVER WIDGETS OWNERSHIP') ;;
+            *)
+              echo 'Invalid Widgets cutover confirmation.' >&2
+              exit 1
+              ;;
+          esac
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' bash -s" <<'EOF'
           set -euo pipefail
           unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
             REPORTING_FIRST_ROLLOUT_STAGED_MARKER
@@ -5354,6 +6439,40 @@ jobs:
               return 1
             fi
           }
+          guard_widgets_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local lifecycle_script="scripts/widgets-database-lifecycle.sh"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || {
+              echo "Expected Widgets revision is invalid." >&2
+              return 1
+            }
+            tracked_blob="$(
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
+                true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
+                echo "Widgets lifecycle guard script is unsafe." >&2
+                return 1
+              }
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
+                echo "Widgets lifecycle guard script differs from the checked-out revision." >&2
+                return 1
+              }
+              APP_ROOT="$APP_ROOT" \
+                bash "$lifecycle_script" "$guard_action" "$expected_revision"
+              return
+            fi
+            [[ -z "$tracked_blob" ]] || {
+              echo "Tracked Widgets lifecycle guard script is missing." >&2
+              return 1
+            }
+          }
           checkout_verified_prod_revision() {
             local expected_revision="$1"
             local current_revision fetched_revision
@@ -5361,8 +6480,10 @@ jobs:
             current_revision="$(git rev-parse HEAD)"
             guard_campaigns_checkout_before_pull "$current_revision"
             guard_reporting_checkout_before_pull "$current_revision"
+            guard_widgets_checkout_before_pull "$current_revision"
             guard_campaigns_checkout_before_pull "$expected_revision"
             guard_reporting_checkout_before_pull "$expected_revision"
+            guard_widgets_checkout_before_pull "$expected_revision"
             git fetch origin prod
             fetched_revision="$(git rev-parse FETCH_HEAD)"
             [[ "$fetched_revision" == "$expected_revision" ]] || {
@@ -5370,6 +6491,8 @@ jobs:
               return 1
             }
             guard_reporting_checkout_before_pull \
+              "$expected_revision" --guard-before-checkout-revision
+            guard_widgets_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
             git checkout prod
             git merge --ff-only "$fetched_revision"
@@ -5383,6 +6506,7 @@ jobs:
             "$current_revision" != "$EXPECTED_REVISION" ]]; then
             guard_campaigns_checkout_before_pull "$current_revision"
             guard_reporting_checkout_before_pull "$current_revision"
+            guard_widgets_checkout_before_pull "$current_revision"
             if ! guard_campaigns_checkout_before_pull \
               "$EXPECTED_REVISION" > /dev/null 2>&1; then
               echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
@@ -5395,6 +6519,11 @@ jobs:
               echo "Resolve the pinned Reporting lifecycle guard before deploying another revision."
               exit 0
             fi
+            if ! guard_widgets_checkout_before_pull \
+              "$EXPECTED_REVISION" > /dev/null 2>&1; then
+              echo "Automatic backend deploy is verified but deferred: the active Widgets ownership guard rejects $EXPECTED_REVISION."
+              exit 0
+            fi
           fi
           case "$DEPLOY_TARGET" in
             all)
@@ -5402,6 +6531,7 @@ jobs:
               APP_ROOT="$APP_ROOT" \
                 CAMPAIGNS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
                 REPORTING_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
+                WIDGETS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
                 bash scripts/deploy-production.sh
               exit 0
               ;;
@@ -5420,6 +6550,22 @@ jobs:
             reporting)
               checkout_verified_prod_revision "$EXPECTED_REVISION"
               APP_ROOT="$APP_ROOT" bash scripts/deploy-reporting-production.sh
+              ;;
+            widgets)
+              [[ "$AUTOMATIC_PROD_PUSH" == "false" ]] || {
+                echo "Widgets first cutover is manual-only." >&2
+                exit 1
+              }
+              widgets_cutover_approved=false
+              if [[ "$WIDGETS_CUTOVER_CONFIRMATION" == 'CUTOVER WIDGETS OWNERSHIP' ]]; then
+                widgets_cutover_approved=true
+              fi
+              checkout_verified_prod_revision "$EXPECTED_REVISION"
+              APP_ROOT="$APP_ROOT" \
+                WIDGETS_AUTOMATIC_PROD_PUSH=false \
+                WIDGETS_FIRST_CUTOVER_APPROVED="$widgets_cutover_approved" \
+                WIDGETS_FIRST_CUTOVER_CONFIRMATION="$WIDGETS_CUTOVER_CONFIRMATION" \
+                bash scripts/deploy-widgets-production.sh
               ;;
             *)
               echo "Unsupported deploy target: $DEPLOY_TARGET" >&2

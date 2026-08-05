@@ -27,14 +27,16 @@ const PASSWORD_FILE_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	'notification-delivery':
 		'DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE',
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE',
-	reporting: 'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE'
+	reporting: 'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE',
+	widgets: 'DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE'
 };
 
 const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	core: 'DATABASE_RESTORE_CORE_PORT',
 	'notification-delivery': 'DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT',
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_PORT',
-	reporting: 'DATABASE_RESTORE_REPORTING_PORT'
+	reporting: 'DATABASE_RESTORE_REPORTING_PORT',
+	widgets: 'DATABASE_RESTORE_WIDGETS_PORT'
 };
 
 export class DatabaseRestoreWorkerConfig {
@@ -189,6 +191,28 @@ export class DatabaseRestoreWorkerConfig {
 					'identity_user_projections',
 					'projection_receipts',
 					'reporting_settings'
+				]
+			}),
+			widgets: this.target({
+				target: 'widgets',
+				label: 'Widgets',
+				port: this.requireTargetPort(environment, 'widgets'),
+				database: 'winwidget_widgets',
+				schema: 'widgets',
+				adminRole: 'winwidget_widgets_admin',
+				migrationRole: 'winwidget_widgets_migration',
+				runtimeRoles: ['winwidget_widgets_runtime'],
+				backupRole: 'winwidget_widgets_backup',
+				passwordFile: passwordFiles.widgets,
+				migrationsDirectory: join(
+					migrationsRoot,
+					'apps/widgets/prisma/migrations'
+				),
+				anchorTables: [
+					'_prisma_migrations',
+					'service_identity',
+					'widgets',
+					'outbox_events'
 				]
 			})
 		};

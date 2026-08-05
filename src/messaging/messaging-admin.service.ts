@@ -1,19 +1,16 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import {
-	LeadIntegrationEventPayload,
-	LeadIntegrationEventPayloadV2
-} from '@/messaging/lead-integration-event';
-import { LeadIntegrationDestinationService } from '@/messaging/lead-integration-destination.service';
-import {
+	CORE_OWNED_MESSAGING_KINDS,
 	getManualRetryRoutingKey,
 	CoreMessagingKind,
-	LEAD_INTEGRATION_KINDS,
 	MESSAGING_KINDS,
 	MessagingKind,
 	NOTIFICATION_DELIVERY_KINDS,
 	NotificationDeliveryKind,
 	OUTBOX_EVENT_TYPE,
-	OUTBOX_LOCK_TIMEOUT_MS
+	OUTBOX_LOCK_TIMEOUT_MS,
+	WIDGETS_PROVIDER_INTEGRATION_KINDS,
+	WidgetsProviderIntegrationKind
 } from '@/messaging/messaging.constants';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
@@ -24,6 +21,10 @@ import {
 	NotificationDeliveryInternalApiError
 } from '@/messaging/notification-delivery-client.service';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
+import {
+	WidgetsDeliveryFailuresClientService,
+	WidgetsDeliveryInternalApiError
+} from '@/messaging/widgets-delivery-failures-client.service';
 import { PrismaService } from '@/prisma.service';
 import {
 	isDatabaseBackupJobType,
@@ -61,9 +62,9 @@ export class MessagingAdminService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly rabbitManagement: RabbitMqManagementService,
-		private readonly leadDestination: LeadIntegrationDestinationService,
 		private readonly adminEventLog: AdminEventLogService,
-		private readonly notificationDelivery: NotificationDeliveryClientService
+		private readonly notificationDelivery: NotificationDeliveryClientService,
+		private readonly widgetsFailures: WidgetsDeliveryFailuresClientService
 	) {}
 
 	async getOverview() {
@@ -82,7 +83,8 @@ export class MessagingAdminService {
 			completedBackupsLast24Hours,
 			heartbeats,
 			queues,
-			notificationDeliveryOverview
+			notificationDeliveryOverview,
+			widgetsOverview
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
 				by: ['status'],
@@ -108,7 +110,7 @@ export class MessagingAdminService {
 				where: {
 					resolvedAt: null,
 					integration: {
-						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+						in: [...CORE_OWNED_MESSAGING_KINDS]
 					}
 				}
 			}),
@@ -117,7 +119,7 @@ export class MessagingAdminService {
 					resolvedAt: null,
 					retryingAt: { not: null },
 					integration: {
-						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+						in: [...CORE_OWNED_MESSAGING_KINDS]
 					}
 				}
 			}),
@@ -125,7 +127,7 @@ export class MessagingAdminService {
 				where: {
 					status: IntegrationDeliveryReceiptStatus.DELIVERED,
 					integration: {
-						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+						in: [...CORE_OWNED_MESSAGING_KINDS]
 					},
 					deliveredAt: {
 						gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
@@ -161,6 +163,14 @@ export class MessagingAdminService {
 						error instanceof Error
 							? error.message
 							: 'Notification Delivery недоступен'
+				})),
+			this.widgetsFailures
+				.getOverview()
+				.then(overview => ({ overview, error: null }))
+				.catch(error => ({
+					overview: null,
+					error:
+						error instanceof Error ? error.message : 'Widgets недоступен'
 				}))
 		]);
 
@@ -176,6 +186,11 @@ export class MessagingAdminService {
 					notificationDeliveryOverview.overview.outbox[status] || 0;
 			}
 		}
+		if (widgetsOverview.overview) {
+			for (const status of Object.values(OutboxEventStatus)) {
+				outbox[status] += widgetsOverview.overview.outbox[status] || 0;
+			}
+		}
 
 		const oldestPendingAt =
 			[
@@ -186,7 +201,8 @@ export class MessagingAdminService {
 								OUTBOX_LOCK_TIMEOUT_MS
 						).toISOString()
 					: null,
-				notificationDeliveryOverview.overview?.oldestPendingAt || null
+				notificationDeliveryOverview.overview?.oldestPendingAt || null,
+				widgetsOverview.overview?.oldestPendingAt || null
 			]
 				.filter((value): value is string => Boolean(value))
 				.sort()[0] || null;
@@ -250,6 +266,28 @@ export class MessagingAdminService {
 				lastSuccessfulConsumeAt: null
 			}
 		);
+		serviceHeartbeats.push(
+			...(widgetsOverview.overview?.heartbeats || [
+				{
+					service: 'widgets-api',
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null
+				},
+				{
+					service: 'widgets-worker',
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null
+				},
+				{
+					service: 'widgets-publisher',
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null
+				}
+			])
+		);
 
 		return {
 			generatedAt: new Date().toISOString(),
@@ -257,16 +295,21 @@ export class MessagingAdminService {
 			oldestPendingAt,
 			unresolvedFailures:
 				unresolvedFailures +
-				(notificationDeliveryOverview.overview?.unresolvedFailures || 0),
+				(notificationDeliveryOverview.overview?.unresolvedFailures || 0) +
+				(widgetsOverview.overview?.unresolvedFailures || 0),
 			retryingFailures:
 				retryingFailures +
-				(notificationDeliveryOverview.overview?.retryingFailures || 0),
+				(notificationDeliveryOverview.overview?.retryingFailures || 0) +
+				(widgetsOverview.overview?.retryingFailures || 0),
 			deliveredLast24Hours:
 				deliveredLast24Hours +
 				completedBackupsLast24Hours +
-				(notificationDeliveryOverview.overview?.deliveredLast24Hours || 0),
+				(notificationDeliveryOverview.overview?.deliveredLast24Hours ||
+					0) +
+				(widgetsOverview.overview?.deliveredLast24Hours || 0),
 			rabbitMqError: queues.error,
 			notificationDeliveryError: notificationDeliveryOverview.error,
+			widgetsError: widgetsOverview.error,
 			heartbeats: serviceHeartbeats,
 			queues: queues.queues.map(queue => ({
 				name: queue.name,
@@ -289,9 +332,12 @@ export class MessagingAdminService {
 		const queryNotificationDelivery =
 			!normalizedIntegration ||
 			this.isNotificationDeliveryKind(normalizedIntegration);
-		const queryLegacy =
+		const queryWidgets =
 			!normalizedIntegration ||
-			!this.isNotificationDeliveryKind(normalizedIntegration);
+			this.isWidgetsProviderKind(normalizedIntegration);
+		const queryCore =
+			!normalizedIntegration ||
+			this.isCoreOwnedKind(normalizedIntegration);
 		const offset = (normalizedPage - 1) * normalizedLimit;
 		const windowSize = offset + normalizedLimit;
 		if (!Number.isSafeInteger(windowSize) || windowSize > 10_000) {
@@ -299,41 +345,54 @@ export class MessagingAdminService {
 				'Слишком глубокая страница истории ошибок'
 			);
 		}
-		const where = queryLegacy
-			? this.getFailureWhere(filters, !normalizedIntegration)
-			: null;
-		const [legacyResult, notificationResult] = await Promise.all([
-			where
-				? this.prisma.$transaction([
-						this.prisma.integrationDeliveryFailure.findMany({
-							where,
-							orderBy: [{ failedAt: 'desc' }, { id: 'desc' }],
-							take: windowSize
+		const where = queryCore ? this.getFailureWhere(filters) : null;
+		const [coreResult, notificationResult, widgetsResult] =
+			await Promise.all([
+				where
+					? this.prisma.$transaction([
+							this.prisma.integrationDeliveryFailure.findMany({
+								where,
+								orderBy: [{ failedAt: 'desc' }, { id: 'desc' }],
+								take: windowSize
+							}),
+							this.prisma.integrationDeliveryFailure.count({ where })
+						])
+					: Promise.resolve([[], 0] as const),
+				queryNotificationDelivery
+					? this.notificationDelivery.getFailures(1, windowSize, filters)
+					: Promise.resolve({
+							items: [],
+							total: 0,
+							page: 1,
+							limit: windowSize,
+							totalPages: 1
 						}),
-						this.prisma.integrationDeliveryFailure.count({ where })
-					])
-				: Promise.resolve([[], 0] as const),
-			queryNotificationDelivery
-				? this.notificationDelivery.getFailures(1, windowSize, filters)
-				: Promise.resolve({
-						items: [],
-						total: 0,
-						page: 1,
-						limit: windowSize,
-						totalPages: 1
-					})
-		]);
-		const legacyItems = legacyResult[0].map(item =>
+				queryWidgets
+					? this.widgetsFailures.getFailures(1, windowSize, filters)
+					: Promise.resolve({
+							items: [],
+							total: 0,
+							page: 1,
+							limit: windowSize,
+							totalPages: 1
+						})
+			]);
+		const coreItems = coreResult[0].map(item =>
 			this.serializeFailure(item)
 		);
-		const items = [...legacyItems, ...notificationResult.items]
+		const items = [
+			...coreItems,
+			...notificationResult.items,
+			...widgetsResult.items
+		]
 			.sort((left, right) => {
 				const byDate =
 					Date.parse(right.failedAt) - Date.parse(left.failedAt);
 				return byDate || right.id.localeCompare(left.id);
 			})
 			.slice(offset, offset + normalizedLimit);
-		const total = legacyResult[1] + notificationResult.total;
+		const total =
+			coreResult[1] + notificationResult.total + widgetsResult.total;
 
 		return {
 			items,
@@ -345,10 +404,13 @@ export class MessagingAdminService {
 	}
 
 	async retryFailure(id: string, adminId: string, request?: Request) {
-		const notificationDeliveryResult =
-			await this.retryNotificationDeliveryFailure(id, adminId, request);
-		if (notificationDeliveryResult) {
-			return notificationDeliveryResult;
+		if (!(await this.isCoreOwnedFailure(id))) {
+			const notificationDeliveryResult =
+				await this.retryNotificationDeliveryFailure(id, adminId, request);
+			if (notificationDeliveryResult) return notificationDeliveryResult;
+			const widgetsResult = await this.retryWidgetsFailure(id, adminId);
+			if (widgetsResult) return widgetsResult;
+			throw new NotFoundException('Ошибка доставки не найдена');
 		}
 
 		const staleRetryBefore = new Date(Date.now() - 5 * 60 * 1000);
@@ -366,15 +428,8 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
-			if (
-				LEAD_INTEGRATION_KINDS.includes(
-					kind as (typeof LEAD_INTEGRATION_KINDS)[number]
-				) &&
-				!this.isLeadEventV2(failure.payload)
-			) {
-				throw new ConflictException(
-					'Повтор устаревшего события интеграции недоступен'
-				);
+			if (!this.isCoreOwnedKind(kind)) {
+				throw new NotFoundException('Ошибка доставки не найдена');
 			}
 			const retryPayload: Prisma.JsonValue = failure.payload;
 			const retryEventType = this.getFailureEventType(retryPayload);
@@ -414,26 +469,6 @@ export class MessagingAdminService {
 
 			if (claimed.count !== 1) {
 				throw new ConflictException('Повторная отправка уже выполняется');
-			}
-
-			if (
-				failure.category === IntegrationErrorCategory.AUTH_CONFIGURATION &&
-				this.isLeadEventV2(retryPayload)
-			) {
-				try {
-					await this.leadDestination.refreshSnapshotFromCurrentConfig(
-						failure.eventId,
-						retryPayload as unknown as LeadIntegrationEventPayloadV2,
-						transaction
-					);
-				} catch (error) {
-					throw new ConflictException(
-						error instanceof Error &&
-							error.message.includes('target has changed')
-							? 'Адрес назначения изменился. Закройте старую ошибку без повтора'
-							: 'Не удалось обновить настройки интеграции для повтора'
-					);
-				}
 			}
 
 			if (scheduledJob) {
@@ -513,15 +548,22 @@ export class MessagingAdminService {
 			);
 		}
 
-		const notificationDeliveryResult =
-			await this.closeNotificationDeliveryFailure(
+		if (!(await this.isCoreOwnedFailure(id))) {
+			const notificationDeliveryResult =
+				await this.closeNotificationDeliveryFailure(
+					id,
+					adminId,
+					normalizedComment,
+					request
+				);
+			if (notificationDeliveryResult) return notificationDeliveryResult;
+			const widgetsResult = await this.closeWidgetsFailure(
 				id,
 				adminId,
-				normalizedComment,
-				request
+				normalizedComment
 			);
-		if (notificationDeliveryResult) {
-			return notificationDeliveryResult;
+			if (widgetsResult) return widgetsResult;
+			throw new NotFoundException('Ошибка доставки не найдена');
 		}
 
 		const resolvedAt = new Date();
@@ -551,6 +593,9 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
+			if (!this.isCoreOwnedKind(kind)) {
+				throw new NotFoundException('Ошибка доставки не найдена');
+			}
 			if (kind !== 'database-backup') {
 				await this.createClosedReceipt(
 					transaction,
@@ -580,12 +625,6 @@ export class MessagingAdminService {
 				);
 			}
 
-			await transaction.integrationCredentialSnapshot.deleteMany({
-				where: {
-					eventId: failure.eventId,
-					integration: failure.integration
-				}
-			});
 			await this.adminEventLog.recordInTransaction(transaction, {
 				adminId,
 				section: 'MESSAGING',
@@ -747,8 +786,7 @@ export class MessagingAdminService {
 	}
 
 	private getFailureWhere(
-		filters: FailureFilters,
-		excludeNotificationDelivery = false
+		filters: FailureFilters
 	): Prisma.IntegrationDeliveryFailureWhereInput {
 		const integration = filters.integration?.trim();
 		const category = filters.category?.trim().toUpperCase();
@@ -756,10 +794,16 @@ export class MessagingAdminService {
 		const where: Prisma.IntegrationDeliveryFailureWhereInput = {};
 
 		if (integration) {
-			where.integration = this.normalizeIntegration(integration);
-		} else if (excludeNotificationDelivery) {
+			const kind = this.normalizeIntegration(integration);
+			if (!this.isCoreOwnedKind(kind)) {
+				throw new BadRequestException(
+					'Тип интеграции не принадлежит Core'
+				);
+			}
+			where.integration = kind;
+		} else {
 			where.integration = {
-				notIn: [...NOTIFICATION_DELIVERY_KINDS]
+				in: [...CORE_OWNED_MESSAGING_KINDS]
 			};
 		}
 		if (category) {
@@ -846,18 +890,6 @@ export class MessagingAdminService {
 		}
 	}
 
-	private isLeadEventV2(payload: Prisma.JsonValue): boolean {
-		return (
-			Boolean(payload) &&
-			typeof payload === 'object' &&
-			!Array.isArray(payload) &&
-			payload.schemaVersion === 2 &&
-			payload.eventType === OUTBOX_EVENT_TYPE &&
-			typeof payload.integration === 'string' &&
-			Boolean(payload.destination)
-		);
-	}
-
 	private normalizeIntegration(value: string): CoreMessagingKind {
 		if (!MESSAGING_KINDS.includes(value as CoreMessagingKind)) {
 			throw new BadRequestException('Некорректный тип интеграции');
@@ -873,18 +905,37 @@ export class MessagingAdminService {
 		);
 	}
 
+	private isWidgetsProviderKind(
+		value: MessagingKind
+	): value is WidgetsProviderIntegrationKind {
+		return WIDGETS_PROVIDER_INTEGRATION_KINDS.includes(
+			value as WidgetsProviderIntegrationKind
+		);
+	}
+
+	private isCoreOwnedKind(value: CoreMessagingKind): boolean {
+		return CORE_OWNED_MESSAGING_KINDS.includes(
+			value as (typeof CORE_OWNED_MESSAGING_KINDS)[number]
+		);
+	}
+
 	private async retryNotificationDeliveryFailure(
 		id: string,
 		adminId: string,
 		request?: Request
 	) {
-		if (await this.isLegacyFailure(id)) return null;
 		let result: Awaited<
 			ReturnType<NotificationDeliveryClientService['retryFailure']>
 		>;
 		try {
 			result = await this.notificationDelivery.retryFailure(id, adminId);
 		} catch (error) {
+			if (
+				error instanceof NotificationDeliveryInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
 			this.rethrowNotificationDeliveryError(error);
 		}
 		await this.recordNotificationDeliveryAuditBestEffort(
@@ -919,7 +970,6 @@ export class MessagingAdminService {
 		comment: string,
 		request?: Request
 	) {
-		if (await this.isLegacyFailure(id)) return null;
 		let result: Awaited<
 			ReturnType<NotificationDeliveryClientService['closeFailure']>
 		>;
@@ -930,6 +980,12 @@ export class MessagingAdminService {
 				comment
 			);
 		} catch (error) {
+			if (
+				error instanceof NotificationDeliveryInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
 			this.rethrowNotificationDeliveryError(error);
 		}
 		await this.recordNotificationDeliveryAuditBestEffort(
@@ -985,19 +1041,62 @@ export class MessagingAdminService {
 		}
 	}
 
-	private async isLegacyFailure(id: string): Promise<boolean> {
+	private async isCoreOwnedFailure(id: string): Promise<boolean> {
 		const failure = await this.prisma.integrationDeliveryFailure.findFirst(
 			{
 				where: {
 					id,
 					integration: {
-						notIn: [...NOTIFICATION_DELIVERY_KINDS]
+						in: [...CORE_OWNED_MESSAGING_KINDS]
 					}
 				},
 				select: { id: true }
 			}
 		);
 		return Boolean(failure);
+	}
+
+	private async retryWidgetsFailure(id: string, adminId: string) {
+		try {
+			return await this.widgetsFailures.retryFailure(id, adminId);
+		} catch (error) {
+			if (
+				error instanceof WidgetsDeliveryInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
+			this.rethrowWidgetsError(error);
+		}
+	}
+
+	private async closeWidgetsFailure(
+		id: string,
+		adminId: string,
+		comment: string
+	) {
+		try {
+			return await this.widgetsFailures.closeFailure(id, adminId, comment);
+		} catch (error) {
+			if (
+				error instanceof WidgetsDeliveryInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
+			this.rethrowWidgetsError(error);
+		}
+	}
+
+	private rethrowWidgetsError(error: unknown): never {
+		if (!(error instanceof WidgetsDeliveryInternalApiError)) throw error;
+		if (error.statusCode === 400) {
+			throw new BadRequestException(error.message);
+		}
+		if (error.statusCode === 409) {
+			throw new ConflictException(error.message);
+		}
+		throw new ServiceUnavailableException('Widgets не выполнил операцию');
 	}
 
 	private rethrowNotificationDeliveryError(error: unknown): never {
@@ -1021,18 +1120,29 @@ export class MessagingAdminService {
 	private serializeFailure(
 		item: IntegrationDeliveryFailure
 	): NotificationDeliveryFailureView {
-		const payload = item.payload as unknown as LeadIntegrationEventPayload;
+		const payload = item.payload as {
+			source?: unknown;
+			entity?: unknown;
+			lead?: Record<string, unknown>;
+		};
 		const jobPayload = item.payload as {
 			jobId?: string;
 			jobType?: string;
 		};
-		const scheduledJobName =
-			jobPayload.jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP
-				? 'Backup PostgreSQL'
-				: jobPayload.jobType ===
-					  SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP
-					? 'Backup PostgreSQL Notification Delivery'
-					: null;
+		const scheduledJobNames: Partial<Record<string, string>> = {
+			[SCHEDULED_JOB_TYPES.DATABASE_BACKUP]: 'Backup PostgreSQL',
+			[SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP]:
+				'Backup PostgreSQL Notification Delivery',
+			[SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP]:
+				'Backup PostgreSQL Campaigns',
+			[SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP]:
+				'Backup PostgreSQL Reporting',
+			[SCHEDULED_JOB_TYPES.WIDGETS_DATABASE_BACKUP]:
+				'Backup PostgreSQL Widgets'
+		};
+		const scheduledJobName = jobPayload.jobType
+			? scheduledJobNames[jobPayload.jobType] || null
+			: null;
 		const scheduledJobEntity = scheduledJobName
 			? {
 					id: jobPayload.jobId || item.eventId,
@@ -1056,16 +1166,26 @@ export class MessagingAdminService {
 			resolvedAt: item.resolvedAt?.toISOString() || null,
 			resolution: item.resolution,
 			resolutionComment: item.resolutionComment,
-			source: payload.source,
-			entity: scheduledJobEntity || payload.entity,
+			source: typeof payload.source === 'string' ? payload.source : null,
+			entity:
+				scheduledJobEntity ||
+				(payload.entity &&
+				typeof payload.entity === 'object' &&
+				!Array.isArray(payload.entity)
+					? (payload.entity as Record<string, unknown>)
+					: null),
 			lead: {
-				id: payload.lead?.id || null,
-				contact: payload.lead?.contact || null,
-				phone: payload.lead?.phone || null,
-				email: payload.lead?.email || null,
-				url: payload.lead?.url || null,
-				createdAt: payload.lead?.createdAt || null
+				id: this.optionalString(payload.lead?.id),
+				contact: this.optionalString(payload.lead?.contact),
+				phone: this.optionalString(payload.lead?.phone),
+				email: this.optionalString(payload.lead?.email),
+				url: this.optionalString(payload.lead?.url),
+				createdAt: this.optionalString(payload.lead?.createdAt)
 			}
 		};
+	}
+
+	private optionalString(value: unknown): string | null {
+		return typeof value === 'string' ? value : null;
 	}
 }

@@ -130,6 +130,30 @@ describe('DatabaseBackupService', () => {
 		expect(connection.url).not.toContain('schema=');
 	});
 
+	it('uses the dedicated least-privilege Widgets backup connection', () => {
+		const service = createService({
+			WIDGETS_BACKUP_URL:
+				'postgresql://widgets_backup:widgets-secret@widgets.example:5432/winwidget_widgets?schema=widgets&sslmode=require'
+		});
+
+		const connection = (service as any).getPostgresConnection('widgets');
+
+		expect(connection).toEqual(
+			expect.objectContaining({
+				target: 'widgets',
+				label: 'Widgets',
+				databaseName: 'winwidget_widgets',
+				schema: 'widgets',
+				password: 'widgets-secret'
+			})
+		);
+		expect(connection.url).toContain(
+			'widgets.example:5432/winwidget_widgets'
+		);
+		expect(connection.url).not.toContain('widgets-secret');
+		expect(connection.url).not.toContain('schema=');
+	});
+
 	it('backs up only the selected notification-delivery target', async () => {
 		const sequence: string[] = [];
 		let dumpedPath = '';
@@ -318,6 +342,19 @@ describe('DatabaseBackupService', () => {
 				new AbortController().signal
 			)
 		).rejects.toThrow('REPORTING_BACKUP_URL is not configured');
+
+		await expect(
+			service.createAndSend(
+				'job-4',
+				'widgets',
+				{
+					chatId: '-1001',
+					messageThreadId: 42,
+					trigger: 'SCHEDULED'
+				},
+				new AbortController().signal
+			)
+		).rejects.toThrow('WIDGETS_BACKUP_URL is not configured');
 	});
 
 	it('stops pg_dump as soon as streamed output exceeds the disk limit', async () => {
@@ -377,6 +414,8 @@ describe('DatabaseBackupService', () => {
 			process.env.NOTIFICATION_DELIVERY_DATABASE_URL;
 		const previousReportingBackupUrl = process.env.REPORTING_BACKUP_URL;
 		const previousReportingRuntimeUrl = process.env.REPORTING_DATABASE_URL;
+		const previousWidgetsBackupUrl = process.env.WIDGETS_BACKUP_URL;
+		const previousWidgetsRuntimeUrl = process.env.WIDGETS_DATABASE_URL;
 		process.env.DATABASE_URL_PRODUCTION =
 			'postgresql://user:full-secret@db.example/app';
 		process.env.DATABASE_BACKUP_URL =
@@ -389,6 +428,10 @@ describe('DatabaseBackupService', () => {
 			'postgresql://user:reporting-backup-secret@db.example/app';
 		process.env.REPORTING_DATABASE_URL =
 			'postgresql://user:reporting-runtime-secret@db.example/app';
+		process.env.WIDGETS_BACKUP_URL =
+			'postgresql://user:widgets-backup-secret@db.example/app';
+		process.env.WIDGETS_DATABASE_URL =
+			'postgresql://user:widgets-runtime-secret@db.example/app';
 
 		try {
 			const execution = (service as any).runCommand(
@@ -414,6 +457,8 @@ describe('DatabaseBackupService', () => {
 			).toBeUndefined();
 			expect(options.env.REPORTING_BACKUP_URL).toBeUndefined();
 			expect(options.env.REPORTING_DATABASE_URL).toBeUndefined();
+			expect(options.env.WIDGETS_BACKUP_URL).toBeUndefined();
+			expect(options.env.WIDGETS_DATABASE_URL).toBeUndefined();
 		} finally {
 			if (previousUrl === undefined) {
 				delete process.env.DATABASE_URL_PRODUCTION;
@@ -446,6 +491,16 @@ describe('DatabaseBackupService', () => {
 				delete process.env.REPORTING_DATABASE_URL;
 			} else {
 				process.env.REPORTING_DATABASE_URL = previousReportingRuntimeUrl;
+			}
+			if (previousWidgetsBackupUrl === undefined) {
+				delete process.env.WIDGETS_BACKUP_URL;
+			} else {
+				process.env.WIDGETS_BACKUP_URL = previousWidgetsBackupUrl;
+			}
+			if (previousWidgetsRuntimeUrl === undefined) {
+				delete process.env.WIDGETS_DATABASE_URL;
+			} else {
+				process.env.WIDGETS_DATABASE_URL = previousWidgetsRuntimeUrl;
 			}
 		}
 	});

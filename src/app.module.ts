@@ -16,18 +16,9 @@ import { SubscriptionModule } from '@/subscription/subscription.module';
 import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { UserModule } from '@/user/user.module';
-import { WidgetModule } from '@/widget/widget.module';
-import { WidgetAdminModule } from '@/widget-admin/widget-admin.module';
-import { WidgetSettingsModule } from '@/widget-settings/widget-settings.module';
-import { WidgetRuntimeModule } from '@/widget-runtime/widget-runtime.module';
-import { QuizModule } from '@/quiz/quiz.module';
-import { CallbackModule } from '@/callback/callback.module';
-import { CalculatorModule } from '@/calculator/calculator.module';
 import { CampaignsInternalModule } from '@/campaigns-internal/campaigns-internal.module';
 import { ReportingInternalModule } from '@/reporting-internal/reporting-internal.module';
-import { CountdownTimerModule } from '@/countdown-timer/countdown-timer.module';
-import { StopOfferModule } from '@/stop-offer/stop-offer.module';
-import { OnlineConsultantModule } from '@/online-consultant/online-consultant.module';
+import { WidgetsInternalModule } from '@/widgets-internal/widgets-internal.module';
 import { DevToolsModule } from '@/dev-tools/dev-tools.module';
 import { HealthModule } from '@/health/health.module';
 import { HomePageContentModule } from '@/home-page-content/home-page-content.module';
@@ -53,16 +44,6 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		PaymentModule,
 		AutoRenewalSchedulerModule,
 		SubscriptionModule,
-		WidgetModule,
-		WidgetAdminModule,
-		WidgetSettingsModule,
-		WidgetRuntimeModule,
-		QuizModule,
-		CallbackModule,
-		CalculatorModule,
-		CountdownTimerModule,
-		StopOfferModule,
-		OnlineConsultantModule,
 		SiteSettingsModule,
 		TariffPricesModule,
 		LegalPagesModule,
@@ -70,6 +51,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		NotesModule,
 		CampaignsInternalModule,
 		ReportingInternalModule,
+		WidgetsInternalModule,
 		MessagingAdminModule,
 		HealthModule,
 		TelegramBotModule,

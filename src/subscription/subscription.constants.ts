@@ -1,23 +1,5 @@
 import { BillingPeriod, Plan } from '@prisma/client';
 
-export const PLAN_LIMITS = {
-	[Plan.TRIAL]: {
-		maxWidgets: 1,
-		maxLeadsPerPeriod: 10,
-		unlimited: false
-	},
-	[Plan.EASY]: {
-		maxWidgets: 1,
-		maxLeadsPerPeriod: 100,
-		unlimited: false
-	},
-	[Plan.HARD]: {
-		maxWidgets: 10,
-		maxLeadsPerPeriod: Infinity,
-		unlimited: true
-	}
-} as const;
-
 export const PLAN_PRIORITY: Record<Plan, number> = {
 	[Plan.TRIAL]: 0,
 	[Plan.EASY]: 1,

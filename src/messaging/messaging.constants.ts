@@ -26,6 +26,7 @@ export const ADMIN_AUDIT_EVENT_TYPE = 'admin.audit.event.v1';
 export const CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE = ADMIN_AUDIT_EVENT_TYPE;
 export const REPORTING_ADMIN_AUDIT_ROUTING_KEY =
 	'admin.audit.reporting.v1';
+export const WIDGETS_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.widgets.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
 export const REPORTING_IDENTITY_USER_EVENT_TYPE =
 	'identity.user.changed.v1';
@@ -42,18 +43,12 @@ export const RETRY_EXCHANGE = 'winwidget.retry';
 export const DEAD_LETTER_EXCHANGE = 'winwidget.dead-letter';
 export const MANUAL_RETRY_EXCHANGE = 'winwidget.manual-retry';
 
-export const LEAD_INTEGRATION_KINDS = [
+export const INTEGRATION_KINDS = [
 	'email',
 	'webhook',
 	'telegram',
 	'bitrix24',
-	'amo-crm'
-] as const;
-
-export type LeadIntegrationKind = (typeof LEAD_INTEGRATION_KINDS)[number];
-
-export const INTEGRATION_KINDS = [
-	...LEAD_INTEGRATION_KINDS,
+	'amo-crm',
 	'payment-email',
 	'payment-telegram',
 	'limit-email',
@@ -66,6 +61,7 @@ export const INTEGRATION_KINDS = [
 	'notification-delivery-outcome',
 	'campaign-admin-audit',
 	'reporting-admin-audit',
+	'widgets-admin-audit',
 	'auto-renewal'
 ] as const;
 
@@ -87,15 +83,28 @@ export const NOTIFICATION_DELIVERY_KINDS = [
 export type NotificationDeliveryKind =
 	(typeof NOTIFICATION_DELIVERY_KINDS)[number];
 
-export type MonolithIntegrationKind = Exclude<
-	IntegrationKind,
-	NotificationDeliveryKind
->;
+export const WIDGETS_PROVIDER_INTEGRATION_KINDS = [
+	'webhook',
+	'bitrix24',
+	'amo-crm'
+] as const satisfies readonly IntegrationKind[];
 
-export const MONOLITH_INTEGRATION_KINDS = INTEGRATION_KINDS.filter(
-	(kind): kind is MonolithIntegrationKind =>
-		!NOTIFICATION_DELIVERY_KINDS.includes(kind as NotificationDeliveryKind)
-);
+export type WidgetsProviderIntegrationKind =
+	(typeof WIDGETS_PROVIDER_INTEGRATION_KINDS)[number];
+
+export const CORE_OWNED_INTEGRATION_KINDS = [
+	'telegram-destination-unavailable',
+	'notification-delivery-outcome',
+	'campaign-admin-audit',
+	'reporting-admin-audit',
+	'widgets-admin-audit',
+	'auto-renewal'
+] as const satisfies readonly IntegrationKind[];
+
+export type MonolithIntegrationKind =
+	(typeof CORE_OWNED_INTEGRATION_KINDS)[number];
+
+export const MONOLITH_INTEGRATION_KINDS = CORE_OWNED_INTEGRATION_KINDS;
 
 export const MAINTENANCE_KINDS = ['database-backup'] as const;
 
@@ -121,6 +130,20 @@ export const MESSAGING_KINDS = [
 export type CoreMessagingKind = (typeof MESSAGING_KINDS)[number];
 export type MessagingKind = CoreMessagingKind | ReportingProjectionKind;
 
+// MESSAGING_KINDS is the federated monitoring/admin contract. Topology ownership
+// is narrower: Widgets owns its provider queues and Core must not recreate them
+// after the ownership handoff.
+export const CORE_RABBITMQ_TOPOLOGY_KINDS = [
+	...NOTIFICATION_DELIVERY_KINDS,
+	...CORE_OWNED_INTEGRATION_KINDS,
+	...MAINTENANCE_KINDS
+] as const satisfies readonly CoreMessagingKind[];
+
+export const CORE_OWNED_MESSAGING_KINDS = [
+	...CORE_OWNED_INTEGRATION_KINDS,
+	...MAINTENANCE_KINDS
+] as const satisfies readonly CoreMessagingKind[];
+
 export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	email: 'lead.integration.email.v2',
 	webhook: 'lead.integration.webhook.v2',
@@ -143,6 +166,7 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 		NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	'campaign-admin-audit': CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
 	'reporting-admin-audit': REPORTING_ADMIN_AUDIT_ROUTING_KEY,
+	'widgets-admin-audit': WIDGETS_ADMIN_AUDIT_ROUTING_KEY,
 	'auto-renewal': AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE,
 	'reporting-identity-user': REPORTING_IDENTITY_USER_EVENT_TYPE,
@@ -176,6 +200,7 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 		'winwidget.notification.delivery-outcome',
 	'campaign-admin-audit': 'winwidget.admin.audit.campaigns.v1',
 	'reporting-admin-audit': 'winwidget.admin.audit.reporting.v1',
+	'widgets-admin-audit': 'winwidget.admin.audit.widgets.v1',
 	'auto-renewal': 'winwidget.payment.auto-renewal',
 	'database-backup': 'winwidget.maintenance.database-backup',
 	'reporting-identity-user': 'winwidget.reporting.identity-user',
