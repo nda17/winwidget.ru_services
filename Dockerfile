@@ -19,7 +19,15 @@ RUN pnpm install --frozen-lockfile
 FROM base AS builder
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY package.json pnpm-lock.yaml tsconfig.json tsconfig.build.json nest-cli.json ./
+COPY prisma ./prisma
+COPY src ./src
+COPY emails ./emails
+COPY public/email ./public/email
+COPY apps/notification-delivery/prisma ./apps/notification-delivery/prisma
+COPY apps/campaigns/prisma ./apps/campaigns/prisma
+COPY apps/reporting/prisma ./apps/reporting/prisma
+COPY apps/widgets/prisma ./apps/widgets/prisma
 
 RUN pnpm exec prisma generate
 RUN pnpm run build:app

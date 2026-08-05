@@ -19,7 +19,7 @@ RUN pnpm install --frozen-lockfile
 FROM base AS builder
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json tsconfig.json tsconfig.build.json nest-cli.json ./
+COPY package.json pnpm-lock.yaml tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY prisma ./prisma
 COPY emails ./emails
 COPY src ./src

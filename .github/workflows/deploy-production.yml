@@ -75,7 +75,6 @@ jobs:
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
-          node scripts/export-widgets-cutover-snapshot.mjs --self-test
           bash scripts/widgets-database-lifecycle.sh --self-test
           bash scripts/test-widgets-cutover-rehearsal.sh --self-test
 
@@ -1164,6 +1163,9 @@ jobs:
           pnpm --dir apps/reporting run prisma:generate
           pnpm --dir apps/widgets run prisma:validate
           pnpm --dir apps/widgets run prisma:generate
+
+      - name: Fast-check Widgets snapshot SQL contract
+        run: node scripts/export-widgets-cutover-snapshot.mjs --self-test
 
       - name: Apply database migrations
         run: |
@@ -5008,6 +5010,9 @@ jobs:
           const reporting = require(
             "./apps/reporting/dist/src/messaging/reporting-messaging.constants.js",
           );
+          const widgets = require(
+            "./apps/widgets/dist/src/messaging/widgets-messaging.constants.js",
+          );
 
           const expectedKinds = [
             "email",
@@ -5024,8 +5029,22 @@ jobs:
           ];
           const actualKinds = [...delivery.NOTIFICATION_DELIVERY_KINDS];
           const coreDeliveryKinds = [...monolith.NOTIFICATION_DELIVERY_KINDS];
+          const monolithIntegrationKinds = [
+            ...monolith.MONOLITH_INTEGRATION_KINDS,
+          ];
+          const widgetsProviderKinds = [
+            ...monolith.WIDGETS_PROVIDER_INTEGRATION_KINDS,
+          ];
+          const widgetsServiceProviderKinds = [
+            ...widgets.WIDGETS_PROVIDER_KINDS,
+          ];
           const reportingDeliveryKinds = [
             ...reporting.REPORTING_NOTIFICATION_DELIVERY_KINDS,
+          ];
+          const expectedWidgetsProviderKinds = [
+            "webhook",
+            "bitrix24",
+            "amo-crm",
           ];
           const steadyMonolithKinds = [
             "telegram-destination-unavailable",
@@ -5221,20 +5240,30 @@ jobs:
               "Reporting settings projection route does not match the cleanup phase",
             );
           }
+          const integrationOwnershipKinds = [
+            ...coreDeliveryKinds,
+            ...widgetsProviderKinds,
+            ...monolithIntegrationKinds,
+          ];
           if (
-            JSON.stringify([...monolith.MONOLITH_INTEGRATION_KINDS]) !==
+            JSON.stringify(monolithIntegrationKinds) !==
               JSON.stringify(expectedMonolithKinds) ||
+            JSON.stringify(widgetsProviderKinds) !==
+              JSON.stringify(expectedWidgetsProviderKinds) ||
+            JSON.stringify(widgetsServiceProviderKinds) !==
+              JSON.stringify(expectedWidgetsProviderKinds) ||
             actualKinds.some(kind =>
-              monolith.MONOLITH_INTEGRATION_KINDS.includes(kind)
+              [...monolithIntegrationKinds, ...widgetsProviderKinds].includes(
+                kind,
+              )
             ) ||
-            [...new Set([
-              ...coreDeliveryKinds,
-              ...monolith.MONOLITH_INTEGRATION_KINDS,
-            ])].sort().join(",") !==
+            new Set(integrationOwnershipKinds).size !==
+              integrationOwnershipKinds.length ||
+            [...integrationOwnershipKinds].sort().join(",") !==
               [...monolith.INTEGRATION_KINDS].sort().join(",")
           ) {
             throw new Error(
-              "Monolith and Notification Delivery kind ownership must be an exact disjoint union",
+              "Core, Notification Delivery, and Widgets kind ownership must be an exact disjoint union",
             );
           }
           for (const [label, actual, expected] of [

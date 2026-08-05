@@ -19,7 +19,7 @@ RUN pnpm install --frozen-lockfile
 FROM base AS builder
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY apps/widgets/package.json apps/widgets/tsconfig.json apps/widgets/tsconfig.build.json apps/widgets/nest-cli.json ./
+COPY apps/widgets/package.json apps/widgets/pnpm-lock.yaml apps/widgets/tsconfig.json apps/widgets/tsconfig.build.json apps/widgets/nest-cli.json ./
 COPY apps/widgets/prisma ./prisma
 COPY apps/widgets/src ./src
 COPY public/widgets ./public/widgets
