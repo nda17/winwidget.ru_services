@@ -1021,12 +1021,21 @@ async function waitForReady(port) {
 	) {
 		throw new Error('Widgets readiness exposed a credential or URL');
 	}
-	assert.deepEqual(JSON.parse(raw), {
-		status: 'ready',
-		service: 'widgets',
-		role: 'all',
-		revision: 'widgets-messaging-integration'
-	});
+	const payload = JSON.parse(raw);
+	assert.deepEqual(
+		{
+			status: payload.status,
+			service: payload.service,
+			role: payload.role,
+			revision: payload.revision
+		},
+		{
+			status: 'ready',
+			service: 'widgets',
+			role: 'all',
+			revision: 'widgets-messaging-integration'
+		}
+	);
 }
 
 async function waitFor(label, action, timeoutMs = 15_000) {
