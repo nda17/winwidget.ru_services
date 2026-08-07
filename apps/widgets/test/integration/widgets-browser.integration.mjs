@@ -71,7 +71,9 @@ const BROWSER_CASES = [
 	}
 ];
 
-const BROWSER_TIMEOUT_MS = 25_000;
+const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
+const BROWSER_RESULT_TIMEOUT_MS = 120_000;
+const BROWSER_RESOURCE_TIMEOUT_MS = 12_000;
 
 export async function runWidgetsBrowserIntegration({
 	appPort,
@@ -96,8 +98,13 @@ export async function runWidgetsBrowserIntegration({
 	}
 
 	const pendingResults = new Map();
+	const pendingPageLoads = new Map();
 	const pages = new Map();
-	const server = createHarnessServer(pages, pendingResults);
+	const server = createHarnessServer(
+		pages,
+		pendingPageLoads,
+		pendingResults
+	);
 	const harnessPort = await listenLoopback(server);
 	const harnessOrigin = `http://127.0.0.1:${harnessPort}`;
 	if (corsAllowedOrigins.includes(harnessOrigin)) {
@@ -125,10 +132,15 @@ export async function runWidgetsBrowserIntegration({
 				nonce
 			};
 			pages.set(pagePath, browserCase);
+			const pageLoadPromise = waitForBrowserPageLoad(
+				pendingPageLoads,
+				nonce
+			);
 			const resultPromise = waitForBrowserResult(pendingResults, nonce);
 			const result = await runChromeCase({
 				browserExecutable,
 				url: `${harnessOrigin}${pagePath}?browser-smoke=${nonce}`,
+				pageLoadPromise,
 				resultPromise,
 				type: definition.type
 			});
@@ -137,6 +149,10 @@ export async function runWidgetsBrowserIntegration({
 			pages.delete(pagePath);
 		}
 	} finally {
+		for (const pending of pendingPageLoads.values()) {
+			pending.reject(new Error('Widgets browser harness stopped'));
+		}
+		pendingPageLoads.clear();
 		for (const pending of pendingResults.values()) {
 			pending.reject(new Error('Widgets browser harness stopped'));
 		}
@@ -150,7 +166,7 @@ export async function runWidgetsBrowserIntegration({
 	return results;
 }
 
-function createHarnessServer(pages, pendingResults) {
+function createHarnessServer(pages, pendingPageLoads, pendingResults) {
 	return createServer(async (request, response) => {
 		try {
 			const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
@@ -163,11 +179,14 @@ function createHarnessServer(pages, pendingResults) {
 			}
 			const browserCase = pages.get(requestUrl.pathname);
 			if (request.method === 'GET' && browserCase) {
+				const pendingPageLoad = pendingPageLoads.get(browserCase.nonce);
+				pendingPageLoads.delete(browserCase.nonce);
 				response.writeHead(200, {
 					'cache-control': 'no-store',
 					'content-type': 'text/html; charset=utf-8'
 				});
 				response.end(browserPage(browserCase));
+				pendingPageLoad?.resolve();
 				return;
 			}
 			const resultMatch = requestUrl.pathname.match(
@@ -315,10 +334,17 @@ function browserPage(browserCase) {
       function loadImage(url) {
         return new Promise(function (resolve, reject) {
           var image = new Image();
+          var timeoutId = setTimeout(function () {
+            reject(new Error('Timed out loading image: ' + url));
+          }, ${BROWSER_RESOURCE_TIMEOUT_MS});
           image.onload = function () {
+            clearTimeout(timeoutId);
             image.naturalWidth > 0 ? resolve() : reject(new Error('Image has no dimensions: ' + url));
           };
-          image.onerror = function () { reject(new Error('Image failed to load: ' + url)); };
+          image.onerror = function () {
+            clearTimeout(timeoutId);
+            reject(new Error('Image failed to load: ' + url));
+          };
           image.src = url;
         });
       }
@@ -493,9 +519,16 @@ function waitForBrowserResult(pendingResults, nonce) {
 	});
 }
 
+function waitForBrowserPageLoad(pendingPageLoads, nonce) {
+	return new Promise((resolve, reject) => {
+		pendingPageLoads.set(nonce, { resolve, reject });
+	});
+}
+
 async function runChromeCase({
 	browserExecutable,
 	url,
+	pageLoadPromise,
 	resultPromise,
 	type
 }) {
@@ -504,7 +537,6 @@ async function runChromeCase({
 	);
 	let browser;
 	let stderr = '';
-	let timeoutId;
 	try {
 		const args = [
 			'--headless=new',
@@ -536,20 +568,30 @@ async function runChromeCase({
 				);
 			});
 		});
-		const timeout = new Promise((_, reject) => {
-			timeoutId = setTimeout(
-				() =>
-					reject(
-						new Error(
-							`Timed out waiting for ${type} browser result${stderr ? `: ${stderr}` : ''}`
-						)
-					),
-				BROWSER_TIMEOUT_MS
-			);
+		const resultOutcome = resultPromise.then(result => ({ result }));
+		const navigationOutcome = await waitForBrowserPhase({
+			promises: [
+				pageLoadPromise.then(() => ({ pageLoaded: true })),
+				resultOutcome,
+				browserExit
+			],
+			timeoutMs: BROWSER_NAVIGATION_TIMEOUT_MS,
+			timeoutError: () =>
+				new Error(
+					`Timed out waiting for ${type} browser navigation${stderr ? `: ${stderr}` : ''}`
+				)
 		});
-		return await Promise.race([resultPromise, browserExit, timeout]);
+		if ('result' in navigationOutcome) return navigationOutcome.result;
+		const resultOutcomeAfterNavigation = await waitForBrowserPhase({
+			promises: [resultOutcome, browserExit],
+			timeoutMs: BROWSER_RESULT_TIMEOUT_MS,
+			timeoutError: () =>
+				new Error(
+					`Timed out waiting for ${type} browser result after navigation${stderr ? `: ${stderr}` : ''}`
+				)
+		});
+		return resultOutcomeAfterNavigation.result;
 	} finally {
-		if (timeoutId) clearTimeout(timeoutId);
 		await stopChild(browser);
 		await rm(profileDirectory, {
 			recursive: true,
@@ -557,6 +599,18 @@ async function runChromeCase({
 			maxRetries: 10,
 			retryDelay: 100
 		});
+	}
+}
+
+async function waitForBrowserPhase({ promises, timeoutMs, timeoutError }) {
+	let timeoutId;
+	try {
+		const timeout = new Promise((_, reject) => {
+			timeoutId = setTimeout(() => reject(timeoutError()), timeoutMs);
+		});
+		return await Promise.race([...promises, timeout]);
+	} finally {
+		if (timeoutId) clearTimeout(timeoutId);
 	}
 }
 
@@ -644,12 +698,24 @@ async function readJson(request, limit) {
 async function stopChild(child) {
 	if (!child || child.exitCode !== null || child.signalCode !== null)
 		return;
+	const exitPromise = new Promise(resolve => child.once('exit', resolve));
 	child.kill('SIGTERM');
 	const exited = await Promise.race([
-		new Promise(resolve => child.once('exit', resolve)),
+		exitPromise,
 		new Promise(resolve => setTimeout(() => resolve(false), 3000))
 	]);
 	if (exited !== false) return;
+	if (child.exitCode !== null || child.signalCode !== null) return;
 	child.kill('SIGKILL');
-	await new Promise(resolve => child.once('exit', resolve));
+	const killed = await Promise.race([
+		exitPromise,
+		new Promise(resolve => setTimeout(() => resolve(false), 3000))
+	]);
+	if (
+		killed === false &&
+		child.exitCode === null &&
+		child.signalCode === null
+	) {
+		throw new Error('Headless Chrome did not exit after SIGKILL');
+	}
 }
