@@ -42,6 +42,32 @@ WIDGETS_CANONICAL_CORE_TABLES=(
 	widget_runtime_daily_step_metrics
 )
 
+widgets_export_compose_release_identity() {
+	local revision="${1:-}"
+	[[ "$#" -eq 1 && "$revision" =~ ^[0-9a-f]{40}$ ]] || {
+		echo 'Widgets Compose release identity requires an exact lowercase Git SHA.' >&2
+		return 1
+	}
+
+	# Docker Compose interpolates the complete production model even for a
+	# targeted Widgets command. Unrelated service references are parse-only;
+	# Widgets deployment commands never operate on those services.
+	export APP_REVISION="$revision"
+	export APP_VERSION="git-$revision"
+	export MAINTENANCE_REVISION="$revision"
+	export MAINTENANCE_IMAGE="winwidget-maintenance:git-$revision"
+	export DATABASE_RESTORE_REVISION="$revision"
+	export DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"
+	export NOTIFICATION_DELIVERY_REVISION="$revision"
+	export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$revision"
+	export CAMPAIGNS_REVISION="$revision"
+	export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$revision"
+	export REPORTING_REVISION="$revision"
+	export REPORTING_IMAGE="winwidget-reporting:git-$revision"
+	export WIDGETS_REVISION="$revision"
+	export WIDGETS_IMAGE="winwidget-widgets:git-$revision"
+}
+
 widgets_canonical_provider_target_queue_names() {
 	local queue retry_index
 	for queue in "${WIDGETS_CANONICAL_PROVIDER_QUEUES[@]}"; do
@@ -491,6 +517,62 @@ widgets_guard_checkout_revision() {
 widgets_lifecycle_self_test() {
 	local table_name projection_queues projection_bindings provider_target_listing
 	local provider_polluted_listing provider_transition_listing
+	local revision='0123456789abcdef0123456789abcdef01234567'
+	(
+		local compose_file compose_release_key compose_release_value
+		local compose_release_count=0
+		unset APP_REVISION APP_VERSION \
+			MAINTENANCE_REVISION MAINTENANCE_IMAGE \
+			DATABASE_RESTORE_REVISION DATABASE_RESTORE_IMAGE \
+			NOTIFICATION_DELIVERY_REVISION NOTIFICATION_DELIVERY_IMAGE \
+			CAMPAIGNS_REVISION CAMPAIGNS_IMAGE \
+			REPORTING_REVISION REPORTING_IMAGE \
+			WIDGETS_REVISION WIDGETS_IMAGE
+		widgets_export_compose_release_identity "$revision"
+		[[ "$APP_REVISION" == "$revision" &&
+			"$APP_VERSION" == "git-$revision" &&
+			"$MAINTENANCE_REVISION" == "$revision" &&
+			"$MAINTENANCE_IMAGE" == "winwidget-maintenance:git-$revision" &&
+			"$DATABASE_RESTORE_REVISION" == "$revision" &&
+			"$DATABASE_RESTORE_IMAGE" == "winwidget-database-restore:git-$revision" &&
+			"$NOTIFICATION_DELIVERY_REVISION" == "$revision" &&
+			"$NOTIFICATION_DELIVERY_IMAGE" == "winwidget-notification-delivery:git-$revision" &&
+			"$CAMPAIGNS_REVISION" == "$revision" &&
+			"$CAMPAIGNS_IMAGE" == "winwidget-campaigns:git-$revision" &&
+			"$REPORTING_REVISION" == "$revision" &&
+			"$REPORTING_IMAGE" == "winwidget-reporting:git-$revision" &&
+			"$WIDGETS_REVISION" == "$revision" &&
+			"$WIDGETS_IMAGE" == "winwidget-widgets:git-$revision" ]]
+		compose_file="$(
+			cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+			pwd
+		)/deploy/docker-compose.prod.yml"
+		[[ -f "$compose_file" && ! -L "$compose_file" ]]
+		while IFS= read -r compose_release_key; do
+			[[ -n "$compose_release_key" ]] || continue
+			compose_release_count=$((compose_release_count + 1))
+			compose_release_value="${!compose_release_key-}"
+			case "$compose_release_key" in
+			*_REVISION) [[ "$compose_release_value" == "$revision" ]] ;;
+			*_IMAGE) [[ "$compose_release_value" == *":git-$revision" ]] ;;
+			*) return 1 ;;
+			esac
+		done < <(
+			grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^}]*\}' "$compose_file" |
+				sed -E 's/^\$\{//; s/:\?.*$//' |
+				grep -E '(_REVISION|_IMAGE)$' |
+				grep -Ev '_POSTGRES_IMAGE$' |
+				LC_ALL=C sort -u
+		)
+		((compose_release_count >= 10))
+	) || {
+		echo 'Widgets lifecycle self-test did not derive the complete Compose release identity.' >&2
+		return 1
+	}
+	if widgets_export_compose_release_identity "${revision}x" >/dev/null 2>&1; then
+		echo 'Widgets lifecycle self-test accepted a non-SHA Compose release identity.' >&2
+		return 1
+	fi
 	[[ "${#WIDGETS_CANONICAL_SOURCE_FREEZE_SERVICES[@]}" == '1' &&
 		"${WIDGETS_CANONICAL_SOURCE_FREEZE_SERVICES[0]}" == 'integration-worker' ]]
 	[[ "${#WIDGETS_CANONICAL_CORE_TABLES[@]}" == '18' ]]

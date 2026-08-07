@@ -253,16 +253,7 @@ assert_checkout_and_environment() {
 }
 
 export_image_identity() {
-	export APP_REVISION="$deploy_revision"
-	export APP_VERSION="git-$deploy_revision"
-	export MAINTENANCE_REVISION="$deploy_revision"
-	export MAINTENANCE_IMAGE="winwidget-maintenance:git-$deploy_revision"
-	export DATABASE_RESTORE_REVISION="$deploy_revision"
-	export DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$deploy_revision"
-	export REPORTING_REVISION="$deploy_revision"
-	export REPORTING_IMAGE="winwidget-reporting:git-$deploy_revision"
-	export WIDGETS_REVISION="$deploy_revision"
-	export WIDGETS_IMAGE="winwidget-widgets:git-$deploy_revision"
+	widgets_export_compose_release_identity "$deploy_revision"
 	widgets_backup_file="$artifact_root/widgets-post-cutover-$deploy_revision.dump"
 	widgets_backup_sha_file="$artifact_root/widgets-post-cutover-$deploy_revision.sha256"
 }

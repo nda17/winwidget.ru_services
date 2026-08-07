@@ -167,8 +167,7 @@ expected_revision="${EXPECTED_REVISION:-$deploy_revision}"
 	"$(git -C "$server_root" branch --show-current)" == 'prod' &&
 	-z "$(git -C "$server_root" status --porcelain --untracked-files=all)" ]] ||
 	fail 'Widgets deploy requires a clean protected prod checkout at EXPECTED_REVISION.'
-export WIDGETS_REVISION="$deploy_revision"
-export WIDGETS_IMAGE="winwidget-widgets:git-$deploy_revision"
+widgets_export_compose_release_identity "$deploy_revision"
 
 for key in WIDGETS_DATABASE_URL WIDGETS_MIGRATION_DATABASE_URL WIDGETS_BACKUP_URL \
 	WIDGETS_POSTGRES_IMAGE WIDGETS_POSTGRES_PORT WIDGETS_POSTGRES_DATA_VOLUME \
