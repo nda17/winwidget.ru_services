@@ -16,13 +16,22 @@ FROM base AS deps
 COPY apps/widgets/package.json apps/widgets/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
+FROM deps AS assets
+
+COPY scripts/build-widgets.mjs scripts/check-widgets.mjs ./scripts/
+COPY widgets-src ./widgets-src
+COPY public/email/logo.png ./public/email/logo.png
+
+RUN node scripts/build-widgets.mjs \
+	&& node scripts/check-widgets.mjs
+
 FROM base AS builder
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/widgets/package.json apps/widgets/pnpm-lock.yaml apps/widgets/tsconfig.json apps/widgets/tsconfig.build.json apps/widgets/nest-cli.json ./
 COPY apps/widgets/prisma ./prisma
 COPY apps/widgets/src ./src
-COPY public/widgets ./public/widgets
+COPY --from=assets /app/public/widgets ./public/widgets
 
 RUN pnpm run prisma:generate \
 	&& pnpm run build \
