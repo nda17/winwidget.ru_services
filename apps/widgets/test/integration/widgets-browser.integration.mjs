@@ -551,7 +551,12 @@ async function runChromeCase({
 	} finally {
 		if (timeoutId) clearTimeout(timeoutId);
 		await stopChild(browser);
-		await rm(profileDirectory, { recursive: true, force: true });
+		await rm(profileDirectory, {
+			recursive: true,
+			force: true,
+			maxRetries: 10,
+			retryDelay: 100
+		});
 	}
 }
 
