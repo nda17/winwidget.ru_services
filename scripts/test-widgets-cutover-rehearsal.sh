@@ -71,7 +71,8 @@ validate_contract() {
 		"$snapshot_exporter_text" == *"version: '0'"* &&
 		"$snapshot_exporter_text" == *"sourceSequence: '0'"* ]] ||
 		fail 'Widgets historical projection snapshot baseline contract is incomplete.'
-	node "$snapshot_exporter" --self-test >/dev/null
+	# Keep this pre-install contract dependency-free. The workflow runs the
+	# exporter's Prisma-backed self-test after frozen install and client generation.
 	case "$mode" in
 	--self-test | --rehearsal | --verify-dump) ;;
 	*) fail 'Usage: test-widgets-cutover-rehearsal.sh [--self-test|--rehearsal|--verify-dump]' ;;
