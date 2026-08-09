@@ -62,17 +62,17 @@ readonly -a legacy_provider_drain_queue_contract=(
 	'winwidget.lead-integration.webhook.retry-v2.1|0'
 	'winwidget.lead-integration.webhook.retry-v2.2|0'
 	'winwidget.lead-integration.webhook.retry-v2.3|0'
-	'winwidget.lead-integration.webhook.dead-letter|0'
+	'winwidget.lead-integration.webhook.dead-letter|1'
 	'winwidget.lead-integration.bitrix24|1'
 	'winwidget.lead-integration.bitrix24.retry-v2.1|0'
 	'winwidget.lead-integration.bitrix24.retry-v2.2|0'
 	'winwidget.lead-integration.bitrix24.retry-v2.3|0'
-	'winwidget.lead-integration.bitrix24.dead-letter|0'
+	'winwidget.lead-integration.bitrix24.dead-letter|1'
 	'winwidget.lead-integration.amo-crm|1'
 	'winwidget.lead-integration.amo-crm.retry-v2.1|0'
 	'winwidget.lead-integration.amo-crm.retry-v2.2|0'
 	'winwidget.lead-integration.amo-crm.retry-v2.3|0'
-	'winwidget.lead-integration.amo-crm.dead-letter|0'
+	'winwidget.lead-integration.amo-crm.dead-letter|1'
 )
 
 source_frozen=false
@@ -1049,17 +1049,116 @@ provider_queues_are_ready_for_source_freeze() {
 	fi
 }
 
+report_widgets_source_drain_blockers() {
+	local pending="$1"
+	local listing="$2"
+	local queue state expected_consumers contract allowed
+	local ready unacknowledged consumers
+	[[ "$pending" =~ ^[0-9]+$ ]] || {
+		echo 'Widgets source drain blocker scope=core-outbox pending=invalid' >&2
+		return 0
+	}
+	if [[ "$pending" != '0' ]]; then
+		printf 'Widgets source drain blocker scope=core-outbox pending=%s\n' \
+			"$pending" >&2
+	fi
+	for queue in "${reporting_drain_queues[@]}"; do
+		state="$(awk -F '\t' -v queue="$queue" '
+      $1 == queue { ready = $2; unacknowledged = $3; found += 1 }
+      END {
+        if (found != 1) printf "identity-count:%d", found
+        else printf "%s|%s", ready, unacknowledged
+      }
+    ' <<<"$listing")"
+		[[ "$state" == '0|0' ]] ||
+			printf 'Widgets source drain blocker scope=reporting queue=%s actual=%s expected=0|0\n' \
+				"$queue" "$state" >&2
+	done
+	if [[ "$forward_only" == 'true' ]]; then
+		allowed="$({
+			widgets_canonical_provider_target_queue_names
+			widgets_canonical_provider_legacy_queue_names
+		} | LC_ALL=C sort -u)"
+		while IFS=$'\t' read -r queue ready unacknowledged consumers; do
+			[[ -n "$queue" ]] || continue
+			if ! grep -Fqx -- "$queue" <<<"$allowed"; then
+				printf 'Widgets source drain blocker scope=provider-transition queue=%s actual=unexpected expected=absent\n' \
+					"$queue" >&2
+				continue
+			fi
+			state="$(awk -F '\t' -v queue="$queue" '
+        $1 == queue {
+          ready = $2
+          unacknowledged = $3
+          consumers = $4
+          found += 1
+        }
+        END {
+          if (found != 1) printf "identity-count:%d", found
+          else printf "%s|%s|%s", ready, unacknowledged, consumers
+        }
+      ' <<<"$listing")"
+			[[ "$state" == '0|0|0' ]] ||
+				printf 'Widgets source drain blocker scope=provider-transition queue=%s actual=%s expected=0|0|0\n' \
+					"$queue" "$state" >&2
+		done < <(awk -F '\t' '
+      $1 ~ /^winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.|$)/ { print }
+    ' <<<"$listing" | LC_ALL=C sort -u)
+		return 0
+	fi
+	for contract in "${legacy_provider_drain_queue_contract[@]}"; do
+		queue="${contract%|*}"
+		expected_consumers="${contract##*|}"
+		state="$(awk -F '\t' -v queue="$queue" '
+      $1 == queue {
+        ready = $2
+        unacknowledged = $3
+        consumers = $4
+        found += 1
+      }
+      END {
+        if (found != 1) printf "identity-count:%d", found
+        else printf "%s|%s|%s", ready, unacknowledged, consumers
+      }
+    ' <<<"$listing")"
+		[[ "$state" == "0|0|$expected_consumers" ]] ||
+			printf 'Widgets source drain blocker scope=provider queue=%s actual=%s expected=0|0|%s\n' \
+				"$queue" "$state" "$expected_consumers" >&2
+	done
+	return 0
+}
+
 wait_for_widgets_source_drain() {
+	local phase="$1"
 	local attempt
 	local pending
 	local listing
+	local outbox_state reporting_state provider_state
+	[[ "$phase" == 'pre-fence' || "$phase" == 'post-fence' ]] || return 1
 	for ((attempt = 1; attempt <= DRAIN_ATTEMPTS; attempt++)); do
 		pending="$(pending_widgets_outbox_count)"
+		[[ "$pending" =~ ^[0-9]+$ ]] ||
+			fail 'Core Widgets Outbox drain count is invalid.'
 		listing="$(rabbitmq_queue_listing)"
-		if [[ "$pending" == '0' ]] &&
-			reporting_widget_queues_are_drained "$listing" &&
-			provider_queues_are_ready_for_source_freeze "$listing"; then
+		outbox_state=blocked
+		reporting_state=blocked
+		provider_state=blocked
+		[[ "$pending" == '0' ]] && outbox_state=ready
+		reporting_widget_queues_are_drained "$listing" && reporting_state=ready
+		provider_queues_are_ready_for_source_freeze "$listing" &&
+			provider_state=ready
+		if [[ "$outbox_state" == 'ready' &&
+			"$reporting_state" == 'ready' &&
+			"$provider_state" == 'ready' ]]; then
 			return 0
+		fi
+		if ((attempt == 1 || attempt % 15 == 0 || attempt == DRAIN_ATTEMPTS)); then
+			printf 'Widgets source drain waiting phase=%s attempt=%d/%d core-outbox=%s reporting=%s provider=%s\n' \
+				"$phase" "$attempt" "$DRAIN_ATTEMPTS" "$outbox_state" \
+				"$reporting_state" "$provider_state"
+		fi
+		if ((attempt == DRAIN_ATTEMPTS)); then
+			report_widgets_source_drain_blockers "$pending" "$listing"
 		fi
 		sleep "$DRAIN_INTERVAL"
 	done
@@ -1112,11 +1211,16 @@ freeze_and_drain_source() {
 		! -e "$snapshot_file" && ! -L "$snapshot_file" ]]; then
 		assert_source_services_running
 	fi
+	wait_for_widgets_source_drain pre-fence ||
+		fail 'Core Widgets Outbox, Reporting or provider queues did not drain before the write fence.'
 	install_core_widgets_write_fence
-	wait_for_widgets_source_drain ||
-		fail 'Core Widgets Outbox, Reporting or provider queues did not drain cleanly.'
-	stop_services_gracefully "${WIDGETS_CANONICAL_SOURCE_FREEZE_SERVICES[@]}"
+	wait_for_widgets_source_drain post-fence ||
+		fail 'Core Widgets Outbox, Reporting or provider queues did not remain drained after the write fence.'
+	# Set the recovery intent before Docker receives SIGTERM. If Compose or the
+	# post-stop inspection fails midway, pre-forward recovery must still start
+	# the complete legacy source set idempotently.
 	legacy_integration_worker_stopped=true
+	stop_services_gracefully "${WIDGETS_CANONICAL_SOURCE_FREEZE_SERVICES[@]}"
 	listing="$(rabbitmq_queue_listing)"
 	if [[ "$forward_only" != 'true' ]]; then
 		legacy_provider_queues_are_drained "$listing" 0 ||
@@ -1687,6 +1791,18 @@ wait_for_url_revision() {
 	return 1
 }
 
+wait_for_url_ready() {
+	local url="$1"
+	local attempt
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		if curl -fsS --connect-timeout 2 --max-time 5 "$url" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+	return 1
+}
+
 verify_running_service_revision() {
 	local service="$1"
 	local revision="$2"
@@ -2037,8 +2153,8 @@ deploy_forward_runtime() {
 	done
 
 	compose_target up -d --no-deps --no-build --force-recreate api-gateway
-	wait_for_url_revision 'http://127.0.0.1:4100/health/ready' "$deploy_revision" ||
-		fail 'API Gateway did not become ready at the cutover revision.'
+	wait_for_url_ready 'http://127.0.0.1:4100/health/ready' ||
+		fail 'API Gateway did not become ready after the cutover rollout.'
 	verify_running_service_revision api-gateway "$deploy_revision" ||
 		fail 'API Gateway revision/restart verification failed.'
 	verify_core_worker_ownership

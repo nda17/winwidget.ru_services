@@ -39,6 +39,7 @@ fail() {
 }
 
 validate_contract() {
+	local cutover_script cutover_text snapshot_exporter snapshot_exporter_text
 	[[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$ &&
 		"$run_id" != '.' && "$run_id" != '..' ]] ||
 		fail 'WIDGETS_REHEARSAL_RUN_ID is unsafe.'
@@ -49,6 +50,28 @@ validate_contract() {
 	[[ -f "$server_root/apps/widgets/prisma/schema.prisma" &&
 		-f "$server_root/apps/widgets/prisma/migrations/20260804000000_init_widgets/migration.sql" ]] ||
 		fail 'Widgets Prisma migration foundation is missing.'
+	cutover_script="$server_root/scripts/widgets-cutover-production.sh"
+	[[ -f "$cutover_script" && ! -L "$cutover_script" ]] ||
+		fail 'Widgets production cutover script is missing or unsafe.'
+	cutover_text="$(<"$cutover_script")"
+	[[ "$(grep -Fc -- '.dead-letter|1' "$cutover_script")" == '3' &&
+		"$(grep -Fc -- '.dead-letter|0' "$cutover_script")" == '0' &&
+		"$cutover_text" == *'wait_for_widgets_source_drain pre-fence'* &&
+		"$cutover_text" == *'wait_for_widgets_source_drain post-fence'* &&
+		"$cutover_text" == *"wait_for_url_ready 'http://127.0.0.1:4100/health/ready'"* &&
+		"$cutover_text" == *'verify_running_service_revision api-gateway "$deploy_revision"'* &&
+		"$cutover_text" == *'Widgets source drain blocker scope=provider'* ]] ||
+		fail 'Widgets source drain consumer and observability contract is incomplete.'
+	snapshot_exporter="$server_root/scripts/export-widgets-cutover-snapshot.mjs"
+	[[ -f "$snapshot_exporter" && ! -L "$snapshot_exporter" ]] ||
+		fail 'Widgets snapshot exporter is missing or unsafe.'
+	snapshot_exporter_text="$(<"$snapshot_exporter")"
+	[[ "$snapshot_exporter_text" == *'sourceOccurredAt: sourceExportedAt'* &&
+		"$snapshot_exporter_text" == *'.filter(Boolean)'* &&
+		"$snapshot_exporter_text" == *"version: '0'"* &&
+		"$snapshot_exporter_text" == *"sourceSequence: '0'"* ]] ||
+		fail 'Widgets historical projection snapshot baseline contract is incomplete.'
+	node "$snapshot_exporter" --self-test >/dev/null
 	case "$mode" in
 	--self-test | --rehearsal | --verify-dump) ;;
 	*) fail 'Usage: test-widgets-cutover-rehearsal.sh [--self-test|--rehearsal|--verify-dump]' ;;

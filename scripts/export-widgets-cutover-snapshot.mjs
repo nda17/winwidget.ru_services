@@ -135,11 +135,12 @@ async function exportSnapshot(transaction) {
 		'billing.subscription',
 		subscriptions.map(subscription => subscription.id)
 	);
-	const latestOccurredAt =
-		await loadLatestProjectionOccurrence(transaction);
-
 	const ownerProjections = users.map(user => {
-		const anchor = requireAnchor(identityAnchors, user.id, 'OWNER_ANCHOR');
+		const anchor = resolveSnapshotAnchor(
+			identityAnchors,
+			user.id,
+			'OWNER_ANCHOR'
+		);
 		const state = identityState(user);
 		const tombstoned = user.deletedAt !== null;
 		return {
@@ -155,25 +156,25 @@ async function exportSnapshot(transaction) {
 				tombstoned,
 				aggregateVersion: anchor.version,
 				sourceSequence: anchor.sourceSequence,
-				sourceOccurredAt:
-					latestOccurredAt.get(`identity.user\u0000${user.id}`) ||
-					user.updatedAt
+				sourceOccurredAt: sourceExportedAt
 			},
-			anchor: {
-				recordType: 'aggregate-version',
-				row: {
-					aggregateType: 'core.identity.user',
-					aggregateId: user.id,
-					version: anchor.version,
-					sourceSequence: anchor.sourceSequence,
-					stateHash: projectionStateHash(false, state)
-				}
-			}
+			anchor: anchor.persisted
+				? {
+						recordType: 'aggregate-version',
+						row: {
+							aggregateType: 'core.identity.user',
+							aggregateId: user.id,
+							version: anchor.version,
+							sourceSequence: anchor.sourceSequence,
+							stateHash: projectionStateHash(false, state)
+						}
+					}
+				: null
 		};
 	});
 
 	const entitlementProjections = subscriptions.map(subscription => {
-		const anchor = requireAnchor(
+		const anchor = resolveSnapshotAnchor(
 			entitlementAnchors,
 			subscription.id,
 			'ENTITLEMENT_ANCHOR'
@@ -201,30 +202,29 @@ async function exportSnapshot(transaction) {
 				tombstoned: false,
 				aggregateVersion: anchor.version,
 				sourceSequence: anchor.sourceSequence,
-				sourceOccurredAt:
-					latestOccurredAt.get(
-						`billing.subscription\u0000${subscription.id}`
-					) || subscription.updatedAt,
+				sourceOccurredAt: sourceExportedAt,
 				sourceCreatedAt: subscription.createdAt,
 				sourceUpdatedAt: subscription.updatedAt
 			},
-			anchor: {
-				recordType: 'aggregate-version',
-				row: {
-					aggregateType: 'core.billing.subscription',
-					aggregateId: subscription.id,
-					version: anchor.version,
-					sourceSequence: anchor.sourceSequence,
-					stateHash: projectionStateHash(false, state)
-				}
-			}
+			anchor: anchor.persisted
+				? {
+						recordType: 'aggregate-version',
+						row: {
+							aggregateType: 'core.billing.subscription',
+							aggregateId: subscription.id,
+							version: anchor.version,
+							sourceSequence: anchor.sourceSequence,
+							stateHash: projectionStateHash(false, state)
+						}
+					}
+				: null
 		};
 	});
 
 	const widgetCounts = await loadWidgetCounts(transaction);
 	const usageCounters = subscriptions
 		.map(subscription => {
-			const anchor = requireAnchor(
+			const anchor = resolveSnapshotAnchor(
 				entitlementAnchors,
 				subscription.id,
 				'USAGE_ENTITLEMENT_ANCHOR'
@@ -292,11 +292,13 @@ async function exportSnapshot(transaction) {
 		...ownerProjections.map(record => record.anchor),
 		...entitlementProjections.map(record => record.anchor),
 		...widgetAggregateVersions
-	].sort(
-		(left, right) =>
-			left.row.aggregateType.localeCompare(right.row.aggregateType) ||
-			left.row.aggregateId.localeCompare(right.row.aggregateId)
-	);
+	]
+		.filter(Boolean)
+		.sort(
+			(left, right) =>
+				left.row.aggregateType.localeCompare(right.row.aggregateType) ||
+				left.row.aggregateId.localeCompare(right.row.aggregateId)
+		);
 
 	Object.assign(counts, {
 		ownerProjections: ownerProjections.length,
@@ -478,33 +480,6 @@ async function loadProjectionAnchors(transaction, aggregateType, ids) {
 	);
 }
 
-async function loadLatestProjectionOccurrence(transaction) {
-	const rows = await transaction.$queryRaw`
-		SELECT DISTINCT ON (
-			"payload"->>'eventType',
-			"payload"->>'aggregateId'
-		)
-			"payload"->>'eventType' AS "eventType",
-			"payload"->>'aggregateId' AS "aggregateId",
-			"payload"->>'occurredAt' AS "occurredAt"
-		FROM "outbox_events"
-		WHERE "event_type" IN (
-			${'identity.user.changed.v1'},
-			${'billing.subscription.changed.v1'}
-		)
-		ORDER BY
-			"payload"->>'eventType',
-			"payload"->>'aggregateId',
-			("payload"->>'aggregateVersion')::BIGINT DESC
-	`;
-	return new Map(
-		rows.map(row => [
-			`${row.eventType === 'identity.user.changed.v1' ? 'identity.user' : 'billing.subscription'}\u0000${row.aggregateId}`,
-			new Date(row.occurredAt)
-		])
-	);
-}
-
 async function loadWidgetCounts(transaction) {
 	const counts = new Map();
 	for (const [, table] of widgetSources) {
@@ -644,13 +619,18 @@ function projectionStateHash(tombstone, state) {
 		.digest('hex');
 }
 
-function requireAnchor(anchors, id, code) {
+function resolveSnapshotAnchor(anchors, id, code) {
 	const anchor = anchors.get(id);
-	if (!anchor)
-		throw new SnapshotError(code, 'Required projection anchor is missing');
+	if (!anchor) {
+		return {
+			version: '0',
+			sourceSequence: '0',
+			persisted: false
+		};
+	}
 	assertDecimal(anchor.version, false, code);
-	assertDecimal(anchor.sourceSequence, true, code);
-	return anchor;
+	assertDecimal(anchor.sourceSequence, false, code);
+	return { ...anchor, persisted: true };
 }
 
 function deterministicUuid(value) {
@@ -841,6 +821,41 @@ function runSelfTest() {
 		throw new Error(
 			'Widgets raw SQL identifier allowlist is not fail-closed'
 		);
+	}
+	const historicalAnchor = resolveSnapshotAnchor(
+		new Map(),
+		'historical-id',
+		'HISTORICAL_ANCHOR'
+	);
+	const persistedAnchor = resolveSnapshotAnchor(
+		new Map([['persisted-id', { version: '7', sourceSequence: '19' }]]),
+		'persisted-id',
+		'PERSISTED_ANCHOR'
+	);
+	if (
+		historicalAnchor.version !== '0' ||
+		historicalAnchor.sourceSequence !== '0' ||
+		historicalAnchor.persisted ||
+		persistedAnchor.version !== '7' ||
+		persistedAnchor.sourceSequence !== '19' ||
+		!persistedAnchor.persisted
+	) {
+		throw new Error(
+			'Widgets historical projection anchor contract drifted'
+		);
+	}
+	let rejectedMixedAnchor = false;
+	try {
+		resolveSnapshotAnchor(
+			new Map([['mixed-id', { version: '1', sourceSequence: '0' }]]),
+			'mixed-id',
+			'MIXED_ANCHOR'
+		);
+	} catch (error) {
+		rejectedMixedAnchor = error instanceof SnapshotError;
+	}
+	if (!rejectedMixedAnchor) {
+		throw new Error('Widgets mixed projection anchor is not rejected');
 	}
 	process.stdout.write(
 		'Widgets snapshot raw SQL contract self-test passed.\n'

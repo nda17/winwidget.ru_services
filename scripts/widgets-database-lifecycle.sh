@@ -117,7 +117,7 @@ widgets_rabbitmq_provider_namespace_is_exact() {
 
 widgets_rabbitmq_provider_transition_is_drained() {
 	[[ $# == 1 ]] || return 1
-	local listing="$1" allowed queue count allowed_count
+	local listing="$1" allowed queue count allowed_count seen=''
 	allowed="$({
 		widgets_canonical_provider_target_queue_names
 		widgets_canonical_provider_legacy_queue_names
@@ -128,6 +128,10 @@ widgets_rabbitmq_provider_transition_is_drained() {
 	while IFS=$'\t' read -r queue ready unacknowledged consumers; do
 		[[ -n "$queue" ]] || continue
 		grep -Fqx -- "$queue" <<<"$allowed" || return 1
+		if [[ -n "$seen" ]] && grep -Fqx -- "$queue" <<<"$seen"; then
+			return 1
+		fi
+		seen="${seen}${seen:+$'\n'}${queue}"
 		[[ "$ready|$unacknowledged|$consumers" == '0|0|0' ]] || return 1
 		count=$((count + 1))
 	done < <(awk -F '\t' '
@@ -637,6 +641,8 @@ widgets_lifecycle_self_test() {
 		"${provider_transition_listing/webhook.retry.1$'\t0\t0\t0'/webhook.retry.1$'\t0\t0\t1'}"
 	! widgets_rabbitmq_provider_transition_is_drained \
 		"$provider_transition_listing"$'\nwinwidget.lead-integration.webhook.retry-v3.1\t0\t0\t0'
+	! widgets_rabbitmq_provider_transition_is_drained \
+		"$provider_transition_listing"$'\nwinwidget.lead-integration.webhook.retry.1\t0\t0\t0'
 	widgets_cutover_provider_replacement_is_safe true true true
 	! widgets_cutover_provider_replacement_is_safe false true true
 	! widgets_cutover_provider_replacement_is_safe true false true
