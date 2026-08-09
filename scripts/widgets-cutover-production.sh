@@ -507,7 +507,7 @@ const amqp = require("amqplib");
     clientProperties: { connection_name: "winwidget-widgets-cutover-dark-probe" },
   });
   const channel = await connection.createConfirmChannel();
-  await channel.checkQueue("winwidget.lead-integration.webhook");
+  await channel.checkQueue("winwidget.widgets.identity-user");
   await channel.close();
   await connection.close();
   process.stdout.write("Widgets RabbitMQ credentials verified\n");
@@ -840,7 +840,12 @@ rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
 }
 
 assert_widgets_rabbitmq_topology() {
-	compose_target run --rm --no-deps --entrypoint node widgets-service -e '
+	local topology_scope="${1:-all}"
+	[[ "$#" -le 1 && ( "$topology_scope" == 'all' || "$topology_scope" == 'projections' ) ]] ||
+		fail 'Widgets RabbitMQ topology scope is invalid.'
+	compose_target run --rm --no-deps \
+		-e "WIDGETS_RABBITMQ_TOPOLOGY_SCOPE=$topology_scope" \
+		--entrypoint node widgets-service -e '
 const { WidgetsRabbitMqService } = require("./dist/src/messaging/widgets-rabbitmq.service.js");
 const config = {
   get(key) {
@@ -866,7 +871,7 @@ const runtime = {
     await service.onApplicationShutdown();
   }
 })().then(() => {
-  process.stdout.write("Widgets RabbitMQ topology asserted without consumers\n");
+  process.stdout.write(`Widgets RabbitMQ ${process.env.WIDGETS_RABBITMQ_TOPOLOGY_SCOPE} topology asserted without consumers\n`);
 }).catch(() => {
   process.stderr.write("Widgets RabbitMQ topology assertion failed\n");
   process.exitCode = 1;
@@ -938,7 +943,7 @@ legacy_provider_queues_are_drained() {
 
 replace_legacy_provider_rabbitmq_topology() {
 	local listing rabbitmq_vhost queue queue_count
-	local -a legacy_queues=()
+	local -a transition_queues=()
 	widgets_cutover_provider_replacement_is_safe \
 		"$forward_only" "$legacy_integration_worker_stopped" \
 		"$legacy_core_topology_owner_stopped" ||
@@ -946,11 +951,14 @@ replace_legacy_provider_rabbitmq_topology() {
 	listing="$(rabbitmq_queue_listing)"
 	widgets_rabbitmq_provider_transition_is_drained "$listing" ||
 		fail 'Provider topology replacement requires the exact empty and unused legacy/Widgets transition namespace.'
-	mapfile -t legacy_queues < <(widgets_canonical_provider_legacy_queue_names)
-	[[ "${#legacy_queues[@]}" == '15' ]] ||
-		fail 'Legacy provider queue manifest is incomplete.'
+	mapfile -t transition_queues < <({
+		widgets_canonical_provider_target_queue_names
+		widgets_canonical_provider_legacy_queue_names
+	} | LC_ALL=C sort -u)
+	[[ "${#transition_queues[@]}" == '24' ]] ||
+		fail 'Provider transition queue manifest is incomplete.'
 	rabbitmq_vhost="$(get_env_value RABBITMQ_VHOST)"
-	for queue in "${legacy_queues[@]}"; do
+	for queue in "${transition_queues[@]}"; do
 		queue_count="$(awk -F '\t' -v queue="$queue" \
 			'$1 == queue { count += 1 } END { print count + 0 }' <<<"$listing")"
 		[[ "$queue_count" == '0' || "$queue_count" == '1' ]] ||
@@ -964,7 +972,7 @@ replace_legacy_provider_rabbitmq_topology() {
 	listing="$(rabbitmq_queue_listing)"
 	widgets_rabbitmq_provider_namespace_is_exact "$listing" ||
 		fail 'Widgets provider namespace is not exact after replacing legacy RabbitMQ topology.'
-	echo 'Legacy provider main/DLQ/retry-v2 topology was replaced by the exact Widgets-owned namespace.'
+	echo 'Legacy provider main/DLQ/retry/retry-v2 topology was replaced by the exact Widgets-owned namespace.'
 }
 
 wait_for_core_topology_owner_restart() {
@@ -1020,6 +1028,15 @@ assert_source_services_running() {
 	done
 }
 
+provider_queues_are_ready_for_source_freeze() {
+	local listing="$1"
+	if [[ "$forward_only" == 'true' ]]; then
+		widgets_rabbitmq_provider_transition_is_drained "$listing"
+	else
+		legacy_provider_queues_are_drained "$listing" 1
+	fi
+}
+
 wait_for_widgets_source_drain() {
 	local attempt
 	local pending
@@ -1029,7 +1046,7 @@ wait_for_widgets_source_drain() {
 		listing="$(rabbitmq_queue_listing)"
 		if [[ "$pending" == '0' ]] &&
 			reporting_widget_queues_are_drained "$listing" &&
-			legacy_provider_queues_are_drained "$listing" 1; then
+			provider_queues_are_ready_for_source_freeze "$listing"; then
 			return 0
 		fi
 		sleep "$DRAIN_INTERVAL"
@@ -1089,8 +1106,12 @@ freeze_and_drain_source() {
 	stop_services_gracefully "${WIDGETS_CANONICAL_SOURCE_FREEZE_SERVICES[@]}"
 	legacy_integration_worker_stopped=true
 	listing="$(rabbitmq_queue_listing)"
-	legacy_provider_queues_are_drained "$listing" 0 ||
-		fail 'Legacy provider queues changed while their Core consumer stopped.'
+	if [[ "$forward_only" != 'true' ]]; then
+		legacy_provider_queues_are_drained "$listing" 0 ||
+			fail 'Legacy provider queues changed while their Core consumer stopped.'
+	fi
+	widgets_rabbitmq_provider_transition_is_drained "$listing" ||
+		fail 'Historical provider queues are not empty, unused and safe for replacement.'
 	[[ "$(pending_widgets_outbox_count)" == '0' ]] ||
 		fail 'A Widgets-owned Core Outbox event appeared after the write fence.'
 	listing="$(rabbitmq_queue_listing)"
@@ -2038,7 +2059,7 @@ main() {
 	validate_widgets_database_urls
 	ensure_rabbitmq_ready
 	provision_widgets_rabbitmq_identity
-	assert_widgets_rabbitmq_topology
+	assert_widgets_rabbitmq_topology projections
 	verify_widgets_projection_topology
 	prepare_widgets_postgres
 	provision_widgets_database_roles

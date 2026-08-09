@@ -23,6 +23,7 @@ import {
 	WIDGETS_EVENTS_EXCHANGE,
 	WIDGETS_MANUAL_RETRY_EXCHANGE,
 	WIDGETS_CONSUMER_KINDS,
+	WIDGETS_PROJECTION_KINDS,
 	WidgetsConsumerKind,
 	WIDGETS_QUEUE_NAMES,
 	WIDGETS_RETRY_DELAYS_MS,
@@ -74,6 +75,9 @@ export class WidgetsRabbitMqService
 		const assertTopology = this.parseAssertTopology(
 			this.config.get<string | boolean>('RABBITMQ_ASSERT_TOPOLOGY')
 		);
+		const topologyKinds = this.parseTopologyKinds(
+			this.config.get<string>('WIDGETS_RABBITMQ_TOPOLOGY_SCOPE')
+		);
 		this.connection = connect([url], {
 			heartbeatIntervalInSeconds: 10,
 			reconnectTimeInSeconds: 5,
@@ -100,7 +104,9 @@ export class WidgetsRabbitMqService
 			setup: async (channel: ConfirmChannel) => {
 				this.topologyReady = false;
 				this.registerReturnHandler(channel);
-				if (assertTopology) await this.assertTopology(channel);
+				if (assertTopology) {
+					await this.assertTopology(channel, topologyKinds);
+				}
 				this.topologyReady = true;
 			}
 		});
@@ -271,7 +277,10 @@ export class WidgetsRabbitMqService
 		if (!closed) this.logger.warn('RabbitMQ shutdown exceeded 10000ms');
 	}
 
-	private async assertTopology(channel: ConfirmChannel): Promise<void> {
+	private async assertTopology(
+		channel: ConfirmChannel,
+		consumerKinds: readonly WidgetsConsumerKind[]
+	): Promise<void> {
 		// Shared exchanges are deployment-owned. The Widgets credentials own only
 		// service-local retry/manual queues and bindings.
 		await channel.assertExchange(WIDGETS_RETRY_EXCHANGE, 'direct', {
@@ -280,7 +289,7 @@ export class WidgetsRabbitMqService
 		await channel.assertExchange(WIDGETS_MANUAL_RETRY_EXCHANGE, 'direct', {
 			durable: true
 		});
-		for (const kind of WIDGETS_CONSUMER_KINDS) {
+		for (const kind of consumerKinds) {
 			const queue = WIDGETS_QUEUE_NAMES[kind];
 			await channel.assertQueue(queue, { durable: true });
 			await channel.bindQueue(
@@ -315,6 +324,24 @@ export class WidgetsRabbitMqService
 				);
 			}
 		}
+	}
+
+	private parseTopologyKinds(
+		value: string | undefined
+	): readonly WidgetsConsumerKind[] {
+		const scope = value?.trim() || 'all';
+		if (scope === 'all') return WIDGETS_CONSUMER_KINDS;
+		if (scope === 'projections') {
+			if (this.runtime.workerEnabled || this.runtime.publisherEnabled) {
+				throw new Error(
+					'Projection-only Widgets RabbitMQ topology is forbidden for worker or publisher runtimes'
+				);
+			}
+			return WIDGETS_PROJECTION_KINDS;
+		}
+		throw new Error(
+			'WIDGETS_RABBITMQ_TOPOLOGY_SCOPE must be all or projections'
+		);
 	}
 
 	private requestConsumerRecovery(kind: WidgetsConsumerKind): void {

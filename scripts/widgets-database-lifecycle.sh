@@ -117,17 +117,13 @@ widgets_rabbitmq_provider_namespace_is_exact() {
 
 widgets_rabbitmq_provider_transition_is_drained() {
 	[[ $# == 1 ]] || return 1
-	local listing="$1" allowed target_queue queue state count
+	local listing="$1" allowed queue count allowed_count
 	allowed="$({
 		widgets_canonical_provider_target_queue_names
 		widgets_canonical_provider_legacy_queue_names
 	} | LC_ALL=C sort -u)" || return 1
-	while IFS= read -r target_queue; do
-		state="$(awk -F '\t' -v queue="$target_queue" \
-			'$1 == queue { print $2 "|" $3 "|" $4; found += 1 } END { exit(found == 1 ? 0 : 1) }' \
-			<<<"$listing")" || return 1
-		[[ "$state" == '0|0|0' ]] || return 1
-	done < <(widgets_canonical_provider_target_queue_names)
+	allowed_count="$(wc -l <<<"$allowed" | tr -d '[:space:]')" || return 1
+	[[ "$allowed_count" == '24' ]] || return 1
 	count=0
 	while IFS=$'\t' read -r queue ready unacknowledged consumers; do
 		[[ -n "$queue" ]] || continue
@@ -137,7 +133,7 @@ widgets_rabbitmq_provider_transition_is_drained() {
 	done < <(awk -F '\t' '
     $1 ~ /^winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.|$)/ { print }
   ' <<<"$listing")
-	((count >= 15 && count <= 24))
+	((count <= allowed_count))
 }
 
 widgets_cutover_projection_boundary_is_safe() {
@@ -629,10 +625,16 @@ widgets_lifecycle_self_test() {
 		widgets_canonical_provider_target_queue_names
 		widgets_canonical_provider_legacy_queue_names
 	} | LC_ALL=C sort -u | awk '{ print $0 "\t0\t0\t0" }')"
+	[[ "$(wc -l <<<"$provider_transition_listing" | tr -d '[:space:]')" == '24' ]]
 	widgets_rabbitmq_provider_transition_is_drained "$provider_transition_listing"
 	widgets_rabbitmq_provider_transition_is_drained "$provider_polluted_listing"
+	widgets_rabbitmq_provider_transition_is_drained ''
+	widgets_rabbitmq_provider_transition_is_drained \
+		"$(awk -F '\t' '$1 != "winwidget.lead-integration.webhook.retry.1"' <<<"$provider_transition_listing")"
 	! widgets_rabbitmq_provider_transition_is_drained \
 		"${provider_transition_listing/amo-crm.retry-v2.3$'\t0\t0\t0'/amo-crm.retry-v2.3$'\t1\t0\t0'}"
+	! widgets_rabbitmq_provider_transition_is_drained \
+		"${provider_transition_listing/webhook.retry.1$'\t0\t0\t0'/webhook.retry.1$'\t0\t0\t1'}"
 	! widgets_rabbitmq_provider_transition_is_drained \
 		"$provider_transition_listing"$'\nwinwidget.lead-integration.webhook.retry-v3.1\t0\t0\t0'
 	widgets_cutover_provider_replacement_is_safe true true true

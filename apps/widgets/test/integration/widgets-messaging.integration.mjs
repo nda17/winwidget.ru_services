@@ -69,11 +69,24 @@ const projectionPayloadHash =
 if (!projectionPayloadHash) {
 	throw new Error('Compiled Widgets projection contract is unavailable');
 }
+const rabbitServiceImported = await import(
+	new URL(
+		'../../dist/src/messaging/widgets-rabbitmq.service.js',
+		import.meta.url
+	)
+);
+const WidgetsRabbitMqService =
+	rabbitServiceImported.WidgetsRabbitMqService ||
+	rabbitServiceImported.default?.WidgetsRabbitMqService;
+if (!WidgetsRabbitMqService) {
+	throw new Error('Compiled Widgets RabbitMQ service is unavailable');
+}
 
 const EVENTS_EXCHANGE = 'winwidget.events';
 const RETRY_EXCHANGE = 'winwidget.widgets.retry';
 const MANUAL_RETRY_EXCHANGE = 'winwidget.widgets.manual-retry';
 const DEAD_LETTER_EXCHANGE = 'winwidget.dead-letter';
+const RETRY_DELAYS_MS = [30_000, 300_000, 1_800_000];
 const QUEUES = {
 	identity: 'winwidget.widgets.identity-user',
 	entitlement: 'winwidget.widgets.billing-subscription',
@@ -104,6 +117,7 @@ let fixture = null;
 
 try {
 	fixture = await provisionRabbitFixture();
+	await assertProjectionTopologyPreservesLegacyProviderRetries(fixture);
 	const port = await getFreePort();
 	service = startService(port);
 	await waitForReady(port);
@@ -129,10 +143,92 @@ try {
 	if (service) await stopService(service).catch(() => undefined);
 	if (fixture) {
 		await purgeWidgetsQueues(fixture.adminChannel).catch(() => undefined);
+		await deleteProviderRetryQueues(fixture.adminChannel).catch(
+			() => undefined
+		);
 		await fixture.close().catch(() => undefined);
 	}
 	await cleanupDatabaseArtifacts().catch(() => undefined);
 	await prisma.$disconnect();
+}
+
+async function assertProjectionTopologyPreservesLegacyProviderRetries(
+	rabbitFixture
+) {
+	const legacyQueues = [];
+	for (const [kind, queue] of Object.entries(QUEUES).filter(([kind]) =>
+		['webhook', 'bitrix24', 'amo-crm'].includes(kind)
+	)) {
+		for (const [index, delay] of RETRY_DELAYS_MS.entries()) {
+			const retryQueue = `${queue}.retry.${index + 1}`;
+			const options = {
+				durable: true,
+				messageTtl: delay,
+				deadLetterExchange: EVENTS_EXCHANGE,
+				deadLetterRoutingKey: `lead.integration.${kind}.v1`
+			};
+			await rabbitFixture.adminChannel.assertQueue(retryQueue, options);
+			legacyQueues.push({ retryQueue, options });
+		}
+	}
+
+	const invalidScopeService = createTopologyService('invalid');
+	await assert.rejects(
+		invalidScopeService.onModuleInit(),
+		/WIDGETS_RABBITMQ_TOPOLOGY_SCOPE must be all or projections/
+	);
+	await invalidScopeService.onApplicationShutdown();
+	const unsafeRuntimeService = createTopologyService('projections', {
+		workerEnabled: true
+	});
+	await assert.rejects(
+		unsafeRuntimeService.onModuleInit(),
+		/Projection-only Widgets RabbitMQ topology is forbidden for worker or publisher runtimes/
+	);
+	await unsafeRuntimeService.onApplicationShutdown();
+
+	const projectionService = createTopologyService('projections');
+	try {
+		await projectionService.onModuleInit();
+		assert.equal(projectionService.isConnected(), true);
+		assert.equal(projectionService.isTopologyReady(), true);
+		for (const { retryQueue, options } of legacyQueues) {
+			await rabbitFixture.adminChannel.assertQueue(retryQueue, options);
+		}
+		console.log(
+			'Widgets projection-only topology preserved legacy provider retry arguments'
+		);
+	} finally {
+		await projectionService.onApplicationShutdown().catch(() => undefined);
+		for (const { retryQueue } of legacyQueues) {
+			await rabbitFixture.adminChannel
+				.deleteQueue(retryQueue, { ifEmpty: true, ifUnused: true })
+				.catch(() => undefined);
+		}
+	}
+}
+
+function createTopologyService(scope, runtime = {}) {
+	return new WidgetsRabbitMqService(
+		{
+			get(key) {
+				if (key === 'RABBITMQ_URL') return restrictedRabbitUrl;
+				if (key === 'RABBITMQ_ASSERT_TOPOLOGY') return true;
+				if (key === 'RABBITMQ_CONNECTION_NAME') {
+					return `widgets-${scope}-topology-${runId}`;
+				}
+				if (key === 'WIDGETS_RABBITMQ_TOPOLOGY_SCOPE') return scope;
+				return undefined;
+			}
+		},
+		{
+			role: 'topology',
+			rabbitEnabled: true,
+			workerEnabled: false,
+			publisherEnabled: false,
+			...runtime
+		}
+	);
 }
 
 async function provisionRabbitFixture() {
@@ -947,6 +1043,17 @@ async function purgeWidgetsQueues(channel) {
 			`${queue}.retry.3`
 		]) {
 			await channel.purgeQueue(name);
+		}
+	}
+}
+
+async function deleteProviderRetryQueues(channel) {
+	for (const kind of ['webhook', 'bitrix24', 'amo-crm']) {
+		for (const index of [1, 2, 3]) {
+			await channel.deleteQueue(`${QUEUES[kind]}.retry.${index}`, {
+				ifEmpty: true,
+				ifUnused: true
+			});
 		}
 	}
 }

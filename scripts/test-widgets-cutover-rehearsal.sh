@@ -493,9 +493,9 @@ verify_rabbitmq_cutover_contract() {
 	widgets_rabbitmq_provider_transition_is_drained "$transition_listing" ||
 		fail 'RabbitMQ rehearsal rejected the complete safe transition namespace.'
 	partial_transition_listing="$(widgets_canonical_provider_target_queue_names |
-		awk '{ print $0 "\t0\t0\t0" }')"$'\nwinwidget.lead-integration.bitrix24.retry-v2.2\t0\t0\t0'
+		awk '$0 != "winwidget.lead-integration.webhook.retry.1" { print $0 "\t0\t0\t0" }')"$'\nwinwidget.lead-integration.bitrix24.retry-v2.2\t0\t0\t0'
 	widgets_rabbitmq_provider_transition_is_drained "$partial_transition_listing" ||
-		fail 'RabbitMQ rehearsal rejected a safe resumable partial cleanup namespace.'
+		fail 'RabbitMQ rehearsal rejected a safe resumable partial target cleanup namespace.'
 	! widgets_cutover_provider_replacement_is_safe \
 		"$forward_only" "$legacy_worker_stopped" \
 		"$legacy_core_topology_owner_stopped" ||
