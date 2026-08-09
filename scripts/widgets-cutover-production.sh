@@ -154,7 +154,7 @@ restore_pre_forward_source() {
 on_error() {
 	local line="$1"
 	local exit_code="$2"
-	trap - ERR
+	trap - ERR HUP INT TERM
 	set +e
 	if [[ "$dark_service_started" == 'true' ]]; then
 		compose_target stop -t 90 widgets-service >/dev/null 2>&1 || true
@@ -172,7 +172,19 @@ on_error() {
 	fi
 	exit "$exit_code"
 }
+
+on_signal() {
+	local signal_name="$1"
+	local line="$2"
+	local exit_code="$3"
+	echo "Widgets cutover received $signal_name at line $line." >&2
+	on_error "$line" "$exit_code"
+}
+
 trap 'on_error "$LINENO" "$?"' ERR
+trap 'on_signal HUP "$LINENO" 129' HUP
+trap 'on_signal INT "$LINENO" 130' INT
+trap 'on_signal TERM "$LINENO" 143' TERM
 
 assert_checkout_and_environment() {
 	local key

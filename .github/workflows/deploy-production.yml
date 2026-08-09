@@ -220,7 +220,12 @@ jobs:
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            -o TCPKeepAlive=yes \
+            -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
             "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' bash -s" <<'EOF'
           set -euo pipefail
@@ -6380,7 +6385,7 @@ jobs:
     needs: verify
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Configure SSH private key
@@ -6417,7 +6422,12 @@ jobs:
               exit 1
               ;;
           esac
-          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -p "$SSH_PORT" \
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            -o TCPKeepAlive=yes \
+            -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
             "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' bash -s" <<'EOF'
           set -euo pipefail

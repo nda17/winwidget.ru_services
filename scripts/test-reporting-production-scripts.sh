@@ -306,6 +306,10 @@ deploy_job="$(
 	"$verify_header" == *'needs: lifecycle_checkout_preflight'* &&
 	"$verify_header" == *"needs.lifecycle_checkout_preflight.result == 'success'"* &&
 	"$deploy_job" == *'needs: verify'* &&
+	"$deploy_job" == *'timeout-minutes: 90'* &&
+	"$(grep -Fc -- '-o ServerAliveInterval=15' "$workflow_file")" == '2' &&
+	"$(grep -Fc -- '-o ServerAliveCountMax=4' "$workflow_file")" == '2' &&
+	"$(grep -Fc -- '-o TCPKeepAlive=yes' "$workflow_file")" == '2' &&
 	"$deploy_job" == *$'            notification-delivery)\n'* &&
 	"$deploy_job" == *'bash scripts/deploy-notification-delivery-production.sh'* &&
 	"$deploy_job" == *$'            campaigns)\n'* &&
