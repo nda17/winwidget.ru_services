@@ -149,6 +149,17 @@ deploy) ;;
 	;;
 esac
 
+expected_integration_worker_kinds="$(
+	reporting_expected_integration_worker_kinds
+)" || {
+	echo 'Unable to resolve the integration-worker ownership contract.' >&2
+	exit 1
+}
+[[ -n "$expected_integration_worker_kinds" ]] || {
+	echo 'The integration-worker ownership contract is empty.' >&2
+	exit 1
+}
+
 # database-restore-production-guard: before-mutation
 database_restore_guard_assert_before_mutation \
 	identity-if-present "$ENV_FILE"
@@ -446,6 +457,10 @@ require_env_exact_list() {
 	local value
 	local normalized
 	local normalized_expected
+	if [[ -z "$expected" ]]; then
+		echo "Required list contract could not be resolved for $key." >&2
+		exit 1
+	fi
 
 	value="$(get_env_value "$key" || true)"
 	normalized="$(
@@ -721,7 +736,7 @@ case "$mode" in
 		require_env_key "NOTIFICATION_DELIVERY_KINDS"
 		require_env_exact_list \
 			"INTEGRATION_WORKER_KINDS" \
-			"$(reporting_expected_integration_worker_kinds)"
+			"$expected_integration_worker_kinds"
 		require_env_exact_list \
 			"MAINTENANCE_WORKER_KINDS" \
 			"database-backup"
@@ -2646,7 +2661,7 @@ notification_cutover_candidate_ids="$(
 )"
 narrow_integration_kinds="$(
 	normalize_csv \
-		"$(reporting_expected_integration_worker_kinds)"
+		"$expected_integration_worker_kinds"
 )"
 pre_reporting_narrow_integration_kinds="$(
 	normalize_csv \
@@ -4553,7 +4568,7 @@ process.stdout.write(JSON.stringify(Object.values(CAMPAIGNS_QUEUE_NAMES)));
 		--env-file "$ENV_FILE" \
 		-e "CLOSE_LEGACY_NOTIFICATION_CONSUMERS=$close_legacy_orphans" \
 		-e "EXPECTED_NOTIFICATION_QUEUE_OWNER=$notification_owner" \
-		-e "EXPECTED_INTEGRATION_KINDS=$(reporting_expected_integration_worker_kinds)" \
+		-e "EXPECTED_INTEGRATION_KINDS=$expected_integration_worker_kinds" \
 		-e "NOTIFICATION_QUEUE_NAMES_JSON=$notification_queue_names_json" \
 		-e "CAMPAIGNS_QUEUE_NAMES_JSON=$campaigns_queue_names_json" \
 		--entrypoint node \

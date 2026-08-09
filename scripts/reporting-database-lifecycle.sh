@@ -137,6 +137,28 @@ reporting_expected_integration_worker_kinds() {
 	fi
 }
 
+reporting_widgets_lifecycle_libpq_url() {
+	local raw_url="${1:-}"
+	local base_url query parameter key separator='?'
+	[[ "$#" -eq 1 && -n "$raw_url" ]] || return 1
+	if [[ "$raw_url" != *'?'* ]]; then
+		printf '%s' "$raw_url"
+		return
+	fi
+	base_url="${raw_url%%\?*}"
+	query="${raw_url#*\?}"
+	printf '%s' "$base_url"
+	while IFS= read -r parameter; do
+		[[ -n "$parameter" ]] || continue
+		key="${parameter%%=*}"
+		case "$key" in
+		schema | connection_limit | pool_timeout | pgbouncer | statement_cache_size) continue ;;
+		esac
+		printf '%s%s' "$separator" "$parameter"
+		separator='&'
+	done < <(tr '&' '\n' <<<"$query")
+}
+
 reporting_widgets_ownership_marker_state() {
 	local database_url postgres_image query result volume
 	database_url="$(reporting_get_env_value WIDGETS_DATABASE_URL 2>/dev/null || true)"
@@ -144,6 +166,10 @@ reporting_widgets_ownership_marker_state() {
 		printf 'inactive\n'
 		return
 	fi
+	database_url="$(reporting_widgets_lifecycle_libpq_url "$database_url")" || {
+		echo 'Widgets database URL cannot be converted to a libpq connection string.' >&2
+		return 1
+	}
 	postgres_image="$(reporting_get_env_value WIDGETS_POSTGRES_IMAGE 2>/dev/null || true)"
 	postgres_image="${postgres_image:-postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296}"
 	query="$(cat <<'SQL'
@@ -2567,6 +2593,55 @@ reporting_database_lifecycle_self_test() {
 		"$REPORTING_FIRST_ROLLOUT_STAGED_MARKER" == "$REPORTING_APP_ROOT/deploy/backend/.reporting-first-rollout-staged-v1" &&
 		"$REPORTING_CUTOVER_MARKER" == "$REPORTING_APP_ROOT/deploy/backend/.reporting-database-cutover-v1" ]] || {
 		echo 'Reporting lifecycle accepted non-canonical production paths.' >&2
+		return 1
+	}
+	(
+		widgets_prisma_url='postgresql://runtime:masked@127.0.0.1:55436/winwidget_widgets?schema=widgets&sslmode=disable&connection_limit=5&pool_timeout=10&pgbouncer=true&statement_cache_size=0&application_name=widgets%20service'
+		widgets_libpq_url='postgresql://runtime:masked@127.0.0.1:55436/winwidget_widgets?sslmode=disable&application_name=widgets%20service'
+		[[ "$(reporting_widgets_lifecycle_libpq_url "$widgets_prisma_url")" == "$widgets_libpq_url" &&
+			"$(reporting_widgets_lifecycle_libpq_url 'postgresql://runtime:masked@127.0.0.1:55436/winwidget_widgets')" == \
+				'postgresql://runtime:masked@127.0.0.1:55436/winwidget_widgets' &&
+			"$(reporting_widgets_lifecycle_libpq_url 'postgresql://runtime:masked@127.0.0.1:55436/winwidget_widgets?schema=widgets&connection_limit=5')" == \
+				'postgresql://runtime:masked@127.0.0.1:55436/winwidget_widgets' ]]
+		! reporting_widgets_lifecycle_libpq_url '' >/dev/null 2>&1
+		reporting_get_env_value() {
+			case "$1" in
+			WIDGETS_DATABASE_URL) printf '%s\n' "$widgets_prisma_url" ;;
+			WIDGETS_POSTGRES_DATA_VOLUME) printf 'winwidget-widgets-postgres-data\n' ;;
+			*) return 1 ;;
+			esac
+		}
+		docker() {
+			if [[ "${1:-}" == run ]]; then
+				[[ "${PGURL:-}" == "$widgets_libpq_url" &&
+					"${WIDGETS_IDENTITY_SQL:-}" == *'FROM widgets.service_identity'* ]] || return 1
+				printf 'active\n'
+				return
+			fi
+			return 1
+		}
+		[[ "$(reporting_widgets_ownership_marker_state)" == 'active' ]]
+	) || {
+		echo 'Reporting Widgets ownership libpq boundary self-test failed.' >&2
+		return 1
+	}
+	(
+		reporting_get_env_value() {
+			case "$1" in
+			WIDGETS_DATABASE_URL) printf 'postgresql://runtime:masked@127.0.0.1:55436/winwidget_widgets?schema=widgets\n' ;;
+			WIDGETS_POSTGRES_DATA_VOLUME) printf 'winwidget-widgets-postgres-data\n' ;;
+			*) return 1 ;;
+			esac
+		}
+		docker() {
+			if [[ "${1:-}" == volume && "${2:-}" == inspect ]]; then
+				return 0
+			fi
+			return 1
+		}
+		! reporting_widgets_ownership_marker_state >/dev/null 2>&1
+	) || {
+		echo 'Reporting Widgets ownership reader did not fail closed.' >&2
 		return 1
 	}
 	(
