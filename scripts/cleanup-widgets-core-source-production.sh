@@ -821,6 +821,8 @@ cleanup_self_test() {
 	script_text="$(<"$deploy_script")"
 	[[ "$script_text" == *'stop_widgets_core_cleanup_precommit_topology'* &&
 		"$script_text" == *'capture_widgets_core_cleanup_precommit_containers'* &&
+		"$script_text" == *'widgets_core_source_cleanup_migration_url_from_env'* &&
+		"$script_text" != *'$DATABASE_MIGRATION_URL_PRODUCTION'* &&
 		"$script_text" == *'Widgets Core source is already absent; old writers will not be restored.'* &&
 		"$script_text" == *'Pre-commit Widgets cleanup requires one exact existing container'* ]]
 	[[ "$(<"$SERVER_ROOT/scripts/cleanup-widgets-core-source-production.sh")" == \

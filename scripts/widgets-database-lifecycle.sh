@@ -547,6 +547,15 @@ process.stdout.write(serialized);
 NODE
 }
 
+widgets_core_source_cleanup_migration_url_from_env() {
+	[[ "$#" -eq 5 ]] || return 1
+	local database_migration_url
+	database_migration_url="$(widgets_lifecycle_get_env_value DATABASE_MIGRATION_URL_PRODUCTION)" ||
+		return 1
+	[[ -n "$database_migration_url" ]] || return 1
+	widgets_core_source_cleanup_migration_url "$database_migration_url" "$@"
+}
+
 widgets_core_source_cleanup_migration_file() {
 	local source_root
 	source_root="$(
@@ -1539,6 +1548,35 @@ widgets_lifecycle_self_test() {
 	[[ "$cleanup_url" == postgresql://migration:masked@127.0.0.1:55432/default_db* &&
 		"$cleanup_url" == *'%20'* && "$cleanup_url" != *'+'* &&
 		"$cleanup_options" == '-c existing.setting=retained -c winwidget.widgets_source_cleanup=production-destructive-approved -c winwidget.widgets_ownership_state=active -c winwidget.widgets_ownership_generation=3 -c winwidget.widgets_source_snapshot_sha256='"$cleanup_sha"' -c winwidget.widgets_core_backup_sha256='"$cleanup_sha"' -c winwidget.widgets_backup_sha256='"$cleanup_sha"' -c winwidget.widgets_restore_evidence_sha256='"$cleanup_sha" ]]
+	(
+		local cleanup_env_directory cleanup_env_file duplicate_env_file missing_env_file
+		local cleanup_url_from_env
+		cleanup_env_directory="$(mktemp -d "${TMPDIR:-/tmp}/widgets-cleanup-env.XXXXXX")"
+		cleanup_env_file="$cleanup_env_directory/valid.env"
+		duplicate_env_file="$cleanup_env_directory/duplicate.env"
+		missing_env_file="$cleanup_env_directory/missing.env"
+		trap 'rm -f "$cleanup_env_file" "$duplicate_env_file" "$missing_env_file"; rmdir "$cleanup_env_directory"' EXIT
+		printf '%s\n' \
+			'DATABASE_MIGRATION_URL_PRODUCTION=postgresql://migration:masked@127.0.0.1:55432/default_db?schema=public&options=-c%20existing.setting%3Dretained' \
+			>"$cleanup_env_file"
+		cleanup_url_from_env="$(ENV_FILE="$cleanup_env_file" \
+			widgets_core_source_cleanup_migration_url_from_env \
+			3 "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha")"
+		[[ "$cleanup_url_from_env" == "$cleanup_url" ]]
+		printf '%s\n' \
+			'DATABASE_MIGRATION_URL_PRODUCTION=postgresql://migration:masked@127.0.0.1:55432/default_db' \
+			'DATABASE_MIGRATION_URL_PRODUCTION=postgresql://duplicate:masked@127.0.0.1:55432/default_db' \
+			>"$duplicate_env_file"
+		printf '%s\n' 'DATABASE_URL_PRODUCTION=postgresql://runtime:masked@127.0.0.1:55432/default_db' \
+			>"$missing_env_file"
+		! ENV_FILE="$duplicate_env_file" widgets_core_source_cleanup_migration_url_from_env \
+			3 "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" >/dev/null 2>&1
+		! ENV_FILE="$missing_env_file" widgets_core_source_cleanup_migration_url_from_env \
+			3 "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" >/dev/null 2>&1
+	) || {
+		echo 'Widgets lifecycle self-test did not enforce exact cleanup migration env input.' >&2
+		return 1
+	}
 	! widgets_core_source_cleanup_migration_url \
 		'https://example.test/not-postgres' 1 "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" \
 		>/dev/null 2>&1

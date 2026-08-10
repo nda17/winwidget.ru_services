@@ -2033,15 +2033,18 @@ widgets_core_cleanup_revalidate_boundary() {
 }
 
 widgets_core_cleanup_migration_url() {
-	local generation snapshot core_backup widgets_backup restore_evidence
+	local generation snapshot core_backup widgets_backup restore_evidence migration_url
 	generation="$(widgets_core_source_cleanup_marker_value ownership_generation)" || return 1
 	snapshot="$(widgets_core_source_cleanup_marker_value source_snapshot_sha256)" || return 1
 	core_backup="$(widgets_core_source_cleanup_marker_value core_backup_sha256)" || return 1
 	widgets_backup="$(widgets_core_source_cleanup_marker_value widgets_backup_sha256)" || return 1
 	restore_evidence="$(widgets_core_source_cleanup_marker_value restore_evidence_sha256)" || return 1
-	widgets_core_source_cleanup_migration_url \
-		"$DATABASE_MIGRATION_URL_PRODUCTION" "$generation" "$snapshot" \
-		"$core_backup" "$widgets_backup" "$restore_evidence"
+	migration_url="$(widgets_core_source_cleanup_migration_url_from_env \
+		"$generation" "$snapshot" "$core_backup" "$widgets_backup" "$restore_evidence")" || {
+		echo 'Widgets Core cleanup could not derive the exact migration URL from the production env.' >&2
+		return 1
+	}
+	printf '%s' "$migration_url"
 }
 
 stop_widgets_core_cleanup_topology_for_recovery() {
