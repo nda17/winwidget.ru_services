@@ -16,6 +16,7 @@ VOLUME="$RESOURCE_PREFIX-data"
 ADMIN_USER='winwidget_cleanup_restore_admin'
 ADMIN_PASSWORD="$(openssl rand -hex 24)"
 TEMP_ROOT=''
+TEMP_PARENT=''
 CREATED_CONTAINER=false
 CREATED_VOLUME=false
 TARGET_TABLES=(
@@ -52,7 +53,7 @@ cleanup() {
 	if [[ -n "$TEMP_ROOT" && -d "$TEMP_ROOT" && ! -L "$TEMP_ROOT" ]]; then
 		temp_parent="$(dirname -- "$TEMP_ROOT")"
 		temp_basename="$(basename -- "$TEMP_ROOT")"
-		if [[ "$temp_parent" == '/tmp' &&
+		if [[ -n "$TEMP_PARENT" && "$temp_parent" == "$TEMP_PARENT" &&
 			"$temp_basename" == "widgets-core-cleanup-$RUN_ID."?????? ]]; then
 			rm -rf -- "$TEMP_ROOT"
 		else
@@ -63,11 +64,18 @@ cleanup() {
 }
 
 create_temp_root() {
+	local temp_owner
 	[[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]] ||
 		fail 'CORE_CLEANUP_REHEARSAL_RUN_ID is unsafe'
-	TEMP_ROOT="$(mktemp -d "/tmp/widgets-core-cleanup-${RUN_ID}.XXXXXX")"
+	if [[ "$(uname -s)" == 'Darwin' ]]; then
+		TEMP_PARENT="$SOURCE_ROOT"
+	else
+		TEMP_PARENT='/tmp'
+	fi
+	TEMP_ROOT="$(mktemp -d "$TEMP_PARENT/widgets-core-cleanup-${RUN_ID}.XXXXXX")"
+	temp_owner="$(widgets_lifecycle_stat_owner "$TEMP_ROOT")"
 	[[ -d "$TEMP_ROOT" && ! -L "$TEMP_ROOT" &&
-		"$(widgets_lifecycle_stat_owner "$TEMP_ROOT")" == "$(id -u):$(id -g)" &&
+		"${temp_owner%%:*}" == "$(id -u)" &&
 		"$(widgets_lifecycle_stat_mode "$TEMP_ROOT")" == '700' ]] ||
 		fail 'rehearsal temporary directory is unsafe'
 }
@@ -100,7 +108,7 @@ query() {
 
 verify_dump() {
 	local dump_file expected_sha source_system_identifier expected_state actual_sha
-	local restore_system_identifier present_count migration_checksum migration_file redump
+	local dump_toc restore_system_identifier present_count migration_checksum migration_file redump
 	dump_file="${CORE_CLEANUP_REHEARSAL_DUMP_FILE:-}"
 	expected_sha="${CORE_CLEANUP_REHEARSAL_EXPECTED_SHA256:-}"
 	source_system_identifier="${CORE_CLEANUP_REHEARSAL_SOURCE_SYSTEM_IDENTIFIER:-}"
@@ -112,6 +120,13 @@ verify_dump() {
 	actual_sha="$(sha256_file "$dump_file")"
 	[[ "$actual_sha" == "$expected_sha" ]] || fail 'dump SHA-256 mismatch'
 	assert_local_docker
+	dump_toc="$(
+		docker run --rm --network none \
+			--mount "type=bind,source=$(dirname "$dump_file"),target=/input,readonly" \
+			"$POSTGRES_IMAGE" pg_restore --list "/input/$(basename "$dump_file")"
+	)" || fail 'dump table of contents is unreadable'
+	[[ "$(printf '%s\n' "$dump_toc" | awk '$4 == "SCHEMA" && $5 == "-" { print $6 }')" == 'public' ]] ||
+		fail 'dump must contain exactly the public schema'
 	[[ -z "$(docker ps -aq --filter "name=^/${CONTAINER}$")" ]] || fail 'rehearsal container already exists'
 	[[ -z "$(docker volume ls -q --filter "name=^${VOLUME}$")" ]] || fail 'rehearsal volume already exists'
 	create_temp_root
@@ -139,7 +154,7 @@ verify_dump() {
 	[[ "$restore_system_identifier" =~ ^[1-9][0-9]*$ &&
 		"$restore_system_identifier" != "$source_system_identifier" ]] ||
 		fail 'restore cluster is not physically independent'
-	query 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' >/dev/null
+	query 'DROP SCHEMA public CASCADE;' >/dev/null
 	docker run --rm --network "container:$CONTAINER" \
 		-e "PGPASSWORD=$ADMIN_PASSWORD" \
 		--mount "type=bind,source=$(dirname "$dump_file"),target=/input,readonly" \
