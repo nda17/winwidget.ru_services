@@ -78,6 +78,19 @@ current_maintenance_image() {
 	current_service_image maintenance-worker
 }
 
+prepare_cleanup_node_runtime() {
+	local image="${1:-}"
+	[[ "$#" -le 1 ]] || return 1
+	if [[ -z "$image" ]]; then
+		widgets_lifecycle_prepare_node_runtime
+		return
+	fi
+	[[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	docker image inspect "$image" >/dev/null 2>&1 || return 1
+	export WIDGETS_LIFECYCLE_NODE_IMAGE="$image"
+	widgets_lifecycle_prepare_node_runtime
+}
+
 image_revision() {
 	local revision
 	revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$1")"
@@ -257,7 +270,7 @@ validate_preflight_evidence() {
 		SOURCE_SNAPSHOT="$snapshot" CORE_BACKUP_SHA="$core_sha" \
 		WIDGETS_BACKUP_SHA="$widgets_sha" CORE_SYSTEM_ID="$core_system" \
 		WIDGETS_SYSTEM_ID="$widgets_system" WIDGETS_DATABASE_ID_VALUE="$database_id" \
-		CORE_RESTORE_SYSTEM_ID="$core_restore_system" node <<'NODE'
+		CORE_RESTORE_SYSTEM_ID="$core_restore_system" widgets_lifecycle_node <<'NODE'
 const fs = require('node:fs');
 let value;
 try {
@@ -296,7 +309,7 @@ NODE
 
 preflight_core_restore_system_identifier() {
 	[[ "$#" -eq 1 ]] || return 1
-	PREFLIGHT_FILE="$1" node -e '
+	PREFLIGHT_FILE="$1" widgets_lifecycle_node -e '
 const fs = require("node:fs");
 let value;
 try { value = JSON.parse(fs.readFileSync(process.env.PREFLIGHT_FILE, "utf8")); } catch { process.exit(1); }
@@ -348,7 +361,7 @@ validate_completion_evidence() {
 		EXPECTED_POST_SHA256="$post_sha" EXPECTED_POST_RECEIPT_SHA="$post_receipt_sha" \
 		EXPECTED_GENERATION="$(widgets_core_source_cleanup_marker_value ownership_generation)" \
 		EXPECTED_RECEIPT_SHA="$(widgets_core_source_cleanup_marker_value offsite_receipt_sha256)" \
-		node <<'NODE'
+		widgets_lifecycle_node <<'NODE'
 const fs = require('node:fs');
 const expectedKeys = [
   'cleanPostgreSQL18Restore',
@@ -401,30 +414,16 @@ write_completion_evidence() {
 	local destination="$1" revision="$2" generation="$3" post_sha="$4"
 	local receipt_sha="$5" post_receipt_sha="$6" verified_at="$7" partial
 	partial="$destination.partial"
-	[[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+	[[ ! -e "$destination" && ! -L "$destination" &&
+		"$revision" =~ ^[0-9a-f]{40}$ && "$generation" =~ ^[1-9][0-9]*$ &&
+		"$post_sha" =~ ^[0-9a-f]{64}$ && "$receipt_sha" =~ ^[0-9a-f]{64}$ &&
+		"$post_receipt_sha" =~ ^[0-9a-f]{64}$ &&
+		"$verified_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+		return 1
 	remove_recoverable_partial "$partial"
-	COMPLETION_DESTINATION="$partial" COMPLETION_REVISION="$revision" \
-		COMPLETION_GENERATION="$generation" COMPLETION_POST_SHA="$post_sha" \
-		COMPLETION_RECEIPT_SHA="$receipt_sha" COMPLETION_POST_RECEIPT_SHA="$post_receipt_sha" \
-		COMPLETION_VERIFIED_AT="$verified_at" node <<'NODE'
-const fs = require('node:fs');
-const value = {
-  version: 1,
-  status: 'verified',
-  cleanupRevision: process.env.COMPLETION_REVISION,
-  ownershipGeneration: Number(process.env.COMPLETION_GENERATION),
-  postCleanupBackupSha256: process.env.COMPLETION_POST_SHA,
-  preCleanupOffsiteReceiptSha256: process.env.COMPLETION_RECEIPT_SHA,
-  postCleanupOffsiteReceiptSha256: process.env.COMPLETION_POST_RECEIPT_SHA,
-  migrationApplied: true,
-  legacyRelationsAbsent: true,
-  runtimeSmoke: true,
-  publicAssets: true,
-  cleanPostgreSQL18Restore: true,
-  verifiedAt: process.env.COMPLETION_VERIFIED_AT,
-};
-fs.writeFileSync(process.env.COMPLETION_DESTINATION, `${JSON.stringify(value)}\n`, { flag: 'wx', mode: 0o600 });
-NODE
+	(umask 077; printf '%s\n' \
+		"{\"version\":1,\"status\":\"verified\",\"cleanupRevision\":\"$revision\",\"ownershipGeneration\":$generation,\"postCleanupBackupSha256\":\"$post_sha\",\"preCleanupOffsiteReceiptSha256\":\"$receipt_sha\",\"postCleanupOffsiteReceiptSha256\":\"$post_receipt_sha\",\"migrationApplied\":true,\"legacyRelationsAbsent\":true,\"runtimeSmoke\":true,\"publicAssets\":true,\"cleanPostgreSQL18Restore\":true,\"verifiedAt\":\"$verified_at\"}" \
+		>"$partial") || return 1
 	chown 0:0 "$partial"
 	chmod 600 "$partial"
 	mv -fT "$partial" "$destination"
@@ -448,6 +447,8 @@ stage_cleanup() {
 	api_image="$(current_api_image)"
 	previous_revision="$(image_revision "$api_image")" || fail 'current Core revision is invalid'
 	maintenance_image="$(current_maintenance_image)"
+	prepare_cleanup_node_runtime "$maintenance_image" ||
+		fail 'the pinned maintenance image cannot provide the cleanup Node runtime'
 	[[ "$(image_revision "$maintenance_image")" == "$previous_revision" ]] ||
 		fail 'Core API and maintenance worker revisions differ before cleanup staging'
 	[[ "$previous_revision" != "$revision" ]] || fail 'cleanup revision must be newer than the running Core revision'
@@ -557,6 +558,8 @@ seal_offsite_evidence() {
 	assert_files_and_restore_guard
 	revision="$(assert_checkout)"
 	widgets_export_compose_release_identity "$revision"
+	prepare_cleanup_node_runtime ||
+		fail 'the pinned maintenance image cannot provide the cleanup Node runtime'
 	widgets_core_source_cleanup_validate_marker || fail 'cleanup marker is missing or invalid'
 	[[ "$(widgets_core_source_cleanup_marker_value revision)" == "$revision" ]] ||
 		fail 'cleanup marker pins another revision'
@@ -633,6 +636,8 @@ run_cleanup() {
 	assert_files_and_restore_guard
 	revision="$(assert_checkout)"
 	widgets_export_compose_release_identity "$revision"
+	prepare_cleanup_node_runtime ||
+		fail 'the pinned maintenance image cannot provide the cleanup Node runtime'
 	widgets_core_source_cleanup_validate_marker || fail 'cleanup marker is missing or invalid'
 	[[ "$(widgets_core_source_cleanup_marker_value revision)" == "$revision" ]] ||
 		fail 'cleanup marker pins another revision'
@@ -692,6 +697,8 @@ complete_offsite_evidence() {
 	assert_files_and_restore_guard
 	revision="$(assert_checkout)"
 	widgets_export_compose_release_identity "$revision"
+	prepare_cleanup_node_runtime ||
+		fail 'the pinned maintenance image cannot provide the cleanup Node runtime'
 	widgets_core_source_cleanup_validate_marker || fail 'cleanup marker is missing or invalid'
 	[[ "$(widgets_core_source_cleanup_marker_value revision)" == "$revision" ]] ||
 		fail 'cleanup marker pins another revision'

@@ -44,6 +44,88 @@ WIDGETS_CANONICAL_CORE_TABLES=(
 	widget_runtime_daily_step_metrics
 )
 
+widgets_lifecycle_prepare_node_runtime() {
+	command -v node >/dev/null 2>&1 && return 0
+	command -v docker >/dev/null 2>&1 || return 1
+	local container image revision project service oneoff marker_revision=''
+	if [[ -n "${WIDGETS_LIFECYCLE_NODE_IMAGE:-}" ]]; then
+		[[ "$WIDGETS_LIFECYCLE_NODE_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+		revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+			"$WIDGETS_LIFECYCLE_NODE_IMAGE")" || return 1
+		[[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return 1
+		return 0
+	fi
+	container="$(docker ps --all --quiet --no-trunc \
+		--filter 'label=com.docker.compose.project=winwidget' \
+		--filter 'label=com.docker.compose.service=maintenance-worker')" || return 1
+	if [[ -n "$container" ]]; then
+		[[ "$container" =~ ^[0-9a-f]{64}$ ]] || return 1
+		project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container")" ||
+			return 1
+		service="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container")" ||
+			return 1
+		oneoff="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$container")" ||
+			return 1
+		[[ "$project" == 'winwidget' && "$service" == 'maintenance-worker' &&
+			"$oneoff" =~ ^[Ff]alse$ ]] || return 1
+		image="$(docker inspect --format '{{.Image}}' "$container")" || return 1
+	else
+		widgets_core_source_cleanup_validate_marker || return 1
+		marker_revision="$(widgets_core_source_cleanup_marker_value_from_file \
+			"$(widgets_core_source_cleanup_marker_path)" revision)" || return 1
+		[[ "$marker_revision" =~ ^[0-9a-f]{40}$ ]] || return 1
+		image="$(docker image inspect --format '{{.Id}}' \
+			"winwidget-maintenance:git-$marker_revision")" || return 1
+	fi
+	revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" ||
+		return 1
+	[[ "$image" =~ ^sha256:[0-9a-f]{64}$ && "$revision" =~ ^[0-9a-f]{40}$ &&
+		( -z "$marker_revision" || "$revision" == "$marker_revision" ) ]] || return 1
+	export WIDGETS_LIFECYCLE_NODE_IMAGE="$image"
+}
+
+widgets_lifecycle_node() {
+	if command -v node >/dev/null 2>&1; then
+		command node "$@"
+		return
+	fi
+	widgets_lifecycle_prepare_node_runtime || return 1
+	local env_name file_variable file_path file_target
+	local -a docker_args=(
+		run --rm --interactive --network none --read-only
+		--user 0:0 --security-opt no-new-privileges --entrypoint node
+	)
+	for file_variable in PREFLIGHT_FILE RECEIPT_FILE COMPLETION_FILE; do
+		file_path="${!file_variable:-}"
+		[[ -n "$file_path" ]] || continue
+		[[ "$file_path" =~ ^/[A-Za-z0-9._/@+-]+$ && -f "$file_path" && ! -L "$file_path" ]] ||
+			return 1
+		case "$file_variable" in
+		PREFLIGHT_FILE) file_target='/tmp/widgets-lifecycle-preflight-file' ;;
+		RECEIPT_FILE) file_target='/tmp/widgets-lifecycle-receipt-file' ;;
+		COMPLETION_FILE) file_target='/tmp/widgets-lifecycle-completion-file' ;;
+		esac
+		docker_args+=(
+			--mount "type=bind,source=$file_path,target=$file_target,readonly"
+			--env "$file_variable=$file_target"
+		)
+	done
+	for env_name in \
+		BASE_DATABASE_URL WIDGETS_CLEANUP_GENERATION WIDGETS_CLEANUP_SNAPSHOT \
+		WIDGETS_CLEANUP_CORE_BACKUP WIDGETS_CLEANUP_WIDGETS_BACKUP \
+		WIDGETS_CLEANUP_RESTORE_EVIDENCE EXPECTED_KIND EXPECTED_REVISION \
+		EXPECTED_GENERATION EXPECTED_FINGERPRINT EXPECTED_CORE_SHA \
+		EXPECTED_WIDGETS_SHA EXPECTED_PREFLIGHT_SHA EXPECTED_POST_SHA \
+		EXPECTED_RECEIPT_SHA CLEANUP_URL PREVIOUS_REVISION CLEANUP_REVISION \
+		OWNERSHIP_GENERATION SOURCE_FINGERPRINT SOURCE_SNAPSHOT CORE_BACKUP_SHA \
+		WIDGETS_BACKUP_SHA CORE_SYSTEM_ID WIDGETS_SYSTEM_ID \
+		WIDGETS_DATABASE_ID_VALUE CORE_RESTORE_SYSTEM_ID EXPECTED_REVISION_VALUE \
+		EXPECTED_POST_SHA256 EXPECTED_POST_RECEIPT_SHA; do
+		[[ -n "${!env_name:-}" ]] && docker_args+=(--env "$env_name")
+	done
+	docker "${docker_args[@]}" "$WIDGETS_LIFECYCLE_NODE_IMAGE" "$@"
+}
+
 widgets_export_compose_release_identity() {
 	local revision="${1:-}"
 	[[ "$#" -eq 1 && "$revision" =~ ^[0-9a-f]{40}$ ]] || {
@@ -429,7 +511,7 @@ widgets_core_source_cleanup_migration_url() {
 		WIDGETS_CLEANUP_CORE_BACKUP="$core_backup" \
 		WIDGETS_CLEANUP_WIDGETS_BACKUP="$widgets_backup" \
 		WIDGETS_CLEANUP_RESTORE_EVIDENCE="$restore_evidence" \
-		node <<'NODE'
+		widgets_lifecycle_node <<'NODE'
 let databaseUrl;
 try {
   databaseUrl = new URL(process.env.BASE_DATABASE_URL);
@@ -561,7 +643,7 @@ widgets_core_source_cleanup_validate_offsite_receipt() {
 		return 1
 	fi
 	metadata="$(
-		RECEIPT_FILE="$receipt" EXPECTED_KIND="$evidence_kind" node -e '
+		RECEIPT_FILE="$receipt" EXPECTED_KIND="$evidence_kind" widgets_lifecycle_node -e '
 const fs = require("node:fs");
 let value;
 try { value = JSON.parse(fs.readFileSync(process.env.RECEIPT_FILE, "utf8")); } catch { process.exit(1); }
@@ -595,7 +677,7 @@ process.stdout.write(`${value.provider}\t${value.providerReference}`);
 		EXPECTED_CORE_SHA="$(if [[ "$evidence_kind" == 'pre' ]]; then widgets_core_source_cleanup_marker_value core_backup_sha256; elif [[ -n "$expected_post_sha" ]]; then printf '%s' "$expected_post_sha"; else widgets_core_source_cleanup_marker_value post_cleanup_backup_sha256; fi)" \
 		EXPECTED_WIDGETS_SHA="$(widgets_core_source_cleanup_marker_value widgets_backup_sha256)" \
 		EXPECTED_PREFLIGHT_SHA="$(widgets_core_source_cleanup_marker_value restore_evidence_sha256)" \
-		node -e '
+		widgets_lifecycle_node -e '
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.env.RECEIPT_FILE, "utf8"));
 if (
@@ -627,7 +709,7 @@ widgets_core_source_cleanup_verify_receipt_artifacts() {
 	checklist="$directory/.offsite-artifact-check.$$"
 	[[ ! -e "$checklist" && ! -L "$checklist" ]] || return 1
 	metadata="$(
-		RECEIPT_FILE="$receipt" node -e '
+		RECEIPT_FILE="$receipt" widgets_lifecycle_node -e '
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.env.RECEIPT_FILE, "utf8"));
 for (const item of [...value.artifacts].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -663,7 +745,7 @@ widgets_core_source_cleanup_validate_completion_evidence() {
 	local evidence="$1" zero_sha receipt_sha
 	zero_sha="$(printf '0%.0s' {1..64})"
 	receipt_sha="$(
-		COMPLETION_FILE="$evidence" node -e '
+		COMPLETION_FILE="$evidence" widgets_lifecycle_node -e '
 const fs = require("node:fs");
 let value;
 try { value = JSON.parse(fs.readFileSync(process.env.COMPLETION_FILE, "utf8")); } catch { process.exit(1); }
@@ -691,7 +773,7 @@ process.stdout.write(value.postCleanupOffsiteReceiptSha256);
 		EXPECTED_GENERATION="$(widgets_core_source_cleanup_marker_value ownership_generation)" \
 		EXPECTED_POST_SHA="$(widgets_core_source_cleanup_marker_value post_cleanup_backup_sha256)" \
 		EXPECTED_RECEIPT_SHA="$(widgets_core_source_cleanup_marker_value offsite_receipt_sha256)" \
-		node -e '
+		widgets_lifecycle_node -e '
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.env.COMPLETION_FILE, "utf8"));
 if (
@@ -1452,7 +1534,7 @@ widgets_lifecycle_self_test() {
 	cleanup_url="$(widgets_core_source_cleanup_migration_url \
 		'postgresql://migration:masked@127.0.0.1:55432/default_db?schema=public&options=-c%20existing.setting%3Dretained' \
 		3 "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha")"
-	cleanup_options="$(CLEANUP_URL="$cleanup_url" node -e \
+	cleanup_options="$(CLEANUP_URL="$cleanup_url" widgets_lifecycle_node -e \
 		'process.stdout.write(new URL(process.env.CLEANUP_URL).searchParams.get("options") ?? "")')"
 	[[ "$cleanup_url" == postgresql://migration:masked@127.0.0.1:55432/default_db* &&
 		"$cleanup_url" == *'%20'* && "$cleanup_url" != *'+'* &&
