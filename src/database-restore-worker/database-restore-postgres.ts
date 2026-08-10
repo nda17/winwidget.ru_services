@@ -95,9 +95,30 @@ const CORE_API_RUNTIME_FUNCTIONS = [
 	'"public"."reporting_auth_identity_projection_trigger"()',
 	'"public"."reporting_payment_projection_trigger"()',
 	'"public"."reporting_subscription_projection_trigger"()',
-	'"public"."reporting_widget_projection_trigger"()',
-	'"public"."reporting_lead_projection_trigger"()',
 	'"public"."reporting_settings_projection_trigger"()'
+] as const;
+
+const CORE_LEGACY_WIDGETS_CLEANUP_MIGRATION =
+	'20260810000000_remove_legacy_widgets_core_source';
+const CORE_LEGACY_WIDGETS_TABLES = [
+	'widgets',
+	'quizzes',
+	'callbacks',
+	'countdown_timers',
+	'stop_offers',
+	'online_consultants',
+	'calculators',
+	'leads',
+	'quiz_leads',
+	'callback_leads',
+	'countdown_timer_leads',
+	'stop_offer_leads',
+	'online_consultant_leads',
+	'calculator_leads',
+	'widget_config_revisions',
+	'widget_runtime_presence',
+	'widget_runtime_daily_metrics',
+	'widget_runtime_daily_step_metrics'
 ] as const;
 
 export interface DatabaseRestoreTocSummary {
@@ -289,8 +310,11 @@ export function buildDatabaseOwnershipAndAclRepairSql(
 		quoteIdentifier(target.backupRole)
 	].join(', ');
 	const runtimeAclSql = buildRuntimeAclRepairSql(target);
+	const coreLegacyWidgetsCleanupInvariantSql =
+		buildCoreLegacyWidgetsCleanupInvariantSql(target);
 
 	return `
+${coreLegacyWidgetsCleanupInvariantSql}
 ALTER SCHEMA ${schema} OWNER TO ${migration};
 DO $database_restore_owners$
 DECLARE
@@ -373,8 +397,11 @@ export function buildDatabasePreReopenVerificationSql(
 	const applicationRolesSql = sqlTextArray(target.allApplicationRoles);
 	const anchorTablesSql = sqlTextArray(target.anchorTables);
 	const runtimeAclVerificationSql = buildRuntimeAclVerificationSql(target);
+	const coreLegacyWidgetsCleanupInvariantSql =
+		buildCoreLegacyWidgetsCleanupInvariantSql(target);
 
 	return `
+${coreLegacyWidgetsCleanupInvariantSql}
 DO $database_restore_verify$
 DECLARE
     role_name TEXT;
@@ -800,6 +827,46 @@ SELECT migration_name || E'\\t' || checksum || E'\\t' ||
        END
 FROM ${quoteIdentifier(target.schema)}."_prisma_migrations"
 ORDER BY migration_name;
+`;
+}
+
+function buildCoreLegacyWidgetsCleanupInvariantSql(
+	target: DatabaseRestoreTargetConfig
+): string {
+	if (target.target !== 'core') return '';
+
+	const schema = quoteIdentifier(target.schema);
+	const cleanupMigration = quoteLiteral(
+		CORE_LEGACY_WIDGETS_CLEANUP_MIGRATION
+	);
+	const legacyTables = sqlTextArray(CORE_LEGACY_WIDGETS_TABLES);
+
+	return `
+DO $database_restore_core_widgets_cleanup$
+DECLARE
+    legacy_table_name TEXT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM ${schema}."_prisma_migrations"
+        WHERE migration_name = ${cleanupMigration}
+          AND finished_at IS NOT NULL
+          AND rolled_back_at IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'Routine Core restore requires the applied legacy Widgets cleanup migration';
+    END IF;
+
+    FOREACH legacy_table_name IN ARRAY ${legacyTables} LOOP
+        IF to_regclass(format('%I.%I', ${quoteLiteral(target.schema)}, legacy_table_name))
+               IS NOT NULL THEN
+            RAISE EXCEPTION
+                'Core restore contains legacy Widgets relation % after cleanup migration',
+                legacy_table_name;
+        END IF;
+    END LOOP;
+END
+$database_restore_core_widgets_cleanup$;
 `;
 }
 

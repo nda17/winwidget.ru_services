@@ -162,6 +162,15 @@ describe('DatabaseRestoreService', () => {
 			'public.reporting_record_projection_event(text,text,text,text,jsonb,boolean)'
 		);
 		expect(runPostgresCommand.mock.calls[2][1][6]).toContain(
+			'Incomplete Reporting producer function set after restore: % of 9'
+		);
+		expect(runPostgresCommand.mock.calls[2][1][6]).not.toContain(
+			'public.reporting_widget_projection_trigger()'
+		);
+		expect(runPostgresCommand.mock.calls[2][1][6]).not.toContain(
+			'public.reporting_lead_projection_trigger()'
+		);
+		expect(runPostgresCommand.mock.calls[2][1][6]).toContain(
 			'privilege.grantee = 0'
 		);
 		expect(prisma.$connect).toHaveBeenCalledTimes(1);

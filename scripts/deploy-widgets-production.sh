@@ -23,9 +23,16 @@ schema_migration_started=false
 previous_image_id=''
 previous_revision=''
 health_port=''
+post_cleanup_service_recovery=false
+core_source_contract=''
 
 fail() {
 	echo "$1" >&2
+	if [[ "$recreate_started" == 'true' && "$rollout_verified" != 'true' ]] &&
+		declare -F rollback_widgets >/dev/null; then
+		trap - ERR
+		rollback_widgets "$1" || true
+	fi
 	exit 1
 }
 
@@ -209,28 +216,66 @@ elif [[ "$ownership_state" != 'active' ]]; then
 		bash "$server_root/scripts/widgets-cutover-production.sh"
 fi
 
+core_source_state="$(widgets_core_source_state)" ||
+	fail 'Core legacy Widgets source state is unreadable.'
+core_cleanup_migration_state="$(widgets_core_source_cleanup_migration_state)" ||
+	fail 'Core legacy Widgets cleanup migration state is unreadable.'
+case "$core_source_state|$core_cleanup_migration_state" in
+	present\|pending | present\|rolled-back)
+		[[ "$(widgets_core_source_cleanup_marker_state)" == 'absent' ]] ||
+			fail 'Legacy Core source cannot be used after cleanup evidence staging.'
+		core_source_contract='legacy'
+		;;
+	absent\|applied)
+		widgets_core_source_cleanup_validate_marker ||
+			fail 'Removed Core source requires the durable cleanup marker.'
+		[[ "$(widgets_core_source_cleanup_marker_value phase)" == 'complete' ]] ||
+			fail 'Widgets service-only deployment is blocked until post-cleanup restore evidence is complete.'
+		widgets_core_source_cleanup_require_completion_evidence ||
+			fail 'Widgets Core source cleanup evidence is missing or changed.'
+		widgets_core_source_cleanup_local_retention_is_finalized ||
+			fail 'Widgets Core source cleanup raw VPS evidence is not finalized.'
+		core_source_contract='clean'
+		;;
+	absent\|unfinished)
+		fail 'Core Widgets source was removed before Prisma finalized its ledger; resume the exact full cleanup revision forward.'
+		;;
+	partial\|* | present\|applied | absent\|pending | absent\|rolled-back | *\|unsafe)
+		fail "Core Widgets source/cleanup state is unsafe: source=$core_source_state migration=$core_cleanup_migration_state."
+		;;
+	*)
+		fail "Unsupported Core Widgets source/cleanup state: source=$core_source_state migration=$core_cleanup_migration_state."
+		;;
+esac
+
 current_container_id="$(compose_target ps --status running -q widgets-service 2>/dev/null || true)"
 if [[ ! "$current_container_id" =~ ^[0-9a-f]{64}$ ]]; then
 	[[ "${WIDGETS_AUTOMATIC_PROD_PUSH:-false}" == 'false' ]] ||
 		fail 'Active Widgets ownership has no running service; resume through the manual widgets target.'
-	exec env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
-		EXPECTED_REVISION="$expected_revision" WIDGETS_AUTOMATIC_PROD_PUSH=false \
-		bash "$server_root/scripts/widgets-cutover-production.sh"
+	if [[ "$core_source_contract" == 'legacy' ]]; then
+		exec env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
+			EXPECTED_REVISION="$expected_revision" WIDGETS_AUTOMATIC_PROD_PUSH=false \
+			bash "$server_root/scripts/widgets-cutover-production.sh"
+	fi
+	post_cleanup_service_recovery=true
+	echo 'Recovering the active Widgets service forward without touching the removed Core source.'
 fi
 
 compose_target --profile widgets-migration config --quiet
 
-[[ "$current_container_id" =~ ^[0-9a-f]{64}$ ]] ||
-	fail 'Routine Widgets deploy requires exactly one running service.'
-previous_image_id="$(docker inspect --format '{{.Image}}' "$current_container_id")"
-previous_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$previous_image_id")"
-[[ "$previous_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
-	"$previous_revision" =~ ^[0-9a-f]{40}$ ]] ||
-	fail 'Previous Widgets image identity is invalid.'
-verify_service "$previous_image_id" "$previous_revision" ||
-	fail 'Current Widgets service is not a healthy rollback target.'
-git -C "$server_root" merge-base --is-ancestor "$previous_revision" "$deploy_revision" ||
-	fail 'Routine Widgets deploy does not accept divergent revision history.'
+if [[ "$post_cleanup_service_recovery" != 'true' ]]; then
+	[[ "$current_container_id" =~ ^[0-9a-f]{64}$ ]] ||
+		fail 'Routine Widgets deploy requires exactly one running service.'
+	previous_image_id="$(docker inspect --format '{{.Image}}' "$current_container_id")"
+	previous_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$previous_image_id")"
+	[[ "$previous_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$previous_revision" =~ ^[0-9a-f]{40}$ ]] ||
+		fail 'Previous Widgets image identity is invalid.'
+	verify_service "$previous_image_id" "$previous_revision" ||
+		fail 'Current Widgets service is not a healthy rollback target.'
+	git -C "$server_root" merge-base --is-ancestor "$previous_revision" "$deploy_revision" ||
+		fail 'Routine Widgets deploy does not accept divergent revision history.'
+fi
 
 compose_target build --provenance=false widgets-service
 new_image_id="$(docker image inspect "$WIDGETS_IMAGE" --format '{{.Id}}')"
@@ -259,7 +304,9 @@ if (JSON.stringify(walk("public/widgets")) !== JSON.stringify(expectedAssets)) t
 validate_widgets_database_urls
 
 recreate_started=true
-stop_widgets_service_for_migration
+if [[ "$post_cleanup_service_recovery" != 'true' ]]; then
+	stop_widgets_service_for_migration
+fi
 schema_migration_started=true
 compose_target --profile widgets-migration run --rm --no-deps widgets-migrate
 compose_target --profile widgets-migration run --rm --no-deps widgets-migrate \
@@ -274,6 +321,9 @@ docker run --rm --network host --env WIDGETS_DATABASE_URL --entrypoint node \
 	"$WIDGETS_IMAGE" dist/src/cutover-main.js verify-steady >/dev/null
 [[ "$(widgets_service_identity_state)" == 'active' ]] ||
 	fail 'Widgets ownership marker changed during routine deployment.'
+[[ "$(widgets_core_source_state)" == "$core_source_state" &&
+	"$(widgets_core_source_cleanup_migration_state)" == "$core_cleanup_migration_state" ]] ||
+	fail 'Core Widgets source cleanup state changed during the independent Widgets deployment.'
 
 rollout_verified=true
 trap - ERR

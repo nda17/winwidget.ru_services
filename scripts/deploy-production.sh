@@ -149,6 +149,86 @@ deploy) ;;
 	;;
 esac
 
+widgets_core_cleanup_runtime_deploy=false
+widgets_core_cleanup_stop_recovery_active=false
+widgets_core_cleanup_marker_phase='absent'
+widgets_core_cleanup_source_state="$(widgets_core_source_state)" || {
+	echo 'Unable to read the legacy Widgets Core source state.' >&2
+	exit 1
+}
+widgets_core_cleanup_migration_state="$(
+	widgets_core_source_cleanup_migration_state
+)" || {
+	echo 'Unable to read the Widgets Core source cleanup migration state.' >&2
+	exit 1
+}
+widgets_core_cleanup_marker_file="$(widgets_core_source_cleanup_marker_path)"
+if [[ -e "$widgets_core_cleanup_marker_file" ||
+	-L "$widgets_core_cleanup_marker_file" ]]; then
+	widgets_core_source_cleanup_validate_marker || {
+		echo 'Widgets Core source cleanup marker is present but invalid.' >&2
+		exit 1
+	}
+	widgets_core_cleanup_marker_phase="$(widgets_core_source_cleanup_marker_value phase)"
+	widgets_core_cleanup_marker_revision="$(widgets_core_source_cleanup_marker_value revision)"
+	case "$widgets_core_cleanup_marker_phase|$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" in
+	staged\|present\|pending | staged\|present\|rolled-back | staged\|present\|unfinished | \
+		staged\|absent\|unfinished | staged\|absent\|applied | \
+		applied\|absent\|unfinished | applied\|absent\|applied)
+		[[ "$widgets_core_cleanup_marker_revision" == "$deploy_revision" ]] || {
+			echo "Widgets Core source cleanup is pinned to revision $widgets_core_cleanup_marker_revision." >&2
+			exit 1
+		}
+		if [[ "$widgets_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend revision $deploy_revision is verified but the staged Widgets Core source cleanup remains manual-only."
+			exit 0
+		fi
+		[[ "${WIDGETS_CORE_SOURCE_CLEANUP_APPROVED:-false}" == 'true' &&
+			"${WIDGETS_CORE_SOURCE_CLEANUP_CONFIRMATION:-}" == \
+			'DROP LEGACY WIDGETS CORE SOURCE' ]] || {
+			echo 'The staged Widgets Core source cleanup requires the exact manual confirmation.' >&2
+			exit 1
+		}
+		widgets_core_cleanup_runtime_deploy=true
+		;;
+	complete\|absent\|applied)
+		widgets_core_source_cleanup_require_completion_evidence || {
+			echo 'Completed Widgets Core source cleanup evidence is missing or changed.' >&2
+			exit 1
+		}
+		widgets_core_source_cleanup_local_retention_is_finalized || {
+			echo 'Completed Widgets Core source cleanup raw VPS evidence is not finalized.' >&2
+			exit 1
+		}
+		git -C "$server_root" merge-base --is-ancestor \
+			"$widgets_core_cleanup_marker_revision" "$deploy_revision" || {
+			echo 'Routine deployment would downgrade past the completed Widgets Core source cleanup.' >&2
+			exit 1
+		}
+		;;
+	*)
+		echo "Widgets Core source cleanup state is unsafe: marker=$widgets_core_cleanup_marker_phase source=$widgets_core_cleanup_source_state migration=$widgets_core_cleanup_migration_state." >&2
+		exit 1
+		;;
+	esac
+else
+	case "$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" in
+	present\|pending | present\|rolled-back)
+		if [[ "$widgets_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend revision $deploy_revision is verified but the destructive Widgets Core source cleanup is deferred."
+			echo 'Stage fresh Core and Widgets backup/restore evidence before the exact manual cleanup.'
+			exit 0
+		fi
+		echo 'Manual full deployment is blocked until Widgets Core source cleanup evidence is staged.' >&2
+		exit 1
+		;;
+	*)
+		echo "Widgets Core source/cleanup state has no durable evidence marker: source=$widgets_core_cleanup_source_state migration=$widgets_core_cleanup_migration_state." >&2
+		exit 1
+		;;
+	esac
+fi
+
 expected_integration_worker_kinds="$(
 	reporting_expected_integration_worker_kinds
 )" || {
@@ -1518,6 +1598,111 @@ capture_routine_stop_containers() {
 	done
 }
 
+capture_widgets_core_cleanup_precommit_containers() {
+	local service container_id identity image_id image_revision app_revision status stopped_state
+	local legacy_api_identity expected_legacy_api_identity
+	local marker_revision
+	local -A candidate_ids=()
+	marker_revision="$(widgets_core_source_cleanup_marker_value revision)" || return 1
+	for service in "${routine_stop_services[@]}"; do
+		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+		if [[ -z "$container_id" && "$service" == 'database-restore-worker' ]]; then
+			continue
+		fi
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+			echo "Pre-commit Widgets cleanup requires one exact existing container for $service." >&2
+			return 1
+		}
+		identity="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)"
+		[[ "$identity" == "$target_project|$service" ]] || {
+			echo "Pre-commit Widgets cleanup found an untrusted Compose identity for $service." >&2
+			return 1
+		}
+		image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+		image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id" 2>/dev/null || true)"
+		app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>/dev/null | sed -n 's/^APP_REVISION=//p')"
+		[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ && "$image_revision" =~ ^[0-9a-f]{40}$ &&
+			"$app_revision" == "$image_revision" ]] &&
+			git -C "$server_root" cat-file -e "$image_revision^{commit}" 2>/dev/null &&
+			git -C "$server_root" merge-base --is-ancestor "$image_revision" "$marker_revision" || {
+			echo "Pre-commit Widgets cleanup found an untrusted image revision for $service." >&2
+			return 1
+		}
+		status="$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+		case "$status" in
+		running) ;;
+		exited)
+			stopped_state="$(docker inspect --format '{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}' "$container_id" 2>/dev/null || true)"
+			case "$stopped_state" in
+			'0|false|' | '143|false|') ;;
+			'137|false|')
+				[[ "$service" == 'api' ]] || {
+					echo "Pre-commit Widgets cleanup found an unclean stopped state for $service." >&2
+					return 1
+				}
+				legacy_api_identity="$(docker inspect --format \
+					'{{.Config.Image}}|{{.Image}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+					"$container_id" 2>/dev/null || true)"
+				expected_legacy_api_identity="winwidget-api:git-$LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION|$LEGACY_API_SHUTDOWN_BOOTSTRAP_IMAGE_ID|$LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION|winwidget|api"
+				[[ "$legacy_api_identity" == "$expected_legacy_api_identity" ]] || {
+					echo 'Pre-commit Widgets cleanup rejected an unpinned API SIGKILL state.' >&2
+					return 1
+				}
+				legacy_api_shutdown_bootstrap_observed=true
+				;;
+			*)
+				echo "Pre-commit Widgets cleanup found an unclean stopped state for $service." >&2
+				return 1
+				;;
+			esac
+			;;
+		*)
+			echo "Pre-commit Widgets cleanup found an unsafe $service state: ${status:-unknown}." >&2
+			return 1
+			;;
+		esac
+		candidate_ids["$service"]="$container_id"
+	done
+	routine_stop_container_ids=()
+	for service in "${!candidate_ids[@]}"; do
+		routine_stop_container_ids["$service"]="${candidate_ids[$service]}"
+	done
+}
+
+stop_widgets_core_cleanup_precommit_topology() {
+	local service container_id running
+	capture_widgets_core_cleanup_precommit_containers || return 1
+	for service in "${routine_stop_services[@]}"; do
+		container_id="${routine_stop_container_ids[$service]:-}"
+		[[ -n "$container_id" ]] || continue
+		running="$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)"
+		if [[ "$running" == 'true' ]]; then
+			stop_routine_service_cleanly "$service" 30 || {
+				restore_routine_containers_after_failed_stop || true
+				return 1
+			}
+		elif [[ "$running" != 'false' ]]; then
+			echo "Pre-commit Widgets cleanup lost the captured state for $service." >&2
+			restore_routine_containers_after_failed_stop || true
+			return 1
+		fi
+		if [[ "$service" == 'notification-delivery-worker' &&
+			"$reporting_outcome_route_state_before" != 'steady' ]] &&
+			! wait_for_reporting_outcome_route_drain; then
+			restore_routine_containers_after_failed_stop || true
+			return 1
+		fi
+	done
+	if [[ "$mode" == 'production' ]] && ! prepare_database_restore_storage; then
+		restore_routine_containers_after_failed_stop || true
+		return 1
+	fi
+	if ! verify_core_database_sessions_drained; then
+		restore_routine_containers_after_failed_stop || true
+		return 1
+	fi
+}
+
 detect_interrupted_reporting_outcome_deploy() {
 	local route_state="$1"
 	local service container_id running status image_id image_revision app_revision identity
@@ -1533,7 +1718,11 @@ detect_interrupted_reporting_outcome_deploy() {
 
 	for service in "${routine_stop_services[@]}"; do
 		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
-		if [[ -z "$container_id" && "$service" == 'database-restore-worker' ]]; then
+		# Once the source is absent this is a forward-only recovery. A previous
+		# interrupted Compose replacement may have removed any one of the old
+		# containers already; the remaining deployment recreates every missing
+		# canonical service from the pinned cleanup revision.
+		if [[ -z "$container_id" ]]; then
 			continue
 		fi
 		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
@@ -1782,6 +1971,128 @@ stop_routine_topology_for_core_migration() {
 	if ! verify_core_database_sessions_drained; then
 		restore_routine_containers_after_failed_stop || true
 		return 1
+	fi
+}
+
+widgets_core_cleanup_revalidate_boundary() {
+	local marker_revision marker_previous marker_generation marker_fingerprint marker_snapshot
+	local identity_generation identity_fingerprint identity_snapshot identity_database_id
+	local marker_database_id source_state migration_state verification_image_id verification_revision
+	widgets_core_source_cleanup_validate_marker || {
+		echo 'Widgets Core source cleanup marker changed or became invalid.' >&2
+		return 1
+	}
+	marker_revision="$(widgets_core_source_cleanup_marker_value revision)" || return 1
+	marker_previous="$(widgets_core_source_cleanup_marker_value previous_revision)" || return 1
+	[[ "$marker_revision" == "$APP_REVISION" && "$marker_previous" != "$marker_revision" ]] || return 1
+	git -C "$server_root" merge-base --is-ancestor "$marker_previous" "$marker_revision" || {
+		echo 'Widgets Core source cleanup revision is not a forward descendant of the staged runtime.' >&2
+		return 1
+	}
+	widgets_core_source_cleanup_require_staged_evidence || {
+		echo 'Widgets Core source cleanup dump or restore evidence changed after staging.' >&2
+		return 1
+	}
+	IFS=$'\t' read -r identity_generation identity_fingerprint identity_snapshot identity_database_id \
+		<<<"$(widgets_service_identity_cleanup_evidence)" || return 1
+	marker_generation="$(widgets_core_source_cleanup_marker_value ownership_generation)"
+	marker_fingerprint="$(widgets_core_source_cleanup_marker_value source_database_fingerprint)"
+	marker_snapshot="$(widgets_core_source_cleanup_marker_value source_snapshot_sha256)"
+	marker_database_id="$(widgets_core_source_cleanup_marker_value widgets_database_id)"
+	[[ "$identity_generation" == "$marker_generation" &&
+		"$identity_fingerprint" == "$marker_fingerprint" &&
+		"$identity_snapshot" == "$marker_snapshot" &&
+		"$identity_database_id" == "$marker_database_id" ]] || {
+		echo 'Widgets ownership evidence changed after Core source cleanup staging.' >&2
+		return 1
+	}
+	source_state="$(widgets_core_source_state)" || return 1
+	migration_state="$(widgets_core_source_cleanup_migration_state)" || return 1
+	case "$source_state|$migration_state" in
+	present\|pending | present\|rolled-back | present\|unfinished | \
+		absent\|unfinished | absent\|applied) ;;
+	*)
+		echo "Widgets Core source cleanup boundary is unsafe: source=$source_state migration=$migration_state." >&2
+		return 1
+		;;
+	esac
+	if [[ "$source_state" == 'present' ]]; then
+		verification_image_id="$(docker image inspect --format '{{.Id}}' "$MAINTENANCE_IMAGE" 2>/dev/null)" || return 1
+		verification_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$verification_image_id" 2>/dev/null)" ||
+			return 1
+		[[ "$verification_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+			"$verification_revision" == "$APP_REVISION" ]] || {
+			echo 'Widgets Core cleanup parity check requires the pinned maintenance image.' >&2
+			return 1
+		}
+		widgets_core_source_ids_and_counts_are_covered "$verification_image_id" || {
+			echo 'Legacy Widgets source counts or target ID coverage changed after staging.' >&2
+			return 1
+		}
+	fi
+}
+
+widgets_core_cleanup_migration_url() {
+	local generation snapshot core_backup widgets_backup restore_evidence
+	generation="$(widgets_core_source_cleanup_marker_value ownership_generation)" || return 1
+	snapshot="$(widgets_core_source_cleanup_marker_value source_snapshot_sha256)" || return 1
+	core_backup="$(widgets_core_source_cleanup_marker_value core_backup_sha256)" || return 1
+	widgets_backup="$(widgets_core_source_cleanup_marker_value widgets_backup_sha256)" || return 1
+	restore_evidence="$(widgets_core_source_cleanup_marker_value restore_evidence_sha256)" || return 1
+	widgets_core_source_cleanup_migration_url \
+		"$DATABASE_MIGRATION_URL_PRODUCTION" "$generation" "$snapshot" \
+		"$core_backup" "$widgets_backup" "$restore_evidence"
+}
+
+stop_widgets_core_cleanup_topology_for_recovery() {
+	local service container_id identity status running image_id image_revision
+	routine_stop_container_ids=()
+	for service in "${routine_stop_services[@]}"; do
+		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+		if [[ -z "$container_id" ]]; then
+			continue
+		fi
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+			echo "Widgets Core cleanup recovery requires one exact container for $service." >&2
+			return 1
+		}
+		identity="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)"
+		[[ "$identity" == "$target_project|$service" ]] || return 1
+		image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+		image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id" 2>/dev/null || true)"
+		[[ "$image_revision" =~ ^[0-9a-f]{40}$ ]] &&
+			git -C "$server_root" merge-base --is-ancestor "$image_revision" "$APP_REVISION" || {
+			echo "Widgets Core cleanup found an untrusted $service image." >&2
+			return 1
+		}
+		routine_stop_container_ids["$service"]="$container_id"
+		status="$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+		running="$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)"
+		if [[ "$running" == 'true' ]]; then
+			stop_routine_service_cleanly "$service" 30 || return 1
+		elif [[ "$running" != 'false' || ! "$status" =~ ^(created|exited)$ ]]; then
+			echo "Widgets Core cleanup found an unsafe $service state: ${status:-unknown}." >&2
+			return 1
+		fi
+	done
+	prepare_database_restore_storage || return 1
+	verify_core_database_sessions_drained
+}
+
+recover_widgets_core_cleanup_stop_on_exit() {
+	local source_state migration_state
+	trap - EXIT INT TERM
+	[[ "$widgets_core_cleanup_stop_recovery_active" == 'true' ]] || return
+	source_state="$(widgets_core_source_state 2>/dev/null || printf 'unknown')"
+	migration_state="$(widgets_core_source_cleanup_migration_state 2>/dev/null || printf 'unsafe')"
+	if [[ "$source_state" == 'present' &&
+		"$migration_state" =~ ^(pending|rolled-back|unfinished)$ ]]; then
+		echo 'Widgets Core source cleanup did not commit; restoring the exact pre-migration runtime.' >&2
+		restore_routine_containers_after_failed_stop || true
+	elif [[ "$source_state" == 'absent' ]]; then
+		echo 'Widgets Core source is already absent; old writers will not be restored. Resume the exact cleanup revision forward.' >&2
+	else
+		echo "Widgets Core source cleanup recovery is ambiguous: source=$source_state migration=$migration_state; writers remain stopped." >&2
 	fi
 }
 
@@ -6026,6 +6337,19 @@ if [[ "$reporting_outcome_route_state_before" != 'steady' ]]; then
 	reporting_outcome_route_queues_are_empty false || exit 1
 fi
 
+if [[ "$widgets_core_cleanup_runtime_deploy" == 'true' ]]; then
+	[[ "$reporting_cleanup_runtime_deploy" != 'true' &&
+		"$reporting_interrupted_routine_recovery" != 'true' &&
+		"$notification_delivery_first_cutover" != 'true' &&
+		"$notification_forward_candidate_active" != 'true' &&
+		"$notification_forward_candidate_needs_recovery" != 'true' ]] || {
+		echo 'Widgets Core source cleanup cannot overlap another production cutover or recovery.' >&2
+		exit 1
+	}
+	widgets_core_cleanup_revalidate_boundary || exit 1
+	echo 'Pinned Widgets Core source cleanup evidence was revalidated before service migrations and runtime stop.'
+fi
+
 if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
 	[[ "$notification_delivery_first_cutover" != 'true' &&
 		"$notification_forward_candidate_active" != 'true' &&
@@ -6335,6 +6659,25 @@ else
 			echo 'Reporting cleanup topology did not reach an exact quiescent recovery boundary.' >&2
 			exit 1
 		fi
+	elif [[ "$widgets_core_cleanup_runtime_deploy" == 'true' ]]; then
+		widgets_core_cleanup_stop_recovery_active=true
+		trap recover_widgets_core_cleanup_stop_on_exit EXIT
+		trap 'exit 130' INT
+		trap 'exit 143' TERM
+		widgets_core_cleanup_revalidate_boundary || exit 1
+		widgets_core_cleanup_source_state="$(widgets_core_source_state)" || exit 1
+		if [[ "$widgets_core_cleanup_source_state" == 'present' ]]; then
+			if ! stop_widgets_core_cleanup_precommit_topology; then
+				echo 'Widgets Core source cleanup topology did not reach the quiescent pre-migration boundary.' >&2
+				exit 1
+			fi
+		else
+			if ! stop_widgets_core_cleanup_topology_for_recovery; then
+				echo 'Widgets Core source cleanup forward recovery could not adopt the stopped topology.' >&2
+				exit 1
+			fi
+		fi
+		widgets_core_cleanup_revalidate_boundary || exit 1
 	elif [[ "$reporting_interrupted_routine_recovery" == 'true' ]]; then
 		prepare_database_restore_storage
 		verify_core_database_sessions_drained || {
@@ -6373,10 +6716,59 @@ else
 			fi
 		fi
 	fi
-	if [[ "$reporting_cleanup_runtime_deploy" == 'true' &&
-		"$reporting_cleanup_migration_state" == 'applied' ]]; then
-		echo 'Exact Core cleanup migration is already applied; Prisma deploy is skipped during forward-only recovery.'
-	elif ! compose_target --profile migration run --rm --no-deps migrate; then
+		if [[ "$reporting_cleanup_runtime_deploy" == 'true' &&
+			"$reporting_cleanup_migration_state" == 'applied' ]]; then
+			echo 'Exact Core cleanup migration is already applied; Prisma deploy is skipped during forward-only recovery.'
+		elif [[ "$widgets_core_cleanup_runtime_deploy" == 'true' ]]; then
+			widgets_core_cleanup_source_state="$(widgets_core_source_state)" || exit 1
+			widgets_core_cleanup_migration_state="$(widgets_core_source_cleanup_migration_state)" || exit 1
+			if [[ "$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" == \
+				'present|unfinished' ]]; then
+				compose_target --profile migration run --rm --no-deps migrate \
+					migrate resolve --rolled-back "$WIDGETS_CORE_SOURCE_CLEANUP_MIGRATION_NAME"
+				widgets_core_cleanup_migration_state="$(widgets_core_source_cleanup_migration_state)" || exit 1
+				[[ "$widgets_core_cleanup_migration_state" == 'rolled-back' ]] || exit 1
+			fi
+			if [[ "$widgets_core_cleanup_source_state" == 'present' &&
+				"$widgets_core_cleanup_migration_state" =~ ^(pending|rolled-back)$ ]]; then
+				widgets_core_cleanup_database_url="$(widgets_core_cleanup_migration_url)" || exit 1
+				if ! DATABASE_URL="$widgets_core_cleanup_database_url" \
+					compose_target --profile migration run --rm --no-deps \
+						-e DATABASE_URL migrate; then
+					unset widgets_core_cleanup_database_url
+					widgets_core_cleanup_source_state="$(widgets_core_source_state 2>/dev/null || printf 'unknown')"
+					widgets_core_cleanup_migration_state="$(widgets_core_source_cleanup_migration_state 2>/dev/null || printf 'unsafe')"
+					if [[ "$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" == \
+						'absent|unfinished' ]]; then
+						compose_target --profile migration run --rm --no-deps migrate \
+							migrate resolve --applied "$WIDGETS_CORE_SOURCE_CLEANUP_MIGRATION_NAME"
+					elif [[ "$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" != \
+						'absent|applied' ]]; then
+						echo "Widgets Core cleanup migrate failed before a provable forward boundary: source=$widgets_core_cleanup_source_state migration=$widgets_core_cleanup_migration_state." >&2
+							exit 1
+					fi
+				fi
+				unset widgets_core_cleanup_database_url
+			elif [[ "$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" == \
+				'absent|unfinished' ]]; then
+				compose_target --profile migration run --rm --no-deps migrate \
+					migrate resolve --applied "$WIDGETS_CORE_SOURCE_CLEANUP_MIGRATION_NAME"
+			elif [[ "$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" == \
+				'absent|applied' ]]; then
+				echo 'Widgets Core source cleanup migration is already applied; continuing forward.'
+			else
+				echo "Widgets Core source cleanup cannot continue from source=$widgets_core_cleanup_source_state migration=$widgets_core_cleanup_migration_state." >&2
+				exit 1
+			fi
+			widgets_core_cleanup_source_state="$(widgets_core_source_state)" || exit 1
+			widgets_core_cleanup_migration_state="$(widgets_core_source_cleanup_migration_state)" || exit 1
+			[[ "$widgets_core_cleanup_source_state|$widgets_core_cleanup_migration_state" == 'absent|applied' ]] || {
+				echo "Widgets Core cleanup did not reach absent|applied: source=$widgets_core_cleanup_source_state migration=$widgets_core_cleanup_migration_state." >&2
+				exit 1
+			}
+			widgets_core_source_cleanup_advance_marker applied pending pending || exit 1
+			echo 'Widgets Core legacy source tables were removed and the exact Prisma ledger is applied.'
+		elif ! compose_target --profile migration run --rm --no-deps migrate; then
 		if [[ "$reporting_cleanup_runtime_deploy" != 'true' ]]; then
 			exit 1
 		fi
@@ -6957,6 +7349,18 @@ reporting_verify_database_lifecycle_unchanged
 	echo 'Widgets ownership marker changed during routine deployment.' >&2
 	exit 1
 }
+if [[ "$widgets_core_cleanup_runtime_deploy" == 'true' ]]; then
+	widgets_core_source_cleanup_validate_marker || exit 1
+	[[ "$(widgets_core_source_cleanup_marker_value phase)" == 'applied' &&
+		"$(widgets_core_source_state)" == 'absent' &&
+		"$(widgets_core_source_cleanup_migration_state)" == 'applied' ]] || {
+		echo 'Widgets Core source cleanup runtime passed smoke without a durable absent|applied boundary.' >&2
+		exit 1
+	}
+	widgets_core_cleanup_stop_recovery_active=false
+	trap - EXIT INT TERM
+	echo 'Widgets Core source cleanup runtime is healthy; post-cleanup backup/restore evidence remains required before phase=complete.'
+fi
 
 if [[ "$reporting_cleanup_stop_recovery_active" == 'true' ]]; then
 	reporting_cleanup_stop_recovery_active=false

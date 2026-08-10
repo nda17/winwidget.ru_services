@@ -61,7 +61,10 @@ jobs:
             scripts/deploy-widgets-production.sh
             scripts/widgets-cutover-production.sh
             scripts/test-widgets-cutover-rehearsal.sh
+            scripts/cleanup-widgets-core-source-production.sh
+            scripts/test-widgets-core-source-cleanup-rehearsal.sh
             scripts/export-widgets-cutover-snapshot.mjs
+            prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
           )
           for path in "${required_files[@]}"; do
             test -f "$path"
@@ -71,12 +74,16 @@ jobs:
             scripts/widgets-database-lifecycle.sh \
             scripts/deploy-widgets-production.sh \
             scripts/widgets-cutover-production.sh \
-            scripts/test-widgets-cutover-rehearsal.sh; do
+            scripts/test-widgets-cutover-rehearsal.sh \
+            scripts/cleanup-widgets-core-source-production.sh \
+            scripts/test-widgets-core-source-cleanup-rehearsal.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
           bash scripts/widgets-database-lifecycle.sh --self-test
+          bash scripts/cleanup-widgets-core-source-production.sh --self-test
           bash scripts/test-widgets-cutover-rehearsal.sh --self-test
+          bash scripts/test-widgets-core-source-cleanup-rehearsal.sh --self-test
 
           # ShellCheck runs separately below; its actionlint integration
           # deadlocks while piping this workflow's large inline scripts.
@@ -101,7 +108,9 @@ jobs:
             scripts/widgets-database-lifecycle.sh \
             scripts/deploy-widgets-production.sh \
             scripts/widgets-cutover-production.sh \
-            scripts/test-widgets-cutover-rehearsal.sh
+            scripts/test-widgets-cutover-rehearsal.sh \
+            scripts/cleanup-widgets-core-source-production.sh \
+            scripts/test-widgets-core-source-cleanup-rehearsal.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -1212,6 +1221,11 @@ jobs:
             pnpm --dir apps/reporting run prisma:migrate:deploy
           WIDGETS_DATABASE_URL="$WIDGETS_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/widgets run prisma:migrate:deploy
+
+      - name: Rehearse guarded Widgets Core source cleanup in PostgreSQL 18
+        env:
+          CORE_CLEANUP_REHEARSAL_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/test-widgets-core-source-cleanup-rehearsal.sh --rehearsal
 
       - name: Test Reporting producer PostgreSQL boundaries
         env:

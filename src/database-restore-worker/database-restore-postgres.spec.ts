@@ -106,7 +106,32 @@ describe('database restore PostgreSQL contract', () => {
 	it('preserves the admin database owner and grants maintenance only explicit Core tables', () => {
 		const core = createConfig().targets.core;
 		const repairSql = buildDatabaseOwnershipAndAclRepairSql(core);
+		const verificationSql = buildDatabasePreReopenVerificationSql(core);
 		const reopenSql = buildDatabaseReopenSql(core);
+		const cleanupMigration =
+			'20260810000000_remove_legacy_widgets_core_source';
+		const runtimeAllTablesGrant =
+			'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "public" TO "winwidget_api_runtime"';
+		const legacyTables = [
+			'widgets',
+			'quizzes',
+			'callbacks',
+			'countdown_timers',
+			'stop_offers',
+			'online_consultants',
+			'calculators',
+			'leads',
+			'quiz_leads',
+			'callback_leads',
+			'countdown_timer_leads',
+			'stop_offer_leads',
+			'online_consultant_leads',
+			'calculator_leads',
+			'widget_config_revisions',
+			'widget_runtime_presence',
+			'widget_runtime_daily_metrics',
+			'widget_runtime_daily_step_metrics'
+		];
 
 		expect(reopenSql).toContain(
 			'ALTER DATABASE "default_db" OWNER TO "winwidget_core_admin"'
@@ -120,6 +145,52 @@ describe('database restore PostgreSQL contract', () => {
 		);
 		expect(repairSql).toContain(
 			'REVOKE ALL ON TABLE "public"."reporting_producer_state" FROM "winwidget_api_runtime"'
+		);
+		expect(repairSql).toContain(cleanupMigration);
+		expect(verificationSql).toContain(cleanupMigration);
+		expect(repairSql.indexOf(cleanupMigration)).toBeLessThan(
+			repairSql.indexOf(runtimeAllTablesGrant)
+		);
+		const invariantTablesSql = repairSql.match(
+			/FOREACH legacy_table_name IN ARRAY ARRAY\[([^\]]+)\]::TEXT\[\] LOOP/s
+		)?.[1];
+		expect(invariantTablesSql).toBeDefined();
+		expect(
+			[...(invariantTablesSql ?? '').matchAll(/'([^']+)'/g)].map(
+				match => match[1]
+			)
+		).toEqual(legacyTables);
+		expect(repairSql).toContain(
+			'finished_at IS NOT NULL\n          AND rolled_back_at IS NULL'
+		);
+		expect(repairSql).toContain(
+			'Routine Core restore requires the applied legacy Widgets cleanup migration'
+		);
+		expect(repairSql).toContain(
+			'Core restore contains legacy Widgets relation % after cleanup migration'
+		);
+		expect(repairSql).not.toContain(
+			'"public"."reporting_widget_projection_trigger"()'
+		);
+		expect(repairSql).not.toContain(
+			'"public"."reporting_lead_projection_trigger"()'
+		);
+		expect(verificationSql).not.toContain(
+			'"public"."reporting_widget_projection_trigger"()'
+		);
+		expect(verificationSql).not.toContain(
+			'"public"."reporting_lead_projection_trigger"()'
+		);
+	});
+
+	it('does not apply the Core Widgets cleanup invariant to service restores', () => {
+		const reporting = createConfig().targets.reporting;
+
+		expect(buildDatabaseOwnershipAndAclRepairSql(reporting)).not.toContain(
+			'20260810000000_remove_legacy_widgets_core_source'
+		);
+		expect(buildDatabasePreReopenVerificationSql(reporting)).not.toContain(
+			'20260810000000_remove_legacy_widgets_core_source'
 		);
 	});
 

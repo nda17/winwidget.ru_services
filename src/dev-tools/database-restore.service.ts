@@ -33,8 +33,6 @@ const REPORTING_PRODUCER_FUNCTION_SIGNATURES = [
 	'public.reporting_auth_identity_projection_trigger()',
 	'public.reporting_payment_projection_trigger()',
 	'public.reporting_subscription_projection_trigger()',
-	'public.reporting_widget_projection_trigger()',
-	'public.reporting_lead_projection_trigger()',
 	'public.reporting_settings_projection_trigger()'
 ] as const;
 

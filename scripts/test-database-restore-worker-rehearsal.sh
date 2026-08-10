@@ -1904,8 +1904,6 @@ expected_function_signatures AS (
     'public.reporting_auth_identity_projection_trigger()',
     'public.reporting_payment_projection_trigger()',
     'public.reporting_subscription_projection_trigger()',
-    'public.reporting_widget_projection_trigger()',
-    'public.reporting_lead_projection_trigger()',
     'public.reporting_settings_projection_trigger()'
   ]::text[] ELSE ARRAY[]::text[] END) expected(signature)
 ),
@@ -1985,6 +1983,30 @@ checks AS (
   NOT EXISTS (
     SELECT 1 FROM expected_function_signatures WHERE object_oid IS NULL
   ) AS required_functions_present,
+  (
+    '$target' <> 'core'
+    OR (
+      EXISTS (
+        SELECT 1
+	      FROM \"$schema\"._prisma_migrations
+        WHERE migration_name = '20260810000000_remove_legacy_widgets_core_source'
+          AND finished_at IS NOT NULL
+          AND rolled_back_at IS NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM all_relations relation
+        WHERE relation.relname = ANY(ARRAY[
+          'widgets', 'quizzes', 'callbacks', 'countdown_timers', 'stop_offers',
+          'online_consultants', 'calculators', 'leads', 'quiz_leads',
+          'callback_leads', 'countdown_timer_leads', 'stop_offer_leads',
+          'online_consultant_leads', 'calculator_leads',
+          'widget_config_revisions', 'widget_runtime_presence',
+          'widget_runtime_daily_metrics', 'widget_runtime_daily_step_metrics'
+        ])
+      )
+    )
+  ) AS legacy_widgets_cleanup_exact,
   NOT EXISTS (
     (
       SELECT expected.object_type
@@ -2065,6 +2087,7 @@ SELECT CASE
     AND type_owners_exact
     AND column_acl_exact
     AND required_functions_present
+    AND legacy_widgets_cleanup_exact
     AND default_acl_object_types_exact
     AND default_acl_owner_exact
     AND global_function_default_acl_exact

@@ -77,20 +77,6 @@ WITH expected(
     ('reporting_auth_identity_projection', 'auth_identities', 'public', 'reporting_auth_identity_projection_trigger', 0, ''),
     ('reporting_payment_projection', 'payments', 'public', 'reporting_payment_projection_trigger', 0, ''),
     ('reporting_subscription_projection', 'subscriptions', 'public', 'reporting_subscription_projection_trigger', 0, ''),
-    ('reporting_widget_projection', 'widgets', 'public', 'reporting_widget_projection_trigger', 1, 'wheel\000'),
-    ('reporting_quiz_projection', 'quizzes', 'public', 'reporting_widget_projection_trigger', 1, 'quiz\000'),
-    ('reporting_callback_projection', 'callbacks', 'public', 'reporting_widget_projection_trigger', 1, 'callback\000'),
-    ('reporting_countdown_timer_projection', 'countdown_timers', 'public', 'reporting_widget_projection_trigger', 1, 'countdownTimer\000'),
-    ('reporting_stop_offer_projection', 'stop_offers', 'public', 'reporting_widget_projection_trigger', 1, 'stopOffer\000'),
-    ('reporting_online_consultant_projection', 'online_consultants', 'public', 'reporting_widget_projection_trigger', 1, 'onlineConsultant\000'),
-    ('reporting_calculator_projection', 'calculators', 'public', 'reporting_widget_projection_trigger', 1, 'calculator\000'),
-    ('reporting_wheel_lead_projection', 'leads', 'public', 'reporting_lead_projection_trigger', 2, 'wheel\000widget_id\000'),
-    ('reporting_quiz_lead_projection', 'quiz_leads', 'public', 'reporting_lead_projection_trigger', 2, 'quiz\000quiz_id\000'),
-    ('reporting_callback_lead_projection', 'callback_leads', 'public', 'reporting_lead_projection_trigger', 2, 'callback\000callback_id\000'),
-    ('reporting_countdown_timer_lead_projection', 'countdown_timer_leads', 'public', 'reporting_lead_projection_trigger', 2, 'countdownTimer\000countdown_timer_id\000'),
-    ('reporting_stop_offer_lead_projection', 'stop_offer_leads', 'public', 'reporting_lead_projection_trigger', 2, 'stopOffer\000stop_offer_id\000'),
-    ('reporting_online_consultant_lead_projection', 'online_consultant_leads', 'public', 'reporting_lead_projection_trigger', 2, 'onlineConsultant\000online_consultant_id\000'),
-    ('reporting_calculator_lead_projection', 'calculator_leads', 'public', 'reporting_lead_projection_trigger', 2, 'calculator\000calculator_id\000'),
     ('reporting_settings_projection', 'telegram_bot_settings', 'public', 'reporting_settings_projection_trigger', 0, '')
 ), actual AS (
   SELECT
@@ -121,8 +107,8 @@ SELECT CASE WHEN
   AND EXISTS (
     SELECT 1 FROM reporting_producer_state WHERE id = 'singleton'
   )
-  AND (SELECT count(*) FROM expected) = 19
-  AND (SELECT count(*) FROM actual) = 19
+  AND (SELECT count(*) FROM expected) = 5
+  AND (SELECT count(*) FROM actual) = 5
   AND NOT EXISTS (
     SELECT 1
     FROM expected
@@ -258,8 +244,6 @@ WITH expected_functions(signature) AS (
     ('public.reporting_auth_identity_projection_trigger()'),
     ('public.reporting_payment_projection_trigger()'),
     ('public.reporting_subscription_projection_trigger()'),
-    ('public.reporting_widget_projection_trigger()'),
-    ('public.reporting_lead_projection_trigger()'),
     ('public.reporting_settings_projection_trigger()')
 ), resolved_functions AS (
   SELECT signature, to_regprocedure(signature) AS function_oid
@@ -269,7 +253,7 @@ SELECT CASE WHEN
   (SELECT count(*) FROM pg_roles WHERE rolname IN (
     'winwidget_api_runtime', 'winwidget_maintenance', 'winwidget_backup'
   )) = 3
-  AND (SELECT count(*) FROM resolved_functions WHERE function_oid IS NOT NULL) = 11
+  AND (SELECT count(*) FROM resolved_functions WHERE function_oid IS NOT NULL) = 9
   AND NOT EXISTS (
     SELECT 1
     FROM resolved_functions resolved
@@ -337,8 +321,6 @@ SELECT CASE WHEN
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_auth_identity_projection_trigger()', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_payment_projection_trigger()', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_subscription_projection_trigger()', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.reporting_widget_projection_trigger()', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.reporting_lead_projection_trigger()', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_settings_projection_trigger()', 'EXECUTE')
   AND has_table_privilege('winwidget_maintenance', 'public.reporting_producer_state', 'SELECT')
   AND has_table_privilege('winwidget_backup', 'public.reporting_producer_state', 'SELECT')
@@ -1011,20 +993,6 @@ LOCK TABLE
   "auth_identities",
   "payments",
   "subscriptions",
-  "widgets",
-  "quizzes",
-  "callbacks",
-  "countdown_timers",
-  "stop_offers",
-  "online_consultants",
-  "calculators",
-  "leads",
-  "quiz_leads",
-  "callback_leads",
-  "countdown_timer_leads",
-  "stop_offer_leads",
-  "online_consultant_leads",
-  "calculator_leads",
   "telegram_bot_settings"
 IN SHARE MODE;
 -- Source writers lock this row FOR SHARE from their trigger. Lock source
@@ -1145,20 +1113,6 @@ LOCK TABLE
   "auth_identities",
   "payments",
   "subscriptions",
-  "widgets",
-  "quizzes",
-  "callbacks",
-  "countdown_timers",
-  "stop_offers",
-  "online_consultants",
-  "calculators",
-  "leads",
-  "quiz_leads",
-  "callback_leads",
-  "countdown_timer_leads",
-  "stop_offer_leads",
-  "online_consultant_leads",
-  "calculator_leads",
   "telegram_bot_settings"
 IN SHARE MODE;
 SELECT "enabled" FROM "reporting_producer_state" WHERE "id" = '"'"'singleton'"'"' FOR UPDATE;
@@ -1330,11 +1284,8 @@ SET LOCAL lock_timeout = '30s';
 SET LOCAL statement_timeout = '60s';
 SELECT pg_advisory_xact_lock(hashtext('winwidget.reporting.producer.lifecycle.v1'));
 LOCK TABLE
-  "User", "auth_identities", "payments", "subscriptions", "widgets",
-  "quizzes", "callbacks", "countdown_timers", "stop_offers",
-  "online_consultants", "calculators", "leads", "quiz_leads",
-  "callback_leads", "countdown_timer_leads", "stop_offer_leads",
-  "online_consultant_leads", "calculator_leads", "telegram_bot_settings"
+  "User", "auth_identities", "payments", "subscriptions",
+  "telegram_bot_settings"
 IN SHARE MODE;
 SELECT "enabled" FROM "reporting_producer_state" WHERE "id" = 'singleton' FOR UPDATE;
 DO $reset$

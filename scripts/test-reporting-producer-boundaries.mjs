@@ -34,9 +34,23 @@ const producerFunctionSignatures = [
 	'public.reporting_auth_identity_projection_trigger()',
 	'public.reporting_payment_projection_trigger()',
 	'public.reporting_subscription_projection_trigger()',
-	'public.reporting_widget_projection_trigger()',
-	'public.reporting_lead_projection_trigger()',
 	'public.reporting_settings_projection_trigger()'
+];
+const legacyWidgetsProducerTables = [
+	'widgets',
+	'quizzes',
+	'callbacks',
+	'countdown_timers',
+	'stop_offers',
+	'online_consultants',
+	'calculators',
+	'leads',
+	'quiz_leads',
+	'callback_leads',
+	'countdown_timer_leads',
+	'stop_offer_leads',
+	'online_consultant_leads',
+	'calculator_leads'
 ];
 const producerFunctionSqlArray = producerFunctionSignatures
 	.map(signature => `'${signature}'`)
@@ -261,6 +275,12 @@ const loadLifecycleSql = async () => {
 			/IN SHARE MODE;/,
 			`${name} boundary must fence source writers`
 		);
+		for (const tableName of legacyWidgetsProducerTables) {
+			assert.ok(
+				!sql.includes(`"${tableName}"`),
+				`${name} boundary must not lock removed Widgets table ${tableName}`
+			);
+		}
 	}
 	assert.match(
 		enableSql,
@@ -296,6 +316,16 @@ const loadLifecycleSql = async () => {
 		'Core producer guard must require the expected public function namespace'
 	);
 	assert.match(
+		migrationGuardSql,
+		/\(SELECT count\(\*\) FROM expected\)\s*=\s*5[\s\S]*\(SELECT count\(\*\) FROM actual\)\s*=\s*5/i,
+		'Core producer guard must require the exact five steady-state triggers'
+	);
+	assert.doesNotMatch(
+		migrationGuardSql,
+		/reporting_(?:widget|lead)_projection_trigger/i,
+		'Core producer guard must not retain removed Widgets trigger functions'
+	);
+	assert.match(
 		aclGuardSql,
 		/aclexplode\([\s\S]*privilege\.grantee\s*=\s*0[\s\S]*privilege\.privilege_type\s*=\s*'EXECUTE'/i,
 		'Core producer ACL guard must fail closed when PUBLIC can execute a producer function'
@@ -304,6 +334,11 @@ const loadLifecycleSql = async () => {
 		aclGuardSql,
 		/\('winwidget_maintenance'\)[\s\S]*\('winwidget_backup'\)[\s\S]*has_function_privilege/i,
 		'Core producer ACL guard must reject execute access for restricted service roles'
+	);
+	assert.doesNotMatch(
+		aclGuardSql,
+		/reporting_(?:widget|lead)_projection_trigger/i,
+		'Core producer ACL guard must not retain removed Widgets functions'
 	);
 
 	return { disableSql, enableSql, resetSql };

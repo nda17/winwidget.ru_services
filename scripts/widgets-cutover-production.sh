@@ -262,6 +262,17 @@ assert_checkout_and_environment() {
 		;;
 	*) fail 'Widgets service identity state is invalid.' ;;
 	esac
+	core_source_state="$(widgets_core_source_state)" ||
+		fail 'Legacy Widgets Core source state is unreadable.'
+	core_cleanup_migration_state="$(widgets_core_source_cleanup_migration_state)" ||
+		fail 'Widgets Core source cleanup migration state is unreadable.'
+	core_cleanup_marker_file="$(widgets_core_source_cleanup_marker_path)"
+	if [[ -e "$core_cleanup_marker_file" || -L "$core_cleanup_marker_file" ]]; then
+		fail 'The Widgets ownership cutover is terminal after Core source cleanup staging; use routine or forward cleanup recovery.'
+	fi
+	[[ "$core_source_state" == 'present' &&
+		"$core_cleanup_migration_state" =~ ^(pending|rolled-back)$ ]] ||
+		fail "Widgets ownership cutover cannot use Core source state=$core_source_state migration=$core_cleanup_migration_state."
 }
 
 export_image_identity() {
