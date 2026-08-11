@@ -61,6 +61,8 @@ jobs:
       # CI-only fixture values. Production still comes exclusively from the
       # protected root-owned backend env on the VPS.
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      YOOKASSA_PRODUCTION_SHOP_ID: ci_billing_shop
+      YOOKASSA_PRODUCTION_SECRET_KEY: ci_billing_secret_key_at_least_32_chars
       S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
       S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
 
