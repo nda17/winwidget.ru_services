@@ -3225,6 +3225,10 @@ pre_reporting_narrow_integration_kinds="$(
 	normalize_csv \
 		"webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,auto-renewal"
 )"
+pre_billing_narrow_integration_kinds="$(
+	normalize_csv \
+		"telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,auto-renewal"
+)"
 broad_integration_kinds="$(
 	normalize_csv \
 		"webhook,bitrix24,amo-crm,payment-telegram,limit-telegram,daily-summary-telegram"
@@ -3366,16 +3370,22 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 			current_integration_kinds_normalized="$(
 				normalize_csv "$current_integration_kinds"
 			)"
-			if ! reporting_cutover_worker_kinds_allowed \
+			if reporting_cutover_worker_kinds_allowed \
 				"$current_integration_kinds_normalized" \
 				"$narrow_integration_kinds" \
 				"$pre_reporting_narrow_integration_kinds"; then
+				:
+			elif [[ "$billing_database_phase" == 'prepared' &&
+				"$current_integration_kinds_normalized" == \
+				"$pre_billing_narrow_integration_kinds" ]]; then
+				echo 'Allowing the pre-Billing integration worker only for its one-way Billing consumer bootstrap.'
+			else
 				echo "Cutover marker exists, but the live integration worker still owns an unexpected kind set." >&2
 				echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
 				exit 1
 			fi
 			if [[ "$current_integration_kinds_normalized" != "$narrow_integration_kinds" ]]; then
-				echo 'Allowing the pre-Reporting integration worker only for its one-way audit-consumer bootstrap.'
+				echo 'The integration worker will be recreated with the current exact ownership contract.'
 			fi
 			current_notification_delivery_kinds="$(
 				container_env_value \
@@ -4298,11 +4308,15 @@ provision_rabbitmq_user \
 	''
 assert_campaigns_shared_rabbitmq_topology
 assert_reporting_shared_rabbitmq_topology
-post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	integration_worker_read_pattern="$legacy_integration_read_pattern"
+elif [[ "$billing_database_phase" == 'active' ||
+	"$billing_database_phase" == 'complete' ]]; then
+	integration_worker_read_pattern="$post_billing_integration_read_pattern"
 fi
 provision_rabbitmq_user \
 	"$integration_user" \
@@ -5163,8 +5177,13 @@ run()
 verify_exact_worker_consumer_ownership() {
 	local close_legacy_orphans="${1:-false}"
 	local notification_owner="${2:-notification}"
+	local billing_owner_active='false'
 	local notification_queue_names_json
 	local campaigns_queue_names_json
+	if [[ "$billing_database_phase" == 'active' ||
+		"$billing_database_phase" == 'complete' ]]; then
+		billing_owner_active='true'
+	fi
 	notification_queue_names_json="$(
 		docker run --rm --network none \
 			--entrypoint node "$NOTIFICATION_DELIVERY_IMAGE" \
@@ -5194,6 +5213,7 @@ process.stdout.write(JSON.stringify(Object.values(CAMPAIGNS_QUEUE_NAMES)));
 		-e "CLOSE_LEGACY_NOTIFICATION_CONSUMERS=$close_legacy_orphans" \
 		-e "EXPECTED_NOTIFICATION_QUEUE_OWNER=$notification_owner" \
 		-e "EXPECTED_INTEGRATION_KINDS=$expected_integration_worker_kinds" \
+		-e "BILLING_OWNER_ACTIVE=$billing_owner_active" \
 		-e "NOTIFICATION_QUEUE_NAMES_JSON=$notification_queue_names_json" \
 		-e "CAMPAIGNS_QUEUE_NAMES_JSON=$campaigns_queue_names_json" \
 		--entrypoint node \
@@ -5260,6 +5280,13 @@ const run = async () => {
 		process.env.RABBITMQ_INTEGRATION_WORKER_URL,
 		"RABBITMQ_INTEGRATION_WORKER_URL",
 	);
+	const billingOwnerActive = process.env.BILLING_OWNER_ACTIVE === "true";
+	const billingUser = billingOwnerActive
+		? decodeUser(
+				process.env.RABBITMQ_BILLING_WORKER_URL,
+				"RABBITMQ_BILLING_WORKER_URL",
+			)
+		: null;
 	const notificationUser = decodeUser(
 		process.env.RABBITMQ_NOTIFICATION_DELIVERY_URL,
 		"RABBITMQ_NOTIFICATION_DELIVERY_URL",
@@ -5345,11 +5372,24 @@ const run = async () => {
 			notification: true,
 		},
 		{
-			kinds: expectedIntegrationKinds,
+			kinds: expectedIntegrationKinds.filter(
+				kind => !(billingOwnerActive && kind === "auto-renewal"),
+			),
 			user: integrationUser,
 			connectionName: "winwidget-integration-worker",
 			notification: false,
 		},
+		...(billingOwnerActive
+			? [
+					{
+						queues: [MESSAGING_QUEUE_NAMES["auto-renewal"]],
+						user: billingUser,
+						connectionName: "winwidget-billing-worker",
+						notification: false,
+						includeDeadLetter: false,
+					},
+				]
+			: []),
 		{
 			queues: campaignsQueues,
 			user: campaignsUser,
@@ -5456,6 +5496,21 @@ const run = async () => {
 					`RabbitMQ Campaigns parking queue ${queue} must have no consumers`,
 				);
 			}
+		}
+	}
+
+	if (billingOwnerActive) {
+		const queue = `${MESSAGING_QUEUE_NAMES["auto-renewal"]}.dead-letter`;
+		const state = await request(
+			`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(queue)}`,
+		);
+		const consumers = Array.isArray(state?.consumer_details)
+			? state.consumer_details
+			: [];
+		if (consumers.length !== 0) {
+			throw new OwnershipError(
+				`RabbitMQ Billing parking queue ${queue} must have no consumers`,
+			);
 		}
 	}
 
@@ -7294,8 +7349,14 @@ check_deployment_revision() {
 }
 
 check_messaging_readiness() {
+	local billing_owner_active='false'
+	if [[ "$billing_database_phase" == 'active' ||
+		"$billing_database_phase" == 'complete' ]]; then
+		billing_owner_active='true'
+	fi
 	compose_target exec -T \
 		-e "MESSAGING_READINESS_STARTED_AT=$messaging_readiness_started_at" \
+		-e "BILLING_OWNER_ACTIVE=$billing_owner_active" \
 		-e "INTEGRATION_WORKER_KINDS=$(get_env_value INTEGRATION_WORKER_KINDS)" \
 		-e "MAINTENANCE_WORKER_KINDS=$(get_env_value MAINTENANCE_WORKER_KINDS)" \
 		-e "NOTIFICATION_DELIVERY_KINDS=$(get_env_value NOTIFICATION_DELIVERY_KINDS)" \
@@ -7306,7 +7367,8 @@ const {
 	INTEGRATION_KINDS,
 	MAINTENANCE_KINDS,
 	NOTIFICATION_DELIVERY_KINDS,
-	MESSAGING_QUEUE_NAMES
+	MESSAGING_QUEUE_NAMES,
+	getMessagingQueueHealthExpectations
 } = require('./dist/src/messaging/messaging.constants.js');
 
 class ReadinessError extends Error {}
@@ -7358,12 +7420,20 @@ const run = async () => {
 			NOTIFICATION_DELIVERY_KINDS
 		)
 	];
-	const requiredQueues = requiredKinds.flatMap(kind => {
+	const requiredMainQueues = new Set(requiredKinds.map(kind => {
 		const queue = MESSAGING_QUEUE_NAMES[kind];
 		if (!queue) {
 			throw new ReadinessError(`RabbitMQ queue is unknown for ${kind}`);
 		}
-		return [queue, `${queue}.dead-letter`];
+		return queue;
+	}));
+	const requiredQueues = getMessagingQueueHealthExpectations({
+		billingOwner: process.env.BILLING_OWNER_ACTIVE === 'true'
+	}).filter(expectation => {
+		const base = expectation.name.endsWith('.dead-letter')
+			? expectation.name.slice(0, -'.dead-letter'.length)
+			: expectation.name;
+		return requiredMainQueues.has(base);
 	});
 	const freshAfter = new Date(Math.max(startedAt, Date.now() - 30_000));
 	const prisma = new PrismaClient({
@@ -7430,7 +7500,8 @@ const run = async () => {
 				);
 			}
 
-			for (const queue of requiredQueues) {
+			for (const expectation of requiredQueues) {
+			const queue = expectation.name;
 			let response;
 			try {
 				response = await fetch(
@@ -7452,9 +7523,14 @@ const run = async () => {
 				);
 			}
 			const state = await response.json();
-			if (!Number.isInteger(state.consumers) || state.consumers < 1) {
+			const consumersMatch =
+				Number.isInteger(state.consumers) &&
+				(expectation.consumerExpectation === 'none'
+					? state.consumers === 0
+					: state.consumers >= 1);
+			if (!consumersMatch) {
 				throw new ReadinessError(
-					`RabbitMQ queue has no consumers: ${queue}`
+					`RabbitMQ queue consumer ownership drifted: ${queue}`
 				);
 			}
 		}

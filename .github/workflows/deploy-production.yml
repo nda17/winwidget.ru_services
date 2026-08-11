@@ -4373,6 +4373,11 @@ jobs:
                 "campaign-admin-audit",
                 "reporting-admin-audit",
                 "widgets-admin-audit",
+                "billing-admin-audit",
+                "billing-payment-projection",
+                "billing-subscription-projection",
+                "billing-affiliate-projection",
+                "billing-settings-projection",
                 "auto-renewal",
               ];
               if (
@@ -6518,6 +6523,19 @@ jobs:
             "scripts/deploy-production.sh",
             "utf8",
           );
+          for (const ownershipNeedle of [
+            '-e "BILLING_OWNER_ACTIVE=$billing_owner_active"',
+            "process.env.RABBITMQ_BILLING_WORKER_URL",
+            'connectionName: "winwidget-billing-worker"',
+            'kind => !(billingOwnerActive && kind === "auto-renewal")',
+            "RabbitMQ Billing parking queue",
+          ]) {
+            if (!deployScript.includes(ownershipNeedle)) {
+              throw new Error(
+                `Billing auto-renewal ownership gate is missing: ${ownershipNeedle}`,
+              );
+            }
+          }
           const autoRenewalQueue =
             monolith.MESSAGING_QUEUE_NAMES["auto-renewal"];
           for (const patternName of [
@@ -6543,6 +6561,94 @@ jobs:
                   `${patternName} does not permit auto-renewal queue ${queue}`,
                 );
               }
+            }
+          }
+          const postCutoverMatch = deployScript.match(
+            /^post_cutover_integration_read_pattern='([^']+)'$/m,
+          );
+          if (!postCutoverMatch) {
+            throw new Error(
+              "Post-cutover RabbitMQ permission pattern is missing",
+            );
+          }
+          const postCutoverPattern = new RegExp(postCutoverMatch[1]);
+          const billingProjectionKinds = [
+            "billing-admin-audit",
+            "billing-payment-projection",
+            "billing-subscription-projection",
+            "billing-affiliate-projection",
+            "billing-settings-projection",
+          ];
+          for (const kind of billingProjectionKinds) {
+            const queue = monolith.MESSAGING_QUEUE_NAMES[kind];
+            for (const candidate of [
+              queue,
+              `${queue}.dead-letter`,
+              `${queue}.retry-v2.1`,
+            ]) {
+              if (!postCutoverPattern.test(candidate)) {
+                throw new Error(
+                  `post_cutover_integration_read_pattern does not permit ${candidate}`,
+                );
+              }
+            }
+          }
+          const postBillingMatch = deployScript.match(
+            /^post_billing_integration_read_pattern='([^']+)'$/m,
+          );
+          if (!postBillingMatch) {
+            throw new Error(
+              "Post-Billing RabbitMQ permission pattern is missing",
+            );
+          }
+          const billingCutoverScript = fs.readFileSync(
+            "scripts/billing-cutover-production.sh",
+            "utf8",
+          );
+          const cutoverPostBillingMatch = billingCutoverScript.match(
+            /^readonly core_integration_post_billing_read_pattern='([^']+)'$/m,
+          );
+          if (
+            !cutoverPostBillingMatch ||
+            cutoverPostBillingMatch[1] !== postBillingMatch[1]
+          ) {
+            throw new Error(
+              "Billing cutover and routine deploy integration permissions differ",
+            );
+          }
+          const postBillingPattern = new RegExp(postBillingMatch[1]);
+          for (const kind of billingProjectionKinds) {
+            const queue = monolith.MESSAGING_QUEUE_NAMES[kind];
+            if (!postBillingPattern.test(queue)) {
+              throw new Error(
+                `post_billing_integration_read_pattern does not permit ${queue}`,
+              );
+            }
+          }
+          for (const candidate of [
+            autoRenewalQueue,
+            `${autoRenewalQueue}.dead-letter`,
+            `${autoRenewalQueue}.retry-v2.1`,
+          ]) {
+            if (postBillingPattern.test(candidate)) {
+              throw new Error(
+                `post_billing_integration_read_pattern permits Billing-owned ${candidate}`,
+              );
+            }
+          }
+          for (const candidate of [
+            "winwidget.billing.identity.v1",
+            "winwidget.billing.notification-delivery-outcome",
+            "winwidget.lead-integration.webhook",
+            "winwidget.notification.campaign.email.v2",
+          ]) {
+            if (
+              postCutoverPattern.test(candidate) ||
+              postBillingPattern.test(candidate)
+            ) {
+              throw new Error(
+                `Core integration permission permits a service-owned queue: ${candidate}`,
+              );
             }
           }
 
@@ -6964,7 +7070,7 @@ jobs:
           RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
         run: pnpm run test:messaging-integration
 
-      - name: Reporting admin audit restricted integration-user smoke
+      - name: Core restricted integration-user smoke
         env:
           RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
         run: |
@@ -6977,7 +7083,7 @@ jobs:
               integration_ci \
               '^$' \
               '^(winwidget\.retry|winwidget\.dead-letter)$' \
-              '^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+              '^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_user_tags integration_ci
           docker exec "$RABBITMQ_CONTAINER_ID" \
@@ -6988,7 +7094,7 @@ jobs:
               rabbitmqctl --silent list_user_permissions integration_ci |
               awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }'
           )" = \
-            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
           docker run --rm \
             --network host \
             --env ADMIN_URL=amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget \
@@ -7001,6 +7107,13 @@ jobs:
           const workerUrl = process.env.WORKER_URL;
           const queue = "winwidget.admin.audit.reporting.v1";
           const routingKey = "admin.audit.reporting.v1";
+          const readableQueues = [
+            "winwidget.admin.audit.billing.v1",
+            "winwidget.core.billing.payment-details.v1",
+            "winwidget.core.billing.subscription-details.v1",
+            "winwidget.core.billing.affiliate.v1",
+            "winwidget.core.billing.settings.v1",
+          ];
           (async () => {
             const worker = await amqp.connect(workerUrl);
             const admin = await amqp.connect(adminUrl);
@@ -7008,6 +7121,13 @@ jobs:
               const consumer = await worker.createChannel();
               const publisher = await admin.createConfirmChannel();
               try {
+                for (const readableQueue of readableQueues) {
+                  const registration = await consumer.consume(
+                    readableQueue,
+                    () => {},
+                  );
+                  await consumer.cancel(registration.consumerTag);
+                }
                 let resolveReceived;
                 let rejectReceived;
                 const received = new Promise((resolve, reject) => {

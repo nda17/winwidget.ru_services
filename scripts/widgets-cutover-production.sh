@@ -926,7 +926,7 @@ switch_core_integration_rabbitmq_permissions() {
 		fail 'RABBITMQ_INTEGRATION_WORKER_URL must use winwidget-integration.'
 	provision_rabbitmq_user "$username" "$password_base64" \
 		'^$' '^(winwidget\.retry|winwidget\.dead-letter)$' \
-		'^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+		'^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 }
 
 rabbitmq_queue_listing() {

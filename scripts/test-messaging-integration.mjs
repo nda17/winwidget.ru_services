@@ -134,6 +134,11 @@ const requiredQueues = [
 	'winwidget.admin.audit.campaigns.v1',
 	'winwidget.admin.audit.reporting.v1',
 	'winwidget.admin.audit.widgets.v1',
+	'winwidget.admin.audit.billing.v1',
+	'winwidget.core.billing.payment-details.v1',
+	'winwidget.core.billing.subscription-details.v1',
+	'winwidget.core.billing.affiliate.v1',
+	'winwidget.core.billing.settings.v1',
 	'winwidget.payment.auto-renewal',
 	'winwidget.maintenance.database-backup'
 ];

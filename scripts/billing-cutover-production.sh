@@ -50,6 +50,8 @@ readonly billing_worker_read_pattern='^winwidget\.(events|billing\.(retry|dead-l
 readonly billing_publisher_write_pattern='^winwidget\.(events|billing\.(retry|dead-letter))$'
 readonly billing_worker_topic_read_pattern='^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.settings\.source\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v1|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$'
 readonly billing_publisher_topic_write_pattern='^(payment\.succeeded\.v1|payment\.notification\.telegram\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.subscription-expiry\.(email|telegram)\.requested\.v1|billing\.(payment|subscription)(\.details)?\.changed\.v1|billing\.(affiliate|settings)\.changed\.v1|admin\.audit\.billing\.v1)$'
+readonly core_integration_write_pattern='^(winwidget\.retry|winwidget\.dead-letter)$'
+readonly core_integration_post_billing_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 
 # shellcheck source=scripts/billing-release-identity.sh
 source "$server_root/scripts/billing-release-identity.sh"
@@ -896,6 +898,49 @@ billing_cutover_provision_rabbit() {
 		-p "$publisher_vhost" "$publisher_user" winwidget.events \
 		"$billing_publisher_topic_write_pattern" '^$' >/dev/null
 	unset worker_password publisher_password worker_credentials publisher_credentials
+}
+
+billing_cutover_restrict_core_integration_permissions() {
+	local container_id user vhost listing
+	container_id="$(billing_compose "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE" ps --status running -q rabbitmq)"
+	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] ||
+		billing_cutover_fail 'Exactly one healthy RabbitMQ container is required.' ||
+		return 1
+	user="$(billing_cutover_rabbit_user RABBITMQ_INTEGRATION_WORKER_URL)" ||
+		return 1
+	[[ "$user" == 'winwidget-integration' ]] || return 1
+	vhost="$(billing_read_env_value "$ENV_FILE" RABBITMQ_VHOST)" || return 1
+	[[ "$vhost" == 'winwidget' ]] || return 1
+	docker exec \
+		-e "RABBITMQ_PERMISSION_USER=$user" \
+		-e "RABBITMQ_PERMISSION_VHOST=$vhost" \
+		-e "RABBITMQ_PERMISSION_WRITE=$core_integration_write_pattern" \
+		-e "RABBITMQ_PERMISSION_READ=$core_integration_post_billing_read_pattern" \
+		"$container_id" sh -euc '
+rabbitmqctl set_permissions -p "$RABBITMQ_PERMISSION_VHOST" \
+  "$RABBITMQ_PERMISSION_USER" "^$" "$RABBITMQ_PERMISSION_WRITE" \
+  "$RABBITMQ_PERMISSION_READ"
+' >/dev/null
+	listing="$(docker exec "$container_id" rabbitmqctl --silent \
+		list_user_permissions "$user")" || return 1
+	printf '%s\n' "$listing" | \
+		EXPECTED_VHOST="$vhost" \
+		EXPECTED_WRITE="$core_integration_write_pattern" \
+		EXPECTED_READ="$core_integration_post_billing_read_pattern" \
+		node -e '
+const fs = require("node:fs");
+const rows = fs.readFileSync(0, "utf8").trim().split("\n").filter(Boolean)
+  .map(line => line.trim().split(/\s+/));
+if (
+  rows.length !== 1 || rows[0].length !== 4 ||
+  rows[0][0] !== process.env.EXPECTED_VHOST || rows[0][1] !== "^$" ||
+  rows[0][2] !== process.env.EXPECTED_WRITE ||
+  rows[0][3] !== process.env.EXPECTED_READ
+) process.exit(1);
+' || billing_cutover_fail \
+		'Core integration RabbitMQ permissions were not narrowed after Billing ownership.'
+	unset listing
 }
 
 billing_cutover_build_candidate_images() {
@@ -1975,6 +2020,7 @@ billing_cutover_run() {
 		phase='forward-only'
 	fi
 	if [[ "$phase" == 'forward-only' ]]; then
+		billing_cutover_restrict_core_integration_permissions
 		handoff_redeliver="$(billing_cutover_auto_renewal_redeliver \
 			"$billing_auto_renewal_core_evidence")"
 		billing_cutover_wait_auto_renewal_ownership 0 '' '' detached \
@@ -2130,12 +2176,14 @@ billing_cutover_status() {
 
 billing_cutover_self_test() {
 	local source forbidden_business_publish
-	local forbidden_env_replace rollout_source handoff_source
+	local forbidden_env_replace rollout_source handoff_source permission_source
 	source="$(<"$server_root/scripts/billing-cutover-production.sh")"
 	rollout_source="$(declare -f billing_cutover_prepare \
 		billing_cutover_install_core_expand_migration \
 		billing_cutover_recover_core_publisher)"
 	handoff_source="$(declare -f billing_cutover_run)"
+	permission_source="$(declare -f \
+		billing_cutover_restrict_core_integration_permissions)"
 	forbidden_business_publish="rabbitmqadmin $(printf publish)"
 	forbidden_env_replace="mv -f \"\$temporary_env\" \"\$ENV_FILE\""
 	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
@@ -2167,6 +2215,8 @@ billing_cutover_self_test() {
 		"$source" == *'backend-env-with-billing-routes.candidate'* &&
 		"$source" == *'winwidget-integration-worker'* &&
 		"$source" == *'winwidget-billing-worker'* &&
+		"$source" == *'core_integration_post_billing_read_pattern'* &&
+		"$source" == *'list_user_permissions'* &&
 		"$source" != *"$forbidden_business_publish"* &&
 		"$source" != *"$forbidden_env_replace"* &&
 		"$source" == *'notification.subscription-expiry'* &&
@@ -2176,6 +2226,11 @@ billing_cutover_self_test() {
 		"$source" == *'providerOperationsInFlight'* &&
 		"$source" == *'ABORT BILLING CUTOVER'* &&
 		"$source" == *'STAGE BILLING CLEANUP REVISION'* ]] || return 1
+	[[ "$permission_source" == *'rabbitmqctl set_permissions'* &&
+		"$permission_source" == *'list_user_permissions'* &&
+		"$permission_source" != *'change_password'* &&
+		"$permission_source" != *'clear_permissions'* &&
+		"$permission_source" != *'RABBITMQ_PROVISION_PASSWORD'* ]] || return 1
 	printf '%s' "$rollout_source" | node -e '
 const fs = require("node:fs");
 const source = fs.readFileSync(0, "utf8");
@@ -2236,6 +2291,7 @@ ordered([
   "winwidget-integration-worker",
   "billing_cutover_run_core_cli activate",
   "billing_auto_renewal_detached_evidence",
+  "billing_cutover_restrict_core_integration_permissions",
   "billing_cutover_run_billing_cli activate",
   "deploy-billing-production.sh",
   "winwidget-billing-worker",
