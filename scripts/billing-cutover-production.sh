@@ -1314,7 +1314,7 @@ billing_cutover_start_dark_source_worker() {
 	billing_cutover_source_consumers_are 0 ||
 		billing_cutover_fail \
 			'Billing source queues have a partial/competing consumer set.' || return 1
-	env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
+	env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" \
 		EXPECTED_REVISION="$EXPECTED_REVISION" BILLING_DEPLOY_SKIP_BUILD=true \
 		bash "$server_root/scripts/deploy-billing-production.sh" --deploy
 	billing_cutover_verify_dark_source_topology
@@ -2989,7 +2989,7 @@ billing_cutover_prepare() {
 	billing_database_require_pinned_candidate_images
 	billing_cutover_prepare_route_artifacts
 	billing_cutover_provision_rabbit
-	env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
+	env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" \
 		EXPECTED_REVISION="$EXPECTED_REVISION" BILLING_DEPLOY_SKIP_BUILD=true \
 		bash "$server_root/scripts/deploy-billing-production.sh" --deploy
 	billing_cutover_verify_dark_source_topology
@@ -3201,7 +3201,7 @@ billing_cutover_run() {
 		*) billing_cutover_fail \
 			'Billing service is not in an activatable forward-recovery phase.' || return 1 ;;
 		esac
-		env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
+		env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" \
 			EXPECTED_REVISION="$EXPECTED_REVISION" BILLING_DEPLOY_SKIP_BUILD=true \
 			bash "$server_root/scripts/deploy-billing-production.sh" --deploy
 		billing_cutover_wait_auto_renewal_ownership 1 \
@@ -3813,7 +3813,7 @@ billing_cutover_self_test() {
 	local forbidden_env_replace rollout_source handoff_source permission_source
 	local restore_gate_source recovery_source synthetic_source reconcile_source
 	local initialize_source cleanup_stage_source active_runtime_source abort_source
-	local migration_run_source
+	local migration_run_source billing_deploy_invocation_source
 	source="$(<"$server_root/scripts/billing-cutover-production.sh")"
 	rollout_source="$(declare -f billing_cutover_prepare \
 		billing_cutover_install_core_expand_migration \
@@ -3837,6 +3837,9 @@ billing_cutover_self_test() {
 	migration_run_source="$(declare -f billing_cutover_core_migration_state \
 		billing_cutover_core_outbox_state \
 		billing_cutover_install_core_expand_migration)"
+	billing_deploy_invocation_source="$(declare -f \
+		billing_cutover_start_dark_source_worker billing_cutover_prepare \
+		billing_cutover_run)"
 	abort_source="$(declare -f billing_cutover_abort \
 		billing_cutover_require_abort_route_state \
 		billing_cutover_validate_route_env_rollback_sync)"
@@ -3922,6 +3925,10 @@ billing_cutover_self_test() {
 		return 1
 	[[ "$migration_run_source" == *'--profile migration run --rm -T --no-deps'* &&
 		"$migration_run_source" != *'run --rm -T --no-deps --no-build'* ]] ||
+		return 1
+	[[ "$billing_deploy_invocation_source" == *'deploy-billing-production.sh'* &&
+		"$billing_deploy_invocation_source" == *'BILLING_DEPLOY_SKIP_BUILD=true'* &&
+		"$billing_deploy_invocation_source" != *'COMPOSE_FILE="$COMPOSE_FILE"'* ]] ||
 		return 1
 	printf '%s' "$abort_source" | node -e '
 const fs = require("node:fs");
