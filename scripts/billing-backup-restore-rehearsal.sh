@@ -119,6 +119,37 @@ billing_restore_validate_output_path() {
 	(( (8#$mode & 0022) == 0 ))
 }
 
+billing_restore_stream_synthetic_dump() {
+	[[ $# -eq 2 ]] || return 1
+	local container="$1" destination="$2" stage
+	[[ -n "$container" && -n "$work_root" && "$destination" == "$work_root/"* \
+		&& ! -e "$destination" && ! -L "$destination" ]] || return 1
+	stage="$(mktemp "$work_root/.billing-synthetic-dump.XXXXXX")"
+	if ! docker exec "$container" pg_dump --host 127.0.0.1 \
+		--username winwidget_billing_backup \
+		--dbname winwidget_billing --format custom --compress=9 --no-owner \
+		--no-acl --schema billing >"$stage"; then
+		rm -f -- "$stage"
+		return 1
+	fi
+	if [[ ! -s "$stage" ]]; then
+		rm -f -- "$stage"
+		return 1
+	fi
+	chmod 600 "$stage"
+	mv -n -- "$stage" "$destination"
+	[[ ! -e "$stage" && ! -L "$stage" && -s "$destination" ]]
+}
+
+billing_restore_stream_synthetic_restore() {
+	[[ $# -eq 2 ]] || return 1
+	local container="$1" source="$2"
+	[[ -n "$container" && -f "$source" && ! -L "$source" && -s "$source" ]] || return 1
+	docker exec -i "$container" pg_restore --exit-on-error \
+		--single-transaction --no-owner --no-acl --role winwidget_billing_migration \
+		--username postgres --dbname winwidget_billing <"$source" >/dev/null
+}
+
 billing_restore_phase_contract() {
 	case "$phase" in
 	pre-cutover)
@@ -193,7 +224,7 @@ NODE
 billing_restore_self_test() {
 	local source_text saved_phase saved_core saved_pre saved_post
 	local saved_manifest saved_evidence saved_pre_evidence
-	local forbidden_env_file forbidden_docker_pull test_root generation_value
+	local forbidden_env_file forbidden_docker_pull forbidden_docker_cp test_root generation_value
 	saved_phase="$phase"
 	saved_core="$core_pre_dump"
 	saved_pre="$billing_pre_dump"
@@ -277,11 +308,27 @@ NODE
 		"$(printf 'a%.0s' {1..40})" 1 "$(printf 'f%.0s' {1..64})" \
 		"sha256:$(printf 'b%.0s' {1..64})" "sha256:$(printf 'c%.0s' {1..64})" \
 		>/dev/null 2>&1; then return 1; fi
-	rm -f -- "$test_root/manifest.json" "$test_root/pre.json"
+	(
+		work_root="$test_root"
+		docker() {
+			[[ "$1" == exec ]] || return 1
+			if [[ "${2:-}" == '-i' ]]; then
+				cat >"$test_root/restored.dump"
+				return
+			fi
+			printf 'PGDMPsynthetic-stream-regression'
+		}
+		billing_restore_stream_synthetic_dump synthetic-source "$test_root/streamed.dump" || return 1
+		billing_restore_stream_synthetic_restore synthetic-restore "$test_root/streamed.dump" || return 1
+		cmp -s "$test_root/streamed.dump" "$test_root/restored.dump" || return 1
+	)
+	rm -f -- "$test_root/manifest.json" "$test_root/pre.json" \
+		"$test_root/streamed.dump" "$test_root/restored.dump"
 	rmdir -- "$test_root"
 	source_text="$(<"${BASH_SOURCE[0]}")"
 	forbidden_env_file='.env.''production'
 	forbidden_docker_pull='docker ''pull'
+	forbidden_docker_cp='docker ''cp'
 	forbidden_port_bindings_json='{{json ''.HostConfig.PortBindings}}'
 	[[ "$source_text" == *'--network none'* \
 		&& "$source_text" == *'{{len .HostConfig.PortBindings}}'* \
@@ -297,6 +344,8 @@ NODE
 		&& "$source_text" == *'runner_tracked_blob'* \
 		&& "$source_text" == *'runner_worktree_blob'* \
 		&& "$source_text" == *'billing_restore_run_synthetic'* \
+		&& "$source_text" == *'billing_restore_stream_synthetic_dump'* \
+		&& "$source_text" == *'billing_restore_stream_synthetic_restore'* \
 		&& "$source_text" == *'billing_restore_verify_migration_ledger'* \
 		&& "$source_text" == *'billing_restore_verify_core_acl'* \
 		&& "$source_text" == *'billing_restore_verify_billing_acl'* \
@@ -307,6 +356,7 @@ NODE
 		&& "$source_text" == *'billing_restore_verify_core_billing_parity'* \
 		&& "$source_text" == *'billing_restore_verify_pre_post_continuity'* \
 		&& "$source_text" != *"$forbidden_docker_pull"* \
+		&& "$source_text" != *"$forbidden_docker_cp"* \
 		&& "$source_text" != *"$forbidden_env_file"* ]] || return 1
 	printf 'billing_backup_restore_rehearsal_self_test=passed\n'
 }
@@ -628,13 +678,9 @@ GRANT USAGE, CREATE ON SCHEMA billing TO winwidget_billing_migration;
 	[[ "$source_system_id" =~ ^[1-9][0-9]*$ && "$database_id" =~ ^[0-9a-f-]{36}$ ]] ||
 		billing_restore_fail 'Synthetic source anchors are invalid.'
 
-	docker exec "$synthetic_source_container" pg_dump --host 127.0.0.1 \
-		--username winwidget_billing_backup \
-		--dbname winwidget_billing --format custom --compress=9 --no-owner \
-		--no-acl --schema billing --file /tmp/billing-synthetic.dump
 	dump_path="$work_root/billing-synthetic.dump"
-	docker cp "$synthetic_source_container:/tmp/billing-synthetic.dump" "$dump_path" >/dev/null
-	docker exec "$synthetic_source_container" rm -f -- /tmp/billing-synthetic.dump
+	billing_restore_stream_synthetic_dump "$synthetic_source_container" "$dump_path" ||
+		billing_restore_fail 'Synthetic Billing dump stream failed.'
 	chown 0:0 "$dump_path"
 	chmod 600 "$dump_path"
 	dump_sha="$(billing_restore_sha256 "$dump_path")"
@@ -644,11 +690,8 @@ GRANT USAGE, CREATE ON SCHEMA billing TO winwidget_billing_migration;
 		--security-opt no-new-privileges \
 		--mount "type=bind,source=$dump_path,target=/input.dump,readonly" \
 		--entrypoint pg_restore "$postgres_image_id" --list /input.dump >/dev/null
-	docker cp "$dump_path" "$synthetic_restore_container:/tmp/billing-synthetic.dump" >/dev/null
-	docker exec "$synthetic_restore_container" pg_restore --exit-on-error \
-		--single-transaction --no-owner --no-acl --role winwidget_billing_migration \
-		--username postgres --dbname winwidget_billing /tmp/billing-synthetic.dump >/dev/null
-	docker exec "$synthetic_restore_container" rm -f -- /tmp/billing-synthetic.dump
+	billing_restore_stream_synthetic_restore "$synthetic_restore_container" "$dump_path" ||
+		billing_restore_fail 'Synthetic Billing restore stream failed.'
 	billing_restore_synthetic_finalize_acl "$synthetic_restore_container"
 	restore_system_id="$(billing_restore_query "$synthetic_restore_container" winwidget_billing 'SELECT system_identifier FROM pg_control_system();')"
 	[[ "$restore_system_id" =~ ^[1-9][0-9]*$ && "$restore_system_id" != "$source_system_id" ]] ||
