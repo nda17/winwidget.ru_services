@@ -74,7 +74,8 @@ describe('ReportingDeliveryFailuresService', () => {
 		};
 		return {
 			service: new ReportingDeliveryFailuresService(prisma as never),
-			transaction
+			transaction,
+			failure
 		};
 	}
 
@@ -150,6 +151,58 @@ describe('ReportingDeliveryFailuresService', () => {
 			retryRequestedAt: '2026-07-31T10:00:00.000Z'
 		});
 		expect(transaction.consumerReceipt.findUnique).not.toHaveBeenCalled();
+		expect(transaction.reportingOutboxEvent.create).not.toHaveBeenCalled();
+	});
+
+	it('returns the winning concurrent retry after losing the failure claim', async () => {
+		const { service, transaction, failure } = harness();
+		const retryRequestedAt = new Date('2026-07-31T10:00:00.000Z');
+		transaction.reportingConsumerFailure.findUnique
+			.mockResolvedValueOnce(failure)
+			.mockResolvedValueOnce({
+				...failure,
+				status: ReportingConsumerFailureStatus.RETRY_REQUESTED,
+				manualRetryCount: 1,
+				retryRequestedAt
+			});
+		transaction.reportingConsumerFailure.updateMany.mockResolvedValue({
+			count: 0
+		});
+		transaction.consumerReceipt.findUnique.mockResolvedValue({
+			id: '33333333-3333-4333-8333-333333333333',
+			status: ReportingConsumerReceiptStatus.RETRY_SCHEDULED,
+			payloadHash: PAYLOAD_HASH,
+			retryCycle: 1
+		});
+
+		await expect(
+			service.retryFailure(EVENT_ID, 'billingPayment', 'admin-1')
+		).resolves.toMatchObject({
+			status: 'retry-requested',
+			manualRetryCount: 1,
+			retryRequestedAt: retryRequestedAt.toISOString()
+		});
+		expect(transaction.consumerReceipt.findUnique).not.toHaveBeenCalled();
+		expect(transaction.consumerReceipt.updateMany).not.toHaveBeenCalled();
+		expect(transaction.reportingOutboxEvent.create).not.toHaveBeenCalled();
+	});
+
+	it('rejects an invalid receipt after claiming the failure', async () => {
+		const { service, transaction } = harness();
+		transaction.consumerReceipt.findUnique.mockResolvedValue({
+			id: '33333333-3333-4333-8333-333333333333',
+			status: ReportingConsumerReceiptStatus.RETRY_SCHEDULED,
+			payloadHash: PAYLOAD_HASH,
+			retryCycle: 1
+		});
+
+		await expect(
+			service.retryFailure(EVENT_ID, 'billingPayment', 'admin-1')
+		).rejects.toThrow('Reporting delivery receipt is not retryable');
+		expect(
+			transaction.reportingConsumerFailure.updateMany
+		).toHaveBeenCalledTimes(1);
+		expect(transaction.consumerReceipt.updateMany).not.toHaveBeenCalled();
 		expect(transaction.reportingOutboxEvent.create).not.toHaveBeenCalled();
 	});
 

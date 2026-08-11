@@ -88,20 +88,6 @@ export class ReportingDeliveryFailuresService {
 				consumerKind
 			);
 
-			const receipt = await transaction.consumerReceipt.findUnique({
-				where: { eventId_consumer: { eventId, consumer } }
-			});
-			if (
-				!receipt ||
-				receipt.status !== ReportingConsumerReceiptStatus.DEAD_LETTERED ||
-				receipt.payloadHash !== failure.payloadHash ||
-				receipt.retryCycle !== failure.manualRetryCount
-			) {
-				throw new ConflictException(
-					'Reporting delivery receipt is not retryable'
-				);
-			}
-
 			const retryCycle = failure.manualRetryCount + 1;
 			const requestedAt = new Date();
 			const claimed =
@@ -136,6 +122,20 @@ export class ReportingDeliveryFailuresService {
 				}
 				throw new ConflictException(
 					'Reporting delivery failure state changed concurrently'
+				);
+			}
+
+			const receipt = await transaction.consumerReceipt.findUnique({
+				where: { eventId_consumer: { eventId, consumer } }
+			});
+			if (
+				!receipt ||
+				receipt.status !== ReportingConsumerReceiptStatus.DEAD_LETTERED ||
+				receipt.payloadHash !== failure.payloadHash ||
+				receipt.retryCycle !== failure.manualRetryCount
+			) {
+				throw new ConflictException(
+					'Reporting delivery receipt is not retryable'
 				);
 			}
 
