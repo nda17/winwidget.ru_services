@@ -3813,6 +3813,7 @@ billing_cutover_self_test() {
 	local forbidden_env_replace rollout_source handoff_source permission_source
 	local restore_gate_source recovery_source synthetic_source reconcile_source
 	local initialize_source cleanup_stage_source active_runtime_source abort_source
+	local migration_run_source
 	source="$(<"$server_root/scripts/billing-cutover-production.sh")"
 	rollout_source="$(declare -f billing_cutover_prepare \
 		billing_cutover_install_core_expand_migration \
@@ -3833,6 +3834,9 @@ billing_cutover_self_test() {
 		billing_cutover_require_cleanup_revision_stage \
 		billing_cutover_stage_cleanup_revision)"
 	active_runtime_source="$(declare -f billing_cutover_require_active_runtime)"
+	migration_run_source="$(declare -f billing_cutover_core_migration_state \
+		billing_cutover_core_outbox_state \
+		billing_cutover_install_core_expand_migration)"
 	abort_source="$(declare -f billing_cutover_abort \
 		billing_cutover_require_abort_route_state \
 		billing_cutover_validate_route_env_rollback_sync)"
@@ -3915,6 +3919,9 @@ billing_cutover_self_test() {
 		"$active_runtime_source" == *'billing_route_env_sync_evidence'* &&
 		"$active_runtime_source" == *'billing_cutover_compare_error_contracts'* &&
 		"$active_runtime_source" == *'billing_cutover_wait_auto_renewal_ownership 1'* ]] ||
+		return 1
+	[[ "$migration_run_source" == *'--profile migration run --rm -T --no-deps'* &&
+		"$migration_run_source" != *'run --rm -T --no-deps --no-build'* ]] ||
 		return 1
 	printf '%s' "$abort_source" | node -e '
 const fs = require("node:fs");
