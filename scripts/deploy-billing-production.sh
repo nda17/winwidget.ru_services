@@ -202,7 +202,7 @@ billing_deploy_run() {
 	esac
 	image_id="$billing_deploy_image_id"
 	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		--profile billing-migration run --rm --no-deps --no-build billing-migrate
+		--profile billing-migration run --rm --no-deps billing-migrate
 	phase="$(billing_database_current_phase)"
 	if [[ "$phase" == 'prepared' || "$phase" == 'source-frozen' ||
 		"$phase" == 'imported' || "$phase" == 'pre-backups-created' ||
@@ -243,8 +243,9 @@ billing_deploy_self_test() {
 		"$source" == *'billing_database_require_env_contract'* &&
 		"$source" == *'billing_database_require_pinned_candidate_images'* &&
 		"$source" == *'rebuilding it during deployment is forbidden'* &&
-		"$source" == *'--profile billing-migration run'* &&
-		"$source" == *'--no-build'* &&
+		"$source" == *'--profile billing-migration run --rm --no-deps billing-migrate'* &&
+		"$source" != *'run --rm --no-deps --no-build billing-migrate'* &&
+		"$source" == *'up -d --no-deps --no-build --force-recreate'* &&
 		"$source" == *'billing-scheduler billing-worker billing-outbox-publisher'* &&
 		"$source" == *'PAYMENT_METHOD_ENCRYPTION_KEY'* &&
 		"$source" == *'TRUST_PROXY'* &&

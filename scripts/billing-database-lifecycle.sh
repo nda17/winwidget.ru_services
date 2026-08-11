@@ -499,7 +499,7 @@ billing_database_prepare() {
 	container_id="$(billing_database_wait_healthy)"
 	billing_database_provision_roles "$container_id"
 	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		--profile billing-migration run --rm --no-deps --no-build billing-migrate
+		--profile billing-migration run --rm --no-deps billing-migrate
 	billing_database_finalize_acl "$container_id"
 	system_identifier="$(billing_database_verify_acl "$container_id")"
 	image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
@@ -789,7 +789,8 @@ billing_database_lifecycle_self_test() {
 	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
 		"$source" == *'billing_compose_config_all_profiles'* &&
 		"$source" == *'--profile billing-database up'* &&
-		"$source" == *'--no-deps --no-build billing-migrate'* &&
+		"$source" == *'--profile billing-migration run --rm --no-deps billing-migrate'* &&
+		"$source" != *'run --rm --no-deps --no-build billing-migrate'* &&
 		"$source" == *'winwidget_billing_migration'* &&
 		"$source" == *'winwidget_billing_runtime'* &&
 		"$source" == *'winwidget_billing_backup'* &&

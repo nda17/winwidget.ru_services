@@ -1515,7 +1515,7 @@ NODE
 
 billing_cutover_core_migration_state() {
 	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		--profile migration run --rm -T --no-deps --no-build \
+		--profile migration run --rm -T --no-deps \
 		--entrypoint node migrate -e '
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
@@ -1538,7 +1538,7 @@ void prisma.$queryRawUnsafe(`
 billing_cutover_core_outbox_state() {
 	[[ $# -eq 1 && "$1" =~ ^(global|billing-source)$ ]] || return 1
 	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		--profile migration run --rm -T --no-deps --no-build \
+		--profile migration run --rm -T --no-deps \
 		--entrypoint node migrate -e '
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
@@ -1688,7 +1688,7 @@ billing_cutover_install_core_expand_migration() {
 		billing_cutover_fail 'Core Outbox retains a publishing claim after publisher stop.' ||
 		return 1
 	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		--profile migration run --rm -T --no-deps --no-build migrate
+		--profile migration run --rm -T --no-deps migrate
 	[[ "$(billing_cutover_core_migration_state)" == 'applied' ]] ||
 		billing_cutover_fail 'Billing Core expand migration did not reach applied.' ||
 		return 1
@@ -3967,10 +3967,11 @@ ordered([
 ordered([
   "billing_cutover_wait_core_outbox global",
   "docker stop --time 30",
-  "--profile migration run --rm -T --no-deps --no-build migrate",
+  "--profile migration run --rm -T --no-deps migrate",
   "up -d --no-deps --no-build --force-recreate outbox-publisher",
   "billing_cutover_wait_core_outbox billing-source",
 ]);
+if (source.includes("run --rm -T --no-deps --no-build")) process.exit(1);
 for (const required of [
   "pending)",
   "docker start",
