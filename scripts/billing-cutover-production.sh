@@ -11,6 +11,7 @@ BILLING_DRAIN_SECONDS="${BILLING_DRAIN_SECONDS:-12}"
 server_root="$APP_ROOT/winwidget.ru_server"
 billing_cutover_marker="$APP_ROOT/deploy/backend/.billing-cutover-v1"
 billing_artifact_root="$APP_ROOT/deploy/backend/billing-cutover-artifacts"
+billing_artifact_archive_root="$APP_ROOT/deploy/backend/billing-cutover-artifact-archive"
 billing_snapshot_file="$billing_artifact_root/core-frozen-snapshot-v1.json"
 billing_core_prepare_evidence="$billing_artifact_root/core-prepare.json"
 billing_core_abort_evidence="$billing_artifact_root/core-abort.json"
@@ -24,12 +25,19 @@ billing_service_activation_evidence="$billing_artifact_root/billing-activation.j
 billing_completion_evidence="$billing_artifact_root/billing-completion.json"
 billing_core_status_evidence="$billing_artifact_root/core-status.json"
 billing_route_manifest="$billing_artifact_root/gateway-routes-billing.json"
+billing_route_env_legacy_snapshot="$billing_artifact_root/backend-env-before-billing-routes"
 billing_route_env_candidate="$billing_artifact_root/backend-env-with-billing-routes.candidate"
 billing_route_env_sync_evidence="$APP_ROOT/deploy/backend/.billing-route-env-sync-v1.json"
+billing_route_env_rollback_evidence="$APP_ROOT/deploy/backend/.billing-route-env-rollback-sync-v1.json"
 billing_pre_backup_manifest="$billing_artifact_root/pre-cutover-backups.json"
 billing_core_backup="$billing_artifact_root/core-pre-billing-cutover.dump"
 billing_service_backup="$billing_artifact_root/billing-pre-ownership.dump"
 billing_post_backup="$billing_artifact_root/billing-post-ownership.dump"
+billing_pre_restore_evidence="$billing_artifact_root/pre-actual-restore-evidence.json"
+billing_post_restore_evidence="$billing_artifact_root/post-actual-restore-evidence.json"
+billing_pre_offsite_receipt="$billing_artifact_root/pre-offsite-receipt.json"
+billing_post_offsite_receipt="$billing_artifact_root/post-offsite-receipt.json"
+billing_restore_rehearsal_script="$server_root/scripts/billing-backup-restore-rehearsal.sh"
 billing_legacy_error_contract="$billing_artifact_root/legacy-error-contract.json"
 billing_direct_error_contract="$billing_artifact_root/billing-error-contract.json"
 billing_gateway_error_contract="$billing_artifact_root/gateway-error-contract.json"
@@ -39,6 +47,12 @@ billing_auto_renewal_billing_evidence="$billing_artifact_root/auto-renewal-billi
 billing_cutover_active_stage=''
 billing_cutover_publisher_recovery_active='false'
 billing_cutover_legacy_publisher_id=''
+billing_cutover_core_image_id=''
+billing_cutover_billing_image_id=''
+billing_cutover_next_pre_restore_sha=''
+billing_cutover_next_pre_receipt_sha=''
+billing_cutover_next_post_restore_sha=''
+billing_cutover_next_post_receipt_sha=''
 
 readonly billing_cutover_confirmation='CUTOVER BILLING OWNERSHIP'
 readonly billing_core_cli='dist/src/billing-core-cutover-main.js'
@@ -104,21 +118,115 @@ billing_cutover_sha256() {
 	sha256sum "$1" | awk '{print $1}'
 }
 
-billing_cutover_require_artifact_root() {
-	if [[ ! -e "$billing_artifact_root" && ! -L "$billing_artifact_root" ]]; then
-		mkdir -m 700 "$billing_artifact_root"
-		chown 0:0 "$billing_artifact_root"
+billing_cutover_validate_private_directory() {
+	[[ $# -eq 1 && -d "$1" && ! -L "$1" &&
+		"$(stat -c '%u:%g:%a' "$1")" == '0:0:700' ]]
+}
+
+billing_cutover_ensure_private_directory() {
+	[[ $# -eq 1 ]] || return 1
+	if [[ ! -e "$1" && ! -L "$1" ]]; then
+		mkdir -m 700 "$1"
+		chown 0:0 "$1"
 	fi
-	[[ -d "$billing_artifact_root" && ! -L "$billing_artifact_root" &&
-		"$(stat -c '%u:%g:%a' "$billing_artifact_root")" == '0:0:700' ]] ||
+	billing_cutover_validate_private_directory "$1"
+}
+
+billing_cutover_require_artifact_root() {
+	billing_cutover_ensure_private_directory "$billing_artifact_root" ||
 		billing_cutover_fail \
 			'Billing cutover evidence directory must be root-owned mode 700.'
+}
+
+billing_cutover_directory_is_empty() {
+	[[ $# -eq 1 ]] || return 1
+	billing_cutover_validate_private_directory "$1" || return 1
+	[[ -z "$(ls -A -- "$1")" ]]
+}
+
+billing_cutover_validate_archive_contents() {
+	[[ $# -eq 1 ]] || return 1
+	local directory="$1" entry name
+	billing_cutover_validate_private_directory "$directory" || return 1
+	for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+		[[ -e "$entry" || -L "$entry" ]] || continue
+		name="$(basename -- "$entry")"
+		case "$name" in
+		artifacts | route-env-sync.json | route-env-rollback-sync.json) ;;
+		*) return 1 ;;
+		esac
+	done
+}
+
+billing_cutover_archive_aborted_generation() {
+	[[ $# -eq 1 && "$1" =~ ^[1-9][0-9]*$ ]] || return 1
+	local generation="$1" archive artifacts_archive route_archive
+	local rollback_archive
+	[[ "$(billing_cutover_marker_value phase)" == 'aborted' &&
+		"$(billing_cutover_marker_value revision)" == "$EXPECTED_REVISION" &&
+		"$(billing_cutover_marker_value generation)" == "$generation" ]] ||
+		return 1
+	billing_cutover_ensure_private_directory "$billing_artifact_archive_root" ||
+		return 1
+	archive="$billing_artifact_archive_root/revision-${EXPECTED_REVISION}-generation-${generation}-aborted"
+	billing_cutover_ensure_private_directory "$archive" || return 1
+	billing_cutover_validate_archive_contents "$archive" || return 1
+	artifacts_archive="$archive/artifacts"
+	if [[ -e "$billing_artifact_root" || -L "$billing_artifact_root" ]]; then
+		billing_cutover_validate_private_directory "$billing_artifact_root" || return 1
+		if [[ -e "$artifacts_archive" || -L "$artifacts_archive" ]]; then
+			billing_cutover_validate_private_directory "$artifacts_archive" || return 1
+			billing_cutover_directory_is_empty "$billing_artifact_root" ||
+				billing_cutover_fail \
+					'Fresh Billing artifacts appeared after the aborted generation was archived.' ||
+				return 1
+		else
+			mv -- "$billing_artifact_root" "$artifacts_archive"
+			billing_cutover_validate_private_directory "$artifacts_archive" || return 1
+		fi
+	fi
+	route_archive="$archive/route-env-sync.json"
+	if [[ -e "$billing_route_env_sync_evidence" ||
+		-L "$billing_route_env_sync_evidence" ]]; then
+		billing_cutover_validate_evidence_file "$billing_route_env_sync_evidence" ||
+			return 1
+		[[ ! -e "$route_archive" && ! -L "$route_archive" ]] ||
+			billing_cutover_fail \
+				'Aborted Billing route evidence already has an archive copy.' || return 1
+		mv -- "$billing_route_env_sync_evidence" "$route_archive"
+		billing_cutover_validate_evidence_file "$route_archive" || return 1
+	elif [[ -e "$route_archive" || -L "$route_archive" ]]; then
+		billing_cutover_validate_evidence_file "$route_archive" || return 1
+	fi
+	rollback_archive="$archive/route-env-rollback-sync.json"
+	if [[ -e "$billing_route_env_rollback_evidence" ||
+		-L "$billing_route_env_rollback_evidence" ]]; then
+		billing_cutover_validate_evidence_file \
+			"$billing_route_env_rollback_evidence" || return 1
+		[[ ! -e "$rollback_archive" && ! -L "$rollback_archive" ]] ||
+			billing_cutover_fail \
+				'Aborted Billing route rollback evidence already has an archive copy.' ||
+			return 1
+		mv -- "$billing_route_env_rollback_evidence" "$rollback_archive"
+		billing_cutover_validate_evidence_file "$rollback_archive" || return 1
+	elif [[ -e "$rollback_archive" || -L "$rollback_archive" ]]; then
+		billing_cutover_validate_evidence_file "$rollback_archive" || return 1
+	fi
+	billing_cutover_validate_archive_contents "$archive" || return 1
+	billing_cutover_require_artifact_root
+	printf 'billing_aborted_artifacts_archive=%s\n' "$archive"
 }
 
 billing_cutover_validate_evidence_file() {
 	[[ $# -eq 1 && -f "$1" && ! -L "$1" &&
 		"$(stat -c '%u:%g:%a' "$1")" == '0:0:600' && -s "$1" ]] ||
 		billing_cutover_fail "Billing evidence file is unsafe or empty: $1"
+}
+
+billing_cutover_validate_partial_file() {
+	[[ $# -eq 1 && -f "$1" && ! -L "$1" &&
+		"$(stat -c '%u:%g:%a' "$1")" == '0:0:600' ]] ||
+		billing_cutover_fail "Billing partial file is unsafe: $1"
 }
 
 billing_cutover_marker_value() {
@@ -135,42 +243,65 @@ billing_cutover_validate_marker() {
 		"$(stat -c '%u:%g:%a' "$billing_cutover_marker")" == '0:0:600' ]] || return 1
 	awk -F= '
 		function hex(value, size) { return length(value) == size && value ~ /^[0-9a-f]+$/ }
+		function timestamp(value) {
+			return length(value) == 20 && value ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
+		}
 		{
 			count[$1] += 1
 			value[$1] = substr($0, index($0, "=") + 1)
-			if ($1 !~ /^(version|phase|revision|cleanup_revision|generation|database_id|snapshot_sha256|projection_sha256|route_sha256|updated_at)$/) invalid = 1
+			if ($1 !~ /^(version|phase|revision|cleanup_revision|generation|database_id|core_image_id|billing_image_id|snapshot_sha256|projection_sha256|route_sha256|pre_restore_evidence_sha256|pre_offsite_receipt_sha256|post_restore_evidence_sha256|post_offsite_receipt_sha256|updated_at)$/) invalid = 1
 		}
 		END {
 			for (key in count) if (count[key] != 1) invalid = 1
-			if (NR != 10 || value["version"] != "1" ||
-				value["phase"] !~ /^(prepared|source-frozen|imported|projection-synced|forward-only|active|complete|aborted)$/ ||
+			if (NR != 16 || value["version"] != "2" ||
+				value["phase"] !~ /^(prepared|source-frozen|imported|pre-backups-created|pre-restore-verified|projection-synced|forward-only|active|post-backup-created|post-restore-verified|complete|aborted)$/ ||
 				!hex(value["revision"], 40) ||
 				!(value["cleanup_revision"] == "pending" || hex(value["cleanup_revision"], 40)) ||
 				value["generation"] !~ /^[1-9][0-9]*$/ ||
 				value["database_id"] !~ /^[0-9a-f-]{36}$/ ||
+				value["core_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				value["billing_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
 				!(value["snapshot_sha256"] == "pending" || hex(value["snapshot_sha256"], 64)) ||
 				!(value["projection_sha256"] == "pending" || hex(value["projection_sha256"], 64)) ||
 				!(value["route_sha256"] == "pending" || hex(value["route_sha256"], 64)) ||
-				length(value["updated_at"]) != 20) invalid = 1
+				!(value["pre_restore_evidence_sha256"] == "pending" || hex(value["pre_restore_evidence_sha256"], 64)) ||
+				!(value["pre_offsite_receipt_sha256"] == "pending" || hex(value["pre_offsite_receipt_sha256"], 64)) ||
+				!(value["post_restore_evidence_sha256"] == "pending" || hex(value["post_restore_evidence_sha256"], 64)) ||
+				!(value["post_offsite_receipt_sha256"] == "pending" || hex(value["post_offsite_receipt_sha256"], 64)) ||
+				!timestamp(value["updated_at"])) invalid = 1
+			if (value["phase"] ~ /^(pre-restore-verified|projection-synced|forward-only|active|post-backup-created|post-restore-verified|complete)$/ &&
+				(!hex(value["pre_restore_evidence_sha256"], 64) ||
+				 !hex(value["pre_offsite_receipt_sha256"], 64))) invalid = 1
+			if (value["phase"] ~ /^(post-restore-verified|complete)$/ &&
+				(!hex(value["post_restore_evidence_sha256"], 64) ||
+				 !hex(value["post_offsite_receipt_sha256"], 64))) invalid = 1
+			if (value["phase"] ~ /^(active|post-backup-created|post-restore-verified|complete)$/ &&
+				!hex(value["route_sha256"], 64)) invalid = 1
 			exit(invalid ? 1 : 0)
 		}
 	' "$billing_cutover_marker"
 }
 
 billing_cutover_write_marker() {
-	[[ $# -eq 8 ]] || return 1
-	local temporary="$APP_ROOT/deploy/backend/.billing-cutover-v1.$$"
+	[[ $# -eq 14 ]] || return 1
+	local temporary="$APP_ROOT/deploy/backend/.billing-cutover-v2.$$"
 	[[ ! -e "$temporary" && ! -L "$temporary" ]] || return 1
 	(umask 077; {
-		printf 'version=1\n'
+		printf 'version=2\n'
 		printf 'phase=%s\n' "$1"
 		printf 'revision=%s\n' "$2"
 		printf 'cleanup_revision=%s\n' "$3"
 		printf 'generation=%s\n' "$4"
 		printf 'database_id=%s\n' "$5"
-		printf 'snapshot_sha256=%s\n' "$6"
-		printf 'projection_sha256=%s\n' "$7"
-		printf 'route_sha256=%s\n' "$8"
+		printf 'core_image_id=%s\n' "$6"
+		printf 'billing_image_id=%s\n' "$7"
+		printf 'snapshot_sha256=%s\n' "$8"
+		printf 'projection_sha256=%s\n' "$9"
+		printf 'route_sha256=%s\n' "${10}"
+		printf 'pre_restore_evidence_sha256=%s\n' "${11}"
+		printf 'pre_offsite_receipt_sha256=%s\n' "${12}"
+		printf 'post_restore_evidence_sha256=%s\n' "${13}"
+		printf 'post_offsite_receipt_sha256=%s\n' "${14}"
 		printf 'updated_at=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	} >"$temporary")
 	chown 0:0 "$temporary"
@@ -212,28 +343,90 @@ billing_cutover_require_environment() {
 	[[ "$BILLING_DRAIN_SECONDS" =~ ^(10|11|12|13|14|15)$ ]] ||
 		billing_cutover_fail 'BILLING_DRAIN_SECONDS must be bounded to 10-15 seconds.' ||
 		return 1
+	[[ -f "$billing_restore_rehearsal_script" &&
+		! -L "$billing_restore_rehearsal_script" ]] ||
+		billing_cutover_fail 'Billing backup restore rehearsal runner is unavailable.' ||
+		return 1
 	phase="$(billing_database_current_phase)" || return 1
-	[[ "$phase" != 'forward-only' ||
-		"${BILLING_FIRST_CUTOVER_APPROVED:-false}" == 'true' ]] ||
-		billing_cutover_fail 'Forward recovery remains manual-only.'
+	case "$phase" in
+	forward-only | active | post-backup-created | post-restore-verified)
+		[[ "${BILLING_FIRST_CUTOVER_APPROVED:-false}" == 'true' ]] ||
+			billing_cutover_fail 'Forward recovery remains manual-only.'
+		;;
+	esac
 }
 
 billing_cutover_validate_restore_drill() {
-	local evidence
+	[[ "$billing_cutover_billing_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	local evidence postgres_image_id runner_sha migration_sha
 	evidence="$(billing_read_env_value "$ENV_FILE" BILLING_RESTORE_DRILL_EVIDENCE_FILE)"
-	[[ "$evidence" == /* ]] || return 1
+	[[ "$evidence" == "$APP_ROOT/deploy/backend/.billing-restore-drill-evidence-v1.json" ]] ||
+		return 1
 	billing_cutover_validate_evidence_file "$evidence" || return 1
-	EXPECTED_REVISION="$EXPECTED_REVISION" node - "$evidence" <<'NODE'
+	postgres_image_id="$(docker image inspect --format '{{.Id}}' \
+		"$billing_postgres_image")" || return 1
+	runner_sha="$(billing_cutover_sha256 "$billing_restore_rehearsal_script")" ||
+		return 1
+	migration_sha="$(billing_cutover_sha256 \
+		"$server_root/apps/billing/prisma/migrations/20260811000000_init_billing/migration.sql")" ||
+		return 1
+	EXPECTED_REVISION="$EXPECTED_REVISION" \
+		EXPECTED_BILLING_IMAGE_ID="$billing_cutover_billing_image_id" \
+		EXPECTED_POSTGRES_IMAGE="$billing_postgres_image" \
+		EXPECTED_POSTGRES_IMAGE_ID="$postgres_image_id" \
+		EXPECTED_RUNNER_SHA="$runner_sha" EXPECTED_MIGRATION_SHA="$migration_sha" \
+		node - "$evidence" <<'NODE'
 const fs = require('node:fs');
 const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const exactKeys = [
+  'schemaVersion', 'action', 'target', 'status', 'postgresMajor', 'revision',
+  'dumpSha256', 'postgresImage', 'postgresImageId', 'billingImage',
+  'billingImageId', 'migrationName', 'migrationChecksum',
+  'sourceSystemIdentifier', 'restoreSystemIdentifier', 'databaseId',
+  'networkInternal', 'hostPortsPublished', 'runnerRevision', 'runnerSha256',
+  'observedAt',
+].sort();
 if (
+	!document || Array.isArray(document) ||
+	Object.keys(document).sort().join('|') !== exactKeys.join('|') ||
+	document.schemaVersion !== 1 ||
+	document.action !== 'billing-independent-restore-drill' ||
   document.target !== 'billing' ||
   document.status !== 'passed' ||
   document.postgresMajor !== 18 ||
   document.revision !== process.env.EXPECTED_REVISION ||
-  !/^[0-9a-f]{64}$/.test(document.dumpSha256 || '')
+	document.billingImage !== `winwidget-billing:git-${process.env.EXPECTED_REVISION}` ||
+	document.billingImageId !== process.env.EXPECTED_BILLING_IMAGE_ID ||
+	!/^[0-9a-f]{64}$/.test(document.dumpSha256 || '') ||
+	document.postgresImage !== process.env.EXPECTED_POSTGRES_IMAGE ||
+	document.postgresImageId !== process.env.EXPECTED_POSTGRES_IMAGE_ID ||
+	!/^sha256:[0-9a-f]{64}$/.test(document.postgresImageId || '') ||
+	document.migrationName !== '20260811000000_init_billing' ||
+	document.migrationChecksum !== process.env.EXPECTED_MIGRATION_SHA ||
+	!/^\d+$/.test(String(document.sourceSystemIdentifier || '')) ||
+	!/^\d+$/.test(String(document.restoreSystemIdentifier || '')) ||
+	String(document.sourceSystemIdentifier) === String(document.restoreSystemIdentifier) ||
+	!/^[0-9a-f-]{36}$/.test(document.databaseId || '') ||
+	document.runnerRevision !== process.env.EXPECTED_REVISION ||
+	document.runnerSha256 !== process.env.EXPECTED_RUNNER_SHA ||
+	!/^[0-9a-f]{64}$/.test(document.runnerSha256 || '') ||
+	!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(document.observedAt || '') ||
+	document.networkInternal !== true || document.hostPortsPublished !== false
 ) process.exit(1);
 NODE
+}
+
+billing_cutover_ensure_restore_drill() {
+	local evidence
+	evidence="$(billing_read_env_value "$ENV_FILE" BILLING_RESTORE_DRILL_EVIDENCE_FILE)" ||
+		return 1
+	[[ "$evidence" == "$APP_ROOT/deploy/backend/.billing-restore-drill-evidence-v1.json" ]] ||
+		return 1
+	if [[ ! -e "$evidence" && ! -L "$evidence" ]]; then
+		bash "$billing_restore_rehearsal_script" --revision "$EXPECTED_REVISION" \
+			--phase synthetic --evidence-file "$evidence"
+	fi
+	billing_cutover_validate_restore_drill
 }
 
 billing_cutover_require_cli_uid() {
@@ -691,6 +884,28 @@ if (
 NODE
 }
 
+billing_cutover_validate_billing_completed_status() {
+	[[ $# -eq 1 ]] || return 1
+	billing_cutover_validate_json_identity "$1" || return 1
+	node - "$1" <<'NODE'
+const fs = require('node:fs');
+const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const ownership = document.ownership;
+if (
+  document.schemaVersion !== 1 || document.service !== 'billing-service' ||
+  document.action !== 'status' || document.status !== 'ok' ||
+  !ownership || ownership.phase !== 'COMPLETE' ||
+  ownership.generation !== String(document.generation) ||
+  ownership.preparedRevision !== document.revision ||
+  ownership.ownershipRevision !== document.revision ||
+  ownership.cleanupRevision !== document.revision ||
+  !document.counts || !Number.isSafeInteger(document.counts.pendingOutbox) ||
+  !Number.isSafeInteger(document.counts.providerOperationsInFlight) ||
+  !document.eventTypes || Object.keys(document.eventTypes).length !== 0
+) process.exit(1);
+NODE
+}
+
 billing_cutover_wait_seed_outbox() {
 	local attempt
 	for ((attempt = 1; attempt <= 120; attempt++)); do
@@ -943,14 +1158,12 @@ if (
 	unset listing
 }
 
-billing_cutover_build_candidate_images() {
+billing_cutover_verify_candidate_images() {
 	local core_image billing_image core_id core_revision core_user
 	core_image="winwidget-api:git-$EXPECTED_REVISION"
 	billing_image="$(billing_release_identity_value BILLING_IMAGE "$EXPECTED_REVISION")"
 	billing_compose_config_all_profiles "$EXPECTED_REVISION" "$ENV_FILE" \
 		"$COMPOSE_FILE"
-	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		build --pull --provenance=false api billing-api
 	billing_deploy_verify_image "$billing_image"
 	core_id="$(docker image inspect --format '{{.Id}}' "$core_image")"
 	core_revision="$(docker image inspect --format \
@@ -962,6 +1175,10 @@ billing_cutover_build_candidate_images() {
 		-n "$core_user" && "$core_user" != '0' && "$core_user" != 'root' ]] ||
 		billing_cutover_fail \
 			'Core candidate image must be immutable, revision-labelled and non-root.' ||
+			return 1
+	billing_cutover_core_image_id="$core_id"
+	billing_cutover_billing_image_id="$billing_deploy_image_id"
+	[[ "$billing_cutover_billing_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
 		return 1
 	docker run --rm --network none --entrypoint node "$core_image" -e '
 const fs = require("node:fs");
@@ -979,6 +1196,14 @@ for (const path of [
   "prisma/schema.prisma",
 ]) fs.accessSync(path);
 ' >/dev/null
+}
+
+billing_cutover_build_candidate_images() {
+	billing_compose_config_all_profiles "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE"
+	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
+		build --pull --provenance=false api billing-api
+	billing_cutover_verify_candidate_images
 }
 
 billing_cutover_verify_dark_source_topology() {
@@ -1485,7 +1710,24 @@ billing_cutover_create_backup() {
 	[[ $# -eq 4 ]] || return 1
 	local url_key="$1" schema="$2" destination="$3" label="$4"
 	local partial="$destination.partial" size
-	[[ ! -e "$partial" && ! -L "$partial" ]] || return 1
+	if [[ -e "$destination" || -L "$destination" ]]; then
+		billing_cutover_validate_evidence_file "$destination" || return 1
+		[[ "$(head -c 5 "$destination")" == 'PGDMP' ]] ||
+			billing_cutover_fail \
+				"Existing maintenance backup is not a custom PostgreSQL dump: $label" ||
+			return 1
+		size="$(wc -c <"$destination" | tr -d '[:space:]')"
+		[[ "$size" =~ ^[0-9]+$ && "$size" -gt 0 &&
+			"$size" -le $((49 * 1024 * 1024)) ]] ||
+			billing_cutover_fail \
+				"Existing maintenance backup is outside the bounded size: $label" ||
+			return 1
+		return 0
+	fi
+	if [[ -e "$partial" || -L "$partial" ]]; then
+		billing_cutover_validate_partial_file "$partial" || return 1
+		rm -f -- "$partial"
+	fi
 	(umask 077; billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
 		run --rm -T --no-deps --entrypoint sh maintenance-worker \
 		-euc 'url_key="$1"; schema="$2"; database_url="$(printenv "$url_key")"; test -n "$database_url"; export PGDATABASE="$database_url"; unset database_url; exec pg_dump --format=custom --compress=6 --no-owner --no-acl --no-password --schema "$schema"' \
@@ -1504,24 +1746,464 @@ billing_cutover_create_backup() {
 	billing_cutover_validate_evidence_file "$destination"
 }
 
+billing_cutover_promote_import_partial() {
+	[[ $# -eq 3 ]] || return 1
+	local source="$1" partial="$2" destination="$3" source_sha
+	[[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+	source_sha="$(billing_cutover_sha256 "$source")" || return 1
+	if [[ -e "$partial" || -L "$partial" ]]; then
+		billing_cutover_validate_partial_file "$partial" || return 1
+		if [[ "$(billing_cutover_sha256 "$partial")" != "$source_sha" ]]; then
+			rm -f -- "$partial"
+		fi
+	fi
+	if [[ ! -e "$partial" && ! -L "$partial" ]]; then
+		cp -- "$source" "$partial"
+		chown 0:0 "$partial"
+		chmod 600 "$partial"
+	fi
+	[[ "$(billing_cutover_sha256 "$partial")" == "$source_sha" ]] || return 1
+	mv -f -- "$partial" "$destination"
+}
+
 billing_cutover_create_pre_backups() {
-	local core_sha billing_sha temporary
+	local core_sha billing_sha core_size billing_size temporary
 	billing_cutover_create_backup DATABASE_BACKUP_URL public \
 		"$billing_core_backup" core
 	billing_cutover_create_backup BILLING_BACKUP_URL billing \
 		"$billing_service_backup" billing
 	core_sha="$(billing_cutover_sha256 "$billing_core_backup")"
 	billing_sha="$(billing_cutover_sha256 "$billing_service_backup")"
+	core_size="$(wc -c <"$billing_core_backup" | tr -d '[:space:]')"
+	billing_size="$(wc -c <"$billing_service_backup" | tr -d '[:space:]')"
+	if [[ -e "$billing_pre_backup_manifest" || -L "$billing_pre_backup_manifest" ]]; then
+		billing_cutover_validate_evidence_file "$billing_pre_backup_manifest" || return 1
+		EXPECTED_REVISION="$EXPECTED_REVISION" \
+			EXPECTED_GENERATION="$(billing_cutover_marker_value generation)" \
+			EXPECTED_CORE_IMAGE_ID="$(billing_database_marker_value core_image_id)" \
+			EXPECTED_BILLING_IMAGE_ID="$(billing_database_marker_value billing_image_id)" \
+			EXPECTED_CORE_SHA="$core_sha" EXPECTED_BILLING_SHA="$billing_sha" \
+			EXPECTED_CORE_SIZE="$core_size" EXPECTED_BILLING_SIZE="$billing_size" \
+			node - "$billing_pre_backup_manifest" <<'NODE'
+const fs = require('node:fs');
+const value = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const exact = ['billingDumpSha256', 'billingDumpSizeBytes', 'billingImageId',
+  'coreDumpSha256', 'coreDumpSizeBytes', 'coreImageId', 'generation',
+  'revision', 'version'];
+if (!value || Array.isArray(value) ||
+    Object.keys(value).sort().join('|') !== exact.sort().join('|') ||
+    value.version !== 2 || value.revision !== process.env.EXPECTED_REVISION ||
+    String(value.generation) !== process.env.EXPECTED_GENERATION ||
+    value.coreImageId !== process.env.EXPECTED_CORE_IMAGE_ID ||
+    value.billingImageId !== process.env.EXPECTED_BILLING_IMAGE_ID ||
+    value.coreDumpSha256 !== process.env.EXPECTED_CORE_SHA ||
+    value.billingDumpSha256 !== process.env.EXPECTED_BILLING_SHA ||
+    String(value.coreDumpSizeBytes) !== process.env.EXPECTED_CORE_SIZE ||
+    String(value.billingDumpSizeBytes) !== process.env.EXPECTED_BILLING_SIZE) process.exit(1);
+NODE
+		return
+	fi
 	temporary="$billing_pre_backup_manifest.$$"
 	(umask 077; {
-		printf '{"version":1,"revision":"%s","generation":%s,' \
+		printf '{"version":2,"revision":"%s","generation":%s,' \
 			"$EXPECTED_REVISION" "$(billing_cutover_marker_value generation)"
-		printf '"coreDumpSha256":"%s","billingDumpSha256":"%s"}\n' \
-			"$core_sha" "$billing_sha"
+		printf '"coreImageId":"%s","billingImageId":"%s",' \
+			"$(billing_database_marker_value core_image_id)" \
+			"$(billing_database_marker_value billing_image_id)"
+		printf '"coreDumpSha256":"%s","coreDumpSizeBytes":%s,' \
+			"$core_sha" "$core_size"
+		printf '"billingDumpSha256":"%s","billingDumpSizeBytes":%s}\n' \
+			"$billing_sha" "$billing_size"
 	} >"$temporary")
 	chown 0:0 "$temporary"
 	chmod 600 "$temporary"
 	mv -f "$temporary" "$billing_pre_backup_manifest"
+}
+
+billing_cutover_validate_actual_restore_evidence() {
+	[[ $# -eq 2 ]] || return 1
+	local evidence="$1" phase="$2" core_sha billing_pre_sha billing_post_sha
+	local core_size billing_pre_size billing_post_size previous_evidence=''
+	[[ "$phase" =~ ^(pre-cutover|post-ownership)$ ]] || return 1
+	billing_cutover_validate_evidence_file "$evidence" || return 1
+	billing_cutover_validate_frozen_snapshot || return 1
+	billing_cutover_validate_evidence_file "$billing_pre_backup_manifest" || return 1
+	billing_cutover_validate_evidence_file "$billing_core_backup" || return 1
+	billing_cutover_validate_evidence_file "$billing_service_backup" || return 1
+	core_sha="$(billing_cutover_sha256 "$billing_core_backup")" || return 1
+	billing_pre_sha="$(billing_cutover_sha256 "$billing_service_backup")" || return 1
+	core_size="$(wc -c <"$billing_core_backup" | tr -d '[:space:]')"
+	billing_pre_size="$(wc -c <"$billing_service_backup" | tr -d '[:space:]')"
+	if [[ "$phase" == 'post-ownership' ]]; then
+		billing_cutover_validate_evidence_file "$billing_post_backup" || return 1
+		billing_cutover_validate_actual_restore_evidence \
+			"$billing_pre_restore_evidence" pre-cutover || return 1
+		billing_post_sha="$(billing_cutover_sha256 "$billing_post_backup")" || return 1
+		billing_post_size="$(wc -c <"$billing_post_backup" | tr -d '[:space:]')"
+		previous_evidence="$billing_pre_restore_evidence"
+	else
+		billing_post_sha='pending'
+		billing_post_size='0'
+	fi
+	EVIDENCE_FILE="$evidence" SNAPSHOT_FILE="$billing_snapshot_file" \
+		MANIFEST_FILE="$billing_pre_backup_manifest" \
+		PREVIOUS_EVIDENCE_FILE="$previous_evidence" \
+		EXPECTED_PHASE="$phase" EXPECTED_REVISION="$EXPECTED_REVISION" \
+		EXPECTED_GENERATION="$(billing_cutover_marker_value generation)" \
+		EXPECTED_DATABASE_ID="$(billing_database_marker_value database_id)" \
+		EXPECTED_DATABASE_SYSTEM_ID="$(billing_database_marker_value database_system_identifier)" \
+		EXPECTED_CORE_IMAGE_ID="$(billing_database_marker_value core_image_id)" \
+		EXPECTED_BILLING_IMAGE_ID="$(billing_database_marker_value billing_image_id)" \
+		EXPECTED_POSTGRES_IMAGE_ID="$(billing_database_marker_value postgres_image_id)" \
+		EXPECTED_POSTGRES_IMAGE="$billing_postgres_image" \
+		EXPECTED_CORE_SHA="$core_sha" EXPECTED_CORE_SIZE="$core_size" \
+		EXPECTED_BILLING_PRE_SHA="$billing_pre_sha" \
+		EXPECTED_BILLING_PRE_SIZE="$billing_pre_size" \
+		EXPECTED_BILLING_POST_SHA="$billing_post_sha" \
+		EXPECTED_BILLING_POST_SIZE="$billing_post_size" node <<'NODE'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const parse = path => {
+  try { return JSON.parse(fs.readFileSync(path, 'utf8')); }
+  catch { process.exit(1); }
+};
+const value = parse(process.env.EVIDENCE_FILE);
+const snapshot = parse(process.env.SNAPSHOT_FILE);
+const manifest = parse(process.env.MANIFEST_FILE);
+const previous = process.env.PREVIOUS_EVIDENCE_FILE
+  ? parse(process.env.PREVIOUS_EVIDENCE_FILE)
+  : null;
+const exact = (object, keys) => object && typeof object === 'object' &&
+  !Array.isArray(object) && Object.keys(object).sort().join('|') ===
+    [...keys].sort().join('|');
+const sha = input => /^[0-9a-f]{64}$/.test(input || '');
+const imageId = input => /^sha256:[0-9a-f]{64}$/.test(input || '');
+const positiveInteger = input => Number.isSafeInteger(input) && input > 0;
+const systemIdentifier = input => /^[1-9][0-9]*$/.test(String(input ?? ''));
+const timestamp = input => typeof input === 'string' &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(input) &&
+  Number.isFinite(Date.parse(input));
+const dump = input => exact(input, ['sha256', 'sizeBytes', 'tocSha256']) &&
+  sha(input.sha256) && positiveInteger(input.sizeBytes) && sha(input.tocSha256);
+const restore = input => exact(input, [
+  'systemIdentifier', 'tableCount', 'tableManifestSha256',
+  'rowManifestSha256', 'migrationCount', 'migrationLedgerSha256',
+]) && systemIdentifier(input.systemIdentifier) && positiveInteger(input.tableCount) &&
+  sha(input.tableManifestSha256) && sha(input.rowManifestSha256) &&
+  positiveInteger(input.migrationCount) && sha(input.migrationLedgerSha256);
+const allTrue = (input, keys) => exact(input, keys) &&
+  keys.every(key => input[key] === true);
+const topKeys = [
+  'schemaVersion', 'action', 'target', 'status', 'postgresMajor', 'phase',
+  'revision', 'generation', 'images', 'dumps', 'restores', 'anchors',
+  'checks', 'startedAt', 'completedAt',
+];
+if (process.env.EXPECTED_PHASE === 'post-ownership') {
+  topKeys.push('preEvidenceSha256');
+}
+const commonChecks = [
+  'sourceFilesSafe', 'dumpShaStable', 'manifestBinding', 'toc',
+  'releaseImages', 'isolatedTargets', 'noHostPorts', 'distinctClusters',
+  'migrations', 'anchors', 'acl', 'relationships', 'continuity',
+  'resourcesRemoved',
+];
+if (
+  !exact(value, topKeys) || value.schemaVersion !== 1 ||
+  value.action !== 'billing-actual-backup-restore-rehearsal' ||
+  value.target !== 'billing' || value.status !== 'passed' ||
+  value.postgresMajor !== 18 || value.phase !== process.env.EXPECTED_PHASE ||
+  value.revision !== process.env.EXPECTED_REVISION ||
+  String(value.generation) !== process.env.EXPECTED_GENERATION ||
+  !timestamp(value.startedAt) || !timestamp(value.completedAt) ||
+  Date.parse(value.completedAt) < Date.parse(value.startedAt) ||
+  !exact(value.images, ['core', 'billing', 'postgres']) ||
+  !exact(value.images.core, ['ref', 'imageId', 'revision', 'user']) ||
+  value.images.core.ref !== `winwidget-api:git-${process.env.EXPECTED_REVISION}` ||
+  value.images.core.imageId !== process.env.EXPECTED_CORE_IMAGE_ID ||
+  value.images.core.revision !== process.env.EXPECTED_REVISION ||
+  value.images.core.user !== 'nestjs' ||
+  !exact(value.images.billing, ['ref', 'imageId', 'revision', 'user']) ||
+  value.images.billing.ref !== `winwidget-billing:git-${process.env.EXPECTED_REVISION}` ||
+  value.images.billing.imageId !== process.env.EXPECTED_BILLING_IMAGE_ID ||
+  value.images.billing.revision !== process.env.EXPECTED_REVISION ||
+  value.images.billing.user !== 'billing' ||
+  !exact(value.images.postgres, ['ref', 'imageId', 'major']) ||
+  value.images.postgres.ref !== process.env.EXPECTED_POSTGRES_IMAGE ||
+  value.images.postgres.imageId !== process.env.EXPECTED_POSTGRES_IMAGE_ID ||
+  value.images.postgres.major !== 18 ||
+  !imageId(value.images.core.imageId) || !imageId(value.images.billing.imageId) ||
+  !imageId(value.images.postgres.imageId) ||
+  !exact(manifest, [
+    'version', 'revision', 'generation', 'coreImageId', 'billingImageId',
+    'coreDumpSha256', 'coreDumpSizeBytes', 'billingDumpSha256',
+    'billingDumpSizeBytes',
+  ]) || manifest.version !== 2 ||
+  manifest.revision !== process.env.EXPECTED_REVISION ||
+  String(manifest.generation) !== process.env.EXPECTED_GENERATION ||
+  manifest.coreImageId !== process.env.EXPECTED_CORE_IMAGE_ID ||
+  manifest.billingImageId !== process.env.EXPECTED_BILLING_IMAGE_ID ||
+  manifest.coreDumpSha256 !== process.env.EXPECTED_CORE_SHA ||
+  String(manifest.coreDumpSizeBytes) !== process.env.EXPECTED_CORE_SIZE ||
+  manifest.billingDumpSha256 !== process.env.EXPECTED_BILLING_PRE_SHA ||
+  String(manifest.billingDumpSizeBytes) !== process.env.EXPECTED_BILLING_PRE_SIZE ||
+  !sha(snapshot.sourceFingerprint) ||
+  !exact(snapshot.coreState, Object.keys(snapshot.coreState || {})) ||
+  snapshot.coreState.ownership !== 'CORE'
+) process.exit(1);
+if (process.env.EXPECTED_PHASE === 'pre-cutover') {
+  const checks = [...commonChecks, 'coreBillingParity'];
+  if (
+    !exact(value.dumps, ['corePre', 'billingPre']) ||
+    !dump(value.dumps.corePre) || !dump(value.dumps.billingPre) ||
+    value.dumps.corePre.sha256 !== process.env.EXPECTED_CORE_SHA ||
+    String(value.dumps.corePre.sizeBytes) !== process.env.EXPECTED_CORE_SIZE ||
+    value.dumps.billingPre.sha256 !== process.env.EXPECTED_BILLING_PRE_SHA ||
+    String(value.dumps.billingPre.sizeBytes) !== process.env.EXPECTED_BILLING_PRE_SIZE ||
+    !exact(value.restores, ['corePre', 'billingPre']) ||
+    !restore(value.restores.corePre) || !restore(value.restores.billingPre) ||
+    !exact(value.anchors, [
+      'billingDatabaseId', 'sourceFingerprint', 'coreOwnership',
+      'billingOwnership', 'billingDatabasePhase',
+      'coreRestoreSystemIdentifier', 'billingPreRestoreSystemIdentifier',
+    ]) || value.anchors.billingDatabaseId !== process.env.EXPECTED_DATABASE_ID ||
+    value.anchors.sourceFingerprint !== snapshot.sourceFingerprint ||
+    value.anchors.coreOwnership !== 'CORE' ||
+    value.anchors.billingOwnership !== 'PREPARED' ||
+    value.anchors.billingDatabasePhase !== 'IMPORTED' ||
+    String(value.anchors.coreRestoreSystemIdentifier) !==
+      String(value.restores.corePre.systemIdentifier) ||
+    String(value.anchors.billingPreRestoreSystemIdentifier) !==
+      String(value.restores.billingPre.systemIdentifier) ||
+    new Set([
+      String(value.restores.corePre.systemIdentifier),
+      String(value.restores.billingPre.systemIdentifier),
+      process.env.EXPECTED_DATABASE_SYSTEM_ID,
+    ]).size !== 3 || !allTrue(value.checks, checks)
+  ) process.exit(1);
+} else {
+  const checks = [...commonChecks, 'preEvidenceBinding', 'prePostContinuity'];
+  if (
+    !previous || previous.phase !== 'pre-cutover' ||
+    previous.revision !== process.env.EXPECTED_REVISION ||
+    String(previous.generation) !== process.env.EXPECTED_GENERATION ||
+    previous.dumps?.billingPre?.sha256 !== process.env.EXPECTED_BILLING_PRE_SHA ||
+    previous.images?.core?.imageId !== process.env.EXPECTED_CORE_IMAGE_ID ||
+    previous.images?.billing?.imageId !== process.env.EXPECTED_BILLING_IMAGE_ID ||
+    previous.anchors?.sourceFingerprint !== snapshot.sourceFingerprint ||
+    value.preEvidenceSha256 !== crypto.createHash('sha256')
+      .update(fs.readFileSync(process.env.PREVIOUS_EVIDENCE_FILE)).digest('hex') ||
+    !exact(value.dumps, ['billingPre', 'billingPost']) ||
+    !dump(value.dumps.billingPre) || !dump(value.dumps.billingPost) ||
+    value.dumps.billingPre.sha256 !== process.env.EXPECTED_BILLING_PRE_SHA ||
+    String(value.dumps.billingPre.sizeBytes) !== process.env.EXPECTED_BILLING_PRE_SIZE ||
+    value.dumps.billingPost.sha256 !== process.env.EXPECTED_BILLING_POST_SHA ||
+    String(value.dumps.billingPost.sizeBytes) !== process.env.EXPECTED_BILLING_POST_SIZE ||
+    !exact(value.restores, ['billingPre', 'billingPost']) ||
+    !restore(value.restores.billingPre) || !restore(value.restores.billingPost) ||
+    !exact(value.anchors, [
+      'billingDatabaseId', 'sourceFingerprint', 'billingPreOwnership',
+      'billingPostOwnership', 'billingPreDatabasePhase',
+      'billingPostDatabasePhase', 'billingPreRestoreSystemIdentifier',
+      'billingPostRestoreSystemIdentifier',
+    ]) || value.anchors.billingDatabaseId !== process.env.EXPECTED_DATABASE_ID ||
+    value.anchors.sourceFingerprint !== snapshot.sourceFingerprint ||
+    value.anchors.billingPreOwnership !== 'PREPARED' ||
+    value.anchors.billingPostOwnership !== 'ACTIVE' ||
+    value.anchors.billingPreDatabasePhase !== 'IMPORTED' ||
+    value.anchors.billingPostDatabasePhase !== 'ACTIVE' ||
+    String(value.anchors.billingPreRestoreSystemIdentifier) !==
+      String(value.restores.billingPre.systemIdentifier) ||
+    String(value.anchors.billingPostRestoreSystemIdentifier) !==
+      String(value.restores.billingPost.systemIdentifier) ||
+    new Set([
+      String(value.restores.billingPre.systemIdentifier),
+      String(value.restores.billingPost.systemIdentifier),
+      String(previous.restores?.corePre?.systemIdentifier),
+      String(previous.restores?.billingPre?.systemIdentifier),
+      process.env.EXPECTED_DATABASE_SYSTEM_ID,
+    ]).size !== 5 || !allTrue(value.checks, checks)
+  ) process.exit(1);
+}
+NODE
+}
+
+billing_cutover_offsite_reference_is_safe() {
+	[[ $# -eq 2 ]] || return 1
+	local provider="$1" reference="$2"
+	case "$provider" in
+	operator-managed-macos)
+		[[ "$reference" =~ ^macos-offsite:[A-Za-z0-9][A-Za-z0-9._:@+-]{7,239}$ ]]
+		;;
+	s3-compatible)
+		[[ "$reference" =~ ^s3-offsite:[A-Za-z0-9][A-Za-z0-9._:/@+-]{7,239}$ ]]
+		;;
+	telegram-document)
+		[[ "$reference" =~ ^telegram-document:[A-Za-z0-9][A-Za-z0-9._:@+-]{7,239}$ ]]
+		;;
+	*) return 1 ;;
+	esac
+}
+
+billing_cutover_validate_offsite_receipt() {
+	[[ $# -eq 2 ]] || return 1
+	local receipt="$1" kind="$2" expected_names metadata provider reference
+	local sha256 size_bytes name artifact actual_sha actual_size
+	[[ "$kind" =~ ^(pre-cutover|post-ownership)$ ]] || return 1
+	billing_cutover_validate_evidence_file "$receipt" || return 1
+	if [[ "$kind" == 'pre-cutover' ]]; then
+		expected_names="$(basename "$billing_core_backup"),$(basename "$billing_service_backup"),$(basename "$billing_pre_backup_manifest"),$(basename "$billing_pre_restore_evidence")"
+	else
+		expected_names="$(basename "$billing_post_backup"),$(basename "$billing_post_restore_evidence")"
+	fi
+	metadata="$(
+		RECEIPT_FILE="$receipt" EXPECTED_KIND="$kind" \
+			EXPECTED_REVISION="$EXPECTED_REVISION" \
+			EXPECTED_GENERATION="$(billing_cutover_marker_value generation)" \
+			EXPECTED_NAMES="$expected_names" node <<'NODE'
+const fs = require('node:fs');
+let value;
+try { value = JSON.parse(fs.readFileSync(process.env.RECEIPT_FILE, 'utf8')); }
+catch { process.exit(1); }
+const exact = (object, keys) => object && typeof object === 'object' &&
+  !Array.isArray(object) && Object.keys(object).sort().join('|') === [...keys].sort().join('|');
+if (!exact(value, ['version', 'status', 'kind', 'revision', 'generation',
+    'provider', 'providerReference', 'artifacts', 'verifiedAt']) ||
+    value.version !== 1 || value.status !== 'verified' ||
+    value.kind !== process.env.EXPECTED_KIND ||
+    value.revision !== process.env.EXPECTED_REVISION ||
+    String(value.generation) !== process.env.EXPECTED_GENERATION ||
+    typeof value.provider !== 'string' || typeof value.providerReference !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value.verifiedAt || '') ||
+    !Array.isArray(value.artifacts)) process.exit(1);
+const expectedNames = process.env.EXPECTED_NAMES.split(',').sort();
+const names = value.artifacts.map(item => item?.name).sort();
+if (names.join('|') !== expectedNames.join('|')) process.exit(1);
+for (const item of value.artifacts) {
+  if (!exact(item, ['name', 'sha256', 'sizeBytes']) ||
+      !/^[0-9a-f]{64}$/.test(item.sha256) ||
+      !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes <= 0) process.exit(1);
+}
+process.stdout.write(`${value.provider}\t${value.providerReference}\n`);
+for (const item of [...value.artifacts].sort((a, b) => a.name.localeCompare(b.name)))
+  process.stdout.write(`${item.sha256}\t${item.sizeBytes}\t${item.name}\n`);
+NODE
+	)" || return 1
+	IFS=$'\t' read -r provider reference <<<"$(printf '%s\n' "$metadata" | head -n 1)"
+	billing_cutover_offsite_reference_is_safe "$provider" "$reference" || return 1
+	while IFS=$'\t' read -r sha256 size_bytes name; do
+		case "$name" in
+		"$(basename "$billing_core_backup")") artifact="$billing_core_backup" ;;
+		"$(basename "$billing_service_backup")") artifact="$billing_service_backup" ;;
+		"$(basename "$billing_pre_backup_manifest")") artifact="$billing_pre_backup_manifest" ;;
+		"$(basename "$billing_pre_restore_evidence")") artifact="$billing_pre_restore_evidence" ;;
+		"$(basename "$billing_post_backup")") artifact="$billing_post_backup" ;;
+		"$(basename "$billing_post_restore_evidence")") artifact="$billing_post_restore_evidence" ;;
+		*) return 1 ;;
+		esac
+		billing_cutover_validate_evidence_file "$artifact" || return 1
+		actual_sha="$(billing_cutover_sha256 "$artifact")"
+		actual_size="$(wc -c <"$artifact" | tr -d '[:space:]')"
+		[[ "$actual_sha" == "$sha256" && "$actual_size" == "$size_bytes" ]] ||
+			return 1
+	done < <(printf '%s\n' "$metadata" | tail -n +2)
+}
+
+billing_cutover_import_offsite_receipt() {
+	[[ $# -eq 1 ]] || return 1
+	local kind="$1" generation source destination source_sha partial
+	generation="$(billing_cutover_marker_value generation)" || return 1
+	case "$kind" in
+	pre-cutover)
+		source="/root/winwidget-billing-pre-offsite-${EXPECTED_REVISION}-g${generation}.json"
+		destination="$billing_pre_offsite_receipt"
+		;;
+	post-ownership)
+		source="/root/winwidget-billing-post-offsite-${EXPECTED_REVISION}-g${generation}.json"
+		destination="$billing_post_offsite_receipt"
+		;;
+	*) return 1 ;;
+	esac
+	billing_cutover_validate_offsite_receipt "$source" "$kind" || return 1
+	source_sha="$(billing_cutover_sha256 "$source")" || return 1
+	if [[ -e "$destination" || -L "$destination" ]]; then
+		billing_cutover_validate_offsite_receipt "$destination" "$kind" || return 1
+		[[ "$(billing_cutover_sha256 "$destination")" == "$source_sha" ]] || return 1
+	else
+		partial="$destination.partial"
+		billing_cutover_promote_import_partial \
+			"$source" "$partial" "$destination" || return 1
+	fi
+	billing_cutover_validate_offsite_receipt "$destination" "$kind" || return 1
+	printf '%s' "$source_sha"
+}
+
+billing_cutover_import_actual_restore_evidence() {
+	[[ $# -eq 1 ]] || return 1
+	local phase="$1" generation source destination source_sha partial
+	generation="$(billing_cutover_marker_value generation)" || return 1
+	case "$phase" in
+	pre-cutover)
+		source="/root/winwidget-billing-pre-restore-${EXPECTED_REVISION}-g${generation}.json"
+		destination="$billing_pre_restore_evidence"
+		;;
+	post-ownership)
+		source="/root/winwidget-billing-post-restore-${EXPECTED_REVISION}-g${generation}.json"
+		destination="$billing_post_restore_evidence"
+		;;
+	*) return 1 ;;
+	esac
+	billing_cutover_validate_actual_restore_evidence "$source" "$phase" || return 1
+	source_sha="$(billing_cutover_sha256 "$source")" || return 1
+	if [[ -e "$destination" || -L "$destination" ]]; then
+		billing_cutover_validate_actual_restore_evidence \
+			"$destination" "$phase" || return 1
+		[[ "$(billing_cutover_sha256 "$destination")" == "$source_sha" ]] ||
+			return 1
+	else
+		partial="$destination.partial"
+		billing_cutover_promote_import_partial \
+			"$source" "$partial" "$destination" || return 1
+	fi
+	billing_cutover_validate_actual_restore_evidence \
+		"$destination" "$phase" || return 1
+	printf '%s' "$source_sha"
+}
+
+billing_cutover_require_actual_restore_gate() {
+	[[ $# -eq 1 ]] || return 1
+	local phase="$1" restore_sha receipt_sha
+	case "$phase" in
+	pre-cutover)
+		[[ "$(billing_database_current_phase)" == 'pre-backups-created' &&
+			"$(billing_database_marker_value pre_restore_evidence_sha256)" == \
+			'pending' &&
+			"$(billing_database_marker_value pre_offsite_receipt_sha256)" == \
+			'pending' ]] || return 1
+		restore_sha="$(billing_cutover_import_actual_restore_evidence "$phase")" ||
+			return 1
+		receipt_sha="$(billing_cutover_import_offsite_receipt "$phase")" ||
+			return 1
+		billing_cutover_next_pre_restore_sha="$restore_sha"
+		billing_cutover_next_pre_receipt_sha="$receipt_sha"
+		;;
+	post-ownership)
+		[[ "$(billing_database_current_phase)" == 'post-backup-created' &&
+			"$(billing_database_marker_value post_restore_evidence_sha256)" == \
+			'pending' &&
+			"$(billing_database_marker_value post_offsite_receipt_sha256)" == \
+			'pending' ]] || return 1
+		restore_sha="$(billing_cutover_import_actual_restore_evidence "$phase")" ||
+			return 1
+		receipt_sha="$(billing_cutover_import_offsite_receipt "$phase")" ||
+			return 1
+		billing_cutover_next_post_restore_sha="$restore_sha"
+		billing_cutover_next_post_receipt_sha="$receipt_sha"
+		;;
+	*) return 1 ;;
+	esac
+	printf 'billing_restore_gate_phase=%s\n' "$phase"
+	printf 'billing_restore_evidence_sha256=%s\n' "$restore_sha"
+	printf 'billing_offsite_receipt_sha256=%s\n' "$receipt_sha"
 }
 
 billing_cutover_capture_error_contract() {
@@ -1580,12 +2262,97 @@ if (JSON.stringify(left) !== JSON.stringify(right)) process.exit(1);
 NODE
 }
 
+billing_cutover_routes_file_is_legacy() {
+	[[ $# -eq 1 ]] || return 1
+	local routes
+	routes="$(billing_read_env_value "$1" GATEWAY_ROUTES_JSON)" || return 1
+	printf '%s\n' "$routes" | node -e '
+const fs = require("node:fs");
+const routes = JSON.parse(fs.readFileSync(0, "utf8"));
+const prefixes = ["/api/v1/payments", "/api/v1/subscriptions", "/api/v1/tariff-prices", "/api/v1/affiliate"];
+if (!Array.isArray(routes) || prefixes.some(prefix => routes.some(route => route.pathPrefix === prefix))) process.exit(1);
+if (!routes.some(route => route.pathPrefix === "/api/v1" && route.upstreamUrl === "http://127.0.0.1:4200")) process.exit(1);
+'
+}
+
+billing_cutover_routes_file_is_desired() {
+	[[ $# -eq 1 ]] || return 1
+	local routes
+	routes="$(billing_read_env_value "$1" GATEWAY_ROUTES_JSON)" || return 1
+	printf '%s\n' "$routes" | node -e '
+const fs = require("node:fs");
+const routes = JSON.parse(fs.readFileSync(0, "utf8"));
+const expected = [
+  ["/api/v1/payments", "billing-payments"],
+  ["/api/v1/subscriptions", "billing-subscriptions"],
+  ["/api/v1/tariff-prices", "billing-tariff-prices"],
+  ["/api/v1/affiliate", "billing-affiliate"],
+];
+if (!Array.isArray(routes)) process.exit(1);
+for (const [pathPrefix, id] of expected) {
+  const matches = routes.filter(route => route?.pathPrefix === pathPrefix);
+  if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify({
+    id,
+    pathPrefix,
+    upstreamUrl: "http://127.0.0.1:4800",
+    authPolicy: "optional",
+    timeoutMs: 30000,
+  })) process.exit(1);
+}
+if (!routes.some(route => route?.pathPrefix === "/api/v1" &&
+    route.upstreamUrl === "http://127.0.0.1:4200")) process.exit(1);
+if (routes.some(route => route?.pathPrefix === "/api/v1/site-settings" &&
+    route.upstreamUrl === "http://127.0.0.1:4800")) process.exit(1);
+'
+}
+
+billing_cutover_capture_legacy_route_env() {
+	local temporary="$billing_route_env_legacy_snapshot.$$"
+	if [[ -e "$billing_route_env_legacy_snapshot" ||
+		-L "$billing_route_env_legacy_snapshot" ]]; then
+		billing_cutover_validate_evidence_file \
+			"$billing_route_env_legacy_snapshot" || return 1
+		billing_cutover_routes_file_is_legacy \
+			"$billing_route_env_legacy_snapshot" || return 1
+		if billing_cutover_routes_file_is_legacy "$ENV_FILE"; then
+			[[ "$(billing_cutover_sha256 "$ENV_FILE")" == \
+				"$(billing_cutover_sha256 "$billing_route_env_legacy_snapshot")" ]] ||
+				billing_cutover_fail \
+					'Production legacy env differs from the immutable Billing route snapshot.' ||
+				return 1
+		fi
+		return 0
+	fi
+	billing_cutover_routes_file_is_legacy "$ENV_FILE" ||
+		billing_cutover_fail \
+			'Billing legacy route snapshot can only be created from legacy routes.' ||
+		return 1
+	[[ ! -e "$temporary" && ! -L "$temporary" ]] || return 1
+	(umask 077; cp -- "$ENV_FILE" "$temporary")
+	chown 0:0 "$temporary"
+	chmod 600 "$temporary"
+	mv -- "$temporary" "$billing_route_env_legacy_snapshot"
+	billing_cutover_validate_evidence_file "$billing_route_env_legacy_snapshot"
+}
+
 billing_cutover_write_route_manifest() {
-	local temporary_env="$billing_route_env_candidate.$$"
-	local temporary_manifest="$billing_route_manifest.$$"
-	[[ ! -e "$temporary_env" && ! -L "$temporary_env" &&
-		! -e "$temporary_manifest" && ! -L "$temporary_manifest" ]] || return 1
-	node - "$ENV_FILE" "$temporary_env" "$temporary_manifest" <<'NODE'
+	local temporary_env="$billing_artifact_root/.backend-env-with-billing-routes.partial"
+	local temporary_manifest="$billing_artifact_root/.gateway-routes-billing.partial"
+	local temporary
+	for temporary in "$temporary_env" "$temporary_manifest"; do
+		if [[ -e "$temporary" || -L "$temporary" ]]; then
+			billing_cutover_validate_partial_file "$temporary" ||
+				billing_cutover_fail 'Unsafe partial Billing route artifact.' ||
+				return 1
+			rm -f -- "$temporary"
+		fi
+	done
+	billing_cutover_validate_evidence_file \
+		"$billing_route_env_legacy_snapshot" || return 1
+	billing_cutover_routes_file_is_legacy \
+		"$billing_route_env_legacy_snapshot" || return 1
+	node - "$billing_route_env_legacy_snapshot" "$temporary_env" \
+		"$temporary_manifest" <<'NODE'
 const fs = require('node:fs');
 const [source, destination, manifestPath] = process.argv.slice(2);
 const raw = fs.readFileSync(source, 'utf8');
@@ -1625,8 +2392,33 @@ fs.writeFileSync(manifestPath, `${JSON.stringify(desired)}\n`, { mode: 0o600, fl
 NODE
 	chown 0:0 "$temporary_env" "$temporary_manifest"
 	chmod 600 "$temporary_env" "$temporary_manifest"
-	mv -f "$temporary_manifest" "$billing_route_manifest"
-	mv -f "$temporary_env" "$billing_route_env_candidate"
+	if [[ -e "$billing_route_manifest" || -L "$billing_route_manifest" ]]; then
+		billing_cutover_validate_evidence_file "$billing_route_manifest" &&
+			[[ "$(billing_cutover_sha256 "$billing_route_manifest")" == \
+				"$(billing_cutover_sha256 "$temporary_manifest")" ]] || {
+				rm -f -- "$temporary_env" "$temporary_manifest"
+				billing_cutover_fail \
+					'Existing Billing route manifest differs from the immutable legacy snapshot.'
+				return 1
+			}
+		rm -f -- "$temporary_manifest"
+	else
+		mv -- "$temporary_manifest" "$billing_route_manifest"
+	fi
+	if [[ -e "$billing_route_env_candidate" ||
+		-L "$billing_route_env_candidate" ]]; then
+		billing_cutover_validate_evidence_file "$billing_route_env_candidate" &&
+			[[ "$(billing_cutover_sha256 "$billing_route_env_candidate")" == \
+				"$(billing_cutover_sha256 "$temporary_env")" ]] || {
+				rm -f -- "$temporary_env"
+				billing_cutover_fail \
+					'Existing Billing route env candidate differs from the immutable legacy snapshot.'
+				return 1
+			}
+		rm -f -- "$temporary_env"
+	else
+		mv -- "$temporary_env" "$billing_route_env_candidate"
+	fi
 	[[ "$(stat -c '%u:%g:%a' "$billing_route_env_candidate")" == \
 		'0:0:600' ]] || return 1
 	billing_cutover_validate_evidence_file "$billing_route_manifest"
@@ -1636,46 +2428,69 @@ NODE
 		"$(billing_cutover_sha256 "$billing_route_env_candidate")"
 }
 
+billing_cutover_validate_route_artifacts() {
+	billing_cutover_validate_evidence_file \
+		"$billing_route_env_legacy_snapshot" || return 1
+	billing_cutover_validate_evidence_file "$billing_route_env_candidate" || return 1
+	billing_cutover_validate_evidence_file "$billing_route_manifest" || return 1
+	billing_cutover_routes_file_is_legacy \
+		"$billing_route_env_legacy_snapshot" || return 1
+	billing_cutover_routes_file_is_desired "$billing_route_env_candidate" || return 1
+	node - "$billing_route_env_legacy_snapshot" "$billing_route_env_candidate" \
+		"$billing_route_manifest" <<'NODE'
+const fs = require('node:fs');
+const [legacyPath, candidatePath, manifestPath] = process.argv.slice(2);
+const legacyLines = fs.readFileSync(legacyPath, 'utf8').split('\n');
+const candidateLines = fs.readFileSync(candidatePath, 'utf8').split('\n');
+if (legacyLines.length !== candidateLines.length) process.exit(1);
+const indexes = lines => lines.flatMap((line, index) =>
+  line.startsWith('GATEWAY_ROUTES_JSON=') ? [index] : []);
+const legacyIndexes = indexes(legacyLines);
+const candidateIndexes = indexes(candidateLines);
+if (legacyIndexes.length !== 1 || candidateIndexes.length !== 1 ||
+    legacyIndexes[0] !== candidateIndexes[0]) process.exit(1);
+const routeIndex = legacyIndexes[0];
+for (let index = 0; index < legacyLines.length; index += 1) {
+  if (index !== routeIndex && legacyLines[index] !== candidateLines[index]) process.exit(1);
+}
+const legacy = JSON.parse(legacyLines[routeIndex].slice('GATEWAY_ROUTES_JSON='.length));
+const candidate = JSON.parse(candidateLines[routeIndex].slice('GATEWAY_ROUTES_JSON='.length));
+const prefixes = [
+  ['/api/v1/payments', 'billing-payments'],
+  ['/api/v1/subscriptions', 'billing-subscriptions'],
+  ['/api/v1/tariff-prices', 'billing-tariff-prices'],
+  ['/api/v1/affiliate', 'billing-affiliate'],
+];
+const desired = prefixes.map(([pathPrefix, id]) => ({
+  id, pathPrefix, upstreamUrl: 'http://127.0.0.1:4800',
+  authPolicy: 'optional', timeoutMs: 30000,
+}));
+const retained = legacy.filter(route =>
+  !prefixes.some(([prefix]) => route?.pathPrefix === prefix));
+if (JSON.stringify(candidate) !== JSON.stringify([...desired, ...retained])) process.exit(1);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+if (JSON.stringify(manifest) !== JSON.stringify(desired)) process.exit(1);
+NODE
+	billing_compose_config_all_profiles "$EXPECTED_REVISION" \
+		"$billing_route_env_candidate" "$COMPOSE_FILE"
+}
+
+billing_cutover_prepare_route_artifacts() {
+	billing_cutover_capture_legacy_route_env || return 1
+	if [[ ! -e "$billing_route_env_candidate" ||
+		-L "$billing_route_env_candidate" ||
+		! -e "$billing_route_manifest" || -L "$billing_route_manifest" ]]; then
+		billing_cutover_write_route_manifest || return 1
+	fi
+	billing_cutover_validate_route_artifacts
+}
+
 billing_cutover_routes_are_legacy() {
-	local routes
-	routes="$(billing_read_env_value "$ENV_FILE" GATEWAY_ROUTES_JSON)" || return 1
-	printf '%s\n' "$routes" | node -e '
-const fs = require("node:fs");
-const routes = JSON.parse(fs.readFileSync(0, "utf8"));
-const prefixes = ["/api/v1/payments", "/api/v1/subscriptions", "/api/v1/tariff-prices", "/api/v1/affiliate"];
-if (!Array.isArray(routes) || prefixes.some(prefix => routes.some(route => route.pathPrefix === prefix))) process.exit(1);
-if (!routes.some(route => route.pathPrefix === "/api/v1" && route.upstreamUrl === "http://127.0.0.1:4200")) process.exit(1);
-'
+	billing_cutover_routes_file_is_legacy "$ENV_FILE"
 }
 
 billing_cutover_routes_are_desired() {
-	local routes
-	routes="$(billing_read_env_value "$ENV_FILE" GATEWAY_ROUTES_JSON)" || return 1
-	printf '%s\n' "$routes" | node -e '
-const fs = require("node:fs");
-const routes = JSON.parse(fs.readFileSync(0, "utf8"));
-const expected = [
-  ["/api/v1/payments", "billing-payments"],
-  ["/api/v1/subscriptions", "billing-subscriptions"],
-  ["/api/v1/tariff-prices", "billing-tariff-prices"],
-  ["/api/v1/affiliate", "billing-affiliate"],
-];
-if (!Array.isArray(routes)) process.exit(1);
-for (const [pathPrefix, id] of expected) {
-  const matches = routes.filter(route => route?.pathPrefix === pathPrefix);
-  if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify({
-    id,
-    pathPrefix,
-    upstreamUrl: "http://127.0.0.1:4800",
-    authPolicy: "optional",
-    timeoutMs: 30000,
-  })) process.exit(1);
-}
-if (!routes.some(route => route?.pathPrefix === "/api/v1" &&
-    route.upstreamUrl === "http://127.0.0.1:4200")) process.exit(1);
-if (routes.some(route => route?.pathPrefix === "/api/v1/site-settings" &&
-    route.upstreamUrl === "http://127.0.0.1:4800")) process.exit(1);
-'
+	billing_cutover_routes_file_is_desired "$ENV_FILE"
 }
 
 billing_cutover_gateway_routes_are_legacy() {
@@ -1704,21 +2519,54 @@ if (!Array.isArray(routes) ||
 '
 }
 
-billing_cutover_validate_route_env_sync() {
-	billing_cutover_validate_evidence_file "$billing_route_env_candidate" || return 1
-	billing_cutover_validate_evidence_file "$billing_route_manifest" || return 1
+billing_cutover_gateway_routes_are_desired() {
+	local container_id
+	container_id="$(billing_compose "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE" ps --status running -q api-gateway)"
+	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	docker inspect "$container_id" | node -e '
+const fs = require("node:fs");
+const documents = JSON.parse(fs.readFileSync(0, "utf8"));
+if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
+const entries = documents[0].Config.Env.filter(value =>
+  value.startsWith("GATEWAY_ROUTES_JSON="));
+if (entries.length !== 1) process.exit(1);
+const routes = JSON.parse(entries[0].slice("GATEWAY_ROUTES_JSON=".length));
+const expected = [
+  ["/api/v1/payments", "billing-payments"],
+  ["/api/v1/subscriptions", "billing-subscriptions"],
+  ["/api/v1/tariff-prices", "billing-tariff-prices"],
+  ["/api/v1/affiliate", "billing-affiliate"],
+];
+if (!Array.isArray(routes)) process.exit(1);
+for (const [pathPrefix, id] of expected) {
+  const matches = routes.filter(route => route?.pathPrefix === pathPrefix);
+  if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify({
+    id,
+    pathPrefix,
+    upstreamUrl: "http://127.0.0.1:4800",
+    authPolicy: "optional",
+    timeoutMs: 30000,
+  })) process.exit(1);
+}
+if (!routes.some(route => route?.pathPrefix === "/api/v1" &&
+    route.upstreamUrl === "http://127.0.0.1:4200")) process.exit(1);
+if (routes.some(route => route?.pathPrefix === "/api/v1/site-settings" &&
+    route.upstreamUrl === "http://127.0.0.1:4800")) process.exit(1);
+'
+}
+
+billing_cutover_validate_route_env_sync_evidence() {
+	billing_cutover_validate_route_artifacts || return 1
 	billing_cutover_validate_evidence_file "$billing_route_env_sync_evidence" || return 1
-	billing_cutover_routes_are_desired || return 1
-	local current_sha candidate_sha manifest_sha
-	current_sha="$(billing_cutover_sha256 "$ENV_FILE")"
+	local candidate_sha legacy_sha manifest_sha
 	candidate_sha="$(billing_cutover_sha256 "$billing_route_env_candidate")"
+	legacy_sha="$(billing_cutover_sha256 "$billing_route_env_legacy_snapshot")"
 	manifest_sha="$(billing_cutover_sha256 "$billing_route_manifest")"
-	[[ "$current_sha" == "$candidate_sha" ]] ||
-		billing_cutover_fail \
-			'Production Billing route env differs from the staged full-file candidate.' || return 1
 	EXPECTED_REVISION="$EXPECTED_REVISION" \
 	EXPECTED_GENERATION="$(billing_cutover_marker_value generation)" \
-	EXPECTED_ENV_SHA="$current_sha" EXPECTED_MANIFEST_SHA="$manifest_sha" \
+	EXPECTED_LEGACY_SHA="$legacy_sha" EXPECTED_ENV_SHA="$candidate_sha" \
+	EXPECTED_MANIFEST_SHA="$manifest_sha" \
 		node - "$billing_route_env_sync_evidence" <<'NODE'
 const fs = require('node:fs');
 const evidence = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
@@ -1729,7 +2577,8 @@ if (
   evidence.revision !== process.env.EXPECTED_REVISION ||
   String(evidence.generation) !== process.env.EXPECTED_GENERATION ||
   !hex(evidence.localSourceSha256) ||
-  evidence.localSourceSha256 !== evidence.serverSourceSha256 ||
+  evidence.localSourceSha256 !== process.env.EXPECTED_LEGACY_SHA ||
+  evidence.serverSourceSha256 !== process.env.EXPECTED_LEGACY_SHA ||
   evidence.localCandidateSha256 !== process.env.EXPECTED_ENV_SHA ||
   evidence.uploadedServerSha256 !== process.env.EXPECTED_ENV_SHA ||
   evidence.roundTripLocalSha256 !== process.env.EXPECTED_ENV_SHA ||
@@ -1737,8 +2586,107 @@ if (
   !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(evidence.observedAt || '')
 ) process.exit(1);
 NODE
+}
+
+billing_cutover_validate_route_env_sync() {
+	billing_cutover_validate_route_env_sync_evidence || return 1
+	billing_cutover_routes_are_desired || return 1
+	[[ "$(billing_cutover_sha256 "$ENV_FILE")" == \
+		"$(billing_cutover_sha256 "$billing_route_env_candidate")" ]] ||
+		billing_cutover_fail \
+			'Production Billing route env differs from the staged full-file candidate.' ||
+		return 1
 	billing_compose_config_all_profiles "$EXPECTED_REVISION" "$ENV_FILE" \
 		"$COMPOSE_FILE"
+}
+
+billing_cutover_validate_route_env_rollback_sync() {
+	[[ $# -eq 1 && "$1" =~ ^(recorded|unrecorded)$ ]] || return 1
+	local sync_state="$1"
+	if [[ "$sync_state" == 'recorded' ]]; then
+		billing_cutover_validate_route_env_sync_evidence || return 1
+	else
+		[[ ! -e "$billing_route_env_sync_evidence" &&
+			! -L "$billing_route_env_sync_evidence" ]] || return 1
+	fi
+	billing_cutover_validate_evidence_file \
+		"$billing_route_env_rollback_evidence" || return 1
+	billing_cutover_routes_are_legacy || return 1
+	local candidate_sha current_sha legacy_sha
+	candidate_sha="$(billing_cutover_sha256 "$billing_route_env_candidate")"
+	legacy_sha="$(billing_cutover_sha256 "$billing_route_env_legacy_snapshot")"
+	current_sha="$(billing_cutover_sha256 "$ENV_FILE")"
+	[[ "$current_sha" == "$legacy_sha" ]] || return 1
+	EXPECTED_REVISION="$EXPECTED_REVISION" \
+	EXPECTED_GENERATION="$(billing_cutover_marker_value generation)" \
+	EXPECTED_CANDIDATE_SHA="$candidate_sha" EXPECTED_LEGACY_SHA="$legacy_sha" \
+		node - "$billing_route_env_rollback_evidence" <<'NODE'
+const fs = require('node:fs');
+const evidence = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const exact = [
+  'schemaVersion', 'action', 'status', 'revision', 'generation',
+  'desiredCandidateSha256', 'localSourceSha256', 'serverSourceSha256',
+  'legacyEnvSha256', 'uploadedServerSha256', 'roundTripLocalSha256',
+  'observedAt',
+].sort();
+const hex = value => /^[0-9a-f]{64}$/.test(value || '');
+const allowedSource = value =>
+  [process.env.EXPECTED_CANDIDATE_SHA, process.env.EXPECTED_LEGACY_SHA].includes(value);
+if (
+  !evidence || Array.isArray(evidence) ||
+  Object.keys(evidence).sort().join('|') !== exact.join('|') ||
+  evidence.schemaVersion !== 1 ||
+  evidence.action !== 'billing-route-env-rollback-sync' ||
+  evidence.status !== 'passed' ||
+  evidence.revision !== process.env.EXPECTED_REVISION ||
+  String(evidence.generation) !== process.env.EXPECTED_GENERATION ||
+  !hex(evidence.desiredCandidateSha256) ||
+  evidence.desiredCandidateSha256 !== process.env.EXPECTED_CANDIDATE_SHA ||
+  !allowedSource(evidence.localSourceSha256) ||
+  !allowedSource(evidence.serverSourceSha256) ||
+  evidence.legacyEnvSha256 !== process.env.EXPECTED_LEGACY_SHA ||
+  evidence.uploadedServerSha256 !== process.env.EXPECTED_LEGACY_SHA ||
+  evidence.roundTripLocalSha256 !== process.env.EXPECTED_LEGACY_SHA ||
+  !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(evidence.observedAt || '')
+) process.exit(1);
+NODE
+	billing_compose_config_all_profiles "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE"
+}
+
+billing_cutover_require_abort_route_state() {
+	[[ $# -eq 1 ]] || return 1
+	local phase="$1"
+	billing_cutover_gateway_routes_are_legacy ||
+		billing_cutover_fail \
+			'Billing abort requires the running Gateway to remain on legacy routes.' ||
+		return 1
+	billing_cutover_validate_route_artifacts || return 1
+	if ! billing_cutover_routes_are_legacy ||
+		[[ "$(billing_cutover_sha256 "$ENV_FILE")" != \
+			"$(billing_cutover_sha256 "$billing_route_env_legacy_snapshot")" ]]; then
+		printf 'billing_route_env_rollback_snapshot=%s\n' \
+			"$billing_route_env_legacy_snapshot"
+		printf 'billing_route_env_rollback_evidence=%s\n' \
+			"$billing_route_env_rollback_evidence"
+		billing_cutover_fail \
+			'Billing abort requires a verified two-copy rollback to the legacy env snapshot.'
+		return 1
+	fi
+	if [[ ! -e "$billing_route_env_sync_evidence" &&
+		! -L "$billing_route_env_sync_evidence" ]]; then
+		[[ "$phase" =~ ^(prepared|aborted)$ ]] ||
+			billing_cutover_fail \
+				'Billing forward route sync evidence is missing outside prepared phase.' ||
+			return 1
+		billing_cutover_validate_route_env_rollback_sync unrecorded ||
+			billing_cutover_fail \
+				'Billing no-op two-copy legacy env receipt is missing or invalid.'
+		return
+	fi
+	billing_cutover_validate_route_env_rollback_sync recorded ||
+		billing_cutover_fail \
+			'Billing route rollback sync evidence is missing or invalid.'
 }
 
 billing_cutover_wait_gateway() {
@@ -1757,25 +2705,88 @@ billing_cutover_wait_gateway() {
 	billing_cutover_fail 'Gateway did not become healthy after the Billing route switch.'
 }
 
+billing_cutover_require_active_runtime() {
+	local image_id redeliver
+	image_id="$(billing_database_marker_value billing_image_id)" || return 1
+	[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	billing_database_require_pinned_candidate_images || return 1
+	billing_deploy_verify_service billing-api api 4800 "$image_id" || return 1
+	billing_deploy_verify_service billing-scheduler scheduler 4801 "$image_id" || return 1
+	billing_deploy_verify_service billing-worker worker 4802 "$image_id" || return 1
+	billing_deploy_verify_service \
+		billing-outbox-publisher outbox-publisher 4803 "$image_id" || return 1
+	billing_cutover_validate_route_env_sync || return 1
+	[[ "$(billing_cutover_marker_value route_sha256)" == \
+		"$(billing_cutover_sha256 "$billing_route_env_sync_evidence")" ]] ||
+		billing_cutover_fail \
+			'Durable Billing route evidence hash differs from the synced route receipt.' ||
+		return 1
+	billing_cutover_wait_gateway || return 1
+	billing_cutover_gateway_routes_are_desired ||
+		billing_cutover_fail \
+			'Running Gateway does not expose the exact Billing route manifest.' ||
+		return 1
+	billing_cutover_validate_evidence_file "$billing_direct_error_contract" || return 1
+	billing_cutover_capture_error_contract http://127.0.0.1:4100 \
+		"$billing_gateway_error_contract"
+	billing_cutover_compare_error_contracts "$billing_direct_error_contract" \
+		"$billing_gateway_error_contract" ||
+		billing_cutover_fail \
+			'Gateway Billing error contract drifted during post-ownership recovery.' ||
+		return 1
+	billing_cutover_validate_evidence_file \
+		"$billing_auto_renewal_billing_evidence" || return 1
+	redeliver="$(billing_cutover_auto_renewal_redeliver \
+		"$billing_auto_renewal_billing_evidence")" || return 1
+	billing_cutover_wait_auto_renewal_ownership 1 \
+		winwidget-billing-worker winwidget-billing-worker billing-owner \
+		"$billing_auto_renewal_billing_evidence" "$redeliver"
+}
+
 billing_cutover_update_phase() {
 	[[ $# -eq 4 ]] || return 1
 	local phase="$1" snapshot_sha="$2" projection_sha="$3" route_sha="$4"
 	local cleanup_revision generation database_id pre_backup_sha post_backup_sha
-	local restore_evidence restore_sha
+	local restore_evidence restore_sha core_image_id billing_image_id
+	local pre_restore_sha pre_receipt_sha post_restore_sha post_receipt_sha
 	cleanup_revision="$(billing_database_marker_value cleanup_revision)"
 	generation="$(billing_cutover_marker_value generation)"
 	database_id="$(billing_database_marker_value database_id)"
+	core_image_id="$(billing_database_marker_value core_image_id)"
+	billing_image_id="$(billing_database_marker_value billing_image_id)"
 	pre_backup_sha="$(billing_database_marker_value pre_backup_sha256)"
 	post_backup_sha="$(billing_database_marker_value post_backup_sha256)"
-	if [[ -f "$billing_pre_backup_manifest" && ! -L "$billing_pre_backup_manifest" ]]; then
+	restore_sha="$(billing_database_marker_value restore_evidence_sha256)"
+	pre_restore_sha="$(billing_database_marker_value pre_restore_evidence_sha256)"
+	pre_receipt_sha="$(billing_database_marker_value pre_offsite_receipt_sha256)"
+	post_restore_sha="$(billing_database_marker_value post_restore_evidence_sha256)"
+	post_receipt_sha="$(billing_database_marker_value post_offsite_receipt_sha256)"
+	if [[ "$phase" == 'prepared' ]]; then
+		[[ "$billing_cutover_core_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+			"$billing_cutover_billing_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+			return 1
+		core_image_id="$billing_cutover_core_image_id"
+		billing_image_id="$billing_cutover_billing_image_id"
+		restore_evidence="$(billing_read_env_value "$ENV_FILE" \
+			BILLING_RESTORE_DRILL_EVIDENCE_FILE)"
+		restore_sha="$(billing_cutover_sha256 "$restore_evidence")"
+	fi
+	if [[ "$phase" == 'pre-backups-created' ]]; then
+		billing_cutover_validate_evidence_file "$billing_pre_backup_manifest" || return 1
 		pre_backup_sha="$(billing_cutover_sha256 "$billing_pre_backup_manifest")"
 	fi
-	if [[ -f "$billing_post_backup" && ! -L "$billing_post_backup" ]]; then
+	if [[ "$phase" == 'post-backup-created' ]]; then
+		billing_cutover_validate_evidence_file "$billing_post_backup" || return 1
 		post_backup_sha="$(billing_cutover_sha256 "$billing_post_backup")"
 	fi
-	restore_evidence="$(billing_read_env_value "$ENV_FILE" \
-		BILLING_RESTORE_DRILL_EVIDENCE_FILE)"
-	restore_sha="$(billing_cutover_sha256 "$restore_evidence")"
+	[[ -z "$billing_cutover_next_pre_restore_sha" ]] ||
+		pre_restore_sha="$billing_cutover_next_pre_restore_sha"
+	[[ -z "$billing_cutover_next_pre_receipt_sha" ]] ||
+		pre_receipt_sha="$billing_cutover_next_pre_receipt_sha"
+	[[ -z "$billing_cutover_next_post_restore_sha" ]] ||
+		post_restore_sha="$billing_cutover_next_post_restore_sha"
+	[[ -z "$billing_cutover_next_post_receipt_sha" ]] ||
+		post_receipt_sha="$billing_cutover_next_post_receipt_sha"
 	billing_database_transition_allowed \
 		"$(billing_database_current_phase)" "$phase" ||
 		billing_cutover_fail \
@@ -1785,11 +2796,16 @@ billing_cutover_update_phase() {
 		"$(billing_database_marker_value database_system_identifier)" \
 		"$(billing_database_marker_value database_volume)" \
 		"$(billing_database_marker_value postgres_image_id)" \
-		"$generation" "$snapshot_sha" "$pre_backup_sha" "$post_backup_sha" \
-		"$restore_sha" "$projection_sha" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+		"$core_image_id" "$billing_image_id" "$generation" "$snapshot_sha" \
+		"$pre_backup_sha" "$post_backup_sha" "$restore_sha" \
+		"$pre_restore_sha" "$pre_receipt_sha" \
+		"$post_restore_sha" "$post_receipt_sha" "$projection_sha" "$route_sha" \
+		"$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	billing_cutover_write_marker "$phase" "$EXPECTED_REVISION" \
-		"$cleanup_revision" "$generation" "$database_id" "$snapshot_sha" \
-		"$projection_sha" "$route_sha"
+		"$cleanup_revision" "$generation" "$database_id" \
+		"$core_image_id" "$billing_image_id" "$snapshot_sha" \
+		"$projection_sha" "$route_sha" "$pre_restore_sha" "$pre_receipt_sha" \
+		"$post_restore_sha" "$post_receipt_sha"
 }
 
 billing_cutover_initialize_marker() {
@@ -1805,68 +2821,179 @@ billing_cutover_initialize_marker() {
 		*) billing_cutover_fail \
 			'Existing Billing cutover marker is not re-preparable.' || return 1 ;;
 		esac
-		[[ "$(billing_cutover_marker_value revision)" == "$EXPECTED_REVISION" &&
-			"$(billing_cutover_marker_value database_id)" == "$database_id" ]] ||
-			billing_cutover_fail 'Existing Billing marker identity changed.' || return 1
+		[[ "$(billing_cutover_marker_value revision)" == "$EXPECTED_REVISION" ]] ||
+			billing_cutover_fail 'Existing Billing marker revision changed.' || return 1
+		if [[ "$marker_phase" == 'prepared' ]]; then
+			[[ "$(billing_cutover_marker_value database_id)" == "$database_id" ]] ||
+				billing_cutover_fail 'Prepared Billing database identity changed.' ||
+				return 1
+		else
+			[[ "$(billing_cutover_marker_value database_id)" != "$database_id" ]] ||
+				billing_cutover_fail \
+					'Aborted Billing reprepare did not create a clean database identity.' ||
+				return 1
+		fi
 		generation="$(billing_cutover_marker_value generation)"
 		if [[ "$marker_phase" == 'aborted' ]]; then
+			billing_cutover_archive_aborted_generation "$generation"
 			generation="$((generation + 1))"
 		fi
 		billing_cutover_write_marker prepared "$EXPECTED_REVISION" \
 			"$(billing_cutover_marker_value cleanup_revision)" \
 			"$generation" "$database_id" \
-			pending pending pending
+			"$billing_cutover_core_image_id" \
+			"$billing_cutover_billing_image_id" \
+			pending pending pending pending pending pending pending
 	else
 		billing_cutover_write_marker prepared "$EXPECTED_REVISION" pending 1 \
-			"$database_id" pending pending pending
+			"$database_id" "$billing_cutover_core_image_id" \
+			"$billing_cutover_billing_image_id" \
+			pending pending pending pending pending pending pending
 	fi
 	billing_cutover_update_phase prepared pending pending pending
 }
 
 billing_cutover_reconcile_marker() {
-	local database_phase cutover_phase
+	local database_phase cutover_phase database_cleanup cutover_cleanup
+	local cleanup_repair='false'
 	database_phase="$(billing_database_current_phase)" || return 1
 	[[ "$database_phase" != 'absent' ]] || return 1
 	billing_cutover_validate_marker || return 1
+	cutover_phase="$(billing_cutover_marker_value phase)" || return 1
+	database_cleanup="$(billing_database_marker_value cleanup_revision)" || return 1
+	cutover_cleanup="$(billing_cutover_marker_value cleanup_revision)" || return 1
 	[[ "$(billing_cutover_marker_value revision)" == "$EXPECTED_REVISION" &&
 		"$(billing_cutover_marker_value database_id)" == \
 		"$(billing_database_marker_value database_id)" &&
 		"$(billing_cutover_marker_value generation)" == \
-		"$(billing_database_marker_value switch_generation)" ]] ||
+		"$(billing_database_marker_value switch_generation)" &&
+		"$(billing_cutover_marker_value core_image_id)" == \
+		"$(billing_database_marker_value core_image_id)" &&
+		"$(billing_cutover_marker_value billing_image_id)" == \
+		"$(billing_database_marker_value billing_image_id)" ]] ||
 		billing_cutover_fail 'Billing lifecycle and cutover marker identities differ.' ||
 		return 1
-	cutover_phase="$(billing_cutover_marker_value phase)"
-	if [[ "$cutover_phase" != "$database_phase" ]]; then
+	if [[ "$cutover_cleanup" == "$database_cleanup" ]]; then
+		:
+	elif [[ "$cutover_cleanup" == 'pending' &&
+		"$database_cleanup" =~ ^[0-9a-f]{40}$ &&
+		"$database_cleanup" != "$EXPECTED_REVISION" &&
+		"$database_phase" == 'complete' && "$cutover_phase" == 'complete' ]]; then
+		cleanup_repair='true'
+	else
+		billing_cutover_fail \
+			'Billing cleanup revision differs between durable markers.' || return 1
+	fi
+	if [[ "$cutover_phase" == "$database_phase" ]]; then
+		[[ "$(billing_cutover_marker_value route_sha256)" == \
+			"$(billing_database_marker_value route_evidence_sha256)" &&
+			"$(billing_cutover_marker_value pre_restore_evidence_sha256)" == \
+			"$(billing_database_marker_value pre_restore_evidence_sha256)" &&
+			"$(billing_cutover_marker_value pre_offsite_receipt_sha256)" == \
+			"$(billing_database_marker_value pre_offsite_receipt_sha256)" &&
+			"$(billing_cutover_marker_value post_restore_evidence_sha256)" == \
+			"$(billing_database_marker_value post_restore_evidence_sha256)" &&
+			"$(billing_cutover_marker_value post_offsite_receipt_sha256)" == \
+			"$(billing_database_marker_value post_offsite_receipt_sha256)" ]] ||
+			billing_cutover_fail 'Billing lifecycle evidence hashes differ between markers.' ||
+			return 1
+		if [[ "$cleanup_repair" == 'true' ]]; then
+			billing_cutover_write_marker complete "$EXPECTED_REVISION" \
+				"$database_cleanup" \
+				"$(billing_database_marker_value switch_generation)" \
+				"$(billing_database_marker_value database_id)" \
+				"$(billing_database_marker_value core_image_id)" \
+				"$(billing_database_marker_value billing_image_id)" \
+				"$(billing_database_marker_value snapshot_sha256)" \
+				"$(billing_database_marker_value projection_evidence_sha256)" \
+				"$(billing_database_marker_value route_evidence_sha256)" \
+				"$(billing_database_marker_value pre_restore_evidence_sha256)" \
+				"$(billing_database_marker_value pre_offsite_receipt_sha256)" \
+				"$(billing_database_marker_value post_restore_evidence_sha256)" \
+				"$(billing_database_marker_value post_offsite_receipt_sha256)"
+		fi
+	else
+		[[ "$cleanup_repair" == 'false' ]] || return 1
 		billing_cutover_write_marker "$database_phase" "$EXPECTED_REVISION" \
 			"$(billing_database_marker_value cleanup_revision)" \
 			"$(billing_database_marker_value switch_generation)" \
 			"$(billing_database_marker_value database_id)" \
+			"$(billing_database_marker_value core_image_id)" \
+			"$(billing_database_marker_value billing_image_id)" \
 			"$(billing_database_marker_value snapshot_sha256)" \
 			"$(billing_database_marker_value projection_evidence_sha256)" \
-			"$(billing_cutover_marker_value route_sha256)"
+			"$(billing_database_marker_value route_evidence_sha256)" \
+			"$(billing_database_marker_value pre_restore_evidence_sha256)" \
+			"$(billing_database_marker_value pre_offsite_receipt_sha256)" \
+			"$(billing_database_marker_value post_restore_evidence_sha256)" \
+			"$(billing_database_marker_value post_offsite_receipt_sha256)"
 	fi
 }
 
 billing_cutover_prepare() {
-	local phase generation
+	local phase generation core_image_id billing_image_id
 	billing_cutover_require_environment
-	billing_cutover_validate_restore_drill ||
-		billing_cutover_fail 'Billing PG18 restore-drill evidence is invalid.' || return 1
 	acquire_production_deploy_lock 'Billing cutover prepare'
-	billing_cutover_build_candidate_images
-	phase="$(billing_database_current_phase)"
+	phase="$(billing_database_current_phase)" || return 1
 	case "$phase" in
-	absent | aborted | preparing | prepared) billing_database_prepare ;;
+	absent | aborted | preparing | prepared) ;;
 	*) billing_cutover_fail "Billing prepare is not allowed from phase=$phase." || return 1 ;;
 	esac
+	if [[ "$phase" == 'prepared' ]] && billing_cutover_routes_are_desired; then
+		billing_cutover_reconcile_marker
+		billing_cutover_core_image_id="$(billing_database_marker_value core_image_id)"
+		billing_cutover_billing_image_id="$(billing_database_marker_value billing_image_id)"
+		billing_database_require_pinned_candidate_images
+		billing_cutover_validate_restore_drill
+		billing_cutover_validate_route_env_sync
+		billing_cutover_gateway_routes_are_legacy ||
+			billing_cutover_fail \
+				'Running Gateway changed Billing routes before source freeze.' ||
+			return 1
+		billing_cutover_verify_dark_source_topology
+		printf 'billing_cutover_phase=prepared\n'
+		return 0
+	fi
+	billing_cutover_routes_are_legacy ||
+		billing_cutover_fail \
+			'Billing prepare requires canonical production env to use legacy routes.' ||
+		return 1
+	billing_cutover_gateway_routes_are_legacy ||
+		billing_cutover_fail \
+			'Billing prepare requires the running Gateway to use legacy routes.' ||
+		return 1
+	core_image_id="$(billing_database_marker_value core_image_id 2>/dev/null || true)"
+	billing_image_id="$(billing_database_marker_value billing_image_id 2>/dev/null || true)"
+	if [[ "$phase" != 'absent' &&
+		"$core_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$billing_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+		billing_cutover_core_image_id="$core_image_id"
+		billing_cutover_billing_image_id="$billing_image_id"
+		billing_database_require_pinned_candidate_images
+	elif billing_cutover_verify_candidate_images 2>/dev/null; then
+		:
+	else
+		billing_cutover_build_candidate_images
+	fi
+	billing_cutover_ensure_restore_drill ||
+		billing_cutover_fail \
+			'Billing PG18 restore-drill evidence is not bound to the built image.' ||
+		return 1
+	if [[ "$phase" != 'prepared' ]]; then
+		BILLING_CANDIDATE_CORE_IMAGE_ID="$billing_cutover_core_image_id" \
+		BILLING_CANDIDATE_BILLING_IMAGE_ID="$billing_cutover_billing_image_id" \
+			billing_database_prepare
+	fi
+	billing_cutover_require_artifact_root
+	billing_cutover_initialize_marker
+	billing_database_require_pinned_candidate_images
+	billing_cutover_prepare_route_artifacts
 	billing_cutover_provision_rabbit
 	env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
 		EXPECTED_REVISION="$EXPECTED_REVISION" BILLING_DEPLOY_SKIP_BUILD=true \
 		bash "$server_root/scripts/deploy-billing-production.sh" --deploy
 	billing_cutover_verify_dark_source_topology
 	billing_cutover_install_core_expand_migration
-	billing_cutover_require_artifact_root
-	billing_cutover_initialize_marker
 	billing_cutover_require_cli_uid
 	generation="$(billing_cutover_marker_value generation)"
 	billing_cutover_run_core_cli prepare "$billing_core_prepare_evidence" \
@@ -1880,11 +3007,7 @@ billing_cutover_prepare() {
 		"$billing_direct_error_contract" ||
 		billing_cutover_fail \
 			'Billing direct error contract differs from the legacy Gateway contract.'
-	billing_cutover_routes_are_legacy ||
-		billing_cutover_fail \
-			'Billing route env must remain legacy while staging the synced candidate.' ||
-		return 1
-	billing_cutover_write_route_manifest
+	billing_cutover_prepare_route_artifacts
 	printf 'billing_cutover_phase=prepared\n'
 }
 
@@ -1905,12 +3028,30 @@ billing_cutover_run() {
 	billing_cutover_require_manual_confirmation
 	acquire_production_deploy_lock 'Billing ownership cutover'
 	billing_cutover_reconcile_marker
+	billing_database_require_pinned_candidate_images
+	billing_cutover_require_artifact_root
 	generation="$(billing_cutover_marker_value generation)"
 	phase="$(billing_database_current_phase)"
-	if [[ "$phase" == 'prepared' ]]; then
+	case "$phase" in
+	prepared | source-frozen | imported | pre-backups-created | \
+		pre-restore-verified | projection-synced)
 		billing_cutover_validate_route_env_sync ||
 			billing_cutover_fail \
-				'Billing route env two-copy sync evidence is missing or invalid.' || return 1
+				'Billing pre-forward recovery requires the synced desired route env.' ||
+			return 1
+		billing_cutover_gateway_routes_are_legacy ||
+			billing_cutover_fail \
+				'Running Gateway activated Billing routes before the forward boundary.' ||
+			return 1
+		;;
+	active | post-backup-created | post-restore-verified)
+		billing_cutover_require_active_runtime ||
+			billing_cutover_fail \
+				'Billing active runtime drifted during the restore/offsite pause.' ||
+			return 1
+		;;
+	esac
+	if [[ "$phase" == 'prepared' ]]; then
 		billing_cutover_gateway_routes_are_legacy ||
 			billing_cutover_fail \
 				'Running Gateway changed Billing routes before source freeze.' || return 1
@@ -1962,12 +3103,30 @@ billing_cutover_run() {
 		done
 		((source_drain_attempt <= 60)) || billing_cutover_fail \
 			'Billing source queues did not drain after verified frozen import.' || return 1
-		billing_cutover_create_pre_backups
 		snapshot_sha="$(billing_cutover_sha256 "$billing_snapshot_file")"
 		billing_cutover_update_phase imported "$snapshot_sha" pending pending
 		phase='imported'
 	fi
 	if [[ "$phase" == 'imported' ]]; then
+		billing_cutover_create_pre_backups
+		snapshot_sha="$(billing_database_marker_value snapshot_sha256)"
+		billing_cutover_update_phase pre-backups-created "$snapshot_sha" \
+			pending pending
+		printf 'billing_cutover_phase=pre-backups-created\n'
+		printf 'billing_restore_required=pre-cutover\n'
+		printf 'billing_restore_evidence_import=%s\n' \
+			"/root/winwidget-billing-pre-restore-${EXPECTED_REVISION}-g${generation}.json"
+		printf 'billing_offsite_receipt_import=%s\n' \
+			"/root/winwidget-billing-pre-offsite-${EXPECTED_REVISION}-g${generation}.json"
+		return 0
+	fi
+	if [[ "$phase" == 'pre-backups-created' ]]; then
+		billing_cutover_require_actual_restore_gate pre-cutover
+		billing_cutover_update_phase pre-restore-verified \
+			"$(billing_database_marker_value snapshot_sha256)" pending pending
+		phase='pre-restore-verified'
+	fi
+	if [[ "$phase" == 'pre-restore-verified' ]]; then
 		billing_cutover_run_billing_cli seed-core-read-events \
 			"$billing_seed_evidence" --revision "$EXPECTED_REVISION" \
 			--generation "$generation"
@@ -2043,16 +3202,20 @@ billing_cutover_run() {
 			'Billing service is not in an activatable forward-recovery phase.' || return 1 ;;
 		esac
 		env APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
-			EXPECTED_REVISION="$EXPECTED_REVISION" \
+			EXPECTED_REVISION="$EXPECTED_REVISION" BILLING_DEPLOY_SKIP_BUILD=true \
 			bash "$server_root/scripts/deploy-billing-production.sh" --deploy
 		billing_cutover_wait_auto_renewal_ownership 1 \
 			winwidget-billing-worker winwidget-billing-worker billing-owner \
 			"$billing_auto_renewal_billing_evidence" "$handoff_redeliver"
 		billing_cutover_validate_route_env_sync
-		route_sha="$(billing_cutover_sha256 "$billing_route_manifest")"
+		route_sha="$(billing_cutover_sha256 "$billing_route_env_sync_evidence")"
 		billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
 			up -d --no-deps --no-build --force-recreate api-gateway
 		billing_cutover_wait_gateway
+		billing_cutover_gateway_routes_are_desired ||
+			billing_cutover_fail \
+				'Running Gateway did not activate the exact Billing route manifest.' ||
+			return 1
 		billing_cutover_capture_error_contract http://127.0.0.1:4100 \
 			"$billing_gateway_error_contract"
 		billing_cutover_compare_error_contracts "$billing_direct_error_contract" \
@@ -2071,10 +3234,45 @@ billing_cutover_run() {
 	if [[ "$phase" == 'active' ]]; then
 		billing_cutover_create_backup BILLING_BACKUP_URL billing \
 			"$billing_post_backup" billing-post-ownership
-		billing_cutover_run_billing_cli complete "$billing_completion_evidence" \
-			--revision "$EXPECTED_REVISION" --generation "$generation"
-		billing_cutover_validate_billing_transition \
-			"$billing_completion_evidence" complete COMPLETE
+		billing_cutover_update_phase post-backup-created \
+			"$(billing_database_marker_value snapshot_sha256)" \
+			"$(billing_database_marker_value projection_evidence_sha256)" \
+			"$(billing_cutover_marker_value route_sha256)"
+		printf 'billing_cutover_phase=post-backup-created\n'
+		printf 'billing_restore_required=post-ownership\n'
+		printf 'billing_restore_evidence_import=%s\n' \
+			"/root/winwidget-billing-post-restore-${EXPECTED_REVISION}-g${generation}.json"
+		printf 'billing_offsite_receipt_import=%s\n' \
+			"/root/winwidget-billing-post-offsite-${EXPECTED_REVISION}-g${generation}.json"
+		return 0
+	fi
+	if [[ "$phase" == 'post-backup-created' ]]; then
+		billing_cutover_require_actual_restore_gate post-ownership
+		billing_cutover_update_phase post-restore-verified \
+			"$(billing_database_marker_value snapshot_sha256)" \
+			"$(billing_database_marker_value projection_evidence_sha256)" \
+			"$(billing_cutover_marker_value route_sha256)"
+		phase='post-restore-verified'
+	fi
+	if [[ "$phase" == 'post-restore-verified' ]]; then
+		billing_cutover_run_billing_cli status "$billing_service_status_evidence"
+		billing_ownership="$(billing_cutover_billing_ownership_phase \
+			"$billing_service_status_evidence")"
+		case "$billing_ownership" in
+		ACTIVE)
+			billing_cutover_run_billing_cli complete "$billing_completion_evidence" \
+				--revision "$EXPECTED_REVISION" --generation "$generation"
+			billing_cutover_validate_billing_transition \
+				"$billing_completion_evidence" complete COMPLETE
+			;;
+		COMPLETE)
+			billing_cutover_validate_billing_completed_status \
+				"$billing_service_status_evidence"
+			;;
+		*) billing_cutover_fail \
+			'Post-restore forward recovery requires ACTIVE or COMPLETE Billing ownership.' ||
+			return 1 ;;
+		esac
 		billing_cutover_update_phase complete \
 			"$(billing_database_marker_value snapshot_sha256)" \
 			"$(billing_database_marker_value projection_evidence_sha256)" \
@@ -2084,23 +3282,36 @@ billing_cutover_run() {
 }
 
 billing_cutover_abort() {
-	local phase generation
+	local phase generation core_ownership
 	billing_cutover_require_environment
 	[[ "${BILLING_ABORT_CONFIRMATION:-}" == 'ABORT BILLING CUTOVER' ]] ||
 		billing_cutover_fail 'Billing abort requires the exact manual confirmation.' ||
 		return 1
 	acquire_production_deploy_lock 'Billing cutover abort'
 	billing_cutover_reconcile_marker
+	billing_database_require_pinned_candidate_images
 	phase="$(billing_database_current_phase)"
 	case "$phase" in
-	prepared | source-frozen | imported | projection-synced) ;;
+	prepared | source-frozen | imported | pre-backups-created | \
+		pre-restore-verified | projection-synced | aborted) ;;
 	*) billing_cutover_fail \
 		"Billing abort is forbidden from phase=$phase." || return 1 ;;
 	esac
-	billing_cutover_routes_are_legacy ||
-		billing_cutover_fail 'Billing abort is forbidden after the route switch.' ||
-		return 1
 	generation="$(billing_cutover_marker_value generation)"
+	billing_cutover_run_core_cli status "$billing_core_status_evidence" \
+		--revision "$EXPECTED_REVISION" --generation "$generation"
+	core_ownership="$(billing_cutover_core_ownership \
+		"$billing_core_status_evidence")" || return 1
+	[[ "$core_ownership" == 'CORE' ]] ||
+		billing_cutover_fail \
+			'Core already owns Billing forward-only; keep desired routes and resume cutover.' ||
+		return 1
+	billing_cutover_require_abort_route_state "$phase" || return 1
+	if [[ "$phase" == 'aborted' ]]; then
+		billing_database_require_runtime_stopped || return 1
+		printf 'billing_cutover_phase=aborted\n'
+		return 0
+	fi
 	billing_cutover_run_core_cli abort "$billing_core_abort_evidence" \
 		--revision "$EXPECTED_REVISION" --generation "$generation"
 	billing_cutover_validate_core_abort_state "$billing_core_abort_evidence"
@@ -2108,8 +3319,14 @@ billing_cutover_abort() {
 	billing_cutover_write_marker aborted "$EXPECTED_REVISION" \
 		"$(billing_database_marker_value cleanup_revision)" "$generation" \
 		"$(billing_database_marker_value database_id)" \
+		"$(billing_database_marker_value core_image_id)" \
+		"$(billing_database_marker_value billing_image_id)" \
 		"$(billing_database_marker_value snapshot_sha256)" \
-		"$(billing_database_marker_value projection_evidence_sha256)" pending
+		"$(billing_database_marker_value projection_evidence_sha256)" pending \
+		"$(billing_database_marker_value pre_restore_evidence_sha256)" \
+		"$(billing_database_marker_value pre_offsite_receipt_sha256)" \
+		"$(billing_database_marker_value post_restore_evidence_sha256)" \
+		"$(billing_database_marker_value post_offsite_receipt_sha256)"
 	printf 'billing_cutover_phase=aborted\n'
 }
 
@@ -2119,10 +3336,25 @@ billing_cutover_forward_recovery() {
 	billing_cutover_reconcile_marker
 	phase="$(billing_database_current_phase)"
 	case "$phase" in
-	forward-only | active) billing_cutover_run ;;
+	forward-only | active | post-backup-created | post-restore-verified)
+		billing_cutover_run
+		;;
 	*) billing_cutover_fail \
-		"Forward recovery requires phase=forward-only|active; phase=$phase." ;;
+		"Forward recovery requires a forward-only Billing phase; phase=$phase." ;;
 	esac
+}
+
+billing_cutover_require_cleanup_revision_stage() {
+	[[ $# -eq 1 ]] || return 1
+	local requested="$1" database_cleanup cutover_cleanup
+	billing_release_validate_revision "$requested" || return 1
+	database_cleanup="$(billing_database_marker_value cleanup_revision)" || return 1
+	cutover_cleanup="$(billing_cutover_marker_value cleanup_revision)" || return 1
+	[[ "$database_cleanup" == "$cutover_cleanup" &&
+		( "$database_cleanup" == 'pending' ||
+			"$database_cleanup" == "$requested" ) ]] ||
+		billing_cutover_fail \
+			'Billing cleanup revision is immutable once it has been staged.'
 }
 
 billing_cutover_stage_cleanup_revision() {
@@ -2134,31 +3366,45 @@ billing_cutover_stage_cleanup_revision() {
 		'STAGE BILLING CLEANUP REVISION' ]] ||
 		billing_cutover_fail 'Billing cleanup SHA staging requires exact confirmation.' ||
 		return 1
+	acquire_production_deploy_lock 'Billing cleanup revision staging'
 	billing_cutover_reconcile_marker
+	billing_cutover_require_cleanup_revision_stage "$cleanup_revision" || return 1
 	[[ "$(billing_database_current_phase)" == 'complete' &&
 		"$cleanup_revision" != "$EXPECTED_REVISION" ]] ||
 		billing_cutover_fail \
 			'Cleanup revision can be staged only after complete and must be SHA B.' ||
 		return 1
-	acquire_production_deploy_lock 'Billing cleanup revision staging'
 	billing_database_write_marker complete "$EXPECTED_REVISION" \
 		"$cleanup_revision" "$(billing_database_marker_value database_id)" \
 		"$(billing_database_marker_value database_system_identifier)" \
 		"$(billing_database_marker_value database_volume)" \
 		"$(billing_database_marker_value postgres_image_id)" \
+		"$(billing_database_marker_value core_image_id)" \
+		"$(billing_database_marker_value billing_image_id)" \
 		"$(billing_database_marker_value switch_generation)" \
 		"$(billing_database_marker_value snapshot_sha256)" \
 		"$(billing_database_marker_value pre_backup_sha256)" \
 		"$(billing_database_marker_value post_backup_sha256)" \
 		"$(billing_database_marker_value restore_evidence_sha256)" \
+		"$(billing_database_marker_value pre_restore_evidence_sha256)" \
+		"$(billing_database_marker_value pre_offsite_receipt_sha256)" \
+		"$(billing_database_marker_value post_restore_evidence_sha256)" \
+		"$(billing_database_marker_value post_offsite_receipt_sha256)" \
 		"$(billing_database_marker_value projection_evidence_sha256)" \
+		"$(billing_database_marker_value route_evidence_sha256)" \
 		"$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	billing_cutover_write_marker complete "$EXPECTED_REVISION" \
 		"$cleanup_revision" "$(billing_cutover_marker_value generation)" \
 		"$(billing_cutover_marker_value database_id)" \
+		"$(billing_database_marker_value core_image_id)" \
+		"$(billing_database_marker_value billing_image_id)" \
 		"$(billing_cutover_marker_value snapshot_sha256)" \
 		"$(billing_cutover_marker_value projection_sha256)" \
-		"$(billing_cutover_marker_value route_sha256)"
+		"$(billing_cutover_marker_value route_sha256)" \
+		"$(billing_database_marker_value pre_restore_evidence_sha256)" \
+		"$(billing_database_marker_value pre_offsite_receipt_sha256)" \
+		"$(billing_database_marker_value post_restore_evidence_sha256)" \
+		"$(billing_database_marker_value post_offsite_receipt_sha256)"
 	printf 'billing_cleanup_revision_staged=%s\n' "$cleanup_revision"
 }
 
@@ -2174,9 +3420,399 @@ billing_cutover_status() {
 	fi
 }
 
+billing_cutover_actual_restore_validator_self_test() (
+	local directory revision core_image_id billing_image_id postgres_image_id
+	directory="$(mktemp -d "${TMPDIR:-/tmp}/billing-restore-validator.XXXXXX")"
+	trap 'rm -f -- "$directory"/*; rmdir -- "$directory"' EXIT
+	revision="$(printf 'a%.0s' {1..40})"
+	core_image_id="sha256:$(printf '1%.0s' {1..64})"
+	billing_image_id="sha256:$(printf '2%.0s' {1..64})"
+	postgres_image_id="sha256:$(printf '3%.0s' {1..64})"
+	EXPECTED_REVISION="$revision"
+	billing_snapshot_file="$directory/snapshot.json"
+	billing_pre_backup_manifest="$directory/manifest.json"
+	billing_core_backup="$directory/core.dump"
+	billing_service_backup="$directory/billing-pre.dump"
+	billing_post_backup="$directory/billing-post.dump"
+	billing_pre_restore_evidence="$directory/pre.json"
+	billing_post_restore_evidence="$directory/post.json"
+	printf 'core-dump-fixture\n' >"$billing_core_backup"
+	printf 'billing-pre-dump-fixture\n' >"$billing_service_backup"
+	printf 'billing-post-dump-fixture\n' >"$billing_post_backup"
+	REVISION="$revision" CORE_IMAGE_ID="$core_image_id" \
+		BILLING_IMAGE_ID="$billing_image_id" POSTGRES_IMAGE_ID="$postgres_image_id" \
+		POSTGRES_IMAGE="$billing_postgres_image" DIRECTORY="$directory" node <<'NODE'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const directory = process.env.DIRECTORY;
+const digest = path => crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex');
+const size = path => fs.statSync(path).size;
+const revision = process.env.REVISION;
+const fingerprint = 'd'.repeat(64);
+const metric = systemIdentifier => ({
+  systemIdentifier,
+  tableCount: 1,
+  tableManifestSha256: '4'.repeat(64),
+  rowManifestSha256: '5'.repeat(64),
+  migrationCount: 1,
+  migrationLedgerSha256: '6'.repeat(64),
+});
+const dump = path => ({
+  sha256: digest(path),
+  sizeBytes: size(path),
+  tocSha256: '7'.repeat(64),
+});
+const images = {
+  core: {
+    ref: `winwidget-api:git-${revision}`,
+    imageId: process.env.CORE_IMAGE_ID,
+    revision,
+    user: 'nestjs',
+  },
+  billing: {
+    ref: `winwidget-billing:git-${revision}`,
+    imageId: process.env.BILLING_IMAGE_ID,
+    revision,
+    user: 'billing',
+  },
+  postgres: {
+    ref: process.env.POSTGRES_IMAGE,
+    imageId: process.env.POSTGRES_IMAGE_ID,
+    major: 18,
+  },
+};
+const commonChecks = {
+  sourceFilesSafe: true,
+  dumpShaStable: true,
+  manifestBinding: true,
+  toc: true,
+  releaseImages: true,
+  isolatedTargets: true,
+  noHostPorts: true,
+  distinctClusters: true,
+  migrations: true,
+  anchors: true,
+  acl: true,
+  relationships: true,
+  continuity: true,
+  resourcesRemoved: true,
+};
+const base = phase => ({
+  schemaVersion: 1,
+  action: 'billing-actual-backup-restore-rehearsal',
+  target: 'billing',
+  status: 'passed',
+  postgresMajor: 18,
+  phase,
+  revision,
+  generation: 1,
+  images,
+  startedAt: '2026-08-11T00:00:00Z',
+  completedAt: '2026-08-11T00:01:00Z',
+});
+const coreDump = `${directory}/core.dump`;
+const billingPreDump = `${directory}/billing-pre.dump`;
+const billingPostDump = `${directory}/billing-post.dump`;
+fs.writeFileSync(`${directory}/snapshot.json`, JSON.stringify({
+  sourceFingerprint: fingerprint,
+  coreState: { ownership: 'CORE' },
+}));
+fs.writeFileSync(`${directory}/manifest.json`, JSON.stringify({
+  version: 2,
+  revision,
+  generation: 1,
+  coreImageId: process.env.CORE_IMAGE_ID,
+  billingImageId: process.env.BILLING_IMAGE_ID,
+  coreDumpSha256: digest(coreDump),
+  coreDumpSizeBytes: size(coreDump),
+  billingDumpSha256: digest(billingPreDump),
+  billingDumpSizeBytes: size(billingPreDump),
+}));
+const pre = {
+  ...base('pre-cutover'),
+  dumps: { corePre: dump(coreDump), billingPre: dump(billingPreDump) },
+  restores: { corePre: metric('1001'), billingPre: metric('1002') },
+  anchors: {
+    billingDatabaseId: '11111111-1111-4111-8111-111111111111',
+    sourceFingerprint: fingerprint,
+    coreOwnership: 'CORE',
+    billingOwnership: 'PREPARED',
+    billingDatabasePhase: 'IMPORTED',
+    coreRestoreSystemIdentifier: '1001',
+    billingPreRestoreSystemIdentifier: '1002',
+  },
+  checks: { ...commonChecks, coreBillingParity: true },
+};
+fs.writeFileSync(`${directory}/pre.json`, JSON.stringify(pre));
+const post = {
+  ...base('post-ownership'),
+  dumps: { billingPre: dump(billingPreDump), billingPost: dump(billingPostDump) },
+  restores: { billingPre: metric('2001'), billingPost: metric('2002') },
+  anchors: {
+    billingDatabaseId: '11111111-1111-4111-8111-111111111111',
+    sourceFingerprint: fingerprint,
+    billingPreOwnership: 'PREPARED',
+    billingPostOwnership: 'ACTIVE',
+    billingPreDatabasePhase: 'IMPORTED',
+    billingPostDatabasePhase: 'ACTIVE',
+    billingPreRestoreSystemIdentifier: '2001',
+    billingPostRestoreSystemIdentifier: '2002',
+  },
+  checks: {
+    ...commonChecks,
+    preEvidenceBinding: true,
+    prePostContinuity: true,
+  },
+  preEvidenceSha256: digest(`${directory}/pre.json`),
+};
+fs.writeFileSync(`${directory}/post.json`, JSON.stringify(post));
+fs.writeFileSync(`${directory}/pre-bad.json`, JSON.stringify({
+  ...pre,
+  images: {
+    ...pre.images,
+    core: { ...pre.images.core, imageId: process.env.BILLING_IMAGE_ID },
+  },
+}));
+fs.writeFileSync(`${directory}/post-bad.json`, JSON.stringify({
+  ...post,
+  preEvidenceSha256: '0'.repeat(64),
+}));
+NODE
+	chmod 600 "$directory"/*
+	billing_cutover_validate_evidence_file() { [[ -f "$1" && ! -L "$1" && -s "$1" ]]; }
+	billing_cutover_validate_frozen_snapshot() { return 0; }
+	billing_cutover_marker_value() {
+		[[ "$1" == 'generation' ]] && printf '1\n'
+	}
+	billing_database_marker_value() {
+		case "$1" in
+		database_id) printf '11111111-1111-4111-8111-111111111111\n' ;;
+		database_system_identifier) printf '999\n' ;;
+		core_image_id) printf '%s\n' "$core_image_id" ;;
+		billing_image_id) printf '%s\n' "$billing_image_id" ;;
+		postgres_image_id) printf '%s\n' "$postgres_image_id" ;;
+		*) return 1 ;;
+		esac
+	}
+	billing_cutover_validate_actual_restore_evidence \
+		"$billing_pre_restore_evidence" pre-cutover
+	if billing_cutover_validate_actual_restore_evidence \
+		"$directory/pre-bad.json" pre-cutover; then
+		return 1
+	fi
+	billing_cutover_validate_actual_restore_evidence \
+		"$billing_post_restore_evidence" post-ownership
+	if billing_cutover_validate_actual_restore_evidence \
+		"$directory/post-bad.json" post-ownership; then
+		return 1
+	fi
+)
+
+billing_cutover_route_rollback_self_test() (
+	local directory revision generation legacy_sha candidate_sha manifest_sha
+	directory="$(mktemp -d /tmp/billing-route-rollback-self-test.XXXXXX)"
+	revision="$(printf '7%.0s' {1..40})"
+	generation='9'
+	EXPECTED_REVISION="$revision"
+	billing_route_env_legacy_snapshot="$directory/legacy.env"
+	billing_route_env_candidate="$directory/candidate.env"
+	billing_route_manifest="$directory/manifest.json"
+	billing_route_env_sync_evidence="$directory/forward.json"
+	billing_route_env_rollback_evidence="$directory/rollback.json"
+	billing_artifact_root="$directory"
+	COMPOSE_FILE="$directory/compose.yml"
+	printf '%s\n' \
+		'MODE=production' \
+		'GATEWAY_ROUTES_JSON=[{"id":"core","pathPrefix":"/api/v1","upstreamUrl":"http://127.0.0.1:4200","authPolicy":"optional","timeoutMs":30000}]' \
+		'UNCHANGED=value' >"$billing_route_env_legacy_snapshot"
+	node - "$billing_route_env_legacy_snapshot" "$billing_route_env_candidate" \
+		"$billing_route_manifest" <<'NODE'
+const fs = require('node:fs');
+const [legacyPath, candidatePath, manifestPath] = process.argv.slice(2);
+const lines = fs.readFileSync(legacyPath, 'utf8').split('\n');
+const index = lines.findIndex(line => line.startsWith('GATEWAY_ROUTES_JSON='));
+const legacy = JSON.parse(lines[index].slice('GATEWAY_ROUTES_JSON='.length));
+const desired = [
+  ['/api/v1/payments', 'billing-payments'],
+  ['/api/v1/subscriptions', 'billing-subscriptions'],
+  ['/api/v1/tariff-prices', 'billing-tariff-prices'],
+  ['/api/v1/affiliate', 'billing-affiliate'],
+].map(([pathPrefix, id]) => ({
+  id, pathPrefix, upstreamUrl: 'http://127.0.0.1:4800',
+  authPolicy: 'optional', timeoutMs: 30000,
+}));
+lines[index] = `GATEWAY_ROUTES_JSON=${JSON.stringify([...desired, ...legacy])}`;
+fs.writeFileSync(candidatePath, lines.join('\n'));
+fs.writeFileSync(manifestPath, `${JSON.stringify(desired)}\n`);
+NODE
+	billing_cutover_validate_evidence_file() {
+		[[ -f "$1" && ! -L "$1" && -s "$1" ]]
+	}
+	billing_compose_config_all_profiles() { return 0; }
+	billing_cutover_marker_value() {
+		[[ "$1" == 'generation' ]] || return 1
+		printf '%s\n' "$generation"
+	}
+	billing_cutover_gateway_routes_are_legacy() { return 0; }
+	billing_cutover_fail() { return 1; }
+	billing_cutover_validate_route_artifacts
+	chown() { return 0; }
+	stat() { printf '0:0:600\n'; }
+	rm -f -- "$billing_route_env_candidate"
+	billing_cutover_write_route_manifest >/dev/null
+	billing_cutover_validate_route_artifacts
+	rm -f -- "$billing_route_manifest"
+	billing_cutover_write_route_manifest >/dev/null
+	billing_cutover_validate_route_artifacts
+	legacy_sha="$(billing_cutover_sha256 "$billing_route_env_legacy_snapshot")"
+	candidate_sha="$(billing_cutover_sha256 "$billing_route_env_candidate")"
+	manifest_sha="$(billing_cutover_sha256 "$billing_route_manifest")"
+	REVISION="$revision" GENERATION="$generation" LEGACY_SHA="$legacy_sha" \
+	CANDIDATE_SHA="$candidate_sha" MANIFEST_SHA="$manifest_sha" \
+		node - "$billing_route_env_sync_evidence" \
+		"$billing_route_env_rollback_evidence" <<'NODE'
+const fs = require('node:fs');
+const base = {
+  schemaVersion: 1,
+  status: 'passed',
+  revision: process.env.REVISION,
+  generation: Number(process.env.GENERATION),
+  observedAt: '2026-08-11T00:00:00Z',
+};
+fs.writeFileSync(process.argv[2], JSON.stringify({
+  ...base,
+  action: 'billing-route-env-sync',
+  localSourceSha256: process.env.LEGACY_SHA,
+  serverSourceSha256: process.env.LEGACY_SHA,
+  localCandidateSha256: process.env.CANDIDATE_SHA,
+  uploadedServerSha256: process.env.CANDIDATE_SHA,
+  roundTripLocalSha256: process.env.CANDIDATE_SHA,
+  routeManifestSha256: process.env.MANIFEST_SHA,
+}));
+fs.writeFileSync(process.argv[3], JSON.stringify({
+  ...base,
+  action: 'billing-route-env-rollback-sync',
+  desiredCandidateSha256: process.env.CANDIDATE_SHA,
+  localSourceSha256: process.env.CANDIDATE_SHA,
+  serverSourceSha256: process.env.CANDIDATE_SHA,
+  legacyEnvSha256: process.env.LEGACY_SHA,
+  uploadedServerSha256: process.env.LEGACY_SHA,
+  roundTripLocalSha256: process.env.LEGACY_SHA,
+}));
+NODE
+	ENV_FILE="$billing_route_env_candidate"
+	billing_cutover_validate_route_env_sync
+	ENV_FILE="$billing_route_env_legacy_snapshot"
+	billing_cutover_validate_route_env_rollback_sync recorded
+	billing_cutover_require_abort_route_state source-frozen
+	generation='10'
+	if billing_cutover_validate_route_env_rollback_sync recorded; then return 1; fi
+	generation='9'
+	rm -f -- "$billing_route_env_sync_evidence"
+	billing_cutover_validate_route_env_rollback_sync unrecorded
+	billing_cutover_require_abort_route_state prepared
+	rm -f -- "$billing_route_env_rollback_evidence"
+	if billing_cutover_require_abort_route_state prepared; then return 1; fi
+	rm -f -- "$billing_route_env_legacy_snapshot" \
+		"$billing_route_env_candidate" "$billing_route_manifest" \
+		"$billing_route_env_sync_evidence"
+	rmdir -- "$directory"
+)
+
+billing_cutover_partial_recovery_self_test() (
+	local directory source destination partial
+	directory="$(mktemp -d /tmp/billing-partial-recovery-self-test.XXXXXX)"
+	source="$directory/source.json"
+	destination="$directory/destination.json"
+	partial="$destination.partial"
+	printf 'trusted-source\n' >"$source"
+	chown() { return 0; }
+	stat() { printf '0:0:600\n'; }
+	billing_cutover_validate_evidence_file() {
+		[[ -f "$1" && ! -L "$1" && -s "$1" ]]
+	}
+	billing_cutover_fail() { return 1; }
+	: >"$partial"
+	billing_cutover_promote_import_partial "$source" "$partial" "$destination"
+	[[ "$(<"$destination")" == 'trusted-source' ]]
+	rm -f -- "$destination"
+	cp -- "$source" "$partial"
+	billing_cutover_promote_import_partial "$source" "$partial" "$destination"
+	[[ "$(<"$destination")" == 'trusted-source' ]]
+	rm -f -- "$destination"
+	ln -s "$source" "$partial"
+	if billing_cutover_promote_import_partial \
+		"$source" "$partial" "$destination"; then return 1; fi
+	[[ -L "$partial" && ! -e "$destination" ]]
+	rm -f -- "$partial"
+	ENV_FILE="$directory/env" COMPOSE_FILE="$directory/compose.yml"
+	EXPECTED_REVISION="$(printf '8%.0s' {1..40})"
+	billing_compose() { printf 'PGDMPsynthetic-backup'; }
+	destination="$directory/backup.dump"
+	partial="$destination.partial"
+	: >"$partial"
+	billing_cutover_create_backup TEST_URL public "$destination" synthetic
+	[[ "$(<"$destination")" == 'PGDMPsynthetic-backup' ]]
+	rm -f -- "$source" "$destination"
+	rmdir -- "$directory"
+)
+
+billing_cutover_reprepare_identity_self_test() (
+	local directory old_database_id new_database_id marker_database_id
+	local archived_generation='' written_identity='' updated='false'
+	directory="$(mktemp -d /tmp/billing-reprepare-identity-self-test.XXXXXX)"
+	billing_cutover_marker="$directory/marker"
+	: >"$billing_cutover_marker"
+	EXPECTED_REVISION="$(printf '9%.0s' {1..40})"
+	old_database_id='11111111-1111-4111-8111-111111111111'
+	new_database_id='22222222-2222-4222-8222-222222222222'
+	marker_database_id="$old_database_id"
+	billing_cutover_core_image_id="sha256:$(printf 'a%.0s' {1..64})"
+	billing_cutover_billing_image_id="sha256:$(printf 'b%.0s' {1..64})"
+	billing_database_current_phase() { printf 'prepared\n'; }
+	billing_database_marker_value() {
+		[[ "$1" == 'database_id' ]] || return 1
+		printf '%s\n' "$new_database_id"
+	}
+	billing_cutover_validate_marker() { return 0; }
+	billing_cutover_marker_value() {
+		case "$1" in
+		phase) printf 'aborted\n' ;;
+		revision) printf '%s\n' "$EXPECTED_REVISION" ;;
+		database_id) printf '%s\n' "$marker_database_id" ;;
+		generation) printf '3\n' ;;
+		cleanup_revision) printf 'pending\n' ;;
+		*) return 1 ;;
+		esac
+	}
+	billing_cutover_archive_aborted_generation() {
+		archived_generation="$1"
+	}
+	billing_cutover_write_marker() {
+		written_identity="$1|$4|$5"
+	}
+	billing_cutover_update_phase() {
+		[[ "$1|$2|$3|$4" == 'prepared|pending|pending|pending' ]]
+		updated='true'
+	}
+	billing_cutover_fail() { return 1; }
+	billing_cutover_initialize_marker
+	[[ "$archived_generation" == '3' &&
+		"$written_identity" == "prepared|4|$new_database_id" &&
+		"$updated" == 'true' ]]
+	marker_database_id="$new_database_id"
+	archived_generation=''
+	if billing_cutover_initialize_marker; then return 1; fi
+	[[ -z "$archived_generation" ]]
+	rm -f -- "$billing_cutover_marker"
+	rmdir -- "$directory"
+)
+
 billing_cutover_self_test() {
 	local source forbidden_business_publish
 	local forbidden_env_replace rollout_source handoff_source permission_source
+	local restore_gate_source recovery_source synthetic_source reconcile_source
+	local initialize_source cleanup_stage_source active_runtime_source abort_source
 	source="$(<"$server_root/scripts/billing-cutover-production.sh")"
 	rollout_source="$(declare -f billing_cutover_prepare \
 		billing_cutover_install_core_expand_migration \
@@ -2184,6 +3820,22 @@ billing_cutover_self_test() {
 	handoff_source="$(declare -f billing_cutover_run)"
 	permission_source="$(declare -f \
 		billing_cutover_restrict_core_integration_permissions)"
+	restore_gate_source="$(declare -f \
+		billing_cutover_import_actual_restore_evidence \
+		billing_cutover_require_actual_restore_gate)"
+	recovery_source="$(declare -f billing_cutover_forward_recovery)"
+	synthetic_source="$(declare -f billing_cutover_validate_restore_drill \
+		billing_cutover_ensure_restore_drill)"
+	reconcile_source="$(declare -f billing_cutover_reconcile_marker \
+		billing_cutover_update_phase)"
+	initialize_source="$(declare -f billing_cutover_initialize_marker)"
+	cleanup_stage_source="$(declare -f \
+		billing_cutover_require_cleanup_revision_stage \
+		billing_cutover_stage_cleanup_revision)"
+	active_runtime_source="$(declare -f billing_cutover_require_active_runtime)"
+	abort_source="$(declare -f billing_cutover_abort \
+		billing_cutover_require_abort_route_state \
+		billing_cutover_validate_route_env_rollback_sync)"
 	forbidden_business_publish="rabbitmqadmin $(printf publish)"
 	forbidden_env_replace="mv -f \"\$temporary_env\" \"\$ENV_FILE\""
 	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
@@ -2224,6 +3876,13 @@ billing_cutover_self_test() {
 		"$source" == *'20260811000000_prepare_billing_service_ownership'* &&
 		"$source" == *'billing-source'* &&
 		"$source" == *'providerOperationsInFlight'* &&
+		"$source" == *'billing-backup-restore-rehearsal.sh'* &&
+		"$source" == *'winwidget-billing-pre-restore-'* &&
+		"$source" == *'winwidget-billing-post-restore-'* &&
+		"$source" == *'winwidget-billing-pre-offsite-'* &&
+		"$source" == *'winwidget-billing-post-offsite-'* &&
+		"$source" == *'billing_database_require_pinned_candidate_images'* &&
+		"$source" == *'BILLING_DEPLOY_SKIP_BUILD=true'* &&
 		"$source" == *'ABORT BILLING CUTOVER'* &&
 		"$source" == *'STAGE BILLING CLEANUP REVISION'* ]] || return 1
 	[[ "$permission_source" == *'rabbitmqctl set_permissions'* &&
@@ -2231,6 +3890,57 @@ billing_cutover_self_test() {
 		"$permission_source" != *'change_password'* &&
 		"$permission_source" != *'clear_permissions'* &&
 		"$permission_source" != *'RABBITMQ_PROVISION_PASSWORD'* ]] || return 1
+	[[ "$restore_gate_source" == *'billing_cutover_validate_actual_restore_evidence'* &&
+		"$restore_gate_source" == *'billing_cutover_import_offsite_receipt'* &&
+		"$restore_gate_source" == *'pre-backups-created'* &&
+		"$restore_gate_source" == *'post-backup-created'* &&
+		"$restore_gate_source" == *'pending'* ]] || return 1
+	[[ "$synthetic_source" == *'--phase synthetic'* &&
+		"$synthetic_source" == *'runnerRevision'* &&
+		"$synthetic_source" == *'runnerSha256'* &&
+		"$synthetic_source" == *'EXPECTED_RUNNER_SHA'* &&
+		"$synthetic_source" == *'.billing-restore-drill-evidence-v1.json'* ]] ||
+		return 1
+	[[ "$reconcile_source" == *'route_evidence_sha256'* &&
+		"$reconcile_source" == *'billing_database_write_marker'* ]] || return 1
+	[[ "$initialize_source" == *'billing_cutover_archive_aborted_generation "$generation"'* ]] ||
+		return 1
+	[[ "$cleanup_stage_source" == *'Billing cleanup revision is immutable once it has been staged.'* &&
+		"$cleanup_stage_source" == *"acquire_production_deploy_lock 'Billing cleanup revision staging'"* ]] ||
+		return 1
+	[[ "$active_runtime_source" == *'billing_deploy_verify_service billing-scheduler scheduler 4801'* &&
+		"$active_runtime_source" == *'billing_cutover_validate_route_env_sync'* &&
+		"$active_runtime_source" == *'billing_cutover_wait_gateway'* &&
+		"$active_runtime_source" == *'billing_cutover_gateway_routes_are_desired'* &&
+		"$active_runtime_source" == *'billing_route_env_sync_evidence'* &&
+		"$active_runtime_source" == *'billing_cutover_compare_error_contracts'* &&
+		"$active_runtime_source" == *'billing_cutover_wait_auto_renewal_ownership 1'* ]] ||
+		return 1
+	printf '%s' "$abort_source" | node -e '
+const fs = require("node:fs");
+const source = fs.readFileSync(0, "utf8");
+const ordered = [
+  "billing_cutover_run_core_cli status",
+  "billing_cutover_core_ownership",
+  "core_ownership\" == '\''CORE'\''",
+  "billing_cutover_require_abort_route_state",
+  "billing_cutover_run_core_cli abort",
+];
+let cursor = -1;
+for (const needle of ordered) {
+  const next = source.indexOf(needle, cursor + 1);
+  if (next < 0 || next <= cursor) process.exit(1);
+  cursor = next;
+}
+for (const required of [
+  "billing-route-env-rollback-sync",
+  "billing_cutover_gateway_routes_are_legacy",
+  "billing_route_env_legacy_snapshot",
+  "billing_route_env_sync_evidence",
+]) if (!source.includes(required)) process.exit(1);
+'
+	[[ "$recovery_source" == *'forward-only | active | post-backup-created | post-restore-verified'* ]] ||
+		return 1
 	printf '%s' "$rollout_source" | node -e '
 const fs = require("node:fs");
 const source = fs.readFileSync(0, "utf8");
@@ -2243,7 +3953,10 @@ const ordered = needles => {
   }
 };
 ordered([
+  "phase=\"$(billing_database_current_phase)\"",
+  "Billing prepare is not allowed from phase=",
   "billing_cutover_build_candidate_images",
+  "billing_cutover_ensure_restore_drill",
   "billing_database_prepare",
   "billing_cutover_provision_rabbit",
   "deploy-billing-production.sh",
@@ -2278,6 +3991,7 @@ const ordered = needles => {
   }
 };
 ordered([
+  "billing_cutover_gateway_routes_are_legacy",
   "billing_cutover_start_dark_source_worker",
   "billing_cutover_stop_source_worker_for_snapshot",
   "billing_cutover_run_core_snapshot_export",
@@ -2285,6 +3999,10 @@ ordered([
   "billing_cutover_run_billing_snapshot_cli verify-import",
   "billing_cutover_start_dark_source_worker",
   "billing_cutover_wait_core_outbox billing-source",
+  "billing_cutover_create_pre_backups",
+  "billing_cutover_update_phase pre-backups-created",
+  "billing_cutover_require_actual_restore_gate pre-cutover",
+  "billing_cutover_update_phase pre-restore-verified",
   "billing_cutover_run_billing_cli seed-core-read-events",
 ]);
 ordered([
@@ -2296,8 +4014,185 @@ ordered([
   "deploy-billing-production.sh",
   "winwidget-billing-worker",
   "billing_cutover_validate_route_env_sync",
+  "force-recreate api-gateway",
+  "billing_cutover_gateway_routes_are_desired",
+]);
+ordered([
+  "billing_cutover_require_active_runtime",
+  "billing_cutover_create_backup BILLING_BACKUP_URL billing",
+  "billing_cutover_update_phase post-backup-created",
+  "billing_cutover_require_actual_restore_gate post-ownership",
+  "billing_cutover_update_phase post-restore-verified",
+  "billing_cutover_run_billing_cli complete",
+  "billing_cutover_update_phase complete",
 ]);
 '
+	(
+		local marker_sha route_sha image_sha
+		marker_sha="$(printf 'a%.0s' {1..64})"
+		route_sha="$(printf 'b%.0s' {1..64})"
+		image_sha="sha256:$(printf 'c%.0s' {1..64})"
+		billing_database_marker_value() {
+			case "$1" in
+			cleanup_revision) printf 'pending\n' ;;
+			database_id) printf '11111111-1111-4111-8111-111111111111\n' ;;
+			database_system_identifier) printf '123456789\n' ;;
+			database_volume) printf 'winwidget-billing-postgres-data\n' ;;
+			postgres_image_id | core_image_id | billing_image_id)
+				printf '%s\n' "$image_sha"
+				;;
+			switch_generation) printf '1\n' ;;
+			*) printf '%s\n' "$marker_sha" ;;
+			esac
+		}
+		billing_cutover_marker_value() {
+			case "$1" in
+			generation) printf '1\n' ;;
+			*) printf '%s\n' "$marker_sha" ;;
+			esac
+		}
+		billing_database_current_phase() { printf 'forward-only\n'; }
+		billing_database_transition_allowed() { return 0; }
+		billing_database_write_marker() {
+			[[ $# -eq 21 && "$1" == 'active' && "${20}" == "$route_sha" ]]
+		}
+		billing_cutover_write_marker() {
+			[[ $# -eq 14 && "$1" == 'active' && "${10}" == "$route_sha" ]]
+		}
+		billing_cutover_update_phase active "$marker_sha" "$marker_sha" \
+			"$route_sha"
+	) || return 1
+	(
+		local requested other database_cleanup_value cutover_cleanup_value
+		requested="$(printf 'd%.0s' {1..40})"
+		other="$(printf 'e%.0s' {1..40})"
+		database_cleanup_value='pending'
+		cutover_cleanup_value='pending'
+		billing_release_validate_revision() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+		billing_database_marker_value() {
+			[[ "$1" == 'cleanup_revision' ]] || return 1
+			printf '%s\n' "$database_cleanup_value"
+		}
+		billing_cutover_marker_value() {
+			[[ "$1" == 'cleanup_revision' ]] || return 1
+			printf '%s\n' "$cutover_cleanup_value"
+		}
+		billing_cutover_fail() { return 1; }
+		billing_cutover_require_cleanup_revision_stage "$requested"
+		database_cleanup_value="$requested"
+		cutover_cleanup_value="$requested"
+		billing_cutover_require_cleanup_revision_stage "$requested"
+		database_cleanup_value="$other"
+		cutover_cleanup_value="$other"
+		if billing_cutover_require_cleanup_revision_stage "$requested"; then
+			return 1
+		fi
+		database_cleanup_value='pending'
+		cutover_cleanup_value="$requested"
+		if billing_cutover_require_cleanup_revision_stage "$requested"; then
+			return 1
+		fi
+	) || return 1
+	(
+		local revision cleanup database_cleanup_value cutover_cleanup_value
+		local marker_sha image_sha repaired_cleanup=''
+		revision="$(printf 'a%.0s' {1..40})"
+		cleanup="$(printf 'b%.0s' {1..40})"
+		marker_sha="$(printf 'c%.0s' {1..64})"
+		image_sha="sha256:$(printf 'd%.0s' {1..64})"
+		EXPECTED_REVISION="$revision"
+		database_cleanup_value="$cleanup"
+		cutover_cleanup_value='pending'
+		billing_database_current_phase() { printf 'complete\n'; }
+		billing_cutover_validate_marker() { return 0; }
+		billing_cutover_marker_value() {
+			case "$1" in
+			phase) printf 'complete\n' ;;
+			revision) printf '%s\n' "$revision" ;;
+			cleanup_revision) printf '%s\n' "$cutover_cleanup_value" ;;
+			generation) printf '1\n' ;;
+			database_id) printf '11111111-1111-4111-8111-111111111111\n' ;;
+			core_image_id | billing_image_id) printf '%s\n' "$image_sha" ;;
+			*) printf '%s\n' "$marker_sha" ;;
+			esac
+		}
+		billing_database_marker_value() {
+			case "$1" in
+			cleanup_revision) printf '%s\n' "$database_cleanup_value" ;;
+			switch_generation) printf '1\n' ;;
+			database_id) printf '11111111-1111-4111-8111-111111111111\n' ;;
+			core_image_id | billing_image_id) printf '%s\n' "$image_sha" ;;
+			*) printf '%s\n' "$marker_sha" ;;
+			esac
+		}
+		billing_cutover_write_marker() {
+			[[ $# -eq 14 && "$1" == 'complete' ]]
+			repaired_cleanup="$3"
+		}
+		billing_cutover_fail() { return 1; }
+		billing_cutover_reconcile_marker
+		[[ "$repaired_cleanup" == "$cleanup" ]]
+		database_cleanup_value='pending'
+		cutover_cleanup_value="$cleanup"
+		if billing_cutover_reconcile_marker; then return 1; fi
+	) || return 1
+	(
+		local test_root archive generation='3'
+		test_root="$(mktemp -d /tmp/billing-cutover-archive-self-test.XXXXXX)"
+		billing_artifact_root="$test_root/artifacts"
+		billing_artifact_archive_root="$test_root/archive-root"
+		billing_route_env_sync_evidence="$test_root/route.json"
+		billing_route_env_rollback_evidence="$test_root/rollback.json"
+		EXPECTED_REVISION="$(printf 'f%.0s' {1..40})"
+		mkdir -m 700 "$billing_artifact_root"
+		printf 'old-artifact\n' >"$billing_artifact_root/proof.txt"
+		printf 'old-route\n' >"$billing_route_env_sync_evidence"
+		printf 'old-rollback\n' >"$billing_route_env_rollback_evidence"
+		billing_cutover_marker_value() {
+			case "$1" in
+			phase) printf 'aborted\n' ;;
+			revision) printf '%s\n' "$EXPECTED_REVISION" ;;
+			generation) printf '%s\n' "$generation" ;;
+			*) return 1 ;;
+			esac
+		}
+		billing_cutover_validate_private_directory() {
+			[[ -d "$1" && ! -L "$1" ]]
+		}
+		billing_cutover_ensure_private_directory() {
+			[[ -e "$1" || -L "$1" ]] || mkdir -m 700 "$1"
+			billing_cutover_validate_private_directory "$1"
+		}
+		billing_cutover_validate_evidence_file() {
+			[[ -f "$1" && ! -L "$1" && -s "$1" ]]
+		}
+		billing_cutover_require_artifact_root() {
+			billing_cutover_ensure_private_directory "$billing_artifact_root"
+		}
+		billing_cutover_fail() { return 1; }
+		billing_cutover_archive_aborted_generation "$generation" >/dev/null
+		archive="$billing_artifact_archive_root/revision-${EXPECTED_REVISION}-generation-${generation}-aborted"
+		[[ "$(<"$archive/artifacts/proof.txt")" == 'old-artifact' &&
+			"$(<"$archive/route-env-sync.json")" == 'old-route' &&
+			"$(<"$archive/route-env-rollback-sync.json")" == 'old-rollback' ]]
+		billing_cutover_directory_is_empty "$billing_artifact_root"
+		billing_cutover_archive_aborted_generation "$generation" >/dev/null
+		printf 'fresh-collision\n' >"$billing_artifact_root/collision.txt"
+		if billing_cutover_archive_aborted_generation "$generation" >/dev/null 2>&1; then
+			return 1
+		fi
+		[[ "$(<"$billing_artifact_root/collision.txt")" == 'fresh-collision' &&
+			"$(<"$archive/artifacts/proof.txt")" == 'old-artifact' ]]
+		rm -f -- "$billing_artifact_root/collision.txt" \
+			"$archive/artifacts/proof.txt" "$archive/route-env-sync.json" \
+			"$archive/route-env-rollback-sync.json"
+		rmdir -- "$billing_artifact_root" "$archive/artifacts" "$archive" \
+			"$billing_artifact_archive_root" "$test_root"
+	) || return 1
+	billing_cutover_actual_restore_validator_self_test || return 1
+	billing_cutover_route_rollback_self_test || return 1
+	billing_cutover_partial_recovery_self_test || return 1
+	billing_cutover_reprepare_identity_self_test || return 1
 	printf 'billing_cutover_self_test=passed\n'
 }
 

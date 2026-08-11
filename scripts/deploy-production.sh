@@ -63,12 +63,63 @@ run_database_restore_create_gate_self_test() {
 	printf 'database_restore_routine_create_gate=passed\n'
 }
 
+run_billing_routine_image_gate_self_test() {
+	node - "${BASH_SOURCE[0]}" <<'NODE'
+const fs = require('node:fs');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const absent = source.indexOf("case \"$billing_database_phase\" in\nabsent)");
+const automaticDefer = source.indexOf(
+  'Automatic backend revision $deploy_revision is verified but Billing first rollout is deferred.',
+  absent,
+);
+const absentExit = source.indexOf('\n\t\texit 0', automaticDefer);
+const prepared = source.indexOf(
+  'prepared | source-frozen | imported | pre-backups-created |',
+  absent,
+);
+const routeMarkerGate = source.indexOf('$1 == "route_sha256"', prepared);
+const imageGate = source.indexOf(
+  'billing_database_require_pinned_candidate_images || {',
+  prepared,
+);
+const build = source.indexOf('compose_target build --provenance=false', imageGate);
+const verifyAgain = source.indexOf(
+  'Pinned Core/Billing candidate images changed during the full build.',
+  build,
+);
+if ([absent, automaticDefer, absentExit, prepared, routeMarkerGate, imageGate,
+    build, verifyAgain]
+    .some(index => index < 0) ||
+    !(absent < automaticDefer && automaticDefer < absentExit &&
+      absentExit < prepared && prepared < routeMarkerGate &&
+      routeMarkerGate < imageGate && imageGate < build && build < verifyAgain)) {
+  process.exit(1);
+}
+const buildEnd = source.indexOf(
+  'billing_database_require_pinned_candidate_images || {',
+  build,
+);
+const buildBlock = source.slice(build, buildEnd);
+if (/\n\s+(api|billing-api)\s*(?:\\)?\n/.test(buildBlock)) process.exit(1);
+NODE
+	printf 'billing_routine_image_gate_self_test=passed\n'
+}
+
 if [[ "${1:-}" == '--self-test-database-restore-create-gate' ]]; then
 	[[ "$#" -eq 1 ]] || {
 		echo 'Database restore create-gate self-test does not accept extra arguments.' >&2
 		exit 1
 	}
 	run_database_restore_create_gate_self_test
+	exit 0
+fi
+
+if [[ "${1:-}" == '--self-test-billing-routine-image-gate' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'Billing routine image-gate self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_billing_routine_image_gate_self_test
 	exit 0
 fi
 
@@ -176,7 +227,9 @@ preparing | aborted)
 	echo 'Resume the exact pinned Billing prepare/abort action before a routine deployment.' >&2
 	exit 1
 	;;
-prepared | source-frozen | imported | projection-synced | forward-only | active | complete)
+prepared | source-frozen | imported | pre-backups-created | \
+	pre-restore-verified | projection-synced | forward-only | active | \
+	post-backup-created | post-restore-verified | complete)
 	billing_database_guard_revision "$deploy_revision" || exit 1
 	[[ -f "$billing_cutover_marker" && ! -L "$billing_cutover_marker" &&
 		"$(stat -c '%u:%g:%a' "$billing_cutover_marker")" == '0:0:600' ]] || {
@@ -185,18 +238,21 @@ prepared | source-frozen | imported | projection-synced | forward-only | active 
 		exit 1
 	}
 	billing_routine_marker_state="$(awk -F= '
+		$1 == "version" { version=$2; version_count += 1 }
 		$1 == "phase" { phase=$2; phase_count += 1 }
 		$1 == "revision" { revision=$2; revision_count += 1 }
+		$1 == "route_sha256" { route=$2; route_count += 1 }
 		END {
-			if (phase_count != 1 || revision_count != 1) exit 1
-			printf "%s|%s", phase, revision
+			if (version_count != 1 || version != 2 || phase_count != 1 ||
+				revision_count != 1 || route_count != 1) exit 1
+			printf "%s|%s|%s", phase, revision, route
 		}
 	' "$billing_cutover_marker")" || {
 		echo 'Billing cutover marker identity is unreadable.' >&2
 		exit 1
 	}
 	[[ "$billing_routine_marker_state" == \
-		"$billing_database_phase|$(billing_database_marker_value ownership_revision)" ]] || {
+		"$billing_database_phase|$(billing_database_marker_value ownership_revision)|$(billing_database_marker_value route_evidence_sha256)" ]] || {
 		echo 'Billing database/cutover marker phases or ownership revisions differ.' >&2
 		exit 1
 	}
@@ -231,8 +287,10 @@ process.stdout.write(billing ? "billing" : legacy ? "legacy" : "unsafe");
 	exit 1
 }
 case "$billing_database_phase:$billing_routes_env_state" in
-prepared:legacy | active:billing | complete:billing) ;;
-source-frozen:* | imported:* | projection-synced:* | forward-only:*)
+prepared:legacy | complete:billing) ;;
+source-frozen:* | imported:* | pre-backups-created:* | \
+	pre-restore-verified:* | projection-synced:* | forward-only:* | active:* | \
+	post-backup-created:* | post-restore-verified:*)
 	echo "Routine deployment is blocked during Billing cutover phase=$billing_database_phase." >&2
 	exit 1
 	;;
@@ -2808,16 +2866,22 @@ compose_target \
 	--profile widgets-migration \
 	--profile billing-migration \
 	config --quiet
+billing_database_require_pinned_candidate_images || {
+	echo 'Pinned Core/Billing candidate images are unavailable or changed.' >&2
+	exit 1
+}
 compose_target build --provenance=false \
-	api \
 	api-gateway \
 	maintenance-worker \
 	database-restore-worker \
 	notification-delivery-worker \
 	campaigns-service \
 	reporting-service \
-	widgets-service \
-	billing-api
+	widgets-service
+billing_database_require_pinned_candidate_images || {
+	echo 'Pinned Core/Billing candidate images changed during the full build.' >&2
+	exit 1
+}
 verify_notification_delivery_image_artifact
 verify_campaigns_image_artifact
 verify_reporting_image_artifact

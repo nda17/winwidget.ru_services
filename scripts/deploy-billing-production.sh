@@ -41,12 +41,15 @@ billing_deploy_require_boundary() {
 	database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
 	phase="$(billing_database_current_phase)" || return 1
 	case "$phase" in
-	prepared | source-frozen | imported | projection-synced | forward-only | active | complete) ;;
+	prepared | source-frozen | imported | pre-backups-created | \
+		pre-restore-verified | projection-synced | forward-only | active | \
+		post-backup-created | post-restore-verified | complete) ;;
 	*) billing_deploy_fail \
 		"Billing deploy requires a prepared lifecycle marker; phase=$phase." || return 1 ;;
 	esac
 	[[ "$(billing_database_marker_value ownership_revision)" == "$EXPECTED_REVISION" ]] ||
 		billing_deploy_fail 'Billing marker is bound to a different ownership revision.'
+	billing_database_require_pinned_candidate_images
 }
 
 billing_deploy_database_fingerprint() {
@@ -186,7 +189,11 @@ billing_deploy_run() {
 	acquire_production_deploy_lock 'Billing deployment'
 	fingerprint_before="$(billing_deploy_database_fingerprint)"
 	case "$BILLING_DEPLOY_SKIP_BUILD" in
-	false) billing_deploy_build_image ;;
+	false)
+		billing_deploy_fail \
+			'Billing lifecycle image is pinned; rebuilding it during deployment is forbidden.'
+		return 1
+		;;
 	true)
 		image_ref="$(billing_release_identity_value BILLING_IMAGE "$EXPECTED_REVISION")"
 		billing_deploy_verify_image "$image_ref"
@@ -198,7 +205,8 @@ billing_deploy_run() {
 		--profile billing-migration run --rm --no-deps --no-build billing-migrate
 	phase="$(billing_database_current_phase)"
 	if [[ "$phase" == 'prepared' || "$phase" == 'source-frozen' ||
-		"$phase" == 'imported' || "$phase" == 'projection-synced' ]]; then
+		"$phase" == 'imported' || "$phase" == 'pre-backups-created' ||
+		"$phase" == 'pre-restore-verified' || "$phase" == 'projection-synced' ]]; then
 		billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
 			stop -t 90 billing-scheduler \
 			>/dev/null 2>&1 || true
@@ -233,7 +241,10 @@ billing_deploy_self_test() {
 		billing_deploy_verify_container_environment billing_deploy_verify_service)"
 	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
 		"$source" == *'billing_database_require_env_contract'* &&
+		"$source" == *'billing_database_require_pinned_candidate_images'* &&
+		"$source" == *'rebuilding it during deployment is forbidden'* &&
 		"$source" == *'--profile billing-migration run'* &&
+		"$source" == *'--no-build'* &&
 		"$source" == *'billing-scheduler billing-worker billing-outbox-publisher'* &&
 		"$source" == *'PAYMENT_METHOD_ENCRYPTION_KEY'* &&
 		"$source" == *'TRUST_PROXY'* &&

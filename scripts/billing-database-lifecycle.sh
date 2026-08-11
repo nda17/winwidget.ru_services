@@ -138,46 +138,74 @@ billing_database_validate_marker() {
 		"$(stat -c '%u:%g:%a' "$billing_database_marker")" == '0:0:600' ]] || return 1
 	awk -F= '
 		function hex(value, size) { return length(value) == size && value ~ /^[0-9a-f]+$/ }
+		function image(value) { return value ~ /^sha256:[0-9a-f]{64}$/ }
 		function timestamp(value) {
 			return length(value) == 20 && value ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
 		}
 		{
 			count[$1] += 1
 			value[$1] = substr($0, index($0, "=") + 1)
-			if ($1 !~ /^(version|phase|ownership_revision|cleanup_revision|database_id|database_system_identifier|database_volume|postgres_image_id|switch_generation|snapshot_sha256|pre_backup_sha256|post_backup_sha256|restore_evidence_sha256|projection_evidence_sha256|updated_at)$/) invalid = 1
+			if ($1 !~ /^(version|phase|ownership_revision|cleanup_revision|database_id|database_system_identifier|database_volume|postgres_image_id|core_image_id|billing_image_id|switch_generation|snapshot_sha256|pre_backup_sha256|post_backup_sha256|restore_evidence_sha256|pre_restore_evidence_sha256|pre_offsite_receipt_sha256|post_restore_evidence_sha256|post_offsite_receipt_sha256|projection_evidence_sha256|route_evidence_sha256|updated_at)$/) invalid = 1
 		}
 		END {
 			for (key in count) if (count[key] != 1) invalid = 1
-			if (NR != 15 || value["version"] != "1" ||
-				value["phase"] !~ /^(preparing|prepared|aborted|source-frozen|imported|projection-synced|forward-only|active|complete)$/ ||
+			phase = value["phase"]
+			if (NR != 22 || value["version"] != "2" ||
+				phase !~ /^(preparing|prepared|aborted|source-frozen|imported|pre-backups-created|pre-restore-verified|projection-synced|forward-only|active|post-backup-created|post-restore-verified|complete)$/ ||
 				!hex(value["ownership_revision"], 40) ||
 				!(value["cleanup_revision"] == "pending" || hex(value["cleanup_revision"], 40)) ||
 				!(value["database_id"] == "pending" || value["database_id"] ~ /^[0-9a-f-]{36}$/) ||
 				!(value["database_system_identifier"] == "pending" || value["database_system_identifier"] ~ /^[0-9]+$/) ||
 				value["database_volume"] != "winwidget-billing-postgres-data" ||
-				!(value["postgres_image_id"] == "pending" || value["postgres_image_id"] ~ /^sha256:[0-9a-f]{64}$/) ||
+				!(value["postgres_image_id"] == "pending" || image(value["postgres_image_id"])) ||
+				!(value["core_image_id"] == "pending" || image(value["core_image_id"])) ||
+				!(value["billing_image_id"] == "pending" || image(value["billing_image_id"])) ||
 				value["switch_generation"] !~ /^[0-9]+$/ ||
 				!(value["snapshot_sha256"] == "pending" || hex(value["snapshot_sha256"], 64)) ||
 				!(value["pre_backup_sha256"] == "pending" || hex(value["pre_backup_sha256"], 64)) ||
 				!(value["post_backup_sha256"] == "pending" || hex(value["post_backup_sha256"], 64)) ||
 				!(value["restore_evidence_sha256"] == "pending" || hex(value["restore_evidence_sha256"], 64)) ||
+				!(value["pre_restore_evidence_sha256"] == "pending" || hex(value["pre_restore_evidence_sha256"], 64)) ||
+				!(value["pre_offsite_receipt_sha256"] == "pending" || hex(value["pre_offsite_receipt_sha256"], 64)) ||
+				!(value["post_restore_evidence_sha256"] == "pending" || hex(value["post_restore_evidence_sha256"], 64)) ||
+				!(value["post_offsite_receipt_sha256"] == "pending" || hex(value["post_offsite_receipt_sha256"], 64)) ||
 				!(value["projection_evidence_sha256"] == "pending" || hex(value["projection_evidence_sha256"], 64)) ||
+				!(value["route_evidence_sha256"] == "pending" || hex(value["route_evidence_sha256"], 64)) ||
 				!timestamp(value["updated_at"])) invalid = 1
+			if (phase !~ /^(preparing|prepared|aborted)$/ &&
+				(!image(value["core_image_id"]) || !image(value["billing_image_id"]) ||
+				 !hex(value["restore_evidence_sha256"], 64))) invalid = 1
+			if (phase ~ /^(source-frozen|imported|pre-backups-created|pre-restore-verified|projection-synced|forward-only|active|post-backup-created|post-restore-verified|complete)$/ &&
+				!hex(value["snapshot_sha256"], 64)) invalid = 1
+			if (phase ~ /^(pre-backups-created|pre-restore-verified|projection-synced|forward-only|active|post-backup-created|post-restore-verified|complete)$/ &&
+				!hex(value["pre_backup_sha256"], 64)) invalid = 1
+			if (phase ~ /^(pre-restore-verified|projection-synced|forward-only|active|post-backup-created|post-restore-verified|complete)$/ &&
+				(!hex(value["pre_restore_evidence_sha256"], 64) ||
+				 !hex(value["pre_offsite_receipt_sha256"], 64))) invalid = 1
+			if (phase ~ /^(projection-synced|forward-only|active|post-backup-created|post-restore-verified|complete)$/ &&
+				!hex(value["projection_evidence_sha256"], 64)) invalid = 1
+			if (phase ~ /^(active|post-backup-created|post-restore-verified|complete)$/ &&
+				!hex(value["route_evidence_sha256"], 64)) invalid = 1
+			if (phase ~ /^(post-backup-created|post-restore-verified|complete)$/ &&
+				!hex(value["post_backup_sha256"], 64)) invalid = 1
+			if (phase ~ /^(post-restore-verified|complete)$/ &&
+				(!hex(value["post_restore_evidence_sha256"], 64) ||
+				 !hex(value["post_offsite_receipt_sha256"], 64))) invalid = 1
 			exit(invalid ? 1 : 0)
 		}
 	' "$billing_database_marker"
 }
 
 billing_database_write_marker() {
-	[[ $# -eq 14 ]] || return 1
+	[[ $# -eq 21 ]] || return 1
 	local directory temporary
 	directory="$(dirname "$billing_database_marker")"
 	[[ -d "$directory" && ! -L "$directory" &&
 		"$(stat -c '%u:%g' "$directory")" == '0:0' ]] || return 1
-	temporary="$directory/.billing-database-lifecycle-v1.$$"
+	temporary="$directory/.billing-database-lifecycle-v2.$$"
 	[[ ! -e "$temporary" && ! -L "$temporary" ]] || return 1
 	(umask 077; {
-		printf 'version=1\n'
+		printf 'version=2\n'
 		printf 'phase=%s\n' "$1"
 		printf 'ownership_revision=%s\n' "$2"
 		printf 'cleanup_revision=%s\n' "$3"
@@ -185,13 +213,20 @@ billing_database_write_marker() {
 		printf 'database_system_identifier=%s\n' "$5"
 		printf 'database_volume=%s\n' "$6"
 		printf 'postgres_image_id=%s\n' "$7"
-		printf 'switch_generation=%s\n' "$8"
-		printf 'snapshot_sha256=%s\n' "$9"
-		printf 'pre_backup_sha256=%s\n' "${10}"
-		printf 'post_backup_sha256=%s\n' "${11}"
-		printf 'restore_evidence_sha256=%s\n' "${12}"
-		printf 'projection_evidence_sha256=%s\n' "${13}"
-		printf 'updated_at=%s\n' "${14}"
+		printf 'core_image_id=%s\n' "$8"
+		printf 'billing_image_id=%s\n' "$9"
+		printf 'switch_generation=%s\n' "${10}"
+		printf 'snapshot_sha256=%s\n' "${11}"
+		printf 'pre_backup_sha256=%s\n' "${12}"
+		printf 'post_backup_sha256=%s\n' "${13}"
+		printf 'restore_evidence_sha256=%s\n' "${14}"
+		printf 'pre_restore_evidence_sha256=%s\n' "${15}"
+		printf 'pre_offsite_receipt_sha256=%s\n' "${16}"
+		printf 'post_restore_evidence_sha256=%s\n' "${17}"
+		printf 'post_offsite_receipt_sha256=%s\n' "${18}"
+		printf 'projection_evidence_sha256=%s\n' "${19}"
+		printf 'route_evidence_sha256=%s\n' "${20}"
+		printf 'updated_at=%s\n' "${21}"
 	} >"$temporary")
 	chown 0:0 "$temporary"
 	chmod 600 "$temporary"
@@ -205,8 +240,13 @@ billing_database_transition_allowed() {
 		preparing:aborted | prepared:preparing | prepared:prepared | \
 		prepared:aborted | aborted:preparing | prepared:source-frozen | \
 		source-frozen:prepared | source-frozen:aborted | source-frozen:imported | \
-		imported:aborted | imported:projection-synced | projection-synced:aborted | \
-		projection-synced:forward-only | forward-only:active | active:complete | \
+		imported:aborted | imported:pre-backups-created | \
+		pre-backups-created:aborted | pre-backups-created:pre-restore-verified | \
+		pre-restore-verified:aborted | pre-restore-verified:projection-synced | \
+		projection-synced:aborted | projection-synced:forward-only | \
+		forward-only:active | active:post-backup-created | \
+		post-backup-created:post-restore-verified | \
+		post-restore-verified:complete | \
 		complete:complete)
 		return 0
 		;;
@@ -221,6 +261,40 @@ billing_database_current_phase() {
 	fi
 	billing_database_validate_marker || return 1
 	billing_database_marker_value phase
+}
+
+billing_database_require_pinned_candidate_images() {
+	local revision core_image billing_image expected_core_id expected_billing_id
+	local actual_core_id actual_billing_id core_revision billing_revision
+	local core_user billing_user
+	billing_database_validate_marker || return 1
+	revision="$(billing_database_marker_value ownership_revision)" || return 1
+	expected_core_id="$(billing_database_marker_value core_image_id)" || return 1
+	expected_billing_id="$(billing_database_marker_value billing_image_id)" || return 1
+	[[ "$revision" =~ ^[0-9a-f]{40}$ &&
+		"$expected_core_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$expected_billing_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+		billing_database_fail 'Billing candidate image IDs are not fixed in the durable marker.' ||
+		return 1
+	core_image="winwidget-api:git-$revision"
+	billing_image="$(billing_release_identity_value BILLING_IMAGE "$revision")"
+	actual_core_id="$(docker image inspect --format '{{.Id}}' "$core_image")" || return 1
+	actual_billing_id="$(docker image inspect --format '{{.Id}}' "$billing_image")" || return 1
+	core_revision="$(docker image inspect --format \
+		'{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+		"$core_image")" || return 1
+	billing_revision="$(docker image inspect --format \
+		'{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+		"$billing_image")" || return 1
+	core_user="$(docker image inspect --format '{{.Config.User}}' "$core_image")" || return 1
+	billing_user="$(docker image inspect --format '{{.Config.User}}' "$billing_image")" || return 1
+	[[ "$actual_core_id" == "$expected_core_id" &&
+		"$actual_billing_id" == "$expected_billing_id" &&
+		"$core_revision" == "$revision" && "$billing_revision" == "$revision" &&
+		-n "$core_user" && "$core_user" != '0' && "$core_user" != 'root' &&
+		"$billing_user" == 'billing' ]] ||
+		billing_database_fail \
+			'Billing candidate image identity differs from the durable marker.'
 }
 
 billing_database_wait_healthy() {
@@ -367,6 +441,8 @@ SQL
 
 billing_database_prepare() {
 	local phase container_id system_identifier image_id database_id
+	local candidate_core_image_id candidate_billing_image_id marker_core_image_id
+	local marker_billing_image_id
 	local previous_generation='0'
 	billing_database_require_root
 	billing_database_require_exact_checkout
@@ -376,16 +452,38 @@ billing_database_prepare() {
 	database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
 	acquire_production_deploy_lock 'Billing database prepare'
 	phase="$(billing_database_current_phase)" || return 1
+	candidate_core_image_id="${BILLING_CANDIDATE_CORE_IMAGE_ID:-}"
+	candidate_billing_image_id="${BILLING_CANDIDATE_BILLING_IMAGE_ID:-}"
+	[[ "$candidate_core_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$candidate_billing_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+		billing_database_fail \
+			'Billing database prepare requires exact candidate image IDs.' ||
+		return 1
 	if [[ "$phase" != 'absent' ]]; then
 		previous_generation="$(billing_database_marker_value switch_generation)"
 		[[ "$previous_generation" =~ ^[0-9]+$ ]] || return 1
+		marker_core_image_id="$(billing_database_marker_value core_image_id)"
+		marker_billing_image_id="$(billing_database_marker_value billing_image_id)"
+		if [[ "$marker_core_image_id" != 'pending' ||
+			"$marker_billing_image_id" != 'pending' ]]; then
+			[[ "$marker_core_image_id" == "$candidate_core_image_id" &&
+				"$marker_billing_image_id" == "$candidate_billing_image_id" ]] ||
+				billing_database_fail \
+					'Billing database candidate image IDs cannot be rebound.' ||
+				return 1
+		fi
 	fi
 	billing_database_transition_allowed "$phase" preparing ||
 		billing_database_fail "Billing database prepare cannot continue from phase=$phase." || return 1
+	if [[ "$phase" == 'aborted' ]]; then
+		billing_database_reset_aborted_target || return 1
+	fi
 	if [[ "$phase" == 'absent' || "$phase" == 'aborted' ]]; then
 		billing_database_write_marker preparing "$EXPECTED_REVISION" pending pending \
-			pending "$billing_postgres_volume" pending "$previous_generation" pending pending pending pending \
-			pending "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+			pending "$billing_postgres_volume" pending \
+			"$candidate_core_image_id" "$candidate_billing_image_id" \
+			"$previous_generation" pending pending pending pending pending pending \
+			pending pending pending pending "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	fi
 	if ! docker volume inspect "$billing_postgres_volume" >/dev/null 2>&1; then
 		docker volume create \
@@ -419,9 +517,96 @@ billing_database_prepare() {
 		billing_database_fail 'Billing service identity database_id is missing.' || return 1
 	billing_database_write_marker prepared "$EXPECTED_REVISION" pending "$database_id" \
 		"$system_identifier" "$billing_postgres_volume" "$image_id" \
-		"$previous_generation" pending \
-		pending pending pending pending "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+		"$candidate_core_image_id" "$candidate_billing_image_id" \
+		"$previous_generation" pending pending pending pending \
+		pending pending pending pending pending pending \
+		"$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	printf 'billing_database_phase=prepared\n'
+}
+
+billing_database_require_runtime_stopped() {
+	local running
+	running="$(billing_compose "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE" ps --status running -q billing-api billing-scheduler \
+		billing-worker billing-outbox-publisher)" || return 1
+	[[ -z "$running" ]] ||
+		billing_database_fail \
+			'Billing runtime roles are still running after abort stop.'
+}
+
+billing_database_reset_aborted_target() {
+	local container_id stopped_state volume_identity cutover_phase
+	[[ "$(billing_database_current_phase)" == 'aborted' &&
+		"$(billing_database_marker_value ownership_revision)" == \
+		"$EXPECTED_REVISION" &&
+		"$(billing_database_marker_value database_volume)" == \
+		"$billing_postgres_volume" ]] ||
+		billing_database_fail \
+			'Billing target reset requires the exact aborted database marker.' ||
+		return 1
+	[[ -f "$billing_cutover_marker" && ! -L "$billing_cutover_marker" &&
+		"$(stat -c '%u:%g:%a' "$billing_cutover_marker")" == '0:0:600' ]] ||
+		billing_database_fail \
+			'Billing target reset requires a safe cutover marker.' || return 1
+	cutover_phase="$(awk -F= -v expected_revision="$EXPECTED_REVISION" '
+		$1 == "phase" { print $2; found += 1 }
+		$1 == "revision" { revision = $2; revisions += 1 }
+		END { exit(found == 1 && revisions == 1 && revision == expected_revision ? 0 : 1) }
+	' "$billing_cutover_marker")" || return 1
+	[[ "$cutover_phase" == 'aborted' ]] ||
+		billing_database_fail \
+			'Billing target reset is forbidden unless cutover is aborted.' || return 1
+	billing_database_require_runtime_stopped || return 1
+	container_id="$(billing_compose "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE" --profile billing-database ps -aq billing-postgres)" ||
+		return 1
+	[[ -z "$container_id" || "$container_id" =~ ^[0-9a-f]{64}$ ]] ||
+		billing_database_fail 'Billing PostgreSQL container identity is ambiguous.' ||
+		return 1
+	if [[ -n "$container_id" ]]; then
+		EXPECTED_VOLUME="$billing_postgres_volume" docker inspect "$container_id" | \
+			node -e '
+const fs = require("node:fs");
+const documents = JSON.parse(fs.readFileSync(0, "utf8"));
+if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
+const document = documents[0];
+const labels = document.Config?.Labels || {};
+const volumes = (document.Mounts || []).filter(mount => mount.Type === "volume");
+if (labels["com.docker.compose.project"] !== "winwidget" ||
+    labels["com.docker.compose.service"] !== "billing-postgres" ||
+    volumes.length !== 1 || volumes[0].Name !== process.env.EXPECTED_VOLUME ||
+    volumes[0].Destination !== "/var/lib/postgresql") process.exit(1);
+' || billing_database_fail \
+			'Billing PostgreSQL container is outside the aborted target boundary.' ||
+			return 1
+		docker stop --time 30 "$container_id" >/dev/null || return 1
+		stopped_state="$(docker inspect --format \
+			'{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}' \
+			"$container_id")" || return 1
+		[[ "$stopped_state" == 'exited|0|false|' ||
+			"$stopped_state" == 'exited|143|false|' ]] ||
+			billing_database_fail \
+				'Billing PostgreSQL did not stop cleanly before aborted reset.' ||
+			return 1
+		docker rm "$container_id" >/dev/null || return 1
+	fi
+	[[ -z "$(billing_compose "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE" --profile billing-database ps -aq billing-postgres)" ]] ||
+		billing_database_fail \
+			'Billing PostgreSQL container remains after aborted reset.' || return 1
+	if docker volume inspect "$billing_postgres_volume" >/dev/null 2>&1; then
+		volume_identity="$(docker volume inspect --format \
+			'{{.Driver}}|{{.Scope}}|{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}' \
+			"$billing_postgres_volume")" || return 1
+		[[ "$volume_identity" == 'local|local|billing|postgres-data' ]] ||
+			billing_database_fail \
+				'Billing PostgreSQL volume is outside the aborted target boundary.' ||
+			return 1
+		docker volume rm "$billing_postgres_volume" >/dev/null || return 1
+	fi
+	! docker volume inspect "$billing_postgres_volume" >/dev/null 2>&1 ||
+		billing_database_fail \
+			'Billing PostgreSQL volume remains after aborted reset.'
 }
 
 billing_database_abort() {
@@ -439,7 +624,8 @@ billing_database_abort() {
 		cutover_phase="$(awk -F= '$1 == "phase" { print $2; found += 1 } END { exit(found == 1 ? 0 : 1) }' \
 			"$billing_cutover_marker")" || return 1
 		case "$cutover_phase" in
-		prepared | source-frozen | imported | projection-synced | aborted) ;;
+		prepared | source-frozen | imported | pre-backups-created | \
+			pre-restore-verified | projection-synced | aborted) ;;
 		*) billing_database_fail \
 			'Billing database abort is forbidden at or after the forward boundary.' || return 1 ;;
 		esac
@@ -448,7 +634,8 @@ billing_database_abort() {
 		billing_database_fail "Billing database abort is forbidden from phase=$phase." || return 1
 	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
 		stop billing-api billing-scheduler billing-worker billing-outbox-publisher \
-		>/dev/null 2>&1 || true
+		>/dev/null || return 1
+	billing_database_require_runtime_stopped || return 1
 	billing_database_write_marker aborted \
 		"$(billing_database_marker_value ownership_revision)" \
 		"$(billing_database_marker_value cleanup_revision)" \
@@ -456,12 +643,19 @@ billing_database_abort() {
 		"$(billing_database_marker_value database_system_identifier)" \
 		"$(billing_database_marker_value database_volume)" \
 		"$(billing_database_marker_value postgres_image_id)" \
+		"$(billing_database_marker_value core_image_id)" \
+		"$(billing_database_marker_value billing_image_id)" \
 		"$(billing_database_marker_value switch_generation)" \
 		"$(billing_database_marker_value snapshot_sha256)" \
 		"$(billing_database_marker_value pre_backup_sha256)" \
 		"$(billing_database_marker_value post_backup_sha256)" \
 		"$(billing_database_marker_value restore_evidence_sha256)" \
+		"$(billing_database_marker_value pre_restore_evidence_sha256)" \
+		"$(billing_database_marker_value pre_offsite_receipt_sha256)" \
+		"$(billing_database_marker_value post_restore_evidence_sha256)" \
+		"$(billing_database_marker_value post_offsite_receipt_sha256)" \
 		"$(billing_database_marker_value projection_evidence_sha256)" \
+		"$(billing_database_marker_value route_evidence_sha256)" \
 		"$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	printf 'billing_database_phase=aborted\n'
 }
@@ -488,15 +682,93 @@ billing_database_guard_revision() {
 	cleanup_revision="$(billing_database_marker_value cleanup_revision)"
 	[[ "$revision" == "$ownership_revision" || "$revision" == "$cleanup_revision" ]] ||
 		billing_database_fail \
-			'Billing lifecycle forbids fetching/checking out an unbound third revision.'
+		'Billing lifecycle forbids fetching/checking out an unbound third revision.'
 }
+
+billing_database_reset_self_test() (
+	local directory phase container_exists volume_exists container_id
+	directory="$(mktemp -d /tmp/billing-database-reset-self-test.XXXXXX)"
+	billing_cutover_marker="$directory/cutover.marker"
+	EXPECTED_REVISION="$(printf '6%.0s' {1..40})"
+	printf 'phase=aborted\nrevision=%s\n' "$EXPECTED_REVISION" \
+		>"$billing_cutover_marker"
+	phase='aborted'
+	container_exists='true'
+	volume_exists='true'
+	container_id="$(printf 'a%.0s' {1..64})"
+	BILLING_RESET_TEST_CONTAINER_ID="$container_id"
+	export BILLING_RESET_TEST_CONTAINER_ID
+	stat() { printf '0:0:600\n'; }
+	billing_database_current_phase() { printf '%s\n' "$phase"; }
+	billing_database_marker_value() {
+		case "$1" in
+		ownership_revision) printf '%s\n' "$EXPECTED_REVISION" ;;
+		database_volume) printf '%s\n' "$billing_postgres_volume" ;;
+		*) return 1 ;;
+		esac
+	}
+	billing_database_require_runtime_stopped() { return 0; }
+	billing_database_fail() { return 1; }
+	billing_compose() {
+		[[ " $* " == *' ps -aq billing-postgres '* ]] || return 1
+		if [[ "$container_exists" == 'true' ]]; then
+			printf '%s\n' "$BILLING_RESET_TEST_CONTAINER_ID"
+		fi
+		return 0
+	}
+	docker() {
+		case "$1:$2" in
+		inspect:"$BILLING_RESET_TEST_CONTAINER_ID")
+			printf '[{"Config":{"Labels":{"com.docker.compose.project":"winwidget","com.docker.compose.service":"billing-postgres"}},"Mounts":[{"Type":"volume","Name":"%s","Destination":"/var/lib/postgresql"}]}]\n' \
+				"$billing_postgres_volume"
+			;;
+		inspect:--format)
+			printf 'exited|0|false|\n'
+			;;
+		stop:--time)
+			[[ "${4:-}" == "$BILLING_RESET_TEST_CONTAINER_ID" ]]
+			;;
+		rm:"$BILLING_RESET_TEST_CONTAINER_ID")
+			container_exists='false'
+			;;
+		volume:inspect)
+			if [[ "${3:-}" == '--format' ]]; then
+				[[ "$volume_exists" == 'true' ]] || return 1
+				printf 'local|local|billing|postgres-data\n'
+			else
+				[[ "$volume_exists" == 'true' ]]
+			fi
+			;;
+		volume:rm)
+			[[ "${3:-}" == "$billing_postgres_volume" ]]
+			volume_exists='false'
+			;;
+		*) return 1 ;;
+		esac
+	}
+	billing_database_reset_aborted_target
+	[[ "$container_exists" == 'false' && "$volume_exists" == 'false' ]]
+	phase='prepared'
+	container_exists='true'
+	volume_exists='true'
+	if billing_database_reset_aborted_target; then return 1; fi
+	[[ "$container_exists" == 'true' && "$volume_exists" == 'true' ]]
+	unset BILLING_RESET_TEST_CONTAINER_ID
+	rm -f -- "$billing_cutover_marker"
+	rmdir -- "$directory"
+)
 
 billing_database_lifecycle_self_test() {
 	local source
 	billing_database_transition_allowed absent preparing
 	billing_database_transition_allowed prepared source-frozen
+	billing_database_transition_allowed imported pre-backups-created
+	billing_database_transition_allowed pre-backups-created pre-restore-verified
+	billing_database_transition_allowed pre-restore-verified projection-synced
 	billing_database_transition_allowed projection-synced forward-only
-	billing_database_transition_allowed active complete
+	billing_database_transition_allowed active post-backup-created
+	billing_database_transition_allowed post-backup-created post-restore-verified
+	billing_database_transition_allowed post-restore-verified complete
 	if billing_database_transition_allowed forward-only prepared; then
 		billing_database_fail 'Billing lifecycle self-test allowed rollback after forward boundary.'
 		return 1
@@ -506,8 +778,13 @@ billing_database_lifecycle_self_test() {
 		return 1
 	fi
 	source="$(declare -f billing_database_prepare billing_database_abort \
+		billing_database_require_runtime_stopped \
+		billing_database_reset_aborted_target \
 		billing_database_require_env_contract \
-		billing_database_guard_revision billing_database_provision_roles \
+		billing_database_validate_marker billing_database_write_marker \
+		billing_database_guard_revision \
+		billing_database_require_pinned_candidate_images \
+		billing_database_provision_roles \
 		billing_database_finalize_acl billing_database_verify_acl)"
 	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
 		"$source" == *'billing_compose_config_all_profiles'* &&
@@ -518,8 +795,16 @@ billing_database_lifecycle_self_test() {
 		"$source" == *'winwidget_billing_backup'* &&
 		"$source" == *'REVOKE ALL ON TABLE billing._prisma_migrations'* &&
 		"$source" == *'billing_database_finalize_acl "$container_id"'* &&
+		"$source" == *'Billing candidate image identity differs from the durable marker.'* &&
+		"$source" == *'billing_database_require_runtime_stopped'* &&
+		"$source" == *'Billing runtime roles are still running after abort stop.'* &&
+		"$source" == *'docker volume rm "$billing_postgres_volume"'* &&
+		"$source" == *'Billing target reset requires the exact aborted database marker.'* &&
+		"$source" == *'route_evidence_sha256'* &&
+		"$source" == *'active|post-backup-created|post-restore-verified|complete'* &&
 		"$source" == *'Billing database abort is forbidden at or after the forward boundary.'* ]] ||
 		return 1
+	billing_database_reset_self_test || return 1
 	bash "$server_root/scripts/billing-release-identity.sh" --self-test >/dev/null
 	printf 'billing_database_lifecycle_self_test=passed\n'
 }

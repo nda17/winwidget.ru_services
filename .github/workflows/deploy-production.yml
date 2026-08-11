@@ -92,6 +92,7 @@ jobs:
             scripts/billing-database-lifecycle.sh
             scripts/deploy-billing-production.sh
             scripts/billing-cutover-production.sh
+            scripts/billing-backup-restore-rehearsal.sh
             scripts/test-billing-runtime-boundaries.mjs
             src/billing-core-cutover-main.ts
             apps/billing/src/cutover-main.ts
@@ -112,7 +113,8 @@ jobs:
             scripts/billing-release-identity.sh \
             scripts/billing-database-lifecycle.sh \
             scripts/deploy-billing-production.sh \
-            scripts/billing-cutover-production.sh; do
+            scripts/billing-cutover-production.sh \
+            scripts/billing-backup-restore-rehearsal.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
@@ -131,6 +133,8 @@ jobs:
             bash scripts/deploy-billing-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/billing-cutover-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-backup-restore-rehearsal.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
 
           # ShellCheck runs separately below; its actionlint integration
@@ -162,7 +166,8 @@ jobs:
             scripts/billing-release-identity.sh \
             scripts/billing-database-lifecycle.sh \
             scripts/deploy-billing-production.sh \
-            scripts/billing-cutover-production.sh
+            scripts/billing-cutover-production.sh \
+            scripts/billing-backup-restore-rehearsal.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -789,6 +794,7 @@ jobs:
           bash -n scripts/billing-database-lifecycle.sh
           bash -n scripts/deploy-billing-production.sh
           bash -n scripts/billing-cutover-production.sh
+          bash -n scripts/billing-backup-restore-rehearsal.sh
           node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
@@ -803,6 +809,8 @@ jobs:
             bash scripts/deploy-billing-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/billing-cutover-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-backup-restore-rehearsal.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
@@ -819,7 +827,8 @@ jobs:
             scripts/billing-release-identity.sh \
             scripts/billing-database-lifecycle.sh \
             scripts/deploy-billing-production.sh \
-            scripts/billing-cutover-production.sh
+            scripts/billing-cutover-production.sh \
+            scripts/billing-backup-restore-rehearsal.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -5601,6 +5610,7 @@ jobs:
             scripts/billing-database-lifecycle.sh \
             scripts/deploy-billing-production.sh \
             scripts/billing-cutover-production.sh \
+            scripts/billing-backup-restore-rehearsal.sh \
             database-restore-entrypoint.sh
           docker run --rm \
             --network none \
@@ -6098,10 +6108,12 @@ jobs:
           bash -n scripts/billing-database-lifecycle.sh
           bash -n scripts/deploy-billing-production.sh
           bash -n scripts/billing-cutover-production.sh
+          bash -n scripts/billing-backup-restore-rehearsal.sh
           pnpm exec prettier --check \
             .github/workflows/database-restore-production.yml \
             .github/workflows/deploy-production.yml
           bash scripts/deploy-production.sh --self-test-database-restore-create-gate
+          bash scripts/deploy-production.sh --self-test-billing-routine-image-gate
           bash scripts/campaigns-contract-migration-guard.sh --self-test
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test
           bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
@@ -6122,6 +6134,8 @@ jobs:
             bash scripts/deploy-billing-production.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/billing-cutover-production.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/billing-backup-restore-rehearsal.sh --self-test
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
