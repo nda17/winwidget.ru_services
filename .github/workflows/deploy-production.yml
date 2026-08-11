@@ -5110,7 +5110,14 @@ jobs:
                 JSON.stringify(databaseRestoreHealthcheckCommand.slice(0, 4)) !==
                   JSON.stringify(["CMD", "su-exec", "nestjs:nodejs", "node"]) ||
                 !String(databaseRestoreHealthcheckCommand.at(-1)).includes(
-                  '["billing","campaigns","core","notification-delivery","reporting","widgets"]',
+                  JSON.stringify([
+                    "billing",
+                    "campaigns",
+                    "core",
+                    "notification-delivery",
+                    "reporting",
+                    "widgets",
+                  ]),
                 ) ||
                 !databaseRestoreHealthcheck.includes("/fences") ||
                 !databaseRestoreHealthcheck.includes("fences.length!==0") ||
