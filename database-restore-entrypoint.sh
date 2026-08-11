@@ -93,6 +93,9 @@ else
 	copy_secret \
 		'/run/secrets/database-restore-widgets-admin-password' \
 		"$secret_target_directory/widgets-admin-password"
+	copy_secret \
+		'/run/secrets/database-restore-billing-admin-password' \
+		"$secret_target_directory/billing-admin-password"
 	chown nestjs:nodejs "$secret_target_directory"
 fi
 

@@ -28,7 +28,8 @@ const PASSWORD_FILE_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 		'DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE',
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE',
 	reporting: 'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE',
-	widgets: 'DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE'
+	widgets: 'DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE',
+	billing: 'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE'
 };
 
 const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
@@ -36,7 +37,8 @@ const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	'notification-delivery': 'DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT',
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_PORT',
 	reporting: 'DATABASE_RESTORE_REPORTING_PORT',
-	widgets: 'DATABASE_RESTORE_WIDGETS_PORT'
+	widgets: 'DATABASE_RESTORE_WIDGETS_PORT',
+	billing: 'DATABASE_RESTORE_BILLING_PORT'
 };
 
 export class DatabaseRestoreWorkerConfig {
@@ -212,6 +214,29 @@ export class DatabaseRestoreWorkerConfig {
 					'_prisma_migrations',
 					'service_identity',
 					'widgets',
+					'outbox_events'
+				]
+			}),
+			billing: this.target({
+				target: 'billing',
+				label: 'Billing',
+				port: this.requireTargetPort(environment, 'billing'),
+				database: 'winwidget_billing',
+				schema: 'billing',
+				adminRole: 'winwidget_billing_admin',
+				migrationRole: 'winwidget_billing_migration',
+				runtimeRoles: ['winwidget_billing_runtime'],
+				backupRole: 'winwidget_billing_backup',
+				passwordFile: passwordFiles.billing,
+				migrationsDirectory: join(
+					migrationsRoot,
+					'apps/billing/prisma/migrations'
+				),
+				anchorTables: [
+					'_prisma_migrations',
+					'service_identity',
+					'payments',
+					'subscriptions',
 					'outbox_events'
 				]
 			})

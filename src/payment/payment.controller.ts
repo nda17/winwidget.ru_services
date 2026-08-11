@@ -1,6 +1,8 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
+import { BillingLegacyRouteGuard } from '@/billing-boundary/billing-legacy-route.guard';
+import { BillingLegacyWriteFenceInterceptor } from '@/billing-boundary/billing-legacy-write-fence.interceptor';
 import {
 	AdminAutoRenewalActionDto,
 	AdminCheckPaymentDto,
@@ -23,12 +25,16 @@ import {
 	Query,
 	Req,
 	UsePipes,
+	UseGuards,
+	UseInterceptors,
 	ValidationPipe
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('payments')
+@UseGuards(BillingLegacyRouteGuard)
+@UseInterceptors(BillingLegacyWriteFenceInterceptor)
 export class PaymentController {
 	constructor(
 		private readonly paymentService: PaymentService,

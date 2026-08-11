@@ -4,7 +4,8 @@ import type { WidgetsAdminOverviewClient } from '@/widgets-internal/widgets-admi
 import {
 	BadRequestException,
 	ConflictException,
-	ForbiddenException
+	ForbiddenException,
+	ServiceUnavailableException
 } from '@nestjs/common';
 import { Prisma, Role, UserStatus } from '@prisma/client';
 
@@ -48,7 +49,7 @@ describe('UserService soft delete', () => {
 			user: {
 				findMany: jest.fn().mockResolvedValue([]),
 				count: jest.fn().mockResolvedValue(0),
-				findUnique: jest.fn(),
+				findUnique: jest.fn().mockResolvedValue(createUser()),
 				update: jest.fn()
 			},
 			subscription: { findUnique: jest.fn() },
@@ -62,16 +63,35 @@ describe('UserService soft delete', () => {
 			)
 		};
 		const widgetsOverview = { getOwnerOverview: jest.fn() };
+		const billingRegistration = {
+			captureReferralInTransaction: jest.fn(),
+			revokeBeforeLifecycleMutation: jest.fn().mockResolvedValue({
+				commandId: 'command-1',
+				remoteApplied: false,
+				userId: 'user-1',
+				operation: 'DELETE',
+				actorId: 'admin-1',
+				actorRole: Role.ADMIN,
+				requestedAt: now.toISOString()
+			}),
+			recordLifecycleRepair: jest.fn()
+		};
+		const billingState = {
+			isBillingOwner: jest.fn().mockResolvedValue(false)
+		};
 		const service = new UserService(
 			prisma as unknown as PrismaService,
-			widgetsOverview as unknown as WidgetsAdminOverviewClient
+			widgetsOverview as unknown as WidgetsAdminOverviewClient,
+			billingRegistration as never,
+			billingState as never
 		);
 
 		return {
 			service,
 			prisma,
 			transaction,
-			widgetsOverview
+			widgetsOverview,
+			billingRegistration
 		};
 	};
 
@@ -255,6 +275,42 @@ describe('UserService soft delete', () => {
 		).rejects.toBeInstanceOf(ForbiddenException);
 		expect(lastDevFixture.transaction.user.update).not.toHaveBeenCalled();
 	});
+
+	it.each(['delete', 'status'] as const)(
+		'maps a frozen legacy Billing write during user %s to retryable 503',
+		async operation => {
+			const { service, prisma, billingRegistration } = createFixture();
+			const user = createUser();
+			prisma.user.findUnique.mockResolvedValue(user);
+			prisma.$transaction.mockRejectedValue({
+				code: 'P2010',
+				meta: {
+					code: '55000',
+					message:
+						'Core Billing source is frozen; legacy table write rejected'
+				}
+			});
+
+			const request =
+				operation === 'delete'
+					? service.deleteUser(user.id, 'admin-1', [Role.USER, Role.ADMIN])
+					: service.toggleUserActivation(user.id, 'admin-1', [
+							Role.USER,
+							Role.ADMIN
+						]);
+			await expect(request).rejects.toBeInstanceOf(
+				ServiceUnavailableException
+			);
+			await expect(request).rejects.toMatchObject({
+				response: expect.objectContaining({
+					code: 'billing_legacy_writer_fenced'
+				})
+			});
+			expect(
+				billingRegistration.recordLifecycleRepair
+			).not.toHaveBeenCalled();
+		}
+	);
 
 	it('rejects self-demotion, ADMIN demotion of DEV, and last active DEV demotion', async () => {
 		const devUser = createUser({
@@ -524,7 +580,8 @@ describe('UserService soft delete', () => {
 		const user = createUser();
 		prisma.user.findUnique.mockResolvedValue({
 			status: UserStatus.ACTIVE,
-			deletedAt: null
+			deletedAt: null,
+			rights: [Role.USER]
 		});
 		transaction.user.findUnique
 			.mockResolvedValueOnce(user)
@@ -566,7 +623,8 @@ describe('UserService soft delete', () => {
 		const selfFixture = createFixture();
 		selfFixture.prisma.user.findUnique.mockResolvedValue({
 			status: UserStatus.ACTIVE,
-			deletedAt: null
+			deletedAt: null,
+			rights: devUser.rights
 		});
 		selfFixture.transaction.user.findUnique.mockResolvedValue(devUser);
 
@@ -582,7 +640,8 @@ describe('UserService soft delete', () => {
 		const adminFixture = createFixture();
 		adminFixture.prisma.user.findUnique.mockResolvedValue({
 			status: UserStatus.ACTIVE,
-			deletedAt: null
+			deletedAt: null,
+			rights: devUser.rights
 		});
 		adminFixture.transaction.user.findUnique.mockResolvedValue(devUser);
 
@@ -592,7 +651,7 @@ describe('UserService soft delete', () => {
 				Role.ADMIN
 			])
 		).rejects.toThrow(
-			'Изменять статус пользователя с ролью DEV может только DEV'
+			'Изменять пользователя с ролью DEV может только DEV'
 		);
 		expect(
 			adminFixture.transaction.user.updateMany
@@ -601,7 +660,8 @@ describe('UserService soft delete', () => {
 		const lastDevFixture = createFixture();
 		lastDevFixture.prisma.user.findUnique.mockResolvedValue({
 			status: UserStatus.ACTIVE,
-			deletedAt: null
+			deletedAt: null,
+			rights: devUser.rights
 		});
 		lastDevFixture.transaction.user.findUnique.mockResolvedValue(devUser);
 		lastDevFixture.transaction.user.count.mockResolvedValue(1);
@@ -624,8 +684,10 @@ describe('UserService soft delete', () => {
 		const { service, prisma } = createFixture();
 		prisma.user.findUnique.mockResolvedValue({
 			status: UserStatus.ACTIVE,
-			deletedAt: null
+			deletedAt: null,
+			rights: [Role.USER, Role.ADMIN, Role.DEV]
 		});
+		prisma.user.count.mockResolvedValue(2);
 		prisma.$transaction.mockRejectedValue({ code: 'P2034' });
 
 		await expect(
@@ -644,7 +706,8 @@ describe('UserService soft delete', () => {
 		});
 		prisma.user.findUnique.mockResolvedValue({
 			status: UserStatus.DEACTIVATED,
-			deletedAt: null
+			deletedAt: null,
+			rights: user.rights
 		});
 		transaction.user.findUnique.mockResolvedValue(user);
 		transaction.user.updateMany.mockResolvedValue({ count: 0 });
@@ -677,7 +740,8 @@ describe('UserService soft delete', () => {
 		});
 		prisma.user.findUnique.mockResolvedValue({
 			status: UserStatus.DEACTIVATED,
-			deletedAt: null
+			deletedAt: null,
+			rights: user.rights
 		});
 		transaction.user.findUnique
 			.mockResolvedValueOnce(user)

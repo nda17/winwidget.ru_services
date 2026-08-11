@@ -1,11 +1,12 @@
 import { HealthModule } from '@/health/health.module';
+import { BillingBoundaryModule } from '@/billing-boundary/billing-boundary.module';
 import { WidgetsAdminOverviewClient } from '@/widgets-internal/widgets-admin-overview.client';
 import { Module } from '@nestjs/common';
 import { AdminAlertsController } from './admin-alerts.controller';
 import { AdminAlertsService } from './admin-alerts.service';
 
 @Module({
-	imports: [HealthModule],
+	imports: [HealthModule, BillingBoundaryModule],
 	controllers: [AdminAlertsController],
 	providers: [AdminAlertsService, WidgetsAdminOverviewClient]
 })

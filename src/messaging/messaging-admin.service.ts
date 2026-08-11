@@ -1,4 +1,11 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
+import {
+	BillingFailureConsumer,
+	BillingMessagingClientService,
+	BillingMessagingFailureView,
+	BillingMessagingInternalApiError
+} from '@/messaging/billing-messaging-client.service';
 import {
 	CORE_OWNED_MESSAGING_KINDS,
 	getManualRetryRoutingKey,
@@ -55,6 +62,27 @@ interface FailureFilters {
 	status?: string;
 }
 
+const BILLING_CONSUMER_TO_PUBLIC_INTEGRATION: Record<
+	BillingFailureConsumer,
+	string
+> = {
+	identity: 'billing-identity-source',
+	offer: 'billing-offer-source',
+	'notification-routing': 'billing-notification-routing-source',
+	'settings-source': 'billing-settings-source',
+	'trial-request': 'billing-trial-source',
+	'referral-request': 'billing-referral-source',
+	'lifecycle-repair': 'billing-lifecycle-repair-source',
+	'auto-renewal-charge': 'auto-renewal',
+	'notification-outcome': 'notification-delivery-outcome'
+};
+
+const PUBLIC_INTEGRATION_TO_BILLING_CONSUMER = Object.fromEntries(
+	Object.entries(BILLING_CONSUMER_TO_PUBLIC_INTEGRATION).map(
+		([consumer, integration]) => [integration, consumer]
+	)
+) as Record<string, BillingFailureConsumer>;
+
 @Injectable()
 export class MessagingAdminService {
 	private readonly logger = new Logger(MessagingAdminService.name);
@@ -64,10 +92,14 @@ export class MessagingAdminService {
 		private readonly rabbitManagement: RabbitMqManagementService,
 		private readonly adminEventLog: AdminEventLogService,
 		private readonly notificationDelivery: NotificationDeliveryClientService,
-		private readonly widgetsFailures: WidgetsDeliveryFailuresClientService
+		private readonly widgetsFailures: WidgetsDeliveryFailuresClientService,
+		private readonly billingState?: BillingCoreStateService,
+		private readonly billingMessaging?: BillingMessagingClientService
 	) {}
 
 	async getOverview() {
+		const billingOwner = await this.isBillingOwner();
+		const coreFailureKinds = this.getCoreFailureKinds(billingOwner);
 		const now = new Date();
 		const staleBefore = new Date(now.getTime() - 30_000);
 		const expiredPublishingBefore = new Date(
@@ -84,7 +116,8 @@ export class MessagingAdminService {
 			heartbeats,
 			queues,
 			notificationDeliveryOverview,
-			widgetsOverview
+			widgetsOverview,
+			billingOverview
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
 				by: ['status'],
@@ -110,7 +143,7 @@ export class MessagingAdminService {
 				where: {
 					resolvedAt: null,
 					integration: {
-						in: [...CORE_OWNED_MESSAGING_KINDS]
+						in: coreFailureKinds
 					}
 				}
 			}),
@@ -119,7 +152,7 @@ export class MessagingAdminService {
 					resolvedAt: null,
 					retryingAt: { not: null },
 					integration: {
-						in: [...CORE_OWNED_MESSAGING_KINDS]
+						in: coreFailureKinds
 					}
 				}
 			}),
@@ -127,7 +160,7 @@ export class MessagingAdminService {
 				where: {
 					status: IntegrationDeliveryReceiptStatus.DELIVERED,
 					integration: {
-						in: [...CORE_OWNED_MESSAGING_KINDS]
+						in: coreFailureKinds
 					},
 					deliveredAt: {
 						gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
@@ -171,7 +204,19 @@ export class MessagingAdminService {
 					overview: null,
 					error:
 						error instanceof Error ? error.message : 'Widgets недоступен'
-				}))
+				})),
+			billingOwner && this.billingMessaging
+				? this.billingMessaging
+						.getOverview()
+						.then(overview => ({ overview, error: null }))
+						.catch(error => ({
+							overview: null,
+							error:
+								error instanceof Error
+									? error.message
+									: 'Billing недоступен'
+						}))
+				: Promise.resolve({ overview: null, error: null })
 		]);
 
 		const outbox = Object.fromEntries(
@@ -191,6 +236,11 @@ export class MessagingAdminService {
 				outbox[status] += widgetsOverview.overview.outbox[status] || 0;
 			}
 		}
+		if (billingOverview.overview) {
+			outbox.PENDING += billingOverview.overview.outbox.PENDING;
+			outbox.PUBLISHING += billingOverview.overview.outbox.PROCESSING;
+			outbox.PUBLISHED += billingOverview.overview.outbox.PUBLISHED;
+		}
 
 		const oldestPendingAt =
 			[
@@ -202,7 +252,8 @@ export class MessagingAdminService {
 						).toISOString()
 					: null,
 				notificationDeliveryOverview.overview?.oldestPendingAt || null,
-				widgetsOverview.overview?.oldestPendingAt || null
+				widgetsOverview.overview?.oldestPendingAt || null,
+				billingOverview.overview?.oldestPendingAt || null
 			]
 				.filter((value): value is string => Boolean(value))
 				.sort()[0] || null;
@@ -296,20 +347,24 @@ export class MessagingAdminService {
 			unresolvedFailures:
 				unresolvedFailures +
 				(notificationDeliveryOverview.overview?.unresolvedFailures || 0) +
-				(widgetsOverview.overview?.unresolvedFailures || 0),
+				(widgetsOverview.overview?.unresolvedFailures || 0) +
+				(billingOverview.overview?.unresolvedFailures || 0),
 			retryingFailures:
 				retryingFailures +
 				(notificationDeliveryOverview.overview?.retryingFailures || 0) +
-				(widgetsOverview.overview?.retryingFailures || 0),
+				(widgetsOverview.overview?.retryingFailures || 0) +
+				(billingOverview.overview?.retryingFailures || 0),
 			deliveredLast24Hours:
 				deliveredLast24Hours +
 				completedBackupsLast24Hours +
 				(notificationDeliveryOverview.overview?.deliveredLast24Hours ||
 					0) +
-				(widgetsOverview.overview?.deliveredLast24Hours || 0),
+				(widgetsOverview.overview?.deliveredLast24Hours || 0) +
+				(billingOverview.overview?.deliveredLast24Hours || 0),
 			rabbitMqError: queues.error,
 			notificationDeliveryError: notificationDeliveryOverview.error,
 			widgetsError: widgetsOverview.error,
+			billingError: billingOverview.error,
 			heartbeats: serviceHeartbeats,
 			queues: queues.queues.map(queue => ({
 				name: queue.name,
@@ -323,21 +378,34 @@ export class MessagingAdminService {
 	}
 
 	async getFailures(page = 1, limit = 20, filters: FailureFilters = {}) {
+		const billingOwner = await this.isBillingOwner();
+		const coreFailureKinds = this.getCoreFailureKinds(billingOwner);
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
 		const normalizedIntegration = filters.integration?.trim()
-			? this.normalizeIntegration(filters.integration.trim())
+			? this.normalizeFederatedIntegration(filters.integration.trim())
 			: null;
 		const queryNotificationDelivery =
 			!normalizedIntegration ||
-			this.isNotificationDeliveryKind(normalizedIntegration);
+			this.isNotificationDeliveryKind(
+				normalizedIntegration as MessagingKind
+			);
 		const queryWidgets =
 			!normalizedIntegration ||
-			this.isWidgetsProviderKind(normalizedIntegration);
+			this.isWidgetsProviderKind(normalizedIntegration as MessagingKind);
 		const queryCore =
 			!normalizedIntegration ||
-			this.isCoreOwnedKind(normalizedIntegration);
+			coreFailureKinds.includes(
+				normalizedIntegration as (typeof coreFailureKinds)[number]
+			);
+		const billingConsumer = normalizedIntegration
+			? PUBLIC_INTEGRATION_TO_BILLING_CONSUMER[normalizedIntegration]
+			: undefined;
+		const queryBilling =
+			billingOwner &&
+			!filters.category?.trim() &&
+			(!normalizedIntegration || Boolean(billingConsumer));
 		const offset = (normalizedPage - 1) * normalizedLimit;
 		const windowSize = offset + normalizedLimit;
 		if (!Number.isSafeInteger(windowSize) || windowSize > 10_000) {
@@ -345,8 +413,10 @@ export class MessagingAdminService {
 				'Слишком глубокая страница истории ошибок'
 			);
 		}
-		const where = queryCore ? this.getFailureWhere(filters) : null;
-		const [coreResult, notificationResult, widgetsResult] =
+		const where = queryCore
+			? this.getFailureWhere(filters, coreFailureKinds)
+			: null;
+		const [coreResult, notificationResult, widgetsResult, billingResult] =
 			await Promise.all([
 				where
 					? this.prisma.$transaction([
@@ -375,6 +445,21 @@ export class MessagingAdminService {
 							page: 1,
 							limit: windowSize,
 							totalPages: 1
+						}),
+				queryBilling
+					? this.requireBillingMessaging().getFailures(1, windowSize, {
+							...(billingConsumer ? { consumer: billingConsumer } : {}),
+							...(filters.status?.trim()
+								? { status: filters.status.trim() }
+								: {})
+						})
+					: Promise.resolve({
+							schemaVersion: 1 as const,
+							items: [],
+							total: 0,
+							page: 1,
+							limit: windowSize,
+							totalPages: 1
 						})
 			]);
 		const coreItems = coreResult[0].map(item =>
@@ -383,7 +468,10 @@ export class MessagingAdminService {
 		const items = [
 			...coreItems,
 			...notificationResult.items,
-			...widgetsResult.items
+			...widgetsResult.items,
+			...billingResult.items.map(item =>
+				this.serializeBillingFailure(item)
+			)
 		]
 			.sort((left, right) => {
 				const byDate =
@@ -392,7 +480,10 @@ export class MessagingAdminService {
 			})
 			.slice(offset, offset + normalizedLimit);
 		const total =
-			coreResult[1] + notificationResult.total + widgetsResult.total;
+			coreResult[1] +
+			notificationResult.total +
+			widgetsResult.total +
+			billingResult.total;
 
 		return {
 			items,
@@ -404,12 +495,22 @@ export class MessagingAdminService {
 	}
 
 	async retryFailure(id: string, adminId: string, request?: Request) {
-		if (!(await this.isCoreOwnedFailure(id))) {
+		const billingOwner = await this.isBillingOwner();
+		if (billingOwner && (await this.isImportedAutoRenewalFailure(id))) {
+			const result = await this.retryBillingFailure(id, adminId);
+			if (result) return result;
+			throw new NotFoundException('Ошибка доставки не найдена');
+		}
+		if (!(await this.isCoreOwnedFailure(id, billingOwner))) {
 			const notificationDeliveryResult =
 				await this.retryNotificationDeliveryFailure(id, adminId, request);
 			if (notificationDeliveryResult) return notificationDeliveryResult;
 			const widgetsResult = await this.retryWidgetsFailure(id, adminId);
 			if (widgetsResult) return widgetsResult;
+			if (billingOwner) {
+				const billingResult = await this.retryBillingFailure(id, adminId);
+				if (billingResult) return billingResult;
+			}
 			throw new NotFoundException('Ошибка доставки не найдена');
 		}
 
@@ -428,7 +529,7 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
-			if (!this.isCoreOwnedKind(kind)) {
+			if (!this.isCoreFailureKind(kind, billingOwner)) {
 				throw new NotFoundException('Ошибка доставки не найдена');
 			}
 			const retryPayload: Prisma.JsonValue = failure.payload;
@@ -541,14 +642,24 @@ export class MessagingAdminService {
 		comment: string,
 		request?: Request
 	) {
+		const billingOwner = await this.isBillingOwner();
 		const normalizedComment = comment.trim();
 		if (normalizedComment.length < 3 || normalizedComment.length > 1000) {
 			throw new BadRequestException(
 				'Комментарий должен содержать от 3 до 1000 символов'
 			);
 		}
+		if (billingOwner && (await this.isImportedAutoRenewalFailure(id))) {
+			const result = await this.closeBillingFailure(
+				id,
+				adminId,
+				normalizedComment
+			);
+			if (result) return result;
+			throw new NotFoundException('Ошибка доставки не найдена');
+		}
 
-		if (!(await this.isCoreOwnedFailure(id))) {
+		if (!(await this.isCoreOwnedFailure(id, billingOwner))) {
 			const notificationDeliveryResult =
 				await this.closeNotificationDeliveryFailure(
 					id,
@@ -563,6 +674,14 @@ export class MessagingAdminService {
 				normalizedComment
 			);
 			if (widgetsResult) return widgetsResult;
+			if (billingOwner) {
+				const billingResult = await this.closeBillingFailure(
+					id,
+					adminId,
+					normalizedComment
+				);
+				if (billingResult) return billingResult;
+			}
 			throw new NotFoundException('Ошибка доставки не найдена');
 		}
 
@@ -593,7 +712,7 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
-			if (!this.isCoreOwnedKind(kind)) {
+			if (!this.isCoreFailureKind(kind, billingOwner)) {
 				throw new NotFoundException('Ошибка доставки не найдена');
 			}
 			if (kind !== 'database-backup') {
@@ -786,7 +905,8 @@ export class MessagingAdminService {
 	}
 
 	private getFailureWhere(
-		filters: FailureFilters
+		filters: FailureFilters,
+		coreFailureKinds: CoreMessagingKind[]
 	): Prisma.IntegrationDeliveryFailureWhereInput {
 		const integration = filters.integration?.trim();
 		const category = filters.category?.trim().toUpperCase();
@@ -795,7 +915,7 @@ export class MessagingAdminService {
 
 		if (integration) {
 			const kind = this.normalizeIntegration(integration);
-			if (!this.isCoreOwnedKind(kind)) {
+			if (!coreFailureKinds.includes(kind)) {
 				throw new BadRequestException(
 					'Тип интеграции не принадлежит Core'
 				);
@@ -803,7 +923,7 @@ export class MessagingAdminService {
 			where.integration = kind;
 		} else {
 			where.integration = {
-				in: [...CORE_OWNED_MESSAGING_KINDS]
+				in: coreFailureKinds
 			};
 		}
 		if (category) {
@@ -897,6 +1017,16 @@ export class MessagingAdminService {
 		return value as CoreMessagingKind;
 	}
 
+	private normalizeFederatedIntegration(value: string): string {
+		if (
+			!MESSAGING_KINDS.includes(value as CoreMessagingKind) &&
+			!PUBLIC_INTEGRATION_TO_BILLING_CONSUMER[value]
+		) {
+			throw new BadRequestException('Некорректный тип интеграции');
+		}
+		return value;
+	}
+
 	private isNotificationDeliveryKind(
 		value: MessagingKind
 	): value is NotificationDeliveryKind {
@@ -913,10 +1043,30 @@ export class MessagingAdminService {
 		);
 	}
 
-	private isCoreOwnedKind(value: CoreMessagingKind): boolean {
-		return CORE_OWNED_MESSAGING_KINDS.includes(
-			value as (typeof CORE_OWNED_MESSAGING_KINDS)[number]
-		);
+	private isCoreFailureKind(
+		value: CoreMessagingKind,
+		billingOwner: boolean
+	): boolean {
+		return this.getCoreFailureKinds(billingOwner).includes(value);
+	}
+
+	private getCoreFailureKinds(billingOwner: boolean): CoreMessagingKind[] {
+		return CORE_OWNED_MESSAGING_KINDS.filter(
+			kind => !billingOwner || kind !== 'auto-renewal'
+		) as CoreMessagingKind[];
+	}
+
+	private async isBillingOwner(): Promise<boolean> {
+		return this.billingState ? this.billingState.isBillingOwner() : false;
+	}
+
+	private requireBillingMessaging(): BillingMessagingClientService {
+		if (!this.billingMessaging) {
+			throw new ServiceUnavailableException(
+				'Billing messaging boundary is unavailable'
+			);
+		}
+		return this.billingMessaging;
 	}
 
 	private async retryNotificationDeliveryFailure(
@@ -1041,19 +1191,100 @@ export class MessagingAdminService {
 		}
 	}
 
-	private async isCoreOwnedFailure(id: string): Promise<boolean> {
+	private async isCoreOwnedFailure(
+		id: string,
+		billingOwner: boolean
+	): Promise<boolean> {
 		const failure = await this.prisma.integrationDeliveryFailure.findFirst(
 			{
 				where: {
 					id,
 					integration: {
-						in: [...CORE_OWNED_MESSAGING_KINDS]
+						in: this.getCoreFailureKinds(billingOwner)
 					}
 				},
 				select: { id: true }
 			}
 		);
 		return Boolean(failure);
+	}
+
+	private async isImportedAutoRenewalFailure(
+		id: string
+	): Promise<boolean> {
+		const failure = await this.prisma.integrationDeliveryFailure.findFirst(
+			{
+				where: { id, integration: 'auto-renewal' },
+				select: { id: true }
+			}
+		);
+		return Boolean(failure);
+	}
+
+	private async retryBillingFailure(id: string, adminId: string) {
+		try {
+			const result = await this.requireBillingMessaging().retryFailure(
+				id,
+				adminId
+			);
+			return {
+				id: result.id,
+				eventId: result.eventId,
+				integration:
+					BILLING_CONSUMER_TO_PUBLIC_INTEGRATION[result.consumer],
+				retryingAt: result.retryingAt
+			};
+		} catch (error) {
+			if (
+				error instanceof BillingMessagingInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
+			this.rethrowBillingMessagingError(error);
+		}
+	}
+
+	private async closeBillingFailure(
+		id: string,
+		adminId: string,
+		comment: string
+	) {
+		try {
+			const result = await this.requireBillingMessaging().closeFailure(
+				id,
+				adminId,
+				comment
+			);
+			return {
+				id: result.id,
+				eventId: result.eventId,
+				integration:
+					BILLING_CONSUMER_TO_PUBLIC_INTEGRATION[result.consumer],
+				resolvedAt: result.resolvedAt,
+				resolution: result.resolution,
+				resolutionComment: result.resolutionComment
+			};
+		} catch (error) {
+			if (
+				error instanceof BillingMessagingInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
+			this.rethrowBillingMessagingError(error);
+		}
+	}
+
+	private rethrowBillingMessagingError(error: unknown): never {
+		if (!(error instanceof BillingMessagingInternalApiError)) throw error;
+		if (error.statusCode === 400) {
+			throw new BadRequestException(error.message);
+		}
+		if (error.statusCode === 409) {
+			throw new ConflictException(error.message);
+		}
+		throw new ServiceUnavailableException('Billing не выполнил операцию');
 	}
 
 	private async retryWidgetsFailure(id: string, adminId: string) {
@@ -1115,6 +1346,46 @@ export class MessagingAdminService {
 		throw new ServiceUnavailableException(
 			'Notification Delivery не выполнил операцию'
 		);
+	}
+
+	private serializeBillingFailure(
+		item: BillingMessagingFailureView
+	): NotificationDeliveryFailureView {
+		const integration =
+			BILLING_CONSUMER_TO_PUBLIC_INTEGRATION[item.consumer];
+		return {
+			id: item.id,
+			eventId: item.eventId,
+			integration,
+			attempts: Math.max(1, item.attempt),
+			lastError:
+				item.safeReason ||
+				item.errorSafe ||
+				item.normalizedCode ||
+				item.errorCode ||
+				'Billing delivery failed',
+			category: item.category,
+			normalizedCode: item.normalizedCode,
+			safeReason: item.safeReason,
+			httpStatus: item.httpStatus,
+			providerCode: item.providerCode,
+			retryable: item.retryable,
+			failedAt: item.failedAt,
+			retryingAt: item.retryingAt,
+			resolvedAt: item.resolvedAt,
+			resolution: item.resolution,
+			resolutionComment: item.resolutionComment,
+			source: 'billing',
+			entity: { id: item.eventId, name: item.routingKey },
+			lead: {
+				id: null,
+				contact: null,
+				phone: null,
+				email: null,
+				url: null,
+				createdAt: null
+			}
+		};
 	}
 
 	private serializeFailure(

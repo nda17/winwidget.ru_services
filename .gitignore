@@ -1,6 +1,8 @@
 # compiled output
 /dist
 /node_modules
+/apps/billing/dist/
+/apps/billing/node_modules/
 /.pnp
 .pnp.js
 .yarn/install-state.gz

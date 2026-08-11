@@ -11,7 +11,7 @@ import { PrismaService } from '@/prisma.service';
 import { Injectable } from '@nestjs/common';
 import { SubscriptionExpiryReminderStatus } from '@prisma/client';
 
-type DeliveryEventPayload =
+export type DeliveryEventPayload =
 	| TelegramDestinationUnavailableEventPayload
 	| NotificationDeliveryOutcomeEventPayload
 	| AutoRenewalChargeRequestedEventPayload

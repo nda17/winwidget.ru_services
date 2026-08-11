@@ -358,6 +358,40 @@ describe('RabbitMqService topology', () => {
 		expect(deliveryChannel.nack).not.toHaveBeenCalled();
 	});
 
+	it('cancels both main and DLQ registrations only for the selected kind', async () => {
+		let sequence = 0;
+		const deliveryChannel = {
+			once: jest.fn(),
+			prefetch: jest.fn().mockResolvedValue(undefined),
+			consume: jest
+				.fn()
+				.mockImplementation(() =>
+					Promise.resolve({ consumerTag: `consumer-${++sequence}` })
+				),
+			cancel: jest.fn().mockResolvedValue(undefined)
+		} as unknown as ConfirmChannel;
+		const channel = {
+			addSetup: jest.fn(async setup => setup(deliveryChannel)),
+			removeSetup: jest.fn(async (_setup, teardown) =>
+				teardown?.(deliveryChannel)
+			)
+		};
+		const service = new RabbitMqService({
+			get: jest.fn()
+		} as unknown as ConfigService);
+		(service as any).channel = channel;
+
+		await service.consume('auto-renewal', jest.fn(), 1);
+		await service.consumeDeadLetter('auto-renewal', jest.fn(), 1);
+		await service.consume('database-backup', jest.fn(), 1);
+		await service.cancelConsumersForKinds(['auto-renewal']);
+
+		expect(channel.removeSetup).toHaveBeenCalledTimes(2);
+		expect(deliveryChannel.cancel).toHaveBeenCalledTimes(2);
+		expect(service.areConsumersReady()).toBe(true);
+		expect((service as any).consumerRegistrations.size).toBe(1);
+	});
+
 	it('becomes unready when the delivery channel closes', async () => {
 		let closeHandler: (() => void) | undefined;
 		const deliveryChannel = {

@@ -5,6 +5,9 @@ import {
 	IVkProfile,
 	TSocialProfile
 } from '@/auth/social-media/social-media-auth.types';
+import { BillingRegistrationBoundaryService } from '@/billing-boundary/billing-registration-boundary.service';
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
+import { isBillingLegacyWriteFenceError } from '@/billing-boundary/billing-legacy-write-fence.interceptor';
 import { disableAutoRenewalForLifecycleInTransaction } from '@/payment/auto-renewal-state';
 import { PrismaService } from '@/prisma.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
@@ -16,7 +19,8 @@ import {
 	ConflictException,
 	ForbiddenException,
 	Injectable,
-	NotFoundException
+	NotFoundException,
+	ServiceUnavailableException
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
@@ -69,7 +73,9 @@ type SocialIdentityType = 'GOOGLE' | 'GITHUB' | 'YANDEX' | 'VK';
 export class UserService {
 	constructor(
 		private prisma: PrismaService,
-		private readonly widgetsOverview: WidgetsAdminOverviewClient
+		private readonly widgetsOverview: WidgetsAdminOverviewClient,
+		private readonly billingRegistration: BillingRegistrationBoundaryService,
+		private readonly billingState: BillingCoreStateService
 	) {}
 
 	async getUserList(
@@ -83,10 +89,13 @@ export class UserService {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
+		const subscriptionProjectionUserIds =
+			await this.getSubscriptionProjectionUserIds(filters.subscription);
 		const where = this.getAdminUserListWhere(
 			normalizedSearchTerm,
 			filters,
-			adminRights
+			adminRights,
+			subscriptionProjectionUserIds
 		);
 		const skip = (normalizedPage - 1) * normalizedLimit;
 		const [users, total] = await Promise.all([
@@ -150,49 +159,9 @@ export class UserService {
 
 		this.ensureUserIsNotDeleted(user);
 
-		const [
-			[
-				subscription,
-				pendingPaymentsCount,
-				succeededPaymentsCount,
-				cancelledPaymentsCount,
-				expiredPaymentsCount,
-				latestPayments,
-				latestActivity
-			],
-			widgetsOverview
-		] = await Promise.all([
-			this.prisma.$transaction([
-				this.prisma.subscription.findUnique({
-					where: { userId: id }
-				}),
-				this.prisma.payment.count({
-					where: { userId: id, status: PaymentStatus.PENDING }
-				}),
-				this.prisma.payment.count({
-					where: { userId: id, status: PaymentStatus.SUCCEEDED }
-				}),
-				this.prisma.payment.count({
-					where: { userId: id, status: PaymentStatus.CANCELLED }
-				}),
-				this.prisma.payment.count({
-					where: { userId: id, status: PaymentStatus.EXPIRED }
-				}),
-				this.prisma.payment.findMany({
-					where: { userId: id },
-					orderBy: { createdAt: 'desc' },
-					take: 5,
-					select: {
-						id: true,
-						yookassaId: true,
-						status: true,
-						amount: true,
-						plan: true,
-						billingPeriod: true,
-						createdAt: true,
-						updatedAt: true
-					}
-				}),
+		const [billingOverview, latestActivity, widgetsOverview] =
+			await Promise.all([
+				this.getAdminBillingOverview(id),
 				this.prisma.adminEventLog.findMany({
 					where: {
 						OR: [{ targetUserId: id }, { adminId: id }]
@@ -211,32 +180,24 @@ export class UserService {
 						targetUserId: true,
 						createdAt: true
 					}
-				})
-			]),
-			this.widgetsOverview.getOwnerOverview(id)
-		]);
-
-		const paymentCounts = {
-			[PaymentStatus.PENDING]: pendingPaymentsCount,
-			[PaymentStatus.SUCCEEDED]: succeededPaymentsCount,
-			[PaymentStatus.CANCELLED]: cancelledPaymentsCount,
-			[PaymentStatus.EXPIRED]: expiredPaymentsCount
-		};
+				}),
+				this.widgetsOverview.getOwnerOverview(id)
+			]);
 
 		return {
-			subscription: subscription
+			subscription: billingOverview.subscription
 				? {
-						...subscription,
+						...billingOverview.subscription,
 						leadsThisPeriod: widgetsOverview.usage.leadCount
 					}
 				: null,
 			payments: {
 				total:
-					paymentCounts.PENDING +
-					paymentCounts.SUCCEEDED +
-					paymentCounts.CANCELLED,
-				counts: paymentCounts,
-				latest: latestPayments
+					billingOverview.paymentCounts.PENDING +
+					billingOverview.paymentCounts.SUCCEEDED +
+					billingOverview.paymentCounts.CANCELLED,
+				counts: billingOverview.paymentCounts,
+				latest: billingOverview.latestPayments
 			},
 			...widgetsOverview,
 			activity: {
@@ -245,6 +206,151 @@ export class UserService {
 					role: item.targetUserId === id ? 'TARGET' : 'ADMIN'
 				}))
 			}
+		};
+	}
+
+	private async getAdminBillingOverview(userId: string) {
+		const billingOwner = await this.billingState.isBillingOwner();
+		if (billingOwner) {
+			const [
+				subscription,
+				pending,
+				succeeded,
+				cancelled,
+				expired,
+				latest
+			] = await this.prisma.$transaction([
+				this.prisma.billingSubscriptionReadProjection.findUnique({
+					where: { userId },
+					select: {
+						id: true,
+						userId: true,
+						plan: true,
+						billingPeriod: true,
+						status: true,
+						startsAt: true,
+						expiresAt: true,
+						leadsThisPeriod: true,
+						periodResetsAt: true,
+						createdAt: true,
+						updatedAt: true
+					}
+				}),
+				...this.getProjectionPaymentOverviewQueries(userId)
+			]);
+			return this.toAdminBillingOverview(
+				subscription,
+				pending,
+				succeeded,
+				cancelled,
+				expired,
+				latest
+			);
+		}
+
+		const [subscription, pending, succeeded, cancelled, expired, latest] =
+			await this.prisma.$transaction([
+				this.prisma.subscription.findUnique({ where: { userId } }),
+				...this.getLegacyPaymentOverviewQueries(userId)
+			]);
+		return this.toAdminBillingOverview(
+			subscription,
+			pending,
+			succeeded,
+			cancelled,
+			expired,
+			latest
+		);
+	}
+
+	private getLegacyPaymentOverviewQueries(userId: string) {
+		return [
+			this.prisma.payment.count({
+				where: { userId, status: PaymentStatus.PENDING }
+			}),
+			this.prisma.payment.count({
+				where: { userId, status: PaymentStatus.SUCCEEDED }
+			}),
+			this.prisma.payment.count({
+				where: { userId, status: PaymentStatus.CANCELLED }
+			}),
+			this.prisma.payment.count({
+				where: { userId, status: PaymentStatus.EXPIRED }
+			}),
+			this.prisma.payment.findMany({
+				where: { userId },
+				orderBy: { createdAt: 'desc' as const },
+				take: 5,
+				select: this.paymentOverviewSelect()
+			})
+		] as const;
+	}
+
+	private getProjectionPaymentOverviewQueries(userId: string) {
+		return [
+			this.prisma.billingPaymentReadProjection.count({
+				where: { userId, status: PaymentStatus.PENDING }
+			}),
+			this.prisma.billingPaymentReadProjection.count({
+				where: { userId, status: PaymentStatus.SUCCEEDED }
+			}),
+			this.prisma.billingPaymentReadProjection.count({
+				where: { userId, status: PaymentStatus.CANCELLED }
+			}),
+			this.prisma.billingPaymentReadProjection.count({
+				where: { userId, status: PaymentStatus.EXPIRED }
+			}),
+			this.prisma.billingPaymentReadProjection.findMany({
+				where: { userId },
+				orderBy: { createdAt: 'desc' as const },
+				take: 5,
+				select: this.paymentOverviewSelect()
+			})
+		] as const;
+	}
+
+	private paymentOverviewSelect() {
+		return {
+			id: true,
+			yookassaId: true,
+			status: true,
+			amount: true,
+			plan: true,
+			billingPeriod: true,
+			createdAt: true,
+			updatedAt: true
+		} as const;
+	}
+
+	private toAdminBillingOverview<
+		TSubscription,
+		TPayment extends {
+			id: string;
+			yookassaId: string | null;
+			status: PaymentStatus;
+			amount: string;
+			plan: unknown;
+			billingPeriod: unknown;
+			createdAt: Date;
+			updatedAt: Date;
+		}
+	>(
+		subscription: TSubscription | null,
+		pending: number,
+		succeeded: number,
+		cancelled: number,
+		expired: number,
+		latestPayments: TPayment[]
+	) {
+		return {
+			subscription,
+			paymentCounts: {
+				[PaymentStatus.PENDING]: pending,
+				[PaymentStatus.SUCCEEDED]: succeeded,
+				[PaymentStatus.CANCELLED]: cancelled,
+				[PaymentStatus.EXPIRED]: expired
+			},
+			latestPayments
 		};
 	}
 
@@ -292,7 +398,10 @@ export class UserService {
 		return result.user;
 	}
 
-	async findOrCreateSocialUserWithResult(profile: TSocialProfile) {
+	async findOrCreateSocialUserWithResult(
+		profile: TSocialProfile,
+		referrerId?: string
+	) {
 		const socialType = this.getSocialIdentityType(profile);
 		const socialIdentity = await this.prisma.authIdentity.findUnique({
 			where: {
@@ -321,7 +430,7 @@ export class UserService {
 		let user = await this.getUserByEmail(normalizedEmail);
 
 		if (!user) {
-			user = await this._createSocialUser(profile, socialType);
+			user = await this._createSocialUser(profile, socialType, referrerId);
 			return {
 				user,
 				isCreated: true
@@ -359,36 +468,48 @@ export class UserService {
 
 	private async _createSocialUser(
 		profile: TSocialProfile,
-		socialType: SocialIdentityType
+		socialType: SocialIdentityType,
+		referrerId?: string
 	): Promise<UserWithAuthIdentities> {
 		const email = normalizeEmail(profile.email);
 		const name = this.getSocialProfileName(profile, socialType, email);
 		const picture = profile.picture || '';
 		const verifiedAt = new Date();
 
-		return this.prisma.user.create({
-			data: {
-				name,
-				password: '',
-				avatarPath: picture,
-				authIdentities: {
-					create: [
-						{
-							type: socialType,
-							value: profile.providerId,
-							verifiedAt
-						},
-						{
-							type: AuthIdentityType.EMAIL,
-							value: email,
-							verifiedAt
-						}
-					]
+		return this.prisma.$transaction(async transaction => {
+			const user = await transaction.user.create({
+				data: {
+					name,
+					password: '',
+					avatarPath: picture,
+					authIdentities: {
+						create: [
+							{
+								type: socialType,
+								value: profile.providerId,
+								verifiedAt
+							},
+							{
+								type: AuthIdentityType.EMAIL,
+								value: email,
+								verifiedAt
+							}
+						]
+					}
+				},
+				include: {
+					authIdentities: true
 				}
-			},
-			include: {
-				authIdentities: true
-			}
+			});
+			await this.billingRegistration.captureReferralInTransaction(
+				transaction,
+				{
+					referrerId,
+					referredUserId: user.id,
+					requestedAt: user.createdAt
+				}
+			);
+			return user;
 		});
 	}
 
@@ -425,39 +546,67 @@ export class UserService {
 	async createVerifiedEmailUser(dto: {
 		email: string;
 		passwordHash: string;
+		referrerId?: string;
 	}) {
-		return this.prisma.user.create({
-			data: {
-				password: dto.passwordHash,
-				authIdentities: {
-					create: {
-						type: AuthIdentityType.EMAIL,
-						value: normalizeEmail(dto.email),
-						verifiedAt: new Date()
+		return this.prisma.$transaction(async transaction => {
+			const user = await transaction.user.create({
+				data: {
+					password: dto.passwordHash,
+					authIdentities: {
+						create: {
+							type: AuthIdentityType.EMAIL,
+							value: normalizeEmail(dto.email),
+							verifiedAt: new Date()
+						}
 					}
+				},
+				include: {
+					authIdentities: true
 				}
-			},
-			include: {
-				authIdentities: true
-			}
+			});
+			await this.billingRegistration.captureReferralInTransaction(
+				transaction,
+				{
+					referrerId: dto.referrerId,
+					referredUserId: user.id,
+					requestedAt: user.createdAt
+				}
+			);
+			return user;
 		});
 	}
 
-	async createPhoneUser(dto: { phone: string; password: string }) {
-		return this.prisma.user.create({
-			data: {
-				password: await hash(dto.password, PASSWORD_SALT_ROUNDS),
-				authIdentities: {
-					create: {
-						type: AuthIdentityType.PHONE,
-						value: normalizePhone(dto.phone),
-						verifiedAt: new Date()
+	async createPhoneUser(dto: {
+		phone: string;
+		password: string;
+		referrerId?: string;
+	}) {
+		const password = await hash(dto.password, PASSWORD_SALT_ROUNDS);
+		return this.prisma.$transaction(async transaction => {
+			const user = await transaction.user.create({
+				data: {
+					password,
+					authIdentities: {
+						create: {
+							type: AuthIdentityType.PHONE,
+							value: normalizePhone(dto.phone),
+							verifiedAt: new Date()
+						}
 					}
+				},
+				include: {
+					authIdentities: true
 				}
-			},
-			include: {
-				authIdentities: true
-			}
+			});
+			await this.billingRegistration.captureReferralInTransaction(
+				transaction,
+				{
+					referrerId: dto.referrerId,
+					referredUserId: user.id,
+					requestedAt: user.createdAt
+				}
+			);
+			return user;
 		});
 	}
 
@@ -723,79 +872,109 @@ export class UserService {
 		}
 
 		const deletedAt = new Date();
-		const deletedUser = await this.prisma.$transaction(
-			async tx => {
-				const user = await tx.user.findUnique({
-					where: { id },
-					include: {
-						authIdentities: true
-					}
-				});
-
-				if (!user) {
-					throw new NotFoundException('User not found');
-				}
-
-				if (user.deletedAt) {
-					throw new BadRequestException('Пользователь уже удалён');
-				}
-
-				const targetIsDev = user.rights.includes(Role.DEV);
-
-				if (targetIsDev && !adminRights.includes(Role.DEV)) {
-					throw new ForbiddenException(
-						'Удалить пользователя с ролью DEV может только DEV'
-					);
-				}
-
-				if (targetIsDev && user.status === UserStatus.ACTIVE) {
-					const activeDevCount = await tx.user.count({
-						where: {
-							status: UserStatus.ACTIVE,
-							deletedAt: null,
-							rights: {
-								has: Role.DEV
-							}
+		await this.validateLifecyclePreconditions(
+			id,
+			adminId,
+			adminRights,
+			'DELETE'
+		);
+		const billingRevocation =
+			await this.billingRegistration.revokeBeforeLifecycleMutation({
+				userId: id,
+				operation: 'DELETE',
+				actorId: adminId,
+				actorRights: adminRights
+			});
+		let deletedUser: UserWithAuthIdentities;
+		try {
+			deletedUser = await this.prisma.$transaction(
+				async tx => {
+					const user = await tx.user.findUnique({
+						where: { id },
+						include: {
+							authIdentities: true
 						}
 					});
 
-					if (activeDevCount <= 1) {
+					if (!user) {
+						throw new NotFoundException('User not found');
+					}
+
+					if (user.deletedAt) {
+						throw new BadRequestException('Пользователь уже удалён');
+					}
+
+					const targetIsDev = user.rights.includes(Role.DEV);
+
+					if (targetIsDev && !adminRights.includes(Role.DEV)) {
 						throw new ForbiddenException(
-							'Нельзя удалить последнего активного DEV'
+							'Удалить пользователя с ролью DEV может только DEV'
 						);
 					}
-				}
 
-				const updated = await tx.user.update({
-					where: { id },
-					data: {
-						status: UserStatus.DEACTIVATED,
-						personalDataConsentRevokedAt:
-							user.personalDataConsentRevokedAt ?? deletedAt,
-						deletedAt
-					},
-					include: {
-						authIdentities: true
+					if (targetIsDev && user.status === UserStatus.ACTIVE) {
+						const activeDevCount = await tx.user.count({
+							where: {
+								status: UserStatus.ACTIVE,
+								deletedAt: null,
+								rights: {
+									has: Role.DEV
+								}
+							}
+						});
+
+						if (activeDevCount <= 1) {
+							throw new ForbiddenException(
+								'Нельзя удалить последнего активного DEV'
+							);
+						}
 					}
-				});
 
-				await this.revokeSessionsForLifecycle(tx, id, deletedAt);
-				await disableAutoRenewalForLifecycleInTransaction(tx, {
-					userId: id,
-					status: AutoRenewalStatus.REVOKED,
-					eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
-					source: 'USER_SOFT_DELETE',
-					reason: 'Автопродление отозвано при удалении пользователя',
-					actorUserId: adminId,
-					actorRole: adminRights.includes(Role.DEV) ? Role.DEV : Role.ADMIN
-				});
+					const updated = await tx.user.update({
+						where: { id },
+						data: {
+							status: UserStatus.DEACTIVATED,
+							personalDataConsentRevokedAt:
+								user.personalDataConsentRevokedAt ?? deletedAt,
+							deletedAt
+						},
+						include: {
+							authIdentities: true
+						}
+					});
 
-				return updated;
-			},
-			{
-				isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+					await this.revokeSessionsForLifecycle(tx, id, deletedAt);
+					if (!billingRevocation.remoteApplied) {
+						await disableAutoRenewalForLifecycleInTransaction(tx, {
+							userId: id,
+							status: AutoRenewalStatus.REVOKED,
+							eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
+							source: 'USER_SOFT_DELETE',
+							reason: 'Автопродление отозвано при удалении пользователя',
+							actorUserId: adminId,
+							actorRole: adminRights.includes(Role.DEV)
+								? Role.DEV
+								: Role.ADMIN
+						});
+					}
+
+					return updated;
+				},
+				{
+					isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+				}
+			);
+		} catch (error) {
+			if (billingRevocation.remoteApplied) {
+				await this.billingRegistration.recordLifecycleRepair(
+					billingRevocation
+				);
 			}
-		);
+			if (isBillingLegacyWriteFenceError(error)) {
+				throw this.billingMigrationInProgress();
+			}
+			throw error;
+		}
 
 		return this.toPublicUser(deletedUser);
 	}
@@ -839,7 +1018,8 @@ export class UserService {
 			where: { id },
 			select: {
 				status: true,
-				deletedAt: true
+				deletedAt: true,
+				rights: true
 			}
 		});
 
@@ -848,10 +1028,25 @@ export class UserService {
 		}
 
 		this.ensureUserIsNotDeleted(user);
+		await this.validateLifecyclePreconditions(
+			id,
+			adminId,
+			adminRights,
+			user.status === UserStatus.ACTIVE ? 'DEACTIVATE' : 'ACTIVATE'
+		);
 
 		const statusChangedAt = new Date();
 
 		let updatedUser: UserWithAuthIdentities;
+		const billingRevocation =
+			user.status === UserStatus.ACTIVE
+				? await this.billingRegistration.revokeBeforeLifecycleMutation({
+						userId: id,
+						operation: 'DEACTIVATE',
+						actorId: adminId,
+						actorRights: adminRights
+					})
+				: null;
 
 		try {
 			updatedUser = await this.prisma.$transaction(
@@ -928,18 +1123,20 @@ export class UserService {
 
 					if (shouldDeactivate) {
 						await this.revokeSessionsForLifecycle(tx, id, statusChangedAt);
-						await disableAutoRenewalForLifecycleInTransaction(tx, {
-							userId: id,
-							status: AutoRenewalStatus.REVOKED,
-							eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
-							source: 'USER_DEACTIVATION',
-							reason:
-								'Автопродление отозвано при деактивации пользователя',
-							actorUserId: adminId,
-							actorRole: adminRights.includes(Role.DEV)
-								? Role.DEV
-								: Role.ADMIN
-						});
+						if (!billingRevocation?.remoteApplied) {
+							await disableAutoRenewalForLifecycleInTransaction(tx, {
+								userId: id,
+								status: AutoRenewalStatus.REVOKED,
+								eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
+								source: 'USER_DEACTIVATION',
+								reason:
+									'Автопродление отозвано при деактивации пользователя',
+								actorUserId: adminId,
+								actorRole: adminRights.includes(Role.DEV)
+									? Role.DEV
+									: Role.ADMIN
+							});
+						}
 					}
 
 					return updated;
@@ -949,10 +1146,18 @@ export class UserService {
 				}
 			);
 		} catch (error) {
+			if (billingRevocation?.remoteApplied) {
+				await this.billingRegistration.recordLifecycleRepair(
+					billingRevocation
+				);
+			}
 			if (this.isSerializableTransactionConflict(error)) {
 				throw new ConflictException(
 					'Данные DEV-учёток изменились параллельно. Обновите страницу и повторите действие'
 				);
+			}
+			if (isBillingLegacyWriteFenceError(error)) {
+				throw this.billingMigrationInProgress();
 			}
 
 			throw error;
@@ -970,6 +1175,51 @@ export class UserService {
 			where: { userId, revokedAt: null },
 			data: { revokedAt }
 		});
+	}
+
+	private async validateLifecyclePreconditions(
+		userId: string,
+		actorId: string,
+		actorRights: Role[],
+		operation: 'ACTIVATE' | 'DEACTIVATE' | 'DELETE'
+	): Promise<void> {
+		const target = await this.prisma.user.findUnique({
+			where: { id: userId },
+			select: { status: true, deletedAt: true, rights: true }
+		});
+		if (!target) throw new NotFoundException('User not found');
+		if (target.deletedAt) {
+			throw new BadRequestException('Пользователь уже удалён');
+		}
+		const targetIsDev = target.rights.includes(Role.DEV);
+		if (targetIsDev && !actorRights.includes(Role.DEV)) {
+			throw new ForbiddenException(
+				'Изменять пользователя с ролью DEV может только DEV'
+			);
+		}
+		if (operation !== 'ACTIVATE' && userId === actorId) {
+			throw new ForbiddenException(
+				'Нельзя деактивировать собственную учётную запись'
+			);
+		}
+		if (
+			operation !== 'ACTIVATE' &&
+			targetIsDev &&
+			target.status === UserStatus.ACTIVE
+		) {
+			const activeDevCount = await this.prisma.user.count({
+				where: {
+					status: UserStatus.ACTIVE,
+					deletedAt: null,
+					rights: { has: Role.DEV }
+				}
+			});
+			if (activeDevCount <= 1) {
+				throw new ForbiddenException(
+					'Нельзя деактивировать последнюю активную DEV-учётную запись'
+				);
+			}
+		}
 	}
 
 	private async ensureAnotherActiveDevExists(
@@ -1000,10 +1250,20 @@ export class UserService {
 		);
 	}
 
+	private billingMigrationInProgress(): ServiceUnavailableException {
+		return new ServiceUnavailableException({
+			statusCode: 503,
+			message: 'Billing migration is in progress. Please retry shortly.',
+			error: 'Service Unavailable',
+			code: 'billing_legacy_writer_fenced'
+		});
+	}
+
 	private getAdminUserListWhere(
 		normalizedSearchTerm: string | undefined,
 		filters: AdminUserListFilters,
-		adminRights: Role[]
+		adminRights: Role[],
+		subscriptionProjectionUserIds: string[] | null = null
 	): Prisma.UserWhereInput | undefined {
 		const and: Prisma.UserWhereInput[] = [];
 		const role = this.normalizeUserRole(filters.role);
@@ -1065,22 +1325,34 @@ export class UserService {
 		}
 
 		if (subscriptionFilter === 'HAS') {
-			and.push({
-				subscription: {
-					isNot: null
-				}
-			});
+			and.push(
+				subscriptionProjectionUserIds === null
+					? { subscription: { isNot: null } }
+					: { id: { in: subscriptionProjectionUserIds } }
+			);
 		}
 
 		if (subscriptionFilter === 'NONE') {
-			and.push({
-				subscription: {
-					is: null
-				}
-			});
+			and.push(
+				subscriptionProjectionUserIds === null
+					? { subscription: { is: null } }
+					: { id: { notIn: subscriptionProjectionUserIds } }
+			);
 		}
 
 		return and.length ? { AND: and } : undefined;
+	}
+
+	private async getSubscriptionProjectionUserIds(
+		filter: string | undefined
+	): Promise<string[] | null> {
+		if (!this.normalizeSubscriptionPresence(filter)) return null;
+		if (!(await this.billingState.isBillingOwner())) return null;
+		const rows =
+			await this.prisma.billingSubscriptionReadProjection.findMany({
+				select: { userId: true }
+			});
+		return rows.map(row => row.userId);
 	}
 
 	private normalizeUserRole(value?: string) {

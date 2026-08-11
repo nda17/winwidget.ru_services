@@ -1,4 +1,9 @@
 import type { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
+import type { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
+import {
+	BillingMessagingClientService,
+	BillingMessagingInternalApiError
+} from '@/messaging/billing-messaging-client.service';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import { CORE_OWNED_MESSAGING_KINDS } from '@/messaging/messaging.constants';
 import {
@@ -994,5 +999,296 @@ describe('MessagingAdminService', () => {
 		expect(widgetsGetFailures).toHaveBeenCalledWith(1, 4, {
 			integration: 'webhook'
 		});
+	});
+
+	it('aggregates Billing metrics without counting legacy auto-renewal rows twice', async () => {
+		const prisma = {
+			outboxEvent: {
+				groupBy: jest.fn().mockResolvedValue([]),
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			integrationDeliveryFailure: {
+				count: jest.fn().mockResolvedValue(2)
+			},
+			integrationDeliveryReceipt: {
+				count: jest.fn().mockResolvedValue(3)
+			},
+			scheduledJobRun: { count: jest.fn().mockResolvedValue(0) },
+			messagingHeartbeat: { findMany: jest.fn().mockResolvedValue([]) }
+		} as unknown as PrismaService;
+		const emptyOverview = {
+			outbox: { PENDING: 0, PUBLISHING: 0, PUBLISHED: 0, FAILED: 0 },
+			oldestPendingAt: null,
+			unresolvedFailures: 0,
+			retryingFailures: 0,
+			deliveredLast24Hours: 0
+		};
+		const billing = {
+			getOverview: jest.fn().mockResolvedValue({
+				schemaVersion: 1,
+				generatedAt: '2026-08-11T00:00:00.000Z',
+				outbox: { PENDING: 4, PROCESSING: 1, PUBLISHED: 7 },
+				oldestPendingAt: '2026-08-11T00:00:00.000Z',
+				unresolvedFailures: 5,
+				retryingFailures: 1,
+				deliveredLast24Hours: 8
+			})
+		} as unknown as BillingMessagingClientService;
+		const service = new MessagingAdminService(
+			prisma,
+			{
+				getMessagingQueues: jest.fn().mockResolvedValue([])
+			} as unknown as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getOverview: jest.fn().mockResolvedValue({
+					...emptyOverview,
+					heartbeat: {
+						service: 'notification-delivery-worker',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-08-11T00:00:00.000Z'
+					}
+				})
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getOverview: jest.fn().mockResolvedValue({
+					...emptyOverview,
+					heartbeats: []
+				})
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			billing
+		);
+
+		await expect(service.getOverview()).resolves.toEqual(
+			expect.objectContaining({
+				outbox: expect.objectContaining({
+					PENDING: 4,
+					PUBLISHING: 1,
+					PUBLISHED: 7
+				}),
+				unresolvedFailures: 7,
+				retryingFailures: 3,
+				deliveredLast24Hours: 11,
+				billingError: null
+			})
+		);
+		for (const call of (
+			prisma.integrationDeliveryFailure.count as jest.Mock
+		).mock.calls) {
+			expect(call[0].where.integration.in).not.toContain('auto-renewal');
+		}
+		expect(
+			(prisma.integrationDeliveryReceipt.count as jest.Mock).mock
+				.calls[0][0].where.integration.in
+		).not.toContain('auto-renewal');
+	});
+
+	it('delegates the auto-renewal filtered page to Billing and preserves public classification fields', async () => {
+		const billingItem = {
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId: '11111111-1111-4111-8111-111111111111',
+			consumer: 'auto-renewal-charge' as const,
+			routingKey: 'payment.auto-renewal.charge.requested.v1',
+			errorCode: 'PROVIDER_TIMEOUT',
+			errorSafe: 'Provider request timed out',
+			attempt: 2,
+			status: 'RESOLVED' as const,
+			category: 'TRANSIENT' as const,
+			normalizedCode: 'PROVIDER_TIMEOUT',
+			safeReason: 'Provider request timed out',
+			httpStatus: 504,
+			providerCode: null,
+			retryable: true,
+			classificationVersion: 1,
+			firstFailedAt: '2026-08-11T00:00:00.000Z',
+			failedAt: '2026-08-11T00:01:00.000Z',
+			retryingAt: null,
+			resolvedAt: '2026-08-11T00:02:00.000Z',
+			resolution: 'CLOSED_NO_RETRY' as const,
+			resolutionComment: 'closed',
+			createdAt: '2026-08-11T00:00:00.000Z',
+			updatedAt: '2026-08-11T00:02:00.000Z'
+		};
+		const coreTransaction = jest.fn();
+		const billing = {
+			getFailures: jest.fn().mockResolvedValue({
+				schemaVersion: 1,
+				items: [billingItem],
+				total: 1,
+				page: 1,
+				limit: 20,
+				totalPages: 1
+			})
+		} as unknown as BillingMessagingClientService;
+		const notificationGetFailures = jest.fn();
+		const widgetsGetFailures = jest.fn();
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: jest.fn(),
+					count: jest.fn()
+				},
+				$transaction: coreTransaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getFailures: notificationGetFailures
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getFailures: widgetsGetFailures
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			billing
+		);
+
+		await expect(
+			service.getFailures(1, 20, {
+				integration: 'auto-renewal',
+				status: 'CLOSED'
+			})
+		).resolves.toEqual({
+			items: [
+				expect.objectContaining({
+					id: billingItem.id,
+					integration: 'auto-renewal',
+					category: 'TRANSIENT',
+					normalizedCode: 'PROVIDER_TIMEOUT',
+					httpStatus: 504,
+					failedAt: billingItem.failedAt
+				})
+			],
+			total: 1,
+			page: 1,
+			limit: 20,
+			totalPages: 1
+		});
+		expect(coreTransaction).not.toHaveBeenCalled();
+		expect(notificationGetFailures).not.toHaveBeenCalled();
+		expect(widgetsGetFailures).not.toHaveBeenCalled();
+		expect(billing.getFailures).toHaveBeenCalledWith(1, 20, {
+			consumer: 'auto-renewal-charge',
+			status: 'CLOSED'
+		});
+	});
+
+	it('routes imported auto-renewal UUID actions directly to Billing with no Core fallback', async () => {
+		const id = '22222222-2222-4222-8222-222222222222';
+		const eventId = '11111111-1111-4111-8111-111111111111';
+		const prismaTransaction = jest.fn();
+		const notificationRetry = jest.fn();
+		const notificationClose = jest.fn();
+		const widgetsRetry = jest.fn();
+		const widgetsClose = jest.fn();
+		const billing = {
+			retryFailure: jest.fn().mockResolvedValue({
+				schemaVersion: 1,
+				id,
+				eventId,
+				consumer: 'auto-renewal-charge',
+				status: 'RETRY_PENDING',
+				retryOutboxId: 'billing-outbox-1',
+				retryingAt: '2026-08-11T00:00:00.000Z',
+				duplicate: false
+			}),
+			closeFailure: jest.fn().mockResolvedValue({
+				schemaVersion: 1,
+				id,
+				eventId,
+				consumer: 'auto-renewal-charge',
+				status: 'RESOLVED',
+				resolvedAt: '2026-08-11T00:01:00.000Z',
+				resolution: 'CLOSED_NO_RETRY',
+				resolutionComment: 'Проверено вручную',
+				duplicate: false
+			})
+		} as unknown as BillingMessagingClientService;
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findFirst: jest.fn().mockResolvedValue({ id })
+				},
+				$transaction: prismaTransaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				retryFailure: notificationRetry,
+				closeFailure: notificationClose
+			} as unknown as NotificationDeliveryClientService,
+			{
+				retryFailure: widgetsRetry,
+				closeFailure: widgetsClose
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			billing
+		);
+
+		await expect(service.retryFailure(id, 'dev-1')).resolves.toEqual({
+			id,
+			eventId,
+			integration: 'auto-renewal',
+			retryingAt: '2026-08-11T00:00:00.000Z'
+		});
+		await expect(
+			service.closeFailure(id, 'dev-1', 'Проверено вручную')
+		).resolves.toEqual({
+			id,
+			eventId,
+			integration: 'auto-renewal',
+			resolvedAt: '2026-08-11T00:01:00.000Z',
+			resolution: 'CLOSED_NO_RETRY',
+			resolutionComment: 'Проверено вручную'
+		});
+		expect(notificationRetry).not.toHaveBeenCalled();
+		expect(notificationClose).not.toHaveBeenCalled();
+		expect(widgetsRetry).not.toHaveBeenCalled();
+		expect(widgetsClose).not.toHaveBeenCalled();
+		expect(prismaTransaction).not.toHaveBeenCalled();
+	});
+
+	it('fails closed for an imported auto-renewal UUID missing from Billing', async () => {
+		const id = '22222222-2222-4222-8222-222222222222';
+		const notificationRetry = jest.fn();
+		const widgetsRetry = jest.fn();
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findFirst: jest.fn().mockResolvedValue({ id })
+				}
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				retryFailure: notificationRetry
+			} as unknown as NotificationDeliveryClientService,
+			{
+				retryFailure: widgetsRetry
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			{
+				retryFailure: jest
+					.fn()
+					.mockRejectedValue(
+						new BillingMessagingInternalApiError(404, 'not found')
+					)
+			} as unknown as BillingMessagingClientService
+		);
+
+		await expect(service.retryFailure(id, 'dev-1')).rejects.toThrow(
+			'Ошибка доставки не найдена'
+		);
+		expect(notificationRetry).not.toHaveBeenCalled();
+		expect(widgetsRetry).not.toHaveBeenCalled();
 	});
 });

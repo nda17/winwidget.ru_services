@@ -1,14 +1,10 @@
-import { AffiliateService } from '@/affiliate/affiliate.service';
 import { TSocialProfile } from '@/auth/social-media/social-media-auth.types';
 import { UserService } from '@/user/user.service';
 import { BadRequestException, Injectable } from '@nestjs/common';
 
 @Injectable()
 export class SocialMediaAuthService {
-	constructor(
-		private readonly userService: UserService,
-		private readonly affiliateService: AffiliateService
-	) {}
+	constructor(private readonly userService: UserService) {}
 
 	async login(req: { user: TSocialProfile }, referrerId?: string) {
 		if (!req.user) {
@@ -16,15 +12,9 @@ export class SocialMediaAuthService {
 		}
 
 		const result = await this.userService.findOrCreateSocialUserWithResult(
-			req.user
+			req.user,
+			referrerId
 		);
-
-		if (result.isCreated) {
-			await this.affiliateService.registerReferral(
-				referrerId,
-				result.user.id
-			);
-		}
 
 		return result.user;
 	}

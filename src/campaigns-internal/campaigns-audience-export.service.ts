@@ -1,4 +1,5 @@
 import { PrismaService } from '@/prisma.service';
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
@@ -19,7 +20,10 @@ const DEFAULT_TRANSACTION_TIMEOUT_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class CampaignsAudienceExportService {
-	constructor(private readonly prisma: PrismaService) {}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly billingState: BillingCoreStateService
+	) {}
 
 	async stream(
 		dto: CampaignsAudienceExportDto,
@@ -28,6 +32,11 @@ export class CampaignsAudienceExportService {
 	): Promise<void> {
 		const snapshotId = randomUUID();
 		const asOf = new Date();
+		let clientClosed = false;
+		const onClientClose = () => {
+			clientClosed = true;
+		};
+		response.once('close', onClientClose);
 		const chunkSize = this.readBoundedInteger(
 			'CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE',
 			DEFAULT_CHUNK_SIZE,
@@ -40,70 +49,88 @@ export class CampaignsAudienceExportService {
 			10_000,
 			30 * 60 * 1000
 		);
+		try {
+			const billingOwner = await this.billingState.isBillingOwner();
 
-		await this.prisma.$transaction(
-			async transaction => {
-				await transaction.$executeRaw`SET TRANSACTION READ ONLY`;
-				this.assertConnected(request, response);
-				await this.writeLine(response, {
-					type: 'snapshot',
-					schemaVersion: 1,
-					snapshotId,
-					asOf: asOf.toISOString(),
-					criteria: {
-						channel: dto.channel,
-						audience: dto.audience
-					}
-				});
-
-				const hash = createHash('sha256');
-				let cursor: string | null = null;
-				let totalCount = 0;
-
-				for (;;) {
-					this.assertConnected(request, response);
-					const rows = await this.getDestinations(
-						transaction,
-						dto.channel,
-						dto.audience,
-						asOf,
-						cursor,
-						chunkSize
+			await this.prisma.$transaction(
+				async transaction => {
+					await transaction.$executeRaw`SET TRANSACTION READ ONLY`;
+					this.assertConnected(request, response, clientClosed);
+					await this.writeLine(
+						response,
+						{
+							type: 'snapshot',
+							schemaVersion: 1,
+							snapshotId,
+							asOf: asOf.toISOString(),
+							criteria: {
+								channel: dto.channel,
+								audience: dto.audience
+							}
+						},
+						() => clientClosed
 					);
-					if (!rows.length) break;
 
-					for (const row of rows) {
-						this.assertConnected(request, response);
-						const destination = this.normalizeDestination(
+					const hash = createHash('sha256');
+					let cursor: string | null = null;
+					let totalCount = 0;
+
+					for (;;) {
+						this.assertConnected(request, response, clientClosed);
+						const rows = await this.getDestinations(
+							transaction,
 							dto.channel,
-							row.destination
+							dto.audience,
+							asOf,
+							cursor,
+							chunkSize,
+							billingOwner
 						);
-						if (!destination || destination === cursor) continue;
-						hash.update(`${dto.channel}\u0000${destination}\n`, 'utf8');
-						await this.writeLine(response, {
-							type: 'recipient',
-							destination
-						});
-						cursor = destination;
-						totalCount += 1;
+						if (!rows.length) break;
+
+						for (const row of rows) {
+							this.assertConnected(request, response, clientClosed);
+							const destination = this.normalizeDestination(
+								dto.channel,
+								row.destination
+							);
+							if (!destination || destination === cursor) continue;
+							hash.update(`${dto.channel}\u0000${destination}\n`, 'utf8');
+							await this.writeLine(
+								response,
+								{
+									type: 'recipient',
+									destination
+								},
+								() => clientClosed
+							);
+							cursor = destination;
+							totalCount += 1;
+						}
+
+						if (rows.length < chunkSize) break;
 					}
 
-					if (rows.length < chunkSize) break;
+					await this.writeLine(
+						response,
+						{
+							type: 'complete',
+							snapshotId,
+							totalCount,
+							sha256: hash.digest('hex')
+						},
+						() => clientClosed
+					);
+				},
+				{
+					isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+					maxWait: 5000,
+					timeout
 				}
-
-				await this.writeLine(response, {
-					type: 'complete',
-					snapshotId,
-					totalCount,
-					sha256: hash.digest('hex')
-				});
-			},
-			{
-				isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
-				maxWait: 5000,
-				timeout
-			}
-		);
+			);
+		} finally {
+			response.off('close', onClientClose);
+		}
 	}
 
 	private getDestinations(
@@ -112,7 +139,8 @@ export class CampaignsAudienceExportService {
 		audience: CampaignsAudience,
 		asOf: Date,
 		cursor: string | null,
-		limit: number
+		limit: number,
+		billingOwner: boolean
 	): Promise<DestinationRow[]> {
 		const cursorFilter = cursor
 			? Prisma.sql`AND "destination" > ${cursor}`
@@ -122,7 +150,11 @@ export class CampaignsAudienceExportService {
 				? Prisma.sql`
 					AND EXISTS (
 						SELECT 1
-						FROM "subscriptions" AS "subscription"
+						FROM ${
+							billingOwner
+								? Prisma.raw('"billing_subscription_read_projections"')
+								: Prisma.raw('"subscriptions"')
+						} AS "subscription"
 						WHERE "subscription"."user_id" = "recipient"."user_id"
 							AND "subscription"."status" = 'ACTIVE'::"SubscriptionStatus"
 							AND (
@@ -196,8 +228,12 @@ export class CampaignsAudienceExportService {
 
 	private async writeLine(
 		response: Response,
-		value: Record<string, unknown>
+		value: Record<string, unknown>,
+		isClientClosed: () => boolean
 	): Promise<void> {
+		if (isClientClosed() || response.destroyed || response.writableEnded) {
+			throw new Error('Campaigns audience export client disconnected');
+		}
 		if (response.write(`${JSON.stringify(value)}\n`)) return;
 		await new Promise<void>((resolve, reject) => {
 			const cleanup = () => {
@@ -221,11 +257,27 @@ export class CampaignsAudienceExportService {
 			response.once('drain', onDrain);
 			response.once('close', onClose);
 			response.once('error', onError);
+			if (
+				isClientClosed() ||
+				response.destroyed ||
+				response.writableEnded
+			) {
+				onClose();
+			}
 		});
 	}
 
-	private assertConnected(request: Request, response: Response): void {
-		if (request.aborted || response.destroyed || response.writableEnded) {
+	private assertConnected(
+		request: Request,
+		response: Response,
+		clientClosed: boolean
+	): void {
+		if (
+			clientClosed ||
+			request.aborted ||
+			response.destroyed ||
+			response.writableEnded
+		) {
 			throw new Error('Campaigns audience export client disconnected');
 		}
 	}

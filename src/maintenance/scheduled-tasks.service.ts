@@ -1,4 +1,5 @@
 import {
+	BILLING_DATABASE_BACKUP_DELAY_MINUTES,
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 	DatabaseBackupInput,
 	DatabaseBackupTarget,
@@ -166,6 +167,10 @@ export class ScheduledTasksService {
 			created: boolean;
 			job: ScheduledJobRunView;
 		};
+		billing: {
+			created: boolean;
+			job: ScheduledJobRunView;
+		};
 	} | null> {
 		const settings = await this.getSettings();
 		if (!settings.databaseBackupEnabled) return null;
@@ -194,6 +199,10 @@ export class ScheduledTasksService {
 		const widgetsScheduledFor = new Date(
 			scheduledFor.getTime() +
 				WIDGETS_DATABASE_BACKUP_DELAY_MINUTES * 60_000
+		);
+		const billingScheduledFor = new Date(
+			scheduledFor.getTime() +
+				BILLING_DATABASE_BACKUP_DELAY_MINUTES * 60_000
 		);
 
 		return this.prisma.$transaction(
@@ -274,6 +283,20 @@ export class ScheduledTasksService {
 						availableAt: widgetsScheduledFor
 					},
 					this.getEventForType(SCHEDULED_JOB_TYPES.WIDGETS_DATABASE_BACKUP)
+				),
+				billing: await this.scheduledJobs.enqueueUniqueInTransaction(
+					transaction,
+					{
+						jobType: SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP,
+						scheduleKey: period.key,
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						scheduledFor: billingScheduledFor,
+						periodStart: period.start,
+						periodEnd: period.end,
+						input: input as unknown as Prisma.InputJsonObject,
+						availableAt: billingScheduledFor
+					},
+					this.getEventForType(SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP)
 				)
 			}),
 			{ timeout: 10_000 }
@@ -378,6 +401,8 @@ export class ScheduledTasksService {
 				return SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP;
 			case 'widgets':
 				return SCHEDULED_JOB_TYPES.WIDGETS_DATABASE_BACKUP;
+			case 'billing':
+				return SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP;
 		}
 	}
 

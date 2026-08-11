@@ -1,4 +1,5 @@
 import { AuthModule } from '@/auth/auth.module';
+import { BillingInternalModule } from '@/billing-boundary/billing-internal.module';
 import { AdminAlertsModule } from '@/admin-alerts/admin-alerts.module';
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { AffiliateModule } from '@/affiliate/affiliate.module';
@@ -39,6 +40,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 			inject: [ConfigService, SiteSettingsService]
 		}),
 		AuthModule,
+		BillingInternalModule,
 		UserModule,
 		FileModule,
 		PaymentModule,

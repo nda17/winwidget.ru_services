@@ -20,7 +20,7 @@ const createSettingsPrisma = (
 	dailySummaryOwner: 'CORE' | 'REPORTING',
 	dailySummaryPolicyReservationTime = dailySummaryOwner === 'CORE'
 		? '01:50'
-		: '03:00',
+		: '03:15',
 	dailySummaryPolicyPendingTime: string | null = null
 ) => {
 	const upsert = jest
@@ -94,6 +94,7 @@ describe('TelegramBotService webhook URLs', () => {
 		expect((service as any).addMinutesToTime('23:55', 15)).toBe('00:10');
 		expect((service as any).addMinutesToTime('23:55', 45)).toBe('00:40');
 		expect((service as any).addMinutesToTime('23:55', 60)).toBe('00:55');
+		expect((service as any).addMinutesToTime('23:55', 75)).toBe('01:10');
 	});
 
 	it('exposes the delayed Widgets backup schedule in settings', () => {
@@ -104,7 +105,10 @@ describe('TelegramBotService webhook URLs', () => {
 		).toMatchObject({
 			widgetsDatabaseBackupDelayMinutes: 60,
 			widgetsDatabaseBackupTime: '02:45',
-			widgetsDatabaseBackupTimeLabel: '02:45 МСК'
+			widgetsDatabaseBackupTimeLabel: '02:45 МСК',
+			billingDatabaseBackupDelayMinutes: 75,
+			billingDatabaseBackupTime: '03:00',
+			billingDatabaseBackupTimeLabel: '03:00 МСК'
 		});
 	});
 

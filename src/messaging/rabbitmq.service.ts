@@ -36,9 +36,11 @@ import { hostname } from 'node:os';
 const DEFAULT_MAX_MESSAGE_BYTES = 256 * 1024;
 
 interface ConsumerRegistration {
+	kind: MessagingKind;
 	setup: SetupFunc;
 	consumerTag: string | null;
 	channel: ConfirmChannel | null;
+	active: boolean;
 }
 
 export interface DeadLetterClassificationMetadata {
@@ -134,7 +136,8 @@ export class RabbitMqService
 		return (
 			this.consumerRegistrations.size > 0 &&
 			[...this.consumerRegistrations].every(
-				registration => registration.consumerTag !== null
+				registration =>
+					registration.active && registration.consumerTag !== null
 			)
 		);
 	}
@@ -372,6 +375,7 @@ export class RabbitMqService
 		prefetch: number
 	): Promise<void> {
 		await this.consumeQueue(
+			kind,
 			MESSAGING_QUEUE_NAMES[kind],
 			`${kind} integration`,
 			handler,
@@ -385,6 +389,7 @@ export class RabbitMqService
 		prefetch: number
 	): Promise<void> {
 		await this.consumeQueue(
+			kind,
 			`${MESSAGING_QUEUE_NAMES[kind]}.dead-letter`,
 			`${kind} dead-letter`,
 			handler,
@@ -393,6 +398,7 @@ export class RabbitMqService
 	}
 
 	private async consumeQueue(
+		kind: MessagingKind,
 		queue: string,
 		consumerName: string,
 		handler: (message: ConsumeMessage) => Promise<void>,
@@ -403,9 +409,12 @@ export class RabbitMqService
 		}
 
 		const registration: ConsumerRegistration = {
+			kind,
 			consumerTag: null,
 			channel: null,
+			active: true,
 			setup: async channel => {
+				if (!registration.active) return;
 				registration.consumerTag = null;
 				const deliveryChannel = channel as ConfirmChannel;
 				registration.channel = deliveryChannel;
@@ -421,11 +430,13 @@ export class RabbitMqService
 					message => {
 						if (!message) {
 							registration.consumerTag = null;
-							this.requestConsumerRecovery(consumerName);
+							if (registration.active) {
+								this.requestConsumerRecovery(consumerName);
+							}
 							return;
 						}
 						this.deliveryChannels.set(message, deliveryChannel);
-						if (this.consumersStopping) {
+						if (this.consumersStopping || !registration.active) {
 							return;
 						}
 						void runWithMessageContext(message, () =>
@@ -486,8 +497,26 @@ export class RabbitMqService
 
 	async cancelConsumers(): Promise<void> {
 		this.consumersStopping = true;
-		const registrations = [...this.consumerRegistrations];
-		this.consumerRegistrations.clear();
+		await this.cancelRegistrations([...this.consumerRegistrations]);
+	}
+
+	async cancelConsumersForKinds(
+		kinds: readonly MessagingKind[]
+	): Promise<void> {
+		const selected = new Set(kinds);
+		await this.cancelRegistrations(
+			[...this.consumerRegistrations].filter(registration =>
+				selected.has(registration.kind)
+			)
+		);
+	}
+
+	private async cancelRegistrations(
+		registrations: ConsumerRegistration[]
+	): Promise<void> {
+		for (const registration of registrations) {
+			registration.active = false;
+		}
 		const results = await Promise.allSettled(
 			registrations.map(registration =>
 				this.channel.removeSetup(registration.setup, async channel => {
@@ -504,6 +533,11 @@ export class RabbitMqService
 			(result): result is PromiseRejectedResult =>
 				result.status === 'rejected'
 		);
+		results.forEach((result, index) => {
+			if (result.status === 'fulfilled') {
+				this.consumerRegistrations.delete(registrations[index]);
+			}
+		});
 		if (failures.length) {
 			throw new AggregateError(
 				failures.map(result => result.reason),

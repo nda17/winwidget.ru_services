@@ -1,5 +1,5 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
-import { AffiliateModule } from '@/affiliate/affiliate.module';
+import { BillingBoundaryModule } from '@/billing-boundary/billing-boundary.module';
 import { AccessJwtService } from '@/auth/access-jwt.service';
 import { AuthController } from '@/auth/auth.controller';
 import { AuthService } from '@/auth/auth.service';
@@ -38,7 +38,7 @@ import { JwtModule } from '@nestjs/jwt';
 		EmailModule,
 		SmsModule,
 		SiteSettingsModule,
-		AffiliateModule,
+		BillingBoundaryModule,
 		AdminEventLogModule
 	],
 	controllers: [

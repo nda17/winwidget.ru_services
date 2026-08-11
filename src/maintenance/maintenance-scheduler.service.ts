@@ -93,6 +93,11 @@ export class MaintenanceSchedulerService
 						`Daily Widgets database backup scheduled period=${period.key} jobId=${backups.widgets.job.id}`
 					);
 				}
+				if (backups?.billing.created) {
+					this.logger.log(
+						`Daily Billing database backup scheduled period=${period.key} jobId=${backups.billing.job.id}`
+					);
+				}
 			}
 		} catch (error) {
 			this.logger.error(

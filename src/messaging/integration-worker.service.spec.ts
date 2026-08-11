@@ -13,6 +13,16 @@ import { IntegrationDeliveryReceiptStatus, Prisma } from '@prisma/client';
 import type { ConsumeMessage } from 'amqplib';
 
 describe('IntegrationWorkerService', () => {
+	const services: IntegrationWorkerService[] = [];
+
+	afterEach(async () => {
+		await Promise.all(
+			services
+				.splice(0)
+				.map(service => service.beforeApplicationShutdown())
+		);
+	});
+
 	const uniqueConstraintError = () =>
 		new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
 			code: 'P2002',
@@ -29,7 +39,8 @@ describe('IntegrationWorkerService', () => {
 			nack: jest.fn(),
 			publishRetry: jest.fn().mockResolvedValue(undefined),
 			publishDeadLetter: jest.fn().mockResolvedValue(undefined),
-			cancelConsumers: jest.fn().mockResolvedValue(undefined)
+			cancelConsumers: jest.fn().mockResolvedValue(undefined),
+			cancelConsumersForKinds: jest.fn().mockResolvedValue(undefined)
 		} as unknown as RabbitMqService;
 		const delivery = {
 			deliver: jest.fn().mockResolvedValue(undefined),
@@ -44,6 +55,16 @@ describe('IntegrationWorkerService', () => {
 		const adminEventLog = {
 			recordInTransaction: jest.fn().mockResolvedValue({})
 		} as unknown as AdminEventLogService;
+		const billingState = {
+			assertLegacyConsumerEnabled: jest.fn().mockResolvedValue(undefined),
+			isLegacyConsumerEnabled: jest.fn().mockResolvedValue(true),
+			assertProjectionConsumerEnabled: jest
+				.fn()
+				.mockResolvedValue(undefined)
+		};
+		const billingProjection = {
+			apply: jest.fn().mockResolvedValue(undefined)
+		};
 		const failureUpsert = jest.fn().mockResolvedValue({});
 		const receiptUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const receiptDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
@@ -84,20 +105,25 @@ describe('IntegrationWorkerService', () => {
 			$transaction: jest.fn(callback => callback(transaction))
 		} as unknown as PrismaService;
 
+		const service = new IntegrationWorkerService(
+			rabbitMq,
+			delivery,
+			configService,
+			prisma,
+			heartbeat,
+			adminEventLog,
+			billingState as never,
+			billingProjection as never
+		);
+		services.push(service);
 		return {
-			service: new IntegrationWorkerService(
-				rabbitMq,
-				delivery,
-				configService,
-				prisma,
-				heartbeat,
-				adminEventLog
-			),
+			service,
 			rabbitMq,
 			delivery,
 			prisma,
 			transaction,
-			adminEventLog
+			adminEventLog,
+			billingState
 		};
 	};
 
@@ -120,6 +146,31 @@ describe('IntegrationWorkerService', () => {
 			properties: {
 				messageId: '11111111-1111-4111-8111-111111111111',
 				type: 'notification.telegram.destination-unavailable.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
+	const createBillingOutcomeMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'notification.delivery.outcome.v1',
+					sourceEventId: '22222222-2222-4222-8222-222222222222',
+					sourceKind: 'subscription-expiry-email',
+					reference: {
+						type: 'subscription-expiry-reminder',
+						id: '33333333-3333-4333-8333-333333333333'
+					},
+					status: 'DELIVERED',
+					failure: null,
+					occurredAt: '2026-08-11T00:00:00.000Z'
+				})
+			),
+			fields: { routingKey: 'notification.delivery.outcome.v1' },
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'notification.delivery.outcome.v1',
 				headers: {}
 			}
 		}) as ConsumeMessage;
@@ -210,6 +261,42 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createBillingAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-08-11T01:00:00.000Z',
+					correlationId: 'request:billing-payment-check-42',
+					actorId: 'admin-user-id',
+					section: 'PAYMENTS',
+					action: 'PAYMENT_MANUAL_CHECK',
+					description: 'Проверен статус платежа',
+					entity: {
+						type: 'payment',
+						id: 'payment-1',
+						label: 'payment-1',
+						targetUserId: 'owner-1'
+					},
+					metadata: {
+						providerStatus: 'succeeded',
+						requestIp: '203.0.113.7',
+						requestUserAgent: 'billing-contract-agent'
+					}
+				})
+			),
+			fields: {
+				routingKey: 'admin.audit.billing.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	const createWidgetsAuditMessage = (): ConsumeMessage =>
 		({
 			content: Buffer.from(
@@ -291,6 +378,11 @@ describe('IntegrationWorkerService', () => {
 			'campaign-admin-audit',
 			'reporting-admin-audit',
 			'widgets-admin-audit',
+			'billing-admin-audit',
+			'billing-payment-projection',
+			'billing-subscription-projection',
+			'billing-affiliate-projection',
+			'billing-settings-projection',
 			'auto-renewal'
 		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
@@ -302,6 +394,175 @@ describe('IntegrationWorkerService', () => {
 		expect(
 			(rabbitMq.consume as jest.Mock).mock.calls.map(call => call[0])
 		).toEqual(MONOLITH_INTEGRATION_KINDS);
+	});
+
+	it('detaches and reattaches only auto-renewal consumers with the ownership fence', async () => {
+		const { service, rabbitMq, billingState } = createService();
+		await service.onModuleInit();
+
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockResolvedValue(
+			false
+		);
+		await (service as any).reconcileBillingOwnedConsumers();
+
+		expect(rabbitMq.cancelConsumersForKinds).toHaveBeenCalledWith([
+			'auto-renewal'
+		]);
+		const consumeCallsBeforeReattach = (rabbitMq.consume as jest.Mock).mock
+			.calls.length;
+
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockResolvedValue(
+			true
+		);
+		await (service as any).reconcileBillingOwnedConsumers();
+
+		expect(rabbitMq.consume).toHaveBeenCalledTimes(
+			consumeCallsBeforeReattach + 1
+		);
+		expect(rabbitMq.consume).toHaveBeenLastCalledWith(
+			'auto-renewal',
+			expect.any(Function),
+			10
+		);
+	});
+
+	it('does not attach auto-renewal main or DLQ consumers when startup is frozen', async () => {
+		const { service, rabbitMq, billingState } = createService();
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockResolvedValue(
+			false
+		);
+
+		await service.onModuleInit();
+
+		expect(
+			(rabbitMq.consume as jest.Mock).mock.calls.map(call => call[0])
+		).not.toContain('auto-renewal');
+		expect(
+			(rabbitMq.consumeDeadLetter as jest.Mock).mock.calls.map(
+				call => call[0]
+			)
+		).not.toContain('auto-renewal');
+		expect(
+			(rabbitMq.consume as jest.Mock).mock.calls.map(call => call[0])
+		).toEqual(
+			MONOLITH_INTEGRATION_KINDS.filter(kind => kind !== 'auto-renewal')
+		);
+	});
+
+	it('keeps auto-renewal marked attached when targeted cancellation fails', async () => {
+		const { service, rabbitMq, billingState } = createService();
+		await service.onModuleInit();
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockResolvedValue(
+			false
+		);
+		(rabbitMq.cancelConsumersForKinds as jest.Mock).mockRejectedValueOnce(
+			new Error('cancel failed')
+		);
+
+		await expect(
+			(service as any).reconcileBillingOwnedConsumers()
+		).rejects.toThrow('cancel failed');
+
+		expect((service as any).attachedKinds.has('auto-renewal')).toBe(true);
+	});
+
+	it('serializes overlapping ownership reconciliation ticks', async () => {
+		const { service, billingState } = createService();
+		let resolveState!: (value: boolean) => void;
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockReturnValue(
+			new Promise<boolean>(resolve => {
+				resolveState = resolve;
+			})
+		);
+		(service as any).enabledKinds = ['auto-renewal'];
+
+		const first = (
+			service as any
+		).scheduleBillingOwnershipReconciliation();
+		const second = (
+			service as any
+		).scheduleBillingOwnershipReconciliation();
+
+		expect(second).toBe(first);
+		resolveState(false);
+		await first;
+		expect(billingState.isLegacyConsumerEnabled).toHaveBeenCalledTimes(1);
+	});
+
+	it('acknowledges a Billing-owned outcome before any Core receipt claim after the fence', async () => {
+		const { service, rabbitMq, delivery, prisma, billingState } =
+			createService();
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockResolvedValue(
+			false
+		);
+
+		await (service as any).handle(
+			'notification-delivery-outcome',
+			createBillingOutcomeMessage()
+		);
+
+		expect(
+			prisma.integrationDeliveryReceipt.create
+		).not.toHaveBeenCalled();
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('returns auto-renewal to RabbitMQ before any Core receipt claim after the fence', async () => {
+		const { service, rabbitMq, delivery, prisma, billingState } =
+			createService();
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockResolvedValue(
+			false
+		);
+		const message = {
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'payment.auto-renewal.charge.requested.v1',
+					autoRenewalId: 'auto-renewal-1',
+					paymentId: 'payment-1',
+					cycleKey: 'cycle-1',
+					scheduledFor: '2026-08-11T00:00:00.000Z'
+				})
+			),
+			fields: {
+				routingKey: 'payment.auto-renewal.charge.requested.v1'
+			},
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'payment.auto-renewal.charge.requested.v1',
+				headers: {}
+			}
+		} as ConsumeMessage;
+
+		await (service as any).handle('auto-renewal', message);
+
+		expect(
+			prisma.integrationDeliveryReceipt.create
+		).not.toHaveBeenCalled();
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.nack).toHaveBeenCalledWith(message, true);
+		expect(rabbitMq.ack).not.toHaveBeenCalled();
+	});
+
+	it('does not fence a non-Billing payload on the shared outcome kind', async () => {
+		const { service, billingState } = createService();
+		(billingState.isLegacyConsumerEnabled as jest.Mock).mockResolvedValue(
+			false
+		);
+		const unrelatedPayload = JSON.parse(
+			createDestinationUnavailableMessage().content.toString('utf8')
+		);
+
+		await expect(
+			(service as any).relinquishBillingOwnedMessageBeforeClaim(
+				'notification-delivery-outcome',
+				unrelatedPayload,
+				createDestinationUnavailableMessage()
+			)
+		).resolves.toBe(false);
+		expect(billingState.isLegacyConsumerEnabled).not.toHaveBeenCalled();
 	});
 
 	it('can restrict consumers to explicit Core-owned kinds', async () => {
@@ -463,6 +724,77 @@ describe('IntegrationWorkerService', () => {
 				data: expect.objectContaining({
 					status: IntegrationDeliveryReceiptStatus.DELIVERED
 				})
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
+	it('writes a Billing audit and its delivered receipt atomically', async () => {
+		const {
+			service,
+			rabbitMq,
+			delivery,
+			transaction,
+			adminEventLog,
+			billingState
+		} = createService({
+			INTEGRATION_WORKER_KINDS: 'billing-admin-audit'
+		});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createBillingAuditMessage();
+
+		await handler(message);
+
+		expect(
+			billingState.assertProjectionConsumerEnabled
+		).toHaveBeenCalledTimes(1);
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			{
+				adminId: 'admin-user-id',
+				section: 'PAYMENTS',
+				action: 'PAYMENT_MANUAL_CHECK',
+				description: 'Проверен статус платежа',
+				entityType: 'payment',
+				entityId: 'payment-1',
+				entityLabel: 'payment-1',
+				targetUserId: 'owner-1',
+				ip: '203.0.113.7',
+				userAgent: 'billing-contract-agent',
+				metadata: {
+					eventId: '11111111-1111-4111-8111-111111111111',
+					correlationId: 'request:billing-payment-check-42',
+					providerStatus: 'succeeded'
+				}
+			}
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					eventId: '11111111-1111-4111-8111-111111111111',
+					integration: 'billing-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(
+			transaction.integrationDeliveryFailure.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					eventId: '11111111-1111-4111-8111-111111111111',
+					integration: 'billing-admin-audit',
+					resolvedAt: null
+				}
 			})
 		);
 		expect(delivery.deliver).not.toHaveBeenCalled();

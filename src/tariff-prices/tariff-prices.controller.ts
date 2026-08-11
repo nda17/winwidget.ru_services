@@ -1,6 +1,8 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
+import { BillingLegacyRouteGuard } from '@/billing-boundary/billing-legacy-route.guard';
+import { BillingLegacyWriteFenceInterceptor } from '@/billing-boundary/billing-legacy-write-fence.interceptor';
 import { UpdateTariffPricesDto } from '@/tariff-prices/dto/update-tariff-prices.dto';
 import { TariffPricesService } from '@/tariff-prices/tariff-prices.service';
 import {
@@ -11,12 +13,16 @@ import {
 	Patch,
 	Req,
 	UsePipes,
+	UseGuards,
+	UseInterceptors,
 	ValidationPipe
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('/tariff-prices')
+@UseGuards(BillingLegacyRouteGuard)
+@UseInterceptors(BillingLegacyWriteFenceInterceptor)
 export class TariffPricesController {
 	constructor(
 		private readonly tariffPricesService: TariffPricesService,

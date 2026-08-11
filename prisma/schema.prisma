@@ -373,6 +373,142 @@ model ReportingProducerState {
   @@map("reporting_producer_state")
 }
 
+model BillingCoreState {
+  id                        String               @id @default("singleton")
+  ownership                 BillingCoreOwnership @default(CORE)
+  sourceProducersEnabled    Boolean              @default(true) @map("source_producers_enabled")
+  legacyRoutesEnabled       Boolean              @default(true) @map("legacy_routes_enabled")
+  schedulerEnabled          Boolean              @default(true) @map("scheduler_enabled")
+  legacyConsumerEnabled     Boolean              @default(true) @map("legacy_consumer_enabled")
+  projectionConsumerEnabled Boolean              @default(true) @map("projection_consumer_enabled")
+  generation                BigInt               @default(0)
+  preparedRevision          String?              @map("prepared_revision")
+  ownershipRevision         String?              @map("ownership_revision")
+  activatedAt               DateTime?            @map("activated_at")
+  updatedAt                 DateTime             @updatedAt @map("updated_at")
+
+  @@map("billing_core_state")
+}
+
+model BillingSourceAggregateVersion {
+  aggregateType  String   @map("aggregate_type")
+  aggregateId    String   @map("aggregate_id")
+  version        BigInt
+  sourceSequence BigInt   @map("source_sequence")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([aggregateType, aggregateId])
+  @@index([sourceSequence], map: "billing_source_aggregate_versions_source_sequence_idx")
+  @@map("billing_source_aggregate_versions")
+}
+
+model BillingReadProjectionVersion {
+  aggregateType  String   @map("aggregate_type")
+  aggregateId    String   @map("aggregate_id")
+  version        BigInt
+  sourceSequence BigInt?  @map("source_sequence")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([aggregateType, aggregateId])
+  @@index([sourceSequence], map: "billing_read_projection_versions_source_sequence_idx")
+  @@map("billing_read_projection_versions")
+}
+
+model BillingSubscriptionReadProjection {
+  id              String             @id
+  userId          String             @unique @map("user_id")
+  plan            Plan
+  billingPeriod   BillingPeriod?     @map("billing_period")
+  status          SubscriptionStatus
+  startsAt        DateTime           @map("starts_at")
+  expiresAt       DateTime?          @map("expires_at")
+  leadsThisPeriod Int                @default(0) @map("leads_this_period")
+  periodResetsAt  DateTime?          @map("period_resets_at")
+  createdAt       DateTime           @map("created_at")
+  updatedAt       DateTime           @map("updated_at")
+  sourceVersion   BigInt             @map("source_version")
+  sourceSequence  BigInt?            @map("source_sequence")
+  projectedAt     DateTime           @default(now()) @map("projected_at")
+
+  @@index([status, expiresAt], map: "billing_subscription_read_status_expires_idx")
+  @@index([userId, status, expiresAt], map: "billing_subscription_read_user_status_idx")
+  @@map("billing_subscription_read_projections")
+}
+
+model BillingPaymentReadProjection {
+  id             String         @id
+  userId         String         @map("user_id")
+  yookassaId     String?        @map("yookassa_id")
+  status         PaymentStatus
+  amount         String
+  plan           Plan?
+  billingPeriod  BillingPeriod? @map("billing_period")
+  createdAt      DateTime       @map("created_at")
+  updatedAt      DateTime       @map("updated_at")
+  sourceVersion  BigInt         @map("source_version")
+  sourceSequence BigInt?        @map("source_sequence")
+  projectedAt    DateTime       @default(now()) @map("projected_at")
+
+  @@index([userId, createdAt], map: "billing_payment_read_user_created_idx")
+  @@index([userId, status], map: "billing_payment_read_user_status_idx")
+  @@index([status, createdAt], map: "billing_payment_read_status_created_idx")
+  @@map("billing_payment_read_projections")
+}
+
+model BillingAffiliateReadProjection {
+  id             String                  @id
+  referrerId     String                  @map("referrer_id")
+  referredUserId String                  @unique @map("referred_user_id")
+  firstPaymentId String?                 @map("first_payment_id")
+  status         AffiliateReferralStatus
+  cashbackAmount Int?                    @map("cashback_amount")
+  availableAt    DateTime?               @map("available_at")
+  cancelledAt    DateTime?               @map("cancelled_at")
+  updatedAt      DateTime                @map("updated_at")
+  sourceVersion  BigInt                  @map("source_version")
+  sourceSequence BigInt?                 @map("source_sequence")
+  projectedAt    DateTime                @default(now()) @map("projected_at")
+
+  @@index([referrerId, status], map: "billing_affiliate_read_referrer_status_idx")
+  @@index([status, availableAt], map: "billing_affiliate_read_status_available_idx")
+  @@index([firstPaymentId], map: "billing_affiliate_read_first_payment_idx")
+  @@map("billing_affiliate_read_projections")
+}
+
+model BillingSettingsReadProjection {
+  id                          String   @id @default("singleton")
+  paymentEnabled              Boolean  @map("payment_enabled")
+  autoRenewalSignupEnabled    Boolean  @map("auto_renewal_signup_enabled")
+  autoRenewalChargesEnabled   Boolean  @map("auto_renewal_charges_enabled")
+  autoRenewalChargesEnabledAt DateTime @map("auto_renewal_charges_enabled_at")
+  affiliateProgramEnabled     Boolean  @map("affiliate_program_enabled")
+  affiliateCashbackPercent    Int      @map("affiliate_cashback_percent")
+  updatedAt                   DateTime @map("updated_at")
+  sourceVersion               BigInt   @map("source_version")
+  sourceSequence              BigInt?  @map("source_sequence")
+  projectedAt                 DateTime @default(now()) @map("projected_at")
+
+  @@map("billing_settings_read_projection")
+}
+
+model BillingSettingsComposition {
+  id                     String                           @id @db.Uuid
+  status                 BillingSettingsCompositionStatus @default(PENDING)
+  corePatch              Json                             @map("core_patch")
+  billingPatch           Json                             @map("billing_patch")
+  actorId                String                           @map("actor_id")
+  correlationId          String?                          @map("correlation_id")
+  appliedBillingSettings Json?                            @map("applied_billing_settings")
+  attempts               Int                              @default(0)
+  lastError              String?                          @map("last_error") @db.Text
+  createdAt              DateTime                         @default(now()) @map("created_at")
+  updatedAt              DateTime                         @updatedAt @map("updated_at")
+  completedAt            DateTime?                        @map("completed_at")
+
+  @@index([status, updatedAt], map: "billing_settings_compositions_status_updated_idx")
+  @@map("billing_settings_compositions")
+}
+
 model ReportingProjectionVersion {
   aggregateType  String   @map("aggregate_type")
   aggregateId    String   @map("aggregate_id")
@@ -596,6 +732,17 @@ enum OutboxEventStatus {
   PUBLISHING
   PUBLISHED
   FAILED
+}
+
+enum BillingCoreOwnership {
+  CORE
+  BILLING
+}
+
+enum BillingSettingsCompositionStatus {
+  PENDING
+  BILLING_APPLIED
+  COMPLETED
 }
 
 enum ScheduledJobRunStatus {

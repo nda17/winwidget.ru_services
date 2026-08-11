@@ -86,6 +86,9 @@ x-api-env: &api-env
   REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
   WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
   WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
+  BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
+  BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
+  BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
   DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
   DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
   DATABASE_RESTORE_PRODUCTION_ENABLED: ${DATABASE_RESTORE_PRODUCTION_ENABLED:-false}
@@ -229,6 +232,23 @@ x-widgets-env: &widgets-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   MESSAGING_SERVICE_NAME: widgets-service
 
+x-billing-env: &billing-env
+  APP_REVISION: ${BILLING_REVISION:?BILLING_REVISION is required}
+  NODE_ENV: production
+  MODE: ${MODE:-production}
+  BILLING_DATABASE_URL: ${BILLING_DATABASE_URL:?BILLING_DATABASE_URL is required}
+  BILLING_LISTEN_HOST: ${BILLING_LISTEN_HOST:-127.0.0.1}
+  BILLING_API_PORT: ${BILLING_API_PORT:-4800}
+  BILLING_SCHEDULER_PORT: ${BILLING_SCHEDULER_PORT:-4801}
+  BILLING_WORKER_PORT: ${BILLING_WORKER_PORT:-4802}
+  BILLING_OUTBOX_PUBLISHER_PORT: ${BILLING_OUTBOX_PUBLISHER_PORT:-4803}
+  BILLING_PREFETCH: ${BILLING_PREFETCH:-10}
+  BILLING_OUTBOX_BATCH_SIZE: ${BILLING_OUTBOX_BATCH_SIZE:-50}
+  BILLING_OUTBOX_POLL_INTERVAL_MS: ${BILLING_OUTBOX_POLL_INTERVAL_MS:-1000}
+  BILLING_OUTBOX_RETENTION_DAYS: ${BILLING_OUTBOX_RETENTION_DAYS:-7}
+  BILLING_RECEIPT_RETENTION_DAYS: ${BILLING_RECEIPT_RETENTION_DAYS:-90}
+  BILLING_FAILURE_DETAIL_RETENTION_DAYS: ${BILLING_FAILURE_DETAIL_RETENTION_DAYS:-30}
+
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
   APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
@@ -238,6 +258,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   CAMPAIGNS_BACKUP_URL: ${CAMPAIGNS_BACKUP_URL:?CAMPAIGNS_BACKUP_URL is required}
   REPORTING_BACKUP_URL: ${REPORTING_BACKUP_URL:?REPORTING_BACKUP_URL is required}
   WIDGETS_BACKUP_URL: ${WIDGETS_BACKUP_URL:?WIDGETS_BACKUP_URL is required}
+  BILLING_BACKUP_URL: ${BILLING_BACKUP_URL:?BILLING_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
@@ -264,11 +285,13 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_CAMPAIGNS_PORT: ${CAMPAIGNS_POSTGRES_PORT:?CAMPAIGNS_POSTGRES_PORT is required}
   DATABASE_RESTORE_REPORTING_PORT: ${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}
   DATABASE_RESTORE_WIDGETS_PORT: ${WIDGETS_POSTGRES_PORT:?WIDGETS_POSTGRES_PORT is required}
+  DATABASE_RESTORE_BILLING_PORT: ${BILLING_POSTGRES_PORT:?BILLING_POSTGRES_PORT is required}
   DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/core-admin-password
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
   DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
   DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/reporting-admin-password
   DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/widgets-admin-password
+  DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/billing-admin-password
 
 x-outbox-publisher-env: &outbox-publisher-env
   <<: *runtime-env
@@ -305,6 +328,11 @@ x-widgets-migration-env: &widgets-migration-env
   APP_REVISION: ${WIDGETS_REVISION:?WIDGETS_REVISION is required}
   NODE_ENV: production
   WIDGETS_DATABASE_URL: ${WIDGETS_MIGRATION_DATABASE_URL:?WIDGETS_MIGRATION_DATABASE_URL is required}
+
+x-billing-migration-env: &billing-migration-env
+  APP_REVISION: ${BILLING_REVISION:?BILLING_REVISION is required}
+  NODE_ENV: production
+  BILLING_DATABASE_URL: ${BILLING_MIGRATION_DATABASE_URL:?BILLING_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -475,6 +503,50 @@ services:
     mem_limit: ${WIDGETS_POSTGRES_MEMORY_LIMIT:-768m}
     mem_reservation: ${WIDGETS_POSTGRES_MEMORY_RESERVATION:-256m}
     cpus: ${WIDGETS_POSTGRES_CPUS:-1.0}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
+  billing-postgres:
+    image: ${BILLING_POSTGRES_IMAGE:?BILLING_POSTGRES_IMAGE is required}
+    profiles:
+      - billing-database
+    labels:
+      com.winwidget.owner: billing
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_billing
+      POSTGRES_USER: ${BILLING_POSTGRES_ADMIN_USER:?BILLING_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/billing-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${BILLING_POSTGRES_PORT:-55437}:5432'
+    volumes:
+      - winwidget-billing-postgres-data:/var/lib/postgresql
+    networks:
+      - billing-postgres
+    secrets:
+      - billing-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${BILLING_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${BILLING_POSTGRES_MEMORY_LIMIT:-768m}
+    mem_reservation: ${BILLING_POSTGRES_MEMORY_RESERVATION:-256m}
+    cpus: ${BILLING_POSTGRES_CPUS:-1.0}
     pids_limit: 200
     logging:
       driver: json-file
@@ -708,6 +780,166 @@ services:
         max-size: 10m
         max-file: '3'
 
+  billing-api:
+    image: ${BILLING_IMAGE:?BILLING_IMAGE is required}
+    build:
+      context: ../apps/billing
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${BILLING_REVISION:?BILLING_REVISION is required}
+    environment:
+      <<: *billing-env
+      BILLING_PROCESS_ROLE: api
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+      BILLING_CORE_INTERNAL_BASE_URL: ${BILLING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
+      BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
+      BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
+      WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
+      WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
+      WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-5000}
+    network_mode: host
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.BILLING_API_PORT||4800)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    mem_limit: ${BILLING_API_MEMORY_LIMIT:-512m}
+    mem_reservation: ${BILLING_API_MEMORY_RESERVATION:-128m}
+    cpus: ${BILLING_API_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  billing-scheduler:
+    image: ${BILLING_IMAGE:?BILLING_IMAGE is required}
+    environment:
+      <<: *billing-env
+      BILLING_PROCESS_ROLE: scheduler
+    network_mode: host
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.BILLING_SCHEDULER_PORT||4801)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${BILLING_SCHEDULER_MEMORY_LIMIT:-384m}
+    mem_reservation: ${BILLING_SCHEDULER_MEMORY_RESERVATION:-96m}
+    cpus: ${BILLING_SCHEDULER_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  billing-worker:
+    image: ${BILLING_IMAGE:?BILLING_IMAGE is required}
+    environment:
+      <<: *billing-env
+      BILLING_PROCESS_ROLE: worker
+      BILLING_CORE_INTERNAL_BASE_URL: ${BILLING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
+      BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
+      BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
+      YOOKASSA_PRODUCTION_SHOP_ID: ${YOOKASSA_PRODUCTION_SHOP_ID:?YOOKASSA_PRODUCTION_SHOP_ID is required}
+      YOOKASSA_PRODUCTION_SECRET_KEY: ${YOOKASSA_PRODUCTION_SECRET_KEY:?YOOKASSA_PRODUCTION_SECRET_KEY is required}
+      PAYMENT_METHOD_ENCRYPTION_KEY: ${PAYMENT_METHOD_ENCRYPTION_KEY:?PAYMENT_METHOD_ENCRYPTION_KEY is required}
+      RECAPTCHA_CLIENT_URL: ${RECAPTCHA_CLIENT_URL:?RECAPTCHA_CLIENT_URL is required}
+      RABBITMQ_URL: ${RABBITMQ_BILLING_WORKER_URL:?RABBITMQ_BILLING_WORKER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-billing-worker
+      RABBITMQ_ASSERT_TOPOLOGY: 'true'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: billing-worker
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.BILLING_WORKER_PORT||4802)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${BILLING_WORKER_MEMORY_LIMIT:-512m}
+    mem_reservation: ${BILLING_WORKER_MEMORY_RESERVATION:-128m}
+    cpus: ${BILLING_WORKER_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  billing-outbox-publisher:
+    image: ${BILLING_IMAGE:?BILLING_IMAGE is required}
+    environment:
+      <<: *billing-env
+      BILLING_PROCESS_ROLE: outbox-publisher
+      RABBITMQ_URL: ${RABBITMQ_BILLING_PUBLISHER_URL:?RABBITMQ_BILLING_PUBLISHER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-billing-outbox-publisher
+      RABBITMQ_ASSERT_TOPOLOGY: 'false'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: billing-outbox-publisher
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.BILLING_OUTBOX_PUBLISHER_PORT||4803)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${BILLING_OUTBOX_PUBLISHER_MEMORY_LIMIT:-384m}
+    mem_reservation: ${BILLING_OUTBOX_PUBLISHER_MEMORY_RESERVATION:-96m}
+    cpus: ${BILLING_OUTBOX_PUBLISHER_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -767,6 +999,8 @@ services:
         target: database-restore-reporting-admin-password
       - source: widgets-postgres-admin-password
         target: database-restore-widgets-admin-password
+      - source: billing-postgres-admin-password
+        target: database-restore-billing-admin-password
     tmpfs:
       - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -789,7 +1023,7 @@ services:
           'nestjs:nodejs',
           'node',
           '-e',
-          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["campaigns","core","notification-delivery","reporting","widgets"]''||fences.length!==0)process.exit(1)'
+          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","core","notification-delivery","reporting","widgets"]''||fences.length!==0)process.exit(1)'
         ]
       interval: 10s
       timeout: 5s
@@ -877,7 +1111,24 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  billing-migrate:
+    image: ${BILLING_IMAGE:?BILLING_IMAGE is required}
+    build:
+      context: ../apps/billing
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${BILLING_REVISION:?BILLING_REVISION is required}
+    profiles:
+      - billing-migration
+    environment: *billing-migration-env
+    network_mode: host
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
+  winwidget-billing-postgres-data:
+    external: true
+    name: ${BILLING_POSTGRES_DATA_VOLUME:?BILLING_POSTGRES_DATA_VOLUME must name the verified Billing PostgreSQL volume}
   winwidget-widgets-postgres-data:
     external: true
     name: ${WIDGETS_POSTGRES_DATA_VOLUME:?WIDGETS_POSTGRES_DATA_VOLUME must name the verified Widgets PostgreSQL volume}
@@ -895,6 +1146,13 @@ volumes:
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
 
 networks:
+  billing-postgres:
+    name: winwidget-billing-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: billing
+      com.winwidget.purpose: postgres-network
   widgets-postgres:
     name: winwidget-widgets-postgres
     driver: bridge
@@ -935,3 +1193,5 @@ secrets:
     file: ${NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE:?NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE is required}
   widgets-postgres-admin-password:
     file: ${WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE:?WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  billing-postgres-admin-password:
+    file: ${BILLING_POSTGRES_ADMIN_PASSWORD_FILE:?BILLING_POSTGRES_ADMIN_PASSWORD_FILE is required}

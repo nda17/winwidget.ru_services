@@ -1,5 +1,6 @@
 import { MessagingOperationalAlertService } from '@/messaging/messaging-operational-alert.service';
 import {
+	CORE_OWNED_MESSAGING_KINDS,
 	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES
 } from '@/messaging/messaging.constants';
@@ -9,6 +10,8 @@ import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-d
 import type { PrismaService } from '@/prisma.service';
 import type { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import type { ConfigService } from '@nestjs/config';
+import type { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
+import type { BillingMessagingClientService } from '@/messaging/billing-messaging-client.service';
 
 const createWidgetsOverview = () => ({
 	outbox: { PENDING: 0, PUBLISHING: 0, PUBLISHED: 0, FAILED: 0 },
@@ -98,6 +101,10 @@ describe('MessagingOperationalAlertService', () => {
 		notificationDelivery: Partial<NotificationDeliveryClientService>,
 		widgets: Partial<WidgetsDeliveryFailuresClientService> = {
 			getOverview: jest.fn().mockResolvedValue(createWidgetsOverview())
+		},
+		billing?: {
+			state: Partial<BillingCoreStateService>;
+			client: Partial<BillingMessagingClientService>;
 		}
 	) => {
 		const now = new Date('2026-07-27T12:00:00.000Z');
@@ -181,7 +188,9 @@ describe('MessagingOperationalAlertService', () => {
 			} as unknown as ConfigService,
 			rabbitManagement,
 			notificationDelivery as NotificationDeliveryClientService,
-			widgets as WidgetsDeliveryFailuresClientService
+			widgets as WidgetsDeliveryFailuresClientService,
+			billing?.state as BillingCoreStateService | undefined,
+			billing?.client as BillingMessagingClientService | undefined
 		);
 		jest
 			.spyOn(service as any, 'sendAlertIfChanged')
@@ -332,15 +341,7 @@ describe('MessagingOperationalAlertService', () => {
 			where: {
 				resolvedAt: null,
 				integration: {
-					in: [
-						'telegram-destination-unavailable',
-						'notification-delivery-outcome',
-						'campaign-admin-audit',
-						'reporting-admin-audit',
-						'widgets-admin-audit',
-						'auto-renewal',
-						'database-backup'
-					]
+					in: [...CORE_OWNED_MESSAGING_KINDS]
 				}
 			}
 		});
@@ -420,5 +421,78 @@ describe('MessagingOperationalAlertService', () => {
 		expect(message).toContain(
 			'Widgets: <b>internal API недоступен: widgets connect ECONNREFUSED'
 		);
+	});
+
+	it('uses Billing overview after ownership and excludes legacy auto-renewal failures', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const billingOverview = jest.fn().mockResolvedValue({
+			schemaVersion: 1,
+			generatedAt: '2026-07-27T12:00:00.000Z',
+			outbox: { PENDING: 2, PROCESSING: 0, PUBLISHED: 5 },
+			oldestPendingAt: null,
+			unresolvedFailures: 4,
+			retryingFailures: 0,
+			deliveredLast24Hours: 3
+		});
+		const { service, prisma } = createCheckService(
+			{
+				getOverview: jest.fn().mockResolvedValue({
+					outbox: {
+						PENDING: 0,
+						PUBLISHING: 0,
+						PUBLISHED: 0,
+						FAILED: 0
+					},
+					oldestPendingAt: null,
+					operational: {
+						staleOutbox: 0,
+						dueOutbox: 0,
+						unresolvedFailuresByCategory: {
+							TRANSIENT: 0,
+							RATE_LIMIT: 0,
+							PERMANENT: 0,
+							AUTH_CONFIGURATION: 0,
+							UNCLASSIFIED: 0
+						}
+					},
+					unresolvedFailures: 0,
+					retryingFailures: 0,
+					deliveredLast24Hours: 0,
+					heartbeat: {
+						service: 'notification-delivery-worker',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-07-27T11:59:55.000Z',
+						lastSuccessfulPublishAt: null,
+						lastSuccessfulConsumeAt: '2026-07-27T11:59:50.000Z'
+					}
+				})
+			},
+			undefined,
+			{
+				state: {
+					isBillingOwner: jest.fn().mockResolvedValue(true)
+				},
+				client: { getOverview: billingOverview }
+			}
+		);
+
+		await (service as any).check();
+
+		expect(billingOverview).toHaveBeenCalledTimes(1);
+		expect(prisma.integrationDeliveryFailure.count).toHaveBeenCalledWith({
+			where: {
+				resolvedAt: null,
+				integration: {
+					in: expect.not.arrayContaining(['auto-renewal'])
+				}
+			}
+		});
+		const [signature, message] = (service as any).sendAlertIfChanged.mock
+			.calls[0];
+		expect(signature).toContain('dlq=4');
+		expect(message).toContain('Billing: <b>Outbox=2, DLQ=4</b>');
 	});
 });

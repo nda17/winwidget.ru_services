@@ -1,5 +1,5 @@
 import { randomBytes, randomInt } from 'node:crypto';
-import { AffiliateService } from '@/affiliate/affiliate.service';
+import { BillingRegistrationBoundaryService } from '@/billing-boundary/billing-registration-boundary.service';
 import { PrismaService } from '@/prisma.service';
 import {
 	PASSWORD_SALT_ROUNDS,
@@ -66,7 +66,7 @@ export class TelegramAuthService {
 
 	constructor(
 		private readonly prisma: PrismaService,
-		private readonly affiliateService: AffiliateService
+		private readonly billingRegistration: BillingRegistrationBoundaryService
 	) {}
 
 	async start() {
@@ -448,25 +448,33 @@ export class TelegramAuthService {
 
 		const displayName = this.getTelegramDisplayName(request);
 
-		const user = await this.prisma.user.create({
-			data: {
-				name: displayName,
-				password: '',
-				authIdentities: {
-					create: {
-						type: AuthIdentityType.TELEGRAM,
-						value: telegramUserId,
-						verifiedAt: new Date()
+		return this.prisma.$transaction(async transaction => {
+			const user = await transaction.user.create({
+				data: {
+					name: displayName,
+					password: '',
+					authIdentities: {
+						create: {
+							type: AuthIdentityType.TELEGRAM,
+							value: telegramUserId,
+							verifiedAt: new Date()
+						}
 					}
+				},
+				include: {
+					authIdentities: true
 				}
-			},
-			include: {
-				authIdentities: true
-			}
+			});
+			await this.billingRegistration.captureReferralInTransaction(
+				transaction,
+				{
+					referrerId,
+					referredUserId: user.id,
+					requestedAt: user.createdAt
+				}
+			);
+			return user;
 		});
-
-		await this.affiliateService.registerReferral(referrerId, user.id);
-		return user;
 	}
 
 	private getTelegramDisplayName(request: VerificationChallenge) {

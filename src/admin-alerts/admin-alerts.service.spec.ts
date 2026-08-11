@@ -42,10 +42,14 @@ describe('AdminAlertsService Widgets handoff', () => {
 				}
 			])
 		};
+		const billingState = {
+			isBillingOwner: jest.fn().mockResolvedValue(false)
+		};
 		const service = new AdminAlertsService(
 			prisma as never,
 			health as never,
-			widgets as never
+			widgets as never,
+			billingState as never
 		);
 
 		await expect(service.getAll(1, 20)).resolves.toEqual({

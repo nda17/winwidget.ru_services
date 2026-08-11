@@ -1,3 +1,4 @@
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import {
 	MESSAGING_ROUTING_KEYS,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
@@ -110,7 +111,10 @@ export class SubscriptionExpiryService
 	private expiryTimeout: NodeJS.Timeout | null = null;
 	private destroyed = false;
 
-	constructor(private prisma: PrismaService) {}
+	constructor(
+		private prisma: PrismaService,
+		private readonly billingState: BillingCoreStateService
+	) {}
 
 	onModuleInit(): void {
 		this.expiryTimeout = setTimeout(() => {
@@ -129,6 +133,7 @@ export class SubscriptionExpiryService
 	}
 
 	async runManualCheck(): Promise<number> {
+		await this.billingState.assertSchedulerEnabled();
 		const expired = await this.expireSubscriptions();
 		this.logger.log(
 			`Manual check complete: deactivated ${expired} expired subscription(s).`
@@ -138,6 +143,12 @@ export class SubscriptionExpiryService
 	}
 
 	private async runSubscriptionMaintenance() {
+		if (!(await this.billingState.isSchedulerEnabled())) {
+			return {
+				expiredCount: 0,
+				reminders: { dispatchedCount: 0, failedCount: 0 }
+			};
+		}
 		const expiredCount = await this.expireSubscriptions();
 		const reminders = await this.sendExpiryReminders();
 

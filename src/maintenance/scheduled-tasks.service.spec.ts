@@ -65,7 +65,9 @@ describe('ScheduledTasksService', () => {
 								REPORTING_DATABASE_BACKUP:
 									'44444444-4444-4444-8444-444444444444',
 								WIDGETS_DATABASE_BACKUP:
-									'55555555-5555-4555-8555-555555555555'
+									'55555555-5555-4555-8555-555555555555',
+								BILLING_DATABASE_BACKUP:
+									'66666666-6666-4666-8666-666666666666'
 							}[input.jobType]
 						}
 					})
@@ -86,6 +88,7 @@ describe('ScheduledTasksService', () => {
 		const campaignsScheduledFor = new Date('2026-07-23T23:15:00.000Z');
 		const reportingScheduledFor = new Date('2026-07-23T23:30:00.000Z');
 		const widgetsScheduledFor = new Date('2026-07-23T23:45:00.000Z');
+		const billingScheduledFor = new Date('2026-07-24T00:00:00.000Z');
 
 		const result = await service.enqueueDailyDatabaseBackups(
 			period,
@@ -106,6 +109,9 @@ describe('ScheduledTasksService', () => {
 		);
 		expect(result?.widgets.job.id).toBe(
 			'55555555-5555-4555-8555-555555555555'
+		);
+		expect(result?.billing.job.id).toBe(
+			'66666666-6666-4666-8666-666666666666'
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
@@ -176,6 +182,20 @@ describe('ScheduledTasksService', () => {
 				eventType: 'database.backup.requested.v1'
 			})
 		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			6,
+			transaction,
+			expect.objectContaining({
+				jobType: 'BILLING_DATABASE_BACKUP',
+				scheduledFor: billingScheduledFor,
+				availableAt: billingScheduledFor
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
 	});
 
 	it('enqueues all database backups as separate jobs in one transaction', async () => {
@@ -205,7 +225,9 @@ describe('ScheduledTasksService', () => {
 							REPORTING_DATABASE_BACKUP:
 								'44444444-4444-4444-8444-444444444444',
 							WIDGETS_DATABASE_BACKUP:
-								'55555555-5555-4555-8555-555555555555'
+								'55555555-5555-4555-8555-555555555555',
+							BILLING_DATABASE_BACKUP:
+								'66666666-6666-4666-8666-666666666666'
 						}[input.jobType]
 					}
 				})
@@ -225,11 +247,12 @@ describe('ScheduledTasksService', () => {
 			notificationDelivery: expect.objectContaining({ created: true }),
 			campaigns: expect.objectContaining({ created: true }),
 			reporting: expect.objectContaining({ created: true }),
-			widgets: expect.objectContaining({ created: true })
+			widgets: expect.objectContaining({ created: true }),
+			billing: expect.objectContaining({ created: true })
 		});
 		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledTimes(
-			5
+			6
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
@@ -309,6 +332,22 @@ describe('ScheduledTasksService', () => {
 			transaction,
 			expect.objectContaining({
 				jobType: 'WIDGETS_DATABASE_BACKUP',
+				scheduleKey: period.key,
+				input: expect.objectContaining({
+					trigger: 'SCHEDULED'
+				})
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			6,
+			transaction,
+			expect.objectContaining({
+				jobType: 'BILLING_DATABASE_BACKUP',
 				scheduleKey: period.key,
 				input: expect.objectContaining({
 					trigger: 'SCHEDULED'

@@ -41,7 +41,10 @@ const DATABASE_URL_ENV_KEYS = [
 	'REPORTING_MIGRATION_DATABASE_URL',
 	'WIDGETS_BACKUP_URL',
 	'WIDGETS_DATABASE_URL',
-	'WIDGETS_MIGRATION_DATABASE_URL'
+	'WIDGETS_MIGRATION_DATABASE_URL',
+	'BILLING_BACKUP_URL',
+	'BILLING_DATABASE_URL',
+	'BILLING_MIGRATION_DATABASE_URL'
 ] as const;
 
 const SERVICE_DATABASE_CONFIG = {
@@ -64,6 +67,11 @@ const SERVICE_DATABASE_CONFIG = {
 		key: 'WIDGETS_BACKUP_URL',
 		label: 'Widgets',
 		filePrefix: 'winwidget-widgets-db'
+	},
+	billing: {
+		key: 'BILLING_BACKUP_URL',
+		label: 'Billing',
+		filePrefix: 'winwidget-billing-db'
 	}
 } as const;
 

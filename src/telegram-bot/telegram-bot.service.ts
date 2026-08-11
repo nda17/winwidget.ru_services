@@ -1,4 +1,5 @@
 import {
+	BILLING_DATABASE_BACKUP_DELAY_MINUTES,
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
 	REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
@@ -137,7 +138,8 @@ export const ensureReportingBackupScheduleSeparated = (
 			(24 * 60),
 		(backupMinutes + CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
 		(backupMinutes + REPORTING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
-		(backupMinutes + WIDGETS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
+		(backupMinutes + WIDGETS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
+		(backupMinutes + BILLING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
 	];
 
 	if (
@@ -1051,6 +1053,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupTime,
 			WIDGETS_DATABASE_BACKUP_DELAY_MINUTES
 		);
+		const billingDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			BILLING_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryChatId: settings.dailySummaryChatId,
@@ -1077,6 +1083,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				WIDGETS_DATABASE_BACKUP_DELAY_MINUTES,
 			widgetsDatabaseBackupTime,
 			widgetsDatabaseBackupTimeLabel: `${widgetsDatabaseBackupTime} МСК`,
+			billingDatabaseBackupDelayMinutes:
+				BILLING_DATABASE_BACKUP_DELAY_MINUTES,
+			billingDatabaseBackupTime,
+			billingDatabaseBackupTimeLabel: `${billingDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:

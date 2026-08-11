@@ -17,7 +17,13 @@ describe('CampaignsAudienceExportService', () => {
 				callback(transaction)
 		)
 	} as unknown as PrismaService;
-	const service = new CampaignsAudienceExportService(prisma);
+	const billingState = {
+		isBillingOwner: jest.fn().mockResolvedValue(false)
+	};
+	const service = new CampaignsAudienceExportService(
+		prisma,
+		billingState as never
+	);
 
 	beforeEach(() => {
 		jest.clearAllMocks();
@@ -29,14 +35,14 @@ describe('CampaignsAudienceExportService', () => {
 			{ destination: 'second@example.test' }
 		]);
 		const chunks: string[] = [];
-		const response = {
+		const response = Object.assign(new EventEmitter(), {
 			destroyed: false,
 			writableEnded: false,
 			write: jest.fn((value: string) => {
 				chunks.push(value);
 				return true;
 			})
-		} as unknown as Response;
+		}) as unknown as Response;
 		const request = { aborted: false } as Request;
 
 		await service.stream(
@@ -80,7 +86,7 @@ describe('CampaignsAudienceExportService', () => {
 		]);
 		const request = { aborted: false } as Request;
 		const chunks: string[] = [];
-		const response = {
+		const response = Object.assign(new EventEmitter(), {
 			destroyed: false,
 			writableEnded: false,
 			write: jest.fn((value: string) => {
@@ -88,7 +94,7 @@ describe('CampaignsAudienceExportService', () => {
 				if (chunks.length === 1) request.aborted = true;
 				return true;
 			})
-		} as unknown as Response;
+		}) as unknown as Response;
 
 		await expect(
 			service.stream(
@@ -127,5 +133,30 @@ describe('CampaignsAudienceExportService', () => {
 		queueMicrotask(() => response.emit('close'));
 
 		await expect(streaming).rejects.toThrow('client disconnected');
+	});
+
+	it('uses only the Billing subscription projection after ownership', async () => {
+		billingState.isBillingOwner.mockResolvedValueOnce(true);
+		queryRaw.mockResolvedValueOnce([]);
+		const response = Object.assign(new EventEmitter(), {
+			destroyed: false,
+			writableEnded: false,
+			write: jest.fn(() => true)
+		}) as unknown as Response;
+
+		await service.stream(
+			{
+				schemaVersion: 1,
+				channel: 'EMAIL',
+				audience: 'ACTIVE_SUBSCRIBERS'
+			},
+			{ aborted: false } as Request,
+			response
+		);
+
+		const query = queryRaw.mock.calls[0][0];
+		const sql = query.strings.join(' ');
+		expect(sql).toContain('billing_subscription_read_projections');
+		expect(sql).not.toMatch(/FROM\s+"subscriptions"/);
 	});
 });

@@ -17,7 +17,8 @@ export const DATABASE_RESTORE_TARGETS = [
 	'notification-delivery',
 	'campaigns',
 	'reporting',
-	'widgets'
+	'widgets',
+	'billing'
 ] as const;
 
 export type DatabaseRestoreTarget =
@@ -64,6 +65,11 @@ export const DATABASE_RESTORE_TARGET_SETTINGS: ReadonlyArray<{
 		id: 'widgets',
 		label: 'Widgets',
 		confirmation: 'ВОССТАНОВИТЬ WIDGETS'
+	},
+	{
+		id: 'billing',
+		label: 'Billing',
+		confirmation: 'ВОССТАНОВИТЬ BILLING'
 	}
 ];
 

@@ -1,3 +1,4 @@
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { PAYMENT_RECONCILIATION_INTERVAL_MS } from '@/payment/payment.constants';
 import { PrismaService } from '@/prisma.service';
 import {
@@ -16,7 +17,10 @@ export class PaymentCleanupService
 	private maintenanceTimer: NodeJS.Timeout | null = null;
 	private destroyed = false;
 
-	constructor(private readonly prisma: PrismaService) {}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly billingState: BillingCoreStateService
+	) {}
 
 	onModuleInit(): void {
 		this.maintenanceTimer = setTimeout(() => {
@@ -35,6 +39,7 @@ export class PaymentCleanupService
 	}
 
 	async runManualCleanup(): Promise<number> {
+		await this.billingState.assertSchedulerEnabled();
 		const expiredCount = await this.expireStalePendingPayments();
 		this.logger.log(
 			`Manual payment reconciliation marked ${expiredCount} checkout(s) expired.`
@@ -67,6 +72,7 @@ export class PaymentCleanupService
 	private async runScheduledMaintenance(): Promise<void> {
 		if (this.destroyed) return;
 		try {
+			if (!(await this.billingState.isSchedulerEnabled())) return;
 			const expiredCount = await this.expireStalePendingPayments();
 			if (expiredCount > 0) {
 				this.logger.log(

@@ -1,4 +1,5 @@
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
+import { AUTO_RENEWAL_CONSENT_TEXT } from '@/payment/payment.constants';
 
 const MESSAGE_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -820,5 +821,114 @@ describe('messaging event contract', () => {
 				kind: 'telegram-destination-unavailable'
 			})
 		).toThrow('sourceKind is invalid');
+	});
+
+	it('accepts the exact Billing offer source event', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'billing.offer.changed.v1',
+			eventId: MESSAGE_ID,
+			aggregateId: 'offer',
+			aggregateVersion: '3',
+			sourceSequence: '42',
+			occurredAt: '2026-08-11T00:00:00.000Z',
+			tombstone: false,
+			state: {
+				id: 'offer',
+				content: '<p>offer</p>',
+				sha256:
+					'8efd4197e25b4f2a1f14e87d137f544cbbf52ccff37595a3024a4a65255c27d9',
+				updatedAt: '2026-08-11T00:00:00.000Z',
+				consentVersion: 'auto-renewal-2026-07-28-v4',
+				consentText: AUTO_RENEWAL_CONSENT_TEXT
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'billing-offer-source'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects Billing offer consent drift', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'billing.offer.changed.v1',
+			eventId: MESSAGE_ID,
+			aggregateId: 'offer',
+			aggregateVersion: '1',
+			sourceSequence: '1',
+			occurredAt: '2026-08-11T00:00:00.000Z',
+			tombstone: false,
+			state: {
+				id: 'offer',
+				content: '',
+				sha256: '0'.repeat(64),
+				updatedAt: '2026-08-11T00:00:00.000Z',
+				consentVersion: 'auto-renewal-2026-07-28-v4',
+				consentText: 'stale'
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'billing-offer-source'
+			})
+		).toThrow('Invalid Billing offer consent contract');
+	});
+
+	it('accepts a Billing offer tombstone', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'billing.offer.changed.v1',
+			eventId: MESSAGE_ID,
+			aggregateId: 'offer',
+			aggregateVersion: '2',
+			sourceSequence: '2',
+			occurredAt: '2026-08-11T00:00:00.000Z',
+			tombstone: true,
+			state: null
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'billing-offer-source'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects routing a Billing offer event to another source kind', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'billing.offer.changed.v1',
+			eventId: MESSAGE_ID,
+			aggregateId: 'offer',
+			aggregateVersion: '2',
+			sourceSequence: '2',
+			occurredAt: '2026-08-11T00:00:00.000Z',
+			tombstone: true,
+			state: null
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'billing-settings-source'
+			})
+		).toThrow(
+			'Event type billing.offer.changed.v1 cannot be consumed by billing-settings-source'
+		);
 	});
 });

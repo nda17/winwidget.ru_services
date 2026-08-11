@@ -1,4 +1,5 @@
 import { PrismaService } from '@/prisma.service';
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { HealthService } from '@/health/health.service';
 import {
 	WidgetsAdminAlert,
@@ -48,7 +49,8 @@ export class AdminAlertsService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly healthService: HealthService,
-		private readonly widgetsAdminClient: WidgetsAdminOverviewClient
+		private readonly widgetsAdminClient: WidgetsAdminOverviewClient,
+		private readonly billingState: BillingCoreStateService
 	) {}
 
 	async getAll(page = 1, limit = 20, filters: AdminAlertFilters = {}) {
@@ -93,6 +95,16 @@ export class AdminAlertsService {
 	}
 
 	private async getBaseSql() {
+		const billingOwner = await this.billingState.isBillingOwner();
+		const subscriptionsTable = billingOwner
+			? Prisma.raw('"billing_subscription_read_projections"')
+			: Prisma.raw('"subscriptions"');
+		const paymentsTable = billingOwner
+			? Prisma.raw('"billing_payment_read_projections"')
+			: Prisma.raw('"payments"');
+		const affiliatesTable = billingOwner
+			? Prisma.raw('"billing_affiliate_read_projections"')
+			: Prisma.raw('"affiliate_referrals"');
 		const userFieldsSql = Prisma.sql`
 			u.id AS target_user_id,
 			u.name AS target_user_name,
@@ -148,7 +160,7 @@ export class AdminAlertsService {
 				'Истёкшая подписка ещё активна'::text AS title,
 				concat('Подписка истекла ', to_char(s.expires_at, 'DD.MM.YYYY HH24:MI'), ', но статус всё ещё ACTIVE') AS message,
 				s.expires_at AS alert_at
-			FROM subscriptions s
+			FROM ${subscriptionsTable} s
 			JOIN "User" u ON u.id = s.user_id
 			${userIdentityJoinsSql}
 			WHERE s.status::text = 'ACTIVE'
@@ -165,7 +177,7 @@ export class AdminAlertsService {
 				'Подписка скоро истекает'::text AS title,
 				concat('Подписка истекает ', to_char(s.expires_at, 'DD.MM.YYYY HH24:MI')) AS message,
 				s.expires_at AS alert_at
-			FROM subscriptions s
+			FROM ${subscriptionsTable} s
 			JOIN "User" u ON u.id = s.user_id
 			${userIdentityJoinsSql}
 			WHERE s.status::text = 'ACTIVE'
@@ -183,7 +195,7 @@ export class AdminAlertsService {
 				'Платёж долго в pending'::text AS title,
 				concat('Платёж ', p.yookassa_id, ' ожидает подтверждения больше 30 минут') AS message,
 				p.created_at AS alert_at
-			FROM payments p
+			FROM ${paymentsTable} p
 			JOIN "User" u ON u.id = p.user_id
 			${userIdentityJoinsSql}
 			WHERE p.status::text = 'PENDING'
@@ -199,9 +211,9 @@ export class AdminAlertsService {
 				'Оплата прошла, доступ не активен'::text AS title,
 				concat('Платёж ', p.yookassa_id, ' успешен, но у пользователя нет активной подписки') AS message,
 				p.updated_at AS alert_at
-			FROM payments p
+			FROM ${paymentsTable} p
 			JOIN "User" u ON u.id = p.user_id
-			LEFT JOIN subscriptions s ON s.user_id = u.id
+			LEFT JOIN ${subscriptionsTable} s ON s.user_id = u.id
 			${userIdentityJoinsSql}
 			WHERE p.status::text = 'SUCCEEDED'
 				AND p.updated_at >= NOW() - INTERVAL '7 days'
@@ -226,7 +238,7 @@ export class AdminAlertsService {
 					user_id,
 					COUNT(*)::int AS pending_count,
 					MAX(created_at) AS last_pending_at
-				FROM payments
+				FROM ${paymentsTable}
 				WHERE status::text = 'PENDING'
 				GROUP BY user_id
 				HAVING COUNT(*) > 1
@@ -251,7 +263,7 @@ export class AdminAlertsService {
 				AND phone_identity.value IS NULL
 				AND NOT EXISTS (
 					SELECT 1
-					FROM subscriptions active_contact_subscription
+					FROM ${subscriptionsTable} active_contact_subscription
 					WHERE active_contact_subscription.user_id = u.id
 						AND active_contact_subscription.status::text = 'ACTIVE'
 						AND (
@@ -271,7 +283,7 @@ export class AdminAlertsService {
 				concat('У пользователя активный тариф ', s.plan, ', но нет email или телефона для оплаты, рассылок и поддержки') AS message,
 				COALESCE(s.expires_at, u.created_at) AS alert_at
 			FROM "User" u
-			JOIN subscriptions s ON s.user_id = u.id
+			JOIN ${subscriptionsTable} s ON s.user_id = u.id
 			${userIdentityJoinsSql}
 			WHERE u.status::text = 'ACTIVE'
 				AND s.status::text = 'ACTIVE'
@@ -291,7 +303,7 @@ export class AdminAlertsService {
 				'Партнёрская выплата ждёт обработки'::text AS title,
 				concat('Кэшбек ', COALESCE(ar.cashback_amount, 0), ' ₽ доступен с ', to_char(ar.available_at, 'DD.MM.YYYY HH24:MI')) AS message,
 				ar.available_at AS alert_at
-			FROM affiliate_referrals ar
+			FROM ${affiliatesTable} ar
 			JOIN "User" u ON u.id = ar.referrer_id
 			${userIdentityJoinsSql}
 			WHERE ar.status::text = 'REWARD_PENDING'
@@ -308,8 +320,8 @@ export class AdminAlertsService {
 				'Кэшбек привязан к отменённому платежу'::text AS title,
 				concat('Реферальное начисление связано с отменённым платежом ', p.yookassa_id) AS message,
 				COALESCE(ar.cancelled_at, ar.updated_at) AS alert_at
-			FROM affiliate_referrals ar
-			JOIN payments p ON p.id = ar.first_payment_id
+			FROM ${affiliatesTable} ar
+			JOIN ${paymentsTable} p ON p.id = ar.first_payment_id
 			JOIN "User" u ON u.id = ar.referrer_id
 			${userIdentityJoinsSql}
 			WHERE p.status::text = 'CANCELLED'

@@ -1,5 +1,16 @@
 import {
 	AUTO_RENEWAL_CHARGE_EVENT_TYPE,
+	BILLING_AFFILIATE_EVENT_TYPE,
+	BILLING_IDENTITY_EVENT_TYPE,
+	BILLING_LIFECYCLE_REPAIR_EVENT_TYPE,
+	BILLING_NOTIFICATION_ROUTING_EVENT_TYPE,
+	BILLING_OFFER_EVENT_TYPE,
+	BILLING_PAYMENT_DETAILS_EVENT_TYPE,
+	BILLING_REFERRAL_REQUESTED_EVENT_TYPE,
+	BILLING_SETTINGS_SOURCE_EVENT_TYPE,
+	BILLING_SETTINGS_EVENT_TYPE,
+	BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
+	BILLING_TRIAL_REQUESTED_EVENT_TYPE,
 	CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
 	DATABASE_BACKUP_EVENT_TYPE,
 	getDeadLetterRoutingKey,
@@ -25,6 +36,15 @@ import {
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
 } from '@/messaging/messaging.constants';
+import {
+	AUTO_RENEWAL_CONSENT_TEXT,
+	AUTO_RENEWAL_CONSENT_VERSION
+} from '@/payment/payment.constants';
+import {
+	BILLING_ADMIN_AUDIT_ACTIONS,
+	BILLING_ADMIN_AUDIT_SECTIONS,
+	BillingAdminAuditAction
+} from '@/messaging/billing-events';
 import { CAMPAIGN_ADMIN_AUDIT_ACTIONS } from '@/messaging/campaign-admin-audit-event';
 import { OUTCOME_NOTIFICATION_DELIVERY_KINDS } from '@/messaging/notification-delivery-event';
 import {
@@ -43,6 +63,7 @@ import {
 import { TELEGRAM_DESTINATION_SOURCE_KINDS } from '@/messaging/telegram-destination-unavailable-event';
 import { isDatabaseBackupJobType } from '@/scheduled-jobs/scheduled-jobs.types';
 import {
+	AffiliateReferralStatus,
 	BillingPeriod,
 	PaymentStatus,
 	Plan,
@@ -199,6 +220,20 @@ const REPORTING_EVENT_KINDS: Record<string, ReportingProjectionKind> = {
 	[REPORTING_LEAD_EVENT_TYPE]: 'reporting-lead',
 	[REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE]: 'reporting-settings'
 };
+
+const BILLING_VERSIONED_EVENT_TYPES = new Set([
+	BILLING_IDENTITY_EVENT_TYPE,
+	BILLING_TRIAL_REQUESTED_EVENT_TYPE,
+	BILLING_REFERRAL_REQUESTED_EVENT_TYPE,
+	BILLING_NOTIFICATION_ROUTING_EVENT_TYPE,
+	BILLING_LIFECYCLE_REPAIR_EVENT_TYPE,
+	BILLING_OFFER_EVENT_TYPE,
+	BILLING_PAYMENT_DETAILS_EVENT_TYPE,
+	BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
+	BILLING_AFFILIATE_EVENT_TYPE,
+	BILLING_SETTINGS_SOURCE_EVENT_TYPE,
+	BILLING_SETTINGS_EVENT_TYPE
+]);
 
 const assertNamespacedWidgetAggregateId = (
 	value: string,
@@ -1088,7 +1123,547 @@ const assertNotificationDeliveryOutcome = (
 	return 'notification-delivery-outcome';
 };
 
+const assertBillingVersionedEvent = (
+	payload: JsonRecord
+): MessagingKind[] => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'aggregateId',
+		'aggregateVersion',
+		'sourceSequence',
+		'occurredAt',
+		'tombstone',
+		'state'
+	]);
+	if (payload.schemaVersion !== 1) {
+		throw new Error('Invalid Billing event contract version');
+	}
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertIdentifier(payload.aggregateId, 'payload.aggregateId');
+	assertDecimalString(
+		payload.aggregateVersion,
+		'payload.aggregateVersion',
+		false
+	);
+	assertDecimalString(
+		payload.sourceSequence,
+		'payload.sourceSequence',
+		false
+	);
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	assertBoolean(payload.tombstone, 'payload.tombstone');
+	if ((payload.state === null) !== (payload.tombstone === true)) {
+		throw new Error('Billing event tombstone and state are inconsistent');
+	}
+
+	const eventType = String(payload.eventType);
+	if (payload.tombstone) {
+		return getBillingEventKinds(eventType);
+	}
+	const state = assertRecord(payload.state, 'payload.state');
+	const aggregateId = String(payload.aggregateId);
+
+	switch (eventType) {
+		case BILLING_IDENTITY_EVENT_TYPE:
+			assertExactKeys(
+				state,
+				[
+					'id',
+					'name',
+					'email',
+					'phone',
+					'status',
+					'deletedAt',
+					'roles',
+					'telegramChatId',
+					'telegramChannelActive',
+					'createdAt',
+					'updatedAt'
+				],
+				[],
+				'payload.state'
+			);
+			assertIdentifier(state.id, 'payload.state.id');
+			if (state.id !== aggregateId) {
+				throw new Error('payload.state.id must match payload.aggregateId');
+			}
+			assertOptionalString(state.name, 'payload.state.name');
+			assertOptionalString(state.email, 'payload.state.email');
+			assertOptionalString(state.phone, 'payload.state.phone');
+			assertEnumValue(
+				state.status,
+				Object.values(UserStatus),
+				'payload.state.status'
+			);
+			assertIsoDate(state.deletedAt, 'payload.state.deletedAt', true);
+			if (
+				!Array.isArray(state.roles) ||
+				state.roles.some(
+					role => !Object.values(Role).includes(role as Role)
+				)
+			) {
+				throw new Error('payload.state.roles is invalid');
+			}
+			assertOptionalString(
+				state.telegramChatId,
+				'payload.state.telegramChatId'
+			);
+			assertBoolean(
+				state.telegramChannelActive,
+				'payload.state.telegramChannelActive'
+			);
+			assertIsoDate(state.createdAt, 'payload.state.createdAt');
+			assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+			break;
+		case BILLING_TRIAL_REQUESTED_EVENT_TYPE:
+			assertExactKeys(
+				state,
+				['userId', 'trialDays', 'registeredAt'],
+				[],
+				'payload.state'
+			);
+			assertIdentifier(state.userId, 'payload.state.userId');
+			if (state.userId !== aggregateId || state.trialDays !== 7) {
+				throw new Error('Invalid Billing trial request');
+			}
+			assertIsoDate(state.registeredAt, 'payload.state.registeredAt');
+			break;
+		case BILLING_REFERRAL_REQUESTED_EVENT_TYPE:
+			assertExactKeys(
+				state,
+				['referrerId', 'referredUserId', 'requestedAt'],
+				[],
+				'payload.state'
+			);
+			assertIdentifier(state.referrerId, 'payload.state.referrerId');
+			assertIdentifier(
+				state.referredUserId,
+				'payload.state.referredUserId'
+			);
+			if (
+				state.referredUserId !== aggregateId ||
+				state.referrerId === state.referredUserId
+			) {
+				throw new Error('Invalid Billing referral request');
+			}
+			assertIsoDate(state.requestedAt, 'payload.state.requestedAt');
+			break;
+		case BILLING_NOTIFICATION_ROUTING_EVENT_TYPE:
+			assertExactKeys(
+				state,
+				['id', 'telegramChatId', 'paymentsThreadId', 'updatedAt'],
+				[],
+				'payload.state'
+			);
+			assertIdentifier(state.id, 'payload.state.id');
+			if (state.id !== aggregateId) {
+				throw new Error('payload.state.id must match payload.aggregateId');
+			}
+			assertOptionalString(
+				state.telegramChatId,
+				'payload.state.telegramChatId'
+			);
+			if (
+				state.paymentsThreadId !== null &&
+				(!Number.isInteger(state.paymentsThreadId) ||
+					Number(state.paymentsThreadId) < 1)
+			) {
+				throw new Error(
+					'payload.state.paymentsThreadId must be a positive integer or null'
+				);
+			}
+			assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+			break;
+		case BILLING_OFFER_EVENT_TYPE:
+			assertExactKeys(
+				state,
+				[
+					'id',
+					'content',
+					'sha256',
+					'updatedAt',
+					'consentVersion',
+					'consentText'
+				],
+				[],
+				'payload.state'
+			);
+			if (aggregateId !== 'offer' || state.id !== 'offer') {
+				throw new Error('Invalid Billing offer aggregate');
+			}
+			if (typeof state.content !== 'string') {
+				throw new Error('payload.state.content must be a string');
+			}
+			if (
+				typeof state.sha256 !== 'string' ||
+				!/^[0-9a-f]{64}$/.test(state.sha256)
+			) {
+				throw new Error(
+					'payload.state.sha256 must be a lowercase SHA-256'
+				);
+			}
+			assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+			if (
+				state.consentVersion !== AUTO_RENEWAL_CONSENT_VERSION ||
+				state.consentText !== AUTO_RENEWAL_CONSENT_TEXT
+			) {
+				throw new Error('Invalid Billing offer consent contract');
+			}
+			break;
+		case BILLING_LIFECYCLE_REPAIR_EVENT_TYPE:
+			assertExactKeys(
+				state,
+				[
+					'commandId',
+					'userId',
+					'operation',
+					'actorId',
+					'actorRole',
+					'coreMutationApplied',
+					'requestedAt'
+				],
+				[],
+				'payload.state'
+			);
+			assertUuid(state.commandId, 'payload.state.commandId');
+			assertIdentifier(state.userId, 'payload.state.userId');
+			assertIdentifier(state.actorId, 'payload.state.actorId');
+			if (state.actorRole !== Role.ADMIN && state.actorRole !== Role.DEV) {
+				throw new Error('payload.state.actorRole is invalid');
+			}
+			if (
+				state.userId !== aggregateId ||
+				(state.operation !== 'DEACTIVATE' &&
+					state.operation !== 'DELETE') ||
+				state.coreMutationApplied !== false
+			) {
+				throw new Error('Invalid Billing lifecycle repair request');
+			}
+			assertIsoDate(state.requestedAt, 'payload.state.requestedAt');
+			break;
+		case BILLING_PAYMENT_DETAILS_EVENT_TYPE:
+			assertBillingPaymentDetailsState(state, aggregateId);
+			break;
+		case BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE:
+			assertBillingSubscriptionDetailsState(state, aggregateId);
+			break;
+		case BILLING_AFFILIATE_EVENT_TYPE:
+			assertBillingAffiliateState(state, aggregateId);
+			break;
+		case BILLING_SETTINGS_SOURCE_EVENT_TYPE:
+		case BILLING_SETTINGS_EVENT_TYPE:
+			assertBillingSettingsState(state, aggregateId);
+			break;
+		default:
+			throw new Error('Invalid Billing event type');
+	}
+
+	return getBillingEventKinds(eventType);
+};
+
+const getBillingEventKinds = (eventType: string): MessagingKind[] => {
+	switch (eventType) {
+		case BILLING_IDENTITY_EVENT_TYPE:
+			return ['billing-identity-source'];
+		case BILLING_TRIAL_REQUESTED_EVENT_TYPE:
+			return ['billing-trial-source'];
+		case BILLING_REFERRAL_REQUESTED_EVENT_TYPE:
+			return ['billing-referral-source'];
+		case BILLING_NOTIFICATION_ROUTING_EVENT_TYPE:
+			return ['billing-notification-routing-source'];
+		case BILLING_LIFECYCLE_REPAIR_EVENT_TYPE:
+			return ['billing-lifecycle-repair-source'];
+		case BILLING_OFFER_EVENT_TYPE:
+			return ['billing-offer-source'];
+		case BILLING_PAYMENT_DETAILS_EVENT_TYPE:
+			return ['billing-payment-projection'];
+		case BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE:
+			return ['billing-subscription-projection'];
+		case BILLING_AFFILIATE_EVENT_TYPE:
+			return ['billing-affiliate-projection'];
+		case BILLING_SETTINGS_SOURCE_EVENT_TYPE:
+			return ['billing-settings-source'];
+		case BILLING_SETTINGS_EVENT_TYPE:
+			return ['billing-settings-projection'];
+		default:
+			throw new Error('Invalid Billing event type');
+	}
+};
+
+const assertBillingPaymentDetailsState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'userId',
+			'yookassaId',
+			'status',
+			'amount',
+			'plan',
+			'billingPeriod',
+			'createdAt',
+			'updatedAt'
+		],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId) {
+		throw new Error('payload.state.id must match payload.aggregateId');
+	}
+	assertIdentifier(state.userId, 'payload.state.userId');
+	assertOptionalString(state.yookassaId, 'payload.state.yookassaId');
+	assertEnumValue(
+		state.status,
+		Object.values(PaymentStatus),
+		'payload.state.status'
+	);
+	assertString(state.amount, 'payload.state.amount', { maxLength: 128 });
+	assertEnumValue(
+		state.plan,
+		Object.values(Plan),
+		'payload.state.plan',
+		true
+	);
+	assertEnumValue(
+		state.billingPeriod,
+		Object.values(BillingPeriod),
+		'payload.state.billingPeriod',
+		true
+	);
+	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+};
+
+const assertBillingSubscriptionDetailsState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'userId',
+			'plan',
+			'billingPeriod',
+			'status',
+			'startsAt',
+			'expiresAt',
+			'leadsThisPeriod',
+			'periodResetsAt',
+			'createdAt',
+			'updatedAt'
+		],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId) {
+		throw new Error('payload.state.id must match payload.aggregateId');
+	}
+	assertIdentifier(state.userId, 'payload.state.userId');
+	assertEnumValue(state.plan, Object.values(Plan), 'payload.state.plan');
+	assertEnumValue(
+		state.billingPeriod,
+		Object.values(BillingPeriod),
+		'payload.state.billingPeriod',
+		true
+	);
+	assertEnumValue(
+		state.status,
+		Object.values(SubscriptionStatus),
+		'payload.state.status'
+	);
+	assertIsoDate(state.startsAt, 'payload.state.startsAt');
+	assertIsoDate(state.expiresAt, 'payload.state.expiresAt', true);
+	if (
+		!Number.isInteger(state.leadsThisPeriod) ||
+		Number(state.leadsThisPeriod) < 0
+	) {
+		throw new Error('payload.state.leadsThisPeriod must be non-negative');
+	}
+	assertIsoDate(
+		state.periodResetsAt,
+		'payload.state.periodResetsAt',
+		true
+	);
+	assertIsoDate(state.createdAt, 'payload.state.createdAt');
+	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+};
+
+const assertBillingAffiliateState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'referrerId',
+			'referredUserId',
+			'firstPaymentId',
+			'status',
+			'cashbackAmount',
+			'availableAt',
+			'cancelledAt',
+			'updatedAt'
+		],
+		[],
+		'payload.state'
+	);
+	assertIdentifier(state.id, 'payload.state.id');
+	if (state.id !== aggregateId) {
+		throw new Error('payload.state.id must match payload.aggregateId');
+	}
+	assertIdentifier(state.referrerId, 'payload.state.referrerId');
+	assertIdentifier(state.referredUserId, 'payload.state.referredUserId');
+	assertOptionalString(
+		state.firstPaymentId,
+		'payload.state.firstPaymentId'
+	);
+	if (
+		!Object.values(AffiliateReferralStatus).includes(
+			state.status as AffiliateReferralStatus
+		)
+	) {
+		throw new Error('payload.state.status is invalid');
+	}
+	if (
+		state.cashbackAmount !== null &&
+		(!Number.isInteger(state.cashbackAmount) ||
+			Number(state.cashbackAmount) < 0)
+	) {
+		throw new Error(
+			'payload.state.cashbackAmount must be non-negative or null'
+		);
+	}
+	assertIsoDate(state.availableAt, 'payload.state.availableAt', true);
+	assertIsoDate(state.cancelledAt, 'payload.state.cancelledAt', true);
+	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+};
+
+const assertBillingSettingsState = (
+	state: JsonRecord,
+	aggregateId: string
+): void => {
+	assertExactKeys(
+		state,
+		[
+			'id',
+			'paymentEnabled',
+			'autoRenewalSignupEnabled',
+			'autoRenewalChargesEnabled',
+			'autoRenewalChargesEnabledAt',
+			'affiliateProgramEnabled',
+			'affiliateCashbackPercent',
+			'updatedAt'
+		],
+		[],
+		'payload.state'
+	);
+	if (state.id !== 'singleton' || aggregateId !== 'singleton') {
+		throw new Error('Billing settings aggregate id must equal singleton');
+	}
+	assertBoolean(state.paymentEnabled, 'payload.state.paymentEnabled');
+	assertBoolean(
+		state.autoRenewalSignupEnabled,
+		'payload.state.autoRenewalSignupEnabled'
+	);
+	assertBoolean(
+		state.autoRenewalChargesEnabled,
+		'payload.state.autoRenewalChargesEnabled'
+	);
+	assertIsoDate(
+		state.autoRenewalChargesEnabledAt,
+		'payload.state.autoRenewalChargesEnabledAt'
+	);
+	assertBoolean(
+		state.affiliateProgramEnabled,
+		'payload.state.affiliateProgramEnabled'
+	);
+	if (
+		!Number.isInteger(state.affiliateCashbackPercent) ||
+		Number(state.affiliateCashbackPercent) < 0 ||
+		Number(state.affiliateCashbackPercent) > 100
+	) {
+		throw new Error('payload.state.affiliateCashbackPercent is invalid');
+	}
+	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
+};
+
+const assertBillingAdminAuditEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'occurredAt',
+		'correlationId',
+		'actorId',
+		'section',
+		'action',
+		'description',
+		'entity',
+		'metadata'
+	]);
+	if (payload.schemaVersion !== 1) {
+		throw new Error('Invalid Billing admin audit contract version');
+	}
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	if (
+		typeof payload.correlationId !== 'string' ||
+		!SAFE_CONTEXT_ID_PATTERN.test(payload.correlationId)
+	) {
+		throw new Error('payload.correlationId is invalid');
+	}
+	assertIdentifier(payload.actorId, 'payload.actorId');
+	if (
+		!BILLING_ADMIN_AUDIT_SECTIONS.includes(
+			payload.section as (typeof BILLING_ADMIN_AUDIT_SECTIONS)[number]
+		)
+	) {
+		throw new Error('payload.section is invalid');
+	}
+	if (
+		!BILLING_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as BillingAdminAuditAction
+		)
+	) {
+		throw new Error('payload.action is invalid');
+	}
+	assertString(payload.description, 'payload.description', {
+		maxLength: 2000
+	});
+	const entity = assertRecord(payload.entity, 'payload.entity');
+	assertExactKeys(
+		entity,
+		['type', 'id', 'label', 'targetUserId'],
+		[],
+		'payload.entity'
+	);
+	assertIdentifier(entity.type, 'payload.entity.type');
+	assertIdentifier(entity.id, 'payload.entity.id');
+	assertOptionalString(entity.label, 'payload.entity.label');
+	assertOptionalString(entity.targetUserId, 'payload.entity.targetUserId');
+	assertRecord(payload.metadata, 'payload.metadata');
+	return 'billing-admin-audit';
+};
+
 const assertAdminAuditEvent = (payload: JsonRecord): IntegrationKind => {
+	if (
+		BILLING_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as BillingAdminAuditAction
+		)
+	) {
+		return assertBillingAdminAuditEvent(payload);
+	}
 	assertExactKeys(payload, [
 		'schemaVersion',
 		'eventType',
@@ -1499,6 +2074,18 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 			return [assertNotificationDeliveryOutcome(payload)];
 		case CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE:
 			return [assertAdminAuditEvent(payload)];
+		case BILLING_IDENTITY_EVENT_TYPE:
+		case BILLING_TRIAL_REQUESTED_EVENT_TYPE:
+		case BILLING_REFERRAL_REQUESTED_EVENT_TYPE:
+		case BILLING_NOTIFICATION_ROUTING_EVENT_TYPE:
+		case BILLING_LIFECYCLE_REPAIR_EVENT_TYPE:
+		case BILLING_OFFER_EVENT_TYPE:
+		case BILLING_PAYMENT_DETAILS_EVENT_TYPE:
+		case BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE:
+		case BILLING_AFFILIATE_EVENT_TYPE:
+		case BILLING_SETTINGS_SOURCE_EVENT_TYPE:
+		case BILLING_SETTINGS_EVENT_TYPE:
+			return assertBillingVersionedEvent(payload);
 		case REPORTING_IDENTITY_USER_EVENT_TYPE:
 		case REPORTING_BILLING_PAYMENT_EVENT_TYPE:
 		case REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE:
@@ -1546,6 +2133,14 @@ export function assertMessagingEventContract(
 	) {
 		throw new Error(
 			'Reporting projection eventId must match the AMQP messageId'
+		);
+	}
+	if (
+		BILLING_VERSIONED_EVENT_TYPES.has(String(payload.eventType)) &&
+		payload.eventId !== metadata.messageId
+	) {
+		throw new Error(
+			'Billing versioned eventId must match the AMQP messageId'
 		);
 	}
 	if (metadata.kind && !expectedKinds.includes(metadata.kind)) {

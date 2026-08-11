@@ -1,4 +1,5 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
+import { BillingBoundaryModule } from '@/billing-boundary/billing-boundary.module';
 import { EmailModule } from '@/email/email.module';
 import { SmsModule } from '@/sms/sms.module';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
@@ -13,6 +14,7 @@ import { Module } from '@nestjs/common';
 		EmailModule,
 		SmsModule,
 		AdminEventLogModule,
+		BillingBoundaryModule,
 		TelegramBotModule
 	],
 	controllers: [UserController],

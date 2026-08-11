@@ -1,5 +1,6 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { AuthModule } from '@/auth/auth.module';
+import { BillingBoundaryModule } from '@/billing-boundary/billing-boundary.module';
 import { SubscriptionExpiryService } from '@/subscription/subscription-expiry.service';
 import { SubscriptionController } from '@/subscription/subscription.controller';
 import { SubscriptionService } from '@/subscription/subscription.service';
@@ -7,7 +8,7 @@ import { WidgetsAdminOverviewClient } from '@/widgets-internal/widgets-admin-ove
 import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [AuthModule, AdminEventLogModule],
+	imports: [AuthModule, AdminEventLogModule, BillingBoundaryModule],
 	controllers: [SubscriptionController],
 	providers: [
 		SubscriptionService,

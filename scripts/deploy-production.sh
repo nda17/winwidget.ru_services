@@ -84,6 +84,10 @@ NOTIFICATION_DELIVERY_READINESS_URL="${NOTIFICATION_DELIVERY_READINESS_URL:-http
 CAMPAIGNS_READINESS_URL="${CAMPAIGNS_READINESS_URL:-http://127.0.0.1:4500/health/ready}"
 REPORTING_READINESS_URL="${REPORTING_READINESS_URL:-http://127.0.0.1:4600/health/ready}"
 WIDGETS_READINESS_URL="${WIDGETS_READINESS_URL:-http://127.0.0.1:4700/health/ready}"
+BILLING_API_READINESS_URL="${BILLING_API_READINESS_URL:-http://127.0.0.1:4800/health/ready}"
+BILLING_SCHEDULER_READINESS_URL="${BILLING_SCHEDULER_READINESS_URL:-http://127.0.0.1:4801/health/ready}"
+BILLING_WORKER_READINESS_URL="${BILLING_WORKER_READINESS_URL:-http://127.0.0.1:4802/health/ready}"
+BILLING_OUTBOX_READINESS_URL="${BILLING_OUTBOX_READINESS_URL:-http://127.0.0.1:4803/health/ready}"
 NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
@@ -106,6 +110,8 @@ source "$server_root/scripts/reporting-database-lifecycle.sh"
 source "$server_root/scripts/reporting-cutover-lifecycle.sh"
 # shellcheck source=scripts/widgets-database-lifecycle.sh
 source "$server_root/scripts/widgets-database-lifecycle.sh"
+# shellcheck source=scripts/billing-database-lifecycle.sh
+source "$server_root/scripts/billing-database-lifecycle.sh"
 # shellcheck source=scripts/campaigns-contract-migration-guard.sh
 source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
@@ -148,6 +154,106 @@ deploy) ;;
 	exit 1
 	;;
 esac
+
+billing_automatic_prod_push="${BILLING_AUTOMATIC_PROD_PUSH:-false}"
+billing_database_phase="$(billing_database_current_phase)" || {
+	echo 'Billing database lifecycle marker is invalid.' >&2
+	exit 1
+}
+case "$billing_database_phase" in
+absent)
+	if [[ "$billing_automatic_prod_push" == 'true' ]]; then
+		echo "Automatic backend revision $deploy_revision is verified but Billing first rollout is deferred."
+		echo 'Run the manual Billing prepare action so source queues are ready before the guarded Core migration.'
+		exit 0
+	fi
+	echo 'Manual full deployment is blocked before Billing first-rollout preparation.' >&2
+	echo 'Use the Billing prepare action; routine migrate-before-recreate is unsafe for the new source events.' >&2
+	exit 1
+	;;
+preparing | aborted)
+	echo "Billing lifecycle is incomplete at phase=$billing_database_phase." >&2
+	echo 'Resume the exact pinned Billing prepare/abort action before a routine deployment.' >&2
+	exit 1
+	;;
+prepared | source-frozen | imported | projection-synced | forward-only | active | complete)
+	billing_database_guard_revision "$deploy_revision" || exit 1
+	[[ -f "$billing_cutover_marker" && ! -L "$billing_cutover_marker" &&
+		"$(stat -c '%u:%g:%a' "$billing_cutover_marker")" == '0:0:600' ]] || {
+		echo 'Billing routine deployment requires the durable post-migration cutover marker.' >&2
+		echo 'Resume the pinned Billing prepare action; do not run routine Core migrate.' >&2
+		exit 1
+	}
+	billing_routine_marker_state="$(awk -F= '
+		$1 == "phase" { phase=$2; phase_count += 1 }
+		$1 == "revision" { revision=$2; revision_count += 1 }
+		END {
+			if (phase_count != 1 || revision_count != 1) exit 1
+			printf "%s|%s", phase, revision
+		}
+	' "$billing_cutover_marker")" || {
+		echo 'Billing cutover marker identity is unreadable.' >&2
+		exit 1
+	}
+	[[ "$billing_routine_marker_state" == \
+		"$billing_database_phase|$(billing_database_marker_value ownership_revision)" ]] || {
+		echo 'Billing database/cutover marker phases or ownership revisions differ.' >&2
+		exit 1
+	}
+	;;
+*)
+	echo "Billing lifecycle phase is unsafe: $billing_database_phase." >&2
+	exit 1
+	;;
+esac
+billing_routes_env_state="$(
+	billing_read_env_value "$ENV_FILE" GATEWAY_ROUTES_JSON | node -e '
+const fs = require("node:fs");
+const routes = JSON.parse(fs.readFileSync(0, "utf8"));
+const prefixes = [
+  "/api/v1/payments",
+  "/api/v1/subscriptions",
+  "/api/v1/tariff-prices",
+  "/api/v1/affiliate",
+];
+if (!Array.isArray(routes)) process.exit(1);
+const billing = prefixes.every(prefix => routes.some(route =>
+  route?.pathPrefix === prefix && route.upstreamUrl === "http://127.0.0.1:4800" &&
+  route.authPolicy === "optional"
+));
+const legacy = prefixes.every(prefix => !routes.some(route => route?.pathPrefix === prefix)) &&
+  routes.some(route => route?.pathPrefix === "/api/v1" &&
+    route.upstreamUrl === "http://127.0.0.1:4200");
+process.stdout.write(billing ? "billing" : legacy ? "legacy" : "unsafe");
+'
+)" || {
+	echo 'Billing Gateway route env contract is invalid.' >&2
+	exit 1
+}
+case "$billing_database_phase:$billing_routes_env_state" in
+prepared:legacy | active:billing | complete:billing) ;;
+source-frozen:* | imported:* | projection-synced:* | forward-only:*)
+	echo "Routine deployment is blocked during Billing cutover phase=$billing_database_phase." >&2
+	exit 1
+	;;
+prepared:billing)
+	echo 'Billing route env is staged; only the pinned cutover may restart Gateway.' >&2
+	exit 1
+	;;
+*)
+	echo "Billing lifecycle/routes are inconsistent: phase=$billing_database_phase routes=$billing_routes_env_state." >&2
+	exit 1
+	;;
+esac
+billing_runtime_services=(
+	billing-api
+	billing-worker
+	billing-outbox-publisher
+)
+if [[ "$billing_database_phase" == 'active' ||
+	"$billing_database_phase" == 'complete' ]]; then
+	billing_runtime_services+=(billing-scheduler)
+fi
 
 widgets_core_cleanup_runtime_deploy=false
 widgets_core_cleanup_stop_recovery_active=false
@@ -353,6 +459,8 @@ export REPORTING_REVISION="$deploy_revision"
 export REPORTING_IMAGE="winwidget-reporting:git-$deploy_revision"
 export WIDGETS_REVISION="$deploy_revision"
 export WIDGETS_IMAGE="winwidget-widgets:git-$deploy_revision"
+export BILLING_REVISION="$deploy_revision"
+export BILLING_IMAGE="winwidget-billing:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
@@ -363,6 +471,7 @@ echo "Building Widgets image: $WIDGETS_IMAGE"
 echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
 echo "Building Campaigns image: $CAMPAIGNS_IMAGE"
 echo "Building Reporting image for the coordinated backend revision: $REPORTING_IMAGE"
+echo "Building Billing image for the coordinated backend revision: $BILLING_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -412,7 +521,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION)
+		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION | BILLING_IMAGE | BILLING_REVISION)
 			continue
 			;;
 	esac
@@ -512,6 +621,9 @@ assert_distinct_database_roles() {
 		WIDGETS_DATABASE_URL
 		WIDGETS_MIGRATION_DATABASE_URL
 		WIDGETS_BACKUP_URL
+		BILLING_DATABASE_URL
+		BILLING_MIGRATION_DATABASE_URL
+		BILLING_BACKUP_URL
 	)
 	local -a role_users=()
 	local key
@@ -524,7 +636,7 @@ assert_distinct_database_roles() {
 	for ((left = 0; left < ${#role_users[@]}; left++)); do
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
-				echo "Core, Notification Delivery, Campaigns, Reporting and Widgets database URLs must use sixteen distinct PostgreSQL roles." >&2
+				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets and Billing database URLs must use nineteen distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -732,6 +844,14 @@ case "$mode" in
 		require_env_key "WIDGETS_POSTGRES_DATA_VOLUME"
 		require_env_key "WIDGETS_POSTGRES_ADMIN_USER"
 		require_env_key "WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "BILLING_DATABASE_URL"
+		require_env_key "BILLING_MIGRATION_DATABASE_URL"
+		require_env_key "BILLING_BACKUP_URL"
+		require_env_key "BILLING_POSTGRES_IMAGE"
+		require_env_key "BILLING_POSTGRES_PORT"
+		require_env_key "BILLING_POSTGRES_DATA_VOLUME"
+		require_env_key "BILLING_POSTGRES_ADMIN_USER"
+		require_env_key "BILLING_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "CORE_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "DATABASE_RESTORE_STORAGE_DIR"
 		require_env_key "DATABASE_RESTORE_QUEUE_SECRET"
@@ -753,6 +873,8 @@ case "$mode" in
 		require_env_key "RABBITMQ_CAMPAIGNS_URL"
 		require_env_key "RABBITMQ_REPORTING_URL"
 		require_env_key "RABBITMQ_WIDGETS_URL"
+		require_env_key "RABBITMQ_BILLING_WORKER_URL"
+		require_env_key "RABBITMQ_BILLING_PUBLISHER_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -803,6 +925,22 @@ case "$mode" in
 		require_env_key "WIDGETS_OUTBOX_RETENTION_DAYS"
 		require_env_key "WIDGETS_RECEIPT_RETENTION_DAYS"
 		require_env_key "WIDGETS_FAILURE_DETAIL_RETENTION_DAYS"
+		require_env_key "BILLING_INTERNAL_BASE_URL"
+		require_env_key "BILLING_CORE_INTERNAL_BASE_URL"
+		require_env_key "BILLING_INTERNAL_TOKEN"
+		require_env_key "BILLING_INTERNAL_TIMEOUT_MS"
+		require_env_key "BILLING_LISTEN_HOST"
+		require_env_key "BILLING_API_PORT"
+		require_env_key "BILLING_SCHEDULER_PORT"
+		require_env_key "BILLING_WORKER_PORT"
+		require_env_key "BILLING_OUTBOX_PUBLISHER_PORT"
+		require_env_key "BILLING_PREFETCH"
+		require_env_key "BILLING_OUTBOX_BATCH_SIZE"
+		require_env_key "BILLING_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "BILLING_OUTBOX_RETENTION_DAYS"
+		require_env_key "BILLING_RECEIPT_RETENTION_DAYS"
+		require_env_key "BILLING_FAILURE_DETAIL_RETENTION_DAYS"
+		require_env_key "RECAPTCHA_CLIENT_URL"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
 		require_env_key "MAINTENANCE_HEALTH_PORT"
@@ -1078,6 +1216,44 @@ case "$mode" in
 			echo 'Widgets timeout, entitlement staleness, prefetch, Outbox and retention settings are outside the reviewed bounds.' >&2
 			exit 1
 		fi
+		if [[ "$(get_env_value BILLING_LISTEN_HOST)" != '127.0.0.1' ||
+			"$(get_env_value BILLING_API_PORT)" != '4800' ||
+			"$(get_env_value BILLING_SCHEDULER_PORT)" != '4801' ||
+			"$(get_env_value BILLING_WORKER_PORT)" != '4802' ||
+			"$(get_env_value BILLING_OUTBOX_PUBLISHER_PORT)" != '4803' ||
+			"$(get_env_value BILLING_INTERNAL_BASE_URL)" != 'http://127.0.0.1:4800' ||
+			"$(get_env_value BILLING_CORE_INTERNAL_BASE_URL)" != 'http://127.0.0.1:4200' ]]; then
+			echo 'Billing runtime must use the reviewed loopback hosts and ports 4800-4803.' >&2
+			exit 1
+		fi
+		billing_internal_token="$(get_env_value BILLING_INTERNAL_TOKEN)"
+		if [[ "$billing_internal_token" == change_me* ||
+			"$billing_internal_token" == 'ci_billing_internal_token_at_least_32_chars' ||
+			${#billing_internal_token} -lt 32 ||
+			"$billing_internal_token" == "$(get_env_value WIDGETS_INTERNAL_TOKEN)" ]]; then
+			echo 'BILLING_INTERNAL_TOKEN must be a unique production-only secret of at least 32 characters.' >&2
+			exit 1
+		fi
+		unset billing_internal_token
+		billing_internal_timeout_ms="$(get_env_value BILLING_INTERNAL_TIMEOUT_MS)"
+		billing_prefetch="$(get_env_value BILLING_PREFETCH)"
+		billing_outbox_batch_size="$(get_env_value BILLING_OUTBOX_BATCH_SIZE)"
+		billing_outbox_poll_interval_ms="$(get_env_value BILLING_OUTBOX_POLL_INTERVAL_MS)"
+		billing_outbox_retention_days="$(get_env_value BILLING_OUTBOX_RETENTION_DAYS)"
+		billing_receipt_retention_days="$(get_env_value BILLING_RECEIPT_RETENTION_DAYS)"
+		billing_failure_detail_retention_days="$(get_env_value BILLING_FAILURE_DETAIL_RETENTION_DAYS)"
+		if [[ ! "$billing_internal_timeout_ms" =~ ^[0-9]+$ ]] ||
+			((billing_internal_timeout_ms < 500 || billing_internal_timeout_ms > 60000)) ||
+			[[ ! "$billing_prefetch" =~ ^[1-9][0-9]*$ ]] || ((billing_prefetch > 100)) ||
+			[[ ! "$billing_outbox_batch_size" =~ ^[1-9][0-9]*$ ]] || ((billing_outbox_batch_size > 500)) ||
+			[[ ! "$billing_outbox_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((billing_outbox_poll_interval_ms < 100 || billing_outbox_poll_interval_ms > 60000)) ||
+			[[ ! "$billing_outbox_retention_days" =~ ^[1-9][0-9]*$ ]] || ((billing_outbox_retention_days > 365)) ||
+			[[ ! "$billing_receipt_retention_days" =~ ^[1-9][0-9]*$ ]] || ((billing_receipt_retention_days > 730)) ||
+			[[ ! "$billing_failure_detail_retention_days" =~ ^[1-9][0-9]*$ ]] || ((billing_failure_detail_retention_days > 365)); then
+			echo 'Billing timeout, prefetch, Outbox and retention settings are outside the reviewed bounds.' >&2
+			exit 1
+		fi
 		require_env_base64url_secret DATABASE_RESTORE_QUEUE_SECRET 43 128
 		database_restore_queue_secret="$(
 			get_env_value DATABASE_RESTORE_QUEUE_SECRET
@@ -1126,6 +1302,9 @@ case "$mode" in
 		assert_database_restore_admin_secret_file \
 			WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE \
 			"$APP_ROOT/deploy/backend/.widgets-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			BILLING_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.billing-postgres-admin-password"
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
 			SMTP_GREETING_TIMEOUT_MS \
@@ -2445,6 +2624,7 @@ for (const forbidden of [
 		throw new Error(`Widgets image contains Core artifact: ${forbidden}`);
 	}
 }
+
 const expectedAssets = [
 	"calculator-button.png", "calculator.js", "callback-button.png", "callback.js",
 	"email-logo.png", "gift-button.png", "helpers/libphonenumber-min.js",
@@ -2463,6 +2643,32 @@ process.stdout.write("Standalone Widgets image artifact verified\n");
 	'
 }
 
+verify_billing_image_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"$BILLING_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of [
+	"dist/src/main.js",
+	"dist/src/cutover-main.js",
+	"prisma/schema.prisma",
+]) fs.accessSync(required);
+require("@prisma/billing-client");
+for (const forbidden of [
+	"dist/src/app.module.js",
+	"dist/src/payment/payment.service.js",
+	"dist/src/outbox-publisher-main.js",
+	"public/widgets",
+]) {
+	if (fs.existsSync(forbidden)) {
+		throw new Error(`Billing image contains Core artifact: ${forbidden}`);
+	}
+}
+process.stdout.write("Standalone Billing image artifact verified\n");
+	'
+}
+
 verify_database_restore_image_artifact() {
 	docker run --rm --network none \
 		--entrypoint node \
@@ -2476,6 +2682,7 @@ for (const required of [
 	"apps/campaigns/prisma/migrations",
 	"apps/reporting/prisma/migrations",
 	"apps/widgets/prisma/migrations",
+	"apps/billing/prisma/migrations",
 	"/usr/bin/pg_dump",
 	"/usr/bin/pg_restore",
 	"/usr/bin/psql",
@@ -2516,7 +2723,40 @@ for (const [index, url] of urls.entries()) {
 		/[\0\r\n]/.test(password)
 	) throw new Error(`Invalid Widgets database URL boundary at index ${index}`);
 }
+
 process.stdout.write("Widgets runtime, migration and backup URL boundaries verified\n");
+'
+}
+
+validate_billing_database_urls() {
+	printf '%s\n%s\n%s\n' \
+		"$(get_env_value BILLING_DATABASE_URL)" \
+		"$(get_env_value BILLING_MIGRATION_DATABASE_URL)" \
+		"$(get_env_value BILLING_BACKUP_URL)" |
+		docker run --rm -i --network none \
+			-e "EXPECTED_PORT=$(get_env_value BILLING_POSTGRES_PORT)" \
+			--entrypoint node "$BILLING_IMAGE" -e '
+const { readFileSync } = require("node:fs");
+const urls = readFileSync(0, "utf8").trim().split("\n").map(value => new URL(value));
+const expectedUsers = [
+	"winwidget_billing_runtime",
+	"winwidget_billing_migration",
+	"winwidget_billing_backup",
+];
+for (const [index, url] of urls.entries()) {
+	const password = decodeURIComponent(url.password);
+	if (
+		url.protocol !== "postgresql:" ||
+		decodeURIComponent(url.username) !== expectedUsers[index] ||
+		url.hostname !== "127.0.0.1" ||
+		url.port !== process.env.EXPECTED_PORT ||
+		url.pathname !== "/winwidget_billing" ||
+		url.searchParams.get("schema") !== "billing" ||
+		password.length < 16 ||
+		/[\0\r\n]/.test(password)
+	) throw new Error(`Invalid Billing database URL boundary at index ${index}`);
+}
+process.stdout.write("Billing runtime, migration and backup URL boundaries verified\n");
 '
 }
 
@@ -2566,6 +2806,7 @@ compose_target \
 	--profile campaigns-migration \
 	--profile reporting-migration \
 	--profile widgets-migration \
+	--profile billing-migration \
 	config --quiet
 compose_target build --provenance=false \
 	api \
@@ -2575,14 +2816,17 @@ compose_target build --provenance=false \
 	notification-delivery-worker \
 	campaigns-service \
 	reporting-service \
-	widgets-service
+	widgets-service \
+	billing-api
 verify_notification_delivery_image_artifact
 verify_campaigns_image_artifact
 verify_reporting_image_artifact
 verify_widgets_image_artifact
+verify_billing_image_artifact
 verify_database_restore_image_artifact
 validate_campaigns_database_urls
 validate_widgets_database_urls
+validate_billing_database_urls
 assert_campaigns_contract_migration_applied_for_routine_deploy
 initialize_campaigns_database_lifecycle_guard \
 	"a routine full deployment" identity-if-present
@@ -3588,6 +3832,12 @@ reporting_credentials="$(
 widgets_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_WIDGETS_URL"
 )"
+billing_worker_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_BILLING_WORKER_URL"
+)"
+billing_publisher_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_BILLING_PUBLISHER_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -3632,6 +3882,21 @@ if [[ "$widgets_user" != "winwidget-widgets" ]]; then
 	echo "RABBITMQ_WIDGETS_URL must use the dedicated winwidget-widgets user" >&2
 	exit 1
 fi
+billing_worker_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$billing_worker_credentials")" |
+		base64 --decode
+)"
+billing_worker_password_base64="$(sed -n '2p' <<<"$billing_worker_credentials")"
+billing_publisher_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$billing_publisher_credentials")" |
+		base64 --decode
+)"
+billing_publisher_password_base64="$(sed -n '2p' <<<"$billing_publisher_credentials")"
+if [[ "$billing_worker_user" != 'winwidget-billing-worker' ||
+	"$billing_publisher_user" != 'winwidget-billing-publisher' ]]; then
+	echo 'Billing RabbitMQ URLs must use the two dedicated canonical users.' >&2
+	exit 1
+fi
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -3649,6 +3914,8 @@ service_users=(
 	"$campaigns_user"
 	"$reporting_user"
 	"$widgets_user"
+	"$billing_worker_user"
+	"$billing_publisher_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -3909,6 +4176,34 @@ rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" "$RABBITMQ_PROV
 '
 }
 
+provision_billing_rabbitmq_topic_permissions() {
+	local worker_user="$1" publisher_user="$2"
+	local worker_read publisher_write
+	worker_read='^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.settings\.source\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v1|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$'
+	publisher_write='^(payment\.succeeded\.v1|payment\.notification\.telegram\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.subscription-expiry\.(email|telegram)\.requested\.v1|billing\.(payment|subscription)(\.details)?\.changed\.v1|billing\.(affiliate|settings)\.changed\.v1|admin\.audit\.billing\.v1)$'
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_BILLING_WORKER_USER="$worker_user" \
+	RABBITMQ_BILLING_PUBLISHER_USER="$publisher_user" \
+	RABBITMQ_BILLING_WORKER_TOPIC_READ="$worker_read" \
+	RABBITMQ_BILLING_PUBLISHER_TOPIC_WRITE="$publisher_write" \
+		docker exec \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_BILLING_WORKER_USER \
+			-e RABBITMQ_BILLING_PUBLISHER_USER \
+			-e RABBITMQ_BILLING_WORKER_TOPIC_READ \
+			-e RABBITMQ_BILLING_PUBLISHER_TOPIC_WRITE \
+			"$provisioning_rabbitmq_container_id" sh -euc '
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" "$RABBITMQ_BILLING_WORKER_USER"
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" "$RABBITMQ_BILLING_PUBLISHER_USER"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_BILLING_WORKER_USER" winwidget.events "^$" \
+	"$RABBITMQ_BILLING_WORKER_TOPIC_READ"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+	"$RABBITMQ_BILLING_PUBLISHER_USER" winwidget.events \
+	"$RABBITMQ_BILLING_PUBLISHER_TOPIC_WRITE" "^$"
+'
+}
+
 assert_campaigns_shared_rabbitmq_topology() {
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
@@ -4061,6 +4356,22 @@ provision_rabbitmq_user \
 	"$WIDGETS_CANONICAL_RABBITMQ_READ_PATTERN" \
 	''
 provision_widgets_rabbitmq_topic_permissions "$widgets_user"
+provision_rabbitmq_user \
+	"$billing_worker_user" \
+	"$billing_worker_password_base64" \
+	'^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+	'^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+	'^winwidget\.(events|billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+	''
+	provision_rabbitmq_user \
+		"$billing_publisher_user" \
+		"$billing_publisher_password_base64" \
+		'^$' \
+		'^winwidget\.(events|billing\.(retry|dead-letter))$' \
+		'^$' \
+		''
+provision_billing_rabbitmq_topic_permissions \
+	"$billing_worker_user" "$billing_publisher_user"
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
 	"$rabbitmq_monitor_password_base64" \
@@ -6847,15 +7158,93 @@ else
 	wait_for_rabbitmq_topology
 fi
 
+verify_billing_rabbitmq_consumers() {
+	local container_id vhost expected_active
+	container_id="$(compose_target ps --status running -q rabbitmq)"
+	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	vhost="$(get_env_value RABBITMQ_VHOST)"
+	expected_active='false'
+	if [[ "$billing_database_phase" == 'active' ||
+		"$billing_database_phase" == 'complete' ]]; then
+		expected_active='true'
+	fi
+	docker exec "$container_id" rabbitmqctl --silent list_queues -p "$vhost" \
+		name consumers | BILLING_EXPECT_ACTIVE="$expected_active" node -e '
+const fs = require("node:fs");
+const rows = fs.readFileSync(0, "utf8").trim().split("\n").filter(Boolean)
+  .map(line => line.trim().split(/\s+/));
+const queues = new Map(rows.map(([name, consumers]) => [name, Number(consumers)]));
+const source = [
+  "winwidget.billing.identity.v1",
+  "winwidget.billing.notification-routing.v1",
+  "winwidget.billing.settings-source.v1",
+  "winwidget.billing.trial.v1",
+  "winwidget.billing.referral.v1",
+  "winwidget.billing.offer.v1",
+  "winwidget.billing.lifecycle-repair.v1",
+];
+const active = [
+  "winwidget.payment.auto-renewal",
+  "winwidget.billing.notification-delivery-outcome",
+];
+const all = [...source, ...active];
+for (const queue of all) {
+  for (const suffix of ["", ".retry.1", ".retry.2", ".retry.3", ".dead-letter"])
+    if (!queues.has(`${queue}${suffix}`)) process.exit(1);
+}
+if (source.some(queue => queues.get(queue) !== 1)) process.exit(1);
+if (process.env.BILLING_EXPECT_ACTIVE === "true") {
+  if (active.some(queue => queues.get(queue) !== 1)) process.exit(1);
+} else {
+  if (queues.get("winwidget.payment.auto-renewal") !== 1 ||
+      queues.get("winwidget.billing.notification-delivery-outcome") !== 0)
+    process.exit(1);
+}
+'
+}
+
+compose_target up -d --no-deps --force-recreate \
+	billing-api \
+	billing-worker \
+	billing-outbox-publisher
+if [[ "$billing_database_phase" == 'active' ||
+	"$billing_database_phase" == 'complete' ]]; then
+	compose_target up -d --no-deps --force-recreate billing-scheduler
+else
+	compose_target stop --timeout 90 billing-scheduler >/dev/null 2>&1 || true
+fi
+wait_for_cutover_revision \
+	"$BILLING_API_READINESS_URL" "$BILLING_REVISION" "Billing API"
+wait_for_cutover_revision \
+	"$BILLING_WORKER_READINESS_URL" "$BILLING_REVISION" "Billing worker"
+wait_for_cutover_revision \
+	"$BILLING_OUTBOX_READINESS_URL" "$BILLING_REVISION" "Billing Outbox publisher"
+if [[ "$billing_database_phase" == 'active' ||
+	"$billing_database_phase" == 'complete' ]]; then
+	wait_for_cutover_revision \
+		"$BILLING_SCHEDULER_READINESS_URL" "$BILLING_REVISION" \
+		"Billing scheduler"
+fi
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if verify_billing_rabbitmq_consumers; then
+		break
+	fi
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo 'Billing RabbitMQ consumer ownership verification failed.' >&2
+		exit 1
+	fi
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service rabbitmq || true
-	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600 and 4700:"
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700 and 4800-4803:"
 	ss -ltnp \
-		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 )' ||
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 )' ||
 		true
 }
 
@@ -6873,7 +7262,8 @@ ensure_required_services_running() {
 		notification-delivery-worker \
 		campaigns-service \
 		reporting-service \
-		widgets-service; do
+		widgets-service \
+		"${billing_runtime_services[@]}"; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -7259,7 +7649,8 @@ for service in \
 	notification-delivery-worker \
 	campaigns-service \
 	reporting-service \
-	widgets-service; do
+	widgets-service \
+	"${billing_runtime_services[@]}"; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -7286,6 +7677,9 @@ for service in \
 	fi
 	if [[ "$service" == "widgets-service" ]]; then
 		expected_image_revision="$WIDGETS_REVISION"
+	fi
+	if [[ "$service" == billing-* ]]; then
+		expected_image_revision="$BILLING_REVISION"
 	fi
 	if [[ "$image_revision" != "$expected_image_revision" ]]; then
 		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
@@ -7348,6 +7742,10 @@ verify_notification_database_lifecycle_unchanged \
 	"$notification_database_phase_before"
 verify_campaigns_database_lifecycle_unchanged
 reporting_verify_database_lifecycle_unchanged
+[[ "$(billing_database_current_phase)" == "$billing_database_phase" ]] || {
+	echo 'Billing database lifecycle changed during routine deployment.' >&2
+	exit 1
+}
 [[ "$(widgets_service_identity_state)" == 'active' ]] || {
 	echo 'Widgets ownership marker changed during routine deployment.' >&2
 	exit 1
@@ -7373,4 +7771,4 @@ fi
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 compose_target ps \
-	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service "${billing_runtime_services[@]}" rabbitmq

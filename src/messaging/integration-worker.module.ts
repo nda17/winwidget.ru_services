@@ -1,4 +1,5 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
+import { BillingBoundaryModule } from '@/billing-boundary/billing-boundary.module';
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
@@ -17,6 +18,7 @@ import { ConfigModule } from '@nestjs/config';
 		}),
 		PrismaModule,
 		AdminEventLogModule,
+		BillingBoundaryModule,
 		RabbitMqModule,
 		PaymentWorkerModule,
 		ScheduledJobsModule

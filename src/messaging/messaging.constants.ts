@@ -27,6 +27,25 @@ export const CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE = ADMIN_AUDIT_EVENT_TYPE;
 export const REPORTING_ADMIN_AUDIT_ROUTING_KEY =
 	'admin.audit.reporting.v1';
 export const WIDGETS_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.widgets.v1';
+export const BILLING_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.billing.v1';
+export const BILLING_IDENTITY_EVENT_TYPE = 'billing.identity.changed.v1';
+export const BILLING_TRIAL_REQUESTED_EVENT_TYPE =
+	'billing.trial.requested.v1';
+export const BILLING_REFERRAL_REQUESTED_EVENT_TYPE =
+	'billing.referral.requested.v1';
+export const BILLING_NOTIFICATION_ROUTING_EVENT_TYPE =
+	'billing.notification-routing.changed.v1';
+export const BILLING_LIFECYCLE_REPAIR_EVENT_TYPE =
+	'billing.lifecycle-repair.requested.v1';
+export const BILLING_OFFER_EVENT_TYPE = 'billing.offer.changed.v1';
+export const BILLING_PAYMENT_DETAILS_EVENT_TYPE =
+	'billing.payment.details.changed.v1';
+export const BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE =
+	'billing.subscription.details.changed.v1';
+export const BILLING_AFFILIATE_EVENT_TYPE = 'billing.affiliate.changed.v1';
+export const BILLING_SETTINGS_SOURCE_EVENT_TYPE =
+	'billing.settings.source.changed.v1';
+export const BILLING_SETTINGS_EVENT_TYPE = 'billing.settings.changed.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
 export const REPORTING_IDENTITY_USER_EVENT_TYPE =
 	'identity.user.changed.v1';
@@ -62,6 +81,11 @@ export const INTEGRATION_KINDS = [
 	'campaign-admin-audit',
 	'reporting-admin-audit',
 	'widgets-admin-audit',
+	'billing-admin-audit',
+	'billing-payment-projection',
+	'billing-subscription-projection',
+	'billing-affiliate-projection',
+	'billing-settings-projection',
 	'auto-renewal'
 ] as const;
 
@@ -98,6 +122,11 @@ export const CORE_OWNED_INTEGRATION_KINDS = [
 	'campaign-admin-audit',
 	'reporting-admin-audit',
 	'widgets-admin-audit',
+	'billing-admin-audit',
+	'billing-payment-projection',
+	'billing-subscription-projection',
+	'billing-affiliate-projection',
+	'billing-settings-projection',
 	'auto-renewal'
 ] as const satisfies readonly IntegrationKind[];
 
@@ -122,13 +151,28 @@ export const REPORTING_PROJECTION_KINDS = [
 export type ReportingProjectionKind =
 	(typeof REPORTING_PROJECTION_KINDS)[number];
 
+export const BILLING_SOURCE_KINDS = [
+	'billing-identity-source',
+	'billing-trial-source',
+	'billing-referral-source',
+	'billing-notification-routing-source',
+	'billing-lifecycle-repair-source',
+	'billing-offer-source',
+	'billing-settings-source'
+] as const;
+
+export type BillingSourceKind = (typeof BILLING_SOURCE_KINDS)[number];
+
 export const MESSAGING_KINDS = [
 	...INTEGRATION_KINDS,
 	...MAINTENANCE_KINDS
 ] as const;
 
 export type CoreMessagingKind = (typeof MESSAGING_KINDS)[number];
-export type MessagingKind = CoreMessagingKind | ReportingProjectionKind;
+export type MessagingKind =
+	| CoreMessagingKind
+	| ReportingProjectionKind
+	| BillingSourceKind;
 
 // MESSAGING_KINDS is the federated monitoring/admin contract. Topology ownership
 // is narrower: Widgets owns its provider queues and Core must not recreate them
@@ -168,6 +212,12 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'reporting-admin-audit': REPORTING_ADMIN_AUDIT_ROUTING_KEY,
 	'widgets-admin-audit': WIDGETS_ADMIN_AUDIT_ROUTING_KEY,
 	'auto-renewal': AUTO_RENEWAL_CHARGE_EVENT_TYPE,
+	'billing-admin-audit': BILLING_ADMIN_AUDIT_ROUTING_KEY,
+	'billing-payment-projection': BILLING_PAYMENT_DETAILS_EVENT_TYPE,
+	'billing-subscription-projection':
+		BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
+	'billing-affiliate-projection': BILLING_AFFILIATE_EVENT_TYPE,
+	'billing-settings-projection': BILLING_SETTINGS_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE,
 	'reporting-identity-user': REPORTING_IDENTITY_USER_EVENT_TYPE,
 	'reporting-billing-payment': REPORTING_BILLING_PAYMENT_EVENT_TYPE,
@@ -175,7 +225,15 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 		REPORTING_BILLING_SUBSCRIPTION_EVENT_TYPE,
 	'reporting-widget': REPORTING_WIDGET_EVENT_TYPE,
 	'reporting-lead': REPORTING_LEAD_EVENT_TYPE,
-	'reporting-settings': REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE
+	'reporting-settings': REPORTING_CORE_OPERATIONAL_ROUTING_EVENT_TYPE,
+	'billing-identity-source': BILLING_IDENTITY_EVENT_TYPE,
+	'billing-trial-source': BILLING_TRIAL_REQUESTED_EVENT_TYPE,
+	'billing-referral-source': BILLING_REFERRAL_REQUESTED_EVENT_TYPE,
+	'billing-notification-routing-source':
+		BILLING_NOTIFICATION_ROUTING_EVENT_TYPE,
+	'billing-lifecycle-repair-source': BILLING_LIFECYCLE_REPAIR_EVENT_TYPE,
+	'billing-offer-source': BILLING_OFFER_EVENT_TYPE,
+	'billing-settings-source': BILLING_SETTINGS_SOURCE_EVENT_TYPE
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
@@ -202,6 +260,13 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'reporting-admin-audit': 'winwidget.admin.audit.reporting.v1',
 	'widgets-admin-audit': 'winwidget.admin.audit.widgets.v1',
 	'auto-renewal': 'winwidget.payment.auto-renewal',
+	'billing-admin-audit': 'winwidget.admin.audit.billing.v1',
+	'billing-payment-projection':
+		'winwidget.core.billing.payment-details.v1',
+	'billing-subscription-projection':
+		'winwidget.core.billing.subscription-details.v1',
+	'billing-affiliate-projection': 'winwidget.core.billing.affiliate.v1',
+	'billing-settings-projection': 'winwidget.core.billing.settings.v1',
 	'database-backup': 'winwidget.maintenance.database-backup',
 	'reporting-identity-user': 'winwidget.reporting.identity-user',
 	'reporting-billing-payment': 'winwidget.reporting.billing-payment',
@@ -209,7 +274,16 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 		'winwidget.reporting.billing-subscription',
 	'reporting-widget': 'winwidget.reporting.widget',
 	'reporting-lead': 'winwidget.reporting.lead',
-	'reporting-settings': 'winwidget.reporting.settings'
+	'reporting-settings': 'winwidget.reporting.settings',
+	'billing-identity-source': 'winwidget.billing.identity.v1',
+	'billing-trial-source': 'winwidget.billing.trial.v1',
+	'billing-referral-source': 'winwidget.billing.referral.v1',
+	'billing-notification-routing-source':
+		'winwidget.billing.notification-routing.v1',
+	'billing-lifecycle-repair-source':
+		'winwidget.billing.lifecycle-repair.v1',
+	'billing-offer-source': 'winwidget.billing.offer.v1',
+	'billing-settings-source': 'winwidget.billing.settings-source.v1'
 };
 
 export const INTEGRATION_ROUTING_KEYS = MESSAGING_ROUTING_KEYS;

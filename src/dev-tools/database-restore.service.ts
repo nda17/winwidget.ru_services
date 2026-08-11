@@ -22,7 +22,8 @@ const SERVICE_DATABASE_SCHEMAS = [
 	},
 	{ schema: 'campaigns', label: 'Campaigns' },
 	{ schema: 'reporting', label: 'Reporting' },
-	{ schema: 'widgets', label: 'Widgets' }
+	{ schema: 'widgets', label: 'Widgets' },
+	{ schema: 'billing', label: 'Billing' }
 ] as const;
 const REPORTING_PRODUCER_FUNCTION_SIGNATURES = [
 	'public.reporting_producers_enabled()',

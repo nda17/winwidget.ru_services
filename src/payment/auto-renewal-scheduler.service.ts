@@ -1,3 +1,4 @@
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { enqueueAutoRenewalChargeRequestedEvent } from '@/messaging/auto-renewal-charge-event';
 import {
 	AUTO_RENEWAL_DUE_GRACE_MS,
@@ -48,7 +49,8 @@ export class AutoRenewalSchedulerService
 
 	constructor(
 		private readonly prisma: PrismaService,
-		private readonly paymentService: PaymentService
+		private readonly paymentService: PaymentService,
+		private readonly billingState: BillingCoreStateService
 	) {}
 
 	onModuleInit(): void {
@@ -64,6 +66,7 @@ export class AutoRenewalSchedulerService
 	}
 
 	async dispatchDueRenewals(): Promise<number> {
+		if (!(await this.billingState.isSchedulerEnabled())) return 0;
 		const settings = await this.prisma.siteSettings.upsert({
 			where: { id: 'singleton' },
 			update: {},

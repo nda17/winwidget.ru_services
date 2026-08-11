@@ -245,6 +245,7 @@ describe('AutoRenewalSchedulerService retry deadline', () => {
 	it('stops treating a one-time payment as blocking at the exact checkout deadline', () => {
 		const service = new AutoRenewalSchedulerService(
 			{} as never,
+			{} as never,
 			{} as never
 		);
 		const now = new Date('2026-07-29T09:00:00.000Z');
@@ -282,6 +283,7 @@ describe('AutoRenewalSchedulerService retry deadline', () => {
 	it('anchors the retry checkout deadline to dueAt instead of dispatch time', () => {
 		const service = new AutoRenewalSchedulerService(
 			{} as never,
+			{} as never,
 			{} as never
 		);
 		const method = Reflect.get(service, 'getCheckoutExpiresAt') as (
@@ -301,6 +303,7 @@ describe('AutoRenewalSchedulerService retry deadline', () => {
 
 	it('does not catch up a charge missed before global re-enable', () => {
 		const service = new AutoRenewalSchedulerService(
+			{} as never,
 			{} as never,
 			{} as never
 		);

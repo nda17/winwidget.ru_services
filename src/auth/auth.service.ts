@@ -1,6 +1,6 @@
 import { randomInt, randomUUID } from 'node:crypto';
-import { AffiliateService } from '@/affiliate/affiliate.service';
 import { AccessJwtService } from '@/auth/access-jwt.service';
+import { BillingRegistrationBoundaryService } from '@/billing-boundary/billing-registration-boundary.service';
 import { AuthDto } from '@/auth/dto/auth.dto';
 import { EmailRegisterDto } from '@/auth/dto/email-register.dto';
 import {
@@ -34,9 +34,7 @@ import {
 	UnauthorizedException
 } from '@nestjs/common';
 import {
-	Plan,
 	Role,
-	SubscriptionStatus,
 	UserStatus,
 	type VerificationChallenge,
 	VerificationChallengePurpose,
@@ -62,7 +60,7 @@ export class AuthService {
 		private emailService: EmailService,
 		private prisma: PrismaService,
 		private smsService: SmsService,
-		private affiliateService: AffiliateService
+		private billingRegistration: BillingRegistrationBoundaryService
 	) {}
 
 	async login(dto: AuthDto, request?: Request) {
@@ -116,10 +114,10 @@ export class AuthService {
 		}
 		const user = await this.userService.createVerifiedEmailUser({
 			email,
-			passwordHash: pendingRegistration.passwordHash
+			passwordHash: pendingRegistration.passwordHash,
+			referrerId: dto.referrerId
 		});
 
-		await this.affiliateService.registerReferral(dto.referrerId, user.id);
 		await this.deletePendingEmailRegistration(email);
 
 		return this.buildResponseObject(user, request);
@@ -239,10 +237,10 @@ export class AuthService {
 
 		const user = await this.userService.createPhoneUser({
 			phone,
-			password: dto.password
+			password: dto.password,
+			referrerId: dto.referrerId
 		});
 
-		await this.affiliateService.registerReferral(dto.referrerId, user.id);
 		await this.deletePhoneCode(phone);
 
 		return this.buildResponseObject(user, request);
@@ -467,7 +465,7 @@ export class AuthService {
 		request?: Request
 	) {
 		this.ensureUserActive(user);
-		await this.ensureTrialSubscription(user.id);
+		await this.billingRegistration.ensureTrial(user.id, user.createdAt);
 		const sessionId = randomUUID();
 		const tokens = this.issueTokens(user.id, user.rights, sessionId);
 		const expiresAt = dayjs()
@@ -531,22 +529,6 @@ export class AuthService {
 		});
 
 		return true;
-	}
-
-	private async ensureTrialSubscription(userId: string) {
-		const existing = await this.prisma.subscription.findUnique({
-			where: { userId }
-		});
-		if (!existing) {
-			await this.prisma.subscription.create({
-				data: {
-					userId,
-					plan: Plan.TRIAL,
-					status: SubscriptionStatus.ACTIVE,
-					expiresAt: dayjs().add(7, 'day').toDate()
-				}
-			});
-		}
 	}
 
 	private issueTokens(userId: string, rights: Role[], sessionId: string) {

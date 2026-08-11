@@ -15,8 +15,25 @@ on:
           - campaigns
           - reporting
           - widgets
+          - billing
       widgets_cutover_confirmation:
         description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
+        required: false
+        default: ''
+        type: string
+      billing_action:
+        description: Billing lifecycle action (manual billing target only)
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - prepare
+          - cutover
+          - abort
+          - forward-recovery
+      billing_confirmation:
+        description: Type the exact Billing cutover or abort confirmation when required
         required: false
         default: ''
         type: string
@@ -55,6 +72,11 @@ jobs:
         run: |
           required_files=(
             apps/widgets/Dockerfile
+            apps/billing/Dockerfile
+            apps/billing/package.json
+            apps/billing/pnpm-lock.yaml
+            apps/billing/prisma/schema.prisma
+            apps/billing/prisma/migrations/20260811000000_init_billing/migration.sql
             deploy/docker-compose.prod.yml
             deploy/nginx.conf
             scripts/widgets-database-lifecycle.sh
@@ -64,6 +86,14 @@ jobs:
             scripts/cleanup-widgets-core-source-production.sh
             scripts/test-widgets-core-source-cleanup-rehearsal.sh
             scripts/export-widgets-cutover-snapshot.mjs
+            scripts/billing-release-identity.sh
+            scripts/billing-database-lifecycle.sh
+            scripts/deploy-billing-production.sh
+            scripts/billing-cutover-production.sh
+            scripts/test-billing-runtime-boundaries.mjs
+            src/billing-core-cutover-main.ts
+            apps/billing/src/cutover-main.ts
+            prisma/migrations/20260811000000_prepare_billing_service_ownership/migration.sql
             prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
           )
           for path in "${required_files[@]}"; do
@@ -76,14 +106,30 @@ jobs:
             scripts/widgets-cutover-production.sh \
             scripts/test-widgets-cutover-rehearsal.sh \
             scripts/cleanup-widgets-core-source-production.sh \
-            scripts/test-widgets-core-source-cleanup-rehearsal.sh; do
+            scripts/test-widgets-core-source-cleanup-rehearsal.sh \
+            scripts/billing-release-identity.sh \
+            scripts/billing-database-lifecycle.sh \
+            scripts/deploy-billing-production.sh \
+            scripts/billing-cutover-production.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
+          node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/widgets-database-lifecycle.sh --self-test
           bash scripts/cleanup-widgets-core-source-production.sh --self-test
           bash scripts/test-widgets-cutover-rehearsal.sh --self-test
           bash scripts/test-widgets-core-source-cleanup-rehearsal.sh --self-test
+          billing_ci_app_root="$(cd "$GITHUB_WORKSPACE/.." && pwd -P)"
+          [[ "$billing_ci_app_root/winwidget.ru_server" == "$GITHUB_WORKSPACE" ]]
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-release-identity.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-database-lifecycle.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/deploy-billing-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-cutover-production.sh --self-test
+          node scripts/test-billing-runtime-boundaries.mjs --self-test
 
           # ShellCheck runs separately below; its actionlint integration
           # deadlocks while piping this workflow's large inline scripts.
@@ -110,7 +156,11 @@ jobs:
             scripts/widgets-cutover-production.sh \
             scripts/test-widgets-cutover-rehearsal.sh \
             scripts/cleanup-widgets-core-source-production.sh \
-            scripts/test-widgets-core-source-cleanup-rehearsal.sh
+            scripts/test-widgets-core-source-cleanup-rehearsal.sh \
+            scripts/billing-release-identity.sh \
+            scripts/billing-database-lifecycle.sh \
+            scripts/deploy-billing-production.sh \
+            scripts/billing-cutover-production.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -144,6 +194,8 @@ jobs:
             --profile reporting-database \
             --profile widgets-migration \
             --profile widgets-database \
+            --profile billing-migration \
+            --profile billing-database \
             --env-file .env.example \
             -f deploy/docker-compose.prod.yml config --quiet
           printf 'widgets_compose_config=passed\n'
@@ -160,7 +212,7 @@ jobs:
             exit 1
           fi
           printf 'widgets_preflight_disk_kib=%s\n' "$available_kib"
-          for port in 5432 5672 15672 55432 55433 55435 55436; do
+          for port in 5432 5672 15672 55432 55433 55435 55436 55437; do
             if ss -H -ltn "sport = :$port" | grep -q .; then
               echo "Preflight runner port is already occupied: $port" >&2
               exit 1
@@ -169,6 +221,11 @@ jobs:
           if docker container ls --all --quiet \
             --filter label=com.winwidget.owner=widgets | grep -q .; then
             echo "A pre-existing Widgets-owned container collides with the isolated verify." >&2
+            exit 1
+          fi
+          if docker container ls --all --quiet \
+            --filter label=com.winwidget.owner=billing | grep -q .; then
+            echo "A pre-existing Billing-owned container collides with the isolated verify." >&2
             exit 1
           fi
 
@@ -303,8 +360,37 @@ jobs:
             WIDGETS_INTERNAL_TIMEOUT_MS \
             WIDGETS_ENTITLEMENT_MAX_STALENESS_MS \
             RABBITMQ_WIDGETS_URL \
+            BILLING_DATABASE_URL \
+            BILLING_MIGRATION_DATABASE_URL \
+            BILLING_BACKUP_URL \
+            BILLING_POSTGRES_IMAGE \
+            BILLING_POSTGRES_PORT \
+            BILLING_POSTGRES_DATA_VOLUME \
+            BILLING_POSTGRES_ADMIN_USER \
+            BILLING_POSTGRES_ADMIN_PASSWORD_FILE \
+            BILLING_PROCESS_ROLE \
+            BILLING_LISTEN_HOST \
+            BILLING_API_PORT \
+            BILLING_SCHEDULER_PORT \
+            BILLING_WORKER_PORT \
+            BILLING_OUTBOX_PUBLISHER_PORT \
+            BILLING_CORE_INTERNAL_BASE_URL \
+            BILLING_INTERNAL_BASE_URL \
+            BILLING_INTERNAL_TOKEN \
+            BILLING_INTERNAL_TIMEOUT_MS \
+            BILLING_RESTORE_DRILL_EVIDENCE_FILE \
+            RABBITMQ_BILLING_WORKER_URL \
+            RABBITMQ_BILLING_PUBLISHER_URL \
             RABBITMQ_INTEGRATION_WORKER_URL \
+            RABBITMQ_MANAGEMENT_URL \
+            RABBITMQ_MONITOR_USER \
+            RABBITMQ_MONITOR_PASSWORD \
             RABBITMQ_VHOST \
+            MODE \
+            YOOKASSA_PRODUCTION_SHOP_ID \
+            YOOKASSA_PRODUCTION_SECRET_KEY \
+            PAYMENT_METHOD_ENCRYPTION_KEY \
+            RECAPTCHA_CLIENT_URL \
             S3_BUCKET \
             S3_ACCESS_KEY_ID \
             S3_SECRET_ACCESS_KEY \
@@ -395,13 +481,42 @@ jobs:
             [[ -z "$tracked_blob" ]]
           }
 
+          guard_billing_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local lifecycle_script="scripts/billing-database-lifecycle.sh"
+            local database_marker="$APP_ROOT/deploy/backend/.billing-database-lifecycle-v1"
+            local cutover_marker="$APP_ROOT/deploy/backend/.billing-cutover-v1"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+            tracked_blob="$(
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
+                true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || return 1
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || return 1
+              APP_ROOT="$APP_ROOT" \
+                bash "$lifecycle_script" "$guard_action" "$expected_revision"
+              return
+            fi
+            [[ -z "$tracked_blob" ]] || return 1
+            [[ ! -e "$database_marker" && ! -L "$database_marker" &&
+              ! -e "$cutover_marker" && ! -L "$cutover_marker" ]]
+          }
+
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           guard_campaigns_checkout_before_pull "$current_revision"
           guard_reporting_checkout_before_pull "$current_revision"
           guard_widgets_checkout_before_pull "$current_revision"
+          guard_billing_checkout_before_pull "$current_revision"
           guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
+          guard_billing_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
             "$current_revision" == "$EXPECTED_REVISION" ]]; then
             guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
@@ -464,8 +579,13 @@ jobs:
       REPORTING_IMAGE: winwidget-reporting:git-${{ github.sha }}
       WIDGETS_REVISION: ${{ github.sha }}
       WIDGETS_IMAGE: winwidget-widgets:git-${{ github.sha }}
+      BILLING_REVISION: ${{ github.sha }}
+      BILLING_IMAGE: winwidget-billing:git-${{ github.sha }}
       # CI-only 32-byte key. Production uses deploy/backend/.env.production.
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      YOOKASSA_PRODUCTION_SHOP_ID: ci_billing_shop
+      YOOKASSA_PRODUCTION_SECRET_KEY: ci_billing_secret_key_at_least_32_chars
+      RECAPTCHA_CLIENT_URL: https://winwidget.test
       S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
       S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
@@ -490,6 +610,23 @@ jobs:
       WIDGETS_BACKUP_URL: postgresql://winwidget_widgets_backup:widgets_backup_ci@127.0.0.1:55436/winwidget_widgets_ci?schema=widgets&sslmode=disable
       WIDGETS_CI_POSTGRES_CONTAINER: winwidget-widgets-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       WIDGETS_CI_POSTGRES_VOLUME: winwidget-widgets-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      BILLING_DATABASE_URL: postgresql://winwidget_billing_runtime:billing_runtime_ci@127.0.0.1:55437/winwidget_billing_ci?schema=billing&sslmode=disable
+      BILLING_CI_MIGRATION_DATABASE_URL: postgresql://winwidget_billing_migration:billing_migration_ci@127.0.0.1:55437/winwidget_billing_ci?schema=billing&sslmode=disable
+      BILLING_BACKUP_URL: postgresql://winwidget_billing_backup:billing_backup_ci@127.0.0.1:55437/winwidget_billing_ci?schema=billing&sslmode=disable
+      BILLING_CI_POSTGRES_CONTAINER: winwidget-billing-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      BILLING_CI_POSTGRES_VOLUME: winwidget-billing-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      BILLING_PROCESS_ROLE: api
+      BILLING_LISTEN_HOST: 127.0.0.1
+      BILLING_API_PORT: 4800
+      BILLING_SCHEDULER_PORT: 4801
+      BILLING_WORKER_PORT: 4802
+      BILLING_OUTBOX_PUBLISHER_PORT: 4803
+      BILLING_CORE_INTERNAL_BASE_URL: http://127.0.0.1:4200
+      BILLING_INTERNAL_BASE_URL: http://127.0.0.1:4800
+      BILLING_INTERNAL_TOKEN: ci_billing_internal_token_at_least_32_chars
+      BILLING_INTERNAL_TIMEOUT_MS: 5000
+      RABBITMQ_BILLING_WORKER_URL: amqp://winwidget-billing-worker:billing_worker_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
+      RABBITMQ_BILLING_PUBLISHER_URL: amqp://winwidget-billing-publisher:billing_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       WIDGETS_PROCESS_ROLE: all
       WIDGETS_LISTEN_HOST: 127.0.0.1
       WIDGETS_PORT: 4700
@@ -646,9 +783,25 @@ jobs:
           bash -n scripts/database-restore-control.sh
           bash -n scripts/database-restore-production-guard.sh
           bash -n scripts/test-database-restore-worker-rehearsal.sh
+          bash -n scripts/billing-release-identity.sh
+          bash -n scripts/billing-database-lifecycle.sh
+          bash -n scripts/deploy-billing-production.sh
+          bash -n scripts/billing-cutover-production.sh
+          node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
           bash scripts/test-database-restore-worker-rehearsal.sh --self-test
+          billing_ci_app_root="$(cd "$GITHUB_WORKSPACE/.." && pwd -P)"
+          [[ "$billing_ci_app_root/winwidget.ru_server" == "$GITHUB_WORKSPACE" ]]
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-release-identity.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-database-lifecycle.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/deploy-billing-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/billing-cutover-production.sh --self-test
+          node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
             --read-only \
@@ -660,7 +813,11 @@ jobs:
             --severity=warning \
             scripts/database-restore-control.sh \
             scripts/database-restore-production-guard.sh \
-            scripts/test-database-restore-worker-rehearsal.sh
+            scripts/test-database-restore-worker-rehearsal.sh \
+            scripts/billing-release-identity.sh \
+            scripts/billing-database-lifecycle.sh \
+            scripts/deploy-billing-production.sh \
+            scripts/billing-cutover-production.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -679,6 +836,7 @@ jobs:
             apps/campaigns/pnpm-lock.yaml
             apps/reporting/pnpm-lock.yaml
             apps/widgets/pnpm-lock.yaml
+            apps/billing/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -690,6 +848,7 @@ jobs:
           pnpm --dir apps/campaigns install --frozen-lockfile
           pnpm --dir apps/reporting install --frozen-lockfile
           pnpm --dir apps/widgets install --frozen-lockfile
+          pnpm --dir apps/billing install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
         env:
@@ -1153,6 +1312,117 @@ jobs:
             GRANT SELECT ON SEQUENCES TO winwidget_widgets_backup;
           SQL
 
+      - name: Start isolated Billing PostgreSQL
+        env:
+          BILLING_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-billing-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          test ! -e "$BILLING_CI_POSTGRES_PASSWORD_FILE"
+          umask 077
+          openssl rand -hex 32 > "$BILLING_CI_POSTGRES_PASSWORD_FILE"
+
+          docker volume create \
+            --label com.winwidget.owner=billing \
+            --label com.winwidget.purpose=ci-postgres-data \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            "$BILLING_CI_POSTGRES_VOLUME" > /dev/null
+
+          docker run --detach \
+            --name "$BILLING_CI_POSTGRES_CONTAINER" \
+            --label com.winwidget.owner=billing \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55437:5432 \
+            --mount \
+              "type=volume,source=$BILLING_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount \
+              "type=bind,source=$BILLING_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/billing-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_billing_ci \
+            --env POSTGRES_USER=winwidget_billing_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/billing-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd \
+              "pg_isready --username winwidget_billing_admin --dbname winwidget_billing_ci" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+
+          for attempt in $(seq 1 30); do
+            status="$(
+              docker inspect \
+                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+                "$BILLING_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$status" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$status" == "unhealthy" || "$attempt" == "30" ]]; then
+              docker logs "$BILLING_CI_POSTGRES_CONTAINER" >&2
+              echo "Isolated Billing PostgreSQL is $status." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Create isolated Billing roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.BILLING_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_billing_admin \
+              --dbname winwidget_billing_ci <<'SQL'
+          REVOKE ALL ON DATABASE winwidget_billing_ci FROM PUBLIC;
+
+          CREATE ROLE winwidget_billing_migration
+            LOGIN PASSWORD 'billing_migration_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          CREATE ROLE winwidget_billing_runtime
+            LOGIN PASSWORD 'billing_runtime_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          CREATE ROLE winwidget_billing_backup
+            LOGIN PASSWORD 'billing_backup_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+
+          GRANT CONNECT ON DATABASE winwidget_billing_ci
+            TO winwidget_billing_migration;
+          GRANT CONNECT ON DATABASE winwidget_billing_ci
+            TO winwidget_billing_runtime;
+          GRANT CONNECT ON DATABASE winwidget_billing_ci
+            TO winwidget_billing_backup;
+
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA billing AUTHORIZATION winwidget_billing_migration;
+          REVOKE ALL ON SCHEMA billing FROM PUBLIC;
+          GRANT USAGE ON SCHEMA billing TO winwidget_billing_runtime;
+          GRANT USAGE ON SCHEMA billing TO winwidget_billing_backup;
+
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            REVOKE ALL ON TABLES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            REVOKE ALL ON SEQUENCES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            REVOKE ALL ON FUNCTIONS FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
+            TO winwidget_billing_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES
+            TO winwidget_billing_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT SELECT ON TABLES TO winwidget_billing_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT SELECT ON SEQUENCES TO winwidget_billing_backup;
+          SQL
+
       - name: Rehearse Widgets exact dump in isolated PostgreSQL 18
         env:
           WIDGETS_REHEARSAL_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1205,6 +1475,8 @@ jobs:
           pnpm --dir apps/reporting run prisma:generate
           pnpm --dir apps/widgets run prisma:validate
           pnpm --dir apps/widgets run prisma:generate
+          pnpm --dir apps/billing run prisma:validate
+          pnpm --dir apps/billing run prisma:generate
 
       - name: Fast-check Widgets snapshot SQL contract
         run: node scripts/export-widgets-cutover-snapshot.mjs --self-test
@@ -1221,6 +1493,8 @@ jobs:
             pnpm --dir apps/reporting run prisma:migrate:deploy
           WIDGETS_DATABASE_URL="$WIDGETS_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/widgets run prisma:migrate:deploy
+          BILLING_DATABASE_URL="$BILLING_CI_MIGRATION_DATABASE_URL" \
+            pnpm --dir apps/billing run prisma:migrate:deploy
 
       - name: Rehearse guarded Widgets Core source cleanup in PostgreSQL 18
         env:
@@ -1909,6 +2183,193 @@ jobs:
             exit 1
           fi
 
+      - name: Finalize and verify Billing database roles
+        env:
+          MONOLITH_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER_ID: ${{ env.BILLING_CI_POSTGRES_CONTAINER }}
+        run: |
+          test "$POSTGRES_CONTAINER_ID" != "$MONOLITH_POSTGRES_CONTAINER_ID"
+          docker exec -i "$MONOLITH_POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --username winwidget --dbname winwidget_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF to_regnamespace('billing') IS NOT NULL THEN
+              RAISE EXCEPTION 'Core database must not contain the Billing service schema';
+            END IF;
+          END $$;
+          SQL
+
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_billing_admin \
+              --dbname winwidget_billing_ci <<'SQL'
+          REVOKE ALL ON ALL TABLES IN SCHEMA billing
+            FROM PUBLIC, winwidget_billing_runtime, winwidget_billing_backup;
+          REVOKE ALL ON ALL SEQUENCES IN SCHEMA billing
+            FROM PUBLIC, winwidget_billing_runtime, winwidget_billing_backup;
+          REVOKE ALL ON ALL FUNCTIONS IN SCHEMA billing
+            FROM PUBLIC, winwidget_billing_runtime, winwidget_billing_backup;
+          GRANT SELECT, INSERT, UPDATE, DELETE
+            ON ALL TABLES IN SCHEMA billing TO winwidget_billing_runtime;
+          GRANT USAGE, SELECT, UPDATE
+            ON ALL SEQUENCES IN SCHEMA billing TO winwidget_billing_runtime;
+          GRANT SELECT
+            ON ALL TABLES IN SCHEMA billing TO winwidget_billing_backup;
+          GRANT SELECT
+            ON ALL SEQUENCES IN SCHEMA billing TO winwidget_billing_backup;
+          REVOKE ALL ON TABLE billing._prisma_migrations
+            FROM winwidget_billing_runtime;
+          REVOKE CREATE, TEMPORARY ON DATABASE winwidget_billing_ci
+            FROM winwidget_billing_migration, winwidget_billing_runtime, winwidget_billing_backup;
+
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            REVOKE ALL ON TABLES FROM PUBLIC, winwidget_billing_runtime, winwidget_billing_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            REVOKE ALL ON SEQUENCES FROM PUBLIC, winwidget_billing_runtime, winwidget_billing_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            REVOKE ALL ON FUNCTIONS FROM PUBLIC, winwidget_billing_runtime, winwidget_billing_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration
+            REVOKE ALL ON FUNCTIONS FROM PUBLIC, winwidget_billing_runtime, winwidget_billing_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES
+            TO winwidget_billing_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES
+            TO winwidget_billing_runtime;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT SELECT ON TABLES TO winwidget_billing_backup;
+          ALTER DEFAULT PRIVILEGES
+            FOR ROLE winwidget_billing_migration IN SCHEMA billing
+            GRANT SELECT ON SEQUENCES TO winwidget_billing_backup;
+
+          DO $$
+          DECLARE
+            table_name text;
+          BEGIN
+            FOR table_name IN
+              SELECT tablename FROM pg_tables
+              WHERE schemaname = 'billing' AND tablename <> '_prisma_migrations'
+            LOOP
+              IF NOT has_table_privilege(
+                'winwidget_billing_runtime', format('billing.%I', table_name),
+                'SELECT,INSERT,UPDATE,DELETE'
+              ) THEN
+                RAISE EXCEPTION 'Billing runtime ACL missing for %', table_name;
+              END IF;
+              IF NOT has_table_privilege(
+                'winwidget_billing_backup', format('billing.%I', table_name), 'SELECT'
+              ) THEN
+                RAISE EXCEPTION 'Billing backup ACL missing for %', table_name;
+              END IF;
+            END LOOP;
+            IF has_table_privilege(
+              'winwidget_billing_runtime', 'billing._prisma_migrations', 'SELECT'
+            ) THEN
+              RAISE EXCEPTION 'Billing migration history leaked to the runtime role';
+            END IF;
+            IF NOT has_table_privilege(
+              'winwidget_billing_backup', 'billing._prisma_migrations', 'SELECT'
+            ) THEN
+              RAISE EXCEPTION 'Billing backup role cannot dump migration history';
+            END IF;
+          END $$;
+          SQL
+
+          docker exec \
+            -e PGPASSWORD=billing_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_billing_runtime --dbname winwidget_billing_ci \
+              --command 'SELECT count(*) FROM billing.service_identity;' > /dev/null
+          if docker exec \
+            -e PGPASSWORD=billing_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_billing_runtime --dbname winwidget_billing_ci \
+              --command 'SELECT count(*) FROM billing._prisma_migrations;' \
+              > /dev/null 2>&1; then
+            echo 'Billing runtime can read _prisma_migrations.' >&2
+            exit 1
+          fi
+          docker exec \
+            -e PGPASSWORD=billing_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_billing_backup --dbname winwidget_billing_ci \
+              --command 'SELECT count(*) FROM billing.outbox_events;' > /dev/null
+          if docker exec \
+            -e PGPASSWORD=billing_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_billing_backup --dbname winwidget_billing_ci \
+              --command "INSERT INTO billing.source_sequences (id, next_value, updated_at) VALUES ('ci-backup-write-must-fail', 1, CURRENT_TIMESTAMP);" \
+              > /dev/null 2>&1; then
+            echo 'Billing backup role can mutate service data.' >&2
+            exit 1
+          fi
+
+      - name: Verify Billing PostgreSQL persistence and restore rehearsal
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.BILLING_CI_POSTGRES_CONTAINER }}
+        run: |
+          sentinel_id=ci-billing-restore-${{ github.run_id }}-${{ github.run_attempt }}
+          docker exec \
+            -e PGPASSWORD=billing_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_billing_runtime --dbname winwidget_billing_ci \
+              --command \
+                "INSERT INTO billing.source_sequences (id, next_value, updated_at) VALUES ('$sentinel_id', 42, CURRENT_TIMESTAMP);"
+          docker exec \
+            -e PGPASSWORD=billing_backup_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            pg_dump --format custom --compress 9 --no-owner --no-acl \
+              --host 127.0.0.1 --username winwidget_billing_backup \
+              --dbname winwidget_billing_ci --file /tmp/billing-ci.dump
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_billing_admin --dbname postgres \
+              --command \
+                'CREATE DATABASE winwidget_billing_restore_ci WITH TEMPLATE template0;'
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore --exit-on-error --single-transaction \
+              --no-owner --no-acl --username winwidget_billing_admin \
+              --dbname winwidget_billing_restore_ci /tmp/billing-ci.dump
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_billing_admin \
+                --dbname winwidget_billing_restore_ci \
+                --command \
+                  "SELECT count(*) FROM billing.source_sequences WHERE id = '$sentinel_id' AND next_value = 42;"
+          )" = "1"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_billing_admin \
+                --dbname winwidget_billing_restore_ci \
+                --command 'SELECT count(*) FROM billing._prisma_migrations;'
+          )" -ge 1
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_billing_admin --dbname postgres \
+              --command 'DROP DATABASE winwidget_billing_restore_ci WITH (FORCE);'
+          docker exec \
+            -e PGPASSWORD=billing_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_billing_runtime --dbname winwidget_billing_ci \
+              --command \
+                "DELETE FROM billing.source_sequences WHERE id = '$sentinel_id';"
+          docker exec "$POSTGRES_CONTAINER_ID" rm -f -- /tmp/billing-ci.dump
+
       - name: Verify Notification Delivery PostgreSQL persistence and restore
         env:
           NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2454,6 +2915,7 @@ jobs:
           pnpm --dir apps/campaigns run typecheck
           pnpm --dir apps/reporting run typecheck
           pnpm --dir apps/widgets run typecheck
+          pnpm --dir apps/billing run typecheck
 
       - name: Lint
         run: |
@@ -2462,6 +2924,7 @@ jobs:
           pnpm --dir apps/campaigns run lint
           pnpm --dir apps/reporting run lint
           pnpm --dir apps/widgets run lint
+          pnpm --dir apps/billing run lint
 
       - name: Test
         run: |
@@ -2470,6 +2933,7 @@ jobs:
           pnpm --dir apps/campaigns test
           pnpm --dir apps/reporting test
           pnpm --dir apps/widgets test
+          pnpm --dir apps/billing test
           widgets_browser_executable="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)"
           test -n "$widgets_browser_executable"
           WIDGETS_TEST_DATABASE_URL="$WIDGETS_DATABASE_URL" \
@@ -2518,10 +2982,22 @@ jobs:
           WIDGETS_DATABASE_URL: postgresql://winwidget_widgets_runtime:widgets_runtime_ci@127.0.0.1:55436/winwidget_widgets?schema=widgets&sslmode=disable
           WIDGETS_MIGRATION_DATABASE_URL: postgresql://winwidget_widgets_migration:widgets_migration_ci@127.0.0.1:55436/winwidget_widgets?schema=widgets&sslmode=disable
           WIDGETS_BACKUP_URL: postgresql://winwidget_widgets_backup:widgets_backup_ci@127.0.0.1:55436/winwidget_widgets?schema=widgets&sslmode=disable
+          BILLING_POSTGRES_IMAGE: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+          BILLING_POSTGRES_PORT: '55437'
+          BILLING_POSTGRES_DATA_VOLUME: winwidget-billing-postgres-data
+          BILLING_POSTGRES_ADMIN_USER: winwidget_billing_admin
+          BILLING_POSTGRES_ADMIN_PASSWORD_FILE: /tmp/winwidget-billing-postgres-admin-password
+          BILLING_DATABASE_URL: postgresql://winwidget_billing_runtime:billing_runtime_ci@127.0.0.1:55437/winwidget_billing?schema=billing&sslmode=disable
+          BILLING_MIGRATION_DATABASE_URL: postgresql://winwidget_billing_migration:billing_migration_ci@127.0.0.1:55437/winwidget_billing?schema=billing&sslmode=disable
+          BILLING_BACKUP_URL: postgresql://winwidget_billing_backup:billing_backup_ci@127.0.0.1:55437/winwidget_billing?schema=billing&sslmode=disable
+          MODE: production
+          YOOKASSA_PRODUCTION_SHOP_ID: ci_billing_shop
+          YOOKASSA_PRODUCTION_SECRET_KEY: ci_billing_secret_key_at_least_32_chars
+          RECAPTCHA_CLIENT_URL: https://winwidget.test
         run: |
-          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --profile billing-migration --profile billing-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
           # shellcheck disable=SC2016
-          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+          docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --profile billing-migration --profile billing-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
             node -e '
               const { readFileSync } = require("node:fs");
               const config = JSON.parse(readFileSync(0, "utf8"));
@@ -2641,6 +3117,27 @@ jobs:
                   "Widgets PostgreSQL must use its admin password file secret",
                 );
               }
+              const billingPostgresVolume =
+                config.volumes?.["winwidget-billing-postgres-data"];
+              if (
+                !billingPostgresVolume?.external ||
+                billingPostgresVolume.name !==
+                  process.env.BILLING_POSTGRES_DATA_VOLUME
+              ) {
+                throw new Error(
+                  "Billing PostgreSQL must use its exact external volume",
+                );
+              }
+              const billingPostgresSecret =
+                config.secrets?.["billing-postgres-admin-password"];
+              if (
+                billingPostgresSecret?.file !==
+                process.env.BILLING_POSTGRES_ADMIN_PASSWORD_FILE
+              ) {
+                throw new Error(
+                  "Billing PostgreSQL must use its admin password file secret",
+                );
+              }
               const coreRestoreSecret =
                 config.secrets?.["core-postgres-admin-password"];
               if (
@@ -2658,6 +3155,10 @@ jobs:
               const expectedPersistentServiceNames = [
                 "api",
                 "api-gateway",
+                "billing-api",
+                "billing-outbox-publisher",
+                "billing-scheduler",
+                "billing-worker",
                 "campaigns-service",
                 "database-restore-worker",
                 "integration-worker",
@@ -2990,12 +3491,83 @@ jobs:
                   "Widgets PostgreSQL loopback network or lifecycle safeguards drifted",
                 );
               }
+              const billingPostgres = requireService("billing-postgres");
+              const billingPostgresEnvironment = requireEnvironment(
+                "billing-postgres",
+                [
+                  "POSTGRES_DB",
+                  "POSTGRES_USER",
+                  "POSTGRES_PASSWORD_FILE",
+                  "POSTGRES_INITDB_ARGS",
+                  "PGDATA",
+                ],
+              );
+              const billingPorts = billingPostgres.ports ?? [];
+              const billingNetworks = billingPostgres.networks ?? {};
+              const billingNetwork = config.networks?.["billing-postgres"];
+              if (
+                billingPostgres.image !== process.env.BILLING_POSTGRES_IMAGE ||
+                billingPostgresEnvironment.POSTGRES_DB !== "winwidget_billing" ||
+                billingPostgresEnvironment.POSTGRES_USER !==
+                  process.env.BILLING_POSTGRES_ADMIN_USER ||
+                billingPostgresEnvironment.POSTGRES_PASSWORD_FILE !==
+                  "/run/secrets/billing-postgres-admin-password" ||
+                billingPostgresEnvironment.POSTGRES_INITDB_ARGS !==
+                  "--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" ||
+                billingPostgresEnvironment.PGDATA !==
+                  "/var/lib/postgresql/18/docker" ||
+                billingPorts.length !== 1 ||
+                billingPorts[0].host_ip !== "127.0.0.1" ||
+                String(billingPorts[0].published) !==
+                  process.env.BILLING_POSTGRES_PORT ||
+                Number(billingPorts[0].target) !== 5432 ||
+                Object.keys(billingNetworks).length !== 1 ||
+                !Object.hasOwn(billingNetworks, "billing-postgres") ||
+                billingNetwork?.name !== "winwidget-billing-postgres" ||
+                billingNetwork.driver !== "bridge" ||
+                billingNetwork.internal === true ||
+                billingNetwork.labels?.["com.winwidget.owner"] !== "billing" ||
+                billingNetwork.labels?.["com.winwidget.purpose"] !==
+                  "postgres-network" ||
+                JSON.stringify(billingPostgres.profiles ?? []) !==
+                  JSON.stringify(["billing-database"]) ||
+                billingPostgres.network_mode != null ||
+                billingPostgres.depends_on != null ||
+                billingPostgres.restart !== "unless-stopped" ||
+                (billingPostgres.volumes ?? []).length !== 1 ||
+                billingPostgres.volumes[0].type !== "volume" ||
+                billingPostgres.volumes[0].source !==
+                  process.env.BILLING_POSTGRES_DATA_VOLUME ||
+                billingPostgres.volumes[0].target !== "/var/lib/postgresql" ||
+                (billingPostgres.secrets ?? []).length !== 1 ||
+                billingPostgres.secrets[0].source !==
+                  "billing-postgres-admin-password" ||
+                JSON.stringify(billingPostgres.healthcheck) !==
+                  JSON.stringify(expectedPostgresHealthcheck) ||
+                billingPostgres.stop_grace_period !== "1m0s" ||
+                billingPostgres.shm_size !== "268435456" ||
+                billingPostgres.mem_limit !== "805306368" ||
+                billingPostgres.mem_reservation !== "268435456" ||
+                billingPostgres.cpus !== 1 ||
+                billingPostgres.pids_limit !== 200 ||
+                billingPostgres.logging?.driver !== "json-file" ||
+                billingPostgres.logging?.options?.["max-size"] !== "10m" ||
+                billingPostgres.logging?.options?.["max-file"] !== "5" ||
+                billingPostgres.labels?.["com.winwidget.owner"] !== "billing" ||
+                billingPostgres.labels?.["com.winwidget.purpose"] !== "postgres" ||
+                Object.keys(billingPostgres.labels ?? {}).length !== 2
+              ) {
+                throw new Error(
+                  "Billing PostgreSQL dedicated loopback lifecycle safeguards drifted",
+                );
+              }
               for (const [name, service] of Object.entries(services)) {
                 if (
                   name === "notification-delivery-postgres" ||
                   name === "campaigns-postgres" ||
                   name === "reporting-postgres" ||
-                  name === "widgets-postgres"
+                  name === "widgets-postgres" ||
+                  name === "billing-postgres"
                 ) continue;
                 if (
                   (service.volumes ?? []).some(
@@ -3073,6 +3645,25 @@ jobs:
                   Object.hasOwn(
                     service.depends_on ?? {},
                     "widgets-postgres",
+                  ) ||
+                  (service.volumes ?? []).some(
+                    mount =>
+                      mount.source ===
+                      process.env.BILLING_POSTGRES_DATA_VOLUME,
+                  ) ||
+                  (name !== "database-restore-worker" &&
+                    (service.secrets ?? []).some(
+                      secret =>
+                        secret.source ===
+                        "billing-postgres-admin-password",
+                    )) ||
+                  Object.hasOwn(
+                    service.networks ?? {},
+                    "billing-postgres",
+                  ) ||
+                  Object.hasOwn(
+                    service.depends_on ?? {},
+                    "billing-postgres",
                   )
                 ) {
                   throw new Error(
@@ -3089,6 +3680,7 @@ jobs:
                 "campaigns-service",
                 "reporting-service",
                 "widgets-service",
+                "billing-api",
               ]) {
                 const service = requireService(name);
                 const expectedRevision = {
@@ -3102,6 +3694,7 @@ jobs:
                   "campaigns-service": process.env.CAMPAIGNS_REVISION,
                   "reporting-service": process.env.REPORTING_REVISION,
                   "widgets-service": process.env.WIDGETS_REVISION,
+                  "billing-api": process.env.BILLING_REVISION,
                 }[name];
                 if (service.build?.args?.APP_REVISION !== expectedRevision) {
                   throw new Error(`${name} image build revision is not pinned`);
@@ -3116,6 +3709,7 @@ jobs:
                   "campaigns-service": process.env.CAMPAIGNS_IMAGE,
                   "reporting-service": process.env.REPORTING_IMAGE,
                   "widgets-service": process.env.WIDGETS_IMAGE,
+                  "billing-api": process.env.BILLING_IMAGE,
                 }[name];
                 if (service.image !== expectedImage) {
                   throw new Error(`${name} image tag is not pinned to the revision`);
@@ -3220,6 +3814,44 @@ jobs:
               };
               requireStandaloneWidgetsBuild("widgets-service");
               requireStandaloneWidgetsBuild("widgets-migrate");
+              const requireStandaloneBillingBuild = name => {
+                const service = requireService(name);
+                const build = service.build ?? {};
+                if (
+                  !String(build.context ?? "")
+                    .replaceAll("\\", "/")
+                    .endsWith("/apps/billing") ||
+                  build.dockerfile !== "Dockerfile" ||
+                  build.target != null ||
+                  build.args?.APP_REVISION !== process.env.BILLING_REVISION ||
+                  service.image !== process.env.BILLING_IMAGE
+                ) {
+                  throw new Error(
+                    `${name} must use the exact standalone Billing app image and context`,
+                  );
+                }
+              };
+              requireStandaloneBillingBuild("billing-api");
+              requireStandaloneBillingBuild("billing-migrate");
+              for (const name of [
+                "billing-api",
+                "billing-scheduler",
+                "billing-worker",
+                "billing-outbox-publisher",
+              ]) {
+                if (requireService(name).image !== process.env.BILLING_IMAGE) {
+                  throw new Error(`${name} must share the immutable Billing image`);
+                }
+              }
+              for (const name of [
+                "billing-scheduler",
+                "billing-worker",
+                "billing-outbox-publisher",
+              ]) {
+                if (requireService(name).build != null) {
+                  throw new Error(`${name} must reuse the Billing API image build`);
+                }
+              }
               const requireExactKinds = (environment, key, expected, name) => {
                 const kinds = [...new Set(String(environment[key] ?? "")
                   .split(",")
@@ -3259,6 +3891,18 @@ jobs:
               );
               requireCommand(
                 "widgets-migrate",
+                "migrate deploy --schema prisma/schema.prisma",
+              );
+              for (const name of [
+                "billing-api",
+                "billing-scheduler",
+                "billing-worker",
+                "billing-outbox-publisher",
+              ]) {
+                requireCommand(name, "node dist/src/main.js");
+              }
+              requireCommand(
+                "billing-migrate",
                 "migrate deploy --schema prisma/schema.prisma",
               );
               const migration = requireService("migrate");
@@ -3443,6 +4087,41 @@ jobs:
                   "widgets-migrate receives an unexpected environment",
                 );
               }
+              const billingMigration = requireService("billing-migrate");
+              const billingMigrationEntrypoint = Array.isArray(
+                billingMigration.entrypoint,
+              )
+                ? billingMigration.entrypoint.join(" ")
+                : String(billingMigration.entrypoint ?? "");
+              if (
+                billingMigrationEntrypoint !== "./node_modules/.bin/prisma" ||
+                JSON.stringify(billingMigration.profiles ?? []) !==
+                  JSON.stringify(["billing-migration"]) ||
+                billingMigration.network_mode !== "host" ||
+                billingMigration.depends_on != null
+              ) {
+                throw new Error(
+                  "billing-migrate must use Prisma behind its isolated migration profile",
+                );
+              }
+              const billingMigrationEnvironment = requireEnvironment(
+                "billing-migrate",
+                ["APP_REVISION", "NODE_ENV", "BILLING_DATABASE_URL"],
+              );
+              if (
+                Object.keys(billingMigrationEnvironment).some(
+                  key =>
+                    ![
+                      "APP_REVISION",
+                      "NODE_ENV",
+                      "BILLING_DATABASE_URL",
+                    ].includes(key),
+                )
+              ) {
+                throw new Error(
+                  "billing-migrate receives an unexpected environment",
+                );
+              }
               if (requireService("maintenance-worker").command != null) {
                 throw new Error(
                   "maintenance-worker command must be owned by its image",
@@ -3494,10 +4173,13 @@ jobs:
                 "CAMPAIGNS_INTERNAL_TOKEN",
                 "CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE",
                 "CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS",
-                "REPORTING_INTERNAL_TOKEN",
-                "WIDGETS_INTERNAL_BASE_URL",
-                "WIDGETS_INTERNAL_TOKEN",
-                "DATABASE_RESTORE_STORAGE_DIR",
+                  "REPORTING_INTERNAL_TOKEN",
+                  "WIDGETS_INTERNAL_BASE_URL",
+                  "WIDGETS_INTERNAL_TOKEN",
+                  "BILLING_INTERNAL_BASE_URL",
+                  "BILLING_INTERNAL_TOKEN",
+                  "BILLING_INTERNAL_TIMEOUT_MS",
+                  "DATABASE_RESTORE_STORAGE_DIR",
                 "DATABASE_RESTORE_QUEUE_SECRET",
                 "DATABASE_RESTORE_PRODUCTION_ENABLED",
               ]);
@@ -3516,6 +4198,16 @@ jobs:
               ) {
                 throw new Error(
                   "api notification delivery timeout must default to 5000ms",
+                );
+              }
+              if (
+                apiEnvironment.BILLING_INTERNAL_BASE_URL !==
+                  "http://127.0.0.1:4800" ||
+                apiEnvironment.BILLING_INTERNAL_TIMEOUT_MS !==
+                  process.env.BILLING_INTERNAL_TIMEOUT_MS
+              ) {
+                throw new Error(
+                  "Core API must use the exact loopback Billing internal endpoint and timeout",
                 );
               }
               if (
@@ -3925,6 +4617,221 @@ jobs:
                   "API, API Gateway and Widgets must share one exact CORS origin policy",
                 );
               }
+              const billingCommonEnvironmentKeys = [
+                "APP_REVISION",
+                "NODE_ENV",
+                "MODE",
+                "BILLING_DATABASE_URL",
+                "BILLING_PROCESS_ROLE",
+                "BILLING_LISTEN_HOST",
+                "BILLING_API_PORT",
+                "BILLING_SCHEDULER_PORT",
+                "BILLING_WORKER_PORT",
+                "BILLING_OUTBOX_PUBLISHER_PORT",
+                "BILLING_PREFETCH",
+                "BILLING_OUTBOX_BATCH_SIZE",
+                "BILLING_OUTBOX_POLL_INTERVAL_MS",
+                "BILLING_OUTBOX_RETENTION_DAYS",
+                "BILLING_RECEIPT_RETENTION_DAYS",
+                "BILLING_FAILURE_DETAIL_RETENTION_DAYS",
+              ];
+              const billingApi = requireService("billing-api");
+              const billingScheduler = requireService("billing-scheduler");
+              const billingWorker = requireService("billing-worker");
+              const billingPublisher = requireService(
+                "billing-outbox-publisher",
+              );
+              const billingApiEnvironment = requireEnvironment(
+                "billing-api",
+                [
+                  ...billingCommonEnvironmentKeys,
+                  "CORS_ALLOWED_ORIGINS",
+                  "TRUST_PROXY",
+                  "BILLING_CORE_INTERNAL_BASE_URL",
+                  "BILLING_INTERNAL_TOKEN",
+                  "BILLING_INTERNAL_TIMEOUT_MS",
+                  "WIDGETS_INTERNAL_BASE_URL",
+                  "WIDGETS_INTERNAL_TOKEN",
+                  "WIDGETS_INTERNAL_TIMEOUT_MS",
+                ],
+              );
+              const billingSchedulerEnvironment = requireEnvironment(
+                "billing-scheduler",
+                billingCommonEnvironmentKeys,
+              );
+              const billingWorkerEnvironment = requireEnvironment(
+                "billing-worker",
+                [
+                  ...billingCommonEnvironmentKeys,
+                  "BILLING_CORE_INTERNAL_BASE_URL",
+                  "BILLING_INTERNAL_TOKEN",
+                  "BILLING_INTERNAL_TIMEOUT_MS",
+                  "YOOKASSA_PRODUCTION_SHOP_ID",
+                  "YOOKASSA_PRODUCTION_SECRET_KEY",
+                  "PAYMENT_METHOD_ENCRYPTION_KEY",
+                  "RECAPTCHA_CLIENT_URL",
+                  "RABBITMQ_URL",
+                  "RABBITMQ_CONNECTION_NAME",
+                  "RABBITMQ_ASSERT_TOPOLOGY",
+                  "RABBITMQ_MAX_MESSAGE_BYTES",
+                  "MESSAGING_SERVICE_NAME",
+                ],
+              );
+              const billingPublisherEnvironment = requireEnvironment(
+                "billing-outbox-publisher",
+                [
+                  ...billingCommonEnvironmentKeys,
+                  "RABBITMQ_URL",
+                  "RABBITMQ_CONNECTION_NAME",
+                  "RABBITMQ_ASSERT_TOPOLOGY",
+                  "RABBITMQ_MAX_MESSAGE_BYTES",
+                  "MESSAGING_SERVICE_NAME",
+                ],
+              );
+              const billingRoles = new Map([
+                ["billing-api", [billingApi, billingApiEnvironment, "api"]],
+                [
+                  "billing-scheduler",
+                  [billingScheduler, billingSchedulerEnvironment, "scheduler"],
+                ],
+                [
+                  "billing-worker",
+                  [billingWorker, billingWorkerEnvironment, "worker"],
+                ],
+                [
+                  "billing-outbox-publisher",
+                  [billingPublisher, billingPublisherEnvironment, "outbox-publisher"],
+                ],
+              ]);
+              const billingRuntimeLimits = {
+                "billing-api": ["30s", 536870912, 134217728, 0.75],
+                "billing-scheduler": ["1m30s", 402653184, 100663296, 0.5],
+                "billing-worker": ["1m30s", 536870912, 134217728, 0.75],
+                "billing-outbox-publisher": [
+                  "1m30s",
+                  402653184,
+                  100663296,
+                  0.5,
+                ],
+              };
+              for (const [name, [service, environment, role]] of billingRoles) {
+                const [stopGracePeriod, memLimit, memReservation, cpus] =
+                  billingRuntimeLimits[name];
+                if (
+                  environment.APP_REVISION !== process.env.BILLING_REVISION ||
+                  environment.NODE_ENV !== "production" ||
+                  environment.MODE !== "production" ||
+                  environment.BILLING_PROCESS_ROLE !== role ||
+                  environment.BILLING_LISTEN_HOST !== "127.0.0.1" ||
+                  environment.BILLING_API_PORT !== "4800" ||
+                  environment.BILLING_SCHEDULER_PORT !== "4801" ||
+                  environment.BILLING_WORKER_PORT !== "4802" ||
+                  environment.BILLING_OUTBOX_PUBLISHER_PORT !== "4803" ||
+                  service.network_mode !== "host" ||
+                  !service.healthcheck?.test ||
+                  service.restart !== "unless-stopped" ||
+                  (service.profiles ?? []).length !== 0 ||
+                  service.stop_grace_period !== stopGracePeriod ||
+                  Number(service.mem_limit) !== memLimit ||
+                  Number(service.mem_reservation) !== memReservation ||
+                  Number(service.cpus) !== cpus ||
+                  Number(service.pids_limit) !== 200 ||
+                  service.logging?.driver !== "json-file" ||
+                  service.logging?.options?.["max-size"] !== "10m" ||
+                  String(service.logging?.options?.["max-file"]) !== "3"
+                ) {
+                  throw new Error(
+                    `${name} must use the exact immutable loopback Billing role boundary`,
+                  );
+                }
+              }
+              if (
+                billingApiEnvironment.CORS_ALLOWED_ORIGINS !==
+                  gatewayEnvironment.CORS_ALLOWED_ORIGINS ||
+                billingApiEnvironment.CORS_ALLOWED_ORIGINS !==
+                  apiEnvironment.CORS_ALLOWED_ORIGINS ||
+                billingApiEnvironment.TRUST_PROXY !== "loopback" ||
+                billingApiEnvironment.BILLING_CORE_INTERNAL_BASE_URL !==
+                  "http://127.0.0.1:4200" ||
+                billingApiEnvironment.BILLING_INTERNAL_TIMEOUT_MS !==
+                  process.env.BILLING_INTERNAL_TIMEOUT_MS ||
+                billingApiEnvironment.WIDGETS_INTERNAL_BASE_URL !==
+                  "http://127.0.0.1:4700" ||
+                billingApiEnvironment.WIDGETS_INTERNAL_TIMEOUT_MS !== "5000" ||
+                billingWorkerEnvironment.BILLING_CORE_INTERNAL_BASE_URL !==
+                  "http://127.0.0.1:4200" ||
+                billingWorkerEnvironment.BILLING_INTERNAL_TIMEOUT_MS !==
+                  process.env.BILLING_INTERNAL_TIMEOUT_MS
+              ) {
+                throw new Error(
+                  "Billing API/worker internal HTTP, proxy or CORS contract drifted",
+                );
+              }
+              const providerEnvironmentKeys = [
+                "YOOKASSA_PRODUCTION_SHOP_ID",
+                "YOOKASSA_PRODUCTION_SECRET_KEY",
+                "PAYMENT_METHOD_ENCRYPTION_KEY",
+                "RECAPTCHA_CLIENT_URL",
+              ];
+              const forbiddenDevelopmentProviderKeys = [
+                "YOOKASSA_SHOP_ID",
+                "YOOKASSA_SECRET_KEY",
+              ];
+              const coreCallerEnvironmentKeys = [
+                "BILLING_CORE_INTERNAL_BASE_URL",
+                "BILLING_INTERNAL_TOKEN",
+                "BILLING_INTERNAL_TIMEOUT_MS",
+              ];
+              const widgetsCallerEnvironmentKeys = [
+                "WIDGETS_INTERNAL_BASE_URL",
+                "WIDGETS_INTERNAL_TOKEN",
+                "WIDGETS_INTERNAL_TIMEOUT_MS",
+              ];
+              for (const [name, [, environment]] of billingRoles) {
+                const mustNotReceive = [
+                  ...forbiddenDevelopmentProviderKeys,
+                  ...(name === "billing-worker" ? [] : providerEnvironmentKeys),
+                  ...(name === "billing-api" || name === "billing-worker"
+                    ? []
+                    : coreCallerEnvironmentKeys),
+                  ...(name === "billing-api" ? [] : widgetsCallerEnvironmentKeys),
+                  ...(name === "billing-api" ? [] : ["TRUST_PROXY"]),
+                  ...(name === "billing-api" ? [] : ["CORS_ALLOWED_ORIGINS"]),
+                ];
+                for (const key of mustNotReceive) {
+                  if (key in environment) {
+                    throw new Error(`${name} must not receive ${key}`);
+                  }
+                }
+                const rabbitExpected =
+                  name === "billing-worker" ||
+                  name === "billing-outbox-publisher";
+                if (("RABBITMQ_URL" in environment) !== rabbitExpected) {
+                  throw new Error(`${name} RabbitMQ credential scope drifted`);
+                }
+              }
+              if (
+                billingApi.depends_on != null ||
+                billingScheduler.depends_on != null ||
+                JSON.stringify(Object.keys(billingWorker.depends_on ?? {})) !==
+                  JSON.stringify(["rabbitmq"]) ||
+                JSON.stringify(Object.keys(billingPublisher.depends_on ?? {})) !==
+                  JSON.stringify(["rabbitmq"]) ||
+                billingWorkerEnvironment.RABBITMQ_CONNECTION_NAME !==
+                  "winwidget-billing-worker" ||
+                billingWorkerEnvironment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
+                billingWorkerEnvironment.MESSAGING_SERVICE_NAME !==
+                  "billing-worker" ||
+                billingPublisherEnvironment.RABBITMQ_CONNECTION_NAME !==
+                  "winwidget-billing-outbox-publisher" ||
+                billingPublisherEnvironment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
+                billingPublisherEnvironment.MESSAGING_SERVICE_NAME !==
+                  "billing-outbox-publisher"
+              ) {
+                throw new Error(
+                  "Billing role dependency, topology ownership or connection identity drifted",
+                );
+              }
               const internalTokens = [
                 apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
                 notificationDeliveryEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
@@ -3980,6 +4887,7 @@ jobs:
               const widgetsInternalTokens = [
                 apiEnvironment.WIDGETS_INTERNAL_TOKEN,
                 widgetsEnvironment.WIDGETS_INTERNAL_TOKEN,
+                billingApiEnvironment.WIDGETS_INTERNAL_TOKEN,
               ];
               if (
                 widgetsInternalTokens.some(
@@ -3993,7 +4901,25 @@ jobs:
                   "http://127.0.0.1:4700"
               ) {
                 throw new Error(
-                  "Core and Widgets must share one non-placeholder internal token and loopback origin",
+                  "Core, Widgets and Billing API must share one non-placeholder Widgets token and loopback origin",
+                );
+              }
+              const billingInternalTokens = [
+                apiEnvironment.BILLING_INTERNAL_TOKEN,
+                billingApiEnvironment.BILLING_INTERNAL_TOKEN,
+                billingWorkerEnvironment.BILLING_INTERNAL_TOKEN,
+              ];
+              if (
+                billingInternalTokens.some(
+                  token =>
+                    typeof token !== "string" ||
+                    token.startsWith("change_me") ||
+                    token.length < 32,
+                ) ||
+                new Set(billingInternalTokens).size !== 1
+              ) {
+                throw new Error(
+                  "Core, Billing API and Billing worker must share one non-placeholder internal token",
                 );
               }
               const maintenance = requireService("maintenance-worker");
@@ -4009,6 +4935,7 @@ jobs:
                   "CAMPAIGNS_BACKUP_URL",
                   "REPORTING_BACKUP_URL",
                   "WIDGETS_BACKUP_URL",
+                  "BILLING_BACKUP_URL",
                   "MAINTENANCE_WORKER_PREFETCH",
                   "MAINTENANCE_HEALTH_PORT",
                   "SCHEDULED_JOB_POLL_INTERVAL_MS",
@@ -4042,15 +4969,19 @@ jobs:
                   "DATABASE_RESTORE_CAMPAIGNS_PORT",
                   "DATABASE_RESTORE_REPORTING_PORT",
                   "DATABASE_RESTORE_WIDGETS_PORT",
+                  "DATABASE_RESTORE_BILLING_PORT",
                   "DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE",
                   "DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE",
                   "DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE",
                   "DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE",
                   "DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE",
+                  "DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE",
                 ],
               );
               const expectedDatabaseRestoreEnvironmentKeys = [
                 "APP_REVISION",
+                "DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE",
+                "DATABASE_RESTORE_BILLING_PORT",
                 "DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE",
                 "DATABASE_RESTORE_CAMPAIGNS_PORT",
                 "DATABASE_RESTORE_COMMAND_TIMEOUT_MS",
@@ -4094,6 +5025,8 @@ jobs:
                   process.env.REPORTING_POSTGRES_PORT ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_WIDGETS_PORT !==
                   process.env.WIDGETS_POSTGRES_PORT ||
+                databaseRestoreEnvironment.DATABASE_RESTORE_BILLING_PORT !==
+                  process.env.BILLING_POSTGRES_PORT ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE !==
                   "/run/database-restore-secrets/core-admin-password" ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE !==
@@ -4103,7 +5036,9 @@ jobs:
                 databaseRestoreEnvironment.DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE !==
                   "/run/database-restore-secrets/reporting-admin-password" ||
                 databaseRestoreEnvironment.DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE !==
-                  "/run/database-restore-secrets/widgets-admin-password"
+                  "/run/database-restore-secrets/widgets-admin-password" ||
+                databaseRestoreEnvironment.DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE !==
+                  "/run/database-restore-secrets/billing-admin-password"
               ) {
                 throw new Error(
                   "database-restore-worker environment or credential boundary drifted",
@@ -4122,6 +5057,10 @@ jobs:
               const databaseRestoreHealthcheckCommand =
                 databaseRestoreWorker.healthcheck?.test ?? [];
               const expectedDatabaseRestoreSecrets = [
+                [
+                  "billing-postgres-admin-password",
+                  "database-restore-billing-admin-password",
+                ],
                 [
                   "campaigns-postgres-admin-password",
                   "database-restore-campaigns-admin-password",
@@ -4168,6 +5107,9 @@ jobs:
                 Number(databaseRestoreWorker.pids_limit) !== 100 ||
                 JSON.stringify(databaseRestoreHealthcheckCommand.slice(0, 4)) !==
                   JSON.stringify(["CMD", "su-exec", "nestjs:nodejs", "node"]) ||
+                !String(databaseRestoreHealthcheckCommand.at(-1)).includes(
+                  '["billing","campaigns","core","notification-delivery","reporting","widgets"]',
+                ) ||
                 !databaseRestoreHealthcheck.includes("/fences") ||
                 !databaseRestoreHealthcheck.includes("fences.length!==0") ||
                 databaseRestoreWorker.labels?.["com.winwidget.owner"] !==
@@ -4329,6 +5271,61 @@ jobs:
                   "Widgets runtime, migration and backup must use distinct roles",
                 );
               }
+              const billingDatabaseUrls = [
+                billingApiEnvironment.BILLING_DATABASE_URL,
+                billingMigrationEnvironment.BILLING_DATABASE_URL,
+                maintenanceEnvironment.BILLING_BACKUP_URL,
+              ].map(value => new URL(value));
+              for (const url of billingDatabaseUrls) {
+                if (
+                  url.protocol !== "postgresql:" ||
+                  url.hostname !== "127.0.0.1" ||
+                  url.port !== "55437" ||
+                  url.pathname !== "/winwidget_billing" ||
+                  url.searchParams.get("schema") !== "billing" ||
+                  url.searchParams.get("sslmode") !== "disable"
+                ) {
+                  throw new Error(
+                    "Billing roles must use the dedicated loopback PostgreSQL database",
+                  );
+                }
+              }
+              if (
+                new Set(billingDatabaseUrls.map(url => url.username)).size !==
+                billingDatabaseUrls.length
+              ) {
+                throw new Error(
+                  "Billing runtime, migration and backup must use distinct roles",
+                );
+              }
+              for (const [, [, environment]] of billingRoles) {
+                for (const forbidden of [
+                  "DATABASE_URL",
+                  "DATABASE_URL_PRODUCTION",
+                  "DATABASE_BACKUP_URL",
+                  "NOTIFICATION_DELIVERY_DATABASE_URL",
+                  "NOTIFICATION_DELIVERY_BACKUP_URL",
+                  "CAMPAIGNS_DATABASE_URL",
+                  "CAMPAIGNS_BACKUP_URL",
+                  "REPORTING_DATABASE_URL",
+                  "REPORTING_BACKUP_URL",
+                  "WIDGETS_DATABASE_URL",
+                  "WIDGETS_BACKUP_URL",
+                  "BILLING_BACKUP_URL",
+                  "BILLING_MIGRATION_DATABASE_URL",
+                  "BILLING_POSTGRES_ADMIN_USER",
+                  "BILLING_POSTGRES_ADMIN_PASSWORD_FILE",
+                  "SMTP_LOGIN",
+                  "SMTP_PASSWORD",
+                  "TELEGRAM_INFO_BOT_TOKEN",
+                  "S3_ACCESS_KEY_ID",
+                  "S3_SECRET_ACCESS_KEY",
+                ]) {
+                  if (forbidden in environment) {
+                    throw new Error(`Billing runtime must not receive ${forbidden}`);
+                  }
+                }
+              }
               for (const forbidden of [
                 "DATABASE_URL",
                 "DATABASE_URL_PRODUCTION",
@@ -4418,6 +5415,8 @@ jobs:
                 new URL(services["campaigns-service"].environment.RABBITMQ_URL).username,
                 new URL(services["reporting-service"].environment.RABBITMQ_URL).username,
                 new URL(services["widgets-service"].environment.RABBITMQ_URL).username,
+                new URL(services["billing-worker"].environment.RABBITMQ_URL).username,
+                new URL(services["billing-outbox-publisher"].environment.RABBITMQ_URL).username,
               ];
               if (
                 services.rabbitmq.environment?.RABBITMQ_DEFAULT_VHOST !== "winwidget" ||
@@ -4433,6 +5432,8 @@ jobs:
                 "campaigns-service",
                 "reporting-service",
                 "widgets-service",
+                "billing-worker",
+                "billing-outbox-publisher",
               ]) {
                 if (new URL(services[name].environment.RABBITMQ_URL).pathname !== "/winwidget") {
                   throw new Error(`${name} must connect to the winwidget vhost`);
@@ -4451,10 +5452,12 @@ jobs:
                 services["notification-delivery-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
                 services["campaigns-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
                 services["reporting-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
-                services["widgets-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true"
+                services["widgets-service"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
+                services["billing-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
+                services["billing-outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false"
               ) {
                 throw new Error(
-                  "Only the core, Campaigns, Reporting and Widgets topology owners may assert RabbitMQ topology",
+                  "Only reviewed core and service worker topology owners may assert RabbitMQ topology",
                 );
               }
               for (const name of [
@@ -4465,6 +5468,8 @@ jobs:
                 "campaigns-service",
                 "reporting-service",
                 "widgets-service",
+                "billing-worker",
+                "billing-outbox-publisher",
               ]) {
                 const environment = services[name].environment ?? {};
                 for (const forbidden of [
@@ -4578,6 +5583,10 @@ jobs:
             scripts/test-campaigns-cutover-rehearsal.sh \
             scripts/audit-legacy-telegram-channels-production.sh \
             scripts/database-restore-production-guard.sh \
+            scripts/billing-release-identity.sh \
+            scripts/billing-database-lifecycle.sh \
+            scripts/deploy-billing-production.sh \
+            scripts/billing-cutover-production.sh \
             database-restore-entrypoint.sh
           docker run --rm \
             --network none \
@@ -4621,7 +5630,7 @@ jobs:
           requireCount("checkout_verified_prod_revision() {", 1);
           requireCount(
             'git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||',
-            6,
+            8,
           );
           requireCount(
             'git rev-parse "HEAD:$lifecycle_script" 2>/dev/null || true',
@@ -4636,7 +5645,7 @@ jobs:
           requireCount('git merge --ff-only "$fetched_revision"', 1);
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-            6,
+            7,
           );
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"',
@@ -4657,18 +5666,19 @@ jobs:
           );
           requireCount("guard_reporting_checkout_before_pull() {", 2);
           requireCount("guard_widgets_checkout_before_pull() {", 2);
+          requireCount("guard_billing_checkout_before_pull() {", 2);
           requireCount(
             'local lifecycle_script="scripts/widgets-database-lifecycle.sh"',
             2,
           );
           requireCount(
             'local guard_action="${2:---guard-before-fetch-revision}"',
-            4,
+            6,
           );
           requireCount('"$guard_action" "$expected_revision"', 2);
           requireCount(
             '"$expected_revision" --guard-before-checkout-revision',
-            2,
+            3,
           );
           requireCount(
             '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
@@ -4683,6 +5693,10 @@ jobs:
             1,
           );
           requireCount(
+            'guard_billing_checkout_before_pull "$expected_revision"',
+            1,
+          );
+          requireCount(
             'echo "Reporting marker exists but its checkout guard is unavailable." >&2',
             1,
           );
@@ -4692,6 +5706,14 @@ jobs:
           );
           requireCount(
             'echo "Tracked Widgets lifecycle guard script is missing." >&2',
+            1,
+          );
+          requireCount(
+            'echo "Tracked Billing lifecycle guard script is missing." >&2',
+            1,
+          );
+          requireCount(
+            'echo "Billing marker exists but its checkout guard is unavailable." >&2',
             1,
           );
           const deployJob = workflow.slice(workflow.indexOf("\n  deploy:"));
@@ -4715,6 +5737,9 @@ jobs:
             const widgetsPreFetchGuardIndex = job.lastIndexOf(
               'guard_widgets_checkout_before_pull "$expected_revision"',
             );
+            const billingPreFetchGuardIndex = job.lastIndexOf(
+              'guard_billing_checkout_before_pull "$expected_revision"',
+            );
             const fetchIndex = job.lastIndexOf("git fetch origin prod");
             const reportingPostFetchGuardIndex = job.indexOf(
               "guard_reporting_checkout_before_pull",
@@ -4724,25 +5749,34 @@ jobs:
               "guard_widgets_checkout_before_pull",
               fetchIndex,
             );
+            const billingPostFetchGuardIndex = job.indexOf(
+              "guard_billing_checkout_before_pull",
+              fetchIndex,
+            );
             const checkoutIndex = job.lastIndexOf("git checkout prod");
             if (
               lockIndex < 0 ||
               reportingPreFetchGuardIndex < 0 ||
               campaignsGuardIndex < 0 ||
               widgetsPreFetchGuardIndex < 0 ||
+              billingPreFetchGuardIndex < 0 ||
               fetchIndex < 0 ||
               reportingPostFetchGuardIndex < 0 ||
               widgetsPostFetchGuardIndex < 0 ||
+              billingPostFetchGuardIndex < 0 ||
               checkoutIndex < 0 ||
               lockIndex >= reportingPreFetchGuardIndex ||
               lockIndex >= campaignsGuardIndex ||
               lockIndex >= widgetsPreFetchGuardIndex ||
+              lockIndex >= billingPreFetchGuardIndex ||
               reportingPreFetchGuardIndex >= fetchIndex ||
               campaignsGuardIndex >= fetchIndex ||
               widgetsPreFetchGuardIndex >= fetchIndex ||
+              billingPreFetchGuardIndex >= fetchIndex ||
               fetchIndex >= reportingPostFetchGuardIndex ||
               reportingPostFetchGuardIndex >= widgetsPostFetchGuardIndex ||
-              widgetsPostFetchGuardIndex >= checkoutIndex
+              widgetsPostFetchGuardIndex >= billingPostFetchGuardIndex ||
+              billingPostFetchGuardIndex >= checkoutIndex
             ) {
               throw new Error(
                 `${label} must hold the production lock and pass every lifecycle guard around the exact fetch`,
@@ -5046,6 +6080,10 @@ jobs:
           bash -n scripts/test-reporting-production-scripts.sh
           bash -n scripts/database-restore-production-guard.sh
           bash -n scripts/test-database-restore-worker-rehearsal.sh
+          bash -n scripts/billing-release-identity.sh
+          bash -n scripts/billing-database-lifecycle.sh
+          bash -n scripts/deploy-billing-production.sh
+          bash -n scripts/billing-cutover-production.sh
           pnpm exec prettier --check \
             .github/workflows/database-restore-production.yml \
             .github/workflows/deploy-production.yml
@@ -5062,6 +6100,14 @@ jobs:
           bash scripts/test-reporting-production-scripts.sh
           bash scripts/database-restore-production-guard.sh --self-test
           bash scripts/test-database-restore-worker-rehearsal.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/billing-release-identity.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/billing-database-lifecycle.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/deploy-billing-production.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/billing-cutover-production.sh --self-test
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
@@ -5069,6 +6115,69 @@ jobs:
           pnpm --dir apps/campaigns run build
           pnpm --dir apps/reporting run build
           pnpm --dir apps/widgets run build
+          pnpm --dir apps/billing run build
+
+      - name: Create restricted Billing RabbitMQ users
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          worker_password=billing_worker_ci_password_at_least_32_chars
+          publisher_password=billing_publisher_ci_password_at_least_32_chars
+          if ! docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl add_user winwidget-billing-worker "$worker_password" \
+            > /dev/null 2>&1; then
+            docker exec "$RABBITMQ_CONTAINER_ID" \
+              rabbitmqctl change_password \
+                winwidget-billing-worker "$worker_password" > /dev/null
+          fi
+          if ! docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl add_user winwidget-billing-publisher "$publisher_password" \
+            > /dev/null 2>&1; then
+            docker exec "$RABBITMQ_CONTAINER_ID" \
+              rabbitmqctl change_password \
+                winwidget-billing-publisher "$publisher_password" > /dev/null
+          fi
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions \
+            -p winwidget winwidget-billing-worker \
+            '^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+            '^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+            '^winwidget\.(events|billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+            > /dev/null
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions \
+            -p winwidget winwidget-billing-publisher \
+            '^$' '^winwidget\.(events|billing\.(retry|dead-letter))$' '^$' > /dev/null
+          node <<'NODE'
+          const amqp = require('amqplib');
+          void (async () => {
+            const connection = await amqp.connect(process.env.RABBITMQ_URL);
+            const channel = await connection.createChannel();
+            await channel.assertExchange('winwidget.events', 'topic', {
+              durable: true,
+            });
+            await channel.close();
+            await connection.close();
+          })();
+          NODE
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_topic_permissions -p winwidget \
+              winwidget-billing-worker winwidget.events '^$' \
+              '^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.settings\.source\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v1|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$' \
+            > /dev/null
+          docker exec "$RABBITMQ_CONTAINER_ID" \
+            rabbitmqctl set_topic_permissions -p winwidget \
+              winwidget-billing-publisher winwidget.events \
+              '^(payment\.succeeded\.v1|payment\.notification\.telegram\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.subscription-expiry\.(email|telegram)\.requested\.v1|billing\.(payment|subscription)(\.details)?\.changed\.v1|billing\.(affiliate|settings)\.changed\.v1|admin\.audit\.billing\.v1)$' \
+              '^$' > /dev/null
+
+      - name: Billing PostgreSQL 18 monetary and RabbitMQ crash-boundary integration
+        env:
+          BILLING_TEST_DATABASE_URL: ${{ env.BILLING_DATABASE_URL }}
+          BILLING_TEST_RABBITMQ_ADMIN_URL: ${{ env.RABBITMQ_URL }}
+          BILLING_TEST_RABBITMQ_WORKER_URL: ${{ env.RABBITMQ_BILLING_WORKER_URL }}
+          BILLING_TEST_RABBITMQ_PUBLISHER_URL: ${{ env.RABBITMQ_BILLING_PUBLISHER_URL }}
+          BILLING_RUNTIME_INTEGRATION_ALLOW_MUTATION: 'true'
+          BILLING_RUNTIME_INTEGRATION_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: node scripts/test-billing-runtime-boundaries.mjs --integration
 
       - name: Verify Notification Delivery wire contract boundary
         run: |
@@ -5513,7 +6622,7 @@ jobs:
           trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
           export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
 
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -5546,6 +6655,28 @@ jobs:
             docker image inspect "$WIDGETS_IMAGE" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
           )" = "$WIDGETS_REVISION"
+          test "$(
+            docker image inspect "$BILLING_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$BILLING_REVISION"
+          test "$(
+            docker image inspect "$BILLING_IMAGE" \
+              --format '{{.Config.User}}'
+          )" = 'billing'
+          docker run --rm --network none \
+            --entrypoint sh \
+            "$BILLING_IMAGE" \
+            -euc '
+              test "$(id -u)" = 1001
+              openssl version > /dev/null
+              test -f dist/src/main.js
+              test -f dist/src/cutover-main.js
+              engine="$(find node_modules/@prisma/billing-client -maxdepth 1 -type f -name "libquery_engine-*.so.node" -print -quit)"
+              test -n "$engine"
+              if ldd "$engine" | grep -q "not found"; then
+                exit 1
+              fi
+            '
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version | grep -Eq " 18[.]" && pg_restore --version | grep -Eq " 18[.]" && test -f dist/src/maintenance-worker-main.js'
@@ -5561,6 +6692,7 @@ jobs:
               test -d apps/campaigns/prisma/migrations
               test -d apps/reporting/prisma/migrations
               test -d apps/widgets/prisma/migrations
+              test -d apps/billing/prisma/migrations
             '
           restore_entrypoint_run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           restore_entrypoint_volume="winwidget-ci-restore-entrypoint-${restore_entrypoint_run_id}"
@@ -5619,7 +6751,8 @@ jobs:
             notification-delivery-admin-password \
             campaigns-admin-password \
             reporting-admin-password \
-            widgets-admin-password; do
+            widgets-admin-password \
+            billing-admin-password; do
             sudo install -o root -g root -m 400 \
               "$restore_entrypoint_fixture" \
               "$restore_entrypoint_secret_root/$secret_name"
@@ -5632,7 +6765,8 @@ jobs:
             notification-delivery-admin-password \
             campaigns-admin-password \
             reporting-admin-password \
-            widgets-admin-password; do
+            widgets-admin-password \
+            billing-admin-password; do
             test "$(sudo stat -c '%u:%g:%a' "$restore_entrypoint_secret_root/$secret_name")" = '0:0:400'
           done
           docker volume create \
@@ -5667,6 +6801,7 @@ jobs:
             --mount "type=bind,source=$restore_entrypoint_secret_root/campaigns-admin-password,target=/run/secrets/database-restore-campaigns-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/reporting-admin-password,target=/run/secrets/database-restore-reporting-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/widgets-admin-password,target=/run/secrets/database-restore-widgets-admin-password,readonly" \
+            --mount "type=bind,source=$restore_entrypoint_secret_root/billing-admin-password,target=/run/secrets/database-restore-billing-admin-password,readonly" \
             --tmpfs /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
             "$DATABASE_RESTORE_IMAGE" \
@@ -5679,7 +6814,8 @@ jobs:
                 /run/database-restore-secrets/notification-delivery-admin-password \
                 /run/database-restore-secrets/campaigns-admin-password \
                 /run/database-restore-secrets/reporting-admin-password \
-                /run/database-restore-secrets/widgets-admin-password; do
+                /run/database-restore-secrets/widgets-admin-password \
+                /run/database-restore-secrets/billing-admin-password; do
                 test -f "$secret_file"
                 test ! -L "$secret_file"
                 test -r "$secret_file"
@@ -5688,7 +6824,7 @@ jobs:
                 test -n "$fixture_value"
                 copied=$((copied + 1))
               done
-              test "$copied" -eq 5
+              test "$copied" -eq 6
               printf "database-restore-entrypoint-secret-copy=passed\n"
             '
           cleanup_restore_entrypoint_smoke
@@ -5798,6 +6934,9 @@ jobs:
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node widgets-service \
             -e "const fs=require('node:fs'); require('@prisma/widgets-client'); fs.accessSync('dist/src/main.js'); fs.accessSync('dist/src/cutover-main.js'); fs.accessSync('prisma/schema.prisma'); const expected=['calculator-button.png','calculator.js','callback-button.png','callback.js','email-logo.png','gift-button.png','helpers/libphonenumber-min.js','helpers/winwidget-phone.js','online-consultant-button.png','online-consultant.js','quiz-button.png','quiz.js','stop-offer.js','timer-button.png','timer.js','wheel.js']; const walk=d=>fs.readdirSync(d,{withFileTypes:true}).flatMap(e=>{const p=d+'/'+e.name;return e.isDirectory()?walk(p):[p.slice('public/widgets/'.length)]}).sort(); if(JSON.stringify(walk('public/widgets'))!==JSON.stringify(expected)) throw new Error('Widgets runtime asset manifest drifted'); for (const path of ['dist/src/app.module.js','dist/src/widget/widget.service.js','dist/src/outbox-publisher-main.js','public/email']) if (fs.existsSync(path)) throw new Error('Widgets image contains Core artifact: '+path)"
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint sh billing-api \
+            -euc "test \"\$(id -u):\$(id -g)\" = '1001:1001'; test -f dist/src/main.js; test -f dist/src/cutover-main.js; test -f prisma/schema.prisma; test -d prisma/migrations; test ! -e dist/src/app.module.js; test ! -e public/widgets"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node api \
             -e "const fs=require('node:fs'); fs.accessSync('dist/src/main.js'); if (fs.existsSync('public/widgets')) throw new Error('Core image still contains Widgets runtime assets')"
@@ -6395,6 +7534,44 @@ jobs:
           rm -f -- "$WIDGETS_CI_POSTGRES_PASSWORD_FILE"
           [[ "$cleanup_failed" == "false" ]]
 
+      - name: Cleanup isolated Billing PostgreSQL
+        if: ${{ always() }}
+        env:
+          BILLING_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-billing-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          cleanup_failed=false
+          if docker container inspect \
+            "$BILLING_CI_POSTGRES_CONTAINER" > /dev/null 2>&1; then
+            container_identity="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{index .Config.Labels "com.winwidget.github-run"}}' \
+                "$BILLING_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$container_identity" != "billing|ci-postgres|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Billing container." >&2
+              cleanup_failed=true
+            else
+              docker container rm --force \
+                "$BILLING_CI_POSTGRES_CONTAINER" > /dev/null
+            fi
+          fi
+          if docker volume inspect \
+            "$BILLING_CI_POSTGRES_VOLUME" > /dev/null 2>&1; then
+            volume_identity="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}|{{index .Labels "com.winwidget.github-run"}}' \
+                "$BILLING_CI_POSTGRES_VOLUME"
+            )"
+            if [[ "$volume_identity" != "billing|ci-postgres-data|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Billing volume." >&2
+              cleanup_failed=true
+            else
+              docker volume rm "$BILLING_CI_POSTGRES_VOLUME" > /dev/null
+            fi
+          fi
+          rm -f -- "$BILLING_CI_POSTGRES_PASSWORD_FILE"
+          [[ "$cleanup_failed" == "false" ]]
+
   deploy:
     needs: verify
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -6425,6 +7602,8 @@ jobs:
           DEPLOY_REVISION: ${{ github.sha }}
           DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
           WIDGETS_CUTOVER_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.widgets_cutover_confirmation || '' }}
+          BILLING_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_action || 'status' }}
+          BILLING_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_confirmation || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -6436,6 +7615,15 @@ jobs:
               exit 1
               ;;
           esac
+          case "$BILLING_ACTION:$BILLING_CONFIRMATION" in
+            status:|prepare:) ;;
+            cutover:'CUTOVER BILLING OWNERSHIP'|forward-recovery:'CUTOVER BILLING OWNERSHIP') ;;
+            abort:'ABORT BILLING CUTOVER') ;;
+            *)
+              echo 'Invalid Billing action or confirmation.' >&2
+              exit 1
+              ;;
+          esac
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o ServerAliveInterval=15 \
@@ -6443,7 +7631,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' bash -s" <<'EOF'
           set -euo pipefail
           unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
             REPORTING_FIRST_ROLLOUT_STAGED_MARKER
@@ -6581,6 +7769,47 @@ jobs:
               return 1
             }
           }
+          guard_billing_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local lifecycle_script="scripts/billing-database-lifecycle.sh"
+            local database_marker="$APP_ROOT/deploy/backend/.billing-database-lifecycle-v1"
+            local cutover_marker="$APP_ROOT/deploy/backend/.billing-cutover-v1"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || {
+              echo "Expected Billing revision is invalid." >&2
+              return 1
+            }
+            tracked_blob="$(
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null ||
+                true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
+                echo "Billing lifecycle guard script is unsafe." >&2
+                return 1
+              }
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
+                echo "Billing lifecycle guard script differs from the checked-out revision." >&2
+                return 1
+              }
+              APP_ROOT="$APP_ROOT" \
+                bash "$lifecycle_script" "$guard_action" "$expected_revision"
+              return
+            fi
+            [[ -z "$tracked_blob" ]] || {
+              echo "Tracked Billing lifecycle guard script is missing." >&2
+              return 1
+            }
+            if [[ -e "$database_marker" || -L "$database_marker" ||
+              -e "$cutover_marker" || -L "$cutover_marker" ]]; then
+              echo "Billing marker exists but its checkout guard is unavailable." >&2
+              return 1
+            fi
+          }
           checkout_verified_prod_revision() {
             local expected_revision="$1"
             local current_revision fetched_revision
@@ -6589,9 +7818,11 @@ jobs:
             guard_campaigns_checkout_before_pull "$current_revision"
             guard_reporting_checkout_before_pull "$current_revision"
             guard_widgets_checkout_before_pull "$current_revision"
+            guard_billing_checkout_before_pull "$current_revision"
             guard_campaigns_checkout_before_pull "$expected_revision"
             guard_reporting_checkout_before_pull "$expected_revision"
             guard_widgets_checkout_before_pull "$expected_revision"
+            guard_billing_checkout_before_pull "$expected_revision"
             git fetch origin prod
             fetched_revision="$(git rev-parse FETCH_HEAD)"
             [[ "$fetched_revision" == "$expected_revision" ]] || {
@@ -6601,6 +7832,8 @@ jobs:
             guard_reporting_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
             guard_widgets_checkout_before_pull \
+              "$expected_revision" --guard-before-checkout-revision
+            guard_billing_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
             git checkout prod
             git merge --ff-only "$fetched_revision"
@@ -6615,6 +7848,7 @@ jobs:
             guard_campaigns_checkout_before_pull "$current_revision"
             guard_reporting_checkout_before_pull "$current_revision"
             guard_widgets_checkout_before_pull "$current_revision"
+            guard_billing_checkout_before_pull "$current_revision"
             if ! guard_campaigns_checkout_before_pull \
               "$EXPECTED_REVISION" > /dev/null 2>&1; then
               echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
@@ -6632,6 +7866,11 @@ jobs:
               echo "Automatic backend deploy is verified but deferred: the active Widgets ownership guard rejects $EXPECTED_REVISION."
               exit 0
             fi
+            if ! guard_billing_checkout_before_pull \
+              "$EXPECTED_REVISION" > /dev/null 2>&1; then
+              echo "Automatic backend deploy is verified but deferred: the active Billing ownership guard rejects $EXPECTED_REVISION."
+              exit 0
+            fi
           fi
           case "$DEPLOY_TARGET" in
             all)
@@ -6640,6 +7879,7 @@ jobs:
                 CAMPAIGNS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
                 REPORTING_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
                 WIDGETS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
+                BILLING_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
                 bash scripts/deploy-production.sh
               exit 0
               ;;
@@ -6674,6 +7914,43 @@ jobs:
                 WIDGETS_FIRST_CUTOVER_APPROVED="$widgets_cutover_approved" \
                 WIDGETS_FIRST_CUTOVER_CONFIRMATION="$WIDGETS_CUTOVER_CONFIRMATION" \
                 bash scripts/deploy-widgets-production.sh
+              ;;
+            billing)
+              [[ "$AUTOMATIC_PROD_PUSH" == "false" ]] || {
+                echo "Billing lifecycle actions are manual-only." >&2
+                exit 1
+              }
+              checkout_verified_prod_revision "$EXPECTED_REVISION"
+              case "$BILLING_ACTION" in
+                status)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash scripts/billing-cutover-production.sh --status
+                  ;;
+                prepare)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    BILLING_AUTOMATIC_PROD_PUSH=false \
+                    bash scripts/billing-cutover-production.sh --prepare
+                  APP_ROOT="$APP_ROOT" BILLING_AUTOMATIC_PROD_PUSH=false \
+                    CAMPAIGNS_AUTOMATIC_PROD_PUSH=false \
+                    REPORTING_AUTOMATIC_PROD_PUSH=false \
+                    WIDGETS_AUTOMATIC_PROD_PUSH=false \
+                    bash scripts/deploy-production.sh
+                  ;;
+                cutover|forward-recovery)
+                  billing_command="--$BILLING_ACTION"
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    BILLING_AUTOMATIC_PROD_PUSH=false \
+                    BILLING_FIRST_CUTOVER_APPROVED=true \
+                    BILLING_FIRST_CUTOVER_CONFIRMATION="$BILLING_CONFIRMATION" \
+                    bash scripts/billing-cutover-production.sh "$billing_command"
+                  ;;
+                abort)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    BILLING_AUTOMATIC_PROD_PUSH=false \
+                    BILLING_ABORT_CONFIRMATION="$BILLING_CONFIRMATION" \
+                    bash scripts/billing-cutover-production.sh --abort
+                  ;;
+              esac
               ;;
             *)
               echo "Unsupported deploy target: $DEPLOY_TARGET" >&2

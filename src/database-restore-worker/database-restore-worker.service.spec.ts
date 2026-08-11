@@ -64,12 +64,14 @@ function createConfig(
 			DATABASE_RESTORE_CAMPAIGNS_PORT: '55433',
 			DATABASE_RESTORE_REPORTING_PORT: '55435',
 			DATABASE_RESTORE_WIDGETS_PORT: '55436',
+			DATABASE_RESTORE_BILLING_PORT: '55437',
 			DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
 			DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: '/secrets/campaigns',
 			DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: '/secrets/reporting',
 			DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
+			DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: '/secrets/billing',
 			APP_REVISION: 'd'.repeat(40),
 			NODE_ENV: productionMode ? 'production' : 'test'
 		},
@@ -515,6 +517,7 @@ describe('DatabaseRestoreWorkerService', () => {
 			String(harness.files.get(join(STORAGE, 'worker-ready.json')))
 		) as { targets: string[] };
 		expect(readiness.targets).toEqual([
+			'billing',
 			'campaigns',
 			'core',
 			'notification-delivery',

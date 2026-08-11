@@ -134,6 +134,11 @@ describe('HealthService notification delivery monitoring', () => {
 						'campaign-admin-audit',
 						'reporting-admin-audit',
 						'widgets-admin-audit',
+						'billing-admin-audit',
+						'billing-payment-projection',
+						'billing-subscription-projection',
+						'billing-affiliate-projection',
+						'billing-settings-projection',
 						'auto-renewal',
 						'database-backup'
 					]

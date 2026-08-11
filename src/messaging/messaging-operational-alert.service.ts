@@ -7,6 +7,11 @@ import {
 	OUTBOX_LOCK_TIMEOUT_MS,
 	WIDGETS_PROVIDER_INTEGRATION_KINDS
 } from '@/messaging/messaging.constants';
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
+import {
+	BillingMessagingClientService,
+	BillingMessagingOverview
+} from '@/messaging/billing-messaging-client.service';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
 import {
 	NotificationDeliveryClientService,
@@ -62,7 +67,9 @@ export class MessagingOperationalAlertService
 		private readonly configService: ConfigService,
 		private readonly rabbitManagement: RabbitMqManagementService,
 		private readonly notificationDelivery: NotificationDeliveryClientService,
-		private readonly widgets: WidgetsDeliveryFailuresClientService
+		private readonly widgets: WidgetsDeliveryFailuresClientService,
+		private readonly billingState?: BillingCoreStateService,
+		private readonly billingMessaging?: BillingMessagingClientService
 	) {}
 
 	onModuleInit(): void {
@@ -78,6 +85,12 @@ export class MessagingOperationalAlertService
 
 	private async check(): Promise<void> {
 		try {
+			const billingOwner = this.billingState
+				? await this.billingState.isBillingOwner()
+				: false;
+			const coreFailureKinds = CORE_OWNED_MESSAGING_KINDS.filter(
+				kind => !billingOwner || kind !== 'auto-renewal'
+			);
 			const now = new Date();
 			const staleBefore = new Date(now.getTime() - 30_000);
 			const activityStaleBefore = new Date(
@@ -102,7 +115,8 @@ export class MessagingOperationalAlertService
 				queueResult,
 				brokerResult,
 				notificationDeliveryResult,
-				widgetsResult
+				widgetsResult,
+				billingResult
 			] = await Promise.all([
 				this.prisma.outboxEvent.count({
 					where: { status: OutboxEventStatus.FAILED }
@@ -145,7 +159,7 @@ export class MessagingOperationalAlertService
 					where: {
 						resolvedAt: null,
 						integration: {
-							in: [...CORE_OWNED_MESSAGING_KINDS]
+							in: coreFailureKinds
 						}
 					}
 				}),
@@ -154,7 +168,7 @@ export class MessagingOperationalAlertService
 					where: {
 						resolvedAt: null,
 						integration: {
-							in: [...CORE_OWNED_MESSAGING_KINDS]
+							in: coreFailureKinds
 						}
 					},
 					_count: { _all: true }
@@ -232,7 +246,22 @@ export class MessagingOperationalAlertService
 						overview: null,
 						error:
 							error instanceof Error ? error.message : 'Widgets недоступен'
-					}))
+					})),
+				billingOwner && this.billingMessaging
+					? this.billingMessaging
+							.getOverview()
+							.then(overview => ({
+								overview,
+								error: null as string | null
+							}))
+							.catch(error => ({
+								overview: null,
+								error:
+									error instanceof Error
+										? error.message
+										: 'Billing недоступен'
+							}))
+					: Promise.resolve({ overview: null, error: null })
 			]);
 
 			const categoryCounts: Record<string, number> = {};
@@ -377,6 +406,17 @@ export class MessagingOperationalAlertService
 				(!deliveryConsumeAt || deliveryConsumeAt < activityStaleBefore);
 			const widgetsOverview: WidgetsMessagingOverview | null =
 				widgetsResult.overview;
+			const billingOverview: BillingMessagingOverview | null =
+				billingResult.overview;
+			const billingPending =
+				(billingOverview?.outbox.PENDING || 0) +
+				(billingOverview?.outbox.PROCESSING || 0);
+			const billingStale =
+				billingOverview?.oldestPendingAt &&
+				Date.parse(billingOverview.oldestPendingAt) <
+					oldPendingBefore.getTime()
+					? 1
+					: 0;
 			const widgetsPublisher = widgetsOverview?.heartbeats.find(
 				heartbeat => heartbeat.service === 'widgets-publisher'
 			);
@@ -406,15 +446,18 @@ export class MessagingOperationalAlertService
 			const combinedStaleOutbox =
 				stalePendingOutbox +
 				(deliveryOverview?.operational.staleOutbox || 0) +
-				(widgetsOverview?.operational.staleOutbox || 0);
+				(widgetsOverview?.operational.staleOutbox || 0) +
+				billingStale;
 			const combinedDueOutbox =
 				dueOutbox +
 				(deliveryOverview?.operational.dueOutbox || 0) +
-				(widgetsOverview?.operational.dueOutbox || 0);
+				(widgetsOverview?.operational.dueOutbox || 0) +
+				billingPending;
 			const combinedUnresolvedFailures =
 				unresolvedDlq +
 				(deliveryOverview?.unresolvedFailures || 0) +
-				(widgetsOverview?.unresolvedFailures || 0);
+				(widgetsOverview?.unresolvedFailures || 0) +
+				(billingOverview?.unresolvedFailures || 0);
 
 			const brokerProblems = [
 				...(brokerResult.error
@@ -472,6 +515,9 @@ export class MessagingOperationalAlertService
 					: []),
 				...(widgetsPublishStale ? ['widgets-publish=stale'] : []),
 				...(widgetsConsumeStale ? ['widgets-consume=stale'] : []),
+				...(billingResult.error
+					? [`billing-api=${billingResult.error}`]
+					: []),
 				...(queueResult.error ? [`queues=${queueResult.error}`] : []),
 				...missingQueues.map(queue => `missing=${queue}`),
 				...consumerlessQueues.map(queue => `consumers=0:${queue}`),
@@ -534,6 +580,13 @@ export class MessagingOperationalAlertService
 								widgetsHeartbeatProblems.length === 0,
 								widgetsPublishStale || widgetsConsumeStale
 							)
+				}</b>`,
+				`Billing: <b>${
+					billingOwner
+						? billingResult.error
+							? `internal API недоступен: ${billingResult.error}`
+							: `Outbox=${billingPending}, DLQ=${billingOverview?.unresolvedFailures || 0}`
+						: 'Core ownership'
 				}</b>`
 			].join('\n');
 			await this.sendAlertIfChanged(

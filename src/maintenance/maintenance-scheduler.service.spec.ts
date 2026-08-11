@@ -71,6 +71,10 @@ describe('MaintenanceSchedulerService', () => {
 			widgets: {
 				created: true,
 				job: { id: '55555555-5555-4555-8555-555555555555' }
+			},
+			billing: {
+				created: true,
+				job: { id: '66666666-6666-4666-8666-666666666666' }
 			}
 		});
 

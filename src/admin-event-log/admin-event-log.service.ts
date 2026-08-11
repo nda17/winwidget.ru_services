@@ -54,6 +54,7 @@ export type AdminEventLogAction =
 	| 'TELEGRAM_DATABASE_RESTORE'
 	| 'MESSAGING_FAILURE_RETRY'
 	| 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY'
+	| 'BILLING_DELIVERY_RETRY'
 	| 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE'
 	| 'REPORTING_DAILY_SUMMARY_SCHEDULE_UPDATE'
 	| 'REPORTING_DAILY_SUMMARY_SCHEDULE_REJECTED'
@@ -121,6 +122,7 @@ const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
 	'TELEGRAM_DATABASE_RESTORE',
 	'MESSAGING_FAILURE_RETRY',
 	'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
+	'BILLING_DELIVERY_RETRY',
 	'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
 	'REPORTING_DAILY_SUMMARY_SCHEDULE_UPDATE',
 	'REPORTING_DAILY_SUMMARY_SCHEDULE_REJECTED',
@@ -149,6 +151,8 @@ export interface AdminEventLogRecordInput {
 	targetUserId?: string | null;
 	metadata?: Prisma.InputJsonValue;
 	request?: Request;
+	ip?: string | null;
+	userAgent?: string | null;
 }
 
 interface AdminEventLogFilters {
@@ -356,7 +360,12 @@ export class AdminEventLogService {
 			this.getUserSnapshot(input.adminId, client),
 			this.getUserSnapshot(input.targetUserId, client)
 		]);
-		const requestSnapshot = this.getRequestSnapshot(input.request);
+		const requestSnapshot = input.request
+			? this.getRequestSnapshot(input.request)
+			: {
+					ip: input.ip || null,
+					userAgent: input.userAgent || null
+				};
 
 		return client.adminEventLog.create({
 			data: {

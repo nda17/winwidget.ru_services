@@ -105,7 +105,11 @@ describe('SubscriptionExpiryService durable dispatch', () => {
 			$transaction: jest.fn(callback => callback(transaction))
 		};
 		service = new SubscriptionExpiryService(
-			prisma as unknown as PrismaService
+			prisma as unknown as PrismaService,
+			{
+				isSchedulerEnabled: jest.fn().mockResolvedValue(true),
+				assertSchedulerEnabled: jest.fn().mockResolvedValue(undefined)
+			} as never
 		);
 	});
 

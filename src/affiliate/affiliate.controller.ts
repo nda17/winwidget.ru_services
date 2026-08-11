@@ -3,6 +3,8 @@ import { UpdateAffiliateSettingsDto } from '@/affiliate/dto/update-affiliate-set
 import { AffiliateService } from '@/affiliate/affiliate.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
+import { BillingLegacyRouteGuard } from '@/billing-boundary/billing-legacy-route.guard';
+import { BillingLegacyWriteFenceInterceptor } from '@/billing-boundary/billing-legacy-write-fence.interceptor';
 import {
 	Body,
 	Controller,
@@ -12,12 +14,16 @@ import {
 	Query,
 	Req,
 	UsePipes,
+	UseGuards,
+	UseInterceptors,
 	ValidationPipe
 } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('affiliate')
+@UseGuards(BillingLegacyRouteGuard)
+@UseInterceptors(BillingLegacyWriteFenceInterceptor)
 export class AffiliateController {
 	constructor(
 		private readonly affiliateService: AffiliateService,

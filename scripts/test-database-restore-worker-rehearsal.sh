@@ -34,6 +34,7 @@ NOTIFICATION_PORT=55432
 CAMPAIGNS_PORT=55433
 REPORTING_PORT=55435
 WIDGETS_PORT=55436
+BILLING_PORT=55437
 REVISION=''
 HEAD_REVISION=''
 SOURCE_HASH=''
@@ -66,6 +67,10 @@ WIDGETS_ADMIN_PASSWORD='rehearsal_widgets_admin_password_2026'
 WIDGETS_MIGRATION_PASSWORD='rehearsal_widgets_migration_password_2026'
 WIDGETS_RUNTIME_PASSWORD='rehearsal_widgets_runtime_password_2026'
 WIDGETS_BACKUP_PASSWORD='rehearsal_widgets_backup_password_2026'
+BILLING_ADMIN_PASSWORD='rehearsal_billing_admin_password_2026'
+BILLING_MIGRATION_PASSWORD='rehearsal_billing_migration_password_2026'
+BILLING_RUNTIME_PASSWORD='rehearsal_billing_runtime_password_2026'
+BILLING_BACKUP_PASSWORD='rehearsal_billing_backup_password_2026'
 
 fail() {
 	printf 'database_restore_rehearsal_error=%s\n' "$1" >&2
@@ -184,6 +189,7 @@ target_database() {
 	campaigns) printf 'winwidget_campaigns' ;;
 	reporting) printf 'winwidget_reporting' ;;
 	widgets) printf 'winwidget_widgets' ;;
+	billing) printf 'winwidget_billing' ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -195,6 +201,7 @@ target_schema() {
 	campaigns) printf 'campaigns' ;;
 	reporting) printf 'reporting' ;;
 	widgets) printf 'widgets' ;;
+	billing) printf 'billing' ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -206,6 +213,7 @@ target_admin_role() {
 	campaigns) printf 'winwidget_campaigns_admin' ;;
 	reporting) printf 'winwidget_reporting_admin' ;;
 	widgets) printf 'winwidget_widgets_admin' ;;
+	billing) printf 'winwidget_billing_admin' ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -217,6 +225,7 @@ target_migration_role() {
 	campaigns) printf 'winwidget_campaigns_migration' ;;
 	reporting) printf 'winwidget_reporting_migration' ;;
 	widgets) printf 'winwidget_widgets_migration' ;;
+	billing) printf 'winwidget_billing_migration' ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -228,6 +237,7 @@ target_runtime_role() {
 	campaigns) printf 'winwidget_campaigns_runtime' ;;
 	reporting) printf 'winwidget_reporting_runtime' ;;
 	widgets) printf 'winwidget_widgets_runtime' ;;
+	billing) printf 'winwidget_billing_runtime' ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -239,6 +249,7 @@ target_backup_role() {
 	campaigns) printf 'winwidget_campaigns_backup' ;;
 	reporting) printf 'winwidget_reporting_backup' ;;
 	widgets) printf 'winwidget_widgets_backup' ;;
+	billing) printf 'winwidget_billing_backup' ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -250,6 +261,7 @@ target_port() {
 	campaigns) printf '%s' "$CAMPAIGNS_PORT" ;;
 	reporting) printf '%s' "$REPORTING_PORT" ;;
 	widgets) printf '%s' "$WIDGETS_PORT" ;;
+	billing) printf '%s' "$BILLING_PORT" ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -261,6 +273,7 @@ target_confirmation() {
 	campaigns) printf 'ВОССТАНОВИТЬ CAMPAIGNS' ;;
 	reporting) printf 'ВОССТАНОВИТЬ REPORTING' ;;
 	widgets) printf 'ВОССТАНОВИТЬ WIDGETS' ;;
+	billing) printf 'ВОССТАНОВИТЬ BILLING' ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -272,6 +285,7 @@ target_admin_password() {
 	campaigns) printf '%s' "$CAMPAIGNS_ADMIN_PASSWORD" ;;
 	reporting) printf '%s' "$REPORTING_ADMIN_PASSWORD" ;;
 	widgets) printf '%s' "$WIDGETS_ADMIN_PASSWORD" ;;
+	billing) printf '%s' "$BILLING_ADMIN_PASSWORD" ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -283,6 +297,7 @@ target_migration_password() {
 	campaigns) printf '%s' "$CAMPAIGNS_MIGRATION_PASSWORD" ;;
 	reporting) printf '%s' "$REPORTING_MIGRATION_PASSWORD" ;;
 	widgets) printf '%s' "$WIDGETS_MIGRATION_PASSWORD" ;;
+	billing) printf '%s' "$BILLING_MIGRATION_PASSWORD" ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -294,6 +309,7 @@ target_runtime_password() {
 	campaigns) printf '%s' "$CAMPAIGNS_RUNTIME_PASSWORD" ;;
 	reporting) printf '%s' "$REPORTING_RUNTIME_PASSWORD" ;;
 	widgets) printf '%s' "$WIDGETS_RUNTIME_PASSWORD" ;;
+	billing) printf '%s' "$BILLING_RUNTIME_PASSWORD" ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -305,6 +321,7 @@ target_backup_password() {
 	campaigns) printf '%s' "$CAMPAIGNS_BACKUP_PASSWORD" ;;
 	reporting) printf '%s' "$REPORTING_BACKUP_PASSWORD" ;;
 	widgets) printf '%s' "$WIDGETS_BACKUP_PASSWORD" ;;
+	billing) printf '%s' "$BILLING_BACKUP_PASSWORD" ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -316,6 +333,7 @@ target_migrations_directory() {
 	campaigns) printf '%s/apps/campaigns/prisma/migrations' "$SOURCE_ROOT" ;;
 	reporting) printf '%s/apps/reporting/prisma/migrations' "$SOURCE_ROOT" ;;
 	widgets) printf '%s/apps/widgets/prisma/migrations' "$SOURCE_ROOT" ;;
+	billing) printf '%s/apps/billing/prisma/migrations' "$SOURCE_ROOT" ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -327,6 +345,7 @@ target_application_roles_sql() {
 	campaigns) printf "'winwidget_campaigns_migration','winwidget_campaigns_runtime','winwidget_campaigns_backup'" ;;
 	reporting) printf "'winwidget_reporting_migration','winwidget_reporting_runtime','winwidget_reporting_backup'" ;;
 	widgets) printf "'winwidget_widgets_migration','winwidget_widgets_runtime','winwidget_widgets_backup'" ;;
+	billing) printf "'winwidget_billing_migration','winwidget_billing_runtime','winwidget_billing_backup'" ;;
 	*) fail "unknown target $1" ;;
 	esac
 }
@@ -352,7 +371,7 @@ validate_static_inputs() {
 		fail 'PostgreSQL image must be an immutable PostgreSQL 18 digest'
 	[[ -f "$SOURCE_ROOT/Dockerfile" && -f "$SOURCE_ROOT/database-restore-entrypoint.sh" ]] ||
 		fail 'database restore build inputs are missing'
-	for target in core notification-delivery campaigns reporting widgets; do
+	for target in core notification-delivery campaigns reporting widgets billing; do
 		[[ -d "$(target_migrations_directory "$target")" ]] ||
 			fail "migration directory is missing for $target"
 	done
@@ -609,12 +628,12 @@ assert_resources_absent() {
 	! docker image inspect "$RUNNER_IMAGE" >/dev/null 2>&1 ||
 		fail "image already exists: $RUNNER_IMAGE"
 	if command -v ss >/dev/null 2>&1; then
-		for port in "$CORE_PORT" "$NOTIFICATION_PORT" "$CAMPAIGNS_PORT" "$REPORTING_PORT" "$WIDGETS_PORT"; do
+		for port in "$CORE_PORT" "$NOTIFICATION_PORT" "$CAMPAIGNS_PORT" "$REPORTING_PORT" "$WIDGETS_PORT" "$BILLING_PORT"; do
 			! ss -H -ltn | awk '{print $4}' | grep -Eq "(^|:)$port$" ||
 				fail "canonical rehearsal port is already in use: $port"
 		done
 	elif command -v lsof >/dev/null 2>&1; then
-		for port in "$CORE_PORT" "$NOTIFICATION_PORT" "$CAMPAIGNS_PORT" "$REPORTING_PORT" "$WIDGETS_PORT"; do
+		for port in "$CORE_PORT" "$NOTIFICATION_PORT" "$CAMPAIGNS_PORT" "$REPORTING_PORT" "$WIDGETS_PORT" "$BILLING_PORT"; do
 			! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 ||
 				fail "canonical rehearsal port is already in use: $port"
 		done
@@ -665,6 +684,7 @@ write_secret_files() {
 	printf '%s' "$CAMPAIGNS_ADMIN_PASSWORD" >"$APP_ROOT/secrets/campaigns-admin"
 	printf '%s' "$REPORTING_ADMIN_PASSWORD" >"$APP_ROOT/secrets/reporting-admin"
 	printf '%s' "$WIDGETS_ADMIN_PASSWORD" >"$APP_ROOT/secrets/widgets-admin"
+	printf '%s' "$BILLING_ADMIN_PASSWORD" >"$APP_ROOT/secrets/billing-admin"
 	chmod 0444 "$APP_ROOT"/secrets/*
 	for command_name in pg_dump pg_restore psql; do
 		cat >"$APP_ROOT/wrappers/$command_name" <<SH
@@ -735,6 +755,7 @@ start_postgres() {
 		-p "127.0.0.1:$CAMPAIGNS_PORT:5432" \
 		-p "127.0.0.1:$REPORTING_PORT:5432" \
 		-p "127.0.0.1:$WIDGETS_PORT:5432" \
+		-p "127.0.0.1:$BILLING_PORT:5432" \
 		--health-cmd 'pg_isready --username winwidget_restore_rehearsal_bootstrap --dbname postgres' \
 		--health-interval 1s \
 		--health-timeout 3s \
@@ -746,7 +767,7 @@ start_postgres() {
 		fail 'PostgreSQL container did not use the pinned digest'
 	bindings="$(docker port "$PG_CONTAINER" 5432/tcp | sort)"
 	expected_bindings="$(printf '127.0.0.1:%s\n' \
-		"$NOTIFICATION_PORT" "$CAMPAIGNS_PORT" "$CORE_PORT" "$REPORTING_PORT" "$WIDGETS_PORT" | sort)"
+		"$NOTIFICATION_PORT" "$CAMPAIGNS_PORT" "$CORE_PORT" "$REPORTING_PORT" "$WIDGETS_PORT" "$BILLING_PORT" | sort)"
 	[[ "$bindings" == "$expected_bindings" ]] ||
 		fail 'PostgreSQL rehearsal ports are not exact loopback bindings'
 	server_state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
@@ -769,6 +790,8 @@ CREATE ROLE winwidget_campaigns_admin LOGIN PASSWORD 'rehearsal_campaigns_admin_
 CREATE ROLE winwidget_reporting_admin LOGIN PASSWORD 'rehearsal_reporting_admin_password_2026'
 	NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;
 CREATE ROLE winwidget_widgets_admin LOGIN PASSWORD 'rehearsal_widgets_admin_password_2026'
+	NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;
+CREATE ROLE winwidget_billing_admin LOGIN PASSWORD 'rehearsal_billing_admin_password_2026'
 	NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;
 
 CREATE ROLE gen_user LOGIN PASSWORD 'rehearsal_core_migration_password_2026'
@@ -807,9 +830,16 @@ CREATE ROLE winwidget_widgets_runtime LOGIN PASSWORD 'rehearsal_widgets_runtime_
 	NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 CREATE ROLE winwidget_widgets_backup LOGIN PASSWORD 'rehearsal_widgets_backup_password_2026'
 	NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+CREATE ROLE winwidget_billing_migration LOGIN PASSWORD 'rehearsal_billing_migration_password_2026'
+	NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+CREATE ROLE winwidget_billing_runtime LOGIN PASSWORD 'rehearsal_billing_runtime_password_2026'
+	NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+CREATE ROLE winwidget_billing_backup LOGIN PASSWORD 'rehearsal_billing_backup_password_2026'
+	NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 
 GRANT pg_signal_backend TO winwidget_core_admin, winwidget_notification_delivery_admin,
-	winwidget_campaigns_admin, winwidget_reporting_admin, winwidget_widgets_admin;
+	winwidget_campaigns_admin, winwidget_reporting_admin, winwidget_widgets_admin,
+	winwidget_billing_admin;
 GRANT gen_user, winwidget_api_runtime, winwidget_maintenance, winwidget_backup
 	TO winwidget_core_admin;
 GRANT winwidget_notification_delivery_migration, winwidget_notification_delivery_runtime,
@@ -820,12 +850,15 @@ GRANT winwidget_reporting_migration, winwidget_reporting_runtime,
 	winwidget_reporting_backup TO winwidget_reporting_admin;
 GRANT winwidget_widgets_migration, winwidget_widgets_runtime,
 	winwidget_widgets_backup TO winwidget_widgets_admin;
+GRANT winwidget_billing_migration, winwidget_billing_runtime,
+	winwidget_billing_backup TO winwidget_billing_admin;
 
 CREATE DATABASE default_db OWNER winwidget_core_admin TEMPLATE template0 ENCODING 'UTF8';
 CREATE DATABASE winwidget_notification_delivery OWNER winwidget_notification_delivery_admin TEMPLATE template0 ENCODING 'UTF8';
 CREATE DATABASE winwidget_campaigns OWNER winwidget_campaigns_admin TEMPLATE template0 ENCODING 'UTF8';
 CREATE DATABASE winwidget_reporting OWNER winwidget_reporting_admin TEMPLATE template0 ENCODING 'UTF8';
 CREATE DATABASE winwidget_widgets OWNER winwidget_widgets_admin TEMPLATE template0 ENCODING 'UTF8';
+CREATE DATABASE winwidget_billing OWNER winwidget_billing_admin TEMPLATE template0 ENCODING 'UTF8';
 
 \connect default_db
 ALTER SCHEMA public OWNER TO gen_user;
@@ -874,6 +907,16 @@ REVOKE CREATE, TEMPORARY ON DATABASE winwidget_widgets FROM winwidget_widgets_mi
 	winwidget_widgets_runtime, winwidget_widgets_backup;
 REVOKE ALL ON SCHEMA widgets FROM PUBLIC;
 GRANT USAGE, CREATE ON SCHEMA widgets TO winwidget_widgets_migration;
+
+\connect winwidget_billing
+CREATE SCHEMA billing AUTHORIZATION winwidget_billing_migration;
+REVOKE ALL ON DATABASE winwidget_billing FROM PUBLIC;
+GRANT CONNECT ON DATABASE winwidget_billing TO winwidget_billing_migration,
+	winwidget_billing_runtime, winwidget_billing_backup;
+REVOKE CREATE, TEMPORARY ON DATABASE winwidget_billing FROM winwidget_billing_migration,
+	winwidget_billing_runtime, winwidget_billing_backup;
+REVOKE ALL ON SCHEMA billing FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA billing TO winwidget_billing_migration;
 SQL
 	status 'roles_and_databases'
 }
@@ -890,6 +933,7 @@ WITH expected_roles(role_name, is_admin) AS (
     ('winwidget_campaigns_admin', true),
     ('winwidget_reporting_admin', true),
 	('winwidget_widgets_admin', true),
+	('winwidget_billing_admin', true),
     ('gen_user', false),
     ('winwidget_api_runtime', false),
     ('winwidget_maintenance', false),
@@ -905,7 +949,10 @@ WITH expected_roles(role_name, is_admin) AS (
 	('winwidget_reporting_backup', false),
 	('winwidget_widgets_migration', false),
 	('winwidget_widgets_runtime', false),
-	('winwidget_widgets_backup', false)
+	('winwidget_widgets_backup', false),
+	('winwidget_billing_migration', false),
+	('winwidget_billing_runtime', false),
+	('winwidget_billing_backup', false)
 ),
 expected_memberships(member_name, role_name) AS (
   VALUES
@@ -929,7 +976,11 @@ expected_memberships(member_name, role_name) AS (
 	('winwidget_widgets_admin', 'pg_signal_backend'),
 	('winwidget_widgets_admin', 'winwidget_widgets_migration'),
 	('winwidget_widgets_admin', 'winwidget_widgets_runtime'),
-	('winwidget_widgets_admin', 'winwidget_widgets_backup')
+	('winwidget_widgets_admin', 'winwidget_widgets_backup'),
+	('winwidget_billing_admin', 'pg_signal_backend'),
+	('winwidget_billing_admin', 'winwidget_billing_migration'),
+	('winwidget_billing_admin', 'winwidget_billing_runtime'),
+	('winwidget_billing_admin', 'winwidget_billing_backup')
 ),
 actual_memberships AS (
   SELECT member.rolname AS member_name, granted.rolname AS role_name
@@ -939,7 +990,7 @@ actual_memberships AS (
   WHERE member.rolname IN (SELECT role_name FROM expected_roles)
 )
 SELECT
-  (SELECT count(*) FROM expected_roles) = 21
+  (SELECT count(*) FROM expected_roles) = 25
   AND NOT EXISTS (
     SELECT 1
     FROM expected_roles expected
@@ -974,9 +1025,10 @@ WITH expected(database_name, owner_name) AS (
     ('winwidget_notification_delivery', 'winwidget_notification_delivery_admin'),
     ('winwidget_campaigns', 'winwidget_campaigns_admin'),
 	('winwidget_reporting', 'winwidget_reporting_admin'),
-	('winwidget_widgets', 'winwidget_widgets_admin')
+	('winwidget_widgets', 'winwidget_widgets_admin'),
+	('winwidget_billing', 'winwidget_billing_admin')
 )
-SELECT count(*) = 5
+SELECT count(*) = 6
   AND bool_and(database_state.datallowconn)
   AND bool_and(pg_encoding_to_char(database_state.encoding) = 'UTF8')
   AND bool_and(owner_state.rolname = expected.owner_name)
@@ -1016,6 +1068,10 @@ run_prisma_migration() {
 		env_key='WIDGETS_DATABASE_URL'
 		schema_path='apps/widgets/prisma/schema.prisma'
 		;;
+	billing)
+		env_key='BILLING_DATABASE_URL'
+		schema_path='apps/billing/prisma/schema.prisma'
+		;;
 	esac
 	url="postgresql://$role:$password@127.0.0.1:$port/$database?schema=$(target_schema "$target")&sslmode=disable$options"
 	utility_run \
@@ -1029,7 +1085,7 @@ run_prisma_migration() {
 
 apply_migrations() {
 	local target
-	for target in core notification-delivery campaigns reporting widgets; do
+	for target in core notification-delivery campaigns reporting widgets billing; do
 		run_prisma_migration "$target"
 	done
 	status 'prisma_migrations'
@@ -1111,7 +1167,181 @@ REVOKE ALL ON TABLE widgets._prisma_migrations FROM winwidget_widgets_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA widgets TO winwidget_widgets_backup;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA widgets TO winwidget_widgets_backup;
 SQL
+
+	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+		--username winwidget_restore_rehearsal_bootstrap --dbname winwidget_billing <<'SQL'
+SET ROLE winwidget_billing_migration;
+CREATE TABLE billing.restore_rehearsal_marker (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO billing.restore_rehearsal_marker (id, value) VALUES ('canonical', 'baseline-billing');
+RESET ROLE;
+GRANT USAGE ON SCHEMA billing TO winwidget_billing_runtime, winwidget_billing_backup;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA billing TO winwidget_billing_runtime;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA billing TO winwidget_billing_runtime;
+REVOKE ALL ON TABLE billing._prisma_migrations FROM winwidget_billing_runtime;
+GRANT SELECT ON ALL TABLES IN SCHEMA billing TO winwidget_billing_backup;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA billing TO winwidget_billing_backup;
+SQL
 	status 'markers_and_backup_acl'
+}
+
+assert_billing_core_writer_fences() {
+	local stale_log="$APP_ROOT/billing-stale-writer.log"
+	local writer_pid writer_visible stale_amount attempt
+	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+		--username winwidget_restore_rehearsal_bootstrap --dbname default_db <<'SQL'
+INSERT INTO public."User" ("id", "password", "rights", "updated_at")
+VALUES ('billing-fence-referred-user', 'not-a-real-password-hash', ARRAY['USER']::public."Role"[], CURRENT_TIMESTAMP);
+INSERT INTO public."payments" (
+    "id", "user_id", "amount", "checkout_expires_at", "updated_at"
+) VALUES (
+    'billing-fence-payment', 'database-restore-rehearsal-dev', '100.00',
+    CURRENT_TIMESTAMP + INTERVAL '1 hour', CURRENT_TIMESTAMP
+);
+INSERT INTO public."subscriptions" ("id", "user_id", "updated_at")
+VALUES ('billing-fence-subscription', 'database-restore-rehearsal-dev', CURRENT_TIMESTAMP);
+INSERT INTO public."affiliate_referrals" (
+    "id", "referrer_id", "referred_user_id", "updated_at"
+) VALUES (
+    'billing-fence-affiliate', 'database-restore-rehearsal-dev',
+    'billing-fence-referred-user', CURRENT_TIMESTAMP
+);
+INSERT INTO public."site_settings" ("id", "updated_at")
+VALUES ('singleton', CURRENT_TIMESTAMP)
+ON CONFLICT ("id") DO NOTHING;
+
+UPDATE public."payments"
+SET "amount" = '101.00', "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'billing-fence-payment';
+UPDATE public."subscriptions"
+SET "leads_this_period" = 1, "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'billing-fence-subscription';
+UPDATE public."affiliate_referrals"
+SET "status" = "status", "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'billing-fence-affiliate';
+UPDATE public."tariff_prices"
+SET "amount" = "amount" + 1, "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'easy_monthly';
+
+UPDATE public."billing_core_state"
+SET "source_producers_enabled" = FALSE,
+    "scheduler_enabled" = FALSE,
+    "legacy_consumer_enabled" = FALSE,
+    "projection_consumer_enabled" = TRUE,
+    "prepared_revision" = repeat('a', 40),
+    "generation" = 1,
+    "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'singleton';
+
+DO $$
+BEGIN
+    BEGIN
+        UPDATE public."payments" SET "amount" = 'blocked' WHERE "id" = 'billing-fence-payment';
+        RAISE EXCEPTION 'frozen payment write unexpectedly succeeded';
+    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+    END;
+    BEGIN
+        UPDATE public."subscriptions" SET "leads_this_period" = 2 WHERE "id" = 'billing-fence-subscription';
+        RAISE EXCEPTION 'frozen subscription write unexpectedly succeeded';
+    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+    END;
+    BEGIN
+        UPDATE public."affiliate_referrals" SET "status" = "status" WHERE "id" = 'billing-fence-affiliate';
+        RAISE EXCEPTION 'frozen affiliate write unexpectedly succeeded';
+    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+    END;
+    BEGIN
+        UPDATE public."tariff_prices" SET "amount" = "amount" + 1 WHERE "id" = 'easy_monthly';
+        RAISE EXCEPTION 'frozen tariff write unexpectedly succeeded';
+    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+    END;
+END;
+$$;
+
+UPDATE public."site_settings"
+SET "banner_enabled" = TRUE,
+    "banner_text" = 'billing-fence-core-banner',
+    "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'singleton';
+DO $$
+BEGIN
+    BEGIN
+        UPDATE public."site_settings"
+        SET "payment_enabled" = NOT "payment_enabled"
+        WHERE "id" = 'singleton';
+        RAISE EXCEPTION 'frozen Billing settings write unexpectedly succeeded';
+    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
+    END;
+END;
+$$;
+
+UPDATE public."billing_core_state"
+SET "source_producers_enabled" = TRUE,
+    "scheduler_enabled" = TRUE,
+    "legacy_consumer_enabled" = TRUE,
+    "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'singleton';
+UPDATE public."payments"
+SET "amount" = '102.00', "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'billing-fence-payment';
+SQL
+
+	(
+		docker exec -e PGAPPNAME=billing-stale-writer-rehearsal \
+			"$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
+			--command "BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT count(*) FROM public.\"payments\"; SELECT pg_sleep(4); UPDATE public.\"payments\" SET \"amount\" = 'stale-writer-crossed' WHERE \"id\" = 'billing-fence-payment'; COMMIT;"
+	) >"$stale_log" 2>&1 &
+	writer_pid=$!
+	writer_visible='false'
+	for ((attempt = 1; attempt <= 50; attempt++)); do
+		if [[ "$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
+			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
+			--command "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'billing-stale-writer-rehearsal' AND wait_event = 'PgSleep';")" == '1' ]]; then
+			writer_visible='true'
+			break
+		fi
+		sleep 0.1
+	done
+	[[ "$writer_visible" == 'true' ]] || {
+		wait "$writer_pid" || true
+		fail 'stale Serializable Billing writer did not reach its pre-freeze snapshot'
+	}
+	docker exec "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
+		--command "UPDATE public.\"billing_core_state\" SET \"source_producers_enabled\" = FALSE, \"scheduler_enabled\" = FALSE, \"legacy_consumer_enabled\" = FALSE, \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = 'singleton';" >/dev/null
+	if wait "$writer_pid"; then
+		fail 'stale Serializable Billing writer crossed the frozen snapshot'
+	fi
+	stale_amount="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
+		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
+		--command "SELECT \"amount\" FROM public.\"payments\" WHERE \"id\" = 'billing-fence-payment';")"
+	[[ "$stale_amount" == '102.00' ]] ||
+		fail 'stale Serializable Billing writer changed the frozen source row'
+	rm -f -- "$stale_log"
+
+	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
+		--username winwidget_restore_rehearsal_bootstrap --dbname default_db <<'SQL'
+UPDATE public."billing_core_state"
+SET "source_producers_enabled" = TRUE,
+    "scheduler_enabled" = TRUE,
+    "legacy_consumer_enabled" = TRUE,
+    "prepared_revision" = NULL,
+    "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'singleton';
+UPDATE public."tariff_prices"
+SET "amount" = 990, "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'easy_monthly';
+UPDATE public."site_settings"
+SET "banner_enabled" = FALSE,
+    "banner_text" = '',
+    "updated_at" = CURRENT_TIMESTAMP
+WHERE "id" = 'singleton';
+DELETE FROM public."affiliate_referrals" WHERE "id" = 'billing-fence-affiliate';
+DELETE FROM public."subscriptions" WHERE "id" = 'billing-fence-subscription';
+DELETE FROM public."payments" WHERE "id" = 'billing-fence-payment';
+DELETE FROM public."User" WHERE "id" = 'billing-fence-referred-user';
+SQL
+	status 'billing_core_writer_fences'
 }
 
 create_target_dump() {
@@ -1139,7 +1369,7 @@ create_target_dump() {
 
 create_baseline_dumps() {
 	local target
-	for target in core notification-delivery campaigns reporting widgets; do
+	for target in core notification-delivery campaigns reporting widgets billing; do
 		create_target_dump "$target"
 	done
 	status 'custom_dumps'
@@ -1167,18 +1397,19 @@ assert_marker_matrix() {
 	assert_marker campaigns "$3"
 	assert_marker reporting "$4"
 	assert_marker widgets "$5"
+	assert_marker billing "$6"
 }
 
 mutate_markers() {
 	local target database schema
-	for target in core notification-delivery campaigns reporting widgets; do
+	for target in core notification-delivery campaigns reporting widgets billing; do
 		database="$(target_database "$target")"
 		schema="$(target_schema "$target")"
 		docker exec "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
 			--username winwidget_restore_rehearsal_bootstrap --dbname "$database" \
 			--command "UPDATE \"$schema\".restore_rehearsal_marker SET value = 'mutated-$target' WHERE id = 'canonical';" >/dev/null
 	done
-	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	status 'live_mutation'
 }
 
@@ -1494,6 +1725,7 @@ start_worker() {
 		--mount "type=bind,source=$APP_ROOT/secrets/campaigns-admin,target=/run/secrets/database-restore-campaigns-admin-password,readonly" \
 		--mount "type=bind,source=$APP_ROOT/secrets/reporting-admin,target=/run/secrets/database-restore-reporting-admin-password,readonly" \
 		--mount "type=bind,source=$APP_ROOT/secrets/widgets-admin,target=/run/secrets/database-restore-widgets-admin-password,readonly" \
+		--mount "type=bind,source=$APP_ROOT/secrets/billing-admin,target=/run/secrets/database-restore-billing-admin-password,readonly" \
 		--mount "type=bind,source=$APP_ROOT/wrappers,target=/rehearsal-bin,readonly" \
 		--tmpfs /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700 \
 		--tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777 \
@@ -1511,11 +1743,13 @@ start_worker() {
 		-e DATABASE_RESTORE_CAMPAIGNS_PORT="$CAMPAIGNS_PORT" \
 		-e DATABASE_RESTORE_REPORTING_PORT="$REPORTING_PORT" \
 		-e DATABASE_RESTORE_WIDGETS_PORT="$WIDGETS_PORT" \
+		-e DATABASE_RESTORE_BILLING_PORT="$BILLING_PORT" \
 		-e DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE=/run/database-restore-secrets/core-admin-password \
 		-e DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE=/run/database-restore-secrets/notification-delivery-admin-password \
 		-e DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE=/run/database-restore-secrets/campaigns-admin-password \
 		-e DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE=/run/database-restore-secrets/reporting-admin-password \
 		-e DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE=/run/database-restore-secrets/widgets-admin-password \
+		-e DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE=/run/database-restore-secrets/billing-admin-password \
 		"$RUNNER_IMAGE" >/dev/null
 	container_is_owned "$WORKER_CONTAINER" || fail 'worker labels are invalid'
 	local attempt
@@ -2189,7 +2423,7 @@ SELECT
   (NOT EXISTS (
     SELECT 1
     FROM unnest(ARRAY[$roles_sql]) role_name
-    CROSS JOIN unnest(ARRAY['default_db','winwidget_notification_delivery','winwidget_campaigns','winwidget_reporting','winwidget_widgets']) database_name
+    CROSS JOIN unnest(ARRAY['default_db','winwidget_notification_delivery','winwidget_campaigns','winwidget_reporting','winwidget_widgets','winwidget_billing']) database_name
     WHERE database_name <> current_database()
       AND has_database_privilege(role_name, database_name, 'CONNECT')
   )) || '|' ||
@@ -2279,7 +2513,7 @@ run_queued_cancellation() {
 	start_worker
 	wait_job_settled "$job_id" reporting
 	verify_terminal "$job_id" reporting CANCELLED >/dev/null
-	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	status 'queued_cancellation'
 }
 
@@ -2308,7 +2542,7 @@ run_publication_crash_boundary() {
 		fail 'receipt-pending job fenced its database'
 	assert_worker_command_audit_empty
 	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' \
-		'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+		'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	status 'receipt_pending_zero_postgres_commands'
 
 	retry_job_publication "$job_id" notification-delivery campaigns.dump
@@ -2316,7 +2550,7 @@ run_publication_crash_boundary() {
 	verify_terminal "$job_id" notification-delivery FAILED \
 		DUMP_TARGET_MISMATCH >/dev/null
 	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' \
-		'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+		'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	status 'exact_publication_retry'
 }
 
@@ -2325,7 +2559,7 @@ run_target_mismatch() {
 	job_id="$(publish_job notification-delivery campaigns.dump)"
 	wait_job_settled "$job_id" notification-delivery
 	verify_terminal "$job_id" notification-delivery FAILED DUMP_TARGET_MISMATCH >/dev/null
-	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	status 'target_mismatch_pre_destructive'
 }
 
@@ -2534,7 +2768,7 @@ run_failed_fenced_shutdown() {
 	fi
 	unset password
 	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' \
-		'failure-mutated-campaigns' 'baseline-reporting' 'baseline-widgets'
+		'failure-mutated-campaigns' 'baseline-reporting' 'baseline-widgets' 'baseline-billing'
 	status 'graceful_failed_fenced_shutdown'
 }
 
@@ -2565,23 +2799,26 @@ main() {
 	verify_cluster_boundaries
 	apply_migrations
 	seed_markers_and_acl
+	assert_billing_core_writer_fences
 	create_baseline_dumps
 	mutate_markers
 	run_queued_cancellation
 	run_publication_crash_boundary
 	run_target_mismatch
 
-	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+	assert_marker_matrix 'mutated-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	run_successful_restore core
-	assert_marker_matrix 'baseline-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+	assert_marker_matrix 'baseline-core' 'mutated-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	run_successful_restore notification-delivery
-	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets'
+	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'mutated-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	run_successful_restore campaigns
-	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'baseline-campaigns' 'mutated-reporting' 'mutated-widgets'
+	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'baseline-campaigns' 'mutated-reporting' 'mutated-widgets' 'mutated-billing'
 	run_successful_restore reporting
-	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'baseline-campaigns' 'baseline-reporting' 'mutated-widgets'
+	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'baseline-campaigns' 'baseline-reporting' 'mutated-widgets' 'mutated-billing'
 	run_successful_restore widgets
-	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'baseline-campaigns' 'baseline-reporting' 'baseline-widgets'
+	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'baseline-campaigns' 'baseline-reporting' 'baseline-widgets' 'mutated-billing'
+	run_successful_restore billing
+	assert_marker_matrix 'baseline-core' 'baseline-notification-delivery' 'baseline-campaigns' 'baseline-reporting' 'baseline-widgets' 'baseline-billing'
 	status 'sequential_isolation'
 
 	run_failed_fenced_shutdown

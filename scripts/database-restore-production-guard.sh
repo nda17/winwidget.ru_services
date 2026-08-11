@@ -469,6 +469,9 @@ database_restore_guard_static_integration_self_test() {
 		scripts/reporting-database-lifecycle.sh
 		scripts/reporting-producer-lifecycle.sh
 		scripts/reporting-cutover-lifecycle.sh
+		scripts/billing-database-lifecycle.sh
+		scripts/deploy-billing-production.sh
+		scripts/billing-cutover-production.sh
 	)
 	for script in "${scripts_with_mutation_guard[@]}"; do
 		[[ -f "$server_root/$script" && ! -L "$server_root/$script" ]] || {
