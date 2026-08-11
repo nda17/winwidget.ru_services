@@ -29,7 +29,30 @@ describe('BillingMessagingClientService', () => {
 			oldestPendingAt: '2026-08-11T00:00:00.000Z',
 			unresolvedFailures: 4,
 			retryingFailures: 5,
-			deliveredLast24Hours: 6
+			deliveredLast24Hours: 6,
+			operational: {
+				dueOutbox: 3,
+				staleOutbox: 1,
+				unresolvedFailuresByCategory: {
+					TRANSIENT: 1,
+					RATE_LIMIT: 1,
+					PERMANENT: 1,
+					AUTH_CONFIGURATION: 0,
+					UNCLASSIFIED: 1
+				}
+			},
+			heartbeats: [
+				'billing-api',
+				'billing-scheduler',
+				'billing-worker',
+				'billing-outbox-publisher'
+			].map(service => ({
+				service,
+				status: 'ok',
+				activeInstances: 1,
+				lastSeenAt: '2026-08-11T00:00:00.000Z',
+				revision: 'a'.repeat(40)
+			}))
 		};
 		global.fetch = jest.fn().mockResolvedValue({
 			ok: true,
@@ -46,6 +69,56 @@ describe('BillingMessagingClientService', () => {
 					'x-winwidget-internal-token': token
 				})
 			})
+		);
+	});
+
+	it('keeps rolling compatibility with the previous overview without role readiness', async () => {
+		const body = {
+			schemaVersion: 1,
+			generatedAt: '2026-08-11T00:00:00.000Z',
+			outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
+			oldestPendingAt: null,
+			unresolvedFailures: 0,
+			retryingFailures: 0,
+			deliveredLast24Hours: 0
+		};
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue(body)
+		});
+
+		await expect(createService().getOverview()).resolves.toEqual(body);
+	});
+
+	it('rejects category subtotals that do not match the unresolved Billing total', async () => {
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				schemaVersion: 1,
+				generatedAt: '2026-08-11T00:00:00.000Z',
+				outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
+				oldestPendingAt: null,
+				unresolvedFailures: 1,
+				retryingFailures: 0,
+				deliveredLast24Hours: 0,
+				operational: {
+					dueOutbox: 0,
+					staleOutbox: 0,
+					unresolvedFailuresByCategory: {
+						TRANSIENT: 0,
+						RATE_LIMIT: 0,
+						PERMANENT: 0,
+						AUTH_CONFIGURATION: 0,
+						UNCLASSIFIED: 0
+					}
+				}
+			})
+		});
+
+		await expect(createService().getOverview()).rejects.toThrow(
+			'Billing вернул некорректный messaging-ответ'
 		);
 	});
 
@@ -66,11 +139,12 @@ describe('BillingMessagingClientService', () => {
 
 		await createService().getFailures(1, 40, {
 			consumer: 'auto-renewal-charge',
+			category: 'TRANSIENT',
 			status: 'CLOSED'
 		});
 
 		expect(global.fetch).toHaveBeenCalledWith(
-			'http://127.0.0.1:4800/internal/v1/billing/messaging/failures?page=1&limit=40&consumer=auto-renewal-charge&status=CLOSED',
+			'http://127.0.0.1:4800/internal/v1/billing/messaging/failures?page=1&limit=40&consumer=auto-renewal-charge&category=TRANSIENT&status=CLOSED',
 			expect.any(Object)
 		);
 	});

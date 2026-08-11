@@ -2,8 +2,11 @@ import { HealthService } from '@/health/health.service';
 import type { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import {
 	getMessagingQueueHealthExpectations,
+	BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME,
+	BILLING_OWNED_QUEUE_NAMES,
 	MESSAGING_QUEUE_NAMES
 } from '@/messaging/messaging.constants';
+import type { BillingMessagingClientService } from '@/messaging/billing-messaging-client.service';
 import type { NotificationDeliveryClientService } from '@/messaging/notification-delivery-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
@@ -83,6 +86,32 @@ const createWidgetsOverview = () => ({
 	]
 });
 
+const createBillingOverview = () => ({
+	schemaVersion: 1 as const,
+	generatedAt: '2026-07-27T12:00:00.000Z',
+	outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
+	oldestPendingAt: null,
+	unresolvedFailures: 0,
+	retryingFailures: 0,
+	deliveredLast24Hours: 0,
+	heartbeats: [
+		'billing-api',
+		'billing-scheduler',
+		'billing-worker',
+		'billing-outbox-publisher'
+	].map(service => ({
+		service: service as
+			| 'billing-api'
+			| 'billing-scheduler'
+			| 'billing-worker'
+			| 'billing-outbox-publisher',
+		status: 'ok' as const,
+		activeInstances: 1,
+		lastSeenAt: '2026-07-27T11:59:55.000Z',
+		revision: 'a'.repeat(40)
+	}))
+});
+
 const createRabbitQueues = (billingOwner = false) =>
 	getMessagingQueueHealthExpectations({ billingOwner }).map(
 		expectation => ({
@@ -120,6 +149,9 @@ const createService = (
 	rabbitManagement: Partial<RabbitMqManagementService> = {},
 	billingState: Partial<BillingCoreStateService> = {
 		isBillingOwner: jest.fn().mockResolvedValue(false)
+	},
+	billing: Partial<BillingMessagingClientService> = {
+		getOverview: jest.fn().mockResolvedValue(createBillingOverview())
 	}
 ) => {
 	const prisma = {
@@ -138,7 +170,8 @@ const createService = (
 		rabbitManagement as RabbitMqManagementService,
 		notificationDelivery as NotificationDeliveryClientService,
 		widgets as WidgetsDeliveryFailuresClientService,
-		billingState as BillingCoreStateService
+		billingState as BillingCoreStateService,
+		billing as BillingMessagingClientService
 	);
 	return { service, prisma };
 };
@@ -241,6 +274,142 @@ describe('HealthService notification delivery monitoring', () => {
 		await expect(
 			(billingService as any).checkRabbitMq()
 		).resolves.toMatchObject({ status: 'ok' });
+	});
+
+	it('requires every Billing main queue and keeps its retry and DLQ queues passive after handoff', () => {
+		const expectations = getMessagingQueueHealthExpectations({
+			billingOwner: true
+		});
+		const billingExpectations = expectations.filter(expectation =>
+			BILLING_OWNED_QUEUE_NAMES.some(
+				queue =>
+					expectation.name === queue ||
+					expectation.name.startsWith(`${queue}.`)
+			)
+		);
+
+		expect(BILLING_OWNED_QUEUE_NAMES).toHaveLength(9);
+		expect(BILLING_OWNED_QUEUE_NAMES).toContain(
+			BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME
+		);
+		expect(billingExpectations).toHaveLength(45);
+		expect(
+			billingExpectations.filter(expectation =>
+				BILLING_OWNED_QUEUE_NAMES.includes(expectation.name)
+			)
+		).toEqual(
+			BILLING_OWNED_QUEUE_NAMES.map(name => ({
+				name,
+				consumerExpectation: 'at-least-one',
+				alertOnAnyMessage: false
+			}))
+		);
+		expect(
+			billingExpectations.filter(expectation =>
+				expectation.name.includes('.retry.')
+			)
+		).toHaveLength(27);
+		expect(
+			billingExpectations.filter(expectation =>
+				expectation.name.endsWith('.dead-letter')
+			)
+		).toEqual(
+			BILLING_OWNED_QUEUE_NAMES.map(name => ({
+				name: `${name}.dead-letter`,
+				consumerExpectation: 'none',
+				alertOnAnyMessage: true
+			}))
+		);
+	});
+
+	it('warns when a Billing main queue is missing after handoff', async () => {
+		const queues = createRabbitQueues(true).filter(
+			queue => queue.name !== BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME
+		);
+		const { service } = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(
+				queues as ReturnType<typeof createRabbitQueues>
+			),
+			{ isBillingOwner: jest.fn().mockResolvedValue(true) }
+		);
+
+		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('отсутствуют очереди: 1')
+		});
+	});
+
+	it('warns on an unexpected Billing retry consumer and the first Billing DLQ message', async () => {
+		const queues = createRabbitQueues(true);
+		const retryQueue = queues.find(
+			queue =>
+				queue.name === `${BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME}.retry.1`
+		)!;
+		const deadLetterQueue = queues.find(
+			queue =>
+				queue.name ===
+				`${BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME}.dead-letter`
+		)!;
+		retryQueue.consumers = 1;
+		deadLetterQueue.messages_ready = 1;
+		const { service } = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(queues),
+			{ isBillingOwner: jest.fn().mockResolvedValue(true) }
+		);
+
+		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('неожиданные consumers: 1')
+		});
+		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
+			message: expect.stringContaining('пассивные DLQ с сообщениями: 1')
+		});
+	});
+
+	it('reports Billing role readiness and includes Billing backlog after handoff', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const billingOverview = createBillingOverview();
+		billingOverview.unresolvedFailures = 2;
+		billingOverview.oldestPendingAt = '2026-07-27T11:58:00.000Z' as never;
+		const { service, prisma } = createService(
+			undefined,
+			undefined,
+			undefined,
+			{ isBillingOwner: jest.fn().mockResolvedValue(true) },
+			{ getOverview: jest.fn().mockResolvedValue(billingOverview) }
+		);
+		const resultPromise = (service as any).getBillingResult();
+
+		await expect(
+			(service as any).checkBilling(resultPromise)
+		).resolves.toMatchObject({
+			id: 'billing',
+			status: 'ok'
+		});
+		await expect(
+			(service as any).checkMessagingBacklog(
+				(service as any).getNotificationDeliveryResult(),
+				(service as any).getWidgetsResult(),
+				resultPromise
+			)
+		).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('DLQ: 9')
+		});
+		expect(prisma.integrationDeliveryFailure.count).toHaveBeenCalledWith({
+			where: {
+				resolvedAt: null,
+				integration: {
+					in: expect.not.arrayContaining(['auto-renewal'])
+				}
+			}
+		});
 	});
 
 	it('combines legacy and notification-delivery backlog without old moved failures', async () => {

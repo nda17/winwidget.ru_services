@@ -477,7 +477,8 @@ describe('MessagingAdminService', () => {
 		'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 		'CAMPAIGNS_DATABASE_BACKUP',
 		'REPORTING_DATABASE_BACKUP',
-		'WIDGETS_DATABASE_BACKUP'
+		'WIDGETS_DATABASE_BACKUP',
+		'BILLING_DATABASE_BACKUP'
 	])(
 		'reopens a failed %s job in the same transaction as manual retry Outbox',
 		async jobType => {
@@ -560,6 +561,43 @@ describe('MessagingAdminService', () => {
 			});
 		}
 	);
+
+	it('labels a failed Billing backup job in the federated failure view', () => {
+		const service = new MessagingAdminService(
+			{} as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			notificationDelivery,
+			widgetsFailures
+		);
+		const result = (service as any).serializeFailure({
+			id: '22222222-2222-4222-8222-222222222222',
+			eventId: '11111111-1111-4111-8111-111111111111',
+			integration: 'database-backup',
+			attempts: 1,
+			lastError: 'backup failed',
+			category: 'TRANSIENT',
+			normalizedCode: 'BACKUP_FAILED',
+			safeReason: 'Backup failed',
+			httpStatus: null,
+			providerCode: null,
+			retryable: true,
+			failedAt: new Date('2026-08-11T00:00:00.000Z'),
+			retryingAt: null,
+			resolvedAt: null,
+			resolution: null,
+			resolutionComment: null,
+			payload: {
+				jobId: '33333333-3333-4333-8333-333333333333',
+				jobType: 'BILLING_DATABASE_BACKUP'
+			}
+		});
+
+		expect(result.entity).toEqual({
+			id: '33333333-3333-4333-8333-333333333333',
+			name: 'Backup PostgreSQL Billing'
+		});
+	});
 
 	it('closes an unresolved Core-owned failure without publishing', async () => {
 		const failure = {
@@ -1031,7 +1069,19 @@ describe('MessagingAdminService', () => {
 				oldestPendingAt: '2026-08-11T00:00:00.000Z',
 				unresolvedFailures: 5,
 				retryingFailures: 1,
-				deliveredLast24Hours: 8
+				deliveredLast24Hours: 8,
+				heartbeats: [
+					'billing-api',
+					'billing-scheduler',
+					'billing-worker',
+					'billing-outbox-publisher'
+				].map(service => ({
+					service,
+					status: 'ok',
+					activeInstances: 1,
+					lastSeenAt: '2026-08-11T00:00:00.000Z',
+					revision: 'a'.repeat(40)
+				}))
 			})
 		} as unknown as BillingMessagingClientService;
 		const service = new MessagingAdminService(
@@ -1073,7 +1123,17 @@ describe('MessagingAdminService', () => {
 				unresolvedFailures: 7,
 				retryingFailures: 3,
 				deliveredLast24Hours: 11,
-				billingError: null
+				billingError: null,
+				heartbeats: expect.arrayContaining([
+					expect.objectContaining({
+						service: 'billing-api',
+						status: 'ok'
+					}),
+					expect.objectContaining({
+						service: 'billing-outbox-publisher',
+						status: 'ok'
+					})
+				])
 			})
 		);
 		for (const call of (
@@ -1151,6 +1211,7 @@ describe('MessagingAdminService', () => {
 		await expect(
 			service.getFailures(1, 20, {
 				integration: 'auto-renewal',
+				category: 'TRANSIENT',
 				status: 'CLOSED'
 			})
 		).resolves.toEqual({
@@ -1174,6 +1235,7 @@ describe('MessagingAdminService', () => {
 		expect(widgetsGetFailures).not.toHaveBeenCalled();
 		expect(billing.getFailures).toHaveBeenCalledWith(1, 20, {
 			consumer: 'auto-renewal-charge',
+			category: 'TRANSIENT',
 			status: 'CLOSED'
 		});
 	});

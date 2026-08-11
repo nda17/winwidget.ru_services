@@ -291,6 +291,12 @@ export class MessagingOperationalAlertService
 			) as Array<[string, number]>) {
 				categoryCounts[category] = (categoryCounts[category] || 0) + count;
 			}
+			for (const [category, count] of Object.entries(
+				billingResult.overview?.operational
+					?.unresolvedFailuresByCategory || {}
+			) as Array<[string, number]>) {
+				categoryCounts[category] = (categoryCounts[category] || 0) + count;
+			}
 
 			const queueExpectations = getMessagingQueueHealthExpectations({
 				billingOwner
@@ -404,7 +410,9 @@ export class MessagingOperationalAlertService
 					serviceStates['outbox-publisher'].publishAt <
 						activityStaleBefore);
 			const integrationQueueMessages = getQueueMessages(
-				MONOLITH_INTEGRATION_KINDS
+				MONOLITH_INTEGRATION_KINDS.filter(
+					kind => !billingOwner || kind !== 'auto-renewal'
+				)
 			);
 			const notificationDeliveryQueueMessages = getQueueMessages(
 				NOTIFICATION_DELIVERY_KINDS
@@ -445,15 +453,29 @@ export class MessagingOperationalAlertService
 				widgetsResult.overview;
 			const billingOverview: BillingMessagingOverview | null =
 				billingResult.overview;
-			const billingPending =
+			const billingDue =
+				billingOverview?.operational?.dueOutbox ??
 				(billingOverview?.outbox.PENDING || 0) +
-				(billingOverview?.outbox.PROCESSING || 0);
+					(billingOverview?.outbox.PROCESSING || 0);
 			const billingStale =
-				billingOverview?.oldestPendingAt &&
+				billingOverview?.operational?.staleOutbox ??
+				(billingOverview?.oldestPendingAt &&
 				Date.parse(billingOverview.oldestPendingAt) <
 					oldPendingBefore.getTime()
 					? 1
-					: 0;
+					: 0);
+			const billingHeartbeatProblems = billingOwner
+				? billingOverview?.heartbeats
+					? billingOverview.heartbeats
+							.filter(heartbeat => heartbeat.status === 'down')
+							.map(heartbeat => heartbeat.service)
+					: [
+							'billing-api',
+							'billing-scheduler',
+							'billing-worker',
+							'billing-outbox-publisher'
+						]
+				: [];
 			const widgetsPublisher = widgetsOverview?.heartbeats.find(
 				heartbeat => heartbeat.service === 'widgets-publisher'
 			);
@@ -489,7 +511,7 @@ export class MessagingOperationalAlertService
 				dueOutbox +
 				(deliveryOverview?.operational.dueOutbox || 0) +
 				(widgetsOverview?.operational.dueOutbox || 0) +
-				billingPending;
+				billingDue;
 			const combinedUnresolvedFailures =
 				unresolvedDlq +
 				(deliveryOverview?.unresolvedFailures || 0) +
@@ -554,6 +576,9 @@ export class MessagingOperationalAlertService
 				...(widgetsConsumeStale ? ['widgets-consume=stale'] : []),
 				...(billingResult.error
 					? [`billing-api=${billingResult.error}`]
+					: []),
+				...(!billingResult.error
+					? billingHeartbeatProblems.map(service => `heartbeat=${service}`)
 					: []),
 				...(queueResult.error ? [`queues=${queueResult.error}`] : []),
 				...missingQueues.map(queue => `missing=${queue}`),
@@ -624,7 +649,9 @@ export class MessagingOperationalAlertService
 					billingOwner
 						? billingResult.error
 							? `internal API недоступен: ${billingResult.error}`
-							: `Outbox=${billingPending}, DLQ=${billingOverview?.unresolvedFailures || 0}`
+							: `${
+									billingHeartbeatProblems.length ? 'нет heartbeat, ' : ''
+								}Outbox=${billingDue}, DLQ=${billingOverview?.unresolvedFailures || 0}`
 						: 'Core ownership'
 				}</b>`
 			].join('\n');

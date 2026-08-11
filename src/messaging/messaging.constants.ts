@@ -286,6 +286,22 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'billing-settings-source': 'winwidget.billing.settings-source.v1'
 };
 
+export const BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME =
+	'winwidget.billing.notification-delivery-outcome';
+
+export const BILLING_OWNED_QUEUE_NAMES: readonly string[] = [
+	...BILLING_SOURCE_KINDS.map(kind => MESSAGING_QUEUE_NAMES[kind]),
+	MESSAGING_QUEUE_NAMES['auto-renewal'],
+	BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME
+];
+
+export const MESSAGING_QUEUE_PREFIXES: readonly string[] = [
+	...new Set([
+		...Object.values(MESSAGING_QUEUE_NAMES),
+		...BILLING_OWNED_QUEUE_NAMES
+	])
+];
+
 export type MessagingQueueHealthExpectation = Readonly<{
 	name: string;
 	consumerExpectation: 'at-least-one' | 'none';
@@ -296,13 +312,16 @@ const WIDGETS_PROVIDER_KIND_SET: ReadonlySet<CoreMessagingKind> = new Set(
 	WIDGETS_PROVIDER_INTEGRATION_KINDS
 );
 
+const BILLING_RETRY_ATTEMPTS = [1, 2, 3] as const;
+
 // Passive DLQ are durable holding queues: manual retry is driven by the
 // delivery-failure record, so a steady-state RabbitMQ consumer must not drain
 // them. They must still exist, stay empty and alert on the first message.
 export const getMessagingQueueHealthExpectations = (options: {
 	billingOwner: boolean;
-}): readonly MessagingQueueHealthExpectation[] =>
-	MESSAGING_KINDS.flatMap(kind => {
+}): readonly MessagingQueueHealthExpectation[] => {
+	const coreExpectations = MESSAGING_KINDS.flatMap(kind => {
+		if (options.billingOwner && kind === 'auto-renewal') return [];
 		const mainQueue = MESSAGING_QUEUE_NAMES[kind];
 		const passiveDeadLetter =
 			WIDGETS_PROVIDER_KIND_SET.has(kind) ||
@@ -323,6 +342,30 @@ export const getMessagingQueueHealthExpectations = (options: {
 			}
 		];
 	});
+	if (!options.billingOwner) return coreExpectations;
+
+	const billingExpectations = BILLING_OWNED_QUEUE_NAMES.flatMap(
+		mainQueue => [
+			{
+				name: mainQueue,
+				consumerExpectation: 'at-least-one' as const,
+				alertOnAnyMessage: false
+			},
+			...BILLING_RETRY_ATTEMPTS.map(attempt => ({
+				name: `${mainQueue}.retry.${attempt}`,
+				consumerExpectation: 'none' as const,
+				alertOnAnyMessage: false
+			})),
+			{
+				name: `${mainQueue}.dead-letter`,
+				consumerExpectation: 'none' as const,
+				alertOnAnyMessage: true
+			}
+		]
+	);
+
+	return [...coreExpectations, ...billingExpectations];
+};
 
 export const INTEGRATION_ROUTING_KEYS = MESSAGING_ROUTING_KEYS;
 export const INTEGRATION_QUEUE_NAMES = MESSAGING_QUEUE_NAMES;

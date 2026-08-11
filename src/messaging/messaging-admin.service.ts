@@ -339,6 +339,40 @@ export class MessagingAdminService {
 				}
 			])
 		);
+		if (billingOwner) {
+			serviceHeartbeats.push(
+				...(billingOverview.overview?.heartbeats || [
+					{
+						service: 'billing-api' as const,
+						status: 'down' as const,
+						activeInstances: 0,
+						lastSeenAt: null,
+						revision: null
+					},
+					{
+						service: 'billing-scheduler' as const,
+						status: 'down' as const,
+						activeInstances: 0,
+						lastSeenAt: null,
+						revision: null
+					},
+					{
+						service: 'billing-worker' as const,
+						status: 'down' as const,
+						activeInstances: 0,
+						lastSeenAt: null,
+						revision: null
+					},
+					{
+						service: 'billing-outbox-publisher' as const,
+						status: 'down' as const,
+						activeInstances: 0,
+						lastSeenAt: null,
+						revision: null
+					}
+				])
+			);
+		}
 
 		return {
 			generatedAt: new Date().toISOString(),
@@ -403,9 +437,7 @@ export class MessagingAdminService {
 			? PUBLIC_INTEGRATION_TO_BILLING_CONSUMER[normalizedIntegration]
 			: undefined;
 		const queryBilling =
-			billingOwner &&
-			!filters.category?.trim() &&
-			(!normalizedIntegration || Boolean(billingConsumer));
+			billingOwner && (!normalizedIntegration || Boolean(billingConsumer));
 		const offset = (normalizedPage - 1) * normalizedLimit;
 		const windowSize = offset + normalizedLimit;
 		if (!Number.isSafeInteger(windowSize) || windowSize > 10_000) {
@@ -449,6 +481,9 @@ export class MessagingAdminService {
 				queryBilling
 					? this.requireBillingMessaging().getFailures(1, windowSize, {
 							...(billingConsumer ? { consumer: billingConsumer } : {}),
+							...(filters.category?.trim()
+								? { category: filters.category.trim() }
+								: {}),
 							...(filters.status?.trim()
 								? { status: filters.status.trim() }
 								: {})
@@ -1409,7 +1444,9 @@ export class MessagingAdminService {
 			[SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP]:
 				'Backup PostgreSQL Reporting',
 			[SCHEDULED_JOB_TYPES.WIDGETS_DATABASE_BACKUP]:
-				'Backup PostgreSQL Widgets'
+				'Backup PostgreSQL Widgets',
+			[SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP]:
+				'Backup PostgreSQL Billing'
 		};
 		const scheduledJobName = jobPayload.jobType
 			? scheduledJobNames[jobPayload.jobType] || null

@@ -1,4 +1,5 @@
 import {
+	MESSAGING_QUEUE_PREFIXES,
 	MESSAGING_QUEUE_NAMES,
 	MessagingKind
 } from '@/messaging/messaging.constants';
@@ -37,10 +38,9 @@ export class RabbitMqManagementService {
 		const queues = await this.request<RabbitQueueInfo[]>(
 			`/api/queues/${this.getEncodedVhost()}`
 		);
-		const messagingQueueNames = Object.values(MESSAGING_QUEUE_NAMES);
 		return queues
 			.filter(queue =>
-				messagingQueueNames.some(
+				MESSAGING_QUEUE_PREFIXES.some(
 					mainQueue =>
 						queue.name === mainQueue ||
 						queue.name.startsWith(`${mainQueue}.`)

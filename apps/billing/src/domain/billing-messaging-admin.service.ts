@@ -24,20 +24,63 @@ import {
 	billingRetryRoutingKey
 } from '../messaging/billing-messaging.constants';
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
+import {
+	BILLING_PROCESS_ROLES,
+	BillingProcessRole,
+	parseBillingPort
+} from '../runtime/billing-runtime.service';
 import { enqueueBillingAdminAudit } from './billing-admin-audit';
+
+type BillingRoleReadiness = {
+	service:
+		| 'billing-api'
+		| 'billing-scheduler'
+		| 'billing-worker'
+		| 'billing-outbox-publisher';
+	status: 'ok' | 'down';
+	activeInstances: number;
+	lastSeenAt: string | null;
+	revision: string | null;
+};
+
+const EMPTY_FAILURE_CATEGORY_COUNTS = {
+	TRANSIENT: 0,
+	RATE_LIMIT: 0,
+	PERMANENT: 0,
+	AUTH_CONFIGURATION: 0,
+	UNCLASSIFIED: 0
+};
+
+const BILLING_ROLE_SERVICE_NAMES: Record<
+	BillingProcessRole,
+	BillingRoleReadiness['service']
+> = {
+	api: 'billing-api',
+	scheduler: 'billing-scheduler',
+	worker: 'billing-worker',
+	'outbox-publisher': 'billing-outbox-publisher'
+};
 
 @Injectable()
 export class BillingMessagingAdminService {
 	constructor(private readonly prisma: BillingPrismaService) {}
 
 	async overview() {
-		const since = new Date(Date.now() - 24 * 60 * 60_000);
+		const now = new Date();
+		const since = new Date(now.getTime() - 24 * 60 * 60_000);
+		const staleBefore = new Date(now.getTime() - 15 * 60_000);
 		const [
 			outboxGroups,
-			oldestPending,
+			oldestDuePending,
+			oldestExpiredProcessing,
+			oldestUnleasedProcessing,
+			dueOutbox,
+			staleOutbox,
 			unresolvedFailures,
 			retryingFailures,
-			deliveredLast24Hours
+			deliveredLast24Hours,
+			failureCategoryGroups,
+			heartbeats
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
 				by: ['status'],
@@ -45,13 +88,61 @@ export class BillingMessagingAdminService {
 			}),
 			this.prisma.outboxEvent.findFirst({
 				where: {
-					status: { in: [OutboxStatus.PENDING, OutboxStatus.PROCESSING] }
+					status: OutboxStatus.PENDING,
+					availableAt: { lte: now }
+				},
+				orderBy: { availableAt: 'asc' },
+				select: { availableAt: true }
+			}),
+			this.prisma.outboxEvent.findFirst({
+				where: {
+					status: OutboxStatus.PROCESSING,
+					leaseUntil: { lte: now }
+				},
+				orderBy: { leaseUntil: 'asc' },
+				select: { leaseUntil: true }
+			}),
+			this.prisma.outboxEvent.findFirst({
+				where: {
+					status: OutboxStatus.PROCESSING,
+					leaseUntil: null
 				},
 				orderBy: { createdAt: 'asc' },
 				select: { createdAt: true }
 			}),
+			this.prisma.outboxEvent.count({
+				where: {
+					OR: [
+						{
+							status: OutboxStatus.PENDING,
+							availableAt: { lte: now }
+						},
+						{
+							status: OutboxStatus.PROCESSING,
+							OR: [{ leaseUntil: null }, { leaseUntil: { lte: now } }]
+						}
+					]
+				}
+			}),
+			this.prisma.outboxEvent.count({
+				where: {
+					OR: [
+						{
+							status: OutboxStatus.PENDING,
+							availableAt: { lt: staleBefore }
+						},
+						{
+							status: OutboxStatus.PROCESSING,
+							OR: [
+								{ leaseUntil: null },
+								{ leaseUntil: { lt: staleBefore } }
+							]
+						}
+					]
+				}
+			}),
 			this.prisma.integrationDeliveryFailure.count({
-				where: { resolvedAt: null, retryingAt: null }
+				where: { resolvedAt: null }
 			}),
 			this.prisma.integrationDeliveryFailure.count({
 				where: { resolvedAt: null, retryingAt: { not: null } }
@@ -61,19 +152,112 @@ export class BillingMessagingAdminService {
 					status: DeliveryReceiptStatus.DELIVERED,
 					deliveredAt: { gte: since }
 				}
-			})
+			}),
+			this.prisma.integrationDeliveryFailure.groupBy({
+				by: ['category', 'normalizedCode'],
+				where: { resolvedAt: null },
+				_count: { _all: true }
+			}),
+			Promise.all(
+				BILLING_PROCESS_ROLES.map(role => this.getRoleReadiness(role))
+			)
 		]);
 		const outbox = { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 };
 		for (const group of outboxGroups)
 			outbox[group.status] = group._count._all;
+		const unresolvedFailuresByCategory = {
+			...EMPTY_FAILURE_CATEGORY_COUNTS
+		};
+		for (const group of failureCategoryGroups) {
+			const category =
+				!group.category || group.normalizedCode === 'UNCLASSIFIED'
+					? 'UNCLASSIFIED'
+					: group.category;
+			unresolvedFailuresByCategory[category] += group._count._all;
+		}
+		const oldestPendingAt = [
+			oldestDuePending?.availableAt || null,
+			oldestExpiredProcessing?.leaseUntil || null,
+			oldestUnleasedProcessing?.createdAt || null
+		]
+			.filter((value): value is Date => Boolean(value))
+			.sort((left, right) => left.getTime() - right.getTime())[0];
 		return {
 			schemaVersion: 1 as const,
 			generatedAt: new Date().toISOString(),
 			outbox,
-			oldestPendingAt: oldestPending?.createdAt.toISOString() || null,
+			oldestPendingAt: oldestPendingAt?.toISOString() || null,
 			unresolvedFailures,
 			retryingFailures,
-			deliveredLast24Hours
+			deliveredLast24Hours,
+			operational: {
+				dueOutbox,
+				staleOutbox,
+				unresolvedFailuresByCategory
+			},
+			heartbeats
+		};
+	}
+
+	private async getRoleReadiness(
+		role: BillingProcessRole
+	): Promise<BillingRoleReadiness> {
+		const service = BILLING_ROLE_SERVICE_NAMES[role];
+		try {
+			const response = await fetch(
+				`http://127.0.0.1:${parseBillingPort(role)}/health/ready`,
+				{
+					headers: { Accept: 'application/json' },
+					redirect: 'error',
+					signal: AbortSignal.timeout(2_000)
+				}
+			);
+			const body: unknown = await response.json().catch(() => null);
+			if (!response.ok || !this.isRoleReadiness(body, role)) {
+				return this.downRole(service);
+			}
+			return {
+				service,
+				status: 'ok',
+				activeInstances: 1,
+				lastSeenAt: new Date().toISOString(),
+				revision: body.revision
+			};
+		} catch {
+			return this.downRole(service);
+		}
+	}
+
+	private isRoleReadiness(
+		value: unknown,
+		role: BillingProcessRole
+	): value is {
+		status: 'ready';
+		service: 'billing';
+		role: BillingProcessRole;
+		revision: string;
+	} {
+		return (
+			Boolean(value) &&
+			typeof value === 'object' &&
+			!Array.isArray(value) &&
+			(value as Record<string, unknown>).status === 'ready' &&
+			(value as Record<string, unknown>).service === 'billing' &&
+			(value as Record<string, unknown>).role === role &&
+			typeof (value as Record<string, unknown>).revision === 'string' &&
+			Boolean((value as Record<string, unknown>).revision)
+		);
+	}
+
+	private downRole(
+		service: BillingRoleReadiness['service']
+	): BillingRoleReadiness {
+		return {
+			service,
+			status: 'down',
+			activeInstances: 0,
+			lastSeenAt: null,
+			revision: null
 		};
 	}
 

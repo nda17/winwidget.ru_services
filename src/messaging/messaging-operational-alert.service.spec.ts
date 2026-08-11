@@ -571,7 +571,30 @@ describe('MessagingOperationalAlertService', () => {
 			oldestPendingAt: null,
 			unresolvedFailures: 4,
 			retryingFailures: 0,
-			deliveredLast24Hours: 3
+			deliveredLast24Hours: 3,
+			operational: {
+				dueOutbox: 2,
+				staleOutbox: 0,
+				unresolvedFailuresByCategory: {
+					TRANSIENT: 2,
+					RATE_LIMIT: 0,
+					PERMANENT: 0,
+					AUTH_CONFIGURATION: 0,
+					UNCLASSIFIED: 2
+				}
+			},
+			heartbeats: [
+				'billing-api',
+				'billing-scheduler',
+				'billing-worker',
+				'billing-outbox-publisher'
+			].map(service => ({
+				service,
+				status: 'ok',
+				activeInstances: 1,
+				lastSeenAt: '2026-07-27T12:00:00.000Z',
+				revision: 'a'.repeat(40)
+			}))
 		});
 		const { service, prisma } = createCheckService(
 			{
@@ -631,5 +654,60 @@ describe('MessagingOperationalAlertService', () => {
 			.calls[0];
 		expect(signature).toContain('dlq=4');
 		expect(message).toContain('Billing: <b>Outbox=2, DLQ=4</b>');
+		expect(message).toContain('— временные: <b>2</b>');
+		expect(message).toContain('— без классификации: <b>2</b>');
+	});
+
+	it('alerts when a Billing process readiness probe is down after ownership', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const services = [
+			'billing-api',
+			'billing-scheduler',
+			'billing-worker',
+			'billing-outbox-publisher'
+		];
+		const { service } = createCheckService(
+			{
+				getOverview: jest
+					.fn()
+					.mockResolvedValue(createNotificationDeliveryOverview())
+			},
+			undefined,
+			{
+				state: { isBillingOwner: jest.fn().mockResolvedValue(true) },
+				client: {
+					getOverview: jest.fn().mockResolvedValue({
+						schemaVersion: 1,
+						generatedAt: '2026-07-27T12:00:00.000Z',
+						outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
+						oldestPendingAt: null,
+						unresolvedFailures: 0,
+						retryingFailures: 0,
+						deliveredLast24Hours: 0,
+						heartbeats: services.map(item => ({
+							service: item,
+							status: item === 'billing-worker' ? 'down' : 'ok',
+							activeInstances: item === 'billing-worker' ? 0 : 1,
+							lastSeenAt:
+								item === 'billing-worker'
+									? null
+									: '2026-07-27T12:00:00.000Z',
+							revision: item === 'billing-worker' ? null : 'a'.repeat(40)
+						}))
+					})
+				}
+			}
+		);
+
+		await (service as any).check();
+
+		const [signature, message] = (service as any).sendAlertIfChanged.mock
+			.calls[0];
+		expect(signature).toContain('heartbeat=billing-worker');
+		expect(message).toContain(
+			'Billing: <b>нет heartbeat, Outbox=0, DLQ=0</b>'
+		);
 	});
 });

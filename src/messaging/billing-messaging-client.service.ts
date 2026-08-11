@@ -44,6 +44,24 @@ export type BillingFailureConsumer =
 	(typeof BILLING_FAILURE_CONSUMERS)[number];
 export type BillingFailureStatus = 'OPEN' | 'RETRY_PENDING' | 'RESOLVED';
 
+export const BILLING_MESSAGING_SERVICES = [
+	'billing-api',
+	'billing-scheduler',
+	'billing-worker',
+	'billing-outbox-publisher'
+] as const;
+
+export type BillingMessagingService =
+	(typeof BILLING_MESSAGING_SERVICES)[number];
+
+export interface BillingMessagingHeartbeat {
+	service: BillingMessagingService;
+	status: 'ok' | 'down';
+	activeInstances: number;
+	lastSeenAt: string | null;
+	revision: string | null;
+}
+
 export interface BillingMessagingOverview {
 	schemaVersion: 1;
 	generatedAt: string;
@@ -52,6 +70,19 @@ export interface BillingMessagingOverview {
 	unresolvedFailures: number;
 	retryingFailures: number;
 	deliveredLast24Hours: number;
+	operational?: {
+		dueOutbox: number;
+		staleOutbox: number;
+		unresolvedFailuresByCategory: Record<
+			| 'TRANSIENT'
+			| 'RATE_LIMIT'
+			| 'PERMANENT'
+			| 'AUTH_CONFIGURATION'
+			| 'UNCLASSIFIED',
+			number
+		>;
+	};
+	heartbeats?: BillingMessagingHeartbeat[];
 }
 
 export interface BillingMessagingFailureView {
@@ -173,19 +204,83 @@ const isFailureStatus = (value: unknown): value is BillingFailureStatus =>
 const isNullableNonNegativeInteger = (
 	value: unknown
 ): value is number | null => value === null || isNonNegativeInteger(value);
-
-const isOverview = (value: unknown): value is BillingMessagingOverview => {
+const isBillingMessagingHeartbeat = (
+	value: unknown
+): value is BillingMessagingHeartbeat =>
+	isRecord(value) &&
+	hasExactKeys(value, [
+		'service',
+		'status',
+		'activeInstances',
+		'lastSeenAt',
+		'revision'
+	]) &&
+	BILLING_MESSAGING_SERVICES.includes(
+		value.service as BillingMessagingService
+	) &&
+	(value.status === 'ok' || value.status === 'down') &&
+	isNonNegativeInteger(value.activeInstances) &&
+	isNullableIsoDate(value.lastSeenAt) &&
+	isNullableString(value.revision) &&
+	(value.status === 'ok'
+		? value.activeInstances === 1 &&
+			isIsoDate(value.lastSeenAt) &&
+			isNonEmptyString(value.revision)
+		: value.activeInstances === 0 &&
+			value.lastSeenAt === null &&
+			value.revision === null);
+const isBillingOperational = (
+	value: unknown
+): value is NonNullable<BillingMessagingOverview['operational']> => {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(value, [
-			'schemaVersion',
-			'generatedAt',
-			'outbox',
-			'oldestPendingAt',
-			'unresolvedFailures',
-			'retryingFailures',
-			'deliveredLast24Hours'
+			'dueOutbox',
+			'staleOutbox',
+			'unresolvedFailuresByCategory'
 		]) ||
+		!isRecord(value.unresolvedFailuresByCategory) ||
+		!hasExactKeys(value.unresolvedFailuresByCategory, [
+			'TRANSIENT',
+			'RATE_LIMIT',
+			'PERMANENT',
+			'AUTH_CONFIGURATION',
+			'UNCLASSIFIED'
+		])
+	) {
+		return false;
+	}
+	return (
+		isNonNegativeInteger(value.dueOutbox) &&
+		isNonNegativeInteger(value.staleOutbox) &&
+		Object.values(value.unresolvedFailuresByCategory).every(
+			isNonNegativeInteger
+		)
+	);
+};
+
+const isOverview = (value: unknown): value is BillingMessagingOverview => {
+	const overviewKeys = [
+		'schemaVersion',
+		'generatedAt',
+		'outbox',
+		'oldestPendingAt',
+		'unresolvedFailures',
+		'retryingFailures',
+		'deliveredLast24Hours'
+	] as const;
+	const expectedKeys: string[] = [...overviewKeys];
+	if (isRecord(value)) {
+		if (Object.prototype.hasOwnProperty.call(value, 'operational')) {
+			expectedKeys.push('operational');
+		}
+		if (Object.prototype.hasOwnProperty.call(value, 'heartbeats')) {
+			expectedKeys.push('heartbeats');
+		}
+	}
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, expectedKeys) ||
 		!isRecord(value.outbox) ||
 		!hasExactKeys(value.outbox, ['PENDING', 'PROCESSING', 'PUBLISHED'])
 	) {
@@ -200,7 +295,19 @@ const isOverview = (value: unknown): value is BillingMessagingOverview => {
 		isNullableIsoDate(value.oldestPendingAt) &&
 		isNonNegativeInteger(value.unresolvedFailures) &&
 		isNonNegativeInteger(value.retryingFailures) &&
-		isNonNegativeInteger(value.deliveredLast24Hours)
+		isNonNegativeInteger(value.deliveredLast24Hours) &&
+		(value.operational === undefined ||
+			(isBillingOperational(value.operational) &&
+				Object.values(
+					value.operational.unresolvedFailuresByCategory
+				).reduce((total, count) => total + count, 0) ===
+					value.unresolvedFailures)) &&
+		(value.heartbeats === undefined ||
+			(Array.isArray(value.heartbeats) &&
+				value.heartbeats.length === BILLING_MESSAGING_SERVICES.length &&
+				value.heartbeats.every(isBillingMessagingHeartbeat) &&
+				new Set(value.heartbeats.map(item => item.service)).size ===
+					BILLING_MESSAGING_SERVICES.length))
 	);
 };
 
@@ -349,7 +456,7 @@ export class BillingMessagingClientService {
 	getFailures(
 		page: number,
 		limit: number,
-		filters: { consumer?: string; status?: string }
+		filters: { consumer?: string; category?: string; status?: string }
 	): Promise<BillingMessagingFailuresPage> {
 		const query = new URLSearchParams({
 			page: String(page),
@@ -357,6 +464,9 @@ export class BillingMessagingClientService {
 		});
 		if (filters.consumer?.trim()) {
 			query.set('consumer', filters.consumer.trim());
+		}
+		if (filters.category?.trim()) {
+			query.set('category', filters.category.trim());
 		}
 		if (filters.status?.trim()) query.set('status', filters.status.trim());
 		return this.request(

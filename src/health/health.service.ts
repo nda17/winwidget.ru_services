@@ -5,6 +5,10 @@ import {
 	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
 import {
+	BillingMessagingClientService,
+	BillingMessagingOverview
+} from '@/messaging/billing-messaging-client.service';
+import {
 	NotificationDeliveryClientService,
 	NotificationDeliveryOverview
 } from '@/messaging/notification-delivery-client.service';
@@ -39,6 +43,12 @@ type WidgetsOverviewResult = {
 	error: string | null;
 };
 
+type BillingOverviewResult = {
+	billingOwner: boolean | null;
+	overview: BillingMessagingOverview | null;
+	error: string | null;
+};
+
 const getRabbitQueueDepth = (queue: {
 	messages: number;
 	messages_ready: number;
@@ -57,19 +67,22 @@ export class HealthService {
 		private readonly rabbitManagement: RabbitMqManagementService,
 		private readonly notificationDelivery: NotificationDeliveryClientService,
 		private readonly widgets: WidgetsDeliveryFailuresClientService,
-		private readonly billingState: BillingCoreStateService
+		private readonly billingState: BillingCoreStateService,
+		private readonly billing: BillingMessagingClientService
 	) {}
 
 	async getAdminHealth() {
 		const notificationDeliveryResult =
 			this.getNotificationDeliveryResult();
 		const widgetsResult = this.getWidgetsResult();
+		const billingResult = this.getBillingResult();
 		const checks = await Promise.all([
 			this.checkBackend(),
 			this.checkDatabase(),
 			this.checkRabbitMq(),
 			this.checkNotificationDelivery(notificationDeliveryResult),
 			this.checkWidgets(widgetsResult),
+			this.checkBilling(billingResult),
 			this.checkMessagingHeartbeat('outbox-publisher', 'Outbox publisher'),
 			this.checkMessagingHeartbeat(
 				'integration-worker',
@@ -81,7 +94,8 @@ export class HealthService {
 			),
 			this.checkMessagingBacklog(
 				notificationDeliveryResult,
-				widgetsResult
+				widgetsResult,
+				billingResult
 			),
 			this.checkScheduledJobs(),
 			this.checkS3(),
@@ -295,8 +309,10 @@ export class HealthService {
 
 	private async checkMessagingBacklog(
 		resultPromise: Promise<NotificationDeliveryResult>,
-		widgetsResultPromise: Promise<WidgetsOverviewResult>
+		widgetsResultPromise: Promise<WidgetsOverviewResult>,
+		billingResultPromise: Promise<BillingOverviewResult> = this.getBillingResult()
 	): Promise<HealthCheck> {
+		const billing = await billingResultPromise;
 		const now = new Date();
 		const expiredPublishingBefore = new Date(
 			now.getTime() - OUTBOX_LOCK_TIMEOUT_MS
@@ -314,7 +330,10 @@ export class HealthService {
 				where: {
 					resolvedAt: null,
 					integration: {
-						in: [...CORE_OWNED_MESSAGING_KINDS]
+						in: CORE_OWNED_MESSAGING_KINDS.filter(
+							kind =>
+								billing.billingOwner !== true || kind !== 'auto-renewal'
+						)
 					}
 				}
 			}),
@@ -348,7 +367,8 @@ export class HealthService {
 			this.parseDate(
 				notificationDelivery.overview?.oldestPendingAt || null
 			),
-			this.parseDate(widgets.overview?.oldestPendingAt || null)
+			this.parseDate(widgets.overview?.oldestPendingAt || null),
+			this.parseDate(billing.overview?.oldestPendingAt || null)
 		]
 			.filter((value): value is Date => Boolean(value))
 			.sort((left, right) => left.getTime() - right.getTime())[0];
@@ -365,18 +385,21 @@ export class HealthService {
 		const combinedUnresolvedFailures =
 			unresolvedFailures +
 			(notificationDelivery.overview?.unresolvedFailures || 0) +
-			(widgets.overview?.unresolvedFailures || 0);
+			(widgets.overview?.unresolvedFailures || 0) +
+			(billing.overview?.unresolvedFailures || 0);
 		const hasProblem =
 			combinedFailedOutbox > 0 ||
 			combinedUnresolvedFailures > 0 ||
 			oldestAgeSeconds > 60 ||
 			Boolean(notificationDelivery.error) ||
-			Boolean(widgets.error);
+			Boolean(widgets.error) ||
+			Boolean(billing.error);
 		const unavailable = [
 			notificationDelivery.error
 				? `Notification Delivery metrics недоступны: ${notificationDelivery.error}`
 				: '',
-			widgets.error ? `Widgets metrics недоступны: ${widgets.error}` : ''
+			widgets.error ? `Widgets metrics недоступны: ${widgets.error}` : '',
+			billing.error ? `Billing metrics недоступны: ${billing.error}` : ''
 		]
 			.filter(Boolean)
 			.join('; ');
@@ -430,6 +453,61 @@ export class HealthService {
 		};
 	}
 
+	private async checkBilling(
+		resultPromise: Promise<BillingOverviewResult>
+	): Promise<HealthCheck> {
+		const startedAt = Date.now();
+		const result = await resultPromise;
+		if (result.billingOwner === false) {
+			return {
+				id: 'billing',
+				title: 'Billing',
+				status: 'disabled',
+				message: 'До cutover владельцем Billing остаётся Core',
+				latencyMs: Date.now() - startedAt
+			};
+		}
+		if (!result.overview || result.error) {
+			return {
+				id: 'billing',
+				title: 'Billing',
+				status: 'down',
+				message: result.error || 'Internal API вернул пустой ответ',
+				latencyMs: Date.now() - startedAt
+			};
+		}
+		const heartbeats = result.overview.heartbeats || [];
+		const down = heartbeats.filter(
+			heartbeat => heartbeat.status === 'down'
+		);
+		const missing = heartbeats.length !== 4;
+		const revisions = new Set(
+			heartbeats
+				.map(heartbeat => heartbeat.revision)
+				.filter((revision): revision is string => Boolean(revision))
+		);
+		const revisionMismatch =
+			!missing && !down.length && revisions.size !== 1;
+		return {
+			id: 'billing',
+			title: 'Billing',
+			status:
+				missing || down.length
+					? 'down'
+					: revisionMismatch
+						? 'warning'
+						: 'ok',
+			message: missing
+				? 'Billing не опубликовал readiness всех процессов'
+				: down.length
+					? `Не готовы процессы: ${down.map(item => item.service).join(', ')}`
+					: revisionMismatch
+						? 'Процессы Billing запущены на разных revisions'
+						: 'API, scheduler, worker и outbox publisher готовы',
+			latencyMs: Date.now() - startedAt
+		};
+	}
+
 	private getNotificationDeliveryResult(): Promise<NotificationDeliveryResult> {
 		return this.notificationDelivery
 			.getOverview()
@@ -452,6 +530,38 @@ export class HealthService {
 				error:
 					error instanceof Error ? error.message : 'Widgets недоступен'
 			}));
+	}
+
+	private async getBillingResult(): Promise<BillingOverviewResult> {
+		try {
+			const billingOwner = await this.billingState.isBillingOwner();
+			if (!billingOwner) {
+				return { billingOwner: false, overview: null, error: null };
+			}
+			try {
+				return {
+					billingOwner: true,
+					overview: await this.billing.getOverview(),
+					error: null
+				};
+			} catch (error) {
+				return {
+					billingOwner: true,
+					overview: null,
+					error:
+						error instanceof Error ? error.message : 'Billing недоступен'
+				};
+			}
+		} catch (error) {
+			return {
+				billingOwner: null,
+				overview: null,
+				error:
+					error instanceof Error
+						? error.message
+						: 'Billing ownership недоступен'
+			};
+		}
 	}
 
 	private parseDate(value?: string | null): Date | null {

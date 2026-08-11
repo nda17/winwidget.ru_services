@@ -1,4 +1,8 @@
-import { MESSAGING_QUEUE_NAMES } from '@/messaging/messaging.constants';
+import {
+	BILLING_OWNED_QUEUE_NAMES,
+	getMessagingQueueHealthExpectations,
+	MESSAGING_QUEUE_NAMES
+} from '@/messaging/messaging.constants';
 import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import type { ConfigService } from '@nestjs/config';
 
@@ -8,12 +12,25 @@ describe('RabbitMqManagementService', () => {
 	});
 
 	it('returns every current messaging queue namespace and its technical queues', async () => {
+		const billingQueues = getMessagingQueueHealthExpectations({
+			billingOwner: true
+		})
+			.filter(expectation =>
+				BILLING_OWNED_QUEUE_NAMES.some(
+					queue =>
+						expectation.name === queue ||
+						expectation.name.startsWith(`${queue}.`)
+				)
+			)
+			.map(expectation => expectation.name);
 		const knownQueues = [
 			MESSAGING_QUEUE_NAMES.email,
 			MESSAGING_QUEUE_NAMES['campaign-email'],
 			`${MESSAGING_QUEUE_NAMES['campaign-email']}.retry-v2.1`,
-			`${MESSAGING_QUEUE_NAMES['notification-delivery-outcome']}.dead-letter`
+			`${MESSAGING_QUEUE_NAMES['notification-delivery-outcome']}.dead-letter`,
+			...billingQueues
 		];
+		expect(billingQueues).toHaveLength(45);
 		const queues = [
 			...knownQueues.map(name => ({
 				name,
