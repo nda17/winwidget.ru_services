@@ -282,7 +282,12 @@ NODE
 	source_text="$(<"${BASH_SOURCE[0]}")"
 	forbidden_env_file='.env.''production'
 	forbidden_docker_pull='docker ''pull'
+	forbidden_port_bindings_json='{{json ''.HostConfig.PortBindings}}'
 	[[ "$source_text" == *'--network none'* \
+		&& "$source_text" == *'{{len .HostConfig.PortBindings}}'* \
+		&& "$source_text" == *'{{.HostConfig.PublishAllPorts}}'* \
+		&& "$source_text" == *'{{.Type}}|{{.Name}}|{{.RW}}'* \
+		&& "$source_text" != *"$forbidden_port_bindings_json"* \
 		&& "$source_text" == *'com.winwidget.rehearsal.run-id'* \
 		&& "$source_text" == *'billing_restore_cleanup_resources'* \
 		&& "$source_text" == *'--pre-manifest-file'* \
@@ -530,10 +535,10 @@ billing_restore_synthetic_start_postgres() {
 	billing_restore_wait_healthy "$container"
 	identity="$(billing_restore_resource_identity container "$container")"
 	[[ "$identity" == "billing|$BILLING_RESTORE_PURPOSE|$run_id|$revision|$phase"
-		&& "$(docker inspect --format '{{.HostConfig.NetworkMode}}|{{json .HostConfig.PortBindings}}|{{.Config.Image}}' "$container")" == "none|null|$BILLING_RESTORE_POSTGRES_IMAGE" ]] ||
+		&& "$(docker inspect --format '{{.HostConfig.NetworkMode}}|{{.HostConfig.PublishAllPorts}}|{{len .HostConfig.PortBindings}}|{{.Image}}' "$container")" == "none|false|0|$postgres_image_id" ]] ||
 		billing_restore_fail "Synthetic target isolation is invalid: $key"
-	mount_name="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Name}}{{end}}{{end}}' "$container")"
-	[[ "$mount_name" == "$volume" ]] ||
+	mount_name="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Type}}|{{.Name}}|{{.RW}}{{end}}{{end}}' "$container")"
+	[[ "$mount_name" == "volume|$volume|true" ]] ||
 		billing_restore_fail "Synthetic target volume is invalid: $key"
 	printf -v "synthetic_${key}_container" '%s' "$container"
 }
@@ -797,10 +802,10 @@ billing_restore_start_target() {
 	billing_restore_wait_healthy "$container"
 	identity="$(billing_restore_resource_identity container "$container")"
 	[[ "$identity" == "billing|$BILLING_RESTORE_PURPOSE|$run_id|$revision|$phase"
-		&& "$(docker inspect --format '{{.HostConfig.NetworkMode}}|{{json .HostConfig.PortBindings}}|{{.Config.Image}}' "$container")" == "none|null|$BILLING_RESTORE_POSTGRES_IMAGE" ]] ||
+		&& "$(docker inspect --format '{{.HostConfig.NetworkMode}}|{{.HostConfig.PublishAllPorts}}|{{len .HostConfig.PortBindings}}|{{.Image}}' "$container")" == "none|false|0|$postgres_image_id" ]] ||
 		billing_restore_fail "Restore target isolation is invalid: $key"
-	mount_name="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Name}}{{end}}{{end}}' "$container")"
-	[[ "$mount_name" == "$volume" ]] || billing_restore_fail "Restore target volume is invalid: $key"
+	mount_name="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Type}}|{{.Name}}|{{.RW}}{{end}}{{end}}' "$container")"
+	[[ "$mount_name" == "volume|$volume|true" ]] || billing_restore_fail "Restore target volume is invalid: $key"
 	billing_restore_query "$container" postgres 'CREATE DATABASE restore_db WITH TEMPLATE template0;' >/dev/null
 	if [[ "$schema" == 'public' ]]; then
 		billing_restore_query "$container" restore_db 'DROP SCHEMA public CASCADE;' >/dev/null
