@@ -1,4 +1,9 @@
 import { HealthService } from '@/health/health.service';
+import type { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
+import {
+	getMessagingQueueHealthExpectations,
+	MESSAGING_QUEUE_NAMES
+} from '@/messaging/messaging.constants';
 import type { NotificationDeliveryClientService } from '@/messaging/notification-delivery-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
@@ -78,12 +83,43 @@ const createWidgetsOverview = () => ({
 	]
 });
 
+const createRabbitQueues = (billingOwner = false) =>
+	getMessagingQueueHealthExpectations({ billingOwner }).map(
+		expectation => ({
+			name: expectation.name,
+			messages: 0,
+			messages_ready: 0,
+			messages_unacknowledged: 0,
+			consumers:
+				expectation.consumerExpectation === 'at-least-one' ? 1 : 0,
+			state: 'running'
+		})
+	);
+
+const createRabbitManagement = (
+	queues: ReturnType<typeof createRabbitQueues>
+) =>
+	({
+		checkConnection: jest.fn().mockResolvedValue('RabbitMQ 4.1.0'),
+		getBrokerHealth: jest.fn().mockResolvedValue({
+			nodes: [{ name: 'rabbit@local', running: true }],
+			alarmNodes: [],
+			stoppedNodes: [],
+			partitionedNodes: []
+		}),
+		getMessagingQueues: jest.fn().mockResolvedValue(queues)
+	}) as unknown as RabbitMqManagementService;
+
 const createService = (
 	notificationDelivery: Partial<NotificationDeliveryClientService> = {
 		getOverview: jest.fn().mockResolvedValue(createOverview())
 	},
 	widgets: Partial<WidgetsDeliveryFailuresClientService> = {
 		getOverview: jest.fn().mockResolvedValue(createWidgetsOverview())
+	},
+	rabbitManagement: Partial<RabbitMqManagementService> = {},
+	billingState: Partial<BillingCoreStateService> = {
+		isBillingOwner: jest.fn().mockResolvedValue(false)
 	}
 ) => {
 	const prisma = {
@@ -99,9 +135,10 @@ const createService = (
 	const service = new HealthService(
 		prisma,
 		{ get: jest.fn() } as unknown as ConfigService,
-		{} as RabbitMqManagementService,
+		rabbitManagement as RabbitMqManagementService,
 		notificationDelivery as NotificationDeliveryClientService,
-		widgets as WidgetsDeliveryFailuresClientService
+		widgets as WidgetsDeliveryFailuresClientService,
+		billingState as BillingCoreStateService
 	);
 	return { service, prisma };
 };
@@ -109,6 +146,101 @@ const createService = (
 describe('HealthService notification delivery monitoring', () => {
 	afterEach(() => {
 		jest.useRealTimers();
+	});
+
+	it('accepts empty passive Widgets DLQ without consumers', async () => {
+		const queues = createRabbitQueues();
+		const { service } = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(queues)
+		);
+
+		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
+			id: 'rabbitmq',
+			status: 'ok'
+		});
+	});
+
+	it('warns when a provider main queue loses its consumer', async () => {
+		const queues = createRabbitQueues();
+		const mainQueue = queues.find(
+			queue => queue.name === MESSAGING_QUEUE_NAMES.webhook
+		)!;
+		mainQueue.consumers = 0;
+		const { service } = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(queues)
+		);
+
+		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('без обязательных consumers: 1')
+		});
+	});
+
+	it('warns on the first message in a passive Widgets DLQ', async () => {
+		const queues = createRabbitQueues();
+		const deadLetterQueue = queues.find(
+			queue =>
+				queue.name === `${MESSAGING_QUEUE_NAMES.webhook}.dead-letter`
+		)!;
+		deadLetterQueue.messages_unacknowledged = 1;
+		const { service } = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(queues)
+		);
+
+		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('пассивные DLQ с сообщениями: 1')
+		});
+	});
+
+	it('warns when a passive DLQ gets an unexpected consumer', async () => {
+		const queues = createRabbitQueues();
+		const deadLetterQueue = queues.find(
+			queue =>
+				queue.name === `${MESSAGING_QUEUE_NAMES.webhook}.dead-letter`
+		)!;
+		deadLetterQueue.consumers = 1;
+		const { service } = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(queues)
+		);
+
+		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('неожиданные consumers: 1')
+		});
+	});
+
+	it('switches auto-renewal DLQ monitoring with Billing ownership', async () => {
+		const coreQueues = createRabbitQueues(false);
+		const billingQueues = createRabbitQueues(true);
+		const coreService = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(coreQueues)
+		).service;
+		const billingService = createService(
+			undefined,
+			undefined,
+			createRabbitManagement(billingQueues),
+			{ isBillingOwner: jest.fn().mockResolvedValue(true) }
+		).service;
+
+		await expect(
+			(coreService as any).checkRabbitMq()
+		).resolves.toMatchObject({
+			status: 'ok'
+		});
+		await expect(
+			(billingService as any).checkRabbitMq()
+		).resolves.toMatchObject({ status: 'ok' });
 	});
 
 	it('combines legacy and notification-delivery backlog without old moved failures', async () => {

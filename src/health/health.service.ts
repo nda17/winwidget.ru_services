@@ -1,7 +1,7 @@
+import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import {
 	CORE_OWNED_MESSAGING_KINDS,
-	MESSAGING_KINDS,
-	MESSAGING_QUEUE_NAMES,
+	getMessagingQueueHealthExpectations,
 	OUTBOX_LOCK_TIMEOUT_MS
 } from '@/messaging/messaging.constants';
 import {
@@ -39,6 +39,16 @@ type WidgetsOverviewResult = {
 	error: string | null;
 };
 
+const getRabbitQueueDepth = (queue: {
+	messages: number;
+	messages_ready: number;
+	messages_unacknowledged: number;
+}): number =>
+	Math.max(
+		queue.messages,
+		queue.messages_ready + queue.messages_unacknowledged
+	);
+
 @Injectable()
 export class HealthService {
 	constructor(
@@ -46,7 +56,8 @@ export class HealthService {
 		private readonly configService: ConfigService,
 		private readonly rabbitManagement: RabbitMqManagementService,
 		private readonly notificationDelivery: NotificationDeliveryClientService,
-		private readonly widgets: WidgetsDeliveryFailuresClientService
+		private readonly widgets: WidgetsDeliveryFailuresClientService,
+		private readonly billingState: BillingCoreStateService
 	) {}
 
 	async getAdminHealth() {
@@ -131,24 +142,47 @@ export class HealthService {
 	private async checkRabbitMq(): Promise<HealthCheck> {
 		const startedAt = Date.now();
 		try {
-			const [version, broker, queues] = await Promise.all([
+			const [version, broker, queues, billingOwner] = await Promise.all([
 				this.rabbitManagement.checkConnection(),
 				this.rabbitManagement.getBrokerHealth(),
-				this.rabbitManagement.getMessagingQueues()
+				this.rabbitManagement.getMessagingQueues(),
+				this.billingState.isBillingOwner()
 			]);
-			const requiredQueues = MESSAGING_KINDS.flatMap(kind => {
-				const queue = MESSAGING_QUEUE_NAMES[kind];
-				return [queue, `${queue}.dead-letter`];
+			const queueExpectations = getMessagingQueueHealthExpectations({
+				billingOwner
 			});
+			const requiredQueues = queueExpectations.map(
+				expectation => expectation.name
+			);
 			const queuesByName = new Map(
 				queues.map(queue => [queue.name, queue])
 			);
 			const missing = requiredQueues.filter(
 				queue => !queuesByName.has(queue)
 			);
-			const consumerless = requiredQueues.filter(
-				queue => queuesByName.get(queue)?.consumers === 0
-			);
+			const consumerless = queueExpectations
+				.filter(
+					expectation => expectation.consumerExpectation === 'at-least-one'
+				)
+				.filter(
+					expectation =>
+						(queuesByName.get(expectation.name)?.consumers ?? 1) < 1
+				)
+				.map(expectation => expectation.name);
+			const unexpectedlyConsumed = queueExpectations
+				.filter(expectation => expectation.consumerExpectation === 'none')
+				.filter(
+					expectation =>
+						(queuesByName.get(expectation.name)?.consumers ?? 0) > 0
+				)
+				.map(expectation => expectation.name);
+			const nonemptyPassiveQueues = queueExpectations
+				.filter(expectation => expectation.alertOnAnyMessage)
+				.filter(expectation => {
+					const queue = queuesByName.get(expectation.name);
+					return queue && getRabbitQueueDepth(queue) > 0;
+				})
+				.map(expectation => expectation.name);
 			const alarms = [
 				...broker.alarmNodes,
 				...broker.stoppedNodes,
@@ -158,13 +192,15 @@ export class HealthService {
 				!broker.nodes.length ||
 				missing.length > 0 ||
 				consumerless.length > 0 ||
+				unexpectedlyConsumed.length > 0 ||
+				nonemptyPassiveQueues.length > 0 ||
 				alarms.length > 0;
 			return {
 				id: 'rabbitmq',
 				title: 'RabbitMQ',
 				status: hasProblem ? 'warning' : 'ok',
 				message: hasProblem
-					? `${version}; отсутствуют очереди: ${missing.length}, без consumers: ${consumerless.length}, alarms/nodes: ${alarms.length + (broker.nodes.length ? 0 : 1)}`
+					? `${version}; отсутствуют очереди: ${missing.length}, без обязательных consumers: ${consumerless.length}, неожиданные consumers: ${unexpectedlyConsumed.length}, пассивные DLQ с сообщениями: ${nonemptyPassiveQueues.length}, alarms/nodes: ${alarms.length + (broker.nodes.length ? 0 : 1)}`
 					: `${version}; ${requiredQueues.length} обязательных очередей готовы`,
 				latencyMs: Date.now() - startedAt
 			};

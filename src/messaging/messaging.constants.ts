@@ -286,6 +286,44 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'billing-settings-source': 'winwidget.billing.settings-source.v1'
 };
 
+export type MessagingQueueHealthExpectation = Readonly<{
+	name: string;
+	consumerExpectation: 'at-least-one' | 'none';
+	alertOnAnyMessage: boolean;
+}>;
+
+const WIDGETS_PROVIDER_KIND_SET: ReadonlySet<CoreMessagingKind> = new Set(
+	WIDGETS_PROVIDER_INTEGRATION_KINDS
+);
+
+// Passive DLQ are durable holding queues: manual retry is driven by the
+// delivery-failure record, so a steady-state RabbitMQ consumer must not drain
+// them. They must still exist, stay empty and alert on the first message.
+export const getMessagingQueueHealthExpectations = (options: {
+	billingOwner: boolean;
+}): readonly MessagingQueueHealthExpectation[] =>
+	MESSAGING_KINDS.flatMap(kind => {
+		const mainQueue = MESSAGING_QUEUE_NAMES[kind];
+		const passiveDeadLetter =
+			WIDGETS_PROVIDER_KIND_SET.has(kind) ||
+			(options.billingOwner && kind === 'auto-renewal');
+
+		return [
+			{
+				name: mainQueue,
+				consumerExpectation: 'at-least-one' as const,
+				alertOnAnyMessage: false
+			},
+			{
+				name: `${mainQueue}.dead-letter`,
+				consumerExpectation: passiveDeadLetter
+					? ('none' as const)
+					: ('at-least-one' as const),
+				alertOnAnyMessage: passiveDeadLetter
+			}
+		];
+	});
+
 export const INTEGRATION_ROUTING_KEYS = MESSAGING_ROUTING_KEYS;
 export const INTEGRATION_QUEUE_NAMES = MESSAGING_QUEUE_NAMES;
 

@@ -1,8 +1,9 @@
 import { MessagingOperationalAlertService } from '@/messaging/messaging-operational-alert.service';
 import {
 	CORE_OWNED_MESSAGING_KINDS,
-	MESSAGING_KINDS,
-	MESSAGING_QUEUE_NAMES
+	getMessagingQueueHealthExpectations,
+	MESSAGING_QUEUE_NAMES,
+	WIDGETS_PROVIDER_INTEGRATION_KINDS
 } from '@/messaging/messaging.constants';
 import type { NotificationDeliveryClientService } from '@/messaging/notification-delivery-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
@@ -52,6 +53,33 @@ const createWidgetsOverview = () => ({
 			lastSuccessfulPublishAt: '2026-07-27T11:59:50.000Z'
 		}
 	]
+});
+
+const createNotificationDeliveryOverview = () => ({
+	outbox: { PENDING: 0, PUBLISHING: 0, PUBLISHED: 0, FAILED: 0 },
+	oldestPendingAt: null,
+	operational: {
+		staleOutbox: 0,
+		dueOutbox: 0,
+		unresolvedFailuresByCategory: {
+			TRANSIENT: 0,
+			RATE_LIMIT: 0,
+			PERMANENT: 0,
+			AUTH_CONFIGURATION: 0,
+			UNCLASSIFIED: 0
+		}
+	},
+	unresolvedFailures: 0,
+	retryingFailures: 0,
+	deliveredLast24Hours: 0,
+	heartbeat: {
+		service: 'notification-delivery-worker' as const,
+		status: 'ok' as const,
+		activeInstances: 1,
+		lastSeenAt: '2026-07-27T11:59:55.000Z',
+		lastSuccessfulPublishAt: null,
+		lastSuccessfulConsumeAt: '2026-07-27T11:59:50.000Z'
+	}
 });
 
 describe('MessagingOperationalAlertService', () => {
@@ -146,27 +174,18 @@ describe('MessagingOperationalAlertService', () => {
 				])
 			}
 		} as unknown as PrismaService;
-		const queues = MESSAGING_KINDS.flatMap(kind => {
-			const mainQueue = MESSAGING_QUEUE_NAMES[kind];
-			return [
-				{
-					name: mainQueue,
-					messages: kind === 'email' ? 1 : 0,
-					messages_ready: kind === 'email' ? 1 : 0,
-					messages_unacknowledged: 0,
-					consumers: 1,
-					state: 'running'
-				},
-				{
-					name: `${mainQueue}.dead-letter`,
-					messages: 0,
-					messages_ready: 0,
-					messages_unacknowledged: 0,
-					consumers: 1,
-					state: 'running'
-				}
-			];
-		});
+		const queues = getMessagingQueueHealthExpectations({
+			billingOwner: Boolean(billing)
+		}).map(expectation => ({
+			name: expectation.name,
+			messages: expectation.name === MESSAGING_QUEUE_NAMES.email ? 1 : 0,
+			messages_ready:
+				expectation.name === MESSAGING_QUEUE_NAMES.email ? 1 : 0,
+			messages_unacknowledged: 0,
+			consumers:
+				expectation.consumerExpectation === 'at-least-one' ? 1 : 0,
+			state: 'running'
+		}));
 		const rabbitManagement = {
 			getMessagingQueues: jest.fn().mockResolvedValue(queues),
 			getBrokerHealth: jest.fn().mockResolvedValue({
@@ -195,7 +214,7 @@ describe('MessagingOperationalAlertService', () => {
 		jest
 			.spyOn(service as any, 'sendAlertIfChanged')
 			.mockResolvedValue(undefined);
-		return { service, prisma };
+		return { service, prisma, queues };
 	};
 
 	it('claims durable alert state before sending a changed alert', async () => {
@@ -246,6 +265,124 @@ describe('MessagingOperationalAlertService', () => {
 		expect(
 			telegramBot.sendMessagingOperationalAlert
 		).not.toHaveBeenCalled();
+	});
+
+	it('keeps empty Widgets provider DLQ healthy without consumers', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const { service, queues } = createCheckService({
+			getOverview: jest
+				.fn()
+				.mockResolvedValue(createNotificationDeliveryOverview())
+		});
+		const passiveQueueNames: string[] =
+			WIDGETS_PROVIDER_INTEGRATION_KINDS.map(
+				kind => `${MESSAGING_QUEUE_NAMES[kind]}.dead-letter`
+			);
+
+		expect(
+			queues
+				.filter(queue => passiveQueueNames.includes(queue.name))
+				.map(queue => [queue.name, queue.consumers])
+		).toEqual(passiveQueueNames.map(queue => [queue, 0]));
+
+		await (service as any).check();
+
+		const [signature] = (service as any).sendAlertIfChanged.mock.calls[0];
+		expect(signature).toBe('');
+	});
+
+	it('alerts when a Widgets provider main queue loses its consumer', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const { service, queues } = createCheckService({
+			getOverview: jest
+				.fn()
+				.mockResolvedValue(createNotificationDeliveryOverview())
+		});
+		const mainQueue = MESSAGING_QUEUE_NAMES.webhook;
+		const queue = queues.find(item => item.name === mainQueue)!;
+		queue.consumers = 0;
+
+		await (service as any).check();
+
+		const [signature] = (service as any).sendAlertIfChanged.mock.calls[0];
+		expect(signature).toContain(`consumers=0:${mainQueue}`);
+	});
+
+	it('alerts on the first message in a passive Widgets provider DLQ', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const { service, queues } = createCheckService({
+			getOverview: jest
+				.fn()
+				.mockResolvedValue(createNotificationDeliveryOverview())
+		});
+		const deadLetterQueue = `${MESSAGING_QUEUE_NAMES.webhook}.dead-letter`;
+		const queue = queues.find(item => item.name === deadLetterQueue)!;
+		queue.messages_ready = 1;
+
+		await (service as any).check();
+
+		const [signature, message] = (service as any).sendAlertIfChanged.mock
+			.calls[0];
+		expect(signature).toContain(`backlog:${deadLetterQueue}=1`);
+		expect(signature).not.toContain(`consumers=0:${deadLetterQueue}`);
+		expect(message).toContain(deadLetterQueue);
+	});
+
+	it('alerts on an unexpected consumer draining a passive DLQ', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const { service, queues } = createCheckService({
+			getOverview: jest
+				.fn()
+				.mockResolvedValue(createNotificationDeliveryOverview())
+		});
+		const deadLetterQueue = `${MESSAGING_QUEUE_NAMES.webhook}.dead-letter`;
+		const queue = queues.find(item => item.name === deadLetterQueue)!;
+		queue.consumers = 1;
+
+		await (service as any).check();
+
+		const [signature] = (service as any).sendAlertIfChanged.mock.calls[0];
+		expect(signature).toContain(`consumers>0:${deadLetterQueue}`);
+	});
+
+	it('still requires a consumer for an active DLQ', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const { service, queues } = createCheckService({
+			getOverview: jest
+				.fn()
+				.mockResolvedValue(createNotificationDeliveryOverview())
+		});
+		const deadLetterQueue = `${MESSAGING_QUEUE_NAMES.email}.dead-letter`;
+		const queue = queues.find(item => item.name === deadLetterQueue)!;
+		queue.consumers = 0;
+
+		await (service as any).check();
+
+		const [signature] = (service as any).sendAlertIfChanged.mock.calls[0];
+		expect(signature).toContain(`consumers=0:${deadLetterQueue}`);
+	});
+
+	it('switches auto-renewal DLQ ownership only after Billing handoff', () => {
+		const deadLetterQueue = `${MESSAGING_QUEUE_NAMES['auto-renewal']}.dead-letter`;
+		const getExpectation = (billingOwner: boolean) =>
+			getMessagingQueueHealthExpectations({ billingOwner }).find(
+				expectation => expectation.name === deadLetterQueue
+			);
+
+		expect(getExpectation(false)?.consumerExpectation).toBe(
+			'at-least-one'
+		);
+		expect(getExpectation(true)?.consumerExpectation).toBe('none');
 	});
 
 	it('assigns moved queue activity only to Notification Delivery', async () => {

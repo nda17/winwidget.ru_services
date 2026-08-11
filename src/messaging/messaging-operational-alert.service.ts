@@ -1,7 +1,7 @@
 import {
 	CORE_OWNED_MESSAGING_KINDS,
+	getMessagingQueueHealthExpectations,
 	MONOLITH_INTEGRATION_KINDS,
-	MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES,
 	NOTIFICATION_DELIVERY_KINDS,
 	OUTBOX_LOCK_TIMEOUT_MS,
@@ -51,6 +51,12 @@ const ALERT_STATE_SCHEDULE_KEY = 'singleton';
 const ALERT_STATE_HEALTHY = 'healthy';
 const ALERT_CLAIM_LEASE_MS = 4 * 60 * 1000;
 const ALERT_RETRY_DELAY_MS = 5 * 60 * 1000;
+
+const getRabbitQueueDepth = (queue: RabbitQueueInfo): number =>
+	Math.max(
+		queue.messages,
+		queue.messages_ready + queue.messages_unacknowledged
+	);
 
 @Injectable()
 export class MessagingOperationalAlertService
@@ -286,10 +292,12 @@ export class MessagingOperationalAlertService
 				categoryCounts[category] = (categoryCounts[category] || 0) + count;
 			}
 
-			const requiredQueues = MESSAGING_KINDS.flatMap(kind => {
-				const queue = MESSAGING_QUEUE_NAMES[kind];
-				return [queue, `${queue}.dead-letter`];
+			const queueExpectations = getMessagingQueueHealthExpectations({
+				billingOwner
 			});
+			const requiredQueues = queueExpectations.map(
+				expectation => expectation.name
+			);
 			const messagingQueues: RabbitQueueInfo[] = queueResult.queues;
 			const queuesByName = new Map<string, RabbitQueueInfo>(
 				messagingQueues.map(queue => [queue.name, queue] as const)
@@ -299,21 +307,50 @@ export class MessagingOperationalAlertService
 				: requiredQueues.filter(queue => !queuesByName.has(queue));
 			const consumerlessQueues = queueResult.error
 				? []
-				: requiredQueues.filter(queue => {
-						const state = queuesByName.get(queue);
-						return state && state.consumers < 1;
-					});
+				: queueExpectations
+						.filter(
+							expectation =>
+								expectation.consumerExpectation === 'at-least-one'
+						)
+						.filter(expectation => {
+							const state = queuesByName.get(expectation.name);
+							return state && state.consumers < 1;
+						})
+						.map(expectation => expectation.name);
+			const unexpectedlyConsumedQueues = queueResult.error
+				? []
+				: queueExpectations
+						.filter(
+							expectation => expectation.consumerExpectation === 'none'
+						)
+						.filter(expectation => {
+							const state = queuesByName.get(expectation.name);
+							return state && state.consumers > 0;
+						})
+						.map(expectation => expectation.name);
 			const stoppedQueues = messagingQueues
 				.filter(
 					queue => queue.state === 'down' || queue.state === 'stopped'
 				)
 				.map(queue => queue.name);
 			const backlogThreshold = this.getBacklogThreshold();
-			const backloggedQueues = messagingQueues
-				.filter(queue => queue.messages >= backlogThreshold)
-				.map(queue => `${queue.name}=${queue.messages}`);
+			const backloggedQueueDepths = new Map(
+				messagingQueues
+					.filter(queue => getRabbitQueueDepth(queue) >= backlogThreshold)
+					.map(queue => [queue.name, getRabbitQueueDepth(queue)] as const)
+			);
+			for (const expectation of queueExpectations) {
+				if (!expectation.alertOnAnyMessage) continue;
+				const queue = queuesByName.get(expectation.name);
+				if (!queue) continue;
+				const depth = getRabbitQueueDepth(queue);
+				if (depth > 0) backloggedQueueDepths.set(queue.name, depth);
+			}
+			const backloggedQueues = [...backloggedQueueDepths].map(
+				([queue, depth]) => `${queue}=${depth}`
+			);
 			const queuedMessages = messagingQueues.reduce(
-				(total, queue) => total + queue.messages,
+				(total, queue) => total + getRabbitQueueDepth(queue),
 				0
 			);
 			const getQueueMessages = (
@@ -329,7 +366,7 @@ export class MessagingOperationalAlertService
 							);
 						})
 					)
-					.reduce((total, queue) => total + queue.messages, 0);
+					.reduce((total, queue) => total + getRabbitQueueDepth(queue), 0);
 
 			const serviceStates = Object.fromEntries(
 				REQUIRED_SERVICES.map(service => {
@@ -521,6 +558,7 @@ export class MessagingOperationalAlertService
 				...(queueResult.error ? [`queues=${queueResult.error}`] : []),
 				...missingQueues.map(queue => `missing=${queue}`),
 				...consumerlessQueues.map(queue => `consumers=0:${queue}`),
+				...unexpectedlyConsumedQueues.map(queue => `consumers>0:${queue}`),
 				...stoppedQueues.map(queue => `state:${queue}`),
 				...backloggedQueues.map(queue => `backlog:${queue}`),
 				...brokerProblems
@@ -546,6 +584,7 @@ export class MessagingOperationalAlertService
 						queueResult.error || '',
 						...missingQueues,
 						...consumerlessQueues,
+						...unexpectedlyConsumedQueues,
 						...stoppedQueues,
 						...backloggedQueues,
 						...brokerProblems
