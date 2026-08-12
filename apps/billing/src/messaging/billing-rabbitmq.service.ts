@@ -50,9 +50,15 @@ export class BillingRabbitMqService
 		BillingConsumerKind,
 		ConsumerRegistration
 	>();
+	private readonly topologySetups = new WeakMap<
+		ConfirmChannel,
+		Promise<void>
+	>();
 	private readonly returnedPublications = new Map<string, Error | null>();
 	private connection: AmqpConnectionManager | null = null;
 	private channel: ChannelWrapper | null = null;
+	private currentTopologySetup: Promise<void> | null = null;
+	private assertTopologyEnabled = false;
 	private topologyReady = false;
 	private stopping = false;
 	private maxMessageBytes = 256 * 1024;
@@ -92,6 +98,7 @@ export class BillingRabbitMqService
 				`RABBITMQ_ASSERT_TOPOLOGY must be ${this.runtime.workerEnabled} for role ${this.runtime.role}`
 			);
 		}
+		this.assertTopologyEnabled = assertTopology;
 		this.connection = connect([url], {
 			heartbeatIntervalInSeconds: 10,
 			reconnectTimeInSeconds: 5,
@@ -109,17 +116,10 @@ export class BillingRabbitMqService
 			name: `winwidget-billing-${this.runtime.role}`,
 			confirm: true,
 			publishTimeout: 15_000,
-			setup: async (channel: ConfirmChannel) => {
-				this.topologyReady = false;
-				this.registerReturnHandler(channel);
-				if (assertTopology) {
-					await this.assertWorkerTopology(channel);
-				}
-				this.topologyReady = true;
-			}
+			setup: (channel: ConfirmChannel) => this.ensureTopologySetup(channel)
 		});
 		await this.connection.connect({ timeout: 15_000 });
-		await this.channel.waitForConnect();
+		await this.waitForConnectedTopology();
 	}
 
 	isConnected(): boolean {
@@ -184,12 +184,15 @@ export class BillingRabbitMqService
 		prefetch = 10
 	): Promise<void> {
 		if (!this.channel) throw new Error('RabbitMQ consumer is disabled');
+		await this.waitForConnectedTopology();
+		const wrapper = this.channel;
 		const registration: ConsumerRegistration = {
 			channel: null,
 			consumerTag: null,
 			setup: async (channel: ConfirmChannel) => {
 				registration.channel = channel;
 				registration.consumerTag = null;
+				await this.ensureTopologySetup(channel);
 				await channel.prefetch(prefetch, false);
 				const consumer = await channel.consume(
 					BILLING_QUEUE_NAMES[kind],
@@ -209,7 +212,15 @@ export class BillingRabbitMqService
 			}
 		};
 		this.registrations.set(kind, registration);
-		await this.channel.addSetup(registration.setup);
+		try {
+			await wrapper.addSetup(registration.setup);
+		} catch (error) {
+			if (this.registrations.get(kind) === registration) {
+				this.registrations.delete(kind);
+			}
+			await wrapper.removeSetup(registration.setup).catch(() => undefined);
+			throw error;
+		}
 	}
 
 	ack(message: ConsumeMessage): void {
@@ -289,6 +300,33 @@ export class BillingRabbitMqService
 				);
 			}
 		}
+	}
+
+	private ensureTopologySetup(channel: ConfirmChannel): Promise<void> {
+		const existing = this.topologySetups.get(channel);
+		if (existing) return existing;
+		const setup = this.setupTopology(channel);
+		this.topologySetups.set(channel, setup);
+		this.currentTopologySetup = setup;
+		return setup;
+	}
+
+	private async setupTopology(channel: ConfirmChannel): Promise<void> {
+		this.topologyReady = false;
+		this.registerReturnHandler(channel);
+		if (this.assertTopologyEnabled) {
+			await this.assertWorkerTopology(channel);
+		}
+		this.topologyReady = true;
+	}
+
+	private async waitForConnectedTopology(): Promise<void> {
+		if (!this.channel)
+			throw new Error('RabbitMQ channel is not initialized');
+		await this.channel.waitForConnect();
+		const setup = this.currentTopologySetup;
+		if (!setup) throw new Error('RabbitMQ topology setup did not start');
+		await setup;
 	}
 
 	private registerReturnHandler(channel: ConfirmChannel): void {
