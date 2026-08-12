@@ -49,7 +49,7 @@ export class BillingAuthGuard implements CanActivate {
 
 	private requireAuthorization(value: string | undefined): string {
 		if (!value) {
-			throw new UnauthorizedException('Access token not passed');
+			throw new UnauthorizedException();
 		}
 		const parts = value.split(' ');
 		if (

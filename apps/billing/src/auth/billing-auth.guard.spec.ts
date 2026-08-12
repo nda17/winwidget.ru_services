@@ -17,21 +17,33 @@ describe('BillingAuthGuard', () => {
 			getClass: () => 'controller'
 		}) as unknown as ExecutionContext;
 
-	it('rejects absent and malformed bearer tokens before introspection', async () => {
+	it('preserves the legacy absent and malformed bearer errors', async () => {
 		const reflector = {
 			getAllAndOverride: jest.fn().mockReturnValue([])
 		};
 		const core = { introspect: jest.fn() };
 		const guard = new BillingAuthGuard(reflector as never, core as never);
 
-		await expect(
-			guard.canActivate(context({ headers: {} }))
-		).rejects.toBeInstanceOf(UnauthorizedException);
-		await expect(
-			guard.canActivate(
+		const absent = await guard
+			.canActivate(context({ headers: {} }))
+			.catch(value => value);
+		expect(absent).toBeInstanceOf(UnauthorizedException);
+		expect(absent.getResponse()).toEqual({
+			message: 'Unauthorized',
+			statusCode: 401
+		});
+
+		const malformed = await guard
+			.canActivate(
 				context({ headers: { authorization: 'bearer invalid' } })
 			)
-		).rejects.toBeInstanceOf(UnauthorizedException);
+			.catch(value => value);
+		expect(malformed).toBeInstanceOf(UnauthorizedException);
+		expect(malformed.getResponse()).toEqual({
+			message: 'Invalid access token',
+			error: 'Unauthorized',
+			statusCode: 401
+		});
 		expect(core.introspect).not.toHaveBeenCalled();
 	});
 
