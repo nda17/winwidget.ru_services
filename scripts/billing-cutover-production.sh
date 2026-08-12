@@ -24,6 +24,7 @@ billing_core_activation_evidence="$billing_artifact_root/core-activation.json"
 billing_service_activation_evidence="$billing_artifact_root/billing-activation.json"
 billing_completion_evidence="$billing_artifact_root/billing-completion.json"
 billing_core_status_evidence="$billing_artifact_root/core-status.json"
+billing_core_bootstrap_status_evidence="$billing_artifact_root/core-bootstrap-status.json"
 billing_route_manifest="$billing_artifact_root/gateway-routes-billing.json"
 billing_route_env_legacy_snapshot="$billing_artifact_root/backend-env-before-billing-routes"
 billing_route_env_candidate="$billing_artifact_root/backend-env-with-billing-routes.candidate"
@@ -2808,6 +2809,128 @@ billing_cutover_update_phase() {
 		"$post_restore_sha" "$post_receipt_sha"
 }
 
+billing_cutover_increment_generation() {
+	[[ $# -eq 1 && "$1" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+	node - "$1" <<'NODE'
+const value = BigInt(process.argv[2]);
+const postgresBigintMax = 9223372036854775807n;
+if (value < 0n || value >= postgresBigintMax) process.exit(1);
+process.stdout.write((value + 1n).toString());
+NODE
+}
+
+billing_cutover_validate_bootstrap_core_status() {
+	[[ $# -eq 3 && "$2" =~ ^(next|persisted)$ ]] || return 1
+	local evidence="$1" mode="$2" expected_generation="$3"
+	billing_cutover_validate_evidence_file "$evidence" || return 1
+	if [[ "$mode" == 'next' ]]; then
+		[[ -z "$expected_generation" ]] || return 1
+	else
+		[[ "$expected_generation" =~ ^[1-9][0-9]*$ ]] || return 1
+	fi
+	EXPECTED_REVISION="$EXPECTED_REVISION" VALIDATION_MODE="$mode" \
+	EXPECTED_GENERATION="$expected_generation" node - "$evidence" <<'NODE'
+const fs = require('node:fs');
+const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const exactKeys = (value, expected) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  return actual.length === sorted.length &&
+    actual.every((key, index) => key === sorted[index]);
+};
+const decimal = value => typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value);
+const topLevelKeys = [
+  'schemaVersion', 'action', 'revision', 'generation', 'observedAt', 'coreState',
+];
+const stateKeys = [
+  'id', 'ownership', 'sourceProducersEnabled', 'legacyRoutesEnabled',
+  'schedulerEnabled', 'legacyConsumerEnabled', 'projectionConsumerEnabled',
+  'generation', 'preparedRevision', 'ownershipRevision', 'activatedAt',
+  'updatedAt',
+];
+const state = document?.coreState;
+if (
+  !exactKeys(document, topLevelKeys) || document.schemaVersion !== 1 ||
+  document.action !== 'status' || !decimal(document.generation) ||
+  !exactKeys(state, stateKeys) || state.id !== 'singleton' ||
+  state.ownership !== 'CORE' || state.sourceProducersEnabled !== true ||
+  state.legacyRoutesEnabled !== true || state.schedulerEnabled !== true ||
+  state.legacyConsumerEnabled !== true ||
+  state.projectionConsumerEnabled !== true ||
+  state.generation !== document.generation ||
+  !Number.isFinite(Date.parse(document.observedAt)) ||
+  !Number.isFinite(Date.parse(state.updatedAt))
+) process.exit(1);
+
+const generation = BigInt(state.generation);
+const max = 9223372036854775807n;
+const unbound = document.revision === null &&
+  state.preparedRevision === null && state.ownershipRevision === null &&
+  state.activatedAt === null;
+if (process.env.VALIDATION_MODE === 'next') {
+  if (!unbound || generation >= max) process.exit(1);
+  process.stdout.write((generation + 1n).toString());
+  process.exit(0);
+}
+
+const expected = BigInt(process.env.EXPECTED_GENERATION);
+const prepared = document.revision === process.env.EXPECTED_REVISION &&
+  state.preparedRevision === process.env.EXPECTED_REVISION &&
+  state.ownershipRevision === null && state.activatedAt === null &&
+  generation === expected;
+if (!prepared && !(unbound && generation < max && generation + 1n === expected)) {
+  process.exit(1);
+}
+NODE
+}
+
+billing_cutover_capture_bootstrap_core_status() {
+	billing_cutover_run_core_cli status \
+		"$billing_core_bootstrap_status_evidence" >/dev/null
+}
+
+billing_cutover_select_initial_generation() {
+	local migration_state
+	migration_state="$(billing_cutover_core_migration_state)" || return 1
+	case "$migration_state" in
+	pending) printf '1\n' ;;
+	applied)
+		billing_cutover_capture_bootstrap_core_status || return 1
+		billing_cutover_validate_bootstrap_core_status \
+			"$billing_core_bootstrap_status_evidence" next ''
+		;;
+	unfinished | unsafe)
+		billing_cutover_fail \
+			"Billing generation bootstrap requires manual Core migration reconciliation: state=$migration_state."
+		;;
+	*) billing_cutover_fail 'Billing generation bootstrap Core migration state is invalid.' ;;
+	esac
+}
+
+billing_cutover_validate_persisted_generation() {
+	[[ $# -eq 1 && "$1" =~ ^[1-9][0-9]*$ ]] || return 1
+	local generation="$1" migration_state
+	migration_state="$(billing_cutover_core_migration_state)" || return 1
+	case "$migration_state" in
+	pending)
+		[[ "$generation" == '1' ]] ||
+			billing_cutover_fail \
+				'Pending Billing Core migration requires initial generation=1.'
+		;;
+	applied)
+		billing_cutover_capture_bootstrap_core_status || return 1
+		billing_cutover_validate_bootstrap_core_status \
+			"$billing_core_bootstrap_status_evidence" persisted "$generation"
+		;;
+	unfinished | unsafe)
+		billing_cutover_fail \
+			"Persisted Billing generation requires manual Core migration reconciliation: state=$migration_state."
+		;;
+	*) billing_cutover_fail 'Persisted Billing generation Core migration state is invalid.' ;;
+	esac
+}
+
 billing_cutover_initialize_marker() {
 	local phase database_id marker_phase generation
 	phase="$(billing_database_current_phase)" || return 1
@@ -2836,7 +2959,11 @@ billing_cutover_initialize_marker() {
 		generation="$(billing_cutover_marker_value generation)"
 		if [[ "$marker_phase" == 'aborted' ]]; then
 			billing_cutover_archive_aborted_generation "$generation"
-			generation="$((generation + 1))"
+			generation="$(billing_cutover_increment_generation "$generation")" ||
+				return 1
+		else
+			billing_cutover_validate_persisted_generation "$generation" ||
+				return 1
 		fi
 		billing_cutover_write_marker prepared "$EXPECTED_REVISION" \
 			"$(billing_cutover_marker_value cleanup_revision)" \
@@ -2845,12 +2972,23 @@ billing_cutover_initialize_marker() {
 			"$billing_cutover_billing_image_id" \
 			pending pending pending pending pending pending pending
 	else
-		billing_cutover_write_marker prepared "$EXPECTED_REVISION" pending 1 \
+		[[ "$(billing_database_marker_value switch_generation)" == '0' ]] ||
+			billing_cutover_fail \
+				'Absent Billing cutover marker requires an unbound database generation.' ||
+			return 1
+		generation="$(billing_cutover_select_initial_generation)" || return 1
+		billing_cutover_write_marker prepared "$EXPECTED_REVISION" pending \
+			"$generation" \
 			"$database_id" "$billing_cutover_core_image_id" \
 			"$billing_cutover_billing_image_id" \
 			pending pending pending pending pending pending pending
 	fi
-	billing_cutover_update_phase prepared pending pending pending
+	# Re-read Core after the durable marker write. A crash before this check is
+	# idempotently recovered through the existing-marker branch; concurrent or
+	# foreign Core binding remains fail-closed.
+	billing_cutover_validate_persisted_generation "$generation" || return 1
+	billing_cutover_update_phase prepared pending pending pending || return 1
+	billing_cutover_validate_persisted_generation "$generation"
 }
 
 billing_cutover_reconcile_marker() {
@@ -3788,6 +3926,9 @@ billing_cutover_reprepare_identity_self_test() (
 	billing_cutover_archive_aborted_generation() {
 		archived_generation="$1"
 	}
+	billing_cutover_validate_persisted_generation() {
+		[[ "$1" == '4' ]]
+	}
 	billing_cutover_write_marker() {
 		written_identity="$1|$4|$5"
 	}
@@ -3805,6 +3946,210 @@ billing_cutover_reprepare_identity_self_test() (
 	if billing_cutover_initialize_marker; then return 1; fi
 	[[ -z "$archived_generation" ]]
 	rm -f -- "$billing_cutover_marker"
+	rmdir -- "$directory"
+)
+
+billing_cutover_bootstrap_generation_self_test() (
+	local directory test_migration_state core_generation core_ownership
+	local prepared_revision ownership_revision activated_at
+	local source_producers legacy_routes scheduler legacy_consumer projection_consumer
+	local written_generation='' updated='false' capture_count_file
+	local marker_write_drift='none'
+	directory="$(mktemp -d /tmp/billing-bootstrap-generation-self-test.XXXXXX)"
+	billing_cutover_marker="$directory/marker"
+	billing_core_bootstrap_status_evidence="$directory/core-status.json"
+	capture_count_file="$directory/capture-count"
+	printf '0\n' >"$capture_count_file"
+	EXPECTED_REVISION="$(printf 'a%.0s' {1..40})"
+	billing_cutover_core_image_id="sha256:$(printf 'b%.0s' {1..64})"
+	billing_cutover_billing_image_id="sha256:$(printf 'c%.0s' {1..64})"
+	test_migration_state='applied'
+	core_generation='1'
+	core_ownership='CORE'
+	prepared_revision=''
+	ownership_revision=''
+	activated_at=''
+	source_producers='true'
+	legacy_routes='true'
+	scheduler='true'
+	legacy_consumer='true'
+	projection_consumer='true'
+	billing_database_current_phase() { printf 'prepared\n'; }
+	billing_database_marker_value() {
+		case "$1" in
+		database_id) printf '11111111-1111-4111-8111-111111111111\n' ;;
+		switch_generation) printf '0\n' ;;
+		*) return 1 ;;
+		esac
+	}
+	billing_cutover_core_migration_state() {
+		printf '%s\n' "$test_migration_state"
+	}
+	billing_cutover_validate_evidence_file() {
+		[[ -f "$1" && ! -L "$1" && -s "$1" ]]
+	}
+	billing_cutover_run_core_cli() {
+		local capture_count
+		[[ $# -eq 2 && "$1" == 'status' &&
+			"$2" == "$billing_core_bootstrap_status_evidence" ]] || return 1
+		capture_count="$(<"$capture_count_file")"
+		[[ "$capture_count" =~ ^[0-9]+$ ]] || return 1
+		printf '%s\n' "$((capture_count + 1))" >"$capture_count_file"
+		CORE_GENERATION="$core_generation" CORE_OWNERSHIP="$core_ownership" \
+		PREPARED_REVISION="$prepared_revision" \
+		OWNERSHIP_REVISION="$ownership_revision" ACTIVATED_AT="$activated_at" \
+		SOURCE_PRODUCERS="$source_producers" LEGACY_ROUTES="$legacy_routes" \
+		SCHEDULER="$scheduler" LEGACY_CONSUMER="$legacy_consumer" \
+		PROJECTION_CONSUMER="$projection_consumer" node - "$2" <<'NODE'
+const fs = require('node:fs');
+const nullable = value => value === '' ? null : value;
+const preparedRevision = nullable(process.env.PREPARED_REVISION);
+const ownershipRevision = nullable(process.env.OWNERSHIP_REVISION);
+const activatedAt = nullable(process.env.ACTIVATED_AT);
+const revision = ownershipRevision ?? preparedRevision;
+const boolean = value => value === 'true';
+const observedAt = '2026-08-12T00:00:00.000Z';
+fs.writeFileSync(process.argv[2], `${JSON.stringify({
+  schemaVersion: 1,
+  action: 'status',
+  revision,
+  generation: process.env.CORE_GENERATION,
+  observedAt,
+  coreState: {
+    id: 'singleton',
+    ownership: process.env.CORE_OWNERSHIP,
+    sourceProducersEnabled: boolean(process.env.SOURCE_PRODUCERS),
+    legacyRoutesEnabled: boolean(process.env.LEGACY_ROUTES),
+    schedulerEnabled: boolean(process.env.SCHEDULER),
+    legacyConsumerEnabled: boolean(process.env.LEGACY_CONSUMER),
+    projectionConsumerEnabled: boolean(process.env.PROJECTION_CONSUMER),
+    generation: process.env.CORE_GENERATION,
+    preparedRevision,
+    ownershipRevision,
+    activatedAt,
+    updatedAt: observedAt,
+  },
+})}\n`);
+NODE
+	}
+	billing_cutover_write_marker() {
+		[[ $# -eq 14 && "$1" == 'prepared' ]]
+		written_generation="$4"
+		if [[ "$marker_write_drift" == 'generation' ]]; then
+			core_generation="$(billing_cutover_increment_generation "$core_generation")"
+		elif [[ "$marker_write_drift" == 'foreign-prepare' ]]; then
+			core_generation="$4"
+			prepared_revision="$(printf 'd%.0s' {1..40})"
+		fi
+	}
+	billing_cutover_update_phase() {
+		[[ "$1|$2|$3|$4" == 'prepared|pending|pending|pending' ]]
+		updated='true'
+	}
+	billing_cutover_fail() { return 1; }
+
+	# An already-applied Core generation is monotonic and must advance exactly.
+	billing_cutover_initialize_marker || return 1
+	[[ "$written_generation" == '2' && "$updated" == 'true' &&
+		"$(<"$capture_count_file")" == '3' ]] || return 1
+
+	# Before the expand migration exists, the first generation remains one.
+	test_migration_state='pending'
+	written_generation=''
+	updated='false'
+	printf '0\n' >"$capture_count_file"
+	billing_cutover_initialize_marker || return 1
+	[[ "$written_generation" == '1' && "$updated" == 'true' &&
+		"$(<"$capture_count_file")" == '0' ]] || return 1
+
+	# A bound/active Core, a prepared Core, or any disabled legacy fence must
+	# never be rebound through an absent marker bootstrap.
+	test_migration_state='applied'
+	core_ownership='BILLING'
+	written_generation=''
+	updated='false'
+	if billing_cutover_initialize_marker; then return 1; fi
+	[[ -z "$written_generation" && "$updated" == 'false' ]] || return 1
+	core_ownership='CORE'
+	ownership_revision="$EXPECTED_REVISION"
+	if billing_cutover_initialize_marker; then return 1; fi
+	[[ -z "$written_generation" && "$updated" == 'false' ]] || return 1
+	ownership_revision=''
+	prepared_revision="$EXPECTED_REVISION"
+	if billing_cutover_initialize_marker; then return 1; fi
+	[[ -z "$written_generation" && "$updated" == 'false' ]] || return 1
+	prepared_revision=''
+	source_producers='false'
+	if billing_cutover_initialize_marker; then return 1; fi
+	[[ -z "$written_generation" && "$updated" == 'false' ]] || return 1
+	source_producers='true'
+
+	# Generation arithmetic must remain exact beyond Number.MAX_SAFE_INTEGER.
+	core_generation='9007199254740993'
+	printf '0\n' >"$capture_count_file"
+	billing_cutover_initialize_marker || return 1
+	[[ "$written_generation" == '9007199254740994' && "$updated" == 'true' &&
+		"$(<"$capture_count_file")" == '3' ]] || return 1
+	[[ "$(billing_cutover_increment_generation 9007199254740993)" == \
+		'9007199254740994' ]] || return 1
+	if billing_cutover_increment_generation 9223372036854775807 >/dev/null; then
+		return 1
+	fi
+
+	# A Core change between selection and the first durable marker validation
+	# must stop before the database marker is updated.
+	core_generation='1'
+	written_generation=''
+	updated='false'
+	marker_write_drift='generation'
+	printf '0\n' >"$capture_count_file"
+	if billing_cutover_initialize_marker; then return 1; fi
+	[[ "$written_generation" == '2' && "$updated" == 'false' &&
+		"$(<"$capture_count_file")" == '2' ]] || return 1
+	marker_write_drift='foreign-prepare'
+	core_generation='1'
+	written_generation=''
+	printf '0\n' >"$capture_count_file"
+	if billing_cutover_initialize_marker; then return 1; fi
+	[[ "$written_generation" == '2' && "$updated" == 'false' &&
+		"$(<"$capture_count_file")" == '2' ]] || return 1
+	marker_write_drift='none'
+	prepared_revision=''
+
+	# A marker written before a crash is reusable only while Core still has the
+	# exact unbound predecessor generation.
+	: >"$billing_cutover_marker"
+	core_generation='1'
+	written_generation=''
+	updated='false'
+	printf '0\n' >"$capture_count_file"
+	billing_cutover_validate_marker() { return 0; }
+	billing_cutover_marker_value() {
+		case "$1" in
+		phase) printf 'prepared\n' ;;
+		revision) printf '%s\n' "$EXPECTED_REVISION" ;;
+		database_id) printf '11111111-1111-4111-8111-111111111111\n' ;;
+		generation) printf '2\n' ;;
+		cleanup_revision) printf 'pending\n' ;;
+		*) return 1 ;;
+		esac
+	}
+	billing_cutover_initialize_marker || return 1
+	[[ "$written_generation" == '2' && "$updated" == 'true' &&
+		"$(<"$capture_count_file")" == '3' ]] || return 1
+
+	# A retry after Core prepare accepts only the same revision and generation.
+	core_generation='2'
+	prepared_revision="$EXPECTED_REVISION"
+	written_generation=''
+	updated='false'
+	printf '0\n' >"$capture_count_file"
+	billing_cutover_initialize_marker || return 1
+	[[ "$written_generation" == '2' && "$updated" == 'true' &&
+		"$(<"$capture_count_file")" == '3' ]] || return 1
+
+	rm -f -- "$billing_cutover_marker" "$billing_core_bootstrap_status_evidence" \
+		"$capture_count_file"
 	rmdir -- "$directory"
 )
 
@@ -4208,6 +4553,7 @@ ordered([
 	billing_cutover_route_rollback_self_test || return 1
 	billing_cutover_partial_recovery_self_test || return 1
 	billing_cutover_reprepare_identity_self_test || return 1
+	billing_cutover_bootstrap_generation_self_test || return 1
 	printf 'billing_cutover_self_test=passed\n'
 }
 

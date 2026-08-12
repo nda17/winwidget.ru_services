@@ -30,31 +30,14 @@ import {
 
 const PAID_PLANS = [Plan.EASY, Plan.HARD] as const;
 const PERIODS = [BillingPeriod.MONTHLY, BillingPeriod.YEARLY] as const;
-const DEFAULTS: Record<'EASY' | 'HARD', Record<BillingPeriod, number>> = {
-	EASY: { MONTHLY: 990, YEARLY: 4680 },
-	HARD: { MONTHLY: 1690, YEARLY: 9480 }
-};
 
 @Injectable()
 export class TariffAffiliateService {
 	constructor(private readonly prisma: BillingPrismaService) {}
 
 	async tariffPrices() {
-		await Promise.all(
-			PAID_PLANS.flatMap(plan =>
-				PERIODS.map(billingPeriod =>
-					this.prisma.tariffPrice.upsert({
-						where: { plan_billingPeriod: { plan, billingPeriod } },
-						create: {
-							plan,
-							billingPeriod,
-							amount: DEFAULTS[plan][billingPeriod]
-						},
-						update: {}
-					})
-				)
-			)
-		);
+		// This public read is exercised while the isolated import target is empty.
+		// Return only truthful persisted DTOs so the later snapshot import stays valid.
 		return this.prisma.tariffPrice.findMany({
 			where: { plan: { in: [...PAID_PLANS] } },
 			orderBy: [{ plan: 'asc' }, { billingPeriod: 'asc' }]
@@ -199,10 +182,17 @@ export class TariffAffiliateService {
 	}
 
 	async affiliateSettings() {
-		const settings = await this.settings();
+		// Keep the pre-import public contract read-only for the same reason as prices.
+		const settings = await this.prisma.billingSettings.findUnique({
+			where: { id: 'singleton' },
+			select: {
+				affiliateProgramEnabled: true,
+				affiliateCashbackPercent: true
+			}
+		});
 		return {
-			enabled: settings.affiliateProgramEnabled,
-			cashbackPercent: settings.affiliateCashbackPercent
+			enabled: settings?.affiliateProgramEnabled ?? false,
+			cashbackPercent: settings?.affiliateCashbackPercent ?? 10
 		};
 	}
 

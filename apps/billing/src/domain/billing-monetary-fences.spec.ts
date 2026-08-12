@@ -16,6 +16,104 @@ import { SubscriptionDomainService } from './subscription-domain.service';
 import { TariffAffiliateService } from './tariff-affiliate.service';
 
 describe('Billing monetary operation fences', () => {
+	it('keeps an empty import target empty during public Billing reads', async () => {
+		const tariffMutations = {
+			create: jest.fn(),
+			update: jest.fn(),
+			upsert: jest.fn()
+		};
+		const settingsMutations = {
+			create: jest.fn(),
+			update: jest.fn(),
+			upsert: jest.fn()
+		};
+		const prisma = {
+			tariffPrice: {
+				findMany: jest.fn().mockResolvedValue([]),
+				...tariffMutations
+			},
+			billingSettings: {
+				findUnique: jest.fn().mockResolvedValue(null),
+				...settingsMutations
+			}
+		};
+		const service = new TariffAffiliateService(prisma as never);
+
+		await expect(service.tariffPrices()).resolves.toEqual([]);
+		await expect(service.affiliateSettings()).resolves.toEqual({
+			enabled: false,
+			cashbackPercent: 10
+		});
+
+		expect(prisma.tariffPrice.findMany).toHaveBeenCalledWith({
+			where: { plan: { in: [Plan.EASY, Plan.HARD] } },
+			orderBy: [{ plan: 'asc' }, { billingPeriod: 'asc' }]
+		});
+		expect(prisma.billingSettings.findUnique).toHaveBeenCalledWith({
+			where: { id: 'singleton' },
+			select: {
+				affiliateProgramEnabled: true,
+				affiliateCashbackPercent: true
+			}
+		});
+		for (const mutation of [
+			...Object.values(tariffMutations),
+			...Object.values(settingsMutations)
+		]) {
+			expect(mutation).not.toHaveBeenCalled();
+		}
+	});
+
+	it('returns persisted public Billing values without changing them', async () => {
+		const persistedPrices = [
+			{
+				id: 'price-easy-monthly',
+				plan: Plan.EASY,
+				billingPeriod: BillingPeriod.MONTHLY,
+				amount: 1090,
+				createdAt: new Date('2026-08-01T00:00:00.000Z'),
+				updatedAt: new Date('2026-08-11T00:00:00.000Z')
+			}
+		];
+		const settings = {
+			affiliateProgramEnabled: true,
+			affiliateCashbackPercent: 27
+		};
+		const tariffMutations = {
+			create: jest.fn(),
+			update: jest.fn(),
+			upsert: jest.fn()
+		};
+		const settingsMutations = {
+			create: jest.fn(),
+			update: jest.fn(),
+			upsert: jest.fn()
+		};
+		const prisma = {
+			tariffPrice: {
+				findMany: jest.fn().mockResolvedValue(persistedPrices),
+				...tariffMutations
+			},
+			billingSettings: {
+				findUnique: jest.fn().mockResolvedValue(settings),
+				...settingsMutations
+			}
+		};
+		const service = new TariffAffiliateService(prisma as never);
+
+		await expect(service.tariffPrices()).resolves.toEqual(persistedPrices);
+		await expect(service.affiliateSettings()).resolves.toEqual({
+			enabled: true,
+			cashbackPercent: 27
+		});
+		for (const mutation of [
+			...Object.values(tariffMutations),
+			...Object.values(settingsMutations)
+		]) {
+			expect(mutation).not.toHaveBeenCalled();
+		}
+	});
+
 	it('blocks identity deactivation while an expired provider lease remains ambiguous', async () => {
 		const transaction = {
 			$queryRaw: jest.fn().mockResolvedValue([]),
