@@ -207,7 +207,8 @@ self_test() {
 
 rehearse_migration() {
 	local port database_url approved_database_url bootstrap_url migrations_root
-	local migration_directory marker_sha legacy_options present_count
+	local migration_directory migration_name marker_sha legacy_options present_count
+	local prefix_migration_count=0
 	assert_local_docker
 	[[ -z "$(docker ps -aq --filter "name=^/${CONTAINER}$")" ]] || fail 'rehearsal container already exists'
 	[[ -z "$(docker volume ls -q --filter "name=^${VOLUME}$")" ]] || fail 'rehearsal volume already exists'
@@ -242,11 +243,24 @@ rehearse_migration() {
 	cp "$SOURCE_ROOT/prisma/schema.prisma" "$migrations_root/schema.prisma"
 	for migration_directory in "$SOURCE_ROOT"/prisma/migrations/*; do
 		[[ -d "$migration_directory" ]] || continue
-		[[ "$(basename -- "$migration_directory")" == "$MIGRATION_NAME" ]] && continue
+		migration_name="$(basename -- "$migration_directory")"
+		[[ "$migration_name" =~ ^[0-9]{14}_[a-z0-9_]+$ ]] ||
+			fail 'tracked migration directory name is invalid'
+		[[ "$migration_name" < "$MIGRATION_NAME" ]] || continue
 		cp -R "$migration_directory" "$migrations_root/migrations/"
+		prefix_migration_count=$((prefix_migration_count + 1))
 	done
 	DATABASE_URL="$database_url" pnpm exec prisma migrate deploy \
 		--schema "$migrations_root/schema.prisma"
+	[[ "$(query "SELECT count(*) FROM public.\"_prisma_migrations\"
+WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL;")" == "$prefix_migration_count" ]] ||
+		fail 'historical Widgets migration prefix ledger is incomplete'
+	[[ "$(query "SELECT count(*) FROM public.\"_prisma_migrations\"
+WHERE migration_name >= '$MIGRATION_NAME';")" == '0' ]] ||
+		fail 'historical Widgets baseline contains a target or later migration'
+	[[ "$(query "SELECT count(*) FROM unnest(ARRAY['payments','subscriptions']) AS required(name)
+WHERE to_regclass(format('public.%I', name)) IS NOT NULL;")" == '2' ]] ||
+		fail 'historical Widgets baseline lost a later cleanup dependency'
 	query "
 DO \$\$
 BEGIN
@@ -337,8 +351,9 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO winwidget_backup;
 	approved_database_url="$(widgets_core_source_cleanup_migration_url \
 		"$database_url" 1 "$marker_sha" "$marker_sha" "$marker_sha" "$marker_sha")" ||
 		fail 'cleanup migration URL could not be built'
+	cp -R "$SOURCE_ROOT/prisma/migrations/$MIGRATION_NAME" "$migrations_root/migrations/"
 	if ! DATABASE_URL="$approved_database_url" pnpm exec prisma migrate deploy \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma"; then
+		--schema "$migrations_root/schema.prisma"; then
 		docker logs "$CONTAINER" 2>&1 |
 			awk '/ERROR:|DETAIL:|CONTEXT:/' |
 			tail -n 20 >&2 || true
@@ -354,8 +369,16 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO winwidget_backup;
 		fail 'approved cleanup did not remove exactly the legacy source'
 	[[ "$(query "SELECT count(*) FROM public.\"User\" WHERE id = 'widgets-cleanup-rehearsal-user';")" == '1' ]] ||
 		fail 'approved cleanup changed unrelated Core data'
+	[[ "$(query "SELECT count(*) FROM public.\"_prisma_migrations\"
+WHERE migration_name = '$MIGRATION_NAME'
+  AND checksum = '$(sha256_file "$SOURCE_ROOT/prisma/migrations/$MIGRATION_NAME/migration.sql")'
+  AND finished_at IS NOT NULL AND rolled_back_at IS NULL;")" == '1' ]] ||
+		fail 'approved cleanup did not record the exact Widgets migration'
+	[[ "$(query "SELECT count(*) FROM public.\"_prisma_migrations\"
+WHERE migration_name > '$MIGRATION_NAME';")" == '0' ]] ||
+		fail 'populated Widgets rehearsal applied a later migration'
 	DATABASE_URL="$database_url" pnpm exec prisma migrate deploy \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
+		--schema "$migrations_root/schema.prisma" >/dev/null
 	docker exec -e "PGPASSWORD=$ADMIN_PASSWORD" "$CONTAINER" \
 		createdb --username "$ADMIN_USER" clean_bootstrap
 	bootstrap_url="postgresql://$ADMIN_USER:$ADMIN_PASSWORD@127.0.0.1:$port/clean_bootstrap?schema=public&sslmode=disable&options=$legacy_options"
