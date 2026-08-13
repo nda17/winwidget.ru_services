@@ -5717,6 +5717,38 @@ jobs:
                 bash scripts/notification-delivery-database-lifecycle.sh --self-test
               bash scripts/audit-legacy-telegram-channels-production.sh --self-test
             '
+          retarget_marker_rewrite_fixture() {
+            [[ $# -eq 1 ]] || return 1
+            awk -F= -v next_revision="$1" '
+              $1 == "cleanup_revision" { print "cleanup_revision=" next_revision; found += 1; next }
+              { print }
+              END { exit(found == 1 ? 0 : 1) }
+            '
+          }
+          retarget_fixture_revision='cccccccccccccccccccccccccccccccccccccccc'
+          retarget_fixture_output="$(retarget_marker_rewrite_fixture \
+            "$retarget_fixture_revision" <<'EOF'
+          version=1
+          cleanup_revision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          generation=2
+          EOF
+          )"
+          [[ "$retarget_fixture_output" == $'version=1\ncleanup_revision=cccccccccccccccccccccccccccccccccccccccc\ngeneration=2' ]]
+          if retarget_marker_rewrite_fixture "$retarget_fixture_revision" >/dev/null <<'EOF'; then
+          cleanup_revision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          cleanup_revision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          EOF
+            echo 'Retarget marker rewrite accepted duplicate cleanup_revision fields.' >&2
+            exit 1
+          fi
+          if retarget_marker_rewrite_fixture "$retarget_fixture_revision" >/dev/null <<'EOF'; then
+          version=1
+          generation=2
+          EOF
+            echo 'Retarget marker rewrite accepted a missing cleanup_revision field.' >&2
+            exit 1
+          fi
+
           node <<'NODE'
           const { createHash } = require("node:crypto");
           const { readFileSync } = require("node:fs");
@@ -6017,6 +6049,11 @@ jobs:
             "state=%s",
             "mv -fT",
             "retarget_marker_contract_sha256",
+            "write_prepared_retarget_receipt",
+            "Billing cleanup retarget may rebind only an intact prepared receipt before either parent marker changes.",
+            '"$receipt_next_revision" "$next_cleanup_revision"',
+            '"$receipt_next_revision:prisma/migrations"',
+            "Billing cleanup retarget cannot replace a candidate with imported offsite receipts.",
             '"$receipt_state" =~ ^(prepared|ready)$',
           ]) {
             if (!retargetFunction.includes(requiredRetargetToken)) {
@@ -6024,6 +6061,18 @@ jobs:
                 `Billing cleanup retarget lost ${requiredRetargetToken}`,
               );
             }
+          }
+          if (
+            retargetFunction.split(
+              '-v next_revision="$next_cleanup_revision"',
+            ).length -
+              1 !==
+              2 ||
+            retargetFunction.includes('-v next="$next_cleanup_revision"')
+          ) {
+            throw new Error(
+              "Billing cleanup retarget must not use the gawk next builtin as a variable name",
+            );
           }
           requireCount(
             "retarget:'RETARGET BILLING CLEANUP REVISION') ;;",
@@ -6084,13 +6133,18 @@ jobs:
           const databaseMarkerWrite = retargetFunction.indexOf(
             'mv -fT "$database_temporary" "$database_marker"',
           );
+          const preparedReceiptRebind = retargetFunction.indexOf(
+            'write_prepared_retarget_receipt "$receipt_created_at"',
+          );
           if (
             cutoverMarkerWrite < 0 ||
             receiptReadyWrite <= cutoverMarkerWrite ||
-            databaseMarkerWrite <= receiptReadyWrite
+            databaseMarkerWrite <= receiptReadyWrite ||
+            preparedReceiptRebind < 0 ||
+            preparedReceiptRebind >= cutoverMarkerWrite
           ) {
             throw new Error(
-              "Billing cleanup retarget must commit cutover marker, ready receipt, then database marker",
+              "Billing cleanup retarget must rebind only prepared evidence before committing cutover marker, ready receipt, then database marker",
             );
           }
           const retargetCheckoutStart = deployJob.indexOf(
@@ -8825,6 +8879,7 @@ jobs:
             local image_revision container_revision app_revision state health all_container_ids
             local database_temporary cutover_temporary checkout_revision docker_path
             local database_contract_sha256 cutover_contract_sha256 root_receipt
+            local receipt_next_revision receipt_created_at
             local ENV_FILE="$APP_ROOT/deploy/backend/.env.production"
             local COMPOSE_FILE="$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml"
             local database_marker="$APP_ROOT/deploy/backend/.billing-database-lifecycle-v1"
@@ -9092,6 +9147,47 @@ jobs:
 
             receipt="$APP_ROOT/deploy/backend/.billing-cleanup-retarget-v1"
             receipt_temporary="$APP_ROOT/deploy/backend/.billing-cleanup-retarget-v1.$$"
+            retarget_receipt_value() {
+              [[ $# -eq 1 ]] || return 1
+              awk -F= -v key="$1" '
+                $1 == key { print substr($0, index($0, "=") + 1); found += 1 }
+                END { exit(found == 1 ? 0 : 1) }
+              ' "$receipt"
+            }
+            retarget_receipt_has_exact_schema() {
+              [[ -f "$receipt" && ! -L "$receipt" &&
+                "$(stat -c '%u:%g:%a' "$receipt")" == '0:0:600' ]] || return 1
+              awk -F= '
+                {
+                  count[$1] += 1
+                  if ($1 !~ /^(version|state|ownership_revision|ownership_generation|previous_cleanup_revision|next_cleanup_revision|migration_blob|candidate_helper_blob|candidate_lifecycle_blob|database_contract_sha256|cutover_contract_sha256|created_at|updated_at)$/) invalid = 1
+                }
+                END {
+                  for (key in count) if (count[key] != 1) invalid = 1
+                  if (NR != 13) invalid = 1
+                  exit(invalid ? 1 : 0)
+                }
+              ' "$receipt"
+            }
+            write_prepared_retarget_receipt() {
+              [[ $# -eq 1 && "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+                ! -e "$receipt_temporary" && ! -L "$receipt_temporary" ]] || return 1
+              (umask 077; {
+                printf 'version=1\nstate=prepared\nownership_revision=%s\nownership_generation=2\n' \
+                  "$ownership_revision"
+                printf 'previous_cleanup_revision=%s\nnext_cleanup_revision=%s\n' \
+                  "$previous_cleanup_revision" "$next_cleanup_revision"
+                printf 'migration_blob=%s\ncandidate_helper_blob=%s\ncandidate_lifecycle_blob=%s\n' \
+                  "$migration_blob" "$helper_blob" "$lifecycle_blob"
+                printf 'database_contract_sha256=%s\ncutover_contract_sha256=%s\n' \
+                  "$database_contract_sha256" "$cutover_contract_sha256"
+                printf 'created_at=%s\nupdated_at=%s\n' \
+                  "$1" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              } >"$receipt_temporary")
+              chown 0:0 "$receipt_temporary"
+              chmod 600 "$receipt_temporary"
+              mv -fT "$receipt_temporary" "$receipt"
+            }
             retarget_marker_contract_sha256() {
               [[ $# -eq 1 && -f "$1" && ! -L "$1" ]] || return 1
               awk -F= '
@@ -9103,47 +9199,67 @@ jobs:
             cutover_contract_sha256="$(retarget_marker_contract_sha256 "$cutover_marker")" || return 1
             [[ ! -L "$receipt" && ! -e "$receipt_temporary" && ! -L "$receipt_temporary" ]] || return 1
             if [[ -e "$receipt" ]]; then
-              [[ -f "$receipt" && "$(stat -c '%u:%g:%a' "$receipt")" == '0:0:600' ]] || return 1
+              retarget_receipt_has_exact_schema || return 1
             else
               [[ "$database_state" == "$previous_cleanup_revision" &&
                 "$cutover_state" == "$previous_cleanup_revision" ]] || {
                 echo 'Billing cleanup retarget receipt is missing after a parent marker changed.' >&2
                 return 1
               }
-              (umask 077; {
-                printf 'version=1\nstate=prepared\nownership_revision=%s\nownership_generation=2\n' \
-                  "$ownership_revision"
-                printf 'previous_cleanup_revision=%s\nnext_cleanup_revision=%s\n' \
-                  "$previous_cleanup_revision" "$next_cleanup_revision"
-                printf 'migration_blob=%s\ncandidate_helper_blob=%s\ncandidate_lifecycle_blob=%s\n' \
-                  "$migration_blob" "$helper_blob" "$lifecycle_blob"
-                printf 'database_contract_sha256=%s\ncutover_contract_sha256=%s\n' \
-                  "$database_contract_sha256" "$cutover_contract_sha256"
-                printf 'created_at=%s\nupdated_at=%s\n' \
-                  "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-              } >"$receipt_temporary")
-              chown 0:0 "$receipt_temporary"
-              chmod 600 "$receipt_temporary"
-              mv -fT "$receipt_temporary" "$receipt"
+              write_prepared_retarget_receipt "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             fi
-            retarget_receipt_value() {
-              [[ $# -eq 1 ]] || return 1
-              awk -F= -v key="$1" '
-                $1 == key { print substr($0, index($0, "=") + 1); found += 1 }
-                END { exit(found == 1 ? 0 : 1) }
-              ' "$receipt"
-            }
-            [[ "$(awk -F= '
-                {
-                  count[$1] += 1
-                  if ($1 !~ /^(version|state|ownership_revision|ownership_generation|previous_cleanup_revision|next_cleanup_revision|migration_blob|candidate_helper_blob|candidate_lifecycle_blob|database_contract_sha256|cutover_contract_sha256|created_at|updated_at)$/) invalid = 1
+            receipt_next_revision="$(retarget_receipt_value next_cleanup_revision)" || return 1
+            if [[ "$receipt_next_revision" != "$next_cleanup_revision" ]]; then
+              receipt_created_at="$(retarget_receipt_value created_at)" || return 1
+              [[ "$database_state" == "$previous_cleanup_revision" &&
+                "$cutover_state" == "$previous_cleanup_revision" &&
+                "$(retarget_receipt_value version)" == '1' &&
+                "$(retarget_receipt_value state)" == 'prepared' &&
+                "$(retarget_receipt_value ownership_revision)" == "$ownership_revision" &&
+                "$(retarget_receipt_value ownership_generation)" == '2' &&
+                "$(retarget_receipt_value previous_cleanup_revision)" == "$previous_cleanup_revision" &&
+                "$receipt_next_revision" =~ ^[0-9a-f]{40}$ &&
+                "$receipt_next_revision" != "$previous_cleanup_revision" &&
+                "$(retarget_receipt_value migration_blob)" == "$migration_blob" &&
+                "$(retarget_receipt_value candidate_helper_blob)" == "$helper_blob" &&
+                "$(retarget_receipt_value candidate_lifecycle_blob)" == "$lifecycle_blob" &&
+                "$(retarget_receipt_value database_contract_sha256)" == "$database_contract_sha256" &&
+                "$(retarget_receipt_value cutover_contract_sha256)" == "$cutover_contract_sha256" &&
+                "$receipt_created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+                "$(retarget_receipt_value updated_at)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+                echo 'Billing cleanup retarget may rebind only an intact prepared receipt before either parent marker changes.' >&2
+                return 1
+              }
+              git cat-file -e "$receipt_next_revision^{commit}" 2>/dev/null || {
+                echo 'Billing cleanup retarget prepared candidate is unavailable locally.' >&2
+                return 1
+              }
+              [[ "$(git rev-parse "$receipt_next_revision:$migration_path")" == "$migration_blob" &&
+                "$(git rev-parse "$receipt_next_revision:scripts/billing-release-identity.sh")" == "$helper_blob" &&
+                "$(git rev-parse "$receipt_next_revision:scripts/billing-database-lifecycle.sh")" == "$lifecycle_blob" &&
+                "$(git rev-parse "$receipt_next_revision:prisma/migrations")" == \
+                "$(git rev-parse "$next_cleanup_revision:prisma/migrations")" ]] || {
+                echo 'Billing cleanup retarget prepared candidate blobs no longer match the replacement.' >&2
+                return 1
+              }
+              git merge-base --is-ancestor \
+                "$receipt_next_revision" "$next_cleanup_revision" || {
+                echo 'Billing cleanup retarget replacement must descend from the prepared candidate.' >&2
+                return 1
+              }
+              for root_receipt in \
+                "/root/winwidget-billing-core-source-cleanup-pre-offsite-${receipt_next_revision}-g2.json" \
+                "/root/winwidget-billing-core-source-cleanup-post-offsite-${receipt_next_revision}-g2.json"; do
+                [[ ! -e "$root_receipt" && ! -L "$root_receipt" ]] || {
+                  echo 'Billing cleanup retarget cannot replace a candidate with imported offsite receipts.' >&2
+                  return 1
                 }
-                END {
-                  for (key in count) if (count[key] != 1) invalid = 1
-                  if (NR != 13) invalid = 1
-                  exit(invalid ? 1 : 0)
-                }
-              ' "$receipt" && printf valid)" == 'valid' &&
+              done
+              write_prepared_retarget_receipt "$receipt_created_at"
+              receipt_next_revision="$next_cleanup_revision"
+            fi
+            retarget_receipt_has_exact_schema || return 1
+            [[
               "$(retarget_receipt_value version)" == '1' &&
               "$(retarget_receipt_value ownership_revision)" == "$ownership_revision" &&
               "$(retarget_receipt_value ownership_generation)" == '2' &&
@@ -9194,8 +9310,8 @@ jobs:
             if [[ "$cutover_state" == "$previous_cleanup_revision" ]]; then
               cutover_temporary="$APP_ROOT/deploy/backend/.billing-cutover-retarget.$$"
               [[ ! -e "$cutover_temporary" && ! -L "$cutover_temporary" ]] || return 1
-              (umask 077; awk -F= -v next="$next_cleanup_revision" '
-                  $1 == "cleanup_revision" { print "cleanup_revision=" next; found += 1; next }
+              (umask 077; awk -F= -v next_revision="$next_cleanup_revision" '
+                  $1 == "cleanup_revision" { print "cleanup_revision=" next_revision; found += 1; next }
                   { print }
                   END { exit(found == 1 ? 0 : 1) }
                 ' "$cutover_marker" >"$cutover_temporary")
@@ -9216,8 +9332,8 @@ jobs:
             if [[ "$database_state" == "$previous_cleanup_revision" ]]; then
               database_temporary="$APP_ROOT/deploy/backend/.billing-database-retarget.$$"
               [[ ! -e "$database_temporary" && ! -L "$database_temporary" ]] || return 1
-              (umask 077; awk -F= -v next="$next_cleanup_revision" '
-                  $1 == "cleanup_revision" { print "cleanup_revision=" next; found += 1; next }
+              (umask 077; awk -F= -v next_revision="$next_cleanup_revision" '
+                  $1 == "cleanup_revision" { print "cleanup_revision=" next_revision; found += 1; next }
                   { print }
                   END { exit(found == 1 ? 0 : 1) }
                 ' "$database_marker" >"$database_temporary")
