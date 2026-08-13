@@ -271,7 +271,7 @@ prepared | source-frozen | imported | pre-backups-created | \
 	;;
 esac
 billing_routes_env_state="$(
-	billing_read_env_value "$ENV_FILE" GATEWAY_ROUTES_JSON | billing_release_node -e '
+	billing_read_env_value "$ENV_FILE" GATEWAY_ROUTES_JSON | billing_release_node_stdin -e '
 const fs = require("node:fs");
 const routes = JSON.parse(fs.readFileSync(0, "utf8"));
 const prefixes = [
@@ -1966,7 +1966,7 @@ billing_core_cleanup_validate_staged_manifests() {
 		BILLING_WRITER_MANIFEST="$writer_file" BILLING_QUEUE_MANIFEST="$queue_file" \
 			BILLING_PREVIOUS_REVISION="$previous" BILLING_CLEANUP_REVISION="$revision" \
 			BILLING_CLEANUP_GENERATION="$generation" BILLING_SNAPSHOT_SHA="$snapshot" \
-			BILLING_PROJECTION_SHA="$projection" BILLING_ROUTE_SHA="$route" billing_release_node <<'NODE'
+			BILLING_PROJECTION_SHA="$projection" BILLING_ROUTE_SHA="$route" billing_release_node - <<'NODE'
 const fs = require('node:fs');
 const exactKeys = (value, expected) => value && typeof value === 'object' &&
   !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) ===
@@ -2595,7 +2595,7 @@ billing_core_cleanup_require_stopped_queue_boundary() {
 	[[ "$allow_retired_absent" == 'true' || "$allow_retired_absent" == 'false' ]] ||
 		return 1
 	state="$(billing_core_cleanup_queue_state)" || return 1
-	BILLING_ALLOW_RETIRED_ABSENT="$allow_retired_absent" billing_release_node -e '
+	BILLING_ALLOW_RETIRED_ABSENT="$allow_retired_absent" billing_release_node_stdin -e '
 const fs = require("node:fs");
 const rows = fs.readFileSync(0, "utf8").trim().split(/\n/).filter(Boolean)
   .map(line => line.trim().split(/\s+/));
@@ -8148,7 +8148,7 @@ verify_billing_rabbitmq_consumers() {
 		expected_active='true'
 	fi
 	docker exec "$container_id" rabbitmqctl --silent list_queues -p "$vhost" \
-		name consumers | BILLING_EXPECT_ACTIVE="$expected_active" billing_release_node -e '
+		name consumers | BILLING_EXPECT_ACTIVE="$expected_active" billing_release_node_stdin -e '
 const fs = require("node:fs");
 const rows = fs.readFileSync(0, "utf8").trim().split("\n").filter(Boolean)
   .map(line => line.trim().split(/\s+/));

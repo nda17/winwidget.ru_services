@@ -45,12 +45,13 @@ on:
         type: choice
         options:
           - status
+          - retarget
           - stage
           - seal-offsite
           - run
           - complete-offsite
       billing_cleanup_confirmation:
-        description: Type DROP LEGACY BILLING CORE SOURCE for a mutating cleanup action
+        description: Type the exact Billing Core cleanup confirmation when required
         required: false
         default: ''
         type: string
@@ -319,10 +320,26 @@ jobs:
           DEPLOY_REVISION: ${{ github.sha }}
           DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
           BILLING_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_action || 'status' }}
+          BILLING_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_confirmation || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
+          if [[ "$DEPLOY_TARGET" == 'billing-cleanup' ]]; then
+            case "$BILLING_CLEANUP_ACTION:$BILLING_CLEANUP_CONFIRMATION" in
+              status:) ;;
+              retarget:'RETARGET BILLING CLEANUP REVISION') ;;
+              stage:'DROP LEGACY BILLING CORE SOURCE'|seal-offsite:'DROP LEGACY BILLING CORE SOURCE'|run:'DROP LEGACY BILLING CORE SOURCE'|complete-offsite:'DROP LEGACY BILLING CORE SOURCE') ;;
+              *)
+                echo 'Invalid Billing Core cleanup action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$BILLING_CLEANUP_ACTION" != 'status' ||
+            -n "$BILLING_CLEANUP_CONFIRMATION" ]]; then
+            echo 'Billing Core cleanup inputs require the billing-cleanup target.' >&2
+            exit 1
+          fi
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o ServerAliveInterval=15 \
@@ -330,7 +347,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -547,19 +564,30 @@ jobs:
 
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
+          billing_retarget_preflight=false
+          if [[ "$AUTOMATIC_PROD_PUSH" != 'true' &&
+            "$DEPLOY_TARGET" == 'billing-cleanup' &&
+            "$BILLING_CLEANUP_ACTION" == 'retarget' &&
+            "$BILLING_CLEANUP_CONFIRMATION" == 'RETARGET BILLING CLEANUP REVISION' &&
+            "$current_revision" != "$EXPECTED_REVISION" ]]; then
+            billing_retarget_preflight=true
+          fi
           guard_campaigns_checkout_before_pull "$current_revision"
           guard_reporting_checkout_before_pull "$current_revision"
           guard_widgets_checkout_before_pull "$current_revision"
-          guard_billing_checkout_before_pull "$current_revision"
+          if [[ "$billing_retarget_preflight" != 'true' ]]; then
+            guard_billing_checkout_before_pull "$current_revision"
+          fi
           guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
             "$current_revision" == "$EXPECTED_REVISION" ]]; then
             guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
             if [[ "$DEPLOY_TARGET" == 'billing-cleanup' &&
-              "$BILLING_CLEANUP_ACTION" =~ ^(status|stage)$ &&
+              ( "$BILLING_CLEANUP_ACTION" =~ ^(status|stage)$ ||
+                "$billing_retarget_preflight" == 'true' ) &&
               "$current_revision" != "$EXPECTED_REVISION" ]]; then
-              echo 'Billing cleanup SHA B will be inspected or marker-bound by the deploy job before checkout.'
+              echo 'Billing cleanup target will be inspected or marker-bound by the deploy job before checkout.'
             else
               guard_billing_checkout_before_pull "$EXPECTED_REVISION"
             fi
@@ -5722,10 +5750,10 @@ jobs:
           );
           requireCount(
             'guard_campaigns_checkout_before_pull "$expected_revision"',
-            1,
+            2,
           );
-          requireCount("git fetch origin prod", 2);
-          requireCount("git checkout prod", 1);
+          requireCount("git fetch origin prod", 3);
+          requireCount("git checkout prod", 2);
           requireCount('git merge --ff-only "$fetched_revision"', 1);
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_REVISION"',
@@ -5733,7 +5761,7 @@ jobs:
           );
           requireCount(
             '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
-            1,
+            2,
           );
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"',
@@ -5770,7 +5798,7 @@ jobs:
           requireCount('"$guard_action" "$expected_revision"', 2);
           requireCount(
             '"$expected_revision" --guard-before-checkout-revision',
-            3,
+            6,
           );
           requireCount(
             '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
@@ -5778,11 +5806,11 @@ jobs:
           );
           requireCount(
             'guard_reporting_checkout_before_pull "$expected_revision"',
-            1,
+            2,
           );
           requireCount(
             'guard_widgets_checkout_before_pull "$expected_revision"',
-            1,
+            2,
           );
           requireCount(
             'guard_billing_checkout_before_pull "$expected_revision"',
@@ -5821,7 +5849,7 @@ jobs:
             "stage_billing_cleanup_revision_with_container_node() (",
           );
           const billingNodeBootstrapEnd = deployJob.indexOf(
-            "\n          checkout_verified_prod_revision() {",
+            "\n          retarget_billing_cleanup_revision() (",
             billingNodeBootstrapStart,
           );
           const billingNodeBootstrap = deployJob.slice(
@@ -5914,19 +5942,24 @@ jobs:
             cleanupDispatchStart,
             deployJob.indexOf("\n            *)", cleanupDispatchStart),
           );
-          const cleanupFetchIndex = cleanupDispatch.indexOf(
+          const cleanupStageStart = cleanupDispatch.indexOf(
+            'if [[ "$BILLING_CLEANUP_ACTION" == \'stage\'',
+          );
+          const cleanupStageDispatch = cleanupDispatch.slice(cleanupStageStart);
+          const cleanupFetchIndex = cleanupStageDispatch.indexOf(
             "git fetch origin prod",
           );
-          const cleanupFetchHeadIndex = cleanupDispatch.indexOf(
+          const cleanupFetchHeadIndex = cleanupStageDispatch.indexOf(
             'prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"',
           );
-          const cleanupStageMarkerIndex = cleanupDispatch.indexOf(
+          const cleanupStageMarkerIndex = cleanupStageDispatch.indexOf(
             "stage_billing_cleanup_revision_with_container_node",
           );
-          const cleanupCheckoutIndex = cleanupDispatch.indexOf(
+          const cleanupCheckoutIndex = cleanupStageDispatch.indexOf(
             '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
           );
           if (
+            cleanupStageStart < 0 ||
             cleanupFetchIndex < 0 ||
             cleanupFetchHeadIndex < 0 ||
             cleanupStageMarkerIndex < 0 ||
@@ -5940,12 +5973,222 @@ jobs:
             );
           }
           if (
-            cleanupDispatch
+            cleanupStageDispatch
               .slice(cleanupStageMarkerIndex, cleanupCheckoutIndex)
               .includes("git fetch origin prod")
           ) {
             throw new Error(
               "Billing cleanup must not refetch origin/prod after binding SHA B",
+            );
+          }
+          const retargetFunctionStart = deployJob.indexOf(
+            "retarget_billing_cleanup_revision() (",
+          );
+          const retargetFunctionEnd = deployJob.indexOf(
+            "\n          checkout_verified_prod_revision() {",
+            retargetFunctionStart,
+          );
+          const retargetFunction = deployJob.slice(
+            retargetFunctionStart,
+            retargetFunctionEnd,
+          );
+          if (
+            retargetFunctionStart < 0 ||
+            retargetFunctionEnd <= retargetFunctionStart
+          ) {
+            throw new Error("Billing cleanup retarget function is missing");
+          }
+          for (const requiredRetargetToken of [
+            "RETARGET BILLING CLEANUP REVISION",
+            "git merge-base --is-ancestor",
+            '"$previous_cleanup_revision:prisma/migrations"',
+            '"$next_cleanup_revision:prisma/migrations"',
+            "winwidget-billing-retarget-helper.XXXXXX",
+            '"$(git hash-object "$helper_path")" == "$helper_blob"',
+            "billing_core_source_cleanup_require_exact_migration_manifest exclusive",
+            'database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"',
+            'local ENV_FILE="$APP_ROOT/deploy/backend/.env.production"',
+            'local COMPOSE_FILE="$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml"',
+            "unix:///var/run/docker.sock",
+            '"$identity" =~ ^winwidget\\|$service\\|[Ff]alse\\|1$',
+            '"$state" == \'running|true|0\'',
+            "billing-core-source-cleanup-pre-offsite",
+            "state=prepared",
+            "state=%s",
+            "mv -fT",
+            "retarget_marker_contract_sha256",
+            '"$receipt_state" =~ ^(prepared|ready)$',
+          ]) {
+            if (!retargetFunction.includes(requiredRetargetToken)) {
+              throw new Error(
+                `Billing cleanup retarget lost ${requiredRetargetToken}`,
+              );
+            }
+          }
+          requireCount(
+            "retarget:'RETARGET BILLING CLEANUP REVISION') ;;",
+            2,
+          );
+          const retargetStateCaseStart = retargetFunction.indexOf(
+            'case "$cutover_state|$database_state|$receipt_state" in',
+          );
+          const retargetStateCaseEnd = retargetFunction.indexOf(
+            "\n            esac",
+            retargetStateCaseStart,
+          );
+          const retargetStateCase = retargetFunction.slice(
+            retargetStateCaseStart,
+            retargetStateCaseEnd,
+          );
+          for (const requiredState of [
+            '"$previous_cleanup_revision|$previous_cleanup_revision|prepared")',
+            '"$next_cleanup_revision|$previous_cleanup_revision|prepared"',
+            '"$next_cleanup_revision|$previous_cleanup_revision|ready"',
+            '"$next_cleanup_revision|$next_cleanup_revision|ready")',
+          ]) {
+            if (!retargetStateCase.includes(requiredState)) {
+              throw new Error(
+                `Billing cleanup retarget lost crash state ${requiredState}`,
+              );
+            }
+          }
+          if (
+            retargetStateCaseStart < 0 ||
+            retargetStateCaseEnd <= retargetStateCaseStart ||
+            retargetStateCase.includes("|complete") ||
+            retargetStateCase.includes(
+              '"$previous_cleanup_revision|$next_cleanup_revision',
+            )
+          ) {
+            throw new Error(
+              "Billing cleanup retarget crash-state matrix is unsafe",
+            );
+          }
+          if (
+            retargetFunction.includes("git checkout") ||
+            retargetFunction.includes("docker stop") ||
+            retargetFunction.includes("docker rm") ||
+            retargetFunction.includes("prisma migrate")
+          ) {
+            throw new Error(
+              "Billing cleanup retarget must not checkout, stop services, remove containers, or migrate",
+            );
+          }
+          const cutoverMarkerWrite = retargetFunction.indexOf(
+            'mv -fT "$cutover_temporary" "$cutover_marker"',
+          );
+          const receiptReadyWrite = retargetFunction.indexOf(
+            "rewrite_retarget_receipt ready",
+            cutoverMarkerWrite,
+          );
+          const databaseMarkerWrite = retargetFunction.indexOf(
+            'mv -fT "$database_temporary" "$database_marker"',
+          );
+          if (
+            cutoverMarkerWrite < 0 ||
+            receiptReadyWrite <= cutoverMarkerWrite ||
+            databaseMarkerWrite <= receiptReadyWrite
+          ) {
+            throw new Error(
+              "Billing cleanup retarget must commit cutover marker, ready receipt, then database marker",
+            );
+          }
+          const retargetCheckoutStart = deployJob.indexOf(
+            "checkout_retargeted_billing_cleanup_revision() {",
+          );
+          const retargetCheckoutEnd = deployJob.indexOf(
+            '\n          current_revision="$(git rev-parse HEAD)"',
+            retargetCheckoutStart,
+          );
+          const retargetCheckout = deployJob.slice(
+            retargetCheckoutStart,
+            retargetCheckoutEnd,
+          );
+          const retargetMerge = retargetCheckout.indexOf(
+            'git merge --ff-only "$prefetched_revision"',
+          );
+          const retargetBillingGuard = retargetCheckout.indexOf(
+            "guard_billing_checkout_before_pull",
+          );
+          if (
+            retargetCheckoutStart < 0 ||
+            retargetCheckoutEnd <= retargetCheckoutStart ||
+            retargetMerge < 0 ||
+            retargetBillingGuard <= retargetMerge ||
+            retargetCheckout.slice(0, retargetMerge).includes(
+              "guard_billing_checkout_before_pull",
+            )
+          ) {
+            throw new Error(
+              "Billing cleanup retarget checkout must defer only the Billing guard until candidate checkout",
+            );
+          }
+          const retargetDispatchStart = cleanupDispatch.indexOf(
+            'if [[ "$BILLING_CLEANUP_ACTION" == \'retarget\'',
+          );
+          const retargetDispatchEnd = cleanupDispatch.indexOf(
+            "\n              prefetched_cleanup_revision=''",
+            retargetDispatchStart,
+          );
+          const retargetDispatch = cleanupDispatch.slice(
+            retargetDispatchStart,
+            retargetDispatchEnd,
+          );
+          const retargetFetch = retargetDispatch.indexOf("git fetch origin prod");
+          const retargetMutation = retargetDispatch.lastIndexOf(
+            "retarget_billing_cleanup_revision",
+          );
+          const retargetCheckoutCall = retargetDispatch.indexOf(
+            "checkout_retargeted_billing_cleanup_revision",
+          );
+          const retargetStatus = retargetDispatch.indexOf(
+            "scripts/billing-database-lifecycle.sh --status",
+          );
+          const retargetExit = retargetDispatch.lastIndexOf("exit 0");
+          if (
+            retargetDispatchStart < 0 ||
+            retargetDispatchEnd <= retargetDispatchStart ||
+            retargetFetch < 0 ||
+            retargetMutation <= retargetFetch ||
+            retargetCheckoutCall <= retargetMutation ||
+            retargetStatus <= retargetCheckoutCall ||
+            retargetExit <= retargetStatus ||
+            retargetDispatch.includes("--stage") ||
+            retargetDispatch.includes("--run")
+          ) {
+            throw new Error(
+              "Billing cleanup retarget dispatch must fetch, retarget, checkout, status, and exit without cleanup mutation",
+            );
+          }
+          const automaticDeferStart = deployJob.indexOf(
+            'current_revision="$(git rev-parse HEAD)"\n          if [[ "$AUTOMATIC_PROD_PUSH" == "true"',
+          );
+          const automaticDeferEnd = deployJob.indexOf(
+            '\n          case "$DEPLOY_TARGET" in',
+            automaticDeferStart,
+          );
+          const automaticDefer = deployJob.slice(
+            automaticDeferStart,
+            automaticDeferEnd,
+          );
+          const billingCandidateGuard = automaticDefer.indexOf(
+            'if ! guard_billing_checkout_before_pull \\\n              "$EXPECTED_REVISION"',
+          );
+          const billingDeferredExit = automaticDefer.indexOf(
+            "exit 0",
+            billingCandidateGuard,
+          );
+          if (
+            automaticDeferStart < 0 ||
+            automaticDeferEnd <= automaticDeferStart ||
+            billingCandidateGuard < 0 ||
+            billingDeferredExit <= billingCandidateGuard ||
+            automaticDefer.includes("git fetch origin prod") ||
+            automaticDefer.includes("git checkout prod") ||
+            automaticDefer.includes("retarget_billing_cleanup_revision")
+          ) {
+            throw new Error(
+              "Automatic SHA C push must defer before fetch, checkout, or Billing cleanup retarget",
             );
           }
           if (
@@ -5963,7 +6206,7 @@ jobs:
               "checkout_verified_prod_revision() {",
             );
             const checkoutFunctionEnd = job.indexOf(
-              '\n          current_revision="$(git rev-parse HEAD)"',
+              "\n          checkout_retargeted_billing_cleanup_revision() {",
               checkoutFunctionStart,
             );
             const checkoutFunction = job.slice(
@@ -8165,6 +8408,7 @@ jobs:
           if [[ "$DEPLOY_TARGET" == 'billing-cleanup' ]]; then
             case "$BILLING_CLEANUP_ACTION:$BILLING_CLEANUP_CONFIRMATION" in
               status:) ;;
+              retarget:'RETARGET BILLING CLEANUP REVISION') ;;
               stage:'DROP LEGACY BILLING CORE SOURCE'|seal-offsite:'DROP LEGACY BILLING CORE SOURCE'|run:'DROP LEGACY BILLING CORE SOURCE'|complete-offsite:'DROP LEGACY BILLING CORE SOURCE') ;;
               *)
                 echo 'Invalid Billing Core cleanup action or confirmation.' >&2
@@ -8571,6 +8815,430 @@ jobs:
               bash scripts/billing-cutover-production.sh \
                 --stage-cleanup-revision "$cleanup_revision"
           )
+          retarget_billing_cleanup_revision() (
+            [[ $# -eq 2 ]] || return 1
+            local previous_cleanup_revision="$1" next_cleanup_revision="$2"
+            local migration_path migration_blob helper_path helper_blob lifecycle_blob
+            local cleanup_marker evidence_root receipt receipt_temporary
+            local receipt_state database_state cutover_state source_state migration_state
+            local ownership_revision key actual expected service container_id identity image_id
+            local image_revision container_revision app_revision state health all_container_ids
+            local database_temporary cutover_temporary checkout_revision docker_path
+            local database_contract_sha256 cutover_contract_sha256 root_receipt
+            local ENV_FILE="$APP_ROOT/deploy/backend/.env.production"
+            local COMPOSE_FILE="$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml"
+            local database_marker="$APP_ROOT/deploy/backend/.billing-database-lifecycle-v1"
+            local cutover_marker="$APP_ROOT/deploy/backend/.billing-cutover-v1"
+            local -a writer_services=(
+              api-gateway campaigns-service api outbox-publisher maintenance-worker
+              database-restore-worker notification-delivery-worker integration-worker
+              reporting-service widgets-service billing-api billing-scheduler billing-worker
+              billing-outbox-publisher
+            )
+            local -a persisted_identity_keys=(
+              DATABASE_RESTORE_REVISION DATABASE_RESTORE_IMAGE
+              BILLING_REVISION BILLING_IMAGE
+            )
+
+            retarget_cleanup_temporary_files() {
+              rm -f -- "${helper_path:-}" "${receipt_temporary:-}" \
+                "${database_temporary:-}" "${cutover_temporary:-}"
+            }
+
+            [[ "$AUTOMATIC_PROD_PUSH" == 'false' &&
+              "$DEPLOY_TARGET" == 'billing-cleanup' &&
+              "$BILLING_CLEANUP_ACTION" == 'retarget' &&
+              "$BILLING_CLEANUP_CONFIRMATION" == 'RETARGET BILLING CLEANUP REVISION' &&
+              "$previous_cleanup_revision" =~ ^[0-9a-f]{40}$ &&
+              "$next_cleanup_revision" =~ ^[0-9a-f]{40}$ &&
+              "$previous_cleanup_revision" != "$next_cleanup_revision" &&
+              "$(id -u)" == '0' && "$(uname -s)" == 'Linux' &&
+              -z "${DOCKER_HOST+x}" && -z "${DOCKER_CONTEXT+x}" &&
+              "$(git branch --show-current)" == 'prod' &&
+              -z "$(git status --porcelain --untracked-files=all)" ]] || {
+              echo 'Billing cleanup retarget requires its exact manual production boundary.' >&2
+              return 1
+            }
+            [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" &&
+              "$(stat -c '%u:%g:%a' "$ENV_FILE")" == '0:0:600' &&
+              -f "$COMPOSE_FILE" && ! -L "$COMPOSE_FILE" ]] || {
+              echo 'Billing cleanup retarget rejected the production configuration boundary.' >&2
+              return 1
+            }
+            docker_path="$(type -P docker 2>/dev/null || true)"
+            docker_path="$(readlink -f "$docker_path" 2>/dev/null || true)"
+            [[ "$docker_path" =~ ^/[A-Za-z0-9._/+:-]+$ &&
+              -f "$docker_path" && ! -L "$docker_path" && -x "$docker_path" &&
+              "$("$docker_path" context show)" == 'default' &&
+              "$("$docker_path" context inspect default --format \
+                '{{.Endpoints.docker.Host}}')" == 'unix:///var/run/docker.sock' &&
+              "$("$docker_path" info --format '{{.OSType}}')" == 'linux' ]] || {
+              echo 'Billing cleanup retarget requires the canonical local Docker daemon.' >&2
+              return 1
+            }
+            checkout_revision="$(git rev-parse HEAD)"
+            [[ "$checkout_revision" == "$previous_cleanup_revision" ||
+              "$checkout_revision" == "$next_cleanup_revision" ]] || return 1
+            git cat-file -e "$next_cleanup_revision^{commit}" 2>/dev/null || {
+              echo 'Billing cleanup retarget candidate is unavailable locally.' >&2
+              return 1
+            }
+            git merge-base --is-ancestor \
+              "$previous_cleanup_revision" "$next_cleanup_revision" || {
+              echo 'Billing cleanup retarget candidate must descend from the staged revision.' >&2
+              return 1
+            }
+            migration_path='prisma/migrations/20260813000000_remove_legacy_billing_core_source/migration.sql'
+            migration_blob="$(git rev-parse "$previous_cleanup_revision:$migration_path")" || return 1
+            [[ "$migration_blob" == "$(git rev-parse "$next_cleanup_revision:$migration_path")" &&
+              "$(git rev-parse "$previous_cleanup_revision:prisma/migrations")" == \
+              "$(git rev-parse "$next_cleanup_revision:prisma/migrations")" ]] || {
+              echo 'Billing cleanup retarget candidate changed the reviewed migration tree.' >&2
+              return 1
+            }
+            [[ "$(git rev-parse "$checkout_revision:scripts/billing-database-lifecycle.sh")" == \
+              "$(git hash-object scripts/billing-database-lifecycle.sh)" &&
+              "$(git rev-parse "$checkout_revision:scripts/billing-cutover-production.sh")" == \
+              "$(git hash-object scripts/billing-cutover-production.sh)" ]] || {
+              echo 'Billing cleanup guards differ from the checked-out staged revision.' >&2
+              return 1
+            }
+            [[ -f "$database_marker" && ! -L "$database_marker" &&
+              "$(stat -c '%u:%g:%a' "$database_marker")" == '0:0:600' &&
+              -f "$cutover_marker" && ! -L "$cutover_marker" &&
+              "$(stat -c '%u:%g:%a' "$cutover_marker")" == '0:0:600' ]] || {
+              echo 'Billing cleanup retarget parent markers are unsafe.' >&2
+              return 1
+            }
+            # shellcheck source=/dev/null
+            source scripts/billing-cutover-production.sh
+            helper_blob="$(git rev-parse \
+              "$next_cleanup_revision:scripts/billing-release-identity.sh")" || return 1
+            lifecycle_blob="$(git rev-parse \
+              "$next_cleanup_revision:scripts/billing-database-lifecycle.sh")" || return 1
+            helper_path="$(mktemp /tmp/winwidget-billing-retarget-helper.XXXXXX)" || return 1
+            trap retarget_cleanup_temporary_files EXIT
+            git show \
+              "$next_cleanup_revision:scripts/billing-release-identity.sh" >"$helper_path"
+            chown 0:0 "$helper_path"
+            chmod 600 "$helper_path"
+            [[ "$helper_path" =~ ^/tmp/winwidget-billing-retarget-helper\.[A-Za-z0-9]{6}$ &&
+              -f "$helper_path" && ! -L "$helper_path" &&
+              "$(stat -c '%u:%g:%a' "$helper_path")" == '0:0:600' &&
+              "$(git hash-object "$helper_path")" == "$helper_blob" ]] || {
+              echo 'Billing cleanup retarget candidate Node helper is not the reviewed Git blob.' >&2
+              return 1
+            }
+            # Source only the reviewed candidate helper. SHA B lifecycle functions
+            # remain active, while this compatibility wrapper maps their legacy
+            # zero-argument heredocs to the candidate helper's explicit `node -`.
+            # shellcheck source=/dev/null
+            source "$helper_path"
+            eval "$(declare -f billing_release_node | \
+              sed '1s/^billing_release_node /billing_retarget_candidate_node /')"
+            declare -F billing_retarget_candidate_node >/dev/null || return 1
+            billing_release_node() {
+              if [[ $# -eq 0 ]]; then
+                billing_retarget_candidate_node -
+              elif [[ "$1" == '-e' ]]; then
+                billing_release_node_stdin "$@"
+              else
+                billing_retarget_candidate_node "$@"
+              fi
+            }
+            rm -f -- "$helper_path"
+            helper_path=''
+            billing_database_validate_urls || return 1
+            # database-restore-production-guard: before-mutation
+            database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE" || return 1
+            billing_database_validate_marker || return 1
+            billing_cutover_validate_marker || return 1
+            ownership_revision="$(billing_database_marker_value ownership_revision)" || return 1
+            database_state="$(billing_database_marker_value cleanup_revision)" || return 1
+            cutover_state="$(billing_core_source_cleanup_parent_marker_value \
+              "$cutover_marker" cleanup_revision)" || return 1
+            [[ "$(billing_database_marker_value phase)" == 'complete' &&
+              "$(billing_database_marker_value switch_generation)" == '2' &&
+              ( "$database_state" == "$previous_cleanup_revision" ||
+                "$database_state" == "$next_cleanup_revision" ) &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" phase)" == 'complete' &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" generation)" == '2' &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" revision)" == "$ownership_revision" &&
+              ( "$cutover_state" == "$previous_cleanup_revision" ||
+                "$cutover_state" == "$next_cleanup_revision" ) ]] || {
+              echo 'Billing cleanup retarget requires complete generation-2 parent markers bound to SHA B.' >&2
+              return 1
+            }
+            for key in "${persisted_identity_keys[@]}"; do
+              actual="$(billing_read_env_value "$ENV_FILE" "$key")" || return 1
+              expected="$(billing_release_identity_value "$key" "$ownership_revision")" || return 1
+              [[ "$actual" == "$expected" ]] || {
+                echo "Billing cleanup retarget rejected the SHA A production identity key: $key" >&2
+                return 1
+              }
+            done
+            [[ "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" database_id)" == \
+              "$(billing_database_marker_value database_id)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" core_image_id)" == \
+              "$(billing_database_marker_value core_image_id)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" billing_image_id)" == \
+              "$(billing_database_marker_value billing_image_id)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" snapshot_sha256)" == \
+              "$(billing_database_marker_value snapshot_sha256)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" projection_sha256)" == \
+              "$(billing_database_marker_value projection_evidence_sha256)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" route_sha256)" == \
+              "$(billing_database_marker_value route_evidence_sha256)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" pre_restore_evidence_sha256)" == \
+              "$(billing_database_marker_value pre_restore_evidence_sha256)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" pre_offsite_receipt_sha256)" == \
+              "$(billing_database_marker_value pre_offsite_receipt_sha256)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" post_restore_evidence_sha256)" == \
+              "$(billing_database_marker_value post_restore_evidence_sha256)" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" post_offsite_receipt_sha256)" == \
+              "$(billing_database_marker_value post_offsite_receipt_sha256)" ]] || {
+              echo 'Billing cleanup retarget parent marker identities/evidence differ.' >&2
+              return 1
+            }
+            cleanup_marker="$(billing_core_source_cleanup_marker_path)" || return 1
+            evidence_root="$APP_ROOT/deploy/backend/billing-core-source-cleanup"
+            [[ ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]] || {
+              echo 'Billing cleanup retarget is forbidden after the dedicated cleanup marker exists.' >&2
+              return 1
+            }
+            if [[ -e "$evidence_root" || -L "$evidence_root" ]]; then
+              [[ -d "$evidence_root" && ! -L "$evidence_root" &&
+                "$(stat -c '%u:%g:%a' "$evidence_root")" == '0:0:700' &&
+                -z "$(find "$evidence_root" -mindepth 1 -print -quit)" ]] || {
+                echo 'Billing cleanup retarget is forbidden after cleanup evidence exists.' >&2
+                return 1
+              }
+            fi
+            source_state="$(billing_core_source_state)" || return 1
+            migration_state="$(billing_core_source_cleanup_migration_state)" || return 1
+            [[ "$source_state" == 'present' && "$migration_state" == 'pending' ]] || {
+              echo 'Billing cleanup retarget requires intact Core source and a pending cleanup migration.' >&2
+              return 1
+            }
+            billing_core_source_cleanup_require_exact_migration_manifest exclusive || {
+              echo 'Billing cleanup retarget rejected the tracked migration manifest or ledger.' >&2
+              return 1
+            }
+            all_container_ids="$(billing_compose "$previous_cleanup_revision" "$ENV_FILE" \
+              "$COMPOSE_FILE" ps -a -q "${writer_services[@]}" 2>/dev/null || true)"
+            [[ "$(printf '%s\n' "$all_container_ids" | sed '/^$/d' | sort -u | wc -l | tr -d ' ')" == \
+              "${#writer_services[@]}" ]] || {
+              echo 'Billing cleanup retarget requires exactly 14 canonical writer containers.' >&2
+              return 1
+            }
+            for service in "${writer_services[@]}"; do
+              container_id="$(billing_compose "$previous_cleanup_revision" "$ENV_FILE" \
+                "$COMPOSE_FILE" ps --status running -q "$service" 2>/dev/null || true)"
+              [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+                echo "Billing cleanup retarget requires exactly one running SHA A service: $service" >&2
+                return 1
+              }
+              identity="$(docker inspect --format \
+                '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}|{{index .Config.Labels "com.docker.compose.container-number"}}' \
+                "$container_id" 2>/dev/null || true)"
+              image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+              container_revision="$(docker inspect --format \
+                '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+                "$container_id" 2>/dev/null || true)"
+              image_revision="$(docker image inspect --format \
+                '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+                "$image_id" 2>/dev/null || true)"
+              app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                "$container_id" 2>/dev/null | awk -F= '
+                  $1 == "APP_REVISION" {
+                    print substr($0, index($0, "=") + 1)
+                    found += 1
+                  }
+                  END { exit(found == 1 ? 0 : 1) }
+                ')" || return 1
+              state="$(docker inspect --format \
+                '{{.State.Status}}|{{.State.Running}}|{{.RestartCount}}' \
+                "$container_id" 2>/dev/null || true)"
+              health="$(docker inspect --format \
+                '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                "$container_id" 2>/dev/null || true)"
+              case "$service:$health" in
+                outbox-publisher:none | integration-worker:none | *:healthy) ;;
+                *)
+                  echo "Billing cleanup retarget rejected SHA A service health: $service" >&2
+                  return 1
+                  ;;
+              esac
+              [[ "$identity" =~ ^winwidget\|$service\|[Ff]alse\|1$ &&
+                "$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+                "$container_revision" == "$ownership_revision" &&
+                "$image_revision" == "$ownership_revision" &&
+                "$app_revision" == "$ownership_revision" &&
+                "$state" == 'running|true|0' ]] || {
+                echo "Billing cleanup retarget rejected SHA A service identity/state: $service" >&2
+                return 1
+              }
+            done
+            for root_receipt in \
+              "/root/winwidget-billing-core-source-cleanup-pre-offsite-${previous_cleanup_revision}-g2.json" \
+              "/root/winwidget-billing-core-source-cleanup-post-offsite-${previous_cleanup_revision}-g2.json" \
+              "/root/winwidget-billing-core-source-cleanup-pre-offsite-${next_cleanup_revision}-g2.json" \
+              "/root/winwidget-billing-core-source-cleanup-post-offsite-${next_cleanup_revision}-g2.json"; do
+              [[ ! -e "$root_receipt" && ! -L "$root_receipt" ]] || {
+                echo 'Billing cleanup retarget rejected an existing cleanup receipt import.' >&2
+                return 1
+              }
+            done
+
+            receipt="$APP_ROOT/deploy/backend/.billing-cleanup-retarget-v1"
+            receipt_temporary="$APP_ROOT/deploy/backend/.billing-cleanup-retarget-v1.$$"
+            retarget_marker_contract_sha256() {
+              [[ $# -eq 1 && -f "$1" && ! -L "$1" ]] || return 1
+              awk -F= '
+                $1 == "cleanup_revision" { print "cleanup_revision=RETARGETED"; next }
+                { print }
+              ' "$1" | sha256sum | awk '{print $1}'
+            }
+            database_contract_sha256="$(retarget_marker_contract_sha256 "$database_marker")" || return 1
+            cutover_contract_sha256="$(retarget_marker_contract_sha256 "$cutover_marker")" || return 1
+            [[ ! -L "$receipt" && ! -e "$receipt_temporary" && ! -L "$receipt_temporary" ]] || return 1
+            if [[ -e "$receipt" ]]; then
+              [[ -f "$receipt" && "$(stat -c '%u:%g:%a' "$receipt")" == '0:0:600' ]] || return 1
+            else
+              [[ "$database_state" == "$previous_cleanup_revision" &&
+                "$cutover_state" == "$previous_cleanup_revision" ]] || {
+                echo 'Billing cleanup retarget receipt is missing after a parent marker changed.' >&2
+                return 1
+              }
+              (umask 077; {
+                printf 'version=1\nstate=prepared\nownership_revision=%s\nownership_generation=2\n' \
+                  "$ownership_revision"
+                printf 'previous_cleanup_revision=%s\nnext_cleanup_revision=%s\n' \
+                  "$previous_cleanup_revision" "$next_cleanup_revision"
+                printf 'migration_blob=%s\ncandidate_helper_blob=%s\ncandidate_lifecycle_blob=%s\n' \
+                  "$migration_blob" "$helper_blob" "$lifecycle_blob"
+                printf 'database_contract_sha256=%s\ncutover_contract_sha256=%s\n' \
+                  "$database_contract_sha256" "$cutover_contract_sha256"
+                printf 'created_at=%s\nupdated_at=%s\n' \
+                  "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              } >"$receipt_temporary")
+              chown 0:0 "$receipt_temporary"
+              chmod 600 "$receipt_temporary"
+              mv -fT "$receipt_temporary" "$receipt"
+            fi
+            retarget_receipt_value() {
+              [[ $# -eq 1 ]] || return 1
+              awk -F= -v key="$1" '
+                $1 == key { print substr($0, index($0, "=") + 1); found += 1 }
+                END { exit(found == 1 ? 0 : 1) }
+              ' "$receipt"
+            }
+            [[ "$(awk -F= '
+                {
+                  count[$1] += 1
+                  if ($1 !~ /^(version|state|ownership_revision|ownership_generation|previous_cleanup_revision|next_cleanup_revision|migration_blob|candidate_helper_blob|candidate_lifecycle_blob|database_contract_sha256|cutover_contract_sha256|created_at|updated_at)$/) invalid = 1
+                }
+                END {
+                  for (key in count) if (count[key] != 1) invalid = 1
+                  if (NR != 13) invalid = 1
+                  exit(invalid ? 1 : 0)
+                }
+              ' "$receipt" && printf valid)" == 'valid' &&
+              "$(retarget_receipt_value version)" == '1' &&
+              "$(retarget_receipt_value ownership_revision)" == "$ownership_revision" &&
+              "$(retarget_receipt_value ownership_generation)" == '2' &&
+              "$(retarget_receipt_value previous_cleanup_revision)" == "$previous_cleanup_revision" &&
+              "$(retarget_receipt_value next_cleanup_revision)" == "$next_cleanup_revision" &&
+              "$(retarget_receipt_value migration_blob)" == "$migration_blob" &&
+              "$(retarget_receipt_value candidate_helper_blob)" == "$helper_blob" &&
+              "$(retarget_receipt_value candidate_lifecycle_blob)" == "$lifecycle_blob" &&
+              "$(retarget_receipt_value database_contract_sha256)" == "$database_contract_sha256" &&
+              "$(retarget_receipt_value cutover_contract_sha256)" == "$cutover_contract_sha256" &&
+              "$(retarget_receipt_value created_at)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+              "$(retarget_receipt_value updated_at)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+            receipt_state="$(retarget_receipt_value state)" || return 1
+            [[ "$receipt_state" =~ ^(prepared|ready)$ ]] || return 1
+
+            rewrite_retarget_receipt() {
+              [[ $# -eq 1 && "$1" == 'ready' ]] || return 1
+              [[ ! -e "$receipt_temporary" && ! -L "$receipt_temporary" ]] || return 1
+              (umask 077; {
+                printf 'version=1\nstate=%s\nownership_revision=%s\nownership_generation=2\n' \
+                  "$1" "$ownership_revision"
+                printf 'previous_cleanup_revision=%s\nnext_cleanup_revision=%s\n' \
+                  "$previous_cleanup_revision" "$next_cleanup_revision"
+                printf 'migration_blob=%s\ncandidate_helper_blob=%s\ncandidate_lifecycle_blob=%s\n' \
+                  "$migration_blob" "$helper_blob" "$lifecycle_blob"
+                printf 'database_contract_sha256=%s\ncutover_contract_sha256=%s\n' \
+                  "$(retarget_receipt_value database_contract_sha256)" \
+                  "$(retarget_receipt_value cutover_contract_sha256)"
+                printf 'created_at=%s\nupdated_at=%s\n' \
+                  "$(retarget_receipt_value created_at)" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              } >"$receipt_temporary")
+              chown 0:0 "$receipt_temporary"
+              chmod 600 "$receipt_temporary"
+              mv -fT "$receipt_temporary" "$receipt"
+            }
+            case "$cutover_state|$database_state|$receipt_state" in
+              "$previous_cleanup_revision|$previous_cleanup_revision|prepared")
+                ;;
+              "$next_cleanup_revision|$previous_cleanup_revision|prepared" | \
+              "$next_cleanup_revision|$previous_cleanup_revision|ready" | \
+                "$next_cleanup_revision|$next_cleanup_revision|ready")
+                ;;
+              *)
+                echo 'Billing cleanup retarget receipt and parent markers are inconsistent.' >&2
+                return 1
+                ;;
+            esac
+            if [[ "$cutover_state" == "$previous_cleanup_revision" ]]; then
+              cutover_temporary="$APP_ROOT/deploy/backend/.billing-cutover-retarget.$$"
+              [[ ! -e "$cutover_temporary" && ! -L "$cutover_temporary" ]] || return 1
+              (umask 077; awk -F= -v next="$next_cleanup_revision" '
+                  $1 == "cleanup_revision" { print "cleanup_revision=" next; found += 1; next }
+                  { print }
+                  END { exit(found == 1 ? 0 : 1) }
+                ' "$cutover_marker" >"$cutover_temporary")
+              chown 0:0 "$cutover_temporary"
+              chmod 600 "$cutover_temporary"
+              mv -fT "$cutover_temporary" "$cutover_marker"
+              billing_cutover_validate_marker || return 1
+              cutover_state="$next_cleanup_revision"
+              rewrite_retarget_receipt ready
+              receipt_state='ready'
+            fi
+            if [[ "$cutover_state" == "$next_cleanup_revision" &&
+              "$database_state" == "$previous_cleanup_revision" &&
+              "$receipt_state" == 'prepared' ]]; then
+              rewrite_retarget_receipt ready
+              receipt_state='ready'
+            fi
+            if [[ "$database_state" == "$previous_cleanup_revision" ]]; then
+              database_temporary="$APP_ROOT/deploy/backend/.billing-database-retarget.$$"
+              [[ ! -e "$database_temporary" && ! -L "$database_temporary" ]] || return 1
+              (umask 077; awk -F= -v next="$next_cleanup_revision" '
+                  $1 == "cleanup_revision" { print "cleanup_revision=" next; found += 1; next }
+                  { print }
+                  END { exit(found == 1 ? 0 : 1) }
+                ' "$database_marker" >"$database_temporary")
+              chown 0:0 "$database_temporary"
+              chmod 600 "$database_temporary"
+              mv -fT "$database_temporary" "$database_marker"
+              database_state="$next_cleanup_revision"
+            fi
+            billing_database_validate_marker || return 1
+            billing_cutover_validate_marker || return 1
+            [[ "$(billing_database_marker_value cleanup_revision)" == "$next_cleanup_revision" &&
+              "$(billing_core_source_cleanup_parent_marker_value "$cutover_marker" cleanup_revision)" == "$next_cleanup_revision" &&
+              "$(retarget_receipt_value state)" == 'ready' &&
+              "$(retarget_marker_contract_sha256 "$database_marker")" == \
+              "$(retarget_receipt_value database_contract_sha256)" &&
+              "$(retarget_marker_contract_sha256 "$cutover_marker")" == \
+              "$(retarget_receipt_value cutover_contract_sha256)" ]] || return 1
+            trap - EXIT
+            retarget_cleanup_temporary_files
+            printf 'billing_cleanup_revision_retargeted=%s\n' "$next_cleanup_revision"
+          )
           checkout_verified_prod_revision() {
             local expected_revision="$1"
             local prefetched_revision="${2:-}"
@@ -8621,6 +9289,30 @@ jobs:
               echo "Verified prod checkout revision mismatch." >&2
               return 1
             }
+          }
+          checkout_retargeted_billing_cleanup_revision() {
+            [[ $# -eq 2 ]] || return 1
+            local expected_revision="$1" prefetched_revision="$2"
+            local current_revision
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$prefetched_revision" == "$expected_revision" ]] || return 1
+            current_revision="$(git rev-parse HEAD)"
+            guard_campaigns_checkout_before_pull "$current_revision"
+            guard_reporting_checkout_before_pull "$current_revision"
+            guard_widgets_checkout_before_pull "$current_revision"
+            guard_campaigns_checkout_before_pull "$expected_revision"
+            guard_reporting_checkout_before_pull "$expected_revision"
+            guard_widgets_checkout_before_pull "$expected_revision"
+            git cat-file -e "$prefetched_revision^{commit}" 2>/dev/null || return 1
+            guard_reporting_checkout_before_pull \
+              "$expected_revision" --guard-before-checkout-revision
+            guard_widgets_checkout_before_pull \
+              "$expected_revision" --guard-before-checkout-revision
+            git checkout prod
+            git merge --ff-only "$prefetched_revision"
+            [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || return 1
+            guard_billing_checkout_before_pull \
+              "$expected_revision" --guard-before-checkout-revision
           }
           current_revision="$(git rev-parse HEAD)"
           if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
@@ -8748,6 +9440,59 @@ jobs:
                 printf 'billing_core_cleanup_phase=not-staged\n'
                 printf 'billing_core_cleanup_candidate_revision=%s\n' "$EXPECTED_REVISION"
                 printf 'billing_core_cleanup_checkout_revision=%s\n' "$(git rev-parse HEAD)"
+                exit 0
+              fi
+              if [[ "$BILLING_CLEANUP_ACTION" == 'retarget' ]]; then
+                current_revision="$(git rev-parse HEAD)"
+                if [[ "$current_revision" == "$EXPECTED_REVISION" ]]; then
+                  retarget_receipt="$APP_ROOT/deploy/backend/.billing-cleanup-retarget-v1"
+                  [[ -f "$retarget_receipt" && ! -L "$retarget_receipt" &&
+                    "$(stat -c '%u:%g:%a' "$retarget_receipt")" == '0:0:600' ]] || {
+                    echo 'Completed Billing cleanup retarget receipt is unavailable.' >&2
+                    exit 1
+                  }
+                  previous_cleanup_revision="$(awk -F= '
+                    $1 == "previous_cleanup_revision" {
+                      print substr($0, index($0, "=") + 1)
+                      found += 1
+                    }
+                    END { exit(found == 1 ? 0 : 1) }
+                  ' "$retarget_receipt")" || exit 1
+                  retarget_billing_cleanup_revision \
+                    "$previous_cleanup_revision" "$EXPECTED_REVISION"
+                else
+                  guard_campaigns_checkout_before_pull "$current_revision"
+                  guard_reporting_checkout_before_pull "$current_revision"
+                  guard_widgets_checkout_before_pull "$current_revision"
+                  guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
+                  guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
+                  guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
+                  git fetch origin prod
+                  prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"
+                  [[ "$prefetched_cleanup_revision" == "$EXPECTED_REVISION" ]] || {
+                    echo 'Origin prod no longer matches the reviewed retarget revision.' >&2
+                    exit 1
+                  }
+                  guard_reporting_checkout_before_pull \
+                    "$EXPECTED_REVISION" --guard-before-checkout-revision
+                  guard_widgets_checkout_before_pull \
+                    "$EXPECTED_REVISION" --guard-before-checkout-revision
+                  retarget_billing_cleanup_revision \
+                    "$current_revision" "$EXPECTED_REVISION"
+                  checkout_retargeted_billing_cleanup_revision \
+                    "$EXPECTED_REVISION" "$prefetched_cleanup_revision"
+                fi
+                APP_ROOT="$APP_ROOT" bash scripts/billing-database-lifecycle.sh --status
+                APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                  bash scripts/cleanup-billing-core-source-production.sh --status
+                curl -fsS --connect-timeout 3 --max-time 5 \
+                  http://127.0.0.1:4100/health/ready >/dev/null
+                curl -fsS --connect-timeout 3 --max-time 5 \
+                  http://127.0.0.1:4200/api/v1/health/ready >/dev/null
+                curl -fsS --connect-timeout 3 --max-time 5 \
+                  https://api.winwidget.ru/api/v1/health/ready >/dev/null
+                printf 'billing_core_cleanup_retarget_checkout_revision=%s\n' \
+                  "$(git rev-parse HEAD)"
                 exit 0
               fi
               prefetched_cleanup_revision=''

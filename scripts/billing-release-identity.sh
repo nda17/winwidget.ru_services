@@ -220,6 +220,11 @@ billing_release_node_input_path_is_allowed() {
 }
 
 billing_release_node_docker() (
+	local read_stdin=false
+	if [[ "${1:-}" == '--billing-release-read-stdin' ]]; then
+		read_stdin=true
+		shift
+	fi
 	[[ $# -ge 1 ]] || return 1
 	billing_release_prepare_node_runtime || return 1
 	local app_root cleanup_root path variable argument mapped index existing docker_binary
@@ -266,11 +271,14 @@ billing_release_node_docker() (
 		container_paths+=('/billing-node-cleanup')
 	fi
 	docker_args=(
-		run --rm --interactive --network none --read-only --cap-drop ALL
+		run --rm --network none --read-only --cap-drop ALL
 		--pids-limit 64 --cpus 1 --memory 512m --memory-swap 512m
 		--log-driver none --user 0:0 --security-opt no-new-privileges
 		--entrypoint node
 	)
+	if [[ "$read_stdin" == 'true' ]]; then
+		docker_args+=(--interactive)
+	fi
 	if ((${#host_paths[@]})); then
 	for index in "${!host_paths[@]}"; do
 		path="${host_paths[$index]}"
@@ -312,12 +320,27 @@ billing_release_node_docker() (
 )
 
 billing_release_node() {
+	[[ $# -ge 1 ]] || return 1
 	if billing_release_host_node_available; then
 		"$BILLING_RELEASE_NODE_HOST_BINARY" "$@"
 		return
 	fi
 	billing_release_prepare_node_runtime || return 1
-	billing_release_node_docker "$@"
+	if [[ "$1" == '-' ]]; then
+		billing_release_node_docker --billing-release-read-stdin "$@"
+	else
+		billing_release_node_docker "$@"
+	fi
+}
+
+billing_release_node_stdin() {
+	[[ $# -ge 2 && "$1" == '-e' ]] || return 1
+	if billing_release_host_node_available; then
+		"$BILLING_RELEASE_NODE_HOST_BINARY" "$@"
+		return
+	fi
+	billing_release_prepare_node_runtime || return 1
+	billing_release_node_docker --billing-release-read-stdin "$@"
 }
 
 billing_release_node_runtime_self_test() (
@@ -395,7 +418,11 @@ case "$1 $2" in
 	fi
 	;;
 run\ --rm*)
-	if [[ -n "${FIELD:-}" ]]; then
+	if [[ "$*" == *' --interactive '* && "${*: -1}" == '-' ]]; then
+		printf 'heredoc-ok'
+	elif [[ "$*" == *' --interactive '* ]]; then
+		cat
+	elif [[ -n "${FIELD:-}" ]]; then
 		printf '%s' "$FIELD"
 	else
 		printf '%s' "${RECEIPT_FILE:-}"
@@ -412,18 +439,37 @@ MOCK
 		'process.stdout.write(process.env.FIELD)' >"$output_file"
 	output="$(<"$output_file")"
 	[[ "$output" == 'protocol' ]] || return 1
+	[[ "$(printf 'stdin-ok' | billing_release_node_stdin -e \
+		'process.stdout.write(require("node:fs").readFileSync(0, "utf8"))')" == \
+		'stdin-ok' ]] || return 1
+	[[ "$(billing_release_node_stdin -e \
+		'process.stdout.write(require("node:fs").readFileSync(0, "utf8"))' \
+		<<<'heredoc-ok')" == 'heredoc-ok' ]] || return 1
+	[[ "$(billing_release_node - <<'NODE'
+process.stdout.write('heredoc-ok');
+NODE
+	)" == 'heredoc-ok' ]] || return 1
 	: >"$output_file"
 	RECEIPT_FILE="$safe_input" EXPECTED_KIND=pre billing_release_node -e \
 		'process.stdout.write(process.env.RECEIPT_FILE)' >"$output_file"
 	output="$(<"$output_file")"
 	[[ "$output" == '/billing-node-input-0' ]] || return 1
+	! billing_release_node >/dev/null 2>&1
+	! billing_release_node_stdin >/dev/null 2>&1
 	log="$(<"$log_file")"
-	[[ "$log" == *'run --rm --interactive --network none --read-only --cap-drop ALL'* &&
+	[[ "$log" == *'run --rm --network none --read-only --cap-drop ALL'* &&
+		"$log" == *' --interactive '* &&
 		"$log" == *'--pids-limit 64 --cpus 1 --memory 512m --memory-swap 512m'* &&
 		"$log" == *'--log-driver none'* &&
 		"$log" == *'--security-opt no-new-privileges --entrypoint node'* &&
 		"$log" == *'--env FIELD'* && "$log" == *'--env RECEIPT_FILE'* &&
 		"$log" == *'--env EXPECTED_KIND'* &&
+		"$(awk '$1 == "run" && /--interactive/ { count += 1 } END { print count + 0 }' \
+			"$log_file")" == '3' &&
+		"$(awk '$1 == "run" && /--interactive/ && $NF == "-" { count += 1 } \
+			END { print count + 0 }' "$log_file")" == '1' &&
+		"$(awk '$1 == "run" && !/--interactive/ { count += 1 } END { print count + 0 }' \
+			"$log_file")" == '2' &&
 		"$log" == *"type=bind,source=$safe_input,target=/billing-node-input-0,readonly"* &&
 		"$(awk '$1 == "ps" && $2 == "--all" { count += 1 } END { print count + 0 }' \
 			"$log_file")" == '1' ]] || return 1
@@ -571,7 +617,7 @@ billing_read_env_value() {
 
 billing_normalize_libpq_url_value() {
 	[[ $# -eq 1 ]] || return 1
-	printf '%s\n' "$1" | billing_release_node -e '
+	printf '%s\n' "$1" | billing_release_node_stdin -e '
 		const fs = require("node:fs");
 		const raw = fs.readFileSync(0, "utf8");
 		if (!raw.endsWith("\n") || raw.slice(0, -1).includes("\n")) process.exit(1);

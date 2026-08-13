@@ -101,7 +101,7 @@ billing_deploy_verify_container_environment() {
 	[[ $# -eq 3 ]] || return 1
 	local container_id="$1" expected_role="$2" expected_revision="$3"
 	docker inspect "$container_id" | EXPECTED_ROLE="$expected_role" \
-		EXPECTED_REVISION="$expected_revision" billing_release_node -e '
+		EXPECTED_REVISION="$expected_revision" billing_release_node_stdin -e '
 const fs = require("node:fs");
 const documents = JSON.parse(fs.readFileSync(0, "utf8"));
 if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
