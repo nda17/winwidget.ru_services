@@ -6,7 +6,6 @@ export LC_ALL=C
 
 SOURCE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 APP_ROOT="${APP_ROOT:-$(cd -- "$SOURCE_ROOT/.." && pwd -P)}"
-SERVER_ROOT="$SOURCE_ROOT"
 # shellcheck source=scripts/billing-database-lifecycle.sh
 source "$SOURCE_ROOT/scripts/billing-database-lifecycle.sh"
 

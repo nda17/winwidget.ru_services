@@ -256,6 +256,8 @@ verify_complete_ownership_boundary() {
 		"$(billing_database_marker_value cleanup_revision)" == "$revision" &&
 		"$(billing_database_marker_value switch_generation)" == '2' ]] ||
 		fail 'Billing lifecycle is not complete generation 2 with this cleanup revision'
+	# Defined by the sourced billing database lifecycle contract.
+	# shellcheck disable=SC2154
 	[[ -f "$billing_cutover_marker" && ! -L "$billing_cutover_marker" &&
 		"$(stat -c '%u:%g:%a' "$billing_cutover_marker")" == '0:0:600' ]] ||
 		fail 'Billing cutover marker is unsafe'
@@ -275,6 +277,17 @@ verify_complete_ownership_boundary() {
 		fail 'Billing ownership evidence identity is invalid'
 	printf '%s\t%s\t%s\t%s\t%s\n' \
 		"$generation" "$snapshot" "$projection" "$route" "$database_id"
+}
+
+validate_gateway_container_routes() {
+	[[ $# -eq 1 ]] || return 1
+	GATEWAY_ROUTES="$1" node -e '
+const fs = require("node:fs");
+const documents = JSON.parse(fs.readFileSync(0, "utf8"));
+if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
+const values = documents[0].Config.Env.filter(value => value.startsWith("GATEWAY_ROUTES_JSON="));
+if (values.length !== 1 || values[0].slice("GATEWAY_ROUTES_JSON=".length) !== process.env.GATEWAY_ROUTES) process.exit(1);
+'
 }
 
 verify_route_contract() {
@@ -302,14 +315,7 @@ if (!routes.some(route => route?.pathPrefix === '/api/v1' &&
 NODE
 	gateway="$(compose_target "$revision" ps --status running -q api-gateway 2>/dev/null || true)"
 	[[ "$gateway" =~ ^[0-9a-f]{64}$ ]] || fail 'running Gateway is unavailable'
-	GATEWAY_ROUTES="$gateway_routes" docker inspect "$gateway" | \
-		GATEWAY_ROUTES="$gateway_routes" node <<'NODE'
-const fs = require('node:fs');
-const documents = JSON.parse(fs.readFileSync(0, 'utf8'));
-if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
-const values = documents[0].Config.Env.filter(value => value.startsWith('GATEWAY_ROUTES_JSON='));
-if (values.length !== 1 || values[0].slice('GATEWAY_ROUTES_JSON='.length) !== process.env.GATEWAY_ROUTES) process.exit(1);
-NODE
+	docker inspect "$gateway" | validate_gateway_container_routes "$gateway_routes"
 }
 
 generic_database_query() {
@@ -1487,7 +1493,7 @@ require_bound_pre_evidence() {
 stage_cleanup() {
 	local revision previous_revision marker_state identities core_image_id billing_image_id
 	local boundary generation snapshot projection route database_id directory core_image
-	local core_system billing_system core_sha billing_sha precommit writer_file boundary_state
+	local core_system billing_system core_sha billing_sha precommit writer_file
 	require_confirmation
 	assert_production_context
 	revision="$(assert_checkout)"
@@ -1561,7 +1567,7 @@ stage_cleanup() {
 		validate_private_file "$precommit" || fail 'writer precommit recovery manifest is unsafe'
 		load_stage_precommit "$precommit" "$previous_revision" "$revision" "$generation" \
 			"$snapshot" "$projection" "$route" || fail 'writer precommit recovery manifest is invalid'
-		boundary_state="$(stage_writer_boundary_state)" || fail 'writer precommit recovery boundary is unsafe'
+		stage_writer_boundary_state >/dev/null || fail 'writer precommit recovery boundary is unsafe'
 		archive_unbound_stage_artifacts "$directory" ||
 			fail 'could not preserve unbound evidence before stage retry'
 	else
@@ -1970,7 +1976,7 @@ show_status() {
 }
 
 self_test() {
-	local source revision previous sha directory receipt
+	local source revision previous sha directory receipt forbidden_cleanup_name forbidden_cleanup_status
 	revision='0123456789abcdef0123456789abcdef01234567'
 	previous='89abcdef0123456789abcdef0123456789abcdef'
 	sha="$(printf 'a%.0s' {1..64})"
@@ -1991,14 +1997,25 @@ if (value.artifacts.length !== 5 || value.action !== "billing-core-source-cleanu
 	[[ "$revision" != "$previous" && "$sha" =~ ^[0-9a-f]{64}$ ]]
 	[[ "$(billing_core_source_cleanup_recovery_action present unfinished)" == 'restore-exact' ]]
 	[[ "$(billing_core_source_cleanup_recovery_action absent unfinished)" == 'forward-only' ]]
+	printf '%s\n' \
+		'[{"Config":{"Env":["GATEWAY_ROUTES_JSON=[{\"id\":\"test\"}]"]}}]' | \
+		validate_gateway_container_routes '[{"id":"test"}]'
+	if printf '%s\n' \
+		'[{"Config":{"Env":["GATEWAY_ROUTES_JSON=[{\"id\":\"wrong\"}]"]}}]' | \
+		validate_gateway_container_routes '[{"id":"test"}]'; then
+		return 1
+	fi
 	source="$(<"${BASH_SOURCE[0]}")"
+	forbidden_cleanup_name='purge_completed_raw_''evidence'
+	forbidden_cleanup_status=0
+	grep -Fq -- "$forbidden_cleanup_name" "${BASH_SOURCE[0]}" || forbidden_cleanup_status=$?
+	[[ "$forbidden_cleanup_status" -eq 1 ]]
 	[[ "$source" == *'--stage|--seal-offsite|--run|--complete-offsite'* &&
 		"$source" == *'billing_core_source_cleanup_bind_staged_evidence'* &&
 		"$source" == *'billing_core_source_cleanup_advance_complete'* &&
 		"$source" == *'BILLING_CORE_SOURCE_CLEANUP_APPROVED=true'* &&
 		"$source" == *'queue-drain-evidence.json'* &&
-		"$source" == *'stopped-writers-evidence.json'* &&
-		"$source" != *'purge_completed_raw_evidence'* ]]
+		"$source" == *'stopped-writers-evidence.json'* ]]
 	RUNNER_SOURCE="$source" node <<'NODE'
 const source = process.env.RUNNER_SOURCE;
 const restart = source.indexOf('if restart_stage_writers; then');

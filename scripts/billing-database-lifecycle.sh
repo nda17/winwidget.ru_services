@@ -1600,6 +1600,7 @@ billing_database_lifecycle_self_test() {
 		billing_database_fail 'Billing lifecycle self-test allowed abort after the forward boundary.'
 		return 1
 	fi
+	! billing_core_source_cleanup_advance_applied unexpected-argument
 	[[ "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" =~ ^[0-9]{14}_[a-z0-9_]+$ &&
 		"$(billing_core_source_cleanup_migration_checksum)" =~ ^[0-9a-f]{64}$ &&
 		"${#BILLING_CANONICAL_CORE_SOURCE_TABLES[@]}" == '9' &&

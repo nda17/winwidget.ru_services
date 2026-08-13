@@ -231,6 +231,8 @@ prepared | source-frozen | imported | pre-backups-created | \
 	pre-restore-verified | projection-synced | forward-only | active | \
 	post-backup-created | post-restore-verified | complete)
 	billing_database_guard_revision "$deploy_revision" || exit 1
+	# Defined by the sourced billing database lifecycle contract.
+	# shellcheck disable=SC2154
 	[[ -f "$billing_cutover_marker" && ! -L "$billing_cutover_marker" &&
 		"$(stat -c '%u:%g:%a' "$billing_cutover_marker")" == '0:0:600' ]] || {
 		echo 'Billing routine deployment requires the durable post-migration cutover marker.' >&2

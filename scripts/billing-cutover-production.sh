@@ -1397,7 +1397,8 @@ billing_cutover_capture_auto_renewal_ownership() {
 	local evidence_stage="$4" destination="$5" expected_redeliver="$6"
 	local management_url monitor_user monitor_password evidence temporary image
 	local rabbit_container_id rabbit_restart_count rabbit_started_at
-	local rabbit_image_id
+	local rabbit_image_id rabbit_generation rabbit_snapshot_sha256
+	local rabbit_projection_sha256
 	management_url="$(billing_read_env_value "$ENV_FILE" RABBITMQ_MANAGEMENT_URL)"
 	monitor_user="$(billing_read_env_value "$ENV_FILE" RABBITMQ_MONITOR_USER)"
 	monitor_password="$(billing_read_env_value "$ENV_FILE" RABBITMQ_MONITOR_PASSWORD)"
@@ -1418,6 +1419,12 @@ billing_cutover_capture_auto_renewal_ownership() {
 	[[ "$rabbit_restart_count" =~ ^[0-9]+$ &&
 		"$rabbit_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
 		"$rabbit_started_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || return 1
+	rabbit_generation="$(billing_cutover_marker_value generation)" || return 1
+	rabbit_snapshot_sha256="$(billing_cutover_marker_value snapshot_sha256)" || return 1
+	rabbit_projection_sha256="$(billing_cutover_marker_value projection_sha256)" || return 1
+	[[ "$rabbit_generation" =~ ^[1-9][0-9]*$ &&
+		"$rabbit_snapshot_sha256" =~ ^[0-9a-f]{64}$ &&
+		"$rabbit_projection_sha256" =~ ^[0-9a-f]{64}$ ]] || return 1
 	export RABBITMQ_MANAGEMENT_URL="$management_url"
 	export RABBITMQ_MONITOR_USER="$monitor_user"
 	export RABBITMQ_MONITOR_PASSWORD="$monitor_password"
@@ -1431,13 +1438,10 @@ billing_cutover_capture_auto_renewal_ownership() {
 	export RABBITMQ_STARTED_AT="$rabbit_started_at"
 	export RABBITMQ_IMAGE_ID="$rabbit_image_id"
 	export RABBITMQ_REVISION="$EXPECTED_REVISION"
-	export RABBITMQ_GENERATION="$(billing_cutover_marker_value generation)"
+	export RABBITMQ_GENERATION="$rabbit_generation"
 	export RABBITMQ_VHOST='winwidget'
-	export RABBITMQ_SNAPSHOT_SHA256="$(billing_cutover_marker_value snapshot_sha256)"
-	export RABBITMQ_PROJECTION_SHA256="$(billing_cutover_marker_value projection_sha256)"
-	[[ "$RABBITMQ_GENERATION" =~ ^[1-9][0-9]*$ &&
-		"$RABBITMQ_SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ &&
-		"$RABBITMQ_PROJECTION_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
+	export RABBITMQ_SNAPSHOT_SHA256="$rabbit_snapshot_sha256"
+	export RABBITMQ_PROJECTION_SHA256="$rabbit_projection_sha256"
 	evidence="$(docker run --rm --network host \
 		-e RABBITMQ_MANAGEMENT_URL -e RABBITMQ_MONITOR_USER \
 		-e RABBITMQ_MONITOR_PASSWORD -e RABBITMQ_EXPECTED_CONSUMERS \
