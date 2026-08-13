@@ -167,7 +167,7 @@ apply_sql_file() {
 connection_url() {
 	local port="$1" database="$2" user="$3" password="$4" options="${5:-}"
 	BASE_REHEARSAL_URL="postgresql://$user:$password@127.0.0.1:$port/$database?schema=public&sslmode=disable" \
-		REHEARSAL_OPTIONS="$options" node <<'NODE'
+		REHEARSAL_OPTIONS="$options" billing_release_node <<'NODE'
 const url = new URL(process.env.BASE_REHEARSAL_URL);
 if (process.env.REHEARSAL_OPTIONS) url.searchParams.set('options', process.env.REHEARSAL_OPTIONS);
 process.stdout.write(url.toString().replace(/([?&]options=)([^&#]*)/, (_, prefix, value) =>
@@ -286,8 +286,7 @@ write_restore_evidence() {
 		OWNERSHIP_GENERATION="$generation" CORE_SHA="$core_sha" BILLING_SHA="$billing_sha" \
 		CORE_SOURCE="$core_source" CORE_RESTORE="$core_restore" BILLING_SOURCE="$billing_source" \
 		BILLING_RESTORE="$billing_restore" BILLING_DATABASE_ID="$database_id" \
-		VERIFIED_AT="$verified_at" node - "$partial" <<'NODE'
-const fs = require('node:fs');
+		VERIFIED_AT="$verified_at" billing_release_node <<'NODE' >"$partial"
 const pre = process.env.RESTORE_KIND === 'pre';
 const value = {
   schemaVersion: 1,
@@ -320,7 +319,7 @@ if (pre) value.billing = {
   phase: 'ACTIVE',
   ownershipGeneration: 2,
 };
-fs.writeFileSync(process.argv[2], `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+process.stdout.write(`${JSON.stringify(value)}\n`);
 NODE
 	chmod 600 "$partial"
 	mv -- "$partial" "$destination"
@@ -647,7 +646,7 @@ self_test() {
 		billing_stopped_writers_evidence_sha256 billing_retention_decision billing_retention_reference; do
 		[[ "$migration" == *"winwidget.$option"* ]] || fail "migration GUC missing: $option"
 	done
-	count="$(MIGRATION_SOURCE="$migration" node -e '
+	count="$(MIGRATION_SOURCE="$migration" billing_release_node -e '
 const keys = [...process.env.MIGRATION_SOURCE.matchAll(/winwidget\.(billing_[a-z0-9_]+)/g)].map(match => match[1]);
 process.stdout.write(String(new Set(keys).size));
 ')"
@@ -663,7 +662,7 @@ process.stdout.write(String(new Set(keys).size));
 		'1111111111111111111111111111111111111111' '2222222222222222222222222222222222222222' \
 		"${hashes[0]}" "${hashes[1]}" "${hashes[2]}" "${hashes[3]}" \
 		"${hashes[4]}" "${hashes[5]}" "${hashes[6]}" "${hashes[7]}")"
-	OPTIONS_URL="$options" node <<'NODE'
+	OPTIONS_URL="$options" billing_release_node <<'NODE'
 const url = new URL(process.env.OPTIONS_URL);
 const options = url.searchParams.get('options') || '';
 const pairs = [...options.matchAll(/-c winwidget\.([a-z0-9_]+)=([^ ]+)/g)]

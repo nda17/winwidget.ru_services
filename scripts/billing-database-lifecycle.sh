@@ -102,7 +102,7 @@ billing_database_url_field() {
 	[[ $# -eq 2 ]] || return 1
 	local raw
 	raw="$(billing_read_env_value "$ENV_FILE" "$1")" || return 1
-	printf '%s\n' "$raw" | FIELD="$2" node -e '
+	printf '%s\n' "$raw" | FIELD="$2" billing_release_node -e '
 		const fs = require("node:fs");
 		const raw = fs.readFileSync(0, "utf8");
 		if (!raw.endsWith("\n") || raw.slice(0, -1).includes("\n")) process.exit(1);
@@ -586,8 +586,8 @@ billing_database_reset_aborted_target() {
 		billing_database_fail 'Billing PostgreSQL container identity is ambiguous.' ||
 		return 1
 	if [[ -n "$container_id" ]]; then
-		EXPECTED_VOLUME="$billing_postgres_volume" docker inspect "$container_id" | \
-			node -e '
+		docker inspect "$container_id" | EXPECTED_VOLUME="$billing_postgres_volume" \
+			billing_release_node -e '
 const fs = require("node:fs");
 const documents = JSON.parse(fs.readFileSync(0, "utf8"));
 if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
@@ -1128,7 +1128,7 @@ billing_core_source_cleanup_migration_url() {
 		BILLING_CLEANUP_OFFSITE_RECEIPT="$offsite_receipt" \
 		BILLING_CLEANUP_QUEUE_DRAIN="$queue_drain" \
 		BILLING_CLEANUP_STOPPED_WRITERS="$stopped_writers" \
-		BILLING_CLEANUP_RETENTION_REFERENCE="$retention_reference" node <<'NODE'
+		BILLING_CLEANUP_RETENTION_REFERENCE="$retention_reference" billing_release_node <<'NODE'
 let databaseUrl;
 try {
   databaseUrl = new URL(process.env.BASE_DATABASE_URL);
@@ -1334,7 +1334,7 @@ WHERE migration_name = '$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME';
 
 billing_core_source_cleanup_migration_manifest_json() {
 	MIGRATIONS_ROOT="$server_root/prisma/migrations" \
-		CLEANUP_MIGRATION="$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" node <<'NODE'
+		CLEANUP_MIGRATION="$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" billing_release_node <<'NODE'
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -1369,7 +1369,7 @@ billing_core_source_cleanup_validate_migration_manifest_state() {
 	[[ $# -eq 3 && "$3" =~ ^(exclusive|applied)$ ]] || return 1
 	MIGRATION_MANIFEST_JSON="$1" MIGRATION_LEDGER_ROWS="$2" \
 		CLEANUP_MIGRATION="$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" \
-		EXPECTED_CLEANUP_STATE="$3" node <<'NODE'
+		EXPECTED_CLEANUP_STATE="$3" billing_release_node <<'NODE'
 let manifest;
 try { manifest = JSON.parse(process.env.MIGRATION_MANIFEST_JSON || ''); } catch { process.exit(1); }
 if (!manifest || Array.isArray(manifest)) process.exit(1);
@@ -1669,7 +1669,7 @@ billing_database_lifecycle_self_test() {
 		2 "$previous_revision" "$revision" "$cleanup_sha" "$cleanup_sha" \
 		"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" \
 		"$cleanup_sha")"
-	cleanup_options="$(CLEANUP_URL="$cleanup_url" node -e \
+	cleanup_options="$(CLEANUP_URL="$cleanup_url" billing_release_node -e \
 		'process.stdout.write(new URL(process.env.CLEANUP_URL).searchParams.get("options") ?? "")')"
 	[[ "$cleanup_url" == postgresql://migration:masked@127.0.0.1:55432/default_db* &&
 		"$cleanup_url" == *'%20'* && "$cleanup_url" != *'+'* &&

@@ -5690,6 +5690,7 @@ jobs:
               bash scripts/audit-legacy-telegram-channels-production.sh --self-test
             '
           node <<'NODE'
+          const { createHash } = require("node:crypto");
           const { readFileSync } = require("node:fs");
           const workflow = readFileSync(
             ".github/workflows/deploy-production.yml",
@@ -5807,7 +5808,105 @@ jobs:
             'echo "Billing marker exists but its checkout guard is unavailable." >&2',
             1,
           );
+          requireCount(
+            "stage_billing_cleanup_revision_with_container_node() (",
+            1,
+          );
+          requireCount(
+            'stage_billing_cleanup_revision_with_container_node \\',
+            1,
+          );
           const deployJob = workflow.slice(workflow.indexOf("\n  deploy:"));
+          const billingNodeBootstrapStart = deployJob.indexOf(
+            "stage_billing_cleanup_revision_with_container_node() (",
+          );
+          const billingNodeBootstrapEnd = deployJob.indexOf(
+            "\n          checkout_verified_prod_revision() {",
+            billingNodeBootstrapStart,
+          );
+          const billingNodeBootstrap = deployJob.slice(
+            billingNodeBootstrapStart,
+            billingNodeBootstrapEnd,
+          );
+          if (
+            billingNodeBootstrapStart < 0 ||
+            billingNodeBootstrapEnd <= billingNodeBootstrapStart
+          ) {
+            throw new Error(
+              "Billing cleanup legacy Node bootstrap is missing or misplaced",
+            );
+          }
+          for (const requiredBootstrapToken of [
+            "--filter 'label=com.docker.compose.project=winwidget'",
+            "--filter 'label=com.docker.compose.service=maintenance-worker'",
+            '[[ "${#canonical_containers[@]}" == \'1\' ]]',
+            '"$running" == \'true\' && "$restart_count" == \'0\'',
+            '"$container_revision" == "$current_revision"',
+            '"$app_revision" == "$current_revision"',
+            '"$image_revision" == "$current_revision"',
+            '"$image_user" == \'nestjs\'',
+            "unix:///var/run/docker.sock",
+            "^sha256:[0-9a-f]{64}$",
+            "/tmp/winwidget-billing-cleanup-node.XXXXXX",
+            "fff593a9f2fe2cf95ab5fb20ca537e4f0cc1d0ecfba186745b3491ecdb45936b",
+            "protocol|username|password|hostname|port|database|schema",
+            "--network none --read-only --user 65534:65534 --cap-drop ALL",
+            "--log-driver none",
+            "--security-opt no-new-privileges --entrypoint node",
+            'trap billing_cleanup_node_bootstrap_on_exit EXIT',
+            '--stage-cleanup-revision "$cleanup_revision"',
+          ]) {
+            if (!billingNodeBootstrap.includes(requiredBootstrapToken)) {
+              throw new Error(
+                `Billing cleanup Node bootstrap lost ${requiredBootstrapToken}`,
+              );
+            }
+          }
+          for (const forbiddenBootstrapToken of [
+            "apt ",
+            "apt-get ",
+            "apk ",
+            "docker exec",
+            "--volume",
+            "git checkout",
+            "git merge",
+          ]) {
+            if (billingNodeBootstrap.includes(forbiddenBootstrapToken)) {
+              throw new Error(
+                `Billing cleanup Node bootstrap contains forbidden operation ${forbiddenBootstrapToken}`,
+              );
+            }
+          }
+          const billingLifecycle = readFileSync(
+            "scripts/billing-database-lifecycle.sh",
+            "utf8",
+          );
+          const billingUrlFieldStart = billingLifecycle.indexOf(
+            "billing_database_url_field() {",
+          );
+          const billingUrlFieldEnd = billingLifecycle.indexOf(
+            "\n}\n\nbilling_database_validate_urls() {",
+            billingUrlFieldStart,
+          );
+          const billingUrlFieldFunction = billingLifecycle.slice(
+            billingUrlFieldStart,
+            billingUrlFieldEnd,
+          );
+          const billingUrlParserMatch = billingUrlFieldFunction.match(
+            / -e '([\s\S]*)'$/,
+          );
+          if (
+            billingUrlFieldStart < 0 ||
+            billingUrlFieldEnd <= billingUrlFieldStart ||
+            !billingUrlParserMatch ||
+            Buffer.byteLength(billingUrlParserMatch[1]) !== 658 ||
+            createHash("sha256").update(billingUrlParserMatch[1]).digest("hex") !==
+              "fff593a9f2fe2cf95ab5fb20ca537e4f0cc1d0ecfba186745b3491ecdb45936b"
+          ) {
+            throw new Error(
+              "Billing cleanup Node shim must stay pinned to the exact legacy URL parser",
+            );
+          }
           const cleanupDispatchStart = deployJob.indexOf(
             "\n            billing-cleanup)",
           );
@@ -5822,7 +5921,7 @@ jobs:
             'prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"',
           );
           const cleanupStageMarkerIndex = cleanupDispatch.indexOf(
-            '--stage-cleanup-revision "$EXPECTED_REVISION"',
+            "stage_billing_cleanup_revision_with_container_node",
           );
           const cleanupCheckoutIndex = cleanupDispatch.indexOf(
             '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
@@ -8263,6 +8362,215 @@ jobs:
               return 1
             fi
           }
+          stage_billing_cleanup_revision_with_container_node() (
+            [[ $# -eq 2 ]] || return 1
+            local current_revision="$1" cleanup_revision="$2"
+            local docker_path container_output candidate oneoff container_id
+            local project service running restart_count container_revision
+            local app_revision image_id inspected_image_id image_revision image_user
+            local shim_dir=''
+            local status cleanup_status
+            local -a canonical_containers=()
+
+            billing_cleanup_node_bootstrap_cleanup() {
+              [[ -n "$shim_dir" ]] || return 0
+              [[ "$shim_dir" =~ ^/tmp/winwidget-billing-cleanup-node\.[A-Za-z0-9]{6}$ &&
+                -d "$shim_dir" && ! -L "$shim_dir" &&
+                "$(stat -c '%u:%g:%a' "$shim_dir")" == '0:0:700' ]] ||
+                return 1
+              rm -f -- "$shim_dir/node" || return 1
+              rmdir -- "$shim_dir" || return 1
+              shim_dir=''
+            }
+
+            billing_cleanup_node_bootstrap_on_exit() {
+              status=$?
+              set +e
+              billing_cleanup_node_bootstrap_cleanup
+              cleanup_status=$?
+              trap - EXIT
+              if [[ "$status" == '0' && "$cleanup_status" != '0' ]]; then
+                status="$cleanup_status"
+              fi
+              exit "$status"
+            }
+            trap billing_cleanup_node_bootstrap_on_exit EXIT
+
+            [[ "$current_revision" =~ ^[0-9a-f]{40}$ &&
+              "$cleanup_revision" =~ ^[0-9a-f]{40}$ &&
+              "$current_revision" != "$cleanup_revision" ]] || {
+              echo 'Billing cleanup Node bootstrap revisions are invalid.' >&2
+              return 1
+            }
+            [[ "$(id -u)" == '0' && "$(uname -s)" == 'Linux' &&
+              -z "${DOCKER_HOST+x}" && -z "${DOCKER_CONTEXT+x}" ]] || {
+              echo 'Billing cleanup Node bootstrap requires the local root Docker context.' >&2
+              return 1
+            }
+            docker_path="$(type -P docker)" || return 1
+            docker_path="$(readlink -f "$docker_path")" || return 1
+            [[ "$docker_path" =~ ^/[A-Za-z0-9._/+:-]+$ &&
+              -f "$docker_path" && ! -L "$docker_path" &&
+              -x "$docker_path" ]] || {
+              echo 'Billing cleanup Node bootstrap requires a trusted Docker CLI.' >&2
+              return 1
+            }
+            [[ "$("$docker_path" context show)" == 'default' &&
+              "$("$docker_path" context inspect default --format \
+                '{{.Endpoints.docker.Host}}')" == 'unix:///var/run/docker.sock' &&
+              "$("$docker_path" info --format '{{.OSType}}')" == 'linux' ]] || {
+              echo 'Billing cleanup Node bootstrap rejected a non-local Docker daemon.' >&2
+              return 1
+            }
+            container_output="$(
+              "$docker_path" ps --no-trunc --filter status=running \
+                --filter 'label=com.docker.compose.project=winwidget' \
+                --filter 'label=com.docker.compose.service=maintenance-worker' \
+                --format '{{.ID}}'
+            )" || return 1
+            while IFS= read -r candidate; do
+              [[ -n "$candidate" ]] || continue
+              [[ "$candidate" =~ ^[0-9a-f]{64}$ ]] || {
+                echo 'Maintenance worker container identity is invalid.' >&2
+                return 1
+              }
+              oneoff="$(
+                "$docker_path" inspect --format \
+                  '{{index .Config.Labels "com.docker.compose.oneoff"}}' \
+                  "$candidate"
+              )" || return 1
+              if [[ "$oneoff" =~ ^[Ff]alse$ ]]; then
+                canonical_containers+=("$candidate")
+              fi
+            done <<<"$container_output"
+            [[ "${#canonical_containers[@]}" == '1' ]] || {
+              echo 'Exactly one running canonical maintenance worker is required.' >&2
+              return 1
+            }
+            container_id="${canonical_containers[0]}"
+            project="$(
+              "$docker_path" inspect --format \
+                '{{index .Config.Labels "com.docker.compose.project"}}' \
+                "$container_id"
+            )" || return 1
+            service="$(
+              "$docker_path" inspect --format \
+                '{{index .Config.Labels "com.docker.compose.service"}}' \
+                "$container_id"
+            )" || return 1
+            oneoff="$(
+              "$docker_path" inspect --format \
+                '{{index .Config.Labels "com.docker.compose.oneoff"}}' \
+                "$container_id"
+            )" || return 1
+            running="$(
+              "$docker_path" inspect --format '{{.State.Running}}' "$container_id"
+            )" || return 1
+            restart_count="$(
+              "$docker_path" inspect --format '{{.RestartCount}}' "$container_id"
+            )" || return 1
+            container_revision="$(
+              "$docker_path" inspect --format \
+                '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+                "$container_id"
+            )" || return 1
+            app_revision="$(
+              "$docker_path" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+                "$container_id" | awk -F= '
+                  $1 == "APP_REVISION" {
+                    print substr($0, index($0, "=") + 1)
+                    found += 1
+                  }
+                  END { exit(found == 1 ? 0 : 1) }
+                '
+            )" || return 1
+            image_id="$(
+              "$docker_path" inspect --format '{{.Image}}' "$container_id"
+            )" || return 1
+            [[ "$container_id" =~ ^[0-9a-f]{64}$ &&
+              "$project" == 'winwidget' &&
+              "$service" == 'maintenance-worker' &&
+              "$oneoff" =~ ^[Ff]alse$ &&
+              "$running" == 'true' && "$restart_count" == '0' &&
+              "$container_revision" == "$current_revision" &&
+              "$app_revision" == "$current_revision" &&
+              "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo 'Canonical maintenance worker failed the Node bootstrap identity gate.' >&2
+              return 1
+            }
+            inspected_image_id="$(
+              "$docker_path" image inspect --format '{{.Id}}' "$image_id"
+            )" || return 1
+            image_revision="$(
+              "$docker_path" image inspect --format \
+                '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+                "$image_id"
+            )" || return 1
+            image_user="$(
+              "$docker_path" image inspect --format '{{.Config.User}}' "$image_id"
+            )" || return 1
+            [[ "$inspected_image_id" == "$image_id" &&
+              "$image_revision" == "$current_revision" &&
+              "$image_user" == 'nestjs' ]] || {
+              echo 'Maintenance worker image failed the immutable revision gate.' >&2
+              return 1
+            }
+
+            umask 077
+            shim_dir="$(mktemp -d /tmp/winwidget-billing-cleanup-node.XXXXXX)" ||
+              return 1
+            [[ "$shim_dir" =~ ^/tmp/winwidget-billing-cleanup-node\.[A-Za-z0-9]{6}$ &&
+              -d "$shim_dir" && ! -L "$shim_dir" &&
+              "$(stat -c '%u:%g:%a' "$shim_dir")" == '0:0:700' ]] ||
+              return 1
+            export BILLING_CLEANUP_BOOTSTRAP_DOCKER="$docker_path"
+            export BILLING_CLEANUP_BOOTSTRAP_NODE_IMAGE="$image_id"
+            cat >"$shim_dir/node" <<'BILLING_CLEANUP_NODE_SHIM'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          [[ $# == 2 && "$1" == '-e' && ${#2} == 658 ]] || exit 1
+          parser_sha256="$(printf '%s' "$2" | sha256sum)"
+          parser_sha256="${parser_sha256%% *}"
+          [[ "$parser_sha256" == \
+            'fff593a9f2fe2cf95ab5fb20ca537e4f0cc1d0ecfba186745b3491ecdb45936b' ]] ||
+            exit 1
+          case "${FIELD:-}" in
+            protocol|username|password|hostname|port|database|schema) ;;
+            *) exit 1 ;;
+          esac
+          [[ "${BILLING_CLEANUP_BOOTSTRAP_DOCKER:-}" =~ \
+            ^/[A-Za-z0-9._/+:-]+$ &&
+            -x "$BILLING_CLEANUP_BOOTSTRAP_DOCKER" &&
+            "${BILLING_CLEANUP_BOOTSTRAP_NODE_IMAGE:-}" =~ \
+            ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          billing_url=''
+          IFS= read -r billing_url || exit 1
+          [[ -n "$billing_url" && "$billing_url" != *$'\r'* ]] || exit 1
+          remainder=''
+          if IFS= read -r remainder || [[ -n "$remainder" ]]; then
+            exit 1
+          fi
+          printf '%s\n' "$billing_url" | \
+            "$BILLING_CLEANUP_BOOTSTRAP_DOCKER" run --rm --interactive \
+              --network none --read-only --user 65534:65534 --cap-drop ALL \
+              --pids-limit 64 --cpus 1 --memory 512m --memory-swap 512m \
+              --log-driver none --security-opt no-new-privileges --entrypoint node \
+              --env "FIELD=$FIELD" \
+              "$BILLING_CLEANUP_BOOTSTRAP_NODE_IMAGE" -e "$2"
+          BILLING_CLEANUP_NODE_SHIM
+            chown 0:0 "$shim_dir/node"
+            chmod 700 "$shim_dir/node"
+            [[ -f "$shim_dir/node" && ! -L "$shim_dir/node" &&
+              "$(stat -c '%u:%g:%a' "$shim_dir/node")" == '0:0:700' ]] ||
+              return 1
+
+            PATH="$shim_dir:$PATH" \
+              APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$current_revision" \
+              BILLING_CLEANUP_STAGE_CONFIRMATION='STAGE BILLING CLEANUP REVISION' \
+              bash scripts/billing-cutover-production.sh \
+                --stage-cleanup-revision "$cleanup_revision"
+          )
           checkout_verified_prod_revision() {
             local expected_revision="$1"
             local prefetched_revision="${2:-}"
@@ -8452,10 +8760,8 @@ jobs:
                   echo 'Origin prod no longer matches the reviewed cleanup revision; marker was not changed.' >&2
                   exit 1
                 }
-                APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$current_revision" \
-                  BILLING_CLEANUP_STAGE_CONFIRMATION='STAGE BILLING CLEANUP REVISION' \
-                  bash scripts/billing-cutover-production.sh \
-                    --stage-cleanup-revision "$EXPECTED_REVISION"
+                stage_billing_cleanup_revision_with_container_node \
+                  "$current_revision" "$EXPECTED_REVISION"
               fi
               checkout_verified_prod_revision \
                 "$EXPECTED_REVISION" "$prefetched_cleanup_revision"

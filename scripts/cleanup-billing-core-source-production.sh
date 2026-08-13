@@ -281,7 +281,7 @@ verify_complete_ownership_boundary() {
 
 validate_gateway_container_routes() {
 	[[ $# -eq 1 ]] || return 1
-	GATEWAY_ROUTES="$1" node -e '
+	GATEWAY_ROUTES="$1" billing_release_node -e '
 const fs = require("node:fs");
 const documents = JSON.parse(fs.readFileSync(0, "utf8"));
 if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
@@ -293,7 +293,7 @@ if (values.length !== 1 || values[0].slice("GATEWAY_ROUTES_JSON=".length) !== pr
 verify_route_contract() {
 	local revision="$1" gateway gateway_routes
 	gateway_routes="$(get_env_value GATEWAY_ROUTES_JSON)" || return 1
-	GATEWAY_ROUTES="$gateway_routes" node <<'NODE'
+	GATEWAY_ROUTES="$gateway_routes" billing_release_node <<'NODE'
 const expected = [
   ['/api/v1/payments', 'billing-payments'],
   ['/api/v1/subscriptions', 'billing-subscriptions'],
@@ -443,8 +443,7 @@ write_stage_precommit() {
 	WRITER_RECORDS="$records" PREVIOUS_REVISION="$previous_revision" \
 		CLEANUP_REVISION="$revision" OWNERSHIP_GENERATION="$generation" \
 		SOURCE_SNAPSHOT="$snapshot" PROJECTION_EVIDENCE="$projection" \
-		ROUTE_EVIDENCE="$route" CAPTURED_AT="$captured_at" node - "$partial" <<'NODE'
-const fs = require('node:fs');
+		ROUTE_EVIDENCE="$route" CAPTURED_AT="$captured_at" billing_release_node <<'NODE' >"$partial"
 const services = process.env.WRITER_RECORDS.trim().split('\n').map(line => {
   const [service, containerId, imageId, imageRevision, appRevision] = line.split('\t');
   return { service, containerId, imageId, imageRevision, appRevision, state: 'running' };
@@ -462,7 +461,7 @@ const value = {
   services,
   capturedAt: process.env.CAPTURED_AT,
 };
-fs.writeFileSync(process.argv[2], `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+process.stdout.write(`${JSON.stringify(value)}\n`);
 NODE
 	chown 0:0 "$partial"
 	chmod 600 "$partial"
@@ -474,7 +473,7 @@ load_stage_precommit() {
 	local output service container_id image_id image_revision app_revision state
 	output="$(WRITER_FILE="$1" PREVIOUS_REVISION="$2" CLEANUP_REVISION="$3" \
 		OWNERSHIP_GENERATION="$4" SOURCE_SNAPSHOT="$5" PROJECTION_EVIDENCE="$6" \
-		ROUTE_EVIDENCE="$7" node <<'NODE'
+		ROUTE_EVIDENCE="$7" billing_release_node <<'NODE'
 const fs = require('node:fs');
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).sort().join('|') === [...keys].sort().join('|');
@@ -582,8 +581,7 @@ write_writer_evidence() {
 	WRITER_RECORDS="$records" PREVIOUS_REVISION="$previous_revision" \
 		CLEANUP_REVISION="$revision" OWNERSHIP_GENERATION="$generation" \
 		SOURCE_SNAPSHOT="$snapshot" PROJECTION_EVIDENCE="$projection" \
-		ROUTE_EVIDENCE="$route" CAPTURED_AT="$captured_at" node - "$partial" <<'NODE'
-const fs = require('node:fs');
+		ROUTE_EVIDENCE="$route" CAPTURED_AT="$captured_at" billing_release_node <<'NODE' >"$partial"
 const services = process.env.WRITER_RECORDS.trim().split('\n').map(line => {
   const [service, containerId, imageId, imageRevision, appRevision, exitCode] = line.split('\t');
   return { service, containerId, imageId, imageRevision, appRevision,
@@ -601,7 +599,7 @@ const value = {
   services,
   capturedAt: process.env.CAPTURED_AT,
 };
-fs.writeFileSync(process.argv[2], `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+process.stdout.write(`${JSON.stringify(value)}\n`);
 NODE
 	chown 0:0 "$partial"
 	chmod 600 "$partial"
@@ -612,7 +610,7 @@ validate_writer_evidence() {
 	[[ $# -eq 7 ]] || return 1
 	WRITER_FILE="$1" PREVIOUS_REVISION="$2" CLEANUP_REVISION="$3" \
 		OWNERSHIP_GENERATION="$4" SOURCE_SNAPSHOT="$5" \
-		PROJECTION_EVIDENCE="$6" ROUTE_EVIDENCE="$7" node <<'NODE'
+		PROJECTION_EVIDENCE="$6" ROUTE_EVIDENCE="$7" billing_release_node <<'NODE'
 const fs = require('node:fs');
 const expectedServices = [
   'api-gateway','campaigns-service','api','outbox-publisher','maintenance-worker',
@@ -652,7 +650,7 @@ load_writer_evidence() {
 	[[ $# -eq 7 ]] || return 1
 	validate_writer_evidence "$@" || return 1
 	local output service container_id image_id image_revision app_revision
-	output="$(WRITER_FILE="$1" node <<'NODE'
+	output="$(WRITER_FILE="$1" billing_release_node <<'NODE'
 const value = JSON.parse(require('node:fs').readFileSync(process.env.WRITER_FILE, 'utf8'));
 for (const item of value.services)
   process.stdout.write([item.service,item.containerId,item.imageId,item.imageRevision,item.appRevision].join('\t') + '\n');
@@ -760,7 +758,7 @@ read_queue_listing() {
 require_stopped_queue_boundary() {
 	local listing
 	listing="$(read_queue_listing "$1")" || return 1
-	QUEUE_LISTING="$listing" node <<'NODE'
+	QUEUE_LISTING="$listing" billing_release_node <<'NODE'
 const rows = process.env.QUEUE_LISTING.trim().split('\n').filter(Boolean)
   .map(line => line.trim().split(/\s+/));
 const actual = new Map();
@@ -792,7 +790,7 @@ NODE
 
 validate_live_broker_from_queue_evidence() {
 	local revision="$1" evidence="$2" expected rabbitmq actual vhost
-	expected="$(QUEUE_FILE="$evidence" node <<'NODE'
+	expected="$(QUEUE_FILE="$evidence" billing_release_node <<'NODE'
 const value = JSON.parse(require('node:fs').readFileSync(process.env.QUEUE_FILE, 'utf8'));
 const broker = value.rabbitmq;
 process.stdout.write([broker.imageId,broker.vhost].join('\t'));
@@ -819,7 +817,7 @@ retired_outcome_topology_contract() {
 	queues="$(docker exec "$rabbitmq" rabbitmqctl --silent list_queues -p "$vhost" name)" || return 1
 	bindings="$(docker exec "$rabbitmq" rabbitmqctl --silent list_bindings -p "$vhost" destination_name)" || return 1
 	RABBITMQ_IMAGE_ID="$image_id" RABBITMQ_VHOST_VALUE="$vhost" \
-		RABBITMQ_QUEUE_NAMES="$queues" RABBITMQ_BINDING_DESTINATIONS="$bindings" node <<'NODE'
+		RABBITMQ_QUEUE_NAMES="$queues" RABBITMQ_BINDING_DESTINATIONS="$bindings" billing_release_node <<'NODE'
 const crypto = require('node:crypto');
 const retiredQueues = [
   'winwidget.notification.delivery-outcome',
@@ -1187,8 +1185,7 @@ write_queue_evidence() {
 		PREVIOUS_REVISION="$previous_revision" CLEANUP_REVISION="$revision" \
 		OWNERSHIP_GENERATION="$generation" SOURCE_SNAPSHOT="$snapshot" \
 		PROJECTION_EVIDENCE="$projection" ROUTE_EVIDENCE="$route" \
-		CAPTURED_AT="$captured_at" node - "$partial" <<'NODE'
-const fs = require('node:fs');
+		CAPTURED_AT="$captured_at" billing_release_node <<'NODE' >"$partial"
 const rows = process.env.QUEUE_LISTING.trim().split('\n').filter(Boolean)
   .map(line => line.trim().split(/\s+/));
 const actual = new Map(rows.map(([name, ready, unacked, consumers]) => [name, {
@@ -1240,7 +1237,7 @@ const value = {
   },
   capturedAt: process.env.CAPTURED_AT,
 };
-fs.writeFileSync(process.argv[2], `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+process.stdout.write(`${JSON.stringify(value)}\n`);
 NODE
 	chown 0:0 "$partial"
 	chmod 600 "$partial"
@@ -1251,7 +1248,7 @@ validate_queue_evidence() {
 	[[ $# -eq 7 ]] || return 1
 	QUEUE_FILE="$1" PREVIOUS_REVISION="$2" CLEANUP_REVISION="$3" \
 		OWNERSHIP_GENERATION="$4" SOURCE_SNAPSHOT="$5" \
-		PROJECTION_EVIDENCE="$6" ROUTE_EVIDENCE="$7" node <<'NODE'
+		PROJECTION_EVIDENCE="$6" ROUTE_EVIDENCE="$7" billing_release_node <<'NODE'
 const fs = require('node:fs');
 let value;
 try { value = JSON.parse(fs.readFileSync(process.env.QUEUE_FILE, 'utf8')); } catch { process.exit(1); }
@@ -1304,7 +1301,7 @@ validate_restore_evidence() {
 	RESTORE_FILE="$1" EXPECTED_KIND="$2" PREVIOUS_REVISION="$3" \
 		CLEANUP_REVISION="$4" OWNERSHIP_GENERATION="$5" CORE_SHA="$6" \
 		BILLING_SHA="$7" CORE_SYSTEM_ID="$8" BILLING_SYSTEM_ID="$9" \
-		BILLING_DATABASE_ID_VALUE="${10}" node <<'NODE'
+		BILLING_DATABASE_ID_VALUE="${10}" billing_release_node <<'NODE'
 const fs = require('node:fs');
 let value;
 try { value = JSON.parse(fs.readFileSync(process.env.RESTORE_FILE, 'utf8')); } catch { process.exit(1); }
@@ -1413,7 +1410,7 @@ reference_is_safe() {
 validate_offsite_receipt() {
 	[[ $# -eq 4 ]] || return 1
 	local receipt="$1" kind="$2" directory="$3" expected_post_sha="$4" metadata
-	metadata="$(RECEIPT_FILE="$receipt" EXPECTED_KIND="$kind" node <<'NODE'
+	metadata="$(RECEIPT_FILE="$receipt" EXPECTED_KIND="$kind" billing_release_node <<'NODE'
 const fs = require('node:fs');
 let value;
 try { value = JSON.parse(fs.readFileSync(process.env.RECEIPT_FILE, 'utf8')); } catch { process.exit(1); }
@@ -1441,7 +1438,7 @@ NODE
 		EXPECTED_REVISION="$(billing_core_source_cleanup_marker_value revision)" \
 		EXPECTED_GENERATION="$(billing_core_source_cleanup_marker_value ownership_generation)" \
 		EXPECTED_SNAPSHOT="$(billing_core_source_cleanup_marker_value source_snapshot_sha256)" \
-		EXPECTED_POST_SHA="$expected_post_sha" node <<'NODE'
+		EXPECTED_POST_SHA="$expected_post_sha" billing_release_node <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -1815,8 +1812,7 @@ write_completion_evidence() {
 		POST_RESTORE_SHA="$post_restore_sha" PRE_RECEIPT_SHA="$pre_receipt_sha" \
 		POST_RECEIPT_SHA="$post_receipt_sha" RETIRED_TOPOLOGY_SHA="$retired_topology_sha" \
 		VERIFIED_AT="$verified_at" \
-		node - "$partial" <<'NODE'
-const fs = require('node:fs');
+		billing_release_node <<'NODE' >"$partial"
 const value = {
   schemaVersion: 1,
   action: 'billing-core-source-cleanup-complete',
@@ -1837,7 +1833,7 @@ const value = {
   retiredOutcomeTopologyContractSha256: process.env.RETIRED_TOPOLOGY_SHA,
   verifiedAt: process.env.VERIFIED_AT,
 };
-fs.writeFileSync(process.argv[2], `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
+process.stdout.write(`${JSON.stringify(value)}\n`);
 NODE
 	chown 0:0 "$partial"
 	chmod 600 "$partial"
@@ -1848,7 +1844,7 @@ validate_completion_evidence() {
 	[[ $# -eq 9 ]] || return 1
 	COMPLETION_FILE="$1" COMPLETION_REVISION="$2" PREVIOUS_REVISION="$3" \
 		OWNERSHIP_GENERATION="$4" POST_SHA="$5" POST_RESTORE_SHA="$6" \
-		PRE_RECEIPT_SHA="$7" POST_RECEIPT_SHA="$8" RETIRED_TOPOLOGY_SHA="$9" node <<'NODE'
+		PRE_RECEIPT_SHA="$7" POST_RECEIPT_SHA="$8" RETIRED_TOPOLOGY_SHA="$9" billing_release_node <<'NODE'
 const fs = require('node:fs');
 let value;
 try { value = JSON.parse(fs.readFileSync(process.env.COMPLETION_FILE, 'utf8')); } catch { process.exit(1); }
@@ -1989,7 +1985,7 @@ self_test() {
 	printf '%s\n' \
 		'{"schemaVersion":1,"action":"billing-core-source-cleanup-pre-offsite","status":"verified","provider":"operator-managed-macos","providerReference":"macos-offsite:billing-cleanup-verified-001","cleanupRevision":"0123456789abcdef0123456789abcdef01234567","ownershipGeneration":2,"sourceSnapshotSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifacts":[{"name":"billing-pre-cleanup.dump","sizeBytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"name":"core-pre-cleanup.dump","sizeBytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"name":"pre-restore-evidence.json","sizeBytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"name":"queue-drain-evidence.json","sizeBytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"name":"stopped-writers-evidence.json","sizeBytes":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],"verifiedAt":"2026-08-13T00:00:00Z"}' \
 		>"$receipt"
-	RECEIPT_FILE="$receipt" EXPECTED_KIND=pre node -e '
+	RECEIPT_FILE="$receipt" EXPECTED_KIND=pre billing_release_node -e '
 const fs = require("node:fs");
 const value = JSON.parse(fs.readFileSync(process.env.RECEIPT_FILE, "utf8"));
 if (value.artifacts.length !== 5 || value.action !== "billing-core-source-cleanup-pre-offsite") process.exit(1);
@@ -2016,7 +2012,7 @@ if (value.artifacts.length !== 5 || value.action !== "billing-core-source-cleanu
 		"$source" == *'BILLING_CORE_SOURCE_CLEANUP_APPROVED=true'* &&
 		"$source" == *'queue-drain-evidence.json'* &&
 		"$source" == *'stopped-writers-evidence.json'* ]]
-	RUNNER_SOURCE="$source" node <<'NODE'
+	RUNNER_SOURCE="$source" billing_release_node <<'NODE'
 const source = process.env.RUNNER_SOURCE;
 const restart = source.indexOf('if restart_stage_writers; then');
 const restartArchive = source.indexOf('archive_unbound_stage_artifacts "$(dirname -- "$STAGE_PRECOMMIT_FILE")"', restart);

@@ -101,7 +101,7 @@ billing_deploy_verify_container_environment() {
 	[[ $# -eq 3 ]] || return 1
 	local container_id="$1" expected_role="$2" expected_revision="$3"
 	docker inspect "$container_id" | EXPECTED_ROLE="$expected_role" \
-		EXPECTED_REVISION="$expected_revision" node -e '
+		EXPECTED_REVISION="$expected_revision" billing_release_node -e '
 const fs = require("node:fs");
 const documents = JSON.parse(fs.readFileSync(0, "utf8"));
 if (!Array.isArray(documents) || documents.length !== 1) process.exit(1);
@@ -236,7 +236,7 @@ billing_deploy_run() {
 }
 
 billing_deploy_self_test() {
-	local source
+	local source self_test_node
 	source="$(declare -f billing_deploy_require_boundary billing_deploy_run \
 		billing_deploy_verify_container_environment billing_deploy_verify_service)"
 	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
@@ -252,7 +252,10 @@ billing_deploy_self_test() {
 		"$source" == *'WIDGETS_INTERNAL_BASE_URL'* &&
 		"$source" == *'Billing PostgreSQL identity changed during deployment.'* ]] ||
 		return 1
-	node - "$COMPOSE_FILE" "$server_root/apps/billing/Dockerfile" <<'NODE'
+	self_test_node="$(type -P node 2>/dev/null || true)"
+	[[ -n "$self_test_node" && -x "$self_test_node" ]] ||
+		billing_deploy_fail 'Billing deploy self-test requires host Node.' || return 1
+	"$self_test_node" - "$COMPOSE_FILE" "$server_root/apps/billing/Dockerfile" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
 const composePath = path.resolve(process.argv[2]);
