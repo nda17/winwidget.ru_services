@@ -26,44 +26,12 @@ export class BillingCoreStateService {
 		return (await this.get()).ownership === BillingCoreOwnership.BILLING;
 	}
 
-	async isLegacyWriter(): Promise<boolean> {
-		const state = await this.get();
-		return (
-			state.ownership === BillingCoreOwnership.CORE &&
-			state.sourceProducersEnabled
-		);
-	}
-
-	async isSchedulerEnabled(): Promise<boolean> {
-		return (await this.get()).schedulerEnabled;
-	}
-
-	async assertSchedulerEnabled(): Promise<void> {
-		if (!(await this.isSchedulerEnabled())) {
+	async assertBillingOwner(): Promise<void> {
+		if (!(await this.isBillingOwner())) {
 			throw new ServiceUnavailableException(
-				'Legacy Core Billing scheduler is fenced'
+				'Billing service ownership is unavailable'
 			);
 		}
-	}
-
-	async assertLegacyRouteEnabled(): Promise<void> {
-		if (!(await this.get()).legacyRoutesEnabled) {
-			throw new ServiceUnavailableException(
-				'Legacy Core Billing route is fenced'
-			);
-		}
-	}
-
-	async assertLegacyConsumerEnabled(): Promise<void> {
-		if (!(await this.isLegacyConsumerEnabled())) {
-			throw new ServiceUnavailableException(
-				'Legacy Core Billing consumer is fenced'
-			);
-		}
-	}
-
-	async isLegacyConsumerEnabled(): Promise<boolean> {
-		return (await this.get()).legacyConsumerEnabled;
 	}
 
 	async assertProjectionConsumerEnabled(): Promise<void> {

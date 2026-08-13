@@ -51,7 +51,8 @@ describe('BillingMessagingAdminService overview', () => {
 					status: 'ready',
 					service: 'billing',
 					role: rolesByPort[url.port],
-					revision: 'a'.repeat(40)
+					revision: 'a'.repeat(40),
+					...(url.port === '4802' ? { providers: { yookassa: true } } : {})
 				})
 			} as unknown as Response;
 		});
@@ -71,6 +72,7 @@ describe('BillingMessagingAdminService overview', () => {
 					UNCLASSIFIED: 1
 				}
 			},
+			providers: { yookassa: true },
 			heartbeats: [
 				{
 					service: 'billing-api',
@@ -94,6 +96,34 @@ describe('BillingMessagingAdminService overview', () => {
 			]
 		});
 		expect(global.fetch).toHaveBeenCalledTimes(4);
+	});
+
+	it('accepts an older worker readiness while omitting provider state', async () => {
+		const rolesByPort: Record<string, string> = {
+			'4800': 'api',
+			'4801': 'scheduler',
+			'4802': 'worker',
+			'4803': 'outbox-publisher'
+		};
+		global.fetch = jest.fn(async input => {
+			const url = new URL(String(input));
+			return {
+				ok: true,
+				json: jest.fn().mockResolvedValue({
+					status: 'ready',
+					service: 'billing',
+					role: rolesByPort[url.port],
+					revision: 'a'.repeat(40)
+				})
+			} as unknown as Response;
+		});
+
+		const overview = await createService().overview();
+
+		expect(overview).not.toHaveProperty('providers');
+		expect(
+			overview.heartbeats.find(item => item.service === 'billing-worker')
+		).toMatchObject({ status: 'ok', activeInstances: 1 });
 	});
 
 	it('marks only the unavailable role down without exposing probe errors', async () => {

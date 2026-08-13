@@ -14,6 +14,28 @@ readonly billing_postgres_image='postgres:18-bookworm@sha256:1961f96e6029a02c381
 readonly billing_postgres_port='55437'
 readonly billing_postgres_volume='winwidget-billing-postgres-data'
 readonly billing_postgres_admin='winwidget_billing_admin'
+readonly BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME='20260813000000_remove_legacy_billing_core_source'
+readonly BILLING_CORE_SOURCE_CLEANUP_MARKER_NAME='.billing-core-source-cleanup-v1'
+readonly billing_core_postgres_image='postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
+BILLING_CANONICAL_CORE_SOURCE_TABLES=(
+	payments
+	payment_receipts
+	subscriptions
+	subscription_history
+	subscription_expiry_reminders
+	auto_renewals
+	auto_renewal_consent_events
+	tariff_prices
+	affiliate_referrals
+)
+BILLING_CANONICAL_CORE_SITE_SETTINGS_COLUMNS=(
+	payment_enabled
+	auto_renewal_signup_enabled
+	auto_renewal_charges_enabled
+	auto_renewal_charges_enabled_at
+	affiliate_program_enabled
+	affiliate_cashback_percent
+)
 
 # shellcheck source=scripts/billing-release-identity.sh
 source "$server_root/scripts/billing-release-identity.sh"
@@ -672,17 +694,813 @@ billing_database_status() {
 	fi
 }
 
-billing_database_guard_revision() {
+billing_core_source_cleanup_sha256_stream() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum | awk 'NR == 1 { print $1 }'
+	else
+		shasum -a 256 | awk 'NR == 1 { print $1 }'
+	fi
+}
+
+billing_core_source_cleanup_sha256_file() {
+	[[ $# -eq 1 && -f "$1" && ! -L "$1" ]] || return 1
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk 'NR == 1 { print $1 }'
+	else
+		shasum -a 256 "$1" | awk 'NR == 1 { print $1 }'
+	fi
+}
+
+billing_core_source_cleanup_stat_mode() {
+	if stat -c '%a' "$1" >/dev/null 2>&1; then
+		stat -c '%a' "$1"
+	else
+		stat -f '%Lp' "$1"
+	fi
+}
+
+billing_core_source_cleanup_stat_owner() {
+	if stat -c '%u:%g' "$1" >/dev/null 2>&1; then
+		stat -c '%u:%g' "$1"
+	else
+		stat -f '%u:%g' "$1"
+	fi
+}
+
+billing_core_source_cleanup_marker_path() {
+	printf '%s/deploy/backend/%s\n' \
+		"${APP_ROOT:-/opt/winwidget}" "$BILLING_CORE_SOURCE_CLEANUP_MARKER_NAME"
+}
+
+billing_core_source_cleanup_evidence_directory() {
+	[[ $# -eq 2 && "$1" =~ ^[0-9a-f]{40}$ && "$2" =~ ^[1-9][0-9]*$ ]] ||
+		return 1
+	printf '%s/deploy/backend/billing-core-source-cleanup/%s-g%s\n' \
+		"${APP_ROOT:-/opt/winwidget}" "$1" "$2"
+}
+
+billing_core_source_cleanup_validate_private_file() {
+	[[ $# -eq 2 && "$2" =~ ^[0-9a-f]{64}$ && -f "$1" && ! -L "$1" &&
+		"$(billing_core_source_cleanup_stat_owner "$1")" == '0:0' &&
+		"$(billing_core_source_cleanup_stat_mode "$1")" == '600' && -s "$1" &&
+		"$(billing_core_source_cleanup_sha256_file "$1")" == "$2" ]]
+}
+
+billing_core_source_cleanup_migration_file() {
+	local source_root
+	source_root="$(
+		cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+		pwd -P
+	)" || return 1
+	printf '%s/prisma/migrations/%s/migration.sql\n' \
+		"$source_root" "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME"
+}
+
+billing_core_source_cleanup_migration_checksum() {
+	local migration_file
+	migration_file="$(billing_core_source_cleanup_migration_file)" || return 1
+	billing_core_source_cleanup_sha256_file "$migration_file"
+}
+
+billing_core_source_cleanup_marker_value_from_file() {
+	[[ $# -eq 2 && -f "$1" && ! -L "$1" ]] || return 1
+	awk -F= -v key="$2" '
+		$1 == key {
+			print substr($0, index($0, "=") + 1)
+			found += 1
+		}
+		END { exit(found == 1 ? 0 : 1) }
+	' "$1"
+}
+
+billing_core_source_cleanup_parent_marker_value() {
+	[[ $# -eq 2 && -f "$1" && ! -L "$1" ]] || return 1
+	billing_core_source_cleanup_marker_value_from_file "$1" "$2"
+}
+
+billing_core_source_cleanup_validate_marker_contents() {
+	[[ $# -eq 1 && -f "$1" && ! -L "$1" ]] || return 1
+	awk -F= -v migration="$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" '
+		function hex(value, size) {
+			return length(value) == size && value ~ /^[0-9a-f]+$/ && value !~ /^0+$/
+		}
+		function timestamp(value) {
+			return length(value) == 20 &&
+				value ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
+		}
+		function pending_or_hash(value) { return value == "pending" || hex(value, 64) }
+		function pending_or_system_id(value) { return value == "pending" || value ~ /^[1-9][0-9]*$/ }
+		function pending_or_database_id(value) {
+			return value == "pending" || value ~ /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+		}
+		{
+			count[$1] += 1
+			value[$1] = substr($0, index($0, "=") + 1)
+			if ($1 !~ /^(version|phase|previous_revision|revision|migration_name|migration_sha256|ownership_generation|cleanup_core_image_id|cleanup_billing_image_id|source_snapshot_sha256|projection_evidence_sha256|route_evidence_sha256|core_backup_sha256|billing_backup_sha256|restore_evidence_sha256|queue_drain_evidence_sha256|stopped_writers_evidence_sha256|pre_offsite_receipt_sha256|retention_decision|retention_reference|core_system_identifier|billing_system_identifier|billing_database_id|post_cleanup_backup_sha256|post_restore_evidence_sha256|post_offsite_receipt_sha256|completion_evidence_sha256|created_at|updated_at)$/) invalid = 1
+		}
+		END {
+			for (key in count) if (count[key] != 1) invalid = 1
+			phase = value["phase"]
+			if (NR != 29 || value["version"] != "1" ||
+				phase !~ /^(staged|applied|complete)$/ ||
+				!hex(value["previous_revision"], 40) ||
+				!hex(value["revision"], 40) ||
+				value["previous_revision"] == value["revision"] ||
+				value["migration_name"] != migration ||
+				!hex(value["migration_sha256"], 64) ||
+				value["ownership_generation"] != "2" ||
+				value["cleanup_core_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				value["cleanup_billing_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				value["cleanup_core_image_id"] ~ /^sha256:0+$/ ||
+				value["cleanup_billing_image_id"] ~ /^sha256:0+$/ ||
+				!hex(value["source_snapshot_sha256"], 64) ||
+				!hex(value["projection_evidence_sha256"], 64) ||
+				!hex(value["route_evidence_sha256"], 64) ||
+				!pending_or_hash(value["core_backup_sha256"]) ||
+				!pending_or_hash(value["billing_backup_sha256"]) ||
+				!pending_or_hash(value["restore_evidence_sha256"]) ||
+				!pending_or_hash(value["queue_drain_evidence_sha256"]) ||
+				!pending_or_hash(value["stopped_writers_evidence_sha256"]) ||
+				!pending_or_hash(value["pre_offsite_receipt_sha256"]) ||
+				value["retention_decision"] != "approved" ||
+				!(value["retention_reference"] == "pending" || hex(value["retention_reference"], 64)) ||
+				!pending_or_system_id(value["core_system_identifier"]) ||
+				!pending_or_system_id(value["billing_system_identifier"]) ||
+				!pending_or_database_id(value["billing_database_id"]) ||
+				!pending_or_hash(value["post_cleanup_backup_sha256"]) ||
+				!pending_or_hash(value["post_restore_evidence_sha256"]) ||
+				!pending_or_hash(value["post_offsite_receipt_sha256"]) ||
+				!pending_or_hash(value["completion_evidence_sha256"]) ||
+				!timestamp(value["created_at"]) || !timestamp(value["updated_at"])) invalid = 1
+			if ((value["pre_offsite_receipt_sha256"] == "pending") != (value["retention_reference"] == "pending")) invalid = 1
+			if (hex(value["pre_offsite_receipt_sha256"], 64) &&
+				value["retention_reference"] != value["pre_offsite_receipt_sha256"]) invalid = 1
+			if (phase ~ /^(applied|complete)$/ &&
+				(!hex(value["core_backup_sha256"], 64) ||
+				 !hex(value["billing_backup_sha256"], 64) ||
+				 !hex(value["restore_evidence_sha256"], 64) ||
+				 !hex(value["queue_drain_evidence_sha256"], 64) ||
+				 !hex(value["stopped_writers_evidence_sha256"], 64) ||
+				 !hex(value["pre_offsite_receipt_sha256"], 64) ||
+				 !hex(value["retention_reference"], 64) ||
+				 value["core_system_identifier"] !~ /^[1-9][0-9]*$/ ||
+				 value["billing_system_identifier"] !~ /^[1-9][0-9]*$/ ||
+				 value["billing_database_id"] !~ /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)) invalid = 1
+			if (phase ~ /^(staged|applied)$/ &&
+				(value["post_cleanup_backup_sha256"] != "pending" ||
+				 value["post_restore_evidence_sha256"] != "pending" ||
+				 value["post_offsite_receipt_sha256"] != "pending" ||
+				 value["completion_evidence_sha256"] != "pending")) invalid = 1
+			if (phase == "complete" &&
+				(!hex(value["post_cleanup_backup_sha256"], 64) ||
+				 !hex(value["post_restore_evidence_sha256"], 64) ||
+				 !hex(value["post_offsite_receipt_sha256"], 64) ||
+				 !hex(value["completion_evidence_sha256"], 64))) invalid = 1
+			exit(invalid ? 1 : 0)
+		}
+	' "$1"
+}
+
+billing_core_source_cleanup_validate_marker() {
+	local marker_file marker_directory expected_checksum
+	marker_file="$(billing_core_source_cleanup_marker_path)" || return 1
+	marker_directory="$(dirname -- "$marker_file")"
+	[[ -d "$marker_directory" && ! -L "$marker_directory" &&
+		"$(billing_core_source_cleanup_stat_owner "$marker_directory")" == '0:0' &&
+		"$(billing_core_source_cleanup_stat_mode "$marker_directory")" =~ ^(700|750|755)$ &&
+		-f "$marker_file" && ! -L "$marker_file" &&
+		"$(billing_core_source_cleanup_stat_owner "$marker_file")" == '0:0' &&
+		"$(billing_core_source_cleanup_stat_mode "$marker_file")" == '600' ]] || return 1
+	billing_core_source_cleanup_validate_marker_contents "$marker_file" || return 1
+	expected_checksum="$(billing_core_source_cleanup_migration_checksum)" || return 1
+	[[ "$(billing_core_source_cleanup_marker_value_from_file \
+		"$marker_file" migration_sha256)" == "$expected_checksum" ]]
+}
+
+billing_core_source_cleanup_marker_value() {
 	[[ $# -eq 1 ]] || return 1
-	local revision="$1" phase ownership_revision cleanup_revision
+	billing_core_source_cleanup_validate_marker || return 1
+	billing_core_source_cleanup_marker_value_from_file \
+		"$(billing_core_source_cleanup_marker_path)" "$1"
+}
+
+billing_core_source_cleanup_marker_state() {
+	local marker_file
+	marker_file="$(billing_core_source_cleanup_marker_path)" || return 1
+	if [[ ! -e "$marker_file" && ! -L "$marker_file" ]]; then
+		printf 'absent\n'
+		return
+	fi
+	billing_core_source_cleanup_validate_marker || {
+		printf 'invalid\n'
+		return 1
+	}
+	billing_core_source_cleanup_marker_value phase
+}
+
+billing_core_source_cleanup_write_marker() {
+	[[ $# -eq 25 ]] || return 1
+	local phase="$1" previous_revision="$2" revision="$3" ownership_generation="$4"
+	local cleanup_core_image_id="$5" cleanup_billing_image_id="$6"
+	local source_snapshot_sha256="$7" projection_evidence_sha256="$8"
+	local route_evidence_sha256="$9" core_backup_sha256="${10}"
+	local billing_backup_sha256="${11}" restore_evidence_sha256="${12}"
+	local queue_drain_evidence_sha256="${13}" stopped_writers_evidence_sha256="${14}"
+	local pre_offsite_receipt_sha256="${15}" retention_decision="${16}"
+	local retention_reference="${17}" core_system_identifier="${18}"
+	local billing_system_identifier="${19}" billing_database_id="${20}"
+	local post_cleanup_backup_sha256="${21}" post_restore_evidence_sha256="${22}"
+	local post_offsite_receipt_sha256="${23}" completion_evidence_sha256="${24}"
+	local created_at="${25}" marker_file marker_directory
+	local migration_sha256 temporary updated_at current_phase current_value key
+	migration_sha256="$(billing_core_source_cleanup_migration_checksum)" || return 1
+	marker_file="$(billing_core_source_cleanup_marker_path)" || return 1
+	marker_directory="$(dirname -- "$marker_file")"
+	[[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+		-d "$marker_directory" && ! -L "$marker_directory" &&
+		"$(billing_core_source_cleanup_stat_owner "$marker_directory")" == '0:0' ]] || return 1
+	updated_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+	if [[ -e "$marker_file" || -L "$marker_file" ]]; then
+		billing_core_source_cleanup_validate_marker || return 1
+		current_phase="$(billing_core_source_cleanup_marker_value phase)" || return 1
+		case "$current_phase|$phase" in
+		staged\|staged | staged\|applied | applied\|applied | applied\|complete | complete\|complete) ;;
+		*) return 1 ;;
+		esac
+		for key in previous_revision revision migration_name migration_sha256 \
+			ownership_generation cleanup_core_image_id cleanup_billing_image_id \
+			source_snapshot_sha256 projection_evidence_sha256 route_evidence_sha256 \
+			retention_decision created_at; do
+			current_value="$(billing_core_source_cleanup_marker_value "$key")" || return 1
+			case "$key" in
+			previous_revision) [[ "$current_value" == "$previous_revision" ]] || return 1 ;;
+			revision) [[ "$current_value" == "$revision" ]] || return 1 ;;
+			migration_name) [[ "$current_value" == "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" ]] || return 1 ;;
+			migration_sha256) [[ "$current_value" == "$migration_sha256" ]] || return 1 ;;
+			ownership_generation) [[ "$current_value" == "$ownership_generation" ]] || return 1 ;;
+			cleanup_core_image_id) [[ "$current_value" == "$cleanup_core_image_id" ]] || return 1 ;;
+			cleanup_billing_image_id) [[ "$current_value" == "$cleanup_billing_image_id" ]] || return 1 ;;
+			source_snapshot_sha256) [[ "$current_value" == "$source_snapshot_sha256" ]] || return 1 ;;
+			projection_evidence_sha256) [[ "$current_value" == "$projection_evidence_sha256" ]] || return 1 ;;
+			route_evidence_sha256) [[ "$current_value" == "$route_evidence_sha256" ]] || return 1 ;;
+			retention_decision) [[ "$current_value" == "$retention_decision" ]] || return 1 ;;
+			created_at) [[ "$current_value" == "$created_at" ]] || return 1 ;;
+			esac
+		done
+		for key in core_backup_sha256 billing_backup_sha256 restore_evidence_sha256 \
+			queue_drain_evidence_sha256 stopped_writers_evidence_sha256 \
+			pre_offsite_receipt_sha256 retention_reference core_system_identifier \
+			billing_system_identifier billing_database_id; do
+			current_value="$(billing_core_source_cleanup_marker_value "$key")" || return 1
+			[[ "$current_value" == 'pending' ]] || {
+				case "$key" in
+				core_backup_sha256) [[ "$current_value" == "$core_backup_sha256" ]] ;;
+				billing_backup_sha256) [[ "$current_value" == "$billing_backup_sha256" ]] ;;
+				restore_evidence_sha256) [[ "$current_value" == "$restore_evidence_sha256" ]] ;;
+				queue_drain_evidence_sha256) [[ "$current_value" == "$queue_drain_evidence_sha256" ]] ;;
+				stopped_writers_evidence_sha256) [[ "$current_value" == "$stopped_writers_evidence_sha256" ]] ;;
+				pre_offsite_receipt_sha256) [[ "$current_value" == "$pre_offsite_receipt_sha256" ]] ;;
+				retention_reference) [[ "$current_value" == "$retention_reference" ]] ;;
+				core_system_identifier) [[ "$current_value" == "$core_system_identifier" ]] ;;
+				billing_system_identifier) [[ "$current_value" == "$billing_system_identifier" ]] ;;
+				billing_database_id) [[ "$current_value" == "$billing_database_id" ]] ;;
+				esac || return 1
+			}
+		done
+		if [[ "$current_phase" == 'complete' ]]; then
+			[[ "$(billing_core_source_cleanup_marker_value post_cleanup_backup_sha256)" == "$post_cleanup_backup_sha256" &&
+				"$(billing_core_source_cleanup_marker_value post_restore_evidence_sha256)" == "$post_restore_evidence_sha256" &&
+				"$(billing_core_source_cleanup_marker_value post_offsite_receipt_sha256)" == "$post_offsite_receipt_sha256" &&
+				"$(billing_core_source_cleanup_marker_value completion_evidence_sha256)" == "$completion_evidence_sha256" ]] || return 1
+		fi
+	fi
+	temporary="$marker_directory/.${BILLING_CORE_SOURCE_CLEANUP_MARKER_NAME#\.}.$$"
+	[[ ! -e "$temporary" && ! -L "$temporary" ]] || return 1
+	if ! {
+		(umask 077; {
+			printf 'version=1\nphase=%s\nprevious_revision=%s\nrevision=%s\n' "$phase" "$previous_revision" "$revision"
+			printf 'migration_name=%s\nmigration_sha256=%s\n' "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" "$migration_sha256"
+			printf 'ownership_generation=%s\ncleanup_core_image_id=%s\ncleanup_billing_image_id=%s\n' "$ownership_generation" "$cleanup_core_image_id" "$cleanup_billing_image_id"
+			printf 'source_snapshot_sha256=%s\nprojection_evidence_sha256=%s\nroute_evidence_sha256=%s\n' "$source_snapshot_sha256" "$projection_evidence_sha256" "$route_evidence_sha256"
+			printf 'core_backup_sha256=%s\nbilling_backup_sha256=%s\nrestore_evidence_sha256=%s\n' "$core_backup_sha256" "$billing_backup_sha256" "$restore_evidence_sha256"
+			printf 'queue_drain_evidence_sha256=%s\nstopped_writers_evidence_sha256=%s\n' "$queue_drain_evidence_sha256" "$stopped_writers_evidence_sha256"
+			printf 'pre_offsite_receipt_sha256=%s\nretention_decision=%s\nretention_reference=%s\n' "$pre_offsite_receipt_sha256" "$retention_decision" "$retention_reference"
+			printf 'core_system_identifier=%s\nbilling_system_identifier=%s\nbilling_database_id=%s\n' "$core_system_identifier" "$billing_system_identifier" "$billing_database_id"
+			printf 'post_cleanup_backup_sha256=%s\npost_restore_evidence_sha256=%s\npost_offsite_receipt_sha256=%s\ncompletion_evidence_sha256=%s\n' "$post_cleanup_backup_sha256" "$post_restore_evidence_sha256" "$post_offsite_receipt_sha256" "$completion_evidence_sha256"
+			printf 'created_at=%s\nupdated_at=%s\n' "$created_at" "$updated_at"
+		} >"$temporary") &&
+			chown 0:0 "$temporary" && chmod 600 "$temporary" &&
+			billing_core_source_cleanup_validate_marker_contents "$temporary" &&
+			mv -f "$temporary" "$marker_file"
+	}; then
+		rm -f -- "$temporary"
+		return 1
+	fi
+	billing_core_source_cleanup_validate_marker
+}
+
+billing_core_source_cleanup_rewrite_marker() {
+	[[ $# -eq 11 ]] || return 1
+	local next_phase="$1" core_backup_sha256="$2" billing_backup_sha256="$3"
+	local restore_evidence_sha256="$4" queue_drain_evidence_sha256="$5"
+	local stopped_writers_evidence_sha256="$6" pre_offsite_receipt_sha256="$7"
+	local core_system_identifier="$8" billing_system_identifier="$9"
+	local billing_database_id="${10}" post_values="${11}" created_at
+	local post_backup='pending' post_restore='pending' post_receipt='pending' completion='pending'
+	billing_core_source_cleanup_validate_marker || return 1
+	created_at="$(billing_core_source_cleanup_marker_value created_at)" || return 1
+	if [[ "$post_values" != 'pending' ]]; then
+		IFS='|' read -r post_backup post_restore post_receipt completion <<<"$post_values"
+		[[ "$post_values" == *'|'* && "$completion" != "$post_values" ]] || return 1
+	fi
+	billing_core_source_cleanup_write_marker \
+		"$next_phase" \
+		"$(billing_core_source_cleanup_marker_value previous_revision)" \
+		"$(billing_core_source_cleanup_marker_value revision)" \
+		"$(billing_core_source_cleanup_marker_value ownership_generation)" \
+		"$(billing_core_source_cleanup_marker_value cleanup_core_image_id)" \
+		"$(billing_core_source_cleanup_marker_value cleanup_billing_image_id)" \
+		"$(billing_core_source_cleanup_marker_value source_snapshot_sha256)" \
+		"$(billing_core_source_cleanup_marker_value projection_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value route_evidence_sha256)" \
+		"$core_backup_sha256" "$billing_backup_sha256" "$restore_evidence_sha256" \
+		"$queue_drain_evidence_sha256" "$stopped_writers_evidence_sha256" \
+		"$pre_offsite_receipt_sha256" approved "$pre_offsite_receipt_sha256" \
+		"$core_system_identifier" "$billing_system_identifier" "$billing_database_id" \
+		"$post_backup" "$post_restore" "$post_receipt" "$completion" "$created_at"
+}
+
+billing_core_source_cleanup_bind_staged_evidence() {
+	[[ $# -eq 9 ]] || return 1
+	[[ "$(billing_core_source_cleanup_marker_value phase)" == 'staged' ]] || return 1
+	billing_core_source_cleanup_rewrite_marker staged "$@" pending
+}
+
+billing_core_source_cleanup_advance_applied() {
+	[[ $# -eq 0 && "$(billing_core_source_cleanup_marker_value phase)" =~ ^(staged|applied)$ ]] ||
+		return 1
+	billing_core_source_cleanup_rewrite_marker applied \
+		"$(billing_core_source_cleanup_marker_value core_backup_sha256)" \
+		"$(billing_core_source_cleanup_marker_value billing_backup_sha256)" \
+		"$(billing_core_source_cleanup_marker_value restore_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value queue_drain_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value stopped_writers_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value pre_offsite_receipt_sha256)" \
+		"$(billing_core_source_cleanup_marker_value core_system_identifier)" \
+		"$(billing_core_source_cleanup_marker_value billing_system_identifier)" \
+		"$(billing_core_source_cleanup_marker_value billing_database_id)" pending
+}
+
+billing_core_source_cleanup_advance_complete() {
+	[[ $# -eq 4 && "$(billing_core_source_cleanup_marker_value phase)" =~ ^(applied|complete)$ ]] ||
+		return 1
+	local post_values="$1|$2|$3|$4"
+	billing_core_source_cleanup_rewrite_marker complete \
+		"$(billing_core_source_cleanup_marker_value core_backup_sha256)" \
+		"$(billing_core_source_cleanup_marker_value billing_backup_sha256)" \
+		"$(billing_core_source_cleanup_marker_value restore_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value queue_drain_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value stopped_writers_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value pre_offsite_receipt_sha256)" \
+		"$(billing_core_source_cleanup_marker_value core_system_identifier)" \
+		"$(billing_core_source_cleanup_marker_value billing_system_identifier)" \
+		"$(billing_core_source_cleanup_marker_value billing_database_id)" "$post_values"
+}
+
+billing_core_source_cleanup_stage_marker() {
+	[[ $# -eq 4 ]] || return 1
+	local previous_revision="$1" revision="$2" cleanup_core_image_id="$3"
+	local cleanup_billing_image_id="$4" generation snapshot projection route created_at
+	billing_release_validate_revision "$previous_revision" || return 1
 	billing_release_validate_revision "$revision" || return 1
+	[[ "$previous_revision" != "$revision" &&
+		"$cleanup_core_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$cleanup_billing_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	billing_database_validate_marker || return 1
+	[[ "$(billing_database_marker_value phase)" == 'complete' &&
+		"$(billing_database_marker_value ownership_revision)" == "$previous_revision" &&
+		"$(billing_database_marker_value cleanup_revision)" == "$revision" ]] || return 1
+	[[ -f "$billing_cutover_marker" && ! -L "$billing_cutover_marker" &&
+		"$(billing_core_source_cleanup_stat_owner "$billing_cutover_marker")" == '0:0' &&
+		"$(billing_core_source_cleanup_stat_mode "$billing_cutover_marker")" == '600' &&
+		"$(billing_core_source_cleanup_parent_marker_value "$billing_cutover_marker" phase)" == 'complete' &&
+		"$(billing_core_source_cleanup_parent_marker_value "$billing_cutover_marker" revision)" == "$previous_revision" &&
+		"$(billing_core_source_cleanup_parent_marker_value "$billing_cutover_marker" cleanup_revision)" == "$revision" ]] || return 1
+	generation="$(billing_database_marker_value switch_generation)" || return 1
+	snapshot="$(billing_database_marker_value snapshot_sha256)" || return 1
+	projection="$(billing_database_marker_value projection_evidence_sha256)" || return 1
+	route="$(billing_database_marker_value route_evidence_sha256)" || return 1
+	[[ "$(billing_core_source_cleanup_parent_marker_value "$billing_cutover_marker" generation)" == "$generation" &&
+		"$(billing_core_source_cleanup_parent_marker_value "$billing_cutover_marker" snapshot_sha256)" == "$snapshot" &&
+		"$(billing_core_source_cleanup_parent_marker_value "$billing_cutover_marker" projection_sha256)" == "$projection" &&
+		"$(billing_core_source_cleanup_parent_marker_value "$billing_cutover_marker" route_sha256)" == "$route" ]] || return 1
+	created_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+	billing_core_source_cleanup_write_marker staged "$previous_revision" "$revision" \
+		"$generation" "$cleanup_core_image_id" "$cleanup_billing_image_id" \
+		"$snapshot" "$projection" "$route" \
+		pending pending pending pending pending pending approved pending \
+		pending pending pending pending pending pending pending "$created_at"
+}
+
+billing_core_source_cleanup_migration_url() {
+	[[ $# -eq 12 ]] || return 1
+	local base_url="$1" generation="$2" previous_revision="$3" cleanup_revision="$4"
+	local snapshot="$5" core_backup="$6" billing_backup="$7" restore_evidence="$8"
+	local offsite_receipt="$9" queue_drain="${10}" stopped_writers="${11}"
+	local retention_reference="${12}"
+	local zero_sha
+	zero_sha="$(printf '0%.0s' {1..64})"
+	[[ -n "$base_url" && "$generation" == '2' &&
+		"$previous_revision" =~ ^[0-9a-f]{40}$ && "$previous_revision" != "$(printf '0%.0s' {1..40})" &&
+		"$cleanup_revision" =~ ^[0-9a-f]{40}$ && "$cleanup_revision" != "$(printf '0%.0s' {1..40})" &&
+		"$previous_revision" != "$cleanup_revision" ]] || return 1
+	local hash
+	for hash in "$snapshot" "$core_backup" "$billing_backup" "$restore_evidence" "$offsite_receipt" \
+		"$queue_drain" "$stopped_writers" "$retention_reference"; do
+		[[ "$hash" =~ ^[0-9a-f]{64}$ && "$hash" != "$zero_sha" ]] || return 1
+	done
+	BASE_DATABASE_URL="$base_url" BILLING_CLEANUP_GENERATION="$generation" \
+		BILLING_CLEANUP_PREVIOUS_REVISION="$previous_revision" \
+		BILLING_CLEANUP_REVISION="$cleanup_revision" BILLING_CLEANUP_SNAPSHOT="$snapshot" \
+		BILLING_CLEANUP_CORE_BACKUP="$core_backup" \
+		BILLING_CLEANUP_BILLING_BACKUP="$billing_backup" \
+		BILLING_CLEANUP_RESTORE_EVIDENCE="$restore_evidence" \
+		BILLING_CLEANUP_OFFSITE_RECEIPT="$offsite_receipt" \
+		BILLING_CLEANUP_QUEUE_DRAIN="$queue_drain" \
+		BILLING_CLEANUP_STOPPED_WRITERS="$stopped_writers" \
+		BILLING_CLEANUP_RETENTION_REFERENCE="$retention_reference" node <<'NODE'
+let databaseUrl;
+try {
+  databaseUrl = new URL(process.env.BASE_DATABASE_URL);
+} catch {
+  process.exit(1);
+}
+if (
+  !['postgres:', 'postgresql:'].includes(databaseUrl.protocol) ||
+  databaseUrl.pathname !== '/default_db'
+) process.exit(1);
+const existingOptions = databaseUrl.searchParams.getAll('options');
+if (existingOptions.length > 1) process.exit(1);
+const cleanupOptions = [
+  '-c winwidget.billing_core_source_cleanup=production-destructive-approved',
+  '-c winwidget.billing_ownership_phase=complete',
+  `-c winwidget.billing_ownership_generation=${process.env.BILLING_CLEANUP_GENERATION}`,
+  `-c winwidget.billing_ownership_revision=${process.env.BILLING_CLEANUP_PREVIOUS_REVISION}`,
+  `-c winwidget.billing_cleanup_revision=${process.env.BILLING_CLEANUP_REVISION}`,
+  `-c winwidget.billing_source_snapshot_sha256=${process.env.BILLING_CLEANUP_SNAPSHOT}`,
+  `-c winwidget.billing_core_backup_sha256=${process.env.BILLING_CLEANUP_CORE_BACKUP}`,
+  `-c winwidget.billing_backup_sha256=${process.env.BILLING_CLEANUP_BILLING_BACKUP}`,
+  `-c winwidget.billing_restore_evidence_sha256=${process.env.BILLING_CLEANUP_RESTORE_EVIDENCE}`,
+  `-c winwidget.billing_offsite_receipt_sha256=${process.env.BILLING_CLEANUP_OFFSITE_RECEIPT}`,
+  `-c winwidget.billing_queue_drain_evidence_sha256=${process.env.BILLING_CLEANUP_QUEUE_DRAIN}`,
+  `-c winwidget.billing_stopped_writers_evidence_sha256=${process.env.BILLING_CLEANUP_STOPPED_WRITERS}`,
+  '-c winwidget.billing_retention_decision=approved',
+  `-c winwidget.billing_retention_reference=${process.env.BILLING_CLEANUP_RETENTION_REFERENCE}`,
+].join(' ');
+const existing = existingOptions[0]?.trim();
+databaseUrl.searchParams.set('options', existing ? `${existing} ${cleanupOptions}` : cleanupOptions);
+const serialized = databaseUrl.toString().replace(
+  /([?&]options=)([^&#]*)/,
+  (_, prefix, value) => `${prefix}${value.replace(/\+/g, '%20')}`,
+);
+process.stdout.write(serialized);
+NODE
+}
+
+billing_core_source_cleanup_migration_url_from_env() {
+	[[ $# -eq 11 ]] || return 1
+	local database_migration_url
+	database_migration_url="$(billing_read_env_value "$ENV_FILE" DATABASE_MIGRATION_URL_PRODUCTION)" ||
+		return 1
+	[[ -n "$database_migration_url" ]] || return 1
+	billing_core_source_cleanup_migration_url "$database_migration_url" "$@"
+}
+
+billing_core_source_cleanup_migration_url_from_marker() {
+	[[ $# -eq 0 ]] || return 1
+	billing_core_source_cleanup_migration_url_from_env \
+		"$(billing_core_source_cleanup_marker_value ownership_generation)" \
+		"$(billing_core_source_cleanup_marker_value previous_revision)" \
+		"$(billing_core_source_cleanup_marker_value revision)" \
+		"$(billing_core_source_cleanup_marker_value source_snapshot_sha256)" \
+		"$(billing_core_source_cleanup_marker_value core_backup_sha256)" \
+		"$(billing_core_source_cleanup_marker_value billing_backup_sha256)" \
+		"$(billing_core_source_cleanup_marker_value restore_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value pre_offsite_receipt_sha256)" \
+		"$(billing_core_source_cleanup_marker_value queue_drain_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value stopped_writers_evidence_sha256)" \
+		"$(billing_core_source_cleanup_marker_value retention_reference)"
+}
+
+billing_core_source_cleanup_evidence_file_for_key() {
+	[[ $# -eq 2 ]] || return 1
+	case "$2" in
+	core_backup_sha256) printf '%s/core-pre-cleanup.dump\n' "$1" ;;
+	billing_backup_sha256) printf '%s/billing-pre-cleanup.dump\n' "$1" ;;
+	restore_evidence_sha256) printf '%s/pre-restore-evidence.json\n' "$1" ;;
+	queue_drain_evidence_sha256) printf '%s/queue-drain-evidence.json\n' "$1" ;;
+	stopped_writers_evidence_sha256) printf '%s/stopped-writers-evidence.json\n' "$1" ;;
+	pre_offsite_receipt_sha256) printf '%s/pre-offsite-receipt.json\n' "$1" ;;
+	post_cleanup_backup_sha256) printf '%s/core-post-cleanup.dump\n' "$1" ;;
+	post_restore_evidence_sha256) printf '%s/post-restore-evidence.json\n' "$1" ;;
+	post_offsite_receipt_sha256) printf '%s/post-offsite-receipt.json\n' "$1" ;;
+	completion_evidence_sha256) printf '%s/completion-evidence.json\n' "$1" ;;
+	*) return 1 ;;
+	esac
+}
+
+billing_core_source_cleanup_require_evidence() {
+	local revision generation directory key expected file phase
+	billing_core_source_cleanup_validate_marker || return 1
+	revision="$(billing_core_source_cleanup_marker_value revision)" || return 1
+	generation="$(billing_core_source_cleanup_marker_value ownership_generation)" || return 1
+	directory="$(billing_core_source_cleanup_evidence_directory "$revision" "$generation")" || return 1
+	[[ -d "$directory" && ! -L "$directory" &&
+		"$(billing_core_source_cleanup_stat_owner "$directory")" == '0:0' &&
+		"$(billing_core_source_cleanup_stat_mode "$directory")" =~ ^(700|750)$ ]] || return 1
+	phase="$(billing_core_source_cleanup_marker_value phase)" || return 1
+	for key in core_backup_sha256 billing_backup_sha256 restore_evidence_sha256 \
+		queue_drain_evidence_sha256 stopped_writers_evidence_sha256 \
+		pre_offsite_receipt_sha256 post_cleanup_backup_sha256 \
+		post_restore_evidence_sha256 post_offsite_receipt_sha256 \
+		completion_evidence_sha256; do
+		expected="$(billing_core_source_cleanup_marker_value "$key")" || return 1
+		if [[ "$expected" == 'pending' ]]; then
+			if [[ "$phase" =~ ^(applied|complete)$ &&
+				"$key" =~ ^(core_backup_sha256|billing_backup_sha256|restore_evidence_sha256|queue_drain_evidence_sha256|stopped_writers_evidence_sha256|pre_offsite_receipt_sha256)$ ]]; then
+				return 1
+			fi
+			if [[ "$phase" == 'complete' ]]; then return 1; fi
+			continue
+		fi
+		file="$(billing_core_source_cleanup_evidence_file_for_key "$directory" "$key")" ||
+			return 1
+		billing_core_source_cleanup_validate_private_file "$file" "$expected" || return 1
+	done
+}
+
+billing_core_database_query() {
+	[[ $# -eq 1 ]] || return 1
+	local database_url postgres_image
+	database_url="$(billing_read_env_value "$ENV_FILE" DATABASE_MIGRATION_URL_PRODUCTION)" ||
+		return 1
+	database_url="$(billing_normalize_libpq_url_value "$database_url")" || return 1
+	postgres_image="$(billing_read_env_value "$ENV_FILE" CORE_POSTGRES_IMAGE 2>/dev/null || true)"
+	postgres_image="${postgres_image:-$billing_core_postgres_image}"
+	PGURL="$database_url" BILLING_CORE_SQL="$1" \
+		docker run --rm --network host -e PGURL -e BILLING_CORE_SQL \
+			--entrypoint sh "$postgres_image" -euc '
+				exec psql "$PGURL" --no-psqlrc --tuples-only --no-align \
+					--set ON_ERROR_STOP=1 --command "$BILLING_CORE_SQL"
+			' 2>/dev/null
+}
+
+billing_core_source_state_from_counts() {
+	[[ $# -eq 2 && "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || return 1
+	case "$1:$2" in
+	0:0) printf 'absent\n' ;;
+	9:6) printf 'present\n' ;;
+	*) printf 'partial\n' ;;
+	esac
+}
+
+billing_core_source_state() {
+	local result relation_count column_count
+	result="$(billing_core_database_query "
+SELECT
+  (SELECT count(*)
+   FROM unnest(ARRAY[
+     'payments','payment_receipts','subscriptions','subscription_history',
+     'subscription_expiry_reminders','auto_renewals',
+     'auto_renewal_consent_events','tariff_prices','affiliate_referrals'
+   ]) AS expected(relation_name)
+   WHERE to_regclass(format('public.%I', relation_name)) IS NOT NULL)
+  || E'\\t' ||
+  (SELECT count(*)
+   FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'site_settings'
+     AND column_name = ANY(ARRAY[
+       'payment_enabled','auto_renewal_signup_enabled',
+       'auto_renewal_charges_enabled','auto_renewal_charges_enabled_at',
+       'affiliate_program_enabled','affiliate_cashback_percent'
+     ]));
+")" || {
+		echo 'Core Billing source state cannot be read; failing closed.' >&2
+		return 1
+	}
+	IFS=$'\t' read -r relation_count column_count <<<"$result"
+	billing_core_source_state_from_counts "$relation_count" "$column_count"
+}
+
+billing_core_source_cleanup_migration_state_from_counts() {
+	[[ $# -eq 5 ]] || return 1
+	local total="$1" mismatched="$2" applied="$3" unfinished="$4" rolled_back="$5"
+	[[ "$total" =~ ^[0-9]+$ && "$mismatched" =~ ^[0-9]+$ &&
+		"$applied" =~ ^[0-9]+$ && "$unfinished" =~ ^[0-9]+$ &&
+		"$rolled_back" =~ ^[0-9]+$ ]] || return 1
+	if ((total == 0)); then
+		printf 'pending\n'
+	elif ((mismatched != 0 || applied > 1 || unfinished > 1 ||
+		applied + unfinished + rolled_back != total)); then
+		printf 'unsafe\n'
+	elif ((applied == 1 && unfinished == 0)); then
+		printf 'applied\n'
+	elif ((applied == 0 && unfinished == 1)); then
+		printf 'unfinished\n'
+	elif ((applied == 0 && unfinished == 0 && rolled_back >= 1)); then
+		printf 'rolled-back\n'
+	else
+		printf 'unsafe\n'
+	fi
+}
+
+billing_core_source_cleanup_migration_state() {
+	local expected_checksum result total mismatched applied unfinished rolled_back
+	expected_checksum="$(billing_core_source_cleanup_migration_checksum)" || return 1
+	result="$(billing_core_database_query "
+SELECT count(*) || E'\\t' ||
+       count(*) FILTER (WHERE checksum <> '$expected_checksum') || E'\\t' ||
+       count(*) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL) || E'\\t' ||
+       count(*) FILTER (WHERE finished_at IS NULL AND rolled_back_at IS NULL) || E'\\t' ||
+       count(*) FILTER (WHERE rolled_back_at IS NOT NULL)
+FROM public.\"_prisma_migrations\"
+WHERE migration_name = '$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME';
+")" || return 1
+	IFS=$'\t' read -r total mismatched applied unfinished rolled_back <<<"$result"
+	billing_core_source_cleanup_migration_state_from_counts \
+		"$total" "$mismatched" "$applied" "$unfinished" "$rolled_back" ||
+		printf 'unsafe\n'
+}
+
+billing_core_source_cleanup_migration_manifest_json() {
+	MIGRATIONS_ROOT="$server_root/prisma/migrations" \
+		CLEANUP_MIGRATION="$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" node <<'NODE'
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.env.MIGRATIONS_ROOT;
+const target = process.env.CLEANUP_MIGRATION;
+const rootStat = fs.lstatSync(root);
+if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) process.exit(1);
+const manifest = {};
+for (const entry of fs.readdirSync(root, { withFileTypes: true }).sort((a, b) =>
+  a.name.localeCompare(b.name, 'en'))) {
+  if (entry.name === 'migration_lock.toml') {
+    const lockStat = fs.lstatSync(path.join(root, entry.name));
+    if (!lockStat.isFile() || lockStat.isSymbolicLink()) process.exit(1);
+    continue;
+  }
+  if (!/^\d{14}_[a-z0-9_]+$/.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink())
+    process.exit(1);
+  const directory = path.join(root, entry.name);
+  const files = fs.readdirSync(directory).sort();
+  if (files.length !== 1 || files[0] !== 'migration.sql') process.exit(1);
+  const migration = path.join(directory, 'migration.sql');
+  const migrationStat = fs.lstatSync(migration);
+  if (!migrationStat.isFile() || migrationStat.isSymbolicLink()) process.exit(1);
+  manifest[entry.name] = crypto.createHash('sha256').update(fs.readFileSync(migration)).digest('hex');
+}
+if (!Object.hasOwn(manifest, target)) process.exit(1);
+process.stdout.write(JSON.stringify(manifest));
+NODE
+}
+
+billing_core_source_cleanup_validate_migration_manifest_state() {
+	[[ $# -eq 3 && "$3" =~ ^(exclusive|applied)$ ]] || return 1
+	MIGRATION_MANIFEST_JSON="$1" MIGRATION_LEDGER_ROWS="$2" \
+		CLEANUP_MIGRATION="$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" \
+		EXPECTED_CLEANUP_STATE="$3" node <<'NODE'
+let manifest;
+try { manifest = JSON.parse(process.env.MIGRATION_MANIFEST_JSON || ''); } catch { process.exit(1); }
+if (!manifest || Array.isArray(manifest)) process.exit(1);
+const names = Object.keys(manifest);
+const target = process.env.CLEANUP_MIGRATION;
+if (!names.length || !names.includes(target) ||
+    names.some(name => !/^\d{14}_[a-z0-9_]+$/.test(name) || !/^[0-9a-f]{64}$/.test(manifest[name])))
+  process.exit(1);
+if (process.env.EXPECTED_CLEANUP_STATE === 'exclusive' && names.at(-1) !== target)
+  process.exit(1);
+const ledger = new Map(names.map(name => [name, []]));
+for (const line of (process.env.MIGRATION_LEDGER_ROWS || '').split('\n').filter(Boolean)) {
+  const fields = line.split('\t');
+  if (fields.length !== 3 || !ledger.has(fields[0]) || !/^[0-9a-f]{64}$/.test(fields[1]) ||
+      !['applied', 'unfinished', 'rolled-back'].includes(fields[2])) process.exit(1);
+  ledger.get(fields[0]).push({ checksum: fields[1], state: fields[2] });
+}
+for (const name of names) {
+  const rows = ledger.get(name);
+  if (rows.some(row => row.checksum !== manifest[name])) process.exit(1);
+  const applied = rows.filter(row => row.state === 'applied').length;
+  const unfinished = rows.filter(row => row.state === 'unfinished').length;
+  if (name !== target) {
+    if (applied !== 1 || unfinished !== 0) process.exit(1);
+    continue;
+  }
+  if (process.env.EXPECTED_CLEANUP_STATE === 'applied') {
+    if (applied !== 1 || unfinished !== 0) process.exit(1);
+  } else if (applied !== 0 || unfinished > 1) {
+    process.exit(1);
+  }
+}
+NODE
+}
+
+billing_core_source_cleanup_require_exact_migration_manifest() {
+	[[ $# -eq 1 && "$1" =~ ^(exclusive|applied)$ ]] || return 1
+	local manifest ledger
+	manifest="$(billing_core_source_cleanup_migration_manifest_json)" || return 1
+	ledger="$(billing_core_database_query '
+SELECT migration_name || CHR(9) || checksum || CHR(9) ||
+       CASE
+         WHEN rolled_back_at IS NOT NULL THEN $ledger$rolled-back$ledger$
+         WHEN finished_at IS NOT NULL THEN $ledger$applied$ledger$
+         WHEN finished_at IS NULL THEN $ledger$unfinished$ledger$
+       END
+FROM public."_prisma_migrations"
+ORDER BY migration_name, started_at, id;
+')" || return 1
+	billing_core_source_cleanup_validate_migration_manifest_state \
+		"$manifest" "$ledger" "$1"
+}
+
+billing_core_source_cleanup_recovery_action() {
+	[[ $# -eq 2 ]] || return 1
+	case "$1|$2" in
+	present\|pending | present\|rolled-back | present\|unfinished) printf 'restore-exact\n' ;;
+	absent\|unfinished | absent\|applied) printf 'forward-only\n' ;;
+	*) printf 'halt\n' ;;
+	esac
+}
+
+billing_require_core_source_absent() {
+	[[ "$(billing_core_source_cleanup_migration_state)" == 'applied' &&
+		"$(billing_core_source_state)" == 'absent' ]]
+}
+
+billing_database_guard_revision() {
+	[[ $# -eq 1 || $# -eq 2 ]] || return 1
+	local revision="$1" guard_action="${2:---guard-before-checkout-revision}"
+	local phase ownership_revision cleanup_revision cleanup_marker cleanup_phase
+	local marker_revision marker_checksum target_checksum
+	billing_release_validate_revision "$revision" || return 1
+	[[ "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
 	phase="$(billing_database_current_phase)" || return 1
 	[[ "$phase" == 'absent' ]] && return 0
 	ownership_revision="$(billing_database_marker_value ownership_revision)"
 	cleanup_revision="$(billing_database_marker_value cleanup_revision)"
+	cleanup_marker="$(billing_core_source_cleanup_marker_path)" || return 1
+	if [[ -e "$cleanup_marker" || -L "$cleanup_marker" ]]; then
+		billing_core_source_cleanup_validate_marker ||
+			billing_database_fail 'Billing Core source cleanup marker is present but invalid.' ||
+			return 1
+		cleanup_phase="$(billing_core_source_cleanup_marker_value phase)" || return 1
+		marker_revision="$(billing_core_source_cleanup_marker_value revision)" || return 1
+		marker_checksum="$(billing_core_source_cleanup_marker_value migration_sha256)" || return 1
+		[[ "$phase" == 'complete' &&
+			"$ownership_revision" == "$(billing_core_source_cleanup_marker_value previous_revision)" &&
+			"$cleanup_revision" == "$marker_revision" ]] ||
+			billing_database_fail 'Billing cleanup marker is not bound to the complete ownership markers.' ||
+			return 1
+		if [[ "$cleanup_phase" =~ ^(staged|applied)$ && "$revision" != "$marker_revision" ]]; then
+			billing_database_fail \
+				"Billing Core source cleanup pins deployment to revision $marker_revision until post-cleanup evidence is complete."
+			return 1
+		fi
+		if [[ "$cleanup_phase" =~ ^(applied|complete)$ ]]; then
+			billing_core_source_cleanup_require_evidence ||
+				billing_database_fail 'Billing Core source cleanup evidence is missing or invalid.' ||
+				return 1
+		fi
+		if [[ "$guard_action" == '--guard-before-checkout-revision' ]]; then
+			git -C "$server_root" cat-file -e \
+				"$revision:scripts/billing-database-lifecycle.sh" 2>/dev/null || {
+				billing_database_fail \
+					'Target revision would remove the Billing Core source cleanup guard.'
+				return 1
+			}
+			target_checksum="$({
+				git -C "$server_root" show \
+					"$revision:prisma/migrations/$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME/migration.sql" 2>/dev/null
+			} | billing_core_source_cleanup_sha256_stream)" || return 1
+			[[ "$target_checksum" == "$marker_checksum" ]] || {
+				billing_database_fail \
+					'Target revision changed or removed the Billing Core source cleanup migration.'
+				return 1
+			}
+			if [[ "$cleanup_phase" == 'complete' ]]; then
+				git -C "$server_root" merge-base --is-ancestor \
+					"$marker_revision" "$revision" || {
+					billing_database_fail \
+						'Target revision would downgrade past the completed Billing Core source cleanup.'
+					return 1
+				}
+			fi
+		fi
+		return 0
+	fi
 	[[ "$revision" == "$ownership_revision" || "$revision" == "$cleanup_revision" ]] ||
 		billing_database_fail \
-		'Billing lifecycle forbids fetching/checking out an unbound third revision.'
+			'Billing lifecycle forbids fetching/checking out an unbound third revision.'
 }
 
 billing_database_reset_self_test() (
@@ -759,7 +1577,12 @@ billing_database_reset_self_test() (
 )
 
 billing_database_lifecycle_self_test() {
-	local source
+	local source cleanup_sha cleanup_url cleanup_options revision previous_revision
+	local table_name column_name other_sha migration_manifest migration_rows
+	cleanup_sha="$(printf 'a%.0s' {1..64})"
+	other_sha="$(printf 'b%.0s' {1..64})"
+	revision="$(printf 'b%.0s' {1..40})"
+	previous_revision="$(printf 'a%.0s' {1..40})"
 	billing_database_transition_allowed absent preparing
 	billing_database_transition_allowed prepared source-frozen
 	billing_database_transition_allowed imported pre-backups-created
@@ -777,12 +1600,155 @@ billing_database_lifecycle_self_test() {
 		billing_database_fail 'Billing lifecycle self-test allowed abort after the forward boundary.'
 		return 1
 	fi
+	[[ "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" =~ ^[0-9]{14}_[a-z0-9_]+$ &&
+		"$(billing_core_source_cleanup_migration_checksum)" =~ ^[0-9a-f]{64}$ &&
+		"${#BILLING_CANONICAL_CORE_SOURCE_TABLES[@]}" == '9' &&
+		"${#BILLING_CANONICAL_CORE_SITE_SETTINGS_COLUMNS[@]}" == '6' ]]
+	[[ "$(printf '%s\n' "${BILLING_CANONICAL_CORE_SOURCE_TABLES[@]}" |
+		LC_ALL=C sort -u | wc -l | tr -d '[:space:]')" == '9' ]]
+	[[ "$(printf '%s\n' "${BILLING_CANONICAL_CORE_SITE_SETTINGS_COLUMNS[@]}" |
+		LC_ALL=C sort -u | wc -l | tr -d '[:space:]')" == '6' ]]
+	for table_name in "${BILLING_CANONICAL_CORE_SOURCE_TABLES[@]}"; do
+		[[ "$table_name" =~ ^[a-z][a-z0-9_]*$ ]]
+	done
+	for column_name in "${BILLING_CANONICAL_CORE_SITE_SETTINGS_COLUMNS[@]}"; do
+		[[ "$column_name" =~ ^[a-z][a-z0-9_]*$ ]]
+	done
+	[[ "$(billing_core_source_state_from_counts 0 0)" == 'absent' &&
+		"$(billing_core_source_state_from_counts 9 6)" == 'present' &&
+		"$(billing_core_source_state_from_counts 8 6)" == 'partial' &&
+		"$(billing_core_source_state_from_counts 9 5)" == 'partial' ]]
+	! billing_core_source_state_from_counts invalid 0 >/dev/null 2>&1
+	[[ "$(billing_core_source_cleanup_migration_state_from_counts 0 0 0 0 0)" == 'pending' &&
+		"$(billing_core_source_cleanup_migration_state_from_counts 1 0 0 1 0)" == 'unfinished' &&
+		"$(billing_core_source_cleanup_migration_state_from_counts 1 0 0 0 1)" == 'rolled-back' &&
+		"$(billing_core_source_cleanup_migration_state_from_counts 2 0 1 0 1)" == 'applied' &&
+		"$(billing_core_source_cleanup_migration_state_from_counts 2 1 1 0 0)" == 'unsafe' ]]
+	! billing_core_source_cleanup_migration_state_from_counts invalid 0 0 0 0 >/dev/null 2>&1
+	migration_manifest="$(printf '{"20260101000000_old":"%s","%s":"%s"}' \
+		"$other_sha" "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" "$cleanup_sha")"
+	migration_rows="$(printf '20260101000000_old\t%s\tapplied\n' "$other_sha")"
+	billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" "$migration_rows" exclusive
+	billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" \
+		"$migration_rows"$'\n'"$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME"$'\t'"$cleanup_sha"$'\tunfinished' \
+		exclusive
+	billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" \
+		"$migration_rows"$'\n'"$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME"$'\t'"$cleanup_sha"$'\tapplied' \
+		applied
+	! billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" \
+		"$migration_rows"$'\n'"$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME"$'\t'"$cleanup_sha"$'\tapplied' \
+		exclusive
+	! billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" \
+		"20260101000000_old"$'\t'"$other_sha"$'\tunfinished' exclusive
+	! billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" \
+		"$migration_rows"$'\n'"20990101000000_unknown"$'\t'"$cleanup_sha"$'\tapplied' exclusive
+	migration_manifest="$(printf '{"20260101000000_old":"%s","%s":"%s","20260901000000_later":"%s"}' \
+		"$other_sha" "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" "$cleanup_sha" "$other_sha")"
+	migration_rows="$(printf '20260101000000_old\t%s\tapplied\n%s\t%s\tapplied\n20260901000000_later\t%s\tapplied\n' \
+		"$other_sha" "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" "$cleanup_sha" "$other_sha")"
+	billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" "$migration_rows" applied
+	! billing_core_source_cleanup_validate_migration_manifest_state \
+		"$migration_manifest" "$migration_rows" exclusive
+	[[ "$(billing_core_source_cleanup_recovery_action present pending)" == 'restore-exact' &&
+		"$(billing_core_source_cleanup_recovery_action present rolled-back)" == 'restore-exact' &&
+		"$(billing_core_source_cleanup_recovery_action present unfinished)" == 'restore-exact' &&
+		"$(billing_core_source_cleanup_recovery_action absent unfinished)" == 'forward-only' &&
+		"$(billing_core_source_cleanup_recovery_action absent applied)" == 'forward-only' &&
+		"$(billing_core_source_cleanup_recovery_action partial unfinished)" == 'halt' &&
+		"$(billing_core_source_cleanup_recovery_action present applied)" == 'halt' ]]
+	cleanup_url="$(billing_core_source_cleanup_migration_url \
+		'postgresql://migration:masked@127.0.0.1:55432/default_db?schema=public&options=-c%20existing.setting%3Dretained' \
+		2 "$previous_revision" "$revision" "$cleanup_sha" "$cleanup_sha" \
+		"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" \
+		"$cleanup_sha")"
+	cleanup_options="$(CLEANUP_URL="$cleanup_url" node -e \
+		'process.stdout.write(new URL(process.env.CLEANUP_URL).searchParams.get("options") ?? "")')"
+	[[ "$cleanup_url" == postgresql://migration:masked@127.0.0.1:55432/default_db* &&
+		"$cleanup_url" == *'%20'* && "$cleanup_url" != *'+'* &&
+		"$cleanup_options" == '-c existing.setting=retained -c winwidget.billing_core_source_cleanup=production-destructive-approved -c winwidget.billing_ownership_phase=complete -c winwidget.billing_ownership_generation=2 -c winwidget.billing_ownership_revision='"$previous_revision"' -c winwidget.billing_cleanup_revision='"$revision"' -c winwidget.billing_source_snapshot_sha256='"$cleanup_sha"' -c winwidget.billing_core_backup_sha256='"$cleanup_sha"' -c winwidget.billing_backup_sha256='"$cleanup_sha"' -c winwidget.billing_restore_evidence_sha256='"$cleanup_sha"' -c winwidget.billing_offsite_receipt_sha256='"$cleanup_sha"' -c winwidget.billing_queue_drain_evidence_sha256='"$cleanup_sha"' -c winwidget.billing_stopped_writers_evidence_sha256='"$cleanup_sha"' -c winwidget.billing_retention_decision=approved -c winwidget.billing_retention_reference='"$cleanup_sha" ]]
+	! billing_core_source_cleanup_migration_url \
+		'https://example.test/not-postgres' 2 "$previous_revision" "$revision" \
+		"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" \
+		"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" >/dev/null 2>&1
+	! billing_core_source_cleanup_migration_url \
+		'postgresql://migration:masked@127.0.0.1/default_db' 2 "$revision" "$revision" \
+		"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" \
+		"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" >/dev/null 2>&1
+	(
+		local marker_directory marker_file marker_timestamp image_id
+		marker_directory="$(mktemp -d "${TMPDIR:-/tmp}/billing-cleanup-marker.XXXXXX")"
+		marker_file="$marker_directory/marker"
+		marker_timestamp='2026-08-13T00:00:00Z'
+		image_id="sha256:$cleanup_sha"
+		trap 'rm -f -- "$marker_file"; rmdir -- "$marker_directory"' EXIT
+		{
+			printf 'version=1\nphase=staged\nprevious_revision=%s\nrevision=%s\n' "$previous_revision" "$revision"
+			printf 'migration_name=%s\nmigration_sha256=%s\n' "$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME" "$cleanup_sha"
+			printf 'ownership_generation=2\ncleanup_core_image_id=%s\ncleanup_billing_image_id=%s\n' "$image_id" "$image_id"
+			printf 'source_snapshot_sha256=%s\nprojection_evidence_sha256=%s\nroute_evidence_sha256=%s\n' "$cleanup_sha" "$cleanup_sha" "$cleanup_sha"
+			printf 'core_backup_sha256=pending\nbilling_backup_sha256=pending\nrestore_evidence_sha256=pending\n'
+			printf 'queue_drain_evidence_sha256=pending\nstopped_writers_evidence_sha256=pending\n'
+			printf 'pre_offsite_receipt_sha256=pending\nretention_decision=approved\nretention_reference=pending\n'
+			printf 'core_system_identifier=pending\nbilling_system_identifier=pending\nbilling_database_id=pending\n'
+			printf 'post_cleanup_backup_sha256=pending\npost_restore_evidence_sha256=pending\npost_offsite_receipt_sha256=pending\ncompletion_evidence_sha256=pending\n'
+			printf 'created_at=%s\nupdated_at=%s\n' "$marker_timestamp" "$marker_timestamp"
+		} >"$marker_file"
+		billing_core_source_cleanup_validate_marker_contents "$marker_file"
+		sed 's/retention_reference=pending/retention_reference=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+			"$marker_file" >"$marker_file.changed"
+		mv "$marker_file.changed" "$marker_file"
+		! billing_core_source_cleanup_validate_marker_contents "$marker_file"
+	)
+	(
+		local temporary_root backend_directory marker_file marker_timestamp image_id other_sha
+		temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/billing-cleanup-write.XXXXXX")"
+		backend_directory="$temporary_root/deploy/backend"
+		mkdir -p "$backend_directory"
+		chmod 700 "$backend_directory"
+		APP_ROOT="$temporary_root"
+		marker_file="$(billing_core_source_cleanup_marker_path)"
+		marker_timestamp='2026-08-13T00:00:00Z'
+		image_id="sha256:$cleanup_sha"
+		other_sha="$(printf 'b%.0s' {1..64})"
+		billing_core_source_cleanup_stat_owner() { printf '0:0\n'; }
+		chown() { return 0; }
+		trap 'rm -f -- "$marker_file"; rmdir -- "$backend_directory" "$(dirname -- "$backend_directory")" "$temporary_root"' EXIT
+		billing_core_source_cleanup_write_marker staged "$previous_revision" "$revision" \
+			2 "$image_id" "$image_id" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" \
+			pending pending pending pending pending pending approved pending \
+			pending pending pending pending pending pending pending "$marker_timestamp"
+		[[ "$(billing_core_source_cleanup_marker_value phase)" == 'staged' ]]
+		billing_core_source_cleanup_bind_staged_evidence \
+			"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" \
+			"$cleanup_sha" "$cleanup_sha" 123 456 \
+			'123e4567-e89b-42d3-a456-426614174000'
+		[[ "$(billing_core_source_cleanup_marker_value retention_reference)" == "$cleanup_sha" ]]
+		billing_core_source_cleanup_advance_applied
+		[[ "$(billing_core_source_cleanup_marker_value phase)" == 'applied' ]]
+		billing_core_source_cleanup_advance_complete \
+			"$cleanup_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha"
+		[[ "$(billing_core_source_cleanup_marker_value phase)" == 'complete' ]]
+		! billing_core_source_cleanup_advance_complete \
+			"$other_sha" "$cleanup_sha" "$cleanup_sha" "$cleanup_sha" >/dev/null 2>&1
+	)
 	source="$(declare -f billing_database_prepare billing_database_abort \
 		billing_database_require_runtime_stopped \
 		billing_database_reset_aborted_target \
 		billing_database_require_env_contract \
 		billing_database_validate_marker billing_database_write_marker \
 		billing_database_guard_revision \
+		billing_core_source_cleanup_validate_marker_contents \
+		billing_core_source_cleanup_write_marker \
+		billing_core_source_cleanup_migration_url \
+		billing_core_source_cleanup_require_exact_migration_manifest \
+		billing_core_source_state billing_core_source_cleanup_migration_state \
 		billing_database_require_pinned_candidate_images \
 		billing_database_provision_roles \
 		billing_database_finalize_acl billing_database_verify_acl)"
@@ -819,12 +1785,24 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 		[[ $# -eq 2 ]] || billing_database_fail 'Exact revision argument is required.'
 		# database-restore-production-guard: before-checkout
 		database_restore_guard_assert_before_checkout "$ENV_FILE"
-		billing_database_guard_revision "$2"
+		billing_database_guard_revision "$2" "$1"
+		;;
+	--core-source-state)
+		[[ $# -eq 1 ]] || exit 64
+		billing_core_source_state
+		;;
+	--core-source-migration-state)
+		[[ $# -eq 1 ]] || exit 64
+		billing_core_source_cleanup_migration_state
+		;;
+	--core-source-cleanup-marker-state)
+		[[ $# -eq 1 ]] || exit 64
+		billing_core_source_cleanup_marker_state
 		;;
 	--self-test) billing_database_lifecycle_self_test ;;
 	*)
 		billing_database_fail \
-			'Usage: billing-database-lifecycle.sh --prepare|--abort|--status|--guard-before-fetch-revision SHA|--guard-before-checkout-revision SHA|--self-test'
+			'Usage: billing-database-lifecycle.sh --prepare|--abort|--status|--core-source-state|--core-source-migration-state|--core-source-cleanup-marker-state|--guard-before-fetch-revision SHA|--guard-before-checkout-revision SHA|--self-test'
 		;;
 	esac
 fi

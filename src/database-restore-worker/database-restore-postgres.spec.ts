@@ -110,11 +110,13 @@ describe('database restore PostgreSQL contract', () => {
 		const repairSql = buildDatabaseOwnershipAndAclRepairSql(core);
 		const verificationSql = buildDatabasePreReopenVerificationSql(core);
 		const reopenSql = buildDatabaseReopenSql(core);
-		const cleanupMigration =
+		const widgetsCleanupMigration =
 			'20260810000000_remove_legacy_widgets_core_source';
+		const billingCleanupMigration =
+			'20260813000000_remove_legacy_billing_core_source';
 		const runtimeAllTablesGrant =
 			'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "public" TO "winwidget_api_runtime"';
-		const legacyTables = [
+		const legacyWidgetsTables = [
 			'widgets',
 			'quizzes',
 			'callbacks',
@@ -134,6 +136,38 @@ describe('database restore PostgreSQL contract', () => {
 			'widget_runtime_daily_metrics',
 			'widget_runtime_daily_step_metrics'
 		];
+		const legacyBillingTables = [
+			'payments',
+			'payment_receipts',
+			'subscriptions',
+			'subscription_history',
+			'subscription_expiry_reminders',
+			'auto_renewals',
+			'auto_renewal_consent_events',
+			'tariff_prices',
+			'affiliate_referrals'
+		];
+		const legacyBillingSiteSettingsColumns = [
+			'payment_enabled',
+			'auto_renewal_signup_enabled',
+			'auto_renewal_charges_enabled',
+			'auto_renewal_charges_enabled_at',
+			'affiliate_program_enabled',
+			'affiliate_cashback_percent'
+		];
+		const retainedRuntimeFunctions = [
+			'"public"."reporting_producers_enabled"()',
+			'"public"."reporting_iso_timestamp"(timestamp without time zone)',
+			'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
+			'"public"."reporting_emit_user_projection"(text, boolean)',
+			'"public"."reporting_user_projection_trigger"()',
+			'"public"."reporting_auth_identity_projection_trigger"()',
+			'"public"."reporting_settings_projection_trigger"()'
+		];
+		const removedRuntimeFunctions = [
+			'"public"."reporting_payment_projection_trigger"()',
+			'"public"."reporting_subscription_projection_trigger"()'
+		];
 
 		expect(reopenSql).toContain(
 			'ALTER DATABASE "default_db" OWNER TO "winwidget_core_admin"'
@@ -148,20 +182,45 @@ describe('database restore PostgreSQL contract', () => {
 		expect(repairSql).toContain(
 			'REVOKE ALL ON TABLE "public"."reporting_producer_state" FROM "winwidget_api_runtime"'
 		);
-		expect(repairSql).toContain(cleanupMigration);
-		expect(verificationSql).toContain(cleanupMigration);
-		expect(repairSql.indexOf(cleanupMigration)).toBeLessThan(
+		expect(repairSql).toContain(widgetsCleanupMigration);
+		expect(verificationSql).toContain(widgetsCleanupMigration);
+		expect(repairSql).toContain(billingCleanupMigration);
+		expect(verificationSql).toContain(billingCleanupMigration);
+		expect(repairSql.indexOf(widgetsCleanupMigration)).toBeLessThan(
 			repairSql.indexOf(runtimeAllTablesGrant)
 		);
-		const invariantTablesSql = repairSql.match(
+		expect(repairSql.indexOf(billingCleanupMigration)).toBeLessThan(
+			repairSql.indexOf(runtimeAllTablesGrant)
+		);
+		const widgetsInvariantTablesSql = repairSql.match(
 			/FOREACH legacy_table_name IN ARRAY ARRAY\[([^\]]+)\]::TEXT\[\] LOOP/s
 		)?.[1];
-		expect(invariantTablesSql).toBeDefined();
+		expect(widgetsInvariantTablesSql).toBeDefined();
 		expect(
-			[...(invariantTablesSql ?? '').matchAll(/'([^']+)'/g)].map(
+			[...(widgetsInvariantTablesSql ?? '').matchAll(/'([^']+)'/g)].map(
 				match => match[1]
 			)
-		).toEqual(legacyTables);
+		).toEqual(legacyWidgetsTables);
+		const billingInvariantSql = repairSql.match(
+			/DO \$database_restore_core_billing_cleanup\$([\s\S]+?)\$database_restore_core_billing_cleanup\$;/
+		)?.[1];
+		expect(billingInvariantSql).toBeDefined();
+		const billingInvariantTablesSql = billingInvariantSql?.match(
+			/FOREACH legacy_table_name IN ARRAY ARRAY\[([^\]]+)\]::TEXT\[\] LOOP/s
+		)?.[1];
+		expect(
+			[...(billingInvariantTablesSql ?? '').matchAll(/'([^']+)'/g)].map(
+				match => match[1]
+			)
+		).toEqual(legacyBillingTables);
+		const billingInvariantColumnsSql = billingInvariantSql?.match(
+			/FOREACH legacy_column_name IN ARRAY ARRAY\[([^\]]+)\]::TEXT\[\] LOOP/s
+		)?.[1];
+		expect(
+			[...(billingInvariantColumnsSql ?? '').matchAll(/'([^']+)'/g)].map(
+				match => match[1]
+			)
+		).toEqual(legacyBillingSiteSettingsColumns);
 		expect(repairSql).toContain(
 			'finished_at IS NOT NULL\n          AND rolled_back_at IS NULL'
 		);
@@ -171,6 +230,23 @@ describe('database restore PostgreSQL contract', () => {
 		expect(repairSql).toContain(
 			'Core restore contains legacy Widgets relation % after cleanup migration'
 		);
+		expect(repairSql).toContain(
+			'Routine Core restore requires the applied legacy Billing cleanup migration'
+		);
+		expect(repairSql).toContain(
+			'Core restore contains legacy Billing relation % after cleanup migration'
+		);
+		expect(repairSql).toContain(
+			'Core restore contains legacy Billing site_settings column % after cleanup migration'
+		);
+		for (const functionSignature of retainedRuntimeFunctions) {
+			expect(repairSql).toContain(functionSignature);
+			expect(verificationSql).toContain(functionSignature);
+		}
+		for (const functionSignature of removedRuntimeFunctions) {
+			expect(repairSql).not.toContain(functionSignature);
+			expect(verificationSql).not.toContain(functionSignature);
+		}
 		expect(repairSql).not.toContain(
 			'"public"."reporting_widget_projection_trigger"()'
 		);
@@ -185,7 +261,7 @@ describe('database restore PostgreSQL contract', () => {
 		);
 	});
 
-	it('does not apply the Core Widgets cleanup invariant to service restores', () => {
+	it('does not apply Core source cleanup invariants to service restores', () => {
 		const reporting = createConfig().targets.reporting;
 
 		expect(buildDatabaseOwnershipAndAclRepairSql(reporting)).not.toContain(
@@ -193,6 +269,12 @@ describe('database restore PostgreSQL contract', () => {
 		);
 		expect(buildDatabasePreReopenVerificationSql(reporting)).not.toContain(
 			'20260810000000_remove_legacy_widgets_core_source'
+		);
+		expect(buildDatabaseOwnershipAndAclRepairSql(reporting)).not.toContain(
+			'20260813000000_remove_legacy_billing_core_source'
+		);
+		expect(buildDatabasePreReopenVerificationSql(reporting)).not.toContain(
+			'20260813000000_remove_legacy_billing_core_source'
 		);
 	});
 

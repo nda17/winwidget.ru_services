@@ -42,7 +42,7 @@ billing_restore_rehearsal_script="$server_root/scripts/billing-backup-restore-re
 billing_legacy_error_contract="$billing_artifact_root/legacy-error-contract.json"
 billing_direct_error_contract="$billing_artifact_root/billing-error-contract.json"
 billing_gateway_error_contract="$billing_artifact_root/gateway-error-contract.json"
-billing_auto_renewal_core_evidence="$billing_artifact_root/auto-renewal-core-owner.json"
+billing_auto_renewal_frozen_evidence="$billing_artifact_root/auto-renewal-core-fenced.json"
 billing_auto_renewal_detached_evidence="$billing_artifact_root/auto-renewal-detached.json"
 billing_auto_renewal_billing_evidence="$billing_artifact_root/auto-renewal-billing-owner.json"
 billing_cutover_active_stage=''
@@ -66,7 +66,7 @@ readonly billing_publisher_write_pattern='^winwidget\.(events|billing\.(retry|de
 readonly billing_worker_topic_read_pattern='^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.settings\.source\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v1|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$'
 readonly billing_publisher_topic_write_pattern='^(payment\.succeeded\.v1|payment\.notification\.telegram\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.subscription-expiry\.(email|telegram)\.requested\.v1|billing\.(payment|subscription)(\.details)?\.changed\.v1|billing\.(affiliate|settings)\.changed\.v1|admin\.audit\.billing\.v1)$'
 readonly core_integration_write_pattern='^(winwidget\.retry|winwidget\.dead-letter)$'
-readonly core_integration_post_billing_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+readonly core_integration_post_billing_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
 
 # shellcheck source=scripts/billing-release-identity.sh
 source "$server_root/scripts/billing-release-identity.sh"
@@ -458,7 +458,7 @@ billing_cutover_run_cli() {
 	stage="$(mktemp -d "$billing_artifact_root/.cli-stage.XXXXXX")"
 	billing_cutover_active_stage="$stage"
 	chown 0:1001 "$stage"
-	chmod 730 "$stage"
+	chmod 770 "$stage"
 	output_name='output.json'
 	if [[ "$input_file" != 'none' ]]; then
 		billing_cutover_validate_evidence_file "$input_file" || return 1
@@ -826,7 +826,7 @@ const seeded = required.reduce(
   0,
 );
 if (
-  document.counts.seedPendingOutboxAtCommit !== seeded ||
+  document.counts.seedPendingOutboxAtCommit > seeded ||
   document.counts.pendingOutbox > seeded
 ) process.exit(1);
 NODE
@@ -970,6 +970,27 @@ if (
     new Set(document.eventTypes).size !== projectionTypes.length ||
     projectionTypes.some(eventType => !document.eventTypes.includes(eventType))
   ))
+) process.exit(1);
+NODE
+}
+
+billing_cutover_validate_core_frozen_state() {
+	[[ $# -eq 1 ]] || return 1
+	billing_cutover_validate_json_identity "$1" || return 1
+	node - "$1" <<'NODE'
+const fs = require('node:fs');
+const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const state = document.coreState;
+if (
+  document.schemaVersion !== 1 || document.action !== 'status' ||
+  !state || state.id !== 'singleton' || state.ownership !== 'CORE' ||
+  state.sourceProducersEnabled !== false ||
+  state.legacyRoutesEnabled !== true || state.schedulerEnabled !== false ||
+  state.legacyConsumerEnabled !== false ||
+  state.projectionConsumerEnabled !== true ||
+  state.generation !== String(document.generation) ||
+  state.preparedRevision !== document.revision ||
+  state.ownershipRevision !== null || state.activatedAt !== null
 ) process.exit(1);
 NODE
 }
@@ -1375,6 +1396,8 @@ billing_cutover_capture_auto_renewal_ownership() {
 	local expected_consumers="$1" expected_connection="$2" expected_user="$3"
 	local evidence_stage="$4" destination="$5" expected_redeliver="$6"
 	local management_url monitor_user monitor_password evidence temporary image
+	local rabbit_container_id rabbit_restart_count rabbit_started_at
+	local rabbit_image_id
 	management_url="$(billing_read_env_value "$ENV_FILE" RABBITMQ_MANAGEMENT_URL)"
 	monitor_user="$(billing_read_env_value "$ENV_FILE" RABBITMQ_MONITOR_USER)"
 	monitor_password="$(billing_read_env_value "$ENV_FILE" RABBITMQ_MONITOR_PASSWORD)"
@@ -1383,6 +1406,18 @@ billing_cutover_capture_auto_renewal_ownership() {
 		"$monitor_user" =~ ^[A-Za-z0-9._-]+$ &&
 		${#monitor_password} -ge 32 ]] || return 1
 	image="winwidget-api:git-$EXPECTED_REVISION"
+	rabbit_container_id="$(billing_compose "$EXPECTED_REVISION" "$ENV_FILE" \
+		"$COMPOSE_FILE" ps --status running -q rabbitmq)"
+	[[ "$rabbit_container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	rabbit_restart_count="$(docker inspect --format '{{.RestartCount}}' \
+		"$rabbit_container_id")"
+	rabbit_started_at="$(docker inspect --format '{{.State.StartedAt}}' \
+		"$rabbit_container_id")"
+	rabbit_image_id="$(docker inspect --format '{{.Image}}' \
+		"$rabbit_container_id")"
+	[[ "$rabbit_restart_count" =~ ^[0-9]+$ &&
+		"$rabbit_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$rabbit_started_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || return 1
 	export RABBITMQ_MANAGEMENT_URL="$management_url"
 	export RABBITMQ_MONITOR_USER="$monitor_user"
 	export RABBITMQ_MONITOR_PASSWORD="$monitor_password"
@@ -1391,13 +1426,36 @@ billing_cutover_capture_auto_renewal_ownership() {
 	export RABBITMQ_EXPECTED_USER="$expected_user"
 	export RABBITMQ_EVIDENCE_STAGE="$evidence_stage"
 	export RABBITMQ_EXPECTED_REDELIVER="$expected_redeliver"
+	export RABBITMQ_CONTAINER_ID="$rabbit_container_id"
+	export RABBITMQ_RESTART_COUNT="$rabbit_restart_count"
+	export RABBITMQ_STARTED_AT="$rabbit_started_at"
+	export RABBITMQ_IMAGE_ID="$rabbit_image_id"
+	export RABBITMQ_REVISION="$EXPECTED_REVISION"
+	export RABBITMQ_GENERATION="$(billing_cutover_marker_value generation)"
+	export RABBITMQ_VHOST='winwidget'
+	export RABBITMQ_SNAPSHOT_SHA256="$(billing_cutover_marker_value snapshot_sha256)"
+	export RABBITMQ_PROJECTION_SHA256="$(billing_cutover_marker_value projection_sha256)"
+	[[ "$RABBITMQ_GENERATION" =~ ^[1-9][0-9]*$ &&
+		"$RABBITMQ_SNAPSHOT_SHA256" =~ ^[0-9a-f]{64}$ &&
+		"$RABBITMQ_PROJECTION_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
 	evidence="$(docker run --rm --network host \
 		-e RABBITMQ_MANAGEMENT_URL -e RABBITMQ_MONITOR_USER \
 		-e RABBITMQ_MONITOR_PASSWORD -e RABBITMQ_EXPECTED_CONSUMERS \
 		-e RABBITMQ_EXPECTED_CONNECTION -e RABBITMQ_EXPECTED_USER \
 		-e RABBITMQ_EVIDENCE_STAGE -e RABBITMQ_EXPECTED_REDELIVER \
+		-e RABBITMQ_CONTAINER_ID -e RABBITMQ_RESTART_COUNT \
+		-e RABBITMQ_STARTED_AT -e RABBITMQ_IMAGE_ID \
+		-e RABBITMQ_REVISION -e RABBITMQ_GENERATION \
+		-e RABBITMQ_VHOST -e RABBITMQ_SNAPSHOT_SHA256 \
+		-e RABBITMQ_PROJECTION_SHA256 \
 		--entrypoint node "$image" -e '
 const queueName = "winwidget.payment.auto-renewal";
+const auxiliaryQueueNames = [
+  `${queueName}.retry-v2.1`, `${queueName}.retry-v2.2`,
+  `${queueName}.retry-v2.3`, `${queueName}.retry.1`,
+  `${queueName}.retry.2`, `${queueName}.retry.3`,
+  `${queueName}.dead-letter`,
+];
 const baseUrl = process.env.RABBITMQ_MANAGEMENT_URL;
 const vhost = "winwidget";
 const authorization = `Basic ${Buffer.from(
@@ -1415,32 +1473,67 @@ const request = async path => {
   return response.json();
 };
 const integer = value => Number.isSafeInteger(value) && value >= 0;
-const run = async () => {
-  const [connections, queue] = await Promise.all([
+const sample = async () => {
+  const [connections, queue, overview, ...auxiliaryQueues] = await Promise.all([
     request("/api/connections"),
     request(`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(queueName)}`),
+	request("/api/overview"),
+    ...auxiliaryQueueNames.map(name =>
+      request(`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(name)}`)),
   ]);
-  if (!Array.isArray(connections) || !queue || typeof queue !== "object") {
+	if (!Array.isArray(connections) || !queue || typeof queue !== "object" ||
+	    !overview || typeof overview !== "object" ||
+	    typeof overview.node !== "string" || !overview.node ||
+	    !/^4\.2\./.test(overview.rabbitmq_version || "") ||
+	    typeof overview.management_version !== "string" ||
+	    !overview.management_version ||
+	    !["basic", "detailed"].includes(overview.rates_mode) ||
+      auxiliaryQueues.length !== auxiliaryQueueNames.length) {
     throw new Error("RabbitMQ Management response is invalid");
   }
+	const auxiliary = auxiliaryQueues.map((value, index) => {
+	  if (!value || typeof value !== "object" ||
+	      value.name !== auxiliaryQueueNames[index] ||
+	      !integer(value.messages_ready) ||
+	      !integer(value.messages_unacknowledged) ||
+	      !integer(value.consumers) || value.messages_ready !== 0 ||
+	      value.messages_unacknowledged !== 0 || value.consumers !== 0) {
+	    throw new Error("Auto-renewal retry or dead-letter queue is not quiescent");
+	  }
+	  return {
+	    queue: value.name,
+	    messagesReady: value.messages_ready,
+	    messagesUnacknowledged: value.messages_unacknowledged,
+	    consumers: value.consumers,
+	  };
+	});
   const bySocket = new Map(connections.map(connection => [connection.name, connection]));
-  const consumers = Array.isArray(queue.consumer_details)
-    ? queue.consumer_details
-    : [];
   const expectedConsumers = Number(process.env.RABBITMQ_EXPECTED_CONSUMERS);
-  if (consumers.length !== expectedConsumers) {
+	if (!Number.isSafeInteger(queue.consumers) ||
+	    queue.consumers !== expectedConsumers ||
+	    !Array.isArray(queue.consumer_details) ||
+	    queue.consumer_details.length !== expectedConsumers) {
     throw new Error("Auto-renewal consumer count is not at the ownership gate");
   }
+	const consumers = queue.consumer_details;
   const owners = consumers.map(consumer => {
     const connection = bySocket.get(consumer?.channel_details?.connection_name);
     return {
       user: connection?.user ?? null,
       connectionName: connection?.client_properties?.connection_name ?? null,
+	  consumerTag: typeof consumer?.consumer_tag === "string" ?
+	    consumer.consumer_tag : null,
+	  ackRequired: consumer?.ack_required ?? null,
+	  exclusive: consumer?.exclusive ?? null,
+	  active: consumer?.active ?? null,
     };
   });
   if (expectedConsumers === 1 && (
     owners[0]?.user !== process.env.RABBITMQ_EXPECTED_USER ||
-    owners[0]?.connectionName !== process.env.RABBITMQ_EXPECTED_CONNECTION
+	owners[0]?.connectionName !== process.env.RABBITMQ_EXPECTED_CONNECTION ||
+	typeof owners[0]?.consumerTag !== "string" || !owners[0].consumerTag
+	|| owners[0]?.ackRequired !== true || owners[0]?.exclusive !== false ||
+	(owners[0]?.active !== null && owners[0]?.active !== true)
   )) throw new Error("Auto-renewal consumer owner is not exact");
   const messagesReady = queue.messages_ready;
   const messagesUnacknowledged = queue.messages_unacknowledged;
@@ -1453,8 +1546,13 @@ const run = async () => {
   if (expectedRedeliver && Number(expectedRedeliver) !== redeliver) {
     throw new Error("Auto-renewal handoff caused a redelivery");
   }
-  process.stdout.write(JSON.stringify({
+	return {
     schemaVersion: 1,
+	revision: process.env.RABBITMQ_REVISION,
+	generation: process.env.RABBITMQ_GENERATION,
+	vhost: process.env.RABBITMQ_VHOST,
+	snapshotSha256: process.env.RABBITMQ_SNAPSHOT_SHA256,
+	projectionSha256: process.env.RABBITMQ_PROJECTION_SHA256,
     queue: queueName,
     stage: process.env.RABBITMQ_EVIDENCE_STAGE,
     consumers: consumers.length,
@@ -1462,8 +1560,36 @@ const run = async () => {
     messagesUnacknowledged,
     redeliver,
     owners,
+	auxiliaryQueues: auxiliary,
+	broker: {
+	  containerId: process.env.RABBITMQ_CONTAINER_ID,
+	  restartCount: Number(process.env.RABBITMQ_RESTART_COUNT),
+	  startedAt: process.env.RABBITMQ_STARTED_AT,
+	  imageId: process.env.RABBITMQ_IMAGE_ID,
+	  node: overview.node,
+	  rabbitmqVersion: overview.rabbitmq_version,
+	  managementVersion: overview.management_version,
+	  ratesMode: overview.rates_mode,
+	},
     observedAt: new Date().toISOString(),
-  }));
+  };
+};
+const run = async () => {
+	const first = await sample();
+	await new Promise(resolve => setTimeout(resolve, 11000));
+	const second = await sample();
+	const stable = value => ({
+	  consumers: value.consumers,
+	  messagesUnacknowledged: value.messagesUnacknowledged,
+	  redeliver: value.redeliver,
+	  owners: value.owners,
+	  auxiliaryQueues: value.auxiliaryQueues,
+	  broker: value.broker,
+	});
+	if (JSON.stringify(stable(first)) !== JSON.stringify(stable(second))) {
+	  throw new Error("RabbitMQ handoff evidence did not remain stable");
+	}
+	process.stdout.write(JSON.stringify(second));
 };
 run().catch(error => {
   process.stderr.write(`${error.message}\n`);
@@ -1473,13 +1599,29 @@ run().catch(error => {
 		unset RABBITMQ_MANAGEMENT_URL RABBITMQ_MONITOR_USER \
 			RABBITMQ_MONITOR_PASSWORD RABBITMQ_EXPECTED_CONSUMERS \
 			RABBITMQ_EXPECTED_CONNECTION RABBITMQ_EXPECTED_USER \
-			RABBITMQ_EVIDENCE_STAGE RABBITMQ_EXPECTED_REDELIVER
+			RABBITMQ_EVIDENCE_STAGE RABBITMQ_EXPECTED_REDELIVER \
+			RABBITMQ_CONTAINER_ID RABBITMQ_RESTART_COUNT RABBITMQ_STARTED_AT \
+			RABBITMQ_IMAGE_ID
+		unset RABBITMQ_REVISION RABBITMQ_GENERATION RABBITMQ_VHOST \
+			RABBITMQ_SNAPSHOT_SHA256 RABBITMQ_PROJECTION_SHA256
 		return 1
 	}
 	unset RABBITMQ_MANAGEMENT_URL RABBITMQ_MONITOR_USER \
 		RABBITMQ_MONITOR_PASSWORD RABBITMQ_EXPECTED_CONSUMERS \
 		RABBITMQ_EXPECTED_CONNECTION RABBITMQ_EXPECTED_USER \
-		RABBITMQ_EVIDENCE_STAGE RABBITMQ_EXPECTED_REDELIVER
+		RABBITMQ_EVIDENCE_STAGE RABBITMQ_EXPECTED_REDELIVER \
+		RABBITMQ_CONTAINER_ID RABBITMQ_RESTART_COUNT RABBITMQ_STARTED_AT \
+		RABBITMQ_IMAGE_ID
+	unset RABBITMQ_REVISION RABBITMQ_GENERATION RABBITMQ_VHOST \
+		RABBITMQ_SNAPSHOT_SHA256 RABBITMQ_PROJECTION_SHA256
+	[[ "$(billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
+		ps --status running -q rabbitmq)" == "$rabbit_container_id" &&
+		"$(docker inspect --format '{{.RestartCount}}' "$rabbit_container_id")" == \
+			"$rabbit_restart_count" &&
+		"$(docker inspect --format '{{.State.StartedAt}}' "$rabbit_container_id")" == \
+			"$rabbit_started_at" &&
+		"$(docker inspect --format '{{.Image}}' "$rabbit_container_id")" == \
+			"$rabbit_image_id" ]] || return 1
 	billing_cutover_require_artifact_root
 	temporary="$destination.$$"
 	[[ ! -e "$temporary" && ! -L "$temporary" ]] || return 1
@@ -1487,13 +1629,15 @@ run().catch(error => {
 	chown 0:0 "$temporary"
 	chmod 600 "$temporary"
 	mv -f "$temporary" "$destination"
-	billing_cutover_validate_evidence_file "$destination"
+	billing_cutover_validate_auto_renewal_evidence "$destination" \
+		"$evidence_stage" "$expected_consumers" "$expected_connection" \
+		"$expected_user"
 }
 
 billing_cutover_wait_auto_renewal_ownership() {
 	[[ $# -eq 6 ]] || return 1
 	local attempt
-	for ((attempt = 1; attempt <= 60; attempt++)); do
+	for ((attempt = 1; attempt <= 12; attempt++)); do
 		if billing_cutover_capture_auto_renewal_ownership "$@" 2>/dev/null; then
 			return 0
 		fi
@@ -1501,6 +1645,86 @@ billing_cutover_wait_auto_renewal_ownership() {
 	done
 	billing_cutover_fail \
 		'RabbitMQ auto-renewal consumer ownership did not reach the required safe state.'
+}
+
+billing_cutover_validate_auto_renewal_evidence() {
+	[[ $# -eq 5 ]] || return 1
+	local file="$1" expected_stage="$2" expected_consumers="$3"
+	local expected_connection="$4" expected_user="$5"
+	billing_cutover_validate_evidence_file "$file" || return 1
+	EXPECTED_STAGE="$expected_stage" EXPECTED_CONSUMERS="$expected_consumers" \
+		EXPECTED_CONNECTION="$expected_connection" EXPECTED_USER="$expected_user" \
+		EXPECTED_REVISION="$EXPECTED_REVISION" \
+		EXPECTED_GENERATION="$(billing_cutover_marker_value generation)" \
+		EXPECTED_SNAPSHOT_SHA256="$(billing_cutover_marker_value snapshot_sha256)" \
+		EXPECTED_PROJECTION_SHA256="$(billing_cutover_marker_value projection_sha256)" \
+		node - "$file" <<'NODE'
+const fs = require('node:fs');
+const document = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const queue = 'winwidget.payment.auto-renewal';
+const auxiliaryNames = [
+  `${queue}.retry-v2.1`, `${queue}.retry-v2.2`, `${queue}.retry-v2.3`,
+  `${queue}.retry.1`, `${queue}.retry.2`, `${queue}.retry.3`,
+  `${queue}.dead-letter`,
+];
+const integer = value => Number.isSafeInteger(value) && value >= 0;
+const consumers = Number(process.env.EXPECTED_CONSUMERS);
+const owners = document.owners;
+const auxiliary = document.auxiliaryQueues;
+if (
+  document.schemaVersion !== 1 || document.queue !== queue ||
+	  document.revision !== process.env.EXPECTED_REVISION ||
+	  !/^[1-9][0-9]*$/.test(document.generation || '') ||
+	  document.generation !== process.env.EXPECTED_GENERATION ||
+	  document.vhost !== 'winwidget' ||
+	  document.snapshotSha256 !== process.env.EXPECTED_SNAPSHOT_SHA256 ||
+	  document.projectionSha256 !== process.env.EXPECTED_PROJECTION_SHA256 ||
+  document.stage !== process.env.EXPECTED_STAGE ||
+  document.consumers !== consumers || !integer(document.messagesReady) ||
+  document.messagesUnacknowledged !== 0 || !integer(document.redeliver) ||
+  !Array.isArray(owners) || owners.length !== consumers ||
+  !Array.isArray(auxiliary) || auxiliary.length !== auxiliaryNames.length ||
+  auxiliary.some((value, index) => !value ||
+    value.queue !== auxiliaryNames[index] || value.messagesReady !== 0 ||
+    value.messagesUnacknowledged !== 0 || value.consumers !== 0) ||
+  !document.broker ||
+  !/^[0-9a-f]{64}$/.test(document.broker.containerId || '') ||
+	  !/^sha256:[0-9a-f]{64}$/.test(document.broker.imageId || '') ||
+  !integer(document.broker.restartCount) ||
+  !Number.isFinite(Date.parse(document.broker.startedAt || '')) ||
+	  typeof document.broker.node !== 'string' || !document.broker.node ||
+	  !/^4\.2\./.test(document.broker.rabbitmqVersion || '') ||
+	  typeof document.broker.managementVersion !== 'string' ||
+	  !document.broker.managementVersion ||
+	  !['basic', 'detailed'].includes(document.broker.ratesMode) ||
+  !Number.isFinite(Date.parse(document.observedAt || ''))
+) process.exit(1);
+if (consumers === 0) {
+  if (process.env.EXPECTED_CONNECTION || process.env.EXPECTED_USER) process.exit(1);
+} else if (
+  consumers !== 1 || owners[0]?.connectionName !== process.env.EXPECTED_CONNECTION ||
+  owners[0]?.user !== process.env.EXPECTED_USER ||
+  typeof owners[0]?.consumerTag !== 'string' || !owners[0].consumerTag
+	|| owners[0]?.ackRequired !== true || owners[0]?.exclusive !== false ||
+	(owners[0]?.active !== null && owners[0]?.active !== true)
+) process.exit(1);
+NODE
+}
+
+billing_cutover_validate_auto_renewal_transition() {
+	[[ $# -eq 2 ]] || return 1
+	local baseline="$1" current="$2"
+	billing_cutover_validate_evidence_file "$baseline" || return 1
+	billing_cutover_validate_evidence_file "$current" || return 1
+	node - "$baseline" "$current" <<'NODE'
+const fs = require('node:fs');
+const baseline = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const current = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+if (
+  baseline.redeliver !== current.redeliver ||
+  JSON.stringify(baseline.broker) !== JSON.stringify(current.broker)
+) process.exit(1);
+NODE
 }
 
 billing_cutover_auto_renewal_redeliver() {
@@ -1730,9 +1954,41 @@ billing_cutover_create_backup() {
 		rm -f -- "$partial"
 	fi
 	(umask 077; billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		run --rm -T --no-deps --entrypoint sh maintenance-worker \
-		-euc 'url_key="$1"; schema="$2"; database_url="$(printenv "$url_key")"; test -n "$database_url"; export PGDATABASE="$database_url"; unset database_url; exec pg_dump --format=custom --compress=6 --no-owner --no-acl --no-password --schema "$schema"' \
-		sh "$url_key" "$schema" >"$partial")
+		run --rm -T --no-deps --entrypoint node maintenance-worker -e '
+const { spawnSync } = require("node:child_process");
+const urlKey = process.argv[1];
+const schema = process.argv[2];
+const raw = process.env[urlKey];
+if (!raw) process.exit(64);
+let url;
+try { url = new URL(raw); } catch { process.exit(65); }
+const sslmode = url.searchParams.get("sslmode");
+const queryKeys = [...url.searchParams.keys()];
+if (url.protocol !== "postgresql:" || !url.username || !url.password ||
+    !url.hostname || !url.pathname.slice(1) ||
+    url.searchParams.getAll("schema").length !== 1 ||
+    url.searchParams.get("schema") !== schema ||
+    url.searchParams.getAll("sslmode").length !== 1 ||
+    !["disable", "allow", "prefer", "require", "verify-ca", "verify-full"].includes(sslmode) ||
+    queryKeys.length !== 2 ||
+    queryKeys.some(key => !["schema", "sslmode"].includes(key))) process.exit(66);
+const env = {
+  ...process.env,
+  PGHOST: url.hostname,
+  PGPORT: url.port || "5432",
+  PGUSER: decodeURIComponent(url.username),
+  PGPASSWORD: decodeURIComponent(url.password),
+  PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
+  PGSSLMODE: sslmode,
+};
+delete env[urlKey];
+const result = spawnSync("pg_dump", [
+  "--format=custom", "--compress=6", "--no-owner", "--no-acl",
+  "--no-password", "--schema", schema,
+], { env, stdio: ["ignore", "inherit", "inherit"] });
+if (result.error || result.signal || result.status !== 0)
+  process.exit(result.status || 67);
+' "$url_key" "$schema" >"$partial")
 	[[ "$(head -c 5 "$partial")" == 'PGDMP' ]] ||
 		billing_cutover_fail "Maintenance backup is not a custom PostgreSQL dump: $label" ||
 		return 1
@@ -2707,7 +2963,12 @@ billing_cutover_wait_gateway() {
 }
 
 billing_cutover_require_active_runtime() {
-	local image_id redeliver
+	local image_id redeliver generation
+	generation="$(billing_cutover_marker_value generation)" || return 1
+	billing_cutover_run_core_cli status "$billing_core_status_evidence" \
+		--revision "$EXPECTED_REVISION" --generation "$generation" || return 1
+	billing_cutover_validate_core_active_state \
+		"$billing_core_status_evidence" || return 1
 	image_id="$(billing_database_marker_value billing_image_id)" || return 1
 	[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
 	billing_database_require_pinned_candidate_images || return 1
@@ -2737,11 +2998,17 @@ billing_cutover_require_active_runtime() {
 		return 1
 	billing_cutover_validate_evidence_file \
 		"$billing_auto_renewal_billing_evidence" || return 1
+	billing_cutover_validate_auto_renewal_evidence \
+		"$billing_auto_renewal_frozen_evidence" \
+		core-fenced-baseline 0 '' '' || return 1
 	redeliver="$(billing_cutover_auto_renewal_redeliver \
-		"$billing_auto_renewal_billing_evidence")" || return 1
+		"$billing_auto_renewal_frozen_evidence")" || return 1
 	billing_cutover_wait_auto_renewal_ownership 1 \
 		winwidget-billing-worker winwidget-billing-worker billing-owner \
-		"$billing_auto_renewal_billing_evidence" "$redeliver"
+		"$billing_auto_renewal_billing_evidence" "$redeliver" || return 1
+	billing_cutover_validate_auto_renewal_transition \
+		"$billing_auto_renewal_frozen_evidence" \
+		"$billing_auto_renewal_billing_evidence"
 }
 
 billing_cutover_update_phase() {
@@ -3161,7 +3428,7 @@ billing_cutover_require_manual_confirmation() {
 billing_cutover_run() {
 	local phase generation snapshot_sha projection_sha route_sha
 	local core_ownership core_source_producers billing_ownership
-	local handoff_redeliver integration_user
+	local handoff_redeliver
 	billing_cutover_require_environment
 	billing_cutover_require_manual_confirmation
 	acquire_production_deploy_lock 'Billing ownership cutover'
@@ -3287,13 +3554,12 @@ billing_cutover_run() {
 			"$billing_core_status_evidence")"
 		case "$core_ownership" in
 		CORE)
-			integration_user="$(billing_cutover_rabbit_user \
-				RABBITMQ_INTEGRATION_WORKER_URL)"
-			billing_cutover_wait_auto_renewal_ownership 1 \
-				winwidget-integration-worker "$integration_user" \
-				core-owner "$billing_auto_renewal_core_evidence" ''
+			billing_cutover_validate_core_frozen_state \
+				"$billing_core_status_evidence"
+			billing_cutover_wait_auto_renewal_ownership 0 '' '' \
+				core-fenced-baseline "$billing_auto_renewal_frozen_evidence" ''
 			handoff_redeliver="$(billing_cutover_auto_renewal_redeliver \
-				"$billing_auto_renewal_core_evidence")"
+				"$billing_auto_renewal_frozen_evidence")"
 			billing_cutover_run_core_cli activate \
 				"$billing_core_activation_evidence" \
 				--revision "$EXPECTED_REVISION" --generation "$generation"
@@ -3303,13 +3569,19 @@ billing_cutover_run() {
 		BILLING)
 			billing_cutover_validate_core_active_state \
 				"$billing_core_status_evidence"
+			billing_cutover_validate_auto_renewal_evidence \
+				"$billing_auto_renewal_frozen_evidence" \
+				core-fenced-baseline 0 '' ''
 			handoff_redeliver="$(billing_cutover_auto_renewal_redeliver \
-				"$billing_auto_renewal_core_evidence")"
+				"$billing_auto_renewal_frozen_evidence")"
 			;;
 		*) billing_cutover_fail 'Core Billing ownership state is invalid.' || return 1 ;;
 		esac
 		billing_cutover_wait_auto_renewal_ownership 0 '' '' detached \
 			"$billing_auto_renewal_detached_evidence" "$handoff_redeliver"
+		billing_cutover_validate_auto_renewal_transition \
+			"$billing_auto_renewal_frozen_evidence" \
+			"$billing_auto_renewal_detached_evidence"
 		snapshot_sha="$(billing_cutover_sha256 "$billing_snapshot_file")"
 		projection_sha="$(billing_cutover_sha256 "$billing_projection_evidence")"
 		billing_cutover_update_phase forward-only "$snapshot_sha" \
@@ -3317,25 +3589,38 @@ billing_cutover_run() {
 		phase='forward-only'
 	fi
 	if [[ "$phase" == 'forward-only' ]]; then
+		billing_cutover_run_core_cli status "$billing_core_status_evidence" \
+			--revision "$EXPECTED_REVISION" --generation "$generation"
+		billing_cutover_validate_core_active_state \
+			"$billing_core_status_evidence"
 		billing_cutover_restrict_core_integration_permissions
+		billing_cutover_validate_auto_renewal_evidence \
+			"$billing_auto_renewal_frozen_evidence" \
+			core-fenced-baseline 0 '' ''
 		handoff_redeliver="$(billing_cutover_auto_renewal_redeliver \
-			"$billing_auto_renewal_core_evidence")"
-		billing_cutover_wait_auto_renewal_ownership 0 '' '' detached \
-			"$billing_auto_renewal_detached_evidence" "$handoff_redeliver"
+			"$billing_auto_renewal_frozen_evidence")"
 		billing_cutover_run_billing_cli status \
 			"$billing_service_status_evidence"
-		billing_cutover_validate_billing_status_before_activate
 		billing_ownership="$(billing_cutover_billing_ownership_phase \
 			"$billing_service_status_evidence")"
 		case "$billing_ownership" in
 		PREPARED)
+			billing_cutover_validate_billing_status_before_activate
+			billing_cutover_wait_auto_renewal_ownership 0 '' '' detached \
+				"$billing_auto_renewal_detached_evidence" "$handoff_redeliver"
+			billing_cutover_validate_auto_renewal_transition \
+				"$billing_auto_renewal_frozen_evidence" \
+				"$billing_auto_renewal_detached_evidence"
 			billing_cutover_run_billing_cli activate \
 				"$billing_service_activation_evidence" \
 				--revision "$EXPECTED_REVISION" --generation "$generation"
 			billing_cutover_validate_billing_transition \
 				"$billing_service_activation_evidence" activate ACTIVE
 			;;
-		ACTIVE) ;;
+		ACTIVE)
+			billing_cutover_validate_billing_transition \
+				"$billing_service_status_evidence" status ACTIVE
+			;;
 		*) billing_cutover_fail \
 			'Billing service is not in an activatable forward-recovery phase.' || return 1 ;;
 		esac
@@ -3345,6 +3630,9 @@ billing_cutover_run() {
 		billing_cutover_wait_auto_renewal_ownership 1 \
 			winwidget-billing-worker winwidget-billing-worker billing-owner \
 			"$billing_auto_renewal_billing_evidence" "$handoff_redeliver"
+		billing_cutover_validate_auto_renewal_transition \
+			"$billing_auto_renewal_frozen_evidence" \
+			"$billing_auto_renewal_billing_evidence"
 		billing_cutover_validate_route_env_sync
 		route_sha="$(billing_cutover_sha256 "$billing_route_env_sync_evidence")"
 		billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
@@ -3895,6 +4183,148 @@ billing_cutover_partial_recovery_self_test() (
 	rmdir -- "$directory"
 )
 
+billing_cutover_forward_only_status_self_test() (
+	local directory phase pending_outbox provider_operations cleanup_revision
+	directory="$(mktemp -d /tmp/billing-forward-only-status-self-test.XXXXXX)"
+	billing_service_status_evidence="$directory/status.json"
+	EXPECTED_REVISION="$(printf '7%.0s' {1..40})"
+	phase='PREPARED'
+	pending_outbox='0'
+	provider_operations='0'
+	cleanup_revision='null'
+	billing_cutover_marker_value() {
+		[[ "$1" == 'generation' ]] || return 1
+		printf '2\n'
+	}
+	billing_cutover_validate_evidence_file() {
+		[[ $# -eq 1 && -f "$1" && ! -L "$1" && -s "$1" ]]
+	}
+	billing_cutover_fail() { return 1; }
+	write_status() {
+		PHASE="$phase" REVISION="$EXPECTED_REVISION" \
+		PENDING_OUTBOX="$pending_outbox" \
+		PROVIDER_OPERATIONS="$provider_operations" \
+		CLEANUP_REVISION="$cleanup_revision" \
+			node - "$billing_service_status_evidence" <<'NODE'
+const fs = require('node:fs');
+const phase = process.env.PHASE;
+const revision = process.env.REVISION;
+const cleanupRevision = process.env.CLEANUP_REVISION === 'null' ? null :
+  process.env.CLEANUP_REVISION;
+fs.writeFileSync(process.argv[2], `${JSON.stringify({
+  schemaVersion: 1,
+  service: 'billing-service',
+  action: 'status',
+  status: 'ok',
+  revision,
+  generation: 2,
+  ownership: {
+    phase,
+    generation: '2',
+    preparedRevision: revision,
+    ownershipRevision: phase === 'PREPARED' ? null : revision,
+    cleanupRevision,
+  },
+  counts: {
+    pendingOutbox: Number(process.env.PENDING_OUTBOX),
+    providerOperationsInFlight: Number(process.env.PROVIDER_OPERATIONS),
+  },
+  eventTypes: {},
+})}\n`);
+NODE
+	}
+	write_status
+	[[ "$(billing_cutover_billing_ownership_phase \
+		"$billing_service_status_evidence")" == 'PREPARED' ]]
+	billing_cutover_validate_billing_status_before_activate
+	if billing_cutover_validate_billing_transition \
+		"$billing_service_status_evidence" status ACTIVE; then return 1; fi
+	phase='ACTIVE'
+	write_status
+	[[ "$(billing_cutover_billing_ownership_phase \
+		"$billing_service_status_evidence")" == 'ACTIVE' ]]
+	billing_cutover_validate_billing_transition \
+		"$billing_service_status_evidence" status ACTIVE
+	if billing_cutover_validate_billing_status_before_activate; then return 1; fi
+	pending_outbox='1'
+	write_status
+	if billing_cutover_validate_billing_transition \
+		"$billing_service_status_evidence" status ACTIVE; then return 1; fi
+	pending_outbox='0'
+	provider_operations='1'
+	write_status
+	if billing_cutover_validate_billing_transition \
+		"$billing_service_status_evidence" status ACTIVE; then return 1; fi
+	provider_operations='0'
+	cleanup_revision="$EXPECTED_REVISION"
+	write_status
+	if billing_cutover_validate_billing_transition \
+		"$billing_service_status_evidence" status ACTIVE; then return 1; fi
+	rm -f -- "$billing_service_status_evidence"
+	rmdir -- "$directory"
+)
+
+billing_cutover_seed_retry_evidence_self_test() (
+	local directory seed_pending pending_outbox
+	directory="$(mktemp -d /tmp/billing-seed-retry-evidence-self-test.XXXXXX)"
+	billing_seed_evidence="$directory/seed.json"
+	EXPECTED_REVISION="$(printf '6%.0s' {1..40})"
+	seed_pending='27'
+	pending_outbox='27'
+	billing_cutover_marker_value() {
+		[[ "$1" == 'generation' ]] || return 1
+		printf '2\n'
+	}
+	billing_cutover_validate_evidence_file() {
+		[[ $# -eq 1 && -f "$1" && ! -L "$1" && -s "$1" ]]
+	}
+	billing_cutover_fail() { return 1; }
+	write_seed() {
+		REVISION="$EXPECTED_REVISION" SEED_PENDING="$seed_pending" \
+		PENDING_OUTBOX="$pending_outbox" node - "$billing_seed_evidence" <<'NODE'
+const fs = require('node:fs');
+const eventTypes = {
+  'billing.payment.details.changed.v1': { sourceRows: 15, eventsEnqueued: 15 },
+  'billing.subscription.details.changed.v1': { sourceRows: 11, eventsEnqueued: 11 },
+  'billing.affiliate.changed.v1': { sourceRows: 0, eventsEnqueued: 0 },
+  'billing.settings.changed.v1': { sourceRows: 1, eventsEnqueued: 1 },
+};
+fs.writeFileSync(process.argv[2], `${JSON.stringify({
+  schemaVersion: 1,
+  service: 'billing-service',
+  action: 'seed-core-read-events',
+  status: 'ok',
+  revision: process.env.REVISION,
+  generation: '2',
+  eventTypes,
+  counts: {
+    pendingOutbox: Number(process.env.PENDING_OUTBOX),
+    seedPendingOutboxAtCommit: Number(process.env.SEED_PENDING),
+  },
+})}\n`);
+NODE
+	}
+	write_seed
+	billing_cutover_validate_seed_evidence
+	seed_pending='0'
+	pending_outbox='0'
+	write_seed
+	billing_cutover_validate_seed_evidence
+	seed_pending='13'
+	pending_outbox='13'
+	write_seed
+	billing_cutover_validate_seed_evidence
+	seed_pending='28'
+	write_seed
+	if billing_cutover_validate_seed_evidence; then return 1; fi
+	seed_pending='0'
+	pending_outbox='28'
+	write_seed
+	if billing_cutover_validate_seed_evidence; then return 1; fi
+	rm -f -- "$billing_seed_evidence"
+	rmdir -- "$directory"
+)
+
 billing_cutover_reprepare_identity_self_test() (
 	local directory old_database_id new_database_id marker_database_id
 	local archived_generation='' written_identity='' updated='false'
@@ -4159,6 +4589,7 @@ billing_cutover_self_test() {
 	local restore_gate_source recovery_source synthetic_source reconcile_source
 	local initialize_source cleanup_stage_source active_runtime_source abort_source
 	local migration_run_source billing_deploy_invocation_source
+	local auto_renewal_source core_state_source
 	source="$(<"$server_root/scripts/billing-cutover-production.sh")"
 	rollout_source="$(declare -f billing_cutover_prepare \
 		billing_cutover_install_core_expand_migration \
@@ -4185,6 +4616,11 @@ billing_cutover_self_test() {
 	billing_deploy_invocation_source="$(declare -f \
 		billing_cutover_start_dark_source_worker billing_cutover_prepare \
 		billing_cutover_run)"
+	auto_renewal_source="$(declare -f \
+		billing_cutover_capture_auto_renewal_ownership \
+		billing_cutover_validate_auto_renewal_evidence \
+		billing_cutover_validate_auto_renewal_transition)"
+	core_state_source="$(declare -f billing_cutover_validate_core_frozen_state)"
 	abort_source="$(declare -f billing_cutover_abort \
 		billing_cutover_require_abort_route_state \
 		billing_cutover_validate_route_env_rollback_sync)"
@@ -4275,6 +4711,83 @@ billing_cutover_self_test() {
 		"$billing_deploy_invocation_source" == *'BILLING_DEPLOY_SKIP_BUILD=true'* &&
 		"$billing_deploy_invocation_source" != *'COMPOSE_FILE="$COMPOSE_FILE"'* ]] ||
 		return 1
+	[[ "$auto_renewal_source" == *'retry-v2.1'* &&
+		"$auto_renewal_source" == *'retry.3'* &&
+		"$auto_renewal_source" == *'dead-letter'* &&
+		"$auto_renewal_source" == *'messagesReady !== 0'* &&
+		"$auto_renewal_source" == *'RABBITMQ_CONTAINER_ID'* &&
+		"$auto_renewal_source" == *'JSON.stringify(baseline.broker)'* &&
+		"$auto_renewal_source" == *'setTimeout(resolve, 11000)'* &&
+		"$auto_renewal_source" == *'queue.consumers !== expectedConsumers'* &&
+		"$auto_renewal_source" == *'RABBITMQ_SNAPSHOT_SHA256'* ]] ||
+		return 1
+	[[ "$source" == *'chmod 770 "$stage"'* &&
+		"$source" == *'document.counts.seedPendingOutboxAtCommit > seeded'* &&
+		"$source" == *'const { spawnSync } = require("node:child_process")'* &&
+		"$source" == *'PGSSLMODE: sslmode'* &&
+		"$source" == *'delete env[urlKey]'* ]] ||
+		return 1
+	[[ "$core_state_source" == *"state.ownership !== 'CORE'"* &&
+		"$core_state_source" == *'state.sourceProducersEnabled !== false'* &&
+		"$core_state_source" == *'state.legacyConsumerEnabled !== false'* ]] ||
+		return 1
+	printf '%s' "$handoff_source" | node -e '
+const fs = require("node:fs");
+const source = fs.readFileSync(0, "utf8");
+const start = source.indexOf("if [[ \"$phase\" == '\''projection-synced'\'' ]]");
+const end = source.indexOf("if [[ \"$phase\" == '\''forward-only'\'' ]]", start);
+if (start < 0 || end <= start) process.exit(1);
+const block = source.slice(start, end);
+const ordered = [
+  "billing_cutover_wait_auto_renewal_ownership 0",
+  "core-fenced-baseline",
+  "billing_cutover_auto_renewal_redeliver",
+  "billing_cutover_run_core_cli activate",
+  "billing_cutover_validate_core_active_state",
+  "billing_cutover_wait_auto_renewal_ownership 0",
+  "billing_cutover_update_phase forward-only",
+];
+let cursor = -1;
+for (const needle of ordered) {
+  const next = block.indexOf(needle, cursor + 1);
+  if (next < 0 || next <= cursor) process.exit(1);
+  cursor = next;
+}
+if (block.includes("winwidget-integration-worker") ||
+    block.includes("core-owner \"$billing_auto_renewal_core_evidence\"")) {
+  process.exit(1);
+}
+'
+	printf '%s' "$handoff_source" | node -e '
+const fs = require("node:fs");
+const source = fs.readFileSync(0, "utf8");
+const start = source.indexOf("if [[ \"$phase\" == '\''forward-only'\'' ]]");
+const end = source.indexOf("if [[ \"$phase\" == '\''active'\'' ]]", start);
+if (start < 0 || end <= start) process.exit(1);
+const block = source.slice(start, end);
+const ordered = [
+	"billing_cutover_run_core_cli status",
+	"billing_cutover_validate_core_active_state",
+	"billing_cutover_restrict_core_integration_permissions",
+  "billing_cutover_run_billing_cli status",
+  "billing_cutover_billing_ownership_phase",
+  "PREPARED)",
+  "billing_cutover_wait_auto_renewal_ownership 0",
+  "billing_cutover_run_billing_cli activate",
+  "ACTIVE)",
+  "billing_cutover_validate_billing_transition",
+  "deploy-billing-production.sh",
+  "billing_cutover_wait_auto_renewal_ownership 1",
+];
+let cursor = -1;
+for (const needle of ordered) {
+  const next = block.indexOf(needle, cursor + 1);
+  if (next < 0 || next <= cursor) process.exit(1);
+  cursor = next;
+}
+const active = block.slice(block.indexOf("ACTIVE)"), block.indexOf(";;", block.indexOf("ACTIVE)")));
+if (active.includes("billing_cutover_wait_auto_renewal_ownership 0")) process.exit(1);
+'
 	printf '%s' "$abort_source" | node -e '
 const fs = require("node:fs");
 const source = fs.readFileSync(0, "utf8");
@@ -4366,7 +4879,7 @@ ordered([
   "billing_cutover_run_billing_cli seed-core-read-events",
 ]);
 ordered([
-  "winwidget-integration-worker",
+  "core-fenced-baseline",
   "billing_cutover_run_core_cli activate",
   "billing_auto_renewal_detached_evidence",
   "billing_cutover_restrict_core_integration_permissions",
@@ -4552,6 +5065,8 @@ ordered([
 	billing_cutover_actual_restore_validator_self_test || return 1
 	billing_cutover_route_rollback_self_test || return 1
 	billing_cutover_partial_recovery_self_test || return 1
+	billing_cutover_forward_only_status_self_test || return 1
+	billing_cutover_seed_retry_evidence_self_test || return 1
 	billing_cutover_reprepare_identity_self_test || return 1
 	billing_cutover_bootstrap_generation_self_test || return 1
 	printf 'billing_cutover_self_test=passed\n'

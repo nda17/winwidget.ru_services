@@ -17,13 +17,7 @@ describe('CampaignsAudienceExportService', () => {
 				callback(transaction)
 		)
 	} as unknown as PrismaService;
-	const billingState = {
-		isBillingOwner: jest.fn().mockResolvedValue(false)
-	};
-	const service = new CampaignsAudienceExportService(
-		prisma,
-		billingState as never
-	);
+	const service = new CampaignsAudienceExportService(prisma);
 
 	beforeEach(() => {
 		jest.clearAllMocks();
@@ -135,8 +129,7 @@ describe('CampaignsAudienceExportService', () => {
 		await expect(streaming).rejects.toThrow('client disconnected');
 	});
 
-	it('uses only the Billing subscription projection after ownership', async () => {
-		billingState.isBillingOwner.mockResolvedValueOnce(true);
+	it('uses only the Billing subscription projection', async () => {
 		queryRaw.mockResolvedValueOnce([]);
 		const response = Object.assign(new EventEmitter(), {
 			destroyed: false,

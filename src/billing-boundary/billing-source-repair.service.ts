@@ -5,7 +5,7 @@ import {
 import {
 	AUTO_RENEWAL_CONSENT_TEXT,
 	AUTO_RENEWAL_CONSENT_VERSION
-} from '@/payment/payment.constants';
+} from '@/billing-boundary/billing-boundary.constants';
 import { PrismaService } from '@/prisma.service';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {

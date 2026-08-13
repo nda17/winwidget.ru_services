@@ -84,7 +84,7 @@ const imageGate = source.indexOf(
 );
 const build = source.indexOf('compose_target build --provenance=false', imageGate);
 const verifyAgain = source.indexOf(
-  'Pinned Core/Billing candidate images changed during the full build.',
+  'Pinned historical Core/Billing candidate images changed during the full build.',
   build,
 );
 if ([absent, automaticDefer, absentExit, prepared, routeMarkerGate, imageGate,
@@ -311,6 +311,124 @@ billing_runtime_services=(
 if [[ "$billing_database_phase" == 'active' ||
 	"$billing_database_phase" == 'complete' ]]; then
 	billing_runtime_services+=(billing-scheduler)
+fi
+
+billing_core_cleanup_require_bound_pre_evidence() {
+	local revision generation directory key expected file
+	billing_core_source_cleanup_validate_marker || return 1
+	revision="$(billing_core_source_cleanup_marker_value revision)" || return 1
+	generation="$(billing_core_source_cleanup_marker_value ownership_generation)" || return 1
+	directory="$(billing_core_source_cleanup_evidence_directory "$revision" "$generation")" ||
+		return 1
+	for key in core_backup_sha256 billing_backup_sha256 restore_evidence_sha256 \
+		queue_drain_evidence_sha256 stopped_writers_evidence_sha256 \
+		pre_offsite_receipt_sha256; do
+		expected="$(billing_core_source_cleanup_marker_value "$key")" || return 1
+		[[ "$expected" =~ ^[0-9a-f]{64}$ && ! "$expected" =~ ^0+$ ]] || return 1
+		file="$(billing_core_source_cleanup_evidence_file_for_key "$directory" "$key")" ||
+			return 1
+		billing_core_source_cleanup_validate_private_file "$file" "$expected" || return 1
+	done
+	[[ "$(billing_core_source_cleanup_marker_value retention_reference)" == \
+		"$(billing_core_source_cleanup_marker_value pre_offsite_receipt_sha256)" &&
+		"$(billing_core_source_cleanup_marker_value core_system_identifier)" =~ ^[1-9][0-9]*$ &&
+		"$(billing_core_source_cleanup_marker_value billing_system_identifier)" =~ ^[1-9][0-9]*$ &&
+		"$(billing_core_source_cleanup_marker_value billing_database_id)" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
+}
+
+billing_core_cleanup_runtime_deploy=false
+billing_core_cleanup_stop_recovery_active=false
+billing_core_cleanup_marker_phase='absent'
+billing_core_cleanup_source_state="$(billing_core_source_state)" || {
+	echo 'Unable to read the legacy Billing Core source state.' >&2
+	exit 1
+}
+billing_core_cleanup_migration_state="$(
+	billing_core_source_cleanup_migration_state
+)" || {
+	echo 'Unable to read the Billing Core source cleanup migration state.' >&2
+	exit 1
+}
+billing_core_cleanup_marker_file="$(billing_core_source_cleanup_marker_path)"
+if [[ -e "$billing_core_cleanup_marker_file" ||
+	-L "$billing_core_cleanup_marker_file" ]]; then
+	billing_core_source_cleanup_validate_marker || {
+		echo 'Billing Core source cleanup marker is present but invalid.' >&2
+		exit 1
+	}
+	billing_core_cleanup_marker_phase="$(billing_core_source_cleanup_marker_value phase)"
+	billing_core_cleanup_marker_revision="$(billing_core_source_cleanup_marker_value revision)"
+	case "$billing_core_cleanup_marker_phase|$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" in
+	staged\|present\|pending | staged\|present\|rolled-back | staged\|present\|unfinished | \
+		staged\|absent\|unfinished | staged\|absent\|applied | \
+		applied\|absent\|unfinished | applied\|absent\|applied)
+		[[ "$billing_core_cleanup_marker_revision" == "$deploy_revision" ]] || {
+			echo "Billing Core source cleanup is pinned to revision $billing_core_cleanup_marker_revision." >&2
+			exit 1
+		}
+		billing_core_source_cleanup_require_evidence || {
+			echo 'Billing Core source cleanup evidence is missing or changed.' >&2
+			exit 1
+		}
+		if [[ "$billing_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend revision $deploy_revision is verified but the staged Billing Core source cleanup remains manual-only."
+			exit 0
+		fi
+		[[ "${BILLING_CORE_SOURCE_CLEANUP_APPROVED:-false}" == 'true' &&
+			"${BILLING_CORE_SOURCE_CLEANUP_CONFIRMATION:-}" == \
+			'DROP LEGACY BILLING CORE SOURCE' ]] || {
+			echo 'The staged Billing Core source cleanup requires the exact manual confirmation.' >&2
+			exit 1
+		}
+		billing_core_cleanup_require_bound_pre_evidence || {
+			echo 'Billing Core source cleanup pre-migration evidence is not fully sealed.' >&2
+			exit 1
+		}
+		if [[ "$billing_core_cleanup_migration_state" == 'applied' ]]; then
+			billing_core_source_cleanup_require_exact_migration_manifest applied
+		else
+			billing_core_source_cleanup_require_exact_migration_manifest exclusive
+		fi || {
+			echo 'Billing Core cleanup migration ledger does not match the exact reviewed migration tree.' >&2
+			exit 1
+		}
+		billing_core_cleanup_runtime_deploy=true
+		;;
+	complete\|absent\|applied)
+		billing_core_source_cleanup_require_evidence || {
+			echo 'Completed Billing Core source cleanup evidence is missing or changed.' >&2
+			exit 1
+		}
+		git -C "$server_root" merge-base --is-ancestor \
+			"$billing_core_cleanup_marker_revision" "$deploy_revision" || {
+			echo 'Routine deployment would downgrade past the completed Billing Core source cleanup.' >&2
+			exit 1
+		}
+		;;
+	*)
+		echo "Billing Core source cleanup state is unsafe: marker=$billing_core_cleanup_marker_phase source=$billing_core_cleanup_source_state migration=$billing_core_cleanup_migration_state." >&2
+		exit 1
+		;;
+	esac
+else
+	case "$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" in
+	present\|pending | present\|rolled-back)
+		if [[ "$deploy_revision" == "$(billing_database_marker_value ownership_revision)" ]]; then
+			:
+		elif [[ "$billing_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend revision $deploy_revision is verified but the destructive Billing Core source cleanup is deferred."
+			echo 'Stage fresh Core and Billing backup/restore/offsite evidence before the exact manual cleanup.'
+			exit 0
+		else
+			echo 'Manual full deployment is blocked until Billing Core source cleanup evidence is staged.' >&2
+			exit 1
+		fi
+		;;
+	*)
+		echo "Billing Core source/cleanup state has no durable evidence marker: source=$billing_core_cleanup_source_state migration=$billing_core_cleanup_migration_state." >&2
+		exit 1
+		;;
+	esac
 fi
 
 widgets_core_cleanup_runtime_deploy=false
@@ -1803,6 +1921,16 @@ routine_stop_services=(
 	reporting-service
 	widgets-service
 )
+billing_core_cleanup_services=(
+	"${routine_stop_services[@]}"
+	billing-api
+	billing-scheduler
+	billing-worker
+	billing-outbox-publisher
+)
+billing_core_cleanup_writer_manifest_rows=''
+billing_core_cleanup_broker_manifest=''
+billing_core_cleanup_require_staged_broker=false
 declare -A routine_stop_container_ids=()
 reporting_outcome_route_state_before='unknown'
 reporting_interrupted_routine_recovery=false
@@ -1812,6 +1940,140 @@ reporting_cleanup_stop_recovery_active=false
 LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION="42c422ca4c2c3a8ce758a37773d6cb0e6b689db7"
 LEGACY_API_SHUTDOWN_BOOTSTRAP_IMAGE_ID="sha256:e64d78b3dc511dde592641e979eb0b506b815f0e83c4eb943ac45b1780c3f554"
 legacy_api_shutdown_bootstrap_observed=false
+
+billing_core_cleanup_validate_staged_manifests() {
+	local revision previous generation directory snapshot projection route output
+	local writer_file queue_file
+	revision="$(billing_core_source_cleanup_marker_value revision)" || return 1
+	previous="$(billing_core_source_cleanup_marker_value previous_revision)" || return 1
+	generation="$(billing_core_source_cleanup_marker_value ownership_generation)" || return 1
+	snapshot="$(billing_core_source_cleanup_marker_value source_snapshot_sha256)" || return 1
+	projection="$(billing_core_source_cleanup_marker_value projection_evidence_sha256)" || return 1
+	route="$(billing_core_source_cleanup_marker_value route_evidence_sha256)" || return 1
+	directory="$(billing_core_source_cleanup_evidence_directory "$revision" "$generation")" ||
+		return 1
+	writer_file="$directory/stopped-writers-evidence.json"
+	queue_file="$directory/queue-drain-evidence.json"
+	output="$(
+		BILLING_WRITER_MANIFEST="$writer_file" BILLING_QUEUE_MANIFEST="$queue_file" \
+			BILLING_PREVIOUS_REVISION="$previous" BILLING_CLEANUP_REVISION="$revision" \
+			BILLING_CLEANUP_GENERATION="$generation" BILLING_SNAPSHOT_SHA="$snapshot" \
+			BILLING_PROJECTION_SHA="$projection" BILLING_ROUTE_SHA="$route" node <<'NODE'
+const fs = require('node:fs');
+const exactKeys = (value, expected) => value && typeof value === 'object' &&
+  !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) ===
+  JSON.stringify([...expected].sort());
+const isSha = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value) && !/^0+$/.test(value);
+const isImage = value => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value) && !/^sha256:0+$/.test(value);
+const isRevision = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value) && !/^0+$/.test(value);
+const isTimestamp = value => typeof value === 'string' &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) &&
+  Number.isFinite(Date.parse(value));
+const read = path => JSON.parse(fs.readFileSync(path, 'utf8'));
+const previous = process.env.BILLING_PREVIOUS_REVISION;
+const cleanup = process.env.BILLING_CLEANUP_REVISION;
+const generation = Number(process.env.BILLING_CLEANUP_GENERATION);
+const common = value => value.previousRevision === previous &&
+  value.cleanupRevision === cleanup && value.ownershipGeneration === generation &&
+  value.sourceSnapshotSha256 === process.env.BILLING_SNAPSHOT_SHA &&
+  value.projectionEvidenceSha256 === process.env.BILLING_PROJECTION_SHA &&
+  value.routeEvidenceSha256 === process.env.BILLING_ROUTE_SHA;
+if (!isRevision(previous) || !isRevision(cleanup) || previous === cleanup || generation !== 2 ||
+    !isSha(process.env.BILLING_SNAPSHOT_SHA) || !isSha(process.env.BILLING_PROJECTION_SHA) ||
+    !isSha(process.env.BILLING_ROUTE_SHA)) process.exit(1);
+const services = [
+  'api-gateway', 'campaigns-service', 'api', 'outbox-publisher',
+  'maintenance-worker', 'database-restore-worker', 'notification-delivery-worker',
+  'integration-worker', 'reporting-service', 'widgets-service', 'billing-api',
+  'billing-scheduler', 'billing-worker', 'billing-outbox-publisher',
+];
+const writer = read(process.env.BILLING_WRITER_MANIFEST);
+if (!exactKeys(writer, ['schemaVersion','action','previousRevision','cleanupRevision',
+    'ownershipGeneration','sourceSnapshotSha256','projectionEvidenceSha256',
+    'routeEvidenceSha256','services','capturedAt']) || writer.schemaVersion !== 1 ||
+    writer.action !== 'billing-core-source-cleanup-stopped-writers' || !common(writer) ||
+    !isTimestamp(writer.capturedAt) || !Array.isArray(writer.services) ||
+    writer.services.length !== services.length) process.exit(1);
+for (let index = 0; index < services.length; index += 1) {
+  const item = writer.services[index];
+  if (!exactKeys(item, ['service','containerId','imageId','imageRevision','appRevision',
+      'state','exitCode','oomKilled','error']) ||
+      item.service !== services[index] || !/^[0-9a-f]{64}$/.test(item.containerId) ||
+      !isImage(item.imageId) || item.imageRevision !== previous ||
+      item.appRevision !== previous || item.state !== 'exited' ||
+      ![0, 143].includes(item.exitCode) || item.oomKilled !== false || item.error !== '')
+    process.exit(1);
+}
+const families = [
+  'winwidget.billing.identity.v1',
+  'winwidget.billing.offer.v1',
+  'winwidget.billing.notification-routing.v1',
+  'winwidget.billing.settings-source.v1',
+  'winwidget.billing.trial.v1',
+  'winwidget.billing.referral.v1',
+  'winwidget.billing.lifecycle-repair.v1',
+  'winwidget.payment.auto-renewal',
+  'winwidget.billing.notification-delivery-outcome',
+];
+const expectedQueues = [];
+for (const family of families) for (const suffix of ['', '.retry.1', '.retry.2', '.retry.3', '.dead-letter'])
+  expectedQueues.push({ name: `${family}${suffix}`, consumers: suffix === '' ? 1 : 0 });
+for (const [name, consumers] of [
+  ['winwidget.notification.delivery-outcome', 0],
+  ['winwidget.notification.delivery-outcome.retry-v2.1', 0],
+  ['winwidget.notification.delivery-outcome.retry-v2.2', 0],
+  ['winwidget.notification.delivery-outcome.retry-v2.3', 0],
+  ['winwidget.notification.delivery-outcome.dead-letter', 0],
+]) expectedQueues.push({ name, consumers });
+const queue = read(process.env.BILLING_QUEUE_MANIFEST);
+if (!exactKeys(queue, ['schemaVersion','action','previousRevision','cleanupRevision',
+    'ownershipGeneration','sourceSnapshotSha256','projectionEvidenceSha256',
+    'routeEvidenceSha256','rabbitmq','queues','coreState','capturedAt']) ||
+    queue.schemaVersion !== 1 || queue.action !== 'billing-core-source-cleanup-queue-drain' ||
+    !common(queue) || !isTimestamp(queue.capturedAt) ||
+    !exactKeys(queue.rabbitmq, ['containerId','imageId','restartCount','startedAt','vhost']) ||
+    !/^[0-9a-f]{64}$/.test(queue.rabbitmq.containerId) || !isImage(queue.rabbitmq.imageId) ||
+    !Number.isSafeInteger(queue.rabbitmq.restartCount) || queue.rabbitmq.restartCount < 0 ||
+    !isTimestamp(queue.rabbitmq.startedAt) || queue.rabbitmq.vhost !== 'winwidget' ||
+    !Array.isArray(queue.queues) || queue.queues.length !== expectedQueues.length ||
+    !exactKeys(queue.coreState, ['pendingBillingCompositions','unfinishedLegacyOutboxEvents',
+      'activeDeliveryReceipts','unresolvedDeliveryFailures']) ||
+    Object.values(queue.coreState).some(value => value !== 0)) process.exit(1);
+for (let index = 0; index < expectedQueues.length; index += 1) {
+  const item = queue.queues[index];
+  const expected = expectedQueues[index];
+  if (!exactKeys(item, ['name','ready','unacked','consumers']) || item.name !== expected.name ||
+      ![item.ready,item.unacked,item.consumers].every(Number.isSafeInteger) ||
+      item.ready !== 0 || item.unacked !== 0 || item.consumers !== 0) process.exit(1);
+}
+for (const item of writer.services)
+  process.stdout.write(`SERVICE\t${item.service}\t${item.containerId}\t${item.imageId}\n`);
+process.stdout.write(`RABBIT\t${queue.rabbitmq.containerId}\t${queue.rabbitmq.imageId}\t${queue.rabbitmq.restartCount}\t${queue.rabbitmq.startedAt}\n`);
+NODE
+	)" || {
+		echo 'Billing Core cleanup staged evidence schema or boundary is invalid.' >&2
+		return 1
+	}
+	billing_core_cleanup_writer_manifest_rows="$(awk -F $'\t' '$1 == "SERVICE"' <<<"$output")"
+	billing_core_cleanup_broker_manifest="$(awk -F $'\t' '$1 == "RABBIT"' <<<"$output")"
+	[[ "$(wc -l <<<"$billing_core_cleanup_writer_manifest_rows" | tr -d ' ')" == \
+		"${#billing_core_cleanup_services[@]}" &&
+		"$billing_core_cleanup_broker_manifest" == RABBIT$'\t'* ]]
+}
+
+billing_core_cleanup_require_broker_identity() {
+	local expected_image container_id actual
+	expected_image="$(awk -F $'\t' '$1 == "RABBIT" { print $3 }' \
+		<<<"$billing_core_cleanup_broker_manifest")"
+	[[ "$expected_image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	container_id="$(compose_target ps --status running -q rabbitmq 2>/dev/null || true)"
+	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	actual="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.Image}}|{{.State.Running}}' \
+		"$container_id" 2>/dev/null || true)"
+	[[ "$actual" == "$target_project|rabbitmq|$expected_image|true" ]] || return 1
+	docker exec "$container_id" rabbitmqctl --silent list_vhosts name |
+		grep -Fqx -- "$rabbitmq_vhost"
+}
 
 capture_routine_stop_containers() {
 	local service
@@ -2176,6 +2438,376 @@ prisma.$queryRawUnsafe(
 		echo "Legacy API bootstrap accepted only after all other core sessions drained." >&2
 	fi
 	echo "Core PostgreSQL sessions drained."
+}
+
+billing_core_cleanup_require_live_database_boundary() {
+	local require_drain="${1:-true}" state expected_revision expected_core_system
+	local expected_billing_system expected_billing_database billing_container_id
+	local billing_admin_password_file billing_admin_password billing_identity
+	local core_state_count unresolved_failures active_receipts unfinished_outbox
+	local pending_compositions core_system prepared_revision ownership_revision
+	local billing_system billing_database service_phase service_generation
+	local ownership_phase ownership_generation billing_prepared_revision
+	local billing_ownership_revision billing_cleanup_revision pending_outbox
+	local provider_operations active_sessions
+	[[ "$require_drain" == 'true' || "$require_drain" == 'false' ]] || return 1
+	expected_revision="$(billing_core_source_cleanup_marker_value previous_revision)" || return 1
+	expected_core_system="$(billing_core_source_cleanup_marker_value core_system_identifier)" || return 1
+	expected_billing_system="$(billing_core_source_cleanup_marker_value billing_system_identifier)" || return 1
+	expected_billing_database="$(billing_core_source_cleanup_marker_value billing_database_id)" || return 1
+	state="$(billing_core_database_query '
+SELECT
+  (
+    SELECT COUNT(*)
+    FROM public.billing_core_state
+    WHERE id = $state$singleton$state$
+      AND ownership = $state$BILLING$state$::public."BillingCoreOwnership"
+      AND NOT source_producers_enabled
+      AND NOT legacy_routes_enabled
+      AND NOT scheduler_enabled
+      AND NOT legacy_consumer_enabled
+      AND projection_consumer_enabled
+      AND generation = 2
+  ) || CHR(9) ||
+  (
+    SELECT COUNT(*)
+    FROM public.integration_delivery_failures
+    WHERE integration IN ($state$auto-renewal$state$, $state$notification-delivery-outcome$state$)
+      AND resolved_at IS NULL
+  ) || CHR(9) ||
+  (
+    SELECT COUNT(*)
+    FROM public.integration_delivery_receipts
+    WHERE integration IN ($state$auto-renewal$state$, $state$notification-delivery-outcome$state$)
+      AND status::TEXT IN ($state$PROCESSING$state$, $state$RETRY_SCHEDULED$state$)
+  ) || CHR(9) ||
+  (
+    SELECT COUNT(*)
+    FROM public.outbox_events
+    WHERE event_type IN (
+      $state$billing.settings.source.changed.v1$state$,
+      $state$billing.payment.changed.v1$state$,
+      $state$billing.subscription.changed.v1$state$,
+      $state$notification.subscription-expiry.email.requested.v1$state$,
+      $state$notification.subscription-expiry.telegram.requested.v1$state$,
+      $state$payment.auto-renewal.charge.requested.v1$state$,
+      $state$payment.notification.telegram.requested.v1$state$,
+      $state$payment.succeeded.v1$state$
+    )
+      AND status::TEXT <> $state$PUBLISHED$state$
+  ) || CHR(9) ||
+  (
+    SELECT COUNT(*)
+    FROM public.billing_settings_compositions
+    WHERE status::TEXT IN ($state$PENDING$state$, $state$BILLING_APPLIED$state$)
+  ) || CHR(9) ||
+  (SELECT system_identifier FROM pg_control_system()) || CHR(9) ||
+  COALESCE((SELECT prepared_revision FROM public.billing_core_state WHERE id = $state$singleton$state$), $state$$state$) || CHR(9) ||
+  COALESCE((SELECT ownership_revision FROM public.billing_core_state WHERE id = $state$singleton$state$), $state$$state$);
+')" || {
+		echo 'Could not verify the stopped Billing Core database boundary.' >&2
+		return 1
+	}
+	IFS=$'\t' read -r core_state_count unresolved_failures active_receipts \
+		unfinished_outbox pending_compositions core_system prepared_revision \
+		ownership_revision <<<"$state"
+	[[ "$core_state_count" == '1' && "$core_system" == "$expected_core_system" &&
+		"$prepared_revision" == "$expected_revision" &&
+		"$ownership_revision" == "$expected_revision" &&
+		"$unresolved_failures" =~ ^[0-9]+$ && "$active_receipts" =~ ^[0-9]+$ &&
+		"$unfinished_outbox" =~ ^[0-9]+$ && "$pending_compositions" =~ ^[0-9]+$ ]] || {
+		echo 'Billing Core database identity or ownership boundary changed.' >&2
+		return 1
+	}
+	if [[ "$require_drain" == 'true' &&
+		( "$unresolved_failures" != '0' || "$active_receipts" != '0' ||
+			"$unfinished_outbox" != '0' || "$pending_compositions" != '0' ) ]]; then
+		echo 'Billing Core durable work is not drained at the pre-commit boundary.' >&2
+		return 1
+	fi
+	billing_container_id="$(compose_target ps --status running -q billing-postgres 2>/dev/null || true)"
+	[[ "$billing_container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	billing_admin_password_file="$(get_env_value BILLING_POSTGRES_ADMIN_PASSWORD_FILE)" || return 1
+	billing_admin_password="$(tr -d '\r\n' <"$billing_admin_password_file")"
+	billing_identity="$(docker exec -e "PGPASSWORD=$billing_admin_password" "$billing_container_id" \
+		psql --no-psqlrc --no-password --set ON_ERROR_STOP=1 --quiet \
+		--tuples-only --no-align --field-separator='|' \
+		--username winwidget_billing_admin --dbname winwidget_billing --command \
+		"SELECT (SELECT system_identifier FROM pg_control_system()), identity.database_id::TEXT, identity.phase::TEXT, identity.ownership_generation::TEXT, ownership.phase::TEXT, ownership.generation::TEXT, ownership.prepared_revision, ownership.ownership_revision, ownership.cleanup_revision, (SELECT COUNT(*) FROM billing.outbox_events WHERE status::TEXT <> 'PUBLISHED'), (SELECT COUNT(*) FROM billing.provider_operations WHERE status::TEXT IN ('PROCESSING','UNKNOWN')), (SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND pid <> pg_backend_pid()) FROM billing.service_identity AS identity CROSS JOIN billing.billing_ownership_marker AS ownership WHERE identity.id = 'singleton' AND identity.service_name = 'billing-service' AND ownership.id = 'singleton';" 2>/dev/null)" || {
+		unset billing_admin_password
+		return 1
+	}
+	unset billing_admin_password
+	IFS='|' read -r billing_system billing_database service_phase service_generation \
+		ownership_phase ownership_generation billing_prepared_revision \
+		billing_ownership_revision billing_cleanup_revision pending_outbox \
+		provider_operations active_sessions <<<"$billing_identity"
+	[[ "$billing_system" == "$expected_billing_system" &&
+		"$billing_database" == "$expected_billing_database" &&
+		"$service_phase" == 'ACTIVE' && "$service_generation" == '2' &&
+		"$ownership_phase" == 'COMPLETE' && "$ownership_generation" == '2' &&
+		"$billing_prepared_revision" == "$expected_revision" &&
+		"$billing_ownership_revision" == "$expected_revision" &&
+		"$billing_cleanup_revision" == "$expected_revision" &&
+		"$pending_outbox" =~ ^[0-9]+$ && "$provider_operations" =~ ^[0-9]+$ &&
+		"$active_sessions" == '0' ]] || {
+		echo 'Billing database identity, ownership or stopped-session boundary changed.' >&2
+		return 1
+	}
+	if [[ "$require_drain" == 'true' &&
+		( "$pending_outbox" != '0' || "$provider_operations" != '0' ) ]]; then
+		echo 'Billing durable work is not drained at the pre-commit boundary.' >&2
+		return 1
+	fi
+}
+
+billing_core_cleanup_queue_state() {
+	local rabbitmq_container_id
+	if [[ "$billing_core_cleanup_require_staged_broker" == 'true' &&
+		-n "$billing_core_cleanup_broker_manifest" ]]; then
+		billing_core_cleanup_require_broker_identity || {
+			echo 'RabbitMQ identity changed after Billing cleanup evidence was sealed.' >&2
+			return 1
+		}
+	fi
+	rabbitmq_container_id="$(
+		compose_target ps --status running -q rabbitmq 2>/dev/null || true
+	)"
+	[[ "$rabbitmq_container_id" =~ ^[0-9a-f]{64}$ ]] || {
+		echo 'Billing Core cleanup requires one running canonical RabbitMQ container.' >&2
+		return 1
+	}
+	docker exec "$rabbitmq_container_id" rabbitmqctl --silent \
+		list_queues -p "$rabbitmq_vhost" \
+		name messages_ready messages_unacknowledged consumers
+}
+
+billing_core_cleanup_require_stopped_queue_boundary() {
+	local allow_retired_absent="${1:-false}" state
+	[[ "$allow_retired_absent" == 'true' || "$allow_retired_absent" == 'false' ]] ||
+		return 1
+	state="$(billing_core_cleanup_queue_state)" || return 1
+	BILLING_ALLOW_RETIRED_ABSENT="$allow_retired_absent" node -e '
+const fs = require("node:fs");
+const rows = fs.readFileSync(0, "utf8").trim().split(/\n/).filter(Boolean)
+  .map(line => line.trim().split(/\s+/));
+const queues = new Map();
+for (const row of rows) {
+  if (row.length !== 4 || queues.has(row[0])) process.exit(1);
+  const values = row.slice(1).map(Number);
+  if (values.some(value => !Number.isSafeInteger(value) || value < 0)) process.exit(1);
+  queues.set(row[0], values);
+}
+const retained = [
+  "winwidget.billing.identity.v1",
+  "winwidget.billing.offer.v1",
+  "winwidget.billing.notification-routing.v1",
+  "winwidget.billing.settings-source.v1",
+  "winwidget.billing.trial.v1",
+  "winwidget.billing.referral.v1",
+  "winwidget.billing.lifecycle-repair.v1",
+  "winwidget.payment.auto-renewal",
+  "winwidget.billing.notification-delivery-outcome",
+];
+const retainedSuffixes = ["", ".retry.1", ".retry.2", ".retry.3", ".dead-letter"];
+for (const base of retained) for (const suffix of retainedSuffixes) {
+  const values = queues.get(`${base}${suffix}`);
+  if (!values) process.exit(1);
+  if (process.env.BILLING_ALLOW_RETIRED_ABSENT === "true") {
+    if (values[2] !== 0) process.exit(1);
+  } else if (values.some(value => value !== 0)) process.exit(1);
+}
+const retired = [
+  "winwidget.notification.delivery-outcome",
+  "winwidget.notification.delivery-outcome.retry-v2.1",
+  "winwidget.notification.delivery-outcome.retry-v2.2",
+  "winwidget.notification.delivery-outcome.retry-v2.3",
+  "winwidget.notification.delivery-outcome.dead-letter",
+];
+const present = retired.filter(name => queues.has(name));
+if (process.env.BILLING_ALLOW_RETIRED_ABSENT !== "true" && present.length !== retired.length)
+  process.exit(1);
+for (const name of present) if (queues.get(name).some(value => value !== 0)) process.exit(1);
+process.stdout.write(present.length === 0 ? "absent" :
+  present.length === retired.length ? "present" : "partial");
+' <<<"$state"
+}
+
+billing_core_cleanup_delete_retired_outcome_queues() {
+	local rabbitmq_container_id retired_state queue
+	retired_state="$(billing_core_cleanup_require_stopped_queue_boundary true)" || return 1
+	if [[ "$retired_state" == 'absent' ]]; then
+		echo 'Legacy Core notification outcome queue family is already absent.'
+		return 0
+	fi
+	rabbitmq_container_id="$(compose_target ps --status running -q rabbitmq)"
+	for queue in \
+		winwidget.notification.delivery-outcome.retry-v2.1 \
+		winwidget.notification.delivery-outcome.retry-v2.2 \
+		winwidget.notification.delivery-outcome.retry-v2.3 \
+		winwidget.notification.delivery-outcome.dead-letter \
+		winwidget.notification.delivery-outcome; do
+		if billing_core_cleanup_queue_state | awk -v expected="$queue" \
+			'$1 == expected { found = 1 } END { exit(found ? 0 : 1) }'; then
+			docker exec "$rabbitmq_container_id" rabbitmqctl delete_queue \
+				-p "$rabbitmq_vhost" "$queue" --if-empty --if-unused >/dev/null || return 1
+		fi
+	done
+	[[ "$(billing_core_cleanup_require_stopped_queue_boundary true)" == 'absent' ]] ||
+		return 1
+	echo 'Legacy Core notification outcome queue family was retired at the forward-only boundary.'
+}
+
+billing_core_cleanup_require_retired_outcome_absent() {
+	local rabbitmq_container_id state bindings queue
+	rabbitmq_container_id="$(compose_target ps --status running -q rabbitmq 2>/dev/null || true)"
+	[[ "$rabbitmq_container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	state="$(billing_core_cleanup_queue_state)" || return 1
+	for queue in \
+		winwidget.notification.delivery-outcome \
+		winwidget.notification.delivery-outcome.retry-v2.1 \
+		winwidget.notification.delivery-outcome.retry-v2.2 \
+		winwidget.notification.delivery-outcome.retry-v2.3 \
+		winwidget.notification.delivery-outcome.dead-letter; do
+		if awk -v expected="$queue" \
+			'$1 == expected { found = 1 } END { exit(found ? 0 : 1) }' \
+			<<<"$state"; then
+			return 1
+		fi
+	done
+	bindings="$(docker exec "$rabbitmq_container_id" rabbitmqctl --silent \
+		list_bindings -p "$rabbitmq_vhost" destination_name)" || return 1
+	for queue in \
+		winwidget.notification.delivery-outcome \
+		winwidget.notification.delivery-outcome.retry-v2.1 \
+		winwidget.notification.delivery-outcome.retry-v2.2 \
+		winwidget.notification.delivery-outcome.retry-v2.3 \
+		winwidget.notification.delivery-outcome.dead-letter; do
+		if awk -v expected="$queue" \
+			'$1 == expected { found = 1 } END { exit(found ? 0 : 1) }' \
+			<<<"$bindings"; then
+			return 1
+		fi
+	done
+}
+
+billing_core_cleanup_capture_precommit_containers() {
+	local service container_id identity image_id image_revision app_revision state expected
+	local record_type expected_service expected_container_id expected_image_id
+	local previous_revision
+	previous_revision="$(billing_core_source_cleanup_marker_value previous_revision)" || return 1
+	routine_stop_container_ids=()
+	for service in "${billing_core_cleanup_services[@]}"; do
+		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+			echo "Pre-commit Billing cleanup requires one staged stopped $service container." >&2
+			return 1
+		}
+		identity="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)"
+		image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+		image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id" 2>/dev/null || true)"
+		app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>/dev/null | sed -n 's/^APP_REVISION=//p')"
+		state="$(docker inspect --format '{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}|{{.RestartCount}}' "$container_id" 2>/dev/null || true)"
+		expected="$(awk -F $'\t' -v service="$service" \
+			'$1 == "SERVICE" && $2 == service { print; found += 1 } END { exit(found == 1 ? 0 : 1) }' \
+			<<<"$billing_core_cleanup_writer_manifest_rows")" || return 1
+		IFS=$'\t' read -r record_type expected_service expected_container_id expected_image_id \
+			<<<"$expected"
+		[[ "$identity" == "$target_project|$service" &&
+			"$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+			"$record_type" == 'SERVICE' && "$expected_service" == "$service" &&
+			"$container_id" == "$expected_container_id" &&
+			"$image_id" == "$expected_image_id" &&
+			"$image_revision" == "$previous_revision" &&
+			"$app_revision" == "$previous_revision" &&
+			( "$state" == 'exited|false|0|false||0' ||
+				"$state" == 'exited|false|143|false||0' ) ]] || {
+			echo "Pre-commit Billing cleanup found an untrusted runtime identity for $service." >&2
+			return 1
+		}
+		routine_stop_container_ids["$service"]="$container_id"
+	done
+}
+
+billing_core_cleanup_adopt_forward_containers() {
+	local service container_id identity image_id image_revision app_revision status running
+	local previous_revision cleanup_revision
+	previous_revision="$(billing_core_source_cleanup_marker_value previous_revision)" || return 1
+	cleanup_revision="$(billing_core_source_cleanup_marker_value revision)" || return 1
+	routine_stop_container_ids=()
+	for service in "${billing_core_cleanup_services[@]}"; do
+		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+		[[ -n "$container_id" ]] || continue
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+		identity="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)"
+		image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+		image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id" 2>/dev/null || true)"
+		app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id" 2>/dev/null | sed -n 's/^APP_REVISION=//p')"
+		[[ "$identity" == "$target_project|$service" &&
+			"$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+			( "$image_revision" == "$previous_revision" || "$image_revision" == "$cleanup_revision" ) &&
+			"$app_revision" == "$image_revision" ]] || {
+			echo "Forward Billing cleanup found an untrusted runtime identity for $service." >&2
+			return 1
+		}
+		status="$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+		running="$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)"
+		case "$status|$running" in
+		running\|true | restarting\|true)
+			routine_stop_container_ids["$service"]="$container_id"
+			stop_routine_service_cleanly "$service" 30 || return 1
+			;;
+		created\|false | exited\|false) ;;
+		*)
+			echo "Forward Billing cleanup found an unsafe state for $service: $status." >&2
+			return 1
+			;;
+		esac
+	done
+}
+
+stop_billing_core_cleanup_topology() {
+	local source_state service
+	source_state="$(billing_core_source_state)" || return 1
+	if [[ "$source_state" == 'present' ]]; then
+		billing_core_cleanup_capture_precommit_containers || return 1
+	else
+		[[ "$source_state" == 'absent' ]] || return 1
+		billing_core_cleanup_adopt_forward_containers || return 1
+	fi
+	if [[ "$mode" == 'production' ]]; then
+		prepare_database_restore_storage || return 1
+	fi
+	verify_core_database_sessions_drained || return 1
+	if [[ "$source_state" == 'present' ]]; then
+		billing_core_cleanup_require_live_database_boundary true || return 1
+	else
+		billing_core_cleanup_require_live_database_boundary false || return 1
+	fi
+	if [[ "$source_state" == 'present' ]]; then
+		[[ "$(billing_core_cleanup_require_stopped_queue_boundary false)" == 'present' ]] ||
+			return 1
+	else
+		billing_core_cleanup_require_stopped_queue_boundary true >/dev/null || return 1
+	fi
+}
+
+recover_billing_core_cleanup_stop_on_exit() {
+	local status=$? source_state migration_state
+	trap - EXIT INT TERM
+	[[ "$billing_core_cleanup_stop_recovery_active" == 'true' ]] || exit "$status"
+	set +e
+	source_state="$(billing_core_source_state 2>/dev/null || printf 'unknown')"
+	migration_state="$(billing_core_source_cleanup_migration_state 2>/dev/null || printf 'unsafe')"
+	if [[ "$source_state" == 'present' &&
+		"$migration_state" =~ ^(pending|rolled-back|unfinished)$ ]]; then
+		echo 'Billing Core cleanup did not commit; sealed SHA A writers remain stopped for an exact retry.' >&2
+	elif [[ "$source_state" == 'absent' ]]; then
+		echo 'Billing Core source is absent; old writers remain stopped and recovery is forward-only.' >&2
+	else
+		echo 'Billing Core cleanup state is ambiguous; all writers remain stopped.' >&2
+	fi
+	exit "$status"
 }
 
 stop_routine_topology_for_core_migration() {
@@ -2727,6 +3359,54 @@ process.stdout.write("Standalone Billing image artifact verified\n");
 	'
 }
 
+billing_core_cleanup_require_pinned_images() {
+	local revision expected_core_id expected_billing_id core_image billing_image
+	local actual_core_id actual_billing_id core_revision billing_revision core_user billing_user
+	billing_core_source_cleanup_validate_marker || return 1
+	revision="$(billing_core_source_cleanup_marker_value revision)" || return 1
+	expected_core_id="$(billing_core_source_cleanup_marker_value cleanup_core_image_id)" || return 1
+	expected_billing_id="$(billing_core_source_cleanup_marker_value cleanup_billing_image_id)" || return 1
+	[[ "$revision" == "$APP_REVISION" &&
+		"$expected_core_id" =~ ^sha256:[0-9a-f]{64}$ &&
+		"$expected_billing_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	core_image="winwidget-api:git-$revision"
+	billing_image="winwidget-billing:git-$revision"
+	actual_core_id="$(docker image inspect --format '{{.Id}}' "$core_image")" || return 1
+	actual_billing_id="$(docker image inspect --format '{{.Id}}' "$billing_image")" || return 1
+	core_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$core_image")" || return 1
+	billing_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$billing_image")" || return 1
+	core_user="$(docker image inspect --format '{{.Config.User}}' "$core_image")" || return 1
+	billing_user="$(docker image inspect --format '{{.Config.User}}' "$billing_image")" || return 1
+	[[ "$actual_core_id" == "$expected_core_id" &&
+		"$actual_billing_id" == "$expected_billing_id" &&
+		"$core_revision" == "$revision" && "$billing_revision" == "$revision" &&
+		-n "$core_user" && "$core_user" != '0' && "$core_user" != 'root' &&
+		"$billing_user" == 'billing' ]]
+}
+
+verify_billing_core_cleanup_image_artifact() {
+	[[ "$billing_core_cleanup_runtime_deploy" == 'true' ||
+		"$billing_core_cleanup_marker_phase" == 'complete' ]] || return 0
+	docker run --rm --network none --entrypoint node \
+		"winwidget-api:$APP_VERSION" -e '
+const fs = require("node:fs");
+for (const required of [
+  "dist/src/main.js",
+  "prisma/schema.prisma",
+  "prisma/migrations/20260813000000_remove_legacy_billing_core_source/migration.sql",
+]) fs.accessSync(required);
+for (const removed of [
+  "dist/src/payment",
+  "dist/src/subscription",
+  "dist/src/affiliate",
+  "dist/src/tariff-prices",
+]) {
+  if (fs.existsSync(removed)) throw new Error(`Core image retains legacy Billing artifact: ${removed}`);
+}
+process.stdout.write("Legacy-free Core Billing cleanup image verified\n");
+'
+}
+
 verify_database_restore_image_artifact() {
 	docker run --rm --network none \
 		--entrypoint node \
@@ -2866,27 +3546,48 @@ compose_target \
 	--profile widgets-migration \
 	--profile billing-migration \
 	config --quiet
-billing_database_require_pinned_candidate_images || {
-	echo 'Pinned Core/Billing candidate images are unavailable or changed.' >&2
-	exit 1
-}
-compose_target build --provenance=false \
-	api-gateway \
-	maintenance-worker \
-	database-restore-worker \
-	notification-delivery-worker \
-	campaigns-service \
-	reporting-service \
+routine_build_services=(
+	api-gateway
+	maintenance-worker
+	database-restore-worker
+	notification-delivery-worker
+	campaigns-service
+	reporting-service
 	widgets-service
-billing_database_require_pinned_candidate_images || {
-	echo 'Pinned Core/Billing candidate images changed during the full build.' >&2
-	exit 1
-}
+)
+if [[ "$billing_core_cleanup_marker_phase" == 'complete' ]]; then
+	routine_build_services+=(api billing-api)
+else
+	billing_database_require_pinned_candidate_images || {
+		echo 'Pinned historical Core/Billing candidate images are unavailable or changed.' >&2
+		exit 1
+	}
+fi
+if [[ "$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
+	billing_core_cleanup_require_pinned_images || {
+		echo 'Pinned Billing Core cleanup images are unavailable or changed.' >&2
+		exit 1
+	}
+fi
+compose_target build --provenance=false "${routine_build_services[@]}"
+if [[ "$billing_core_cleanup_marker_phase" != 'complete' ]]; then
+	billing_database_require_pinned_candidate_images || {
+		echo 'Pinned historical Core/Billing candidate images changed during the full build.' >&2
+		exit 1
+	}
+fi
+if [[ "$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
+	billing_core_cleanup_require_pinned_images || {
+		echo 'Pinned Billing Core cleanup images changed during the full build.' >&2
+		exit 1
+	}
+fi
 verify_notification_delivery_image_artifact
 verify_campaigns_image_artifact
 verify_reporting_image_artifact
 verify_widgets_image_artifact
 verify_billing_image_artifact
+verify_billing_core_cleanup_image_artifact
 verify_database_restore_image_artifact
 validate_campaigns_database_urls
 validate_widgets_database_urls
@@ -3413,19 +4114,24 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 			"$running_notification_delivery_container_id" == *$'\n'* ||
 			-z "$current_integration_container_id" ||
 			"$current_integration_container_id" == *$'\n'* ]]; then
-			reporting_outcome_route_state_before="$(
-				reporting_outcome_route_topology_state
-			)" || exit 1
-			if detect_interrupted_reporting_outcome_deploy \
-				"$reporting_outcome_route_state_before"; then
-				reporting_interrupted_routine_recovery=true
+			if [[ "$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
+				echo 'Billing cleanup will validate the exact stopped Notification Delivery and integration workers from sealed evidence.'
 			else
-				echo "Cutover marker exists, but neither canonical nor saved forward topology is complete." >&2
-				echo "Resolve the topology manually; forward-only cutover state cannot be inferred safely." >&2
-				exit 1
+				reporting_outcome_route_state_before="$(
+					reporting_outcome_route_topology_state
+				)" || exit 1
+				if detect_interrupted_reporting_outcome_deploy \
+					"$reporting_outcome_route_state_before"; then
+					reporting_interrupted_routine_recovery=true
+				else
+					echo "Cutover marker exists, but neither canonical nor saved forward topology is complete." >&2
+					echo "Resolve the topology manually; forward-only cutover state cannot be inferred safely." >&2
+					exit 1
+				fi
 			fi
 		fi
-		if [[ "$reporting_interrupted_routine_recovery" != 'true' ]]; then
+		if [[ "$reporting_interrupted_routine_recovery" != 'true' &&
+			"$billing_core_cleanup_runtime_deploy" != 'true' ]]; then
 			current_integration_kinds="$(
 				container_env_value \
 					"$current_integration_container_id" \
@@ -3679,7 +4385,8 @@ process.stdout.write(
 );
 '
 
-if [[ "$reporting_gateway_policy" == 'reporting' ]]; then
+if [[ "$reporting_gateway_policy" == 'reporting' &&
+	"$billing_core_cleanup_runtime_deploy" != 'true' ]]; then
 	reporting_cutover_require_forward_scheduler_ready || {
 		echo 'Reporting runtime/owner preflight failed before the public Gateway route switch.' >&2
 		exit 1
@@ -4373,7 +5080,7 @@ provision_rabbitmq_user \
 assert_campaigns_shared_rabbitmq_topology
 assert_reporting_shared_rabbitmq_topology
 post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
-post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
@@ -4523,10 +5230,10 @@ wait_for_rabbitmq_topology() {
 			"winwidget-api:$APP_VERSION" \
 			-e '
 const {
-	MESSAGING_KINDS,
+	CORE_RABBITMQ_TOPOLOGY_KINDS,
 	MESSAGING_QUEUE_NAMES
 } = require("./dist/src/messaging/messaging.constants.js");
-for (const kind of MESSAGING_KINDS) {
+for (const kind of CORE_RABBITMQ_TOPOLOGY_KINDS) {
 	const queue = MESSAGING_QUEUE_NAMES[kind];
 	process.stdout.write(`${queue}\n${queue}.dead-letter\n`);
 }
@@ -5284,6 +5991,7 @@ process.stdout.write(JSON.stringify(Object.values(CAMPAIGNS_QUEUE_NAMES)));
 		"winwidget-api:$APP_VERSION" \
 		-e '
 const {
+	BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME,
 	MESSAGING_QUEUE_NAMES,
 } = require("./dist/src/messaging/messaging.constants.js");
 
@@ -5437,7 +6145,12 @@ const run = async () => {
 		},
 		{
 			kinds: expectedIntegrationKinds.filter(
-				kind => !(billingOwnerActive && kind === "auto-renewal"),
+				kind =>
+					!(
+						billingOwnerActive &&
+						(kind === "auto-renewal" ||
+							kind === "notification-delivery-outcome")
+					),
 			),
 			user: integrationUser,
 			connectionName: "winwidget-integration-worker",
@@ -5446,7 +6159,10 @@ const run = async () => {
 		...(billingOwnerActive
 			? [
 					{
-						queues: [MESSAGING_QUEUE_NAMES["auto-renewal"]],
+						queues: [
+							MESSAGING_QUEUE_NAMES["auto-renewal"],
+							BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME,
+						],
 						user: billingUser,
 						connectionName: "winwidget-billing-worker",
 						notification: false,
@@ -5564,17 +6280,29 @@ const run = async () => {
 	}
 
 	if (billingOwnerActive) {
-		const queue = `${MESSAGING_QUEUE_NAMES["auto-renewal"]}.dead-letter`;
-		const state = await request(
-			`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(queue)}`,
-		);
-		const consumers = Array.isArray(state?.consumer_details)
-			? state.consumer_details
-			: [];
-		if (consumers.length !== 0) {
-			throw new OwnershipError(
-				`RabbitMQ Billing parking queue ${queue} must have no consumers`,
-			);
+		for (const baseQueue of [
+			MESSAGING_QUEUE_NAMES["auto-renewal"],
+			BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME,
+		]) {
+			for (const suffix of [
+				".dead-letter",
+				".retry.1",
+				".retry.2",
+				".retry.3",
+			]) {
+				const queue = `${baseQueue}${suffix}`;
+				const state = await request(
+					`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(queue)}`,
+				);
+				const consumers = Array.isArray(state?.consumer_details)
+					? state.consumer_details
+					: [];
+				if (consumers.length !== 0) {
+					throw new OwnershipError(
+						`RabbitMQ Billing parking queue ${queue} must have no consumers`,
+					);
+				}
+			}
 		}
 	}
 
@@ -5716,22 +6444,16 @@ Promise.all([
 			status: { in: ["PENDING", "PUBLISHING", "FAILED"] },
 		},
 	}),
-	prisma.subscriptionExpiryReminder.count({
-		where: {
-			status: "PROCESSING",
-		},
-	}),
 ])
 	.then(
 		([
 			unresolvedFailures,
 			activeReceipts,
-			pendingOutbox,
-			processingReminders,
+			pendingOutbox
 		]) => {
-		process.stdout.write(
-				`${unresolvedFailures}\t${activeReceipts}\t${pendingOutbox}\t${processingReminders}\n`,
-		);
+			process.stdout.write(
+				`${unresolvedFailures}\t${activeReceipts}\t${pendingOutbox}\n`,
+			);
 		},
 	)
 	.catch(() => {
@@ -5854,7 +6576,6 @@ notification_cutover_is_clear() {
 	local unresolved_failures
 	local active_receipts
 	local pending_outbox
-	local processing_reminders
 
 	notification_cutover_last_queue_state="$(
 		notification_cutover_queue_state
@@ -5881,18 +6602,16 @@ notification_cutover_is_clear() {
 	notification_cutover_last_database_state="$(
 		notification_cutover_database_state
 	)"
-	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox processing_reminders \
+	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox \
 		<<<"$notification_cutover_last_database_state"
 	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
 		! "$active_receipts" =~ ^[0-9]+$ ||
-		! "$pending_outbox" =~ ^[0-9]+$ ||
-		! "$processing_reminders" =~ ^[0-9]+$ ]]; then
+		! "$pending_outbox" =~ ^[0-9]+$ ]]; then
 		return 1
 	fi
 	[[ "$unresolved_failures" == "0" &&
 		"$active_receipts" == "0" &&
-		"$pending_outbox" == "0" &&
-		"$processing_reminders" == "0" ]]
+		"$pending_outbox" == "0" ]]
 }
 
 delete_legacy_payment_telegram_queues() {
@@ -6578,7 +7297,6 @@ perform_notification_first_cutover_preflight() {
 	local unresolved_failures
 	local active_receipts
 	local pending_outbox
-	local processing_reminders
 	local attempt
 
 	if [[ "$notification_delivery_first_cutover" != "true" ]]; then
@@ -6618,12 +7336,11 @@ perform_notification_first_cutover_preflight() {
 	fi
 
 	initial_database_state="$(notification_cutover_database_state)"
-	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox processing_reminders \
+	IFS=$'\t' read -r unresolved_failures active_receipts pending_outbox \
 		<<<"$initial_database_state"
 	if [[ ! "$unresolved_failures" =~ ^[0-9]+$ ||
 		! "$active_receipts" =~ ^[0-9]+$ ||
-		! "$pending_outbox" =~ ^[0-9]+$ ||
-		! "$processing_reminders" =~ ^[0-9]+$ ]]; then
+		! "$pending_outbox" =~ ^[0-9]+$ ]]; then
 		echo "Public delivery state returned an invalid provider-cutover result." >&2
 		print_notification_cutover_runbook
 		return 1
@@ -6737,7 +7454,8 @@ if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
 	fi
 fi
 if [[ "$reporting_cleanup_runtime_deploy" != 'true' &&
-	"$reporting_interrupted_routine_recovery" != 'true' ]]; then
+	"$reporting_interrupted_routine_recovery" != 'true' &&
+	"$billing_core_cleanup_runtime_deploy" != 'true' ]]; then
 	verify_active_reporting_runtime \
 		"$reporting_runtime_container_before" \
 		"$reporting_runtime_image_before" || {
@@ -6768,6 +7486,33 @@ if [[ "$reporting_outcome_route_state_before" != 'steady' ]]; then
 	}
 	reporting_outcome_route_is_drained || exit 1
 	reporting_outcome_route_queues_are_empty false || exit 1
+fi
+
+if [[ "$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
+	[[ "$reporting_cleanup_runtime_deploy" != 'true' &&
+		"$reporting_interrupted_routine_recovery" != 'true' &&
+		"$widgets_core_cleanup_runtime_deploy" != 'true' &&
+		"$notification_delivery_first_cutover" != 'true' &&
+		"$notification_forward_candidate_active" != 'true' &&
+		"$notification_forward_candidate_needs_recovery" != 'true' ]] || {
+		echo 'Billing Core source cleanup cannot overlap another production cutover or recovery.' >&2
+		exit 1
+	}
+	[[ "$reporting_outcome_route_state_before" == 'steady' ]] || {
+		echo 'Billing Core cleanup requires the already-completed steady Reporting outcome topology.' >&2
+		exit 1
+	}
+	billing_core_source_cleanup_validate_marker || exit 1
+	billing_core_cleanup_require_bound_pre_evidence || exit 1
+	billing_core_cleanup_require_pinned_images || exit 1
+	billing_core_cleanup_validate_staged_manifests || exit 1
+	if [[ "$billing_core_cleanup_source_state" == 'present' ]]; then
+		billing_core_cleanup_require_staged_broker=true
+		billing_core_cleanup_require_broker_identity || exit 1
+	else
+		billing_core_cleanup_require_staged_broker=false
+	fi
+	echo 'Pinned Billing Core source cleanup evidence and images were revalidated before runtime stop.'
 fi
 
 if [[ "$widgets_core_cleanup_runtime_deploy" == 'true' ]]; then
@@ -6807,7 +7552,8 @@ fi
 finalize_notification_delivery_backup_grants
 verify_notification_delivery_runtime_crud
 verify_notification_delivery_backup_boundary
-if [[ "$reporting_interrupted_routine_recovery" == 'true' ]]; then
+if [[ "$reporting_interrupted_routine_recovery" == 'true' ||
+	"$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
 	current_campaigns_container_id="$(
 		compose_target ps -a -q campaigns-service 2>/dev/null || true
 	)"
@@ -7082,7 +7828,16 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	wait_for_cutover_revision \
 		"$PUBLIC_HEALTHCHECK_URL" "$APP_REVISION" "Canonical public API"
 else
-	if [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
+	if [[ "$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
+		billing_core_cleanup_stop_recovery_active=true
+		trap recover_billing_core_cleanup_stop_on_exit EXIT
+		trap 'exit 130' INT
+		trap 'exit 143' TERM
+		if ! stop_billing_core_cleanup_topology; then
+			echo 'Billing Core source cleanup topology did not reach an exact quiescent boundary.' >&2
+			exit 1
+		fi
+	elif [[ "$reporting_cleanup_runtime_deploy" == 'true' ]]; then
 		reporting_cleanup_stop_recovery_active=true
 		trap recover_reporting_cleanup_stop_on_exit EXIT
 		trap 'exit 130' INT
@@ -7123,7 +7878,8 @@ else
 	fi
 	if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
 		reporting_cutover_validate_marker || {
-			if [[ "$reporting_cleanup_runtime_deploy" != 'true' ]]; then
+			if [[ "$reporting_cleanup_runtime_deploy" != 'true' &&
+				"$billing_core_cleanup_runtime_deploy" != 'true' ]]; then
 				restore_routine_containers_after_failed_stop || true
 			fi
 			exit 1
@@ -7149,7 +7905,92 @@ else
 			fi
 		fi
 	fi
-		if [[ "$reporting_cleanup_runtime_deploy" == 'true' &&
+		if [[ "$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
+			billing_core_cleanup_require_bound_pre_evidence || exit 1
+			billing_core_cleanup_require_pinned_images || exit 1
+			billing_core_cleanup_source_state="$(billing_core_source_state)" || exit 1
+			billing_core_cleanup_migration_state="$(
+				billing_core_source_cleanup_migration_state
+			)" || exit 1
+			if [[ "$billing_core_cleanup_migration_state" == 'applied' ]]; then
+				billing_core_source_cleanup_require_exact_migration_manifest applied
+			else
+				billing_core_source_cleanup_require_exact_migration_manifest exclusive
+			fi || {
+				echo 'Billing Core cleanup migration tree or ledger changed at the stopped boundary.' >&2
+				exit 1
+			}
+			if [[ "$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" == \
+				'present|unfinished' ]]; then
+				compose_target --profile migration run --rm --no-deps migrate \
+					migrate resolve --rolled-back \
+					"$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME"
+				billing_core_cleanup_migration_state="$(
+					billing_core_source_cleanup_migration_state
+				)" || exit 1
+				[[ "$billing_core_cleanup_migration_state" == 'rolled-back' ]] || exit 1
+			fi
+			if [[ "$billing_core_cleanup_source_state" == 'present' &&
+				"$billing_core_cleanup_migration_state" =~ ^(pending|rolled-back)$ ]]; then
+				billing_core_cleanup_database_url="$(
+					billing_core_source_cleanup_migration_url_from_marker
+				)" || exit 1
+				if ! DATABASE_URL="$billing_core_cleanup_database_url" \
+					compose_target --profile migration run --rm --no-deps \
+						-e DATABASE_URL migrate; then
+					unset billing_core_cleanup_database_url
+					billing_core_cleanup_source_state="$(billing_core_source_state 2>/dev/null || printf 'unknown')"
+					billing_core_cleanup_migration_state="$(
+						billing_core_source_cleanup_migration_state 2>/dev/null || printf 'unsafe'
+					)"
+					if [[ "$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" == \
+						'absent|unfinished' ]]; then
+						compose_target --profile migration run --rm --no-deps migrate \
+							migrate resolve --applied \
+							"$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME"
+					elif [[ "$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" != \
+						'absent|applied' ]]; then
+						echo "Billing Core cleanup migrate failed before a provable forward boundary: source=$billing_core_cleanup_source_state migration=$billing_core_cleanup_migration_state." >&2
+						exit 1
+					fi
+				fi
+				unset billing_core_cleanup_database_url
+			elif [[ "$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" == \
+				'absent|unfinished' ]]; then
+				compose_target --profile migration run --rm --no-deps migrate \
+					migrate resolve --applied \
+					"$BILLING_CORE_SOURCE_CLEANUP_MIGRATION_NAME"
+			elif [[ "$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" == \
+				'absent|applied' ]]; then
+				echo 'Billing Core source cleanup migration is already applied; continuing forward.'
+			else
+				echo "Billing Core source cleanup cannot continue from source=$billing_core_cleanup_source_state migration=$billing_core_cleanup_migration_state." >&2
+				exit 1
+			fi
+			billing_core_cleanup_source_state="$(billing_core_source_state)" || exit 1
+			billing_core_cleanup_migration_state="$(
+				billing_core_source_cleanup_migration_state
+			)" || exit 1
+			[[ "$billing_core_cleanup_source_state|$billing_core_cleanup_migration_state" == \
+				'absent|applied' ]] || {
+				echo "Billing Core cleanup did not reach absent|applied: source=$billing_core_cleanup_source_state migration=$billing_core_cleanup_migration_state." >&2
+				exit 1
+			}
+			billing_core_cleanup_delete_retired_outcome_queues || {
+				echo 'Legacy Core notification outcome queue retirement failed.' >&2
+				exit 1
+			}
+			compose_target --profile migration run --rm --no-deps migrate || {
+				echo 'A migration command failed after the Billing cleanup boundary; forward recovery remains stopped.' >&2
+				exit 1
+			}
+			billing_core_source_cleanup_require_exact_migration_manifest applied || {
+				echo 'Billing Core cleanup did not leave the exact migration tree fully applied.' >&2
+				exit 1
+			}
+			billing_core_source_cleanup_advance_applied || exit 1
+			echo 'Billing Core legacy source and obsolete outcome queues reached the durable forward-only boundary.'
+		elif [[ "$reporting_cleanup_runtime_deploy" == 'true' &&
 			"$reporting_cleanup_migration_state" == 'applied' ]]; then
 			echo 'Exact Core cleanup migration is already applied; Prisma deploy is skipped during forward-only recovery.'
 		elif [[ "$widgets_core_cleanup_runtime_deploy" == 'true' ]]; then
@@ -7221,6 +8062,17 @@ else
 		)" || exit 1
 		[[ "$reporting_cleanup_migration_state" == 'applied' ]] || {
 			echo "Cleanup Reporting cannot start until the exact migration state is applied; got $reporting_cleanup_migration_state." >&2
+			exit 1
+		}
+	fi
+	if [[ "$billing_core_cleanup_marker_phase" == 'complete' ]]; then
+		billing_require_core_source_absent &&
+			billing_core_source_cleanup_require_exact_migration_manifest applied || {
+			echo 'Routine migration recreated or changed the completed Billing Core cleanup boundary.' >&2
+			exit 1
+		}
+		billing_core_cleanup_require_retired_outcome_absent || {
+			echo 'Retired Core notification outcome topology reappeared during routine migration.' >&2
 			exit 1
 		}
 	fi
@@ -7901,6 +8753,36 @@ if [[ "$widgets_core_cleanup_runtime_deploy" == 'true' ]]; then
 	widgets_core_cleanup_stop_recovery_active=false
 	trap - EXIT INT TERM
 	echo 'Widgets Core source cleanup runtime is healthy; post-cleanup backup/restore evidence remains required before phase=complete.'
+fi
+
+if [[ "$billing_core_cleanup_runtime_deploy" == 'true' ]]; then
+	billing_core_source_cleanup_validate_marker || exit 1
+	[[ "$(billing_core_source_cleanup_marker_value phase)" == 'applied' &&
+		"$(billing_core_source_state)" == 'absent' &&
+		"$(billing_core_source_cleanup_migration_state)" == 'applied' ]] || {
+		echo 'Billing Core cleanup runtime passed smoke without a durable absent|applied boundary.' >&2
+		exit 1
+	}
+	billing_core_cleanup_require_retired_outcome_absent || {
+		echo 'Retired Core notification outcome topology reappeared after cleanup smoke.' >&2
+		exit 1
+	}
+	billing_core_cleanup_stop_recovery_active=false
+	trap - EXIT INT TERM
+	echo 'Billing Core source cleanup runtime is healthy; post-cleanup backup, restore and offsite evidence remain required before phase=complete.'
+fi
+
+if [[ "$billing_core_cleanup_marker_phase" == 'complete' ]]; then
+	billing_core_source_cleanup_validate_marker &&
+		billing_require_core_source_absent &&
+		billing_core_source_cleanup_require_exact_migration_manifest applied || {
+		echo 'Completed Billing Core cleanup invariant failed after routine smoke.' >&2
+		exit 1
+	}
+	billing_core_cleanup_require_retired_outcome_absent || {
+		echo 'Retired Core notification outcome topology reappeared after routine smoke.' >&2
+		exit 1
+	}
 fi
 
 if [[ "$reporting_cleanup_stop_recovery_active" == 'true' ]]; then

@@ -102,7 +102,7 @@ export class HealthService {
 			this.checkSmtp(),
 			this.checkSmsAero(),
 			this.checkRecaptcha(),
-			this.checkYooKassa(),
+			this.checkYooKassa(billingResult),
 			this.checkInfoTelegramBot(),
 			this.checkAuthTelegramBot(),
 			this.checkSupportTelegramBot()
@@ -330,10 +330,7 @@ export class HealthService {
 				where: {
 					resolvedAt: null,
 					integration: {
-						in: CORE_OWNED_MESSAGING_KINDS.filter(
-							kind =>
-								billing.billingOwner !== true || kind !== 'auto-renewal'
-						)
+						in: [...CORE_OWNED_MESSAGING_KINDS]
 					}
 				}
 			}),
@@ -759,27 +756,54 @@ export class HealthService {
 		};
 	}
 
-	private async checkYooKassa(): Promise<HealthCheck> {
-		const isProduction =
-			this.configService.get<string>('MODE') === 'production';
-		const shopIdKey = isProduction
-			? 'YOOKASSA_PRODUCTION_SHOP_ID'
-			: 'YOOKASSA_SHOP_ID';
-		const secretKey = isProduction
-			? 'YOOKASSA_PRODUCTION_SECRET_KEY'
-			: 'YOOKASSA_SECRET_KEY';
-
-		const configured =
-			Boolean(this.configService.get<string>(shopIdKey)) &&
-			Boolean(this.configService.get<string>(secretKey));
+	private async checkYooKassa(
+		resultPromise: Promise<BillingOverviewResult> = this.getBillingResult()
+	): Promise<HealthCheck> {
+		const result = await resultPromise;
+		if (result.billingOwner === false) {
+			return {
+				id: 'yookassa',
+				title: 'ЮKassa',
+				status: 'disabled',
+				message: 'До cutover конфигурация остаётся на стороне Core'
+			};
+		}
+		if (!result.overview || result.error) {
+			return {
+				id: 'yookassa',
+				title: 'ЮKassa',
+				status: 'down',
+				message: result.error || 'Billing internal API недоступен'
+			};
+		}
+		const worker = result.overview.heartbeats?.find(
+			heartbeat => heartbeat.service === 'billing-worker'
+		);
+		if (worker?.status === 'down') {
+			return {
+				id: 'yookassa',
+				title: 'ЮKassa',
+				status: 'down',
+				message: 'Billing worker не готов'
+			};
+		}
+		const configured = result.overview.providers?.yookassa;
+		if (configured === undefined) {
+			return {
+				id: 'yookassa',
+				title: 'ЮKassa',
+				status: 'warning',
+				message: 'Billing worker ещё не опубликовал состояние конфигурации'
+			};
+		}
 
 		return {
 			id: 'yookassa',
 			title: 'ЮKassa',
 			status: configured ? 'ok' : 'warning',
 			message: configured
-				? 'Платёжные ключи настроены'
-				: `Не настроены ${shopIdKey} или ${secretKey}`
+				? 'Платёжные ключи настроены в Billing worker'
+				: 'Платёжные ключи не настроены в Billing worker'
 		};
 	}
 

@@ -33,7 +33,7 @@ REPORTING_CANONICAL_MIGRATION_USER='winwidget_reporting_migration'
 REPORTING_CANONICAL_BACKUP_USER='winwidget_reporting_backup'
 REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
 REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
-WIDGETS_STEADY_INTEGRATION_WORKER_KINDS='telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection,auto-renewal'
+WIDGETS_STEADY_INTEGRATION_WORKER_KINDS='telegram-destination-unavailable,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection'
 REPORTING_PRE_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram'
 REPORTING_POST_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,subscription-expiry-email,subscription-expiry-telegram'
 REPORTING_STEADY_STATE_REMOVED_PATHS=(
@@ -2593,6 +2593,15 @@ reporting_database_lifecycle_self_test() {
 		"$REPORTING_FIRST_ROLLOUT_STAGED_MARKER" == "$REPORTING_APP_ROOT/deploy/backend/.reporting-first-rollout-staged-v1" &&
 		"$REPORTING_CUTOVER_MARKER" == "$REPORTING_APP_ROOT/deploy/backend/.reporting-database-cutover-v1" ]] || {
 		echo 'Reporting lifecycle accepted non-canonical production paths.' >&2
+		return 1
+	}
+	[[ "$WIDGETS_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-admin-audit'* &&
+		"$WIDGETS_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-payment-projection'* &&
+		"$WIDGETS_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-subscription-projection'* &&
+		"$WIDGETS_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-affiliate-projection'* &&
+		"$WIDGETS_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-settings-projection'* &&
+		"$WIDGETS_STEADY_INTEGRATION_WORKER_KINDS" != *'auto-renewal'* ]] || {
+		echo 'Reporting lifecycle has an invalid steady Billing projection consumer set.' >&2
 		return 1
 	}
 	(

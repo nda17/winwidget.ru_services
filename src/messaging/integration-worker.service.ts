@@ -1,7 +1,6 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { BillingReadProjectionService } from '@/billing-boundary/billing-read-projection.service';
-import { AutoRenewalChargeRequestedEventPayload } from '@/messaging/auto-renewal-charge-event';
 import { CampaignAdminAuditEventPayload } from '@/messaging/campaign-admin-audit-event';
 import {
 	BillingAdminAuditEventPayload,
@@ -24,7 +23,6 @@ import {
 } from '@/messaging/messaging-context';
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
-import { NotificationDeliveryOutcomeEventPayload } from '@/messaging/notification-delivery-event';
 import { getStableMessageId } from '@/messaging/poison-message-id';
 import { ReportingAdminAuditEventPayload } from '@/messaging/reporting-admin-audit-event';
 import { WidgetsAdminAuditEventPayload } from '@/messaging/widgets-admin-audit-event';
@@ -54,7 +52,6 @@ const DELIVERY_RECEIPT_LEASE_MS = 10 * 60 * 1000;
 const DELIVERY_RECOVERY_GRACE_MS = 5_000;
 const AUTOMATIC_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 20_000;
-const BILLING_OWNERSHIP_RECONCILE_INTERVAL_MS = 1_000;
 const REDACTED_FAILURE_DETAIL = '[redacted after retention]';
 
 type DeliveryClaim =
@@ -67,8 +64,6 @@ type DeliveryClaim =
 
 type WorkerEventPayload =
 	| TelegramDestinationUnavailableEventPayload
-	| NotificationDeliveryOutcomeEventPayload
-	| AutoRenewalChargeRequestedEventPayload
 	| CampaignAdminAuditEventPayload
 	| ReportingAdminAuditEventPayload
 	| WidgetsAdminAuditEventPayload
@@ -92,8 +87,6 @@ export class IntegrationWorkerService
 	private readonly activeHandlers = new Set<Promise<void>>();
 	private shutdownPromise: Promise<void> | null = null;
 	private cleanupTimer: NodeJS.Timeout | null = null;
-	private billingOwnershipTimer: NodeJS.Timeout | null = null;
-	private billingOwnershipReconciliation: Promise<void> | null = null;
 	private readonly attachedKinds = new Set<MonolithIntegrationKind>();
 	private enabledKinds: MonolithIntegrationKind[] = [];
 	private workerPrefetch = 1;
@@ -113,17 +106,7 @@ export class IntegrationWorkerService
 		this.workerPrefetch = this.getPrefetch();
 		this.enabledKinds = this.getEnabledKinds();
 		for (const kind of this.enabledKinds) {
-			if (kind !== 'auto-renewal') {
-				await this.startConsumers(kind);
-			}
-		}
-		if (this.enabledKinds.includes('auto-renewal')) {
-			await this.reconcileBillingOwnedConsumers();
-			this.billingOwnershipTimer = setInterval(
-				() => void this.scheduleBillingOwnershipReconciliation(),
-				BILLING_OWNERSHIP_RECONCILE_INTERVAL_MS
-			);
-			this.billingOwnershipTimer.unref();
+			await this.startConsumers(kind);
 		}
 		this.logger.log(
 			`Integration consumers started kinds=${[...this.attachedKinds].join(',')} prefetch=${this.workerPrefetch}`
@@ -145,9 +128,6 @@ export class IntegrationWorkerService
 
 	private async shutdown(): Promise<void> {
 		if (this.cleanupTimer) clearInterval(this.cleanupTimer);
-		if (this.billingOwnershipTimer) {
-			clearInterval(this.billingOwnershipTimer);
-		}
 		let consumerCancellationError: unknown = null;
 		const drained = await Promise.race([
 			(async () => {
@@ -222,40 +202,6 @@ export class IntegrationWorkerService
 		this.attachedKinds.add(kind);
 	}
 
-	private scheduleBillingOwnershipReconciliation(): Promise<void> {
-		if (!this.billingOwnershipReconciliation) {
-			this.billingOwnershipReconciliation =
-				this.reconcileBillingOwnedConsumers()
-					.catch(error => {
-						this.logger.error(
-							`Failed to reconcile Billing-owned Core consumers: ${
-								error instanceof Error ? error.message : String(error)
-							}`
-						);
-					})
-					.finally(() => {
-						this.billingOwnershipReconciliation = null;
-					});
-		}
-		return this.billingOwnershipReconciliation;
-	}
-
-	private async reconcileBillingOwnedConsumers(): Promise<void> {
-		if (!this.enabledKinds.includes('auto-renewal')) return;
-		const legacyEnabled = await this.isLegacyBillingConsumerEnabled();
-		const attached = this.attachedKinds.has('auto-renewal');
-		if (legacyEnabled && !attached) {
-			await this.startConsumers('auto-renewal');
-			this.logger.log('Legacy Core auto-renewal consumers attached');
-			return;
-		}
-		if (!legacyEnabled && attached) {
-			await this.rabbitMq.cancelConsumersForKinds(['auto-renewal']);
-			this.attachedKinds.delete('auto-renewal');
-			this.logger.log('Legacy Core auto-renewal consumers detached');
-		}
-	}
-
 	private trackHandler(
 		handler: () => Promise<void>,
 		kind?: MonolithIntegrationKind,
@@ -306,16 +252,6 @@ export class IntegrationWorkerService
 			);
 			return;
 		}
-		if (
-			await this.relinquishBillingOwnedMessageBeforeClaim(
-				kind,
-				payload,
-				message
-			)
-		) {
-			return;
-		}
-
 		let receiptClaim: Date | null = null;
 		try {
 			const claim = await this.claimDelivery(
@@ -437,24 +373,6 @@ export class IntegrationWorkerService
 				);
 				return;
 			}
-			if (
-				this.isLegacyBillingOwnedMessage(kind, payload) &&
-				!(await this.isLegacyBillingConsumerEnabled())
-			) {
-				await this.releaseDeliveryClaimIfOwned(
-					eventId,
-					kind,
-					receiptClaim
-				);
-				receiptClaim = null;
-				if (kind === 'auto-renewal') {
-					this.rabbitMq.nack(message, true);
-				} else {
-					this.rabbitMq.ack(message);
-				}
-				return;
-			}
-
 			await this.delivery.deliver(kind, payload as DeliveryEventPayload);
 			await this.markDeliveryDelivered(eventId, kind, receiptClaim);
 			receiptClaim = null;
@@ -464,31 +382,6 @@ export class IntegrationWorkerService
 				`Integration delivered eventId=${eventId} kind=${kind}`
 			);
 		} catch (error) {
-			if (
-				this.isLegacyBillingOwnedMessage(kind, payload) &&
-				!(await this.isLegacyBillingConsumerEnabled())
-			) {
-				await this.releaseDeliveryClaimIfOwned(
-					eventId,
-					kind,
-					receiptClaim
-				).catch(releaseError => {
-					this.logger.error(
-						`Failed to release fenced Billing delivery claim eventId=${eventId} kind=${kind}: ${
-							releaseError instanceof Error
-								? releaseError.message
-								: String(releaseError)
-						}`
-					);
-				});
-				receiptClaim = null;
-				if (kind === 'auto-renewal') {
-					this.rabbitMq.nack(message, true);
-				} else {
-					this.rabbitMq.ack(message);
-				}
-				return;
-			}
 			const lastAttempt = this.getRetryAttempt(message);
 			const nextAttempt = lastAttempt + 1;
 			const firstFailedAt = this.getFirstFailedAt(message);
@@ -534,11 +427,6 @@ export class IntegrationWorkerService
 							safeReason: `${classification.safeReason}; automatic retry budget exhausted`
 						};
 					}
-					await this.delivery.handleTerminalFailure(
-						kind,
-						payload as DeliveryEventPayload,
-						classification
-					);
 					await this.rabbitMq.publishDeadLetter(
 						kind,
 						payload,
@@ -1871,64 +1759,6 @@ export class IntegrationWorkerService
 			kind === 'billing-subscription-projection' ||
 			kind === 'billing-affiliate-projection' ||
 			kind === 'billing-settings-projection'
-		);
-	}
-
-	private async isLegacyBillingConsumerEnabled(): Promise<boolean> {
-		try {
-			return await this.billingState.isLegacyConsumerEnabled();
-		} catch (error) {
-			this.logger.error(
-				`Billing legacy-consumer marker is unavailable; failing closed: ${
-					error instanceof Error ? error.message : String(error)
-				}`
-			);
-			return false;
-		}
-	}
-
-	private isLegacyBillingOwnedMessage(
-		kind: MonolithIntegrationKind,
-		payload: WorkerEventPayload
-	): boolean {
-		return (
-			kind === 'auto-renewal' ||
-			(kind === 'notification-delivery-outcome' &&
-				this.isBillingNotificationOutcome(payload))
-		);
-	}
-
-	private async relinquishBillingOwnedMessageBeforeClaim(
-		kind: MonolithIntegrationKind,
-		payload: WorkerEventPayload,
-		message: ConsumeMessage
-	): Promise<boolean> {
-		if (!this.isLegacyBillingOwnedMessage(kind, payload)) return false;
-		if (await this.isLegacyBillingConsumerEnabled()) return false;
-		if (kind === 'auto-renewal') {
-			this.rabbitMq.nack(message, true);
-			this.logger.warn(
-				'Fenced Core auto-renewal delivery was returned without claiming a receipt'
-			);
-		} else {
-			this.rabbitMq.ack(message);
-			this.logger.log(
-				'Billing-owned notification outcome was acknowledged by Core without claiming a receipt'
-			);
-		}
-		return true;
-	}
-
-	private isBillingNotificationOutcome(
-		payload: WorkerEventPayload
-	): payload is NotificationDeliveryOutcomeEventPayload {
-		if (!('reference' in payload) || !('sourceKind' in payload)) {
-			return false;
-		}
-		return (
-			payload.reference.type === 'subscription-expiry-reminder' &&
-			(payload.sourceKind === 'subscription-expiry-email' ||
-				payload.sourceKind === 'subscription-expiry-telegram')
 		);
 	}
 }

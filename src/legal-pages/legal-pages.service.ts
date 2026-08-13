@@ -1,6 +1,6 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { UpdateLegalPageDto } from '@/legal-pages/dto/update-legal-page.dto';
-import { isAutoRenewalOfferCompatible } from '@/payment/payment.constants';
+import { isAutoRenewalOfferCompatible } from '@/billing-boundary/billing-boundary.constants';
 import { PrismaService } from '@/prisma.service';
 import {
 	BadRequestException,

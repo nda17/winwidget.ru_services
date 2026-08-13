@@ -16,6 +16,7 @@ on:
           - reporting
           - widgets
           - billing
+          - billing-cleanup
       widgets_cutover_confirmation:
         description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
         required: false
@@ -34,6 +35,22 @@ on:
           - forward-recovery
       billing_confirmation:
         description: Type the exact Billing cutover or abort confirmation when required
+        required: false
+        default: ''
+        type: string
+      billing_cleanup_action:
+        description: Billing Core source cleanup action (manual billing-cleanup target only)
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - stage
+          - seal-offsite
+          - run
+          - complete-offsite
+      billing_cleanup_confirmation:
+        description: Type DROP LEGACY BILLING CORE SOURCE for a mutating cleanup action
         required: false
         default: ''
         type: string
@@ -93,11 +110,14 @@ jobs:
             scripts/deploy-billing-production.sh
             scripts/billing-cutover-production.sh
             scripts/billing-backup-restore-rehearsal.sh
+            scripts/cleanup-billing-core-source-production.sh
+            scripts/test-billing-core-source-cleanup-rehearsal.sh
             scripts/test-billing-runtime-boundaries.mjs
             src/billing-core-cutover-main.ts
             apps/billing/src/cutover-main.ts
             prisma/migrations/20260811000000_prepare_billing_service_ownership/migration.sql
             prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
+            prisma/migrations/20260813000000_remove_legacy_billing_core_source/migration.sql
           )
           for path in "${required_files[@]}"; do
             test -f "$path"
@@ -114,7 +134,9 @@ jobs:
             scripts/billing-database-lifecycle.sh \
             scripts/deploy-billing-production.sh \
             scripts/billing-cutover-production.sh \
-            scripts/billing-backup-restore-rehearsal.sh; do
+            scripts/billing-backup-restore-rehearsal.sh \
+            scripts/cleanup-billing-core-source-production.sh \
+            scripts/test-billing-core-source-cleanup-rehearsal.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
@@ -135,6 +157,10 @@ jobs:
             bash scripts/billing-cutover-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/billing-backup-restore-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/cleanup-billing-core-source-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-billing-core-source-cleanup-rehearsal.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
 
           # ShellCheck runs separately below; its actionlint integration
@@ -167,7 +193,9 @@ jobs:
             scripts/billing-database-lifecycle.sh \
             scripts/deploy-billing-production.sh \
             scripts/billing-cutover-production.sh \
-            scripts/billing-backup-restore-rehearsal.sh
+            scripts/billing-backup-restore-rehearsal.sh \
+            scripts/cleanup-billing-core-source-production.sh \
+            scripts/test-billing-core-source-cleanup-rehearsal.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -289,6 +317,8 @@ jobs:
           APP_ROOT: /opt/winwidget
           AUTOMATIC_PROD_PUSH: ${{ github.event_name == 'push' && 'true' || 'false' }}
           DEPLOY_REVISION: ${{ github.sha }}
+          DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
+          BILLING_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_action || 'status' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -300,7 +330,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -523,12 +553,18 @@ jobs:
           guard_billing_checkout_before_pull "$current_revision"
           guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
-          guard_billing_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
             "$current_revision" == "$EXPECTED_REVISION" ]]; then
             guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
+            if [[ "$DEPLOY_TARGET" == 'billing-cleanup' &&
+              "$BILLING_CLEANUP_ACTION" =~ ^(status|stage)$ &&
+              "$current_revision" != "$EXPECTED_REVISION" ]]; then
+              echo 'Billing cleanup SHA B will be inspected or marker-bound by the deploy job before checkout.'
+            else
+              guard_billing_checkout_before_pull "$EXPECTED_REVISION"
+            fi
           else
-            echo "Automatic push will verify before the deploy job evaluates the active Reporting revision guard."
+            echo "Automatic push will verify before the deploy job evaluates the active Reporting and Billing revision guards."
           fi
           echo "Active lifecycle checkout preflight passed without changing VPS state."
           EOF
@@ -795,6 +831,8 @@ jobs:
           bash -n scripts/deploy-billing-production.sh
           bash -n scripts/billing-cutover-production.sh
           bash -n scripts/billing-backup-restore-rehearsal.sh
+          bash -n scripts/cleanup-billing-core-source-production.sh
+          bash -n scripts/test-billing-core-source-cleanup-rehearsal.sh
           node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
@@ -811,6 +849,10 @@ jobs:
             bash scripts/billing-cutover-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/billing-backup-restore-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/cleanup-billing-core-source-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-billing-core-source-cleanup-rehearsal.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
@@ -828,7 +870,9 @@ jobs:
             scripts/billing-database-lifecycle.sh \
             scripts/deploy-billing-production.sh \
             scripts/billing-cutover-production.sh \
-            scripts/billing-backup-restore-rehearsal.sh
+            scripts/billing-backup-restore-rehearsal.sh \
+            scripts/cleanup-billing-core-source-production.sh \
+            scripts/test-billing-core-source-cleanup-rehearsal.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -4378,7 +4422,6 @@ jobs:
                 .filter(Boolean);
               const expectedIntegrationKinds = [
                 "telegram-destination-unavailable",
-                "notification-delivery-outcome",
                 "campaign-admin-audit",
                 "reporting-admin-audit",
                 "widgets-admin-audit",
@@ -4387,7 +4430,6 @@ jobs:
                 "billing-subscription-projection",
                 "billing-affiliate-projection",
                 "billing-settings-projection",
-                "auto-renewal",
               ];
               if (
                 JSON.stringify(integrationKinds) !==
@@ -4783,12 +4825,27 @@ jobs:
                   "Billing API/worker internal HTTP, proxy or CORS contract drifted",
                 );
               }
-              const providerEnvironmentKeys = [
+              const providerSecretEnvironmentKeys = [
                 "YOOKASSA_PRODUCTION_SHOP_ID",
                 "YOOKASSA_PRODUCTION_SECRET_KEY",
                 "PAYMENT_METHOD_ENCRYPTION_KEY",
+              ];
+              const providerEnvironmentKeys = [
+                ...providerSecretEnvironmentKeys,
                 "RECAPTCHA_CLIENT_URL",
               ];
+              for (const [name, environment] of [
+                ["api", apiEnvironment],
+                ["integration-worker", integrationEnvironment],
+              ]) {
+                for (const key of providerSecretEnvironmentKeys) {
+                  if (key in environment) {
+                    throw new Error(
+                      `${name} must not receive Billing provider secret ${key}`,
+                    );
+                  }
+                }
+              }
               const forbiddenDevelopmentProviderKeys = [
                 "YOOKASSA_SHOP_ID",
                 "YOOKASSA_SECRET_KEY",
@@ -5611,6 +5668,8 @@ jobs:
             scripts/deploy-billing-production.sh \
             scripts/billing-cutover-production.sh \
             scripts/billing-backup-restore-rehearsal.sh \
+            scripts/cleanup-billing-core-source-production.sh \
+            scripts/test-billing-core-source-cleanup-rehearsal.sh \
             database-restore-entrypoint.sh
           docker run --rm \
             --network none \
@@ -5664,7 +5723,7 @@ jobs:
             'guard_campaigns_checkout_before_pull "$expected_revision"',
             1,
           );
-          requireCount("git fetch origin prod", 1);
+          requireCount("git fetch origin prod", 2);
           requireCount("git checkout prod", 1);
           requireCount('git merge --ff-only "$fetched_revision"', 1);
           requireCount(
@@ -5672,7 +5731,15 @@ jobs:
             7,
           );
           requireCount(
+            '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
+            1,
+          );
+          requireCount(
             'checkout_verified_prod_revision "$EXPECTED_PROD_REVISION"',
+            0,
+          );
+          requireCount(
+            "git ls-remote --exit-code origin refs/heads/prod |",
             0,
           );
           requireCount(
@@ -5741,6 +5808,47 @@ jobs:
             1,
           );
           const deployJob = workflow.slice(workflow.indexOf("\n  deploy:"));
+          const cleanupDispatchStart = deployJob.indexOf(
+            "\n            billing-cleanup)",
+          );
+          const cleanupDispatch = deployJob.slice(
+            cleanupDispatchStart,
+            deployJob.indexOf("\n            *)", cleanupDispatchStart),
+          );
+          const cleanupFetchIndex = cleanupDispatch.indexOf(
+            "git fetch origin prod",
+          );
+          const cleanupFetchHeadIndex = cleanupDispatch.indexOf(
+            'prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"',
+          );
+          const cleanupStageMarkerIndex = cleanupDispatch.indexOf(
+            '--stage-cleanup-revision "$EXPECTED_REVISION"',
+          );
+          const cleanupCheckoutIndex = cleanupDispatch.indexOf(
+            '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
+          );
+          if (
+            cleanupFetchIndex < 0 ||
+            cleanupFetchHeadIndex < 0 ||
+            cleanupStageMarkerIndex < 0 ||
+            cleanupCheckoutIndex < 0 ||
+            cleanupFetchIndex >= cleanupFetchHeadIndex ||
+            cleanupFetchHeadIndex >= cleanupStageMarkerIndex ||
+            cleanupStageMarkerIndex >= cleanupCheckoutIndex
+          ) {
+            throw new Error(
+              "Billing cleanup must fetch and freeze origin/prod before binding and checking out SHA B",
+            );
+          }
+          if (
+            cleanupDispatch
+              .slice(cleanupStageMarkerIndex, cleanupCheckoutIndex)
+              .includes("git fetch origin prod")
+          ) {
+            throw new Error(
+              "Billing cleanup must not refetch origin/prod after binding SHA B",
+            );
+          }
           if (
             !deployJob.includes("needs: verify") ||
             !deployJob.includes("github.event_name == 'push'") ||
@@ -5752,34 +5860,47 @@ jobs:
           }
           const assertCheckoutOrder = (job, lockNeedle, label) => {
             const lockIndex = job.indexOf(lockNeedle);
-            const reportingPreFetchGuardIndex = job.lastIndexOf(
+            const checkoutFunctionStart = job.indexOf(
+              "checkout_verified_prod_revision() {",
+            );
+            const checkoutFunctionEnd = job.indexOf(
+              '\n          current_revision="$(git rev-parse HEAD)"',
+              checkoutFunctionStart,
+            );
+            const checkoutFunction = job.slice(
+              checkoutFunctionStart,
+              checkoutFunctionEnd,
+            );
+            const reportingPreFetchGuardIndex = checkoutFunction.lastIndexOf(
               'guard_reporting_checkout_before_pull "$expected_revision"',
             );
-            const campaignsGuardIndex = job.lastIndexOf(
+            const campaignsGuardIndex = checkoutFunction.lastIndexOf(
               'guard_campaigns_checkout_before_pull "$expected_revision"',
             );
-            const widgetsPreFetchGuardIndex = job.lastIndexOf(
+            const widgetsPreFetchGuardIndex = checkoutFunction.lastIndexOf(
               'guard_widgets_checkout_before_pull "$expected_revision"',
             );
-            const billingPreFetchGuardIndex = job.lastIndexOf(
+            const billingPreFetchGuardIndex = checkoutFunction.lastIndexOf(
               'guard_billing_checkout_before_pull "$expected_revision"',
             );
-            const fetchIndex = job.lastIndexOf("git fetch origin prod");
-            const reportingPostFetchGuardIndex = job.indexOf(
+            const fetchIndex = checkoutFunction.indexOf("git fetch origin prod");
+            const reportingPostFetchGuardIndex = checkoutFunction.indexOf(
               "guard_reporting_checkout_before_pull",
               fetchIndex,
             );
-            const widgetsPostFetchGuardIndex = job.indexOf(
+            const widgetsPostFetchGuardIndex = checkoutFunction.indexOf(
               "guard_widgets_checkout_before_pull",
               fetchIndex,
             );
-            const billingPostFetchGuardIndex = job.indexOf(
+            const billingPostFetchGuardIndex = checkoutFunction.indexOf(
               "guard_billing_checkout_before_pull",
               fetchIndex,
             );
-            const checkoutIndex = job.lastIndexOf("git checkout prod");
+            const checkoutIndex = checkoutFunction.lastIndexOf("git checkout prod");
             if (
               lockIndex < 0 ||
+              checkoutFunctionStart < 0 ||
+              checkoutFunctionEnd <= checkoutFunctionStart ||
               reportingPreFetchGuardIndex < 0 ||
               campaignsGuardIndex < 0 ||
               widgetsPreFetchGuardIndex < 0 ||
@@ -5789,10 +5910,7 @@ jobs:
               widgetsPostFetchGuardIndex < 0 ||
               billingPostFetchGuardIndex < 0 ||
               checkoutIndex < 0 ||
-              lockIndex >= reportingPreFetchGuardIndex ||
-              lockIndex >= campaignsGuardIndex ||
-              lockIndex >= widgetsPreFetchGuardIndex ||
-              lockIndex >= billingPreFetchGuardIndex ||
+              lockIndex >= checkoutFunctionStart ||
               reportingPreFetchGuardIndex >= fetchIndex ||
               campaignsGuardIndex >= fetchIndex ||
               widgetsPreFetchGuardIndex >= fetchIndex ||
@@ -6109,6 +6227,8 @@ jobs:
           bash -n scripts/deploy-billing-production.sh
           bash -n scripts/billing-cutover-production.sh
           bash -n scripts/billing-backup-restore-rehearsal.sh
+          bash -n scripts/cleanup-billing-core-source-production.sh
+          bash -n scripts/test-billing-core-source-cleanup-rehearsal.sh
           pnpm exec prettier --check \
             .github/workflows/database-restore-production.yml \
             .github/workflows/deploy-production.yml
@@ -6136,6 +6256,13 @@ jobs:
             bash scripts/billing-cutover-production.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/billing-backup-restore-rehearsal.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/cleanup-billing-core-source-production.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/test-billing-core-source-cleanup-rehearsal.sh --self-test
+          CORE_CLEANUP_REHEARSAL_RUN_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/test-billing-core-source-cleanup-rehearsal.sh --rehearsal
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
@@ -6224,6 +6351,9 @@ jobs:
           const widgets = require(
             "./apps/widgets/dist/src/messaging/widgets-messaging.constants.js",
           );
+          const billing = require(
+            "./apps/billing/dist/src/messaging/billing-messaging.constants.js",
+          );
 
           const expectedKinds = [
             "email",
@@ -6243,11 +6373,18 @@ jobs:
           const monolithIntegrationKinds = [
             ...monolith.MONOLITH_INTEGRATION_KINDS,
           ];
+          const archivedCoreFailureKinds = [
+            ...monolith.CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
+          ];
           const widgetsProviderKinds = [
             ...monolith.WIDGETS_PROVIDER_INTEGRATION_KINDS,
           ];
           const widgetsServiceProviderKinds = [
             ...widgets.WIDGETS_PROVIDER_KINDS,
+          ];
+          const billingOwnedFederatedKinds = [
+            "notification-delivery-outcome",
+            "auto-renewal",
           ];
           const reportingDeliveryKinds = [
             ...reporting.REPORTING_NOTIFICATION_DELIVERY_KINDS,
@@ -6259,7 +6396,6 @@ jobs:
           ];
           const steadyMonolithKinds = [
             "telegram-destination-unavailable",
-            "notification-delivery-outcome",
             "campaign-admin-audit",
             "reporting-admin-audit",
             "widgets-admin-audit",
@@ -6268,13 +6404,109 @@ jobs:
             "billing-subscription-projection",
             "billing-affiliate-projection",
             "billing-settings-projection",
-            "auto-renewal",
           ];
           const legacyPaths = [
             "src/messaging/daily-summary-event.ts",
             "src/reports",
             "src/statistics",
           ];
+          const legacyBillingSourcePaths = [
+            "src/payment",
+            "src/subscription",
+            "src/affiliate",
+            "src/tariff-prices",
+          ];
+          const legacyBillingSchemaTokens = [
+            "Payment",
+            "PaymentReceipt",
+            "Subscription",
+            "SubscriptionHistory",
+            "SubscriptionExpiryReminder",
+            "AutoRenewal",
+            "AutoRenewalConsentEvent",
+            "TariffPrice",
+            "AffiliateReferral",
+          ];
+          if (legacyBillingSourcePaths.some(path => fs.existsSync(path))) {
+            throw new Error("Legacy Billing Core source directories reappeared");
+          }
+          const corePrismaSchema = fs.readFileSync(
+            "prisma/schema.prisma",
+            "utf8",
+          );
+          for (const model of legacyBillingSchemaTokens) {
+            if (
+              new RegExp(`^model\\s+${model}\\s+\\{`, "m").test(
+                corePrismaSchema,
+              )
+            ) {
+              throw new Error(
+                `Legacy Billing Core Prisma model reappeared: ${model}`,
+              );
+            }
+          }
+          for (const enumName of [
+            "PaymentKind",
+            "AutoRenewalStatus",
+            "AutoRenewalConsentEventType",
+            "SubscriptionExpiryReminderStatus",
+            "SubscriptionHistoryAction",
+            "SubscriptionBonusAudience",
+          ]) {
+            if (
+              new RegExp(`^enum\\s+${enumName}\\s+\\{`, "m").test(
+                corePrismaSchema,
+              )
+            ) {
+              throw new Error(
+                `Legacy Billing Core Prisma enum reappeared: ${enumName}`,
+              );
+            }
+          }
+          const siteSettingsBlock = corePrismaSchema.match(
+            /^model SiteSettings \{[\s\S]*?^\}/m,
+          )?.[0];
+          if (!siteSettingsBlock) {
+            throw new Error("SiteSettings Prisma model is missing");
+          }
+          for (const field of [
+            "paymentEnabled",
+            "autoRenewalSignupEnabled",
+            "autoRenewalChargesEnabled",
+            "autoRenewalChargesEnabledAt",
+            "affiliateProgramEnabled",
+            "affiliateCashbackPercent",
+          ]) {
+            if (new RegExp(`^\\s*${field}\\s+`, "m").test(siteSettingsBlock)) {
+              throw new Error(
+                `Legacy Billing SiteSettings field reappeared: ${field}`,
+              );
+            }
+          }
+          const assertBillingLegacyGuardRejects = (schema, label) => {
+            if (
+              !legacyBillingSchemaTokens.some(model =>
+                new RegExp(`^model\\s+${model}\\s+\\{`, "m").test(schema),
+              ) &&
+              !new RegExp(
+                "^model SiteSettings \\{[\\s\\S]*?^\\s*paymentEnabled\\s+",
+                "m",
+              ).test(schema)
+            ) {
+              throw new Error(`Billing legacy guard did not reject ${label}`);
+            }
+          };
+          assertBillingLegacyGuardRejects(
+            `${corePrismaSchema}\nmodel Payment {\n  id String @id\n}\n`,
+            "a restored source model",
+          );
+          assertBillingLegacyGuardRejects(
+            corePrismaSchema.replace(
+              "model SiteSettings {",
+              "model SiteSettings {\n  paymentEnabled Boolean",
+            ),
+            "a restored SiteSettings field",
+          );
           const legacyPathsPresent = legacyPaths.every(path =>
             fs.existsSync(path),
           );
@@ -6460,6 +6692,7 @@ jobs:
             ...coreDeliveryKinds,
             ...widgetsProviderKinds,
             ...monolithIntegrationKinds,
+            ...billingOwnedFederatedKinds,
           ];
           if (
             JSON.stringify(monolithIntegrationKinds) !==
@@ -6469,9 +6702,11 @@ jobs:
             JSON.stringify(widgetsServiceProviderKinds) !==
               JSON.stringify(expectedWidgetsProviderKinds) ||
             actualKinds.some(kind =>
-              [...monolithIntegrationKinds, ...widgetsProviderKinds].includes(
-                kind,
-              )
+              [
+                ...monolithIntegrationKinds,
+                ...widgetsProviderKinds,
+                ...billingOwnedFederatedKinds,
+              ].includes(kind),
             ) ||
             new Set(integrationOwnershipKinds).size !==
               integrationOwnershipKinds.length ||
@@ -6479,7 +6714,48 @@ jobs:
               [...monolith.INTEGRATION_KINDS].sort().join(",")
           ) {
             throw new Error(
-              "Core, Notification Delivery, and Widgets kind ownership must be an exact disjoint union",
+              "Core, Notification Delivery, Widgets, and Billing kind ownership must be an exact disjoint union",
+            );
+          }
+          if (
+            JSON.stringify(archivedCoreFailureKinds) !==
+              JSON.stringify(["notification-delivery-outcome"]) ||
+            archivedCoreFailureKinds.some(kind =>
+              [
+                ...monolith.CORE_OWNED_MESSAGING_KINDS,
+                ...monolith.CORE_RABBITMQ_TOPOLOGY_KINDS,
+              ].includes(kind),
+            )
+          ) {
+            throw new Error(
+              "Archived Core failure history must remain exact and disjoint from runtime ownership",
+            );
+          }
+          if (
+            JSON.stringify(
+              billing.BILLING_CONSUMER_KINDS.filter(kind =>
+                ["auto-renewal-charge", "notification-outcome"].includes(
+                  kind,
+                ),
+              ),
+            ) !==
+              JSON.stringify([
+                "auto-renewal-charge",
+                "notification-outcome",
+              ]) ||
+            billing.BILLING_ROUTING_KEYS["notification-outcome"] !==
+              monolith.MESSAGING_ROUTING_KEYS[
+                "notification-delivery-outcome"
+              ] ||
+            billing.BILLING_QUEUE_NAMES["notification-outcome"] !==
+              monolith.BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME ||
+            billing.BILLING_ROUTING_KEYS["auto-renewal-charge"] !==
+              monolith.MESSAGING_ROUTING_KEYS["auto-renewal"] ||
+            billing.BILLING_QUEUE_NAMES["auto-renewal-charge"] !==
+              monolith.MESSAGING_QUEUE_NAMES["auto-renewal"]
+          ) {
+            throw new Error(
+              "Billing federated routing and queue ownership drifted",
             );
           }
           for (const [label, actual, expected] of [
@@ -6537,11 +6813,24 @@ jobs:
             "scripts/deploy-production.sh",
             "utf8",
           );
+          const topologyWait = deployScript.slice(
+            deployScript.indexOf("wait_for_rabbitmq_topology() {"),
+            deployScript.indexOf("verify_notification_delivery_runtime_crud() {"),
+          );
+          if (
+            !topologyWait.includes("CORE_RABBITMQ_TOPOLOGY_KINDS") ||
+            topologyWait.includes("for (const kind of MESSAGING_KINDS)")
+          ) {
+            throw new Error(
+              "Routine RabbitMQ wait must use the Core-owned topology catalog",
+            );
+          }
           for (const ownershipNeedle of [
             '-e "BILLING_OWNER_ACTIVE=$billing_owner_active"',
             "process.env.RABBITMQ_BILLING_WORKER_URL",
             'connectionName: "winwidget-billing-worker"',
-            'kind => !(billingOwnerActive && kind === "auto-renewal")',
+            'kind === "notification-delivery-outcome"',
+            "BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME",
             "RabbitMQ Billing parking queue",
           ]) {
             if (!deployScript.includes(ownershipNeedle)) {
@@ -7097,7 +7386,7 @@ jobs:
               integration_ci \
               '^$' \
               '^(winwidget\.retry|winwidget\.dead-letter)$' \
-              '^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+              '^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_user_tags integration_ci
           docker exec "$RABBITMQ_CONTAINER_ID" \
@@ -7108,7 +7397,7 @@ jobs:
               rabbitmqctl --silent list_user_permissions integration_ci |
               awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }'
           )" = \
-            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
           docker run --rm \
             --network host \
             --env ADMIN_URL=amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget \
@@ -7752,6 +8041,8 @@ jobs:
           WIDGETS_CUTOVER_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.widgets_cutover_confirmation || '' }}
           BILLING_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_action || 'status' }}
           BILLING_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_confirmation || '' }}
+          BILLING_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_action || 'status' }}
+          BILLING_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_confirmation || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -7772,6 +8063,20 @@ jobs:
               exit 1
               ;;
           esac
+          if [[ "$DEPLOY_TARGET" == 'billing-cleanup' ]]; then
+            case "$BILLING_CLEANUP_ACTION:$BILLING_CLEANUP_CONFIRMATION" in
+              status:) ;;
+              stage:'DROP LEGACY BILLING CORE SOURCE'|seal-offsite:'DROP LEGACY BILLING CORE SOURCE'|run:'DROP LEGACY BILLING CORE SOURCE'|complete-offsite:'DROP LEGACY BILLING CORE SOURCE') ;;
+              *)
+                echo 'Invalid Billing Core cleanup action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$BILLING_CLEANUP_ACTION" != 'status' ||
+            -n "$BILLING_CLEANUP_CONFIRMATION" ]]; then
+            echo 'Billing Core cleanup inputs require the billing-cleanup target.' >&2
+            exit 1
+          fi
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o ServerAliveInterval=15 \
@@ -7779,7 +8084,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' bash -s" <<'EOF'
           set -euo pipefail
           unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
             REPORTING_FIRST_ROLLOUT_STAGED_MARKER
@@ -7960,7 +8265,14 @@ jobs:
           }
           checkout_verified_prod_revision() {
             local expected_revision="$1"
+            local prefetched_revision="${2:-}"
             local current_revision fetched_revision
+
+            [[ -z "$prefetched_revision" ||
+              "$prefetched_revision" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "Prefetched prod revision is invalid." >&2
+              return 1
+            }
 
             current_revision="$(git rev-parse HEAD)"
             guard_campaigns_checkout_before_pull "$current_revision"
@@ -7971,12 +8283,24 @@ jobs:
             guard_reporting_checkout_before_pull "$expected_revision"
             guard_widgets_checkout_before_pull "$expected_revision"
             guard_billing_checkout_before_pull "$expected_revision"
-            git fetch origin prod
-            fetched_revision="$(git rev-parse FETCH_HEAD)"
-            [[ "$fetched_revision" == "$expected_revision" ]] || {
-              echo "Origin prod changed after workflow start; checkout was not modified." >&2
-              return 1
-            }
+            if [[ -n "$prefetched_revision" ]]; then
+              [[ "$prefetched_revision" == "$expected_revision" ]] || {
+                echo "Prefetched prod revision differs from the reviewed revision." >&2
+                return 1
+              }
+              git cat-file -e "$prefetched_revision^{commit}" 2>/dev/null || {
+                echo "Prefetched prod commit is unavailable locally." >&2
+                return 1
+              }
+              fetched_revision="$prefetched_revision"
+            else
+              git fetch origin prod
+              fetched_revision="$(git rev-parse FETCH_HEAD)"
+              [[ "$fetched_revision" == "$expected_revision" ]] || {
+                echo "Origin prod changed after workflow start; checkout was not modified." >&2
+                return 1
+              }
+            fi
             guard_reporting_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
             guard_widgets_checkout_before_pull \
@@ -8099,6 +8423,47 @@ jobs:
                     bash scripts/billing-cutover-production.sh --abort
                   ;;
               esac
+              ;;
+            billing-cleanup)
+              [[ "$AUTOMATIC_PROD_PUSH" == "false" ]] || {
+                echo "Billing Core source cleanup actions are manual-only." >&2
+                exit 1
+              }
+              if [[ "$BILLING_CLEANUP_ACTION" == 'status' &&
+                "$(git rev-parse HEAD)" != "$EXPECTED_REVISION" ]]; then
+                cleanup_marker="$APP_ROOT/deploy/backend/.billing-core-source-cleanup-v1"
+                [[ ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]] || {
+                  echo 'Billing cleanup marker exists but its bound revision is not checked out.' >&2
+                  exit 1
+                }
+                APP_ROOT="$APP_ROOT" bash scripts/billing-database-lifecycle.sh --status
+                printf 'billing_core_cleanup_phase=not-staged\n'
+                printf 'billing_core_cleanup_candidate_revision=%s\n' "$EXPECTED_REVISION"
+                printf 'billing_core_cleanup_checkout_revision=%s\n' "$(git rev-parse HEAD)"
+                exit 0
+              fi
+              prefetched_cleanup_revision=''
+              if [[ "$BILLING_CLEANUP_ACTION" == 'stage' &&
+                "$(git rev-parse HEAD)" != "$EXPECTED_REVISION" ]]; then
+                current_revision="$(git rev-parse HEAD)"
+                git fetch origin prod
+                prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"
+                [[ "$prefetched_cleanup_revision" == "$EXPECTED_REVISION" ]] || {
+                  echo 'Origin prod no longer matches the reviewed cleanup revision; marker was not changed.' >&2
+                  exit 1
+                }
+                APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$current_revision" \
+                  BILLING_CLEANUP_STAGE_CONFIRMATION='STAGE BILLING CLEANUP REVISION' \
+                  bash scripts/billing-cutover-production.sh \
+                    --stage-cleanup-revision "$EXPECTED_REVISION"
+              fi
+              checkout_verified_prod_revision \
+                "$EXPECTED_REVISION" "$prefetched_cleanup_revision"
+              cleanup_command="--$BILLING_CLEANUP_ACTION"
+              APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                BILLING_CORE_SOURCE_CLEANUP_CONFIRMATION="$BILLING_CLEANUP_CONFIRMATION" \
+                bash scripts/cleanup-billing-core-source-production.sh \
+                  "$cleanup_command"
               ;;
             *)
               echo "Unsupported deploy target: $DEPLOY_TARGET" >&2

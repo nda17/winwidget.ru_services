@@ -7,6 +7,7 @@ import {
 	BillingMessagingInternalApiError
 } from '@/messaging/billing-messaging-client.service';
 import {
+	CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
 	CORE_OWNED_MESSAGING_KINDS,
 	getManualRetryRoutingKey,
 	CoreMessagingKind,
@@ -99,7 +100,7 @@ export class MessagingAdminService {
 
 	async getOverview() {
 		const billingOwner = await this.isBillingOwner();
-		const coreFailureKinds = this.getCoreFailureKinds(billingOwner);
+		const coreFailureKinds = this.getCoreFailureKinds();
 		const now = new Date();
 		const staleBefore = new Date(now.getTime() - 30_000);
 		const expiredPublishingBefore = new Date(
@@ -413,7 +414,8 @@ export class MessagingAdminService {
 
 	async getFailures(page = 1, limit = 20, filters: FailureFilters = {}) {
 		const billingOwner = await this.isBillingOwner();
-		const coreFailureKinds = this.getCoreFailureKinds(billingOwner);
+		const coreFailureKinds = this.getCoreFailureKinds();
+		const archivedFailureKinds = this.getArchivedFailureKinds();
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
@@ -428,11 +430,17 @@ export class MessagingAdminService {
 		const queryWidgets =
 			!normalizedIntegration ||
 			this.isWidgetsProviderKind(normalizedIntegration as MessagingKind);
-		const queryCore =
+		const queryCoreOwned =
 			!normalizedIntegration ||
 			coreFailureKinds.includes(
 				normalizedIntegration as (typeof coreFailureKinds)[number]
 			);
+		const queryArchivedCore =
+			billingOwner &&
+			(!normalizedIntegration ||
+				archivedFailureKinds.includes(
+					normalizedIntegration as (typeof archivedFailureKinds)[number]
+				));
 		const billingConsumer = normalizedIntegration
 			? PUBLIC_INTEGRATION_TO_BILLING_CONSUMER[normalizedIntegration]
 			: undefined;
@@ -445,9 +453,16 @@ export class MessagingAdminService {
 				'Слишком глубокая страница истории ошибок'
 			);
 		}
-		const where = queryCore
+		const coreWhere = queryCoreOwned
 			? this.getFailureWhere(filters, coreFailureKinds)
 			: null;
+		const archivedWhere = queryArchivedCore
+			? this.getArchivedFailureHistoryWhere(filters, archivedFailureKinds)
+			: null;
+		const where: Prisma.IntegrationDeliveryFailureWhereInput | null =
+			coreWhere && archivedWhere
+				? { OR: [coreWhere, archivedWhere] }
+				: coreWhere || archivedWhere;
 		const [coreResult, notificationResult, widgetsResult, billingResult] =
 			await Promise.all([
 				where
@@ -536,7 +551,12 @@ export class MessagingAdminService {
 			if (result) return result;
 			throw new NotFoundException('Ошибка доставки не найдена');
 		}
-		if (!(await this.isCoreOwnedFailure(id, billingOwner))) {
+		if (billingOwner && (await this.isArchivedCoreFailure(id))) {
+			throw new ConflictException(
+				'Архивная ошибка доступна только для чтения'
+			);
+		}
+		if (!(await this.isCoreOwnedFailure(id))) {
 			const notificationDeliveryResult =
 				await this.retryNotificationDeliveryFailure(id, adminId, request);
 			if (notificationDeliveryResult) return notificationDeliveryResult;
@@ -564,7 +584,7 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
-			if (!this.isCoreFailureKind(kind, billingOwner)) {
+			if (!this.isCoreFailureKind(kind)) {
 				throw new NotFoundException('Ошибка доставки не найдена');
 			}
 			const retryPayload: Prisma.JsonValue = failure.payload;
@@ -693,8 +713,13 @@ export class MessagingAdminService {
 			if (result) return result;
 			throw new NotFoundException('Ошибка доставки не найдена');
 		}
+		if (billingOwner && (await this.isArchivedCoreFailure(id))) {
+			throw new ConflictException(
+				'Архивная ошибка доступна только для чтения'
+			);
+		}
 
-		if (!(await this.isCoreOwnedFailure(id, billingOwner))) {
+		if (!(await this.isCoreOwnedFailure(id))) {
 			const notificationDeliveryResult =
 				await this.closeNotificationDeliveryFailure(
 					id,
@@ -747,7 +772,7 @@ export class MessagingAdminService {
 			}
 
 			const kind = this.normalizeIntegration(failure.integration);
-			if (!this.isCoreFailureKind(kind, billingOwner)) {
+			if (!this.isCoreFailureKind(kind)) {
 				throw new NotFoundException('Ошибка доставки не найдена');
 			}
 			if (kind !== 'database-backup') {
@@ -989,6 +1014,18 @@ export class MessagingAdminService {
 		return where;
 	}
 
+	private getArchivedFailureHistoryWhere(
+		filters: FailureFilters,
+		archivedFailureKinds: CoreMessagingKind[]
+	): Prisma.IntegrationDeliveryFailureWhereInput {
+		return {
+			AND: [
+				this.getFailureWhere(filters, archivedFailureKinds),
+				{ resolvedAt: { not: null } }
+			]
+		};
+	}
+
 	private getScheduledJobReference(
 		kind: MessagingKind,
 		eventId: string,
@@ -1078,17 +1115,16 @@ export class MessagingAdminService {
 		);
 	}
 
-	private isCoreFailureKind(
-		value: CoreMessagingKind,
-		billingOwner: boolean
-	): boolean {
-		return this.getCoreFailureKinds(billingOwner).includes(value);
+	private isCoreFailureKind(value: CoreMessagingKind): boolean {
+		return this.getCoreFailureKinds().includes(value);
 	}
 
-	private getCoreFailureKinds(billingOwner: boolean): CoreMessagingKind[] {
-		return CORE_OWNED_MESSAGING_KINDS.filter(
-			kind => !billingOwner || kind !== 'auto-renewal'
-		) as CoreMessagingKind[];
+	private getCoreFailureKinds(): CoreMessagingKind[] {
+		return [...CORE_OWNED_MESSAGING_KINDS];
+	}
+
+	private getArchivedFailureKinds(): CoreMessagingKind[] {
+		return [...CORE_ARCHIVED_FAILURE_HISTORY_KINDS];
 	}
 
 	private async isBillingOwner(): Promise<boolean> {
@@ -1226,16 +1262,28 @@ export class MessagingAdminService {
 		}
 	}
 
-	private async isCoreOwnedFailure(
-		id: string,
-		billingOwner: boolean
-	): Promise<boolean> {
+	private async isCoreOwnedFailure(id: string): Promise<boolean> {
 		const failure = await this.prisma.integrationDeliveryFailure.findFirst(
 			{
 				where: {
 					id,
 					integration: {
-						in: this.getCoreFailureKinds(billingOwner)
+						in: this.getCoreFailureKinds()
+					}
+				},
+				select: { id: true }
+			}
+		);
+		return Boolean(failure);
+	}
+
+	private async isArchivedCoreFailure(id: string): Promise<boolean> {
+		const failure = await this.prisma.integrationDeliveryFailure.findFirst(
+			{
+				where: {
+					id,
+					integration: {
+						in: this.getArchivedFailureKinds()
 					}
 				},
 				select: { id: true }

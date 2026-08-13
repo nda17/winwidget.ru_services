@@ -93,8 +93,6 @@ const CORE_API_RUNTIME_FUNCTIONS = [
 	'"public"."reporting_emit_user_projection"(text, boolean)',
 	'"public"."reporting_user_projection_trigger"()',
 	'"public"."reporting_auth_identity_projection_trigger"()',
-	'"public"."reporting_payment_projection_trigger"()',
-	'"public"."reporting_subscription_projection_trigger"()',
 	'"public"."reporting_settings_projection_trigger"()'
 ] as const;
 
@@ -119,6 +117,28 @@ const CORE_LEGACY_WIDGETS_TABLES = [
 	'widget_runtime_presence',
 	'widget_runtime_daily_metrics',
 	'widget_runtime_daily_step_metrics'
+] as const;
+
+const CORE_LEGACY_BILLING_CLEANUP_MIGRATION =
+	'20260813000000_remove_legacy_billing_core_source';
+const CORE_LEGACY_BILLING_TABLES = [
+	'payments',
+	'payment_receipts',
+	'subscriptions',
+	'subscription_history',
+	'subscription_expiry_reminders',
+	'auto_renewals',
+	'auto_renewal_consent_events',
+	'tariff_prices',
+	'affiliate_referrals'
+] as const;
+const CORE_LEGACY_BILLING_SITE_SETTINGS_COLUMNS = [
+	'payment_enabled',
+	'auto_renewal_signup_enabled',
+	'auto_renewal_charges_enabled',
+	'auto_renewal_charges_enabled_at',
+	'affiliate_program_enabled',
+	'affiliate_cashback_percent'
 ] as const;
 
 export interface DatabaseRestoreTocSummary {
@@ -312,9 +332,12 @@ export function buildDatabaseOwnershipAndAclRepairSql(
 	const runtimeAclSql = buildRuntimeAclRepairSql(target);
 	const coreLegacyWidgetsCleanupInvariantSql =
 		buildCoreLegacyWidgetsCleanupInvariantSql(target);
+	const coreLegacyBillingCleanupInvariantSql =
+		buildCoreLegacyBillingCleanupInvariantSql(target);
 
 	return `
 ${coreLegacyWidgetsCleanupInvariantSql}
+${coreLegacyBillingCleanupInvariantSql}
 ALTER SCHEMA ${schema} OWNER TO ${migration};
 DO $database_restore_owners$
 DECLARE
@@ -399,9 +422,12 @@ export function buildDatabasePreReopenVerificationSql(
 	const runtimeAclVerificationSql = buildRuntimeAclVerificationSql(target);
 	const coreLegacyWidgetsCleanupInvariantSql =
 		buildCoreLegacyWidgetsCleanupInvariantSql(target);
+	const coreLegacyBillingCleanupInvariantSql =
+		buildCoreLegacyBillingCleanupInvariantSql(target);
 
 	return `
 ${coreLegacyWidgetsCleanupInvariantSql}
+${coreLegacyBillingCleanupInvariantSql}
 DO $database_restore_verify$
 DECLARE
     role_name TEXT;
@@ -867,6 +893,65 @@ BEGIN
     END LOOP;
 END
 $database_restore_core_widgets_cleanup$;
+`;
+}
+
+function buildCoreLegacyBillingCleanupInvariantSql(
+	target: DatabaseRestoreTargetConfig
+): string {
+	if (target.target !== 'core') return '';
+
+	const schema = quoteIdentifier(target.schema);
+	const schemaLiteral = quoteLiteral(target.schema);
+	const cleanupMigration = quoteLiteral(
+		CORE_LEGACY_BILLING_CLEANUP_MIGRATION
+	);
+	const legacyTables = sqlTextArray(CORE_LEGACY_BILLING_TABLES);
+	const legacySiteSettingsColumns = sqlTextArray(
+		CORE_LEGACY_BILLING_SITE_SETTINGS_COLUMNS
+	);
+
+	return `
+DO $database_restore_core_billing_cleanup$
+DECLARE
+    legacy_table_name TEXT;
+    legacy_column_name TEXT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM ${schema}."_prisma_migrations"
+        WHERE migration_name = ${cleanupMigration}
+          AND finished_at IS NOT NULL
+          AND rolled_back_at IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'Routine Core restore requires the applied legacy Billing cleanup migration';
+    END IF;
+
+    FOREACH legacy_table_name IN ARRAY ${legacyTables} LOOP
+        IF to_regclass(format('%I.%I', ${schemaLiteral}, legacy_table_name))
+               IS NOT NULL THEN
+            RAISE EXCEPTION
+                'Core restore contains legacy Billing relation % after cleanup migration',
+                legacy_table_name;
+        END IF;
+    END LOOP;
+
+    FOREACH legacy_column_name IN ARRAY ${legacySiteSettingsColumns} LOOP
+        IF EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = ${schemaLiteral}
+              AND table_name = 'site_settings'
+              AND column_name = legacy_column_name
+        ) THEN
+            RAISE EXCEPTION
+                'Core restore contains legacy Billing site_settings column % after cleanup migration',
+                legacy_column_name;
+        END IF;
+    END LOOP;
+END
+$database_restore_core_billing_cleanup$;
 `;
 }
 

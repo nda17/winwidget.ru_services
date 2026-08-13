@@ -1,5 +1,4 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
-import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import {
 	BillingSettingsCompositionService,
 	type BillingSettingsPatch,
@@ -9,7 +8,7 @@ import { BillingSettingsState } from '@/messaging/billing-events';
 import {
 	AUTO_RENEWAL_CONSENT_TEXT,
 	AUTO_RENEWAL_CONSENT_VERSION
-} from '@/payment/payment.constants';
+} from '@/billing-boundary/billing-boundary.constants';
 import { PrismaService } from '@/prisma.service';
 import { UpdateSiteSettingsDto } from '@/site-settings/dto/update-site-settings.dto';
 import {
@@ -18,7 +17,6 @@ import {
 	ServiceUnavailableException
 } from '@nestjs/common';
 import {
-	BillingCoreOwnership,
 	type BillingSettingsReadProjection,
 	Prisma,
 	type SiteSettings
@@ -32,20 +30,11 @@ export class SiteSettingsService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly adminEventLog: AdminEventLogService,
-		private readonly billingState: BillingCoreStateService,
 		private readonly composition: BillingSettingsCompositionService
 	) {}
 
 	async get() {
-		const state = await this.billingState.get();
-		const coreSettings = await this.getCoreSettings(
-			state.ownership === BillingCoreOwnership.CORE &&
-				state.sourceProducersEnabled
-		);
-		if (state.ownership !== BillingCoreOwnership.BILLING) {
-			return this.withAutoRenewalTerms(coreSettings);
-		}
-
+		const coreSettings = await this.getCoreSettings();
 		await this.composition.repairPending().catch(() => {
 			this.logger.warn(
 				'Pending Billing settings composition could not be repaired during read'
@@ -70,13 +59,6 @@ export class SiteSettingsService {
 		dto: UpdateSiteSettingsDto,
 		audit?: { adminId: string; request: Request }
 	) {
-		const state = await this.billingState.get();
-		if (
-			state.ownership === BillingCoreOwnership.CORE &&
-			state.sourceProducersEnabled
-		) {
-			return this.updateLegacy(dto, audit);
-		}
 		if (!audit) {
 			throw new ServiceUnavailableException(
 				'Billing settings update requires an authenticated actor'
@@ -85,18 +67,6 @@ export class SiteSettingsService {
 
 		const corePatch = this.getCorePatch(dto);
 		const billingPatch = this.getBillingPatch(dto);
-		if (
-			state.ownership === BillingCoreOwnership.CORE &&
-			!state.sourceProducersEnabled &&
-			Object.keys(billingPatch).length > 0
-		) {
-			throw new ServiceUnavailableException({
-				statusCode: 503,
-				message: 'Billing ownership migration is in progress',
-				error: 'Service Unavailable',
-				code: 'billing_migration_in_progress'
-			});
-		}
 		if (Object.keys(billingPatch).length > 0) {
 			const result = await this.composition.execute({
 				corePatch,
@@ -108,68 +78,16 @@ export class SiteSettingsService {
 		}
 
 		const coreSettings = await this.updateCoreOnly(corePatch, dto, audit);
-		if (state.ownership === BillingCoreOwnership.BILLING) {
-			const billingSettings =
-				await this.prisma.billingSettingsReadProjection.findUnique({
-					where: { id: 'singleton' }
-				});
-			if (!billingSettings) {
-				throw new ServiceUnavailableException(
-					'Billing settings projection is unavailable'
-				);
-			}
-			return this.compose(coreSettings, billingSettings);
-		}
-		return this.withAutoRenewalTerms(coreSettings);
-	}
-
-	private updateLegacy(
-		dto: UpdateSiteSettingsDto,
-		audit?: { adminId: string; request: Request }
-	) {
-		return this.prisma.$transaction(async transaction => {
-			await transaction.siteSettings.upsert({
-				where: { id: 'singleton' },
-				update: {},
-				create: { id: 'singleton' }
-			});
-			await transaction.$queryRaw(
-				Prisma.sql`
-					SELECT "id"
-					FROM "site_settings"
-					WHERE "id" = 'singleton'
-					FOR UPDATE
-				`
-			);
-			const current = await transaction.siteSettings.findUniqueOrThrow({
+		const billingSettings =
+			await this.prisma.billingSettingsReadProjection.findUnique({
 				where: { id: 'singleton' }
 			});
-			const settings = await transaction.siteSettings.update({
-				where: { id: 'singleton' },
-				data: {
-					...this.getUpdateData(dto),
-					...((dto.autoRenewalChargesEnabled === true &&
-						!current.autoRenewalChargesEnabled) ||
-					(dto.paymentEnabled === true && !current.paymentEnabled)
-						? { autoRenewalChargesEnabledAt: new Date() }
-						: {})
-				}
-			});
-			if (audit) {
-				await this.adminEventLog.recordInTransaction(transaction, {
-					adminId: audit.adminId,
-					section: 'SITE_SETTINGS',
-					action: 'SITE_SETTINGS_UPDATE',
-					description: 'Обновлены настройки сайта',
-					entityType: 'site_settings',
-					entityId: 'singleton',
-					entityLabel: 'Настройки сайта',
-					metadata: this.getUpdateMetadata(dto, settings),
-					request: audit.request
-				});
-			}
-			return this.withAutoRenewalTerms(settings);
-		});
+		if (!billingSettings) {
+			throw new ServiceUnavailableException(
+				'Billing settings projection is unavailable'
+			);
+		}
+		return this.compose(coreSettings, billingSettings);
 	}
 
 	private updateCoreOnly(
@@ -209,21 +127,14 @@ export class SiteSettingsService {
 		});
 	}
 
-	private async getCoreSettings(
-		allowCreate: boolean
-	): Promise<SiteSettings> {
+	private async getCoreSettings(): Promise<SiteSettings> {
 		const settings = await this.prisma.siteSettings.findUnique({
 			where: { id: 'singleton' }
 		});
 		if (settings) return settings;
-		if (!allowCreate) {
-			throw new ServiceUnavailableException(
-				'Core site settings are unavailable'
-			);
-		}
-		return this.prisma.siteSettings.create({
-			data: { id: 'singleton' }
-		});
+		throw new ServiceUnavailableException(
+			'Core site settings are unavailable'
+		);
 	}
 
 	private getCorePatch(dto: UpdateSiteSettingsDto): CoreSettingsPatch {
@@ -274,53 +185,6 @@ export class SiteSettingsService {
 		};
 	}
 
-	private getUpdateData(
-		dto: UpdateSiteSettingsDto
-	): Prisma.SiteSettingsUpdateInput {
-		return {
-			...(dto.bannerEnabled !== undefined
-				? { bannerEnabled: dto.bannerEnabled }
-				: {}),
-			...(dto.bannerText !== undefined
-				? { bannerText: dto.bannerText }
-				: {}),
-			...(dto.snowflakeEnabled !== undefined
-				? { snowflakeEnabled: dto.snowflakeEnabled }
-				: {}),
-			...(dto.paymentEnabled !== undefined
-				? { paymentEnabled: dto.paymentEnabled }
-				: {}),
-			...(dto.autoRenewalSignupEnabled !== undefined
-				? {
-						autoRenewalSignupEnabled: dto.autoRenewalSignupEnabled
-					}
-				: {}),
-			...(dto.autoRenewalChargesEnabled !== undefined
-				? {
-						autoRenewalChargesEnabled: dto.autoRenewalChargesEnabled
-					}
-				: {}),
-			...(dto.recaptchaEnabled !== undefined
-				? { recaptchaEnabled: dto.recaptchaEnabled }
-				: {}),
-			...(dto.googleAuthEnabled !== undefined
-				? { googleAuthEnabled: dto.googleAuthEnabled }
-				: {}),
-			...(dto.yandexAuthEnabled !== undefined
-				? { yandexAuthEnabled: dto.yandexAuthEnabled }
-				: {}),
-			...(dto.githubAuthEnabled !== undefined
-				? { githubAuthEnabled: dto.githubAuthEnabled }
-				: {}),
-			...(dto.vkAuthEnabled !== undefined
-				? { vkAuthEnabled: dto.vkAuthEnabled }
-				: {}),
-			...(dto.telegramAuthEnabled !== undefined
-				? { telegramAuthEnabled: dto.telegramAuthEnabled }
-				: {})
-		};
-	}
-
 	private getUpdateMetadata(
 		dto: UpdateSiteSettingsDto,
 		settings: SiteSettings
@@ -328,9 +192,6 @@ export class SiteSettingsService {
 		const booleanFields = [
 			'bannerEnabled',
 			'snowflakeEnabled',
-			'paymentEnabled',
-			'autoRenewalSignupEnabled',
-			'autoRenewalChargesEnabled',
 			'recaptchaEnabled',
 			'googleAuthEnabled',
 			'yandexAuthEnabled',

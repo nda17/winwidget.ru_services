@@ -2,19 +2,14 @@ import { AuthModule } from '@/auth/auth.module';
 import { BillingInternalModule } from '@/billing-boundary/billing-internal.module';
 import { AdminAlertsModule } from '@/admin-alerts/admin-alerts.module';
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
-import { AffiliateModule } from '@/affiliate/affiliate.module';
 import { getGoogleRecaptchaConfig } from '@/config/google-recaptcha.config';
 import { FileModule } from '@/file/file.module';
 import { LegalPagesModule } from '@/legal-pages/legal-pages.module';
 import { NotesModule } from '@/notes/notes.module';
-import { AutoRenewalSchedulerModule } from '@/payment/auto-renewal-scheduler.module';
-import { PaymentModule } from '@/payment/payment.module';
 import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
 import { SiteSettingsModule } from '@/site-settings/site-settings.module';
 import { SiteSettingsService } from '@/site-settings/site-settings.service';
-import { SubscriptionModule } from '@/subscription/subscription.module';
-import { TariffPricesModule } from '@/tariff-prices/tariff-prices.module';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { UserModule } from '@/user/user.module';
 import { CampaignsInternalModule } from '@/campaigns-internal/campaigns-internal.module';
@@ -43,11 +38,7 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		BillingInternalModule,
 		UserModule,
 		FileModule,
-		PaymentModule,
-		AutoRenewalSchedulerModule,
-		SubscriptionModule,
 		SiteSettingsModule,
-		TariffPricesModule,
 		LegalPagesModule,
 		HomePageContentModule,
 		NotesModule,
@@ -59,7 +50,6 @@ import { GoogleRecaptchaModule } from '@nestlab/google-recaptcha';
 		TelegramBotModule,
 		DevToolsModule,
 		AdminAlertsModule,
-		AffiliateModule,
 		AdminEventLogModule
 	]
 })

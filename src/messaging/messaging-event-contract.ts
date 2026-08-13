@@ -39,7 +39,7 @@ import {
 import {
 	AUTO_RENEWAL_CONSENT_TEXT,
 	AUTO_RENEWAL_CONSENT_VERSION
-} from '@/payment/payment.constants';
+} from '@/billing-boundary/billing-boundary.constants';
 import {
 	BILLING_ADMIN_AUDIT_ACTIONS,
 	BILLING_ADMIN_AUDIT_SECTIONS,

@@ -32,8 +32,6 @@ const producerFunctionSignatures = [
 	'public.reporting_emit_user_projection(text,boolean)',
 	'public.reporting_user_projection_trigger()',
 	'public.reporting_auth_identity_projection_trigger()',
-	'public.reporting_payment_projection_trigger()',
-	'public.reporting_subscription_projection_trigger()',
 	'public.reporting_settings_projection_trigger()'
 ];
 const legacyWidgetsProducerTables = [
@@ -317,9 +315,21 @@ const loadLifecycleSql = async () => {
 	);
 	assert.match(
 		migrationGuardSql,
-		/\(SELECT count\(\*\) FROM expected\)\s*=\s*5[\s\S]*\(SELECT count\(\*\) FROM actual\)\s*=\s*5/i,
-		'Core producer guard must require the exact five steady-state triggers'
+		/\(SELECT count\(\*\) FROM expected\)\s*=\s*3[\s\S]*\(SELECT count\(\*\) FROM actual\)\s*=\s*3/i,
+		'Core producer guard must require the exact three steady-state triggers'
 	);
+	for (const removedBillingSource of [
+		'payments',
+		'subscriptions',
+		'reporting_payment_projection_trigger',
+		'reporting_subscription_projection_trigger'
+	]) {
+		assert.doesNotMatch(
+			`${migrationGuardSql}\n${aclGuardSql}\n${enableSql}\n${disableSql}\n${resetSql}`,
+			new RegExp(removedBillingSource, 'i'),
+			`Reporting lifecycle must not require removed Billing source ${removedBillingSource}`
+		);
+	}
 	assert.doesNotMatch(
 		migrationGuardSql,
 		/reporting_(?:widget|lead)_projection_trigger/i,

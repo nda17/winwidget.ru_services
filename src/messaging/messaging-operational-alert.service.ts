@@ -94,9 +94,7 @@ export class MessagingOperationalAlertService
 			const billingOwner = this.billingState
 				? await this.billingState.isBillingOwner()
 				: false;
-			const coreFailureKinds = CORE_OWNED_MESSAGING_KINDS.filter(
-				kind => !billingOwner || kind !== 'auto-renewal'
-			);
+			const coreFailureKinds = [...CORE_OWNED_MESSAGING_KINDS];
 			const now = new Date();
 			const staleBefore = new Date(now.getTime() - 30_000);
 			const activityStaleBefore = new Date(
@@ -410,9 +408,7 @@ export class MessagingOperationalAlertService
 					serviceStates['outbox-publisher'].publishAt <
 						activityStaleBefore);
 			const integrationQueueMessages = getQueueMessages(
-				MONOLITH_INTEGRATION_KINDS.filter(
-					kind => !billingOwner || kind !== 'auto-renewal'
-				)
+				MONOLITH_INTEGRATION_KINDS
 			);
 			const notificationDeliveryQueueMessages = getQueueMessages(
 				NOTIFICATION_DELIVERY_KINDS

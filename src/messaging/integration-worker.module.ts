@@ -3,7 +3,6 @@ import { BillingBoundaryModule } from '@/billing-boundary/billing-boundary.modul
 import { IntegrationDeliveryService } from '@/messaging/integration-delivery.service';
 import { IntegrationWorkerService } from '@/messaging/integration-worker.service';
 import { MessagingHeartbeatService } from '@/messaging/messaging-heartbeat.service';
-import { PaymentWorkerModule } from '@/payment/payment-worker.module';
 import { RabbitMqModule } from '@/messaging/rabbitmq.module';
 import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
@@ -20,7 +19,6 @@ import { ConfigModule } from '@nestjs/config';
 		AdminEventLogModule,
 		BillingBoundaryModule,
 		RabbitMqModule,
-		PaymentWorkerModule,
 		ScheduledJobsModule
 	],
 	providers: [

@@ -6,9 +6,6 @@ import {
 	TSocialProfile
 } from '@/auth/social-media/social-media-auth.types';
 import { BillingRegistrationBoundaryService } from '@/billing-boundary/billing-registration-boundary.service';
-import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
-import { isBillingLegacyWriteFenceError } from '@/billing-boundary/billing-legacy-write-fence.interceptor';
-import { disableAutoRenewalForLifecycleInTransaction } from '@/payment/auto-renewal-state';
 import { PrismaService } from '@/prisma.service';
 import { UpdateProfileDto } from '@/user/dto/update-profile.dto';
 import { UpdateUserDto } from '@/user/dto/update-user.dto';
@@ -19,13 +16,10 @@ import {
 	ConflictException,
 	ForbiddenException,
 	Injectable,
-	NotFoundException,
-	ServiceUnavailableException
+	NotFoundException
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
-	AutoRenewalConsentEventType,
-	AutoRenewalStatus,
 	PaymentStatus,
 	Prisma,
 	Role,
@@ -74,8 +68,7 @@ export class UserService {
 	constructor(
 		private prisma: PrismaService,
 		private readonly widgetsOverview: WidgetsAdminOverviewClient,
-		private readonly billingRegistration: BillingRegistrationBoundaryService,
-		private readonly billingState: BillingCoreStateService
+		private readonly billingRegistration: BillingRegistrationBoundaryService
 	) {}
 
 	async getUserList(
@@ -210,16 +203,8 @@ export class UserService {
 	}
 
 	private async getAdminBillingOverview(userId: string) {
-		const billingOwner = await this.billingState.isBillingOwner();
-		if (billingOwner) {
-			const [
-				subscription,
-				pending,
-				succeeded,
-				cancelled,
-				expired,
-				latest
-			] = await this.prisma.$transaction([
+		const [subscription, pending, succeeded, cancelled, expired, latest] =
+			await this.prisma.$transaction([
 				this.prisma.billingSubscriptionReadProjection.findUnique({
 					where: { userId },
 					select: {
@@ -238,21 +223,6 @@ export class UserService {
 				}),
 				...this.getProjectionPaymentOverviewQueries(userId)
 			]);
-			return this.toAdminBillingOverview(
-				subscription,
-				pending,
-				succeeded,
-				cancelled,
-				expired,
-				latest
-			);
-		}
-
-		const [subscription, pending, succeeded, cancelled, expired, latest] =
-			await this.prisma.$transaction([
-				this.prisma.subscription.findUnique({ where: { userId } }),
-				...this.getLegacyPaymentOverviewQueries(userId)
-			]);
 		return this.toAdminBillingOverview(
 			subscription,
 			pending,
@@ -261,29 +231,6 @@ export class UserService {
 			expired,
 			latest
 		);
-	}
-
-	private getLegacyPaymentOverviewQueries(userId: string) {
-		return [
-			this.prisma.payment.count({
-				where: { userId, status: PaymentStatus.PENDING }
-			}),
-			this.prisma.payment.count({
-				where: { userId, status: PaymentStatus.SUCCEEDED }
-			}),
-			this.prisma.payment.count({
-				where: { userId, status: PaymentStatus.CANCELLED }
-			}),
-			this.prisma.payment.count({
-				where: { userId, status: PaymentStatus.EXPIRED }
-			}),
-			this.prisma.payment.findMany({
-				where: { userId },
-				orderBy: { createdAt: 'desc' as const },
-				take: 5,
-				select: this.paymentOverviewSelect()
-			})
-		] as const;
 	}
 
 	private getProjectionPaymentOverviewQueries(userId: string) {
@@ -944,19 +891,6 @@ export class UserService {
 					});
 
 					await this.revokeSessionsForLifecycle(tx, id, deletedAt);
-					if (!billingRevocation.remoteApplied) {
-						await disableAutoRenewalForLifecycleInTransaction(tx, {
-							userId: id,
-							status: AutoRenewalStatus.REVOKED,
-							eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
-							source: 'USER_SOFT_DELETE',
-							reason: 'Автопродление отозвано при удалении пользователя',
-							actorUserId: adminId,
-							actorRole: adminRights.includes(Role.DEV)
-								? Role.DEV
-								: Role.ADMIN
-						});
-					}
 
 					return updated;
 				},
@@ -969,9 +903,6 @@ export class UserService {
 				await this.billingRegistration.recordLifecycleRepair(
 					billingRevocation
 				);
-			}
-			if (isBillingLegacyWriteFenceError(error)) {
-				throw this.billingMigrationInProgress();
 			}
 			throw error;
 		}
@@ -1123,20 +1054,6 @@ export class UserService {
 
 					if (shouldDeactivate) {
 						await this.revokeSessionsForLifecycle(tx, id, statusChangedAt);
-						if (!billingRevocation?.remoteApplied) {
-							await disableAutoRenewalForLifecycleInTransaction(tx, {
-								userId: id,
-								status: AutoRenewalStatus.REVOKED,
-								eventType: AutoRenewalConsentEventType.ADMIN_REVOKED,
-								source: 'USER_DEACTIVATION',
-								reason:
-									'Автопродление отозвано при деактивации пользователя',
-								actorUserId: adminId,
-								actorRole: adminRights.includes(Role.DEV)
-									? Role.DEV
-									: Role.ADMIN
-							});
-						}
 					}
 
 					return updated;
@@ -1156,10 +1073,6 @@ export class UserService {
 					'Данные DEV-учёток изменились параллельно. Обновите страницу и повторите действие'
 				);
 			}
-			if (isBillingLegacyWriteFenceError(error)) {
-				throw this.billingMigrationInProgress();
-			}
-
 			throw error;
 		}
 
@@ -1250,15 +1163,6 @@ export class UserService {
 		);
 	}
 
-	private billingMigrationInProgress(): ServiceUnavailableException {
-		return new ServiceUnavailableException({
-			statusCode: 503,
-			message: 'Billing migration is in progress. Please retry shortly.',
-			error: 'Service Unavailable',
-			code: 'billing_legacy_writer_fenced'
-		});
-	}
-
 	private getAdminUserListWhere(
 		normalizedSearchTerm: string | undefined,
 		filters: AdminUserListFilters,
@@ -1325,19 +1229,11 @@ export class UserService {
 		}
 
 		if (subscriptionFilter === 'HAS') {
-			and.push(
-				subscriptionProjectionUserIds === null
-					? { subscription: { isNot: null } }
-					: { id: { in: subscriptionProjectionUserIds } }
-			);
+			and.push({ id: { in: subscriptionProjectionUserIds ?? [] } });
 		}
 
 		if (subscriptionFilter === 'NONE') {
-			and.push(
-				subscriptionProjectionUserIds === null
-					? { subscription: { is: null } }
-					: { id: { notIn: subscriptionProjectionUserIds } }
-			);
+			and.push({ id: { notIn: subscriptionProjectionUserIds ?? [] } });
 		}
 
 		return and.length ? { AND: and } : undefined;
@@ -1347,7 +1243,6 @@ export class UserService {
 		filter: string | undefined
 	): Promise<string[] | null> {
 		if (!this.normalizeSubscriptionPresence(filter)) return null;
-		if (!(await this.billingState.isBillingOwner())) return null;
 		const rows =
 			await this.prisma.billingSubscriptionReadProjection.findMany({
 				select: { userId: true }

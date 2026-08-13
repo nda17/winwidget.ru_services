@@ -75,8 +75,6 @@ WITH expected(
   VALUES
     ('reporting_user_projection', 'User', 'public', 'reporting_user_projection_trigger', 0, ''),
     ('reporting_auth_identity_projection', 'auth_identities', 'public', 'reporting_auth_identity_projection_trigger', 0, ''),
-    ('reporting_payment_projection', 'payments', 'public', 'reporting_payment_projection_trigger', 0, ''),
-    ('reporting_subscription_projection', 'subscriptions', 'public', 'reporting_subscription_projection_trigger', 0, ''),
     ('reporting_settings_projection', 'telegram_bot_settings', 'public', 'reporting_settings_projection_trigger', 0, '')
 ), actual AS (
   SELECT
@@ -107,8 +105,8 @@ SELECT CASE WHEN
   AND EXISTS (
     SELECT 1 FROM reporting_producer_state WHERE id = 'singleton'
   )
-  AND (SELECT count(*) FROM expected) = 5
-  AND (SELECT count(*) FROM actual) = 5
+  AND (SELECT count(*) FROM expected) = 3
+  AND (SELECT count(*) FROM actual) = 3
   AND NOT EXISTS (
     SELECT 1
     FROM expected
@@ -242,8 +240,6 @@ WITH expected_functions(signature) AS (
     ('public.reporting_emit_user_projection(text,boolean)'),
     ('public.reporting_user_projection_trigger()'),
     ('public.reporting_auth_identity_projection_trigger()'),
-    ('public.reporting_payment_projection_trigger()'),
-    ('public.reporting_subscription_projection_trigger()'),
     ('public.reporting_settings_projection_trigger()')
 ), resolved_functions AS (
   SELECT signature, to_regprocedure(signature) AS function_oid
@@ -253,7 +249,7 @@ SELECT CASE WHEN
   (SELECT count(*) FROM pg_roles WHERE rolname IN (
     'winwidget_api_runtime', 'winwidget_maintenance', 'winwidget_backup'
   )) = 3
-  AND (SELECT count(*) FROM resolved_functions WHERE function_oid IS NOT NULL) = 9
+  AND (SELECT count(*) FROM resolved_functions WHERE function_oid IS NOT NULL) = 7
   AND NOT EXISTS (
     SELECT 1
     FROM resolved_functions resolved
@@ -319,8 +315,6 @@ SELECT CASE WHEN
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_emit_user_projection(text,boolean)', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_user_projection_trigger()', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_auth_identity_projection_trigger()', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.reporting_payment_projection_trigger()', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.reporting_subscription_projection_trigger()', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_settings_projection_trigger()', 'EXECUTE')
   AND has_table_privilege('winwidget_maintenance', 'public.reporting_producer_state', 'SELECT')
   AND has_table_privilege('winwidget_backup', 'public.reporting_producer_state', 'SELECT')
@@ -991,8 +985,6 @@ SELECT pg_advisory_xact_lock(hashtext('winwidget.reporting.producer.lifecycle.v1
 LOCK TABLE
   "User",
   "auth_identities",
-  "payments",
-  "subscriptions",
   "telegram_bot_settings"
 IN SHARE MODE;
 -- Source writers lock this row FOR SHARE from their trigger. Lock source
@@ -1111,8 +1103,6 @@ SELECT pg_advisory_xact_lock(hashtext('"'"'winwidget.reporting.producer.lifecycl
 LOCK TABLE
   "User",
   "auth_identities",
-  "payments",
-  "subscriptions",
   "telegram_bot_settings"
 IN SHARE MODE;
 SELECT "enabled" FROM "reporting_producer_state" WHERE "id" = '"'"'singleton'"'"' FOR UPDATE;
@@ -1284,8 +1274,8 @@ SET LOCAL lock_timeout = '30s';
 SET LOCAL statement_timeout = '60s';
 SELECT pg_advisory_xact_lock(hashtext('winwidget.reporting.producer.lifecycle.v1'));
 LOCK TABLE
-  "User", "auth_identities", "payments", "subscriptions",
-  "telegram_bot_settings"
+	  "User", "auth_identities",
+	  "telegram_bot_settings"
 IN SHARE MODE;
 SELECT "enabled" FROM "reporting_producer_state" WHERE "id" = 'singleton' FOR UPDATE;
 DO $reset$

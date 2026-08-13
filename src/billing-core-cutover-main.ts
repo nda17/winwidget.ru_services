@@ -10,7 +10,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import {
 	AUTO_RENEWAL_CONSENT_TEXT,
 	AUTO_RENEWAL_CONSENT_VERSION
-} from './payment/payment.constants';
+} from './billing-boundary/billing-boundary.constants';
 
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const UUID_PATTERN =
@@ -80,6 +80,19 @@ interface ProjectionLagRow {
 	projectedSettings: bigint;
 	settingsIdLag: bigint;
 	settingsVersionLag: bigint;
+}
+
+type LegacySnapshotRow = Record<string, unknown> & { id: string };
+
+interface LegacyBillingSettingsSnapshot {
+	id: string;
+	paymentEnabled: boolean;
+	autoRenewalSignupEnabled: boolean;
+	autoRenewalChargesEnabled: boolean;
+	autoRenewalChargesEnabledAt: Date | null;
+	affiliateProgramEnabled: boolean;
+	affiliateCashbackPercent: number;
+	updatedAt: Date;
 }
 
 class CutoverCliError extends Error {}
@@ -638,6 +651,91 @@ async function getSequenceHighWater(
 	return rows[0].value;
 }
 
+function normalizeLegacySnapshotRows(
+	rows: Array<Record<string, unknown>>
+): LegacySnapshotRow[] {
+	return rows.map(row => {
+		const normalized = Object.fromEntries(
+			Object.entries(row).map(([key, value]) => [
+				key.replace(/_([a-z])/g, (_, letter: string) =>
+					letter.toUpperCase()
+				),
+				value
+			])
+		);
+		if (typeof normalized.id !== 'string' || !normalized.id) {
+			throw new CutoverCliError(
+				'Billing legacy snapshot row ID is invalid'
+			);
+		}
+		return normalized as LegacySnapshotRow;
+	});
+}
+
+async function legacySnapshotRows(
+	transaction: Prisma.TransactionClient,
+	table:
+		| 'payments'
+		| 'payment_receipts'
+		| 'subscriptions'
+		| 'subscription_history'
+		| 'subscription_expiry_reminders'
+		| 'auto_renewals'
+		| 'auto_renewal_consent_events'
+		| 'tariff_prices'
+		| 'affiliate_referrals'
+): Promise<LegacySnapshotRow[]> {
+	let rows: Array<Record<string, unknown>>;
+	switch (table) {
+		case 'payments':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "payments" ORDER BY "id"
+			`);
+			break;
+		case 'payment_receipts':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "payment_receipts" ORDER BY "id"
+			`);
+			break;
+		case 'subscriptions':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "subscriptions" ORDER BY "id"
+			`);
+			break;
+		case 'subscription_history':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "subscription_history" ORDER BY "id"
+			`);
+			break;
+		case 'subscription_expiry_reminders':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "subscription_expiry_reminders" ORDER BY "id"
+			`);
+			break;
+		case 'auto_renewals':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "auto_renewals" ORDER BY "id"
+			`);
+			break;
+		case 'auto_renewal_consent_events':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "auto_renewal_consent_events" ORDER BY "id"
+			`);
+			break;
+		case 'tariff_prices':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "tariff_prices" ORDER BY "id"
+			`);
+			break;
+		case 'affiliate_referrals':
+			rows = await transaction.$queryRaw(Prisma.sql`
+				SELECT * FROM "affiliate_referrals" ORDER BY "id"
+			`);
+			break;
+	}
+	return normalizeLegacySnapshotRows(rows);
+}
+
 async function buildFrozenSnapshot(
 	transaction: Prisma.TransactionClient,
 	options: RequiredIdentity,
@@ -699,45 +797,64 @@ async function buildFrozenSnapshot(
 			updatedAt: true
 		}
 	});
+	const [siteSettingsRow] = await transaction.$queryRaw<
+		LegacyBillingSettingsSnapshot[]
+	>(Prisma.sql`
+			SELECT "id",
+			       "payment_enabled" AS "paymentEnabled",
+			       "auto_renewal_signup_enabled" AS "autoRenewalSignupEnabled",
+			       "auto_renewal_charges_enabled" AS "autoRenewalChargesEnabled",
+			       "auto_renewal_charges_enabled_at" AS "autoRenewalChargesEnabledAt",
+			       "affiliate_program_enabled" AS "affiliateProgramEnabled",
+			       "affiliate_cashback_percent" AS "affiliateCashbackPercent",
+			       "updated_at" AS "updatedAt"
+			FROM "site_settings"
+			WHERE "id" = 'singleton'
+		`);
 	const siteSettings = requireBillingSettingsSnapshot(
-		await transaction.siteSettings.findUnique({
-			where: { id: 'singleton' }
-		})
+		siteSettingsRow ?? null
 	);
 	const offer = await transaction.legalPage.findUnique({
 		where: { slug: 'oferta' }
 	});
 	const offerSnapshot = serializeBillingOfferSnapshot(offer);
-	const payments = await transaction.payment.findMany({
-		orderBy: { id: 'asc' }
-	});
-	const paymentReceipts = await transaction.paymentReceipt.findMany({
-		orderBy: { id: 'asc' }
-	});
-	const subscriptions = await transaction.subscription.findMany({
-		orderBy: { id: 'asc' }
-	});
-	const subscriptionHistory =
-		await transaction.subscriptionHistory.findMany({
-			orderBy: { id: 'asc' }
-		});
-	const subscriptionExpiryReminders =
-		await transaction.subscriptionExpiryReminder.findMany({
-			orderBy: { id: 'asc' }
-		});
-	const autoRenewals = await transaction.autoRenewal.findMany({
-		orderBy: { id: 'asc' }
-	});
-	const autoRenewalConsentEvents =
-		await transaction.autoRenewalConsentEvent.findMany({
-			orderBy: { id: 'asc' }
-		});
-	const tariffPrices = await transaction.tariffPrice.findMany({
-		orderBy: { id: 'asc' }
-	});
-	const affiliateReferrals = await transaction.affiliateReferral.findMany({
-		orderBy: { id: 'asc' }
-	});
+	// These relations are deliberately absent from the post-cleanup Prisma
+	// schema. The historical freeze exporter remains source-compatible through
+	// exact raw reads while the relations exist, and fails closed at PostgreSQL
+	// once the destructive cleanup migration removes them.
+	const payments = await legacySnapshotRows(transaction, 'payments');
+	const paymentReceipts = await legacySnapshotRows(
+		transaction,
+		'payment_receipts'
+	);
+	const subscriptions = await legacySnapshotRows(
+		transaction,
+		'subscriptions'
+	);
+	const subscriptionHistory = await legacySnapshotRows(
+		transaction,
+		'subscription_history'
+	);
+	const subscriptionExpiryReminders = await legacySnapshotRows(
+		transaction,
+		'subscription_expiry_reminders'
+	);
+	const autoRenewals = await legacySnapshotRows(
+		transaction,
+		'auto_renewals'
+	);
+	const autoRenewalConsentEvents = await legacySnapshotRows(
+		transaction,
+		'auto_renewal_consent_events'
+	);
+	const tariffPrices = await legacySnapshotRows(
+		transaction,
+		'tariff_prices'
+	);
+	const affiliateReferrals = await legacySnapshotRows(
+		transaction,
+		'affiliate_referrals'
+	);
 	const integrationDeliveryFailures =
 		await transaction.integrationDeliveryFailure.findMany({
 			where: { integration: 'auto-renewal' },
@@ -1072,7 +1189,7 @@ function omitSnapshotIdentity(
 	return payload;
 }
 
-async function calculateProjectionLag(
+export async function calculateProjectionLag(
 	transaction: Prisma.TransactionClient
 ): Promise<{ total: bigint; row: ProjectionLagRow }> {
 	const rows = await transaction.$queryRaw<ProjectionLagRow[]>(Prisma.sql`
@@ -1139,8 +1256,8 @@ async function calculateProjectionLag(
 						WHEN
 							(SELECT COUNT(*) FROM "site_settings" WHERE "id" = 'singleton') = 1
 							AND (SELECT COUNT(*) FROM "billing_settings_read_projection" WHERE "id" = 'singleton') = 1
-						THEN 0
-						ELSE 1
+						THEN 0::BIGINT
+						ELSE 1::BIGINT
 					END
 			) AS "settingsIdLag",
 			(

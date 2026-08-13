@@ -1,5 +1,5 @@
 import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
-import { AUTO_RENEWAL_CONSENT_TEXT } from '@/payment/payment.constants';
+import { AUTO_RENEWAL_CONSENT_TEXT } from '@/billing-boundary/billing-boundary.constants';
 
 const MESSAGE_ID = '11111111-1111-4111-8111-111111111111';
 

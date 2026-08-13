@@ -5,7 +5,10 @@ import {
 	BillingMessagingInternalApiError
 } from '@/messaging/billing-messaging-client.service';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
-import { CORE_OWNED_MESSAGING_KINDS } from '@/messaging/messaging.constants';
+import {
+	CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
+	CORE_OWNED_MESSAGING_KINDS
+} from '@/messaging/messaging.constants';
 import {
 	NotificationDeliveryClientService,
 	NotificationDeliveryInternalApiError
@@ -973,6 +976,282 @@ describe('MessagingAdminService', () => {
 		expect(widgetsGetFailures).toHaveBeenCalledWith(1, 4, {});
 	});
 
+	it('adds resolved archived Core rows to unfiltered history only after Billing takes ownership', async () => {
+		const archivedFailure = {
+			...remoteFailure(
+				'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+				'notification-delivery-outcome',
+				'2026-08-10T12:00:00.000Z'
+			),
+			payload: {},
+			failedAt: new Date('2026-08-10T12:00:00.000Z'),
+			resolvedAt: new Date('2026-08-10T12:01:00.000Z'),
+			resolution: 'DELIVERED',
+			createdAt: new Date('2026-08-10T12:00:00.000Z'),
+			updatedAt: new Date('2026-08-10T12:01:00.000Z')
+		};
+		const coreFindMany = jest.fn().mockResolvedValue([archivedFailure]);
+		const coreCount = jest.fn().mockResolvedValue(1);
+		const transaction = jest.fn(async operations =>
+			Promise.all(operations)
+		);
+		const emptyPage = {
+			items: [],
+			total: 0,
+			page: 1,
+			limit: 20,
+			totalPages: 1
+		};
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: coreFindMany,
+					count: coreCount
+				},
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getFailures: jest.fn().mockResolvedValue(emptyPage)
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getFailures: jest.fn().mockResolvedValue(emptyPage)
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			{
+				getFailures: jest.fn().mockResolvedValue({
+					...emptyPage,
+					schemaVersion: 1
+				})
+			} as unknown as BillingMessagingClientService
+		);
+
+		await expect(service.getFailures(1, 20)).resolves.toEqual(
+			expect.objectContaining({
+				items: [
+					expect.objectContaining({
+						id: archivedFailure.id,
+						integration: 'notification-delivery-outcome',
+						resolvedAt: '2026-08-10T12:01:00.000Z'
+					})
+				],
+				total: 1
+			})
+		);
+		expect(coreFindMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					OR: [
+						{
+							integration: { in: [...CORE_OWNED_MESSAGING_KINDS] }
+						},
+						{
+							AND: [
+								{
+									integration: {
+										in: [...CORE_ARCHIVED_FAILURE_HISTORY_KINDS]
+									}
+								},
+								{ resolvedAt: { not: null } }
+							]
+						}
+					]
+				}
+			})
+		);
+	});
+
+	it('merges archived and Billing notification outcome history for a terminal filter', async () => {
+		const archivedFailure = {
+			...remoteFailure(
+				'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+				'notification-delivery-outcome',
+				'2026-08-10T12:00:00.000Z'
+			),
+			payload: {},
+			failedAt: new Date('2026-08-10T12:00:00.000Z'),
+			resolvedAt: new Date('2026-08-10T12:01:00.000Z'),
+			resolution: 'CLOSED_NO_RETRY',
+			resolutionComment: 'Проверено до cutover',
+			createdAt: new Date('2026-08-10T12:00:00.000Z'),
+			updatedAt: new Date('2026-08-10T12:01:00.000Z')
+		};
+		const billingFailure = {
+			id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+			eventId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+			consumer: 'notification-outcome' as const,
+			routingKey: 'notification.delivery.outcome.v1',
+			errorCode: 'TRANSIENT',
+			errorSafe: 'Billing outcome failed',
+			attempt: 2,
+			status: 'RESOLVED' as const,
+			category: 'TRANSIENT' as const,
+			normalizedCode: 'TRANSIENT',
+			safeReason: 'Billing outcome failed',
+			httpStatus: null,
+			providerCode: null,
+			retryable: true,
+			classificationVersion: 1,
+			firstFailedAt: '2026-08-11T12:00:00.000Z',
+			failedAt: '2026-08-11T12:00:00.000Z',
+			retryingAt: null,
+			resolvedAt: '2026-08-11T12:01:00.000Z',
+			resolution: 'CLOSED_NO_RETRY' as const,
+			resolutionComment: 'Проверено после cutover',
+			createdAt: '2026-08-11T12:00:00.000Z',
+			updatedAt: '2026-08-11T12:01:00.000Z'
+		};
+		const coreFindMany = jest.fn().mockResolvedValue([archivedFailure]);
+		const transaction = jest.fn(async operations =>
+			Promise.all(operations)
+		);
+		const billingGetFailures = jest.fn().mockResolvedValue({
+			schemaVersion: 1,
+			items: [billingFailure],
+			total: 1,
+			page: 1,
+			limit: 20,
+			totalPages: 1
+		});
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: coreFindMany,
+					count: jest.fn().mockResolvedValue(1)
+				},
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{} as NotificationDeliveryClientService,
+			{} as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			{
+				getFailures: billingGetFailures
+			} as unknown as BillingMessagingClientService
+		);
+
+		const result = await service.getFailures(1, 20, {
+			integration: 'notification-delivery-outcome',
+			status: 'CLOSED'
+		});
+		expect(result.items.map(item => item.id)).toEqual([
+			billingFailure.id,
+			archivedFailure.id
+		]);
+		expect(result.total).toBe(2);
+		expect(coreFindMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					AND: [
+						{
+							integration: 'notification-delivery-outcome',
+							resolution: 'CLOSED_NO_RETRY'
+						},
+						{ resolvedAt: { not: null } }
+					]
+				}
+			})
+		);
+		expect(billingGetFailures).toHaveBeenCalledWith(1, 20, {
+			consumer: 'notification-outcome',
+			status: 'CLOSED'
+		});
+	});
+
+	it('keeps unresolved archived rows out of the failed history after ownership handoff', async () => {
+		const coreFindMany = jest.fn().mockResolvedValue([]);
+		const transaction = jest.fn(async operations =>
+			Promise.all(operations)
+		);
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: coreFindMany,
+					count: jest.fn().mockResolvedValue(0)
+				},
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{} as NotificationDeliveryClientService,
+			{} as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			{
+				getFailures: jest.fn().mockResolvedValue({
+					schemaVersion: 1,
+					items: [],
+					total: 0,
+					page: 1,
+					limit: 20,
+					totalPages: 1
+				})
+			} as unknown as BillingMessagingClientService
+		);
+
+		await expect(
+			service.getFailures(1, 20, {
+				integration: 'notification-delivery-outcome',
+				status: 'FAILED'
+			})
+		).resolves.toEqual(expect.objectContaining({ items: [], total: 0 }));
+		expect(coreFindMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					AND: [
+						{
+							integration: 'notification-delivery-outcome',
+							resolvedAt: null,
+							retryingAt: null
+						},
+						{ resolvedAt: { not: null } }
+					]
+				}
+			})
+		);
+	});
+
+	it('does not expose archived Core history before Billing ownership', async () => {
+		const transaction = jest.fn();
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: jest.fn(),
+					count: jest.fn()
+				},
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{} as NotificationDeliveryClientService,
+			{} as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(false)
+			} as unknown as BillingCoreStateService
+		);
+
+		await expect(
+			service.getFailures(1, 20, {
+				integration: 'notification-delivery-outcome',
+				status: 'ALL'
+			})
+		).resolves.toEqual({
+			items: [],
+			total: 0,
+			page: 1,
+			limit: 20,
+			totalPages: 1
+		});
+		expect(transaction).not.toHaveBeenCalled();
+	});
+
 	it('queries only Widgets for a provider integration while preserving pagination', async () => {
 		const widgetsItems = [
 			remoteFailure(
@@ -1352,5 +1631,68 @@ describe('MessagingAdminService', () => {
 		);
 		expect(notificationRetry).not.toHaveBeenCalled();
 		expect(widgetsRetry).not.toHaveBeenCalled();
+	});
+
+	it('keeps archived Core failures read-only without delegating actions', async () => {
+		const id = '22222222-2222-4222-8222-222222222222';
+		const findFirst = jest.fn().mockImplementation(({ where }) => {
+			if (where.integration === 'auto-renewal')
+				return Promise.resolve(null);
+			if (
+				Array.isArray(where.integration?.in) &&
+				where.integration.in.includes('notification-delivery-outcome')
+			) {
+				return Promise.resolve({ id });
+			}
+			return Promise.resolve(null);
+		});
+		const transaction = jest.fn();
+		const notificationRetry = jest.fn();
+		const notificationClose = jest.fn();
+		const widgetsRetry = jest.fn();
+		const widgetsClose = jest.fn();
+		const billingRetry = jest.fn();
+		const billingClose = jest.fn();
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: { findFirst },
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				retryFailure: notificationRetry,
+				closeFailure: notificationClose
+			} as unknown as NotificationDeliveryClientService,
+			{
+				retryFailure: widgetsRetry,
+				closeFailure: widgetsClose
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			{
+				retryFailure: billingRetry,
+				closeFailure: billingClose
+			} as unknown as BillingMessagingClientService
+		);
+
+		await expect(service.retryFailure(id, 'dev-1')).rejects.toMatchObject({
+			message: 'Архивная ошибка доступна только для чтения',
+			status: 409
+		});
+		await expect(
+			service.closeFailure(id, 'dev-1', 'Проверено вручную')
+		).rejects.toMatchObject({
+			message: 'Архивная ошибка доступна только для чтения',
+			status: 409
+		});
+		expect(transaction).not.toHaveBeenCalled();
+		expect(notificationRetry).not.toHaveBeenCalled();
+		expect(notificationClose).not.toHaveBeenCalled();
+		expect(widgetsRetry).not.toHaveBeenCalled();
+		expect(widgetsClose).not.toHaveBeenCalled();
+		expect(billingRetry).not.toHaveBeenCalled();
+		expect(billingClose).not.toHaveBeenCalled();
 	});
 });

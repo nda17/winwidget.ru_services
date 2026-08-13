@@ -42,14 +42,10 @@ describe('AdminAlertsService Widgets handoff', () => {
 				}
 			])
 		};
-		const billingState = {
-			isBillingOwner: jest.fn().mockResolvedValue(false)
-		};
 		const service = new AdminAlertsService(
 			prisma as never,
 			health as never,
-			widgets as never,
-			billingState as never
+			widgets as never
 		);
 
 		await expect(service.getAll(1, 20)).resolves.toEqual({
@@ -80,6 +76,12 @@ describe('AdminAlertsService Widgets handoff', () => {
 			.map(([query]) => query.strings.join(' '))
 			.join(' ');
 		expect(sql).toContain('jsonb_to_recordset');
+		expect(sql).toContain('billing_subscription_read_projections');
+		expect(sql).toContain('billing_payment_read_projections');
+		expect(sql).toContain('billing_affiliate_read_projections');
+		expect(sql).not.toMatch(
+			/\b(FROM|JOIN)\s+"?(subscriptions|payments|affiliate_referrals)"?\b/i
+		);
 		expect(sql).not.toMatch(
 			/\bFROM\s+(widgets|quizzes|callbacks|countdown_timers|stop_offers|online_consultants|calculators)\b/i
 		);

@@ -1,5 +1,4 @@
 import { PrismaService } from '@/prisma.service';
-import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Request, Response } from 'express';
@@ -20,10 +19,7 @@ const DEFAULT_TRANSACTION_TIMEOUT_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class CampaignsAudienceExportService {
-	constructor(
-		private readonly prisma: PrismaService,
-		private readonly billingState: BillingCoreStateService
-	) {}
+	constructor(private readonly prisma: PrismaService) {}
 
 	async stream(
 		dto: CampaignsAudienceExportDto,
@@ -50,8 +46,6 @@ export class CampaignsAudienceExportService {
 			30 * 60 * 1000
 		);
 		try {
-			const billingOwner = await this.billingState.isBillingOwner();
-
 			await this.prisma.$transaction(
 				async transaction => {
 					await transaction.$executeRaw`SET TRANSACTION READ ONLY`;
@@ -83,8 +77,7 @@ export class CampaignsAudienceExportService {
 							dto.audience,
 							asOf,
 							cursor,
-							chunkSize,
-							billingOwner
+							chunkSize
 						);
 						if (!rows.length) break;
 
@@ -139,8 +132,7 @@ export class CampaignsAudienceExportService {
 		audience: CampaignsAudience,
 		asOf: Date,
 		cursor: string | null,
-		limit: number,
-		billingOwner: boolean
+		limit: number
 	): Promise<DestinationRow[]> {
 		const cursorFilter = cursor
 			? Prisma.sql`AND "destination" > ${cursor}`
@@ -150,11 +142,7 @@ export class CampaignsAudienceExportService {
 				? Prisma.sql`
 					AND EXISTS (
 						SELECT 1
-						FROM ${
-							billingOwner
-								? Prisma.raw('"billing_subscription_read_projections"')
-								: Prisma.raw('"subscriptions"')
-						} AS "subscription"
+						FROM "billing_subscription_read_projections" AS "subscription"
 						WHERE "subscription"."user_id" = "recipient"."user_id"
 							AND "subscription"."status" = 'ACTIVE'::"SubscriptionStatus"
 							AND (

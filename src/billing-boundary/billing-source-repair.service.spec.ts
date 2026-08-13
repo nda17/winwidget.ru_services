@@ -1,5 +1,5 @@
 import { BillingSourceRepairService } from './billing-source-repair.service';
-import { AUTO_RENEWAL_CONSENT_TEXT } from '@/payment/payment.constants';
+import { AUTO_RENEWAL_CONSENT_TEXT } from '@/billing-boundary/billing-boundary.constants';
 import type { PrismaService } from '@/prisma.service';
 import { createHash } from 'node:crypto';
 

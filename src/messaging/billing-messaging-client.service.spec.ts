@@ -41,6 +41,7 @@ describe('BillingMessagingClientService', () => {
 					UNCLASSIFIED: 1
 				}
 			},
+			providers: { yookassa: true },
 			heartbeats: [
 				'billing-api',
 				'billing-scheduler',
@@ -89,6 +90,27 @@ describe('BillingMessagingClientService', () => {
 		});
 
 		await expect(createService().getOverview()).resolves.toEqual(body);
+	});
+
+	it('rejects a malformed optional provider status without exposing details', async () => {
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				schemaVersion: 1,
+				generatedAt: '2026-08-11T00:00:00.000Z',
+				outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
+				oldestPendingAt: null,
+				unresolvedFailures: 0,
+				retryingFailures: 0,
+				deliveredLast24Hours: 0,
+				providers: { yookassa: 'configured' }
+			})
+		});
+
+		await expect(createService().getOverview()).rejects.toThrow(
+			'Billing вернул некорректный messaging-ответ'
+		);
 	});
 
 	it('rejects category subtotals that do not match the unresolved Billing total', async () => {

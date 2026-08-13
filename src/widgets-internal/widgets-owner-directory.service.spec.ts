@@ -1,25 +1,28 @@
-import { PrismaService } from '@/prisma.service';
+import type { PrismaService } from '@/prisma.service';
 import { AuthIdentityType, Plan, Role, UserStatus } from '@prisma/client';
 import { WidgetsOwnerDirectoryService } from './widgets-owner-directory.service';
 
 describe('WidgetsOwnerDirectoryService', () => {
-	it('returns only the bounded owner data needed by Widgets admin views', async () => {
-		const findMany = jest.fn().mockResolvedValue([
-			{
-				id: 'user-1',
-				name: 'Owner',
-				status: UserStatus.ACTIVE,
-				deletedAt: null,
-				rights: [Role.USER],
-				authIdentities: [
-					{ type: AuthIdentityType.EMAIL, value: 'owner@example.test' },
-					{ type: AuthIdentityType.PHONE, value: '+79990000000' }
-				],
-				subscription: null
-			}
-		]);
+	const user = () => ({
+		id: 'user-1',
+		name: 'Owner',
+		status: UserStatus.ACTIVE,
+		deletedAt: null,
+		rights: [Role.USER],
+		authIdentities: [
+			{ type: AuthIdentityType.EMAIL, value: 'owner@example.test' },
+			{ type: AuthIdentityType.PHONE, value: '+79990000000' }
+		]
+	});
+
+	it('resolves bounded owner data composed with the Billing projection', async () => {
+		const userFindMany = jest.fn().mockResolvedValue([user()]);
+		const subscriptionFindMany = jest.fn().mockResolvedValue([]);
 		const service = new WidgetsOwnerDirectoryService({
-			user: { findMany }
+			user: { findMany: userFindMany },
+			billingSubscriptionReadProjection: {
+				findMany: subscriptionFindMany
+			}
 		} as unknown as PrismaService);
 
 		await expect(service.resolve(['user-1'])).resolves.toEqual({
@@ -36,27 +39,38 @@ describe('WidgetsOwnerDirectoryService', () => {
 				}
 			]
 		});
-		expect(findMany).toHaveBeenCalledWith(
+		expect(userFindMany).toHaveBeenCalledWith(
 			expect.objectContaining({ where: { id: { in: ['user-1'] } } })
+		);
+		expect(subscriptionFindMany).toHaveBeenCalledWith(
+			expect.objectContaining({ where: { userId: { in: ['user-1'] } } })
 		);
 	});
 
-	it('searches owner PII and plan with a bounded stable keyset page', async () => {
-		const findMany = jest.fn().mockResolvedValue([
+	it('searches owner PII and plan through a stable projection-backed keyset page', async () => {
+		const queryRaw = jest.fn().mockResolvedValue([{ id: 'user-20' }]);
+		const userFindMany = jest.fn().mockResolvedValue([
 			{
+				...user(),
 				id: 'user-20',
-				name: 'Owner',
-				status: UserStatus.ACTIVE,
-				deletedAt: null,
-				rights: [Role.USER],
 				authIdentities: [
-					{ type: AuthIdentityType.EMAIL, value: 'owner@example.test' }
-				],
-				subscription: { plan: Plan.EASY }
+					{
+						type: AuthIdentityType.EMAIL,
+						value: 'owner@example.test'
+					}
+				]
 			}
 		]);
+		const subscription = { userId: 'user-20', plan: Plan.EASY };
+		const subscriptionFindMany = jest
+			.fn()
+			.mockResolvedValue([subscription]);
 		const service = new WidgetsOwnerDirectoryService({
-			user: { findMany }
+			$queryRaw: queryRaw,
+			user: { findMany: userFindMany },
+			billingSubscriptionReadProjection: {
+				findMany: subscriptionFindMany
+			}
 		} as unknown as PrismaService);
 
 		await expect(
@@ -68,61 +82,42 @@ describe('WidgetsOwnerDirectoryService', () => {
 			})
 		).resolves.toEqual({
 			items: [
-				{
+				expect.objectContaining({
 					id: 'user-20',
-					name: 'Owner',
-					status: UserStatus.ACTIVE,
-					deletedAt: null,
-					rights: [Role.USER],
 					email: 'owner@example.test',
 					phone: null,
 					subscription: { plan: Plan.EASY }
-				}
+				})
 			],
 			nextAfterId: 'user-20'
 		});
-		expect(findMany).toHaveBeenCalledWith(
-			expect.objectContaining({
-				where: expect.objectContaining({
-					deletedAt: null,
-					id: { gt: 'user-10' },
-					subscription: { is: { plan: Plan.EASY } },
-					OR: expect.arrayContaining([
-						{
-							id: {
-								contains: 'OWNER',
-								mode: 'insensitive'
-							}
-						},
-						{
-							name: {
-								contains: 'OWNER',
-								mode: 'insensitive'
-							}
-						}
-					])
-				}),
-				orderBy: { id: 'asc' },
-				take: 1
-			})
+		const query = queryRaw.mock.calls[0][0];
+		const sql = query.strings.join(' ');
+		expect(sql).toContain('billing_subscription_read_projections');
+		expect(sql).toContain('auth_identities');
+		expect(sql).not.toMatch(/\bsubscriptions\b/);
+		expect(query.values).toEqual(
+			expect.arrayContaining(['user-10', '%OWNER%', 'EASY', 1])
 		);
 	});
 
-	it('filters owners without subscriptions and terminates a short page', async () => {
-		const findMany = jest.fn().mockResolvedValue([]);
+	it('filters owners without a Billing projection and terminates a short page', async () => {
+		const queryRaw = jest.fn().mockResolvedValue([]);
+		const userFindMany = jest.fn();
 		const service = new WidgetsOwnerDirectoryService({
-			user: { findMany }
+			$queryRaw: queryRaw,
+			user: { findMany: userFindMany },
+			billingSubscriptionReadProjection: { findMany: jest.fn() }
 		} as unknown as PrismaService);
 
 		await expect(
 			service.search({ plan: 'NONE', limit: 100 })
 		).resolves.toEqual({ items: [], nextAfterId: null });
-		expect(findMany).toHaveBeenCalledWith(
-			expect.objectContaining({
-				where: { deletedAt: null, subscription: { is: null } },
-				orderBy: { id: 'asc' },
-				take: 100
-			})
+		const query = queryRaw.mock.calls[0][0];
+		expect(query.strings.join(' ')).toContain('NOT EXISTS');
+		expect(query.strings.join(' ')).toContain(
+			'billing_subscription_read_projections'
 		);
+		expect(userFindMany).not.toHaveBeenCalled();
 	});
 });

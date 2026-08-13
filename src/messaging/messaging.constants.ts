@@ -118,7 +118,6 @@ export type WidgetsProviderIntegrationKind =
 
 export const CORE_OWNED_INTEGRATION_KINDS = [
 	'telegram-destination-unavailable',
-	'notification-delivery-outcome',
 	'campaign-admin-audit',
 	'reporting-admin-audit',
 	'widgets-admin-audit',
@@ -126,8 +125,7 @@ export const CORE_OWNED_INTEGRATION_KINDS = [
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection',
-	'billing-settings-projection',
-	'auto-renewal'
+	'billing-settings-projection'
 ] as const satisfies readonly IntegrationKind[];
 
 export type MonolithIntegrationKind =
@@ -186,6 +184,12 @@ export const CORE_RABBITMQ_TOPOLOGY_KINDS = [
 export const CORE_OWNED_MESSAGING_KINDS = [
 	...CORE_OWNED_INTEGRATION_KINDS,
 	...MAINTENANCE_KINDS
+] as const satisfies readonly CoreMessagingKind[];
+
+// Terminal rows from the retired Core consumer remain queryable for admin
+// history only. This catalog must never drive topology, consumers or retries.
+export const CORE_ARCHIVED_FAILURE_HISTORY_KINDS = [
+	'notification-delivery-outcome'
 ] as const satisfies readonly CoreMessagingKind[];
 
 export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
@@ -321,7 +325,12 @@ export const getMessagingQueueHealthExpectations = (options: {
 	billingOwner: boolean;
 }): readonly MessagingQueueHealthExpectation[] => {
 	const coreExpectations = MESSAGING_KINDS.flatMap(kind => {
-		if (options.billingOwner && kind === 'auto-renewal') return [];
+		if (
+			options.billingOwner &&
+			(kind === 'auto-renewal' || kind === 'notification-delivery-outcome')
+		) {
+			return [];
+		}
 		const mainQueue = MESSAGING_QUEUE_NAMES[kind];
 		const passiveDeadLetter =
 			WIDGETS_PROVIDER_KIND_SET.has(kind) ||

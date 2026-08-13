@@ -50,9 +50,6 @@ x-api-env: &api-env
   VK_CLIENT_SECRET: ${VK_CLIENT_SECRET:-}
   VK_SERVICE_TOKEN: ${VK_SERVICE_TOKEN:-}
   VK_CALLBACK_URL: ${VK_CALLBACK_URL:-}
-  YOOKASSA_PRODUCTION_SHOP_ID: ${YOOKASSA_PRODUCTION_SHOP_ID}
-  YOOKASSA_PRODUCTION_SECRET_KEY: ${YOOKASSA_PRODUCTION_SECRET_KEY}
-  PAYMENT_METHOD_ENCRYPTION_KEY: ${PAYMENT_METHOD_ENCRYPTION_KEY:?PAYMENT_METHOD_ENCRYPTION_KEY is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME}
   TELEGRAM_INFO_BOT_WEBHOOK_SECRET: ${TELEGRAM_INFO_BOT_WEBHOOK_SECRET}
@@ -116,9 +113,6 @@ x-api-gateway-env: &api-gateway-env
 
 x-integration-worker-env: &integration-worker-env
   <<: [*runtime-env, *smtp-env]
-  YOOKASSA_PRODUCTION_SHOP_ID: ${YOOKASSA_PRODUCTION_SHOP_ID}
-  YOOKASSA_PRODUCTION_SECRET_KEY: ${YOOKASSA_PRODUCTION_SECRET_KEY}
-  PAYMENT_METHOD_ENCRYPTION_KEY: ${PAYMENT_METHOD_ENCRYPTION_KEY:?PAYMENT_METHOD_ENCRYPTION_KEY is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_INTEGRATION_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-integration-worker
@@ -126,7 +120,7 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection,auto-renewal}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-telegram-destination-unavailable,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}

@@ -31,6 +31,11 @@ interface CreateProviderPaymentInput {
 
 @Injectable()
 export class YooKassaService {
+	isConfigured(): boolean {
+		const { shopId, secret } = this.credentialValues();
+		return Boolean(shopId && secret);
+	}
+
 	async createPayment(
 		input: CreateProviderPaymentInput,
 		idempotencyKey: string
@@ -174,6 +179,19 @@ export class YooKassaService {
 	}
 
 	private credentials(): { shopId: string; secret: string } {
+		const { shopId, secret } = this.credentialValues();
+		if (!shopId || !secret) {
+			throw new Error(
+				'YooKassa credentials are missing for the selected MODE'
+			);
+		}
+		return { shopId, secret };
+	}
+
+	private credentialValues(): {
+		shopId: string | undefined;
+		secret: string | undefined;
+	} {
 		const production =
 			process.env.MODE?.trim().toLowerCase() === 'production';
 		const shopId = (
@@ -186,11 +204,6 @@ export class YooKassaService {
 				? process.env.YOOKASSA_PRODUCTION_SECRET_KEY
 				: process.env.YOOKASSA_SECRET_KEY
 		)?.trim();
-		if (!shopId || !secret) {
-			throw new Error(
-				'YooKassa credentials are missing for the selected MODE'
-			);
-		}
 		return { shopId, secret };
 	}
 }

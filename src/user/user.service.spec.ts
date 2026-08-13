@@ -4,8 +4,7 @@ import type { WidgetsAdminOverviewClient } from '@/widgets-internal/widgets-admi
 import {
 	BadRequestException,
 	ConflictException,
-	ForbiddenException,
-	ServiceUnavailableException
+	ForbiddenException
 } from '@nestjs/common';
 import { Prisma, Role, UserStatus } from '@prisma/client';
 
@@ -37,13 +36,7 @@ describe('UserService soft delete', () => {
 				update: jest.fn(),
 				updateMany: createUpdateMany()
 			},
-			userSession: { updateMany: createUpdateMany() },
-			autoRenewal: {
-				findUnique: jest.fn().mockResolvedValue(null),
-				updateMany: createUpdateMany()
-			},
-			payment: { updateMany: createUpdateMany() },
-			autoRenewalConsentEvent: { create: jest.fn() }
+			userSession: { updateMany: createUpdateMany() }
 		};
 		const prisma = {
 			user: {
@@ -52,8 +45,11 @@ describe('UserService soft delete', () => {
 				findUnique: jest.fn().mockResolvedValue(createUser()),
 				update: jest.fn()
 			},
-			subscription: { findUnique: jest.fn() },
-			payment: {
+			billingSubscriptionReadProjection: {
+				findUnique: jest.fn(),
+				findMany: jest.fn().mockResolvedValue([])
+			},
+			billingPaymentReadProjection: {
 				count: jest.fn(),
 				findMany: jest.fn()
 			},
@@ -67,7 +63,7 @@ describe('UserService soft delete', () => {
 			captureReferralInTransaction: jest.fn(),
 			revokeBeforeLifecycleMutation: jest.fn().mockResolvedValue({
 				commandId: 'command-1',
-				remoteApplied: false,
+				remoteApplied: true,
 				userId: 'user-1',
 				operation: 'DELETE',
 				actorId: 'admin-1',
@@ -76,14 +72,10 @@ describe('UserService soft delete', () => {
 			}),
 			recordLifecycleRepair: jest.fn()
 		};
-		const billingState = {
-			isBillingOwner: jest.fn().mockResolvedValue(false)
-		};
 		const service = new UserService(
 			prisma as unknown as PrismaService,
 			widgetsOverview as unknown as WidgetsAdminOverviewClient,
-			billingRegistration as never,
-			billingState as never
+			billingRegistration as never
 		);
 
 		return {
@@ -275,42 +267,6 @@ describe('UserService soft delete', () => {
 		).rejects.toBeInstanceOf(ForbiddenException);
 		expect(lastDevFixture.transaction.user.update).not.toHaveBeenCalled();
 	});
-
-	it.each(['delete', 'status'] as const)(
-		'maps a frozen legacy Billing write during user %s to retryable 503',
-		async operation => {
-			const { service, prisma, billingRegistration } = createFixture();
-			const user = createUser();
-			prisma.user.findUnique.mockResolvedValue(user);
-			prisma.$transaction.mockRejectedValue({
-				code: 'P2010',
-				meta: {
-					code: '55000',
-					message:
-						'Core Billing source is frozen; legacy table write rejected'
-				}
-			});
-
-			const request =
-				operation === 'delete'
-					? service.deleteUser(user.id, 'admin-1', [Role.USER, Role.ADMIN])
-					: service.toggleUserActivation(user.id, 'admin-1', [
-							Role.USER,
-							Role.ADMIN
-						]);
-			await expect(request).rejects.toBeInstanceOf(
-				ServiceUnavailableException
-			);
-			await expect(request).rejects.toMatchObject({
-				response: expect.objectContaining({
-					code: 'billing_legacy_writer_fenced'
-				})
-			});
-			expect(
-				billingRegistration.recordLifecycleRepair
-			).not.toHaveBeenCalled();
-		}
-	);
 
 	it('rejects self-demotion, ADMIN demotion of DEV, and last active DEV demotion', async () => {
 		const devUser = createUser({
@@ -542,13 +498,17 @@ describe('UserService soft delete', () => {
 			}
 		};
 		prisma.user.findUnique.mockResolvedValue(user);
-		prisma.subscription.findUnique.mockResolvedValue(subscription);
-		prisma.payment.count
+		prisma.billingSubscriptionReadProjection.findUnique.mockResolvedValue(
+			subscription
+		);
+		prisma.billingPaymentReadProjection.count
 			.mockResolvedValueOnce(1)
 			.mockResolvedValueOnce(2)
 			.mockResolvedValueOnce(3)
 			.mockResolvedValueOnce(4);
-		prisma.payment.findMany.mockResolvedValue([payment]);
+		prisma.billingPaymentReadProjection.findMany.mockResolvedValue([
+			payment
+		]);
 		prisma.adminEventLog.findMany.mockResolvedValue([activity]);
 		widgetsOverview.getOwnerOverview.mockResolvedValue(widgetData);
 

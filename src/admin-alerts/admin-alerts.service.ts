@@ -1,5 +1,4 @@
 import { PrismaService } from '@/prisma.service';
-import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { HealthService } from '@/health/health.service';
 import {
 	WidgetsAdminAlert,
@@ -49,8 +48,7 @@ export class AdminAlertsService {
 	constructor(
 		private readonly prisma: PrismaService,
 		private readonly healthService: HealthService,
-		private readonly widgetsAdminClient: WidgetsAdminOverviewClient,
-		private readonly billingState: BillingCoreStateService
+		private readonly widgetsAdminClient: WidgetsAdminOverviewClient
 	) {}
 
 	async getAll(page = 1, limit = 20, filters: AdminAlertFilters = {}) {
@@ -95,16 +93,13 @@ export class AdminAlertsService {
 	}
 
 	private async getBaseSql() {
-		const billingOwner = await this.billingState.isBillingOwner();
-		const subscriptionsTable = billingOwner
-			? Prisma.raw('"billing_subscription_read_projections"')
-			: Prisma.raw('"subscriptions"');
-		const paymentsTable = billingOwner
-			? Prisma.raw('"billing_payment_read_projections"')
-			: Prisma.raw('"payments"');
-		const affiliatesTable = billingOwner
-			? Prisma.raw('"billing_affiliate_read_projections"')
-			: Prisma.raw('"affiliate_referrals"');
+		const subscriptionsTable = Prisma.raw(
+			'"billing_subscription_read_projections"'
+		);
+		const paymentsTable = Prisma.raw('"billing_payment_read_projections"');
+		const affiliatesTable = Prisma.raw(
+			'"billing_affiliate_read_projections"'
+		);
 		const userFieldsSql = Prisma.sql`
 			u.id AS target_user_id,
 			u.name AS target_user_name,

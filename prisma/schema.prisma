@@ -19,15 +19,6 @@ model User {
   authIdentities               AuthIdentity[]
   telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
-  payments                     Payment[]
-  autoRenewal                  AutoRenewal?
-  autoRenewalConsentEvents     AutoRenewalConsentEvent[]
-  subscription                 Subscription?
-  subscriptionHistories        SubscriptionHistory[]        @relation("SubscriptionHistoryUser")
-  subscriptionHistoryActions   SubscriptionHistory[]        @relation("SubscriptionHistoryAdmin")
-  subscriptionExpiryReminders  SubscriptionExpiryReminder[]
-  affiliateReferralsMade       AffiliateReferral[]          @relation("AffiliateReferralReferrer")
-  affiliateReferral            AffiliateReferral?           @relation("AffiliateReferralReferred")
   adminEventLogActions         AdminEventLog[]              @relation("AdminEventLogAdmin")
   adminEventLogTargets         AdminEventLog[]              @relation("AdminEventLogTargetUser")
   resolvedIntegrationFailures  IntegrationDeliveryFailure[] @relation("IntegrationFailureResolver")
@@ -54,51 +45,6 @@ model UserSession {
   @@index([userId, revokedAt])
   @@index([expiresAt])
   @@map("user_sessions")
-}
-
-model Subscription {
-  id              String                       @id @default(cuid())
-  userId          String                       @unique @map("user_id")
-  plan            Plan                         @default(TRIAL)
-  billingPeriod   BillingPeriod?               @map("billing_period")
-  status          SubscriptionStatus           @default(ACTIVE)
-  startsAt        DateTime                     @default(now()) @map("starts_at")
-  expiresAt       DateTime?                    @map("expires_at")
-  leadsThisPeriod Int                          @default(0) @map("leads_this_period")
-  periodResetsAt  DateTime?                    @map("period_resets_at")
-  user            User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  histories       SubscriptionHistory[]
-  expiryReminders SubscriptionExpiryReminder[]
-  createdAt       DateTime                     @default(now()) @map("created_at")
-  updatedAt       DateTime                     @updatedAt @map("updated_at")
-
-  @@map("subscriptions")
-}
-
-model SubscriptionExpiryReminder {
-  id               String                           @id @default(cuid())
-  subscriptionId   String                           @map("subscription_id")
-  userId           String                           @map("user_id")
-  daysBeforeExpiry Int                              @map("days_before_expiry")
-  expiresAt        DateTime                         @map("expires_at")
-  sentTo           String                           @map("sent_to")
-  status           SubscriptionExpiryReminderStatus @default(PENDING)
-  lockedAt         DateTime?                        @map("locked_at")
-  lockedBy         String?                          @map("locked_by")
-  attempts         Int                              @default(0)
-  availableAt      DateTime                         @default(now()) @map("available_at")
-  lastError        String?                          @map("last_error") @db.Text
-  subscription     Subscription                     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  user             User                             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sentAt           DateTime?                        @map("sent_at")
-
-  @@unique([subscriptionId, daysBeforeExpiry, expiresAt, sentTo], map: "subscription_expiry_reminder_unique")
-  @@index([userId], map: "subscription_expiry_reminders_user_id_idx")
-  @@index([daysBeforeExpiry, expiresAt], map: "subscription_expiry_reminders_days_expires_idx")
-  @@index([sentAt], map: "subscription_expiry_reminders_sent_at_idx")
-  @@index([status, availableAt], map: "subscription_expiry_reminders_status_available_idx")
-  @@index([status, lockedAt], map: "subscription_expiry_reminders_status_locked_idx")
-  @@map("subscription_expiry_reminders")
 }
 
 model TelegramNotificationChannel {
@@ -138,30 +84,6 @@ model TelegramSupportMessage {
   @@map("telegram_support_messages")
 }
 
-model SubscriptionHistory {
-  id                 String                     @id @default(cuid())
-  subscriptionId     String?                    @map("subscription_id")
-  userId             String?                    @map("user_id")
-  adminId            String?                    @map("admin_id")
-  action             SubscriptionHistoryAction
-  days               Int?
-  oldExpiresAt       DateTime?                  @map("old_expires_at")
-  newExpiresAt       DateTime?                  @map("new_expires_at")
-  targetAudience     SubscriptionBonusAudience? @map("target_audience")
-  targetLabel        String?                    @map("target_label")
-  affectedUsersCount Int?                       @map("affected_users_count")
-  subscription       Subscription?              @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
-  user               User?                      @relation("SubscriptionHistoryUser", fields: [userId], references: [id], onDelete: Cascade)
-  admin              User?                      @relation("SubscriptionHistoryAdmin", fields: [adminId], references: [id], onDelete: SetNull)
-  createdAt          DateTime                   @default(now()) @map("created_at")
-
-  @@index([subscriptionId])
-  @@index([userId])
-  @@index([adminId])
-  @@index([createdAt])
-  @@map("subscription_history")
-}
-
 model AdminEventLog {
   id              String   @id @default(cuid())
   adminId         String?  @map("admin_id")
@@ -190,143 +112,6 @@ model AdminEventLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("admin_event_logs")
-}
-
-model Payment {
-  id                      String             @id @default(cuid())
-  userId                  String             @map("user_id")
-  yookassaId              String?            @unique @map("yookassa_id")
-  providerIdempotencyKey  String?            @unique @map("provider_idempotency_key")
-  recurringCycleKey       String?            @unique @map("recurring_cycle_key")
-  recurringAttempt        Int                @default(0) @map("recurring_attempt")
-  kind                    PaymentKind        @default(ONE_TIME)
-  amount                  String
-  currency                String             @default("RUB")
-  confirmationUrl         String?            @map("confirmation_url")
-  status                  PaymentStatus      @default(PENDING)
-  providerStatus          String?            @map("provider_status")
-  plan                    Plan?
-  billingPeriod           BillingPeriod?     @map("billing_period")
-  autoRenew               Boolean            @default(false) @map("auto_renew")
-  consentVersion          String?            @map("consent_version")
-  consentText             String?            @map("consent_text") @db.Text
-  consentedAt             DateTime?          @map("consented_at")
-  consentIp               String?            @map("consent_ip")
-  consentUserAgent        String?            @map("consent_user_agent")
-  offerSnapshot           String?            @map("offer_snapshot") @db.Text
-  offerSha256             String?            @map("offer_sha256")
-  offerUpdatedAt          DateTime?          @map("offer_updated_at")
-  customerEmail           String?            @map("customer_email")
-  customerPhone           String?            @map("customer_phone")
-  paymentMethodCiphertext String?            @map("payment_method_ciphertext") @db.Text
-  providerCreatedAt       DateTime?          @map("provider_created_at")
-  checkoutExpiresAt       DateTime           @map("checkout_expires_at")
-  providerExpiresAt       DateTime?          @map("provider_expires_at")
-  lastProviderCheckedAt   DateTime?          @map("last_provider_checked_at")
-  succeededAt             DateTime?          @map("succeeded_at")
-  cancelledAt             DateTime?          @map("cancelled_at")
-  cancellationReason      String?            @map("cancellation_reason")
-  receiptSyncEligible     Boolean            @default(true) @map("receipt_sync_eligible")
-  affiliateReferral       AffiliateReferral?
-  receipts                PaymentReceipt[]
-  createdAt               DateTime           @default(now()) @map("created_at")
-  updatedAt               DateTime           @updatedAt @map("updated_at")
-  user                    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, createdAt])
-  @@index([status, checkoutExpiresAt])
-  @@index([kind, status, createdAt])
-  @@map("payments")
-}
-
-model AutoRenewal {
-  id                      String                    @id @default(cuid())
-  userId                  String                    @unique @map("user_id")
-  status                  AutoRenewalStatus         @default(ACTIVE)
-  plan                    Plan
-  billingPeriod           BillingPeriod             @map("billing_period")
-  amount                  String
-  pendingAmount           String?                   @map("pending_amount")
-  priceChangeDetectedAt   DateTime?                 @map("price_change_detected_at")
-  currency                String                    @default("RUB")
-  paymentMethodCiphertext String?                   @map("payment_method_ciphertext") @db.Text
-  paymentMethodType       String?                   @map("payment_method_type")
-  paymentMethodTitle      String?                   @map("payment_method_title")
-  paymentMethodLast4      String?                   @map("payment_method_last4")
-  paymentMethodSavedAt    DateTime?                 @map("payment_method_saved_at")
-  consentVersion          String                    @map("consent_version")
-  consentText             String                    @map("consent_text") @db.Text
-  consentedAt             DateTime                  @map("consented_at")
-  offerSnapshot           String?                   @map("offer_snapshot") @db.Text
-  offerSha256             String?                   @map("offer_sha256")
-  offerUpdatedAt          DateTime?                 @map("offer_updated_at")
-  nextChargeAt            DateTime                  @map("next_charge_at")
-  retryStartedAt          DateTime?                 @map("retry_started_at")
-  retryAttempt            Int                       @default(0) @map("retry_attempt")
-  nextRetryAt             DateTime?                 @map("next_retry_at")
-  dispatchPending         Boolean                   @default(false) @map("dispatch_pending")
-  disabledAt              DateTime?                 @map("disabled_at")
-  disableReason           String?                   @map("disable_reason") @db.Text
-  lastChargeAttemptAt     DateTime?                 @map("last_charge_attempt_at")
-  lastChargeErrorCode     String?                   @map("last_charge_error_code")
-  stateVersion            Int                       @default(1) @map("state_version")
-  user                    User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  consentEvents           AutoRenewalConsentEvent[]
-  createdAt               DateTime                  @default(now()) @map("created_at")
-  updatedAt               DateTime                  @updatedAt @map("updated_at")
-
-  @@index([status, nextChargeAt])
-  @@index([status, nextRetryAt])
-  @@map("auto_renewals")
-}
-
-model AutoRenewalConsentEvent {
-  id             String                      @id @default(cuid())
-  autoRenewalId  String                      @map("auto_renewal_id")
-  userId         String                      @map("user_id")
-  type           AutoRenewalConsentEventType
-  actorUserId    String?                     @map("actor_user_id")
-  actorRole      String?                     @map("actor_role")
-  source         String
-  reason         String?                     @db.Text
-  consentVersion String                      @map("consent_version")
-  consentText    String                      @map("consent_text") @db.Text
-  offerSnapshot  String?                     @map("offer_snapshot") @db.Text
-  offerSha256    String?                     @map("offer_sha256")
-  offerUpdatedAt DateTime?                   @map("offer_updated_at")
-  plan           Plan
-  billingPeriod  BillingPeriod               @map("billing_period")
-  amount         String
-  currency       String                      @default("RUB")
-  ip             String?
-  userAgent      String?                     @map("user_agent")
-  metadata       Json                        @default("{}")
-  autoRenewal    AutoRenewal                 @relation(fields: [autoRenewalId], references: [id], onDelete: Cascade)
-  user           User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt      DateTime                    @default(now()) @map("created_at")
-
-  @@index([autoRenewalId, createdAt])
-  @@index([userId, createdAt])
-  @@map("auto_renewal_consent_events")
-}
-
-model PaymentReceipt {
-  id                   String    @id @default(cuid())
-  paymentId            String    @map("payment_id")
-  providerReceiptId    String    @unique @map("provider_receipt_id")
-  status               String
-  type                 String?
-  fiscalDocumentNumber String?   @map("fiscal_document_number")
-  fiscalStorageNumber  String?   @map("fiscal_storage_number")
-  fiscalAttribute      String?   @map("fiscal_attribute")
-  registeredAt         DateTime? @map("registered_at")
-  publicUrl            String?   @map("public_url") @db.Text
-  payment              Payment   @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  createdAt            DateTime  @default(now()) @map("created_at")
-  updatedAt            DateTime  @updatedAt @map("updated_at")
-
-  @@index([paymentId, registeredAt])
-  @@map("payment_receipts")
 }
 
 model OutboxEvent {
@@ -636,18 +421,6 @@ model IntegrationDeliveryReceipt {
   @@map("integration_delivery_receipts")
 }
 
-model TariffPrice {
-  id            String        @id @default(cuid())
-  plan          Plan
-  billingPeriod BillingPeriod @map("billing_period")
-  amount        Int
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime      @updatedAt @map("updated_at")
-
-  @@unique([plan, billingPeriod])
-  @@map("tariff_prices")
-}
-
 model AuthIdentity {
   id         String           @id @default(cuid())
   userId     String           @map("user_id")
@@ -696,35 +469,6 @@ enum PaymentStatus {
   SUCCEEDED
   CANCELLED
   EXPIRED
-}
-
-enum PaymentKind {
-  ONE_TIME
-  RECURRING
-}
-
-enum AutoRenewalStatus {
-  ACTIVE
-  USER_DISABLED
-  ADMIN_PAUSED
-  TECHNICAL_PAUSE
-  REVOKED
-}
-
-enum AutoRenewalConsentEventType {
-  CONSENT_GRANTED
-  USER_DISABLED
-  ADMIN_PAUSED
-  ADMIN_RESUMED
-  ADMIN_REVOKED
-  TECHNICAL_PAUSED
-  TECHNICAL_RESUMED
-  PAYMENT_METHOD_UPDATED
-  PRICE_CHANGE_REQUIRED
-  PRICE_CHANGE_CONFIRMED
-  RETRY_SCHEDULED
-  RETRY_EXHAUSTED
-  RETRY_CANCELLED
 }
 
 enum OutboxEventStatus {
@@ -810,24 +554,6 @@ enum SubscriptionStatus {
   CANCELLED
 }
 
-enum SubscriptionExpiryReminderStatus {
-  PENDING
-  PROCESSING
-  SENT
-  FAILED
-}
-
-enum SubscriptionHistoryAction {
-  BONUS_DAYS
-}
-
-enum SubscriptionBonusAudience {
-  SINGLE
-  ACTIVE_SUBSCRIPTION
-  INACTIVE_SUBSCRIPTION
-  ALL
-}
-
 enum AffiliateReferralStatus {
   REGISTERED
   REWARD_PENDING
@@ -856,49 +582,19 @@ enum IntegrationFailureResolution {
 }
 
 model SiteSettings {
-  id                          String   @id @default("singleton")
-  bannerEnabled               Boolean  @default(false) @map("banner_enabled")
-  bannerText                  String   @default("") @map("banner_text")
-  snowflakeEnabled            Boolean  @default(false) @map("snowflake_enabled")
-  paymentEnabled              Boolean  @default(true) @map("payment_enabled")
-  autoRenewalSignupEnabled    Boolean  @default(false) @map("auto_renewal_signup_enabled")
-  autoRenewalChargesEnabled   Boolean  @default(false) @map("auto_renewal_charges_enabled")
-  autoRenewalChargesEnabledAt DateTime @default(now()) @map("auto_renewal_charges_enabled_at")
-  recaptchaEnabled            Boolean  @default(true) @map("recaptcha_enabled")
-  googleAuthEnabled           Boolean  @default(true) @map("google_auth_enabled")
-  yandexAuthEnabled           Boolean  @default(true) @map("yandex_auth_enabled")
-  githubAuthEnabled           Boolean  @default(true) @map("github_auth_enabled")
-  vkAuthEnabled               Boolean  @default(false) @map("vk_auth_enabled")
-  telegramAuthEnabled         Boolean  @default(true) @map("telegram_auth_enabled")
-  affiliateProgramEnabled     Boolean  @default(false) @map("affiliate_program_enabled")
-  affiliateCashbackPercent    Int      @default(10) @map("affiliate_cashback_percent")
-  updatedAt                   DateTime @updatedAt @map("updated_at")
+  id                  String   @id @default("singleton")
+  bannerEnabled       Boolean  @default(false) @map("banner_enabled")
+  bannerText          String   @default("") @map("banner_text")
+  snowflakeEnabled    Boolean  @default(false) @map("snowflake_enabled")
+  recaptchaEnabled    Boolean  @default(true) @map("recaptcha_enabled")
+  googleAuthEnabled   Boolean  @default(true) @map("google_auth_enabled")
+  yandexAuthEnabled   Boolean  @default(true) @map("yandex_auth_enabled")
+  githubAuthEnabled   Boolean  @default(true) @map("github_auth_enabled")
+  vkAuthEnabled       Boolean  @default(false) @map("vk_auth_enabled")
+  telegramAuthEnabled Boolean  @default(true) @map("telegram_auth_enabled")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
-}
-
-model AffiliateReferral {
-  id              String                  @id @default(cuid())
-  referrerId      String                  @map("referrer_id")
-  referredUserId  String                  @unique @map("referred_user_id")
-  firstPaymentId  String?                 @unique @map("first_payment_id")
-  status          AffiliateReferralStatus @default(REGISTERED)
-  paymentAmount   Int?                    @map("payment_amount")
-  cashbackPercent Int?                    @map("cashback_percent")
-  cashbackAmount  Int?                    @map("cashback_amount")
-  availableAt     DateTime?               @map("available_at")
-  cancelledAt     DateTime?               @map("cancelled_at")
-  paidAt          DateTime?               @map("paid_at")
-  referrer        User                    @relation("AffiliateReferralReferrer", fields: [referrerId], references: [id], onDelete: Cascade)
-  referredUser    User                    @relation("AffiliateReferralReferred", fields: [referredUserId], references: [id], onDelete: Cascade)
-  firstPayment    Payment?                @relation(fields: [firstPaymentId], references: [id], onDelete: SetNull)
-  createdAt       DateTime                @default(now()) @map("created_at")
-  updatedAt       DateTime                @updatedAt @map("updated_at")
-
-  @@index([referrerId])
-  @@index([status])
-  @@index([availableAt])
-  @@map("affiliate_referrals")
 }
 
 model TelegramBotSettings {

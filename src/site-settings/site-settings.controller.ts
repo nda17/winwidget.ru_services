@@ -1,6 +1,5 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { CurrentUser } from '@/auth/decorators/user.decorator';
-import { BillingLegacyWriteFenceInterceptor } from '@/billing-boundary/billing-legacy-write-fence.interceptor';
 import { UpdateSiteSettingsDto } from '@/site-settings/dto/update-site-settings.dto';
 import { SiteSettingsService } from '@/site-settings/site-settings.service';
 import {
@@ -10,7 +9,6 @@ import {
 	HttpCode,
 	Patch,
 	Req,
-	UseInterceptors,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
@@ -18,7 +16,6 @@ import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('/site-settings')
-@UseInterceptors(BillingLegacyWriteFenceInterceptor)
 export class SiteSettingsController {
 	constructor(private readonly siteSettingsService: SiteSettingsService) {}
 

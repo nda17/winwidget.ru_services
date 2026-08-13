@@ -6,7 +6,7 @@
 WIDGETS_CANONICAL_POSTGRES_IMAGE='postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
 WIDGETS_CORE_SOURCE_CLEANUP_MIGRATION_NAME='20260810000000_remove_legacy_widgets_core_source'
 WIDGETS_CORE_SOURCE_CLEANUP_MARKER_NAME='.widgets-core-source-cleanup-v1'
-WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS='telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection,auto-renewal'
+WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS='telegram-destination-unavailable,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection'
 WIDGETS_CANONICAL_RABBITMQ_CONFIGURE_PATTERN='^(winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$'
 WIDGETS_CANONICAL_RABBITMQ_WRITE_PATTERN='^(winwidget\.(events|dead-letter)|winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$'
 WIDGETS_CANONICAL_RABBITMQ_READ_PATTERN='^(winwidget\.(events|dead-letter)|winwidget\.widgets(\..*)?|winwidget\.lead-integration\.(webhook|bitrix24|amo-crm)(\.(dead-letter|retry\.[1-3]))?)$'
@@ -1632,6 +1632,12 @@ widgets_lifecycle_self_test() {
 		! widgets_core_source_cleanup_validate_marker_contents "$marker_file"
 	)
 	[[ "$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == *'widgets-admin-audit'* &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-admin-audit'* &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-payment-projection'* &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-subscription-projection'* &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-affiliate-projection'* &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-settings-projection'* &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" != *'auto-renewal'* &&
 		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" != *'webhook'* &&
 		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" != *'bitrix24'* &&
 		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" != *'amo-crm'* ]]

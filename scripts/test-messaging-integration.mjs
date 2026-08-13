@@ -130,7 +130,6 @@ const createdEventIds = [];
 const createdScheduledJobIds = [];
 const requiredQueues = [
 	'winwidget.notification.telegram-destination-unavailable',
-	'winwidget.notification.delivery-outcome',
 	'winwidget.admin.audit.campaigns.v1',
 	'winwidget.admin.audit.reporting.v1',
 	'winwidget.admin.audit.widgets.v1',
@@ -139,16 +138,10 @@ const requiredQueues = [
 	'winwidget.core.billing.subscription-details.v1',
 	'winwidget.core.billing.affiliate.v1',
 	'winwidget.core.billing.settings.v1',
-	'winwidget.payment.auto-renewal',
 	'winwidget.maintenance.database-backup'
 ];
 
-const reportingEventTypes = [
-	'identity.user.changed.v1',
-	'billing.payment.changed.v1',
-	'billing.subscription.changed.v1',
-	'reporting.core-operational-routing.changed.v1'
-];
+const reportingEventTypes = ['identity.user.changed.v1'];
 
 const streamReportingProjectionSnapshot = async () => {
 	const chunks = [];
@@ -293,17 +286,9 @@ const verifyReportingProjectionProducers = async () => {
 	const userId = `ci-reporting-user-${suffix}`;
 	const emailIdentityId = `ci-reporting-email-${suffix}`;
 	const phoneIdentityId = `ci-reporting-phone-${suffix}`;
-	const paymentId = `ci-reporting-payment-${suffix}`;
-	const subscriptionId = `ci-reporting-subscription-${suffix}`;
 	const emailValue = `projection-${suffix}@example.invalid`;
 	const phoneValue = `+7000${suffix.replaceAll('-', '').slice(0, 10)}`;
-	const aggregateIds = [
-		disabledUserId,
-		rollbackUserId,
-		userId,
-		paymentId,
-		subscriptionId
-	];
+	const aggregateIds = [disabledUserId, rollbackUserId, userId];
 	let originalState;
 
 	try {
@@ -416,17 +401,6 @@ const verifyReportingProjectionProducers = async () => {
 			where: { id: phoneIdentityId },
 			data: { verifiedAt: new Date() }
 		});
-		await prisma.payment.create({
-			data: {
-				id: paymentId,
-				userId,
-				amount: '990.00',
-				checkoutExpiresAt: new Date(Date.now() + 60_000)
-			}
-		});
-		await prisma.subscription.create({
-			data: { id: subscriptionId, userId }
-		});
 
 		const identityEvents = await prisma.outboxEvent.findMany({
 			where: {
@@ -483,9 +457,7 @@ const verifyReportingProjectionProducers = async () => {
 		const cascadeEvents = await prisma.outboxEvent.findMany({
 			where: {
 				eventType: { in: reportingEventTypes },
-				OR: [userId, paymentId, subscriptionId].map(id => ({
-					payload: { path: ['aggregateId'], equals: id }
-				}))
+				payload: { path: ['aggregateId'], equals: userId }
 			},
 			select: {
 				id: true,
@@ -521,23 +493,15 @@ const verifyReportingProjectionProducers = async () => {
 				'AuthIdentity cascade emitted a missing or resurrecting user projection'
 			);
 		}
-		for (const [eventType, aggregateId] of [
-			['identity.user.changed.v1', userId],
-			['billing.payment.changed.v1', paymentId],
-			['billing.subscription.changed.v1', subscriptionId]
-		]) {
-			const tombstone = cascadeEvents.find(
-				event =>
-					event.eventType === eventType &&
-					event.payload.aggregateId === aggregateId &&
-					event.payload.tombstone === true &&
-					event.payload.state === null
-			);
-			if (!tombstone) {
-				throw new Error(
-					`Reporting cascade tombstone is missing for ${eventType}`
-				);
-			}
+		const tombstone = cascadeEvents.find(
+			event =>
+				event.eventType === 'identity.user.changed.v1' &&
+				event.payload.aggregateId === userId &&
+				event.payload.tombstone === true &&
+				event.payload.state === null
+		);
+		if (!tombstone) {
+			throw new Error('Reporting identity cascade tombstone is missing');
 		}
 
 		const serializedPayloads = JSON.stringify(
@@ -604,146 +568,6 @@ try {
 		return true;
 	}, 'publisher queues');
 	channel = await connection.createChannel();
-
-	const paymentEmailEventId = randomUUID();
-	const paymentTelegramEventId = randomUUID();
-	createdEventIds.push(paymentEmailEventId, paymentTelegramEventId);
-	const pendingPaymentQueues = new Set([
-		'payment-email',
-		'payment-telegram'
-	]);
-	const paymentConsumerTags = [];
-	for (const [kind, routingKey] of [
-		['payment-email', 'payment.succeeded.v1'],
-		['payment-telegram', 'payment.notification.telegram.requested.v1']
-	]) {
-		const queue = await channel.assertQueue('', {
-			exclusive: true,
-			autoDelete: true
-		});
-		await channel.bindQueue(queue.queue, 'winwidget.events', routingKey);
-		const { consumerTag } = await channel.consume(
-			queue.queue,
-			message => {
-				if (!message) return;
-				const expectedEventId =
-					kind === 'payment-email'
-						? paymentEmailEventId
-						: paymentTelegramEventId;
-				if (message.properties.messageId !== expectedEventId) {
-					channel.nack(message, false, true);
-					return;
-				}
-				try {
-					const payload = JSON.parse(message.content.toString('utf8'));
-					const expectedType =
-						kind === 'payment-email'
-							? 'payment.succeeded.v1'
-							: 'payment.notification.telegram.requested.v1';
-					if (
-						payload?.schemaVersion !== 1 ||
-						payload?.eventType !== expectedType ||
-						payload?.payment?.id !== 'ci-payment' ||
-						(kind === 'payment-telegram' &&
-							(payload?.destination?.telegramChatId !==
-								'ci-payment-chat' ||
-								payload?.destination?.messageThreadId !== 17))
-					) {
-						throw new Error('Unexpected payment event payload');
-					}
-				} catch (error) {
-					childFailure = new Error(
-						`Payment fan-out contained invalid JSON payload: ${
-							error instanceof Error ? error.message : String(error)
-						}`
-					);
-				}
-				pendingPaymentQueues.delete(kind);
-				channel.ack(message);
-			},
-			{ noAck: false }
-		);
-		paymentConsumerTags.push(consumerTag);
-	}
-	const paymentSucceededAt = new Date().toISOString();
-	await prisma.$transaction([
-		prisma.outboxEvent.create({
-			data: {
-				id: paymentEmailEventId,
-				messageId: paymentEmailEventId,
-				eventType: 'payment.succeeded.v1',
-				routingKey: 'payment.succeeded.v1',
-				payload: {
-					schemaVersion: 1,
-					eventType: 'payment.succeeded.v1',
-					payment: {
-						id: 'ci-payment',
-						yookassaId: 'ci-yookassa',
-						amount: '990.00',
-						plan: 'EASY',
-						billingPeriod: 'MONTHLY',
-						succeededAt: paymentSucceededAt
-					},
-					user: {
-						id: 'ci-user',
-						name: 'CI',
-						email: 'ci@example.com',
-						phone: null
-					},
-					subscription: { expiresAt: null }
-				}
-			}
-		}),
-		prisma.outboxEvent.create({
-			data: {
-				id: paymentTelegramEventId,
-				messageId: paymentTelegramEventId,
-				eventType: 'payment.notification.telegram.requested.v1',
-				routingKey: 'payment.notification.telegram.requested.v1',
-				payload: {
-					schemaVersion: 1,
-					eventType: 'payment.notification.telegram.requested.v1',
-					payment: {
-						id: 'ci-payment',
-						yookassaId: 'ci-yookassa',
-						amount: '990.00',
-						plan: 'EASY',
-						billingPeriod: 'MONTHLY',
-						succeededAt: paymentSucceededAt
-					},
-					user: {
-						id: 'ci-user',
-						name: 'CI',
-						email: 'ci@example.com',
-						phone: null
-					},
-					destination: {
-						telegramChatId: 'ci-payment-chat',
-						messageThreadId: 17
-					}
-				}
-			}
-		})
-	]);
-	await waitFor(
-		() => pendingPaymentQueues.size === 0,
-		'separate payment email and prepared Telegram events'
-	);
-	await waitFor(
-		() =>
-			prisma.outboxEvent
-				.count({
-					where: {
-						id: { in: [paymentEmailEventId, paymentTelegramEventId] },
-						status: 'PUBLISHED'
-					}
-				})
-				.then(count => count === 2),
-		'published prepared payment Outbox statuses'
-	);
-	for (const consumerTag of paymentConsumerTags) {
-		await channel.cancel(consumerTag);
-	}
 
 	startProcess('dist/src/integration-worker-main.js', {
 		INTEGRATION_WORKER_KINDS:
@@ -973,32 +797,24 @@ try {
 		await channel.bindQueue(
 			durabilityQueue,
 			'winwidget.events',
-			'payment.succeeded.v1'
+			'identity.user.changed.v1'
 		);
 		createdEventIds.push(durableEventId);
 		await prisma.outboxEvent.create({
 			data: {
 				id: durableEventId,
-				eventType: 'payment.succeeded.v1',
-				routingKey: 'payment.succeeded.v1',
+				eventType: 'identity.user.changed.v1',
+				routingKey: 'identity.user.changed.v1',
 				payload: {
 					schemaVersion: 1,
-					eventType: 'payment.succeeded.v1',
-					payment: {
-						id: durableEventId,
-						yookassaId: `ci-${durableEventId}`,
-						amount: '990.00',
-						plan: 'EASY',
-						billingPeriod: 'MONTHLY',
-						succeededAt: new Date().toISOString()
-					},
-					user: {
-						id: 'ci-restart-user',
-						name: 'CI',
-						email: 'ci-restart@example.com',
-						phone: null
-					},
-					subscription: { expiresAt: null }
+					eventType: 'identity.user.changed.v1',
+					eventId: durableEventId,
+					aggregateId: `ci-restart-${durableEventId}`,
+					aggregateVersion: '1',
+					sourceSequence: '1',
+					occurredAt: new Date().toISOString(),
+					tombstone: true,
+					state: null
 				}
 			}
 		});
@@ -1074,26 +890,18 @@ try {
 		await prisma.outboxEvent.create({
 			data: {
 				id: postRestartEventId,
-				eventType: 'payment.succeeded.v1',
-				routingKey: 'payment.succeeded.v1',
+				eventType: 'identity.user.changed.v1',
+				routingKey: 'identity.user.changed.v1',
 				payload: {
 					schemaVersion: 1,
-					eventType: 'payment.succeeded.v1',
-					payment: {
-						id: postRestartEventId,
-						yookassaId: `ci-${postRestartEventId}`,
-						amount: '990.00',
-						plan: 'EASY',
-						billingPeriod: 'MONTHLY',
-						succeededAt: new Date().toISOString()
-					},
-					user: {
-						id: 'ci-reconnected-user',
-						name: 'CI',
-						email: 'ci-reconnected@example.com',
-						phone: null
-					},
-					subscription: { expiresAt: null }
+					eventType: 'identity.user.changed.v1',
+					eventId: postRestartEventId,
+					aggregateId: `ci-reconnected-${postRestartEventId}`,
+					aggregateVersion: '1',
+					sourceSequence: '1',
+					occurredAt: new Date().toISOString(),
+					tombstone: true,
+					state: null
 				}
 			}
 		});
@@ -1204,7 +1012,7 @@ try {
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: retired Reporting snapshot, Core projection triggers, manual backup advisory lock, payment fan-out, Reporting audit Outbox -> idempotent ActivityLog and malformed -> isolated DLQ -> PostgreSQL, terminal database-backup retry/DLQ${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
+		`Messaging integration smoke passed: retired Reporting snapshot, retained identity producer, manual backup advisory lock, Reporting audit Outbox -> idempotent ActivityLog and malformed -> isolated DLQ -> PostgreSQL, terminal database-backup retry/DLQ${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);

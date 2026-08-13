@@ -4,6 +4,7 @@ import { BillingRabbitMqService } from '../messaging/billing-rabbitmq.service';
 import { BillingWorkerService } from '../messaging/billing-worker.service';
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
 import { BillingProviderWorkerService } from '../provider/billing-provider-worker.service';
+import { YooKassaService } from '../provider/yookassa.service';
 import { BillingRuntimeService } from '../runtime/billing-runtime.service';
 import { BillingSchedulerService } from '../scheduler/billing-scheduler.service';
 
@@ -15,6 +16,7 @@ export class BillingHealthService {
 		private readonly rabbit: BillingRabbitMqService,
 		private readonly worker: BillingWorkerService,
 		private readonly providerWorker: BillingProviderWorkerService,
+		private readonly yookassa: YooKassaService,
 		private readonly publisher: BillingOutboxPublisherService,
 		private readonly scheduler: BillingSchedulerService
 	) {}
@@ -58,7 +60,16 @@ export class BillingHealthService {
 				'Billing scheduler is not ready'
 			);
 		}
-		return this.status('ready');
+		return {
+			...this.status('ready'),
+			...(this.runtime.workerEnabled
+				? {
+						providers: {
+							yookassa: this.yookassa.isConfigured()
+						}
+					}
+				: {})
+		};
 	}
 
 	private status(status: 'ok' | 'ready') {

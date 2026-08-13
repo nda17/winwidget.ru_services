@@ -86,7 +86,7 @@ const createWidgetsOverview = () => ({
 	]
 });
 
-const createBillingOverview = () => ({
+const createBillingOverview = (withProviders = true) => ({
 	schemaVersion: 1 as const,
 	generatedAt: '2026-07-27T12:00:00.000Z',
 	outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
@@ -94,6 +94,7 @@ const createBillingOverview = () => ({
 	unresolvedFailures: 0,
 	retryingFailures: 0,
 	deliveredLast24Hours: 0,
+	...(withProviders ? { providers: { yookassa: true } } : {}),
 	heartbeats: [
 		'billing-api',
 		'billing-scheduler',
@@ -154,6 +155,7 @@ const createService = (
 		getOverview: jest.fn().mockResolvedValue(createBillingOverview())
 	}
 ) => {
+	const configService = { get: jest.fn() };
 	const prisma = {
 		$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 		outboxEvent: {
@@ -166,14 +168,14 @@ const createService = (
 	} as unknown as PrismaService;
 	const service = new HealthService(
 		prisma,
-		{ get: jest.fn() } as unknown as ConfigService,
+		configService as unknown as ConfigService,
 		rabbitManagement as RabbitMqManagementService,
 		notificationDelivery as NotificationDeliveryClientService,
 		widgets as WidgetsDeliveryFailuresClientService,
 		billingState as BillingCoreStateService,
 		billing as BillingMessagingClientService
 	);
-	return { service, prisma };
+	return { service, prisma, configService };
 };
 
 describe('HealthService notification delivery monitoring', () => {
@@ -412,7 +414,69 @@ describe('HealthService notification delivery monitoring', () => {
 		});
 	});
 
-	it('combines legacy and notification-delivery backlog without old moved failures', async () => {
+	it('reports YooKassa from Billing worker without reading Core secrets', async () => {
+		const billingOverview = createBillingOverview();
+		const { service, configService } = createService(
+			undefined,
+			undefined,
+			undefined,
+			{ isBillingOwner: jest.fn().mockResolvedValue(true) },
+			{ getOverview: jest.fn().mockResolvedValue(billingOverview) }
+		);
+
+		await expect(
+			(service as any).checkYooKassa((service as any).getBillingResult())
+		).resolves.toEqual({
+			id: 'yookassa',
+			title: 'ЮKassa',
+			status: 'ok',
+			message: 'Платёжные ключи настроены в Billing worker'
+		});
+		expect(configService.get).not.toHaveBeenCalled();
+	});
+
+	it('warns without crashing during a rolling Billing overview upgrade', async () => {
+		const billingOverview = createBillingOverview(false);
+		const { service } = createService(
+			undefined,
+			undefined,
+			undefined,
+			{ isBillingOwner: jest.fn().mockResolvedValue(true) },
+			{ getOverview: jest.fn().mockResolvedValue(billingOverview) }
+		);
+
+		await expect(
+			(service as any).checkYooKassa((service as any).getBillingResult())
+		).resolves.toMatchObject({
+			id: 'yookassa',
+			status: 'warning',
+			message: expect.stringContaining('ещё не опубликовал')
+		});
+	});
+
+	it('warns when Billing worker reports missing YooKassa credentials', async () => {
+		const billingOverview = {
+			...createBillingOverview(),
+			providers: { yookassa: false }
+		};
+		const { service } = createService(
+			undefined,
+			undefined,
+			undefined,
+			{ isBillingOwner: jest.fn().mockResolvedValue(true) },
+			{ getOverview: jest.fn().mockResolvedValue(billingOverview) }
+		);
+
+		await expect(
+			(service as any).checkYooKassa((service as any).getBillingResult())
+		).resolves.toMatchObject({
+			id: 'yookassa',
+			status: 'warning',
+			message: 'Платёжные ключи не настроены в Billing worker'
+		});
+	});
+
+	it('combines Core and service-owned backlog without Billing failures', async () => {
 		jest
 			.useFakeTimers()
 			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
@@ -431,7 +495,6 @@ describe('HealthService notification delivery monitoring', () => {
 				integration: {
 					in: [
 						'telegram-destination-unavailable',
-						'notification-delivery-outcome',
 						'campaign-admin-audit',
 						'reporting-admin-audit',
 						'widgets-admin-audit',
@@ -440,7 +503,6 @@ describe('HealthService notification delivery monitoring', () => {
 						'billing-subscription-projection',
 						'billing-affiliate-projection',
 						'billing-settings-projection',
-						'auto-renewal',
 						'database-backup'
 					]
 				}

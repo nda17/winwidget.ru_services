@@ -82,6 +82,9 @@ export interface BillingMessagingOverview {
 			number
 		>;
 	};
+	providers?: {
+		yookassa: boolean;
+	};
 	heartbeats?: BillingMessagingHeartbeat[];
 }
 
@@ -259,6 +262,13 @@ const isBillingOperational = (
 	);
 };
 
+const isBillingProviders = (
+	value: unknown
+): value is NonNullable<BillingMessagingOverview['providers']> =>
+	isRecord(value) &&
+	hasExactKeys(value, ['yookassa']) &&
+	typeof value.yookassa === 'boolean';
+
 const isOverview = (value: unknown): value is BillingMessagingOverview => {
 	const overviewKeys = [
 		'schemaVersion',
@@ -276,6 +286,9 @@ const isOverview = (value: unknown): value is BillingMessagingOverview => {
 		}
 		if (Object.prototype.hasOwnProperty.call(value, 'heartbeats')) {
 			expectedKeys.push('heartbeats');
+		}
+		if (Object.prototype.hasOwnProperty.call(value, 'providers')) {
+			expectedKeys.push('providers');
 		}
 	}
 	if (
@@ -302,6 +315,8 @@ const isOverview = (value: unknown): value is BillingMessagingOverview => {
 					value.operational.unresolvedFailuresByCategory
 				).reduce((total, count) => total + count, 0) ===
 					value.unresolvedFailures)) &&
+		(value.providers === undefined ||
+			isBillingProviders(value.providers)) &&
 		(value.heartbeats === undefined ||
 			(Array.isArray(value.heartbeats) &&
 				value.heartbeats.length === BILLING_MESSAGING_SERVICES.length &&

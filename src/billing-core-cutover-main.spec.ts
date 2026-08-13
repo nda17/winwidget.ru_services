@@ -1,6 +1,7 @@
 import {
 	assertBillingSnapshotContinuity,
 	assertAutoRenewalDeliveryTransfer,
+	calculateProjectionLag,
 	calculateSourceFingerprint,
 	parseBillingCoreCutoverArgs,
 	requireBillingSettingsSnapshot,
@@ -205,5 +206,36 @@ describe('Billing Core cutover CLI contract', () => {
 		expect(requireBillingSettingsSnapshot({ id: 'singleton' })).toEqual({
 			id: 'singleton'
 		});
+	});
+
+	it('keeps every projection lag term in the bigint domain', async () => {
+		const row = {
+			legacyPayments: 0n,
+			projectedPayments: 0n,
+			paymentIdLag: 0n,
+			paymentVersionLag: 0n,
+			legacySubscriptions: 0n,
+			projectedSubscriptions: 0n,
+			subscriptionIdLag: 0n,
+			subscriptionVersionLag: 0n,
+			legacyAffiliates: 0n,
+			projectedAffiliates: 0n,
+			affiliateIdLag: 0n,
+			affiliateVersionLag: 0n,
+			legacySettings: 1n,
+			projectedSettings: 1n,
+			settingsIdLag: 0n,
+			settingsVersionLag: 0n
+		};
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([row])
+		};
+
+		await expect(
+			calculateProjectionLag(transaction as never)
+		).resolves.toEqual({ total: 0n, row });
+		const query = transaction.$queryRaw.mock.calls[0][0];
+		expect(query.strings.join('')).toContain('THEN 0::BIGINT');
+		expect(query.strings.join('')).toContain('ELSE 1::BIGINT');
 	});
 });

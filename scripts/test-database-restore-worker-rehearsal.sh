@@ -2136,8 +2136,6 @@ expected_function_signatures AS (
     'public.reporting_emit_user_projection(text,boolean)',
     'public.reporting_user_projection_trigger()',
     'public.reporting_auth_identity_projection_trigger()',
-    'public.reporting_payment_projection_trigger()',
-    'public.reporting_subscription_projection_trigger()',
     'public.reporting_settings_projection_trigger()'
   ]::text[] ELSE ARRAY[]::text[] END) expected(signature)
 ),

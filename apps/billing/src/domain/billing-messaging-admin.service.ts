@@ -41,6 +41,11 @@ type BillingRoleReadiness = {
 	activeInstances: number;
 	lastSeenAt: string | null;
 	revision: string | null;
+	providers?: BillingProviderReadiness;
+};
+
+type BillingProviderReadiness = {
+	yookassa: boolean;
 };
 
 const EMPTY_FAILURE_CATEGORY_COUNTS = {
@@ -80,7 +85,7 @@ export class BillingMessagingAdminService {
 			retryingFailures,
 			deliveredLast24Hours,
 			failureCategoryGroups,
-			heartbeats
+			roleReadiness
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
 				by: ['status'],
@@ -182,6 +187,16 @@ export class BillingMessagingAdminService {
 		]
 			.filter((value): value is Date => Boolean(value))
 			.sort((left, right) => left.getTime() - right.getTime())[0];
+		const providers = roleReadiness.find(
+			item => item.service === 'billing-worker'
+		)?.providers;
+		const heartbeats = roleReadiness.map(item => ({
+			service: item.service,
+			status: item.status,
+			activeInstances: item.activeInstances,
+			lastSeenAt: item.lastSeenAt,
+			revision: item.revision
+		}));
 		return {
 			schemaVersion: 1 as const,
 			generatedAt: new Date().toISOString(),
@@ -195,6 +210,7 @@ export class BillingMessagingAdminService {
 				staleOutbox,
 				unresolvedFailuresByCategory
 			},
+			...(providers ? { providers } : {}),
 			heartbeats
 		};
 	}
@@ -221,7 +237,10 @@ export class BillingMessagingAdminService {
 				status: 'ok',
 				activeInstances: 1,
 				lastSeenAt: new Date().toISOString(),
-				revision: body.revision
+				revision: body.revision,
+				...(role === 'worker' && body.providers
+					? { providers: body.providers }
+					: {})
 			};
 		} catch {
 			return this.downRole(service);
@@ -236,16 +255,33 @@ export class BillingMessagingAdminService {
 		service: 'billing';
 		role: BillingProcessRole;
 		revision: string;
+		providers?: BillingProviderReadiness;
 	} {
+		const record = value as Record<string, unknown>;
 		return (
 			Boolean(value) &&
 			typeof value === 'object' &&
 			!Array.isArray(value) &&
-			(value as Record<string, unknown>).status === 'ready' &&
-			(value as Record<string, unknown>).service === 'billing' &&
-			(value as Record<string, unknown>).role === role &&
-			typeof (value as Record<string, unknown>).revision === 'string' &&
-			Boolean((value as Record<string, unknown>).revision)
+			record.status === 'ready' &&
+			record.service === 'billing' &&
+			record.role === role &&
+			typeof record.revision === 'string' &&
+			Boolean(record.revision) &&
+			(record.providers === undefined ||
+				(role === 'worker' && this.isProviderReadiness(record.providers)))
+		);
+	}
+
+	private isProviderReadiness(
+		value: unknown
+	): value is BillingProviderReadiness {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return false;
+		}
+		const record = value as Record<string, unknown>;
+		return (
+			Object.keys(record).length === 1 &&
+			typeof record.yookassa === 'boolean'
 		);
 	}
 

@@ -347,14 +347,19 @@ NODE
 		&& "$source_text" == *'billing_restore_stream_synthetic_dump'* \
 		&& "$source_text" == *'billing_restore_stream_synthetic_restore'* \
 		&& "$source_text" == *'billing_restore_verify_migration_ledger'* \
+		&& "$source_text" == *'checksum="${checksum%% *}"'* \
 		&& "$source_text" == *'billing_restore_verify_core_acl'* \
 		&& "$source_text" == *'billing_restore_verify_billing_acl'* \
+		&& "$source_text" == *"privilege.grantee = 0"* \
+		&& "$source_text" == *"acldefault('n', namespace.nspowner)"* \
 		&& "$source_text" == *'ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_billing_migration'* \
 		&& "$source_text" == *'CREATE FUNCTION billing.$probe_function()'* \
 		&& "$source_text" == *'has_function_privilege'* \
 		&& "$source_text" == *'billing_restore_verify_billing_invariants'* \
 		&& "$source_text" == *'billing_restore_verify_core_billing_parity'* \
 		&& "$source_text" == *'billing_restore_verify_pre_post_continuity'* \
+		&& "$source_text" == *'BILLING_PRE_OWNERSHIP="$billing_ownership"'* \
+		&& "$source_text" == *'BILLING_POST_OWNERSHIP="$billing_post_ownership"'* \
 		&& "$source_text" != *"$forbidden_docker_pull"* \
 		&& "$source_text" != *"$forbidden_docker_cp"* \
 		&& "$source_text" != *"$forbidden_env_file"* ]] || return 1
@@ -948,7 +953,8 @@ root="$1"
 find "$root" -mindepth 1 -maxdepth 1 -type d | LC_ALL=C sort |
 while IFS= read -r directory; do
   name="$(basename "$directory")"
-  checksum="$(sha256sum "$directory/migration.sql" | awk "{ print \\$1 }")"
+  checksum="$(sha256sum "$directory/migration.sql")"
+  checksum="${checksum%% *}"
   printf "%s|%s\\n" "$name" "$checksum"
 done
 ' sh prisma/migrations >"$image"
@@ -969,7 +975,17 @@ billing_restore_verify_billing_acl() {
 	state="$(billing_restore_query "$container" restore_db "
 SELECT
   (SELECT nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'winwidget_billing_migration') FROM pg_namespace WHERE nspname = 'billing'),
-  NOT has_schema_privilege('PUBLIC','billing','USAGE'),
+  NOT EXISTS (
+    SELECT 1
+    FROM pg_namespace AS namespace
+    CROSS JOIN LATERAL aclexplode(COALESCE(
+      namespace.nspacl,
+      acldefault('n', namespace.nspowner)
+    )) AS privilege
+    WHERE namespace.nspname = 'billing'
+      AND privilege.grantee = 0
+      AND privilege.privilege_type = 'USAGE'
+  ),
   NOT has_schema_privilege('winwidget_billing_runtime','billing','CREATE'),
   NOT has_database_privilege('winwidget_billing_runtime',current_database(),'CREATE'),
   has_table_privilege('winwidget_billing_runtime','billing.source_sequences','SELECT,INSERT,UPDATE,DELETE'),
@@ -1249,8 +1265,18 @@ export PRE_EVIDENCE_SHA="${pre_evidence_sha:-}"
 export CORE_PRE_SYSTEM_ID="${core_pre_system_id:-}" CORE_PRE_TABLE_COUNT="${core_pre_table_count:-}" CORE_PRE_TABLE_SHA="${core_pre_table_sha:-}" CORE_PRE_ROW_SHA="${core_pre_row_sha:-}" CORE_PRE_MIGRATION_COUNT="${core_pre_migration_count:-}" CORE_PRE_MIGRATION_SHA="${core_pre_migration_sha:-}"
 export BILLING_PRE_SYSTEM_ID="$billing_pre_system_id" BILLING_PRE_TABLE_COUNT="$billing_pre_table_count" BILLING_PRE_TABLE_SHA="$billing_pre_table_sha" BILLING_PRE_ROW_SHA="$billing_pre_row_sha" BILLING_PRE_MIGRATION_COUNT="$billing_pre_migration_count" BILLING_PRE_MIGRATION_SHA="$billing_pre_migration_sha"
 export BILLING_POST_SYSTEM_ID="${billing_post_system_id:-}" BILLING_POST_TABLE_COUNT="${billing_post_table_count:-}" BILLING_POST_TABLE_SHA="${billing_post_table_sha:-}" BILLING_POST_ROW_SHA="${billing_post_row_sha:-}" BILLING_POST_MIGRATION_COUNT="${billing_post_migration_count:-}" BILLING_POST_MIGRATION_SHA="${billing_post_migration_sha:-}"
-export CORE_OWNERSHIP="${core_anchor%%|*}" BILLING_PRE_OWNERSHIP="${billing_pre_ownership:-}" BILLING_POST_OWNERSHIP="${billing_post_ownership:-}"
-export BILLING_PRE_DB_PHASE="${billing_database_phase:-${billing_pre_database_phase:-}}" BILLING_POST_DB_PHASE="${billing_post_database_phase:-}"
+if [[ "$phase" == 'pre-cutover' ]]; then
+	export CORE_OWNERSHIP="${core_anchor%%|*}"
+	export BILLING_PRE_OWNERSHIP="$billing_ownership"
+	export BILLING_PRE_DB_PHASE="$billing_database_phase"
+	export BILLING_POST_OWNERSHIP='' BILLING_POST_DB_PHASE=''
+else
+	export CORE_OWNERSHIP=''
+	export BILLING_PRE_OWNERSHIP="$billing_pre_ownership"
+	export BILLING_POST_OWNERSHIP="$billing_post_ownership"
+	export BILLING_PRE_DB_PHASE="$billing_pre_database_phase"
+	export BILLING_POST_DB_PHASE="$billing_post_database_phase"
+fi
 
 node - "$evidence_stage" <<'NODE'
 const fs = require('node:fs');
