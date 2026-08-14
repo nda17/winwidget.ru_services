@@ -56,7 +56,6 @@ billing_cutover_next_post_restore_sha=''
 billing_cutover_next_post_receipt_sha=''
 
 readonly billing_cutover_confirmation='CUTOVER BILLING OWNERSHIP'
-readonly billing_core_cli='dist/src/billing-core-cutover-main.js'
 readonly billing_service_cli='dist/src/cutover-main.js'
 readonly billing_core_expand_migration='20260811000000_prepare_billing_service_ownership'
 readonly billing_worker_configure_pattern='^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$'
@@ -486,11 +485,7 @@ billing_cutover_run_cli() {
 }
 
 billing_cutover_run_core_cli() {
-	[[ $# -ge 2 ]] || return 1
-	local action="$1" destination="$2"
-	shift 2
-	billing_cutover_run_cli migration migrate "$billing_core_cli" "$action" \
-		"$destination" none "$@" --evidence-file /cutover/output.json
+	billing_cutover_fail 'Retired Core Billing cutover CLI is unavailable after source cleanup.'
 }
 
 billing_cutover_run_billing_cli() {
@@ -513,28 +508,7 @@ billing_cutover_run_billing_snapshot_cli() {
 }
 
 billing_cutover_run_core_snapshot_export() {
-	local stage
-	billing_cutover_require_artifact_root
-	stage="$(mktemp -d "$billing_artifact_root/.snapshot-stage.XXXXXX")"
-	billing_cutover_active_stage="$stage"
-	chown 0:1001 "$stage"
-	chmod 730 "$stage"
-	billing_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		--profile migration run --rm -T --no-deps \
-		--volume "$stage:/cutover" --entrypoint node migrate \
-		"$billing_core_cli" freeze-export --revision "$EXPECTED_REVISION" \
-		--generation "$(billing_cutover_marker_value generation)" \
-		--snapshot-file /cutover/output.json
-	[[ -f "$stage/output.json" && ! -L "$stage/output.json" &&
-		-s "$stage/output.json" ]] ||
-		billing_cutover_fail 'Core frozen exporter did not create the snapshot.' ||
-		return 1
-	chown 0:0 "$stage/output.json"
-	chmod 600 "$stage/output.json"
-	mv -f "$stage/output.json" "$billing_snapshot_file"
-	rmdir "$stage"
-	billing_cutover_active_stage=''
-	billing_cutover_validate_evidence_file "$billing_snapshot_file"
+	billing_cutover_fail 'Retired Core Billing snapshot export is unavailable after source cleanup.'
 }
 
 billing_cutover_validate_json_identity() {
@@ -1206,7 +1180,6 @@ billing_cutover_verify_candidate_images() {
 const fs = require("node:fs");
 for (const path of [
   "dist/src/outbox-publisher-main.js",
-  "dist/src/billing-core-cutover-main.js",
   "prisma/schema.prisma",
 ]) fs.accessSync(path);
 ' >/dev/null
@@ -4634,7 +4607,6 @@ billing_cutover_self_test() {
 		"$source" == *'--profile migration'* &&
 		"$source" == *'--profile billing-migration'* &&
 		"$source" == *'billing-migrate'* &&
-		"$source" == *'dist/src/billing-core-cutover-main.js'* &&
 		"$source" == *'dist/src/cutover-main.js'* &&
 		"$source" == *'freeze-export'* &&
 		"$source" == *'seed-core-read-events'* &&

@@ -11,8 +11,7 @@
 		"outDir": "./dist",
 		"baseUrl": "./",
 		"paths": {
-			"@/*": ["src/*"],
-			"@email/*": ["emails/*"]
+			"@/*": ["src/*"]
 		},
 		"incremental": true,
 		"skipLibCheck": true,
@@ -20,8 +19,7 @@
 		"noImplicitAny": false,
 		"strictBindCallApply": false,
 		"forceConsistentCasingInFileNames": false,
-		"noFallthroughCasesInSwitch": false,
-		"jsx": "react"
+		"noFallthroughCasesInSwitch": false
 	},
 	"exclude": ["apps", "node_modules", "dist"]
 }

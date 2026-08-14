@@ -13,10 +13,6 @@ import { ConfigService } from '@nestjs/config';
 const DEFAULT_INTERNAL_BASE_URL = 'http://127.0.0.1:4200';
 const DEFAULT_IDENTITY_BASE_URL = 'http://127.0.0.1:4900';
 const DEFAULT_TIMEOUT_MS = 10_000;
-// Core allows a snapshot transaction to run for at most 60 minutes. The
-// client keeps a bounded five-minute transport cushion so it cannot abort a
-// valid stream at the exact server-side deadline.
-const SNAPSHOT_TIMEOUT_MS = 65 * 60 * 1000;
 const PLACEHOLDER_INTERNAL_TOKENS = new Set([
 	'change_me',
 	'XYZXYZXYZ',
@@ -64,7 +60,7 @@ export class CoreInternalClient {
 		this.identityToken =
 			config.get<string>('IDENTITY_REPORTING_TOKEN')?.trim() || '';
 		if (
-			(runtime.apiEnabled || runtime.backfillEnabled) &&
+			runtime.apiEnabled &&
 			(this.token.length < 32 ||
 				PLACEHOLDER_INTERNAL_TOKENS.has(this.token))
 		) {
@@ -73,7 +69,7 @@ export class CoreInternalClient {
 			);
 		}
 		if (
-			(runtime.apiEnabled || runtime.backfillEnabled) &&
+			runtime.apiEnabled &&
 			(this.identityToken.length < 32 ||
 				PLACEHOLDER_INTERNAL_TOKENS.has(this.identityToken))
 		) {
@@ -159,47 +155,6 @@ export class CoreInternalClient {
 			);
 		}
 		return value;
-	}
-
-	async openProjectionSnapshot(
-		correlationId = createReportingCorrelationId()
-	): Promise<Response> {
-		let response: Response;
-		try {
-			response = await fetch(
-				`${this.baseUrl}/api/v1/internal/reporting/snapshot`,
-				{
-					method: 'GET',
-					headers: {
-						'x-winwidget-internal-token': this.token,
-						'x-correlation-id': correlationId,
-						accept: 'application/x-ndjson'
-					},
-					signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS)
-				}
-			);
-		} catch {
-			throw new Error('Projection snapshot service is unavailable');
-		}
-		if (!response.ok) {
-			throw new Error(
-				`Projection snapshot failed with HTTP ${response.status}`
-			);
-		}
-		if (
-			!response.headers
-				.get('content-type')
-				?.toLowerCase()
-				.includes('application/x-ndjson')
-		) {
-			throw new Error(
-				'Projection snapshot returned an invalid content type'
-			);
-		}
-		if (!response.body) {
-			throw new Error('Projection snapshot returned an empty body');
-		}
-		return response;
 	}
 
 	async reserveDailySummarySchedulePolicy(

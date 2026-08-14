@@ -73,8 +73,6 @@ WITH expected(
   encoded_arguments
 ) AS (
   VALUES
-    ('reporting_user_projection', 'User', 'public', 'reporting_user_projection_trigger', 0, ''),
-    ('reporting_auth_identity_projection', 'auth_identities', 'public', 'reporting_auth_identity_projection_trigger', 0, ''),
     ('reporting_settings_projection', 'telegram_bot_settings', 'public', 'reporting_settings_projection_trigger', 0, '')
 ), actual AS (
   SELECT
@@ -105,8 +103,8 @@ SELECT CASE WHEN
   AND EXISTS (
     SELECT 1 FROM reporting_producer_state WHERE id = 'singleton'
   )
-  AND (SELECT count(*) FROM expected) = 3
-  AND (SELECT count(*) FROM actual) = 3
+  AND (SELECT count(*) FROM expected) = 1
+  AND (SELECT count(*) FROM actual) = 1
   AND NOT EXISTS (
     SELECT 1
     FROM expected
@@ -237,9 +235,6 @@ WITH expected_functions(signature) AS (
     ('public.reporting_producers_enabled()'),
     ('public.reporting_iso_timestamp(timestamp without time zone)'),
     ('public.reporting_record_projection_event(text,text,text,text,jsonb,boolean)'),
-    ('public.reporting_emit_user_projection(text,boolean)'),
-    ('public.reporting_user_projection_trigger()'),
-    ('public.reporting_auth_identity_projection_trigger()'),
     ('public.reporting_settings_projection_trigger()')
 ), resolved_functions AS (
   SELECT signature, to_regprocedure(signature) AS function_oid
@@ -249,7 +244,7 @@ SELECT CASE WHEN
   (SELECT count(*) FROM pg_roles WHERE rolname IN (
     'winwidget_api_runtime', 'winwidget_maintenance', 'winwidget_backup'
   )) = 3
-  AND (SELECT count(*) FROM resolved_functions WHERE function_oid IS NOT NULL) = 7
+  AND (SELECT count(*) FROM resolved_functions WHERE function_oid IS NOT NULL) = 4
   AND NOT EXISTS (
     SELECT 1
     FROM resolved_functions resolved
@@ -312,9 +307,6 @@ SELECT CASE WHEN
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_producers_enabled()', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_iso_timestamp(timestamp without time zone)', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_record_projection_event(text,text,text,text,jsonb,boolean)', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.reporting_emit_user_projection(text,boolean)', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.reporting_user_projection_trigger()', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.reporting_auth_identity_projection_trigger()', 'EXECUTE')
   AND has_function_privilege('winwidget_api_runtime', 'public.reporting_settings_projection_trigger()', 'EXECUTE')
   AND has_table_privilege('winwidget_maintenance', 'public.reporting_producer_state', 'SELECT')
   AND has_table_privilege('winwidget_backup', 'public.reporting_producer_state', 'SELECT')
@@ -325,58 +317,6 @@ SQL
 )"
 	[[ "$state" == 'ready' ]] || {
 		echo 'Core Reporting producer runtime, maintenance or backup ACL is unsafe.' >&2
-		return 1
-	}
-}
-
-reporting_require_source_data_preflight() {
-	local state
-	state="$(reporting_core_psql --tuples-only --no-align --command '
-WITH settings AS (
-  SELECT *,
-    CASE WHEN "daily_summary_time" ~ '"'"'^([01][0-9]|2[0-3]):[0-5][0-9]$'"'"'
-      THEN split_part("daily_summary_time", '"'"':'"'"', 1)::INTEGER * 60 +
-        split_part("daily_summary_time", '"'"':'"'"', 2)::INTEGER
-    END AS summary_minutes,
-    CASE WHEN "database_backup_time" ~ '"'"'^([01][0-9]|2[0-3]):[0-5][0-9]$'"'"'
-      THEN split_part("database_backup_time", '"'"':'"'"', 1)::INTEGER * 60 +
-        split_part("database_backup_time", '"'"':'"'"', 2)::INTEGER
-    END AS backup_minutes
-  FROM "telegram_bot_settings"
-)
-SELECT CASE WHEN (
-  SELECT count(*) = 1
-    AND min("id") = '"'"'singleton'"'"'
-    AND bool_and("daily_summary_time" ~ '"'"'^([01][0-9]|2[0-3]):[0-5][0-9]$'"'"')
-    AND bool_and("database_backup_time" ~ '"'"'^([01][0-9]|2[0-3]):[0-5][0-9]$'"'"')
-    AND bool_and(char_length(COALESCE("daily_summary_chat_id", '"'"''"'"')) <= 255)
-    AND bool_and("reports_thread_id" IS NULL OR "reports_thread_id" > 0)
-    AND bool_and(
-      "operational_alerts_thread_id" IS NULL
-      OR "operational_alerts_thread_id" > 0
-    )
-    AND bool_and(
-      NOT "daily_summary_enabled"
-      OR (
-        char_length(btrim(COALESCE("daily_summary_chat_id", '"'"''"'"'))) BETWEEN 1 AND 255
-        AND "reports_thread_id" IS NOT NULL
-      )
-    )
-  FROM settings
-) AND NOT EXISTS (
-  SELECT 1
-  FROM settings
-  CROSS JOIN unnest(ARRAY[0, 15, 30, 45]) AS delay(minutes)
-  WHERE summary_minutes IS NULL
-    OR backup_minutes IS NULL
-    OR LEAST(
-      ABS(summary_minutes - ((backup_minutes + delay.minutes) % 1440)),
-      1440 - ABS(summary_minutes - ((backup_minutes + delay.minutes) % 1440))
-    ) < 5
-) THEN '"'"'ready'"'"' ELSE '"'"'invalid'"'"' END;
-')"
-	[[ "$state" == 'ready' ]] || {
-		echo 'Reporting activation requires one valid singleton Telegram settings row and a Daily Summary schedule at least five minutes from every backup attempt.' >&2
 		return 1
 	}
 }
@@ -473,14 +413,11 @@ WHERE table_schema = '"'"'public'"'"'
     '"'"'daily_summary_last_sent_at'"'"'
   );
 ')" || return 1
-	case "$legacy_column_count" in
-	5) printf 'transition\n' ;;
-	0) printf 'steady\n' ;;
-	*)
-		echo "Core Reporting settings schema is partial: expected 5 or 0 legacy columns, got ${legacy_column_count:-unavailable}." >&2
+	[[ "$legacy_column_count" == '0' ]] || {
+		echo "Core Reporting steady state requires zero legacy settings columns; got ${legacy_column_count:-unavailable}." >&2
 		return 1
-		;;
-	esac
+	}
+	printf 'steady\n'
 }
 
 reporting_binding_count() {
@@ -526,11 +463,7 @@ reporting_require_rabbitmq_topology() {
 			binding_count="$(reporting_binding_count \
 				"$bindings" winwidget.events "$queue" \
 				"$REPORTING_LEGACY_SETTINGS_ROUTING_KEY")" || return 1
-			if [[ "$settings_mode" == 'transition' && "$binding_count" != '1' ]]; then
-				echo 'Reporting transition requires the exact legacy settings binding.' >&2
-				return 1
-			fi
-			if [[ "$settings_mode" == 'steady' && "$binding_count" != '0' ]]; then
+			if [[ "$binding_count" != '0' ]]; then
 				echo 'Reporting steady state still has the legacy settings binding.' >&2
 				return 1
 			fi
@@ -575,12 +508,7 @@ SELECT
   to_char("updated_at" AT TIME ZONE '"'"'UTC'"'"', '"'"'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'"'"'),
   COALESCE((SELECT MAX("source_sequence")::TEXT FROM "reporting_projection_versions"), '"'"'0'"'"'),
   (SELECT COUNT(*)::TEXT FROM "outbox_events" WHERE "event_type" IN (
-    '"'"'identity.user.changed.v1'"'"',
-    '"'"'billing.payment.changed.v1'"'"',
-    '"'"'billing.subscription.changed.v1'"'"',
-    '"'"'widgets.widget.changed.v1'"'"',
-    '"'"'widgets.lead.changed.v1'"'"',
-    '"'"'reporting.settings.changed.v1'"'"'
+    '"'"'reporting.core-operational-routing.changed.v1'"'"'
   ) AND "status" <> '"'"'PUBLISHED'"'"'::"OutboxEventStatus")
 FROM "reporting_producer_state"
 WHERE "id" = '"'"'singleton'"'"';
@@ -615,12 +543,7 @@ SELECT CASE
     SELECT 1
     FROM "outbox_events"
     WHERE "event_type" IN (
-      '"'"'identity.user.changed.v1'"'"',
-      '"'"'billing.payment.changed.v1'"'"',
-      '"'"'billing.subscription.changed.v1'"'"',
-      '"'"'widgets.widget.changed.v1'"'"',
-      '"'"'widgets.lead.changed.v1'"'"',
-      '"'"'reporting.settings.changed.v1'"'"'
+      '"'"'reporting.core-operational-routing.changed.v1'"'"'
     )
   )
   AND (SELECT NOT "is_called" AND "last_value" = 1 FROM "reporting_source_sequence")
@@ -633,24 +556,6 @@ FROM "reporting_producer_state";
 		"$lifecycle_state" == 'never-activated' ||
 		"$lifecycle_state" == 'historical' ]] || return 1
 	printf '%s\n' "$lifecycle_state"
-}
-
-reporting_require_cutover_phase_for_enable() {
-	local expected_revision="$1" status phase revision
-	status="$(
-		APP_ROOT="$APP_ROOT" ENV_FILE="$ENV_FILE" \
-			REPORTING_CUTOVER_MARKER="$REPORTING_CUTOVER_MARKER" \
-			bash "$server_root/scripts/reporting-cutover-lifecycle.sh" status
-	)" || {
-		echo 'A valid Reporting cutover marker is required before producer activation.' >&2
-		return 1
-	}
-	phase="$(printf '%s\n' "$status" | awk -F= '$1 == "phase" { print $2; found += 1 } END { exit(found == 1 ? 0 : 1) }')"
-	revision="$(printf '%s\n' "$status" | awk -F= '$1 == "revision" { print $2; found += 1 } END { exit(found == 1 ? 0 : 1) }')"
-	[[ "$phase" == 'migrated' && "$revision" == "$expected_revision" ]] || {
-		echo 'Reporting producers may be enabled only at cutover phase=migrated for the exact revision.' >&2
-		return 1
-	}
 }
 
 reporting_producer_status() {
@@ -677,33 +582,8 @@ reporting_producer_status() {
 }
 
 reporting_producer_next_step() {
-	case "$1|${2:-}" in
-	false\|never)
-		printf 'enable_after_service_topology_and_migration_ready\n'
-		;;
-	false\|*)
-		printf 'fenced_target_reset_required_before_reactivation\n'
-		;;
-	true\|*)
-		printf 'capture_repeatable_read_snapshot_then_import_then_drain_entire_queue_then_reconcile_shadow\n'
-		;;
-	*)
-		return 1
-		;;
-	esac
-}
-
-reporting_require_projection_recovery_phase() {
-	local phase
-	reporting_cutover_validate_marker || {
-		echo 'A valid Reporting cutover marker is required for producer recovery.' >&2
-		return 1
-	}
-	phase="$(reporting_cutover_marker_value phase)"
-	[[ "$phase" == 'migrated' ]] || {
-		echo "Producer disable/reset is allowed only before the durable producers-enabled phase; current phase=$phase." >&2
-		return 1
-	}
+	[[ "$1" == 'true' || "$1" == 'false' ]] || return 1
+	printf 'steady_state_no_cutover_action\n'
 }
 
 reporting_normalize_integration_kinds() {
@@ -958,413 +838,34 @@ reporting_admin_audit_consumer_self_test() (
 	fi
 )
 
-reporting_enable_producers() {
-	local expected_revision="$1"
-	local live_revision result
-	[[ "${CONFIRM_REPORTING_PRODUCER_ENABLE:-}" == "enable:$expected_revision" ]] || {
-		echo "Set CONFIRM_REPORTING_PRODUCER_ENABLE=enable:$expected_revision for the reviewed phase-A activation." >&2
-		return 1
-	}
-	reporting_require_cutover_phase_for_enable "$expected_revision"
-	reporting_require_core_producer_migration
-	reporting_require_core_producer_acl
-	reporting_require_source_data_preflight
-	live_revision="$(reporting_require_dark_service_ready "$expected_revision")"
-	reporting_require_outbox_publisher_ready "$expected_revision"
-	reporting_require_rabbitmq_topology
-	reporting_require_admin_audit_consumer_ready "$expected_revision"
-	result="$(reporting_core_migration_psql --tuples-only --no-align --field-separator='|' <<'SQL'
-BEGIN;
-SET LOCAL lock_timeout = '30s';
-SET LOCAL statement_timeout = '45s';
-SELECT pg_advisory_xact_lock(hashtext('winwidget.reporting.producer.lifecycle.v1'));
--- This short activation barrier waits for every pre-activation writer and
--- blocks new source writes until enabled=true commits. Without it, a writer
--- which fired a disabled trigger but committed after the first repeatable-read
--- snapshot could be absent from both snapshot and Outbox.
-LOCK TABLE
-  "User",
-  "auth_identities",
-  "telegram_bot_settings"
-IN SHARE MODE;
--- Source writers lock this row FOR SHARE from their trigger. Lock source
--- tables before taking FOR UPDATE here so neither side can hold one lock while
--- waiting for the other.
-SELECT "enabled" FROM "reporting_producer_state" WHERE "id" = 'singleton' FOR UPDATE;
-DO $activation$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM "reporting_producer_state"
-    WHERE "id" = 'singleton'
-      AND NOT "enabled"
-      AND "activated_at" IS NOT NULL
-  ) THEN
-    RAISE EXCEPTION 'Reporting producers were previously disabled; fenced target reset is required before reactivation';
-  END IF;
-END
-$activation$;
--- Repeat the mutable source invariant after the writer barrier. The outer
--- preflight is only an early diagnostic and cannot authorize activation.
-DO $activation$
-BEGIN
-  IF NOT COALESCE((
-    WITH settings AS (
-      SELECT *,
-        CASE WHEN "daily_summary_time" ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
-          THEN split_part("daily_summary_time", ':', 1)::INTEGER * 60 +
-            split_part("daily_summary_time", ':', 2)::INTEGER
-        END AS summary_minutes,
-        CASE WHEN "database_backup_time" ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
-          THEN split_part("database_backup_time", ':', 1)::INTEGER * 60 +
-            split_part("database_backup_time", ':', 2)::INTEGER
-        END AS backup_minutes
-      FROM "telegram_bot_settings"
-    )
-    SELECT count(*) = 1
-      AND min("id") = 'singleton'
-      AND bool_and("daily_summary_time" ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$')
-      AND bool_and("database_backup_time" ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$')
-      AND bool_and(char_length(COALESCE("daily_summary_chat_id", '')) <= 255)
-      AND bool_and("reports_thread_id" IS NULL OR "reports_thread_id" > 0)
-      AND bool_and(
-        "operational_alerts_thread_id" IS NULL
-        OR "operational_alerts_thread_id" > 0
-      )
-      AND bool_and(
-        NOT "daily_summary_enabled"
-        OR (
-          char_length(btrim(COALESCE("daily_summary_chat_id", ''))) BETWEEN 1 AND 255
-          AND "reports_thread_id" IS NOT NULL
-        )
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM settings checked
-        CROSS JOIN unnest(ARRAY[0, 15, 30, 45]) AS delay(minutes)
-        WHERE checked.summary_minutes IS NULL
-          OR checked.backup_minutes IS NULL
-          OR LEAST(
-            ABS(checked.summary_minutes - ((checked.backup_minutes + delay.minutes) % 1440)),
-            1440 - ABS(checked.summary_minutes - ((checked.backup_minutes + delay.minutes) % 1440))
-          ) < 5
-      )
-    FROM settings
-  ), false) THEN
-    RAISE EXCEPTION 'Reporting activation requires one valid singleton Telegram settings row and a conflict-free backup schedule';
-  END IF;
-END
-$activation$;
-UPDATE "reporting_producer_state"
-SET "enabled" = true,
-    "activated_at" = clock_timestamp() AT TIME ZONE 'UTC',
-    "updated_at" = clock_timestamp() AT TIME ZONE 'UTC'
-WHERE "id" = 'singleton' AND NOT "enabled";
-SELECT
-  "enabled"::TEXT,
-  COALESCE((SELECT MAX("source_sequence")::TEXT FROM "reporting_projection_versions"), '0')
-FROM "reporting_producer_state"
-WHERE "id" = 'singleton';
-COMMIT;
-SQL
-)"
-	result="$(printf '%s\n' "$result" | grep -E '^true\|[0-9]+$' | tail -n 1)"
-	[[ "$result" =~ ^true\|[0-9]+$ ]] || {
-		echo 'Reporting producer activation transaction did not reach enabled state.' >&2
-		return 1
-	}
-	# A post-commit check detects, but cannot transactionally couple, an external
-	# Rabbit/service failure. Events already created remain durable in core Outbox.
-	reporting_require_dark_service_ready "$live_revision" >/dev/null
-	reporting_require_outbox_publisher_ready "$expected_revision"
-	reporting_require_rabbitmq_topology
-	echo "Reporting producers enabled at service revision $live_revision."
-	echo 'Next, capture the repeatable-read snapshot with per-aggregate versions, import it, then drain the entire queued stream.'
-	echo 'The global sourceSequence is diagnostic only: never purge, skip or discard queued events because of its value.'
-	echo 'Do not switch Gateway/frontend/scheduler or remove legacy Reporting code in phase A.'
-}
-
-reporting_disable_producers() {
-	local expected_revision="$1"
-	local result
-	[[ "${CONFIRM_REPORTING_PRODUCER_DISABLE:-}" == "disable:$expected_revision" ]] || {
-		echo "Set CONFIRM_REPORTING_PRODUCER_DISABLE=disable:$expected_revision to stop new projection events." >&2
-		return 1
-	}
-	reporting_require_projection_recovery_phase
-	reporting_require_core_producer_migration
-	result="$(reporting_core_migration_psql --tuples-only --no-align --command '
-BEGIN;
-SET LOCAL lock_timeout = '"'"'30s'"'"';
-SET LOCAL statement_timeout = '"'"'45s'"'"';
-SELECT pg_advisory_xact_lock(hashtext('"'"'winwidget.reporting.producer.lifecycle.v1'"'"'));
--- Match the activation barrier: every writer which observed enabled=true must
--- commit its Outbox event before the disabled boundary is reported.
-LOCK TABLE
-  "User",
-  "auth_identities",
-  "telegram_bot_settings"
-IN SHARE MODE;
-SELECT "enabled" FROM "reporting_producer_state" WHERE "id" = '"'"'singleton'"'"' FOR UPDATE;
-UPDATE "reporting_producer_state"
-SET "enabled" = false,
-    "updated_at" = clock_timestamp() AT TIME ZONE '"'"'UTC'"'"'
-WHERE "id" = '"'"'singleton'"'"' AND "enabled";
-SELECT "enabled"::TEXT FROM "reporting_producer_state" WHERE "id" = '"'"'singleton'"'"';
-COMMIT;
-')"
-	result="$(printf '%s\n' "$result" | grep -Fx 'false' | tail -n 1)"
-	[[ "$result" == 'false' ]] || {
-		echo 'Reporting producer disable transaction did not reach disabled state.' >&2
-		return 1
-	}
-	echo 'Reporting producers disabled. Existing core Outbox rows and every Reporting queue remain intact and must still be drained/reconciled.'
-	echo 'Plain re-enable is intentionally blocked. After all queues are drained, use the explicit fenced reset action to rebuild the target.'
-}
-
-reporting_require_reset_queue_boundary() {
-	local rabbitmq_container queues kind queue retry_index queue_name line
-	rabbitmq_container="$(reporting_compose ps --status running -q rabbitmq 2>/dev/null || true)"
-	[[ -n "$rabbitmq_container" && "$rabbitmq_container" != *$'\n'* ]] || {
-		echo 'Exactly one running RabbitMQ container is required for Reporting target reset.' >&2
-		return 1
-	}
-	queues="$(docker exec "$rabbitmq_container" rabbitmqctl --silent list_queues -p winwidget name messages_ready messages_unacknowledged consumers)"
-	while IFS='|' read -r kind queue _routing_key; do
-		[[ -n "$kind" ]] || continue
-		for queue_name in "$queue" "$queue.dead-letter"; do
-			line="$(printf '%s\n' "$queues" | grep -E "^${queue_name//./\.}[[:space:]]+0[[:space:]]+0[[:space:]]+0$" || true)"
-			[[ -n "$line" && "$line" != *$'\n'* ]] || {
-				echo "Reporting reset requires an empty queue with no consumers or unacked messages: $queue_name" >&2
-				return 1
-			}
-		done
-		for retry_index in 1 2 3; do
-			queue_name="$queue.retry.$retry_index"
-			line="$(printf '%s\n' "$queues" | grep -E "^${queue_name//./\.}[[:space:]]+0[[:space:]]+0[[:space:]]+0$" || true)"
-			[[ -n "$line" && "$line" != *$'\n'* ]] || {
-				echo "Reporting reset requires an empty retry queue with no consumers: $queue_name" >&2
-				return 1
-			}
-		done
-	done < <(reporting_queue_matrix)
-}
-
-reporting_require_reset_durable_state() {
-	local service_id core_state target_state
-	service_id="$(reporting_compose ps --status running -q reporting-service 2>/dev/null || true)"
-	[[ -z "$service_id" ]] || {
-		echo 'Stop the Reporting service before the fenced target reset.' >&2
-		return 1
-	}
-	core_state="$(reporting_core_psql --tuples-only --no-align --command '
-SELECT CASE WHEN
-  EXISTS (
-    SELECT 1 FROM "reporting_producer_state"
-	    WHERE "id" = '"'"'singleton'"'"'
-	      AND NOT "enabled"
-	      AND "activated_at" IS NOT NULL
-	      AND "daily_summary_owner" = '"'"'CORE'"'"'
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM "outbox_events"
-    WHERE "event_type" IN (
-      '"'"'identity.user.changed.v1'"'"',
-      '"'"'billing.payment.changed.v1'"'"',
-      '"'"'billing.subscription.changed.v1'"'"',
-      '"'"'widgets.widget.changed.v1'"'"',
-      '"'"'widgets.lead.changed.v1'"'"',
-      '"'"'reporting.settings.changed.v1'"'"'
-    ) AND "status" <> '"'"'PUBLISHED'"'"'::"OutboxEventStatus"
-  )
-THEN '"'"'clear'"'"' ELSE '"'"'unsafe'"'"' END;
-')"
-	[[ "$core_state" == 'clear' ]] || {
-		echo 'Reporting reset requires disabled previously-activated producers and zero unpublished Core projection Outbox rows.' >&2
-		return 1
-	}
-	target_state="$(reporting_database_psql REPORTING_MIGRATION_DATABASE_URL --tuples-only --no-align --command "
-SELECT CASE WHEN
-  NOT EXISTS (
-    SELECT 1 FROM reporting.outbox_events
-    WHERE status <> 'PUBLISHED'::reporting.\"ReportingOutboxStatus\"
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM reporting.consumer_receipts
-    WHERE status IN (
-      'PROCESSING'::reporting.\"ReportingConsumerReceiptStatus\",
-      'RETRY_SCHEDULED'::reporting.\"ReportingConsumerReceiptStatus\"
-    )
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM reporting.consumer_failures
-    WHERE status IN (
-      'OPEN'::reporting.\"ReportingConsumerFailureStatus\",
-      'RETRY_REQUESTED'::reporting.\"ReportingConsumerFailureStatus\"
-    )
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM reporting.backfill_runs
-    WHERE status = 'RUNNING'::reporting.\"ReportingBackfillStatus\"
-  )
-  AND NOT EXISTS (
-    SELECT 1 FROM reporting.reporting_settings
-    WHERE owner <> 'CORE_SHADOW'::reporting.\"ReportingOwner\"
-  )
-THEN 'clear' ELSE 'unsafe' END;
-")"
-	[[ "$target_state" == 'clear' ]] || {
-		echo 'Reporting target has unpublished work, active receipts/failures/backfill, or already owns Daily Summary.' >&2
-		return 1
-	}
-}
-
-reporting_reset_projection_target() {
-	local expected_revision="$1" result
-	[[ "${CONFIRM_REPORTING_PROJECTION_RESET:-}" == "reset:$expected_revision" ]] || {
-		echo "Set CONFIRM_REPORTING_PROJECTION_RESET=reset:$expected_revision for the reviewed destructive target rebuild." >&2
-		return 1
-	}
-	reporting_require_projection_recovery_phase
-	reporting_require_core_producer_migration
-	reporting_require_core_producer_acl
-	reporting_require_reset_durable_state
-	reporting_require_reset_queue_boundary
-	# The target is cleared before the Core activation marker. A failure between the two
-	# leaves producers disabled and plain re-enable blocked, so rerunning reset is
-	# safe. The version ledger and global sequence must remain intact because old
-	# published Outbox deduplication keys are permanent.
-	reporting_database_psql REPORTING_MIGRATION_DATABASE_URL --file - <<'SQL'
-BEGIN;
-SET LOCAL lock_timeout = '30s';
-SET LOCAL statement_timeout = '60s';
-LOCK TABLE reporting.reporting_settings IN ACCESS EXCLUSIVE MODE;
-DO $reset$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM reporting.reporting_settings
-    WHERE owner <> 'CORE_SHADOW'::reporting."ReportingOwner"
-  ) THEN
-    RAISE EXCEPTION 'Reporting target owns Daily Summary and cannot be reset';
-  END IF;
-END
-$reset$;
-TRUNCATE TABLE
-  reporting.projection_receipts,
-  reporting.projection_watermarks,
-  reporting.consumer_receipts,
-  reporting.consumer_failures,
-  reporting.backfill_runs,
-  reporting.identity_user_projections,
-  reporting.billing_payment_facts,
-  reporting.billing_subscription_projections,
-  reporting.widget_projections,
-  reporting.lead_facts;
-UPDATE reporting.reporting_settings
-SET source_aggregate_version = NULL,
-    source_sequence = NULL,
-    state_hash = NULL,
-    updated_at = CURRENT_TIMESTAMP
-WHERE owner = 'CORE_SHADOW'::reporting."ReportingOwner";
-COMMIT;
-SQL
-	result="$(reporting_core_migration_psql --tuples-only --no-align <<'SQL'
-BEGIN;
-SET LOCAL lock_timeout = '30s';
-SET LOCAL statement_timeout = '60s';
-SELECT pg_advisory_xact_lock(hashtext('winwidget.reporting.producer.lifecycle.v1'));
-LOCK TABLE
-	  "User", "auth_identities",
-	  "telegram_bot_settings"
-IN SHARE MODE;
-SELECT "enabled" FROM "reporting_producer_state" WHERE "id" = 'singleton' FOR UPDATE;
-DO $reset$
-BEGIN
-	  IF NOT EXISTS (
-	    SELECT 1 FROM "reporting_producer_state"
-	    WHERE "id" = 'singleton'
-	      AND NOT "enabled"
-	      AND "activated_at" IS NOT NULL
-	      AND "daily_summary_owner" = 'CORE'
-  ) THEN
-    RAISE EXCEPTION 'Reporting producer reset boundary changed';
-  END IF;
-END
-$reset$;
-	UPDATE "reporting_producer_state"
-SET "activated_at" = NULL,
-    "updated_at" = clock_timestamp() AT TIME ZONE 'UTC'
-WHERE "id" = 'singleton' AND NOT "enabled";
-SELECT CASE WHEN NOT "enabled" AND "activated_at" IS NULL THEN 'reset' ELSE 'unsafe' END
-FROM "reporting_producer_state" WHERE "id" = 'singleton';
-COMMIT;
-SQL
-)"
-	result="$(printf '%s\n' "$result" | grep -Fx 'reset' | tail -n 1)"
-	[[ "$result" == 'reset' ]] || {
-		echo 'Core Reporting producer activation marker reset did not reach the fenced disabled state.' >&2
-		return 1
-	}
-	echo 'Reporting projection target was reset behind a drained, producer-disabled boundary; the Core version ledger and source sequence were preserved.'
-	echo 'Restart the Reporting service in dark mode, run enable, then capture and import a new repeatable-read snapshot.'
-}
-
 reporting_producer_lifecycle_self_test() {
-	local barrier_count main_text matrix_count matrix_text source_text topology_text
-	matrix_text="$(reporting_queue_matrix)"
-	matrix_count="$(reporting_queue_matrix | wc -l | tr -d '[:space:]')"
-	[[ "$matrix_count" == '7' &&
-		"$matrix_text" == *'reportingSettings|winwidget.reporting.settings|reporting.core-operational-routing.changed.v1'* &&
-		"$matrix_text" != *'reportingSettings|winwidget.reporting.settings|reporting.settings.changed.v1'* &&
-		"$(reporting_producer_next_step false never)" == 'enable_after_service_topology_and_migration_ready' &&
-		"$(reporting_producer_next_step false 2026-07-31T00:00:00.000Z)" == 'fenced_target_reset_required_before_reactivation' &&
-		"$(reporting_producer_next_step true 2026-07-31T00:00:00.000Z)" == 'capture_repeatable_read_snapshot_then_import_then_drain_entire_queue_then_reconcile_shadow' ]] || {
-		echo 'Reporting producer phase-A ordering helper is invalid.' >&2
-		return 1
-	}
-	if reporting_producer_next_step invalid >/dev/null 2>&1; then
-		echo 'Reporting producer helper accepted an invalid state.' >&2
-		return 1
-	fi
+	[[ "$(reporting_producer_next_step true)" == 'steady_state_no_cutover_action' &&
+		"$(reporting_producer_next_step false)" == 'steady_state_no_cutover_action' ]]
+	! reporting_producer_next_step invalid >/dev/null 2>&1
 	reporting_admin_audit_consumer_self_test
 	(
-		reporting_core_psql() { printf '5\n'; }
-		[[ "$(reporting_settings_topology_mode)" == 'transition' ]]
 		reporting_core_psql() { printf '0\n'; }
 		[[ "$(reporting_settings_topology_mode)" == 'steady' ]]
-		reporting_core_psql() { printf '2\n'; }
-		if reporting_settings_topology_mode >/dev/null 2>&1; then
-			echo 'Reporting topology mode self-test accepted a partial Core schema.' >&2
-			return 1
-		fi
+		reporting_core_psql() { printf '5\n'; }
+		! reporting_settings_topology_mode >/dev/null 2>&1
 	)
-	source_text="$(declare -f reporting_enable_producers reporting_disable_producers reporting_require_dark_service_ready reporting_require_admin_audit_consumer_ready reporting_require_cutover_phase_for_enable)"
-	topology_text="$(declare -f reporting_require_rabbitmq_topology)"
+	local migration_text acl_text main_text
+	migration_text="$(declare -f reporting_require_core_producer_migration)"
+	acl_text="$(declare -f reporting_require_core_producer_acl)"
 	main_text="$(declare -f reporting_producer_lifecycle_main)"
-	barrier_count="$(printf '%s\n' "$source_text" | grep -c 'IN SHARE MODE')"
-	[[ "$source_text" == *'CONFIRM_REPORTING_PRODUCER_ENABLE'* &&
-			"$source_text" == *'REPORTING_SCHEDULER_ENABLED'* &&
-			"$source_text" == *'winwidget.admin.audit.reporting.v1'* &&
-			"$source_text" == *'reporting_require_admin_audit_consumer_ready'* &&
-			"$source_text" == *"phase=migrated"* &&
-			"$barrier_count" == '2' &&
-			"$source_text" == *'drain the entire queued stream'* &&
-			"$topology_text" == *'REPORTING_LEGACY_SETTINGS_ROUTING_KEY'* &&
-			"$topology_text" == *'REPORTING_OPERATIONAL_ROUTING_KEY'* &&
-			"$topology_text" == *"settings_mode\" == 'steady'"* &&
-		"$main_text" == *'reporting_export_pinned_runtime_identity "$revision"'* &&
-		"$main_text" == *'reporting_assert_no_ambient_compose_overrides'* &&
-		"$main_text" == *'NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION'* &&
-		"$main_text" == *'CAMPAIGNS_IMAGE CAMPAIGNS_REVISION'* &&
-		"$main_text" == *'DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION'* &&
-		"$source_text" != *'DELETE FROM "reporting_projection_versions"'* &&
-		"$source_text" != *'TRUNCATE'* ]] || {
-		echo 'Reporting producer self-test found an unsafe phase-A action.' >&2
-		return 1
-	}
-	echo 'Reporting producer enable-before-snapshot ordering and non-destructive guards verified.'
+	[[ "$migration_text" == *"(SELECT count(*) FROM expected) = 1"* &&
+		"$migration_text" == *"(SELECT count(*) FROM actual) = 1"* &&
+		"$migration_text" == *"'reporting_settings_projection'"* &&
+		"$migration_text" != *"'reporting_user_projection'"* &&
+		"$migration_text" != *"'reporting_auth_identity_projection'"* &&
+		"$acl_text" == *'function_oid IS NOT NULL) = 4'* &&
+		"$acl_text" == *'reporting_settings_projection_trigger()'* &&
+		"$acl_text" != *'reporting_emit_user_projection'* &&
+		"$main_text" == *'status)'* &&
+		"$main_text" != *'enable)'* && "$main_text" != *'disable)'* &&
+		"$main_text" != *'reset)'* ]] || return 1
+	printf 'reporting_producer_lifecycle_self_test=passed\n'
 }
-
 reporting_producer_lifecycle_main() {
 	local action="${1:-}"
 	local revision key
@@ -1374,11 +875,11 @@ reporting_producer_lifecycle_main() {
 		reporting_producer_lifecycle_self_test
 		return
 		;;
-	status | enable | disable | reset)
+	status)
 		[[ $# == 1 ]] || return 1
 		;;
 	*)
-		echo "Usage: $0 status | EXPECTED_REVISION=<sha> $0 enable | EXPECTED_REVISION=<sha> $0 disable | EXPECTED_REVISION=<sha> $0 reset | $0 --self-test" >&2
+		echo "Usage: $0 status | $0 --self-test" >&2
 		return 1
 		;;
 	esac
@@ -1386,12 +887,7 @@ reporting_producer_lifecycle_main() {
 		echo 'Reporting producer lifecycle must run as root.' >&2
 		return 1
 	}
-	if [[ "$action" == 'status' ]]; then
-		revision="$(git -C "$server_root" rev-parse HEAD)"
-	else
-		revision="${EXPECTED_REVISION:-}"
-		reporting_validate_exact_revision "$revision"
-	fi
+	revision="$(git -C "$server_root" rev-parse HEAD)"
 	reporting_export_pinned_runtime_identity "$revision"
 	reporting_validate_production_files
 	reporting_assert_no_ambient_compose_overrides \
@@ -1403,42 +899,12 @@ reporting_producer_lifecycle_main() {
 		MAINTENANCE_DATABASE_URL_PRODUCTION DATABASE_BACKUP_URL; do
 		reporting_require_env_key "$key"
 	done
-	if [[ "$action" != 'disable' ]]; then
-		for key in REPORTING_PORT REPORTING_SCHEDULER_ENABLED; do
-			reporting_require_env_key "$key"
-		done
-	fi
-	if [[ "$action" == 'enable' || "$action" == 'reset' ]]; then
-		for key in REPORTING_POSTGRES_IMAGE REPORTING_POSTGRES_PORT \
-			REPORTING_POSTGRES_DATA_VOLUME REPORTING_POSTGRES_ADMIN_USER \
-			REPORTING_POSTGRES_ADMIN_PASSWORD_FILE REPORTING_DATABASE_URL \
-			REPORTING_MIGRATION_DATABASE_URL REPORTING_BACKUP_URL; do
-			reporting_require_env_key "$key"
-		done
-	fi
-	if [[ "$action" != 'status' ]]; then
-		acquire_production_deploy_lock "Reporting producer $action"
-		# database-restore-production-guard: before-mutation
-		database_restore_guard_assert_before_mutation \
-			healthy-required "$REPORTING_ENV_FILE"
-	fi
+	for key in REPORTING_PORT REPORTING_SCHEDULER_ENABLED; do
+		reporting_require_env_key "$key"
+	done
 	assert_core_database_url_boundaries
 	assert_core_database_postgres_identity
-	if [[ "$action" == 'status' ]]; then
-		reporting_producer_status
-		return
-	fi
-	if [[ "$action" == 'enable' || "$action" == 'reset' ]]; then
-		reporting_initialize_database_guard "Reporting producer $action"
-	fi
-	case "$action" in
-	enable) reporting_enable_producers "$revision" ;;
-	disable) reporting_disable_producers "$revision" ;;
-	reset) reporting_reset_projection_target "$revision" ;;
-	esac
-	if [[ "$action" == 'enable' || "$action" == 'reset' ]]; then
-		reporting_verify_database_lifecycle_unchanged
-	fi
+	reporting_producer_status
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

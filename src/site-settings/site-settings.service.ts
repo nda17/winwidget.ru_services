@@ -147,24 +147,6 @@ export class SiteSettingsService {
 				: {}),
 			...(dto.snowflakeEnabled !== undefined
 				? { snowflakeEnabled: dto.snowflakeEnabled }
-				: {}),
-			...(dto.recaptchaEnabled !== undefined
-				? { recaptchaEnabled: dto.recaptchaEnabled }
-				: {}),
-			...(dto.googleAuthEnabled !== undefined
-				? { googleAuthEnabled: dto.googleAuthEnabled }
-				: {}),
-			...(dto.yandexAuthEnabled !== undefined
-				? { yandexAuthEnabled: dto.yandexAuthEnabled }
-				: {}),
-			...(dto.githubAuthEnabled !== undefined
-				? { githubAuthEnabled: dto.githubAuthEnabled }
-				: {}),
-			...(dto.vkAuthEnabled !== undefined
-				? { vkAuthEnabled: dto.vkAuthEnabled }
-				: {}),
-			...(dto.telegramAuthEnabled !== undefined
-				? { telegramAuthEnabled: dto.telegramAuthEnabled }
 				: {})
 		};
 	}
@@ -189,16 +171,7 @@ export class SiteSettingsService {
 		dto: UpdateSiteSettingsDto,
 		settings: SiteSettings
 	) {
-		const booleanFields = [
-			'bannerEnabled',
-			'snowflakeEnabled',
-			'recaptchaEnabled',
-			'googleAuthEnabled',
-			'yandexAuthEnabled',
-			'githubAuthEnabled',
-			'vkAuthEnabled',
-			'telegramAuthEnabled'
-		] as const;
+		const booleanFields = ['bannerEnabled', 'snowflakeEnabled'] as const;
 		return {
 			changedFields: Object.keys(dto),
 			bannerTextChanged: typeof dto.bannerText === 'string',

@@ -54,16 +54,12 @@ REPORTING_CLEANUP_PRESERVED_PATHS=(
 	apps/reporting/prisma/schema.prisma
 	prisma/migrations/20260731010000_add_reporting_projection_producers
 	src/messaging/reporting-admin-audit-event.ts
-	src/reporting-internal/reporting-auth-introspection.service.spec.ts
-	src/reporting-internal/reporting-auth-introspection.service.ts
 	src/reporting-internal/reporting-internal-token.guard.spec.ts
 	src/reporting-internal/reporting-internal-token.guard.ts
 	src/reporting-internal/reporting-internal.constants.ts
 	src/reporting-internal/reporting-internal.controller.spec.ts
 	src/reporting-internal/reporting-internal.controller.ts
 	src/reporting-internal/reporting-internal.module.ts
-	src/reporting-internal/reporting-producer-migration.spec.ts
-	src/reporting-internal/reporting-projection-snapshot.service.spec.ts
 	src/reporting-internal/reporting-schedule-authority.service.spec.ts
 )
 REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS=(
@@ -74,7 +70,6 @@ REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS=(
 	apps/reporting/src/projections/projection.service.ts
 	apps/reporting/src/projections/reporting-event.contract.spec.ts
 	apps/reporting/src/projections/reporting-event.contract.ts
-	apps/reporting/src/shadow-evidence/reporting-shadow-evidence.service.ts
 	apps/reporting/test/integration/reporting.integration.mjs
 )
 REPORTING_CLEANUP_MUTABLE_CORE_PATHS=(
@@ -98,7 +93,6 @@ REPORTING_CLEANUP_MUTABLE_CORE_PATHS=(
 	src/messaging/messaging.constants.ts
 	src/messaging/notification-delivery-event.ts
 	src/messaging/reporting-projection-contract.spec.ts
-	src/reporting-internal/reporting-projection-snapshot.service.ts
 	src/reporting-internal/reporting-schedule-authority.service.ts
 	src/scheduled-jobs/scheduled-jobs.service.spec.ts
 	src/scheduled-jobs/scheduled-jobs.types.ts
@@ -118,13 +112,10 @@ REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS=(
 	scripts/reporting-database-lifecycle.sh
 	scripts/reporting-producer-lifecycle.sh
 	scripts/test-messaging-integration.mjs
-	scripts/test-reporting-cutover-rehearsal.sh
 	scripts/test-reporting-production-scripts.sh
 )
 REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS=(
 	scripts/generate-reporting-frontend-runtime-attestation.sh
-	scripts/run-reporting-restore-cutover-smoke.sh
-	scripts/run-reporting-route-cutover-smoke.sh
 	scripts/run-reporting-scheduler-cutover-smoke.sh
 )
 REPORTING_CLEANUP_TRUSTED_PATHS=(
@@ -531,7 +522,6 @@ SELECT CASE WHEN
   to_regclass('reporting.identity_user_projections') IS NOT NULL
   AND to_regclass('reporting.projection_receipts') IS NOT NULL
   AND to_regclass('reporting.consumer_receipts') IS NOT NULL
-  AND to_regclass('reporting.backfill_runs') IS NOT NULL
   AND to_regclass('reporting.reporting_settings') IS NOT NULL
   AND EXISTS (
     SELECT 1 FROM information_schema.columns
@@ -581,41 +571,8 @@ FROM "reporting_producer_state" WHERE "id" = '"'"'singleton'"'"';
 	reporting_cutover_advance_marker producers-enabled
 }
 
-reporting_cutover_run_backfill() {
-	local previous_snapshot result snapshot_id sha256 revision system_identifier
-	reporting_cutover_require_phase producers-enabled
-	previous_snapshot="$(reporting_database_psql REPORTING_DATABASE_URL --tuples-only --no-align --command "
-SELECT COALESCE((SELECT snapshot_id::TEXT FROM reporting.backfill_runs
-WHERE status = 'VERIFIED'::reporting.\"ReportingBackfillStatus\"
-ORDER BY verified_at DESC NULLS LAST LIMIT 1), 'none');
-")"
-	reporting_compose run --rm --no-deps \
-		-e REPORTING_PROCESS_ROLE=backfill \
-		--entrypoint node reporting-service dist/src/backfill/main.js
-	result="$(reporting_database_psql REPORTING_DATABASE_URL --tuples-only --no-align --field-separator='|' --command "
-SELECT snapshot_id::TEXT, btrim(sha256), record_count::TEXT
-FROM reporting.backfill_runs
-WHERE status = 'VERIFIED'::reporting.\"ReportingBackfillStatus\"
-  AND sha256 = expected_sha256
-ORDER BY verified_at DESC NULLS LAST
-LIMIT 1;
-")"
-	IFS='|' read -r snapshot_id sha256 _record_count <<<"$result"
-	[[ "$snapshot_id" =~ ^[0-9a-f-]{36}$ && "$snapshot_id" != "$previous_snapshot" &&
-		"$sha256" =~ ^[0-9a-f]{64}$ ]] || {
-		echo 'Backfill did not create a new checksum-verified snapshot.' >&2
-		return 1
-	}
-	revision="$(reporting_cutover_marker_value revision)"
-	system_identifier="$(reporting_cutover_marker_value database_system_identifier)"
-	reporting_cutover_write_marker backfilled "$revision" "$system_identifier" \
-		"$snapshot_id" "$sha256" pending pending pending pending pending pending pending \
-		pending pending pending pending pending pending
-	echo "Reporting backfill verified snapshot=$snapshot_id sha256=$sha256."
-}
-
 reporting_cutover_require_empty_projection_queues() {
-	local rabbitmq_container queues kind queue _routing_key retry_index name line
+	local rabbitmq_container queues kind queue _routing_key name line
 	rabbitmq_container="$(reporting_compose ps --status running -q rabbitmq 2>/dev/null || true)"
 	[[ -n "$rabbitmq_container" && "$rabbitmq_container" != *$'\n'* ]] || return 1
 	queues="$(docker exec "$rabbitmq_container" rabbitmqctl --silent list_queues -p winwidget name messages_ready messages_unacknowledged consumers)"
@@ -630,121 +587,10 @@ reporting_cutover_require_empty_projection_queues() {
 	done < <(reporting_queue_matrix)
 }
 
-reporting_cutover_core_projection_barrier_state() {
-	reporting_core_psql --tuples-only --no-align --field-separator='|' --command '
-SELECT
-  COALESCE(MAX("source_sequence") FILTER (
-    WHERE "aggregate_type" = '"'"'identity.user'"'"'
-  ), 0)::TEXT,
-  COALESCE(MAX("source_sequence") FILTER (
-    WHERE "aggregate_type" = '"'"'billing.payment'"'"'
-  ), 0)::TEXT,
-  COALESCE(MAX("source_sequence") FILTER (
-    WHERE "aggregate_type" = '"'"'billing.subscription'"'"'
-  ), 0)::TEXT,
-  COALESCE(MAX("source_sequence") FILTER (
-    WHERE "aggregate_type" LIKE '"'"'widgets.widget.%'"'"'
-  ), 0)::TEXT,
-  COALESCE(MAX("source_sequence") FILTER (
-    WHERE "aggregate_type" LIKE '"'"'widgets.lead.%'"'"'
-  ), 0)::TEXT,
-  COALESCE(MAX("source_sequence") FILTER (
-    WHERE "aggregate_type" IN (
-      '"'"'reporting.settings'"'"',
-      '"'"'reporting.core-operational-routing.changed.v1'"'"'
-    )
-  ), 0)::TEXT,
-  CASE WHEN NOT EXISTS (
-    SELECT 1 FROM "outbox_events"
-    WHERE "event_type" IN (
-      '"'"'identity.user.changed.v1'"'"',
-      '"'"'billing.payment.changed.v1'"'"',
-      '"'"'billing.subscription.changed.v1'"'"',
-      '"'"'widgets.widget.changed.v1'"'"',
-      '"'"'widgets.lead.changed.v1'"'"',
-      '"'"'reporting.settings.changed.v1'"'"',
-      '"'"'reporting.core-operational-routing.changed.v1'"'"'
-    ) AND "status" <> '"'"'PUBLISHED'"'"'::"OutboxEventStatus"
-  ) THEN '"'"'clear'"'"' ELSE '"'"'pending'"'"' END,
-  CASE WHEN EXISTS (
-    SELECT 1 FROM "reporting_producer_state"
-    WHERE "id" = '"'"'singleton'"'"'
-      AND "enabled" = TRUE
-      AND "activated_at" IS NOT NULL
-  ) THEN '"'"'ready'"'"' ELSE '"'"'unsafe'"'"' END
-FROM "reporting_projection_versions";
-'
-}
-
-reporting_cutover_target_projection_barrier_state() {
-	[[ $# == 6 ]] || return 1
-	local identity_user="$1" billing_payment="$2" billing_subscription="$3"
-	local widget="$4" lead="$5" reporting_settings="$6"
-	local snapshot_id sha256 value
-	for value in "$identity_user" "$billing_payment" "$billing_subscription" \
-		"$widget" "$lead" "$reporting_settings"; do
-		[[ "$value" =~ ^[0-9]+$ ]] || return 1
-	done
-	snapshot_id="$(reporting_cutover_marker_value backfill_snapshot_id)"
-	sha256="$(reporting_cutover_marker_value backfill_sha256)"
+reporting_cutover_projection_delivery_state() {
 	reporting_database_psql REPORTING_DATABASE_URL --tuples-only --no-align --command "
-WITH snapshot AS (
-  SELECT watermarks
-  FROM reporting.backfill_runs
-  WHERE snapshot_id = '$snapshot_id'::UUID
-    AND btrim(sha256) = '$sha256'
-    AND btrim(expected_sha256) = '$sha256'
-    AND status = 'VERIFIED'::reporting.\"ReportingBackfillStatus\"
-), expected(stream, source_sequence) AS (
-  VALUES
-    ('identityUser', $identity_user::NUMERIC),
-    ('billingPayment', $billing_payment::NUMERIC),
-    ('billingSubscription', $billing_subscription::NUMERIC),
-    ('widget', $widget::NUMERIC),
-    ('lead', $lead::NUMERIC),
-    ('reportingSettings', $reporting_settings::NUMERIC)
-), snapshot_watermarks(stream, value) AS (
-  SELECT entry.key, entry.value
-  FROM snapshot, LATERAL jsonb_each_text(snapshot.watermarks) entry
-), malformed_snapshot_watermark AS (
-  SELECT 1
-  FROM expected
-  FULL JOIN snapshot_watermarks USING (stream)
-  WHERE expected.stream IS NULL
-    OR snapshot_watermarks.stream IS NULL
-    OR CASE
-      WHEN snapshot_watermarks.value ~ '^[0-9]+$'
-        THEN snapshot_watermarks.value::NUMERIC > expected.source_sequence
-      ELSE TRUE
-    END
-), mismatched_watermark AS (
-  SELECT 1
-  FROM expected
-  LEFT JOIN reporting.projection_watermarks actual
-    ON actual.stream = expected.stream
-  WHERE COALESCE(actual.source_sequence, 0) <> expected.source_sequence
-)
 SELECT CASE WHEN
-  (SELECT count(*) FROM snapshot) = 1
-  AND NOT EXISTS (SELECT 1 FROM malformed_snapshot_watermark)
-  AND NOT EXISTS (SELECT 1 FROM mismatched_watermark)
-  AND NOT EXISTS (
-    SELECT 1 FROM reporting.projection_watermarks
-    WHERE stream NOT IN (
-      'identityUser', 'billingPayment', 'billingSubscription',
-      'widget', 'lead', 'reportingSettings'
-    )
-  )
-  AND NOT EXISTS (
-    SELECT 1
-    FROM reporting.projection_watermarks watermark
-    LEFT JOIN reporting.projection_receipts receipt
-      ON receipt.event_id = watermark.event_id
-      AND receipt.projection = watermark.stream
-      AND receipt.source_sequence = watermark.source_sequence
-    WHERE receipt.id IS NULL
-  )
-  AND NOT EXISTS (
+  NOT EXISTS (
     SELECT 1 FROM reporting.consumer_receipts
     WHERE status IN (
       'PROCESSING'::reporting.\"ReportingConsumerReceiptStatus\",
@@ -762,18 +608,12 @@ SELECT CASE WHEN
     SELECT 1 FROM reporting.outbox_events
     WHERE status <> 'PUBLISHED'::reporting.\"ReportingOutboxStatus\"
   )
-  AND NOT EXISTS (
-    SELECT 1 FROM reporting.backfill_runs
-    WHERE status = 'RUNNING'::reporting.\"ReportingBackfillStatus\"
-  )
 THEN 'clear' ELSE 'pending' END;
 "
 }
 
 reporting_cutover_require_projection_barrier() {
-	local active_revision first_state phase second_state target_state value
-	local identity_user billing_payment billing_subscription widget lead
-	local reporting_settings outbox_state producer_state
+	local active_revision first_state second_state phase
 	phase="$(reporting_cutover_marker_value phase)"
 	case "$phase" in
 	cleanup-staged | source-cleaned | complete)
@@ -786,217 +626,25 @@ reporting_cutover_require_projection_barrier() {
 	reporting_require_core_producer_acl
 	reporting_require_outbox_publisher_ready "$active_revision"
 	reporting_require_rabbitmq_topology
-	first_state="$(reporting_cutover_core_projection_barrier_state)" || return 1
-	IFS='|' read -r identity_user billing_payment billing_subscription widget lead \
-		reporting_settings outbox_state producer_state <<<"$first_state"
-	for value in "$identity_user" "$billing_payment" "$billing_subscription" \
-		"$widget" "$lead" "$reporting_settings"; do
-		[[ "$value" =~ ^[0-9]+$ ]] || return 1
-	done
-	[[ "$outbox_state" == 'clear' ]] || {
-		echo 'Core Reporting projection Outbox is not fully published.' >&2
-		return 1
-	}
-	[[ "$producer_state" == 'ready' ]] || {
-		echo 'Core Reporting projection producers are not durably enabled.' >&2
-		return 1
-	}
 	reporting_cutover_require_empty_projection_queues || {
 		echo 'Reporting main/retry/DLQ queues are not drained with active main consumers.' >&2
 		return 1
 	}
-	target_state="$(reporting_cutover_target_projection_barrier_state \
-		"$identity_user" "$billing_payment" "$billing_subscription" \
-		"$widget" "$lead" "$reporting_settings")" || return 1
-	[[ "$target_state" == 'clear' ]] || {
-		echo 'Reporting watermarks, receipts, failures, Outbox or backfill are not caught up to Core.' >&2
-		return 1
-	}
-	second_state="$(reporting_cutover_core_projection_barrier_state)" || return 1
-	[[ "$second_state" == "$first_state" ]] || {
-		echo 'Core Reporting projection barrier changed during verification.' >&2
+	first_state="$(reporting_cutover_projection_delivery_state)" || return 1
+	[[ "$first_state" == 'clear' ]] || {
+		echo 'Reporting receipts, failures or Outbox are not drained.' >&2
 		return 1
 	}
 	reporting_cutover_require_empty_projection_queues || {
 		echo 'Reporting projection queues changed during barrier verification.' >&2
 		return 1
 	}
-	target_state="$(reporting_cutover_target_projection_barrier_state \
-		"$identity_user" "$billing_payment" "$billing_subscription" \
-		"$widget" "$lead" "$reporting_settings")" || return 1
-	[[ "$target_state" == 'clear' ]] || {
-		echo 'Reporting projection state changed during barrier verification.' >&2
+	second_state="$(reporting_cutover_projection_delivery_state)" || return 1
+	[[ "$second_state" == "$first_state" ]] || {
+		echo 'Reporting delivery state changed during barrier verification.' >&2
 		return 1
 	}
 }
-
-reporting_cutover_verify_caught_up() {
-	reporting_cutover_require_phase backfilled
-	reporting_cutover_require_projection_barrier
-	reporting_cutover_advance_marker caught-up
-	echo 'Reporting caught-up barrier passed: exact Core/target watermarks, Outbox, Rabbit queues, receipts, failures and backfill are clear.'
-}
-
-reporting_cutover_validate_shadow_evidence() {
-	local evidence="$1" revision="$2" image_id="$3"
-	local core_system_identifier="$4" reporting_system_identifier="$5"
-	local backfill_snapshot_id="$6" backfill_sha256="$7"
-	[[ -f "$evidence" && ! -L "$evidence" &&
-		"$(reporting_stat_mode "$evidence")" == '600' &&
-		"$(reporting_stat_owner "$evidence")" == '0:0' ]] || {
-		echo 'Shadow evidence must be a root-owned regular file with mode 600.' >&2
-		return 1
-	}
-	[[ "$image_id" == "$(reporting_resolve_image_id_for_revision \
-		"$revision" "winwidget-reporting:git-$revision")" ]] || return 1
-	reporting_run_isolated_node_validator "$image_id" '
-const { readFileSync } = require("node:fs");
-const { parseReportingShadowEvidence } = require(
-  "/app/dist/src/shadow-evidence/reporting-shadow-evidence.contract.js"
-);
-const value = parseReportingShadowEvidence(readFileSync("/evidence.json", "utf8"));
-if (value.revision !== process.env.EXPECTED_REVISION ||
-    value.imageId !== process.env.EXPECTED_IMAGE_ID ||
-    value.source.systemIdentifier !== process.env.EXPECTED_CORE_SYSTEM_IDENTIFIER ||
-    value.target.systemIdentifier !== process.env.EXPECTED_REPORTING_SYSTEM_IDENTIFIER ||
-    value.target.backfillSnapshotId !== process.env.EXPECTED_BACKFILL_SNAPSHOT_ID ||
-    value.target.backfillSha256 !== process.env.EXPECTED_BACKFILL_SHA256) process.exit(1);
-' \
-		-e "EXPECTED_REVISION=$revision" \
-		-e "EXPECTED_IMAGE_ID=$image_id" \
-		-e "EXPECTED_CORE_SYSTEM_IDENTIFIER=$core_system_identifier" \
-		-e "EXPECTED_REPORTING_SYSTEM_IDENTIFIER=$reporting_system_identifier" \
-		-e "EXPECTED_BACKFILL_SNAPSHOT_ID=$backfill_snapshot_id" \
-		-e "EXPECTED_BACKFILL_SHA256=$backfill_sha256" \
-		-v "$evidence:/evidence.json:ro" >/dev/null
-}
-
-reporting_cutover_run_shadow_evidence_cli() {
-	local action="$1" revision="$2" image_id="$3"
-	local core_system_identifier="$4" reporting_system_identifier="$5"
-	local backfill_snapshot_id="$6" backfill_sha256="$7"
-	local backup_url
-	backup_url="$(reporting_get_env_value REPORTING_BACKUP_URL)" || return 1
-	[[ "$action" == 'generate' || "$action" == 'verify' ]] || return 1
-	[[ "$image_id" == "$(reporting_resolve_image_id_for_revision "$revision")" ]] || return 1
-	REPORTING_IMAGE="$image_id" \
-	REPORTING_DATABASE_URL="$backup_url" \
-	REPORTING_SHADOW_EXPECTED_REVISION="$revision" \
-	REPORTING_SHADOW_EXPECTED_IMAGE_ID="$image_id" \
-	REPORTING_SHADOW_EXPECTED_CORE_SYSTEM_IDENTIFIER="$core_system_identifier" \
-	REPORTING_SHADOW_EXPECTED_REPORTING_SYSTEM_IDENTIFIER="$reporting_system_identifier" \
-	REPORTING_SHADOW_EXPECTED_BACKFILL_SNAPSHOT_ID="$backfill_snapshot_id" \
-	REPORTING_SHADOW_EXPECTED_BACKFILL_SHA256="$backfill_sha256" \
-		reporting_compose run --rm --no-deps -T \
-			-e REPORTING_PROCESS_ROLE=backfill \
-			-e REPORTING_DATABASE_URL \
-			-e REPORTING_SHADOW_EXPECTED_REVISION \
-			-e REPORTING_SHADOW_EXPECTED_IMAGE_ID \
-			-e REPORTING_SHADOW_EXPECTED_CORE_SYSTEM_IDENTIFIER \
-			-e REPORTING_SHADOW_EXPECTED_REPORTING_SYSTEM_IDENTIFIER \
-			-e REPORTING_SHADOW_EXPECTED_BACKFILL_SNAPSHOT_ID \
-			-e REPORTING_SHADOW_EXPECTED_BACKFILL_SHA256 \
-			--entrypoint node reporting-service \
-			dist/src/shadow-evidence/main.js "$action"
-}
-
-reporting_cutover_prepare_shadow_evidence() {
-	local revision image_id core_system_identifier reporting_system_identifier
-	local backfill_snapshot_id backfill_sha256 temporary sha256 destination
-	reporting_cutover_require_phase caught-up
-	reporting_cutover_require_projection_barrier
-	revision="$(reporting_cutover_marker_value revision)"
-	image_id="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
-	core_system_identifier="$CORE_POSTGRES_SYSTEM_IDENTIFIER"
-	reporting_system_identifier="$(reporting_cutover_marker_value database_system_identifier)"
-	backfill_snapshot_id="$(reporting_cutover_marker_value backfill_snapshot_id)"
-	backfill_sha256="$(reporting_cutover_marker_value backfill_sha256)"
-	reporting_cutover_require_evidence_root
-	temporary="$REPORTING_EVIDENCE_ROOT/.shadow-candidate.$$"
-	[[ ! -e "$temporary" && ! -L "$temporary" ]] || return 1
-	if ! (umask 077; reporting_cutover_run_shadow_evidence_cli generate \
-		"$revision" "$image_id" "$core_system_identifier" \
-		"$reporting_system_identifier" "$backfill_snapshot_id" \
-		"$backfill_sha256" >"$temporary"); then
-		rm -f -- "$temporary"
-		return 1
-	fi
-	chown 0:0 "$temporary"
-	chmod 600 "$temporary"
-	if ! reporting_cutover_require_projection_barrier ||
-		! reporting_cutover_validate_shadow_evidence "$temporary" "$revision" \
-			"$image_id" "$core_system_identifier" "$reporting_system_identifier" \
-			"$backfill_snapshot_id" "$backfill_sha256" ||
-		! reporting_cutover_run_shadow_evidence_cli verify "$revision" "$image_id" \
-			"$core_system_identifier" "$reporting_system_identifier" \
-			"$backfill_snapshot_id" "$backfill_sha256" <"$temporary" ||
-		! reporting_cutover_require_projection_barrier; then
-		rm -f -- "$temporary"
-		return 1
-	fi
-	sha256="$(reporting_sha256_file "$temporary")"
-	destination="$(reporting_cutover_evidence_path shadow-candidate "$sha256")" || {
-		rm -f -- "$temporary"
-		return 1
-	}
-	if [[ -e "$destination" || -L "$destination" ]]; then
-		[[ -f "$destination" && ! -L "$destination" &&
-			"$(reporting_stat_owner "$destination")" == '0:0' &&
-			"$(reporting_stat_mode "$destination")" == '600' &&
-			"$(reporting_sha256_file "$destination")" == "$sha256" ]] || {
-			rm -f -- "$temporary"
-			return 1
-		}
-		rm -f -- "$temporary"
-	else
-		mv "$temporary" "$destination"
-	fi
-	echo "Reporting shadow candidate generated from live Core/Reporting data: $destination"
-	echo "Set REPORTING_SHADOW_EVIDENCE_FILE=$destination"
-	echo "After reviewing actual values, set CONFIRM_REPORTING_SHADOW_VERIFIED=shadow:$revision:$sha256 and run shadow-verified."
-}
-
-reporting_cutover_verify_shadow() {
-	local revision evidence sha256 system_identifier snapshot_id backfill_sha256
-	local image_id core_system_identifier expected_candidate
-	reporting_cutover_require_phase caught-up
-	reporting_cutover_require_projection_barrier
-	revision="$(reporting_cutover_marker_value revision)"
-	image_id="$(reporting_resolve_image_id_for_revision "$revision")" || return 1
-	core_system_identifier="$CORE_POSTGRES_SYSTEM_IDENTIFIER"
-	system_identifier="$(reporting_cutover_marker_value database_system_identifier)"
-	snapshot_id="$(reporting_cutover_marker_value backfill_snapshot_id)"
-	backfill_sha256="$(reporting_cutover_marker_value backfill_sha256)"
-	evidence="${REPORTING_SHADOW_EVIDENCE_FILE:-}"
-	[[ -n "$evidence" ]] || {
-		echo 'REPORTING_SHADOW_EVIDENCE_FILE is required.' >&2
-		return 1
-	}
-	sha256="$(reporting_sha256_file "$evidence")"
-	expected_candidate="$(reporting_cutover_evidence_path shadow-candidate "$sha256")" || return 1
-	[[ "$evidence" == "$expected_candidate" ]] || {
-		echo 'Shadow evidence must be the lifecycle-generated digest-named candidate.' >&2
-		return 1
-	}
-	reporting_cutover_validate_shadow_evidence "$evidence" "$revision" \
-		"$image_id" "$core_system_identifier" "$system_identifier" \
-		"$snapshot_id" "$backfill_sha256"
-	reporting_cutover_run_shadow_evidence_cli verify "$revision" "$image_id" \
-		"$core_system_identifier" "$system_identifier" "$snapshot_id" \
-		"$backfill_sha256" <"$evidence"
-	reporting_cutover_require_projection_barrier
-	reporting_cutover_require_stable_digest shadow "$evidence" "$sha256"
-	[[ "${CONFIRM_REPORTING_SHADOW_VERIFIED:-}" == "shadow:$revision:$sha256" ]] || {
-		echo "Set CONFIRM_REPORTING_SHADOW_VERIFIED=shadow:$revision:$sha256 after reviewing the exact evidence." >&2
-		return 1
-	}
-	reporting_cutover_archive_evidence shadow "$evidence" "$sha256"
-	reporting_cutover_write_marker shadow-verified "$revision" "$system_identifier" \
-		"$snapshot_id" "$backfill_sha256" "$sha256" pending pending pending pending pending pending \
-		pending pending pending pending pending pending
-	echo "Reporting shadow evidence verified sha256=$sha256."
-}
-
 reporting_cutover_rewrite_scheduler_state() {
 	local scheduler_step="$1" scheduler_evidence_sha256="${2:-pending}"
 	local switch_generation_override="${3:-}"
@@ -3810,16 +3458,12 @@ const preservedPaths = [
   "apps/reporting/prisma/schema.prisma",
   "prisma/migrations/20260731010000_add_reporting_projection_producers",
   "src/messaging/reporting-admin-audit-event.ts",
-  "src/reporting-internal/reporting-auth-introspection.service.spec.ts",
-  "src/reporting-internal/reporting-auth-introspection.service.ts",
   "src/reporting-internal/reporting-internal-token.guard.spec.ts",
   "src/reporting-internal/reporting-internal-token.guard.ts",
   "src/reporting-internal/reporting-internal.constants.ts",
   "src/reporting-internal/reporting-internal.controller.spec.ts",
   "src/reporting-internal/reporting-internal.controller.ts",
   "src/reporting-internal/reporting-internal.module.ts",
-  "src/reporting-internal/reporting-producer-migration.spec.ts",
-  "src/reporting-internal/reporting-projection-snapshot.service.spec.ts",
   "src/reporting-internal/reporting-schedule-authority.service.spec.ts",
 ];
 const modifiedReportingPaths = [
@@ -3830,7 +3474,6 @@ const modifiedReportingPaths = [
   "apps/reporting/src/projections/projection.service.ts",
   "apps/reporting/src/projections/reporting-event.contract.spec.ts",
   "apps/reporting/src/projections/reporting-event.contract.ts",
-  "apps/reporting/src/shadow-evidence/reporting-shadow-evidence.service.ts",
   "apps/reporting/test/integration/reporting.integration.mjs",
 ];
 const modifiedCorePaths = [
@@ -3854,7 +3497,6 @@ const modifiedCorePaths = [
   "src/messaging/messaging.constants.ts",
   "src/messaging/notification-delivery-event.ts",
   "src/messaging/reporting-projection-contract.spec.ts",
-  "src/reporting-internal/reporting-projection-snapshot.service.ts",
   "src/reporting-internal/reporting-schedule-authority.service.ts",
   "src/scheduled-jobs/scheduled-jobs.service.spec.ts",
   "src/scheduled-jobs/scheduled-jobs.types.ts",
@@ -3874,13 +3516,10 @@ const modifiedControlPlanePaths = [
   "scripts/reporting-database-lifecycle.sh",
   "scripts/reporting-producer-lifecycle.sh",
   "scripts/test-messaging-integration.mjs",
-  "scripts/test-reporting-cutover-rehearsal.sh",
   "scripts/test-reporting-production-scripts.sh",
 ];
 const addedControlPlanePaths = [
   "scripts/generate-reporting-frontend-runtime-attestation.sh",
-  "scripts/run-reporting-restore-cutover-smoke.sh",
-  "scripts/run-reporting-route-cutover-smoke.sh",
   "scripts/run-reporting-scheduler-cutover-smoke.sh",
 ];
 const removedQueues = [
@@ -5058,303 +4697,6 @@ reporting_cutover_complete() {
 	echo "Reporting cutover is complete at cleanup revision $cleanup_revision; future deploys must descend from it."
 }
 
-reporting_cutover_rollback_target_owner() {
-	case "$1" in
-	core-stopped) printf 'CORE_SHADOW\n' ;;
-	target-owned) printf 'REPORTING\n' ;;
-	*) return 1 ;;
-	esac
-}
-
-reporting_cutover_rollback_routes() {
-	local revision system_identifier snapshot_id backfill_sha shadow_sha
-	local switch_generation
-	reporting_cutover_require_phase routes-switched
-	revision="$(reporting_cutover_marker_value revision)"
-	[[ "${CONFIRM_REPORTING_ROUTE_ROLLBACK:-}" == "rollback-routes:$revision" ]] || {
-		echo "Set CONFIRM_REPORTING_ROUTE_ROLLBACK=rollback-routes:$revision after the Gateway is returned to the exact dark manifest." >&2
-		return 1
-	}
-	reporting_cutover_require_dark_gateway_runtime
-	reporting_cutover_require_scheduler_disabled_runtime || {
-		echo 'Disable the Reporting scheduler before reopening the pre-route boundary.' >&2
-		return 1
-	}
-	reporting_cutover_require_switch_generation REPORTING
-	system_identifier="$(reporting_cutover_marker_value database_system_identifier)"
-	snapshot_id="$(reporting_cutover_marker_value backfill_snapshot_id)"
-	backfill_sha="$(reporting_cutover_marker_value backfill_sha256)"
-	shadow_sha="$(reporting_cutover_marker_value shadow_evidence_sha256)"
-	switch_generation="$(reporting_cutover_marker_value switch_generation)"
-	reporting_cutover_write_marker shadow-verified "$revision" "$system_identifier" \
-		"$snapshot_id" "$backfill_sha" "$shadow_sha" target-owned \
-		pending pending pending pending pending \
-		"$switch_generation" pending pending pending pending pending
-	echo 'Reporting public routes returned to the reviewed dark manifest. Scheduler/route/restore evidence was invalidated for this window; archived files remain for audit.'
-}
-
-reporting_cutover_rollback_scheduler() {
-	local step revision previous_snapshot result snapshot_id sha256 core_result
-	local system_identifier phase route_evidence target_owner core_owner
-	local shadow_sha switch_generation
-	reporting_cutover_validate_marker
-	phase="$(reporting_cutover_marker_value phase)"
-	case "$phase" in
-	shadow-verified) ;;
-	scheduler-switched)
-		route_evidence="$(reporting_cutover_marker_value route_evidence_sha256)"
-		[[ "$route_evidence" == 'pending' ]] || {
-			echo 'Scheduler rollback is forbidden while public route evidence remains active.' >&2
-			return 1
-		}
-		reporting_cutover_require_dark_gateway_runtime || return 1
-		;;
-	*)
-		echo "Scheduler rollback is only safe before public routes switch, current phase=$phase." >&2
-		return 1
-		;;
-	esac
-	step="$(reporting_cutover_marker_value scheduler_step)"
-	[[ "$step" == 'core-stopped' || "$step" == 'target-owned' ||
-		"$step" == 'rollback-intent' ||
-		"$step" == 'rollback-target-shadowed' ||
-		"$step" == 'rollback-repair-backfilled' ]] || {
-		echo "Scheduler rollback cannot resume from scheduler_step=$step." >&2
-		return 1
-	}
-	revision="$(reporting_cutover_marker_value revision)"
-	[[ "${CONFIRM_REPORTING_SCHEDULER_ROLLBACK:-}" == "rollback-scheduler:$revision" ]] || {
-		echo "Set CONFIRM_REPORTING_SCHEDULER_ROLLBACK=rollback-scheduler:$revision for the reviewed pre-route rollback." >&2
-		return 1
-	}
-	reporting_cutover_require_target_daily_summary_drained
-	if [[ "$phase" == 'scheduler-switched' ]]; then
-		system_identifier="$(reporting_cutover_marker_value database_system_identifier)"
-		snapshot_id="$(reporting_cutover_marker_value backfill_snapshot_id)"
-		sha256="$(reporting_cutover_marker_value backfill_sha256)"
-		shadow_sha="$(reporting_cutover_marker_value shadow_evidence_sha256)"
-		switch_generation="$(reporting_cutover_marker_value switch_generation)"
-		reporting_cutover_write_marker shadow-verified "$revision" "$system_identifier" \
-			"$snapshot_id" "$sha256" "$shadow_sha" target-owned \
-			pending pending pending pending pending \
-			"$switch_generation" pending pending pending pending pending
-		phase='shadow-verified'
-		step='target-owned'
-	fi
-
-	if [[ "$step" == 'core-stopped' || "$step" == 'target-owned' ]]; then
-		target_owner="$(reporting_cutover_rollback_target_owner "$step")"
-		reporting_cutover_schedule_authority_generation \
-			REPORTING "$target_owner" >/dev/null
-		reporting_cutover_require_telegram_topic_split "$target_owner"
-		# The durable intent is written before either database is mutated. All
-		# following checkpoints describe states that are safe to resume exactly.
-		reporting_cutover_rewrite_scheduler_state rollback-intent
-		step='rollback-intent'
-	fi
-
-	if [[ "$step" == 'rollback-intent' ]]; then
-		core_owner="$(reporting_core_psql --tuples-only --no-align --command '
-SELECT COALESCE((SELECT "daily_summary_owner" FROM "reporting_producer_state"
-WHERE "id" = '"'"'singleton'"'"'), '"'"'missing'"'"');
-')"
-		target_owner="$(reporting_database_psql REPORTING_DATABASE_URL --tuples-only --no-align --command "
-SELECT COALESCE((SELECT owner::TEXT FROM reporting.reporting_settings
-WHERE id = 'daily-summary'), 'missing');
-")"
-		[[ "$core_owner" == 'REPORTING' &&
-			( "$target_owner" == 'REPORTING' || "$target_owner" == 'CORE_SHADOW' ) ]] || {
-			echo "Scheduler rollback intent found an unreconcilable owner pair: $core_owner|$target_owner" >&2
-			return 1
-		}
-		reporting_cutover_schedule_authority_generation \
-			REPORTING "$target_owner" >/dev/null
-		# Restore the legacy Core scheduler time from the canonical reservation
-		# while both schedulers are fenced. This transaction is idempotent.
-		reporting_core_migration_psql --command '
-BEGIN;
-SET LOCAL lock_timeout = '"'"'30s'"'"';
-SET LOCAL statement_timeout = '"'"'45s'"'"';
-SELECT pg_advisory_xact_lock(hashtext('"'"'winwidget.reporting.daily-summary.owner.v1'"'"'));
-SELECT "id" FROM "telegram_bot_settings"
-WHERE "id" = '"'"'singleton'"'"' FOR UPDATE;
-SELECT "daily_summary_schedule_time"
-FROM "reporting_producer_state"
-WHERE "id" = '"'"'singleton'"'"' FOR UPDATE;
-UPDATE "telegram_bot_settings" settings
-SET "daily_summary_time" = state."daily_summary_schedule_time",
-    "updated_at" = clock_timestamp() AT TIME ZONE '"'"'UTC'"'"'
-FROM "reporting_producer_state" state
-WHERE settings."id" = '"'"'singleton'"'"'
-  AND state."id" = '"'"'singleton'"'"'
-  AND state."daily_summary_owner" = '"'"'REPORTING'"'"';
-DO $schedule_restore$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM "reporting_producer_state" state
-    JOIN "telegram_bot_settings" settings ON settings."id" = '"'"'singleton'"'"'
-    WHERE state."id" = '"'"'singleton'"'"'
-      AND state."daily_summary_owner" = '"'"'REPORTING'"'"'
-      AND settings."daily_summary_time" = state."daily_summary_schedule_time"
-  ) THEN
-    RAISE EXCEPTION '"'"'Core Daily Summary schedule restoration failed'"'"';
-  END IF;
-END
-$schedule_restore$;
-COMMIT;
-' >/dev/null
-		# Restore the target to shadow first. Core stays stopped until a fresh
-		# source snapshot has repaired changes ignored while Reporting was owner.
-		reporting_database_psql REPORTING_MIGRATION_DATABASE_URL --command "
-BEGIN;
-SET LOCAL lock_timeout = '30s';
-SET LOCAL statement_timeout = '45s';
-SELECT id FROM reporting.reporting_settings
-WHERE id = 'daily-summary' FOR UPDATE;
-DO \$drain\$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM reporting.report_runs
-    WHERE status IN (
-      'PENDING'::reporting.\"ReportRunStatus\",
-      'PROCESSING'::reporting.\"ReportRunStatus\",
-      'WAITING_DELIVERY'::reporting.\"ReportRunStatus\"
-    )
-  ) OR EXISTS (
-    SELECT 1 FROM reporting.outbox_events
-    WHERE event_type = 'notification.daily-summary.telegram.requested.v1'
-      AND status <> 'PUBLISHED'::reporting.\"ReportingOutboxStatus\"
-  ) OR EXISTS (
-    SELECT 1 FROM reporting.consumer_receipts
-    WHERE consumer = 'reporting-delivery-outcome-v1'
-      AND status IN (
-        'PROCESSING'::reporting.\"ReportingConsumerReceiptStatus\",
-        'RETRY_SCHEDULED'::reporting.\"ReportingConsumerReceiptStatus\"
-      )
-  ) THEN
-    RAISE EXCEPTION 'Reporting Daily Summary work appeared before owner rollback';
-  END IF;
-END
-\$drain\$;
-UPDATE reporting.reporting_settings
-SET owner = 'CORE_SHADOW'::reporting.\"ReportingOwner\",
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = 'daily-summary';
-DO \$rollback\$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM reporting.reporting_settings
-    WHERE id = 'daily-summary'
-      AND owner = 'CORE_SHADOW'::reporting.\"ReportingOwner\"
-  ) THEN
-    RAISE EXCEPTION 'Reporting settings row is missing during scheduler rollback';
-  END IF;
-END
-\$rollback\$;
-COMMIT;
-" >/dev/null
-		reporting_cutover_require_target_daily_summary_drained
-		reporting_cutover_schedule_authority_generation REPORTING CORE_SHADOW >/dev/null
-		reporting_cutover_require_telegram_topic_split CORE_SHADOW
-		reporting_cutover_rewrite_scheduler_state rollback-target-shadowed
-		step='rollback-target-shadowed'
-	fi
-
-	if [[ "$step" == 'rollback-target-shadowed' ]]; then
-		reporting_cutover_schedule_authority_generation REPORTING CORE_SHADOW >/dev/null
-		reporting_cutover_require_telegram_topic_split CORE_SHADOW
-		previous_snapshot="$(reporting_database_psql REPORTING_DATABASE_URL --tuples-only --no-align --command "
-SELECT COALESCE((SELECT snapshot_id::TEXT FROM reporting.backfill_runs
-WHERE status = 'VERIFIED'::reporting.\"ReportingBackfillStatus\"
-ORDER BY verified_at DESC NULLS LAST LIMIT 1), 'none');
-")"
-		reporting_compose run --rm --no-deps \
-			-e REPORTING_PROCESS_ROLE=backfill \
-			--entrypoint node reporting-service dist/src/backfill/main.js
-		result="$(reporting_database_psql REPORTING_DATABASE_URL --tuples-only --no-align --field-separator='|' --command "
-SELECT snapshot_id::TEXT, btrim(sha256)
-FROM reporting.backfill_runs
-WHERE status = 'VERIFIED'::reporting.\"ReportingBackfillStatus\"
-  AND sha256 = expected_sha256
-ORDER BY verified_at DESC NULLS LAST LIMIT 1;
-")"
-		IFS='|' read -r snapshot_id sha256 <<<"$result"
-		[[ "$snapshot_id" =~ ^[0-9a-f-]{36}$ && "$snapshot_id" != "$previous_snapshot" &&
-			"$sha256" =~ ^[0-9a-f]{64}$ ]] || {
-			echo 'Scheduler rollback left Core stopped because the repair snapshot was not verified.' >&2
-			return 1
-		}
-		reporting_cutover_rewrite_scheduler_state \
-			rollback-repair-backfilled pending '' "$snapshot_id" "$sha256"
-		step='rollback-repair-backfilled'
-	fi
-
-	if [[ "$step" == 'rollback-repair-backfilled' ]]; then
-		snapshot_id="$(reporting_cutover_marker_value backfill_snapshot_id)"
-		sha256="$(reporting_cutover_marker_value backfill_sha256)"
-		result="$(reporting_database_psql REPORTING_DATABASE_URL --tuples-only --no-align --command "
-SELECT CASE WHEN EXISTS (
-  SELECT 1 FROM reporting.backfill_runs
-  WHERE snapshot_id = '$snapshot_id'::uuid
-    AND status = 'VERIFIED'::reporting.\"ReportingBackfillStatus\"
-    AND sha256 = '$sha256'
-    AND expected_sha256 = '$sha256'
-) THEN 'verified' ELSE 'invalid' END;
-")"
-		[[ "$result" == 'verified' ]] || {
-			echo 'Durable scheduler rollback repair snapshot no longer verifies.' >&2
-			return 1
-		}
-		core_owner="$(reporting_core_psql --tuples-only --no-align --command '
-SELECT COALESCE((SELECT "daily_summary_owner" FROM "reporting_producer_state"
-WHERE "id" = '"'"'singleton'"'"'), '"'"'missing'"'"');
-')"
-		case "$core_owner" in
-		REPORTING)
-			reporting_cutover_schedule_authority_generation REPORTING CORE_SHADOW >/dev/null
-			;;
-		CORE)
-			reporting_cutover_schedule_authority_generation CORE CORE_SHADOW >/dev/null
-			;;
-		*)
-			echo "Scheduler rollback checkpoint found an invalid Core owner: $core_owner" >&2
-			return 1
-			;;
-		esac
-		reporting_cutover_require_target_daily_summary_drained
-		core_result="$(reporting_core_migration_psql --tuples-only --no-align --field-separator='|' <<'SQL'
-BEGIN;
-SET LOCAL lock_timeout = '30s';
-SELECT pg_advisory_xact_lock(hashtext('winwidget.reporting.daily-summary.owner.v1'));
-SELECT "daily_summary_owner" FROM "reporting_producer_state"
-WHERE "id" = 'singleton' FOR UPDATE;
-UPDATE "reporting_producer_state"
-SET "daily_summary_owner" = 'CORE',
-    "daily_summary_switch_generation" = "daily_summary_switch_generation" + 1,
-    "daily_summary_switched_at" = clock_timestamp() AT TIME ZONE 'UTC',
-    "updated_at" = clock_timestamp() AT TIME ZONE 'UTC'
-WHERE "id" = 'singleton' AND "daily_summary_owner" = 'REPORTING';
-SELECT "daily_summary_owner", "daily_summary_switch_generation"::TEXT
-FROM "reporting_producer_state" WHERE "id" = 'singleton';
-COMMIT;
-SQL
-)"
-		core_result="$(printf '%s\n' "$core_result" | grep -E '^CORE\|[1-9][0-9]*$' | tail -n 1)"
-		[[ "$core_result" =~ ^CORE\|[1-9][0-9]*$ ]] || {
-			echo 'Scheduler rollback repair snapshot is safe, but Core ownership was not restored.' >&2
-			return 1
-		}
-		reporting_cutover_schedule_authority_generation CORE CORE_SHADOW >/dev/null
-		reporting_cutover_require_telegram_topic_split CORE_SHADOW
-		system_identifier="$(reporting_cutover_marker_value database_system_identifier)"
-		reporting_cutover_write_marker backfilled "$revision" "$system_identifier" \
-			"$snapshot_id" "$sha256" pending pending pending pending pending pending pending \
-			pending pending pending pending pending pending
-		echo 'Daily Summary owner restored to Core after a verified repair snapshot. Re-run caught-up and shadow evidence before another switch.'
-	fi
-}
-
 reporting_cutover_status() {
 	reporting_cutover_validate_marker || {
 		echo 'Reporting cutover marker is missing or invalid.' >&2
@@ -5364,862 +4706,49 @@ reporting_cutover_status() {
 }
 
 reporting_cutover_self_test() {
-	local bootstrap_expected bootstrap_phase bootstrap_result bootstrap_state
-	local claim_text dark_gateway_text drain_text evidence_text main_text rollback_text root marker revision
-	local rollback_drain_text reporting_db_check_count notification_db_check_count
-	local rollback_gate_count forward_projection_barrier_count claim_projection_barrier_count
-	local cleanup_contract_text cleanup_topology_text complete_text evidence_actions_text validator_runtime_text
-	local core_cleanup_backup_text
-	local shadow_prepare_text shadow_runtime_text
-	local projection_barrier_text
-	local fenced_step fenced_marker stable_file stable_sha
-	local cleanup_revision pre_cleanup_kinds post_cleanup_kinds
-	local manifest_mutable_paths_actual mutable_paths_actual mutable_paths_expected
-	reporting_cutover_self_test_projection_barrier_case() {
-		[[ $# == 7 ]] || return 1
-		local expected="$1" first_core="$2" second_core="$3"
-		local queue_failure_call="$4" first_target="$5" second_target="$6"
-		local fixture_root="$7"
-		(
-			local core_calls="$fixture_root/core-calls"
-			local queue_calls="$fixture_root/queue-calls"
-			local target_calls="$fixture_root/target-calls"
-			: >"$core_calls"
-			: >"$queue_calls"
-			: >"$target_calls"
-			reporting_cutover_marker_value() {
-				case "$1" in
-				phase) printf 'backfilled\n' ;;
-				revision) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
-				*) return 1 ;;
-				esac
-			}
-			reporting_require_core_producer_migration() { return 0; }
-			reporting_require_core_producer_acl() { return 0; }
-			reporting_require_outbox_publisher_ready() { return 0; }
-			reporting_require_rabbitmq_topology() { return 0; }
-			reporting_cutover_core_projection_barrier_state() {
-				local call_count
-				call_count="$(wc -c <"$core_calls" | tr -d '[:space:]')"
-				printf x >>"$core_calls"
-				if [[ "$call_count" == '0' ]]; then
-					printf '%s\n' "$first_core"
-				else
-					printf '%s\n' "$second_core"
-				fi
-			}
-			reporting_cutover_require_empty_projection_queues() {
-				local call_count
-				call_count="$(wc -c <"$queue_calls" | tr -d '[:space:]')"
-				printf x >>"$queue_calls"
-				[[ "$queue_failure_call" == '0' ||
-					"$queue_failure_call" != "$((call_count + 1))" ]]
-			}
-			reporting_cutover_target_projection_barrier_state() {
-				local call_count
-				call_count="$(wc -c <"$target_calls" | tr -d '[:space:]')"
-				printf x >>"$target_calls"
-				if [[ "$call_count" == '0' ]]; then
-					printf '%s\n' "$first_target"
-				else
-					printf '%s\n' "$second_target"
-				fi
-			}
-			local actual='fail'
-			if reporting_cutover_require_projection_barrier >/dev/null 2>&1; then
-				actual='pass'
-			fi
-			[[ "$actual" == "$expected" ]] || return 1
-			if [[ "$expected" == 'pass' ]]; then
-				[[ "$(wc -c <"$core_calls" | tr -d '[:space:]')" == '2' &&
-					"$(wc -c <"$queue_calls" | tr -d '[:space:]')" == '2' &&
-					"$(wc -c <"$target_calls" | tr -d '[:space:]')" == '2' ]]
-			fi
-		)
-	}
-	root="$(mktemp -d "${TMPDIR:-/tmp}/winwidget-reporting-cutover.XXXXXX")"
-	marker="$root/marker"
-	revision='0123456789abcdef0123456789abcdef01234567'
-	trap 'rm -rf -- "$root"' RETURN
-	[[ "$REPORTING_EVIDENCE_ROOT" == "$APP_ROOT/deploy/backend/reporting-evidence" ]] || {
-		echo 'Reporting cutover self-test accepted an ambient evidence archive path.' >&2
-		return 1
-	}
-	(
-		policy_calls="$root/route-policy-calls"
-		reporting_cutover_marker_value() {
-			[[ "$1" == 'route_evidence_sha256' ]] || return 1
-			printf '%064d\n' 1
-		}
-		reporting_cutover_require_archived_evidence() { :; }
-		reporting_cutover_evidence_path() { printf '%s\n' "$root/routes.json"; }
-		reporting_cutover_require_archived_frontend_runtime_attestation() { :; }
-		reporting_cutover_require_live_frontend_runtime() { :; }
-		reporting_cutover_require_live_legacy_routes_retained() {
-			printf 'retained:%s\n' "$1" >>"$policy_calls"
-		}
-		reporting_cutover_require_live_legacy_routes_absent() {
-			printf 'absent:%s\n' "$1" >>"$policy_calls"
-		}
-		reporting_cutover_require_archived_route_runtime "$revision" "$revision"
-		reporting_cutover_require_archived_route_runtime "$revision" \
-			'89abcdef0123456789abcdef0123456789abcdef'
-		[[ "$(cat "$policy_calls")" == \
-			$'absent:0123456789abcdef0123456789abcdef01234567\nabsent:89abcdef0123456789abcdef0123456789abcdef' ]]
-	) || {
-		echo 'Reporting cutover self-test rejected the archived legacy route absence policy.' >&2
-		return 1
-	}
-	stable_file="$root/stable-evidence.json"
-	printf '{"version":1}\n' >"$stable_file"
-	stable_sha="$(reporting_sha256_file "$stable_file")"
-	reporting_cutover_require_stable_digest self-test "$stable_file" "$stable_sha"
-	printf 'changed\n' >>"$stable_file"
-	if reporting_cutover_require_stable_digest self-test \
-		"$stable_file" "$stable_sha" >/dev/null 2>&1; then
-		echo 'Reporting cutover self-test accepted evidence changed after validation.' >&2
-		return 1
-	fi
-	local barrier_state='1|2|3|4|5|6|clear|ready'
-	reporting_cutover_self_test_projection_barrier_case \
-		pass "$barrier_state" "$barrier_state" 0 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail '1|2|3|4|5|clear|ready' "$barrier_state" 0 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail '1|2|x|4|5|6|clear|ready' "$barrier_state" 0 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail '1|2|3|4|5|6|pending|ready' "$barrier_state" 0 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail '1|2|3|4|5|6|clear|unsafe' "$barrier_state" 0 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail "$barrier_state" '1|2|3|4|5|7|clear|ready' 0 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail "$barrier_state" "$barrier_state" 1 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail "$barrier_state" "$barrier_state" 2 clear clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail "$barrier_state" "$barrier_state" 0 pending clear "$root"
-	reporting_cutover_self_test_projection_barrier_case \
-		fail "$barrier_state" "$barrier_state" 0 clear pending "$root"
-	(
-		local expected_checksum='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-		local ledger_fixture topology_fixture
-		reporting_cutover_core_cleanup_migration_name() {
-			printf '20260801000000_remove_legacy_reporting_state\n'
-		}
-		reporting_cutover_core_cleanup_migration_checksum() {
-			[[ "$1" == "$revision" &&
-				"$2" == '20260801000000_remove_legacy_reporting_state' ]] || return 1
-			printf '%s\n' "$expected_checksum"
-		}
-		reporting_settings_topology_mode() {
-			[[ "$topology_fixture" != 'partial' ]] || return 1
-			printf '%s\n' "$topology_fixture"
-		}
-		reporting_core_migration_psql() {
-			[[ "$*" == *"checksum IS DISTINCT FROM '$expected_checksum'"* &&
-				"$*" == *'finished_at IS NOT NULL AND rolled_back_at IS NULL'* &&
-				"$*" == *'finished_at IS NULL AND rolled_back_at IS NULL'* ]] || return 1
-			printf '%s\n' "$ledger_fixture"
-		}
-		topology_fixture='transition'
-		ledger_fixture='0|0|0|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'pending' ]]
-		# Exact-checksum rolled-back history produces the same active-ledger tuple
-		# and is deliberately allowed before the one active attempt.
-		ledger_fixture='0|0|1|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unfinished-transition' ]]
-		topology_fixture='steady'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unfinished-steady' ]]
-		ledger_fixture='0|1|0|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'applied' ]]
-		topology_fixture='transition'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-		ledger_fixture='1|0|0|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-		ledger_fixture='0|2|0|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-		ledger_fixture='0|0|2|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-		ledger_fixture='0|1|1|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-		ledger_fixture='0|0|0|unsafe'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-		topology_fixture='steady'
-		ledger_fixture='0|0|0|ready'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-		topology_fixture='partial'
-		[[ "$(reporting_cutover_core_cleanup_migration_state "$revision")" == 'unsafe' ]]
-	)
-	(
-		local migration_sha schema_sha row_anchor_sha row_content_sha sequence_sha zero_sha
-		local fixture_expected_value mismatch_manifest fixture_revision
-		fixture_revision="$revision"
-		migration_sha="$(printf '%064x' 1)"
-		schema_sha="$(printf '%064x' 2)"
-		row_anchor_sha="$(printf '%064x' 3)"
-		row_content_sha="$(printf '%064x' 4)"
-		sequence_sha="$(printf '%064x' 5)"
-		zero_sha="$(printf '%064x' 0)"
-		fixture_expected_value="$migration_sha|$schema_sha"
-		reporting_cutover_marker_value() {
-			[[ "$1" == 'revision' ]] || return 1
-			printf '%s\n' "$fixture_revision"
-		}
-		reporting_resolve_image_id_for_revision() {
-			[[ "$1" == "$fixture_revision" ]] || return 1
-			printf 'sha256:%064x\n' 6
-		}
-		reporting_run_isolated_node_validator() {
-			printf '%s\n' "$fixture_expected_value"
-		}
-		reporting_core_migration_psql() {
-			case "$*" in
-			*'_prisma_migrations'*) printf 'migration|checksum\n' ;;
-			*'information_schema.columns'*) printf 'table|column|1|text|NO\n' ;;
-			*) return 1 ;;
-			esac
-		}
-		reporting_sha256_file() {
-			local manifest_name="${1##*/}"
-			case "$manifest_name" in
-			migrations.manifest) printf '%s\n' "$migration_sha" ;;
-			schema.manifest) printf '%s\n' "$schema_sha" ;;
-			rows.manifest) printf '%s\n' "$row_anchor_sha" ;;
-			row-content.manifest) printf '%s\n' "$row_content_sha" ;;
-			sequences.manifest) printf '%s\n' "$sequence_sha" ;;
-			*) return 1 ;;
-			esac
-		}
-		mismatch_manifest=''
-		reporting_cutover_require_live_core_matches_backup_evidence \
-			"$root/core-cleanup-backup.fixture.json" >/dev/null
-		for mismatch_manifest in migrations.manifest schema.manifest; do
-			case "$mismatch_manifest" in
-			migrations.manifest)
-				fixture_expected_value="$zero_sha|$schema_sha"
-				;;
-			schema.manifest)
-				fixture_expected_value="$migration_sha|$zero_sha"
-				;;
-			esac
-			if reporting_cutover_require_live_core_matches_backup_evidence \
-				"$root/core-cleanup-backup.fixture.json" >/dev/null 2>&1; then
-				echo "Reporting cutover self-test accepted a changed live Core $mismatch_manifest." >&2
-				return 1
-			fi
-		done
-		fixture_expected_value="$migration_sha|$schema_sha"
-		reporting_cutover_require_live_core_matches_backup_evidence \
-			"$root/core-cleanup-backup.fixture.json" >/dev/null
-	)
-	main_text="$(declare -f reporting_cutover_main)"
-	local runtime_identity_text
-	runtime_identity_text="$(declare -f reporting_cutover_export_pinned_runtime_identity)"
-	evidence_text="$(declare -f reporting_cutover_validate_shadow_evidence reporting_cutover_validate_scheduler_evidence reporting_cutover_validate_gateway_manifest_value reporting_cutover_validate_route_evidence reporting_cutover_validate_restore_evidence)"
-	evidence_actions_text="$(declare -f reporting_cutover_verify_shadow reporting_cutover_verify_scheduler reporting_cutover_verify_routes reporting_cutover_verify_restore reporting_cutover_stage_cleanup reporting_cutover_mark_source_cleaned reporting_cutover_verify_cleanup_restore reporting_cutover_complete)"
-	shadow_prepare_text="$(declare -f reporting_cutover_prepare_shadow_evidence)"
-	shadow_runtime_text="$(declare -f reporting_cutover_run_shadow_evidence_cli)"
-	validator_runtime_text="$(declare -f reporting_resolve_image_id_for_revision reporting_run_isolated_node_validator)"
-	cleanup_contract_text="$(declare -f reporting_cutover_validate_cleanup_contract reporting_cutover_require_cleanup_git_contract)"
-	cleanup_migration_text="$(declare -f reporting_cutover_expected_cleanup_migration_sql reporting_cutover_require_exact_cleanup_migration)"
-	cleanup_runtime_text="$(declare -f reporting_cutover_require_legacy_code_absent_from_image reporting_cutover_require_reporting_steady_runtime_contract reporting_cutover_require_cleanup_runtime_revision)"
-	cleanup_topology_text="$(declare -f reporting_cutover_require_cleanup_legacy_drain_after_stop reporting_cutover_prepare_settings_topology_cleanup_after_stop)"
-	core_cleanup_backup_text="$(declare -f reporting_cutover_core_content_manifest_sql reporting_cutover_core_migration_manifest_sql reporting_cutover_core_schema_manifest_sql reporting_cutover_core_row_anchor_manifest_sql reporting_cutover_core_sequence_manifest_sql reporting_cutover_core_backup_job_summary reporting_cutover_validate_core_cleanup_backup_evidence reporting_cutover_core_cleanup_migration_name reporting_cutover_core_cleanup_migration_checksum reporting_cutover_core_cleanup_migration_state reporting_cutover_require_core_cleanup_pending reporting_cutover_core_cleanup_resolve reporting_cutover_verify_core_cleanup_backup reporting_cutover_require_live_core_matches_backup_evidence reporting_cutover_require_core_cleanup_backup_archive_from_review reporting_cutover_require_core_cleanup_backup_from_review)"
-	core_cleanup_resolve_text="$(declare -f reporting_cutover_core_cleanup_image_identity reporting_cutover_core_cleanup_stopped_exit_is_safe reporting_cutover_write_core_cleanup_stopped_writer_proof reporting_cutover_require_settings_topology_cleanup_converged_after_stop reporting_cutover_core_cleanup_resolve)"
-	live_core_match_text="$(declare -f reporting_cutover_require_live_core_matches_backup_evidence)"
-	legacy_state_text="$(declare -f reporting_cutover_require_legacy_core_state_absent)"
-	route_runtime_text="$(declare -f reporting_cutover_validate_route_evidence reporting_cutover_route_evidence_identity reporting_cutover_validate_frontend_runtime_attestation reporting_cutover_require_live_frontend_runtime reporting_cutover_require_live_legacy_routes reporting_cutover_require_live_legacy_routes_retained reporting_cutover_require_live_legacy_routes_absent reporting_cutover_archive_frontend_runtime_attestation reporting_cutover_require_archived_frontend_runtime_attestation reporting_cutover_require_archived_route_runtime reporting_cutover_verify_routes)"
-	complete_text="$(declare -f reporting_cutover_complete)"
-	drain_text="$(declare -f reporting_cutover_require_legacy_daily_summary_drained)"
-	claim_text="$(declare -f reporting_cutover_claim_scheduler_target)"
-	projection_barrier_text="$(declare -f \
-		reporting_cutover_core_projection_barrier_state \
-		reporting_cutover_target_projection_barrier_state \
-		reporting_cutover_require_projection_barrier)"
-	rollback_drain_text="$(declare -f \
-		reporting_cutover_require_reporting_runtime_stopped \
-		reporting_cutover_validate_daily_summary_drain_values \
-		reporting_cutover_reporting_daily_summary_database_state \
-		reporting_cutover_notification_daily_summary_database_state \
-		reporting_cutover_require_target_daily_summary_drained)"
-	dark_gateway_text="$(declare -f reporting_cutover_require_dark_gateway_runtime)"
-	rollback_text="$(declare -f reporting_cutover_rollback_scheduler)"
-	reporting_db_check_count="$(printf '%s\n' "$rollback_drain_text" | awk \
-		'/reporting_cutover_reporting_daily_summary_database_state/ { count += 1 } END { print count + 0 }')"
-	notification_db_check_count="$(printf '%s\n' "$rollback_drain_text" | awk \
-		'/reporting_cutover_notification_daily_summary_database_state/ { count += 1 } END { print count + 0 }')"
-	rollback_gate_count="$(printf '%s\n' "$rollback_text" | awk \
-		'/reporting_cutover_require_target_daily_summary_drained/ { count += 1 } END { print count + 0 }')"
-	forward_projection_barrier_count="$(printf '%s\n' "$evidence_actions_text" | awk \
-		'/reporting_cutover_require_projection_barrier/ { count += 1 } END { print count + 0 }')"
-	claim_projection_barrier_count="$(printf '%s\n' "$claim_text" | awk \
-		'/reporting_cutover_require_projection_barrier/ { count += 1 } END { print count + 0 }')"
-	mutable_paths_actual="$(printf '%s\n' "${REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS[@]}")"
-	mutable_paths_expected=$'apps/reporting/src/messaging/reporting-messaging.constants.spec.ts\napps/reporting/src/messaging/reporting-messaging.constants.ts\napps/reporting/src/messaging/reporting-rabbitmq.service.spec.ts\napps/reporting/src/projections/projection.service.spec.ts\napps/reporting/src/projections/projection.service.ts\napps/reporting/src/projections/reporting-event.contract.spec.ts\napps/reporting/src/projections/reporting-event.contract.ts\napps/reporting/src/shadow-evidence/reporting-shadow-evidence.service.ts\napps/reporting/test/integration/reporting.integration.mjs'
-	[[ "$mutable_paths_actual" == "$mutable_paths_expected" ]] || {
-		echo 'Reporting cutover self-test found an unexpected mutable Reporting cleanup path set.' >&2
-		return 1
-	}
-	manifest_mutable_paths_actual="$(printf '%s\n' "$cleanup_contract_text" | awk '
-/^const modifiedReportingPaths = \[$/ { capture = 1; next }
-capture && /^];$/ { exit }
-capture {
-  sub(/^[[:space:]]*"/, "")
-  sub(/",?[[:space:]]*$/, "")
-  print
-}')"
-	[[ "$manifest_mutable_paths_actual" == "$mutable_paths_expected" ]] || {
-		echo 'Reporting cleanup manifest validator mutable path set is not exact.' >&2
-		return 1
-	}
-	manifest_array_values() {
-		local declaration="$1"
-		printf '%s\n' "$cleanup_contract_text" | awk -v declaration="$declaration" '
-$0 == "const " declaration " = [" { capture = 1; next }
-capture && /^];$/ { exit }
-capture {
-  sub(/^[[:space:]]*"/, "")
-  sub(/",?[[:space:]]*$/, "")
-  print
-}'
-	}
-	[[ "$(manifest_array_values modifiedCorePaths)" == \
-		"$(printf '%s\n' "${REPORTING_CLEANUP_MUTABLE_CORE_PATHS[@]}")" &&
-		"$(manifest_array_values modifiedControlPlanePaths)" == \
-		"$(printf '%s\n' "${REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS[@]}")" &&
-		"$(manifest_array_values addedControlPlanePaths)" == \
-		"$(printf '%s\n' "${REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS[@]}")" ]] || {
-		echo 'Reporting cleanup manifest validator Core/control-plane path sets are not exact.' >&2
-		return 1
-	}
-	[[ "$main_text" == *'reporting_cutover_export_pinned_runtime_identity "$revision"'* &&
-		"$main_text" == *'reporting_assert_no_ambient_compose_overrides'* &&
-		"$main_text" == *'NOTIFICATION_DELIVERY_IMAGE NOTIFICATION_DELIVERY_REVISION'* &&
-		"$main_text" == *'CAMPAIGNS_IMAGE CAMPAIGNS_REVISION'* &&
-		"$main_text" == *'DATABASE_RESTORE_IMAGE DATABASE_RESTORE_REVISION'* &&
-		"$main_text" == *'verify-core-cleanup-backup)'* &&
-		"$main_text" == *'reporting_cutover_verify_core_cleanup_backup'* &&
-		"$main_text" == *'prepare-core-cleanup-resolve)'* &&
-		"$main_text" == *'reporting_cutover_core_cleanup_resolve prepare'* &&
-		"$main_text" == *'resolve-core-cleanup-migration)'* &&
-		"$main_text" == *'reporting_cutover_core_cleanup_resolve resolve'* &&
-		"$main_text" == *'reporting_cutover_export_pinned_runtime_identity "$marker_revision"'* &&
-		"$runtime_identity_text" == *'reporting_export_pinned_runtime_identity "$revision"'* &&
-		"$runtime_identity_text" == *'DATABASE_RESTORE_REVISION="$revision"'* &&
-		"$runtime_identity_text" == *'DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"'* &&
-		"$main_text" == *'stage-cleanup)'* &&
-		"$main_text" == *'reporting_cutover_stage_cleanup'* &&
-		"$main_text" == *'source-cleaned)'* &&
-		"$main_text" == *'reporting_cutover_mark_source_cleaned'* &&
-		"$main_text" == *'complete)'* &&
-		"$main_text" == *'reporting_cutover_complete'* &&
-		"$main_text" == *'prepare-shadow-evidence)'* &&
-		"$main_text" == *'reporting_cutover_prepare_shadow_evidence'* &&
-		"$evidence_text" == *'reporting_resolve_image_id_for_revision'* &&
-		"$evidence_text" != *'reporting_get_env_value REPORTING_IMAGE'* &&
-		"$evidence_text" != *'docker run'* &&
-		"$validator_runtime_text" == *'org.opencontainers.image.revision'* &&
-		"$validator_runtime_text" == *'--cap-drop ALL'* &&
-		"$validator_runtime_text" == *'--security-opt no-new-privileges'* &&
-		"$evidence_actions_text" == *'reporting_cutover_require_stable_digest shadow'* &&
-		"$evidence_actions_text" == *'reporting_cutover_require_stable_digest completion'* &&
-		"$shadow_prepare_text" == *'reporting_cutover_run_shadow_evidence_cli generate'* &&
-		"$shadow_prepare_text" == *'reporting_cutover_run_shadow_evidence_cli verify'* &&
-		"$shadow_prepare_text" == *'reporting_cutover_require_projection_barrier'* &&
-		"$shadow_runtime_text" == *'REPORTING_DATABASE_URL="$backup_url"'* &&
-		"$shadow_runtime_text" == *'REPORTING_IMAGE="$image_id"'* &&
-		"$shadow_runtime_text" == *'-e REPORTING_DATABASE_URL'* &&
-		"$shadow_runtime_text" != *'REPORTING_BACKUP_URL='* &&
-		"$cleanup_contract_text" == *'diff-tree --no-commit-id --raw -r -z --no-renames'* &&
-		"$cleanup_contract_text" == *'manifest.changedFiles'* &&
-		"$cleanup_contract_text" == *'manifest.modifiedReportingPaths'* &&
-		"$cleanup_contract_text" == *'manifest.modifiedCorePaths'* &&
-		"$cleanup_contract_text" == *'manifest.modifiedControlPlanePaths'* &&
-		"$cleanup_contract_text" == *'manifest.addedControlPlanePaths'* &&
-		"$cleanup_contract_text" == *'changedFiles.some'* &&
-		"$cleanup_contract_text" == *'REPORTING_CLEANUP_MUTABLE_CORE_PATHS'* &&
-		"$cleanup_contract_text" == *'REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS'* &&
-		"$cleanup_contract_text" == *'REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS'* &&
-		"$cleanup_contract_text" == *'coreBackupEvidenceSha256'* &&
-		"$cleanup_contract_text" == *'EXPECTED_CORE_BACKUP_SHA'* &&
-		"$cleanup_contract_text" == *'REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS'* &&
-		"$cleanup_contract_text" == *'modified or removed immutable migration file'* &&
-		"$cleanup_contract_text" == *'reporting_require_post_cleanup_revision_contract "$cleanup_revision"'* &&
-		"$cleanup_contract_text" == *'reporting_cutover_require_exact_cleanup_migration'* &&
-		"$cleanup_contract_text" == *'new_core_migration_count" == '\''1'\'''* &&
-		"$cleanup_migration_text" == *'_remove_legacy_reporting_state'* &&
-		"$cleanup_migration_text" == *'Legacy Reporting state is not drained'* &&
-		"$cleanup_migration_text" == *'DROP COLUMN "daily_summary_last_sent_at"'* &&
-		"$cleanup_runtime_text" == *'org.opencontainers.image.revision'* &&
-		"$cleanup_runtime_text" == *'reporting_cutover_require_legacy_code_absent_from_image "$core_image_id"'* &&
-		"$cleanup_runtime_text" == *'reporting_cutover_require_reporting_steady_runtime_contract'* &&
-		"$cleanup_runtime_text" == *'REPORTING_ACCEPTED_ROUTING_KEYS.reportingSettings'* &&
-		"$cleanup_runtime_text" == *'DELIVERY_OUTCOME_EVENT_TYPE !== deliveryOutcome'* &&
-		"$cleanup_runtime_text" == *'REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome'* &&
-		"$cleanup_runtime_text" == *'reporting.notification.delivery.outcome.v1'* &&
-		"$cleanup_runtime_text" == *'/app/dist/src/statistics'* &&
-		"$cleanup_runtime_text" == *'daily-summary-job'* &&
-		"$cleanup_topology_text" == *'reporting_cutover_require_target_daily_summary_drained'* &&
-		"$cleanup_topology_text" == *'channel.unbindQueue'* &&
-		"$cleanup_topology_text" == *'winwidget.reporting.settings.retry.$retry_index'* &&
-		"$cleanup_topology_text" == *'REPORTING_OPERATIONAL_ROUTING_KEY'* &&
-		"$core_cleanup_backup_text" == *'REPORTING_CORE_CLEANUP_BACKUP_JOB_ID'* &&
-		"$core_cleanup_backup_text" == *'REPORTING_CORE_CLEANUP_BACKUP_MAX_AGE_SECONDS'* &&
-		"$core_cleanup_backup_text" == *'winwidget-database-restore:git-$revision'* &&
-		"$core_cleanup_backup_text" == *'--network none --read-only'* &&
-		"$core_cleanup_backup_text" == *'--entrypoint pg_restore'* &&
-		"$core_cleanup_backup_text" == *'core-cleanup-backup'* &&
-		"$core_cleanup_backup_text" == *'createdAt < routeBoundary'* &&
-		"$core_cleanup_backup_text" == *'POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --data-checksums'* &&
-		"$core_cleanup_backup_text" == *'COLLATE "C"'* &&
-		"$core_cleanup_backup_text" == *'migrationManifestSha256'* &&
-		"$core_cleanup_backup_text" == *'schemaManifestSha256'* &&
-		"$core_cleanup_backup_text" == *'rowAnchorManifestSha256'* &&
-		"$core_cleanup_backup_text" == *'rowContentManifestSha256'* &&
-		"$core_cleanup_backup_text" == *'sequenceManifestSha256'* &&
-		"$core_cleanup_backup_text" == *'to_jsonb(source_row)::TEXT'* &&
-		"$core_cleanup_backup_text" == *'source_row.message_id = %L::UUID'* &&
-		"$core_cleanup_backup_text" == *"source_row.payload ->> 'jobId' = %L"* &&
-		"$core_cleanup_backup_text" == *"source_row.action = 'TELEGRAM_DATABASE_BACKUP_CREATE'"* &&
-		"$core_cleanup_backup_text" == *'source_row.event_id = %L::UUID'* &&
-		"$core_cleanup_backup_text" != *"tablename <> 'outbox_events'"* &&
-		"$core_cleanup_backup_text" != *"tablename <> 'admin_event_logs'"* &&
-		"$live_core_match_text" == *"compare_live_core_manifest 'migration manifest'"* &&
-		"$live_core_match_text" == *"compare_live_core_manifest 'schema manifest'"* &&
-		"$live_core_match_text" != *"compare_live_core_manifest 'row-anchor manifest'"* &&
-		"$live_core_match_text" != *"compare_live_core_manifest 'row-content manifest'"* &&
-		"$live_core_match_text" != *"compare_live_core_manifest 'sequence manifest'"* &&
-		"$live_core_match_text" != *'rowAnchorManifestSha256'* &&
-		"$live_core_match_text" != *'rowContentManifestSha256'* &&
-		"$live_core_match_text" != *'sequenceManifestSha256'* &&
-		"$live_core_match_text" != *'reporting_cutover_core_content_manifest_sql'* &&
-		"$core_cleanup_backup_text" == *'reporting_cutover_require_live_core_matches_backup_evidence "$evidence" || return 1'* &&
-		"$core_cleanup_backup_text" == *'cat-file blob'* &&
-		"$core_cleanup_backup_text" == *'checksum IS DISTINCT FROM'*'$migration_checksum'* &&
-		"$core_cleanup_backup_text" == *'finished_at IS NOT NULL AND rolled_back_at IS NULL'* &&
-		"$core_cleanup_backup_text" == *'finished_at IS NULL AND rolled_back_at IS NULL'* &&
-		"$core_cleanup_backup_text" == *"printf 'unfinished-transition\\n'"* &&
-		"$core_cleanup_backup_text" == *"printf 'unfinished-steady\\n'"* &&
-		"$core_cleanup_backup_text" != *'prisma migrate resolve'* &&
-		"$core_cleanup_backup_text" == *'reporting_cutover_require_core_cleanup_pending'* &&
-		"$core_cleanup_resolve_text" == *'resolve-core-cleanup:$original_revision:$cleanup_revision:$switch_generation:$state:$migration_name:$failed_migration_id:$migration_checksum:$core_image_digest:$image_migration_checksum:$ledger_proof_sha:$writer_proof_sha'* &&
-		"$core_cleanup_resolve_text" == *'DATABASE_MIGRATION_URL_PRODUCTION'* &&
-		"$core_cleanup_resolve_text" != *'DATABASE_URL_PRODUCTION'* &&
-		"$core_cleanup_resolve_text" == *'winwidget-api:git-$cleanup_revision'* &&
-		"$core_cleanup_resolve_text" == *'com.docker.compose.service=migrate'* &&
-		"$core_cleanup_resolve_text" == *'--cap-drop ALL'* &&
-		"$core_cleanup_resolve_text" == *'"--$resolution" "$migration_name"'* &&
-		"$core_cleanup_resolve_text" == *'expected_post_state='\''pending'\'''* &&
-		"$core_cleanup_resolve_text" == *'expected_post_state='\''applied'\'''* &&
-		"$core_cleanup_resolve_text" == *'cleanupApiImageId'* &&
-		"$core_cleanup_resolve_text" == *'imageMigrationChecksum'* &&
-		"$core_cleanup_resolve_text" == *'State.ExitCode'* &&
-		"$core_cleanup_resolve_text" == *'State.OOMKilled'* &&
-		"$core_cleanup_resolve_text" == *'State.Error'* &&
-		"$REPORTING_LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION" == '42c422ca4c2c3a8ce758a37773d6cb0e6b689db7' &&
-		"$REPORTING_LEGACY_API_SHUTDOWN_BOOTSTRAP_IMAGE_ID" == 'sha256:e64d78b3dc511dde592641e979eb0b506b815f0e83c4eb943ac45b1780c3f554' &&
-		"$core_cleanup_resolve_text" == *'writers.before-command.proof'* &&
-		"$core_cleanup_resolve_text" == *'writers.after-command.proof'* &&
-		"$core_cleanup_resolve_text" == *'resolve_rc=$?'* &&
-		"$core_cleanup_resolve_text" == *'"version":2'* &&
-		"$core_cleanup_resolve_text" == *'reporting_cutover_require_core_producer_continuity'* &&
-		"$core_cleanup_resolve_text" == *'reporting_cutover_require_legacy_core_state_absent'* &&
-		"$core_cleanup_resolve_text" == *'reporting_cutover_require_cleanup_legacy_drain_after_stop'* &&
-		"$core_cleanup_resolve_text" == *'reporting_cutover_require_settings_topology_cleanup_converged_after_stop'* &&
-		"$core_cleanup_resolve_text" == *'Core cleanup resolve ledger proof'* &&
-		"$core_cleanup_resolve_text" == *'Core cleanup resolve stopped-writer proof'* &&
-		"$core_cleanup_resolve_text" == *'same fresh verified backup/review'* &&
-		"$core_cleanup_backup_text" == *'reporting_cutover_validate_core_cleanup_backup_evidence "$evidence" || return 1'* &&
-		"$evidence_actions_text" == *'stage-cleanup:$revision:$cleanup_revision:$switch_generation:$core_sha:$review_sha:$manifest_sha'* &&
-		"$evidence_actions_text" == *'Refreshing Core backup evidence cannot replace the pinned cleanup manifest'* &&
-		"$legacy_state_text" == *'DAILY_TELEGRAM_SUMMARY'* &&
-		"$legacy_state_text" == *'daily_summary_last_sent_period_start'* &&
-		"$evidence_actions_text" == *'reporting_cutover_require_legacy_core_state_absent'* &&
-		"$route_runtime_text" == *'frontendRuntimeAttestationSha256'* &&
-		"$route_runtime_text" == *'frontendRuntimeSignatureSha256'* &&
-		"$route_runtime_text" == *'frontendRuntimePublicKeySha256'* &&
-		"$route_runtime_text" == *'frontendRuntimeChallenge'* &&
-		"$route_runtime_text" == *'legacyStatisticsTombstoned'* &&
-		"$route_runtime_text" == *'EXPECTED_LEGACY_POLICY'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes "$1" retained'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes "$1" absent'* &&
-		"$route_runtime_text" == *'REPORTING_CUTOVER_ADMIN_ACCESS_TOKEN_FILE:-$APP_ROOT/deploy/backend/.reporting-cutover-admin-access-token'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes_absent "$runtime_revision"'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_live_legacy_routes_absent "$revision"'* &&
-		"$route_runtime_text" != *'docker ps --no-trunc -q'* &&
-		"$route_runtime_text" == *'Cross-VPS frontend runtime attestation, signature and public key must be absolute root-owned mode-600 regular files.'* &&
-		"$route_runtime_text" == *'value.backendRevision !== process.env.EXPECTED_BACKEND_REVISION'* &&
-		"$route_runtime_text" == *'value.switchGeneration !== process.env.EXPECTED_SWITCH_GENERATION'* &&
-		"$route_runtime_text" == *'value.composeProject !== "winwidget"'* &&
-		"$route_runtime_text" == *'value.contractScan !== true'* &&
-		"$route_runtime_text" == *'value.challenge !== process.env.EXPECTED_CHALLENGE'* &&
-		"$route_runtime_text" == *'openssl pkeyutl -verify'* &&
-		"$route_runtime_text" == *'value.assetPath.split("/").includes("..")'* &&
-		"$route_runtime_text" == *'Public frontend asset does not match the signed frontend runtime image.'* &&
-		"$route_runtime_text" == *'ageMs > Number(process.env.MAX_AGE_SECONDS) * 1000'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_stable_digest frontend-runtime'* &&
-		"$route_runtime_text" == *'reporting_cutover_archive_evidence frontend-runtime-attestation'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_archived_evidence'* &&
-		"$route_runtime_text" == *'reporting_cutover_require_live_frontend_runtime "$evidence" "$revision" true'* &&
-		"$complete_text" == *'reporting_cutover_require_post_cleanup_queue_topology'* ]] || {
-		echo 'Reporting cutover self-test found an unsafe validator, evidence, cleanup or completion guard.' >&2
-		return 1
-	}
-	[[ "$evidence_text" == *'"billing-payments", "/api/v1/payments"'* &&
-		"$evidence_text" == *'"billing-subscriptions", "/api/v1/subscriptions"'* &&
-		"$evidence_text" == *'"billing-tariff-prices", "/api/v1/tariff-prices"'* &&
-		"$evidence_text" == *'"billing-affiliate", "/api/v1/affiliate"'* &&
-		"$evidence_text" == *'route.upstreamUrl === "http://127.0.0.1:4800"'* &&
-		"$evidence_text" == *'...(includeBilling ? billing : [])'* &&
-		"$drain_text" == *'DAILY_TELEGRAM_SUMMARY'* &&
-		"$drain_text" == *'"$base.retry-v2.$retry_index"'* &&
-		"$drain_text" != *'"$base.retry.$retry_index"'* &&
-		"$drain_text" == *'reporting_cutover_require_projection_barrier'* &&
-		"$forward_projection_barrier_count" == '5' &&
-		"$projection_barrier_text" == *"'identity.user.changed.v1'"* &&
-		"$projection_barrier_text" == *"'billing.payment.changed.v1'"* &&
-		"$projection_barrier_text" == *"'billing.subscription.changed.v1'"* &&
-		"$projection_barrier_text" == *"'widgets.widget.changed.v1'"* &&
-		"$projection_barrier_text" == *"'widgets.lead.changed.v1'"* &&
-		"$projection_barrier_text" == *"'reporting.settings.changed.v1'"* &&
-		"$projection_barrier_text" == *'"enabled" = TRUE'* &&
-		"$projection_barrier_text" == *'"activated_at" IS NOT NULL'* &&
-		"$projection_barrier_text" == *'jsonb_each_text(snapshot.watermarks)'* &&
-		"$projection_barrier_text" == *'malformed_snapshot_watermark'* &&
-		"$projection_barrier_text" == *'COALESCE(actual.source_sequence, 0) <> expected.source_sequence'* &&
-		"$projection_barrier_text" == *'receipt.source_sequence = watermark.source_sequence'* &&
-		"$projection_barrier_text" == *'reporting_require_core_producer_migration'* &&
-		"$projection_barrier_text" == *'reporting_require_core_producer_acl'* &&
-		"$projection_barrier_text" == *'reporting_require_outbox_publisher_ready "$active_revision"'* &&
-		"$projection_barrier_text" == *'reporting_require_rabbitmq_topology'* &&
-		"$projection_barrier_text" == *'"$second_state" == "$first_state"'* &&
-		"$claim_projection_barrier_count" == '2' ]] || {
-		echo 'Reporting cutover self-test found an incomplete projection or retry queue barrier.' >&2
-		return 1
-	}
-	[[ "$rollback_drain_text" == *'Stop the main Reporting service before scheduler rollback'* &&
-		"$rollback_drain_text" == *'Unable to verify that the Reporting runtime is stopped'* &&
-		"$rollback_drain_text" == *'if ! container_id='* &&
-		"$rollback_drain_text" == *"'PENDING'::reporting."* &&
-		"$rollback_drain_text" == *"'WAITING_DELIVERY'::reporting."* &&
-		"$rollback_drain_text" == *'ReportRunStatus'* &&
-		"$rollback_drain_text" == *"'notification.daily-summary.telegram.requested.v1'"* &&
-		"$rollback_drain_text" == *"'reporting-delivery-outcome-v1'"* &&
-		"$rollback_drain_text" == *'NOTIFICATION_DELIVERY_DATABASE_URL'* &&
-		"$rollback_drain_text" == *"'daily-summary-delivery-telegram'"* &&
-		"$rollback_drain_text" == *"'notification.delivery.outcome.v1'"* &&
-		"$rollback_drain_text" == *'rabbitmqctl --silent list_queues'* &&
-		"$rollback_drain_text" != *'curl '* &&
-		"$rollback_drain_text" == *'winwidget.notification.daily-summary.telegram.retry-v2.$retry_index'* &&
-		"$rollback_drain_text" == *'winwidget.reporting.delivery-outcome.retry.$retry_index'* &&
-		"$reporting_db_check_count" == '3' &&
-		"$notification_db_check_count" == '3' ]] || {
-		echo 'Reporting cutover self-test found an incomplete cross-database Daily Summary drain fence.' >&2
-		return 1
-	}
-	[[ "$dark_gateway_text" == *'reporting_cutover_validate_gateway_manifest_value "$env_manifest" dark'* &&
-		"$dark_gateway_text" == *'"$live_manifest" == "$env_manifest"'* &&
-		"$rollback_text" == *'scheduler-switched)'* &&
-		"$rollback_text" == *'"$route_evidence" == '\''pending'\'''* &&
-		"$rollback_text" == *'reporting_cutover_require_dark_gateway_runtime'* &&
-		"$rollback_text" == *'DO \$drain\$'* &&
-		"$rollback_text" == *"'Reporting Daily Summary work appeared before owner rollback'"* &&
-		"$rollback_gate_count" == '3' &&
-		"$rollback_text" == *'reporting_cutover_write_marker backfilled'* ]] || {
-		echo 'Reporting cutover self-test found an unsafe pre-route scheduler rollback path.' >&2
-		return 1
-	}
-	reporting_cutover_validate_daily_summary_drain_values drained drained
-	if reporting_cutover_validate_daily_summary_drain_values pending drained ||
-		reporting_cutover_validate_daily_summary_drain_values drained pending; then
-		echo 'Reporting cutover self-test accepted a partially drained scheduler rollback.' >&2
-		return 1
-	fi
-	if (
-		reporting_compose() { return 1; }
-		reporting_cutover_require_reporting_runtime_stopped >/dev/null 2>&1
-	); then
-		echo 'Reporting cutover self-test accepted an unverifiable Reporting runtime fence.' >&2
-		return 1
-	fi
-	(
-		reporting_compose() { return 0; }
-		reporting_cutover_require_reporting_runtime_stopped
-	) || {
-		echo 'Reporting cutover self-test rejected a confirmed stopped Reporting runtime.' >&2
-		return 1
-	}
-	if (
-		reporting_compose() { printf 'running-container\n'; }
-		reporting_cutover_require_reporting_runtime_stopped >/dev/null 2>&1
-	); then
-		echo 'Reporting cutover self-test accepted a running Reporting runtime.' >&2
-		return 1
-	fi
-	{
-		printf 'version=1\nphase=preflight\nrevision=%s\n' "$revision"
-		printf 'database_system_identifier=123456789\n'
-		printf 'database_volume=%s\n' "$REPORTING_CANONICAL_POSTGRES_VOLUME"
-		printf 'backfill_snapshot_id=pending\nbackfill_sha256=pending\n'
-		printf 'shadow_evidence_sha256=pending\nscheduler_step=pending\n'
-		printf 'scheduler_evidence_sha256=pending\n'
-		printf 'route_evidence_sha256=pending\nrestore_evidence_sha256=pending\n'
-		printf 'switch_generation=pending\n'
-		printf 'cleanup_previous_revision=pending\ncleanup_revision=pending\n'
-		printf 'cleanup_review_evidence_sha256=pending\n'
-		printf 'cleanup_manifest_sha256=pending\ncleanup_restore_evidence_sha256=pending\n'
-		printf 'source_cleanup_evidence_sha256=pending\n'
-		printf 'completion_evidence_sha256=pending\n'
-		printf 'updated_at=2026-07-31T00:00:00Z\n'
-	} >"$marker"
-	reporting_cutover_validate_marker_contents "$marker"
-	REPORTING_CUTOVER_MARKER="$marker"
-	# The static self-test also runs as an unprivileged developer. Production
-	# ownership/mode checks remain in reporting_cutover_validate_marker; only
-	# this temporary fixture substitutes the already-tested content validator.
-	reporting_cutover_validate_marker() {
-		reporting_cutover_validate_marker_contents "$REPORTING_CUTOVER_MARKER"
-	}
-	reporting_core_producer_bootstrap_state() {
-		printf '%s\n' "$bootstrap_state"
-	}
-	for bootstrap_phase in absent preflight target-created roles-ready migrated producers-enabled; do
-		case "$bootstrap_phase" in
-		absent)
-			REPORTING_CUTOVER_MARKER="$root/missing-marker"
-			;;
-		preflight)
-			REPORTING_CUTOVER_MARKER="$marker"
-			;;
-		target-created | roles-ready | migrated | producers-enabled)
-			sed "s/^phase=preflight$/phase=$bootstrap_phase/" \
-				"$marker" >"$root/marker-$bootstrap_phase"
-			REPORTING_CUTOVER_MARKER="$root/marker-$bootstrap_phase"
-			;;
-		esac
-		for bootstrap_state in absent never-activated historical enabled; do
-			bootstrap_expected='rejected'
-			if [[ "$bootstrap_phase" != 'migrated' &&
-				"$bootstrap_phase" != 'producers-enabled' &&
-				( "$bootstrap_state" == 'absent' ||
-					"$bootstrap_state" == 'never-activated' ) ]]; then
-				bootstrap_expected='allowed'
-			fi
-			bootstrap_result='rejected'
-			if reporting_cutover_allows_pre_audit_worker >/dev/null 2>&1; then
-				bootstrap_result='allowed'
-			fi
-			if [[ "$bootstrap_result" != "$bootstrap_expected" ]]; then
-				echo "Reporting audit bootstrap matrix failed: phase=$bootstrap_phase state=$bootstrap_state expected=$bootstrap_expected actual=$bootstrap_result." >&2
-				return 1
-			fi
-		done
+	reporting_cutover_scheduler_value_allowed disabled false
+	reporting_cutover_scheduler_value_allowed fenced false
+	reporting_cutover_scheduler_value_allowed transitional false
+	reporting_cutover_scheduler_value_allowed transitional true
+	reporting_cutover_scheduler_value_allowed enabled true
+	! reporting_cutover_scheduler_value_allowed disabled true
+	! reporting_cutover_scheduler_value_allowed enabled false
+	local function_name source file_text retired_path retired_role retired_command
+	for function_name in reporting_cutover_worker_kinds_allowed \
+		reporting_cutover_runtime_scheduler_policy reporting_cutover_runtime_gateway_policy \
+		reporting_cutover_require_projection_barrier \
+		reporting_cutover_require_forward_scheduler_ready \
+		reporting_cutover_require_cleanup_runtime_revision \
+		reporting_cutover_require_core_producer_continuity \
+		reporting_cutover_require_legacy_core_state_absent \
+		reporting_cutover_require_post_cleanup_queue_topology; do
+		declare -F "$function_name" >/dev/null || return 1
 	done
-	REPORTING_CUTOVER_MARKER="$marker"
-	bootstrap_state='never-activated'
-	reporting_cutover_worker_kinds_allowed current current pre-reporting
-	reporting_cutover_worker_kinds_allowed pre-reporting current pre-reporting
-	if reporting_cutover_worker_kinds_allowed missing-auto-renewal \
-		current pre-reporting; then
-		echo 'Reporting cutover self-test accepted a worker without auto-renewal.' >&2
-		return 1
-	fi
-	if ! { [[ "$(reporting_cutover_runtime_scheduler_policy)" == 'disabled' &&
-		"$(reporting_cutover_runtime_gateway_policy)" == 'dark' ]] &&
-		reporting_cutover_scheduler_value_allowed disabled false &&
-		! reporting_cutover_scheduler_value_allowed disabled true; }; then
-		echo 'Reporting cutover self-test rejected the preflight runtime policy.' >&2
-		return 1
-	fi
-	[[ "$(reporting_cutover_rollback_target_owner core-stopped)" == 'CORE_SHADOW' &&
-		"$(reporting_cutover_rollback_target_owner target-owned)" == 'REPORTING' ]] || {
-		echo 'Reporting cutover self-test rejected a valid scheduler rollback owner.' >&2
-		return 1
-	}
-	if reporting_cutover_rollback_target_owner pending >/dev/null 2>&1; then
-		echo 'Reporting cutover self-test accepted an invalid scheduler rollback step.' >&2
-		return 1
-	fi
-	local chat_hash='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-	reporting_cutover_validate_telegram_topic_split_values \
-		CORE_SHADOW "$chat_hash|2024" "$chat_hash|43|$chat_hash|2024"
-	if reporting_cutover_validate_telegram_topic_split_values \
-		CORE_SHADOW "$chat_hash|2024" "$chat_hash|2024|$chat_hash|2024"; then
-		echo 'Reporting cutover self-test accepted one Telegram topic for both routes.' >&2
-		return 1
-	fi
-	if reporting_cutover_validate_telegram_topic_split_values \
-		CORE_SHADOW "$chat_hash|2024" \
-		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|43|$chat_hash|2024"; then
-		echo 'Reporting cutover self-test accepted different Telegram chats.' >&2
-		return 1
-	fi
-	if reporting_cutover_validate_telegram_topic_split_values \
-		CORE_SHADOW "$chat_hash|2024" "$chat_hash|43|$chat_hash|2025"; then
-		echo 'Reporting cutover self-test accepted a stale operational topic projection.' >&2
-		return 1
-	fi
-	if reporting_cutover_validate_telegram_topic_split_values \
-		CORE_SHADOW "$chat_hash|42" "$chat_hash|43|$chat_hash|42"; then
-		echo 'Reporting cutover self-test accepted a non-canonical operational topic.' >&2
-		return 1
-	fi
-	[[ "$(
-		reporting_cutover_validate_schedule_authority_values \
-			CORE CORE_SHADOW 'CORE|00:20|7' \
-			'CORE_SHADOW|00:20|Europe/Moscow|0'
-	)" == '7' ]]
-	[[ "$(
-		reporting_cutover_validate_schedule_authority_values \
-			REPORTING REPORTING 'REPORTING|02:10|8' \
-			'REPORTING|02:10|Europe/Moscow|8'
-	)" == '8' ]]
-	if reporting_cutover_validate_schedule_authority_values \
-		REPORTING REPORTING 'REPORTING|02:10|8' \
-		'REPORTING|02:11|Europe/Moscow|8' >/dev/null; then
-		echo 'Reporting cutover self-test accepted different schedule times.' >&2
-		return 1
-	fi
-	if reporting_cutover_validate_schedule_authority_values \
-		REPORTING REPORTING 'REPORTING|02:10|8' \
-		'REPORTING|02:10|Europe/Moscow|7' >/dev/null; then
-		echo 'Reporting cutover self-test accepted a stale schedule generation.' >&2
-		return 1
-	fi
-	if reporting_cutover_validate_schedule_authority_values \
-		REPORTING REPORTING 'REPORTING|02:10|8' \
-		'REPORTING|02:10|UTC|8' >/dev/null; then
-		echo 'Reporting cutover self-test accepted a different schedule timezone.' >&2
-		return 1
-	fi
-	reporting_cutover_validate_transition preflight target-created
-	if reporting_cutover_validate_transition preflight roles-ready; then
-		echo 'Reporting cutover self-test accepted a skipped phase.' >&2
-		return 1
-	fi
-	printf 'unexpected=value\n' >>"$marker"
-	if reporting_cutover_validate_marker_contents "$marker"; then
-		echo 'Reporting cutover self-test accepted an unknown marker field.' >&2
-		return 1
-	fi
-	sed -i.bak '/^unexpected=value$/d' "$marker"
-	rm -f -- "$marker.bak"
-	sed -i.bak \
-		-e 's/^phase=preflight$/phase=shadow-verified/' \
-		-e 's/^backfill_snapshot_id=pending$/backfill_snapshot_id=12345678-1234-4123-8123-123456789abc/' \
-		-e 's/^backfill_sha256=pending$/backfill_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
-		-e 's/^shadow_evidence_sha256=pending$/shadow_evidence_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
-		-e 's/^scheduler_step=pending$/scheduler_step=target-owned/' \
-		-e 's/^switch_generation=pending$/switch_generation=7/' \
-		"$marker"
-	rm -f -- "$marker.bak"
-	if ! { [[ "$(reporting_cutover_runtime_scheduler_policy)" == 'transitional' &&
-		"$(reporting_cutover_runtime_gateway_policy)" == 'dark' ]] &&
-		reporting_cutover_scheduler_value_allowed transitional false &&
-		reporting_cutover_scheduler_value_allowed transitional true; }; then
-		echo 'Reporting cutover self-test rejected the owner hand-off policy.' >&2
-		return 1
-	fi
-	for fenced_step in core-stopped target-claim-intent rollback-intent \
-		rollback-target-shadowed rollback-repair-backfilled; do
-		fenced_marker="$root/marker-$fenced_step"
-		sed "s/^scheduler_step=target-owned$/scheduler_step=$fenced_step/" \
-			"$marker" >"$fenced_marker"
-		reporting_cutover_validate_marker_contents "$fenced_marker"
-		REPORTING_CUTOVER_MARKER="$fenced_marker"
-		if ! { [[ "$(reporting_cutover_runtime_scheduler_policy)" == 'fenced' ]] &&
-			reporting_cutover_scheduler_value_allowed fenced false &&
-			! reporting_cutover_scheduler_value_allowed fenced true; }; then
-			echo "Reporting cutover self-test rejected fenced scheduler_step=$fenced_step." >&2
-			return 1
-		fi
-	done
-	fenced_marker="$root/marker-switch-intent"
-	sed -e 's/^scheduler_step=target-owned$/scheduler_step=switch-intent/' \
-		-e 's/^switch_generation=7$/switch_generation=pending/' \
-		"$marker" >"$fenced_marker"
-	reporting_cutover_validate_marker_contents "$fenced_marker"
-	REPORTING_CUTOVER_MARKER="$fenced_marker"
-	if ! { [[ "$(reporting_cutover_runtime_scheduler_policy)" == 'fenced' ]] &&
-		reporting_cutover_scheduler_value_allowed fenced false &&
-		! reporting_cutover_scheduler_value_allowed fenced true; }; then
-		echo 'Reporting cutover self-test rejected fenced scheduler_step=switch-intent.' >&2
-		return 1
-	fi
-	REPORTING_CUTOVER_MARKER="$marker"
-	if reporting_cutover_allows_pre_audit_worker; then
-		echo 'Reporting cutover self-test accepted a pre-audit worker after producer activation.' >&2
-		return 1
-	fi
-	sed -i.bak \
-		-e 's/^phase=shadow-verified$/phase=scheduler-switched/' \
-		-e 's/^scheduler_evidence_sha256=pending$/scheduler_evidence_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/' \
-		"$marker"
-	rm -f -- "$marker.bak"
-	if ! { [[ "$(reporting_cutover_runtime_scheduler_policy)" == 'enabled' &&
-		"$(reporting_cutover_runtime_gateway_policy)" == 'reporting' ]] &&
-		reporting_cutover_scheduler_value_allowed enabled true &&
-		! reporting_cutover_scheduler_value_allowed enabled false; }; then
-		echo 'Reporting cutover self-test rejected the post-scheduler policy.' >&2
-		return 1
-	fi
-	sed -i.bak \
-		-e 's/^phase=scheduler-switched$/phase=routes-switched/' \
-		-e 's/^route_evidence_sha256=pending$/route_evidence_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/' \
-		"$marker"
-	rm -f -- "$marker.bak"
-	reporting_cutover_validate_marker_contents "$marker"
-	sed -i.bak \
-		's/^restore_evidence_sha256=pending$/restore_evidence_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' \
-		"$marker"
-	rm -f -- "$marker.bak"
-	reporting_cutover_validate_marker_contents "$marker"
-	sed 's/^phase=routes-switched$/phase=source-cleaned/' "$marker" >"$marker.invalid"
-	if reporting_cutover_validate_marker_contents "$marker.invalid"; then
-		echo 'Reporting cutover self-test accepted source cleanup without evidence.' >&2
-		return 1
-	fi
-	cleanup_revision='89abcdef0123456789abcdef0123456789abcdef'
-	sed \
-		-e 's/^phase=routes-switched$/phase=cleanup-staged/' \
-		-e "s/^cleanup_previous_revision=pending$/cleanup_previous_revision=$revision/" \
-		-e "s/^cleanup_revision=pending$/cleanup_revision=$cleanup_revision/" \
-		-e 's/^cleanup_review_evidence_sha256=pending$/cleanup_review_evidence_sha256=1111111111111111111111111111111111111111111111111111111111111111/' \
-		-e 's/^cleanup_manifest_sha256=pending$/cleanup_manifest_sha256=2222222222222222222222222222222222222222222222222222222222222222/' \
-		"$marker" >"$root/cleanup-marker"
-	REPORTING_CUTOVER_MARKER="$root/cleanup-marker"
-	reporting_cutover_validate_marker_contents "$REPORTING_CUTOVER_MARKER"
-	pre_cleanup_kinds="$(reporting_normalize_integration_kinds \
-		"$REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS")"
-	post_cleanup_kinds="$(reporting_normalize_integration_kinds \
-		"$REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS")"
-	reporting_cutover_worker_kinds_allowed \
-		"$pre_cleanup_kinds" "$post_cleanup_kinds" pre-reporting
-	if reporting_cutover_worker_kinds_allowed \
-		unexpected "$post_cleanup_kinds" pre-reporting; then
-		echo 'Reporting cleanup self-test accepted an unrelated integration-worker kind set.' >&2
-		return 1
-	fi
-	sed \
-		-e 's/^phase=cleanup-staged$/phase=source-cleaned/' \
-		-e 's/^source_cleanup_evidence_sha256=pending$/source_cleanup_evidence_sha256=3333333333333333333333333333333333333333333333333333333333333333/' \
-		"$REPORTING_CUTOVER_MARKER" >"$root/source-cleaned-marker"
-	reporting_cutover_validate_marker_contents "$root/source-cleaned-marker"
-	sed \
-		-e 's/^phase=source-cleaned$/phase=complete/' \
-		-e 's/^cleanup_restore_evidence_sha256=pending$/cleanup_restore_evidence_sha256=4444444444444444444444444444444444444444444444444444444444444444/' \
-		-e 's/^completion_evidence_sha256=pending$/completion_evidence_sha256=5555555555555555555555555555555555555555555555555555555555555555/' \
-		"$root/source-cleaned-marker" >"$root/complete-marker"
-	reporting_cutover_validate_marker_contents "$root/complete-marker"
-	trap - RETURN
-	[[ "$root" == "${TMPDIR:-/tmp}/winwidget-reporting-cutover."* ]] || return 1
-	rm -rf -- "$root"
-	echo 'Reporting cutover phase ordering and marker contract verified.'
+	source="$(declare -f reporting_cutover_require_projection_barrier reporting_cutover_main)"
+	[[ "$source" == *'reporting_cutover_require_empty_projection_queues'* &&
+		"$source" == *'reporting_cutover_projection_delivery_state'* &&
+		"$source" == *'reporting_require_core_producer_acl'* &&
+		"$source" == *'prepare-core-cleanup-resolve'* &&
+		"$source" == *'resolve-core-cleanup-migration'* &&
+		"$source" != *'rollback-routes)'* &&
+		"$source" != *'rollback-scheduler)'* ]] || return 1
+	file_text="$(<"${BASH_SOURCE[0]}")"
+	retired_path='apps/reporting/src/'backfill'/'
+	[[ "$file_text" != *"$retired_path"* ]] || return 1
+	retired_path='apps/reporting/src/'shadow-evidence'/'
+	[[ "$file_text" != *"$retired_path"* ]] || return 1
+	retired_path='dist/src/'backfill'/'
+	[[ "$file_text" != *"$retired_path"* ]] || return 1
+	retired_path='dist/src/'shadow-evidence'/'
+	[[ "$file_text" != *"$retired_path"* ]] || return 1
+	retired_role='REPORTING_PROCESS_ROLE='backfill
+	[[ "$file_text" != *"$retired_role"* ]] || return 1
+	retired_command='prepare-'shadow-evidence
+	[[ "$source" != *"$retired_command"* ]] || return 1
+	printf 'reporting_cutover_lifecycle_self_test=passed\n'
 }
-
 reporting_cutover_main() {
-	local action="${1:-}" revision phase marker_revision cleanup_revision
+	local action="${1:-}" revision marker_revision cleanup_revision
 	case "$action" in
 	--self-test)
 		[[ $# == 1 ]] || return 1
@@ -6231,19 +4760,13 @@ reporting_cutover_main() {
 		reporting_cutover_status
 		return
 		;;
-	initialize | backfill | caught-up | prepare-shadow-evidence | shadow-verified | \
-		stop-core-scheduler | claim-scheduler | verify-scheduler | \
-		routes-switched | restore-verified | rollback-routes | \
-		rollback-scheduler | verify-core-cleanup-backup | stage-cleanup | \
+	verify-core-cleanup-backup | stage-cleanup | \
 		prepare-core-cleanup-resolve | resolve-core-cleanup-migration | source-cleaned | \
 		cleanup-restore-verified | complete)
 		[[ $# == 1 ]] || return 1
 		;;
-	advance)
-		[[ $# == 2 ]] || return 1
-		;;
 	*)
-		echo "Usage: EXPECTED_REVISION=<sha> $0 initialize | $0 advance target-created|roles-ready|migrated|producers-enabled | $0 backfill | $0 caught-up | $0 prepare-shadow-evidence | $0 shadow-verified | $0 stop-core-scheduler | $0 claim-scheduler | $0 verify-scheduler | $0 routes-switched | $0 restore-verified | $0 rollback-routes | $0 rollback-scheduler | $0 verify-core-cleanup-backup | $0 stage-cleanup | $0 prepare-core-cleanup-resolve | $0 resolve-core-cleanup-migration | $0 source-cleaned | $0 cleanup-restore-verified | $0 complete | $0 status | $0 --self-test" >&2
+		echo "Usage: EXPECTED_REVISION=<sha> $0 verify-core-cleanup-backup | $0 stage-cleanup | $0 prepare-core-cleanup-resolve | $0 resolve-core-cleanup-migration | $0 source-cleaned | $0 cleanup-restore-verified | $0 complete | $0 status | $0 --self-test" >&2
 		return 1
 		;;
 	esac
@@ -6266,9 +4789,8 @@ reporting_cutover_main() {
 		healthy-required "$REPORTING_ENV_FILE"
 	assert_core_database_url_boundaries
 	assert_core_database_postgres_identity
-	if [[ "$action" != 'initialize' ]]; then
-		reporting_cutover_validate_marker
-		case "$action" in
+	reporting_cutover_validate_marker
+	case "$action" in
 		prepare-core-cleanup-resolve | resolve-core-cleanup-migration | \
 		source-cleaned | cleanup-restore-verified | complete)
 			[[ "$(reporting_cutover_marker_value cleanup_revision)" == "$revision" ]] || {
@@ -6295,51 +4817,9 @@ reporting_cutover_main() {
 				reporting_cutover_export_pinned_runtime_identity "$marker_revision"
 			fi
 			;;
-		*)
-			[[ "$(reporting_cutover_marker_value revision)" == "$revision" ]] || {
-				echo 'Reporting cutover action must run from the original revision fixed in its durable marker.' >&2
-				return 1
-			}
-			;;
-		esac
-		reporting_initialize_database_guard "Reporting cutover $action"
-	fi
+	esac
+	reporting_initialize_database_guard "Reporting cutover $action"
 	case "$action" in
-	initialize) reporting_cutover_initialize "$revision" ;;
-	advance)
-		[[ $# == 2 ]] || return 1
-		phase="$2"
-		case "$phase" in
-		target-created)
-			reporting_cutover_require_phase preflight
-			reporting_cutover_verify_target_created
-			;;
-		roles-ready)
-			reporting_cutover_require_phase target-created
-			reporting_cutover_verify_roles_ready
-			;;
-		migrated)
-			reporting_cutover_require_phase roles-ready
-			reporting_cutover_verify_migrated
-			;;
-		producers-enabled)
-			reporting_cutover_require_phase migrated
-			reporting_cutover_verify_producers_enabled
-			;;
-		*) return 1 ;;
-		esac
-		;;
-	backfill) reporting_cutover_run_backfill ;;
-	caught-up) reporting_cutover_verify_caught_up ;;
-	prepare-shadow-evidence) reporting_cutover_prepare_shadow_evidence ;;
-	shadow-verified) reporting_cutover_verify_shadow ;;
-	stop-core-scheduler) reporting_cutover_stop_core_scheduler ;;
-	claim-scheduler) reporting_cutover_claim_scheduler_target ;;
-	verify-scheduler) reporting_cutover_verify_scheduler ;;
-	routes-switched) reporting_cutover_verify_routes ;;
-	restore-verified) reporting_cutover_verify_restore ;;
-	rollback-routes) reporting_cutover_rollback_routes ;;
-	rollback-scheduler) reporting_cutover_rollback_scheduler ;;
 	verify-core-cleanup-backup) reporting_cutover_verify_core_cleanup_backup ;;
 	stage-cleanup) reporting_cutover_stage_cleanup ;;
 	prepare-core-cleanup-resolve) reporting_cutover_core_cleanup_resolve prepare ;;
@@ -6348,9 +4828,7 @@ reporting_cutover_main() {
 	cleanup-restore-verified) reporting_cutover_verify_cleanup_restore ;;
 	complete) reporting_cutover_complete ;;
 	esac
-	if [[ "$action" != 'initialize' ]]; then
-		reporting_verify_database_lifecycle_unchanged
-	fi
+	reporting_verify_database_lifecycle_unchanged
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

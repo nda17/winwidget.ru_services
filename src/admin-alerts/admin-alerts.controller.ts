@@ -1,10 +1,9 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { Controller, Get, HttpCode, Query } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { AdminAlertsService } from './admin-alerts.service';
 
 @Controller('admin-alerts')
-@Auth(Role.ADMIN)
+@Auth('ADMIN')
 export class AdminAlertsController {
 	constructor(private readonly adminAlertsService: AdminAlertsService) {}
 

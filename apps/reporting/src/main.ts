@@ -1,4 +1,3 @@
-import { bootstrapReportingBackfill } from './backfill/main';
 import { ReportingJsonLogger } from './common/reporting-json.logger';
 import {
 	isReportingCorsOriginAllowed,
@@ -17,10 +16,6 @@ async function bootstrap(): Promise<void> {
 	const role = parseReportingProcessRole(
 		process.env.REPORTING_PROCESS_ROLE
 	);
-	if (role === 'backfill') {
-		await bootstrapReportingBackfill();
-		return;
-	}
 	const host = parseReportingListenHost(
 		process.env.REPORTING_LISTEN_HOST,
 		process.env.NODE_ENV

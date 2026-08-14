@@ -161,12 +161,15 @@ describe('database restore PostgreSQL contract', () => {
 			'"public"."reporting_producers_enabled"()',
 			'"public"."reporting_iso_timestamp"(timestamp without time zone)',
 			'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
-			'"public"."reporting_emit_user_projection"(text, boolean)',
-			'"public"."reporting_user_projection_trigger"()',
-			'"public"."reporting_auth_identity_projection_trigger"()',
 			'"public"."reporting_settings_projection_trigger"()'
 		];
 		const removedRuntimeFunctions = [
+			'"public"."identity_core_source_is_open"()',
+			'"public"."fence_identity_core_source"(text)',
+			'"public"."unfence_identity_core_source"(text)',
+			'"public"."reporting_emit_user_projection"(text, boolean)',
+			'"public"."reporting_user_projection_trigger"()',
+			'"public"."reporting_auth_identity_projection_trigger"()',
 			'"public"."reporting_payment_projection_trigger"()',
 			'"public"."reporting_subscription_projection_trigger"()'
 		];
@@ -366,6 +369,8 @@ describe('database restore PostgreSQL contract', () => {
 		expect(sql).toContain("'DEV_DATABASE_RESTORE'");
 		expect(sql).toContain('ON CONFLICT ("id") DO NOTHING');
 		expect(sql).toContain("'status', 'SUCCEEDED'");
+		expect(sql).toContain("'dev-user'");
+		expect(sql).not.toContain('"public"."User"');
 	});
 });
 
@@ -394,6 +399,24 @@ describe('DatabaseRestoreWorkerConfig', () => {
 				'outbox_events'
 			]
 		});
+	});
+
+	it('defines Core anchors without retired Identity source tables', () => {
+		expect(createConfig().targets.core.anchorTables).toEqual([
+			'_prisma_migrations',
+			'admin_event_logs',
+			'outbox_events',
+			'reporting_producer_state'
+		]);
+	});
+
+	it('defines Reporting anchors without retired backfill state', () => {
+		expect(createConfig().targets.reporting.anchorTables).toEqual([
+			'_prisma_migrations',
+			'identity_user_projections',
+			'projection_receipts',
+			'reporting_settings'
+		]);
 	});
 
 	it('defines the isolated Widgets database, roles, migrations and anchors', () => {

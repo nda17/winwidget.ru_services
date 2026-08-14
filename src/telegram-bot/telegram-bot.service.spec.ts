@@ -81,7 +81,6 @@ describe('TelegramBotService webhook URLs', () => {
 		const service = new TelegramBotService({} as PrismaService);
 
 		expect(service.getWebhookHealth().expectedWebhooks).toEqual({
-			info: 'https://hooks.example.test/api/v1/telegram-bot/webhook',
 			support:
 				'https://hooks.example.test/api/v1/telegram-bot/support-webhook'
 		});

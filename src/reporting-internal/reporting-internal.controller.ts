@@ -1,7 +1,6 @@
 import {
 	Controller,
 	Body,
-	Get,
 	HttpCode,
 	Post,
 	Put,
@@ -12,12 +11,10 @@ import {
 import { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import {
-	REPORTING_PROJECTION_SNAPSHOT_PATH,
 	REPORTING_SCHEDULE_POLICY_CONFIRM_PATH,
 	REPORTING_SCHEDULE_POLICY_PATH
 } from './reporting-internal.constants';
 import { ReportingInternalTokenGuard } from './reporting-internal-token.guard';
-import { ReportingProjectionSnapshotService } from './reporting-projection-snapshot.service';
 import { ReportingSchedulePolicyService } from './reporting-schedule-authority.service';
 
 const UUID_PATTERN =
@@ -27,18 +24,8 @@ const UUID_PATTERN =
 @UseGuards(ReportingInternalTokenGuard)
 export class ReportingInternalController {
 	constructor(
-		private readonly projectionSnapshot: ReportingProjectionSnapshotService,
 		private readonly schedulePolicy: ReportingSchedulePolicyService
 	) {}
-
-	@Get(REPORTING_PROJECTION_SNAPSHOT_PATH)
-	snapshot(
-		@Req() request: Request,
-		@Res({ passthrough: true }) response: Response
-	): never {
-		this.setCorrelationId(request, response);
-		return this.projectionSnapshot.retired();
-	}
 
 	@Put(REPORTING_SCHEDULE_POLICY_PATH)
 	@HttpCode(200)

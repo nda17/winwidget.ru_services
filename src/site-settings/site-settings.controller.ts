@@ -12,7 +12,6 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('/site-settings')
@@ -26,7 +25,7 @@ export class SiteSettingsController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Patch()
 	@UsePipes(
 		new ValidationPipe({

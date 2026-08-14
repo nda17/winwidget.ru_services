@@ -17,12 +17,6 @@ export interface CoreSettingsPatch {
 	bannerEnabled?: boolean;
 	bannerText?: string;
 	snowflakeEnabled?: boolean;
-	recaptchaEnabled?: boolean;
-	googleAuthEnabled?: boolean;
-	yandexAuthEnabled?: boolean;
-	githubAuthEnabled?: boolean;
-	vkAuthEnabled?: boolean;
-	telegramAuthEnabled?: boolean;
 }
 
 export interface BillingSettingsPatch {

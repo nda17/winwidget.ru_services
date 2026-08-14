@@ -66,22 +66,11 @@ const importedProjectionService = await import(
 		import.meta.url
 	)
 );
-const importedBackfillService = await import(
-	new URL(
-		'../../dist/src/backfill/reporting-backfill.service.js',
-		import.meta.url
-	)
-);
 const ProjectionService =
 	importedProjectionService.ProjectionService ||
 	importedProjectionService.default?.ProjectionService;
-const ReportingBackfillService =
-	importedBackfillService.ReportingBackfillService ||
-	importedBackfillService.default?.ReportingBackfillService;
-if (!ProjectionService || !ReportingBackfillService) {
-	throw new Error(
-		'Compiled Reporting projection services are unavailable'
-	);
+if (!ProjectionService) {
+	throw new Error('Compiled Reporting projection service is unavailable');
 }
 const prisma = new PrismaClient({
 	datasources: { db: { url: databaseUrl } }
@@ -90,13 +79,6 @@ const integrationMetrics = { increment: () => undefined };
 const projectionService = new ProjectionService(
 	prisma,
 	integrationMetrics
-);
-const backfillService = new ReportingBackfillService(
-	{},
-	projectionService,
-	{ backfillEnabled: true },
-	integrationMetrics,
-	prisma
 );
 const internalToken = `reporting-integration-${randomUUID()}`;
 const allowedOrigin = 'http://127.0.0.1:3000';
@@ -294,7 +276,6 @@ try {
 	});
 	await waitForReady(apiPort, 'api');
 	await assertApiBoundary(apiPort);
-	await assertCorruptLateSnapshotIsAtomic();
 	await stopService(service);
 	service = null;
 
@@ -693,90 +674,6 @@ async function findSettingsAuditOutbox() {
 	);
 }
 
-async function assertCorruptLateSnapshotIsAtomic() {
-	const before = await projectionStateSnapshot();
-	const snapshotId = randomUUID();
-	const headerLine = `${JSON.stringify({
-		schemaVersion: 1,
-		kind: 'header',
-		snapshotId,
-		watermarks: {
-			identityUser: '0',
-			billingPayment: '0',
-			billingSubscription: '0',
-			widget: '0',
-			lead: '0',
-			reportingSettings: '0'
-		}
-	})}\n`;
-	const recordLines = Array.from({ length: 101 }, (_, index) => {
-		const aggregateId = `corrupt-late-snapshot-user-${index}`;
-		return `${JSON.stringify({
-			schemaVersion: 1,
-			kind: 'record',
-			stream: 'identityUser',
-			event: {
-				schemaVersion: 1,
-				eventType: 'identity.user.changed.v1',
-				eventId: randomUUID(),
-				aggregateId,
-				aggregateVersion: '0',
-				sourceSequence: '0',
-				occurredAt: '2026-07-31T00:00:00.000Z',
-				tombstone: false,
-				state: identityState(aggregateId, false)
-			}
-		})}\n`;
-	});
-	const response = new Response(
-		`${headerLine}${recordLines.join('')}${JSON.stringify({
-			schemaVersion: 1,
-			kind: 'footer',
-			snapshotId,
-			recordCount: recordLines.length,
-			sha256: '0'.repeat(64)
-		})}\n`,
-		{ headers: { 'content-type': 'application/x-ndjson' } }
-	);
-	await assert.rejects(
-		backfillService.importResponse(response),
-		/Snapshot SHA-256 mismatch/
-	);
-	const [after, failedRun] = await Promise.all([
-		projectionStateSnapshot(),
-		prisma.reportingBackfillRun.findUnique({ where: { snapshotId } })
-	]);
-	assert.deepEqual(after, before);
-	assert.equal(failedRun?.status, 'FAILED');
-	assert.equal(failedRun?.recordCount, recordLines.length);
-	assert.equal(failedRun?.appliedCount, 0);
-	await prisma.reportingBackfillRun.delete({ where: { snapshotId } });
-}
-
-async function projectionStateSnapshot() {
-	const state = await Promise.all([
-		prisma.identityUserProjection.findMany({ orderBy: { id: 'asc' } }),
-		prisma.billingPaymentFact.findMany({ orderBy: { id: 'asc' } }),
-		prisma.billingSubscriptionProjection.findMany({
-			orderBy: { id: 'asc' }
-		}),
-		prisma.widgetProjection.findMany({
-			orderBy: { sourceAggregateId: 'asc' }
-		}),
-		prisma.leadFact.findMany({
-			orderBy: { sourceAggregateId: 'asc' }
-		}),
-		prisma.reportingSettings.findMany({ orderBy: { id: 'asc' } }),
-		prisma.projectionReceipt.findMany({ orderBy: { id: 'asc' } }),
-		prisma.projectionWatermark.findMany({ orderBy: { stream: 'asc' } })
-	]);
-	return JSON.parse(
-		JSON.stringify(state, (_key, value) =>
-			typeof value === 'bigint' ? value.toString() : value
-		)
-	);
-}
-
 async function provisionSharedRabbitFixture() {
 	const amqpImported = await import('amqplib');
 	const connect = amqpImported.connect || amqpImported.default?.connect;
@@ -879,7 +776,7 @@ async function runRabbitSmoke(port) {
 				return receipt?.status === 'DELIVERED';
 			});
 
-			await assertConcurrentLiveAndBackfillBatch(publisher);
+			await assertConcurrentLiveAndProjectionBatch(publisher);
 
 			const aggregateId = `integration-user-${randomUUID()}`;
 			const baseEventId = randomUUID();
@@ -1060,10 +957,10 @@ async function runRabbitSmoke(port) {
 	}
 }
 
-async function assertConcurrentLiveAndBackfillBatch(publisher) {
+async function assertConcurrentLiveAndProjectionBatch(publisher) {
 	const suffix = randomUUID();
-	const aggregateA = `concurrent-backfill-a-${suffix}`;
-	const aggregateB = `concurrent-backfill-b-${suffix}`;
+	const aggregateA = `concurrent-projection-batch-a-${suffix}`;
+	const aggregateB = `concurrent-projection-batch-b-${suffix}`;
 	const lockKey = `reporting:identityUser:${aggregateA}`;
 	const blockerReady = deferred();
 	const releaseBlocker = deferred();
@@ -1084,7 +981,7 @@ async function assertConcurrentLiveAndBackfillBatch(publisher) {
 			throw error;
 		});
 	await blockerReady.promise;
-	const snapshotEvents = [aggregateB, aggregateA].map(aggregateId => ({
+	const projectionEvents = [aggregateB, aggregateA].map(aggregateId => ({
 		schemaVersion: 1,
 		eventType: 'identity.user.changed.v1',
 		eventId: randomUUID(),
@@ -1095,9 +992,9 @@ async function assertConcurrentLiveAndBackfillBatch(publisher) {
 		tombstone: false,
 		state: identityState(aggregateId, false)
 	}));
-	const batch = projectionService.applyBatch(snapshotEvents);
+	const batch = projectionService.applyBatch(projectionEvents);
 	try {
-		await waitFor('backfill batch advisory lock wait', async () => {
+		await waitFor('projection batch advisory lock wait', async () => {
 			const rows = await prisma.$queryRawUnsafe(`
 				SELECT count(*)::INTEGER AS "waiting"
 				FROM pg_locks
@@ -1118,7 +1015,7 @@ async function assertConcurrentLiveAndBackfillBatch(publisher) {
 			state: identityState(aggregateB, true)
 		});
 		await waitFor(
-			'live projection while backfill batch is blocked',
+			'live projection while projection batch is blocked',
 			async () => {
 				const projection = await prisma.identityUserProjection.findUnique({
 					where: { id: aggregateB }
@@ -1135,7 +1032,7 @@ async function assertConcurrentLiveAndBackfillBatch(publisher) {
 	const [, summary] = await withTimeout(
 		Promise.all([blocker, batch]),
 		10_000,
-		'Concurrent live projection and backfill batch deadlocked'
+		'Concurrent live projection and projection batch deadlocked'
 	);
 	assert.deepEqual(summary, { applied: 1, duplicate: 0, stale: 1 });
 	const [projectionA, projectionB, watermark] = await Promise.all([
@@ -1381,7 +1278,6 @@ async function cleanupDatabase() {
 		prisma.projectionWatermark.deleteMany(),
 		prisma.reportingOutboxEvent.deleteMany(),
 		prisma.reportRun.deleteMany(),
-		prisma.reportingBackfillRun.deleteMany(),
 		prisma.leadFact.deleteMany(),
 		prisma.widgetProjection.deleteMany(),
 		prisma.billingSubscriptionProjection.deleteMany(),

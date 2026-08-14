@@ -467,7 +467,6 @@ database_restore_guard_static_integration_self_test() {
 		scripts/notification-delivery-database-lifecycle.sh
 		scripts/campaigns-database-lifecycle.sh
 		scripts/reporting-database-lifecycle.sh
-		scripts/reporting-producer-lifecycle.sh
 		scripts/reporting-cutover-lifecycle.sh
 		scripts/billing-database-lifecycle.sh
 		scripts/deploy-billing-production.sh

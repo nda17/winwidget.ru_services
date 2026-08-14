@@ -23,7 +23,7 @@ function client(overrides: Record<string, string> = {}) {
 			IDENTITY_INTERNAL_BASE_URL: 'http://127.0.0.1:4900',
 			...overrides
 		}),
-		{ apiEnabled: true, backfillEnabled: false } as never
+		{ apiEnabled: true } as never
 	);
 }
 

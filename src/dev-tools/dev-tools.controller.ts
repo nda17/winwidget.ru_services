@@ -22,7 +22,6 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { Role } from '@prisma/client';
 import { IsOptional, IsString, IsUUID } from 'class-validator';
 import { Request } from 'express';
 
@@ -36,7 +35,7 @@ class RestoreDatabaseBackupDto {
 }
 
 @Controller('dev-tools')
-@Auth(Role.DEV)
+@Auth('DEV')
 export class DevToolsController {
 	constructor(
 		private readonly databaseRestoreService: DatabaseRestoreService,

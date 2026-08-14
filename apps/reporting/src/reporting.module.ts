@@ -4,7 +4,6 @@ import {
 } from './auth/reporting-auth.guard';
 import { ReportingAnalyticsController } from './analytics/reporting-analytics.controller';
 import { ReportingAnalyticsService } from './analytics/reporting-analytics.service';
-import { ReportingBackfillService } from './backfill/reporting-backfill.service';
 import { reportingContextMiddleware } from './common/reporting-context';
 import { waitForReportingShutdown } from './common/reporting-shutdown';
 import { DailySummaryReportService } from './daily-summary/daily-summary-report.service';
@@ -63,7 +62,6 @@ import { ConfigModule } from '@nestjs/config';
 		DailySummarySchedulerService,
 		ReportingWorkerService,
 		ReportingOutboxPublisherService,
-		ReportingBackfillService,
 		ReportingHeartbeatService,
 		ReportingHealthService
 	]

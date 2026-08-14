@@ -7,62 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id                           String                       @id @default(cuid())
-  name                         String?
-  password                     String
-  avatarPath                   String?
-  status                       UserStatus                   @default(ACTIVE)
-  personalDataConsentRevokedAt DateTime?                    @map("personal_data_consent_revoked_at")
-  deletedAt                    DateTime?                    @map("deleted_at")
-  rights                       Role[]                       @default([USER])
-  authIdentities               AuthIdentity[]
-  telegramNotificationChannel  TelegramNotificationChannel?
-  verificationChallenges       VerificationChallenge[]
-  sessions                     UserSession[]
-  createdAt                    DateTime                     @default(now()) @map("created_at")
-  updatedAt                    DateTime                     @updatedAt @map("updated_at")
-
-  @@index([status])
-  @@index([deletedAt])
-}
-
-model UserSession {
-  id               String    @id
-  userId           String    @map("user_id")
-  refreshTokenHash String    @map("refresh_token_hash")
-  userAgent        String?   @map("user_agent")
-  ipAddress        String?   @map("ip_address")
-  expiresAt        DateTime  @map("expires_at")
-  lastUsedAt       DateTime  @default(now()) @map("last_used_at")
-  revokedAt        DateTime? @map("revoked_at")
-  createdAt        DateTime  @default(now()) @map("created_at")
-  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, revokedAt])
-  @@index([expiresAt])
-  @@map("user_sessions")
-}
-
-model TelegramNotificationChannel {
-  id             String    @id @default(cuid())
-  userId         String    @unique @map("user_id")
-  chatId         String    @unique @map("chat_id")
-  telegramUserId String?   @unique @map("telegram_user_id")
-  username       String?
-  firstName      String?   @map("first_name")
-  lastName       String?   @map("last_name")
-  isActive       Boolean   @default(true) @map("is_active")
-  connectedAt    DateTime  @default(now()) @map("connected_at")
-  disabledAt     DateTime? @map("disabled_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  updatedAt      DateTime  @updatedAt @map("updated_at")
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([isActive], map: "telegram_notification_channels_is_active_idx")
-  @@map("telegram_notification_channels")
-}
-
 model TelegramSupportMessage {
   id             String   @id @default(cuid())
   adminChatId    String   @map("admin_chat_id")
@@ -168,17 +112,6 @@ model BillingCoreState {
   updatedAt                 DateTime             @updatedAt @map("updated_at")
 
   @@map("billing_core_state")
-}
-
-model IdentityCoreSourceState {
-  id             String   @id @default("singleton")
-  ownership      String   @default("OPEN")
-  generation     BigInt   @default(0)
-  fencedRevision String?  @map("fenced_revision")
-  fencedAt       DateTime? @map("fenced_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
-
-  @@map("identity_core_source_state")
 }
 
 model BillingSourceAggregateVersion {
@@ -426,49 +359,6 @@ model IntegrationDeliveryReceipt {
   @@map("integration_delivery_receipts")
 }
 
-model AuthIdentity {
-  id         String           @id @default(cuid())
-  userId     String           @map("user_id")
-  type       AuthIdentityType
-  value      String
-  verifiedAt DateTime?        @map("verified_at")
-  createdAt  DateTime         @default(now()) @map("created_at")
-  updatedAt  DateTime         @updatedAt @map("updated_at")
-  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
-  @@unique([type, value])
-  @@unique([userId, type])
-  @@index([userId])
-  @@map("auth_identities")
-}
-
-model VerificationChallenge {
-  id                String                       @id @default(cuid())
-  userId            String?                      @map("user_id")
-  type              VerificationChallengeType
-  purpose           VerificationChallengePurpose
-  value             String
-  passwordHash      String?                      @map("password_hash")
-  codeHash          String                       @map("code_hash")
-  attempts          Int                          @default(0)
-  telegramUserId    String?                      @map("telegram_user_id")
-  telegramChatId    String?                      @map("telegram_chat_id")
-  telegramUsername  String?                      @map("telegram_username")
-  telegramFirstName String?                      @map("telegram_first_name")
-  telegramLastName  String?                      @map("telegram_last_name")
-  expiresAt         DateTime                     @map("expires_at")
-  lastSentAt        DateTime                     @default(now()) @map("last_sent_at")
-  createdAt         DateTime                     @default(now()) @map("created_at")
-  updatedAt         DateTime                     @updatedAt @map("updated_at")
-  user              User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-
-  @@unique([userId, type, purpose])
-  @@unique([type, purpose, value])
-  @@index([telegramUserId])
-  @@index([expiresAt])
-  @@map("verification_challenges")
-}
-
 enum PaymentStatus {
   PENDING
   SUCCEEDED
@@ -506,40 +396,6 @@ enum ScheduledJobRunStatus {
 enum ScheduledJobRunTrigger {
   SCHEDULED
   MANUAL
-}
-
-enum Role {
-  USER
-  ADMIN
-  DEV
-}
-
-enum UserStatus {
-  ACTIVE
-  DEACTIVATED
-}
-
-enum AuthIdentityType {
-  EMAIL
-  PHONE
-  GOOGLE
-  GITHUB
-  YANDEX
-  VK
-  TELEGRAM
-}
-
-enum VerificationChallengeType {
-  EMAIL
-  PHONE
-  TELEGRAM
-}
-
-enum VerificationChallengePurpose {
-  REGISTER
-  BIND_IDENTITY
-  BIND_TELEGRAM_NOTIFICATIONS
-  LOGIN
 }
 
 enum Plan {
@@ -587,17 +443,11 @@ enum IntegrationFailureResolution {
 }
 
 model SiteSettings {
-  id                  String   @id @default("singleton")
-  bannerEnabled       Boolean  @default(false) @map("banner_enabled")
-  bannerText          String   @default("") @map("banner_text")
-  snowflakeEnabled    Boolean  @default(false) @map("snowflake_enabled")
-  recaptchaEnabled    Boolean  @default(true) @map("recaptcha_enabled")
-  googleAuthEnabled   Boolean  @default(true) @map("google_auth_enabled")
-  yandexAuthEnabled   Boolean  @default(true) @map("yandex_auth_enabled")
-  githubAuthEnabled   Boolean  @default(true) @map("github_auth_enabled")
-  vkAuthEnabled       Boolean  @default(false) @map("vk_auth_enabled")
-  telegramAuthEnabled Boolean  @default(true) @map("telegram_auth_enabled")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  id               String   @id @default("singleton")
+  bannerEnabled    Boolean  @default(false) @map("banner_enabled")
+  bannerText       String   @default("") @map("banner_text")
+  snowflakeEnabled Boolean  @default(false) @map("snowflake_enabled")
+  updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("site_settings")
 }

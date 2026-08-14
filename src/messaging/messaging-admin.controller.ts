@@ -15,7 +15,6 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('messaging/admin')
@@ -25,14 +24,14 @@ export class MessagingAdminController {
 	) {}
 
 	@Get('overview')
-	@Auth([Role.ADMIN, Role.DEV])
+	@Auth(['ADMIN', 'DEV'])
 	@HttpCode(200)
 	getOverview() {
 		return this.messagingAdminService.getOverview();
 	}
 
 	@Get('failures')
-	@Auth(Role.DEV)
+	@Auth('DEV')
 	@HttpCode(200)
 	getFailures(
 		@Query('page') page?: string,
@@ -49,7 +48,7 @@ export class MessagingAdminController {
 	}
 
 	@Post('failures/:id/retry')
-	@Auth(Role.DEV)
+	@Auth('DEV')
 	@HttpCode(200)
 	async retryFailure(
 		@Param('id', new ParseUUIDPipe()) id: string,
@@ -60,7 +59,7 @@ export class MessagingAdminController {
 	}
 
 	@Post('failures/:id/close')
-	@Auth(Role.DEV)
+	@Auth('DEV')
 	@HttpCode(200)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	async closeFailure(

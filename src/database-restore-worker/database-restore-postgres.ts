@@ -87,15 +87,9 @@ const UNSUPPORTED_SCHEMA_TOC_KINDS = new Set([
 ]);
 
 const CORE_API_RUNTIME_FUNCTIONS = [
-	'"public"."identity_core_source_is_open"()',
-	'"public"."fence_identity_core_source"(text)',
-	'"public"."unfence_identity_core_source"(text)',
 	'"public"."reporting_producers_enabled"()',
 	'"public"."reporting_iso_timestamp"(timestamp without time zone)',
 	'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
-	'"public"."reporting_emit_user_projection"(text, boolean)',
-	'"public"."reporting_user_projection_trigger"()',
-	'"public"."reporting_auth_identity_projection_trigger"()',
 	'"public"."reporting_settings_projection_trigger"()'
 ] as const;
 
@@ -750,13 +744,8 @@ INSERT INTO "public"."admin_event_logs" (
     "created_at"
 )
 SELECT
-    ${auditId},
-    CASE
-        WHEN EXISTS (
-            SELECT 1 FROM "public"."User" WHERE "id" = ${requestedBy}
-        ) THEN ${requestedBy}
-        ELSE NULL
-    END,
+	${auditId},
+	${requestedBy},
     'DEV_TOOLS',
     'DEV_DATABASE_RESTORE',
     'Восстановление основной базы данных из проверенного dump',
@@ -788,12 +777,7 @@ BEGIN
               'sha256', ${sha256},
               'status', 'SUCCEEDED'
           )
-          AND "admin_id" IS NOT DISTINCT FROM CASE
-              WHEN EXISTS (
-                  SELECT 1 FROM "public"."User" WHERE "id" = ${requestedBy}
-              ) THEN ${requestedBy}
-              ELSE NULL
-          END
+		  AND "admin_id" = ${requestedBy}
     ) THEN
         RAISE EXCEPTION 'Core restore audit event is missing or inconsistent';
     END IF;
@@ -976,8 +960,6 @@ function buildRuntimeAclRepairSql(
 			? `
 REVOKE ALL ON TABLE ${schema}."reporting_producer_state" FROM ${primaryRuntime};
 GRANT SELECT ON TABLE ${schema}."reporting_producer_state" TO ${primaryRuntime};
-REVOKE ALL ON TABLE ${schema}."identity_core_source_state" FROM ${primaryRuntime};
-GRANT SELECT ON TABLE ${schema}."identity_core_source_state" TO ${primaryRuntime};
 REVOKE ALL ON TABLE ${schema}."reporting_projection_versions" FROM ${primaryRuntime};
 GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}."reporting_projection_versions" TO ${primaryRuntime};
 GRANT EXECUTE ON FUNCTION ${CORE_API_RUNTIME_FUNCTIONS.join(',\n    ')} TO ${primaryRuntime};
@@ -1104,12 +1086,12 @@ function buildRuntimeAclVerificationSql(
     LOOP
 	        IF has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'SELECT')
 	               IS DISTINCT FROM (table_name <> '_prisma_migrations')
-	           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
-	               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'identity_core_source_state', 'reporting_producer_state']))
-	           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
-	               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'identity_core_source_state', 'reporting_producer_state']))
-	           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
-	               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'identity_core_source_state', 'reporting_producer_state', 'reporting_projection_versions'])) THEN
+		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
+		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state']))
+		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
+		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state']))
+		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
+		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions'])) THEN
             RAISE EXCEPTION 'Core API runtime table ACL is invalid';
         END IF;
     END LOOP;

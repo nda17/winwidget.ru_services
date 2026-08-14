@@ -1,5 +1,5 @@
 import { MessagingAdminController } from '@/messaging/messaging-admin.controller';
-import { Role } from '@prisma/client';
+import type { PlatformRole } from '@/auth/decorators/roles.decorator';
 
 describe('MessagingAdminController authorization', () => {
 	const getRoles = (
@@ -7,11 +7,11 @@ describe('MessagingAdminController authorization', () => {
 			MessagingAdminController,
 			'getOverview' | 'getFailures' | 'retryFailure' | 'closeFailure'
 		>
-	): Role[] =>
+	): PlatformRole[] =>
 		Reflect.getMetadata(
 			'roles',
 			MessagingAdminController.prototype[method]
-		) as Role[];
+		) as PlatformRole[];
 
 	it('declares authorization explicitly on controller methods', () => {
 		expect(
@@ -24,12 +24,12 @@ describe('MessagingAdminController authorization', () => {
 	});
 
 	it('allows ADMIN and DEV to read the queue overview', () => {
-		expect(getRoles('getOverview')).toEqual([Role.ADMIN, Role.DEV]);
+		expect(getRoles('getOverview')).toEqual(['ADMIN', 'DEV']);
 	});
 
 	it('keeps delivery failures and manual retry DEV-only', () => {
-		expect(getRoles('getFailures')).toEqual([Role.DEV]);
-		expect(getRoles('retryFailure')).toEqual([Role.DEV]);
-		expect(getRoles('closeFailure')).toEqual([Role.DEV]);
+		expect(getRoles('getFailures')).toEqual(['DEV']);
+		expect(getRoles('retryFailure')).toEqual(['DEV']);
+		expect(getRoles('closeFailure')).toEqual(['DEV']);
 	});
 });

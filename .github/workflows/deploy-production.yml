@@ -171,13 +171,13 @@ jobs:
             scripts/identity-cutover-production.sh
             scripts/identity-backup-restore-rehearsal.sh
             scripts/cleanup-identity-core-source-production.sh
-            src/billing-core-cutover-main.ts
-            src/identity-core-cutover-main.ts
+            scripts/test-identity-core-source-cleanup-rehearsal.sh
             apps/billing/src/cutover-main.ts
             prisma/migrations/20260811000000_prepare_billing_service_ownership/migration.sql
             prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
             prisma/migrations/20260813000000_remove_legacy_billing_core_source/migration.sql
             prisma/migrations/20260814020000_detach_identity_foreign_keys/migration.sql
+            prisma/migrations/20260815000000_remove_legacy_identity_core_source/migration.sql
           )
           for path in "${required_files[@]}"; do
             test -f "$path"
@@ -203,7 +203,8 @@ jobs:
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
             scripts/identity-backup-restore-rehearsal.sh \
-            scripts/cleanup-identity-core-source-production.sh; do
+            scripts/cleanup-identity-core-source-production.sh \
+            scripts/test-identity-core-source-cleanup-rehearsal.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
@@ -243,6 +244,8 @@ jobs:
             bash scripts/identity-backup-restore-rehearsal.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/cleanup-identity-core-source-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
 
           # ShellCheck runs separately below; its actionlint integration
           # deadlocks while piping this workflow's large inline scripts.
@@ -283,7 +286,8 @@ jobs:
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
             scripts/identity-backup-restore-rehearsal.sh \
-            scripts/cleanup-identity-core-source-production.sh
+            scripts/cleanup-identity-core-source-production.sh \
+            scripts/test-identity-core-source-cleanup-rehearsal.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -974,7 +978,6 @@ jobs:
             scripts/campaigns-database-lifecycle.sh \
             scripts/cutover-campaigns-database-production.sh \
             scripts/restart-campaigns-database-cutover-production.sh \
-            scripts/test-campaigns-cutover-rehearsal.sh \
             scripts/audit-legacy-telegram-channels-production.sh; do
             bash -n "$script"
           done
@@ -1005,7 +1008,6 @@ jobs:
             scripts/campaigns-database-lifecycle.sh \
             scripts/cutover-campaigns-database-production.sh \
             scripts/restart-campaigns-database-cutover-production.sh \
-            scripts/test-campaigns-cutover-rehearsal.sh \
             scripts/audit-legacy-telegram-channels-production.sh
 
       - name: Fast-check Reporting phase-A production scripts
@@ -1019,20 +1021,12 @@ jobs:
             scripts/reporting-cutover-lifecycle.sh \
             scripts/generate-reporting-frontend-runtime-attestation.sh \
             scripts/run-reporting-scheduler-cutover-smoke.sh \
-            scripts/run-reporting-route-cutover-smoke.sh \
-            scripts/run-reporting-restore-cutover-smoke.sh \
-            scripts/test-reporting-cutover-rehearsal.sh \
             scripts/test-reporting-production-scripts.sh; do
             bash -n "$script"
           done
-          bash scripts/test-reporting-cutover-rehearsal.sh --self-test
           bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
-          APP_ROOT="$reporting_ci_app_root" \
-            bash scripts/run-reporting-route-cutover-smoke.sh --self-test
-          APP_ROOT="$reporting_ci_app_root" \
-            bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
           for script in \
             scripts/reporting-database-lifecycle.sh \
@@ -1041,9 +1035,6 @@ jobs:
             scripts/reporting-cutover-lifecycle.sh \
             scripts/generate-reporting-frontend-runtime-attestation.sh \
             scripts/run-reporting-scheduler-cutover-smoke.sh \
-            scripts/run-reporting-route-cutover-smoke.sh \
-            scripts/run-reporting-restore-cutover-smoke.sh \
-            scripts/test-reporting-cutover-rehearsal.sh \
             scripts/test-reporting-production-scripts.sh; do
             printf 'reporting_shellcheck_start=%s\n' "$script"
             docker run --rm \
@@ -1078,6 +1069,7 @@ jobs:
           bash -n scripts/identity-cutover-production.sh
           bash -n scripts/identity-backup-restore-rehearsal.sh
           bash -n scripts/cleanup-identity-core-source-production.sh
+          bash -n scripts/test-identity-core-source-cleanup-rehearsal.sh
           node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
@@ -1098,6 +1090,8 @@ jobs:
             bash scripts/cleanup-billing-core-source-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
@@ -1117,7 +1111,8 @@ jobs:
             scripts/billing-cutover-production.sh \
             scripts/billing-backup-restore-rehearsal.sh \
             scripts/cleanup-billing-core-source-production.sh \
-            scripts/test-billing-core-source-cleanup-rehearsal.sh
+            scripts/test-billing-core-source-cleanup-rehearsal.sh \
+            scripts/test-identity-core-source-cleanup-rehearsal.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -1808,62 +1803,46 @@ jobs:
 
       - name: Generate ephemeral CI JWT keyset
         run: |
-          cp .env.example "$RUNNER_TEMP/winwidget-jwt-ci.env"
-          node scripts/generate-jwt-keyset.mjs \
-            --backend-env "$RUNNER_TEMP/winwidget-jwt-ci.env" \
-            --issuer https://api.winwidget.test/auth \
-            --audience https://api.winwidget.test \
-            --kid-prefix winwidget-ci \
-            --keep-previous 0
-          JWT_ENV_FILE="$RUNNER_TEMP/winwidget-jwt-ci.env" node <<'NODE'
-          const { appendFileSync, readFileSync } = require('node:fs');
-          const requiredKeys = new Set([
-            'JWT_ACCESS_PRIVATE_KEY_BASE64',
-            'JWT_ACCESS_JWKS_BASE64',
-            'JWT_ACCESS_ACTIVE_KID',
-            'JWT_ISSUER',
-            'JWT_AUDIENCE',
-            'JWT_ACCESS_TTL_SECONDS',
-            'JWT_CLOCK_TOLERANCE_SECONDS',
+          node <<'NODE'
+          const { generateKeyPairSync, randomBytes } = require('node:crypto');
+          const { appendFileSync } = require('node:fs');
+
+          const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+            modulusLength: 3072,
+            publicExponent: 0x10001,
+          });
+          const kid = `winwidget-identity-ci-${randomBytes(12).toString('hex')}`;
+          const privateKeyBase64 = Buffer.from(
+            privateKey.export({ format: 'pem', type: 'pkcs8' }),
+            'utf8',
+          ).toString('base64');
+          const publicJwk = {
+            ...publicKey.export({ format: 'jwk' }),
+            kid,
+            use: 'sig',
+            alg: 'RS256',
+            key_ops: ['verify'],
+          };
+          const jwksBase64 = Buffer.from(
+            JSON.stringify({ keys: [publicJwk] }),
+            'utf8',
+          ).toString('base64');
+          const values = new Map([
+            ['IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64', privateKeyBase64],
+            ['IDENTITY_JWT_ACCESS_JWKS_BASE64', jwksBase64],
+            ['IDENTITY_JWT_ACCESS_ACTIVE_KID', kid],
+            ['JWT_ISSUER', 'https://api.winwidget.test/auth'],
+            ['JWT_AUDIENCE', 'https://api.winwidget.test'],
+            ['JWT_ACCESS_TTL_SECONDS', '900'],
+            ['JWT_CLOCK_TOLERANCE_SECONDS', '5'],
+            [
+              'JWT_JWKS_URL',
+              'http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json',
+            ],
           ]);
-          const values = new Map();
-          for (const line of readFileSync(process.env.JWT_ENV_FILE, 'utf8').split(/\r?\n/)) {
-            const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-            if (match && requiredKeys.has(match[1])) values.set(match[1], match[2]);
-          }
-          for (const key of requiredKeys) {
-            const value = values.get(key);
-            if (!value) throw new Error(`Missing generated ${key}`);
-            appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
-          }
-          appendFileSync(
-            process.env.GITHUB_ENV,
-            'JWT_JWKS_URL=http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json\n',
-          );
-          NODE
-          cp .env.example "$RUNNER_TEMP/winwidget-identity-jwt-ci.env"
-          node scripts/generate-jwt-keyset.mjs \
-            --backend-env "$RUNNER_TEMP/winwidget-identity-jwt-ci.env" \
-            --issuer https://api.winwidget.test/auth \
-            --audience https://api.winwidget.test \
-            --kid-prefix winwidget-identity-ci \
-            --keep-previous 0
-          JWT_ENV_FILE="$RUNNER_TEMP/winwidget-identity-jwt-ci.env" node <<'NODE'
-          const { appendFileSync, readFileSync } = require('node:fs');
-          const mapping = new Map([
-            ['JWT_ACCESS_PRIVATE_KEY_BASE64', 'IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64'],
-            ['JWT_ACCESS_JWKS_BASE64', 'IDENTITY_JWT_ACCESS_JWKS_BASE64'],
-            ['JWT_ACCESS_ACTIVE_KID', 'IDENTITY_JWT_ACCESS_ACTIVE_KID'],
-          ]);
-          const values = new Map();
-          for (const line of readFileSync(process.env.JWT_ENV_FILE, 'utf8').split(/\r?\n/)) {
-            const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-            if (match && mapping.has(match[1])) values.set(match[1], match[2]);
-          }
-          for (const [source, destination] of mapping) {
-            const value = values.get(source);
-            if (!value) throw new Error(`Missing generated ${source}`);
-            appendFileSync(process.env.GITHUB_ENV, `${destination}=${value}\n`);
+
+          for (const [name, value] of values) {
+            appendFileSync(process.env.GITHUB_ENV, `${name}=${value}\n`);
           }
           NODE
 
@@ -1908,12 +1887,10 @@ jobs:
           CORE_CLEANUP_REHEARSAL_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
         run: bash scripts/test-widgets-core-source-cleanup-rehearsal.sh --rehearsal
 
-      - name: Test Reporting producer PostgreSQL boundaries
+      - name: Rehearse guarded Identity Core source cleanup in PostgreSQL 18
         env:
-          REPORTING_PRODUCER_TEST_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
-        run: |
-          REPORTING_PRODUCER_TEST_DATABASE_URL="$DATABASE_URL" \
-            pnpm run test:reporting-producer-boundaries
+          CORE_CLEANUP_REHEARSAL_RUN_ID: identity-ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/test-identity-core-source-cleanup-rehearsal.sh --rehearsal
 
       - name: Finalize Notification Delivery runtime grants
         env:
@@ -4980,9 +4957,6 @@ jobs:
                 "RABBITMQ_MONITOR_PASSWORD",
                 "RABBITMQ_VHOST",
                 "TRUST_PROXY",
-                "JWT_ACCESS_PRIVATE_KEY_BASE64",
-                "JWT_ACCESS_JWKS_BASE64",
-                "JWT_ACCESS_ACTIVE_KID",
                 "JWT_ISSUER",
                 "JWT_AUDIENCE",
                 "CORS_ALLOWED_ORIGINS",
@@ -5007,6 +4981,66 @@ jobs:
                 "DATABASE_RESTORE_PRODUCTION_ENABLED",
               ]);
               const apiEnvironment = requireService("api").environment ?? {};
+              const integrationServiceEnvironment =
+                requireService("integration-worker").environment ?? {};
+              const identityOnlyCoreEnvironmentKeys = [
+                "JWT_ACCESS_PRIVATE_KEY_BASE64",
+                "JWT_ACCESS_JWKS_BASE64",
+                "JWT_ACCESS_ACTIVE_KID",
+                "RECAPTCHA_SECRET_KEY",
+                "RECAPTCHA_CLIENT_URL",
+                "RECAPTCHA_ENABLED",
+                "RECAPTCHA_MIN_SCORE",
+                "SMTP_LOGIN",
+                "SMTP_PASSWORD",
+                "SMTP_SERVER",
+                "SMTP_CONNECTION_TIMEOUT_MS",
+                "SMTP_GREETING_TIMEOUT_MS",
+                "SMTP_SOCKET_TIMEOUT_MS",
+                "SMSAERO_EMAIL",
+                "SMSAERO_API_KEY",
+                "SMSAERO_SIGN",
+                "GOOGLE_CLIENT_ID",
+                "GOOGLE_CLIENT_SECRET",
+                "GOOGLE_CALLBACK_URL",
+                "GITHUB_CLIENT_ID",
+                "GITHUB_CLIENT_SECRET",
+                "GITHUB_CALLBACK_URL",
+                "YANDEX_CLIENT_ID",
+                "YANDEX_CLIENT_SECRET",
+                "YANDEX_CALLBACK_URL",
+                "VK_CLIENT_ID",
+                "VK_CLIENT_SECRET",
+                "VK_SERVICE_TOKEN",
+                "VK_CALLBACK_URL",
+                "TELEGRAM_AUTH_BOT_TOKEN",
+                "TELEGRAM_AUTH_BOT_USERNAME",
+                "TELEGRAM_AUTH_BOT_WEBHOOK_SECRET",
+              ];
+              for (const [name, environment] of [
+                ["api", apiEnvironment],
+                ["integration-worker", integrationServiceEnvironment],
+              ]) {
+                for (const key of identityOnlyCoreEnvironmentKeys) {
+                  if (key in environment) {
+                    throw new Error(
+                      `${name} must not receive Identity-owned ${key}`,
+                    );
+                  }
+                }
+              }
+              for (const key of [
+                "TELEGRAM_INFO_BOT_TOKEN",
+                "TELEGRAM_INFO_BOT_USERNAME",
+                "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
+                "TELEGRAM_SUPPORT_BOT_TOKEN",
+                "TELEGRAM_SUPPORT_BOT_USERNAME",
+                "TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET",
+              ]) {
+                if (!(key in apiEnvironment)) {
+                  throw new Error(`Clean Core API must retain ${key}`);
+                }
+              }
               if (
                 apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_URL !==
                 "http://127.0.0.1:4401/internal/notification-delivery"
@@ -5720,6 +5754,35 @@ jobs:
                   "JWT_ACCESS_ACTIVE_KID",
                   "JWT_ISSUER",
                   "JWT_AUDIENCE",
+                  "RECAPTCHA_SECRET_KEY",
+                  "RECAPTCHA_CLIENT_URL",
+                  "RECAPTCHA_ENABLED",
+                  "RECAPTCHA_MIN_SCORE",
+                  "SMTP_LOGIN",
+                  "SMTP_PASSWORD",
+                  "SMTP_SERVER",
+                  "SMTP_CONNECTION_TIMEOUT_MS",
+                  "SMTP_GREETING_TIMEOUT_MS",
+                  "SMTP_SOCKET_TIMEOUT_MS",
+                  "SMSAERO_EMAIL",
+                  "SMSAERO_API_KEY",
+                  "SMSAERO_SIGN",
+                  "GOOGLE_CLIENT_ID",
+                  "GOOGLE_CLIENT_SECRET",
+                  "GOOGLE_CALLBACK_URL",
+                  "GITHUB_CLIENT_ID",
+                  "GITHUB_CLIENT_SECRET",
+                  "GITHUB_CALLBACK_URL",
+                  "YANDEX_CLIENT_ID",
+                  "YANDEX_CLIENT_SECRET",
+                  "YANDEX_CALLBACK_URL",
+                  "VK_CLIENT_ID",
+                  "VK_CLIENT_SECRET",
+                  "VK_SERVICE_TOKEN",
+                  "VK_CALLBACK_URL",
+                  "TELEGRAM_AUTH_BOT_TOKEN",
+                  "TELEGRAM_AUTH_BOT_USERNAME",
+                  "TELEGRAM_AUTH_BOT_WEBHOOK_SECRET",
                   "IDENTITY_CORE_TOKEN",
                   "CORE_IDENTITY_TOKEN",
                   "IDENTITY_CAMPAIGNS_TOKEN",
@@ -5734,6 +5797,7 @@ jobs:
                   "WIDGETS_IDENTITY_TOKEN",
                   "WIDGETS_INTERNAL_TIMEOUT_MS",
                 ],
+                ["VK_CLIENT_ID", "VK_CLIENT_SECRET", "VK_SERVICE_TOKEN"],
               );
               const identityWorkerEnvironment = requireEnvironment(
                 "identity-worker",
@@ -5831,12 +5895,6 @@ jobs:
                   "http://127.0.0.1:4800" ||
                 identityApiEnvironment.WIDGETS_INTERNAL_BASE_URL !==
                   "http://127.0.0.1:4700" ||
-                identityApiEnvironment.JWT_ACCESS_PRIVATE_KEY_BASE64 ===
-                  apiEnvironment.JWT_ACCESS_PRIVATE_KEY_BASE64 ||
-                identityApiEnvironment.JWT_ACCESS_JWKS_BASE64 ===
-                  apiEnvironment.JWT_ACCESS_JWKS_BASE64 ||
-                identityApiEnvironment.JWT_ACCESS_ACTIVE_KID ===
-                  apiEnvironment.JWT_ACCESS_ACTIVE_KID ||
                 "BILLING_INTERNAL_TOKEN" in identityApiEnvironment ||
                 "WIDGETS_INTERNAL_TOKEN" in identityApiEnvironment ||
                 identityApi.labels?.["com.winwidget.singleton"] !== "true" ||
@@ -6849,7 +6907,6 @@ jobs:
             scripts/campaigns-contract-migration-guard.sh \
             scripts/core-database-production-guard.sh \
             scripts/production-deploy-lock.sh \
-            scripts/test-campaigns-cutover-rehearsal.sh \
             scripts/audit-legacy-telegram-channels-production.sh \
             scripts/database-restore-production-guard.sh \
             scripts/billing-release-identity.sh \
@@ -6866,6 +6923,7 @@ jobs:
             scripts/identity-cutover-production.sh \
             scripts/identity-backup-restore-rehearsal.sh \
             scripts/cleanup-identity-core-source-production.sh \
+            scripts/test-identity-core-source-cleanup-rehearsal.sh \
             database-restore-entrypoint.sh
           docker run --rm \
             --network none \
@@ -7792,7 +7850,6 @@ jobs:
           bash -n scripts/campaigns-contract-migration-guard.sh
           bash -n scripts/core-database-production-guard.sh
           bash -n scripts/production-deploy-lock.sh
-          bash -n scripts/test-campaigns-cutover-rehearsal.sh
           bash -n scripts/audit-legacy-telegram-channels-production.sh
           bash -n scripts/reporting-database-lifecycle.sh
           bash -n scripts/deploy-reporting-production.sh
@@ -7800,9 +7857,6 @@ jobs:
           bash -n scripts/reporting-cutover-lifecycle.sh
           bash -n scripts/generate-reporting-frontend-runtime-attestation.sh
           bash -n scripts/run-reporting-scheduler-cutover-smoke.sh
-          bash -n scripts/run-reporting-route-cutover-smoke.sh
-          bash -n scripts/run-reporting-restore-cutover-smoke.sh
-          bash -n scripts/test-reporting-cutover-rehearsal.sh
           bash -n scripts/test-reporting-production-scripts.sh
           bash -n scripts/database-restore-production-guard.sh
           bash -n scripts/test-database-restore-worker-rehearsal.sh
@@ -7813,6 +7867,7 @@ jobs:
           bash -n scripts/billing-backup-restore-rehearsal.sh
           bash -n scripts/cleanup-billing-core-source-production.sh
           bash -n scripts/test-billing-core-source-cleanup-rehearsal.sh
+          bash -n scripts/test-identity-core-source-cleanup-rehearsal.sh
           pnpm exec prettier --check \
             .github/workflows/database-restore-production.yml \
             .github/workflows/deploy-production.yml
@@ -7820,14 +7875,9 @@ jobs:
           bash scripts/deploy-production.sh --self-test-billing-routine-image-gate
           bash scripts/deploy-production.sh --self-test-gateway-route-manifest-policy
           bash scripts/campaigns-contract-migration-guard.sh --self-test
-          bash scripts/test-reporting-cutover-rehearsal.sh --self-test
           bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
-          APP_ROOT="$reporting_ci_app_root" \
-            bash scripts/run-reporting-route-cutover-smoke.sh --self-test
-          APP_ROOT="$reporting_ci_app_root" \
-            bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
           bash scripts/database-restore-production-guard.sh --self-test
           bash scripts/test-database-restore-worker-rehearsal.sh --self-test
@@ -7859,6 +7909,8 @@ jobs:
             bash scripts/identity-backup-restore-rehearsal.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/cleanup-identity-core-source-production.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
           CORE_CLEANUP_REHEARSAL_RUN_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             APP_ROOT="$reporting_ci_app_root" \
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --rehearsal

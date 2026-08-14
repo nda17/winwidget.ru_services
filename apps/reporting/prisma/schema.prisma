@@ -308,33 +308,6 @@ model ReportingHeartbeat {
   @@schema("reporting")
 }
 
-model ReportingBackfillRun {
-  id             String                  @id @default(uuid()) @db.Uuid
-  snapshotId     String                  @unique(map: "reporting_backfill_runs_snapshot_unique") @map("snapshot_id") @db.Uuid
-  status         ReportingBackfillStatus @default(RUNNING)
-  watermarks     Json
-  counts         Json                    @default("{}")
-  recordCount    Int                     @default(0) @map("record_count")
-  appliedCount   Int                     @default(0) @map("applied_count")
-  duplicateCount Int                     @default(0) @map("duplicate_count")
-  staleCount     Int                     @default(0) @map("stale_count")
-  sha256         String?                 @db.Char(64)
-  expectedSha256 String?                 @map("expected_sha256") @db.Char(64)
-  lockedBy       String?                 @map("locked_by")
-  lockToken      String?                 @map("lock_token") @db.Uuid
-  leaseExpiresAt DateTime?               @map("lease_expires_at")
-  lastError      String?                 @map("last_error") @db.Text
-  startedAt      DateTime                @default(now()) @map("started_at")
-  verifiedAt     DateTime?               @map("verified_at")
-  failedAt       DateTime?               @map("failed_at")
-  createdAt      DateTime                @default(now()) @map("created_at")
-  updatedAt      DateTime                @updatedAt @map("updated_at")
-
-  @@index([status, leaseExpiresAt], map: "reporting_backfill_runs_lease_idx")
-  @@map("backfill_runs")
-  @@schema("reporting")
-}
-
 enum ProjectionReceiptResult {
   APPLIED
   DUPLICATE
@@ -391,14 +364,6 @@ enum ReportingConsumerFailureStatus {
   OPEN
   RETRY_REQUESTED
   RESOLVED
-
-  @@schema("reporting")
-}
-
-enum ReportingBackfillStatus {
-  RUNNING
-  VERIFIED
-  FAILED
 
   @@schema("reporting")
 }

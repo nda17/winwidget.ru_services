@@ -1,10 +1,13 @@
+import type { PlatformIdentityActor } from '@/auth/decorators/roles.decorator';
 import { createParamDecorator, ExecutionContext } from '@nestjs/common';
-import prisma from '@prisma/client';
 
 export const CurrentUser = createParamDecorator(
-	(data: keyof prisma.User | 'sessionId', ctx: ExecutionContext) => {
+	(
+		data: keyof PlatformIdentityActor | undefined,
+		ctx: ExecutionContext
+	) => {
 		const request = ctx.switchToHttp().getRequest();
-		const user = request.user;
+		const user = request.user as PlatformIdentityActor;
 
 		return data ? user[data] : user;
 	}

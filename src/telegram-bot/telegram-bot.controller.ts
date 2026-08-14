@@ -30,7 +30,6 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { isUUID } from 'class-validator';
 import { Request } from 'express';
 
@@ -43,14 +42,14 @@ export class TelegramBotController {
 	) {}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Get('admin/settings')
 	getSettings() {
 		return this.telegramBotService.getSettings();
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	@Patch('admin/settings')
 	async updateSettings(
@@ -116,14 +115,14 @@ export class TelegramBotController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Get('admin/webhooks/status')
 	getWebhookStatuses() {
 		return this.telegramBotService.getWebhookStatuses();
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Post('admin/webhooks/reinstall')
 	async reinstallWebhooks(
 		@CurrentUser('id') adminId: string,
@@ -138,7 +137,7 @@ export class TelegramBotController {
 			description: 'Переустановлены webhook Telegram-ботов',
 			entityType: 'telegram_webhook',
 			entityId: 'all',
-			entityLabel: 'Info_bot + Support_bot',
+			entityLabel: 'Support_bot',
 			metadata: result,
 			request
 		});
@@ -147,7 +146,7 @@ export class TelegramBotController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Post('admin/webhooks/:bot/reinstall')
 	async reinstallWebhook(
 		@Param('bot') bot: TelegramWebhookBot,
@@ -172,7 +171,7 @@ export class TelegramBotController {
 	}
 
 	@HttpCode(202)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Post('admin/database-backups/:target/send')
 	async sendDatabaseBackup(
 		@Param('target', new ParseEnumPipe(DATABASE_BACKUP_TARGETS))
@@ -227,7 +226,7 @@ export class TelegramBotController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Get('admin/database-backups/:target/jobs/active')
 	getLatestActiveManualDatabaseBackup(
 		@Param('target', new ParseEnumPipe(DATABASE_BACKUP_TARGETS))
@@ -241,7 +240,7 @@ export class TelegramBotController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Get('admin/database-backups/:target/jobs/:jobId')
 	async getDatabaseBackupJob(
 		@Param('target', new ParseEnumPipe(DATABASE_BACKUP_TARGETS))

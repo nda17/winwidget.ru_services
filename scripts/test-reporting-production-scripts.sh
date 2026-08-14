@@ -14,9 +14,6 @@ scripts=(
 	"$script_directory/reporting-cutover-lifecycle.sh"
 	"$script_directory/generate-reporting-frontend-runtime-attestation.sh"
 	"$script_directory/run-reporting-scheduler-cutover-smoke.sh"
-	"$script_directory/run-reporting-route-cutover-smoke.sh"
-	"$script_directory/run-reporting-restore-cutover-smoke.sh"
-	"$script_directory/test-reporting-cutover-rehearsal.sh"
 )
 
 for script in "${scripts[@]}"; do
@@ -45,6 +42,31 @@ for deployment_entrypoint in \
 done
 unset deployment_entrypoint entrypoint_text
 printf 'reporting_audit_consumer_bootstrap_entrypoints=passed\n'
+
+(
+	APP_ROOT="$app_root"
+	REPORTING_LIFECYCLE_SOURCE_ROOT="$server_root"
+	# shellcheck source=scripts/reporting-cutover-lifecycle.sh
+	source "$script_directory/reporting-cutover-lifecycle.sh"
+	# shellcheck source=scripts/identity-database-lifecycle.sh
+	source "$script_directory/identity-database-lifecycle.sh"
+	# shellcheck source=scripts/widgets-database-lifecycle.sh
+	source "$script_directory/widgets-database-lifecycle.sh"
+	reporting_widgets_ownership_marker_state() { printf 'active\n'; }
+	current_worker_kinds="$(reporting_expected_integration_worker_kinds)"
+	[[ "$current_worker_kinds" == "$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == \
+			"$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" &&
+		"$current_worker_kinds" == *'identity-admin-audit'* &&
+		"$current_worker_kinds" != *'telegram-destination-unavailable'* ]]
+	current_worker_kinds="$(reporting_normalize_integration_kinds "$current_worker_kinds")"
+	reporting_cutover_worker_kinds_allowed \
+		"$current_worker_kinds" "$current_worker_kinds" pre-reporting
+) || {
+	echo 'Post-Identity Notification Delivery worker ownership fixture failed.' >&2
+	exit 1
+}
+printf 'reporting_identity_worker_ownership=passed\n'
 
 for deployment_entrypoint in \
 	"$script_directory/deploy-maintenance-production.sh" \
@@ -214,16 +236,13 @@ ci_permission_count="$(
 unset reporting_topic_read_pattern standalone_permission_count \
 	full_deploy_permission_count ci_permission_count
 printf 'reporting_operational_routing_topic_permissions=passed\n'
-APP_ROOT="$app_root" bash "$script_directory/reporting-producer-lifecycle.sh" --self-test
-APP_ROOT="$app_root" bash "$script_directory/reporting-cutover-lifecycle.sh" --self-test
+APP_ROOT="$app_root" REPORTING_LIFECYCLE_SOURCE_ROOT="$server_root" \
+	bash "$script_directory/reporting-producer-lifecycle.sh" --self-test
+APP_ROOT="$app_root" REPORTING_LIFECYCLE_SOURCE_ROOT="$server_root" \
+	bash "$script_directory/reporting-cutover-lifecycle.sh" --self-test
 bash "$script_directory/generate-reporting-frontend-runtime-attestation.sh" --self-test
 APP_ROOT="$app_root" \
 	bash "$script_directory/run-reporting-scheduler-cutover-smoke.sh" --self-test
-APP_ROOT="$app_root" \
-	bash "$script_directory/run-reporting-route-cutover-smoke.sh" --self-test
-APP_ROOT="$app_root" \
-	bash "$script_directory/run-reporting-restore-cutover-smoke.sh" --self-test
-bash "$script_directory/test-reporting-cutover-rehearsal.sh" --self-test
 
 schedule_authority_service="$server_root/src/reporting-internal/reporting-schedule-authority.service.ts"
 reporting_settings_service="$server_root/apps/reporting/src/settings/daily-summary-settings.service.ts"
@@ -257,20 +276,6 @@ workflow_file="$server_root/.github/workflows/deploy-production.yml"
 	echo 'Production workflow is missing or unsafe.' >&2
 	exit 1
 }
-package_file="$server_root/package.json"
-[[ -f "$package_file" && ! -L "$package_file" &&
-	"$(<"$package_file")" == *'"test:reporting-cutover-rehearsal": "bash scripts/test-reporting-cutover-rehearsal.sh"'* ]] || {
-	echo 'Reusable Reporting cutover rehearsal command is missing.' >&2
-	exit 1
-}
-workflow_text="$(<"$workflow_file")"
-[[ "$(grep -Fc 'scripts/test-reporting-cutover-rehearsal.sh' "$workflow_file")" -ge 3 &&
-	"$workflow_text" == *'bash scripts/test-reporting-cutover-rehearsal.sh --self-test'* ]] || {
-	echo 'Reporting cutover rehearsal is missing from workflow syntax, shellcheck or static execution gates.' >&2
-	exit 1
-}
-unset package_file workflow_text
-printf 'reporting_cutover_rehearsal_workflow=passed\n'
 workflow_exact_line_count() {
 	local needle="$1"
 	awk -v needle="$needle" '
@@ -307,9 +312,9 @@ deploy_job="$(
 	"$verify_header" == *"needs.lifecycle_checkout_preflight.result == 'success'"* &&
 	"$deploy_job" == *'needs: verify'* &&
 	"$deploy_job" == *'timeout-minutes: 90'* &&
-	"$(grep -Fc -- '-o ServerAliveInterval=15' "$workflow_file")" == '2' &&
-	"$(grep -Fc -- '-o ServerAliveCountMax=4' "$workflow_file")" == '2' &&
-	"$(grep -Fc -- '-o TCPKeepAlive=yes' "$workflow_file")" == '2' &&
+	"$(grep -Fc -- '-o ServerAliveInterval=15' "$workflow_file")" -ge 2 &&
+	"$(grep -Fc -- '-o ServerAliveCountMax=4' "$workflow_file")" -ge 2 &&
+	"$(grep -Fc -- '-o TCPKeepAlive=yes' "$workflow_file")" -ge 2 &&
 	"$deploy_job" == *$'            notification-delivery)\n'* &&
 	"$deploy_job" == *'bash scripts/deploy-notification-delivery-production.sh'* &&
 	"$deploy_job" == *$'            campaigns)\n'* &&

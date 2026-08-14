@@ -26,7 +26,6 @@ Prisma ORM и обслуживает frontend, публичные страниц
 - Passport;
 - OAuth: Google, GitHub, Yandex и VK;
 - авторизация через Telegram;
-- `bcryptjs`;
 - `class-validator` и `class-transformer`;
 - Google reCAPTCHA v3;
 - SMS-коды через SMS Aero.
@@ -407,7 +406,7 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal
+INTEGRATION_WORKER_KINDS=campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection
 NOTIFICATION_DELIVERY_DATABASE_URL=postgresql://winwidget_notification_delivery_runtime:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
 NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION=postgresql://winwidget_notification_delivery_migration:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
 NOTIFICATION_DELIVERY_BACKUP_URL=postgresql://winwidget_notification_delivery_backup:<password>@127.0.0.1:55432/winwidget_notification_delivery?schema=notification_delivery&sslmode=disable
@@ -506,7 +505,7 @@ MESSAGING_ACTIVITY_STALE_MS=300000
 MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD=100
 INTEGRATION_RECEIPT_RETENTION_DAYS=90
 INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS=30
-INTEGRATION_WORKER_KINDS=webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal
+INTEGRATION_WORKER_KINDS=campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection
 NOTIFICATION_DELIVERY_POSTGRES_IMAGE=postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
 NOTIFICATION_DELIVERY_POSTGRES_PORT=55432
 NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME=winwidget-notification-delivery-postgres-data
@@ -1492,12 +1491,12 @@ TRUST_PROXY
 CORS_ALLOWED_ORIGINS
 ```
 
-## Auth, JWT и API Gateway
+## Identity, JWT и API Gateway
 
 ```text
-JWT_ACCESS_PRIVATE_KEY_BASE64
-JWT_ACCESS_JWKS_BASE64
-JWT_ACCESS_ACTIVE_KID
+IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64
+IDENTITY_JWT_ACCESS_JWKS_BASE64
+IDENTITY_JWT_ACCESS_ACTIVE_KID
 JWT_ISSUER
 JWT_AUDIENCE
 JWT_ACCESS_TTL_SECONDS
@@ -1515,7 +1514,11 @@ JWKS_MAX_BYTES
 GATEWAY_SHUTDOWN_GRACE_MS
 ```
 
-## reCAPTCHA
+Приватный ключ и JWKS передаются только `identity-api`. Core API и фоновые
+Core-процессы получают только параметры проверки JWT и обращаются к
+Identity JWKS по `JWT_JWKS_URL`.
+
+## Identity reCAPTCHA
 
 ```text
 RECAPTCHA_SECRET_KEY
@@ -1524,7 +1527,7 @@ RECAPTCHA_ENABLED
 RECAPTCHA_MIN_SCORE
 ```
 
-## SMTP и SMS Aero
+## Identity/Notification Delivery SMTP и Identity SMS Aero
 
 ```text
 SMTP_LOGIN
@@ -1535,7 +1538,7 @@ SMSAERO_API_KEY
 SMSAERO_SIGN
 ```
 
-## OAuth
+## Identity OAuth
 
 ```text
 GOOGLE_CLIENT_ID
@@ -1582,6 +1585,10 @@ TELEGRAM_SUPPORT_BOT_TOKEN
 TELEGRAM_SUPPORT_BOT_USERNAME
 TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET
 ```
+
+`Auth_bot` принадлежит Identity и не передаётся Core. Core сохраняет только
+свои credentials `Info_bot`/`Support_bot`; Identity также получает требуемый
+`Info_bot` credential для принадлежащего ему webhook-контракта.
 
 ## S3
 
@@ -1687,7 +1694,6 @@ CAMPAIGNS_OUTBOX_RETENTION_DAYS
 | `pnpm email`                                                 | React Email preview                    |
 | `pnpm prisma-generate`                                       | Генерация Prisma Client                |
 | `pnpm dev-prisma-migration`                                  | Применение development migrations      |
-| `pnpm jwt:keyset:generate -- ...`                            | Генерация RSA 3072 keyset              |
 | `pnpm --dir apps/api-gateway test`                           | Unit/integration tests API Gateway     |
 | `pnpm --dir apps/campaigns build`                            | Сборка Campaigns Service               |
 | `pnpm --dir apps/campaigns lint`                             | ESLint Campaigns Service               |
@@ -1936,7 +1942,6 @@ recreate isolated Notification Delivery PostgreSQL and verify volume/system iden
 recreate isolated Campaigns PostgreSQL and verify volume/system identifier/sentinel
 recreate isolated Reporting PostgreSQL and verify volume/system identifier/sentinel
 pg_dump with backup role -> clean scratch pg_restore -> compare migrations/tables/rows/sequences
-pnpm run test:reporting-producer-boundaries
 curl ... "$RABBITMQ_MANAGEMENT_URL/api/overview"
 pnpm exec tsc --noEmit --incremental false -p tsconfig.build.json
 pnpm exec jest --runInBand

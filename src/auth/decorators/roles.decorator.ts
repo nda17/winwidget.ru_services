@@ -1,4 +1,13 @@
+import type { IdentityActor } from '@/identity-boundary/identity-internal.client';
 import { SetMetadata } from '@nestjs/common';
-import { Role } from '@prisma/client';
 
-export const Roles = (...roles: Role[]) => SetMetadata('roles', roles);
+export type PlatformRole = IdentityActor['roles'][number];
+
+export interface PlatformIdentityActor {
+	id: IdentityActor['subject'];
+	rights: PlatformRole[];
+	sessionId: IdentityActor['sessionId'];
+}
+
+export const Roles = (...roles: PlatformRole[]) =>
+	SetMetadata('roles', roles);

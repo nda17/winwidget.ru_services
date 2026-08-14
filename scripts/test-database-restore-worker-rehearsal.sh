@@ -431,11 +431,8 @@ self_test() {
 		"$source" == *"{{.State.Paused}}"* &&
 		"$source" == *'--cap-add KILL'* &&
 		"$source" == *'safety_backup_restore_'* &&
-		"$source" == *'identity_core_source_acl'* &&
-		"$source" == *'identity_core_source_fence_concurrency'* &&
-		"$source" == *"application_name = 'identity-core-user-writer-rehearsal'"* &&
-		"$source" == *"application_name = 'identity-core-auth-settings-writer-rehearsal'"* &&
-		"$source" == *'wait_event_type = '\''Lock'\'''* &&
+		"$source" == *'identity_core_source_removed'* &&
+		"$source" == *'billing_core_source_removed'* &&
 		"$source" == *'independent_catalog_acl_matrix'* &&
 		"$source" == *'future_function_default_acl_'* &&
 		"$source" == *'pg_default_acl'* &&
@@ -1151,56 +1148,65 @@ apply_migrations() {
 	status 'prisma_migrations'
 }
 
-assert_identity_core_source_acl() {
+assert_identity_core_source_removed() {
 	local state
 	state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
 		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
 		--command "
 SELECT
-  has_table_privilege('winwidget_api_runtime', 'public.identity_core_source_state', 'SELECT')
-  AND NOT has_table_privilege('winwidget_api_runtime', 'public.identity_core_source_state', 'INSERT')
-  AND NOT has_table_privilege('winwidget_api_runtime', 'public.identity_core_source_state', 'UPDATE')
-  AND NOT has_table_privilege('winwidget_api_runtime', 'public.identity_core_source_state', 'DELETE')
-  AND NOT has_table_privilege('winwidget_maintenance', 'public.identity_core_source_state', 'INSERT')
-  AND NOT has_table_privilege('winwidget_maintenance', 'public.identity_core_source_state', 'UPDATE')
-  AND NOT has_table_privilege('winwidget_maintenance', 'public.identity_core_source_state', 'DELETE')
-  AND NOT has_table_privilege('winwidget_backup', 'public.identity_core_source_state', 'INSERT')
-  AND NOT has_table_privilege('winwidget_backup', 'public.identity_core_source_state', 'UPDATE')
-  AND NOT has_table_privilege('winwidget_backup', 'public.identity_core_source_state', 'DELETE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.identity_core_source_is_open()', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.fence_identity_core_source(text)', 'EXECUTE')
-  AND has_function_privilege('winwidget_api_runtime', 'public.unfence_identity_core_source(text)', 'EXECUTE')
-  AND NOT has_function_privilege('winwidget_api_runtime', 'public.lock_identity_core_source_open()', 'EXECUTE')
-  AND NOT has_function_privilege('winwidget_api_runtime', 'public.reject_fenced_identity_core_source_write()', 'EXECUTE')
-  AND NOT has_function_privilege('winwidget_api_runtime', 'public.reject_fenced_identity_auth_settings_write()', 'EXECUTE')
-  AND (
-    SELECT count(*) = 3
-    FROM unnest(ARRAY[
-      'public.lock_identity_core_source_open()',
-      'public.reject_fenced_identity_core_source_write()',
-      'public.reject_fenced_identity_auth_settings_write()'
-    ]::text[]) AS restricted(signature)
-    WHERE to_regprocedure(restricted.signature) IS NOT NULL
+  (SELECT bool_and(to_regclass(format('public.%I', relation_name)) IS NULL)
+   FROM unnest(ARRAY[
+     'User', 'user_sessions', 'auth_identities',
+     'telegram_notification_channels', 'verification_challenges',
+     'identity_core_source_state'
+   ]) AS source(relation_name))
+  AND (SELECT bool_and(to_regprocedure(signature) IS NULL)
+   FROM unnest(ARRAY[
+     'public.reporting_emit_user_projection(text,boolean)',
+     'public.reporting_user_projection_trigger()',
+     'public.reporting_auth_identity_projection_trigger()',
+     'public.billing_emit_identity_projection(text,boolean)',
+     'public.billing_identity_user_projection_trigger()',
+     'public.billing_identity_auth_projection_trigger()',
+     'public.billing_identity_telegram_projection_trigger()',
+     'public.identity_core_source_is_open()',
+     'public.lock_identity_core_source_open()',
+     'public.reject_fenced_identity_core_source_write()',
+     'public.reject_fenced_identity_auth_settings_write()',
+     'public.fence_identity_core_source(text)',
+     'public.unfence_identity_core_source(text)'
+   ]) AS source(signature))
+  AND (SELECT bool_and(to_regtype(type_name) IS NULL)
+   FROM unnest(ARRAY[
+     'public.\"Role\"', 'public.\"UserStatus\"',
+     'public.\"AuthIdentityType\"',
+     'public.\"VerificationChallengeType\"',
+     'public.\"VerificationChallengePurpose\"'
+   ]) AS source(type_name))
+  AND NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'site_settings'
+      AND column_name IN (
+        'recaptcha_enabled', 'google_auth_enabled', 'yandex_auth_enabled',
+        'github_auth_enabled', 'vk_auth_enabled', 'telegram_auth_enabled'
+      )
   )
   AND NOT EXISTS (
-    SELECT routine.oid
-    FROM unnest(ARRAY[
-      'public.lock_identity_core_source_open()',
-      'public.reject_fenced_identity_core_source_write()',
-      'public.reject_fenced_identity_auth_settings_write()'
-    ]::text[]) AS restricted(signature)
-    JOIN pg_proc routine ON routine.oid = to_regprocedure(restricted.signature)
-    CROSS JOIN LATERAL aclexplode(
-      COALESCE(routine.proacl, acldefault('f', routine.proowner))
-    ) privilege
-    GROUP BY routine.oid, routine.proowner
-    HAVING count(*) <> 1
-      OR bool_or(privilege.grantee <> routine.proowner)
-      OR bool_or(privilege.privilege_type <> 'EXECUTE')
-      OR bool_or(privilege.is_grantable)
+    SELECT 1
+    FROM pg_trigger
+    WHERE NOT tgisinternal
+      AND tgname IN (
+        'reporting_user_projection', 'reporting_auth_identity_projection',
+        'billing_identity_user_projection', 'billing_identity_auth_projection',
+        'billing_identity_telegram_projection',
+        'identity_core_source_write_fence',
+        'identity_core_auth_settings_write_fence'
+      )
   );")"
-	[[ "$state" == 't' ]] || fail 'Identity Core source fence ACL is not least-privilege'
-	status 'identity_core_source_acl'
+	[[ "$state" == 't' ]] || fail 'legacy Identity source objects remain in Core'
+	status 'identity_core_source_removed'
 }
 
 seed_markers_and_acl() {
@@ -1212,8 +1218,6 @@ CREATE TABLE public.restore_rehearsal_marker (
 	value TEXT NOT NULL
 );
 INSERT INTO public.restore_rehearsal_marker (id, value) VALUES ('canonical', 'baseline-core');
-INSERT INTO public."User" ("id", "password", "rights", "updated_at")
-VALUES ('database-restore-rehearsal-dev', 'not-a-real-password-hash', ARRAY['DEV']::public."Role"[], CURRENT_TIMESTAMP);
 INSERT INTO public."site_settings" ("id", "updated_at")
 VALUES ('singleton', CURRENT_TIMESTAMP);
 RESET ROLE;
@@ -1221,7 +1225,6 @@ GRANT USAGE ON SCHEMA public TO winwidget_api_runtime, winwidget_maintenance, wi
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO winwidget_api_runtime;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO winwidget_api_runtime;
 REVOKE ALL ON TABLE public._prisma_migrations FROM winwidget_api_runtime;
-REVOKE INSERT, UPDATE, DELETE ON TABLE public."identity_core_source_state" FROM winwidget_api_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO winwidget_backup;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO winwidget_backup;
 SQL
@@ -1313,349 +1316,18 @@ SQL
 	status 'markers_and_backup_acl'
 }
 
-assert_billing_core_writer_fences() {
-	local stale_log="$APP_ROOT/billing-stale-writer.log"
-	local writer_pid writer_visible stale_amount attempt source_removed
-	source_removed="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command "SELECT bool_and(to_regclass(format('public.%I', relation_name)) IS NULL) FROM unnest(ARRAY['payments','payment_receipts','subscriptions','subscription_history','subscription_expiry_reminders','auto_renewals','auto_renewal_consent_events','tariff_prices','affiliate_referrals']) AS source(relation_name);")"
-	if [[ "$source_removed" == 't' ]]; then
-		status 'billing_core_source_removed'
-		return
-	fi
-	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db <<'SQL'
-INSERT INTO public."User" ("id", "password", "rights", "updated_at")
-VALUES ('billing-fence-referred-user', 'not-a-real-password-hash', ARRAY['USER']::public."Role"[], CURRENT_TIMESTAMP);
-INSERT INTO public."payments" (
-    "id", "user_id", "amount", "checkout_expires_at", "updated_at"
-) VALUES (
-    'billing-fence-payment', 'database-restore-rehearsal-dev', '100.00',
-    CURRENT_TIMESTAMP + INTERVAL '1 hour', CURRENT_TIMESTAMP
-);
-INSERT INTO public."subscriptions" ("id", "user_id", "updated_at")
-VALUES ('billing-fence-subscription', 'database-restore-rehearsal-dev', CURRENT_TIMESTAMP);
-INSERT INTO public."affiliate_referrals" (
-    "id", "referrer_id", "referred_user_id", "updated_at"
-) VALUES (
-    'billing-fence-affiliate', 'database-restore-rehearsal-dev',
-    'billing-fence-referred-user', CURRENT_TIMESTAMP
-);
-INSERT INTO public."site_settings" ("id", "updated_at")
-VALUES ('singleton', CURRENT_TIMESTAMP)
-ON CONFLICT ("id") DO NOTHING;
-
-UPDATE public."payments"
-SET "amount" = '101.00', "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'billing-fence-payment';
-UPDATE public."subscriptions"
-SET "leads_this_period" = 1, "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'billing-fence-subscription';
-UPDATE public."affiliate_referrals"
-SET "status" = "status", "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'billing-fence-affiliate';
-UPDATE public."tariff_prices"
-SET "amount" = "amount" + 1, "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'easy_monthly';
-
-UPDATE public."billing_core_state"
-SET "source_producers_enabled" = FALSE,
-    "scheduler_enabled" = FALSE,
-    "legacy_consumer_enabled" = FALSE,
-    "projection_consumer_enabled" = TRUE,
-    "prepared_revision" = repeat('a', 40),
-    "generation" = 1,
-    "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'singleton';
-
-DO $$
-BEGIN
-    BEGIN
-        UPDATE public."payments" SET "amount" = 'blocked' WHERE "id" = 'billing-fence-payment';
-        RAISE EXCEPTION 'frozen payment write unexpectedly succeeded';
-    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-    END;
-    BEGIN
-        UPDATE public."subscriptions" SET "leads_this_period" = 2 WHERE "id" = 'billing-fence-subscription';
-        RAISE EXCEPTION 'frozen subscription write unexpectedly succeeded';
-    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-    END;
-    BEGIN
-        UPDATE public."affiliate_referrals" SET "status" = "status" WHERE "id" = 'billing-fence-affiliate';
-        RAISE EXCEPTION 'frozen affiliate write unexpectedly succeeded';
-    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-    END;
-    BEGIN
-        UPDATE public."tariff_prices" SET "amount" = "amount" + 1 WHERE "id" = 'easy_monthly';
-        RAISE EXCEPTION 'frozen tariff write unexpectedly succeeded';
-    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-    END;
-END;
-$$;
-
-UPDATE public."site_settings"
-SET "banner_enabled" = TRUE,
-    "banner_text" = 'billing-fence-core-banner',
-    "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'singleton';
-DO $$
-BEGIN
-    BEGIN
-        UPDATE public."site_settings"
-        SET "payment_enabled" = NOT "payment_enabled"
-        WHERE "id" = 'singleton';
-        RAISE EXCEPTION 'frozen Billing settings write unexpectedly succeeded';
-    EXCEPTION WHEN SQLSTATE '55000' THEN NULL;
-    END;
-END;
-$$;
-
-UPDATE public."billing_core_state"
-SET "source_producers_enabled" = TRUE,
-    "scheduler_enabled" = TRUE,
-    "legacy_consumer_enabled" = TRUE,
-    "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'singleton';
-UPDATE public."payments"
-SET "amount" = '102.00', "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'billing-fence-payment';
-SQL
-
-	(
-		docker exec -e PGAPPNAME=billing-stale-writer-rehearsal \
-			"$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-			--command "BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT count(*) FROM public.\"payments\"; SELECT pg_sleep(4); UPDATE public.\"payments\" SET \"amount\" = 'stale-writer-crossed' WHERE \"id\" = 'billing-fence-payment'; COMMIT;"
-	) >"$stale_log" 2>&1 &
-	writer_pid=$!
-	writer_visible='false'
-	for ((attempt = 1; attempt <= 50; attempt++)); do
-		if [[ "$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-			--command "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'billing-stale-writer-rehearsal' AND wait_event = 'PgSleep';")" == '1' ]]; then
-			writer_visible='true'
-			break
-		fi
-		sleep 0.1
-	done
-	[[ "$writer_visible" == 'true' ]] || {
-		wait "$writer_pid" || true
-		fail 'stale Serializable Billing writer did not reach its pre-freeze snapshot'
-	}
-	docker exec "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command "UPDATE public.\"billing_core_state\" SET \"source_producers_enabled\" = FALSE, \"scheduler_enabled\" = FALSE, \"legacy_consumer_enabled\" = FALSE, \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = 'singleton';" >/dev/null
-	if wait "$writer_pid"; then
-		fail 'stale Serializable Billing writer crossed the frozen snapshot'
-	fi
-	stale_amount="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command "SELECT \"amount\" FROM public.\"payments\" WHERE \"id\" = 'billing-fence-payment';")"
-	[[ "$stale_amount" == '102.00' ]] ||
-		fail 'stale Serializable Billing writer changed the frozen source row'
-	rm -f -- "$stale_log"
-
-	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db <<'SQL'
-UPDATE public."billing_core_state"
-SET "source_producers_enabled" = TRUE,
-    "scheduler_enabled" = TRUE,
-    "legacy_consumer_enabled" = TRUE,
-    "prepared_revision" = NULL,
-    "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'singleton';
-UPDATE public."tariff_prices"
-SET "amount" = 990, "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'easy_monthly';
-UPDATE public."site_settings"
-SET "banner_enabled" = FALSE,
-    "banner_text" = '',
-    "updated_at" = CURRENT_TIMESTAMP
-WHERE "id" = 'singleton';
-DELETE FROM public."affiliate_referrals" WHERE "id" = 'billing-fence-affiliate';
-DELETE FROM public."subscriptions" WHERE "id" = 'billing-fence-subscription';
-DELETE FROM public."payments" WHERE "id" = 'billing-fence-payment';
-DELETE FROM public."User" WHERE "id" = 'billing-fence-referred-user';
-SQL
-	status 'billing_core_writer_fences'
-}
-
-assert_identity_core_source_fence_concurrency() {
-	local revision='identity-fence-concurrency-rehearsal'
-	local user_writer_log="$APP_ROOT/identity-user-writer.log"
-	local user_fence_log="$APP_ROOT/identity-user-fence.log"
-	local user_reject_log="$APP_ROOT/identity-user-reject.log"
-	local settings_writer_log="$APP_ROOT/identity-settings-writer.log"
-	local settings_fence_log="$APP_ROOT/identity-settings-fence.log"
-	local settings_reject_log="$APP_ROOT/identity-settings-reject.log"
-	local user_writer_pid user_fence_pid settings_writer_pid settings_fence_pid
-	local attempt writer_visible fence_blocked state original_recaptcha restore_recaptcha
-
-	original_recaptcha="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command 'SELECT "recaptcha_enabled"::text FROM public."site_settings" WHERE "id" = '\''singleton'\'';')"
-	[[ "$original_recaptcha" =~ ^(true|false)$ ]] ||
-		fail 'Identity auth settings rehearsal baseline is invalid'
-
-	(
-		docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" \
-			-e PGAPPNAME=identity-core-user-writer-rehearsal \
-			"$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-			--host 127.0.0.1 --username winwidget_api_runtime --dbname default_db \
-			--command "BEGIN; UPDATE public.\"User\" SET \"password\" = 'identity-fence-writer-committed', \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = 'database-restore-rehearsal-dev'; SELECT pg_sleep(4); COMMIT;"
-	) >"$user_writer_log" 2>&1 &
-	user_writer_pid=$!
-	writer_visible='false'
-	for ((attempt = 1; attempt <= 50; attempt++)); do
-		if [[ "$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-			--command "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'identity-core-user-writer-rehearsal' AND wait_event = 'PgSleep';")" == '1' ]]; then
-			writer_visible='true'
-			break
-		fi
-		sleep 0.1
-	done
-	[[ "$writer_visible" == 'true' ]] || {
-		wait "$user_writer_pid" || true
-		fail 'Identity Core user writer did not reach its paused pre-fence transaction'
-	}
-
-	(
-		docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" \
-			-e PGAPPNAME=identity-core-user-fence-rehearsal \
-			"$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-			--host 127.0.0.1 --username winwidget_api_runtime --dbname default_db \
-			--command "SELECT * FROM public.\"fence_identity_core_source\"('$revision');"
-	) >"$user_fence_log" 2>&1 &
-	user_fence_pid=$!
-	fence_blocked='false'
-	for ((attempt = 1; attempt <= 50; attempt++)); do
-		if [[ "$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-			--command "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'identity-core-user-fence-rehearsal' AND wait_event_type = 'Lock';")" == '1' ]]; then
-			fence_blocked='true'
-			break
-		fi
-		sleep 0.1
-	done
-	[[ "$fence_blocked" == 'true' ]] || fail 'Identity Core fence did not wait for the paused user writer'
+assert_billing_core_source_removed() {
+	local state
 	state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
 		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command 'SELECT "ownership" FROM public."identity_core_source_state" WHERE "id" = '\''singleton'\'';')"
-	[[ "$state" == 'OPEN' ]] || fail 'Identity Core fence evidence became visible before the paused user writer committed'
-	if ! wait "$user_writer_pid"; then
-		fail 'Identity Core user writer failed before the fence boundary'
-	fi
-	if ! wait "$user_fence_pid"; then
-		fail 'Identity Core fence failed after the paused user writer committed'
-	fi
-	state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command "SELECT state.\"ownership\" || '|' || state.\"fenced_revision\" || '|' || users.\"password\" FROM public.\"identity_core_source_state\" state CROSS JOIN public.\"User\" users WHERE state.\"id\" = 'singleton' AND users.\"id\" = 'database-restore-rehearsal-dev';")"
-	[[ "$state" == "FENCED|$revision|identity-fence-writer-committed" ]] ||
-		fail 'Identity Core fence did not include the last committed user write'
-	if docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" "$PG_CONTAINER" \
-		psql --no-psqlrc --set ON_ERROR_STOP=1 --set VERBOSITY=verbose \
-		--host 127.0.0.1 --username winwidget_api_runtime --dbname default_db \
-		--command "UPDATE public.\"User\" SET \"password\" = 'identity-fence-write-must-fail' WHERE \"id\" = 'database-restore-rehearsal-dev';" \
-		>"$user_reject_log" 2>&1; then
-		fail 'Identity Core user write unexpectedly crossed the FENCED boundary'
-	fi
-	grep -F '55000:' "$user_reject_log" >/dev/null &&
-		grep -F 'Legacy Core identity source is fenced' "$user_reject_log" >/dev/null ||
-		fail 'Identity Core user rejection did not return the exact fence error'
-	docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" "$PG_CONTAINER" \
-		psql --no-psqlrc --set ON_ERROR_STOP=1 --host 127.0.0.1 \
-		--username winwidget_api_runtime --dbname default_db \
-		--command "SELECT * FROM public.\"unfence_identity_core_source\"('$revision');" >/dev/null
-
-	(
-		docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" \
-			-e PGAPPNAME=identity-core-auth-settings-writer-rehearsal \
-			"$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-			--host 127.0.0.1 --username winwidget_api_runtime --dbname default_db \
-			--command "BEGIN; UPDATE public.\"site_settings\" SET \"recaptcha_enabled\" = NOT \"recaptcha_enabled\", \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = 'singleton'; SELECT pg_sleep(4); COMMIT;"
-	) >"$settings_writer_log" 2>&1 &
-	settings_writer_pid=$!
-	writer_visible='false'
-	for ((attempt = 1; attempt <= 50; attempt++)); do
-		if [[ "$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-			--command "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'identity-core-auth-settings-writer-rehearsal' AND wait_event = 'PgSleep';")" == '1' ]]; then
-			writer_visible='true'
-			break
-		fi
-		sleep 0.1
-	done
-	[[ "$writer_visible" == 'true' ]] || {
-		wait "$settings_writer_pid" || true
-		fail 'Identity auth settings writer did not reach its paused pre-fence transaction'
-	}
-
-	(
-		docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" \
-			-e PGAPPNAME=identity-core-auth-settings-fence-rehearsal \
-			"$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-			--host 127.0.0.1 --username winwidget_api_runtime --dbname default_db \
-			--command "SELECT * FROM public.\"fence_identity_core_source\"('$revision');"
-	) >"$settings_fence_log" 2>&1 &
-	settings_fence_pid=$!
-	fence_blocked='false'
-	for ((attempt = 1; attempt <= 50; attempt++)); do
-		if [[ "$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-			--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-			--command "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'identity-core-auth-settings-fence-rehearsal' AND wait_event_type = 'Lock';")" == '1' ]]; then
-			fence_blocked='true'
-			break
-		fi
-		sleep 0.1
-	done
-	[[ "$fence_blocked" == 'true' ]] || fail 'Identity Core fence did not wait for the paused auth settings writer'
-	state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command 'SELECT "ownership" FROM public."identity_core_source_state" WHERE "id" = '\''singleton'\'';')"
-	[[ "$state" == 'OPEN' ]] || fail 'Identity Core fence evidence became visible before the auth settings writer committed'
-	if ! wait "$settings_writer_pid"; then
-		fail 'Identity auth settings writer failed before the fence boundary'
-	fi
-	if ! wait "$settings_fence_pid"; then
-		fail 'Identity Core fence failed after the auth settings writer committed'
-	fi
-	if docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" "$PG_CONTAINER" \
-		psql --no-psqlrc --set ON_ERROR_STOP=1 --set VERBOSITY=verbose \
-		--host 127.0.0.1 --username winwidget_api_runtime --dbname default_db \
-		--command "UPDATE public.\"site_settings\" SET \"google_auth_enabled\" = NOT \"google_auth_enabled\" WHERE \"id\" = 'singleton';" \
-		>"$settings_reject_log" 2>&1; then
-		fail 'Identity auth settings write unexpectedly crossed the FENCED boundary'
-	fi
-	grep -F '55000:' "$settings_reject_log" >/dev/null &&
-		grep -F 'Legacy Core Identity auth settings are fenced' "$settings_reject_log" >/dev/null ||
-		fail 'Identity auth settings rejection did not return the exact fence error'
-	docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" "$PG_CONTAINER" \
-		psql --no-psqlrc --set ON_ERROR_STOP=1 --host 127.0.0.1 \
-		--username winwidget_api_runtime --dbname default_db \
-		--command "UPDATE public.\"site_settings\" SET \"banner_text\" = \"banner_text\", \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = 'singleton';" >/dev/null
-	docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" "$PG_CONTAINER" \
-		psql --no-psqlrc --set ON_ERROR_STOP=1 --host 127.0.0.1 \
-		--username winwidget_api_runtime --dbname default_db \
-		--command "SELECT * FROM public.\"unfence_identity_core_source\"('$revision');" >/dev/null
-	if [[ "$original_recaptcha" == 'true' ]]; then
-		restore_recaptcha='TRUE'
-	else
-		restore_recaptcha='FALSE'
-	fi
-	docker exec -e "PGPASSWORD=$CORE_RUNTIME_PASSWORD" "$PG_CONTAINER" \
-		psql --no-psqlrc --set ON_ERROR_STOP=1 --host 127.0.0.1 \
-		--username winwidget_api_runtime --dbname default_db \
-		--command "UPDATE public.\"User\" SET \"password\" = 'not-a-real-password-hash', \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = 'database-restore-rehearsal-dev'; UPDATE public.\"site_settings\" SET \"recaptcha_enabled\" = $restore_recaptcha, \"updated_at\" = CURRENT_TIMESTAMP WHERE \"id\" = 'singleton';" >/dev/null
-	state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
-		--command "SELECT state.\"ownership\" || '|' || users.\"password\" || '|' || settings.\"recaptcha_enabled\"::text FROM public.\"identity_core_source_state\" state CROSS JOIN public.\"User\" users CROSS JOIN public.\"site_settings\" settings WHERE state.\"id\" = 'singleton' AND users.\"id\" = 'database-restore-rehearsal-dev' AND settings.\"id\" = 'singleton';")"
-	[[ "$state" == "OPEN|not-a-real-password-hash|$original_recaptcha" ]] ||
-		fail 'Identity Core fence concurrency rehearsal did not restore its OPEN baseline'
-	rm -f -- "$user_writer_log" "$user_fence_log" "$user_reject_log" \
-		"$settings_writer_log" "$settings_fence_log" "$settings_reject_log"
-	status 'identity_core_source_fence_concurrency'
+		--command "SELECT bool_and(to_regclass(format('public.%I', relation_name)) IS NULL)
+FROM unnest(ARRAY[
+  'payments', 'payment_receipts', 'subscriptions', 'subscription_history',
+  'subscription_expiry_reminders', 'auto_renewals',
+  'auto_renewal_consent_events', 'tariff_prices', 'affiliate_referrals'
+]) AS source(relation_name);")"
+	[[ "$state" == 't' ]] || fail 'legacy Billing source objects remain in Core'
+	status 'billing_core_source_removed'
 }
 
 create_target_dump() {
@@ -2387,11 +2059,10 @@ expected_relation_acl AS (
     WHEN privilege.privilege_type = 'SELECT' THEN relation.relname <> '_prisma_migrations'
     WHEN privilege.privilege_type IN ('INSERT', 'UPDATE') THEN
       relation.relname <> ALL(ARRAY[
-        '_prisma_migrations', 'reporting_producer_state', 'identity_core_source_state'
+        '_prisma_migrations', 'reporting_producer_state'
       ])
     ELSE relation.relname <> ALL(ARRAY[
-      '_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions',
-      'identity_core_source_state'
+      '_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions'
     ])
   END
   UNION ALL
@@ -2454,13 +2125,7 @@ expected_function_signatures AS (
     'public.reporting_producers_enabled()',
     'public.reporting_iso_timestamp(timestamp without time zone)',
     'public.reporting_record_projection_event(text,text,text,text,jsonb,boolean)',
-    'public.reporting_emit_user_projection(text,boolean)',
-    'public.reporting_user_projection_trigger()',
-    'public.reporting_auth_identity_projection_trigger()',
-    'public.reporting_settings_projection_trigger()',
-    'public.identity_core_source_is_open()',
-    'public.fence_identity_core_source(text)',
-    'public.unfence_identity_core_source(text)'
+    'public.reporting_settings_projection_trigger()'
   ]::text[] ELSE ARRAY[]::text[] END) expected(signature)
 ),
 expected_function_acl AS (
@@ -3120,10 +2785,9 @@ main() {
 	provision_roles_and_databases
 	verify_cluster_boundaries
 	apply_migrations
-	assert_identity_core_source_acl
+	assert_identity_core_source_removed
 	seed_markers_and_acl
-	assert_billing_core_writer_fences
-	assert_identity_core_source_fence_concurrency
+	assert_billing_core_source_removed
 	create_baseline_dumps
 	mutate_markers
 	run_queued_cancellation
