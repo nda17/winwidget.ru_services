@@ -123,98 +123,6 @@ assert_checkout() {
 	printf '%s' "$revision"
 }
 
-resolve_run_deploy_script() {
-	[[ $# -eq 1 && "$1" =~ ^[0-9a-f]{40}$ ]] || return 1
-	local cleanup_revision="$1"
-	local override="${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_DEPLOY_SCRIPT:-}"
-	local candidate_revision="${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_CANDIDATE_REVISION:-}"
-	local expected_deploy_blob="${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_DEPLOY_BLOB:-}"
-	local expected_runner_blob="${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_RUNNER_BLOB:-}"
-	local raw_runner_path="${BASH_SOURCE[0]}" raw_deploy_path="$override"
-	local runner_path runner_directory deploy_path deploy_directory
-	local deploy_blob runner_blob candidate_parents candidate_parent changed_files
-	local expected_changed_files expected_modes actual_modes
-
-	if [[ -z "$override" ]]; then
-		[[ -z "$candidate_revision" && -z "$expected_deploy_blob" &&
-			-z "$expected_runner_blob" &&
-			"${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_APPROVED:-false}" == 'false' ]] ||
-			fail 'partial Billing cleanup recovery overlay variables are forbidden'
-		printf '%s\n' "$SERVER_ROOT/scripts/deploy-production.sh"
-		return
-	fi
-
-	[[ "${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_APPROVED:-false}" == 'true' &&
-		"${BILLING_CORE_SOURCE_CLEANUP_CONFIRMATION:-}" == "$CONFIRMATION" &&
-		"$candidate_revision" =~ ^[0-9a-f]{40}$ &&
-		"$candidate_revision" != "$cleanup_revision" &&
-		"$expected_deploy_blob" =~ ^[0-9a-f]{40}$ &&
-		"$expected_runner_blob" =~ ^[0-9a-f]{40}$ ]] ||
-		fail 'Billing cleanup recovery overlay approval or identity is invalid'
-	[[ "$(git -C "$SERVER_ROOT" rev-parse HEAD)" == "$cleanup_revision" &&
-		"$(git -C "$SERVER_ROOT" rev-parse FETCH_HEAD)" == "$candidate_revision" ]] ||
-		fail 'Billing cleanup recovery overlay is not bound to the fetched candidate'
-	candidate_parents="$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$candidate_revision")" ||
-		fail 'Billing cleanup recovery candidate commit is unavailable'
-	[[ "$candidate_parents" =~ ^[0-9a-f]{40}[[:space:]][0-9a-f]{40}$ ]] ||
-		fail 'Billing cleanup recovery candidate must be a non-merge commit'
-	candidate_parent="${candidate_parents#* }"
-	[[ "$candidate_parent" == "$cleanup_revision" ]] ||
-		fail 'Billing cleanup recovery candidate must directly descend from the staged revision'
-
-	expected_changed_files=$'M\t.github/workflows/deploy-production.yml\nM\tscripts/cleanup-billing-core-source-production.sh\nM\tscripts/deploy-production.sh\nM\tscripts/reporting-cutover-lifecycle.sh'
-	changed_files="$(git -C "$SERVER_ROOT" diff --name-status --no-renames \
-		"$cleanup_revision" "$candidate_revision")" ||
-		fail 'Billing cleanup recovery candidate diff is unreadable'
-	[[ "$changed_files" == "$expected_changed_files" ]] ||
-		fail 'Billing cleanup recovery candidate changes files outside the reviewed overlay'
-	[[ "$(git -C "$SERVER_ROOT" rev-parse "$cleanup_revision:prisma/migrations")" == \
-		"$(git -C "$SERVER_ROOT" rev-parse "$candidate_revision:prisma/migrations")" ]] ||
-		fail 'Billing cleanup recovery candidate changes the Core migration tree'
-	expected_modes=$'100644 blob\t.github/workflows/deploy-production.yml\n100755 blob\tscripts/cleanup-billing-core-source-production.sh\n100755 blob\tscripts/deploy-production.sh\n100755 blob\tscripts/reporting-cutover-lifecycle.sh'
-	actual_modes="$(git -C "$SERVER_ROOT" ls-tree "$candidate_revision" -- \
-		.github/workflows/deploy-production.yml \
-		scripts/cleanup-billing-core-source-production.sh \
-		scripts/deploy-production.sh \
-		scripts/reporting-cutover-lifecycle.sh | \
-		awk '{print $1 " " $2 "\t" $4}')" ||
-		fail 'Billing cleanup recovery candidate modes are unreadable'
-	[[ "$actual_modes" == "$expected_modes" ]] ||
-		fail 'Billing cleanup recovery candidate file modes are unsafe'
-
-	[[ "$raw_runner_path" == /* && "$raw_deploy_path" == /* &&
-		-f "$raw_runner_path" && ! -L "$raw_runner_path" &&
-		-f "$raw_deploy_path" && ! -L "$raw_deploy_path" ]] ||
-		fail 'Billing cleanup recovery overlay requires absolute regular input files'
-	runner_path="$(readlink -f -- "$raw_runner_path" || true)"
-	deploy_path="$(readlink -f -- "$raw_deploy_path" || true)"
-	[[ "$runner_path" == "$raw_runner_path" && "$deploy_path" == "$raw_deploy_path" ]] ||
-		fail 'Billing cleanup recovery overlay paths must already be canonical'
-	runner_directory="$(dirname -- "$runner_path")"
-	deploy_directory="$(dirname -- "$deploy_path")"
-	[[ "$runner_directory" == "$deploy_directory" &&
-		"$runner_directory" =~ ^/tmp/winwidget-billing-cleanup-recovery\.[A-Za-z0-9]{6}$ &&
-		-d "$runner_directory" && ! -L "$runner_directory" &&
-		"$(stat -c '%u:%g:%a' "$runner_directory")" == '0:0:700' &&
-		-f "$runner_path" && ! -L "$runner_path" &&
-		"$(stat -c '%u:%g:%a' "$runner_path")" == '0:0:700' &&
-		-f "$deploy_path" && ! -L "$deploy_path" &&
-		"$(stat -c '%u:%g:%a' "$deploy_path")" == '0:0:700' ]] ||
-		fail 'Billing cleanup recovery overlay files are not private immutable inputs'
-	runner_blob="$(git -C "$SERVER_ROOT" hash-object --no-filters "$runner_path")" ||
-		fail 'Billing cleanup recovery runner blob is unreadable'
-	deploy_blob="$(git -C "$SERVER_ROOT" hash-object --no-filters "$deploy_path")" ||
-		fail 'Billing cleanup recovery deploy blob is unreadable'
-	[[ "$runner_blob" == "$expected_runner_blob" &&
-		"$runner_blob" == "$(git -C "$SERVER_ROOT" rev-parse \
-			"$candidate_revision:scripts/cleanup-billing-core-source-production.sh")" &&
-		"$deploy_blob" == "$expected_deploy_blob" &&
-		"$deploy_blob" == "$(git -C "$SERVER_ROOT" rev-parse \
-			"$candidate_revision:scripts/deploy-production.sh")" ]] ||
-		fail 'Billing cleanup recovery overlay bytes differ from the reviewed candidate'
-	printf '%s\n' "$deploy_path"
-}
-
 assert_production_context() {
 	local restore_worker_mode="${1:-healthy-required}"
 	[[ "$restore_worker_mode" =~ ^(healthy-required|identity-if-present)$ ]] ||
@@ -1806,7 +1714,7 @@ verify_runtime_smoke() {
 }
 
 run_cleanup() {
-	local revision phase generation directory post_dump post_sha core_system deploy_script
+	local revision phase generation directory post_dump post_sha core_system
 	local previous_revision snapshot projection route source_state migration_state
 	require_confirmation
 	assert_production_context identity-if-present
@@ -1865,12 +1773,10 @@ run_cleanup() {
 	elif [[ "$phase" != 'applied' ]]; then
 		fail "unsafe cleanup recovery state: source=$source_state migration=$migration_state"
 	fi
-	deploy_script="$(resolve_run_deploy_script "$revision")" ||
-		fail 'could not resolve the exact Billing cleanup deploy script'
 	EXPECTED_REVISION="$revision" BILLING_AUTOMATIC_PROD_PUSH=false \
 	BILLING_CORE_SOURCE_CLEANUP_APPROVED=true \
 	BILLING_CORE_SOURCE_CLEANUP_CONFIRMATION="$CONFIRMATION" \
-		bash "$deploy_script"
+		bash "$SERVER_ROOT/scripts/deploy-production.sh"
 	[[ "$(billing_core_source_cleanup_marker_value phase)" == 'applied' &&
 		"$(billing_core_source_state)" == 'absent' &&
 		"$(billing_core_source_cleanup_migration_state)" == 'applied' ]] ||
@@ -2104,11 +2010,6 @@ if (value.artifacts.length !== 5 || value.action !== "billing-core-source-cleanu
 		"$source" == *'billing_core_source_cleanup_bind_staged_evidence'* &&
 		"$source" == *'billing_core_source_cleanup_advance_complete'* &&
 		"$source" == *'BILLING_CORE_SOURCE_CLEANUP_APPROVED=true'* &&
-		"$source" == *'resolve_run_deploy_script "$revision"'* &&
-		"$source" == *'candidate must directly descend from the staged revision'* &&
-		"$source" == *$'M\\t.github/workflows/deploy-production.yml\\nM\\tscripts/cleanup-billing-core-source-production.sh\\nM\\tscripts/deploy-production.sh\\nM\\tscripts/reporting-cutover-lifecycle.sh'* &&
-		"$source" == *'BILLING_CORE_SOURCE_CLEANUP_RECOVERY_APPROVED:-false'* &&
-		"$source" == *'hash-object --no-filters'* &&
 		"$source" == *'queue-drain-evidence.json'* &&
 		"$source" == *'stopped-writers-evidence.json'* ]]
 	RUNNER_SOURCE="$source" billing_release_node - <<'NODE'
@@ -2123,15 +2024,6 @@ if (restart < 0 || restartArchive < restart || precommitRemoval < restartArchive
 NODE
 	printf 'billing_core_source_cleanup_self_test=passed\n'
 }
-
-if [[ "${1:-}" != '--run' &&
-	( -n "${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_DEPLOY_SCRIPT:-}" ||
-		-n "${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_CANDIDATE_REVISION:-}" ||
-		-n "${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_DEPLOY_BLOB:-}" ||
-		-n "${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_RUNNER_BLOB:-}" ||
-		"${BILLING_CORE_SOURCE_CLEANUP_RECOVERY_APPROVED:-false}" != 'false' ) ]]; then
-	fail 'Billing cleanup recovery overlay variables are accepted only for --run'
-fi
 
 case "${1:-}" in
 --status)

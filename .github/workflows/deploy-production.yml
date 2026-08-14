@@ -50,8 +50,6 @@ on:
           - seal-offsite
           - run
           - complete-offsite
-          - recover-run
-          - recover-complete-offsite
       billing_cleanup_confirmation:
         description: Type the exact Billing Core cleanup confirmation when required
         required: false
@@ -332,7 +330,6 @@ jobs:
               status:) ;;
               retarget:'RETARGET BILLING CLEANUP REVISION') ;;
               stage:'DROP LEGACY BILLING CORE SOURCE'|seal-offsite:'DROP LEGACY BILLING CORE SOURCE'|run:'DROP LEGACY BILLING CORE SOURCE'|complete-offsite:'DROP LEGACY BILLING CORE SOURCE') ;;
-              recover-run:'RECOVER STAGED BILLING CORE CLEANUP RUN'|recover-complete-offsite:'COMPLETE STAGED BILLING CORE CLEANUP') ;;
               *)
                 echo 'Invalid Billing Core cleanup action or confirmation.' >&2
                 exit 1
@@ -568,7 +565,6 @@ jobs:
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           billing_retarget_preflight=false
-          billing_staged_recovery_preflight=false
           if [[ "$AUTOMATIC_PROD_PUSH" != 'true' &&
             "$DEPLOY_TARGET" == 'billing-cleanup' &&
             "$BILLING_CLEANUP_ACTION" == 'retarget' &&
@@ -576,40 +572,27 @@ jobs:
             "$current_revision" != "$EXPECTED_REVISION" ]]; then
             billing_retarget_preflight=true
           fi
-          if [[ "$AUTOMATIC_PROD_PUSH" != 'true' &&
-            "$DEPLOY_TARGET" == 'billing-cleanup' &&
-            ( "$BILLING_CLEANUP_ACTION:$BILLING_CLEANUP_CONFIRMATION" == \
-                'recover-run:RECOVER STAGED BILLING CORE CLEANUP RUN' ||
-              "$BILLING_CLEANUP_ACTION:$BILLING_CLEANUP_CONFIRMATION" == \
-                'recover-complete-offsite:COMPLETE STAGED BILLING CORE CLEANUP' ) &&
-            "$current_revision" != "$EXPECTED_REVISION" ]]; then
-            billing_staged_recovery_preflight=true
-          fi
           guard_campaigns_checkout_before_pull "$current_revision"
           guard_reporting_checkout_before_pull "$current_revision"
           guard_widgets_checkout_before_pull "$current_revision"
           if [[ "$billing_retarget_preflight" != 'true' ]]; then
             guard_billing_checkout_before_pull "$current_revision"
           fi
-          if [[ "$billing_staged_recovery_preflight" == 'true' ]]; then
-            echo 'Pinned Billing cleanup recovery candidate will be fetched and attested without checkout by the deploy job.'
-          else
-            guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
-            guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
-            if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
-              "$current_revision" == "$EXPECTED_REVISION" ]]; then
-              guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
-              if [[ "$DEPLOY_TARGET" == 'billing-cleanup' &&
-                ( "$BILLING_CLEANUP_ACTION" =~ ^(status|stage)$ ||
-                  "$billing_retarget_preflight" == 'true' ) &&
-                "$current_revision" != "$EXPECTED_REVISION" ]]; then
-                echo 'Billing cleanup target will be inspected or marker-bound by the deploy job before checkout.'
-              else
-                guard_billing_checkout_before_pull "$EXPECTED_REVISION"
-              fi
+          guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
+          guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
+          if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
+            "$current_revision" == "$EXPECTED_REVISION" ]]; then
+            guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
+            if [[ "$DEPLOY_TARGET" == 'billing-cleanup' &&
+              ( "$BILLING_CLEANUP_ACTION" =~ ^(status|stage)$ ||
+                "$billing_retarget_preflight" == 'true' ) &&
+              "$current_revision" != "$EXPECTED_REVISION" ]]; then
+              echo 'Billing cleanup target will be inspected or marker-bound by the deploy job before checkout.'
             else
-              echo "Automatic push will verify before the deploy job evaluates the active Reporting and Billing revision guards."
+              guard_billing_checkout_before_pull "$EXPECTED_REVISION"
             fi
+          else
+            echo "Automatic push will verify before the deploy job evaluates the active Reporting and Billing revision guards."
           fi
           echo "Active lifecycle checkout preflight passed without changing VPS state."
           EOF
@@ -5801,7 +5784,7 @@ jobs:
             'guard_campaigns_checkout_before_pull "$expected_revision"',
             2,
           );
-          requireCount("git fetch origin prod", 4);
+          requireCount("git fetch origin prod", 3);
           requireCount("git checkout prod", 2);
           requireCount('git merge --ff-only "$fetched_revision"', 1);
           requireCount(
@@ -6168,7 +6151,7 @@ jobs:
             "checkout_retargeted_billing_cleanup_revision() {",
           );
           const retargetCheckoutEnd = deployJob.indexOf(
-            "\n          recover_staged_billing_cleanup() (",
+            '\n          current_revision="$(git rev-parse HEAD)"',
             retargetCheckoutStart,
           );
           const retargetCheckout = deployJob.slice(
@@ -6192,152 +6175,6 @@ jobs:
           ) {
             throw new Error(
               "Billing cleanup retarget checkout must defer only the Billing guard until candidate checkout",
-            );
-          }
-          requireCount(
-            "recover-run:'RECOVER STAGED BILLING CORE CLEANUP RUN'|recover-complete-offsite:'COMPLETE STAGED BILLING CORE CLEANUP') ;;",
-            3,
-          );
-          const recoveryFunctionStart = deployJob.indexOf(
-            "recover_staged_billing_cleanup() (",
-          );
-          const recoveryFunctionEnd = deployJob.indexOf(
-            '\n          current_revision="$(git rev-parse HEAD)"',
-            recoveryFunctionStart,
-          );
-          const recoveryFunction = deployJob.slice(
-            recoveryFunctionStart,
-            recoveryFunctionEnd,
-          );
-          if (
-            recoveryFunctionStart < 0 ||
-            recoveryFunctionEnd <= recoveryFunctionStart
-          ) {
-            throw new Error("Billing cleanup staged recovery function is missing");
-          }
-          const requireRecoveryFileBinding = (
-            path,
-            expectedBlobVariable,
-            expectedShaVariable,
-          ) => {
-            const bytes = readFileSync(path);
-            const blob = createHash("sha1")
-              .update(`blob ${bytes.length}\0`)
-              .update(bytes)
-              .digest("hex");
-            const sha256 = createHash("sha256").update(bytes).digest("hex");
-            if (
-              !recoveryFunction.includes(
-                `local ${expectedBlobVariable}='${blob}'`,
-              ) ||
-              !recoveryFunction.includes(
-                `local ${expectedShaVariable}='${sha256}'`,
-              )
-            ) {
-              throw new Error(
-                `Billing cleanup staged recovery has stale blob or SHA binding for ${path}`,
-              );
-            }
-          };
-          requireRecoveryFileBinding(
-            "scripts/cleanup-billing-core-source-production.sh",
-            "expected_runner_blob",
-            "expected_runner_sha256",
-          );
-          requireRecoveryFileBinding(
-            "scripts/deploy-production.sh",
-            "expected_deploy_blob",
-            "expected_deploy_sha256",
-          );
-          requireRecoveryFileBinding(
-            "scripts/reporting-cutover-lifecycle.sh",
-            "expected_reporting_blob",
-            "expected_reporting_sha256",
-          );
-          for (const requiredRecoveryToken of [
-            "af4c7e035d06c53e92cfedf5dc2431130a66bb56",
-            "7d308989c6a8b01de6c0cbc48be97485a65fb450",
-            "92418dbbebeabc4b32b1e199ed750b4ad73f6de9",
-            "bb15b467595412fd00bcc4fa13fc24dc6c7f459c",
-            "42b81aaa244266173745d2bfdb21a0ab8cd0f9977267b5258ae7597da3076253",
-            "2a1f7d57934773679a8803f9e2312c9d494ef31909300ad8b069d2c392fe6448",
-            "b79a6477b40ebce6ba5364a4030274f9a6eea140283de20a20cac136f19df0c4",
-            "git fetch origin prod",
-            'fetched_revision="$(git rev-parse FETCH_HEAD)"',
-            "candidate must directly descend from the staged revision",
-            "git diff --name-status --no-renames",
-            "M\\t.github/workflows/deploy-production.yml",
-            "M\\tscripts/cleanup-billing-core-source-production.sh",
-            "M\\tscripts/deploy-production.sh",
-            "M\\tscripts/reporting-cutover-lifecycle.sh",
-            '"$staged_revision:prisma/migrations"',
-            '"$candidate_revision:prisma/migrations"',
-            "/tmp/winwidget-billing-cleanup-recovery.XXXXXX",
-            'git cat-file blob "$runner_blob"',
-            'git cat-file blob "$deploy_blob"',
-            'git hash-object --no-filters "$runner_partial"',
-            'git hash-object --no-filters "$deploy_partial"',
-            'bash -n "$runner_path"',
-            'bash -n "$deploy_path"',
-            "BILLING_CORE_SOURCE_CLEANUP_CONFIRMATION='DROP LEGACY BILLING CORE SOURCE'",
-            "BILLING_CORE_SOURCE_CLEANUP_RECOVERY_APPROVED=true",
-            'BILLING_CORE_SOURCE_CLEANUP_RECOVERY_DEPLOY_SCRIPT="$deploy_path"',
-            'bash "$runner_path" --run',
-            "bash scripts/cleanup-billing-core-source-production.sh --complete-offsite",
-            'recover-run:applied|recover-complete-offsite:complete) ;;',
-            'guard_billing_checkout_before_pull \\\n                "$candidate_revision" --guard-before-checkout-revision',
-          ]) {
-            if (!recoveryFunction.includes(requiredRecoveryToken)) {
-              throw new Error(
-                `Billing cleanup staged recovery lost ${requiredRecoveryToken}`,
-              );
-            }
-          }
-          const recoveryFetch = recoveryFunction.indexOf("git fetch origin prod");
-          const recoveryDiff = recoveryFunction.indexOf(
-            "git diff --name-status --no-renames",
-          );
-          const recoveryExtract = recoveryFunction.indexOf(
-            'git cat-file blob "$runner_blob"',
-          );
-          const recoveryRun = recoveryFunction.indexOf('bash "$runner_path" --run');
-          if (
-            recoveryFetch < 0 ||
-            recoveryDiff <= recoveryFetch ||
-            recoveryExtract <= recoveryDiff ||
-            recoveryRun <= recoveryExtract ||
-            recoveryFunction.includes("git checkout") ||
-            recoveryFunction.includes("git merge --ff-only") ||
-            recoveryFunction.includes("prisma migrate") ||
-            recoveryFunction.includes("docker stop") ||
-            recoveryFunction.includes("docker rm")
-          ) {
-            throw new Error(
-              "Billing cleanup staged recovery must attest and execute the overlay without checkout or direct mutation",
-            );
-          }
-          const recoveryDispatchStart = cleanupDispatch.indexOf(
-            'if [[ "$BILLING_CLEANUP_ACTION" =~ ^recover-(run|complete-offsite)$',
-          );
-          const recoveryDispatchEnd = cleanupDispatch.indexOf(
-            '\n              if [[ "$BILLING_CLEANUP_ACTION" == \'status\'',
-            recoveryDispatchStart,
-          );
-          const recoveryDispatch = cleanupDispatch.slice(
-            recoveryDispatchStart,
-            recoveryDispatchEnd,
-          );
-          if (
-            recoveryDispatchStart < 0 ||
-            recoveryDispatchEnd <= recoveryDispatchStart ||
-            !recoveryDispatch.includes("recover_staged_billing_cleanup") ||
-            !recoveryDispatch.includes("--status") ||
-            !recoveryDispatch.includes("exit 0") ||
-            recoveryDispatch.includes("checkout_verified_prod_revision") ||
-            recoveryDispatch.includes("git checkout")
-          ) {
-            throw new Error(
-              "Billing cleanup staged recovery dispatch must finish on pinned SHA D without generic checkout",
             );
           }
           const retargetDispatchStart = cleanupDispatch.indexOf(
@@ -8628,7 +8465,6 @@ jobs:
               status:) ;;
               retarget:'RETARGET BILLING CLEANUP REVISION') ;;
               stage:'DROP LEGACY BILLING CORE SOURCE'|seal-offsite:'DROP LEGACY BILLING CORE SOURCE'|run:'DROP LEGACY BILLING CORE SOURCE'|complete-offsite:'DROP LEGACY BILLING CORE SOURCE') ;;
-              recover-run:'RECOVER STAGED BILLING CORE CLEANUP RUN'|recover-complete-offsite:'COMPLETE STAGED BILLING CORE CLEANUP') ;;
               *)
                 echo 'Invalid Billing Core cleanup action or confirmation.' >&2
                 exit 1
@@ -9595,227 +9431,6 @@ jobs:
             guard_billing_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
           }
-          recover_staged_billing_cleanup() (
-            [[ $# -eq 3 ]] || return 1
-            local staged_revision="$1" candidate_revision="$2" recovery_action="$3"
-            local cleanup_marker="$APP_ROOT/deploy/backend/.billing-core-source-cleanup-v1"
-            local marker_state marker_revision candidate_parents candidate_parent
-            local changed_files expected_changed_files actual_modes expected_modes
-            local fetched_revision recovery_directory='' runner_path deploy_path
-            local runner_partial deploy_partial runner_blob deploy_blob reporting_blob
-            local runner_sha256 deploy_sha256 reporting_sha256 status cleanup_status
-            local expected_runner_blob='7d308989c6a8b01de6c0cbc48be97485a65fb450'
-            local expected_deploy_blob='92418dbbebeabc4b32b1e199ed750b4ad73f6de9'
-            local expected_reporting_blob='bb15b467595412fd00bcc4fa13fc24dc6c7f459c'
-            local expected_runner_sha256='42b81aaa244266173745d2bfdb21a0ab8cd0f9977267b5258ae7597da3076253'
-            local expected_deploy_sha256='2a1f7d57934773679a8803f9e2312c9d494ef31909300ad8b069d2c392fe6448'
-            local expected_reporting_sha256='b79a6477b40ebce6ba5364a4030274f9a6eea140283de20a20cac136f19df0c4'
-            local exact_staged_revision='af4c7e035d06c53e92cfedf5dc2431130a66bb56'
-
-            cleanup_recovery_overlay_files() {
-              [[ -n "$recovery_directory" ]] || return 0
-              [[ "$recovery_directory" =~ ^/tmp/winwidget-billing-cleanup-recovery\.[A-Za-z0-9]{6}$ &&
-                -d "$recovery_directory" && ! -L "$recovery_directory" &&
-                "$(stat -c '%u:%g:%a' "$recovery_directory")" == '0:0:700' ]] ||
-                return 1
-              rm -f -- \
-                "$recovery_directory/cleanup-billing-core-source-production.sh.partial" \
-                "$recovery_directory/deploy-production.sh.partial" \
-                "$recovery_directory/cleanup-billing-core-source-production.sh" \
-                "$recovery_directory/deploy-production.sh" || return 1
-              rmdir -- "$recovery_directory" || return 1
-              recovery_directory=''
-            }
-            cleanup_recovery_overlay_on_exit() {
-              status=$?
-              set +e
-              cleanup_recovery_overlay_files
-              cleanup_status=$?
-              trap - EXIT
-              if [[ "$status" == '0' && "$cleanup_status" != '0' ]]; then
-                status="$cleanup_status"
-              fi
-              exit "$status"
-            }
-            trap cleanup_recovery_overlay_on_exit EXIT
-            trap 'exit 130' INT
-            trap 'exit 143' TERM
-
-            [[ "$staged_revision" == "$exact_staged_revision" &&
-              "$candidate_revision" =~ ^[0-9a-f]{40}$ &&
-              "$candidate_revision" != "$staged_revision" &&
-              "$recovery_action" =~ ^recover-(run|complete-offsite)$ &&
-              "$(id -u)" == '0' && "$(uname -s)" == 'Linux' &&
-              "$(git rev-parse HEAD)" == "$staged_revision" &&
-              "$(git branch --show-current)" == 'prod' &&
-              -z "$(git status --porcelain --untracked-files=all)" ]] || {
-              echo 'Billing cleanup recovery requires the exact clean staged production revision.' >&2
-              return 1
-            }
-            case "$recovery_action:$BILLING_CLEANUP_CONFIRMATION" in
-              recover-run:'RECOVER STAGED BILLING CORE CLEANUP RUN'|recover-complete-offsite:'COMPLETE STAGED BILLING CORE CLEANUP') ;;
-              *)
-                echo 'Billing cleanup recovery confirmation is invalid.' >&2
-                return 1
-                ;;
-            esac
-            [[ -f "$cleanup_marker" && ! -L "$cleanup_marker" &&
-              "$(stat -c '%u:%g:%a' "$cleanup_marker")" == '0:0:600' ]] || {
-              echo 'Billing cleanup recovery marker is missing or unsafe.' >&2
-              return 1
-            }
-            marker_state="$(awk -F= '
-              $1 == "phase" { print substr($0, index($0, "=") + 1); found += 1 }
-              END { exit(found == 1 ? 0 : 1) }
-            ' "$cleanup_marker")" || return 1
-            marker_revision="$(awk -F= '
-              $1 == "revision" { print substr($0, index($0, "=") + 1); found += 1 }
-              END { exit(found == 1 ? 0 : 1) }
-            ' "$cleanup_marker")" || return 1
-            [[ "$marker_revision" == "$staged_revision" ]] || {
-              echo 'Billing cleanup recovery marker pins another revision.' >&2
-              return 1
-            }
-            case "$recovery_action:$marker_state" in
-              recover-run:staged|recover-run:applied|recover-complete-offsite:applied|recover-complete-offsite:complete) ;;
-              *)
-                echo 'Billing cleanup recovery action does not match the durable marker phase.' >&2
-                return 1
-                ;;
-            esac
-
-            guard_campaigns_checkout_before_pull "$staged_revision"
-            guard_reporting_checkout_before_pull "$staged_revision"
-            guard_widgets_checkout_before_pull "$staged_revision"
-            guard_billing_checkout_before_pull "$staged_revision"
-            git fetch origin prod
-            fetched_revision="$(git rev-parse FETCH_HEAD)"
-            [[ "$fetched_revision" == "$candidate_revision" ]] || {
-              echo 'Origin prod changed after the recovery workflow started.' >&2
-              return 1
-            }
-            candidate_parents="$(git rev-list --parents -n 1 "$candidate_revision")" || return 1
-            [[ "$candidate_parents" =~ ^[0-9a-f]{40}[[:space:]][0-9a-f]{40}$ ]] || {
-              echo 'Billing cleanup recovery candidate must be a non-merge commit.' >&2
-              return 1
-            }
-            candidate_parent="${candidate_parents#* }"
-            [[ "$candidate_parent" == "$staged_revision" ]] || {
-              echo 'Billing cleanup recovery candidate must directly descend from the staged revision.' >&2
-              return 1
-            }
-            expected_changed_files=$'M\t.github/workflows/deploy-production.yml\nM\tscripts/cleanup-billing-core-source-production.sh\nM\tscripts/deploy-production.sh\nM\tscripts/reporting-cutover-lifecycle.sh'
-            changed_files="$(git diff --name-status --no-renames \
-              "$staged_revision" "$candidate_revision")" || return 1
-            [[ "$changed_files" == "$expected_changed_files" &&
-              "$(git rev-parse "$staged_revision:prisma/migrations")" == \
-              "$(git rev-parse "$candidate_revision:prisma/migrations")" ]] || {
-              echo 'Billing cleanup recovery candidate exceeds the reviewed orchestration overlay.' >&2
-              return 1
-            }
-            expected_modes=$'100644 blob\t.github/workflows/deploy-production.yml\n100755 blob\tscripts/cleanup-billing-core-source-production.sh\n100755 blob\tscripts/deploy-production.sh\n100755 blob\tscripts/reporting-cutover-lifecycle.sh'
-            actual_modes="$(git ls-tree "$candidate_revision" -- \
-              .github/workflows/deploy-production.yml \
-              scripts/cleanup-billing-core-source-production.sh \
-              scripts/deploy-production.sh \
-              scripts/reporting-cutover-lifecycle.sh | \
-              awk '{print $1 " " $2 "\t" $4}')" || return 1
-            [[ "$actual_modes" == "$expected_modes" ]] || {
-              echo 'Billing cleanup recovery candidate file modes are unsafe.' >&2
-              return 1
-            }
-            runner_blob="$(git rev-parse \
-              "$candidate_revision:scripts/cleanup-billing-core-source-production.sh")" || return 1
-            deploy_blob="$(git rev-parse \
-              "$candidate_revision:scripts/deploy-production.sh")" || return 1
-            reporting_blob="$(git rev-parse \
-              "$candidate_revision:scripts/reporting-cutover-lifecycle.sh")" || return 1
-            [[ "$runner_blob" == "$expected_runner_blob" &&
-              "$deploy_blob" == "$expected_deploy_blob" &&
-              "$reporting_blob" == "$expected_reporting_blob" ]] || {
-              echo 'Billing cleanup recovery candidate blobs differ from the reviewed overlay.' >&2
-              return 1
-            }
-
-            umask 077
-            recovery_directory="$(mktemp -d /tmp/winwidget-billing-cleanup-recovery.XXXXXX)" ||
-              return 1
-            [[ "$recovery_directory" =~ ^/tmp/winwidget-billing-cleanup-recovery\.[A-Za-z0-9]{6}$ &&
-              -d "$recovery_directory" && ! -L "$recovery_directory" ]] || return 1
-            chown 0:0 "$recovery_directory"
-            chmod 700 "$recovery_directory"
-            runner_path="$recovery_directory/cleanup-billing-core-source-production.sh"
-            deploy_path="$recovery_directory/deploy-production.sh"
-            runner_partial="$runner_path.partial"
-            deploy_partial="$deploy_path.partial"
-            [[ ! -e "$runner_path" && ! -L "$runner_path" &&
-              ! -e "$runner_partial" && ! -L "$runner_partial" &&
-              ! -e "$deploy_path" && ! -L "$deploy_path" &&
-              ! -e "$deploy_partial" && ! -L "$deploy_partial" ]] || return 1
-            git cat-file blob "$runner_blob" >"$runner_partial"
-            git cat-file blob "$deploy_blob" >"$deploy_partial"
-            chown 0:0 "$runner_partial" "$deploy_partial"
-            chmod 700 "$runner_partial" "$deploy_partial"
-            [[ "$(git hash-object --no-filters "$runner_partial")" == "$runner_blob" &&
-              "$(git hash-object --no-filters "$deploy_partial")" == "$deploy_blob" ]] || return 1
-            mv -T "$runner_partial" "$runner_path"
-            mv -T "$deploy_partial" "$deploy_path"
-            runner_sha256="$(sha256sum "$runner_path" | awk '{print $1}')" || return 1
-            deploy_sha256="$(sha256sum "$deploy_path" | awk '{print $1}')" || return 1
-            reporting_sha256="$(git cat-file blob "$reporting_blob" | sha256sum | awk '{print $1}')" ||
-              return 1
-            [[ "$runner_sha256" == "$expected_runner_sha256" &&
-              "$deploy_sha256" == "$expected_deploy_sha256" &&
-              "$reporting_sha256" == "$expected_reporting_sha256" ]] || {
-              echo 'Billing cleanup recovery candidate SHA-256 contract changed.' >&2
-              return 1
-            }
-            bash -n "$runner_path"
-            bash -n "$deploy_path"
-
-            case "$recovery_action" in
-              recover-run)
-                APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$staged_revision" \
-                  BILLING_CORE_SOURCE_CLEANUP_CONFIRMATION='DROP LEGACY BILLING CORE SOURCE' \
-                  BILLING_CORE_SOURCE_CLEANUP_RECOVERY_APPROVED=true \
-                  BILLING_CORE_SOURCE_CLEANUP_RECOVERY_CANDIDATE_REVISION="$candidate_revision" \
-                  BILLING_CORE_SOURCE_CLEANUP_RECOVERY_RUNNER_BLOB="$runner_blob" \
-                  BILLING_CORE_SOURCE_CLEANUP_RECOVERY_DEPLOY_BLOB="$deploy_blob" \
-                  BILLING_CORE_SOURCE_CLEANUP_RECOVERY_DEPLOY_SCRIPT="$deploy_path" \
-                  bash "$runner_path" --run
-                ;;
-              recover-complete-offsite)
-                if [[ "$marker_state" == 'applied' ]]; then
-                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$staged_revision" \
-                    BILLING_CORE_SOURCE_CLEANUP_CONFIRMATION='DROP LEGACY BILLING CORE SOURCE' \
-                    bash scripts/cleanup-billing-core-source-production.sh --complete-offsite
-                fi
-                ;;
-            esac
-            [[ "$(git rev-parse HEAD)" == "$staged_revision" &&
-              "$(git branch --show-current)" == 'prod' &&
-              -z "$(git status --porcelain --untracked-files=all)" ]] || {
-              echo 'Billing cleanup recovery changed the protected staged checkout.' >&2
-              return 1
-            }
-            marker_state="$(awk -F= '
-              $1 == "phase" { print substr($0, index($0, "=") + 1); found += 1 }
-              END { exit(found == 1 ? 0 : 1) }
-            ' "$cleanup_marker")" || return 1
-            case "$recovery_action:$marker_state" in
-              recover-run:applied|recover-complete-offsite:complete) ;;
-              *)
-                echo 'Billing cleanup recovery did not reach its durable terminal phase.' >&2
-                return 1
-                ;;
-            esac
-            if [[ "$recovery_action" == 'recover-complete-offsite' ]]; then
-              guard_billing_checkout_before_pull \
-                "$candidate_revision" --guard-before-checkout-revision
-            fi
-            trap - EXIT INT TERM
-            cleanup_recovery_overlay_files
-          )
           current_revision="$(git rev-parse HEAD)"
           if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
             "$current_revision" != "$EXPECTED_REVISION" ]]; then
@@ -9931,16 +9546,6 @@ jobs:
                 echo "Billing Core source cleanup actions are manual-only." >&2
                 exit 1
               }
-              if [[ "$BILLING_CLEANUP_ACTION" =~ ^recover-(run|complete-offsite)$ ]]; then
-                current_revision="$(git rev-parse HEAD)"
-                recover_staged_billing_cleanup \
-                  "$current_revision" "$EXPECTED_REVISION" "$BILLING_CLEANUP_ACTION"
-                APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$current_revision" \
-                  bash scripts/cleanup-billing-core-source-production.sh --status
-                printf 'billing_core_cleanup_recovery_checkout_revision=%s\n' \
-                  "$(git rev-parse HEAD)"
-                exit 0
-              fi
               if [[ "$BILLING_CLEANUP_ACTION" == 'status' &&
                 "$(git rev-parse HEAD)" != "$EXPECTED_REVISION" ]]; then
                 cleanup_marker="$APP_ROOT/deploy/backend/.billing-core-source-cleanup-v1"
