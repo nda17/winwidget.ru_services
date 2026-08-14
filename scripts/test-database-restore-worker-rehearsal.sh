@@ -1313,7 +1313,14 @@ SQL
 
 assert_billing_core_writer_fences() {
 	local stale_log="$APP_ROOT/billing-stale-writer.log"
-	local writer_pid writer_visible stale_amount attempt
+	local writer_pid writer_visible stale_amount attempt source_removed
+	source_removed="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
+		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
+		--command "SELECT bool_and(to_regclass(format('public.%I', relation_name)) IS NULL) FROM unnest(ARRAY['payments','payment_receipts','subscriptions','subscription_history','subscription_expiry_reminders','auto_renewals','auto_renewal_consent_events','tariff_prices','affiliate_referrals']) AS source(relation_name);")"
+	if [[ "$source_removed" == 't' ]]; then
+		status 'billing_core_source_removed'
+		return
+	fi
 	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
 		--username winwidget_restore_rehearsal_bootstrap --dbname default_db <<'SQL'
 INSERT INTO public."User" ("id", "password", "rights", "updated_at")
