@@ -1890,6 +1890,18 @@ THEN 'ready' ELSE 'unsafe' END;
 	printf '%s' "$value" | reporting_run_isolated_node_validator "$image" '
 const { readFileSync } = require("node:fs");
 const routes = JSON.parse(readFileSync(0, "utf8"));
+const billing = [
+  ["billing-payments", "/api/v1/payments"],
+  ["billing-subscriptions", "/api/v1/subscriptions"],
+  ["billing-tariff-prices", "/api/v1/tariff-prices"],
+  ["billing-affiliate", "/api/v1/affiliate"],
+].map(([id, pathPrefix]) => ({
+  id,
+  pathPrefix,
+  upstreamUrl: "http://127.0.0.1:4800",
+  authPolicy: "optional",
+  timeoutMs: 30000,
+}));
 const widgets = [
   ["widgets-admin", "/api/v1/widgets/admin", "required"],
   ["widgets-management", "/api/v1/widgets", "required"],
@@ -1919,7 +1931,15 @@ const widgets = [
 const includeWidgets = routes.some(
   route => route.upstreamUrl === "http://127.0.0.1:4700",
 );
+const billingIds = new Set(billing.map(route => route.id));
+const billingPrefixes = new Set(billing.map(route => route.pathPrefix));
+const includeBilling = routes.some(route =>
+  billingIds.has(route.id) ||
+  billingPrefixes.has(route.pathPrefix) ||
+  route.upstreamUrl === "http://127.0.0.1:4800",
+);
 const expected = [
+  ...(includeBilling ? billing : []),
   {
     id: "database-restores",
     pathPrefix: "/api/v1/dev-tools/database-restores",
@@ -5846,7 +5866,13 @@ capture {
 		echo 'Reporting cutover self-test found an unsafe validator, evidence, cleanup or completion guard.' >&2
 		return 1
 	}
-	[[ "$drain_text" == *'DAILY_TELEGRAM_SUMMARY'* &&
+	[[ "$evidence_text" == *'"billing-payments", "/api/v1/payments"'* &&
+		"$evidence_text" == *'"billing-subscriptions", "/api/v1/subscriptions"'* &&
+		"$evidence_text" == *'"billing-tariff-prices", "/api/v1/tariff-prices"'* &&
+		"$evidence_text" == *'"billing-affiliate", "/api/v1/affiliate"'* &&
+		"$evidence_text" == *'route.upstreamUrl === "http://127.0.0.1:4800"'* &&
+		"$evidence_text" == *'...(includeBilling ? billing : [])'* &&
+		"$drain_text" == *'DAILY_TELEGRAM_SUMMARY'* &&
 		"$drain_text" == *'"$base.retry-v2.$retry_index"'* &&
 		"$drain_text" != *'"$base.retry.$retry_index"'* &&
 		"$drain_text" == *'reporting_cutover_require_projection_barrier'* &&

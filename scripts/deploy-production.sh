@@ -111,6 +111,252 @@ NODE
 	printf 'billing_routine_image_gate_self_test=passed\n'
 }
 
+gateway_route_manifest_policy_validator_source() {
+	cat <<'NODE'
+function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy) {
+  const routes = config?.routes;
+  if (!Array.isArray(routes)) throw new Error('Gateway routes are unavailable');
+
+  const routeMatches = (route, id, pathPrefix, upstreamOrigin, authPolicy, timeoutMs) =>
+    route?.id === id &&
+    route.pathPrefix === pathPrefix &&
+    route.upstreamUrl?.origin === upstreamOrigin &&
+    route.authPolicy === authPolicy &&
+    route.timeoutMs === timeoutMs;
+  const databaseRestores = routes.find(route => route.id === 'database-restores');
+  const campaigns = routes.find(route => route.id === 'campaigns');
+  const reporting = routes.find(route => route.id === 'reporting');
+  const monolith = routes.find(route => route.id === 'monolith');
+  const widgetRoutes = [
+    ['widgets-admin', '/api/v1/widgets/admin', 'required'],
+    ['widgets-management', '/api/v1/widgets', 'required'],
+    ['quizzes-management', '/api/v1/quizzes', 'required'],
+    ['callbacks-management', '/api/v1/callbacks', 'required'],
+    ['countdown-timers-management', '/api/v1/countdown-timers', 'required'],
+    ['stop-offers-management', '/api/v1/stop-offers', 'required'],
+    ['online-consultants-management', '/api/v1/online-consultants', 'required'],
+    ['calculators-management', '/api/v1/calculators', 'required'],
+    ['widget-settings', '/api/v1/widget-settings', 'required'],
+    ['widget-runtime', '/api/v1/widget-runtime', 'required'],
+    ['widget-public', '/api/v1/widget', 'optional'],
+    ['quiz-public', '/api/v1/quiz', 'optional'],
+    ['callback-public', '/api/v1/callback', 'optional'],
+    ['countdown-timer-public', '/api/v1/countdown-timer', 'optional'],
+    ['stop-offer-public', '/api/v1/stop-offer', 'optional'],
+    ['online-consultant-public', '/api/v1/online-consultant', 'optional'],
+    ['calculator-public', '/api/v1/calculator', 'optional'],
+    ['widget-events', '/api/v1/widget-events', 'optional'],
+  ];
+  const billingRoutes = [
+    ['billing-payments', '/api/v1/payments'],
+    ['billing-subscriptions', '/api/v1/subscriptions'],
+    ['billing-tariff-prices', '/api/v1/tariff-prices'],
+    ['billing-affiliate', '/api/v1/affiliate'],
+  ];
+  const widgetsInvalid = widgetRoutes.some(([id, pathPrefix, authPolicy]) =>
+    !routeMatches(
+      routes.find(route => route.id === id),
+      id,
+      pathPrefix,
+      'http://127.0.0.1:4700',
+      authPolicy,
+      60000,
+    ),
+  ) || routes.filter(
+    route => route.upstreamUrl?.origin === 'http://127.0.0.1:4700',
+  ).length !== widgetRoutes.length;
+  const billingPrefixes = new Set(billingRoutes.map(([, pathPrefix]) => pathPrefix));
+  const billingIds = new Set(billingRoutes.map(([id]) => id));
+  const billingInvalid = billingPolicy === 'billing'
+    ? billingRoutes.some(([id, pathPrefix]) => !routeMatches(
+        routes.find(route => route.id === id),
+        id,
+        pathPrefix,
+        'http://127.0.0.1:4800',
+        'optional',
+        30000,
+      )) || routes.filter(
+        route => route.upstreamUrl?.origin === 'http://127.0.0.1:4800',
+      ).length !== billingRoutes.length
+    : billingPolicy === 'legacy'
+      ? routes.some(route =>
+          billingIds.has(route.id) ||
+          billingPrefixes.has(route.pathPrefix) ||
+          route.upstreamUrl?.origin === 'http://127.0.0.1:4800')
+      : true;
+  const commonInvalid =
+    !routeMatches(
+      databaseRestores,
+      'database-restores',
+      '/api/v1/dev-tools/database-restores',
+      'http://127.0.0.1:4200',
+      'required',
+      120000,
+    ) ||
+    !routeMatches(
+      campaigns,
+      'campaigns',
+      '/api/v1/admin/campaigns',
+      'http://127.0.0.1:4500',
+      'required',
+      60000,
+    ) ||
+    !routeMatches(
+      monolith,
+      'monolith',
+      '/api/v1',
+      'http://127.0.0.1:4200',
+      'optional',
+      60000,
+    );
+  const expectedRouteCount = 3 + widgetRoutes.length +
+    (reportingPolicy === 'reporting' ? 1 : 0) +
+    (billingPolicy === 'billing' ? billingRoutes.length : 0);
+  const darkInvalid = reportingPolicy === 'dark' &&
+    (reporting || routes.some(route =>
+      route.pathPrefix === '/api/v1/admin/reporting' ||
+      route.upstreamUrl?.origin === 'http://127.0.0.1:4600'));
+  const reportingInvalid = reportingPolicy === 'reporting' && !routeMatches(
+    reporting,
+    'reporting',
+    '/api/v1/admin/reporting',
+    'http://127.0.0.1:4600',
+    'required',
+    60000,
+  );
+  if (
+    !['dark', 'reporting'].includes(reportingPolicy) ||
+    !['legacy', 'billing'].includes(billingPolicy) ||
+    routes.length !== expectedRouteCount ||
+    commonInvalid ||
+    widgetsInvalid ||
+    billingInvalid ||
+    darkInvalid ||
+    reportingInvalid
+  ) {
+    throw new Error(
+      `Gateway route manifest conflicts with Reporting policy ${reportingPolicy} and Billing policy ${billingPolicy}`,
+    );
+  }
+}
+NODE
+}
+
+run_gateway_route_manifest_policy_self_test() {
+	local self_test_node validator_source
+	self_test_node="$(type -P node 2>/dev/null || true)"
+	[[ -n "$self_test_node" && -x "$self_test_node" ]] || {
+		echo 'Gateway route-manifest policy self-test requires host Node.' >&2
+		return 1
+	}
+	validator_source="$(gateway_route_manifest_policy_validator_source)"
+	"$self_test_node" - "$validator_source" <<'NODE'
+const assert = require('node:assert/strict');
+const validatorSource = process.argv[2];
+eval(validatorSource);
+
+const route = (id, pathPrefix, upstreamOrigin, authPolicy, timeoutMs) => ({
+  id,
+  pathPrefix,
+  upstreamUrl: new URL(upstreamOrigin),
+  authPolicy,
+  timeoutMs,
+});
+const common = [
+  route('database-restores', '/api/v1/dev-tools/database-restores', 'http://127.0.0.1:4200', 'required', 120000),
+  route('campaigns', '/api/v1/admin/campaigns', 'http://127.0.0.1:4500', 'required', 60000),
+  route('monolith', '/api/v1', 'http://127.0.0.1:4200', 'optional', 60000),
+];
+const widgets = [
+  ['widgets-admin', '/api/v1/widgets/admin', 'required'],
+  ['widgets-management', '/api/v1/widgets', 'required'],
+  ['quizzes-management', '/api/v1/quizzes', 'required'],
+  ['callbacks-management', '/api/v1/callbacks', 'required'],
+  ['countdown-timers-management', '/api/v1/countdown-timers', 'required'],
+  ['stop-offers-management', '/api/v1/stop-offers', 'required'],
+  ['online-consultants-management', '/api/v1/online-consultants', 'required'],
+  ['calculators-management', '/api/v1/calculators', 'required'],
+  ['widget-settings', '/api/v1/widget-settings', 'required'],
+  ['widget-runtime', '/api/v1/widget-runtime', 'required'],
+  ['widget-public', '/api/v1/widget', 'optional'],
+  ['quiz-public', '/api/v1/quiz', 'optional'],
+  ['callback-public', '/api/v1/callback', 'optional'],
+  ['countdown-timer-public', '/api/v1/countdown-timer', 'optional'],
+  ['stop-offer-public', '/api/v1/stop-offer', 'optional'],
+  ['online-consultant-public', '/api/v1/online-consultant', 'optional'],
+  ['calculator-public', '/api/v1/calculator', 'optional'],
+  ['widget-events', '/api/v1/widget-events', 'optional'],
+].map(([id, pathPrefix, authPolicy]) =>
+  route(id, pathPrefix, 'http://127.0.0.1:4700', authPolicy, 60000));
+const reporting = route(
+  'reporting',
+  '/api/v1/admin/reporting',
+  'http://127.0.0.1:4600',
+  'required',
+  60000,
+);
+const billing = [
+  ['billing-payments', '/api/v1/payments'],
+  ['billing-subscriptions', '/api/v1/subscriptions'],
+  ['billing-tariff-prices', '/api/v1/tariff-prices'],
+  ['billing-affiliate', '/api/v1/affiliate'],
+].map(([id, pathPrefix]) =>
+  route(id, pathPrefix, 'http://127.0.0.1:4800', 'optional', 30000));
+const accepts = (routes, reportingPolicy, billingPolicy) =>
+  validateGatewayRouteManifest({ routes }, reportingPolicy, billingPolicy);
+const rejects = (routes, reportingPolicy, billingPolicy) => assert.throws(
+  () => accepts(routes, reportingPolicy, billingPolicy),
+  /Gateway route manifest conflicts/,
+);
+
+accepts([...common, ...widgets], 'dark', 'legacy');
+accepts([...common, ...widgets, reporting], 'reporting', 'legacy');
+accepts([...common, ...widgets, ...billing], 'dark', 'billing');
+accepts([...common, ...widgets, reporting, ...billing], 'reporting', 'billing');
+accepts(
+  [...billing, common[0], common[1], reporting, ...widgets, common[2]],
+  'reporting',
+  'billing',
+);
+rejects([...common, ...widgets, reporting, ...billing], 'reporting', 'legacy');
+rejects([...common, ...widgets, reporting, ...billing.slice(0, 3)], 'reporting', 'billing');
+rejects(
+  [...common, ...widgets, reporting, ...billing.slice(0, 3), { ...billing[3], authPolicy: 'required' }],
+  'reporting',
+  'billing',
+);
+rejects(
+  [...common, ...widgets, reporting, { ...billing[0], id: 'billing-payment' }, ...billing.slice(1)],
+  'reporting',
+  'billing',
+);
+rejects(
+  [...common, ...widgets, reporting, { ...billing[0], timeoutMs: 60000 }, ...billing.slice(1)],
+  'reporting',
+  'billing',
+);
+rejects(
+  [
+    ...common,
+    ...widgets,
+    reporting,
+    { ...billing[0], upstreamUrl: new URL('http://127.0.0.1:4200') },
+    ...billing.slice(1),
+  ],
+  'reporting',
+  'billing',
+);
+rejects(
+  [...common, ...widgets, reporting, ...billing, route('extra', '/extra', 'http://127.0.0.1:4900', 'required', 1000)],
+  'reporting',
+  'billing',
+);
+rejects([...common, ...widgets, reporting], 'unsafe', 'legacy');
+rejects([...common, ...widgets, reporting], 'reporting', 'unsafe');
+NODE
+	printf 'gateway_route_manifest_policy_self_test=passed\n'
+}
+
 if [[ "${1:-}" == '--self-test-database-restore-create-gate' ]]; then
 	[[ "$#" -eq 1 ]] || {
 		echo 'Database restore create-gate self-test does not accept extra arguments.' >&2
@@ -126,6 +372,15 @@ if [[ "${1:-}" == '--self-test-billing-routine-image-gate' ]]; then
 		exit 1
 	}
 	run_billing_routine_image_gate_self_test
+	exit 0
+fi
+
+if [[ "${1:-}" == '--self-test-gateway-route-manifest-policy' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'Gateway route-manifest policy self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_gateway_route_manifest_policy_self_test
 	exit 0
 fi
 
@@ -4300,6 +4555,11 @@ gateway_validation_env+=(
 	--env "JWT_MAX_TOKEN_LIFETIME_SECONDS=$(get_env_value JWT_ACCESS_TTL_SECONDS)"
 	--env "SHUTDOWN_GRACE_MS=$(get_env_value GATEWAY_SHUTDOWN_GRACE_MS)"
 	--env "REPORTING_GATEWAY_POLICY=$reporting_gateway_policy"
+	--env "BILLING_GATEWAY_POLICY=$billing_routes_env_state"
+)
+gateway_route_manifest_policy_validator="$(gateway_route_manifest_policy_validator_source)"
+gateway_validation_env+=(
+	--env "GATEWAY_ROUTE_MANIFEST_POLICY_VALIDATOR=$gateway_route_manifest_policy_validator"
 )
 
 docker run --rm --network none \
@@ -4307,89 +4567,15 @@ docker run --rm --network none \
 	--entrypoint node \
 	"winwidget-api-gateway:$APP_VERSION" \
 	-e '
+eval(process.env.GATEWAY_ROUTE_MANIFEST_POLICY_VALIDATOR);
 const { loadConfig } = require("./dist/src/config.js");
 const config = loadConfig();
-const databaseRestores = config.routes.find(route => route.id === "database-restores");
-const campaigns = config.routes.find(route => route.id === "campaigns");
-const reporting = config.routes.find(route => route.id === "reporting");
-const monolith = config.routes.find(route => route.id === "monolith");
-const policy = process.env.REPORTING_GATEWAY_POLICY;
-const widgetRoutes = [
-	["widgets-admin", "/api/v1/widgets/admin", "required"],
-	["widgets-management", "/api/v1/widgets", "required"],
-	["quizzes-management", "/api/v1/quizzes", "required"],
-	["callbacks-management", "/api/v1/callbacks", "required"],
-	["countdown-timers-management", "/api/v1/countdown-timers", "required"],
-	["stop-offers-management", "/api/v1/stop-offers", "required"],
-	["online-consultants-management", "/api/v1/online-consultants", "required"],
-	["calculators-management", "/api/v1/calculators", "required"],
-	["widget-settings", "/api/v1/widget-settings", "required"],
-	["widget-runtime", "/api/v1/widget-runtime", "required"],
-	["widget-public", "/api/v1/widget", "optional"],
-	["quiz-public", "/api/v1/quiz", "optional"],
-	["callback-public", "/api/v1/callback", "optional"],
-	["countdown-timer-public", "/api/v1/countdown-timer", "optional"],
-	["stop-offer-public", "/api/v1/stop-offer", "optional"],
-	["online-consultant-public", "/api/v1/online-consultant", "optional"],
-	["calculator-public", "/api/v1/calculator", "optional"],
-	["widget-events", "/api/v1/widget-events", "optional"],
-];
-const widgetsInvalid = widgetRoutes.some(([id, pathPrefix, authPolicy]) => {
-	const route = config.routes.find(candidate => candidate.id === id);
-	return !route ||
-		route.pathPrefix !== pathPrefix ||
-		route.upstreamUrl.origin !== "http://127.0.0.1:4700" ||
-		route.authPolicy !== authPolicy ||
-		route.timeoutMs !== 60000;
-}) || config.routes.filter(
-	route => route.upstreamUrl.origin === "http://127.0.0.1:4700",
-).length !== widgetRoutes.length;
-const commonInvalid =
-	!databaseRestores ||
-	databaseRestores.pathPrefix !== "/api/v1/dev-tools/database-restores" ||
-	databaseRestores.upstreamUrl.origin !== "http://127.0.0.1:4200" ||
-	databaseRestores.authPolicy !== "required" ||
-	databaseRestores.timeoutMs !== 120000 ||
-	!campaigns ||
-	campaigns.pathPrefix !== "/api/v1/admin/campaigns" ||
-	campaigns.upstreamUrl.origin !== "http://127.0.0.1:4500" ||
-	campaigns.authPolicy !== "required" ||
-	campaigns.timeoutMs !== 60000 ||
-	!monolith ||
-	monolith.pathPrefix !== "/api/v1" ||
-	monolith.upstreamUrl.origin !== "http://127.0.0.1:4200" ||
-	monolith.authPolicy !== "optional" ||
-	monolith.timeoutMs !== 60000;
-const darkInvalid =
-	policy === "dark" &&
-	(config.routes.length !== 3 + widgetRoutes.length ||
-		reporting ||
-		config.routes.some(
-			route =>
-				route.pathPrefix === "/api/v1/admin/reporting" ||
-				route.upstreamUrl.origin === "http://127.0.0.1:4600",
-		));
-const reportingInvalid =
-	policy === "reporting" &&
-	(config.routes.length !== 4 + widgetRoutes.length ||
-		!reporting ||
-		reporting.pathPrefix !== "/api/v1/admin/reporting" ||
-		reporting.upstreamUrl.origin !== "http://127.0.0.1:4600" ||
-		reporting.authPolicy !== "required" ||
-		reporting.timeoutMs !== 60000);
-if (
-	!["dark", "reporting"].includes(policy) ||
-	commonInvalid ||
-	widgetsInvalid ||
-	darkInvalid ||
-	reportingInvalid
-) {
-	throw new Error(
-		`Gateway route manifest conflicts with Reporting cutover policy ${policy}`,
-	);
-}
+const reportingPolicy = process.env.REPORTING_GATEWAY_POLICY;
+const billingPolicy = process.env.BILLING_GATEWAY_POLICY;
+validateGatewayRouteManifest(config, reportingPolicy, billingPolicy);
 process.stdout.write(
-	`API Gateway route manifest validated for Reporting policy ${policy}\n`,
+	"API Gateway route manifest validated for Reporting policy " + reportingPolicy +
+		" and Billing policy " + billingPolicy + "\\n",
 );
 '
 
