@@ -7,41 +7,45 @@ import { ConfigService } from '@nestjs/config';
 import type { BillingActor } from '../auth/billing-request';
 import { BillingRuntimeService } from '../runtime/billing-runtime.service';
 
-const DEFAULT_BASE_URL = 'http://127.0.0.1:4200';
+const DEFAULT_IDENTITY_BASE_URL = 'http://127.0.0.1:4900';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const PLACEHOLDER_TOKENS = new Set([
 	'change_me',
 	'XYZXYZXYZ',
+	'identity_billing_token',
+	'ci_identity_billing_token_at_least_32_chars',
 	'billing_internal_token'
 ]);
 
 @Injectable()
 export class CoreInternalClient {
-	private readonly baseUrl: string;
-	private readonly token: string;
+	private readonly identityBaseUrl: string;
+	private readonly identityToken: string;
 	private readonly timeoutMs: number;
 
 	constructor(config: ConfigService, runtime: BillingRuntimeService) {
-		this.baseUrl = this.parseBaseUrl(
-			config.get<string>('BILLING_CORE_INTERNAL_BASE_URL')
+		this.identityBaseUrl = this.parseBaseUrl(
+			config.get<string>('IDENTITY_INTERNAL_BASE_URL'),
+			'IDENTITY_INTERNAL_BASE_URL'
 		);
-		this.token =
-			config.get<string>('BILLING_INTERNAL_TOKEN')?.trim() || '';
+		this.identityToken =
+			config.get<string>('IDENTITY_BILLING_TOKEN')?.trim() || '';
 		if (
 			(runtime.apiEnabled || runtime.workerEnabled) &&
-			(this.token.length < 32 || PLACEHOLDER_TOKENS.has(this.token))
+			(this.identityToken.length < 32 ||
+				PLACEHOLDER_TOKENS.has(this.identityToken))
 		) {
 			throw new Error(
-				'BILLING_INTERNAL_TOKEN must be a non-placeholder secret with at least 32 characters'
+				'IDENTITY_BILLING_TOKEN must be a non-placeholder secret with at least 32 characters'
 			);
 		}
 		const timeout = Number(
-			config.get<string>('BILLING_INTERNAL_TIMEOUT_MS') ||
+			config.get<string>('IDENTITY_INTERNAL_TIMEOUT_MS') ||
 				DEFAULT_TIMEOUT_MS
 		);
 		if (!Number.isInteger(timeout) || timeout < 500 || timeout > 60_000) {
 			throw new Error(
-				'BILLING_INTERNAL_TIMEOUT_MS must be an integer between 500 and 60000'
+				'IDENTITY_INTERNAL_TIMEOUT_MS must be an integer between 500 and 60000'
 			);
 		}
 		this.timeoutMs = timeout;
@@ -51,12 +55,13 @@ export class CoreInternalClient {
 		let response: Response;
 		try {
 			response = await fetch(
-				`${this.baseUrl}/api/v1/internal/billing/auth/introspect`,
+				`${this.identityBaseUrl}/internal/v1/auth/introspect`,
 				{
 					method: 'POST',
 					headers: {
 						authorization,
-						'x-winwidget-internal-token': this.token,
+						'x-winwidget-service': 'billing',
+						'x-winwidget-internal-token': this.identityToken,
 						accept: 'application/json'
 					},
 					signal: AbortSignal.timeout(this.timeoutMs)
@@ -67,8 +72,13 @@ export class CoreInternalClient {
 				'Authorization service is unavailable'
 			);
 		}
-		if (response.status === 401 || response.status === 403) {
+		if (response.status === 401) {
 			throw await this.authException(response);
+		}
+		if (response.status === 403) {
+			throw new ServiceUnavailableException(
+				'Authorization service rejected its Billing credential'
+			);
 		}
 		if (!response.ok) {
 			throw new ServiceUnavailableException(
@@ -103,11 +113,12 @@ export class CoreInternalClient {
 		let response: Response;
 		try {
 			response = await fetch(
-				`${this.baseUrl}/api/v1/internal/billing/lifecycle/complete`,
+				`${this.identityBaseUrl}/internal/v1/billing/lifecycle/complete`,
 				{
 					method: 'POST',
 					headers: {
-						'x-winwidget-internal-token': this.token,
+						'x-winwidget-service': 'billing',
+						'x-winwidget-internal-token': this.identityToken,
 						accept: 'application/json',
 						'content-type': 'application/json'
 					},
@@ -163,20 +174,16 @@ export class CoreInternalClient {
 		return result;
 	}
 
-	private parseBaseUrl(value: string | undefined): string {
-		const configured = value?.trim() || DEFAULT_BASE_URL;
+	private parseBaseUrl(value: string | undefined, name: string): string {
+		const configured = value?.trim() || DEFAULT_IDENTITY_BASE_URL;
 		let url: URL;
 		try {
 			url = new URL(configured);
 		} catch {
-			throw new Error(
-				'BILLING_CORE_INTERNAL_BASE_URL must be a valid URL'
-			);
+			throw new Error(`${name} must be a valid URL`);
 		}
 		if (url.protocol !== 'http:') {
-			throw new Error(
-				'BILLING_CORE_INTERNAL_BASE_URL must use http on the private network'
-			);
+			throw new Error(`${name} must use http on the private network`);
 		}
 		if (
 			!['127.0.0.1', '::1', 'localhost'].includes(url.hostname) ||
@@ -186,9 +193,7 @@ export class CoreInternalClient {
 			url.search ||
 			url.hash
 		) {
-			throw new Error(
-				'BILLING_CORE_INTERNAL_BASE_URL must be an exact loopback origin'
-			);
+			throw new Error(`${name} must be an exact loopback origin`);
 		}
 		return url.toString().replace(/\/$/, '');
 	}

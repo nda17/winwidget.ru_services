@@ -3,6 +3,8 @@
 /node_modules
 /apps/billing/dist/
 /apps/billing/node_modules/
+/apps/identity/dist/
+/apps/identity/node_modules/
 /.pnp
 .pnp.js
 .yarn/install-state.gz

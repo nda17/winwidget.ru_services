@@ -17,6 +17,11 @@ import {
 	BILLING_EVENTS_EXCHANGE
 } from '../messaging/billing-messaging.constants';
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
+import {
+	assertBillingCommandReceipt,
+	billingCommandRequestHash,
+	lockBillingCommand
+} from './billing-command-idempotency';
 import { SubscriptionDomainService } from './subscription-domain.service';
 import { TariffAffiliateService } from './tariff-affiliate.service';
 
@@ -29,34 +34,47 @@ export class InternalCommandsService {
 	) {}
 
 	async ensureTrial(dto: EnsureTrialCommandDto) {
-		const prior = await this.receipt(dto.commandId, 'ENSURE_TRIAL');
-		if (prior) return prior;
-		const subscription = await this.subscriptions.ensureTrial(
-			dto.userId,
-			dto.trialDays || 7,
-			new Date(dto.registeredAt)
+		return this.executeCommand(
+			dto.commandId,
+			'ENSURE_TRIAL',
+			{
+				schemaVersion: dto.schemaVersion,
+				commandId: dto.commandId,
+				userId: dto.userId,
+				trialDays: dto.trialDays,
+				registeredAt: new Date(dto.registeredAt).toISOString()
+			},
+			async transaction => {
+				const subscription =
+					await this.subscriptions.ensureTrialInTransaction(
+						transaction,
+						dto.userId,
+						dto.trialDays || 7,
+						new Date(dto.registeredAt)
+					);
+				return {
+					ensured: true,
+					subscriptionId: subscription.id,
+					userId: dto.userId
+				};
+			}
 		);
-		const result = {
-			ensured: true,
-			subscriptionId: subscription.id,
-			userId: dto.userId
-		};
-		await this.saveReceipt(dto.commandId, 'ENSURE_TRIAL', result);
-		return result;
 	}
 
 	async revokeBeforeDeactivate(dto: RevokeEntitlementsCommandDto) {
-		const prior = await this.receipt(
+		return this.executeCommand(
 			dto.commandId,
-			'REVOKE_BEFORE_DEACTIVATE'
-		);
-		if (prior) return prior;
-		return this.prisma.$transaction(
+			'REVOKE_BEFORE_DEACTIVATE',
+			{
+				schemaVersion: dto.schemaVersion,
+				commandId: dto.commandId,
+				userId: dto.userId,
+				reason: dto.reason,
+				actorId: dto.actorId,
+				actorRole: dto.actorRole,
+				occurredAt: new Date(dto.occurredAt).toISOString()
+			},
 			async transaction => {
-				const inside = await transaction.billingCommandReceipt.findUnique({
-					where: { commandId: dto.commandId }
-				});
-				if (inside) return inside.result;
 				await transaction.$queryRaw`
 					SELECT user_id FROM billing.identity_contact_projections
 					WHERE user_id = ${dto.userId}
@@ -172,19 +190,7 @@ export class InternalCommandsService {
 					cancelledPayments: pendingPayments.length,
 					stateVersion: renewal ? renewal.stateVersion + 1 : null
 				};
-				await transaction.billingCommandReceipt.create({
-					data: {
-						commandId: dto.commandId,
-						commandType: 'REVOKE_BEFORE_DEACTIVATE',
-						result
-					}
-				});
 				return result;
-			},
-			{
-				isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-				maxWait: 5_000,
-				timeout: 30_000
 			}
 		);
 	}
@@ -198,15 +204,102 @@ export class InternalCommandsService {
 		return this.serializeSettings(item);
 	}
 
+	async getAdminUserOverview(userId: string) {
+		const [subscription, pending, succeeded, cancelled, expired, latest] =
+			await this.prisma.$transaction([
+				this.prisma.subscription.findUnique({
+					where: { userId },
+					select: {
+						id: true,
+						userId: true,
+						plan: true,
+						billingPeriod: true,
+						status: true,
+						startsAt: true,
+						expiresAt: true,
+						leadsThisPeriod: true,
+						periodResetsAt: true,
+						createdAt: true,
+						updatedAt: true
+					}
+				}),
+				this.prisma.payment.count({
+					where: { userId, status: PaymentStatus.PENDING }
+				}),
+				this.prisma.payment.count({
+					where: { userId, status: PaymentStatus.SUCCEEDED }
+				}),
+				this.prisma.payment.count({
+					where: { userId, status: PaymentStatus.CANCELLED }
+				}),
+				this.prisma.payment.count({
+					where: { userId, status: PaymentStatus.EXPIRED }
+				}),
+				this.prisma.payment.findMany({
+					where: { userId },
+					orderBy: { createdAt: 'desc' },
+					take: 5,
+					select: {
+						id: true,
+						yookassaId: true,
+						status: true,
+						amount: true,
+						plan: true,
+						billingPeriod: true,
+						createdAt: true,
+						updatedAt: true
+					}
+				})
+			]);
+		return {
+			subscription,
+			paymentCounts: {
+				[PaymentStatus.PENDING]: pending,
+				[PaymentStatus.SUCCEEDED]: succeeded,
+				[PaymentStatus.CANCELLED]: cancelled,
+				[PaymentStatus.EXPIRED]: expired
+			},
+			latestPayments: latest
+		};
+	}
+
+	async getSubscriptionUserIds() {
+		const [rows, highWater] = await this.prisma.$transaction([
+			this.prisma.subscription.findMany({
+				orderBy: { userId: 'asc' },
+				select: { userId: true }
+			}),
+			this.prisma.subscription.aggregate({
+				_max: { sourceSequence: true }
+			})
+		]);
+		return {
+			schemaVersion: 1 as const,
+			userIds: rows.map(item => item.userId),
+			count: rows.length,
+			sourceSequence: (highWater._max.sourceSequence || 0n).toString()
+		};
+	}
+
 	async updateSettings(dto: UpdateBillingSettingsCommandDto) {
-		const prior = await this.receipt(dto.commandId, 'UPDATE_SETTINGS');
-		if (prior) return prior;
-		return this.prisma.$transaction(
+		return this.executeCommand(
+			dto.commandId,
+			'UPDATE_SETTINGS',
+			{
+				schemaVersion: dto.schemaVersion,
+				commandId: dto.commandId,
+				actorId: dto.actorId,
+				occurredAt: new Date(dto.occurredAt).toISOString(),
+				settings: {
+					paymentEnabled: dto.settings.paymentEnabled,
+					autoRenewalSignupEnabled: dto.settings.autoRenewalSignupEnabled,
+					autoRenewalChargesEnabled:
+						dto.settings.autoRenewalChargesEnabled,
+					affiliateProgramEnabled: dto.settings.affiliateProgramEnabled,
+					affiliateCashbackPercent: dto.settings.affiliateCashbackPercent
+				}
+			},
 			async transaction => {
-				const inside = await transaction.billingCommandReceipt.findUnique({
-					where: { commandId: dto.commandId }
-				});
-				if (inside) return inside.result;
 				const current = await transaction.billingSettings.upsert({
 					where: { id: 'singleton' },
 					create: { id: 'singleton' },
@@ -240,17 +333,8 @@ export class InternalCommandsService {
 					}
 				});
 				await this.tariffAffiliate.emitSettings(transaction, updated);
-				const result = this.serializeSettings(updated);
-				await transaction.billingCommandReceipt.create({
-					data: {
-						commandId: dto.commandId,
-						commandType: 'UPDATE_SETTINGS',
-						result: result as Prisma.InputJsonValue
-					}
-				});
-				return result;
-			},
-			{ isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+				return this.serializeSettings(updated);
+			}
 		);
 	}
 
@@ -326,32 +410,63 @@ export class InternalCommandsService {
 		}
 	}
 
-	private async receipt(commandId: string, commandType: string) {
-		const value = await this.prisma.billingCommandReceipt.findUnique({
-			where: { commandId }
-		});
-		if (value && value.commandType !== commandType) {
-			throw new ConflictException(
-				'Command ID was used for another command type'
-			);
-		}
-		return value?.result || null;
-	}
-
-	private async saveReceipt(
+	private async executeCommand<T extends Record<string, unknown>>(
 		commandId: string,
 		commandType: string,
-		result: Record<string, unknown>
-	) {
-		await this.prisma.billingCommandReceipt.upsert({
-			where: { commandId },
-			create: {
-				commandId,
-				commandType,
-				result: result as Prisma.InputJsonValue
-			},
-			update: {}
-		});
+		payload: Record<string, unknown>,
+		mutate: (transaction: Prisma.TransactionClient) => Promise<T>
+	): Promise<T> {
+		const requestHash = billingCommandRequestHash(commandType, payload);
+		for (let attempt = 1; attempt <= 3; attempt += 1) {
+			try {
+				return await this.prisma.$transaction(
+					async transaction => {
+						await lockBillingCommand(transaction, commandId);
+						const prior =
+							await transaction.billingCommandReceipt.findUnique({
+								where: { commandId }
+							});
+						if (prior) {
+							return assertBillingCommandReceipt(
+								prior,
+								commandType,
+								requestHash
+							) as unknown as T;
+						}
+						const result = await mutate(transaction);
+						await transaction.billingCommandReceipt.create({
+							data: {
+								commandId,
+								commandType,
+								requestHash,
+								requestHashVersion: 1,
+								result: result as Prisma.InputJsonValue
+							}
+						});
+						return result;
+					},
+					{
+						isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+						maxWait: 5_000,
+						timeout: 30_000
+					}
+				);
+			} catch (error) {
+				if (attempt === 3 || !this.retryableTransactionError(error)) {
+					throw error;
+				}
+			}
+		}
+		throw new Error('Billing command retry loop exhausted');
+	}
+
+	private retryableTransactionError(error: unknown): boolean {
+		return (
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			(error as { code?: unknown }).code === 'P2034'
+		);
 	}
 
 	private async nextSequence(transaction: Prisma.TransactionClient) {

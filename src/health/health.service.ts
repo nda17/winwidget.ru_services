@@ -104,7 +104,6 @@ export class HealthService {
 			this.checkRecaptcha(),
 			this.checkYooKassa(billingResult),
 			this.checkInfoTelegramBot(),
-			this.checkAuthTelegramBot(),
 			this.checkSupportTelegramBot()
 		]);
 
@@ -813,15 +812,6 @@ export class HealthService {
 			title: '@winwidget_info_bot',
 			tokenKey: 'TELEGRAM_INFO_BOT_TOKEN',
 			usernameKey: 'TELEGRAM_INFO_BOT_USERNAME'
-		});
-	}
-
-	private async checkAuthTelegramBot(): Promise<HealthCheck> {
-		return this.checkTelegramBot({
-			id: 'telegram_auth_bot',
-			title: '@nda-auth_bot',
-			tokenKey: 'TELEGRAM_AUTH_BOT_TOKEN',
-			usernameKey: 'TELEGRAM_AUTH_BOT_USERNAME'
 		});
 	}
 

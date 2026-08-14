@@ -4,6 +4,7 @@ import {
 	BillingMessagingClientService,
 	BillingMessagingInternalApiError
 } from '@/messaging/billing-messaging-client.service';
+import type { IdentityMessagingClientService } from '@/messaging/identity-messaging-client.service';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import {
 	CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
@@ -155,91 +156,39 @@ describe('MessagingAdminService', () => {
 		);
 	});
 
-	it('queues a Core-owned manual retry through the transactional Outbox', async () => {
-		const retryingAt = null;
-		const failure = {
+	it('routes an Identity-owned destination retry without touching the Core Outbox', async () => {
+		const result = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'telegram-destination-unavailable',
-			routingKey: 'notification.telegram.destination-unavailable.v1',
-			payload: {
-				schemaVersion: 1,
-				eventType: 'notification.telegram.destination-unavailable.v1',
-				sourceEventId: '44444444-4444-4444-8444-444444444444',
-				sourceKind: 'telegram',
-				destination: { telegramChatId: '123456789' },
-				normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
-				occurredAt: '2026-07-24T00:00:00.000Z'
-			},
-			attempts: 4,
-			lastError: 'timeout',
-			failedAt: new Date(),
-			retryingAt,
-			resolvedAt: null,
-			createdAt: new Date(),
-			updatedAt: new Date()
+			integration: 'telegram-destination-unavailable' as const,
+			retryingAt: '2026-08-14T12:00:00.000Z'
 		};
-		const transaction = {
-			$queryRaw: jest.fn().mockResolvedValue([{ id: 'receipt-1' }]),
-			integrationDeliveryFailure: {
-				findUnique: jest.fn().mockResolvedValue(failure),
-				updateMany: jest.fn().mockResolvedValue({ count: 1 })
-			},
-			outboxEvent: {
-				create: jest.fn().mockResolvedValue({ id: 'outbox-1' })
-			}
-		};
+		const transaction = jest.fn();
 		const prisma = {
 			integrationDeliveryFailure: {
-				findUnique: jest.fn().mockResolvedValue(failure),
-				findFirst: jest.fn().mockResolvedValue({ id: failure.id })
+				findFirst: jest.fn().mockResolvedValue(null)
 			},
-			$transaction: jest.fn(async callback => callback(transaction))
+			$transaction: transaction
 		} as unknown as PrismaService;
-		const adminEventLog = {
-			recordInTransaction: jest.fn().mockResolvedValue({})
-		} as unknown as AdminEventLogService;
+		const identityRetry = jest.fn().mockResolvedValue(result);
 		const service = new MessagingAdminService(
 			prisma,
 			{} as RabbitMqManagementService,
-			adminEventLog,
+			{} as AdminEventLogService,
 			notificationDelivery,
-			widgetsFailures
+			widgetsFailures,
+			undefined,
+			undefined,
+			{
+				retryFailure: identityRetry
+			} as unknown as IdentityMessagingClientService
 		);
 
-		const result = await service.retryFailure(failure.id, 'admin-1');
-
-		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
-			data: expect.objectContaining({
-				messageId: failure.eventId,
-				eventType: 'notification.telegram.destination-unavailable.v1',
-				routingKey: 'manual.telegram-destination-unavailable',
-				headers: expect.objectContaining({
-					'x-retry-attempt': 0,
-					'x-delivery-token': expect.any(String),
-					'x-correlation-id': failure.eventId,
-					'x-request-id': failure.eventId,
-					'x-causation-id': failure.eventId
-				}),
-				payload: failure.payload
-			})
-		});
-		expect(result).toEqual(
-			expect.objectContaining({
-				id: failure.id,
-				eventId: failure.eventId,
-				integration: 'telegram-destination-unavailable',
-				retryingAt: expect.any(String)
-			})
-		);
-		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
-			transaction,
-			expect.objectContaining({
-				action: 'MESSAGING_FAILURE_RETRY',
-				entityId: failure.id,
-				adminId: 'admin-1'
-			})
-		);
+		await expect(
+			service.retryFailure(result.id, 'admin-1')
+		).resolves.toEqual(result);
+		expect(identityRetry).toHaveBeenCalledWith(result.id, 'admin-1');
+		expect(transaction).not.toHaveBeenCalled();
 	});
 
 	it('queues a Reporting audit retry through the same transaction as its receipt claim', async () => {
@@ -428,7 +377,7 @@ describe('MessagingAdminService', () => {
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'telegram-destination-unavailable',
+			integration: 'reporting-admin-audit',
 			payload: {
 				schemaVersion: 1,
 				eventType: 'payment.succeeded.v1',
@@ -481,7 +430,8 @@ describe('MessagingAdminService', () => {
 		'CAMPAIGNS_DATABASE_BACKUP',
 		'REPORTING_DATABASE_BACKUP',
 		'WIDGETS_DATABASE_BACKUP',
-		'BILLING_DATABASE_BACKUP'
+		'BILLING_DATABASE_BACKUP',
+		'IDENTITY_DATABASE_BACKUP'
 	])(
 		'reopens a failed %s job in the same transaction as manual retry Outbox',
 		async jobType => {
@@ -967,7 +917,21 @@ describe('MessagingAdminService', () => {
 		expect(coreFindMany).toHaveBeenCalledWith(
 			expect.objectContaining({
 				where: {
-					integration: { in: [...CORE_OWNED_MESSAGING_KINDS] }
+					OR: [
+						{
+							integration: { in: [...CORE_OWNED_MESSAGING_KINDS] }
+						},
+						{
+							AND: [
+								{
+									integration: {
+										in: ['telegram-destination-unavailable']
+									}
+								},
+								{ resolvedAt: { not: null } }
+							]
+						}
+					]
 				},
 				take: 4
 			})

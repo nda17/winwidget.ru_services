@@ -104,6 +104,10 @@ async function bootstrap(): Promise<void> {
 			{
 				path: 'internal/v1/widgets/admin-owner-overview',
 				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/identity/widgets/admin-owner-overview',
+				method: RequestMethod.POST
 			}
 		]
 	});

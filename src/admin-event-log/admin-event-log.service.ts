@@ -1,7 +1,8 @@
+import { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
 import { PrismaService } from '@/prisma.service';
 import { getClientIp } from '@/utils/ip.util';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { AuthIdentityType, Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { Request } from 'express';
 
 export type AdminEventLogSection =
@@ -142,6 +143,8 @@ const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
 
 export interface AdminEventLogRecordInput {
 	adminId?: string | null;
+	adminName?: string | null;
+	adminEmail?: string | null;
 	section: AdminEventLogSection;
 	action: AdminEventLogAction;
 	description: string;
@@ -149,6 +152,8 @@ export interface AdminEventLogRecordInput {
 	entityId?: string | null;
 	entityLabel?: string | null;
 	targetUserId?: string | null;
+	targetUserName?: string | null;
+	targetUserEmail?: string | null;
 	metadata?: Prisma.InputJsonValue;
 	request?: Request;
 	ip?: string | null;
@@ -173,7 +178,10 @@ interface UserSnapshot {
 export class AdminEventLogService {
 	private readonly logger = new Logger(AdminEventLogService.name);
 
-	constructor(private readonly prisma: PrismaService) {}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly identity: IdentityInternalClient
+	) {}
 
 	async getAll(page = 1, limit = 20, filters: AdminEventLogFilters = {}) {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
@@ -198,6 +206,34 @@ export class AdminEventLogService {
 			page: normalizedPage,
 			limit: normalizedLimit,
 			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
+		};
+	}
+
+	async getUserActivity(userId: string) {
+		const latest = await this.prisma.adminEventLog.findMany({
+			where: {
+				OR: [{ targetUserId: userId }, { adminId: userId }]
+			},
+			orderBy: { createdAt: 'desc' },
+			take: 5,
+			select: {
+				id: true,
+				section: true,
+				action: true,
+				description: true,
+				entityType: true,
+				entityLabel: true,
+				adminName: true,
+				adminEmail: true,
+				targetUserId: true,
+				createdAt: true
+			}
+		});
+		return {
+			latest: latest.map(item => ({
+				...item,
+				role: item.targetUserId === userId ? 'TARGET' : 'ADMIN'
+			}))
 		};
 	}
 
@@ -356,10 +392,8 @@ export class AdminEventLogService {
 		input: AdminEventLogRecordInput,
 		recordId?: string
 	) {
-		const [adminSnapshot, targetUserSnapshot] = await Promise.all([
-			this.getUserSnapshot(input.adminId, client),
-			this.getUserSnapshot(input.targetUserId, client)
-		]);
+		const [adminSnapshot, targetUserSnapshot] =
+			await this.resolveUserSnapshots(input);
 		const requestSnapshot = input.request
 			? this.getRequestSnapshot(input.request)
 			: {
@@ -370,20 +404,18 @@ export class AdminEventLogService {
 		return client.adminEventLog.create({
 			data: {
 				...(recordId ? { id: recordId } : {}),
-				adminId: adminSnapshot ? input.adminId || null : null,
-				adminName: adminSnapshot?.name ?? null,
-				adminEmail: adminSnapshot?.email ?? null,
+				adminId: input.adminId || null,
+				adminName: adminSnapshot.name,
+				adminEmail: adminSnapshot.email,
 				section: input.section,
 				action: input.action,
 				description: input.description.trim(),
 				entityType: input.entityType || null,
 				entityId: input.entityId || null,
 				entityLabel: input.entityLabel || null,
-				targetUserId: targetUserSnapshot
-					? input.targetUserId || null
-					: null,
-				targetUserName: targetUserSnapshot?.name ?? null,
-				targetUserEmail: targetUserSnapshot?.email ?? null,
+				targetUserId: input.targetUserId || null,
+				targetUserName: targetUserSnapshot.name,
+				targetUserEmail: targetUserSnapshot.email,
 				metadata: input.metadata ?? {},
 				ip: requestSnapshot.ip,
 				userAgent: requestSnapshot.userAgent
@@ -391,34 +423,62 @@ export class AdminEventLogService {
 		});
 	}
 
-	private async getUserSnapshot(
-		userId?: string | null,
-		client: Prisma.TransactionClient | PrismaService = this.prisma
-	): Promise<UserSnapshot | null> {
-		if (!userId) {
-			return null;
-		}
-
-		const user = await client.user.findUnique({
-			where: { id: userId },
-			select: {
-				name: true,
-				authIdentities: {
-					where: { type: AuthIdentityType.EMAIL },
-					select: { value: true },
-					take: 1
-				}
+	private async resolveUserSnapshots(
+		input: AdminEventLogRecordInput
+	): Promise<[UserSnapshot, UserSnapshot]> {
+		const requestedIds = [
+			input.adminName === undefined && input.adminEmail === undefined
+				? input.adminId
+				: undefined,
+			input.targetUserName === undefined &&
+			input.targetUserEmail === undefined
+				? input.targetUserId
+				: undefined
+		].filter((value): value is string => Boolean(value));
+		const uniqueIds = [...new Set(requestedIds)];
+		let snapshots = new Map<string, UserSnapshot>();
+		if (uniqueIds.length) {
+			try {
+				snapshots = await this.identity.getAuditSnapshots(uniqueIds);
+			} catch (error) {
+				this.logger.warn(
+					`Identity audit snapshot lookup failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`
+				);
 			}
-		});
-
-		if (!user) {
-			return null;
 		}
+		return [
+			this.resolveUserSnapshot(
+				input.adminId,
+				input.adminName,
+				input.adminEmail,
+				snapshots
+			),
+			this.resolveUserSnapshot(
+				input.targetUserId,
+				input.targetUserName,
+				input.targetUserEmail,
+				snapshots
+			)
+		];
+	}
 
-		return {
-			name: user.name,
-			email: user.authIdentities[0]?.value ?? null
-		};
+	private resolveUserSnapshot(
+		userId: string | null | undefined,
+		providedName: string | null | undefined,
+		providedEmail: string | null | undefined,
+		snapshots: Map<string, UserSnapshot>
+	): UserSnapshot {
+		if (providedName !== undefined || providedEmail !== undefined) {
+			return {
+				name: providedName ?? null,
+				email: providedEmail ?? null
+			};
+		}
+		return (
+			(userId && snapshots.get(userId)) || { name: null, email: null }
+		);
 	}
 
 	private getRequestSnapshot(request?: Request) {

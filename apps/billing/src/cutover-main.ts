@@ -27,6 +27,7 @@ import {
 	type AggregateContinuityRow,
 	type FrozenBillingSnapshot
 } from './cutover/frozen-snapshot';
+import { billingCommandRequestHash } from './domain/billing-command-idempotency';
 
 type Action =
 	| 'status'
@@ -765,19 +766,24 @@ async function seedCoreReadEvents(
 				settingsState
 			);
 			for (const eventType of REQUIRED_SEED_EVENT_TYPES) {
+				const commandId = seedCompletionId(
+					marker.sourceFingerprint,
+					eventType
+				);
 				await transaction.billingCommandReceipt.upsert({
-					where: {
-						commandId: seedCompletionId(
-							marker.sourceFingerprint,
-							eventType
-						)
-					},
+					where: { commandId },
 					create: {
-						commandId: seedCompletionId(
-							marker.sourceFingerprint,
-							eventType
-						),
+						commandId,
 						commandType: 'CUTOVER_SEED_COMPLETE',
+						requestHash: billingCommandRequestHash(
+							'CUTOVER_SEED_COMPLETE',
+							{
+								commandId,
+								sourceFingerprint: marker.sourceFingerprint,
+								eventType
+							}
+						),
+						requestHashVersion: 1,
 						result: {
 							eventType,
 							sourceRows: enqueued[eventType].sourceRows,

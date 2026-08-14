@@ -3,9 +3,7 @@ import { Test } from '@nestjs/testing';
 import { Request, Response } from 'express';
 import { IncomingMessage, ServerResponse } from 'node:http';
 import { Duplex } from 'node:stream';
-import { ReportingAuthIntrospectionService } from './reporting-auth-introspection.service';
 import {
-	REPORTING_AUTH_INTROSPECTION_PATH,
 	REPORTING_PROJECTION_SNAPSHOT_PATH,
 	REPORTING_SCHEDULE_POLICY_CONFIRM_PATH,
 	REPORTING_SCHEDULE_POLICY_PATH
@@ -52,9 +50,6 @@ const injectGet = async (app: INestApplication, path: string) => {
 
 describe('ReportingInternalController', () => {
 	it('uses the versioned global-prefix paths and propagates correlation', async () => {
-		expect(REPORTING_AUTH_INTROSPECTION_PATH).toBe(
-			'internal/reporting/auth/introspect'
-		);
 		expect(REPORTING_PROJECTION_SNAPSHOT_PATH).toBe(
 			'internal/reporting/snapshot'
 		);
@@ -65,14 +60,12 @@ describe('ReportingInternalController', () => {
 			'internal/reporting/schedule-policy/confirm'
 		);
 
-		const introspect = jest.fn().mockResolvedValue({ active: true });
 		const retired = jest.fn(() => {
 			throw new GoneException('retired');
 		});
 		const reserve = jest.fn().mockResolvedValue({ generation: '2' });
 		const confirm = jest.fn().mockResolvedValue({ generation: '2' });
 		const controller = new ReportingInternalController(
-			{ introspect } as unknown as ReportingAuthIntrospectionService,
 			{ retired } as unknown as ReportingProjectionSnapshotService,
 			{
 				reserve,
@@ -91,7 +84,6 @@ describe('ReportingInternalController', () => {
 			headersSent: false
 		} as unknown as Response;
 
-		await controller.introspect('Bearer token', request, response);
 		expect(() => controller.snapshot(request, response)).toThrow(
 			GoneException
 		);
@@ -141,10 +133,6 @@ describe('ReportingInternalController', () => {
 		const moduleRef = await Test.createTestingModule({
 			controllers: [ReportingInternalController],
 			providers: [
-				{
-					provide: ReportingAuthIntrospectionService,
-					useValue: { introspect: jest.fn() }
-				},
 				ReportingProjectionSnapshotService,
 				{
 					provide: ReportingSchedulePolicyService,

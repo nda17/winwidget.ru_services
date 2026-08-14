@@ -6,11 +6,13 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { WidgetsRuntimeService } from '../runtime/widgets-runtime.service';
 
-const DEFAULT_INTERNAL_BASE_URL = 'http://127.0.0.1:4200';
+const DEFAULT_IDENTITY_BASE_URL = 'http://127.0.0.1:4900';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const PLACEHOLDER_INTERNAL_TOKENS = new Set([
 	'change_me',
 	'XYZXYZXYZ',
+	'identity_widgets_token',
+	'ci_identity_widgets_token_at_least_32_chars',
 	'widgets_internal_token',
 	'ci_widgets_internal_token_at_least_32_chars'
 ]);
@@ -30,7 +32,7 @@ export interface WidgetsOwnerDirectoryItem {
 	rights: Array<'ADMIN' | 'DEV' | 'USER'>;
 	email: string | null;
 	phone: string | null;
-	subscription: {
+	subscription?: {
 		id: string;
 		plan: 'TRIAL' | 'EASY' | 'HARD';
 		billingPeriod: 'MONTHLY' | 'YEARLY' | null;
@@ -50,27 +52,28 @@ export interface WidgetsOwnerSearchResult {
 
 @Injectable()
 export class CoreInternalClient {
-	private readonly baseUrl: string;
-	private readonly token: string;
+	private readonly identityBaseUrl: string;
+	private readonly identityToken: string;
 	private readonly timeoutMs: number;
 
 	constructor(config: ConfigService, runtime: WidgetsRuntimeService) {
-		this.baseUrl = this.parseBaseUrl(
-			config.get<string>('WIDGETS_CORE_INTERNAL_BASE_URL')
+		this.identityBaseUrl = this.parseBaseUrl(
+			config.get<string>('IDENTITY_INTERNAL_BASE_URL'),
+			'IDENTITY_INTERNAL_BASE_URL'
 		);
-		this.token =
-			config.get<string>('WIDGETS_INTERNAL_TOKEN')?.trim() || '';
+		this.identityToken =
+			config.get<string>('IDENTITY_WIDGETS_TOKEN')?.trim() || '';
 		if (
 			runtime.apiEnabled &&
-			(this.token.length < 32 ||
-				PLACEHOLDER_INTERNAL_TOKENS.has(this.token))
+			(this.identityToken.length < 32 ||
+				PLACEHOLDER_INTERNAL_TOKENS.has(this.identityToken))
 		) {
 			throw new Error(
-				'WIDGETS_INTERNAL_TOKEN must be a non-placeholder secret with at least 32 characters'
+				'IDENTITY_WIDGETS_TOKEN must be a non-placeholder secret with at least 32 characters'
 			);
 		}
 		const configuredTimeout = Number(
-			config.get<string>('WIDGETS_INTERNAL_TIMEOUT_MS') ||
+			config.get<string>('IDENTITY_INTERNAL_TIMEOUT_MS') ||
 				DEFAULT_TIMEOUT_MS
 		);
 		if (
@@ -79,7 +82,7 @@ export class CoreInternalClient {
 			configuredTimeout > 60_000
 		) {
 			throw new Error(
-				'WIDGETS_INTERNAL_TIMEOUT_MS must be an integer between 500 and 60000'
+				'IDENTITY_INTERNAL_TIMEOUT_MS must be an integer between 500 and 60000'
 			);
 		}
 		this.timeoutMs = configuredTimeout;
@@ -91,12 +94,13 @@ export class CoreInternalClient {
 		let response: Response;
 		try {
 			response = await fetch(
-				`${this.baseUrl}/internal/v1/widgets/auth/introspect`,
+				`${this.identityBaseUrl}/internal/v1/auth/introspect`,
 				{
 					method: 'POST',
 					headers: {
 						authorization,
-						'x-winwidget-internal-token': this.token,
+						'x-winwidget-service': 'widgets',
+						'x-winwidget-internal-token': this.identityToken,
 						accept: 'application/json'
 					},
 					signal: AbortSignal.timeout(this.timeoutMs)
@@ -108,8 +112,13 @@ export class CoreInternalClient {
 			);
 		}
 
-		if (response.status === 401 || response.status === 403) {
+		if (response.status === 401) {
 			throw new UnauthorizedException('Authentication is no longer valid');
+		}
+		if (response.status === 403) {
+			throw new ServiceUnavailableException(
+				'Authorization service rejected its Widgets credential'
+			);
 		}
 		if (!response.ok) {
 			throw new ServiceUnavailableException(
@@ -147,13 +156,14 @@ export class CoreInternalClient {
 		let response: Response;
 		try {
 			response = await fetch(
-				`${this.baseUrl}/internal/v1/widgets/owners/resolve`,
+				`${this.identityBaseUrl}/internal/v1/widgets/owners/resolve`,
 				{
 					method: 'POST',
 					headers: {
 						'content-type': 'application/json',
 						accept: 'application/json',
-						'x-winwidget-internal-token': this.token
+						'x-winwidget-service': 'widgets',
+						'x-winwidget-internal-token': this.identityToken
 					},
 					body: JSON.stringify({ userIds }),
 					signal: AbortSignal.timeout(this.timeoutMs)
@@ -219,13 +229,14 @@ export class CoreInternalClient {
 		let response: Response;
 		try {
 			response = await fetch(
-				`${this.baseUrl}/internal/v1/widgets/owners/search`,
+				`${this.identityBaseUrl}/internal/v1/widgets/owners/search`,
 				{
 					method: 'POST',
 					headers: {
 						'content-type': 'application/json',
 						accept: 'application/json',
-						'x-winwidget-internal-token': this.token
+						'x-winwidget-service': 'widgets',
+						'x-winwidget-internal-token': this.identityToken
 					},
 					body: JSON.stringify({
 						...(search && { search }),
@@ -293,24 +304,20 @@ export class CoreInternalClient {
 		};
 	}
 
-	private parseBaseUrl(value: string | undefined): string {
-		const configured = value?.trim() || DEFAULT_INTERNAL_BASE_URL;
+	private parseBaseUrl(value: string | undefined, name: string): string {
+		const configured = value?.trim() || DEFAULT_IDENTITY_BASE_URL;
 		let url: URL;
 		try {
 			url = new URL(configured);
 		} catch {
-			throw new Error(
-				'WIDGETS_CORE_INTERNAL_BASE_URL must be a valid URL'
-			);
+			throw new Error(`${name} must be a valid URL`);
 		}
 		if (url.protocol !== 'http:') {
-			throw new Error(
-				'WIDGETS_CORE_INTERNAL_BASE_URL must use http on the private network'
-			);
+			throw new Error(`${name} must use http on the private network`);
 		}
 		if (url.username || url.password || url.search || url.hash) {
 			throw new Error(
-				'WIDGETS_CORE_INTERNAL_BASE_URL must not contain credentials, query, or fragment'
+				`${name} must not contain credentials, query, or fragment`
 			);
 		}
 		if (
@@ -318,14 +325,10 @@ export class CoreInternalClient {
 				url.hostname.toLowerCase()
 			)
 		) {
-			throw new Error(
-				'WIDGETS_CORE_INTERNAL_BASE_URL must use a loopback host'
-			);
+			throw new Error(`${name} must use a loopback host`);
 		}
 		if (url.pathname !== '/') {
-			throw new Error(
-				'WIDGETS_CORE_INTERNAL_BASE_URL must be an origin without a path'
-			);
+			throw new Error(`${name} must be an origin without a path`);
 		}
 		return url.toString().replace(/\/$/, '');
 	}
@@ -387,13 +390,8 @@ export class CoreInternalClient {
 			!Array.isArray(item.rights)
 		)
 			return false;
-		return (
-			item.subscription === null ||
-			Boolean(
-				item.subscription &&
-				typeof item.subscription === 'object' &&
-				!Array.isArray(item.subscription)
-			)
+		return item.rights.every(role =>
+			['ADMIN', 'DEV', 'USER'].includes(String(role))
 		);
 	}
 }

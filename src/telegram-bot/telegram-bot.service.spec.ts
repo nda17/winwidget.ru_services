@@ -20,7 +20,7 @@ const createSettingsPrisma = (
 	dailySummaryOwner: 'CORE' | 'REPORTING',
 	dailySummaryPolicyReservationTime = dailySummaryOwner === 'CORE'
 		? '01:50'
-		: '03:15',
+		: '03:30',
 	dailySummaryPolicyPendingTime: string | null = null
 ) => {
 	const upsert = jest
@@ -82,7 +82,6 @@ describe('TelegramBotService webhook URLs', () => {
 
 		expect(service.getWebhookHealth().expectedWebhooks).toEqual({
 			info: 'https://hooks.example.test/api/v1/telegram-bot/webhook',
-			auth: 'https://hooks.example.test/api/v1/telegram-auth/webhook',
 			support:
 				'https://hooks.example.test/api/v1/telegram-bot/support-webhook'
 		});
@@ -95,9 +94,10 @@ describe('TelegramBotService webhook URLs', () => {
 		expect((service as any).addMinutesToTime('23:55', 45)).toBe('00:40');
 		expect((service as any).addMinutesToTime('23:55', 60)).toBe('00:55');
 		expect((service as any).addMinutesToTime('23:55', 75)).toBe('01:10');
+		expect((service as any).addMinutesToTime('23:55', 90)).toBe('01:25');
 	});
 
-	it('exposes the delayed Widgets backup schedule in settings', () => {
+	it('exposes all delayed service backup schedules in settings', () => {
 		const service = new TelegramBotService({} as PrismaService);
 
 		expect(
@@ -108,7 +108,10 @@ describe('TelegramBotService webhook URLs', () => {
 			widgetsDatabaseBackupTimeLabel: '02:45 МСК',
 			billingDatabaseBackupDelayMinutes: 75,
 			billingDatabaseBackupTime: '03:00',
-			billingDatabaseBackupTimeLabel: '03:00 МСК'
+			billingDatabaseBackupTimeLabel: '03:00 МСК',
+			identityDatabaseBackupDelayMinutes: 90,
+			identityDatabaseBackupTime: '03:15',
+			identityDatabaseBackupTimeLabel: '03:15 МСК'
 		});
 	});
 

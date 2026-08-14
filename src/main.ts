@@ -65,24 +65,8 @@ export const bootstrap = async () => {
 	app.setGlobalPrefix(API_PREFIX, {
 		exclude: [
 			{
-				path: 'internal/v1/auth/introspect',
-				method: RequestMethod.POST
-			},
-			{
-				path: 'internal/v1/campaigns/audience-export',
-				method: RequestMethod.POST
-			},
-			{
-				path: 'internal/v1/widgets/auth/introspect',
-				method: RequestMethod.POST
-			},
-			{
-				path: 'internal/v1/widgets/owners/resolve',
-				method: RequestMethod.POST
-			},
-			{
-				path: 'internal/v1/widgets/owners/search',
-				method: RequestMethod.POST
+				path: 'internal/v1/identity/users/:userId/admin-events/overview',
+				method: RequestMethod.GET
 			}
 		]
 	});

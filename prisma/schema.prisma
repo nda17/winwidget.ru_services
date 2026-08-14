@@ -19,9 +19,6 @@ model User {
   authIdentities               AuthIdentity[]
   telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
-  adminEventLogActions         AdminEventLog[]              @relation("AdminEventLogAdmin")
-  adminEventLogTargets         AdminEventLog[]              @relation("AdminEventLogTargetUser")
-  resolvedIntegrationFailures  IntegrationDeliveryFailure[] @relation("IntegrationFailureResolver")
   sessions                     UserSession[]
   createdAt                    DateTime                     @default(now()) @map("created_at")
   updatedAt                    DateTime                     @updatedAt @map("updated_at")
@@ -101,8 +98,6 @@ model AdminEventLog {
   metadata        Json     @default("{}")
   ip              String?
   userAgent       String?  @map("user_agent")
-  admin           User?    @relation("AdminEventLogAdmin", fields: [adminId], references: [id], onDelete: SetNull)
-  targetUser      User?    @relation("AdminEventLogTargetUser", fields: [targetUserId], references: [id], onDelete: SetNull)
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@index([adminId])
@@ -173,6 +168,17 @@ model BillingCoreState {
   updatedAt                 DateTime             @updatedAt @map("updated_at")
 
   @@map("billing_core_state")
+}
+
+model IdentityCoreSourceState {
+  id             String   @id @default("singleton")
+  ownership      String   @default("OPEN")
+  generation     BigInt   @default(0)
+  fencedRevision String?  @map("fenced_revision")
+  fencedAt       DateTime? @map("fenced_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("identity_core_source_state")
 }
 
 model BillingSourceAggregateVersion {
@@ -390,7 +396,6 @@ model IntegrationDeliveryFailure {
   resolution            IntegrationFailureResolution?
   resolutionComment     String?                       @map("resolution_comment") @db.Text
   resolvedById          String?                       @map("resolved_by_id")
-  resolvedBy            User?                         @relation("IntegrationFailureResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
   createdAt             DateTime                      @default(now()) @map("created_at")
   updatedAt             DateTime                      @updatedAt @map("updated_at")
 

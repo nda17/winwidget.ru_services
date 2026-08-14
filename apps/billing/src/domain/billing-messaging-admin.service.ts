@@ -30,6 +30,11 @@ import {
 	parseBillingPort
 } from '../runtime/billing-runtime.service';
 import { enqueueBillingAdminAudit } from './billing-admin-audit';
+import {
+	assertBillingCommandReceipt,
+	billingCommandRequestHash,
+	lockBillingCommand
+} from './billing-command-idempotency';
 
 type BillingRoleReadiness = {
 	service:
@@ -331,13 +336,30 @@ export class BillingMessagingAdminService {
 	}
 
 	async retry(id: string, dto: BillingFailureCommandDto) {
+		const requestHash = billingCommandRequestHash(
+			'BILLING_FAILURE_RETRY',
+			{
+				schemaVersion: dto.schemaVersion,
+				commandId: dto.commandId,
+				failureId: id,
+				actorId: dto.actorId,
+				actorRole: dto.actorRole,
+				occurredAt: new Date(dto.occurredAt).toISOString()
+			}
+		);
 		return this.prisma.$transaction(
 			async transaction => {
+				await lockBillingCommand(transaction, dto.commandId);
 				const prior = await transaction.billingCommandReceipt.findUnique({
 					where: { commandId: dto.commandId }
 				});
 				if (prior)
-					return this.priorResult(prior, 'BILLING_FAILURE_RETRY', id);
+					return this.priorResult(
+						prior,
+						'BILLING_FAILURE_RETRY',
+						id,
+						requestHash
+					);
 				await transaction.$queryRaw(Prisma.sql`
 				SELECT "id" FROM "billing"."integration_delivery_failures"
 				WHERE "id" = ${id}::uuid FOR UPDATE
@@ -463,6 +485,8 @@ export class BillingMessagingAdminService {
 					data: {
 						commandId: dto.commandId,
 						commandType: 'BILLING_FAILURE_RETRY',
+						requestHash,
+						requestHashVersion: 1,
 						result: result as Prisma.InputJsonValue
 					}
 				});
@@ -473,13 +497,32 @@ export class BillingMessagingAdminService {
 	}
 
 	async close(id: string, dto: BillingFailureCloseCommandDto) {
+		const comment = dto.comment.trim();
+		const requestHash = billingCommandRequestHash(
+			'BILLING_FAILURE_CLOSE',
+			{
+				schemaVersion: dto.schemaVersion,
+				commandId: dto.commandId,
+				failureId: id,
+				actorId: dto.actorId,
+				actorRole: dto.actorRole,
+				occurredAt: new Date(dto.occurredAt).toISOString(),
+				comment
+			}
+		);
 		return this.prisma.$transaction(
 			async transaction => {
+				await lockBillingCommand(transaction, dto.commandId);
 				const prior = await transaction.billingCommandReceipt.findUnique({
 					where: { commandId: dto.commandId }
 				});
 				if (prior)
-					return this.priorResult(prior, 'BILLING_FAILURE_CLOSE', id);
+					return this.priorResult(
+						prior,
+						'BILLING_FAILURE_CLOSE',
+						id,
+						requestHash
+					);
 				await transaction.$queryRaw(Prisma.sql`
 				SELECT "id" FROM "billing"."integration_delivery_failures"
 				WHERE "id" = ${id}::uuid FOR UPDATE
@@ -498,7 +541,6 @@ export class BillingMessagingAdminService {
 					);
 				}
 				const resolvedAt = new Date(dto.occurredAt);
-				const comment = dto.comment.trim();
 				const receipt =
 					await transaction.integrationDeliveryReceipt.findUnique({
 						where: {
@@ -568,6 +610,8 @@ export class BillingMessagingAdminService {
 					data: {
 						commandId: dto.commandId,
 						commandType: 'BILLING_FAILURE_CLOSE',
+						requestHash,
+						requestHashVersion: 1,
 						result: result as Prisma.InputJsonValue
 					}
 				});
@@ -677,15 +721,21 @@ export class BillingMessagingAdminService {
 	}
 
 	private priorResult(
-		receipt: { commandType: string; result: Prisma.JsonValue },
+		receipt: {
+			commandType: string;
+			requestHash: string;
+			requestHashVersion: number;
+			result: Prisma.JsonValue;
+		},
 		commandType: string,
-		failureId: string
+		failureId: string,
+		requestHash: string
 	): Record<string, unknown> {
-		if (receipt.commandType !== commandType)
-			throw new ConflictException(
-				'Command ID was used for another command type'
-			);
-		const result = receipt.result;
+		const result = assertBillingCommandReceipt(
+			receipt,
+			commandType,
+			requestHash
+		);
 		if (
 			!result ||
 			typeof result !== 'object' ||

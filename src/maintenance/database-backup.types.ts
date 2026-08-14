@@ -6,7 +6,8 @@ export const DATABASE_BACKUP_TARGETS = {
 	CAMPAIGNS: 'campaigns',
 	REPORTING: 'reporting',
 	WIDGETS: 'widgets',
-	BILLING: 'billing'
+	BILLING: 'billing',
+	IDENTITY: 'identity'
 } as const;
 
 export type DatabaseBackupTarget =
@@ -17,6 +18,7 @@ export const CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES = 30;
 export const REPORTING_DATABASE_BACKUP_DELAY_MINUTES = 45;
 export const WIDGETS_DATABASE_BACKUP_DELAY_MINUTES = 60;
 export const BILLING_DATABASE_BACKUP_DELAY_MINUTES = 75;
+export const IDENTITY_DATABASE_BACKUP_DELAY_MINUTES = 90;
 
 export interface DatabaseBackupInput {
 	chatId: string;

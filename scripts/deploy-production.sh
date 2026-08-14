@@ -113,7 +113,7 @@ NODE
 
 gateway_route_manifest_policy_validator_source() {
 	cat <<'NODE'
-function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy) {
+function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, identityPolicy) {
   const routes = config?.routes;
   if (!Array.isArray(routes)) throw new Error('Gateway routes are unavailable');
 
@@ -153,6 +153,12 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy) {
     ['billing-tariff-prices', '/api/v1/tariff-prices'],
     ['billing-affiliate', '/api/v1/affiliate'],
   ];
+  const identityRoutes = [
+    ['identity-auth', '/api/v1/auth'],
+    ['identity-users', '/api/v1/users'],
+    ['identity-telegram-auth', '/api/v1/telegram-auth'],
+    ['identity-info-webhook', '/api/v1/telegram-bot/webhook'],
+  ];
   const widgetsInvalid = widgetRoutes.some(([id, pathPrefix, authPolicy]) =>
     !routeMatches(
       routes.find(route => route.id === id),
@@ -184,6 +190,25 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy) {
           billingPrefixes.has(route.pathPrefix) ||
           route.upstreamUrl?.origin === 'http://127.0.0.1:4800')
       : true;
+  const identityPrefixes = new Set(identityRoutes.map(([, pathPrefix]) => pathPrefix));
+  const identityIds = new Set(identityRoutes.map(([id]) => id));
+  const identityInvalid = identityPolicy === 'identity'
+    ? identityRoutes.some(([id, pathPrefix]) => !routeMatches(
+        routes.find(route => route.id === id),
+        id,
+        pathPrefix,
+        'http://127.0.0.1:4900',
+        'optional',
+        60000,
+      )) || routes.filter(
+        route => route.upstreamUrl?.origin === 'http://127.0.0.1:4900',
+      ).length !== identityRoutes.length
+    : identityPolicy === 'legacy'
+      ? routes.some(route =>
+          identityIds.has(route.id) ||
+          identityPrefixes.has(route.pathPrefix) ||
+          route.upstreamUrl?.origin === 'http://127.0.0.1:4900')
+      : true;
   const commonInvalid =
     !routeMatches(
       databaseRestores,
@@ -211,7 +236,8 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy) {
     );
   const expectedRouteCount = 3 + widgetRoutes.length +
     (reportingPolicy === 'reporting' ? 1 : 0) +
-    (billingPolicy === 'billing' ? billingRoutes.length : 0);
+    (billingPolicy === 'billing' ? billingRoutes.length : 0) +
+    (identityPolicy === 'identity' ? identityRoutes.length : 0);
   const darkInvalid = reportingPolicy === 'dark' &&
     (reporting || routes.some(route =>
       route.pathPrefix === '/api/v1/admin/reporting' ||
@@ -227,15 +253,17 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy) {
   if (
     !['dark', 'reporting'].includes(reportingPolicy) ||
     !['legacy', 'billing'].includes(billingPolicy) ||
+    !['legacy', 'identity'].includes(identityPolicy) ||
     routes.length !== expectedRouteCount ||
     commonInvalid ||
     widgetsInvalid ||
     billingInvalid ||
+    identityInvalid ||
     darkInvalid ||
     reportingInvalid
   ) {
     throw new Error(
-      `Gateway route manifest conflicts with Reporting policy ${reportingPolicy} and Billing policy ${billingPolicy}`,
+      `Gateway route manifest conflicts with Reporting policy ${reportingPolicy}, Billing policy ${billingPolicy}, and Identity policy ${identityPolicy}`,
     );
   }
 }
@@ -302,10 +330,17 @@ const billing = [
   ['billing-affiliate', '/api/v1/affiliate'],
 ].map(([id, pathPrefix]) =>
   route(id, pathPrefix, 'http://127.0.0.1:4800', 'optional', 30000));
-const accepts = (routes, reportingPolicy, billingPolicy) =>
-  validateGatewayRouteManifest({ routes }, reportingPolicy, billingPolicy);
-const rejects = (routes, reportingPolicy, billingPolicy) => assert.throws(
-  () => accepts(routes, reportingPolicy, billingPolicy),
+const identity = [
+  ['identity-auth', '/api/v1/auth'],
+  ['identity-users', '/api/v1/users'],
+  ['identity-telegram-auth', '/api/v1/telegram-auth'],
+  ['identity-info-webhook', '/api/v1/telegram-bot/webhook'],
+].map(([id, pathPrefix]) =>
+  route(id, pathPrefix, 'http://127.0.0.1:4900', 'optional', 60000));
+const accepts = (routes, reportingPolicy, billingPolicy, identityPolicy = 'legacy') =>
+  validateGatewayRouteManifest({ routes }, reportingPolicy, billingPolicy, identityPolicy);
+const rejects = (routes, reportingPolicy, billingPolicy, identityPolicy = 'legacy') => assert.throws(
+  () => accepts(routes, reportingPolicy, billingPolicy, identityPolicy),
   /Gateway route manifest conflicts/,
 );
 
@@ -313,6 +348,13 @@ accepts([...common, ...widgets], 'dark', 'legacy');
 accepts([...common, ...widgets, reporting], 'reporting', 'legacy');
 accepts([...common, ...widgets, ...billing], 'dark', 'billing');
 accepts([...common, ...widgets, reporting, ...billing], 'reporting', 'billing');
+accepts([...common, ...widgets, ...identity], 'dark', 'legacy', 'identity');
+accepts(
+  [...common, ...widgets, reporting, ...billing, ...identity],
+  'reporting',
+  'billing',
+  'identity',
+);
 accepts(
   [...billing, common[0], common[1], reporting, ...widgets, common[2]],
   'reporting',
@@ -353,6 +395,15 @@ rejects(
 );
 rejects([...common, ...widgets, reporting], 'unsafe', 'legacy');
 rejects([...common, ...widgets, reporting], 'reporting', 'unsafe');
+rejects([...common, ...widgets, ...identity], 'dark', 'legacy', 'legacy');
+rejects([...common, ...widgets, ...identity.slice(0, 3)], 'dark', 'legacy', 'identity');
+rejects(
+  [...common, ...widgets, ...identity.slice(0, 3), { ...identity[3], authPolicy: 'required' }],
+  'dark',
+  'legacy',
+  'identity',
+);
+rejects([...common, ...widgets], 'dark', 'legacy', 'unsafe');
 NODE
 	printf 'gateway_route_manifest_policy_self_test=passed\n'
 }
@@ -400,6 +451,9 @@ BILLING_API_READINESS_URL="${BILLING_API_READINESS_URL:-http://127.0.0.1:4800/he
 BILLING_SCHEDULER_READINESS_URL="${BILLING_SCHEDULER_READINESS_URL:-http://127.0.0.1:4801/health/ready}"
 BILLING_WORKER_READINESS_URL="${BILLING_WORKER_READINESS_URL:-http://127.0.0.1:4802/health/ready}"
 BILLING_OUTBOX_READINESS_URL="${BILLING_OUTBOX_READINESS_URL:-http://127.0.0.1:4803/health/ready}"
+IDENTITY_API_READINESS_URL="${IDENTITY_API_READINESS_URL:-http://127.0.0.1:4900/health/ready}"
+IDENTITY_WORKER_READINESS_URL="${IDENTITY_WORKER_READINESS_URL:-http://127.0.0.1:4901/health/ready}"
+IDENTITY_OUTBOX_READINESS_URL="${IDENTITY_OUTBOX_READINESS_URL:-http://127.0.0.1:4902/health/ready}"
 NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
@@ -424,6 +478,8 @@ source "$server_root/scripts/reporting-cutover-lifecycle.sh"
 source "$server_root/scripts/widgets-database-lifecycle.sh"
 # shellcheck source=scripts/billing-database-lifecycle.sh
 source "$server_root/scripts/billing-database-lifecycle.sh"
+# shellcheck source=scripts/identity-database-lifecycle.sh
+source "$server_root/scripts/identity-database-lifecycle.sh"
 # shellcheck source=scripts/campaigns-contract-migration-guard.sh
 source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
@@ -440,6 +496,138 @@ if [[ -n "$dirty_files" ]]; then
 	echo "Backend deployment checkout is not clean:" >&2
 	echo "$dirty_files" >&2
 	exit 1
+fi
+
+identity_automatic_prod_push="${IDENTITY_AUTOMATIC_PROD_PUSH:-${AUTOMATIC_PROD_PUSH:-false}}"
+identity_database_phase="$(identity_database_current_phase)" || {
+	echo 'Identity database lifecycle marker is invalid.' >&2
+	exit 1
+}
+identity_routes_env_state="$(
+	identity_read_env_value "$ENV_FILE" GATEWAY_ROUTES_JSON |
+		IDENTITY_JWKS_URL="$(identity_read_env_value "$ENV_FILE" JWT_JWKS_URL)" \
+			node -e '
+const fs = require("node:fs");
+const routes = JSON.parse(fs.readFileSync(0, "utf8"));
+const required = [
+  ["identity-auth", "/api/v1/auth"],
+  ["identity-users", "/api/v1/users"],
+  ["identity-telegram-auth", "/api/v1/telegram-auth"],
+  ["identity-info-webhook", "/api/v1/telegram-bot/webhook"],
+];
+if (!Array.isArray(routes)) process.exit(1);
+const identity = required.every(([id, pathPrefix]) => routes.some(route =>
+  route?.id === id && route.pathPrefix === pathPrefix &&
+  route.upstreamUrl === "http://127.0.0.1:4900" &&
+  route.authPolicy === "optional" && route.timeoutMs === 60000
+)) && routes.filter(route => route?.upstreamUrl === "http://127.0.0.1:4900").length === 4 &&
+  process.env.IDENTITY_JWKS_URL ===
+    "http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json";
+const legacy = required.every(([, pathPrefix]) =>
+  !routes.some(route => route?.pathPrefix === pathPrefix)) &&
+  !routes.some(route => route?.upstreamUrl === "http://127.0.0.1:4900") &&
+  process.env.IDENTITY_JWKS_URL ===
+    "http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json";
+process.stdout.write(identity ? "identity" : legacy ? "legacy" : "unsafe");
+'
+)" || {
+	echo 'Identity Gateway route/JWKS env contract is invalid.' >&2
+	exit 1
+}
+case "$identity_database_phase:$identity_routes_env_state" in
+absent:legacy | aborted:legacy)
+	if [[ "$identity_automatic_prod_push" == 'true' ]]; then
+		echo "Automatic backend revision $deploy_revision is verified but Identity first rollout is deferred."
+		echo 'Run the manual Identity prepare action before the one-time ownership cutover.'
+		exit 0
+	fi
+	echo 'Manual full deployment is blocked until Identity preparation and cutover complete.' >&2
+	exit 1
+	;;
+complete:identity) ;;
+prepared:legacy | preparing:* | forward-only:* | active:*)
+	echo "Routine deployment is blocked during Identity cutover phase=$identity_database_phase." >&2
+	exit 1
+	;;
+*)
+	echo "Identity lifecycle/routes/JWKS are inconsistent: phase=$identity_database_phase routes=$identity_routes_env_state." >&2
+	exit 1
+	;;
+esac
+identity_runtime_services=(identity-api identity-worker identity-outbox-publisher)
+
+identity_cleanup_migration='20260815000000_remove_legacy_identity_core_source'
+identity_cleanup_directory="$server_root/prisma/migrations/$identity_cleanup_migration"
+identity_cleanup_migration_file="$identity_cleanup_directory/migration.sql"
+identity_cleanup_marker="$APP_ROOT/deploy/backend/.identity-core-cleanup-v1"
+if [[ -e "$identity_cleanup_directory" || -L "$identity_cleanup_directory" ]]; then
+	[[ -d "$identity_cleanup_directory" && ! -L "$identity_cleanup_directory" &&
+		-f "$identity_cleanup_migration_file" && ! -L "$identity_cleanup_migration_file" ]] || {
+		echo 'Identity Core cleanup migration path is unsafe.' >&2
+		exit 1
+	}
+	if [[ ! -e "$identity_cleanup_marker" && ! -L "$identity_cleanup_marker" ]]; then
+		if [[ "$identity_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend revision $deploy_revision is verified but the destructive Identity Core cleanup is deferred."
+			echo 'Use the manual identity-cleanup target after its soak, backup and clean-restore gates pass.'
+			exit 0
+		fi
+		echo 'Routine deployment is blocked for an unstaged Identity Core cleanup revision.' >&2
+		echo 'Use the manual identity-cleanup target; routine migrate must not apply the destructive migration.' >&2
+		exit 1
+	fi
+	APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$deploy_revision" \
+		bash "$server_root/scripts/cleanup-identity-core-source-production.sh" --status >/dev/null || {
+		echo 'Identity Core cleanup marker is invalid.' >&2
+		exit 1
+	}
+	identity_cleanup_state="$(awk -F= '
+	  $1 == "phase" { phase=substr($0, index($0, "=") + 1); phase_count += 1 }
+	  $1 == "cleanup_revision" { revision=substr($0, index($0, "=") + 1); revision_count += 1 }
+	  $1 == "migration_sha256" { migration_sha=substr($0, index($0, "=") + 1); migration_sha_count += 1 }
+	  END {
+	    if (phase_count != 1 || revision_count != 1 || migration_sha_count != 1 ||
+	        phase !~ /^(verified|forward-only|complete)$/ ||
+	        revision !~ /^[0-9a-f]{40}$/ || migration_sha !~ /^[0-9a-f]{64}$/) exit 1
+	    printf "%s|%s|%s", phase, revision, migration_sha
+	  }
+	' "$identity_cleanup_marker")" || {
+		echo 'Identity Core cleanup marker identity is unreadable.' >&2
+		exit 1
+	}
+	identity_cleanup_phase="${identity_cleanup_state%%|*}"
+	identity_cleanup_bound="${identity_cleanup_state#*|}"
+	identity_cleanup_bound="${identity_cleanup_bound%%|*}"
+	identity_cleanup_migration_sha="${identity_cleanup_state##*|}"
+	identity_cleanup_actual_migration_sha="$(
+		sha256sum "$identity_cleanup_migration_file" | awk 'NR == 1 { print $1 }'
+	)"
+	[[ "$identity_cleanup_actual_migration_sha" == "$identity_cleanup_migration_sha" ]] || {
+		echo 'Identity Core cleanup migration differs from its reviewed marker SHA-256.' >&2
+		exit 1
+	}
+	case "$identity_cleanup_phase" in
+	verified | forward-only)
+		if [[ "$identity_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend deployment is deferred while Identity Core cleanup is phase=$identity_cleanup_phase."
+			exit 0
+		fi
+		echo "Routine deployment is blocked while Identity Core cleanup is phase=$identity_cleanup_phase." >&2
+		echo 'Resume the exact manual identity-cleanup workflow.' >&2
+		exit 1
+		;;
+	complete)
+		[[ "$(identity_database_marker_value cleanup_revision)" == "$identity_cleanup_bound" ]] || {
+			echo 'Identity database lifecycle is not bound to the completed cleanup revision.' >&2
+			exit 1
+		}
+		git -C "$server_root" merge-base --is-ancestor \
+			"$identity_cleanup_bound" "$deploy_revision" || {
+			echo 'Routine deployment would downgrade past the completed Identity Core cleanup.' >&2
+			exit 1
+		}
+		;;
+	esac
 fi
 
 widgets_automatic_prod_push="${WIDGETS_AUTOMATIC_PROD_PUSH:-false}"
@@ -784,6 +972,7 @@ expected_integration_worker_kinds="$(
 	echo 'The integration-worker ownership contract is empty.' >&2
 	exit 1
 }
+expected_integration_worker_kinds="$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS"
 
 # database-restore-production-guard: before-mutation
 database_restore_guard_assert_before_mutation \
@@ -900,6 +1089,8 @@ export WIDGETS_REVISION="$deploy_revision"
 export WIDGETS_IMAGE="winwidget-widgets:git-$deploy_revision"
 export BILLING_REVISION="$deploy_revision"
 export BILLING_IMAGE="winwidget-billing:git-$deploy_revision"
+export IDENTITY_REVISION="$deploy_revision"
+export IDENTITY_IMAGE="winwidget-identity:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
@@ -911,6 +1102,7 @@ echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
 echo "Building Campaigns image: $CAMPAIGNS_IMAGE"
 echo "Building Reporting image for the coordinated backend revision: $REPORTING_IMAGE"
 echo "Building Billing image for the coordinated backend revision: $BILLING_IMAGE"
+echo "Building Identity image for the coordinated backend revision: $IDENTITY_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -960,7 +1152,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-		APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION | BILLING_IMAGE | BILLING_REVISION)
+	APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION | BILLING_IMAGE | BILLING_REVISION | IDENTITY_IMAGE | IDENTITY_REVISION)
 			continue
 			;;
 	esac
@@ -1063,6 +1255,9 @@ assert_distinct_database_roles() {
 		BILLING_DATABASE_URL
 		BILLING_MIGRATION_DATABASE_URL
 		BILLING_BACKUP_URL
+		IDENTITY_DATABASE_URL
+		IDENTITY_MIGRATION_DATABASE_URL
+		IDENTITY_BACKUP_URL
 	)
 	local -a role_users=()
 	local key
@@ -1075,7 +1270,7 @@ assert_distinct_database_roles() {
 	for ((left = 0; left < ${#role_users[@]}; left++)); do
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
-				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets and Billing database URLs must use nineteen distinct PostgreSQL roles." >&2
+				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets, Billing and Identity database URLs must use twenty-two distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -1291,6 +1486,14 @@ case "$mode" in
 		require_env_key "BILLING_POSTGRES_DATA_VOLUME"
 		require_env_key "BILLING_POSTGRES_ADMIN_USER"
 		require_env_key "BILLING_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "IDENTITY_DATABASE_URL"
+		require_env_key "IDENTITY_MIGRATION_DATABASE_URL"
+		require_env_key "IDENTITY_BACKUP_URL"
+		require_env_key "IDENTITY_POSTGRES_IMAGE"
+		require_env_key "IDENTITY_POSTGRES_PORT"
+		require_env_key "IDENTITY_POSTGRES_DATA_VOLUME"
+		require_env_key "IDENTITY_POSTGRES_ADMIN_USER"
+		require_env_key "IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "CORE_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "DATABASE_RESTORE_STORAGE_DIR"
 		require_env_key "DATABASE_RESTORE_QUEUE_SECRET"
@@ -1314,6 +1517,8 @@ case "$mode" in
 		require_env_key "RABBITMQ_WIDGETS_URL"
 		require_env_key "RABBITMQ_BILLING_WORKER_URL"
 		require_env_key "RABBITMQ_BILLING_PUBLISHER_URL"
+		require_env_key "RABBITMQ_IDENTITY_WORKER_URL"
+		require_env_key "RABBITMQ_IDENTITY_PUBLISHER_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -1351,6 +1556,7 @@ case "$mode" in
 		require_env_key "REPORTING_OUTBOX_POLL_INTERVAL_MS"
 		require_env_key "REPORTING_OUTBOX_RETENTION_DAYS"
 		require_env_key "WIDGETS_INTERNAL_TOKEN"
+		require_env_key "WIDGETS_IDENTITY_TOKEN"
 		require_env_key "WIDGETS_INTERNAL_TIMEOUT_MS"
 		require_env_key "WIDGETS_ENTITLEMENT_MAX_STALENESS_MS"
 		require_env_key "WIDGETS_PROCESS_ROLE"
@@ -1379,6 +1585,30 @@ case "$mode" in
 		require_env_key "BILLING_OUTBOX_RETENTION_DAYS"
 		require_env_key "BILLING_RECEIPT_RETENTION_DAYS"
 		require_env_key "BILLING_FAILURE_DETAIL_RETENTION_DAYS"
+		require_env_key "BILLING_CAMPAIGNS_TOKEN"
+		require_env_key "BILLING_IDENTITY_TOKEN"
+		require_env_key "IDENTITY_INTERNAL_BASE_URL"
+		require_env_key "IDENTITY_INTERNAL_TIMEOUT_MS"
+		require_env_key "IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64"
+		require_env_key "IDENTITY_JWT_ACCESS_JWKS_BASE64"
+		require_env_key "IDENTITY_JWT_ACCESS_ACTIVE_KID"
+		require_env_key "IDENTITY_CORE_TOKEN"
+		require_env_key "CORE_IDENTITY_TOKEN"
+		require_env_key "IDENTITY_CAMPAIGNS_TOKEN"
+		require_env_key "IDENTITY_REPORTING_TOKEN"
+		require_env_key "IDENTITY_WIDGETS_TOKEN"
+		require_env_key "IDENTITY_BILLING_TOKEN"
+		require_env_key "IDENTITY_LISTEN_HOST"
+		require_env_key "IDENTITY_API_PORT"
+		require_env_key "IDENTITY_WORKER_PORT"
+		require_env_key "IDENTITY_OUTBOX_PUBLISHER_PORT"
+		require_env_key "IDENTITY_PREFETCH"
+		require_env_key "IDENTITY_OUTBOX_BATCH_SIZE"
+		require_env_key "IDENTITY_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "IDENTITY_OUTBOX_RETENTION_DAYS"
+		require_env_key "IDENTITY_RECEIPT_RETENTION_DAYS"
+		require_env_key "IDENTITY_FAILURE_DETAIL_RETENTION_DAYS"
+		require_env_key "IDENTITY_CORE_CLEANUP_SOAK_SECONDS"
 		require_env_key "RECAPTCHA_CLIENT_URL"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
@@ -1693,6 +1923,72 @@ case "$mode" in
 			echo 'Billing timeout, prefetch, Outbox and retention settings are outside the reviewed bounds.' >&2
 			exit 1
 		fi
+		if [[ "$(get_env_value IDENTITY_POSTGRES_PORT)" != '55438' ||
+			"$(get_env_value IDENTITY_POSTGRES_ADMIN_USER)" != 'winwidget_identity_admin' ||
+			"$(get_env_value IDENTITY_LISTEN_HOST)" != '127.0.0.1' ||
+			"$(get_env_value IDENTITY_API_PORT)" != '4900' ||
+			"$(get_env_value IDENTITY_WORKER_PORT)" != '4901' ||
+			"$(get_env_value IDENTITY_OUTBOX_PUBLISHER_PORT)" != '4902' ||
+			"$(get_env_value IDENTITY_INTERNAL_BASE_URL)" != 'http://127.0.0.1:4900' ||
+			"$(get_env_value IDENTITY_INTERNAL_TIMEOUT_MS)" != '5000' ]]; then
+			echo 'Identity must use the reviewed database, loopback HTTP and process-role ports.' >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64)" == "$(get_env_value JWT_ACCESS_PRIVATE_KEY_BASE64)" ||
+			"$(get_env_value IDENTITY_JWT_ACCESS_JWKS_BASE64)" == "$(get_env_value JWT_ACCESS_JWKS_BASE64)" ||
+			"$(get_env_value IDENTITY_JWT_ACCESS_ACTIVE_KID)" == "$(get_env_value JWT_ACCESS_ACTIVE_KID)" ]]; then
+			echo 'Identity signing material must be rotated and distinct from the legacy Core keyset.' >&2
+			exit 1
+		fi
+		identity_prefetch="$(get_env_value IDENTITY_PREFETCH)"
+		identity_outbox_batch_size="$(get_env_value IDENTITY_OUTBOX_BATCH_SIZE)"
+		identity_outbox_poll_interval_ms="$(get_env_value IDENTITY_OUTBOX_POLL_INTERVAL_MS)"
+		identity_outbox_retention_days="$(get_env_value IDENTITY_OUTBOX_RETENTION_DAYS)"
+		identity_receipt_retention_days="$(get_env_value IDENTITY_RECEIPT_RETENTION_DAYS)"
+		identity_failure_detail_retention_days="$(get_env_value IDENTITY_FAILURE_DETAIL_RETENTION_DAYS)"
+		identity_core_cleanup_soak_seconds="$(get_env_value IDENTITY_CORE_CLEANUP_SOAK_SECONDS)"
+		if [[ ! "$identity_prefetch" =~ ^[1-9][0-9]*$ ]] || ((identity_prefetch > 100)) ||
+			[[ ! "$identity_outbox_batch_size" =~ ^[1-9][0-9]*$ ]] || ((identity_outbox_batch_size > 500)) ||
+			[[ ! "$identity_outbox_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((identity_outbox_poll_interval_ms < 100 || identity_outbox_poll_interval_ms > 60000)) ||
+			[[ ! "$identity_outbox_retention_days" =~ ^[1-9][0-9]*$ ]] || ((identity_outbox_retention_days > 365)) ||
+			[[ ! "$identity_receipt_retention_days" =~ ^[1-9][0-9]*$ ]] || ((identity_receipt_retention_days > 730)) ||
+			[[ ! "$identity_failure_detail_retention_days" =~ ^[1-9][0-9]*$ ]] || ((identity_failure_detail_retention_days > 365)) ||
+			[[ ! "$identity_core_cleanup_soak_seconds" =~ ^[0-9]+$ ]] ||
+			((identity_core_cleanup_soak_seconds < 900 || identity_core_cleanup_soak_seconds > 86400)); then
+			echo 'Identity prefetch, Outbox and retention settings are outside the reviewed bounds.' >&2
+			exit 1
+		fi
+		identity_credential_keys=(
+			IDENTITY_CORE_TOKEN CORE_IDENTITY_TOKEN IDENTITY_CAMPAIGNS_TOKEN
+			IDENTITY_REPORTING_TOKEN IDENTITY_WIDGETS_TOKEN IDENTITY_BILLING_TOKEN
+			BILLING_CAMPAIGNS_TOKEN BILLING_IDENTITY_TOKEN WIDGETS_IDENTITY_TOKEN
+		)
+		identity_credentials=()
+		for identity_credential_key in "${identity_credential_keys[@]}"; do
+			identity_credential_value="$(get_env_value "$identity_credential_key")"
+			if [[ "$identity_credential_value" == change_me* ||
+				"$identity_credential_value" == ci_* ||
+				${#identity_credential_value} -lt 32 ||
+				"$identity_credential_value" == "$(get_env_value NOTIFICATION_DELIVERY_INTERNAL_TOKEN)" ||
+				"$identity_credential_value" == "$(get_env_value CAMPAIGNS_INTERNAL_TOKEN)" ||
+				"$identity_credential_value" == "$(get_env_value REPORTING_INTERNAL_TOKEN)" ||
+				"$identity_credential_value" == "$(get_env_value WIDGETS_INTERNAL_TOKEN)" ||
+				"$identity_credential_value" == "$(get_env_value BILLING_INTERNAL_TOKEN)" ]]; then
+				echo "$identity_credential_key must be a production-only secret of at least 32 characters." >&2
+				exit 1
+			fi
+			identity_credentials+=("$identity_credential_value")
+		done
+		for ((left = 0; left < ${#identity_credentials[@]}; left++)); do
+			for ((right = left + 1; right < ${#identity_credentials[@]}; right++)); do
+				[[ "${identity_credentials[$left]}" != "${identity_credentials[$right]}" ]] || {
+					echo 'Identity cross-domain credentials must be audience-scoped and distinct.' >&2
+					exit 1
+				}
+			done
+		done
+		unset identity_credential_key identity_credential_value
 		require_env_base64url_secret DATABASE_RESTORE_QUEUE_SECRET 43 128
 		database_restore_queue_secret="$(
 			get_env_value DATABASE_RESTORE_QUEUE_SECRET
@@ -1702,10 +1998,20 @@ case "$mode" in
 			"$database_restore_queue_secret" == "$(get_env_value CAMPAIGNS_INTERNAL_TOKEN)" ||
 			"$database_restore_queue_secret" == "$(get_env_value REPORTING_INTERNAL_TOKEN)" ||
 			"$database_restore_queue_secret" == "$(get_env_value WIDGETS_INTERNAL_TOKEN)" ||
+			"$database_restore_queue_secret" == "$(get_env_value BILLING_INTERNAL_TOKEN)" ||
+			"$database_restore_queue_secret" == "$(get_env_value IDENTITY_CORE_TOKEN)" ||
+			"$database_restore_queue_secret" == "$(get_env_value CORE_IDENTITY_TOKEN)" ||
 			"$database_restore_queue_secret" == "$(get_env_value PAYMENT_METHOD_ENCRYPTION_KEY)" ]]; then
 			echo 'DATABASE_RESTORE_QUEUE_SECRET must be a unique production-only secret.' >&2
 			exit 1
 		fi
+		for identity_credential_value in "${identity_credentials[@]}"; do
+			[[ "$database_restore_queue_secret" != "$identity_credential_value" ]] || {
+				echo 'DATABASE_RESTORE_QUEUE_SECRET must differ from every Identity cross-domain credential.' >&2
+				exit 1
+			}
+		done
+		unset identity_credentials identity_credential_value
 		unset database_restore_queue_secret
 		validate_routine_database_restore_create_gate "$ENV_FILE" || exit 1
 		database_restore_poll_interval_ms="$(
@@ -1744,6 +2050,9 @@ case "$mode" in
 		assert_database_restore_admin_secret_file \
 			BILLING_POSTGRES_ADMIN_PASSWORD_FILE \
 			"$APP_ROOT/deploy/backend/.billing-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.identity-postgres-admin-password"
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
 			SMTP_GREETING_TIMEOUT_MS \
@@ -1756,8 +2065,10 @@ case "$mode" in
 			fi
 		done
 		assert_distinct_database_roles
-		if [[ "$(get_env_value JWT_JWKS_URL)" != "http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json" ]]; then
-			echo "Production JWT_JWKS_URL must use the loopback Auth endpoint" >&2
+		expected_jwks_url="http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json"
+		if [[ "$identity_routes_env_state" != 'identity' ||
+			"$(get_env_value JWT_JWKS_URL)" != "$expected_jwks_url" ]]; then
+			echo "Production JWT_JWKS_URL must use the loopback Identity JWKS endpoint" >&2
 			exit 1
 		fi
 		for oauth_provider in google github yandex vk; do
@@ -2183,6 +2494,7 @@ routine_stop_services=(
 	integration-worker
 	reporting-service
 	widgets-service
+	"${identity_runtime_services[@]}"
 )
 billing_core_cleanup_services=(
 	"${routine_stop_services[@]}"
@@ -3808,6 +4120,7 @@ compose_target \
 	--profile reporting-migration \
 	--profile widgets-migration \
 	--profile billing-migration \
+	--profile identity-migration \
 	config --quiet
 routine_build_services=(
 	api-gateway
@@ -3817,6 +4130,7 @@ routine_build_services=(
 	campaigns-service
 	reporting-service
 	widgets-service
+	identity-api
 )
 if [[ "$billing_core_cleanup_marker_phase" == 'complete' ]]; then
 	routine_build_services+=(api billing-api)
@@ -4556,6 +4870,7 @@ gateway_validation_env+=(
 	--env "SHUTDOWN_GRACE_MS=$(get_env_value GATEWAY_SHUTDOWN_GRACE_MS)"
 	--env "REPORTING_GATEWAY_POLICY=$reporting_gateway_policy"
 	--env "BILLING_GATEWAY_POLICY=$billing_routes_env_state"
+	--env "IDENTITY_GATEWAY_POLICY=$identity_routes_env_state"
 )
 gateway_route_manifest_policy_validator="$(gateway_route_manifest_policy_validator_source)"
 gateway_validation_env+=(
@@ -4572,10 +4887,12 @@ const { loadConfig } = require("./dist/src/config.js");
 const config = loadConfig();
 const reportingPolicy = process.env.REPORTING_GATEWAY_POLICY;
 const billingPolicy = process.env.BILLING_GATEWAY_POLICY;
-validateGatewayRouteManifest(config, reportingPolicy, billingPolicy);
+const identityPolicy = process.env.IDENTITY_GATEWAY_POLICY;
+validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, identityPolicy);
 process.stdout.write(
 	"API Gateway route manifest validated for Reporting policy " + reportingPolicy +
-		" and Billing policy " + billingPolicy + "\\n",
+		", Billing policy " + billingPolicy +
+		", and Identity policy " + identityPolicy + "\\n",
 );
 '
 
@@ -4813,6 +5130,12 @@ billing_worker_credentials="$(
 billing_publisher_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_BILLING_PUBLISHER_URL"
 )"
+identity_worker_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_IDENTITY_WORKER_URL"
+)"
+identity_publisher_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_IDENTITY_PUBLISHER_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -4872,6 +5195,21 @@ if [[ "$billing_worker_user" != 'winwidget-billing-worker' ||
 	echo 'Billing RabbitMQ URLs must use the two dedicated canonical users.' >&2
 	exit 1
 fi
+identity_worker_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$identity_worker_credentials")" |
+		base64 --decode
+)"
+identity_worker_password_base64="$(sed -n '2p' <<<"$identity_worker_credentials")"
+identity_publisher_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$identity_publisher_credentials")" |
+		base64 --decode
+)"
+identity_publisher_password_base64="$(sed -n '2p' <<<"$identity_publisher_credentials")"
+if [[ "$identity_worker_user" != 'winwidget-identity-worker' ||
+	"$identity_publisher_user" != 'winwidget-identity-publisher' ]]; then
+	echo 'Identity RabbitMQ URLs must use the two dedicated canonical users.' >&2
+	exit 1
+fi
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -4891,6 +5229,8 @@ service_users=(
 	"$widgets_user"
 	"$billing_worker_user"
 	"$billing_publisher_user"
+	"$identity_worker_user"
+	"$identity_publisher_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -5179,6 +5519,35 @@ rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
 '
 }
 
+provision_identity_rabbitmq_topic_permissions() {
+	local worker_user="$1" publisher_user="$2"
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_IDENTITY_WORKER_USER="$worker_user" \
+	RABBITMQ_IDENTITY_PUBLISHER_USER="$publisher_user" \
+		docker exec \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_IDENTITY_WORKER_USER \
+			-e RABBITMQ_IDENTITY_PUBLISHER_USER \
+			"$provisioning_rabbitmq_container_id" sh -euc '
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_IDENTITY_WORKER_USER"
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_IDENTITY_PUBLISHER_USER"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_IDENTITY_WORKER_USER" winwidget.events "^$" \
+  "^(notification\.telegram\.destination-unavailable\.v1|manual\.telegram-destination-unavailable|telegram-destination-unavailable\.dead-letter)$"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_IDENTITY_WORKER_USER" winwidget.dead-letter "^$" \
+  "^telegram-destination-unavailable\.dead-letter$"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_IDENTITY_PUBLISHER_USER" winwidget.events \
+  "^(identity\.user\.changed\.v1|billing\.(identity\.changed|referral\.requested|lifecycle-repair\.requested)\.v1|admin\.audit\.identity\.v1)$" "^$"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_IDENTITY_PUBLISHER_USER" winwidget.dead-letter \
+  "^telegram-destination-unavailable\.dead-letter$" "^$"
+'
+}
+
 assert_campaigns_shared_rabbitmq_topology() {
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
@@ -5275,10 +5644,13 @@ assert_campaigns_shared_rabbitmq_topology
 assert_reporting_shared_rabbitmq_topology
 post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
+post_identity_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1)(\..*)?$'
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	integration_worker_read_pattern="$legacy_integration_read_pattern"
+elif [[ "$identity_database_phase" == 'complete' ]]; then
+	integration_worker_read_pattern="$post_identity_integration_read_pattern"
 elif [[ "$billing_database_phase" == 'active' ||
 	"$billing_database_phase" == 'complete' ]]; then
 	integration_worker_read_pattern="$post_billing_integration_read_pattern"
@@ -5351,6 +5723,22 @@ provision_rabbitmq_user \
 		''
 provision_billing_rabbitmq_topic_permissions \
 	"$billing_worker_user" "$billing_publisher_user"
+provision_rabbitmq_user \
+	"$identity_worker_user" \
+	"$identity_worker_password_base64" \
+	'^(winwidget\.(events|retry|dead-letter|manual-retry)|winwidget\.notification\.telegram-destination-unavailable(\.dead-letter|\.retry-v2\.[123])?)$' \
+	'^(winwidget\.(retry|dead-letter|manual-retry)|winwidget\.notification\.telegram-destination-unavailable(\.dead-letter|\.retry-v2\.[123])?)$' \
+	'^(winwidget\.(events|retry|dead-letter|manual-retry)|winwidget\.notification\.telegram-destination-unavailable(\.dead-letter|\.retry-v2\.[123])?)$' \
+	''
+provision_rabbitmq_user \
+	"$identity_publisher_user" \
+	"$identity_publisher_password_base64" \
+	'^$' \
+	'^winwidget\.(events|retry|dead-letter|manual-retry)$' \
+	'^$' \
+	''
+provision_identity_rabbitmq_topic_permissions \
+	"$identity_worker_user" "$identity_publisher_user"
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
 	"$rabbitmq_monitor_password_base64" \
@@ -5473,6 +5861,11 @@ for (const kind of WIDGETS_CONSUMER_KINDS) {
 '
 	)"
 	required_queues+=$'\n'"$widgets_required_queues"
+	required_queues+=$'\nwinwidget.notification.telegram-destination-unavailable'
+	required_queues+=$'\nwinwidget.notification.telegram-destination-unavailable.dead-letter'
+	required_queues+=$'\nwinwidget.notification.telegram-destination-unavailable.retry-v2.1'
+	required_queues+=$'\nwinwidget.notification.telegram-destination-unavailable.retry-v2.2'
+	required_queues+=$'\nwinwidget.notification.telegram-destination-unavailable.retry-v2.3'
 
 	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 		actual_queues="$(
@@ -6261,6 +6654,10 @@ const run = async () => {
 		process.env.RABBITMQ_CAMPAIGNS_URL,
 		"RABBITMQ_CAMPAIGNS_URL",
 	);
+	const identityUser = decodeUser(
+		process.env.RABBITMQ_IDENTITY_WORKER_URL,
+		"RABBITMQ_IDENTITY_WORKER_URL",
+	);
 	let campaignsQueues;
 	try {
 		campaignsQueues = JSON.parse(process.env.CAMPAIGNS_QUEUE_NAMES_JSON || "");
@@ -6371,6 +6768,13 @@ const run = async () => {
 			notification: false,
 			includeDeadLetter: false,
 		},
+		{
+			queues: ["winwidget.notification.telegram-destination-unavailable"],
+			user: identityUser,
+			connectionName: "winwidget-identity-worker",
+			notification: false,
+			includeDeadLetter: false,
+		},
 	];
 
 	let closedLegacyOrphan = false;
@@ -6470,6 +6874,26 @@ const run = async () => {
 					`RabbitMQ Campaigns parking queue ${queue} must have no consumers`,
 				);
 			}
+		}
+	}
+
+	for (const suffix of [
+		".dead-letter",
+		".retry-v2.1",
+		".retry-v2.2",
+		".retry-v2.3",
+	]) {
+		const queue = `winwidget.notification.telegram-destination-unavailable${suffix}`;
+		const state = await request(
+			`/api/queues/${encodeURIComponent(vhost)}/${encodeURIComponent(queue)}`,
+		);
+		const consumers = Array.isArray(state?.consumer_details)
+			? state.consumer_details
+			: [];
+		if (consumers.length !== 0) {
+			throw new OwnershipError(
+				`RabbitMQ Identity parking queue ${queue} must have no consumers`,
+			);
 		}
 	}
 
@@ -7803,6 +8227,9 @@ verify_campaigns_database_access_boundaries
 compose_target \
 	--profile widgets-migration \
 	run --rm --no-deps widgets-migrate
+compose_target \
+	--profile identity-migration \
+	run --rm --no-deps identity-migrate
 docker run --rm --network host --env-file "$ENV_FILE" \
 	--entrypoint node "$WIDGETS_IMAGE" \
 	dist/src/cutover-main.js verify-steady >/dev/null
@@ -8289,6 +8716,16 @@ else
 		campaigns-service \
 		widgets-service
 	compose_target up -d --no-deps --force-recreate api
+	compose_target up -d --no-deps --force-recreate \
+		identity-api \
+		identity-worker \
+		identity-outbox-publisher
+	wait_for_cutover_revision \
+		"$IDENTITY_API_READINESS_URL" "$IDENTITY_REVISION" "Identity API"
+	wait_for_cutover_revision \
+		"$IDENTITY_WORKER_READINESS_URL" "$IDENTITY_REVISION" "Identity worker"
+	wait_for_cutover_revision \
+		"$IDENTITY_OUTBOX_READINESS_URL" "$IDENTITY_REVISION" "Identity Outbox publisher"
 	compose_target up -d --no-deps --force-recreate api-gateway
 	core_runtime_recovered=true
 	if ! wait_for_cutover_revision \
@@ -8404,12 +8841,12 @@ done
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher rabbitmq || true
-	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700 and 4800-4803:"
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700, 4800-4803 and 4900-4902:"
 	ss -ltnp \
-		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 )' ||
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 or sport = :4900 or sport = :4901 or sport = :4902 )' ||
 		true
 }
 
@@ -8428,6 +8865,7 @@ ensure_required_services_running() {
 		campaigns-service \
 		reporting-service \
 		widgets-service \
+		"${identity_runtime_services[@]}" \
 		"${billing_runtime_services[@]}"; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
@@ -8545,6 +8983,20 @@ const run = async () => {
 			: expectation.name;
 		return requiredMainQueues.has(base);
 	});
+	requiredQueues.push(
+		{
+			name: 'winwidget.notification.telegram-destination-unavailable',
+			consumerExpectation: 'at-least-one',
+			alertOnAnyMessage: false
+		},
+		...['.dead-letter', '.retry-v2.1', '.retry-v2.2', '.retry-v2.3'].map(
+			suffix => ({
+				name: `winwidget.notification.telegram-destination-unavailable${suffix}`,
+				consumerExpectation: 'none',
+				alertOnAnyMessage: true
+			})
+		)
+	);
 	const freshAfter = new Date(Math.max(startedAt, Date.now() - 30_000));
 	const prisma = new PrismaClient({
 		datasources: { db: { url: databaseUrl } }
@@ -8836,6 +9288,7 @@ for service in \
 	campaigns-service \
 	reporting-service \
 	widgets-service \
+	"${identity_runtime_services[@]}" \
 	"${billing_runtime_services[@]}"; do
 	container_id="$(
 		compose_target ps -q "$service"
@@ -8987,4 +9440,4 @@ fi
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 compose_target ps \
-	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service "${billing_runtime_services[@]}" rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service "${identity_runtime_services[@]}" "${billing_runtime_services[@]}" rabbitmq

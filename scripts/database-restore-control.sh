@@ -11,7 +11,7 @@ database_restore_control_fail() {
 
 database_restore_control_validate_target() {
 	case "$1" in
-	core | notification-delivery | campaigns | reporting | widgets | billing) return 0 ;;
+	core | notification-delivery | campaigns | reporting | widgets | billing | identity) return 0 ;;
 	*)
 		database_restore_control_fail \
 			'Unsupported database restore target.'
@@ -59,6 +59,7 @@ database_restore_control_self_test() {
 	database_restore_control_validate_target reporting
 	database_restore_control_validate_target widgets
 	database_restore_control_validate_target billing
+	database_restore_control_validate_target identity
 	if database_restore_control_validate_target unknown >/dev/null 2>&1; then
 		database_restore_control_fail \
 			'Database restore control self-test accepted an unknown target.'

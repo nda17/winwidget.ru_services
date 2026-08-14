@@ -29,7 +29,7 @@ import { WidgetsMessagingOverviewService } from '../messaging/widgets-messaging-
 import { WidgetsAdminMonitoringService } from '../monitoring/widgets-admin-monitoring.service';
 import { WidgetsInternalGuard } from './widgets-internal.guard';
 
-class OwnerOverviewDto {
+export class OwnerOverviewDto {
 	@IsString()
 	@MinLength(1)
 	@MaxLength(255)

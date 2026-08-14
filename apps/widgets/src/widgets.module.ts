@@ -38,6 +38,8 @@ import { WidgetsSafeHttpService } from './integrations/widgets-safe-http.service
 import { CoreInternalClient } from './internal/core-internal.client';
 import { WidgetsInternalController } from './internal/widgets-internal.controller';
 import { WidgetsInternalGuard } from './internal/widgets-internal.guard';
+import { WidgetsIdentityController } from './internal/widgets-identity.controller';
+import { WidgetsIdentityGuard } from './internal/widgets-identity.guard';
 import { WidgetsDomainEventsService } from './messaging/widgets-domain-events.service';
 import { WidgetsMessagingOverviewService } from './messaging/widgets-messaging-overview.service';
 import { WidgetsOutboxPublisherService } from './messaging/widgets-outbox-publisher.service';
@@ -63,6 +65,7 @@ import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 	controllers: [
 		WidgetsHealthController,
 		WidgetsInternalController,
+		WidgetsIdentityController,
 		WidgetsDeliveryFailuresController,
 		WidgetsManagementController,
 		WidgetsSettingsController,
@@ -73,6 +76,7 @@ import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 	providers: [
 		CoreInternalClient,
 		WidgetsInternalGuard,
+		WidgetsIdentityGuard,
 		WidgetsApiGuard,
 		WidgetsAuthGuard,
 		WidgetsDomainRepository,

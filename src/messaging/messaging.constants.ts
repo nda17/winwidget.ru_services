@@ -28,6 +28,7 @@ export const REPORTING_ADMIN_AUDIT_ROUTING_KEY =
 	'admin.audit.reporting.v1';
 export const WIDGETS_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.widgets.v1';
 export const BILLING_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.billing.v1';
+export const IDENTITY_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.identity.v1';
 export const BILLING_IDENTITY_EVENT_TYPE = 'billing.identity.changed.v1';
 export const BILLING_TRIAL_REQUESTED_EVENT_TYPE =
 	'billing.trial.requested.v1';
@@ -82,6 +83,7 @@ export const INTEGRATION_KINDS = [
 	'reporting-admin-audit',
 	'widgets-admin-audit',
 	'billing-admin-audit',
+	'identity-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection',
@@ -117,11 +119,11 @@ export type WidgetsProviderIntegrationKind =
 	(typeof WIDGETS_PROVIDER_INTEGRATION_KINDS)[number];
 
 export const CORE_OWNED_INTEGRATION_KINDS = [
-	'telegram-destination-unavailable',
 	'campaign-admin-audit',
 	'reporting-admin-audit',
 	'widgets-admin-audit',
 	'billing-admin-audit',
+	'identity-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection',
@@ -189,6 +191,7 @@ export const CORE_OWNED_MESSAGING_KINDS = [
 // Terminal rows from the retired Core consumer remain queryable for admin
 // history only. This catalog must never drive topology, consumers or retries.
 export const CORE_ARCHIVED_FAILURE_HISTORY_KINDS = [
+	'telegram-destination-unavailable',
 	'notification-delivery-outcome'
 ] as const satisfies readonly CoreMessagingKind[];
 
@@ -217,6 +220,7 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'widgets-admin-audit': WIDGETS_ADMIN_AUDIT_ROUTING_KEY,
 	'auto-renewal': AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	'billing-admin-audit': BILLING_ADMIN_AUDIT_ROUTING_KEY,
+	'identity-admin-audit': IDENTITY_ADMIN_AUDIT_ROUTING_KEY,
 	'billing-payment-projection': BILLING_PAYMENT_DETAILS_EVENT_TYPE,
 	'billing-subscription-projection':
 		BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
@@ -265,6 +269,7 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'widgets-admin-audit': 'winwidget.admin.audit.widgets.v1',
 	'auto-renewal': 'winwidget.payment.auto-renewal',
 	'billing-admin-audit': 'winwidget.admin.audit.billing.v1',
+	'identity-admin-audit': 'winwidget.admin.audit.identity.v1',
 	'billing-payment-projection':
 		'winwidget.core.billing.payment-details.v1',
 	'billing-subscription-projection':
@@ -333,6 +338,7 @@ export const getMessagingQueueHealthExpectations = (options: {
 		}
 		const mainQueue = MESSAGING_QUEUE_NAMES[kind];
 		const passiveDeadLetter =
+			kind === 'telegram-destination-unavailable' ||
 			WIDGETS_PROVIDER_KIND_SET.has(kind) ||
 			(options.billingOwner && kind === 'auto-renewal');
 

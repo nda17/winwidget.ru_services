@@ -9,6 +9,33 @@ import {
 import { createHash } from 'node:crypto';
 
 const SNAPSHOT_ID = '3a879a0a-0fd9-49f8-aed0-c4731e4ae41d';
+const SUBSCRIBER_SNAPSHOT_ID = '4b879a0a-0fd9-49f8-aed0-c4731e4ae41d';
+
+const activeSubscriberResponse = (userIds: string[]) => {
+	const sha256 = createHash('sha256')
+		.update(userIds.map(userId => `${userId}\n`).join(''))
+		.digest('hex');
+	return new Response(
+		[
+			JSON.stringify({
+				type: 'snapshot',
+				schemaVersion: 1,
+				snapshotId: SUBSCRIBER_SNAPSHOT_ID,
+				asOf: '2026-07-30T11:59:59.000Z'
+			}),
+			...userIds.map(userId =>
+				JSON.stringify({ type: 'subscriber', userId })
+			),
+			JSON.stringify({
+				type: 'complete',
+				snapshotId: SUBSCRIBER_SNAPSHOT_ID,
+				totalCount: userIds.length,
+				sha256
+			})
+		].join('\n'),
+		{ headers: { 'content-type': 'application/x-ndjson' } }
+	);
+};
 
 describe('AudienceSnapshotService NDJSON verification', () => {
 	const campaign = {
@@ -52,35 +79,51 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 
 	it('accepts sorted recipients and canonical channel hash', async () => {
 		const destinations = ['a@example.com', 'b@example.com'];
-		const sha256 = createHash('sha256')
+		const resultSha256 = createHash('sha256')
 			.update(
 				destinations
 					.map(destination => `EMAIL\u0000${destination}\n`)
 					.join('')
 			)
 			.digest('hex');
+		const sourceSha256 = createHash('sha256')
+			.update(
+				destinations
+					.map(
+						(destination, index) =>
+							`EMAIL\u0000${destination}\u0000user-${index + 1}\n`
+					)
+					.join('')
+			)
+			.digest('hex');
 		const body = [
 			JSON.stringify({
 				type: 'snapshot',
-				schemaVersion: 1,
+				schemaVersion: 2,
 				snapshotId: SNAPSHOT_ID,
 				asOf: '2026-07-30T12:00:00.000Z',
 				criteria: {
-					channel: 'EMAIL',
-					audience: 'ACTIVE_SUBSCRIBERS'
+					channel: 'EMAIL'
 				}
 			}),
-			...destinations.map(destination =>
-				JSON.stringify({ type: 'recipient', destination })
+			...destinations.map((destination, index) =>
+				JSON.stringify({
+					type: 'recipient',
+					userId: `user-${index + 1}`,
+					destination
+				})
 			),
 			JSON.stringify({
 				type: 'complete',
 				snapshotId: SNAPSHOT_ID,
 				totalCount: 2,
-				sha256
+				sha256: sourceSha256
 			})
 		].join('\n');
 		const core = {
+			exportActiveSubscriberIds: jest
+				.fn()
+				.mockResolvedValue(activeSubscriberResponse(['user-1', 'user-2'])),
 			exportAudience: jest.fn().mockResolvedValue(
 				new Response(body, {
 					headers: {
@@ -107,29 +150,166 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 				}>;
 			}
 		).streamExport(campaign, snapshot, onChunk);
-		expect(result.sha256).toBe(sha256);
+		expect(result.sha256).toBe(resultSha256);
 		expect(result.totalCount).toBe(2);
 		expect(onChunk).toHaveBeenNthCalledWith(1, ['a@example.com']);
 		expect(onChunk).toHaveBeenNthCalledWith(2, ['b@example.com']);
 	});
 
-	it('rejects an unverified/non-normalized email export', async () => {
-		const destination = 'User@Example.com';
-		const sha256 = createHash('sha256')
+	it('keeps one delivery when an inactive owner sorts before an active owner of the same destination', async () => {
+		const destination = 'shared@example.com';
+		const recipients = [
+			{ userId: 'user-a', destination },
+			{ userId: 'user-b', destination }
+		];
+		const sourceSha256 = createHash('sha256')
+			.update(
+				recipients
+					.map(
+						recipient =>
+							`EMAIL\u0000${recipient.destination}\u0000${recipient.userId}\n`
+					)
+					.join('')
+			)
+			.digest('hex');
+		const resultSha256 = createHash('sha256')
 			.update(`EMAIL\u0000${destination}\n`)
 			.digest('hex');
 		const body = [
 			JSON.stringify({
 				type: 'snapshot',
-				schemaVersion: 1,
+				schemaVersion: 2,
+				snapshotId: SNAPSHOT_ID,
+				asOf: '2026-07-30T12:00:00.000Z',
+				criteria: { channel: 'EMAIL' }
+			}),
+			...recipients.map(recipient =>
+				JSON.stringify({ type: 'recipient', ...recipient })
+			),
+			JSON.stringify({
+				type: 'complete',
+				snapshotId: SNAPSHOT_ID,
+				totalCount: recipients.length,
+				sha256: sourceSha256
+			})
+		].join('\n');
+		const core = {
+			exportActiveSubscriberIds: jest
+				.fn()
+				.mockResolvedValue(activeSubscriberResponse(['user-b'])),
+			exportAudience: jest.fn().mockResolvedValue(new Response(body))
+		};
+		const service = new AudienceSnapshotService(
+			{} as never,
+			core as never,
+			{ get: jest.fn().mockReturnValue('1000') } as never
+		);
+		const onChunk = jest.fn().mockResolvedValue(undefined);
+
+		const result = await (
+			service as unknown as {
+				streamExport: (
+					inputCampaign: typeof campaign,
+					inputSnapshot: typeof snapshot,
+					consumer: (destinations: readonly string[]) => Promise<void>
+				) => Promise<{ sha256: string; totalCount: number }>;
+			}
+		).streamExport(campaign, snapshot, onChunk);
+
+		expect(result).toEqual(
+			expect.objectContaining({
+				sha256: resultSha256,
+				totalCount: 1
+			})
+		);
+		expect(onChunk).toHaveBeenCalledTimes(1);
+		expect(onChunk).toHaveBeenCalledWith([destination]);
+	});
+
+	it('deduplicates a shared destination for the ALL audience after validating every source pair', async () => {
+		const destination = 'shared@example.com';
+		const recipients = [
+			{ userId: 'user-a', destination },
+			{ userId: 'user-b', destination }
+		];
+		const sourceSha256 = createHash('sha256')
+			.update(
+				recipients
+					.map(
+						recipient =>
+							`EMAIL\u0000${recipient.destination}\u0000${recipient.userId}\n`
+					)
+					.join('')
+			)
+			.digest('hex');
+		const body = [
+			JSON.stringify({
+				type: 'snapshot',
+				schemaVersion: 2,
+				snapshotId: SNAPSHOT_ID,
+				asOf: '2026-07-30T12:00:00.000Z',
+				criteria: { channel: 'EMAIL' }
+			}),
+			...recipients.map(recipient =>
+				JSON.stringify({ type: 'recipient', ...recipient })
+			),
+			JSON.stringify({
+				type: 'complete',
+				snapshotId: SNAPSHOT_ID,
+				totalCount: recipients.length,
+				sha256: sourceSha256
+			})
+		].join('\n');
+		const core = {
+			exportActiveSubscriberIds: jest.fn(),
+			exportAudience: jest.fn().mockResolvedValue(new Response(body))
+		};
+		const service = new AudienceSnapshotService(
+			{} as never,
+			core as never,
+			{ get: jest.fn().mockReturnValue('1000') } as never
+		);
+		const allCampaign = {
+			...campaign,
+			audience: CampaignAudience.ALL
+		};
+		const allSnapshot = {
+			...snapshot,
+			audience: CampaignAudience.ALL
+		};
+		const onChunk = jest.fn().mockResolvedValue(undefined);
+
+		const result = await (
+			service as unknown as {
+				streamExport: (
+					inputCampaign: typeof allCampaign,
+					inputSnapshot: typeof allSnapshot,
+					consumer: (destinations: readonly string[]) => Promise<void>
+				) => Promise<{ totalCount: number }>;
+			}
+		).streamExport(allCampaign, allSnapshot, onChunk);
+
+		expect(result.totalCount).toBe(1);
+		expect(onChunk).toHaveBeenCalledWith([destination]);
+		expect(core.exportActiveSubscriberIds).not.toHaveBeenCalled();
+	});
+
+	it('rejects an unverified/non-normalized email export', async () => {
+		const destination = 'User@Example.com';
+		const sha256 = createHash('sha256')
+			.update(`EMAIL\u0000${destination}\u0000user-1\n`)
+			.digest('hex');
+		const body = [
+			JSON.stringify({
+				type: 'snapshot',
+				schemaVersion: 2,
 				snapshotId: SNAPSHOT_ID,
 				asOf: '2026-07-30T12:00:00.000Z',
 				criteria: {
-					channel: 'EMAIL',
-					audience: 'ACTIVE_SUBSCRIBERS'
+					channel: 'EMAIL'
 				}
 			}),
-			JSON.stringify({ type: 'recipient', destination }),
+			JSON.stringify({ type: 'recipient', userId: 'user-1', destination }),
 			JSON.stringify({
 				type: 'complete',
 				snapshotId: SNAPSHOT_ID,
@@ -138,6 +318,9 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 			})
 		].join('\n');
 		const core = {
+			exportActiveSubscriberIds: jest
+				.fn()
+				.mockResolvedValue(activeSubscriberResponse(['user-1'])),
 			exportAudience: jest.fn().mockResolvedValue(new Response(body))
 		};
 		const service = new AudienceSnapshotService(

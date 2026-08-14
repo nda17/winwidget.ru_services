@@ -22,6 +22,7 @@ function createConfig(): DatabaseRestoreWorkerConfig {
 			DATABASE_RESTORE_REPORTING_PORT: '55435',
 			DATABASE_RESTORE_WIDGETS_PORT: '55436',
 			DATABASE_RESTORE_BILLING_PORT: '55437',
+			DATABASE_RESTORE_IDENTITY_PORT: '55438',
 			DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
@@ -29,6 +30,7 @@ function createConfig(): DatabaseRestoreWorkerConfig {
 			DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: '/secrets/reporting',
 			DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
 			DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: '/secrets/billing',
+			DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: '/secrets/identity',
 			APP_REVISION: 'd'.repeat(40)
 		},
 		'/app'
@@ -368,6 +370,32 @@ describe('database restore PostgreSQL contract', () => {
 });
 
 describe('DatabaseRestoreWorkerConfig', () => {
+	it('defines the isolated Identity database, roles, migrations and anchors', () => {
+		const target = createConfig().targets.identity;
+
+		expect(target).toMatchObject({
+			target: 'identity',
+			label: 'Identity',
+			host: '127.0.0.1',
+			port: 55438,
+			database: 'winwidget_identity',
+			schema: 'identity',
+			adminRole: 'winwidget_identity_admin',
+			migrationRole: 'winwidget_identity_migration',
+			runtimeRoles: ['winwidget_identity_runtime'],
+			backupRole: 'winwidget_identity_backup',
+			passwordFile: '/secrets/identity',
+			migrationsDirectory: '/app/apps/identity/prisma/migrations',
+			anchorTables: [
+				'_prisma_migrations',
+				'service_identity',
+				'users',
+				'auth_identities',
+				'outbox_events'
+			]
+		});
+	});
+
 	it('defines the isolated Widgets database, roles, migrations and anchors', () => {
 		const target = createConfig().targets.widgets;
 
@@ -406,6 +434,7 @@ describe('DatabaseRestoreWorkerConfig', () => {
 					DATABASE_RESTORE_REPORTING_PORT: '55435',
 					DATABASE_RESTORE_WIDGETS_PORT: '55436',
 					DATABASE_RESTORE_BILLING_PORT: '55437',
+					DATABASE_RESTORE_IDENTITY_PORT: '55438',
 					DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 					DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 						'/secrets/notification-delivery',
@@ -415,6 +444,8 @@ describe('DatabaseRestoreWorkerConfig', () => {
 						'/secrets/reporting',
 					DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
 					DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: '/secrets/billing',
+					DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE:
+						'/secrets/identity',
 					APP_REVISION: 'd'.repeat(40)
 				})
 		).toThrow('must not contain surrounding whitespace');

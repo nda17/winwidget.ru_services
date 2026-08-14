@@ -13,10 +13,12 @@ import {
 	Prisma
 } from '@prisma/campaigns-client';
 import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as wait } from 'node:timers/promises';
 
 const MAX_AUDIENCE_RECIPIENTS = 500_000;
 const DEFAULT_IMPORT_BATCH_SIZE = 1000;
 const SNAPSHOT_IMPORT_LEASE_MS = 10 * 60 * 1000;
+const SNAPSHOT_IMPORT_HEARTBEAT_MS = 2 * 60 * 1000;
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -25,6 +27,16 @@ interface ExportedAudienceMetadata {
 	asOf: Date;
 	sha256: string;
 	totalCount: number;
+	billingSnapshotId: string | null;
+	billingSnapshotSha256: string | null;
+	billingSnapshotAsOf: Date | null;
+}
+
+interface ActiveSubscriberSnapshot {
+	snapshotId: string;
+	asOf: Date;
+	sha256: string;
+	userIds: ReadonlySet<string>;
 }
 
 class SnapshotImportCancelledError extends Error {
@@ -149,15 +161,22 @@ export class AudienceSnapshotService {
 		const importToken = await this.beginImport(campaign.id, snapshot.id);
 		if (!importToken) return;
 		try {
-			const metadata = await this.streamExport(
-				campaign,
-				snapshot,
-				destinations =>
-					this.persistImportChunk(
-						campaign.id,
+			const metadata = await this.withImportLeaseHeartbeat(
+				campaign.id,
+				snapshot.id,
+				importToken,
+				abortSignal =>
+					this.streamExport(
+						campaign,
 						snapshot,
-						importToken,
-						destinations
+						destinations =>
+							this.persistImportChunk(
+								campaign.id,
+								snapshot,
+								importToken,
+								destinations
+							),
+						abortSignal
 					)
 			);
 			await this.completeImport(
@@ -222,6 +241,9 @@ export class AudienceSnapshotService {
 					where: { id: snapshotId },
 					data: {
 						sourceSnapshotId: null,
+						billingSnapshotId: null,
+						billingSnapshotSha256: null,
+						billingSnapshotAsOf: null,
 						asOf: null,
 						recipientCount: 0,
 						sha256: null,
@@ -244,18 +266,25 @@ export class AudienceSnapshotService {
 	private async streamExport(
 		campaign: Campaign,
 		snapshot: AudienceSnapshot,
-		onChunk: (destinations: readonly string[]) => Promise<void>
+		onChunk: (destinations: readonly string[]) => Promise<void>,
+		abortSignal: AbortSignal
 	): Promise<ExportedAudienceMetadata> {
+		const activeSubscribers =
+			campaign.audience === 'ACTIVE_SUBSCRIPTION'
+				? await this.readActiveSubscriberSnapshot(abortSignal)
+				: null;
 		const response = await this.coreInternal.exportAudience(
 			snapshot.channel,
-			snapshot.audience
+			abortSignal
 		);
 		const reader = response.body!.getReader();
 		const decoder = new TextDecoder();
-		const hasher = createHash('sha256');
+		const sourceHasher = createHash('sha256');
+		const resultHasher = createHash('sha256');
 		const batchSize = this.importBatchSize();
 		let destinations: string[] = [];
 		let totalCount = 0;
+		let sourceTotalCount = 0;
 		let buffer = '';
 		let header:
 			| {
@@ -270,7 +299,11 @@ export class AudienceSnapshotService {
 					sha256: string;
 			  }
 			| undefined;
-		let previousDestination: string | null = null;
+		let previousSourcePair: {
+			destination: string;
+			userId: string;
+		} | null = null;
+		let previousResultDestination: string | null = null;
 
 		const flush = async () => {
 			if (!destinations.length) return;
@@ -297,7 +330,7 @@ export class AudienceSnapshotService {
 				]);
 				if (
 					record.type !== 'snapshot' ||
-					record.schemaVersion !== 1 ||
+					record.schemaVersion !== 2 ||
 					typeof record.snapshotId !== 'string' ||
 					!UUID_PATTERN.test(record.snapshotId) ||
 					typeof record.asOf !== 'string' ||
@@ -306,15 +339,8 @@ export class AudienceSnapshotService {
 					throw new Error('Audience export snapshot header is invalid');
 				}
 				const criteria = this.record(record.criteria);
-				this.exactKeys(criteria, ['channel', 'audience']);
-				const expectedAudience =
-					campaign.audience === 'ACTIVE_SUBSCRIPTION'
-						? 'ACTIVE_SUBSCRIBERS'
-						: 'ALL';
-				if (
-					criteria.channel !== snapshot.channel ||
-					criteria.audience !== expectedAudience
-				) {
+				this.exactKeys(criteria, ['channel']);
+				if (criteria.channel !== snapshot.channel) {
 					throw new Error(
 						'Audience export criteria do not match campaign'
 					);
@@ -355,9 +381,12 @@ export class AudienceSnapshotService {
 			if (trailer) {
 				throw new Error('Audience export contains data after the trailer');
 			}
-			this.exactKeys(record, ['type', 'destination']);
+			this.exactKeys(record, ['type', 'userId', 'destination']);
 			if (
 				record.type !== 'recipient' ||
+				typeof record.userId !== 'string' ||
+				!record.userId ||
+				record.userId.length > 255 ||
 				typeof record.destination !== 'string'
 			) {
 				throw new Error('Audience export recipient is invalid');
@@ -367,22 +396,39 @@ export class AudienceSnapshotService {
 				record.destination
 			);
 			if (
-				previousDestination !== null &&
-				destination <= previousDestination
+				previousSourcePair !== null &&
+				(destination < previousSourcePair.destination ||
+					(destination === previousSourcePair.destination &&
+						record.userId <= previousSourcePair.userId))
 			) {
 				throw new Error(
-					'Audience export recipients must be sorted and unique'
+					'Audience export recipients must be sorted and unique by destination and user ID'
 				);
 			}
-			previousDestination = destination;
-			totalCount += 1;
-			if (totalCount > MAX_AUDIENCE_RECIPIENTS) {
+			previousSourcePair = {
+				destination,
+				userId: record.userId
+			};
+			sourceTotalCount += 1;
+			if (sourceTotalCount > MAX_AUDIENCE_RECIPIENTS) {
 				throw new Error(
 					`Audience export exceeds ${MAX_AUDIENCE_RECIPIENTS} recipients`
 				);
 			}
+			sourceHasher.update(
+				`${snapshot.channel}\u0000${destination}\u0000${record.userId}\n`
+			);
+			if (
+				activeSubscribers &&
+				!activeSubscribers.userIds.has(record.userId)
+			) {
+				return;
+			}
+			if (destination === previousResultDestination) return;
+			previousResultDestination = destination;
+			totalCount += 1;
 			destinations.push(destination);
-			hasher.update(`${snapshot.channel}\u0000${destination}\n`);
+			resultHasher.update(`${snapshot.channel}\u0000${destination}\n`);
 			if (destinations.length >= batchSize) await flush();
 		};
 
@@ -414,11 +460,11 @@ export class AudienceSnapshotService {
 				'Audience export must contain snapshot header and complete trailer'
 			);
 		}
-		const digest = hasher.digest('hex');
+		const sourceDigest = sourceHasher.digest('hex');
 		if (
 			trailer.snapshotId !== header.snapshotId ||
-			trailer.totalCount !== totalCount ||
-			trailer.sha256 !== digest
+			trailer.totalCount !== sourceTotalCount ||
+			trailer.sha256 !== sourceDigest
 		) {
 			throw new Error(
 				'Audience export count or SHA-256 verification failed'
@@ -427,10 +473,232 @@ export class AudienceSnapshotService {
 		await flush();
 		return {
 			sourceSnapshotId: header.snapshotId,
-			asOf: header.asOf,
-			sha256: digest,
-			totalCount
+			asOf:
+				activeSubscribers && activeSubscribers.asOf > header.asOf
+					? activeSubscribers.asOf
+					: header.asOf,
+			sha256: resultHasher.digest('hex'),
+			totalCount,
+			billingSnapshotId: activeSubscribers?.snapshotId || null,
+			billingSnapshotSha256: activeSubscribers?.sha256 || null,
+			billingSnapshotAsOf: activeSubscribers?.asOf || null
 		};
+	}
+
+	private async readActiveSubscriberSnapshot(
+		abortSignal: AbortSignal
+	): Promise<ActiveSubscriberSnapshot> {
+		const response =
+			await this.coreInternal.exportActiveSubscriberIds(abortSignal);
+		const reader = response.body!.getReader();
+		const decoder = new TextDecoder();
+		const hasher = createHash('sha256');
+		const userIds = new Set<string>();
+		let buffer = '';
+		let previousUserId: string | null = null;
+		let header: { snapshotId: string; asOf: Date } | null = null;
+		let trailer: {
+			snapshotId: string;
+			totalCount: number;
+			sha256: string;
+		} | null = null;
+
+		const processLine = (line: string) => {
+			if (!line) return;
+			let value: unknown;
+			try {
+				value = JSON.parse(line);
+			} catch {
+				throw new Error('Active subscriber export contains invalid JSON');
+			}
+			const record = this.record(value);
+			if (!header) {
+				this.exactKeys(record, [
+					'type',
+					'schemaVersion',
+					'snapshotId',
+					'asOf'
+				]);
+				if (
+					record.type !== 'snapshot' ||
+					record.schemaVersion !== 1 ||
+					typeof record.snapshotId !== 'string' ||
+					!UUID_PATTERN.test(record.snapshotId) ||
+					typeof record.asOf !== 'string' ||
+					!Number.isFinite(Date.parse(record.asOf))
+				) {
+					throw new Error('Active subscriber snapshot header is invalid');
+				}
+				header = {
+					snapshotId: record.snapshotId,
+					asOf: new Date(record.asOf)
+				};
+				return;
+			}
+			if (record.type === 'complete') {
+				if (trailer) {
+					throw new Error('Active subscriber export has two trailers');
+				}
+				this.exactKeys(record, [
+					'type',
+					'snapshotId',
+					'totalCount',
+					'sha256'
+				]);
+				if (
+					typeof record.snapshotId !== 'string' ||
+					typeof record.totalCount !== 'number' ||
+					!Number.isInteger(record.totalCount) ||
+					record.totalCount < 0 ||
+					typeof record.sha256 !== 'string' ||
+					!/^[0-9a-f]{64}$/.test(record.sha256)
+				) {
+					throw new Error('Active subscriber snapshot trailer is invalid');
+				}
+				trailer = {
+					snapshotId: record.snapshotId,
+					totalCount: record.totalCount,
+					sha256: record.sha256
+				};
+				return;
+			}
+			if (trailer) {
+				throw new Error('Active subscriber export has data after trailer');
+			}
+			this.exactKeys(record, ['type', 'userId']);
+			if (
+				record.type !== 'subscriber' ||
+				typeof record.userId !== 'string' ||
+				!record.userId ||
+				record.userId.length > 255 ||
+				(previousUserId !== null && record.userId <= previousUserId)
+			) {
+				throw new Error('Active subscriber record is invalid');
+			}
+			previousUserId = record.userId;
+			userIds.add(record.userId);
+			if (userIds.size > MAX_AUDIENCE_RECIPIENTS) {
+				throw new Error(
+					`Active subscriber export exceeds ${MAX_AUDIENCE_RECIPIENTS} users`
+				);
+			}
+			hasher.update(`${record.userId}\n`, 'utf8');
+		};
+
+		try {
+			for (;;) {
+				const chunk = await reader.read();
+				buffer += decoder.decode(chunk.value, { stream: !chunk.done });
+				let newline = buffer.indexOf('\n');
+				while (newline >= 0) {
+					processLine(buffer.slice(0, newline).replace(/\r$/, ''));
+					buffer = buffer.slice(newline + 1);
+					newline = buffer.indexOf('\n');
+				}
+				if (chunk.done) break;
+			}
+			if (buffer) processLine(buffer.replace(/\r$/, ''));
+		} catch (error) {
+			await reader.cancel().catch(() => undefined);
+			throw error;
+		} finally {
+			reader.releaseLock();
+		}
+
+		const digest = hasher.digest('hex');
+		const completedHeader = header as {
+			snapshotId: string;
+			asOf: Date;
+		} | null;
+		const completedTrailer = trailer as {
+			snapshotId: string;
+			totalCount: number;
+			sha256: string;
+		} | null;
+		if (
+			!completedHeader ||
+			!completedTrailer ||
+			completedTrailer.snapshotId !== completedHeader.snapshotId ||
+			completedTrailer.totalCount !== userIds.size ||
+			completedTrailer.sha256 !== digest
+		) {
+			throw new Error(
+				'Active subscriber snapshot count or SHA-256 verification failed'
+			);
+		}
+		return {
+			snapshotId: completedHeader.snapshotId,
+			asOf: completedHeader.asOf,
+			sha256: digest,
+			userIds
+		};
+	}
+
+	private async withImportLeaseHeartbeat<T>(
+		campaignId: string,
+		snapshotId: string,
+		importToken: string,
+		operation: (abortSignal: AbortSignal) => Promise<T>
+	): Promise<T> {
+		const operationAbort = new AbortController();
+		const heartbeatStop = new AbortController();
+		const operationPromise = operation(operationAbort.signal);
+		const heartbeatPromise = this.runImportLeaseHeartbeat(
+			campaignId,
+			snapshotId,
+			importToken,
+			heartbeatStop.signal
+		).catch(error => {
+			operationAbort.abort();
+			throw error;
+		});
+		const heartbeatFailure = heartbeatPromise.then(
+			() => new Promise<never>(() => undefined),
+			error => Promise.reject(error)
+		);
+
+		try {
+			return await Promise.race([operationPromise, heartbeatFailure]);
+		} finally {
+			heartbeatStop.abort();
+			operationAbort.abort();
+			await Promise.allSettled([operationPromise, heartbeatPromise]);
+		}
+	}
+
+	private async runImportLeaseHeartbeat(
+		campaignId: string,
+		snapshotId: string,
+		importToken: string,
+		abortSignal: AbortSignal
+	): Promise<void> {
+		while (!abortSignal.aborted) {
+			try {
+				await wait(SNAPSHOT_IMPORT_HEARTBEAT_MS, undefined, {
+					signal: abortSignal
+				});
+			} catch (error) {
+				if (abortSignal.aborted) return;
+				throw error;
+			}
+			const renewed = await this.prisma.audienceSnapshot.updateMany({
+				where: {
+					id: snapshotId,
+					campaignId,
+					status: AudienceSnapshotStatus.CREATING,
+					importToken,
+					campaign: { status: CampaignStatus.SNAPSHOTTING }
+				},
+				data: {
+					importLeaseExpiresAt: new Date(
+						Date.now() + SNAPSHOT_IMPORT_LEASE_MS
+					)
+				}
+			});
+			if (renewed.count !== 1) {
+				throw new SnapshotImportCancelledError();
+			}
+		}
 	}
 
 	private async persistImportChunk(
@@ -548,6 +816,9 @@ export class AudienceSnapshotService {
 					},
 					data: {
 						sourceSnapshotId: metadata.sourceSnapshotId,
+						billingSnapshotId: metadata.billingSnapshotId,
+						billingSnapshotSha256: metadata.billingSnapshotSha256,
+						billingSnapshotAsOf: metadata.billingSnapshotAsOf,
 						asOf: metadata.asOf,
 						status: AudienceSnapshotStatus.READY,
 						recipientCount: metadata.totalCount,
@@ -602,6 +873,9 @@ export class AudienceSnapshotService {
 					},
 					data: {
 						sourceSnapshotId: null,
+						billingSnapshotId: null,
+						billingSnapshotSha256: null,
+						billingSnapshotAsOf: null,
 						asOf: null,
 						recipientCount: 0,
 						sha256: null,

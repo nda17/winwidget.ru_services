@@ -94,11 +94,6 @@ describe('RabbitMqService topology', () => {
 			'manual.limit-telegram'
 		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.notification.telegram-destination-unavailable',
-			'winwidget.events',
-			'notification.telegram.destination-unavailable.v1'
-		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
 			'winwidget.maintenance.database-backup.dead-letter',
 			'winwidget.events',
 			'database-backup.dead-letter'
@@ -133,6 +128,22 @@ describe('RabbitMqService topology', () => {
 
 		const assertedQueues = assertQueue.mock.calls.map(([queue]) => queue);
 		const boundQueues = bindQueue.mock.calls.map(([queue]) => queue);
+		const identityDestinationQueue =
+			'winwidget.notification.telegram-destination-unavailable';
+		expect(
+			assertedQueues.some(
+				queue =>
+					queue === identityDestinationQueue ||
+					queue.startsWith(`${identityDestinationQueue}.`)
+			)
+		).toBe(false);
+		expect(
+			boundQueues.some(
+				queue =>
+					queue === identityDestinationQueue ||
+					queue.startsWith(`${identityDestinationQueue}.`)
+			)
+		).toBe(false);
 		for (const provider of ['webhook', 'bitrix24', 'amo-crm']) {
 			const providerQueue = `winwidget.lead-integration.${provider}`;
 			expect(

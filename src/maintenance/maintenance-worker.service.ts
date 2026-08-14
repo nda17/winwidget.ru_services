@@ -709,6 +709,8 @@ export class MaintenanceWorkerService
 				return 'widgets';
 			case SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP:
 				return 'billing';
+			case SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP:
+				return 'identity';
 		}
 	}
 

@@ -70,6 +70,9 @@ describe('IntegrationWorkerService', () => {
 		const outboxCreateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const transaction = {
 			$queryRaw: jest.fn().mockResolvedValue([]),
+			user: {
+				findUnique: jest.fn().mockResolvedValue(null)
+			},
 			integrationDeliveryFailure: {
 				upsert: failureUpsert,
 				updateMany: failureUpdateMany
@@ -298,6 +301,49 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createIdentityAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-08-14T12:00:00.000Z',
+					correlationId: 'request:identity-user-update-42',
+					actorId: 'admin-user-id',
+					actorSnapshot: {
+						name: 'Admin',
+						email: 'admin@example.com'
+					},
+					section: 'USERS',
+					action: 'USER_UPDATE',
+					description: 'Обновлён пользователь',
+					entity: {
+						type: 'user',
+						id: 'owner-1',
+						label: 'Owner',
+						targetUserId: 'owner-1',
+						targetSnapshot: {
+							name: 'Owner',
+							email: 'owner@example.com'
+						}
+					},
+					metadata: {
+						changedFields: ['name'],
+						passwordChanged: false,
+						requestIp: '203.0.113.8',
+						requestUserAgent: 'identity-contract-agent'
+					}
+				})
+			),
+			fields: { routingKey: 'admin.audit.identity.v1' },
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	const createWidgetsCloseAuditMessage = (): ConsumeMessage =>
 		({
 			content: Buffer.from(
@@ -345,11 +391,11 @@ describe('IntegrationWorkerService', () => {
 			'subscription-expiry-telegram'
 		]);
 		expect(MONOLITH_INTEGRATION_KINDS).toEqual([
-			'telegram-destination-unavailable',
 			'campaign-admin-audit',
 			'reporting-admin-audit',
 			'widgets-admin-audit',
 			'billing-admin-audit',
+			'identity-admin-audit',
 			'billing-payment-projection',
 			'billing-subscription-projection',
 			'billing-affiliate-projection',
@@ -639,6 +685,61 @@ describe('IntegrationWorkerService', () => {
 				where: expect.objectContaining({
 					eventId: '11111111-1111-4111-8111-111111111111',
 					integration: 'widgets-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
+	it('writes an Identity audit snapshot and delivered receipt atomically', async () => {
+		const { service, rabbitMq, delivery, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'identity-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createIdentityAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			{
+				adminId: 'admin-user-id',
+				adminName: 'Admin',
+				adminEmail: 'admin@example.com',
+				section: 'USERS',
+				action: 'USER_UPDATE',
+				description: 'Обновлён пользователь',
+				entityType: 'user',
+				entityId: 'owner-1',
+				entityLabel: 'Owner',
+				targetUserId: 'owner-1',
+				targetUserName: 'Owner',
+				targetUserEmail: 'owner@example.com',
+				ip: '203.0.113.8',
+				userAgent: 'identity-contract-agent',
+				metadata: {
+					eventId: '11111111-1111-4111-8111-111111111111',
+					correlationId: 'request:identity-user-update-42',
+					changedFields: ['name'],
+					passwordChanged: false
+				}
+			}
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					integration: 'identity-admin-audit',
 					status: IntegrationDeliveryReceiptStatus.PROCESSING
 				}),
 				data: expect.objectContaining({

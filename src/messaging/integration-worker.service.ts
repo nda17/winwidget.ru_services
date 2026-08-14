@@ -2,6 +2,7 @@ import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service'
 import { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import { BillingReadProjectionService } from '@/billing-boundary/billing-read-projection.service';
 import { CampaignAdminAuditEventPayload } from '@/messaging/campaign-admin-audit-event';
+import { IdentityAdminAuditEventPayload } from '@/messaging/identity-admin-audit-event';
 import {
 	BillingAdminAuditEventPayload,
 	BillingProjectionEventPayload
@@ -68,6 +69,7 @@ type WorkerEventPayload =
 	| ReportingAdminAuditEventPayload
 	| WidgetsAdminAuditEventPayload
 	| BillingAdminAuditEventPayload
+	| IdentityAdminAuditEventPayload
 	| BillingProjectionEventPayload;
 
 interface DeliveryFailureLockRow {
@@ -303,6 +305,21 @@ export class IntegrationWorkerService
 				return;
 			}
 			receiptClaim = claim.lockedAt;
+
+			if (kind === 'identity-admin-audit') {
+				await this.deliverIdentityAdminAudit(
+					payload as IdentityAdminAuditEventPayload,
+					eventId,
+					receiptClaim
+				);
+				receiptClaim = null;
+				await this.runCleanup();
+				this.rabbitMq.ack(message);
+				this.logger.log(
+					`Identity admin audit delivered eventId=${eventId}`
+				);
+				return;
+			}
 
 			if (kind === 'campaign-admin-audit') {
 				await this.deliverCampaignAdminAudit(
@@ -901,9 +918,9 @@ export class IntegrationWorkerService
 				userAgent:
 					typeof requestUserAgent === 'string' ? requestUserAgent : null,
 				metadata: {
+					...auditMetadata,
 					eventId: payload.eventId,
-					correlationId: payload.correlationId,
-					...auditMetadata
+					correlationId: payload.correlationId
 				}
 			});
 
@@ -932,6 +949,76 @@ export class IntegrationWorkerService
 				where: {
 					eventId,
 					integration: 'billing-admin-audit',
+					resolvedAt: null
+				},
+				data: {
+					resolvedAt: new Date(),
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
+				}
+			});
+		});
+	}
+
+	private async deliverIdentityAdminAudit(
+		payload: IdentityAdminAuditEventPayload,
+		eventId: string,
+		lockedAt: Date
+	): Promise<void> {
+		const { requestIp, requestUserAgent, ...auditMetadata } =
+			payload.metadata;
+		await this.prisma.$transaction(async transaction => {
+			await this.adminEventLog.recordInTransaction(transaction, {
+				adminId: payload.actorId,
+				adminName: payload.actorSnapshot.name,
+				adminEmail: payload.actorSnapshot.email,
+				section: payload.section,
+				action: payload.action,
+				description: payload.description,
+				entityType: payload.entity.type,
+				entityId: payload.entity.id,
+				entityLabel: payload.entity.label,
+				targetUserId: payload.entity.targetUserId,
+				targetUserName: payload.entity.targetSnapshot.name,
+				targetUserEmail: payload.entity.targetSnapshot.email,
+				ip: typeof requestIp === 'string' ? requestIp : null,
+				userAgent:
+					typeof requestUserAgent === 'string' ? requestUserAgent : null,
+				metadata: {
+					...auditMetadata,
+					eventId: payload.eventId,
+					correlationId: payload.correlationId
+				}
+			});
+
+			const delivered =
+				await transaction.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration: 'identity-admin-audit',
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.DELIVERED,
+						deliveredAt: new Date(),
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			if (delivered.count !== 1) {
+				throw new Error(
+					`Identity audit receipt claim was lost eventId=${eventId}`
+				);
+			}
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: {
+					eventId,
+					integration: 'identity-admin-audit',
 					resolvedAt: null
 				},
 				data: {

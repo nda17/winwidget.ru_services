@@ -7,6 +7,10 @@ import {
 	BillingMessagingInternalApiError
 } from '@/messaging/billing-messaging-client.service';
 import {
+	IdentityMessagingClientService,
+	IdentityMessagingInternalApiError
+} from '@/messaging/identity-messaging-client.service';
+import {
 	CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
 	CORE_OWNED_MESSAGING_KINDS,
 	getManualRetryRoutingKey,
@@ -95,7 +99,8 @@ export class MessagingAdminService {
 		private readonly notificationDelivery: NotificationDeliveryClientService,
 		private readonly widgetsFailures: WidgetsDeliveryFailuresClientService,
 		private readonly billingState?: BillingCoreStateService,
-		private readonly billingMessaging?: BillingMessagingClientService
+		private readonly billingMessaging?: BillingMessagingClientService,
+		private readonly identityMessaging?: IdentityMessagingClientService
 	) {}
 
 	async getOverview() {
@@ -118,7 +123,8 @@ export class MessagingAdminService {
 			queues,
 			notificationDeliveryOverview,
 			widgetsOverview,
-			billingOverview
+			billingOverview,
+			identityOverview
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
 				by: ['status'],
@@ -217,7 +223,22 @@ export class MessagingAdminService {
 									? error.message
 									: 'Billing недоступен'
 						}))
-				: Promise.resolve({ overview: null, error: null })
+				: Promise.resolve({ overview: null, error: null }),
+			this.identityMessaging
+				? this.identityMessaging
+						.getOverview()
+						.then(overview => ({ overview, error: null }))
+						.catch(error => ({
+							overview: null,
+							error:
+								error instanceof Error
+									? error.message
+									: 'Identity недоступен'
+						}))
+				: Promise.resolve({
+						overview: null,
+						error: 'Identity messaging boundary is unavailable'
+					})
 		]);
 
 		const outbox = Object.fromEntries(
@@ -242,6 +263,11 @@ export class MessagingAdminService {
 			outbox.PUBLISHING += billingOverview.overview.outbox.PROCESSING;
 			outbox.PUBLISHED += billingOverview.overview.outbox.PUBLISHED;
 		}
+		if (identityOverview.overview) {
+			for (const status of Object.values(OutboxEventStatus)) {
+				outbox[status] += identityOverview.overview.outbox[status] || 0;
+			}
+		}
 
 		const oldestPendingAt =
 			[
@@ -254,7 +280,8 @@ export class MessagingAdminService {
 					: null,
 				notificationDeliveryOverview.overview?.oldestPendingAt || null,
 				widgetsOverview.overview?.oldestPendingAt || null,
-				billingOverview.overview?.oldestPendingAt || null
+				billingOverview.overview?.oldestPendingAt || null,
+				identityOverview.overview?.oldestPendingAt || null
 			]
 				.filter((value): value is string => Boolean(value))
 				.sort()[0] || null;
@@ -374,6 +401,22 @@ export class MessagingAdminService {
 				])
 			);
 		}
+		for (const service of [
+			'identity-api',
+			'identity-worker',
+			'identity-outbox-publisher'
+		]) {
+			serviceHeartbeats.push(
+				identityOverview.overview?.heartbeats.find(
+					heartbeat => heartbeat.service === service
+				) || {
+					service,
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null
+				}
+			);
+		}
 
 		return {
 			generatedAt: new Date().toISOString(),
@@ -383,23 +426,27 @@ export class MessagingAdminService {
 				unresolvedFailures +
 				(notificationDeliveryOverview.overview?.unresolvedFailures || 0) +
 				(widgetsOverview.overview?.unresolvedFailures || 0) +
-				(billingOverview.overview?.unresolvedFailures || 0),
+				(billingOverview.overview?.unresolvedFailures || 0) +
+				(identityOverview.overview?.unresolvedFailures || 0),
 			retryingFailures:
 				retryingFailures +
 				(notificationDeliveryOverview.overview?.retryingFailures || 0) +
 				(widgetsOverview.overview?.retryingFailures || 0) +
-				(billingOverview.overview?.retryingFailures || 0),
+				(billingOverview.overview?.retryingFailures || 0) +
+				(identityOverview.overview?.retryingFailures || 0),
 			deliveredLast24Hours:
 				deliveredLast24Hours +
 				completedBackupsLast24Hours +
 				(notificationDeliveryOverview.overview?.deliveredLast24Hours ||
 					0) +
 				(widgetsOverview.overview?.deliveredLast24Hours || 0) +
-				(billingOverview.overview?.deliveredLast24Hours || 0),
+				(billingOverview.overview?.deliveredLast24Hours || 0) +
+				(identityOverview.overview?.deliveredLast24Hours || 0),
 			rabbitMqError: queues.error,
 			notificationDeliveryError: notificationDeliveryOverview.error,
 			widgetsError: widgetsOverview.error,
 			billingError: billingOverview.error,
+			identityError: identityOverview.error,
 			heartbeats: serviceHeartbeats,
 			queues: queues.queues.map(queue => ({
 				name: queue.name,
@@ -415,7 +462,8 @@ export class MessagingAdminService {
 	async getFailures(page = 1, limit = 20, filters: FailureFilters = {}) {
 		const billingOwner = await this.isBillingOwner();
 		const coreFailureKinds = this.getCoreFailureKinds();
-		const archivedFailureKinds = this.getArchivedFailureKinds();
+		const archivedFailureKinds =
+			this.getArchivedFailureKinds(billingOwner);
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =
 			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
@@ -436,11 +484,13 @@ export class MessagingAdminService {
 				normalizedIntegration as (typeof coreFailureKinds)[number]
 			);
 		const queryArchivedCore =
-			billingOwner &&
-			(!normalizedIntegration ||
-				archivedFailureKinds.includes(
-					normalizedIntegration as (typeof archivedFailureKinds)[number]
-				));
+			!normalizedIntegration ||
+			archivedFailureKinds.includes(
+				normalizedIntegration as (typeof archivedFailureKinds)[number]
+			);
+		const queryIdentity =
+			!normalizedIntegration ||
+			normalizedIntegration === 'telegram-destination-unavailable';
 		const billingConsumer = normalizedIntegration
 			? PUBLIC_INTEGRATION_TO_BILLING_CONSUMER[normalizedIntegration]
 			: undefined;
@@ -463,55 +513,76 @@ export class MessagingAdminService {
 			coreWhere && archivedWhere
 				? { OR: [coreWhere, archivedWhere] }
 				: coreWhere || archivedWhere;
-		const [coreResult, notificationResult, widgetsResult, billingResult] =
-			await Promise.all([
-				where
-					? this.prisma.$transaction([
-							this.prisma.integrationDeliveryFailure.findMany({
-								where,
-								orderBy: [{ failedAt: 'desc' }, { id: 'desc' }],
-								take: windowSize
-							}),
-							this.prisma.integrationDeliveryFailure.count({ where })
-						])
-					: Promise.resolve([[], 0] as const),
-				queryNotificationDelivery
-					? this.notificationDelivery.getFailures(1, windowSize, filters)
-					: Promise.resolve({
-							items: [],
-							total: 0,
-							page: 1,
-							limit: windowSize,
-							totalPages: 1
+		const [
+			coreResult,
+			notificationResult,
+			widgetsResult,
+			billingResult,
+			identityResult
+		] = await Promise.all([
+			where
+				? this.prisma.$transaction([
+						this.prisma.integrationDeliveryFailure.findMany({
+							where,
+							orderBy: [{ failedAt: 'desc' }, { id: 'desc' }],
+							take: windowSize
 						}),
-				queryWidgets
-					? this.widgetsFailures.getFailures(1, windowSize, filters)
-					: Promise.resolve({
-							items: [],
-							total: 0,
-							page: 1,
-							limit: windowSize,
-							totalPages: 1
-						}),
-				queryBilling
-					? this.requireBillingMessaging().getFailures(1, windowSize, {
-							...(billingConsumer ? { consumer: billingConsumer } : {}),
-							...(filters.category?.trim()
-								? { category: filters.category.trim() }
-								: {}),
-							...(filters.status?.trim()
-								? { status: filters.status.trim() }
-								: {})
-						})
-					: Promise.resolve({
-							schemaVersion: 1 as const,
-							items: [],
-							total: 0,
-							page: 1,
-							limit: windowSize,
-							totalPages: 1
-						})
-			]);
+						this.prisma.integrationDeliveryFailure.count({ where })
+					])
+				: Promise.resolve([[], 0] as const),
+			queryNotificationDelivery
+				? this.notificationDelivery.getFailures(1, windowSize, filters)
+				: Promise.resolve({
+						items: [],
+						total: 0,
+						page: 1,
+						limit: windowSize,
+						totalPages: 1
+					}),
+			queryWidgets
+				? this.widgetsFailures.getFailures(1, windowSize, filters)
+				: Promise.resolve({
+						items: [],
+						total: 0,
+						page: 1,
+						limit: windowSize,
+						totalPages: 1
+					}),
+			queryBilling
+				? this.requireBillingMessaging().getFailures(1, windowSize, {
+						...(billingConsumer ? { consumer: billingConsumer } : {}),
+						...(filters.category?.trim()
+							? { category: filters.category.trim() }
+							: {}),
+						...(filters.status?.trim()
+							? { status: filters.status.trim() }
+							: {})
+					})
+				: Promise.resolve({
+						schemaVersion: 1 as const,
+						items: [],
+						total: 0,
+						page: 1,
+						limit: windowSize,
+						totalPages: 1
+					}),
+			queryIdentity && this.identityMessaging
+				? this.identityMessaging.getFailures(1, windowSize, {
+						...(filters.category?.trim()
+							? { category: filters.category.trim() }
+							: {}),
+						...(filters.status?.trim()
+							? { status: filters.status.trim() }
+							: {})
+					})
+				: Promise.resolve({
+						items: [],
+						total: 0,
+						page: 1,
+						limit: windowSize,
+						totalPages: 1
+					})
+		]);
 		const coreItems = coreResult[0].map(item =>
 			this.serializeFailure(item)
 		);
@@ -519,6 +590,7 @@ export class MessagingAdminService {
 			...coreItems,
 			...notificationResult.items,
 			...widgetsResult.items,
+			...identityResult.items,
 			...billingResult.items.map(item =>
 				this.serializeBillingFailure(item)
 			)
@@ -533,7 +605,8 @@ export class MessagingAdminService {
 			coreResult[1] +
 			notificationResult.total +
 			widgetsResult.total +
-			billingResult.total;
+			billingResult.total +
+			identityResult.total;
 
 		return {
 			items,
@@ -551,12 +624,14 @@ export class MessagingAdminService {
 			if (result) return result;
 			throw new NotFoundException('Ошибка доставки не найдена');
 		}
-		if (billingOwner && (await this.isArchivedCoreFailure(id))) {
-			throw new ConflictException(
-				'Архивная ошибка доступна только для чтения'
-			);
-		}
 		if (!(await this.isCoreOwnedFailure(id))) {
+			if (await this.isArchivedCoreFailure(id, billingOwner)) {
+				throw new ConflictException(
+					'Архивная ошибка доступна только для чтения'
+				);
+			}
+			const identityResult = await this.retryIdentityFailure(id, adminId);
+			if (identityResult) return identityResult;
 			const notificationDeliveryResult =
 				await this.retryNotificationDeliveryFailure(id, adminId, request);
 			if (notificationDeliveryResult) return notificationDeliveryResult;
@@ -713,13 +788,18 @@ export class MessagingAdminService {
 			if (result) return result;
 			throw new NotFoundException('Ошибка доставки не найдена');
 		}
-		if (billingOwner && (await this.isArchivedCoreFailure(id))) {
-			throw new ConflictException(
-				'Архивная ошибка доступна только для чтения'
-			);
-		}
-
 		if (!(await this.isCoreOwnedFailure(id))) {
+			if (await this.isArchivedCoreFailure(id, billingOwner)) {
+				throw new ConflictException(
+					'Архивная ошибка доступна только для чтения'
+				);
+			}
+			const identityResult = await this.closeIdentityFailure(
+				id,
+				adminId,
+				normalizedComment
+			);
+			if (identityResult) return identityResult;
 			const notificationDeliveryResult =
 				await this.closeNotificationDeliveryFailure(
 					id,
@@ -1123,8 +1203,12 @@ export class MessagingAdminService {
 		return [...CORE_OWNED_MESSAGING_KINDS];
 	}
 
-	private getArchivedFailureKinds(): CoreMessagingKind[] {
-		return [...CORE_ARCHIVED_FAILURE_HISTORY_KINDS];
+	private getArchivedFailureKinds(
+		billingOwner: boolean
+	): CoreMessagingKind[] {
+		return CORE_ARCHIVED_FAILURE_HISTORY_KINDS.filter(
+			kind => kind !== 'notification-delivery-outcome' || billingOwner
+		);
 	}
 
 	private async isBillingOwner(): Promise<boolean> {
@@ -1277,13 +1361,16 @@ export class MessagingAdminService {
 		return Boolean(failure);
 	}
 
-	private async isArchivedCoreFailure(id: string): Promise<boolean> {
+	private async isArchivedCoreFailure(
+		id: string,
+		billingOwner: boolean
+	): Promise<boolean> {
 		const failure = await this.prisma.integrationDeliveryFailure.findFirst(
 			{
 				where: {
 					id,
 					integration: {
-						in: this.getArchivedFailureKinds()
+						in: this.getArchivedFailureKinds(billingOwner)
 					}
 				},
 				select: { id: true }
@@ -1368,6 +1455,55 @@ export class MessagingAdminService {
 			throw new ConflictException(error.message);
 		}
 		throw new ServiceUnavailableException('Billing не выполнил операцию');
+	}
+
+	private async retryIdentityFailure(id: string, adminId: string) {
+		if (!this.identityMessaging) return null;
+		try {
+			return await this.identityMessaging.retryFailure(id, adminId);
+		} catch (error) {
+			if (
+				error instanceof IdentityMessagingInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
+			this.rethrowIdentityMessagingError(error);
+		}
+	}
+
+	private async closeIdentityFailure(
+		id: string,
+		adminId: string,
+		comment: string
+	) {
+		if (!this.identityMessaging) return null;
+		try {
+			return await this.identityMessaging.closeFailure(
+				id,
+				adminId,
+				comment
+			);
+		} catch (error) {
+			if (
+				error instanceof IdentityMessagingInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
+			this.rethrowIdentityMessagingError(error);
+		}
+	}
+
+	private rethrowIdentityMessagingError(error: unknown): never {
+		if (!(error instanceof IdentityMessagingInternalApiError)) throw error;
+		if (error.statusCode === 400) {
+			throw new BadRequestException(error.message);
+		}
+		if (error.statusCode === 409) {
+			throw new ConflictException(error.message);
+		}
+		throw new ServiceUnavailableException('Identity не выполнил операцию');
 	}
 
 	private async retryWidgetsFailure(id: string, adminId: string) {
@@ -1494,7 +1630,9 @@ export class MessagingAdminService {
 			[SCHEDULED_JOB_TYPES.WIDGETS_DATABASE_BACKUP]:
 				'Backup PostgreSQL Widgets',
 			[SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP]:
-				'Backup PostgreSQL Billing'
+				'Backup PostgreSQL Billing',
+			[SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP]:
+				'Backup PostgreSQL Identity'
 		};
 		const scheduledJobName = jobPayload.jobType
 			? scheduledJobNames[jobPayload.jobType] || null

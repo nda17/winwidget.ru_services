@@ -139,6 +139,11 @@ describe('DatabaseRestoreQueueService', () => {
 					id: 'billing',
 					label: 'Billing',
 					confirmation: 'ВОССТАНОВИТЬ BILLING'
+				},
+				{
+					id: 'identity',
+					label: 'Identity',
+					confirmation: 'ВОССТАНОВИТЬ IDENTITY'
 				}
 			]
 		});

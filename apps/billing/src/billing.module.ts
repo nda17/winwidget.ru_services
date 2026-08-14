@@ -2,6 +2,9 @@ import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { BillingAuthGuard } from './auth/billing-auth.guard';
 import { BillingInternalGuard } from './auth/billing-internal.guard';
+import { BillingCampaignsGuard } from './auth/billing-campaigns.guard';
+import { BillingIdentityGuard } from './auth/billing-identity.guard';
+import { BillingCampaignAudienceService } from './domain/billing-campaign-audience.service';
 import { InternalCommandsService } from './domain/internal-commands.service';
 import { BillingMessagingAdminService } from './domain/billing-messaging-admin.service';
 import { PaymentDomainService } from './domain/payment-domain.service';
@@ -11,7 +14,9 @@ import { TariffAffiliateService } from './domain/tariff-affiliate.service';
 import { BillingHealthController } from './health/billing-health.controller';
 import { BillingHealthService } from './health/billing-health.service';
 import { AffiliateController } from './http/affiliate.controller';
+import { BillingCampaignAudienceController } from './http/billing-campaign-audience.controller';
 import { BillingInternalController } from './http/billing-internal.controller';
+import { BillingIdentityController } from './http/billing-identity.controller';
 import { PaymentController } from './http/payment.controller';
 import { SubscriptionController } from './http/subscription.controller';
 import { TariffPricesController } from './http/tariff-prices.controller';
@@ -30,14 +35,30 @@ import { BillingRuntimeModule } from './runtime/billing-runtime.module';
 import { parseBillingProcessRole } from './runtime/billing-runtime.service';
 import { BillingSchedulerService } from './scheduler/billing-scheduler.service';
 
+const BILLING_PROCESS_ROLE = parseBillingProcessRole(
+	process.env.BILLING_PROCESS_ROLE
+);
+
 const API_CONTROLLERS =
-	parseBillingProcessRole(process.env.BILLING_PROCESS_ROLE) === 'api'
+	BILLING_PROCESS_ROLE === 'api'
 		? [
 				PaymentController,
 				SubscriptionController,
 				TariffPricesController,
 				AffiliateController,
+				BillingCampaignAudienceController,
+				BillingIdentityController,
 				BillingInternalController
+			]
+		: [];
+
+const API_PROVIDERS =
+	BILLING_PROCESS_ROLE === 'api'
+		? [
+				BillingAuthGuard,
+				BillingInternalGuard,
+				BillingCampaignsGuard,
+				BillingIdentityGuard
 			]
 		: [];
 
@@ -49,8 +70,7 @@ const API_CONTROLLERS =
 	],
 	controllers: [BillingHealthController, ...API_CONTROLLERS],
 	providers: [
-		BillingAuthGuard,
-		BillingInternalGuard,
+		...API_PROVIDERS,
 		CoreInternalClient,
 		WidgetsInternalClient,
 		PaymentDomainService,
@@ -58,6 +78,7 @@ const API_CONTROLLERS =
 		SubscriptionDomainService,
 		TariffAffiliateService,
 		InternalCommandsService,
+		BillingCampaignAudienceService,
 		BillingMessagingAdminService,
 		BillingProjectionService,
 		PaymentMethodCryptoService,

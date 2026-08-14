@@ -606,32 +606,47 @@ export class SubscriptionDomainService {
 		trialDays: number,
 		registeredAt: Date
 	) {
-		const existing = await this.prisma.subscription.findUnique({
+		return this.prisma.$transaction(transaction =>
+			this.ensureTrialInTransaction(
+				transaction,
+				userId,
+				trialDays,
+				registeredAt
+			)
+		);
+	}
+
+	async ensureTrialInTransaction(
+		transaction: Prisma.TransactionClient,
+		userId: string,
+		trialDays: number,
+		registeredAt: Date
+	) {
+		await transaction.$executeRaw(Prisma.sql`
+			SELECT pg_advisory_xact_lock(
+				hashtextextended(${`billing-subscription-user:${userId}`}, 0)
+			)
+		`);
+		const existing = await transaction.subscription.findUnique({
 			where: { userId }
 		});
 		if (existing) return existing;
-		return this.prisma.$transaction(async transaction => {
-			const inside = await transaction.subscription.findUnique({
-				where: { userId }
-			});
-			if (inside) return inside;
-			const sequence = await this.nextSequence(transaction);
-			const created = await transaction.subscription.create({
-				data: {
-					userId,
-					plan: Plan.TRIAL,
-					status: SubscriptionStatus.ACTIVE,
-					startsAt: registeredAt,
-					expiresAt: new Date(
-						registeredAt.getTime() + trialDays * 24 * 60 * 60 * 1000
-					),
-					aggregateVersion: 1n,
-					sourceSequence: sequence
-				}
-			});
-			await this.emitSubscriptionState(transaction, created);
-			return created;
+		const sequence = await this.nextSequence(transaction);
+		const created = await transaction.subscription.create({
+			data: {
+				userId,
+				plan: Plan.TRIAL,
+				status: SubscriptionStatus.ACTIVE,
+				startsAt: registeredAt,
+				expiresAt: new Date(
+					registeredAt.getTime() + trialDays * 24 * 60 * 60 * 1000
+				),
+				aggregateVersion: 1n,
+				sourceSequence: sequence
+			}
 		});
+		await this.emitSubscriptionState(transaction, created);
+		return created;
 	}
 
 	private async emitSubscriptionState(

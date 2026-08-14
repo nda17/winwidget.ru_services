@@ -433,10 +433,12 @@ model BillingScheduledRun {
 }
 
 model BillingCommandReceipt {
-  commandId   String   @id @map("command_id")
-  commandType String   @map("command_type")
-  result      Json
-  createdAt   DateTime @default(now()) @map("created_at")
+  commandId          String   @id @map("command_id")
+  commandType        String   @map("command_type")
+  requestHash        String   @default("0000000000000000000000000000000000000000000000000000000000000000") @map("request_hash") @db.Char(64)
+  requestHashVersion Int      @default(0) @map("request_hash_version") @db.SmallInt
+  result             Json
+  createdAt          DateTime @default(now()) @map("created_at")
 
   @@index([commandType, createdAt])
   @@map("command_receipts")

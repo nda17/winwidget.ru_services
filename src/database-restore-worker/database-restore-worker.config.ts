@@ -29,7 +29,8 @@ const PASSWORD_FILE_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE',
 	reporting: 'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE',
 	widgets: 'DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE',
-	billing: 'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE'
+	billing: 'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE',
+	identity: 'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE'
 };
 
 const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
@@ -38,7 +39,8 @@ const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_PORT',
 	reporting: 'DATABASE_RESTORE_REPORTING_PORT',
 	widgets: 'DATABASE_RESTORE_WIDGETS_PORT',
-	billing: 'DATABASE_RESTORE_BILLING_PORT'
+	billing: 'DATABASE_RESTORE_BILLING_PORT',
+	identity: 'DATABASE_RESTORE_IDENTITY_PORT'
 };
 
 export class DatabaseRestoreWorkerConfig {
@@ -131,6 +133,7 @@ export class DatabaseRestoreWorkerConfig {
 					'_prisma_migrations',
 					'User',
 					'admin_event_logs',
+					'identity_core_source_state',
 					'outbox_events',
 					'reporting_producer_state'
 				]
@@ -237,6 +240,29 @@ export class DatabaseRestoreWorkerConfig {
 					'service_identity',
 					'payments',
 					'subscriptions',
+					'outbox_events'
+				]
+			}),
+			identity: this.target({
+				target: 'identity',
+				label: 'Identity',
+				port: this.requireTargetPort(environment, 'identity'),
+				database: 'winwidget_identity',
+				schema: 'identity',
+				adminRole: 'winwidget_identity_admin',
+				migrationRole: 'winwidget_identity_migration',
+				runtimeRoles: ['winwidget_identity_runtime'],
+				backupRole: 'winwidget_identity_backup',
+				passwordFile: passwordFiles.identity,
+				migrationsDirectory: join(
+					migrationsRoot,
+					'apps/identity/prisma/migrations'
+				),
+				anchorTables: [
+					'_prisma_migrations',
+					'service_identity',
+					'users',
+					'auth_identities',
 					'outbox_events'
 				]
 			})

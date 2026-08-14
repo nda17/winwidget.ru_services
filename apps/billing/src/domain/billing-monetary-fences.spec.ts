@@ -116,6 +116,7 @@ describe('Billing monetary operation fences', () => {
 
 	it('blocks identity deactivation while an expired provider lease remains ambiguous', async () => {
 		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
 			$queryRaw: jest.fn().mockResolvedValue([]),
 			billingCommandReceipt: {
 				findUnique: jest.fn().mockResolvedValue(null),

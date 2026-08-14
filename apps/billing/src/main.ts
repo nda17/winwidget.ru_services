@@ -47,6 +47,34 @@ async function bootstrap(): Promise<void> {
 				method: RequestMethod.PATCH
 			},
 			{
+				path: 'internal/v1/billing/users/:userId/admin-overview',
+				method: RequestMethod.GET
+			},
+			{
+				path: 'internal/v1/billing/directory/subscription-user-ids',
+				method: RequestMethod.GET
+			},
+			{
+				path: 'internal/v1/identity/billing/users/revoke-entitlements',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/identity/billing/trials/ensure',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/identity/billing/users/:userId/admin-overview',
+				method: RequestMethod.GET
+			},
+			{
+				path: 'internal/v1/identity/billing/directory/subscription-user-ids',
+				method: RequestMethod.GET
+			},
+			{
+				path: 'internal/v1/billing/campaigns/active-subscriber-ids',
+				method: RequestMethod.POST
+			},
+			{
 				path: 'internal/v1/billing/messaging/overview',
 				method: RequestMethod.GET
 			},

@@ -146,10 +146,13 @@ describe('CoreInternalClient auth contract', () => {
 		global.fetch = originalFetch;
 	});
 
-	const createClient = (baseUrl = 'http://127.0.0.1:4200') => {
+	const createClient = (
+		baseUrl = 'http://127.0.0.1:4900',
+		identityToken = token
+	) => {
 		const values: Record<string, string> = {
-			BILLING_CORE_INTERNAL_BASE_URL: baseUrl,
-			BILLING_INTERNAL_TOKEN: token,
+			IDENTITY_INTERNAL_BASE_URL: baseUrl,
+			IDENTITY_BILLING_TOKEN: identityToken,
 			BILLING_INTERNAL_TIMEOUT_MS: '10000'
 		};
 		const config = {
@@ -172,6 +175,15 @@ describe('CoreInternalClient auth contract', () => {
 		expect(() => createClient('http://127.0.0.1:4200/path')).toThrow(
 			'must be an exact loopback origin'
 		);
+	});
+
+	it('rejects the documented Identity CI placeholder', () => {
+		expect(() =>
+			createClient(
+				'http://127.0.0.1:4900',
+				'ci_identity_billing_token_at_least_32_chars'
+			)
+		).toThrow('IDENTITY_BILLING_TOKEN');
 	});
 
 	it('proxies a bounded exact Core 401 response', async () => {
@@ -201,6 +213,18 @@ describe('CoreInternalClient auth contract', () => {
 				code: 'invalid_session'
 			}
 		});
+	});
+
+	it('maps a rejected Billing credential to 503 instead of user logout', async () => {
+		global.fetch = jest
+			.fn()
+			.mockResolvedValue(
+				new Response(null, { status: 403 })
+			) as typeof fetch;
+
+		await expect(
+			createClient().introspect('Bearer access-token')
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
 	});
 
 	it('rejects an expanded or malformed actor response', async () => {

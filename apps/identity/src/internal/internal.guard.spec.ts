@@ -1,0 +1,99 @@
+import { ForbiddenException, type ExecutionContext } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Reflector } from '@nestjs/core';
+import {
+	IDENTITY_INTERNAL_SERVICES,
+	IdentityInternalGuard,
+	type IdentityInternalService
+} from './internal.guard';
+
+function credential(service: IdentityInternalService): string {
+	return `test-${service}-${'x'.repeat(48)}`;
+}
+
+function environment(): Record<string, string> {
+	return Object.fromEntries(
+		IDENTITY_INTERNAL_SERVICES.map(service => [
+			`IDENTITY_${service.toUpperCase()}_TOKEN`,
+			credential(service)
+		])
+	);
+}
+
+function context(
+	service: IdentityInternalService,
+	token: string,
+	remoteAddress = '127.0.0.1'
+): ExecutionContext {
+	const headers: Record<string, string> = {
+		'x-winwidget-service': service,
+		'x-winwidget-internal-token': token
+	};
+	const request = {
+		header: (name: string) => headers[name.toLowerCase()],
+		socket: { remoteAddress }
+	};
+	return {
+		getHandler: () => function handler() {},
+		getClass: () => class Controller {},
+		switchToHttp: () => ({ getRequest: () => request })
+	} as unknown as ExecutionContext;
+}
+
+function guard(allowed: IdentityInternalService[]) {
+	const reflector = {
+		getAllAndOverride: jest.fn().mockReturnValue(allowed)
+	} as unknown as Reflector;
+	return new IdentityInternalGuard(
+		new ConfigService(environment()),
+		reflector
+	);
+}
+
+describe('IdentityInternalGuard', () => {
+	it.each(IDENTITY_INTERNAL_SERVICES)(
+		'allows the matching scoped %s credential from loopback',
+		service => {
+			expect(
+				guard([service]).canActivate(context(service, credential(service)))
+			).toBe(true);
+		}
+	);
+
+	it('rejects a valid token from another service scope with 403', () => {
+		expect(() =>
+			guard(['core']).canActivate(context('core', credential('billing')))
+		).toThrow(ForbiddenException);
+	});
+
+	it('rejects non-loopback callers before token comparison', () => {
+		expect(() =>
+			guard(['core']).canActivate(
+				context('core', credential('core'), '10.10.0.25')
+			)
+		).toThrow('Invalid internal credentials');
+	});
+
+	it('rejects exact CI placeholders and pairwise-equal credentials at startup', () => {
+		const placeholder = environment();
+		placeholder.IDENTITY_CORE_TOKEN =
+			'ci_identity_core_token_at_least_32_chars';
+		expect(
+			() =>
+				new IdentityInternalGuard(
+					new ConfigService(placeholder),
+					new Reflector()
+				)
+		).toThrow('non-placeholder secret');
+
+		const duplicate = environment();
+		duplicate.IDENTITY_BILLING_TOKEN = duplicate.IDENTITY_CORE_TOKEN;
+		expect(
+			() =>
+				new IdentityInternalGuard(
+					new ConfigService(duplicate),
+					new Reflector()
+				)
+		).toThrow('pairwise distinct');
+	});
+});

@@ -1,6 +1,7 @@
 import {
 	BILLING_DATABASE_BACKUP_DELAY_MINUTES,
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
+	IDENTITY_DATABASE_BACKUP_DELAY_MINUTES,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
 	REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
 	WIDGETS_DATABASE_BACKUP_DELAY_MINUTES
@@ -9,7 +10,6 @@ import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
 import {
 	PASSWORD_SALT_ROUNDS,
-	TELEGRAM_AUTH_NOT_CONFIGURED,
 	TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED,
 	TELEGRAM_NOTIFICATION_WEBHOOK_SECRET_INVALID,
 	TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED,
@@ -68,7 +68,7 @@ export type TelegramSupportBotWebhookUpdate = {
 	message?: TelegramMessage;
 };
 
-export type TelegramWebhookBot = 'info' | 'auth' | 'support';
+export type TelegramWebhookBot = 'info' | 'support';
 
 interface TelegramWebhookConfig {
 	bot: TelegramWebhookBot;
@@ -139,7 +139,8 @@ export const ensureReportingBackupScheduleSeparated = (
 		(backupMinutes + CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
 		(backupMinutes + REPORTING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
 		(backupMinutes + WIDGETS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
-		(backupMinutes + BILLING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
+		(backupMinutes + BILLING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
+		(backupMinutes + IDENTITY_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
 	];
 
 	if (
@@ -381,19 +382,17 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async reinstallWebhooks() {
-		const [info, auth, support] = await Promise.all([
+		const [info, support] = await Promise.all([
 			this.reinstallWebhook('info'),
-			this.reinstallWebhook('auth'),
 			this.reinstallWebhook('support')
 		]);
 
-		return { items: [info, auth, support] };
+		return { items: [info, support] };
 	}
 
 	async getWebhookStatuses() {
 		const configs: TelegramWebhookConfig[] = [
 			this.getWebhookConfig('info'),
-			this.getWebhookConfig('auth'),
 			this.getWebhookConfig('support')
 		];
 
@@ -415,7 +414,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			expectedWebhooks: webhookHost
 				? {
 						info: `${webhookHost}/api/v1/telegram-bot/webhook`,
-						auth: `${webhookHost}/api/v1/telegram-auth/webhook`,
 						support: `${webhookHost}/api/v1/telegram-bot/support-webhook`
 					}
 				: null,
@@ -628,21 +626,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private getWebhookConfig(
 		bot: TelegramWebhookBot
 	): TelegramWebhookConfig {
-		if (bot === 'auth') {
-			return {
-				bot,
-				title: 'Auth_bot',
-				token: process.env.TELEGRAM_AUTH_BOT_TOKEN,
-				username: process.env.TELEGRAM_AUTH_BOT_USERNAME?.trim().replace(
-					/^@/,
-					''
-				),
-				secret: process.env.TELEGRAM_AUTH_BOT_WEBHOOK_SECRET,
-				path: 'telegram-auth/webhook',
-				allowedUpdates: ['message', 'callback_query']
-			};
-		}
-
 		if (bot === 'support') {
 			return {
 				bot,
@@ -704,7 +687,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private async ensureWebhooksOnStartup() {
 		const configs: TelegramWebhookConfig[] = [
 			this.getWebhookConfig('info'),
-			this.getWebhookConfig('auth'),
 			this.getWebhookConfig('support')
 		];
 
@@ -743,7 +725,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		this.webhookHealthcheckInProgress = true;
 		const configs: TelegramWebhookConfig[] = [
 			this.getWebhookConfig('info'),
-			this.getWebhookConfig('auth'),
 			this.getWebhookConfig('support')
 		];
 
@@ -977,10 +958,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	private getBotNotConfiguredError(bot: TelegramWebhookBot) {
-		if (bot === 'auth') {
-			return TELEGRAM_AUTH_NOT_CONFIGURED;
-		}
-
 		if (bot === 'support') {
 			return TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED;
 		}
@@ -1057,6 +1034,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupTime,
 			BILLING_DATABASE_BACKUP_DELAY_MINUTES
 		);
+		const identityDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			IDENTITY_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryChatId: settings.dailySummaryChatId,
@@ -1087,6 +1068,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				BILLING_DATABASE_BACKUP_DELAY_MINUTES,
 			billingDatabaseBackupTime,
 			billingDatabaseBackupTimeLabel: `${billingDatabaseBackupTime} МСК`,
+			identityDatabaseBackupDelayMinutes:
+				IDENTITY_DATABASE_BACKUP_DELAY_MINUTES,
+			identityDatabaseBackupTime,
+			identityDatabaseBackupTimeLabel: `${identityDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:

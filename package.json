@@ -22,6 +22,7 @@
 		"start:integration-worker": "node dist/src/integration-worker-main.js",
 		"start:maintenance-worker": "node dist/src/maintenance-worker-main.js",
 		"start:database-restore-worker": "node dist/src/database-restore-worker-main.js",
+		"start:identity-core-cutover": "node dist/src/identity-core-cutover-main.js",
 		"start:api-gateway": "pnpm --dir apps/api-gateway run start:local",
 		"lint": "eslint \"{src,libs,test}/**/*.ts\" --fix",
 		"test": "jest",

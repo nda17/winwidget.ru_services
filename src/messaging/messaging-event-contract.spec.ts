@@ -209,6 +209,205 @@ describe('messaging event contract', () => {
 		).toThrow('cannot be consumed by campaign-admin-audit');
 	});
 
+	it('accepts a strict Identity audit with immutable user snapshots', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-14T12:00:00.000Z',
+			correlationId: 'request:identity-user-update-42',
+			actorId: 'admin-user-id',
+			actorSnapshot: {
+				name: 'Admin',
+				email: 'admin@example.com'
+			},
+			section: 'USERS',
+			action: 'USER_UPDATE',
+			description: 'Обновлён пользователь',
+			entity: {
+				type: 'user',
+				id: 'owner-1',
+				label: 'owner-1',
+				targetUserId: 'owner-1',
+				targetSnapshot: {
+					name: 'Owner',
+					email: 'owner@example.com'
+				}
+			},
+			metadata: {
+				changedFields: ['name'],
+				passwordChanged: false,
+				requestIp: '203.0.113.8'
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.identity.v1',
+				messageId: MESSAGE_ID,
+				kind: 'identity-admin-audit'
+			})
+		).not.toThrow();
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.billing.v1',
+				messageId: MESSAGE_ID,
+				kind: 'identity-admin-audit'
+			})
+		).toThrow('Routing key');
+	});
+
+	it('rejects malformed or credential-bearing Identity audits', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-14T12:00:00.000Z',
+			correlationId: 'request:identity-settings-42',
+			actorId: 'admin-user-id',
+			actorSnapshot: { name: null, email: null },
+			section: 'SITE_SETTINGS',
+			action: 'SITE_SETTINGS_UPDATE',
+			description: 'Обновлены настройки авторизации',
+			entity: {
+				type: 'auth-settings',
+				id: 'singleton',
+				label: null,
+				targetUserId: null,
+				targetSnapshot: { name: null, email: null }
+			},
+			metadata: { changedFields: ['recaptchaEnabled'] }
+		};
+		const assertPayload = (value: unknown) =>
+			assertMessagingEventContract(value, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.identity.v1',
+				messageId: MESSAGE_ID,
+				kind: 'identity-admin-audit'
+			});
+
+		expect(() => assertPayload(payload)).not.toThrow();
+		expect(() =>
+			assertPayload({
+				...payload,
+				action: 'IDENTITY_AUTH_SETTINGS_UPDATE'
+			})
+		).toThrow('payload.action is invalid');
+		expect(() =>
+			assertPayload({
+				...payload,
+				metadata: { token: 'must-not-cross-the-boundary' }
+			})
+		).toThrow('forbidden');
+	});
+
+	it('accepts the Identity verification cleanup audit in TASKS', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-14T12:00:00.000Z',
+			correlationId: 'request:identity-cleanup-42',
+			actorId: 'admin-user-id',
+			actorSnapshot: { name: 'Admin', email: 'admin@example.com' },
+			section: 'TASKS',
+			action: 'VERIFICATION_CHALLENGE_CLEANUP_RUN',
+			description: 'Очистка verification challenges',
+			entity: {
+				type: 'manual_task',
+				id: 'verificationChallengeCleanup',
+				label: 'Очистка verification challenges',
+				targetUserId: null,
+				targetSnapshot: { name: null, email: null }
+			},
+			metadata: {
+				taskId: 'verificationChallengeCleanup',
+				title: 'Очистка verification challenges',
+				affectedCount: 2,
+				message: 'Удалено 2 просроченных verification challenge(s).',
+				executedAt: '2026-08-14T12:00:00.000Z'
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.identity.v1',
+				messageId: MESSAGE_ID,
+				kind: 'identity-admin-audit'
+			})
+		).not.toThrow();
+	});
+
+	it('accepts only the scoped Identity messaging retry and close metadata', () => {
+		const base = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-14T12:00:00.000Z',
+			correlationId: 'request:identity-messaging-42',
+			actorId: 'admin-user-id',
+			actorSnapshot: { name: 'Admin', email: 'admin@example.com' },
+			section: 'MESSAGING',
+			description: 'Изменено состояние ошибки доставки',
+			entity: {
+				type: 'integration_delivery_failure',
+				id: 'failure-id',
+				label: 'telegram-destination-unavailable',
+				targetUserId: null,
+				targetSnapshot: { name: null, email: null }
+			}
+		};
+		const assertPayload = (value: unknown) =>
+			assertMessagingEventContract(value, {
+				eventType: base.eventType,
+				routingKey: 'admin.audit.identity.v1',
+				messageId: MESSAGE_ID,
+				kind: 'identity-admin-audit'
+			});
+
+		expect(() =>
+			assertPayload({
+				...base,
+				action: 'MESSAGING_FAILURE_RETRY',
+				metadata: {
+					integration: 'telegram-destination-unavailable',
+					requestId: 'request-id'
+				}
+			})
+		).not.toThrow();
+		expect(() =>
+			assertPayload({
+				...base,
+				action: 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
+				metadata: {
+					integration: 'telegram-destination-unavailable',
+					comment: 'Проверено вручную'
+				}
+			})
+		).not.toThrow();
+		expect(() =>
+			assertPayload({
+				...base,
+				action: 'MESSAGING_FAILURE_RETRY',
+				metadata: { integration: 'email' }
+			})
+		).toThrow('payload.metadata.integration is invalid');
+		expect(() =>
+			assertPayload({
+				...base,
+				action: 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
+				metadata: {
+					integration: 'telegram-destination-unavailable',
+					comment: 'Проверено вручную',
+					refreshTokenHash: 'must-not-cross-the-boundary'
+				}
+			})
+		).toThrow('forbidden');
+	});
+
 	it('rejects Reporting audit values, PII, and unstable changedFields', () => {
 		const payload = {
 			schemaVersion: 1,

@@ -46,6 +46,11 @@ import {
 	BillingAdminAuditAction
 } from '@/messaging/billing-events';
 import { CAMPAIGN_ADMIN_AUDIT_ACTIONS } from '@/messaging/campaign-admin-audit-event';
+import {
+	IDENTITY_ADMIN_AUDIT_ACTIONS,
+	IDENTITY_ADMIN_AUDIT_SECTIONS,
+	IdentityAdminAuditAction
+} from '@/messaging/identity-admin-audit-event';
 import { OUTCOME_NOTIFICATION_DELIVERY_KINDS } from '@/messaging/notification-delivery-event';
 import {
 	REPORTING_ADMIN_AUDIT_ACTIONS,
@@ -80,13 +85,23 @@ const FORBIDDEN_PAYLOAD_KEYS = new Set([
 	'apikey',
 	'authorization',
 	'bitrix24webhookurl',
+	'clientsecret',
+	'codehash',
 	'databaseurl',
+	'oauthaccesstoken',
+	'oauthrefreshtoken',
+	'otp',
+	'otpcode',
 	'password',
+	'passwordhash',
+	'privatekey',
 	'refreshtoken',
+	'refreshtokenhash',
 	'secret',
 	'secretkey',
 	'smtppassword',
 	'telegrambottoken',
+	'telegramwebhooksecret',
 	'token',
 	'webhookurl'
 ]);
@@ -1656,7 +1671,341 @@ const assertBillingAdminAuditEvent = (
 	return 'billing-admin-audit';
 };
 
+const assertIdentityAdminAuditSnapshot = (
+	value: unknown,
+	path: string
+): void => {
+	const snapshot = assertRecord(value, path);
+	assertExactKeys(snapshot, ['name', 'email'], [], path);
+	assertOptionalString(snapshot.name, `${path}.name`);
+	assertOptionalString(snapshot.email, `${path}.email`);
+};
+
+const IDENTITY_USER_UPDATE_FIELDS = [
+	'name',
+	'avatarPath',
+	'email',
+	'phone',
+	'isPhoneVerified',
+	'isUser',
+	'isAdmin',
+	'isDev',
+	'password'
+] as const;
+
+const IDENTITY_AUTH_SETTING_FIELDS = [
+	'recaptchaEnabled',
+	'googleAuthEnabled',
+	'yandexAuthEnabled',
+	'githubAuthEnabled',
+	'vkAuthEnabled',
+	'telegramAuthEnabled'
+] as const;
+
+const IDENTITY_AUDIT_REQUEST_METADATA_KEYS = [
+	'requestId',
+	'requestIp',
+	'requestUserAgent'
+] as const;
+
+const assertIdentityChangedFields = (
+	value: unknown,
+	allowed: readonly string[]
+): void => {
+	if (
+		!Array.isArray(value) ||
+		value.length < 1 ||
+		value.length > allowed.length ||
+		value.some(
+			field => typeof field !== 'string' || !allowed.includes(field)
+		) ||
+		new Set(value).size !== value.length
+	) {
+		throw new Error('payload.metadata.changedFields is invalid');
+	}
+};
+
+const assertIdentityAdminAuditMetadata = (
+	action: IdentityAdminAuditAction,
+	value: unknown
+): void => {
+	const metadata = assertRecord(value, 'payload.metadata');
+	switch (action) {
+		case 'USER_UPDATE':
+			assertExactKeys(
+				metadata,
+				['changedFields', 'passwordChanged'],
+				IDENTITY_AUDIT_REQUEST_METADATA_KEYS,
+				'payload.metadata'
+			);
+			assertIdentityChangedFields(
+				metadata.changedFields,
+				IDENTITY_USER_UPDATE_FIELDS
+			);
+			assertBoolean(
+				metadata.passwordChanged,
+				'payload.metadata.passwordChanged'
+			);
+			break;
+		case 'USER_TOGGLE_ACTIVATION':
+		case 'USER_SOFT_DELETE':
+		case 'USER_RESTORE': {
+			assertExactKeys(
+				metadata,
+				['operation'],
+				['commandId', ...IDENTITY_AUDIT_REQUEST_METADATA_KEYS],
+				'payload.metadata'
+			);
+			const allowedOperations =
+				action === 'USER_TOGGLE_ACTIVATION'
+					? ['ACTIVATE', 'DEACTIVATE']
+					: action === 'USER_SOFT_DELETE'
+						? ['DELETE']
+						: ['RESTORE'];
+			assertEnumValue(
+				metadata.operation,
+				allowedOperations,
+				'payload.metadata.operation'
+			);
+			if ('commandId' in metadata) {
+				assertUuid(metadata.commandId, 'payload.metadata.commandId');
+			}
+			break;
+		}
+		case 'SITE_SETTINGS_UPDATE':
+			assertExactKeys(
+				metadata,
+				['changedFields'],
+				[
+					...IDENTITY_AUTH_SETTING_FIELDS,
+					...IDENTITY_AUDIT_REQUEST_METADATA_KEYS
+				],
+				'payload.metadata'
+			);
+			assertIdentityChangedFields(
+				metadata.changedFields,
+				IDENTITY_AUTH_SETTING_FIELDS
+			);
+			for (const key of IDENTITY_AUTH_SETTING_FIELDS) {
+				if (key in metadata) {
+					assertBoolean(metadata[key], `payload.metadata.${key}`);
+				}
+			}
+			break;
+		case 'TELEGRAM_BOT_SETTINGS_UPDATE':
+			assertExactKeys(
+				metadata,
+				['changedFields'],
+				[
+					'authTelegramBotTokenConfigured',
+					'authTelegramBotUsernameConfigured',
+					...IDENTITY_AUDIT_REQUEST_METADATA_KEYS
+				],
+				'payload.metadata'
+			);
+			assertIdentityChangedFields(metadata.changedFields, [
+				'authTelegramBotTokenConfigured',
+				'authTelegramBotUsernameConfigured'
+			]);
+			for (const key of [
+				'authTelegramBotTokenConfigured',
+				'authTelegramBotUsernameConfigured'
+			] as const) {
+				if (key in metadata) {
+					assertBoolean(metadata[key], `payload.metadata.${key}`);
+				}
+			}
+			break;
+		case 'TELEGRAM_BOT_WEBHOOK_REINSTALL':
+			assertExactKeys(
+				metadata,
+				[
+					'bot',
+					'title',
+					'webhookUrl',
+					'dropPendingUpdates',
+					'allowedUpdates',
+					'secretConfigured',
+					'installedAt'
+				],
+				IDENTITY_AUDIT_REQUEST_METADATA_KEYS,
+				'payload.metadata'
+			);
+			if (metadata.bot !== 'auth') {
+				throw new Error('payload.metadata.bot is invalid');
+			}
+			assertString(metadata.title, 'payload.metadata.title', {
+				maxLength: 100
+			});
+			assertString(metadata.webhookUrl, 'payload.metadata.webhookUrl', {
+				maxLength: 2048
+			});
+			assertBoolean(
+				metadata.dropPendingUpdates,
+				'payload.metadata.dropPendingUpdates'
+			);
+			if (
+				!Array.isArray(metadata.allowedUpdates) ||
+				metadata.allowedUpdates.some(
+					item => !['message', 'callback_query'].includes(String(item))
+				)
+			) {
+				throw new Error('payload.metadata.allowedUpdates is invalid');
+			}
+			assertBoolean(
+				metadata.secretConfigured,
+				'payload.metadata.secretConfigured'
+			);
+			assertIsoDate(metadata.installedAt, 'payload.metadata.installedAt');
+			break;
+		case 'VERIFICATION_CHALLENGE_CLEANUP_RUN':
+			assertExactKeys(
+				metadata,
+				['taskId', 'title', 'affectedCount', 'message', 'executedAt'],
+				IDENTITY_AUDIT_REQUEST_METADATA_KEYS,
+				'payload.metadata'
+			);
+			if (metadata.taskId !== 'verificationChallengeCleanup') {
+				throw new Error('payload.metadata.taskId is invalid');
+			}
+			assertString(metadata.title, 'payload.metadata.title', {
+				maxLength: 255
+			});
+			if (
+				!Number.isSafeInteger(metadata.affectedCount) ||
+				Number(metadata.affectedCount) < 0
+			) {
+				throw new Error('payload.metadata.affectedCount is invalid');
+			}
+			assertString(metadata.message, 'payload.metadata.message', {
+				maxLength: 2000
+			});
+			assertIsoDate(metadata.executedAt, 'payload.metadata.executedAt');
+			break;
+		case 'MESSAGING_FAILURE_RETRY':
+			assertExactKeys(
+				metadata,
+				['integration'],
+				IDENTITY_AUDIT_REQUEST_METADATA_KEYS,
+				'payload.metadata'
+			);
+			if (metadata.integration !== 'telegram-destination-unavailable') {
+				throw new Error('payload.metadata.integration is invalid');
+			}
+			break;
+		case 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY':
+			assertExactKeys(
+				metadata,
+				['integration', 'comment'],
+				IDENTITY_AUDIT_REQUEST_METADATA_KEYS,
+				'payload.metadata'
+			);
+			if (metadata.integration !== 'telegram-destination-unavailable') {
+				throw new Error('payload.metadata.integration is invalid');
+			}
+			assertString(metadata.comment, 'payload.metadata.comment', {
+				maxLength: 1000
+			});
+			if (
+				typeof metadata.comment !== 'string' ||
+				metadata.comment !== metadata.comment.trim() ||
+				metadata.comment.length < 3
+			) {
+				throw new Error('payload.metadata.comment is invalid');
+			}
+			break;
+	}
+	if ('requestId' in metadata) {
+		assertString(metadata.requestId, 'payload.metadata.requestId', {
+			maxLength: 128
+		});
+	}
+	for (const key of ['requestIp', 'requestUserAgent'] as const) {
+		if (key in metadata) {
+			assertString(metadata[key], `payload.metadata.${key}`, {
+				maxLength: key === 'requestIp' ? 128 : 500
+			});
+		}
+	}
+};
+
+const assertIdentityAdminAuditEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'occurredAt',
+		'correlationId',
+		'actorId',
+		'actorSnapshot',
+		'section',
+		'action',
+		'description',
+		'entity',
+		'metadata'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE
+	) {
+		throw new Error('Invalid Identity admin audit contract version');
+	}
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	if (
+		typeof payload.correlationId !== 'string' ||
+		!SAFE_CONTEXT_ID_PATTERN.test(payload.correlationId)
+	) {
+		throw new Error('payload.correlationId is invalid');
+	}
+	assertIdentifier(payload.actorId, 'payload.actorId');
+	assertIdentityAdminAuditSnapshot(
+		payload.actorSnapshot,
+		'payload.actorSnapshot'
+	);
+	if (
+		!IDENTITY_ADMIN_AUDIT_SECTIONS.includes(
+			payload.section as (typeof IDENTITY_ADMIN_AUDIT_SECTIONS)[number]
+		)
+	) {
+		throw new Error('payload.section is invalid');
+	}
+	if (
+		!IDENTITY_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as IdentityAdminAuditAction
+		)
+	) {
+		throw new Error('payload.action is invalid');
+	}
+	const action = payload.action as IdentityAdminAuditAction;
+	assertString(payload.description, 'payload.description', {
+		maxLength: 2000
+	});
+	const entity = assertRecord(payload.entity, 'payload.entity');
+	assertExactKeys(
+		entity,
+		['type', 'id', 'label', 'targetUserId', 'targetSnapshot'],
+		[],
+		'payload.entity'
+	);
+	assertIdentifier(entity.type, 'payload.entity.type');
+	assertIdentifier(entity.id, 'payload.entity.id');
+	assertOptionalString(entity.label, 'payload.entity.label');
+	assertOptionalString(entity.targetUserId, 'payload.entity.targetUserId');
+	assertIdentityAdminAuditSnapshot(
+		entity.targetSnapshot,
+		'payload.entity.targetSnapshot'
+	);
+	assertIdentityAdminAuditMetadata(action, payload.metadata);
+	return 'identity-admin-audit';
+};
+
 const assertAdminAuditEvent = (payload: JsonRecord): IntegrationKind => {
+	if ('actorSnapshot' in payload) {
+		return assertIdentityAdminAuditEvent(payload);
+	}
 	if (
 		BILLING_ADMIN_AUDIT_ACTIONS.includes(
 			payload.action as BillingAdminAuditAction

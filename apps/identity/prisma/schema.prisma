@@ -1,0 +1,427 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/identity-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("IDENTITY_DATABASE_URL")
+  schemas  = ["identity"]
+}
+
+model User {
+  id                           String                        @id @default(cuid())
+  name                         String?
+  password                     String
+  avatarPath                   String?                       @map("avatar_path")
+  status                       UserStatus                    @default(ACTIVE)
+  personalDataConsentRevokedAt DateTime?                     @map("personal_data_consent_revoked_at")
+  deletedAt                    DateTime?                     @map("deleted_at")
+  rights                       Role[]                        @default([USER])
+  authIdentities               AuthIdentity[]
+  telegramNotificationChannel  TelegramNotificationChannel?
+  verificationChallenges       VerificationChallenge[]
+  sessions                     UserSession[]
+  createdAt                    DateTime                      @default(now()) @map("created_at")
+  updatedAt                    DateTime                      @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([deletedAt])
+  @@map("users")
+  @@schema("identity")
+}
+
+model UserSession {
+  id               String    @id @db.Uuid
+  userId           String    @map("user_id")
+  refreshTokenHash String    @map("refresh_token_hash")
+  userAgent        String?   @map("user_agent") @db.VarChar(500)
+  ipAddress        String?   @map("ip_address") @db.VarChar(128)
+  expiresAt        DateTime  @map("expires_at")
+  lastUsedAt       DateTime  @default(now()) @map("last_used_at")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("user_sessions")
+  @@schema("identity")
+}
+
+model AuthIdentity {
+  id         String           @id @default(cuid())
+  userId     String           @map("user_id")
+  type       AuthIdentityType
+  value      String
+  verifiedAt DateTime?        @map("verified_at")
+  createdAt  DateTime         @default(now()) @map("created_at")
+  updatedAt  DateTime         @updatedAt @map("updated_at")
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([type, value])
+  @@unique([userId, type])
+  @@index([userId])
+  @@map("auth_identities")
+  @@schema("identity")
+}
+
+model TelegramNotificationChannel {
+  id             String    @id @default(cuid())
+  userId         String    @unique @map("user_id")
+  chatId         String    @unique @map("chat_id")
+  telegramUserId String?   @unique @map("telegram_user_id")
+  username       String?
+  firstName      String?   @map("first_name")
+  lastName       String?   @map("last_name")
+  isActive       Boolean   @default(true) @map("is_active")
+  connectedAt    DateTime  @default(now()) @map("connected_at")
+  disabledAt     DateTime? @map("disabled_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([isActive])
+  @@map("telegram_notification_channels")
+  @@schema("identity")
+}
+
+model VerificationChallenge {
+  id                String                       @id @default(cuid())
+  userId            String?                      @map("user_id")
+  type              VerificationChallengeType
+  purpose           VerificationChallengePurpose
+  value             String
+  passwordHash      String?                      @map("password_hash")
+  codeHash          String                       @map("code_hash")
+  attempts          Int                          @default(0)
+  telegramUserId    String?                      @map("telegram_user_id")
+  telegramChatId    String?                      @map("telegram_chat_id")
+  telegramUsername  String?                      @map("telegram_username")
+  telegramFirstName String?                      @map("telegram_first_name")
+  telegramLastName  String?                      @map("telegram_last_name")
+  expiresAt         DateTime                     @map("expires_at")
+  lastSentAt        DateTime                     @default(now()) @map("last_sent_at")
+  createdAt         DateTime                     @default(now()) @map("created_at")
+  updatedAt         DateTime                     @updatedAt @map("updated_at")
+  user              User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([userId, type, purpose])
+  @@unique([type, purpose, value])
+  @@index([telegramUserId])
+  @@index([expiresAt])
+  @@map("verification_challenges")
+  @@schema("identity")
+}
+
+model AuthSettings {
+  id                  String   @id @default("singleton")
+  recaptchaEnabled    Boolean  @default(true) @map("recaptcha_enabled")
+  googleAuthEnabled   Boolean  @default(true) @map("google_auth_enabled")
+  yandexAuthEnabled   Boolean  @default(true) @map("yandex_auth_enabled")
+  githubAuthEnabled   Boolean  @default(true) @map("github_auth_enabled")
+  vkAuthEnabled       Boolean  @default(false) @map("vk_auth_enabled")
+  telegramAuthEnabled Boolean  @default(true) @map("telegram_auth_enabled")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("auth_settings")
+  @@schema("identity")
+}
+
+model OAuthAuthorization {
+  stateHash    String        @id @map("state_hash") @db.Char(64)
+  provider     OAuthProvider
+  codeVerifier String        @map("code_verifier")
+  referrerId   String?       @map("referrer_id")
+  expiresAt    DateTime      @map("expires_at")
+  consumedAt   DateTime?     @map("consumed_at")
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("oauth_authorizations")
+  @@schema("identity")
+}
+
+model ServiceIdentity {
+  id                       String               @id @default("singleton")
+  serviceName              String               @default("identity-service") @map("service_name")
+  databaseId               String               @default(uuid()) @map("database_id") @db.Uuid
+  phase                    ServiceDatabasePhase @default(SHADOW)
+  ownershipGeneration      BigInt               @default(0) @map("ownership_generation")
+  sourceFingerprint        String?              @map("source_fingerprint") @db.Char(64)
+  sourceSnapshotSha256     String?              @map("source_snapshot_sha256") @db.Char(64)
+  sourceSnapshotCounts     Json?                @map("source_snapshot_counts")
+  sourceIdentityHighWater  BigInt?              @map("source_identity_high_water")
+  sourceBillingHighWater   BigInt?              @map("source_billing_high_water")
+  importedAt               DateTime?            @map("imported_at")
+  activatedAt              DateTime?            @map("activated_at")
+  createdAt                DateTime             @default(now()) @map("created_at")
+  updatedAt                DateTime             @updatedAt @map("updated_at")
+
+  @@map("service_identity")
+  @@schema("identity")
+}
+
+model AggregateVersion {
+  aggregateType  String   @map("aggregate_type")
+  aggregateId    String   @map("aggregate_id")
+  version        BigInt
+  sourceSequence BigInt   @map("source_sequence")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@id([aggregateType, aggregateId])
+  @@index([sourceSequence])
+  @@map("aggregate_versions")
+  @@schema("identity")
+}
+
+model SourceSequence {
+  id        String   @id
+  lastValue BigInt   @default(0) @map("last_value")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("source_sequences")
+  @@schema("identity")
+}
+
+model OutboxEvent {
+  id               String         @id @default(uuid()) @db.Uuid
+  messageId        String         @default(uuid()) @map("message_id") @db.Uuid
+  deduplicationKey String?        @unique @map("deduplication_key")
+  exchange         OutboxExchange @default(EVENTS)
+  eventType        String         @map("event_type")
+  routingKey       String         @map("routing_key")
+  payload          Json
+  headers          Json           @default("{}")
+  aggregateType    String?        @map("aggregate_type")
+  aggregateId      String?        @map("aggregate_id")
+  aggregateVersion BigInt?        @map("aggregate_version")
+  sourceSequence   BigInt?        @map("source_sequence")
+  status           OutboxStatus   @default(PENDING)
+  attempts         Int            @default(0)
+  availableAt      DateTime       @default(now()) @map("available_at")
+  lockedAt         DateTime?      @map("locked_at")
+  lockedBy         String?        @map("locked_by")
+  leaseToken       String?        @map("lease_token") @db.Uuid
+  leaseExpiresAt   DateTime?      @map("lease_expires_at")
+  publishedAt      DateTime?      @map("published_at")
+  lastError        String?        @map("last_error") @db.Text
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([aggregateType, aggregateId, aggregateVersion])
+  @@index([sourceSequence])
+  @@index([publishedAt])
+  @@map("outbox_events")
+  @@schema("identity")
+}
+
+model ConsumerReceipt {
+  id               String                @id @default(uuid()) @db.Uuid
+  eventId          String                @map("event_id") @db.Uuid
+  consumer         String
+  payloadHash      String                @map("payload_hash") @db.Char(64)
+  status           ConsumerReceiptStatus @default(PROCESSING)
+  lockedAt         DateTime?             @map("locked_at")
+  lockedBy         String?               @map("locked_by")
+  lockToken        String?               @map("lock_token") @db.Uuid
+  leaseExpiresAt   DateTime?             @map("lease_expires_at")
+  retryAttempt     Int?                  @map("retry_attempt")
+  manualRetryCycle Int                   @default(0) @map("manual_retry_cycle")
+  deliveredAt      DateTime?             @map("delivered_at")
+  lastError        String?               @map("last_error") @db.Text
+  createdAt        DateTime              @default(now()) @map("created_at")
+  updatedAt        DateTime              @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer])
+  @@index([status, leaseExpiresAt])
+  @@index([consumer, deliveredAt])
+  @@map("consumer_receipts")
+  @@schema("identity")
+}
+
+model ConsumerFailure {
+  id                  String                @id @default(uuid()) @db.Uuid
+  eventId             String                @map("event_id") @db.Uuid
+  consumer            String
+  eventType           String                @map("event_type")
+  routingKey          String                @map("routing_key")
+  payload             Json
+  headers             Json                  @default("{}")
+  payloadHash         String                @map("payload_hash") @db.Char(64)
+  correlationId       String                @map("correlation_id")
+  status              ConsumerFailureStatus @default(OPEN)
+  attempts            Int                   @default(0)
+  manualRetryCount    Int                   @default(0) @map("manual_retry_count")
+  lastError           String                @map("last_error") @db.Text
+  lastFailedAt        DateTime              @default(now()) @map("last_failed_at")
+  retryRequestedAt    DateTime?             @map("retry_requested_at")
+  retryRequestedById  String?               @map("retry_requested_by_id")
+  retryToken          String?               @map("retry_token") @db.Uuid
+  retryLeaseExpiresAt DateTime?             @map("retry_lease_expires_at")
+  resolvedAt          DateTime?             @map("resolved_at")
+  resolutionComment   String?               @map("resolution_comment") @db.Text
+  createdAt           DateTime              @default(now()) @map("created_at")
+  updatedAt           DateTime              @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer])
+  @@index([status, lastFailedAt])
+  @@index([status, retryLeaseExpiresAt])
+  @@index([retryRequestedById])
+  @@map("consumer_failures")
+  @@schema("identity")
+}
+
+model InternalCommandReceipt {
+  id             String   @id @default(uuid()) @db.Uuid
+  client         String
+  command        String
+  idempotencyKey String   @map("idempotency_key") @db.Uuid
+  requestHash    String   @map("request_hash") @db.Char(64)
+  response       Json
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@unique([client, command, idempotencyKey])
+  @@map("internal_command_receipts")
+  @@schema("identity")
+}
+
+model TelegramUpdateReceipt {
+  botKind      TelegramBotKind @map("bot_kind")
+  updateId     BigInt          @map("update_id")
+  payloadHash  String          @map("payload_hash") @db.Char(64)
+  status       WebhookReceiptStatus @default(PROCESSING)
+  attempts     Int             @default(0)
+  leaseToken   String?         @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?     @map("lease_expires_at")
+  deliveredAt  DateTime?       @map("delivered_at")
+  lastError    String?         @map("last_error") @db.Text
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
+
+  @@id([botKind, updateId])
+  @@index([status, leaseExpiresAt])
+  @@map("telegram_update_receipts")
+  @@schema("identity")
+}
+
+model IdentityHeartbeat {
+  id         String   @id @default(uuid()) @db.Uuid
+  role       String
+  instanceId String   @map("instance_id")
+  metadata   Json     @default("{}")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([role, instanceId])
+  @@index([role, lastSeenAt])
+  @@index([lastSeenAt])
+  @@map("heartbeats")
+  @@schema("identity")
+}
+
+enum Role {
+  USER
+  ADMIN
+  DEV
+  @@schema("identity")
+}
+
+enum UserStatus {
+  ACTIVE
+  DEACTIVATED
+  @@schema("identity")
+}
+
+enum AuthIdentityType {
+  EMAIL
+  PHONE
+  GOOGLE
+  GITHUB
+  YANDEX
+  VK
+  TELEGRAM
+  @@schema("identity")
+}
+
+enum VerificationChallengeType {
+  EMAIL
+  PHONE
+  TELEGRAM
+  @@schema("identity")
+}
+
+enum VerificationChallengePurpose {
+  REGISTER
+  BIND_IDENTITY
+  BIND_TELEGRAM_NOTIFICATIONS
+  LOGIN
+  @@schema("identity")
+}
+
+enum OAuthProvider {
+  GOOGLE
+  GITHUB
+  YANDEX
+  VK
+  @@schema("identity")
+}
+
+enum ServiceDatabasePhase {
+  SHADOW
+  IMPORTED
+  ACTIVE
+  @@schema("identity")
+}
+
+enum OutboxExchange {
+  EVENTS
+  AUDIT
+  RETRY
+  MANUAL_RETRY
+  DEAD_LETTER
+  @@schema("identity")
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  @@schema("identity")
+}
+
+enum ConsumerReceiptStatus {
+  PROCESSING
+  RETRY_SCHEDULED
+  DELIVERED
+  DEAD_LETTERED
+  CLOSED_NO_RETRY
+  @@schema("identity")
+}
+
+enum ConsumerFailureStatus {
+  OPEN
+  RETRYING
+  RESOLVED
+  CLOSED_NO_RETRY
+  @@schema("identity")
+}
+
+enum TelegramBotKind {
+  AUTH
+  INFO
+  @@schema("identity")
+}
+
+enum WebhookReceiptStatus {
+  PROCESSING
+  DELIVERED
+  FAILED
+  @@schema("identity")
+}

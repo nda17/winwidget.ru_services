@@ -14,6 +14,7 @@ on:
           - reporting
           - widgets
           - billing
+          - identity
       evidence:
         description: Reviewed rehearsal evidence reference containing exact SHA
         required: true
@@ -66,7 +67,7 @@ jobs:
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
           case "$DATABASE_RESTORE_TARGET" in
-            core|notification-delivery|campaigns|reporting|widgets|billing) ;;
+            core|notification-delivery|campaigns|reporting|widgets|billing|identity) ;;
             *)
               echo "Unsupported database restore target." >&2
               exit 1

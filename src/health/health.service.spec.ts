@@ -278,6 +278,22 @@ describe('HealthService notification delivery monitoring', () => {
 		).resolves.toMatchObject({ status: 'ok' });
 	});
 
+	it('treats the Identity destination DLQ as a passive alerting queue', () => {
+		const expectation = getMessagingQueueHealthExpectations({
+			billingOwner: false
+		}).find(
+			item =>
+				item.name ===
+				`${MESSAGING_QUEUE_NAMES['telegram-destination-unavailable']}.dead-letter`
+		);
+
+		expect(expectation).toEqual({
+			name: `${MESSAGING_QUEUE_NAMES['telegram-destination-unavailable']}.dead-letter`,
+			consumerExpectation: 'none',
+			alertOnAnyMessage: true
+		});
+	});
+
 	it('requires every Billing main queue and keeps its retry and DLQ queues passive after handoff', () => {
 		const expectations = getMessagingQueueHealthExpectations({
 			billingOwner: true
@@ -494,11 +510,11 @@ describe('HealthService notification delivery monitoring', () => {
 				resolvedAt: null,
 				integration: {
 					in: [
-						'telegram-destination-unavailable',
 						'campaign-admin-audit',
 						'reporting-admin-audit',
 						'widgets-admin-audit',
 						'billing-admin-audit',
+						'identity-admin-audit',
 						'billing-payment-projection',
 						'billing-subscription-projection',
 						'billing-affiliate-projection',

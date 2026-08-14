@@ -1,6 +1,7 @@
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
 import { BillingBoundaryModule } from '@/billing-boundary/billing-boundary.module';
 import { BillingMessagingClientService } from '@/messaging/billing-messaging-client.service';
+import { IdentityMessagingClientService } from '@/messaging/identity-messaging-client.service';
 import { MessagingAdminController } from '@/messaging/messaging-admin.controller';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import { MessagingOperationalAlertService } from '@/messaging/messaging-operational-alert.service';
@@ -21,6 +22,7 @@ import { Module } from '@nestjs/common';
 	controllers: [MessagingAdminController],
 	providers: [
 		BillingMessagingClientService,
+		IdentityMessagingClientService,
 		WidgetsDeliveryFailuresClientService,
 		MessagingAdminService,
 		MessagingOperationalAlertService

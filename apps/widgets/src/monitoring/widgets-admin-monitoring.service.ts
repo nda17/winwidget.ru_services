@@ -157,13 +157,18 @@ export class WidgetsAdminMonitoringService {
 	async get(type: WidgetType, id: string) {
 		const lifecycle = await this.domain.adminGet(type, id);
 		const ownerId = await this.domain.ownerId(type, id);
-		const owner = (await this.core.resolveOwners([ownerId]))[0];
-		if (!owner) throw new NotFoundException('Владелец виджета не найден');
-		if (owner.status === 'DELETED' || owner.deletedAt) {
+		const resolvedOwner = (await this.core.resolveOwners([ownerId]))[0];
+		if (!resolvedOwner) {
+			throw new NotFoundException('Владелец виджета не найден');
+		}
+		if (resolvedOwner.status === 'DELETED' || resolvedOwner.deletedAt) {
 			throw new BadRequestException(
 				'Сначала восстановите удалённого владельца виджета'
 			);
 		}
+		const owner = (
+			await this.enrichOwnersWithEntitlements([resolvedOwner])
+		)[0];
 		return {
 			type,
 			entity: {
@@ -606,7 +611,53 @@ export class WidgetsAdminMonitoringService {
 		rows: MonitoringRow[]
 	): Promise<WidgetsOwnerDirectoryItem[]> {
 		const ids = [...new Set(rows.map(row => row.ownerId))];
-		return ids.length ? this.core.resolveOwners(ids) : [];
+		if (!ids.length) return [];
+		return this.enrichOwnersWithEntitlements(
+			await this.core.resolveOwners(ids)
+		);
+	}
+
+	private async enrichOwnersWithEntitlements(
+		owners: WidgetsOwnerDirectoryItem[]
+	): Promise<WidgetsOwnerDirectoryItem[]> {
+		if (!owners.length) return owners;
+		const entitlements = await this.repository
+			.client()
+			.widgetEntitlementProjection.findMany({
+				where: {
+					userId: { in: owners.map(owner => owner.id) },
+					tombstoned: false
+				}
+			});
+		const entitlementByUserId = new Map(
+			entitlements.map(entitlement => [entitlement.userId, entitlement])
+		);
+		return owners.map(owner => {
+			const entitlement = entitlementByUserId.get(owner.id);
+			return {
+				...owner,
+				subscription:
+					entitlement &&
+					entitlement.plan &&
+					entitlement.status &&
+					entitlement.startsAt
+						? {
+								id: entitlement.id,
+								plan: entitlement.plan,
+								billingPeriod: entitlement.billingPeriod,
+								status: entitlement.status,
+								startsAt: entitlement.startsAt.toISOString(),
+								expiresAt: entitlement.expiresAt?.toISOString() || null,
+								periodResetsAt:
+									entitlement.periodResetsAt?.toISOString() || null,
+								createdAt: (
+									entitlement.sourceCreatedAt || entitlement.appliedAt
+								).toISOString(),
+								updatedAt: entitlement.updatedAt.toISOString()
+							}
+						: null
+			};
+		});
 	}
 
 	private serialize(row: MonitoringRow, owner: WidgetsOwnerDirectoryItem) {

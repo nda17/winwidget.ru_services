@@ -154,6 +154,30 @@ describe('DatabaseBackupService', () => {
 		expect(connection.url).not.toContain('schema=');
 	});
 
+	it('uses the dedicated least-privilege Identity backup connection', () => {
+		const service = createService({
+			IDENTITY_BACKUP_URL:
+				'postgresql://identity_backup:identity-secret@identity.example:5432/winwidget_identity?schema=identity&sslmode=require'
+		});
+
+		const connection = (service as any).getPostgresConnection('identity');
+
+		expect(connection).toEqual(
+			expect.objectContaining({
+				target: 'identity',
+				label: 'Identity',
+				databaseName: 'winwidget_identity',
+				schema: 'identity',
+				password: 'identity-secret'
+			})
+		);
+		expect(connection.url).toContain(
+			'identity.example:5432/winwidget_identity'
+		);
+		expect(connection.url).not.toContain('identity-secret');
+		expect(connection.url).not.toContain('schema=');
+	});
+
 	it('backs up only the selected notification-delivery target', async () => {
 		const sequence: string[] = [];
 		let dumpedPath = '';

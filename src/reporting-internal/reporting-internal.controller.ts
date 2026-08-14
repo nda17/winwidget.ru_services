@@ -2,7 +2,6 @@ import {
 	Controller,
 	Body,
 	Get,
-	Headers,
 	HttpCode,
 	Post,
 	Put,
@@ -12,9 +11,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import { ReportingAuthIntrospectionService } from './reporting-auth-introspection.service';
 import {
-	REPORTING_AUTH_INTROSPECTION_PATH,
 	REPORTING_PROJECTION_SNAPSHOT_PATH,
 	REPORTING_SCHEDULE_POLICY_CONFIRM_PATH,
 	REPORTING_SCHEDULE_POLICY_PATH
@@ -30,21 +27,9 @@ const UUID_PATTERN =
 @UseGuards(ReportingInternalTokenGuard)
 export class ReportingInternalController {
 	constructor(
-		private readonly authIntrospection: ReportingAuthIntrospectionService,
 		private readonly projectionSnapshot: ReportingProjectionSnapshotService,
 		private readonly schedulePolicy: ReportingSchedulePolicyService
 	) {}
-
-	@Post(REPORTING_AUTH_INTROSPECTION_PATH)
-	@HttpCode(200)
-	introspect(
-		@Headers('authorization') authorization: string | undefined,
-		@Req() request: Request,
-		@Res({ passthrough: true }) response: Response
-	) {
-		this.setCorrelationId(request, response);
-		return this.authIntrospection.introspect(authorization);
-	}
 
 	@Get(REPORTING_PROJECTION_SNAPSHOT_PATH)
 	snapshot(

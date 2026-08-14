@@ -87,6 +87,9 @@ const UNSUPPORTED_SCHEMA_TOC_KINDS = new Set([
 ]);
 
 const CORE_API_RUNTIME_FUNCTIONS = [
+	'"public"."identity_core_source_is_open"()',
+	'"public"."fence_identity_core_source"(text)',
+	'"public"."unfence_identity_core_source"(text)',
 	'"public"."reporting_producers_enabled"()',
 	'"public"."reporting_iso_timestamp"(timestamp without time zone)',
 	'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
@@ -973,6 +976,8 @@ function buildRuntimeAclRepairSql(
 			? `
 REVOKE ALL ON TABLE ${schema}."reporting_producer_state" FROM ${primaryRuntime};
 GRANT SELECT ON TABLE ${schema}."reporting_producer_state" TO ${primaryRuntime};
+REVOKE ALL ON TABLE ${schema}."identity_core_source_state" FROM ${primaryRuntime};
+GRANT SELECT ON TABLE ${schema}."identity_core_source_state" TO ${primaryRuntime};
 REVOKE ALL ON TABLE ${schema}."reporting_projection_versions" FROM ${primaryRuntime};
 GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}."reporting_projection_versions" TO ${primaryRuntime};
 GRANT EXECUTE ON FUNCTION ${CORE_API_RUNTIME_FUNCTIONS.join(',\n    ')} TO ${primaryRuntime};
@@ -1097,14 +1102,14 @@ function buildRuntimeAclVerificationSql(
         WHERE schemaname = ${schemaLiteral}
         ORDER BY tablename
     LOOP
-        IF has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'SELECT')
-               IS DISTINCT FROM (table_name <> '_prisma_migrations')
-           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
-               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state']))
-           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
-               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state']))
-           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
-               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions'])) THEN
+	        IF has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'SELECT')
+	               IS DISTINCT FROM (table_name <> '_prisma_migrations')
+	           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
+	               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'identity_core_source_state', 'reporting_producer_state']))
+	           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
+	               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'identity_core_source_state', 'reporting_producer_state']))
+	           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
+	               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'identity_core_source_state', 'reporting_producer_state', 'reporting_projection_versions'])) THEN
             RAISE EXCEPTION 'Core API runtime table ACL is invalid';
         END IF;
     END LOOP;

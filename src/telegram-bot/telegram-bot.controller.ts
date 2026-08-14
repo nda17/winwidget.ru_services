@@ -10,7 +10,6 @@ import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram
 import {
 	TelegramBotService,
 	type TelegramWebhookBot,
-	type TelegramInfoBotWebhookUpdate,
 	type TelegramSupportBotWebhookUpdate
 } from '@/telegram-bot/telegram-bot.service';
 import {
@@ -139,7 +138,7 @@ export class TelegramBotController {
 			description: 'Переустановлены webhook Telegram-ботов',
 			entityType: 'telegram_webhook',
 			entityId: 'all',
-			entityLabel: 'Auth_bot + Info_bot + Support_bot',
+			entityLabel: 'Info_bot + Support_bot',
 			metadata: result,
 			request
 		});
@@ -203,7 +202,8 @@ export class TelegramBotController {
 				[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns',
 				[DATABASE_BACKUP_TARGETS.REPORTING]: 'БД Reporting',
 				[DATABASE_BACKUP_TARGETS.WIDGETS]: 'БД Widgets',
-				[DATABASE_BACKUP_TARGETS.BILLING]: 'БД Billing'
+				[DATABASE_BACKUP_TARGETS.BILLING]: 'БД Billing',
+				[DATABASE_BACKUP_TARGETS.IDENTITY]: 'БД Identity'
 			}[target];
 			await this.adminEventLogService.record({
 				adminId,
@@ -264,15 +264,6 @@ export class TelegramBotController {
 	@Get('webhook-health')
 	getWebhookHealth() {
 		return this.telegramBotService.getWebhookHealth();
-	}
-
-	@HttpCode(200)
-	@Post('webhook')
-	handleWebhook(
-		@Body() update: TelegramInfoBotWebhookUpdate,
-		@Headers('x-telegram-bot-api-secret-token') secret?: string
-	) {
-		return this.telegramBotService.handleWebhook(update, secret);
 	}
 
 	@HttpCode(200)

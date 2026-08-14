@@ -44,6 +44,9 @@ model Campaign {
 model AudienceSnapshot {
   id                   String                  @id @default(uuid()) @db.Uuid
   sourceSnapshotId     String?                 @unique(map: "audience_snapshots_source_id_unique") @map("source_snapshot_id") @db.Uuid
+  billingSnapshotId    String?                 @map("billing_snapshot_id") @db.Uuid
+  billingSnapshotSha256 String?                @map("billing_snapshot_sha256") @db.Char(64)
+  billingSnapshotAsOf  DateTime?               @map("billing_snapshot_as_of")
   campaignId           String                  @map("campaign_id") @db.Uuid
   channel              CampaignDeliveryChannel
   audience             CampaignAudience

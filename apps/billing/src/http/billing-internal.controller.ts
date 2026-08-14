@@ -66,6 +66,30 @@ export class BillingInternalController {
 		return this.commands.getSettings();
 	}
 
+	@Get('users/:userId/admin-overview')
+	@HttpCode(200)
+	getAdminUserOverview(@Param('userId') userId: string) {
+		if (
+			!userId ||
+			userId.length > 256 ||
+			/[\s\x00-\x1f\x7f]/.test(userId)
+		) {
+			throw new BadRequestException('Invalid userId');
+		}
+		return this.commands.getAdminUserOverview(userId);
+	}
+
+	@Get('directory/subscription-user-ids')
+	@HttpCode(200)
+	getSubscriptionUserIds(
+		@Headers('x-winwidget-service') service?: string
+	) {
+		if (service !== 'identity') {
+			throw new BadRequestException('Invalid service scope');
+		}
+		return this.commands.getSubscriptionUserIds();
+	}
+
 	@Patch('settings')
 	@HttpCode(200)
 	updateSettings(

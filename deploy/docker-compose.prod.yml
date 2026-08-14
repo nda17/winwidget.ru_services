@@ -22,9 +22,6 @@ x-api-env: &api-env
   PRODUCTION_HOST: ${PRODUCTION_HOST}
   AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
   TELEGRAM_WEBHOOK_HOST: ${TELEGRAM_WEBHOOK_HOST:-https://api.winwidget.ru}
-  JWT_ACCESS_PRIVATE_KEY_BASE64: ${JWT_ACCESS_PRIVATE_KEY_BASE64}
-  JWT_ACCESS_JWKS_BASE64: ${JWT_ACCESS_JWKS_BASE64}
-  JWT_ACCESS_ACTIVE_KID: ${JWT_ACCESS_ACTIVE_KID}
   JWT_ISSUER: ${JWT_ISSUER}
   JWT_AUDIENCE: ${JWT_AUDIENCE}
   JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
@@ -53,9 +50,6 @@ x-api-env: &api-env
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME}
   TELEGRAM_INFO_BOT_WEBHOOK_SECRET: ${TELEGRAM_INFO_BOT_WEBHOOK_SECRET}
-  TELEGRAM_AUTH_BOT_TOKEN: ${TELEGRAM_AUTH_BOT_TOKEN}
-  TELEGRAM_AUTH_BOT_USERNAME: ${TELEGRAM_AUTH_BOT_USERNAME}
-  TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: ${TELEGRAM_AUTH_BOT_WEBHOOK_SECRET}
   TELEGRAM_SUPPORT_BOT_TOKEN: ${TELEGRAM_SUPPORT_BOT_TOKEN}
   TELEGRAM_SUPPORT_BOT_USERNAME: ${TELEGRAM_SUPPORT_BOT_USERNAME:-}
   TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: ${TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET}
@@ -86,6 +80,10 @@ x-api-env: &api-env
   BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
   BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
   BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
+  IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+  IDENTITY_CORE_TOKEN: ${IDENTITY_CORE_TOKEN:?IDENTITY_CORE_TOKEN is required}
+  CORE_IDENTITY_TOKEN: ${CORE_IDENTITY_TOKEN:?CORE_IDENTITY_TOKEN is required}
+  IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
   DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
   DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
   DATABASE_RESTORE_PRODUCTION_ENABLED: ${DATABASE_RESTORE_PRODUCTION_ENABLED:-false}
@@ -98,7 +96,7 @@ x-api-gateway-env: &api-gateway-env
   PORT: ${GATEWAY_PORT:-4100}
   GATEWAY_ROUTES_JSON: ${GATEWAY_ROUTES_JSON:?GATEWAY_ROUTES_JSON is required}
   CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://winwidget.ru,https://www.winwidget.ru}
-  JWT_JWKS_URL: ${JWT_JWKS_URL:-http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json}
+  JWT_JWKS_URL: ${JWT_JWKS_URL:-http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json}
   JWT_ISSUER: ${JWT_ISSUER}
   JWT_AUDIENCE: ${JWT_AUDIENCE}
   JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
@@ -120,7 +118,7 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-telegram-destination-unavailable,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
@@ -158,6 +156,12 @@ x-campaigns-env: &campaigns-env
   CAMPAIGNS_INTERNAL_TIMEOUT_MS: ${CAMPAIGNS_INTERNAL_TIMEOUT_MS:-10000}
   CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: ${CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS:-300000}
   CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE: ${CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE:-1000}
+  IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+  IDENTITY_CAMPAIGNS_TOKEN: ${IDENTITY_CAMPAIGNS_TOKEN:?IDENTITY_CAMPAIGNS_TOKEN is required}
+  IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
+  BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
+  BILLING_CAMPAIGNS_TOKEN: ${BILLING_CAMPAIGNS_TOKEN:?BILLING_CAMPAIGNS_TOKEN is required}
+  BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
   CAMPAIGNS_PREFETCH: ${CAMPAIGNS_PREFETCH:-10}
   CAMPAIGNS_EMAIL_RATE_PER_SECOND: ${CAMPAIGNS_EMAIL_RATE_PER_SECOND:-10}
   CAMPAIGNS_TELEGRAM_RATE_PER_SECOND: ${CAMPAIGNS_TELEGRAM_RATE_PER_SECOND:-5}
@@ -182,6 +186,9 @@ x-reporting-env: &reporting-env
   REPORTING_CORE_INTERNAL_BASE_URL: ${REPORTING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
   REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
   REPORTING_INTERNAL_TIMEOUT_MS: ${REPORTING_INTERNAL_TIMEOUT_MS:-10000}
+  IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+  IDENTITY_REPORTING_TOKEN: ${IDENTITY_REPORTING_TOKEN:?IDENTITY_REPORTING_TOKEN is required}
+  IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
   REPORTING_SCHEDULER_ENABLED: ${REPORTING_SCHEDULER_ENABLED:-false}
   REPORTING_PREFETCH: ${REPORTING_PREFETCH:-10}
   REPORTING_OUTBOX_BATCH_SIZE: ${REPORTING_OUTBOX_BATCH_SIZE:-50}
@@ -204,7 +211,11 @@ x-widgets-env: &widgets-env
   WIDGETS_PORT: ${WIDGETS_PORT:-4700}
   WIDGETS_CORE_INTERNAL_BASE_URL: ${WIDGETS_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
   WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
+  WIDGETS_IDENTITY_TOKEN: ${WIDGETS_IDENTITY_TOKEN:?WIDGETS_IDENTITY_TOKEN is required}
   WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-10000}
+  IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+  IDENTITY_WIDGETS_TOKEN: ${IDENTITY_WIDGETS_TOKEN:?IDENTITY_WIDGETS_TOKEN is required}
+  IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
   WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: ${WIDGETS_ENTITLEMENT_MAX_STALENESS_MS:?WIDGETS_ENTITLEMENT_MAX_STALENESS_MS is required}
   WIDGETS_PREFETCH: ${WIDGETS_PREFETCH:-10}
   WIDGETS_OUTBOX_BATCH_SIZE: ${WIDGETS_OUTBOX_BATCH_SIZE:-50}
@@ -242,6 +253,21 @@ x-billing-env: &billing-env
   BILLING_OUTBOX_RETENTION_DAYS: ${BILLING_OUTBOX_RETENTION_DAYS:-7}
   BILLING_RECEIPT_RETENTION_DAYS: ${BILLING_RECEIPT_RETENTION_DAYS:-90}
   BILLING_FAILURE_DETAIL_RETENTION_DAYS: ${BILLING_FAILURE_DETAIL_RETENTION_DAYS:-30}
+x-identity-env: &identity-env
+  APP_REVISION: ${IDENTITY_REVISION:?IDENTITY_REVISION is required}
+  NODE_ENV: production
+  MODE: ${MODE:-production}
+  IDENTITY_DATABASE_URL: ${IDENTITY_DATABASE_URL:?IDENTITY_DATABASE_URL is required}
+  IDENTITY_LISTEN_HOST: ${IDENTITY_LISTEN_HOST:-127.0.0.1}
+  IDENTITY_API_PORT: ${IDENTITY_API_PORT:-4900}
+  IDENTITY_WORKER_PORT: ${IDENTITY_WORKER_PORT:-4901}
+  IDENTITY_OUTBOX_PUBLISHER_PORT: ${IDENTITY_OUTBOX_PUBLISHER_PORT:-4902}
+  IDENTITY_PREFETCH: ${IDENTITY_PREFETCH:-10}
+  IDENTITY_OUTBOX_BATCH_SIZE: ${IDENTITY_OUTBOX_BATCH_SIZE:-50}
+  IDENTITY_OUTBOX_POLL_INTERVAL_MS: ${IDENTITY_OUTBOX_POLL_INTERVAL_MS:-1000}
+  IDENTITY_OUTBOX_RETENTION_DAYS: ${IDENTITY_OUTBOX_RETENTION_DAYS:-7}
+  IDENTITY_RECEIPT_RETENTION_DAYS: ${IDENTITY_RECEIPT_RETENTION_DAYS:-90}
+  IDENTITY_FAILURE_DETAIL_RETENTION_DAYS: ${IDENTITY_FAILURE_DETAIL_RETENTION_DAYS:-30}
 
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
@@ -253,6 +279,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   REPORTING_BACKUP_URL: ${REPORTING_BACKUP_URL:?REPORTING_BACKUP_URL is required}
   WIDGETS_BACKUP_URL: ${WIDGETS_BACKUP_URL:?WIDGETS_BACKUP_URL is required}
   BILLING_BACKUP_URL: ${BILLING_BACKUP_URL:?BILLING_BACKUP_URL is required}
+  IDENTITY_BACKUP_URL: ${IDENTITY_BACKUP_URL:?IDENTITY_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
@@ -280,12 +307,14 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_REPORTING_PORT: ${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}
   DATABASE_RESTORE_WIDGETS_PORT: ${WIDGETS_POSTGRES_PORT:?WIDGETS_POSTGRES_PORT is required}
   DATABASE_RESTORE_BILLING_PORT: ${BILLING_POSTGRES_PORT:?BILLING_POSTGRES_PORT is required}
+  DATABASE_RESTORE_IDENTITY_PORT: ${IDENTITY_POSTGRES_PORT:?IDENTITY_POSTGRES_PORT is required}
   DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/core-admin-password
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
   DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
   DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/reporting-admin-password
   DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/widgets-admin-password
   DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/billing-admin-password
+  DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/identity-admin-password
 
 x-outbox-publisher-env: &outbox-publisher-env
   <<: *runtime-env
@@ -327,6 +356,11 @@ x-billing-migration-env: &billing-migration-env
   APP_REVISION: ${BILLING_REVISION:?BILLING_REVISION is required}
   NODE_ENV: production
   BILLING_DATABASE_URL: ${BILLING_MIGRATION_DATABASE_URL:?BILLING_MIGRATION_DATABASE_URL is required}
+
+x-identity-migration-env: &identity-migration-env
+  APP_REVISION: ${IDENTITY_REVISION:?IDENTITY_REVISION is required}
+  NODE_ENV: production
+  IDENTITY_DATABASE_URL: ${IDENTITY_MIGRATION_DATABASE_URL:?IDENTITY_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -549,6 +583,50 @@ services:
         max-file: '5'
     restart: unless-stopped
 
+  identity-postgres:
+    image: ${IDENTITY_POSTGRES_IMAGE:?IDENTITY_POSTGRES_IMAGE is required}
+    profiles:
+      - identity-database
+    labels:
+      com.winwidget.owner: identity
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_identity
+      POSTGRES_USER: ${IDENTITY_POSTGRES_ADMIN_USER:?IDENTITY_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/identity-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${IDENTITY_POSTGRES_PORT:-55438}:5432'
+    volumes:
+      - winwidget-identity-postgres-data:/var/lib/postgresql
+    networks:
+      - identity-postgres
+    secrets:
+      - identity-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${IDENTITY_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${IDENTITY_POSTGRES_MEMORY_LIMIT:-768m}
+    mem_reservation: ${IDENTITY_POSTGRES_MEMORY_RESERVATION:-256m}
+    cpus: ${IDENTITY_POSTGRES_CPUS:-1.0}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:4.2-management-alpine
     hostname: winwidget-rabbitmq
@@ -608,6 +686,8 @@ services:
       api:
         condition: service_healthy
       widgets-service:
+        condition: service_healthy
+      identity-api:
         condition: service_healthy
     healthcheck:
       test:
@@ -788,10 +868,15 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-loopback}
       BILLING_CORE_INTERNAL_BASE_URL: ${BILLING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
       BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
+      BILLING_CAMPAIGNS_TOKEN: ${BILLING_CAMPAIGNS_TOKEN:?BILLING_CAMPAIGNS_TOKEN is required}
+      BILLING_IDENTITY_TOKEN: ${BILLING_IDENTITY_TOKEN:?BILLING_IDENTITY_TOKEN is required}
       BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
       WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
       WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
       WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-5000}
+      IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+      IDENTITY_BILLING_TOKEN: ${IDENTITY_BILLING_TOKEN:?IDENTITY_BILLING_TOKEN is required}
+      IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
     network_mode: host
     command: ['node', 'dist/src/main.js']
     healthcheck:
@@ -934,6 +1019,190 @@ services:
         max-size: 10m
         max-file: '3'
 
+  identity-api:
+    image: ${IDENTITY_IMAGE:?IDENTITY_IMAGE is required}
+    build:
+      context: ../apps/identity
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${IDENTITY_REVISION:?IDENTITY_REVISION is required}
+    labels:
+      com.winwidget.owner: identity
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *identity-env
+      IDENTITY_PROCESS_ROLE: api
+      IDENTITY_PORT: ${IDENTITY_API_PORT:-4900}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+      PRODUCTION_HOST: ${PRODUCTION_HOST:?PRODUCTION_HOST is required}
+      AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+      TELEGRAM_WEBHOOK_HOST: ${TELEGRAM_WEBHOOK_HOST:-https://api.winwidget.ru}
+      JWT_ACCESS_PRIVATE_KEY_BASE64: ${IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64:?IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64 is required}
+      JWT_ACCESS_JWKS_BASE64: ${IDENTITY_JWT_ACCESS_JWKS_BASE64:?IDENTITY_JWT_ACCESS_JWKS_BASE64 is required}
+      JWT_ACCESS_ACTIVE_KID: ${IDENTITY_JWT_ACCESS_ACTIVE_KID:?IDENTITY_JWT_ACCESS_ACTIVE_KID is required}
+      JWT_ISSUER: ${JWT_ISSUER:?JWT_ISSUER is required}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:?JWT_AUDIENCE is required}
+      JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
+      JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
+      RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY:?RECAPTCHA_SECRET_KEY is required}
+      RECAPTCHA_CLIENT_URL: ${RECAPTCHA_CLIENT_URL:?RECAPTCHA_CLIENT_URL is required}
+      RECAPTCHA_ENABLED: ${RECAPTCHA_ENABLED:-true}
+      RECAPTCHA_MIN_SCORE: ${RECAPTCHA_MIN_SCORE:-0.5}
+      SMTP_LOGIN: ${SMTP_LOGIN:?SMTP_LOGIN is required}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:?SMTP_PASSWORD is required}
+      SMTP_SERVER: ${SMTP_SERVER:?SMTP_SERVER is required}
+      SMTP_CONNECTION_TIMEOUT_MS: ${SMTP_CONNECTION_TIMEOUT_MS:-5000}
+      SMTP_GREETING_TIMEOUT_MS: ${SMTP_GREETING_TIMEOUT_MS:-5000}
+      SMTP_SOCKET_TIMEOUT_MS: ${SMTP_SOCKET_TIMEOUT_MS:-15000}
+      SMSAERO_EMAIL: ${SMSAERO_EMAIL:?SMSAERO_EMAIL is required}
+      SMSAERO_API_KEY: ${SMSAERO_API_KEY:?SMSAERO_API_KEY is required}
+      SMSAERO_SIGN: ${SMSAERO_SIGN:?SMSAERO_SIGN is required}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?GOOGLE_CLIENT_SECRET is required}
+      GOOGLE_CALLBACK_URL: ${GOOGLE_CALLBACK_URL:?GOOGLE_CALLBACK_URL is required}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?GITHUB_CLIENT_ID is required}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?GITHUB_CLIENT_SECRET is required}
+      GITHUB_CALLBACK_URL: ${GITHUB_CALLBACK_URL:?GITHUB_CALLBACK_URL is required}
+      YANDEX_CLIENT_ID: ${YANDEX_CLIENT_ID:?YANDEX_CLIENT_ID is required}
+      YANDEX_CLIENT_SECRET: ${YANDEX_CLIENT_SECRET:?YANDEX_CLIENT_SECRET is required}
+      YANDEX_CALLBACK_URL: ${YANDEX_CALLBACK_URL:?YANDEX_CALLBACK_URL is required}
+      VK_CLIENT_ID: ${VK_CLIENT_ID:-}
+      VK_CLIENT_SECRET: ${VK_CLIENT_SECRET:-}
+      VK_SERVICE_TOKEN: ${VK_SERVICE_TOKEN:-}
+      VK_CALLBACK_URL: ${VK_CALLBACK_URL:-}
+      TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN:?TELEGRAM_INFO_BOT_TOKEN is required}
+      TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME:?TELEGRAM_INFO_BOT_USERNAME is required}
+      TELEGRAM_INFO_BOT_WEBHOOK_SECRET: ${TELEGRAM_INFO_BOT_WEBHOOK_SECRET:?TELEGRAM_INFO_BOT_WEBHOOK_SECRET is required}
+      TELEGRAM_AUTH_BOT_TOKEN: ${TELEGRAM_AUTH_BOT_TOKEN:?TELEGRAM_AUTH_BOT_TOKEN is required}
+      TELEGRAM_AUTH_BOT_USERNAME: ${TELEGRAM_AUTH_BOT_USERNAME:?TELEGRAM_AUTH_BOT_USERNAME is required}
+      TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: ${TELEGRAM_AUTH_BOT_WEBHOOK_SECRET:?TELEGRAM_AUTH_BOT_WEBHOOK_SECRET is required}
+      IDENTITY_CORE_TOKEN: ${IDENTITY_CORE_TOKEN:?IDENTITY_CORE_TOKEN is required}
+      CORE_IDENTITY_TOKEN: ${CORE_IDENTITY_TOKEN:?CORE_IDENTITY_TOKEN is required}
+      IDENTITY_CAMPAIGNS_TOKEN: ${IDENTITY_CAMPAIGNS_TOKEN:?IDENTITY_CAMPAIGNS_TOKEN is required}
+      IDENTITY_REPORTING_TOKEN: ${IDENTITY_REPORTING_TOKEN:?IDENTITY_REPORTING_TOKEN is required}
+      IDENTITY_WIDGETS_TOKEN: ${IDENTITY_WIDGETS_TOKEN:?IDENTITY_WIDGETS_TOKEN is required}
+      IDENTITY_BILLING_TOKEN: ${IDENTITY_BILLING_TOKEN:?IDENTITY_BILLING_TOKEN is required}
+      IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
+      BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
+      BILLING_IDENTITY_TOKEN: ${BILLING_IDENTITY_TOKEN:?BILLING_IDENTITY_TOKEN is required}
+      BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
+      WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
+      WIDGETS_IDENTITY_TOKEN: ${WIDGETS_IDENTITY_TOKEN:?WIDGETS_IDENTITY_TOKEN is required}
+      WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-5000}
+    network_mode: host
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.IDENTITY_PORT||4900)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    mem_limit: ${IDENTITY_API_MEMORY_LIMIT:-512m}
+    mem_reservation: ${IDENTITY_API_MEMORY_RESERVATION:-128m}
+    cpus: ${IDENTITY_API_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  identity-worker:
+    image: ${IDENTITY_IMAGE:?IDENTITY_IMAGE is required}
+    labels:
+      com.winwidget.owner: identity
+      com.winwidget.purpose: worker
+    environment:
+      <<: *identity-env
+      IDENTITY_PROCESS_ROLE: worker
+      IDENTITY_PORT: ${IDENTITY_WORKER_PORT:-4901}
+      RABBITMQ_URL: ${RABBITMQ_IDENTITY_WORKER_URL:?RABBITMQ_IDENTITY_WORKER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-identity-worker
+      RABBITMQ_ASSERT_TOPOLOGY: 'true'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: identity-worker
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.IDENTITY_PORT||4901)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${IDENTITY_WORKER_MEMORY_LIMIT:-512m}
+    mem_reservation: ${IDENTITY_WORKER_MEMORY_RESERVATION:-128m}
+    cpus: ${IDENTITY_WORKER_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  identity-outbox-publisher:
+    image: ${IDENTITY_IMAGE:?IDENTITY_IMAGE is required}
+    labels:
+      com.winwidget.owner: identity
+      com.winwidget.purpose: outbox-publisher
+    environment:
+      <<: *identity-env
+      IDENTITY_PROCESS_ROLE: outbox-publisher
+      IDENTITY_PORT: ${IDENTITY_OUTBOX_PUBLISHER_PORT:-4902}
+      RABBITMQ_URL: ${RABBITMQ_IDENTITY_PUBLISHER_URL:?RABBITMQ_IDENTITY_PUBLISHER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-identity-outbox-publisher
+      RABBITMQ_ASSERT_TOPOLOGY: 'false'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: identity-outbox-publisher
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.IDENTITY_PORT||4902)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${IDENTITY_OUTBOX_PUBLISHER_MEMORY_LIMIT:-384m}
+    mem_reservation: ${IDENTITY_OUTBOX_PUBLISHER_MEMORY_RESERVATION:-96m}
+    cpus: ${IDENTITY_OUTBOX_PUBLISHER_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -995,6 +1264,8 @@ services:
         target: database-restore-widgets-admin-password
       - source: billing-postgres-admin-password
         target: database-restore-billing-admin-password
+      - source: identity-postgres-admin-password
+        target: database-restore-identity-admin-password
     tmpfs:
       - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -1017,7 +1288,7 @@ services:
           'nestjs:nodejs',
           'node',
           '-e',
-          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","core","notification-delivery","reporting","widgets"]''||fences.length!==0)process.exit(1)'
+          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","core","identity","notification-delivery","reporting","widgets"]''||fences.length!==0)process.exit(1)'
         ]
       interval: 10s
       timeout: 5s
@@ -1119,7 +1390,24 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  identity-migrate:
+    image: ${IDENTITY_IMAGE:?IDENTITY_IMAGE is required}
+    build:
+      context: ../apps/identity
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${IDENTITY_REVISION:?IDENTITY_REVISION is required}
+    profiles:
+      - identity-migration
+    environment: *identity-migration-env
+    network_mode: host
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
+  winwidget-identity-postgres-data:
+    external: true
+    name: ${IDENTITY_POSTGRES_DATA_VOLUME:?IDENTITY_POSTGRES_DATA_VOLUME must name the verified Identity PostgreSQL volume}
   winwidget-billing-postgres-data:
     external: true
     name: ${BILLING_POSTGRES_DATA_VOLUME:?BILLING_POSTGRES_DATA_VOLUME must name the verified Billing PostgreSQL volume}
@@ -1140,6 +1428,13 @@ volumes:
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
 
 networks:
+  identity-postgres:
+    name: winwidget-identity-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: identity
+      com.winwidget.purpose: postgres-network
   billing-postgres:
     name: winwidget-billing-postgres
     driver: bridge
@@ -1189,3 +1484,5 @@ secrets:
     file: ${WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE:?WIDGETS_POSTGRES_ADMIN_PASSWORD_FILE is required}
   billing-postgres-admin-password:
     file: ${BILLING_POSTGRES_ADMIN_PASSWORD_FILE:?BILLING_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  identity-postgres-admin-password:
+    file: ${IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE:?IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE is required}

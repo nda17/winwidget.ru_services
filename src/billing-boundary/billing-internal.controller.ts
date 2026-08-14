@@ -1,7 +1,6 @@
 import {
 	Body,
 	Controller,
-	Headers,
 	HttpCode,
 	Post,
 	Req,
@@ -10,9 +9,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
-import { BillingAuthIntrospectionService } from './billing-auth-introspection.service';
 import {
-	BILLING_AUTH_INTROSPECTION_PATH,
 	BILLING_IDENTITY_RESOLVE_PATH,
 	BILLING_LIFECYCLE_COMPLETE_PATH,
 	BILLING_SOURCE_REPAIR_PATH
@@ -29,22 +26,10 @@ const UUID_PATTERN =
 @UseGuards(BillingInternalTokenGuard)
 export class BillingInternalController {
 	constructor(
-		private readonly authIntrospection: BillingAuthIntrospectionService,
 		private readonly identities: BillingIdentityDirectoryService,
 		private readonly repairs: BillingSourceRepairService,
 		private readonly lifecycle: BillingLifecycleCompletionService
 	) {}
-
-	@Post(BILLING_AUTH_INTROSPECTION_PATH)
-	@HttpCode(200)
-	introspect(
-		@Headers('authorization') authorization: string | undefined,
-		@Req() request: Request,
-		@Res({ passthrough: true }) response: Response
-	) {
-		this.setCorrelationId(request, response);
-		return this.authIntrospection.introspect(authorization);
-	}
 
 	@Post(BILLING_LIFECYCLE_COMPLETE_PATH)
 	@HttpCode(200)
