@@ -15,6 +15,7 @@ IDENTITY_SERVICE_CUTOVER_CLI="${IDENTITY_SERVICE_CUTOVER_CLI:-dist/src/cutover/m
 identity_cutover_root="${IDENTITY_CUTOVER_ARTIFACT_ROOT:-$APP_ROOT/deploy/backend/identity-cutover-artifacts}"
 identity_cutover_marker="${IDENTITY_CUTOVER_MARKER:-$APP_ROOT/deploy/backend/.identity-cutover-v1}"
 identity_core_backup="$identity_cutover_root/core-pre-identity-cutover.dump"
+identity_frozen_core_backup="$identity_cutover_root/core-frozen-identity-cutover.dump"
 identity_pre_backup="$identity_cutover_root/identity-pre-ownership.dump"
 identity_post_backup="$identity_cutover_root/identity-post-ownership.dump"
 identity_pre_restore_evidence="$identity_cutover_root/identity-pre-restore.json"
@@ -56,6 +57,8 @@ source "$IDENTITY_SCRIPT_ROOT/scripts/identity-database-lifecycle.sh"
 source "$IDENTITY_SCRIPT_ROOT/scripts/deploy-identity-production.sh"
 # shellcheck source=scripts/database-restore-production-guard.sh
 source "$IDENTITY_SCRIPT_ROOT/scripts/database-restore-production-guard.sh"
+# shellcheck source=scripts/core-database-production-guard.sh
+source "$IDENTITY_SCRIPT_ROOT/scripts/core-database-production-guard.sh"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$IDENTITY_SCRIPT_ROOT/scripts/production-deploy-lock.sh"
 
@@ -96,7 +99,7 @@ identity_cutover_require_artifact_root() {
 }
 
 identity_cutover_marker_value() {
-	[[ $# -eq 1 && "$1" =~ ^[a-z_]+$ ]] || return 1
+	[[ $# -eq 1 && "$1" =~ ^[a-z0-9_]+$ ]] || return 1
 	identity_cutover_validate_marker || return 1
 	awk -F= -v key="$1" '
     $1 == key { print substr($0, index($0, "=") + 1); found += 1 }
@@ -443,15 +446,287 @@ identity_cutover_assert_bound_images() {
 			"$(identity_cutover_route_sha)" == "$(identity_cutover_marker_value route_sha256)" ]]
 }
 
-identity_cutover_create_backup() {
+identity_cutover_require_database_binding() {
+	identity_database_validate_marker || return 1
+	identity_cutover_validate_marker || return 1
+	local ownership_revision database_image_id cutover_image_id
+	ownership_revision="$(identity_database_marker_value ownership_revision)" || return 1
+	database_image_id="$(identity_database_marker_value image_id)" || return 1
+	cutover_image_id="$(identity_cutover_marker_value identity_image_id)" || return 1
+	[[ "$ownership_revision" == "$EXPECTED_REVISION" &&
+		"$database_image_id" == "$cutover_image_id" ]] ||
+		identity_cutover_fail 'Identity lifecycle marker is not bound to the cutover revision and image'
+}
+
+identity_cutover_validate_backup_file() {
+	[[ $# -eq 1 ]] || return 1
+	local size
+	identity_cutover_validate_private_file "$1" || return 1
+	[[ "$(head -c 5 "$1")" == 'PGDMP' ]] || return 1
+	size="$(wc -c <"$1" | tr -d '[:space:]')"
+	[[ "$size" =~ ^[1-9][0-9]*$ && "$size" -le $((49 * 1024 * 1024)) ]]
+}
+
+identity_cutover_backup_source_identity() {
 	[[ $# -eq 3 ]] || return 1
-	local url_key="$1" schema="$2" destination="$3" partial="${destination}.partial" size
-	if [[ -e "$destination" || -L "$destination" ]]; then
-		identity_cutover_validate_private_file "$destination" &&
-			[[ "$(head -c 5 "$destination")" == 'PGDMP' ]] || return 1
-		return
+	local url_key="$1" schema="$2" purpose="$3" expected_database_id expected_system_identifier
+	case "$purpose:$url_key:$schema" in
+	core-pre-identity-cutover:DATABASE_BACKUP_URL:public | \
+		core-frozen-identity-cutover:DATABASE_BACKUP_URL:public)
+		expected_database_id='core-monolith:default_db'
+		expected_system_identifier="$CORE_POSTGRES_SYSTEM_IDENTIFIER"
+		;;
+	identity-pre-ownership:IDENTITY_BACKUP_URL:identity | \
+		identity-post-ownership:IDENTITY_BACKUP_URL:identity)
+		expected_database_id="$(identity_database_marker_value database_id)" || return 1
+		expected_system_identifier="$(identity_database_marker_value database_system_identifier)" || return 1
+		[[ "$expected_database_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ &&
+			"$expected_system_identifier" =~ ^[1-9][0-9]*$ ]] || return 1
+		;;
+	*) return 1 ;;
+	esac
+	EXPECTED_DATABASE_ID="$expected_database_id" \
+	EXPECTED_SYSTEM_IDENTIFIER="$expected_system_identifier" \
+		identity_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
+		run --rm -T --no-deps -e EXPECTED_DATABASE_ID -e EXPECTED_SYSTEM_IDENTIFIER \
+		--entrypoint node maintenance-worker -e '
+const { spawnSync } = require("node:child_process");
+const key = process.argv[1];
+const schema = process.argv[2];
+const purpose = process.argv[3];
+const expectedDatabaseId = process.env.EXPECTED_DATABASE_ID || "";
+const expectedSystemIdentifier = process.env.EXPECTED_SYSTEM_IDENTIFIER || "";
+const raw = process.env[key];
+if (!raw || !/^[1-9][0-9]*$/.test(expectedSystemIdentifier)) process.exit(64);
+let url;
+try { url = new URL(raw); } catch { process.exit(65); }
+const queryKeys = [...url.searchParams.keys()];
+const sslmode = url.searchParams.get("sslmode");
+if (url.protocol !== "postgresql:" || !url.username || !url.password || !url.hostname ||
+    !url.pathname.slice(1) || url.searchParams.getAll("schema").length !== 1 ||
+    url.searchParams.get("schema") !== schema || url.searchParams.getAll("sslmode").length !== 1 ||
+    !["disable", "allow", "prefer", "require", "verify-ca", "verify-full"].includes(sslmode) ||
+    queryKeys.length !== 2 || queryKeys.some(value => !["schema", "sslmode"].includes(value))) process.exit(66);
+const identityPurpose = purpose === "identity-pre-ownership" || purpose === "identity-post-ownership";
+const corePurpose = purpose === "core-pre-identity-cutover" || purpose === "core-frozen-identity-cutover";
+if ((!identityPurpose && !corePurpose) ||
+    (identityPurpose && schema !== "identity") || (!identityPurpose && schema !== "public")) process.exit(67);
+const env = { ...process.env, PGHOST: url.hostname, PGPORT: url.port || "5432",
+  PGUSER: decodeURIComponent(url.username), PGPASSWORD: decodeURIComponent(url.password),
+  PGDATABASE: decodeURIComponent(url.pathname.slice(1)), PGSSLMODE: sslmode };
+delete env[key];
+const sql = identityPurpose
+  ? "SELECT current_database(), (pg_control_system()).system_identifier::text, database_id::text, pg_current_wal_lsn()::text FROM identity.service_identity WHERE id = '\''singleton'\'' AND service_name = '\''identity-service'\'';"
+  : "SELECT current_database(), (pg_control_system()).system_identifier::text, '\''core-monolith:default_db'\''::text, pg_current_wal_lsn()::text;";
+const result = spawnSync("psql", ["--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--tuples-only",
+  "--no-align", "--field-separator", "|", "--command", sql],
+  { env, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+if (result.error || result.signal || result.status !== 0) process.exit(68);
+const rows = result.stdout.trim().split(/\n/).filter(Boolean);
+if (rows.length !== 1) process.exit(69);
+const [database, systemIdentifier, databaseId, sourceLsn] = rows[0].split("|");
+const expectedDatabase = identityPurpose ? decodeURIComponent(url.pathname.slice(1)) : "default_db";
+if (database !== expectedDatabase || databaseId !== expectedDatabaseId ||
+    systemIdentifier !== expectedSystemIdentifier || !/^[0-9A-F]+\/[0-9A-F]+$/.test(sourceLsn || "")) process.exit(70);
+process.stdout.write(`${databaseId}|${systemIdentifier}|${sourceLsn}`);
+' "$url_key" "$schema" "$purpose"
+}
+
+identity_cutover_frozen_boundary_sha256() {
+	identity_cutover_require_frozen_boundary_evidence || return 1
+	local file sha manifest=''
+	for file in "$identity_core_frozen_preflight_evidence" \
+		"$identity_core_frozen_projection_evidence" \
+		"$identity_core_frozen_destination_evidence" \
+		"$identity_core_frozen_destination_state_evidence" \
+		"$identity_core_fence_evidence"; do
+		sha="$(identity_cutover_sha256 "$file")" || return 1
+		[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+		manifest+="$(basename -- "$file")=$sha"$'\n'
+	done
+	printf '%s' "$manifest" | identity_cutover_text_sha256
+}
+
+identity_cutover_backup_boundary_sha256() {
+	[[ $# -eq 1 ]] || return 1
+	case "$1" in
+	core-pre-identity-cutover | identity-pre-ownership) printf 'pending' ;;
+	core-frozen-identity-cutover) identity_cutover_frozen_boundary_sha256 ;;
+	identity-post-ownership)
+		local snapshot_sha
+		snapshot_sha="$(identity_cutover_marker_value snapshot_sha256)" || return 1
+		[[ "$snapshot_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+		printf '%s' "$snapshot_sha"
+		;;
+	*) return 1 ;;
+	esac
+}
+
+identity_cutover_backup_journal_value() {
+	[[ $# -eq 2 && "$2" =~ ^[a-z0-9_]+$ ]] || return 1
+	awk -F= -v key="$2" '
+    $1 == key { print substr($0, index($0, "=") + 1); found += 1 }
+    END { exit(found == 1 ? 0 : 1) }
+  ' "$1"
+}
+
+identity_cutover_validate_backup_journal() {
+	[[ $# -eq 6 ]] || return 1
+	local journal="$1" purpose="$2" url_key="$3" schema="$4" destination="$5" revision="$6"
+	local source_identity database_id system_identifier source_lsn boundary_sha256
+	identity_cutover_validate_private_file "$journal" || return 1
+	awk -F= '
+    $1 !~ /^(version|phase|revision|purpose|url_key|schema|artifact_name|database_id|database_system_identifier|source_lsn|boundary_sha256|sha256|updated_at)$/ { exit 1 }
+    { count[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
+    END {
+      for (key in count) if (count[key] != 1) exit 1
+      if (NR != 13 || value["version"] != "1" || value["phase"] !~ /^(prepared|complete)$/ ||
+          value["revision"] !~ /^[0-9a-f]{40}$/ ||
+          value["purpose"] !~ /^(core-pre-identity-cutover|core-frozen-identity-cutover|identity-pre-ownership|identity-post-ownership)$/ ||
+          value["url_key"] !~ /^(DATABASE_BACKUP_URL|IDENTITY_BACKUP_URL)$/ ||
+          value["schema"] !~ /^(public|identity)$/ || value["artifact_name"] !~ /^[A-Za-z0-9._-]+$/ ||
+          value["database_id"] !~ /^(core-monolith:default_db|[0-9a-f-]{36})$/ ||
+          value["database_system_identifier"] !~ /^[1-9][0-9]*$/ ||
+          value["source_lsn"] !~ /^[0-9A-F]+\/[0-9A-F]+$/ ||
+          value["boundary_sha256"] !~ /^(pending|[0-9a-f]{64})$/ ||
+          value["sha256"] !~ /^[0-9a-f]{64}$/ || value["sha256"] == sprintf("%064d", 0) ||
+          value["updated_at"] !~ /^[0-9TZ:.-]+$/) exit 1
+    }
+  ' "$journal" || return 1
+	[[ "$(identity_cutover_backup_journal_value "$journal" revision)" == "$revision" &&
+		"$(identity_cutover_backup_journal_value "$journal" purpose)" == "$purpose" &&
+		"$(identity_cutover_backup_journal_value "$journal" url_key)" == "$url_key" &&
+		"$(identity_cutover_backup_journal_value "$journal" schema)" == "$schema" &&
+		"$(identity_cutover_backup_journal_value "$journal" artifact_name)" == "$(basename -- "$destination")" ]] || return 1
+	source_identity="$(identity_cutover_backup_source_identity "$url_key" "$schema" "$purpose")" || return 1
+	boundary_sha256="$(identity_cutover_backup_boundary_sha256 "$purpose")" || return 1
+	IFS='|' read -r database_id system_identifier source_lsn <<<"$source_identity"
+	[[ "$source_lsn" =~ ^[0-9A-F]+/[0-9A-F]+$ &&
+		"$(identity_cutover_backup_journal_value "$journal" database_id)" == "$database_id" &&
+		"$(identity_cutover_backup_journal_value "$journal" database_system_identifier)" == "$system_identifier" &&
+		"$(identity_cutover_backup_journal_value "$journal" boundary_sha256)" == "$boundary_sha256" ]]
+}
+
+identity_cutover_write_backup_journal() {
+	[[ $# -eq 7 && "$2" =~ ^(prepared|complete)$ && "$7" =~ ^[0-9a-f]{64}$ ]] || return 1
+	local journal="$1" phase="$2" purpose="$3" url_key="$4" schema="$5" destination="$6" artifact_sha="$7"
+	local current='absent' source_identity database_id system_identifier source_lsn boundary_sha256 temporary="${journal}.tmp.$$"
+	if [[ -e "$journal" || -L "$journal" ]]; then
+		identity_cutover_validate_backup_journal "$journal" "$purpose" "$url_key" "$schema" \
+			"$destination" "$EXPECTED_REVISION" || return 1
+		current="$(identity_cutover_backup_journal_value "$journal" phase)"
+		[[ "$(identity_cutover_backup_journal_value "$journal" sha256)" == "$artifact_sha" ]] || return 1
+		database_id="$(identity_cutover_backup_journal_value "$journal" database_id)" || return 1
+		system_identifier="$(identity_cutover_backup_journal_value "$journal" database_system_identifier)" || return 1
+		source_lsn="$(identity_cutover_backup_journal_value "$journal" source_lsn)" || return 1
+		boundary_sha256="$(identity_cutover_backup_journal_value "$journal" boundary_sha256)" || return 1
+	else
+		source_identity="$(identity_cutover_backup_source_identity "$url_key" "$schema" "$purpose")" || return 1
+		boundary_sha256="$(identity_cutover_backup_boundary_sha256 "$purpose")" || return 1
+		IFS='|' read -r database_id system_identifier source_lsn <<<"$source_identity"
 	fi
-	[[ ! -e "$partial" && ! -L "$partial" ]] || return 1
+	case "$current:$phase" in
+	absent:prepared | prepared:prepared | prepared:complete | complete:complete) ;;
+	*) return 1 ;;
+	esac
+	[[ ! -e "$temporary" && ! -L "$temporary" ]] || return 1
+	{
+		printf 'version=1\nphase=%s\nrevision=%s\npurpose=%s\n' \
+			"$phase" "$EXPECTED_REVISION" "$purpose"
+		printf 'url_key=%s\nschema=%s\nartifact_name=%s\n' \
+			"$url_key" "$schema" "$(basename -- "$destination")"
+		printf 'database_id=%s\ndatabase_system_identifier=%s\nsource_lsn=%s\nboundary_sha256=%s\n' \
+			"$database_id" "$system_identifier" "$source_lsn" "$boundary_sha256"
+		printf 'sha256=%s\nupdated_at=%s\n' "$artifact_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	} >"$temporary"
+	chmod 600 "$temporary"
+	chown 0:0 "$temporary"
+	mv -f -- "$temporary" "$journal"
+	identity_cutover_validate_backup_journal "$journal" "$purpose" "$url_key" "$schema" \
+		"$destination" "$EXPECTED_REVISION"
+}
+
+identity_cutover_require_existing_backup_capture() {
+	[[ $# -eq 4 ]] || return 1
+	local purpose="$1" url_key="$2" schema="$3" destination="$4"
+	local journal="${destination}.capture-v1" staging="${destination}.prepared"
+	local phase artifact_sha
+	[[ -f "$journal" && ! -L "$journal" ]] || return 1
+	identity_cutover_validate_backup_journal "$journal" "$purpose" "$url_key" "$schema" \
+		"$destination" "$EXPECTED_REVISION" || return 1
+	phase="$(identity_cutover_backup_journal_value "$journal" phase)" || return 1
+	artifact_sha="$(identity_cutover_backup_journal_value "$journal" sha256)" || return 1
+	case "$phase" in
+	complete)
+		[[ -f "$destination" && ! -L "$destination" && ! -e "$staging" && ! -L "$staging" ]] || return 1
+		identity_cutover_validate_backup_file "$destination" || return 1
+		[[ "$(identity_cutover_sha256 "$destination")" == "$artifact_sha" ]]
+		;;
+	prepared)
+		if [[ -e "$destination" || -L "$destination" ]]; then
+			[[ -f "$destination" && ! -L "$destination" && ! -e "$staging" && ! -L "$staging" ]] || return 1
+			identity_cutover_validate_backup_file "$destination" || return 1
+			[[ "$(identity_cutover_sha256 "$destination")" == "$artifact_sha" ]] || return 1
+		else
+			[[ -f "$staging" && ! -L "$staging" ]] || return 1
+			identity_cutover_validate_backup_file "$staging" || return 1
+			[[ "$(identity_cutover_sha256 "$staging")" == "$artifact_sha" ]] || return 1
+			mv -f -- "$staging" "$destination"
+		fi
+		identity_cutover_write_backup_journal "$journal" complete "$purpose" "$url_key" \
+			"$schema" "$destination" "$artifact_sha" || return 1
+		identity_cutover_validate_backup_file "$destination" || return 1
+		[[ "$(identity_cutover_sha256 "$destination")" == "$artifact_sha" ]]
+		;;
+	*) return 1 ;;
+	esac
+}
+
+identity_cutover_cleanup_backup_partials() {
+	[[ $# -eq 1 ]] || return 1
+	node - "$1" <<'NODE'
+const { lstatSync, readdirSync, unlinkSync } = require('node:fs');
+const { basename, dirname } = require('node:path');
+const destination = process.argv[2];
+const directory = dirname(destination);
+const prefix = `${basename(destination)}.partial`;
+for (const name of readdirSync(directory)) {
+  if (name !== prefix && !name.startsWith(`${prefix}.`)) continue;
+  const path = `${directory}/${name}`;
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink()) process.exit(1);
+  if ((typeof process.getuid !== 'function' || process.getuid() === 0) &&
+      (stat.uid !== 0 || (stat.mode & 0o777) !== 0o600)) process.exit(1);
+  unlinkSync(path);
+}
+NODE
+}
+
+identity_cutover_validate_backup_partials() {
+	[[ $# -eq 1 ]] || return 1
+	node - "$1" <<'NODE'
+const { lstatSync, readdirSync } = require('node:fs');
+const { basename, dirname } = require('node:path');
+const destination = process.argv[2];
+const directory = dirname(destination);
+const prefix = `${basename(destination)}.partial`;
+for (const name of readdirSync(directory)) {
+  if (name !== prefix && !name.startsWith(`${prefix}.`)) continue;
+  const stat = lstatSync(`${directory}/${name}`);
+  if (!stat.isFile() || stat.isSymbolicLink()) process.exit(1);
+  if ((typeof process.getuid !== 'function' || process.getuid() === 0) &&
+      (stat.uid !== 0 || (stat.mode & 0o777) !== 0o600)) process.exit(1);
+}
+NODE
+}
+
+identity_cutover_capture_backup_file() (
+	[[ $# -eq 3 ]] || return 1
+	local url_key="$1" schema="$2" partial="$3" size
+	[[ -f "$partial" && ! -L "$partial" && ! -s "$partial" ]] || return 1
+	trap 'rm -f -- "$partial"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	identity_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
 		run --rm -T --no-deps --entrypoint node maintenance-worker -e '
 const { spawnSync } = require("node:child_process");
@@ -477,13 +752,93 @@ const result = spawnSync("pg_dump", ["--format=custom", "--compress=6", "--no-ow
   "--no-acl", "--no-password", "--schema", schema],
   { env, stdio: ["ignore", "inherit", "inherit"] });
 if (result.error || result.signal || result.status !== 0) process.exit(result.status || 66);
-' "$url_key" "$schema" >"$partial"
+' "$url_key" "$schema" >"$partial" || return 1
 	[[ "$(head -c 5 "$partial")" == 'PGDMP' ]] || return 1
 	size="$(wc -c <"$partial" | tr -d '[:space:]')"
 	[[ "$size" =~ ^[1-9][0-9]*$ && "$size" -le $((49 * 1024 * 1024)) ]] || return 1
 	chmod 600 "$partial"
 	chown 0:0 "$partial"
-	mv -f -- "$partial" "$destination"
+	trap - EXIT INT TERM
+)
+
+identity_cutover_create_backup() (
+	[[ $# -eq 4 ]] || return 1
+	local purpose="$1" url_key="$2" schema="$3" destination="$4"
+	local journal="${destination}.capture-v1" staging="${destination}.prepared"
+	local artifact_sha partial=''
+	identity_cutover_backup_source_identity "$url_key" "$schema" "$purpose" >/dev/null || return 1
+	identity_cutover_cleanup_backup_partials "$destination" || return 1
+	if [[ -e "$journal" || -L "$journal" ]]; then
+		identity_cutover_require_existing_backup_capture "$purpose" "$url_key" "$schema" "$destination"
+		return
+	fi
+	[[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+	if [[ -e "$staging" || -L "$staging" ]]; then
+		identity_cutover_validate_private_file "$staging" || return 1
+		rm -f -- "$staging"
+	fi
+	partial="$(mktemp "${destination}.partial.XXXXXX")" || return 1
+	trap '[[ -z "$partial" ]] || rm -f -- "$partial"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	identity_cutover_capture_backup_file "$url_key" "$schema" "$partial" || return 1
+	mv -f -- "$partial" "$staging"
+	partial=''
+	artifact_sha="$(identity_cutover_sha256 "$staging")"
+	identity_cutover_write_backup_journal "$journal" prepared "$purpose" "$url_key" \
+		"$schema" "$destination" "$artifact_sha"
+	mv -f -- "$staging" "$destination"
+	identity_cutover_write_backup_journal "$journal" complete "$purpose" "$url_key" \
+		"$schema" "$destination" "$artifact_sha"
+	trap - EXIT INT TERM
+	identity_cutover_require_existing_backup_capture "$purpose" "$url_key" "$schema" "$destination"
+)
+
+identity_cutover_validate_frozen_backup_attempt_for_discard() {
+	local destination="$identity_frozen_core_backup"
+	local journal="${destination}.capture-v1" staging="${destination}.prepared" artifact_sha phase
+	identity_cutover_validate_backup_partials "$destination" || return 1
+	if [[ -e "$journal" || -L "$journal" ]]; then
+		identity_cutover_validate_backup_journal "$journal" core-frozen-identity-cutover \
+			DATABASE_BACKUP_URL public "$destination" "$EXPECTED_REVISION" || return 1
+		phase="$(identity_cutover_backup_journal_value "$journal" phase)" || return 1
+		artifact_sha="$(identity_cutover_backup_journal_value "$journal" sha256)" || return 1
+		case "$phase" in
+		complete)
+			[[ -f "$destination" && ! -L "$destination" && ! -e "$staging" && ! -L "$staging" ]] || return 1
+			identity_cutover_validate_backup_file "$destination" || return 1
+			[[ "$(identity_cutover_sha256 "$destination")" == "$artifact_sha" ]] || return 1
+			;;
+		prepared)
+			if [[ -e "$destination" || -L "$destination" ]]; then
+				[[ -f "$destination" && ! -L "$destination" && ! -e "$staging" && ! -L "$staging" ]] || return 1
+				identity_cutover_validate_backup_file "$destination" || return 1
+				[[ "$(identity_cutover_sha256 "$destination")" == "$artifact_sha" ]] || return 1
+			else
+				[[ -f "$staging" && ! -L "$staging" ]] || return 1
+				identity_cutover_validate_backup_file "$staging" || return 1
+				[[ "$(identity_cutover_sha256 "$staging")" == "$artifact_sha" ]] || return 1
+			fi
+			;;
+		*) return 1 ;;
+		esac
+	else
+		[[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+		if [[ -e "$staging" || -L "$staging" ]]; then
+			identity_cutover_validate_private_file "$staging" || return 1
+		fi
+	fi
+	return 0
+}
+
+identity_cutover_discard_frozen_backup_attempt() {
+	local destination="$identity_frozen_core_backup"
+	local journal="${destination}.capture-v1" staging="${destination}.prepared"
+	identity_cutover_validate_frozen_backup_attempt_for_discard || return 1
+	rm -f -- "$destination" "$staging" "$journal"
+	identity_cutover_cleanup_backup_partials "$destination" || return 1
+	[[ ! -e "$destination" && ! -L "$destination" && ! -e "$staging" && ! -L "$staging" &&
+		! -e "$journal" && ! -L "$journal" ]]
 }
 
 identity_cutover_restore_evidence_matches() {
@@ -491,15 +846,79 @@ identity_cutover_restore_evidence_matches() {
 	local evidence="$1" phase="$2" dump_sha="$3"
 	identity_cutover_validate_private_file "$evidence" || return 1
 	REVISION="$EXPECTED_REVISION" PHASE="$phase" DUMP_SHA="$dump_sha" \
+	DATABASE_ID="$(identity_database_marker_value database_id)" \
+	SOURCE_SYSTEM_IDENTIFIER="$(identity_database_marker_value database_system_identifier)" \
 		node - "$evidence" <<'NODE'
 const fs = require('node:fs');
 const value = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-if (value?.schemaVersion !== 1 || value.action !== 'identity-actual-backup-restore-rehearsal' ||
+const exact = (item, keys) => item && typeof item === 'object' && !Array.isArray(item) &&
+  JSON.stringify(Object.keys(item).sort()) === JSON.stringify([...keys].sort());
+if (!exact(value, ['schemaVersion','action','target','status','phase','revision','postgresMajor',
+      'dump','identity','counts','checks','completedAt']) ||
+    !exact(value.dump, ['sha256','sizeBytes']) ||
+    !exact(value.identity, ['databaseId','sourceSystemIdentifier','restoredSystemIdentifier']) ||
+    !exact(value.counts, ['tables','migrations','users','authIdentities',
+      'telegramNotificationChannels','outboxEvents']) ||
+    !exact(value.checks, ['immutableRevision','sourceFileSafe','dumpShaStable','isolatedTarget',
+      'noHostPorts','distinctCluster','identityAnchor','migrations','resourcesRemovedOnExit']) ||
+    value?.schemaVersion !== 1 || value.action !== 'identity-actual-backup-restore-rehearsal' ||
     value.target !== 'identity' || value.status !== 'passed' ||
     value.revision !== process.env.REVISION || value.phase !== process.env.PHASE ||
-    value.dump?.sha256 !== process.env.DUMP_SHA ||
-    Object.values(value.checks || {}).some(item => item !== true)) process.exit(1);
+    value.postgresMajor !== 18 || value.dump.sha256 !== process.env.DUMP_SHA ||
+    !Number.isSafeInteger(value.dump.sizeBytes) || value.dump.sizeBytes < 1 ||
+    value.identity.databaseId !== process.env.DATABASE_ID ||
+    value.identity.sourceSystemIdentifier !== process.env.SOURCE_SYSTEM_IDENTIFIER ||
+    !/^[1-9][0-9]*$/.test(value.identity.restoredSystemIdentifier) ||
+    value.identity.restoredSystemIdentifier === value.identity.sourceSystemIdentifier ||
+    !Number.isSafeInteger(value.counts.tables) || value.counts.tables < 1 ||
+    !Number.isSafeInteger(value.counts.migrations) || value.counts.migrations < 1 ||
+    ['users','authIdentities','telegramNotificationChannels','outboxEvents'].some(key =>
+      !Number.isSafeInteger(value.counts[key]) || value.counts[key] < 0) ||
+    Object.values(value.checks).some(item => item !== true) ||
+    !Number.isFinite(Date.parse(value.completedAt))) process.exit(1);
 NODE
+}
+
+identity_cutover_require_pre_cutover_artifacts() {
+	identity_cutover_validate_marker || return 1
+	[[ "$(identity_cutover_marker_value revision)" == "$EXPECTED_REVISION" ]] || return 1
+	identity_cutover_require_existing_backup_capture core-pre-identity-cutover \
+		DATABASE_BACKUP_URL public "$identity_core_backup" || return 1
+	identity_cutover_require_existing_backup_capture identity-pre-ownership \
+		IDENTITY_BACKUP_URL identity "$identity_pre_backup" || return 1
+	identity_cutover_validate_private_file "$identity_pre_restore_evidence" || return 1
+	local core_sha identity_sha restore_sha phase
+	core_sha="$(identity_cutover_sha256 "$identity_core_backup")" || return 1
+	identity_sha="$(identity_cutover_sha256 "$identity_pre_backup")" || return 1
+	restore_sha="$(identity_cutover_sha256 "$identity_pre_restore_evidence")" || return 1
+	phase="$(identity_cutover_marker_value phase)" || return 1
+	[[ "$identity_sha" == "$(identity_cutover_marker_value identity_pre_backup_sha256)" &&
+		"$restore_sha" == "$(identity_cutover_marker_value pre_restore_evidence_sha256)" ]] || return 1
+	if [[ "$phase" =~ ^(preflight-verified|restore-verified)$ ]]; then
+		[[ "$core_sha" == "$(identity_cutover_marker_value core_backup_sha256)" ]] || return 1
+	fi
+	identity_cutover_restore_evidence_matches "$identity_pre_restore_evidence" \
+		pre-cutover "$identity_sha"
+}
+
+identity_cutover_require_post_ownership_artifacts() {
+	[[ $# -eq 1 && "$1" =~ ^(pending-or-bound|bound)$ ]] || return 1
+	local mode="$1" backup_sha restore_sha marker_backup marker_restore
+	identity_cutover_require_existing_backup_capture identity-post-ownership \
+		IDENTITY_BACKUP_URL identity "$identity_post_backup" || return 1
+	identity_cutover_validate_private_file "$identity_post_restore_evidence" || return 1
+	backup_sha="$(identity_cutover_sha256 "$identity_post_backup")" || return 1
+	restore_sha="$(identity_cutover_sha256 "$identity_post_restore_evidence")" || return 1
+	identity_cutover_restore_evidence_matches "$identity_post_restore_evidence" \
+		post-ownership "$backup_sha" || return 1
+	marker_backup="$(identity_cutover_marker_value identity_post_backup_sha256)" || return 1
+	marker_restore="$(identity_cutover_marker_value post_restore_evidence_sha256)" || return 1
+	if [[ "$mode" == 'bound' ]]; then
+		[[ "$marker_backup" == "$backup_sha" && "$marker_restore" == "$restore_sha" ]]
+	else
+		[[ ( "$marker_backup" == 'pending' || "$marker_backup" == "$backup_sha" ) &&
+			( "$marker_restore" == 'pending' || "$marker_restore" == "$restore_sha" ) ]]
+	fi
 }
 
 identity_cutover_run_restore_rehearsal() {
@@ -528,16 +947,17 @@ identity_cutover_verify() {
 		identity_cutover_fail 'Identity verify requires the prepared preflight candidate' || return 1
 	identity_cutover_assert_bound_images ||
 		identity_cutover_fail 'Identity candidate images or route manifest drifted after preflight' || return 1
+	identity_cutover_require_database_binding || return 1
 	if [[ "$(identity_cutover_marker_value phase)" == 'restore-verified' ]]; then
-		[[ "$(identity_cutover_sha256 "$identity_core_backup")" == "$(identity_cutover_marker_value core_backup_sha256)" &&
-			"$(identity_cutover_sha256 "$identity_pre_backup")" == "$(identity_cutover_marker_value identity_pre_backup_sha256)" &&
-			"$(identity_cutover_sha256 "$identity_pre_restore_evidence")" == "$(identity_cutover_marker_value pre_restore_evidence_sha256)" ]] ||
+		identity_cutover_require_pre_cutover_artifacts ||
 			identity_cutover_fail 'Identity pre-cutover artifacts drifted after verification' || return 1
 		printf 'identity_cutover_phase=restore-verified\n'
 		return
 	fi
-	identity_cutover_create_backup DATABASE_BACKUP_URL public "$identity_core_backup"
-	identity_cutover_create_backup IDENTITY_BACKUP_URL identity "$identity_pre_backup"
+	identity_cutover_create_backup core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$identity_core_backup"
+	identity_cutover_create_backup identity-pre-ownership IDENTITY_BACKUP_URL identity \
+		"$identity_pre_backup"
 	identity_cutover_run_restore_rehearsal pre-cutover "$identity_pre_backup" \
 		"$identity_pre_restore_evidence"
 	identity_cutover_write_marker restore-verified "$EXPECTED_REVISION" \
@@ -1117,9 +1537,19 @@ identity_cutover_recover_pre_boundary() {
 			identity_cutover_validate_private_file "$identity_snapshot" &&
 				rm -f -- "$identity_snapshot" || true
 		fi
-		if identity_cutover_run_core_fence_action unfence \
-			"$identity_core_unfence_evidence" OPEN; then
-			safe_to_restart='true'
+		if identity_cutover_validate_frozen_backup_attempt_for_discard; then
+			if identity_cutover_run_core_fence_action unfence \
+				"$identity_core_unfence_evidence" OPEN; then
+				safe_to_restart='true'
+			fi
+		else
+			printf 'identity_pre_boundary_frozen_backup_discardable=false\n' >&2
+		fi
+		if [[ "$safe_to_restart" == 'true' ]]; then
+			identity_cutover_discard_frozen_backup_attempt || {
+				safe_to_restart='false'
+				printf 'identity_pre_boundary_frozen_backup_discarded=false\n' >&2
+			}
 		fi
 		if [[ "$safe_to_restart" == 'true' ]]; then
 			[[ -z "$identity_frozen_core_outbox_id" ]] || docker start "$identity_frozen_core_outbox_id" >/dev/null || true
@@ -1551,9 +1981,11 @@ identity_cutover_start_forward_runtime() {
 }
 
 identity_cutover_complete_forward() {
-	identity_cutover_create_backup IDENTITY_BACKUP_URL identity "$identity_post_backup"
+	identity_cutover_create_backup identity-post-ownership IDENTITY_BACKUP_URL identity \
+		"$identity_post_backup"
 	identity_cutover_run_restore_rehearsal post-ownership "$identity_post_backup" \
 		"$identity_post_restore_evidence"
+	identity_cutover_require_post_ownership_artifacts pending-or-bound
 	identity_cutover_require_completion_parity
 	if [[ "$(identity_database_current_phase)" == 'active' ]]; then
 		identity_database_advance complete
@@ -1588,7 +2020,12 @@ identity_cutover_deploy() {
 		"$(identity_database_current_phase)" == 'prepared' ]] ||
 		identity_cutover_fail 'Identity deploy requires preflight then verified restore evidence' || return 1
 	identity_cutover_assert_bound_images || return 1
+	identity_cutover_require_database_binding || return 1
+	identity_cutover_require_pre_cutover_artifacts ||
+		identity_cutover_fail 'Identity deploy pre-cutover artifacts drifted after verification' || return 1
 	identity_cutover_freeze_core
+	identity_cutover_create_backup core-frozen-identity-cutover DATABASE_BACKUP_URL public \
+		"$identity_frozen_core_backup"
 	identity_cutover_export_snapshot
 	local snapshot_sha
 	snapshot_sha="$(identity_cutover_sha256 "$identity_snapshot")"
@@ -1602,7 +2039,7 @@ identity_cutover_deploy() {
 		"$(identity_cutover_marker_value widgets_image_id)" \
 		"$(identity_cutover_marker_value billing_image_id)" \
 		"$(identity_cutover_marker_value route_sha256)" \
-		"$(identity_cutover_marker_value core_backup_sha256)" \
+		"$(identity_cutover_sha256 "$identity_frozen_core_backup")" \
 		"$(identity_cutover_marker_value identity_pre_backup_sha256)" \
 		"$(identity_cutover_marker_value pre_restore_evidence_sha256)" \
 		"$snapshot_sha" pending pending "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1613,23 +2050,158 @@ identity_cutover_deploy() {
 	identity_cutover_complete_forward
 }
 
+identity_cutover_require_split_recovery_state() {
+	[[ $# -eq 2 ]] || return 1
+	case "$1:$2" in
+	active:forward-only | complete:active) ;;
+	*) return 1 ;;
+	esac
+	identity_database_validate_marker || return 1
+	identity_cutover_validate_marker || return 1
+	[[ "$(identity_database_current_phase)" == "$1" &&
+		"$(identity_cutover_marker_value phase)" == "$2" &&
+		"$(identity_database_marker_value ownership_revision)" == "$EXPECTED_REVISION" &&
+		"$(identity_cutover_marker_value revision)" == "$EXPECTED_REVISION" ]] ||
+		identity_cutover_fail "Identity split recovery state or revision drifted: expected=$1:$2" || return 1
+	identity_cutover_assert_bound_images ||
+		identity_cutover_fail 'Identity split recovery image or route bindings drifted' || return 1
+}
+
+identity_cutover_require_split_recovery_base_evidence() {
+	local core_backup_sha identity_pre_backup_sha pre_restore_sha snapshot_sha
+	core_backup_sha="$(identity_cutover_marker_value core_backup_sha256)" || return 1
+	identity_pre_backup_sha="$(identity_cutover_marker_value identity_pre_backup_sha256)" || return 1
+	pre_restore_sha="$(identity_cutover_marker_value pre_restore_evidence_sha256)" || return 1
+	snapshot_sha="$(identity_cutover_marker_value snapshot_sha256)" || return 1
+	[[ "$core_backup_sha" =~ ^[0-9a-f]{64}$ &&
+		"$identity_pre_backup_sha" =~ ^[0-9a-f]{64}$ &&
+		"$pre_restore_sha" =~ ^[0-9a-f]{64}$ &&
+		"$snapshot_sha" =~ ^[0-9a-f]{64}$ ]] ||
+		identity_cutover_fail 'Identity split recovery marker evidence is incomplete' || return 1
+	identity_cutover_require_pre_cutover_artifacts || return 1
+	identity_cutover_require_existing_backup_capture core-frozen-identity-cutover \
+		DATABASE_BACKUP_URL public "$identity_frozen_core_backup" || return 1
+	identity_cutover_validate_private_file "$identity_snapshot" || return 1
+	[[ "$(identity_cutover_sha256 "$identity_frozen_core_backup")" == "$core_backup_sha" &&
+		"$(identity_cutover_sha256 "$identity_snapshot")" == "$snapshot_sha" ]] ||
+		identity_cutover_fail 'Identity split recovery artifacts drifted from the marker' || return 1
+}
+
+identity_cutover_assert_split_recovery_activation_evidence() {
+	identity_cutover_validate_private_file "$identity_service_activation_evidence" || return 1
+	identity_cutover_validate_private_file "$identity_service_completion_evidence" || return 1
+	EXPECTED_SNAPSHOT_SHA="$(identity_cutover_marker_value snapshot_sha256)" \
+		node - "$identity_service_activation_evidence" \
+		"$identity_service_completion_evidence" <<'NODE'
+const fs = require('node:fs');
+const activation = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const completion = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const exact = (value, keys) => value && typeof value === 'object' &&
+  !Array.isArray(value) && Object.keys(value).sort().join('|') === keys.sort().join('|');
+const generation = value => /^[1-9][0-9]*$/.test(value || '');
+if (!exact(activation, ['ok','action','phase','duplicate','ownershipGeneration']) ||
+    activation.ok !== true || activation.action !== 'activate' ||
+    activation.phase !== 'ACTIVE' || typeof activation.duplicate !== 'boolean' ||
+    !generation(activation.ownershipGeneration) ||
+    !exact(completion, ['ok','action','sha256','counts','phase','ownershipGeneration']) ||
+    completion.ok !== true || completion.action !== 'complete' ||
+    completion.phase !== 'ACTIVE' || completion.sha256 !== process.env.EXPECTED_SNAPSHOT_SHA ||
+    !generation(completion.ownershipGeneration) ||
+    completion.ownershipGeneration !== activation.ownershipGeneration ||
+    !exact(completion.counts, ['users','identities','telegramNotificationChannels',
+      'emailCollisionGroups','phoneCollisionGroups','reportingVersionCoverageFailures',
+      'billingVersionCoverageFailures']) ||
+    !Number.isSafeInteger(completion.counts.users) || completion.counts.users < 1 ||
+    !Number.isSafeInteger(completion.counts.identities) || completion.counts.identities < 1 ||
+    !Number.isSafeInteger(completion.counts.telegramNotificationChannels) ||
+    completion.counts.telegramNotificationChannels < 0 ||
+    completion.counts.emailCollisionGroups !== 0 || completion.counts.phoneCollisionGroups !== 0 ||
+    completion.counts.reportingVersionCoverageFailures !== 0 ||
+    completion.counts.billingVersionCoverageFailures !== 0) process.exit(1);
+NODE
+}
+
+identity_cutover_write_reconciled_marker() {
+	[[ $# -eq 3 && "$1" =~ ^(active|complete)$ &&
+		"$2" =~ ^(pending|[0-9a-f]{64})$ &&
+		"$3" =~ ^(pending|[0-9a-f]{64})$ ]] || return 1
+	identity_cutover_write_marker "$1" "$EXPECTED_REVISION" \
+		"$(identity_cutover_marker_value core_image_id)" \
+		"$(identity_cutover_marker_value identity_image_id)" \
+		"$(identity_cutover_marker_value gateway_image_id)" \
+		"$(identity_cutover_marker_value campaigns_image_id)" \
+		"$(identity_cutover_marker_value reporting_image_id)" \
+		"$(identity_cutover_marker_value widgets_image_id)" \
+		"$(identity_cutover_marker_value billing_image_id)" \
+		"$(identity_cutover_marker_value route_sha256)" \
+		"$(identity_cutover_marker_value core_backup_sha256)" \
+		"$(identity_cutover_marker_value identity_pre_backup_sha256)" \
+		"$(identity_cutover_marker_value pre_restore_evidence_sha256)" \
+		"$(identity_cutover_marker_value snapshot_sha256)" \
+		"$2" "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+identity_cutover_reconcile_split_state() {
+	[[ $# -eq 2 ]] || return 1
+	local database_phase="$1" marker_phase="$2"
+	local marker_post_backup marker_post_restore post_backup_sha post_restore_sha
+	identity_cutover_require_split_recovery_state "$database_phase" "$marker_phase" || return 1
+	identity_cutover_require_split_recovery_base_evidence || return 1
+	identity_cutover_require_core_fenced_live || return 1
+	case "$database_phase:$marker_phase" in
+	active:forward-only)
+		marker_post_backup="$(identity_cutover_marker_value identity_post_backup_sha256)" || return 1
+		marker_post_restore="$(identity_cutover_marker_value post_restore_evidence_sha256)" || return 1
+		[[ "$marker_post_backup" == 'pending' && "$marker_post_restore" == 'pending' ]] ||
+			identity_cutover_fail 'Identity forward-only marker unexpectedly binds post-ownership evidence' || return 1
+		;;
+	complete:active)
+		identity_cutover_require_post_ownership_artifacts pending-or-bound ||
+			identity_cutover_fail 'Identity split recovery post-ownership evidence is invalid' || return 1
+		post_backup_sha="$(identity_cutover_sha256 "$identity_post_backup")" || return 1
+		post_restore_sha="$(identity_cutover_sha256 "$identity_post_restore_evidence")" || return 1
+		marker_post_backup="$post_backup_sha"
+		marker_post_restore="$post_restore_sha"
+		;;
+	esac
+	identity_deploy_dark_api || return 1
+	identity_cutover_run_service_action complete "$identity_service_completion_evidence" || return 1
+	identity_cutover_require_completion_parity || return 1
+	identity_cutover_assert_split_recovery_activation_evidence ||
+		identity_cutover_fail 'Identity split recovery activation/parity evidence is invalid' || return 1
+	identity_cutover_require_core_fenced_live || return 1
+	identity_cutover_require_split_recovery_state "$database_phase" "$marker_phase" || return 1
+	identity_cutover_write_reconciled_marker "$database_phase" \
+		"$marker_post_backup" "$marker_post_restore" || return 1
+	[[ "$(identity_database_current_phase):$(identity_cutover_marker_value phase)" == \
+		"$database_phase:$database_phase" ]] ||
+		identity_cutover_fail 'Identity split recovery marker reconciliation did not persist'
+}
+
 identity_cutover_forward_recovery() {
 	identity_cutover_require_common
 	acquire_production_deploy_lock 'Identity forward recovery'
 	identity_cutover_validate_marker || return 1
 	[[ "$(identity_cutover_marker_value revision)" == "$EXPECTED_REVISION" ]] || return 1
+	identity_cutover_require_database_binding || return 1
 	identity_cutover_assert_bound_images || return 1
 	trap identity_cutover_recover_pre_boundary EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
-	local database_phase marker_phase snapshot_sha
+	local database_phase marker_phase snapshot_sha frozen_core_sha
 	database_phase="$(identity_database_current_phase)"
 	marker_phase="$(identity_cutover_marker_value phase)"
 	case "$database_phase:$marker_phase" in
 	forward-only:restore-verified | forward-only:forward-only)
 		identity_cutover_require_core_fenced_live || return 1
+		if [[ "$marker_phase" == 'restore-verified' ]]; then
+			identity_cutover_require_pre_cutover_artifacts || return 1
+		fi
+		identity_cutover_require_existing_backup_capture core-frozen-identity-cutover \
+			DATABASE_BACKUP_URL public "$identity_frozen_core_backup" || return 1
 		identity_cutover_validate_private_file "$identity_snapshot" || return 1
-		snapshot_sha="$(identity_cutover_sha256 "$identity_snapshot")"
+		frozen_core_sha="$(identity_cutover_sha256 "$identity_frozen_core_backup")" || return 1
+		snapshot_sha="$(identity_cutover_sha256 "$identity_snapshot")" || return 1
 		if [[ "$marker_phase" == 'restore-verified' ]]; then
 			identity_cutover_write_marker forward-only "$EXPECTED_REVISION" \
 				"$(identity_cutover_marker_value core_image_id)" \
@@ -1640,21 +2212,34 @@ identity_cutover_forward_recovery() {
 				"$(identity_cutover_marker_value widgets_image_id)" \
 				"$(identity_cutover_marker_value billing_image_id)" \
 				"$(identity_cutover_marker_value route_sha256)" \
-				"$(identity_cutover_marker_value core_backup_sha256)" \
+				"$frozen_core_sha" \
 				"$(identity_cutover_marker_value identity_pre_backup_sha256)" \
 				"$(identity_cutover_marker_value pre_restore_evidence_sha256)" \
 				"$snapshot_sha" pending pending "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		else
-			[[ "$snapshot_sha" == "$(identity_cutover_marker_value snapshot_sha256)" ]] || return 1
+			[[ "$frozen_core_sha" == "$(identity_cutover_marker_value core_backup_sha256)" &&
+				"$snapshot_sha" == "$(identity_cutover_marker_value snapshot_sha256)" ]] || return 1
 		fi
+		identity_cutover_require_split_recovery_base_evidence || return 1
 		identity_cutover_import_snapshot
 		identity_cutover_start_forward_runtime
 		identity_cutover_complete_forward
 		;;
+	active:forward-only)
+		identity_cutover_reconcile_split_state active forward-only || return 1
+		identity_cutover_start_forward_runtime
+		identity_cutover_complete_forward
+		;;
 	active:active)
+		identity_cutover_require_split_recovery_base_evidence || return 1
 		identity_cutover_require_core_fenced_live || return 1
 		identity_cutover_start_forward_runtime
 		identity_cutover_complete_forward
+		;;
+	complete:active)
+		identity_cutover_reconcile_split_state complete active || return 1
+		identity_cutover_start_forward_runtime
+		printf 'identity_cutover_phase=complete\n'
 		;;
 	complete:complete)
 		identity_cutover_require_core_fenced_live || return 1
@@ -1676,6 +2261,290 @@ identity_cutover_status() {
 	printf 'identity_cutover_revision=%s\n' "$(identity_cutover_marker_value revision)"
 }
 
+identity_cutover_self_test_database_binding() (
+	local revision database_revision database_image cutover_image
+	local database_marker_valid='true' cutover_marker_valid='true'
+	revision="$(printf 'a%.0s' {1..40})"
+	database_revision="$revision"
+	database_image="sha256:$(printf 'b%.0s' {1..64})"
+	cutover_image="$database_image"
+	EXPECTED_REVISION="$revision"
+	identity_database_validate_marker() { [[ "$database_marker_valid" == 'true' ]]; }
+	identity_cutover_validate_marker() { [[ "$cutover_marker_valid" == 'true' ]]; }
+	identity_database_marker_value() {
+		case "$1" in
+		ownership_revision) printf '%s\n' "$database_revision" ;;
+		image_id) printf '%s\n' "$database_image" ;;
+		*) return 1 ;;
+		esac
+	}
+	identity_cutover_marker_value() {
+		[[ "$1" == 'identity_image_id' ]] || return 1
+		printf '%s\n' "$cutover_image"
+	}
+	identity_cutover_fail() { return 1; }
+
+	identity_cutover_require_database_binding || return 1
+	database_revision="$(printf 'c%.0s' {1..40})"
+	if identity_cutover_require_database_binding; then return 1; fi
+	database_revision="$revision"
+	database_image="sha256:$(printf 'd%.0s' {1..64})"
+	if identity_cutover_require_database_binding; then return 1; fi
+	database_image="$cutover_image"
+	database_marker_valid='false'
+	if identity_cutover_require_database_binding; then return 1; fi
+)
+
+identity_cutover_self_test_split_recovery() (
+	local revision foreign_revision image_id route_sha core_sha pre_sha pre_restore_sha snapshot_sha
+	local post_sha fixture_post_restore_sha database_revision fixture_database_phase marker_revision fixture_marker_phase
+	local fixture_marker_post_backup='pending' fixture_marker_post_restore='pending'
+	local base_evidence_valid='true' fence_valid='true' parity_valid='true'
+	local state_calls=0 fence_calls=0 base_calls=0 deploy_calls=0 parity_calls=0
+	local service_calls=0 activation_calls=0 post_restore_calls=0
+	local -a written=()
+	revision="$(printf 'a%.0s' {1..40})"
+	foreign_revision="$(printf 'b%.0s' {1..40})"
+	route_sha="$(printf '1%.0s' {1..64})"
+	core_sha="$(printf '2%.0s' {1..64})"
+	pre_sha="$(printf '3%.0s' {1..64})"
+	pre_restore_sha="$(printf '4%.0s' {1..64})"
+	snapshot_sha="$(printf '5%.0s' {1..64})"
+	post_sha="$(printf '6%.0s' {1..64})"
+	fixture_post_restore_sha="$(printf '7%.0s' {1..64})"
+	image_id="sha256:$(printf '8%.0s' {1..64})"
+	EXPECTED_REVISION="$revision"
+	identity_service_completion_evidence='/tmp/identity-cutover-self-test-completion.json'
+	identity_post_backup='/tmp/identity-cutover-self-test-post.dump'
+	identity_post_restore_evidence='/tmp/identity-cutover-self-test-post-restore.json'
+	database_revision="$revision"
+	marker_revision="$revision"
+	identity_database_validate_marker() { return 0; }
+	identity_cutover_validate_marker() { return 0; }
+	identity_database_current_phase() { printf '%s\n' "$fixture_database_phase"; }
+	identity_database_marker_value() {
+		[[ "$1" == 'ownership_revision' ]] || return 1
+		printf '%s\n' "$database_revision"
+	}
+	identity_cutover_marker_value() {
+		case "$1" in
+		phase) printf '%s\n' "$fixture_marker_phase" ;;
+		revision) printf '%s\n' "$marker_revision" ;;
+		core_image_id | identity_image_id | gateway_image_id | campaigns_image_id | \
+			reporting_image_id | widgets_image_id | billing_image_id) printf '%s\n' "$image_id" ;;
+		route_sha256) printf '%s\n' "$route_sha" ;;
+		core_backup_sha256) printf '%s\n' "$core_sha" ;;
+		identity_pre_backup_sha256) printf '%s\n' "$pre_sha" ;;
+		pre_restore_evidence_sha256) printf '%s\n' "$pre_restore_sha" ;;
+		snapshot_sha256) printf '%s\n' "$snapshot_sha" ;;
+		identity_post_backup_sha256) printf '%s\n' "$fixture_marker_post_backup" ;;
+		post_restore_evidence_sha256) printf '%s\n' "$fixture_marker_post_restore" ;;
+		*) return 1 ;;
+		esac
+	}
+	identity_cutover_assert_bound_images() { ((state_calls += 1)); }
+	identity_cutover_require_split_recovery_base_evidence() {
+		((base_calls += 1))
+		[[ "$base_evidence_valid" == 'true' ]]
+	}
+	identity_cutover_require_core_fenced_live() {
+		((fence_calls += 1))
+		[[ "$fence_valid" == 'true' ]]
+	}
+	identity_deploy_dark_api() { ((deploy_calls += 1)); }
+	identity_cutover_run_service_action() {
+		[[ "$1" == 'complete' && "$2" == "$identity_service_completion_evidence" ]] || return 1
+		((service_calls += 1))
+	}
+	identity_cutover_require_completion_parity() {
+		((parity_calls += 1))
+		[[ "$parity_valid" == 'true' ]]
+	}
+	identity_cutover_assert_split_recovery_activation_evidence() { ((activation_calls += 1)); }
+	identity_cutover_require_post_ownership_artifacts() {
+		[[ "$1" == 'pending-or-bound' &&
+			( "$fixture_marker_post_backup" == 'pending' || "$fixture_marker_post_backup" == "$post_sha" ) &&
+			( "$fixture_marker_post_restore" == 'pending' || "$fixture_marker_post_restore" == "$fixture_post_restore_sha" ) ]] || return 1
+		((post_restore_calls += 1))
+	}
+	identity_cutover_sha256() {
+		case "$1" in
+		"$identity_post_backup") printf '%s\n' "$post_sha" ;;
+		"$identity_post_restore_evidence") printf '%s\n' "$fixture_post_restore_sha" ;;
+		*) return 1 ;;
+		esac
+	}
+	identity_cutover_write_marker() {
+		[[ $# -eq 17 ]] || return 1
+		written=("$@")
+		fixture_marker_phase="$1"
+	}
+	identity_cutover_fail() { return 1; }
+
+	fixture_database_phase='active'
+	fixture_marker_phase='forward-only'
+	identity_cutover_reconcile_split_state active forward-only
+	[[ "$fixture_marker_phase" == 'active' && "$state_calls" == 2 && "$fence_calls" == 2 &&
+		"$base_calls" == 1 && "$deploy_calls" == 1 && "$service_calls" == 1 &&
+		"$parity_calls" == 1 && "$activation_calls" == 1 && "${#written[@]}" == 17 &&
+		"${written[0]}" == 'active' && "${written[1]}" == "$revision" &&
+		"${written[9]}" == "$route_sha" && "${written[10]}" == "$core_sha" &&
+		"${written[11]}" == "$pre_sha" && "${written[12]}" == "$pre_restore_sha" &&
+		"${written[13]}" == "$snapshot_sha" && "${written[14]}" == 'pending' &&
+		"${written[15]}" == 'pending' ]] || return 1
+
+	fixture_database_phase='complete'
+	fixture_marker_phase='active'
+	state_calls=0 fence_calls=0 base_calls=0 deploy_calls=0 parity_calls=0
+	service_calls=0 activation_calls=0 post_restore_calls=0 written=()
+	identity_cutover_reconcile_split_state complete active
+	[[ "$fixture_marker_phase" == 'complete' && "$state_calls" == 2 && "$fence_calls" == 2 &&
+		"$base_calls" == 1 && "$deploy_calls" == 1 && "$service_calls" == 1 &&
+		"$parity_calls" == 1 && "$activation_calls" == 1 && "$post_restore_calls" == 1 &&
+		"${#written[@]}" == 17 && "${written[0]}" == 'complete' &&
+		"${written[1]}" == "$revision" && "${written[9]}" == "$route_sha" &&
+		"${written[10]}" == "$core_sha" && "${written[11]}" == "$pre_sha" &&
+		"${written[12]}" == "$pre_restore_sha" && "${written[13]}" == "$snapshot_sha" &&
+		"${written[14]}" == "$post_sha" && "${written[15]}" == "$fixture_post_restore_sha" ]] || return 1
+
+	fixture_database_phase='active'
+	fixture_marker_phase='forward-only'
+	database_revision="$foreign_revision"
+	deploy_calls=0 written=()
+	if identity_cutover_reconcile_split_state active forward-only; then return 1; fi
+	[[ "$deploy_calls" == 0 && "${#written[@]}" == 0 ]] || return 1
+	database_revision="$revision"
+	base_evidence_valid='false'
+	if identity_cutover_reconcile_split_state active forward-only; then return 1; fi
+	[[ "$deploy_calls" == 0 && "${#written[@]}" == 0 ]] || return 1
+	base_evidence_valid='true'
+
+	fixture_database_phase='complete'
+	fixture_marker_phase='active'
+	fixture_marker_post_backup="$core_sha"
+	deploy_calls=0 written=()
+	if identity_cutover_reconcile_split_state complete active; then return 1; fi
+	[[ "$deploy_calls" == 0 && "${#written[@]}" == 0 ]] || return 1
+)
+
+identity_cutover_self_test_backup_journal() (
+	local temporary destination journal staging artifact_sha
+	local revision fixture_source_identity boundary_sha mode='failed'
+	temporary="$(mktemp -d "${TMPDIR:-/tmp}/identity-cutover-backup-self-test.XXXXXX")"
+	destination="$temporary/core.dump"
+	journal="${destination}.capture-v1"
+	staging="${destination}.prepared"
+	revision="$(printf 'a%.0s' {1..40})"
+	fixture_source_identity='core-monolith:default_db|7668360958158979115|0/16B6C50'
+	boundary_sha='pending'
+	EXPECTED_REVISION="$revision"
+	trap 'rm -f -- "$destination" "$journal" "$staging" "${journal}.tmp.$$" "${destination}.partial"; rmdir -- "$temporary"' EXIT
+	if [[ "$(id -u)" != '0' ]]; then chown() { :; }; fi
+	identity_cutover_backup_source_identity() {
+		case "$1:$2:$3" in
+		DATABASE_BACKUP_URL:public:core-pre-identity-cutover | \
+			DATABASE_BACKUP_URL:public:core-frozen-identity-cutover) ;;
+		*) return 1 ;;
+		esac
+		printf '%s' "$fixture_source_identity"
+	}
+	identity_cutover_backup_boundary_sha256() {
+		case "$1" in
+		core-pre-identity-cutover) printf '%s' "$boundary_sha" ;;
+		core-frozen-identity-cutover) printf '%s' "$boundary_sha" ;;
+		*) return 1 ;;
+		esac
+	}
+	identity_release_compose() {
+		if [[ "$mode" == 'success' ]]; then
+			printf 'PGDMP-self-test-backup\n'
+			return 0
+		fi
+		printf 'failed-partial\n'
+		return 1
+	}
+	! identity_cutover_create_backup core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination"
+	[[ ! -e "$destination" && ! -e "$journal" && ! -e "$staging" ]] || return 1
+	printf 'orphaned-partial\n' >"${destination}.partial"
+	chmod 600 "${destination}.partial"
+	mode='success'
+	identity_cutover_create_backup core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination" || return 1
+	[[ ! -e "${destination}.partial" &&
+		"$(identity_cutover_backup_journal_value "$journal" phase)" == 'complete' ]] || return 1
+	artifact_sha="$(identity_cutover_backup_journal_value "$journal" sha256)"
+	[[ "$(identity_cutover_sha256 "$destination")" == "$artifact_sha" &&
+		"$(identity_cutover_backup_journal_value "$journal" source_lsn)" == '0/16B6C50' ]] || return 1
+	identity_cutover_require_existing_backup_capture core-pre-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination" || return 1
+	printf 'PGDMP-journal-sha-mismatch\n' >"$destination"
+	chmod 600 "$destination"
+	! identity_cutover_require_existing_backup_capture core-pre-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination"
+	printf 'PGDMP-self-test-backup\n' >"$destination"
+	chmod 600 "$destination"
+	identity_cutover_require_existing_backup_capture core-pre-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination" || return 1
+	mode='failed'
+	identity_cutover_create_backup core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination"
+	! identity_cutover_validate_backup_journal "$journal" identity-pre-ownership \
+		IDENTITY_BACKUP_URL identity "$destination" "$revision"
+	boundary_sha="$(printf 'b%.0s' {1..64})"
+	! identity_cutover_create_backup core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination"
+	boundary_sha='pending'
+	fixture_source_identity='core-monolith:default_db|9999999999999999999|0/16B6C50'
+	! identity_cutover_create_backup core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination"
+	fixture_source_identity='core-monolith:default_db|7668360958158979115|0/16B6C50'
+	rm -f -- "$destination" "$journal"
+	printf 'PGDMP-stale-valid-unbound\n' >"$destination"
+	chmod 600 "$destination"
+	! identity_cutover_create_backup core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination"
+	rm -f -- "$destination"
+	printf 'PGDMP-crash-after-rename\n' >"$destination"
+	chmod 600 "$destination"
+	artifact_sha="$(identity_cutover_sha256 "$destination")"
+	identity_cutover_write_backup_journal "$journal" prepared core-pre-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination" "$artifact_sha" || return 1
+	fixture_source_identity='core-monolith:default_db|7668360958158979115|0/16B6C51'
+	identity_cutover_require_existing_backup_capture core-pre-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination" || return 1
+	[[ "$(identity_cutover_backup_journal_value "$journal" phase)" == 'complete' &&
+		"$(identity_cutover_backup_journal_value "$journal" source_lsn)" == '0/16B6C50' &&
+		"$(identity_cutover_sha256 "$destination")" == "$artifact_sha" ]] || return 1
+	fixture_source_identity='core-monolith:default_db|7668360958158979115|0/16B6C50'
+	rm -f -- "$destination" "$journal"
+	printf 'PGDMP-crash-before-rename\n' >"$staging"
+	chmod 600 "$staging"
+	artifact_sha="$(identity_cutover_sha256 "$staging")"
+	identity_cutover_write_backup_journal "$journal" prepared core-pre-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination" "$artifact_sha" || return 1
+	identity_cutover_require_existing_backup_capture core-pre-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination" || return 1
+	[[ ! -e "$staging" && "$(identity_cutover_backup_journal_value "$journal" phase)" == 'complete' &&
+		"$(identity_cutover_sha256 "$destination")" == "$artifact_sha" ]] || return 1
+	rm -f -- "$destination" "$journal"
+	identity_frozen_core_backup="$destination"
+	boundary_sha="$(printf 'c%.0s' {1..64})"
+	printf 'PGDMP-frozen-retry-after-unfence\n' >"$destination"
+	chmod 600 "$destination"
+	artifact_sha="$(identity_cutover_sha256 "$destination")"
+	identity_cutover_write_backup_journal "$journal" prepared core-frozen-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination" "$artifact_sha" || return 1
+	identity_cutover_create_backup core-frozen-identity-cutover DATABASE_BACKUP_URL public \
+		"$destination" || return 1
+	boundary_sha="$(printf 'd%.0s' {1..64})"
+	! identity_cutover_validate_backup_journal "$journal" core-frozen-identity-cutover \
+		DATABASE_BACKUP_URL public "$destination" "$revision"
+	boundary_sha="$(printf 'c%.0s' {1..64})"
+	identity_cutover_discard_frozen_backup_attempt || return 1
+	[[ ! -e "$destination" && ! -e "$journal" && ! -e "$staging" ]] || return 1
+)
+
 identity_cutover_self_test() {
 	identity_cutover_transition_allowed absent preflight-verified
 	identity_cutover_transition_allowed preflight-verified restore-verified
@@ -1684,7 +2553,8 @@ identity_cutover_self_test() {
 	identity_cutover_transition_allowed active complete
 	! identity_cutover_transition_allowed forward-only preflight-verified
 	! identity_cutover_transition_allowed complete active
-	local source
+	local source recovery_source backup_source deploy_source complete_source
+	local recover_pre_boundary_source
 	source="$(declare -f identity_cutover_require_common identity_cutover_preflight identity_cutover_verify \
 		identity_cutover_deploy identity_cutover_forward_recovery \
 		identity_cutover_freeze_core identity_cutover_recover_pre_boundary \
@@ -1713,6 +2583,85 @@ identity_cutover_self_test() {
 		"$source" == *'admin\.audit\.(campaigns|reporting|widgets|billing|identity)'* &&
 		"$source" == *'exactly one Identity consumer'* &&
 		"$source" == *'identity-backup-restore-rehearsal.sh'* ]] || return 1
+	recovery_source="$(declare -f identity_cutover_forward_recovery \
+		identity_cutover_reconcile_split_state \
+		identity_cutover_require_database_binding \
+		identity_cutover_require_split_recovery_state \
+		identity_cutover_require_split_recovery_base_evidence \
+		identity_cutover_require_pre_cutover_artifacts \
+		identity_cutover_require_post_ownership_artifacts \
+		identity_cutover_require_existing_backup_capture \
+		identity_cutover_assert_split_recovery_activation_evidence \
+		identity_cutover_write_reconciled_marker)"
+	[[ "$recovery_source" == *'active:forward-only'* &&
+		"$recovery_source" == *'complete:active'* &&
+		"$recovery_source" == *'identity_cutover_require_core_fenced_live'* &&
+		"$recovery_source" == *'identity_cutover_require_completion_parity'* &&
+		"$recovery_source" == *'identity_cutover_restore_evidence_matches'* &&
+		"$recovery_source" == *'identity_database_marker_value ownership_revision'* &&
+		"$recovery_source" == *'identity_cutover_marker_value snapshot_sha256'* &&
+		"$recovery_source" == *'identity_cutover_write_marker'* ]] || return 1
+	identity_cutover_self_test_database_binding || return 1
+	identity_cutover_self_test_split_recovery || return 1
+	identity_cutover_self_test_backup_journal || return 1
+	backup_source="$(declare -f identity_cutover_backup_source_identity \
+		identity_cutover_frozen_boundary_sha256 identity_cutover_backup_boundary_sha256 \
+		identity_cutover_validate_backup_journal identity_cutover_require_existing_backup_capture \
+		identity_cutover_create_backup identity_cutover_require_pre_cutover_artifacts \
+		identity_cutover_require_post_ownership_artifacts \
+		identity_cutover_discard_frozen_backup_attempt identity_cutover_restore_evidence_matches \
+		identity_cutover_deploy identity_cutover_forward_recovery)"
+	[[ "$backup_source" == *'core-frozen-identity-cutover'* &&
+		"$backup_source" == *'database_system_identifier'* &&
+		"$backup_source" == *'source_lsn'* &&
+		"$backup_source" == *'boundary_sha256'* &&
+		"$backup_source" == *'identity_core_frozen_preflight_evidence'* &&
+		"$backup_source" == *'identity_core_frozen_projection_evidence'* &&
+		"$backup_source" == *'identity_core_frozen_destination_evidence'* &&
+		"$backup_source" == *'identity_core_fence_evidence'* &&
+		"$backup_source" == *'identity_frozen_core_backup'* &&
+		"$backup_source" == *'identity_database_marker_value database_id'* &&
+		"$backup_source" == *'identity_database_marker_value database_system_identifier'* &&
+		"$backup_source" == *'sourceSystemIdentifier'* &&
+		"$backup_source" == *'restoredSystemIdentifier'* ]] || return 1
+	deploy_source="$(declare -f identity_cutover_deploy)"
+	DEPLOY_SOURCE="$deploy_source" node -e '
+const source = process.env.DEPLOY_SOURCE || "";
+const binding = source.indexOf("identity_cutover_require_database_binding");
+const requirePre = source.indexOf("identity_cutover_require_pre_cutover_artifacts", binding);
+const freeze = source.indexOf("identity_cutover_freeze_core", requirePre);
+const frozenBackup = source.indexOf("identity_cutover_create_backup core-frozen-identity-cutover", freeze);
+const snapshot = source.indexOf("identity_cutover_export_snapshot", frozenBackup);
+if (binding < 0 || requirePre <= binding || freeze <= requirePre ||
+    frozenBackup <= freeze || snapshot <= frozenBackup) process.exit(1);
+'
+	complete_source="$(declare -f identity_cutover_complete_forward)"
+	COMPLETE_SOURCE="$complete_source" node -e '
+const source = process.env.COMPLETE_SOURCE || "";
+const backup = source.indexOf("identity_cutover_create_backup identity-post-ownership");
+const restore = source.indexOf("identity_cutover_run_restore_rehearsal post-ownership", backup);
+const requirePost = source.indexOf("identity_cutover_require_post_ownership_artifacts pending-or-bound", restore);
+const parity = source.indexOf("identity_cutover_require_completion_parity", requirePost);
+const advance = source.indexOf("identity_database_advance complete", parity);
+const marker = source.indexOf("identity_cutover_write_marker complete", advance);
+if (backup < 0 || restore <= backup || requirePost <= restore || parity <= requirePost ||
+    advance <= parity || marker <= advance) process.exit(1);
+'
+	recover_pre_boundary_source="$(declare -f identity_cutover_recover_pre_boundary)"
+	RECOVER_SOURCE="$recover_pre_boundary_source" node -e '
+const source = process.env.RECOVER_SOURCE || "";
+const validate = source.indexOf("identity_cutover_validate_frozen_backup_attempt_for_discard");
+const unfence = source.indexOf("identity_cutover_run_core_fence_action unfence", validate);
+const discard = source.indexOf("identity_cutover_discard_frozen_backup_attempt", unfence);
+const restart = source.indexOf("docker start", discard);
+if (validate < 0 || unfence <= validate || discard <= unfence || restart <= discard) process.exit(1);
+'
+	RECOVERY_SOURCE="$(declare -f identity_cutover_forward_recovery)" node -e '
+const source = process.env.RECOVERY_SOURCE || "";
+const binding = source.indexOf("identity_cutover_require_database_binding");
+const state = source.indexOf("case", binding);
+if (binding < 0 || state <= binding) process.exit(1);
+'
 	printf 'identity_cutover_self_test=passed\n'
 }
 

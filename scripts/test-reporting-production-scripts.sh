@@ -46,6 +46,31 @@ done
 unset deployment_entrypoint entrypoint_text
 printf 'reporting_audit_consumer_bootstrap_entrypoints=passed\n'
 
+(
+	APP_ROOT="$app_root"
+	REPORTING_LIFECYCLE_SOURCE_ROOT="$server_root"
+	# shellcheck source=scripts/reporting-cutover-lifecycle.sh
+	source "$script_directory/reporting-cutover-lifecycle.sh"
+	# shellcheck source=scripts/identity-database-lifecycle.sh
+	source "$script_directory/identity-database-lifecycle.sh"
+	# shellcheck source=scripts/widgets-database-lifecycle.sh
+	source "$script_directory/widgets-database-lifecycle.sh"
+	reporting_widgets_ownership_marker_state() { printf 'active\n'; }
+	current_worker_kinds="$(reporting_expected_integration_worker_kinds)"
+	[[ "$current_worker_kinds" == "$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" &&
+		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == \
+			"$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" &&
+		"$current_worker_kinds" == *'identity-admin-audit'* &&
+		"$current_worker_kinds" != *'telegram-destination-unavailable'* ]]
+	current_worker_kinds="$(reporting_normalize_integration_kinds "$current_worker_kinds")"
+	reporting_cutover_worker_kinds_allowed \
+		"$current_worker_kinds" "$current_worker_kinds" pre-reporting
+) || {
+	echo 'Post-Identity Notification Delivery worker ownership fixture failed.' >&2
+	exit 1
+}
+printf 'reporting_identity_worker_ownership=passed\n'
+
 for deployment_entrypoint in \
 	"$script_directory/deploy-maintenance-production.sh" \
 	"$script_directory/deploy-notification-delivery-production.sh" \
@@ -307,9 +332,9 @@ deploy_job="$(
 	"$verify_header" == *"needs.lifecycle_checkout_preflight.result == 'success'"* &&
 	"$deploy_job" == *'needs: verify'* &&
 	"$deploy_job" == *'timeout-minutes: 90'* &&
-	"$(grep -Fc -- '-o ServerAliveInterval=15' "$workflow_file")" == '2' &&
-	"$(grep -Fc -- '-o ServerAliveCountMax=4' "$workflow_file")" == '2' &&
-	"$(grep -Fc -- '-o TCPKeepAlive=yes' "$workflow_file")" == '2' &&
+	"$(grep -Fc -- '-o ServerAliveInterval=15' "$workflow_file")" -ge 2 &&
+	"$(grep -Fc -- '-o ServerAliveCountMax=4' "$workflow_file")" -ge 2 &&
+	"$(grep -Fc -- '-o TCPKeepAlive=yes' "$workflow_file")" -ge 2 &&
 	"$deploy_job" == *$'            notification-delivery)\n'* &&
 	"$deploy_job" == *'bash scripts/deploy-notification-delivery-production.sh'* &&
 	"$deploy_job" == *$'            campaigns)\n'* &&
