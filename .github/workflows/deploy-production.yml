@@ -4363,6 +4363,34 @@ jobs:
               );
               const expectedGatewayRoutes = [
                 {
+                  id: "billing-payments",
+                  pathPrefix: "/api/v1/payments",
+                  upstreamUrl: "http://127.0.0.1:4800",
+                  authPolicy: "optional",
+                  timeoutMs: 30000,
+                },
+                {
+                  id: "billing-subscriptions",
+                  pathPrefix: "/api/v1/subscriptions",
+                  upstreamUrl: "http://127.0.0.1:4800",
+                  authPolicy: "optional",
+                  timeoutMs: 30000,
+                },
+                {
+                  id: "billing-tariff-prices",
+                  pathPrefix: "/api/v1/tariff-prices",
+                  upstreamUrl: "http://127.0.0.1:4800",
+                  authPolicy: "optional",
+                  timeoutMs: 30000,
+                },
+                {
+                  id: "billing-affiliate",
+                  pathPrefix: "/api/v1/affiliate",
+                  upstreamUrl: "http://127.0.0.1:4800",
+                  authPolicy: "optional",
+                  timeoutMs: 30000,
+                },
+                {
                   id: "database-restores",
                   pathPrefix: "/api/v1/dev-tools/database-restores",
                   upstreamUrl: "http://127.0.0.1:4200",
@@ -4422,7 +4450,7 @@ jobs:
                 JSON.stringify(expectedGatewayRoutes)
               ) {
                 throw new Error(
-                  "Production example must keep protected service routes, public Widgets routes and Reporting before the monolith catch-all",
+                  "Production example must keep Billing, protected service, public Widgets and Reporting routes before the monolith catch-all",
                 );
               }
               requireEnvironment("outbox-publisher", [
