@@ -1,5 +1,14 @@
--- CreateSchema
-CREATE SCHEMA IF NOT EXISTS "identity";
+-- The production lifecycle pre-creates this schema with the migration role as
+-- its owner. Avoid PostgreSQL's database-level CREATE privilege check when the
+-- schema already exists, while retaining an owner-path for local databases
+-- that have not been provisioned separately.
+DO $$
+BEGIN
+    IF to_regnamespace('identity') IS NULL THEN
+        EXECUTE 'CREATE SCHEMA "identity"';
+    END IF;
+END
+$$;
 
 -- CreateEnum
 CREATE TYPE "identity"."Role" AS ENUM ('USER', 'ADMIN', 'DEV');
