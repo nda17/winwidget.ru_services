@@ -1214,6 +1214,8 @@ CREATE TABLE public.restore_rehearsal_marker (
 INSERT INTO public.restore_rehearsal_marker (id, value) VALUES ('canonical', 'baseline-core');
 INSERT INTO public."User" ("id", "password", "rights", "updated_at")
 VALUES ('database-restore-rehearsal-dev', 'not-a-real-password-hash', ARRAY['DEV']::public."Role"[], CURRENT_TIMESTAMP);
+INSERT INTO public."site_settings" ("id", "updated_at")
+VALUES ('singleton', CURRENT_TIMESTAMP);
 RESET ROLE;
 GRANT USAGE ON SCHEMA public TO winwidget_api_runtime, winwidget_maintenance, winwidget_backup;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO winwidget_api_runtime;
