@@ -108,7 +108,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-production-server
+  # Versioned to escape the corrupted GitHub scheduler lock left by runs
+  # 31817210252, 31819710389, 31833550406 and 31846059212. GitHub returns
+  # HTTP 500 for both cancel and force-cancel before any job is created.
+  group: deploy-production-server-v2
   cancel-in-progress: false
 
 jobs:
