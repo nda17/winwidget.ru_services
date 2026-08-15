@@ -80,6 +80,10 @@ export class IdentityRuntimeService {
 	readonly receiptRetentionDays: number;
 	readonly failureRetentionDays: number;
 	readonly housekeepingIntervalMs: number;
+	readonly avatarCleanupBatchSize: number;
+	readonly avatarCleanupPollIntervalMs: number;
+	readonly avatarCleanupLeaseMs: number;
+	readonly avatarCleanupRetentionDays: number;
 
 	constructor(config: ConfigService) {
 		this.role = parseIdentityProcessRole(
@@ -133,6 +137,34 @@ export class IdentityRuntimeService {
 			60_000,
 			24 * 60 * 60_000,
 			'IDENTITY_HOUSEKEEPING_INTERVAL_MS'
+		);
+		this.avatarCleanupBatchSize = boundedInteger(
+			config.get<string>('IDENTITY_AVATAR_CLEANUP_BATCH_SIZE'),
+			10,
+			1,
+			100,
+			'IDENTITY_AVATAR_CLEANUP_BATCH_SIZE'
+		);
+		this.avatarCleanupPollIntervalMs = boundedInteger(
+			config.get<string>('IDENTITY_AVATAR_CLEANUP_POLL_INTERVAL_MS'),
+			1_000,
+			250,
+			60_000,
+			'IDENTITY_AVATAR_CLEANUP_POLL_INTERVAL_MS'
+		);
+		this.avatarCleanupLeaseMs = boundedInteger(
+			config.get<string>('IDENTITY_AVATAR_CLEANUP_LEASE_MS'),
+			60_000,
+			30_000,
+			10 * 60_000,
+			'IDENTITY_AVATAR_CLEANUP_LEASE_MS'
+		);
+		this.avatarCleanupRetentionDays = boundedInteger(
+			config.get<string>('IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS'),
+			7,
+			1,
+			365,
+			'IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS'
 		);
 	}
 

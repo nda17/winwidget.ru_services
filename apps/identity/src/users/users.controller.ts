@@ -1,4 +1,5 @@
 import {
+	BadRequestException,
 	Body,
 	Controller,
 	Delete,
@@ -9,12 +10,19 @@ import {
 	Post,
 	Query,
 	Req,
+	UploadedFile,
 	UseGuards,
+	UseInterceptors,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/identity-client';
 import type { Request } from 'express';
+import { AvatarMediaOwnershipGuard } from '../avatar/avatar-media-ownership.service';
+import { AVATAR_MAX_UPLOAD_BYTES } from '../avatar/avatar-storage.service';
+import { AvatarUploadAdmissionInterceptor } from '../avatar/avatar-upload-admission.service';
+import { AvatarService } from '../avatar/avatar.service';
 import { Auth, CurrentUser, IdentityAuthGuard } from '../auth/auth.guard';
 import {
 	BindEmailStartDto,
@@ -26,11 +34,43 @@ import {
 } from '../auth/auth.dto';
 import { UsersService } from './users.service';
 
+export const AVATAR_UPLOAD_OPTIONS = {
+	limits: {
+		fileSize: AVATAR_MAX_UPLOAD_BYTES,
+		files: 1,
+		fields: 0,
+		parts: 1
+	},
+	fileFilter: (
+		_request: Express.Request,
+		file: Express.Multer.File,
+		callback: (error: Error | null, acceptFile: boolean) => void
+	) => {
+		if (
+			!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)
+		) {
+			callback(
+				new BadRequestException(
+					'Avatar must be a JPEG, PNG or WebP image'
+				),
+				false
+			);
+			return;
+		}
+		callback(null, true);
+	}
+};
+
+const AVATAR_INTERCEPTOR = FileInterceptor('file', AVATAR_UPLOAD_OPTIONS);
+
 @Controller('users')
 @UseGuards(IdentityAuthGuard)
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class UsersController {
-	constructor(private readonly users: UsersService) {}
+	constructor(
+		private readonly users: UsersService,
+		private readonly avatars: AvatarService
+	) {}
 
 	@Get('profile')
 	@Auth(Role.USER)
@@ -48,6 +88,30 @@ export class UsersController {
 		@Req() request: Request
 	) {
 		return this.users.updateProfile(userId, sessionId, dto, request);
+	}
+
+	@Post('profile/avatar')
+	@HttpCode(200)
+	@Auth(Role.USER)
+	@UseGuards(AvatarMediaOwnershipGuard)
+	@UseInterceptors(AvatarUploadAdmissionInterceptor, AVATAR_INTERCEPTOR)
+	uploadProfileAvatar(
+		@CurrentUser('id') userId: string,
+		@UploadedFile() file: Express.Multer.File | undefined,
+		@Req() request: Request
+	) {
+		return this.avatars.uploadSelf(userId, file, request);
+	}
+
+	@Delete('profile/avatar')
+	@HttpCode(200)
+	@Auth(Role.USER)
+	@UseGuards(AvatarMediaOwnershipGuard)
+	deleteProfileAvatar(
+		@CurrentUser('id') userId: string,
+		@Req() request: Request
+	) {
+		return this.avatars.deleteSelf(userId, request);
 	}
 
 	@Post('profile/bind/email/send-code')
@@ -189,6 +253,40 @@ export class UsersController {
 		@Req() request: Request
 	) {
 		return this.users.adminUpdate(actorId, actorRights, id, dto, request);
+	}
+
+	@Post('user/:id/avatar')
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@UseGuards(AvatarMediaOwnershipGuard)
+	@UseInterceptors(AvatarUploadAdmissionInterceptor, AVATAR_INTERCEPTOR)
+	uploadUserAvatar(
+		@CurrentUser('id') actorId: string,
+		@CurrentUser('rights') actorRights: Role[],
+		@Param('id') id: string,
+		@UploadedFile() file: Express.Multer.File | undefined,
+		@Req() request: Request
+	) {
+		return this.avatars.uploadAdmin(
+			actorId,
+			actorRights,
+			id,
+			file,
+			request
+		);
+	}
+
+	@Delete('user/:id/avatar')
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@UseGuards(AvatarMediaOwnershipGuard)
+	deleteUserAvatar(
+		@CurrentUser('id') actorId: string,
+		@CurrentUser('rights') actorRights: Role[],
+		@Param('id') id: string,
+		@Req() request: Request
+	) {
+		return this.avatars.deleteAdmin(actorId, actorRights, id, request);
 	}
 
 	@Patch('user/:id/toggle-activation')

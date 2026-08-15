@@ -151,6 +151,8 @@ const requiredExact = new Map([
   ['IDENTITY_RECEIPT_RETENTION_DAYS', '90'],
   ['IDENTITY_FAILURE_DETAIL_RETENTION_DAYS', '30'],
   ['IDENTITY_CORE_CLEANUP_SOAK_SECONDS', '900'],
+  ['IDENTITY_AVATAR_S3_KEY_PREFIX', 'identity/avatars'],
+  ['IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS', '7'],
   ['INTEGRATION_WORKER_KINDS', process.env.IDENTITY_EXPECTED_INTEGRATION_KINDS],
   ['JWT_JWKS_URL', 'http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json'],
 ]);
@@ -191,6 +193,74 @@ for (const broadKey of ['NOTIFICATION_DELIVERY_INTERNAL_TOKEN', 'CAMPAIGNS_INTER
   'REPORTING_INTERNAL_TOKEN', 'WIDGETS_INTERNAL_TOKEN', 'BILLING_INTERNAL_TOKEN']) {
   if (scoped.includes(values.get(broadKey))) fail();
 }
+const avatarStorageKeys = [
+  'IDENTITY_AVATAR_S3_ENDPOINT', 'IDENTITY_AVATAR_S3_REGION',
+  'IDENTITY_AVATAR_S3_BUCKET', 'IDENTITY_AVATAR_S3_PUBLIC_BASE_URL',
+  'IDENTITY_AVATAR_S3_KEY_PREFIX', 'IDENTITY_AVATAR_S3_FORCE_PATH_STYLE',
+  'IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID',
+  'IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY',
+  'IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID',
+  'IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY',
+];
+if (avatarStorageKeys.some(key => !values.has(key))) fail();
+for (const forbidden of [
+  'IDENTITY_AVATAR_S3_LEGACY_KEY_PREFIX',
+  'IDENTITY_AVATAR_MIGRATION_S3_ACCESS_KEY_ID',
+  'IDENTITY_AVATAR_MIGRATION_S3_SECRET_ACCESS_KEY',
+  'IDENTITY_AVATAR_MIGRATION_LEGACY_KEY_PREFIX',
+  'IDENTITY_AVATAR_MIGRATION_LEGACY_PUBLIC_BASE_URL',
+  'IDENTITY_AVATAR_MIGRATION_UPLOADS_PUBLIC_BASE_URL',
+  'IDENTITY_AVATAR_MIGRATION_UPLOADS_ROOT',
+  'IDENTITY_AVATAR_RETIREMENT_S3_ACCESS_KEY_ID',
+  'IDENTITY_AVATAR_RETIREMENT_S3_SECRET_ACCESS_KEY',
+  'IDENTITY_AVATAR_RETIREMENT_LEGACY_KEY_PREFIX',
+]) {
+  if (values.has(forbidden)) fail();
+}
+let avatarEndpoint;
+let avatarPublicBase;
+try {
+  avatarEndpoint = new URL(values.get('IDENTITY_AVATAR_S3_ENDPOINT'));
+  avatarPublicBase = new URL(values.get('IDENTITY_AVATAR_S3_PUBLIC_BASE_URL'));
+} catch { fail(); }
+if (avatarEndpoint.protocol !== 'https:' || avatarEndpoint.username ||
+    avatarEndpoint.password || avatarEndpoint.search || avatarEndpoint.hash ||
+    avatarPublicBase.protocol !== 'https:' || avatarPublicBase.username ||
+    avatarPublicBase.password || avatarPublicBase.search || avatarPublicBase.hash ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(values.get('IDENTITY_AVATAR_S3_REGION') || '') ||
+    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(values.get('IDENTITY_AVATAR_S3_BUCKET') || '') ||
+    !/^(true|false)$/.test(values.get('IDENTITY_AVATAR_S3_FORCE_PATH_STYLE') || '')) fail();
+let genericEndpoint;
+let genericPublicBase;
+try {
+  genericEndpoint = new URL(values.get('S3_ENDPOINT'));
+  genericPublicBase = new URL(values.get('S3_PUBLIC_BASE_URL'));
+} catch { fail(); }
+const normalizedUrl = url => url.toString().replace(/\/$/, '');
+if (normalizedUrl(avatarEndpoint) !== normalizedUrl(genericEndpoint) ||
+    normalizedUrl(avatarPublicBase) !== normalizedUrl(genericPublicBase) ||
+    values.get('IDENTITY_AVATAR_S3_REGION') !== values.get('S3_REGION') ||
+    values.get('IDENTITY_AVATAR_S3_BUCKET') !== values.get('S3_BUCKET') ||
+    values.get('IDENTITY_AVATAR_S3_FORCE_PATH_STYLE') !== values.get('S3_FORCE_PATH_STYLE')) fail();
+const avatarPrefix = values.get('IDENTITY_AVATAR_S3_KEY_PREFIX');
+const safePrefix = value => typeof value === 'string' &&
+  !value.startsWith('/') && !value.endsWith('/') &&
+  !value.split('/').some(part => !part || part === '.' || part === '..' ||
+    !/^[A-Za-z0-9._-]+$/.test(part));
+if (!safePrefix(avatarPrefix)) fail();
+const avatarCredentialKeys = [
+  'IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID',
+  'IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY',
+  'IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID',
+  'IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY',
+];
+const avatarCredentials = avatarCredentialKeys.map(key => values.get(key));
+if (avatarCredentials.some((value, index) => !value || /[\0\r\n]/.test(value) ||
+    /^(change_me|ci_)/.test(value) ||
+    (index % 2 === 1 && value.length < 32)) ||
+    new Set(avatarCredentials).size !== avatarCredentials.length ||
+    avatarCredentials.some(value => value === values.get('S3_ACCESS_KEY_ID') ||
+      value === values.get('S3_SECRET_ACCESS_KEY'))) fail();
 const privateValue = values.get('IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64');
 const jwksValue = values.get('IDENTITY_JWT_ACCESS_JWKS_BASE64');
 const kid = values.get('IDENTITY_JWT_ACCESS_ACTIVE_KID');
@@ -468,6 +538,9 @@ identity_env_self_test() {
 		"$source" == *'IDENTITY_CORE_TOKEN'* && "$source" == *'CORE_IDENTITY_TOKEN'* &&
 		"$source" == *'BILLING_CAMPAIGNS_TOKEN'* && "$source" == *'BILLING_IDENTITY_TOKEN'* &&
 		"$source" == *'WIDGETS_IDENTITY_TOKEN'* &&
+		"$source" == *'IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID'* &&
+		"$source" == *'IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID'* &&
+		"$source" == *'identity/avatars'* &&
 		"$source" == *'/api/v1/telegram-bot/webhook'* &&
 		"$source" == *'openssl cms -encrypt -binary -aes-256-cbc'* &&
 		"$source" == *'identity-production-env-'* ]] || return 1

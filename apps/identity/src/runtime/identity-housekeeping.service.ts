@@ -21,6 +21,7 @@ export type IdentityHousekeepingResult = {
 	expiredSessions: number;
 	telegramReceipts: number;
 	staleHeartbeats: number;
+	deliveredAvatarCleanupJobs: number;
 };
 
 @Injectable()
@@ -66,6 +67,10 @@ export class IdentityHousekeepingService
 			this.runtime.failureRetentionDays
 		);
 		const heartbeatBefore = new Date(now.getTime() - 24 * 60 * 60_000);
+		const avatarCleanupBefore = daysBefore(
+			now,
+			this.runtime.avatarCleanupRetentionDays
+		);
 		const values = await this.prisma.$transaction([
 			this.prisma.$executeRaw(Prisma.sql`
 				WITH victims AS (
@@ -149,6 +154,16 @@ export class IdentityHousekeepingService
 				)
 				DELETE FROM "identity"."heartbeats" target
 				USING victims WHERE target."id" = victims."id"
+			`),
+			this.prisma.$executeRaw(Prisma.sql`
+				WITH victims AS (
+					SELECT "id" FROM "identity"."avatar_cleanup_jobs"
+					WHERE "status" = 'DELIVERED'::"identity"."AvatarCleanupStatus"
+						AND "delivered_at" < ${avatarCleanupBefore}
+					ORDER BY "delivered_at", "id" LIMIT ${BATCH_SIZE}
+				)
+				DELETE FROM "identity"."avatar_cleanup_jobs" target
+				USING victims WHERE target."id" = victims."id"
 			`)
 		]);
 		return {
@@ -159,7 +174,8 @@ export class IdentityHousekeepingService
 			expiredOAuth: values[4],
 			expiredSessions: values[5],
 			telegramReceipts: values[6],
-			staleHeartbeats: values[7]
+			staleHeartbeats: values[7],
+			deliveredAvatarCleanupJobs: values[8]
 		};
 	}
 

@@ -15,6 +15,7 @@ model User {
   name                         String?
   password                     String
   avatarPath                   String?                       @map("avatar_path")
+  avatarObjectKey              String?                       @unique @map("avatar_object_key") @db.VarChar(1024)
   status                       UserStatus                    @default(ACTIVE)
   personalDataConsentRevokedAt DateTime?                     @map("personal_data_consent_revoked_at")
   deletedAt                    DateTime?                     @map("deleted_at")
@@ -29,6 +30,42 @@ model User {
   @@index([status])
   @@index([deletedAt])
   @@map("users")
+  @@schema("identity")
+}
+
+model AvatarCleanupJob {
+  id               String              @id @default(uuid()) @db.Uuid
+  objectKey        String              @unique @map("object_key") @db.VarChar(1024)
+  ownerFingerprint String              @map("owner_fingerprint") @db.Char(64)
+  kind             AvatarCleanupKind
+  status           AvatarCleanupStatus @default(PENDING)
+  availableAt      DateTime            @default(now()) @map("available_at")
+  leaseToken       String?             @map("lease_token") @db.Uuid
+  leaseExpiresAt   DateTime?           @map("lease_expires_at")
+  attempts         Int                 @default(0)
+  lastError        String?             @map("last_error") @db.Text
+  deliveredAt      DateTime?           @map("delivered_at")
+  createdAt        DateTime            @default(now()) @map("created_at")
+  updatedAt        DateTime            @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([deliveredAt])
+  @@map("avatar_cleanup_jobs")
+  @@schema("identity")
+}
+
+model AvatarMediaOwnership {
+  id                String                    @id @default("singleton")
+  phase             AvatarMediaOwnershipPhase @default(PREPARED)
+  activatedRevision String?                   @map("activated_revision") @db.VarChar(64)
+  inventorySha256   String?                   @map("inventory_sha256") @db.Char(64)
+  statusSha256      String?                   @map("status_sha256") @db.Char(64)
+  activatedAt       DateTime?                 @map("activated_at")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  updatedAt         DateTime                  @updatedAt @map("updated_at")
+
+  @@map("avatar_media_ownership")
   @@schema("identity")
 }
 
@@ -336,6 +373,26 @@ enum Role {
 enum UserStatus {
   ACTIVE
   DEACTIVATED
+  @@schema("identity")
+}
+
+enum AvatarCleanupKind {
+  STAGING
+  RETIRED
+  @@schema("identity")
+}
+
+enum AvatarCleanupStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  BLOCKED
+  @@schema("identity")
+}
+
+enum AvatarMediaOwnershipPhase {
+  PREPARED
+  ACTIVE
   @@schema("identity")
 }
 

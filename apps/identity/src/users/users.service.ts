@@ -93,9 +93,6 @@ export class UsersService {
 				where: { id: userId },
 				data: {
 					...(dto.name !== undefined ? { name: dto.name } : {}),
-					...(dto.avatarPath !== undefined
-						? { avatarPath: dto.avatarPath }
-						: {}),
 					...(passwordHash ? { password: passwordHash } : {})
 				}
 			});
@@ -548,13 +545,6 @@ export class UsersService {
 					where: { id },
 					data: {
 						name: typeof dto.name === 'string' ? dto.name : target.name,
-						avatarPath:
-							dto.avatarPath === null
-								? null
-								: typeof dto.avatarPath === 'string' &&
-									  dto.avatarPath.length
-									? dto.avatarPath
-									: target.avatarPath,
 						rights,
 						...(passwordHash ? { password: passwordHash } : {})
 					}

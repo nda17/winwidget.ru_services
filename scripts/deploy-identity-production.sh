@@ -23,6 +23,8 @@ declare -F database_restore_guard_assert_before_mutation >/dev/null ||
 # shellcheck source=scripts/production-deploy-lock.sh
 declare -F acquire_production_deploy_lock >/dev/null ||
 	source "$IDENTITY_SCRIPT_ROOT/scripts/production-deploy-lock.sh"
+# shellcheck source=scripts/identity-avatar-media-production.sh
+source "$IDENTITY_SCRIPT_ROOT/scripts/identity-avatar-media-production.sh"
 
 identity_deploy_fail() {
 	printf '%s\n' "$1" >&2
@@ -159,7 +161,7 @@ rabbitmqctl set_topic_permissions -p "$IDENTITY_RABBITMQ_VHOST" \
 
 identity_deploy_verify_environment() {
 	[[ $# -eq 3 ]] || return 1
-	local container_id="$1" role="$2" expected_port="$3" environment keys identity_port
+	local container_id="$1" role="$2" expected_port="$3" environment keys identity_port required forbidden
 	environment="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id")" || return 1
 	keys="$(awk -F= '{ print $1 }' <<<"$environment" | LC_ALL=C sort -u)" || return 1
 	identity_port="$(awk -F= '$1 == "IDENTITY_PORT" { print substr($0, length($1) + 2) }' \
@@ -168,7 +170,17 @@ identity_deploy_verify_environment() {
 	grep -Fxq IDENTITY_PROCESS_ROLE <<<"$keys" || return 1
 	[[ "$identity_port" == "$expected_port" ]] || return 1
 	for forbidden in IDENTITY_MIGRATION_DATABASE_URL IDENTITY_BACKUP_URL \
-		IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE; do
+		IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE \
+		S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY IDENTITY_AVATAR_S3_LEGACY_KEY_PREFIX \
+		IDENTITY_AVATAR_MIGRATION_S3_ACCESS_KEY_ID \
+		IDENTITY_AVATAR_MIGRATION_S3_SECRET_ACCESS_KEY \
+		IDENTITY_AVATAR_MIGRATION_LEGACY_KEY_PREFIX \
+		IDENTITY_AVATAR_MIGRATION_LEGACY_PUBLIC_BASE_URL \
+		IDENTITY_AVATAR_MIGRATION_UPLOADS_PUBLIC_BASE_URL \
+		IDENTITY_AVATAR_RETIREMENT_S3_ACCESS_KEY_ID \
+		IDENTITY_AVATAR_RETIREMENT_S3_SECRET_ACCESS_KEY \
+		IDENTITY_AVATAR_RETIREMENT_LEGACY_KEY_PREFIX \
+		IDENTITY_AVATAR_MIGRATION_UPLOADS_ROOT; do
 		! grep -Fxq "$forbidden" <<<"$keys" || return 1
 	done
 	case "$role" in
@@ -178,16 +190,51 @@ identity_deploy_verify_environment() {
 			IDENTITY_CAMPAIGNS_TOKEN \
 			IDENTITY_REPORTING_TOKEN IDENTITY_WIDGETS_TOKEN IDENTITY_BILLING_TOKEN \
 			BILLING_IDENTITY_TOKEN WIDGETS_IDENTITY_TOKEN \
-			JWT_ACCESS_PRIVATE_KEY_BASE64 JWT_ACCESS_JWKS_BASE64; do
+			JWT_ACCESS_PRIVATE_KEY_BASE64 JWT_ACCESS_JWKS_BASE64 \
+			IDENTITY_AVATAR_S3_ENDPOINT IDENTITY_AVATAR_S3_REGION \
+			IDENTITY_AVATAR_S3_BUCKET IDENTITY_AVATAR_S3_PUBLIC_BASE_URL \
+			IDENTITY_AVATAR_S3_KEY_PREFIX IDENTITY_AVATAR_S3_FORCE_PATH_STYLE \
+			IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID \
+			IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY; do
 			grep -Fxq "$required" <<<"$keys" || return 1
 		done
-		! grep -Fxq BILLING_INTERNAL_TOKEN <<<"$keys" || return 1
-		! grep -Fxq WIDGETS_INTERNAL_TOKEN <<<"$keys" || return 1
+		for forbidden in BILLING_INTERNAL_TOKEN WIDGETS_INTERNAL_TOKEN \
+			IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID \
+			IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY \
+			IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS; do
+			! grep -Fxq "$forbidden" <<<"$keys" || return 1
+		done
 		;;
-	worker | outbox-publisher)
+	worker)
 		grep -Fxq RABBITMQ_URL <<<"$keys" || return 1
-		! grep -Fxq JWT_ACCESS_PRIVATE_KEY_BASE64 <<<"$keys" || return 1
-		! grep -Fxq IDENTITY_CORE_TOKEN <<<"$keys" || return 1
+		for required in IDENTITY_AVATAR_S3_ENDPOINT IDENTITY_AVATAR_S3_REGION \
+			IDENTITY_AVATAR_S3_BUCKET IDENTITY_AVATAR_S3_KEY_PREFIX \
+			IDENTITY_AVATAR_S3_FORCE_PATH_STYLE \
+			IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID \
+			IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY \
+			IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS; do
+			grep -Fxq "$required" <<<"$keys" || return 1
+		done
+		for forbidden in JWT_ACCESS_PRIVATE_KEY_BASE64 IDENTITY_CORE_TOKEN \
+			IDENTITY_AVATAR_S3_PUBLIC_BASE_URL \
+			IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID \
+			IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY; do
+			! grep -Fxq "$forbidden" <<<"$keys" || return 1
+		done
+		;;
+	outbox-publisher)
+		grep -Fxq RABBITMQ_URL <<<"$keys" || return 1
+		for forbidden in JWT_ACCESS_PRIVATE_KEY_BASE64 IDENTITY_CORE_TOKEN \
+			IDENTITY_AVATAR_S3_ENDPOINT IDENTITY_AVATAR_S3_REGION \
+			IDENTITY_AVATAR_S3_BUCKET IDENTITY_AVATAR_S3_PUBLIC_BASE_URL \
+			IDENTITY_AVATAR_S3_KEY_PREFIX IDENTITY_AVATAR_S3_FORCE_PATH_STYLE \
+			IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID \
+			IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY \
+			IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID \
+			IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY \
+			IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS; do
+			! grep -Fxq "$forbidden" <<<"$keys" || return 1
+		done
 		;;
 	*) return 1 ;;
 	esac
@@ -276,6 +323,8 @@ identity_deploy_active_runtime() {
 	identity_deploy_verify_service identity-worker worker 4901
 	identity_deploy_verify_service identity-outbox-publisher outbox-publisher 4902
 	identity_deploy_assert_single_api
+	identity_avatar_legacy_writer_fence_canary
+	identity_avatar_storage_policy_canary
 	printf 'identity_deploy_mode=active-runtime\n'
 	printf 'identity_deploy_revision=%s\n' "$EXPECTED_REVISION"
 	printf 'identity_deploy_phase=%s\n' "$phase"
@@ -306,6 +355,8 @@ identity_deploy_self_test() {
 		"$source" == *'--no-build --force-recreate'* &&
 		"$source" == *'winwidget-identity-worker'* &&
 		"$source" == *'notification\.telegram\.destination-unavailable\.v1'* &&
+		"$source" == *'identity_avatar_legacy_writer_fence_canary'* &&
+		"$source" == *'identity_avatar_storage_policy_canary'* &&
 		"$source" == *'exactly one API instance'* &&
 		"$source" == *'IDENTITY_PORT'* &&
 		"$source" == *'IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE'* ]] || return 1

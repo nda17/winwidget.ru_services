@@ -111,6 +111,612 @@ NODE
 	printf 'billing_routine_image_gate_self_test=passed\n'
 }
 
+enter_identity_avatar_first_production_mutation_boundary() {
+	prepare_identity_avatar_runtime_stability_deploy_mutation
+}
+
+assert_identity_avatar_inactive_or_pre_client_before_early_mutation() {
+	local marker="$APP_ROOT/deploy/backend/.identity-avatar-media-v1"
+	local phase
+
+	if [[ ! -e "$marker" && ! -L "$marker" ]]; then
+		return 0
+	fi
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$deploy_revision" \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" \
+			--guard-before-checkout-revision "$deploy_revision" || return 1
+	phase="$(awk -F= '
+		$1 == "phase" { print substr($0, index($0, "=") + 1); found += 1 }
+		END { exit(found == 1 ? 0 : 1) }
+	' "$marker")" || return 1
+	[[ "$phase" =~ ^(expanded|migration-ready|migrated)$ ]] || {
+		echo "Early stage-only production mutation is blocked while Identity avatar phase=$phase requires runtime-stability PREPARED." >&2
+		return 1
+	}
+}
+
+write_reporting_first_rollout_stage_after_identity_avatar_guard() {
+	assert_identity_avatar_inactive_or_pre_client_before_early_mutation || return 1
+	reporting_write_first_rollout_staged_marker "$1"
+}
+
+write_campaigns_first_rollout_stage_after_identity_avatar_guard() {
+	guard_campaigns_cutover_checkout_revision "$1" || return 1
+	assert_identity_avatar_inactive_or_pre_client_before_early_mutation || return 1
+	write_campaigns_first_cutover_staged_marker "$1"
+}
+
+run_identity_avatar_deploy_mutation_fence_self_test() (
+	local self_test_node self_test_root self_test_directory common_block
+	local durable_state durable_state_tmp timeline_file crash_file stage_marker
+	local status actual_timeline expected_timeline
+	local prepare_calls=0
+	local trap_marker
+	local -a mutation_events=()
+
+	self_test_node="$(type -P node 2>/dev/null || true)"
+	[[ -n "$self_test_node" && -x "$self_test_node" ]] || {
+		echo 'Identity avatar deploy-mutation fence self-test requires host Node.' >&2
+		return 1
+	}
+	"$self_test_node" - "${BASH_SOURCE[0]}" <<'NODE'
+const fs = require('node:fs');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const fail = message => {
+  process.stderr.write(`${message}\n`);
+  process.exit(1);
+};
+const one = (value, label, from = 0) => {
+  const index = source.indexOf(value, from);
+  if (index < 0) fail(`Missing ${label}`);
+  return index;
+};
+const productionStart = one(
+  '\nAPP_ROOT="${APP_ROOT:-/opt/winwidget}"',
+  'production entrypoint',
+);
+
+const build = one(
+  'compose_target build --provenance=false "${routine_build_services[@]}"',
+  'full image build',
+  productionStart,
+);
+const imageVerification = one(
+  '\nverify_database_restore_image_artifact\n',
+  'last standalone image verification',
+  build,
+);
+const credentialValidation = one(
+  'RabbitMQ admin, monitor and service URLs must use distinct users',
+  'RabbitMQ credential uniqueness validation',
+  imageVerification,
+);
+const fenceMarker = one(
+  '# identity-avatar-runtime-stability: first-production-mutation-fence',
+  'first-production-mutation fence marker',
+  credentialValidation,
+);
+const fenceCall = one(
+  'enter_identity_avatar_first_production_mutation_boundary',
+  'first-production-mutation fence call',
+  fenceMarker,
+);
+const rabbitBranch = one(
+  'if [[ -n "$matched_rabbitmq_container_id" ]]',
+  'RabbitMQ start/create branch',
+  fenceCall,
+);
+const rabbitStart = one(
+  'docker start "$matched_rabbitmq_container_id"',
+  'existing RabbitMQ start',
+  rabbitBranch,
+);
+const rabbitCreate = one(
+  'compose_target up -d rabbitmq',
+  'RabbitMQ create/start',
+  rabbitBranch,
+);
+if (!(
+  build < imageVerification &&
+  imageVerification < credentialValidation &&
+  credentialValidation < fenceMarker &&
+  fenceMarker < fenceCall &&
+  fenceCall < rabbitBranch &&
+  rabbitBranch < rabbitStart &&
+  rabbitBranch < rabbitCreate
+)) fail('The first-production-mutation fence is not at the reviewed boundary');
+
+for (const [token, label] of [
+  ['rabbitmqctl add_vhost "$RABBITMQ_PROVISION_VHOST"', 'RabbitMQ vhost creation'],
+  ['rabbitmqctl add_user "$RABBITMQ_PROVISION_USER"', 'RabbitMQ user creation'],
+  ['rabbitmqctl set_permissions', 'RabbitMQ ACL mutation'],
+  ['rabbitmqctl set_topic_permissions', 'RabbitMQ topic ACL mutation'],
+  ['await channel.assertExchange(EVENTS_EXCHANGE', 'RabbitMQ exchange mutation'],
+  ['\nverify_notification_delivery_migration_boundary\n', 'service migration/grant phase'],
+  ['\nperform_notification_first_cutover_preflight\n', 'first-cutover stop phase'],
+  ['\n\tdelete_legacy_payment_telegram_queues\n', 'legacy queue retirement'],
+  ['\n\tcreate_campaigns_pre_migration_backup\n', 'pre-migration snapshot'],
+  ['mv "$first_cutover_marker_tmp" "$NOTIFICATION_DELIVERY_CUTOVER_MARKER"', 'cutover marker publication'],
+  ['compose_target up -d --no-deps --force-recreate', 'runtime force-recreate'],
+  ['if ! stop_routine_topology_for_core_migration; then', 'routine running stop path'],
+  ['if ! stop_reporting_cleanup_topology_for_core_migration', 'already-stopped reporting path'],
+  ['trap recover_billing_core_cleanup_stop_on_exit EXIT', 'Billing cleanup recovery trap'],
+  ['trap recover_widgets_core_cleanup_stop_on_exit EXIT', 'Widgets cleanup recovery trap'],
+]) {
+  if (one(token, label, fenceCall) <= fenceCall) {
+    fail(`${label} is not behind the first-production-mutation fence`);
+  }
+}
+
+const firstCutoverStart = one(
+  'perform_notification_first_cutover_preflight() {',
+  'first-cutover function',
+  fenceCall,
+);
+const firstCutoverEnd = one(
+  '\nreporting_runtime_container_before=',
+  'first-cutover function end',
+  firstCutoverStart,
+);
+const firstCutover = source.slice(firstCutoverStart, firstCutoverEnd);
+const localPrepare = firstCutover.indexOf(
+  'prepare_identity_avatar_runtime_stability_deploy_mutation || return 1',
+);
+const recoveryActive = firstCutover.indexOf('first_cutover_recovery_active=true');
+const recoveryTrap = firstCutover.indexOf(
+  'trap restore_first_cutover_producers_on_exit EXIT',
+);
+const firstStop = firstCutover.indexOf('compose_target stop api-gateway');
+if ([localPrepare, recoveryActive, recoveryTrap, firstStop].some(index => index < 0) ||
+    !(localPrepare < recoveryActive && recoveryActive < recoveryTrap && recoveryTrap < firstStop)) {
+  fail('First-cutover recovery trap or stop can precede its local idempotent PREPARED guard');
+}
+
+const production = source.slice(productionStart);
+const prepareCalls = production.match(
+  /^[\t ]+prepare_identity_avatar_runtime_stability_deploy_mutation \|\| (?:return|exit) 1$/gm,
+) || [];
+if (prepareCalls.length !== 7) {
+  fail(`Expected exactly 7 helper-local PREPARED guards, found ${prepareCalls.length}`);
+}
+const prepareDefinitions = production.match(
+  /^prepare_identity_avatar_runtime_stability_deploy_mutation\(\) \{$/gm,
+) || [];
+if (prepareDefinitions.length !== 1) {
+  fail('Production must define exactly one deploy-mutation prepare helper');
+}
+NODE
+	self_test_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+	"$self_test_node" - \
+		"${BASH_SOURCE[0]}" \
+		"$self_test_root/scripts/reporting-database-lifecycle.sh" \
+		"$self_test_root/scripts/campaigns-database-lifecycle.sh" <<'NODE'
+const fs = require('node:fs');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const reporting = fs.readFileSync(process.argv[3], 'utf8');
+const campaigns = fs.readFileSync(process.argv[4], 'utf8');
+const fail = message => {
+  process.stderr.write(`${message}\n`);
+  process.exit(1);
+};
+const find = (value, token, label, from = 0) => {
+  const index = value.indexOf(token, from);
+  if (index < 0) fail(`Missing ${label}`);
+  return index;
+};
+const slice = (value, startToken, endToken, label, from = 0) => {
+  const start = find(value, startToken, `${label} start`, from);
+  const end = find(value, endToken, `${label} end`, start + startToken.length);
+  return value.slice(start, end);
+};
+const productionStart = find(
+  source,
+  '\nAPP_ROOT="${APP_ROOT:-/opt/winwidget}"',
+  'production entrypoint',
+);
+
+const avatarGuard = slice(
+  source,
+  'assert_identity_avatar_inactive_or_pre_client_before_early_mutation() {',
+  '\nwrite_reporting_first_rollout_stage_after_identity_avatar_guard() {',
+  'early Avatar guard',
+);
+if (!avatarGuard.includes('--guard-before-checkout-revision "$deploy_revision"') ||
+    !avatarGuard.includes('^(expanded|migration-ready|migrated)$')) {
+  fail('Early mutations are not restricted by the signed pre-client Avatar guard');
+}
+const reportingWrapper = slice(
+  source,
+  'write_reporting_first_rollout_stage_after_identity_avatar_guard() {',
+  '\nwrite_campaigns_first_rollout_stage_after_identity_avatar_guard() {',
+  'Reporting stage wrapper',
+);
+const reportingGuard = reportingWrapper.indexOf(
+  'assert_identity_avatar_inactive_or_pre_client_before_early_mutation || return 1',
+);
+const reportingWriter = reportingWrapper.indexOf(
+  'reporting_write_first_rollout_staged_marker "$1"',
+);
+if (reportingGuard < 0 || reportingWriter < 0 || reportingGuard >= reportingWriter) {
+  fail('Reporting marker writer is not dominated by the Avatar guard');
+}
+const campaignsWrapper = slice(
+  source,
+  'write_campaigns_first_rollout_stage_after_identity_avatar_guard() {',
+  '\nrun_identity_avatar_deploy_mutation_fence_self_test() (',
+  'Campaigns stage wrapper',
+);
+const campaignsRevisionGuard = campaignsWrapper.indexOf(
+  'guard_campaigns_cutover_checkout_revision "$1" || return 1',
+);
+const campaignsAvatarGuard = campaignsWrapper.indexOf(
+  'assert_identity_avatar_inactive_or_pre_client_before_early_mutation || return 1',
+);
+const campaignsWriter = campaignsWrapper.indexOf(
+  'write_campaigns_first_cutover_staged_marker "$1"',
+);
+if ([campaignsRevisionGuard, campaignsAvatarGuard, campaignsWriter]
+    .some(index => index < 0) ||
+    !(campaignsRevisionGuard < campaignsAvatarGuard &&
+      campaignsAvatarGuard < campaignsWriter)) {
+  fail('Campaigns marker writer is not dominated by both read-only guards');
+}
+
+const reportingMarkerWriter = slice(
+  reporting,
+  'reporting_write_first_rollout_staged_marker() {',
+  '\nreporting_first_rollout_deploy_action() {',
+  'Reporting lifecycle marker writer',
+);
+if (!reportingMarkerWriter.includes(
+  'mv "$temporary_marker" "$REPORTING_FIRST_ROLLOUT_STAGED_MARKER"',
+)) fail('Reporting lifecycle marker writer is not a proven real mutation');
+const reportingEnvTransition = slice(
+  reporting,
+  'reporting_transition_cleanup_integration_worker_env() {',
+  '\nreporting_validate_exact_revision() {',
+  'Reporting lifecycle env transition',
+);
+if (!reportingEnvTransition.includes('mv -- "$temporary" "$REPORTING_ENV_FILE"')) {
+  fail('Reporting production env transition is not a proven real replacement');
+}
+const campaignsMarkerWriter = slice(
+  campaigns,
+  'write_campaigns_first_cutover_staged_marker() {',
+  '\nguard_campaigns_cutover_checkout_revision() {',
+  'Campaigns lifecycle marker writer',
+);
+if (!campaignsMarkerWriter.includes('mv -f "$temporary_marker" "$marker"')) {
+  fail('Campaigns lifecycle marker writer is not a proven real mutation');
+}
+
+const validateStorageStart = find(
+  source,
+  'validate_database_restore_storage() {',
+  'read-only restore storage validator',
+  productionStart,
+);
+const prepareStorageStart = find(
+  source,
+  'prepare_database_restore_storage() {',
+  'restore storage preparer',
+  validateStorageStart,
+);
+const storageFunctionsEnd = find(
+  source,
+  '\nmode="$(get_env_value "MODE" || true)"',
+  'restore storage helpers end',
+  prepareStorageStart,
+);
+const validateStorage = source.slice(validateStorageStart, prepareStorageStart);
+const prepareStorage = source.slice(prepareStorageStart, storageFunctionsEnd);
+if (validateStorage.includes('install -d') ||
+    !prepareStorage.includes('install -d -m 700 -o 1001 -g 1001 "$storage_path"')) {
+  fail('Pre-fence storage validation mutates, or fenced preparation lost its install');
+}
+const coreBoundary = find(
+  source,
+  '\nassert_core_database_production_boundary\n',
+  'Core database boundary call',
+  storageFunctionsEnd,
+);
+const rabbitConfig = find(
+  source,
+  '\nrabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"',
+  'RabbitMQ config validation',
+  coreBoundary,
+);
+const earlyStorageCall = source.slice(coreBoundary, rabbitConfig);
+if (!earlyStorageCall.includes('\n\tvalidate_database_restore_storage\n') ||
+    earlyStorageCall.includes('\n\tprepare_database_restore_storage\n')) {
+  fail('The early restore-storage path is not validation-only');
+}
+
+const production = source.slice(productionStart);
+const reportingStage = slice(
+  production,
+  'case "$reporting_deploy_action" in',
+  '\nreporting_scheduler_policy=',
+  'Reporting production stage branch',
+);
+if (!reportingStage.includes(
+  'write_reporting_first_rollout_stage_after_identity_avatar_guard',
+) || reportingStage.includes('reporting_write_first_rollout_staged_marker')) {
+  fail('Reporting production stage can bypass the guarded wrapper');
+}
+const campaignsStage = slice(
+  production,
+  'case "$campaigns_deploy_action" in',
+  '\nexport APP_REVISION=',
+  'Campaigns production stage branch',
+);
+if (!campaignsStage.includes(
+  'write_campaigns_first_rollout_stage_after_identity_avatar_guard',
+) || campaignsStage.includes('write_campaigns_first_cutover_staged_marker')) {
+  fail('Campaigns production stage can bypass the guarded wrapper');
+}
+const commonStart = find(
+  production,
+  '# identity-avatar-runtime-stability: first-production-mutation-block-begin',
+  'production mutation block start',
+);
+const commonEnd = find(
+  production,
+  '# identity-avatar-runtime-stability: first-production-mutation-block-end',
+  'production mutation block end',
+  commonStart,
+);
+const common = production.slice(commonStart, commonEnd);
+const fence = common.indexOf(
+  'enter_identity_avatar_first_production_mutation_boundary || exit "$?"',
+);
+const envMutation = common.indexOf(
+  'reporting_transition_cleanup_integration_worker_env "$deploy_revision"',
+);
+const storageMutation = common.indexOf('prepare_database_restore_storage');
+const rabbitBranch = common.indexOf('if [[ -n "$matched_rabbitmq_container_id" ]]');
+const rabbitStart = common.indexOf('docker start "$matched_rabbitmq_container_id"');
+const rabbitCreate = common.indexOf('compose_target up -d rabbitmq');
+if ([fence, envMutation, storageMutation, rabbitBranch, rabbitStart, rabbitCreate]
+    .some(index => index < 0) ||
+    !(fence < envMutation && envMutation < storageMutation &&
+      storageMutation < rabbitBranch && rabbitBranch < rabbitStart &&
+      rabbitBranch < rabbitCreate)) {
+  fail('Real env/storage/RabbitMQ mutations are not dominated by PREPARED');
+}
+const reportingTransitionCalls = production.match(
+  /^reporting_transition_cleanup_integration_worker_env "\$deploy_revision"$/gm,
+) || [];
+if (reportingTransitionCalls.length !== 1) {
+  fail('Reporting env transition must have exactly one fenced production call');
+}
+NODE
+
+	self_test_directory="$(
+		mktemp -d "${TMPDIR:-/tmp}/winwidget-avatar-deploy-fence.XXXXXX"
+	)"
+	common_block="$self_test_directory/production-mutation-block.sh"
+	durable_state="$self_test_directory/runtime-generation"
+	durable_state_tmp="$self_test_directory/runtime-generation.tmp"
+	timeline_file="$self_test_directory/timeline"
+	crash_file="$self_test_directory/crashed"
+	trap_marker="$self_test_directory/trap-mutated"
+	stage_marker="$self_test_directory/stage-mutated"
+	trap 'rm -f "$common_block" "$durable_state" "$durable_state_tmp" "$timeline_file" "$crash_file" "$trap_marker" "$stage_marker"; rmdir "$self_test_directory"' RETURN
+
+	awk '
+		$0 == "# identity-avatar-runtime-stability: first-production-mutation-block-begin" {
+			copy = 1
+			started = 1
+			next
+		}
+		$0 == "# identity-avatar-runtime-stability: first-production-mutation-block-end" {
+			finished = 1
+			exit
+		}
+		copy { print }
+		END { exit(started && finished ? 0 : 1) }
+	' "${BASH_SOURCE[0]}" >"$common_block"
+	[[ -s "$common_block" ]] || {
+		echo 'Deploy-mutation fence self-test could not extract the production mutation block.' >&2
+		return 1
+	}
+
+	# Exercise the real production stage wrappers: a failed Avatar guard must
+	# prevent either lifecycle marker writer from being called.
+	if (
+		assert_identity_avatar_inactive_or_pre_client_before_early_mutation() { return 70; }
+		reporting_write_first_rollout_staged_marker() {
+			printf 'reporting-stage\n' >"$stage_marker"
+		}
+		write_reporting_first_rollout_stage_after_identity_avatar_guard \
+			'1111111111111111111111111111111111111111'
+	); then
+		echo 'Reporting stage wrapper accepted a failed Identity avatar guard.' >&2
+		return 1
+	fi
+	[[ ! -e "$stage_marker" ]] || {
+		echo 'Reporting stage marker writer ran after Identity avatar guard failure.' >&2
+		return 1
+	}
+	if (
+		guard_campaigns_cutover_checkout_revision() { return 0; }
+		assert_identity_avatar_inactive_or_pre_client_before_early_mutation() { return 70; }
+		write_campaigns_first_cutover_staged_marker() {
+			printf 'campaigns-stage\n' >"$stage_marker"
+		}
+		write_campaigns_first_rollout_stage_after_identity_avatar_guard \
+			'1111111111111111111111111111111111111111'
+	); then
+		echo 'Campaigns stage wrapper accepted a failed Identity avatar guard.' >&2
+		return 1
+	fi
+	[[ ! -e "$stage_marker" ]] || {
+		echo 'Campaigns stage marker writer ran after Identity avatar guard failure.' >&2
+		return 1
+	}
+
+	prepare_identity_avatar_runtime_stability_deploy_mutation() {
+		prepare_calls=$((prepare_calls + 1))
+		return 70
+	}
+
+	record_mutation() {
+		mutation_events+=("$1")
+	}
+
+	simulate_routine_running_path() {
+		enter_identity_avatar_first_production_mutation_boundary || return
+		record_mutation predeploy-snapshot
+		record_mutation stop-api-gateway
+		record_mutation stop-campaigns-service
+	}
+
+	simulate_already_stopped_path() {
+		enter_identity_avatar_first_production_mutation_boundary || return
+		record_mutation database-migrate
+		record_mutation queue-delete-unbind
+		record_mutation rabbitmq-up
+		record_mutation force-recreate
+	}
+
+	simulate_first_cutover_path() {
+		enter_identity_avatar_first_production_mutation_boundary || return
+		trap 'printf "%s\n" mutating-recovery >"$trap_marker"' EXIT
+		record_mutation arm-first-cutover-recovery
+		record_mutation stop-api-gateway
+		trap - EXIT
+	}
+
+	if simulate_routine_running_path; then
+		echo 'Deploy-mutation fence self-test accepted a failed routine-running prepare.' >&2
+		return 1
+	fi
+	[[ "$prepare_calls" == '1' && "${#mutation_events[@]}" == '0' ]] || {
+		echo 'Routine-running path mutated or snapshotted before PREPARED.' >&2
+		return 1
+	}
+
+	mutation_events=()
+	if simulate_already_stopped_path; then
+		echo 'Deploy-mutation fence self-test accepted a failed already-stopped prepare.' >&2
+		return 1
+	fi
+	[[ "$prepare_calls" == '2' && "${#mutation_events[@]}" == '0' ]] || {
+		echo 'Already-stopped recovery migrated, changed queues or recreated runtime before PREPARED.' >&2
+		return 1
+	}
+
+	mutation_events=()
+	if (simulate_first_cutover_path); then
+		echo 'Deploy-mutation fence self-test accepted a failed first-cutover prepare.' >&2
+		return 1
+	fi
+	[[ ! -e "$trap_marker" && "${#mutation_events[@]}" == '0' ]] || {
+		echo 'First-cutover EXIT recovery trap was armed or mutated after prepare failure.' >&2
+		return 1
+	}
+
+	run_extracted_production_mutation_block() (
+		local injected_prepare_failure="$1"
+		local generation
+		set -euo pipefail
+		mode=production
+		deploy_revision='1111111111111111111111111111111111111111'
+		matched_rabbitmq_container_id=''
+
+		prepare_identity_avatar_runtime_stability_deploy_mutation() {
+			if [[ "$injected_prepare_failure" == 'true' ]]; then
+				return 70
+			fi
+			if [[ -e "$durable_state" ]]; then
+				IFS= read -r generation <"$durable_state"
+				[[ "$generation" == '41' ]] || return 1
+				printf 'REUSED generation=%s\n' "$generation" >>"$timeline_file"
+				return 0
+			fi
+			[[ ! -e "$durable_state_tmp" ]] || return 1
+			printf '41\n' >"$durable_state_tmp"
+			mv -- "$durable_state_tmp" "$durable_state"
+			printf 'PREPARED generation=41\n' >>"$timeline_file"
+		}
+		reporting_transition_cleanup_integration_worker_env() {
+			printf 'MUTATION reporting-env\n' >>"$timeline_file"
+		}
+		prepare_database_restore_storage() {
+			printf 'MUTATION restore-storage\n' >>"$timeline_file"
+		}
+		compose_target() {
+			case "$*" in
+			'up -d rabbitmq')
+				printf 'MUTATION rabbitmq-up\n' >>"$timeline_file"
+				if [[ ! -e "$crash_file" ]]; then
+					printf 'crashed\n' >"$crash_file"
+					return 77
+				fi
+				;;
+			'ps -q rabbitmq')
+				printf '%064d\n' 1
+				;;
+			*) return 1 ;;
+			esac
+		}
+
+		# Source the exact extracted production branch, not a handwritten model.
+		source "$common_block"
+	)
+
+	set +e
+	run_extracted_production_mutation_block true
+	status="$?"
+	set -e
+	[[ "$status" == '70' && ! -e "$timeline_file" && ! -e "$durable_state" ]] || {
+		echo 'Extracted production branch mutated env/storage/RabbitMQ after prepare failure.' >&2
+		return 1
+	}
+
+	set +e
+	run_extracted_production_mutation_block false
+	status="$?"
+	set -e
+	[[ "$status" == '77' && -f "$durable_state" ]] || {
+		echo 'Extracted production branch did not crash after its first fenced RabbitMQ mutation.' >&2
+		return 1
+	}
+	# This second function subshell has no shell-variable lifecycle memory. It can
+	# reuse generation 41 only through the durable stub state file.
+	set +e
+	run_extracted_production_mutation_block false
+	status="$?"
+	set -e
+	[[ "$status" == '0' ]] || {
+		echo 'Extracted production branch retry did not complete.' >&2
+		return 1
+	}
+	IFS= read -r actual_timeline <"$durable_state"
+	[[ "$actual_timeline" == '41' ]] || {
+		echo 'Extracted production branch changed its durable PREPARED generation.' >&2
+		return 1
+	}
+	actual_timeline="$(<"$timeline_file")"
+	expected_timeline="$(printf '%s\n' \
+		'PREPARED generation=41' \
+		'MUTATION reporting-env' \
+		'MUTATION restore-storage' \
+		'MUTATION rabbitmq-up' \
+		'REUSED generation=41' \
+		'MUTATION reporting-env' \
+		'MUTATION restore-storage' \
+		'MUTATION rabbitmq-up')"
+	[[ "$actual_timeline" == "$expected_timeline" ]] || {
+		echo 'Extracted production branch did not fence its first mutation or reuse PREPARED on retry.' >&2
+		return 1
+	}
+
+	printf 'identity_avatar_deploy_mutation_fence_self_test=passed\n'
+)
+
 gateway_route_manifest_policy_validator_source() {
 	cat <<'NODE'
 function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, identityPolicy) {
@@ -426,6 +1032,15 @@ if [[ "${1:-}" == '--self-test-billing-routine-image-gate' ]]; then
 	exit 0
 fi
 
+if [[ "${1:-}" == '--self-test-identity-avatar-deploy-mutation-fence' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'Identity avatar deploy-mutation fence self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_identity_avatar_deploy_mutation_fence_self_test
+	exit 0
+fi
+
 if [[ "${1:-}" == '--self-test-gateway-route-manifest-policy' ]]; then
 	[[ "$#" -eq 1 ]] || {
 		echo 'Gateway route-manifest policy self-test does not accept extra arguments.' >&2
@@ -496,6 +1111,24 @@ if [[ -n "$dirty_files" ]]; then
 	echo "Backend deployment checkout is not clean:" >&2
 	echo "$dirty_files" >&2
 	exit 1
+fi
+
+[[ "${IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY:-false}" =~ ^(true|false)$ ]] || {
+	echo 'IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY must be true or false.' >&2
+	exit 1
+}
+if [[ "${IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY:-false}" == 'true' ]]; then
+	[[ "${AUTOMATIC_PROD_PUSH:-false}" == 'false' ]] || {
+		echo 'Identity avatar runtime retarget is manual-only.' >&2
+		exit 1
+	}
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$expected_revision" \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" \
+		--guard-before-checkout-revision "$expected_revision" || {
+		echo 'Identity avatar runtime retarget evidence is missing or invalid.' >&2
+		exit 1
+	}
 fi
 
 identity_automatic_prod_push="${IDENTITY_AUTOMATIC_PROD_PUSH:-${AUTOMATIC_PROD_PUSH:-false}}"
@@ -978,8 +1611,6 @@ expected_integration_worker_kinds="$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS"
 # database-restore-production-guard: before-mutation
 database_restore_guard_assert_before_mutation \
 	identity-if-present "$ENV_FILE"
-reporting_transition_cleanup_integration_worker_env "$deploy_revision"
-
 reporting_automatic_prod_push="${REPORTING_AUTOMATIC_PROD_PUSH:-false}"
 reporting_deploy_action="$(
 	reporting_first_rollout_deploy_action \
@@ -991,7 +1622,8 @@ reporting_deploy_action="$(
 }
 case "$reporting_deploy_action" in
 	stage)
-		reporting_write_first_rollout_staged_marker "$deploy_revision"
+		write_reporting_first_rollout_stage_after_identity_avatar_guard \
+			"$deploy_revision"
 		echo "Reporting first-rollout revision $deploy_revision is staged on the VPS."
 		echo "Restore safety state was verified; no Compose configuration was evaluated, image built, runtime changed or database accessed."
 		echo "Run the manual reporting-database prepare workflow next."
@@ -1050,8 +1682,8 @@ campaigns_deploy_action="$(
 }
 case "$campaigns_deploy_action" in
 	stage)
-		guard_campaigns_cutover_checkout_revision "$deploy_revision"
-		write_campaigns_first_cutover_staged_marker "$deploy_revision"
+		write_campaigns_first_rollout_stage_after_identity_avatar_guard \
+			"$deploy_revision"
 		echo "Campaigns first-cutover revision $deploy_revision is staged on the VPS."
 		echo "No image was built, container restarted or migration applied."
 		echo "The completed Campaigns database action is retired; follow the production recovery runbook before continuing."
@@ -1355,7 +1987,7 @@ assert_database_restore_admin_secret_file() {
 	fi
 }
 
-prepare_database_restore_storage() {
+validate_database_restore_storage() {
 	local storage_path
 	local active_entry
 	local directory
@@ -1372,7 +2004,7 @@ prepare_database_restore_storage() {
 			exit 1
 		fi
 	else
-		install -d -m 700 -o 1001 -g 1001 "$storage_path"
+		return 0
 	fi
 
 	for directory in queued processing locks gates fences; do
@@ -1395,6 +2027,17 @@ prepare_database_restore_storage() {
 			exit 1
 		fi
 	done
+}
+
+prepare_database_restore_storage() {
+	local storage_path
+
+	validate_database_restore_storage
+	storage_path="$(get_env_value DATABASE_RESTORE_STORAGE_DIR)"
+	if [[ ! -e "$storage_path" && ! -L "$storage_path" ]]; then
+		install -d -m 700 -o 1001 -g 1001 "$storage_path"
+	fi
+	validate_database_restore_storage
 }
 
 mode="$(get_env_value "MODE" || true)"
@@ -2144,7 +2787,7 @@ assert_core_database_production_boundary
 assert_notification_database_postgres_identity
 assert_campaigns_database_postgres_identity
 if [[ "$mode" == 'production' ]]; then
-	prepare_database_restore_storage
+	validate_database_restore_storage
 fi
 rabbitmq_vhost="$(get_env_value "RABBITMQ_VHOST" || true)"
 if [[ "$rabbitmq_vhost" != "winwidget" ]]; then
@@ -2537,6 +3180,9 @@ declare -A routine_stop_container_ids=()
 reporting_outcome_route_state_before='unknown'
 reporting_interrupted_routine_recovery=false
 reporting_cleanup_stop_recovery_active=false
+identity_avatar_predeploy_no_return=false
+identity_avatar_runtime_mutation_fenced=false
+identity_avatar_runtime_mutation_recovered=false
 # Remove this exact-image bootstrap after the first successful rollout verifies
 # that the replacement API exits without Docker SIGKILL.
 LEGACY_API_SHUTDOWN_BOOTSTRAP_REVISION="42c422ca4c2c3a8ce758a37773d6cb0e6b689db7"
@@ -2869,6 +3515,9 @@ restore_routine_containers_after_failed_stop() {
 		database-restore-worker \
 		notification-delivery-worker \
 		campaigns-service \
+		identity-outbox-publisher \
+		identity-worker \
+		identity-api \
 		api \
 		api-gateway; do
 		container_id="${routine_stop_container_ids[$service]:-}"
@@ -2917,6 +3566,15 @@ restore_routine_containers_after_failed_stop() {
 			{ [[ -z "${routine_stop_container_ids[api-gateway]:-}" ]] ||
 				curl -fsS --connect-timeout 2 --max-time 5 \
 					"$GATEWAY_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[identity-api]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$IDENTITY_API_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[identity-worker]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$IDENTITY_WORKER_READINESS_URL" >/dev/null; } &&
+			{ [[ -z "${routine_stop_container_ids[identity-outbox-publisher]:-}" ]] ||
+				curl -fsS --connect-timeout 2 --max-time 5 \
+					"$IDENTITY_OUTBOX_READINESS_URL" >/dev/null; } &&
 			{ [[ -z "${routine_stop_container_ids[maintenance-worker]:-}" ]] ||
 				curl -fsS --connect-timeout 2 --max-time 5 \
 					"$MAINTENANCE_READINESS_URL" >/dev/null; } &&
@@ -2972,6 +3630,11 @@ stop_routine_service_cleanly() {
 		echo "Captured container ID is invalid for $service." >&2
 		return 1
 	fi
+	case "$service" in
+	api | widgets-service | identity-api | identity-worker | identity-outbox-publisher)
+		prepare_identity_avatar_runtime_stability_deploy_mutation || return 1
+		;;
+	esac
 	if ! docker stop --time "$timeout" "$container_id" >/dev/null; then
 		echo "Could not stop $service before the core migration boundary." >&2
 		return 1
@@ -3002,6 +3665,184 @@ stop_routine_service_cleanly() {
 
 	echo "$service did not stop cleanly: ${stopped_state:-unavailable}" >&2
 	return 1
+}
+
+run_identity_avatar_predeploy_action() {
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" "$@"
+}
+
+prepare_identity_avatar_runtime_stability_deploy_mutation() {
+	local output transition
+	if [[ "$identity_avatar_runtime_mutation_fenced" == 'true' ]]; then
+		return 0
+	fi
+	output="$(APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+		IDENTITY_AVATAR_RUNTIME_STABILITY_DEPLOY_MUTATION=true \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" \
+			--prepare-backend-deploy-mutation)" || return 1
+	printf '%s\n' "$output"
+	identity_avatar_runtime_mutation_fenced=true
+	if grep -qx 'identity_avatar_runtime_stability_deploy_mutation=prepared-recovery-already-live' <<<"$output"; then
+		transition="$(sed -n 's/^identity_avatar_runtime_stability_transition=//p' <<<"$output")"
+		case "$transition" in
+		backend-same-sha-planned)
+			finish_identity_avatar_runtime_stability_deploy_mutation || return 1
+			;;
+		backend-code-retarget)
+			[[ "${IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY:-false}" == 'true' ]] || return 1
+			APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+				COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+				IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY=true \
+				bash "$server_root/scripts/identity-avatar-media-production.sh" --apply-runtime-retarget || return 1
+			;;
+		*) return 1 ;;
+		esac
+		identity_avatar_runtime_mutation_recovered=true
+		echo 'Recovered the already-live Identity avatar runtime generation without another stop; rerun the deployment from its clean pre-mutation boundary.' >&2
+		return 75
+	fi
+}
+
+finish_identity_avatar_runtime_stability_deploy_mutation() {
+	[[ "$identity_avatar_runtime_mutation_fenced" == 'true' ]] || return 0
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+		IDENTITY_AVATAR_RUNTIME_STABILITY_DEPLOY_MUTATION=true \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" \
+			--finish-backend-deploy-mutation
+}
+
+identity_avatar_predeploy_state_value() {
+	local output
+	output="$(run_identity_avatar_predeploy_action --predeploy-uploads-state)" || return 1
+	[[ "$(grep -Ec '^identity_avatar_predeploy_state=(absent|prepared|sealing|sealed)$' <<<"$output")" == '1' ]] || return 1
+	sed -n 's/^identity_avatar_predeploy_state=//p' <<<"$output"
+}
+
+capture_identity_avatar_predeploy_existing_topology() {
+	[[ $# -eq 1 && "$1" =~ ^(complete|allow-missing)$ ]] || return 1
+	local service container_id identity image_id image_revision app_revision status running stopped_state
+	routine_stop_container_ids=()
+	for service in "${routine_stop_services[@]}"; do
+		container_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+		if [[ -z "$container_id" ]]; then
+			if [[ "$1" == 'allow-missing' || "$service" == 'database-restore-worker' ]]; then
+				continue
+			fi
+			return 1
+		fi
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+		identity="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+			"$container_id" 2>/dev/null || true)"
+		[[ "$identity" == "$target_project|$service" ]] || return 1
+		image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+		image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+			"$image_id" 2>/dev/null || true)"
+		app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+			"$container_id" 2>/dev/null | sed -n 's/^APP_REVISION=//p')"
+		[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ && "$image_revision" =~ ^[0-9a-f]{40}$ &&
+			"$app_revision" == "$image_revision" ]] || return 1
+		git -C "$server_root" cat-file -e "$image_revision^{commit}" 2>/dev/null || return 1
+		git -C "$server_root" merge-base --is-ancestor "$image_revision" "$APP_REVISION" || return 1
+		status="$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || true)"
+		running="$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)"
+		case "$status|$running" in
+		running\|true) ;;
+		exited\|false)
+			stopped_state="$(docker inspect --format '{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}' \
+				"$container_id" 2>/dev/null || true)"
+			if [[ "$service" == 'api' ]]; then
+				[[ "$stopped_state" =~ ^(0|137|143)\|false\|$ ]] || return 1
+			else
+				[[ "$stopped_state" =~ ^(0|143)\|false\|$ ]] || return 1
+			fi
+			;;
+		*) return 1 ;;
+		esac
+		routine_stop_container_ids["$service"]="$container_id"
+	done
+}
+
+identity_avatar_predeploy_bound_writer_rows() {
+	[[ $# -eq 1 && "$1" =~ ^(prepared|sealing|sealed)$ ]] || return 1
+	local source
+	if [[ "$1" == 'sealed' ]]; then
+		source="$(IDENTITY_AVATAR_HANDOFF="$APP_ROOT/deploy/backend/identity-avatar-media-artifacts/predeploy-uploads-handoff-v1.json" \
+			IDENTITY_AVATAR_ARTIFACT_ROOT="$APP_ROOT/deploy/backend/identity-avatar-media-artifacts" node <<'NODE'
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
+const handoff = JSON.parse(readFileSync(process.env.IDENTITY_AVATAR_HANDOFF, 'utf8'));
+process.stdout.write(join(process.env.IDENTITY_AVATAR_ARTIFACT_ROOT, handoff.snapshotEvidenceFile));
+NODE
+)" || return 1
+	else
+		source="$APP_ROOT/deploy/backend/identity-avatar-media-artifacts/predeploy-uploads-prepared-v1.json"
+	fi
+	[[ -f "$source" && ! -L "$source" ]] || return 1
+	IDENTITY_AVATAR_WRITER_SOURCE="$source" node <<'NODE'
+const { readFileSync } = require('node:fs');
+let value;
+try { value = JSON.parse(readFileSync(process.env.IDENTITY_AVATAR_WRITER_SOURCE, 'utf8')); }
+catch { process.exit(1); }
+if (!Array.isArray(value.writers) || value.writers.length !== 3) process.exit(1);
+for (const writer of value.writers) {
+  if (!['api-gateway','api','identity-api'].includes(writer.service) ||
+      !/^[0-9a-f]{64}$/.test(writer.containerId || '') ||
+      !/^sha256:[0-9a-f]{64}$/.test(writer.imageId || '')) process.exit(1);
+  process.stdout.write(`${writer.service}\t${writer.containerId}\t${writer.imageId}\n`);
+}
+NODE
+}
+
+identity_avatar_recover_predeploy_state() {
+	[[ $# -eq 1 && "$1" =~ ^(prepared|sealing|sealed)$ ]] || return 1
+	local state="$1" bound_rows service bound_id bound_image current_id running
+	if [[ "$state" == 'prepared' ]]; then
+		capture_identity_avatar_predeploy_existing_topology complete || return 1
+		bound_rows="$(identity_avatar_predeploy_bound_writer_rows prepared)" || return 1
+		while IFS=$'\t' read -r service bound_id bound_image; do
+			[[ "${routine_stop_container_ids[$service]:-}" == "$bound_id" ]] || return 1
+		done <<<"$bound_rows"
+		restore_routine_containers_after_failed_stop || return 1
+		run_identity_avatar_predeploy_action --abort-predeploy-uploads || return 1
+		printf 'identity_avatar_predeploy_recovery=rolled-back-before-seal\n'
+		return 2
+	fi
+	capture_identity_avatar_predeploy_existing_topology "$([[ "$state" == 'sealed' ]] && printf 'allow-missing' || printf 'complete')" || return 1
+	bound_rows="$(identity_avatar_predeploy_bound_writer_rows "$state")" || return 1
+	while IFS=$'\t' read -r service bound_id bound_image; do
+		current_id="${routine_stop_container_ids[$service]:-}"
+		if [[ "$state" == 'sealing' ]]; then
+			[[ "$current_id" == "$bound_id" ]] || return 1
+		fi
+		if [[ -n "$current_id" ]]; then
+			running="$(docker inspect --format '{{.State.Running}}' "$current_id" 2>/dev/null || true)"
+			if [[ "$current_id" == "$bound_id" && "$running" == 'true' ]]; then
+				echo "Sealed legacy writer was restarted after the snapshot boundary: $service." >&2
+				return 1
+			fi
+		fi
+	done <<<"$bound_rows"
+	for service in "${routine_stop_services[@]}"; do
+		current_id="${routine_stop_container_ids[$service]:-}"
+		[[ -n "$current_id" ]] || continue
+		running="$(docker inspect --format '{{.State.Running}}' "$current_id" 2>/dev/null || true)"
+		if [[ "$running" == 'true' ]]; then
+			stop_routine_service_cleanly "$service" 30 || return 1
+		elif [[ "$running" != 'false' ]]; then
+			return 1
+		fi
+	done
+	if [[ "$mode" == 'production' ]]; then
+		prepare_database_restore_storage || return 1
+	fi
+	verify_core_database_sessions_drained || return 1
+	run_identity_avatar_predeploy_action --seal-predeploy-uploads || return 1
+	identity_avatar_predeploy_no_return=true
+	printf 'identity_avatar_predeploy_recovery=forward-only\n'
 }
 
 verify_core_database_sessions_drained() {
@@ -3416,6 +4257,19 @@ stop_routine_topology_for_core_migration() {
 	local service
 
 	capture_routine_stop_containers || return 1
+	if ! APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" \
+			--prepare-predeploy-uploads \
+			"${routine_stop_container_ids[api-gateway]}" \
+			"${routine_stop_container_ids[api]}" \
+			"${routine_stop_container_ids[identity-api]}"; then
+		APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+			COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+			bash "$server_root/scripts/identity-avatar-media-production.sh" \
+				--abort-predeploy-uploads >/dev/null 2>&1 || true
+		return 1
+	fi
 	for service in "${routine_stop_services[@]}"; do
 		if [[ -z "${routine_stop_container_ids[$service]:-}" &&
 			"$service" == 'database-restore-worker' ]]; then
@@ -3425,22 +4279,42 @@ stop_routine_topology_for_core_migration() {
 			if [[ "$service" == 'notification-delivery-worker' &&
 				"$reporting_outcome_route_state_before" != 'steady' ]] &&
 				! wait_for_reporting_outcome_route_drain; then
-				restore_routine_containers_after_failed_stop || true
+				if restore_routine_containers_after_failed_stop; then
+					APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+						COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+						bash "$server_root/scripts/identity-avatar-media-production.sh" \
+							--abort-predeploy-uploads >/dev/null 2>&1 || true
+				fi
 				return 1
 			fi
 			continue
 		fi
-		restore_routine_containers_after_failed_stop || true
+		if restore_routine_containers_after_failed_stop; then
+			APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+				COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+				bash "$server_root/scripts/identity-avatar-media-production.sh" \
+					--abort-predeploy-uploads >/dev/null 2>&1 || true
+		fi
 		return 1
 	done
 	if [[ "$mode" == 'production' ]]; then
 		if ! prepare_database_restore_storage; then
-			restore_routine_containers_after_failed_stop || true
+			if restore_routine_containers_after_failed_stop; then
+				APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+					COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+					bash "$server_root/scripts/identity-avatar-media-production.sh" \
+						--abort-predeploy-uploads >/dev/null 2>&1 || true
+			fi
 			return 1
 		fi
 	fi
 	if ! verify_core_database_sessions_drained; then
-		restore_routine_containers_after_failed_stop || true
+		if restore_routine_containers_after_failed_stop; then
+			APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+				COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$APP_REVISION" \
+				bash "$server_root/scripts/identity-avatar-media-production.sh" \
+					--abort-predeploy-uploads >/dev/null 2>&1 || true
+		fi
 		return 1
 	fi
 }
@@ -4393,6 +5267,73 @@ container_env_value() {
 		'
 }
 
+assert_identity_avatar_storage_environment_boundary() {
+	local core_container integration_container identity_api_container
+	local identity_worker_container identity_publisher_container
+	local core_keys integration_keys api_keys worker_keys publisher_keys key
+	core_container="$(compose_target ps --status running -q api)" || return 1
+	integration_container="$(compose_target ps --status running -q integration-worker)" || return 1
+	identity_api_container="$(compose_target ps --status running -q identity-api)" || return 1
+	identity_worker_container="$(compose_target ps --status running -q identity-worker)" || return 1
+	identity_publisher_container="$(compose_target ps --status running -q identity-outbox-publisher)" || return 1
+	for container_id in "$core_container" "$integration_container" \
+		"$identity_api_container" "$identity_worker_container" \
+		"$identity_publisher_container"; do
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	done
+	core_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$core_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	integration_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$integration_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	api_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$identity_api_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	worker_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$identity_worker_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	publisher_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$identity_publisher_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	for key in IDENTITY_AVATAR_S3_LEGACY_KEY_PREFIX \
+		IDENTITY_AVATAR_MIGRATION_S3_ACCESS_KEY_ID \
+		IDENTITY_AVATAR_MIGRATION_S3_SECRET_ACCESS_KEY \
+		IDENTITY_AVATAR_MIGRATION_LEGACY_KEY_PREFIX \
+		IDENTITY_AVATAR_MIGRATION_LEGACY_PUBLIC_BASE_URL \
+		IDENTITY_AVATAR_MIGRATION_UPLOADS_PUBLIC_BASE_URL \
+		IDENTITY_AVATAR_RETIREMENT_S3_ACCESS_KEY_ID \
+		IDENTITY_AVATAR_RETIREMENT_S3_SECRET_ACCESS_KEY \
+		IDENTITY_AVATAR_RETIREMENT_LEGACY_KEY_PREFIX \
+		IDENTITY_AVATAR_MIGRATION_UPLOADS_ROOT; do
+		! grep -Fxq "$key" <<<"$core_keys" &&
+			! grep -Fxq "$key" <<<"$integration_keys" &&
+			! grep -Fxq "$key" <<<"$api_keys" &&
+			! grep -Fxq "$key" <<<"$worker_keys" &&
+			! grep -Fxq "$key" <<<"$publisher_keys" || return 1
+	done
+	for key in IDENTITY_AVATAR_S3_ENDPOINT IDENTITY_AVATAR_S3_REGION \
+		IDENTITY_AVATAR_S3_BUCKET IDENTITY_AVATAR_S3_KEY_PREFIX \
+		IDENTITY_AVATAR_S3_FORCE_PATH_STYLE; do
+		grep -Fxq "$key" <<<"$api_keys" && grep -Fxq "$key" <<<"$worker_keys" || return 1
+		! grep -Fxq "$key" <<<"$core_keys" &&
+			! grep -Fxq "$key" <<<"$integration_keys" &&
+			! grep -Fxq "$key" <<<"$publisher_keys" || return 1
+	done
+	for key in IDENTITY_AVATAR_S3_PUBLIC_BASE_URL \
+		IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY; do
+		grep -Fxq "$key" <<<"$api_keys" || return 1
+		! grep -Fxq "$key" <<<"$core_keys" &&
+			! grep -Fxq "$key" <<<"$integration_keys" &&
+			! grep -Fxq "$key" <<<"$worker_keys" &&
+			! grep -Fxq "$key" <<<"$publisher_keys" || return 1
+	done
+	for key in IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID \
+		IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY \
+		IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS; do
+		grep -Fxq "$key" <<<"$worker_keys" || return 1
+		! grep -Fxq "$key" <<<"$core_keys" &&
+			! grep -Fxq "$key" <<<"$integration_keys" &&
+			! grep -Fxq "$key" <<<"$api_keys" &&
+			! grep -Fxq "$key" <<<"$publisher_keys" || return 1
+	done
+}
+
 assert_clean_core_identity_environment_boundary() {
 	local core_container identity_container integration_container
 	local core_keys identity_keys integration_keys key
@@ -5315,6 +6256,14 @@ for ((left = 0; left < ${#service_users[@]}; left++)); do
 	done
 done
 
+# identity-avatar-runtime-stability: first-production-mutation-block-begin
+# identity-avatar-runtime-stability: first-production-mutation-fence
+enter_identity_avatar_first_production_mutation_boundary || exit "$?"
+reporting_transition_cleanup_integration_worker_env "$deploy_revision"
+if [[ "$mode" == 'production' ]]; then
+	prepare_database_restore_storage
+fi
+
 if [[ -n "$matched_rabbitmq_container_id" ]]; then
 	rabbitmq_is_running="$(
 		docker inspect --format '{{ .State.Running }}' \
@@ -5328,6 +6277,7 @@ else
 	compose_target up -d rabbitmq
 	provisioning_rabbitmq_container_id="$(compose_target ps -q rabbitmq)"
 fi
+# identity-avatar-runtime-stability: first-production-mutation-block-end
 
 if [[ -z "$provisioning_rabbitmq_container_id" ]]; then
 	echo "RabbitMQ container for service-user provisioning was not found" >&2
@@ -8059,6 +9009,7 @@ perform_notification_first_cutover_preflight() {
 		first_cutover_producer_ids+=("$container_id")
 	done
 
+	prepare_identity_avatar_runtime_stability_deploy_mutation || return 1
 	echo "Notification Delivery provider cutover: stopping producers and draining legacy provider work."
 	first_cutover_recovery_active=true
 	trap restore_first_cutover_producers_on_exit EXIT
@@ -8331,6 +9282,7 @@ fi
 
 if [[ "$notification_forward_candidate_needs_recovery" == "true" ]]; then
 	echo "Restoring the exact saved forward topology before canonical handoff."
+	prepare_identity_avatar_runtime_stability_deploy_mutation || exit 1
 	forward_cutover_recovery_active=true
 	trap restore_forward_cutover_on_exit EXIT
 	trap 'exit 130' INT
@@ -8409,6 +9361,7 @@ if [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	# fail-closed with the marker present; the next full deploy resumes forward
 	# before any publisher or public Gateway is started.
 	delete_legacy_payment_telegram_queues
+	prepare_identity_avatar_runtime_stability_deploy_mutation || exit 1
 	forward_cutover_recovery_active=true
 	trap restore_forward_cutover_on_exit EXIT
 	trap 'exit 130' INT
@@ -8427,6 +9380,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	verify_notification_cutover_candidate_topology \
 		"$notification_cutover_marker_revision" \
 		"$notification_cutover_candidate_verification_started_at"
+	prepare_identity_avatar_runtime_stability_deploy_mutation || exit 1
 	forward_cutover_recovery_active=true
 	trap restore_forward_cutover_on_exit EXIT
 	trap 'exit 130' INT
@@ -8504,6 +9458,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	start_canonical_reporting_runtime "Canonical Reporting"
 	finish_canonical_reporting_runtime "Canonical Reporting"
 
+	prepare_identity_avatar_runtime_stability_deploy_mutation || exit 1
 	compose_target up -d --no-deps --force-recreate widgets-service
 	wait_for_cutover_revision \
 		"$WIDGETS_READINESS_URL" \
@@ -8567,14 +9522,51 @@ else
 			echo 'Interrupted Reporting recovery did not retain the quiescent Core database boundary.' >&2
 			exit 1
 		}
-	elif ! stop_routine_topology_for_core_migration; then
-		echo "Routine production topology did not reach a safe core migration boundary." >&2
-		exit 1
+	else
+		identity_avatar_existing_predeploy_state="$(identity_avatar_predeploy_state_value)" || {
+			echo 'Identity avatar predeploy state is invalid or unreadable.' >&2
+			exit 1
+		}
+		case "$identity_avatar_existing_predeploy_state" in
+		absent)
+			if ! stop_routine_topology_for_core_migration; then
+				echo "Routine production topology did not reach a safe core migration boundary." >&2
+				exit 1
+			fi
+			;;
+		prepared)
+			set +e
+			identity_avatar_recover_predeploy_state prepared
+			identity_avatar_predeploy_recovery_status=$?
+			set -e
+			[[ "$identity_avatar_predeploy_recovery_status" == '2' ]] || {
+				echo 'Prepared Identity avatar snapshot state could not be rolled back exactly.' >&2
+				exit 1
+			}
+			if ! stop_routine_topology_for_core_migration; then
+				echo "Routine production topology did not reach a safe core migration boundary after recovery." >&2
+				exit 1
+			fi
+			;;
+		sealing | sealed)
+			identity_avatar_recover_predeploy_state "$identity_avatar_existing_predeploy_state" || {
+				echo 'Identity avatar sealed snapshot could not resume forward safely.' >&2
+				exit 1
+			}
+			;;
+		esac
+		if [[ "$identity_avatar_predeploy_no_return" != 'true' ]] &&
+			! run_identity_avatar_predeploy_action --seal-predeploy-uploads; then
+			echo 'Identity avatar uploads handoff could not be sealed; legacy writers remain stopped for forward recovery.' >&2
+			exit 1
+		fi
+		identity_avatar_predeploy_no_return=true
 	fi
 	if [[ -e "$REPORTING_CUTOVER_MARKER" || -L "$REPORTING_CUTOVER_MARKER" ]]; then
 		reporting_cutover_validate_marker || {
 			if [[ "$reporting_cleanup_runtime_deploy" != 'true' &&
-				"$billing_core_cleanup_runtime_deploy" != 'true' ]]; then
+				"$billing_core_cleanup_runtime_deploy" != 'true' &&
+				"$identity_avatar_predeploy_no_return" != 'true' ]]; then
 				restore_routine_containers_after_failed_stop || true
 			fi
 			exit 1
@@ -8782,6 +9774,7 @@ else
 		reporting_start_failed=true
 	fi
 	compose_target up -d --no-deps --force-recreate outbox-publisher
+	prepare_identity_avatar_runtime_stability_deploy_mutation || exit 1
 	compose_target up -d --no-deps --force-recreate \
 		integration-worker \
 		maintenance-worker \
@@ -9409,6 +10402,25 @@ for service in \
 		exit 1
 	fi
 done
+
+assert_identity_avatar_storage_environment_boundary || {
+	echo 'Identity avatar storage runtime credential boundary is invalid.' >&2
+	exit 1
+}
+if [[ "${IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY:-false}" == 'true' ]]; then
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$expected_revision" \
+		IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY=true \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" --apply-runtime-retarget
+else
+	finish_identity_avatar_runtime_stability_deploy_mutation || {
+		echo 'Identity avatar runtime stability generation did not reach its post-deploy boundary.' >&2
+		exit 1
+	}
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" ENV_FILE="$ENV_FILE" \
+		COMPOSE_FILE="$COMPOSE_FILE" EXPECTED_REVISION="$expected_revision" \
+		bash "$server_root/scripts/identity-avatar-media-production.sh" --release-canary
+fi
 
 if [[ "$identity_cleanup_phase" == 'complete' ]]; then
 	assert_clean_core_identity_environment_boundary || {

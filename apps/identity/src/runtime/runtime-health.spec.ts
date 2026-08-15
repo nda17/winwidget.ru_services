@@ -7,6 +7,7 @@ import { IdentityHealthService } from '../health/identity-health.service';
 import { IdentityHousekeepingService } from './identity-housekeeping.service';
 import { IdentityOwnershipGuard } from './identity-ownership.service';
 import {
+	IdentityRuntimeService,
 	parseIdentityPort,
 	parseIdentityProcessRole
 } from './identity-runtime.service';
@@ -26,6 +27,15 @@ describe('Identity runtime ownership fencing', () => {
 		expect(() =>
 			parseIdentityPort('api', { IDENTITY_PORT: '4901' })
 		).toThrow('canonical port 4900');
+		expect(
+			() =>
+				new IdentityRuntimeService({
+					get: (name: string) =>
+						name === 'IDENTITY_AVATAR_CLEANUP_LEASE_MS'
+							? '10000'
+							: undefined
+				} as any)
+		).toThrow('IDENTITY_AVATAR_CLEANUP_LEASE_MS must be between 30000');
 	});
 
 	it('allows health while dark but blocks every domain route before ACTIVE', async () => {
@@ -70,6 +80,10 @@ describe('Identity runtime ownership fencing', () => {
 		};
 		const worker = { isReady: jest.fn().mockReturnValue(false) };
 		const housekeeping = { isReady: jest.fn().mockReturnValue(false) };
+		const avatarCleanup = {
+			isReady: jest.fn().mockReturnValue(false),
+			health: jest.fn().mockReturnValue({ ready: false })
+		};
 		const health = new IdentityHealthService(
 			{
 				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }])
@@ -83,7 +97,8 @@ describe('Identity runtime ownership fencing', () => {
 			{ isReady: jest.fn().mockReturnValue(false) } as any,
 			{ isReady: jest.fn().mockReturnValue(true) } as any,
 			housekeeping as any,
-			ownership as any
+			ownership as any,
+			avatarCleanup as any
 		);
 		await expect(health.readiness()).resolves.toMatchObject({
 			status: 'ready',
@@ -99,9 +114,15 @@ describe('Identity runtime ownership fencing', () => {
 		);
 		worker.isReady.mockReturnValue(true);
 		housekeeping.isReady.mockReturnValue(true);
+		await expect(health.readiness()).rejects.toThrow(
+			'Identity avatar cleanup worker is not ready'
+		);
+		avatarCleanup.isReady.mockReturnValue(true);
+		avatarCleanup.health.mockReturnValue({ ready: true });
 		await expect(health.readiness()).resolves.toMatchObject({
 			status: 'ready',
-			ownership: { phase: ServiceDatabasePhase.ACTIVE }
+			ownership: { phase: ServiceDatabasePhase.ACTIVE },
+			avatarCleanup: { ready: true }
 		});
 	});
 
@@ -126,7 +147,8 @@ describe('Identity runtime ownership fencing', () => {
 				housekeepingIntervalMs: 60_000,
 				outboxRetentionDays: 7,
 				receiptRetentionDays: 90,
-				failureRetentionDays: 30
+				failureRetentionDays: 30,
+				avatarCleanupRetentionDays: 7
 			} as any,
 			ownership as any
 		);
@@ -136,7 +158,7 @@ describe('Identity runtime ownership fencing', () => {
 			await Promise.resolve();
 			expect(housekeeping.isReady()).toBe(false);
 			await jest.advanceTimersByTimeAsync(1_000);
-			expect(execute).toHaveBeenCalledTimes(8);
+			expect(execute).toHaveBeenCalledTimes(9);
 			expect(housekeeping.isReady()).toBe(true);
 		} finally {
 			housekeeping.onApplicationShutdown();

@@ -18,6 +18,7 @@ on:
           - billing
           - billing-cleanup
           - identity
+          - identity-avatar
           - identity-cleanup
       widgets_cutover_confirmation:
         description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
@@ -80,6 +81,91 @@ on:
         required: false
         default: ''
         type: string
+      identity_avatar_action:
+        description: Identity avatar media lifecycle action (manual identity-avatar target only)
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - release-canary
+          - install-client-public-key
+          - inventory
+          - migrate
+          - activate
+          - publish-client-ready
+          - record-client-switch
+          - stage-runtime-retarget
+          - record-client-soak-retarget
+          - stage-cleanup-retarget
+          - soak-heartbeat
+          - verify-soak
+          - runtime-stability-monitor
+          - publish-runtime-stability-current
+          - prepare-backend-runtime-rebind
+          - record-backend-runtime-rebind
+          - prepare-frontend-runtime-rebind
+          - record-frontend-runtime-rebind
+      identity_avatar_confirmation:
+        description: Type the exact Identity avatar lifecycle confirmation when required
+        required: false
+        default: ''
+        type: string
+      identity_avatar_client_revision:
+        description: Exact deployed frontend revision for record-client-switch
+        required: false
+        default: ''
+        type: string
+      identity_avatar_release_evidence_sha256:
+        description: SHA-256 printed by the exact frontend release evidence deployment
+        required: false
+        default: ''
+        type: string
+      identity_avatar_client_ready_sha256:
+        description: SHA-256 of the exact signed backend client-ready body consumed by frontend
+        required: false
+        default: ''
+        type: string
+      identity_avatar_client_ready_signature_sha256:
+        description: SHA-256 of the exact detached backend client-ready signature consumed by frontend
+        required: false
+        default: ''
+        type: string
+      identity_avatar_client_retarget_sha256:
+        description: SHA-256 of the exact signed frontend client soak-retarget outcome body
+        required: false
+        default: ''
+        type: string
+      identity_avatar_client_retarget_signature_sha256:
+        description: SHA-256 of the exact detached frontend client soak-retarget outcome signature
+        required: false
+        default: ''
+        type: string
+      identity_avatar_runtime_generation:
+        description: Exact runtime stability generation (1..64) for frontend runtime rebind
+        required: false
+        default: ''
+        type: string
+      identity_avatar_runtime_prepared_sha256:
+        description: SHA-256 of the exact signed frontend runtime PREPARED body
+        required: false
+        default: ''
+        type: string
+      identity_avatar_runtime_prepared_signature_sha256:
+        description: SHA-256 of the exact detached frontend runtime PREPARED signature
+        required: false
+        default: ''
+        type: string
+      identity_avatar_runtime_adopted_sha256:
+        description: SHA-256 of the exact signed frontend runtime ADOPTED body
+        required: false
+        default: ''
+        type: string
+      identity_avatar_runtime_adopted_signature_sha256:
+        description: SHA-256 of the exact detached frontend runtime ADOPTED signature
+        required: false
+        default: ''
+        type: string
       identity_cleanup_action:
         description: Identity Core source cleanup action (manual identity-cleanup target only)
         required: true
@@ -128,6 +214,10 @@ jobs:
       YOOKASSA_PRODUCTION_SECRET_KEY: ci_billing_secret_key_at_least_32_chars
       S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
       S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
+      IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID: identity-avatar-api-ci-access-key
+      IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY: identity-avatar-api-ci-secret-key-at-least-32-chars
+      IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID: identity-avatar-worker-ci-access-key
+      IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY: identity-avatar-worker-ci-secret-key-at-least-32-chars
 
     steps:
       - name: Checkout candidate revision
@@ -148,6 +238,11 @@ jobs:
             apps/identity/prisma/schema.prisma
             apps/identity/prisma/migrations/20260814000000_init_identity/migration.sql
             deploy/docker-compose.prod.yml
+            deploy/identity-avatar-migration.env.example
+            deploy/identity-avatar-retirement.env.example
+            deploy/identity-avatar-nginx-log.conf
+            deploy/identity-avatar-nginx-logrotate.conf
+            deploy/identity-avatar-client-ready-nginx.conf
             deploy/nginx.conf
             scripts/widgets-database-lifecycle.sh
             scripts/deploy-widgets-production.sh
@@ -166,6 +261,7 @@ jobs:
             scripts/test-billing-runtime-boundaries.mjs
             scripts/identity-release-identity.sh
             scripts/identity-production-env-control.sh
+            scripts/identity-avatar-media-production.sh
             scripts/identity-database-lifecycle.sh
             scripts/deploy-identity-production.sh
             scripts/identity-cutover-production.sh
@@ -199,6 +295,7 @@ jobs:
             scripts/test-billing-core-source-cleanup-rehearsal.sh \
             scripts/identity-release-identity.sh \
             scripts/identity-production-env-control.sh \
+            scripts/identity-avatar-media-production.sh \
             scripts/identity-database-lifecycle.sh \
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
@@ -234,6 +331,8 @@ jobs:
             bash scripts/identity-release-identity.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/identity-production-env-control.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/identity-avatar-media-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/identity-database-lifecycle.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
@@ -282,6 +381,7 @@ jobs:
             scripts/test-billing-core-source-cleanup-rehearsal.sh \
             scripts/identity-release-identity.sh \
             scripts/identity-production-env-control.sh \
+            scripts/identity-avatar-media-production.sh \
             scripts/identity-database-lifecycle.sh \
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
@@ -422,6 +522,19 @@ jobs:
           IDENTITY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_action || 'status' }}
           IDENTITY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_confirmation || '' }}
           IDENTITY_ENV_EXPECTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_backend_env_expected_sha256 || '' }}
+          IDENTITY_AVATAR_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_action || 'status' }}
+          IDENTITY_AVATAR_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_confirmation || '' }}
+          IDENTITY_AVATAR_CLIENT_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_revision || '' }}
+          IDENTITY_AVATAR_RELEASE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_release_evidence_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_READY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_ready_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_ready_signature_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_RETARGET_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_retarget_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_retarget_signature_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_GENERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_generation || '' }}
+          IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_prepared_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_prepared_signature_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_adopted_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_adopted_signature_sha256 || '' }}
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
           IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_confirmation || '' }}
           IDENTITY_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_migration_sha256 || '' }}
@@ -471,6 +584,110 @@ jobs:
             echo 'Identity lifecycle inputs require the identity target.' >&2
             exit 1
           fi
+          if [[ "$DEPLOY_TARGET" == 'identity-avatar' ]]; then
+            case "$IDENTITY_AVATAR_ACTION:$IDENTITY_AVATAR_CONFIRMATION" in
+              status:|soak-heartbeat:|runtime-stability-monitor:|publish-runtime-stability-current:) ;;
+              release-canary:'EXPAND IDENTITY AVATAR MEDIA') ;;
+              install-client-public-key:'PIN IDENTITY AVATAR CLIENT KEY') ;;
+              inventory:'INVENTORY IDENTITY AVATAR MEDIA') ;;
+              migrate:'MIGRATE IDENTITY AVATAR MEDIA') ;;
+              activate:'ACTIVATE IDENTITY AVATAR OWNERSHIP') ;;
+              publish-client-ready:'PUBLISH IDENTITY AVATAR CLIENT READY') ;;
+              record-client-switch:'SWITCH AVATAR CLIENT TO IDENTITY') ;;
+              stage-runtime-retarget:'STAGE IDENTITY AVATAR RUNTIME RETARGET') ;;
+              record-client-soak-retarget:'RECORD IDENTITY AVATAR CLIENT SOAK RETARGET') ;;
+              stage-cleanup-retarget:'STAGE IDENTITY AVATAR CLEANUP') ;;
+              verify-soak:'COMPLETE IDENTITY AVATAR SOAK') ;;
+              prepare-backend-runtime-rebind:'REBIND IDENTITY AVATAR BACKEND RUNTIME') ;;
+              record-backend-runtime-rebind:'REBIND IDENTITY AVATAR BACKEND RUNTIME') ;;
+              prepare-frontend-runtime-rebind:'REBIND IDENTITY AVATAR FRONTEND RUNTIME') ;;
+              record-frontend-runtime-rebind:'REBIND IDENTITY AVATAR FRONTEND RUNTIME') ;;
+              *)
+                echo 'Invalid Identity avatar media action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+            if [[ "$IDENTITY_AVATAR_ACTION" == 'record-client-switch' ]]; then
+              [[ "$IDENTITY_AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ &&
+                "$IDENTITY_AVATAR_RELEASE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_READY_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+                echo 'Identity avatar client switch requires exact frontend revision and all three evidence SHA-256 values.' >&2
+                exit 1
+              }
+              [[ -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_GENERATION" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || exit 1
+            elif [[ "$IDENTITY_AVATAR_ACTION" == 'record-client-soak-retarget' ]]; then
+              [[ "$IDENTITY_AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ &&
+                "$IDENTITY_AVATAR_RELEASE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_GENERATION" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || {
+                echo 'Identity avatar client retarget requires exact frontend revision, release, outcome, and signature SHA-256 values.' >&2
+                exit 1
+              }
+            elif [[ "$IDENTITY_AVATAR_ACTION" == 'prepare-frontend-runtime-rebind' ]]; then
+              [[ "$IDENTITY_AVATAR_RUNTIME_GENERATION" =~ ^([1-9]|[1-5][0-9]|6[0-4])$ &&
+                "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || exit 1
+              [[ -z "$IDENTITY_AVATAR_CLIENT_REVISION" && -z "$IDENTITY_AVATAR_RELEASE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" ]] || exit 1
+            elif [[ "$IDENTITY_AVATAR_ACTION" == 'record-frontend-runtime-rebind' ]]; then
+              [[ "$IDENTITY_AVATAR_RUNTIME_GENERATION" =~ ^([1-9]|[1-5][0-9]|6[0-4])$ &&
+                "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" ]] || exit 1
+              [[ -z "$IDENTITY_AVATAR_CLIENT_REVISION" && -z "$IDENTITY_AVATAR_RELEASE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" ]] || exit 1
+            else
+              [[ -z "$IDENTITY_AVATAR_CLIENT_REVISION" &&
+                -z "$IDENTITY_AVATAR_RELEASE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_GENERATION" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || exit 1
+            fi
+          elif [[ "$IDENTITY_AVATAR_ACTION" != 'status' ||
+            -n "$IDENTITY_AVATAR_CONFIRMATION" ||
+            -n "$IDENTITY_AVATAR_CLIENT_REVISION" ||
+            -n "$IDENTITY_AVATAR_RELEASE_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_READY_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_GENERATION" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]]; then
+            echo 'Identity avatar lifecycle inputs require the identity-avatar target.' >&2
+            exit 1
+          fi
           if [[ "$DEPLOY_TARGET" == 'identity-cleanup' ]]; then
             case "$IDENTITY_CLEANUP_ACTION:$IDENTITY_CLEANUP_CONFIRMATION" in
               status:)
@@ -502,7 +719,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_AVATAR_ACTION='$IDENTITY_AVATAR_ACTION' IDENTITY_AVATAR_CONFIRMATION='$IDENTITY_AVATAR_CONFIRMATION' IDENTITY_AVATAR_CLIENT_REVISION='$IDENTITY_AVATAR_CLIENT_REVISION' IDENTITY_AVATAR_RELEASE_SHA256='$IDENTITY_AVATAR_RELEASE_SHA256' IDENTITY_AVATAR_CLIENT_READY_SHA256='$IDENTITY_AVATAR_CLIENT_READY_SHA256' IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256='$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256' IDENTITY_AVATAR_CLIENT_RETARGET_SHA256='$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256' IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256='$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256' IDENTITY_AVATAR_RUNTIME_GENERATION='$IDENTITY_AVATAR_RUNTIME_GENERATION' IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256='$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256' IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256='$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256' IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256='$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256' IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256='$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -605,6 +822,17 @@ jobs:
             YOOKASSA_PRODUCTION_SECRET_KEY \
             PAYMENT_METHOD_ENCRYPTION_KEY \
             RECAPTCHA_CLIENT_URL \
+            IDENTITY_AVATAR_S3_ENDPOINT \
+            IDENTITY_AVATAR_S3_REGION \
+            IDENTITY_AVATAR_S3_BUCKET \
+            IDENTITY_AVATAR_S3_PUBLIC_BASE_URL \
+            IDENTITY_AVATAR_S3_KEY_PREFIX \
+            IDENTITY_AVATAR_S3_FORCE_PATH_STYLE \
+            IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID \
+            IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY \
+            IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID \
+            IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY \
+            IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS \
             S3_BUCKET \
             S3_ACCESS_KEY_ID \
             S3_SECRET_ACCESS_KEY \
@@ -729,7 +957,9 @@ jobs:
             local database_marker="$APP_ROOT/deploy/backend/.identity-database-lifecycle-v1"
             local cutover_marker="$APP_ROOT/deploy/backend/.identity-cutover-v1"
             local cleanup_marker="$APP_ROOT/deploy/backend/.identity-core-cleanup-v1"
-            local tracked_blob actual_blob
+            local avatar_script="scripts/identity-avatar-media-production.sh"
+            local avatar_marker="$APP_ROOT/deploy/backend/.identity-avatar-media-v1"
+            local tracked_blob actual_blob avatar_tracked_blob avatar_actual_blob
 
             [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
               "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
@@ -742,22 +972,47 @@ jobs:
               [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || return 1
               APP_ROOT="$APP_ROOT" \
                 bash "$lifecycle_script" "$guard_action" "$expected_revision"
-              return
+            else
+              [[ -z "$tracked_blob" && ! -e "$database_marker" && ! -L "$database_marker" &&
+                ! -e "$cutover_marker" && ! -L "$cutover_marker" &&
+                ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]] || return 1
             fi
-            [[ -z "$tracked_blob" && ! -e "$database_marker" && ! -L "$database_marker" &&
-              ! -e "$cutover_marker" && ! -L "$cutover_marker" &&
-              ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]]
+            avatar_tracked_blob="$(git rev-parse --verify "HEAD:$avatar_script" 2>/dev/null || true)"
+            if [[ -e "$avatar_script" || -L "$avatar_script" ]]; then
+              [[ -f "$avatar_script" && ! -L "$avatar_script" ]] || return 1
+              avatar_actual_blob="$(git hash-object "$avatar_script")"
+              [[ -n "$avatar_tracked_blob" && "$avatar_actual_blob" == "$avatar_tracked_blob" ]] || return 1
+              APP_ROOT="$APP_ROOT" bash "$avatar_script" "$guard_action" "$expected_revision"
+            else
+              [[ -z "$avatar_tracked_blob" && ! -e "$avatar_marker" && ! -L "$avatar_marker" ]]
+            fi
           }
 
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           billing_retarget_preflight=false
+          avatar_cleanup_retarget_preflight=false
+          avatar_runtime_retarget_preflight=false
           if [[ "$AUTOMATIC_PROD_PUSH" != 'true' &&
             "$DEPLOY_TARGET" == 'billing-cleanup' &&
             "$BILLING_CLEANUP_ACTION" == 'retarget' &&
             "$BILLING_CLEANUP_CONFIRMATION" == 'RETARGET BILLING CLEANUP REVISION' &&
             "$current_revision" != "$EXPECTED_REVISION" ]]; then
             billing_retarget_preflight=true
+          fi
+          if [[ "$AUTOMATIC_PROD_PUSH" != 'true' &&
+            "$DEPLOY_TARGET" == 'identity-avatar' &&
+            "$IDENTITY_AVATAR_ACTION" == 'stage-cleanup-retarget' &&
+            "$IDENTITY_AVATAR_CONFIRMATION" == 'STAGE IDENTITY AVATAR CLEANUP' &&
+            "$current_revision" != "$EXPECTED_REVISION" ]]; then
+            avatar_cleanup_retarget_preflight=true
+          fi
+          if [[ "$AUTOMATIC_PROD_PUSH" != 'true' &&
+            "$DEPLOY_TARGET" == 'identity-avatar' &&
+            "$IDENTITY_AVATAR_ACTION" == 'stage-runtime-retarget' &&
+            "$IDENTITY_AVATAR_CONFIRMATION" == 'STAGE IDENTITY AVATAR RUNTIME RETARGET' &&
+            "$current_revision" != "$EXPECTED_REVISION" ]]; then
+            avatar_runtime_retarget_preflight=true
           fi
           guard_campaigns_checkout_before_pull "$current_revision"
           guard_reporting_checkout_before_pull "$current_revision"
@@ -779,7 +1034,13 @@ jobs:
             else
               guard_billing_checkout_before_pull "$EXPECTED_REVISION"
             fi
-            guard_identity_checkout_before_pull "$EXPECTED_REVISION"
+            if [[ "$avatar_cleanup_retarget_preflight" == 'true' ]]; then
+              echo 'Avatar cleanup candidate will be fetched, verified and marker-bound by the manual deploy job before checkout.'
+            elif [[ "$avatar_runtime_retarget_preflight" == 'true' ]]; then
+              echo 'Avatar runtime descendant will be fetched, verified and marker-bound by the manual deploy job before checkout.'
+            else
+              guard_identity_checkout_before_pull "$EXPECTED_REVISION"
+            fi
           else
             echo "Automatic push will verify before the deploy job evaluates the active Reporting and Billing revision guards."
           fi
@@ -850,6 +1111,10 @@ jobs:
       RECAPTCHA_CLIENT_URL: https://winwidget.test
       S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
       S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
+      IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID: identity-avatar-api-ci-access-key
+      IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY: identity-avatar-api-ci-secret-key-at-least-32-chars
+      IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID: identity-avatar-worker-ci-access-key
+      IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY: identity-avatar-worker-ci-secret-key-at-least-32-chars
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://winwidget_notification_delivery_runtime:winwidget_notification_delivery_runtime_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
@@ -1064,6 +1329,7 @@ jobs:
           bash -n scripts/test-billing-core-source-cleanup-rehearsal.sh
           bash -n scripts/identity-release-identity.sh
           bash -n scripts/identity-production-env-control.sh
+          bash -n scripts/identity-avatar-media-production.sh
           bash -n scripts/identity-database-lifecycle.sh
           bash -n scripts/deploy-identity-production.sh
           bash -n scripts/identity-cutover-production.sh
@@ -1092,6 +1358,8 @@ jobs:
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/identity-avatar-media-production.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
@@ -1112,6 +1380,7 @@ jobs:
             scripts/billing-backup-restore-rehearsal.sh \
             scripts/cleanup-billing-core-source-production.sh \
             scripts/test-billing-core-source-cleanup-rehearsal.sh \
+            scripts/identity-avatar-media-production.sh \
             scripts/test-identity-core-source-cleanup-rehearsal.sh
 
       - name: Setup pnpm
@@ -2823,6 +3092,7 @@ jobs:
           DO $$
           DECLARE
             table_name text;
+            required_table text;
           BEGIN
             FOR table_name IN
               SELECT tablename FROM pg_tables
@@ -2849,6 +3119,107 @@ jobs:
               'winwidget_identity_backup', 'identity._prisma_migrations', 'SELECT'
             ) THEN
               RAISE EXCEPTION 'Identity backup role cannot dump migration history';
+            END IF;
+            IF has_database_privilege(
+              'winwidget_identity_migration', current_database(), 'CREATE'
+            ) OR has_database_privilege(
+              'winwidget_identity_migration', current_database(), 'TEMPORARY'
+            ) OR has_database_privilege(
+              'winwidget_identity_runtime', current_database(), 'CREATE'
+            ) OR has_database_privilege(
+              'winwidget_identity_runtime', current_database(), 'TEMPORARY'
+            ) OR has_database_privilege(
+              'winwidget_identity_backup', current_database(), 'CREATE'
+            ) OR has_database_privilege(
+              'winwidget_identity_backup', current_database(), 'TEMPORARY'
+            ) THEN
+              RAISE EXCEPTION 'Identity roles must not have database CREATE or TEMPORARY';
+            END IF;
+            IF NOT has_schema_privilege(
+              'winwidget_identity_migration', 'identity', 'CREATE'
+            ) OR has_schema_privilege(
+              'winwidget_identity_runtime', 'identity', 'CREATE'
+            ) OR has_schema_privilege(
+              'winwidget_identity_backup', 'identity', 'CREATE'
+            ) THEN
+              RAISE EXCEPTION 'Identity schema DDL boundary is invalid';
+            END IF;
+            IF (SELECT phase::text FROM identity.avatar_media_ownership WHERE id = 'singleton')
+              <> 'PREPARED' THEN
+              RAISE EXCEPTION 'Identity avatar ownership must start PREPARED';
+            END IF;
+            IF NOT EXISTS (
+              SELECT 1 FROM identity._prisma_migrations
+              WHERE migration_name = '20260815010000_add_avatar_media_ownership'
+                AND finished_at IS NOT NULL AND rolled_back_at IS NULL
+            ) THEN
+              RAISE EXCEPTION 'Identity avatar ownership migration is not cleanly applied';
+            END IF;
+            FOREACH required_table IN ARRAY ARRAY[
+              'users', 'avatar_cleanup_jobs', 'avatar_media_ownership',
+              'aggregate_versions', 'source_sequences', 'outbox_events'
+            ]
+            LOOP
+              IF (
+                SELECT pg_get_userbyid(c.relowner) <> 'winwidget_identity_migration'
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'identity' AND c.relname = required_table
+                  AND c.relkind IN ('r', 'p')
+              ) IS DISTINCT FROM FALSE THEN
+                RAISE EXCEPTION 'Identity migration role does not own %', required_table;
+              END IF;
+              IF NOT has_table_privilege(
+                'winwidget_identity_runtime', format('identity.%I', required_table), 'SELECT'
+              ) OR NOT has_table_privilege(
+                'winwidget_identity_runtime', format('identity.%I', required_table), 'INSERT'
+              ) OR NOT has_table_privilege(
+                'winwidget_identity_runtime', format('identity.%I', required_table), 'UPDATE'
+              ) OR NOT has_table_privilege(
+                'winwidget_identity_runtime', format('identity.%I', required_table), 'DELETE'
+              ) THEN
+                RAISE EXCEPTION 'Identity runtime avatar ACL missing for %', required_table;
+              END IF;
+              IF NOT has_table_privilege(
+                'winwidget_identity_backup', format('identity.%I', required_table), 'SELECT'
+              ) OR has_table_privilege(
+                'winwidget_identity_backup', format('identity.%I', required_table), 'INSERT'
+              ) OR has_table_privilege(
+                'winwidget_identity_backup', format('identity.%I', required_table), 'UPDATE'
+              ) OR has_table_privilege(
+                'winwidget_identity_backup', format('identity.%I', required_table), 'DELETE'
+              ) THEN
+                RAISE EXCEPTION 'Identity backup avatar ACL invalid for %', required_table;
+              END IF;
+            END LOOP;
+            IF EXISTS (
+              SELECT 1 FROM pg_type t
+              JOIN pg_namespace n ON n.oid = t.typnamespace
+              WHERE n.nspname = 'identity'
+                AND t.typname IN (
+                  'AvatarCleanupKind', 'AvatarCleanupStatus', 'AvatarMediaOwnershipPhase'
+                )
+                AND pg_get_userbyid(t.typowner) <> 'winwidget_identity_migration'
+            ) OR (
+              SELECT count(*) FROM pg_type t
+              JOIN pg_namespace n ON n.oid = t.typnamespace
+              WHERE n.nspname = 'identity'
+                AND t.typname IN (
+                  'AvatarCleanupKind', 'AvatarCleanupStatus', 'AvatarMediaOwnershipPhase'
+                )
+            ) <> 3 THEN
+              RAISE EXCEPTION 'Identity avatar enum ownership is invalid';
+            END IF;
+            IF NOT EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'identity' AND table_name = 'users'
+                AND column_name = 'avatar_object_key' AND is_nullable = 'YES'
+            ) OR to_regclass('identity.users_avatar_object_key_key') IS NULL
+              OR to_regclass('identity.avatar_cleanup_jobs_object_key_key') IS NULL
+              OR to_regclass('identity.avatar_cleanup_jobs_status_available_at_created_at_idx') IS NULL
+              OR to_regclass('identity.avatar_cleanup_jobs_status_lease_expires_at_idx') IS NULL
+              OR to_regclass('identity.avatar_cleanup_jobs_delivered_at_idx') IS NULL THEN
+              RAISE EXCEPTION 'Identity avatar schema/index anchors are incomplete';
             END IF;
           END $$;
           SQL
@@ -2891,6 +3262,10 @@ jobs:
           POSTGRES_CONTAINER_ID: ${{ env.IDENTITY_CI_POSTGRES_CONTAINER }}
         run: |
           sentinel_id=ci-identity-restore-${{ github.run_id }}-${{ github.run_attempt }}
+          avatar_job_id='00000000-0000-4000-8000-0000000000b1'
+          first_lease='00000000-0000-4000-8000-0000000000b2'
+          second_lease='00000000-0000-4000-8000-0000000000b3'
+          avatar_key='identity/avatars/00000000-0000-4000-8000-0000000000b4/ci.webp'
           docker exec \
             -e PGPASSWORD=identity_runtime_ci \
             "$POSTGRES_CONTAINER_ID" \
@@ -2898,6 +3273,64 @@ jobs:
               --username winwidget_identity_runtime --dbname winwidget_identity_ci \
               --command \
                 "INSERT INTO identity.source_sequences (id, last_value, created_at, updated_at) VALUES ('$sentinel_id', 42, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);"
+          docker exec -i \
+            -e PGPASSWORD=identity_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_identity_runtime \
+              --dbname winwidget_identity_ci <<SQL
+          INSERT INTO identity.avatar_cleanup_jobs (
+            id, object_key, owner_fingerprint, kind, updated_at
+          ) VALUES (
+            '$avatar_job_id', '$avatar_key', repeat('a', 64), 'STAGING', CURRENT_TIMESTAMP
+          );
+          UPDATE identity.avatar_cleanup_jobs
+          SET status = 'PROCESSING', lease_token = '$first_lease',
+              lease_expires_at = CURRENT_TIMESTAMP - interval '1 second',
+              attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = '$avatar_job_id' AND status = 'PENDING'
+            AND lease_token IS NULL AND lease_expires_at IS NULL;
+          UPDATE identity.avatar_cleanup_jobs
+          SET lease_token = '$second_lease',
+              lease_expires_at = CURRENT_TIMESTAMP + interval '5 minutes',
+              attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = '$avatar_job_id' AND status = 'PROCESSING'
+            AND lease_token = '$first_lease' AND lease_expires_at < CURRENT_TIMESTAMP;
+          UPDATE identity.avatar_cleanup_jobs
+          SET status = 'DELIVERED', lease_token = NULL, lease_expires_at = NULL,
+              delivered_at = CURRENT_TIMESTAMP, last_error = NULL,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = '$avatar_job_id' AND status = 'PROCESSING'
+            AND lease_token = '$second_lease';
+          DO \$\$
+          DECLARE
+            replay_count integer;
+          BEGIN
+            UPDATE identity.avatar_cleanup_jobs
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE id = '$avatar_job_id' AND status = 'PROCESSING'
+              AND lease_token = '$second_lease';
+            GET DIAGNOSTICS replay_count = ROW_COUNT;
+            IF (SELECT status::text FROM identity.avatar_cleanup_jobs WHERE id = '$avatar_job_id')
+              <> 'DELIVERED' OR
+              (SELECT attempts FROM identity.avatar_cleanup_jobs WHERE id = '$avatar_job_id') <> 2 OR
+              replay_count <> 0 THEN
+              RAISE EXCEPTION 'Identity avatar cleanup CAS/lease replay fence failed';
+            END IF;
+          END
+          \$\$;
+          SQL
+          if docker exec \
+            -e PGPASSWORD=identity_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_identity_runtime --dbname winwidget_identity_ci \
+              --command \
+                "INSERT INTO identity.avatar_cleanup_jobs (id, object_key, owner_fingerprint, kind, updated_at) VALUES ('00000000-0000-4000-8000-0000000000b5', '$avatar_key', repeat('b', 64), 'RETIRED', CURRENT_TIMESTAMP);" \
+              > /dev/null 2>&1; then
+            echo 'Identity avatar cleanup replay inserted a duplicate object key.' >&2
+            exit 1
+          fi
           docker exec \
             -e PGPASSWORD=identity_backup_ci \
             "$POSTGRES_CONTAINER_ID" \
@@ -2926,6 +3359,70 @@ jobs:
               psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
                 --username winwidget_identity_admin \
                 --dbname winwidget_identity_restore_ci \
+                --command \
+                  "SELECT count(*) FROM identity.avatar_cleanup_jobs WHERE id = '$avatar_job_id' AND object_key = '$avatar_key' AND status = 'DELIVERED' AND attempts = 2 AND lease_token IS NULL AND lease_expires_at IS NULL AND delivered_at IS NOT NULL;"
+          )" = "1"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_identity_admin \
+                --dbname winwidget_identity_restore_ci \
+                --command "
+                  SELECT count(*)
+                  FROM pg_type t
+                  JOIN pg_namespace n ON n.oid = t.typnamespace
+                  WHERE n.nspname = 'identity'
+                    AND t.typname IN (
+                      'AvatarCleanupKind', 'AvatarCleanupStatus', 'AvatarMediaOwnershipPhase'
+                    );
+                "
+          )" = "3"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_identity_admin \
+                --dbname winwidget_identity_restore_ci \
+                --command "
+                  SELECT count(*)
+                  FROM identity.avatar_media_ownership
+                  WHERE id = 'singleton' AND phase = 'PREPARED'
+                    AND activated_revision IS NULL AND inventory_sha256 IS NULL
+                    AND status_sha256 IS NULL AND activated_at IS NULL;
+                "
+          )" = "1"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_identity_admin \
+                --dbname winwidget_identity_restore_ci \
+                --command "
+                  SELECT count(*)
+                  FROM pg_indexes
+                  WHERE schemaname = 'identity' AND indexname IN (
+                    'users_avatar_object_key_key',
+                    'avatar_cleanup_jobs_object_key_key',
+                    'avatar_cleanup_jobs_status_available_at_created_at_idx',
+                    'avatar_cleanup_jobs_status_lease_expires_at_idx',
+                    'avatar_cleanup_jobs_delivered_at_idx'
+                  );
+                "
+          )" = "5"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_identity_admin \
+                --dbname winwidget_identity_restore_ci \
+                --command "
+                  SELECT count(*) FROM information_schema.columns
+                  WHERE table_schema = 'identity' AND table_name = 'users'
+                    AND column_name = 'avatar_object_key' AND is_nullable = 'YES';
+                "
+          )" = "1"
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_identity_admin \
+                --dbname winwidget_identity_restore_ci \
                 --command 'SELECT count(*) FROM identity._prisma_migrations;'
           )" -ge 1
           docker exec "$POSTGRES_CONTAINER_ID" \
@@ -2939,6 +3436,13 @@ jobs:
               --username winwidget_identity_runtime --dbname winwidget_identity_ci \
               --command \
                 "DELETE FROM identity.source_sequences WHERE id = '$sentinel_id';"
+          docker exec \
+            -e PGPASSWORD=identity_runtime_ci \
+            "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_identity_runtime --dbname winwidget_identity_ci \
+              --command \
+                "DELETE FROM identity.avatar_cleanup_jobs WHERE id = '$avatar_job_id';"
           docker exec "$POSTGRES_CONTAINER_ID" rm -f -- /tmp/identity-ci.dump
 
       - name: Verify Notification Delivery PostgreSQL persistence and restore
@@ -5738,6 +6242,13 @@ jobs:
                 "IDENTITY_RECEIPT_RETENTION_DAYS",
                 "IDENTITY_FAILURE_DETAIL_RETENTION_DAYS",
               ];
+              const identityAvatarSharedEnvironmentKeys = [
+                "IDENTITY_AVATAR_S3_ENDPOINT",
+                "IDENTITY_AVATAR_S3_REGION",
+                "IDENTITY_AVATAR_S3_BUCKET",
+                "IDENTITY_AVATAR_S3_KEY_PREFIX",
+                "IDENTITY_AVATAR_S3_FORCE_PATH_STYLE",
+              ];
               const identityApi = requireService("identity-api");
               const identityWorker = requireService("identity-worker");
               const identityPublisher = requireService(
@@ -5796,6 +6307,10 @@ jobs:
                   "WIDGETS_INTERNAL_BASE_URL",
                   "WIDGETS_IDENTITY_TOKEN",
                   "WIDGETS_INTERNAL_TIMEOUT_MS",
+                  ...identityAvatarSharedEnvironmentKeys,
+                  "IDENTITY_AVATAR_S3_PUBLIC_BASE_URL",
+                  "IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID",
+                  "IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY",
                 ],
                 ["VK_CLIENT_ID", "VK_CLIENT_SECRET", "VK_SERVICE_TOKEN"],
               );
@@ -5808,6 +6323,10 @@ jobs:
                   "RABBITMQ_ASSERT_TOPOLOGY",
                   "RABBITMQ_MAX_MESSAGE_BYTES",
                   "MESSAGING_SERVICE_NAME",
+                  ...identityAvatarSharedEnvironmentKeys,
+                  "IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID",
+                  "IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY",
+                  "IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS",
                 ],
               );
               const identityPublisherEnvironment = requireEnvironment(
@@ -5895,8 +6414,39 @@ jobs:
                   "http://127.0.0.1:4800" ||
                 identityApiEnvironment.WIDGETS_INTERNAL_BASE_URL !==
                   "http://127.0.0.1:4700" ||
+                identityApiEnvironment.IDENTITY_AVATAR_S3_ENDPOINT !==
+                  "https://s3.twcstorage.ru" ||
+                identityApiEnvironment.IDENTITY_AVATAR_S3_REGION !== "ru-1" ||
+                identityApiEnvironment.IDENTITY_AVATAR_S3_BUCKET !==
+                  "cdn-winwidget-s3" ||
+                identityApiEnvironment.IDENTITY_AVATAR_S3_PUBLIC_BASE_URL !==
+                  "https://s3.twcstorage.ru/cdn-winwidget-s3" ||
+                identityApiEnvironment.IDENTITY_AVATAR_S3_KEY_PREFIX !==
+                  "identity/avatars" ||
+                identityApiEnvironment.IDENTITY_AVATAR_S3_FORCE_PATH_STYLE !==
+                  "true" ||
+                identityWorkerEnvironment.IDENTITY_AVATAR_S3_ENDPOINT !==
+                  identityApiEnvironment.IDENTITY_AVATAR_S3_ENDPOINT ||
+                identityWorkerEnvironment.IDENTITY_AVATAR_S3_REGION !==
+                  identityApiEnvironment.IDENTITY_AVATAR_S3_REGION ||
+                identityWorkerEnvironment.IDENTITY_AVATAR_S3_BUCKET !==
+                  identityApiEnvironment.IDENTITY_AVATAR_S3_BUCKET ||
+                identityWorkerEnvironment.IDENTITY_AVATAR_S3_KEY_PREFIX !==
+                  identityApiEnvironment.IDENTITY_AVATAR_S3_KEY_PREFIX ||
+                identityWorkerEnvironment.IDENTITY_AVATAR_S3_FORCE_PATH_STYLE !==
+                  identityApiEnvironment.IDENTITY_AVATAR_S3_FORCE_PATH_STYLE ||
+                identityWorkerEnvironment.IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS !==
+                  "7" ||
                 "BILLING_INTERNAL_TOKEN" in identityApiEnvironment ||
                 "WIDGETS_INTERNAL_TOKEN" in identityApiEnvironment ||
+                "IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID" in
+                  identityApiEnvironment ||
+                "IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY" in
+                  identityApiEnvironment ||
+                "IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID" in
+                  identityWorkerEnvironment ||
+                "IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY" in
+                  identityWorkerEnvironment ||
                 identityApi.labels?.["com.winwidget.singleton"] !== "true" ||
                 identityApi.depends_on != null ||
                 JSON.stringify(Object.keys(identityWorker.depends_on ?? {})) !==
@@ -5918,6 +6468,95 @@ jobs:
                 throw new Error(
                   "Identity API singleton, internal clients or RabbitMQ role boundary drifted",
                 );
+              }
+              const identityAvatarApiCredentialKeys = [
+                "IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID",
+                "IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY",
+              ];
+              const identityAvatarWorkerCredentialKeys = [
+                "IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID",
+                "IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY",
+              ];
+              const identityAvatarWorkerOnlyEnvironmentKeys = [
+                ...identityAvatarWorkerCredentialKeys,
+                "IDENTITY_AVATAR_CLEANUP_RETENTION_DAYS",
+              ];
+              const identityAvatarEnvironmentKeys = [
+                ...identityAvatarSharedEnvironmentKeys,
+                "IDENTITY_AVATAR_S3_PUBLIC_BASE_URL",
+                ...identityAvatarApiCredentialKeys,
+                ...identityAvatarWorkerOnlyEnvironmentKeys,
+              ];
+              const forbiddenIdentityAvatarRuntimeKeys = [
+                "IDENTITY_AVATAR_S3_LEGACY_KEY_PREFIX",
+                "IDENTITY_AVATAR_MIGRATION_S3_ACCESS_KEY_ID",
+                "IDENTITY_AVATAR_MIGRATION_S3_SECRET_ACCESS_KEY",
+                "IDENTITY_AVATAR_MIGRATION_LEGACY_KEY_PREFIX",
+                "IDENTITY_AVATAR_MIGRATION_LEGACY_PUBLIC_BASE_URL",
+                "IDENTITY_AVATAR_MIGRATION_UPLOADS_PUBLIC_BASE_URL",
+                "IDENTITY_AVATAR_MIGRATION_UPLOADS_ROOT",
+                "IDENTITY_AVATAR_RETIREMENT_S3_ACCESS_KEY_ID",
+                "IDENTITY_AVATAR_RETIREMENT_S3_SECRET_ACCESS_KEY",
+                "IDENTITY_AVATAR_RETIREMENT_LEGACY_KEY_PREFIX",
+              ];
+              const identityAvatarCredentialValues = [
+                identityApiEnvironment.IDENTITY_AVATAR_S3_API_ACCESS_KEY_ID,
+                identityApiEnvironment.IDENTITY_AVATAR_S3_API_SECRET_ACCESS_KEY,
+                identityWorkerEnvironment.IDENTITY_AVATAR_S3_WORKER_ACCESS_KEY_ID,
+                identityWorkerEnvironment.IDENTITY_AVATAR_S3_WORKER_SECRET_ACCESS_KEY,
+              ];
+              if (
+                identityAvatarCredentialValues.some(
+                  (value, index) =>
+                    typeof value !== "string" ||
+                    !value ||
+                    /[\0\r\n]/.test(value) ||
+                    (index % 2 === 1 && value.length < 32),
+                ) ||
+                new Set(identityAvatarCredentialValues).size !==
+                  identityAvatarCredentialValues.length ||
+                identityAvatarCredentialValues.some(value =>
+                  [
+                    apiEnvironment.S3_ACCESS_KEY_ID,
+                    apiEnvironment.S3_SECRET_ACCESS_KEY,
+                    widgetsEnvironment.S3_ACCESS_KEY_ID,
+                    widgetsEnvironment.S3_SECRET_ACCESS_KEY,
+                  ].includes(value),
+                )
+              ) {
+                throw new Error(
+                  "Identity avatar API and worker credentials must be scoped and distinct",
+                );
+              }
+              for (const [name, service] of Object.entries(services)) {
+                const environment = service?.environment ?? {};
+                const allowed =
+                  name === "identity-api"
+                    ? new Set([
+                        ...identityAvatarSharedEnvironmentKeys,
+                        "IDENTITY_AVATAR_S3_PUBLIC_BASE_URL",
+                        ...identityAvatarApiCredentialKeys,
+                      ])
+                    : name === "identity-worker"
+                      ? new Set([
+                          ...identityAvatarSharedEnvironmentKeys,
+                          ...identityAvatarWorkerOnlyEnvironmentKeys,
+                        ])
+                      : new Set();
+                for (const key of identityAvatarEnvironmentKeys) {
+                  if ((key in environment) !== allowed.has(key)) {
+                    throw new Error(
+                      `${name} Identity avatar storage credential boundary drifted for ${key}`,
+                    );
+                  }
+                }
+                for (const key of forbiddenIdentityAvatarRuntimeKeys) {
+                  if (key in environment) {
+                    throw new Error(
+                      `${name} must not receive one-shot Identity avatar migration key ${key}`,
+                    );
+                  }
+                }
               }
               const providerSecretEnvironmentKeys = [
                 "YOOKASSA_PRODUCTION_SHOP_ID",
@@ -6918,6 +7557,7 @@ jobs:
             scripts/test-billing-core-source-cleanup-rehearsal.sh \
             scripts/identity-release-identity.sh \
             scripts/identity-production-env-control.sh \
+            scripts/identity-avatar-media-production.sh \
             scripts/identity-database-lifecycle.sh \
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
@@ -7018,6 +7658,10 @@ jobs:
             9,
           );
           requireCount(
+            'checkout_verified_prod_revision "$EXPECTED_REVISION" "$prefetched_avatar_revision"',
+            1,
+          );
+          requireCount(
             '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
             2,
           );
@@ -7046,6 +7690,25 @@ jobs:
           requireCount("guard_widgets_checkout_before_pull() {", 2);
           requireCount("guard_billing_checkout_before_pull() {", 2);
           requireCount("guard_identity_checkout_before_pull() {", 2);
+          requireCount(
+            'local avatar_script="scripts/identity-avatar-media-production.sh"',
+            2,
+          );
+          requireCount(
+            'APP_ROOT="$APP_ROOT" bash "$avatar_script" "$guard_action" "$expected_revision"',
+            2,
+          );
+          requireCount("identity-avatar)", 1);
+          requireCount(
+            'bash "$avatar_script" --install-client-public-key \\',
+            1,
+          );
+          requireCount(
+            '"$APP_ROOT/deploy/backend/.identity-avatar-client-signing.transfer.public.pem"',
+            1,
+          );
+          requireCount("IDENTITY_AVATAR_MIGRATION_S3_ACCESS_KEY_ID:", 0);
+          requireCount("IDENTITY_AVATAR_MIGRATION_S3_SECRET_ACCESS_KEY:", 0);
           requireCount(
             'local lifecycle_script="scripts/widgets-database-lifecycle.sh"',
             2,
@@ -7652,7 +8315,7 @@ jobs:
             "utf8",
           );
           const restoreStorageFunction = deployScript.slice(
-            deployScript.indexOf("prepare_database_restore_storage() {"),
+            deployScript.indexOf("validate_database_restore_storage() {"),
             deployScript.indexOf('\nmode="$(get_env_value "MODE" || true)"'),
           );
           if (
@@ -7867,12 +8530,14 @@ jobs:
           bash -n scripts/billing-backup-restore-rehearsal.sh
           bash -n scripts/cleanup-billing-core-source-production.sh
           bash -n scripts/test-billing-core-source-cleanup-rehearsal.sh
+          bash -n scripts/identity-avatar-media-production.sh
           bash -n scripts/test-identity-core-source-cleanup-rehearsal.sh
           pnpm exec prettier --check \
             .github/workflows/database-restore-production.yml \
             .github/workflows/deploy-production.yml
           bash scripts/deploy-production.sh --self-test-database-restore-create-gate
           bash scripts/deploy-production.sh --self-test-billing-routine-image-gate
+          bash scripts/deploy-production.sh --self-test-identity-avatar-deploy-mutation-fence
           bash scripts/deploy-production.sh --self-test-gateway-route-manifest-policy
           bash scripts/campaigns-contract-migration-guard.sh --self-test
           bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
@@ -7899,6 +8564,8 @@ jobs:
             bash scripts/identity-release-identity.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/identity-production-env-control.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/identity-avatar-media-production.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/identity-database-lifecycle.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
@@ -9079,6 +9746,110 @@ jobs:
             run --rm --no-deps --entrypoint node api-gateway \
             -e "require('./dist/src/config.js').loadConfig()"
 
+      - name: Identity avatar reference scan PostgreSQL 18 regression
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.IDENTITY_CI_POSTGRES_CONTAINER }}
+        run: |
+          reference_database='winwidget_avatar_reference_ci'
+          reference_env="$RUNNER_TEMP/identity-avatar-reference-scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.env"
+          late_outbox_id='00000000-0000-4000-8000-0000000000a1'
+          cleanup_avatar_reference_scan() {
+            docker exec -i "$POSTGRES_CONTAINER_ID" \
+              psql --set ON_ERROR_STOP=1 \
+                --username winwidget_identity_admin \
+                --dbname winwidget_identity_ci <<SQL >/dev/null 2>&1 || true
+          DELETE FROM identity.outbox_events WHERE id = '$late_outbox_id';
+          UPDATE identity.service_identity SET phase = 'SHADOW' WHERE id = 'singleton';
+          SQL
+            docker exec -i "$POSTGRES_CONTAINER_ID" \
+              psql --set ON_ERROR_STOP=1 \
+                --username winwidget_identity_admin \
+                --dbname postgres <<SQL >/dev/null 2>&1 || true
+          DROP DATABASE IF EXISTS $reference_database WITH (FORCE);
+          DROP ROLE IF EXISTS winwidget_backup;
+          SQL
+            rm -f -- "$reference_env"
+          }
+          trap cleanup_avatar_reference_scan EXIT
+          test ! -e "$reference_env"
+
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_identity_admin \
+              --dbname postgres <<SQL
+          CREATE ROLE winwidget_backup LOGIN PASSWORD 'avatar_reference_backup_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE DATABASE $reference_database OWNER winwidget_identity_admin;
+          REVOKE ALL ON DATABASE $reference_database FROM PUBLIC;
+          GRANT CONNECT ON DATABASE $reference_database TO winwidget_backup;
+          REVOKE CREATE, TEMPORARY ON DATABASE $reference_database FROM winwidget_backup;
+          SQL
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_identity_admin \
+              --dbname "$reference_database" <<'SQL'
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE TABLE public.avatar_reference_scan_fixture (
+            id integer PRIMARY KEY,
+            value text NOT NULL
+          );
+          INSERT INTO public.avatar_reference_scan_fixture (id, value)
+          VALUES (1, 'identity-avatar-clean-reference');
+          GRANT USAGE ON SCHEMA public TO winwidget_backup;
+          GRANT SELECT ON TABLE public.avatar_reference_scan_fixture TO winwidget_backup;
+          SQL
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_identity_admin \
+              --dbname winwidget_identity_ci <<'SQL'
+          UPDATE identity.service_identity
+          SET phase = 'ACTIVE'
+          WHERE id = 'singleton';
+          SQL
+          umask 077
+          printf '%s\n' \
+            "DATABASE_BACKUP_URL=postgresql://winwidget_backup:avatar_reference_backup_ci@127.0.0.1:55438/$reference_database?schema=public&sslmode=disable" \
+            "IDENTITY_BACKUP_URL=$IDENTITY_BACKUP_URL" > "$reference_env"
+
+          CI=true APP_ROOT="$GITHUB_WORKSPACE/.." SERVER_ROOT="$GITHUB_WORKSPACE" \
+            ENV_FILE="$reference_env" EXPECTED_REVISION="$APP_REVISION" \
+            bash scripts/identity-avatar-media-production.sh \
+              --reference-scan-pg18-self-test clean
+
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_identity_admin \
+              --dbname "$reference_database" <<'SQL'
+          UPDATE public.avatar_reference_scan_fixture
+          SET value = '/uploads/user-avatar/late-reference.webp'
+          WHERE id = 1;
+          SQL
+          CI=true APP_ROOT="$GITHUB_WORKSPACE/.." SERVER_ROOT="$GITHUB_WORKSPACE" \
+            ENV_FILE="$reference_env" EXPECTED_REVISION="$APP_REVISION" \
+            bash scripts/identity-avatar-media-production.sh \
+              --reference-scan-pg18-self-test legacy-reference
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_identity_admin \
+              --dbname winwidget_identity_ci <<SQL
+          INSERT INTO identity.outbox_events (
+            id, message_id, event_type, routing_key, payload, updated_at
+          ) VALUES (
+            '$late_outbox_id',
+            '00000000-0000-4000-8000-0000000000a2',
+            'ci.identity.avatar.reference',
+            'ci.identity.avatar.reference',
+            '{"path":"/uploads/user-avatar/late-reference.webp"}'::jsonb,
+            CURRENT_TIMESTAMP
+          );
+          SQL
+          CI=true APP_ROOT="$GITHUB_WORKSPACE/.." SERVER_ROOT="$GITHUB_WORKSPACE" \
+            ENV_FILE="$reference_env" EXPECTED_REVISION="$APP_REVISION" \
+            bash scripts/identity-avatar-media-production.sh \
+              --reference-scan-pg18-self-test identity-legacy-reference
+          cleanup_avatar_reference_scan
+          trap - EXIT
+
       - name: Messaging integration smoke
         env:
           MESSAGING_INTEGRATION_ALLOW_MUTATION: 'true'
@@ -9880,6 +10651,19 @@ jobs:
           IDENTITY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_action || 'status' }}
           IDENTITY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_confirmation || '' }}
           IDENTITY_ENV_EXPECTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_backend_env_expected_sha256 || '' }}
+          IDENTITY_AVATAR_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_action || 'status' }}
+          IDENTITY_AVATAR_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_confirmation || '' }}
+          IDENTITY_AVATAR_CLIENT_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_revision || '' }}
+          IDENTITY_AVATAR_RELEASE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_release_evidence_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_READY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_ready_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_ready_signature_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_RETARGET_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_retarget_sha256 || '' }}
+          IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_client_retarget_signature_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_GENERATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_generation || '' }}
+          IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_prepared_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_prepared_signature_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_adopted_sha256 || '' }}
+          IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_avatar_runtime_adopted_signature_sha256 || '' }}
           IDENTITY_ENV_EXPORT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
           IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_confirmation || '' }}
@@ -9946,6 +10730,110 @@ jobs:
             echo 'Identity lifecycle inputs require the identity target.' >&2
             exit 1
           fi
+          if [[ "$DEPLOY_TARGET" == 'identity-avatar' ]]; then
+            case "$IDENTITY_AVATAR_ACTION:$IDENTITY_AVATAR_CONFIRMATION" in
+              status:|soak-heartbeat:|runtime-stability-monitor:|publish-runtime-stability-current:) ;;
+              release-canary:'EXPAND IDENTITY AVATAR MEDIA') ;;
+              install-client-public-key:'PIN IDENTITY AVATAR CLIENT KEY') ;;
+              inventory:'INVENTORY IDENTITY AVATAR MEDIA') ;;
+              migrate:'MIGRATE IDENTITY AVATAR MEDIA') ;;
+              activate:'ACTIVATE IDENTITY AVATAR OWNERSHIP') ;;
+              publish-client-ready:'PUBLISH IDENTITY AVATAR CLIENT READY') ;;
+              record-client-switch:'SWITCH AVATAR CLIENT TO IDENTITY') ;;
+              stage-runtime-retarget:'STAGE IDENTITY AVATAR RUNTIME RETARGET') ;;
+              record-client-soak-retarget:'RECORD IDENTITY AVATAR CLIENT SOAK RETARGET') ;;
+              stage-cleanup-retarget:'STAGE IDENTITY AVATAR CLEANUP') ;;
+              verify-soak:'COMPLETE IDENTITY AVATAR SOAK') ;;
+              prepare-backend-runtime-rebind:'REBIND IDENTITY AVATAR BACKEND RUNTIME') ;;
+              record-backend-runtime-rebind:'REBIND IDENTITY AVATAR BACKEND RUNTIME') ;;
+              prepare-frontend-runtime-rebind:'REBIND IDENTITY AVATAR FRONTEND RUNTIME') ;;
+              record-frontend-runtime-rebind:'REBIND IDENTITY AVATAR FRONTEND RUNTIME') ;;
+              *)
+                echo 'Invalid Identity avatar media action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+            if [[ "$IDENTITY_AVATAR_ACTION" == 'record-client-switch' ]]; then
+              [[ "$IDENTITY_AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ &&
+                "$IDENTITY_AVATAR_RELEASE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_READY_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+                echo 'Identity avatar client switch requires exact frontend revision and all three evidence SHA-256 values.' >&2
+                exit 1
+              }
+              [[ -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_GENERATION" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || exit 1
+            elif [[ "$IDENTITY_AVATAR_ACTION" == 'record-client-soak-retarget' ]]; then
+              [[ "$IDENTITY_AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ &&
+                "$IDENTITY_AVATAR_RELEASE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_GENERATION" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || {
+                echo 'Identity avatar client retarget requires exact frontend revision, release, outcome, and signature SHA-256 values.' >&2
+                exit 1
+              }
+            elif [[ "$IDENTITY_AVATAR_ACTION" == 'prepare-frontend-runtime-rebind' ]]; then
+              [[ "$IDENTITY_AVATAR_RUNTIME_GENERATION" =~ ^([1-9]|[1-5][0-9]|6[0-4])$ &&
+                "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || exit 1
+              [[ -z "$IDENTITY_AVATAR_CLIENT_REVISION" && -z "$IDENTITY_AVATAR_RELEASE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" ]] || exit 1
+            elif [[ "$IDENTITY_AVATAR_ACTION" == 'record-frontend-runtime-rebind' ]]; then
+              [[ "$IDENTITY_AVATAR_RUNTIME_GENERATION" =~ ^([1-9]|[1-5][0-9]|6[0-4])$ &&
+                "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" ]] || exit 1
+              [[ -z "$IDENTITY_AVATAR_CLIENT_REVISION" && -z "$IDENTITY_AVATAR_RELEASE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" ]] || exit 1
+            else
+              [[ -z "$IDENTITY_AVATAR_CLIENT_REVISION" &&
+                -z "$IDENTITY_AVATAR_RELEASE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" &&
+                -z "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_GENERATION" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" &&
+                -z "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]] || exit 1
+            fi
+          elif [[ "$IDENTITY_AVATAR_ACTION" != 'status' ||
+            -n "$IDENTITY_AVATAR_CONFIRMATION" ||
+            -n "$IDENTITY_AVATAR_CLIENT_REVISION" ||
+            -n "$IDENTITY_AVATAR_RELEASE_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_READY_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" ||
+            -n "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_GENERATION" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" ||
+            -n "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256" ]]; then
+            echo 'Identity avatar lifecycle inputs require the identity-avatar target.' >&2
+            exit 1
+          fi
           if [[ "$DEPLOY_TARGET" == 'identity-cleanup' ]]; then
             case "$IDENTITY_CLEANUP_ACTION:$IDENTITY_CLEANUP_CONFIRMATION" in
               status:)
@@ -9977,7 +10865,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_ENV_EXPECTED_SHA256='$IDENTITY_ENV_EXPECTED_SHA256' IDENTITY_ENV_EXPORT_ID='$IDENTITY_ENV_EXPORT_ID' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_ENV_EXPECTED_SHA256='$IDENTITY_ENV_EXPECTED_SHA256' IDENTITY_ENV_EXPORT_ID='$IDENTITY_ENV_EXPORT_ID' IDENTITY_AVATAR_ACTION='$IDENTITY_AVATAR_ACTION' IDENTITY_AVATAR_CONFIRMATION='$IDENTITY_AVATAR_CONFIRMATION' IDENTITY_AVATAR_CLIENT_REVISION='$IDENTITY_AVATAR_CLIENT_REVISION' IDENTITY_AVATAR_RELEASE_SHA256='$IDENTITY_AVATAR_RELEASE_SHA256' IDENTITY_AVATAR_CLIENT_READY_SHA256='$IDENTITY_AVATAR_CLIENT_READY_SHA256' IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256='$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256' IDENTITY_AVATAR_CLIENT_RETARGET_SHA256='$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256' IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256='$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256' IDENTITY_AVATAR_RUNTIME_GENERATION='$IDENTITY_AVATAR_RUNTIME_GENERATION' IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256='$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256' IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256='$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256' IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256='$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256' IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256='$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
           set -euo pipefail
           unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
             REPORTING_FIRST_ROLLOUT_STAGED_MARKER
@@ -10163,7 +11051,9 @@ jobs:
             local database_marker="$APP_ROOT/deploy/backend/.identity-database-lifecycle-v1"
             local cutover_marker="$APP_ROOT/deploy/backend/.identity-cutover-v1"
             local cleanup_marker="$APP_ROOT/deploy/backend/.identity-core-cleanup-v1"
-            local tracked_blob actual_blob
+            local avatar_script="scripts/identity-avatar-media-production.sh"
+            local avatar_marker="$APP_ROOT/deploy/backend/.identity-avatar-media-v1"
+            local tracked_blob actual_blob avatar_tracked_blob avatar_actual_blob
 
             [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
               "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || {
@@ -10185,13 +11075,23 @@ jobs:
               }
               APP_ROOT="$APP_ROOT" \
                 bash "$lifecycle_script" "$guard_action" "$expected_revision"
-              return
+            else
+              [[ -z "$tracked_blob" ]] || return 1
+              if [[ -e "$database_marker" || -L "$database_marker" ||
+                -e "$cutover_marker" || -L "$cutover_marker" ||
+                -e "$cleanup_marker" || -L "$cleanup_marker" ]]; then
+                echo "Identity marker exists but its checkout guard is unavailable." >&2
+                return 1
+              fi
             fi
-            [[ -z "$tracked_blob" ]] || return 1
-            if [[ -e "$database_marker" || -L "$database_marker" ||
-              -e "$cutover_marker" || -L "$cutover_marker" ||
-              -e "$cleanup_marker" || -L "$cleanup_marker" ]]; then
-              echo "Identity marker exists but its checkout guard is unavailable." >&2
+            avatar_tracked_blob="$(git rev-parse --verify "HEAD:$avatar_script" 2>/dev/null || true)"
+            if [[ -e "$avatar_script" || -L "$avatar_script" ]]; then
+              [[ -f "$avatar_script" && ! -L "$avatar_script" ]] || return 1
+              avatar_actual_blob="$(git hash-object "$avatar_script")"
+              [[ -n "$avatar_tracked_blob" && "$avatar_actual_blob" == "$avatar_tracked_blob" ]] || return 1
+              APP_ROOT="$APP_ROOT" bash "$avatar_script" "$guard_action" "$expected_revision"
+            elif [[ -n "$avatar_tracked_blob" || -e "$avatar_marker" || -L "$avatar_marker" ]]; then
+              echo "Identity avatar marker exists but its checkout guard is unavailable." >&2
               return 1
             fi
           }
@@ -11008,6 +11908,15 @@ jobs:
               echo "Automatic backend deploy is verified but deferred: the active Identity ownership guard rejects $EXPECTED_REVISION."
               exit 0
             fi
+            avatar_script='scripts/identity-avatar-media-production.sh'
+            if [[ -f "$avatar_script" && ! -L "$avatar_script" ]]; then
+              bound_avatar_cleanup="$(APP_ROOT="$APP_ROOT" bash "$avatar_script" \
+                --cleanup-retarget-bound-revision 2>/dev/null || true)"
+              if [[ "$bound_avatar_cleanup" == "$EXPECTED_REVISION" ]]; then
+                echo 'Automatic backend deploy is verified but deferred: the exact avatar cleanup revision requires its manual cleanup target.'
+                exit 0
+              fi
+            fi
           fi
           case "$DEPLOY_TARGET" in
             all)
@@ -11237,6 +12146,130 @@ jobs:
                   APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
                     IDENTITY_ABORT_CONFIRMATION="$IDENTITY_CONFIRMATION" \
                     bash scripts/identity-database-lifecycle.sh --abort-prepare
+                  ;;
+              esac
+              ;;
+            identity-avatar)
+              [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
+                echo 'Identity avatar media lifecycle actions are manual-only.' >&2
+                exit 1
+              }
+              avatar_script='scripts/identity-avatar-media-production.sh'
+              prefetched_avatar_revision=''
+              if [[ "$IDENTITY_AVATAR_ACTION" =~ ^stage-(cleanup|runtime)-retarget$ ]]; then
+                current_revision="$(git rev-parse HEAD)"
+                if [[ "$current_revision" != "$EXPECTED_REVISION" ]]; then
+                  if [[ "$IDENTITY_AVATAR_ACTION" == 'stage-cleanup-retarget' ]]; then
+                    APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$current_revision" \
+                      IDENTITY_AVATAR_CLEANUP_RETARGET_CONFIRMATION="$IDENTITY_AVATAR_CONFIRMATION" \
+                      bash "$avatar_script" --stage-cleanup-retarget "$EXPECTED_REVISION"
+                  else
+                    APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$current_revision" \
+                      IDENTITY_AVATAR_RUNTIME_RETARGET_CONFIRMATION="$IDENTITY_AVATAR_CONFIRMATION" \
+                      bash "$avatar_script" --stage-runtime-retarget "$EXPECTED_REVISION"
+                  fi
+                fi
+                git cat-file -e "$EXPECTED_REVISION^{commit}" 2>/dev/null || {
+                  echo 'The exact avatar retarget candidate fetched by the staging action is unavailable.' >&2
+                  exit 1
+                }
+                prefetched_avatar_revision="$EXPECTED_REVISION"
+              fi
+              checkout_verified_prod_revision "$EXPECTED_REVISION" "$prefetched_avatar_revision"
+              case "$IDENTITY_AVATAR_ACTION" in
+                status)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --status
+                  ;;
+                release-canary)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --release-canary
+                  ;;
+                install-client-public-key)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --install-client-public-key \
+                      "$APP_ROOT/deploy/backend/.identity-avatar-client-signing.transfer.public.pem"
+                  ;;
+                inventory)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --inventory
+                  ;;
+                migrate)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --migrate
+                  ;;
+                activate)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --activate
+                  ;;
+                publish-client-ready)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --publish-client-ready
+                  ;;
+                record-client-switch)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --record-client-switch \
+                      "$IDENTITY_AVATAR_CLIENT_REVISION" "$IDENTITY_AVATAR_RELEASE_SHA256" \
+                      "$IDENTITY_AVATAR_CLIENT_READY_SHA256" \
+                      "$IDENTITY_AVATAR_CLIENT_READY_SIGNATURE_SHA256"
+                  ;;
+                record-client-soak-retarget)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    IDENTITY_AVATAR_CLIENT_RETARGET_CONFIRMATION="$IDENTITY_AVATAR_CONFIRMATION" \
+                    bash "$avatar_script" --record-client-soak-retarget \
+                      "$IDENTITY_AVATAR_CLIENT_REVISION" "$IDENTITY_AVATAR_RELEASE_SHA256" \
+                      "$IDENTITY_AVATAR_CLIENT_RETARGET_SHA256" \
+                      "$IDENTITY_AVATAR_CLIENT_RETARGET_SIGNATURE_SHA256"
+                  ;;
+                stage-cleanup-retarget)
+                  printf 'identity_avatar_cleanup_retarget_checkout=%s\n' "$EXPECTED_REVISION"
+                  ;;
+                stage-runtime-retarget)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    IDENTITY_AVATAR_RUNTIME_RETARGET_DEPLOY=true \
+                    bash scripts/deploy-production.sh
+                  ;;
+                soak-heartbeat)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --soak-heartbeat
+                  ;;
+                verify-soak)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --verify-soak
+                  ;;
+                runtime-stability-monitor)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --runtime-stability-monitor
+                  ;;
+                publish-runtime-stability-current)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    bash "$avatar_script" --publish-runtime-stability-current
+                  ;;
+                prepare-backend-runtime-rebind)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    IDENTITY_AVATAR_RUNTIME_STABILITY_CONFIRMATION="$IDENTITY_AVATAR_CONFIRMATION" \
+                    bash "$avatar_script" --prepare-backend-runtime-rebind
+                  ;;
+                record-backend-runtime-rebind)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    IDENTITY_AVATAR_RUNTIME_STABILITY_CONFIRMATION="$IDENTITY_AVATAR_CONFIRMATION" \
+                    bash "$avatar_script" --record-backend-runtime-rebind
+                  ;;
+                prepare-frontend-runtime-rebind)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    IDENTITY_AVATAR_RUNTIME_STABILITY_CONFIRMATION="$IDENTITY_AVATAR_CONFIRMATION" \
+                    bash "$avatar_script" --prepare-frontend-runtime-rebind \
+                      "$IDENTITY_AVATAR_RUNTIME_GENERATION" \
+                      "$IDENTITY_AVATAR_RUNTIME_PREPARED_SHA256" \
+                      "$IDENTITY_AVATAR_RUNTIME_PREPARED_SIGNATURE_SHA256"
+                  ;;
+                record-frontend-runtime-rebind)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    IDENTITY_AVATAR_RUNTIME_STABILITY_CONFIRMATION="$IDENTITY_AVATAR_CONFIRMATION" \
+                    bash "$avatar_script" --record-frontend-runtime-rebind \
+                      "$IDENTITY_AVATAR_RUNTIME_GENERATION" \
+                      "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SHA256" \
+                      "$IDENTITY_AVATAR_RUNTIME_ADOPTED_SIGNATURE_SHA256"
                   ;;
               esac
               ;;

@@ -11,6 +11,17 @@ import { IdentityAuthGuard } from './auth/auth.guard';
 import { AuthService } from './auth/auth.service';
 import { RecaptchaGuard } from './auth/recaptcha.guard';
 import { RefreshTokenService } from './auth/refresh-token.service';
+import { AvatarCleanupWorkerService } from './avatar/avatar-cleanup-worker.service';
+import {
+	AvatarMediaOwnershipGuard,
+	AvatarMediaOwnershipService
+} from './avatar/avatar-media-ownership.service';
+import { AvatarStorageService } from './avatar/avatar-storage.service';
+import {
+	AvatarUploadAdmissionInterceptor,
+	AvatarUploadAdmissionService
+} from './avatar/avatar-upload-admission.service';
+import { AvatarService } from './avatar/avatar.service';
 import { IdentityEventsService } from './events/identity-events.service';
 import { IdentityHealthController } from './health/identity-health.controller';
 import { IdentityHealthService } from './health/identity-health.service';
@@ -69,6 +80,11 @@ const API_PROVIDERS =
 				AuthRateLimitGuard,
 				AuthSettingsService,
 				AuthService,
+				AvatarMediaOwnershipGuard,
+				AvatarMediaOwnershipService,
+				AvatarUploadAdmissionInterceptor,
+				AvatarUploadAdmissionService,
+				AvatarService,
 				IdentityAuthGuard,
 				IdentityInternalGuard,
 				IdentityInternalService,
@@ -83,6 +99,14 @@ const API_PROVIDERS =
 			]
 		: [];
 
+const AVATAR_STORAGE_PROVIDERS =
+	PROCESS_ROLE === 'api' || PROCESS_ROLE === 'worker'
+		? [AvatarStorageService]
+		: [];
+
+const AVATAR_WORKER_PROVIDERS =
+	PROCESS_ROLE === 'worker' ? [AvatarCleanupWorkerService] : [];
+
 @Module({
 	imports: [
 		ConfigModule.forRoot({ isGlobal: true }),
@@ -93,6 +117,8 @@ const API_PROVIDERS =
 	controllers: [IdentityHealthController, ...API_CONTROLLERS],
 	providers: [
 		...API_PROVIDERS,
+		...AVATAR_STORAGE_PROVIDERS,
+		...AVATAR_WORKER_PROVIDERS,
 		IdentityEventsService,
 		IdentityOwnershipService,
 		{ provide: APP_GUARD, useClass: IdentityOwnershipGuard },

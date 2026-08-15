@@ -1,4 +1,9 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+	Injectable,
+	Optional,
+	ServiceUnavailableException
+} from '@nestjs/common';
+import { AvatarCleanupWorkerService } from '../avatar/avatar-cleanup-worker.service';
 import { DestinationUnavailableWorkerService } from '../messaging/destination-worker.service';
 import { IdentityOutboxPublisherService } from '../messaging/outbox-publisher.service';
 import { IdentityRabbitMqService } from '../messaging/rabbitmq.service';
@@ -18,7 +23,9 @@ export class IdentityHealthService {
 		private readonly publisher: IdentityOutboxPublisherService,
 		private readonly heartbeat: IdentityHeartbeatService,
 		private readonly housekeeping: IdentityHousekeepingService,
-		private readonly ownershipService: IdentityOwnershipService
+		private readonly ownershipService: IdentityOwnershipService,
+		@Optional()
+		private readonly avatarCleanup?: AvatarCleanupWorkerService
 	) {}
 
 	liveness() {
@@ -78,6 +85,15 @@ export class IdentityHealthService {
 		}
 		if (
 			active &&
+			this.runtime.workerEnabled &&
+			!this.avatarCleanup?.isReady()
+		) {
+			throw new ServiceUnavailableException(
+				'Identity avatar cleanup worker is not ready'
+			);
+		}
+		if (
+			active &&
 			this.runtime.outboxPublisherEnabled &&
 			!this.publisher.isReady()
 		) {
@@ -92,7 +108,10 @@ export class IdentityHealthService {
 		}
 		return {
 			...this.status('ready'),
-			ownership: await this.ownership(false)
+			ownership: await this.ownership(false),
+			...(this.avatarCleanup
+				? { avatarCleanup: this.avatarCleanup.health() }
+				: {})
 		};
 	}
 

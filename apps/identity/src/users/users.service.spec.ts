@@ -1,7 +1,8 @@
 import {
 	BadRequestException,
 	ForbiddenException,
-	UnauthorizedException
+	UnauthorizedException,
+	ValidationPipe
 } from '@nestjs/common';
 import {
 	AuthIdentityType,
@@ -13,6 +14,7 @@ import {
 import { hash } from 'bcryptjs';
 import type { Request } from 'express';
 import { PASSWORD_SALT_ROUNDS } from '../common/identity.util';
+import { UpdateProfileDto, UpdateUserDto } from '../auth/auth.dto';
 import { UsersService } from './users.service';
 
 const USER_ID = '00000000-0000-4000-8000-000000000001';
@@ -24,6 +26,7 @@ function user(overrides: Record<string, any> = {}) {
 		name: 'User',
 		password: 'hash',
 		avatarPath: '/old.png',
+		avatarObjectKey: null,
 		status: UserStatus.ACTIVE,
 		personalDataConsentRevokedAt: null,
 		deletedAt: null,
@@ -167,23 +170,20 @@ describe('UsersService security and frozen contracts', () => {
 		expect(value.tx.user.count).not.toHaveBeenCalled();
 	});
 
-	it('preserves avatarPath when admin sends an empty string', async () => {
-		const value = createService();
-		const current = user();
-		value.tx.user.findUnique.mockResolvedValue(current);
-		value.tx.user.findUniqueOrThrow.mockResolvedValue(current);
-		await value.service.adminUpdate(
-			'admin',
-			[Role.ADMIN],
-			USER_ID,
-			{ avatarPath: '' },
-			request()
-		);
-		expect(value.tx.user.update).toHaveBeenCalledWith(
-			expect.objectContaining({
-				data: expect.objectContaining({ avatarPath: '/old.png' })
-			})
-		);
+	it('strips avatarPath from generic self and admin update DTOs', async () => {
+		const pipe = new ValidationPipe({ whitelist: true, transform: true });
+		await expect(
+			pipe.transform(
+				{ name: 'Changed', avatarPath: 'https://attacker.invalid/a.svg' },
+				{ type: 'body', metatype: UpdateProfileDto }
+			)
+		).resolves.toEqual({ name: 'Changed' });
+		await expect(
+			pipe.transform(
+				{ name: 'Changed', avatarPath: '/uploads/user-avatar/a.png' },
+				{ type: 'body', metatype: UpdateUserDto }
+			)
+		).resolves.toEqual({ name: 'Changed' });
 	});
 
 	it('searches only name and EMAIL/PHONE identities and clamps unsafe paging', async () => {
