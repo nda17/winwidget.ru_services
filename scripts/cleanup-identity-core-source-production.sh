@@ -303,13 +303,19 @@ process.stdin.on("end", () => {
     "YANDEX_CLIENT_ID", "YANDEX_CLIENT_SECRET", "YANDEX_CALLBACK_URL",
     "VK_CLIENT_ID", "VK_CLIENT_SECRET", "VK_SERVICE_TOKEN", "VK_CALLBACK_URL",
     "TELEGRAM_AUTH_BOT_TOKEN", "TELEGRAM_AUTH_BOT_USERNAME", "TELEGRAM_AUTH_BOT_WEBHOOK_SECRET",
+    "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
+  ];
+  const identityInfoWebhookKeys = [
+    "TELEGRAM_WEBHOOK_HOST", "TELEGRAM_INFO_BOT_TOKEN", "TELEGRAM_INFO_BOT_USERNAME",
+    "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
   ];
   const coreTelegramKeys = [
-    "TELEGRAM_INFO_BOT_TOKEN", "TELEGRAM_INFO_BOT_USERNAME", "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
+    "TELEGRAM_INFO_BOT_TOKEN", "TELEGRAM_INFO_BOT_USERNAME",
     "TELEGRAM_SUPPORT_BOT_TOKEN", "TELEGRAM_SUPPORT_BOT_USERNAME", "TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET",
   ];
   if ([...signingKeys, ...identityProviderKeys].some(key => Object.prototype.hasOwnProperty.call(core, key)) ||
       [...signingKeys, ...identityProviderKeys].some(key => !Object.prototype.hasOwnProperty.call(identity, key)) ||
+      identityInfoWebhookKeys.some(key => !Object.prototype.hasOwnProperty.call(identity, key)) ||
       coreTelegramKeys.some(key => !Object.prototype.hasOwnProperty.call(core, key))) process.exit(1);
   for (const [name, service] of Object.entries(services)) {
     if (name === "identity-api") continue;
@@ -568,6 +574,7 @@ identity_cleanup_assert_identity_runtime_stable() {
 		https://api.winwidget.ru/api/v1/auth/.well-known/jwks.json | identity_cutover_text_sha256)"
 	[[ "$direct_sha" =~ ^[0-9a-f]{64}$ && "$direct_sha" == "$public_sha" ]] ||
 		identity_cleanup_fail 'public and direct Identity JWKS differ before cleanup'
+	identity_cutover_assert_info_webhook_owner
 	identity_cleanup_jwks_sha256="$direct_sha"
 }
 
@@ -1466,6 +1473,7 @@ identity_cleanup_start_core() {
 	done
 	identity_cutover_wait_url https://api.winwidget.ru/api/v1/auth/.well-known/jwks.json \
 		'public Identity JWKS after Core cleanup'
+	identity_cutover_assert_info_webhook_owner
 	local core_container identity_container core_keys identity_keys
 	core_container="$(identity_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
 		ps --status running -q api)" || return 1
@@ -1485,16 +1493,22 @@ identity_cleanup_start_core() {
 		GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GITHUB_CALLBACK_URL \
 		YANDEX_CLIENT_ID YANDEX_CLIENT_SECRET YANDEX_CALLBACK_URL \
 		VK_CLIENT_ID VK_CLIENT_SECRET VK_SERVICE_TOKEN VK_CALLBACK_URL \
-		TELEGRAM_AUTH_BOT_TOKEN TELEGRAM_AUTH_BOT_USERNAME TELEGRAM_AUTH_BOT_WEBHOOK_SECRET; do
+		TELEGRAM_AUTH_BOT_TOKEN TELEGRAM_AUTH_BOT_USERNAME TELEGRAM_AUTH_BOT_WEBHOOK_SECRET \
+		TELEGRAM_INFO_BOT_WEBHOOK_SECRET; do
 		! grep -Fxq "$key" <<<"$core_keys" ||
 			identity_cleanup_fail "clean Core container still receives Identity-owned $key" || return 1
 		grep -Fxq "$key" <<<"$identity_keys" ||
 			identity_cleanup_fail "Identity API lost required Identity-owned key $key" || return 1
 	done
-	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME TELEGRAM_INFO_BOT_WEBHOOK_SECRET \
+	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME \
 		TELEGRAM_SUPPORT_BOT_TOKEN TELEGRAM_SUPPORT_BOT_USERNAME TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET; do
 		grep -Fxq "$key" <<<"$core_keys" ||
 			identity_cleanup_fail "clean Core container lost required $key" || return 1
+	done
+	for key in TELEGRAM_WEBHOOK_HOST TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME \
+		TELEGRAM_INFO_BOT_WEBHOOK_SECRET; do
+		grep -Fxq "$key" <<<"$identity_keys" ||
+			identity_cleanup_fail "Identity API lost required Info webhook setting $key" || return 1
 	done
 	for key in JWT_ACCESS_PRIVATE_KEY_BASE64 JWT_ACCESS_JWKS_BASE64 JWT_ACCESS_ACTIVE_KID; do
 		! awk -F= -v key="$key" '$1 == key { found += 1 } END { exit(found == 0 ? 0 : 1) }' "$ENV_FILE" ||
@@ -1814,10 +1828,11 @@ NODE
 		identity_cleanup_require_bound_evidence() { return 1; }
 		! identity_cleanup_migration_url
 	)
-	local source source_state_source deploy_source
+	local source source_state_source deploy_source candidate_boundary_source live_boundary_source
 	source="$(declare -f identity_cleanup_require_migration identity_cleanup_require_common \
 		identity_cleanup_require_soak identity_cleanup_runtime_has_soaked \
 		identity_cleanup_assert_identity_runtime_stable identity_cleanup_validate_soak_evidence \
+		identity_cutover_assert_info_webhook_owner \
 		identity_cleanup_capture_soak_evidence \
 		identity_cleanup_assert_identity_queues_drained identity_cleanup_assert_candidate_signing_boundary \
 		identity_cleanup_capture_stopped_writers_evidence identity_cleanup_require_bound_evidence \
@@ -1828,6 +1843,40 @@ NODE
 		identity_cleanup_verify_started_core_rabbitmq identity_cleanup_wait_started_core_ready \
 		identity_cleanup_start_core identity_cleanup_deploy identity_cleanup_source_state)"
 	source_state_source="$(declare -f identity_cleanup_source_state)"
+	candidate_boundary_source="$(declare -f identity_cleanup_assert_candidate_signing_boundary)"
+	live_boundary_source="$(declare -f identity_cleanup_start_core)"
+	CANDIDATE_BOUNDARY_SOURCE="$candidate_boundary_source" \
+		LIVE_BOUNDARY_SOURCE="$live_boundary_source" node <<'NODE'
+const candidate = process.env.CANDIDATE_BOUNDARY_SOURCE || '';
+const live = process.env.LIVE_BOUNDARY_SOURCE || '';
+const section = (source, start, end) => {
+  const from = source.indexOf(start);
+  const to = source.indexOf(end, from);
+  if (from < 0 || to < 0) process.exit(1);
+  return source.slice(from, to);
+};
+const identityProviders = section(candidate, 'const identityProviderKeys', 'const identityInfoWebhookKeys');
+const identityInfo = section(candidate, 'const identityInfoWebhookKeys', 'const coreTelegramKeys');
+const coreTelegram = section(candidate, 'const coreTelegramKeys', 'if (');
+if (!identityProviders.includes('TELEGRAM_INFO_BOT_WEBHOOK_SECRET') ||
+    !identityInfo.includes('TELEGRAM_WEBHOOK_HOST') ||
+    !identityInfo.includes('TELEGRAM_INFO_BOT_TOKEN') ||
+    !identityInfo.includes('TELEGRAM_INFO_BOT_USERNAME') ||
+    !identityInfo.includes('TELEGRAM_INFO_BOT_WEBHOOK_SECRET') ||
+    coreTelegram.includes('TELEGRAM_INFO_BOT_WEBHOOK_SECRET')) process.exit(1);
+const identityOnlyLoop = section(live, 'for key in JWT_ACCESS_PRIVATE_KEY_BASE64', 'done');
+const coreTelegramLoop = section(live, 'for key in TELEGRAM_INFO_BOT_TOKEN', 'done');
+const identityInfoLoop = section(
+  live.slice(live.indexOf('done', live.indexOf('for key in TELEGRAM_INFO_BOT_TOKEN')) + 4),
+  'for key in TELEGRAM_WEBHOOK_HOST',
+  'done',
+);
+if (!identityOnlyLoop.includes('TELEGRAM_INFO_BOT_WEBHOOK_SECRET') ||
+    coreTelegramLoop.includes('TELEGRAM_INFO_BOT_WEBHOOK_SECRET') ||
+    !identityInfoLoop.includes('TELEGRAM_INFO_BOT_TOKEN') ||
+    !identityInfoLoop.includes('TELEGRAM_INFO_BOT_USERNAME') ||
+    !identityInfoLoop.includes('TELEGRAM_INFO_BOT_WEBHOOK_SECRET')) process.exit(1);
+NODE
 	[[ "$source" == *'merge-base --is-ancestor'* &&
 		"$source" == *'must add exactly the reviewed Identity Core cleanup migration'* &&
 		"$source" == *'database_restore_guard_assert_before_mutation'* &&
@@ -1835,6 +1884,7 @@ NODE
 		"$source" == *'RestartCount'* && "$source" == *'.State.StartedAt'* &&
 		"$source" == *'minimumSoakSeconds'* && "$source" == *"'startedAt'"* &&
 		"$source" == *'health/ready'* &&
+		"$source" == *'legacy Core Info_bot webhook remains reachable'* &&
 		"$source" == *'messages_unacknowledged !== 0'* &&
 		"$source" == *'database-restore-worker'* && "$source" == *"'gen_user'"* &&
 		"$source" == *'identity_cleanup_require_artifact_sha'* &&

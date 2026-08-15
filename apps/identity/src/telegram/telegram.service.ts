@@ -68,6 +68,8 @@ type TelegramApiEnvelope = {
 	result?: Record<string, unknown>;
 };
 
+type TelegramWebhookKind = 'AUTH' | 'INFO';
+
 const USER_INCLUDE = {
 	authIdentities: true,
 	telegramNotificationChannel: true
@@ -192,14 +194,24 @@ export class TelegramService {
 		};
 	}
 
-	async authWebhookStatus() {
-		const token = this.botToken('AUTH');
-		const username = this.botUsername('AUTH');
+	authWebhookStatus() {
+		return this.webhookStatus('AUTH');
+	}
+
+	infoWebhookStatus() {
+		return this.webhookStatus('INFO');
+	}
+
+	private async webhookStatus(kind: TelegramWebhookKind) {
+		const config = this.webhookConfig(kind);
+		const token = this.botToken(kind);
+		const username = this.botUsername(kind);
 		let expectedWebhookUrl: string | null = null;
 		try {
-			expectedWebhookUrl = this.webhookUrl('AUTH');
+			expectedWebhookUrl = this.webhookUrl(kind);
 		} catch (error) {
 			return this.webhookFailure(
+				kind,
 				token,
 				username,
 				null,
@@ -208,10 +220,11 @@ export class TelegramService {
 		}
 		if (!token) {
 			return this.webhookFailure(
+				kind,
 				token,
 				username,
 				expectedWebhookUrl,
-				'Telegram auth bot is not configured'
+				config.notConfiguredError
 			);
 		}
 		try {
@@ -230,8 +243,8 @@ export class TelegramService {
 					)
 				: null;
 			return {
-				bot: 'auth' as const,
-				title: 'Auth_bot',
+				bot: config.bot,
+				title: config.title,
 				configured: true,
 				ok: webhook.ok === true,
 				expectedWebhookUrl,
@@ -244,7 +257,7 @@ export class TelegramService {
 						: new Date(lastErrorDate * 1_000).toISOString(),
 				lastErrorMessage: this.string(result.last_error_message) || null,
 				allowedUpdates,
-				secretConfigured: Boolean(this.webhookSecret('AUTH')),
+				secretConfigured: Boolean(this.webhookSecret(kind)),
 				configuredUsername: username || null,
 				actualUsername,
 				usernameMatchesConfigured: username
@@ -254,6 +267,7 @@ export class TelegramService {
 			};
 		} catch (error) {
 			return this.webhookFailure(
+				kind,
 				token,
 				username,
 				expectedWebhookUrl,
@@ -262,10 +276,22 @@ export class TelegramService {
 		}
 	}
 
-	async reinstallAuthWebhook(actorId: string, request: Request) {
-		const token = this.botToken('AUTH', true);
-		const webhookUrl = this.webhookUrl('AUTH');
-		const allowedUpdates = ['message', 'callback_query'];
+	reinstallAuthWebhook(actorId: string, request: Request) {
+		return this.reinstallWebhook('AUTH', actorId, request);
+	}
+
+	reinstallInfoWebhook(actorId: string, request: Request) {
+		return this.reinstallWebhook('INFO', actorId, request);
+	}
+
+	private async reinstallWebhook(
+		kind: TelegramWebhookKind,
+		actorId: string,
+		request: Request
+	) {
+		const config = this.webhookConfig(kind);
+		const token = this.botToken(kind, true);
+		const webhookUrl = this.webhookUrl(kind);
 		await this.telegramApi(token, 'deleteWebhook', {
 			drop_pending_updates: true
 		});
@@ -273,15 +299,15 @@ export class TelegramService {
 			url: webhookUrl,
 			drop_pending_updates: true,
 			max_connections: 40,
-			allowed_updates: allowedUpdates,
-			secret_token: this.webhookSecret('AUTH', true)
+			allowed_updates: config.allowedUpdates,
+			secret_token: this.webhookSecret(kind, true)
 		});
 		const result = {
-			bot: 'auth' as const,
-			title: 'Auth_bot',
+			bot: config.bot,
+			title: config.title,
 			webhookUrl,
 			dropPendingUpdates: true,
-			allowedUpdates,
+			allowedUpdates: config.allowedUpdates,
 			secretConfigured: true,
 			installedAt: new Date().toISOString()
 		};
@@ -291,10 +317,17 @@ export class TelegramService {
 				section: 'TELEGRAM_BOT',
 				action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
 				entityType: 'telegram_webhook',
-				entityId: 'auth',
-				entityLabel: 'Auth_bot',
-				description: 'Переустановлен webhook Auth_bot',
-				metadata: result,
+				entityId: config.bot,
+				entityLabel: config.title,
+				description: `Переустановлен webhook ${config.title}`,
+				metadata: {
+					bot: result.bot,
+					title: result.title,
+					dropPendingUpdates: result.dropPendingUpdates,
+					allowedUpdates: result.allowedUpdates,
+					secretConfigured: result.secretConfigured,
+					installedAt: result.installedAt
+				},
 				requestId: request.header('x-request-id'),
 				requestIp: clientIp(request),
 				requestUserAgent: request.get('user-agent')?.slice(0, 500),
@@ -906,14 +939,16 @@ export class TelegramService {
 	}
 
 	private webhookFailure(
+		kind: TelegramWebhookKind,
 		token: string,
 		username: string,
 		expectedWebhookUrl: string | null,
 		error: string
 	) {
+		const config = this.webhookConfig(kind);
 		return {
-			bot: 'auth' as const,
-			title: 'Auth_bot',
+			bot: config.bot,
+			title: config.title,
 			configured: Boolean(token),
 			ok: false,
 			expectedWebhookUrl,
@@ -923,12 +958,28 @@ export class TelegramService {
 			lastErrorAt: null,
 			lastErrorMessage: null,
 			allowedUpdates: null,
-			secretConfigured: Boolean(this.webhookSecret('AUTH')),
+			secretConfigured: Boolean(this.webhookSecret(kind)),
 			configuredUsername: username || null,
 			actualUsername: null,
 			usernameMatchesConfigured: null,
 			error
 		};
+	}
+
+	private webhookConfig(kind: TelegramWebhookKind) {
+		return kind === 'AUTH'
+			? {
+					bot: 'auth' as const,
+					title: 'Auth_bot',
+					allowedUpdates: ['message', 'callback_query'],
+					notConfiguredError: 'Telegram auth bot is not configured'
+				}
+			: {
+					bot: 'info' as const,
+					title: 'Info_bot',
+					allowedUpdates: ['message'],
+					notConfiguredError: 'Telegram notification bot is not configured'
+				};
 	}
 
 	private startArgument(text?: string): string | null {
@@ -948,7 +999,7 @@ export class TelegramService {
 		return `Telegram ${challenge.telegramUserId}`;
 	}
 
-	private webhookUrl(kind: 'AUTH' | 'INFO'): string {
+	private webhookUrl(kind: TelegramWebhookKind): string {
 		const raw =
 			this.config.get<string>('TELEGRAM_WEBHOOK_HOST')?.trim() || '';
 		let url: URL;
@@ -976,7 +1027,7 @@ export class TelegramService {
 		}`;
 	}
 
-	private botToken(kind: 'AUTH' | 'INFO', required = false): string {
+	private botToken(kind: TelegramWebhookKind, required = false): string {
 		const value =
 			this.config.get<string>(`TELEGRAM_${kind}_BOT_TOKEN`)?.trim() || '';
 		if (required && !value) {
@@ -989,7 +1040,10 @@ export class TelegramService {
 		return value;
 	}
 
-	private botUsername(kind: 'AUTH' | 'INFO', required = false): string {
+	private botUsername(
+		kind: TelegramWebhookKind,
+		required = false
+	): string {
 		const value =
 			this.config
 				.get<string>(`TELEGRAM_${kind}_BOT_USERNAME`)
@@ -1005,7 +1059,10 @@ export class TelegramService {
 		return value;
 	}
 
-	private webhookSecret(kind: 'AUTH' | 'INFO', required = false): string {
+	private webhookSecret(
+		kind: TelegramWebhookKind,
+		required = false
+	): string {
 		const value =
 			this.config
 				.get<string>(`TELEGRAM_${kind}_BOT_WEBHOOK_SECRET`)
@@ -1018,7 +1075,10 @@ export class TelegramService {
 		return value;
 	}
 
-	private assertWebhookSecret(kind: 'AUTH' | 'INFO', supplied?: string) {
+	private assertWebhookSecret(
+		kind: TelegramWebhookKind,
+		supplied?: string
+	) {
 		const expected = this.webhookSecret(kind, true);
 		if (!supplied || !safeEqual(expected, supplied)) {
 			throw new UnauthorizedException(

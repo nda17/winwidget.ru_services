@@ -4417,7 +4417,8 @@ assert_clean_core_identity_environment_boundary() {
 		GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GITHUB_CALLBACK_URL \
 		YANDEX_CLIENT_ID YANDEX_CLIENT_SECRET YANDEX_CALLBACK_URL \
 		VK_CLIENT_ID VK_CLIENT_SECRET VK_SERVICE_TOKEN VK_CALLBACK_URL \
-		TELEGRAM_AUTH_BOT_TOKEN TELEGRAM_AUTH_BOT_USERNAME TELEGRAM_AUTH_BOT_WEBHOOK_SECRET; do
+		TELEGRAM_AUTH_BOT_TOKEN TELEGRAM_AUTH_BOT_USERNAME TELEGRAM_AUTH_BOT_WEBHOOK_SECRET \
+		TELEGRAM_INFO_BOT_WEBHOOK_SECRET; do
 		! grep -Fxq "$key" <<<"$core_keys" || {
 			echo "Clean Core API unexpectedly receives Identity-owned $key." >&2
 			return 1
@@ -4431,10 +4432,17 @@ assert_clean_core_identity_environment_boundary() {
 			return 1
 		}
 	done
-	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME TELEGRAM_INFO_BOT_WEBHOOK_SECRET \
+	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME \
 		TELEGRAM_SUPPORT_BOT_TOKEN TELEGRAM_SUPPORT_BOT_USERNAME TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET; do
 		grep -Fxq "$key" <<<"$core_keys" || {
 			echo "Clean Core API is missing required $key." >&2
+			return 1
+		}
+	done
+	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME \
+		TELEGRAM_INFO_BOT_WEBHOOK_SECRET TELEGRAM_WEBHOOK_HOST; do
+		grep -Fxq "$key" <<<"$identity_keys" || {
+			echo "Identity API is missing required Info webhook setting $key." >&2
 			return 1
 		}
 	done

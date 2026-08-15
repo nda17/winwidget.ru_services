@@ -190,6 +190,37 @@ describe('Identity audit metadata', () => {
 		).toEqual({ changedFields: ['name'], passwordChanged: false });
 	});
 
+	it('accepts webhook audit metadata without provider URLs or secrets', () => {
+		expect(
+			auditMetadata('TELEGRAM_BOT_WEBHOOK_REINSTALL', {
+				bot: 'info',
+				title: 'Info_bot',
+				dropPendingUpdates: true,
+				allowedUpdates: ['message'],
+				secretConfigured: true,
+				installedAt: '2026-08-14T12:00:00.000Z'
+			})
+		).toEqual({
+			bot: 'info',
+			title: 'Info_bot',
+			dropPendingUpdates: true,
+			allowedUpdates: ['message'],
+			secretConfigured: true,
+			installedAt: '2026-08-14T12:00:00.000Z'
+		});
+		expect(() =>
+			auditMetadata('TELEGRAM_BOT_WEBHOOK_REINSTALL', {
+				bot: 'info',
+				title: 'Info_bot',
+				dropPendingUpdates: true,
+				allowedUpdates: ['message'],
+				secretConfigured: true,
+				installedAt: '2026-08-14T12:00:00.000Z',
+				webhookUrl: 'https://api.winwidget.ru/api/v1/telegram-bot/webhook'
+			})
+		).toThrow('Unsafe Identity audit metadata key webhookUrl');
+	});
+
 	it.each([
 		'passwordHash',
 		'refreshTokenHash',

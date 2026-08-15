@@ -5016,6 +5016,7 @@ jobs:
                 "TELEGRAM_AUTH_BOT_TOKEN",
                 "TELEGRAM_AUTH_BOT_USERNAME",
                 "TELEGRAM_AUTH_BOT_WEBHOOK_SECRET",
+                "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
               ];
               for (const [name, environment] of [
                 ["api", apiEnvironment],
@@ -5032,7 +5033,6 @@ jobs:
               for (const key of [
                 "TELEGRAM_INFO_BOT_TOKEN",
                 "TELEGRAM_INFO_BOT_USERNAME",
-                "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
                 "TELEGRAM_SUPPORT_BOT_TOKEN",
                 "TELEGRAM_SUPPORT_BOT_USERNAME",
                 "TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET",
@@ -5780,6 +5780,10 @@ jobs:
                   "VK_CLIENT_SECRET",
                   "VK_SERVICE_TOKEN",
                   "VK_CALLBACK_URL",
+                  "TELEGRAM_WEBHOOK_HOST",
+                  "TELEGRAM_INFO_BOT_TOKEN",
+                  "TELEGRAM_INFO_BOT_USERNAME",
+                  "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
                   "TELEGRAM_AUTH_BOT_TOKEN",
                   "TELEGRAM_AUTH_BOT_USERNAME",
                   "TELEGRAM_AUTH_BOT_WEBHOOK_SECRET",

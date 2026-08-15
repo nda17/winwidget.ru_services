@@ -315,7 +315,6 @@ const AUDIT_METADATA_KEYS: Record<string, readonly string[]> = {
 	TELEGRAM_BOT_WEBHOOK_REINSTALL: [
 		'bot',
 		'title',
-		'webhookUrl',
 		'dropPendingUpdates',
 		'allowedUpdates',
 		'secretConfigured',

@@ -303,6 +303,45 @@ describe('messaging event contract', () => {
 		).toThrow('forbidden');
 	});
 
+	it('accepts the Identity-owned Info_bot webhook audit', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-14T12:00:00.000Z',
+			correlationId: 'request:identity-info-webhook-42',
+			actorId: 'admin-user-id',
+			actorSnapshot: { name: 'Admin', email: 'admin@example.com' },
+			section: 'TELEGRAM_BOT',
+			action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
+			description: 'Переустановлен webhook Info_bot',
+			entity: {
+				type: 'telegram_webhook',
+				id: 'info',
+				label: 'Info_bot',
+				targetUserId: null,
+				targetSnapshot: { name: null, email: null }
+			},
+			metadata: {
+				bot: 'info',
+				title: 'Info_bot',
+				dropPendingUpdates: true,
+				allowedUpdates: ['message'],
+				secretConfigured: true,
+				installedAt: '2026-08-14T12:00:00.000Z'
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.identity.v1',
+				messageId: MESSAGE_ID,
+				kind: 'identity-admin-audit'
+			})
+		).not.toThrow();
+	});
+
 	it('accepts the Identity verification cleanup audit in TASKS', () => {
 		const payload = {
 			schemaVersion: 1,

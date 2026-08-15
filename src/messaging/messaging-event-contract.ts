@@ -1821,7 +1821,6 @@ const assertIdentityAdminAuditMetadata = (
 				[
 					'bot',
 					'title',
-					'webhookUrl',
 					'dropPendingUpdates',
 					'allowedUpdates',
 					'secretConfigured',
@@ -1830,14 +1829,11 @@ const assertIdentityAdminAuditMetadata = (
 				IDENTITY_AUDIT_REQUEST_METADATA_KEYS,
 				'payload.metadata'
 			);
-			if (metadata.bot !== 'auth') {
+			if (!['auth', 'info'].includes(String(metadata.bot))) {
 				throw new Error('payload.metadata.bot is invalid');
 			}
 			assertString(metadata.title, 'payload.metadata.title', {
 				maxLength: 100
-			});
-			assertString(metadata.webhookUrl, 'payload.metadata.webhookUrl', {
-				maxLength: 2048
 			});
 			assertBoolean(
 				metadata.dropPendingUpdates,

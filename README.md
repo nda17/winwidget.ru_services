@@ -1586,9 +1586,10 @@ TELEGRAM_SUPPORT_BOT_USERNAME
 TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET
 ```
 
-`Auth_bot` принадлежит Identity и не передаётся Core. Core сохраняет только
-свои credentials `Info_bot`/`Support_bot`; Identity также получает требуемый
-`Info_bot` credential для принадлежащего ему webhook-контракта.
+`Auth_bot` и входящий webhook `Info_bot` принадлежат Identity. Секрет webhook
+`Info_bot` передаётся только `identity-api`; его token/username временно также
+получает Core для оставшихся исходящих сообщений и health-проверки. Все
+credentials `Support_bot` пока принадлежат Core.
 
 ## S3
 

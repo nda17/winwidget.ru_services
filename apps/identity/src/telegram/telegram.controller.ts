@@ -130,10 +130,26 @@ export class TelegramAdminController {
 		return this.telegram.authWebhookStatus();
 	}
 
+	@Get('info-webhook/status')
+	@Auth(Role.ADMIN)
+	infoStatus() {
+		return this.telegram.infoWebhookStatus();
+	}
+
 	@Post('webhook/reinstall')
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
 	reinstall(@CurrentUser('id') actorId: string, @Req() request: Request) {
 		return this.telegram.reinstallAuthWebhook(actorId, request);
+	}
+
+	@Post('info-webhook/reinstall')
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	reinstallInfo(
+		@CurrentUser('id') actorId: string,
+		@Req() request: Request
+	) {
+		return this.telegram.reinstallInfoWebhook(actorId, request);
 	}
 }
