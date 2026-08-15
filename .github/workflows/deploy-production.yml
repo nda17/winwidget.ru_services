@@ -5720,6 +5720,10 @@ jobs:
                   "JWT_ACCESS_ACTIVE_KID",
                   "JWT_ISSUER",
                   "JWT_AUDIENCE",
+                  "TELEGRAM_WEBHOOK_HOST",
+                  "TELEGRAM_INFO_BOT_TOKEN",
+                  "TELEGRAM_INFO_BOT_USERNAME",
+                  "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
                   "IDENTITY_CORE_TOKEN",
                   "CORE_IDENTITY_TOKEN",
                   "IDENTITY_CAMPAIGNS_TOKEN",
@@ -5757,6 +5761,15 @@ jobs:
                   "MESSAGING_SERVICE_NAME",
                 ],
               );
+              if (
+                "TELEGRAM_INFO_BOT_WEBHOOK_SECRET" in apiEnvironment ||
+                !("TELEGRAM_INFO_BOT_TOKEN" in apiEnvironment) ||
+                !("TELEGRAM_INFO_BOT_USERNAME" in apiEnvironment)
+              ) {
+                throw new Error(
+                  "Info_bot webhook secret must be Identity-only while Core retains only outbound token/username",
+                );
+              }
               const identityRoles = new Map([
                 [
                   "identity-api",

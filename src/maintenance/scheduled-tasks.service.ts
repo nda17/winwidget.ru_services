@@ -1,7 +1,14 @@
 import {
 	BILLING_DATABASE_BACKUP_DELAY_MINUTES,
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
+	DatabaseBackupAdminJobSummary,
+	DATABASE_BACKUP_FRESHNESS_HOURS,
+	DATABASE_BACKUP_TARGETS,
 	DatabaseBackupInput,
+	DatabaseBackupJobsPage,
+	DatabaseBackupJobsQuery,
+	DatabaseBackupOverview,
+	DatabaseBackupOverviewItem,
 	DatabaseBackupTarget,
 	IDENTITY_DATABASE_BACKUP_DELAY_MINUTES,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
@@ -16,6 +23,7 @@ import {
 import { PrismaService } from '@/prisma.service';
 import { ScheduledJobsService } from '@/scheduled-jobs/scheduled-jobs.service';
 import {
+	DATABASE_BACKUP_JOB_TYPES,
 	isDatabaseBackupJobType,
 	SCHEDULED_JOB_TYPES,
 	ScheduledJobOutboxEvent,
@@ -378,6 +386,175 @@ export class ScheduledTasksService {
 			: null;
 	}
 
+	async getDatabaseBackupOverview(): Promise<DatabaseBackupOverview> {
+		const generatedAt = new Date();
+		const settings = await this.getSettings();
+		const targets = Object.values(DATABASE_BACKUP_TARGETS);
+		const items = await Promise.all(
+			targets.map(target =>
+				this.getDatabaseBackupOverviewItem(
+					target,
+					settings.databaseBackupEnabled,
+					generatedAt
+				)
+			)
+		);
+
+		return {
+			databaseBackupEnabled: settings.databaseBackupEnabled,
+			generatedAt: generatedAt.toISOString(),
+			staleAfterHours: DATABASE_BACKUP_FRESHNESS_HOURS,
+			items
+		};
+	}
+
+	async getDatabaseBackupJobs(
+		query: DatabaseBackupJobsQuery
+	): Promise<DatabaseBackupJobsPage> {
+		const where: Prisma.ScheduledJobRunWhereInput = {
+			jobType: query.target
+				? this.getDatabaseBackupJobType(query.target)
+				: { in: [...DATABASE_BACKUP_JOB_TYPES] },
+			...(query.trigger ? { trigger: query.trigger } : {}),
+			...(query.status ? { status: query.status } : {})
+		};
+		const [jobs, total] = await Promise.all([
+			this.prisma.scheduledJobRun.findMany({
+				where,
+				orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+				skip: (query.page - 1) * query.limit,
+				take: query.limit
+			}),
+			this.prisma.scheduledJobRun.count({ where })
+		]);
+
+		return {
+			items: jobs.map(job =>
+				this.toDatabaseBackupAdminJobSummary(
+					this.getDatabaseBackupTarget(job.jobType),
+					job
+				)
+			),
+			page: query.page,
+			limit: query.limit,
+			total,
+			totalPages: Math.max(1, Math.ceil(total / query.limit))
+		};
+	}
+
+	private async getDatabaseBackupOverviewItem(
+		target: DatabaseBackupTarget,
+		databaseBackupEnabled: boolean,
+		generatedAt: Date
+	): Promise<DatabaseBackupOverviewItem> {
+		const jobType = this.getDatabaseBackupJobType(target);
+		const baseWhere: Prisma.ScheduledJobRunWhereInput = { jobType };
+		const [latest, latestScheduled, latestManual, latestSuccessful] =
+			await Promise.all([
+				this.prisma.scheduledJobRun.findFirst({
+					where: baseWhere,
+					orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
+				}),
+				this.prisma.scheduledJobRun.findFirst({
+					where: {
+						...baseWhere,
+						trigger: ScheduledJobRunTrigger.SCHEDULED
+					},
+					orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
+				}),
+				this.prisma.scheduledJobRun.findFirst({
+					where: {
+						...baseWhere,
+						trigger: ScheduledJobRunTrigger.MANUAL
+					},
+					orderBy: [{ createdAt: 'desc' }, { id: 'desc' }]
+				}),
+				this.prisma.scheduledJobRun.findFirst({
+					where: {
+						...baseWhere,
+						status: ScheduledJobRunStatus.SUCCEEDED
+					},
+					orderBy: [{ finishedAt: 'desc' }, { id: 'desc' }]
+				})
+			]);
+		const successfulAt = latestSuccessful?.finishedAt ?? null;
+		const staleAfter = successfulAt
+			? new Date(
+					successfulAt.getTime() +
+						DATABASE_BACKUP_FRESHNESS_HOURS * 60 * 60 * 1000
+				)
+			: null;
+		const freshness = !databaseBackupEnabled
+			? 'DISABLED'
+			: !successfulAt
+				? 'MISSING'
+				: staleAfter && staleAfter.getTime() <= generatedAt.getTime()
+					? 'STALE'
+					: 'FRESH';
+
+		return {
+			target,
+			freshness,
+			staleAfter: staleAfter?.toISOString() ?? null,
+			latest: latest
+				? this.toDatabaseBackupAdminJobSummary(target, latest)
+				: null,
+			latestScheduled: latestScheduled
+				? this.toDatabaseBackupAdminJobSummary(target, latestScheduled)
+				: null,
+			latestManual: latestManual
+				? this.toDatabaseBackupAdminJobSummary(target, latestManual)
+				: null,
+			latestSuccessful: latestSuccessful
+				? this.toDatabaseBackupAdminJobSummary(target, latestSuccessful)
+				: null
+		};
+	}
+
+	private toDatabaseBackupAdminJobSummary(
+		target: DatabaseBackupTarget,
+		job: {
+			id: string;
+			trigger: ScheduledJobRunTrigger;
+			status: ScheduledJobRunStatus;
+			createdAt: Date;
+			startedAt: Date | null;
+			finishedAt: Date | null;
+			attempts: number;
+			maxAttempts: number;
+			result: Prisma.JsonValue | null;
+			lastError: string | null;
+		}
+	): DatabaseBackupAdminJobSummary {
+		return {
+			target,
+			jobId: job.id,
+			trigger: job.trigger,
+			status: job.status,
+			queuedAt: job.createdAt.toISOString(),
+			startedAt: job.startedAt?.toISOString() ?? null,
+			completedAt: job.finishedAt?.toISOString() ?? null,
+			attempts: job.attempts,
+			maxAttempts: job.maxAttempts,
+			fileSize: this.getDatabaseBackupFileSize(job.result),
+			hasError:
+				job.status === ScheduledJobRunStatus.FAILED ||
+				Boolean(job.lastError)
+		};
+	}
+
+	private getDatabaseBackupFileSize(result: Prisma.JsonValue | null) {
+		if (!result || typeof result !== 'object' || Array.isArray(result)) {
+			return null;
+		}
+		const fileSize = result.fileSize;
+		return typeof fileSize === 'number' &&
+			Number.isSafeInteger(fileSize) &&
+			fileSize >= 0
+			? fileSize
+			: null;
+	}
+
 	private toDatabaseBackupJob(
 		target: DatabaseBackupTarget,
 		job: ScheduledJobRunView
@@ -389,8 +566,10 @@ export class ScheduledTasksService {
 			queuedAt: job.createdAt,
 			startedAt: job.startedAt,
 			completedAt: job.finishedAt,
-			lastError: job.lastError,
-			result: job.result
+			fileSize: this.getDatabaseBackupFileSize(job.result),
+			hasError:
+				job.status === ScheduledJobRunStatus.FAILED ||
+				Boolean(job.lastError)
 		};
 	}
 
@@ -430,6 +609,29 @@ export class ScheduledTasksService {
 				return SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP;
 			case 'identity':
 				return SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP;
+		}
+	}
+
+	private getDatabaseBackupTarget(jobType: string): DatabaseBackupTarget {
+		switch (jobType) {
+			case SCHEDULED_JOB_TYPES.DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.CORE;
+			case SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.NOTIFICATION_DELIVERY;
+			case SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.CAMPAIGNS;
+			case SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.REPORTING;
+			case SCHEDULED_JOB_TYPES.WIDGETS_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.WIDGETS;
+			case SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.BILLING;
+			case SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.IDENTITY;
+			default:
+				throw new Error(
+					`Unsupported database backup job type: ${jobType}`
+				);
 		}
 	}
 

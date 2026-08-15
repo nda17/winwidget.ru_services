@@ -28,6 +28,20 @@ describe('RabbitMqManagementService', () => {
 			MESSAGING_QUEUE_NAMES['campaign-email'],
 			`${MESSAGING_QUEUE_NAMES['campaign-email']}.retry-v2.1`,
 			`${MESSAGING_QUEUE_NAMES['notification-delivery-outcome']}.dead-letter`,
+			'winwidget.notification.daily-summary.telegram',
+			'winwidget.notification.daily-summary.telegram.retry.1',
+			'winwidget.notification.daily-summary.telegram.dead-letter',
+			'winwidget.campaigns.snapshot',
+			'winwidget.campaigns.snapshot.retry.1',
+			'winwidget.campaigns.snapshot.dead-letter',
+			'winwidget.campaigns.delivery-outcome.v2',
+			'winwidget.campaigns.delivery-outcome.v2.retry.1',
+			'winwidget.reporting.delivery-outcome',
+			'winwidget.reporting.delivery-outcome.dead-letter',
+			'winwidget.widgets.identity-user',
+			'winwidget.widgets.identity-user.retry.1',
+			'winwidget.widgets.billing-subscription',
+			'winwidget.widgets.billing-subscription.dead-letter',
 			...billingQueues
 		];
 		expect(billingQueues).toHaveLength(45);

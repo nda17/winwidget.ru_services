@@ -7,6 +7,7 @@ import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import { MessagingOperationalAlertService } from '@/messaging/messaging-operational-alert.service';
 import { NotificationDeliveryClientModule } from '@/messaging/notification-delivery-client.module';
 import { RabbitMqManagementModule } from '@/messaging/rabbitmq-management.module';
+import { ServiceOwnedMessagingOverviewClientService } from '@/messaging/service-owned-messaging-overview-client.service';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
 import { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
 import { Module } from '@nestjs/common';
@@ -24,6 +25,7 @@ import { Module } from '@nestjs/common';
 		BillingMessagingClientService,
 		IdentityMessagingClientService,
 		WidgetsDeliveryFailuresClientService,
+		ServiceOwnedMessagingOverviewClientService,
 		MessagingAdminService,
 		MessagingOperationalAlertService
 	],

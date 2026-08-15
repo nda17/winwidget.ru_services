@@ -4,10 +4,7 @@ import {
 	ServiceUnavailableException
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-	NOTIFICATION_DELIVERY_KINDS,
-	NotificationDeliveryKind
-} from '@/messaging/messaging.constants';
+import { NOTIFICATION_DELIVERY_KINDS } from '@/messaging/messaging.constants';
 import { createMessagingHeaders } from '@/messaging/messaging-context';
 import { randomUUID } from 'node:crypto';
 
@@ -15,6 +12,14 @@ const DEFAULT_INTERNAL_URL =
 	'http://127.0.0.1:4401/internal/notification-delivery';
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MIN_INTERNAL_TOKEN_LENGTH = 32;
+
+export const NOTIFICATION_DELIVERY_ADMIN_KINDS = [
+	...NOTIFICATION_DELIVERY_KINDS,
+	'daily-summary-delivery-telegram'
+] as const;
+
+export type NotificationDeliveryAdminKind =
+	(typeof NOTIFICATION_DELIVERY_ADMIN_KINDS)[number];
 
 export interface NotificationDeliveryFailureFilters {
 	integration?: string;
@@ -94,14 +99,14 @@ export interface NotificationDeliveryOverview {
 interface NotificationDeliveryRetryResult {
 	id: string;
 	eventId: string;
-	integration: NotificationDeliveryKind;
+	integration: NotificationDeliveryAdminKind;
 	retryingAt: string;
 }
 
 interface NotificationDeliveryCloseResult {
 	id: string;
 	eventId: string;
-	integration: NotificationDeliveryKind;
+	integration: NotificationDeliveryAdminKind;
 	resolvedAt: string;
 	resolution: 'CLOSED_NO_RETRY';
 	resolutionComment: string;
@@ -152,9 +157,11 @@ const isNullableIsoDate = (value: unknown): value is string | null =>
 
 const isNotificationKind = (
 	value: unknown
-): value is NotificationDeliveryKind =>
+): value is NotificationDeliveryAdminKind =>
 	typeof value === 'string' &&
-	NOTIFICATION_DELIVERY_KINDS.includes(value as NotificationDeliveryKind);
+	NOTIFICATION_DELIVERY_ADMIN_KINDS.includes(
+		value as NotificationDeliveryAdminKind
+	);
 
 const hasOptionalString = (
 	record: Record<string, unknown>,

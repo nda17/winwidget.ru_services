@@ -1905,6 +1905,23 @@ identity_cutover_assert_public_auth_contract() {
 		identity_cutover_fail 'public login validation no longer matches the stable frontend HTTP contract'
 }
 
+identity_cutover_assert_info_webhook_owner() {
+	local direct_status public_status core_status
+	direct_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+		--connect-timeout 3 --max-time 10 -H 'content-type: application/json' \
+		--data '{}' http://127.0.0.1:4900/api/v1/telegram-bot/webhook || true)"
+	public_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+		--connect-timeout 3 --max-time 10 -H 'content-type: application/json' \
+		--data '{}' https://api.winwidget.ru/api/v1/telegram-bot/webhook || true)"
+	[[ "$direct_status" == '401' && "$public_status" == '401' ]] ||
+		identity_cutover_fail "Info_bot webhook is not owned fail-closed by Identity: direct=$direct_status public=$public_status" || return 1
+	core_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+		--connect-timeout 3 --max-time 10 -H 'content-type: application/json' \
+		--data '{}' http://127.0.0.1:4200/api/v1/telegram-bot/webhook || true)"
+	[[ "$core_status" =~ ^(404|410)$ ]] ||
+		identity_cutover_fail "legacy Core Info_bot webhook remains reachable: status=$core_status"
+}
+
 identity_cutover_start_forward_runtime() {
 	local database_phase
 	database_phase="$(identity_database_current_phase)" || return 1
@@ -1968,6 +1985,7 @@ identity_cutover_start_forward_runtime() {
 		https://api.winwidget.ru/api/v1/auth/.well-known/jwks.json | identity_cutover_text_sha256)"
 	[[ "$direct_sha" =~ ^[0-9a-f]{64}$ && "$direct_sha" == "$public_sha" ]] ||
 		identity_cutover_fail 'public Gateway JWKS differs from direct Identity JWKS' || return 1
+	identity_cutover_assert_info_webhook_owner
 	identity_cutover_assert_public_auth_contract
 	internal_status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 10 \
 		https://api.winwidget.ru/internal/v1/auth/introspect || true)"
@@ -2565,6 +2583,7 @@ identity_cutover_self_test() {
 		identity_cutover_require_completion_parity identity_cutover_capture_dark_readiness \
 		identity_cutover_switch_core_integration_permissions \
 		identity_cutover_assert_narrow_owner_routes \
+		identity_cutover_assert_info_webhook_owner \
 		identity_cutover_assert_destination_queue_owner)"
 	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
 		"$source" == *'preflight then verified restore evidence'* &&
@@ -2580,6 +2599,8 @@ identity_cutover_self_test() {
 		"$source" == *'WIDGETS_IDENTITY_TOKEN'* &&
 		"$source" == *'api integration-worker'* &&
 		"$source" == *'internal/v1/auth/introspect'* &&
+		"$source" == *'api/v1/telegram-bot/webhook'* &&
+		"$source" == *'legacy Core Info_bot webhook remains reachable'* &&
 		"$source" == *'admin\.audit\.(campaigns|reporting|widgets|billing|identity)'* &&
 		"$source" == *'exactly one Identity consumer'* &&
 		"$source" == *'identity-backup-restore-rehearsal.sh'* ]] || return 1

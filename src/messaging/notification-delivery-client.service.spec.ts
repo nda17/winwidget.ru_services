@@ -241,6 +241,29 @@ describe('NotificationDeliveryClientService', () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
+	it('accepts the service-owned Daily Summary delivery failure kind', async () => {
+		const dailySummaryFailure = {
+			...failure,
+			integration: 'daily-summary-delivery-telegram'
+		};
+		jest.spyOn(global, 'fetch').mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					items: [dailySummaryFailure],
+					total: 1,
+					page: 1,
+					limit: 20,
+					totalPages: 1
+				}),
+				{ status: 200 }
+			)
+		);
+
+		await expect(createService().getFailures(1, 20, {})).resolves.toEqual(
+			expect.objectContaining({ items: [dailySummaryFailure], total: 1 })
+		);
+	});
+
 	it('accepts the exact retry and close response contracts', async () => {
 		const retryResult = {
 			id: failure.id,

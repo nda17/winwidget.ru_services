@@ -1,17 +1,25 @@
 import { ReportingAnalyticsController } from '../analytics/reporting-analytics.controller';
 import { ReportingDeliveryFailuresController } from '../delivery-failures/reporting-delivery-failures.controller';
 import { CoreInternalClient } from '../internal/core-internal.client';
+import { ReportingMessagingOverviewController } from '../internal/reporting-messaging-overview.controller';
+import { ReportingRuntimeService } from '../runtime/reporting-runtime.service';
 import { DailySummarySettingsController } from '../settings/daily-summary-settings.controller';
 import {
 	REPORTING_REQUIRED_ROLE,
-	ReportingAdminGuard
+	ReportingAdminGuard,
+	ReportingApiGuard,
+	ReportingMessagingInternalGuard,
+	isReportingMessagingLoopback
 } from './reporting-auth.guard';
 import type { ReportingRequest } from './reporting-request';
 import {
 	ExecutionContext,
 	ForbiddenException,
+	ServiceUnavailableException,
 	UnauthorizedException
 } from '@nestjs/common';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
+import type { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 
 const createContext = (
@@ -170,5 +178,95 @@ describe('ReportingAdminGuard access matrix', () => {
 			new UnauthorizedException('Bearer token is required')
 		);
 		expect(core.introspect).not.toHaveBeenCalled();
+	});
+});
+
+describe('Reporting messaging overview guards', () => {
+	const token = 'reporting-overview-internal-token-at-least-32-characters';
+	const guard = () =>
+		new ReportingMessagingInternalGuard({
+			get: jest.fn().mockReturnValue(token)
+		} as unknown as ConfigService);
+	const internalContext = (
+		address: string,
+		suppliedToken: string | string[] | null = token,
+		service: string | string[] | undefined = 'core'
+	): ExecutionContext =>
+		({
+			switchToHttp: () => ({
+				getRequest: () => ({
+					socket: { remoteAddress: address },
+					headers: {
+						'x-winwidget-service': service,
+						...(suppliedToken === null
+							? {}
+							: { 'x-winwidget-internal-token': suppliedToken })
+					}
+				})
+			})
+		}) as unknown as ExecutionContext;
+
+	it('binds both the API-role and internal caller guards to the endpoint', () => {
+		expect(
+			Reflect.getMetadata(
+				GUARDS_METADATA,
+				ReportingMessagingOverviewController
+			)
+		).toEqual([ReportingApiGuard, ReportingMessagingInternalGuard]);
+	});
+
+	it.each(['127.0.0.1', '127.23.45.67', '::1', '::ffff:127.0.0.1'])(
+		'allows an authenticated Core caller on loopback %s',
+		address => {
+			expect(guard().canActivate(internalContext(address))).toBe(true);
+		}
+	);
+
+	it.each(['10.0.0.5', '::ffff:10.0.0.5', '::2', 'localhost'])(
+		'rejects a non-loopback caller %s',
+		address => {
+			expect(() => guard().canActivate(internalContext(address))).toThrow(
+				ForbiddenException
+			);
+		}
+	);
+
+	it('rejects the wrong service identity before accepting its token', () => {
+		expect(() =>
+			guard().canActivate(internalContext('127.0.0.1', token, 'campaigns'))
+		).toThrow(ForbiddenException);
+	});
+
+	it.each([null, 'wrong-token', [token]])(
+		'rejects an invalid token header %#',
+		suppliedToken => {
+			expect(() =>
+				guard().canActivate(internalContext('127.0.0.1', suppliedToken))
+			).toThrow(UnauthorizedException);
+		}
+	);
+
+	it('fails startup closed for an insecure configured token', () => {
+		expect(
+			() =>
+				new ReportingMessagingInternalGuard({
+					get: jest.fn().mockReturnValue('change_me')
+				} as unknown as ConfigService)
+		).toThrow('non-placeholder secret');
+	});
+
+	it('rejects the endpoint outside the API process role', () => {
+		const apiGuard = new ReportingApiGuard({
+			apiEnabled: false
+		} as ReportingRuntimeService);
+
+		expect(() => apiGuard.canActivate()).toThrow(
+			ServiceUnavailableException
+		);
+	});
+
+	it('rejects missing and malformed loopback addresses', () => {
+		expect(isReportingMessagingLoopback(undefined)).toBe(false);
+		expect(isReportingMessagingLoopback('127.0.0.999')).toBe(false);
 	});
 });

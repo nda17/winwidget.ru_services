@@ -3,7 +3,10 @@ import type { ScheduledTasksService } from '@/maintenance/scheduled-tasks.servic
 import { TelegramBotController } from '@/telegram-bot/telegram-bot.controller';
 import type { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import { BadRequestException } from '@nestjs/common';
-import { ScheduledJobRunStatus } from '@prisma/client';
+import {
+	ScheduledJobRunStatus,
+	ScheduledJobRunTrigger
+} from '@prisma/client';
 import type { Request } from 'express';
 import { randomUUID } from 'node:crypto';
 
@@ -22,7 +25,9 @@ describe('TelegramBotController manual database backup', () => {
 				created
 			}),
 			getLatestActiveManualDatabaseBackup: jest.fn(),
-			getDatabaseBackupJob: jest.fn()
+			getDatabaseBackupJob: jest.fn(),
+			getDatabaseBackupOverview: jest.fn(),
+			getDatabaseBackupJobs: jest.fn()
 		} as unknown as ScheduledTasksService;
 		const adminEventLogService = {
 			record: jest.fn().mockResolvedValue(undefined)
@@ -178,6 +183,74 @@ describe('TelegramBotController manual database backup', () => {
 				metadata: expect.objectContaining({ target: 'widgets' })
 			})
 		);
+	});
+
+	it('exposes the redacted overview and validates history filters', async () => {
+		const { controller, scheduledTasksService } = createController(true);
+		(
+			scheduledTasksService.getDatabaseBackupOverview as jest.Mock
+		).mockResolvedValue({ items: [] });
+		(
+			scheduledTasksService.getDatabaseBackupJobs as jest.Mock
+		).mockResolvedValue({ items: [], page: 2, totalPages: 1 });
+
+		await expect(controller.getDatabaseBackupOverview()).resolves.toEqual({
+			items: []
+		});
+		await expect(
+			controller.getDatabaseBackupJobs(
+				'2',
+				'25',
+				'identity',
+				'MANUAL',
+				'SUCCEEDED'
+			)
+		).resolves.toEqual({ items: [], page: 2, totalPages: 1 });
+		expect(
+			scheduledTasksService.getDatabaseBackupJobs
+		).toHaveBeenCalledWith({
+			page: 2,
+			limit: 25,
+			target: 'identity',
+			trigger: ScheduledJobRunTrigger.MANUAL,
+			status: ScheduledJobRunStatus.SUCCEEDED
+		});
+		expect(() => controller.getDatabaseBackupJobs('0', '20')).toThrow(
+			BadRequestException
+		);
+		expect(() => controller.getDatabaseBackupJobs('1', '101')).toThrow(
+			BadRequestException
+		);
+		expect(() =>
+			controller.getDatabaseBackupJobs('2147483648', '2')
+		).toThrow(BadRequestException);
+		expect(() =>
+			controller.getDatabaseBackupJobs(
+				'1',
+				'20',
+				'unknown',
+				'MANUAL',
+				'SUCCEEDED'
+			)
+		).toThrow(BadRequestException);
+		expect(() =>
+			controller.getDatabaseBackupJobs(
+				'1',
+				'20',
+				'identity',
+				'UNKNOWN',
+				'SUCCEEDED'
+			)
+		).toThrow(BadRequestException);
+		expect(() =>
+			controller.getDatabaseBackupJobs(
+				'1',
+				'20',
+				'identity',
+				'MANUAL',
+				'UNKNOWN'
+			)
+		).toThrow(BadRequestException);
 	});
 });
 

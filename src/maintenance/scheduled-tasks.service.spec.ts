@@ -946,6 +946,70 @@ describe('ScheduledTasksService', () => {
 		});
 	});
 
+	it('redacts private backup result and infrastructure errors from polling', async () => {
+		const adminId = randomUUID();
+		const job = createManualBackupJob(
+			adminId,
+			`manual:${adminId}:${randomUUID()}`,
+			{
+				status: ScheduledJobRunStatus.FAILED,
+				lastError: 'pg_dump failed at /private/backup.dump',
+				result: {
+					fileSize: 4096,
+					fileName: '/private/backup.dump',
+					telegramReceipt: { chatId: '-100-secret' }
+				}
+			}
+		);
+		const scheduledJobs = {
+			getJob: jest.fn().mockResolvedValue({
+				...job,
+				scheduledFor: job.scheduledFor.toISOString(),
+				periodStart: null,
+				periodEnd: null,
+				availableAt: job.availableAt.toISOString(),
+				leaseExpiresAt: null,
+				startedAt: null,
+				finishedAt: null,
+				createdAt: job.createdAt.toISOString(),
+				updatedAt: job.updatedAt.toISOString()
+			})
+		} as unknown as ScheduledJobsService;
+		const service = new ScheduledTasksService(
+			{} as PrismaService,
+			scheduledJobs,
+			{} as ConfigService
+		);
+
+		const result = await service.getDatabaseBackupJob(
+			'core',
+			job.id,
+			adminId
+		);
+
+		expect(result).toEqual(
+			expect.objectContaining({
+				fileSize: 4096,
+				hasError: true
+			})
+		);
+		expect(Object.keys(result || {}).sort()).toEqual(
+			[
+				'completedAt',
+				'fileSize',
+				'hasError',
+				'jobId',
+				'queuedAt',
+				'startedAt',
+				'status',
+				'target'
+			].sort()
+		);
+		expect(JSON.stringify(result)).not.toContain('/private/backup.dump');
+		expect(JSON.stringify(result)).not.toContain('-100-secret');
+		expect(JSON.stringify(result)).not.toContain('pg_dump failed');
+	});
+
 	it('does not expose a manual backup owned by another admin', async () => {
 		const currentAdminId = randomUUID();
 		const otherAdminId = randomUUID();
@@ -976,5 +1040,205 @@ describe('ScheduledTasksService', () => {
 		await expect(
 			service.getDatabaseBackupJob('core', job.id, currentAdminId)
 		).resolves.toBeNull();
+	});
+
+	it('returns a redacted overview for every active database backup target', async () => {
+		const now = new Date();
+		const jobTypes = [
+			'DATABASE_BACKUP',
+			'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
+			'CAMPAIGNS_DATABASE_BACKUP',
+			'REPORTING_DATABASE_BACKUP',
+			'WIDGETS_DATABASE_BACKUP',
+			'BILLING_DATABASE_BACKUP',
+			'IDENTITY_DATABASE_BACKUP'
+		];
+		const jobs = new Map(
+			jobTypes.map((jobType, index) => [
+				jobType,
+				createManualBackupJob(randomUUID(), `overview:${jobType}`, {
+					jobType,
+					trigger: ScheduledJobRunTrigger.SCHEDULED,
+					status: ScheduledJobRunStatus.SUCCEEDED,
+					finishedAt: new Date(now.getTime() - index * 60_000),
+					result: {
+						fileSize: 1024 + index,
+						fileName: '/private/backup.dump',
+						telegramReceipt: { chatId: '-100-secret' }
+					}
+				})
+			])
+		);
+		const prisma = {
+			telegramBotSettings: {
+				upsert: jest.fn().mockResolvedValue({
+					databaseBackupEnabled: true
+				})
+			},
+			scheduledJobRun: {
+				findFirst: jest.fn(({ where }) => {
+					const job = jobs.get(where.jobType) ?? null;
+					if (where.trigger && job?.trigger !== where.trigger) {
+						return Promise.resolve(null);
+					}
+					if (where.status && job?.status !== where.status) {
+						return Promise.resolve(null);
+					}
+					return Promise.resolve(job);
+				})
+			}
+		} as unknown as PrismaService;
+		const service = new ScheduledTasksService(
+			prisma,
+			{} as ScheduledJobsService,
+			{} as ConfigService
+		);
+
+		const result = await service.getDatabaseBackupOverview();
+
+		expect(result.items).toHaveLength(7);
+		expect(result.items.map(item => item.target)).toEqual([
+			'core',
+			'notification-delivery',
+			'campaigns',
+			'reporting',
+			'widgets',
+			'billing',
+			'identity'
+		]);
+		expect(result.items[0]).toEqual(
+			expect.objectContaining({
+				freshness: 'FRESH',
+				latestSuccessful: expect.objectContaining({
+					target: 'core',
+					fileSize: 1024,
+					hasError: false
+				})
+			})
+		);
+		expect(JSON.stringify(result)).not.toContain('/private/backup.dump');
+		expect(JSON.stringify(result)).not.toContain('-100-secret');
+		expect(prisma.scheduledJobRun.findFirst).toHaveBeenCalledTimes(28);
+	});
+
+	it('marks the exact freshness boundary stale and distinguishes missing and disabled backups', async () => {
+		jest.useFakeTimers();
+		const now = new Date('2026-08-15T12:00:00.000Z');
+		jest.setSystemTime(now);
+		try {
+			const coreJob = createManualBackupJob(
+				randomUUID(),
+				'freshness:core',
+				{
+					trigger: ScheduledJobRunTrigger.SCHEDULED,
+					status: ScheduledJobRunStatus.SUCCEEDED,
+					finishedAt: new Date(now.getTime() - 36 * 60 * 60 * 1000)
+				}
+			);
+			const settingsUpsert = jest
+				.fn()
+				.mockResolvedValueOnce({ databaseBackupEnabled: true })
+				.mockResolvedValueOnce({ databaseBackupEnabled: false });
+			const findFirst = jest.fn(({ where }) => {
+				if (where.jobType !== 'DATABASE_BACKUP') {
+					return Promise.resolve(null);
+				}
+				if (
+					where.trigger &&
+					where.trigger !== ScheduledJobRunTrigger.SCHEDULED
+				) {
+					return Promise.resolve(null);
+				}
+				return Promise.resolve(coreJob);
+			});
+			const prisma = {
+				telegramBotSettings: { upsert: settingsUpsert },
+				scheduledJobRun: { findFirst }
+			} as unknown as PrismaService;
+			const service = new ScheduledTasksService(
+				prisma,
+				{} as ScheduledJobsService,
+				{} as ConfigService
+			);
+
+			const enabled = await service.getDatabaseBackupOverview();
+			const disabled = await service.getDatabaseBackupOverview();
+
+			expect(
+				enabled.items.find(item => item.target === 'core')?.freshness
+			).toBe('STALE');
+			expect(
+				enabled.items.find(item => item.target === 'notification-delivery')
+					?.freshness
+			).toBe('MISSING');
+			expect(
+				disabled.items.every(item => item.freshness === 'DISABLED')
+			).toBe(true);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
+	it('returns a redacted and stably paginated database backup history', async () => {
+		const job = createManualBackupJob(
+			randomUUID(),
+			'manual:reporting:history',
+			{
+				jobType: 'REPORTING_DATABASE_BACKUP',
+				status: ScheduledJobRunStatus.FAILED,
+				attempts: 3,
+				lastError: 'pg_dump failed at /private/path',
+				result: { fileSize: 2048, fileName: '/private/path' }
+			}
+		);
+		const prisma = {
+			scheduledJobRun: {
+				findMany: jest.fn().mockResolvedValue([job]),
+				count: jest.fn().mockResolvedValue(21)
+			}
+		} as unknown as PrismaService;
+		const service = new ScheduledTasksService(
+			prisma,
+			{} as ScheduledJobsService,
+			{} as ConfigService
+		);
+
+		const result = await service.getDatabaseBackupJobs({
+			target: 'reporting',
+			trigger: ScheduledJobRunTrigger.MANUAL,
+			status: ScheduledJobRunStatus.FAILED,
+			page: 2,
+			limit: 10
+		});
+
+		expect(prisma.scheduledJobRun.findMany).toHaveBeenCalledWith({
+			where: {
+				jobType: 'REPORTING_DATABASE_BACKUP',
+				trigger: ScheduledJobRunTrigger.MANUAL,
+				status: ScheduledJobRunStatus.FAILED
+			},
+			orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+			skip: 10,
+			take: 10
+		});
+		expect(result).toEqual(
+			expect.objectContaining({
+				page: 2,
+				limit: 10,
+				total: 21,
+				totalPages: 3
+			})
+		);
+		expect(result.items[0]).toEqual(
+			expect.objectContaining({
+				target: 'reporting',
+				status: ScheduledJobRunStatus.FAILED,
+				attempts: 3,
+				fileSize: 2048,
+				hasError: true
+			})
+		);
+		expect(JSON.stringify(result)).not.toContain('/private/path');
+		expect(JSON.stringify(result)).not.toContain('pg_dump failed');
 	});
 });

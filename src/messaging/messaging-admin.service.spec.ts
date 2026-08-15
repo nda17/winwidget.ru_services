@@ -14,6 +14,7 @@ import {
 	NotificationDeliveryClientService,
 	NotificationDeliveryInternalApiError
 } from '@/messaging/notification-delivery-client.service';
+import type { ServiceOwnedMessagingOverviewClientService } from '@/messaging/service-owned-messaging-overview-client.service';
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
 import type { PrismaService } from '@/prisma.service';
@@ -147,13 +148,146 @@ describe('MessagingAdminService', () => {
 				oldestPendingAt: '2026-08-05T11:58:00.000Z',
 				unresolvedFailures: 13,
 				retryingFailures: 6,
-				deliveredLast24Hours: 23,
+				processedLast24Hours: 19,
+				completedBackupsLast24Hours: 4,
 				widgetsError: null,
 				heartbeats: expect.arrayContaining([
 					expect.objectContaining({ service: 'widgets-publisher' })
 				])
 			})
 		);
+		expect(prisma.scheduledJobRun.count).toHaveBeenCalledWith({
+			where: {
+				jobType: {
+					in: [
+						'DATABASE_BACKUP',
+						'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
+						'CAMPAIGNS_DATABASE_BACKUP',
+						'REPORTING_DATABASE_BACKUP',
+						'WIDGETS_DATABASE_BACKUP',
+						'BILLING_DATABASE_BACKUP',
+						'IDENTITY_DATABASE_BACKUP'
+					]
+				},
+				status: 'SUCCEEDED',
+				finishedAt: { gte: expect.any(Date) }
+			}
+		});
+	});
+
+	it('keeps Campaigns metrics while Reporting is unavailable and reports that owner as down', async () => {
+		const prisma = {
+			outboxEvent: {
+				groupBy: jest.fn().mockResolvedValue([]),
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			integrationDeliveryFailure: {
+				count: jest.fn().mockResolvedValue(0)
+			},
+			integrationDeliveryReceipt: {
+				count: jest.fn().mockResolvedValue(1)
+			},
+			scheduledJobRun: {
+				count: jest.fn().mockResolvedValue(2)
+			},
+			messagingHeartbeat: {
+				findMany: jest.fn().mockResolvedValue([])
+			}
+		} as unknown as PrismaService;
+		const campaignsOverview = {
+			schemaVersion: 1 as const,
+			generatedAt: '2026-08-15T12:00:00.000Z',
+			outbox: { PENDING: 1, PUBLISHING: 2, PUBLISHED: 3, FAILED: 4 },
+			oldestPendingAt: '2026-08-15T11:59:00.000Z',
+			unresolvedFailures: 5,
+			retryingFailures: 6,
+			processedLast24Hours: 7,
+			heartbeats: [
+				{
+					service: 'campaigns-api' as const,
+					status: 'ok' as const,
+					activeInstances: 1,
+					lastSeenAt: '2026-08-15T12:00:00.000Z'
+				},
+				{
+					service: 'campaigns-worker' as const,
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null
+				},
+				{
+					service: 'campaigns-outbox-publisher' as const,
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null
+				}
+			]
+		};
+		const serviceOwnedOverview = {
+			getCampaignsOverview: jest.fn().mockResolvedValue(campaignsOverview),
+			getReportingOverview: jest
+				.fn()
+				.mockRejectedValue(new Error('Reporting overview timeout'))
+		} as unknown as ServiceOwnedMessagingOverviewClientService;
+		const service = new MessagingAdminService(
+			prisma,
+			{
+				getMessagingQueues: jest.fn().mockResolvedValue([])
+			} as unknown as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getOverview: jest
+					.fn()
+					.mockRejectedValue(
+						new Error('Notification Delivery unavailable')
+					)
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getOverview: jest
+					.fn()
+					.mockRejectedValue(new Error('Widgets unavailable'))
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			undefined,
+			undefined,
+			undefined,
+			serviceOwnedOverview
+		);
+
+		await expect(service.getOverview()).resolves.toEqual(
+			expect.objectContaining({
+				outbox: { PENDING: 1, PUBLISHING: 2, PUBLISHED: 3, FAILED: 4 },
+				oldestPendingAt: '2026-08-15T11:59:00.000Z',
+				unresolvedFailures: 5,
+				retryingFailures: 6,
+				processedLast24Hours: 8,
+				completedBackupsLast24Hours: 2,
+				campaignsError: null,
+				reportingError: 'Reporting overview timeout',
+				heartbeats: expect.arrayContaining([
+					expect.objectContaining({
+						service: 'campaigns-api',
+						status: 'ok',
+						activeInstances: 1
+					}),
+					expect.objectContaining({
+						service: 'reporting-api',
+						status: 'down',
+						activeInstances: 0
+					}),
+					expect.objectContaining({
+						service: 'reporting-scheduler',
+						status: 'down',
+						activeInstances: 0
+					})
+				])
+			})
+		);
+		expect(
+			serviceOwnedOverview.getCampaignsOverview
+		).toHaveBeenCalledTimes(1);
+		expect(
+			serviceOwnedOverview.getReportingOverview
+		).toHaveBeenCalledTimes(1);
 	});
 
 	it('routes an Identity-owned destination retry without touching the Core Outbox', async () => {
@@ -940,6 +1074,221 @@ describe('MessagingAdminService', () => {
 		expect(widgetsGetFailures).toHaveBeenCalledWith(1, 4, {});
 	});
 
+	it('returns available failures and explicit coverage when one owner rejects', async () => {
+		const coreFailure = {
+			...remoteFailure(
+				'cccccccc-cccc-4ccc-8ccc-ccccccccccc1',
+				'reporting-admin-audit',
+				'2026-08-15T12:01:00.000Z'
+			),
+			failedAt: new Date('2026-08-15T12:01:00.000Z'),
+			payload: {}
+		};
+		const widgetsFailure = remoteFailure(
+			'wwwwwwww-wwww-4www-8www-wwwwwwwwww02',
+			'webhook',
+			'2026-08-15T12:02:00.000Z'
+		);
+		const transaction = jest.fn().mockResolvedValue([[coreFailure], 1]);
+		const notificationGetFailures = jest
+			.fn()
+			.mockRejectedValue(new Error('contract drift'));
+		const widgetsGetFailures = jest.fn().mockResolvedValue({
+			items: [widgetsFailure],
+			total: 1,
+			page: 1,
+			limit: 20,
+			totalPages: 1
+		});
+		const identityGetFailures = jest.fn().mockResolvedValue({
+			items: [],
+			total: 0,
+			page: 1,
+			limit: 20,
+			totalPages: 1
+		});
+		jest
+			.spyOn(Logger.prototype, 'warn')
+			.mockImplementation(() => undefined);
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: jest.fn(),
+					count: jest.fn()
+				},
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getFailures: notificationGetFailures
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getFailures: widgetsGetFailures
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			undefined,
+			undefined,
+			{
+				getFailures: identityGetFailures
+			} as unknown as IdentityMessagingClientService
+		);
+
+		await expect(service.getFailures(1, 20)).resolves.toEqual({
+			items: [
+				expect.objectContaining({ id: widgetsFailure.id }),
+				expect.objectContaining({ id: coreFailure.id })
+			],
+			total: 2,
+			page: 1,
+			limit: 20,
+			totalPages: 1,
+			sourceErrors: {
+				notificationDelivery: 'Источник ошибок временно недоступен'
+			},
+			coverage: {
+				core: 'complete',
+				notificationDelivery: 'unavailable',
+				widgets: 'complete',
+				billing: 'not_queried',
+				identity: 'complete'
+			}
+		});
+		expect(transaction).toHaveBeenCalledTimes(1);
+		expect(notificationGetFailures).toHaveBeenCalledTimes(1);
+		expect(widgetsGetFailures).toHaveBeenCalledTimes(1);
+		expect(identityGetFailures).toHaveBeenCalledTimes(1);
+	});
+
+	it('returns an empty partial page with every relevant source error instead of throwing', async () => {
+		const transaction = jest
+			.fn()
+			.mockRejectedValue(new Error('core down'));
+		const notificationGetFailures = jest
+			.fn()
+			.mockRejectedValue(new Error('notification down'));
+		const widgetsGetFailures = jest
+			.fn()
+			.mockRejectedValue(new Error('widgets down'));
+		const billingGetFailures = jest
+			.fn()
+			.mockRejectedValue(new Error('billing down'));
+		const identityGetFailures = jest
+			.fn()
+			.mockRejectedValue(new Error('identity down'));
+		jest
+			.spyOn(Logger.prototype, 'warn')
+			.mockImplementation(() => undefined);
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: jest.fn(),
+					count: jest.fn()
+				},
+				$transaction: transaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getFailures: notificationGetFailures
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getFailures: widgetsGetFailures
+			} as unknown as WidgetsDeliveryFailuresClientService,
+			{
+				isBillingOwner: jest.fn().mockResolvedValue(true)
+			} as unknown as BillingCoreStateService,
+			{
+				getFailures: billingGetFailures
+			} as unknown as BillingMessagingClientService,
+			{
+				getFailures: identityGetFailures
+			} as unknown as IdentityMessagingClientService
+		);
+
+		await expect(service.getFailures(1, 20)).resolves.toEqual({
+			items: [],
+			total: 0,
+			page: 1,
+			limit: 20,
+			totalPages: 1,
+			sourceErrors: {
+				core: 'Источник ошибок временно недоступен',
+				notificationDelivery: 'Источник ошибок временно недоступен',
+				widgets: 'Источник ошибок временно недоступен',
+				billing: 'Источник ошибок временно недоступен',
+				identity: 'Источник ошибок временно недоступен'
+			},
+			coverage: {
+				core: 'unavailable',
+				notificationDelivery: 'unavailable',
+				widgets: 'unavailable',
+				billing: 'unavailable',
+				identity: 'unavailable'
+			}
+		});
+		expect(transaction).toHaveBeenCalledTimes(1);
+		expect(notificationGetFailures).toHaveBeenCalledTimes(1);
+		expect(widgetsGetFailures).toHaveBeenCalledTimes(1);
+		expect(billingGetFailures).toHaveBeenCalledTimes(1);
+		expect(identityGetFailures).toHaveBeenCalledTimes(1);
+	});
+
+	it('routes the service-owned Daily Summary failure filter only to Notification Delivery', async () => {
+		const notificationGetFailures = jest.fn().mockResolvedValue({
+			items: [],
+			total: 0,
+			page: 1,
+			limit: 20,
+			totalPages: 1
+		});
+		const coreTransaction = jest.fn();
+		const widgetsGetFailures = jest.fn();
+		const service = new MessagingAdminService(
+			{
+				integrationDeliveryFailure: {
+					findMany: jest.fn(),
+					count: jest.fn()
+				},
+				$transaction: coreTransaction
+			} as unknown as PrismaService,
+			{} as RabbitMqManagementService,
+			{} as AdminEventLogService,
+			{
+				getFailures: notificationGetFailures
+			} as unknown as NotificationDeliveryClientService,
+			{
+				getFailures: widgetsGetFailures
+			} as unknown as WidgetsDeliveryFailuresClientService
+		);
+
+		await expect(
+			service.getFailures(1, 20, {
+				integration: 'daily-summary-delivery-telegram',
+				status: 'FAILED'
+			})
+		).resolves.toEqual({
+			items: [],
+			total: 0,
+			page: 1,
+			limit: 20,
+			totalPages: 1,
+			sourceErrors: {},
+			coverage: {
+				core: 'not_queried',
+				notificationDelivery: 'complete',
+				widgets: 'not_queried',
+				billing: 'not_queried',
+				identity: 'not_queried'
+			}
+		});
+		expect(notificationGetFailures).toHaveBeenCalledWith(1, 20, {
+			integration: 'daily-summary-delivery-telegram',
+			status: 'FAILED'
+		});
+		expect(coreTransaction).not.toHaveBeenCalled();
+		expect(widgetsGetFailures).not.toHaveBeenCalled();
+	});
+
 	it('adds resolved archived Core rows to unfiltered history only after Billing takes ownership', async () => {
 		const archivedFailure = {
 			...remoteFailure(
@@ -1211,7 +1560,15 @@ describe('MessagingAdminService', () => {
 			total: 0,
 			page: 1,
 			limit: 20,
-			totalPages: 1
+			totalPages: 1,
+			sourceErrors: {},
+			coverage: {
+				core: 'not_queried',
+				notificationDelivery: 'not_queried',
+				widgets: 'not_queried',
+				billing: 'not_queried',
+				identity: 'not_queried'
+			}
 		});
 		expect(transaction).not.toHaveBeenCalled();
 	});
@@ -1273,7 +1630,15 @@ describe('MessagingAdminService', () => {
 			total: 5,
 			page: 2,
 			limit: 2,
-			totalPages: 3
+			totalPages: 3,
+			sourceErrors: {},
+			coverage: {
+				core: 'not_queried',
+				notificationDelivery: 'not_queried',
+				widgets: 'complete',
+				billing: 'not_queried',
+				identity: 'not_queried'
+			}
 		});
 		expect(coreTransaction).not.toHaveBeenCalled();
 		expect(notificationGetFailures).not.toHaveBeenCalled();
@@ -1365,7 +1730,8 @@ describe('MessagingAdminService', () => {
 				}),
 				unresolvedFailures: 7,
 				retryingFailures: 3,
-				deliveredLast24Hours: 11,
+				processedLast24Hours: 11,
+				completedBackupsLast24Hours: 0,
 				billingError: null,
 				heartbeats: expect.arrayContaining([
 					expect.objectContaining({
@@ -1471,7 +1837,15 @@ describe('MessagingAdminService', () => {
 			total: 1,
 			page: 1,
 			limit: 20,
-			totalPages: 1
+			totalPages: 1,
+			sourceErrors: {},
+			coverage: {
+				core: 'not_queried',
+				notificationDelivery: 'not_queried',
+				widgets: 'not_queried',
+				billing: 'complete',
+				identity: 'not_queried'
+			}
 		});
 		expect(coreTransaction).not.toHaveBeenCalled();
 		expect(notificationGetFailures).not.toHaveBeenCalled();

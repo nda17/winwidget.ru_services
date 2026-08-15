@@ -1,6 +1,7 @@
 import {
 	ReportingAdminGuard,
-	ReportingApiGuard
+	ReportingApiGuard,
+	ReportingMessagingInternalGuard
 } from './auth/reporting-auth.guard';
 import { ReportingAnalyticsController } from './analytics/reporting-analytics.controller';
 import { ReportingAnalyticsService } from './analytics/reporting-analytics.service';
@@ -16,6 +17,8 @@ import { ReportingHealthController } from './health/reporting-health.controller'
 import { ReportingHealthService } from './health/reporting-health.service';
 import { ReportingHeartbeatService } from './health/reporting-heartbeat.service';
 import { CoreInternalClient } from './internal/core-internal.client';
+import { ReportingMessagingOverviewController } from './internal/reporting-messaging-overview.controller';
+import { ReportingMessagingOverviewService } from './messaging/reporting-messaging-overview.service';
 import { ReportingOutboxPublisherService } from './messaging/reporting-outbox-publisher.service';
 import { ReportingRabbitMqModule } from './messaging/reporting-rabbitmq.module';
 import { ReportingWorkerService } from './messaging/reporting-worker.service';
@@ -48,12 +51,14 @@ import { ConfigModule } from '@nestjs/config';
 		DailySummarySettingsController,
 		ReportingDeliveryFailuresController,
 		ReportingHealthController,
-		ReportingMetricsController
+		ReportingMetricsController,
+		ReportingMessagingOverviewController
 	],
 	providers: [
 		CoreInternalClient,
 		ReportingApiGuard,
 		ReportingAdminGuard,
+		ReportingMessagingInternalGuard,
 		ProjectionService,
 		ReportingAnalyticsService,
 		DailySummarySettingsService,
@@ -63,6 +68,7 @@ import { ConfigModule } from '@nestjs/config';
 		DailySummarySchedulerService,
 		ReportingWorkerService,
 		ReportingOutboxPublisherService,
+		ReportingMessagingOverviewService,
 		ReportingBackfillService,
 		ReportingHeartbeatService,
 		ReportingHealthService

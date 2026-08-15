@@ -26,11 +26,16 @@ import {
 	ParseUUIDPipe,
 	Patch,
 	Post,
+	Query,
 	Req,
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
+import {
+	Role,
+	ScheduledJobRunStatus,
+	ScheduledJobRunTrigger
+} from '@prisma/client';
 import { isUUID } from 'class-validator';
 import { Request } from 'express';
 
@@ -135,10 +140,10 @@ export class TelegramBotController {
 			adminId,
 			section: 'TELEGRAM_BOT',
 			action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
-			description: 'Переустановлены webhook Telegram-ботов',
+			description: 'Переустановлен webhook Support_bot',
 			entityType: 'telegram_webhook',
 			entityId: 'all',
-			entityLabel: 'Info_bot + Support_bot',
+			entityLabel: 'Support_bot',
 			metadata: result,
 			request
 		});
@@ -228,6 +233,67 @@ export class TelegramBotController {
 
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
+	@Get('admin/database-backups/overview')
+	getDatabaseBackupOverview() {
+		return this.scheduledTasksService.getDatabaseBackupOverview();
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
+	@Get('admin/database-backups/jobs')
+	getDatabaseBackupJobs(
+		@Query('page') page?: string,
+		@Query('limit') limit?: string,
+		@Query('target') target?: string,
+		@Query('trigger') trigger?: string,
+		@Query('status') status?: string
+	) {
+		const parsedPage = this.parsePositiveInteger(page, 1, 'page');
+		const parsedLimit = this.parsePositiveInteger(limit, 20, 'limit');
+		if (parsedLimit > 100) {
+			throw new BadRequestException('limit не должен превышать 100');
+		}
+		if (parsedPage - 1 > Math.floor(2_147_483_647 / parsedLimit)) {
+			throw new BadRequestException('page выходит за допустимый диапазон');
+		}
+		if (
+			target &&
+			!Object.values(DATABASE_BACKUP_TARGETS).includes(
+				target as DatabaseBackupTarget
+			)
+		) {
+			throw new BadRequestException('Некорректная цель database backup');
+		}
+		if (
+			trigger &&
+			!Object.values(ScheduledJobRunTrigger).includes(
+				trigger as ScheduledJobRunTrigger
+			)
+		) {
+			throw new BadRequestException(
+				'Некорректный trigger database backup'
+			);
+		}
+		if (
+			status &&
+			!Object.values(ScheduledJobRunStatus).includes(
+				status as ScheduledJobRunStatus
+			)
+		) {
+			throw new BadRequestException('Некорректный status database backup');
+		}
+
+		return this.scheduledTasksService.getDatabaseBackupJobs({
+			page: parsedPage,
+			limit: parsedLimit,
+			...(target ? { target: target as DatabaseBackupTarget } : {}),
+			...(trigger ? { trigger: trigger as ScheduledJobRunTrigger } : {}),
+			...(status ? { status: status as ScheduledJobRunStatus } : {})
+		});
+	}
+
+	@HttpCode(200)
+	@Auth(Role.ADMIN)
 	@Get('admin/database-backups/:target/jobs/active')
 	getLatestActiveManualDatabaseBackup(
 		@Param('target', new ParseEnumPipe(DATABASE_BACKUP_TARGETS))
@@ -273,5 +339,20 @@ export class TelegramBotController {
 		@Headers('x-telegram-bot-api-secret-token') secret?: string
 	) {
 		return this.telegramBotService.handleSupportWebhook(update, secret);
+	}
+
+	private parsePositiveInteger(
+		value: string | undefined,
+		fallback: number,
+		field: string
+	) {
+		if (value === undefined) return fallback;
+		const parsed = Number(value);
+		if (!Number.isSafeInteger(parsed) || parsed < 1) {
+			throw new BadRequestException(
+				`${field} должен быть целым числом от 1`
+			);
+		}
+		return parsed;
 	}
 }

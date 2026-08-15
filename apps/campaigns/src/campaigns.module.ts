@@ -1,6 +1,7 @@
 import {
 	CampaignsApiGuard,
-	CampaignsAuthGuard
+	CampaignsAuthGuard,
+	CampaignsMessagingInternalGuard
 } from './auth/campaigns-auth.guard';
 import { AudienceSnapshotService } from './campaigns/audience-snapshot.service';
 import { CampaignsController } from './campaigns/campaigns.controller';
@@ -9,6 +10,8 @@ import { CampaignsHealthController } from './health/campaigns-health.controller'
 import { CampaignsHealthService } from './health/campaigns-health.service';
 import { CampaignsHeartbeatService } from './health/campaigns-heartbeat.service';
 import { CoreInternalClient } from './internal/core-internal.client';
+import { CampaignsMessagingOverviewController } from './internal/campaigns-messaging-overview.controller';
+import { CampaignsMessagingOverviewService } from './messaging/campaigns-messaging-overview.service';
 import { CampaignsOutboxPublisherService } from './messaging/campaigns-outbox-publisher.service';
 import { CampaignsRabbitMqModule } from './messaging/campaigns-rabbitmq.module';
 import { CampaignsWorkerService } from './messaging/campaigns-worker.service';
@@ -25,15 +28,21 @@ import { ConfigModule } from '@nestjs/config';
 		CampaignsPrismaModule,
 		CampaignsRabbitMqModule
 	],
-	controllers: [CampaignsController, CampaignsHealthController],
+	controllers: [
+		CampaignsController,
+		CampaignsHealthController,
+		CampaignsMessagingOverviewController
+	],
 	providers: [
 		CoreInternalClient,
 		CampaignsApiGuard,
 		CampaignsAuthGuard,
+		CampaignsMessagingInternalGuard,
 		CampaignsService,
 		AudienceSnapshotService,
 		CampaignsWorkerService,
 		CampaignsOutboxPublisherService,
+		CampaignsMessagingOverviewService,
 		CampaignsHeartbeatService,
 		CampaignsHealthService
 	]

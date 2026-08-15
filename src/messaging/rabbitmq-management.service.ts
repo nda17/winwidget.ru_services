@@ -6,6 +6,22 @@ import {
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+// Service-owned queues are observed here but remain outside Core topology
+// assertions and producer/consumer routing maps.
+const FEDERATED_MONITORING_QUEUE_PREFIXES = [
+	'winwidget.notification.daily-summary.telegram',
+	'winwidget.campaigns.snapshot',
+	'winwidget.campaigns.delivery-outcome.v2',
+	'winwidget.reporting.delivery-outcome',
+	'winwidget.widgets.identity-user',
+	'winwidget.widgets.billing-subscription'
+] as const;
+
+const MONITORED_MESSAGING_QUEUE_PREFIXES = [
+	...MESSAGING_QUEUE_PREFIXES,
+	...FEDERATED_MONITORING_QUEUE_PREFIXES
+] as const;
+
 export interface RabbitQueueInfo {
 	name: string;
 	messages: number;
@@ -40,7 +56,7 @@ export class RabbitMqManagementService {
 		);
 		return queues
 			.filter(queue =>
-				MESSAGING_QUEUE_PREFIXES.some(
+				MONITORED_MESSAGING_QUEUE_PREFIXES.some(
 					mainQueue =>
 						queue.name === mainQueue ||
 						queue.name.startsWith(`${mainQueue}.`)

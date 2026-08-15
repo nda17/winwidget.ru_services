@@ -68,7 +68,7 @@ export type TelegramSupportBotWebhookUpdate = {
 	message?: TelegramMessage;
 };
 
-export type TelegramWebhookBot = 'info' | 'support';
+export type TelegramWebhookBot = 'support';
 
 interface TelegramWebhookConfig {
 	bot: TelegramWebhookBot;
@@ -351,12 +351,12 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		return this.serializeSettings(settings);
 	}
 
-	async reinstallWebhook(bot: TelegramWebhookBot) {
+	async reinstallWebhook(bot: string) {
 		const config = this.getWebhookConfig(bot);
 		const webhookUrl = this.getWebhookUrl(config.path);
 
 		if (!config.token?.trim()) {
-			throw new BadRequestException(this.getBotNotConfiguredError(bot));
+			throw new BadRequestException(this.getBotNotConfiguredError());
 		}
 
 		try {
@@ -382,17 +382,11 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	}
 
 	async reinstallWebhooks() {
-		const [info, support] = await Promise.all([
-			this.reinstallWebhook('info'),
-			this.reinstallWebhook('support')
-		]);
-
-		return { items: [info, support] };
+		return { items: [await this.reinstallWebhook('support')] };
 	}
 
 	async getWebhookStatuses() {
 		const configs: TelegramWebhookConfig[] = [
-			this.getWebhookConfig('info'),
 			this.getWebhookConfig('support')
 		];
 
@@ -413,7 +407,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			webhookHost: webhookHost || null,
 			expectedWebhooks: webhookHost
 				? {
-						info: `${webhookHost}/api/v1/telegram-bot/webhook`,
 						support: `${webhookHost}/api/v1/telegram-bot/support-webhook`
 					}
 				: null,
@@ -623,35 +616,17 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		});
 	}
 
-	private getWebhookConfig(
-		bot: TelegramWebhookBot
-	): TelegramWebhookConfig {
-		if (bot === 'support') {
-			return {
-				bot,
-				title: 'Support_bot',
-				token: process.env.TELEGRAM_SUPPORT_BOT_TOKEN,
-				username: this.getSupportBotUsername(),
-				secret: process.env.TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET,
-				path: 'telegram-bot/support-webhook',
-				allowedUpdates: ['message']
-			};
-		}
-
-		if (bot !== 'info') {
+	private getWebhookConfig(bot: string): TelegramWebhookConfig {
+		if (bot !== 'support') {
 			throw new BadRequestException('Неизвестный Telegram-бот');
 		}
-
 		return {
-			bot,
-			title: 'Info_bot',
-			token: process.env.TELEGRAM_INFO_BOT_TOKEN,
-			username: process.env.TELEGRAM_INFO_BOT_USERNAME?.trim().replace(
-				/^@/,
-				''
-			),
-			secret: process.env.TELEGRAM_INFO_BOT_WEBHOOK_SECRET,
-			path: 'telegram-bot/webhook',
+			bot: 'support',
+			title: 'Support_bot',
+			token: process.env.TELEGRAM_SUPPORT_BOT_TOKEN,
+			username: this.getSupportBotUsername(),
+			secret: process.env.TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET,
+			path: 'telegram-bot/support-webhook',
 			allowedUpdates: ['message']
 		};
 	}
@@ -686,7 +661,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 	private async ensureWebhooksOnStartup() {
 		const configs: TelegramWebhookConfig[] = [
-			this.getWebhookConfig('info'),
 			this.getWebhookConfig('support')
 		];
 
@@ -724,7 +698,6 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
 		this.webhookHealthcheckInProgress = true;
 		const configs: TelegramWebhookConfig[] = [
-			this.getWebhookConfig('info'),
 			this.getWebhookConfig('support')
 		];
 
@@ -802,7 +775,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const token = config.token?.trim();
 
 		if (!token) {
-			throw new Error(this.getBotNotConfiguredError(config.bot));
+			throw new Error(this.getBotNotConfiguredError());
 		}
 
 		await this.fetchTelegramApi(
@@ -828,7 +801,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		const token = config.token?.trim();
 
 		if (!token) {
-			throw new Error(this.getBotNotConfiguredError(config.bot));
+			throw new Error(this.getBotNotConfiguredError());
 		}
 
 		await this.fetchTelegramApi(
@@ -889,7 +862,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				configuredUsername: config.username || null,
 				actualUsername: null,
 				usernameMatchesConfigured: null,
-				error: this.getBotNotConfiguredError(config.bot)
+				error: this.getBotNotConfiguredError()
 			};
 		}
 
@@ -957,12 +930,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		}
 	}
 
-	private getBotNotConfiguredError(bot: TelegramWebhookBot) {
-		if (bot === 'support') {
-			return TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED;
-		}
-
-		return TELEGRAM_NOTIFICATION_BOT_NOT_CONFIGURED;
+	private getBotNotConfiguredError() {
+		return TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED;
 	}
 
 	private getSettingsPatch(dto: UpdateTelegramBotSettingsDto) {

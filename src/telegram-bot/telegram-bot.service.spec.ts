@@ -75,16 +75,23 @@ describe('TelegramBotService webhook URLs', () => {
 		else process.env.TELEGRAM_WEBHOOK_HOST = originalWebhookHost;
 	});
 
-	it('uses the v1 API prefix for every generated webhook URL', () => {
+	it('uses the v1 API prefix for the Core-owned Support webhook', () => {
 		process.env.MODE = 'production';
 		process.env.TELEGRAM_WEBHOOK_HOST = 'https://hooks.example.test/';
 		const service = new TelegramBotService({} as PrismaService);
 
 		expect(service.getWebhookHealth().expectedWebhooks).toEqual({
-			info: 'https://hooks.example.test/api/v1/telegram-bot/webhook',
 			support:
 				'https://hooks.example.test/api/v1/telegram-bot/support-webhook'
 		});
+	});
+
+	it('rejects legacy Info_bot webhook administration in Core', async () => {
+		const service = new TelegramBotService({} as PrismaService);
+
+		await expect(service.reinstallWebhook('info')).rejects.toThrow(
+			'Неизвестный Telegram-бот'
+		);
 	});
 
 	it('derives the Notification Delivery backup time across midnight', () => {
