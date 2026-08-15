@@ -631,6 +631,98 @@ if [[ -e "$identity_cleanup_directory" || -L "$identity_cleanup_directory" ]]; t
 	esac
 fi
 
+# Removing Core's generic file route/source and the public /uploads route is a
+# separate forward-only boundary after Identity avatar ownership. A routine
+# push must never reach any migrate/recreate command for that revision.
+avatar_cleanup_marker="$APP_ROOT/deploy/backend/.avatar-core-cleanup-v1"
+avatar_cleanup_candidate='false'
+if [[ ! -e "$server_root/src/file" && ! -L "$server_root/src/file" &&
+	-f "$server_root/scripts/cleanup-avatar-core-source-production.sh" &&
+	-f "$server_root/scripts/test-avatar-core-source-cleanup-rehearsal.sh" ]]; then
+	avatar_cleanup_candidate='true'
+fi
+if [[ "$avatar_cleanup_candidate" == 'true' || -e "$avatar_cleanup_marker" || -L "$avatar_cleanup_marker" ]]; then
+	[[ "$avatar_cleanup_candidate" == 'true' ]] || {
+		echo 'An active/completed Avatar Core cleanup forbids reintroducing legacy file source or removing its lifecycle guards.' >&2
+		exit 1
+	}
+	if [[ ! -e "$avatar_cleanup_marker" && ! -L "$avatar_cleanup_marker" ]]; then
+		if [[ "$identity_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend revision $deploy_revision is verified but the destructive Avatar Core cleanup is deferred."
+			echo 'Use the manual avatar-cleanup target after migration, seven-day observation, backup and clean-restore gates pass.'
+			exit 0
+		fi
+		echo 'Routine deployment is blocked for an unstaged Avatar Core cleanup revision.' >&2
+		echo 'Use the manual avatar-cleanup target; routine migrate/recreate must not cross this boundary.' >&2
+		exit 1
+	fi
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" \
+		bash "$server_root/scripts/cleanup-avatar-core-source-production.sh" \
+			--guard-before-checkout-revision "$deploy_revision" >/dev/null || {
+		echo 'Avatar Core cleanup marker/evidence is invalid.' >&2
+		exit 1
+	}
+	avatar_cleanup_state="$(awk -F= '
+    $1 == "phase" { phase=substr($0, index($0, "=") + 1); phase_count += 1 }
+    $1 == "ownership_revision" { ownership=substr($0, index($0, "=") + 1); ownership_count += 1 }
+    $1 == "cleanup_revision" { cleanup=substr($0, index($0, "=") + 1); cleanup_count += 1 }
+    $1 == "current_client_revision" { client=substr($0, index($0, "=") + 1); client_count += 1 }
+    $1 == "lifecycle_key_retirement_evidence_sha256" {
+      lifecycle_retirement=substr($0, index($0, "=") + 1); lifecycle_retirement_count += 1
+    }
+    END {
+      if (phase_count != 1 || ownership_count != 1 || cleanup_count != 1 || client_count != 1 ||
+          lifecycle_retirement_count != 1 ||
+          phase !~ /^(verified|forward-only|complete)$/ || ownership !~ /^[0-9a-f]{40}$/ ||
+          cleanup !~ /^[0-9a-f]{40}$/ || client !~ /^[0-9a-f]{40}$/ ||
+          lifecycle_retirement !~ /^(pending|[0-9a-f]{64})$/) exit 1
+      printf "%s|%s|%s", phase, cleanup, lifecycle_retirement
+    }
+  ' "$avatar_cleanup_marker")" || {
+		echo 'Avatar Core cleanup marker identity is unreadable.' >&2
+		exit 1
+	}
+	avatar_cleanup_phase="${avatar_cleanup_state%%|*}"
+	avatar_cleanup_state_rest="${avatar_cleanup_state#*|}"
+	avatar_cleanup_bound_revision="${avatar_cleanup_state_rest%%|*}"
+	avatar_cleanup_lifecycle_retirement_sha="${avatar_cleanup_state_rest##*|}"
+	case "$avatar_cleanup_phase" in
+	verified | forward-only)
+		if [[ "$identity_automatic_prod_push" == 'true' ]]; then
+			echo "Automatic backend deployment is deferred while Avatar Core cleanup is phase=$avatar_cleanup_phase."
+			exit 0
+		fi
+		echo "Routine deployment is blocked while Avatar Core cleanup is phase=$avatar_cleanup_phase." >&2
+		echo 'Resume the exact manual avatar-cleanup workflow.' >&2
+		exit 1
+		;;
+	complete)
+		git -C "$server_root" merge-base --is-ancestor \
+			"$avatar_cleanup_bound_revision" "$deploy_revision" || {
+			echo 'Routine deployment would downgrade past the completed Avatar Core cleanup.' >&2
+			exit 1
+		}
+		if [[ "$avatar_cleanup_lifecycle_retirement_sha" == 'pending' ]]; then
+			if [[ "$identity_automatic_prod_push" == 'true' ]]; then
+				echo 'Automatic backend deployment is deferred while Avatar Core cleanup publication/key retirement is incomplete.'
+				exit 0
+			fi
+			echo 'Routine deployment is blocked until Avatar Core cleanup publication and lifecycle key retirement complete.' >&2
+			echo 'Resume the exact manual avatar-cleanup forward-recovery workflow.' >&2
+			exit 1
+		fi
+		# This cleanup-only checkout intentionally predates the frozen SHA-A
+		# lifecycle deploy hooks. A later descendant is safe only after the merge
+		# integration adds an evidence-gated bypass around every retired lifecycle
+		# prepare/predeploy/finish/release-canary call.
+		[[ "$deploy_revision" == "$avatar_cleanup_bound_revision" ]] || {
+			echo 'Completed Avatar cleanup descendant deployment is blocked until the SHA-A lifecycle bypass integration is present.' >&2
+			exit 1
+		}
+		;;
+	esac
+fi
+
 widgets_automatic_prod_push="${WIDGETS_AUTOMATIC_PROD_PUSH:-false}"
 widgets_deploy_action="$(
 	widgets_full_deploy_action "$widgets_automatic_prod_push"

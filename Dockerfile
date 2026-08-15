@@ -55,9 +55,7 @@ COPY --from=builder --chown=nestjs:nodejs /app/public/email ./public/email
 COPY --from=builder --chown=nestjs:nodejs /app/package.json ./package.json
 COPY --chown=nestjs:nodejs docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-	&& mkdir -p /app/uploads \
-	&& chown -R nestjs:nodejs /app/uploads
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 USER nestjs
 

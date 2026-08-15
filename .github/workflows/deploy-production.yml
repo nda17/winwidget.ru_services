@@ -19,6 +19,7 @@ on:
           - billing-cleanup
           - identity
           - identity-cleanup
+          - avatar-cleanup
       widgets_cutover_confirmation:
         description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
         required: false
@@ -100,6 +101,31 @@ on:
         required: false
         default: ''
         type: string
+      avatar_cleanup_action:
+        description: Avatar Core source cleanup action (manual avatar-cleanup target only)
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - verify
+          - run
+          - forward-recovery
+      avatar_cleanup_confirmation:
+        description: Type CLEANUP AVATAR CORE SOURCE for a forward-only mutation
+        required: false
+        default: ''
+        type: string
+      avatar_ownership_revision:
+        description: Exact 40-hex backend SHA that owns Identity avatar media
+        required: false
+        default: ''
+        type: string
+      avatar_client_revision:
+        description: Exact 40-hex frontend SHA served in X-Winwidget-Revision
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - prod
@@ -172,6 +198,8 @@ jobs:
             scripts/identity-backup-restore-rehearsal.sh
             scripts/cleanup-identity-core-source-production.sh
             scripts/test-identity-core-source-cleanup-rehearsal.sh
+            scripts/cleanup-avatar-core-source-production.sh
+            scripts/test-avatar-core-source-cleanup-rehearsal.sh
             apps/billing/src/cutover-main.ts
             prisma/migrations/20260811000000_prepare_billing_service_ownership/migration.sql
             prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
@@ -204,7 +232,9 @@ jobs:
             scripts/identity-cutover-production.sh \
             scripts/identity-backup-restore-rehearsal.sh \
             scripts/cleanup-identity-core-source-production.sh \
-            scripts/test-identity-core-source-cleanup-rehearsal.sh; do
+            scripts/test-identity-core-source-cleanup-rehearsal.sh \
+            scripts/cleanup-avatar-core-source-production.sh \
+            scripts/test-avatar-core-source-cleanup-rehearsal.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
@@ -246,6 +276,10 @@ jobs:
             bash scripts/cleanup-identity-core-source-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/cleanup-avatar-core-source-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-avatar-core-source-cleanup-rehearsal.sh
 
           # ShellCheck runs separately below; its actionlint integration
           # deadlocks while piping this workflow's large inline scripts.
@@ -287,7 +321,9 @@ jobs:
             scripts/identity-cutover-production.sh \
             scripts/identity-backup-restore-rehearsal.sh \
             scripts/cleanup-identity-core-source-production.sh \
-            scripts/test-identity-core-source-cleanup-rehearsal.sh
+            scripts/test-identity-core-source-cleanup-rehearsal.sh \
+            scripts/cleanup-avatar-core-source-production.sh \
+            scripts/test-avatar-core-source-cleanup-rehearsal.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -425,6 +461,10 @@ jobs:
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
           IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_confirmation || '' }}
           IDENTITY_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_migration_sha256 || '' }}
+          AVATAR_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_cleanup_action || 'status' }}
+          AVATAR_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_cleanup_confirmation || '' }}
+          AVATAR_OWNERSHIP_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_ownership_revision || '' }}
+          AVATAR_CLIENT_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_client_revision || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -495,6 +535,29 @@ jobs:
             echo 'Identity cleanup inputs require the identity-cleanup target.' >&2
             exit 1
           fi
+          if [[ "$DEPLOY_TARGET" == 'avatar-cleanup' ]]; then
+            case "$AVATAR_CLEANUP_ACTION:$AVATAR_CLEANUP_CONFIRMATION" in
+              status:)
+                [[ -z "$AVATAR_OWNERSHIP_REVISION$AVATAR_CLIENT_REVISION" ]] || exit 1
+                ;;
+              verify:)
+                [[ "$AVATAR_OWNERSHIP_REVISION" =~ ^[0-9a-f]{40}$ &&
+                  "$AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 1
+                ;;
+              run:'CLEANUP AVATAR CORE SOURCE'|forward-recovery:'CLEANUP AVATAR CORE SOURCE')
+                [[ "$AVATAR_OWNERSHIP_REVISION" =~ ^[0-9a-f]{40}$ &&
+                  "$AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 1
+                ;;
+              *)
+                echo 'Invalid Avatar Core cleanup action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$AVATAR_CLEANUP_ACTION" != 'status' ||
+            -n "$AVATAR_CLEANUP_CONFIRMATION$AVATAR_OWNERSHIP_REVISION$AVATAR_CLIENT_REVISION" ]]; then
+            echo 'Avatar cleanup inputs require the avatar-cleanup target.' >&2
+            exit 1
+          fi
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o ServerAliveInterval=15 \
@@ -502,7 +565,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' AVATAR_CLEANUP_ACTION='$AVATAR_CLEANUP_ACTION' AVATAR_CLEANUP_CONFIRMATION='$AVATAR_CLEANUP_CONFIRMATION' AVATAR_OWNERSHIP_REVISION='$AVATAR_OWNERSHIP_REVISION' AVATAR_CLIENT_REVISION='$AVATAR_CLIENT_REVISION' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -749,6 +812,29 @@ jobs:
               ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]]
           }
 
+          guard_avatar_cleanup_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local lifecycle_script="scripts/cleanup-avatar-core-source-production.sh"
+            local cleanup_marker="$APP_ROOT/deploy/backend/.avatar-core-cleanup-v1"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+            tracked_blob="$(
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null || true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || return 1
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || return 1
+              APP_ROOT="$APP_ROOT" SERVER_ROOT="$PWD" \
+                bash "$lifecycle_script" "$guard_action" "$expected_revision"
+              return
+            fi
+            [[ -z "$tracked_blob" && ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]]
+          }
+
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           billing_retarget_preflight=false
@@ -766,6 +852,7 @@ jobs:
             guard_billing_checkout_before_pull "$current_revision"
           fi
           guard_identity_checkout_before_pull "$current_revision"
+          guard_avatar_cleanup_checkout_before_pull "$current_revision"
           guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
@@ -780,6 +867,7 @@ jobs:
               guard_billing_checkout_before_pull "$EXPECTED_REVISION"
             fi
             guard_identity_checkout_before_pull "$EXPECTED_REVISION"
+            guard_avatar_cleanup_checkout_before_pull "$EXPECTED_REVISION"
           else
             echo "Automatic push will verify before the deploy job evaluates the active Reporting and Billing revision guards."
           fi
@@ -1070,6 +1158,8 @@ jobs:
           bash -n scripts/identity-backup-restore-rehearsal.sh
           bash -n scripts/cleanup-identity-core-source-production.sh
           bash -n scripts/test-identity-core-source-cleanup-rehearsal.sh
+          bash -n scripts/cleanup-avatar-core-source-production.sh
+          bash -n scripts/test-avatar-core-source-cleanup-rehearsal.sh
           node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
@@ -1092,6 +1182,10 @@ jobs:
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/cleanup-avatar-core-source-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-avatar-core-source-cleanup-rehearsal.sh
           node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
@@ -1112,7 +1206,9 @@ jobs:
             scripts/billing-backup-restore-rehearsal.sh \
             scripts/cleanup-billing-core-source-production.sh \
             scripts/test-billing-core-source-cleanup-rehearsal.sh \
-            scripts/test-identity-core-source-cleanup-rehearsal.sh
+            scripts/test-identity-core-source-cleanup-rehearsal.sh \
+            scripts/cleanup-avatar-core-source-production.sh \
+            scripts/test-avatar-core-source-cleanup-rehearsal.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -6924,6 +7020,8 @@ jobs:
             scripts/identity-backup-restore-rehearsal.sh \
             scripts/cleanup-identity-core-source-production.sh \
             scripts/test-identity-core-source-cleanup-rehearsal.sh \
+            scripts/cleanup-avatar-core-source-production.sh \
+            scripts/test-avatar-core-source-cleanup-rehearsal.sh \
             database-restore-entrypoint.sh
           docker run --rm \
             --network none \
@@ -7015,7 +7113,7 @@ jobs:
           requireCount('git merge --ff-only "$fetched_revision"', 1);
           requireCount(
             'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-            9,
+            10,
           );
           requireCount(
             '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
@@ -7046,18 +7144,19 @@ jobs:
           requireCount("guard_widgets_checkout_before_pull() {", 2);
           requireCount("guard_billing_checkout_before_pull() {", 2);
           requireCount("guard_identity_checkout_before_pull() {", 2);
+          requireCount("guard_avatar_cleanup_checkout_before_pull() {", 2);
           requireCount(
             'local lifecycle_script="scripts/widgets-database-lifecycle.sh"',
             2,
           );
           requireCount(
             'local guard_action="${2:---guard-before-fetch-revision}"',
-            8,
+            10,
           );
           requireCount('"$guard_action" "$expected_revision"', 2);
           requireCount(
             '"$expected_revision" --guard-before-checkout-revision',
-            8,
+            10,
           );
           requireCount(
             '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
@@ -7077,6 +7176,10 @@ jobs:
           );
           requireCount(
             'guard_identity_checkout_before_pull "$expected_revision"',
+            2,
+          );
+          requireCount(
+            'guard_avatar_cleanup_checkout_before_pull "$expected_revision"',
             2,
           );
           requireCount(
@@ -7101,6 +7204,14 @@ jobs:
           );
           requireCount(
             'echo "Identity marker exists but its checkout guard is unavailable." >&2',
+            1,
+          );
+          requireCount(
+            'echo "Avatar cleanup marker exists but its checkout guard is unavailable." >&2',
+            1,
+          );
+          requireCount(
+            'echo "Automatic backend deploy is verified but deferred: the active Avatar Core cleanup checkout guard rejects $EXPECTED_REVISION."',
             1,
           );
           requireCount(
@@ -7467,11 +7578,20 @@ jobs:
             "exit 0",
             billingCandidateGuard,
           );
+          const avatarCandidateGuard = automaticDefer.indexOf(
+            'if ! guard_avatar_cleanup_checkout_before_pull \\\n              "$EXPECTED_REVISION"',
+          );
+          const avatarDeferredExit = automaticDefer.indexOf(
+            "exit 0",
+            avatarCandidateGuard,
+          );
           if (
             automaticDeferStart < 0 ||
             automaticDeferEnd <= automaticDeferStart ||
             billingCandidateGuard < 0 ||
             billingDeferredExit <= billingCandidateGuard ||
+            avatarCandidateGuard <= billingCandidateGuard ||
+            avatarDeferredExit <= avatarCandidateGuard ||
             automaticDefer.includes("git fetch origin prod") ||
             automaticDefer.includes("git checkout prod") ||
             automaticDefer.includes("retarget_billing_cleanup_revision")
@@ -7517,6 +7637,9 @@ jobs:
             const identityPreFetchGuardIndex = checkoutFunction.lastIndexOf(
               'guard_identity_checkout_before_pull "$expected_revision"',
             );
+            const avatarPreFetchGuardIndex = checkoutFunction.lastIndexOf(
+              'guard_avatar_cleanup_checkout_before_pull "$expected_revision"',
+            );
             const fetchIndex = checkoutFunction.indexOf("git fetch origin prod");
             const reportingPostFetchGuardIndex = checkoutFunction.indexOf(
               "guard_reporting_checkout_before_pull",
@@ -7534,6 +7657,10 @@ jobs:
               "guard_identity_checkout_before_pull",
               fetchIndex,
             );
+            const avatarPostFetchGuardIndex = checkoutFunction.indexOf(
+              "guard_avatar_cleanup_checkout_before_pull",
+              fetchIndex,
+            );
             const checkoutIndex = checkoutFunction.lastIndexOf("git checkout prod");
             if (
               lockIndex < 0 ||
@@ -7544,11 +7671,13 @@ jobs:
               widgetsPreFetchGuardIndex < 0 ||
               billingPreFetchGuardIndex < 0 ||
               identityPreFetchGuardIndex < 0 ||
+              avatarPreFetchGuardIndex < 0 ||
               fetchIndex < 0 ||
               reportingPostFetchGuardIndex < 0 ||
               widgetsPostFetchGuardIndex < 0 ||
               billingPostFetchGuardIndex < 0 ||
               identityPostFetchGuardIndex < 0 ||
+              avatarPostFetchGuardIndex < 0 ||
               checkoutIndex < 0 ||
               lockIndex >= checkoutFunctionStart ||
               reportingPreFetchGuardIndex >= fetchIndex ||
@@ -7556,11 +7685,13 @@ jobs:
               widgetsPreFetchGuardIndex >= fetchIndex ||
               billingPreFetchGuardIndex >= fetchIndex ||
               identityPreFetchGuardIndex >= fetchIndex ||
+              avatarPreFetchGuardIndex >= fetchIndex ||
               fetchIndex >= reportingPostFetchGuardIndex ||
               reportingPostFetchGuardIndex >= widgetsPostFetchGuardIndex ||
               widgetsPostFetchGuardIndex >= billingPostFetchGuardIndex ||
               billingPostFetchGuardIndex >= identityPostFetchGuardIndex ||
-              identityPostFetchGuardIndex >= checkoutIndex
+              identityPostFetchGuardIndex >= avatarPostFetchGuardIndex ||
+              avatarPostFetchGuardIndex >= checkoutIndex
             ) {
               throw new Error(
                 `${label} must hold the production lock and pass every lifecycle guard around the exact fetch`,
@@ -7868,6 +7999,8 @@ jobs:
           bash -n scripts/cleanup-billing-core-source-production.sh
           bash -n scripts/test-billing-core-source-cleanup-rehearsal.sh
           bash -n scripts/test-identity-core-source-cleanup-rehearsal.sh
+          bash -n scripts/cleanup-avatar-core-source-production.sh
+          bash -n scripts/test-avatar-core-source-cleanup-rehearsal.sh
           pnpm exec prettier --check \
             .github/workflows/database-restore-production.yml \
             .github/workflows/deploy-production.yml
@@ -7911,6 +8044,10 @@ jobs:
             bash scripts/cleanup-identity-core-source-production.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/cleanup-avatar-core-source-production.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/test-avatar-core-source-cleanup-rehearsal.sh
           CORE_CLEANUP_REHEARSAL_RUN_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             APP_ROOT="$reporting_ci_app_root" \
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --rehearsal
@@ -9884,6 +10021,10 @@ jobs:
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
           IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_confirmation || '' }}
           IDENTITY_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_migration_sha256 || '' }}
+          AVATAR_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_cleanup_action || 'status' }}
+          AVATAR_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_cleanup_confirmation || '' }}
+          AVATAR_OWNERSHIP_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_ownership_revision || '' }}
+          AVATAR_CLIENT_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.avatar_client_revision || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -9970,6 +10111,29 @@ jobs:
             echo 'Identity cleanup inputs require the identity-cleanup target.' >&2
             exit 1
           fi
+          if [[ "$DEPLOY_TARGET" == 'avatar-cleanup' ]]; then
+            case "$AVATAR_CLEANUP_ACTION:$AVATAR_CLEANUP_CONFIRMATION" in
+              status:)
+                [[ -z "$AVATAR_OWNERSHIP_REVISION$AVATAR_CLIENT_REVISION" ]] || exit 1
+                ;;
+              verify:)
+                [[ "$AVATAR_OWNERSHIP_REVISION" =~ ^[0-9a-f]{40}$ &&
+                  "$AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 1
+                ;;
+              run:'CLEANUP AVATAR CORE SOURCE'|forward-recovery:'CLEANUP AVATAR CORE SOURCE')
+                [[ "$AVATAR_OWNERSHIP_REVISION" =~ ^[0-9a-f]{40}$ &&
+                  "$AVATAR_CLIENT_REVISION" =~ ^[0-9a-f]{40}$ ]] || exit 1
+                ;;
+              *)
+                echo 'Invalid Avatar Core cleanup action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+          elif [[ "$AVATAR_CLEANUP_ACTION" != 'status' ||
+            -n "$AVATAR_CLEANUP_CONFIRMATION$AVATAR_OWNERSHIP_REVISION$AVATAR_CLIENT_REVISION" ]]; then
+            echo 'Avatar cleanup inputs require the avatar-cleanup target.' >&2
+            exit 1
+          fi
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o ServerAliveInterval=15 \
@@ -9977,7 +10141,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_ENV_EXPECTED_SHA256='$IDENTITY_ENV_EXPECTED_SHA256' IDENTITY_ENV_EXPORT_ID='$IDENTITY_ENV_EXPORT_ID' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_ENV_EXPECTED_SHA256='$IDENTITY_ENV_EXPECTED_SHA256' IDENTITY_ENV_EXPORT_ID='$IDENTITY_ENV_EXPORT_ID' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' AVATAR_CLEANUP_ACTION='$AVATAR_CLEANUP_ACTION' AVATAR_CLEANUP_CONFIRMATION='$AVATAR_CLEANUP_CONFIRMATION' AVATAR_OWNERSHIP_REVISION='$AVATAR_OWNERSHIP_REVISION' AVATAR_CLIENT_REVISION='$AVATAR_CLIENT_REVISION' bash -s" <<'EOF'
           set -euo pipefail
           unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
             REPORTING_FIRST_ROLLOUT_STAGED_MARKER
@@ -10192,6 +10356,44 @@ jobs:
               -e "$cutover_marker" || -L "$cutover_marker" ||
               -e "$cleanup_marker" || -L "$cleanup_marker" ]]; then
               echo "Identity marker exists but its checkout guard is unavailable." >&2
+              return 1
+            fi
+          }
+          guard_avatar_cleanup_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local lifecycle_script="scripts/cleanup-avatar-core-source-production.sh"
+            local cleanup_marker="$APP_ROOT/deploy/backend/.avatar-core-cleanup-v1"
+            local tracked_blob actual_blob
+
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || {
+              echo "Expected Avatar cleanup revision is invalid." >&2
+              return 1
+            }
+            tracked_blob="$(
+              git rev-parse --verify "HEAD:$lifecycle_script" 2>/dev/null || true
+            )"
+            if [[ -e "$lifecycle_script" || -L "$lifecycle_script" ]]; then
+              [[ -f "$lifecycle_script" && ! -L "$lifecycle_script" ]] || {
+                echo "Avatar cleanup checkout guard script is unsafe." >&2
+                return 1
+              }
+              actual_blob="$(git hash-object "$lifecycle_script")"
+              [[ -n "$tracked_blob" && "$actual_blob" == "$tracked_blob" ]] || {
+                echo "Avatar cleanup checkout guard differs from the checked-out revision." >&2
+                return 1
+              }
+              APP_ROOT="$APP_ROOT" SERVER_ROOT="$PWD" \
+                bash "$lifecycle_script" "$guard_action" "$expected_revision"
+              return
+            fi
+            if [[ -n "$tracked_blob" ]]; then
+              echo "Tracked Avatar cleanup checkout guard script is missing." >&2
+              return 1
+            fi
+            if [[ -e "$cleanup_marker" || -L "$cleanup_marker" ]]; then
+              echo "Avatar cleanup marker exists but its checkout guard is unavailable." >&2
               return 1
             fi
           }
@@ -10907,11 +11109,13 @@ jobs:
             guard_widgets_checkout_before_pull "$current_revision"
             guard_billing_checkout_before_pull "$current_revision"
             guard_identity_checkout_before_pull "$current_revision"
+            guard_avatar_cleanup_checkout_before_pull "$current_revision"
             guard_campaigns_checkout_before_pull "$expected_revision"
             guard_reporting_checkout_before_pull "$expected_revision"
             guard_widgets_checkout_before_pull "$expected_revision"
             guard_billing_checkout_before_pull "$expected_revision"
             guard_identity_checkout_before_pull "$expected_revision"
+            guard_avatar_cleanup_checkout_before_pull "$expected_revision"
             if [[ -n "$prefetched_revision" ]]; then
               [[ "$prefetched_revision" == "$expected_revision" ]] || {
                 echo "Prefetched prod revision differs from the reviewed revision." >&2
@@ -10938,6 +11142,8 @@ jobs:
               "$expected_revision" --guard-before-checkout-revision
             guard_identity_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
+            guard_avatar_cleanup_checkout_before_pull \
+              "$expected_revision" --guard-before-checkout-revision
             git checkout prod
             git merge --ff-only "$fetched_revision"
             [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
@@ -10956,16 +11162,20 @@ jobs:
             guard_reporting_checkout_before_pull "$current_revision"
             guard_widgets_checkout_before_pull "$current_revision"
             guard_identity_checkout_before_pull "$current_revision"
+            guard_avatar_cleanup_checkout_before_pull "$current_revision"
             guard_campaigns_checkout_before_pull "$expected_revision"
             guard_reporting_checkout_before_pull "$expected_revision"
             guard_widgets_checkout_before_pull "$expected_revision"
             guard_identity_checkout_before_pull "$expected_revision"
+            guard_avatar_cleanup_checkout_before_pull "$expected_revision"
             git cat-file -e "$prefetched_revision^{commit}" 2>/dev/null || return 1
             guard_reporting_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
             guard_widgets_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
             guard_identity_checkout_before_pull \
+              "$expected_revision" --guard-before-checkout-revision
+            guard_avatar_cleanup_checkout_before_pull \
               "$expected_revision" --guard-before-checkout-revision
             git checkout prod
             git merge --ff-only "$prefetched_revision"
@@ -10981,6 +11191,7 @@ jobs:
             guard_widgets_checkout_before_pull "$current_revision"
             guard_billing_checkout_before_pull "$current_revision"
             guard_identity_checkout_before_pull "$current_revision"
+            guard_avatar_cleanup_checkout_before_pull "$current_revision"
             if ! guard_campaigns_checkout_before_pull \
               "$EXPECTED_REVISION" > /dev/null 2>&1; then
               echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
@@ -11006,6 +11217,11 @@ jobs:
             if ! guard_identity_checkout_before_pull \
               "$EXPECTED_REVISION" > /dev/null 2>&1; then
               echo "Automatic backend deploy is verified but deferred: the active Identity ownership guard rejects $EXPECTED_REVISION."
+              exit 0
+            fi
+            if ! guard_avatar_cleanup_checkout_before_pull \
+              "$EXPECTED_REVISION" > /dev/null 2>&1; then
+              echo "Automatic backend deploy is verified but deferred: the active Avatar Core cleanup checkout guard rejects $EXPECTED_REVISION."
               exit 0
             fi
           fi
@@ -11130,9 +11346,11 @@ jobs:
                   guard_campaigns_checkout_before_pull "$current_revision"
                   guard_reporting_checkout_before_pull "$current_revision"
                   guard_widgets_checkout_before_pull "$current_revision"
+                  guard_avatar_cleanup_checkout_before_pull "$current_revision"
                   guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
                   guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
                   guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
+                  guard_avatar_cleanup_checkout_before_pull "$EXPECTED_REVISION"
                   git fetch origin prod
                   prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"
                   [[ "$prefetched_cleanup_revision" == "$EXPECTED_REVISION" ]] || {
@@ -11142,6 +11360,8 @@ jobs:
                   guard_reporting_checkout_before_pull \
                     "$EXPECTED_REVISION" --guard-before-checkout-revision
                   guard_widgets_checkout_before_pull \
+                    "$EXPECTED_REVISION" --guard-before-checkout-revision
+                  guard_avatar_cleanup_checkout_before_pull \
                     "$EXPECTED_REVISION" --guard-before-checkout-revision
                   retarget_billing_cleanup_revision \
                     "$current_revision" "$EXPECTED_REVISION"
@@ -11165,12 +11385,16 @@ jobs:
               if [[ "$BILLING_CLEANUP_ACTION" == 'stage' &&
                 "$(git rev-parse HEAD)" != "$EXPECTED_REVISION" ]]; then
                 current_revision="$(git rev-parse HEAD)"
+                guard_avatar_cleanup_checkout_before_pull "$current_revision"
+                guard_avatar_cleanup_checkout_before_pull "$EXPECTED_REVISION"
                 git fetch origin prod
                 prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"
                 [[ "$prefetched_cleanup_revision" == "$EXPECTED_REVISION" ]] || {
                   echo 'Origin prod no longer matches the reviewed cleanup revision; marker was not changed.' >&2
                   exit 1
                 }
+                guard_avatar_cleanup_checkout_before_pull \
+                  "$EXPECTED_REVISION" --guard-before-checkout-revision
                 stage_billing_cleanup_revision_with_container_node \
                   "$current_revision" "$EXPECTED_REVISION"
               fi
@@ -11278,6 +11502,35 @@ jobs:
                     IDENTITY_ENV_EXPORT_FILE="$APP_ROOT/deploy/backend/.identity-production-env-$IDENTITY_ENV_EXPORT_ID.p7m" \
                     bash scripts/cleanup-identity-core-source-production.sh \
                       "$identity_cleanup_command"
+                  ;;
+              esac
+              ;;
+            avatar-cleanup)
+              [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
+                echo 'Avatar Core source cleanup actions are manual-only.' >&2
+                exit 1
+              }
+              checkout_verified_prod_revision "$EXPECTED_REVISION"
+              case "$AVATAR_CLEANUP_ACTION" in
+                status)
+                  APP_ROOT="$APP_ROOT" \
+                    bash scripts/cleanup-avatar-core-source-production.sh --status
+                  ;;
+                verify)
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    AVATAR_OWNERSHIP_REVISION="$AVATAR_OWNERSHIP_REVISION" \
+                    AVATAR_CLIENT_REVISION="$AVATAR_CLIENT_REVISION" \
+                    bash scripts/cleanup-avatar-core-source-production.sh --verify
+                  ;;
+                run|forward-recovery)
+                  avatar_cleanup_command='--deploy'
+                  [[ "$AVATAR_CLEANUP_ACTION" == 'run' ]] || avatar_cleanup_command='--forward-recovery'
+                  APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+                    AVATAR_OWNERSHIP_REVISION="$AVATAR_OWNERSHIP_REVISION" \
+                    AVATAR_CLIENT_REVISION="$AVATAR_CLIENT_REVISION" \
+                    AVATAR_CLEANUP_CONFIRMATION="$AVATAR_CLEANUP_CONFIRMATION" \
+                    bash scripts/cleanup-avatar-core-source-production.sh \
+                      "$avatar_cleanup_command"
                   ;;
               esac
               ;;

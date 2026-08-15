@@ -38,7 +38,7 @@ Prisma ORM и обслуживает frontend, публичные страниц
 - SMTP и Nodemailer;
 - React Email;
 - Telegram Bot API;
-- S3-совместимое файловое хранилище через AWS SDK;
+- service-owned S3-совместимое хранилище изображений Widgets и Identity;
 - generic webhook;
 - Bitrix24;
 - amoCRM и Kommo;
@@ -88,7 +88,6 @@ winwidget.ru_server/
 │   ├── messaging/             # RabbitMQ topology, monolith consumers и Outbox contracts
 │   ├── scheduled-jobs/        # durable-запуски, уникальность и CAS-lease
 │   ├── maintenance/           # длительные регламентные задачи и backup
-│   ├── file/                  # local/S3 uploads
 │   ├── safe-outbound-http/    # защита исходящих webhook/CRM-запросов
 │   └── ...                    # контент, статистика и admin-модули
 ├── apps/
@@ -149,7 +148,6 @@ winwidget.ru_server/
 | Кампании            | `apps/campaigns`                                                                                 | кампании, снимки аудитории и статусы доставок       |
 | Отчётность          | `apps/reporting`                                                                                 | проекции, аналитика и Daily Summary                 |
 | Регламентные задачи | `scheduled-jobs`, `maintenance`                                                                  | durable scheduler, lease и backup                   |
-| Файлы               | `file`                                                                                           | local uploads и S3                                  |
 | Интеграции          | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                    |
 
 Единого `AdminModule` нет: административные endpoints находятся внутри
@@ -164,7 +162,6 @@ winwidget.ru_server/
 - Основной API prefix: `/api/v1`.
 - Публичные loader- и preview-страницы исключены из API prefix.
 - Статические runtime-файлы отдаются из `public` по `/widgets/*`.
-- Development uploads сохраняются локально и доступны по `/uploads/*`.
 - Для публичных widget API разрешён cross-origin доступ.
 - Ошибки нормализуются глобальными HTTP и reCAPTCHA filters.
 
@@ -1298,12 +1295,11 @@ Backend обслуживает три бота:
 
 Webhook settings и health доступны в модуле `telegram-bot`.
 
-## Файлы
+## Изображения
 
-```text
-MODE=development -> локальный каталог uploads
-MODE=production  -> S3-совместимое хранилище
-```
+Изображения принадлежат доменным сервисам: аватары обслуживает Identity через
+scoped API, изображения кнопок виджетов — Widgets. Generic `/files`, raw S3
+keys и локальный `/uploads/*` в Core отсутствуют.
 
 Для пользовательских PNG-кнопок проверяются:
 
@@ -1358,7 +1354,7 @@ GET /api/v1/health/admin
 
 Он проверяет backend, PostgreSQL, RabbitMQ, heartbeat `outbox-publisher`,
 `integration-worker` и `maintenance-worker`, накопление Outbox/DLQ, состояние
-durable-задач, S3, SMTP, SMS Aero, reCAPTCHA, ЮKassa и три Telegram-бота. Итог
+durable-задач, SMTP, SMS Aero, reCAPTCHA, ЮKassa и три Telegram-бота. Итог
 каждой проверки находится в массиве `checks` со статусом `ok`, `warning`,
 `down` или `disabled`.
 
@@ -1592,7 +1588,11 @@ TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET
 
 ## S3
 
-Production storage:
+Generic `S3_*` принадлежат Widgets. Identity получает отдельные
+`IDENTITY_AVATAR_S3_*` credentials, ограниченные своим avatar-prefix. Core API
+не получает storage credentials.
+
+Widgets production storage:
 
 ```text
 S3_ENDPOINT

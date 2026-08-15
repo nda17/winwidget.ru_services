@@ -18,7 +18,6 @@ import {
 	WidgetsMessagingOverview
 } from '@/messaging/widgets-delivery-failures-client.service';
 import { PrismaService } from '@/prisma.service';
-import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -97,7 +96,6 @@ export class HealthService {
 				billingResult
 			),
 			this.checkScheduledJobs(),
-			this.checkS3(),
 			this.checkYooKassa(billingResult),
 			this.checkInfoTelegramBot(),
 			this.checkSupportTelegramBot()
@@ -603,60 +601,6 @@ export class HealthService {
 				? `FAILED: ${failed}, QUEUED с задержкой > 15 минут: ${overdueQueued}, просроченных lease: ${expiredLeases}`
 				: 'Ошибок, длительной задержки и просроченных lease нет'
 		};
-	}
-
-	private async checkS3(): Promise<HealthCheck> {
-		const mode = this.configService.get<string>('MODE');
-		if (mode !== 'production') {
-			return {
-				id: 's3',
-				title: 'S3 хранилище',
-				status: 'disabled',
-				message: 'В текущем режиме файлы сохраняются локально'
-			};
-		}
-
-		const required = [
-			'S3_BUCKET',
-			'S3_ACCESS_KEY_ID',
-			'S3_SECRET_ACCESS_KEY'
-		];
-		const missing = required.filter(key => !this.configService.get(key));
-
-		if (missing.length > 0) {
-			return {
-				id: 's3',
-				title: 'S3 хранилище',
-				status: 'warning',
-				message: `Не настроены переменные: ${missing.join(', ')}`
-			};
-		}
-
-		return this.measure('s3', 'S3 хранилище', async () => {
-			const client = new S3Client({
-				endpoint:
-					this.configService.get<string>('S3_ENDPOINT') ||
-					'https://s3.twcstorage.ru',
-				region: this.configService.get<string>('S3_REGION') || 'ru-1',
-				forcePathStyle:
-					this.configService.get<string>('S3_FORCE_PATH_STYLE') !==
-					'false',
-				credentials: {
-					accessKeyId: this.configService.get<string>('S3_ACCESS_KEY_ID'),
-					secretAccessKey: this.configService.get<string>(
-						'S3_SECRET_ACCESS_KEY'
-					)
-				}
-			});
-
-			await client.send(
-				new HeadBucketCommand({
-					Bucket: this.configService.get<string>('S3_BUCKET')
-				})
-			);
-
-			return 'Бакет доступен';
-		});
 	}
 
 	private async checkYooKassa(
