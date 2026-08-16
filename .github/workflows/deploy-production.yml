@@ -1141,6 +1141,7 @@ jobs:
             apps/reporting/pnpm-lock.yaml
             apps/widgets/pnpm-lock.yaml
             apps/billing/pnpm-lock.yaml
+            apps/identity/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -1153,6 +1154,7 @@ jobs:
           pnpm --dir apps/reporting install --frozen-lockfile
           pnpm --dir apps/widgets install --frozen-lockfile
           pnpm --dir apps/billing install --frozen-lockfile
+          pnpm --dir apps/identity install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
         env:
