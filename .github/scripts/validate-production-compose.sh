@@ -1368,9 +1368,6 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "RABBITMQ_MONITOR_PASSWORD",
       "RABBITMQ_VHOST",
       "TRUST_PROXY",
-      "JWT_ACCESS_PRIVATE_KEY_BASE64",
-      "JWT_ACCESS_JWKS_BASE64",
-      "JWT_ACCESS_ACTIVE_KID",
       "JWT_ISSUER",
       "JWT_AUDIENCE",
       "CORS_ALLOWED_ORIGINS",
@@ -1395,6 +1392,17 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "DATABASE_RESTORE_PRODUCTION_ENABLED",
     ]);
     const apiEnvironment = requireService("api").environment ?? {};
+    for (const forbidden of [
+      "JWT_ACCESS_PRIVATE_KEY_BASE64",
+      "JWT_ACCESS_JWKS_BASE64",
+      "JWT_ACCESS_ACTIVE_KID",
+    ]) {
+      if (forbidden in apiEnvironment) {
+        throw new Error(
+          `Core API must not receive retired Core signing material ${forbidden}`,
+        );
+      }
+    }
     if (
       apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_URL !==
       "http://127.0.0.1:4401/internal/notification-delivery"
@@ -2233,11 +2241,11 @@ docker compose --profile migration --profile notification-delivery-migration --p
       identityApiEnvironment.WIDGETS_INTERNAL_BASE_URL !==
         "http://127.0.0.1:4700" ||
       identityApiEnvironment.JWT_ACCESS_PRIVATE_KEY_BASE64 ===
-        apiEnvironment.JWT_ACCESS_PRIVATE_KEY_BASE64 ||
+        process.env.JWT_ACCESS_PRIVATE_KEY_BASE64 ||
       identityApiEnvironment.JWT_ACCESS_JWKS_BASE64 ===
-        apiEnvironment.JWT_ACCESS_JWKS_BASE64 ||
+        process.env.JWT_ACCESS_JWKS_BASE64 ||
       identityApiEnvironment.JWT_ACCESS_ACTIVE_KID ===
-        apiEnvironment.JWT_ACCESS_ACTIVE_KID ||
+        process.env.JWT_ACCESS_ACTIVE_KID ||
       "BILLING_INTERNAL_TOKEN" in identityApiEnvironment ||
       "WIDGETS_INTERNAL_TOKEN" in identityApiEnvironment ||
       identityApi.labels?.["com.winwidget.singleton"] !== "true" ||
