@@ -212,6 +212,7 @@ if (
 }
 requireCount("apps/identity/pnpm-lock.yaml", 2);
 requireCount("pnpm --dir apps/identity install --frozen-lockfile", 1);
+requireCount('process.stdout.write(`::add-mask::${value}\\n`);', 2);
 
 requireCount("guard_campaigns_checkout_before_pull() {", 2);
 requireCount("checkout_verified_prod_revision() {", 1);

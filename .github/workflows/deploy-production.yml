@@ -1840,6 +1840,9 @@ jobs:
           for (const key of requiredKeys) {
             const value = values.get(key);
             if (!value) throw new Error(`Missing generated ${key}`);
+            if (key === 'JWT_ACCESS_PRIVATE_KEY_BASE64') {
+              process.stdout.write(`::add-mask::${value}\n`);
+            }
             appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
           }
           appendFileSync(
@@ -1869,6 +1872,9 @@ jobs:
           for (const [source, destination] of mapping) {
             const value = values.get(source);
             if (!value) throw new Error(`Missing generated ${source}`);
+            if (source === 'JWT_ACCESS_PRIVATE_KEY_BASE64') {
+              process.stdout.write(`::add-mask::${value}\n`);
+            }
             appendFileSync(process.env.GITHUB_ENV, `${destination}=${value}\n`);
           }
           NODE
