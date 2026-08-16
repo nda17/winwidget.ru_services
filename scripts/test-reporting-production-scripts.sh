@@ -282,6 +282,11 @@ workflow_file="$server_root/.github/workflows/deploy-production.yml"
 	echo 'Production workflow is missing or unsafe.' >&2
 	exit 1
 }
+deploy_controller_file="$server_root/.github/scripts/stage-or-deploy-backend.sh"
+[[ -f "$deploy_controller_file" && ! -L "$deploy_controller_file" ]] || {
+	echo 'Versioned production deploy controller is missing or unsafe.' >&2
+	exit 1
+}
 package_file="$server_root/package.json"
 [[ -f "$package_file" && ! -L "$package_file" &&
 	"$(<"$package_file")" == *'"test:reporting-cutover-rehearsal": "bash scripts/test-reporting-cutover-rehearsal.sh"'* ]] || {
@@ -308,14 +313,33 @@ workflow_exact_line_count() {
 		END { print count + 0 }
 	' "$workflow_file"
 }
+deployment_exact_line_count() {
+	local needle="$1"
+	awk -v needle="$needle" '
+		{
+			line = $0
+			sub(/^[[:space:]]*/, "", line)
+			sub(/[[:space:]]*$/, "", line)
+			if (line == needle) count += 1
+		}
+		END { print count + 0 }
+	' "$workflow_file" "$deploy_controller_file"
+}
 
 lifecycle_checkout_preflight_job="$(
 	sed -n '/^  lifecycle_checkout_preflight:/,/^  verify:/p' "$workflow_file"
 )"
 verify_header="$(sed -n '/^  verify:/,/^    services:/p' "$workflow_file")"
-deploy_job="$(
+deploy_job_header="$(
 	sed -n '/^  deploy:/,$p' "$workflow_file"
 )"
+deploy_controller_checkout_line="$(
+	grep -n -m1 -- '- name: Checkout deployment controller' "$workflow_file" | cut -d: -f1
+)"
+deploy_controller_run_line="$(
+	grep -n -m1 -- 'run: bash .github/scripts/stage-or-deploy-backend.sh' "$workflow_file" | cut -d: -f1
+)"
+deploy_job="$deploy_job_header"$'\n'"$(sed 's/^/          /' "$deploy_controller_file")"
 
 [[
 	"$(workflow_exact_line_count 'lifecycle_checkout_preflight:')" == '1' &&
@@ -330,11 +354,23 @@ deploy_job="$(
 	"$lifecycle_checkout_preflight_job" == *'guard_reporting_checkout_before_pull "$EXPECTED_REVISION"'* &&
 	"$verify_header" == *'needs: lifecycle_checkout_preflight'* &&
 	"$verify_header" == *"needs.lifecycle_checkout_preflight.result == 'success'"* &&
-	"$deploy_job" == *'needs: verify'* &&
-	"$deploy_job" == *'timeout-minutes: 90'* &&
-	"$(grep -Fc -- '-o ServerAliveInterval=15' "$workflow_file")" -ge 2 &&
-	"$(grep -Fc -- '-o ServerAliveCountMax=4' "$workflow_file")" -ge 2 &&
-	"$(grep -Fc -- '-o TCPKeepAlive=yes' "$workflow_file")" -ge 2 &&
+	"$deploy_job_header" == *'needs: verify'* &&
+	"$deploy_job_header" == *'timeout-minutes: 90'* &&
+	"$deploy_controller_checkout_line" =~ ^[0-9]+$ &&
+	"$deploy_controller_run_line" =~ ^[0-9]+$ &&
+	"$deploy_controller_checkout_line" -lt "$deploy_controller_run_line" &&
+	"$((
+		$(grep -Fc -- '-o ServerAliveInterval=15' "$workflow_file") +
+			$(grep -Fc -- '-o ServerAliveInterval=15' "$deploy_controller_file")
+	))" -ge 2 &&
+	"$((
+		$(grep -Fc -- '-o ServerAliveCountMax=4' "$workflow_file") +
+			$(grep -Fc -- '-o ServerAliveCountMax=4' "$deploy_controller_file")
+	))" -ge 2 &&
+	"$((
+		$(grep -Fc -- '-o TCPKeepAlive=yes' "$workflow_file") +
+			$(grep -Fc -- '-o TCPKeepAlive=yes' "$deploy_controller_file")
+	))" -ge 2 &&
 	"$deploy_job" == *$'            notification-delivery)\n'* &&
 	"$deploy_job" == *'bash scripts/deploy-notification-delivery-production.sh'* &&
 	"$deploy_job" == *$'            campaigns)\n'* &&
@@ -370,12 +406,14 @@ for retired_line in \
 	'reporting-cutover-resolve-core-cleanup:' \
 	'reporting-cutover-stage-cleanup:' \
 	'reporting-database:'; do
-	[[ "$(workflow_exact_line_count "$retired_line")" == '0' ]] || {
+	[[ "$(deployment_exact_line_count "$retired_line")" == '0' ]] || {
 		echo "Completed Reporting lifecycle action remains in the production workflow: $retired_line" >&2
 		exit 1
 	}
 done
-unset retired_line lifecycle_checkout_preflight_job verify_header deploy_job
+unset retired_line lifecycle_checkout_preflight_job verify_header deploy_job \
+	deploy_job_header deploy_controller_file deploy_controller_checkout_line \
+	deploy_controller_run_line
 printf 'reporting_steady_state_workflow=passed\n'
 
 printf 'reporting_production_scripts=passed\n'
