@@ -970,6 +970,30 @@ jobs:
           printf 'REPORTING_INTERNAL_TOKEN=%s\n' \
             "$reporting_internal_token" >> "$GITHUB_ENV"
 
+      - name: Generate CI-only Identity scoped tokens
+        run: |
+          identity_scoped_token_names=(
+            IDENTITY_CORE_TOKEN
+            CORE_IDENTITY_TOKEN
+            IDENTITY_CAMPAIGNS_TOKEN
+            IDENTITY_REPORTING_TOKEN
+            IDENTITY_WIDGETS_TOKEN
+            WIDGETS_IDENTITY_TOKEN
+            IDENTITY_BILLING_TOKEN
+            BILLING_IDENTITY_TOKEN
+          )
+          declare -A identity_scoped_token_values=()
+          for name in "${identity_scoped_token_names[@]}"; do
+            value="$(openssl rand -hex 32)"
+            if [[ -n "${identity_scoped_token_values[$value]:-}" ]]; then
+              echo 'Failed to generate unique CI-only Identity scoped tokens' >&2
+              exit 1
+            fi
+            identity_scoped_token_values["$value"]=1
+            echo "::add-mask::$value"
+            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+          done
+
       - name: Fast-check Campaigns production recovery
         run: |
           for script in \

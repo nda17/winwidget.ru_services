@@ -213,6 +213,56 @@ if (
 requireCount("apps/identity/pnpm-lock.yaml", 2);
 requireCount("pnpm --dir apps/identity install --frozen-lockfile", 1);
 requireCount('process.stdout.write(`::add-mask::${value}\\n`);', 2);
+const identityScopedTokenStep = workflow.indexOf(
+  "      - name: Generate CI-only Identity scoped tokens\n",
+);
+const firstProductionRecoveryCheck = workflow.indexOf(
+  "      - name: Fast-check Campaigns production recovery\n",
+  identityScopedTokenStep,
+);
+if (
+  identityScopedTokenStep < 0 ||
+  firstProductionRecoveryCheck <= identityScopedTokenStep
+) {
+  throw new Error("CI-only Identity scoped token step is missing or misplaced");
+}
+const identityScopedTokenBlock = workflow.slice(
+  identityScopedTokenStep,
+  firstProductionRecoveryCheck,
+);
+const exactIdentityScopedTokenNames = `          identity_scoped_token_names=(
+            IDENTITY_CORE_TOKEN
+            CORE_IDENTITY_TOKEN
+            IDENTITY_CAMPAIGNS_TOKEN
+            IDENTITY_REPORTING_TOKEN
+            IDENTITY_WIDGETS_TOKEN
+            WIDGETS_IDENTITY_TOKEN
+            IDENTITY_BILLING_TOKEN
+            BILLING_IDENTITY_TOKEN
+          )`;
+if (!identityScopedTokenBlock.includes(exactIdentityScopedTokenNames)) {
+  throw new Error("CI-only Identity scoped token name set is not exact");
+}
+const identityScopedTokenOrder = [
+  'declare -A identity_scoped_token_values=()',
+  'for name in "${identity_scoped_token_names[@]}"; do',
+  'value="$(openssl rand -hex 32)"',
+  'if [[ -n "${identity_scoped_token_values[$value]:-}" ]]; then',
+  'identity_scoped_token_values["$value"]=1',
+  'echo "::add-mask::$value"',
+  `printf '%s=%s\\n' "$name" "$value" >> "$GITHUB_ENV"`,
+  "done",
+];
+let previousIdentityScopedTokenIndex = -1;
+for (const sourceLine of identityScopedTokenOrder) {
+  const sourceIndex = identityScopedTokenBlock.indexOf(sourceLine);
+  if (sourceIndex <= previousIdentityScopedTokenIndex) {
+    throw new Error(
+      `Generated CI Identity scoped token boundary is missing or reordered: ${sourceLine}`,
+    );
+  }
+  previousIdentityScopedTokenIndex = sourceIndex;
+}
 
 requireCount("guard_campaigns_checkout_before_pull() {", 2);
 requireCount("checkout_verified_prod_revision() {", 1);
