@@ -47,8 +47,8 @@ unset deployment_entrypoint entrypoint_text
 printf 'reporting_audit_consumer_bootstrap_entrypoints=passed\n'
 
 (
-	APP_ROOT="$app_root"
-	REPORTING_LIFECYCLE_SOURCE_ROOT="$server_root"
+	export APP_ROOT="$app_root"
+	export REPORTING_LIFECYCLE_SOURCE_ROOT="$server_root"
 	# shellcheck source=scripts/reporting-cutover-lifecycle.sh
 	source "$script_directory/reporting-cutover-lifecycle.sh"
 	# shellcheck source=scripts/identity-database-lifecycle.sh
