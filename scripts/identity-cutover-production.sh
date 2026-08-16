@@ -357,8 +357,8 @@ const prisma = new PrismaClient({ datasources: { db: { url } } });
   );
   const constraints = await prisma.$queryRawUnsafe(
     `SELECT conname FROM pg_constraint WHERE conname IN
-      ('admin_event_logs_admin_id_fkey', 'admin_event_logs_target_user_id_fkey',
-       'integration_delivery_failures_resolved_by_id_fkey')`,
+      ('\''admin_event_logs_admin_id_fkey'\'', '\''admin_event_logs_target_user_id_fkey'\'',
+       '\''integration_delivery_failures_resolved_by_id_fkey'\'')`,
   );
   if (rows.length !== 1 || !rows[0].finished_at || rows[0].rolled_back_at || rows[0].logs ||
       constraints.length !== 0) process.exit(1);
