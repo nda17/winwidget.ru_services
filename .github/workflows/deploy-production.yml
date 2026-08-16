@@ -37,7 +37,7 @@ on:
           - abort
           - forward-recovery
       billing_confirmation:
-        description: Type the exact Billing cutover or abort confirmation when required
+        description: Type the exact Billing lifecycle or cleanup confirmation when required
         required: false
         default: ''
         type: string
@@ -53,11 +53,6 @@ on:
           - seal-offsite
           - run
           - complete-offsite
-      billing_cleanup_confirmation:
-        description: Type the exact Billing Core cleanup confirmation when required
-        required: false
-        default: ''
-        type: string
       identity_action:
         description: Identity lifecycle action (manual identity target only)
         required: true
@@ -71,7 +66,7 @@ on:
           - abort-prepare
           - forward-recovery
       identity_confirmation:
-        description: Type the exact Identity cutover or prepare-abort confirmation when required
+        description: Type the exact Identity lifecycle or cleanup confirmation when required
         required: false
         default: ''
         type: string
@@ -90,11 +85,6 @@ on:
           - verify
           - run
           - forward-recovery
-      identity_cleanup_confirmation:
-        description: Type CLEANUP IDENTITY CORE SOURCE when cleanup mutation is required
-        required: false
-        default: ''
-        type: string
       identity_cleanup_migration_sha256:
         description: Reviewed SHA-256 of the exact post-stability Identity Core cleanup migration
         required: false
@@ -414,12 +404,12 @@ jobs:
           DEPLOY_REVISION: ${{ github.sha }}
           DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
           BILLING_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_action || 'status' }}
-          BILLING_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_confirmation || '' }}
+          BILLING_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'billing-cleanup' && inputs.billing_confirmation || '' }}
           IDENTITY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_action || 'status' }}
-          IDENTITY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_confirmation || '' }}
+          IDENTITY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target != 'identity-cleanup' && inputs.identity_confirmation || '' }}
           IDENTITY_ENV_EXPECTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_backend_env_expected_sha256 || '' }}
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
-          IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_confirmation || '' }}
+          IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'identity-cleanup' && inputs.identity_confirmation || '' }}
           IDENTITY_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_migration_sha256 || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
@@ -5658,15 +5648,15 @@ jobs:
           DEPLOY_TARGET: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target || 'all' }}
           WIDGETS_CUTOVER_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.widgets_cutover_confirmation || '' }}
           BILLING_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_action || 'status' }}
-          BILLING_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_confirmation || '' }}
+          BILLING_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target != 'billing-cleanup' && inputs.billing_confirmation || '' }}
           BILLING_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_action || 'status' }}
-          BILLING_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.billing_cleanup_confirmation || '' }}
+          BILLING_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'billing-cleanup' && inputs.billing_confirmation || '' }}
           IDENTITY_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_action || 'status' }}
-          IDENTITY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_confirmation || '' }}
+          IDENTITY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target != 'identity-cleanup' && inputs.identity_confirmation || '' }}
           IDENTITY_ENV_EXPECTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_backend_env_expected_sha256 || '' }}
           IDENTITY_ENV_EXPORT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
-          IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_confirmation || '' }}
+          IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'identity-cleanup' && inputs.identity_confirmation || '' }}
           IDENTITY_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_migration_sha256 || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

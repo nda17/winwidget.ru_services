@@ -130,6 +130,44 @@ if (Buffer.byteLength(workflow, "utf8") >= 450_000) {
     "deploy-production.yml must stay below 450000 bytes of scheduler headroom",
   );
 }
+const workflowDispatchInputsStart = workflow.indexOf(
+  "  workflow_dispatch:\n    inputs:\n",
+);
+const workflowPushStart = workflow.indexOf(
+  "  push:\n",
+  workflowDispatchInputsStart,
+);
+if (
+  workflowDispatchInputsStart < 0 ||
+  workflowPushStart <= workflowDispatchInputsStart
+) {
+  throw new Error("workflow_dispatch input block is missing or misplaced");
+}
+const workflowDispatchInputNames = [
+  ...workflow
+    .slice(workflowDispatchInputsStart, workflowPushStart)
+    .matchAll(/^      ([a-z][a-z0-9_]*):$/gm),
+].map(match => match[1]);
+const expectedWorkflowDispatchInputNames = [
+  "deploy_target",
+  "widgets_cutover_confirmation",
+  "billing_action",
+  "billing_confirmation",
+  "billing_cleanup_action",
+  "identity_action",
+  "identity_confirmation",
+  "identity_backend_env_expected_sha256",
+  "identity_cleanup_action",
+  "identity_cleanup_migration_sha256",
+];
+if (
+  JSON.stringify(workflowDispatchInputNames) !==
+  JSON.stringify(expectedWorkflowDispatchInputNames)
+) {
+  throw new Error(
+    `Unexpected workflow_dispatch inputs: ${workflowDispatchInputNames.join(",")}`,
+  );
+}
 const workflowContract = [
   workflow,
   validateProductionComposeScript,
@@ -149,6 +187,29 @@ const requireCount = (needle, expected) => {
     );
   }
 };
+
+requireCount(
+  "BILLING_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target != 'billing-cleanup' && inputs.billing_confirmation || '' }}",
+  1,
+);
+requireCount(
+  "BILLING_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'billing-cleanup' && inputs.billing_confirmation || '' }}",
+  2,
+);
+requireCount(
+  "IDENTITY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target != 'identity-cleanup' && inputs.identity_confirmation || '' }}",
+  2,
+);
+requireCount(
+  "IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'identity-cleanup' && inputs.identity_confirmation || '' }}",
+  2,
+);
+if (
+  workflow.includes("inputs.billing_cleanup_confirmation") ||
+  workflow.includes("inputs.identity_cleanup_confirmation")
+) {
+  throw new Error("Removed cleanup confirmation inputs must not be referenced");
+}
 
 requireCount("guard_campaigns_checkout_before_pull() {", 2);
 requireCount("checkout_verified_prod_revision() {", 1);
