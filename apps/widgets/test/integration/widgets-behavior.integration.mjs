@@ -22,6 +22,7 @@ const quotaOwnerId = cuidLikeId();
 const missingProjectionOwnerId = cuidLikeId();
 const devActorId = cuidLikeId();
 const internalToken = `widgets_behavior_internal_${randomBytes(24).toString('hex')}`;
+const identityToken = `widgets_behavior_identity_${randomBytes(24).toString('hex')}`;
 const browserCorsAllowedOrigins = ['https://shop.example.test'];
 const actorTokens = new Map([
 	['behavior-user', actor(primaryOwnerId, ['USER'])],
@@ -77,9 +78,10 @@ try {
 			WIDGETS_LISTEN_HOST: '127.0.0.1',
 			WIDGETS_PORT: String(appPort),
 			WIDGETS_ASSETS_DIR: '../../public/widgets',
-			WIDGETS_CORE_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
 			WIDGETS_INTERNAL_TOKEN: internalToken,
-			WIDGETS_INTERNAL_TIMEOUT_MS: '2000',
+			IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
+			IDENTITY_WIDGETS_TOKEN: identityToken,
+			IDENTITY_INTERNAL_TIMEOUT_MS: '2000',
 			WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: '86400000',
 			CORS_ALLOWED_ORIGINS: browserCorsAllowedOrigins.join(','),
 			S3_ENDPOINT: `http://127.0.0.1:${s3Port}`,
@@ -1159,13 +1161,14 @@ function createCoreServer() {
 	return createServer(async (request, response) => {
 		try {
 			if (
-				request.headers['x-winwidget-internal-token'] !== internalToken
+				request.headers['x-winwidget-service'] !== 'widgets' ||
+				request.headers['x-winwidget-internal-token'] !== identityToken
 			) {
 				return sendJson(response, 403, { message: 'forbidden' });
 			}
 			if (
 				request.method === 'POST' &&
-				request.url === '/internal/v1/widgets/auth/introspect'
+				request.url === '/internal/v1/auth/introspect'
 			) {
 				const value = actorTokens.get(
 					String(request.headers.authorization || '').replace(
