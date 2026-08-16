@@ -6,6 +6,20 @@ import {
 } from './verification-transport.service';
 
 describe('Identity verification email parity', () => {
+	const configuredSiteUrl = process.env.RECAPTCHA_CLIENT_URL;
+
+	beforeAll(() => {
+		delete process.env.RECAPTCHA_CLIENT_URL;
+	});
+
+	afterAll(() => {
+		if (configuredSiteUrl === undefined) {
+			delete process.env.RECAPTCHA_CLIENT_URL;
+			return;
+		}
+		process.env.RECAPTCHA_CLIENT_URL = configuredSiteUrl;
+	});
+
 	it('renders the frozen confirmation layout, mobile CSS and subject', () => {
 		const html = render(verificationEmail('123456'));
 		expect(VERIFICATION_EMAIL_SUBJECT).toBe('Код подтверждения email');

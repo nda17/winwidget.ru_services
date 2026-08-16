@@ -20,6 +20,12 @@ function environment(): Record<string, string> {
 	);
 }
 
+function config(values: Record<string, string>): ConfigService {
+	return {
+		get: jest.fn((name: string) => values[name])
+	} as unknown as ConfigService;
+}
+
 function context(
 	service: IdentityInternalService,
 	token: string,
@@ -44,10 +50,7 @@ function guard(allowed: IdentityInternalService[]) {
 	const reflector = {
 		getAllAndOverride: jest.fn().mockReturnValue(allowed)
 	} as unknown as Reflector;
-	return new IdentityInternalGuard(
-		new ConfigService(environment()),
-		reflector
-	);
+	return new IdentityInternalGuard(config(environment()), reflector);
 }
 
 describe('IdentityInternalGuard', () => {
@@ -79,21 +82,13 @@ describe('IdentityInternalGuard', () => {
 		placeholder.IDENTITY_CORE_TOKEN =
 			'ci_identity_core_token_at_least_32_chars';
 		expect(
-			() =>
-				new IdentityInternalGuard(
-					new ConfigService(placeholder),
-					new Reflector()
-				)
+			() => new IdentityInternalGuard(config(placeholder), new Reflector())
 		).toThrow('non-placeholder secret');
 
 		const duplicate = environment();
 		duplicate.IDENTITY_BILLING_TOKEN = duplicate.IDENTITY_CORE_TOKEN;
 		expect(
-			() =>
-				new IdentityInternalGuard(
-					new ConfigService(duplicate),
-					new Reflector()
-				)
+			() => new IdentityInternalGuard(config(duplicate), new Reflector())
 		).toThrow('pairwise distinct');
 	});
 });
