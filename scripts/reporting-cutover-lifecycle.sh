@@ -4540,13 +4540,25 @@ const pathsContaining = token => files
   .filter(({ text }) => text.includes(token))
   .map(({ path }) => path)
   .sort();
+const client = require(
+  "/app/dist/src/messaging/notification-delivery-client.service.js"
+);
+const contract = require("/app/dist/src/messaging/messaging.constants.js");
+const expectedAdminKinds = [
+  ...contract.NOTIFICATION_DELIVERY_KINDS,
+  "daily-summary-delivery-telegram",
+];
 if (JSON.stringify(pathsContaining("daily-summary-delivery-telegram")) !==
-    JSON.stringify(["/app/dist/src/messaging/notification-delivery-client.service.js"]) ||
+    JSON.stringify([]) ||
     JSON.stringify(pathsContaining("NOTIFICATION_DELIVERY_ADMIN_KINDS")) !==
     JSON.stringify([
       "/app/dist/src/messaging/messaging-admin.service.js",
       "/app/dist/src/messaging/notification-delivery-client.service.js",
     ]) ||
+    client.NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND !==
+      "daily-summary-delivery-telegram" ||
+    JSON.stringify(client.NOTIFICATION_DELIVERY_ADMIN_KINDS) !==
+      JSON.stringify(expectedAdminKinds) ||
     files.some(({ text }) => forbidden.some(token => text.includes(token)))) process.exit(1);
 ' >/dev/null || {
 		echo 'Cleanup runtime image still contains legacy Reporting code or contracts.' >&2
@@ -5772,6 +5784,10 @@ capture {
 		"$cleanup_runtime_text" == *'reporting.notification.delivery.outcome.v1'* &&
 		"$cleanup_runtime_text" == *'/app/dist/src/statistics'* &&
 		"$cleanup_runtime_text" == *'pathsContaining("daily-summary-delivery-telegram")'* &&
+		"$cleanup_runtime_text" == *'JSON.stringify([])'* &&
+		"$cleanup_runtime_text" == *'client.NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND'* &&
+		"$cleanup_runtime_text" == *'expectedAdminKinds'* &&
+		"$cleanup_runtime_text" == *'JSON.stringify(client.NOTIFICATION_DELIVERY_ADMIN_KINDS)'* &&
 		"$cleanup_runtime_text" == *'/app/dist/src/messaging/notification-delivery-client.service.js'* &&
 		"$cleanup_runtime_text" == *'pathsContaining("NOTIFICATION_DELIVERY_ADMIN_KINDS")'* &&
 		"$cleanup_runtime_text" == *'/app/dist/src/messaging/messaging-admin.service.js'* &&

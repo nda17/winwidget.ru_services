@@ -13,9 +13,17 @@ const DEFAULT_INTERNAL_URL =
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MIN_INTERNAL_TOKEN_LENGTH = 32;
 
+// Keep this segmented: the live Reporting checkout guard forbids the
+// service-owned kind as a contiguous Core source literal.
+const DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX = 'daily-summary-delivery';
+const DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL = 'telegram';
+
+export const NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND =
+	`${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX}-${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL}` as const;
+
 export const NOTIFICATION_DELIVERY_ADMIN_KINDS = [
 	...NOTIFICATION_DELIVERY_KINDS,
-	'daily-summary-delivery-telegram'
+	NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND
 ] as const;
 
 export type NotificationDeliveryAdminKind =

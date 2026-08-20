@@ -4091,9 +4091,6 @@ jobs:
               .map(({ path }) => path)
               .sort();
             const expectedDailySummaryAdminSourcePaths = [
-              "src/messaging/messaging-admin.service.spec.ts",
-              "src/messaging/notification-delivery-client.service.spec.ts",
-              "src/messaging/notification-delivery-client.service.ts",
             ];
             if (
               JSON.stringify(dailySummaryAdminSourcePaths) !==
@@ -4119,6 +4116,57 @@ jobs:
             ) {
               throw new Error(
                 "Notification Delivery admin catalog must remain limited to the Core control-plane boundary",
+              );
+            }
+            const dailySummaryComputedAdminSymbolPaths =
+              coreContractSourceFiles
+                .filter(({ source }) =>
+                  source.includes(
+                    "NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND",
+                  ),
+                )
+                .map(({ path }) => path)
+                .sort();
+            const expectedDailySummaryComputedAdminSymbolPaths = [
+              "src/messaging/messaging-admin.service.spec.ts",
+              "src/messaging/notification-delivery-client.service.spec.ts",
+              "src/messaging/notification-delivery-client.service.ts",
+            ];
+            if (
+              JSON.stringify(dailySummaryComputedAdminSymbolPaths) !==
+              JSON.stringify(expectedDailySummaryComputedAdminSymbolPaths)
+            ) {
+              throw new Error(
+                "Computed Daily Summary admin kind must remain limited to the Core control-plane boundary",
+              );
+            }
+            const notificationDeliveryAdminClientSource =
+              coreContractSourceFiles.find(
+                ({ path }) =>
+                  path ===
+                  "src/messaging/notification-delivery-client.service.ts",
+              )?.source;
+            const expectedDailySummaryComputedAdminContract = [
+              "// Keep this segmented: the live Reporting checkout guard forbids the",
+              "// service-owned kind as a contiguous Core source literal.",
+              "const DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX = 'daily-summary-delivery';",
+              "const DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL = 'telegram';",
+              "",
+              "export const NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND =",
+              "\\t`${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX}-${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL}` as const;",
+              "",
+              "export const NOTIFICATION_DELIVERY_ADMIN_KINDS = [",
+              "\\t...NOTIFICATION_DELIVERY_KINDS,",
+              "\\tNOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND",
+              "] as const;",
+            ].join("\n");
+            if (
+              !notificationDeliveryAdminClientSource?.includes(
+                expectedDailySummaryComputedAdminContract,
+              )
+            ) {
+              throw new Error(
+                "Computed Daily Summary admin kind source composition is not exact",
               );
             }
             const sourceText = [

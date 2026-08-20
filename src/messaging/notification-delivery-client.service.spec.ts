@@ -1,4 +1,5 @@
 import {
+	NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND,
 	NotificationDeliveryClientService,
 	NotificationDeliveryInternalApiError
 } from '@/messaging/notification-delivery-client.service';
@@ -244,7 +245,7 @@ describe('NotificationDeliveryClientService', () => {
 	it('accepts the service-owned Daily Summary delivery failure kind', async () => {
 		const dailySummaryFailure = {
 			...failure,
-			integration: 'daily-summary-delivery-telegram'
+			integration: NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND
 		};
 		jest.spyOn(global, 'fetch').mockResolvedValue(
 			new Response(

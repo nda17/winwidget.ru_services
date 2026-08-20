@@ -11,6 +11,7 @@ import {
 	CORE_OWNED_MESSAGING_KINDS
 } from '@/messaging/messaging.constants';
 import {
+	NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND,
 	NotificationDeliveryClientService,
 	NotificationDeliveryInternalApiError
 } from '@/messaging/notification-delivery-client.service';
@@ -1263,7 +1264,7 @@ describe('MessagingAdminService', () => {
 
 		await expect(
 			service.getFailures(1, 20, {
-				integration: 'daily-summary-delivery-telegram',
+				integration: NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND,
 				status: 'FAILED'
 			})
 		).resolves.toEqual({
@@ -1282,7 +1283,7 @@ describe('MessagingAdminService', () => {
 			}
 		});
 		expect(notificationGetFailures).toHaveBeenCalledWith(1, 20, {
-			integration: 'daily-summary-delivery-telegram',
+			integration: NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND,
 			status: 'FAILED'
 		});
 		expect(coreTransaction).not.toHaveBeenCalled();

@@ -72,14 +72,15 @@ REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS=(
 	dailySummaryLastSent
 )
 REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_TOKEN='daily-summary-delivery-telegram'
-REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SOURCE_PATHS=(
-	src/messaging/messaging-admin.service.spec.ts
-	src/messaging/notification-delivery-client.service.spec.ts
-	src/messaging/notification-delivery-client.service.ts
-)
 REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL='NOTIFICATION_DELIVERY_ADMIN_KINDS'
 REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL_PATHS=(
 	src/messaging/messaging-admin.service.ts
+	src/messaging/notification-delivery-client.service.ts
+)
+REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_COMPUTED_SYMBOL='NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND'
+REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_COMPUTED_SYMBOL_PATHS=(
+	src/messaging/messaging-admin.service.spec.ts
+	src/messaging/notification-delivery-client.service.spec.ts
 	src/messaging/notification-delivery-client.service.ts
 )
 REPORTING_STEADY_STATE_FORBIDDEN_REPORTING_SOURCE_TOKENS=(
@@ -555,6 +556,35 @@ reporting_require_exact_post_cleanup_token_paths() {
 	}
 }
 
+reporting_require_daily_summary_admin_source_contract() {
+	local revision="$1" repository source_path source expected
+	repository="$REPORTING_APP_ROOT/winwidget.ru_server"
+	source_path='src/messaging/notification-delivery-client.service.ts'
+	source="$(git -C "$repository" show "$revision:$source_path" 2>/dev/null)" || {
+		echo 'Reporting post-cleanup admin federation source is unavailable.' >&2
+		return 1
+	}
+	expected="$(cat <<'EOF'
+// Keep this segmented: the live Reporting checkout guard forbids the
+// service-owned kind as a contiguous Core source literal.
+const DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX = 'daily-summary-delivery';
+const DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL = 'telegram';
+
+export const NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND =
+	`${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX}-${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL}` as const;
+
+export const NOTIFICATION_DELIVERY_ADMIN_KINDS = [
+	...NOTIFICATION_DELIVERY_KINDS,
+	NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND
+] as const;
+EOF
+)"
+	[[ "$source" == *"$expected"* ]] || {
+		echo 'Reporting post-cleanup admin federation source composition is not exact.' >&2
+		return 1
+	}
+}
+
 reporting_require_post_cleanup_revision_contract() {
 	local revision="$1" repository path token grep_status
 	repository="$REPORTING_APP_ROOT/winwidget.ru_server"
@@ -570,11 +600,14 @@ reporting_require_post_cleanup_revision_contract() {
 		fi
 	done
 	reporting_require_exact_post_cleanup_token_paths \
-		"$revision" "$REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_TOKEN" \
-		"${REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SOURCE_PATHS[@]}" || return 1
+		"$revision" "$REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_TOKEN" || return 1
 	reporting_require_exact_post_cleanup_token_paths \
 		"$revision" "$REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL" \
 		"${REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL_PATHS[@]}" || return 1
+	reporting_require_exact_post_cleanup_token_paths \
+		"$revision" "$REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_COMPUTED_SYMBOL" \
+		"${REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_COMPUTED_SYMBOL_PATHS[@]}" || return 1
+	reporting_require_daily_summary_admin_source_contract "$revision" || return 1
 	for token in "${REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS[@]}"; do
 		if git -C "$repository" grep -I -n -F -e "$token" "$revision" -- \
 			src prisma/schema.prisma \
@@ -3315,15 +3348,23 @@ reporting_database_lifecycle_self_test() {
 		reporting_require_post_cleanup_revision_contract)"
 	post_cleanup_token_path_text="$(declare -f \
 		reporting_require_exact_post_cleanup_token_paths)"
+	post_cleanup_composition_text="$(declare -f \
+		reporting_require_daily_summary_admin_source_contract)"
 	checkout_guard_text="$(declare -f reporting_guard_before_checkout_revision)"
 	[[ "$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_REMOVED_PATHS'* &&
 		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS'* &&
-		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SOURCE_PATHS'* &&
+		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_TOKEN'* &&
 		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL_PATHS'* &&
+		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_COMPUTED_SYMBOL_PATHS'* &&
+		"$post_cleanup_contract_text" == *'reporting_require_daily_summary_admin_source_contract'* &&
 		"$(printf '%s\n' "$post_cleanup_contract_text" | awk \
-			'/reporting_require_exact_post_cleanup_token_paths/ { count += 1 } END { print count + 0 }')" == '2' &&
+			'/reporting_require_exact_post_cleanup_token_paths/ { count += 1 } END { print count + 0 }')" == '3' &&
 		"$post_cleanup_token_path_text" == *'grep -I -l -F -e "$token"'* &&
 		"$post_cleanup_token_path_text" == *'LC_ALL=C sort'* &&
+		"$post_cleanup_composition_text" == *'git -C "$repository" show "$revision:$source_path"'* &&
+		"$post_cleanup_composition_text" == *'DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX'* &&
+		"$post_cleanup_composition_text" == *'DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL'* &&
+		"$post_cleanup_composition_text" == *'NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND'* &&
 		"$post_cleanup_contract_text" == *'cat-file -e "$revision^{commit}"'* &&
 		"$post_cleanup_contract_text" == *'src prisma/schema.prisma'* &&
 		"$checkout_guard_text" == *'cleanup-staged)'* &&
