@@ -3835,6 +3835,10 @@ jobs:
           const billing = require(
             "./apps/billing/dist/src/messaging/billing-messaging.constants.js",
           );
+          const coreMessagingIntegrationSmoke = fs.readFileSync(
+            "scripts/test-messaging-integration.mjs",
+            "utf8",
+          );
 
           const expectedKinds = [
             "email",
@@ -3860,6 +3864,10 @@ jobs:
           const archivedCoreFailureKinds = [
             ...monolith.CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
           ];
+          const coreTopologyKinds = [
+            ...monolith.CORE_RABBITMQ_TOPOLOGY_KINDS,
+          ];
+          const maintenanceKinds = [...monolith.MAINTENANCE_KINDS];
           const widgetsProviderKinds = [
             ...monolith.WIDGETS_PROVIDER_INTEGRATION_KINDS,
           ];
@@ -3875,6 +3883,11 @@ jobs:
               !archivedCoreFailureKinds.includes(kind) ||
               billingOwnedFederatedKinds.includes(kind),
           );
+          const expectedCoreTopologyKinds = [
+            ...coreDeliveryKinds,
+            ...monolithIntegrationKinds,
+            "database-backup",
+          ];
           const reportingDeliveryKinds = [
             ...reporting.REPORTING_NOTIFICATION_DELIVERY_KINDS,
           ];
@@ -4285,6 +4298,45 @@ jobs:
             throw new Error(
               "Archived Core failure history must remain exact and disjoint from runtime ownership",
             );
+          }
+          const coreTopologyQueues = coreTopologyKinds.map(
+            kind => monolith.MESSAGING_QUEUE_NAMES[kind],
+          );
+          if (
+            JSON.stringify(maintenanceKinds) !==
+              JSON.stringify(["database-backup"]) ||
+            JSON.stringify(coreTopologyKinds) !==
+              JSON.stringify(expectedCoreTopologyKinds) ||
+            new Set(coreTopologyKinds).size !== coreTopologyKinds.length ||
+            coreTopologyQueues.some(
+              queue => typeof queue !== "string" || queue.length === 0,
+            ) ||
+            new Set(coreTopologyQueues).size !== coreTopologyQueues.length
+          ) {
+            throw new Error(
+              "Core RabbitMQ topology must remain the exact duplicate-free runtime catalog",
+            );
+          }
+          if (
+            coreMessagingIntegrationSmoke.includes(
+              "telegram-destination-unavailable",
+            )
+          ) {
+            throw new Error(
+              "Core messaging integration smoke must not exercise the Identity-owned destination failure consumer",
+            );
+          }
+          for (const fragment of [
+            "const coreIntegrationWorkerKinds = 'reporting-admin-audit';",
+            "extraEnv.INTEGRATION_WORKER_KINDS !== coreIntegrationWorkerKinds",
+            "INTEGRATION_WORKER_KINDS: coreIntegrationWorkerKinds",
+            "startProcess('dist/src/integration-worker-main.js', {",
+          ]) {
+            if (coreMessagingIntegrationSmoke.split(fragment).length !== 2) {
+              throw new Error(
+                `Core messaging integration smoke worker boundary drifted: ${fragment}`,
+              );
+            }
           }
           if (
             JSON.stringify(

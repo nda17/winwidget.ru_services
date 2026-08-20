@@ -14,6 +14,10 @@ const {
 	assertMessagingEventContract
 } = require('../dist/src/messaging/messaging-event-contract.js');
 const {
+	CORE_RABBITMQ_TOPOLOGY_KINDS,
+	MESSAGING_QUEUE_NAMES
+} = require('../dist/src/messaging/messaging.constants.js');
+const {
 	ReportingProjectionSnapshotService
 } = require('../dist/src/reporting-internal/reporting-projection-snapshot.service.js');
 
@@ -128,18 +132,16 @@ let maintenanceScheduleState;
 let reportingAuditActorId;
 const createdEventIds = [];
 const createdScheduledJobIds = [];
-const requiredQueues = [
-	'winwidget.notification.telegram-destination-unavailable',
-	'winwidget.admin.audit.campaigns.v1',
-	'winwidget.admin.audit.reporting.v1',
-	'winwidget.admin.audit.widgets.v1',
-	'winwidget.admin.audit.billing.v1',
-	'winwidget.core.billing.payment-details.v1',
-	'winwidget.core.billing.subscription-details.v1',
-	'winwidget.core.billing.affiliate.v1',
-	'winwidget.core.billing.settings.v1',
-	'winwidget.maintenance.database-backup'
-];
+const publisherQueues = CORE_RABBITMQ_TOPOLOGY_KINDS.map(
+	kind => MESSAGING_QUEUE_NAMES[kind]
+);
+const coreIntegrationWorkerKinds = 'reporting-admin-audit';
+if (
+	publisherQueues.some(queue => typeof queue !== 'string' || !queue) ||
+	new Set(publisherQueues).size !== publisherQueues.length
+) {
+	throw new Error('Core publisher topology queue catalog is invalid');
+}
 
 const reportingEventTypes = ['identity.user.changed.v1'];
 
@@ -186,6 +188,14 @@ const waitFor = async (check, label, timeoutMs = 20_000) => {
 
 const startProcess = (entry, extraEnv = {}) => {
 	const ownsTopology = entry.endsWith('outbox-publisher-main.js');
+	if (
+		entry.endsWith('integration-worker-main.js') &&
+		extraEnv.INTEGRATION_WORKER_KINDS !== coreIntegrationWorkerKinds
+	) {
+		throw new Error(
+			'Core integration worker smoke kind catalog is invalid'
+		);
+	}
 	const child = spawn(process.execPath, [entry], {
 		env: {
 			...process.env,
@@ -552,7 +562,7 @@ try {
 	startProcess('dist/src/outbox-publisher-main.js');
 	await waitFor(async () => {
 		const statuses = await Promise.all(
-			requiredQueues.map(queue =>
+			publisherQueues.map(queue =>
 				getRabbitManagementStatus(
 					`/api/queues/${encodeURIComponent(rabbitVhost)}/${encodeURIComponent(queue)}`
 				)
@@ -570,61 +580,18 @@ try {
 	channel = await connection.createChannel();
 
 	startProcess('dist/src/integration-worker-main.js', {
-		INTEGRATION_WORKER_KINDS:
-			'telegram-destination-unavailable,reporting-admin-audit',
+		INTEGRATION_WORKER_KINDS: coreIntegrationWorkerKinds,
 		RABBITMQ_WORKER_PREFETCH: '1'
 	});
 	await waitFor(async () => {
 		const queues = await Promise.all(
 			[
-				'winwidget.notification.telegram-destination-unavailable',
-				'winwidget.notification.telegram-destination-unavailable.dead-letter',
 				'winwidget.admin.audit.reporting.v1',
 				'winwidget.admin.audit.reporting.v1.dead-letter'
 			].map(queue => channel.checkQueue(queue))
 		);
 		return queues.every(queue => queue.consumerCount > 0);
 	}, 'integration worker consumers');
-
-	const destinationUnavailableEventId = randomUUID();
-	createdEventIds.push(destinationUnavailableEventId);
-	const destinationUnavailablePayload = {
-		schemaVersion: 1,
-		eventType: 'notification.telegram.destination-unavailable.v1',
-		sourceEventId: randomUUID(),
-		sourceKind: 'limit-telegram',
-		destination: {
-			telegramChatId: `ci-missing-chat-${destinationUnavailableEventId}`
-		},
-		normalizedCode: 'TELEGRAM_CHAT_NOT_FOUND',
-		occurredAt: new Date().toISOString()
-	};
-	channel.publish(
-		'winwidget.events',
-		'notification.telegram.destination-unavailable.v1',
-		Buffer.from(JSON.stringify(destinationUnavailablePayload)),
-		{
-			persistent: true,
-			messageId: destinationUnavailableEventId,
-			type: 'notification.telegram.destination-unavailable.v1',
-			contentType: 'application/json'
-		}
-	);
-	await waitFor(
-		() =>
-			prisma.integrationDeliveryReceipt
-				.findUnique({
-					where: {
-						eventId_integration: {
-							eventId: destinationUnavailableEventId,
-							integration: 'telegram-destination-unavailable'
-						}
-					},
-					select: { status: true }
-				})
-				.then(receipt => receipt?.status === 'DELIVERED'),
-		'destination-unavailable outcome delivery'
-	);
 
 	reportingAuditActorId = `ci-reporting-audit-${randomUUID()}`;
 	await prisma.user.create({
@@ -871,8 +838,6 @@ try {
 			async () => {
 				const queues = await Promise.all(
 					[
-						'winwidget.notification.telegram-destination-unavailable',
-						'winwidget.notification.telegram-destination-unavailable.dead-letter',
 						'winwidget.admin.audit.reporting.v1',
 						'winwidget.admin.audit.reporting.v1.dead-letter',
 						'winwidget.maintenance.database-backup',
