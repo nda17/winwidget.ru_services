@@ -47,7 +47,6 @@ REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS=(
 	reporting.notification.delivery.outcome.v1
 	reporting.settings.changed.v1
 	daily-summary-telegram
-	daily-summary-delivery-telegram
 	daily-summary-job
 	winwidget.report.daily-summary.telegram
 	DAILY_SUMMARY_EVENT_TYPE
@@ -71,6 +70,17 @@ REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS=(
 	dailySummaryEnabled
 	dailySummaryTime
 	dailySummaryLastSent
+)
+REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_TOKEN='daily-summary-delivery-telegram'
+REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SOURCE_PATHS=(
+	src/messaging/messaging-admin.service.spec.ts
+	src/messaging/notification-delivery-client.service.spec.ts
+	src/messaging/notification-delivery-client.service.ts
+)
+REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL='NOTIFICATION_DELIVERY_ADMIN_KINDS'
+REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL_PATHS=(
+	src/messaging/messaging-admin.service.ts
+	src/messaging/notification-delivery-client.service.ts
 )
 REPORTING_STEADY_STATE_FORBIDDEN_REPORTING_SOURCE_TOKENS=(
 	reporting.settings.changed.v1
@@ -514,6 +524,37 @@ reporting_first_rollout_deploy_action() {
 	printf 'prepare\n'
 }
 
+reporting_require_exact_post_cleanup_token_paths() {
+	local revision="$1" token="$2" repository actual expected grep_status path
+	shift 2
+	repository="$REPORTING_APP_ROOT/winwidget.ru_server"
+	if actual="$(git -C "$repository" grep -I -l -F -e "$token" \
+		"$revision" -- src prisma/schema.prisma 2>/dev/null)"; then
+		grep_status=0
+	else
+		grep_status=$?
+	fi
+	case "$grep_status" in
+	0) ;;
+	1) actual='' ;;
+	*)
+		echo 'Reporting post-cleanup source contract could not inspect an allowed control-plane token.' >&2
+		return 1
+		;;
+	esac
+	expected=''
+	for path in "$@"; do
+		expected+="${revision}:${path}"$'\n'
+	done
+	expected="${expected%$'\n'}"
+	actual="$(printf '%s\n' "$actual" | LC_ALL=C sort)"
+	expected="$(printf '%s\n' "$expected" | LC_ALL=C sort)"
+	[[ "$actual" == "$expected" ]] || {
+		echo 'Reporting post-cleanup control-plane token path set is not exact.' >&2
+		return 1
+	}
+}
+
 reporting_require_post_cleanup_revision_contract() {
 	local revision="$1" repository path token grep_status
 	repository="$REPORTING_APP_ROOT/winwidget.ru_server"
@@ -528,6 +569,12 @@ reporting_require_post_cleanup_revision_contract() {
 			return 1
 		fi
 	done
+	reporting_require_exact_post_cleanup_token_paths \
+		"$revision" "$REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_TOKEN" \
+		"${REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SOURCE_PATHS[@]}" || return 1
+	reporting_require_exact_post_cleanup_token_paths \
+		"$revision" "$REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL" \
+		"${REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL_PATHS[@]}" || return 1
 	for token in "${REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS[@]}"; do
 		if git -C "$repository" grep -I -n -F -e "$token" "$revision" -- \
 			src prisma/schema.prisma \
@@ -3266,9 +3313,17 @@ reporting_database_lifecycle_self_test() {
 	}
 	post_cleanup_contract_text="$(declare -f \
 		reporting_require_post_cleanup_revision_contract)"
+	post_cleanup_token_path_text="$(declare -f \
+		reporting_require_exact_post_cleanup_token_paths)"
 	checkout_guard_text="$(declare -f reporting_guard_before_checkout_revision)"
 	[[ "$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_REMOVED_PATHS'* &&
 		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_FORBIDDEN_SOURCE_TOKENS'* &&
+		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SOURCE_PATHS'* &&
+		"$post_cleanup_contract_text" == *'REPORTING_STEADY_STATE_DAILY_SUMMARY_ADMIN_SYMBOL_PATHS'* &&
+		"$(printf '%s\n' "$post_cleanup_contract_text" | awk \
+			'/reporting_require_exact_post_cleanup_token_paths/ { count += 1 } END { print count + 0 }')" == '2' &&
+		"$post_cleanup_token_path_text" == *'grep -I -l -F -e "$token"'* &&
+		"$post_cleanup_token_path_text" == *'LC_ALL=C sort'* &&
 		"$post_cleanup_contract_text" == *'cat-file -e "$revision^{commit}"'* &&
 		"$post_cleanup_contract_text" == *'src prisma/schema.prisma'* &&
 		"$checkout_guard_text" == *'cleanup-staged)'* &&

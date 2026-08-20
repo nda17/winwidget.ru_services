@@ -4502,7 +4502,6 @@ const forbidden = [
   "notification.daily-summary.telegram.requested.v1",
   "reporting.settings.changed.v1",
   "daily-summary-telegram",
-  "daily-summary-delivery-telegram",
   "daily-summary-job",
   "winwidget.report.daily-summary.telegram",
   "DAILY_SUMMARY_EVENT_TYPE",
@@ -4524,6 +4523,7 @@ const forbidden = [
   "dailySummaryTime",
   "dailySummaryLastSent",
 ];
+const files = [];
 const visit = directory => {
   if (!existsSync(directory)) process.exit(1);
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -4531,11 +4531,23 @@ const visit = directory => {
     if (entry.isDirectory()) visit(path);
     else if (entry.isFile() && entry.name.endsWith(".js")) {
       const text = readFileSync(path, "utf8");
-      if (forbidden.some(token => text.includes(token))) process.exit(1);
+      files.push({ path, text });
     }
   }
 };
 visit("/app/dist/src");
+const pathsContaining = token => files
+  .filter(({ text }) => text.includes(token))
+  .map(({ path }) => path)
+  .sort();
+if (JSON.stringify(pathsContaining("daily-summary-delivery-telegram")) !==
+    JSON.stringify(["/app/dist/src/messaging/notification-delivery-client.service.js"]) ||
+    JSON.stringify(pathsContaining("NOTIFICATION_DELIVERY_ADMIN_KINDS")) !==
+    JSON.stringify([
+      "/app/dist/src/messaging/messaging-admin.service.js",
+      "/app/dist/src/messaging/notification-delivery-client.service.js",
+    ]) ||
+    files.some(({ text }) => forbidden.some(token => text.includes(token)))) process.exit(1);
 ' >/dev/null || {
 		echo 'Cleanup runtime image still contains legacy Reporting code or contracts.' >&2
 		return 1
@@ -5759,6 +5771,10 @@ capture {
 		"$cleanup_runtime_text" == *'REPORTING_ACCEPTED_ROUTING_KEYS.deliveryOutcome'* &&
 		"$cleanup_runtime_text" == *'reporting.notification.delivery.outcome.v1'* &&
 		"$cleanup_runtime_text" == *'/app/dist/src/statistics'* &&
+		"$cleanup_runtime_text" == *'pathsContaining("daily-summary-delivery-telegram")'* &&
+		"$cleanup_runtime_text" == *'/app/dist/src/messaging/notification-delivery-client.service.js'* &&
+		"$cleanup_runtime_text" == *'pathsContaining("NOTIFICATION_DELIVERY_ADMIN_KINDS")'* &&
+		"$cleanup_runtime_text" == *'/app/dist/src/messaging/messaging-admin.service.js'* &&
 		"$cleanup_runtime_text" == *'daily-summary-job'* &&
 		"$cleanup_topology_text" == *'reporting_cutover_require_target_daily_summary_drained'* &&
 		"$cleanup_topology_text" == *'channel.unbindQueue'* &&

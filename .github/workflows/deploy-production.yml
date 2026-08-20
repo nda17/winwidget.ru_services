@@ -3820,6 +3820,9 @@ jobs:
           const coreDeliveryOutcome = require(
             "./dist/src/messaging/notification-delivery-event.js",
           );
+          const coreDeliveryAdmin = require(
+            "./dist/src/messaging/notification-delivery-client.service.js",
+          );
           const delivery = require(
             "./apps/notification-delivery/dist/src/messaging/messaging.constants.js",
           );
@@ -3848,6 +3851,9 @@ jobs:
           ];
           const actualKinds = [...delivery.NOTIFICATION_DELIVERY_KINDS];
           const coreDeliveryKinds = [...monolith.NOTIFICATION_DELIVERY_KINDS];
+          const coreDeliveryAdminKinds = [
+            ...coreDeliveryAdmin.NOTIFICATION_DELIVERY_ADMIN_KINDS,
+          ];
           const monolithIntegrationKinds = [
             ...monolith.MONOLITH_INTEGRATION_KINDS,
           ];
@@ -3864,6 +3870,11 @@ jobs:
             "notification-delivery-outcome",
             "auto-renewal",
           ];
+          const expectedRuntimeIntegrationKinds = monolith.INTEGRATION_KINDS.filter(
+            kind =>
+              !archivedCoreFailureKinds.includes(kind) ||
+              billingOwnedFederatedKinds.includes(kind),
+          );
           const reportingDeliveryKinds = [
             ...reporting.REPORTING_NOTIFICATION_DELIVERY_KINDS,
           ];
@@ -4004,6 +4015,12 @@ jobs:
             : expectedKinds.filter(
                 kind => kind !== "daily-summary-delivery-telegram",
               );
+          const expectedCoreDeliveryAdminKinds = [
+            ...new Set([
+              ...expectedCoreDeliveryKinds,
+              ...reportingDeliveryKinds,
+            ]),
+          ];
           if (legacyPathsAbsent) {
             const forbiddenTokens = [
               "report.daily-summary.requested.v1",
@@ -4011,7 +4028,6 @@ jobs:
               "reporting.notification.delivery.outcome.v1",
               "reporting.settings.changed.v1",
               "daily-summary-telegram",
-              "daily-summary-delivery-telegram",
               "daily-summary-job",
               "winwidget.report.daily-summary.telegram",
               "DAILY_SUMMARY_EVENT_TYPE",
@@ -4036,20 +4052,64 @@ jobs:
               "dailySummaryTime",
               "dailySummaryLastSent",
             ];
-            const readSourceTree = directory =>
+            const readSourceFiles = directory =>
               fs
                 .readdirSync(directory, { withFileTypes: true })
                 .flatMap(entry => {
                   const path = `${directory}/${entry.name}`;
-                  if (entry.isDirectory()) return readSourceTree(path);
+                  if (entry.isDirectory()) return readSourceFiles(path);
                   return entry.isFile() && entry.name.endsWith(".ts")
-                    ? [fs.readFileSync(path, "utf8")]
+                    ? [{ path, source: fs.readFileSync(path, "utf8") }]
                     : [];
-                })
+                });
+            const readSourceTree = directory =>
+              readSourceFiles(directory)
+                .map(({ source }) => source)
                 .join("\n");
+            const coreSourceFiles = readSourceFiles("src");
+            const coreContractSourceFiles = [
+              ...coreSourceFiles,
+              { path: "prisma/schema.prisma", source: corePrismaSchema },
+            ];
+            const dailySummaryAdminSourcePaths = coreContractSourceFiles
+              .filter(({ source }) =>
+                source.includes("daily-summary-delivery-telegram"),
+              )
+              .map(({ path }) => path)
+              .sort();
+            const expectedDailySummaryAdminSourcePaths = [
+              "src/messaging/messaging-admin.service.spec.ts",
+              "src/messaging/notification-delivery-client.service.spec.ts",
+              "src/messaging/notification-delivery-client.service.ts",
+            ];
+            if (
+              JSON.stringify(dailySummaryAdminSourcePaths) !==
+              JSON.stringify(expectedDailySummaryAdminSourcePaths)
+            ) {
+              throw new Error(
+                "Daily Summary delivery kind must remain limited to the Core admin federation boundary",
+              );
+            }
+            const dailySummaryAdminSymbolPaths = coreContractSourceFiles
+              .filter(({ source }) =>
+                source.includes("NOTIFICATION_DELIVERY_ADMIN_KINDS"),
+              )
+              .map(({ path }) => path)
+              .sort();
+            const expectedDailySummaryAdminSymbolPaths = [
+              "src/messaging/messaging-admin.service.ts",
+              "src/messaging/notification-delivery-client.service.ts",
+            ];
+            if (
+              JSON.stringify(dailySummaryAdminSymbolPaths) !==
+              JSON.stringify(expectedDailySummaryAdminSymbolPaths)
+            ) {
+              throw new Error(
+                "Notification Delivery admin catalog must remain limited to the Core control-plane boundary",
+              );
+            }
             const sourceText = [
-              readSourceTree("src"),
-              fs.readFileSync("prisma/schema.prisma", "utf8"),
+              ...coreContractSourceFiles.map(({ source }) => source),
             ].join("\n");
             const reintroducedToken = forbiddenTokens.find(token =>
               sourceText.includes(token),
@@ -4070,6 +4130,20 @@ jobs:
             JSON.stringify(actualKinds) !== JSON.stringify(expectedKinds) ||
             JSON.stringify(coreDeliveryKinds) !==
               JSON.stringify(expectedCoreDeliveryKinds) ||
+            JSON.stringify(coreDeliveryAdminKinds) !==
+              JSON.stringify(expectedCoreDeliveryAdminKinds) ||
+            [
+              monolith.NOTIFICATION_DELIVERY_KINDS,
+              monolith.CORE_RABBITMQ_TOPOLOGY_KINDS,
+              monolith.CORE_OWNED_MESSAGING_KINDS,
+              monolith.INTEGRATION_KINDS,
+            ].some(kinds =>
+              kinds.includes("daily-summary-delivery-telegram"),
+            ) ||
+            "daily-summary-delivery-telegram" in
+              monolith.MESSAGING_ROUTING_KEYS ||
+            "daily-summary-delivery-telegram" in
+              monolith.MESSAGING_QUEUE_NAMES ||
             JSON.stringify(reportingDeliveryKinds) !==
               JSON.stringify(["daily-summary-delivery-telegram"]) ||
             Object.keys(delivery.MESSAGING_ROUTING_KEYS).sort().join(",") !==
@@ -4189,7 +4263,7 @@ jobs:
             new Set(integrationOwnershipKinds).size !==
               integrationOwnershipKinds.length ||
             [...integrationOwnershipKinds].sort().join(",") !==
-              [...monolith.INTEGRATION_KINDS].sort().join(",")
+              [...expectedRuntimeIntegrationKinds].sort().join(",")
           ) {
             throw new Error(
               "Core, Notification Delivery, Widgets, and Billing kind ownership must be an exact disjoint union",
@@ -4197,7 +4271,10 @@ jobs:
           }
           if (
             JSON.stringify(archivedCoreFailureKinds) !==
-              JSON.stringify(["notification-delivery-outcome"]) ||
+              JSON.stringify([
+                "telegram-destination-unavailable",
+                "notification-delivery-outcome",
+              ]) ||
             archivedCoreFailureKinds.some(kind =>
               [
                 ...monolith.CORE_OWNED_MESSAGING_KINDS,
