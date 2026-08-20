@@ -4153,11 +4153,11 @@ jobs:
               "const DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL = 'telegram';",
               "",
               "export const NOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND =",
-              "\\t`${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX}-${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL}` as const;",
+              "\t`${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_PREFIX}-${DAILY_SUMMARY_DELIVERY_ADMIN_KIND_CHANNEL}` as const;",
               "",
               "export const NOTIFICATION_DELIVERY_ADMIN_KINDS = [",
-              "\\t...NOTIFICATION_DELIVERY_KINDS,",
-              "\\tNOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND",
+              "\t...NOTIFICATION_DELIVERY_KINDS,",
+              "\tNOTIFICATION_DELIVERY_DAILY_SUMMARY_ADMIN_KIND",
               "] as const;",
             ].join("\n");
             if (
