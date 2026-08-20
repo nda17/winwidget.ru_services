@@ -170,6 +170,7 @@ jobs:
             scripts/test-billing-runtime-boundaries.mjs
             scripts/identity-release-identity.sh
             scripts/identity-production-env-control.sh
+            scripts/test-identity-production-env-recovery.sh
             scripts/identity-database-lifecycle.sh
             scripts/deploy-identity-production.sh
             scripts/identity-cutover-production.sh
@@ -203,6 +204,7 @@ jobs:
             scripts/test-billing-core-source-cleanup-rehearsal.sh \
             scripts/identity-release-identity.sh \
             scripts/identity-production-env-control.sh \
+            scripts/test-identity-production-env-recovery.sh \
             scripts/identity-database-lifecycle.sh \
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
@@ -237,6 +239,7 @@ jobs:
             bash scripts/identity-release-identity.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/identity-production-env-control.sh --self-test
+          bash scripts/test-identity-production-env-recovery.sh
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/identity-database-lifecycle.sh --self-test
           APP_ROOT="$billing_ci_app_root" \

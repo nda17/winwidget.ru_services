@@ -50,6 +50,7 @@ docker run --rm \
   scripts/test-billing-core-source-cleanup-rehearsal.sh \
   scripts/identity-release-identity.sh \
   scripts/identity-production-env-control.sh \
+  scripts/test-identity-production-env-recovery.sh \
   scripts/identity-database-lifecycle.sh \
   scripts/deploy-identity-production.sh \
   scripts/identity-cutover-production.sh \
@@ -125,6 +126,154 @@ const stageOrDeployScript = readFileSync(
   ".github/scripts/stage-or-deploy-backend.sh",
   "utf8",
 );
+const identityEnvRecoveryTest = readFileSync(
+  "scripts/test-identity-production-env-recovery.sh",
+  "utf8",
+);
+const staticWorkflowLines = staticWorkflowCheckScript
+  .split("\n")
+  .map((line) => line.trim());
+const identityRecoveryPreflightStart = workflow.indexOf(
+  "\n  lifecycle_checkout_preflight:\n",
+);
+const identityRecoveryVerifyStart = workflow.indexOf(
+  "\n  verify:\n",
+  identityRecoveryPreflightStart,
+);
+const identityRecoveryPreflight = workflow.slice(
+  identityRecoveryPreflightStart,
+  identityRecoveryVerifyStart,
+);
+if (
+  identityRecoveryPreflightStart < 0 ||
+  identityRecoveryVerifyStart <= identityRecoveryPreflightStart ||
+  (workflow.match(/scripts\/test-identity-production-env-recovery\.sh/g) ?? [])
+    .length !== 3 ||
+  identityRecoveryPreflight
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+    (line) => line === "bash scripts/test-identity-production-env-recovery.sh",
+    ).length !== 1 ||
+  workflow
+    .slice(identityRecoveryVerifyStart)
+    .split("\n")
+    .map((line) => line.trim())
+    .includes("bash scripts/test-identity-production-env-recovery.sh") ||
+  staticWorkflowLines.filter(
+    (line) => line === "scripts/test-identity-production-env-recovery.sh \\",
+  ).length !== 1 ||
+  !identityEnvRecoveryTest.startsWith(
+    "#!/usr/bin/env bash\nset -Eeuo pipefail\numask 077\n",
+  ) ||
+  identityEnvRecoveryTest.includes("identity_env_assert_candidate() {")
+) {
+  throw new Error(
+    "Identity env recovery behavior test must be required, syntax-checked, shellchecked, and run exactly once before verify",
+  );
+}
+for (const requiredControllerContract of [
+  'deploy_ssh_key_path="${DEPLOY_SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"',
+  'deploy_ssh_known_hosts_path="${DEPLOY_SSH_KNOWN_HOSTS_PATH:-$HOME/.ssh/known_hosts}"',
+  'ssh -i "$deploy_ssh_key_path" \\',
+  '-F /dev/null \\',
+  '-o BatchMode=yes \\',
+  '-o StrictHostKeyChecking=yes \\',
+  '-o GlobalKnownHostsFile=/dev/null \\',
+  '-o UserKnownHostsFile="$deploy_ssh_known_hosts_path" \\',
+  '-o ConnectTimeout=15 \\',
+  '[[ "$IDENTITY_ENV_EXPORT_ID" =~ ^[0-9]{1,20}-[0-9]{1,10}$ ]]',
+  '      recover-candidate-env)\n        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \\',
+  "rollback-env-bootstrap:'ROLLBACK INCOMPLETE IDENTITY ENV BOOTSTRAP'",
+  'bash scripts/identity-production-env-control.sh --rollback-incomplete-bootstrap',
+  'bash scripts/identity-production-env-control.sh --export-candidate-encrypted',
+]) {
+  if (!stageOrDeployScript.includes(requiredControllerContract)) {
+    throw new Error(
+      `Stage/deploy controller is missing resumable Identity env export contract: ${requiredControllerContract}`,
+    );
+  }
+}
+if (stageOrDeployScript.includes("ssh -i ~/.ssh/deploy_key")) {
+  throw new Error("Stage/deploy controller bypasses the explicit SSH key path");
+}
+const identityControllerStart = stageOrDeployScript.indexOf("\n  identity)\n");
+const identityControllerEnd = stageOrDeployScript.indexOf(
+  "\n  identity-cleanup)\n",
+  identityControllerStart,
+);
+const identityController = stageOrDeployScript.slice(
+  identityControllerStart,
+  identityControllerEnd,
+);
+const noCheckoutExportIndex = identityController.indexOf(
+  'if [[ "$IDENTITY_ACTION" =~ ^(recover-candidate-env|rollback-env-bootstrap)$ ]]',
+);
+const noCheckoutElseIndex = identityController.indexOf(
+  '\n    else\n      checkout_verified_prod_revision "$EXPECTED_REVISION"\n    fi',
+  noCheckoutExportIndex,
+);
+const identityCheckoutIndex = identityController.indexOf(
+  'checkout_verified_prod_revision "$EXPECTED_REVISION"',
+);
+const identityActionCaseIndex = identityController.indexOf(
+  'case "$IDENTITY_ACTION" in',
+);
+if (
+  identityControllerStart < 0 ||
+  identityControllerEnd <= identityControllerStart ||
+  noCheckoutExportIndex < 0 ||
+  noCheckoutElseIndex <= noCheckoutExportIndex ||
+  identityCheckoutIndex <= noCheckoutExportIndex ||
+  identityCheckoutIndex <= noCheckoutElseIndex ||
+  identityActionCaseIndex <= identityCheckoutIndex
+) {
+  throw new Error(
+    "Identity env export recovery must verify the current checkout without moving it",
+  );
+}
+const noCheckoutRecoveryArm = identityController.slice(
+  noCheckoutExportIndex,
+  noCheckoutElseIndex,
+);
+const allowedRecoveryGitContracts = [
+  'git rev-parse HEAD',
+  'git rev-parse --verify "HEAD:$env_control_script"',
+  'git hash-object "$env_control_script"',
+];
+if (
+  (noCheckoutRecoveryArm.match(/\bgit\s+/g) ?? []).length !==
+    allowedRecoveryGitContracts.length ||
+  allowedRecoveryGitContracts.some(
+    (contract) => !noCheckoutRecoveryArm.includes(contract),
+  )
+) {
+  throw new Error(
+    "Identity env recovery may use only the exact read-only Git inspection commands",
+  );
+}
+for (const forbiddenRecoveryMutation of [
+  "checkout_verified_prod_revision",
+  "git fetch",
+  "git checkout",
+  "git merge",
+]) {
+  if (noCheckoutRecoveryArm.includes(forbiddenRecoveryMutation)) {
+    throw new Error(
+      `Identity env recovery performs a checkout mutation: ${forbiddenRecoveryMutation}`,
+    );
+  }
+}
+for (const internalIdentityAction of [
+  "recover-candidate-env",
+  "rollback-env-bootstrap",
+]) {
+  if (workflow.includes(internalIdentityAction)) {
+    throw new Error(
+      `Internal Identity recovery action is exposed by workflow_dispatch: ${internalIdentityAction}`,
+    );
+  }
+}
 const productionCompose = readFileSync(
   "deploy/docker-compose.prod.yml",
   "utf8",

@@ -2,6 +2,21 @@
 set -e
 set -o pipefail
 
+deploy_ssh_key_path="${DEPLOY_SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"
+deploy_ssh_known_hosts_path="${DEPLOY_SSH_KNOWN_HOSTS_PATH:-$HOME/.ssh/known_hosts}"
+[[ "$deploy_ssh_key_path" == /* && -f "$deploy_ssh_key_path" &&
+  ! -L "$deploy_ssh_key_path" &&
+  "$deploy_ssh_known_hosts_path" == /* &&
+  -f "$deploy_ssh_known_hosts_path" &&
+  ! -L "$deploy_ssh_known_hosts_path" ]] || {
+  echo 'Deployment SSH credential paths are not trusted regular files.' >&2
+  exit 1
+}
+if [[ -n "$IDENTITY_ENV_EXPORT_ID" &&
+  ! "$IDENTITY_ENV_EXPORT_ID" =~ ^[0-9]{1,20}-[0-9]{1,10}$ ]]; then
+  echo 'Identity env export id is unsafe.' >&2
+  exit 1
+fi
 case "$WIDGETS_CUTOVER_CONFIRMATION" in
   ''|'CUTOVER WIDGETS OWNERSHIP') ;;
   *)
@@ -35,7 +50,8 @@ elif [[ "$BILLING_CLEANUP_ACTION" != 'status' ||
 fi
 if [[ "$DEPLOY_TARGET" == 'identity' ]]; then
   case "$IDENTITY_ACTION:$IDENTITY_CONFIRMATION" in
-    status:|export-env:|prepare:) ;;
+    status:|recover-candidate-env:|prepare:) ;;
+    rollback-env-bootstrap:'ROLLBACK INCOMPLETE IDENTITY ENV BOOTSTRAP') ;;
     cutover:'CUTOVER IDENTITY OWNERSHIP'|forward-recovery:'CUTOVER IDENTITY OWNERSHIP') ;;
     abort-prepare:'ABORT IDENTITY PREPARE') ;;
     *)
@@ -44,7 +60,7 @@ if [[ "$DEPLOY_TARGET" == 'identity' ]]; then
       ;;
   esac
   case "$IDENTITY_ACTION" in
-    prepare|cutover|forward-recovery)
+    prepare|rollback-env-bootstrap|cutover|forward-recovery)
       [[ "$IDENTITY_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
         echo 'Identity mutation requires the exact local canonical backend env SHA-256.' >&2
         exit 1
@@ -54,6 +70,12 @@ if [[ "$DEPLOY_TARGET" == 'identity' ]]; then
       [[ -z "$IDENTITY_ENV_EXPECTED_SHA256" ]] || exit 1
       ;;
   esac
+  if [[ "$IDENTITY_ACTION" =~ ^(recover-candidate-env|prepare)$ ]]; then
+    [[ "$IDENTITY_ENV_EXPORT_ID" =~ ^[0-9]{1,20}-[0-9]{1,10}$ ]] || {
+      echo 'Identity env export requires a safe export id.' >&2
+      exit 1
+    }
+  fi
 elif [[ "$DEPLOY_TARGET" != 'identity-cleanup' &&
   ( "$IDENTITY_ACTION" != 'status' || -n "$IDENTITY_CONFIRMATION" ||
     -n "$IDENTITY_ENV_EXPECTED_SHA256" ) ]]; then
@@ -71,7 +93,8 @@ if [[ "$DEPLOY_TARGET" == 'identity-cleanup' ]]; then
       ;;
     run:'CLEANUP IDENTITY CORE SOURCE'|forward-recovery:'CLEANUP IDENTITY CORE SOURCE')
       [[ "$IDENTITY_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
-        "$IDENTITY_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+        "$IDENTITY_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+        "$IDENTITY_ENV_EXPORT_ID" =~ ^[0-9]{1,20}-[0-9]{1,10}$ ]] || exit 1
       ;;
     *)
       echo 'Invalid Identity Core cleanup action or confirmation.' >&2
@@ -84,8 +107,14 @@ elif [[ "$IDENTITY_CLEANUP_ACTION" != 'status' ||
   echo 'Identity cleanup inputs require the identity-cleanup target.' >&2
   exit 1
 fi
-ssh -i ~/.ssh/deploy_key \
+ssh -i "$deploy_ssh_key_path" \
+  -F /dev/null \
   -o IdentitiesOnly=yes \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes \
+  -o GlobalKnownHostsFile=/dev/null \
+  -o UserKnownHostsFile="$deploy_ssh_known_hosts_path" \
+  -o ConnectTimeout=15 \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=4 \
   -o TCPKeepAlive=yes \
@@ -1310,11 +1339,38 @@ case "$DEPLOY_TARGET" in
         exit 1
       }
     fi
-    checkout_verified_prod_revision "$EXPECTED_REVISION"
+    if [[ "$IDENTITY_ACTION" =~ ^(recover-candidate-env|rollback-env-bootstrap)$ ]]; then
+      [[ "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" ]] || {
+        echo 'Identity env export requires the exact current production checkout.' >&2
+        exit 1
+      }
+      guard_identity_checkout_before_pull "$EXPECTED_REVISION"
+      env_control_script='scripts/identity-production-env-control.sh'
+      env_control_blob="$(git rev-parse --verify "HEAD:$env_control_script")"
+      [[ -f "$env_control_script" && ! -L "$env_control_script" &&
+        "$(git hash-object "$env_control_script")" == "$env_control_blob" ]] || {
+        echo 'Identity env recovery controller differs from the current revision.' >&2
+        exit 1
+      }
+    else
+      checkout_verified_prod_revision "$EXPECTED_REVISION"
+    fi
     case "$IDENTITY_ACTION" in
       status)
         APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
           bash scripts/identity-cutover-production.sh --status
+        ;;
+      recover-candidate-env)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          IDENTITY_ENV_EXPORT_CERTIFICATE_FILE="$APP_ROOT/deploy/backend/.identity-env-export-certificate-$IDENTITY_ENV_EXPORT_ID.pem" \
+          IDENTITY_ENV_EXPORT_FILE="$APP_ROOT/deploy/backend/.identity-production-env-$IDENTITY_ENV_EXPORT_ID.p7m" \
+          bash scripts/identity-production-env-control.sh --export-candidate-encrypted
+        ;;
+      rollback-env-bootstrap)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          IDENTITY_ENV_EXPECTED_SHA256="$IDENTITY_ENV_EXPECTED_SHA256" \
+          IDENTITY_ENV_ROLLBACK_CONFIRMATION="$IDENTITY_CONFIRMATION" \
+          bash scripts/identity-production-env-control.sh --rollback-incomplete-bootstrap
         ;;
       prepare)
         APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
@@ -1323,7 +1379,7 @@ case "$DEPLOY_TARGET" in
         APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
           IDENTITY_ENV_EXPORT_CERTIFICATE_FILE="$APP_ROOT/deploy/backend/.identity-env-export-certificate-$IDENTITY_ENV_EXPORT_ID.pem" \
           IDENTITY_ENV_EXPORT_FILE="$APP_ROOT/deploy/backend/.identity-production-env-$IDENTITY_ENV_EXPORT_ID.p7m" \
-          bash scripts/identity-production-env-control.sh --export-encrypted
+          bash scripts/identity-production-env-control.sh --export-candidate-encrypted
         APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
           bash scripts/identity-database-lifecycle.sh --prepare
         ;;
