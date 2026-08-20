@@ -125,6 +125,11 @@ const stageOrDeployScript = readFileSync(
   ".github/scripts/stage-or-deploy-backend.sh",
   "utf8",
 );
+const productionCompose = readFileSync(
+  "deploy/docker-compose.prod.yml",
+  "utf8",
+);
+const productionEnvExample = readFileSync(".env.example", "utf8");
 if (Buffer.byteLength(workflow, "utf8") >= 450_000) {
   throw new Error(
     "deploy-production.yml must stay below 450000 bytes of scheduler headroom",
@@ -875,16 +880,21 @@ const lifecyclePreflightStart = workflow.indexOf(
   "\n  lifecycle_checkout_preflight:",
 );
 const verifyStart = workflow.indexOf("\n  verify:");
+const deployStart = workflow.indexOf("\n  deploy:", verifyStart);
 const verifyServicesStart = workflow.indexOf(
   "\n    services:",
   verifyStart,
 );
+const verifyStepsStart = workflow.indexOf("\n    steps:\n", verifyServicesStart);
 if (
   lifecyclePreflightStart < 0 ||
   verifyStart <= lifecyclePreflightStart ||
+  deployStart <= verifyStart ||
   verifyServicesStart <= verifyStart ||
+  verifyStepsStart <= verifyServicesStart ||
   substringCount(workflow, "\n  lifecycle_checkout_preflight:") !== 1 ||
-  substringCount(workflow, "\n  verify:") !== 1
+  substringCount(workflow, "\n  verify:") !== 1 ||
+  substringCount(workflow, "\n  deploy:") !== 1
 ) {
   throw new Error(
     "The mandatory production preflight and verify chain is missing or out of order",
@@ -908,6 +918,113 @@ if (
   throw new Error(
     "Every ordinary and manual deployment must pass mandatory preflight and verify",
   );
+}
+const buildImageStepStart = workflow.indexOf(
+  "\n      - name: Build and verify production image\n",
+  verifyStepsStart,
+);
+const buildImageStepEnd = workflow.indexOf(
+  "\n      - name:",
+  buildImageStepStart + 1,
+);
+if (
+  buildImageStepStart < verifyStepsStart ||
+  buildImageStepEnd <= buildImageStepStart ||
+  buildImageStepEnd >= deployStart ||
+  substringCount(
+    workflow,
+    "\n      - name: Build and verify production image\n",
+  ) !== 1
+) {
+  throw new Error("Production image verification step is missing");
+}
+const buildImageStep = workflow.slice(buildImageStepStart, buildImageStepEnd);
+const buildImageEnvStart = buildImageStep.indexOf("\n        env:\n");
+const buildImageRunStart = buildImageStep.indexOf("\n        run: |\n");
+if (
+  buildImageEnvStart < 0 ||
+  buildImageRunStart <= buildImageEnvStart ||
+  substringCount(buildImageStep, "\n        env:\n") !== 1
+) {
+  throw new Error(
+    "Production image verification must have one step-local CI fixture environment",
+  );
+}
+const buildImageEnvLines = buildImageStep
+  .slice(buildImageEnvStart + "\n        env:\n".length, buildImageRunStart)
+  .split("\n")
+  .filter(line => line.trim() !== "" && !line.trimStart().startsWith("#"));
+const buildImageEnvEntries = buildImageEnvLines.map(line => {
+  const match = line.match(/^          ([A-Z][A-Z0-9_]*): (\S.*)$/);
+  if (!match) {
+    throw new Error(
+      "Production image verification CI fixture mapping contains a non-scalar or empty entry",
+    );
+  }
+  return [match[1], match[2]];
+});
+const buildImageEnv = Object.fromEntries(buildImageEnvEntries);
+if (Object.keys(buildImageEnv).length !== buildImageEnvEntries.length) {
+  throw new Error("Production image verification has duplicate CI fixture keys");
+}
+const expectedBuildImageEnv = {
+  PAYMENT_METHOD_ENCRYPTION_KEY:
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  YOOKASSA_PRODUCTION_SHOP_ID: "ci_billing_shop",
+  YOOKASSA_PRODUCTION_SECRET_KEY:
+    "ci_billing_secret_key_at_least_32_chars",
+  S3_ACCESS_KEY_ID: "ci_widgets_s3_access_key",
+  S3_SECRET_ACCESS_KEY: "ci_widgets_s3_secret_key_at_least_32_chars",
+  GOOGLE_CLIENT_ID: "ci_identity_google_client_id",
+  GOOGLE_CLIENT_SECRET: "ci_identity_google_client_secret",
+  GITHUB_CLIENT_ID: "ci_identity_github_client_id",
+  GITHUB_CLIENT_SECRET: "ci_identity_github_client_secret",
+  YANDEX_CLIENT_ID: "ci_identity_yandex_client_id",
+  YANDEX_CLIENT_SECRET: "ci_identity_yandex_client_secret",
+  TELEGRAM_INFO_BOT_TOKEN: "ci_identity_info_bot_token",
+  TELEGRAM_INFO_BOT_USERNAME: "ci_identity_info_bot",
+  TELEGRAM_INFO_BOT_WEBHOOK_SECRET: "ci_identity_info_webhook_secret",
+  TELEGRAM_AUTH_BOT_TOKEN: "ci_identity_auth_bot_token",
+  TELEGRAM_AUTH_BOT_USERNAME: "ci_identity_auth_bot",
+  TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: "ci_identity_auth_webhook_secret",
+  SMSAERO_EMAIL: "identity-ci@example.invalid",
+  SMSAERO_API_KEY: "ci_identity_smsaero_api_key",
+};
+const productionEnvExampleValues = new Map(
+  productionEnvExample
+    .split("\n")
+    .filter(line => /^[A-Z][A-Z0-9_]*=/.test(line))
+    .map(line => {
+      const separator = line.indexOf("=");
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }),
+);
+const requiredBlankComposeVariables = [
+  ...new Set(
+    [...productionCompose.matchAll(/\$\{([A-Z][A-Z0-9_]*):\?[^}]*\}/g)].map(
+      match => match[1],
+    ),
+  ),
+]
+  .filter(name => productionEnvExampleValues.get(name) === "")
+  .sort();
+const expectedBuildImageEnvNames = Object.keys(expectedBuildImageEnv).sort();
+if (
+  JSON.stringify(requiredBlankComposeVariables) !==
+    JSON.stringify(expectedBuildImageEnvNames) ||
+  JSON.stringify(buildImageEnv) !== JSON.stringify(expectedBuildImageEnv)
+) {
+  throw new Error(
+    "Production image verification CI fixtures do not exactly cover blank mandatory Compose variables",
+  );
+}
+const deployWorkflow = workflow.slice(deployStart);
+for (const [name, value] of Object.entries(expectedBuildImageEnv)) {
+  if (deployWorkflow.includes(name) || deployWorkflow.includes(value)) {
+    throw new Error(
+      "Production image CI-only fixtures must not enter the deploy job",
+    );
+  }
 }
 for (const retiredToken of [
   "\n          - notification-delivery-" + "database",

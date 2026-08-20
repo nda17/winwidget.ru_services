@@ -4626,6 +4626,28 @@ jobs:
           NODE
 
       - name: Build and verify production image
+        env:
+          # CI-only fixture values. The deploy job still reads production
+          # values exclusively from the protected root-owned VPS env.
+          PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          YOOKASSA_PRODUCTION_SHOP_ID: ci_billing_shop
+          YOOKASSA_PRODUCTION_SECRET_KEY: ci_billing_secret_key_at_least_32_chars
+          S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
+          S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
+          GOOGLE_CLIENT_ID: ci_identity_google_client_id
+          GOOGLE_CLIENT_SECRET: ci_identity_google_client_secret
+          GITHUB_CLIENT_ID: ci_identity_github_client_id
+          GITHUB_CLIENT_SECRET: ci_identity_github_client_secret
+          YANDEX_CLIENT_ID: ci_identity_yandex_client_id
+          YANDEX_CLIENT_SECRET: ci_identity_yandex_client_secret
+          TELEGRAM_INFO_BOT_TOKEN: ci_identity_info_bot_token
+          TELEGRAM_INFO_BOT_USERNAME: ci_identity_info_bot
+          TELEGRAM_INFO_BOT_WEBHOOK_SECRET: ci_identity_info_webhook_secret
+          TELEGRAM_AUTH_BOT_TOKEN: ci_identity_auth_bot_token
+          TELEGRAM_AUTH_BOT_USERNAME: ci_identity_auth_bot
+          TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: ci_identity_auth_webhook_secret
+          SMSAERO_EMAIL: identity-ci@example.invalid
+          SMSAERO_API_KEY: ci_identity_smsaero_api_key
         run: |
           ci_rabbitmq_volume="winwidget-ci-rabbitmq-data-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker volume create "$ci_rabbitmq_volume" > /dev/null
