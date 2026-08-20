@@ -27,9 +27,15 @@ if (testRabbitUrl) {
 }
 
 const internalToken = `campaigns-integration-${randomUUID()}`;
+const identityToken = `campaigns-identity-integration-${randomUUID()}`;
+const billingToken = `campaigns-billing-integration-${randomUUID()}`;
+if (new Set([internalToken, identityToken, billingToken]).size !== 3) {
+	throw new Error('Campaigns integration tokens must be distinct');
+}
 const corsAllowedOrigin = 'http://127.0.0.1:3000';
 const apiPort = await getFreePort();
-const corePort = await getFreePort();
+const identityPort = await getFreePort();
+const billingPort = await getFreePort();
 const migration = spawnSync('pnpm', ['run', 'prisma:migrate:deploy'], {
 	cwd: new URL('../../', import.meta.url),
 	env: {
@@ -44,8 +50,12 @@ if (migration.status !== 0) {
 	);
 }
 
-const core = createServer((request, response) => {
-	if (request.headers['x-winwidget-internal-token'] !== internalToken) {
+let identityIntrospectionCalls = 0;
+const identity = createServer((request, response) => {
+	if (
+		request.headers['x-winwidget-service'] !== 'campaigns' ||
+		request.headers['x-winwidget-internal-token'] !== identityToken
+	) {
 		response.writeHead(403).end();
 		return;
 	}
@@ -53,6 +63,11 @@ const core = createServer((request, response) => {
 		request.method === 'POST' &&
 		request.url === '/internal/v1/auth/introspect'
 	) {
+		if (request.headers.authorization !== 'Bearer integration-token') {
+			response.writeHead(401).end();
+			return;
+		}
+		identityIntrospectionCalls += 1;
 		response.writeHead(200, { 'content-type': 'application/json' });
 		response.end(
 			JSON.stringify({
@@ -64,26 +79,66 @@ const core = createServer((request, response) => {
 		);
 		return;
 	}
+	if (
+		request.method === 'POST' &&
+		request.url === '/internal/v1/campaigns/eligible-contacts'
+	) {
+		response
+			.writeHead(200, { 'content-type': 'application/x-ndjson' })
+			.end();
+		return;
+	}
 	response.writeHead(404).end();
 });
 await new Promise((resolve, reject) => {
-	core.once('error', reject);
-	core.listen(corePort, '127.0.0.1', resolve);
+	identity.once('error', reject);
+	identity.listen(identityPort, '127.0.0.1', resolve);
 });
 
+const billing = createServer((request, response) => {
+	if (
+		request.headers['x-winwidget-service'] !== 'campaigns' ||
+		request.headers['x-winwidget-internal-token'] !== billingToken
+	) {
+		response.writeHead(403).end();
+		return;
+	}
+	if (
+		request.method === 'POST' &&
+		request.url === '/internal/v1/billing/campaigns/active-subscriber-ids'
+	) {
+		response
+			.writeHead(200, { 'content-type': 'application/x-ndjson' })
+			.end();
+		return;
+	}
+	response.writeHead(404).end();
+});
+await new Promise((resolve, reject) => {
+	billing.once('error', reject);
+	billing.listen(billingPort, '127.0.0.1', resolve);
+});
+
+const appEnv = {
+	...process.env,
+	CAMPAIGNS_DATABASE_URL: databaseUrl,
+	CAMPAIGNS_PROCESS_ROLE: 'api',
+	CAMPAIGNS_LISTEN_HOST: '127.0.0.1',
+	CAMPAIGNS_HEALTH_PORT: String(apiPort),
+	CAMPAIGNS_INTERNAL_TOKEN: internalToken,
+	IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${identityPort}`,
+	IDENTITY_INTERNAL_TIMEOUT_MS: '5000',
+	IDENTITY_CAMPAIGNS_TOKEN: identityToken,
+	BILLING_INTERNAL_BASE_URL: `http://127.0.0.1:${billingPort}`,
+	BILLING_CAMPAIGNS_TOKEN: billingToken,
+	CORS_ALLOWED_ORIGINS: corsAllowedOrigin,
+	APP_REVISION: 'integration-test'
+};
+delete appEnv.CAMPAIGNS_CORE_INTERNAL_BASE_URL;
+delete appEnv.CAMPAIGNS_INTERNAL_TIMEOUT_MS;
 const app = spawn('node', ['dist/src/main.js'], {
 	cwd: new URL('../../', import.meta.url),
-	env: {
-		...process.env,
-		CAMPAIGNS_DATABASE_URL: databaseUrl,
-		CAMPAIGNS_PROCESS_ROLE: 'api',
-		CAMPAIGNS_LISTEN_HOST: '127.0.0.1',
-		CAMPAIGNS_HEALTH_PORT: String(apiPort),
-		CAMPAIGNS_CORE_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
-		CAMPAIGNS_INTERNAL_TOKEN: internalToken,
-		CORS_ALLOWED_ORIGINS: corsAllowedOrigin,
-		APP_REVISION: 'integration-test'
-	},
+	env: appEnv,
 	stdio: 'inherit'
 });
 
@@ -186,7 +241,15 @@ try {
 			databaseUrl,
 			process.env.CAMPAIGNS_TEST_RABBITMQ_URL.trim(),
 			internalToken,
-			corePort
+			identityToken,
+			billingToken,
+			identityPort,
+			billingPort
+		);
+	}
+	if (identityIntrospectionCalls !== 5) {
+		throw new Error(
+			`Campaigns integration expected 5 Identity introspections, received ${identityIntrospectionCalls}`
 		);
 	}
 	console.log('Campaigns API integration smoke passed');
@@ -196,7 +259,10 @@ try {
 		new Promise(resolve => app.once('exit', resolve)),
 		new Promise(resolve => setTimeout(resolve, 5000))
 	]);
-	await new Promise(resolve => core.close(resolve));
+	await Promise.all([
+		new Promise(resolve => identity.close(resolve)),
+		new Promise(resolve => billing.close(resolve))
+	]);
 	await cleanup(databaseUrl, campaignId);
 }
 
@@ -292,24 +358,39 @@ async function cleanup(url, id) {
 	}
 }
 
-async function runRabbitMqSmoke(databaseUrl, rabbitUrl, token, corePort) {
+async function runRabbitMqSmoke(
+	databaseUrl,
+	rabbitUrl,
+	internalToken,
+	identityToken,
+	billingToken,
+	identityPort,
+	billingPort
+) {
 	const port = await getFreePort();
+	const serviceEnv = {
+		...process.env,
+		CAMPAIGNS_DATABASE_URL: databaseUrl,
+		CAMPAIGNS_PROCESS_ROLE: 'all',
+		CAMPAIGNS_LISTEN_HOST: '127.0.0.1',
+		CAMPAIGNS_HEALTH_PORT: String(port),
+		CAMPAIGNS_INTERNAL_TOKEN: internalToken,
+		IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${identityPort}`,
+		IDENTITY_INTERNAL_TIMEOUT_MS: '5000',
+		IDENTITY_CAMPAIGNS_TOKEN: identityToken,
+		BILLING_INTERNAL_BASE_URL: `http://127.0.0.1:${billingPort}`,
+		BILLING_CAMPAIGNS_TOKEN: billingToken,
+		CORS_ALLOWED_ORIGINS: corsAllowedOrigin,
+		RABBITMQ_URL: rabbitUrl,
+		RABBITMQ_ASSERT_TOPOLOGY: 'true',
+		RABBITMQ_CONNECTION_NAME: 'campaigns-ci-restricted-smoke',
+		APP_REVISION: 'integration-test'
+	};
+	delete serviceEnv.CAMPAIGNS_CORE_INTERNAL_BASE_URL;
+	delete serviceEnv.CAMPAIGNS_INTERNAL_TIMEOUT_MS;
 	const service = spawn('node', ['dist/src/main.js'], {
 		cwd: new URL('../../', import.meta.url),
-		env: {
-			...process.env,
-			CAMPAIGNS_DATABASE_URL: databaseUrl,
-			CAMPAIGNS_PROCESS_ROLE: 'all',
-			CAMPAIGNS_LISTEN_HOST: '127.0.0.1',
-			CAMPAIGNS_HEALTH_PORT: String(port),
-			CAMPAIGNS_CORE_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
-			CAMPAIGNS_INTERNAL_TOKEN: token,
-			CORS_ALLOWED_ORIGINS: corsAllowedOrigin,
-			RABBITMQ_URL: rabbitUrl,
-			RABBITMQ_ASSERT_TOPOLOGY: 'true',
-			RABBITMQ_CONNECTION_NAME: 'campaigns-ci-restricted-smoke',
-			APP_REVISION: 'integration-test'
-		},
+		env: serviceEnv,
 		stdio: 'inherit'
 	});
 	try {
