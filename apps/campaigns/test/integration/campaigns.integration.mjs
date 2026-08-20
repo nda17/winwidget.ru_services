@@ -33,9 +33,6 @@ if (new Set([internalToken, identityToken, billingToken]).size !== 3) {
 	throw new Error('Campaigns integration tokens must be distinct');
 }
 const corsAllowedOrigin = 'http://127.0.0.1:3000';
-const apiPort = await getFreePort();
-const identityPort = await getFreePort();
-const billingPort = await getFreePort();
 const migration = spawnSync('pnpm', ['run', 'prisma:migrate:deploy'], {
 	cwd: new URL('../../', import.meta.url),
 	env: {
@@ -51,6 +48,7 @@ if (migration.status !== 0) {
 }
 
 let identityIntrospectionCalls = 0;
+const identityPort = await getFreePort();
 const identity = createServer((request, response) => {
 	if (
 		request.headers['x-winwidget-service'] !== 'campaigns' ||
@@ -95,6 +93,7 @@ await new Promise((resolve, reject) => {
 	identity.listen(identityPort, '127.0.0.1', resolve);
 });
 
+const billingPort = await getFreePort();
 const billing = createServer((request, response) => {
 	if (
 		request.headers['x-winwidget-service'] !== 'campaigns' ||
@@ -119,6 +118,7 @@ await new Promise((resolve, reject) => {
 	billing.listen(billingPort, '127.0.0.1', resolve);
 });
 
+const apiPort = await getFreePort();
 const appEnv = {
 	...process.env,
 	CAMPAIGNS_DATABASE_URL: databaseUrl,

@@ -99,6 +99,10 @@ const backfillService = new ReportingBackfillService(
 	prisma
 );
 const internalToken = `reporting-integration-${randomUUID()}`;
+const identityToken = `reporting-identity-integration-${randomUUID()}`;
+if (internalToken === identityToken) {
+	throw new Error('Reporting integration tokens must be distinct');
+}
 const allowedOrigin = 'http://127.0.0.1:3000';
 let lastIntrospectionCorrelationId = null;
 let schedulePolicy = {
@@ -249,9 +253,25 @@ const core = createServer(async (request, response) => {
 		);
 		return;
 	}
+	response.writeHead(404).end();
+});
+await new Promise((resolve, reject) => {
+	core.once('error', reject);
+	core.listen(corePort, '127.0.0.1', resolve);
+});
+
+const identityPort = await getFreePort();
+const identity = createServer((request, response) => {
+	if (
+		request.headers['x-winwidget-service'] !== 'reporting' ||
+		request.headers['x-winwidget-internal-token'] !== identityToken
+	) {
+		response.writeHead(403).end();
+		return;
+	}
 	if (
 		request.method !== 'POST' ||
-		request.url !== '/api/v1/internal/reporting/auth/introspect'
+		request.url !== '/internal/v1/auth/introspect'
 	) {
 		response.writeHead(404).end();
 		return;
@@ -278,8 +298,8 @@ const core = createServer(async (request, response) => {
 	);
 });
 await new Promise((resolve, reject) => {
-	core.once('error', reject);
-	core.listen(corePort, '127.0.0.1', resolve);
+	identity.once('error', reject);
+	identity.listen(identityPort, '127.0.0.1', resolve);
 });
 
 let service = null;
@@ -314,7 +334,10 @@ try {
 } finally {
 	if (service) await stopService(service);
 	if (rabbitFixture) await rabbitFixture.close();
-	await new Promise(resolve => core.close(resolve));
+	await Promise.all([
+		new Promise(resolve => core.close(resolve)),
+		new Promise(resolve => identity.close(resolve))
+	]);
 	await cleanupDatabase().catch(() => undefined);
 	await prisma.$disconnect();
 }
@@ -334,6 +357,9 @@ function startService({ port, role, rabbitUrl }) {
 			REPORTING_CORE_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
 			REPORTING_INTERNAL_TOKEN: internalToken,
 			REPORTING_INTERNAL_TIMEOUT_MS: '2000',
+			IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${identityPort}`,
+			IDENTITY_REPORTING_TOKEN: identityToken,
+			IDENTITY_INTERNAL_TIMEOUT_MS: '2000',
 			REPORTING_SCHEDULER_ENABLED: 'false',
 			REPORTING_PREFETCH: '5',
 			REPORTING_OUTBOX_BATCH_SIZE: '50',
