@@ -29,10 +29,166 @@ identity_cleanup_marker="$APP_ROOT/deploy/backend/.identity-core-cleanup-v1"
 
 readonly identity_env_postgres_image='postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
 readonly identity_env_integration_kinds='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection'
+identity_env_node_image_id=''
 
 identity_env_fail() {
 	printf 'identity_production_env_error=%s\n' "$1" >&2
 	return 1
+}
+
+identity_env_host_node_available() {
+	# Production VPS hosts Docker only. Root/Linux executions must use the
+	# release-bound maintenance image instead of an ambient host runtime.
+	if [[ "$(uname -s)" == 'Linux' && "$(id -u)" == '0' ]]; then
+		return 1
+	fi
+	command -v node >/dev/null 2>&1
+}
+
+identity_env_docker_binary() {
+	local binary
+	binary="$(type -P docker 2>/dev/null || true)"
+	[[ -n "$binary" && "$binary" == /* &&
+		"$binary" =~ ^/[A-Za-z0-9._/@:+-]+$ &&
+		-f "$binary" && ! -L "$binary" && -x "$binary" ]] || return 1
+	printf '%s\n' "$binary"
+}
+
+identity_env_node_revision_is_allowed() {
+	[[ $# -eq 2 && "$1" =~ ^[0-9a-f]{40}$ &&
+		"$2" =~ ^/[A-Za-z0-9._/@:+-]+$ &&
+		-d "$2/.git" && ! -L "$2" ]] || return 1
+	[[ "$(git -C "$2" rev-parse HEAD)" == "$EXPECTED_REVISION" ]] || return 1
+	[[ "$1" == "$EXPECTED_REVISION" ]] ||
+		git -C "$2" merge-base --is-ancestor "$1" "$EXPECTED_REVISION"
+}
+
+identity_env_prepare_node_runtime() {
+	identity_env_host_node_available && return 0
+	[[ "$(id -u)" == '0' && "$(uname -s)" == 'Linux' &&
+		-z "${DOCKER_HOST+x}" && -z "${DOCKER_CONTEXT+x}" ]] || return 1
+	local docker_binary source_root container metadata project service oneoff
+	local status running health restart_count container_revision image app_revision
+	local image_metadata image_id image_revision image_user
+	docker_binary="$(identity_env_docker_binary)" || return 1
+	[[ "$("$docker_binary" context show)" == 'default' &&
+		"$("$docker_binary" context inspect default --format '{{.Endpoints.docker.Host}}')" == 'unix:///var/run/docker.sock' &&
+		"$("$docker_binary" info --format '{{.OSType}}')" == 'linux' ]] || return 1
+	source_root="$APP_ROOT/winwidget.ru_server"
+	[[ "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ &&
+		"$source_root" =~ ^/[A-Za-z0-9._/@:+-]+$ &&
+		-d "$source_root/.git" && ! -L "$source_root" ]] || return 1
+	container="$("$docker_binary" ps --quiet --no-trunc \
+		--filter 'label=com.docker.compose.project=winwidget' \
+		--filter 'label=com.docker.compose.service=maintenance-worker' \
+		--filter 'label=com.docker.compose.oneoff=False')" || return 1
+	[[ "$container" =~ ^[0-9a-f]{64}$ ]] || return 1
+	metadata="$("$docker_binary" inspect --format \
+		'{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}|{{.RestartCount}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Image}}' \
+		"$container")" || return 1
+	IFS='|' read -r project service oneoff status running health restart_count \
+		container_revision image <<<"$metadata"
+	app_revision="$("$docker_binary" inspect --format \
+		'{{range .Config.Env}}{{println .}}{{end}}' "$container" | awk -F= '
+      $1 == "APP_REVISION" { print substr($0, index($0, "=") + 1); found += 1 }
+      END { exit(found == 1 ? 0 : 1) }
+    ')" || return 1
+	[[ "$project" == 'winwidget' && "$service" == 'maintenance-worker' &&
+		"$oneoff" =~ ^[Ff]alse$ && "$status" == 'running' &&
+		"$running" == 'true' && "$health" == 'healthy' &&
+		"$restart_count" == '0' && "$container_revision" =~ ^[0-9a-f]{40}$ &&
+		"$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	image_metadata="$("$docker_binary" image inspect --format \
+		'{{.Id}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Config.User}}' \
+		"$image")" || return 1
+	IFS='|' read -r image_id image_revision image_user <<<"$image_metadata"
+	[[ "$image_id" == "$image" && "$image_revision" =~ ^[0-9a-f]{40}$ &&
+		"$container_revision" == "$image_revision" &&
+		"$app_revision" == "$image_revision" && "$image_user" == 'nestjs' ]] || return 1
+	identity_env_node_revision_is_allowed "$image_revision" "$source_root" || return 1
+	identity_env_node_image_id="$image_id"
+}
+
+identity_env_node_path_is_safe() {
+	[[ $# -eq 1 && "$1" == /* && "$1" =~ ^/[A-Za-z0-9._/@:+-]+$ &&
+		"/$1/" != *'/../'* && "/$1/" != *'/./'* && "$1" != *'//' ]]
+}
+
+identity_env_node_file_is_safe() {
+	[[ $# -eq 1 ]] || return 1
+	local path="$1" parent canonical
+	identity_env_node_path_is_safe "$path" || return 1
+	[[ -f "$path" && ! -L "$path" ]] || return 1
+	parent="${path%/*}"
+	canonical="$(cd -- "$parent" && pwd -P)/${path##*/}" || return 1
+	[[ "$canonical" == "$path" ]] || return 1
+	if [[ "$(uname -s)" == 'Linux' && "$(id -u)" == '0' ]]; then
+		[[ "$(stat -c '%u:%g:%a' "$path")" == '0:0:600' ]] || return 1
+	fi
+}
+
+identity_env_node_validate_path_is_allowed() {
+	[[ $# -eq 1 ]] || return 1
+	local canonical_env="$APP_ROOT/deploy/backend/.env.production"
+	[[ "$1" == "$canonical_env" || "$1" == "$identity_env_bootstrap_candidate" ||
+		"$1" == "$identity_env_bootstrap_candidate_temporary" ]] || return 1
+	identity_env_node_file_is_safe "$1"
+}
+
+identity_env_node_docker_run() {
+	[[ $# -ge 2 && "$1" =~ ^(validate|generate)$ ]] || return 1
+	local operation="$1" source="$2" target="" docker_binary env_name
+	shift 2
+	[[ $# -eq 0 ]] || return 1
+	identity_env_prepare_node_runtime || return 1
+	docker_binary="$(identity_env_docker_binary)" || return 1
+	identity_env_node_validate_path_is_allowed "$source" || return 1
+	local -a mounts=(
+		--mount "type=bind,source=$source,target=/tmp/identity-env-source,readonly"
+	)
+	local -a node_args=(- /tmp/identity-env-source)
+	if [[ "$operation" == 'generate' ]]; then
+		target="$identity_env_bootstrap_candidate_temporary"
+		identity_env_node_file_is_safe "$target" || return 1
+		mounts+=(--mount "type=bind,source=$target,target=/tmp/identity-env-candidate")
+		node_args+=(/tmp/identity-env-candidate)
+	fi
+	local -a docker_args=(
+		run --rm --interactive --pull never --network none --read-only
+		--cap-drop ALL --pids-limit 64 --cpus 1 --memory 512m
+		--memory-swap 512m --log-driver none --user 0:0
+		--security-opt no-new-privileges --entrypoint node
+	)
+	docker_args+=("${mounts[@]}")
+	for env_name in IDENTITY_EXPECTED_REVISION IDENTITY_EXPECTED_POSTGRES_IMAGE \
+		IDENTITY_EXPECTED_INTEGRATION_KINDS IDENTITY_EXPECTED_ADMIN_FILE; do
+		[[ -n "${!env_name:-}" ]] || return 1
+		docker_args+=(--env "$env_name")
+	done
+	"$docker_binary" "${docker_args[@]}" "$identity_env_node_image_id" \
+		"${node_args[@]}"
+}
+
+identity_env_node_validate() {
+	[[ $# -eq 1 ]] || return 1
+	identity_env_node_validate_path_is_allowed "$1" || return 1
+	if identity_env_host_node_available; then
+		command node - "$1"
+		return
+	fi
+	identity_env_node_docker_run validate "$1"
+}
+
+identity_env_node_generate() {
+	[[ $# -eq 2 && "$1" == "$APP_ROOT/deploy/backend/.env.production" &&
+		"$2" == "$identity_env_bootstrap_candidate_temporary" ]] || return 1
+	identity_env_node_validate_path_is_allowed "$1" || return 1
+	identity_env_node_file_is_safe "$2" || return 1
+	if identity_env_host_node_available; then
+		command node - "$1" "$2"
+		return
+	fi
+	identity_env_node_docker_run generate "$1"
 }
 
 identity_env_sha256() {
@@ -285,7 +441,7 @@ identity_env_assert_candidate() {
 	IDENTITY_EXPECTED_POSTGRES_IMAGE="$identity_env_postgres_image" \
 	IDENTITY_EXPECTED_INTEGRATION_KINDS="$identity_env_integration_kinds" \
 	IDENTITY_EXPECTED_ADMIN_FILE="$identity_env_admin_password_file" \
-		node - "$ENV_FILE" <<'NODE' || return 1
+		identity_env_node_validate "$ENV_FILE" <<'NODE' || return 1
 const { createPrivateKey, createPublicKey, randomBytes, sign, verify } = require('node:crypto');
 const fs = require('node:fs');
 const fail = () => process.exit(1);
@@ -477,13 +633,19 @@ identity_env_bootstrap() {
 				"$(stat -c '%u:%g:%a' "$identity_env_bootstrap_candidate_temporary")" == '0:0:600' ]] || return 1
 			rm -f -- "$identity_env_bootstrap_candidate_temporary" || return 1
 		fi
-	IDENTITY_EXPECTED_REVISION="$EXPECTED_REVISION" \
-	IDENTITY_EXPECTED_POSTGRES_IMAGE="$identity_env_postgres_image" \
-	IDENTITY_EXPECTED_INTEGRATION_KINDS="$identity_env_integration_kinds" \
-	IDENTITY_EXPECTED_ADMIN_FILE="$identity_env_admin_password_file" \
-		node - "$ENV_FILE" "$identity_env_bootstrap_candidate_temporary" <<'NODE' || return 1
+		(
+			set -o noclobber
+			: >"$identity_env_bootstrap_candidate_temporary"
+		) || return 1
+		chmod 600 "$identity_env_bootstrap_candidate_temporary" || return 1
+		chown 0:0 "$identity_env_bootstrap_candidate_temporary" || return 1
+		IDENTITY_EXPECTED_REVISION="$EXPECTED_REVISION" \
+		IDENTITY_EXPECTED_POSTGRES_IMAGE="$identity_env_postgres_image" \
+		IDENTITY_EXPECTED_INTEGRATION_KINDS="$identity_env_integration_kinds" \
+		IDENTITY_EXPECTED_ADMIN_FILE="$identity_env_admin_password_file" \
+			identity_env_node_generate "$ENV_FILE" "$identity_env_bootstrap_candidate_temporary" <<'NODE' || return 1
 const { generateKeyPairSync, randomBytes } = require('node:crypto');
-const { chmodSync, readFileSync, unlinkSync, writeFileSync } = require('node:fs');
+const { closeSync, constants, fsyncSync, openSync, readFileSync, writeFileSync } = require('node:fs');
 const file = process.argv[2];
 const candidate = process.argv[3];
 const content = readFileSync(file, 'utf8');
@@ -598,11 +760,17 @@ retained.splice(retainedBefore, 0,
   '# Identity clean-cutover candidate (generated once on the production VPS)',
   ...[...updates].map(([key, value]) => `${key}=${value}`));
 const output = `${retained.join('\n').replace(/\n+$/, '')}\n`;
+let candidateFd;
 try {
-  writeFileSync(candidate, output, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  chmodSync(candidate, 0o600);
+  candidateFd = openSync(candidate, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW);
+  writeFileSync(candidateFd, output, 'utf8');
+  fsyncSync(candidateFd);
+  closeSync(candidateFd);
+  candidateFd = undefined;
 } catch (error) {
-  try { unlinkSync(candidate); } catch {}
+  if (candidateFd !== undefined) {
+    try { closeSync(candidateFd); } catch {}
+  }
   throw error;
 }
 NODE
@@ -828,7 +996,10 @@ identity_env_self_test() {
 		identity_env_protect_bootstrap_source identity_env_finalize_bootstrap_journal \
 		identity_env_rollback_incomplete_bootstrap \
 		identity_env_export_encrypted identity_env_export_candidate_encrypted \
-		identity_env_assert_candidate)"
+		identity_env_assert_candidate identity_env_host_node_available \
+		identity_env_prepare_node_runtime identity_env_node_revision_is_allowed \
+		identity_env_node_docker_run identity_env_node_validate \
+		identity_env_node_generate)"
 	[[ "$source" == *'server env SHA-256 differs from the local canonical source copy'* &&
 		"$source" == *'legacy production env already contains a bootstrap-managed Identity key'* &&
 		"$source" == *'IDENTITY_CORE_TOKEN'* && "$source" == *'CORE_IDENTITY_TOKEN'* &&
@@ -841,6 +1012,17 @@ identity_env_self_test() {
 		"$source" == *'committed Identity candidate env cannot be rolled back'* &&
 		"$source" == *'Identity candidate env export is not bound to its marker'* &&
 		"$source" == *'set -o noclobber'* &&
+		"$source" == *'identity_env_node_validate "$ENV_FILE"'* &&
+		"$source" == *'identity_env_node_generate "$ENV_FILE" "$identity_env_bootstrap_candidate_temporary"'* &&
+		"$source" == *'com.docker.compose.service=maintenance-worker'* &&
+		"$source" == *'unix:///var/run/docker.sock'* &&
+		"$source" == *"--pull never --network none --read-only"* &&
+		"$source" == *'--cap-drop ALL --pids-limit 64'* &&
+		"$source" == *'--memory-swap 512m --log-driver none --user 0:0'* &&
+		"$source" == *'--security-opt no-new-privileges --entrypoint node'* &&
+		"$source" == *'target=/tmp/identity-env-source,readonly'* &&
+		"$source" == *'target=/tmp/identity-env-candidate'* &&
+		"$source" == *'constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW'* &&
 		"$source" == *'identity-production-env-'* ]] || return 1
 	printf 'identity_production_env_self_test=passed\n'
 }

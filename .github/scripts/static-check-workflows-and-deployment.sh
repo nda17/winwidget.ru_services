@@ -130,6 +130,10 @@ const identityEnvRecoveryTest = readFileSync(
   "scripts/test-identity-production-env-recovery.sh",
   "utf8",
 );
+const identityEnvControlScript = readFileSync(
+  "scripts/identity-production-env-control.sh",
+  "utf8",
+);
 const staticWorkflowLines = staticWorkflowCheckScript
   .split("\n")
   .map((line) => line.trim());
@@ -170,6 +174,92 @@ if (
 ) {
   throw new Error(
     "Identity env recovery behavior test must be required, syntax-checked, shellchecked, and run exactly once before verify",
+  );
+}
+const identityNodeRuntimeStart = identityEnvControlScript.indexOf(
+  "\nidentity_env_host_node_available() {\n",
+);
+const identityNodeRuntimeEnd = identityEnvControlScript.indexOf(
+  "\nidentity_env_sha256() {\n",
+  identityNodeRuntimeStart,
+);
+const identityNodeRuntime = identityEnvControlScript.slice(
+  identityNodeRuntimeStart,
+  identityNodeRuntimeEnd,
+);
+const identityNodeForwardedEnvContract =
+  "for env_name in IDENTITY_EXPECTED_REVISION IDENTITY_EXPECTED_POSTGRES_IMAGE \\\n" +
+  "\t\tIDENTITY_EXPECTED_INTEGRATION_KINDS IDENTITY_EXPECTED_ADMIN_FILE; do";
+for (const requiredIdentityNodeContract of [
+  "com.docker.compose.project=winwidget",
+  "com.docker.compose.service=maintenance-worker",
+  "com.docker.compose.oneoff=False",
+  "unix:///var/run/docker.sock",
+  "git -C \"$2\" merge-base --is-ancestor \"$1\" \"$EXPECTED_REVISION\"",
+  `"$status" == 'running'`,
+  `"$running" == 'true'`,
+  `"$health" == 'healthy'`,
+  `"$restart_count" == '0'`,
+  `"$image_id" == "$image"`,
+  `"$app_revision" == "$image_revision"`,
+  `"$image_user" == 'nestjs'`,
+  'identity_env_node_revision_is_allowed "$image_revision" "$source_root" || return 1',
+  "run --rm --interactive --pull never --network none --read-only",
+  "--cap-drop ALL --pids-limit 64 --cpus 1 --memory 512m",
+  "--memory-swap 512m --log-driver none --user 0:0",
+  "--security-opt no-new-privileges --entrypoint node",
+  "target=/tmp/identity-env-source,readonly",
+  "target=/tmp/identity-env-candidate",
+  identityNodeForwardedEnvContract,
+]) {
+  if (!identityNodeRuntime.includes(requiredIdentityNodeContract)) {
+    throw new Error(
+      `Identity env Docker-only Node runtime contract is missing: ${requiredIdentityNodeContract}`,
+    );
+  }
+}
+if (
+  identityNodeRuntimeStart < 0 ||
+  identityNodeRuntimeEnd <= identityNodeRuntimeStart ||
+  (identityEnvControlScript.match(
+    /identity_env_node_validate "\$ENV_FILE" <<'NODE'/g,
+  ) ?? []).length !== 1 ||
+  (identityEnvControlScript.match(
+    /identity_env_node_generate "\$ENV_FILE" "\$identity_env_bootstrap_candidate_temporary" <<'NODE'/g,
+  ) ?? []).length !== 1 ||
+  (identityNodeRuntime.match(/--mount/g) ?? []).length !== 2 ||
+  (identityNodeRuntime.match(/docker_args\+=\(--env "\$env_name"\)/g) ?? [])
+    .length !== 1 ||
+  (identityNodeRuntime.match(/run --rm/g) ?? []).length !== 1 ||
+  /(^|\n)[\t ]*(command )?node - "\$ENV_FILE"/.test(
+    identityEnvControlScript,
+  ) ||
+  !identityEnvControlScript.includes(
+    "constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW",
+  ) ||
+  !identityEnvControlScript.includes(
+    ': >"$identity_env_bootstrap_candidate_temporary"',
+  ) ||
+  identityNodeRuntime.includes("docker exec") ||
+  identityNodeRuntime.includes("--env-file") ||
+  identityNodeRuntime.includes("--volume") ||
+  identityNodeRuntime.includes("--network host") ||
+  identityNodeRuntime.includes("/var/run/docker.sock,target=") ||
+  identityNodeRuntime.includes("source=$APP_ROOT/deploy/backend,target=") ||
+  !identityEnvRecoveryTest.includes(
+    "run_docker_node_fallback_contract() (",
+  ) ||
+  !identityEnvRecoveryTest.includes(
+    "container-revision wrong-user image-revision image-id-mismatch",
+  ) ||
+  !identityEnvRecoveryTest.includes("untrusted-revision") ||
+  !identityEnvRecoveryTest.includes(
+    '[[ "$identity_revision_check_calls" == \'2\' ]]',
+  ) ||
+  !identityEnvRecoveryTest.includes("IDENTITY_NODE_FAKE_CASE='run-failure'")
+) {
+  throw new Error(
+    "Identity env candidate validation and generation must use the isolated immutable maintenance-worker Node runtime",
   );
 }
 for (const requiredControllerContract of [
