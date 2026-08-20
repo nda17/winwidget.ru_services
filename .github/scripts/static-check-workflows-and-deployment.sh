@@ -213,6 +213,14 @@ if (
 requireCount("apps/identity/pnpm-lock.yaml", 2);
 requireCount("pnpm --dir apps/identity install --frozen-lockfile", 1);
 requireCount('process.stdout.write(`::add-mask::${value}\\n`);', 2);
+requireCount(
+  "'JWT_JWKS_URL=http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json\\n',",
+  1,
+);
+requireCount(
+  "'JWT_JWKS_URL=http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json\\n',",
+  0,
+);
 const identityScopedTokenStep = workflow.indexOf(
   "      - name: Generate CI-only Identity scoped tokens\n",
 );

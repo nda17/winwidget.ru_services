@@ -1871,7 +1871,7 @@ jobs:
           }
           appendFileSync(
             process.env.GITHUB_ENV,
-            'JWT_JWKS_URL=http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json\n',
+            'JWT_JWKS_URL=http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json\n',
           );
           NODE
           cp .env.example "$RUNNER_TEMP/winwidget-identity-jwt-ci.env"
