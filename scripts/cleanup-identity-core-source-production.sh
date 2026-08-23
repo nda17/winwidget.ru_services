@@ -1035,13 +1035,17 @@ identity_cleanup_migration_url() {
 }
 
 identity_cleanup_require_common() {
+	[[ $# -eq 1 && "$1" =~ ^(healthy-required|identity-if-present)$ ]] || return 1
+	local restore_guard_mode="$1"
 	identity_database_require_root
 	identity_release_validate_revision "$EXPECTED_REVISION"
 	identity_release_validate_file "$ENV_FILE"
 	identity_release_validate_file "$COMPOSE_FILE"
 	identity_release_require_checkout "$SERVER_ROOT" "$EXPECTED_REVISION"
+	identity_cutover_prepare_node_runtime ||
+		identity_cleanup_fail 'could not attest the cleanup Node runtime before stopping Core workers' || return 1
 	identity_cleanup_require_env_source_sha
-	database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
+	database_restore_guard_assert_before_mutation "$restore_guard_mode" "$ENV_FILE"
 	identity_cutover_require_route_contract || return 1
 	identity_cutover_require_tokens || return 1
 	identity_database_validate_marker || return 1
@@ -1063,7 +1067,7 @@ identity_cleanup_require_common() {
 }
 
 identity_cleanup_verify() {
-	identity_cleanup_require_common
+	identity_cleanup_require_common healthy-required
 	acquire_production_deploy_lock 'Identity Core cleanup verification'
 	if [[ -e "$identity_cleanup_marker" || -L "$identity_cleanup_marker" ]]; then
 		identity_cleanup_validate_marker || return 1
@@ -1517,9 +1521,9 @@ identity_cleanup_start_core() {
 }
 
 identity_cleanup_deploy() {
-	identity_cleanup_require_common
 	[[ "${IDENTITY_CORE_CLEANUP_CONFIRMATION:-}" == "$identity_cleanup_confirmation" ]] ||
 		identity_cleanup_fail 'Core source cleanup requires exact confirmation' || return 1
+	identity_cleanup_require_common identity-if-present
 	acquire_production_deploy_lock 'Identity Core source cleanup'
 	identity_cleanup_validate_marker || return 1
 	[[ "$(identity_cleanup_marker_value phase)" =~ ^(verified|forward-only)$ &&
@@ -1828,7 +1832,8 @@ NODE
 		identity_cleanup_require_bound_evidence() { return 1; }
 		! identity_cleanup_migration_url
 	)
-	local source source_state_source deploy_source candidate_boundary_source live_boundary_source
+	local source source_state_source deploy_source verify_source candidate_boundary_source live_boundary_source
+	local common_source
 	source="$(declare -f identity_cleanup_require_migration identity_cleanup_require_common \
 		identity_cleanup_require_soak identity_cleanup_runtime_has_soaked \
 		identity_cleanup_assert_identity_runtime_stable identity_cleanup_validate_soak_evidence \
@@ -1843,6 +1848,23 @@ NODE
 		identity_cleanup_verify_started_core_rabbitmq identity_cleanup_wait_started_core_ready \
 		identity_cleanup_start_core identity_cleanup_deploy identity_cleanup_source_state)"
 	source_state_source="$(declare -f identity_cleanup_source_state)"
+	common_source="$(declare -f identity_cleanup_require_common)"
+	verify_source="$(declare -f identity_cleanup_verify)"
+	deploy_source="$(declare -f identity_cleanup_deploy)"
+	COMMON_SOURCE="$common_source" VERIFY_SOURCE="$verify_source" DEPLOY_SOURCE="$deploy_source" node -e '
+const source = process.env.COMMON_SOURCE || "";
+const verify = process.env.VERIFY_SOURCE || "";
+const deploy = process.env.DEPLOY_SOURCE || "";
+const prepare = source.indexOf("identity_cutover_prepare_node_runtime");
+const firstNodeConsumer = source.indexOf("identity_cutover_require_route_contract");
+if (prepare < 0 || firstNodeConsumer <= prepare ||
+    !source.includes("could not attest the cleanup Node runtime before stopping Core workers") ||
+    !source.includes("database_restore_guard_assert_before_mutation \"$restore_guard_mode\"") ||
+    !verify.includes("identity_cleanup_require_common healthy-required")) process.exit(1);
+const confirmation = deploy.indexOf("IDENTITY_CORE_CLEANUP_CONFIRMATION");
+const recoveryCommon = deploy.indexOf("identity_cleanup_require_common identity-if-present");
+if (confirmation < 0 || recoveryCommon <= confirmation) process.exit(1);
+'
 	candidate_boundary_source="$(declare -f identity_cleanup_assert_candidate_signing_boundary)"
 	live_boundary_source="$(declare -f identity_cleanup_start_core)"
 	CANDIDATE_BOUNDARY_SOURCE="$candidate_boundary_source" \

@@ -4,6 +4,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
+IDENTITY_RESTORE_SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly IDENTITY_RESTORE_POSTGRES_IMAGE='postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
 readonly IDENTITY_RESTORE_MAX_DUMP_BYTES=$((49 * 1024 * 1024))
 
@@ -21,6 +22,7 @@ volume=''
 admin_password=''
 created_container='false'
 created_volume='false'
+identity_restore_node_image_id=''
 
 identity_restore_fail() {
 	printf 'identity_restore_rehearsal_error=%s\n' "$1" >&2
@@ -33,7 +35,8 @@ Usage:
   identity-backup-restore-rehearsal.sh --revision <40-char-sha> \
     --phase pre-cutover|post-ownership --dump <absolute-custom-dump> \
     --expected-sha256 <sha256> --database-id <uuid> \
-    --source-system-identifier <positive-integer> --evidence-file <absolute-json>
+    --source-system-identifier <positive-integer> --evidence-file <absolute-json> \
+    --node-image-id <sha256-image-id>
   identity-backup-restore-rehearsal.sh --self-test
 
 The runner never reads production env files and never connects to production.
@@ -60,6 +63,7 @@ identity_restore_validate_inputs() {
 	[[ "$revision" =~ ^[0-9a-f]{40}$ &&
 		"$phase" =~ ^(pre-cutover|post-ownership)$ &&
 		"$expected_sha256" =~ ^[0-9a-f]{64}$ &&
+		"$identity_restore_node_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
 		"$database_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ &&
 		"$source_system_identifier" =~ ^[1-9][0-9]*$ ]] ||
 		identity_restore_fail 'invalid immutable rehearsal identity' || return 1
@@ -96,6 +100,23 @@ identity_restore_assert_local_docker() {
 		identity_restore_fail 'rehearsal requires a local Unix Docker Linux endpoint'
 }
 
+identity_restore_prepare_node_runtime() {
+	local metadata image_id image_revision image_user image_title
+	metadata="$(docker image inspect --format \
+		'{{.Id}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Config.User}}|{{index .Config.Labels "org.opencontainers.image.title"}}' \
+		"$identity_restore_node_image_id")" ||
+		identity_restore_fail 'revision-pinned Identity Node image is unavailable' || return 1
+	IFS='|' read -r image_id image_revision image_user image_title <<<"$metadata"
+	[[ "$image_id" == "$identity_restore_node_image_id" &&
+		"$image_revision" =~ ^[0-9a-f]{40}$ && "$image_user" == 'identity' &&
+		"$image_title" == 'winwidget-identity' &&
+		"$(git -C "$IDENTITY_RESTORE_SCRIPT_ROOT" rev-parse HEAD)" == "$revision" ]] ||
+		identity_restore_fail 'Identity Node image identity is unsafe or revision-mismatched' || return 1
+	git -C "$IDENTITY_RESTORE_SCRIPT_ROOT" merge-base --is-ancestor \
+		"$image_revision" "$revision" ||
+		identity_restore_fail 'Identity Node image revision is outside the cleanup release history'
+}
+
 identity_restore_cleanup() {
 	local status=$?
 	trap - EXIT INT TERM
@@ -123,6 +144,7 @@ identity_restore_query() {
 identity_restore_run() {
 	identity_restore_validate_inputs
 	identity_restore_assert_local_docker
+	identity_restore_prepare_node_runtime
 	run_id="${revision:0:12}-$$"
 	container="winwidget-identity-restore-$run_id"
 	volume="winwidget-identity-restore-$run_id-data"
@@ -191,13 +213,36 @@ identity_restore_run() {
 		identity_restore_fail 'restored Identity anchors are incomplete' || return 1
 	local temporary="$evidence_file.partial.$$" size
 	size="$(wc -c <"$dump_file" | tr -d '[:space:]')"
-	REVISION="$revision" PHASE="$phase" SHA256="$expected_sha256" \
+	(
+		set -o noclobber
+		: >"$temporary"
+	) || return 1
+	chmod 600 "$temporary" || {
+		rm -f -- "$temporary"
+		return 1
+	}
+	if [[ "$(uname -s)" == 'Linux' && "$(id -u)" == '0' ]]; then
+		chown 0:0 "$temporary" || {
+			rm -f -- "$temporary"
+			return 1
+		}
+	fi
+	if ! REVISION="$revision" PHASE="$phase" SHA256="$expected_sha256" \
 		SIZE="$size" DATABASE_ID="$database_id" SOURCE_SYSTEM="$source_system_identifier" \
 		RESTORED_SYSTEM="$restored_system" TABLE_COUNT="$table_count" \
 		MIGRATION_COUNT="$migration_count" USERS="$users" IDENTITIES="$identities" \
 		CHANNELS="$channels" OUTBOX_EVENTS="$outbox_events" \
-		node - "$temporary" <<'NODE'
-const fs = require('node:fs');
+		docker run --rm --interactive --pull never --network none --read-only \
+			--cap-drop ALL --pids-limit 64 --cpus 1 --memory 512m --memory-swap 512m \
+			--log-driver none --user 0:0 --security-opt no-new-privileges \
+			--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 \
+			--mount "type=bind,source=$temporary,target=/identity-restore-evidence.json" \
+			--env REVISION --env PHASE --env SHA256 --env SIZE --env DATABASE_ID \
+			--env SOURCE_SYSTEM --env RESTORED_SYSTEM --env TABLE_COUNT \
+			--env MIGRATION_COUNT --env USERS --env IDENTITIES --env CHANNELS \
+			--env OUTBOX_EVENTS --entrypoint node "$identity_restore_node_image_id" \
+			- /identity-restore-evidence.json <<'NODE'
+const { closeSync, constants, fsyncSync, openSync, writeFileSync } = require('node:fs');
 const evidence = {
   schemaVersion: 1,
   action: 'identity-actual-backup-restore-rehearsal',
@@ -233,11 +278,34 @@ const evidence = {
   },
   completedAt: new Date().toISOString(),
 };
-fs.writeFileSync(process.argv[2], `${JSON.stringify(evidence)}\n`, { flag: 'wx', mode: 0o600 });
+const descriptor = openSync(
+  process.argv[2],
+  constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
+);
+try {
+  writeFileSync(descriptor, `${JSON.stringify(evidence)}\n`, 'utf8');
+  fsyncSync(descriptor);
+} finally {
+  closeSync(descriptor);
+}
 NODE
-	chmod 600 "$temporary"
+	then
+		rm -f -- "$temporary"
+		return 1
+	fi
+	if [[ ! -s "$temporary" ]]; then
+		rm -f -- "$temporary"
+		return 1
+	fi
+	chmod 600 "$temporary" || {
+		rm -f -- "$temporary"
+		return 1
+	}
 	if [[ "$(uname -s)" == 'Linux' && "$(id -u)" == '0' ]]; then
-		chown 0:0 "$temporary"
+		chown 0:0 "$temporary" || {
+			rm -f -- "$temporary"
+			return 1
+		}
 	fi
 	mv -f -- "$temporary" "$evidence_file"
 	printf 'identity_restore_rehearsal=passed\n'
@@ -245,11 +313,21 @@ NODE
 }
 
 identity_restore_self_test() {
-	local source
-	source="$(declare -f identity_restore_validate_inputs identity_restore_run identity_restore_cleanup)"
+	local source run_source
+	source="$(declare -f identity_restore_validate_inputs identity_restore_prepare_node_runtime \
+		identity_restore_run identity_restore_cleanup)"
+	run_source="$(declare -f identity_restore_run)"
+	if grep -Eq '^[[:space:]]*node([[:space:]]|$)' <<<"$run_source"; then
+		return 1
+	fi
 	[[ "$source" == *'PGDMP'* && "$source" == *'--no-owner --no-acl'* &&
 		"$source" == *'--network "container:$container"'* &&
 		"$source" == *'PGPASSWORD="$admin_password" docker run'* &&
+		"$source" == *'org.opencontainers.image.revision'* &&
+		"$source" == *'merge-base --is-ancestor'* &&
+		"$source" == *'org.opencontainers.image.title'* &&
+		"$source" == *'docker run --rm --interactive --pull never --network none --read-only'* &&
+		"$source" == *'--entrypoint node "$identity_restore_node_image_id"'* &&
 		"$source" == *'source_system_identifier'* &&
 		"$source" == *'identity.service_identity'* &&
 		"$source" == *'identity._prisma_migrations'* &&
@@ -272,6 +350,7 @@ while (($#)); do
 	--database-id) database_id="${2:-}"; shift 2 ;;
 	--source-system-identifier) source_system_identifier="${2:-}"; shift 2 ;;
 	--evidence-file) evidence_file="${2:-}"; shift 2 ;;
+	--node-image-id) identity_restore_node_image_id="${2:-}"; shift 2 ;;
 	-h | --help) identity_restore_usage; exit ;;
 	*) identity_restore_usage >&2; exit 2 ;;
 	esac

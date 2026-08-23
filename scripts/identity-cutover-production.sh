@@ -41,6 +41,7 @@ identity_frozen_core_outbox_id=''
 identity_frozen_gateway_id=''
 identity_frozen_core_recovery='false'
 identity_cutover_active_stage=''
+identity_cutover_node_image_id=''
 
 readonly identity_cutover_confirmation='CUTOVER IDENTITY OWNERSHIP'
 readonly identity_core_expand_migration='20260814020000_detach_identity_foreign_keys'
@@ -60,15 +61,101 @@ source "$IDENTITY_SCRIPT_ROOT/scripts/core-database-production-guard.sh"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$IDENTITY_SCRIPT_ROOT/scripts/production-deploy-lock.sh"
 
+identity_cutover_prepare_node_runtime() {
+	if [[ "$(uname -s)" != 'Linux' || "$(id -u)" != '0' ]]; then
+		command -v node >/dev/null 2>&1
+		return
+	fi
+	if [[ -n "$identity_cutover_node_image_id" ]]; then
+		[[ "$identity_cutover_node_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+		return
+	fi
+	local docker_binary source_root container metadata runtime_metadata image_metadata
+	local project service oneoff owner purpose singleton status running health restart_count
+	local container_revision image_id configured_image app_revision process_role
+	local marker_revision marker_image_id image_revision image_user image_title
+	docker_binary="$(type -P docker 2>/dev/null || true)"
+	[[ -n "$docker_binary" && "$docker_binary" == /* &&
+		"$docker_binary" =~ ^/[A-Za-z0-9._/@:+-]+$ && -f "$docker_binary" &&
+		! -L "$docker_binary" && -x "$docker_binary" &&
+		-z "${DOCKER_HOST+x}" && -z "${DOCKER_CONTEXT+x}" ]] || return 1
+	[[ "$("$docker_binary" context show)" == 'default' &&
+		"$("$docker_binary" context inspect default --format '{{.Endpoints.docker.Host}}')" == 'unix:///var/run/docker.sock' &&
+		"$("$docker_binary" info --format '{{.OSType}}')" == 'linux' ]] || return 1
+	source_root="$APP_ROOT/winwidget.ru_server"
+	identity_release_require_checkout "$source_root" "$EXPECTED_REVISION" || return 1
+	identity_cutover_validate_marker || return 1
+	marker_revision="$(identity_cutover_marker_value revision)" || return 1
+	marker_image_id="$(identity_cutover_marker_value identity_image_id)" || return 1
+	[[ "$(identity_cutover_marker_value phase)" == 'complete' &&
+		"$marker_revision" =~ ^[0-9a-f]{40}$ &&
+		"$marker_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	git -C "$source_root" merge-base --is-ancestor "$marker_revision" "$EXPECTED_REVISION" || return 1
+	container="$("$docker_binary" ps --quiet --no-trunc \
+		--filter 'label=com.docker.compose.project=winwidget' \
+		--filter 'label=com.docker.compose.service=identity-api' \
+		--filter 'label=com.docker.compose.oneoff=False')" || return 1
+	[[ "$container" =~ ^[0-9a-f]{64}$ ]] || return 1
+	metadata="$("$docker_binary" inspect --format \
+		'{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}|{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{index .Config.Labels "com.winwidget.singleton"}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}|{{.RestartCount}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Image}}|{{.Config.Image}}' \
+		"$container")" || return 1
+	IFS='|' read -r project service oneoff owner purpose singleton status running health \
+		restart_count container_revision image_id configured_image <<<"$metadata"
+	runtime_metadata="$("$docker_binary" inspect --format \
+		'{{range .Config.Env}}{{println .}}{{end}}' "$container" | awk -F= '
+      $1 == "APP_REVISION" { revision = substr($0, index($0, "=") + 1); revision_count += 1 }
+      $1 == "IDENTITY_PROCESS_ROLE" { role = substr($0, index($0, "=") + 1); role_count += 1 }
+      END {
+        if (revision_count != 1 || role_count != 1) exit 1
+        printf "%s|%s", revision, role
+      }
+    ')" || return 1
+	IFS='|' read -r app_revision process_role <<<"$runtime_metadata"
+	image_metadata="$("$docker_binary" image inspect --format \
+		'{{.Id}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Config.User}}|{{index .Config.Labels "org.opencontainers.image.title"}}' \
+		"$image_id")" || return 1
+	IFS='|' read -r image_id image_revision image_user image_title <<<"$image_metadata"
+	[[ "$project" == 'winwidget' && "$service" == 'identity-api' &&
+		"$oneoff" =~ ^[Ff]alse$ && "$owner" == 'identity' && "$purpose" == 'api' &&
+		"$singleton" == 'true' && "$status" == 'running' && "$running" == 'true' &&
+		"$health" == 'healthy' && "$restart_count" == '0' &&
+		"$container_revision" == "$marker_revision" && "$app_revision" == "$marker_revision" &&
+		"$process_role" == 'api' && "$image_id" == "$marker_image_id" &&
+		"$image_revision" == "$marker_revision" && "$image_user" == 'identity' &&
+		"$image_title" == 'winwidget-identity' &&
+		"$configured_image" == "winwidget-identity:git-$marker_revision" ]] || return 1
+	identity_cutover_node_image_id="$image_id"
+}
+
 identity_cutover_node_runtime() {
 	[[ "$(uname -s)" == 'Linux' && "$(id -u)" == '0' ]] || return 1
 	APP_ROOT="$APP_ROOT" SERVER_ROOT="$SERVER_ROOT" ENV_FILE="$ENV_FILE" \
 		EXPECTED_REVISION="$EXPECTED_REVISION" \
+		IDENTITY_CACHED_NODE_IMAGE_ID="$identity_cutover_node_image_id" \
 		IDENTITY_NODE_SCRIPT_ROOT="$IDENTITY_SCRIPT_ROOT" \
 		/bin/bash --noprofile --norc -Eeuo pipefail -c '
     source "$IDENTITY_NODE_SCRIPT_ROOT/scripts/identity-production-env-control.sh"
-    identity_env_prepare_node_runtime || exit 1
     docker_binary="$(identity_env_docker_binary)" || exit 1
+    if [[ -n "$IDENTITY_CACHED_NODE_IMAGE_ID" ]]; then
+      [[ "$IDENTITY_CACHED_NODE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ &&
+        "$(id -u)" == "0" && "$(uname -s)" == "Linux" &&
+        -z "${DOCKER_HOST+x}" && -z "${DOCKER_CONTEXT+x}" ]] || exit 1
+      [[ "$("$docker_binary" context show)" == "default" &&
+        "$("$docker_binary" context inspect default --format "{{.Endpoints.docker.Host}}")" == "unix:///var/run/docker.sock" &&
+        "$("$docker_binary" info --format "{{.OSType}}")" == "linux" ]] || exit 1
+      source_root="$APP_ROOT/winwidget.ru_server"
+      image_metadata="$("$docker_binary" image inspect --format \
+        "{{.Id}}|{{index .Config.Labels \"org.opencontainers.image.revision\"}}|{{.Config.User}}|{{index .Config.Labels \"org.opencontainers.image.title\"}}" \
+        "$IDENTITY_CACHED_NODE_IMAGE_ID")" || exit 1
+      IFS="|" read -r image_id image_revision image_user image_title <<<"$image_metadata"
+      [[ "$image_id" == "$IDENTITY_CACHED_NODE_IMAGE_ID" &&
+        "$image_revision" =~ ^[0-9a-f]{40}$ && "$image_user" == "identity" &&
+        "$image_title" == "winwidget-identity" ]] || exit 1
+      identity_env_node_revision_is_allowed "$image_revision" "$source_root" || exit 1
+      identity_env_node_image_id="$image_id"
+    else
+      identity_env_prepare_node_runtime || exit 1
+    fi
     docker_args=(
       run --rm --interactive --pull never --network none --read-only
       --cap-drop ALL --pids-limit 64 --cpus 1 --memory 512m
@@ -81,7 +168,7 @@ identity_cutover_node_runtime() {
     while IFS= read -r env_name; do
       [[ "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
       case "$env_name" in
-        BASH*|SHELLOPTS|EUID|PPID|UID|PATH|HOME|PWD|OLDPWD|SHLVL|_|TERM|TMPDIR|TMP|TEMP|NODE_OPTIONS|NODE_PATH|DOCKER_HOST|DOCKER_CONTEXT|IDENTITY_NODE_SCRIPT_ROOT) continue ;;
+        BASH*|SHELLOPTS|EUID|PPID|UID|PATH|HOME|PWD|OLDPWD|SHLVL|_|TERM|TMPDIR|TMP|TEMP|NODE_OPTIONS|NODE_PATH|DOCKER_HOST|DOCKER_CONTEXT|IDENTITY_CACHED_NODE_IMAGE_ID|IDENTITY_NODE_SCRIPT_ROOT) continue ;;
       esac
       docker_args+=(--env "$env_name")
     done < <(compgen -e)
@@ -973,18 +1060,24 @@ identity_cutover_require_post_ownership_artifacts() {
 
 identity_cutover_run_restore_rehearsal() {
 	[[ $# -eq 3 ]] || return 1
-	local phase="$1" dump="$2" evidence="$3" dump_sha
+	local phase="$1" dump="$2" evidence="$3" dump_sha node_image_id
 	dump_sha="$(identity_cutover_sha256 "$dump")"
 	if [[ -e "$evidence" || -L "$evidence" ]]; then
 		identity_cutover_restore_evidence_matches "$evidence" "$phase" "$dump_sha"
 		return
 	fi
+	node_image_id="$identity_cutover_node_image_id"
+	if [[ -z "$node_image_id" ]]; then
+		identity_cutover_validate_marker || return 1
+		node_image_id="$(identity_cutover_marker_value identity_image_id)" || return 1
+	fi
+	[[ "$node_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
 	bash "$IDENTITY_SCRIPT_ROOT/scripts/identity-backup-restore-rehearsal.sh" \
 		--revision "$EXPECTED_REVISION" --phase "$phase" --dump "$dump" \
 		--expected-sha256 "$dump_sha" \
 		--database-id "$(identity_database_marker_value database_id)" \
 		--source-system-identifier "$(identity_database_marker_value database_system_identifier)" \
-		--evidence-file "$evidence"
+		--evidence-file "$evidence" --node-image-id "$node_image_id"
 }
 
 identity_cutover_verify() {
@@ -2546,7 +2639,36 @@ identity_cutover_self_test() {
 	! identity_cutover_transition_allowed forward-only preflight-verified
 	! identity_cutover_transition_allowed complete active
 	local fence_source recovery_source backup_source deploy_source complete_source
-	local recover_pre_boundary_source file_text retired_path
+	local node_runtime_source
+	local restore_runner_source recover_pre_boundary_source file_text retired_path
+	node_runtime_source="$(declare -f identity_cutover_prepare_node_runtime \
+		identity_cutover_node_runtime)"
+	NODE_RUNTIME_SOURCE="$node_runtime_source" node -e '
+const source = process.env.NODE_RUNTIME_SOURCE || "";
+const runtimeStart = source.indexOf("identity_cutover_node_runtime ()");
+const prepare = source.slice(0, runtimeStart);
+const cachedStart = source.indexOf("if [[ -n \"$IDENTITY_CACHED_NODE_IMAGE_ID\" ]]");
+const fallback = source.indexOf("else", cachedStart);
+const cached = source.slice(cachedStart, fallback);
+if (runtimeStart < 0 || !prepare.includes("com.docker.compose.service=identity-api") ||
+    prepare.includes("com.docker.compose.service=maintenance-worker") ||
+    !prepare.includes("identity_cutover_marker_value identity_image_id") ||
+    !prepare.includes("org.opencontainers.image.title") ||
+    !prepare.includes("winwidget-identity") ||
+    prepare.includes("identity_env_prepare_node_runtime") ||
+    !source.includes("identity_cutover_node_image_id=\"$image_id\"") ||
+    !source.includes("IDENTITY_CACHED_NODE_IMAGE_ID=\"$identity_cutover_node_image_id\"") ||
+    cachedStart < 0 || fallback <= cachedStart ||
+    !cached.includes("docker_binary\" image inspect") ||
+    !cached.includes("identity_env_node_revision_is_allowed") ||
+    !cached.includes("image_title\" == \"winwidget-identity\"") ||
+    cached.includes("identity_env_prepare_node_runtime") || cached.includes("docker ps") ||
+    !source.slice(fallback).includes("identity_env_prepare_node_runtime")) process.exit(1);
+'
+	restore_runner_source="$(declare -f identity_cutover_run_restore_rehearsal)"
+	[[ "$restore_runner_source" == *'identity_cutover_node_image_id'* &&
+		"$restore_runner_source" == *'identity_cutover_marker_value identity_image_id'* &&
+		"$restore_runner_source" == *'--node-image-id "$node_image_id"'* ]] || return 1
 	fence_source="$(declare -f identity_cutover_require_core_fenced_live)"
 	[[ "$fence_source" == *'public.identity_core_source_state'* &&
 		"$fence_source" == *"ownership = 'FENCED'"* &&
