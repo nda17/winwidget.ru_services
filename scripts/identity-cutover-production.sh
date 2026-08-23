@@ -60,6 +60,41 @@ source "$IDENTITY_SCRIPT_ROOT/scripts/core-database-production-guard.sh"
 # shellcheck source=scripts/production-deploy-lock.sh
 source "$IDENTITY_SCRIPT_ROOT/scripts/production-deploy-lock.sh"
 
+identity_cutover_node_runtime() {
+	[[ "$(uname -s)" == 'Linux' && "$(id -u)" == '0' ]] || return 1
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$SERVER_ROOT" ENV_FILE="$ENV_FILE" \
+		EXPECTED_REVISION="$EXPECTED_REVISION" \
+		IDENTITY_NODE_SCRIPT_ROOT="$IDENTITY_SCRIPT_ROOT" \
+		/bin/bash --noprofile --norc -Eeuo pipefail -c '
+    source "$IDENTITY_NODE_SCRIPT_ROOT/scripts/identity-production-env-control.sh"
+    identity_env_prepare_node_runtime || exit 1
+    docker_binary="$(identity_env_docker_binary)" || exit 1
+    docker_args=(
+      run --rm --interactive --pull never --network none --read-only
+      --cap-drop ALL --pids-limit 64 --cpus 1 --memory 512m
+      --memory-swap 512m --log-driver none --user 0:0
+      --security-opt no-new-privileges
+      --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216
+      --mount "type=bind,source=$APP_ROOT,target=$APP_ROOT"
+      --workdir "$SERVER_ROOT" --entrypoint node
+    )
+    while IFS= read -r env_name; do
+      [[ "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+      case "$env_name" in
+        BASH*|SHELLOPTS|EUID|PPID|UID|PATH|HOME|PWD|OLDPWD|SHLVL|_|TERM|TMPDIR|TMP|TEMP|NODE_OPTIONS|NODE_PATH|DOCKER_HOST|DOCKER_CONTEXT|IDENTITY_NODE_SCRIPT_ROOT) continue ;;
+      esac
+      docker_args+=(--env "$env_name")
+    done < <(compgen -e)
+    exec "$docker_binary" "${docker_args[@]}" "$identity_env_node_image_id" "$@"
+  ' identity-cutover-node "$@"
+}
+
+if [[ "$(uname -s)" == 'Linux' && "$(id -u)" == '0' ]]; then
+	node() {
+		identity_cutover_node_runtime "$@"
+	}
+fi
+
 identity_cutover_fail() {
 	printf 'identity_cutover_error=%s\n' "$1" >&2
 	return 1
