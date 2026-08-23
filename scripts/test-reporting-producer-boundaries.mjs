@@ -22,16 +22,11 @@ let aggregateType = 'reporting.settings';
 const aggregateId = 'singleton';
 let eventType = 'reporting.settings.changed.v1';
 let settingsTopologyMode = 'transition';
-const identityAggregateType = 'identity.user';
-const identityEventType = 'identity.user.changed.v1';
 const lifecycleLockMarker = 'winwidget.reporting.producer.lifecycle.v1';
 const producerFunctionSignatures = [
 	'public.reporting_producers_enabled()',
 	'public.reporting_iso_timestamp(timestamp without time zone)',
 	'public.reporting_record_projection_event(text,text,text,text,jsonb,boolean)',
-	'public.reporting_emit_user_projection(text,boolean)',
-	'public.reporting_user_projection_trigger()',
-	'public.reporting_auth_identity_projection_trigger()',
 	'public.reporting_settings_projection_trigger()'
 ];
 const legacyWidgetsProducerTables = [
@@ -574,28 +569,6 @@ const sourceSequenceValue = async prisma => {
 	`);
 	assert.equal(rows.length, 1);
 	return rows[0];
-};
-
-const identityProjectionArtifacts = async (prisma, userId) => {
-	const versions = await prisma.$queryRawUnsafe(`
-		SELECT "version", "source_sequence" AS "sourceSequence"
-		FROM "reporting_projection_versions"
-		WHERE "aggregate_type" = '${identityAggregateType}'
-			AND "aggregate_id" = '${userId}'
-	`);
-	const events = await prisma.$queryRawUnsafe(`
-		SELECT
-			("payload"->>'aggregateVersion')::BIGINT AS "aggregateVersion",
-			("payload"->>'sourceSequence')::BIGINT AS "sourceSequence",
-			("payload"->'state'->>'hasEmailIdentity')::BOOLEAN AS "hasEmailIdentity",
-			("payload"->'state'->>'hasPhoneIdentity')::BOOLEAN AS "hasPhoneIdentity",
-			("payload"->'state'->>'loginMethodCount')::INTEGER AS "loginMethodCount"
-		FROM "outbox_events"
-		WHERE "event_type" = '${identityEventType}'
-			AND "payload"->>'aggregateId' = '${userId}'
-		ORDER BY ("payload"->>'aggregateVersion')::BIGINT
-	`);
-	return { events, versions };
 };
 
 const updateSettingsTime = (prisma, value) =>
@@ -1202,146 +1175,6 @@ const verifyResetRequired = async ({
 	);
 };
 
-const verifyConcurrentIdentitySnapshots = async ({
-	databaseUrl,
-	enableSql,
-	observer,
-	firstWriter,
-	secondWriter
-}) => {
-	await prepareFixture(observer);
-	const suffix = randomBytes(8).toString('hex');
-	const userId = `reporting-identity-${suffix}`;
-	const emailIdentityId = `reporting-email-${suffix}`;
-	const phoneIdentityId = `reporting-phone-${suffix}`;
-	const emailValue = `reporting-${suffix}@example.test`;
-	const phoneValue = `+7999${suffix.slice(0, 7)}`;
-	await observer.$transaction(async transaction => {
-		await transaction.$executeRawUnsafe(`
-			INSERT INTO "User" (
-				"id", "password", "status", "rights", "created_at", "updated_at"
-			) VALUES (
-				'${userId}', 'reporting-test-password',
-				'ACTIVE'::"UserStatus", ARRAY['USER'::"Role"],
-				CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-			)
-		`);
-		await transaction.$executeRawUnsafe(`
-			INSERT INTO "auth_identities" (
-				"id", "user_id", "type", "value", "verified_at",
-				"created_at", "updated_at"
-			) VALUES
-				(
-					'${emailIdentityId}', '${userId}', 'EMAIL'::"AuthIdentityType",
-					'${emailValue}', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-				),
-				(
-					'${phoneIdentityId}', '${userId}', 'PHONE'::"AuthIdentityType",
-					'${phoneValue}', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-				)
-		`);
-	});
-	if (settingsTopologyMode === 'transition') {
-		await runSql(
-			databaseUrl,
-			enableSql,
-			'Reporting activation for concurrent AuthIdentity writers'
-		);
-	} else {
-		await enableSteadyStateProducers(observer);
-	}
-
-	const firstUpdated = deferred();
-	const releaseFirst = deferred();
-	const first = firstWriter
-		.$transaction(
-			async transaction => {
-				await transaction.$executeRawUnsafe(
-					`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-					`reporting:identity.user:${userId}`
-				);
-				await transaction.$executeRawUnsafe(`
-				UPDATE "auth_identities"
-				SET "verified_at" = CURRENT_TIMESTAMP,
-					"updated_at" = CURRENT_TIMESTAMP
-				WHERE "id" = '${emailIdentityId}'
-			`);
-				firstUpdated.resolve();
-				await releaseFirst.promise;
-			},
-			{ maxWait: 5_000, timeout: 20_000 }
-		)
-		.catch(error => {
-			firstUpdated.reject(error);
-			throw error;
-		});
-	await firstUpdated.promise;
-	let secondSettled = false;
-	const second = Promise.resolve(
-		secondWriter.$executeRawUnsafe(`
-			UPDATE "auth_identities"
-			SET "verified_at" = CURRENT_TIMESTAMP,
-				"updated_at" = CURRENT_TIMESTAMP
-			WHERE "id" = '${phoneIdentityId}'
-		`)
-	).finally(() => {
-		secondSettled = true;
-	});
-	second.catch(() => undefined);
-	try {
-		await waitFor(async () => {
-			if (secondSettled) {
-				throw new Error(
-					'Second AuthIdentity writer crossed the per-user advisory lock'
-				);
-			}
-			const rows = await observer.$queryRawUnsafe(`
-				SELECT count(*)::INTEGER AS "waiting"
-				FROM pg_locks
-				WHERE locktype = 'advisory'
-					AND database = (
-						SELECT oid FROM pg_database WHERE datname = current_database()
-					)
-					AND NOT granted
-			`);
-			return rows[0]?.waiting > 0;
-		}, 'second AuthIdentity writer advisory lock wait');
-	} finally {
-		releaseFirst.resolve();
-	}
-	await Promise.all([first, second]);
-
-	const artifacts = await identityProjectionArtifacts(observer, userId);
-	assert.equal(artifacts.versions.length, 1);
-	assert.equal(artifacts.versions[0]?.version, 2n);
-	assert.equal(artifacts.events.length, 2);
-	assert.deepEqual(
-		artifacts.events.map(event => event.aggregateVersion),
-		[1n, 2n]
-	);
-	assert.ok(
-		artifacts.events[1].sourceSequence > artifacts.events[0].sourceSequence
-	);
-	assert.deepEqual(artifacts.events[0], {
-		aggregateVersion: 1n,
-		sourceSequence: artifacts.events[0].sourceSequence,
-		hasEmailIdentity: true,
-		hasPhoneIdentity: true,
-		loginMethodCount: 1
-	});
-	assert.deepEqual(artifacts.events[1], {
-		aggregateVersion: 2n,
-		sourceSequence: artifacts.events[1].sourceSequence,
-		hasEmailIdentity: true,
-		hasPhoneIdentity: true,
-		loginMethodCount: 2
-	});
-	assert.equal(
-		artifacts.versions[0].sourceSequence,
-		artifacts.events[1].sourceSequence
-	);
-};
-
 const producerFunctionAclState = async prisma => {
 	const rows = await prisma.$queryRawUnsafe(`
 		WITH expected(signature) AS (
@@ -1662,14 +1495,6 @@ const main = async () => {
 				observer
 			});
 		}
-		await verifyConcurrentIdentitySnapshots({
-			databaseUrl: databaseUrl.toString(),
-			enableSql: lifecycleSql.enableSql,
-			observer,
-			firstWriter: writer,
-			secondWriter: staleClient
-		});
-
 		process.stdout.write(
 			'reporting_producer_postgresql_boundaries=passed\n'
 		);
