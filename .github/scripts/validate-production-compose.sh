@@ -235,6 +235,25 @@ docker compose --profile migration --profile notification-delivery-migration --p
       }
       return environment;
     };
+    const requireTelegramProxy = (name, environment) => {
+      if (
+        environment.TELEGRAM_API_BASE_URL !==
+        "https://api.telegram.org:8443"
+      ) {
+        throw new Error(
+          `${name} must use the pinned Telegram TLS passthrough endpoint`,
+        );
+      }
+      const extraHosts = requireService(name).extra_hosts ?? [];
+      if (
+        JSON.stringify(extraHosts) !==
+        JSON.stringify(["api.telegram.org=192.0.2.1"])
+      ) {
+        throw new Error(
+          `${name} must resolve api.telegram.org only through the configured Telegram proxy IP`,
+        );
+      }
+    };
     const notificationPostgres = requireService(
       "notification-delivery-postgres",
     );
@@ -1371,6 +1390,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "JWT_ISSUER",
       "JWT_AUDIENCE",
       "CORS_ALLOWED_ORIGINS",
+      "TELEGRAM_API_BASE_URL",
       "NOTIFICATION_DELIVERY_INTERNAL_URL",
       "NOTIFICATION_DELIVERY_INTERNAL_TOKEN",
       "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS",
@@ -1692,6 +1712,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "SMTP_LOGIN",
         "SMTP_PASSWORD",
         "TELEGRAM_INFO_BOT_TOKEN",
+        "TELEGRAM_API_BASE_URL",
       ],
       ["TELEGRAM_INFO_BOT_TOKEN"],
     );
@@ -2123,6 +2144,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "JWT_ISSUER",
         "JWT_AUDIENCE",
         "TELEGRAM_WEBHOOK_HOST",
+        "TELEGRAM_API_BASE_URL",
         "TELEGRAM_INFO_BOT_TOKEN",
         "TELEGRAM_INFO_BOT_USERNAME",
         "TELEGRAM_INFO_BOT_WEBHOOK_SECRET",
@@ -2540,6 +2562,8 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "WIDGETS_BACKUP_URL",
         "BILLING_BACKUP_URL",
         "IDENTITY_BACKUP_URL",
+        "TELEGRAM_INFO_BOT_TOKEN",
+        "TELEGRAM_API_BASE_URL",
         "MAINTENANCE_WORKER_PREFETCH",
         "MAINTENANCE_HEALTH_PORT",
         "SCHEDULED_JOB_POLL_INTERVAL_MS",
@@ -2555,6 +2579,14 @@ docker compose --profile migration --profile notification-delivery-migration --p
       ["database-backup"],
       "maintenance-worker",
     );
+    for (const [name, environment] of [
+      ["api", apiEnvironment],
+      ["identity-api", identityApiEnvironment],
+      ["notification-delivery-worker", notificationDeliveryEnvironment],
+      ["maintenance-worker", maintenanceEnvironment],
+    ]) {
+      requireTelegramProxy(name, environment);
+    }
     const databaseRestoreWorker = requireService(
       "database-restore-worker",
     );

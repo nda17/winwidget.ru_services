@@ -8,6 +8,7 @@ import {
 } from '@/maintenance/database-backup.types';
 import { PrismaService } from '@/prisma.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
+import { resolveTelegramApiBaseUrl } from '@/telegram-bot/telegram-info-transport.service';
 import {
 	BadRequestException,
 	Injectable,
@@ -16,6 +17,7 @@ import {
 	OnModuleInit,
 	UnauthorizedException
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma, type TelegramBotSettings } from '@prisma/client';
 
 const TELEGRAM_SUPPORT_BOT_NOT_CONFIGURED =
@@ -159,7 +161,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 	private webhookHealthcheckInterval: NodeJS.Timeout | null = null;
 	private webhookHealthcheckInProgress = false;
 
-	constructor(private readonly prisma: PrismaService) {}
+	constructor(
+		private readonly prisma: PrismaService,
+		private readonly configService: ConfigService
+	) {}
 
 	async onModuleInit() {
 		void this.ensureWebhooksOnStartup();
@@ -1217,15 +1222,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		body?: Record<string, unknown>,
 		timeoutMs = this.TELEGRAM_SEND_TIMEOUT_MS
 	) {
-		const response = await fetch(
-			`https://api.telegram.org/bot${token}/${method}`,
-			{
-				method: body ? 'POST' : 'GET',
-				headers: body ? { 'Content-Type': 'application/json' } : undefined,
-				signal: AbortSignal.timeout(timeoutMs),
-				body: body ? JSON.stringify(body) : undefined
-			}
-		);
+		const apiBaseUrl = resolveTelegramApiBaseUrl(this.configService);
+		const response = await fetch(`${apiBaseUrl}/bot${token}/${method}`, {
+			method: body ? 'POST' : 'GET',
+			headers: body ? { 'Content-Type': 'application/json' } : undefined,
+			signal: AbortSignal.timeout(timeoutMs),
+			body: body ? JSON.stringify(body) : undefined
+		});
 		const data = (await response.json().catch(() => null)) as
 			| (T & { ok?: boolean; description?: string })
 			| null;
@@ -1246,23 +1249,21 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 		options?: { parseMode?: 'HTML' | null; messageThreadId?: number }
 	) {
 		const parseMode = options?.parseMode === null ? null : 'HTML';
-		const response = await fetch(
-			`https://api.telegram.org/bot${token}/sendMessage`,
-			{
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
-				body: JSON.stringify({
-					chat_id: chatId,
-					...(options?.messageThreadId
-						? { message_thread_id: options.messageThreadId }
-						: {}),
-					text,
-					...(parseMode ? { parse_mode: parseMode } : {}),
-					disable_web_page_preview: true
-				})
-			}
-		);
+		const apiBaseUrl = resolveTelegramApiBaseUrl(this.configService);
+		const response = await fetch(`${apiBaseUrl}/bot${token}/sendMessage`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			signal: AbortSignal.timeout(this.TELEGRAM_SEND_TIMEOUT_MS),
+			body: JSON.stringify({
+				chat_id: chatId,
+				...(options?.messageThreadId
+					? { message_thread_id: options.messageThreadId }
+					: {}),
+				text,
+				...(parseMode ? { parse_mode: parseMode } : {}),
+				disable_web_page_preview: true
+			})
+		});
 
 		const data = (await response.json().catch(() => null)) as {
 			ok?: boolean;

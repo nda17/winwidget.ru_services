@@ -1,6 +1,10 @@
 import type { PrismaService } from '@/prisma.service';
 import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import { BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+const createTelegramBotService = (prisma: PrismaService) =>
+	new TelegramBotService(prisma, new ConfigService({ MODE: 'test' }));
 
 const telegramSettings = {
 	id: 'singleton',
@@ -78,7 +82,7 @@ describe('TelegramBotService webhook URLs', () => {
 	it('uses the v1 API prefix for the Core-owned Support webhook', () => {
 		process.env.MODE = 'production';
 		process.env.TELEGRAM_WEBHOOK_HOST = 'https://hooks.example.test/';
-		const service = new TelegramBotService({} as PrismaService);
+		const service = createTelegramBotService({} as PrismaService);
 
 		expect(service.getWebhookHealth().expectedWebhooks).toEqual({
 			support:
@@ -87,7 +91,7 @@ describe('TelegramBotService webhook URLs', () => {
 	});
 
 	it('rejects legacy Info_bot webhook administration in Core', async () => {
-		const service = new TelegramBotService({} as PrismaService);
+		const service = createTelegramBotService({} as PrismaService);
 
 		await expect(service.reinstallWebhook('info')).rejects.toThrow(
 			'Неизвестный Telegram-бот'
@@ -95,7 +99,7 @@ describe('TelegramBotService webhook URLs', () => {
 	});
 
 	it('derives the Notification Delivery backup time across midnight', () => {
-		const service = new TelegramBotService({} as PrismaService);
+		const service = createTelegramBotService({} as PrismaService);
 
 		expect((service as any).addMinutesToTime('23:55', 15)).toBe('00:10');
 		expect((service as any).addMinutesToTime('23:55', 45)).toBe('00:40');
@@ -105,7 +109,7 @@ describe('TelegramBotService webhook URLs', () => {
 	});
 
 	it('exposes all delayed service backup schedules in settings', () => {
-		const service = new TelegramBotService({} as PrismaService);
+		const service = createTelegramBotService({} as PrismaService);
 
 		expect(
 			(service as any).serializeSettings(telegramSettings)
@@ -123,7 +127,7 @@ describe('TelegramBotService webhook URLs', () => {
 	});
 
 	it('keeps the summary away from every backup time across midnight', () => {
-		const service = new TelegramBotService({} as PrismaService);
+		const service = createTelegramBotService({} as PrismaService);
 
 		expect(() =>
 			(service as any).ensureScheduleTimesSeparated('00:08', '23:55')
@@ -141,7 +145,7 @@ describe('TelegramBotService webhook URLs', () => {
 
 	it('lets Core-owned backup time change use the Reporting schedule reservation', async () => {
 		const { prisma, upsert } = createSettingsPrisma('REPORTING');
-		const service = new TelegramBotService(prisma);
+		const service = createTelegramBotService(prisma);
 
 		const result = await service.updateSettings({
 			databaseBackupTime: '01:48'
@@ -155,7 +159,7 @@ describe('TelegramBotService webhook URLs', () => {
 
 	it('validates a Core backup change against the committed Reporting policy fence', async () => {
 		const { prisma, upsert } = createSettingsPrisma('REPORTING', '02:32');
-		const service = new TelegramBotService(prisma);
+		const service = createTelegramBotService(prisma);
 
 		await expect(
 			service.updateSettings({ databaseBackupTime: '01:48' })
@@ -169,7 +173,7 @@ describe('TelegramBotService webhook URLs', () => {
 			'03:00',
 			'02:32'
 		);
-		const service = new TelegramBotService(prisma);
+		const service = createTelegramBotService(prisma);
 
 		await expect(
 			service.updateSettings({ databaseBackupTime: '01:48' })
@@ -179,7 +183,7 @@ describe('TelegramBotService webhook URLs', () => {
 
 	it('still enforces the schedule gap while the authority row is transitional', async () => {
 		const { prisma, upsert } = createSettingsPrisma('CORE');
-		const service = new TelegramBotService(prisma);
+		const service = createTelegramBotService(prisma);
 
 		await expect(
 			service.updateSettings({ databaseBackupTime: '01:48' })
@@ -189,7 +193,7 @@ describe('TelegramBotService webhook URLs', () => {
 
 	it('lets Core edit its own chat and operational topic after the split', async () => {
 		const { prisma, upsert } = createSettingsPrisma('REPORTING');
-		const service = new TelegramBotService(prisma);
+		const service = createTelegramBotService(prisma);
 
 		await expect(
 			service.updateSettings({ operationalAlertsThreadId: 6 })
@@ -206,13 +210,42 @@ describe('TelegramBotService webhook URLs', () => {
 });
 
 describe('TelegramBotService operational alert routing', () => {
+	it('routes Support_bot API calls through the TLS passthrough port', async () => {
+		const service = new TelegramBotService(
+			{} as PrismaService,
+			new ConfigService({
+				MODE: 'production',
+				TELEGRAM_API_BASE_URL: 'https://api.telegram.org:8443'
+			})
+		);
+		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				ok: true,
+				result: { message_id: 1 }
+			})
+		} as unknown as Response);
+
+		await (service as any).fetchTelegramApi(
+			'support-token',
+			'sendMessage',
+			{ chat_id: '123', text: 'test' }
+		);
+
+		expect(fetchMock.mock.calls[0][0]).toBe(
+			'https://api.telegram.org:8443/botsupport-token/sendMessage'
+		);
+		fetchMock.mockRestore();
+	});
+
 	it('uses the dedicated Core topic instead of the Daily Summary topic', async () => {
 		const prisma = {
 			telegramBotSettings: {
 				upsert: jest.fn().mockResolvedValue(telegramSettings)
 			}
 		} as unknown as PrismaService;
-		const service = new TelegramBotService(prisma);
+		const service = createTelegramBotService(prisma);
 		const send = jest
 			.spyOn(service, 'sendInfoBotMessage')
 			.mockResolvedValue(undefined);

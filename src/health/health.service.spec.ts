@@ -675,3 +675,33 @@ describe('HealthService notification delivery monitoring', () => {
 		expect(getOverview).not.toHaveBeenCalled();
 	});
 });
+
+describe('HealthService Telegram proxy routing', () => {
+	afterEach(() => {
+		jest.restoreAllMocks();
+	});
+
+	it('checks Telegram getMe through the TLS passthrough endpoint', async () => {
+		const { service, configService } = createService();
+		configService.get.mockImplementation((key: string) => {
+			if (key === 'MODE') return 'production';
+			if (key === 'TELEGRAM_API_BASE_URL')
+				return 'https://api.telegram.org:8443';
+			if (key === 'TELEGRAM_INFO_BOT_TOKEN') return 'info-token';
+			if (key === 'TELEGRAM_INFO_BOT_USERNAME') return 'info-bot';
+			return undefined;
+		});
+		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({ ok: true })
+		} as unknown as Response);
+
+		await expect((service as any).checkInfoTelegramBot()).resolves.toEqual(
+			expect.objectContaining({ status: 'ok' })
+		);
+		expect(fetchMock.mock.calls[0][0]).toBe(
+			'https://api.telegram.org:8443/botinfo-token/getMe'
+		);
+	});
+});

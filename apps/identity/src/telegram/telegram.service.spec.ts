@@ -39,7 +39,10 @@ function challenge(overrides: Record<string, any> = {}) {
 	};
 }
 
-function createService(challengeValue: Record<string, any>) {
+function createService(
+	challengeValue: Record<string, any>,
+	config: Record<string, string> = {}
+) {
 	const tx = {
 		verificationChallenge: {
 			findUnique: jest.fn().mockResolvedValue(challengeValue),
@@ -68,7 +71,7 @@ function createService(challengeValue: Record<string, any>) {
 		emitAudit: jest.fn()
 	};
 	const service = new TelegramService(
-		new ConfigService(),
+		new ConfigService(config),
 		prisma as any,
 		events as any,
 		settings as any,
@@ -76,6 +79,44 @@ function createService(challengeValue: Record<string, any>) {
 	);
 	return { service, prisma, tx, auth, settings, events };
 }
+
+describe('Identity Telegram API routing', () => {
+	afterEach(() => {
+		jest.restoreAllMocks();
+	});
+
+	it('routes bot calls through the pinned TLS passthrough endpoint', async () => {
+		const value = createService(challenge(), {
+			MODE: 'production',
+			TELEGRAM_API_BASE_URL: 'https://api.telegram.org:8443'
+		});
+		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({ ok: true })
+		} as unknown as Response);
+
+		await (value.service as any).telegramApi('identity-token', 'getMe');
+
+		expect(fetchMock.mock.calls[0][0]).toBe(
+			'https://api.telegram.org:8443/botidentity-token/getMe'
+		);
+	});
+
+	it.each([undefined, 'https://api.telegram.org'])(
+		'rejects a direct production endpoint: %s',
+		async apiBaseUrl => {
+			const value = createService(challenge(), {
+				MODE: 'production',
+				...(apiBaseUrl ? { TELEGRAM_API_BASE_URL: apiBaseUrl } : {})
+			});
+
+			await expect(
+				(value.service as any).telegramApi('identity-token', 'getMe')
+			).rejects.toThrow('Telegram API configuration is invalid');
+		}
+	);
+});
 
 describe('Telegram Auth confirmation contract', () => {
 	it('does not create a session after /start until callback confirmation', async () => {

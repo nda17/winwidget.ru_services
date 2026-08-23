@@ -12,10 +12,58 @@ describe('TelegramInfoTransportService', () => {
 		jest.restoreAllMocks();
 	});
 
-	const createService = () =>
+	const createService = (apiBaseUrl?: string, mode = 'test') =>
 		new TelegramInfoTransportService({
-			get: jest.fn().mockReturnValue('bot-token')
+			get: jest.fn((key: string) => {
+				if (key === 'TELEGRAM_INFO_BOT_TOKEN') return 'bot-token';
+				if (key === 'TELEGRAM_API_BASE_URL') return apiBaseUrl;
+				if (key === 'MODE') return mode;
+				return undefined;
+			})
 		} as unknown as ConfigService);
+
+	it('uses the pinned TLS passthrough endpoint without changing the Telegram host', async () => {
+		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({ ok: true })
+		} as unknown as Response);
+
+		await createService(
+			'https://api.telegram.org:8443',
+			'production'
+		).sendMessage('123', 'test');
+
+		expect(fetchMock.mock.calls[0][0]).toBe(
+			'https://api.telegram.org:8443/botbot-token/sendMessage'
+		);
+	});
+
+	it.each([undefined, 'https://api.telegram.org'])(
+		'rejects a direct Telegram endpoint in production: %s',
+		async apiBaseUrl => {
+			await expect(
+				createService(apiBaseUrl, 'production').sendMessage('123', 'test')
+			).rejects.toMatchObject<Partial<TelegramApiError>>({
+				code: 'TELEGRAM_CONFIGURATION_INVALID'
+			});
+		}
+	);
+
+	it.each([
+		'https://example.com',
+		'https://api.telegram.org:9443',
+		'https://user:password@api.telegram.org:8443',
+		'https://api.telegram.org:8443/path'
+	])('rejects an untrusted Telegram API endpoint %s', async apiBaseUrl => {
+		await expect(
+			createService(apiBaseUrl).sendMessage('123', 'test')
+		).rejects.toMatchObject<Partial<TelegramApiError>>({
+			code: 'TELEGRAM_CONFIGURATION_INVALID',
+			httpStatus: 0,
+			description: 'Telegram API base URL is not allowed'
+		});
+	});
 
 	it('returns structured Telegram rate-limit details', async () => {
 		jest.spyOn(globalThis, 'fetch').mockResolvedValue({
@@ -89,7 +137,7 @@ describe('TelegramInfoTransportService', () => {
 			);
 			const filePath = join(directory, 'backup.dump');
 			await writeFile(filePath, 'dump');
-			jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
 				ok: true,
 				status: 200,
 				json: jest.fn().mockResolvedValue({
@@ -116,14 +164,12 @@ describe('TelegramInfoTransportService', () => {
 
 			try {
 				await expect(
-					createService().sendDocument(
-						configuredChatId,
-						filePath,
-						'Backup',
-						{
-							messageThreadId: 42
-						}
-					)
+					createService(
+						'https://api.telegram.org:8443',
+						'production'
+					).sendDocument(configuredChatId, filePath, 'Backup', {
+						messageThreadId: 42
+					})
 				).resolves.toEqual({
 					messageId: 41,
 					chatId: '-100123',
@@ -131,6 +177,9 @@ describe('TelegramInfoTransportService', () => {
 					fileId: 'telegram-file-id',
 					fileUniqueId: 'telegram-file-unique-id'
 				});
+				expect(fetchMock.mock.calls[0][0]).toBe(
+					'https://api.telegram.org:8443/botbot-token/sendDocument'
+				);
 			} finally {
 				await rm(directory, { recursive: true, force: true });
 			}

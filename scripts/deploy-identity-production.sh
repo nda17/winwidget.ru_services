@@ -29,9 +29,46 @@ identity_deploy_fail() {
 	return 1
 }
 
+identity_deploy_validate_ipv4_address() {
+	[[ $# -eq 1 ]] || return 1
+	local value="$1" octet
+	local -a octets=()
+
+	[[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	IFS='.' read -r -a octets <<<"$value"
+	[[ "${#octets[@]}" == '4' ]] || return 1
+	for octet in "${octets[@]}"; do
+		[[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+		((10#$octet <= 255)) || return 1
+	done
+}
+
+identity_deploy_verify_telegram_tls_passthrough() {
+	[[ $# -eq 1 ]] || return 1
+	local proxy_ip="$1" http_status
+
+	http_status="$(
+		curl --noproxy '*' --silent --show-error \
+			--connect-timeout 5 --max-time 15 \
+			--resolve "api.telegram.org:8443:$proxy_ip" \
+			--output /dev/null --write-out '%{http_code}' \
+			https://api.telegram.org:8443/
+	)" || return 1
+	[[ "$http_status" =~ ^[234][0-9]{2}$ ]]
+}
+
 identity_deploy_require_boundary() {
+	local telegram_api_base_url telegram_api_proxy_ip
 	identity_database_require_root
 	identity_database_require_inputs
+	telegram_api_base_url="$(identity_read_env_value "$ENV_FILE" TELEGRAM_API_BASE_URL)" || return 1
+	telegram_api_proxy_ip="$(identity_read_env_value "$ENV_FILE" TELEGRAM_API_PROXY_IP)" || return 1
+	[[ "$telegram_api_base_url" == 'https://api.telegram.org:8443' ]] ||
+		identity_deploy_fail 'Identity requires the Telegram TLS passthrough endpoint.' || return 1
+	identity_deploy_validate_ipv4_address "$telegram_api_proxy_ip" ||
+		identity_deploy_fail 'Identity Telegram proxy must be a valid IPv4 address.' || return 1
+	identity_deploy_verify_telegram_tls_passthrough "$telegram_api_proxy_ip" ||
+		identity_deploy_fail 'Identity Telegram TLS passthrough preflight failed.' || return 1
 	database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
 	local phase
 	phase="$(identity_database_current_phase)" || return 1
@@ -163,9 +200,12 @@ rabbitmqctl set_topic_permissions -p "$IDENTITY_RABBITMQ_VHOST" \
 identity_deploy_verify_environment() {
 	[[ $# -eq 3 ]] || return 1
 	local container_id="$1" role="$2" expected_port="$3" environment keys identity_port
+	local telegram_api_base_url
 	environment="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_id")" || return 1
 	keys="$(awk -F= '{ print $1 }' <<<"$environment" | LC_ALL=C sort -u)" || return 1
 	identity_port="$(awk -F= '$1 == "IDENTITY_PORT" { print substr($0, length($1) + 2) }' \
+		<<<"$environment")" || return 1
+	telegram_api_base_url="$(awk -F= '$1 == "TELEGRAM_API_BASE_URL" { print substr($0, length($1) + 2) }' \
 		<<<"$environment")" || return 1
 	grep -Fxq IDENTITY_DATABASE_URL <<<"$keys" || return 1
 	grep -Fxq IDENTITY_PROCESS_ROLE <<<"$keys" || return 1
@@ -189,6 +229,7 @@ identity_deploy_verify_environment() {
 			IDENTITY_AVATAR_S3_FORCE_PATH_STYLE; do
 			grep -Fxq "$required" <<<"$keys" || return 1
 		done
+		[[ "$telegram_api_base_url" == 'https://api.telegram.org:8443' ]] || return 1
 		! grep -Fxq BILLING_INTERNAL_TOKEN <<<"$keys" || return 1
 		! grep -Fxq WIDGETS_INTERNAL_TOKEN <<<"$keys" || return 1
 		;;
@@ -213,6 +254,7 @@ identity_deploy_verify_service() {
 	[[ $# -eq 3 ]] || return 1
 	local service="$1" role="$2" port="$3" attempt container_id health
 	local image_id revision restart_count response
+	local extra_hosts telegram_api_proxy_ip
 	for ((attempt = 1; attempt <= IDENTITY_HEALTHCHECK_ATTEMPTS; attempt++)); do
 		container_id="$(identity_release_compose "$EXPECTED_REVISION" "$ENV_FILE" \
 			"$COMPOSE_FILE" ps --status running -q "$service" 2>/dev/null || true)"
@@ -228,6 +270,14 @@ identity_deploy_verify_service() {
 				"$revision" == "$EXPECTED_REVISION" && "$restart_count" == '0' &&
 				-n "$response" ]] &&
 				identity_deploy_verify_environment "$container_id" "$role" "$port"; then
+				if [[ "$role" == 'api' ]]; then
+					telegram_api_proxy_ip="$(identity_read_env_value "$ENV_FILE" TELEGRAM_API_PROXY_IP)" || return 1
+					extra_hosts="$(
+						docker inspect --format '{{range .HostConfig.ExtraHosts}}{{println .}}{{end}}' \
+							"$container_id" | sed 's/=/:/'
+					)" || return 1
+					[[ "$extra_hosts" == "api.telegram.org:$telegram_api_proxy_ip" ]] || return 1
+				fi
 				return 0
 			fi
 		fi
@@ -274,6 +324,9 @@ identity_deploy_dark_api() {
 	identity_deploy_verify_service identity-api api 4900
 	identity_deploy_assert_single_api
 	identity_deploy_assert_async_runtime_stopped
+	identity_deploy_verify_telegram_tls_passthrough "$(
+		identity_read_env_value "$ENV_FILE" TELEGRAM_API_PROXY_IP
+	)" || identity_deploy_fail 'Identity Telegram TLS passthrough post-deploy smoke failed.' || return 1
 	printf 'identity_deploy_mode=dark-api-only\n'
 	printf 'identity_deploy_revision=%s\n' "$EXPECTED_REVISION"
 	printf 'identity_deploy_phase=%s\n' "$(identity_database_current_phase)"
@@ -292,6 +345,9 @@ identity_deploy_active_runtime() {
 	identity_deploy_verify_service identity-worker worker 4901
 	identity_deploy_verify_service identity-outbox-publisher outbox-publisher 4902
 	identity_deploy_assert_single_api
+	identity_deploy_verify_telegram_tls_passthrough "$(
+		identity_read_env_value "$ENV_FILE" TELEGRAM_API_PROXY_IP
+	)" || identity_deploy_fail 'Identity Telegram TLS passthrough post-deploy smoke failed.' || return 1
 	printf 'identity_deploy_mode=active-runtime\n'
 	printf 'identity_deploy_revision=%s\n' "$EXPECTED_REVISION"
 	printf 'identity_deploy_phase=%s\n' "$phase"

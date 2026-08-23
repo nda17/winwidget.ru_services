@@ -9,7 +9,14 @@ describe('notification delivery integration error classifier', () => {
 		}
 	);
 
-	it.each(['telegram', 'payment-telegram', 'limit-telegram'] as const)(
+	it.each([
+		'telegram',
+		'payment-telegram',
+		'limit-telegram',
+		'campaign-telegram',
+		'daily-summary-delivery-telegram',
+		'subscription-expiry-telegram'
+	] as const)(
 		'classifies %s failures through the Telegram taxonomy',
 		kind => {
 			expect(
@@ -34,6 +41,26 @@ describe('notification delivery integration error classifier', () => {
 			expect.objectContaining({
 				category: 'AUTH_CONFIGURATION',
 				normalizedCode: 'DESTINATION_CONFIGURATION_MISSING',
+				retryable: false,
+				mayDisableDestination: false
+			})
+		);
+	});
+
+	it('classifies an invalid Telegram transport endpoint as configuration', () => {
+		const error = Object.assign(
+			new Error('Telegram configuration invalid'),
+			{
+				code: 'TELEGRAM_CONFIGURATION_INVALID',
+				httpStatus: 0,
+				description: 'Telegram API base URL is not allowed'
+			}
+		);
+
+		expect(classifyIntegrationError('telegram', error)).toEqual(
+			expect.objectContaining({
+				category: 'AUTH_CONFIGURATION',
+				normalizedCode: 'TELEGRAM_CONFIGURATION_INVALID',
 				retryable: false,
 				mayDisableDestination: false
 			})

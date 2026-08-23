@@ -62,6 +62,55 @@ export class TelegramApiError extends Error {
 	}
 }
 
+export const resolveTelegramApiBaseUrl = (
+	configService: Pick<ConfigService, 'get'>
+): string => {
+	const mode = configService.get<string>('MODE')?.trim().toLowerCase();
+	const configured = configService
+		.get<string>('TELEGRAM_API_BASE_URL')
+		?.trim();
+	if (!configured) {
+		if (mode === 'production') throw invalidTelegramApiBaseUrl();
+		return 'https://api.telegram.org';
+	}
+
+	let url: URL;
+	try {
+		url = new URL(configured);
+	} catch {
+		throw invalidTelegramApiBaseUrl();
+	}
+	const loopbackHost = ['127.0.0.1', 'localhost', '[::1]'].includes(
+		url.hostname
+	);
+	const telegramApi =
+		url.protocol === 'https:' &&
+		url.hostname === 'api.telegram.org' &&
+		(mode === 'production'
+			? url.port === '8443'
+			: ['', '8443'].includes(url.port)) &&
+		url.pathname === '/';
+	const loopbackTestApi =
+		mode !== 'production' && url.protocol === 'http:' && loopbackHost;
+	if (
+		(!telegramApi && !loopbackTestApi) ||
+		url.username !== '' ||
+		url.password !== '' ||
+		url.search !== '' ||
+		url.hash !== ''
+	) {
+		throw invalidTelegramApiBaseUrl();
+	}
+	return url.toString().replace(/\/+$/, '');
+};
+
+const invalidTelegramApiBaseUrl = (): TelegramApiError =>
+	new TelegramApiError({
+		httpStatus: 0,
+		code: 'TELEGRAM_CONFIGURATION_INVALID',
+		description: 'Telegram API base URL is not allowed'
+	});
+
 @Injectable()
 export class TelegramInfoTransportService {
 	private readonly messageTimeoutMs = 10_000;
@@ -79,12 +128,13 @@ export class TelegramInfoTransportService {
 		} = {}
 	): Promise<void> {
 		const token = this.getToken();
+		const apiBaseUrl = this.getApiBaseUrl();
 		await this.withTimeout(
 			this.messageTimeoutMs,
 			options.signal,
 			async signal => {
 				const response = await fetch(
-					`https://api.telegram.org/bot${token}/sendMessage`,
+					`${apiBaseUrl}/bot${token}/sendMessage`,
 					{
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
@@ -119,6 +169,7 @@ export class TelegramInfoTransportService {
 		}
 	): Promise<TelegramDocumentReceipt> {
 		const token = this.getToken();
+		const apiBaseUrl = this.getApiBaseUrl();
 		const normalizedChatId = chatId.trim();
 		if (
 			!/^-?[1-9]\d*$/.test(normalizedChatId) &&
@@ -163,7 +214,7 @@ export class TelegramInfoTransportService {
 					})()
 				);
 				const response = await fetch(
-					`https://api.telegram.org/bot${token}/sendDocument`,
+					`${apiBaseUrl}/bot${token}/sendDocument`,
 					{
 						method: 'POST',
 						headers: {
@@ -210,6 +261,10 @@ export class TelegramInfoTransportService {
 			});
 		}
 		return token;
+	}
+
+	private getApiBaseUrl(): string {
+		return resolveTelegramApiBaseUrl(this.configService);
 	}
 
 	private async assertTelegramResponse<T = unknown>(

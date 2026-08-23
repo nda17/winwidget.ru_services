@@ -1239,6 +1239,34 @@ get_env_value() {
 	' "$ENV_FILE"
 }
 
+validate_ipv4_address() {
+	local value="$1"
+	local octet
+	local -a octets=()
+
+	[[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	IFS='.' read -r -a octets <<<"$value"
+	[[ "${#octets[@]}" == '4' ]] || return 1
+	for octet in "${octets[@]}"; do
+		[[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+		((10#$octet <= 255)) || return 1
+	done
+}
+
+verify_telegram_tls_passthrough() {
+	local proxy_ip="$1"
+	local http_status
+
+	http_status="$(
+		curl --noproxy '*' --silent --show-error \
+			--connect-timeout 5 --max-time 15 \
+			--resolve "api.telegram.org:8443:$proxy_ip" \
+			--output /dev/null --write-out '%{http_code}' \
+			https://api.telegram.org:8443/
+	)" || return 1
+	[[ "$http_status" =~ ^[234][0-9]{2}$ ]]
+}
+
 get_database_username() {
 	local key="$1"
 	local value
@@ -1417,6 +1445,7 @@ prepare_database_restore_storage() {
 mode="$(get_env_value "MODE" || true)"
 mode="${mode:-production}"
 mode="${mode,,}"
+telegram_api_proxy_ip=""
 
 for key in \
 	JWT_ISSUER \
@@ -1576,6 +1605,8 @@ case "$mode" in
 		require_env_key "SMTP_GREETING_TIMEOUT_MS"
 		require_env_key "SMTP_SOCKET_TIMEOUT_MS"
 		require_env_key "TELEGRAM_INFO_BOT_TOKEN"
+		require_env_key "TELEGRAM_API_BASE_URL"
+		require_env_key "TELEGRAM_API_PROXY_IP"
 		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_URL"
 		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_TOKEN"
 		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS"
@@ -1749,6 +1780,19 @@ case "$mode" in
 		fi
 		if [[ "$(get_env_value NOTIFICATION_DELIVERY_INTERNAL_URL)" != "http://127.0.0.1:4401/internal/notification-delivery" ]]; then
 			echo "Production NOTIFICATION_DELIVERY_INTERNAL_URL must use the loopback notification delivery endpoint" >&2
+			exit 1
+		fi
+		if [[ "$(get_env_value TELEGRAM_API_BASE_URL)" != "https://api.telegram.org:8443" ]]; then
+			echo "Production TELEGRAM_API_BASE_URL must use the Telegram TLS passthrough endpoint" >&2
+			exit 1
+		fi
+		telegram_api_proxy_ip="$(get_env_value TELEGRAM_API_PROXY_IP)"
+		if ! validate_ipv4_address "$telegram_api_proxy_ip"; then
+			echo "Production TELEGRAM_API_PROXY_IP must be a valid IPv4 address" >&2
+			exit 1
+		fi
+		if ! verify_telegram_tls_passthrough "$telegram_api_proxy_ip"; then
+			echo "Telegram TLS passthrough preflight failed" >&2
 			exit 1
 		fi
 		notification_delivery_internal_token="$(
@@ -4416,6 +4460,22 @@ container_env_value() {
 			}
 			END { exit(found ? 0 : 1) }
 		'
+}
+
+assert_telegram_proxy_runtime() {
+	local service container_id base_url extra_hosts
+
+	for service in api identity-api notification-delivery-worker maintenance-worker; do
+		container_id="$(compose_target ps --status running -q "$service")" || return 1
+		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+		base_url="$(container_env_value "$container_id" TELEGRAM_API_BASE_URL)" || return 1
+		[[ "$base_url" == 'https://api.telegram.org:8443' ]] || return 1
+		extra_hosts="$(
+			docker inspect --format '{{range .HostConfig.ExtraHosts}}{{println .}}{{end}}' \
+				"$container_id" | sed 's/=/:/'
+		)" || return 1
+		[[ "$extra_hosts" == "api.telegram.org:$telegram_api_proxy_ip" ]] || return 1
+	done
 }
 
 assert_clean_core_identity_environment_boundary() {
@@ -9442,6 +9502,17 @@ for service in \
 		exit 1
 	fi
 done
+
+if [[ "$mode" == 'production' ]]; then
+	assert_telegram_proxy_runtime || {
+		echo 'Telegram proxy runtime boundary is invalid.' >&2
+		exit 1
+	}
+	verify_telegram_tls_passthrough "$telegram_api_proxy_ip" || {
+		echo 'Telegram TLS passthrough post-deploy smoke failed.' >&2
+		exit 1
+	}
+fi
 
 if [[ "$identity_cleanup_phase" == 'complete' ]]; then
 	assert_clean_core_identity_environment_boundary || {

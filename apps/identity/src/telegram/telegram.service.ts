@@ -902,19 +902,15 @@ export class TelegramService {
 		method: string,
 		body?: Record<string, unknown>
 	): Promise<TelegramApiEnvelope> {
+		const apiBaseUrl = this.telegramApiBaseUrl();
 		let response: Response;
 		try {
-			response = await fetch(
-				`https://api.telegram.org/bot${token}/${method}`,
-				{
-					method: body ? 'POST' : 'GET',
-					headers: body
-						? { 'content-type': 'application/json' }
-						: undefined,
-					body: body ? JSON.stringify(body) : undefined,
-					signal: AbortSignal.timeout(10_000)
-				}
-			);
+			response = await fetch(`${apiBaseUrl}/bot${token}/${method}`, {
+				method: body ? 'POST' : 'GET',
+				headers: body ? { 'content-type': 'application/json' } : undefined,
+				body: body ? JSON.stringify(body) : undefined,
+				signal: AbortSignal.timeout(10_000)
+			});
 		} catch {
 			throw new BadRequestException('Telegram API is unavailable');
 		}
@@ -936,6 +932,54 @@ export class TelegramService {
 			);
 		}
 		return envelope;
+	}
+
+	private telegramApiBaseUrl(): string {
+		const mode = this.config.get<string>('MODE')?.trim().toLowerCase();
+		const configured = this.config
+			.get<string>('TELEGRAM_API_BASE_URL')
+			?.trim();
+		if (!configured) {
+			if (mode === 'production') {
+				throw new BadRequestException(
+					'Telegram API configuration is invalid'
+				);
+			}
+			return 'https://api.telegram.org';
+		}
+
+		let url: URL;
+		try {
+			url = new URL(configured);
+		} catch {
+			throw new BadRequestException(
+				'Telegram API configuration is invalid'
+			);
+		}
+		const loopbackHost = ['127.0.0.1', 'localhost', '[::1]'].includes(
+			url.hostname
+		);
+		const telegramApi =
+			url.protocol === 'https:' &&
+			url.hostname === 'api.telegram.org' &&
+			(mode === 'production'
+				? url.port === '8443'
+				: ['', '8443'].includes(url.port)) &&
+			url.pathname === '/';
+		const loopbackTestApi =
+			mode !== 'production' && url.protocol === 'http:' && loopbackHost;
+		if (
+			(!telegramApi && !loopbackTestApi) ||
+			url.username !== '' ||
+			url.password !== '' ||
+			url.search !== '' ||
+			url.hash !== ''
+		) {
+			throw new BadRequestException(
+				'Telegram API configuration is invalid'
+			);
+		}
+		return url.toString().replace(/\/+$/, '');
 	}
 
 	private webhookFailure(

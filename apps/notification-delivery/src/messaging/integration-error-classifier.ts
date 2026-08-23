@@ -67,7 +67,10 @@ const SMTP_PERMANENT_CODES = new Set(['EENVELOPE', 'EMESSAGE']);
 const TELEGRAM_KINDS = new Set<NotificationDeliveryKind>([
 	'telegram',
 	'payment-telegram',
-	'limit-telegram'
+	'limit-telegram',
+	'campaign-telegram',
+	'daily-summary-delivery-telegram',
+	'subscription-expiry-telegram'
 ]);
 
 export function classifyIntegrationError(
@@ -132,6 +135,14 @@ function classifyTelegramError(
 			});
 		}
 		return null;
+	}
+
+	if (details.code === 'TELEGRAM_CONFIGURATION_INVALID') {
+		return createClassification({
+			category: 'AUTH_CONFIGURATION',
+			normalizedCode: details.code,
+			safeReason: 'Telegram transport configuration is invalid'
+		});
 	}
 
 	if (details.httpStatus === 429 || details.retryAfterMs !== null) {

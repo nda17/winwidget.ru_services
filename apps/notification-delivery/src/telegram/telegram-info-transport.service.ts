@@ -96,27 +96,54 @@ export class TelegramInfoTransportService {
 	}
 
 	private getApiBaseUrl(): string {
+		const mode = this.configService
+			.get<string>('MODE')
+			?.trim()
+			.toLowerCase();
 		const configured = this.configService
 			.get<string>('TELEGRAM_API_BASE_URL')
 			?.trim();
-		if (!configured) return 'https://api.telegram.org';
+		if (!configured) {
+			if (mode === 'production') throw this.invalidApiBaseUrl();
+			return 'https://api.telegram.org';
+		}
 
-		const url = new URL(configured);
+		let url: URL;
+		try {
+			url = new URL(configured);
+		} catch {
+			throw this.invalidApiBaseUrl();
+		}
+		const loopbackHost = ['127.0.0.1', 'localhost', '[::1]'].includes(
+			url.hostname
+		);
+		const telegramApi =
+			url.protocol === 'https:' &&
+			url.hostname === 'api.telegram.org' &&
+			(mode === 'production'
+				? url.port === '8443'
+				: ['', '8443'].includes(url.port)) &&
+			url.pathname === '/';
+		const loopbackTestApi =
+			mode !== 'production' && url.protocol === 'http:' && loopbackHost;
 		if (
-			url.protocol !== 'https:' &&
-			!(
-				url.protocol === 'http:' &&
-				['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
-			)
+			(!telegramApi && !loopbackTestApi) ||
+			url.username !== '' ||
+			url.password !== '' ||
+			url.search !== '' ||
+			url.hash !== ''
 		) {
-			throw new TelegramApiError({
-				httpStatus: 0,
-				code: 'TELEGRAM_CONFIGURATION_INVALID',
-				description:
-					'Telegram API base URL must use HTTPS or loopback HTTP'
-			});
+			throw this.invalidApiBaseUrl();
 		}
 		return url.toString().replace(/\/+$/, '');
+	}
+
+	private invalidApiBaseUrl(): TelegramApiError {
+		return new TelegramApiError({
+			httpStatus: 0,
+			code: 'TELEGRAM_CONFIGURATION_INVALID',
+			description: 'Telegram API base URL is not allowed'
+		});
 	}
 
 	private async assertTelegramResponse(

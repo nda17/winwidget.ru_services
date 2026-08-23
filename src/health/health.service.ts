@@ -19,6 +19,7 @@ import {
 } from '@/messaging/widgets-delivery-failures-client.service';
 import { PrismaService } from '@/prisma.service';
 import { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
+import { resolveTelegramApiBaseUrl } from '@/telegram-bot/telegram-info-transport.service';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -736,8 +737,9 @@ export class HealthService {
 		}
 
 		return this.measure(id, title, async () => {
+			const apiBaseUrl = resolveTelegramApiBaseUrl(this.configService);
 			const response = await this.fetchWithTimeout(
-				`https://api.telegram.org/bot${token}/getMe`
+				`${apiBaseUrl}/bot${token}/getMe`
 			);
 
 			if (!response.ok) {

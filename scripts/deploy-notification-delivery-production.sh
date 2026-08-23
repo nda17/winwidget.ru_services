@@ -25,6 +25,7 @@ previous_image_id=""
 previous_revision=""
 previous_restart_count=""
 health_port=""
+telegram_api_proxy_ip=""
 
 compose_target() {
 	docker compose \
@@ -75,6 +76,8 @@ verify_notification_delivery_worker() {
 	local image_id
 	local image_revision
 	local restart_count
+	local telegram_api_base_url
+	local extra_hosts
 
 	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 		container_id="$(
@@ -108,10 +111,20 @@ verify_notification_delivery_worker() {
 					restart_count="$(
 						docker inspect --format '{{ .RestartCount }}' "$container_id"
 					)"
+					telegram_api_base_url="$(
+						docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+							"$container_id" | sed -n 's/^TELEGRAM_API_BASE_URL=//p'
+					)"
+					extra_hosts="$(
+						docker inspect --format '{{range .HostConfig.ExtraHosts}}{{println .}}{{end}}' \
+							"$container_id" | sed 's/=/:/'
+					)"
 
 					[[ "$image_id" == "$expected_image_id" ]] || return 1
 					[[ "$image_revision" == "$expected_revision" ]] || return 1
 					[[ "$restart_count" == "$expected_restart_count" ]] || return 1
+					[[ "$telegram_api_base_url" == 'https://api.telegram.org:8443' ]] || return 1
+					[[ "$extra_hosts" == "api.telegram.org:$telegram_api_proxy_ip" ]] || return 1
 					return 0
 				fi
 			fi
@@ -855,6 +868,34 @@ get_env_value() {
 	' "$ENV_FILE"
 }
 
+validate_ipv4_address() {
+	local value="$1"
+	local octet
+	local -a octets=()
+
+	[[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+	IFS='.' read -r -a octets <<<"$value"
+	[[ "${#octets[@]}" == '4' ]] || return 1
+	for octet in "${octets[@]}"; do
+		[[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+		((10#$octet <= 255)) || return 1
+	done
+}
+
+verify_telegram_tls_passthrough() {
+	local proxy_ip="$1"
+	local http_status
+
+	http_status="$(
+		curl --noproxy '*' --silent --show-error \
+			--connect-timeout 5 --max-time 15 \
+			--resolve "api.telegram.org:8443:$proxy_ip" \
+			--output /dev/null --write-out '%{http_code}' \
+			https://api.telegram.org:8443/
+	)" || return 1
+	[[ "$http_status" =~ ^[234][0-9]{2}$ ]]
+}
+
 get_env_value_or_default() {
 	local key="$1"
 	local fallback="$2"
@@ -1147,6 +1188,8 @@ for key in \
 	SMTP_GREETING_TIMEOUT_MS \
 	SMTP_SOCKET_TIMEOUT_MS \
 	TELEGRAM_INFO_BOT_TOKEN \
+	TELEGRAM_API_BASE_URL \
+	TELEGRAM_API_PROXY_IP \
 	NOTIFICATION_DELIVERY_INTERNAL_URL \
 	NOTIFICATION_DELIVERY_INTERNAL_TOKEN \
 	NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS \
@@ -1163,6 +1206,19 @@ if [[ "$(get_env_value MODE)" != "production" ]]; then
 fi
 if [[ "$(get_env_value COMPOSE_PROJECT_NAME)" != "winwidget" ]]; then
 	echo "Notification delivery rollout requires COMPOSE_PROJECT_NAME=winwidget." >&2
+	exit 1
+fi
+if [[ "$(get_env_value TELEGRAM_API_BASE_URL)" != 'https://api.telegram.org:8443' ]]; then
+	echo "TELEGRAM_API_BASE_URL must use the Telegram TLS passthrough endpoint." >&2
+	exit 1
+fi
+telegram_api_proxy_ip="$(get_env_value TELEGRAM_API_PROXY_IP)"
+if ! validate_ipv4_address "$telegram_api_proxy_ip"; then
+	echo "TELEGRAM_API_PROXY_IP must be a valid IPv4 address." >&2
+	exit 1
+fi
+if ! verify_telegram_tls_passthrough "$telegram_api_proxy_ip"; then
+	echo "Telegram TLS passthrough preflight failed." >&2
 	exit 1
 fi
 assert_notification_database_postgres_identity
@@ -1382,6 +1438,7 @@ for service_env_key in \
 	SMTP_GREETING_TIMEOUT_MS \
 	SMTP_SOCKET_TIMEOUT_MS \
 	TELEGRAM_INFO_BOT_TOKEN \
+	TELEGRAM_API_BASE_URL \
 	NOTIFICATION_DELIVERY_INTERNAL_TOKEN \
 	NOTIFICATION_DELIVERY_LISTEN_HOST \
 	NOTIFICATION_DELIVERY_HEALTH_PORT \
@@ -1565,6 +1622,10 @@ if ! verify_notification_delivery_worker \
 	"$candidate_image_id" \
 	"$deploy_revision"; then
 	echo "Candidate notification delivery worker did not pass rollout verification." >&2
+	exit 1
+fi
+if ! verify_telegram_tls_passthrough "$telegram_api_proxy_ip"; then
+	echo "Telegram TLS passthrough post-deploy smoke failed." >&2
 	exit 1
 fi
 verify_notification_delivery_control_smoke "$deploy_revision"
