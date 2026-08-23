@@ -89,7 +89,6 @@ winwidget.ru_server/
 │   ├── messaging/             # RabbitMQ topology, monolith consumers и Outbox contracts
 │   ├── scheduled-jobs/        # durable-запуски, уникальность и CAS-lease
 │   ├── maintenance/           # длительные регламентные задачи и backup
-│   ├── file/                  # local/S3 uploads
 │   ├── safe-outbound-http/    # защита исходящих webhook/CRM-запросов
 │   └── ...                    # контент, статистика и admin-модули
 ├── apps/
@@ -150,7 +149,7 @@ winwidget.ru_server/
 | Кампании            | `apps/campaigns`                                                                                 | кампании, снимки аудитории и статусы доставок       |
 | Отчётность          | `apps/reporting`                                                                                 | проекции, аналитика и Daily Summary                 |
 | Регламентные задачи | `scheduled-jobs`, `maintenance`                                                                  | durable scheduler, lease и backup                   |
-| Файлы               | `file`                                                                                           | local uploads и S3                                  |
+| Файлы               | `apps/identity`, `apps/widgets`                                                                  | scoped avatar/widget media в S3                     |
 | Интеграции          | `safe-outbound-http`                                                                             | безопасные webhook и CRM-запросы                    |
 
 Единого `AdminModule` нет: административные endpoints находятся внутри
@@ -165,7 +164,6 @@ winwidget.ru_server/
 - Основной API prefix: `/api/v1`.
 - Публичные loader- и preview-страницы исключены из API prefix.
 - Статические runtime-файлы отдаются из `public` по `/widgets/*`.
-- Development uploads сохраняются локально и доступны по `/uploads/*`.
 - Для публичных widget API разрешён cross-origin доступ.
 - Ошибки нормализуются глобальными HTTP и reCAPTCHA filters.
 
@@ -1301,10 +1299,10 @@ Webhook settings и health доступны в модуле `telegram-bot`.
 
 ## Файлы
 
-```text
-MODE=development -> локальный каталог uploads
-MODE=production  -> S3-совместимое хранилище
-```
+Аватары принадлежат Identity и изменяются только через scoped self/admin
+endpoints. Immutable-ключ `identity/avatars/<userId>/<uuid>` формируется сервером;
+универсальных upload/delete endpoints в Core нет. Widget media остаются в
+Widgets и используют отдельную S3-конфигурацию.
 
 Для пользовательских PNG-кнопок проверяются:
 
@@ -1590,7 +1588,7 @@ credentials `Support_bot` пока принадлежат Core.
 
 ## S3
 
-Production storage:
+Widgets storage:
 
 ```text
 S3_ENDPOINT
@@ -1601,6 +1599,18 @@ S3_SECRET_ACCESS_KEY
 S3_PUBLIC_BASE_URL
 S3_KEY_PREFIX
 S3_FORCE_PATH_STYLE
+```
+
+Identity avatar storage передаётся только `identity-api`:
+
+```text
+IDENTITY_AVATAR_S3_ENDPOINT
+IDENTITY_AVATAR_S3_REGION
+IDENTITY_AVATAR_S3_BUCKET
+IDENTITY_AVATAR_S3_ACCESS_KEY_ID
+IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY
+IDENTITY_AVATAR_S3_PUBLIC_BASE_URL
+IDENTITY_AVATAR_S3_FORCE_PATH_STYLE
 ```
 
 ## RabbitMQ и фоновые процессы

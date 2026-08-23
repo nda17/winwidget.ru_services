@@ -1,6 +1,5 @@
 import { AdminAlertsModule } from '@/admin-alerts/admin-alerts.module';
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
-import { FileModule } from '@/file/file.module';
 import { LegalPagesModule } from '@/legal-pages/legal-pages.module';
 import { NotesModule } from '@/notes/notes.module';
 import { PrismaModule } from '@/prisma.module';
@@ -23,7 +22,6 @@ import { ConfigModule } from '@nestjs/config';
 		}),
 		PrismaModule,
 		IdentityBoundaryModule,
-		FileModule,
 		SiteSettingsModule,
 		LegalPagesModule,
 		HomePageContentModule,

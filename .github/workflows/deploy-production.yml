@@ -120,6 +120,8 @@ jobs:
       YOOKASSA_PRODUCTION_SECRET_KEY: ci_billing_secret_key_at_least_32_chars
       S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
       S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
+      IDENTITY_AVATAR_S3_ACCESS_KEY_ID: ci_identity_avatar_s3_access_key
+      IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY: ci_identity_avatar_s3_secret_key_at_least_32_chars
       GOOGLE_CLIENT_ID: ci_identity_google_client_id
       GOOGLE_CLIENT_SECRET: ci_identity_google_client_secret
       GITHUB_CLIENT_ID: ci_identity_github_client_id
@@ -623,7 +625,14 @@ jobs:
             S3_BUCKET \
             S3_ACCESS_KEY_ID \
             S3_SECRET_ACCESS_KEY \
-            S3_PUBLIC_BASE_URL; do
+            S3_PUBLIC_BASE_URL \
+            IDENTITY_AVATAR_S3_ENDPOINT \
+            IDENTITY_AVATAR_S3_REGION \
+            IDENTITY_AVATAR_S3_BUCKET \
+            IDENTITY_AVATAR_S3_ACCESS_KEY_ID \
+            IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY \
+            IDENTITY_AVATAR_S3_PUBLIC_BASE_URL \
+            IDENTITY_AVATAR_S3_FORCE_PATH_STYLE; do
             require_production_env_key "$key" || {
               echo "Missing, duplicate, empty or placeholder production env key: $key" >&2
               exit 1
@@ -865,6 +874,8 @@ jobs:
       RECAPTCHA_CLIENT_URL: https://winwidget.test
       S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
       S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
+      IDENTITY_AVATAR_S3_ACCESS_KEY_ID: ci_identity_avatar_s3_access_key
+      IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY: ci_identity_avatar_s3_secret_key_at_least_32_chars
       DATABASE_URL: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       DATABASE_URL_DEVELOPMENT: postgresql://winwidget:winwidget_ci@127.0.0.1:5432/winwidget_ci?schema=public
       NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://winwidget_notification_delivery_runtime:winwidget_notification_delivery_runtime_ci@127.0.0.1:55432/winwidget_notification_delivery_ci?schema=notification_delivery&sslmode=disable
@@ -4758,6 +4769,8 @@ jobs:
           YOOKASSA_PRODUCTION_SECRET_KEY: ci_billing_secret_key_at_least_32_chars
           S3_ACCESS_KEY_ID: ci_widgets_s3_access_key
           S3_SECRET_ACCESS_KEY: ci_widgets_s3_secret_key_at_least_32_chars
+          IDENTITY_AVATAR_S3_ACCESS_KEY_ID: ci_identity_avatar_s3_access_key
+          IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY: ci_identity_avatar_s3_secret_key_at_least_32_chars
           GOOGLE_CLIENT_ID: ci_identity_google_client_id
           GOOGLE_CLIENT_SECRET: ci_identity_google_client_secret
           GITHUB_CLIENT_ID: ci_identity_github_client_id

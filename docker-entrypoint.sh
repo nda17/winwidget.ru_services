@@ -26,6 +26,4 @@ fi
 export DATABASE_URL="$database_url"
 echo "Using $database_url_key for database connection."
 
-mkdir -p /app/uploads
-
 exec "$@"

@@ -2,6 +2,9 @@ import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
+import { AvatarStorageService } from './avatar/avatar-storage.service';
+import { AvatarCleanupService } from './avatar/avatar-cleanup.service';
+import { AvatarService } from './avatar/avatar.service';
 import { AccessJwtService } from './auth/access-jwt.service';
 import { AuthRateLimitGuard } from './auth/auth-rate-limit.guard';
 import { AuthSettingsController } from './auth/auth-settings.controller';
@@ -67,6 +70,9 @@ const API_PROVIDERS =
 	PROCESS_ROLE === 'api'
 		? [
 				AccessJwtService,
+				AvatarCleanupService,
+				AvatarService,
+				AvatarStorageService,
 				AuthRateLimitGuard,
 				AuthSettingsService,
 				AuthService,

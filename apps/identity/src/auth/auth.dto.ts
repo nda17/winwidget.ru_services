@@ -131,11 +131,6 @@ export class UpdateProfileDto {
 	name?: string;
 
 	@IsOptional()
-	@ValidateIf(value => value.avatarPath !== null)
-	@IsString()
-	avatarPath?: string | null;
-
-	@IsOptional()
 	@IsString()
 	@Matches(PASSWORD, {
 		message:
@@ -166,11 +161,6 @@ export class UpdateUserDto {
 	@IsOptional()
 	@IsString()
 	name?: string;
-
-	@IsOptional()
-	@ValidateIf((_, value) => value !== null)
-	@IsString()
-	avatarPath?: string | null;
 
 	@IsOptional()
 	@IsBoolean()

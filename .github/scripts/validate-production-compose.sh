@@ -2139,6 +2139,13 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "WIDGETS_INTERNAL_BASE_URL",
         "WIDGETS_IDENTITY_TOKEN",
         "WIDGETS_INTERNAL_TIMEOUT_MS",
+        "IDENTITY_AVATAR_S3_ENDPOINT",
+        "IDENTITY_AVATAR_S3_REGION",
+        "IDENTITY_AVATAR_S3_BUCKET",
+        "IDENTITY_AVATAR_S3_ACCESS_KEY_ID",
+        "IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY",
+        "IDENTITY_AVATAR_S3_PUBLIC_BASE_URL",
+        "IDENTITY_AVATAR_S3_FORCE_PATH_STYLE",
       ],
     );
     const identityWorkerEnvironment = requireEnvironment(
@@ -3002,6 +3009,21 @@ docker compose --profile migration --profile notification-delivery-migration --p
       ) {
         throw new Error(`${name} RabbitMQ credential scope drifted`);
       }
+      for (const avatarStorageKey of [
+        "IDENTITY_AVATAR_S3_ENDPOINT",
+        "IDENTITY_AVATAR_S3_REGION",
+        "IDENTITY_AVATAR_S3_BUCKET",
+        "IDENTITY_AVATAR_S3_ACCESS_KEY_ID",
+        "IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY",
+        "IDENTITY_AVATAR_S3_PUBLIC_BASE_URL",
+        "IDENTITY_AVATAR_S3_FORCE_PATH_STYLE",
+      ]) {
+        if ((avatarStorageKey in environment) !== (name === "identity-api")) {
+          throw new Error(
+            `${name} Identity avatar storage credential scope drifted`,
+          );
+        }
+      }
     }
     for (const forbidden of [
       "DATABASE_URL",
@@ -3049,6 +3071,20 @@ docker compose --profile migration --profile notification-delivery-migration --p
     }
     if ("RABBITMQ_URL" in (services.api.environment ?? {})) {
       throw new Error("api must not receive an AMQP URL");
+    }
+    for (const forbidden of [
+      "S3_ENDPOINT",
+      "S3_REGION",
+      "S3_BUCKET",
+      "S3_ACCESS_KEY_ID",
+      "S3_SECRET_ACCESS_KEY",
+      "S3_PUBLIC_BASE_URL",
+      "S3_KEY_PREFIX",
+      "S3_FORCE_PATH_STYLE",
+    ]) {
+      if (forbidden in apiEnvironment) {
+        throw new Error(`Core api must not receive ${forbidden}`);
+      }
     }
     if (!maintenance.healthcheck?.test) {
       throw new Error("maintenance-worker must define readiness healthcheck");

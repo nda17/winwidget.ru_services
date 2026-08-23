@@ -11,20 +11,20 @@ datasource db {
 }
 
 model User {
-  id                           String                        @id @default(cuid())
+  id                           String                       @id @default(cuid())
   name                         String?
   password                     String
-  avatarPath                   String?                       @map("avatar_path")
-  status                       UserStatus                    @default(ACTIVE)
-  personalDataConsentRevokedAt DateTime?                     @map("personal_data_consent_revoked_at")
-  deletedAt                    DateTime?                     @map("deleted_at")
-  rights                       Role[]                        @default([USER])
+  avatarPath                   String?                      @map("avatar_path")
+  status                       UserStatus                   @default(ACTIVE)
+  personalDataConsentRevokedAt DateTime?                    @map("personal_data_consent_revoked_at")
+  deletedAt                    DateTime?                    @map("deleted_at")
+  rights                       Role[]                       @default([USER])
   authIdentities               AuthIdentity[]
   telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
   sessions                     UserSession[]
-  createdAt                    DateTime                      @default(now()) @map("created_at")
-  updatedAt                    DateTime                      @updatedAt @map("updated_at")
+  createdAt                    DateTime                     @default(now()) @map("created_at")
+  updatedAt                    DateTime                     @updatedAt @map("updated_at")
 
   @@index([status])
   @@index([deletedAt])
@@ -144,20 +144,20 @@ model OAuthAuthorization {
 }
 
 model ServiceIdentity {
-  id                       String               @id @default("singleton")
-  serviceName              String               @default("identity-service") @map("service_name")
-  databaseId               String               @default(uuid()) @map("database_id") @db.Uuid
-  phase                    ServiceDatabasePhase @default(SHADOW)
-  ownershipGeneration      BigInt               @default(0) @map("ownership_generation")
-  sourceFingerprint        String?              @map("source_fingerprint") @db.Char(64)
-  sourceSnapshotSha256     String?              @map("source_snapshot_sha256") @db.Char(64)
-  sourceSnapshotCounts     Json?                @map("source_snapshot_counts")
-  sourceIdentityHighWater  BigInt?              @map("source_identity_high_water")
-  sourceBillingHighWater   BigInt?              @map("source_billing_high_water")
-  importedAt               DateTime?            @map("imported_at")
-  activatedAt              DateTime?            @map("activated_at")
-  createdAt                DateTime             @default(now()) @map("created_at")
-  updatedAt                DateTime             @updatedAt @map("updated_at")
+  id                      String               @id @default("singleton")
+  serviceName             String               @default("identity-service") @map("service_name")
+  databaseId              String               @default(uuid()) @map("database_id") @db.Uuid
+  phase                   ServiceDatabasePhase @default(SHADOW)
+  ownershipGeneration     BigInt               @default(0) @map("ownership_generation")
+  sourceFingerprint       String?              @map("source_fingerprint") @db.Char(64)
+  sourceSnapshotSha256    String?              @map("source_snapshot_sha256") @db.Char(64)
+  sourceSnapshotCounts    Json?                @map("source_snapshot_counts")
+  sourceIdentityHighWater BigInt?              @map("source_identity_high_water")
+  sourceBillingHighWater  BigInt?              @map("source_billing_high_water")
+  importedAt              DateTime?            @map("imported_at")
+  activatedAt             DateTime?            @map("activated_at")
+  createdAt               DateTime             @default(now()) @map("created_at")
+  updatedAt               DateTime             @updatedAt @map("updated_at")
 
   @@map("service_identity")
   @@schema("identity")
@@ -218,6 +218,28 @@ model OutboxEvent {
   @@index([sourceSequence])
   @@index([publishedAt])
   @@map("outbox_events")
+  @@schema("identity")
+}
+
+model AvatarMediaObject {
+  id             String                  @id @db.Uuid
+  userId         String                  @map("user_id")
+  objectKey      String                  @unique @map("object_key") @db.VarChar(500)
+  publicUrl      String                  @unique @map("public_url") @db.VarChar(2000)
+  status         AvatarMediaObjectStatus @default(PREPARED)
+  attempts       Int                     @default(0)
+  deletePasses   Int                     @default(0) @map("delete_passes")
+  availableAt    DateTime                @default(now()) @map("available_at")
+  leaseToken     String?                 @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?               @map("lease_expires_at")
+  lastError      String?                 @map("last_error") @db.Text
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([userId, status])
+  @@map("avatar_media_objects")
   @@schema("identity")
 }
 
@@ -292,17 +314,17 @@ model InternalCommandReceipt {
 }
 
 model TelegramUpdateReceipt {
-  botKind      TelegramBotKind @map("bot_kind")
-  updateId     BigInt          @map("update_id")
-  payloadHash  String          @map("payload_hash") @db.Char(64)
-  status       WebhookReceiptStatus @default(PROCESSING)
-  attempts     Int             @default(0)
-  leaseToken   String?         @map("lease_token") @db.Uuid
-  leaseExpiresAt DateTime?     @map("lease_expires_at")
-  deliveredAt  DateTime?       @map("delivered_at")
-  lastError    String?         @map("last_error") @db.Text
-  createdAt    DateTime        @default(now()) @map("created_at")
-  updatedAt    DateTime        @updatedAt @map("updated_at")
+  botKind        TelegramBotKind      @map("bot_kind")
+  updateId       BigInt               @map("update_id")
+  payloadHash    String               @map("payload_hash") @db.Char(64)
+  status         WebhookReceiptStatus @default(PROCESSING)
+  attempts       Int                  @default(0)
+  leaseToken     String?              @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?            @map("lease_expires_at")
+  deliveredAt    DateTime?            @map("delivered_at")
+  lastError      String?              @map("last_error") @db.Text
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
 
   @@id([botKind, updateId])
   @@index([status, leaseExpiresAt])
@@ -330,12 +352,14 @@ enum Role {
   USER
   ADMIN
   DEV
+
   @@schema("identity")
 }
 
 enum UserStatus {
   ACTIVE
   DEACTIVATED
+
   @@schema("identity")
 }
 
@@ -347,6 +371,7 @@ enum AuthIdentityType {
   YANDEX
   VK
   TELEGRAM
+
   @@schema("identity")
 }
 
@@ -354,6 +379,7 @@ enum VerificationChallengeType {
   EMAIL
   PHONE
   TELEGRAM
+
   @@schema("identity")
 }
 
@@ -362,6 +388,7 @@ enum VerificationChallengePurpose {
   BIND_IDENTITY
   BIND_TELEGRAM_NOTIFICATIONS
   LOGIN
+
   @@schema("identity")
 }
 
@@ -370,6 +397,7 @@ enum OAuthProvider {
   GITHUB
   YANDEX
   VK
+
   @@schema("identity")
 }
 
@@ -377,6 +405,7 @@ enum ServiceDatabasePhase {
   SHADOW
   IMPORTED
   ACTIVE
+
   @@schema("identity")
 }
 
@@ -386,6 +415,7 @@ enum OutboxExchange {
   RETRY
   MANUAL_RETRY
   DEAD_LETTER
+
   @@schema("identity")
 }
 
@@ -393,6 +423,16 @@ enum OutboxStatus {
   PENDING
   PROCESSING
   PUBLISHED
+
+  @@schema("identity")
+}
+
+enum AvatarMediaObjectStatus {
+  PREPARED
+  ACTIVE
+  DELETE_PENDING
+  DELETING
+
   @@schema("identity")
 }
 
@@ -402,6 +442,7 @@ enum ConsumerReceiptStatus {
   DELIVERED
   DEAD_LETTERED
   CLOSED_NO_RETRY
+
   @@schema("identity")
 }
 
@@ -410,12 +451,14 @@ enum ConsumerFailureStatus {
   RETRYING
   RESOLVED
   CLOSED_NO_RETRY
+
   @@schema("identity")
 }
 
 enum TelegramBotKind {
   AUTH
   INFO
+
   @@schema("identity")
 }
 
@@ -423,5 +466,6 @@ enum WebhookReceiptStatus {
   PROCESSING
   DELIVERED
   FAILED
+
   @@schema("identity")
 }

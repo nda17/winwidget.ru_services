@@ -167,7 +167,7 @@ describe('UsersService security and frozen contracts', () => {
 		expect(value.tx.user.count).not.toHaveBeenCalled();
 	});
 
-	it('preserves avatarPath when admin sends an empty string', async () => {
+	it('does not write avatarPath through the generic admin profile DTO', async () => {
 		const value = createService();
 		const current = user();
 		value.tx.user.findUnique.mockResolvedValue(current);
@@ -176,13 +176,11 @@ describe('UsersService security and frozen contracts', () => {
 			'admin',
 			[Role.ADMIN],
 			USER_ID,
-			{ avatarPath: '' },
+			{ name: 'Changed' },
 			request()
 		);
-		expect(value.tx.user.update).toHaveBeenCalledWith(
-			expect.objectContaining({
-				data: expect.objectContaining({ avatarPath: '/old.png' })
-			})
+		expect(value.tx.user.update.mock.calls[0]?.[0].data).not.toHaveProperty(
+			'avatarPath'
 		);
 	});
 

@@ -1355,6 +1355,9 @@ const expectedBuildImageEnv = {
     "ci_billing_secret_key_at_least_32_chars",
   S3_ACCESS_KEY_ID: "ci_widgets_s3_access_key",
   S3_SECRET_ACCESS_KEY: "ci_widgets_s3_secret_key_at_least_32_chars",
+  IDENTITY_AVATAR_S3_ACCESS_KEY_ID: "ci_identity_avatar_s3_access_key",
+  IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY:
+    "ci_identity_avatar_s3_secret_key_at_least_32_chars",
   GOOGLE_CLIENT_ID: "ci_identity_google_client_id",
   GOOGLE_CLIENT_SECRET: "ci_identity_google_client_secret",
   GITHUB_CLIENT_ID: "ci_identity_github_client_id",
