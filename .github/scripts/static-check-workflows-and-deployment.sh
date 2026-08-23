@@ -6,7 +6,8 @@ sh -n database-restore-entrypoint.sh
 bash -n \
   .github/scripts/validate-production-compose.sh \
   .github/scripts/static-check-workflows-and-deployment.sh \
-  .github/scripts/stage-or-deploy-backend.sh
+  .github/scripts/stage-or-deploy-backend.sh \
+  .github/scripts/stage-or-deploy-backend-remote.sh
 # actionlint runs without its ShellCheck integration. Extracted workflow
 # runners are syntax-checked above; production scripts are checked separately.
 docker run --rm \
@@ -57,6 +58,8 @@ docker run --rm \
   scripts/identity-backup-restore-rehearsal.sh \
   scripts/cleanup-identity-core-source-production.sh \
   scripts/rotate-identity-jwt-production.sh \
+  .github/scripts/stage-or-deploy-backend.sh \
+  .github/scripts/stage-or-deploy-backend-remote.sh \
   database-restore-entrypoint.sh
 docker run --rm \
   --network none \
@@ -123,10 +126,18 @@ const staticWorkflowCheckScript = readFileSync(
   ".github/scripts/static-check-workflows-and-deployment.sh",
   "utf8",
 );
-const stageOrDeployScript = readFileSync(
+const stageOrDeployLocalScript = readFileSync(
   ".github/scripts/stage-or-deploy-backend.sh",
   "utf8",
 );
+const stageOrDeployRemoteScript = readFileSync(
+  ".github/scripts/stage-or-deploy-backend-remote.sh",
+  "utf8",
+);
+const stageOrDeployScript = [
+  stageOrDeployLocalScript,
+  stageOrDeployRemoteScript,
+].join("\n");
 const identityEnvRecoveryTest = readFileSync(
   "scripts/test-identity-production-env-recovery.sh",
   "utf8",
@@ -342,13 +353,19 @@ if (
 for (const requiredControllerContract of [
   'deploy_ssh_key_path="${DEPLOY_SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"',
   'deploy_ssh_known_hosts_path="${DEPLOY_SSH_KNOWN_HOSTS_PATH:-$HOME/.ssh/known_hosts}"',
-  'ssh -i "$deploy_ssh_key_path" \\',
-  '-F /dev/null \\',
-  '-o BatchMode=yes \\',
-  '-o StrictHostKeyChecking=yes \\',
-  '-o GlobalKnownHostsFile=/dev/null \\',
-  '-o UserKnownHostsFile="$deploy_ssh_known_hosts_path" \\',
-  '-o ConnectTimeout=15 \\',
+  'remote_controller_source=".github/scripts/stage-or-deploy-backend-remote.sh"',
+  'git rev-parse --verify "$DEPLOY_REVISION:$remote_controller_source"',
+  '[[ "$(git hash-object "$remote_controller_source")" == "$remote_controller_blob" ]]',
+  'scp "${scp_options[@]}" \\',
+  'remote_controller_sha256="$(',
+  "Staged backend remote deployment controller failed verification.",
+  'APP_ROOT=\'$APP_ROOT\' AUTOMATIC_PROD_PUSH=\'$AUTOMATIC_PROD_PUSH\'',
+  '  -F /dev/null',
+  '  -o BatchMode=yes',
+  '  -o StrictHostKeyChecking=yes',
+  '  -o GlobalKnownHostsFile=/dev/null',
+  '  -o "UserKnownHostsFile=$deploy_ssh_known_hosts_path"',
+  '  -o ConnectTimeout=15',
   '[[ "$IDENTITY_ENV_EXPORT_ID" =~ ^[0-9]{1,20}-[0-9]{1,10}$ ]]',
   '      recover-candidate-env)\n        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \\',
   "rollback-env-bootstrap:'ROLLBACK INCOMPLETE IDENTITY ENV BOOTSTRAP'",
@@ -361,7 +378,11 @@ for (const requiredControllerContract of [
     );
   }
 }
-if (stageOrDeployScript.includes("ssh -i ~/.ssh/deploy_key")) {
+if (
+  stageOrDeployScript.includes("ssh -i ~/.ssh/deploy_key") ||
+  stageOrDeployLocalScript.includes("bash -s") ||
+  stageOrDeployLocalScript.includes("<<'EOF'")
+) {
   throw new Error("Stage/deploy controller bypasses the explicit SSH key path");
 }
 const identityControllerStart = stageOrDeployScript.indexOf("\n  identity)\n");
@@ -752,22 +773,22 @@ if (
     "Automatic backend deploy did not produce its exact completion receipt.",
   ) ||
   !stageOrDeployScript.includes("require_completion_receipt() {") ||
-  !stageOrDeployScript.includes(
-    "bash -s\" <<'EOF' | require_completion_receipt",
+  !stageOrDeployLocalScript.includes(
+    'IDENTITY_CORE_CLEANUP_MIGRATION_SHA256=\'$IDENTITY_CLEANUP_MIGRATION_SHA256\' bash \\"\\$controller\\"" |\n  require_completion_receipt\ntrap - EXIT',
   )
 ) {
   throw new Error(
     "Automatic backend deployment must require one exact post-readiness completion receipt",
   );
 }
-const localReceiptGate = stageOrDeployScript.indexOf(
+const localReceiptGate = stageOrDeployLocalScript.indexOf(
   'awk -v expected_revision="$DEPLOY_REVISION"',
 );
-const remoteScriptStart = stageOrDeployScript.indexOf("set -euo pipefail");
+const remoteScriptStart = stageOrDeployRemoteScript.indexOf("set -euo pipefail");
 if (
   localReceiptGate < 0 ||
   remoteScriptStart < 0 ||
-  localReceiptGate > remoteScriptStart
+  stageOrDeployRemoteScript.includes("require_completion_receipt")
 ) {
   throw new Error(
     "Automatic completion receipt must be enforced by the GitHub runner outside the SSH script",
