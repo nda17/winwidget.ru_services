@@ -16,11 +16,10 @@ import {
 	Query,
 	Req
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('/notes')
-@Auth(Role.ADMIN)
+@Auth('ADMIN')
 export class NotesController {
 	constructor(
 		private readonly notesService: NotesService,

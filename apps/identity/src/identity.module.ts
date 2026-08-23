@@ -14,6 +14,7 @@ import { RefreshTokenService } from './auth/refresh-token.service';
 import { IdentityEventsService } from './events/identity-events.service';
 import { IdentityHealthController } from './health/identity-health.controller';
 import { IdentityHealthService } from './health/identity-health.service';
+import { IdentityProviderHealthService } from './health/identity-provider-health.service';
 import { OwnerClientsService } from './integrations/owner-clients.service';
 import { IdentityInternalController } from './internal/internal.controller';
 import { IdentityInternalGuard } from './internal/internal.guard';
@@ -73,6 +74,7 @@ const API_PROVIDERS =
 				IdentityInternalGuard,
 				IdentityInternalService,
 				IdentityMessagingAdminService,
+				IdentityProviderHealthService,
 				OAuthService,
 				OwnerClientsService,
 				RecaptchaGuard,

@@ -27,6 +27,14 @@ export interface IdentityAuditSnapshot {
 	email: string | null;
 }
 
+export interface IdentityProviderHealthCheck {
+	id: 'smtp' | 'smsaero' | 'recaptcha';
+	title: string;
+	status: 'ok' | 'warning' | 'down' | 'disabled';
+	message: string;
+	latencyMs?: number;
+}
+
 @Injectable()
 export class IdentityInternalClient {
 	private readonly baseUrl: string;
@@ -166,6 +174,65 @@ export class IdentityInternalClient {
 		return new Map(payload.items.map(item => [item.id, item]));
 	}
 
+	async getProviderHealth(): Promise<IdentityProviderHealthCheck[]> {
+		let response: Response;
+		try {
+			response = await fetch(
+				`${this.baseUrl}/internal/v1/core/admin-health`,
+				{
+					headers: {
+						accept: 'application/json',
+						'x-winwidget-service': 'core',
+						'x-winwidget-internal-token': this.token
+					},
+					signal: AbortSignal.timeout(this.timeoutMs)
+				}
+			);
+		} catch {
+			throw new ServiceUnavailableException(
+				'Identity provider health is unavailable'
+			);
+		}
+		if (!response.ok) {
+			throw new ServiceUnavailableException(
+				'Identity provider health is unavailable'
+			);
+		}
+		const declaredLength = Number(response.headers.get('content-length'));
+		if (Number.isFinite(declaredLength) && declaredLength > 16 * 1024) {
+			throw new ServiceUnavailableException(
+				'Identity provider health returned an invalid response'
+			);
+		}
+		let body: string;
+		try {
+			body = await response.text();
+		} catch {
+			throw new ServiceUnavailableException(
+				'Identity provider health returned an invalid response'
+			);
+		}
+		if (Buffer.byteLength(body, 'utf8') > 16 * 1024) {
+			throw new ServiceUnavailableException(
+				'Identity provider health returned an invalid response'
+			);
+		}
+		let payload: unknown;
+		try {
+			payload = JSON.parse(body);
+		} catch {
+			throw new ServiceUnavailableException(
+				'Identity provider health returned an invalid response'
+			);
+		}
+		if (!this.isProviderHealthResponse(payload)) {
+			throw new ServiceUnavailableException(
+				'Identity provider health returned an invalid response'
+			);
+		}
+		return payload.checks;
+	}
+
 	private async authenticationException(
 		response: Response
 	): Promise<UnauthorizedException | ServiceUnavailableException> {
@@ -241,6 +308,56 @@ export class IdentityInternalClient {
 		return new ServiceUnavailableException(
 			'Authorization service returned an invalid response'
 		);
+	}
+
+	private isProviderHealthResponse(value: unknown): value is {
+		service: 'identity';
+		checks: IdentityProviderHealthCheck[];
+	} {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return false;
+		}
+		const payload = value as Record<string, unknown>;
+		if (
+			Object.keys(payload).sort().join(',') !== 'checks,service' ||
+			payload.service !== 'identity' ||
+			!Array.isArray(payload.checks)
+		) {
+			return false;
+		}
+		const expected = [
+			{ id: 'smtp', title: 'Email SMTP' },
+			{ id: 'smsaero', title: 'SMS Aero' },
+			{ id: 'recaptcha', title: 'reCAPTCHA' }
+		] as const;
+		if (payload.checks.length !== expected.length) return false;
+		return payload.checks.every((check, index) => {
+			if (!check || typeof check !== 'object' || Array.isArray(check)) {
+				return false;
+			}
+			const item = check as Record<string, unknown>;
+			const keys = Object.keys(item).sort();
+			const expectedKeys =
+				item.latencyMs === undefined
+					? ['id', 'message', 'status', 'title']
+					: ['id', 'latencyMs', 'message', 'status', 'title'];
+			return (
+				keys.join(',') === expectedKeys.join(',') &&
+				item.id === expected[index].id &&
+				item.title === expected[index].title &&
+				['ok', 'warning', 'down', 'disabled'].includes(
+					String(item.status)
+				) &&
+				typeof item.message === 'string' &&
+				item.message.length > 0 &&
+				item.message.length <= 200 &&
+				(item.latencyMs === undefined ||
+					(typeof item.latencyMs === 'number' &&
+						Number.isInteger(item.latencyMs) &&
+						item.latencyMs >= 0 &&
+						item.latencyMs <= 60_000))
+			);
+		});
 	}
 
 	private parseBaseUrl(value?: string): string {

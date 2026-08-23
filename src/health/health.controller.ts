@@ -1,7 +1,6 @@
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { HealthService } from '@/health/health.service';
 import { Controller, Get, Header, HttpCode } from '@nestjs/common';
-import { Role } from '@prisma/client';
 
 @Controller('/health')
 export class HealthController {
@@ -32,7 +31,7 @@ export class HealthController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Get('/admin')
 	async getAdminHealth() {
 		return this.healthService.getAdminHealth();

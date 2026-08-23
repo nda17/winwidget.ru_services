@@ -489,6 +489,14 @@ if [[ "$deploy_revision" != "$expected_revision" ]]; then
 	exit 1
 fi
 
+EXPECTED_REVISION="$expected_revision"
+# shellcheck source=scripts/identity-production-env-control.sh
+source "$server_root/scripts/identity-production-env-control.sh"
+export IDENTITY_EXPECTED_REVISION="$expected_revision"
+export IDENTITY_EXPECTED_POSTGRES_IMAGE="$identity_env_postgres_image"
+export IDENTITY_EXPECTED_INTEGRATION_KINDS="$identity_env_integration_kinds"
+export IDENTITY_EXPECTED_ADMIN_FILE="$identity_env_admin_password_file"
+
 dirty_files="$(
 	git -C "$server_root" status --porcelain --untracked-files=all
 )"
@@ -504,11 +512,20 @@ identity_database_phase="$(identity_database_current_phase)" || {
 	exit 1
 }
 identity_routes_env_state="$(
-	identity_read_env_value "$ENV_FILE" GATEWAY_ROUTES_JSON |
-		IDENTITY_JWKS_URL="$(identity_read_env_value "$ENV_FILE" JWT_JWKS_URL)" \
-			node -e '
+	identity_env_node_validate "$ENV_FILE" <<'NODE'
 const fs = require("node:fs");
-const routes = JSON.parse(fs.readFileSync(0, "utf8"));
+const source = fs.readFileSync(process.argv[2], "utf8");
+const read = key => {
+  const matches = source.split(/\r?\n/).filter(line => line.startsWith(`${key}=`));
+  if (matches.length !== 1) process.exit(1);
+  const raw = matches[0].slice(key.length + 1).trim();
+  if (!raw) process.exit(1);
+  if ((raw.startsWith('"') && raw.endsWith('"')) ||
+      (raw.startsWith("'") && raw.endsWith("'"))) return raw.slice(1, -1);
+  return raw;
+};
+const routes = JSON.parse(read("GATEWAY_ROUTES_JSON"));
+const jwksUrl = read("JWT_JWKS_URL");
 const required = [
   ["identity-auth", "/api/v1/auth"],
   ["identity-users", "/api/v1/users"],
@@ -521,15 +538,15 @@ const identity = required.every(([id, pathPrefix]) => routes.some(route =>
   route.upstreamUrl === "http://127.0.0.1:4900" &&
   route.authPolicy === "optional" && route.timeoutMs === 60000
 )) && routes.filter(route => route?.upstreamUrl === "http://127.0.0.1:4900").length === 4 &&
-  process.env.IDENTITY_JWKS_URL ===
+  jwksUrl ===
     "http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json";
 const legacy = required.every(([, pathPrefix]) =>
   !routes.some(route => route?.pathPrefix === pathPrefix)) &&
   !routes.some(route => route?.upstreamUrl === "http://127.0.0.1:4900") &&
-  process.env.IDENTITY_JWKS_URL ===
+  jwksUrl ===
     "http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json";
 process.stdout.write(identity ? "identity" : legacy ? "legacy" : "unsafe");
-'
+NODE
 )" || {
 	echo 'Identity Gateway route/JWKS env contract is invalid.' >&2
 	exit 1
@@ -560,6 +577,7 @@ identity_cleanup_migration='20260815000000_remove_legacy_identity_core_source'
 identity_cleanup_directory="$server_root/prisma/migrations/$identity_cleanup_migration"
 identity_cleanup_migration_file="$identity_cleanup_directory/migration.sql"
 identity_cleanup_marker="$APP_ROOT/deploy/backend/.identity-core-cleanup-v1"
+identity_cleanup_phase='absent'
 if [[ -e "$identity_cleanup_directory" || -L "$identity_cleanup_directory" ]]; then
 	[[ -d "$identity_cleanup_directory" && ! -L "$identity_cleanup_directory" &&
 		-f "$identity_cleanup_migration_file" && ! -L "$identity_cleanup_migration_file" ]] || {
@@ -1401,9 +1419,6 @@ mode="${mode:-production}"
 mode="${mode,,}"
 
 for key in \
-	JWT_ACCESS_PRIVATE_KEY_BASE64 \
-	JWT_ACCESS_JWKS_BASE64 \
-	JWT_ACCESS_ACTIVE_KID \
 	JWT_ISSUER \
 	JWT_AUDIENCE \
 	JWT_ACCESS_TTL_SECONDS \
@@ -1416,6 +1431,34 @@ for key in \
 	GATEWAY_SHUTDOWN_GRACE_MS; do
 	require_env_key "$key"
 done
+
+if [[ "$identity_cleanup_phase" == 'complete' ]]; then
+	for removed_identity_core_key in \
+		JWT_ACCESS_PRIVATE_KEY_BASE64 \
+		JWT_ACCESS_JWKS_BASE64 \
+		JWT_ACCESS_ACTIVE_KID; do
+		if awk -F= -v key="$removed_identity_core_key" '
+			/^[[:space:]]*(#|$)/ { next }
+			{
+				name = $1
+				sub(/^[[:space:]]*/, "", name)
+				sub(/[[:space:]]*$/, "", name)
+				if (name == key) found = 1
+			}
+			END { exit(found ? 0 : 1) }
+		' "$ENV_FILE"; then
+			echo "$removed_identity_core_key must stay absent after completed Identity Core cleanup." >&2
+			exit 1
+		fi
+	done
+else
+	for legacy_identity_core_key in \
+		JWT_ACCESS_PRIVATE_KEY_BASE64 \
+		JWT_ACCESS_JWKS_BASE64 \
+		JWT_ACCESS_ACTIVE_KID; do
+		require_env_key "$legacy_identity_core_key"
+	done
+fi
 
 for legacy_key in \
 	JWT_SECRET \
@@ -1934,9 +1977,10 @@ case "$mode" in
 			echo 'Identity must use the reviewed database, loopback HTTP and process-role ports.' >&2
 			exit 1
 		fi
-		if [[ "$(get_env_value IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64)" == "$(get_env_value JWT_ACCESS_PRIVATE_KEY_BASE64)" ||
-			"$(get_env_value IDENTITY_JWT_ACCESS_JWKS_BASE64)" == "$(get_env_value JWT_ACCESS_JWKS_BASE64)" ||
-			"$(get_env_value IDENTITY_JWT_ACCESS_ACTIVE_KID)" == "$(get_env_value JWT_ACCESS_ACTIVE_KID)" ]]; then
+		if [[ "$identity_cleanup_phase" != 'complete' ]] &&
+			[[ "$(get_env_value IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64)" == "$(get_env_value JWT_ACCESS_PRIVATE_KEY_BASE64)" ||
+				"$(get_env_value IDENTITY_JWT_ACCESS_JWKS_BASE64)" == "$(get_env_value JWT_ACCESS_JWKS_BASE64)" ||
+				"$(get_env_value IDENTITY_JWT_ACCESS_ACTIVE_KID)" == "$(get_env_value JWT_ACCESS_ACTIVE_KID)" ]]; then
 			echo 'Identity signing material must be rotated and distinct from the legacy Core keyset.' >&2
 			exit 1
 		fi
@@ -4366,6 +4410,61 @@ container_env_value() {
 		'
 }
 
+assert_clean_core_identity_environment_boundary() {
+	local core_container identity_container integration_container
+	local core_keys identity_keys integration_keys key
+	core_container="$(compose_target ps --status running -q api)" || return 1
+	identity_container="$(compose_target ps --status running -q identity-api)" || return 1
+	integration_container="$(compose_target ps --status running -q integration-worker)" || return 1
+	[[ "$core_container" =~ ^[0-9a-f]{64}$ &&
+		"$identity_container" =~ ^[0-9a-f]{64}$ &&
+		"$integration_container" =~ ^[0-9a-f]{64}$ ]] || return 1
+	core_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$core_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	identity_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$identity_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	integration_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$integration_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	for key in JWT_ACCESS_PRIVATE_KEY_BASE64 JWT_ACCESS_JWKS_BASE64 JWT_ACCESS_ACTIVE_KID \
+		RECAPTCHA_SECRET_KEY RECAPTCHA_CLIENT_URL RECAPTCHA_ENABLED RECAPTCHA_MIN_SCORE \
+		SMTP_LOGIN SMTP_PASSWORD SMTP_SERVER SMTP_CONNECTION_TIMEOUT_MS \
+		SMTP_GREETING_TIMEOUT_MS SMTP_SOCKET_TIMEOUT_MS \
+		SMSAERO_EMAIL SMSAERO_API_KEY SMSAERO_SIGN \
+		GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_CALLBACK_URL \
+		GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GITHUB_CALLBACK_URL \
+		YANDEX_CLIENT_ID YANDEX_CLIENT_SECRET YANDEX_CALLBACK_URL \
+		VK_CLIENT_ID VK_CLIENT_SECRET VK_SERVICE_TOKEN VK_CALLBACK_URL \
+		TELEGRAM_AUTH_BOT_TOKEN TELEGRAM_AUTH_BOT_USERNAME TELEGRAM_AUTH_BOT_WEBHOOK_SECRET \
+		TELEGRAM_INFO_BOT_WEBHOOK_SECRET; do
+		! grep -Fxq "$key" <<<"$core_keys" || {
+			echo "Clean Core API unexpectedly receives Identity-owned $key." >&2
+			return 1
+		}
+		! grep -Fxq "$key" <<<"$integration_keys" || {
+			echo "Clean Core integration worker unexpectedly receives Identity-owned $key." >&2
+			return 1
+		}
+		grep -Fxq "$key" <<<"$identity_keys" || {
+			echo "Identity API is missing required Identity-owned $key." >&2
+			return 1
+		}
+	done
+	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME \
+		TELEGRAM_SUPPORT_BOT_TOKEN TELEGRAM_SUPPORT_BOT_USERNAME TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET; do
+		grep -Fxq "$key" <<<"$core_keys" || {
+			echo "Clean Core API is missing required $key." >&2
+			return 1
+		}
+	done
+	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME \
+		TELEGRAM_INFO_BOT_WEBHOOK_SECRET TELEGRAM_WEBHOOK_HOST; do
+		grep -Fxq "$key" <<<"$identity_keys" || {
+			echo "Identity API is missing required Info webhook setting $key." >&2
+			return 1
+		}
+	done
+}
+
 validate_notification_cutover_marker() {
 	local marker_path="${1:-$NOTIFICATION_DELIVERY_CUTOVER_MARKER}"
 	local marker_mode
@@ -4907,7 +5006,7 @@ fi
 docker run --rm --network none \
 	--env-file "$ENV_FILE" \
 	--entrypoint node \
-	"winwidget-api:$APP_VERSION" \
+	"${IDENTITY_IMAGE:-winwidget-identity:git-$deploy_revision}" \
 	-e '
 const {
 	createPrivateKey,
@@ -4926,10 +5025,10 @@ let privateKey;
 let jwks;
 try {
 	privateKey = createPrivateKey(
-		Buffer.from(process.env.JWT_ACCESS_PRIVATE_KEY_BASE64 || "", "base64"),
+		Buffer.from(process.env.IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64 || "", "base64"),
 	);
 	jwks = JSON.parse(
-		Buffer.from(process.env.JWT_ACCESS_JWKS_BASE64 || "", "base64").toString(
+		Buffer.from(process.env.IDENTITY_JWT_ACCESS_JWKS_BASE64 || "", "base64").toString(
 			"utf8",
 		),
 	);
@@ -4967,7 +5066,7 @@ for (const key of jwks.keys) {
 	keyIds.add(key.kid);
 }
 
-const activeKid = process.env.JWT_ACCESS_ACTIVE_KID;
+const activeKid = process.env.IDENTITY_JWT_ACCESS_ACTIVE_KID;
 const activeJwk = jwks.keys.find(key => key.kid === activeKid);
 if (!activeJwk) fail("JWT active kid is missing from JWKS");
 
@@ -4987,7 +5086,7 @@ if (!verify("sha256", challenge, publicKey, signature)) {
 	fail("JWT private key does not match the active public JWK");
 }
 
-process.stdout.write(`JWT RS256 keyset validated for kid ${activeKid}\n`);
+process.stdout.write(`Identity JWT RS256 keyset validated for kid ${activeKid}\n`);
 '
 
 rabbitmq_admin_user="$(get_env_value "RABBITMQ_ADMIN_USER")"
@@ -9335,6 +9434,13 @@ for service in \
 		exit 1
 	fi
 done
+
+if [[ "$identity_cleanup_phase" == 'complete' ]]; then
+	assert_clean_core_identity_environment_boundary || {
+		echo 'Completed Identity cleanup runtime credential boundary is invalid.' >&2
+		exit 1
+	}
+fi
 
 if [[ "$notification_forward_candidate_active" == "true" ]]; then
 	# Canonical services passed the complete deployment smoke, so the saved

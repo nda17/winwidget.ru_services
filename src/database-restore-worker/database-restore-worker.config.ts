@@ -131,9 +131,7 @@ export class DatabaseRestoreWorkerConfig {
 				migrationsDirectory: join(migrationsRoot, 'prisma/migrations'),
 				anchorTables: [
 					'_prisma_migrations',
-					'User',
 					'admin_event_logs',
-					'identity_core_source_state',
 					'outbox_events',
 					'reporting_producer_state'
 				]

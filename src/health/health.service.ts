@@ -18,10 +18,10 @@ import {
 	WidgetsMessagingOverview
 } from '@/messaging/widgets-delivery-failures-client.service';
 import { PrismaService } from '@/prisma.service';
+import { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
 import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createTransport } from 'nodemailer';
 
 type HealthStatus = 'ok' | 'warning' | 'down' | 'disabled';
 
@@ -68,7 +68,8 @@ export class HealthService {
 		private readonly notificationDelivery: NotificationDeliveryClientService,
 		private readonly widgets: WidgetsDeliveryFailuresClientService,
 		private readonly billingState: BillingCoreStateService,
-		private readonly billing: BillingMessagingClientService
+		private readonly billing: BillingMessagingClientService,
+		private readonly identity: IdentityInternalClient
 	) {}
 
 	async getAdminHealth() {
@@ -76,6 +77,7 @@ export class HealthService {
 			this.getNotificationDeliveryResult();
 		const widgetsResult = this.getWidgetsResult();
 		const billingResult = this.getBillingResult();
+		const identityProviderChecks = await this.getIdentityProviderChecks();
 		const checks = await Promise.all([
 			this.checkBackend(),
 			this.checkDatabase(),
@@ -99,9 +101,7 @@ export class HealthService {
 			),
 			this.checkScheduledJobs(),
 			this.checkS3(),
-			this.checkSmtp(),
-			this.checkSmsAero(),
-			this.checkRecaptcha(),
+			...identityProviderChecks,
 			this.checkYooKassa(billingResult),
 			this.checkInfoTelegramBot(),
 			this.checkSupportTelegramBot()
@@ -113,6 +113,36 @@ export class HealthService {
 			uptimeSeconds: Math.round(process.uptime()),
 			checks
 		};
+	}
+
+	private async getIdentityProviderChecks(): Promise<
+		Array<Promise<HealthCheck>>
+	> {
+		try {
+			const checks = await this.identity.getProviderHealth();
+			return checks.map(check => Promise.resolve(check));
+		} catch {
+			return [
+				Promise.resolve({
+					id: 'smtp',
+					title: 'Email SMTP',
+					status: 'down',
+					message: 'Identity provider health недоступен'
+				}),
+				Promise.resolve({
+					id: 'smsaero',
+					title: 'SMS Aero',
+					status: 'down',
+					message: 'Identity provider health недоступен'
+				}),
+				Promise.resolve({
+					id: 'recaptcha',
+					title: 'reCAPTCHA',
+					status: 'down',
+					message: 'Identity provider health недоступен'
+				})
+			];
+		}
 	}
 
 	getLivenessHealth() {
@@ -661,98 +691,6 @@ export class HealthService {
 
 			return 'Бакет доступен';
 		});
-	}
-
-	private async checkSmtp(): Promise<HealthCheck> {
-		const required = ['SMTP_SERVER', 'SMTP_LOGIN', 'SMTP_PASSWORD'];
-		const missing = required.filter(key => !this.configService.get(key));
-
-		if (missing.length > 0) {
-			return {
-				id: 'smtp',
-				title: 'Email SMTP',
-				status: 'warning',
-				message: `Не настроены переменные: ${missing.join(', ')}`
-			};
-		}
-
-		return this.measure('smtp', 'Email SMTP', async () => {
-			const isProduction =
-				this.configService.get<string>('MODE') === 'production';
-			const transport = createTransport({
-				host: this.configService.get<string>('SMTP_SERVER'),
-				port: isProduction ? 465 : 2525,
-				secure: isProduction,
-				connectionTimeout: 3000,
-				greetingTimeout: 3000,
-				socketTimeout: 3000,
-				auth: {
-					user: this.configService.get<string>('SMTP_LOGIN'),
-					pass: this.configService.get<string>('SMTP_PASSWORD')
-				}
-			});
-
-			await transport.verify();
-			transport.close();
-
-			return 'SMTP подключение работает';
-		});
-	}
-
-	private async checkSmsAero(): Promise<HealthCheck> {
-		const email = this.configService.get<string>('SMSAERO_EMAIL');
-		const apiKey = this.configService.get<string>('SMSAERO_API_KEY');
-
-		if (!email || !apiKey) {
-			return {
-				id: 'smsaero',
-				title: 'SMS Aero',
-				status: 'warning',
-				message: 'Не настроены SMSAERO_EMAIL или SMSAERO_API_KEY'
-			};
-		}
-
-		return this.measure('smsaero', 'SMS Aero', async () => {
-			const auth = Buffer.from(`${email}:${apiKey}`).toString('base64');
-			const response = await this.fetchWithTimeout(
-				'https://gate.smsaero.ru/v2/balance',
-				{
-					headers: {
-						Authorization: `Basic ${auth}`
-					}
-				}
-			);
-
-			if (!response.ok) {
-				throw new Error(`HTTP ${response.status}`);
-			}
-
-			return 'Сервис отвечает';
-		});
-	}
-
-	private async checkRecaptcha(): Promise<HealthCheck> {
-		const enabled =
-			this.configService.get<string>('RECAPTCHA_ENABLED') === 'true';
-		const secret = this.configService.get<string>('RECAPTCHA_SECRET_KEY');
-
-		if (!enabled) {
-			return {
-				id: 'recaptcha',
-				title: 'reCAPTCHA',
-				status: 'disabled',
-				message: 'Проверка отключена переменной RECAPTCHA_ENABLED'
-			};
-		}
-
-		return {
-			id: 'recaptcha',
-			title: 'reCAPTCHA',
-			status: secret ? 'ok' : 'warning',
-			message: secret
-				? 'Ключ настроен'
-				: 'Не настроен RECAPTCHA_SECRET_KEY'
-		};
 	}
 
 	private async checkYooKassa(

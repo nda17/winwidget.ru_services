@@ -3,13 +3,10 @@ import { BillingSettingsState } from '@/messaging/billing-events';
 import { parseBillingSettingsState } from '@/billing-boundary/billing-settings-state';
 import { ServiceUnavailableException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Role } from '@prisma/client';
 import {
-	BILLING_ENSURE_TRIAL_PATH,
 	BILLING_INTERNAL_TOKEN_ENV,
 	BILLING_INTERNAL_TOKEN_HEADER,
 	BILLING_INTERNAL_TOKEN_MIN_LENGTH,
-	BILLING_REVOKE_ENTITLEMENTS_PATH,
 	BILLING_SERVICE_BASE_URL_ENV,
 	BILLING_SERVICE_DEFAULT_BASE_URL,
 	BILLING_SERVICE_TIMEOUT_ENV,
@@ -28,42 +25,6 @@ const INSECURE_TOKENS = new Set([
 @Injectable()
 export class BillingInternalClient {
 	constructor(private readonly config: ConfigService) {}
-
-	async ensureTrial(input: {
-		commandId: string;
-		userId: string;
-		registeredAt: string;
-	}): Promise<void> {
-		await this.request(
-			'POST',
-			BILLING_ENSURE_TRIAL_PATH,
-			{
-				schemaVersion: 1,
-				...input,
-				trialDays: 7
-			},
-			input.commandId
-		);
-	}
-
-	async revokeEntitlements(input: {
-		commandId: string;
-		userId: string;
-		reason: 'USER_DEACTIVATION' | 'USER_SOFT_DELETE';
-		actorId: string;
-		actorRole: Role;
-		occurredAt: string;
-	}): Promise<void> {
-		await this.request(
-			'POST',
-			BILLING_REVOKE_ENTITLEMENTS_PATH,
-			{
-				schemaVersion: 1,
-				...input
-			},
-			input.commandId
-		);
-	}
 
 	async updateSettings(input: {
 		commandId: string;
@@ -90,7 +51,7 @@ export class BillingInternalClient {
 	}
 
 	private async request(
-		method: 'POST' | 'PATCH',
+		method: 'PATCH',
 		path: string,
 		body: Record<string, unknown>,
 		idempotencyKey: string

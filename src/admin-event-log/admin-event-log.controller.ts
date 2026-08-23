@@ -1,10 +1,9 @@
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { Auth } from '@/auth/decorators/auth.decorator';
 import { Controller, Get, HttpCode, Query } from '@nestjs/common';
-import { Role } from '@prisma/client';
 
 @Controller('admin-event-log')
-@Auth(Role.ADMIN)
+@Auth('ADMIN')
 export class AdminEventLogController {
 	constructor(
 		private readonly adminEventLogService: AdminEventLogService

@@ -72,14 +72,14 @@ import {
 	BillingPeriod,
 	PaymentStatus,
 	Plan,
-	Role,
-	SubscriptionStatus,
-	UserStatus
+	SubscriptionStatus
 } from '@prisma/client';
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_CONTEXT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const PLATFORM_ROLES = ['USER', 'ADMIN', 'DEV'] as const;
+const PLATFORM_USER_STATUSES = ['ACTIVE', 'DEACTIVATED'] as const;
 const FORBIDDEN_PAYLOAD_KEYS = new Set([
 	'amocrmtoken',
 	'apikey',
@@ -295,7 +295,7 @@ const assertReportingIdentityState = (
 	}
 	assertEnumValue(
 		state.status,
-		Object.values(UserStatus),
+		PLATFORM_USER_STATUSES,
 		'payload.state.status'
 	);
 	assertIsoDate(state.deletedAt, 'payload.state.deletedAt', true);
@@ -305,11 +305,7 @@ const assertReportingIdentityState = (
 		throw new Error('payload.state.roles must be an array');
 	}
 	state.roles.forEach((role, index) =>
-		assertEnumValue(
-			role,
-			Object.values(Role),
-			`payload.state.roles[${index}]`
-		)
+		assertEnumValue(role, PLATFORM_ROLES, `payload.state.roles[${index}]`)
 	);
 	if (new Set(state.roles).size !== state.roles.length) {
 		throw new Error('payload.state.roles must be unique');
@@ -1209,14 +1205,17 @@ const assertBillingVersionedEvent = (
 			assertOptionalString(state.phone, 'payload.state.phone');
 			assertEnumValue(
 				state.status,
-				Object.values(UserStatus),
+				PLATFORM_USER_STATUSES,
 				'payload.state.status'
 			);
 			assertIsoDate(state.deletedAt, 'payload.state.deletedAt', true);
 			if (
 				!Array.isArray(state.roles) ||
 				state.roles.some(
-					role => !Object.values(Role).includes(role as Role)
+					role =>
+						!PLATFORM_ROLES.includes(
+							role as (typeof PLATFORM_ROLES)[number]
+						)
 				)
 			) {
 				throw new Error('payload.state.roles is invalid');
@@ -1345,7 +1344,7 @@ const assertBillingVersionedEvent = (
 			assertUuid(state.commandId, 'payload.state.commandId');
 			assertIdentifier(state.userId, 'payload.state.userId');
 			assertIdentifier(state.actorId, 'payload.state.actorId');
-			if (state.actorRole !== Role.ADMIN && state.actorRole !== Role.DEV) {
+			if (state.actorRole !== 'ADMIN' && state.actorRole !== 'DEV') {
 				throw new Error('payload.state.actorRole is invalid');
 			}
 			if (

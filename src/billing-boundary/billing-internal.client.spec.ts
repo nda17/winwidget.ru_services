@@ -10,11 +10,20 @@ describe('BillingInternalClient', () => {
 		jest.restoreAllMocks();
 	});
 
-	it('sends the exact idempotent seven-day trial command', async () => {
+	it('sends the exact idempotent settings command', async () => {
 		global.fetch = jest.fn().mockResolvedValue({
 			ok: true,
-			status: 204,
-			json: jest.fn()
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				id: 'singleton',
+				paymentEnabled: true,
+				autoRenewalSignupEnabled: false,
+				autoRenewalChargesEnabled: false,
+				autoRenewalChargesEnabledAt: '2026-08-11T00:00:00.000Z',
+				affiliateProgramEnabled: true,
+				affiliateCashbackPercent: 10,
+				updatedAt: '2026-08-11T00:00:00.000Z'
+			})
 		});
 		const client = new BillingInternalClient({
 			get: jest.fn((key: string) => {
@@ -27,24 +36,24 @@ describe('BillingInternalClient', () => {
 		} as unknown as ConfigService);
 		const command = {
 			commandId: '11111111-1111-4111-8111-111111111111',
-			userId: 'user-1',
-			registeredAt: '2026-08-11T00:00:00.000Z'
+			actorId: 'admin-1',
+			occurredAt: '2026-08-11T00:00:00.000Z',
+			settings: { paymentEnabled: true }
 		};
 
-		await client.ensureTrial(command);
+		await client.updateSettings(command);
 
 		expect(global.fetch).toHaveBeenCalledWith(
-			'http://127.0.0.1:4800/internal/v1/billing/trials/ensure',
+			'http://127.0.0.1:4800/internal/v1/billing/settings',
 			expect.objectContaining({
-				method: 'POST',
+				method: 'PATCH',
 				headers: expect.objectContaining({
 					'x-winwidget-internal-token': token,
 					'idempotency-key': command.commandId
 				}),
 				body: JSON.stringify({
 					schemaVersion: 1,
-					...command,
-					trialDays: 7
+					...command
 				})
 			})
 		);

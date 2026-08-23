@@ -176,13 +176,13 @@ jobs:
             scripts/identity-cutover-production.sh
             scripts/identity-backup-restore-rehearsal.sh
             scripts/cleanup-identity-core-source-production.sh
-            src/billing-core-cutover-main.ts
-            src/identity-core-cutover-main.ts
+            scripts/test-identity-core-source-cleanup-rehearsal.sh
             apps/billing/src/cutover-main.ts
             prisma/migrations/20260811000000_prepare_billing_service_ownership/migration.sql
             prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
             prisma/migrations/20260813000000_remove_legacy_billing_core_source/migration.sql
             prisma/migrations/20260814020000_detach_identity_foreign_keys/migration.sql
+            prisma/migrations/20260815000000_remove_legacy_identity_core_source/migration.sql
           )
           for path in "${required_files[@]}"; do
             test -f "$path"
@@ -209,7 +209,8 @@ jobs:
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
             scripts/identity-backup-restore-rehearsal.sh \
-            scripts/cleanup-identity-core-source-production.sh; do
+            scripts/cleanup-identity-core-source-production.sh \
+            scripts/test-identity-core-source-cleanup-rehearsal.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
@@ -250,6 +251,8 @@ jobs:
             bash scripts/identity-backup-restore-rehearsal.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/cleanup-identity-core-source-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
 
           # ShellCheck runs separately below; its actionlint integration
           # deadlocks while piping this workflow's large inline scripts.
@@ -290,7 +293,8 @@ jobs:
             scripts/deploy-identity-production.sh \
             scripts/identity-cutover-production.sh \
             scripts/identity-backup-restore-rehearsal.sh \
-            scripts/cleanup-identity-core-source-production.sh
+            scripts/cleanup-identity-core-source-production.sh \
+            scripts/test-identity-core-source-cleanup-rehearsal.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -1050,7 +1054,6 @@ jobs:
             scripts/reporting-cutover-lifecycle.sh \
             scripts/generate-reporting-frontend-runtime-attestation.sh \
             scripts/run-reporting-scheduler-cutover-smoke.sh \
-            scripts/run-reporting-route-cutover-smoke.sh \
             scripts/run-reporting-restore-cutover-smoke.sh \
             scripts/test-reporting-cutover-rehearsal.sh \
             scripts/test-reporting-production-scripts.sh; do
@@ -1061,8 +1064,6 @@ jobs:
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
-            bash scripts/run-reporting-route-cutover-smoke.sh --self-test
-          APP_ROOT="$reporting_ci_app_root" \
             bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
           for script in \
@@ -1072,7 +1073,6 @@ jobs:
             scripts/reporting-cutover-lifecycle.sh \
             scripts/generate-reporting-frontend-runtime-attestation.sh \
             scripts/run-reporting-scheduler-cutover-smoke.sh \
-            scripts/run-reporting-route-cutover-smoke.sh \
             scripts/run-reporting-restore-cutover-smoke.sh \
             scripts/test-reporting-cutover-rehearsal.sh \
             scripts/test-reporting-production-scripts.sh; do
@@ -1109,6 +1109,7 @@ jobs:
           bash -n scripts/identity-cutover-production.sh
           bash -n scripts/identity-backup-restore-rehearsal.sh
           bash -n scripts/cleanup-identity-core-source-production.sh
+          bash -n scripts/test-identity-core-source-cleanup-rehearsal.sh
           node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
@@ -1129,6 +1130,8 @@ jobs:
             bash scripts/cleanup-billing-core-source-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
@@ -1148,7 +1151,8 @@ jobs:
             scripts/billing-cutover-production.sh \
             scripts/billing-backup-restore-rehearsal.sh \
             scripts/cleanup-billing-core-source-production.sh \
-            scripts/test-billing-core-source-cleanup-rehearsal.sh
+            scripts/test-billing-core-source-cleanup-rehearsal.sh \
+            scripts/test-identity-core-source-cleanup-rehearsal.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -3679,7 +3683,6 @@ jobs:
           bash -n scripts/reporting-cutover-lifecycle.sh
           bash -n scripts/generate-reporting-frontend-runtime-attestation.sh
           bash -n scripts/run-reporting-scheduler-cutover-smoke.sh
-          bash -n scripts/run-reporting-route-cutover-smoke.sh
           bash -n scripts/run-reporting-restore-cutover-smoke.sh
           bash -n scripts/test-reporting-cutover-rehearsal.sh
           bash -n scripts/test-reporting-production-scripts.sh
@@ -3703,8 +3706,6 @@ jobs:
           bash scripts/generate-reporting-frontend-runtime-attestation.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/run-reporting-scheduler-cutover-smoke.sh --self-test
-          APP_ROOT="$reporting_ci_app_root" \
-            bash scripts/run-reporting-route-cutover-smoke.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/run-reporting-restore-cutover-smoke.sh --self-test
           bash scripts/test-reporting-production-scripts.sh
@@ -3738,6 +3739,11 @@ jobs:
             bash scripts/identity-backup-restore-rehearsal.sh --self-test
           APP_ROOT="$reporting_ci_app_root" \
             bash scripts/cleanup-identity-core-source-production.sh --self-test
+          APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
+          CORE_CLEANUP_REHEARSAL_RUN_ID="identity-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            APP_ROOT="$reporting_ci_app_root" \
+            bash scripts/test-identity-core-source-cleanup-rehearsal.sh --rehearsal
           CORE_CLEANUP_REHEARSAL_RUN_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             APP_ROOT="$reporting_ci_app_root" \
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --rehearsal

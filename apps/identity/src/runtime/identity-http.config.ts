@@ -12,6 +12,7 @@ export const IDENTITY_GLOBAL_PREFIX_EXCLUDES = [
 	},
 	{ path: 'internal/v1/widgets/owners/search', method: RequestMethod.ALL },
 	{ path: 'internal/v1/core/audit-snapshots', method: RequestMethod.ALL },
+	{ path: 'internal/v1/core/admin-health', method: RequestMethod.GET },
 	{
 		path: 'internal/v1/campaigns/eligible-contacts',
 		method: RequestMethod.ALL

@@ -14,7 +14,6 @@ scripts=(
 	"$script_directory/reporting-cutover-lifecycle.sh"
 	"$script_directory/generate-reporting-frontend-runtime-attestation.sh"
 	"$script_directory/run-reporting-scheduler-cutover-smoke.sh"
-	"$script_directory/run-reporting-route-cutover-smoke.sh"
 	"$script_directory/run-reporting-restore-cutover-smoke.sh"
 	"$script_directory/test-reporting-cutover-rehearsal.sh"
 )
@@ -244,8 +243,6 @@ APP_ROOT="$app_root" bash "$script_directory/reporting-cutover-lifecycle.sh" --s
 bash "$script_directory/generate-reporting-frontend-runtime-attestation.sh" --self-test
 APP_ROOT="$app_root" \
 	bash "$script_directory/run-reporting-scheduler-cutover-smoke.sh" --self-test
-APP_ROOT="$app_root" \
-	bash "$script_directory/run-reporting-route-cutover-smoke.sh" --self-test
 APP_ROOT="$app_root" \
 	bash "$script_directory/run-reporting-restore-cutover-smoke.sh" --self-test
 bash "$script_directory/test-reporting-cutover-rehearsal.sh" --self-test

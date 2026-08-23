@@ -11,15 +11,9 @@ const {
 	ScheduledTasksService
 } = require('../dist/src/maintenance/scheduled-tasks.service.js');
 const {
-	assertMessagingEventContract
-} = require('../dist/src/messaging/messaging-event-contract.js');
-const {
 	CORE_RABBITMQ_TOPOLOGY_KINDS,
 	MESSAGING_QUEUE_NAMES
 } = require('../dist/src/messaging/messaging.constants.js');
-const {
-	ReportingProjectionSnapshotService
-} = require('../dist/src/reporting-internal/reporting-projection-snapshot.service.js');
 
 const databaseUrl = process.env.DATABASE_URL_DEVELOPMENT;
 const rabbitUrl = process.env.RABBITMQ_URL;
@@ -142,23 +136,6 @@ if (
 ) {
 	throw new Error('Core publisher topology queue catalog is invalid');
 }
-
-const reportingEventTypes = ['identity.user.changed.v1'];
-
-const streamReportingProjectionSnapshot = async () => {
-	const chunks = [];
-	const request = { aborted: false };
-	const response = {
-		destroyed: false,
-		writableEnded: false,
-		write(value) {
-			chunks.push(value);
-			return true;
-		}
-	};
-	await new ReportingProjectionSnapshotService().stream(request, response);
-	return chunks;
-};
 
 const getRabbitManagementStatus = async path => {
 	const response = await fetch(
@@ -289,273 +266,8 @@ const verifyManualBackupAdvisoryLock = async () => {
 	}
 };
 
-const verifyReportingProjectionProducers = async () => {
-	const suffix = randomUUID();
-	const disabledUserId = `ci-reporting-disabled-${suffix}`;
-	const rollbackUserId = `ci-reporting-rollback-${suffix}`;
-	const userId = `ci-reporting-user-${suffix}`;
-	const emailIdentityId = `ci-reporting-email-${suffix}`;
-	const phoneIdentityId = `ci-reporting-phone-${suffix}`;
-	const emailValue = `projection-${suffix}@example.invalid`;
-	const phoneValue = `+7000${suffix.replaceAll('-', '').slice(0, 10)}`;
-	const aggregateIds = [disabledUserId, rollbackUserId, userId];
-	let originalState;
-
-	try {
-		originalState = await prisma.reportingProducerState.findUniqueOrThrow({
-			where: { id: 'singleton' }
-		});
-		if (originalState.enabled) {
-			throw new Error(
-				'Reporting projection producer must be disabled before integration smoke'
-			);
-		}
-		try {
-			await streamReportingProjectionSnapshot();
-			throw new Error(
-				'Retired Reporting projection snapshot was available'
-			);
-		} catch (error) {
-			if (
-				!error?.message?.includes(
-					'Core Reporting projection snapshot was retired after Widgets ownership handoff'
-				)
-			) {
-				throw error;
-			}
-		}
-
-		await prisma.user.create({
-			data: {
-				id: disabledUserId,
-				password: 'not-a-real-password'
-			}
-		});
-		const disabledEvents = await prisma.outboxEvent.count({
-			where: {
-				eventType: { in: reportingEventTypes },
-				payload: { path: ['aggregateId'], equals: disabledUserId }
-			}
-		});
-		if (disabledEvents !== 0) {
-			throw new Error(
-				'Disabled Reporting producer created an Outbox event'
-			);
-		}
-		await prisma.user.delete({ where: { id: disabledUserId } });
-
-		await prisma.reportingProducerState.update({
-			where: { id: 'singleton' },
-			data: { enabled: true, activatedAt: new Date() }
-		});
-		try {
-			await prisma.$transaction(async transaction => {
-				await transaction.user.create({
-					data: {
-						id: rollbackUserId,
-						password: 'not-a-real-password'
-					}
-				});
-				throw new Error('EXPECTED_REPORTING_PRODUCER_ROLLBACK');
-			});
-			throw new Error('Reporting rollback smoke unexpectedly committed');
-		} catch (error) {
-			if (error?.message !== 'EXPECTED_REPORTING_PRODUCER_ROLLBACK') {
-				throw error;
-			}
-		}
-		const rolledBackArtifacts = await Promise.all([
-			prisma.user.count({ where: { id: rollbackUserId } }),
-			prisma.outboxEvent.count({
-				where: {
-					eventType: 'identity.user.changed.v1',
-					payload: { path: ['aggregateId'], equals: rollbackUserId }
-				}
-			}),
-			prisma.reportingProjectionVersion.count({
-				where: {
-					aggregateType: 'identity.user',
-					aggregateId: rollbackUserId
-				}
-			})
-		]);
-		if (rolledBackArtifacts.some(count => count !== 0)) {
-			throw new Error(
-				'Reporting producer artifacts survived a rolled-back transaction'
-			);
-		}
-		await prisma.user.create({
-			data: { id: userId, password: 'not-a-real-password' }
-		});
-		await prisma.authIdentity.create({
-			data: {
-				id: emailIdentityId,
-				userId,
-				type: 'EMAIL',
-				value: emailValue
-			}
-		});
-		await prisma.user.updateMany({
-			where: { id: userId },
-			data: { status: 'DEACTIVATED' }
-		});
-		await prisma.authIdentity.create({
-			data: {
-				id: phoneIdentityId,
-				userId,
-				type: 'PHONE',
-				value: phoneValue
-			}
-		});
-		await prisma.authIdentity.updateMany({
-			where: { id: phoneIdentityId },
-			data: { verifiedAt: new Date() }
-		});
-
-		const identityEvents = await prisma.outboxEvent.findMany({
-			where: {
-				eventType: 'identity.user.changed.v1',
-				payload: { path: ['aggregateId'], equals: userId }
-			},
-			orderBy: { createdAt: 'asc' },
-			select: { payload: true }
-		});
-		const versions = identityEvents.map(event =>
-			Number(event.payload.aggregateVersion)
-		);
-		if (
-			versions.length !== 5 ||
-			versions.some((version, index) => version !== index + 1)
-		) {
-			throw new Error(
-				`Reporting aggregate versions are not gapless: ${versions.join(',')}`
-			);
-		}
-		const sequences = identityEvents.map(event =>
-			BigInt(event.payload.sourceSequence)
-		);
-		if (
-			sequences.some(
-				(sequence, index) => index > 0 && sequence <= sequences[index - 1]
-			)
-		) {
-			throw new Error('Reporting sourceSequence is not monotonic');
-		}
-		const lastIdentityState = identityEvents.at(-1)?.payload.state;
-		const expectedIdentityKeys = [
-			'createdAt',
-			'deletedAt',
-			'hasEmailIdentity',
-			'hasPhoneIdentity',
-			'hasTelegramIdentity',
-			'id',
-			'loginMethodCount',
-			'roles',
-			'status',
-			'updatedAt'
-		];
-		if (
-			!lastIdentityState ||
-			Object.keys(lastIdentityState).sort().join('|') !==
-				expectedIdentityKeys.join('|') ||
-			lastIdentityState.loginMethodCount !== 2
-		) {
-			throw new Error('Reporting identity state contract drifted');
-		}
-
-		await prisma.user.delete({ where: { id: userId } });
-		const cascadeEvents = await prisma.outboxEvent.findMany({
-			where: {
-				eventType: { in: reportingEventTypes },
-				payload: { path: ['aggregateId'], equals: userId }
-			},
-			select: {
-				id: true,
-				messageId: true,
-				eventType: true,
-				routingKey: true,
-				payload: true
-			}
-		});
-		for (const event of cascadeEvents) {
-			assertMessagingEventContract(event.payload, {
-				eventType: event.eventType,
-				routingKey: event.routingKey,
-				messageId: event.messageId || event.id
-			});
-		}
-		const postCascadeIdentityEvents = cascadeEvents
-			.filter(
-				event =>
-					event.eventType === 'identity.user.changed.v1' &&
-					event.payload.aggregateId === userId
-			)
-			.sort(
-				(left, right) =>
-					Number(left.payload.aggregateVersion) -
-					Number(right.payload.aggregateVersion)
-			);
-		if (
-			postCascadeIdentityEvents.length !== 6 ||
-			postCascadeIdentityEvents.at(-1)?.payload.tombstone !== true
-		) {
-			throw new Error(
-				'AuthIdentity cascade emitted a missing or resurrecting user projection'
-			);
-		}
-		const tombstone = cascadeEvents.find(
-			event =>
-				event.eventType === 'identity.user.changed.v1' &&
-				event.payload.aggregateId === userId &&
-				event.payload.tombstone === true &&
-				event.payload.state === null
-		);
-		if (!tombstone) {
-			throw new Error('Reporting identity cascade tombstone is missing');
-		}
-
-		const serializedPayloads = JSON.stringify(
-			cascadeEvents.map(event => event.payload)
-		);
-		for (const forbiddenValue of [emailValue, phoneValue]) {
-			if (serializedPayloads.includes(forbiddenValue)) {
-				throw new Error(
-					'Reporting projection payload contains source PII'
-				);
-			}
-		}
-	} finally {
-		await prisma.reportingProducerState.updateMany({
-			where: { id: 'singleton' },
-			data: {
-				enabled: false,
-				activatedAt: originalState?.activatedAt || null
-			}
-		});
-		await prisma.user.deleteMany({
-			where: { id: { in: [disabledUserId, rollbackUserId, userId] } }
-		});
-		const events = await prisma.outboxEvent.findMany({
-			where: {
-				eventType: { in: reportingEventTypes },
-				OR: aggregateIds.map(id => ({
-					payload: { path: ['aggregateId'], equals: id }
-				}))
-			},
-			select: { id: true }
-		});
-		await prisma.outboxEvent.deleteMany({
-			where: { id: { in: events.map(event => event.id) } }
-		});
-		await prisma.reportingProjectionVersion.deleteMany({
-			where: { aggregateId: { in: aggregateIds } }
-		});
-	}
-};
-
 try {
 	await prisma.$connect();
-	await verifyReportingProjectionProducers();
 	await verifyManualBackupAdvisoryLock();
 	connection = await amqp.connect(rabbitUrl);
 
@@ -594,12 +306,6 @@ try {
 	}, 'integration worker consumers');
 
 	reportingAuditActorId = `ci-reporting-audit-${randomUUID()}`;
-	await prisma.user.create({
-		data: {
-			id: reportingAuditActorId,
-			password: 'not-a-real-password'
-		}
-	});
 	const reportingAuditEventId = randomUUID();
 	createdEventIds.push(reportingAuditEventId);
 	const reportingAuditPayload = {
@@ -764,24 +470,19 @@ try {
 		await channel.bindQueue(
 			durabilityQueue,
 			'winwidget.events',
-			'identity.user.changed.v1'
+			'ci.outbox.durability.v1'
 		);
 		createdEventIds.push(durableEventId);
 		await prisma.outboxEvent.create({
 			data: {
 				id: durableEventId,
-				eventType: 'identity.user.changed.v1',
-				routingKey: 'identity.user.changed.v1',
+				eventType: 'ci.outbox.durability.v1',
+				routingKey: 'ci.outbox.durability.v1',
 				payload: {
 					schemaVersion: 1,
-					eventType: 'identity.user.changed.v1',
+					eventType: 'ci.outbox.durability.v1',
 					eventId: durableEventId,
-					aggregateId: `ci-restart-${durableEventId}`,
-					aggregateVersion: '1',
-					sourceSequence: '1',
-					occurredAt: new Date().toISOString(),
-					tombstone: true,
-					state: null
+					occurredAt: new Date().toISOString()
 				}
 			}
 		});
@@ -855,18 +556,13 @@ try {
 		await prisma.outboxEvent.create({
 			data: {
 				id: postRestartEventId,
-				eventType: 'identity.user.changed.v1',
-				routingKey: 'identity.user.changed.v1',
+				eventType: 'ci.outbox.durability.v1',
+				routingKey: 'ci.outbox.durability.v1',
 				payload: {
 					schemaVersion: 1,
-					eventType: 'identity.user.changed.v1',
+					eventType: 'ci.outbox.durability.v1',
 					eventId: postRestartEventId,
-					aggregateId: `ci-reconnected-${postRestartEventId}`,
-					aggregateVersion: '1',
-					sourceSequence: '1',
-					occurredAt: new Date().toISOString(),
-					tombstone: true,
-					state: null
+					occurredAt: new Date().toISOString()
 				}
 			}
 		});
@@ -977,7 +673,7 @@ try {
 	);
 
 	process.stdout.write(
-		`Messaging integration smoke passed: retired Reporting snapshot, retained identity producer, manual backup advisory lock, Reporting audit Outbox -> idempotent ActivityLog and malformed -> isolated DLQ -> PostgreSQL, terminal database-backup retry/DLQ${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
+		`Messaging integration smoke passed: manual backup advisory lock, detached Reporting audit Outbox -> idempotent ActivityLog and malformed -> isolated DLQ -> PostgreSQL, terminal database-backup retry/DLQ${rabbitContainerId ? ', RabbitMQ restart durability and reconnect' : ''}\n`
 	);
 } finally {
 	if (channel) await channel.close().catch(() => undefined);
@@ -1033,9 +729,6 @@ try {
 					action: 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE'
 				}
 			})
-			.catch(() => undefined);
-		await prisma.user
-			.deleteMany({ where: { id: reportingAuditActorId } })
 			.catch(() => undefined);
 	}
 	await prisma.$disconnect();

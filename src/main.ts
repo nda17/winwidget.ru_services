@@ -1,13 +1,10 @@
 import { AppModule } from '@/app.module';
 import { getTrustProxyConfig } from '@/config/trust-proxy.config';
-import { GoogleRecaptchaExceptionFilter } from '@/filters/google-recaptcha-exception.filter';
 import { AppHttpExceptionFilter } from '@/filters/http-exception.filter';
-import { RecaptchaDevLoggingInterceptor } from '@/interceptors/recaptcha-dev-logging.interceptor';
 import { messagingContextMiddleware } from '@/messaging/messaging-context';
 import { RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import 'colors';
-import * as cookieParser from 'cookie-parser';
 
 const API_PREFIX = 'api/v1';
 
@@ -77,12 +74,7 @@ export const bootstrap = async () => {
 	}
 
 	app.use(messagingContextMiddleware);
-	app.use(cookieParser());
-	app.useGlobalInterceptors(new RecaptchaDevLoggingInterceptor());
-	app.useGlobalFilters(
-		new GoogleRecaptchaExceptionFilter(),
-		new AppHttpExceptionFilter()
-	);
+	app.useGlobalFilters(new AppHttpExceptionFilter());
 	app.enableCors({
 		origin: getCorsAllowedOrigins(),
 		credentials: true,

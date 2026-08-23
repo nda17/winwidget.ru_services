@@ -3,9 +3,7 @@ import {
 	BillingPeriod,
 	PaymentStatus,
 	Plan,
-	Role,
-	SubscriptionStatus,
-	UserStatus
+	SubscriptionStatus
 } from '@prisma/client';
 
 interface BillingVersionedEventBase {
@@ -24,9 +22,9 @@ export interface BillingIdentityState {
 	name: string | null;
 	email: string | null;
 	phone: string | null;
-	status: UserStatus;
+	status: 'ACTIVE' | 'DEACTIVATED';
 	deletedAt: string | null;
-	roles: Role[];
+	roles: Array<'USER' | 'ADMIN' | 'DEV'>;
 	telegramChatId: string | null;
 	telegramChannelActive: boolean;
 	createdAt: string;

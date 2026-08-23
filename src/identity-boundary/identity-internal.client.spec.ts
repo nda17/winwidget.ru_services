@@ -170,4 +170,107 @@ describe('IdentityInternalClient', () => {
 			createClient().getAuditSnapshots(['admin-id', 'target-id'])
 		).rejects.toBeInstanceOf(ServiceUnavailableException);
 	});
+
+	it('loads provider health through the Core-scoped bounded endpoint', async () => {
+		const checks = [
+			{
+				id: 'smtp',
+				title: 'Email SMTP',
+				status: 'ok',
+				message: 'Подключение работает',
+				latencyMs: 12
+			},
+			{
+				id: 'smsaero',
+				title: 'SMS Aero',
+				status: 'warning',
+				message: 'SMS Aero не настроен'
+			},
+			{
+				id: 'recaptcha',
+				title: 'reCAPTCHA',
+				status: 'disabled',
+				message: 'reCAPTCHA отключена настройками'
+			}
+		];
+		const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+			new Response(JSON.stringify({ service: 'identity', checks }), {
+				status: 200
+			})
+		);
+
+		await expect(createClient().getProviderHealth()).resolves.toEqual(
+			checks
+		);
+		expect(fetchMock).toHaveBeenCalledWith(
+			'http://127.0.0.1:4900/internal/v1/core/admin-health',
+			expect.objectContaining({
+				headers: expect.objectContaining({
+					'x-winwidget-service': 'core',
+					'x-winwidget-internal-token': TOKEN
+				})
+			})
+		);
+	});
+
+	it('rejects oversized, reordered, or expanded provider health responses', async () => {
+		const validChecks = [
+			{
+				id: 'smtp',
+				title: 'Email SMTP',
+				status: 'ok',
+				message: 'Подключение работает'
+			},
+			{
+				id: 'smsaero',
+				title: 'SMS Aero',
+				status: 'ok',
+				message: 'Подключение работает'
+			},
+			{
+				id: 'recaptcha',
+				title: 'reCAPTCHA',
+				status: 'ok',
+				message: 'Ключ настроен'
+			}
+		];
+		jest
+			.spyOn(global, 'fetch')
+			.mockResolvedValueOnce(
+				new Response('', {
+					status: 200,
+					headers: { 'content-length': String(16 * 1024 + 1) }
+				})
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						service: 'identity',
+						checks: [...validChecks].reverse()
+					}),
+					{ status: 200 }
+				)
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						service: 'identity',
+						checks: validChecks.map((check, index) =>
+							index === 0 ? { ...check, secret: 'not-allowed' } : check
+						)
+					}),
+					{ status: 200 }
+				)
+			);
+
+		await expect(
+			createClient().getProviderHealth()
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+		await expect(
+			createClient().getProviderHealth()
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+		await expect(
+			createClient().getProviderHealth()
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
 });

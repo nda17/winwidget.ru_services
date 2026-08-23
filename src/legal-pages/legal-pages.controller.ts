@@ -11,7 +11,6 @@ import {
 	Patch,
 	Req
 } from '@nestjs/common';
-import { Role } from '@prisma/client';
 import { Request } from 'express';
 
 @Controller('/legal-pages')
@@ -31,7 +30,7 @@ export class LegalPagesController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Patch(':slug')
 	async update(
 		@Param('slug') slug: string,

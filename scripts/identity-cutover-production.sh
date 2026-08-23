@@ -10,7 +10,6 @@ SERVER_ROOT="${SERVER_ROOT:-$APP_ROOT/winwidget.ru_server}"
 ENV_FILE="${ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 COMPOSE_FILE="${COMPOSE_FILE:-$SERVER_ROOT/deploy/docker-compose.prod.yml}"
 EXPECTED_REVISION="${EXPECTED_REVISION:-}"
-IDENTITY_CORE_CUTOVER_CLI="${IDENTITY_CORE_CUTOVER_CLI:-dist/src/identity-core-cutover-main.js}"
 IDENTITY_SERVICE_CUTOVER_CLI="${IDENTITY_SERVICE_CUTOVER_CLI:-dist/src/cutover/main.js}"
 identity_cutover_root="${IDENTITY_CUTOVER_ARTIFACT_ROOT:-$APP_ROOT/deploy/backend/identity-cutover-artifacts}"
 identity_cutover_marker="${IDENTITY_CUTOVER_MARKER:-$APP_ROOT/deploy/backend/.identity-cutover-v1}"
@@ -77,6 +76,24 @@ identity_cutover_sha256() {
 
 identity_cutover_text_sha256() {
 	node -e 'process.stdin.setEncoding("utf8");let value="";process.stdin.on("data",chunk=>value+=chunk);process.stdin.on("end",()=>process.stdout.write(require("node:crypto").createHash("sha256").update(value).digest("hex")));'
+}
+
+identity_cutover_psql_url() {
+	[[ $# -eq 1 ]] || return 1
+	IDENTITY_CUTOVER_DATABASE_URL="$1" node <<'NODE'
+let url;
+try { url = new URL(process.env.IDENTITY_CUTOVER_DATABASE_URL || ''); }
+catch { process.exit(1); }
+if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.username || !url.password ||
+    !url.hostname || url.pathname !== '/default_db' ||
+    url.searchParams.getAll('schema').length !== 1 ||
+    url.searchParams.get('schema') !== 'public') process.exit(1);
+url.searchParams.delete('schema');
+process.stdout.write(url.toString().replace(
+  /([?&]options=)([^&#]*)/,
+  (_, prefix, value) => `${prefix}${value.replace(/\+/g, '%20')}`,
+));
+NODE
 }
 
 identity_cutover_validate_private_file() {
@@ -402,8 +419,7 @@ identity_cutover_preflight() {
 	[[ "$(identity_cutover_image_id "$identity_image")" == "$(identity_database_marker_value image_id)" ]] ||
 		identity_cutover_fail 'Identity candidate image differs from the prepared database marker' || return 1
 	identity_cutover_apply_expand_migration
-	identity_cutover_run_evidence api "$identity_core_preflight_evidence" \
-		"$IDENTITY_CORE_CUTOVER_CLI" preflight
+	identity_cutover_fail 'Core Identity cutover preflight is retired after ownership completion' || return 1
 	identity_cutover_run_evidence identity-api "$identity_service_shadow_status_evidence" \
 		"$IDENTITY_SERVICE_CUTOVER_CLI" status
 	identity_cutover_assert_shadow_status_evidence "$identity_service_shadow_status_evidence" ||
@@ -1062,64 +1078,36 @@ NODE
 }
 
 identity_cutover_run_core_fence_action() {
-	[[ $# -eq 3 && "$1" =~ ^(status|fence|unfence)$ && "$3" =~ ^(OPEN|FENCED)$ ]] || return 1
-	local action="$1" destination="$2" expected_fence="$3"
-	identity_cutover_prepare_fresh_evidence "$destination" || return 1
-	identity_cutover_run_evidence api "$destination" "$IDENTITY_CORE_CUTOVER_CLI" "$action" || return 1
-	identity_cutover_assert_core_fence_evidence "$destination" "$action" "$expected_fence"
+	identity_cutover_fail 'Core Identity fence mutation is retired after ownership completion'
 }
 
 identity_cutover_require_core_fenced_live() {
-	identity_cutover_run_core_fence_action status \
-		"$identity_core_post_boundary_fence_evidence" FENCED ||
-		identity_cutover_fail 'Legacy Core identity source is not durably fenced by the candidate revision'
+	local PGURL OWNERSHIP_REVISION core_postgres_image state
+	PGURL="$(identity_read_env_value "$ENV_FILE" DATABASE_MIGRATION_URL_PRODUCTION)" || return 1
+	PGURL="$(identity_cutover_psql_url "$PGURL")" || return 1
+	OWNERSHIP_REVISION="$(identity_cutover_marker_value revision)" || return 1
+	[[ "$OWNERSHIP_REVISION" =~ ^[0-9a-f]{40}$ ]] || return 1
+	core_postgres_image="$CORE_POSTGRES_IMAGE"
+	export PGURL OWNERSHIP_REVISION
+	state="$(docker run --rm -i --network host -e PGURL -e OWNERSHIP_REVISION "$core_postgres_image" \
+		sh -euc 'psql --no-psqlrc --set ON_ERROR_STOP=1 --set ownership_revision="$OWNERSHIP_REVISION" --tuples-only --no-align "$PGURL"' <<'SQL'
+SELECT CASE WHEN count(*) = 1 THEN 'fenced' ELSE 'unsafe' END
+FROM public.identity_core_source_state
+WHERE id = 'singleton'
+  AND ownership = 'FENCED'
+  AND generation > 0
+  AND fenced_revision = :'ownership_revision'
+  AND fenced_at IS NOT NULL;
+SQL
+	)" || return 1
+	unset PGURL OWNERSHIP_REVISION
+	[[ "$state" == 'fenced' ]] ||
+		identity_cutover_fail 'Legacy Core identity source is not durably fenced by the ownership revision'
 }
 
 identity_cutover_wait_core_identity_outbox_drained() {
-	[[ $# -eq 1 ]] || return 1
-	local destination="$1" partial="${1}.partial.$$" attempt pending status
-	identity_cutover_prepare_fresh_evidence "$destination" || return 1
-	for ((attempt = 1; attempt <= identity_core_outbox_drain_attempts; attempt++)); do
-		if ! identity_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-			run --rm -T --no-deps api node "$IDENTITY_CORE_CUTOVER_CLI" \
-			preflight >"$partial"; then
-			rm -f -- "$partial"
-			identity_cutover_fail 'Core frozen preflight failed while draining the legacy Identity Outbox' || return 1
-		fi
-		chmod 600 "$partial"
-		chown 0:0 "$partial"
-		if pending="$(node - "$partial" <<'NODE'
-const fs = require('node:fs');
-const lines = fs.readFileSync(process.argv[2], 'utf8').trim().split(/\n/);
-if (lines.length !== 1) process.exit(1);
-const value = JSON.parse(lines[0]);
-if (value?.ok !== true || value.action !== 'preflight' ||
-    !Number.isSafeInteger(value.legacyIdentityOutboxPending) ||
-    value.legacyIdentityOutboxPending < 0) process.exit(1);
-process.stdout.write(String(value.legacyIdentityOutboxPending));
-NODE
-		)"; then
-			status=0
-		else
-			status=$?
-		fi
-		if [[ "$status" -ne 0 || ! "$pending" =~ ^(0|[1-9][0-9]*)$ ]]; then
-			rm -f -- "$partial"
-			identity_cutover_fail 'Core frozen preflight returned invalid Outbox drain evidence' || return 1
-		fi
-		if [[ "$pending" == '0' ]]; then
-			mv -f -- "$partial" "$destination"
-			identity_cutover_assert_core_preflight_evidence "$destination" || return 1
-			printf 'identity_core_legacy_outbox_pending=0\n'
-			return 0
-		fi
-		rm -f -- "$partial"
-		printf 'identity_core_legacy_outbox_pending=%s attempt=%s\n' "$pending" "$attempt"
-		sleep 2
-	done
-	identity_cutover_fail 'Core legacy Identity Outbox did not drain within the bounded wait'
+	identity_cutover_fail 'Retired Core Identity Outbox drain is unavailable after ownership completion'
 }
-
 identity_cutover_assert_projection_evidence() {
 	[[ $# -eq 1 ]] || return 1
 	identity_cutover_validate_private_file "$1" || return 1
@@ -1439,56 +1427,8 @@ identity_cutover_require_frozen_boundary_evidence() {
 }
 
 identity_cutover_export_snapshot() {
-	identity_cutover_require_frozen_boundary_evidence ||
-		identity_cutover_fail 'Core frozen Outbox/queue boundary evidence is absent or invalid' || return 1
-	if [[ -e "$identity_snapshot" || -L "$identity_snapshot" ]]; then
-		identity_cutover_validate_private_file "$identity_snapshot" || return 1
-		[[ "$identity_frozen_core_recovery" == 'true' &&
-			"$(identity_database_current_phase)" == 'prepared' ]] || return 1
-		rm -f -- "$identity_snapshot"
-	fi
-	local image="winwidget-api:git-$EXPECTED_REVISION" uid_gid stage partial
-	uid_gid="$(identity_cutover_image_uid_gid "$image")"
-	[[ "$uid_gid" =~ ^[0-9]+:[0-9]+$ ]] || return 1
-	stage="$identity_cutover_root/.core-export-$EXPECTED_REVISION"
-	if [[ -e "$stage" || -L "$stage" ]]; then
-		identity_cutover_active_stage="$stage"
-		identity_cutover_cleanup_active_stage || return 1
-	fi
-	mkdir -m 700 "$stage"
-	identity_cutover_active_stage="$stage"
-	chown "$uid_gid" "$stage"
-	identity_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
-		run --rm -T --no-deps --user "$uid_gid" \
-		--volume "$stage:/cutover" api node "$IDENTITY_CORE_CUTOVER_CLI" \
-		export --file /cutover/snapshot.json >/dev/null
-	partial="$stage/snapshot.json"
-	[[ -f "$partial" && ! -L "$partial" && -s "$partial" ]] || return 1
-	chown 0:0 "$partial" "$stage"
-	chmod 600 "$partial"
-	mv -f -- "$partial" "$identity_snapshot"
-	rmdir "$stage"
-	identity_cutover_active_stage=''
-	identity_cutover_validate_private_file "$identity_snapshot"
-	node - "$identity_snapshot" <<'NODE'
-const fs = require('node:fs');
-const value = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-const counts = value?.counts;
-if (value?.schemaVersion !== 1 ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.snapshotId || '') ||
-    !Array.isArray(value.users) || !value.authSettings || !value.versions ||
-    !Number.isSafeInteger(counts?.users) || counts.users !== value.users.length ||
-    !Number.isSafeInteger(counts?.identities) ||
-    !Number.isSafeInteger(counts?.telegramNotificationChannels) ||
-    counts.emailCollisionGroups !== 0 ||
-    JSON.stringify(value).includes('refreshTokenHash') ||
-    JSON.stringify(value).includes('verificationChallenge')) process.exit(1);
-const identities = value.users.reduce((sum, user) => sum + (user.authIdentities?.length || 0), 0);
-const channels = value.users.filter(user => user.telegramNotificationChannel).length;
-if (identities !== counts.identities || channels !== counts.telegramNotificationChannels) process.exit(1);
-NODE
+	identity_cutover_fail 'Retired Core Identity snapshot export is unavailable after ownership completion'
 }
-
 identity_cutover_import_snapshot() {
 	local image="winwidget-identity:git-$EXPECTED_REVISION" uid_gid stage
 	uid_gid="$(identity_cutover_image_uid_gid "$image")"
@@ -2571,39 +2511,13 @@ identity_cutover_self_test() {
 	identity_cutover_transition_allowed active complete
 	! identity_cutover_transition_allowed forward-only preflight-verified
 	! identity_cutover_transition_allowed complete active
-	local source recovery_source backup_source deploy_source complete_source
-	local recover_pre_boundary_source
-	source="$(declare -f identity_cutover_require_common identity_cutover_preflight identity_cutover_verify \
-		identity_cutover_deploy identity_cutover_forward_recovery \
-		identity_cutover_freeze_core identity_cutover_recover_pre_boundary \
-		identity_cutover_run_core_fence_action identity_cutover_require_core_fenced_live \
-		identity_cutover_wait_core_identity_outbox_drained \
-		identity_cutover_require_frozen_boundary_evidence identity_cutover_export_snapshot \
-		identity_cutover_start_forward_runtime identity_cutover_run_restore_rehearsal \
-		identity_cutover_require_completion_parity identity_cutover_capture_dark_readiness \
-		identity_cutover_switch_core_integration_permissions \
-		identity_cutover_assert_narrow_owner_routes \
-		identity_cutover_assert_info_webhook_owner \
-		identity_cutover_assert_destination_queue_owner)"
-	[[ "$source" == *'database_restore_guard_assert_before_mutation'* &&
-		"$source" == *'preflight then verified restore evidence'* &&
-		"$source" == *'legacyIdentityOutboxPending'* &&
-		"$source" == *'stop --timeout 90 outbox-publisher'* &&
-		"$source" == *'identity_cutover_run_core_fence_action fence'* &&
-		"$source" == *'identity_cutover_run_core_fence_action unfence'* &&
-		"$source" == *'identity_cutover_require_core_fenced_live'* &&
-		"$source" == *'identity_database_advance forward-only'* &&
-		"$source" == *'identity_cutover_require_completion_parity'* &&
-		"$source" == *'ownership?.phase !== '\''IMPORTED'\'''* &&
-		"$source" == *'CORE_IDENTITY_TOKEN'* && "$source" == *'BILLING_IDENTITY_TOKEN'* &&
-		"$source" == *'WIDGETS_IDENTITY_TOKEN'* &&
-		"$source" == *'api integration-worker'* &&
-		"$source" == *'internal/v1/auth/introspect'* &&
-		"$source" == *'api/v1/telegram-bot/webhook'* &&
-		"$source" == *'legacy Core Info_bot webhook remains reachable'* &&
-		"$source" == *'admin\.audit\.(campaigns|reporting|widgets|billing|identity)'* &&
-		"$source" == *'exactly one Identity consumer'* &&
-		"$source" == *'identity-backup-restore-rehearsal.sh'* ]] || return 1
+	local fence_source recovery_source backup_source deploy_source complete_source
+	local recover_pre_boundary_source file_text retired_path
+	fence_source="$(declare -f identity_cutover_require_core_fenced_live)"
+	[[ "$fence_source" == *'public.identity_core_source_state'* &&
+		"$fence_source" == *"ownership = 'FENCED'"* &&
+		"$fence_source" == *"fenced_revision = :'ownership_revision'"* &&
+		"$fence_source" == *'generation > 0'* ]] || return 1
 	recovery_source="$(declare -f identity_cutover_forward_recovery \
 		identity_cutover_reconcile_split_state \
 		identity_cutover_require_database_binding \
@@ -2683,9 +2597,11 @@ const binding = source.indexOf("identity_cutover_require_database_binding");
 const state = source.indexOf("case", binding);
 if (binding < 0 || state <= binding) process.exit(1);
 '
+	file_text="$(<"${BASH_SOURCE[0]}")"
+	retired_path='dist/src/identity-core-'cutover-main'.js'
+	[[ "$file_text" != *"$retired_path"* ]] || return 1
 	printf 'identity_cutover_self_test=passed\n'
 }
-
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	case "${1:-}" in
 	--preflight) identity_cutover_preflight ;;

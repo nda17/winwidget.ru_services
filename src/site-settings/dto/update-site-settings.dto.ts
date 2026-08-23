@@ -30,28 +30,4 @@ export class UpdateSiteSettingsDto {
 	@IsOptional()
 	@IsBoolean()
 	autoRenewalChargesEnabled?: boolean;
-
-	@IsOptional()
-	@IsBoolean()
-	recaptchaEnabled?: boolean;
-
-	@IsOptional()
-	@IsBoolean()
-	googleAuthEnabled?: boolean;
-
-	@IsOptional()
-	@IsBoolean()
-	yandexAuthEnabled?: boolean;
-
-	@IsOptional()
-	@IsBoolean()
-	githubAuthEnabled?: boolean;
-
-	@IsOptional()
-	@IsBoolean()
-	vkAuthEnabled?: boolean;
-
-	@IsOptional()
-	@IsBoolean()
-	telegramAuthEnabled?: boolean;
 }

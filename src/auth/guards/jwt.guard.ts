@@ -1,3 +1,4 @@
+import type { PlatformIdentityActor } from '@/auth/decorators/roles.decorator';
 import { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
 import {
 	CanActivate,
@@ -7,12 +8,14 @@ import {
 } from '@nestjs/common';
 import { Request } from 'express';
 
+type PlatformRequest = Request & { user?: PlatformIdentityActor };
+
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
 	constructor(private readonly identity: IdentityInternalClient) {}
 
 	async canActivate(context: ExecutionContext): Promise<boolean> {
-		const request = context.switchToHttp().getRequest<Request>();
+		const request = context.switchToHttp().getRequest<PlatformRequest>();
 		const authorization = request.headers.authorization;
 		if (
 			typeof authorization !== 'string' ||
@@ -26,7 +29,7 @@ export class JwtAuthGuard implements CanActivate {
 			id: actor.subject,
 			rights: actor.roles,
 			sessionId: actor.sessionId
-		} as never;
+		};
 		return true;
 	}
 }

@@ -54,16 +54,12 @@ REPORTING_CLEANUP_PRESERVED_PATHS=(
 	apps/reporting/prisma/schema.prisma
 	prisma/migrations/20260731010000_add_reporting_projection_producers
 	src/messaging/reporting-admin-audit-event.ts
-	src/reporting-internal/reporting-auth-introspection.service.spec.ts
-	src/reporting-internal/reporting-auth-introspection.service.ts
 	src/reporting-internal/reporting-internal-token.guard.spec.ts
 	src/reporting-internal/reporting-internal-token.guard.ts
 	src/reporting-internal/reporting-internal.constants.ts
 	src/reporting-internal/reporting-internal.controller.spec.ts
 	src/reporting-internal/reporting-internal.controller.ts
 	src/reporting-internal/reporting-internal.module.ts
-	src/reporting-internal/reporting-producer-migration.spec.ts
-	src/reporting-internal/reporting-projection-snapshot.service.spec.ts
 	src/reporting-internal/reporting-schedule-authority.service.spec.ts
 )
 REPORTING_CLEANUP_MUTABLE_REPORTING_PATHS=(
@@ -98,7 +94,6 @@ REPORTING_CLEANUP_MUTABLE_CORE_PATHS=(
 	src/messaging/messaging.constants.ts
 	src/messaging/notification-delivery-event.ts
 	src/messaging/reporting-projection-contract.spec.ts
-	src/reporting-internal/reporting-projection-snapshot.service.ts
 	src/reporting-internal/reporting-schedule-authority.service.ts
 	src/scheduled-jobs/scheduled-jobs.service.spec.ts
 	src/scheduled-jobs/scheduled-jobs.types.ts
@@ -124,7 +119,6 @@ REPORTING_CLEANUP_MUTABLE_CONTROL_PLANE_PATHS=(
 REPORTING_CLEANUP_ADDED_CONTROL_PLANE_PATHS=(
 	scripts/generate-reporting-frontend-runtime-attestation.sh
 	scripts/run-reporting-restore-cutover-smoke.sh
-	scripts/run-reporting-route-cutover-smoke.sh
 	scripts/run-reporting-scheduler-cutover-smoke.sh
 )
 REPORTING_CLEANUP_TRUSTED_PATHS=(
@@ -3810,16 +3804,12 @@ const preservedPaths = [
   "apps/reporting/prisma/schema.prisma",
   "prisma/migrations/20260731010000_add_reporting_projection_producers",
   "src/messaging/reporting-admin-audit-event.ts",
-  "src/reporting-internal/reporting-auth-introspection.service.spec.ts",
-  "src/reporting-internal/reporting-auth-introspection.service.ts",
   "src/reporting-internal/reporting-internal-token.guard.spec.ts",
   "src/reporting-internal/reporting-internal-token.guard.ts",
   "src/reporting-internal/reporting-internal.constants.ts",
   "src/reporting-internal/reporting-internal.controller.spec.ts",
   "src/reporting-internal/reporting-internal.controller.ts",
   "src/reporting-internal/reporting-internal.module.ts",
-  "src/reporting-internal/reporting-producer-migration.spec.ts",
-  "src/reporting-internal/reporting-projection-snapshot.service.spec.ts",
   "src/reporting-internal/reporting-schedule-authority.service.spec.ts",
 ];
 const modifiedReportingPaths = [
@@ -3854,7 +3844,6 @@ const modifiedCorePaths = [
   "src/messaging/messaging.constants.ts",
   "src/messaging/notification-delivery-event.ts",
   "src/messaging/reporting-projection-contract.spec.ts",
-  "src/reporting-internal/reporting-projection-snapshot.service.ts",
   "src/reporting-internal/reporting-schedule-authority.service.ts",
   "src/scheduled-jobs/scheduled-jobs.service.spec.ts",
   "src/scheduled-jobs/scheduled-jobs.types.ts",
@@ -3880,7 +3869,6 @@ const modifiedControlPlanePaths = [
 const addedControlPlanePaths = [
   "scripts/generate-reporting-frontend-runtime-attestation.sh",
   "scripts/run-reporting-restore-cutover-smoke.sh",
-  "scripts/run-reporting-route-cutover-smoke.sh",
   "scripts/run-reporting-scheduler-cutover-smoke.sh",
 ];
 const removedQueues = [

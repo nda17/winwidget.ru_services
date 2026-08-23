@@ -9,6 +9,7 @@ import nodemailer, { type Transporter } from 'nodemailer';
 import { passwordEmail, verificationEmail } from './email-templates';
 
 const SMSAERO_ENDPOINT = 'https://gate.smsaero.ru/v2/sms/send';
+const SMSAERO_BALANCE_ENDPOINT = 'https://gate.smsaero.ru/v2/balance';
 const MAIL_FROM = '"winwidget.ru" <no-reply@winwidget.ru>';
 export const VERIFICATION_EMAIL_SUBJECT = 'Код подтверждения email';
 export const PASSWORD_EMAIL_SUBJECT = 'Временный пароль';
@@ -64,6 +65,32 @@ export class VerificationTransportService {
 
 	isSmsConfigured(): boolean {
 		return Boolean(this.smsEmail && this.smsApiKey);
+	}
+
+	async verifyEmailTransport(): Promise<void> {
+		if (!this.mailer) {
+			throw new Error('SMTP transport is not configured');
+		}
+		await this.mailer.verify();
+	}
+
+	async verifySmsTransport(): Promise<void> {
+		if (!this.smsEmail || !this.smsApiKey) {
+			throw new Error('SMS Aero transport is not configured');
+		}
+		const response = await fetch(SMSAERO_BALANCE_ENDPOINT, {
+			headers: {
+				Authorization: `Basic ${Buffer.from(
+					`${this.smsEmail}:${this.smsApiKey}`
+				).toString('base64')}`
+			},
+			signal: AbortSignal.timeout(3_000)
+		});
+		if (!response.ok) {
+			throw new Error(
+				`SMS Aero health request failed: HTTP ${response.status}`
+			);
+		}
 	}
 
 	async emailCode(email: string, code: string): Promise<void> {

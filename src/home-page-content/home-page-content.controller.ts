@@ -2,7 +2,6 @@ import { Auth } from '@/auth/decorators/auth.decorator';
 import { UpdateHomePageContentDto } from '@/home-page-content/dto/update-home-page-content.dto';
 import { HomePageContentService } from '@/home-page-content/home-page-content.service';
 import { Body, Controller, Get, HttpCode, Patch } from '@nestjs/common';
-import { Role } from '@prisma/client';
 
 @Controller('/home-page-content')
 export class HomePageContentController {
@@ -17,7 +16,7 @@ export class HomePageContentController {
 	}
 
 	@HttpCode(200)
-	@Auth(Role.ADMIN)
+	@Auth('ADMIN')
 	@Patch()
 	update(@Body() dto: UpdateHomePageContentDto) {
 		return this.homePageContentService.update(dto);

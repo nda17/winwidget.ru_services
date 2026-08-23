@@ -16,12 +16,6 @@ describe('SiteSettingsService Billing composition', () => {
 		bannerEnabled: false,
 		bannerText: '',
 		snowflakeEnabled: false,
-		recaptchaEnabled: true,
-		googleAuthEnabled: true,
-		yandexAuthEnabled: true,
-		githubAuthEnabled: true,
-		vkAuthEnabled: false,
-		telegramAuthEnabled: true,
 		updatedAt
 	});
 	const billingSettings = (

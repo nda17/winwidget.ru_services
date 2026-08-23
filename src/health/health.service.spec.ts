@@ -11,6 +11,7 @@ import type { NotificationDeliveryClientService } from '@/messaging/notification
 import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.service';
 import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
 import type { PrismaService } from '@/prisma.service';
+import type { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
 import type { ConfigService } from '@nestjs/config';
 
 const createOverview = () => ({
@@ -153,6 +154,28 @@ const createService = (
 	},
 	billing: Partial<BillingMessagingClientService> = {
 		getOverview: jest.fn().mockResolvedValue(createBillingOverview())
+	},
+	identity: Partial<IdentityInternalClient> = {
+		getProviderHealth: jest.fn().mockResolvedValue([
+			{
+				id: 'smtp',
+				title: 'Email SMTP',
+				status: 'ok',
+				message: 'Подключение работает'
+			},
+			{
+				id: 'smsaero',
+				title: 'SMS Aero',
+				status: 'ok',
+				message: 'Подключение работает'
+			},
+			{
+				id: 'recaptcha',
+				title: 'reCAPTCHA',
+				status: 'ok',
+				message: 'Ключ настроен'
+			}
+		])
 	}
 ) => {
 	const configService = { get: jest.fn() };
@@ -173,7 +196,8 @@ const createService = (
 		notificationDelivery as NotificationDeliveryClientService,
 		widgets as WidgetsDeliveryFailuresClientService,
 		billingState as BillingCoreStateService,
-		billing as BillingMessagingClientService
+		billing as BillingMessagingClientService,
+		identity as IdentityInternalClient
 	);
 	return { service, prisma, configService };
 };
@@ -195,6 +219,30 @@ describe('HealthService notification delivery monitoring', () => {
 			id: 'rabbitmq',
 			status: 'ok'
 		});
+	});
+
+	it('keeps three stable provider checks when Identity health is unavailable', async () => {
+		const { service } = createService(
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{
+				getProviderHealth: jest
+					.fn()
+					.mockRejectedValue(new Error('identity unavailable'))
+			}
+		);
+
+		const checks = await Promise.all(
+			await (service as any).getIdentityProviderChecks()
+		);
+		expect(checks).toEqual([
+			expect.objectContaining({ id: 'smtp', status: 'down' }),
+			expect.objectContaining({ id: 'smsaero', status: 'down' }),
+			expect.objectContaining({ id: 'recaptcha', status: 'down' })
+		]);
 	});
 
 	it('warns when a provider main queue loses its consumer', async () => {

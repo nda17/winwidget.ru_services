@@ -134,6 +134,10 @@ const identityEnvControlScript = readFileSync(
   "scripts/identity-production-env-control.sh",
   "utf8",
 );
+const deployProductionScript = readFileSync(
+  "scripts/deploy-production.sh",
+  "utf8",
+);
 const staticWorkflowLines = staticWorkflowCheckScript
   .split("\n")
   .map((line) => line.trim());
@@ -174,6 +178,22 @@ if (
 ) {
   throw new Error(
     "Identity env recovery behavior test must be required, syntax-checked, shellchecked, and run exactly once before verify",
+  );
+}
+if (
+  !deployProductionScript.includes(
+    'source "$server_root/scripts/identity-production-env-control.sh"',
+  ) ||
+  !deployProductionScript.includes(
+    'identity_env_node_validate "$ENV_FILE" <<\'NODE\'',
+  ) ||
+  /IDENTITY_JWKS_URL=.*\n[\s\S]{0,200}node -e/.test(deployProductionScript) ||
+  /identity_read_env_value "\$ENV_FILE" GATEWAY_ROUTES_JSON \|/.test(
+    deployProductionScript,
+  )
+) {
+  throw new Error(
+    "Full deployment must validate Identity routes with the pinned Docker-only Node runtime",
   );
 }
 const identityNodeRuntimeStart = identityEnvControlScript.indexOf(

@@ -1,6 +1,7 @@
 import {
 	Body,
 	Controller,
+	Get,
 	Headers,
 	HttpCode,
 	Post,
@@ -27,6 +28,7 @@ import {
 } from '../auth/auth.dto';
 import { IdentityInternalGuard, InternalServices } from './internal.guard';
 import { IdentityInternalService } from './internal.service';
+import { IdentityProviderHealthService } from '../health/identity-provider-health.service';
 
 export class CampaignContactsDto {
 	@Equals(1)
@@ -55,7 +57,10 @@ export class AuditSnapshotsDto {
 	})
 )
 export class IdentityInternalController {
-	constructor(private readonly internal: IdentityInternalService) {}
+	constructor(
+		private readonly internal: IdentityInternalService,
+		private readonly providerHealth: IdentityProviderHealthService
+	) {}
 
 	@Post('auth/introspect')
 	@HttpCode(200)
@@ -83,6 +88,13 @@ export class IdentityInternalController {
 	@InternalServices('core')
 	auditSnapshots(@Body() dto: AuditSnapshotsDto) {
 		return this.internal.auditSnapshots(dto.userIds);
+	}
+
+	@Get('core/admin-health')
+	@HttpCode(200)
+	@InternalServices('core')
+	adminHealth() {
+		return this.providerHealth.providerHealth();
 	}
 
 	@Post('campaigns/eligible-contacts')
