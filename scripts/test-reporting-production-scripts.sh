@@ -284,6 +284,11 @@ deploy_controller_file="$server_root/.github/scripts/stage-or-deploy-backend.sh"
 	echo 'Versioned production deploy controller is missing or unsafe.' >&2
 	exit 1
 }
+deploy_remote_controller_file="$server_root/.github/scripts/stage-or-deploy-backend-remote.sh"
+[[ -f "$deploy_remote_controller_file" && ! -L "$deploy_remote_controller_file" ]] || {
+	echo 'Versioned production remote deploy controller is missing or unsafe.' >&2
+	exit 1
+}
 package_file="$server_root/package.json"
 [[ -f "$package_file" && ! -L "$package_file" &&
 	"$(<"$package_file")" == *'"test:reporting-cutover-rehearsal": "bash scripts/test-reporting-cutover-rehearsal.sh"'* ]] || {
@@ -320,7 +325,7 @@ deployment_exact_line_count() {
 			if (line == needle) count += 1
 		}
 		END { print count + 0 }
-	' "$workflow_file" "$deploy_controller_file"
+	' "$workflow_file" "$deploy_controller_file" "$deploy_remote_controller_file"
 }
 
 lifecycle_checkout_preflight_job="$(
@@ -336,7 +341,7 @@ deploy_controller_checkout_line="$(
 deploy_controller_run_line="$(
 	grep -n -m1 -- 'run: bash .github/scripts/stage-or-deploy-backend.sh' "$workflow_file" | cut -d: -f1
 )"
-deploy_job="$deploy_job_header"$'\n'"$(sed 's/^/          /' "$deploy_controller_file")"
+deploy_job="$deploy_job_header"$'\n'"$(sed 's/^/          /' "$deploy_controller_file")"$'\n'"$(sed 's/^/          /' "$deploy_remote_controller_file")"
 
 [[
 	"$(workflow_exact_line_count 'lifecycle_checkout_preflight:')" == '1' &&
@@ -409,8 +414,8 @@ for retired_line in \
 	}
 done
 unset retired_line lifecycle_checkout_preflight_job verify_header deploy_job \
-	deploy_job_header deploy_controller_file deploy_controller_checkout_line \
-	deploy_controller_run_line
+	deploy_job_header deploy_controller_file deploy_remote_controller_file \
+	deploy_controller_checkout_line deploy_controller_run_line
 printf 'reporting_steady_state_workflow=passed\n'
 
 printf 'reporting_production_scripts=passed\n'
