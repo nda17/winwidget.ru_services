@@ -732,6 +732,27 @@ const deployJob = [
   deployJobHeader,
   indentedStageOrDeployBody,
 ].join("\n");
+if (
+  !stageOrDeployScript.includes(
+    'awk -v expected_revision="$EXPECTED_REVISION"',
+  ) ||
+  !stageOrDeployScript.includes(
+    '-v receipt_required="$AUTOMATIC_PROD_PUSH"',
+  ) ||
+  !stageOrDeployScript.includes(
+    '$0 == "Backend revision verified locally and publicly: " expected_revision',
+  ) ||
+  !stageOrDeployScript.includes(
+    'receipt_required == "true" && receipts != 1',
+  ) ||
+  !stageOrDeployScript.includes(
+    "Automatic backend deploy did not produce its exact completion receipt.",
+  )
+) {
+  throw new Error(
+    "Automatic backend deployment must require one exact post-readiness completion receipt",
+  );
+}
 const billingNodeBootstrapStart = deployJob.indexOf(
   "stage_billing_cleanup_revision_with_container_node() (",
 );

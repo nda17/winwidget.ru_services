@@ -1162,7 +1162,23 @@ case "$DEPLOY_TARGET" in
       WIDGETS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
       BILLING_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
       IDENTITY_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
-      bash scripts/deploy-production.sh
+      bash scripts/deploy-production.sh |
+      awk -v expected_revision="$EXPECTED_REVISION" \
+        -v receipt_required="$AUTOMATIC_PROD_PUSH" '
+          {
+            print
+            fflush()
+          }
+          $0 == "Backend revision verified locally and publicly: " expected_revision {
+            receipts += 1
+          }
+          END {
+            if (receipt_required == "true" && receipts != 1) {
+              print "Automatic backend deploy did not produce its exact completion receipt." > "/dev/stderr"
+              exit 74
+            }
+          }
+        '
     exit 0
     ;;
   maintenance)
