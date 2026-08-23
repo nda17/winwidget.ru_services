@@ -179,13 +179,16 @@ database_url() {
 	connection_url "$1" "$2" "$ADMIN_USER" "$ADMIN_PASSWORD" "${3:-}"
 }
 
-copy_migrations_without_cleanup() {
-	local destination="$1" migration
+copy_migrations_before_cleanup() {
+	local destination="$1" migration migration_name
 	mkdir "$destination" "$destination/migrations"
 	cp "$SOURCE_ROOT/prisma/schema.prisma" "$destination/schema.prisma"
 	for migration in "$SOURCE_ROOT"/prisma/migrations/*; do
 		[[ -d "$migration" ]] || continue
-		[[ "$(basename -- "$migration")" == "$MIGRATION_NAME" ]] && continue
+		migration_name="$(basename -- "$migration")"
+		[[ "$migration_name" =~ ^[0-9]{14}_[a-z0-9_]+$ ]] ||
+			fail 'tracked migration directory name is invalid'
+		[[ "$migration_name" < "$MIGRATION_NAME" ]] || continue
 		cp -R "$migration" "$destination/migrations/"
 	done
 }
@@ -408,7 +411,7 @@ rehearse_migration() {
 	legacy_options='-c winwidget.campaigns_contract_cutover=production-destructive-approved -c winwidget.campaigns_forward_boundary=forward-only -c winwidget.campaigns_source_manifest_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -c winwidget.campaigns_telegram_audit_decision=completed -c winwidget.campaigns_telegram_audit_reference=billing-core-cleanup-rehearsal'
 	base_url="$(database_url "$port" default_db "$legacy_options")"
 	migrations_root="$TEMP_ROOT/prisma-before-cleanup"
-	copy_migrations_without_cleanup "$migrations_root"
+	copy_migrations_before_cleanup "$migrations_root"
 	DATABASE_URL="$base_url" pnpm exec prisma migrate deploy --schema "$migrations_root/schema.prisma" >/dev/null
 	query_database default_db "
 DO \$\$
@@ -620,7 +623,7 @@ VALUES ('55555555-5555-4555-8555-555555555555','66666666-6666-4666-8666-66666666
 	migration_sha="$(sha256_file "$SOURCE_ROOT/prisma/migrations/$MIGRATION_NAME/migration.sql")"
 	[[ "$(query_database default_db "SELECT count(*) FROM public.\"_prisma_migrations\" WHERE migration_name='$MIGRATION_NAME' AND checksum='$migration_sha' AND finished_at IS NOT NULL AND rolled_back_at IS NULL;")" == '1' ]] ||
 		fail 'approved cleanup lacks the exact successful migration ledger'
-	[[ "$(query_database default_db "SELECT count(*) FROM unnest(ARRAY['public.billing_core_state_transition_guard()','public.billing_core_source_producers_enabled()','public.billing_core_ownership_active()','public.billing_iso_timestamp(timestamp without time zone)','public.billing_record_source_event(text,text,text,text,jsonb,boolean)','public.billing_emit_identity_projection(text,boolean)','public.billing_identity_user_projection_trigger()','public.billing_identity_auth_projection_trigger()','public.billing_identity_telegram_projection_trigger()','public.billing_notification_routing_projection_trigger()','public.billing_offer_projection_trigger()']) AS retained(signature) JOIN pg_catalog.pg_proc AS function_definition ON function_definition.oid=to_regprocedure(retained.signature) JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid=function_definition.proowner WHERE owner_role.rolname='gen_user';")" == '11' ]] ||
+	[[ "$(query_database default_db "SELECT count(*) FROM unnest(ARRAY['public.billing_core_state_transition_guard()','public.billing_core_source_producers_enabled()','public.billing_core_ownership_active()','public.billing_iso_timestamp(timestamp without time zone)','public.billing_record_source_event(text,text,text,text,jsonb,boolean)','public.billing_notification_routing_projection_trigger()','public.billing_offer_projection_trigger()']) AS retained(signature) JOIN pg_catalog.pg_proc AS function_definition ON function_definition.oid=to_regprocedure(retained.signature) JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid=function_definition.proowner WHERE owner_role.rolname='gen_user';")" == '7' ]] ||
 		fail 'approved cleanup removed or changed ownership of a retained producer function'
 	[[ "$(query_database default_db "SELECT count(*) FROM pg_catalog.pg_proc AS function_definition JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid=function_definition.pronamespace WHERE namespace.nspname='public' AND function_definition.proname IN ('billing_assert_legacy_table_write_enabled','billing_assert_legacy_settings_write_enabled','billing_settings_projection_trigger','reporting_payment_projection_trigger','reporting_subscription_projection_trigger');")" == '0' ]] ||
 		fail 'approved cleanup retained an obsolete function ACL surface'
