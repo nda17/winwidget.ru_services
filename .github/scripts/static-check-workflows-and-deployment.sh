@@ -734,23 +734,43 @@ const deployJob = [
 ].join("\n");
 if (
   !stageOrDeployScript.includes(
-    'awk -v expected_revision="$EXPECTED_REVISION"',
+    'awk -v expected_revision="$DEPLOY_REVISION"',
   ) ||
   !stageOrDeployScript.includes(
-    '-v receipt_required="$AUTOMATIC_PROD_PUSH"',
+    '-v automatic_prod_push="$AUTOMATIC_PROD_PUSH"',
+  ) ||
+  !stageOrDeployScript.includes(
+    '-v deploy_target="$DEPLOY_TARGET"',
   ) ||
   !stageOrDeployScript.includes(
     '$0 == "Backend revision verified locally and publicly: " expected_revision',
   ) ||
   !stageOrDeployScript.includes(
-    'receipt_required == "true" && receipts != 1',
+    'automatic_prod_push == "true" && deploy_target == "all" && receipts != 1',
   ) ||
   !stageOrDeployScript.includes(
     "Automatic backend deploy did not produce its exact completion receipt.",
+  ) ||
+  !stageOrDeployScript.includes("require_completion_receipt() {") ||
+  !stageOrDeployScript.includes(
+    "bash -s\" <<'EOF' | require_completion_receipt",
   )
 ) {
   throw new Error(
     "Automatic backend deployment must require one exact post-readiness completion receipt",
+  );
+}
+const localReceiptGate = stageOrDeployScript.indexOf(
+  'awk -v expected_revision="$DEPLOY_REVISION"',
+);
+const remoteScriptStart = stageOrDeployScript.indexOf("set -euo pipefail");
+if (
+  localReceiptGate < 0 ||
+  remoteScriptStart < 0 ||
+  localReceiptGate > remoteScriptStart
+) {
+  throw new Error(
+    "Automatic completion receipt must be enforced by the GitHub runner outside the SSH script",
   );
 }
 const billingNodeBootstrapStart = deployJob.indexOf(

@@ -108,6 +108,25 @@ elif [[ "$IDENTITY_CLEANUP_ACTION" != 'status' ||
   echo 'Identity cleanup inputs require the identity-cleanup target.' >&2
   exit 1
 fi
+require_completion_receipt() {
+  awk -v expected_revision="$DEPLOY_REVISION" \
+    -v automatic_prod_push="$AUTOMATIC_PROD_PUSH" \
+    -v deploy_target="$DEPLOY_TARGET" '
+      {
+        print
+        fflush()
+      }
+      $0 == "Backend revision verified locally and publicly: " expected_revision {
+        receipts += 1
+      }
+      END {
+        if (automatic_prod_push == "true" && deploy_target == "all" && receipts != 1) {
+          print "Automatic backend deploy did not produce its exact completion receipt." > "/dev/stderr"
+          exit 74
+        }
+      }
+    '
+}
 ssh -i "$deploy_ssh_key_path" \
   -F /dev/null \
   -o IdentitiesOnly=yes \
@@ -121,7 +140,7 @@ ssh -i "$deploy_ssh_key_path" \
   -o TCPKeepAlive=yes \
   -p "$SSH_PORT" \
   "$SSH_USER@$SSH_HOST" \
-  "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_ENV_EXPECTED_SHA256='$IDENTITY_ENV_EXPECTED_SHA256' IDENTITY_ENV_EXPORT_ID='$IDENTITY_ENV_EXPORT_ID' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
+  "APP_ROOT='$APP_ROOT' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' EXPECTED_REVISION='$DEPLOY_REVISION' DEPLOY_TARGET='$DEPLOY_TARGET' WIDGETS_CUTOVER_CONFIRMATION='$WIDGETS_CUTOVER_CONFIRMATION' BILLING_ACTION='$BILLING_ACTION' BILLING_CONFIRMATION='$BILLING_CONFIRMATION' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_ENV_EXPECTED_SHA256='$IDENTITY_ENV_EXPECTED_SHA256' IDENTITY_ENV_EXPORT_ID='$IDENTITY_ENV_EXPORT_ID' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF' | require_completion_receipt
 set -euo pipefail
 unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
   REPORTING_FIRST_ROLLOUT_STAGED_MARKER
@@ -1162,23 +1181,7 @@ case "$DEPLOY_TARGET" in
       WIDGETS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
       BILLING_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
       IDENTITY_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
-      bash scripts/deploy-production.sh |
-      awk -v expected_revision="$EXPECTED_REVISION" \
-        -v receipt_required="$AUTOMATIC_PROD_PUSH" '
-          {
-            print
-            fflush()
-          }
-          $0 == "Backend revision verified locally and publicly: " expected_revision {
-            receipts += 1
-          }
-          END {
-            if (receipt_required == "true" && receipts != 1) {
-              print "Automatic backend deploy did not produce its exact completion receipt." > "/dev/stderr"
-              exit 74
-            }
-          }
-        '
+      bash scripts/deploy-production.sh
     exit 0
     ;;
   maintenance)
