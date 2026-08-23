@@ -1978,6 +1978,9 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "BILLING_CORE_INTERNAL_BASE_URL",
         "BILLING_INTERNAL_TOKEN",
         "BILLING_INTERNAL_TIMEOUT_MS",
+        "IDENTITY_INTERNAL_BASE_URL",
+        "IDENTITY_BILLING_TOKEN",
+        "IDENTITY_INTERNAL_TIMEOUT_MS",
         "YOOKASSA_PRODUCTION_SHOP_ID",
         "YOOKASSA_PRODUCTION_SECRET_KEY",
         "PAYMENT_METHOD_ENCRYPTION_KEY",
@@ -2076,7 +2079,10 @@ docker compose --profile migration --profile notification-delivery-migration --p
       billingWorkerEnvironment.BILLING_CORE_INTERNAL_BASE_URL !==
         "http://127.0.0.1:4200" ||
       billingWorkerEnvironment.BILLING_INTERNAL_TIMEOUT_MS !==
-        process.env.BILLING_INTERNAL_TIMEOUT_MS
+        process.env.BILLING_INTERNAL_TIMEOUT_MS ||
+      billingWorkerEnvironment.IDENTITY_INTERNAL_BASE_URL !==
+        "http://127.0.0.1:4900" ||
+      billingWorkerEnvironment.IDENTITY_INTERNAL_TIMEOUT_MS !== "5000"
     ) {
       throw new Error(
         "Billing API/worker internal HTTP, proxy or CORS contract drifted",
@@ -2480,6 +2486,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
     ]);
     requireMutualToken("Billing to Identity", [
       billingApiEnvironment.IDENTITY_BILLING_TOKEN,
+      billingWorkerEnvironment.IDENTITY_BILLING_TOKEN,
       requireService("identity-api").environment
         ?.IDENTITY_BILLING_TOKEN,
     ]);
