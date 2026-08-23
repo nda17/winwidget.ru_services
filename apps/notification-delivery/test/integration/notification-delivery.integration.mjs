@@ -407,7 +407,8 @@ async function startService({ smtpPort, telegramPort, healthPort }) {
 	const runtimeEnv = {
 		...process.env,
 		NODE_ENV: 'production',
-		MODE: 'production',
+		// The production image is under test, but external providers are local mocks.
+		MODE: 'test',
 		APP_REVISION: 'notification-delivery-integration',
 		NOTIFICATION_DELIVERY_DATABASE_URL: databaseUrl,
 		NOTIFICATION_DELIVERY_INTERNAL_TOKEN: INTERNAL_TOKEN,
