@@ -692,7 +692,7 @@ NODE
 		winwidget.identity_backup_sha256 winwidget.identity_restore_evidence_sha256 \
 		winwidget.identity_queue_drain_evidence_sha256 \
 		winwidget.identity_stopped_writers_evidence_sha256 winwidget.identity_soak_evidence_sha256; do
-		rg -q --fixed-strings "$source" "$migration_file"
+		grep -Fq -- "$source" "$migration_file"
 	done
 	source="$(declare -f rehearse_migration seed_production_boundary \
 		identity_cleanup_source_state assert_rejected_unchanged \
@@ -872,4 +872,3 @@ case "${1:-}" in
 	exit 64
 	;;
 esac
-
