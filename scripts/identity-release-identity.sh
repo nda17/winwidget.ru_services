@@ -59,8 +59,9 @@ identity_release_compose() {
 	identity_release_validate_revision "$revision" || return 1
 	identity_release_validate_file "$env_file" || return 1
 	identity_release_validate_file "$compose_file" || return 1
-	local identity_image campaigns_image reporting_image widgets_image billing_image
+	local identity_image notification_delivery_image campaigns_image reporting_image widgets_image billing_image
 	identity_image="$(identity_release_image "$revision")" || return 1
+	notification_delivery_image="winwidget-notification-delivery:git-$revision"
 	campaigns_image="winwidget-campaigns:git-$revision"
 	reporting_image="winwidget-reporting:git-$revision"
 	widgets_image="winwidget-widgets:git-$revision"
@@ -70,6 +71,8 @@ identity_release_compose() {
 		APP_VERSION="git-$revision" \
 		MAINTENANCE_REVISION="$revision" \
 		DATABASE_RESTORE_REVISION="$revision" \
+		NOTIFICATION_DELIVERY_REVISION="$revision" \
+		NOTIFICATION_DELIVERY_IMAGE="$notification_delivery_image" \
 		CAMPAIGNS_REVISION="$revision" \
 		CAMPAIGNS_IMAGE="$campaigns_image" \
 		REPORTING_REVISION="$revision" \
@@ -96,6 +99,8 @@ identity_release_self_test() {
 	source="$(declare -f identity_release_compose identity_release_require_checkout)"
 	[[ "$source" == *'docker compose --env-file'* &&
 		"$source" == *'APP_VERSION="git-$revision"'* &&
+		"$source" == *'NOTIFICATION_DELIVERY_REVISION'* &&
+		"$source" == *'NOTIFICATION_DELIVERY_IMAGE'* &&
 		"$source" == *'CAMPAIGNS_REVISION'* &&
 		"$source" == *'REPORTING_IMAGE'* &&
 		"$source" == *'WIDGETS_IMAGE'* &&
