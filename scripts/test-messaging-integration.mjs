@@ -470,19 +470,20 @@ try {
 		await channel.bindQueue(
 			durabilityQueue,
 			'winwidget.events',
-			'ci.outbox.durability.v1'
+			'admin.audit.reporting.v1'
 		);
 		createdEventIds.push(durableEventId);
 		await prisma.outboxEvent.create({
 			data: {
 				id: durableEventId,
-				eventType: 'ci.outbox.durability.v1',
-				routingKey: 'ci.outbox.durability.v1',
+				messageId: durableEventId,
+				eventType: 'admin.audit.event.v1',
+				routingKey: 'admin.audit.reporting.v1',
 				payload: {
-					schemaVersion: 1,
-					eventType: 'ci.outbox.durability.v1',
+					...reportingAuditPayload,
 					eventId: durableEventId,
-					occurredAt: new Date().toISOString()
+					occurredAt: new Date().toISOString(),
+					correlationId: `ci:outbox-durability:${durableEventId}`
 				}
 			}
 		});
@@ -556,13 +557,14 @@ try {
 		await prisma.outboxEvent.create({
 			data: {
 				id: postRestartEventId,
-				eventType: 'ci.outbox.durability.v1',
-				routingKey: 'ci.outbox.durability.v1',
+				messageId: postRestartEventId,
+				eventType: 'admin.audit.event.v1',
+				routingKey: 'admin.audit.reporting.v1',
 				payload: {
-					schemaVersion: 1,
-					eventType: 'ci.outbox.durability.v1',
+					...reportingAuditPayload,
 					eventId: postRestartEventId,
-					occurredAt: new Date().toISOString()
+					occurredAt: new Date().toISOString(),
+					correlationId: `ci:outbox-durability:${postRestartEventId}`
 				}
 			}
 		});
