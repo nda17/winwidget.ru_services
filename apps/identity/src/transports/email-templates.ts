@@ -47,7 +47,6 @@ function layout(input: {
 }) {
 	const siteUrl =
 		process.env.RECAPTCHA_CLIENT_URL || 'https://winwidget.ru';
-	const apiUrl = process.env.API_PUBLIC_URL || 'https://api.winwidget.ru';
 	return createElement(
 		Html,
 		{ lang: 'ru' },
@@ -121,10 +120,7 @@ function layout(input: {
 												className: 'ww-brand-logo-cell'
 											},
 											createElement(Img, {
-												src: new URL(
-													'/widgets/email-logo.png',
-													apiUrl
-												).toString(),
+												src: 'cid:winwidget-identity-logo',
 												alt: 'WinWidget',
 												width: '52',
 												height: '52',

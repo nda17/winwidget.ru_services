@@ -22,7 +22,6 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json pnpm-lock.yaml tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY prisma ./prisma
 COPY src ./src
-COPY public/email ./public/email
 COPY apps/notification-delivery/prisma ./apps/notification-delivery/prisma
 COPY apps/campaigns/prisma ./apps/campaigns/prisma
 COPY apps/reporting/prisma ./apps/reporting/prisma
@@ -51,7 +50,6 @@ RUN addgroup -S -g 1001 nodejs \
 COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nestjs:nodejs /app/prisma ./prisma
-COPY --from=builder --chown=nestjs:nodejs /app/public/email ./public/email
 COPY --from=builder --chown=nestjs:nodejs /app/package.json ./package.json
 COPY --chown=nestjs:nodejs docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

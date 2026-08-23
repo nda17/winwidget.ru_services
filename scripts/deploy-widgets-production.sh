@@ -290,7 +290,7 @@ require("@prisma/widgets-client");
 for (const path of ["dist/src/app.module.js", "dist/src/outbox-publisher-main.js"]) if (fs.existsSync(path)) throw new Error(`Widgets image contains Core artifact: ${path}`);
 const expectedAssets = [
   "calculator-button.png", "calculator.js", "callback-button.png", "callback.js",
-  "email-logo.png", "gift-button.png", "helpers/libphonenumber-min.js",
+  "gift-button.png", "helpers/libphonenumber-min.js",
   "helpers/winwidget-phone.js", "online-consultant-button.png",
   "online-consultant.js", "quiz-button.png", "quiz.js", "stop-offer.js",
   "timer-button.png", "timer.js", "wheel.js",

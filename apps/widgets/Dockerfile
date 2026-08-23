@@ -20,7 +20,6 @@ FROM deps AS assets
 
 COPY scripts/build-widgets.mjs scripts/check-widgets.mjs ./scripts/
 COPY widgets-src ./widgets-src
-COPY public/email/logo.png ./public/email/logo.png
 
 RUN node scripts/build-widgets.mjs \
 	&& node scripts/check-widgets.mjs

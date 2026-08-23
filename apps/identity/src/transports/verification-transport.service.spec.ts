@@ -51,7 +51,14 @@ describe('VerificationTransportService frozen provider contract', () => {
 			expect.objectContaining({
 				to: 'user@example.com',
 				subject: VERIFICATION_EMAIL_SUBJECT,
-				html: expect.stringContaining('123456')
+				html: expect.stringContaining('123456'),
+				attachments: [
+					expect.objectContaining({
+						path: expect.stringMatching(/assets\/email-logo\.png$/),
+						cid: 'winwidget-identity-logo',
+						contentDisposition: 'inline'
+					})
+				]
 			})
 		);
 		expect(sendMail).toHaveBeenNthCalledWith(

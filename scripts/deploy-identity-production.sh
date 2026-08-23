@@ -53,6 +53,9 @@ identity_deploy_verify_image() {
 		"$revision" == "$EXPECTED_REVISION" && -n "$user" &&
 		"$user" != 'root' && "$user" != '0' ]] ||
 		identity_deploy_fail 'Identity image identity, revision, or runtime user is unsafe.' || return 1
+	docker run --rm --network none --entrypoint node "$image" \
+		-e 'require("node:fs").accessSync("assets/email-logo.png")' ||
+		identity_deploy_fail 'Identity image is missing its service-owned email logo.' || return 1
 	printf '%s\n' "$image_id"
 }
 

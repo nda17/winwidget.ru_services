@@ -334,7 +334,7 @@ for (const path of ["dist/src/main.js", "dist/src/cutover-main.js", "prisma/sche
 require("@prisma/widgets-client");
 const forbidden = ["dist/src/app.module.js", "dist/src/widget/widget.service.js", "dist/src/outbox-publisher-main.js", "public/email"];
 for (const path of forbidden) if (fs.existsSync(path)) throw new Error(`Widgets image contains Core artifact: ${path}`);
-const expected = ["calculator-button.png","calculator.js","callback-button.png","callback.js","email-logo.png","gift-button.png","helpers/libphonenumber-min.js","helpers/winwidget-phone.js","online-consultant-button.png","online-consultant.js","quiz-button.png","quiz.js","stop-offer.js","timer-button.png","timer.js","wheel.js"];
+const expected = ["calculator-button.png","calculator.js","callback-button.png","callback.js","gift-button.png","helpers/libphonenumber-min.js","helpers/winwidget-phone.js","online-consultant-button.png","online-consultant.js","quiz-button.png","quiz.js","stop-offer.js","timer-button.png","timer.js","wheel.js"];
 const walk = directory => fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
   const path = `${directory}/${entry.name}`;
   return entry.isDirectory() ? walk(path) : [path.slice("public/widgets/".length)];

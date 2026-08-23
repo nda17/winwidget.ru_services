@@ -3843,6 +3843,7 @@ const fs = require("node:fs");
 for (const required of [
 	"dist/src/main.js",
 	"prisma/schema.prisma",
+	"assets/email-logo.png",
 ]) {
 	fs.accessSync(required);
 }
@@ -3936,7 +3937,7 @@ for (const forbidden of [
 
 const expectedAssets = [
 	"calculator-button.png", "calculator.js", "callback-button.png", "callback.js",
-	"email-logo.png", "gift-button.png", "helpers/libphonenumber-min.js",
+	"gift-button.png", "helpers/libphonenumber-min.js",
 	"helpers/winwidget-phone.js", "online-consultant-button.png",
 	"online-consultant.js", "quiz-button.png", "quiz.js", "stop-offer.js",
 	"timer-button.png", "timer.js", "wheel.js",

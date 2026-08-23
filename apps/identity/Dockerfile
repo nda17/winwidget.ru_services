@@ -34,6 +34,7 @@ COPY --from=build --chown=identity:identity /app/dist ./dist
 COPY --from=build --chown=identity:identity /app/node_modules ./node_modules
 COPY --from=build --chown=identity:identity /app/package.json ./package.json
 COPY --from=build --chown=identity:identity /app/prisma ./prisma
+COPY --from=build --chown=identity:identity /app/assets ./assets
 
 USER identity
 EXPOSE 4900 4901 4902

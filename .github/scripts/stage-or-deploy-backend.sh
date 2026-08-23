@@ -54,13 +54,14 @@ if [[ "$DEPLOY_TARGET" == 'identity' ]]; then
     rollback-env-bootstrap:'ROLLBACK INCOMPLETE IDENTITY ENV BOOTSTRAP') ;;
     cutover:'CUTOVER IDENTITY OWNERSHIP'|forward-recovery:'CUTOVER IDENTITY OWNERSHIP') ;;
     abort-prepare:'ABORT IDENTITY PREPARE') ;;
+    rotate-jwt:'ROTATE IDENTITY JWT SIGNING KEY'|rotate-jwt-forward-recovery:'ROTATE IDENTITY JWT SIGNING KEY') ;;
     *)
       echo 'Invalid Identity action or confirmation.' >&2
       exit 1
       ;;
   esac
   case "$IDENTITY_ACTION" in
-    prepare|rollback-env-bootstrap|cutover|forward-recovery)
+    prepare|rollback-env-bootstrap|cutover|forward-recovery|rotate-jwt|rotate-jwt-forward-recovery)
       [[ "$IDENTITY_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
         echo 'Identity mutation requires the exact local canonical backend env SHA-256.' >&2
         exit 1
@@ -70,7 +71,7 @@ if [[ "$DEPLOY_TARGET" == 'identity' ]]; then
       [[ -z "$IDENTITY_ENV_EXPECTED_SHA256" ]] || exit 1
       ;;
   esac
-  if [[ "$IDENTITY_ACTION" =~ ^(recover-candidate-env|prepare)$ ]]; then
+  if [[ "$IDENTITY_ACTION" =~ ^(recover-candidate-env|prepare|rotate-jwt|rotate-jwt-forward-recovery)$ ]]; then
     [[ "$IDENTITY_ENV_EXPORT_ID" =~ ^[0-9]{1,20}-[0-9]{1,10}$ ]] || {
       echo 'Identity env export requires a safe export id.' >&2
       exit 1
@@ -1330,7 +1331,7 @@ case "$DEPLOY_TARGET" in
       echo 'Identity lifecycle actions are manual-only.' >&2
       exit 1
     }
-    if [[ "$IDENTITY_ACTION" =~ ^(prepare|cutover|forward-recovery)$ ]]; then
+    if [[ "$IDENTITY_ACTION" =~ ^(prepare|cutover|forward-recovery|rotate-jwt)$ ]]; then
       production_env="$APP_ROOT/deploy/backend/.env.production"
       [[ -f "$production_env" && ! -L "$production_env" &&
         "$(stat -c '%u:%g:%a' "$production_env")" == '0:0:600' &&
@@ -1407,6 +1408,22 @@ case "$DEPLOY_TARGET" in
         APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
           IDENTITY_ABORT_CONFIRMATION="$IDENTITY_CONFIRMATION" \
           bash scripts/identity-database-lifecycle.sh --abort-prepare
+        ;;
+      rotate-jwt)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          IDENTITY_ENV_EXPECTED_SHA256="$IDENTITY_ENV_EXPECTED_SHA256" \
+          IDENTITY_JWT_ROTATION_CONFIRMATION="$IDENTITY_CONFIRMATION" \
+          IDENTITY_ENV_EXPORT_CERTIFICATE_FILE="$APP_ROOT/deploy/backend/.identity-env-export-certificate-$IDENTITY_ENV_EXPORT_ID.pem" \
+          IDENTITY_ENV_EXPORT_FILE="$APP_ROOT/deploy/backend/.identity-production-env-$IDENTITY_ENV_EXPORT_ID.p7m" \
+          bash scripts/rotate-identity-jwt-production.sh --rotate
+        ;;
+      rotate-jwt-forward-recovery)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          IDENTITY_ENV_EXPECTED_SHA256="$IDENTITY_ENV_EXPECTED_SHA256" \
+          IDENTITY_JWT_ROTATION_CONFIRMATION="$IDENTITY_CONFIRMATION" \
+          IDENTITY_ENV_EXPORT_CERTIFICATE_FILE="$APP_ROOT/deploy/backend/.identity-env-export-certificate-$IDENTITY_ENV_EXPORT_ID.pem" \
+          IDENTITY_ENV_EXPORT_FILE="$APP_ROOT/deploy/backend/.identity-production-env-$IDENTITY_ENV_EXPORT_ID.p7m" \
+          bash scripts/rotate-identity-jwt-production.sh --forward-recovery
         ;;
     esac
     ;;

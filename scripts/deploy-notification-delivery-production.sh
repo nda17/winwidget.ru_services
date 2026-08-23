@@ -43,6 +43,7 @@ const fs = require("node:fs");
 for (const required of [
 	"dist/src/main.js",
 	"prisma/schema.prisma",
+	"assets/email-logo.png",
 ]) {
 	fs.accessSync(required);
 }

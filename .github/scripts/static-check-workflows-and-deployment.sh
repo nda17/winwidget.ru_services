@@ -56,6 +56,7 @@ docker run --rm \
   scripts/identity-cutover-production.sh \
   scripts/identity-backup-restore-rehearsal.sh \
   scripts/cleanup-identity-core-source-production.sh \
+  scripts/rotate-identity-jwt-production.sh \
   database-restore-entrypoint.sh
 docker run --rm \
   --network none \
@@ -134,6 +135,10 @@ const identityEnvControlScript = readFileSync(
   "scripts/identity-production-env-control.sh",
   "utf8",
 );
+const identityJwtRotationScript = readFileSync(
+  "scripts/rotate-identity-jwt-production.sh",
+  "utf8",
+);
 const deployProductionScript = readFileSync(
   "scripts/deploy-production.sh",
   "utf8",
@@ -195,6 +200,58 @@ if (
   throw new Error(
     "Full deployment must validate Identity routes with the pinned Docker-only Node runtime",
   );
+}
+for (const requiredIdentityRotationContract of [
+  "readonly identity_rotation_confirmation='ROTATE IDENTITY JWT SIGNING KEY'",
+  "identity_rotation_write_current_marker_phase forward-only",
+  "identity_rotation_write_current_marker_phase complete",
+  "generateKeyPairSync('rsa', { modulusLength: 3072",
+  "JSON.stringify({ keys: [publicJwk] })",
+  'mv -f -- "$identity_rotation_candidate" "$ENV_FILE"',
+  "acquire_production_deploy_lock 'Identity JWT signing-key rotation'",
+  "up -d --no-deps --no-build --force-recreate identity-api",
+  "up -d --no-deps --no-build --force-recreate api-gateway",
+  "--max-filesize 65536",
+  "{{.Config.Image}}",
+  '"winwidget-identity:git-$EXPECTED_REVISION" identity winwidget-identity',
+  '"winwidget-api-gateway:git-$EXPECTED_REVISION" node',
+  '-H "@$identity_rotation_new_header"',
+  '-H "@$identity_rotation_old_header"',
+  "identity_rotation_archive_complete_marker",
+  "--rotate) identity_rotation_run",
+  "--forward-recovery) identity_rotation_forward_recovery",
+]) {
+  if (!identityJwtRotationScript.includes(requiredIdentityRotationContract)) {
+    throw new Error(
+      `Identity JWT rotation contract is missing: ${requiredIdentityRotationContract}`,
+    );
+  }
+}
+for (const forbiddenIdentityRotationContract of [
+  "set -x",
+  "JWT_ACCESS_PRIVATE_KEY_BASE64=%s",
+  "IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64=%s",
+  "--env-file \"$ENV_FILE\" --entrypoint node",
+]) {
+  if (identityJwtRotationScript.includes(forbiddenIdentityRotationContract)) {
+    throw new Error(
+      `Identity JWT rotation exposes or broadly injects signing material: ${forbiddenIdentityRotationContract}`,
+    );
+  }
+}
+for (const requiredIdentityRotationWorkflowContract of [
+  "          - rotate-jwt\n",
+  "          - rotate-jwt-forward-recovery\n",
+  "rotate-jwt:'ROTATE IDENTITY JWT SIGNING KEY'|rotate-jwt-forward-recovery:'ROTATE IDENTITY JWT SIGNING KEY'",
+  "bash scripts/rotate-identity-jwt-production.sh --rotate",
+  "bash scripts/rotate-identity-jwt-production.sh --forward-recovery",
+]) {
+  if (!workflow.includes(requiredIdentityRotationWorkflowContract) &&
+      !stageOrDeployScript.includes(requiredIdentityRotationWorkflowContract)) {
+    throw new Error(
+      `Identity JWT rotation workflow contract is missing: ${requiredIdentityRotationWorkflowContract}`,
+    );
+  }
 }
 const identityNodeRuntimeStart = identityEnvControlScript.indexOf(
   "\nidentity_env_host_node_available() {\n",

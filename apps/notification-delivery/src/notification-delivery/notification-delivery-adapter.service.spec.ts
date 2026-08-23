@@ -1,6 +1,7 @@
 import { NotificationDeliveryAdapterService } from './notification-delivery-adapter.service';
 import LeadNotificationEmail from '../../emails/lead-notification.email';
-import type { EmailService } from '../email/email.service';
+import { EmailService } from '../email/email.service';
+import type { MailerService } from '@nestjs-modules/mailer';
 import type { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import type { TelegramInfoTransportService } from '../telegram/telegram-info-transport.service';
 import { render } from '@react-email/render';
@@ -119,8 +120,35 @@ describe('NotificationDeliveryAdapterService', () => {
 
 		expect(wheelHtml).toContain('Клиент выиграл');
 		expect(wheelHtml).toContain('Скидку 10%');
+		expect(wheelHtml).toContain('src="cid:winwidget-notification-logo"');
+		expect(wheelHtml).not.toContain('/widgets/email-logo.png');
 		expect(wheelHtml).not.toContain('Выигранный приз');
 		expect(fallbackHtml).toContain('Выигранный приз');
+	});
+
+	it('attaches the Notification Delivery owned logo inline', async () => {
+		const sendMail = jest.fn().mockResolvedValue(undefined);
+		const ownedEmail = new EmailService({
+			sendMail
+		} as unknown as MailerService);
+
+		await ownedEmail.sendEmail(
+			'owner@example.com',
+			'Subject',
+			'<p>Body</p>'
+		);
+
+		expect(sendMail).toHaveBeenCalledWith(
+			expect.objectContaining({
+				attachments: [
+					expect.objectContaining({
+						path: expect.stringMatching(/assets\/email-logo\.png$/),
+						cid: 'winwidget-notification-logo',
+						contentDisposition: 'inline'
+					})
+				]
+			})
+		);
 	});
 
 	it('delivers a lead Telegram notification using the inline chat id', async () => {

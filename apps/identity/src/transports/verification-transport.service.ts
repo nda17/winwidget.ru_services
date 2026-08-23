@@ -6,11 +6,14 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { render } from '@react-email/render';
 import nodemailer, { type Transporter } from 'nodemailer';
+import { join } from 'node:path';
 import { passwordEmail, verificationEmail } from './email-templates';
 
 const SMSAERO_ENDPOINT = 'https://gate.smsaero.ru/v2/sms/send';
 const SMSAERO_BALANCE_ENDPOINT = 'https://gate.smsaero.ru/v2/balance';
 const MAIL_FROM = '"winwidget.ru" <no-reply@winwidget.ru>';
+const EMAIL_LOGO_CID = 'winwidget-identity-logo';
+const EMAIL_LOGO_PATH = join(process.cwd(), 'assets', 'email-logo.png');
 export const VERIFICATION_EMAIL_SUBJECT = 'Код подтверждения email';
 export const PASSWORD_EMAIL_SUBJECT = 'Временный пароль';
 
@@ -127,7 +130,20 @@ export class VerificationTransportService {
 				'Email verification transport is not configured'
 			);
 		}
-		await this.mailer.sendMail({ from: MAIL_FROM, to, subject, html });
+		await this.mailer.sendMail({
+			from: MAIL_FROM,
+			to,
+			subject,
+			html,
+			attachments: [
+				{
+					filename: 'winwidget-logo.png',
+					path: EMAIL_LOGO_PATH,
+					cid: EMAIL_LOGO_CID,
+					contentDisposition: 'inline'
+				}
+			]
+		});
 	}
 
 	private async sendSms(to: string, text: string): Promise<void> {

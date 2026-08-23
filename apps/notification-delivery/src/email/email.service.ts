@@ -6,6 +6,10 @@ import SubscriptionExpiryReminderEmail from '../../emails/subscription-expiry-re
 import { MailerService } from '@nestjs-modules/mailer';
 import { Injectable } from '@nestjs/common';
 import { render } from '@react-email/render';
+import { join } from 'node:path';
+
+const EMAIL_LOGO_CID = 'winwidget-notification-logo';
+const EMAIL_LOGO_PATH = join(process.cwd(), 'assets', 'email-logo.png');
 
 interface LeadNotificationPayload {
 	widgetName: string;
@@ -47,6 +51,14 @@ export class EmailService {
 			to,
 			subject,
 			html,
+			attachments: [
+				{
+					filename: 'winwidget-logo.png',
+					path: EMAIL_LOGO_PATH,
+					cid: EMAIL_LOGO_CID,
+					contentDisposition: 'inline'
+				}
+			],
 			...options
 		});
 	}

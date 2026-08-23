@@ -21,6 +21,7 @@ FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json pnpm-lock.yaml tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY prisma ./prisma
+COPY assets ./assets
 COPY emails ./emails
 COPY src ./src
 
@@ -42,6 +43,7 @@ LABEL org.opencontainers.image.revision=${APP_REVISION}
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/dist ./dist
 COPY --from=builder --chown=node:node /app/prisma ./prisma
+COPY --from=builder --chown=node:node /app/assets ./assets
 COPY --from=builder --chown=node:node /app/package.json ./package.json
 
 USER node

@@ -31,6 +31,8 @@ describe('Identity verification email parity', () => {
 		expect(html).toContain('Код действует 10 минут.');
 		expect(html).toContain('Письмо отправлено автоматически сервисом');
 		expect(html).toContain('https://winwidget.ru');
+		expect(html).toContain('src="cid:winwidget-identity-logo"');
+		expect(html).not.toContain('/widgets/email-logo.png');
 	});
 
 	it('renders the frozen password action and subject without dropping mobile classes', () => {
