@@ -1129,28 +1129,28 @@ if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
     echo "Resolve the pinned Campaigns lifecycle guard from the production runbook before deploying $EXPECTED_REVISION."
-    exit 0
+    exit 1
   fi
   if ! guard_reporting_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: Reporting first-rollout preparation is pinned to $current_revision."
     echo "Resolve the pinned Reporting lifecycle guard before deploying another revision."
-    exit 0
+    exit 1
   fi
   if ! guard_widgets_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the active Widgets ownership guard rejects $EXPECTED_REVISION."
-    exit 0
+    exit 1
   fi
   if ! guard_billing_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the active Billing ownership guard rejects $EXPECTED_REVISION."
-    exit 0
+    exit 1
   fi
   if ! guard_identity_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the active Identity ownership guard rejects $EXPECTED_REVISION."
-    exit 0
+    exit 1
   fi
 fi
 case "$DEPLOY_TARGET" in

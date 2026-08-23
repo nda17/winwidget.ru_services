@@ -1084,7 +1084,7 @@ const billingCandidateGuard = automaticDefer.indexOf(
   'if ! guard_billing_checkout_before_pull \\\n              "$EXPECTED_REVISION"',
 );
 const billingDeferredExit = automaticDefer.indexOf(
-  "exit 0",
+  "exit 1",
   billingCandidateGuard,
 );
 if (
@@ -1092,12 +1092,14 @@ if (
   automaticDeferEnd <= automaticDeferStart ||
   billingCandidateGuard < 0 ||
   billingDeferredExit <= billingCandidateGuard ||
+  automaticDefer.includes("exit 0") ||
+  (automaticDefer.match(/exit 1/g) || []).length !== 5 ||
   automaticDefer.includes("git fetch origin prod") ||
   automaticDefer.includes("git checkout prod") ||
   automaticDefer.includes("retarget_billing_cleanup_revision")
 ) {
   throw new Error(
-    "Automatic SHA C push must defer before fetch, checkout, or Billing cleanup retarget",
+    "Automatic SHA C push must fail when deferred before fetch, checkout, or Billing cleanup retarget",
   );
 }
 if (
