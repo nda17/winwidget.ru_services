@@ -1269,6 +1269,15 @@ process.stdin.on("end", () => {
 '
 }
 
+identity_cleanup_core_container_hostname() {
+	[[ $# -eq 1 ]] || return 1
+	local container_id hostname
+	container_id="$(identity_cleanup_core_container_id "$1")" || return 1
+	hostname="$(docker inspect --format '{{.Config.Hostname}}' "$container_id")" || return 1
+	[[ "$hostname" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || return 1
+	printf '%s' "$hostname"
+}
+
 identity_cleanup_verify_started_core_containers() {
 	[[ $# -eq 1 && "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || return 1
 	local started_after="$1" service container_id expected_image container_image
@@ -1316,12 +1325,9 @@ identity_cleanup_verify_started_core_heartbeats() {
 	PGURL="$(identity_read_env_value "$ENV_FILE" DATABASE_MIGRATION_URL_PRODUCTION)" || return 1
 	PGURL="$(identity_cutover_psql_url "$PGURL")" || return 1
 	STARTED_AT="$1"
-	OUTBOX_HOST="$(identity_cleanup_core_container_id outbox-publisher)" || return 1
-	INTEGRATION_HOST="$(identity_cleanup_core_container_id integration-worker)" || return 1
-	MAINTENANCE_HOST="$(identity_cleanup_core_container_id maintenance-worker)" || return 1
-	OUTBOX_HOST="${OUTBOX_HOST:0:12}"
-	INTEGRATION_HOST="${INTEGRATION_HOST:0:12}"
-	MAINTENANCE_HOST="${MAINTENANCE_HOST:0:12}"
+	OUTBOX_HOST="$(identity_cleanup_core_container_hostname outbox-publisher)" || return 1
+	INTEGRATION_HOST="$(identity_cleanup_core_container_hostname integration-worker)" || return 1
+	MAINTENANCE_HOST="$(identity_cleanup_core_container_hostname maintenance-worker)" || return 1
 	core_postgres_image="$CORE_POSTGRES_IMAGE"
 	export PGURL STARTED_AT OUTBOX_HOST INTEGRATION_HOST MAINTENANCE_HOST
 	result="$(docker run --rm -i --network host \
@@ -1354,11 +1360,11 @@ SQL
 }
 
 identity_cleanup_verify_started_core_rabbitmq() {
-	local core_image expected_kinds integration_queues integration_container_id
+	local core_image expected_kinds integration_queues integration_container_hostname
 	core_image="winwidget-api:git-$EXPECTED_REVISION"
 	expected_kinds="$(identity_read_env_value "$ENV_FILE" INTEGRATION_WORKER_KINDS)" || return 1
 	[[ -n "$expected_kinds" ]] || return 1
-	integration_container_id="$(identity_cleanup_core_container_id integration-worker)" || return 1
+	integration_container_hostname="$(identity_cleanup_core_container_hostname integration-worker)" || return 1
 	integration_queues="$(docker run --rm --network none \
 		-e "EXPECTED_INTEGRATION_KINDS=$expected_kinds" --entrypoint node "$core_image" -e '
 const { MESSAGING_QUEUE_NAMES, MONOLITH_INTEGRATION_KINDS } = require("./dist/src/messaging/messaging.constants.js");
@@ -1370,7 +1376,7 @@ if (queues.some(queue => typeof queue !== "string" || !queue) || new Set(queues)
 process.stdout.write(JSON.stringify(queues));
 ')" || return 1
 	INTEGRATION_QUEUES_JSON="$integration_queues" \
-		INTEGRATION_CONTAINER_HOST="${integration_container_id:0:12}" REVISION="$EXPECTED_REVISION" \
+		INTEGRATION_CONTAINER_HOST="$integration_container_hostname" REVISION="$EXPECTED_REVISION" \
 		docker run --rm --network host --env-file "$ENV_FILE" \
 		-e INTEGRATION_QUEUES_JSON -e INTEGRATION_CONTAINER_HOST -e REVISION \
 		--entrypoint node "$core_image" -e '
@@ -1398,7 +1404,7 @@ const run = async () => {
   const revision = process.env.REVISION;
   const hostname = process.env.INTEGRATION_CONTAINER_HOST;
   if (vhost !== "winwidget" || !adminUser || !adminPassword || !/^[0-9a-f]{40}$/.test(revision || "") ||
-      !/^[0-9a-f]{12}$/.test(hostname || "")) throw new ReadinessError("Core RabbitMQ readiness inputs are invalid");
+      !/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(hostname || "")) throw new ReadinessError("Core RabbitMQ readiness inputs are invalid");
   const authorization = `Basic ${Buffer.from(`${adminUser}:${adminPassword}`).toString("base64")}`;
   const request = async path => {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -1515,7 +1521,7 @@ identity_cleanup_start_core() {
 			identity_cleanup_fail "Identity API lost required Info webhook setting $key" || return 1
 	done
 	for key in JWT_ACCESS_PRIVATE_KEY_BASE64 JWT_ACCESS_JWKS_BASE64 JWT_ACCESS_ACTIVE_KID; do
-		! awk -F= -v key="$key" '$1 == key { found += 1 } END { exit(found == 0 ? 0 : 1) }' "$ENV_FILE" ||
+		awk -F= -v key="$key" '$1 == key { found += 1 } END { exit(found == 0 ? 0 : 1) }' "$ENV_FILE" ||
 			identity_cleanup_fail "legacy Core signing key remains in backend production env: $key" || return 1
 	done
 }
@@ -1843,6 +1849,7 @@ NODE
 		identity_cleanup_capture_stopped_writers_evidence identity_cleanup_require_bound_evidence \
 		identity_cleanup_build_migration_url identity_cleanup_remove_core_signing_env \
 		identity_cleanup_core_container_id identity_cleanup_core_service_image \
+		identity_cleanup_core_container_hostname \
 		identity_cleanup_verify_started_core_containers \
 		identity_cleanup_verify_started_core_heartbeats \
 		identity_cleanup_verify_started_core_rabbitmq identity_cleanup_wait_started_core_ready \
@@ -1923,6 +1930,7 @@ NODE
 		"$source" == *'api integration-worker outbox-publisher maintenance-worker database-restore-worker'* &&
 		"$source" == *'.State.Health'* && "$source" == *'.RestartCount'* &&
 		"$source" == *'org.opencontainers.image.revision'* &&
+		"$source" == *'.Config.Hostname'* &&
 		"$source" == *'messaging_heartbeats'* && "$source" == *"metadata->>'hostname'"* &&
 		"$source" == *'consumer_details'* && "$source" == *'consumer_tag'* &&
 		"$source" == *'winwidget-integration-worker'* &&

@@ -90,6 +90,8 @@ x-api-gateway-env: &api-gateway-env
 
 x-integration-worker-env: &integration-worker-env
   <<: *runtime-env
+  IDENTITY_CORE_TOKEN: ${IDENTITY_CORE_TOKEN:?IDENTITY_CORE_TOKEN is required}
+  CORE_IDENTITY_TOKEN: ${CORE_IDENTITY_TOKEN:?CORE_IDENTITY_TOKEN is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   RABBITMQ_URL: ${RABBITMQ_INTEGRATION_WORKER_URL}
   RABBITMQ_CONNECTION_NAME: winwidget-integration-worker
