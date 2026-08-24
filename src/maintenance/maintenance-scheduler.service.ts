@@ -103,6 +103,11 @@ export class MaintenanceSchedulerService
 						`Daily Platform database backup scheduled period=${period.key} jobId=${backups.platform.job.id}`
 					);
 				}
+				if (backups?.support.created) {
+					this.logger.log(
+						`Daily Support database backup scheduled period=${period.key} jobId=${backups.support.job.id}`
+					);
+				}
 			}
 		} catch (error) {
 			this.logger.error(

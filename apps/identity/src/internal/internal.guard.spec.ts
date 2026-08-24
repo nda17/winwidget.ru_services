@@ -77,6 +77,14 @@ describe('IdentityInternalGuard', () => {
 		).toThrow(ForbiddenException);
 	});
 
+	it('does not let the Support credential escape its endpoint scope', () => {
+		expect(() =>
+			guard(['core']).canActivate(
+				context('support', credential('support'))
+			)
+		).toThrow(ForbiddenException);
+	});
+
 	it('rejects non-loopback callers before token comparison', () => {
 		expect(() =>
 			guard(['core']).canActivate(

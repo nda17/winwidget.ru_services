@@ -1365,4 +1365,74 @@ describe('messaging event contract', () => {
 			})
 		).toThrow('payload.action is invalid');
 	});
+
+	it('accepts the exact Support admin-audit contract and dedicated route', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-24T12:00:00.000Z',
+			correlationId: 'request:support-settings-42',
+			actorId: 'admin-user-id',
+			section: 'SUPPORT',
+			action: 'SUPPORT_ROUTING_SETTINGS_UPDATE',
+			description: 'Support routing settings updated',
+			entity: {
+				type: 'support_routing_settings',
+				id: 'singleton',
+				label: 'Support_bot',
+				targetUserId: null
+			},
+			metadata: {
+				adminChatIdConfigured: true,
+				supportThreadIdConfigured: true,
+				aggregateVersion: '2',
+				actorRole: 'DEV',
+				requestIp: null,
+				requestUserAgent: 'jest'
+			}
+		};
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.support.v1',
+				messageId: MESSAGE_ID,
+				kind: 'support-admin-audit'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects Support audit on another service queue', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-24T12:00:00.000Z',
+			correlationId: 'request:support-close-42',
+			actorId: 'admin-user-id',
+			section: 'SUPPORT',
+			action: 'SUPPORT_DELIVERY_CLOSE',
+			description: 'Support delivery closed',
+			entity: {
+				type: 'support_delivery_failure',
+				id: MESSAGE_ID,
+				label: null,
+				targetUserId: null
+			},
+			metadata: {
+				eventId: MESSAGE_ID,
+				actorRole: 'DEV',
+				requestIp: null,
+				requestUserAgent: null
+			}
+		};
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.platform.v1',
+				messageId: MESSAGE_ID,
+				kind: 'platform-admin-audit'
+			})
+		).toThrow('cannot be consumed by platform-admin-audit');
+	});
 });

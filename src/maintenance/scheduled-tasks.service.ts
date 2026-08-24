@@ -14,6 +14,7 @@ import {
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
 	PLATFORM_DATABASE_BACKUP_DELAY_MINUTES,
 	REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
+	SUPPORT_DATABASE_BACKUP_DELAY_MINUTES,
 	WIDGETS_DATABASE_BACKUP_DELAY_MINUTES
 } from '@/maintenance/database-backup.types';
 import {
@@ -188,6 +189,10 @@ export class ScheduledTasksService {
 			created: boolean;
 			job: ScheduledJobRunView;
 		};
+		support: {
+			created: boolean;
+			job: ScheduledJobRunView;
+		};
 	} | null> {
 		const settings = await this.getSettings();
 		if (!settings.databaseBackupEnabled) return null;
@@ -228,6 +233,10 @@ export class ScheduledTasksService {
 		const platformScheduledFor = new Date(
 			scheduledFor.getTime() +
 				PLATFORM_DATABASE_BACKUP_DELAY_MINUTES * 60_000
+		);
+		const supportScheduledFor = new Date(
+			scheduledFor.getTime() +
+				SUPPORT_DATABASE_BACKUP_DELAY_MINUTES * 60_000
 		);
 
 		return this.prisma.$transaction(
@@ -341,6 +350,20 @@ export class ScheduledTasksService {
 					this.getEventForType(
 						SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP
 					)
+				),
+				support: await this.scheduledJobs.enqueueUniqueInTransaction(
+					transaction,
+					{
+						jobType: SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP,
+						scheduleKey: period.key,
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						scheduledFor: supportScheduledFor,
+						periodStart: period.start,
+						periodEnd: period.end,
+						input: input as unknown as Prisma.InputJsonObject,
+						availableAt: supportScheduledFor
+					},
+					this.getEventForType(SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP)
 				)
 			}),
 			{ timeout: 10_000 }
@@ -620,6 +643,8 @@ export class ScheduledTasksService {
 				return SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP;
 			case 'platform':
 				return SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP;
+			case 'support':
+				return SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP;
 		}
 	}
 
@@ -639,6 +664,8 @@ export class ScheduledTasksService {
 				return DATABASE_BACKUP_TARGETS.IDENTITY;
 			case SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP:
 				return DATABASE_BACKUP_TARGETS.PLATFORM;
+			case SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.SUPPORT;
 			default:
 				throw new Error(
 					`Unsupported database backup job type: ${jobType}`

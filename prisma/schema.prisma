@@ -7,24 +7,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model TelegramSupportMessage {
-  id             String   @id @default(cuid())
-  adminChatId    String   @map("admin_chat_id")
-  adminMessageId Int      @map("admin_message_id")
-  userChatId     String   @map("user_chat_id")
-  telegramUserId String?  @map("telegram_user_id")
-  username       String?
-  firstName      String?  @map("first_name")
-  lastName       String?  @map("last_name")
-  text           String?  @db.Text
-  createdAt      DateTime @default(now()) @map("created_at")
-
-  @@unique([adminChatId, adminMessageId], map: "telegram_support_messages_admin_message_unique")
-  @@index([userChatId], map: "telegram_support_messages_user_chat_id_idx")
-  @@index([createdAt], map: "telegram_support_messages_created_at_idx")
-  @@map("telegram_support_messages")
-}
-
 model AdminEventLog {
   id              String   @id @default(cuid())
   adminId         String?  @map("admin_id")
@@ -447,6 +429,11 @@ enum PlatformCoreOwnership {
   PLATFORM
 }
 
+enum SupportCoreOwnership {
+  CORE
+  SUPPORT
+}
+
 model SiteSettings {
   id               String   @id @default("singleton")
   bannerEnabled    Boolean  @default(false) @map("banner_enabled")
@@ -482,10 +469,32 @@ model PlatformCoreState {
   @@map("platform_core_state")
 }
 
+model SupportCoreState {
+  id                       String               @id @default("singleton")
+  ownership                SupportCoreOwnership @default(CORE)
+  admissionEnabled         Boolean              @default(true) @map("admission_enabled")
+  reconcilerEnabled        Boolean              @default(true) @map("reconciler_enabled")
+  activeTaskCount          Int                  @default(0) @map("active_task_count")
+  generation               BigInt               @default(0)
+  preparedRevision         String?              @map("prepared_revision")
+  sourceRevision           String?              @map("source_revision")
+  ownershipRevision        String?              @map("ownership_revision")
+  sourceDatabaseSystemId   String?              @map("source_database_system_id")
+  sourceFingerprint        String?              @map("source_fingerprint")
+  sourceSnapshotSha256     String?              @map("source_snapshot_sha256")
+  sourceMappingCount       BigInt?              @map("source_mapping_count")
+  sourceHighWatermark      BigInt?              @map("source_high_watermark")
+  fencedAt                 DateTime?            @map("fenced_at")
+  exportedAt               DateTime?            @map("exported_at")
+  activatedAt              DateTime?            @map("activated_at")
+  updatedAt                DateTime              @updatedAt @map("updated_at")
+
+  @@map("support_core_state")
+}
+
 model TelegramBotSettings {
   id                                String    @id @default("singleton")
   dailySummaryChatId                String    @default("") @map("daily_summary_chat_id")
-  supportThreadId                   Int?      @map("support_thread_id")
   databaseBackupThreadId            Int?      @map("database_backup_thread_id")
   paymentsThreadId                  Int?      @map("payments_thread_id")
   operationalAlertsThreadId         Int?      @map("operational_alerts_thread_id")

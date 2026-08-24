@@ -70,7 +70,8 @@ export class IdentityInternalController {
 		'reporting',
 		'widgets',
 		'billing',
-		'platform'
+		'platform',
+		'support'
 	)
 	introspect(@Headers('authorization') authorization?: string) {
 		return this.internal.introspect(authorization);

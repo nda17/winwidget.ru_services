@@ -30,6 +30,7 @@ export const WIDGETS_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.widgets.v1';
 export const BILLING_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.billing.v1';
 export const IDENTITY_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.identity.v1';
 export const PLATFORM_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.platform.v1';
+export const SUPPORT_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.support.v1';
 export const BILLING_IDENTITY_EVENT_TYPE = 'billing.identity.changed.v1';
 export const BILLING_TRIAL_REQUESTED_EVENT_TYPE =
 	'billing.trial.requested.v1';
@@ -83,6 +84,7 @@ export const INTEGRATION_KINDS = [
 	'billing-admin-audit',
 	'identity-admin-audit',
 	'platform-admin-audit',
+	'support-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection',
@@ -123,6 +125,7 @@ export const CORE_OWNED_INTEGRATION_KINDS = [
 	'billing-admin-audit',
 	'identity-admin-audit',
 	'platform-admin-audit',
+	'support-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection'
@@ -219,6 +222,7 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'billing-admin-audit': BILLING_ADMIN_AUDIT_ROUTING_KEY,
 	'identity-admin-audit': IDENTITY_ADMIN_AUDIT_ROUTING_KEY,
 	'platform-admin-audit': PLATFORM_ADMIN_AUDIT_ROUTING_KEY,
+	'support-admin-audit': SUPPORT_ADMIN_AUDIT_ROUTING_KEY,
 	'billing-payment-projection': BILLING_PAYMENT_DETAILS_EVENT_TYPE,
 	'billing-subscription-projection':
 		BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
@@ -267,6 +271,7 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'billing-admin-audit': 'winwidget.admin.audit.billing.v1',
 	'identity-admin-audit': 'winwidget.admin.audit.identity.v1',
 	'platform-admin-audit': 'winwidget.admin.audit.platform.v1',
+	'support-admin-audit': 'winwidget.admin.audit.support.v1',
 	'billing-payment-projection':
 		'winwidget.core.billing.payment-details.v1',
 	'billing-subscription-projection':

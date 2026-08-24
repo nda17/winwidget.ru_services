@@ -262,6 +262,35 @@ guard_platform_checkout_before_pull() {
     return 1
   fi
 }
+guard_support_checkout_before_pull() {
+  local expected_revision="$1"
+  local guard_action="${2:---guard-before-fetch-revision}"
+  local database_script="scripts/support-database-lifecycle.sh"
+  local cutover_script="scripts/support-cutover-production.sh"
+  local database_marker="$APP_ROOT/deploy/backend/.support-database-lifecycle-v1"
+  local cleanup_marker="$APP_ROOT/deploy/backend/.support-core-cleanup-v1"
+  local script tracked_blob actual_blob
+
+  [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+    "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+  for script in "$database_script" "$cutover_script"; do
+    tracked_blob="$(git rev-parse --verify "HEAD:$script" 2>/dev/null || true)"
+    if [[ -e "$script" || -L "$script" ]]; then
+      [[ -f "$script" && ! -L "$script" && -n "$tracked_blob" ]] || return 1
+      actual_blob="$(git hash-object "$script")"
+      [[ "$actual_blob" == "$tracked_blob" ]] || return 1
+    elif [[ -n "$tracked_blob" ]]; then
+      return 1
+    fi
+  done
+  if [[ -e "$database_script" ]]; then
+    APP_ROOT="$APP_ROOT" bash "$database_script" "$guard_action" "$expected_revision"
+  elif [[ -e "$database_marker" || -L "$database_marker" ||
+    -e "$cleanup_marker" || -L "$cleanup_marker" ]]; then
+    echo 'Support marker exists but its checkout guards are unavailable.' >&2
+    return 1
+  fi
+}
 stage_billing_cleanup_revision_with_container_node() (
   [[ $# -eq 2 ]] || return 1
   local current_revision="$1" cleanup_revision="$2"
@@ -975,12 +1004,14 @@ checkout_verified_prod_revision() {
   guard_billing_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
   guard_platform_checkout_before_pull "$current_revision"
+  guard_support_checkout_before_pull "$current_revision"
   guard_campaigns_checkout_before_pull "$expected_revision"
   guard_reporting_checkout_before_pull "$expected_revision"
   guard_widgets_checkout_before_pull "$expected_revision"
   guard_billing_checkout_before_pull "$expected_revision"
   guard_identity_checkout_before_pull "$expected_revision"
   guard_platform_checkout_before_pull "$expected_revision"
+  guard_support_checkout_before_pull "$expected_revision"
   if [[ -n "$prefetched_revision" ]]; then
     [[ "$prefetched_revision" == "$expected_revision" ]] || {
       echo "Prefetched prod revision differs from the reviewed revision." >&2
@@ -1009,6 +1040,8 @@ checkout_verified_prod_revision() {
     "$expected_revision" --guard-before-checkout-revision
   guard_platform_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
+  guard_support_checkout_before_pull \
+    "$expected_revision" --guard-before-checkout-revision
   git checkout prod
   git merge --ff-only "$fetched_revision"
   [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
@@ -1028,11 +1061,13 @@ checkout_retargeted_billing_cleanup_revision() {
   guard_widgets_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
   guard_platform_checkout_before_pull "$current_revision"
+  guard_support_checkout_before_pull "$current_revision"
   guard_campaigns_checkout_before_pull "$expected_revision"
   guard_reporting_checkout_before_pull "$expected_revision"
   guard_widgets_checkout_before_pull "$expected_revision"
   guard_identity_checkout_before_pull "$expected_revision"
   guard_platform_checkout_before_pull "$expected_revision"
+  guard_support_checkout_before_pull "$expected_revision"
   git cat-file -e "$prefetched_revision^{commit}" 2>/dev/null || return 1
   guard_reporting_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
@@ -1041,6 +1076,8 @@ checkout_retargeted_billing_cleanup_revision() {
   guard_identity_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
   guard_platform_checkout_before_pull \
+    "$expected_revision" --guard-before-checkout-revision
+  guard_support_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
   git checkout prod
   git merge --ff-only "$prefetched_revision"
@@ -1057,6 +1094,7 @@ if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
   guard_billing_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
   guard_platform_checkout_before_pull "$current_revision"
+  guard_support_checkout_before_pull "$current_revision"
   if ! guard_campaigns_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
@@ -1087,6 +1125,11 @@ if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
   if ! guard_platform_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the active Platform ownership guard rejects $EXPECTED_REVISION."
+    exit 1
+  fi
+  if ! guard_support_checkout_before_pull \
+    "$EXPECTED_REVISION" > /dev/null 2>&1; then
+    echo "Automatic backend deploy is verified but deferred: the active Support ownership guard rejects $EXPECTED_REVISION."
     exit 1
   fi
 fi
@@ -1225,9 +1268,11 @@ case "$DEPLOY_TARGET" in
         guard_campaigns_checkout_before_pull "$current_revision"
         guard_reporting_checkout_before_pull "$current_revision"
         guard_widgets_checkout_before_pull "$current_revision"
+        guard_support_checkout_before_pull "$current_revision"
         guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
         guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
         guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
+        guard_support_checkout_before_pull "$EXPECTED_REVISION"
         git fetch origin prod
         prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"
         [[ "$prefetched_cleanup_revision" == "$EXPECTED_REVISION" ]] || {
@@ -1237,6 +1282,8 @@ case "$DEPLOY_TARGET" in
         guard_reporting_checkout_before_pull \
           "$EXPECTED_REVISION" --guard-before-checkout-revision
         guard_widgets_checkout_before_pull \
+          "$EXPECTED_REVISION" --guard-before-checkout-revision
+        guard_support_checkout_before_pull \
           "$EXPECTED_REVISION" --guard-before-checkout-revision
         retarget_billing_cleanup_revision \
           "$current_revision" "$EXPECTED_REVISION"
@@ -1472,6 +1519,45 @@ case "$DEPLOY_TARGET" in
           PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
           PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
           bash scripts/platform-cutover-production.sh --abort
+        ;;
+    esac
+    ;;
+  support)
+    [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
+      echo 'Support lifecycle actions are manual-only.' >&2
+      exit 1
+    }
+    checkout_verified_prod_revision "$EXPECTED_REVISION"
+    case "$SUPPORT_ACTION" in
+      status)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          bash scripts/support-cutover-production.sh --status
+        ;;
+      prepare)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          SUPPORT_CONFIRMATION="$SUPPORT_CONFIRMATION" \
+          bash scripts/support-cutover-production.sh --prepare
+        ;;
+      cutover)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          SUPPORT_CONFIRMATION="$SUPPORT_CONFIRMATION" \
+          bash scripts/support-cutover-production.sh --cutover
+        ;;
+      cleanup)
+        [[ "$SUPPORT_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+          "$SUPPORT_CLEANUP_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ &&
+          "$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+          echo 'Support cleanup requires all three exact evidence SHA-256 values.' >&2
+          exit 1
+        }
+        APP_ROOT="$APP_ROOT" \
+          SUPPORT_CORE_SOURCE_CLEANUP_APPROVED=true \
+          SUPPORT_CORE_SOURCE_CLEANUP_CONFIRMATION="$SUPPORT_CONFIRMATION" \
+          SUPPORT_CORE_SOURCE_CLEANUP_REVISION="$EXPECTED_REVISION" \
+          SUPPORT_CORE_SOURCE_CLEANUP_MIGRATION_SHA256="$SUPPORT_CLEANUP_MIGRATION_SHA256" \
+          SUPPORT_CORE_SOURCE_CLEANUP_SUPPORT_BACKUP_SHA256="$SUPPORT_CLEANUP_BACKUP_SHA256" \
+          SUPPORT_CORE_SOURCE_CLEANUP_RESTORE_EVIDENCE_SHA256="$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" \
+          bash scripts/cleanup-support-core-source-production.sh
         ;;
     esac
     ;;

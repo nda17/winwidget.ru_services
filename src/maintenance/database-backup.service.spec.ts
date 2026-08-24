@@ -374,7 +374,6 @@ describe('DatabaseBackupService', () => {
 		child.kill = jest.fn().mockReturnValue(true);
 		(spawn as unknown as jest.Mock).mockReturnValue(child);
 		const previousUrl = process.env.DATABASE_URL_PRODUCTION;
-		const previousBackupUrl = process.env.DATABASE_BACKUP_URL;
 		const previousNotificationDeliveryUrl =
 			process.env.NOTIFICATION_DELIVERY_BACKUP_URL;
 		const previousNotificationDeliveryRuntimeUrl =
@@ -385,8 +384,6 @@ describe('DatabaseBackupService', () => {
 		const previousWidgetsRuntimeUrl = process.env.WIDGETS_DATABASE_URL;
 		process.env.DATABASE_URL_PRODUCTION =
 			'postgresql://user:full-secret@db.example/app';
-		process.env.DATABASE_BACKUP_URL =
-			'postgresql://user:backup-secret@db.example/app';
 		process.env.NOTIFICATION_DELIVERY_BACKUP_URL =
 			'postgresql://user:notification-backup-secret@db.example/app';
 		process.env.NOTIFICATION_DELIVERY_DATABASE_URL =
@@ -414,7 +411,6 @@ describe('DatabaseBackupService', () => {
 				.calls[0];
 			expect(args.join(' ')).not.toContain('password-only');
 			expect(options.env.PGPASSWORD).toBe('password-only');
-			expect(options.env.DATABASE_BACKUP_URL).toBeUndefined();
 			expect(options.env.DATABASE_URL_PRODUCTION).toBeUndefined();
 			expect(options.env.DATABASE_URL_DEVELOPMENT).toBeUndefined();
 			expect(options.env.DATABASE_URL).toBeUndefined();
@@ -431,11 +427,6 @@ describe('DatabaseBackupService', () => {
 				delete process.env.DATABASE_URL_PRODUCTION;
 			} else {
 				process.env.DATABASE_URL_PRODUCTION = previousUrl;
-			}
-			if (previousBackupUrl === undefined) {
-				delete process.env.DATABASE_BACKUP_URL;
-			} else {
-				process.env.DATABASE_BACKUP_URL = previousBackupUrl;
 			}
 			if (previousNotificationDeliveryUrl === undefined) {
 				delete process.env.NOTIFICATION_DELIVERY_BACKUP_URL;

@@ -83,6 +83,10 @@ describe('MaintenanceSchedulerService', () => {
 			platform: {
 				created: true,
 				job: { id: '88888888-8888-4888-8888-888888888888' }
+			},
+			support: {
+				created: true,
+				job: { id: '99999999-9999-4999-8999-999999999999' }
 			}
 		});
 

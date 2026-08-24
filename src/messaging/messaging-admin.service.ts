@@ -40,6 +40,7 @@ import { RabbitMqManagementService } from '@/messaging/rabbitmq-management.servi
 import {
 	CAMPAIGNS_MESSAGING_HEARTBEAT_SERVICES,
 	REPORTING_MESSAGING_HEARTBEAT_SERVICES,
+	SUPPORT_MESSAGING_HEARTBEAT_SERVICES,
 	ServiceOwnedMessagingOverviewClientService
 } from '@/messaging/service-owned-messaging-overview-client.service';
 import {
@@ -157,6 +158,7 @@ export class MessagingAdminService {
 			identityOverview,
 			campaignsOverview,
 			reportingOverview,
+			supportOverview,
 			platformOverview
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
@@ -302,6 +304,21 @@ export class MessagingAdminService {
 						overview: null,
 						error: 'Reporting messaging overview boundary is unavailable'
 					}),
+			this.serviceOwnedOverview
+				? this.serviceOwnedOverview
+						.getSupportOverview()
+						.then(overview => ({ overview, error: null }))
+						.catch(error => ({
+							overview: null,
+							error:
+								error instanceof Error
+									? error.message
+									: 'Support messaging overview недоступен'
+						}))
+				: Promise.resolve({
+						overview: null,
+						error: 'Support messaging overview boundary is unavailable'
+					}),
 			this.platformMessaging
 				? this.platformMessaging
 						.getOverview()
@@ -353,7 +370,8 @@ export class MessagingAdminService {
 		}
 		for (const overview of [
 			campaignsOverview.overview,
-			reportingOverview.overview
+			reportingOverview.overview,
+			supportOverview.overview
 		]) {
 			if (!overview) continue;
 			for (const status of Object.values(OutboxEventStatus)) {
@@ -376,6 +394,7 @@ export class MessagingAdminService {
 				identityOverview.overview?.oldestPendingAt || null,
 				campaignsOverview.overview?.oldestPendingAt || null,
 				reportingOverview.overview?.oldestPendingAt || null,
+				supportOverview.overview?.oldestPendingAt || null,
 				platformOverview.overview?.oldestPendingAt || null
 			]
 				.filter((value): value is string => Boolean(value))
@@ -531,6 +550,15 @@ export class MessagingAdminService {
 				})))
 		);
 		serviceHeartbeats.push(
+			...(supportOverview.overview?.heartbeats ||
+				SUPPORT_MESSAGING_HEARTBEAT_SERVICES.map(service => ({
+					service,
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null
+				})))
+		);
+		serviceHeartbeats.push(
 			...(platformOverview.overview?.heartbeats ||
 				PLATFORM_MESSAGING_HEARTBEAT_SERVICES.map(service => ({
 					service,
@@ -552,7 +580,8 @@ export class MessagingAdminService {
 				(billingOverview.overview?.unresolvedFailures || 0) +
 				(identityOverview.overview?.unresolvedFailures || 0) +
 				(campaignsOverview.overview?.unresolvedFailures || 0) +
-				(reportingOverview.overview?.unresolvedFailures || 0),
+				(reportingOverview.overview?.unresolvedFailures || 0) +
+				(supportOverview.overview?.unresolvedFailures || 0),
 			retryingFailures:
 				retryingFailures +
 				(notificationDeliveryOverview.overview?.retryingFailures || 0) +
@@ -560,7 +589,8 @@ export class MessagingAdminService {
 				(billingOverview.overview?.retryingFailures || 0) +
 				(identityOverview.overview?.retryingFailures || 0) +
 				(campaignsOverview.overview?.retryingFailures || 0) +
-				(reportingOverview.overview?.retryingFailures || 0),
+				(reportingOverview.overview?.retryingFailures || 0) +
+				(supportOverview.overview?.retryingFailures || 0),
 			processedLast24Hours:
 				processedLast24Hours +
 				(notificationDeliveryOverview.overview?.deliveredLast24Hours ||
@@ -569,7 +599,8 @@ export class MessagingAdminService {
 				(billingOverview.overview?.deliveredLast24Hours || 0) +
 				(identityOverview.overview?.deliveredLast24Hours || 0) +
 				(campaignsOverview.overview?.processedLast24Hours || 0) +
-				(reportingOverview.overview?.processedLast24Hours || 0),
+				(reportingOverview.overview?.processedLast24Hours || 0) +
+				(supportOverview.overview?.processedLast24Hours || 0),
 			completedBackupsLast24Hours,
 			rabbitMqError: queues.error,
 			notificationDeliveryError: notificationDeliveryOverview.error,
@@ -578,6 +609,7 @@ export class MessagingAdminService {
 			identityError: identityOverview.error,
 			campaignsError: campaignsOverview.error,
 			reportingError: reportingOverview.error,
+			supportError: supportOverview.error,
 			platformError: platformOverview.error,
 			heartbeats: serviceHeartbeats,
 			queues: queues.queues.map(queue => ({
@@ -1871,7 +1903,9 @@ export class MessagingAdminService {
 			[SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP]:
 				'Backup PostgreSQL Identity',
 			[SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP]:
-				'Backup PostgreSQL Platform'
+				'Backup PostgreSQL Platform',
+			[SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP]:
+				'Backup PostgreSQL Support'
 		};
 		const scheduledJobName =
 			jobPayload.jobType && isDatabaseBackupJobType(jobPayload.jobType)

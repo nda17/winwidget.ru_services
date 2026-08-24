@@ -7,11 +7,7 @@ import {
 } from '@/maintenance/database-backup.types';
 import { ScheduledTasksService } from '@/maintenance/scheduled-tasks.service';
 import { UpdateTelegramBotSettingsDto } from '@/telegram-bot/dto/update-telegram-bot-settings.dto';
-import {
-	TelegramBotService,
-	type TelegramWebhookBot,
-	type TelegramSupportBotWebhookUpdate
-} from '@/telegram-bot/telegram-bot.service';
+import { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import {
 	Body,
 	BadRequestException,
@@ -99,7 +95,6 @@ export class TelegramBotController {
 				dailySummaryChatIdConfigured: Boolean(
 					settings.dailySummaryChatId.trim()
 				),
-				supportThreadIdConfigured: Boolean(settings.supportThreadId),
 				databaseBackupThreadIdConfigured: Boolean(
 					settings.databaseBackupThreadId
 				),
@@ -110,69 +105,13 @@ export class TelegramBotController {
 				databaseBackupEnabled: settings.databaseBackupEnabled,
 				databaseBackupTime: settings.databaseBackupTime,
 				telegramBotTokenConfigured: settings.telegramBotTokenConfigured,
-				supportTelegramBotTokenConfigured:
-					settings.supportTelegramBotTokenConfigured
+				telegramBotUsernameConfigured:
+					settings.telegramBotUsernameConfigured
 			},
 			request
 		});
 
 		return settings;
-	}
-
-	@HttpCode(200)
-	@Auth('ADMIN')
-	@Get('admin/webhooks/status')
-	getWebhookStatuses() {
-		return this.telegramBotService.getWebhookStatuses();
-	}
-
-	@HttpCode(200)
-	@Auth('ADMIN')
-	@Post('admin/webhooks/reinstall')
-	async reinstallWebhooks(
-		@CurrentUser('id') adminId: string,
-		@Req() request: Request
-	) {
-		const result = await this.telegramBotService.reinstallWebhooks();
-
-		await this.adminEventLogService.record({
-			adminId,
-			section: 'TELEGRAM_BOT',
-			action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
-			description: 'Переустановлен webhook Support_bot',
-			entityType: 'telegram_webhook',
-			entityId: 'all',
-			entityLabel: 'Support_bot',
-			metadata: result,
-			request
-		});
-
-		return result;
-	}
-
-	@HttpCode(200)
-	@Auth('ADMIN')
-	@Post('admin/webhooks/:bot/reinstall')
-	async reinstallWebhook(
-		@Param('bot') bot: TelegramWebhookBot,
-		@CurrentUser('id') adminId: string,
-		@Req() request: Request
-	) {
-		const result = await this.telegramBotService.reinstallWebhook(bot);
-
-		await this.adminEventLogService.record({
-			adminId,
-			section: 'TELEGRAM_BOT',
-			action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
-			description: `Переустановлен webhook ${result.title}`,
-			entityType: 'telegram_webhook',
-			entityId: result.bot,
-			entityLabel: result.title,
-			metadata: result,
-			request
-		});
-
-		return result;
 	}
 
 	@HttpCode(202)
@@ -207,7 +146,8 @@ export class TelegramBotController {
 				[DATABASE_BACKUP_TARGETS.WIDGETS]: 'БД Widgets',
 				[DATABASE_BACKUP_TARGETS.BILLING]: 'БД Billing',
 				[DATABASE_BACKUP_TARGETS.IDENTITY]: 'БД Identity',
-				[DATABASE_BACKUP_TARGETS.PLATFORM]: 'БД Platform'
+				[DATABASE_BACKUP_TARGETS.PLATFORM]: 'БД Platform',
+				[DATABASE_BACKUP_TARGETS.SUPPORT]: 'БД Support'
 			}[target];
 			await this.adminEventLogService.record({
 				adminId,
@@ -323,21 +263,6 @@ export class TelegramBotController {
 			throw new NotFoundException('Задание backup не найдено');
 		}
 		return job;
-	}
-
-	@HttpCode(200)
-	@Get('webhook-health')
-	getWebhookHealth() {
-		return this.telegramBotService.getWebhookHealth();
-	}
-
-	@HttpCode(200)
-	@Post('support-webhook')
-	handleSupportWebhook(
-		@Body() update: TelegramSupportBotWebhookUpdate,
-		@Headers('x-telegram-bot-api-secret-token') secret?: string
-	) {
-		return this.telegramBotService.handleSupportWebhook(update, secret);
 	}
 
 	private parsePositiveInteger(

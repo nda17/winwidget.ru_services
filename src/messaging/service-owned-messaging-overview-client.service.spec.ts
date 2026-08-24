@@ -6,6 +6,7 @@ import type { ConfigService } from '@nestjs/config';
 import {
 	CAMPAIGNS_MESSAGING_HEARTBEAT_SERVICES,
 	REPORTING_MESSAGING_HEARTBEAT_SERVICES,
+	SUPPORT_MESSAGING_HEARTBEAT_SERVICES,
 	ServiceOwnedMessagingOverviewClientService
 } from './service-owned-messaging-overview-client.service';
 
@@ -13,6 +14,7 @@ const CAMPAIGNS_TOKEN =
 	'campaigns-core-overview-token-at-least-32-characters';
 const REPORTING_TOKEN =
 	'reporting-core-overview-token-at-least-32-characters';
+const SUPPORT_TOKEN = 'support-core-overview-token-at-least-32-characters';
 const NOW = '2026-08-15T12:00:00.000Z';
 
 const overview = (services: readonly string[]) => ({
@@ -33,12 +35,18 @@ const overview = (services: readonly string[]) => ({
 
 const createClient = (
 	overrides: Partial<
-		Record<'CAMPAIGNS_INTERNAL_TOKEN' | 'REPORTING_INTERNAL_TOKEN', string>
+		Record<
+			'CAMPAIGNS_INTERNAL_TOKEN' | 'REPORTING_INTERNAL_TOKEN',
+			string
+		> &
+			Record<'SUPPORT_CORE_TOKEN', string>
 	> = {}
 ) => {
 	const values = {
 		CAMPAIGNS_INTERNAL_TOKEN: CAMPAIGNS_TOKEN,
 		REPORTING_INTERNAL_TOKEN: REPORTING_TOKEN,
+		SUPPORT_CORE_TOKEN: SUPPORT_TOKEN,
+		SUPPORT_INTERNAL_BASE_URL: 'http://127.0.0.1:5100',
 		...overrides
 	};
 	return new ServiceOwnedMessagingOverviewClientService({
@@ -65,6 +73,14 @@ describe('ServiceOwnedMessagingOverviewClientService', () => {
 			url: 'http://127.0.0.1:4600/internal/v1/reporting/messaging/overview',
 			token: REPORTING_TOKEN,
 			services: REPORTING_MESSAGING_HEARTBEAT_SERVICES
+		},
+		{
+			owner: 'Support',
+			request: (client: ServiceOwnedMessagingOverviewClientService) =>
+				client.getSupportOverview(),
+			url: 'http://127.0.0.1:5100/internal/v1/support/messaging/overview',
+			token: SUPPORT_TOKEN,
+			services: SUPPORT_MESSAGING_HEARTBEAT_SERVICES
 		}
 	])(
 		'uses the exact loopback path and scoped token for $owner',

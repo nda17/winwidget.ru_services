@@ -23,7 +23,6 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30 * 60 * 1_000;
 
 const PASSWORD_FILE_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
-	core: 'DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE',
 	'notification-delivery':
 		'DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE',
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE',
@@ -31,18 +30,19 @@ const PASSWORD_FILE_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	widgets: 'DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE',
 	billing: 'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE',
 	identity: 'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE',
-	platform: 'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE'
+	platform: 'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE',
+	support: 'DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE'
 };
 
 const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
-	core: 'DATABASE_RESTORE_CORE_PORT',
 	'notification-delivery': 'DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT',
 	campaigns: 'DATABASE_RESTORE_CAMPAIGNS_PORT',
 	reporting: 'DATABASE_RESTORE_REPORTING_PORT',
 	widgets: 'DATABASE_RESTORE_WIDGETS_PORT',
 	billing: 'DATABASE_RESTORE_BILLING_PORT',
 	identity: 'DATABASE_RESTORE_IDENTITY_PORT',
-	platform: 'DATABASE_RESTORE_PLATFORM_PORT'
+	platform: 'DATABASE_RESTORE_PLATFORM_PORT',
+	support: 'DATABASE_RESTORE_SUPPORT_PORT'
 };
 
 export class DatabaseRestoreWorkerConfig {
@@ -119,25 +119,6 @@ export class DatabaseRestoreWorkerConfig {
 		) as Record<DatabaseRestoreTarget, string>;
 
 		this.targets = {
-			core: this.target({
-				target: 'core',
-				label: 'Core',
-				port: this.requireTargetPort(environment, 'core'),
-				database: 'default_db',
-				schema: 'public',
-				adminRole: 'winwidget_core_admin',
-				migrationRole: 'gen_user',
-				runtimeRoles: ['winwidget_api_runtime', 'winwidget_maintenance'],
-				backupRole: 'winwidget_backup',
-				passwordFile: passwordFiles.core,
-				migrationsDirectory: join(migrationsRoot, 'prisma/migrations'),
-				anchorTables: [
-					'_prisma_migrations',
-					'admin_event_logs',
-					'outbox_events',
-					'reporting_producer_state'
-				]
-			}),
 			'notification-delivery': this.target({
 				target: 'notification-delivery',
 				label: 'Notification Delivery',
@@ -287,6 +268,29 @@ export class DatabaseRestoreWorkerConfig {
 					'site_settings',
 					'legal_pages',
 					'home_page_content',
+					'outbox_events'
+				]
+			}),
+			support: this.target({
+				target: 'support',
+				label: 'Support',
+				port: this.requireTargetPort(environment, 'support'),
+				database: 'winwidget_support',
+				schema: 'support',
+				adminRole: 'winwidget_support_admin',
+				migrationRole: 'winwidget_support_migration',
+				runtimeRoles: ['winwidget_support_runtime'],
+				backupRole: 'winwidget_support_backup',
+				passwordFile: passwordFiles.support,
+				migrationsDirectory: join(
+					migrationsRoot,
+					'apps/support/prisma/migrations'
+				),
+				anchorTables: [
+					'_prisma_migrations',
+					'service_identity',
+					'routing_settings',
+					'telegram_webhook_inbox',
 					'outbox_events'
 				]
 			})

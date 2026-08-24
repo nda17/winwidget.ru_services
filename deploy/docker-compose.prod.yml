@@ -21,7 +21,6 @@ x-api-env: &api-env
   TRUST_PROXY: ${TRUST_PROXY:-loopback}
   PRODUCTION_HOST: ${PRODUCTION_HOST}
   AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
-  TELEGRAM_WEBHOOK_HOST: ${TELEGRAM_WEBHOOK_HOST:-https://api.winwidget.ru}
   TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
   JWT_ISSUER: ${JWT_ISSUER}
   JWT_AUDIENCE: ${JWT_AUDIENCE}
@@ -30,9 +29,6 @@ x-api-env: &api-env
   CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME}
-  TELEGRAM_SUPPORT_BOT_TOKEN: ${TELEGRAM_SUPPORT_BOT_TOKEN}
-  TELEGRAM_SUPPORT_BOT_USERNAME: ${TELEGRAM_SUPPORT_BOT_USERNAME:-}
-  TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: ${TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET}
   RABBITMQ_MANAGEMENT_URL: ${RABBITMQ_MANAGEMENT_URL:-http://127.0.0.1:15672}
   RABBITMQ_MONITOR_USER: ${RABBITMQ_MONITOR_USER}
   RABBITMQ_MONITOR_PASSWORD: ${RABBITMQ_MONITOR_PASSWORD}
@@ -59,6 +55,8 @@ x-api-env: &api-env
   PLATFORM_INTERNAL_BASE_URL: ${PLATFORM_INTERNAL_BASE_URL:-http://127.0.0.1:5000}
   PLATFORM_CORE_TOKEN: ${PLATFORM_CORE_TOKEN:?PLATFORM_CORE_TOKEN is required}
   PLATFORM_INTERNAL_TIMEOUT_MS: ${PLATFORM_INTERNAL_TIMEOUT_MS:-5000}
+  SUPPORT_CORE_TOKEN: ${SUPPORT_CORE_TOKEN:?SUPPORT_CORE_TOKEN is required}
+  SUPPORT_INTERNAL_BASE_URL: ${SUPPORT_INTERNAL_BASE_URL:-http://127.0.0.1:5100}
   DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
   DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
   DATABASE_RESTORE_PRODUCTION_ENABLED: ${DATABASE_RESTORE_PRODUCTION_ENABLED:-false}
@@ -95,7 +93,7 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,support-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
@@ -259,11 +257,24 @@ x-platform-env: &platform-env
   PLATFORM_OUTBOX_POLL_INTERVAL_MS: ${PLATFORM_OUTBOX_POLL_INTERVAL_MS:-1000}
   PLATFORM_OUTBOX_RETENTION_DAYS: ${PLATFORM_OUTBOX_RETENTION_DAYS:-7}
 
+x-support-env: &support-env
+  APP_REVISION: ${SUPPORT_REVISION:?SUPPORT_REVISION is required}
+  NODE_ENV: production
+  MODE: ${MODE:-production}
+  SUPPORT_DATABASE_URL: ${SUPPORT_DATABASE_URL:?SUPPORT_DATABASE_URL is required}
+  SUPPORT_LISTEN_HOST: ${SUPPORT_LISTEN_HOST:-127.0.0.1}
+  SUPPORT_INBOX_LEASE_MS: ${SUPPORT_INBOX_LEASE_MS:-60000}
+  SUPPORT_PREFETCH: ${SUPPORT_PREFETCH:-10}
+  SUPPORT_OUTBOX_BATCH_SIZE: ${SUPPORT_OUTBOX_BATCH_SIZE:-50}
+  SUPPORT_OUTBOX_POLL_INTERVAL_MS: ${SUPPORT_OUTBOX_POLL_INTERVAL_MS:-1000}
+  SUPPORT_OUTBOX_RETENTION_DAYS: ${SUPPORT_OUTBOX_RETENTION_DAYS:-7}
+  SUPPORT_RECEIPT_RETENTION_DAYS: ${SUPPORT_RECEIPT_RETENTION_DAYS:-90}
+  SUPPORT_FAILURE_DETAIL_RETENTION_DAYS: ${SUPPORT_FAILURE_DETAIL_RETENTION_DAYS:-30}
+
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
   APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
   DATABASE_URL_PRODUCTION: ${MAINTENANCE_DATABASE_URL_PRODUCTION:?MAINTENANCE_DATABASE_URL_PRODUCTION is required}
-  DATABASE_BACKUP_URL: ${DATABASE_BACKUP_URL:?DATABASE_BACKUP_URL is required}
   NOTIFICATION_DELIVERY_BACKUP_URL: ${NOTIFICATION_DELIVERY_BACKUP_URL:?NOTIFICATION_DELIVERY_BACKUP_URL is required}
   CAMPAIGNS_BACKUP_URL: ${CAMPAIGNS_BACKUP_URL:?CAMPAIGNS_BACKUP_URL is required}
   REPORTING_BACKUP_URL: ${REPORTING_BACKUP_URL:?REPORTING_BACKUP_URL is required}
@@ -271,6 +282,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   BILLING_BACKUP_URL: ${BILLING_BACKUP_URL:?BILLING_BACKUP_URL is required}
   IDENTITY_BACKUP_URL: ${IDENTITY_BACKUP_URL:?IDENTITY_BACKUP_URL is required}
   PLATFORM_BACKUP_URL: ${PLATFORM_BACKUP_URL:?PLATFORM_BACKUP_URL is required}
+  SUPPORT_BACKUP_URL: ${SUPPORT_BACKUP_URL:?SUPPORT_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
@@ -293,7 +305,6 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_POLL_INTERVAL_MS: ${DATABASE_RESTORE_POLL_INTERVAL_MS:-1000}
   DATABASE_RESTORE_COMMAND_TIMEOUT_MS: ${DATABASE_RESTORE_COMMAND_TIMEOUT_MS:-1800000}
   DATABASE_RESTORE_MIGRATIONS_ROOT: /app
-  DATABASE_RESTORE_CORE_PORT: '55434'
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: ${NOTIFICATION_DELIVERY_POSTGRES_PORT:?NOTIFICATION_DELIVERY_POSTGRES_PORT is required}
   DATABASE_RESTORE_CAMPAIGNS_PORT: ${CAMPAIGNS_POSTGRES_PORT:?CAMPAIGNS_POSTGRES_PORT is required}
   DATABASE_RESTORE_REPORTING_PORT: ${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}
@@ -301,7 +312,7 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_BILLING_PORT: ${BILLING_POSTGRES_PORT:?BILLING_POSTGRES_PORT is required}
   DATABASE_RESTORE_IDENTITY_PORT: ${IDENTITY_POSTGRES_PORT:?IDENTITY_POSTGRES_PORT is required}
   DATABASE_RESTORE_PLATFORM_PORT: ${PLATFORM_POSTGRES_PORT:?PLATFORM_POSTGRES_PORT is required}
-  DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/core-admin-password
+  DATABASE_RESTORE_SUPPORT_PORT: ${SUPPORT_POSTGRES_PORT:?SUPPORT_POSTGRES_PORT is required}
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
   DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
   DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/reporting-admin-password
@@ -309,6 +320,7 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/billing-admin-password
   DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/identity-admin-password
   DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/platform-admin-password
+  DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/support-admin-password
 
 x-outbox-publisher-env: &outbox-publisher-env
   <<: *runtime-env
@@ -360,6 +372,11 @@ x-platform-migration-env: &platform-migration-env
   APP_REVISION: ${PLATFORM_REVISION:?PLATFORM_REVISION is required}
   NODE_ENV: production
   PLATFORM_DATABASE_URL: ${PLATFORM_MIGRATION_DATABASE_URL:?PLATFORM_MIGRATION_DATABASE_URL is required}
+
+x-support-migration-env: &support-migration-env
+  APP_REVISION: ${SUPPORT_REVISION:?SUPPORT_REVISION is required}
+  NODE_ENV: production
+  SUPPORT_DATABASE_URL: ${SUPPORT_MIGRATION_DATABASE_URL:?SUPPORT_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -662,6 +679,50 @@ services:
     mem_limit: ${PLATFORM_POSTGRES_MEMORY_LIMIT:-512m}
     mem_reservation: ${PLATFORM_POSTGRES_MEMORY_RESERVATION:-128m}
     cpus: ${PLATFORM_POSTGRES_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
+  support-postgres:
+    image: ${SUPPORT_POSTGRES_IMAGE:?SUPPORT_POSTGRES_IMAGE is required}
+    profiles:
+      - support-database
+    labels:
+      com.winwidget.owner: support
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_support
+      POSTGRES_USER: ${SUPPORT_POSTGRES_ADMIN_USER:?SUPPORT_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/support-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${SUPPORT_POSTGRES_PORT:-55440}:5432'
+    volumes:
+      - winwidget-support-postgres-data:/var/lib/postgresql
+    networks:
+      - support-postgres
+    secrets:
+      - support-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${SUPPORT_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${SUPPORT_POSTGRES_MEMORY_LIMIT:-512m}
+    mem_reservation: ${SUPPORT_POSTGRES_MEMORY_RESERVATION:-128m}
+    cpus: ${SUPPORT_POSTGRES_CPUS:-0.75}
     pids_limit: 200
     logging:
       driver: json-file
@@ -1136,6 +1197,7 @@ services:
       IDENTITY_WIDGETS_TOKEN: ${IDENTITY_WIDGETS_TOKEN:?IDENTITY_WIDGETS_TOKEN is required}
       IDENTITY_BILLING_TOKEN: ${IDENTITY_BILLING_TOKEN:?IDENTITY_BILLING_TOKEN is required}
       IDENTITY_PLATFORM_TOKEN: ${IDENTITY_PLATFORM_TOKEN:?IDENTITY_PLATFORM_TOKEN is required}
+      IDENTITY_SUPPORT_TOKEN: ${IDENTITY_SUPPORT_TOKEN:?IDENTITY_SUPPORT_TOKEN is required}
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
       BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
       BILLING_IDENTITY_TOKEN: ${BILLING_IDENTITY_TOKEN:?BILLING_IDENTITY_TOKEN is required}
@@ -1352,6 +1414,152 @@ services:
         max-size: 10m
         max-file: '3'
 
+  support-api:
+    image: ${SUPPORT_IMAGE:?SUPPORT_IMAGE is required}
+    build:
+      context: ../apps/support
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${SUPPORT_REVISION:?SUPPORT_REVISION is required}
+    labels:
+      com.winwidget.owner: support
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *support-env
+      SUPPORT_PROCESS_ROLE: api
+      SUPPORT_PORT: ${SUPPORT_API_PORT:-5100}
+      SUPPORT_WEBHOOK_PUBLIC_URL: ${SUPPORT_WEBHOOK_PUBLIC_URL:?SUPPORT_WEBHOOK_PUBLIC_URL is required}
+      TELEGRAM_SUPPORT_BOT_TOKEN: ${TELEGRAM_SUPPORT_BOT_TOKEN:?TELEGRAM_SUPPORT_BOT_TOKEN is required}
+      TELEGRAM_SUPPORT_BOT_USERNAME: ${TELEGRAM_SUPPORT_BOT_USERNAME:?TELEGRAM_SUPPORT_BOT_USERNAME is required}
+      TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: ${TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET:?TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET is required}
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
+      TELEGRAM_API_PROXY_IP: ${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+      IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+      IDENTITY_SUPPORT_TOKEN: ${IDENTITY_SUPPORT_TOKEN:?IDENTITY_SUPPORT_TOKEN is required}
+      IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
+      SUPPORT_CORE_TOKEN: ${SUPPORT_CORE_TOKEN:?SUPPORT_CORE_TOKEN is required}
+    network_mode: host
+    extra_hosts:
+      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.SUPPORT_PORT||5100)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    mem_limit: ${SUPPORT_API_MEMORY_LIMIT:-384m}
+    mem_reservation: ${SUPPORT_API_MEMORY_RESERVATION:-96m}
+    cpus: ${SUPPORT_API_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  support-worker:
+    image: ${SUPPORT_IMAGE:?SUPPORT_IMAGE is required}
+    labels:
+      com.winwidget.owner: support
+      com.winwidget.purpose: worker
+    environment:
+      <<: *support-env
+      SUPPORT_PROCESS_ROLE: worker
+      SUPPORT_PORT: ${SUPPORT_WORKER_PORT:-5101}
+      TELEGRAM_SUPPORT_BOT_TOKEN: ${TELEGRAM_SUPPORT_BOT_TOKEN:?TELEGRAM_SUPPORT_BOT_TOKEN is required}
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
+      TELEGRAM_API_PROXY_IP: ${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}
+      RABBITMQ_URL: ${RABBITMQ_SUPPORT_WORKER_URL:?RABBITMQ_SUPPORT_WORKER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-support-worker
+      RABBITMQ_ASSERT_TOPOLOGY: 'true'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: support-worker
+    network_mode: host
+    extra_hosts:
+      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.SUPPORT_PORT||5101)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${SUPPORT_WORKER_MEMORY_LIMIT:-384m}
+    mem_reservation: ${SUPPORT_WORKER_MEMORY_RESERVATION:-96m}
+    cpus: ${SUPPORT_WORKER_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  support-outbox-publisher:
+    image: ${SUPPORT_IMAGE:?SUPPORT_IMAGE is required}
+    labels:
+      com.winwidget.owner: support
+      com.winwidget.purpose: outbox-publisher
+    environment:
+      <<: *support-env
+      SUPPORT_PROCESS_ROLE: outbox-publisher
+      SUPPORT_PORT: ${SUPPORT_OUTBOX_PUBLISHER_PORT:-5102}
+      RABBITMQ_URL: ${RABBITMQ_SUPPORT_PUBLISHER_URL:?RABBITMQ_SUPPORT_PUBLISHER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-support-outbox-publisher
+      RABBITMQ_ASSERT_TOPOLOGY: 'false'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: support-outbox-publisher
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.SUPPORT_PORT||5102)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${SUPPORT_OUTBOX_PUBLISHER_MEMORY_LIMIT:-256m}
+    mem_reservation: ${SUPPORT_OUTBOX_PUBLISHER_MEMORY_RESERVATION:-64m}
+    cpus: ${SUPPORT_OUTBOX_PUBLISHER_CPUS:-0.35}
+    pids_limit: 150
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -1403,8 +1611,6 @@ services:
         source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
         target: /var/lib/winwidget/database-restores
     secrets:
-      - source: core-postgres-admin-password
-        target: database-restore-core-admin-password
       - source: notification-delivery-postgres-admin-password
         target: database-restore-notification-delivery-admin-password
       - source: campaigns-postgres-admin-password
@@ -1419,6 +1625,8 @@ services:
         target: database-restore-identity-admin-password
       - source: platform-postgres-admin-password
         target: database-restore-platform-admin-password
+      - source: support-postgres-admin-password
+        target: database-restore-support-admin-password
     tmpfs:
       - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -1441,7 +1649,7 @@ services:
           'nestjs:nodejs',
           'node',
           '-e',
-          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","core","identity","notification-delivery","platform","reporting","widgets"]''||fences.length!==0)process.exit(1)'
+          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","identity","notification-delivery","platform","reporting","support","widgets"]''||fences.length!==0)process.exit(1)'
         ]
       interval: 10s
       timeout: 5s
@@ -1571,7 +1779,24 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  support-migrate:
+    image: ${SUPPORT_IMAGE:?SUPPORT_IMAGE is required}
+    build:
+      context: ../apps/support
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${SUPPORT_REVISION:?SUPPORT_REVISION is required}
+    profiles:
+      - support-migration
+    environment: *support-migration-env
+    network_mode: host
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
+  winwidget-support-postgres-data:
+    external: true
+    name: ${SUPPORT_POSTGRES_DATA_VOLUME:?SUPPORT_POSTGRES_DATA_VOLUME must name the verified Support PostgreSQL volume}
   winwidget-platform-postgres-data:
     external: true
     name: ${PLATFORM_POSTGRES_DATA_VOLUME:?PLATFORM_POSTGRES_DATA_VOLUME must name the verified Platform PostgreSQL volume}
@@ -1598,6 +1823,13 @@ volumes:
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
 
 networks:
+  support-postgres:
+    name: winwidget-support-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: support
+      com.winwidget.purpose: postgres-network
   platform-postgres:
     name: winwidget-platform-postgres
     driver: bridge
@@ -1665,3 +1897,5 @@ secrets:
     file: ${IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE:?IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE is required}
   platform-postgres-admin-password:
     file: ${PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE:?PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  support-postgres-admin-password:
+    file: ${SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE:?SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE is required}

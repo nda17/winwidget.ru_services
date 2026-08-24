@@ -13,14 +13,14 @@ export const DATABASE_RESTORE_MANIFEST_MAX_FILE_SIZE_BYTES = 64 * 1024;
 export const DATABASE_RESTORE_PUBLICATION_GRACE_MS = 5 * 60 * 1000;
 
 export const DATABASE_RESTORE_TARGETS = [
-	'core',
 	'notification-delivery',
 	'campaigns',
 	'reporting',
 	'widgets',
 	'billing',
 	'identity',
-	'platform'
+	'platform',
+	'support'
 ] as const;
 
 export type DatabaseRestoreTarget =
@@ -43,11 +43,6 @@ export const DATABASE_RESTORE_TARGET_SETTINGS: ReadonlyArray<{
 	label: string;
 	confirmation: string;
 }> = [
-	{
-		id: 'core',
-		label: 'Основная БД',
-		confirmation: 'ВОССТАНОВИТЬ CORE'
-	},
 	{
 		id: 'notification-delivery',
 		label: 'Notification Delivery',
@@ -82,6 +77,11 @@ export const DATABASE_RESTORE_TARGET_SETTINGS: ReadonlyArray<{
 		id: 'platform',
 		label: 'Platform',
 		confirmation: 'ВОССТАНОВИТЬ PLATFORM'
+	},
+	{
+		id: 'support',
+		label: 'Support',
+		confirmation: 'ВОССТАНОВИТЬ SUPPORT'
 	}
 ];
 

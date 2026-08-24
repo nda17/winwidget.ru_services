@@ -111,11 +111,6 @@ describe('DatabaseRestoreQueueService', () => {
 			allowedFileExtension: '.dump',
 			targets: [
 				{
-					id: 'core',
-					label: 'Основная БД',
-					confirmation: 'ВОССТАНОВИТЬ CORE'
-				},
-				{
 					id: 'notification-delivery',
 					label: 'Notification Delivery',
 					confirmation: 'ВОССТАНОВИТЬ NOTIFICATION DELIVERY'
@@ -149,6 +144,11 @@ describe('DatabaseRestoreQueueService', () => {
 					id: 'platform',
 					label: 'Platform',
 					confirmation: 'ВОССТАНОВИТЬ PLATFORM'
+				},
+				{
+					id: 'support',
+					label: 'Support',
+					confirmation: 'ВОССТАНОВИТЬ SUPPORT'
 				}
 			]
 		});
@@ -294,9 +294,9 @@ describe('DatabaseRestoreQueueService', () => {
 
 		await expect(
 			service.enqueue(
-				'core',
-				createFile({ originalname: 'core.dump' }),
-				'ВОССТАНОВИТЬ CORE',
+				'support',
+				createFile({ originalname: 'support.dump' }),
+				'ВОССТАНОВИТЬ SUPPORT',
 				'clrestoreadmin123',
 				beforePublish,
 				undefined,
@@ -405,7 +405,7 @@ describe('DatabaseRestoreQueueService', () => {
 		const valid = createPermit();
 		process.env.DATABASE_RESTORE_PRODUCTION_PERMIT = JSON.stringify({
 			...valid,
-			target: 'core'
+			target: 'support'
 		});
 		await expect(service.getSettings()).rejects.toBeInstanceOf(
 			ServiceUnavailableException
@@ -436,9 +436,9 @@ describe('DatabaseRestoreQueueService', () => {
 		process.env.DATABASE_RESTORE_PRODUCTION_PERMIT = JSON.stringify(valid);
 		await expect(
 			service.enqueue(
-				'core',
-				createFile({ originalname: 'core.dump' }),
-				'ВОССТАНОВИТЬ CORE',
+				'support',
+				createFile({ originalname: 'support.dump' }),
+				'ВОССТАНОВИТЬ SUPPORT',
 				'clrestoreadmin123',
 				beforePublish,
 				jobId,
@@ -568,9 +568,9 @@ describe('DatabaseRestoreQueueService', () => {
 		).rejects.toBeInstanceOf(ConflictException);
 		await expect(
 			service.enqueue(
-				'core',
-				createFile({ originalname: 'core.dump' }),
-				'ВОССТАНОВИТЬ CORE',
+				'support',
+				createFile({ originalname: 'support.dump' }),
+				'ВОССТАНОВИТЬ SUPPORT',
 				'clrestoreadmin123',
 				duplicateAudit,
 				'not-a-request-id'
@@ -762,7 +762,7 @@ describe('DatabaseRestoreQueueService', () => {
 			service.enqueue(
 				'reporting',
 				createFile(),
-				'ВОССТАНОВИТЬ CORE',
+				'НЕВЕРНОЕ ПОДТВЕРЖДЕНИЕ',
 				'clrestoreadmin123',
 				beforePublish
 			)
@@ -802,9 +802,9 @@ describe('DatabaseRestoreQueueService', () => {
 		process.env.DATABASE_RESTORE_QUEUE_SECRET = 'short';
 		await expect(
 			service.enqueue(
-				'core',
+				'reporting',
 				createFile(),
-				'ВОССТАНОВИТЬ CORE',
+				'ВОССТАНОВИТЬ REPORTING',
 				'clrestoreadmin123',
 				beforePublish
 			)
@@ -887,16 +887,19 @@ describe('DatabaseRestoreQueueService', () => {
 					)
 				).toContain(job.jobId);
 				expect(
-					await readFile(join(storageDir, 'locks', 'core.lock'), 'utf8')
+					await readFile(
+						join(storageDir, 'locks', 'reporting.lock'),
+						'utf8'
+					)
 				).toContain(job.jobId);
 				throw new Error('audit unavailable');
 			});
 
 		await expect(
 			service.enqueue(
-				'core',
-				createFile({ originalname: 'core.dump' }),
-				'ВОССТАНОВИТЬ CORE',
+				'reporting',
+				createFile({ originalname: 'reporting.dump' }),
+				'ВОССТАНОВИТЬ REPORTING',
 				'clrestoreadmin123',
 				failingAudit
 			)
@@ -921,9 +924,9 @@ describe('DatabaseRestoreQueueService', () => {
 
 		await expect(
 			service.enqueue(
-				'core',
-				createFile({ originalname: 'core-second.dump' }),
-				'ВОССТАНОВИТЬ CORE',
+				'reporting',
+				createFile({ originalname: 'reporting-second.dump' }),
+				'ВОССТАНОВИТЬ REPORTING',
 				'clrestoreadmin123',
 				duplicateAudit
 			)
@@ -971,7 +974,7 @@ describe('DatabaseRestoreQueueService', () => {
 			{
 				version: 1,
 				kind: 'DATABASE_RESTORE_GLOBAL_GATE',
-				target: 'core',
+				target: 'reporting',
 				jobId: foreignJobId,
 				createdAt: new Date().toISOString()
 			},

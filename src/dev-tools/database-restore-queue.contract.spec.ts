@@ -69,7 +69,7 @@ describe('database restore queue contract', () => {
 
 		expect(
 			verifyDatabaseRestoreJobManifest(
-				{ ...manifest, target: 'core' },
+				{ ...manifest, target: 'support' },
 				secret
 			)
 		).toBe(false);
@@ -101,7 +101,7 @@ describe('database restore queue contract', () => {
 		).toEqual(lock);
 		expect(() =>
 			parseAndVerifyDatabaseRestoreTargetLock(
-				JSON.stringify({ ...lock, target: 'core' }),
+				JSON.stringify({ ...lock, target: 'support' }),
 				secret
 			)
 		).toThrow('signature is invalid');

@@ -634,6 +634,7 @@ describe('HealthService notification delivery monitoring', () => {
 						'billing-admin-audit',
 						'identity-admin-audit',
 						'platform-admin-audit',
+						'support-admin-audit',
 						'billing-payment-projection',
 						'billing-subscription-projection',
 						'billing-affiliate-projection',
@@ -772,6 +773,32 @@ describe('HealthService Telegram proxy routing', () => {
 		);
 		expect(fetchMock.mock.calls[0][0]).toBe(
 			'https://tg.winwidget.ru/telegram-api/botinfo-token/getMe'
+		);
+	});
+
+	it('checks Support readiness without reading the retired Core bot token', async () => {
+		const { service, configService } = createService();
+		configService.get.mockImplementation((key: string) =>
+			key === 'SUPPORT_INTERNAL_BASE_URL'
+				? 'http://127.0.0.1:5100'
+				: undefined
+		);
+		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest
+				.fn()
+				.mockResolvedValue({ status: 'ready', service: 'support' })
+		} as unknown as Response);
+
+		await expect((service as any).checkSupportService()).resolves.toEqual(
+			expect.objectContaining({ id: 'support_service', status: 'ok' })
+		);
+		expect(fetchMock.mock.calls[0][0]).toBe(
+			'http://127.0.0.1:5100/health/ready'
+		);
+		expect(configService.get).not.toHaveBeenCalledWith(
+			'TELEGRAM_SUPPORT_BOT_TOKEN'
 		);
 	});
 });

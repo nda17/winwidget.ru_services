@@ -381,6 +381,43 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createSupportAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-08-24T12:00:00.000Z',
+					correlationId: 'request:support-settings-42',
+					actorId: 'admin-user-id',
+					section: 'SUPPORT',
+					action: 'SUPPORT_ROUTING_SETTINGS_UPDATE',
+					description: 'Обновлены настройки маршрутизации Support_bot',
+					entity: {
+						type: 'support_routing_settings',
+						id: 'singleton',
+						label: 'Support_bot',
+						targetUserId: null
+					},
+					metadata: {
+						adminChatIdConfigured: true,
+						supportThreadIdConfigured: true,
+						aggregateVersion: '2',
+						actorRole: 'DEV',
+						requestIp: '203.0.113.10',
+						requestUserAgent: 'support-contract-agent'
+					}
+				})
+			),
+			fields: { routingKey: 'admin.audit.support.v1' },
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	const createWidgetsCloseAuditMessage = (): ConsumeMessage =>
 		({
 			content: Buffer.from(
@@ -434,6 +471,7 @@ describe('IntegrationWorkerService', () => {
 			'billing-admin-audit',
 			'identity-admin-audit',
 			'platform-admin-audit',
+			'support-admin-audit',
 			'billing-payment-projection',
 			'billing-subscription-projection',
 			'billing-affiliate-projection'
@@ -830,6 +868,59 @@ describe('IntegrationWorkerService', () => {
 			expect.objectContaining({
 				where: expect.objectContaining({
 					integration: 'platform-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
+	it('writes a Support audit and its delivered receipt atomically', async () => {
+		const { service, rabbitMq, delivery, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'support-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createSupportAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			{
+				adminId: 'admin-user-id',
+				section: 'SUPPORT',
+				action: 'SUPPORT_ROUTING_SETTINGS_UPDATE',
+				description: 'Обновлены настройки маршрутизации Support_bot',
+				entityType: 'support_routing_settings',
+				entityId: 'singleton',
+				entityLabel: 'Support_bot',
+				targetUserId: null,
+				ip: '203.0.113.10',
+				userAgent: 'support-contract-agent',
+				metadata: {
+					adminChatIdConfigured: true,
+					supportThreadIdConfigured: true,
+					aggregateVersion: '2',
+					actorRole: 'DEV',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					correlationId: 'request:support-settings-42'
+				}
+			}
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					integration: 'support-admin-audit',
 					status: IntegrationDeliveryReceiptStatus.PROCESSING
 				}),
 				data: expect.objectContaining({

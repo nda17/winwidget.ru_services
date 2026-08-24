@@ -55,6 +55,10 @@ import {
 	PlatformAdminAuditAction
 } from '@/messaging/platform-admin-audit-event';
 import {
+	SUPPORT_ADMIN_AUDIT_ACTIONS,
+	SupportAdminAuditAction
+} from '@/messaging/support-admin-audit-event';
+import {
 	REPORTING_ADMIN_AUDIT_ACTIONS,
 	REPORTING_AUDIT_CONSUMER_KINDS,
 	REPORTING_SETTINGS_AUDIT_FIELDS,
@@ -1812,6 +1816,178 @@ const assertPlatformAdminAuditEvent = (
 	return 'platform-admin-audit';
 };
 
+const assertSupportAdminAuditEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'occurredAt',
+		'correlationId',
+		'actorId',
+		'section',
+		'action',
+		'description',
+		'entity',
+		'metadata'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE
+	) {
+		throw new Error('Invalid Support admin audit contract version');
+	}
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	if (
+		typeof payload.correlationId !== 'string' ||
+		!SAFE_CONTEXT_ID_PATTERN.test(payload.correlationId)
+	) {
+		throw new Error('payload.correlationId is invalid');
+	}
+	assertIdentifier(payload.actorId, 'payload.actorId');
+	if (payload.section !== 'SUPPORT') {
+		throw new Error('payload.section is invalid');
+	}
+	if (
+		!SUPPORT_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as SupportAdminAuditAction
+		)
+	) {
+		throw new Error('payload.action is invalid');
+	}
+	const action = payload.action as SupportAdminAuditAction;
+	assertString(payload.description, 'payload.description', {
+		maxLength: 2000
+	});
+	const entity = assertRecord(payload.entity, 'payload.entity');
+	assertExactKeys(
+		entity,
+		['type', 'id', 'label', 'targetUserId'],
+		[],
+		'payload.entity'
+	);
+	assertIdentifier(entity.type, 'payload.entity.type');
+	assertIdentifier(entity.id, 'payload.entity.id');
+	assertOptionalString(entity.label, 'payload.entity.label');
+	if (entity.targetUserId !== null) {
+		throw new Error('payload.entity.targetUserId must be null');
+	}
+	if (
+		(action === 'SUPPORT_ROUTING_SETTINGS_UPDATE' &&
+			(entity.type !== 'support_routing_settings' ||
+				entity.id !== 'singleton')) ||
+		(action === 'SUPPORT_WEBHOOK_REINSTALL' &&
+			(entity.type !== 'support_webhook' || entity.id !== 'support')) ||
+		((action === 'SUPPORT_DELIVERY_RETRY' ||
+			action === 'SUPPORT_DELIVERY_CLOSE') &&
+			(entity.type !== 'support_delivery_failure' ||
+				typeof entity.id !== 'string' ||
+				!UUID_PATTERN.test(entity.id)))
+	) {
+		throw new Error('payload.entity does not match action');
+	}
+
+	const metadata = assertRecord(payload.metadata, 'payload.metadata');
+	const requestContext = [
+		'actorRole',
+		'requestIp',
+		'requestUserAgent'
+	] as const;
+	if (action === 'SUPPORT_ROUTING_SETTINGS_UPDATE') {
+		assertExactKeys(
+			metadata,
+			[
+				...requestContext,
+				'adminChatIdConfigured',
+				'supportThreadIdConfigured',
+				'aggregateVersion'
+			],
+			[],
+			'payload.metadata'
+		);
+		assertBoolean(
+			metadata.adminChatIdConfigured,
+			'payload.metadata.adminChatIdConfigured'
+		);
+		assertBoolean(
+			metadata.supportThreadIdConfigured,
+			'payload.metadata.supportThreadIdConfigured'
+		);
+		assertDecimalString(
+			metadata.aggregateVersion,
+			'payload.metadata.aggregateVersion',
+			false
+		);
+	} else if (action === 'SUPPORT_WEBHOOK_REINSTALL') {
+		assertExactKeys(
+			metadata,
+			[
+				...requestContext,
+				'webhookMatchesExpected',
+				'usernameMatchesConfigured',
+				'dropPendingUpdates'
+			],
+			[],
+			'payload.metadata'
+		);
+		assertBoolean(
+			metadata.webhookMatchesExpected,
+			'payload.metadata.webhookMatchesExpected'
+		);
+		assertBoolean(
+			metadata.usernameMatchesConfigured,
+			'payload.metadata.usernameMatchesConfigured'
+		);
+		assertBoolean(
+			metadata.dropPendingUpdates,
+			'payload.metadata.dropPendingUpdates'
+		);
+	} else {
+		assertExactKeys(
+			metadata,
+			[
+				...requestContext,
+				'eventId',
+				...(action === 'SUPPORT_DELIVERY_RETRY'
+					? ['manualRetryCycle']
+					: [])
+			],
+			[],
+			'payload.metadata'
+		);
+		assertUuid(metadata.eventId, 'payload.metadata.eventId');
+		if (
+			action === 'SUPPORT_DELIVERY_RETRY' &&
+			(!Number.isSafeInteger(metadata.manualRetryCycle) ||
+				Number(metadata.manualRetryCycle) < 1)
+		) {
+			throw new Error('payload.metadata.manualRetryCycle is invalid');
+		}
+	}
+	if (
+		typeof metadata.actorRole !== 'string' ||
+		!['ADMIN', 'DEV'].includes(metadata.actorRole)
+	) {
+		throw new Error('payload.metadata.actorRole is invalid');
+	}
+	assertOptionalString(metadata.requestIp, 'payload.metadata.requestIp');
+	assertOptionalString(
+		metadata.requestUserAgent,
+		'payload.metadata.requestUserAgent'
+	);
+	if (
+		(typeof metadata.requestIp === 'string' &&
+			metadata.requestIp.length > 128) ||
+		(typeof metadata.requestUserAgent === 'string' &&
+			metadata.requestUserAgent.length > 500)
+	) {
+		throw new Error('payload.metadata request context is too large');
+	}
+	return 'support-admin-audit';
+};
+
 const assertIdentityAdminAuditSnapshot = (
 	value: unknown,
 	path: string
@@ -2143,6 +2319,14 @@ const assertAdminAuditEvent = (
 	payload: JsonRecord,
 	hintedKind?: MessagingKind
 ): IntegrationKind => {
+	if (
+		hintedKind === 'support-admin-audit' ||
+		SUPPORT_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as SupportAdminAuditAction
+		)
+	) {
+		return assertSupportAdminAuditEvent(payload);
+	}
 	if (
 		hintedKind === 'platform-admin-audit' ||
 		PLATFORM_ADMIN_AUDIT_ACTIONS.includes(

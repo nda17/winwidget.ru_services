@@ -9,6 +9,12 @@ bash -n \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh
 node --check .github/scripts/validate-production-compose.cjs
+node --check scripts/test-support-runtime-boundaries.mjs
+node --check scripts/test-support-core-source-cleanup-rehearsal.mjs
+bash -n scripts/support-release-identity.sh
+bash -n scripts/support-database-lifecycle.sh
+bash -n scripts/support-cutover-production.sh
+bash -n scripts/cleanup-support-core-source-production.sh
 # actionlint runs without its ShellCheck integration. Extracted workflow
 # runners are syntax-checked above; production scripts are checked separately.
 docker run --rm \
@@ -65,6 +71,10 @@ docker run --rm \
   scripts/platform-frontend-runtime-attestation.sh \
   scripts/platform-backup-restore-rehearsal.sh \
   scripts/deploy-platform-production.sh \
+  scripts/support-release-identity.sh \
+  scripts/support-database-lifecycle.sh \
+  scripts/support-cutover-production.sh \
+  scripts/cleanup-support-core-source-production.sh \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh \
   database-restore-entrypoint.sh
@@ -1647,6 +1657,11 @@ const expectedWorkflowDispatchInputNames = [
   "platform_frontend_attestation_sha256",
   "platform_frontend_signature_sha256",
   "platform_frontend_trusted_public_key_sha256",
+  "support_action",
+  "support_confirmation",
+  "support_cleanup_migration_sha256",
+  "support_cleanup_backup_sha256",
+  "support_cleanup_restore_evidence_sha256",
 ];
 if (
   JSON.stringify(workflowDispatchInputNames) !==
@@ -1749,6 +1764,7 @@ const exactIdentityScopedTokenNames = `          identity_scoped_token_names=(
             WIDGETS_IDENTITY_TOKEN
             IDENTITY_BILLING_TOKEN
             IDENTITY_PLATFORM_TOKEN
+            IDENTITY_SUPPORT_TOKEN
             BILLING_IDENTITY_TOKEN
           )`;
 if (!identityScopedTokenBlock.includes(exactIdentityScopedTokenNames)) {
@@ -1881,7 +1897,7 @@ requireCount("git checkout prod", 2);
 requireCount('git merge --ff-only "$fetched_revision"', 1);
 requireCount(
   'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-  10,
+  11,
 );
 requireCount(
   '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
@@ -1941,12 +1957,12 @@ requireCount(
 );
 requireCount(
   'local guard_action="${2:---guard-before-fetch-revision}"',
-  10,
+  12,
 );
 requireCount('"$guard_action" "$expected_revision"', 2);
 requireCount(
   '"$expected_revision" --guard-before-checkout-revision',
-  10,
+  12,
 );
 requireCount(
   '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
@@ -2602,7 +2618,7 @@ if (
   billingCandidateGuard < 0 ||
   billingDeferredExit <= billingCandidateGuard ||
   automaticDefer.includes("exit 0") ||
-  (automaticDefer.match(/exit 1/g) || []).length !== 6 ||
+  (automaticDefer.match(/exit 1/g) || []).length !== 7 ||
   automaticDefer.includes("git fetch origin prod") ||
   automaticDefer.includes("git checkout prod") ||
   automaticDefer.includes("retarget_billing_cleanup_revision")
@@ -2828,6 +2844,9 @@ const expectedBuildImageEnv = {
   TELEGRAM_AUTH_BOT_TOKEN: "ci_identity_auth_bot_token",
   TELEGRAM_AUTH_BOT_USERNAME: "ci_identity_auth_bot",
   TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: "ci_identity_auth_webhook_secret",
+  TELEGRAM_SUPPORT_BOT_TOKEN: "ci_support_bot_token",
+  TELEGRAM_SUPPORT_BOT_USERNAME: "ci_support_bot",
+  TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: "ci_support_webhook_secret",
   SMSAERO_EMAIL: "identity-ci@example.invalid",
   SMSAERO_API_KEY: "ci_identity_smsaero_api_key",
 };
@@ -3090,3 +3109,9 @@ process.stdout.write(
   "Backend checkout and standalone core database guards verified\n",
 );
 NODE
+node scripts/test-support-runtime-boundaries.mjs
+node scripts/test-support-core-source-cleanup-rehearsal.mjs
+bash scripts/support-release-identity.sh --self-test
+bash scripts/support-database-lifecycle.sh --self-test
+bash scripts/support-cutover-production.sh --self-test
+bash scripts/cleanup-support-core-source-production.sh --self-test

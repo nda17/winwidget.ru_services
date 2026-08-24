@@ -4,10 +4,6 @@ import { CurrentUser } from '@/auth/decorators/user.decorator';
 import { DATABASE_RESTORE_MAX_FILE_SIZE_BYTES as DATABASE_RESTORE_QUEUE_MAX_FILE_SIZE_BYTES } from '@/dev-tools/database-restore-queue.contract';
 import { DatabaseRestoreQueueService } from '@/dev-tools/database-restore-queue.service';
 import {
-	DATABASE_RESTORE_MAX_FILE_SIZE_BYTES,
-	DatabaseRestoreService
-} from '@/dev-tools/database-restore.service';
-import {
 	Body,
 	Controller,
 	Get,
@@ -38,7 +34,6 @@ class RestoreDatabaseBackupDto {
 @Auth('DEV')
 export class DevToolsController {
 	constructor(
-		private readonly databaseRestoreService: DatabaseRestoreService,
 		private readonly databaseRestoreQueueService: DatabaseRestoreQueueService,
 		private readonly adminEventLogService: AdminEventLogService
 	) {}
@@ -179,44 +174,5 @@ export class DevToolsController {
 				return { auditEventId: auditRecord.id };
 			}
 		);
-	}
-
-	@HttpCode(200)
-	@Get('database-backup/restore-settings')
-	getDatabaseRestoreSettings() {
-		return this.databaseRestoreService.getSettings();
-	}
-
-	@HttpCode(200)
-	@UsePipes(new ValidationPipe({ whitelist: true }))
-	@Post('database-backup/restore')
-	@UseInterceptors(
-		FileInterceptor('file', {
-			limits: { fileSize: DATABASE_RESTORE_MAX_FILE_SIZE_BYTES }
-		})
-	)
-	async restoreDatabaseBackup(
-		@UploadedFile() file: Express.Multer.File | undefined,
-		@Body() dto: RestoreDatabaseBackupDto,
-		@CurrentUser('id') adminId: string,
-		@Req() request: Request
-	) {
-		await this.adminEventLogService.record({
-			adminId,
-			section: 'DEV_TOOLS',
-			action: 'DEV_DATABASE_RESTORE',
-			description:
-				'DEV запросил legacy-восстановление основной базы из backup',
-			entityType: 'database_backup',
-			entityId: file?.originalname ?? 'unknown',
-			entityLabel: file?.originalname ?? 'unknown',
-			metadata: {
-				fileName: file?.originalname ?? null,
-				fileSize: file?.size ?? null
-			},
-			request
-		});
-
-		return this.databaseRestoreService.restore(file, dto.confirmation);
 	}
 }

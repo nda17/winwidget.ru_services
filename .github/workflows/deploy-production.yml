@@ -20,6 +20,7 @@ on:
           - identity
           - identity-cleanup
           - platform
+          - support
       widgets_cutover_confirmation:
         description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
         required: false
@@ -145,6 +146,36 @@ on:
         required: false
         default: ''
         type: string
+      support_action:
+        description: Support lifecycle action (manual support target only)
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - prepare
+          - cutover
+          - cleanup
+      support_confirmation:
+        description: Type the exact Support lifecycle confirmation when required
+        required: false
+        default: ''
+        type: string
+      support_cleanup_migration_sha256:
+        description: Reviewed SHA-256 of the exact Support Core cleanup SQL
+        required: false
+        default: ''
+        type: string
+      support_cleanup_backup_sha256:
+        description: SHA-256 of the protected Support database backup used for cleanup recovery
+        required: false
+        default: ''
+        type: string
+      support_cleanup_restore_evidence_sha256:
+        description: SHA-256 of the clean Support restore rehearsal evidence
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - prod
@@ -213,6 +244,12 @@ jobs:
             apps/platform/pnpm-lock.yaml
             apps/platform/prisma/schema.prisma
             apps/platform/prisma/migrations/20260823000000_init_platform/migration.sql
+            apps/support/Dockerfile
+            apps/support/package.json
+            apps/support/pnpm-lock.yaml
+            apps/support/prisma/schema.prisma
+            apps/support/prisma/migrations/20260824010000_init_support/migration.sql
+            prisma/post-cutover/support/20260824030000_remove_legacy_support_core_source.sql
             .github/scripts/validate-production-compose.cjs
             deploy/docker-compose.prod.yml
             deploy/nginx.conf
@@ -247,6 +284,11 @@ jobs:
             scripts/platform-frontend-runtime-attestation.sh
             scripts/platform-backup-restore-rehearsal.sh
             scripts/deploy-platform-production.sh
+            scripts/support-release-identity.sh
+            scripts/support-database-lifecycle.sh
+            scripts/support-cutover-production.sh
+            scripts/cleanup-support-core-source-production.sh
+            scripts/test-support-core-source-cleanup-rehearsal.mjs
             apps/billing/src/cutover-main.ts
             prisma/migrations/20260811000000_prepare_billing_service_ownership/migration.sql
             prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
@@ -254,6 +296,7 @@ jobs:
             prisma/migrations/20260814020000_detach_identity_foreign_keys/migration.sql
             prisma/migrations/20260815000000_remove_legacy_identity_core_source/migration.sql
             prisma/migrations/20260824000000_prepare_platform_service_ownership/migration.sql
+            prisma/migrations/20260824020000_prepare_support_service_ownership/migration.sql
           )
           for path in "${required_files[@]}"; do
             test -f "$path"
@@ -288,7 +331,11 @@ jobs:
             scripts/platform-cutover-production.sh \
             scripts/platform-frontend-runtime-attestation.sh \
             scripts/platform-backup-restore-rehearsal.sh \
-            scripts/deploy-platform-production.sh; do
+            scripts/deploy-platform-production.sh \
+            scripts/support-release-identity.sh \
+            scripts/support-database-lifecycle.sh \
+            scripts/support-cutover-production.sh \
+            scripts/cleanup-support-core-source-production.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
@@ -345,6 +392,14 @@ jobs:
             bash scripts/platform-backup-restore-rehearsal.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/deploy-platform-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/support-release-identity.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/support-database-lifecycle.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/support-cutover-production.sh --self-test
+          bash scripts/cleanup-support-core-source-production.sh --self-test
+          node scripts/test-support-core-source-cleanup-rehearsal.mjs
 
           # ShellCheck runs separately below; its actionlint integration
           # deadlocks while piping this workflow's large inline scripts.
@@ -393,7 +448,11 @@ jobs:
             scripts/platform-cutover-production.sh \
             scripts/platform-frontend-runtime-attestation.sh \
             scripts/platform-backup-restore-rehearsal.sh \
-            scripts/deploy-platform-production.sh
+            scripts/deploy-platform-production.sh \
+            scripts/support-release-identity.sh \
+            scripts/support-database-lifecycle.sh \
+            scripts/support-cutover-production.sh \
+            scripts/cleanup-support-core-source-production.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -547,6 +606,11 @@ jobs:
           PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_attestation_sha256 || '' }}
           PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_signature_sha256 || '' }}
           PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_trusted_public_key_sha256 || '' }}
+          SUPPORT_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_action || 'status' }}
+          SUPPORT_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_confirmation || '' }}
+          SUPPORT_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_migration_sha256 || '' }}
+          SUPPORT_CLEANUP_BACKUP_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_backup_sha256 || '' }}
+          SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_restore_evidence_sha256 || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -658,6 +722,33 @@ jobs:
             echo 'Platform lifecycle inputs require the platform target.' >&2
             exit 1
           fi
+          if [[ "$DEPLOY_TARGET" == 'support' ]]; then
+            case "$SUPPORT_ACTION:$SUPPORT_CONFIRMATION" in
+              status:) ;;
+              prepare:'PREPARE SUPPORT OWNERSHIP') ;;
+              cutover:'CUTOVER SUPPORT OWNERSHIP') ;;
+              cleanup:'DROP LEGACY SUPPORT CORE SOURCE') ;;
+              *)
+                echo 'Invalid Support lifecycle action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+            if [[ "$SUPPORT_ACTION" == 'cleanup' ]]; then
+              [[ "$SUPPORT_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$SUPPORT_CLEANUP_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ &&
+                "$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+                echo 'Support cleanup requires all three exact evidence SHA-256 values.' >&2
+                exit 1
+              }
+            elif [[ -n "$SUPPORT_CLEANUP_MIGRATION_SHA256$SUPPORT_CLEANUP_BACKUP_SHA256$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" ]]; then
+              echo 'Support cleanup evidence is accepted only by the cleanup action.' >&2
+              exit 1
+            fi
+          elif [[ "$SUPPORT_ACTION" != 'status' || -n "$SUPPORT_CONFIRMATION" ||
+            -n "$SUPPORT_CLEANUP_MIGRATION_SHA256$SUPPORT_CLEANUP_BACKUP_SHA256$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" ]]; then
+            echo 'Support lifecycle inputs require the support target.' >&2
+            exit 1
+          fi
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o ServerAliveInterval=15 \
@@ -665,7 +756,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256='$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256' PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256='$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256='$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256' PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256='$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' SUPPORT_ACTION='$SUPPORT_ACTION' SUPPORT_CONFIRMATION='$SUPPORT_CONFIRMATION' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -716,7 +807,6 @@ jobs:
           for key in \
             DATABASE_URL_PRODUCTION \
             DATABASE_MIGRATION_URL_PRODUCTION \
-            DATABASE_BACKUP_URL \
             INTEGRATION_WORKER_KINDS \
             GATEWAY_ROUTES_JSON \
             CORS_ALLOWED_ORIGINS \
@@ -774,6 +864,36 @@ jobs:
             PLATFORM_OUTBOX_RETENTION_DAYS \
             IDENTITY_PLATFORM_TOKEN \
             RABBITMQ_PLATFORM_PUBLISHER_URL \
+            SUPPORT_POSTGRES_IMAGE \
+            SUPPORT_POSTGRES_PORT \
+            SUPPORT_POSTGRES_DATA_VOLUME \
+            SUPPORT_POSTGRES_ADMIN_USER \
+            SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE \
+            SUPPORT_DATABASE_URL \
+            SUPPORT_MIGRATION_DATABASE_URL \
+            SUPPORT_BACKUP_URL \
+            SUPPORT_API_PORT \
+            SUPPORT_WORKER_PORT \
+            SUPPORT_OUTBOX_PUBLISHER_PORT \
+            SUPPORT_INTERNAL_BASE_URL \
+            SUPPORT_CORE_TOKEN \
+            SUPPORT_WEBHOOK_PUBLIC_URL \
+            SUPPORT_INBOX_LEASE_MS \
+            SUPPORT_PREFETCH \
+            SUPPORT_OUTBOX_BATCH_SIZE \
+            SUPPORT_OUTBOX_POLL_INTERVAL_MS \
+            SUPPORT_OUTBOX_RETENTION_DAYS \
+            SUPPORT_RECEIPT_RETENTION_DAYS \
+            SUPPORT_FAILURE_DETAIL_RETENTION_DAYS \
+            SUPPORT_RESTORE_DRILL_EVIDENCE_FILE \
+            IDENTITY_SUPPORT_TOKEN \
+            TELEGRAM_SUPPORT_BOT_TOKEN \
+            TELEGRAM_SUPPORT_BOT_USERNAME \
+            TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET \
+            TELEGRAM_API_BASE_URL \
+            TELEGRAM_API_PROXY_IP \
+            RABBITMQ_SUPPORT_WORKER_URL \
+            RABBITMQ_SUPPORT_PUBLISHER_URL \
             RABBITMQ_INTEGRATION_WORKER_URL \
             RABBITMQ_MANAGEMENT_URL \
             RABBITMQ_MONITOR_USER \
@@ -977,6 +1097,34 @@ jobs:
                 ! -e "$phase_a_env" && ! -L "$phase_a_env" ) ]]
           }
 
+          guard_support_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local database_script="scripts/support-database-lifecycle.sh"
+            local cutover_script="scripts/support-cutover-production.sh"
+            local database_marker="$APP_ROOT/deploy/backend/.support-database-lifecycle-v1"
+            local cleanup_marker="$APP_ROOT/deploy/backend/.support-core-cleanup-v1"
+            local script tracked_blob actual_blob
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+            for script in "$database_script" "$cutover_script"; do
+              tracked_blob="$(git rev-parse --verify "HEAD:$script" 2>/dev/null || true)"
+              if [[ -e "$script" || -L "$script" ]]; then
+                [[ -f "$script" && ! -L "$script" && -n "$tracked_blob" ]] || return 1
+                actual_blob="$(git hash-object "$script")"
+                [[ "$actual_blob" == "$tracked_blob" ]] || return 1
+              elif [[ -n "$tracked_blob" ]]; then
+                return 1
+              fi
+            done
+            if [[ -e "$database_script" ]]; then
+              APP_ROOT="$APP_ROOT" bash "$database_script" "$guard_action" "$expected_revision"
+            else
+              [[ ! -e "$database_marker" && ! -L "$database_marker" &&
+                ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]]
+            fi
+          }
+
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           billing_retarget_preflight=false
@@ -995,6 +1143,7 @@ jobs:
           fi
           guard_identity_checkout_before_pull "$current_revision"
           guard_platform_checkout_before_pull "$current_revision"
+          guard_support_checkout_before_pull "$current_revision"
           guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
@@ -1010,6 +1159,7 @@ jobs:
             fi
             guard_identity_checkout_before_pull "$EXPECTED_REVISION"
             guard_platform_checkout_before_pull "$EXPECTED_REVISION"
+            guard_support_checkout_before_pull "$EXPECTED_REVISION"
           else
             echo "Automatic push will verify before the deploy job evaluates the active Reporting and Billing revision guards."
           fi
@@ -1075,6 +1225,8 @@ jobs:
       IDENTITY_IMAGE: winwidget-identity:git-${{ github.sha }}
       PLATFORM_REVISION: ${{ github.sha }}
       PLATFORM_IMAGE: winwidget-platform:git-${{ github.sha }}
+      SUPPORT_REVISION: ${{ github.sha }}
+      SUPPORT_IMAGE: winwidget-support:git-${{ github.sha }}
       # CI-only 32-byte key. Production uses deploy/backend/.env.production.
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       YOOKASSA_PRODUCTION_SHOP_ID: ci_billing_shop
@@ -1121,6 +1273,11 @@ jobs:
       PLATFORM_BACKUP_URL: postgresql://winwidget_platform_backup:platform_backup_ci@127.0.0.1:55439/winwidget_platform_ci?schema=platform&sslmode=disable
       PLATFORM_CI_POSTGRES_CONTAINER: winwidget-platform-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       PLATFORM_CI_POSTGRES_VOLUME: winwidget-platform-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      SUPPORT_DATABASE_URL: postgresql://winwidget_support_runtime:support_runtime_ci@127.0.0.1:55440/winwidget_support_ci?schema=support&sslmode=disable
+      SUPPORT_CI_MIGRATION_DATABASE_URL: postgresql://winwidget_support_migration:support_migration_ci@127.0.0.1:55440/winwidget_support_ci?schema=support&sslmode=disable
+      SUPPORT_BACKUP_URL: postgresql://winwidget_support_backup:support_backup_ci@127.0.0.1:55440/winwidget_support_ci?schema=support&sslmode=disable
+      SUPPORT_CI_POSTGRES_CONTAINER: winwidget-support-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      SUPPORT_CI_POSTGRES_VOLUME: winwidget-support-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       BILLING_PROCESS_ROLE: api
       BILLING_LISTEN_HOST: 127.0.0.1
       BILLING_API_PORT: 4800
@@ -1148,6 +1305,7 @@ jobs:
       IDENTITY_WIDGETS_TOKEN: ci_identity_widgets_token_at_least_32_chars
       IDENTITY_BILLING_TOKEN: ci_identity_billing_token_at_least_32_chars
       IDENTITY_PLATFORM_TOKEN: ci_identity_platform_token_at_least_32_chars
+      IDENTITY_SUPPORT_TOKEN: ci_identity_support_token_at_least_32_chars
       BILLING_CAMPAIGNS_TOKEN: ci_billing_campaigns_token_at_least_32_chars
       RABBITMQ_IDENTITY_WORKER_URL: amqp://winwidget-identity-worker:identity_worker_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       RABBITMQ_IDENTITY_PUBLISHER_URL: amqp://winwidget-identity-publisher:identity_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
@@ -1160,6 +1318,28 @@ jobs:
       PLATFORM_INTERNAL_TIMEOUT_MS: 5000
       PLATFORM_OUTBOX_RETENTION_DAYS: 7
       RABBITMQ_PLATFORM_PUBLISHER_URL: amqp://winwidget-platform-publisher:platform_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
+      SUPPORT_PROCESS_ROLE: api
+      SUPPORT_LISTEN_HOST: 127.0.0.1
+      SUPPORT_API_PORT: 5100
+      SUPPORT_WORKER_PORT: 5101
+      SUPPORT_OUTBOX_PUBLISHER_PORT: 5102
+      SUPPORT_INTERNAL_BASE_URL: http://127.0.0.1:5100
+      SUPPORT_CORE_TOKEN: ci_support_core_token_at_least_32_chars
+      SUPPORT_WEBHOOK_PUBLIC_URL: https://tg.winwidget.ru/api/v1/telegram-bot/support-webhook
+      SUPPORT_INBOX_LEASE_MS: 60000
+      SUPPORT_PREFETCH: 10
+      SUPPORT_OUTBOX_BATCH_SIZE: 50
+      SUPPORT_OUTBOX_POLL_INTERVAL_MS: 1000
+      SUPPORT_OUTBOX_RETENTION_DAYS: 7
+      SUPPORT_RECEIPT_RETENTION_DAYS: 90
+      SUPPORT_FAILURE_DETAIL_RETENTION_DAYS: 30
+      TELEGRAM_SUPPORT_BOT_TOKEN: ci_support_bot_token
+      TELEGRAM_SUPPORT_BOT_USERNAME: ci_support_bot
+      TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: ci_support_webhook_secret_at_least_32_chars
+      TELEGRAM_API_BASE_URL: https://tg.winwidget.ru/telegram-api
+      TELEGRAM_API_PROXY_IP: 185.184.122.62
+      RABBITMQ_SUPPORT_WORKER_URL: amqp://winwidget-support-worker:support_worker_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
+      RABBITMQ_SUPPORT_PUBLISHER_URL: amqp://winwidget-support-publisher:support_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       WIDGETS_PROCESS_ROLE: all
       WIDGETS_LISTEN_HOST: 127.0.0.1
       WIDGETS_PORT: 4700
@@ -1230,6 +1410,7 @@ jobs:
             WIDGETS_IDENTITY_TOKEN
             IDENTITY_BILLING_TOKEN
             IDENTITY_PLATFORM_TOKEN
+            IDENTITY_SUPPORT_TOKEN
             BILLING_IDENTITY_TOKEN
           )
           declare -A identity_scoped_token_values=()
@@ -1451,6 +1632,7 @@ jobs:
             apps/billing/pnpm-lock.yaml
             apps/identity/pnpm-lock.yaml
             apps/platform/pnpm-lock.yaml
+            apps/support/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -1465,6 +1647,7 @@ jobs:
           pnpm --dir apps/billing install --frozen-lockfile
           pnpm --dir apps/identity install --frozen-lockfile
           pnpm --dir apps/platform install --frozen-lockfile
+          pnpm --dir apps/support install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
         env:
@@ -2195,6 +2378,84 @@ jobs:
             GRANT SELECT ON SEQUENCES TO winwidget_platform_backup;
           SQL
 
+      - name: Start isolated Support PostgreSQL 18
+        env:
+          SUPPORT_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-support-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          test ! -e "$SUPPORT_CI_POSTGRES_PASSWORD_FILE"
+          umask 077
+          openssl rand -hex 32 > "$SUPPORT_CI_POSTGRES_PASSWORD_FILE"
+          docker volume create \
+            --label com.winwidget.owner=support \
+            --label com.winwidget.purpose=ci-postgres-data \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            "$SUPPORT_CI_POSTGRES_VOLUME" > /dev/null
+          docker run --detach \
+            --name "$SUPPORT_CI_POSTGRES_CONTAINER" \
+            --label com.winwidget.owner=support \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55440:5432 \
+            --mount "type=volume,source=$SUPPORT_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount "type=bind,source=$SUPPORT_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/support-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_support_ci \
+            --env POSTGRES_USER=winwidget_support_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/support-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd "pg_isready --username winwidget_support_admin --dbname winwidget_support_ci" \
+            --health-interval 5s --health-timeout 5s --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+          for attempt in $(seq 1 30); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$SUPPORT_CI_POSTGRES_CONTAINER")"
+            [[ "$status" == 'healthy' ]] && break
+            if [[ "$status" == 'unhealthy' || "$attempt" == '30' ]]; then
+              docker logs "$SUPPORT_CI_POSTGRES_CONTAINER" >&2
+              echo "Isolated Support PostgreSQL is $status." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Create isolated Support roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.SUPPORT_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_support_admin \
+              --dbname winwidget_support_ci <<'SQL'
+          REVOKE ALL ON DATABASE winwidget_support_ci FROM PUBLIC;
+          CREATE ROLE winwidget_support_migration LOGIN PASSWORD 'support_migration_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE winwidget_support_runtime LOGIN PASSWORD 'support_runtime_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE winwidget_support_backup LOGIN PASSWORD 'support_backup_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE winwidget_support_ci
+            TO winwidget_support_migration, winwidget_support_runtime, winwidget_support_backup;
+          REVOKE CREATE, TEMPORARY ON DATABASE winwidget_support_ci
+            FROM winwidget_support_migration, winwidget_support_runtime, winwidget_support_backup;
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA support AUTHORIZATION winwidget_support_migration;
+          REVOKE ALL ON SCHEMA support FROM PUBLIC;
+          GRANT USAGE ON SCHEMA support TO winwidget_support_runtime, winwidget_support_backup;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
+            REVOKE ALL ON TABLES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
+            REVOKE ALL ON SEQUENCES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
+            REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO winwidget_support_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO winwidget_support_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
+            GRANT SELECT ON TABLES TO winwidget_support_backup;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
+            GRANT SELECT ON SEQUENCES TO winwidget_support_backup;
+          SQL
+
       - name: Rehearse Widgets exact dump in isolated PostgreSQL 18
         env:
           WIDGETS_REHEARSAL_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2284,6 +2545,8 @@ jobs:
           pnpm --dir apps/identity run prisma:generate
           pnpm --dir apps/platform run prisma:validate
           pnpm --dir apps/platform run prisma:generate
+          pnpm --dir apps/support run prisma:validate
+          pnpm --dir apps/support run prisma:generate
 
       - name: Fast-check Widgets snapshot SQL contract
         run: node scripts/export-widgets-cutover-snapshot.mjs --self-test
@@ -2306,6 +2569,97 @@ jobs:
             pnpm --dir apps/identity run prisma:migrate:deploy
           PLATFORM_DATABASE_URL="$PLATFORM_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/platform run prisma:migrate:deploy
+          SUPPORT_DATABASE_URL="$SUPPORT_CI_MIGRATION_DATABASE_URL" \
+            pnpm --dir apps/support run prisma:migrate:deploy
+
+      - name: Verify Support PostgreSQL ACLs and clean restore
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.SUPPORT_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_support_admin \
+              --dbname winwidget_support_ci <<'SQL'
+          REVOKE ALL ON SCHEMA support FROM PUBLIC;
+          REVOKE CREATE ON SCHEMA support FROM winwidget_support_runtime, winwidget_support_backup;
+          REVOKE ALL ON ALL TABLES IN SCHEMA support
+            FROM PUBLIC, winwidget_support_runtime, winwidget_support_backup;
+          REVOKE ALL ON ALL SEQUENCES IN SCHEMA support
+            FROM PUBLIC, winwidget_support_runtime, winwidget_support_backup;
+          REVOKE ALL ON ALL FUNCTIONS IN SCHEMA support
+            FROM PUBLIC, winwidget_support_runtime, winwidget_support_backup;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA support
+            TO winwidget_support_runtime;
+          GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA support
+            TO winwidget_support_runtime;
+          REVOKE ALL ON TABLE support._prisma_migrations FROM winwidget_support_runtime;
+          GRANT SELECT ON ALL TABLES IN SCHEMA support TO winwidget_support_backup;
+          GRANT SELECT ON ALL SEQUENCES IN SCHEMA support TO winwidget_support_backup;
+          SQL
+          test "$(
+            docker exec -e PGPASSWORD=support_runtime_ci "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --host 127.0.0.1 \
+                --username winwidget_support_runtime \
+                --dbname winwidget_support_ci \
+                --command "SELECT service_name || '|' || phase::text FROM support.service_identity WHERE id = 'singleton';"
+          )" = 'support-service|SHADOW'
+          if docker exec -e PGPASSWORD=support_runtime_ci "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --host 127.0.0.1 \
+              --username winwidget_support_runtime \
+              --dbname winwidget_support_ci \
+              --command 'SELECT count(*) FROM support._prisma_migrations;' \
+              > /dev/null 2>&1; then
+            echo 'Support runtime role unexpectedly reads migration history.' >&2
+            exit 1
+          fi
+          docker exec -e PGPASSWORD=support_backup_ci "$POSTGRES_CONTAINER_ID" \
+            pg_dump \
+              --host 127.0.0.1 \
+              --username winwidget_support_backup \
+              --dbname winwidget_support_ci \
+              --format custom \
+              --no-owner \
+              --no-acl \
+              --schema support \
+              --file /tmp/support-ci.dump
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore --list /tmp/support-ci.dump > /dev/null
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_support_admin \
+              --dbname postgres \
+              --command 'CREATE DATABASE winwidget_support_restore_ci WITH TEMPLATE template0;'
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore \
+              --exit-on-error \
+              --single-transaction \
+              --no-owner \
+              --no-acl \
+              --username winwidget_support_admin \
+              --dbname winwidget_support_restore_ci \
+              /tmp/support-ci.dump
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_support_admin \
+                --dbname winwidget_support_restore_ci \
+                --command "SELECT service_name || '|' || phase::text FROM support.service_identity WHERE id = 'singleton';"
+          )" = 'support-service|SHADOW'
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_support_admin \
+                --dbname winwidget_support_restore_ci \
+                --command 'SELECT count(*) FROM support._prisma_migrations;'
+          )" -ge 1
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_support_admin \
+              --dbname postgres \
+              --command 'DROP DATABASE winwidget_support_restore_ci WITH (FORCE);'
+          docker exec "$POSTGRES_CONTAINER_ID" rm -f -- /tmp/support-ci.dump
 
       - name: Rehearse guarded Widgets Core source cleanup in PostgreSQL 18
         env:
@@ -4190,6 +4544,7 @@ jobs:
           pnpm --dir apps/billing run typecheck
           pnpm --dir apps/identity run typecheck
           pnpm --dir apps/platform run typecheck
+          pnpm --dir apps/support run typecheck
 
       - name: Lint
         run: |
@@ -4201,6 +4556,7 @@ jobs:
           pnpm --dir apps/billing run lint
           pnpm --dir apps/identity run lint
           pnpm --dir apps/platform run lint
+          pnpm --dir apps/support run lint
 
       - name: Test
         run: |
@@ -4212,6 +4568,7 @@ jobs:
           pnpm --dir apps/billing test
           pnpm --dir apps/identity test
           pnpm --dir apps/platform test
+          pnpm --dir apps/support test
           widgets_browser_executable="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)"
           test -n "$widgets_browser_executable"
           WIDGETS_TEST_DATABASE_URL="$WIDGETS_DATABASE_URL" \
@@ -4284,6 +4641,14 @@ jobs:
           PLATFORM_DATABASE_URL: postgresql://winwidget_platform_runtime:platform_runtime_ci@127.0.0.1:55439/winwidget_platform?schema=platform&sslmode=disable
           PLATFORM_MIGRATION_DATABASE_URL: postgresql://winwidget_platform_migration:platform_migration_ci@127.0.0.1:55439/winwidget_platform?schema=platform&sslmode=disable
           PLATFORM_BACKUP_URL: postgresql://winwidget_platform_backup:platform_backup_ci@127.0.0.1:55439/winwidget_platform?schema=platform&sslmode=disable
+          SUPPORT_POSTGRES_IMAGE: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+          SUPPORT_POSTGRES_PORT: '55440'
+          SUPPORT_POSTGRES_DATA_VOLUME: winwidget-support-postgres-data
+          SUPPORT_POSTGRES_ADMIN_USER: winwidget_support_admin
+          SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE: /tmp/winwidget-support-postgres-admin-password
+          SUPPORT_DATABASE_URL: postgresql://winwidget_support_runtime:support_runtime_ci@127.0.0.1:55440/winwidget_support?schema=support&sslmode=disable
+          SUPPORT_MIGRATION_DATABASE_URL: postgresql://winwidget_support_migration:support_migration_ci@127.0.0.1:55440/winwidget_support?schema=support&sslmode=disable
+          SUPPORT_BACKUP_URL: postgresql://winwidget_support_backup:support_backup_ci@127.0.0.1:55440/winwidget_support?schema=support&sslmode=disable
           MODE: production
           GOOGLE_CLIENT_ID: ci_identity_google_client_id
           GOOGLE_CLIENT_SECRET: ci_identity_google_client_secret
@@ -4408,6 +4773,7 @@ jobs:
           pnpm --dir apps/identity test
           pnpm --dir apps/identity run build
           pnpm --dir apps/platform run build
+          pnpm --dir apps/support run build
 
       - name: Create restricted Billing RabbitMQ users
         env:
@@ -4562,6 +4928,7 @@ jobs:
             "billing-admin-audit",
             "identity-admin-audit",
             "platform-admin-audit",
+            "support-admin-audit",
             "billing-payment-projection",
             "billing-subscription-projection",
             "billing-affiliate-projection",
@@ -5265,6 +5632,7 @@ jobs:
             ...billingProjectionKinds,
             "identity-admin-audit",
             "platform-admin-audit",
+            "support-admin-audit",
           ]) {
             const queue = monolith.MESSAGING_QUEUE_NAMES[kind];
             if (!postIdentityPattern.test(queue)) {
@@ -5407,6 +5775,9 @@ jobs:
           TELEGRAM_AUTH_BOT_TOKEN: ci_identity_auth_bot_token
           TELEGRAM_AUTH_BOT_USERNAME: ci_identity_auth_bot
           TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: ci_identity_auth_webhook_secret
+          TELEGRAM_SUPPORT_BOT_TOKEN: ci_support_bot_token
+          TELEGRAM_SUPPORT_BOT_USERNAME: ci_support_bot
+          TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: ci_support_webhook_secret
           SMSAERO_EMAIL: identity-ci@example.invalid
           SMSAERO_API_KEY: ci_identity_smsaero_api_key
         run: |
@@ -5415,7 +5786,7 @@ jobs:
           trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
           export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
 
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api identity-api platform-api
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api identity-api platform-api support-api
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -5518,6 +5889,25 @@ jobs:
               test ! -e dist/src/app.module.js
               test ! -e public/widgets
             '
+          test "$(
+            docker image inspect "$SUPPORT_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$SUPPORT_REVISION"
+          test "$(
+            docker image inspect "$SUPPORT_IMAGE" --format '{{.Config.User}}'
+          )" = 'support'
+          docker run --rm --network none \
+            --entrypoint sh \
+            "$SUPPORT_IMAGE" \
+            -euc '
+              test "$(id -u)" = 1001
+              test -f dist/src/main.js
+              test -f dist/src/cutover/main.js
+              test -f prisma/schema.prisma
+              test -d prisma/migrations
+              test ! -e dist/src/app.module.js
+              test ! -e public/widgets
+            '
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version | grep -Eq " 18[.]" && pg_restore --version | grep -Eq " 18[.]" && test -f dist/src/maintenance-worker-main.js'
@@ -5536,6 +5926,7 @@ jobs:
               test -d apps/billing/prisma/migrations
               test -d apps/identity/prisma/migrations
               test -d apps/platform/prisma/migrations
+              test -d apps/support/prisma/migrations
             '
           restore_entrypoint_run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           restore_entrypoint_volume="winwidget-ci-restore-entrypoint-${restore_entrypoint_run_id}"
@@ -5590,14 +5981,14 @@ jobs:
           restore_entrypoint_fixture="$restore_entrypoint_secret_root/.fixture"
           printf 'ci-database-restore-entrypoint-fixture\n' > "$restore_entrypoint_fixture"
           for secret_name in \
-            core-admin-password \
             notification-delivery-admin-password \
             campaigns-admin-password \
             reporting-admin-password \
             widgets-admin-password \
             billing-admin-password \
             identity-admin-password \
-            platform-admin-password; do
+            platform-admin-password \
+            support-admin-password; do
             sudo install -o root -g root -m 400 \
               "$restore_entrypoint_fixture" \
               "$restore_entrypoint_secret_root/$secret_name"
@@ -5606,14 +5997,14 @@ jobs:
           sudo chown root:root "$restore_entrypoint_secret_root"
           sudo chmod 700 "$restore_entrypoint_secret_root"
           for secret_name in \
-            core-admin-password \
             notification-delivery-admin-password \
             campaigns-admin-password \
             reporting-admin-password \
             widgets-admin-password \
             billing-admin-password \
             identity-admin-password \
-            platform-admin-password; do
+            platform-admin-password \
+            support-admin-password; do
             test "$(sudo stat -c '%u:%g:%a' "$restore_entrypoint_secret_root/$secret_name")" = '0:0:400'
           done
           docker volume create \
@@ -5643,7 +6034,6 @@ jobs:
             --cap-add SETUID \
             --env DATABASE_RESTORE_STORAGE_DIR=/var/lib/winwidget/database-restores \
             --mount "type=volume,source=$restore_entrypoint_volume,target=/var/lib/winwidget/database-restores" \
-            --mount "type=bind,source=$restore_entrypoint_secret_root/core-admin-password,target=/run/secrets/database-restore-core-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/notification-delivery-admin-password,target=/run/secrets/database-restore-notification-delivery-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/campaigns-admin-password,target=/run/secrets/database-restore-campaigns-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/reporting-admin-password,target=/run/secrets/database-restore-reporting-admin-password,readonly" \
@@ -5651,6 +6041,7 @@ jobs:
             --mount "type=bind,source=$restore_entrypoint_secret_root/billing-admin-password,target=/run/secrets/database-restore-billing-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/identity-admin-password,target=/run/secrets/database-restore-identity-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/platform-admin-password,target=/run/secrets/database-restore-platform-admin-password,readonly" \
+            --mount "type=bind,source=$restore_entrypoint_secret_root/support-admin-password,target=/run/secrets/database-restore-support-admin-password,readonly" \
             --tmpfs /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
             "$DATABASE_RESTORE_IMAGE" \
@@ -5659,14 +6050,14 @@ jobs:
               test "$(stat -c "%u:%g:%a" /run/database-restore-secrets)" = "1001:1001:700"
               copied=0
               for secret_file in \
-                /run/database-restore-secrets/core-admin-password \
                 /run/database-restore-secrets/notification-delivery-admin-password \
                 /run/database-restore-secrets/campaigns-admin-password \
                 /run/database-restore-secrets/reporting-admin-password \
                 /run/database-restore-secrets/widgets-admin-password \
                 /run/database-restore-secrets/billing-admin-password \
                 /run/database-restore-secrets/identity-admin-password \
-                /run/database-restore-secrets/platform-admin-password; do
+                /run/database-restore-secrets/platform-admin-password \
+                /run/database-restore-secrets/support-admin-password; do
                 test -f "$secret_file"
                 test ! -L "$secret_file"
                 test -r "$secret_file"
@@ -6515,6 +6906,44 @@ jobs:
           rm -f -- "$PLATFORM_CI_POSTGRES_PASSWORD_FILE"
           [[ "$cleanup_failed" == "false" ]]
 
+      - name: Cleanup isolated Support PostgreSQL
+        if: ${{ always() }}
+        env:
+          SUPPORT_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-support-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          cleanup_failed=false
+          if docker container inspect \
+            "$SUPPORT_CI_POSTGRES_CONTAINER" > /dev/null 2>&1; then
+            container_identity="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{index .Config.Labels "com.winwidget.github-run"}}' \
+                "$SUPPORT_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$container_identity" != "support|ci-postgres|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Support container." >&2
+              cleanup_failed=true
+            else
+              docker container rm --force \
+                "$SUPPORT_CI_POSTGRES_CONTAINER" > /dev/null
+            fi
+          fi
+          if docker volume inspect \
+            "$SUPPORT_CI_POSTGRES_VOLUME" > /dev/null 2>&1; then
+            volume_identity="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}|{{index .Labels "com.winwidget.github-run"}}' \
+                "$SUPPORT_CI_POSTGRES_VOLUME"
+            )"
+            if [[ "$volume_identity" != "support|ci-postgres-data|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Support volume." >&2
+              cleanup_failed=true
+            else
+              docker volume rm "$SUPPORT_CI_POSTGRES_VOLUME" > /dev/null
+            fi
+          fi
+          rm -f -- "$SUPPORT_CI_POSTGRES_PASSWORD_FILE"
+          [[ "$cleanup_failed" == "false" ]]
+
   deploy:
     needs: verify
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -6646,6 +7075,11 @@ jobs:
           PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_attestation_sha256 || '' }}
           PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_signature_sha256 || '' }}
           PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_trusted_public_key_sha256 || '' }}
+          SUPPORT_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_action || 'status' }}
+          SUPPORT_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_confirmation || '' }}
+          SUPPORT_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_migration_sha256 || '' }}
+          SUPPORT_CLEANUP_BACKUP_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_backup_sha256 || '' }}
+          SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_restore_evidence_sha256 || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}

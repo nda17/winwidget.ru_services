@@ -28,6 +28,7 @@ import { getStableMessageId } from '@/messaging/poison-message-id';
 import { PlatformAdminAuditEventPayload } from '@/messaging/platform-admin-audit-event';
 import { ReportingAdminAuditEventPayload } from '@/messaging/reporting-admin-audit-event';
 import { WidgetsAdminAuditEventPayload } from '@/messaging/widgets-admin-audit-event';
+import { SupportAdminAuditEventPayload } from '@/messaging/support-admin-audit-event';
 import {
 	DeliveryEventPayload,
 	IntegrationDeliveryService
@@ -72,6 +73,7 @@ type WorkerEventPayload =
 	| BillingAdminAuditEventPayload
 	| IdentityAdminAuditEventPayload
 	| PlatformAdminAuditEventPayload
+	| SupportAdminAuditEventPayload
 	| BillingProjectionEventPayload;
 
 interface DeliveryFailureLockRow {
@@ -333,6 +335,20 @@ export class IntegrationWorkerService
 				this.rabbitMq.ack(message);
 				this.logger.log(
 					`Platform admin audit delivered eventId=${eventId}`
+				);
+				return;
+			}
+			if (kind === 'support-admin-audit') {
+				await this.deliverSupportAdminAudit(
+					payload as SupportAdminAuditEventPayload,
+					eventId,
+					receiptClaim
+				);
+				receiptClaim = null;
+				await this.runCleanup();
+				this.rabbitMq.ack(message);
+				this.logger.log(
+					`Support admin audit delivered eventId=${eventId}`
 				);
 				return;
 			}
@@ -1101,6 +1117,72 @@ export class IntegrationWorkerService
 				where: {
 					eventId,
 					integration: 'platform-admin-audit',
+					resolvedAt: null
+				},
+				data: {
+					resolvedAt: new Date(),
+					retryingAt: null,
+					resolution: 'DELIVERED',
+					resolutionComment: null,
+					resolvedById: null,
+					activeRetryToken: null
+				}
+			});
+		});
+	}
+
+	private async deliverSupportAdminAudit(
+		payload: SupportAdminAuditEventPayload,
+		eventId: string,
+		lockedAt: Date
+	): Promise<void> {
+		const { requestIp, requestUserAgent, ...auditMetadata } =
+			payload.metadata;
+		await this.prisma.$transaction(async transaction => {
+			await this.adminEventLog.recordInTransaction(transaction, {
+				adminId: payload.actorId,
+				section: payload.section,
+				action: payload.action,
+				description: payload.description,
+				entityType: payload.entity.type,
+				entityId: payload.entity.id,
+				entityLabel: payload.entity.label,
+				targetUserId: null,
+				ip: typeof requestIp === 'string' ? requestIp : null,
+				userAgent:
+					typeof requestUserAgent === 'string' ? requestUserAgent : null,
+				metadata: {
+					...auditMetadata,
+					eventId: payload.eventId,
+					correlationId: payload.correlationId
+				}
+			});
+
+			const delivered =
+				await transaction.integrationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						integration: 'support-admin-audit',
+						status: IntegrationDeliveryReceiptStatus.PROCESSING,
+						lockedAt
+					},
+					data: {
+						status: IntegrationDeliveryReceiptStatus.DELIVERED,
+						deliveredAt: new Date(),
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			if (delivered.count !== 1) {
+				throw new Error(
+					`Support audit receipt claim was lost eventId=${eventId}`
+				);
+			}
+			await transaction.integrationDeliveryFailure.updateMany({
+				where: {
+					eventId,
+					integration: 'support-admin-audit',
 					resolvedAt: null
 				},
 				data: {

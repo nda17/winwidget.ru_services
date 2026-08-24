@@ -24,7 +24,6 @@ const PRISMA_ONLY_CONNECTION_PARAMS = [
 	'statement_cache_size'
 ] as const;
 const DATABASE_URL_ENV_KEYS = [
-	'DATABASE_BACKUP_URL',
 	'DATABASE_MIGRATION_URL_PRODUCTION',
 	'DATABASE_URL',
 	'DATABASE_URL_DEVELOPMENT',
@@ -50,7 +49,10 @@ const DATABASE_URL_ENV_KEYS = [
 	'IDENTITY_MIGRATION_DATABASE_URL',
 	'PLATFORM_BACKUP_URL',
 	'PLATFORM_DATABASE_URL',
-	'PLATFORM_MIGRATION_DATABASE_URL'
+	'PLATFORM_MIGRATION_DATABASE_URL',
+	'SUPPORT_BACKUP_URL',
+	'SUPPORT_DATABASE_URL',
+	'SUPPORT_MIGRATION_DATABASE_URL'
 ] as const;
 
 const SERVICE_DATABASE_CONFIG = {
@@ -88,6 +90,11 @@ const SERVICE_DATABASE_CONFIG = {
 		key: 'PLATFORM_BACKUP_URL',
 		label: 'Platform',
 		filePrefix: 'winwidget-platform-db'
+	},
+	support: {
+		key: 'SUPPORT_BACKUP_URL',
+		label: 'Support',
+		filePrefix: 'winwidget-support-db'
 	}
 } as const;
 

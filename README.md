@@ -273,10 +273,10 @@ Feature-модули не регистрируют Prisma service повторн
 lifecycle-хуков процесса; API обрабатывает `SIGTERM` через Nest shutdown hooks.
 
 В production Maintenance получает отдельный
-`MAINTENANCE_DATABASE_URL_PRODUCTION`, а `pg_dump` — обязательный
-`DATABASE_BACKUP_URL` отдельной read-only роли на прямом PostgreSQL endpoint
-без transaction pooler. Основной `DATABASE_URL_PRODUCTION` этому контейнеру не
-передаётся. Одноразовый `migrate` получает только
+`MAINTENANCE_DATABASE_URL_PRODUCTION`; service-owned `pg_dump` использует
+только восемь target-specific `*_BACKUP_URL` read-only ролей на прямых
+PostgreSQL endpoints без transaction pooler. Основной
+`DATABASE_URL_PRODUCTION` этому контейнеру не передаётся. Одноразовый `migrate` получает только
 `DATABASE_MIGRATION_URL_PRODUCTION`; runtime-роль API не используется для DDL.
 
 `notification-delivery-worker` владеет отдельным PostgreSQL-контейнером,
@@ -663,7 +663,7 @@ Reporting:
 | `reporting-service`            | Проекции отчётных данных, аналитика, Reporting-owned Outbox и независимые projection/delivery-outcome consumers с receipts/retry/DLQ                                                                                 |
 | `notification-delivery-worker` | Физическая email/Telegram-доставка лидов, платежей, лимитов, кампаний, daily summary и subscription expiry; собственные receipts, failures, retry/DLQ Outbox, delivery outcomes и control API                        |
 | `integration-worker`           | CRM/webhook, outcomes уведомлений об окончании подписки, недоступность пользовательского Telegram-канала, `campaign-admin-audit`, `reporting-admin-audit` и auto-renewal; без lifecycle/outcomes выделенных сервисов |
-| `maintenance-worker`           | Durable scheduler/lease и независимые backup-задачи для core, Notification Delivery, Campaigns и Reporting                                                                                                           |
+| `maintenance-worker`           | Durable scheduler/lease и независимые backup-задачи для восьми service-owned PostgreSQL: Notification Delivery, Campaigns, Reporting, Widgets, Billing, Identity, Platform и Support                                 |
 
 Один kind не должен одновременно находиться у `integration-worker` и
 `notification-delivery-worker`. Первичный Outbox остаётся в транзакции
@@ -778,15 +778,13 @@ chat и operational topic: для их смены нужна coordinated mainten
 
 ### Backup PostgreSQL
 
-Для основной БД (`core`), Notification Delivery
-(`notification-delivery`), Campaigns (`campaigns`) и Reporting (`reporting`)
-создаются независимые durable-задания: `DATABASE_BACKUP`,
-`NOTIFICATION_DELIVERY_DATABASE_BACKUP`, `CAMPAIGNS_DATABASE_BACKUP` и
-`REPORTING_DATABASE_BACKUP`. Плановый backup основной БД запускается в
-настроенное время, Notification Delivery — через 15 минут, Campaigns — через
-30 минут, Reporting — через 45 минут, чтобы четыре `pg_dump` не конкурировали
-за CPU, disk I/O и Telegram upload. Результаты отправляются отдельными
-документами в настроенную Telegram-тему вне VPS.
+Backup runtime не обслуживает монолитную основную БД. Независимые durable-задачи
+создаются только для восьми service-owned targets: `notification-delivery`,
+`campaigns`, `reporting`, `widgets`, `billing`, `identity`, `platform` и
+`support`. Плановые запуски разнесены с шагом 15 минут от Notification Delivery
+до Support, чтобы восемь `pg_dump` не конкурировали за CPU, disk I/O и Telegram
+upload. Результаты отправляются отдельными документами в настроенную
+Telegram-тему вне VPS.
 
 Плановый и ручной backup сначала создают durable-задание в основной PostgreSQL
 и Outbox-событие. API только ставит ручной запуск в очередь и не выполняет
@@ -797,57 +795,37 @@ chat и operational topic: для их смены нужна coordinated mainten
 отдельном `tmpfs` maintenance-контейнера с лимитом 64 МБ и удаляется в
 `finally`; максимальный размер каждого отправляемого файла ограничен 49 МБ.
 
-В production обязательны четыре независимых read-only подключения на прямые
+В production обязательны восемь независимых read-only подключений на прямые
 PostgreSQL endpoints:
 
-- `DATABASE_BACKUP_URL` — основная БД;
 - `NOTIFICATION_DELIVERY_BACKUP_URL` — отдельный PostgreSQL-контейнер
   Notification Delivery;
-- `CAMPAIGNS_BACKUP_URL` — отдельный PostgreSQL-контейнер Campaigns.
-- `REPORTING_BACKUP_URL` — отдельный PostgreSQL-контейнер Reporting.
+- `CAMPAIGNS_BACKUP_URL` — отдельный PostgreSQL-контейнер Campaigns;
+- `REPORTING_BACKUP_URL` — отдельный PostgreSQL-контейнер Reporting;
+- `WIDGETS_BACKUP_URL` — отдельный PostgreSQL-контейнер Widgets;
+- `BILLING_BACKUP_URL` — отдельный PostgreSQL-контейнер Billing;
+- `IDENTITY_BACKUP_URL` — отдельный PostgreSQL-контейнер Identity;
+- `PLATFORM_BACKUP_URL` — отдельный PostgreSQL-контейнер Platform;
+- `SUPPORT_BACKUP_URL` — отдельный PostgreSQL-контейнер Support.
 
 `pg_dump` не должен идти через transaction pooler. Пароль удаляется из
 аргументов процесса и передаётся `pg_dump` только через `PGPASSWORD`;
 Prisma-only параметры подключения удаляются.
 
-После `routes-switched`, но до Reporting source cleanup, оператор обязан через
-`/admin/databases` создать новый ручной backup target `core`, дождаться
-`SUCCEEDED` и скачать именно его Telegram `.dump` на VPS в
-`/opt/winwidget/deploy/backend/reporting-core-cleanup-backup-v1.dump`. Файл
-должен быть обычным root-owned файлом `root:root` с mode `0600`. Затем manual
-workflow запускается с `deploy_target=reporting-cutover`, action
-`verify-core-cleanup-backup` и точным UUID этого job в
-`reporting_core_backup_job_id`. Lifecycle сверяет durable job/Telegram receipt
-и bytes dump, восстанавливает его в изолированную PostgreSQL 18 и сохраняет
-root-only evidence
-`/opt/winwidget/deploy/backend/reporting-core-cleanup-backup-v1.json`.
-Evidence фиксирует `migrationManifestSha256`, `schemaManifestSha256`,
-`rowAnchorManifestSha256`, `rowContentManifestSha256`,
-`sequenceManifestSha256` и digest повторного dump. Полные row anchors,
-логическое содержимое и sequences доказывают корректность backup/restore;
-`rowContentManifestSha256` покрывает все таблицы Core schema `public`, кроме
-volatile `messaging_heartbeats` и строки самого текущего backup job в
-`scheduled_job_runs`.
+Монолитная БД не является backup target и не может быть запущена через
+`/admin/databases`. Guarded post-cutover cleanup может принимать только заранее
+подготовленное root-only evidence, явно указанное в соответствующем one-time
+lifecycle; routine scheduler, API, maintenance-worker и restore-worker не
+создают и не восстанавливают Core backup. После ownership switch восстановление
+старого Core runtime не является recovery-путём.
 
-SHA-256 этого evidence обязателен в cleanup review как
-`coreBackupEvidenceSha256` и входит в exact `stage-cleanup` confirmation token.
-И `stage-cleanup`, и shared cleanup deploy повторно проверяют digest,
-`switch_generation`, live job/dump и 24-часовую freshness. После остановки
-writers live pre-migration gate заново вычисляет только exact migration и schema
-manifests и требует их совпадения с `migrationManifestSha256` и
-`schemaManifestSha256`. Row anchors/content/sequences остаются доказательством
-изолированного restore и не сравниваются с live Core: несвязанные canonical rows
-и sequences могут штатно измениться после создания backup. Cleanup-sensitive
-граница отдельно проверяет остановленные writers, RabbitMQ drain/topology,
-producer continuity и отсутствие legacy state. При ошибке любого gate migration
-не запускается, а старые writers остаются остановленными; отдельных
-resume/quiesce actions для cleanup recovery нет. Новый Core backup, review и
-повторный `stage-cleanup` нужны только при фактической просрочке/невалидности
-evidence либо drift migration/schema manifests, но не из-за обычного row drift.
-Cleanup revision и manifest SHA при таком refresh менять запрещено. После
-доказанного применения exact cleanup migration retry выполняется только forward:
-проверяются applied state и неизменные digest архивных review/evidence, без
-сравнения новой live schema с pre-migration manifests.
+Одноразовый cleanup legacy Support source не требует backup монолита: при
+прямом hard cutover обязательны только актуальный backup PostgreSQL Support и
+evidence его чистого восстановления. `cleanup-support-core-source-production.sh`
+запускается root-пользователем на локальном production Docker daemon, по
+умолчанию читает `$APP_ROOT/deploy/backend/.env.production`, удерживает общий
+production deploy lock и повторно проверяет отсутствие активного restore прямо
+перед destructive SQL.
 
 Если остановившийся Prisma run оставил ровно одну exact-checksum попытку в
 состоянии `unfinished-transition` или `unfinished-steady`, обычный deploy
@@ -873,10 +851,10 @@ action выполняет только `migrate resolve --applied`; до и по
 forward retry exact cleanup deploy без восстановления старого runtime.
 
 Контракт ручного запуска возвращает принятое в очередь задание, а не готовый
-файл. Для каждого target используется
-`POST /api/v1/telegram-bot/admin/database-backups/:target/send`, где `target` —
-`core`, `notification-delivery`, `campaigns` или `reporting`; запрос требует
-заголовок `Idempotency-Key` с UUID. Ключ сохраняется в детерминированном
+файл. Для каждого из восьми service-owned targets используется
+`POST /api/v1/telegram-bot/admin/database-backups/:target/send`; запрос требует
+заголовок `Idempotency-Key` с UUID. Target `core` отклоняется контрактом. Ключ
+сохраняется в детерминированном
 `scheduleKey` вместе с ID администратора и target, а также в отдельной таблице
 соответствий
 `adminId + jobType + idempotencyKey → jobId`. Поэтому повтор HTTP-запроса
@@ -888,7 +866,7 @@ audit event. Если у этого администратора уже есть
 transaction-scoped advisory lock только на команду данного администратора и
 target; этот lock завершается до `pg_dump`.
 
-Интерфейс ручного запуска и polling четырёх targets расположен на странице
+Интерфейс ручного запуска и polling восьми targets расположен на странице
 `/admin/databases`. Для каждого target есть отдельная кнопка и независимый
 статус. Админка восстанавливает polling после reload через
 `GET /api/v1/telegram-bot/admin/database-backups/:target/jobs/active` и
@@ -897,8 +875,9 @@ target; этот lock завершается до `pg_dump`.
 чужого запуска.
 
 Восстановление остаётся отдельной опасной операцией только для роли `DEV` и не
-использует RabbitMQ. Для четырёх targets (`core`, `notification-delivery`,
-`campaigns`, `reporting`) API предоставляет:
+использует RabbitMQ. Для восьми service-owned targets (`notification-delivery`,
+`campaigns`, `reporting`, `widgets`, `billing`, `identity`, `platform`,
+`support`) API предоставляет:
 
 ```text
 GET  /api/v1/dev-tools/database-restores/settings
@@ -912,7 +891,7 @@ POST /api/v1/dev-tools/database-restores/jobs/:jobId/cancel
 событий и только после этого атомарно публикует HMAC-подписанный manifest в
 защищённую filesystem-очередь. Публикация одновременно захватывает target lock
 и общий HMAC-подписанный `global.lock`, поэтому non-terminal restore может быть
-только один сразу для всех четырёх баз. После durable publish API записывает
+только один сразу для всех восьми баз. После durable publish API записывает
 отдельный audit результата и создаёт HMAC-подписанный publish receipt. Только
 `publicationConfirmed=true` доказывает завершённую публикацию; предварительный
 request-intent и один manifest этого не доказывают. API не получает admin
@@ -936,7 +915,7 @@ HMAC-подписанный одноразовый permit с точными `app
 production deploy fail closed требует одновременно literal `false` и пустой
 `DATABASE_RESTORE_PRODUCTION_PERMIT`. Кратковременные `true` и permit разрешит
 только отдельный reviewed restore-control action на exact revision после
-полного four-target rehearsal, отдельного согласования текущего in-place риска
+полного eight-service-target rehearsal, отдельного согласования текущего in-place риска
 и наличия reviewed `FAILED_FENCED` recovery-action. Такой action в текущем
 release ещё не реализован, поэтому production restore остаётся выключенным.
 Read-only статус существующего job и безопасная отмена до destructive-фазы
@@ -964,13 +943,9 @@ ownership/grants и проверяет migrations, anchor tables и ACL-инва
 lock и fence для `FAILED_FENCED`. Такую БД нельзя открывать без operator runbook
 из `DOCUMENTATION/DEPLOYMENT.md` и reviewed recovery-action.
 
-Legacy endpoints
-`GET /api/v1/dev-tools/database-backup/restore-settings` и
-`POST /api/v1/dev-tools/database-backup/restore` сохранены для локальной
-обратной совместимости. Синхронный POST в `MODE=production` всегда отклоняется:
-production restore разрешён только через очередь. В текущей рабочей ветке
-очередь ещё должна пройти полный real PostgreSQL 18 rehearsal всех четырёх
-targets, включая cancel/destructive race, и согласованный production rollout.
+Legacy Core restore endpoints удалены без fallback. Restore доступен только
+через защищённую очередь и только для восьми service-owned targets; target
+`core` отклоняется контрактом API и worker.
 
 При добавлении следующего service-owned PostgreSQL его restore-регистрация
 входит в тот же релиз: target/confirmation в UI и API, точная конфигурация
@@ -1485,7 +1460,6 @@ DATABASE_URL_DEVELOPMENT
 DATABASE_URL_PRODUCTION
 DATABASE_MIGRATION_URL_PRODUCTION
 MAINTENANCE_DATABASE_URL_PRODUCTION
-DATABASE_BACKUP_URL
 TRUST_PROXY
 CORS_ALLOWED_ORIGINS
 ```
@@ -1866,8 +1840,8 @@ prepare → frontend → production smoke → Telegram audit (completed)
    `../DOCUMENTATION/ENV_PRODUCTION_TEMPLATE.md`.
 2. Merge backend в `prod`; автоматический workflow должен завершиться
    staged-only и создать `.campaigns-first-cutover-staged-v1` с exact SHA.
-3. Заморозить backend deploy/campaign writes, проверить очереди и получить
-   off-VPS backups core и Notification Delivery.
+3. Заморозить backend deploy/campaign writes, проверить очереди и зафиксировать
+   требуемое Campaigns source evidence по versioned lifecycle.
 4. Вручную запустить из `prod`
    `deploy_target=campaigns-database`,
    `campaigns_database_action=prepare`. Успех означает marker
@@ -2072,17 +2046,17 @@ SHA в защищённую ветку `prod`:
    forward-recovery.
 4. Ещё раз запустить target `all` из той же актуальной `prod`. Полный deploy
    проверит fingerprint PostgreSQL-контейнера и volume, применит service-owned
-   migrations и подтвердит, что `maintenance-worker` видит обе независимые
-   backup-цели. PostgreSQL-контейнер и volume при этом не пересоздаются и не
-   останавливаются.
-5. Открыть `/admin/databases`, по отдельности запустить ручной backup `core` и
+   migrations и подтвердит, что `maintenance-worker` видит service-owned
+   backup target Notification Delivery. PostgreSQL-контейнер и volume при этом
+   не пересоздаются и не останавливаются.
+5. Открыть `/admin/databases`, запустить ручной backup
    `notification-delivery`, дождаться `SUCCEEDED` и убедиться, что в Telegram
-   пришли два непустых `.dump`-документа. Эти backups должны быть созданы после
-   перехода marker в `forward_only`.
+   пришёл непустой `.dump`-документ. Backup должен быть создан после перехода
+   marker в `forward_only`.
 6. Повторно вручную запустить
    `notification-delivery-database` из `prod`. Скрипт проверит
-   readiness, текущий target backup URL и наличие обоих успешных post-cutover
-   Telegram-backups, повторно сверит frozen schema/data checksums, удалит
+   readiness, текущий target backup URL и наличие успешного post-cutover
+   Telegram backup, повторно сверит frozen schema/data checksums, удалит
    точный набор service-owned объектов через `RESTRICT`, отключит dedicated
    source-роли и только затем переведёт marker в `complete`.
 7. Выполнить финальный smoke и убедиться, что marker содержит одновременно

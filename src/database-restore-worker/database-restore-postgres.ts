@@ -86,74 +86,6 @@ const UNSUPPORTED_SCHEMA_TOC_KINDS = new Set([
 	'TEXT SEARCH TEMPLATE'
 ]);
 
-const CORE_API_RUNTIME_FUNCTIONS = [
-	'"public"."reporting_producers_enabled"()',
-	'"public"."reporting_iso_timestamp"(timestamp without time zone)',
-	'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
-	'"public"."reporting_settings_projection_trigger"()',
-	'"public"."platform_core_source_writes_enabled"()',
-	'"public"."platform_assert_core_write_enabled"()'
-] as const;
-
-const CORE_RETIRED_IDENTITY_CLEANUP_MIGRATION =
-	'20260815000000_remove_legacy_identity_core_source';
-const CORE_RETIRED_IDENTITY_SOURCE_STATE_TABLES = [
-	'identity_core_source_state'
-] as const;
-const CORE_RETIRED_IDENTITY_SOURCE_STATE_FUNCTIONS = [
-	'public.identity_core_source_is_open()',
-	'public.lock_identity_core_source_open()',
-	'public.reject_fenced_identity_core_source_write()',
-	'public.reject_fenced_identity_auth_settings_write()',
-	'public.fence_identity_core_source(text)',
-	'public.unfence_identity_core_source(text)'
-] as const;
-
-const CORE_LEGACY_WIDGETS_CLEANUP_MIGRATION =
-	'20260810000000_remove_legacy_widgets_core_source';
-const CORE_LEGACY_WIDGETS_TABLES = [
-	'widgets',
-	'quizzes',
-	'callbacks',
-	'countdown_timers',
-	'stop_offers',
-	'online_consultants',
-	'calculators',
-	'leads',
-	'quiz_leads',
-	'callback_leads',
-	'countdown_timer_leads',
-	'stop_offer_leads',
-	'online_consultant_leads',
-	'calculator_leads',
-	'widget_config_revisions',
-	'widget_runtime_presence',
-	'widget_runtime_daily_metrics',
-	'widget_runtime_daily_step_metrics'
-] as const;
-
-const CORE_LEGACY_BILLING_CLEANUP_MIGRATION =
-	'20260813000000_remove_legacy_billing_core_source';
-const CORE_LEGACY_BILLING_TABLES = [
-	'payments',
-	'payment_receipts',
-	'subscriptions',
-	'subscription_history',
-	'subscription_expiry_reminders',
-	'auto_renewals',
-	'auto_renewal_consent_events',
-	'tariff_prices',
-	'affiliate_referrals'
-] as const;
-const CORE_LEGACY_BILLING_SITE_SETTINGS_COLUMNS = [
-	'payment_enabled',
-	'auto_renewal_signup_enabled',
-	'auto_renewal_charges_enabled',
-	'auto_renewal_charges_enabled_at',
-	'affiliate_program_enabled',
-	'affiliate_cashback_percent'
-] as const;
-
 export interface DatabaseRestoreTocSummary {
 	entryCount: number;
 	tables: ReadonlySet<string>;
@@ -343,17 +275,8 @@ export function buildDatabaseOwnershipAndAclRepairSql(
 		quoteIdentifier(target.backupRole)
 	].join(', ');
 	const runtimeAclSql = buildRuntimeAclRepairSql(target);
-	const coreRetiredIdentitySourceInvariantSql =
-		buildCoreRetiredIdentitySourceInvariantSql(target);
-	const coreLegacyWidgetsCleanupInvariantSql =
-		buildCoreLegacyWidgetsCleanupInvariantSql(target);
-	const coreLegacyBillingCleanupInvariantSql =
-		buildCoreLegacyBillingCleanupInvariantSql(target);
 
 	return `
-${coreRetiredIdentitySourceInvariantSql}
-${coreLegacyWidgetsCleanupInvariantSql}
-${coreLegacyBillingCleanupInvariantSql}
 ALTER SCHEMA ${schema} OWNER TO ${migration};
 DO $database_restore_owners$
 DECLARE
@@ -436,17 +359,8 @@ export function buildDatabasePreReopenVerificationSql(
 	const applicationRolesSql = sqlTextArray(target.allApplicationRoles);
 	const anchorTablesSql = sqlTextArray(target.anchorTables);
 	const runtimeAclVerificationSql = buildRuntimeAclVerificationSql(target);
-	const coreRetiredIdentitySourceInvariantSql =
-		buildCoreRetiredIdentitySourceInvariantSql(target);
-	const coreLegacyWidgetsCleanupInvariantSql =
-		buildCoreLegacyWidgetsCleanupInvariantSql(target);
-	const coreLegacyBillingCleanupInvariantSql =
-		buildCoreLegacyBillingCleanupInvariantSql(target);
 
 	return `
-${coreRetiredIdentitySourceInvariantSql}
-${coreLegacyWidgetsCleanupInvariantSql}
-${coreLegacyBillingCleanupInvariantSql}
 DO $database_restore_verify$
 DECLARE
     role_name TEXT;
@@ -740,74 +654,6 @@ $database_restore_reopen_verify$;
 `;
 }
 
-export function buildCoreRestoreAuditSql(input: {
-	jobId: string;
-	target: 'core';
-	sha256: string;
-	requestedBy: string;
-}): string {
-	const auditId = quoteLiteral(`database_restore_${input.jobId}`);
-	const jobId = quoteLiteral(input.jobId);
-	const target = quoteLiteral(input.target);
-	const sha256 = quoteLiteral(input.sha256);
-	const requestedBy = quoteLiteral(input.requestedBy);
-
-	return `
-INSERT INTO "public"."admin_event_logs" (
-    "id",
-    "admin_id",
-    "section",
-    "action",
-    "description",
-    "entity_type",
-    "entity_id",
-    "entity_label",
-    "metadata",
-    "created_at"
-)
-SELECT
-	${auditId},
-	${requestedBy},
-    'DEV_TOOLS',
-    'DEV_DATABASE_RESTORE',
-    'Восстановление основной базы данных из проверенного dump',
-    'DATABASE',
-    ${target},
-    'Core',
-    jsonb_build_object(
-        'jobId', ${jobId},
-        'target', ${target},
-        'sha256', ${sha256},
-        'status', 'SUCCEEDED'
-    ),
-    NOW()
-ON CONFLICT ("id") DO NOTHING;
-
-DO $core_restore_audit_verify$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM "public"."admin_event_logs"
-        WHERE "id" = ${auditId}
-          AND "section" = 'DEV_TOOLS'
-          AND "action" = 'DEV_DATABASE_RESTORE'
-          AND "entity_type" = 'DATABASE'
-          AND "entity_id" = ${target}
-          AND "metadata" @> jsonb_build_object(
-              'jobId', ${jobId},
-              'target', ${target},
-              'sha256', ${sha256},
-              'status', 'SUCCEEDED'
-          )
-		  AND "admin_id" = ${requestedBy}
-    ) THEN
-        RAISE EXCEPTION 'Core restore audit event is missing or inconsistent';
-    END IF;
-END
-$core_restore_audit_verify$;
-`;
-}
-
 export function parseDatabaseMigrationRows(
 	stdout: string
 ): DatabaseRestoreMigrationChecksum[] {
@@ -865,160 +711,6 @@ ORDER BY migration_name;
 `;
 }
 
-function buildCoreLegacyWidgetsCleanupInvariantSql(
-	target: DatabaseRestoreTargetConfig
-): string {
-	if (target.target !== 'core') return '';
-
-	const schema = quoteIdentifier(target.schema);
-	const cleanupMigration = quoteLiteral(
-		CORE_LEGACY_WIDGETS_CLEANUP_MIGRATION
-	);
-	const legacyTables = sqlTextArray(CORE_LEGACY_WIDGETS_TABLES);
-
-	return `
-DO $database_restore_core_widgets_cleanup$
-DECLARE
-    legacy_table_name TEXT;
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM ${schema}."_prisma_migrations"
-        WHERE migration_name = ${cleanupMigration}
-          AND finished_at IS NOT NULL
-          AND rolled_back_at IS NULL
-    ) THEN
-        RAISE EXCEPTION
-            'Routine Core restore requires the applied legacy Widgets cleanup migration';
-    END IF;
-
-    FOREACH legacy_table_name IN ARRAY ${legacyTables} LOOP
-        IF to_regclass(format('%I.%I', ${quoteLiteral(target.schema)}, legacy_table_name))
-               IS NOT NULL THEN
-            RAISE EXCEPTION
-                'Core restore contains legacy Widgets relation % after cleanup migration',
-                legacy_table_name;
-        END IF;
-    END LOOP;
-END
-$database_restore_core_widgets_cleanup$;
-`;
-}
-
-function buildCoreRetiredIdentitySourceInvariantSql(
-	target: DatabaseRestoreTargetConfig
-): string {
-	if (target.target !== 'core') return '';
-
-	const schema = quoteIdentifier(target.schema);
-	const schemaLiteral = quoteLiteral(target.schema);
-	const cleanupMigration = quoteLiteral(
-		CORE_RETIRED_IDENTITY_CLEANUP_MIGRATION
-	);
-	const retiredTables = sqlTextArray(
-		CORE_RETIRED_IDENTITY_SOURCE_STATE_TABLES
-	);
-	const retiredFunctions = sqlTextArray(
-		CORE_RETIRED_IDENTITY_SOURCE_STATE_FUNCTIONS
-	);
-
-	return `
-DO $database_restore_core_identity_cleanup$
-DECLARE
-    retired_table_name TEXT;
-    retired_function_signature TEXT;
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM ${schema}."_prisma_migrations"
-        WHERE migration_name = ${cleanupMigration}
-          AND finished_at IS NOT NULL
-          AND rolled_back_at IS NULL
-    ) THEN
-        RAISE EXCEPTION
-            'Routine Core restore requires the applied legacy Identity cleanup migration';
-    END IF;
-
-    FOREACH retired_table_name IN ARRAY ${retiredTables} LOOP
-        IF to_regclass(format('%I.%I', ${schemaLiteral}, retired_table_name))
-               IS NOT NULL THEN
-            RAISE EXCEPTION
-                'Core restore contains retired Identity source-state relation %',
-                retired_table_name;
-        END IF;
-    END LOOP;
-
-    FOREACH retired_function_signature IN ARRAY ${retiredFunctions} LOOP
-        IF to_regprocedure(retired_function_signature) IS NOT NULL THEN
-            RAISE EXCEPTION
-                'Core restore contains retired Identity source-state function %',
-                retired_function_signature;
-        END IF;
-    END LOOP;
-END
-$database_restore_core_identity_cleanup$;
-`;
-}
-
-function buildCoreLegacyBillingCleanupInvariantSql(
-	target: DatabaseRestoreTargetConfig
-): string {
-	if (target.target !== 'core') return '';
-
-	const schema = quoteIdentifier(target.schema);
-	const schemaLiteral = quoteLiteral(target.schema);
-	const cleanupMigration = quoteLiteral(
-		CORE_LEGACY_BILLING_CLEANUP_MIGRATION
-	);
-	const legacyTables = sqlTextArray(CORE_LEGACY_BILLING_TABLES);
-	const legacySiteSettingsColumns = sqlTextArray(
-		CORE_LEGACY_BILLING_SITE_SETTINGS_COLUMNS
-	);
-
-	return `
-DO $database_restore_core_billing_cleanup$
-DECLARE
-    legacy_table_name TEXT;
-    legacy_column_name TEXT;
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM ${schema}."_prisma_migrations"
-        WHERE migration_name = ${cleanupMigration}
-          AND finished_at IS NOT NULL
-          AND rolled_back_at IS NULL
-    ) THEN
-        RAISE EXCEPTION
-            'Routine Core restore requires the applied legacy Billing cleanup migration';
-    END IF;
-
-    FOREACH legacy_table_name IN ARRAY ${legacyTables} LOOP
-        IF to_regclass(format('%I.%I', ${schemaLiteral}, legacy_table_name))
-               IS NOT NULL THEN
-            RAISE EXCEPTION
-                'Core restore contains legacy Billing relation % after cleanup migration',
-                legacy_table_name;
-        END IF;
-    END LOOP;
-
-    FOREACH legacy_column_name IN ARRAY ${legacySiteSettingsColumns} LOOP
-        IF EXISTS (
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_schema = ${schemaLiteral}
-              AND table_name = 'site_settings'
-              AND column_name = legacy_column_name
-        ) THEN
-            RAISE EXCEPTION
-                'Core restore contains legacy Billing site_settings column % after cleanup migration',
-                legacy_column_name;
-        END IF;
-    END LOOP;
-END
-$database_restore_core_billing_cleanup$;
-`;
-}
-
 function buildRuntimeAclRepairSql(
 	target: DatabaseRestoreTargetConfig
 ): string {
@@ -1028,41 +720,6 @@ function buildRuntimeAclRepairSql(
 	const runtimeRoles = target.runtimeRoles.map(quoteIdentifier).join(', ');
 	const backup = quoteIdentifier(target.backupRole);
 	const defaultPrivilegeRoles = `${runtimeRoles}, ${backup}`;
-	const coreMaintenance =
-		target.target === 'core'
-			? quoteIdentifier(target.runtimeRoles[1])
-			: null;
-	const coreOverrides =
-		target.target === 'core'
-			? `
-REVOKE ALL ON TABLE ${schema}."reporting_producer_state" FROM ${primaryRuntime};
-GRANT SELECT ON TABLE ${schema}."reporting_producer_state" TO ${primaryRuntime};
-REVOKE ALL ON TABLE ${schema}."reporting_projection_versions" FROM ${primaryRuntime};
-GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}."reporting_projection_versions" TO ${primaryRuntime};
-REVOKE ALL ON TABLE ${schema}."platform_core_state" FROM ${primaryRuntime};
-GRANT SELECT ON TABLE ${schema}."platform_core_state" TO ${primaryRuntime};
-GRANT EXECUTE ON FUNCTION ${CORE_API_RUNTIME_FUNCTIONS.join(',\n    ')} TO ${primaryRuntime};
-
-GRANT SELECT, INSERT, UPDATE ON TABLE
-    ${schema}."scheduled_job_runs"
-    TO ${coreMaintenance};
-GRANT SELECT, INSERT ON TABLE
-    ${schema}."scheduled_job_idempotency_keys",
-    ${schema}."outbox_events"
-    TO ${coreMaintenance};
-GRANT SELECT, INSERT, UPDATE ON TABLE
-    ${schema}."telegram_bot_settings",
-    ${schema}."integration_delivery_failures"
-    TO ${coreMaintenance};
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
-    ${schema}."messaging_heartbeats"
-    TO ${coreMaintenance};
-GRANT SELECT ON TABLE
-    ${schema}."reporting_producer_state",
-    ${schema}."platform_core_state"
-    TO ${coreMaintenance};
-`
-			: '';
 
 	return `
 REVOKE ALL ON SCHEMA ${schema} FROM ${runtimeRoles}, ${backup};
@@ -1073,7 +730,6 @@ GRANT USAGE ON SCHEMA ${schema} TO ${runtimeRoles}, ${backup};
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schema} TO ${primaryRuntime};
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA ${schema} TO ${primaryRuntime};
 REVOKE ALL ON TABLE ${schema}."_prisma_migrations" FROM ${primaryRuntime};
-${coreOverrides}
 GRANT SELECT ON ALL TABLES IN SCHEMA ${schema} TO ${backup};
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA ${schema} TO ${backup};
 
@@ -1137,8 +793,7 @@ function buildRuntimeAclVerificationSql(
     END IF;
 `;
 
-	if (target.target !== 'core') {
-		return `${baseRuntimeChecks}
+	return `${baseRuntimeChecks}
     IF EXISTS (
         SELECT 1
         FROM pg_proc p
@@ -1147,130 +802,6 @@ function buildRuntimeAclVerificationSql(
           AND has_function_privilege(${primaryRuntimeLiteral}, p.oid, 'EXECUTE')
     ) THEN
         RAISE EXCEPTION 'Service runtime has unexpected routine execution privilege';
-    END IF;
-`;
-	}
-
-	const maintenanceLiteral = quoteLiteral(target.runtimeRoles[1]);
-	const expectedFunctions = sqlTextArray(CORE_API_RUNTIME_FUNCTIONS);
-	return `
-    IF NOT has_schema_privilege(${primaryRuntimeLiteral}, ${schemaLiteral}, 'USAGE')
-       OR has_schema_privilege(${primaryRuntimeLiteral}, ${schemaLiteral}, 'CREATE') THEN
-        RAISE EXCEPTION 'Core API runtime schema ACL is invalid';
-    END IF;
-    FOR table_name IN
-        SELECT tablename
-        FROM pg_tables
-        WHERE schemaname = ${schemaLiteral}
-        ORDER BY tablename
-    LOOP
-	        IF has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'SELECT')
-	               IS DISTINCT FROM (table_name <> '_prisma_migrations')
-		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
-		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']))
-			   OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
-			       IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']))
-		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
-		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions', 'platform_core_state'])) THEN
-            RAISE EXCEPTION 'Core API runtime table ACL is invalid';
-        END IF;
-    END LOOP;
-    IF EXISTS (
-        SELECT 1
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = ${schemaLiteral}
-          AND c.relkind = 'S'
-          AND NOT (
-              has_sequence_privilege(${primaryRuntimeLiteral}, c.oid, 'USAGE')
-              AND has_sequence_privilege(${primaryRuntimeLiteral}, c.oid, 'SELECT')
-              AND has_sequence_privilege(${primaryRuntimeLiteral}, c.oid, 'UPDATE')
-          )
-    ) THEN
-        RAISE EXCEPTION 'Core API runtime sequence ACL is invalid';
-    END IF;
-    FOREACH function_signature IN ARRAY ${expectedFunctions} LOOP
-        IF to_regprocedure(function_signature) IS NULL
-           OR NOT has_function_privilege(${primaryRuntimeLiteral}, to_regprocedure(function_signature), 'EXECUTE') THEN
-            RAISE EXCEPTION 'Core API runtime lacks a required producer function';
-        END IF;
-    END LOOP;
-    IF EXISTS (
-        SELECT 1
-        FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = ${schemaLiteral}
-          AND has_function_privilege(${primaryRuntimeLiteral}, p.oid, 'EXECUTE')
-          AND NOT EXISTS (
-              SELECT 1
-              FROM unnest(${expectedFunctions}) AS expected(signature)
-              WHERE to_regprocedure(expected.signature) = p.oid
-          )
-    ) THEN
-        RAISE EXCEPTION 'Core API runtime has unexpected routine execution privilege';
-    END IF;
-
-    IF NOT has_schema_privilege(${maintenanceLiteral}, ${schemaLiteral}, 'USAGE')
-       OR has_schema_privilege(${maintenanceLiteral}, ${schemaLiteral}, 'CREATE') THEN
-        RAISE EXCEPTION 'Maintenance runtime schema ACL is invalid';
-    END IF;
-    FOR table_name IN
-        SELECT tablename
-        FROM pg_tables
-        WHERE schemaname = ${schemaLiteral}
-        ORDER BY tablename
-    LOOP
-        IF has_table_privilege(${maintenanceLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'SELECT')
-               IS DISTINCT FROM (table_name = ANY(ARRAY[
-                   'scheduled_job_runs',
-                   'scheduled_job_idempotency_keys',
-                   'outbox_events',
-                   'telegram_bot_settings',
-                   'integration_delivery_failures',
-                   'messaging_heartbeats',
-                   'reporting_producer_state',
-                   'platform_core_state'
-               ]))
-           OR has_table_privilege(${maintenanceLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
-               IS DISTINCT FROM (table_name = ANY(ARRAY[
-                   'scheduled_job_runs',
-                   'scheduled_job_idempotency_keys',
-                   'outbox_events',
-                   'telegram_bot_settings',
-                   'integration_delivery_failures',
-                   'messaging_heartbeats'
-               ]))
-           OR has_table_privilege(${maintenanceLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
-               IS DISTINCT FROM (table_name = ANY(ARRAY[
-                   'scheduled_job_runs',
-                   'telegram_bot_settings',
-                   'integration_delivery_failures',
-                   'messaging_heartbeats'
-               ]))
-           OR has_table_privilege(${maintenanceLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
-               IS DISTINCT FROM (table_name = 'messaging_heartbeats') THEN
-            RAISE EXCEPTION 'Maintenance runtime table ACL is invalid';
-        END IF;
-    END LOOP;
-    IF EXISTS (
-        SELECT 1
-        FROM pg_class c
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = ${schemaLiteral}
-          AND c.relkind = 'S'
-          AND (
-              has_sequence_privilege(${maintenanceLiteral}, c.oid, 'USAGE')
-              OR has_sequence_privilege(${maintenanceLiteral}, c.oid, 'SELECT')
-              OR has_sequence_privilege(${maintenanceLiteral}, c.oid, 'UPDATE')
-          )
-    ) OR EXISTS (
-        SELECT 1
-        FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = ${schemaLiteral}
-          AND has_function_privilege(${maintenanceLiteral}, p.oid, 'EXECUTE')
-    ) THEN
-        RAISE EXCEPTION 'Maintenance runtime has unexpected sequence or routine privileges';
     END IF;
 `;
 }

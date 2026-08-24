@@ -59,7 +59,6 @@ function createConfig(
 		{
 			DATABASE_RESTORE_STORAGE_DIR: STORAGE,
 			DATABASE_RESTORE_QUEUE_SECRET: QUEUE_SECRET,
-			DATABASE_RESTORE_CORE_PORT: '55434',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: '55432',
 			DATABASE_RESTORE_CAMPAIGNS_PORT: '55433',
 			DATABASE_RESTORE_REPORTING_PORT: '55435',
@@ -67,7 +66,7 @@ function createConfig(
 			DATABASE_RESTORE_BILLING_PORT: '55437',
 			DATABASE_RESTORE_IDENTITY_PORT: '55438',
 			DATABASE_RESTORE_PLATFORM_PORT: '55439',
-			DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
+			DATABASE_RESTORE_SUPPORT_PORT: '55440',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
 			DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: '/secrets/campaigns',
@@ -76,6 +75,7 @@ function createConfig(
 			DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: '/secrets/billing',
 			DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: '/secrets/identity',
 			DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: '/secrets/platform',
+			DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: '/secrets/support',
 			APP_REVISION: 'd'.repeat(40),
 			NODE_ENV: productionMode ? 'production' : 'test'
 		},
@@ -523,11 +523,11 @@ describe('DatabaseRestoreWorkerService', () => {
 		expect(readiness.targets).toEqual([
 			'billing',
 			'campaigns',
-			'core',
 			'identity',
 			'notification-delivery',
 			'platform',
 			'reporting',
+			'support',
 			'widgets'
 		]);
 		await harness.service.beforeApplicationShutdown();
