@@ -446,11 +446,18 @@ platform_cutover_container_env_sha256() {
 		( "$2" == '-' || "$2" =~ ^[A-Z][A-Z0-9_]*$ ) ]] || return 1
 	platform_database_docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" |
 		awk -F= -v excluded="$2" '
-			$1 !~ /^[A-Z_][A-Z0-9_]*$/ { exit 1 }
+			$0 == "" {
+				if (saw_terminator) exit 1
+				saw_terminator = 1
+				next
+			}
+			saw_terminator || index($0, "=") <= 1 ||
+				$1 !~ /^[A-Z_][A-Z0-9_]*$/ { exit 1 }
 			{
 				if (seen[$1]++) exit 1
 				if ($1 != excluded) print
 			}
+			END { if (!saw_terminator) exit 1 }
 		' | LC_ALL=C sort | platform_cutover_sha256 /dev/stdin
 }
 
@@ -4538,6 +4545,36 @@ platform_cutover_self_test_phase_a_retirement() (
 	platform_cutover_finalize_phase_a_artifacts
 )
 
+platform_cutover_self_test_container_env_hash() (
+	local container payload expected actual
+	container='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+	platform_database_docker() {
+		[[ "$1" == inspect && "$2" == --format && "$4" == "$container" ]] || return 1
+		printf '%s' "$payload"
+	}
+
+	payload=$'SECOND=two\nFIRST=one\nTOKEN=left=right\n\n'
+	expected="$(printf '%s\n' 'FIRST=one' 'SECOND=two' 'TOKEN=left=right' |
+		LC_ALL=C sort | platform_cutover_sha256 /dev/stdin)" || return 1
+	actual="$(platform_cutover_container_env_sha256 "$container" -)" || return 1
+	[[ "$actual" == "$expected" ]] || return 1
+
+	payload=$'GATEWAY_ROUTES_JSON=[]\nFIRST=one\n\n'
+	expected="$(printf '%s\n' 'FIRST=one' | platform_cutover_sha256 /dev/stdin)" || return 1
+	actual="$(platform_cutover_container_env_sha256 "$container" GATEWAY_ROUTES_JSON)" || return 1
+	[[ "$actual" == "$expected" ]] || return 1
+
+	for payload in \
+		$'FIRST=one\n' \
+		$'FIRST=one\n\nSECOND=two\n' \
+		$'FIRST=one\n\n\n' \
+		$'FIRST=one\nFIRST=two\n\n' \
+		$'invalid=one\n\n' \
+		$'MISSING_EQUALS\n\n'; do
+		! platform_cutover_container_env_sha256 "$container" - >/dev/null 2>&1 || return 1
+	done
+)
+
 platform_cutover_self_test() {
 	platform_cutover_transition_allowed absent prepared
 	platform_cutover_transition_allowed prepared source-fenced
@@ -4562,6 +4599,7 @@ platform_cutover_self_test() {
 	platform_cutover_self_test_consumer_v2_crash_resume
 	platform_cutover_self_test_core_migration_ledger
 	platform_cutover_self_test_phase_a_retirement
+	platform_cutover_self_test_container_env_hash
 	local source prepare_source continue_source status_source dump_source
 	prepare_source="$(declare -f platform_cutover_prepare)"
 	[[ "$prepare_source" == *'phase="$(platform_cutover_current_phase)"'*'[[ "$phase" != aborted ]]'*'platform_database_require_inputs'*'platform_cutover_preflight_final_env_and_phase_a'*'platform_cutover_run_core_migration'*'platform_database_prepare'* &&
