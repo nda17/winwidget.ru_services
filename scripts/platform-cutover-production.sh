@@ -241,47 +241,52 @@ platform_cutover_validate_marker() {
 		[[ "$(stat -c '%u:%g:%a' "$platform_cutover_marker")" == '0:0:600' ]] || return 1
 	fi
 	awk -F= '
+		function is_hex(value, size) { return length(value) == size && value ~ /^[0-9a-f]+$/ }
+		function is_sha256(value) { return substr(value, 1, 7) == "sha256:" && is_hex(substr(value, 8), 64) }
+		function is_pending_or_hex(value) { return value == "pending" || is_hex(value, 64) }
+		function is_generation(value) { return length(value) <= 18 && value ~ /^[1-9][0-9]*$/ }
+		function is_database_id(value) { return length(value) == 36 && value ~ /^[0-9a-f-]+$/ }
 		$1 !~ /^(version|phase|revision|generation|image_id|database_id|database_system_identifier|snapshot_sha256|source_fingerprint|source_high_watermark|imported_backup_sha256|imported_restore_evidence_sha256|active_backup_sha256|active_restore_evidence_sha256|updated_at)$/ { exit 1 }
 		{ seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
 		END {
 			if (NR != 15 || seen["version"] != 1 || value["version"] != "1" ||
 				seen["phase"] != 1 || value["phase"] !~ /^(prepared|source-fenced|imported|restore-verified|target-active|consumer-v2|core-active|complete|aborted)$/ ||
-				seen["revision"] != 1 || value["revision"] !~ /^[0-9a-f]{40}$/ ||
-				seen["generation"] != 1 || value["generation"] !~ /^[1-9][0-9]{0,17}$/ ||
-				seen["image_id"] != 1 || value["image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
-				seen["database_id"] != 1 || value["database_id"] !~ /^[0-9a-f-]{36}$/ ||
+				seen["revision"] != 1 || !is_hex(value["revision"], 40) ||
+				seen["generation"] != 1 || !is_generation(value["generation"]) ||
+				seen["image_id"] != 1 || !is_sha256(value["image_id"]) ||
+				seen["database_id"] != 1 || !is_database_id(value["database_id"]) ||
 				seen["database_system_identifier"] != 1 || value["database_system_identifier"] !~ /^[1-9][0-9]*$/ ||
-				seen["snapshot_sha256"] != 1 || value["snapshot_sha256"] !~ /^(pending|[0-9a-f]{64})$/ ||
-				seen["source_fingerprint"] != 1 || value["source_fingerprint"] !~ /^(pending|[0-9a-f]{64})$/ ||
+				seen["snapshot_sha256"] != 1 || !is_pending_or_hex(value["snapshot_sha256"]) ||
+				seen["source_fingerprint"] != 1 || !is_pending_or_hex(value["source_fingerprint"]) ||
 				seen["source_high_watermark"] != 1 || value["source_high_watermark"] !~ /^(pending|[1-9][0-9]*)$/ ||
-				seen["imported_backup_sha256"] != 1 || value["imported_backup_sha256"] !~ /^(pending|[0-9a-f]{64})$/ ||
-				seen["imported_restore_evidence_sha256"] != 1 || value["imported_restore_evidence_sha256"] !~ /^(pending|[0-9a-f]{64})$/ ||
-				seen["active_backup_sha256"] != 1 || value["active_backup_sha256"] !~ /^(pending|[0-9a-f]{64})$/ ||
-				seen["active_restore_evidence_sha256"] != 1 || value["active_restore_evidence_sha256"] !~ /^(pending|[0-9a-f]{64})$/ ||
-				seen["updated_at"] != 1 || value["updated_at"] !~ /^[0-9TZ:.-]+$/) exit 1
-			if (value["imported_restore_evidence_sha256"] ~ /^[0-9a-f]{64}$/ &&
-				value["imported_backup_sha256"] !~ /^[0-9a-f]{64}$/) exit 1
-			if (value["active_restore_evidence_sha256"] ~ /^[0-9a-f]{64}$/ &&
-				value["active_backup_sha256"] !~ /^[0-9a-f]{64}$/) exit 1
+				seen["imported_backup_sha256"] != 1 || !is_pending_or_hex(value["imported_backup_sha256"]) ||
+				seen["imported_restore_evidence_sha256"] != 1 || !is_pending_or_hex(value["imported_restore_evidence_sha256"]) ||
+				seen["active_backup_sha256"] != 1 || !is_pending_or_hex(value["active_backup_sha256"]) ||
+				seen["active_restore_evidence_sha256"] != 1 || !is_pending_or_hex(value["active_restore_evidence_sha256"]) ||
+				seen["updated_at"] != 1 || value["updated_at"] !~ /^[-0-9TZ:.]+$/) exit 1
+			if (is_hex(value["imported_restore_evidence_sha256"], 64) &&
+				!is_hex(value["imported_backup_sha256"], 64)) exit 1
+			if (is_hex(value["active_restore_evidence_sha256"], 64) &&
+				!is_hex(value["active_backup_sha256"], 64)) exit 1
 			if (value["phase"] == "prepared" &&
 				(value["snapshot_sha256"] != "pending" || value["source_fingerprint"] != "pending" ||
 				 value["source_high_watermark"] != "pending" ||
 				 value["imported_backup_sha256"] != "pending" || value["imported_restore_evidence_sha256"] != "pending" ||
 				 value["active_backup_sha256"] != "pending" || value["active_restore_evidence_sha256"] != "pending")) exit 1
 			if (value["phase"] ~ /^(source-fenced|imported|restore-verified|target-active|consumer-v2|core-active|complete)$/ &&
-				(value["snapshot_sha256"] !~ /^[0-9a-f]{64}$/ || value["source_fingerprint"] !~ /^[0-9a-f]{64}$/ ||
+				(!is_hex(value["snapshot_sha256"], 64) || !is_hex(value["source_fingerprint"], 64) ||
 				 value["source_high_watermark"] !~ /^[1-9][0-9]*$/)) exit 1
 			if (value["phase"] == "source-fenced" &&
 				(value["imported_backup_sha256"] != "pending" || value["imported_restore_evidence_sha256"] != "pending" ||
 				 value["active_backup_sha256"] != "pending" || value["active_restore_evidence_sha256"] != "pending")) exit 1
 			if (value["phase"] ~ /^(restore-verified|target-active|consumer-v2|core-active|complete)$/ &&
-				(value["imported_backup_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				 value["imported_restore_evidence_sha256"] !~ /^[0-9a-f]{64}$/)) exit 1
+				(!is_hex(value["imported_backup_sha256"], 64) ||
+				 !is_hex(value["imported_restore_evidence_sha256"], 64))) exit 1
 			if (value["phase"] ~ /^(imported|restore-verified|target-active|consumer-v2)$/ &&
 				(value["active_backup_sha256"] != "pending" || value["active_restore_evidence_sha256"] != "pending")) exit 1
 			if (value["phase"] == "complete" &&
-				(value["active_backup_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				 value["active_restore_evidence_sha256"] !~ /^[0-9a-f]{64}$/)) exit 1
+				(!is_hex(value["active_backup_sha256"], 64) ||
+				 !is_hex(value["active_restore_evidence_sha256"], 64))) exit 1
 		}
 	' "$platform_cutover_marker"
 }
@@ -552,20 +557,21 @@ platform_cutover_phase_a_intent_value() {
 platform_cutover_validate_phase_a_intent() {
 	platform_cutover_validate_private_file "$platform_phase_a_intent" || return 1
 	awk -F= '
+		function is_hex(value, size) { return length(value) == size && value ~ /^[0-9a-f]+$/ }
 		$1 !~ /^(version|phase|revision|generation|phase_a_env_sha256|phase_a_routes_sha256|frontend_revision|frontend_challenge|frontend_origin_sha256|trusted_public_key_sha256|created_at)$/ { exit 1 }
 		{ seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
 		END {
 			if (NR != 11 || seen["version"] != 1 || value["version"] != "1" ||
 				seen["phase"] != 1 || value["phase"] != "preparing" ||
-				seen["revision"] != 1 || value["revision"] !~ /^[0-9a-f]{40}$/ ||
+				seen["revision"] != 1 || !is_hex(value["revision"], 40) ||
 				seen["generation"] != 1 || value["generation"] != "1" ||
-				seen["phase_a_env_sha256"] != 1 || value["phase_a_env_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["phase_a_routes_sha256"] != 1 || value["phase_a_routes_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["frontend_revision"] != 1 || value["frontend_revision"] !~ /^[0-9a-f]{40}$/ ||
-				seen["frontend_challenge"] != 1 || value["frontend_challenge"] !~ /^[0-9a-f]{64}$/ ||
-				seen["frontend_origin_sha256"] != 1 || value["frontend_origin_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["trusted_public_key_sha256"] != 1 || value["trusted_public_key_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["created_at"] != 1 || value["created_at"] !~ /^[0-9TZ:.-]+$/) exit 1
+				seen["phase_a_env_sha256"] != 1 || !is_hex(value["phase_a_env_sha256"], 64) ||
+				seen["phase_a_routes_sha256"] != 1 || !is_hex(value["phase_a_routes_sha256"], 64) ||
+				seen["frontend_revision"] != 1 || !is_hex(value["frontend_revision"], 40) ||
+				seen["frontend_challenge"] != 1 || !is_hex(value["frontend_challenge"], 64) ||
+				seen["frontend_origin_sha256"] != 1 || !is_hex(value["frontend_origin_sha256"], 64) ||
+				seen["trusted_public_key_sha256"] != 1 || !is_hex(value["trusted_public_key_sha256"], 64) ||
+				seen["created_at"] != 1 || value["created_at"] !~ /^[-0-9TZ:.]+$/) exit 1
 		}
 	' "$platform_phase_a_intent"
 }
@@ -662,31 +668,34 @@ platform_cutover_validate_billing_readiness_receipt_file() {
 	[[ $# -eq 1 ]] || return 1
 	platform_cutover_validate_private_file "$1" || return 1
 	awk -F= '
+		function is_hex(value, size) { return length(value) == size && value ~ /^[0-9a-f]+$/ }
+		function is_sha256(value) { return substr(value, 1, 7) == "sha256:" && is_hex(substr(value, 8), 64) }
+		function is_generation(value) { return length(value) <= 18 && value ~ /^[1-9][0-9]*$/ }
 		$1 !~ /^(version|phase|revision|generation|phase_a_env_sha256|phase_a_env_artifact_sha256|phase_a_env_non_route_sha256|phase_a_routes_sha256|core_api_container_id|core_api_image_id|core_api_env_sha256|billing_api_container_id|billing_api_image_id|billing_api_env_sha256|gateway_container_id|gateway_image_id|gateway_non_route_env_sha256|frontend_revision|frontend_challenge|frontend_origin_sha256|trusted_public_key_sha256|created_at)$/ { exit 1 }
 		{ seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
 		END {
 			if (NR != 22 || seen["version"] != 1 || value["version"] != "1" ||
 				seen["phase"] != 1 || value["phase"] != "phase-a" ||
-				seen["revision"] != 1 || value["revision"] !~ /^[0-9a-f]{40}$/ ||
-				seen["generation"] != 1 || value["generation"] !~ /^[1-9][0-9]{0,17}$/ ||
-				seen["phase_a_env_sha256"] != 1 || value["phase_a_env_sha256"] !~ /^[0-9a-f]{64}$/ ||
+				seen["revision"] != 1 || !is_hex(value["revision"], 40) ||
+				seen["generation"] != 1 || !is_generation(value["generation"]) ||
+				seen["phase_a_env_sha256"] != 1 || !is_hex(value["phase_a_env_sha256"], 64) ||
 				seen["phase_a_env_artifact_sha256"] != 1 || value["phase_a_env_artifact_sha256"] != value["phase_a_env_sha256"] ||
-				seen["phase_a_env_non_route_sha256"] != 1 || value["phase_a_env_non_route_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["phase_a_routes_sha256"] != 1 || value["phase_a_routes_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["core_api_container_id"] != 1 || value["core_api_container_id"] !~ /^[0-9a-f]{64}$/ ||
-				seen["core_api_image_id"] != 1 || value["core_api_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
-				seen["core_api_env_sha256"] != 1 || value["core_api_env_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["billing_api_container_id"] != 1 || value["billing_api_container_id"] !~ /^[0-9a-f]{64}$/ ||
-				seen["billing_api_image_id"] != 1 || value["billing_api_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
-				seen["billing_api_env_sha256"] != 1 || value["billing_api_env_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["gateway_container_id"] != 1 || value["gateway_container_id"] !~ /^[0-9a-f]{64}$/ ||
-				seen["gateway_image_id"] != 1 || value["gateway_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
-				seen["gateway_non_route_env_sha256"] != 1 || value["gateway_non_route_env_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["frontend_revision"] != 1 || value["frontend_revision"] !~ /^[0-9a-f]{40}$/ ||
-				seen["frontend_challenge"] != 1 || value["frontend_challenge"] !~ /^[0-9a-f]{64}$/ ||
-				seen["frontend_origin_sha256"] != 1 || value["frontend_origin_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["trusted_public_key_sha256"] != 1 || value["trusted_public_key_sha256"] !~ /^[0-9a-f]{64}$/ ||
-				seen["created_at"] != 1 || value["created_at"] !~ /^[0-9TZ:.-]+$/) exit 1
+				seen["phase_a_env_non_route_sha256"] != 1 || !is_hex(value["phase_a_env_non_route_sha256"], 64) ||
+				seen["phase_a_routes_sha256"] != 1 || !is_hex(value["phase_a_routes_sha256"], 64) ||
+				seen["core_api_container_id"] != 1 || !is_hex(value["core_api_container_id"], 64) ||
+				seen["core_api_image_id"] != 1 || !is_sha256(value["core_api_image_id"]) ||
+				seen["core_api_env_sha256"] != 1 || !is_hex(value["core_api_env_sha256"], 64) ||
+				seen["billing_api_container_id"] != 1 || !is_hex(value["billing_api_container_id"], 64) ||
+				seen["billing_api_image_id"] != 1 || !is_sha256(value["billing_api_image_id"]) ||
+				seen["billing_api_env_sha256"] != 1 || !is_hex(value["billing_api_env_sha256"], 64) ||
+				seen["gateway_container_id"] != 1 || !is_hex(value["gateway_container_id"], 64) ||
+				seen["gateway_image_id"] != 1 || !is_sha256(value["gateway_image_id"]) ||
+				seen["gateway_non_route_env_sha256"] != 1 || !is_hex(value["gateway_non_route_env_sha256"], 64) ||
+				seen["frontend_revision"] != 1 || !is_hex(value["frontend_revision"], 40) ||
+				seen["frontend_challenge"] != 1 || !is_hex(value["frontend_challenge"], 64) ||
+				seen["frontend_origin_sha256"] != 1 || !is_hex(value["frontend_origin_sha256"], 64) ||
+				seen["trusted_public_key_sha256"] != 1 || !is_hex(value["trusted_public_key_sha256"], 64) ||
+				seen["created_at"] != 1 || value["created_at"] !~ /^[-0-9TZ:.]+$/) exit 1
 		}
 	' "$1"
 
@@ -1020,16 +1029,23 @@ platform_cutover_core_migration_ledger_is_exact() {
 		printf '%s\n' '---LEDGER---'
 		printf '%s\n' "$ledger_manifest"
 	} | awk -F'|' -v mode="$mode" -v expected="$PLATFORM_CORE_PREPARE_MIGRATION" '
+		function is_hex(value, size) { return length(value) == size && value ~ /^[0-9a-f]+$/ }
+		function is_migration_name(value, prefix, suffix) {
+			if (length(value) < 16 || substr(value, 15, 1) != "_") return 0
+			prefix = substr(value, 1, 14)
+			suffix = substr(value, 16)
+			return prefix ~ /^[0-9]+$/ && suffix ~ /^[a-z0-9_]+$/
+		}
 		$0 == "---LEDGER---" { section = 1; next }
 		section == 0 && NF {
-			if (NF != 2 || $1 !~ /^[0-9]{14}_[a-z0-9_]+$/ || $2 !~ /^[0-9a-f]{64}$/ ||
+			if (NF != 2 || !is_migration_name($1) || !is_hex($2, 64) ||
 				repository[$1] || (last != "" && $1 <= last)) invalid = 1
 			repository[$1] = $2
 			last = $1
 			next
 		}
 		section == 1 && NF {
-			if (NF != 3 || $1 !~ /^[0-9]{14}_[a-z0-9_]+$/ || $2 !~ /^[0-9a-f]{64}$/ ||
+			if (NF != 3 || !is_migration_name($1) || !is_hex($2, 64) ||
 				$3 !~ /^(applied|incomplete)$/ || ledger[$1]) invalid = 1
 			ledger[$1] = $2
 			state[$1] = $3
@@ -2064,7 +2080,8 @@ platform_cutover_assert_integration_worker_candidate() {
 
 platform_cutover_legacy_settings_queue_listing_is_drained() {
 	[[ $# -eq 1 ]] || return 1
-	awk -v pattern="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" '
+	PLATFORM_AWK_LEGACY_PATTERN="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" awk '
+		BEGIN { pattern = ENVIRON["PLATFORM_AWK_LEGACY_PATTERN"] }
 		$1 ~ pattern {
 			seen[$1] += 1
 			if (NF != 5 || seen[$1] != 1 || $2 != "true" ||
@@ -2112,12 +2129,14 @@ platform_cutover_settings_projection_topology_is_absent() {
 	vhost="$(platform_read_env_value "$ENV_FILE" RABBITMQ_VHOST)" || return 1
 	[[ "$container" =~ ^[0-9a-f]{64}$ && "$vhost" == winwidget ]] || return 1
 	listing="$(platform_database_docker exec "$container" rabbitmqctl --silent list_queues -p "$vhost" name)" || return 1
-	! awk -v pattern="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" \
-		'$1 ~ pattern { found = 1 } END { exit(found ? 0 : 1) }' <<<"$listing" || return 1
+	! PLATFORM_AWK_LEGACY_PATTERN="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" awk \
+		'BEGIN { pattern = ENVIRON["PLATFORM_AWK_LEGACY_PATTERN"] }
+		 $1 ~ pattern { found = 1 } END { exit(found ? 0 : 1) }' <<<"$listing" || return 1
 	bindings="$(platform_database_docker exec "$container" rabbitmqctl --silent list_bindings -p "$vhost" \
 		source_name destination_name routing_key)" || return 1
-	! awk -v pattern="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" \
-		'$1 ~ pattern || $2 ~ pattern { found = 1 } END { exit(found ? 0 : 1) }' <<<"$bindings"
+	! PLATFORM_AWK_LEGACY_PATTERN="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" awk \
+		'BEGIN { pattern = ENVIRON["PLATFORM_AWK_LEGACY_PATTERN"] }
+		 $1 ~ pattern || $2 ~ pattern { found = 1 } END { exit(found ? 0 : 1) }' <<<"$bindings"
 }
 
 platform_cutover_retire_settings_projection() {
@@ -2128,8 +2147,9 @@ platform_cutover_retire_settings_projection() {
 	[[ "$container" =~ ^[0-9a-f]{64}$ && "$vhost" == winwidget ]] || return 1
 	listing="$(platform_database_docker exec "$container" rabbitmqctl --silent list_queues -p "$vhost" \
 		name durable messages_ready messages_unacknowledged consumers)" || return 1
-	if awk -v pattern="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" \
-		'$1 ~ pattern { found = 1 } END { exit(found ? 0 : 1) }' <<<"$listing"; then
+	if PLATFORM_AWK_LEGACY_PATTERN="$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" awk \
+		'BEGIN { pattern = ENVIRON["PLATFORM_AWK_LEGACY_PATTERN"] }
+		 $1 ~ pattern { found = 1 } END { exit(found ? 0 : 1) }' <<<"$listing"; then
 		platform_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
 			stop --timeout 90 integration-worker billing-worker || return 1
 		listing="$(platform_database_docker exec "$container" rabbitmqctl --silent list_queues -p "$vhost" \
@@ -4554,8 +4574,13 @@ platform_cutover_self_test() {
 		platform_cutover_revalidate_phase platform_cutover_verify_complete_noop \
 		platform_cutover_switch_billing_offer_consumer_v2 \
 		platform_cutover_verify_billing_offer_v2_boundary \
+		platform_cutover_retire_billing_offer_v1 \
+		platform_cutover_retire_settings_projection \
 		platform_cutover_ensure_billing_api_candidate \
+		platform_cutover_assert_gateway_runtime \
+		platform_cutover_assert_gateway_receipt_identity \
 		platform_cutover_verify_runtime_and_routes \
+		platform_cutover_archived_readiness_receipt \
 		platform_cutover_finalize_phase_a_artifacts \
 		platform_cutover_assert_phase_a_artifacts_retired)"
 	continue_source="$(declare -f platform_cutover_continue)"
