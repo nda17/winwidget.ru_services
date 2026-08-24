@@ -158,6 +158,30 @@ const telegramBridgeNginx = readFileSync(
   "deploy/telegram-bridge/nginx.conf",
   "utf8",
 );
+const telegramBridgeStream = readFileSync(
+  "deploy/telegram-bridge/telegram-api-stream.conf",
+  "utf8",
+);
+for (const requiredTelegramStreamContract of [
+  "listen 8443;",
+  "listen [::]:8443;",
+  "map $remote_addr $telegram_api_upstream {",
+  "default api.telegram.org:443;",
+  "resolver 1.1.1.1 8.8.8.8 ipv6=off valid=5m;",
+  "proxy_pass $telegram_api_upstream;",
+  "limit_conn telegram_api_per_ip 32;",
+]) {
+  if (!telegramBridgeStream.includes(requiredTelegramStreamContract)) {
+    throw new Error(
+      `Telegram public stream contract is missing: ${requiredTelegramStreamContract}`,
+    );
+  }
+}
+if (telegramBridgeStream.includes("server api.telegram.org:443")) {
+  throw new Error(
+    "Telegram public stream must not resolve a potentially unreachable IPv6 upstream at Nginx reload time",
+  );
+}
 const telegramBotApiLocation =
   "location ~ ^/telegram-api/(bot[0-9]+:[A-Za-z0-9_-]+)/(getMe|getWebhookInfo|deleteWebhook|setWebhook|sendMessage|sendDocument|copyMessage|answerCallbackQuery)$ {";
 for (const requiredTelegramBridgeContract of [

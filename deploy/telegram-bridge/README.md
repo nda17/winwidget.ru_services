@@ -29,7 +29,8 @@ simultaneous Bot API connections.
 `/etc/nginx/modules-enabled/99-winwidget-telegram-api-stream.conf` because public
 port `8443` is retained by product decision. It is an optional fixed-upstream
 raw TLS relay for networks without Telegram SNI filtering; production WinWidget
-runtimes do not use it.
+runtimes do not use it. Its dynamic resolver is IPv4-only because the bridge
+accepts public IPv6 connections but has no working outbound IPv6 route.
 
 ## Release boundary
 
