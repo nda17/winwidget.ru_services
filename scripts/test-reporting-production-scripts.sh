@@ -340,7 +340,17 @@ deploy_controller_checkout_line="$(
 	grep -n -m1 -- '- name: Checkout deployment controller' "$workflow_file" | cut -d: -f1
 )"
 deploy_controller_run_line="$(
-	grep -n -m1 -- 'run: bash .github/scripts/stage-or-deploy-backend.sh' "$workflow_file" | cut -d: -f1
+	awk '
+		{
+			line = $0
+			sub(/^[[:space:]]*/, "", line)
+			sub(/[[:space:]]*$/, "", line)
+			if (line == "bash .github/scripts/stage-or-deploy-backend.sh") {
+				print NR
+				exit
+			}
+		}
+	' "$workflow_file"
 )"
 deploy_job="$deploy_job_header"$'\n'"$(sed 's/^/          /' "$deploy_controller_file")"$'\n'"$(sed 's/^/          /' "$deploy_remote_controller_file")"
 
@@ -359,6 +369,7 @@ deploy_job="$deploy_job_header"$'\n'"$(sed 's/^/          /' "$deploy_controller
 	"$verify_header" == *"needs.lifecycle_checkout_preflight.result == 'success'"* &&
 	"$deploy_job_header" == *'needs: verify'* &&
 	"$deploy_job_header" == *'timeout-minutes: 90'* &&
+	"$(workflow_exact_line_count 'bash .github/scripts/stage-or-deploy-backend.sh')" == '1' &&
 	"$deploy_controller_checkout_line" =~ ^[0-9]+$ &&
 	"$deploy_controller_run_line" =~ ^[0-9]+$ &&
 	"$deploy_controller_checkout_line" -lt "$deploy_controller_run_line" &&
