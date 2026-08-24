@@ -5509,7 +5509,7 @@ jobs:
             -euc '
               test "$(id -u)" = 1001
               openssl version > /dev/null
-              node -e "require('@prisma/platform-client')"
+              node -e "require(\"@prisma/platform-client\")"
               test -f dist/src/main.js
               test -f dist/src/cutover/main.js
               test -f dist/src/cutover/core-main.js
