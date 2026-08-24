@@ -213,6 +213,7 @@ jobs:
             apps/platform/pnpm-lock.yaml
             apps/platform/prisma/schema.prisma
             apps/platform/prisma/migrations/20260823000000_init_platform/migration.sql
+            .github/scripts/validate-production-compose.cjs
             deploy/docker-compose.prod.yml
             deploy/nginx.conf
             scripts/widgets-database-lifecycle.sh
@@ -292,6 +293,7 @@ jobs:
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
           node --check scripts/test-billing-runtime-boundaries.mjs
+          node --check .github/scripts/validate-production-compose.cjs
           bash scripts/widgets-database-lifecycle.sh --self-test
           bash scripts/cleanup-widgets-core-source-production.sh --self-test
           bash scripts/test-widgets-cutover-rehearsal.sh --self-test

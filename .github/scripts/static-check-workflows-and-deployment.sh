@@ -8,6 +8,7 @@ bash -n \
   .github/scripts/static-check-workflows-and-deployment.sh \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh
+node --check .github/scripts/validate-production-compose.cjs
 # actionlint runs without its ShellCheck integration. Extracted workflow
 # runners are syntax-checked above; production scripts are checked separately.
 docker run --rm \
@@ -124,10 +125,28 @@ const workflow = readFileSync(
   ".github/workflows/deploy-production.yml",
   "utf8",
 );
-const validateProductionComposeScript = readFileSync(
+const validateProductionComposeWrapper = readFileSync(
   ".github/scripts/validate-production-compose.sh",
   "utf8",
 );
+const validateProductionComposeValidator = readFileSync(
+  ".github/scripts/validate-production-compose.cjs",
+  "utf8",
+);
+const validateProductionComposeScript = [
+  validateProductionComposeWrapper,
+  validateProductionComposeValidator,
+].join("\n");
+if (
+  !validateProductionComposeWrapper.includes(
+    "node .github/scripts/validate-production-compose.cjs",
+  ) ||
+  validateProductionComposeWrapper.includes("node -e")
+) {
+  throw new Error(
+    "Production Compose validation must execute its versioned file instead of oversized inline JavaScript",
+  );
+}
 const productionCompose = readFileSync(
   "deploy/docker-compose.prod.yml",
   "utf8",
@@ -1814,10 +1833,10 @@ if (
     )
     .includes("PLATFORM_CORE_TOKEN") ||
   !validateProductionComposeScript.includes(
-    'requireMutualToken("Core to Platform", [',
+    "requireMutualToken('Core to Platform', [",
   ) ||
   !validateProductionComposeScript.includes(
-    'name === "api" || name === "platform-api"',
+    "name === 'api' || name === 'platform-api'",
   ) ||
   !deployProductionScript.includes(
     'require_env_key "PLATFORM_INTERNAL_BASE_URL"',
