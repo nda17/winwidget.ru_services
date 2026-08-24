@@ -228,7 +228,7 @@ const verifyManualBackupAdvisoryLock = async () => {
 			prisma.scheduledJobRun.create({
 				data: {
 					id: jobId,
-					jobType: 'DATABASE_BACKUP',
+					jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 					scheduleKey: `ci:manual-backup:${jobId}`,
 					trigger: 'MANUAL',
 					status: 'SUCCEEDED',
@@ -240,7 +240,7 @@ const verifyManualBackupAdvisoryLock = async () => {
 			prisma.scheduledJobIdempotencyKey.create({
 				data: {
 					adminId,
-					jobType: 'DATABASE_BACKUP',
+					jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 					idempotencyKey,
 					jobId
 				}
@@ -249,7 +249,7 @@ const verifyManualBackupAdvisoryLock = async () => {
 
 		const service = new ScheduledTasksService(prisma, {}, {});
 		const result = await service.enqueueManualDatabaseBackup(
-			'core',
+			'notification-delivery',
 			adminId,
 			idempotencyKey
 		);
@@ -603,7 +603,7 @@ try {
 		prisma.scheduledJobRun.create({
 			data: {
 				id: terminalBackupJobId,
-				jobType: 'DATABASE_BACKUP',
+				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 				scheduleKey: terminalBackupScheduleKey,
 				trigger: 'MANUAL',
 				status: 'QUEUED',
@@ -629,7 +629,7 @@ try {
 					schemaVersion: 1,
 					eventType: 'database.backup.requested.v1',
 					jobId: terminalBackupJobId,
-					jobType: 'DATABASE_BACKUP',
+					jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 					scheduleKey: terminalBackupScheduleKey,
 					periodStart: null,
 					periodEnd: null
