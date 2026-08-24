@@ -7,6 +7,7 @@ readonly PLATFORM_FRONTEND_ATTESTATION_MAX_HTTP_FILE_SIZE='16777216'
 readonly PLATFORM_FRONTEND_ATTESTATION_PROJECT='winwidget'
 readonly PLATFORM_FRONTEND_ATTESTATION_SERVICE='client'
 readonly PLATFORM_FRONTEND_ATTESTATION_DEFAULT_MAX_AGE_SECONDS='600'
+readonly PLATFORM_FRONTEND_ATTESTATION_HARD_CUTOVER_FRONTEND_REVISION='7dfc706feff5a8c70bc6fa03af726926e7d3dd15'
 
 platform_frontend_attestation_fail() {
 	printf '%s\n' "$1" >&2
@@ -212,6 +213,26 @@ const paymentReference = readSafe(paymentReferenceRelative);
 const publicBuildManifestRelative = `static/${buildId}/_buildManifest.js`;
 const publicBuildManifest = readSafe(publicBuildManifestRelative);
 if (!paymentReference.toString("utf8").includes('"/payment/page"')) process.exit(1);
+
+const emitBuildEvidence = () => process.stdout.write([
+  buildId,
+  `/_next/${publicBuildManifestRelative}`,
+  sha256(publicBuildManifest),
+  sha256(appBuildManifestBuffer),
+  `/_next/${paymentAssetRelative}`,
+  sha256(paymentAsset),
+  paymentServerRelative,
+  sha256(paymentServer),
+  paymentReferenceRelative,
+  sha256(paymentReference),
+].join("|"));
+const integrityOnlyRevision = process.env.CONTRACT_INTEGRITY_ONLY_REVISION;
+if (integrityOnlyRevision !== undefined) {
+  if (integrityOnlyRevision !==
+      "7dfc706feff5a8c70bc6fa03af726926e7d3dd15") process.exit(1);
+  emitBuildEvidence();
+  process.exit(0);
+}
 
 const quotedSource = String.raw`(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')`;
 const quotedPattern = new RegExp(quotedSource, "g");
@@ -514,18 +535,7 @@ if (forbiddenBillingRoute(adminText) ||
     !/\.get\(\s*["'`]\/site-settings["'`]/.test(adminText) ||
     !/\.patch\(\s*["'`]\/site-settings["'`]/.test(adminText)) process.exit(1);
 
-process.stdout.write([
-  buildId,
-  `/_next/${publicBuildManifestRelative}`,
-  sha256(publicBuildManifest),
-  sha256(appBuildManifestBuffer),
-  `/_next/${paymentAssetRelative}`,
-  sha256(paymentAsset),
-  paymentServerRelative,
-  sha256(paymentServer),
-  paymentReferenceRelative,
-  sha256(paymentReference),
-].join("|"));
+emitBuildEvidence();
 NODE
 }
 
@@ -1083,7 +1093,7 @@ try { value = JSON.parse(readFileSync(path, "utf8")); }
 catch { process.exit(1); }
 const keys = [
   "version", "purpose", "backendRevision", "cutoverGeneration",
-  "frontendRevision", "origin", "challenge", "composeProject",
+  "frontendRevision", "verificationMode", "origin", "challenge", "composeProject",
   "composeService", "containerId", "imageId", "appRevision",
   "imageRevision", "status", "health", "restarting", "restartCount",
   "containerHostPort", "buildId", "buildManifestPath",
@@ -1102,10 +1112,12 @@ try { origin = new URL(value.origin); } catch { process.exit(1); }
 const verifiedAt = Date.parse(value.verifiedAt);
 const maxAgeSeconds = Number(process.env.MAX_AGE_SECONDS);
 const ageMs = Date.now() - verifiedAt;
-if (!exact || value.version !== 2 ||
+if (!exact || value.version !== 3 ||
     value.purpose !== "platform-frontend-runtime" ||
     value.backendRevision !== process.env.EXPECTED_BACKEND_REVISION ||
     value.frontendRevision !== process.env.EXPECTED_FRONTEND_REVISION ||
+    value.frontendRevision !== "7dfc706feff5a8c70bc6fa03af726926e7d3dd15" ||
+    value.verificationMode !== "pinned-hard-cutover-integrity" ||
     value.cutoverGeneration !== process.env.EXPECTED_CUTOVER_GENERATION ||
     value.challenge !== process.env.EXPECTED_CHALLENGE ||
     value.origin !== process.env.EXPECTED_ORIGIN ||
@@ -1135,7 +1147,7 @@ if (!exact || value.version !== 2 ||
     !/^[0-9a-f]{64}$/.test(value.localPaymentHtmlSha256) ||
     !/^[0-9a-f]{64}$/.test(value.publicPaymentHtmlSha256) ||
     !/^[0-9a-f]{64}$/.test(value.paymentExecutableGraphSha256) ||
-    value.contractDefenseScan !== true ||
+    value.contractDefenseScan !== false ||
     value.localPaymentHttp !== true || value.publicPaymentHttp !== true ||
     typeof value.verifiedAt !== "string" ||
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value.verifiedAt) ||
@@ -1312,6 +1324,10 @@ platform_frontend_attestation_generate() (
 	local local_payment_graph_sha public_payment_graph_sha payment_graph_sha
 
 	platform_frontend_attestation_require_safe_directory "$output_root"
+	[[ "$frontend_revision" == \
+		"$PLATFORM_FRONTEND_ATTESTATION_HARD_CUTOVER_FRONTEND_REVISION" ]] ||
+		platform_frontend_attestation_fail \
+			'Platform hard-cutover attestation is pinned to the reviewed frontend revision.' || return 1
 	for value in "$private_key" "$public_key" "$attestation" "$signature" "$lock_file"; do
 		platform_frontend_attestation_require_direct_child "$output_root" "$value"
 	done
@@ -1386,10 +1402,12 @@ platform_frontend_attestation_generate() (
 		--cap-drop ALL --security-opt no-new-privileges \
 		--pids-limit 64 --memory 192m --cpus 0.5 \
 		--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
-		-e CONTRACT_ROOT=/app/.next --entrypoint node "$image_id" \
+		-e CONTRACT_ROOT=/app/.next \
+		-e "CONTRACT_INTEGRITY_ONLY_REVISION=$frontend_revision" \
+		--entrypoint node "$image_id" \
 		-e "$scanner")" ||
 		platform_frontend_attestation_fail \
-			'Frontend image lacks exact Next BUILD_ID/payment build evidence or failed the defensive settings split scan.' || return 1
+			'Frontend image lacks exact pinned Next build evidence.' || return 1
 	IFS='|' read -r build_id build_manifest_path build_manifest_sha \
 		app_build_manifest_sha payment_asset_path payment_asset_sha \
 		payment_server_path payment_server_sha payment_reference_path \
@@ -1501,11 +1519,12 @@ platform_frontend_attestation_generate() (
 		-e "VERIFIED_AT=$verified_at" \
 		--entrypoint node "$image_id" -e '
 const value = {
-  version: 2,
+  version: 3,
   purpose: "platform-frontend-runtime",
   backendRevision: process.env.BACKEND_REVISION,
   cutoverGeneration: process.env.CUTOVER_GENERATION,
   frontendRevision: process.env.FRONTEND_REVISION,
+  verificationMode: "pinned-hard-cutover-integrity",
   origin: process.env.FRONTEND_ORIGIN,
   challenge: process.env.CHALLENGE,
   composeProject: "winwidget",
@@ -1532,7 +1551,7 @@ const value = {
   localPaymentHtmlSha256: process.env.LOCAL_PAYMENT_HTML_SHA,
   publicPaymentHtmlSha256: process.env.PUBLIC_PAYMENT_HTML_SHA,
   paymentExecutableGraphSha256: process.env.PAYMENT_EXECUTABLE_GRAPH_SHA,
-  contractDefenseScan: true,
+  contractDefenseScan: false,
   localPaymentHttp: true,
   publicPaymentHttp: true,
   verifiedAt: process.env.VERIFIED_AT,
@@ -1622,6 +1641,10 @@ platform_frontend_attestation_validate() (
 	local payment_graph_sha verified_at build_tmp='' asset_tmp='' payment_tmp=''
 	local html_validator public_payment_graph_sha
 
+	[[ "$frontend_revision" == \
+		"$PLATFORM_FRONTEND_ATTESTATION_HARD_CUTOVER_FRONTEND_REVISION" ]] ||
+		platform_frontend_attestation_fail \
+			'Platform hard-cutover validation is pinned to the reviewed frontend revision.' || return 1
 	[[ "$expected_attestation_sha" =~ ^[0-9a-f]{64}$ &&
 		"$expected_signature_sha" =~ ^[0-9a-f]{64}$ &&
 		"$trusted_public_key_sha" =~ ^[0-9a-f]{64}$ &&
@@ -1761,7 +1784,7 @@ platform_frontend_attestation_self_test() (
 	local private_key public_key rsa_key payload signature mixed_signature now stale
 	local response_headers
 	local backend_revision='0123456789abcdef0123456789abcdef01234567'
-	local frontend_revision='89abcdef0123456789abcdef0123456789abcdef'
+	local frontend_revision="$PLATFORM_FRONTEND_ATTESTATION_HARD_CUTOVER_FRONTEND_REVISION"
 	local generation='7'
 	local challenge='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 	local origin='https://winwidget.ru'
@@ -1817,6 +1840,20 @@ platform_frontend_attestation_self_test() (
 	if CONTRACT_ROOT="$fixture_next" node -e "$scanner" >/dev/null 2>&1; then
 		platform_frontend_attestation_fail \
 			'Platform frontend build scanner accepted decoy evidence with a composed legacy route.'
+	fi
+	evidence="$(
+		CONTRACT_ROOT="$fixture_next" \
+		CONTRACT_INTEGRITY_ONLY_REVISION="$PLATFORM_FRONTEND_ATTESTATION_HARD_CUTOVER_FRONTEND_REVISION" \
+			node -e "$scanner"
+	)"
+	[[ "$evidence" == "$build_id|/_next/static/$build_id/_buildManifest.js|"* ]] ||
+		platform_frontend_attestation_fail \
+			'Pinned hard-cutover inventory mode rejected exact Next build evidence.'
+	if CONTRACT_ROOT="$fixture_next" \
+		CONTRACT_INTEGRITY_ONLY_REVISION='0000000000000000000000000000000000000000' \
+		node -e "$scanner" >/dev/null 2>&1; then
+		platform_frontend_attestation_fail \
+			'Hard-cutover inventory mode accepted an unreviewed frontend revision.'
 	fi
 	# Literal JavaScript template string fixtures.
 	# shellcheck disable=SC2016
@@ -2271,13 +2308,44 @@ platform_frontend_attestation_self_test() (
 	payload="$root/attestation.json"
 	signature="$root/attestation.sig"
 	mixed_signature="$root/mixed.sig"
-	payload_text="{\"version\":2,\"purpose\":\"platform-frontend-runtime\",\"backendRevision\":\"$backend_revision\",\"cutoverGeneration\":\"$generation\",\"frontendRevision\":\"$frontend_revision\",\"origin\":\"$origin\",\"challenge\":\"$challenge\",\"composeProject\":\"winwidget\",\"composeService\":\"client\",\"containerId\":\"$container_id\",\"imageId\":\"$image_id\",\"appRevision\":\"$frontend_revision\",\"imageRevision\":\"$frontend_revision\",\"status\":\"running\",\"health\":\"not-configured\",\"restarting\":false,\"restartCount\":0,\"containerHostPort\":3000,\"buildId\":\"$build_id\",\"buildManifestPath\":\"/_next/static/$build_id/_buildManifest.js\",\"buildManifestSha256\":\"$build_manifest_sha\",\"appBuildManifestSha256\":\"$app_build_manifest_sha\",\"paymentAssetPath\":\"/_next/static/chunks/app/payment/page-payment123.js\",\"paymentAssetSha256\":\"$payment_asset_sha\",\"paymentServerPath\":\"server/app/payment/page.js\",\"paymentServerSha256\":\"$payment_server_sha\",\"paymentReferenceManifestPath\":\"server/app/payment/page_client-reference-manifest.js\",\"paymentReferenceManifestSha256\":\"$reference_sha\",\"localPaymentHtmlSha256\":\"$local_payment_html_sha\",\"publicPaymentHtmlSha256\":\"$public_payment_html_sha\",\"paymentExecutableGraphSha256\":\"$payment_graph_sha\",\"contractDefenseScan\":true,\"localPaymentHttp\":true,\"publicPaymentHttp\":true,\"verifiedAt\":\"$now\"}"
+	payload_text="{\"version\":3,\"purpose\":\"platform-frontend-runtime\",\"backendRevision\":\"$backend_revision\",\"cutoverGeneration\":\"$generation\",\"frontendRevision\":\"$frontend_revision\",\"verificationMode\":\"pinned-hard-cutover-integrity\",\"origin\":\"$origin\",\"challenge\":\"$challenge\",\"composeProject\":\"winwidget\",\"composeService\":\"client\",\"containerId\":\"$container_id\",\"imageId\":\"$image_id\",\"appRevision\":\"$frontend_revision\",\"imageRevision\":\"$frontend_revision\",\"status\":\"running\",\"health\":\"not-configured\",\"restarting\":false,\"restartCount\":0,\"containerHostPort\":3000,\"buildId\":\"$build_id\",\"buildManifestPath\":\"/_next/static/$build_id/_buildManifest.js\",\"buildManifestSha256\":\"$build_manifest_sha\",\"appBuildManifestSha256\":\"$app_build_manifest_sha\",\"paymentAssetPath\":\"/_next/static/chunks/app/payment/page-payment123.js\",\"paymentAssetSha256\":\"$payment_asset_sha\",\"paymentServerPath\":\"server/app/payment/page.js\",\"paymentServerSha256\":\"$payment_server_sha\",\"paymentReferenceManifestPath\":\"server/app/payment/page_client-reference-manifest.js\",\"paymentReferenceManifestSha256\":\"$reference_sha\",\"localPaymentHtmlSha256\":\"$local_payment_html_sha\",\"publicPaymentHtmlSha256\":\"$public_payment_html_sha\",\"paymentExecutableGraphSha256\":\"$payment_graph_sha\",\"contractDefenseScan\":false,\"localPaymentHttp\":true,\"publicPaymentHttp\":true,\"verifiedAt\":\"$now\"}"
 	printf '%s\n' "$payload_text" >"$payload"
 	validator="$(platform_frontend_attestation_json_validator)"
 	ATTESTATION_PATH="$payload" EXPECTED_BACKEND_REVISION="$backend_revision" \
 		EXPECTED_FRONTEND_REVISION="$frontend_revision" \
 		EXPECTED_CUTOVER_GENERATION="$generation" EXPECTED_CHALLENGE="$challenge" \
 		EXPECTED_ORIGIN="$origin" MAX_AGE_SECONDS=600 node -e "$validator" >/dev/null
+	ATTESTATION_PAYLOAD="$payload_text" node -e '
+const value = JSON.parse(process.env.ATTESTATION_PAYLOAD);
+value.contractDefenseScan = true;
+process.stdout.write(`${JSON.stringify(value)}\n`);
+' >"$root/false-defense-claim.json"
+	if ATTESTATION_PATH="$root/false-defense-claim.json" \
+		EXPECTED_BACKEND_REVISION="$backend_revision" \
+		EXPECTED_FRONTEND_REVISION="$frontend_revision" \
+		EXPECTED_CUTOVER_GENERATION="$generation" EXPECTED_CHALLENGE="$challenge" \
+		EXPECTED_ORIGIN="$origin" MAX_AGE_SECONDS=600 \
+		node -e "$validator" >/dev/null 2>&1; then
+		platform_frontend_attestation_fail \
+			'Hard-cutover attestation accepted a false semantic-defense claim.'
+	fi
+	ATTESTATION_PAYLOAD="$payload_text" node -e '
+const value = JSON.parse(process.env.ATTESTATION_PAYLOAD);
+const revision = "89abcdef0123456789abcdef0123456789abcdef";
+value.frontendRevision = revision;
+value.appRevision = revision;
+value.imageRevision = revision;
+process.stdout.write(`${JSON.stringify(value)}\n`);
+' >"$root/unreviewed-frontend.json"
+	if ATTESTATION_PATH="$root/unreviewed-frontend.json" \
+		EXPECTED_BACKEND_REVISION="$backend_revision" \
+		EXPECTED_FRONTEND_REVISION='89abcdef0123456789abcdef0123456789abcdef' \
+		EXPECTED_CUTOVER_GENERATION="$generation" EXPECTED_CHALLENGE="$challenge" \
+		EXPECTED_ORIGIN="$origin" MAX_AGE_SECONDS=600 \
+		node -e "$validator" >/dev/null 2>&1; then
+		platform_frontend_attestation_fail \
+			'Hard-cutover attestation accepted an unreviewed frontend identity.'
+	fi
 	printf '%s\n' \
 		"${payload_text/,\"paymentExecutableGraphSha256\":\"$payment_graph_sha\"/}" \
 		>"$root/missing-graph.json"
