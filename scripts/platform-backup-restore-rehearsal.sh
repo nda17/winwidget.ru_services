@@ -786,13 +786,13 @@ platform_restore_self_test() {
 		"$source" == *"actual_state <> '23514'"* &&
 		"$source" == *"actual_constraint <> 'platform_current_semantic_fingerprint_guard'"* &&
 		"$source" == *'trigger_entry.tgconstraint'* &&
-		"$source" == *'trigger_entry.tgdeferrable'* &&
-		"$source" == *'trigger_entry.tginitdeferred'* &&
+		"$source" == *'AND tgdeferrable'* &&
+		"$source" == *'AND tginitdeferred'* &&
 		"$source" == *'rejected % partial probe left database drift'* &&
 		"$source" == *'coherent % probe rollback left database drift'* &&
 		"$source" == *'platform.billing_offer_producer_state'* &&
-		"$source" == *'platform_restore_docker volume rm'* ]]
-	platform_restore_path_self_test
+		"$source" == *'platform_restore_docker volume rm'* ]] || return 1
+	platform_restore_path_self_test || return 1
 	printf 'platform_backup_restore_rehearsal_self_test=passed\n'
 }
 
