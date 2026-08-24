@@ -399,6 +399,13 @@ const runIntegration = async () => {
 			}),
 			1
 		);
+		const paymentSucceededOutbox =
+			await prisma.outboxEvent.findFirstOrThrow({
+				where: {
+					eventType: 'payment.succeeded.v1',
+					aggregateId: paymentId
+				}
+			});
 
 		const paymentDomain = new PaymentDomainService(prisma, {});
 		const duplicateWebhook = {
@@ -420,10 +427,13 @@ const runIntegration = async () => {
 			}),
 			1
 		);
-		// The guard above requires a dedicated *_ci/*_test database. Isolate the
-		// publisher crash scenario from monetary events and from residues left by
-		// an intentionally interrupted previous rehearsal.
-		await prisma.outboxEvent.deleteMany({});
+		// The guard above requires a dedicated *_ci/*_test database. Keep the real
+		// payment event so the crash-recovery probe exercises a production-allowed
+		// routing key and payload, while removing unrelated monetary events and
+		// residues left by an intentionally interrupted previous rehearsal.
+		await prisma.outboxEvent.deleteMany({
+			where: { id: { not: paymentSucceededOutbox.id } }
+		});
 
 		rabbitConnection = await amqp.connect(rabbitAdminUrl, {
 			clientProperties: {
@@ -442,7 +452,7 @@ const runIntegration = async () => {
 		await channel.bindQueue(
 			queue,
 			'winwidget.events',
-			'billing.publisher.rehearsal.v1'
+			'payment.succeeded.v1'
 		);
 		const workerConfigValues = {
 			BILLING_PROCESS_ROLE: 'worker',
@@ -494,29 +504,19 @@ const runIntegration = async () => {
 			publisherRabbit
 		);
 
-		const recoveredEventId = randomUUID();
-		const recoveredOutboxId = `ci-crash-${randomUUID()}`;
+		const recoveredEventId = paymentSucceededOutbox.eventId;
+		const recoveredOutboxId = paymentSucceededOutbox.id;
 		outboxIds.push(recoveredOutboxId);
-		await prisma.outboxEvent.create({
+		await prisma.outboxEvent.update({
+			where: { id: recoveredOutboxId },
 			data: {
-				id: recoveredOutboxId,
-				eventId: recoveredEventId,
-				eventType: 'billing.publisher.rehearsal.v1',
-				aggregateType: 'billing.publisher-rehearsal',
-				aggregateId: recoveredEventId,
-				exchange: 'winwidget.events',
-				routingKey: 'billing.publisher.rehearsal.v1',
-				payload: {
-					schemaVersion: 1,
-					eventType: 'billing.publisher.rehearsal.v1',
-					eventId: recoveredEventId,
-					rehearsal: true
-				},
 				status: OutboxStatus.PROCESSING,
 				attempt: 1,
 				availableAt: new Date(Date.now() - 60_000),
 				leaseToken: randomUUID(),
-				leaseUntil: new Date(Date.now() - 1_000)
+				leaseUntil: new Date(Date.now() - 1_000),
+				publishedAt: null,
+				lastError: null
 			}
 		});
 		assert.equal(await publisher.publishOne(), true);
@@ -530,10 +530,7 @@ const runIntegration = async () => {
 		assert.ok(recovered.publishedAt instanceof Date);
 		const delivered = await waitForMessage(channel, queue);
 		assert.equal(delivered.properties.messageId, recoveredEventId);
-		assert.equal(
-			delivered.properties.type,
-			'billing.publisher.rehearsal.v1'
-		);
+		assert.equal(delivered.properties.type, 'payment.succeeded.v1');
 		assert.equal(delivered.fields.redelivered, false);
 		channel.ack(delivered);
 		assert.equal(await publisher.publishOne(), false);
