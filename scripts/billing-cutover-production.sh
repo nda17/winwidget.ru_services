@@ -65,7 +65,7 @@ readonly billing_publisher_write_pattern='^winwidget\.(events|billing\.(retry|de
 readonly billing_worker_topic_read_pattern='^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.settings\.source\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v1|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$'
 readonly billing_publisher_topic_write_pattern='^(payment\.succeeded\.v1|payment\.notification\.telegram\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.subscription-expiry\.(email|telegram)\.requested\.v1|billing\.(payment|subscription)(\.details)?\.changed\.v1|billing\.(affiliate|settings)\.changed\.v1|admin\.audit\.billing\.v1)$'
 readonly core_integration_write_pattern='^(winwidget\.retry|winwidget\.dead-letter)$'
-readonly core_integration_post_billing_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
+readonly core_integration_post_billing_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
 
 # shellcheck source=scripts/billing-release-identity.sh
 source "$server_root/scripts/billing-release-identity.sh"
