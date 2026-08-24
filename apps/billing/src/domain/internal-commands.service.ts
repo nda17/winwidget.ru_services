@@ -9,8 +9,7 @@ import { ConflictException, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type {
 	EnsureTrialCommandDto,
-	RevokeEntitlementsCommandDto,
-	UpdateBillingSettingsCommandDto
+	RevokeEntitlementsCommandDto
 } from '../http/billing.dto';
 import {
 	BILLING_EVENT_TYPES,
@@ -23,14 +22,12 @@ import {
 	lockBillingCommand
 } from './billing-command-idempotency';
 import { SubscriptionDomainService } from './subscription-domain.service';
-import { TariffAffiliateService } from './tariff-affiliate.service';
 
 @Injectable()
 export class InternalCommandsService {
 	constructor(
 		private readonly prisma: BillingPrismaService,
-		private readonly subscriptions: SubscriptionDomainService,
-		private readonly tariffAffiliate: TariffAffiliateService
+		private readonly subscriptions: SubscriptionDomainService
 	) {}
 
 	async ensureTrial(dto: EnsureTrialCommandDto) {
@@ -195,15 +192,6 @@ export class InternalCommandsService {
 		);
 	}
 
-	async getSettings() {
-		const item = await this.prisma.billingSettings.upsert({
-			where: { id: 'singleton' },
-			create: { id: 'singleton' },
-			update: {}
-		});
-		return this.serializeSettings(item);
-	}
-
 	async getAdminUserOverview(userId: string) {
 		const [subscription, pending, succeeded, cancelled, expired, latest] =
 			await this.prisma.$transaction([
@@ -278,77 +266,6 @@ export class InternalCommandsService {
 			userIds: rows.map(item => item.userId),
 			count: rows.length,
 			sourceSequence: (highWater._max.sourceSequence || 0n).toString()
-		};
-	}
-
-	async updateSettings(dto: UpdateBillingSettingsCommandDto) {
-		return this.executeCommand(
-			dto.commandId,
-			'UPDATE_SETTINGS',
-			{
-				schemaVersion: dto.schemaVersion,
-				commandId: dto.commandId,
-				actorId: dto.actorId,
-				occurredAt: new Date(dto.occurredAt).toISOString(),
-				settings: {
-					paymentEnabled: dto.settings.paymentEnabled,
-					autoRenewalSignupEnabled: dto.settings.autoRenewalSignupEnabled,
-					autoRenewalChargesEnabled:
-						dto.settings.autoRenewalChargesEnabled,
-					affiliateProgramEnabled: dto.settings.affiliateProgramEnabled,
-					affiliateCashbackPercent: dto.settings.affiliateCashbackPercent
-				}
-			},
-			async transaction => {
-				const current = await transaction.billingSettings.upsert({
-					where: { id: 'singleton' },
-					create: { id: 'singleton' },
-					update: {}
-				});
-				const sequence = await this.nextSequence(transaction);
-				const patch = dto.settings;
-				const updated = await transaction.billingSettings.update({
-					where: { id: 'singleton' },
-					data: {
-						paymentEnabled: patch.paymentEnabled ?? current.paymentEnabled,
-						autoRenewalSignupEnabled:
-							patch.autoRenewalSignupEnabled ??
-							current.autoRenewalSignupEnabled,
-						autoRenewalChargesEnabled:
-							patch.autoRenewalChargesEnabled ??
-							current.autoRenewalChargesEnabled,
-						autoRenewalChargesEnabledAt:
-							patch.autoRenewalChargesEnabled === true &&
-							!current.autoRenewalChargesEnabled
-								? new Date()
-								: current.autoRenewalChargesEnabledAt,
-						affiliateProgramEnabled:
-							patch.affiliateProgramEnabled ??
-							current.affiliateProgramEnabled,
-						affiliateCashbackPercent:
-							patch.affiliateCashbackPercent ??
-							current.affiliateCashbackPercent,
-						aggregateVersion: { increment: 1n },
-						sourceSequence: sequence
-					}
-				});
-				await this.tariffAffiliate.emitSettings(transaction, updated);
-				return this.serializeSettings(updated);
-			}
-		);
-	}
-
-	private serializeSettings(item: any) {
-		return {
-			id: 'singleton',
-			paymentEnabled: item.paymentEnabled,
-			autoRenewalSignupEnabled: item.autoRenewalSignupEnabled,
-			autoRenewalChargesEnabled: item.autoRenewalChargesEnabled,
-			autoRenewalChargesEnabledAt:
-				item.autoRenewalChargesEnabledAt.toISOString(),
-			affiliateProgramEnabled: item.affiliateProgramEnabled,
-			affiliateCashbackPercent: item.affiliateCashbackPercent,
-			updatedAt: item.updatedAt.toISOString()
 		};
 	}
 

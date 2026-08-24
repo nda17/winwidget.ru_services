@@ -24,6 +24,11 @@ describe('DatabaseRestoreService', () => {
 		'5; 2615 2200 SCHEMA - widgets postgres',
 		'215; 1259 16401 TABLE widgets widgets postgres'
 	].join('\n');
+	const platformTableOfContents = [
+		'; Archive created at 2026-08-24 12:00:00 UTC',
+		'5; 2615 2200 SCHEMA - platform postgres',
+		'215; 1259 16401 TABLE platform site_settings postgres'
+	].join('\n');
 
 	const createService = () => {
 		const prisma = {
@@ -242,6 +247,27 @@ describe('DatabaseRestoreService', () => {
 		await expect(
 			service.restore(createFile(), 'ВОССТАНОВИТЬ БД')
 		).rejects.toThrow('Dump Widgets нельзя восстанавливать в основную БД');
+		expect(runPostgresCommand).toHaveBeenCalledTimes(1);
+		expect(prisma.$disconnect).not.toHaveBeenCalled();
+		expect(prisma.$connect).not.toHaveBeenCalled();
+	});
+
+	it('rejects a Platform dump before destructive restore', async () => {
+		const { service, prisma } = createService();
+		const internals = service as any;
+		jest
+			.spyOn(internals, 'writeUploadedBackupFile')
+			.mockResolvedValue('/tmp/platform.dump');
+		const runPostgresCommand = jest
+			.spyOn(internals, 'runPostgresCommand')
+			.mockResolvedValue(platformTableOfContents);
+		jest.spyOn(internals, 'deleteTempFile').mockResolvedValue(undefined);
+
+		await expect(
+			service.restore(createFile(), 'ВОССТАНОВИТЬ БД')
+		).rejects.toThrow(
+			'Dump Platform нельзя восстанавливать в основную БД'
+		);
 		expect(runPostgresCommand).toHaveBeenCalledTimes(1);
 		expect(prisma.$disconnect).not.toHaveBeenCalled();
 		expect(prisma.$connect).not.toHaveBeenCalled();

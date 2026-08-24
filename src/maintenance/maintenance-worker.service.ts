@@ -301,19 +301,26 @@ export class MaintenanceWorkerService
 						);
 						if (!job) return null;
 						if (
-							job.jobType === SCHEDULED_JOB_TYPES.DATABASE_BACKUP &&
+							job.jobType ===
+								SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP &&
 							job.trigger === 'SCHEDULED' &&
 							job.periodStart
 						) {
-							await transaction.telegramBotSettings.update({
-								where: { id: 'singleton' },
-								data: {
-									databaseBackupLastSentPeriodStart: new Date(
-										job.periodStart
-									),
-									databaseBackupLastSentAt: completedAt
-								}
-							});
+							// These are maintenance markers, not a Telegram routing change.
+							// Keeping updated_at unchanged lets the retained Billing/Reporting
+							// projection triggers ignore this maintenance-only update.
+							const updatedSettings = await transaction.$executeRaw`
+								UPDATE "telegram_bot_settings"
+								SET
+									"database_backup_last_sent_period_start" = ${new Date(job.periodStart)},
+									"database_backup_last_sent_at" = ${completedAt}
+								WHERE "id" = 'singleton'
+							`;
+							if (updatedSettings !== 1) {
+								throw new Error(
+									'Database backup settings singleton is missing'
+								);
+							}
 						}
 						return job;
 					}
@@ -697,8 +704,6 @@ export class MaintenanceWorkerService
 		jobType: DatabaseBackupJobType
 	): DatabaseBackupTarget {
 		switch (jobType) {
-			case SCHEDULED_JOB_TYPES.DATABASE_BACKUP:
-				return 'core';
 			case SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP:
 				return 'notification-delivery';
 			case SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP:
@@ -711,6 +716,8 @@ export class MaintenanceWorkerService
 				return 'billing';
 			case SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP:
 				return 'identity';
+			case SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP:
+				return 'platform';
 		}
 	}
 

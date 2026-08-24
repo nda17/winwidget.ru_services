@@ -68,11 +68,6 @@ export class MaintenanceSchedulerService
 					period,
 					this.getScheduledFor(now, settings.databaseBackupTime, '01:45')
 				);
-				if (backups?.core.created) {
-					this.logger.log(
-						`Daily core database backup scheduled period=${period.key} jobId=${backups.core.job.id}`
-					);
-				}
 				if (backups?.notificationDelivery.created) {
 					this.logger.log(
 						`Daily Notification Delivery database backup scheduled period=${period.key} jobId=${backups.notificationDelivery.job.id}`
@@ -96,6 +91,16 @@ export class MaintenanceSchedulerService
 				if (backups?.billing.created) {
 					this.logger.log(
 						`Daily Billing database backup scheduled period=${period.key} jobId=${backups.billing.job.id}`
+					);
+				}
+				if (backups?.identity.created) {
+					this.logger.log(
+						`Daily Identity database backup scheduled period=${period.key} jobId=${backups.identity.job.id}`
+					);
+				}
+				if (backups?.platform.created) {
+					this.logger.log(
+						`Daily Platform database backup scheduled period=${period.key} jobId=${backups.platform.job.id}`
 					);
 				}
 			}

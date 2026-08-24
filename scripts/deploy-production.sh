@@ -111,9 +111,263 @@ NODE
 	printf 'billing_routine_image_gate_self_test=passed\n'
 }
 
+run_rabbitmq_routine_provisioning_self_test() {
+	local script_path cutover_path provision_source routine_source
+	local image_resolver_source topology_provision_source compose_guard_source self_test_node
+	script_path="${BASH_SOURCE[0]}"
+	cutover_path="$(dirname -- "$script_path")/platform-cutover-production.sh"
+	[[ -f "$cutover_path" && ! -L "$cutover_path" ]] || {
+		echo 'RabbitMQ routine provisioning self-test requires the Platform cutover source.' >&2
+		return 1
+	}
+	provision_source="$(awk '
+		/^provision_rabbitmq_user\(\) \{/ { capture = 1 }
+		/^provision_campaigns_rabbitmq_topic_permissions\(\) \{/ { capture = 0 }
+		capture { print }
+	' "$script_path")"
+	routine_source="$(<"$script_path")"
+	image_resolver_source="$(awk '
+		/^platform_cutover_expected_release_image_id\(\) \{/ { capture = 1 }
+		/^platform_cutover_assert_release_image_id\(\) \{/ { capture = 0 }
+		capture { print }
+	' "$cutover_path")"
+	topology_provision_source="$(awk '
+		/^platform_cutover_provision_platform_admin_audit_topology\(\) \{/ { capture = 1 }
+		/^platform_cutover_assert_integration_worker_permissions\(\) \{/ { capture = 0 }
+		capture { print }
+	' "$cutover_path")"
+	compose_guard_source="$(awk '
+		/^routine_compose_starts_integration_worker\(\) \{/ { capture = 1 }
+		/^readonly CORE_NOTIFICATION_DELIVERY_OUTCOME_ROUTING_KEY=/ { capture = 0 }
+		capture { print }
+	' "$script_path")"
+
+	[[ "$provision_source" == *'if ! RABBITMQ_ADMIN_USER='* &&
+		"$provision_source" == *'--env RABBITMQ_ADMIN_PASSWORD'* &&
+		"$provision_source" == *'--env RABBITMQ_PROVISION_PASSWORD_BASE64'* &&
+		"$provision_source" == *'const adminConnection = await connectRabbitMq('*'const response = await fetch('*'/api/users/'*'const targetConnection = await connectRabbitMq('*'rabbitmqctl set_permissions'* &&
+		"$provision_source" == *'JSON.stringify({'*'password: targetPassword'*'tags: value("RABBITMQ_PROVISION_TAG")'* &&
+		"$provision_source" != *'rabbitmqctl add_user'* &&
+		"$provision_source" != *'rabbitmqctl change_password'* &&
+		"$provision_source" != *'rabbitmqctl authenticate_user'* &&
+		"$provision_source" != *'--env "RABBITMQ_ADMIN_PASSWORD='* &&
+		"$provision_source" != *'--env "RABBITMQ_PROVISION_PASSWORD_BASE64='* ]] || {
+		echo 'RabbitMQ routine credential transport contract is not fail-closed.' >&2
+		return 1
+	}
+	[[ "$routine_source" == *'routine_compose_starts_integration_worker() {'*'up | start | restart'*'integration-worker)'* &&
+		"$routine_source" == *'routine_require_platform_admin_audit_topology() {'*'platform_cutover_provision_platform_admin_audit_topology'*'platform_cutover_assert_platform_admin_audit_topology'* &&
+		"$routine_source" == *'compose_target() {'*'routine_compose_starts_integration_worker "$@"'*'routine_require_platform_admin_audit_topology || return 1'*'docker compose --project-name "$target_project"'* &&
+		"$routine_source" == *'compose_notification_cutover() {'*'routine_compose_starts_integration_worker "$@"'*'routine_require_platform_admin_audit_topology || return 1'*'docker compose --project-name "$NOTIFICATION_DELIVERY_CUTOVER_PROJECT"'* &&
+		"$routine_source" == *'if [[ "$service" == integration-worker ]] &&'*'routine_require_platform_admin_audit_topology'*'docker start "$container_id"'* &&
+		"$routine_source" == *'if [[ "$service" == integration-worker ]]; then'*'routine_require_platform_admin_audit_topology'*'docker start "$container_id"'* &&
+		"$routine_source" == *'if [[ -n "$first_cutover_legacy_worker_id" ]]'*'routine_require_platform_admin_audit_topology'*'docker start "$first_cutover_legacy_worker_id"'* ]] || {
+		echo 'RabbitMQ Platform admin-audit ordering guard is incomplete.' >&2
+		return 1
+	}
+	[[ "$image_resolver_source" == *'core) key=core_api_image_id'*'if platform_cutover_receipt_is_present'*'platform_cutover_billing_readiness_value "$key"'* &&
+		"$image_resolver_source" == *'platform_cutover_validate_archived_readiness_receipt'*'platform_cutover_receipt_value_from_file "$archive" "$key"'*'platform_cutover_assert_phase_a_artifacts_retired'* &&
+		"$image_resolver_source" == *'core) image="winwidget-api:git-$EXPECTED_REVISION"'*'platform_database_docker image inspect --format'*'{{.Id}}'*'"$image"'* &&
+		"$topology_provision_source" == *'image="$(platform_cutover_expected_release_image_id core)"'*'platform_cutover_assert_release_image_id core "$image"'*'--entrypoint node "$image"'*'platform_cutover_assert_platform_admin_audit_topology'* &&
+		"$topology_provision_source" != *'--entrypoint node "winwidget-api:'* ]] || {
+		echo 'RabbitMQ Platform topology image identity contract is not immutable.' >&2
+		return 1
+	}
+	(
+		eval "$image_resolver_source"
+		local mode='before-receipt'
+		local expected_revision='0123456789abcdef0123456789abcdef01234567'
+		local current_image='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+		local receipt_image='sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+		# The extracted resolver reads these dynamic-scope fixtures through eval.
+		# shellcheck disable=SC2034
+		local platform_phase_a_intent='/fixture/.platform-phase-a-intent-v1'
+		# shellcheck disable=SC2034
+		local platform_phase_a_env_artifact='/fixture/.platform-phase-a-env-v1'
+		EXPECTED_REVISION="$expected_revision"
+		platform_cutover_receipt_is_present() { [[ "$mode" == after-receipt ]]; }
+		platform_cutover_validate_billing_readiness_receipt() { return 0; }
+		platform_cutover_billing_readiness_value() {
+			case "$1" in
+			revision) printf '%s\n' "$expected_revision" ;;
+			core_api_image_id) printf '%s\n' "$receipt_image" ;;
+			*) return 1 ;;
+			esac
+		}
+		platform_cutover_current_phase() {
+			[[ "$mode" == after-archive ]] && printf 'complete\n' || printf 'absent\n'
+		}
+		platform_cutover_validate_archived_readiness_receipt() { [[ "$mode" == after-archive ]]; }
+		platform_cutover_archived_readiness_receipt() { printf '/fixture/archive.receipt\n'; }
+		platform_cutover_marker_value() { [[ "$1" == revision ]] && printf '%s\n' "$expected_revision"; }
+		platform_cutover_receipt_value_from_file() {
+			[[ "$1" == /fixture/archive.receipt && "$2" == core_api_image_id ]] || return 1
+			printf '%s\n' "$receipt_image"
+		}
+		platform_cutover_assert_phase_a_artifacts_retired() { [[ "$mode" == after-archive ]]; }
+		platform_cutover_fail() { return 1; }
+		platform_database_docker() {
+			[[ "$mode" =~ ^(before-receipt|future-release)$ && "$1" == image && "$2" == inspect && "$3" == --format &&
+				"$4" == '{{.Id}}' && "$5" == "winwidget-api:git-$expected_revision" ]] || return 1
+			printf '%s\n' "$current_image"
+		}
+		[[ "$(platform_cutover_expected_release_image_id core)" == "$current_image" ]] || return 1
+		mode='after-receipt'
+		[[ "$(platform_cutover_expected_release_image_id core)" == "$receipt_image" ]] || return 1
+		mode='after-archive'
+		[[ "$(platform_cutover_expected_release_image_id core)" == "$receipt_image" ]] || return 1
+		mode='future-release'
+		[[ "$(platform_cutover_expected_release_image_id core)" == "$current_image" ]] || return 1
+	) || {
+		echo 'RabbitMQ Platform topology image resolution fixture failed.' >&2
+		return 1
+	}
+	[[ "$(grep -Ec '^[[:space:]]*docker compose ' "$script_path")" == 2 ]] &&
+		! grep -Eq '^[[:space:]]*docker restart ' "$script_path" || {
+		echo 'RabbitMQ Platform ordering has a direct Docker bypass.' >&2
+		return 1
+	}
+	(
+		eval "$compose_guard_source"
+		local trace='' provision_result=0
+		target_project=winwidget
+		NOTIFICATION_DELIVERY_CUTOVER_PROJECT=winwidget-notification-telegram-cutover
+		ENV_FILE=/fixture.env
+		COMPOSE_FILE=/fixture.yml
+		platform_cutover_provision_platform_admin_audit_topology() {
+			trace+='P'
+			return "$provision_result"
+		}
+		platform_cutover_assert_platform_admin_audit_topology() { trace+='A'; }
+		docker() { trace+='D'; }
+		compose_target up -d --no-deps --force-recreate integration-worker || return 1
+		[[ "$trace" == PAD ]] || return 1
+		trace=''
+		compose_target ps --status running -q integration-worker || return 1
+		[[ "$trace" == D ]] || return 1
+		trace=''
+		compose_notification_cutover restart integration-worker || return 1
+		[[ "$trace" == PAD ]] || return 1
+		trace=''
+		provision_result=1
+		! compose_target up -d integration-worker || return 1
+		[[ "$trace" == P ]] || return 1
+	) || {
+		echo 'RabbitMQ Platform ordering runtime fixture failed.' >&2
+		return 1
+	}
+	self_test_node="$(type -P node 2>/dev/null || true)"
+	[[ -n "$self_test_node" && -x "$self_test_node" ]] || {
+		echo 'RabbitMQ routine provisioning self-test requires host Node.' >&2
+		return 1
+	}
+	"$self_test_node" - "$script_path" <<'NODE'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+const source = fs.readFileSync(process.argv[2], "utf8");
+const functionStart = source.indexOf("\nprovision_rabbitmq_user() {");
+const scriptStart = source.indexOf('const amqp = require("amqplib");', functionStart);
+const scriptEnd = source.indexOf("\n'; then", scriptStart);
+assert(functionStart >= 0 && scriptStart > functionStart && scriptEnd > scriptStart);
+const provisioningScript = source.slice(scriptStart, scriptEnd);
+const adminPassword = "a".repeat(40);
+const targetPassword = "b".repeat(40);
+
+async function runFixture({ adminFails = false, managementStatus = 204 } = {}) {
+  const events = [];
+  const errors = [];
+  let connectionAttempt = 0;
+  const environment = {
+    RABBITMQ_ADMIN_USER: "admin-user",
+    RABBITMQ_ADMIN_PASSWORD: adminPassword,
+    RABBITMQ_MANAGEMENT_URL: "http://127.0.0.1:15672",
+    RABBITMQ_PROVISION_USER: "target-user",
+    RABBITMQ_PROVISION_PASSWORD_BASE64: Buffer.from(targetPassword).toString("base64"),
+    RABBITMQ_PROVISION_VHOST: "winwidget",
+    RABBITMQ_PROVISION_TAG: "administrator,monitoring",
+  };
+  const sandbox = {
+    AbortSignal,
+    Buffer,
+    process: {
+      env: environment,
+      exitCode: undefined,
+      stderr: { write: message => errors.push(message) },
+    },
+    require(name) {
+      assert.equal(name, "amqplib");
+      return {
+        async connect(options) {
+          connectionAttempt += 1;
+          const role = connectionAttempt === 1 ? "admin" : "target";
+          events.push(`connect:${role}`);
+          if (role === "admin") {
+            assert.equal(options.username, environment.RABBITMQ_ADMIN_USER);
+            assert.equal(options.password, environment.RABBITMQ_ADMIN_PASSWORD);
+            if (adminFails) throw new Error("rejected");
+          } else {
+            assert.equal(options.username, environment.RABBITMQ_PROVISION_USER);
+            assert.equal(options.password, targetPassword);
+          }
+          assert.equal(options.vhost, environment.RABBITMQ_PROVISION_VHOST);
+          return { close: async () => events.push(`close:${role}`) };
+        },
+      };
+    },
+    async fetch(url, options) {
+      events.push("fetch");
+      assert.equal(
+        url,
+        "http://127.0.0.1:15672/api/users/target-user",
+      );
+      assert.equal(options.method, "PUT");
+      assert.equal(options.redirect, "error");
+      assert.equal(
+        Buffer.from(options.headers.authorization.slice(6), "base64").toString("utf8"),
+        `${environment.RABBITMQ_ADMIN_USER}:${environment.RABBITMQ_ADMIN_PASSWORD}`,
+      );
+      assert.deepEqual(JSON.parse(options.body), {
+        password: targetPassword,
+        tags: "administrator,monitoring",
+      });
+      return { status: managementStatus };
+    },
+  };
+  await vm.runInNewContext(provisioningScript, sandbox);
+  return { errors, events, exitCode: sandbox.process.exitCode };
+}
+
+(async () => {
+  const invalidAdmin = await runFixture({ adminFails: true });
+  assert.deepEqual(invalidAdmin.events, ["connect:admin"]);
+  assert.deepEqual(invalidAdmin.errors, ["RabbitMQ credential provisioning failed\n"]);
+  assert.equal(invalidAdmin.exitCode, 1);
+
+  const rejectedUpdate = await runFixture({ managementStatus: 403 });
+  assert.deepEqual(rejectedUpdate.events, ["connect:admin", "close:admin", "fetch"]);
+  assert.deepEqual(rejectedUpdate.errors, ["RabbitMQ credential provisioning failed\n"]);
+  assert.equal(rejectedUpdate.exitCode, 1);
+
+  const success = await runFixture();
+  assert.deepEqual(success.events, [
+    "connect:admin",
+    "close:admin",
+    "fetch",
+    "connect:target",
+    "close:target",
+  ]);
+  assert.deepEqual(success.errors, []);
+  assert.equal(success.exitCode, undefined);
+})().catch(() => process.exit(1));
+NODE
+	printf 'rabbitmq_routine_provisioning_self_test=passed\n'
+}
+
 gateway_route_manifest_policy_validator_source() {
 	cat <<'NODE'
-function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, identityPolicy) {
+function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, identityPolicy, platformPolicy) {
   const routes = config?.routes;
   if (!Array.isArray(routes)) throw new Error('Gateway routes are unavailable');
 
@@ -148,16 +402,23 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
     ['widget-events', '/api/v1/widget-events', 'optional'],
   ];
   const billingRoutes = [
-    ['billing-payments', '/api/v1/payments'],
-    ['billing-subscriptions', '/api/v1/subscriptions'],
-    ['billing-tariff-prices', '/api/v1/tariff-prices'],
-    ['billing-affiliate', '/api/v1/affiliate'],
+    ['billing-payments', '/api/v1/payments', 'optional'],
+    ['billing-subscriptions', '/api/v1/subscriptions', 'optional'],
+    ['billing-tariff-prices', '/api/v1/tariff-prices', 'optional'],
+    ['billing-affiliate', '/api/v1/affiliate', 'optional'],
+    ['billing-settings-public', '/api/v1/billing-settings/public', 'optional'],
+    ['billing-settings-admin', '/api/v1/billing-settings/admin', 'required'],
   ];
   const identityRoutes = [
     ['identity-auth', '/api/v1/auth'],
     ['identity-users', '/api/v1/users'],
     ['identity-telegram-auth', '/api/v1/telegram-auth'],
     ['identity-info-webhook', '/api/v1/telegram-bot/webhook'],
+  ];
+  const platformRoutes = [
+    ['platform-site-settings', '/api/v1/site-settings'],
+    ['platform-legal-pages', '/api/v1/legal-pages'],
+    ['platform-home-page-content', '/api/v1/home-page-content'],
   ];
   const widgetsInvalid = widgetRoutes.some(([id, pathPrefix, authPolicy]) =>
     !routeMatches(
@@ -174,16 +435,19 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
   const billingPrefixes = new Set(billingRoutes.map(([, pathPrefix]) => pathPrefix));
   const billingIds = new Set(billingRoutes.map(([id]) => id));
   const billingInvalid = billingPolicy === 'billing'
-    ? billingRoutes.some(([id, pathPrefix]) => !routeMatches(
+    ? billingRoutes.some(([id, pathPrefix, authPolicy]) => !routeMatches(
         routes.find(route => route.id === id),
         id,
         pathPrefix,
         'http://127.0.0.1:4800',
-        'optional',
+        authPolicy,
         30000,
-      )) || routes.filter(
+      ) || routes.indexOf(routes.find(route => route.id === id)) >=
+        routes.indexOf(monolith)) || routes.filter(
         route => route.upstreamUrl?.origin === 'http://127.0.0.1:4800',
-      ).length !== billingRoutes.length
+      ).length !== billingRoutes.length || routes.filter(route =>
+        route.pathPrefix === '/api/v1/billing-settings' ||
+        route.pathPrefix?.startsWith('/api/v1/billing-settings/')).length !== 2
     : billingPolicy === 'legacy'
       ? routes.some(route =>
           billingIds.has(route.id) ||
@@ -209,6 +473,19 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
           identityPrefixes.has(route.pathPrefix) ||
           route.upstreamUrl?.origin === 'http://127.0.0.1:4900')
       : true;
+  const platformInvalid = platformPolicy === 'platform'
+    ? platformRoutes.some(([id, pathPrefix]) => !routeMatches(
+        routes.find(route => route.id === id),
+        id,
+        pathPrefix,
+        'http://127.0.0.1:5000',
+        'optional',
+        60000,
+      ) || routes.indexOf(routes.find(route => route.id === id)) >=
+        routes.indexOf(monolith)) || routes.filter(
+        route => route.upstreamUrl?.origin === 'http://127.0.0.1:5000',
+      ).length !== platformRoutes.length
+    : true;
   const commonInvalid =
     !routeMatches(
       databaseRestores,
@@ -237,7 +514,8 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
   const expectedRouteCount = 3 + widgetRoutes.length +
     (reportingPolicy === 'reporting' ? 1 : 0) +
     (billingPolicy === 'billing' ? billingRoutes.length : 0) +
-    (identityPolicy === 'identity' ? identityRoutes.length : 0);
+    (identityPolicy === 'identity' ? identityRoutes.length : 0) +
+    (platformPolicy === 'platform' ? platformRoutes.length : 0);
   const darkInvalid = reportingPolicy === 'dark' &&
     (reporting || routes.some(route =>
       route.pathPrefix === '/api/v1/admin/reporting' ||
@@ -254,16 +532,18 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
     !['dark', 'reporting'].includes(reportingPolicy) ||
     !['legacy', 'billing'].includes(billingPolicy) ||
     !['legacy', 'identity'].includes(identityPolicy) ||
+    platformPolicy !== 'platform' ||
     routes.length !== expectedRouteCount ||
     commonInvalid ||
     widgetsInvalid ||
     billingInvalid ||
     identityInvalid ||
+    platformInvalid ||
     darkInvalid ||
     reportingInvalid
   ) {
     throw new Error(
-      `Gateway route manifest conflicts with Reporting policy ${reportingPolicy}, Billing policy ${billingPolicy}, and Identity policy ${identityPolicy}`,
+      `Gateway route manifest conflicts with Reporting policy ${reportingPolicy}, Billing policy ${billingPolicy}, Identity policy ${identityPolicy}, and Platform policy ${platformPolicy}`,
     );
   }
 }
@@ -324,12 +604,14 @@ const reporting = route(
   60000,
 );
 const billing = [
-  ['billing-payments', '/api/v1/payments'],
-  ['billing-subscriptions', '/api/v1/subscriptions'],
-  ['billing-tariff-prices', '/api/v1/tariff-prices'],
-  ['billing-affiliate', '/api/v1/affiliate'],
-].map(([id, pathPrefix]) =>
-  route(id, pathPrefix, 'http://127.0.0.1:4800', 'optional', 30000));
+  ['billing-payments', '/api/v1/payments', 'optional'],
+  ['billing-subscriptions', '/api/v1/subscriptions', 'optional'],
+  ['billing-tariff-prices', '/api/v1/tariff-prices', 'optional'],
+  ['billing-affiliate', '/api/v1/affiliate', 'optional'],
+  ['billing-settings-public', '/api/v1/billing-settings/public', 'optional'],
+  ['billing-settings-admin', '/api/v1/billing-settings/admin', 'required'],
+].map(([id, pathPrefix, authPolicy]) =>
+  route(id, pathPrefix, 'http://127.0.0.1:4800', authPolicy, 30000));
 const identity = [
   ['identity-auth', '/api/v1/auth'],
   ['identity-users', '/api/v1/users'],
@@ -337,10 +619,26 @@ const identity = [
   ['identity-info-webhook', '/api/v1/telegram-bot/webhook'],
 ].map(([id, pathPrefix]) =>
   route(id, pathPrefix, 'http://127.0.0.1:4900', 'optional', 60000));
+const platform = [
+  ['platform-site-settings', '/api/v1/site-settings'],
+  ['platform-legal-pages', '/api/v1/legal-pages'],
+  ['platform-home-page-content', '/api/v1/home-page-content'],
+].map(([id, pathPrefix]) =>
+  route(id, pathPrefix, 'http://127.0.0.1:5000', 'optional', 60000));
+const withPlatformBeforeMonolith = routes => {
+  const monolithIndex = routes.findIndex(item => item.id === 'monolith');
+  assert.notEqual(monolithIndex, -1);
+	const monolith = routes[monolithIndex];
+  return [
+	...routes.filter((_, index) => index !== monolithIndex),
+    ...platform,
+	monolith,
+  ];
+};
 const accepts = (routes, reportingPolicy, billingPolicy, identityPolicy = 'legacy') =>
-  validateGatewayRouteManifest({ routes }, reportingPolicy, billingPolicy, identityPolicy);
+  validateGatewayRouteManifest({ routes: withPlatformBeforeMonolith(routes) }, reportingPolicy, billingPolicy, identityPolicy, 'platform');
 const rejects = (routes, reportingPolicy, billingPolicy, identityPolicy = 'legacy') => assert.throws(
-  () => accepts(routes, reportingPolicy, billingPolicy, identityPolicy),
+  () => validateGatewayRouteManifest({ routes }, reportingPolicy, billingPolicy, identityPolicy, 'platform'),
   /Gateway route manifest conflicts/,
 );
 
@@ -360,20 +658,46 @@ accepts(
   'reporting',
   'billing',
 );
-rejects([...common, ...widgets, reporting, ...billing], 'reporting', 'legacy');
-rejects([...common, ...widgets, reporting, ...billing.slice(0, 3)], 'reporting', 'billing');
+rejects([...common, ...widgets, reporting, ...billing, ...platform], 'reporting', 'legacy');
+rejects([...common, ...widgets, reporting, ...billing.slice(0, 3), ...platform], 'reporting', 'billing');
 rejects(
-  [...common, ...widgets, reporting, ...billing.slice(0, 3), { ...billing[3], authPolicy: 'required' }],
+  [...common, ...widgets, reporting, ...billing.slice(0, 3), { ...billing[3], authPolicy: 'required' }, ...platform],
   'reporting',
   'billing',
 );
 rejects(
-  [...common, ...widgets, reporting, { ...billing[0], id: 'billing-payment' }, ...billing.slice(1)],
+  withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]).map(item =>
+    item.id === 'billing-settings-public' ? { ...item, authPolicy: 'required' } : item),
   'reporting',
   'billing',
 );
 rejects(
-  [...common, ...widgets, reporting, { ...billing[0], timeoutMs: 60000 }, ...billing.slice(1)],
+  withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]).map(item =>
+    item.id === 'billing-settings-admin' ? { ...item, authPolicy: 'optional' } : item),
+  'reporting',
+  'billing',
+);
+rejects(
+  [
+    ...withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]).slice(0, -1),
+    route('billing-settings-alias', '/api/v1/billing-settings', 'http://127.0.0.1:4800', 'optional', 30000),
+    common[2],
+  ],
+  'reporting',
+  'billing',
+);
+rejects(
+  [...withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]), billing[5]],
+  'reporting',
+  'billing',
+);
+rejects(
+  [...common, ...widgets, reporting, { ...billing[0], id: 'billing-payment' }, ...billing.slice(1), ...platform],
+  'reporting',
+  'billing',
+);
+rejects(
+  [...common, ...widgets, reporting, { ...billing[0], timeoutMs: 60000 }, ...billing.slice(1), ...platform],
   'reporting',
   'billing',
 );
@@ -384,26 +708,28 @@ rejects(
     reporting,
     { ...billing[0], upstreamUrl: new URL('http://127.0.0.1:4200') },
     ...billing.slice(1),
+    ...platform,
   ],
   'reporting',
   'billing',
 );
 rejects(
-  [...common, ...widgets, reporting, ...billing, route('extra', '/extra', 'http://127.0.0.1:4900', 'required', 1000)],
+  [...common, ...widgets, reporting, ...billing, ...platform, route('extra', '/extra', 'http://127.0.0.1:4900', 'required', 1000)],
   'reporting',
   'billing',
 );
 rejects([...common, ...widgets, reporting], 'unsafe', 'legacy');
 rejects([...common, ...widgets, reporting], 'reporting', 'unsafe');
-rejects([...common, ...widgets, ...identity], 'dark', 'legacy', 'legacy');
-rejects([...common, ...widgets, ...identity.slice(0, 3)], 'dark', 'legacy', 'identity');
+rejects([...common, ...widgets, ...identity, ...platform], 'dark', 'legacy', 'legacy');
+rejects([...common, ...widgets, ...identity.slice(0, 3), ...platform], 'dark', 'legacy', 'identity');
 rejects(
-  [...common, ...widgets, ...identity.slice(0, 3), { ...identity[3], authPolicy: 'required' }],
+  [...common, ...widgets, ...identity.slice(0, 3), { ...identity[3], authPolicy: 'required' }, ...platform],
   'dark',
   'legacy',
   'identity',
 );
-rejects([...common, ...widgets], 'dark', 'legacy', 'unsafe');
+rejects([...common, ...widgets, ...platform], 'dark', 'legacy', 'unsafe');
+rejects([...common, ...widgets, ...platform.slice(0, 2)], 'dark', 'legacy');
 NODE
 	printf 'gateway_route_manifest_policy_self_test=passed\n'
 }
@@ -432,6 +758,15 @@ if [[ "${1:-}" == '--self-test-gateway-route-manifest-policy' ]]; then
 		exit 1
 	}
 	run_gateway_route_manifest_policy_self_test
+	exit 0
+fi
+
+if [[ "${1:-}" == '--self-test-rabbitmq-provisioning-contract' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'RabbitMQ provisioning self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_rabbitmq_routine_provisioning_self_test
 	exit 0
 fi
 
@@ -480,6 +815,10 @@ source "$server_root/scripts/widgets-database-lifecycle.sh"
 source "$server_root/scripts/billing-database-lifecycle.sh"
 # shellcheck source=scripts/identity-database-lifecycle.sh
 source "$server_root/scripts/identity-database-lifecycle.sh"
+# shellcheck source=scripts/platform-database-lifecycle.sh
+source "$server_root/scripts/platform-database-lifecycle.sh"
+# shellcheck source=scripts/platform-cutover-production.sh
+source "$server_root/scripts/platform-cutover-production.sh"
 # shellcheck source=scripts/campaigns-contract-migration-guard.sh
 source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
@@ -493,9 +832,98 @@ EXPECTED_REVISION="$expected_revision"
 # shellcheck source=scripts/identity-production-env-control.sh
 source "$server_root/scripts/identity-production-env-control.sh"
 export IDENTITY_EXPECTED_REVISION="$expected_revision"
+# These values are populated by the sourced env-control contract above.
+# shellcheck disable=SC2154
 export IDENTITY_EXPECTED_POSTGRES_IMAGE="$identity_env_postgres_image"
+# shellcheck disable=SC2154
 export IDENTITY_EXPECTED_INTEGRATION_KINDS="$identity_env_integration_kinds"
+# shellcheck disable=SC2154
 export IDENTITY_EXPECTED_ADMIN_FILE="$identity_env_admin_password_file"
+
+platform_routes_env_state="$(
+	identity_env_node_validate "$ENV_FILE" <<'NODE'
+const fs = require("node:fs");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const matches = source.split(/\r?\n/).filter(line => line.startsWith("GATEWAY_ROUTES_JSON="));
+if (matches.length !== 1) process.exit(1);
+let raw = matches[0].slice("GATEWAY_ROUTES_JSON=".length).trim();
+if ((raw.startsWith('"') && raw.endsWith('"')) ||
+    (raw.startsWith("'") && raw.endsWith("'"))) raw = raw.slice(1, -1);
+const routes = JSON.parse(raw);
+const exact = [
+  ["platform-site-settings", "/api/v1/site-settings", "http://127.0.0.1:5000", "optional", 60000],
+  ["platform-legal-pages", "/api/v1/legal-pages", "http://127.0.0.1:5000", "optional", 60000],
+  ["platform-home-page-content", "/api/v1/home-page-content", "http://127.0.0.1:5000", "optional", 60000],
+  ["billing-settings-public", "/api/v1/billing-settings/public", "http://127.0.0.1:4800", "optional", 30000],
+  ["billing-settings-admin", "/api/v1/billing-settings/admin", "http://127.0.0.1:4800", "required", 30000],
+];
+if (!Array.isArray(routes)) process.exit(1);
+const monolith = routes.findIndex(route => route?.id === "monolith");
+const valid = monolith >= 0 && exact.every(([id, pathPrefix, upstreamUrl, authPolicy, timeoutMs]) => {
+  const matching = routes.filter(route => route?.id === id);
+  if (matching.length !== 1) return false;
+  const route = matching[0];
+  return route.pathPrefix === pathPrefix &&
+    route.upstreamUrl === upstreamUrl &&
+    route.authPolicy === authPolicy && route.timeoutMs === timeoutMs &&
+    routes.indexOf(route) < monolith;
+}) && routes.filter(route => route?.upstreamUrl === "http://127.0.0.1:5000").length === 3 &&
+  routes.filter(route => route?.pathPrefix === "/api/v1/billing-settings" ||
+    route?.pathPrefix?.startsWith("/api/v1/billing-settings/")).length === 2;
+process.stdout.write(valid ? "platform" : "unsafe");
+NODE
+)" || {
+	echo 'Platform Gateway route env contract is invalid.' >&2
+	exit 1
+}
+platform_database_phase="$(platform_database_current_phase)" || {
+	echo 'Platform database lifecycle marker is invalid.' >&2
+	exit 1
+}
+platform_cutover_phase="$(platform_cutover_current_phase)" || {
+	echo 'Platform ownership lifecycle marker is invalid.' >&2
+	exit 1
+}
+[[ "$platform_routes_env_state" == platform &&
+	"$platform_database_phase" == complete &&
+	"$platform_cutover_phase" == complete ]] || {
+	echo "Full deployment is blocked until Platform routes and both lifecycles are exactly complete: routes=$platform_routes_env_state database=$platform_database_phase ownership=$platform_cutover_phase." >&2
+	exit 1
+}
+platform_database_require_inputs
+platform_cutover_validate_marker
+[[ "$(platform_cutover_marker_value revision)" == \
+	"$(platform_database_marker_value revision)" &&
+	"$(platform_cutover_marker_value image_id)" == \
+	"$(platform_database_marker_value image_id)" &&
+	"$(platform_cutover_marker_value database_id)" == \
+	"$(platform_database_marker_value database_id)" &&
+	"$(platform_cutover_marker_value database_system_identifier)" == \
+	"$(platform_database_marker_value database_system_identifier)" ]] || {
+	echo 'Completed Platform database and ownership markers disagree.' >&2
+	exit 1
+}
+for platform_evidence_key in snapshot_sha256 source_fingerprint \
+	imported_backup_sha256 active_backup_sha256; do
+	[[ "$(platform_cutover_marker_value "$platform_evidence_key")" =~ ^[0-9a-f]{64}$ ]] || {
+		echo "Completed Platform marker lacks sealed $platform_evidence_key evidence." >&2
+		exit 1
+	}
+done
+[[ "$(platform_cutover_marker_value source_high_watermark)" =~ ^[1-9][0-9]*$ ]] || {
+	echo 'Completed Platform marker lacks source high-water evidence.' >&2
+	exit 1
+}
+platform_cutover_assert_phase_a_artifacts_retired || {
+	echo 'Full deployment requires canonically retired phase-A artifacts.' >&2
+	exit 1
+}
+git -C "$server_root" merge-base --is-ancestor \
+	"$(platform_cutover_marker_value revision)" "$deploy_revision" || {
+	echo 'Full deployment would precede the completed Platform ownership revision.' >&2
+	exit 1
+}
+platform_database_assert_marker_identity
 
 dirty_files="$(
 	git -C "$server_root" status --porcelain --untracked-files=all
@@ -1320,6 +1748,9 @@ assert_distinct_database_roles() {
 		IDENTITY_DATABASE_URL
 		IDENTITY_MIGRATION_DATABASE_URL
 		IDENTITY_BACKUP_URL
+		PLATFORM_DATABASE_URL
+		PLATFORM_MIGRATION_DATABASE_URL
+		PLATFORM_BACKUP_URL
 	)
 	local -a role_users=()
 	local key
@@ -1332,7 +1763,7 @@ assert_distinct_database_roles() {
 	for ((left = 0; left < ${#role_users[@]}; left++)); do
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
-				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets, Billing and Identity database URLs must use twenty-two distinct PostgreSQL roles." >&2
+				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets, Billing, Identity and Platform database URLs must use twenty-five distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -1589,6 +2020,14 @@ case "$mode" in
 		require_env_key "IDENTITY_AVATAR_S3_SECRET_ACCESS_KEY"
 		require_env_key "IDENTITY_AVATAR_S3_PUBLIC_BASE_URL"
 		require_env_key "IDENTITY_AVATAR_S3_FORCE_PATH_STYLE"
+		require_env_key "PLATFORM_DATABASE_URL"
+		require_env_key "PLATFORM_MIGRATION_DATABASE_URL"
+		require_env_key "PLATFORM_BACKUP_URL"
+		require_env_key "PLATFORM_POSTGRES_IMAGE"
+		require_env_key "PLATFORM_POSTGRES_PORT"
+		require_env_key "PLATFORM_POSTGRES_DATA_VOLUME"
+		require_env_key "PLATFORM_POSTGRES_ADMIN_USER"
+		require_env_key "PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "CORE_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "DATABASE_RESTORE_STORAGE_DIR"
 		require_env_key "DATABASE_RESTORE_QUEUE_SECRET"
@@ -1614,6 +2053,7 @@ case "$mode" in
 		require_env_key "RABBITMQ_BILLING_PUBLISHER_URL"
 		require_env_key "RABBITMQ_IDENTITY_WORKER_URL"
 		require_env_key "RABBITMQ_IDENTITY_PUBLISHER_URL"
+		require_env_key "RABBITMQ_PLATFORM_PUBLISHER_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -1695,6 +2135,7 @@ case "$mode" in
 		require_env_key "IDENTITY_REPORTING_TOKEN"
 		require_env_key "IDENTITY_WIDGETS_TOKEN"
 		require_env_key "IDENTITY_BILLING_TOKEN"
+		require_env_key "IDENTITY_PLATFORM_TOKEN"
 		require_env_key "IDENTITY_LISTEN_HOST"
 		require_env_key "IDENTITY_API_PORT"
 		require_env_key "IDENTITY_WORKER_PORT"
@@ -1706,6 +2147,16 @@ case "$mode" in
 		require_env_key "IDENTITY_RECEIPT_RETENTION_DAYS"
 		require_env_key "IDENTITY_FAILURE_DETAIL_RETENTION_DAYS"
 		require_env_key "IDENTITY_CORE_CLEANUP_SOAK_SECONDS"
+		require_env_key "PLATFORM_LISTEN_HOST"
+		require_env_key "PLATFORM_API_PORT"
+		require_env_key "PLATFORM_OUTBOX_PUBLISHER_PORT"
+		require_env_key "PLATFORM_INTERNAL_BASE_URL"
+		require_env_key "PLATFORM_CORE_TOKEN"
+		require_env_key "PLATFORM_INTERNAL_TIMEOUT_MS"
+		require_env_key "PLATFORM_OUTBOX_BATCH_SIZE"
+		require_env_key "PLATFORM_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "PLATFORM_OUTBOX_RETENTION_DAYS"
+		require_env_key "PLATFORM_RESTORE_DRILL_EVIDENCE_FILE"
 		require_env_key "RECAPTCHA_CLIENT_URL"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
@@ -2070,10 +2521,30 @@ case "$mode" in
 			echo 'Identity prefetch, Outbox and retention settings are outside the reviewed bounds.' >&2
 			exit 1
 		fi
+		platform_outbox_batch_size="$(get_env_value PLATFORM_OUTBOX_BATCH_SIZE)"
+		platform_outbox_poll_interval_ms="$(get_env_value PLATFORM_OUTBOX_POLL_INTERVAL_MS)"
+		platform_outbox_retention_days="$(get_env_value PLATFORM_OUTBOX_RETENTION_DAYS)"
+		if [[ "$(get_env_value PLATFORM_POSTGRES_PORT)" != '55439' ||
+			"$(get_env_value PLATFORM_LISTEN_HOST)" != '127.0.0.1' ||
+			"$(get_env_value PLATFORM_API_PORT)" != '5000' ||
+			"$(get_env_value PLATFORM_OUTBOX_PUBLISHER_PORT)" != '5001' ||
+			"$(get_env_value PLATFORM_INTERNAL_BASE_URL)" != 'http://127.0.0.1:5000' ||
+			"$(get_env_value PLATFORM_INTERNAL_TIMEOUT_MS)" != '5000' ||
+			! "$platform_outbox_batch_size" =~ ^[1-9][0-9]*$ ]] ||
+			((platform_outbox_batch_size > 500)) ||
+			[[ ! "$platform_outbox_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((platform_outbox_poll_interval_ms < 100 || platform_outbox_poll_interval_ms > 60000)) ||
+			[[ ! "$platform_outbox_retention_days" =~ ^[1-9][0-9]*$ ]] ||
+			((platform_outbox_retention_days > 365)); then
+			echo 'Platform must use the reviewed database, loopback boundary, ports and bounded Outbox settings.' >&2
+			exit 1
+		fi
 		identity_credential_keys=(
 			IDENTITY_CORE_TOKEN CORE_IDENTITY_TOKEN IDENTITY_CAMPAIGNS_TOKEN
 			IDENTITY_REPORTING_TOKEN IDENTITY_WIDGETS_TOKEN IDENTITY_BILLING_TOKEN
+			IDENTITY_PLATFORM_TOKEN
 			BILLING_CAMPAIGNS_TOKEN BILLING_IDENTITY_TOKEN WIDGETS_IDENTITY_TOKEN
+			PLATFORM_CORE_TOKEN
 		)
 		identity_credentials=()
 		for identity_credential_key in "${identity_credential_keys[@]}"; do
@@ -2094,7 +2565,7 @@ case "$mode" in
 		for ((left = 0; left < ${#identity_credentials[@]}; left++)); do
 			for ((right = left + 1; right < ${#identity_credentials[@]}; right++)); do
 				[[ "${identity_credentials[$left]}" != "${identity_credentials[$right]}" ]] || {
-					echo 'Identity cross-domain credentials must be audience-scoped and distinct.' >&2
+					echo 'Cross-domain credentials must be audience-scoped and distinct.' >&2
 					exit 1
 				}
 			done
@@ -2118,7 +2589,7 @@ case "$mode" in
 		fi
 		for identity_credential_value in "${identity_credentials[@]}"; do
 			[[ "$database_restore_queue_secret" != "$identity_credential_value" ]] || {
-				echo 'DATABASE_RESTORE_QUEUE_SECRET must differ from every Identity cross-domain credential.' >&2
+				echo 'DATABASE_RESTORE_QUEUE_SECRET must differ from every cross-domain credential.' >&2
 				exit 1
 			}
 		done
@@ -2164,6 +2635,9 @@ case "$mode" in
 		assert_database_restore_admin_secret_file \
 			IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE \
 			"$APP_ROOT/deploy/backend/.identity-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.platform-postgres-admin-password"
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
 			SMTP_GREETING_TIMEOUT_MS \
@@ -2289,12 +2763,35 @@ if [[ -n "$matched_rabbitmq_container_id" &&
 	exit 1
 fi
 
+routine_compose_starts_integration_worker() {
+	local argument command='' includes_integration_worker=false
+	for argument in "$@"; do
+		case "$argument" in
+		up | start | restart) command="$argument" ;;
+		integration-worker) includes_integration_worker=true ;;
+		esac
+	done
+	[[ "$command" =~ ^(up|start|restart)$ &&
+		"$includes_integration_worker" == true ]]
+}
+
+routine_require_platform_admin_audit_topology() {
+	platform_cutover_provision_platform_admin_audit_topology || return 1
+	platform_cutover_assert_platform_admin_audit_topology
+}
+
 compose_target() {
+	if routine_compose_starts_integration_worker "$@"; then
+		routine_require_platform_admin_audit_topology || return 1
+	fi
 	docker compose --project-name "$target_project" \
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
 compose_notification_cutover() {
+	if routine_compose_starts_integration_worker "$@"; then
+		routine_require_platform_admin_audit_topology || return 1
+	fi
 	docker compose --project-name "$NOTIFICATION_DELIVERY_CUTOVER_PROJECT" \
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
@@ -2966,8 +3463,18 @@ restore_routine_containers_after_failed_stop() {
 		if [[ "$running" == "true" ]]; then
 			continue
 		fi
-		if [[ "$running" != "false" ]] ||
-			! docker start "$container_id" >/dev/null; then
+		if [[ "$running" != "false" ]]; then
+			echo "Could not restart exact pre-migration container: $service" >&2
+			recovery_failed=true
+			continue
+		fi
+		if [[ "$service" == integration-worker ]] &&
+			! routine_require_platform_admin_audit_topology; then
+			echo 'Platform admin-audit topology is unsafe; integration-worker recovery remains stopped.' >&2
+			recovery_failed=true
+			continue
+		fi
+		if ! docker start "$container_id" >/dev/null; then
 			echo "Could not restart exact pre-migration container: $service" >&2
 			recovery_failed=true
 		fi
@@ -3822,6 +4329,9 @@ start_notification_cutover_services() {
 			echo "Saved forward cutover service has an unreadable state: $service" >&2
 			return 1
 		fi
+		if [[ "$service" == integration-worker ]]; then
+			routine_require_platform_admin_audit_topology || return 1
+		fi
 		if ! docker start "$container_id" >/dev/null; then
 			echo "Saved forward cutover service could not be started: $service" >&2
 			return 1
@@ -4042,6 +4552,7 @@ for (const forbidden of [
 		throw new Error(`Billing image contains Core artifact: ${forbidden}`);
 	}
 }
+
 process.stdout.write("Standalone Billing image artifact verified\n");
 	'
 }
@@ -4108,6 +4619,7 @@ for (const required of [
 	"apps/reporting/prisma/migrations",
 	"apps/widgets/prisma/migrations",
 	"apps/billing/prisma/migrations",
+	"apps/platform/prisma/migrations",
 	"/usr/bin/pg_dump",
 	"/usr/bin/pg_restore",
 	"/usr/bin/psql",
@@ -5054,6 +5566,7 @@ gateway_validation_env+=(
 	--env "REPORTING_GATEWAY_POLICY=$reporting_gateway_policy"
 	--env "BILLING_GATEWAY_POLICY=$billing_routes_env_state"
 	--env "IDENTITY_GATEWAY_POLICY=$identity_routes_env_state"
+	--env "PLATFORM_GATEWAY_POLICY=platform"
 )
 gateway_route_manifest_policy_validator="$(gateway_route_manifest_policy_validator_source)"
 gateway_validation_env+=(
@@ -5071,11 +5584,13 @@ const config = loadConfig();
 const reportingPolicy = process.env.REPORTING_GATEWAY_POLICY;
 const billingPolicy = process.env.BILLING_GATEWAY_POLICY;
 const identityPolicy = process.env.IDENTITY_GATEWAY_POLICY;
-validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, identityPolicy);
+const platformPolicy = process.env.PLATFORM_GATEWAY_POLICY;
+validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, identityPolicy, platformPolicy);
 process.stdout.write(
 	"API Gateway route manifest validated for Reporting policy " + reportingPolicy +
 		", Billing policy " + billingPolicy +
-		", and Identity policy " + identityPolicy + "\\n",
+		", Identity policy " + identityPolicy +
+		", and Platform policy " + platformPolicy + "\\n",
 );
 '
 
@@ -5498,31 +6013,127 @@ provision_rabbitmq_user() {
 	local read_pattern="$5"
 	local tag="$6"
 
+	if ! RABBITMQ_ADMIN_USER="$rabbitmq_admin_user" \
+		RABBITMQ_ADMIN_PASSWORD="$rabbitmq_admin_password" \
+		RABBITMQ_MANAGEMENT_URL="$rabbitmq_management_url" \
+		RABBITMQ_PROVISION_USER="$username" \
+		RABBITMQ_PROVISION_PASSWORD_BASE64="$password_base64" \
+		RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+		RABBITMQ_PROVISION_TAG="$tag" \
+		docker run --rm --network host --read-only \
+			--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 \
+			--cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+			--log-driver none \
+			--env RABBITMQ_ADMIN_USER \
+			--env RABBITMQ_ADMIN_PASSWORD \
+			--env RABBITMQ_MANAGEMENT_URL \
+			--env RABBITMQ_PROVISION_USER \
+			--env RABBITMQ_PROVISION_PASSWORD_BASE64 \
+			--env RABBITMQ_PROVISION_VHOST \
+			--env RABBITMQ_PROVISION_TAG \
+			--entrypoint node \
+			"winwidget-api:$APP_VERSION" \
+			-e '
+const amqp = require("amqplib");
+
+const required = [
+  "RABBITMQ_ADMIN_USER",
+  "RABBITMQ_ADMIN_PASSWORD",
+  "RABBITMQ_MANAGEMENT_URL",
+  "RABBITMQ_PROVISION_USER",
+  "RABBITMQ_PROVISION_PASSWORD_BASE64",
+  "RABBITMQ_PROVISION_VHOST",
+  "RABBITMQ_PROVISION_TAG",
+];
+const value = name => process.env[name] ?? "";
+const invalid = () => {
+  throw new Error("invalid RabbitMQ provisioning input");
+};
+
+(async () => {
+	if (required.slice(0, -1).some(name => !value(name))) invalid();
+	if (value("RABBITMQ_MANAGEMENT_URL") !== "http://127.0.0.1:15672") invalid();
+	if (![value("RABBITMQ_ADMIN_USER"), value("RABBITMQ_PROVISION_USER")]
+		.every(username => /^[A-Za-z0-9._-]+$/.test(username))) invalid();
+	if (!/^[A-Za-z0-9._/-]+$/.test(value("RABBITMQ_PROVISION_VHOST"))) invalid();
+	if (!/^(?:[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*)?$/.test(value("RABBITMQ_PROVISION_TAG"))) invalid();
+
+	const encodedPassword = value("RABBITMQ_PROVISION_PASSWORD_BASE64");
+	if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedPassword)) invalid();
+	const targetPassword = Buffer.from(encodedPassword, "base64").toString("utf8");
+	if (Buffer.from(targetPassword, "utf8").toString("base64") !== encodedPassword ||
+		targetPassword.length < 32 || /[\0\r\n]/.test(targetPassword)) invalid();
+	if (value("RABBITMQ_ADMIN_PASSWORD").length < 32 ||
+		/[\0\r\n]/.test(value("RABBITMQ_ADMIN_PASSWORD"))) invalid();
+
+	const connectRabbitMq = async (username, password, connectionName) => {
+		const connection = await amqp.connect({
+			protocol: "amqp",
+			hostname: "127.0.0.1",
+			port: 5672,
+			username,
+			password,
+			vhost: value("RABBITMQ_PROVISION_VHOST"),
+			clientProperties: { connection_name: connectionName },
+		}, { timeout: 10_000 });
+		await connection.close();
+	};
+
+  const adminConnection = await connectRabbitMq(
+    value("RABBITMQ_ADMIN_USER"),
+    value("RABBITMQ_ADMIN_PASSWORD"),
+    "winwidget-routine-deploy-admin-credential-check",
+  );
+  void adminConnection;
+
+  const authorization = `Basic ${Buffer.from(
+    `${value("RABBITMQ_ADMIN_USER")}:${value("RABBITMQ_ADMIN_PASSWORD")}`,
+  ).toString("base64")}`;
+  const response = await fetch(
+    `${value("RABBITMQ_MANAGEMENT_URL")}/api/users/${encodeURIComponent(value("RABBITMQ_PROVISION_USER"))}`,
+    {
+      method: "PUT",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        password: targetPassword,
+        tags: value("RABBITMQ_PROVISION_TAG"),
+      }),
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  if (![201, 204].includes(response.status)) {
+    throw new Error("RabbitMQ Management API rejected the user update");
+  }
+
+  const targetConnection = await connectRabbitMq(
+    value("RABBITMQ_PROVISION_USER"),
+    targetPassword,
+    "winwidget-routine-deploy-target-credential-check",
+  );
+  void targetConnection;
+})().catch(() => {
+  process.stderr.write("RabbitMQ credential provisioning failed\n");
+  process.exitCode = 1;
+});
+'; then
+		echo 'RabbitMQ credential provisioning failed before permissions were changed.' >&2
+		return 1
+	fi
+
 	RABBITMQ_PROVISION_USER="$username" \
-	RABBITMQ_PROVISION_PASSWORD_BASE64="$password_base64" \
 	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
 	RABBITMQ_PROVISION_CONFIGURE="$configure_pattern" \
 	RABBITMQ_PROVISION_WRITE="$write_pattern" \
 	RABBITMQ_PROVISION_READ="$read_pattern" \
-	RABBITMQ_PROVISION_TAG="$tag" \
 		docker exec \
-			-e RABBITMQ_PROVISION_USER \
-			-e RABBITMQ_PROVISION_PASSWORD_BASE64 \
-			-e RABBITMQ_PROVISION_VHOST \
-			-e RABBITMQ_PROVISION_CONFIGURE \
-			-e RABBITMQ_PROVISION_WRITE \
-			-e RABBITMQ_PROVISION_READ \
-			-e RABBITMQ_PROVISION_TAG \
+			--env RABBITMQ_PROVISION_USER \
+			--env RABBITMQ_PROVISION_VHOST \
+			--env RABBITMQ_PROVISION_CONFIGURE \
+			--env RABBITMQ_PROVISION_WRITE \
+			--env RABBITMQ_PROVISION_READ \
 			"$provisioning_rabbitmq_container_id" \
 			sh -ec '
-password="$(printf "%s" "$RABBITMQ_PROVISION_PASSWORD_BASE64" | base64 -d)"
-if rabbitmqctl --silent list_users |
-	cut -f1 |
-	grep -Fqx -- "$RABBITMQ_PROVISION_USER"; then
-	rabbitmqctl change_password "$RABBITMQ_PROVISION_USER" "$password"
-else
-	rabbitmqctl add_user "$RABBITMQ_PROVISION_USER" "$password"
-fi
 
 while IFS= read -r other_vhost; do
 	if [ "$other_vhost" != "$RABBITMQ_PROVISION_VHOST" ]; then
@@ -5541,14 +6152,6 @@ rabbitmqctl set_permissions \
 	"$RABBITMQ_PROVISION_CONFIGURE" \
 	"$RABBITMQ_PROVISION_WRITE" \
 	"$RABBITMQ_PROVISION_READ"
-if [ -n "$RABBITMQ_PROVISION_TAG" ]; then
-	rabbitmqctl set_user_tags \
-		"$RABBITMQ_PROVISION_USER" "$RABBITMQ_PROVISION_TAG"
-else
-	rabbitmqctl set_user_tags "$RABBITMQ_PROVISION_USER"
-fi
-rabbitmqctl authenticate_user "$RABBITMQ_PROVISION_USER" "$password"
-unset password
 '
 }
 
@@ -5677,7 +6280,7 @@ rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" "$RABBITMQ_PROV
 provision_billing_rabbitmq_topic_permissions() {
 	local worker_user="$1" publisher_user="$2"
 	local worker_read publisher_write
-	worker_read='^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.settings\.source\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v1|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$'
+	worker_read='^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v2|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$'
 	publisher_write='^(payment\.succeeded\.v1|payment\.notification\.telegram\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.subscription-expiry\.(email|telegram)\.requested\.v1|billing\.(payment|subscription)(\.details)?\.changed\.v1|billing\.(affiliate|settings)\.changed\.v1|admin\.audit\.billing\.v1)$'
 	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
 	RABBITMQ_BILLING_WORKER_USER="$worker_user" \
@@ -5825,9 +6428,9 @@ provision_rabbitmq_user \
 	''
 assert_campaigns_shared_rabbitmq_topology
 assert_reporting_shared_rabbitmq_topology
-post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
-post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
-post_identity_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1)(\..*)?$'
+post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
+post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
+post_identity_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\.dead-letter)?$'
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
@@ -5893,9 +6496,9 @@ provision_widgets_rabbitmq_topic_permissions "$widgets_user"
 provision_rabbitmq_user \
 	"$billing_worker_user" \
 	"$billing_worker_password_base64" \
-	'^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
-	'^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
-	'^winwidget\.(events|billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+	'^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|trial|referral|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.offer\.v2(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+	'^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|trial|referral|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.offer\.v2(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+	'^winwidget\.(events|billing\.(retry|dead-letter)|billing\.(identity|notification-routing|trial|referral|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.offer\.v2(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
 	''
 	provision_rabbitmq_user \
 		"$billing_publisher_user" \
@@ -7537,6 +8140,7 @@ restore_first_cutover_producers_on_exit() {
 			docker inspect --format '{{ .Image }}' \
 				"$first_cutover_legacy_worker_id" 2>/dev/null
 		)" >/dev/null 2>&1 ||
+			! routine_require_platform_admin_audit_topology ||
 			! docker start "$first_cutover_legacy_worker_id" >/dev/null; then
 			echo "CRITICAL: the unchanged legacy integration worker could not be restarted." >&2
 			recovery_failed=true
@@ -8962,12 +9566,14 @@ const queues = new Map(rows.map(([name, consumers]) => [name, Number(consumers)]
 const source = [
   "winwidget.billing.identity.v1",
   "winwidget.billing.notification-routing.v1",
-  "winwidget.billing.settings-source.v1",
   "winwidget.billing.trial.v1",
   "winwidget.billing.referral.v1",
-  "winwidget.billing.offer.v1",
+  "winwidget.billing.offer.v2",
   "winwidget.billing.lifecycle-repair.v1",
 ];
+const retired = "winwidget.billing.settings-source.v1";
+for (const suffix of ["", ".retry.1", ".retry.2", ".retry.3", ".dead-letter"])
+  if (queues.has(`${retired}${suffix}`)) process.exit(1);
 const active = [
   "winwidget.payment.auto-renewal",
   "winwidget.billing.notification-delivery-outcome",

@@ -12,6 +12,8 @@ export interface ProjectionEnvelope {
 	aggregateId: string;
 	aggregateVersion: bigint;
 	sourceSequence: bigint;
+	sourceSequenceContractVersion: 2 | null;
+	sourceSequenceScope: 'billing.offer:offer' | null;
 	occurredAt: Date;
 	tombstone: boolean;
 	state: Record<string, unknown> | null;
@@ -26,6 +28,7 @@ export class BillingProjectionService {
 			throw new Error('Billing projection envelope must be an object');
 		}
 		const event = value as Record<string, unknown>;
+		const billingOfferV2 = expectedType === 'billing.offer.changed.v2';
 		const exactKeys = [
 			'schemaVersion',
 			'eventType',
@@ -35,14 +38,17 @@ export class BillingProjectionService {
 			'sourceSequence',
 			'occurredAt',
 			'tombstone',
-			'state'
+			'state',
+			...(billingOfferV2
+				? ['sourceSequenceContractVersion', 'sourceSequenceScope']
+				: [])
 		].sort();
 		if (
 			Object.keys(event).length !== exactKeys.length ||
 			Object.keys(event)
 				.sort()
 				.some((key, index) => key !== exactKeys[index]) ||
-			event.schemaVersion !== 1 ||
+			event.schemaVersion !== (billingOfferV2 ? 2 : 1) ||
 			event.eventType !== expectedType
 		) {
 			throw new Error('Billing projection envelope type is invalid');
@@ -76,6 +82,13 @@ export class BillingProjectionService {
 		if (aggregateVersion < 1n || sourceSequence < 1n) {
 			throw new Error('Billing projection version must be positive');
 		}
+		if (
+			billingOfferV2 &&
+			(event.sourceSequenceContractVersion !== 2 ||
+				event.sourceSequenceScope !== 'billing.offer:offer')
+		) {
+			throw new Error('Billing offer scoped sequence contract is invalid');
+		}
 		const occurredAt = new Date(event.occurredAt as string);
 		if (!Number.isFinite(occurredAt.getTime())) {
 			throw new Error('Billing projection occurredAt is invalid');
@@ -98,6 +111,10 @@ export class BillingProjectionService {
 			aggregateId: event.aggregateId as string,
 			aggregateVersion,
 			sourceSequence,
+			sourceSequenceContractVersion: billingOfferV2 ? (2 as const) : null,
+			sourceSequenceScope: billingOfferV2
+				? ('billing.offer:offer' as const)
+				: null,
 			occurredAt,
 			tombstone: event.tombstone,
 			state: event.state as Record<string, unknown> | null
@@ -246,7 +263,11 @@ export class BillingProjectionService {
 	async applyOffer(
 		event: ProjectionEnvelope
 	): Promise<'applied' | 'stale'> {
-		if (event.aggregateId !== 'offer') {
+		if (
+			event.aggregateId !== 'offer' ||
+			event.sourceSequenceContractVersion !== 2 ||
+			event.sourceSequenceScope !== 'billing.offer:offer'
+		) {
 			throw new Error('Billing offer aggregate is invalid');
 		}
 		const state = event.state;
@@ -344,131 +365,8 @@ export class BillingProjectionService {
 					consentText: consentText || ''
 				}
 			});
-			const sequence = await transaction.billingSourceSequence.findUnique({
-				where: { id: 'billing' }
-			});
-			const nextValue = event.sourceSequence + 1n;
-			if (!sequence) {
-				await transaction.billingSourceSequence.create({
-					data: { id: 'billing', nextValue }
-				});
-			} else if (sequence.nextValue < nextValue) {
-				await transaction.billingSourceSequence.update({
-					where: { id: 'billing' },
-					data: { nextValue }
-				});
-			}
 			return 'applied';
 		});
-	}
-
-	async applySettingsSource(
-		event: ProjectionEnvelope
-	): Promise<'applied' | 'stale'> {
-		if (
-			event.aggregateId !== 'singleton' ||
-			event.tombstone ||
-			!event.state
-		) {
-			throw new Error('Billing settings source state is invalid');
-		}
-		const state = event.state;
-		if (
-			!this.exactKeys(state, [
-				'id',
-				'paymentEnabled',
-				'autoRenewalSignupEnabled',
-				'autoRenewalChargesEnabled',
-				'autoRenewalChargesEnabledAt',
-				'affiliateProgramEnabled',
-				'affiliateCashbackPercent',
-				'updatedAt'
-			]) ||
-			state.id !== 'singleton'
-		) {
-			throw new Error('Billing settings source state is invalid');
-		}
-		for (const key of [
-			'paymentEnabled',
-			'autoRenewalSignupEnabled',
-			'autoRenewalChargesEnabled',
-			'affiliateProgramEnabled'
-		] as const) {
-			if (typeof state[key] !== 'boolean') {
-				throw new Error(`Billing settings ${key} is invalid`);
-			}
-		}
-		if (!Number.isInteger(state.affiliateCashbackPercent)) {
-			throw new Error(
-				'Billing settings affiliateCashbackPercent is invalid'
-			);
-		}
-		const enabledAt = this.requiredDate(state.autoRenewalChargesEnabledAt);
-		const updatedAt = this.requiredDate(state.updatedAt);
-		const current = await this.prisma.billingSettings.findUnique({
-			where: { id: 'singleton' }
-		});
-		if (current && current.aggregateVersion >= event.aggregateVersion)
-			return 'stale';
-		await this.prisma.$transaction(async transaction => {
-			await transaction.$executeRaw`
-				SELECT pg_advisory_xact_lock(hashtextextended(${'billing.settings:singleton'}, 0))
-			`;
-			const inside = await transaction.billingSettings.findUnique({
-				where: { id: 'singleton' }
-			});
-			if (inside && inside.aggregateVersion >= event.aggregateVersion)
-				return;
-			await transaction.billingSettings.upsert({
-				where: { id: 'singleton' },
-				create: {
-					id: 'singleton',
-					paymentEnabled: state.paymentEnabled as boolean,
-					autoRenewalSignupEnabled:
-						state.autoRenewalSignupEnabled as boolean,
-					autoRenewalChargesEnabled:
-						state.autoRenewalChargesEnabled as boolean,
-					autoRenewalChargesEnabledAt: enabledAt,
-					affiliateProgramEnabled:
-						state.affiliateProgramEnabled as boolean,
-					affiliateCashbackPercent:
-						state.affiliateCashbackPercent as number,
-					aggregateVersion: event.aggregateVersion,
-					sourceSequence: event.sourceSequence,
-					updatedAt
-				},
-				update: {
-					paymentEnabled: state.paymentEnabled as boolean,
-					autoRenewalSignupEnabled:
-						state.autoRenewalSignupEnabled as boolean,
-					autoRenewalChargesEnabled:
-						state.autoRenewalChargesEnabled as boolean,
-					autoRenewalChargesEnabledAt: enabledAt,
-					affiliateProgramEnabled:
-						state.affiliateProgramEnabled as boolean,
-					affiliateCashbackPercent:
-						state.affiliateCashbackPercent as number,
-					aggregateVersion: event.aggregateVersion,
-					sourceSequence: event.sourceSequence,
-					updatedAt
-				}
-			});
-			const sequence = await transaction.billingSourceSequence.findUnique({
-				where: { id: 'billing' }
-			});
-			const nextValue = event.sourceSequence + 1n;
-			if (!sequence) {
-				await transaction.billingSourceSequence.create({
-					data: { id: 'billing', nextValue }
-				});
-			} else if (sequence.nextValue < nextValue) {
-				await transaction.billingSourceSequence.update({
-					where: { id: 'billing' },
-					data: { nextValue }
-				});
-			}
-		});
-		return 'applied';
 	}
 
 	private assertIdentityState(
@@ -536,33 +434,7 @@ export class BillingProjectionService {
 			this.requiredDate(state.updatedAt);
 			return;
 		}
-		if (expectedType === 'billing.settings.source.changed.v1') {
-			if (
-				!this.exactKeys(state, [
-					'id',
-					'paymentEnabled',
-					'autoRenewalSignupEnabled',
-					'autoRenewalChargesEnabled',
-					'autoRenewalChargesEnabledAt',
-					'affiliateProgramEnabled',
-					'affiliateCashbackPercent',
-					'updatedAt'
-				]) ||
-				state.id !== 'singleton' ||
-				[
-					'paymentEnabled',
-					'autoRenewalSignupEnabled',
-					'autoRenewalChargesEnabled',
-					'affiliateProgramEnabled'
-				].some(key => typeof state[key] !== 'boolean') ||
-				!Number.isInteger(state.affiliateCashbackPercent)
-			)
-				throw new Error('Billing settings source state is invalid');
-			this.requiredDate(state.autoRenewalChargesEnabledAt);
-			this.requiredDate(state.updatedAt);
-			return;
-		}
-		if (expectedType === 'billing.offer.changed.v1') {
+		if (expectedType === 'billing.offer.changed.v2') {
 			if (
 				!this.exactKeys(state, [
 					'id',

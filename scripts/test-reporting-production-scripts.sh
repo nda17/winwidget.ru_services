@@ -60,6 +60,7 @@ printf 'reporting_audit_consumer_bootstrap_entrypoints=passed\n'
 		"$WIDGETS_CANONICAL_STEADY_INTEGRATION_WORKER_KINDS" == \
 			"$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" &&
 		"$current_worker_kinds" == *'identity-admin-audit'* &&
+		"$current_worker_kinds" == *'platform-admin-audit'* &&
 		"$current_worker_kinds" != *'telegram-destination-unavailable'* ]]
 	current_worker_kinds="$(reporting_normalize_integration_kinds "$current_worker_kinds")"
 	reporting_cutover_worker_kinds_allowed \

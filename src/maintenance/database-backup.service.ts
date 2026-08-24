@@ -47,7 +47,10 @@ const DATABASE_URL_ENV_KEYS = [
 	'BILLING_MIGRATION_DATABASE_URL',
 	'IDENTITY_BACKUP_URL',
 	'IDENTITY_DATABASE_URL',
-	'IDENTITY_MIGRATION_DATABASE_URL'
+	'IDENTITY_MIGRATION_DATABASE_URL',
+	'PLATFORM_BACKUP_URL',
+	'PLATFORM_DATABASE_URL',
+	'PLATFORM_MIGRATION_DATABASE_URL'
 ] as const;
 
 const SERVICE_DATABASE_CONFIG = {
@@ -80,6 +83,11 @@ const SERVICE_DATABASE_CONFIG = {
 		key: 'IDENTITY_BACKUP_URL',
 		label: 'Identity',
 		filePrefix: 'winwidget-identity-db'
+	},
+	platform: {
+		key: 'PLATFORM_BACKUP_URL',
+		label: 'Platform',
+		filePrefix: 'winwidget-platform-db'
 	}
 } as const;
 
@@ -121,10 +129,7 @@ export class DatabaseBackupService implements OnModuleInit {
 			const createdAt = new Date();
 			const timestamp = createdAt.toISOString().replace(/[:.]/g, '-');
 			const database = this.getPostgresConnection(target);
-			const filePrefix =
-				target === 'core'
-					? 'winwidget-db'
-					: SERVICE_DATABASE_CONFIG[target].filePrefix;
+			const filePrefix = SERVICE_DATABASE_CONFIG[target].filePrefix;
 			const fileName = `${filePrefix}-${timestamp}.dump`;
 			const filePath = join(directory, fileName);
 
@@ -217,43 +222,13 @@ export class DatabaseBackupService implements OnModuleInit {
 	private getPostgresConnection(
 		target: DatabaseBackupTarget
 	): PostgresConnection {
-		if (target !== 'core') {
-			const config = SERVICE_DATABASE_CONFIG[target];
-			const key = config.key;
-			const raw = this.configService.get<string>(key)?.trim();
-			if (!raw || ['change_me', 'XYZXYZXYZ'].includes(raw)) {
-				throw new Error(`${key} is not configured`);
-			}
-			return this.parsePostgresConnection(key, raw, target, config.label);
-		}
-
-		const mode =
-			this.configService.get<string>('MODE')?.trim().toLowerCase() ||
-			'development';
-		if (mode !== 'development' && mode !== 'production') {
-			throw new Error(
-				`Unsupported MODE=${mode}: expected development or production`
-			);
-		}
-		const modeKey =
-			mode === 'production'
-				? 'DATABASE_URL_PRODUCTION'
-				: 'DATABASE_URL_DEVELOPMENT';
-		const backupUrl = this.configService
-			.get<string>('DATABASE_BACKUP_URL')
-			?.trim();
-		const key = backupUrl ? 'DATABASE_BACKUP_URL' : modeKey;
+		const config = SERVICE_DATABASE_CONFIG[target];
+		const key = config.key;
 		const raw = this.configService.get<string>(key)?.trim();
 		if (!raw || ['change_me', 'XYZXYZXYZ'].includes(raw)) {
 			throw new Error(`${key} is not configured`);
 		}
-
-		return this.parsePostgresConnection(
-			key,
-			raw,
-			'core',
-			'основная (core)'
-		);
+		return this.parsePostgresConnection(key, raw, target, config.label);
 	}
 
 	private parsePostgresConnection(

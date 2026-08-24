@@ -22,7 +22,7 @@ describe('MaintenanceWorkerService', () => {
 		overrides: Partial<ScheduledJobRunView> = {}
 	): ScheduledJobRunView => ({
 		id: jobId,
-		jobType: 'DATABASE_BACKUP',
+		jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 		scheduleKey: 'manual:test',
 		trigger: ScheduledJobRunTrigger.MANUAL,
 		status: ScheduledJobRunStatus.PROCESSING,
@@ -57,7 +57,7 @@ describe('MaintenanceWorkerService', () => {
 			schemaVersion: 1,
 			eventType: 'database.backup.requested.v1',
 			jobId,
-			jobType: 'DATABASE_BACKUP',
+			jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 			scheduleKey: 'manual:test',
 			periodStart: null,
 			periodEnd: null
@@ -115,6 +115,7 @@ describe('MaintenanceWorkerService', () => {
 			})
 		} as unknown as ScheduledTasksService;
 		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
 			$queryRaw: jest.fn().mockImplementation(statement => {
 				const sql = statement.strings.join('?');
 				return sql.includes('integration_delivery_failures')
@@ -193,7 +194,7 @@ describe('MaintenanceWorkerService', () => {
 
 		expect(backup.createAndSend).toHaveBeenCalledWith(
 			jobId,
-			'core',
+			'notification-delivery',
 			expect.objectContaining({
 				chatId: '-100123',
 				messageThreadId: 42
@@ -239,6 +240,87 @@ describe('MaintenanceWorkerService', () => {
 				activeRetryToken: null
 			}
 		});
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('marks the first scheduled service backup without changing shared settings updated_at', async () => {
+		const { service, transaction } = createService(
+			{},
+			{
+				scheduleKey: '2026-07-24',
+				trigger: ScheduledJobRunTrigger.SCHEDULED,
+				periodStart: now,
+				periodEnd: '2026-07-25T00:00:00.000Z',
+				input: {
+					chatId: '-100123',
+					messageThreadId: 42,
+					trigger: 'SCHEDULED',
+					periodStart: now
+				}
+			}
+		);
+
+		await (service as any).handle('database-backup', createMessage());
+
+		expect(transaction.$executeRaw).toHaveBeenCalledTimes(1);
+		const [query, periodStart, completedAt] = transaction.$executeRaw.mock
+			.calls[0] as [TemplateStringsArray, Date, Date];
+		const sql = query.join('?');
+		expect(sql).toContain('UPDATE "telegram_bot_settings"');
+		expect(sql).toContain('"database_backup_last_sent_period_start"');
+		expect(sql).toContain('"database_backup_last_sent_at"');
+		expect(sql).not.toContain('"updated_at"');
+		expect(periodStart).toEqual(new Date(now));
+		expect(completedAt).toEqual(expect.any(Date));
+		expect(transaction.telegramBotSettings.update).not.toHaveBeenCalled();
+	});
+
+	it('rejects the first scheduled service completion when the settings singleton is missing', async () => {
+		const { service, rabbitMq, scheduledJobs, transaction, prisma } =
+			createService(
+				{},
+				{
+					scheduleKey: '2026-07-24',
+					trigger: ScheduledJobRunTrigger.SCHEDULED,
+					periodStart: now,
+					periodEnd: '2026-07-25T00:00:00.000Z',
+					input: {
+						chatId: '-100123',
+						messageThreadId: 42,
+						trigger: 'SCHEDULED',
+						periodStart: now
+					}
+				}
+			);
+		transaction.$executeRaw.mockResolvedValue(0);
+		(scheduledJobs.releaseOrFail as jest.Mock).mockResolvedValue({
+			state: 'retry_scheduled',
+			job: createJob({
+				status: ScheduledJobRunStatus.QUEUED,
+				leaseOwner: null,
+				leaseToken: null,
+				leaseExpiresAt: null,
+				lastError: 'Database backup settings singleton is missing'
+			})
+		});
+
+		await (service as any).handle('database-backup', createMessage());
+
+		expect(scheduledJobs.releaseOrFail).toHaveBeenCalledWith(
+			jobId,
+			leaseToken,
+			expect.objectContaining({
+				message: 'Database backup settings singleton is missing'
+			}),
+			30_000,
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			prisma.integrationDeliveryFailure.updateMany
+		).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
@@ -387,53 +469,61 @@ describe('MaintenanceWorkerService', () => {
 		expect(transaction.telegramBotSettings.update).not.toHaveBeenCalled();
 	});
 
-	it('executes Identity as an independent backup target', async () => {
-		const identityJobType = 'IDENTITY_DATABASE_BACKUP';
-		const { service, backup, scheduledJobs, transaction } = createService(
-			{},
-			{
-				jobType: identityJobType,
+	it.each([
+		['Identity', 'IDENTITY_DATABASE_BACKUP', 'identity'],
+		['Platform', 'PLATFORM_DATABASE_BACKUP', 'platform']
+	])(
+		'executes %s as an independent backup target',
+		async (_, jobType, target) => {
+			const { service, backup, scheduledJobs, transaction } =
+				createService(
+					{},
+					{
+						jobType,
+						scheduleKey: '2026-07-24',
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						periodStart: now,
+						periodEnd: '2026-07-25T00:00:00.000Z',
+						input: {
+							chatId: '-100123',
+							messageThreadId: 42,
+							trigger: 'SCHEDULED',
+							periodStart: now
+						}
+					}
+				);
+			const message = createMessage(jobId, {
+				schemaVersion: 1,
+				eventType: 'database.backup.requested.v1',
+				jobId,
+				jobType,
 				scheduleKey: '2026-07-24',
-				trigger: ScheduledJobRunTrigger.SCHEDULED,
 				periodStart: now,
-				periodEnd: '2026-07-25T00:00:00.000Z',
-				input: {
-					chatId: '-100123',
-					messageThreadId: 42,
-					trigger: 'SCHEDULED',
-					periodStart: now
-				}
-			}
-		);
-		const message = createMessage(jobId, {
-			schemaVersion: 1,
-			eventType: 'database.backup.requested.v1',
-			jobId,
-			jobType: identityJobType,
-			scheduleKey: '2026-07-24',
-			periodStart: now,
-			periodEnd: '2026-07-25T00:00:00.000Z'
-		});
+				periodEnd: '2026-07-25T00:00:00.000Z'
+			});
 
-		await (service as any).handle('database-backup', message);
+			await (service as any).handle('database-backup', message);
 
-		expect(scheduledJobs.claim).toHaveBeenCalledWith(
-			jobId,
-			expect.any(String),
-			120_000,
-			identityJobType,
-			expect.objectContaining({
-				eventType: 'database.backup.requested.v1'
-			})
-		);
-		expect(backup.createAndSend).toHaveBeenCalledWith(
-			jobId,
-			'identity',
-			expect.objectContaining({ trigger: 'SCHEDULED' }),
-			expect.any(AbortSignal)
-		);
-		expect(transaction.telegramBotSettings.update).not.toHaveBeenCalled();
-	});
+			expect(scheduledJobs.claim).toHaveBeenCalledWith(
+				jobId,
+				expect.any(String),
+				120_000,
+				jobType,
+				expect.objectContaining({
+					eventType: 'database.backup.requested.v1'
+				})
+			);
+			expect(backup.createAndSend).toHaveBeenCalledWith(
+				jobId,
+				target,
+				expect.objectContaining({ trigger: 'SCHEDULED' }),
+				expect.any(AbortSignal)
+			);
+			expect(
+				transaction.telegramBotSettings.update
+			).not.toHaveBeenCalled();
+		}
+	);
 
 	it('keeps a completed backup successful when resolving an old DLQ record fails', async () => {
 		const { service, rabbitMq, scheduledJobs, prisma } = createService();
@@ -589,7 +679,7 @@ describe('MaintenanceWorkerService', () => {
 			jobId,
 			expect.any(String),
 			120_000,
-			'DATABASE_BACKUP',
+			'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 			expect.objectContaining({
 				deadLetterRoutingKey: 'database-backup.dead-letter'
 			})
@@ -1005,7 +1095,7 @@ describe('MaintenanceWorkerService', () => {
 
 		expect(backup.createAndSend).toHaveBeenCalledWith(
 			jobId,
-			'core',
+			'notification-delivery',
 			expect.any(Object),
 			expect.objectContaining({ aborted: true })
 		);

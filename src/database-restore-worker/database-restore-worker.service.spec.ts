@@ -66,6 +66,7 @@ function createConfig(
 			DATABASE_RESTORE_WIDGETS_PORT: '55436',
 			DATABASE_RESTORE_BILLING_PORT: '55437',
 			DATABASE_RESTORE_IDENTITY_PORT: '55438',
+			DATABASE_RESTORE_PLATFORM_PORT: '55439',
 			DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
@@ -74,6 +75,7 @@ function createConfig(
 			DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
 			DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: '/secrets/billing',
 			DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: '/secrets/identity',
+			DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: '/secrets/platform',
 			APP_REVISION: 'd'.repeat(40),
 			NODE_ENV: productionMode ? 'production' : 'test'
 		},
@@ -524,6 +526,7 @@ describe('DatabaseRestoreWorkerService', () => {
 			'core',
 			'identity',
 			'notification-delivery',
+			'platform',
 			'reporting',
 			'widgets'
 		]);

@@ -5,6 +5,7 @@ import {
 	BillingMessagingInternalApiError
 } from '@/messaging/billing-messaging-client.service';
 import type { IdentityMessagingClientService } from '@/messaging/identity-messaging-client.service';
+import type { PlatformMessagingClientService } from '@/messaging/platform-messaging-client.service';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import {
 	CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
@@ -133,6 +134,31 @@ describe('MessagingAdminService', () => {
 				]
 			})
 		} as unknown as WidgetsDeliveryFailuresClientService;
+		const platform = {
+			getOverview: jest.fn().mockResolvedValue({
+				schemaVersion: 1,
+				generatedAt: '2026-08-05T12:00:00.000Z',
+				outbox: { PENDING: 4, PROCESSING: 2, PUBLISHED: 10 },
+				oldestPendingAt: '2026-08-05T11:57:00.000Z',
+				operational: { dueOutbox: 4, staleOutbox: 0 },
+				heartbeats: [
+					{
+						service: 'platform-api',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-08-05T11:59:55.000Z',
+						revision: 'a'.repeat(40)
+					},
+					{
+						service: 'platform-outbox-publisher',
+						status: 'ok',
+						activeInstances: 1,
+						lastSeenAt: '2026-08-05T11:59:55.000Z',
+						revision: 'a'.repeat(40)
+					}
+				]
+			})
+		} as unknown as PlatformMessagingClientService;
 		const service = new MessagingAdminService(
 			prisma,
 			{
@@ -140,20 +166,29 @@ describe('MessagingAdminService', () => {
 			} as unknown as RabbitMqManagementService,
 			{} as AdminEventLogService,
 			notification,
-			widgets
+			widgets,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			platform
 		);
 
 		await expect(service.getOverview()).resolves.toEqual(
 			expect.objectContaining({
-				outbox: { PENDING: 6, PUBLISHING: 1, PUBLISHED: 19, FAILED: 1 },
-				oldestPendingAt: '2026-08-05T11:58:00.000Z',
+				outbox: { PENDING: 10, PUBLISHING: 3, PUBLISHED: 29, FAILED: 1 },
+				oldestPendingAt: '2026-08-05T11:57:00.000Z',
 				unresolvedFailures: 13,
 				retryingFailures: 6,
 				processedLast24Hours: 19,
 				completedBackupsLast24Hours: 4,
 				widgetsError: null,
+				platformError: null,
 				heartbeats: expect.arrayContaining([
-					expect.objectContaining({ service: 'widgets-publisher' })
+					expect.objectContaining({ service: 'widgets-publisher' }),
+					expect.objectContaining({
+						service: 'platform-outbox-publisher'
+					})
 				])
 			})
 		);
@@ -161,13 +196,13 @@ describe('MessagingAdminService', () => {
 			where: {
 				jobType: {
 					in: [
-						'DATABASE_BACKUP',
 						'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 						'CAMPAIGNS_DATABASE_BACKUP',
 						'REPORTING_DATABASE_BACKUP',
 						'WIDGETS_DATABASE_BACKUP',
 						'BILLING_DATABASE_BACKUP',
-						'IDENTITY_DATABASE_BACKUP'
+						'IDENTITY_DATABASE_BACKUP',
+						'PLATFORM_DATABASE_BACKUP'
 					]
 				},
 				status: 'SUCCEEDED',
@@ -560,13 +595,13 @@ describe('MessagingAdminService', () => {
 	});
 
 	it.each([
-		'DATABASE_BACKUP',
 		'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 		'CAMPAIGNS_DATABASE_BACKUP',
 		'REPORTING_DATABASE_BACKUP',
 		'WIDGETS_DATABASE_BACKUP',
 		'BILLING_DATABASE_BACKUP',
-		'IDENTITY_DATABASE_BACKUP'
+		'IDENTITY_DATABASE_BACKUP',
+		'PLATFORM_DATABASE_BACKUP'
 	])(
 		'reopens a failed %s job in the same transaction as manual retry Outbox',
 		async jobType => {
@@ -650,42 +685,48 @@ describe('MessagingAdminService', () => {
 		}
 	);
 
-	it('labels a failed Billing backup job in the federated failure view', () => {
-		const service = new MessagingAdminService(
-			{} as PrismaService,
-			{} as RabbitMqManagementService,
-			{} as AdminEventLogService,
-			notificationDelivery,
-			widgetsFailures
-		);
-		const result = (service as any).serializeFailure({
-			id: '22222222-2222-4222-8222-222222222222',
-			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'database-backup',
-			attempts: 1,
-			lastError: 'backup failed',
-			category: 'TRANSIENT',
-			normalizedCode: 'BACKUP_FAILED',
-			safeReason: 'Backup failed',
-			httpStatus: null,
-			providerCode: null,
-			retryable: true,
-			failedAt: new Date('2026-08-11T00:00:00.000Z'),
-			retryingAt: null,
-			resolvedAt: null,
-			resolution: null,
-			resolutionComment: null,
-			payload: {
-				jobId: '33333333-3333-4333-8333-333333333333',
-				jobType: 'BILLING_DATABASE_BACKUP'
-			}
-		});
+	it.each([
+		['BILLING_DATABASE_BACKUP', 'Backup PostgreSQL Billing'],
+		['PLATFORM_DATABASE_BACKUP', 'Backup PostgreSQL Platform']
+	])(
+		'labels a failed %s job in the federated failure view',
+		(jobType, name) => {
+			const service = new MessagingAdminService(
+				{} as PrismaService,
+				{} as RabbitMqManagementService,
+				{} as AdminEventLogService,
+				notificationDelivery,
+				widgetsFailures
+			);
+			const result = (service as any).serializeFailure({
+				id: '22222222-2222-4222-8222-222222222222',
+				eventId: '11111111-1111-4111-8111-111111111111',
+				integration: 'database-backup',
+				attempts: 1,
+				lastError: 'backup failed',
+				category: 'TRANSIENT',
+				normalizedCode: 'BACKUP_FAILED',
+				safeReason: 'Backup failed',
+				httpStatus: null,
+				providerCode: null,
+				retryable: true,
+				failedAt: new Date('2026-08-11T00:00:00.000Z'),
+				retryingAt: null,
+				resolvedAt: null,
+				resolution: null,
+				resolutionComment: null,
+				payload: {
+					jobId: '33333333-3333-4333-8333-333333333333',
+					jobType
+				}
+			});
 
-		expect(result.entity).toEqual({
-			id: '33333333-3333-4333-8333-333333333333',
-			name: 'Backup PostgreSQL Billing'
-		});
-	});
+			expect(result.entity).toEqual({
+				id: '33333333-3333-4333-8333-333333333333',
+				name
+			});
+		}
+	);
 
 	it('closes an unresolved Core-owned failure without publishing', async () => {
 		const failure = {

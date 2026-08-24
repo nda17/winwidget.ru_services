@@ -23,6 +23,7 @@ function createConfig(): DatabaseRestoreWorkerConfig {
 			DATABASE_RESTORE_WIDGETS_PORT: '55436',
 			DATABASE_RESTORE_BILLING_PORT: '55437',
 			DATABASE_RESTORE_IDENTITY_PORT: '55438',
+			DATABASE_RESTORE_PLATFORM_PORT: '55439',
 			DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
@@ -31,6 +32,7 @@ function createConfig(): DatabaseRestoreWorkerConfig {
 			DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: '/secrets/widgets',
 			DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: '/secrets/billing',
 			DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: '/secrets/identity',
+			DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: '/secrets/platform',
 			APP_REVISION: 'd'.repeat(40)
 		},
 		'/app'
@@ -116,6 +118,8 @@ describe('database restore PostgreSQL contract', () => {
 			'20260810000000_remove_legacy_widgets_core_source';
 		const billingCleanupMigration =
 			'20260813000000_remove_legacy_billing_core_source';
+		const identityCleanupMigration =
+			'20260815000000_remove_legacy_identity_core_source';
 		const runtimeAllTablesGrant =
 			'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "public" TO "winwidget_api_runtime"';
 		const legacyWidgetsTables = [
@@ -161,12 +165,19 @@ describe('database restore PostgreSQL contract', () => {
 			'"public"."reporting_producers_enabled"()',
 			'"public"."reporting_iso_timestamp"(timestamp without time zone)',
 			'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
-			'"public"."reporting_settings_projection_trigger"()'
+			'"public"."reporting_settings_projection_trigger"()',
+			'"public"."platform_core_source_writes_enabled"()',
+			'"public"."platform_assert_core_write_enabled"()'
 		];
-		const removedRuntimeFunctions = [
-			'"public"."identity_core_source_is_open"()',
-			'"public"."fence_identity_core_source"(text)',
-			'"public"."unfence_identity_core_source"(text)',
+		const retiredIdentitySourceFunctions = [
+			'public.identity_core_source_is_open()',
+			'public.lock_identity_core_source_open()',
+			'public.reject_fenced_identity_core_source_write()',
+			'public.reject_fenced_identity_auth_settings_write()',
+			'public.fence_identity_core_source(text)',
+			'public.unfence_identity_core_source(text)'
+		];
+		const removedProjectionFunctions = [
 			'"public"."reporting_emit_user_projection"(text, boolean)',
 			'"public"."reporting_user_projection_trigger"()',
 			'"public"."reporting_auth_identity_projection_trigger"()',
@@ -191,6 +202,11 @@ describe('database restore PostgreSQL contract', () => {
 		expect(verificationSql).toContain(widgetsCleanupMigration);
 		expect(repairSql).toContain(billingCleanupMigration);
 		expect(verificationSql).toContain(billingCleanupMigration);
+		expect(repairSql).toContain(identityCleanupMigration);
+		expect(verificationSql).toContain(identityCleanupMigration);
+		expect(repairSql.indexOf(identityCleanupMigration)).toBeLessThan(
+			repairSql.indexOf(runtimeAllTablesGrant)
+		);
 		expect(repairSql.indexOf(widgetsCleanupMigration)).toBeLessThan(
 			repairSql.indexOf(runtimeAllTablesGrant)
 		);
@@ -244,14 +260,63 @@ describe('database restore PostgreSQL contract', () => {
 		expect(repairSql).toContain(
 			'Core restore contains legacy Billing site_settings column % after cleanup migration'
 		);
-		for (const functionSignature of retainedRuntimeFunctions) {
-			expect(repairSql).toContain(functionSignature);
-			expect(verificationSql).toContain(functionSignature);
+		const identityInvariantSql = repairSql.match(
+			/DO \$database_restore_core_identity_cleanup\$([\s\S]+?)\$database_restore_core_identity_cleanup\$;/
+		)?.[1];
+		expect(identityInvariantSql).toBeDefined();
+		expect(identityInvariantSql).toContain(
+			"ARRAY['identity_core_source_state']::TEXT[]"
+		);
+		for (const functionSignature of retiredIdentitySourceFunctions) {
+			expect(identityInvariantSql).toContain(`'${functionSignature}'`);
 		}
-		for (const functionSignature of removedRuntimeFunctions) {
+		expect(repairSql).toContain(
+			'Core restore contains retired Identity source-state relation %'
+		);
+		expect(repairSql).toContain(
+			'Core restore contains retired Identity source-state function %'
+		);
+		const runtimeFunctionGrant = repairSql.match(
+			/GRANT EXECUTE ON FUNCTION ([\s\S]+?) TO "winwidget_api_runtime";/
+		)?.[1];
+		expect(runtimeFunctionGrant).toBeDefined();
+		const verifiedRuntimeFunctions = verificationSql.match(
+			/FOREACH function_signature IN ARRAY (ARRAY\[[^\]]+\]::TEXT\[\]) LOOP/s
+		)?.[1];
+		expect(verifiedRuntimeFunctions).toBeDefined();
+		for (const functionSignature of retainedRuntimeFunctions) {
+			expect(runtimeFunctionGrant).toContain(functionSignature);
+			expect(verifiedRuntimeFunctions).toContain(functionSignature);
+		}
+		for (const functionSignature of retiredIdentitySourceFunctions) {
+			expect(runtimeFunctionGrant).not.toContain(functionSignature);
+			expect(verifiedRuntimeFunctions).not.toContain(functionSignature);
+		}
+		for (const functionSignature of removedProjectionFunctions) {
 			expect(repairSql).not.toContain(functionSignature);
 			expect(verificationSql).not.toContain(functionSignature);
 		}
+		expect(repairSql).toContain(
+			'REVOKE ALL ON TABLE "public"."platform_core_state" FROM "winwidget_api_runtime"'
+		);
+		expect(repairSql).toContain(
+			'GRANT SELECT ON TABLE "public"."platform_core_state" TO "winwidget_api_runtime"'
+		);
+		expect(repairSql).toContain(
+			'"public"."reporting_producer_state",\n    "public"."platform_core_state"\n    TO "winwidget_maintenance"'
+		);
+		expect(verificationSql).toContain(
+			"ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']"
+		);
+		expect(verificationSql).toContain(
+			"ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions', 'platform_core_state']"
+		);
+		expect(verificationSql).toContain(
+			"ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']"
+		);
+		expect(verificationSql).toContain(
+			"'reporting_producer_state',\n                   'platform_core_state'"
+		);
 		expect(repairSql).not.toContain(
 			'"public"."reporting_widget_projection_trigger"()'
 		);
@@ -280,6 +345,12 @@ describe('database restore PostgreSQL contract', () => {
 		);
 		expect(buildDatabasePreReopenVerificationSql(reporting)).not.toContain(
 			'20260813000000_remove_legacy_billing_core_source'
+		);
+		expect(buildDatabaseOwnershipAndAclRepairSql(reporting)).not.toContain(
+			'20260815000000_remove_legacy_identity_core_source'
+		);
+		expect(buildDatabasePreReopenVerificationSql(reporting)).not.toContain(
+			'20260815000000_remove_legacy_identity_core_source'
 		);
 	});
 
@@ -401,6 +472,33 @@ describe('DatabaseRestoreWorkerConfig', () => {
 		});
 	});
 
+	it('defines the isolated Platform database, roles, migrations and anchors', () => {
+		const target = createConfig().targets.platform;
+
+		expect(target).toMatchObject({
+			target: 'platform',
+			label: 'Platform',
+			host: '127.0.0.1',
+			port: 55439,
+			database: 'winwidget_platform',
+			schema: 'platform',
+			adminRole: 'winwidget_platform_admin',
+			migrationRole: 'winwidget_platform_migration',
+			runtimeRoles: ['winwidget_platform_runtime'],
+			backupRole: 'winwidget_platform_backup',
+			passwordFile: '/secrets/platform',
+			migrationsDirectory: '/app/apps/platform/prisma/migrations',
+			anchorTables: [
+				'_prisma_migrations',
+				'service_identity',
+				'site_settings',
+				'legal_pages',
+				'home_page_content',
+				'outbox_events'
+			]
+		});
+	});
+
 	it('defines Core anchors without retired Identity source tables', () => {
 		expect(createConfig().targets.core.anchorTables).toEqual([
 			'_prisma_migrations',
@@ -458,6 +556,7 @@ describe('DatabaseRestoreWorkerConfig', () => {
 					DATABASE_RESTORE_WIDGETS_PORT: '55436',
 					DATABASE_RESTORE_BILLING_PORT: '55437',
 					DATABASE_RESTORE_IDENTITY_PORT: '55438',
+					DATABASE_RESTORE_PLATFORM_PORT: '55439',
 					DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: '/secrets/core',
 					DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 						'/secrets/notification-delivery',
@@ -469,6 +568,8 @@ describe('DatabaseRestoreWorkerConfig', () => {
 					DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: '/secrets/billing',
 					DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE:
 						'/secrets/identity',
+					DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE:
+						'/secrets/platform',
 					APP_REVISION: 'd'.repeat(40)
 				})
 		).toThrow('must not contain surrounding whitespace');

@@ -125,6 +125,33 @@ describe('RabbitMqService topology', () => {
 				deadLetterRoutingKey: 'reporting-admin-audit'
 			})
 		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.platform.v1',
+			'winwidget.events',
+			'admin.audit.platform.v1'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.platform.v1',
+			'winwidget.events',
+			'manual.platform-admin-audit'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.platform.v1',
+			'winwidget.manual-retry',
+			'platform-admin-audit'
+		);
+		expect(channel.bindQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.platform.v1.dead-letter',
+			'winwidget.dead-letter',
+			'platform-admin-audit.dead-letter'
+		);
+		expect(channel.assertQueue).toHaveBeenCalledWith(
+			'winwidget.admin.audit.platform.v1.retry-v2.1',
+			expect.objectContaining({
+				deadLetterExchange: 'winwidget.manual-retry',
+				deadLetterRoutingKey: 'platform-admin-audit'
+			})
+		);
 
 		const assertedQueues = assertQueue.mock.calls.map(([queue]) => queue);
 		const boundQueues = bindQueue.mock.calls.map(([queue]) => queue);
@@ -248,6 +275,60 @@ describe('RabbitMqService topology', () => {
 			service.publishEvent('payment.succeeded.v1', paymentPayload, {
 				messageId,
 				type: 'payment.succeeded.v1'
+			})
+		).rejects.toThrow('NO_ROUTE');
+		expect((service as any).returnedPublications.size).toBe(0);
+	});
+
+	it('rejects a returned Platform audit publication after contract validation', async () => {
+		const service = new RabbitMqService({
+			get: jest.fn()
+		} as unknown as ConfigService);
+		const publish = jest.fn(
+			async (
+				_exchange: string,
+				_routingKey: string,
+				_content: Buffer,
+				options: { headers: { 'x-publication-token': string } }
+			) => {
+				(service as any).returnedPublications.set(
+					options.headers['x-publication-token'],
+					new Error('RabbitMQ returned Platform publication: NO_ROUTE')
+				);
+				return true;
+			}
+		);
+		(service as any).channel = { publish };
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: messageId,
+			occurredAt: '2026-08-23T12:00:00.000Z',
+			correlationId: 'request:platform-settings-42',
+			actorId: 'admin-user-id',
+			section: 'PLATFORM_CONTENT',
+			action: 'PLATFORM_SITE_SETTINGS_UPDATE',
+			description: 'Обновлены настройки платформы',
+			entity: {
+				type: 'site_settings',
+				id: 'singleton',
+				label: null,
+				targetUserId: null
+			},
+			metadata: {
+				changedFields: ['bannerEnabled'],
+				bannerTextChanged: false,
+				bannerEnabled: true,
+				actorRole: 'ADMIN',
+				requestIp: null,
+				requestUserAgent: null
+			}
+		};
+
+		await expect(
+			service.publishEvent('admin.audit.platform.v1', payload, {
+				messageId,
+				type: 'admin.audit.event.v1'
 			})
 		).rejects.toThrow('NO_ROUTE');
 		expect((service as any).returnedPublications.size).toBe(0);

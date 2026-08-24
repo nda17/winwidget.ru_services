@@ -56,6 +56,9 @@ x-api-env: &api-env
   IDENTITY_CORE_TOKEN: ${IDENTITY_CORE_TOKEN:?IDENTITY_CORE_TOKEN is required}
   CORE_IDENTITY_TOKEN: ${CORE_IDENTITY_TOKEN:?CORE_IDENTITY_TOKEN is required}
   IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
+  PLATFORM_INTERNAL_BASE_URL: ${PLATFORM_INTERNAL_BASE_URL:-http://127.0.0.1:5000}
+  PLATFORM_CORE_TOKEN: ${PLATFORM_CORE_TOKEN:?PLATFORM_CORE_TOKEN is required}
+  PLATFORM_INTERNAL_TIMEOUT_MS: ${PLATFORM_INTERNAL_TIMEOUT_MS:-5000}
   DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
   DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
   DATABASE_RESTORE_PRODUCTION_ENABLED: ${DATABASE_RESTORE_PRODUCTION_ENABLED:-false}
@@ -92,7 +95,7 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
@@ -244,6 +247,18 @@ x-identity-env: &identity-env
   IDENTITY_RECEIPT_RETENTION_DAYS: ${IDENTITY_RECEIPT_RETENTION_DAYS:-90}
   IDENTITY_FAILURE_DETAIL_RETENTION_DAYS: ${IDENTITY_FAILURE_DETAIL_RETENTION_DAYS:-30}
 
+x-platform-env: &platform-env
+  APP_REVISION: ${PLATFORM_REVISION:?PLATFORM_REVISION is required}
+  NODE_ENV: production
+  MODE: ${MODE:-production}
+  PLATFORM_DATABASE_URL: ${PLATFORM_DATABASE_URL:?PLATFORM_DATABASE_URL is required}
+  PLATFORM_LISTEN_HOST: ${PLATFORM_LISTEN_HOST:-127.0.0.1}
+  PLATFORM_API_PORT: ${PLATFORM_API_PORT:-5000}
+  PLATFORM_OUTBOX_PUBLISHER_PORT: ${PLATFORM_OUTBOX_PUBLISHER_PORT:-5001}
+  PLATFORM_OUTBOX_BATCH_SIZE: ${PLATFORM_OUTBOX_BATCH_SIZE:-50}
+  PLATFORM_OUTBOX_POLL_INTERVAL_MS: ${PLATFORM_OUTBOX_POLL_INTERVAL_MS:-1000}
+  PLATFORM_OUTBOX_RETENTION_DAYS: ${PLATFORM_OUTBOX_RETENTION_DAYS:-7}
+
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
   APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
@@ -255,6 +270,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   WIDGETS_BACKUP_URL: ${WIDGETS_BACKUP_URL:?WIDGETS_BACKUP_URL is required}
   BILLING_BACKUP_URL: ${BILLING_BACKUP_URL:?BILLING_BACKUP_URL is required}
   IDENTITY_BACKUP_URL: ${IDENTITY_BACKUP_URL:?IDENTITY_BACKUP_URL is required}
+  PLATFORM_BACKUP_URL: ${PLATFORM_BACKUP_URL:?PLATFORM_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
@@ -284,6 +300,7 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_WIDGETS_PORT: ${WIDGETS_POSTGRES_PORT:?WIDGETS_POSTGRES_PORT is required}
   DATABASE_RESTORE_BILLING_PORT: ${BILLING_POSTGRES_PORT:?BILLING_POSTGRES_PORT is required}
   DATABASE_RESTORE_IDENTITY_PORT: ${IDENTITY_POSTGRES_PORT:?IDENTITY_POSTGRES_PORT is required}
+  DATABASE_RESTORE_PLATFORM_PORT: ${PLATFORM_POSTGRES_PORT:?PLATFORM_POSTGRES_PORT is required}
   DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/core-admin-password
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
   DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
@@ -291,6 +308,7 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/widgets-admin-password
   DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/billing-admin-password
   DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/identity-admin-password
+  DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/platform-admin-password
 
 x-outbox-publisher-env: &outbox-publisher-env
   <<: *runtime-env
@@ -337,6 +355,11 @@ x-identity-migration-env: &identity-migration-env
   APP_REVISION: ${IDENTITY_REVISION:?IDENTITY_REVISION is required}
   NODE_ENV: production
   IDENTITY_DATABASE_URL: ${IDENTITY_MIGRATION_DATABASE_URL:?IDENTITY_MIGRATION_DATABASE_URL is required}
+
+x-platform-migration-env: &platform-migration-env
+  APP_REVISION: ${PLATFORM_REVISION:?PLATFORM_REVISION is required}
+  NODE_ENV: production
+  PLATFORM_DATABASE_URL: ${PLATFORM_MIGRATION_DATABASE_URL:?PLATFORM_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -595,6 +618,50 @@ services:
     mem_limit: ${IDENTITY_POSTGRES_MEMORY_LIMIT:-768m}
     mem_reservation: ${IDENTITY_POSTGRES_MEMORY_RESERVATION:-256m}
     cpus: ${IDENTITY_POSTGRES_CPUS:-1.0}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
+  platform-postgres:
+    image: ${PLATFORM_POSTGRES_IMAGE:?PLATFORM_POSTGRES_IMAGE is required}
+    profiles:
+      - platform-database
+    labels:
+      com.winwidget.owner: platform
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_platform
+      POSTGRES_USER: ${PLATFORM_POSTGRES_ADMIN_USER:?PLATFORM_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/platform-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${PLATFORM_POSTGRES_PORT:-55439}:5432'
+    volumes:
+      - winwidget-platform-postgres-data:/var/lib/postgresql
+    networks:
+      - platform-postgres
+    secrets:
+      - platform-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${PLATFORM_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${PLATFORM_POSTGRES_MEMORY_LIMIT:-512m}
+    mem_reservation: ${PLATFORM_POSTGRES_MEMORY_RESERVATION:-128m}
+    cpus: ${PLATFORM_POSTGRES_CPUS:-0.75}
     pids_limit: 200
     logging:
       driver: json-file
@@ -1068,6 +1135,7 @@ services:
       IDENTITY_REPORTING_TOKEN: ${IDENTITY_REPORTING_TOKEN:?IDENTITY_REPORTING_TOKEN is required}
       IDENTITY_WIDGETS_TOKEN: ${IDENTITY_WIDGETS_TOKEN:?IDENTITY_WIDGETS_TOKEN is required}
       IDENTITY_BILLING_TOKEN: ${IDENTITY_BILLING_TOKEN:?IDENTITY_BILLING_TOKEN is required}
+      IDENTITY_PLATFORM_TOKEN: ${IDENTITY_PLATFORM_TOKEN:?IDENTITY_PLATFORM_TOKEN is required}
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
       BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
       BILLING_IDENTITY_TOKEN: ${BILLING_IDENTITY_TOKEN:?BILLING_IDENTITY_TOKEN is required}
@@ -1196,6 +1264,94 @@ services:
         max-size: 10m
         max-file: '3'
 
+  platform-api:
+    image: ${PLATFORM_IMAGE:?PLATFORM_IMAGE is required}
+    build:
+      context: ../apps/platform
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${PLATFORM_REVISION:?PLATFORM_REVISION is required}
+    labels:
+      com.winwidget.owner: platform
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *platform-env
+      PLATFORM_PROCESS_ROLE: api
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+      IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+      IDENTITY_PLATFORM_TOKEN: ${IDENTITY_PLATFORM_TOKEN:?IDENTITY_PLATFORM_TOKEN is required}
+      IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
+      PLATFORM_CORE_TOKEN: ${PLATFORM_CORE_TOKEN:?PLATFORM_CORE_TOKEN is required}
+    network_mode: host
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.PLATFORM_API_PORT||5000)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    mem_limit: ${PLATFORM_API_MEMORY_LIMIT:-384m}
+    mem_reservation: ${PLATFORM_API_MEMORY_RESERVATION:-96m}
+    cpus: ${PLATFORM_API_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  platform-outbox-publisher:
+    image: ${PLATFORM_IMAGE:?PLATFORM_IMAGE is required}
+    labels:
+      com.winwidget.owner: platform
+      com.winwidget.purpose: outbox-publisher
+    environment:
+      <<: *platform-env
+      PLATFORM_PROCESS_ROLE: outbox-publisher
+      RABBITMQ_URL: ${RABBITMQ_PLATFORM_PUBLISHER_URL:?RABBITMQ_PLATFORM_PUBLISHER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-platform-outbox-publisher
+      RABBITMQ_ASSERT_TOPOLOGY: 'false'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: platform-outbox-publisher
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.PLATFORM_OUTBOX_PUBLISHER_PORT||5001)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${PLATFORM_OUTBOX_PUBLISHER_MEMORY_LIMIT:-256m}
+    mem_reservation: ${PLATFORM_OUTBOX_PUBLISHER_MEMORY_RESERVATION:-64m}
+    cpus: ${PLATFORM_OUTBOX_PUBLISHER_CPUS:-0.35}
+    pids_limit: 150
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   maintenance-worker:
     image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
     build:
@@ -1261,6 +1417,8 @@ services:
         target: database-restore-billing-admin-password
       - source: identity-postgres-admin-password
         target: database-restore-identity-admin-password
+      - source: platform-postgres-admin-password
+        target: database-restore-platform-admin-password
     tmpfs:
       - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -1283,7 +1441,7 @@ services:
           'nestjs:nodejs',
           'node',
           '-e',
-          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","core","identity","notification-delivery","reporting","widgets"]''||fences.length!==0)process.exit(1)'
+          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","core","identity","notification-delivery","platform","reporting","widgets"]''||fences.length!==0)process.exit(1)'
         ]
       interval: 10s
       timeout: 5s
@@ -1399,7 +1557,24 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  platform-migrate:
+    image: ${PLATFORM_IMAGE:?PLATFORM_IMAGE is required}
+    build:
+      context: ../apps/platform
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${PLATFORM_REVISION:?PLATFORM_REVISION is required}
+    profiles:
+      - platform-migration
+    environment: *platform-migration-env
+    network_mode: host
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
+  winwidget-platform-postgres-data:
+    external: true
+    name: ${PLATFORM_POSTGRES_DATA_VOLUME:?PLATFORM_POSTGRES_DATA_VOLUME must name the verified Platform PostgreSQL volume}
   winwidget-identity-postgres-data:
     external: true
     name: ${IDENTITY_POSTGRES_DATA_VOLUME:?IDENTITY_POSTGRES_DATA_VOLUME must name the verified Identity PostgreSQL volume}
@@ -1423,6 +1598,13 @@ volumes:
     name: ${RABBITMQ_DATA_VOLUME:?RABBITMQ_DATA_VOLUME must name the verified existing RabbitMQ volume}
 
 networks:
+  platform-postgres:
+    name: winwidget-platform-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: platform
+      com.winwidget.purpose: postgres-network
   identity-postgres:
     name: winwidget-identity-postgres
     driver: bridge
@@ -1481,3 +1663,5 @@ secrets:
     file: ${BILLING_POSTGRES_ADMIN_PASSWORD_FILE:?BILLING_POSTGRES_ADMIN_PASSWORD_FILE is required}
   identity-postgres-admin-password:
     file: ${IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE:?IDENTITY_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  platform-postgres-admin-password:
+    file: ${PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE:?PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE is required}

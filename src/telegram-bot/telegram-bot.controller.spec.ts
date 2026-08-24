@@ -18,7 +18,7 @@ describe('TelegramBotController manual database backup', () => {
 	const createController = (created: boolean) => {
 		const scheduledTasksService = {
 			enqueueManualDatabaseBackup: jest.fn().mockResolvedValue({
-				target: 'core',
+				target: 'notification-delivery',
 				jobId: randomUUID(),
 				status: ScheduledJobRunStatus.QUEUED,
 				queuedAt: '2026-07-24T00:00:00.000Z',
@@ -49,10 +49,20 @@ describe('TelegramBotController manual database backup', () => {
 		const { controller, scheduledTasksService } = createController(true);
 
 		await expect(
-			controller.sendDatabaseBackup('core', adminId, undefined, request)
+			controller.sendDatabaseBackup(
+				'notification-delivery',
+				adminId,
+				undefined,
+				request
+			)
 		).rejects.toBeInstanceOf(BadRequestException);
 		await expect(
-			controller.sendDatabaseBackup('core', adminId, 'invalid', request)
+			controller.sendDatabaseBackup(
+				'notification-delivery',
+				adminId,
+				'invalid',
+				request
+			)
 		).rejects.toBeInstanceOf(BadRequestException);
 		expect(
 			scheduledTasksService.enqueueManualDatabaseBackup
@@ -64,7 +74,7 @@ describe('TelegramBotController manual database backup', () => {
 			createController(true);
 
 		const result = await controller.sendDatabaseBackup(
-			'core',
+			'notification-delivery',
 			adminId,
 			idempotencyKey,
 			request
@@ -72,7 +82,11 @@ describe('TelegramBotController manual database backup', () => {
 
 		expect(
 			scheduledTasksService.enqueueManualDatabaseBackup
-		).toHaveBeenCalledWith('core', adminId, idempotencyKey);
+		).toHaveBeenCalledWith(
+			'notification-delivery',
+			adminId,
+			idempotencyKey
+		);
 		expect(adminEventLogService.record).toHaveBeenCalledTimes(1);
 		expect(result.created).toBe(true);
 	});
@@ -81,7 +95,7 @@ describe('TelegramBotController manual database backup', () => {
 		const { controller, adminEventLogService } = createController(false);
 
 		const result = await controller.sendDatabaseBackup(
-			'core',
+			'notification-delivery',
 			adminId,
 			idempotencyKey,
 			request
@@ -101,19 +115,26 @@ describe('TelegramBotController manual database backup', () => {
 		});
 
 		await expect(
-			controller.getDatabaseBackupJob('core', jobId, adminId)
+			controller.getDatabaseBackupJob(
+				'notification-delivery',
+				jobId,
+				adminId
+			)
 		).resolves.toEqual({ jobId });
 		expect(
 			scheduledTasksService.getDatabaseBackupJob
-		).toHaveBeenCalledWith('core', jobId, adminId);
+		).toHaveBeenCalledWith('notification-delivery', jobId, adminId);
 
-		await controller.getLatestActiveManualDatabaseBackup('core', adminId);
+		await controller.getLatestActiveManualDatabaseBackup(
+			'notification-delivery',
+			adminId
+		);
 		expect(
 			scheduledTasksService.getLatestActiveManualDatabaseBackup
-		).toHaveBeenCalledWith('core', adminId);
+		).toHaveBeenCalledWith('notification-delivery', adminId);
 	});
 
-	it('keeps Notification Delivery manual jobs isolated from core jobs', async () => {
+	it('keeps Notification Delivery manual jobs isolated by target', async () => {
 		const { controller, scheduledTasksService, adminEventLogService } =
 			createController(true);
 
@@ -181,6 +202,28 @@ describe('TelegramBotController manual database backup', () => {
 			expect.objectContaining({
 				description: expect.stringContaining('Widgets'),
 				metadata: expect.objectContaining({ target: 'widgets' })
+			})
+		);
+	});
+
+	it('keeps Platform manual jobs isolated and records the target', async () => {
+		const { controller, scheduledTasksService, adminEventLogService } =
+			createController(true);
+
+		await controller.sendDatabaseBackup(
+			'platform',
+			adminId,
+			idempotencyKey,
+			request
+		);
+
+		expect(
+			scheduledTasksService.enqueueManualDatabaseBackup
+		).toHaveBeenCalledWith('platform', adminId, idempotencyKey);
+		expect(adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				description: expect.stringContaining('Platform'),
+				metadata: expect.objectContaining({ target: 'platform' })
 			})
 		);
 	});

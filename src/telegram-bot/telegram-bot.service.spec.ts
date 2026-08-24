@@ -24,7 +24,7 @@ const createSettingsPrisma = (
 	dailySummaryOwner: 'CORE' | 'REPORTING',
 	dailySummaryPolicyReservationTime = dailySummaryOwner === 'CORE'
 		? '01:50'
-		: '03:30',
+		: '04:00',
 	dailySummaryPolicyPendingTime: string | null = null
 ) => {
 	const upsert = jest
@@ -106,6 +106,7 @@ describe('TelegramBotService webhook URLs', () => {
 		expect((service as any).addMinutesToTime('23:55', 60)).toBe('00:55');
 		expect((service as any).addMinutesToTime('23:55', 75)).toBe('01:10');
 		expect((service as any).addMinutesToTime('23:55', 90)).toBe('01:25');
+		expect((service as any).addMinutesToTime('23:55', 105)).toBe('01:40');
 	});
 
 	it('exposes all delayed service backup schedules in settings', () => {
@@ -122,7 +123,10 @@ describe('TelegramBotService webhook URLs', () => {
 			billingDatabaseBackupTimeLabel: '03:00 МСК',
 			identityDatabaseBackupDelayMinutes: 90,
 			identityDatabaseBackupTime: '03:15',
-			identityDatabaseBackupTimeLabel: '03:15 МСК'
+			identityDatabaseBackupTimeLabel: '03:15 МСК',
+			platformDatabaseBackupDelayMinutes: 105,
+			platformDatabaseBackupTime: '03:30',
+			platformDatabaseBackupTimeLabel: '03:30 МСК'
 		});
 	});
 
@@ -140,6 +144,9 @@ describe('TelegramBotService webhook URLs', () => {
 		).toThrow(BadRequestException);
 		expect(() =>
 			(service as any).ensureScheduleTimesSeparated('00:53', '23:55')
+		).toThrow(BadRequestException);
+		expect(() =>
+			(service as any).ensureScheduleTimesSeparated('01:38', '23:55')
 		).toThrow(BadRequestException);
 	});
 

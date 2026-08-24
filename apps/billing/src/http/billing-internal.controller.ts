@@ -7,7 +7,6 @@ import {
 	HttpCode,
 	Param,
 	ParseUUIDPipe,
-	Patch,
 	Post,
 	Query,
 	UseGuards,
@@ -21,8 +20,7 @@ import {
 	BillingFailureCloseCommandDto,
 	BillingFailureCommandDto,
 	EnsureTrialCommandDto,
-	RevokeEntitlementsCommandDto,
-	UpdateBillingSettingsCommandDto
+	RevokeEntitlementsCommandDto
 } from './billing.dto';
 
 @Controller('internal/v1/billing')
@@ -60,12 +58,6 @@ export class BillingInternalController {
 		return this.commands.ensureTrial(dto);
 	}
 
-	@Get('settings')
-	@HttpCode(200)
-	getSettings() {
-		return this.commands.getSettings();
-	}
-
 	@Get('users/:userId/admin-overview')
 	@HttpCode(200)
 	getAdminUserOverview(@Param('userId') userId: string) {
@@ -88,16 +80,6 @@ export class BillingInternalController {
 			throw new BadRequestException('Invalid service scope');
 		}
 		return this.commands.getSubscriptionUserIds();
-	}
-
-	@Patch('settings')
-	@HttpCode(200)
-	updateSettings(
-		@Body() dto: UpdateBillingSettingsCommandDto,
-		@Headers('idempotency-key') idempotencyKey?: string
-	) {
-		this.assertIdempotencyKey(idempotencyKey, dto.commandId);
-		return this.commands.updateSettings(dto);
 	}
 
 	@Get('messaging/overview')

@@ -28,7 +28,7 @@ identity_cutover_marker="$APP_ROOT/deploy/backend/.identity-cutover-v1"
 identity_cleanup_marker="$APP_ROOT/deploy/backend/.identity-core-cleanup-v1"
 
 readonly identity_env_postgres_image='postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
-readonly identity_env_integration_kinds='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection'
+readonly identity_env_integration_kinds='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
 identity_env_node_image_id=''
 
 identity_env_fail() {
@@ -504,13 +504,16 @@ for (const [key, user] of [
       decodeURIComponent(url.password).length < 32 || url.hostname !== '127.0.0.1' ||
       (url.port && url.port !== '5672') || decodeURIComponent(url.pathname) !== '/winwidget') fail();
 }
+const optionalScopedKeys = ['PLATFORM_CORE_TOKEN'].filter(key => values.has(key));
 const scopedKeys = [
   'IDENTITY_CORE_TOKEN', 'CORE_IDENTITY_TOKEN', 'IDENTITY_CAMPAIGNS_TOKEN',
   'IDENTITY_REPORTING_TOKEN', 'IDENTITY_WIDGETS_TOKEN', 'IDENTITY_BILLING_TOKEN',
+  'IDENTITY_PLATFORM_TOKEN',
   'BILLING_CAMPAIGNS_TOKEN', 'BILLING_IDENTITY_TOKEN', 'WIDGETS_IDENTITY_TOKEN',
+  ...optionalScopedKeys,
 ];
 const scoped = scopedKeys.map(key => values.get(key));
-if (scoped.some(value => !value || value.length < 32 || /^(change_me|ci_)/.test(value)) ||
+if (scoped.some(value => !value || value.length < 32 || /^(change[_-]me|ci_)/.test(value)) ||
     new Set(scoped).size !== scoped.length) fail();
 for (const broadKey of ['NOTIFICATION_DELIVERY_INTERNAL_TOKEN', 'CAMPAIGNS_INTERNAL_TOKEN',
   'REPORTING_INTERNAL_TOKEN', 'WIDGETS_INTERNAL_TOKEN', 'BILLING_INTERNAL_TOKEN']) {
@@ -668,6 +671,7 @@ const additions = [
   'IDENTITY_JWT_ACCESS_JWKS_BASE64', 'IDENTITY_JWT_ACCESS_ACTIVE_KID',
   'IDENTITY_CORE_TOKEN', 'CORE_IDENTITY_TOKEN', 'IDENTITY_CAMPAIGNS_TOKEN',
   'IDENTITY_REPORTING_TOKEN', 'IDENTITY_WIDGETS_TOKEN', 'IDENTITY_BILLING_TOKEN',
+  'IDENTITY_PLATFORM_TOKEN',
   'BILLING_CAMPAIGNS_TOKEN', 'BILLING_IDENTITY_TOKEN', 'WIDGETS_IDENTITY_TOKEN',
   'IDENTITY_PREFETCH', 'IDENTITY_OUTBOX_BATCH_SIZE',
   'IDENTITY_OUTBOX_POLL_INTERVAL_MS', 'IDENTITY_OUTBOX_RETENTION_DAYS',
@@ -730,6 +734,7 @@ const updates = new Map([
   ['IDENTITY_CORE_TOKEN', secret()], ['CORE_IDENTITY_TOKEN', secret()],
   ['IDENTITY_CAMPAIGNS_TOKEN', secret()], ['IDENTITY_REPORTING_TOKEN', secret()],
   ['IDENTITY_WIDGETS_TOKEN', secret()], ['IDENTITY_BILLING_TOKEN', secret()],
+  ['IDENTITY_PLATFORM_TOKEN', secret()],
   ['BILLING_CAMPAIGNS_TOKEN', secret()], ['BILLING_IDENTITY_TOKEN', secret()],
   ['WIDGETS_IDENTITY_TOKEN', secret()], ['IDENTITY_PREFETCH', '10'],
   ['IDENTITY_OUTBOX_BATCH_SIZE', '50'], ['IDENTITY_OUTBOX_POLL_INTERVAL_MS', '1000'],
@@ -1003,6 +1008,8 @@ identity_env_self_test() {
 	[[ "$source" == *'server env SHA-256 differs from the local canonical source copy'* &&
 		"$source" == *'legacy production env already contains a bootstrap-managed Identity key'* &&
 		"$source" == *'IDENTITY_CORE_TOKEN'* && "$source" == *'CORE_IDENTITY_TOKEN'* &&
+		"$source" == *'IDENTITY_PLATFORM_TOKEN'* &&
+		"$source" == *"optionalScopedKeys = ['PLATFORM_CORE_TOKEN']"* &&
 		"$source" == *'BILLING_CAMPAIGNS_TOKEN'* && "$source" == *'BILLING_IDENTITY_TOKEN'* &&
 		"$source" == *'WIDGETS_IDENTITY_TOKEN'* &&
 		"$source" == *'/api/v1/telegram-bot/webhook'* &&

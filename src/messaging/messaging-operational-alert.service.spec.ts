@@ -13,6 +13,10 @@ import type { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import type { ConfigService } from '@nestjs/config';
 import type { BillingCoreStateService } from '@/billing-boundary/billing-core-state.service';
 import type { BillingMessagingClientService } from '@/messaging/billing-messaging-client.service';
+import type {
+	PlatformMessagingClientService,
+	PlatformMessagingOverview
+} from '@/messaging/platform-messaging-client.service';
 
 const createWidgetsOverview = () => ({
 	outbox: { PENDING: 0, PUBLISHING: 0, PUBLISHED: 0, FAILED: 0 },
@@ -82,6 +86,30 @@ const createNotificationDeliveryOverview = () => ({
 	}
 });
 
+const createPlatformOverview = (): PlatformMessagingOverview => ({
+	schemaVersion: 1 as const,
+	generatedAt: '2026-07-27T12:00:00.000Z',
+	outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
+	oldestPendingAt: null,
+	operational: { dueOutbox: 0, staleOutbox: 0 },
+	heartbeats: [
+		{
+			service: 'platform-api' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T12:00:00.000Z',
+			revision: 'a'.repeat(40)
+		},
+		{
+			service: 'platform-outbox-publisher' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T12:00:00.000Z',
+			revision: 'a'.repeat(40)
+		}
+	]
+});
+
 describe('MessagingOperationalAlertService', () => {
 	afterEach(() => {
 		jest.useRealTimers();
@@ -133,6 +161,9 @@ describe('MessagingOperationalAlertService', () => {
 		billing?: {
 			state: Partial<BillingCoreStateService>;
 			client: Partial<BillingMessagingClientService>;
+		},
+		platform: Partial<PlatformMessagingClientService> = {
+			getOverview: jest.fn().mockResolvedValue(createPlatformOverview())
 		}
 	) => {
 		const now = new Date('2026-07-27T12:00:00.000Z');
@@ -209,7 +240,8 @@ describe('MessagingOperationalAlertService', () => {
 			notificationDelivery as NotificationDeliveryClientService,
 			widgets as WidgetsDeliveryFailuresClientService,
 			billing?.state as BillingCoreStateService | undefined,
-			billing?.client as BillingMessagingClientService | undefined
+			billing?.client as BillingMessagingClientService | undefined,
+			platform as PlatformMessagingClientService
 		);
 		jest
 			.spyOn(service as any, 'sendAlertIfChanged')
@@ -709,5 +741,40 @@ describe('MessagingOperationalAlertService', () => {
 		expect(message).toContain(
 			'Billing: <b>нет heartbeat, Outbox=0, DLQ=0</b>'
 		);
+	});
+
+	it('includes Platform stale Outbox and process readiness in the alert', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const platformOverview = createPlatformOverview();
+		platformOverview.outbox.PENDING = 3;
+		platformOverview.operational.dueOutbox = 3;
+		platformOverview.operational.staleOutbox = 2;
+		platformOverview.heartbeats[1] = {
+			service: 'platform-outbox-publisher',
+			status: 'down',
+			activeInstances: 0,
+			lastSeenAt: null,
+			revision: null
+		};
+		const { service } = createCheckService(
+			{
+				getOverview: jest
+					.fn()
+					.mockResolvedValue(createNotificationDeliveryOverview())
+			},
+			undefined,
+			undefined,
+			{ getOverview: jest.fn().mockResolvedValue(platformOverview) }
+		);
+
+		await (service as any).check();
+
+		const [signature, message] = (service as any).sendAlertIfChanged.mock
+			.calls[0];
+		expect(signature).toContain('outbox-stale=2');
+		expect(signature).toContain('heartbeat=platform-outbox-publisher');
+		expect(message).toContain('Platform: <b>нет heartbeat, Outbox=3</b>');
 	});
 });

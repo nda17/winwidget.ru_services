@@ -32,7 +32,6 @@ export const BILLING_FAILURE_CONSUMERS = [
 	'identity',
 	'offer',
 	'notification-routing',
-	'settings-source',
 	'trial-request',
 	'referral-request',
 	'lifecycle-repair',

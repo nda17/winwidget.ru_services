@@ -7,6 +7,7 @@ import { BillingIdentityGuard } from './auth/billing-identity.guard';
 import { BillingCampaignAudienceService } from './domain/billing-campaign-audience.service';
 import { InternalCommandsService } from './domain/internal-commands.service';
 import { BillingMessagingAdminService } from './domain/billing-messaging-admin.service';
+import { BillingSettingsService } from './domain/billing-settings.service';
 import { PaymentDomainService } from './domain/payment-domain.service';
 import { PaymentSuccessTransaction } from './domain/payment-success.transaction';
 import { SubscriptionDomainService } from './domain/subscription-domain.service';
@@ -17,6 +18,7 @@ import { AffiliateController } from './http/affiliate.controller';
 import { BillingCampaignAudienceController } from './http/billing-campaign-audience.controller';
 import { BillingInternalController } from './http/billing-internal.controller';
 import { BillingIdentityController } from './http/billing-identity.controller';
+import { BillingSettingsController } from './http/billing-settings.controller';
 import { PaymentController } from './http/payment.controller';
 import { SubscriptionController } from './http/subscription.controller';
 import { TariffPricesController } from './http/tariff-prices.controller';
@@ -48,6 +50,7 @@ const API_CONTROLLERS =
 				AffiliateController,
 				BillingCampaignAudienceController,
 				BillingIdentityController,
+				BillingSettingsController,
 				BillingInternalController
 			]
 		: [];
@@ -80,6 +83,7 @@ const API_PROVIDERS =
 		InternalCommandsService,
 		BillingCampaignAudienceService,
 		BillingMessagingAdminService,
+		BillingSettingsService,
 		BillingProjectionService,
 		PaymentMethodCryptoService,
 		YooKassaService,

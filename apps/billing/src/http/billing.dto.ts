@@ -202,25 +202,6 @@ export class BillingSettingsPatchDto {
 	affiliateCashbackPercent?: number;
 }
 
-export class UpdateBillingSettingsCommandDto {
-	@IsInt()
-	@Equals(1)
-	schemaVersion!: number;
-
-	@IsUUID()
-	commandId!: string;
-
-	@IsString()
-	actorId!: string;
-
-	@IsDateString()
-	occurredAt!: string;
-
-	@ValidateNested()
-	@Type(() => BillingSettingsPatchDto)
-	settings!: BillingSettingsPatchDto;
-}
-
 export class BillingFailureCommandDto {
 	@IsInt()
 	@Equals(1)

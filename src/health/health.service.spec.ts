@@ -12,6 +12,7 @@ import type { RabbitMqManagementService } from '@/messaging/rabbitmq-management.
 import type { WidgetsDeliveryFailuresClientService } from '@/messaging/widgets-delivery-failures-client.service';
 import type { PrismaService } from '@/prisma.service';
 import type { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
+import type { PlatformMessagingClientService } from '@/messaging/platform-messaging-client.service';
 import type { ConfigService } from '@nestjs/config';
 
 const createOverview = () => ({
@@ -114,6 +115,30 @@ const createBillingOverview = (withProviders = true) => ({
 	}))
 });
 
+const createPlatformOverview = () => ({
+	schemaVersion: 1 as const,
+	generatedAt: '2026-07-27T12:00:00.000Z',
+	outbox: { PENDING: 0, PROCESSING: 0, PUBLISHED: 0 },
+	oldestPendingAt: null,
+	operational: { dueOutbox: 0, staleOutbox: 0 },
+	heartbeats: [
+		{
+			service: 'platform-api' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z',
+			revision: 'a'.repeat(40)
+		},
+		{
+			service: 'platform-outbox-publisher' as const,
+			status: 'ok' as const,
+			activeInstances: 1,
+			lastSeenAt: '2026-07-27T11:59:55.000Z',
+			revision: 'a'.repeat(40)
+		}
+	]
+});
+
 const createRabbitQueues = (billingOwner = false) =>
 	getMessagingQueueHealthExpectations({ billingOwner }).map(
 		expectation => ({
@@ -176,6 +201,9 @@ const createService = (
 				message: 'Ключ настроен'
 			}
 		])
+	},
+	platform: Partial<PlatformMessagingClientService> = {
+		getOverview: jest.fn().mockResolvedValue(createPlatformOverview())
 	}
 ) => {
 	const configService = { get: jest.fn() };
@@ -197,7 +225,8 @@ const createService = (
 		widgets as WidgetsDeliveryFailuresClientService,
 		billingState as BillingCoreStateService,
 		billing as BillingMessagingClientService,
-		identity as IdentityInternalClient
+		identity as IdentityInternalClient,
+		platform as PlatformMessagingClientService
 	);
 	return { service, prisma, configService };
 };
@@ -218,6 +247,44 @@ describe('HealthService notification delivery monitoring', () => {
 		await expect((service as any).checkRabbitMq()).resolves.toMatchObject({
 			id: 'rabbitmq',
 			status: 'ok'
+		});
+	});
+
+	it('reports Platform role readiness and includes its oldest Outbox item', async () => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-07-27T12:00:00.000Z'));
+		const platformOverview = createPlatformOverview();
+		platformOverview.outbox.PENDING = 2;
+		platformOverview.operational.dueOutbox = 2;
+		platformOverview.oldestPendingAt = '2026-07-27T11:58:00.000Z' as never;
+		const { service } = createService(
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			{ getOverview: jest.fn().mockResolvedValue(platformOverview) }
+		);
+		const result = (service as any).getPlatformResult();
+
+		await expect(
+			(service as any).checkPlatform(result)
+		).resolves.toMatchObject({
+			id: 'platform',
+			status: 'ok'
+		});
+		await expect(
+			(service as any).checkMessagingBacklog(
+				(service as any).getNotificationDeliveryResult(),
+				(service as any).getWidgetsResult(),
+				(service as any).getBillingResult(),
+				result
+			)
+		).resolves.toMatchObject({
+			status: 'warning',
+			message: expect.stringContaining('старейшее ожидание: 120 сек.')
 		});
 	});
 
@@ -354,11 +421,14 @@ describe('HealthService notification delivery monitoring', () => {
 			)
 		);
 
-		expect(BILLING_OWNED_QUEUE_NAMES).toHaveLength(9);
+		expect(BILLING_OWNED_QUEUE_NAMES).toHaveLength(8);
+		expect(BILLING_OWNED_QUEUE_NAMES).not.toContain(
+			'winwidget.billing.settings-source.v1'
+		);
 		expect(BILLING_OWNED_QUEUE_NAMES).toContain(
 			BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME
 		);
-		expect(billingExpectations).toHaveLength(45);
+		expect(billingExpectations).toHaveLength(40);
 		expect(
 			billingExpectations.filter(expectation =>
 				BILLING_OWNED_QUEUE_NAMES.includes(expectation.name)
@@ -374,7 +444,7 @@ describe('HealthService notification delivery monitoring', () => {
 			billingExpectations.filter(expectation =>
 				expectation.name.includes('.retry.')
 			)
-		).toHaveLength(27);
+		).toHaveLength(24);
 		expect(
 			billingExpectations.filter(expectation =>
 				expectation.name.endsWith('.dead-letter')
@@ -563,10 +633,10 @@ describe('HealthService notification delivery monitoring', () => {
 						'widgets-admin-audit',
 						'billing-admin-audit',
 						'identity-admin-audit',
+						'platform-admin-audit',
 						'billing-payment-projection',
 						'billing-subscription-projection',
 						'billing-affiliate-projection',
-						'billing-settings-projection',
 						'database-backup'
 					]
 				}

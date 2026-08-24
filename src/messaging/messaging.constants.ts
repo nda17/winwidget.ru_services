@@ -29,6 +29,7 @@ export const REPORTING_ADMIN_AUDIT_ROUTING_KEY =
 export const WIDGETS_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.widgets.v1';
 export const BILLING_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.billing.v1';
 export const IDENTITY_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.identity.v1';
+export const PLATFORM_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.platform.v1';
 export const BILLING_IDENTITY_EVENT_TYPE = 'billing.identity.changed.v1';
 export const BILLING_TRIAL_REQUESTED_EVENT_TYPE =
 	'billing.trial.requested.v1';
@@ -44,9 +45,6 @@ export const BILLING_PAYMENT_DETAILS_EVENT_TYPE =
 export const BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE =
 	'billing.subscription.details.changed.v1';
 export const BILLING_AFFILIATE_EVENT_TYPE = 'billing.affiliate.changed.v1';
-export const BILLING_SETTINGS_SOURCE_EVENT_TYPE =
-	'billing.settings.source.changed.v1';
-export const BILLING_SETTINGS_EVENT_TYPE = 'billing.settings.changed.v1';
 export const DATABASE_BACKUP_EVENT_TYPE = 'database.backup.requested.v1';
 export const REPORTING_IDENTITY_USER_EVENT_TYPE =
 	'identity.user.changed.v1';
@@ -84,10 +82,10 @@ export const INTEGRATION_KINDS = [
 	'widgets-admin-audit',
 	'billing-admin-audit',
 	'identity-admin-audit',
+	'platform-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection',
-	'billing-settings-projection',
 	'auto-renewal'
 ] as const;
 
@@ -124,10 +122,10 @@ export const CORE_OWNED_INTEGRATION_KINDS = [
 	'widgets-admin-audit',
 	'billing-admin-audit',
 	'identity-admin-audit',
+	'platform-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
-	'billing-affiliate-projection',
-	'billing-settings-projection'
+	'billing-affiliate-projection'
 ] as const satisfies readonly IntegrationKind[];
 
 export type MonolithIntegrationKind =
@@ -157,8 +155,7 @@ export const BILLING_SOURCE_KINDS = [
 	'billing-referral-source',
 	'billing-notification-routing-source',
 	'billing-lifecycle-repair-source',
-	'billing-offer-source',
-	'billing-settings-source'
+	'billing-offer-source'
 ] as const;
 
 export type BillingSourceKind = (typeof BILLING_SOURCE_KINDS)[number];
@@ -221,11 +218,11 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'auto-renewal': AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	'billing-admin-audit': BILLING_ADMIN_AUDIT_ROUTING_KEY,
 	'identity-admin-audit': IDENTITY_ADMIN_AUDIT_ROUTING_KEY,
+	'platform-admin-audit': PLATFORM_ADMIN_AUDIT_ROUTING_KEY,
 	'billing-payment-projection': BILLING_PAYMENT_DETAILS_EVENT_TYPE,
 	'billing-subscription-projection':
 		BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
 	'billing-affiliate-projection': BILLING_AFFILIATE_EVENT_TYPE,
-	'billing-settings-projection': BILLING_SETTINGS_EVENT_TYPE,
 	'database-backup': DATABASE_BACKUP_EVENT_TYPE,
 	'reporting-identity-user': REPORTING_IDENTITY_USER_EVENT_TYPE,
 	'reporting-billing-payment': REPORTING_BILLING_PAYMENT_EVENT_TYPE,
@@ -240,8 +237,7 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'billing-notification-routing-source':
 		BILLING_NOTIFICATION_ROUTING_EVENT_TYPE,
 	'billing-lifecycle-repair-source': BILLING_LIFECYCLE_REPAIR_EVENT_TYPE,
-	'billing-offer-source': BILLING_OFFER_EVENT_TYPE,
-	'billing-settings-source': BILLING_SETTINGS_SOURCE_EVENT_TYPE
+	'billing-offer-source': BILLING_OFFER_EVENT_TYPE
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
@@ -270,12 +266,12 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'auto-renewal': 'winwidget.payment.auto-renewal',
 	'billing-admin-audit': 'winwidget.admin.audit.billing.v1',
 	'identity-admin-audit': 'winwidget.admin.audit.identity.v1',
+	'platform-admin-audit': 'winwidget.admin.audit.platform.v1',
 	'billing-payment-projection':
 		'winwidget.core.billing.payment-details.v1',
 	'billing-subscription-projection':
 		'winwidget.core.billing.subscription-details.v1',
 	'billing-affiliate-projection': 'winwidget.core.billing.affiliate.v1',
-	'billing-settings-projection': 'winwidget.core.billing.settings.v1',
 	'database-backup': 'winwidget.maintenance.database-backup',
 	'reporting-identity-user': 'winwidget.reporting.identity-user',
 	'reporting-billing-payment': 'winwidget.reporting.billing-payment',
@@ -291,8 +287,7 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 		'winwidget.billing.notification-routing.v1',
 	'billing-lifecycle-repair-source':
 		'winwidget.billing.lifecycle-repair.v1',
-	'billing-offer-source': 'winwidget.billing.offer.v1',
-	'billing-settings-source': 'winwidget.billing.settings-source.v1'
+	'billing-offer-source': 'winwidget.billing.offer.v2'
 };
 
 export const BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME =

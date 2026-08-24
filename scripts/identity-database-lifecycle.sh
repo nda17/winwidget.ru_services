@@ -10,7 +10,7 @@ SERVER_ROOT="${SERVER_ROOT:-$APP_ROOT/winwidget.ru_server}"
 COMPOSE_FILE="${COMPOSE_FILE:-$SERVER_ROOT/deploy/docker-compose.prod.yml}"
 EXPECTED_REVISION="${EXPECTED_REVISION:-}"
 identity_database_marker="${IDENTITY_DATABASE_MARKER:-$APP_ROOT/deploy/backend/.identity-database-lifecycle-v1}"
-readonly IDENTITY_STEADY_INTEGRATION_WORKER_KINDS='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection'
+readonly IDENTITY_STEADY_INTEGRATION_WORKER_KINDS='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
 
 # shellcheck source=scripts/identity-release-identity.sh
 declare -F identity_release_compose >/dev/null ||

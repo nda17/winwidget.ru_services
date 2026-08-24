@@ -15,7 +15,8 @@ export const IDENTITY_INTERNAL_SERVICES = [
 	'campaigns',
 	'reporting',
 	'widgets',
-	'billing'
+	'billing',
+	'platform'
 ] as const;
 export type IdentityInternalService =
 	(typeof IDENTITY_INTERNAL_SERVICES)[number];
@@ -30,11 +31,13 @@ const PLACEHOLDERS = new Set([
 	'identity_reporting_token',
 	'identity_widgets_token',
 	'identity_billing_token',
+	'identity_platform_token',
 	'ci_identity_core_token_at_least_32_chars',
 	'ci_identity_campaigns_token_at_least_32_chars',
 	'ci_identity_reporting_token_at_least_32_chars',
 	'ci_identity_widgets_token_at_least_32_chars',
-	'ci_identity_billing_token_at_least_32_chars'
+	'ci_identity_billing_token_at_least_32_chars',
+	'ci_identity_platform_token_at_least_32_chars'
 ]);
 
 export const InternalServices = (...services: IdentityInternalService[]) =>

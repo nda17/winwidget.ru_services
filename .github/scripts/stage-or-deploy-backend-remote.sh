@@ -219,6 +219,49 @@ guard_identity_checkout_before_pull() {
     return 1
   fi
 }
+guard_platform_checkout_before_pull() {
+  local expected_revision="$1"
+  local guard_action="${2:---guard-before-fetch-revision}"
+  local database_script="scripts/platform-database-lifecycle.sh"
+  local cutover_script="scripts/platform-cutover-production.sh"
+  local attestation_script="scripts/platform-frontend-runtime-attestation.sh"
+  local database_marker="$APP_ROOT/deploy/backend/.platform-database-lifecycle-v1"
+  local cutover_marker="$APP_ROOT/deploy/backend/.platform-cutover-v1"
+  local readiness_receipt="$APP_ROOT/deploy/backend/.platform-billing-readiness-v1"
+  local phase_a_env="$APP_ROOT/deploy/backend/.platform-phase-a-env-v1"
+  local script tracked_blob actual_blob
+
+  [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+    "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+  for script in "$database_script" "$cutover_script"; do
+    tracked_blob="$(git rev-parse --verify "HEAD:$script" 2>/dev/null || true)"
+    if [[ -e "$script" || -L "$script" ]]; then
+      [[ -f "$script" && ! -L "$script" && -n "$tracked_blob" ]] || return 1
+      actual_blob="$(git hash-object "$script")"
+      [[ "$actual_blob" == "$tracked_blob" ]] || return 1
+      APP_ROOT="$APP_ROOT" bash "$script" "$guard_action" "$expected_revision"
+    elif [[ -n "$tracked_blob" ]]; then
+      return 1
+    fi
+  done
+
+  tracked_blob="$(git rev-parse --verify "HEAD:$attestation_script" 2>/dev/null || true)"
+  if [[ -n "$tracked_blob" ]]; then
+    [[ -f "$attestation_script" && ! -L "$attestation_script" &&
+      "$(git hash-object "$attestation_script")" == "$tracked_blob" ]] || return 1
+  elif [[ -e "$readiness_receipt" || -L "$readiness_receipt" ||
+    -e "$phase_a_env" || -L "$phase_a_env" ]]; then
+    return 1
+  fi
+  if [[ ! -e "$database_script" &&
+    ( -e "$database_marker" || -L "$database_marker" ||
+      -e "$cutover_marker" || -L "$cutover_marker" ||
+      -e "$readiness_receipt" || -L "$readiness_receipt" ||
+      -e "$phase_a_env" || -L "$phase_a_env" ) ]]; then
+    echo 'Platform marker exists but its checkout guards are unavailable.' >&2
+    return 1
+  fi
+}
 stage_billing_cleanup_revision_with_container_node() (
   [[ $# -eq 2 ]] || return 1
   local current_revision="$1" cleanup_revision="$2"
@@ -931,11 +974,13 @@ checkout_verified_prod_revision() {
   guard_widgets_checkout_before_pull "$current_revision"
   guard_billing_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
+  guard_platform_checkout_before_pull "$current_revision"
   guard_campaigns_checkout_before_pull "$expected_revision"
   guard_reporting_checkout_before_pull "$expected_revision"
   guard_widgets_checkout_before_pull "$expected_revision"
   guard_billing_checkout_before_pull "$expected_revision"
   guard_identity_checkout_before_pull "$expected_revision"
+  guard_platform_checkout_before_pull "$expected_revision"
   if [[ -n "$prefetched_revision" ]]; then
     [[ "$prefetched_revision" == "$expected_revision" ]] || {
       echo "Prefetched prod revision differs from the reviewed revision." >&2
@@ -962,6 +1007,8 @@ checkout_verified_prod_revision() {
     "$expected_revision" --guard-before-checkout-revision
   guard_identity_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
+  guard_platform_checkout_before_pull \
+    "$expected_revision" --guard-before-checkout-revision
   git checkout prod
   git merge --ff-only "$fetched_revision"
   [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
@@ -980,16 +1027,20 @@ checkout_retargeted_billing_cleanup_revision() {
   guard_reporting_checkout_before_pull "$current_revision"
   guard_widgets_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
+  guard_platform_checkout_before_pull "$current_revision"
   guard_campaigns_checkout_before_pull "$expected_revision"
   guard_reporting_checkout_before_pull "$expected_revision"
   guard_widgets_checkout_before_pull "$expected_revision"
   guard_identity_checkout_before_pull "$expected_revision"
+  guard_platform_checkout_before_pull "$expected_revision"
   git cat-file -e "$prefetched_revision^{commit}" 2>/dev/null || return 1
   guard_reporting_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
   guard_widgets_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
   guard_identity_checkout_before_pull \
+    "$expected_revision" --guard-before-checkout-revision
+  guard_platform_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
   git checkout prod
   git merge --ff-only "$prefetched_revision"
@@ -1005,6 +1056,7 @@ if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
   guard_widgets_checkout_before_pull "$current_revision"
   guard_billing_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
+  guard_platform_checkout_before_pull "$current_revision"
   if ! guard_campaigns_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
@@ -1032,9 +1084,24 @@ if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
     echo "Automatic backend deploy is verified but deferred: the active Identity ownership guard rejects $EXPECTED_REVISION."
     exit 1
   fi
+  if ! guard_platform_checkout_before_pull \
+    "$EXPECTED_REVISION" > /dev/null 2>&1; then
+    echo "Automatic backend deploy is verified but deferred: the active Platform ownership guard rejects $EXPECTED_REVISION."
+    exit 1
+  fi
 fi
 case "$DEPLOY_TARGET" in
   all)
+    platform_cutover_marker="$APP_ROOT/deploy/backend/.platform-cutover-v1"
+    [[ -f "$platform_cutover_marker" && ! -L "$platform_cutover_marker" ]] || {
+      echo 'Automatic/all deployment is blocked until Platform ownership is exactly complete.' >&2
+      exit 1
+    }
+    platform_phase="$(awk -F= '$1 == "phase" { print $2; found += 1 } END { exit(found == 1 ? 0 : 1) }' "$platform_cutover_marker")"
+    [[ "$platform_phase" == complete ]] || {
+      echo "Automatic/all deployment is blocked while Platform lifecycle is phase=$platform_phase." >&2
+      exit 1
+    }
     checkout_verified_prod_revision "$EXPECTED_REVISION"
     APP_ROOT="$APP_ROOT" \
       CAMPAIGNS_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
@@ -1043,6 +1110,10 @@ case "$DEPLOY_TARGET" in
       BILLING_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
       IDENTITY_AUTOMATIC_PROD_PUSH="$AUTOMATIC_PROD_PUSH" \
       bash scripts/deploy-production.sh
+    if [[ "$platform_phase" == complete ]]; then
+      APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+        bash scripts/deploy-platform-production.sh --deploy
+    fi
     exit 0
     ;;
   maintenance)
@@ -1345,6 +1416,62 @@ case "$DEPLOY_TARGET" in
           IDENTITY_ENV_EXPORT_FILE="$APP_ROOT/deploy/backend/.identity-production-env-$IDENTITY_ENV_EXPORT_ID.p7m" \
           bash scripts/cleanup-identity-core-source-production.sh \
             "$identity_cleanup_command"
+        ;;
+    esac
+    ;;
+  platform)
+    [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
+      echo 'Platform lifecycle actions are manual-only.' >&2
+      exit 1
+    }
+    checkout_verified_prod_revision "$EXPECTED_REVISION"
+    case "$PLATFORM_ACTION" in
+      status)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          bash scripts/platform-cutover-production.sh --status
+        ;;
+      prepare-billing-readiness)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+          PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+          PLATFORM_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
+          PLATFORM_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
+          PLATFORM_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
+          PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256="$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" \
+          PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256="$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" \
+          PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
+          bash scripts/platform-cutover-production.sh --prepare-billing-readiness
+        ;;
+      prepare)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+          PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+          PLATFORM_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
+          PLATFORM_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
+          PLATFORM_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
+          PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256="$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" \
+          PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256="$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" \
+          PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
+          bash scripts/platform-cutover-production.sh --prepare
+        ;;
+      cutover|forward-recovery)
+        platform_command="--$PLATFORM_ACTION"
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+          PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+          PLATFORM_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
+          PLATFORM_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
+          PLATFORM_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
+          PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256="$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" \
+          PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256="$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" \
+          PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
+          bash scripts/platform-cutover-production.sh "$platform_command"
+        ;;
+      abort)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+          PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+          bash scripts/platform-cutover-production.sh --abort
         ;;
     esac
     ;;

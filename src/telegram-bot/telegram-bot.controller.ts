@@ -200,14 +200,14 @@ export class TelegramBotController {
 
 		if (result.created) {
 			const targetLabel = {
-				[DATABASE_BACKUP_TARGETS.CORE]: 'основной БД',
 				[DATABASE_BACKUP_TARGETS.NOTIFICATION_DELIVERY]:
 					'БД Notification Delivery',
 				[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns',
 				[DATABASE_BACKUP_TARGETS.REPORTING]: 'БД Reporting',
 				[DATABASE_BACKUP_TARGETS.WIDGETS]: 'БД Widgets',
 				[DATABASE_BACKUP_TARGETS.BILLING]: 'БД Billing',
-				[DATABASE_BACKUP_TARGETS.IDENTITY]: 'БД Identity'
+				[DATABASE_BACKUP_TARGETS.IDENTITY]: 'БД Identity',
+				[DATABASE_BACKUP_TARGETS.PLATFORM]: 'БД Platform'
 			}[target];
 			await this.adminEventLogService.record({
 				adminId,

@@ -19,6 +19,7 @@ on:
           - billing-cleanup
           - identity
           - identity-cleanup
+          - platform
       widgets_cutover_confirmation:
         description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
         required: false
@@ -92,6 +93,58 @@ on:
         required: false
         default: ''
         type: string
+      platform_action:
+        description: Platform lifecycle action (manual platform target only)
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - prepare-billing-readiness
+          - prepare
+          - cutover
+          - abort
+          - forward-recovery
+      platform_confirmation:
+        description: Type the exact Platform lifecycle confirmation when required
+        required: false
+        default: ''
+        type: string
+      platform_backend_env_expected_sha256:
+        description: SHA-256 of the byte-identical local canonical backend production env for this Platform action
+        required: false
+        default: ''
+        type: string
+      platform_frontend_revision:
+        description: Immutable frontend revision bound to the Platform runtime attestation
+        required: false
+        default: ''
+        type: string
+      platform_frontend_runtime_challenge:
+        description: Fresh 64-character hex challenge bound to this Platform cutover generation
+        required: false
+        default: ''
+        type: string
+      platform_frontend_origin:
+        description: Canonical lowercase public HTTPS frontend origin
+        required: false
+        default: ''
+        type: string
+      platform_frontend_attestation_sha256:
+        description: Optional extra pin for the workflow-computed frontend runtime attestation SHA-256
+        required: false
+        default: ''
+        type: string
+      platform_frontend_signature_sha256:
+        description: Optional extra pin for the workflow-computed frontend runtime signature SHA-256
+        required: false
+        default: ''
+        type: string
+      platform_frontend_trusted_public_key_sha256:
+        description: Independently pinned SHA-256 of the trusted frontend attestation public key
+        required: false
+        default: ''
+        type: string
   push:
     branches:
       - prod
@@ -155,6 +208,11 @@ jobs:
             apps/identity/pnpm-lock.yaml
             apps/identity/prisma/schema.prisma
             apps/identity/prisma/migrations/20260814000000_init_identity/migration.sql
+            apps/platform/Dockerfile
+            apps/platform/package.json
+            apps/platform/pnpm-lock.yaml
+            apps/platform/prisma/schema.prisma
+            apps/platform/prisma/migrations/20260823000000_init_platform/migration.sql
             deploy/docker-compose.prod.yml
             deploy/nginx.conf
             scripts/widgets-database-lifecycle.sh
@@ -182,12 +240,19 @@ jobs:
             scripts/cleanup-identity-core-source-production.sh
             scripts/rotate-identity-jwt-production.sh
             scripts/test-identity-core-source-cleanup-rehearsal.sh
+            scripts/platform-release-identity.sh
+            scripts/platform-database-lifecycle.sh
+            scripts/platform-cutover-production.sh
+            scripts/platform-frontend-runtime-attestation.sh
+            scripts/platform-backup-restore-rehearsal.sh
+            scripts/deploy-platform-production.sh
             apps/billing/src/cutover-main.ts
             prisma/migrations/20260811000000_prepare_billing_service_ownership/migration.sql
             prisma/migrations/20260810000000_remove_legacy_widgets_core_source/migration.sql
             prisma/migrations/20260813000000_remove_legacy_billing_core_source/migration.sql
             prisma/migrations/20260814020000_detach_identity_foreign_keys/migration.sql
             prisma/migrations/20260815000000_remove_legacy_identity_core_source/migration.sql
+            prisma/migrations/20260824000000_prepare_platform_service_ownership/migration.sql
           )
           for path in "${required_files[@]}"; do
             test -f "$path"
@@ -216,7 +281,13 @@ jobs:
             scripts/identity-backup-restore-rehearsal.sh \
             scripts/cleanup-identity-core-source-production.sh \
             scripts/rotate-identity-jwt-production.sh \
-            scripts/test-identity-core-source-cleanup-rehearsal.sh; do
+            scripts/test-identity-core-source-cleanup-rehearsal.sh \
+            scripts/platform-release-identity.sh \
+            scripts/platform-database-lifecycle.sh \
+            scripts/platform-cutover-production.sh \
+            scripts/platform-frontend-runtime-attestation.sh \
+            scripts/platform-backup-restore-rehearsal.sh \
+            scripts/deploy-platform-production.sh; do
             bash -n "$script"
           done
           node --check scripts/export-widgets-cutover-snapshot.mjs
@@ -261,6 +332,17 @@ jobs:
             bash scripts/rotate-identity-jwt-production.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-release-identity.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-database-lifecycle.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-cutover-production.sh --self-test
+          bash scripts/platform-frontend-runtime-attestation.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-backup-restore-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/deploy-platform-production.sh --self-test
 
           # ShellCheck runs separately below; its actionlint integration
           # deadlocks while piping this workflow's large inline scripts.
@@ -270,7 +352,7 @@ jobs:
             --security-opt no-new-privileges \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
             --workdir /repo \
-            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            rhysd/actionlint@sha256:ef8299f97635c4c30e2298f48f30763ab782a4ad2c95b744649439a039421e36 \
             -shellcheck=
           printf 'widgets_actionlint=passed\n'
           docker run --rm \
@@ -303,7 +385,13 @@ jobs:
             scripts/identity-backup-restore-rehearsal.sh \
             scripts/cleanup-identity-core-source-production.sh \
             scripts/rotate-identity-jwt-production.sh \
-            scripts/test-identity-core-source-cleanup-rehearsal.sh
+            scripts/test-identity-core-source-cleanup-rehearsal.sh \
+            scripts/platform-release-identity.sh \
+            scripts/platform-database-lifecycle.sh \
+            scripts/platform-cutover-production.sh \
+            scripts/platform-frontend-runtime-attestation.sh \
+            scripts/platform-backup-restore-rehearsal.sh \
+            scripts/deploy-platform-production.sh
           printf 'widgets_shellcheck=passed\n'
 
           require_compose_flag() {
@@ -341,6 +429,8 @@ jobs:
             --profile billing-database \
             --profile identity-migration \
             --profile identity-database \
+            --profile platform-migration \
+            --profile platform-database \
             --env-file .env.example \
             -f deploy/docker-compose.prod.yml config --quiet
           printf 'widgets_compose_config=passed\n'
@@ -357,7 +447,7 @@ jobs:
             exit 1
           fi
           printf 'widgets_preflight_disk_kib=%s\n' "$available_kib"
-          for port in 5432 5672 15672 4900 4901 4902 55432 55433 55435 55436 55437 55438; do
+          for port in 5432 5672 15672 4900 4901 4902 5000 5001 55432 55433 55435 55436 55437 55438 55439; do
             if ss -H -ltn "sport = :$port" | grep -q .; then
               echo "Preflight runner port is already occupied: $port" >&2
               exit 1
@@ -376,6 +466,11 @@ jobs:
           if docker container ls --all --quiet \
             --filter label=com.winwidget.owner=identity | grep -q .; then
             echo "A pre-existing Identity-owned container collides with the isolated verify." >&2
+            exit 1
+          fi
+          if docker container ls --all --quiet \
+            --filter label=com.winwidget.owner=platform | grep -q .; then
+            echo "A pre-existing Platform-owned container collides with the isolated verify." >&2
             exit 1
           fi
 
@@ -441,6 +536,15 @@ jobs:
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
           IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'identity-cleanup' && inputs.identity_confirmation || '' }}
           IDENTITY_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_migration_sha256 || '' }}
+          PLATFORM_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_action || 'status' }}
+          PLATFORM_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_confirmation || '' }}
+          PLATFORM_ENV_EXPECTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_backend_env_expected_sha256 || '' }}
+          PLATFORM_FRONTEND_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_revision || '' }}
+          PLATFORM_FRONTEND_RUNTIME_CHALLENGE: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_runtime_challenge || '' }}
+          PLATFORM_FRONTEND_ORIGIN: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_origin || '' }}
+          PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_attestation_sha256 || '' }}
+          PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_signature_sha256 || '' }}
+          PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_trusted_public_key_sha256 || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -512,6 +616,46 @@ jobs:
             echo 'Identity cleanup inputs require the identity-cleanup target.' >&2
             exit 1
           fi
+          if [[ "$DEPLOY_TARGET" == 'platform' ]]; then
+            case "$PLATFORM_ACTION:$PLATFORM_CONFIRMATION" in
+              status:) ;;
+              prepare-billing-readiness:'PREPARE PLATFORM BILLING READINESS') ;;
+              prepare:'PREPARE PLATFORM OWNERSHIP') ;;
+              cutover:'CUTOVER PLATFORM OWNERSHIP'|forward-recovery:'CUTOVER PLATFORM OWNERSHIP') ;;
+              abort:'ABORT PLATFORM CUTOVER') ;;
+              *)
+                echo 'Invalid Platform lifecycle action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
+            case "$PLATFORM_ACTION" in
+              prepare-billing-readiness|prepare|cutover|forward-recovery)
+                [[ "$PLATFORM_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_FRONTEND_REVISION" =~ ^[0-9a-f]{40}$ &&
+                  "$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_FRONTEND_ORIGIN" =~ ^https://[a-z0-9.-]+(:[1-9][0-9]{0,4})?$ &&
+                  ( -z "$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" ||
+                    "$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" =~ ^[0-9a-f]{64}$ ) &&
+                  ( -z "$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" ||
+                    "$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ) &&
+                  "$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+                  echo 'Platform mutation requires exact env/runtime identity and a trusted public-key pin; manual artifact pins are optional.' >&2
+                  exit 1
+                }
+                ;;
+              abort)
+                [[ "$PLATFORM_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+                  -z "$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]] || exit 1
+                ;;
+              status)
+                [[ -z "$PLATFORM_ENV_EXPECTED_SHA256$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]] || exit 1
+                ;;
+            esac
+          elif [[ "$PLATFORM_ACTION" != 'status' || -n "$PLATFORM_CONFIRMATION" ||
+            -n "$PLATFORM_ENV_EXPECTED_SHA256$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]; then
+            echo 'Platform lifecycle inputs require the platform target.' >&2
+            exit 1
+          fi
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o ServerAliveInterval=15 \
@@ -519,7 +663,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256='$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256' PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256='$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -612,6 +756,22 @@ jobs:
             BILLING_RESTORE_DRILL_EVIDENCE_FILE \
             RABBITMQ_BILLING_WORKER_URL \
             RABBITMQ_BILLING_PUBLISHER_URL \
+            PLATFORM_POSTGRES_IMAGE \
+            PLATFORM_POSTGRES_PORT \
+            PLATFORM_POSTGRES_DATA_VOLUME \
+            PLATFORM_POSTGRES_ADMIN_USER \
+            PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE \
+            PLATFORM_DATABASE_URL \
+            PLATFORM_MIGRATION_DATABASE_URL \
+            PLATFORM_BACKUP_URL \
+            PLATFORM_API_PORT \
+            PLATFORM_OUTBOX_PUBLISHER_PORT \
+            PLATFORM_INTERNAL_BASE_URL \
+            PLATFORM_CORE_TOKEN \
+            PLATFORM_INTERNAL_TIMEOUT_MS \
+            PLATFORM_OUTBOX_RETENTION_DAYS \
+            IDENTITY_PLATFORM_TOKEN \
+            RABBITMQ_PLATFORM_PUBLISHER_URL \
             RABBITMQ_INTEGRATION_WORKER_URL \
             RABBITMQ_MANAGEMENT_URL \
             RABBITMQ_MONITOR_USER \
@@ -773,6 +933,48 @@ jobs:
               ! -e "$cleanup_marker" && ! -L "$cleanup_marker" ]]
           }
 
+          guard_platform_checkout_before_pull() {
+            local expected_revision="$1"
+            local guard_action="${2:---guard-before-fetch-revision}"
+            local database_script="scripts/platform-database-lifecycle.sh"
+            local cutover_script="scripts/platform-cutover-production.sh"
+            local attestation_script="scripts/platform-frontend-runtime-attestation.sh"
+            local database_marker="$APP_ROOT/deploy/backend/.platform-database-lifecycle-v1"
+            local cutover_marker="$APP_ROOT/deploy/backend/.platform-cutover-v1"
+            local readiness_receipt="$APP_ROOT/deploy/backend/.platform-billing-readiness-v1"
+            local phase_a_intent="$APP_ROOT/deploy/backend/.platform-phase-a-intent-v1"
+            local phase_a_env="$APP_ROOT/deploy/backend/.platform-phase-a-env-v1"
+            local script tracked_blob actual_blob
+            [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+              "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+            for script in "$database_script" "$cutover_script"; do
+              tracked_blob="$(git rev-parse --verify "HEAD:$script" 2>/dev/null || true)"
+              if [[ -e "$script" || -L "$script" ]]; then
+                [[ -f "$script" && ! -L "$script" && -n "$tracked_blob" ]] || return 1
+                actual_blob="$(git hash-object "$script")"
+                [[ "$actual_blob" == "$tracked_blob" ]] || return 1
+                APP_ROOT="$APP_ROOT" bash "$script" "$guard_action" "$expected_revision"
+              elif [[ -n "$tracked_blob" ]]; then
+                return 1
+              fi
+            done
+            tracked_blob="$(git rev-parse --verify "HEAD:$attestation_script" 2>/dev/null || true)"
+            if [[ -n "$tracked_blob" ]]; then
+              [[ -f "$attestation_script" && ! -L "$attestation_script" &&
+                "$(git hash-object "$attestation_script")" == "$tracked_blob" ]] || return 1
+            elif [[ -e "$readiness_receipt" || -L "$readiness_receipt" ||
+              -e "$phase_a_intent" || -L "$phase_a_intent" ||
+              -e "$phase_a_env" || -L "$phase_a_env" ]]; then
+              return 1
+            fi
+            [[ -e "$database_script" ||
+              ( ! -e "$database_marker" && ! -L "$database_marker" &&
+                ! -e "$cutover_marker" && ! -L "$cutover_marker" &&
+                ! -e "$readiness_receipt" && ! -L "$readiness_receipt" &&
+                ! -e "$phase_a_intent" && ! -L "$phase_a_intent" &&
+                ! -e "$phase_a_env" && ! -L "$phase_a_env" ) ]]
+          }
+
           current_revision="$(git rev-parse HEAD)"
           [[ "$AUTOMATIC_PROD_PUSH" =~ ^(true|false)$ ]] || exit 1
           billing_retarget_preflight=false
@@ -790,6 +992,7 @@ jobs:
             guard_billing_checkout_before_pull "$current_revision"
           fi
           guard_identity_checkout_before_pull "$current_revision"
+          guard_platform_checkout_before_pull "$current_revision"
           guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
           guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
           if [[ "$AUTOMATIC_PROD_PUSH" != "true" ||
@@ -804,6 +1007,7 @@ jobs:
               guard_billing_checkout_before_pull "$EXPECTED_REVISION"
             fi
             guard_identity_checkout_before_pull "$EXPECTED_REVISION"
+            guard_platform_checkout_before_pull "$EXPECTED_REVISION"
           else
             echo "Automatic push will verify before the deploy job evaluates the active Reporting and Billing revision guards."
           fi
@@ -867,6 +1071,8 @@ jobs:
       BILLING_IMAGE: winwidget-billing:git-${{ github.sha }}
       IDENTITY_REVISION: ${{ github.sha }}
       IDENTITY_IMAGE: winwidget-identity:git-${{ github.sha }}
+      PLATFORM_REVISION: ${{ github.sha }}
+      PLATFORM_IMAGE: winwidget-platform:git-${{ github.sha }}
       # CI-only 32-byte key. Production uses deploy/backend/.env.production.
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       YOOKASSA_PRODUCTION_SHOP_ID: ci_billing_shop
@@ -908,6 +1114,11 @@ jobs:
       IDENTITY_BACKUP_URL: postgresql://winwidget_identity_backup:identity_backup_ci@127.0.0.1:55438/winwidget_identity_ci?schema=identity&sslmode=disable
       IDENTITY_CI_POSTGRES_CONTAINER: winwidget-identity-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       IDENTITY_CI_POSTGRES_VOLUME: winwidget-identity-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      PLATFORM_DATABASE_URL: postgresql://winwidget_platform_runtime:platform_runtime_ci@127.0.0.1:55439/winwidget_platform_ci?schema=platform&sslmode=disable
+      PLATFORM_CI_MIGRATION_DATABASE_URL: postgresql://winwidget_platform_migration:platform_migration_ci@127.0.0.1:55439/winwidget_platform_ci?schema=platform&sslmode=disable
+      PLATFORM_BACKUP_URL: postgresql://winwidget_platform_backup:platform_backup_ci@127.0.0.1:55439/winwidget_platform_ci?schema=platform&sslmode=disable
+      PLATFORM_CI_POSTGRES_CONTAINER: winwidget-platform-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      PLATFORM_CI_POSTGRES_VOLUME: winwidget-platform-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       BILLING_PROCESS_ROLE: api
       BILLING_LISTEN_HOST: 127.0.0.1
       BILLING_API_PORT: 4800
@@ -934,9 +1145,19 @@ jobs:
       IDENTITY_REPORTING_TOKEN: ci_identity_reporting_token_at_least_32_chars
       IDENTITY_WIDGETS_TOKEN: ci_identity_widgets_token_at_least_32_chars
       IDENTITY_BILLING_TOKEN: ci_identity_billing_token_at_least_32_chars
+      IDENTITY_PLATFORM_TOKEN: ci_identity_platform_token_at_least_32_chars
       BILLING_CAMPAIGNS_TOKEN: ci_billing_campaigns_token_at_least_32_chars
       RABBITMQ_IDENTITY_WORKER_URL: amqp://winwidget-identity-worker:identity_worker_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       RABBITMQ_IDENTITY_PUBLISHER_URL: amqp://winwidget-identity-publisher:identity_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
+      PLATFORM_PROCESS_ROLE: api
+      PLATFORM_LISTEN_HOST: 127.0.0.1
+      PLATFORM_API_PORT: 5000
+      PLATFORM_OUTBOX_PUBLISHER_PORT: 5001
+      PLATFORM_INTERNAL_BASE_URL: http://127.0.0.1:5000
+      PLATFORM_CORE_TOKEN: ci_platform_core_token_at_least_32_chars
+      PLATFORM_INTERNAL_TIMEOUT_MS: 5000
+      PLATFORM_OUTBOX_RETENTION_DAYS: 7
+      RABBITMQ_PLATFORM_PUBLISHER_URL: amqp://winwidget-platform-publisher:platform_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       WIDGETS_PROCESS_ROLE: all
       WIDGETS_LISTEN_HOST: 127.0.0.1
       WIDGETS_PORT: 4700
@@ -1006,6 +1227,7 @@ jobs:
             IDENTITY_WIDGETS_TOKEN
             WIDGETS_IDENTITY_TOKEN
             IDENTITY_BILLING_TOKEN
+            IDENTITY_PLATFORM_TOKEN
             BILLING_IDENTITY_TOKEN
           )
           declare -A identity_scoped_token_values=()
@@ -1019,6 +1241,13 @@ jobs:
             echo "::add-mask::$value"
             printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
           done
+
+      - name: Generate CI-only Platform Core token
+        run: |
+          platform_core_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$platform_core_token"
+          printf 'PLATFORM_CORE_TOKEN=%s\n' \
+            "$platform_core_token" >> "$GITHUB_ENV"
 
       - name: Fast-check Campaigns production recovery
         run: |
@@ -1043,7 +1272,7 @@ jobs:
             --security-opt no-new-privileges \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
             --workdir /repo \
-            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            rhysd/actionlint@sha256:ef8299f97635c4c30e2298f48f30763ab782a4ad2c95b744649439a039421e36 \
             -shellcheck=
           docker run --rm \
             --network none \
@@ -1130,6 +1359,12 @@ jobs:
           bash -n scripts/cleanup-identity-core-source-production.sh
           bash -n scripts/rotate-identity-jwt-production.sh
           bash -n scripts/test-identity-core-source-cleanup-rehearsal.sh
+          bash -n scripts/platform-release-identity.sh
+          bash -n scripts/platform-database-lifecycle.sh
+          bash -n scripts/platform-cutover-production.sh
+          bash -n scripts/platform-frontend-runtime-attestation.sh
+          bash -n scripts/platform-backup-restore-rehearsal.sh
+          bash -n scripts/deploy-platform-production.sh
           node --check scripts/test-billing-runtime-boundaries.mjs
           bash scripts/database-restore-control.sh --self-test
           bash scripts/database-restore-production-guard.sh --self-test
@@ -1154,6 +1389,17 @@ jobs:
             bash scripts/test-identity-core-source-cleanup-rehearsal.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/rotate-identity-jwt-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-release-identity.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-database-lifecycle.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-cutover-production.sh --self-test
+          bash scripts/platform-frontend-runtime-attestation.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/platform-backup-restore-rehearsal.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/deploy-platform-production.sh --self-test
           node scripts/test-billing-runtime-boundaries.mjs --self-test
           docker run --rm \
             --network none \
@@ -1175,7 +1421,13 @@ jobs:
             scripts/cleanup-billing-core-source-production.sh \
             scripts/test-billing-core-source-cleanup-rehearsal.sh \
             scripts/rotate-identity-jwt-production.sh \
-            scripts/test-identity-core-source-cleanup-rehearsal.sh
+            scripts/test-identity-core-source-cleanup-rehearsal.sh \
+            scripts/platform-release-identity.sh \
+            scripts/platform-database-lifecycle.sh \
+            scripts/platform-cutover-production.sh \
+            scripts/platform-frontend-runtime-attestation.sh \
+            scripts/platform-backup-restore-rehearsal.sh \
+            scripts/deploy-platform-production.sh
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -1196,6 +1448,7 @@ jobs:
             apps/widgets/pnpm-lock.yaml
             apps/billing/pnpm-lock.yaml
             apps/identity/pnpm-lock.yaml
+            apps/platform/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -1209,6 +1462,7 @@ jobs:
           pnpm --dir apps/widgets install --frozen-lockfile
           pnpm --dir apps/billing install --frozen-lockfile
           pnpm --dir apps/identity install --frozen-lockfile
+          pnpm --dir apps/platform install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
         env:
@@ -1861,6 +2115,84 @@ jobs:
             GRANT SELECT ON SEQUENCES TO winwidget_identity_backup;
           SQL
 
+      - name: Start isolated Platform PostgreSQL
+        env:
+          PLATFORM_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-platform-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          test ! -e "$PLATFORM_CI_POSTGRES_PASSWORD_FILE"
+          umask 077
+          openssl rand -hex 32 > "$PLATFORM_CI_POSTGRES_PASSWORD_FILE"
+          docker volume create \
+            --label com.winwidget.owner=platform \
+            --label com.winwidget.purpose=ci-postgres-data \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            "$PLATFORM_CI_POSTGRES_VOLUME" > /dev/null
+          docker run --detach \
+            --name "$PLATFORM_CI_POSTGRES_CONTAINER" \
+            --label com.winwidget.owner=platform \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55439:5432 \
+            --mount "type=volume,source=$PLATFORM_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount "type=bind,source=$PLATFORM_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/platform-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_platform_ci \
+            --env POSTGRES_USER=winwidget_platform_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/platform-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd "pg_isready --username winwidget_platform_admin --dbname winwidget_platform_ci" \
+            --health-interval 5s --health-timeout 5s --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+          for attempt in $(seq 1 30); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$PLATFORM_CI_POSTGRES_CONTAINER")"
+            [[ "$status" == 'healthy' ]] && break
+            if [[ "$status" == 'unhealthy' || "$attempt" == '30' ]]; then
+              docker logs "$PLATFORM_CI_POSTGRES_CONTAINER" >&2
+              echo "Isolated Platform PostgreSQL is $status." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Create isolated Platform roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.PLATFORM_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_platform_admin \
+              --dbname winwidget_platform_ci <<'SQL'
+          REVOKE ALL ON DATABASE winwidget_platform_ci FROM PUBLIC;
+          CREATE ROLE winwidget_platform_migration LOGIN PASSWORD 'platform_migration_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE winwidget_platform_runtime LOGIN PASSWORD 'platform_runtime_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE winwidget_platform_backup LOGIN PASSWORD 'platform_backup_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE winwidget_platform_ci
+            TO winwidget_platform_migration, winwidget_platform_runtime, winwidget_platform_backup;
+          REVOKE CREATE, TEMPORARY ON DATABASE winwidget_platform_ci
+            FROM winwidget_platform_migration, winwidget_platform_runtime, winwidget_platform_backup;
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA platform AUTHORIZATION winwidget_platform_migration;
+          REVOKE ALL ON SCHEMA platform FROM PUBLIC;
+          GRANT USAGE ON SCHEMA platform TO winwidget_platform_runtime, winwidget_platform_backup;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_platform_migration IN SCHEMA platform
+            REVOKE ALL ON TABLES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_platform_migration IN SCHEMA platform
+            REVOKE ALL ON SEQUENCES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_platform_migration IN SCHEMA platform
+            REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_platform_migration IN SCHEMA platform
+            GRANT SELECT ON TABLES TO winwidget_platform_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_platform_migration IN SCHEMA platform
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO winwidget_platform_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_platform_migration IN SCHEMA platform
+            GRANT SELECT ON TABLES TO winwidget_platform_backup;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_platform_migration IN SCHEMA platform
+            GRANT SELECT ON SEQUENCES TO winwidget_platform_backup;
+          SQL
+
       - name: Rehearse Widgets exact dump in isolated PostgreSQL 18
         env:
           WIDGETS_REHEARSAL_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1948,6 +2280,8 @@ jobs:
           pnpm --dir apps/billing run prisma:generate
           pnpm --dir apps/identity run prisma:validate
           pnpm --dir apps/identity run prisma:generate
+          pnpm --dir apps/platform run prisma:validate
+          pnpm --dir apps/platform run prisma:generate
 
       - name: Fast-check Widgets snapshot SQL contract
         run: node scripts/export-widgets-cutover-snapshot.mjs --self-test
@@ -1968,6 +2302,8 @@ jobs:
             pnpm --dir apps/billing run prisma:migrate:deploy
           IDENTITY_DATABASE_URL="$IDENTITY_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/identity run prisma:migrate:deploy
+          PLATFORM_DATABASE_URL="$PLATFORM_CI_MIGRATION_DATABASE_URL" \
+            pnpm --dir apps/platform run prisma:migrate:deploy
 
       - name: Rehearse guarded Widgets Core source cleanup in PostgreSQL 18
         env:
@@ -3030,6 +3366,280 @@ jobs:
                 "DELETE FROM identity.source_sequences WHERE id = '$sentinel_id';"
           docker exec "$POSTGRES_CONTAINER_ID" rm -f -- /tmp/identity-ci.dump
 
+      - name: Verify Platform PostgreSQL isolation and restore rehearsal
+        env:
+          MONOLITH_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER_ID: ${{ env.PLATFORM_CI_POSTGRES_CONTAINER }}
+        run: |
+          test "$POSTGRES_CONTAINER_ID" != "$MONOLITH_POSTGRES_CONTAINER_ID"
+          docker exec -i "$MONOLITH_POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --username winwidget --dbname winwidget_ci <<'SQL'
+          DO $$
+          BEGIN
+            IF to_regnamespace('platform') IS NOT NULL THEN
+              RAISE EXCEPTION 'Core database must not contain the Platform service schema';
+            END IF;
+          END $$;
+          SQL
+
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_platform_admin \
+              --dbname winwidget_platform_ci <<'SQL'
+          REVOKE ALL ON ALL TABLES IN SCHEMA platform
+            FROM PUBLIC, winwidget_platform_runtime, winwidget_platform_backup;
+          REVOKE ALL ON ALL SEQUENCES IN SCHEMA platform
+            FROM PUBLIC, winwidget_platform_runtime, winwidget_platform_backup;
+          REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform
+            FROM PUBLIC, winwidget_platform_runtime, winwidget_platform_backup;
+          REVOKE CREATE ON SCHEMA platform
+            FROM winwidget_platform_runtime, winwidget_platform_backup;
+          GRANT EXECUTE ON FUNCTION platform.current_semantic_fingerprint()
+            TO winwidget_platform_runtime;
+          GRANT EXECUTE ON FUNCTION platform.refresh_current_semantic_fingerprint(TEXT)
+            TO winwidget_platform_runtime;
+          REVOKE ALL ON FUNCTION platform.enforce_current_semantic_fingerprint()
+            FROM PUBLIC, winwidget_platform_runtime;
+          GRANT SELECT ON ALL TABLES IN SCHEMA platform
+            TO winwidget_platform_runtime;
+          GRANT UPDATE ON TABLE platform.site_settings, platform.home_page_content
+            TO winwidget_platform_runtime;
+          GRANT INSERT, UPDATE ON TABLE
+            platform.legal_pages,
+            platform.source_sequences,
+            platform.outbox_events
+            TO winwidget_platform_runtime;
+          GRANT UPDATE (current_aggregate_version, current_source_sequence, updated_at)
+            ON TABLE platform.billing_offer_producer_state
+            TO winwidget_platform_runtime;
+          GRANT UPDATE (current_semantic_fingerprint, updated_at)
+            ON TABLE platform.service_identity
+            TO winwidget_platform_runtime;
+          GRANT USAGE, SELECT, UPDATE
+            ON ALL SEQUENCES IN SCHEMA platform TO winwidget_platform_runtime;
+          GRANT SELECT
+            ON ALL TABLES IN SCHEMA platform TO winwidget_platform_backup;
+          GRANT SELECT
+            ON ALL SEQUENCES IN SCHEMA platform TO winwidget_platform_backup;
+          REVOKE ALL ON TABLE platform._prisma_migrations
+            FROM winwidget_platform_runtime;
+          REVOKE CREATE, TEMPORARY ON DATABASE winwidget_platform_ci
+            FROM winwidget_platform_migration, winwidget_platform_runtime, winwidget_platform_backup;
+          DO $acl_contract$
+          BEGIN
+            IF NOT (
+              has_function_privilege('winwidget_platform_runtime', 'platform.current_semantic_fingerprint()', 'EXECUTE')
+              AND has_function_privilege('winwidget_platform_runtime', 'platform.refresh_current_semantic_fingerprint(text)', 'EXECUTE')
+              AND NOT has_function_privilege('winwidget_platform_runtime', 'platform.enforce_current_semantic_fingerprint()', 'EXECUTE')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.site_settings', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.site_settings', 'INSERT')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.site_settings', 'DELETE')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.home_page_content', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.home_page_content', 'INSERT')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.home_page_content', 'DELETE')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.legal_pages', 'INSERT')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.legal_pages', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.legal_pages', 'DELETE')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.source_sequences', 'INSERT')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.source_sequences', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.source_sequences', 'DELETE')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.outbox_events', 'INSERT')
+              AND has_table_privilege('winwidget_platform_runtime', 'platform.outbox_events', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.outbox_events', 'DELETE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.billing_offer_producer_state', 'UPDATE')
+              AND has_column_privilege('winwidget_platform_runtime', 'platform.billing_offer_producer_state', 'current_aggregate_version', 'UPDATE')
+              AND has_column_privilege('winwidget_platform_runtime', 'platform.billing_offer_producer_state', 'current_source_sequence', 'UPDATE')
+              AND has_column_privilege('winwidget_platform_runtime', 'platform.billing_offer_producer_state', 'updated_at', 'UPDATE')
+              AND NOT has_column_privilege('winwidget_platform_runtime', 'platform.billing_offer_producer_state', 'phase', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform.service_identity', 'UPDATE')
+              AND has_column_privilege('winwidget_platform_runtime', 'platform.service_identity', 'current_semantic_fingerprint', 'UPDATE')
+              AND has_column_privilege('winwidget_platform_runtime', 'platform.service_identity', 'updated_at', 'UPDATE')
+              AND NOT has_column_privilege('winwidget_platform_runtime', 'platform.service_identity', 'phase', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_runtime', 'platform._prisma_migrations', 'SELECT')
+              AND has_table_privilege('winwidget_platform_backup', 'platform.service_identity', 'SELECT')
+              AND NOT has_table_privilege('winwidget_platform_backup', 'platform.outbox_events', 'INSERT')
+              AND NOT has_table_privilege('winwidget_platform_backup', 'platform.outbox_events', 'UPDATE')
+              AND NOT has_table_privilege('winwidget_platform_backup', 'platform.outbox_events', 'DELETE')
+            ) THEN
+              RAISE EXCEPTION 'Platform CI ACL differs from the production least-privilege contract';
+            END IF;
+          END
+          $acl_contract$;
+          DO $guard_catalog$
+          DECLARE invalid_count INTEGER;
+          DECLARE semantic_trigger_count INTEGER;
+          BEGIN
+            SELECT count(*) INTO invalid_count
+            FROM (VALUES
+              ('service_identity', 'service_identity_semantic_fingerprint_guard'),
+              ('source_sequences', 'source_sequences_semantic_fingerprint_guard'),
+              ('site_settings', 'site_settings_semantic_fingerprint_guard'),
+              ('legal_pages', 'legal_pages_semantic_fingerprint_guard'),
+              ('home_page_content', 'home_page_content_semantic_fingerprint_guard'),
+              ('billing_offer_producer_state', 'billing_offer_producer_semantic_fingerprint_guard')
+            ) AS expected(table_name, trigger_name)
+            LEFT JOIN pg_class relation
+              ON relation.oid = format('platform.%I', expected.table_name)::regclass
+            LEFT JOIN pg_trigger trigger_entry
+              ON trigger_entry.tgrelid = relation.oid
+             AND trigger_entry.tgname = expected.trigger_name
+            LEFT JOIN pg_constraint constraint_entry
+              ON constraint_entry.oid = trigger_entry.tgconstraint
+            WHERE trigger_entry.oid IS NULL
+               OR constraint_entry.oid IS NULL
+               OR trigger_entry.tgenabled <> 'O'
+               OR trigger_entry.tgisinternal
+               OR trigger_entry.tgtype <> 29
+               OR trigger_entry.tgconstraint = 0
+               OR NOT trigger_entry.tgdeferrable
+               OR NOT trigger_entry.tginitdeferred
+               OR trigger_entry.tgfoid <> 'platform.enforce_current_semantic_fingerprint()'::regprocedure
+               OR constraint_entry.contype <> 't'
+               OR constraint_entry.conname <> expected.trigger_name
+               OR constraint_entry.connamespace <> 'platform'::regnamespace
+               OR constraint_entry.conrelid <> relation.oid
+               OR NOT constraint_entry.condeferrable
+               OR NOT constraint_entry.condeferred;
+            SELECT count(*) INTO semantic_trigger_count
+            FROM pg_trigger
+            WHERE tgfoid = 'platform.enforce_current_semantic_fingerprint()'::regprocedure;
+            IF invalid_count <> 0 OR semantic_trigger_count <> 6 THEN
+              RAISE EXCEPTION 'Platform semantic constraint-trigger catalog is not exact';
+            END IF;
+          END
+          $guard_catalog$;
+          SQL
+
+          test "$(
+            docker exec -e PGPASSWORD=platform_runtime_ci "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --host 127.0.0.1 --username winwidget_platform_runtime \
+                --dbname winwidget_platform_ci --command \
+                "SELECT concat((SELECT count(*) FROM platform.site_settings), '/', (SELECT count(*) FROM platform.legal_pages), '/', (SELECT count(*) FROM platform.home_page_content), '/', (SELECT phase::text FROM platform.service_identity WHERE id = 'singleton'), '/', (SELECT phase::text FROM platform.billing_offer_producer_state WHERE id = 'offer'));"
+          )" = '1/4/1/SHADOW/BLOCKED'
+          if docker exec -e PGPASSWORD=platform_runtime_ci "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_platform_runtime --dbname winwidget_platform_ci \
+              --command 'SELECT count(*) FROM platform._prisma_migrations;' \
+              > /dev/null 2>&1; then
+            echo 'Platform runtime can read _prisma_migrations.' >&2
+            exit 1
+          fi
+          if docker exec -e PGPASSWORD=platform_backup_ci "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_platform_backup --dbname winwidget_platform_ci \
+              --command "UPDATE platform.site_settings SET banner_text = 'must fail';" \
+              > /dev/null 2>&1; then
+            echo 'Platform backup role can mutate service data.' >&2
+            exit 1
+          fi
+
+          docker exec -i -e PGPASSWORD=platform_runtime_ci "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_platform_runtime --dbname winwidget_platform_ci <<'SQL'
+          DO $guard_probe$
+          DECLARE
+            before_row JSONB;
+            after_row JSONB;
+            before_persisted TEXT;
+            after_persisted TEXT;
+            before_recomputed TEXT;
+            after_recomputed TEXT;
+            actual_state TEXT;
+            actual_constraint TEXT;
+          BEGIN
+            SELECT to_jsonb(site) INTO before_row
+            FROM platform.site_settings site WHERE id = 'singleton';
+            SELECT current_semantic_fingerprint INTO before_persisted
+            FROM platform.service_identity WHERE id = 'singleton';
+            before_recomputed := platform.current_semantic_fingerprint();
+            BEGIN
+              UPDATE platform.site_settings
+              SET snowflake_enabled = NOT snowflake_enabled,
+                  aggregate_version = aggregate_version + 1,
+                  source_sequence = source_sequence + 1,
+                  updated_at = updated_at + interval '1 millisecond'
+              WHERE id = 'singleton';
+              SET CONSTRAINTS ALL IMMEDIATE;
+              RAISE EXCEPTION USING
+                ERRCODE = 'P0001',
+                MESSAGE = 'unguarded Platform semantic mutation was accepted';
+            EXCEPTION WHEN OTHERS THEN
+              GET STACKED DIAGNOSTICS
+                actual_state = RETURNED_SQLSTATE,
+                actual_constraint = CONSTRAINT_NAME;
+              IF actual_state <> '23514'
+                OR actual_constraint <> 'platform_current_semantic_fingerprint_guard' THEN
+                RAISE EXCEPTION
+                  'unguarded Platform mutation failed with SQLSTATE % / constraint %, expected 23514 / platform_current_semantic_fingerprint_guard',
+                  actual_state, COALESCE(actual_constraint, '<null>');
+              END IF;
+            END;
+            SET CONSTRAINTS ALL DEFERRED;
+            SELECT to_jsonb(site) INTO after_row
+            FROM platform.site_settings site WHERE id = 'singleton';
+            SELECT current_semantic_fingerprint INTO after_persisted
+            FROM platform.service_identity WHERE id = 'singleton';
+            after_recomputed := platform.current_semantic_fingerprint();
+            IF after_row IS DISTINCT FROM before_row
+              OR after_persisted IS DISTINCT FROM before_persisted
+              OR after_recomputed IS DISTINCT FROM before_recomputed THEN
+              RAISE EXCEPTION 'rejected Platform mutation left database drift';
+            END IF;
+          END
+          $guard_probe$;
+          SQL
+
+          sentinel_id=ci-platform-restore-${{ github.run_id }}-${{ github.run_attempt }}
+          docker exec -e PGPASSWORD=platform_runtime_ci "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_platform_runtime --dbname winwidget_platform_ci \
+              --command \
+                "INSERT INTO platform.outbox_events (id, event_id, event_type, aggregate_type, aggregate_id, routing_key, payload) VALUES ('$sentinel_id', '$sentinel_id', 'ci.platform.restore-probe.v1', 'ci.platform.restore-probe', '$sentinel_id', 'ci.platform.restore-probe.v1', '{\"persisted\":true}'::jsonb);"
+          docker exec -e PGPASSWORD=platform_backup_ci "$POSTGRES_CONTAINER_ID" \
+            pg_dump --format custom --compress 9 --no-owner --no-acl \
+              --host 127.0.0.1 --username winwidget_platform_backup \
+              --dbname winwidget_platform_ci --file /tmp/platform-ci.dump
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_platform_admin --dbname postgres \
+              --command \
+                'CREATE DATABASE winwidget_platform_restore_ci WITH TEMPLATE template0;'
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            pg_restore --exit-on-error --single-transaction \
+              --no-owner --no-acl --username winwidget_platform_admin \
+              --dbname winwidget_platform_restore_ci /tmp/platform-ci.dump
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_platform_admin \
+                --dbname winwidget_platform_restore_ci --command \
+                "SELECT count(*) FROM platform.outbox_events WHERE id = '$sentinel_id' AND event_id = '$sentinel_id' AND event_type = 'ci.platform.restore-probe.v1' AND payload = '{\"persisted\":true}'::jsonb;"
+          )" = '1'
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_platform_admin \
+                --dbname winwidget_platform_restore_ci --command \
+                "SELECT concat((SELECT count(*) FROM platform.site_settings), '/', (SELECT count(*) FROM platform.legal_pages), '/', (SELECT count(*) FROM platform.home_page_content));"
+          )" = '1/4/1'
+          test "$(
+            docker exec "$POSTGRES_CONTAINER_ID" \
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 \
+                --username winwidget_platform_admin \
+                --dbname winwidget_platform_restore_ci --command \
+                'SELECT count(*) FROM platform._prisma_migrations;'
+          )" -ge 1
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_platform_admin --dbname postgres \
+              --command 'DROP DATABASE winwidget_platform_restore_ci WITH (FORCE);'
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_platform_admin --dbname winwidget_platform_ci \
+              --command "DELETE FROM platform.outbox_events WHERE id = '$sentinel_id';"
+          docker exec "$POSTGRES_CONTAINER_ID" rm -f -- /tmp/platform-ci.dump
+
       - name: Verify Notification Delivery PostgreSQL persistence and restore
         env:
           NOTIFICATION_DELIVERY_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-notification-delivery-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
@@ -3577,6 +4187,7 @@ jobs:
           pnpm --dir apps/widgets run typecheck
           pnpm --dir apps/billing run typecheck
           pnpm --dir apps/identity run typecheck
+          pnpm --dir apps/platform run typecheck
 
       - name: Lint
         run: |
@@ -3587,6 +4198,7 @@ jobs:
           pnpm --dir apps/widgets run lint
           pnpm --dir apps/billing run lint
           pnpm --dir apps/identity run lint
+          pnpm --dir apps/platform run lint
 
       - name: Test
         run: |
@@ -3597,6 +4209,7 @@ jobs:
           pnpm --dir apps/widgets test
           pnpm --dir apps/billing test
           pnpm --dir apps/identity test
+          pnpm --dir apps/platform test
           widgets_browser_executable="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)"
           test -n "$widgets_browser_executable"
           WIDGETS_TEST_DATABASE_URL="$WIDGETS_DATABASE_URL" \
@@ -3661,6 +4274,14 @@ jobs:
           IDENTITY_DATABASE_URL: postgresql://winwidget_identity_runtime:identity_runtime_ci@127.0.0.1:55438/winwidget_identity?schema=identity&sslmode=disable
           IDENTITY_MIGRATION_DATABASE_URL: postgresql://winwidget_identity_migration:identity_migration_ci@127.0.0.1:55438/winwidget_identity?schema=identity&sslmode=disable
           IDENTITY_BACKUP_URL: postgresql://winwidget_identity_backup:identity_backup_ci@127.0.0.1:55438/winwidget_identity?schema=identity&sslmode=disable
+          PLATFORM_POSTGRES_IMAGE: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+          PLATFORM_POSTGRES_PORT: '55439'
+          PLATFORM_POSTGRES_DATA_VOLUME: winwidget-platform-postgres-data
+          PLATFORM_POSTGRES_ADMIN_USER: winwidget_platform_admin
+          PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE: /tmp/winwidget-platform-postgres-admin-password
+          PLATFORM_DATABASE_URL: postgresql://winwidget_platform_runtime:platform_runtime_ci@127.0.0.1:55439/winwidget_platform?schema=platform&sslmode=disable
+          PLATFORM_MIGRATION_DATABASE_URL: postgresql://winwidget_platform_migration:platform_migration_ci@127.0.0.1:55439/winwidget_platform?schema=platform&sslmode=disable
+          PLATFORM_BACKUP_URL: postgresql://winwidget_platform_backup:platform_backup_ci@127.0.0.1:55439/winwidget_platform?schema=platform&sslmode=disable
           MODE: production
           GOOGLE_CLIENT_ID: ci_identity_google_client_id
           GOOGLE_CLIENT_SECRET: ci_identity_google_client_secret
@@ -3784,6 +4405,7 @@ jobs:
           pnpm --dir apps/identity run typecheck
           pnpm --dir apps/identity test
           pnpm --dir apps/identity run build
+          pnpm --dir apps/platform run build
 
       - name: Create restricted Billing RabbitMQ users
         env:
@@ -3807,9 +4429,9 @@ jobs:
           fi
           docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions \
             -p winwidget winwidget-billing-worker \
-            '^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
-            '^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
-            '^winwidget\.(events|billing\.(retry|dead-letter)|billing\.(identity|notification-routing|settings-source|trial|referral|offer|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+            '^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|trial|referral|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.offer\.v2(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+            '^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|trial|referral|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.offer\.v2(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
+            '^winwidget\.(events|billing\.(retry|dead-letter)|billing\.(identity|notification-routing|trial|referral|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.offer\.v2(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$' \
             > /dev/null
           docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions \
             -p winwidget winwidget-billing-publisher \
@@ -3829,7 +4451,7 @@ jobs:
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_topic_permissions -p winwidget \
               winwidget-billing-worker winwidget.events '^$' \
-              '^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.settings\.source\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v1|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$' \
+              '^(billing\.identity\.changed\.v1|billing\.notification-routing\.changed\.v1|billing\.trial\.requested\.v1|billing\.referral\.requested\.v1|billing\.offer\.changed\.v2|billing\.lifecycle-repair\.requested\.v1|payment\.auto-renewal\.charge\.requested\.v1|notification\.delivery\.outcome\.v1)$' \
             > /dev/null
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_topic_permissions -p winwidget \
@@ -3937,10 +4559,10 @@ jobs:
             "widgets-admin-audit",
             "billing-admin-audit",
             "identity-admin-audit",
+            "platform-admin-audit",
             "billing-payment-projection",
             "billing-subscription-projection",
             "billing-affiliate-projection",
-            "billing-settings-projection",
           ];
           const legacyPaths = [
             "src/messaging/daily-summary-event.ts",
@@ -4570,7 +5192,6 @@ jobs:
             "billing-payment-projection",
             "billing-subscription-projection",
             "billing-affiliate-projection",
-            "billing-settings-projection",
           ];
           for (const kind of billingProjectionKinds) {
             const queue = monolith.MESSAGING_QUEUE_NAMES[kind];
@@ -4641,6 +5262,7 @@ jobs:
           for (const kind of [
             ...billingProjectionKinds,
             "identity-admin-audit",
+            "platform-admin-audit",
           ]) {
             const queue = monolith.MESSAGING_QUEUE_NAMES[kind];
             if (!postIdentityPattern.test(queue)) {
@@ -4791,7 +5413,7 @@ jobs:
           trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
           export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
 
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api identity-api
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api identity-api platform-api
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -4867,6 +5489,33 @@ jobs:
               test ! -e dist/src/app.module.js
               test ! -e public/widgets
             '
+          test "$(
+            docker image inspect "$PLATFORM_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$PLATFORM_REVISION"
+          test "$(
+            docker image inspect "$PLATFORM_IMAGE" \
+              --format '{{.Config.User}}'
+          )" = 'platform'
+          test "$(
+            docker image inspect "$PLATFORM_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.title" }}'
+          )" = 'winwidget-platform'
+          docker run --rm --network none \
+            --entrypoint sh \
+            "$PLATFORM_IMAGE" \
+            -euc '
+              test "$(id -u)" = 1001
+              openssl version > /dev/null
+              node -e "require('@prisma/platform-client')"
+              test -f dist/src/main.js
+              test -f dist/src/cutover/main.js
+              test -f dist/src/cutover/core-main.js
+              test -f prisma/schema.prisma
+              test -d prisma/migrations
+              test ! -e dist/src/app.module.js
+              test ! -e public/widgets
+            '
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version | grep -Eq " 18[.]" && pg_restore --version | grep -Eq " 18[.]" && test -f dist/src/maintenance-worker-main.js'
@@ -4884,6 +5533,7 @@ jobs:
               test -d apps/widgets/prisma/migrations
               test -d apps/billing/prisma/migrations
               test -d apps/identity/prisma/migrations
+              test -d apps/platform/prisma/migrations
             '
           restore_entrypoint_run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           restore_entrypoint_volume="winwidget-ci-restore-entrypoint-${restore_entrypoint_run_id}"
@@ -4944,7 +5594,8 @@ jobs:
             reporting-admin-password \
             widgets-admin-password \
             billing-admin-password \
-            identity-admin-password; do
+            identity-admin-password \
+            platform-admin-password; do
             sudo install -o root -g root -m 400 \
               "$restore_entrypoint_fixture" \
               "$restore_entrypoint_secret_root/$secret_name"
@@ -4959,7 +5610,8 @@ jobs:
             reporting-admin-password \
             widgets-admin-password \
             billing-admin-password \
-            identity-admin-password; do
+            identity-admin-password \
+            platform-admin-password; do
             test "$(sudo stat -c '%u:%g:%a' "$restore_entrypoint_secret_root/$secret_name")" = '0:0:400'
           done
           docker volume create \
@@ -4996,6 +5648,7 @@ jobs:
             --mount "type=bind,source=$restore_entrypoint_secret_root/widgets-admin-password,target=/run/secrets/database-restore-widgets-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/billing-admin-password,target=/run/secrets/database-restore-billing-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/identity-admin-password,target=/run/secrets/database-restore-identity-admin-password,readonly" \
+            --mount "type=bind,source=$restore_entrypoint_secret_root/platform-admin-password,target=/run/secrets/database-restore-platform-admin-password,readonly" \
             --tmpfs /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
             "$DATABASE_RESTORE_IMAGE" \
@@ -5010,7 +5663,8 @@ jobs:
                 /run/database-restore-secrets/reporting-admin-password \
                 /run/database-restore-secrets/widgets-admin-password \
                 /run/database-restore-secrets/billing-admin-password \
-                /run/database-restore-secrets/identity-admin-password; do
+                /run/database-restore-secrets/identity-admin-password \
+                /run/database-restore-secrets/platform-admin-password; do
                 test -f "$secret_file"
                 test ! -L "$secret_file"
                 test -r "$secret_file"
@@ -5019,7 +5673,7 @@ jobs:
                 test -n "$fixture_value"
                 copied=$((copied + 1))
               done
-              test "$copied" -eq 7
+              test "$copied" -eq 8
               printf "database-restore-entrypoint-secret-copy=passed\n"
             '
           cleanup_restore_entrypoint_smoke
@@ -5133,6 +5787,9 @@ jobs:
             run --rm --no-deps --entrypoint sh billing-api \
             -euc "test \"\$(id -u):\$(id -g)\" = '1001:1001'; test -f dist/src/main.js; test -f dist/src/cutover-main.js; test -f prisma/schema.prisma; test -d prisma/migrations; test ! -e dist/src/app.module.js; test ! -e public/widgets"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
+            run --rm --no-deps --entrypoint sh platform-api \
+            -euc "test \"\$(id -u):\$(id -g)\" = '1001:1001'; test -f dist/src/main.js; test -f dist/src/cutover/main.js; test -f dist/src/cutover/core-main.js; test -f prisma/schema.prisma; test -d prisma/migrations; test ! -e dist/src/app.module.js; test ! -e public/widgets"
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint node api \
             -e "const fs=require('node:fs'); fs.accessSync('dist/src/main.js'); if (fs.existsSync('public/widgets')) throw new Error('Core image still contains Widgets runtime assets')"
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
@@ -5158,7 +5815,7 @@ jobs:
               integration_ci \
               '^$' \
               '^(winwidget\.retry|winwidget\.dead-letter)$' \
-              '^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1)(\..*)?$'
+              '^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\..*)?$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_user_tags integration_ci
           docker exec "$RABBITMQ_CONTAINER_ID" \
@@ -5169,7 +5826,7 @@ jobs:
               rabbitmqctl --silent list_user_permissions integration_ci |
               awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }'
           )" = \
-            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1)(\..*)?$'
+            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\..*)?$'
           docker run --rm \
             --network host \
             --env ADMIN_URL=amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget \
@@ -5187,7 +5844,6 @@ jobs:
             "winwidget.core.billing.payment-details.v1",
             "winwidget.core.billing.subscription-details.v1",
             "winwidget.core.billing.affiliate.v1",
-            "winwidget.core.billing.settings.v1",
           ];
           (async () => {
             const worker = await amqp.connect(workerUrl);
@@ -5819,6 +6475,44 @@ jobs:
           rm -f -- "$IDENTITY_CI_POSTGRES_PASSWORD_FILE"
           [[ "$cleanup_failed" == "false" ]]
 
+      - name: Cleanup isolated Platform PostgreSQL
+        if: ${{ always() }}
+        env:
+          PLATFORM_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-platform-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          cleanup_failed=false
+          if docker container inspect \
+            "$PLATFORM_CI_POSTGRES_CONTAINER" > /dev/null 2>&1; then
+            container_identity="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{index .Config.Labels "com.winwidget.github-run"}}' \
+                "$PLATFORM_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$container_identity" != "platform|ci-postgres|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Platform container." >&2
+              cleanup_failed=true
+            else
+              docker container rm --force \
+                "$PLATFORM_CI_POSTGRES_CONTAINER" > /dev/null
+            fi
+          fi
+          if docker volume inspect \
+            "$PLATFORM_CI_POSTGRES_VOLUME" > /dev/null 2>&1; then
+            volume_identity="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}|{{index .Labels "com.winwidget.github-run"}}' \
+                "$PLATFORM_CI_POSTGRES_VOLUME"
+            )"
+            if [[ "$volume_identity" != "platform|ci-postgres-data|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Platform volume." >&2
+              cleanup_failed=true
+            else
+              docker volume rm "$PLATFORM_CI_POSTGRES_VOLUME" > /dev/null
+            fi
+          fi
+          rm -f -- "$PLATFORM_CI_POSTGRES_PASSWORD_FILE"
+          [[ "$cleanup_failed" == "false" ]]
+
   deploy:
     needs: verify
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -5941,10 +6635,455 @@ jobs:
           IDENTITY_CLEANUP_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_action || 'status' }}
           IDENTITY_CLEANUP_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_target == 'identity-cleanup' && inputs.identity_confirmation || '' }}
           IDENTITY_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.identity_cleanup_migration_sha256 || '' }}
+          PLATFORM_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_action || 'status' }}
+          PLATFORM_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_confirmation || '' }}
+          PLATFORM_ENV_EXPECTED_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_backend_env_expected_sha256 || '' }}
+          PLATFORM_FRONTEND_REVISION: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_revision || '' }}
+          PLATFORM_FRONTEND_RUNTIME_CHALLENGE: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_runtime_challenge || '' }}
+          PLATFORM_FRONTEND_ORIGIN: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_origin || '' }}
+          PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_attestation_sha256 || '' }}
+          PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_signature_sha256 || '' }}
+          PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_trusted_public_key_sha256 || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-        run: bash .github/scripts/stage-or-deploy-backend.sh
+        run: |
+          if [[ "$DEPLOY_TARGET" == 'platform' && "$PLATFORM_ACTION" != 'status' ]]; then
+            # Freeze/deploy the exact backend revision first, but leave the
+            # requested lifecycle mutation until fresh frontend evidence has
+            # been generated and transported below.
+            export PLATFORM_ACTION=status
+            export PLATFORM_CONFIRMATION=''
+            export PLATFORM_ENV_EXPECTED_SHA256=''
+            export PLATFORM_FRONTEND_REVISION=''
+            export PLATFORM_FRONTEND_RUNTIME_CHALLENGE=''
+            export PLATFORM_FRONTEND_ORIGIN=''
+            export PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256=''
+            export PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256=''
+            export PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256=''
+          fi
+          bash .github/scripts/stage-or-deploy-backend.sh
+
+      - name: Generate, transport, and consume Platform frontend attestation
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.deploy_target == 'platform' &&
+          inputs.platform_action != 'status'
+        env:
+          PLATFORM_ACTION: ${{ inputs.platform_action }}
+          PLATFORM_CONFIRMATION: ${{ inputs.platform_confirmation }}
+          PLATFORM_ENV_EXPECTED_SHA256: ${{ inputs.platform_backend_env_expected_sha256 }}
+          PLATFORM_FRONTEND_REVISION: ${{ inputs.platform_frontend_revision }}
+          PLATFORM_FRONTEND_RUNTIME_CHALLENGE: ${{ inputs.platform_frontend_runtime_challenge }}
+          PLATFORM_FRONTEND_ORIGIN: ${{ inputs.platform_frontend_origin }}
+          PLATFORM_MANUAL_ATTESTATION_SHA256: ${{ inputs.platform_frontend_attestation_sha256 }}
+          PLATFORM_MANUAL_SIGNATURE_SHA256: ${{ inputs.platform_frontend_signature_sha256 }}
+          PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ inputs.platform_frontend_trusted_public_key_sha256 }}
+          FRONTEND_SSH_HOST: ${{ secrets.FRONTEND_PRODUCTION_SSH_HOST }}
+          FRONTEND_SSH_PORT: ${{ secrets.FRONTEND_PRODUCTION_SSH_PORT }}
+          FRONTEND_SSH_USER: ${{ secrets.FRONTEND_PRODUCTION_SSH_USER }}
+          FRONTEND_SSH_PRIVATE_KEY: ${{ secrets.FRONTEND_PRODUCTION_SSH_PRIVATE_KEY }}
+          BACKEND_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          BACKEND_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+          BACKEND_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          transport_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          local_root="$RUNNER_TEMP/platform-frontend-attestation-$transport_id"
+          frontend_key="$RUNNER_TEMP/platform-frontend-deploy-key-$transport_id"
+          frontend_known_hosts="$RUNNER_TEMP/platform-frontend-known-hosts-$transport_id"
+          frontend_root='/opt/winwidget/deploy/frontend'
+          frontend_controller="$frontend_root/.platform-frontend-attestation-controller-$transport_id.sh"
+          backend_root='/opt/winwidget/deploy/backend'
+          backend_stage="$backend_root/.platform-frontend-attestation-transport-$transport_id"
+          controller_source='scripts/platform-frontend-runtime-attestation.sh'
+          public_name='platform-frontend-runtime-attestation-v2.public.pem'
+          attestation_name='platform-frontend-runtime-attestation-v2.json'
+          signature_name='platform-frontend-runtime-attestation-v2.sig'
+          frontend_controller_staged=false
+          backend_stage_prepared=false
+          attested_mutation=false
+          computed_attestation_sha=''
+          computed_signature_sha=''
+          declare -a frontend_ssh_options=()
+          declare -a backend_ssh_options=(
+            -i "$HOME/.ssh/deploy_key"
+            -F /dev/null
+            -o IdentitiesOnly=yes
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o GlobalKnownHostsFile=/dev/null
+            -o "UserKnownHostsFile=$HOME/.ssh/known_hosts"
+            -o ConnectTimeout=15
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=4
+            -p "$BACKEND_SSH_PORT"
+          )
+          declare -a backend_scp_options=(
+            -q
+            -i "$HOME/.ssh/deploy_key"
+            -F /dev/null
+            -o IdentitiesOnly=yes
+            -o BatchMode=yes
+            -o StrictHostKeyChecking=yes
+            -o GlobalKnownHostsFile=/dev/null
+            -o "UserKnownHostsFile=$HOME/.ssh/known_hosts"
+            -o ConnectTimeout=15
+            -P "$BACKEND_SSH_PORT"
+          )
+
+          cleanup_platform_attestation_transport() {
+            set +e
+            if [[ "$frontend_controller_staged" == 'true' ]]; then
+              ssh "${frontend_ssh_options[@]}" \
+                "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
+                "rm -f -- '$frontend_controller'" >/dev/null 2>&1 || true
+            fi
+            if [[ "$backend_stage_prepared" == 'true' ]]; then
+              ssh "${backend_ssh_options[@]}" \
+                "$BACKEND_SSH_USER@$BACKEND_SSH_HOST" \
+                "rm -f -- '$backend_stage/$public_name' '$backend_stage/$attestation_name' '$backend_stage/$signature_name'; rmdir '$backend_stage' 2>/dev/null || true" \
+                >/dev/null 2>&1 || true
+            fi
+            rm -f -- \
+              "$local_root/$public_name" \
+              "$local_root/$attestation_name" \
+              "$local_root/$signature_name" \
+              "$frontend_key" "$frontend_known_hosts"
+            rmdir "$local_root" 2>/dev/null || true
+          }
+          trap cleanup_platform_attestation_transport EXIT HUP INT TERM
+
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
+            "$transport_id" =~ ^[0-9]{1,20}-[0-9]{1,10}$ &&
+            "$PLATFORM_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+            "$BACKEND_SSH_PORT" =~ ^[1-9][0-9]{0,4}$ &&
+            "$BACKEND_SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ &&
+            "$BACKEND_SSH_HOST" =~ ^[A-Za-z0-9._:-]+$ &&
+            "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || {
+            echo 'Platform attestation transport rejected its backend release identity.' >&2
+            exit 1
+          }
+          (( 10#$BACKEND_SSH_PORT <= 65535 ))
+          case "$PLATFORM_ACTION:$PLATFORM_CONFIRMATION" in
+            prepare-billing-readiness:'PREPARE PLATFORM BILLING READINESS'|prepare:'PREPARE PLATFORM OWNERSHIP'|cutover:'CUTOVER PLATFORM OWNERSHIP'|forward-recovery:'CUTOVER PLATFORM OWNERSHIP')
+              attested_mutation=true
+              ;;
+            abort:'ABORT PLATFORM CUTOVER') ;;
+            *)
+              echo 'Platform attestation transport rejected the requested lifecycle action.' >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ "$attested_mutation" == 'true' ]]; then
+            [[ "$PLATFORM_FRONTEND_REVISION" =~ ^[0-9a-f]{40}$ &&
+              "$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" =~ ^[0-9a-f]{64}$ &&
+              "$PLATFORM_FRONTEND_ORIGIN" =~ ^https://[a-z0-9.-]+(:[1-9][0-9]{0,4})?$ &&
+              "$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" =~ ^[0-9a-f]{64}$ &&
+              ( -z "$PLATFORM_MANUAL_ATTESTATION_SHA256" ||
+                "$PLATFORM_MANUAL_ATTESTATION_SHA256" =~ ^[0-9a-f]{64}$ ) &&
+              ( -z "$PLATFORM_MANUAL_SIGNATURE_SHA256" ||
+                "$PLATFORM_MANUAL_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ) &&
+              "$FRONTEND_SSH_PORT" =~ ^[1-9][0-9]{0,4}$ &&
+              "$FRONTEND_SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ &&
+              "$FRONTEND_SSH_HOST" =~ ^[A-Za-z0-9._:-]+$ &&
+              -n "$FRONTEND_SSH_PRIVATE_KEY" ]] || {
+              echo 'Platform frontend attestation inputs or dedicated frontend SSH credentials are invalid.' >&2
+              exit 1
+            }
+            (( 10#$FRONTEND_SSH_PORT <= 65535 ))
+          else
+            [[ -z "$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_MANUAL_ATTESTATION_SHA256$PLATFORM_MANUAL_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]] || {
+              echo 'Platform abort must not consume frontend attestation inputs.' >&2
+              exit 1
+            }
+          fi
+
+          if [[ "$attested_mutation" == 'true' ]]; then
+            [[ -f "$controller_source" && ! -L "$controller_source" &&
+              "$(git hash-object "$controller_source")" == \
+                "$(git rev-parse --verify "$GITHUB_SHA:$controller_source")" ]] || {
+              echo 'Platform frontend attestation controller is not the exact tracked release controller.' >&2
+              exit 1
+            }
+            controller_sha="$(sha256sum "$controller_source" | awk 'NR == 1 { print $1 }')"
+            [[ "$controller_sha" =~ ^[0-9a-f]{64}$ ]]
+            mkdir -- "$local_root"
+            chmod 700 "$local_root"
+            printf '%s\n' "$FRONTEND_SSH_PRIVATE_KEY" > "$frontend_key"
+            unset FRONTEND_SSH_PRIVATE_KEY
+            chmod 600 "$frontend_key"
+            ssh-keygen -y -f "$frontend_key" > /dev/null
+            ssh-keyscan -p "$FRONTEND_SSH_PORT" -H "$FRONTEND_SSH_HOST" \
+              > "$frontend_known_hosts"
+            chmod 600 "$frontend_known_hosts"
+            [[ -s "$frontend_known_hosts" && ! -L "$frontend_known_hosts" ]]
+            frontend_ssh_options=(
+              -i "$frontend_key"
+              -F /dev/null
+              -o IdentitiesOnly=yes
+              -o BatchMode=yes
+              -o StrictHostKeyChecking=yes
+              -o GlobalKnownHostsFile=/dev/null
+              -o "UserKnownHostsFile=$frontend_known_hosts"
+              -o ConnectTimeout=15
+              -o ServerAliveInterval=15
+              -o ServerAliveCountMax=4
+              -p "$FRONTEND_SSH_PORT"
+            )
+            frontend_scp_options=(
+              -q
+              -i "$frontend_key"
+              -F /dev/null
+              -o IdentitiesOnly=yes
+              -o BatchMode=yes
+              -o StrictHostKeyChecking=yes
+              -o GlobalKnownHostsFile=/dev/null
+              -o "UserKnownHostsFile=$frontend_known_hosts"
+              -o ConnectTimeout=15
+              -P "$FRONTEND_SSH_PORT"
+            )
+
+            ssh "${frontend_ssh_options[@]}" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
+              "set -euo pipefail; [[ \"\$(id -u)\" == '0' && -d '$frontend_root' && ! -L '$frontend_root' && \"\$(stat -c '%u:%g' '$frontend_root')\" == '0:0' ]]; rm -f -- '$frontend_controller'"
+            frontend_controller_staged=true
+            scp "${frontend_scp_options[@]}" \
+              "$controller_source" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_controller"
+            ssh "${frontend_ssh_options[@]}" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
+              "set -Eeuo pipefail
+              controller='$frontend_controller'
+              cleanup_controller() { rm -f -- \"\$controller\"; }
+              trap cleanup_controller EXIT HUP INT TERM
+              [[ \"\$(id -u)\" == '0' && -f \"\$controller\" && ! -L \"\$controller\" &&
+                \"\$(stat -c '%u:%g:%h' \"\$controller\")\" == '0:0:1' &&
+                \"\$(sha256sum \"\$controller\" | awk 'NR == 1 { print \$1 }')\" == '$controller_sha' ]]
+              chmod 600 \"\$controller\"
+              PLATFORM_BACKEND_REVISION='$GITHUB_SHA' \
+                PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' \
+                PLATFORM_CUTOVER_GENERATION=1 \
+                PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' \
+                PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' \
+                PLATFORM_FRONTEND_ATTESTATION_ROOT='$frontend_root' \
+                bash \"\$controller\" --generate"
+            ssh "${frontend_ssh_options[@]}" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
+              "rm -f -- '$frontend_controller'; [[ ! -e '$frontend_controller' && ! -L '$frontend_controller' ]]"
+            frontend_controller_staged=false
+
+            scp "${frontend_scp_options[@]}" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/$public_name" \
+              "$local_root/$public_name"
+            scp "${frontend_scp_options[@]}" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/$attestation_name" \
+              "$local_root/$attestation_name"
+            scp "${frontend_scp_options[@]}" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/$signature_name" \
+              "$local_root/$signature_name"
+            for artifact in "$public_name" "$attestation_name" "$signature_name"; do
+              [[ -f "$local_root/$artifact" && ! -L "$local_root/$artifact" ]]
+              artifact_size="$(wc -c < "$local_root/$artifact" | tr -d '[:space:]')"
+              [[ "$artifact_size" =~ ^[1-9][0-9]{0,4}$ && "$artifact_size" -le 16384 ]]
+              chmod 600 "$local_root/$artifact"
+            done
+            openssl pkey -pubin -in "$local_root/$public_name" -noout
+            openssl pkeyutl -verify -pubin \
+              -inkey "$local_root/$public_name" -rawin \
+              -in "$local_root/$attestation_name" \
+              -sigfile "$local_root/$signature_name" > /dev/null
+            computed_public_sha="$(sha256sum "$local_root/$public_name" | awk 'NR == 1 { print $1 }')"
+            computed_attestation_sha="$(sha256sum "$local_root/$attestation_name" | awk 'NR == 1 { print $1 }')"
+            computed_signature_sha="$(sha256sum "$local_root/$signature_name" | awk 'NR == 1 { print $1 }')"
+            [[ "$computed_public_sha" == "$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" &&
+              "$computed_attestation_sha" =~ ^[0-9a-f]{64}$ &&
+              "$computed_signature_sha" =~ ^[0-9a-f]{64}$ ]]
+            [[ -z "$PLATFORM_MANUAL_ATTESTATION_SHA256" ||
+              "$PLATFORM_MANUAL_ATTESTATION_SHA256" == "$computed_attestation_sha" ]]
+            [[ -z "$PLATFORM_MANUAL_SIGNATURE_SHA256" ||
+              "$PLATFORM_MANUAL_SIGNATURE_SHA256" == "$computed_signature_sha" ]]
+            printf 'platform_frontend_attestation_sha256=%s\n' "$computed_attestation_sha"
+            printf 'platform_frontend_signature_sha256=%s\n' "$computed_signature_sha"
+
+            ssh "${backend_ssh_options[@]}" \
+              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST" \
+              "set -euo pipefail
+              [[ \"\$(id -u)\" == '0' && -d '$backend_root' && ! -L '$backend_root' &&
+                \"\$(stat -c '%u:%g' '$backend_root')\" == '0:0' &&
+                ! -e '$backend_stage' && ! -L '$backend_stage' ]]
+              umask 077
+              mkdir -- '$backend_stage'
+              chown 0:0 '$backend_stage'
+              chmod 700 '$backend_stage'"
+            backend_stage_prepared=true
+            scp "${backend_scp_options[@]}" \
+              "$local_root/$public_name" \
+              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST:$backend_stage/$public_name"
+            scp "${backend_scp_options[@]}" \
+              "$local_root/$attestation_name" \
+              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST:$backend_stage/$attestation_name"
+            scp "${backend_scp_options[@]}" \
+              "$local_root/$signature_name" \
+              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST:$backend_stage/$signature_name"
+          else
+            unset FRONTEND_SSH_PRIVATE_KEY
+          fi
+
+          ssh "${backend_ssh_options[@]}" \
+            "$BACKEND_SSH_USER@$BACKEND_SSH_HOST" \
+            "APP_ROOT='/opt/winwidget' EXPECTED_REVISION='$GITHUB_SHA' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_COMPUTED_ATTESTATION_SHA256='$computed_attestation_sha' PLATFORM_COMPUTED_SIGNATURE_SHA256='$computed_signature_sha' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' PLATFORM_ATTESTED_MUTATION='$attested_mutation' PLATFORM_TRANSPORT_ID='$transport_id' bash -s" <<'PLATFORM_LIFECYCLE'
+          set -Eeuo pipefail
+          umask 077
+          server_root="$APP_ROOT/winwidget.ru_server"
+          artifact_root="$APP_ROOT/deploy/backend"
+          artifact_root_mode=''
+          readiness_receipt="$artifact_root/.platform-billing-readiness-v1"
+          phase_a_intent="$artifact_root/.platform-phase-a-intent-v1"
+          stage="$artifact_root/.platform-frontend-attestation-transport-$PLATFORM_TRANSPORT_ID"
+          public_name='platform-frontend-runtime-attestation-v2.public.pem'
+          attestation_name='platform-frontend-runtime-attestation-v2.json'
+          signature_name='platform-frontend-runtime-attestation-v2.sig'
+          cleanup_stage() {
+            rm -f -- "$stage/$public_name" "$stage/$attestation_name" "$stage/$signature_name"
+            rmdir "$stage" 2>/dev/null || true
+          }
+          trap cleanup_stage EXIT HUP INT TERM
+
+          [[ "$(id -u)" == '0' && "$(uname -s)" == 'Linux' &&
+            "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ &&
+            "$PLATFORM_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+            "$PLATFORM_TRANSPORT_ID" =~ ^[0-9]{1,20}-[0-9]{1,10}$ ]]
+          [[ -d "$artifact_root" && ! -L "$artifact_root" &&
+            "$(stat -c '%u:%g' "$artifact_root")" == '0:0' ]]
+          artifact_root_mode="$(stat -c '%a' "$artifact_root")"
+          [[ "$artifact_root_mode" =~ ^[0-7]{3,4}$ ]]
+          (( (8#$artifact_root_mode & 0022) == 0 ))
+          cd "$server_root"
+          [[ "$(git branch --show-current)" == 'prod' &&
+            "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" &&
+            -z "$(git status --porcelain --untracked-files=all)" ]]
+          for controller in \
+            scripts/platform-cutover-production.sh \
+            scripts/platform-frontend-runtime-attestation.sh; do
+            [[ -f "$controller" && ! -L "$controller" &&
+              "$(git hash-object "$controller")" == \
+                "$(git rev-parse --verify "HEAD:$controller")" ]]
+          done
+
+          if [[ "$PLATFORM_ATTESTED_MUTATION" == 'true' ]]; then
+            [[ "$PLATFORM_ACTION" =~ ^(prepare-billing-readiness|prepare|cutover|forward-recovery)$ &&
+              "$PLATFORM_FRONTEND_REVISION" =~ ^[0-9a-f]{40}$ &&
+              "$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" =~ ^[0-9a-f]{64}$ &&
+              "$PLATFORM_FRONTEND_ORIGIN" =~ ^https://[a-z0-9.-]+(:[1-9][0-9]{0,4})?$ &&
+              "$PLATFORM_COMPUTED_ATTESTATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+              "$PLATFORM_COMPUTED_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ &&
+              "$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" =~ ^[0-9a-f]{64}$ &&
+              -d "$stage" && ! -L "$stage" &&
+              "$(stat -c '%u:%g:%a' "$stage")" == '0:0:700' ]]
+            expected_origin_sha="$(printf '%s' "$PLATFORM_FRONTEND_ORIGIN" | sha256sum | awk 'NR == 1 { print $1 }')"
+            if [[ -e "$phase_a_intent" || -L "$phase_a_intent" ]]; then
+              [[ -f "$phase_a_intent" && ! -L "$phase_a_intent" &&
+                "$(stat -c '%u:%g:%a' "$phase_a_intent")" == '0:0:600' ]]
+              intent_frontend_identity="$(awk -F= '
+                $1 !~ /^(version|phase|revision|generation|phase_a_env_sha256|phase_a_routes_sha256|frontend_revision|frontend_challenge|frontend_origin_sha256|trusted_public_key_sha256|created_at)$/ { exit 1 }
+                { seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
+                END {
+                  if (NR == 11 && seen["version"] == 1 && value["version"] == "1" &&
+                    seen["phase"] == 1 && value["phase"] == "preparing" &&
+                    seen["revision"] == 1 && value["revision"] ~ /^[0-9a-f]{40}$/ &&
+                    seen["generation"] == 1 && value["generation"] == "1" &&
+                    seen["phase_a_env_sha256"] == 1 && value["phase_a_env_sha256"] ~ /^[0-9a-f]{64}$/ &&
+                    seen["phase_a_routes_sha256"] == 1 && value["phase_a_routes_sha256"] ~ /^[0-9a-f]{64}$/ &&
+                    seen["frontend_revision"] == 1 && value["frontend_revision"] ~ /^[0-9a-f]{40}$/ &&
+                    seen["frontend_challenge"] == 1 && value["frontend_challenge"] ~ /^[0-9a-f]{64}$/ &&
+                    seen["frontend_origin_sha256"] == 1 && value["frontend_origin_sha256"] ~ /^[0-9a-f]{64}$/ &&
+                    seen["trusted_public_key_sha256"] == 1 && value["trusted_public_key_sha256"] ~ /^[0-9a-f]{64}$/ &&
+                    seen["created_at"] == 1 && value["created_at"] ~ /^[0-9TZ:.-]+$/) {
+                    print value["revision"] "|" value["generation"] "|" value["frontend_revision"] "|" value["frontend_challenge"] "|" value["frontend_origin_sha256"] "|" value["trusted_public_key_sha256"]
+                  } else exit 1
+                }
+              ' "$phase_a_intent")"
+              [[ "$intent_frontend_identity" == "$EXPECTED_REVISION|1|$PLATFORM_FRONTEND_REVISION|$PLATFORM_FRONTEND_RUNTIME_CHALLENGE|$expected_origin_sha|$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]
+            fi
+            if [[ -e "$readiness_receipt" || -L "$readiness_receipt" ]]; then
+              [[ -f "$readiness_receipt" && ! -L "$readiness_receipt" &&
+                "$(stat -c '%u:%g:%a' "$readiness_receipt")" == '0:0:600' ]]
+              receipt_frontend_identity="$(awk -F= '
+                $1 == "frontend_revision" { revision = substr($0, index($0, "=") + 1); revision_count += 1 }
+                $1 == "frontend_challenge" { challenge = substr($0, index($0, "=") + 1); challenge_count += 1 }
+                $1 == "frontend_origin_sha256" { origin = substr($0, index($0, "=") + 1); origin_count += 1 }
+                $1 == "trusted_public_key_sha256" { key = substr($0, index($0, "=") + 1); key_count += 1 }
+                END {
+                  if (revision_count == 1 && challenge_count == 1 && origin_count == 1 && key_count == 1) {
+                    print revision "|" challenge "|" origin "|" key
+                  } else exit 1
+                }
+              ' "$readiness_receipt")"
+              [[ "$receipt_frontend_identity" == "$PLATFORM_FRONTEND_REVISION|$PLATFORM_FRONTEND_RUNTIME_CHALLENGE|$expected_origin_sha|$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]
+            else
+              [[ "$PLATFORM_ACTION" == 'prepare-billing-readiness' ]]
+            fi
+            for artifact in "$public_name" "$attestation_name" "$signature_name"; do
+              [[ -f "$stage/$artifact" && ! -L "$stage/$artifact" &&
+                "$(stat -c '%u:%g:%h' "$stage/$artifact")" == '0:0:1' ]]
+              chown 0:0 "$stage/$artifact"
+              chmod 600 "$stage/$artifact"
+            done
+            [[ "$(find "$stage" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]')" == 3 &&
+              "$(sha256sum "$stage/$public_name" | awk 'NR == 1 { print $1 }')" ==
+                "$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" &&
+              "$(sha256sum "$stage/$attestation_name" | awk 'NR == 1 { print $1 }')" ==
+                "$PLATFORM_COMPUTED_ATTESTATION_SHA256" &&
+              "$(sha256sum "$stage/$signature_name" | awk 'NR == 1 { print $1 }')" ==
+                "$PLATFORM_COMPUTED_SIGNATURE_SHA256" ]]
+            openssl pkey -pubin -in "$stage/$public_name" -noout
+            openssl pkeyutl -verify -pubin -inkey "$stage/$public_name" -rawin \
+              -in "$stage/$attestation_name" -sigfile "$stage/$signature_name" > /dev/null
+            # Publish the signed manifest last so every interrupted install is
+            # either coherent or rejected by signature/hash validation.
+            for artifact in "$public_name" "$signature_name" "$attestation_name"; do
+              sync -f "$stage/$artifact"
+              mv -fT -- "$stage/$artifact" "$artifact_root/$artifact"
+              sync -f "$artifact_root/$artifact"
+            done
+            sync -f "$artifact_root"
+            for artifact in "$public_name" "$attestation_name" "$signature_name"; do
+              [[ -f "$artifact_root/$artifact" && ! -L "$artifact_root/$artifact" &&
+                "$(stat -c '%u:%g:%a:%h' "$artifact_root/$artifact")" == '0:0:600:1' ]]
+            done
+            [[ "$(sha256sum "$artifact_root/$attestation_name" | awk 'NR == 1 { print $1 }')" ==
+                "$PLATFORM_COMPUTED_ATTESTATION_SHA256" &&
+              "$(sha256sum "$artifact_root/$signature_name" | awk 'NR == 1 { print $1 }')" ==
+                "$PLATFORM_COMPUTED_SIGNATURE_SHA256" ]]
+          else
+            [[ "$PLATFORM_ACTION" == 'abort' &&
+              -z "$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_COMPUTED_ATTESTATION_SHA256$PLATFORM_COMPUTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]
+          fi
+
+          case "$PLATFORM_ACTION" in
+            prepare-billing-readiness) platform_command='--prepare-billing-readiness' ;;
+            prepare) platform_command='--prepare' ;;
+            cutover) platform_command='--cutover' ;;
+            forward-recovery) platform_command='--forward-recovery' ;;
+            abort) platform_command='--abort' ;;
+            *) exit 1 ;;
+          esac
+          APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+            PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+            PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+            PLATFORM_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
+            PLATFORM_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
+            PLATFORM_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
+            PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256="$PLATFORM_COMPUTED_ATTESTATION_SHA256" \
+            PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256="$PLATFORM_COMPUTED_SIGNATURE_SHA256" \
+            PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
+            bash scripts/platform-cutover-production.sh "$platform_command"
+          PLATFORM_LIFECYCLE
+
       - name: Download encrypted canonical Identity production env
         id: download_identity_env
         if: >-

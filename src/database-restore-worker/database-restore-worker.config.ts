@@ -30,7 +30,8 @@ const PASSWORD_FILE_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	reporting: 'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE',
 	widgets: 'DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE',
 	billing: 'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE',
-	identity: 'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE'
+	identity: 'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE',
+	platform: 'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE'
 };
 
 const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
@@ -40,7 +41,8 @@ const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	reporting: 'DATABASE_RESTORE_REPORTING_PORT',
 	widgets: 'DATABASE_RESTORE_WIDGETS_PORT',
 	billing: 'DATABASE_RESTORE_BILLING_PORT',
-	identity: 'DATABASE_RESTORE_IDENTITY_PORT'
+	identity: 'DATABASE_RESTORE_IDENTITY_PORT',
+	platform: 'DATABASE_RESTORE_PLATFORM_PORT'
 };
 
 export class DatabaseRestoreWorkerConfig {
@@ -261,6 +263,30 @@ export class DatabaseRestoreWorkerConfig {
 					'service_identity',
 					'users',
 					'auth_identities',
+					'outbox_events'
+				]
+			}),
+			platform: this.target({
+				target: 'platform',
+				label: 'Platform',
+				port: this.requireTargetPort(environment, 'platform'),
+				database: 'winwidget_platform',
+				schema: 'platform',
+				adminRole: 'winwidget_platform_admin',
+				migrationRole: 'winwidget_platform_migration',
+				runtimeRoles: ['winwidget_platform_runtime'],
+				backupRole: 'winwidget_platform_backup',
+				passwordFile: passwordFiles.platform,
+				migrationsDirectory: join(
+					migrationsRoot,
+					'apps/platform/prisma/migrations'
+				),
+				anchorTables: [
+					'_prisma_migrations',
+					'service_identity',
+					'site_settings',
+					'legal_pages',
+					'home_page_content',
 					'outbox_events'
 				]
 			})

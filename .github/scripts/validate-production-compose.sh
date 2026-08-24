@@ -2,9 +2,9 @@
 set -e
 set -o pipefail
 
-docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --profile billing-migration --profile billing-database --profile identity-migration --profile identity-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
+docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --profile billing-migration --profile billing-database --profile identity-migration --profile identity-database --profile platform-migration --profile platform-database --env-file .env.example -f deploy/docker-compose.prod.yml config --quiet
 # shellcheck disable=SC2016
-docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --profile billing-migration --profile billing-database --profile identity-migration --profile identity-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
+docker compose --profile migration --profile notification-delivery-migration --profile notification-delivery-database --profile campaigns-migration --profile campaigns-database --profile reporting-migration --profile reporting-database --profile widgets-migration --profile widgets-database --profile billing-migration --profile billing-database --profile identity-migration --profile identity-database --profile platform-migration --profile platform-database --env-file .env.example -f deploy/docker-compose.prod.yml config --format json |
   node -e '
     const { readFileSync } = require("node:fs");
     const config = JSON.parse(readFileSync(0, "utf8"));
@@ -166,6 +166,27 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "Identity PostgreSQL must use its admin password file secret",
       );
     }
+    const platformPostgresVolume =
+      config.volumes?.["winwidget-platform-postgres-data"];
+    if (
+      !platformPostgresVolume?.external ||
+      platformPostgresVolume.name !==
+        process.env.PLATFORM_POSTGRES_DATA_VOLUME
+    ) {
+      throw new Error(
+        "Platform PostgreSQL must use its exact external volume",
+      );
+    }
+    const platformPostgresSecret =
+      config.secrets?.["platform-postgres-admin-password"];
+    if (
+      platformPostgresSecret?.file !==
+      process.env.PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE
+    ) {
+      throw new Error(
+        "Platform PostgreSQL must use its admin password file secret",
+      );
+    }
     const coreRestoreSecret =
       config.secrets?.["core-postgres-admin-password"];
     if (
@@ -196,6 +217,8 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "maintenance-worker",
       "notification-delivery-worker",
       "outbox-publisher",
+      "platform-api",
+      "platform-outbox-publisher",
       "rabbitmq",
       "reporting-service",
       "widgets-service",
@@ -682,6 +705,76 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "Identity PostgreSQL dedicated loopback lifecycle safeguards drifted",
       );
     }
+    const platformPostgres = requireService("platform-postgres");
+    const platformPostgresEnvironment = requireEnvironment(
+      "platform-postgres",
+      [
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD_FILE",
+        "POSTGRES_INITDB_ARGS",
+        "PGDATA",
+      ],
+    );
+    const platformPorts = platformPostgres.ports ?? [];
+    const platformNetworks = platformPostgres.networks ?? {};
+    const platformNetwork = config.networks?.["platform-postgres"];
+    if (
+      platformPostgres.image !== process.env.PLATFORM_POSTGRES_IMAGE ||
+      platformPostgresEnvironment.POSTGRES_DB !== "winwidget_platform" ||
+      platformPostgresEnvironment.POSTGRES_USER !==
+        process.env.PLATFORM_POSTGRES_ADMIN_USER ||
+      platformPostgresEnvironment.POSTGRES_PASSWORD_FILE !==
+        "/run/secrets/platform-postgres-admin-password" ||
+      platformPostgresEnvironment.POSTGRES_INITDB_ARGS !==
+        "--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" ||
+      platformPostgresEnvironment.PGDATA !==
+        "/var/lib/postgresql/18/docker" ||
+      platformPorts.length !== 1 ||
+      platformPorts[0].host_ip !== "127.0.0.1" ||
+      String(platformPorts[0].published) !==
+        process.env.PLATFORM_POSTGRES_PORT ||
+      Number(platformPorts[0].target) !== 5432 ||
+      Object.keys(platformNetworks).length !== 1 ||
+      !Object.hasOwn(platformNetworks, "platform-postgres") ||
+      platformNetwork?.name !== "winwidget-platform-postgres" ||
+      platformNetwork.driver !== "bridge" ||
+      platformNetwork.internal === true ||
+      platformNetwork.labels?.["com.winwidget.owner"] !== "platform" ||
+      platformNetwork.labels?.["com.winwidget.purpose"] !==
+        "postgres-network" ||
+      JSON.stringify(platformPostgres.profiles ?? []) !==
+        JSON.stringify(["platform-database"]) ||
+      platformPostgres.network_mode != null ||
+      platformPostgres.depends_on != null ||
+      platformPostgres.restart !== "unless-stopped" ||
+      (platformPostgres.volumes ?? []).length !== 1 ||
+      platformPostgres.volumes[0].type !== "volume" ||
+      platformPostgres.volumes[0].source !==
+        process.env.PLATFORM_POSTGRES_DATA_VOLUME ||
+      platformPostgres.volumes[0].target !== "/var/lib/postgresql" ||
+      (platformPostgres.secrets ?? []).length !== 1 ||
+      platformPostgres.secrets[0].source !==
+        "platform-postgres-admin-password" ||
+      JSON.stringify(platformPostgres.healthcheck) !==
+        JSON.stringify(expectedPostgresHealthcheck) ||
+      platformPostgres.stop_grace_period !== "1m0s" ||
+      platformPostgres.shm_size !== "268435456" ||
+      platformPostgres.mem_limit !== "536870912" ||
+      platformPostgres.mem_reservation !== "134217728" ||
+      platformPostgres.cpus !== 0.75 ||
+      platformPostgres.pids_limit !== 200 ||
+      platformPostgres.logging?.driver !== "json-file" ||
+      platformPostgres.logging?.options?.["max-size"] !== "10m" ||
+      platformPostgres.logging?.options?.["max-file"] !== "5" ||
+      platformPostgres.labels?.["com.winwidget.owner"] !== "platform" ||
+      platformPostgres.labels?.["com.winwidget.purpose"] !== "postgres" ||
+      Object.keys(platformPostgres.labels ?? {}).length !== 2
+    ) {
+      throw new Error(
+        "Platform PostgreSQL dedicated loopback lifecycle safeguards drifted",
+      );
+    }
     for (const [name, service] of Object.entries(services)) {
       if (
         name === "notification-delivery-postgres" ||
@@ -689,7 +782,8 @@ docker compose --profile migration --profile notification-delivery-migration --p
         name === "reporting-postgres" ||
         name === "widgets-postgres" ||
         name === "billing-postgres" ||
-        name === "identity-postgres"
+        name === "identity-postgres" ||
+        name === "platform-postgres"
       ) continue;
       if (
         (service.volumes ?? []).some(
@@ -805,6 +899,25 @@ docker compose --profile migration --profile notification-delivery-migration --p
         Object.hasOwn(
           service.depends_on ?? {},
           "identity-postgres",
+        ) ||
+        (service.volumes ?? []).some(
+          mount =>
+            mount.source ===
+            process.env.PLATFORM_POSTGRES_DATA_VOLUME,
+        ) ||
+        (name !== "database-restore-worker" &&
+          (service.secrets ?? []).some(
+            secret =>
+              secret.source ===
+              "platform-postgres-admin-password",
+          )) ||
+        Object.hasOwn(
+          service.networks ?? {},
+          "platform-postgres",
+        ) ||
+        Object.hasOwn(
+          service.depends_on ?? {},
+          "platform-postgres",
         )
       ) {
         throw new Error(
@@ -818,6 +931,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "maintenance-worker",
       "database-restore-worker",
       "identity-api",
+      "platform-api",
       "notification-delivery-worker",
       "campaigns-service",
       "reporting-service",
@@ -832,6 +946,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "database-restore-worker":
           process.env.DATABASE_RESTORE_REVISION,
         "identity-api": process.env.IDENTITY_REVISION,
+        "platform-api": process.env.PLATFORM_REVISION,
         "notification-delivery-worker":
           process.env.NOTIFICATION_DELIVERY_REVISION,
         "campaigns-service": process.env.CAMPAIGNS_REVISION,
@@ -848,6 +963,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "maintenance-worker": process.env.MAINTENANCE_IMAGE,
         "database-restore-worker": process.env.DATABASE_RESTORE_IMAGE,
         "identity-api": process.env.IDENTITY_IMAGE,
+        "platform-api": process.env.PLATFORM_IMAGE,
         "notification-delivery-worker":
           process.env.NOTIFICATION_DELIVERY_IMAGE,
         "campaigns-service": process.env.CAMPAIGNS_IMAGE,
@@ -996,6 +1112,35 @@ docker compose --profile migration --profile notification-delivery-migration --p
     };
     requireStandaloneIdentityBuild("identity-api");
     requireStandaloneIdentityBuild("identity-migrate");
+    const requireStandalonePlatformBuild = name => {
+      const service = requireService(name);
+      const build = service.build ?? {};
+      if (
+        !String(build.context ?? "")
+          .replaceAll("\\", "/")
+          .endsWith("/apps/platform") ||
+        build.dockerfile !== "Dockerfile" ||
+        build.target != null ||
+        build.args?.APP_REVISION !== process.env.PLATFORM_REVISION ||
+        service.image !== process.env.PLATFORM_IMAGE
+      ) {
+        throw new Error(
+          `${name} must use the exact standalone Platform app image and context`,
+        );
+      }
+    };
+    requireStandalonePlatformBuild("platform-api");
+    requireStandalonePlatformBuild("platform-migrate");
+    for (const name of ["platform-api", "platform-outbox-publisher"]) {
+      if (requireService(name).image !== process.env.PLATFORM_IMAGE) {
+        throw new Error(`${name} must share the immutable Platform image`);
+      }
+    }
+    if (requireService("platform-outbox-publisher").build != null) {
+      throw new Error(
+        "platform-outbox-publisher must reuse the Platform API image build",
+      );
+    }
     for (const name of [
       "identity-api",
       "identity-worker",
@@ -1094,6 +1239,13 @@ docker compose --profile migration --profile notification-delivery-migration --p
     }
     requireCommand(
       "identity-migrate",
+      "migrate deploy --schema prisma/schema.prisma",
+    );
+    for (const name of ["platform-api", "platform-outbox-publisher"]) {
+      requireCommand(name, "node dist/src/main.js");
+    }
+    requireCommand(
+      "platform-migrate",
       "migrate deploy --schema prisma/schema.prisma",
     );
     const migration = requireService("migrate");
@@ -1348,6 +1500,41 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "identity-migrate receives an unexpected environment",
       );
     }
+    const platformMigration = requireService("platform-migrate");
+    const platformMigrationEntrypoint = Array.isArray(
+      platformMigration.entrypoint,
+    )
+      ? platformMigration.entrypoint.join(" ")
+      : String(platformMigration.entrypoint ?? "");
+    if (
+      platformMigrationEntrypoint !== "./node_modules/.bin/prisma" ||
+      JSON.stringify(platformMigration.profiles ?? []) !==
+        JSON.stringify(["platform-migration"]) ||
+      platformMigration.network_mode !== "host" ||
+      platformMigration.depends_on != null
+    ) {
+      throw new Error(
+        "platform-migrate must use Prisma behind its isolated migration profile",
+      );
+    }
+    const platformMigrationEnvironment = requireEnvironment(
+      "platform-migrate",
+      ["APP_REVISION", "NODE_ENV", "PLATFORM_DATABASE_URL"],
+    );
+    if (
+      Object.keys(platformMigrationEnvironment).some(
+        key =>
+          ![
+            "APP_REVISION",
+            "NODE_ENV",
+            "PLATFORM_DATABASE_URL",
+          ].includes(key),
+      )
+    ) {
+      throw new Error(
+        "platform-migrate receives an unexpected environment",
+      );
+    }
     if (requireService("maintenance-worker").command != null) {
       throw new Error(
         "maintenance-worker command must be owned by its image",
@@ -1407,6 +1594,9 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "IDENTITY_CORE_TOKEN",
         "CORE_IDENTITY_TOKEN",
         "IDENTITY_INTERNAL_TIMEOUT_MS",
+        "PLATFORM_INTERNAL_BASE_URL",
+        "PLATFORM_CORE_TOKEN",
+        "PLATFORM_INTERNAL_TIMEOUT_MS",
         "DATABASE_RESTORE_STORAGE_DIR",
       "DATABASE_RESTORE_QUEUE_SECRET",
       "DATABASE_RESTORE_PRODUCTION_ENABLED",
@@ -1456,6 +1646,15 @@ docker compose --profile migration --profile notification-delivery-migration --p
     ) {
       throw new Error(
         "Core API must use the exact loopback Identity internal endpoint and timeout",
+      );
+    }
+    if (
+      apiEnvironment.PLATFORM_INTERNAL_BASE_URL !==
+        "http://127.0.0.1:5000" ||
+      apiEnvironment.PLATFORM_INTERNAL_TIMEOUT_MS !== "5000"
+    ) {
+      throw new Error(
+        "Core API must use the exact loopback Platform internal endpoint and timeout",
       );
     }
     if (
@@ -1542,6 +1741,20 @@ docker compose --profile migration --profile notification-delivery-migration --p
         authPolicy: "optional",
         timeoutMs: 60000,
       })),
+      ...[
+        ["platform-site-settings", "/api/v1/site-settings"],
+        ["platform-legal-pages", "/api/v1/legal-pages"],
+        [
+          "platform-home-page-content",
+          "/api/v1/home-page-content",
+        ],
+      ].map(([id, pathPrefix]) => ({
+        id,
+        pathPrefix,
+        upstreamUrl: "http://127.0.0.1:5000",
+        authPolicy: "optional",
+        timeoutMs: 60000,
+      })),
       {
         id: "billing-payments",
         pathPrefix: "/api/v1/payments",
@@ -1568,6 +1781,20 @@ docker compose --profile migration --profile notification-delivery-migration --p
         pathPrefix: "/api/v1/affiliate",
         upstreamUrl: "http://127.0.0.1:4800",
         authPolicy: "optional",
+        timeoutMs: 30000,
+      },
+      {
+        id: "billing-settings-public",
+        pathPrefix: "/api/v1/billing-settings/public",
+        upstreamUrl: "http://127.0.0.1:4800",
+        authPolicy: "optional",
+        timeoutMs: 30000,
+      },
+      {
+        id: "billing-settings-admin",
+        pathPrefix: "/api/v1/billing-settings/admin",
+        upstreamUrl: "http://127.0.0.1:4800",
+        authPolicy: "required",
         timeoutMs: 30000,
       },
       {
@@ -1630,7 +1857,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
       JSON.stringify(expectedGatewayRoutes)
     ) {
       throw new Error(
-        "Production example must keep Billing, protected service, public Widgets and Reporting routes before the monolith catch-all",
+        "Production example must keep Platform, Billing, protected service, public Widgets and Reporting routes before the monolith catch-all",
       );
     }
     if (
@@ -1670,10 +1897,10 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "widgets-admin-audit",
       "billing-admin-audit",
       "identity-admin-audit",
+      "platform-admin-audit",
       "billing-payment-projection",
       "billing-subscription-projection",
       "billing-affiliate-projection",
-      "billing-settings-projection",
     ];
     if (
       JSON.stringify(integrationKinds) !==
@@ -2154,6 +2381,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "IDENTITY_REPORTING_TOKEN",
         "IDENTITY_WIDGETS_TOKEN",
         "IDENTITY_BILLING_TOKEN",
+        "IDENTITY_PLATFORM_TOKEN",
         "IDENTITY_INTERNAL_TIMEOUT_MS",
         "BILLING_INTERNAL_BASE_URL",
         "BILLING_IDENTITY_TOKEN",
@@ -2303,6 +2531,152 @@ docker compose --profile migration --profile notification-delivery-migration --p
     ) {
       throw new Error(
         "Identity API singleton, internal clients or RabbitMQ role boundary drifted",
+      );
+    }
+    const platformCommonEnvironmentKeys = [
+      "APP_REVISION",
+      "NODE_ENV",
+      "MODE",
+      "PLATFORM_DATABASE_URL",
+      "PLATFORM_PROCESS_ROLE",
+      "PLATFORM_LISTEN_HOST",
+      "PLATFORM_API_PORT",
+      "PLATFORM_OUTBOX_PUBLISHER_PORT",
+      "PLATFORM_OUTBOX_BATCH_SIZE",
+      "PLATFORM_OUTBOX_POLL_INTERVAL_MS",
+      "PLATFORM_OUTBOX_RETENTION_DAYS",
+    ];
+    const platformApi = requireService("platform-api");
+    const platformPublisher = requireService(
+      "platform-outbox-publisher",
+    );
+    const platformApiEnvironment = requireEnvironment(
+      "platform-api",
+      [
+        ...platformCommonEnvironmentKeys,
+        "CORS_ALLOWED_ORIGINS",
+        "TRUST_PROXY",
+        "IDENTITY_INTERNAL_BASE_URL",
+        "IDENTITY_PLATFORM_TOKEN",
+        "IDENTITY_INTERNAL_TIMEOUT_MS",
+        "PLATFORM_CORE_TOKEN",
+      ],
+    );
+    const platformPublisherEnvironment = requireEnvironment(
+      "platform-outbox-publisher",
+      [
+        ...platformCommonEnvironmentKeys,
+        "RABBITMQ_URL",
+        "RABBITMQ_CONNECTION_NAME",
+        "RABBITMQ_ASSERT_TOPOLOGY",
+        "RABBITMQ_MAX_MESSAGE_BYTES",
+        "MESSAGING_SERVICE_NAME",
+      ],
+    );
+    const platformRoles = new Map([
+      ["platform-api", [platformApi, platformApiEnvironment, "api"]],
+      [
+        "platform-outbox-publisher",
+        [
+          platformPublisher,
+          platformPublisherEnvironment,
+          "outbox-publisher",
+        ],
+      ],
+    ]);
+    const platformRuntimeLimits = {
+      "platform-api": ["30s", 402653184, 100663296, 0.5, 200],
+      "platform-outbox-publisher": [
+        "1m30s",
+        268435456,
+        67108864,
+        0.35,
+        150,
+      ],
+    };
+    for (const [name, [service, environment, role]] of platformRoles) {
+      const [stopGracePeriod, memLimit, memReservation, cpus, pidsLimit] =
+        platformRuntimeLimits[name];
+      if (
+        environment.APP_REVISION !== process.env.PLATFORM_REVISION ||
+        environment.NODE_ENV !== "production" ||
+        environment.MODE !== "production" ||
+        environment.PLATFORM_PROCESS_ROLE !== role ||
+        environment.PLATFORM_LISTEN_HOST !== "127.0.0.1" ||
+        environment.PLATFORM_API_PORT !== "5000" ||
+        environment.PLATFORM_OUTBOX_PUBLISHER_PORT !== "5001" ||
+        environment.PLATFORM_OUTBOX_BATCH_SIZE !== "50" ||
+        environment.PLATFORM_OUTBOX_POLL_INTERVAL_MS !== "1000" ||
+        environment.PLATFORM_OUTBOX_RETENTION_DAYS !== "7" ||
+        service.network_mode !== "host" ||
+        !service.healthcheck?.test ||
+        service.restart !== "unless-stopped" ||
+        (service.profiles ?? []).length !== 0 ||
+        service.stop_grace_period !== stopGracePeriod ||
+        Number(service.mem_limit) !== memLimit ||
+        Number(service.mem_reservation) !== memReservation ||
+        Number(service.cpus) !== cpus ||
+        Number(service.pids_limit) !== pidsLimit ||
+        service.logging?.driver !== "json-file" ||
+        service.logging?.options?.["max-size"] !== "10m" ||
+        String(service.logging?.options?.["max-file"]) !== "3"
+      ) {
+        throw new Error(
+          `${name} must use the exact immutable loopback Platform role boundary`,
+        );
+      }
+    }
+    if (
+      JSON.stringify(Object.keys(platformApiEnvironment).sort()) !==
+        JSON.stringify(
+          [
+            ...platformCommonEnvironmentKeys,
+            "CORS_ALLOWED_ORIGINS",
+            "TRUST_PROXY",
+            "IDENTITY_INTERNAL_BASE_URL",
+            "IDENTITY_PLATFORM_TOKEN",
+            "IDENTITY_INTERNAL_TIMEOUT_MS",
+            "PLATFORM_CORE_TOKEN",
+          ].sort(),
+        ) ||
+      JSON.stringify(Object.keys(platformPublisherEnvironment).sort()) !==
+        JSON.stringify(
+          [
+            ...platformCommonEnvironmentKeys,
+            "RABBITMQ_URL",
+            "RABBITMQ_CONNECTION_NAME",
+            "RABBITMQ_ASSERT_TOPOLOGY",
+            "RABBITMQ_MAX_MESSAGE_BYTES",
+            "MESSAGING_SERVICE_NAME",
+          ].sort(),
+        ) ||
+      platformApiEnvironment.CORS_ALLOWED_ORIGINS !==
+        gatewayEnvironment.CORS_ALLOWED_ORIGINS ||
+      platformApiEnvironment.CORS_ALLOWED_ORIGINS !==
+        apiEnvironment.CORS_ALLOWED_ORIGINS ||
+      platformApiEnvironment.TRUST_PROXY !== "loopback" ||
+      platformApiEnvironment.IDENTITY_INTERNAL_BASE_URL !==
+        "http://127.0.0.1:4900" ||
+      platformApiEnvironment.IDENTITY_INTERNAL_TIMEOUT_MS !== "5000" ||
+      platformApi.labels?.["com.winwidget.owner"] !== "platform" ||
+      platformApi.labels?.["com.winwidget.purpose"] !== "api" ||
+      platformApi.labels?.["com.winwidget.singleton"] !== "true" ||
+      Object.keys(platformApi.labels ?? {}).length !== 3 ||
+      platformApi.depends_on != null ||
+      platformPublisher.labels?.["com.winwidget.owner"] !== "platform" ||
+      platformPublisher.labels?.["com.winwidget.purpose"] !==
+        "outbox-publisher" ||
+      Object.keys(platformPublisher.labels ?? {}).length !== 2 ||
+      JSON.stringify(Object.keys(platformPublisher.depends_on ?? {})) !==
+        JSON.stringify(["rabbitmq"]) ||
+      platformPublisherEnvironment.RABBITMQ_CONNECTION_NAME !==
+        "winwidget-platform-outbox-publisher" ||
+      platformPublisherEnvironment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
+      platformPublisherEnvironment.MESSAGING_SERVICE_NAME !==
+        "platform-outbox-publisher"
+    ) {
+      throw new Error(
+        "Platform API singleton, Identity client or RabbitMQ role boundary drifted",
       );
     }
     const providerSecretEnvironmentKeys = [
@@ -2531,6 +2905,28 @@ docker compose --profile migration --profile notification-delivery-migration --p
       identityApiEnvironment.WIDGETS_IDENTITY_TOKEN,
       widgetsEnvironment.WIDGETS_IDENTITY_TOKEN,
     ]);
+    requireMutualToken("Platform to Identity", [
+      platformApiEnvironment.IDENTITY_PLATFORM_TOKEN,
+      identityApiEnvironment.IDENTITY_PLATFORM_TOKEN,
+    ]);
+    requireMutualToken("Core to Platform", [
+      apiEnvironment.PLATFORM_CORE_TOKEN,
+      platformApiEnvironment.PLATFORM_CORE_TOKEN,
+    ]);
+    for (const forbiddenToken of [
+      apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
+      apiEnvironment.CAMPAIGNS_INTERNAL_TOKEN,
+      apiEnvironment.REPORTING_INTERNAL_TOKEN,
+      apiEnvironment.WIDGETS_INTERNAL_TOKEN,
+      apiEnvironment.BILLING_INTERNAL_TOKEN,
+      process.env.DATABASE_RESTORE_QUEUE_SECRET,
+    ]) {
+      if (apiEnvironment.PLATFORM_CORE_TOKEN === forbiddenToken) {
+        throw new Error(
+          "Platform Core credential must differ from broad internal and restore credentials",
+        );
+      }
+    }
     const isolatedCallerTokens = [
       apiEnvironment.IDENTITY_CORE_TOKEN,
       apiEnvironment.CORE_IDENTITY_TOKEN,
@@ -2538,9 +2934,11 @@ docker compose --profile migration --profile notification-delivery-migration --p
       reportingEnvironment.IDENTITY_REPORTING_TOKEN,
       widgetsEnvironment.IDENTITY_WIDGETS_TOKEN,
       billingApiEnvironment.IDENTITY_BILLING_TOKEN,
+      platformApiEnvironment.IDENTITY_PLATFORM_TOKEN,
       campaignsEnvironment.BILLING_CAMPAIGNS_TOKEN,
       identityApiEnvironment.BILLING_IDENTITY_TOKEN,
       identityApiEnvironment.WIDGETS_IDENTITY_TOKEN,
+      apiEnvironment.PLATFORM_CORE_TOKEN,
     ];
     if (new Set(isolatedCallerTokens).size !== isolatedCallerTokens.length) {
       throw new Error(
@@ -2562,6 +2960,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "WIDGETS_BACKUP_URL",
         "BILLING_BACKUP_URL",
         "IDENTITY_BACKUP_URL",
+        "PLATFORM_BACKUP_URL",
         "TELEGRAM_INFO_BOT_TOKEN",
         "TELEGRAM_API_BASE_URL",
         "MAINTENANCE_WORKER_PREFETCH",
@@ -2607,6 +3006,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "DATABASE_RESTORE_WIDGETS_PORT",
         "DATABASE_RESTORE_BILLING_PORT",
         "DATABASE_RESTORE_IDENTITY_PORT",
+        "DATABASE_RESTORE_PLATFORM_PORT",
         "DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE",
         "DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE",
         "DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE",
@@ -2614,6 +3014,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE",
         "DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE",
         "DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE",
+        "DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE",
       ],
     );
     const expectedDatabaseRestoreEnvironmentKeys = [
@@ -2631,6 +3032,8 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE",
       "DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT",
       "DATABASE_RESTORE_POLL_INTERVAL_MS",
+      "DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE",
+      "DATABASE_RESTORE_PLATFORM_PORT",
       "DATABASE_RESTORE_QUEUE_SECRET",
       "DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE",
       "DATABASE_RESTORE_REPORTING_PORT",
@@ -2669,6 +3072,8 @@ docker compose --profile migration --profile notification-delivery-migration --p
         process.env.BILLING_POSTGRES_PORT ||
       databaseRestoreEnvironment.DATABASE_RESTORE_IDENTITY_PORT !==
         process.env.IDENTITY_POSTGRES_PORT ||
+      databaseRestoreEnvironment.DATABASE_RESTORE_PLATFORM_PORT !==
+        process.env.PLATFORM_POSTGRES_PORT ||
       databaseRestoreEnvironment.DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE !==
         "/run/database-restore-secrets/core-admin-password" ||
       databaseRestoreEnvironment.DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE !==
@@ -2682,7 +3087,9 @@ docker compose --profile migration --profile notification-delivery-migration --p
       databaseRestoreEnvironment.DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE !==
         "/run/database-restore-secrets/billing-admin-password" ||
       databaseRestoreEnvironment.DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE !==
-        "/run/database-restore-secrets/identity-admin-password"
+        "/run/database-restore-secrets/identity-admin-password" ||
+      databaseRestoreEnvironment.DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE !==
+        "/run/database-restore-secrets/platform-admin-password"
     ) {
       throw new Error(
         "database-restore-worker environment or credential boundary drifted",
@@ -2720,6 +3127,10 @@ docker compose --profile migration --profile notification-delivery-migration --p
       [
         "notification-delivery-postgres-admin-password",
         "database-restore-notification-delivery-admin-password",
+      ],
+      [
+        "platform-postgres-admin-password",
+        "database-restore-platform-admin-password",
       ],
       [
         "reporting-postgres-admin-password",
@@ -2762,6 +3173,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
           "core",
           "identity",
           "notification-delivery",
+          "platform",
           "reporting",
           "widgets",
         ]),
@@ -2981,6 +3393,33 @@ docker compose --profile migration --profile notification-delivery-migration --p
         "Identity runtime, migration and backup must use distinct roles",
       );
     }
+    const platformDatabaseUrls = [
+      platformApiEnvironment.PLATFORM_DATABASE_URL,
+      platformMigrationEnvironment.PLATFORM_DATABASE_URL,
+      maintenanceEnvironment.PLATFORM_BACKUP_URL,
+    ].map(value => new URL(value));
+    for (const url of platformDatabaseUrls) {
+      if (
+        url.protocol !== "postgresql:" ||
+        url.hostname !== "127.0.0.1" ||
+        url.port !== "55439" ||
+        url.pathname !== "/winwidget_platform" ||
+        url.searchParams.get("schema") !== "platform" ||
+        url.searchParams.get("sslmode") !== "disable"
+      ) {
+        throw new Error(
+          "Platform roles must use the dedicated loopback PostgreSQL database",
+        );
+      }
+    }
+    if (
+      new Set(platformDatabaseUrls.map(url => url.username)).size !==
+      platformDatabaseUrls.length
+    ) {
+      throw new Error(
+        "Platform runtime, migration and backup must use distinct roles",
+      );
+    }
     for (const [, [, environment]] of billingRoles) {
       for (const forbidden of [
         "DATABASE_URL",
@@ -3055,6 +3494,68 @@ docker compose --profile migration --profile notification-delivery-migration --p
             `${name} Identity avatar storage credential scope drifted`,
           );
         }
+      }
+    }
+    for (const [name, [, environment]] of platformRoles) {
+      for (const forbidden of [
+        "DATABASE_URL",
+        "DATABASE_URL_PRODUCTION",
+        "DATABASE_BACKUP_URL",
+        "NOTIFICATION_DELIVERY_DATABASE_URL",
+        "NOTIFICATION_DELIVERY_BACKUP_URL",
+        "CAMPAIGNS_DATABASE_URL",
+        "CAMPAIGNS_BACKUP_URL",
+        "REPORTING_DATABASE_URL",
+        "REPORTING_BACKUP_URL",
+        "WIDGETS_DATABASE_URL",
+        "WIDGETS_BACKUP_URL",
+        "BILLING_DATABASE_URL",
+        "BILLING_BACKUP_URL",
+        "IDENTITY_DATABASE_URL",
+        "IDENTITY_BACKUP_URL",
+        "PLATFORM_BACKUP_URL",
+        "PLATFORM_MIGRATION_DATABASE_URL",
+        "PLATFORM_POSTGRES_ADMIN_USER",
+        "PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE",
+        "SMTP_LOGIN",
+        "SMTP_PASSWORD",
+        "TELEGRAM_INFO_BOT_TOKEN",
+        "S3_ACCESS_KEY_ID",
+        "S3_SECRET_ACCESS_KEY",
+      ]) {
+        if (forbidden in environment) {
+          throw new Error(`${name} must not receive ${forbidden}`);
+        }
+      }
+      if (
+        ("RABBITMQ_URL" in environment) !==
+        (name === "platform-outbox-publisher")
+      ) {
+        throw new Error(`${name} RabbitMQ credential scope drifted`);
+      }
+      if (
+        ("IDENTITY_PLATFORM_TOKEN" in environment) !==
+        (name === "platform-api")
+      ) {
+          throw new Error(`${name} Identity credential scope drifted`);
+      }
+      if (
+        ("PLATFORM_CORE_TOKEN" in environment) !==
+        (name === "platform-api")
+      ) {
+        throw new Error(`${name} Core credential scope drifted`);
+      }
+    }
+    for (const [name, service] of Object.entries(services)) {
+      const receivesPlatformCoreToken =
+        "PLATFORM_CORE_TOKEN" in (service.environment ?? {});
+      if (
+        receivesPlatformCoreToken !==
+        (name === "api" || name === "platform-api")
+      ) {
+        throw new Error(
+          `${name} Platform Core credential scope drifted`,
+        );
       }
     }
     for (const forbidden of [
@@ -3164,6 +3665,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
       new URL(services["billing-outbox-publisher"].environment.RABBITMQ_URL).username,
       new URL(services["identity-worker"].environment.RABBITMQ_URL).username,
       new URL(services["identity-outbox-publisher"].environment.RABBITMQ_URL).username,
+      new URL(services["platform-outbox-publisher"].environment.RABBITMQ_URL).username,
     ];
     if (
       services.rabbitmq.environment?.RABBITMQ_DEFAULT_VHOST !== "winwidget" ||
@@ -3183,6 +3685,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "billing-outbox-publisher",
       "identity-worker",
       "identity-outbox-publisher",
+      "platform-outbox-publisher",
     ]) {
       if (new URL(services[name].environment.RABBITMQ_URL).pathname !== "/winwidget") {
         throw new Error(`${name} must connect to the winwidget vhost`);
@@ -3205,7 +3708,8 @@ docker compose --profile migration --profile notification-delivery-migration --p
       services["billing-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
       services["billing-outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
       services["identity-worker"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "true" ||
-      services["identity-outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false"
+      services["identity-outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false" ||
+      services["platform-outbox-publisher"].environment.RABBITMQ_ASSERT_TOPOLOGY !== "false"
     ) {
       throw new Error(
         "Only reviewed core and service worker topology owners may assert RabbitMQ topology",
@@ -3223,6 +3727,7 @@ docker compose --profile migration --profile notification-delivery-migration --p
       "billing-outbox-publisher",
       "identity-worker",
       "identity-outbox-publisher",
+      "platform-outbox-publisher",
     ]) {
       const environment = services[name].environment ?? {};
       for (const forbidden of [

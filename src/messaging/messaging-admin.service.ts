@@ -26,6 +26,10 @@ import { assertMessagingEventContract } from '@/messaging/messaging-event-contra
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
 import { createMessagingHeaders } from '@/messaging/messaging-context';
 import {
+	PLATFORM_MESSAGING_HEARTBEAT_SERVICES,
+	PlatformMessagingClientService
+} from '@/messaging/platform-messaging-client.service';
+import {
 	NOTIFICATION_DELIVERY_ADMIN_KINDS,
 	NotificationDeliveryAdminKind,
 	NotificationDeliveryClientService,
@@ -45,6 +49,7 @@ import {
 import { PrismaService } from '@/prisma.service';
 import {
 	DATABASE_BACKUP_JOB_TYPES,
+	type DatabaseBackupJobType,
 	isDatabaseBackupJobType,
 	SCHEDULED_JOB_TYPES
 } from '@/scheduled-jobs/scheduled-jobs.types';
@@ -98,7 +103,6 @@ const BILLING_CONSUMER_TO_PUBLIC_INTEGRATION: Record<
 	identity: 'billing-identity-source',
 	offer: 'billing-offer-source',
 	'notification-routing': 'billing-notification-routing-source',
-	'settings-source': 'billing-settings-source',
 	'trial-request': 'billing-trial-source',
 	'referral-request': 'billing-referral-source',
 	'lifecycle-repair': 'billing-lifecycle-repair-source',
@@ -125,7 +129,8 @@ export class MessagingAdminService {
 		private readonly billingState?: BillingCoreStateService,
 		private readonly billingMessaging?: BillingMessagingClientService,
 		private readonly identityMessaging?: IdentityMessagingClientService,
-		private readonly serviceOwnedOverview?: ServiceOwnedMessagingOverviewClientService
+		private readonly serviceOwnedOverview?: ServiceOwnedMessagingOverviewClientService,
+		private readonly platformMessaging?: PlatformMessagingClientService
 	) {}
 
 	async getOverview() {
@@ -151,7 +156,8 @@ export class MessagingAdminService {
 			billingOverview,
 			identityOverview,
 			campaignsOverview,
-			reportingOverview
+			reportingOverview,
+			platformOverview
 		] = await Promise.all([
 			this.prisma.outboxEvent.groupBy({
 				by: ['status'],
@@ -295,6 +301,21 @@ export class MessagingAdminService {
 				: Promise.resolve({
 						overview: null,
 						error: 'Reporting messaging overview boundary is unavailable'
+					}),
+			this.platformMessaging
+				? this.platformMessaging
+						.getOverview()
+						.then(overview => ({ overview, error: null }))
+						.catch(error => ({
+							overview: null,
+							error:
+								error instanceof Error
+									? error.message
+									: 'Platform messaging overview недоступен'
+						}))
+				: Promise.resolve({
+						overview: null,
+						error: 'Platform messaging overview boundary is unavailable'
 					})
 		]);
 
@@ -325,6 +346,11 @@ export class MessagingAdminService {
 				outbox[status] += identityOverview.overview.outbox[status] || 0;
 			}
 		}
+		if (platformOverview.overview) {
+			outbox.PENDING += platformOverview.overview.outbox.PENDING;
+			outbox.PUBLISHING += platformOverview.overview.outbox.PROCESSING;
+			outbox.PUBLISHED += platformOverview.overview.outbox.PUBLISHED;
+		}
 		for (const overview of [
 			campaignsOverview.overview,
 			reportingOverview.overview
@@ -349,7 +375,8 @@ export class MessagingAdminService {
 				billingOverview.overview?.oldestPendingAt || null,
 				identityOverview.overview?.oldestPendingAt || null,
 				campaignsOverview.overview?.oldestPendingAt || null,
-				reportingOverview.overview?.oldestPendingAt || null
+				reportingOverview.overview?.oldestPendingAt || null,
+				platformOverview.overview?.oldestPendingAt || null
 			]
 				.filter((value): value is string => Boolean(value))
 				.sort()[0] || null;
@@ -503,6 +530,16 @@ export class MessagingAdminService {
 					lastSeenAt: null
 				})))
 		);
+		serviceHeartbeats.push(
+			...(platformOverview.overview?.heartbeats ||
+				PLATFORM_MESSAGING_HEARTBEAT_SERVICES.map(service => ({
+					service,
+					status: 'down' as const,
+					activeInstances: 0,
+					lastSeenAt: null,
+					revision: null
+				})))
+		);
 
 		return {
 			generatedAt: new Date().toISOString(),
@@ -541,6 +578,7 @@ export class MessagingAdminService {
 			identityError: identityOverview.error,
 			campaignsError: campaignsOverview.error,
 			reportingError: reportingOverview.error,
+			platformError: platformOverview.error,
 			heartbeats: serviceHeartbeats,
 			queues: queues.queues.map(queue => ({
 				name: queue.name,
@@ -1819,8 +1857,7 @@ export class MessagingAdminService {
 			jobId?: string;
 			jobType?: string;
 		};
-		const scheduledJobNames: Partial<Record<string, string>> = {
-			[SCHEDULED_JOB_TYPES.DATABASE_BACKUP]: 'Backup PostgreSQL',
+		const scheduledJobNames: Record<DatabaseBackupJobType, string> = {
 			[SCHEDULED_JOB_TYPES.NOTIFICATION_DELIVERY_DATABASE_BACKUP]:
 				'Backup PostgreSQL Notification Delivery',
 			[SCHEDULED_JOB_TYPES.CAMPAIGNS_DATABASE_BACKUP]:
@@ -1832,11 +1869,14 @@ export class MessagingAdminService {
 			[SCHEDULED_JOB_TYPES.BILLING_DATABASE_BACKUP]:
 				'Backup PostgreSQL Billing',
 			[SCHEDULED_JOB_TYPES.IDENTITY_DATABASE_BACKUP]:
-				'Backup PostgreSQL Identity'
+				'Backup PostgreSQL Identity',
+			[SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP]:
+				'Backup PostgreSQL Platform'
 		};
-		const scheduledJobName = jobPayload.jobType
-			? scheduledJobNames[jobPayload.jobType] || null
-			: null;
+		const scheduledJobName =
+			jobPayload.jobType && isDatabaseBackupJobType(jobPayload.jobType)
+				? scheduledJobNames[jobPayload.jobType]
+				: null;
 		const scheduledJobEntity = scheduledJobName
 			? {
 					id: jobPayload.jobId || item.eventId,

@@ -3,7 +3,6 @@ import {
 	BillingAffiliateState,
 	BillingPaymentDetailsState,
 	BillingProjectionEventPayload,
-	BillingSettingsState,
 	BillingSubscriptionDetailsState
 } from '@/messaging/billing-events';
 import { PrismaService } from '@/prisma.service';
@@ -87,8 +86,6 @@ export class BillingReadProjectionService {
 			case 'billing.affiliate.changed.v1':
 				await this.applyAffiliate(transaction, event, version);
 				return;
-			case 'billing.settings.changed.v1':
-				await this.applySettings(transaction, event, version);
 		}
 	}
 
@@ -198,41 +195,6 @@ export class BillingReadProjectionService {
 		});
 	}
 
-	private async applySettings(
-		transaction: Prisma.TransactionClient,
-		event: BillingProjectionEventPayload & {
-			eventType: 'billing.settings.changed.v1';
-		},
-		version: { aggregateVersion: bigint; sourceSequence: bigint }
-	): Promise<void> {
-		if (event.tombstone) {
-			await transaction.billingSettingsReadProjection.deleteMany({
-				where: { id: event.aggregateId }
-			});
-			return;
-		}
-		const state = event.state as BillingSettingsState;
-		const data = {
-			paymentEnabled: state.paymentEnabled,
-			autoRenewalSignupEnabled: state.autoRenewalSignupEnabled,
-			autoRenewalChargesEnabled: state.autoRenewalChargesEnabled,
-			autoRenewalChargesEnabledAt: new Date(
-				state.autoRenewalChargesEnabledAt
-			),
-			affiliateProgramEnabled: state.affiliateProgramEnabled,
-			affiliateCashbackPercent: state.affiliateCashbackPercent,
-			updatedAt: new Date(state.updatedAt),
-			sourceVersion: version.aggregateVersion,
-			sourceSequence: version.sourceSequence,
-			projectedAt: new Date()
-		};
-		await transaction.billingSettingsReadProjection.upsert({
-			where: { id: 'singleton' },
-			update: data,
-			create: { id: 'singleton', ...data }
-		});
-	}
-
 	private getAggregateType(
 		eventType: BillingProjectionEventPayload['eventType']
 	): string {
@@ -243,8 +205,6 @@ export class BillingReadProjectionService {
 				return 'billing.subscription-details';
 			case 'billing.affiliate.changed.v1':
 				return 'billing.affiliate';
-			case 'billing.settings.changed.v1':
-				return 'billing.settings';
 		}
 	}
 }

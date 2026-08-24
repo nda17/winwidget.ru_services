@@ -40,15 +40,14 @@ describe('DatabaseBackupService', () => {
 
 	it('removes credentials and Prisma-only parameters from the pg_dump URL', () => {
 		const service = createService({
-			MODE: 'production',
-			DATABASE_URL_PRODUCTION:
+			REPORTING_BACKUP_URL:
 				'postgresql://backup:s%40cret@db.example:5432/app?schema=tenant&connection_limit=5&pool_timeout=3&pgbouncer=true&statement_cache_size=0&sslmode=require'
 		});
 
-		const connection = (service as any).getPostgresConnection('core');
+		const connection = (service as any).getPostgresConnection('reporting');
 
 		expect(connection.password).toBe('s@cret');
-		expect(connection.target).toBe('core');
+		expect(connection.target).toBe('reporting');
 		expect(connection.schema).toBe('tenant');
 		expect(connection.url).toContain('sslmode=require');
 		expect(connection.url).not.toContain('s%40cret');
@@ -59,28 +58,8 @@ describe('DatabaseBackupService', () => {
 		expect(connection.url).not.toContain('statement_cache_size=');
 	});
 
-	it('prefers an optional direct backup endpoint over the Prisma pooler URL', () => {
-		const service = createService({
-			MODE: 'production',
-			DATABASE_URL_PRODUCTION:
-				'postgresql://app:pooler-secret@pooler.example:6543/app?pgbouncer=true',
-			DATABASE_BACKUP_URL:
-				'postgresql://backup:direct-secret@primary.example:5432/app?sslmode=require'
-		});
-
-		const connection = (service as any).getPostgresConnection('core');
-
-		expect(connection.url).toContain('primary.example:5432');
-		expect(connection.url).not.toContain('pooler.example');
-		expect(connection.url).not.toContain('direct-secret');
-		expect(connection.password).toBe('direct-secret');
-	});
-
 	it('sanitizes the separately configured notification-delivery backup connection', () => {
 		const service = createService({
-			MODE: 'production',
-			DATABASE_BACKUP_URL:
-				'postgresql://core:core-secret@core.example:5432/app?schema=public',
 			NOTIFICATION_DELIVERY_BACKUP_URL:
 				'postgresql://notifications:delivery-secret@notifications.example:5432/winwidget_notification_delivery?schema=delivery&sslmode=require'
 		});
@@ -178,6 +157,30 @@ describe('DatabaseBackupService', () => {
 		expect(connection.url).not.toContain('schema=');
 	});
 
+	it('uses the dedicated least-privilege Platform backup connection', () => {
+		const service = createService({
+			PLATFORM_BACKUP_URL:
+				'postgresql://platform_backup:platform-secret@platform.example:5432/winwidget_platform?schema=platform&sslmode=require'
+		});
+
+		const connection = (service as any).getPostgresConnection('platform');
+
+		expect(connection).toEqual(
+			expect.objectContaining({
+				target: 'platform',
+				label: 'Platform',
+				databaseName: 'winwidget_platform',
+				schema: 'platform',
+				password: 'platform-secret'
+			})
+		);
+		expect(connection.url).toContain(
+			'platform.example:5432/winwidget_platform'
+		);
+		expect(connection.url).not.toContain('platform-secret');
+		expect(connection.url).not.toContain('schema=');
+	});
+
 	it('backs up only the selected notification-delivery target', async () => {
 		const sequence: string[] = [];
 		let dumpedPath = '';
@@ -198,9 +201,6 @@ describe('DatabaseBackupService', () => {
 		};
 		const service = createService(
 			{
-				MODE: 'production',
-				DATABASE_BACKUP_URL:
-					'postgresql://core:core-secret@core.example:5432/app?schema=public&sslmode=require',
 				NOTIFICATION_DELIVERY_BACKUP_URL:
 					'postgresql://notifications:delivery-secret@notifications.example:5432/winwidget_notification_delivery?schema=public&sslmode=require'
 			},
@@ -219,10 +219,8 @@ describe('DatabaseBackupService', () => {
 					if (command === 'pg_dump' && output) {
 						sequence.push('dump:notification-delivery');
 						dumpedPath = output.filePath;
-						expect(args.join(' ')).not.toContain('core-secret');
 						expect(args.join(' ')).not.toContain('delivery-secret');
 						expect(args.join(' ')).toContain('notifications.example:5432');
-						expect(args.join(' ')).not.toContain('core.example:5432');
 						await writeFile(output.filePath, 'delivery-dump');
 						return;
 					}
@@ -278,64 +276,9 @@ describe('DatabaseBackupService', () => {
 		});
 	});
 
-	it('returns source metadata for the selected core target', async () => {
-		const telegram = {
-			sendDocument: jest.fn().mockResolvedValue(telegramReceipt)
-		};
-		const service = createService(
-			{
-				MODE: 'development',
-				DATABASE_BACKUP_URL:
-					'postgresql://core:secret@localhost:5432/app?schema=public'
-			},
-			telegram
-		);
-		jest
-			.spyOn(service as any, 'runCommand')
-			.mockImplementation(
-				async (
-					command: 'pg_dump' | 'pg_restore',
-					_args: string[],
-					_password: string | null,
-					_signal: AbortSignal,
-					output?: { filePath: string }
-				) => {
-					if (command === 'pg_dump' && output) {
-						await writeFile(output.filePath, 'core');
-					}
-				}
-			);
-
-		const result = await service.createAndSend(
-			'job-1',
-			'core',
-			{
-				chatId: '-1001',
-				messageThreadId: 42,
-				trigger: 'MANUAL'
-			},
-			new AbortController().signal
-		);
-
-		expect(result).toEqual({
-			target: 'core',
-			databaseName: 'app',
-			schema: 'public',
-			fileName: expect.stringMatching(/^winwidget-db-.+\.dump$/),
-			fileSize: 4,
-			fileSha256: createHash('sha256').update('core').digest('hex'),
-			createdAt: expect.any(String),
-			telegramSent: true,
-			telegramReceipt
-		});
-		expect(telegram.sendDocument).toHaveBeenCalledTimes(1);
-	});
-
 	it('requires a dedicated URL for each service-owned database', async () => {
 		const service = createService({
-			MODE: 'development',
-			DATABASE_BACKUP_URL:
-				'postgresql://core:secret@localhost:5432/app?schema=public'
+			MODE: 'development'
 		});
 
 		await expect(

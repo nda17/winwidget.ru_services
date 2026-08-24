@@ -24,7 +24,7 @@ describe('ScheduledJobsService', () => {
 		overrides: Partial<ScheduledJobRun> = {}
 	): ScheduledJobRun => ({
 		id: randomUUID(),
-		jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+		jobType: SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP,
 		scheduleKey: '2026-07-23T21:00:00.000Z',
 		trigger: ScheduledJobRunTrigger.SCHEDULED,
 		status: ScheduledJobRunStatus.QUEUED,
@@ -49,7 +49,7 @@ describe('ScheduledJobsService', () => {
 	});
 
 	const enqueueInput = {
-		jobType: SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+		jobType: SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP,
 		scheduleKey: '2026-07-23T21:00:00.000Z',
 		scheduledFor: now,
 		periodStart: new Date('2026-07-22T21:00:00.000Z'),
@@ -438,7 +438,7 @@ describe('ScheduledJobsService', () => {
 				failedJob.id,
 				'database-backup:test',
 				120_000,
-				SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+				SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP,
 				event
 			)
 		).resolves.toEqual({
@@ -600,7 +600,7 @@ describe('ScheduledJobsService', () => {
 			job.id,
 			'database-backup:test',
 			120_000,
-			SCHEDULED_JOB_TYPES.DATABASE_BACKUP,
+			SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP,
 			event
 		);
 
@@ -615,7 +615,7 @@ describe('ScheduledJobsService', () => {
 		for (const statement of [exhaustedSql, claimSql]) {
 			expect(statement.strings.join('?')).toContain('AND "job_type" = ?');
 			expect(statement.values).toContain(
-				SCHEDULED_JOB_TYPES.DATABASE_BACKUP
+				SCHEDULED_JOB_TYPES.REPORTING_DATABASE_BACKUP
 			);
 		}
 	});

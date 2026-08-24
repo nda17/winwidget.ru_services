@@ -69,6 +69,14 @@ describe('IdentityInternalGuard', () => {
 		).toThrow(ForbiddenException);
 	});
 
+	it('does not let the Platform credential escape its endpoint scope', () => {
+		expect(() =>
+			guard(['core']).canActivate(
+				context('platform', credential('platform'))
+			)
+		).toThrow(ForbiddenException);
+	});
+
 	it('rejects non-loopback callers before token comparison', () => {
 		expect(() =>
 			guard(['core']).canActivate(
@@ -86,7 +94,7 @@ describe('IdentityInternalGuard', () => {
 		).toThrow('non-placeholder secret');
 
 		const duplicate = environment();
-		duplicate.IDENTITY_BILLING_TOKEN = duplicate.IDENTITY_CORE_TOKEN;
+		duplicate.IDENTITY_PLATFORM_TOKEN = duplicate.IDENTITY_CORE_TOKEN;
 		expect(
 			() => new IdentityInternalGuard(config(duplicate), new Reflector())
 		).toThrow('pairwise distinct');

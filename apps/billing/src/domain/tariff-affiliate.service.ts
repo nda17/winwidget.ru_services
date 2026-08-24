@@ -218,7 +218,6 @@ export class TariffAffiliateService {
 					sourceSequence: sequence
 				}
 			});
-			await this.emitSettings(transaction, updated);
 			await this.audit(
 				transaction,
 				actor,
@@ -545,44 +544,6 @@ export class TariffAffiliateService {
 						cashbackAmount: item.cashbackAmount,
 						availableAt: item.availableAt?.toISOString() || null,
 						cancelledAt: item.cancelledAt?.toISOString() || null,
-						updatedAt: item.updatedAt.toISOString()
-					}
-				}
-			}
-		});
-	}
-
-	async emitSettings(transaction: Prisma.TransactionClient, item: any) {
-		const eventId = randomUUID();
-		const eventType = BILLING_EVENT_TYPES.settingsChanged;
-		await transaction.outboxEvent.create({
-			data: {
-				eventId,
-				eventType,
-				aggregateType: 'billing.settings',
-				aggregateId: item.id,
-				aggregateVersion: item.aggregateVersion,
-				sourceSequence: item.sourceSequence,
-				exchange: BILLING_EVENTS_EXCHANGE,
-				routingKey: eventType,
-				payload: {
-					schemaVersion: 1,
-					eventType,
-					eventId,
-					aggregateId: item.id,
-					aggregateVersion: item.aggregateVersion.toString(),
-					sourceSequence: item.sourceSequence.toString(),
-					occurredAt: item.updatedAt.toISOString(),
-					tombstone: false,
-					state: {
-						id: item.id,
-						paymentEnabled: item.paymentEnabled,
-						autoRenewalSignupEnabled: item.autoRenewalSignupEnabled,
-						autoRenewalChargesEnabled: item.autoRenewalChargesEnabled,
-						autoRenewalChargesEnabledAt:
-							item.autoRenewalChargesEnabledAt?.toISOString() || null,
-						affiliateProgramEnabled: item.affiliateProgramEnabled,
-						affiliateCashbackPercent: item.affiliateCashbackPercent,
 						updatedAt: item.updatedAt.toISOString()
 					}
 				}

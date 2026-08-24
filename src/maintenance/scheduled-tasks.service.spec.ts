@@ -57,7 +57,6 @@ describe('ScheduledTasksService', () => {
 						created: true,
 						job: {
 							id: {
-								DATABASE_BACKUP: '11111111-1111-4111-8111-111111111111',
 								NOTIFICATION_DELIVERY_DATABASE_BACKUP:
 									'22222222-2222-4222-8222-222222222222',
 								CAMPAIGNS_DATABASE_BACKUP:
@@ -69,7 +68,9 @@ describe('ScheduledTasksService', () => {
 								BILLING_DATABASE_BACKUP:
 									'66666666-6666-4666-8666-666666666666',
 								IDENTITY_DATABASE_BACKUP:
-									'77777777-7777-4777-8777-777777777777'
+									'77777777-7777-4777-8777-777777777777',
+								PLATFORM_DATABASE_BACKUP:
+									'88888888-8888-4888-8888-888888888888'
 							}[input.jobType]
 						}
 					})
@@ -83,24 +84,22 @@ describe('ScheduledTasksService', () => {
 		return { service, scheduledJobs, transaction, prisma };
 	};
 
-	it('creates independent core and service database backup jobs', async () => {
+	it('creates independent service-owned database backup jobs', async () => {
 		const { service, scheduledJobs, transaction } = createService();
-		const coreScheduledFor = new Date('2026-07-23T22:45:00.000Z');
+		const scheduleStart = new Date('2026-07-23T22:45:00.000Z');
 		const notificationScheduledFor = new Date('2026-07-23T23:00:00.000Z');
 		const campaignsScheduledFor = new Date('2026-07-23T23:15:00.000Z');
 		const reportingScheduledFor = new Date('2026-07-23T23:30:00.000Z');
 		const widgetsScheduledFor = new Date('2026-07-23T23:45:00.000Z');
 		const billingScheduledFor = new Date('2026-07-24T00:00:00.000Z');
 		const identityScheduledFor = new Date('2026-07-24T00:15:00.000Z');
+		const platformScheduledFor = new Date('2026-07-24T00:30:00.000Z');
 
 		const result = await service.enqueueDailyDatabaseBackups(
 			period,
-			coreScheduledFor
+			scheduleStart
 		);
 
-		expect(result?.core.job.id).toBe(
-			'11111111-1111-4111-8111-111111111111'
-		);
 		expect(result?.notificationDelivery.job.id).toBe(
 			'22222222-2222-4222-8222-222222222222'
 		);
@@ -119,23 +118,13 @@ describe('ScheduledTasksService', () => {
 		expect(result?.identity.job.id).toBe(
 			'77777777-7777-4777-8777-777777777777'
 		);
-		expect(
-			scheduledJobs.enqueueUniqueInTransaction
-		).toHaveBeenNthCalledWith(
-			1,
-			transaction,
-			expect.objectContaining({
-				jobType: 'DATABASE_BACKUP',
-				scheduledFor: coreScheduledFor
-			}),
-			expect.objectContaining({
-				eventType: 'database.backup.requested.v1'
-			})
+		expect(result?.platform.job.id).toBe(
+			'88888888-8888-4888-8888-888888888888'
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			2,
+			1,
 			transaction,
 			expect.objectContaining({
 				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
@@ -149,7 +138,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			3,
+			2,
 			transaction,
 			expect.objectContaining({
 				jobType: 'CAMPAIGNS_DATABASE_BACKUP',
@@ -163,7 +152,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			4,
+			3,
 			transaction,
 			expect.objectContaining({
 				jobType: 'REPORTING_DATABASE_BACKUP',
@@ -177,7 +166,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			5,
+			4,
 			transaction,
 			expect.objectContaining({
 				jobType: 'WIDGETS_DATABASE_BACKUP',
@@ -191,7 +180,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			6,
+			5,
 			transaction,
 			expect.objectContaining({
 				jobType: 'BILLING_DATABASE_BACKUP',
@@ -205,12 +194,26 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			7,
+			6,
 			transaction,
 			expect.objectContaining({
 				jobType: 'IDENTITY_DATABASE_BACKUP',
 				scheduledFor: identityScheduledFor,
 				availableAt: identityScheduledFor
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			7,
+			transaction,
+			expect.objectContaining({
+				jobType: 'PLATFORM_DATABASE_BACKUP',
+				scheduledFor: platformScheduledFor,
+				availableAt: platformScheduledFor
 			}),
 			expect.objectContaining({
 				eventType: 'database.backup.requested.v1'
@@ -237,7 +240,6 @@ describe('ScheduledTasksService', () => {
 					created: true,
 					job: {
 						id: {
-							DATABASE_BACKUP: '11111111-1111-4111-8111-111111111111',
 							NOTIFICATION_DELIVERY_DATABASE_BACKUP:
 								'22222222-2222-4222-8222-222222222222',
 							CAMPAIGNS_DATABASE_BACKUP:
@@ -249,7 +251,9 @@ describe('ScheduledTasksService', () => {
 							BILLING_DATABASE_BACKUP:
 								'66666666-6666-4666-8666-666666666666',
 							IDENTITY_DATABASE_BACKUP:
-								'77777777-7777-4777-8777-777777777777'
+								'77777777-7777-4777-8777-777777777777',
+							PLATFORM_DATABASE_BACKUP:
+								'88888888-8888-4888-8888-888888888888'
 						}[input.jobType]
 					}
 				})
@@ -265,13 +269,13 @@ describe('ScheduledTasksService', () => {
 		);
 
 		expect(result).toEqual({
-			core: expect.objectContaining({ created: true }),
 			notificationDelivery: expect.objectContaining({ created: true }),
 			campaigns: expect.objectContaining({ created: true }),
 			reporting: expect.objectContaining({ created: true }),
 			widgets: expect.objectContaining({ created: true }),
 			billing: expect.objectContaining({ created: true }),
-			identity: expect.objectContaining({ created: true })
+			identity: expect.objectContaining({ created: true }),
+			platform: expect.objectContaining({ created: true })
 		});
 		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledTimes(
@@ -282,20 +286,11 @@ describe('ScheduledTasksService', () => {
 		).toHaveBeenNthCalledWith(
 			1,
 			transaction,
-			{
-				jobType: 'DATABASE_BACKUP',
+			expect.objectContaining({
+				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 				scheduleKey: period.key,
-				trigger: ScheduledJobRunTrigger.SCHEDULED,
-				scheduledFor,
-				periodStart: period.start,
-				periodEnd: period.end,
-				input: {
-					chatId: '-100123',
-					messageThreadId: 43,
-					trigger: 'SCHEDULED',
-					periodStart: period.start.toISOString()
-				}
-			},
+				input: expect.objectContaining({ trigger: 'SCHEDULED' })
+			}),
 			expect.objectContaining({
 				eventType: 'database.backup.requested.v1'
 			})
@@ -303,7 +298,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			3,
+			2,
 			transaction,
 			expect.objectContaining({
 				jobType: 'CAMPAIGNS_DATABASE_BACKUP',
@@ -319,23 +314,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			2,
-			transaction,
-			expect.objectContaining({
-				jobType: 'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
-				scheduleKey: period.key,
-				input: expect.objectContaining({
-					trigger: 'SCHEDULED'
-				})
-			}),
-			expect.objectContaining({
-				eventType: 'database.backup.requested.v1'
-			})
-		);
-		expect(
-			scheduledJobs.enqueueUniqueInTransaction
-		).toHaveBeenNthCalledWith(
-			4,
+			3,
 			transaction,
 			expect.objectContaining({
 				jobType: 'REPORTING_DATABASE_BACKUP',
@@ -351,7 +330,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			5,
+			4,
 			transaction,
 			expect.objectContaining({
 				jobType: 'WIDGETS_DATABASE_BACKUP',
@@ -367,7 +346,7 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			6,
+			5,
 			transaction,
 			expect.objectContaining({
 				jobType: 'BILLING_DATABASE_BACKUP',
@@ -383,10 +362,26 @@ describe('ScheduledTasksService', () => {
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
 		).toHaveBeenNthCalledWith(
-			7,
+			6,
 			transaction,
 			expect.objectContaining({
 				jobType: 'IDENTITY_DATABASE_BACKUP',
+				scheduleKey: period.key,
+				input: expect.objectContaining({
+					trigger: 'SCHEDULED'
+				})
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			7,
+			transaction,
+			expect.objectContaining({
+				jobType: 'PLATFORM_DATABASE_BACKUP',
 				scheduleKey: period.key,
 				input: expect.objectContaining({
 					trigger: 'SCHEDULED'
@@ -432,7 +427,7 @@ describe('ScheduledTasksService', () => {
 		overrides: Partial<ScheduledJobRun> = {}
 	): ScheduledJobRun => ({
 		id: randomUUID(),
-		jobType: 'DATABASE_BACKUP',
+		jobType: 'REPORTING_DATABASE_BACKUP',
 		scheduleKey,
 		trigger: ScheduledJobRunTrigger.MANUAL,
 		status: ScheduledJobRunStatus.QUEUED,
@@ -542,13 +537,13 @@ describe('ScheduledTasksService', () => {
 		(configService.get as jest.Mock).mockReturnValue(undefined);
 
 		const result = await service.enqueueManualDatabaseBackup(
-			'core',
+			'reporting',
 			adminId,
 			idempotencyKey.toUpperCase()
 		);
 
 		expect(result).toEqual({
-			target: 'core',
+			target: 'reporting',
 			jobId: job.id,
 			status: ScheduledJobRunStatus.SUCCEEDED,
 			queuedAt: job.createdAt.toISOString(),
@@ -560,7 +555,7 @@ describe('ScheduledTasksService', () => {
 			where: {
 				adminId_jobType_idempotencyKey: {
 					adminId,
-					jobType: 'DATABASE_BACKUP',
+					jobType: 'REPORTING_DATABASE_BACKUP',
 					idempotencyKey
 				}
 			},
@@ -587,7 +582,7 @@ describe('ScheduledTasksService', () => {
 			createManualBackupService(null, activeJob);
 
 		const result = await service.enqueueManualDatabaseBackup(
-			'core',
+			'reporting',
 			adminId,
 			randomUUID()
 		);
@@ -612,7 +607,7 @@ describe('ScheduledTasksService', () => {
 		).toHaveBeenCalledWith({
 			data: {
 				adminId,
-				jobType: 'DATABASE_BACKUP',
+				jobType: 'REPORTING_DATABASE_BACKUP',
 				idempotencyKey: expect.any(String),
 				jobId: activeJob.id
 			}
@@ -636,7 +631,7 @@ describe('ScheduledTasksService', () => {
 			createManualBackupService(null, null, job);
 
 		const result = await service.enqueueManualDatabaseBackup(
-			'core',
+			'reporting',
 			adminId,
 			idempotencyKey
 		);
@@ -646,8 +641,8 @@ describe('ScheduledTasksService', () => {
 		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledWith(
 			transaction,
 			expect.objectContaining({
-				jobType: 'DATABASE_BACKUP',
-				scheduleKey: `manual:core:${adminId}:${idempotencyKey}`,
+				jobType: 'REPORTING_DATABASE_BACKUP',
+				scheduleKey: `manual:reporting:${adminId}:${idempotencyKey}`,
 				trigger: ScheduledJobRunTrigger.MANUAL,
 				input: expect.objectContaining({
 					requestedByAdminId: adminId
@@ -662,7 +657,7 @@ describe('ScheduledTasksService', () => {
 		).toHaveBeenCalledWith({
 			data: {
 				adminId,
-				jobType: 'DATABASE_BACKUP',
+				jobType: 'REPORTING_DATABASE_BACKUP',
 				idempotencyKey,
 				jobId: job.id
 			}
@@ -838,12 +833,12 @@ describe('ScheduledTasksService', () => {
 		} as unknown as ConfigService);
 
 		const first = await service.enqueueManualDatabaseBackup(
-			'core',
+			'reporting',
 			adminId,
 			firstKey
 		);
 		const second = await service.enqueueManualDatabaseBackup(
-			'core',
+			'reporting',
 			adminId,
 			secondKey
 		);
@@ -891,7 +886,7 @@ describe('ScheduledTasksService', () => {
 		);
 
 		const result = await service.enqueueManualDatabaseBackup(
-			'core',
+			'reporting',
 			adminId,
 			newKey
 		);
@@ -922,14 +917,14 @@ describe('ScheduledTasksService', () => {
 		);
 
 		const result = await service.getLatestActiveManualDatabaseBackup(
-			'core',
+			'reporting',
 			adminId
 		);
 
 		expect(result?.jobId).toBe(job.id);
 		expect(prisma.scheduledJobRun.findFirst).toHaveBeenCalledWith({
 			where: expect.objectContaining({
-				jobType: 'DATABASE_BACKUP',
+				jobType: 'REPORTING_DATABASE_BACKUP',
 				trigger: ScheduledJobRunTrigger.MANUAL,
 				status: {
 					in: [
@@ -982,7 +977,7 @@ describe('ScheduledTasksService', () => {
 		);
 
 		const result = await service.getDatabaseBackupJob(
-			'core',
+			'reporting',
 			job.id,
 			adminId
 		);
@@ -1038,20 +1033,20 @@ describe('ScheduledTasksService', () => {
 		);
 
 		await expect(
-			service.getDatabaseBackupJob('core', job.id, currentAdminId)
+			service.getDatabaseBackupJob('reporting', job.id, currentAdminId)
 		).resolves.toBeNull();
 	});
 
 	it('returns a redacted overview for every active database backup target', async () => {
 		const now = new Date();
 		const jobTypes = [
-			'DATABASE_BACKUP',
 			'NOTIFICATION_DELIVERY_DATABASE_BACKUP',
 			'CAMPAIGNS_DATABASE_BACKUP',
 			'REPORTING_DATABASE_BACKUP',
 			'WIDGETS_DATABASE_BACKUP',
 			'BILLING_DATABASE_BACKUP',
-			'IDENTITY_DATABASE_BACKUP'
+			'IDENTITY_DATABASE_BACKUP',
+			'PLATFORM_DATABASE_BACKUP'
 		];
 		const jobs = new Map(
 			jobTypes.map((jobType, index) => [
@@ -1098,19 +1093,19 @@ describe('ScheduledTasksService', () => {
 
 		expect(result.items).toHaveLength(7);
 		expect(result.items.map(item => item.target)).toEqual([
-			'core',
 			'notification-delivery',
 			'campaigns',
 			'reporting',
 			'widgets',
 			'billing',
-			'identity'
+			'identity',
+			'platform'
 		]);
 		expect(result.items[0]).toEqual(
 			expect.objectContaining({
 				freshness: 'FRESH',
 				latestSuccessful: expect.objectContaining({
-					target: 'core',
+					target: 'notification-delivery',
 					fileSize: 1024,
 					hasError: false
 				})
@@ -1126,9 +1121,9 @@ describe('ScheduledTasksService', () => {
 		const now = new Date('2026-08-15T12:00:00.000Z');
 		jest.setSystemTime(now);
 		try {
-			const coreJob = createManualBackupJob(
+			const reportingJob = createManualBackupJob(
 				randomUUID(),
-				'freshness:core',
+				'freshness:reporting',
 				{
 					trigger: ScheduledJobRunTrigger.SCHEDULED,
 					status: ScheduledJobRunStatus.SUCCEEDED,
@@ -1140,7 +1135,7 @@ describe('ScheduledTasksService', () => {
 				.mockResolvedValueOnce({ databaseBackupEnabled: true })
 				.mockResolvedValueOnce({ databaseBackupEnabled: false });
 			const findFirst = jest.fn(({ where }) => {
-				if (where.jobType !== 'DATABASE_BACKUP') {
+				if (where.jobType !== 'REPORTING_DATABASE_BACKUP') {
 					return Promise.resolve(null);
 				}
 				if (
@@ -1149,7 +1144,7 @@ describe('ScheduledTasksService', () => {
 				) {
 					return Promise.resolve(null);
 				}
-				return Promise.resolve(coreJob);
+				return Promise.resolve(reportingJob);
 			});
 			const prisma = {
 				telegramBotSettings: { upsert: settingsUpsert },
@@ -1165,7 +1160,7 @@ describe('ScheduledTasksService', () => {
 			const disabled = await service.getDatabaseBackupOverview();
 
 			expect(
-				enabled.items.find(item => item.target === 'core')?.freshness
+				enabled.items.find(item => item.target === 'reporting')?.freshness
 			).toBe('STALE');
 			expect(
 				enabled.items.find(item => item.target === 'notification-delivery')

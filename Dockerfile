@@ -28,6 +28,7 @@ COPY apps/reporting/prisma ./apps/reporting/prisma
 COPY apps/widgets/prisma ./apps/widgets/prisma
 COPY apps/billing/prisma ./apps/billing/prisma
 COPY apps/identity/prisma ./apps/identity/prisma
+COPY apps/platform/prisma ./apps/platform/prisma
 
 RUN pnpm exec prisma generate
 RUN pnpm run build:app
@@ -82,6 +83,7 @@ COPY --from=builder --chown=nestjs:nodejs /app/apps/reporting/prisma ./apps/repo
 COPY --from=builder --chown=nestjs:nodejs /app/apps/widgets/prisma ./apps/widgets/prisma
 COPY --from=builder --chown=nestjs:nodejs /app/apps/billing/prisma ./apps/billing/prisma
 COPY --from=builder --chown=nestjs:nodejs /app/apps/identity/prisma ./apps/identity/prisma
+COPY --from=builder --chown=nestjs:nodejs /app/apps/platform/prisma ./apps/platform/prisma
 COPY database-restore-entrypoint.sh /usr/local/bin/database-restore-entrypoint.sh
 
 RUN chmod 755 /usr/local/bin/database-restore-entrypoint.sh

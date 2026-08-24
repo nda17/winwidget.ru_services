@@ -14,6 +14,10 @@ import {
 } from '@/messaging/billing-messaging-client.service';
 import { parseMessagingHeartbeatMetadata } from '@/messaging/messaging-heartbeat.service';
 import {
+	PlatformMessagingClientService,
+	PlatformMessagingOverview
+} from '@/messaging/platform-messaging-client.service';
+import {
 	NotificationDeliveryClientService,
 	NotificationDeliveryOverview
 } from '@/messaging/notification-delivery-client.service';
@@ -75,7 +79,8 @@ export class MessagingOperationalAlertService
 		private readonly notificationDelivery: NotificationDeliveryClientService,
 		private readonly widgets: WidgetsDeliveryFailuresClientService,
 		private readonly billingState?: BillingCoreStateService,
-		private readonly billingMessaging?: BillingMessagingClientService
+		private readonly billingMessaging?: BillingMessagingClientService,
+		private readonly platformMessaging?: PlatformMessagingClientService
 	) {}
 
 	onModuleInit(): void {
@@ -120,7 +125,8 @@ export class MessagingOperationalAlertService
 				brokerResult,
 				notificationDeliveryResult,
 				widgetsResult,
-				billingResult
+				billingResult,
+				platformResult
 			] = await Promise.all([
 				this.prisma.outboxEvent.count({
 					where: { status: OutboxEventStatus.FAILED }
@@ -265,7 +271,25 @@ export class MessagingOperationalAlertService
 										? error.message
 										: 'Billing недоступен'
 							}))
-					: Promise.resolve({ overview: null, error: null })
+					: Promise.resolve({ overview: null, error: null }),
+				this.platformMessaging
+					? this.platformMessaging
+							.getOverview()
+							.then(overview => ({
+								overview,
+								error: null as string | null
+							}))
+							.catch(error => ({
+								overview: null,
+								error:
+									error instanceof Error
+										? error.message
+										: 'Platform недоступен'
+							}))
+					: Promise.resolve({
+							overview: null,
+							error: 'Platform messaging boundary is unavailable'
+						})
 			]);
 
 			const categoryCounts: Record<string, number> = {};
@@ -449,6 +473,8 @@ export class MessagingOperationalAlertService
 				widgetsResult.overview;
 			const billingOverview: BillingMessagingOverview | null =
 				billingResult.overview;
+			const platformOverview: PlatformMessagingOverview | null =
+				platformResult.overview;
 			const billingDue =
 				billingOverview?.operational?.dueOutbox ??
 				(billingOverview?.outbox.PENDING || 0) +
@@ -472,6 +498,13 @@ export class MessagingOperationalAlertService
 							'billing-outbox-publisher'
 						]
 				: [];
+			const platformDue = platformOverview?.operational.dueOutbox || 0;
+			const platformStale = platformOverview?.operational.staleOutbox || 0;
+			const platformHeartbeatProblems = platformOverview?.heartbeats
+				? platformOverview.heartbeats
+						.filter(heartbeat => heartbeat.status === 'down')
+						.map(heartbeat => heartbeat.service)
+				: ['platform-api', 'platform-outbox-publisher'];
 			const widgetsPublisher = widgetsOverview?.heartbeats.find(
 				heartbeat => heartbeat.service === 'widgets-publisher'
 			);
@@ -502,12 +535,14 @@ export class MessagingOperationalAlertService
 				stalePendingOutbox +
 				(deliveryOverview?.operational.staleOutbox || 0) +
 				(widgetsOverview?.operational.staleOutbox || 0) +
-				billingStale;
+				billingStale +
+				platformStale;
 			const combinedDueOutbox =
 				dueOutbox +
 				(deliveryOverview?.operational.dueOutbox || 0) +
 				(widgetsOverview?.operational.dueOutbox || 0) +
-				billingDue;
+				billingDue +
+				platformDue;
 			const combinedUnresolvedFailures =
 				unresolvedDlq +
 				(deliveryOverview?.unresolvedFailures || 0) +
@@ -576,6 +611,11 @@ export class MessagingOperationalAlertService
 				...(!billingResult.error
 					? billingHeartbeatProblems.map(service => `heartbeat=${service}`)
 					: []),
+				...(platformResult.error
+					? [`platform-api=${platformResult.error}`]
+					: platformHeartbeatProblems.map(
+							service => `heartbeat=${service}`
+						)),
 				...(queueResult.error ? [`queues=${queueResult.error}`] : []),
 				...missingQueues.map(queue => `missing=${queue}`),
 				...consumerlessQueues.map(queue => `consumers=0:${queue}`),
@@ -649,6 +689,13 @@ export class MessagingOperationalAlertService
 									billingHeartbeatProblems.length ? 'нет heartbeat, ' : ''
 								}Outbox=${billingDue}, DLQ=${billingOverview?.unresolvedFailures || 0}`
 						: 'Core ownership'
+				}</b>`,
+				`Platform: <b>${
+					platformResult.error
+						? `internal API недоступен: ${platformResult.error}`
+						: `${
+								platformHeartbeatProblems.length ? 'нет heartbeat, ' : ''
+							}Outbox=${platformDue}`
 				}</b>`
 			].join('\n');
 			await this.sendAlertIfChanged(

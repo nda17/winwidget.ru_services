@@ -64,7 +64,14 @@ export class IdentityInternalController {
 
 	@Post('auth/introspect')
 	@HttpCode(200)
-	@InternalServices('core', 'campaigns', 'reporting', 'widgets', 'billing')
+	@InternalServices(
+		'core',
+		'campaigns',
+		'reporting',
+		'widgets',
+		'billing',
+		'platform'
+	)
 	introspect(@Headers('authorization') authorization?: string) {
 		return this.internal.introspect(authorization);
 	}

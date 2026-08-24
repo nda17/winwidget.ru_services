@@ -102,4 +102,25 @@ describe('AdminEventLogService identity snapshots', () => {
 			})
 		});
 	});
+
+	it('records the dedicated Platform section and action', async () => {
+		const { service, identity, transaction, create } = createFixture();
+
+		await service.recordInTransaction(transaction, {
+			adminId: 'admin-id',
+			adminName: 'Platform admin',
+			adminEmail: null,
+			section: 'PLATFORM_CONTENT',
+			action: 'PLATFORM_HOME_PAGE_CONTENT_UPDATE',
+			description: 'Updated Platform content'
+		});
+
+		expect(identity.getAuditSnapshots).not.toHaveBeenCalled();
+		expect(create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				section: 'PLATFORM_CONTENT',
+				action: 'PLATFORM_HOME_PAGE_CONTENT_UPDATE'
+			})
+		});
+	});
 });

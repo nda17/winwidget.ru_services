@@ -64,6 +64,8 @@ export async function enqueueBillingAdminAudit(
 	const eventId = randomUUID();
 	const occurredAt = new Date().toISOString();
 	const correlationId = input.correlationId || getBillingCorrelationId();
+	const requestIp = boundedContext(input.actor.ip, 128);
+	const requestUserAgent = boundedContext(input.actor.userAgent, 500);
 	await transaction.outboxEvent.create({
 		data: {
 			eventId,
@@ -85,10 +87,21 @@ export async function enqueueBillingAdminAudit(
 				description: input.description,
 				entity: input.entity,
 				metadata: {
+					...(input.metadata || {}),
 					actorRole: input.actor.role,
-					...(input.metadata || {})
+					requestIp,
+					requestUserAgent
 				}
 			} as Prisma.InputJsonValue
 		}
 	});
+}
+
+function boundedContext(
+	value: string | null | undefined,
+	maxLength: number
+): string | null {
+	if (typeof value !== 'string') return null;
+	const normalized = value.trim();
+	return normalized ? normalized.slice(0, maxLength) : null;
 }

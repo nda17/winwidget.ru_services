@@ -44,7 +44,16 @@ describe('RabbitMqManagementService', () => {
 			'winwidget.widgets.billing-subscription.dead-letter',
 			...billingQueues
 		];
-		expect(billingQueues).toHaveLength(45);
+		expect(MESSAGING_QUEUE_NAMES['billing-offer-source']).toBe(
+			'winwidget.billing.offer.v2'
+		);
+		expect(billingQueues).toContain('winwidget.billing.offer.v2');
+		expect(
+			billingQueues.some(queue =>
+				queue.startsWith('winwidget.billing.offer.v1')
+			)
+		).toBe(false);
+		expect(billingQueues).toHaveLength(40);
 		const queues = [
 			...knownQueues.map(name => ({
 				name,

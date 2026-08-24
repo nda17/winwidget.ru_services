@@ -5,6 +5,7 @@ import { IdentityMessagingClientService } from '@/messaging/identity-messaging-c
 import { MessagingAdminController } from '@/messaging/messaging-admin.controller';
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import { MessagingOperationalAlertService } from '@/messaging/messaging-operational-alert.service';
+import { PlatformMessagingClientService } from '@/messaging/platform-messaging-client.service';
 import { NotificationDeliveryClientModule } from '@/messaging/notification-delivery-client.module';
 import { RabbitMqManagementModule } from '@/messaging/rabbitmq-management.module';
 import { ServiceOwnedMessagingOverviewClientService } from '@/messaging/service-owned-messaging-overview-client.service';
@@ -24,6 +25,7 @@ import { Module } from '@nestjs/common';
 	providers: [
 		BillingMessagingClientService,
 		IdentityMessagingClientService,
+		PlatformMessagingClientService,
 		WidgetsDeliveryFailuresClientService,
 		ServiceOwnedMessagingOverviewClientService,
 		MessagingAdminService,

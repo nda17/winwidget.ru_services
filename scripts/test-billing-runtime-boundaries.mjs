@@ -442,7 +442,7 @@ const runIntegration = async () => {
 		await channel.bindQueue(
 			queue,
 			'winwidget.events',
-			'billing.settings.changed.v1'
+			'billing.publisher.rehearsal.v1'
 		);
 		const workerConfigValues = {
 			BILLING_PROCESS_ROLE: 'worker',
@@ -458,8 +458,7 @@ const runIntegration = async () => {
 		assert.equal(workerRabbit.isTopologyReady(), true);
 		for (const requiredQueue of [
 			'winwidget.billing.identity.v1',
-			'winwidget.billing.offer.v1',
-			'winwidget.billing.settings-source.v1',
+			'winwidget.billing.offer.v2',
 			'winwidget.billing.lifecycle-repair.v1',
 			'winwidget.payment.auto-renewal',
 			'winwidget.billing.notification-delivery-outcome'
@@ -502,14 +501,14 @@ const runIntegration = async () => {
 			data: {
 				id: recoveredOutboxId,
 				eventId: recoveredEventId,
-				eventType: 'billing.settings.changed.v1',
-				aggregateType: 'billing.settings',
-				aggregateId: 'singleton',
+				eventType: 'billing.publisher.rehearsal.v1',
+				aggregateType: 'billing.publisher-rehearsal',
+				aggregateId: recoveredEventId,
 				exchange: 'winwidget.events',
-				routingKey: 'billing.settings.changed.v1',
+				routingKey: 'billing.publisher.rehearsal.v1',
 				payload: {
 					schemaVersion: 1,
-					eventType: 'billing.settings.changed.v1',
+					eventType: 'billing.publisher.rehearsal.v1',
 					eventId: recoveredEventId,
 					rehearsal: true
 				},
@@ -531,7 +530,10 @@ const runIntegration = async () => {
 		assert.ok(recovered.publishedAt instanceof Date);
 		const delivered = await waitForMessage(channel, queue);
 		assert.equal(delivered.properties.messageId, recoveredEventId);
-		assert.equal(delivered.properties.type, 'billing.settings.changed.v1');
+		assert.equal(
+			delivered.properties.type,
+			'billing.publisher.rehearsal.v1'
+		);
 		assert.equal(delivered.fields.redelivered, false);
 		channel.ack(delivered);
 		assert.equal(await publisher.publishOne(), false);

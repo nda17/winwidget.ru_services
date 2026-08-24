@@ -363,6 +363,8 @@ billing_cutover_validate_restore_drill() {
 	[[ "$evidence" == "$APP_ROOT/deploy/backend/.billing-restore-drill-evidence-v1.json" ]] ||
 		return 1
 	billing_cutover_validate_evidence_file "$evidence" || return 1
+	# Populated by the sourced immutable Billing database lifecycle contract.
+	# shellcheck disable=SC2154
 	postgres_image_id="$(docker image inspect --format '{{.Id}}' \
 		"$billing_postgres_image")" || return 1
 	runner_sha="$(billing_cutover_sha256 "$billing_restore_rehearsal_script")" ||
@@ -2503,7 +2505,7 @@ billing_cutover_routes_file_is_legacy() {
 	printf '%s\n' "$routes" | node -e '
 const fs = require("node:fs");
 const routes = JSON.parse(fs.readFileSync(0, "utf8"));
-const prefixes = ["/api/v1/payments", "/api/v1/subscriptions", "/api/v1/tariff-prices", "/api/v1/affiliate"];
+const prefixes = ["/api/v1/payments", "/api/v1/subscriptions", "/api/v1/tariff-prices", "/api/v1/affiliate", "/api/v1/billing-settings/public", "/api/v1/billing-settings/admin"];
 if (!Array.isArray(routes) || prefixes.some(prefix => routes.some(route => route.pathPrefix === prefix))) process.exit(1);
 if (!routes.some(route => route.pathPrefix === "/api/v1" && route.upstreamUrl === "http://127.0.0.1:4200")) process.exit(1);
 '
@@ -2517,19 +2519,21 @@ billing_cutover_routes_file_is_desired() {
 const fs = require("node:fs");
 const routes = JSON.parse(fs.readFileSync(0, "utf8"));
 const expected = [
-  ["/api/v1/payments", "billing-payments"],
-  ["/api/v1/subscriptions", "billing-subscriptions"],
-  ["/api/v1/tariff-prices", "billing-tariff-prices"],
-  ["/api/v1/affiliate", "billing-affiliate"],
+  ["/api/v1/payments", "billing-payments", "optional"],
+  ["/api/v1/subscriptions", "billing-subscriptions", "optional"],
+  ["/api/v1/tariff-prices", "billing-tariff-prices", "optional"],
+  ["/api/v1/affiliate", "billing-affiliate", "optional"],
+  ["/api/v1/billing-settings/public", "billing-settings-public", "optional"],
+  ["/api/v1/billing-settings/admin", "billing-settings-admin", "required"],
 ];
 if (!Array.isArray(routes)) process.exit(1);
-for (const [pathPrefix, id] of expected) {
+for (const [pathPrefix, id, authPolicy] of expected) {
   const matches = routes.filter(route => route?.pathPrefix === pathPrefix);
   if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify({
     id,
     pathPrefix,
     upstreamUrl: "http://127.0.0.1:4800",
-    authPolicy: "optional",
+    authPolicy,
     timeoutMs: 30000,
   })) process.exit(1);
 }
@@ -2600,16 +2604,18 @@ const index = indexes[0];
 const current = JSON.parse(lines[index].slice('GATEWAY_ROUTES_JSON='.length));
 if (!Array.isArray(current)) process.exit(1);
 const prefixes = [
-  ['/api/v1/payments', 'billing-payments'],
-  ['/api/v1/subscriptions', 'billing-subscriptions'],
-  ['/api/v1/tariff-prices', 'billing-tariff-prices'],
-  ['/api/v1/affiliate', 'billing-affiliate'],
+  ['/api/v1/payments', 'billing-payments', 'optional'],
+  ['/api/v1/subscriptions', 'billing-subscriptions', 'optional'],
+  ['/api/v1/tariff-prices', 'billing-tariff-prices', 'optional'],
+  ['/api/v1/affiliate', 'billing-affiliate', 'optional'],
+  ['/api/v1/billing-settings/public', 'billing-settings-public', 'optional'],
+  ['/api/v1/billing-settings/admin', 'billing-settings-admin', 'required'],
 ];
-const desired = prefixes.map(([pathPrefix, id]) => ({
+const desired = prefixes.map(([pathPrefix, id, authPolicy]) => ({
   id,
   pathPrefix,
   upstreamUrl: 'http://127.0.0.1:4800',
-  authPolicy: 'optional',
+  authPolicy,
   timeoutMs: 30000,
 }));
 for (const route of current) {
@@ -2690,14 +2696,16 @@ for (let index = 0; index < legacyLines.length; index += 1) {
 const legacy = JSON.parse(legacyLines[routeIndex].slice('GATEWAY_ROUTES_JSON='.length));
 const candidate = JSON.parse(candidateLines[routeIndex].slice('GATEWAY_ROUTES_JSON='.length));
 const prefixes = [
-  ['/api/v1/payments', 'billing-payments'],
-  ['/api/v1/subscriptions', 'billing-subscriptions'],
-  ['/api/v1/tariff-prices', 'billing-tariff-prices'],
-  ['/api/v1/affiliate', 'billing-affiliate'],
+  ['/api/v1/payments', 'billing-payments', 'optional'],
+  ['/api/v1/subscriptions', 'billing-subscriptions', 'optional'],
+  ['/api/v1/tariff-prices', 'billing-tariff-prices', 'optional'],
+  ['/api/v1/affiliate', 'billing-affiliate', 'optional'],
+  ['/api/v1/billing-settings/public', 'billing-settings-public', 'optional'],
+  ['/api/v1/billing-settings/admin', 'billing-settings-admin', 'required'],
 ];
-const desired = prefixes.map(([pathPrefix, id]) => ({
+const desired = prefixes.map(([pathPrefix, id, authPolicy]) => ({
   id, pathPrefix, upstreamUrl: 'http://127.0.0.1:4800',
-  authPolicy: 'optional', timeoutMs: 30000,
+  authPolicy, timeoutMs: 30000,
 }));
 const retained = legacy.filter(route =>
   !prefixes.some(([prefix]) => route?.pathPrefix === prefix));
@@ -2745,6 +2753,8 @@ const prefixes = [
   "/api/v1/subscriptions",
   "/api/v1/tariff-prices",
   "/api/v1/affiliate",
+  "/api/v1/billing-settings/public",
+  "/api/v1/billing-settings/admin",
 ];
 if (!Array.isArray(routes) ||
     prefixes.some(prefix => routes.some(route => route?.pathPrefix === prefix)) ||
@@ -2767,19 +2777,21 @@ const entries = documents[0].Config.Env.filter(value =>
 if (entries.length !== 1) process.exit(1);
 const routes = JSON.parse(entries[0].slice("GATEWAY_ROUTES_JSON=".length));
 const expected = [
-  ["/api/v1/payments", "billing-payments"],
-  ["/api/v1/subscriptions", "billing-subscriptions"],
-  ["/api/v1/tariff-prices", "billing-tariff-prices"],
-  ["/api/v1/affiliate", "billing-affiliate"],
+  ["/api/v1/payments", "billing-payments", "optional"],
+  ["/api/v1/subscriptions", "billing-subscriptions", "optional"],
+  ["/api/v1/tariff-prices", "billing-tariff-prices", "optional"],
+  ["/api/v1/affiliate", "billing-affiliate", "optional"],
+  ["/api/v1/billing-settings/public", "billing-settings-public", "optional"],
+  ["/api/v1/billing-settings/admin", "billing-settings-admin", "required"],
 ];
 if (!Array.isArray(routes)) process.exit(1);
-for (const [pathPrefix, id] of expected) {
+for (const [pathPrefix, id, authPolicy] of expected) {
   const matches = routes.filter(route => route?.pathPrefix === pathPrefix);
   if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify({
     id,
     pathPrefix,
     upstreamUrl: "http://127.0.0.1:4800",
-    authPolicy: "optional",
+    authPolicy,
     timeoutMs: 30000,
   })) process.exit(1);
 }
@@ -4036,13 +4048,15 @@ const lines = fs.readFileSync(legacyPath, 'utf8').split('\n');
 const index = lines.findIndex(line => line.startsWith('GATEWAY_ROUTES_JSON='));
 const legacy = JSON.parse(lines[index].slice('GATEWAY_ROUTES_JSON='.length));
 const desired = [
-  ['/api/v1/payments', 'billing-payments'],
-  ['/api/v1/subscriptions', 'billing-subscriptions'],
-  ['/api/v1/tariff-prices', 'billing-tariff-prices'],
-  ['/api/v1/affiliate', 'billing-affiliate'],
-].map(([pathPrefix, id]) => ({
+  ['/api/v1/payments', 'billing-payments', 'optional'],
+  ['/api/v1/subscriptions', 'billing-subscriptions', 'optional'],
+  ['/api/v1/tariff-prices', 'billing-tariff-prices', 'optional'],
+  ['/api/v1/affiliate', 'billing-affiliate', 'optional'],
+  ['/api/v1/billing-settings/public', 'billing-settings-public', 'optional'],
+  ['/api/v1/billing-settings/admin', 'billing-settings-admin', 'required'],
+].map(([pathPrefix, id, authPolicy]) => ({
   id, pathPrefix, upstreamUrl: 'http://127.0.0.1:4800',
-  authPolicy: 'optional', timeoutMs: 30000,
+  authPolicy, timeoutMs: 30000,
 }));
 lines[index] = `GATEWAY_ROUTES_JSON=${JSON.stringify([...desired, ...legacy])}`;
 fs.writeFileSync(candidatePath, lines.join('\n'));

@@ -344,6 +344,43 @@ describe('IntegrationWorkerService', () => {
 			}
 		}) as ConsumeMessage;
 
+	const createPlatformAuditMessage = (): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventType: 'admin.audit.event.v1',
+					eventId: '11111111-1111-4111-8111-111111111111',
+					occurredAt: '2026-08-23T12:00:00.000Z',
+					correlationId: 'request:platform-settings-42',
+					actorId: 'admin-user-id',
+					section: 'PLATFORM_CONTENT',
+					action: 'PLATFORM_SITE_SETTINGS_UPDATE',
+					description: 'Обновлены настройки платформы',
+					entity: {
+						type: 'site_settings',
+						id: 'singleton',
+						label: 'Настройки платформы',
+						targetUserId: null
+					},
+					metadata: {
+						changedFields: ['bannerEnabled'],
+						bannerTextChanged: false,
+						bannerEnabled: true,
+						actorRole: 'ADMIN',
+						requestIp: '203.0.113.9',
+						requestUserAgent: 'platform-contract-agent'
+					}
+				})
+			),
+			fields: { routingKey: 'admin.audit.platform.v1' },
+			properties: {
+				messageId: '11111111-1111-4111-8111-111111111111',
+				type: 'admin.audit.event.v1',
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
 	const createWidgetsCloseAuditMessage = (): ConsumeMessage =>
 		({
 			content: Buffer.from(
@@ -396,10 +433,10 @@ describe('IntegrationWorkerService', () => {
 			'widgets-admin-audit',
 			'billing-admin-audit',
 			'identity-admin-audit',
+			'platform-admin-audit',
 			'billing-payment-projection',
 			'billing-subscription-projection',
-			'billing-affiliate-projection',
-			'billing-settings-projection'
+			'billing-affiliate-projection'
 		]);
 		expect(rabbitMq.consume).toHaveBeenCalledTimes(
 			MONOLITH_INTEGRATION_KINDS.length
@@ -751,6 +788,59 @@ describe('IntegrationWorkerService', () => {
 		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
 	});
 
+	it('writes a Platform audit and its delivered receipt atomically', async () => {
+		const { service, rabbitMq, delivery, transaction, adminEventLog } =
+			createService({
+				INTEGRATION_WORKER_KINDS: 'platform-admin-audit'
+			});
+		await service.onModuleInit();
+		const handler = (rabbitMq.consume as jest.Mock).mock.calls[0][1] as (
+			message: ConsumeMessage
+		) => Promise<void>;
+		const message = createPlatformAuditMessage();
+
+		await handler(message);
+
+		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			{
+				adminId: 'admin-user-id',
+				section: 'PLATFORM_CONTENT',
+				action: 'PLATFORM_SITE_SETTINGS_UPDATE',
+				description: 'Обновлены настройки платформы',
+				entityType: 'site_settings',
+				entityId: 'singleton',
+				entityLabel: 'Настройки платформы',
+				targetUserId: null,
+				ip: '203.0.113.9',
+				userAgent: 'platform-contract-agent',
+				metadata: {
+					actorRole: 'ADMIN',
+					bannerEnabled: true,
+					bannerTextChanged: false,
+					changedFields: ['bannerEnabled'],
+					eventId: '11111111-1111-4111-8111-111111111111',
+					correlationId: 'request:platform-settings-42'
+				}
+			}
+		);
+		expect(
+			transaction.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					integration: 'platform-admin-audit',
+					status: IntegrationDeliveryReceiptStatus.PROCESSING
+				}),
+				data: expect.objectContaining({
+					status: IntegrationDeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledWith(message);
+	});
+
 	it('writes a Widgets delivery-close audit without exposing its comment', async () => {
 		const { service, rabbitMq, transaction, adminEventLog } =
 			createService({
@@ -843,6 +933,29 @@ describe('IntegrationWorkerService', () => {
 		);
 
 		expect(delivery.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('idempotently skips a delivered Platform audit receipt', async () => {
+		const { service, rabbitMq, adminEventLog, prisma } = createService({
+			INTEGRATION_WORKER_KINDS: 'platform-admin-audit'
+		});
+		(
+			prisma.integrationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValue(uniqueConstraintError());
+		(
+			prisma.integrationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValue({
+			status: IntegrationDeliveryReceiptStatus.DELIVERED,
+			lockedAt: new Date()
+		});
+
+		await (service as any).handle(
+			'platform-admin-audit',
+			createPlatformAuditMessage()
+		);
+
+		expect(adminEventLog.recordInTransaction).not.toHaveBeenCalled();
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
 	});
 

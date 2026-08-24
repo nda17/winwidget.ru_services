@@ -71,7 +71,6 @@ describe('InternalCommandsService subscription directory', () => {
 		};
 		const service = new InternalCommandsService(
 			prisma as never,
-			{} as never,
 			{} as never
 		);
 
@@ -98,8 +97,7 @@ describe('InternalCommandsService command idempotency', () => {
 		};
 		const service = new InternalCommandsService(
 			prisma as never,
-			subscriptions as never,
-			{} as never
+			subscriptions as never
 		);
 
 		const first = await service.ensureTrial(ensureTrialCommand());
@@ -126,8 +124,7 @@ describe('InternalCommandsService command idempotency', () => {
 		};
 		const service = new InternalCommandsService(
 			prisma as never,
-			subscriptions as never,
-			{} as never
+			subscriptions as never
 		);
 		await service.ensureTrial(ensureTrialCommand('user-1'));
 
@@ -158,8 +155,7 @@ describe('InternalCommandsService command idempotency', () => {
 		};
 		const service = new InternalCommandsService(
 			prisma as never,
-			subscriptions as never,
-			{} as never
+			subscriptions as never
 		);
 
 		const first = service.ensureTrial(ensureTrialCommand());
@@ -188,8 +184,7 @@ describe('InternalCommandsService command idempotency', () => {
 		};
 		const service = new InternalCommandsService(
 			prisma as never,
-			subscriptions as never,
-			{} as never
+			subscriptions as never
 		);
 
 		await expect(
@@ -208,7 +203,6 @@ describe('InternalCommandsService command idempotency', () => {
 		prisma.$transaction.mockRejectedValue({ code: 'P2002' });
 		const service = new InternalCommandsService(
 			prisma as never,
-			{} as never,
 			{} as never
 		);
 
@@ -238,8 +232,7 @@ describe('InternalCommandsService command idempotency', () => {
 		};
 		const service = new InternalCommandsService(
 			prisma as never,
-			subscriptions as never,
-			{} as never
+			subscriptions as never
 		);
 
 		await expect(

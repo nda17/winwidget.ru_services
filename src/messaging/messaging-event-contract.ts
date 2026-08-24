@@ -7,8 +7,6 @@ import {
 	BILLING_OFFER_EVENT_TYPE,
 	BILLING_PAYMENT_DETAILS_EVENT_TYPE,
 	BILLING_REFERRAL_REQUESTED_EVENT_TYPE,
-	BILLING_SETTINGS_SOURCE_EVENT_TYPE,
-	BILLING_SETTINGS_EVENT_TYPE,
 	BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
 	BILLING_TRIAL_REQUESTED_EVENT_TYPE,
 	CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
@@ -52,6 +50,10 @@ import {
 	IdentityAdminAuditAction
 } from '@/messaging/identity-admin-audit-event';
 import { OUTCOME_NOTIFICATION_DELIVERY_KINDS } from '@/messaging/notification-delivery-event';
+import {
+	PLATFORM_ADMIN_AUDIT_ACTIONS,
+	PlatformAdminAuditAction
+} from '@/messaging/platform-admin-audit-event';
 import {
 	REPORTING_ADMIN_AUDIT_ACTIONS,
 	REPORTING_AUDIT_CONSUMER_KINDS,
@@ -245,9 +247,7 @@ const BILLING_VERSIONED_EVENT_TYPES = new Set([
 	BILLING_OFFER_EVENT_TYPE,
 	BILLING_PAYMENT_DETAILS_EVENT_TYPE,
 	BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
-	BILLING_AFFILIATE_EVENT_TYPE,
-	BILLING_SETTINGS_SOURCE_EVENT_TYPE,
-	BILLING_SETTINGS_EVENT_TYPE
+	BILLING_AFFILIATE_EVENT_TYPE
 ]);
 
 const assertNamespacedWidgetAggregateId = (
@@ -1366,10 +1366,6 @@ const assertBillingVersionedEvent = (
 		case BILLING_AFFILIATE_EVENT_TYPE:
 			assertBillingAffiliateState(state, aggregateId);
 			break;
-		case BILLING_SETTINGS_SOURCE_EVENT_TYPE:
-		case BILLING_SETTINGS_EVENT_TYPE:
-			assertBillingSettingsState(state, aggregateId);
-			break;
 		default:
 			throw new Error('Invalid Billing event type');
 	}
@@ -1397,10 +1393,6 @@ const getBillingEventKinds = (eventType: string): MessagingKind[] => {
 			return ['billing-subscription-projection'];
 		case BILLING_AFFILIATE_EVENT_TYPE:
 			return ['billing-affiliate-projection'];
-		case BILLING_SETTINGS_SOURCE_EVENT_TYPE:
-			return ['billing-settings-source'];
-		case BILLING_SETTINGS_EVENT_TYPE:
-			return ['billing-settings-projection'];
 		default:
 			throw new Error('Invalid Billing event type');
 	}
@@ -1561,55 +1553,6 @@ const assertBillingAffiliateState = (
 	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
 };
 
-const assertBillingSettingsState = (
-	state: JsonRecord,
-	aggregateId: string
-): void => {
-	assertExactKeys(
-		state,
-		[
-			'id',
-			'paymentEnabled',
-			'autoRenewalSignupEnabled',
-			'autoRenewalChargesEnabled',
-			'autoRenewalChargesEnabledAt',
-			'affiliateProgramEnabled',
-			'affiliateCashbackPercent',
-			'updatedAt'
-		],
-		[],
-		'payload.state'
-	);
-	if (state.id !== 'singleton' || aggregateId !== 'singleton') {
-		throw new Error('Billing settings aggregate id must equal singleton');
-	}
-	assertBoolean(state.paymentEnabled, 'payload.state.paymentEnabled');
-	assertBoolean(
-		state.autoRenewalSignupEnabled,
-		'payload.state.autoRenewalSignupEnabled'
-	);
-	assertBoolean(
-		state.autoRenewalChargesEnabled,
-		'payload.state.autoRenewalChargesEnabled'
-	);
-	assertIsoDate(
-		state.autoRenewalChargesEnabledAt,
-		'payload.state.autoRenewalChargesEnabledAt'
-	);
-	assertBoolean(
-		state.affiliateProgramEnabled,
-		'payload.state.affiliateProgramEnabled'
-	);
-	if (
-		!Number.isInteger(state.affiliateCashbackPercent) ||
-		Number(state.affiliateCashbackPercent) < 0 ||
-		Number(state.affiliateCashbackPercent) > 100
-	) {
-		throw new Error('payload.state.affiliateCashbackPercent is invalid');
-	}
-	assertIsoDate(state.updatedAt, 'payload.state.updatedAt');
-};
-
 const assertBillingAdminAuditEvent = (
 	payload: JsonRecord
 ): IntegrationKind => {
@@ -1668,6 +1611,205 @@ const assertBillingAdminAuditEvent = (
 	assertOptionalString(entity.targetUserId, 'payload.entity.targetUserId');
 	assertRecord(payload.metadata, 'payload.metadata');
 	return 'billing-admin-audit';
+};
+
+const PLATFORM_AUDIT_REQUEST_METADATA_KEYS = [
+	'actorRole',
+	'requestIp',
+	'requestUserAgent'
+] as const;
+
+const assertPlatformAuditChangedFields = (value: unknown): void => {
+	if (
+		!Array.isArray(value) ||
+		value.length < 1 ||
+		value.length > 64 ||
+		value.some(
+			field => typeof field !== 'string' || !field || field.length > 128
+		) ||
+		new Set(value).size !== value.length ||
+		value.join(',') !== [...value].sort().join(',')
+	) {
+		throw new Error('payload.metadata.changedFields is invalid');
+	}
+};
+
+const assertPlatformAdminAuditEvent = (
+	payload: JsonRecord
+): IntegrationKind => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'occurredAt',
+		'correlationId',
+		'actorId',
+		'section',
+		'action',
+		'description',
+		'entity',
+		'metadata'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE
+	) {
+		throw new Error('Invalid Platform admin audit contract version');
+	}
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	if (
+		typeof payload.correlationId !== 'string' ||
+		!SAFE_CONTEXT_ID_PATTERN.test(payload.correlationId)
+	) {
+		throw new Error('payload.correlationId is invalid');
+	}
+	assertIdentifier(payload.actorId, 'payload.actorId');
+	if (payload.section !== 'PLATFORM_CONTENT') {
+		throw new Error('payload.section is invalid');
+	}
+	if (
+		!PLATFORM_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as PlatformAdminAuditAction
+		)
+	) {
+		throw new Error('payload.action is invalid');
+	}
+	const action = payload.action as PlatformAdminAuditAction;
+	assertString(payload.description, 'payload.description', {
+		maxLength: 2000
+	});
+	const entity = assertRecord(payload.entity, 'payload.entity');
+	assertExactKeys(
+		entity,
+		['type', 'id', 'label', 'targetUserId'],
+		[],
+		'payload.entity'
+	);
+	assertIdentifier(entity.type, 'payload.entity.type');
+	assertIdentifier(entity.id, 'payload.entity.id');
+	assertOptionalString(entity.label, 'payload.entity.label');
+	if (entity.targetUserId !== null) {
+		throw new Error('payload.entity.targetUserId must be null');
+	}
+	if (
+		(action === 'PLATFORM_SITE_SETTINGS_UPDATE' &&
+			(entity.type !== 'site_settings' || entity.id !== 'singleton')) ||
+		(action === 'PLATFORM_LEGAL_PAGE_UPDATE' &&
+			(entity.type !== 'legal_page' ||
+				![
+					'personal-policy',
+					'consent-processing',
+					'cookie-notice',
+					'oferta'
+				].includes(entity.id as string))) ||
+		((action === 'PLATFORM_HOME_PAGE_CONTENT_UPDATE' ||
+			action === 'PLATFORM_HOME_PAGE_RAW_CODE_UPDATE') &&
+			(entity.type !== 'home_page_content' || entity.id !== 'singleton'))
+	) {
+		throw new Error('payload.entity does not match action');
+	}
+
+	const metadata = assertRecord(payload.metadata, 'payload.metadata');
+	if (action === 'PLATFORM_SITE_SETTINGS_UPDATE') {
+		assertExactKeys(
+			metadata,
+			[
+				...PLATFORM_AUDIT_REQUEST_METADATA_KEYS,
+				'changedFields',
+				'bannerTextChanged'
+			],
+			['bannerEnabled', 'snowflakeEnabled'],
+			'payload.metadata'
+		);
+		assertPlatformAuditChangedFields(metadata.changedFields);
+		assertBoolean(
+			metadata.bannerTextChanged,
+			'payload.metadata.bannerTextChanged'
+		);
+		if (metadata.bannerEnabled !== undefined)
+			assertBoolean(
+				metadata.bannerEnabled,
+				'payload.metadata.bannerEnabled'
+			);
+		if (metadata.snowflakeEnabled !== undefined)
+			assertBoolean(
+				metadata.snowflakeEnabled,
+				'payload.metadata.snowflakeEnabled'
+			);
+	} else if (action === 'PLATFORM_LEGAL_PAGE_UPDATE') {
+		assertExactKeys(
+			metadata,
+			[
+				...PLATFORM_AUDIT_REQUEST_METADATA_KEYS,
+				'contentLength',
+				'contentSha256'
+			],
+			[],
+			'payload.metadata'
+		);
+		if (
+			!Number.isInteger(metadata.contentLength) ||
+			Number(metadata.contentLength) < 0 ||
+			Number(metadata.contentLength) > 1_048_576 ||
+			typeof metadata.contentSha256 !== 'string' ||
+			!/^[0-9a-f]{64}$/.test(metadata.contentSha256)
+		) {
+			throw new Error(
+				'payload.metadata legal content evidence is invalid'
+			);
+		}
+	} else {
+		assertExactKeys(
+			metadata,
+			[
+				...PLATFORM_AUDIT_REQUEST_METADATA_KEYS,
+				'updateKind',
+				'changedFields',
+				'contentBytes',
+				'contentSha256'
+			],
+			[],
+			'payload.metadata'
+		);
+		const expectedKind =
+			action === 'PLATFORM_HOME_PAGE_CONTENT_UPDATE'
+				? 'STRUCTURED'
+				: 'RAW';
+		if (metadata.updateKind !== expectedKind) {
+			throw new Error('payload.metadata.updateKind is invalid');
+		}
+		assertPlatformAuditChangedFields(metadata.changedFields);
+		if (
+			!Number.isInteger(metadata.contentBytes) ||
+			Number(metadata.contentBytes) < 0 ||
+			Number(metadata.contentBytes) > 1_048_576 ||
+			typeof metadata.contentSha256 !== 'string' ||
+			!/^[0-9a-f]{64}$/.test(metadata.contentSha256)
+		) {
+			throw new Error('payload.metadata home content evidence is invalid');
+		}
+	}
+	if (
+		typeof metadata.actorRole !== 'string' ||
+		!['ADMIN', 'DEV'].includes(metadata.actorRole)
+	) {
+		throw new Error('payload.metadata.actorRole is invalid');
+	}
+	assertOptionalString(metadata.requestIp, 'payload.metadata.requestIp');
+	assertOptionalString(
+		metadata.requestUserAgent,
+		'payload.metadata.requestUserAgent'
+	);
+	if (
+		(typeof metadata.requestIp === 'string' &&
+			metadata.requestIp.length > 128) ||
+		(typeof metadata.requestUserAgent === 'string' &&
+			metadata.requestUserAgent.length > 500)
+	) {
+		throw new Error('payload.metadata request context is too large');
+	}
+	return 'platform-admin-audit';
 };
 
 const assertIdentityAdminAuditSnapshot = (
@@ -1997,7 +2139,18 @@ const assertIdentityAdminAuditEvent = (
 	return 'identity-admin-audit';
 };
 
-const assertAdminAuditEvent = (payload: JsonRecord): IntegrationKind => {
+const assertAdminAuditEvent = (
+	payload: JsonRecord,
+	hintedKind?: MessagingKind
+): IntegrationKind => {
+	if (
+		hintedKind === 'platform-admin-audit' ||
+		PLATFORM_ADMIN_AUDIT_ACTIONS.includes(
+			payload.action as PlatformAdminAuditAction
+		)
+	) {
+		return assertPlatformAdminAuditEvent(payload);
+	}
 	if ('actorSnapshot' in payload) {
 		return assertIdentityAdminAuditEvent(payload);
 	}
@@ -2394,7 +2547,10 @@ const assertScheduledEvent = (payload: JsonRecord): MessagingKind => {
 	throw new Error('Invalid scheduled event type');
 };
 
-const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
+const resolveExpectedKinds = (
+	payload: JsonRecord,
+	hintedKind?: MessagingKind
+): MessagingKind[] => {
 	switch (payload.eventType) {
 		case OUTBOX_EVENT_TYPE:
 			return [assertLeadEvent(payload)];
@@ -2417,7 +2573,7 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 		case NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE:
 			return [assertNotificationDeliveryOutcome(payload)];
 		case CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE:
-			return [assertAdminAuditEvent(payload)];
+			return [assertAdminAuditEvent(payload, hintedKind)];
 		case BILLING_IDENTITY_EVENT_TYPE:
 		case BILLING_TRIAL_REQUESTED_EVENT_TYPE:
 		case BILLING_REFERRAL_REQUESTED_EVENT_TYPE:
@@ -2427,8 +2583,6 @@ const resolveExpectedKinds = (payload: JsonRecord): MessagingKind[] => {
 		case BILLING_PAYMENT_DETAILS_EVENT_TYPE:
 		case BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE:
 		case BILLING_AFFILIATE_EVENT_TYPE:
-		case BILLING_SETTINGS_SOURCE_EVENT_TYPE:
-		case BILLING_SETTINGS_EVENT_TYPE:
 			return assertBillingVersionedEvent(payload);
 		case REPORTING_IDENTITY_USER_EVENT_TYPE:
 		case REPORTING_BILLING_PAYMENT_EVENT_TYPE:
@@ -2458,7 +2612,7 @@ export function assertMessagingEventContract(
 		);
 	}
 
-	const expectedKinds = resolveExpectedKinds(payload);
+	const expectedKinds = resolveExpectedKinds(payload, metadata.kind);
 	if (
 		payload.eventType === DATABASE_BACKUP_EVENT_TYPE &&
 		payload.jobId !== metadata.messageId

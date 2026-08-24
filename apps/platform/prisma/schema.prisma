@@ -1,0 +1,151 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/platform-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("PLATFORM_DATABASE_URL")
+  schemas  = ["platform"]
+}
+
+model ServiceIdentity {
+  id                         String               @id @default("singleton")
+  serviceName                String               @default("platform-service") @map("service_name")
+  databaseId                 String               @default(uuid()) @map("database_id") @db.Uuid
+  phase                      ServiceDatabasePhase @default(SHADOW)
+  ownershipGeneration        BigInt               @default(0) @map("ownership_generation")
+  sourceFingerprint          String?              @map("source_fingerprint")
+  sourceSnapshotSha256       String?              @map("source_snapshot_sha256")
+  sourceSnapshotCounts       Json?                @map("source_snapshot_counts")
+  sourceHighWatermark        BigInt?              @map("source_high_watermark")
+  currentSemanticFingerprint String               @map("current_semantic_fingerprint")
+  importedAt                 DateTime?            @map("imported_at")
+  activatedAt                DateTime?            @map("activated_at")
+  createdAt                  DateTime             @default(now()) @map("created_at")
+  updatedAt                  DateTime             @updatedAt @map("updated_at")
+
+  @@map("service_identity")
+  @@schema("platform")
+}
+
+model PlatformSourceSequence {
+  id        String   @id
+  nextValue BigInt   @default(1) @map("next_value")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("source_sequences")
+  @@schema("platform")
+}
+
+model SiteSettings {
+  id               String   @id @default("singleton")
+  bannerEnabled    Boolean  @default(false) @map("banner_enabled")
+  bannerText       String   @default("") @map("banner_text")
+  snowflakeEnabled Boolean  @default(false) @map("snowflake_enabled")
+  aggregateVersion BigInt   @default(0) @map("aggregate_version")
+  sourceSequence   BigInt   @default(0) @map("source_sequence")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("site_settings")
+  @@schema("platform")
+}
+
+model LegalPage {
+  slug             String   @id
+  content          String   @default("") @db.Text
+  aggregateVersion BigInt   @default(0) @map("aggregate_version")
+  sourceSequence   BigInt   @default(0) @map("source_sequence")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("legal_pages")
+  @@schema("platform")
+}
+
+model HomePageContent {
+  id               String   @id @default("singleton")
+  content          Json     @default("{}")
+  aggregateVersion BigInt   @default(0) @map("aggregate_version")
+  sourceSequence   BigInt   @default(0) @map("source_sequence")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("home_page_content")
+  @@schema("platform")
+}
+
+model BillingOfferProducerState {
+  id                       String             @id @default("offer")
+  phase                    OfferProducerPhase @default(BLOCKED)
+  producerContractVersion  Int?               @map("producer_contract_version")
+  sourceSequenceScope      String?            @map("source_sequence_scope")
+  importedAggregateVersion BigInt?            @map("imported_aggregate_version")
+  importedSourceSequence   BigInt?            @map("imported_source_sequence")
+  currentAggregateVersion  BigInt?            @map("current_aggregate_version")
+  currentSourceSequence    BigInt?            @map("current_source_sequence")
+  sourceFenceFingerprint   String?            @map("source_fence_fingerprint")
+  importedAt               DateTime?          @map("imported_at")
+  activatedAt              DateTime?          @map("activated_at")
+  createdAt                DateTime           @default(now()) @map("created_at")
+  updatedAt                DateTime           @updatedAt @map("updated_at")
+
+  @@map("billing_offer_producer_state")
+  @@schema("platform")
+}
+
+model OutboxEvent {
+  id               String       @id @default(cuid())
+  eventId          String       @unique @map("event_id")
+  messageId        String?      @map("message_id")
+  deduplicationKey String?      @unique @map("deduplication_key")
+  eventType        String       @map("event_type")
+  aggregateType    String       @map("aggregate_type")
+  aggregateId      String       @map("aggregate_id")
+  aggregateVersion BigInt?      @map("aggregate_version")
+  sourceSequence   BigInt?      @map("source_sequence")
+  correlationId    String?      @map("correlation_id") @db.Uuid
+  exchange         String       @default("winwidget.events")
+  routingKey       String       @map("routing_key")
+  payload          Json
+  deliveryAttempt  Int          @default(0) @map("delivery_attempt")
+  status           OutboxStatus @default(PENDING)
+  attempt          Int          @default(0)
+  availableAt      DateTime     @default(now()) @map("available_at")
+  leaseToken       String?      @map("lease_token")
+  leaseUntil       DateTime?    @map("lease_until")
+  publishedAt      DateTime?    @map("published_at")
+  lastError        String?      @map("last_error") @db.Text
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  @@index([status, availableAt])
+  @@index([status, publishedAt, id], map: "outbox_events_retention_idx")
+  @@map("outbox_events")
+  @@schema("platform")
+}
+
+enum ServiceDatabasePhase {
+  SHADOW
+  ACTIVE
+
+  @@schema("platform")
+}
+
+enum OfferProducerPhase {
+  BLOCKED
+  IMPORTED
+  ACTIVE
+
+  @@schema("platform")
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+
+  @@schema("platform")
+}

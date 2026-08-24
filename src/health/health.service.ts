@@ -17,6 +17,10 @@ import {
 	WidgetsDeliveryFailuresClientService,
 	WidgetsMessagingOverview
 } from '@/messaging/widgets-delivery-failures-client.service';
+import {
+	PlatformMessagingClientService,
+	PlatformMessagingOverview
+} from '@/messaging/platform-messaging-client.service';
 import { PrismaService } from '@/prisma.service';
 import { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
 import { resolveTelegramApiBaseUrl } from '@/telegram-bot/telegram-info-transport.service';
@@ -49,6 +53,11 @@ type BillingOverviewResult = {
 	error: string | null;
 };
 
+type PlatformOverviewResult = {
+	overview: PlatformMessagingOverview | null;
+	error: string | null;
+};
+
 const getRabbitQueueDepth = (queue: {
 	messages: number;
 	messages_ready: number;
@@ -69,7 +78,8 @@ export class HealthService {
 		private readonly widgets: WidgetsDeliveryFailuresClientService,
 		private readonly billingState: BillingCoreStateService,
 		private readonly billing: BillingMessagingClientService,
-		private readonly identity: IdentityInternalClient
+		private readonly identity: IdentityInternalClient,
+		private readonly platform: PlatformMessagingClientService
 	) {}
 
 	async getAdminHealth() {
@@ -77,6 +87,7 @@ export class HealthService {
 			this.getNotificationDeliveryResult();
 		const widgetsResult = this.getWidgetsResult();
 		const billingResult = this.getBillingResult();
+		const platformResult = this.getPlatformResult();
 		const identityProviderChecks = await this.getIdentityProviderChecks();
 		const checks = await Promise.all([
 			this.checkBackend(),
@@ -85,6 +96,7 @@ export class HealthService {
 			this.checkNotificationDelivery(notificationDeliveryResult),
 			this.checkWidgets(widgetsResult),
 			this.checkBilling(billingResult),
+			this.checkPlatform(platformResult),
 			this.checkMessagingHeartbeat('outbox-publisher', 'Outbox publisher'),
 			this.checkMessagingHeartbeat(
 				'integration-worker',
@@ -97,7 +109,8 @@ export class HealthService {
 			this.checkMessagingBacklog(
 				notificationDeliveryResult,
 				widgetsResult,
-				billingResult
+				billingResult,
+				platformResult
 			),
 			this.checkScheduledJobs(),
 			...identityProviderChecks,
@@ -338,9 +351,13 @@ export class HealthService {
 	private async checkMessagingBacklog(
 		resultPromise: Promise<NotificationDeliveryResult>,
 		widgetsResultPromise: Promise<WidgetsOverviewResult>,
-		billingResultPromise: Promise<BillingOverviewResult> = this.getBillingResult()
+		billingResultPromise: Promise<BillingOverviewResult> = this.getBillingResult(),
+		platformResultPromise: Promise<PlatformOverviewResult> = this.getPlatformResult()
 	): Promise<HealthCheck> {
-		const billing = await billingResultPromise;
+		const [billing, platform] = await Promise.all([
+			billingResultPromise,
+			platformResultPromise
+		]);
 		const now = new Date();
 		const expiredPublishingBefore = new Date(
 			now.getTime() - OUTBOX_LOCK_TIMEOUT_MS
@@ -393,7 +410,8 @@ export class HealthService {
 				notificationDelivery.overview?.oldestPendingAt || null
 			),
 			this.parseDate(widgets.overview?.oldestPendingAt || null),
-			this.parseDate(billing.overview?.oldestPendingAt || null)
+			this.parseDate(billing.overview?.oldestPendingAt || null),
+			this.parseDate(platform.overview?.oldestPendingAt || null)
 		]
 			.filter((value): value is Date => Boolean(value))
 			.sort((left, right) => left.getTime() - right.getTime())[0];
@@ -418,13 +436,17 @@ export class HealthService {
 			oldestAgeSeconds > 60 ||
 			Boolean(notificationDelivery.error) ||
 			Boolean(widgets.error) ||
-			Boolean(billing.error);
+			Boolean(billing.error) ||
+			Boolean(platform.error);
 		const unavailable = [
 			notificationDelivery.error
 				? `Notification Delivery metrics недоступны: ${notificationDelivery.error}`
 				: '',
 			widgets.error ? `Widgets metrics недоступны: ${widgets.error}` : '',
-			billing.error ? `Billing metrics недоступны: ${billing.error}` : ''
+			billing.error ? `Billing metrics недоступны: ${billing.error}` : '',
+			platform.error
+				? `Platform metrics недоступны: ${platform.error}`
+				: ''
 		]
 			.filter(Boolean)
 			.join('; ');
@@ -533,6 +555,57 @@ export class HealthService {
 		};
 	}
 
+	private async checkPlatform(
+		resultPromise: Promise<PlatformOverviewResult>
+	): Promise<HealthCheck> {
+		const startedAt = Date.now();
+		const result = await resultPromise;
+		if (!result.overview || result.error) {
+			return {
+				id: 'platform',
+				title: 'Platform',
+				status: 'down',
+				message: result.error || 'Internal API вернул пустой ответ',
+				latencyMs: Date.now() - startedAt
+			};
+		}
+		const heartbeats = result.overview.heartbeats;
+		const down = heartbeats.filter(
+			heartbeat => heartbeat.status === 'down'
+		);
+		const missing = heartbeats.length !== 2;
+		const revisions = new Set(
+			heartbeats
+				.map(heartbeat => heartbeat.revision)
+				.filter((revision): revision is string => Boolean(revision))
+		);
+		const revisionMismatch =
+			!missing && !down.length && revisions.size !== 1;
+		const staleOutbox = result.overview.operational.staleOutbox;
+		return {
+			id: 'platform',
+			title: 'Platform',
+			status:
+				missing || down.length
+					? 'down'
+					: revisionMismatch || staleOutbox > 0
+						? 'warning'
+						: 'ok',
+			message: missing
+				? 'Platform не опубликовал readiness всех процессов'
+				: down.length
+					? `Не готовы процессы: ${down
+							.map(item => item.service)
+							.join(', ')}`
+					: revisionMismatch
+						? 'Процессы Platform запущены на разных revisions'
+						: staleOutbox > 0
+							? `Outbox Platform старше 15 минут: ${staleOutbox}`
+							: 'API и outbox publisher готовы',
+			latencyMs: Date.now() - startedAt
+		};
+	}
+
 	private getNotificationDeliveryResult(): Promise<NotificationDeliveryResult> {
 		return this.notificationDelivery
 			.getOverview()
@@ -587,6 +660,17 @@ export class HealthService {
 						: 'Billing ownership недоступен'
 			};
 		}
+	}
+
+	private getPlatformResult(): Promise<PlatformOverviewResult> {
+		return this.platform
+			.getOverview()
+			.then(overview => ({ overview, error: null }))
+			.catch(error => ({
+				overview: null,
+				error:
+					error instanceof Error ? error.message : 'Platform недоступен'
+			}));
 	}
 
 	private parseDate(value?: string | null): Date | null {

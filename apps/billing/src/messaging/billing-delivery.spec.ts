@@ -4,13 +4,104 @@ import {
 	OutboxStatus
 } from '@prisma/billing-client';
 import type { ConsumeMessage } from 'amqplib';
+import { createHash } from 'node:crypto';
+import {
+	AUTO_RENEWAL_CONSENT_TEXT,
+	AUTO_RENEWAL_CONSENT_VERSION
+} from '../domain/billing-legal.constants';
+import { BillingProjectionService } from '../projections/billing-projection.service';
 import {
 	BILLING_DEAD_LETTER_EXCHANGE,
 	BILLING_EVENT_TYPES,
+	BILLING_QUEUE_NAMES,
 	BILLING_RETRY_EXCHANGE
 } from './billing-messaging.constants';
 import { BillingOutboxPublisherService } from './billing-outbox-publisher.service';
 import { BillingWorkerService } from './billing-worker.service';
+
+describe('Billing offer v2 scoped sequence contract', () => {
+	const content = '<p>exact offer snapshot</p>';
+	const payload = {
+		schemaVersion: 2,
+		eventType: BILLING_EVENT_TYPES.offerChanged,
+		eventId: '4c230515-2e4e-4e8c-a655-cdcfb8c3dc2b',
+		aggregateId: 'offer',
+		aggregateVersion: '42',
+		sourceSequenceContractVersion: 2,
+		sourceSequenceScope: 'billing.offer:offer',
+		sourceSequence: '871',
+		occurredAt: '2026-08-24T00:00:00.000Z',
+		tombstone: false,
+		state: {
+			id: 'offer',
+			content,
+			sha256: createHash('sha256').update(content, 'utf8').digest('hex'),
+			updatedAt: '2026-08-24T00:00:00.000Z',
+			consentVersion: AUTO_RENEWAL_CONSENT_VERSION,
+			consentText: AUTO_RENEWAL_CONSENT_TEXT
+		}
+	};
+
+	it('accepts only v2 on the v2 queue and rejects the retired v1 envelope', () => {
+		const service = new BillingProjectionService({} as never);
+		expect(BILLING_QUEUE_NAMES.offer).toBe('winwidget.billing.offer.v2');
+		expect(
+			service.parse(payload, BILLING_EVENT_TYPES.offerChanged)
+		).toMatchObject({
+			sourceSequenceContractVersion: 2,
+			sourceSequenceScope: 'billing.offer:offer',
+			sourceSequence: 871n
+		});
+		const retired = {
+			...payload,
+			schemaVersion: 1,
+			eventType: 'billing.offer.changed.v1'
+		} as Record<string, unknown>;
+		delete retired.sourceSequenceContractVersion;
+		delete retired.sourceSequenceScope;
+		expect(() =>
+			service.parse(retired, BILLING_EVENT_TYPES.offerChanged)
+		).toThrow('envelope type is invalid');
+	});
+
+	it('does not advance the retained Core Billing allocator', async () => {
+		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue([]),
+			billingOfferProjection: {
+				findUnique: jest.fn().mockResolvedValue(null),
+				upsert: jest.fn().mockResolvedValue({})
+			},
+			billingSettings: { upsert: jest.fn().mockResolvedValue({}) },
+			billingSourceSequence: {
+				findUnique: jest.fn(),
+				create: jest.fn(),
+				update: jest.fn()
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				async (work: (client: typeof transaction) => unknown) =>
+					work(transaction)
+			)
+		};
+		const service = new BillingProjectionService(prisma as never);
+
+		await expect(
+			service.applyOffer(
+				service.parse(payload, BILLING_EVENT_TYPES.offerChanged)
+			)
+		).resolves.toBe('applied');
+		expect(
+			transaction.billingSourceSequence.findUnique
+		).not.toHaveBeenCalled();
+		expect(
+			transaction.billingSourceSequence.create
+		).not.toHaveBeenCalled();
+		expect(
+			transaction.billingSourceSequence.update
+		).not.toHaveBeenCalled();
+	});
+});
 
 describe('BillingOutboxPublisherService', () => {
 	const event = () => ({

@@ -3,6 +3,7 @@ import {
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 	IDENTITY_DATABASE_BACKUP_DELAY_MINUTES,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
+	PLATFORM_DATABASE_BACKUP_DELAY_MINUTES,
 	REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
 	WIDGETS_DATABASE_BACKUP_DELAY_MINUTES
 } from '@/maintenance/database-backup.types';
@@ -125,7 +126,8 @@ export const ensureReportingBackupScheduleSeparated = (
 		(backupMinutes + REPORTING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
 		(backupMinutes + WIDGETS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
 		(backupMinutes + BILLING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
-		(backupMinutes + IDENTITY_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
+		(backupMinutes + IDENTITY_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
+		(backupMinutes + PLATFORM_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
 	];
 
 	if (
@@ -856,6 +858,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 			databaseBackupTime,
 			IDENTITY_DATABASE_BACKUP_DELAY_MINUTES
 		);
+		const platformDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			PLATFORM_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryChatId: settings.dailySummaryChatId,
@@ -890,6 +896,10 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 				IDENTITY_DATABASE_BACKUP_DELAY_MINUTES,
 			identityDatabaseBackupTime,
 			identityDatabaseBackupTimeLabel: `${identityDatabaseBackupTime} МСК`,
+			platformDatabaseBackupDelayMinutes:
+				PLATFORM_DATABASE_BACKUP_DELAY_MINUTES,
+			platformDatabaseBackupTime,
+			platformDatabaseBackupTimeLabel: `${platformDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:

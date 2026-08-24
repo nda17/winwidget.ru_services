@@ -348,7 +348,7 @@ NODE
 }
 
 identity_cutover_require_tokens() {
-	local key value values='|'
+	local key value values='|' platform_core_token_count
 	for key in NOTIFICATION_DELIVERY_INTERNAL_TOKEN CAMPAIGNS_INTERNAL_TOKEN \
 		REPORTING_INTERNAL_TOKEN WIDGETS_INTERNAL_TOKEN BILLING_INTERNAL_TOKEN; do
 		value="$(identity_read_env_value "$ENV_FILE" "$key")" || return 1
@@ -359,6 +359,7 @@ identity_cutover_require_tokens() {
 	done
 	for key in IDENTITY_CORE_TOKEN IDENTITY_CAMPAIGNS_TOKEN \
 		IDENTITY_REPORTING_TOKEN IDENTITY_WIDGETS_TOKEN IDENTITY_BILLING_TOKEN \
+		IDENTITY_PLATFORM_TOKEN \
 		CORE_IDENTITY_TOKEN BILLING_CAMPAIGNS_TOKEN BILLING_IDENTITY_TOKEN \
 		WIDGETS_IDENTITY_TOKEN; do
 		value="$(identity_read_env_value "$ENV_FILE" "$key")" || return 1
@@ -367,7 +368,22 @@ identity_cutover_require_tokens() {
 			identity_cutover_fail "Identity credential contract failed for $key" || return 1
 		values+="$value|"
 	done
-	unset value values
+	platform_core_token_count="$(awk -F= '
+    $1 == "PLATFORM_CORE_TOKEN" { found += 1 }
+    END { print found + 0 }
+  ' "$ENV_FILE")" || return 1
+	[[ "$platform_core_token_count" =~ ^[0-9]+$ ]] || return 1
+	if [[ "$platform_core_token_count" != 0 ]]; then
+		[[ "$platform_core_token_count" == 1 ]] ||
+			identity_cutover_fail 'Identity credential contract found duplicate PLATFORM_CORE_TOKEN keys' || return 1
+		value="$(identity_read_env_value "$ENV_FILE" PLATFORM_CORE_TOKEN)" || return 1
+		[[ ${#value} -ge 32 && "$value" != *$'\n'* && "$value" != *$'\r'* &&
+			"$value" != change_me* && "$value" != change-me* && "$value" != ci_* &&
+			"$values" != *"|$value|"* ]] ||
+			identity_cutover_fail 'Identity credential contract failed for PLATFORM_CORE_TOKEN' || return 1
+		values+="$value|"
+	fi
+	unset value values platform_core_token_count
 }
 
 identity_cutover_require_rotated_signing_key() {
@@ -1712,7 +1728,7 @@ identity_cutover_switch_core_integration_permissions() {
 rabbitmqctl set_permissions -p "$IDENTITY_RABBITMQ_VHOST" \
   "$IDENTITY_INTEGRATION_USER" "^$" \
   "^(winwidget\.retry|winwidget\.dead-letter)$" \
-  "^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1)(\..*)?$" >/dev/null
+  "^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate|settings)\.v1)(\..*)?$" >/dev/null
 '
 	unset credentials
 }
@@ -2640,6 +2656,11 @@ identity_cutover_self_test() {
 	! identity_cutover_transition_allowed complete active
 	local fence_source recovery_source backup_source deploy_source complete_source
 	local node_runtime_source
+	local token_source
+	token_source="$(declare -f identity_cutover_require_tokens)"
+	[[ "$token_source" == *'platform_core_token_count'* &&
+		"$token_source" == *'PLATFORM_CORE_TOKEN'* &&
+		"$token_source" == *'change_me'* && "$token_source" == *'ci_'* ]] || return 1
 	local restore_runner_source recover_pre_boundary_source file_text retired_path
 	node_runtime_source="$(declare -f identity_cutover_prepare_node_runtime \
 		identity_cutover_node_runtime)"

@@ -35,7 +35,6 @@ const SOURCE_KINDS: readonly BillingConsumerKind[] = [
 	'identity',
 	'offer',
 	'notification-routing',
-	'settings-source',
 	'trial-request',
 	'referral-request',
 	'lifecycle-repair'
@@ -245,14 +244,6 @@ export class BillingWorkerService
 				BILLING_EVENT_TYPES.notificationRoutingChanged
 			);
 			await this.projections.applyNotificationRouting(event);
-			return;
-		}
-		if (kind === 'settings-source') {
-			const event = this.projections.parse(
-				payload,
-				BILLING_EVENT_TYPES.settingsSourceChanged
-			);
-			await this.projections.applySettingsSource(event);
 			return;
 		}
 		if (kind === 'trial-request') {
@@ -783,7 +774,6 @@ export class BillingWorkerService
 			offer: BILLING_EVENT_TYPES.offerChanged,
 			'notification-routing':
 				BILLING_EVENT_TYPES.notificationRoutingChanged,
-			'settings-source': BILLING_EVENT_TYPES.settingsSourceChanged,
 			'trial-request': BILLING_EVENT_TYPES.trialRequested,
 			'referral-request': BILLING_EVENT_TYPES.referralRequested,
 			'lifecycle-repair': BILLING_EVENT_TYPES.lifecycleRepairRequested

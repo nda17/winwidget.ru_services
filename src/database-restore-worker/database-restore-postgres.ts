@@ -90,7 +90,23 @@ const CORE_API_RUNTIME_FUNCTIONS = [
 	'"public"."reporting_producers_enabled"()',
 	'"public"."reporting_iso_timestamp"(timestamp without time zone)',
 	'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
-	'"public"."reporting_settings_projection_trigger"()'
+	'"public"."reporting_settings_projection_trigger"()',
+	'"public"."platform_core_source_writes_enabled"()',
+	'"public"."platform_assert_core_write_enabled"()'
+] as const;
+
+const CORE_RETIRED_IDENTITY_CLEANUP_MIGRATION =
+	'20260815000000_remove_legacy_identity_core_source';
+const CORE_RETIRED_IDENTITY_SOURCE_STATE_TABLES = [
+	'identity_core_source_state'
+] as const;
+const CORE_RETIRED_IDENTITY_SOURCE_STATE_FUNCTIONS = [
+	'public.identity_core_source_is_open()',
+	'public.lock_identity_core_source_open()',
+	'public.reject_fenced_identity_core_source_write()',
+	'public.reject_fenced_identity_auth_settings_write()',
+	'public.fence_identity_core_source(text)',
+	'public.unfence_identity_core_source(text)'
 ] as const;
 
 const CORE_LEGACY_WIDGETS_CLEANUP_MIGRATION =
@@ -327,12 +343,15 @@ export function buildDatabaseOwnershipAndAclRepairSql(
 		quoteIdentifier(target.backupRole)
 	].join(', ');
 	const runtimeAclSql = buildRuntimeAclRepairSql(target);
+	const coreRetiredIdentitySourceInvariantSql =
+		buildCoreRetiredIdentitySourceInvariantSql(target);
 	const coreLegacyWidgetsCleanupInvariantSql =
 		buildCoreLegacyWidgetsCleanupInvariantSql(target);
 	const coreLegacyBillingCleanupInvariantSql =
 		buildCoreLegacyBillingCleanupInvariantSql(target);
 
 	return `
+${coreRetiredIdentitySourceInvariantSql}
 ${coreLegacyWidgetsCleanupInvariantSql}
 ${coreLegacyBillingCleanupInvariantSql}
 ALTER SCHEMA ${schema} OWNER TO ${migration};
@@ -417,12 +436,15 @@ export function buildDatabasePreReopenVerificationSql(
 	const applicationRolesSql = sqlTextArray(target.allApplicationRoles);
 	const anchorTablesSql = sqlTextArray(target.anchorTables);
 	const runtimeAclVerificationSql = buildRuntimeAclVerificationSql(target);
+	const coreRetiredIdentitySourceInvariantSql =
+		buildCoreRetiredIdentitySourceInvariantSql(target);
 	const coreLegacyWidgetsCleanupInvariantSql =
 		buildCoreLegacyWidgetsCleanupInvariantSql(target);
 	const coreLegacyBillingCleanupInvariantSql =
 		buildCoreLegacyBillingCleanupInvariantSql(target);
 
 	return `
+${coreRetiredIdentitySourceInvariantSql}
 ${coreLegacyWidgetsCleanupInvariantSql}
 ${coreLegacyBillingCleanupInvariantSql}
 DO $database_restore_verify$
@@ -883,6 +905,61 @@ $database_restore_core_widgets_cleanup$;
 `;
 }
 
+function buildCoreRetiredIdentitySourceInvariantSql(
+	target: DatabaseRestoreTargetConfig
+): string {
+	if (target.target !== 'core') return '';
+
+	const schema = quoteIdentifier(target.schema);
+	const schemaLiteral = quoteLiteral(target.schema);
+	const cleanupMigration = quoteLiteral(
+		CORE_RETIRED_IDENTITY_CLEANUP_MIGRATION
+	);
+	const retiredTables = sqlTextArray(
+		CORE_RETIRED_IDENTITY_SOURCE_STATE_TABLES
+	);
+	const retiredFunctions = sqlTextArray(
+		CORE_RETIRED_IDENTITY_SOURCE_STATE_FUNCTIONS
+	);
+
+	return `
+DO $database_restore_core_identity_cleanup$
+DECLARE
+    retired_table_name TEXT;
+    retired_function_signature TEXT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM ${schema}."_prisma_migrations"
+        WHERE migration_name = ${cleanupMigration}
+          AND finished_at IS NOT NULL
+          AND rolled_back_at IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'Routine Core restore requires the applied legacy Identity cleanup migration';
+    END IF;
+
+    FOREACH retired_table_name IN ARRAY ${retiredTables} LOOP
+        IF to_regclass(format('%I.%I', ${schemaLiteral}, retired_table_name))
+               IS NOT NULL THEN
+            RAISE EXCEPTION
+                'Core restore contains retired Identity source-state relation %',
+                retired_table_name;
+        END IF;
+    END LOOP;
+
+    FOREACH retired_function_signature IN ARRAY ${retiredFunctions} LOOP
+        IF to_regprocedure(retired_function_signature) IS NOT NULL THEN
+            RAISE EXCEPTION
+                'Core restore contains retired Identity source-state function %',
+                retired_function_signature;
+        END IF;
+    END LOOP;
+END
+$database_restore_core_identity_cleanup$;
+`;
+}
+
 function buildCoreLegacyBillingCleanupInvariantSql(
 	target: DatabaseRestoreTargetConfig
 ): string {
@@ -962,6 +1039,8 @@ REVOKE ALL ON TABLE ${schema}."reporting_producer_state" FROM ${primaryRuntime};
 GRANT SELECT ON TABLE ${schema}."reporting_producer_state" TO ${primaryRuntime};
 REVOKE ALL ON TABLE ${schema}."reporting_projection_versions" FROM ${primaryRuntime};
 GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}."reporting_projection_versions" TO ${primaryRuntime};
+REVOKE ALL ON TABLE ${schema}."platform_core_state" FROM ${primaryRuntime};
+GRANT SELECT ON TABLE ${schema}."platform_core_state" TO ${primaryRuntime};
 GRANT EXECUTE ON FUNCTION ${CORE_API_RUNTIME_FUNCTIONS.join(',\n    ')} TO ${primaryRuntime};
 
 GRANT SELECT, INSERT, UPDATE ON TABLE
@@ -979,7 +1058,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
     ${schema}."messaging_heartbeats"
     TO ${coreMaintenance};
 GRANT SELECT ON TABLE
-    ${schema}."reporting_producer_state"
+    ${schema}."reporting_producer_state",
+    ${schema}."platform_core_state"
     TO ${coreMaintenance};
 `
 			: '';
@@ -1087,11 +1167,11 @@ function buildRuntimeAclVerificationSql(
 	        IF has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'SELECT')
 	               IS DISTINCT FROM (table_name <> '_prisma_migrations')
 		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
-		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state']))
-		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
-		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state']))
+		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']))
+			   OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
+			       IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']))
 		           OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
-		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions'])) THEN
+		               IS DISTINCT FROM (table_name <> ALL(ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions', 'platform_core_state'])) THEN
             RAISE EXCEPTION 'Core API runtime table ACL is invalid';
         END IF;
     END LOOP;
@@ -1148,7 +1228,8 @@ function buildRuntimeAclVerificationSql(
                    'telegram_bot_settings',
                    'integration_delivery_failures',
                    'messaging_heartbeats',
-                   'reporting_producer_state'
+                   'reporting_producer_state',
+                   'platform_core_state'
                ]))
            OR has_table_privilege(${maintenanceLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
                IS DISTINCT FROM (table_name = ANY(ARRAY[

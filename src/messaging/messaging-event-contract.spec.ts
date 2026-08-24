@@ -688,7 +688,7 @@ describe('messaging event contract', () => {
 			schemaVersion: 1,
 			eventType: 'database.backup.requested.v1',
 			jobId: MESSAGE_ID,
-			jobType: 'DATABASE_BACKUP',
+			jobType: 'REPORTING_DATABASE_BACKUP',
 			scheduleKey: 'manual:test',
 			periodStart: null,
 			periodEnd: null
@@ -709,7 +709,7 @@ describe('messaging event contract', () => {
 			schemaVersion: 1,
 			eventType: 'database.backup.requested.v1',
 			jobId: MESSAGE_ID,
-			jobType: 'DATABASE_BACKUP',
+			jobType: 'REPORTING_DATABASE_BACKUP',
 			scheduleKey: 'scheduled:test',
 			periodStart: null,
 			periodEnd: null
@@ -788,12 +788,33 @@ describe('messaging event contract', () => {
 		).toThrow('Invalid database backup job type');
 	});
 
-	it('rejects a backup period with only one boundary', () => {
+	it('rejects the removed Core database backup job type', () => {
 		const payload = {
 			schemaVersion: 1,
 			eventType: 'database.backup.requested.v1',
 			jobId: MESSAGE_ID,
 			jobType: 'DATABASE_BACKUP',
+			scheduleKey: 'scheduled:legacy-core',
+			periodStart: null,
+			periodEnd: null
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'database-backup'
+			})
+		).toThrow('Invalid database backup job type');
+	});
+
+	it('rejects a backup period with only one boundary', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'database.backup.requested.v1',
+			jobId: MESSAGE_ID,
+			jobType: 'REPORTING_DATABASE_BACKUP',
 			scheduleKey: 'scheduled:test',
 			periodStart: '2026-07-25T00:00:00.000Z',
 			periodEnd: null
@@ -1163,10 +1184,185 @@ describe('messaging event contract', () => {
 				eventType: payload.eventType,
 				routingKey: payload.eventType,
 				messageId: MESSAGE_ID,
-				kind: 'billing-settings-source'
+				kind: 'billing-identity-source'
 			})
 		).toThrow(
-			'Event type billing.offer.changed.v1 cannot be consumed by billing-settings-source'
+			'Event type billing.offer.changed.v1 cannot be consumed by billing-identity-source'
 		);
+	});
+
+	it('rejects the retired Core Billing settings-source event', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'billing.settings.source.changed.v1',
+			eventId: MESSAGE_ID,
+			aggregateId: 'singleton',
+			aggregateVersion: '2',
+			sourceSequence: '2',
+			occurredAt: '2026-08-11T00:00:00.000Z',
+			tombstone: true,
+			state: null
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: payload.eventType,
+				messageId: MESSAGE_ID,
+				kind: 'billing-identity-source'
+			})
+		).toThrow(
+			'Unsupported messaging event type: billing.settings.source.changed.v1'
+		);
+	});
+
+	it('accepts the exact Platform admin-audit contract and dedicated route', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-23T12:00:00.000Z',
+			correlationId: 'request:platform-settings-42',
+			actorId: 'admin-user-id',
+			section: 'PLATFORM_CONTENT',
+			action: 'PLATFORM_SITE_SETTINGS_UPDATE',
+			description: 'Обновлены настройки платформы',
+			entity: {
+				type: 'site_settings',
+				id: 'singleton',
+				label: 'Настройки платформы',
+				targetUserId: null
+			},
+			metadata: {
+				changedFields: ['bannerEnabled'],
+				bannerTextChanged: false,
+				bannerEnabled: true,
+				actorRole: 'ADMIN',
+				requestIp: null,
+				requestUserAgent: null
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.platform.v1',
+				messageId: MESSAGE_ID,
+				kind: 'platform-admin-audit'
+			})
+		).not.toThrow();
+	});
+
+	it.each([
+		{
+			action: 'PLATFORM_LEGAL_PAGE_UPDATE',
+			entity: {
+				type: 'legal_page',
+				id: 'personal-policy',
+				label: 'personal-policy',
+				targetUserId: null
+			},
+			metadata: {
+				contentLength: 42,
+				contentSha256: 'a'.repeat(64),
+				actorRole: 'ADMIN',
+				requestIp: null,
+				requestUserAgent: null
+			}
+		},
+		{
+			action: 'PLATFORM_HOME_PAGE_CONTENT_UPDATE',
+			entity: {
+				type: 'home_page_content',
+				id: 'singleton',
+				label: 'Главная страница',
+				targetUserId: null
+			},
+			metadata: {
+				updateKind: 'STRUCTURED',
+				changedFields: ['about', 'hero'],
+				contentBytes: 256,
+				contentSha256: 'b'.repeat(64),
+				actorRole: 'ADMIN',
+				requestIp: null,
+				requestUserAgent: null
+			}
+		},
+		{
+			action: 'PLATFORM_HOME_PAGE_RAW_CODE_UPDATE',
+			entity: {
+				type: 'home_page_content',
+				id: 'singleton',
+				label: 'Главная страница',
+				targetUserId: null
+			},
+			metadata: {
+				updateKind: 'RAW',
+				changedFields: ['body', 'head'],
+				contentBytes: 128,
+				contentSha256: 'c'.repeat(64),
+				actorRole: 'DEV',
+				requestIp: '127.0.0.1',
+				requestUserAgent: 'jest'
+			}
+		}
+	])('accepts the $action Platform action allowlist branch', fixture => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-23T12:00:00.000Z',
+			correlationId: 'request:platform-content-42',
+			actorId: 'admin-user-id',
+			section: 'PLATFORM_CONTENT',
+			action: fixture.action,
+			description: 'Platform content updated',
+			entity: fixture.entity,
+			metadata: fixture.metadata
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.platform.v1',
+				messageId: MESSAGE_ID,
+				kind: 'platform-admin-audit'
+			})
+		).not.toThrow();
+	});
+
+	it('rejects legacy or cross-domain Platform audit actions', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-23T12:00:00.000Z',
+			correlationId: 'request:platform-settings-42',
+			actorId: 'admin-user-id',
+			section: 'PLATFORM_CONTENT',
+			action: 'SITE_SETTINGS_UPDATE',
+			description: 'legacy collision',
+			entity: {
+				type: 'site_settings',
+				id: 'singleton',
+				label: null,
+				targetUserId: null
+			},
+			metadata: {
+				changedFields: ['bannerEnabled'],
+				bannerTextChanged: false,
+				actorRole: 'ADMIN',
+				requestIp: null,
+				requestUserAgent: null
+			}
+		};
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.platform.v1',
+				messageId: MESSAGE_ID,
+				kind: 'platform-admin-audit'
+			})
+		).toThrow('payload.action is invalid');
 	});
 });

@@ -148,7 +148,6 @@ describe('Billing monetary operation fences', () => {
 		};
 		const service = new InternalCommandsService(
 			prisma as never,
-			{} as never,
 			{} as never
 		);
 

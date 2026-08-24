@@ -408,6 +408,125 @@ describe('API Gateway config', () => {
 		);
 	});
 
+	it('routes Billing settings with split public and admin auth policies', () => {
+		const billingOrigin = 'http://127.0.0.1:4800';
+		const config = loadConfig({
+			...baseEnv,
+			GATEWAY_ROUTES_JSON: JSON.stringify([
+				{
+					id: 'billing-settings-public',
+					pathPrefix: '/api/v1/billing-settings/public',
+					upstreamUrl: billingOrigin,
+					authPolicy: 'optional',
+					timeoutMs: 30_000
+				},
+				{
+					id: 'billing-settings-admin',
+					pathPrefix: '/api/v1/billing-settings/admin',
+					upstreamUrl: billingOrigin,
+					authPolicy: 'required',
+					timeoutMs: 30_000
+				},
+				{
+					id: 'monolith',
+					pathPrefix: '/api/v1',
+					upstreamUrl: 'http://127.0.0.1:4200',
+					authPolicy: 'optional',
+					timeoutMs: 60_000
+				}
+			])
+		});
+
+		const publicRoute = matchGatewayRoute(
+			'/api/v1/billing-settings/public',
+			config.routes
+		);
+		const adminRoute = matchGatewayRoute(
+			'/api/v1/billing-settings/admin',
+			config.routes
+		);
+		assert.deepEqual(
+			publicRoute && {
+				id: publicRoute.id,
+				authPolicy: publicRoute.authPolicy,
+				timeoutMs: publicRoute.timeoutMs
+			},
+			{
+				id: 'billing-settings-public',
+				authPolicy: 'optional',
+				timeoutMs: 30_000
+			}
+		);
+		assert.deepEqual(
+			adminRoute && {
+				id: adminRoute.id,
+				authPolicy: adminRoute.authPolicy,
+				timeoutMs: adminRoute.timeoutMs
+			},
+			{
+				id: 'billing-settings-admin',
+				authPolicy: 'required',
+				timeoutMs: 30_000
+			}
+		);
+		assert.equal(publicRoute?.upstreamUrl.origin, billingOrigin);
+		assert.equal(adminRoute?.upstreamUrl.origin, billingOrigin);
+		const monolithIndex = config.routes.findIndex(
+			route => route.id === 'monolith'
+		);
+		assert.ok(config.routes.indexOf(publicRoute!) < monolithIndex);
+		assert.ok(config.routes.indexOf(adminRoute!) < monolithIndex);
+		assert.equal(
+			matchGatewayRoute('/api/v1/billing-settings-public', config.routes)
+				?.id,
+			'monolith'
+		);
+	});
+
+	it('routes the exact Platform public boundaries before the monolith', () => {
+		const platformOrigin = 'http://127.0.0.1:5000';
+		const platformRoutes = [
+			['platform-site-settings', '/api/v1/site-settings'],
+			['platform-legal-pages', '/api/v1/legal-pages'],
+			['platform-home-page-content', '/api/v1/home-page-content']
+		].map(([id, pathPrefix]) => ({
+			id,
+			pathPrefix,
+			upstreamUrl: platformOrigin,
+			authPolicy: 'optional' as const,
+			timeoutMs: 60_000
+		}));
+		const config = loadConfig({
+			...baseEnv,
+			GATEWAY_ROUTES_JSON: JSON.stringify([
+				...platformRoutes,
+				{
+					id: 'monolith',
+					pathPrefix: '/api/v1',
+					upstreamUrl: 'http://127.0.0.1:4200',
+					authPolicy: 'optional',
+					timeoutMs: 60_000
+				}
+			])
+		});
+		const monolithIndex = config.routes.findIndex(
+			route => route.id === 'monolith'
+		);
+
+		for (const expected of platformRoutes) {
+			const route = matchGatewayRoute(expected.pathPrefix, config.routes);
+			assert.equal(route?.id, expected.id);
+			assert.equal(route?.upstreamUrl.origin, platformOrigin);
+			assert.equal(route?.authPolicy, 'optional');
+			assert.equal(route?.timeoutMs, 60_000);
+			assert.ok(config.routes.indexOf(route!) < monolithIndex);
+		}
+		assert.equal(
+			matchGatewayRoute('/api/v1/site-setting', config.routes)?.id,
+			'monolith'
+		);
+	});
+
 	it('fails fast for legacy, malformed and incomplete route config', () => {
 		assert.throws(
 			() =>

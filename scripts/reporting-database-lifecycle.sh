@@ -33,7 +33,7 @@ REPORTING_CANONICAL_MIGRATION_USER='winwidget_reporting_migration'
 REPORTING_CANONICAL_BACKUP_USER='winwidget_reporting_backup'
 REPORTING_PRE_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,daily-summary-telegram,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
 REPORTING_POST_CLEANUP_INTEGRATION_WORKER_KINDS='webhook,bitrix24,amo-crm,telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,auto-renewal'
-REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection,billing-settings-projection'
+REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
 REPORTING_PRE_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram'
 REPORTING_POST_CLEANUP_CORE_NOTIFICATION_DELIVERY_KINDS='email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,subscription-expiry-email,subscription-expiry-telegram'
 REPORTING_STEADY_STATE_REMOVED_PATHS=(
@@ -2677,10 +2677,11 @@ reporting_database_lifecycle_self_test() {
 	}
 	[[ "$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-admin-audit'* &&
 		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" == *'identity-admin-audit'* &&
+		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" == *'platform-admin-audit'* &&
 		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-payment-projection'* &&
 		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-subscription-projection'* &&
 		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-affiliate-projection'* &&
-		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" == *'billing-settings-projection'* &&
+		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" != *'billing-settings-projection'* &&
 		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" != *'telegram-destination-unavailable'* &&
 		"$REPORTING_CURRENT_IDENTITY_STEADY_INTEGRATION_WORKER_KINDS" != *'auto-renewal'* ]] || {
 		echo 'Reporting lifecycle has an invalid post-Identity worker ownership set.' >&2

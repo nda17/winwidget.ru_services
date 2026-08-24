@@ -59,17 +59,6 @@ export interface BillingOfferState {
 	consentText: string;
 }
 
-export interface BillingSettingsState {
-	id: 'singleton';
-	paymentEnabled: boolean;
-	autoRenewalSignupEnabled: boolean;
-	autoRenewalChargesEnabled: boolean;
-	autoRenewalChargesEnabledAt: string;
-	affiliateProgramEnabled: boolean;
-	affiliateCashbackPercent: number;
-	updatedAt: string;
-}
-
 export interface BillingPaymentDetailsState {
 	id: string;
 	userId: string;
@@ -121,10 +110,6 @@ export type BillingProjectionEventPayload = BillingVersionedEventBase &
 		| {
 				eventType: 'billing.affiliate.changed.v1';
 				state: BillingAffiliateState | null;
-		  }
-		| {
-				eventType: 'billing.settings.changed.v1';
-				state: BillingSettingsState | null;
 		  }
 	);
 

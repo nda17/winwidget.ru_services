@@ -75,6 +75,14 @@ describe('MaintenanceSchedulerService', () => {
 			billing: {
 				created: true,
 				job: { id: '66666666-6666-4666-8666-666666666666' }
+			},
+			identity: {
+				created: true,
+				job: { id: '77777777-7777-4777-8777-777777777777' }
+			},
+			platform: {
+				created: true,
+				job: { id: '88888888-8888-4888-8888-888888888888' }
 			}
 		});
 

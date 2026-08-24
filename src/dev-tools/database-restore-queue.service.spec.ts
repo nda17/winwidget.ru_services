@@ -144,6 +144,11 @@ describe('DatabaseRestoreQueueService', () => {
 					id: 'identity',
 					label: 'Identity',
 					confirmation: 'ВОССТАНОВИТЬ IDENTITY'
+				},
+				{
+					id: 'platform',
+					label: 'Platform',
+					confirmation: 'ВОССТАНОВИТЬ PLATFORM'
 				}
 			]
 		});

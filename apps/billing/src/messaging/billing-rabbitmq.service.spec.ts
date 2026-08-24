@@ -1,5 +1,9 @@
 import type { SetupFunc } from 'amqp-connection-manager';
 import type { ConfirmChannel } from 'amqplib';
+import {
+	BILLING_CONSUMER_KINDS,
+	BILLING_QUEUE_NAMES
+} from './billing-messaging.constants';
 import { BillingRabbitMqService } from './billing-rabbitmq.service';
 
 function deferred(): {
@@ -100,5 +104,12 @@ describe('BillingRabbitMqService topology ordering', () => {
 		await reconnect;
 		expect(reconnectChannel.prefetch).toHaveBeenCalledWith(10, false);
 		expect(reconnectChannel.consume).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not declare the retired settings-source queue family', () => {
+		expect(BILLING_CONSUMER_KINDS).not.toContain('settings-source');
+		expect(Object.values(BILLING_QUEUE_NAMES)).not.toContain(
+			'winwidget.billing.settings-source.v1'
+		);
 	});
 });
