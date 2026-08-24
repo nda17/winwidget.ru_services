@@ -6723,19 +6723,6 @@ jobs:
             -o ServerAliveCountMax=4
             -p "$BACKEND_SSH_PORT"
           )
-          declare -a backend_scp_options=(
-            -q
-            -i "$HOME/.ssh/deploy_key"
-            -F /dev/null
-            -o IdentitiesOnly=yes
-            -o BatchMode=yes
-            -o StrictHostKeyChecking=yes
-            -o GlobalKnownHostsFile=/dev/null
-            -o "UserKnownHostsFile=$HOME/.ssh/known_hosts"
-            -o ConnectTimeout=15
-            -P "$BACKEND_SSH_PORT"
-          )
-
           cleanup_platform_attestation_transport() {
             set +e
             if [[ "$frontend_controller_staged" == 'true' ]]; then
@@ -6836,26 +6823,14 @@ jobs:
               -o ServerAliveCountMax=4
               -p "$FRONTEND_SSH_PORT"
             )
-            frontend_scp_options=(
-              -q
-              -i "$frontend_key"
-              -F /dev/null
-              -o IdentitiesOnly=yes
-              -o BatchMode=yes
-              -o StrictHostKeyChecking=yes
-              -o GlobalKnownHostsFile=/dev/null
-              -o "UserKnownHostsFile=$frontend_known_hosts"
-              -o ConnectTimeout=15
-              -P "$FRONTEND_SSH_PORT"
-            )
-
             ssh "${frontend_ssh_options[@]}" \
               "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
               "set -euo pipefail; [[ \"\$(id -u)\" == '0' && -d '$frontend_root' && ! -L '$frontend_root' && \"\$(stat -c '%u:%g' '$frontend_root')\" == '0:0' ]]; rm -f -- '$frontend_controller'"
             frontend_controller_staged=true
-            scp "${frontend_scp_options[@]}" \
-              "$controller_source" \
-              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_controller"
+            ssh "${frontend_ssh_options[@]}" \
+              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
+              "set -Eeuo pipefail; umask 077; set -o noclobber; cat > '$frontend_controller'" \
+              < "$controller_source"
             ssh "${frontend_ssh_options[@]}" \
               "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
               "set -Eeuo pipefail
@@ -6878,15 +6853,16 @@ jobs:
               "rm -f -- '$frontend_controller'; [[ ! -e '$frontend_controller' && ! -L '$frontend_controller' ]]"
             frontend_controller_staged=false
 
-            scp "${frontend_scp_options[@]}" \
-              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/$public_name" \
-              "$local_root/$public_name"
-            scp "${frontend_scp_options[@]}" \
-              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/$attestation_name" \
-              "$local_root/$attestation_name"
-            scp "${frontend_scp_options[@]}" \
-              "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/$signature_name" \
-              "$local_root/$signature_name"
+            for artifact in "$public_name" "$attestation_name" "$signature_name"; do
+              ssh "${frontend_ssh_options[@]}" \
+                "$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST" \
+                "set -Eeuo pipefail
+                artifact='$frontend_root/$artifact'
+                [[ -f \"\$artifact\" && ! -L \"\$artifact\" &&
+                  \"\$(stat -c '%u:%g:%a:%h' \"\$artifact\")\" == '0:0:600:1' ]]
+                cat -- \"\$artifact\"" \
+                > "$local_root/$artifact"
+            done
             for artifact in "$public_name" "$attestation_name" "$signature_name"; do
               [[ -f "$local_root/$artifact" && ! -L "$local_root/$artifact" ]]
               artifact_size="$(wc -c < "$local_root/$artifact" | tr -d '[:space:]')"
@@ -6922,15 +6898,12 @@ jobs:
               chown 0:0 '$backend_stage'
               chmod 700 '$backend_stage'"
             backend_stage_prepared=true
-            scp "${backend_scp_options[@]}" \
-              "$local_root/$public_name" \
-              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST:$backend_stage/$public_name"
-            scp "${backend_scp_options[@]}" \
-              "$local_root/$attestation_name" \
-              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST:$backend_stage/$attestation_name"
-            scp "${backend_scp_options[@]}" \
-              "$local_root/$signature_name" \
-              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST:$backend_stage/$signature_name"
+            for artifact in "$public_name" "$attestation_name" "$signature_name"; do
+              ssh "${backend_ssh_options[@]}" \
+                "$BACKEND_SSH_USER@$BACKEND_SSH_HOST" \
+                "set -Eeuo pipefail; umask 077; set -o noclobber; cat > '$backend_stage/$artifact'" \
+                < "$local_root/$artifact"
+            done
           else
             unset FRONTEND_SSH_PRIVATE_KEY
           fi

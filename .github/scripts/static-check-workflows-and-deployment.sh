@@ -2096,6 +2096,10 @@ for (const requiredTransportToken of [
   "cleanup_platform_attestation_transport() {",
   "cleanup_controller() { rm -f --",
   "cleanup_stage() {",
+  "set -Eeuo pipefail; umask 077; set -o noclobber; cat > '$frontend_controller'",
+  "artifact='$frontend_root/$artifact'",
+  'cat -- \\"\\$artifact\\"',
+  "set -Eeuo pipefail; umask 077; set -o noclobber; cat > '$backend_stage/$artifact'",
 ]) {
   if (!platformTransportStep.includes(requiredTransportToken)) {
     throw new Error(
@@ -2112,6 +2116,7 @@ for (const forbiddenTransportToken of [
   ".github/scripts/stage-or-deploy-backend.sh",
   "PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256='$PLATFORM_MANUAL_ATTESTATION_SHA256'",
   "PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256='$PLATFORM_MANUAL_SIGNATURE_SHA256'",
+  "scp ",
 ]) {
   if (platformTransportStep.includes(forbiddenTransportToken)) {
     throw new Error(
@@ -2122,16 +2127,17 @@ for (const forbiddenTransportToken of [
 if (
   substringCount(
     platformTransportStep,
-    'scp "${frontend_scp_options[@]}"',
-  ) !== 4 ||
+    "set -Eeuo pipefail; umask 077; set -o noclobber; cat > '$frontend_controller'",
+  ) !== 1 ||
   substringCount(
     platformTransportStep,
-    'scp "${backend_scp_options[@]}"',
-  ) !== 3 ||
+    "artifact='$frontend_root/$artifact'",
+  ) !== 1 ||
+  substringCount(platformTransportStep, 'cat -- \\"\\$artifact\\"') !== 1 ||
   substringCount(
     platformTransportStep,
-    '$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/',
-  ) !== 3 ||
+    "set -Eeuo pipefail; umask 077; set -o noclobber; cat > '$backend_stage/$artifact'",
+  ) !== 1 ||
   !platformTransportStep.includes(
     '( -z "$PLATFORM_MANUAL_ATTESTATION_SHA256" ||',
   ) ||
@@ -2140,15 +2146,15 @@ if (
   )
 ) {
   throw new Error(
-    "Platform frontend transport must copy one exact controller, download only three public artifacts, upload only those artifacts, and treat manual hashes as optional extra pins",
+    "Platform frontend transport must stream one exact controller, download only the three public artifacts, upload only those artifacts, and treat manual hashes as optional extra pins",
   );
 }
 const platformControllerUpload = platformTransportStep.indexOf(
-  '"$controller_source" \\\n',
+  "cat > '$frontend_controller'",
 );
 const platformGenerate = platformTransportStep.indexOf("--generate");
 const platformPublicDownload = platformTransportStep.indexOf(
-  '"$FRONTEND_SSH_USER@$FRONTEND_SSH_HOST:$frontend_root/$public_name"',
+  "artifact='$frontend_root/$artifact'",
 );
 const platformComputedPins = platformTransportStep.indexOf(
   'computed_attestation_sha="$(sha256sum',
