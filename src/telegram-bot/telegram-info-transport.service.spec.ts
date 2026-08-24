@@ -22,7 +22,7 @@ describe('TelegramInfoTransportService', () => {
 			})
 		} as unknown as ConfigService);
 
-	it('uses the pinned TLS passthrough endpoint without changing the Telegram host', async () => {
+	it('uses the pinned HTTPS reverse proxy in production', async () => {
 		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
 			ok: true,
 			status: 200,
@@ -30,16 +30,20 @@ describe('TelegramInfoTransportService', () => {
 		} as unknown as Response);
 
 		await createService(
-			'https://api.telegram.org:8443',
+			'https://tg.winwidget.ru/telegram-api',
 			'production'
 		).sendMessage('123', 'test');
 
 		expect(fetchMock.mock.calls[0][0]).toBe(
-			'https://api.telegram.org:8443/botbot-token/sendMessage'
+			'https://tg.winwidget.ru/telegram-api/botbot-token/sendMessage'
 		);
 	});
 
-	it.each([undefined, 'https://api.telegram.org'])(
+	it.each([
+		undefined,
+		'https://api.telegram.org',
+		'https://api.telegram.org:8443'
+	])(
 		'rejects a direct Telegram endpoint in production: %s',
 		async apiBaseUrl => {
 			await expect(
@@ -53,8 +57,12 @@ describe('TelegramInfoTransportService', () => {
 	it.each([
 		'https://example.com',
 		'https://api.telegram.org:9443',
-		'https://user:password@api.telegram.org:8443',
-		'https://api.telegram.org:8443/path'
+		'https://user:password@tg.winwidget.ru/telegram-api',
+		'https://tg.winwidget.ru/telegram-api/',
+		'https://tg.winwidget.ru/telegram-api/extra',
+		'https://tg.winwidget.ru:8443/telegram-api',
+		'https://tg.winwidget.ru/telegram-api?target=other',
+		'https://tg.winwidget.ru/telegram-api#fragment'
 	])('rejects an untrusted Telegram API endpoint %s', async apiBaseUrl => {
 		await expect(
 			createService(apiBaseUrl).sendMessage('123', 'test')
@@ -165,7 +173,7 @@ describe('TelegramInfoTransportService', () => {
 			try {
 				await expect(
 					createService(
-						'https://api.telegram.org:8443',
+						'https://tg.winwidget.ru/telegram-api',
 						'production'
 					).sendDocument(configuredChatId, filePath, 'Backup', {
 						messageThreadId: 42
@@ -178,7 +186,7 @@ describe('TelegramInfoTransportService', () => {
 					fileUniqueId: 'telegram-file-unique-id'
 				});
 				expect(fetchMock.mock.calls[0][0]).toBe(
-					'https://api.telegram.org:8443/botbot-token/sendDocument'
+					'https://tg.winwidget.ru/telegram-api/botbot-token/sendDocument'
 				);
 			} finally {
 				await rm(directory, { recursive: true, force: true });

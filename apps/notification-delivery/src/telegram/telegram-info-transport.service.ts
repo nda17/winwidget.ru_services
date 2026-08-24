@@ -117,17 +117,24 @@ export class TelegramInfoTransportService {
 		const loopbackHost = ['127.0.0.1', 'localhost', '[::1]'].includes(
 			url.hostname
 		);
-		const telegramApi =
+		const directTelegramApi =
 			url.protocol === 'https:' &&
 			url.hostname === 'api.telegram.org' &&
-			(mode === 'production'
-				? url.port === '8443'
-				: ['', '8443'].includes(url.port)) &&
+			url.port === '' &&
 			url.pathname === '/';
+		const productionReverseProxy =
+			url.protocol === 'https:' &&
+			url.hostname === 'tg.winwidget.ru' &&
+			url.port === '' &&
+			url.pathname === '/telegram-api';
 		const loopbackTestApi =
 			mode !== 'production' && url.protocol === 'http:' && loopbackHost;
 		if (
-			(!telegramApi && !loopbackTestApi) ||
+			!(mode === 'production'
+				? productionReverseProxy
+				: directTelegramApi ||
+					productionReverseProxy ||
+					loopbackTestApi) ||
 			url.username !== '' ||
 			url.password !== '' ||
 			url.search !== '' ||

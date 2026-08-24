@@ -632,7 +632,7 @@ services:
     environment: *api-env
     network_mode: host
     extra_hosts:
-      - 'api.telegram.org:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
+      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
     volumes:
       - type: bind
         source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
@@ -715,7 +715,7 @@ services:
     environment: *notification-delivery-env
     network_mode: host
     extra_hosts:
-      - 'api.telegram.org:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
+      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1084,7 +1084,7 @@ services:
       IDENTITY_AVATAR_S3_FORCE_PATH_STYLE: ${IDENTITY_AVATAR_S3_FORCE_PATH_STYLE:-true}
     network_mode: host
     extra_hosts:
-      - 'api.telegram.org:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
+      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
     command: ['node', 'dist/src/main.js']
     healthcheck:
       test:
@@ -1207,7 +1207,7 @@ services:
     environment: *maintenance-worker-env
     network_mode: host
     extra_hosts:
-      - 'api.telegram.org:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
+      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
     tmpfs:
       - /tmp:size=64m,mode=1777
     depends_on:

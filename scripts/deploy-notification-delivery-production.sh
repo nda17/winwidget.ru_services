@@ -123,8 +123,8 @@ verify_notification_delivery_worker() {
 					[[ "$image_id" == "$expected_image_id" ]] || return 1
 					[[ "$image_revision" == "$expected_revision" ]] || return 1
 					[[ "$restart_count" == "$expected_restart_count" ]] || return 1
-					[[ "$telegram_api_base_url" == 'https://api.telegram.org:8443' ]] || return 1
-					[[ "$extra_hosts" == "api.telegram.org:$telegram_api_proxy_ip" ]] || return 1
+					[[ "$telegram_api_base_url" == 'https://tg.winwidget.ru/telegram-api' ]] || return 1
+					[[ "$extra_hosts" == "tg.winwidget.ru:$telegram_api_proxy_ip" ]] || return 1
 					return 0
 				fi
 			fi
@@ -882,18 +882,34 @@ validate_ipv4_address() {
 	done
 }
 
-verify_telegram_tls_passthrough() {
+verify_telegram_https_reverse_proxy() {
 	local proxy_ip="$1"
-	local http_status
+	local header_file http_status marker
 
-	http_status="$(
+	header_file="$(mktemp)" || return 1
+	if ! http_status="$(
 		curl --noproxy '*' --silent --show-error \
 			--connect-timeout 5 --max-time 15 \
-			--resolve "api.telegram.org:8443:$proxy_ip" \
+			--resolve "tg.winwidget.ru:443:$proxy_ip" \
+			--dump-header "$header_file" \
 			--output /dev/null --write-out '%{http_code}' \
-			https://api.telegram.org:8443/
-	)" || return 1
-	[[ "$http_status" =~ ^[234][0-9]{2}$ ]]
+			https://tg.winwidget.ru/telegram-api-health
+	)"; then
+		rm -f -- "$header_file"
+		return 1
+	fi
+	marker="$(awk '
+		tolower($1) == "x-winwidget-telegram-proxy:" {
+			gsub(/\r/, "", $2)
+			value = $2
+		}
+		END { if (value == "active") print value; else exit 1 }
+	' "$header_file")" || {
+		rm -f -- "$header_file"
+		return 1
+	}
+	rm -f -- "$header_file"
+	[[ "$http_status" =~ ^[234][0-9]{2}$ && "$marker" == 'active' ]]
 }
 
 get_env_value_or_default() {
@@ -1208,8 +1224,8 @@ if [[ "$(get_env_value COMPOSE_PROJECT_NAME)" != "winwidget" ]]; then
 	echo "Notification delivery rollout requires COMPOSE_PROJECT_NAME=winwidget." >&2
 	exit 1
 fi
-if [[ "$(get_env_value TELEGRAM_API_BASE_URL)" != 'https://api.telegram.org:8443' ]]; then
-	echo "TELEGRAM_API_BASE_URL must use the Telegram TLS passthrough endpoint." >&2
+if [[ "$(get_env_value TELEGRAM_API_BASE_URL)" != 'https://tg.winwidget.ru/telegram-api' ]]; then
+	echo "TELEGRAM_API_BASE_URL must use the Telegram HTTPS reverse proxy endpoint." >&2
 	exit 1
 fi
 telegram_api_proxy_ip="$(get_env_value TELEGRAM_API_PROXY_IP)"
@@ -1217,8 +1233,8 @@ if ! validate_ipv4_address "$telegram_api_proxy_ip"; then
 	echo "TELEGRAM_API_PROXY_IP must be a valid IPv4 address." >&2
 	exit 1
 fi
-if ! verify_telegram_tls_passthrough "$telegram_api_proxy_ip"; then
-	echo "Telegram TLS passthrough preflight failed." >&2
+if ! verify_telegram_https_reverse_proxy "$telegram_api_proxy_ip"; then
+	echo "Telegram HTTPS reverse proxy preflight failed." >&2
 	exit 1
 fi
 assert_notification_database_postgres_identity
@@ -1624,8 +1640,8 @@ if ! verify_notification_delivery_worker \
 	echo "Candidate notification delivery worker did not pass rollout verification." >&2
 	exit 1
 fi
-if ! verify_telegram_tls_passthrough "$telegram_api_proxy_ip"; then
-	echo "Telegram TLS passthrough post-deploy smoke failed." >&2
+if ! verify_telegram_https_reverse_proxy "$telegram_api_proxy_ip"; then
+	echo "Telegram HTTPS reverse proxy post-deploy smoke failed." >&2
 	exit 1
 fi
 verify_notification_delivery_control_smoke "$deploy_revision"

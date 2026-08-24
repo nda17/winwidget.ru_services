@@ -238,19 +238,19 @@ docker compose --profile migration --profile notification-delivery-migration --p
     const requireTelegramProxy = (name, environment) => {
       if (
         environment.TELEGRAM_API_BASE_URL !==
-        "https://api.telegram.org:8443"
+        "https://tg.winwidget.ru/telegram-api"
       ) {
         throw new Error(
-          `${name} must use the pinned Telegram TLS passthrough endpoint`,
+          `${name} must use the pinned Telegram HTTPS reverse proxy endpoint`,
         );
       }
       const extraHosts = requireService(name).extra_hosts ?? [];
       if (
         JSON.stringify(extraHosts) !==
-        JSON.stringify(["api.telegram.org=192.0.2.1"])
+        JSON.stringify(["tg.winwidget.ru=192.0.2.1"])
       ) {
         throw new Error(
-          `${name} must resolve api.telegram.org only through the configured Telegram proxy IP`,
+          `${name} must resolve tg.winwidget.ru only through the configured Telegram proxy IP`,
         );
       }
     };

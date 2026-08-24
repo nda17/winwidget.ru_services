@@ -154,6 +154,73 @@ const deployProductionScript = readFileSync(
   "scripts/deploy-production.sh",
   "utf8",
 );
+const telegramBridgeNginx = readFileSync(
+  "deploy/telegram-bridge/nginx.conf",
+  "utf8",
+);
+const telegramBotApiLocation =
+  "location ~ ^/telegram-api/(bot[0-9]+:[A-Za-z0-9_-]+)/(getMe|getWebhookInfo|deleteWebhook|setWebhook|sendMessage|sendDocument|copyMessage|answerCallbackQuery)$ {";
+for (const requiredTelegramBridgeContract of [
+  telegramBotApiLocation,
+  "location = /telegram-api-health {",
+  'add_header X-WinWidget-Telegram-Proxy "active" always;',
+  "limit_except GET POST {",
+  "proxy_pass_request_body off;",
+  "client_max_body_size 52m;",
+  "limit_conn_zone $binary_remote_addr zone=telegram_api_https_per_ip:10m;",
+  "limit_conn telegram_api_https_per_ip 32;",
+  "proxy_request_buffering off;",
+  "proxy_buffering off;",
+  "proxy_ssl_server_name on;",
+  "proxy_ssl_name api.telegram.org;",
+  "proxy_ssl_verify on;",
+  "proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;",
+  "proxy_read_timeout 11m;",
+]) {
+  if (!telegramBridgeNginx.includes(requiredTelegramBridgeContract)) {
+    throw new Error(
+      `Telegram bridge contract is missing: ${requiredTelegramBridgeContract}`,
+    );
+  }
+}
+if (
+  (telegramBridgeNginx.match(/access_log off;/g) ?? []).length < 4 ||
+  (telegramBridgeNginx.match(/error_log \/dev\/null;/g) ?? []).length < 3 ||
+  (telegramBridgeNginx.match(/proxy_ssl_verify on;/g) ?? []).length < 2 ||
+  !/server \{[\s\S]*?listen 80;[\s\S]*?location \/telegram-api\/ \{[\s\S]*?access_log off;[\s\S]*?error_log \/dev\/null;[\s\S]*?return 404;[\s\S]*?\}[\s\S]*?location \/ \{[\s\S]*?return 301 https:\/\/\$host\$request_uri;[\s\S]*?\}/.test(
+    telegramBridgeNginx,
+  ) ||
+  !/location = \/telegram-api-health \{[\s\S]*?limit_except GET \{[\s\S]*?proxy_pass_request_body off;[\s\S]*?proxy_set_header Content-Length "";/.test(
+    telegramBridgeNginx,
+  ) ||
+  !new RegExp(
+    `${telegramBotApiLocation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?access_log off;[\\s\\S]*?error_log \/dev\/null;`,
+  ).test(telegramBridgeNginx)
+) {
+  throw new Error(
+    "Telegram bridge must keep tokens out of logs and preserve the method/TLS/upload contract",
+  );
+}
+for (const telegramDeployScript of [
+  deployProductionScript,
+  readFileSync("scripts/deploy-maintenance-production.sh", "utf8"),
+  readFileSync("scripts/deploy-notification-delivery-production.sh", "utf8"),
+  readFileSync("scripts/deploy-identity-production.sh", "utf8"),
+]) {
+  if (
+    !telegramDeployScript.includes('--dump-header "$header_file"') ||
+    !telegramDeployScript.includes(
+      'tolower($1) == "x-winwidget-telegram-proxy:"',
+    ) ||
+    !telegramDeployScript.includes(
+      '[[ "$http_status" =~ ^[234][0-9]{2}$ && "$marker" == \'active\' ]]',
+    )
+  ) {
+    throw new Error(
+      "Every Telegram deploy preflight must verify the unique reverse-proxy health marker",
+    );
+  }
+}
 const staticWorkflowLines = staticWorkflowCheckScript
   .split("\n")
   .map((line) => line.trim());

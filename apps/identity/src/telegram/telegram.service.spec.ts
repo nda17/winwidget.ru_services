@@ -85,10 +85,10 @@ describe('Identity Telegram API routing', () => {
 		jest.restoreAllMocks();
 	});
 
-	it('routes bot calls through the pinned TLS passthrough endpoint', async () => {
+	it('routes bot calls through the pinned HTTPS reverse proxy', async () => {
 		const value = createService(challenge(), {
 			MODE: 'production',
-			TELEGRAM_API_BASE_URL: 'https://api.telegram.org:8443'
+			TELEGRAM_API_BASE_URL: 'https://tg.winwidget.ru/telegram-api'
 		});
 		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
 			ok: true,
@@ -99,23 +99,27 @@ describe('Identity Telegram API routing', () => {
 		await (value.service as any).telegramApi('identity-token', 'getMe');
 
 		expect(fetchMock.mock.calls[0][0]).toBe(
-			'https://api.telegram.org:8443/botidentity-token/getMe'
+			'https://tg.winwidget.ru/telegram-api/botidentity-token/getMe'
 		);
 	});
 
-	it.each([undefined, 'https://api.telegram.org'])(
-		'rejects a direct production endpoint: %s',
-		async apiBaseUrl => {
-			const value = createService(challenge(), {
-				MODE: 'production',
-				...(apiBaseUrl ? { TELEGRAM_API_BASE_URL: apiBaseUrl } : {})
-			});
+	it.each([
+		undefined,
+		'https://api.telegram.org',
+		'https://api.telegram.org:8443',
+		'https://tg.winwidget.ru/telegram-api/',
+		'https://tg.winwidget.ru/telegram-api?target=other',
+		'https://tg.winwidget.ru/telegram-api#fragment'
+	])('rejects a direct production endpoint: %s', async apiBaseUrl => {
+		const value = createService(challenge(), {
+			MODE: 'production',
+			...(apiBaseUrl ? { TELEGRAM_API_BASE_URL: apiBaseUrl } : {})
+		});
 
-			await expect(
-				(value.service as any).telegramApi('identity-token', 'getMe')
-			).rejects.toThrow('Telegram API configuration is invalid');
-		}
-	);
+		await expect(
+			(value.service as any).telegramApi('identity-token', 'getMe')
+		).rejects.toThrow('Telegram API configuration is invalid');
+	});
 });
 
 describe('Telegram Auth confirmation contract', () => {

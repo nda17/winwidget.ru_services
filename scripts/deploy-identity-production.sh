@@ -43,18 +43,34 @@ identity_deploy_validate_ipv4_address() {
 	done
 }
 
-identity_deploy_verify_telegram_tls_passthrough() {
+identity_deploy_verify_telegram_https_reverse_proxy() {
 	[[ $# -eq 1 ]] || return 1
-	local proxy_ip="$1" http_status
+	local proxy_ip="$1" header_file http_status marker
 
-	http_status="$(
+	header_file="$(mktemp)" || return 1
+	if ! http_status="$(
 		curl --noproxy '*' --silent --show-error \
 			--connect-timeout 5 --max-time 15 \
-			--resolve "api.telegram.org:8443:$proxy_ip" \
+			--resolve "tg.winwidget.ru:443:$proxy_ip" \
+			--dump-header "$header_file" \
 			--output /dev/null --write-out '%{http_code}' \
-			https://api.telegram.org:8443/
-	)" || return 1
-	[[ "$http_status" =~ ^[234][0-9]{2}$ ]]
+			https://tg.winwidget.ru/telegram-api-health
+	)"; then
+		rm -f -- "$header_file"
+		return 1
+	fi
+	marker="$(awk '
+		tolower($1) == "x-winwidget-telegram-proxy:" {
+			gsub(/\r/, "", $2)
+			value = $2
+		}
+		END { if (value == "active") print value; else exit 1 }
+	' "$header_file")" || {
+		rm -f -- "$header_file"
+		return 1
+	}
+	rm -f -- "$header_file"
+	[[ "$http_status" =~ ^[234][0-9]{2}$ && "$marker" == 'active' ]]
 }
 
 identity_deploy_require_boundary() {
@@ -63,12 +79,12 @@ identity_deploy_require_boundary() {
 	identity_database_require_inputs
 	telegram_api_base_url="$(identity_read_env_value "$ENV_FILE" TELEGRAM_API_BASE_URL)" || return 1
 	telegram_api_proxy_ip="$(identity_read_env_value "$ENV_FILE" TELEGRAM_API_PROXY_IP)" || return 1
-	[[ "$telegram_api_base_url" == 'https://api.telegram.org:8443' ]] ||
-		identity_deploy_fail 'Identity requires the Telegram TLS passthrough endpoint.' || return 1
+	[[ "$telegram_api_base_url" == 'https://tg.winwidget.ru/telegram-api' ]] ||
+		identity_deploy_fail 'Identity requires the Telegram HTTPS reverse proxy endpoint.' || return 1
 	identity_deploy_validate_ipv4_address "$telegram_api_proxy_ip" ||
 		identity_deploy_fail 'Identity Telegram proxy must be a valid IPv4 address.' || return 1
-	identity_deploy_verify_telegram_tls_passthrough "$telegram_api_proxy_ip" ||
-		identity_deploy_fail 'Identity Telegram TLS passthrough preflight failed.' || return 1
+	identity_deploy_verify_telegram_https_reverse_proxy "$telegram_api_proxy_ip" ||
+		identity_deploy_fail 'Identity Telegram HTTPS reverse proxy preflight failed.' || return 1
 	database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"
 	local phase
 	phase="$(identity_database_current_phase)" || return 1
@@ -229,7 +245,7 @@ identity_deploy_verify_environment() {
 			IDENTITY_AVATAR_S3_FORCE_PATH_STYLE; do
 			grep -Fxq "$required" <<<"$keys" || return 1
 		done
-		[[ "$telegram_api_base_url" == 'https://api.telegram.org:8443' ]] || return 1
+		[[ "$telegram_api_base_url" == 'https://tg.winwidget.ru/telegram-api' ]] || return 1
 		! grep -Fxq BILLING_INTERNAL_TOKEN <<<"$keys" || return 1
 		! grep -Fxq WIDGETS_INTERNAL_TOKEN <<<"$keys" || return 1
 		;;
@@ -276,7 +292,7 @@ identity_deploy_verify_service() {
 						docker inspect --format '{{range .HostConfig.ExtraHosts}}{{println .}}{{end}}' \
 							"$container_id" | sed 's/=/:/'
 					)" || return 1
-					[[ "$extra_hosts" == "api.telegram.org:$telegram_api_proxy_ip" ]] || return 1
+					[[ "$extra_hosts" == "tg.winwidget.ru:$telegram_api_proxy_ip" ]] || return 1
 				fi
 				return 0
 			fi
@@ -324,9 +340,9 @@ identity_deploy_dark_api() {
 	identity_deploy_verify_service identity-api api 4900
 	identity_deploy_assert_single_api
 	identity_deploy_assert_async_runtime_stopped
-	identity_deploy_verify_telegram_tls_passthrough "$(
+	identity_deploy_verify_telegram_https_reverse_proxy "$(
 		identity_read_env_value "$ENV_FILE" TELEGRAM_API_PROXY_IP
-	)" || identity_deploy_fail 'Identity Telegram TLS passthrough post-deploy smoke failed.' || return 1
+	)" || identity_deploy_fail 'Identity Telegram HTTPS reverse proxy post-deploy smoke failed.' || return 1
 	printf 'identity_deploy_mode=dark-api-only\n'
 	printf 'identity_deploy_revision=%s\n' "$EXPECTED_REVISION"
 	printf 'identity_deploy_phase=%s\n' "$(identity_database_current_phase)"
@@ -345,9 +361,9 @@ identity_deploy_active_runtime() {
 	identity_deploy_verify_service identity-worker worker 4901
 	identity_deploy_verify_service identity-outbox-publisher outbox-publisher 4902
 	identity_deploy_assert_single_api
-	identity_deploy_verify_telegram_tls_passthrough "$(
+	identity_deploy_verify_telegram_https_reverse_proxy "$(
 		identity_read_env_value "$ENV_FILE" TELEGRAM_API_PROXY_IP
-	)" || identity_deploy_fail 'Identity Telegram TLS passthrough post-deploy smoke failed.' || return 1
+	)" || identity_deploy_fail 'Identity Telegram HTTPS reverse proxy post-deploy smoke failed.' || return 1
 	printf 'identity_deploy_mode=active-runtime\n'
 	printf 'identity_deploy_revision=%s\n' "$EXPECTED_REVISION"
 	printf 'identity_deploy_phase=%s\n' "$phase"

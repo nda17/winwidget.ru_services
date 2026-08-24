@@ -210,12 +210,12 @@ describe('TelegramBotService webhook URLs', () => {
 });
 
 describe('TelegramBotService operational alert routing', () => {
-	it('routes Support_bot API calls through the TLS passthrough port', async () => {
+	it('routes Support_bot API calls through the HTTPS reverse proxy', async () => {
 		const service = new TelegramBotService(
 			{} as PrismaService,
 			new ConfigService({
 				MODE: 'production',
-				TELEGRAM_API_BASE_URL: 'https://api.telegram.org:8443'
+				TELEGRAM_API_BASE_URL: 'https://tg.winwidget.ru/telegram-api'
 			})
 		);
 		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
@@ -234,7 +234,7 @@ describe('TelegramBotService operational alert routing', () => {
 		);
 
 		expect(fetchMock.mock.calls[0][0]).toBe(
-			'https://api.telegram.org:8443/botsupport-token/sendMessage'
+			'https://tg.winwidget.ru/telegram-api/botsupport-token/sendMessage'
 		);
 		fetchMock.mockRestore();
 	});

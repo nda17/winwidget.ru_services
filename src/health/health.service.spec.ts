@@ -681,12 +681,12 @@ describe('HealthService Telegram proxy routing', () => {
 		jest.restoreAllMocks();
 	});
 
-	it('checks Telegram getMe through the TLS passthrough endpoint', async () => {
+	it('checks Telegram getMe through the HTTPS reverse proxy', async () => {
 		const { service, configService } = createService();
 		configService.get.mockImplementation((key: string) => {
 			if (key === 'MODE') return 'production';
 			if (key === 'TELEGRAM_API_BASE_URL')
-				return 'https://api.telegram.org:8443';
+				return 'https://tg.winwidget.ru/telegram-api';
 			if (key === 'TELEGRAM_INFO_BOT_TOKEN') return 'info-token';
 			if (key === 'TELEGRAM_INFO_BOT_USERNAME') return 'info-bot';
 			return undefined;
@@ -701,7 +701,7 @@ describe('HealthService Telegram proxy routing', () => {
 			expect.objectContaining({ status: 'ok' })
 		);
 		expect(fetchMock.mock.calls[0][0]).toBe(
-			'https://api.telegram.org:8443/botinfo-token/getMe'
+			'https://tg.winwidget.ru/telegram-api/botinfo-token/getMe'
 		);
 	});
 });
