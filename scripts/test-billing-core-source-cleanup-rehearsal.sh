@@ -219,9 +219,13 @@ SELECT count(*) FROM unnest(ARRAY[
 legacy_settings_count() {
 	local container="$1" database="$2"
 	query "$container" "$database" "
-SELECT count(*) FROM pg_catalog.pg_attribute
-WHERE attrelid = 'public.site_settings'::regclass AND attnum > 0 AND NOT attisdropped
-  AND attname = ANY(ARRAY[
+SELECT count(*)
+FROM pg_catalog.pg_attribute attribute
+JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+WHERE namespace.nspname = 'public' AND relation.relname = 'site_settings'
+  AND attribute.attnum > 0 AND NOT attribute.attisdropped
+  AND attribute.attname = ANY(ARRAY[
     'payment_enabled','auto_renewal_signup_enabled','auto_renewal_charges_enabled',
     'auto_renewal_charges_enabled_at','affiliate_program_enabled','affiliate_cashback_percent'
   ]);
@@ -451,11 +455,13 @@ END
 	# First prove a pristine replay through every tracked migration.
 	docker exec -e "PGPASSWORD=$ADMIN_PASSWORD" "$CORE_CONTAINER" createdb \
 		--username "$ADMIN_USER" pristine_bootstrap
-	DATABASE_URL="$(database_url "$port" pristine_bootstrap "$legacy_options")" pnpm exec prisma migrate deploy \
+	DATABASE_URL="$(database_url "$port" pristine_bootstrap "$legacy_options -c winwidget.platform_pristine_replay=approved-nonproduction-replay")" \
+		pnpm exec prisma migrate deploy \
 		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
 	[[ "$(target_table_count "$CORE_CONTAINER" pristine_bootstrap)" == '0' &&
 		"$(legacy_settings_count "$CORE_CONTAINER" pristine_bootstrap)" == '0' ]] ||
 		fail 'pristine bootstrap did not reach the cleanup schema'
+	cp -R "$SOURCE_ROOT/prisma/migrations/$MIGRATION_NAME" "$migrations_root/migrations/"
 	previous='1111111111111111111111111111111111111111'
 	wrong_previous='3333333333333333333333333333333333333333'
 	revision='2222222222222222222222222222222222222222'
@@ -530,13 +536,13 @@ TO PUBLIC, winwidget_api_runtime, winwidget_maintenance, winwidget_backup;" >/de
 		"${hashes[4]}" "${hashes[5]}" "${hashes[6]}" "${hashes[7]}")" ||
 		fail 'could not build wrong-evidence cleanup URL'
 	if DATABASE_URL="$wrong_url" pnpm exec prisma migrate deploy \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null 2>&1; then
+		--schema "$migrations_root/schema.prisma" >/dev/null 2>&1; then
 		fail 'cleanup migration accepted an ownership revision from the wrong evidence boundary'
 	fi
 	after="$(target_table_count "$CORE_CONTAINER" default_db)|$(legacy_settings_count "$CORE_CONTAINER" default_db)"
 	[[ "$after" == "$before" ]] || fail 'wrong-evidence cleanup attempt mutated the schema'
 	DATABASE_URL="$migration_base_url" pnpm exec prisma migrate resolve --rolled-back "$MIGRATION_NAME" \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
+		--schema "$migrations_root/schema.prisma" >/dev/null
 	approved_url="$(billing_core_source_cleanup_migration_url "$migration_base_url" 2 "$previous" "$revision" \
 		"${hashes[0]}" "${hashes[1]}" "${hashes[2]}" "${hashes[3]}" \
 		"${hashes[4]}" "${hashes[5]}" "${hashes[6]}" "${hashes[7]}")" ||
@@ -550,7 +556,7 @@ VALUES ('11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-22222222
   'auto-renewal','test','{}',1,'test',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,
   'TRANSIENT','test','test',TRUE,1,CURRENT_TIMESTAMP);" >/dev/null
 	if DATABASE_URL="$approved_url" pnpm exec prisma migrate deploy \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null 2>&1; then
+		--schema "$migrations_root/schema.prisma" >/dev/null 2>&1; then
 		fail 'approved cleanup accepted unresolved delivery failure'
 	fi
 	[[ "$(target_table_count "$CORE_CONTAINER" default_db)" == '9' ]] ||
@@ -559,7 +565,7 @@ VALUES ('11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-22222222
 		fail 'failed approved cleanup did not roll back its ACL convergence'
 	query_database default_db "UPDATE public.integration_delivery_failures SET resolved_at=CURRENT_TIMESTAMP, resolution='DELIVERED', active_retry_token=NULL WHERE id='11111111-1111-4111-8111-111111111111';" >/dev/null
 	DATABASE_URL="$migration_base_url" pnpm exec prisma migrate resolve --rolled-back "$MIGRATION_NAME" \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
+		--schema "$migrations_root/schema.prisma" >/dev/null
 	# The second delivery drain family is independently guarded for active
 	# PROCESSING/RETRY_SCHEDULED receipts.
 	query_database default_db "INSERT INTO public.integration_delivery_receipts
@@ -567,13 +573,13 @@ VALUES ('11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-22222222
 VALUES ('55555555-5555-4555-8555-555555555555','66666666-6666-4666-8666-666666666666',
   'notification-delivery-outcome','PROCESSING',CURRENT_TIMESTAMP,NULL,NULL,NULL,NULL,CURRENT_TIMESTAMP);" >/dev/null
 	if DATABASE_URL="$approved_url" pnpm exec prisma migrate deploy \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null 2>&1; then
+		--schema "$migrations_root/schema.prisma" >/dev/null 2>&1; then
 		fail 'approved cleanup accepted an active delivery receipt'
 	fi
 	[[ "$(target_table_count "$CORE_CONTAINER" default_db)" == '9' ]] ||
 		fail 'active-receipt cleanup attempt mutated legacy source'
 	DATABASE_URL="$migration_base_url" pnpm exec prisma migrate resolve --rolled-back "$MIGRATION_NAME" \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
+		--schema "$migrations_root/schema.prisma" >/dev/null
 	query_database default_db "UPDATE public.integration_delivery_receipts SET status='DELIVERED', delivered_at=CURRENT_TIMESTAMP, retry_attempt=NULL, retry_available_at=NULL, retry_token=NULL WHERE id='55555555-5555-4555-8555-555555555555';" >/dev/null
 	# Racing writer: the migration must wait for its ACCESS EXCLUSIVE lock and
 	# then roll back when the committed race makes a drain guard non-zero.
@@ -595,7 +601,7 @@ VALUES ('55555555-5555-4555-8555-555555555555','66666666-6666-4666-8666-66666666
 	done
 	[[ "$visible" == 'true' ]] || fail 'racing writer did not hold the migration relation'
 	if DATABASE_URL="$approved_url" pnpm exec prisma migrate deploy \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >"$lock_log" 2>&1; then
+		--schema "$migrations_root/schema.prisma" >"$lock_log" 2>&1; then
 		wait "$writer_pid" || true
 		fail 'racing writer crossed the cleanup guard'
 	fi
@@ -607,12 +613,12 @@ VALUES ('55555555-5555-4555-8555-555555555555','66666666-6666-4666-8666-66666666
 	# populated path must remove only legacy data.
 	while [[ "$(query_database default_db "SELECT count(*) FROM public.\"_prisma_migrations\" WHERE migration_name='$MIGRATION_NAME' AND finished_at IS NULL AND rolled_back_at IS NULL;")" != '0' ]]; do
 		DATABASE_URL="$migration_base_url" pnpm exec prisma migrate resolve --rolled-back "$MIGRATION_NAME" \
-			--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
+			--schema "$migrations_root/schema.prisma" >/dev/null
 	done
 	[[ "$(query_database default_db "SELECT count(*) FROM public.outbox_events WHERE event_type IN ('billing.settings.source.changed.v1','billing.payment.changed.v1','billing.subscription.changed.v1','notification.subscription-expiry.email.requested.v1','notification.subscription-expiry.telegram.requested.v1','payment.auto-renewal.charge.requested.v1','payment.notification.telegram.requested.v1','payment.succeeded.v1') AND status <> 'PUBLISHED'::public.\"OutboxEventStatus\";")" == '0' ]] ||
 		fail 'legacy Billing Outbox fixture is not drained before approved cleanup'
 	DATABASE_URL="$approved_url" pnpm exec prisma migrate deploy \
-		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
+		--schema "$migrations_root/schema.prisma" >/dev/null
 	[[ "$(target_table_count "$CORE_CONTAINER" default_db)" == '0' &&
 		"$(legacy_settings_count "$CORE_CONTAINER" default_db)" == '0' ]] ||
 		fail 'approved populated cleanup did not remove exact legacy source'

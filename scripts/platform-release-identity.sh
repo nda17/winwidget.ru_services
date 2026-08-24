@@ -74,6 +74,7 @@ platform_release_compose() {
 		APP_VERSION="$app_version" \
 		MAINTENANCE_REVISION="$revision" \
 		DATABASE_RESTORE_REVISION="$revision" \
+		DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision" \
 		NOTIFICATION_DELIVERY_REVISION="$revision" \
 		NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$revision" \
 		CAMPAIGNS_REVISION="$revision" \
@@ -101,6 +102,7 @@ platform_release_self_test() {
 		"$source" == *'PLATFORM_RELEASE_APP_VERSION_OVERRIDE'* &&
 		"$source" == *'PLATFORM_RELEASE_BILLING_IMAGE_OVERRIDE'* &&
 		"$source" == *'cutover-$revision-g'* &&
+		"$source" == *'DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"'* &&
 		"$source" == *'PLATFORM_REVISION'* &&
 		"$source" == *'PLATFORM_IMAGE'* &&
 		"$source" == *'diff --quiet --no-ext-diff HEAD'* ]]

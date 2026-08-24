@@ -22,6 +22,7 @@ platform_evidence_parent="${PLATFORM_EVIDENCE_ROOT:-$APP_ROOT/deploy/backend/.pr
 platform_billing_readiness_receipt="${PLATFORM_BILLING_READINESS_RECEIPT:-$APP_ROOT/deploy/backend/.platform-billing-readiness-v1}"
 platform_phase_a_intent="${PLATFORM_PHASE_A_INTENT:-$APP_ROOT/deploy/backend/.platform-phase-a-intent-v1}"
 platform_phase_a_env_artifact="${PLATFORM_PHASE_A_ENV_ARTIFACT:-$APP_ROOT/deploy/backend/.platform-phase-a-env-v1}"
+platform_core_cleanup_marker="${PLATFORM_CORE_SOURCE_CLEANUP_MARKER:-$APP_ROOT/deploy/backend/.platform-core-source-cleanup-v1}"
 readonly PLATFORM_CUTOVER_POSTGRES_IMAGE='postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
 readonly PLATFORM_BILLING_OFFER_V1_QUEUE='winwidget.billing.offer.v1'
 readonly PLATFORM_BILLING_OFFER_V2_QUEUE='winwidget.billing.offer.v2'
@@ -63,6 +64,29 @@ declare -F acquire_production_deploy_lock >/dev/null ||
 platform_cutover_fail() {
 	printf 'platform_cutover_error=%s\n' "$1" >&2
 	return 1
+}
+
+platform_cutover_core_cleanup_phase() {
+	if [[ ! -e "$platform_core_cleanup_marker" && ! -L "$platform_core_cleanup_marker" ]]; then
+		printf 'absent\n'
+		return 0
+	fi
+	local cleanup_script="$SERVER_ROOT/scripts/cleanup-platform-core-source-production.sh"
+	[[ -f "$cleanup_script" && ! -L "$cleanup_script" ]] ||
+		platform_cutover_fail 'Platform cleanup marker exists without its lifecycle controller.' || return 1
+	if ! declare -F platform_cleanup_current_phase >/dev/null; then
+		# shellcheck source=scripts/cleanup-platform-core-source-production.sh
+		source "$cleanup_script"
+	fi
+	platform_cleanup_validate_marker || return 1
+	platform_cleanup_current_phase
+}
+
+platform_cutover_require_no_core_cleanup() {
+	local cleanup_phase
+	cleanup_phase="$(platform_cutover_core_cleanup_phase)" || return 1
+	[[ "$cleanup_phase" == absent ]] ||
+		platform_cutover_fail "Platform ownership lifecycle is immutable after Core cleanup starts; cleanup phase=$cleanup_phase."
 }
 
 platform_cutover_rabbitmq_password_command() {
@@ -139,6 +163,7 @@ platform_cutover_require_inputs() {
 	[[ $# -le 1 && "${1:-cutover}" =~ ^(cutover|abort)$ ]] || return 1
 	local mode="${1:-cutover}" database_phase
 	platform_cutover_require_root
+	platform_cutover_require_no_core_cleanup || return 1
 	platform_cutover_validate_paths
 	platform_database_require_inputs
 	database_phase="$(platform_database_current_phase)" || return 1
@@ -3529,9 +3554,24 @@ platform_cutover_abort() {
 }
 
 platform_cutover_status() {
-	local phase database_phase target_status core_status image_id mode
+	local phase database_phase target_status core_status image_id mode cleanup_phase
 	phase="$(platform_cutover_current_phase)" || return 1
 	printf 'platform_cutover_phase=%s\n' "$phase"
+	cleanup_phase="$(platform_cutover_core_cleanup_phase)" || return 1
+	if [[ "$cleanup_phase" != absent ]]; then
+		[[ "$phase" == complete &&
+			"$(platform_cleanup_marker_value ownership_revision)" == "$(platform_cutover_marker_value revision)" &&
+			"$(platform_cleanup_marker_value generation)" == "$(platform_cutover_marker_value generation)" ]] ||
+			platform_cutover_fail 'Platform cleanup marker is not bound to the completed ownership generation.' || return 1
+		printf 'platform_core_source_cleanup_phase=%s\n' "$cleanup_phase"
+		printf 'platform_core_source_cleanup_revision=%s\n' \
+			"$(platform_cleanup_marker_value cleanup_revision)"
+		printf 'platform_cutover_revision=%s\n' \
+			"$(platform_cutover_marker_value revision)"
+		printf 'platform_cutover_generation=%s\n' \
+			"$(platform_cutover_marker_value generation)"
+		return 0
+	fi
 	if [[ "$phase" == absent ]]; then
 		if [[ -e "$platform_billing_readiness_receipt" || -L "$platform_billing_readiness_receipt" ]]; then
 			platform_cutover_validate_billing_readiness_receipt || return 1
@@ -3672,8 +3712,24 @@ if (phase === "aborted" && (target.phase !== "SHADOW" || target.imported !== fal
 
 platform_cutover_guard_checkout_revision() {
 	[[ "$1" =~ ^[0-9a-f]{40}$ ]] || return 1
-	local phase
+	local phase cleanup_phase cleanup_revision
 	phase="$(platform_cutover_current_phase)" || return 1
+	cleanup_phase="$(platform_cutover_core_cleanup_phase)" || return 1
+	if [[ "$cleanup_phase" != absent ]]; then
+		cleanup_revision="$(platform_cleanup_marker_value cleanup_revision)" || return 1
+		if [[ "$cleanup_phase" == complete ]]; then
+			if git -C "$SERVER_ROOT" cat-file -e "$1^{commit}" 2>/dev/null; then
+				git -C "$SERVER_ROOT" merge-base --is-ancestor "$cleanup_revision" "$1"
+			else
+				# The guard runs once before fetch and again before checkout. The
+				# second invocation must prove ancestry with the fetched object.
+				return 0
+			fi
+		else
+			[[ "$1" == "$cleanup_revision" ]]
+		fi
+		return
+	fi
 	case "$phase" in
 	absent)
 		if [[ -e "$platform_billing_readiness_receipt" || -L "$platform_billing_readiness_receipt" ]]; then
@@ -4635,20 +4691,24 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	case "${1:-}" in
 	--prepare-billing-readiness)
 		[[ $# -eq 1 ]] || exit 1
+		platform_cutover_require_no_core_cleanup || exit 1
 		platform_cutover_prepare_billing_readiness
 		;;
 	--prepare)
 		[[ $# -eq 1 ]] || exit 1
+		platform_cutover_require_no_core_cleanup || exit 1
 		platform_cutover_prepare
 		;;
 	--cutover)
 		[[ $# -eq 1 ]] || exit 1
+		platform_cutover_require_no_core_cleanup || exit 1
 		[[ "${PLATFORM_CONFIRMATION:-}" == 'CUTOVER PLATFORM OWNERSHIP' ]] ||
 			platform_cutover_fail 'Platform cutover requires exact confirmation.' || exit 1
 		platform_cutover_continue
 		;;
 	--forward-recovery)
 		[[ $# -eq 1 ]] || exit 1
+		platform_cutover_require_no_core_cleanup || exit 1
 		[[ "${PLATFORM_CONFIRMATION:-}" == 'CUTOVER PLATFORM OWNERSHIP' ]] || exit 1
 		[[ "$(platform_cutover_current_phase)" =~ ^(restore-verified|target-active|consumer-v2|core-active)$ ]] ||
 			platform_cutover_fail 'Platform forward recovery has no forward-only boundary to finish.' || exit 1
@@ -4656,6 +4716,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 		;;
 	--abort)
 		[[ $# -eq 1 ]] || exit 1
+		platform_cutover_require_no_core_cleanup || exit 1
 		platform_cutover_abort
 		;;
 	--status)

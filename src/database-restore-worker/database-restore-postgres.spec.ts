@@ -120,6 +120,8 @@ describe('database restore PostgreSQL contract', () => {
 			'20260813000000_remove_legacy_billing_core_source';
 		const identityCleanupMigration =
 			'20260815000000_remove_legacy_identity_core_source';
+		const platformCleanupMigration =
+			'20260825000000_remove_legacy_platform_core_source';
 		const runtimeAllTablesGrant =
 			'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "public" TO "winwidget_api_runtime"';
 		const legacyWidgetsTables = [
@@ -165,9 +167,7 @@ describe('database restore PostgreSQL contract', () => {
 			'"public"."reporting_producers_enabled"()',
 			'"public"."reporting_iso_timestamp"(timestamp without time zone)',
 			'"public"."reporting_record_projection_event"(text, text, text, text, jsonb, boolean)',
-			'"public"."reporting_settings_projection_trigger"()',
-			'"public"."platform_core_source_writes_enabled"()',
-			'"public"."platform_assert_core_write_enabled"()'
+			'"public"."reporting_settings_projection_trigger"()'
 		];
 		const retiredIdentitySourceFunctions = [
 			'public.identity_core_source_is_open()',
@@ -204,6 +204,8 @@ describe('database restore PostgreSQL contract', () => {
 		expect(verificationSql).toContain(billingCleanupMigration);
 		expect(repairSql).toContain(identityCleanupMigration);
 		expect(verificationSql).toContain(identityCleanupMigration);
+		expect(repairSql).toContain(platformCleanupMigration);
+		expect(verificationSql).toContain(platformCleanupMigration);
 		expect(repairSql.indexOf(identityCleanupMigration)).toBeLessThan(
 			repairSql.indexOf(runtimeAllTablesGrant)
 		);
@@ -276,13 +278,30 @@ describe('database restore PostgreSQL contract', () => {
 		expect(repairSql).toContain(
 			'Core restore contains retired Identity source-state function %'
 		);
+		expect(repairSql).toContain(
+			'Routine Core restore requires the applied legacy Platform cleanup migration'
+		);
+		expect(repairSql).toContain(
+			'Core restore contains retired Platform relation %'
+		);
+		expect(repairSql).toContain(
+			'Core restore contains retired Platform function %'
+		);
+		expect(repairSql).toContain(
+			'Core restore is missing retained Billing projection relation %'
+		);
+		expect(repairSql).toContain(
+			'Core restore contains the retired Platform Billing offer cursor'
+		);
 		const runtimeFunctionGrant = repairSql.match(
 			/GRANT EXECUTE ON FUNCTION ([\s\S]+?) TO "winwidget_api_runtime";/
 		)?.[1];
 		expect(runtimeFunctionGrant).toBeDefined();
-		const verifiedRuntimeFunctions = verificationSql.match(
-			/FOREACH function_signature IN ARRAY (ARRAY\[[^\]]+\]::TEXT\[\]) LOOP/s
-		)?.[1];
+		const verifiedRuntimeFunctions = [
+			...verificationSql.matchAll(
+				/FOREACH function_signature IN ARRAY (ARRAY\[[^\]]+\]::TEXT\[\]) LOOP/gs
+			)
+		].at(-1)?.[1];
 		expect(verifiedRuntimeFunctions).toBeDefined();
 		for (const functionSignature of retainedRuntimeFunctions) {
 			expect(runtimeFunctionGrant).toContain(functionSignature);
@@ -296,25 +315,16 @@ describe('database restore PostgreSQL contract', () => {
 			expect(repairSql).not.toContain(functionSignature);
 			expect(verificationSql).not.toContain(functionSignature);
 		}
-		expect(repairSql).toContain(
-			'REVOKE ALL ON TABLE "public"."platform_core_state" FROM "winwidget_api_runtime"'
-		);
-		expect(repairSql).toContain(
-			'GRANT SELECT ON TABLE "public"."platform_core_state" TO "winwidget_api_runtime"'
-		);
-		expect(repairSql).toContain(
-			'"public"."reporting_producer_state",\n    "public"."platform_core_state"\n    TO "winwidget_maintenance"'
+		expect(repairSql).not.toContain(
+			'GRANT SELECT ON TABLE "public"."platform_core_state"'
 		);
 		expect(verificationSql).toContain(
-			"ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']"
+			"ARRAY['_prisma_migrations', 'reporting_producer_state']"
 		);
 		expect(verificationSql).toContain(
-			"ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions', 'platform_core_state']"
+			"ARRAY['_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions']"
 		);
-		expect(verificationSql).toContain(
-			"ARRAY['_prisma_migrations', 'reporting_producer_state', 'platform_core_state']"
-		);
-		expect(verificationSql).toContain(
+		expect(verificationSql).not.toContain(
 			"'reporting_producer_state',\n                   'platform_core_state'"
 		);
 		expect(repairSql).not.toContain(
@@ -351,6 +361,12 @@ describe('database restore PostgreSQL contract', () => {
 		);
 		expect(buildDatabasePreReopenVerificationSql(reporting)).not.toContain(
 			'20260815000000_remove_legacy_identity_core_source'
+		);
+		expect(buildDatabaseOwnershipAndAclRepairSql(reporting)).not.toContain(
+			'20260825000000_remove_legacy_platform_core_source'
+		);
+		expect(buildDatabasePreReopenVerificationSql(reporting)).not.toContain(
+			'20260825000000_remove_legacy_platform_core_source'
 		);
 	});
 

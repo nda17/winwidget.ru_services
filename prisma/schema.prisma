@@ -442,46 +442,6 @@ enum IntegrationFailureResolution {
   CLOSED_NO_RETRY
 }
 
-enum PlatformCoreOwnership {
-  CORE
-  PLATFORM
-}
-
-model SiteSettings {
-  id               String   @id @default("singleton")
-  bannerEnabled    Boolean  @default(false) @map("banner_enabled")
-  bannerText       String   @default("") @map("banner_text")
-  snowflakeEnabled Boolean  @default(false) @map("snowflake_enabled")
-  updatedAt        DateTime @updatedAt @map("updated_at")
-
-  @@map("site_settings")
-}
-
-model PlatformCoreState {
-  id                           String                @id @default("singleton")
-  ownership                    PlatformCoreOwnership @default(CORE)
-  sourceWritesEnabled          Boolean               @default(true) @map("source_writes_enabled")
-  legacyRoutesEnabled          Boolean               @default(true) @map("legacy_routes_enabled")
-  generation                   BigInt                @default(0)
-  preparedRevision             String?               @map("prepared_revision")
-  sourceRevision               String?               @map("source_revision")
-  ownershipRevision            String?               @map("ownership_revision")
-  sourceFingerprint            String?               @map("source_fingerprint")
-  sourceSnapshotSha256         String?               @map("source_snapshot_sha256")
-  sourceHighWatermark          BigInt?               @map("source_high_watermark")
-  billingOfferContractVersion  Int?                  @map("billing_offer_contract_version")
-  billingOfferSequenceScope    String?               @map("billing_offer_sequence_scope")
-  billingOfferAggregateVersion BigInt?               @map("billing_offer_aggregate_version")
-  billingOfferSourceSequence   BigInt?               @map("billing_offer_source_sequence")
-  billingOfferFenceFingerprint String?               @map("billing_offer_fence_fingerprint")
-  fencedAt                     DateTime?             @map("fenced_at")
-  exportedAt                   DateTime?             @map("exported_at")
-  activatedAt                  DateTime?             @map("activated_at")
-  updatedAt                    DateTime              @updatedAt @map("updated_at")
-
-  @@map("platform_core_state")
-}
-
 model TelegramBotSettings {
   id                                String    @id @default("singleton")
   dailySummaryChatId                String    @default("") @map("daily_summary_chat_id")
@@ -496,22 +456,6 @@ model TelegramBotSettings {
   updatedAt                         DateTime  @updatedAt @map("updated_at")
 
   @@map("telegram_bot_settings")
-}
-
-model LegalPage {
-  slug      String   @id
-  content   String   @default("")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@map("legal_pages")
-}
-
-model HomePageContent {
-  id        String   @id @default("singleton")
-  content   Json     @default("{}")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@map("home_page_content")
 }
 
 model Note {

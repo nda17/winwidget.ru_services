@@ -734,6 +734,71 @@ NODE
 	printf 'gateway_route_manifest_policy_self_test=passed\n'
 }
 
+run_platform_cleanup_routine_gate_self_test() {
+	local self_test_node
+	self_test_node="$(type -P node 2>/dev/null || true)"
+	[[ -n "$self_test_node" && -x "$self_test_node" ]] || {
+		echo 'Platform cleanup routine-gate self-test requires host Node.' >&2
+		return 1
+	}
+	"$self_test_node" - "${BASH_SOURCE[0]}" <<'NODE'
+const fs = require('node:fs');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const markerIdentity = source.lastIndexOf('platform_database_assert_marker_identity');
+const cleanupMigration = source.indexOf(
+  "platform_cleanup_migration='20260825000000_remove_legacy_platform_core_source'",
+  markerIdentity,
+);
+const absentDefer = source.indexOf(
+  'the destructive Platform Core cleanup is deferred.',
+  cleanupMigration,
+);
+const statusGate = source.indexOf('bash "$platform_cleanup_controller" --status', cleanupMigration);
+const markerBinding = source.indexOf(
+  'Platform Core cleanup release is not bound to the completed ownership generation and reviewed migration.',
+  statusGate,
+);
+const incompleteDefer = source.indexOf(
+  'Automatic backend deployment is deferred while Platform Core cleanup is phase=',
+  markerBinding,
+);
+const ancestryGate = source.indexOf(
+  'Routine deployment would downgrade past the completed Platform Core cleanup.',
+  incompleteDefer,
+);
+const dirtyGate = source.indexOf('dirty_files="$(', ancestryGate);
+const routineBuild = source.indexOf('compose_target build --provenance=false', dirtyGate);
+const routineMigrate = source.indexOf(
+  'compose_target --profile migration run --rm --no-deps migrate',
+  dirtyGate,
+);
+if ([markerIdentity, cleanupMigration, absentDefer, statusGate, markerBinding,
+    incompleteDefer, ancestryGate, dirtyGate, routineBuild, routineMigrate]
+    .some(index => index < 0) ||
+    !(markerIdentity < cleanupMigration && cleanupMigration < absentDefer &&
+      absentDefer < statusGate && statusGate < markerBinding &&
+      markerBinding < incompleteDefer && incompleteDefer < ancestryGate &&
+      ancestryGate < dirtyGate && dirtyGate < routineBuild && dirtyGate < routineMigrate)) {
+  console.error(JSON.stringify({ markerIdentity, cleanupMigration, absentDefer, statusGate,
+    markerBinding, incompleteDefer, ancestryGate, dirtyGate, routineBuild, routineMigrate }));
+  process.exit(1);
+}
+const block = source.slice(cleanupMigration, dirtyGate);
+for (const token of [
+  'Use the manual platform-cleanup target; routine migrate must not apply the destructive migration.',
+  'Resume the exact manual platform-cleanup workflow.',
+  '"$platform_cleanup_actual_migration_sha" == "$platform_cleanup_migration_sha"',
+  '"$platform_cleanup_ownership" == "$(platform_cutover_marker_value revision)"',
+  '"$platform_cleanup_generation" == "$(platform_cutover_marker_value generation)"',
+  '"$platform_cleanup_revision" "$deploy_revision"',
+]) if (!block.includes(token)) {
+  console.error(`missing Platform cleanup routine-gate token: ${token}`);
+  process.exit(1);
+}
+NODE
+	printf 'platform_cleanup_routine_gate_self_test=passed\n'
+}
+
 if [[ "${1:-}" == '--self-test-database-restore-create-gate' ]]; then
 	[[ "$#" -eq 1 ]] || {
 		echo 'Database restore create-gate self-test does not accept extra arguments.' >&2
@@ -767,6 +832,15 @@ if [[ "${1:-}" == '--self-test-rabbitmq-provisioning-contract' ]]; then
 		exit 1
 	}
 	run_rabbitmq_routine_provisioning_self_test
+	exit 0
+fi
+
+if [[ "${1:-}" == '--self-test-platform-cleanup-routine-gate' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'Platform cleanup routine-gate self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_platform_cleanup_routine_gate_self_test
 	exit 0
 fi
 
@@ -924,6 +998,82 @@ git -C "$server_root" merge-base --is-ancestor \
 	exit 1
 }
 platform_database_assert_marker_identity
+
+platform_cleanup_automatic_prod_push="${PLATFORM_CLEANUP_AUTOMATIC_PROD_PUSH:-${AUTOMATIC_PROD_PUSH:-false}}"
+platform_cleanup_migration='20260825000000_remove_legacy_platform_core_source'
+platform_cleanup_directory="$server_root/prisma/migrations/$platform_cleanup_migration"
+platform_cleanup_migration_file="$platform_cleanup_directory/migration.sql"
+platform_cleanup_controller="$server_root/scripts/cleanup-platform-core-source-production.sh"
+# Defined by the sourced Platform database lifecycle contract.
+# shellcheck disable=SC2154
+if [[ -e "$platform_cleanup_directory" || -L "$platform_cleanup_directory" ||
+	-e "$platform_core_cleanup_marker" || -L "$platform_core_cleanup_marker" ]]; then
+	[[ -d "$platform_cleanup_directory" && ! -L "$platform_cleanup_directory" &&
+		-f "$platform_cleanup_migration_file" && ! -L "$platform_cleanup_migration_file" &&
+		-f "$platform_cleanup_controller" && ! -L "$platform_cleanup_controller" ]] || {
+		echo 'Platform Core cleanup release paths are incomplete or unsafe.' >&2
+		exit 1
+	}
+	if [[ ! -e "$platform_core_cleanup_marker" && ! -L "$platform_core_cleanup_marker" ]]; then
+		if [[ "$platform_cleanup_automatic_prod_push" == true ]]; then
+			echo "Automatic backend revision $deploy_revision is verified but the destructive Platform Core cleanup is deferred."
+			echo 'Use the manual platform-cleanup target after the post-cutover soak and evidence gates pass.'
+			exit 0
+		fi
+		echo 'Routine deployment is blocked for an unstaged Platform Core cleanup release.' >&2
+		echo 'Use the manual platform-cleanup target; routine migrate must not apply the destructive migration.' >&2
+		exit 1
+	fi
+	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" EXPECTED_REVISION="$deploy_revision" \
+		bash "$platform_cleanup_controller" --status >/dev/null || {
+		echo 'Platform Core cleanup marker is invalid.' >&2
+		exit 1
+	}
+	platform_cleanup_state="$(awk -F= -v expected_migration="$platform_cleanup_migration" '
+	  $1 == "phase" { phase=substr($0, index($0, "=") + 1); phase_count += 1 }
+	  $1 == "ownership_revision" { ownership=substr($0, index($0, "=") + 1); ownership_count += 1 }
+	  $1 == "cleanup_revision" { cleanup=substr($0, index($0, "=") + 1); cleanup_count += 1 }
+	  $1 == "generation" { generation=substr($0, index($0, "=") + 1); generation_count += 1 }
+	  $1 == "migration" { migration=substr($0, index($0, "=") + 1); migration_count += 1 }
+	  $1 == "migration_sha256" { migration_sha=substr($0, index($0, "=") + 1); migration_sha_count += 1 }
+	  END {
+	    if (phase_count != 1 || ownership_count != 1 || cleanup_count != 1 ||
+	        generation_count != 1 || migration_count != 1 || migration_sha_count != 1 ||
+	        phase !~ /^(preparing|staged|sealing|sealed|forward-only|migrating|applied|verifying|complete)$/ ||
+	        ownership !~ /^[0-9a-f]{40}$/ || cleanup !~ /^[0-9a-f]{40}$/ || ownership == cleanup ||
+	        generation !~ /^[1-9][0-9]{0,17}$/ || migration != expected_migration ||
+	        migration_sha !~ /^[0-9a-f]{64}$/) exit 1
+	    printf "%s|%s|%s|%s|%s", phase, ownership, cleanup, generation, migration_sha
+	  }
+	' "$platform_core_cleanup_marker")" || {
+		echo 'Platform Core cleanup marker identity is unreadable.' >&2
+		exit 1
+	}
+	IFS='|' read -r platform_cleanup_phase platform_cleanup_ownership \
+		platform_cleanup_revision platform_cleanup_generation platform_cleanup_migration_sha \
+		<<<"$platform_cleanup_state"
+	platform_cleanup_actual_migration_sha="$(sha256sum "$platform_cleanup_migration_file" | awk 'NR == 1 { print $1 }')"
+	[[ "$platform_cleanup_actual_migration_sha" == "$platform_cleanup_migration_sha" &&
+		"$platform_cleanup_ownership" == "$(platform_cutover_marker_value revision)" &&
+		"$platform_cleanup_generation" == "$(platform_cutover_marker_value generation)" ]] || {
+		echo 'Platform Core cleanup release is not bound to the completed ownership generation and reviewed migration.' >&2
+		exit 1
+	}
+	if [[ "$platform_cleanup_phase" != complete ]]; then
+		if [[ "$platform_cleanup_automatic_prod_push" == true ]]; then
+			echo "Automatic backend deployment is deferred while Platform Core cleanup is phase=$platform_cleanup_phase."
+			exit 0
+		fi
+		echo "Routine deployment is blocked while Platform Core cleanup is phase=$platform_cleanup_phase." >&2
+		echo 'Resume the exact manual platform-cleanup workflow.' >&2
+		exit 1
+	fi
+	git -C "$server_root" merge-base --is-ancestor \
+		"$platform_cleanup_revision" "$deploy_revision" || {
+		echo 'Routine deployment would downgrade past the completed Platform Core cleanup.' >&2
+		exit 1
+	}
+fi
 
 dirty_files="$(
 	git -C "$server_root" status --porcelain --untracked-files=all

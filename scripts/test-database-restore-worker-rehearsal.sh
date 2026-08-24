@@ -1163,7 +1163,7 @@ run_prisma_migration() {
 	core)
 		env_key='DATABASE_URL'
 		schema_path='prisma/schema.prisma'
-		options='&options=-c%20winwidget.campaigns_contract_cutover%3Dproduction-destructive-approved%20-c%20winwidget.campaigns_forward_boundary%3Dforward-only%20-c%20winwidget.campaigns_source_manifest_sha256%3D0000000000000000000000000000000000000000000000000000000000000000%20-c%20winwidget.campaigns_telegram_audit_decision%3Dcompleted%20-c%20winwidget.campaigns_telegram_audit_reference%3Drestore-rehearsal'
+		options='&options=-c%20winwidget.campaigns_contract_cutover%3Dproduction-destructive-approved%20-c%20winwidget.campaigns_forward_boundary%3Dforward-only%20-c%20winwidget.campaigns_source_manifest_sha256%3D0000000000000000000000000000000000000000000000000000000000000000%20-c%20winwidget.campaigns_telegram_audit_decision%3Dcompleted%20-c%20winwidget.campaigns_telegram_audit_reference%3Drestore-rehearsal%20-c%20winwidget.platform_pristine_replay%3Dapproved-nonproduction-replay'
 		;;
 	notification-delivery)
 		env_key='NOTIFICATION_DELIVERY_DATABASE_URL'
@@ -1233,10 +1233,15 @@ SELECT
 	      'github_auth_enabled', 'vk_auth_enabled', 'telegram_auth_enabled'
 	    ]::text[]) AS legacy(column_name)
 	    JOIN pg_attribute attribute_state
-	      ON attribute_state.attrelid = 'public.site_settings'::regclass
-	     AND attribute_state.attname = legacy.column_name
+	      ON attribute_state.attname = legacy.column_name
 	     AND attribute_state.attnum > 0
 	     AND NOT attribute_state.attisdropped
+	    JOIN pg_class relation_state
+	      ON relation_state.oid = attribute_state.attrelid
+	    JOIN pg_namespace namespace_state
+	      ON namespace_state.oid = relation_state.relnamespace
+	     AND namespace_state.nspname = 'public'
+	     AND relation_state.relname = 'site_settings'
 	  )
 	  AND NOT EXISTS (
 	    SELECT 1
@@ -1270,14 +1275,11 @@ CREATE TABLE public.restore_rehearsal_marker (
 	value TEXT NOT NULL
 );
 INSERT INTO public.restore_rehearsal_marker (id, value) VALUES ('canonical', 'baseline-core');
-INSERT INTO public."site_settings" ("id", "updated_at")
-VALUES ('singleton', CURRENT_TIMESTAMP);
 RESET ROLE;
 GRANT USAGE ON SCHEMA public TO winwidget_api_runtime, winwidget_maintenance, winwidget_backup;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO winwidget_api_runtime;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO winwidget_api_runtime;
 REVOKE ALL ON TABLE public._prisma_migrations FROM winwidget_api_runtime;
-REVOKE INSERT, UPDATE, DELETE ON TABLE public."platform_core_state" FROM winwidget_api_runtime;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO winwidget_backup;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO winwidget_backup;
 SQL
@@ -1388,62 +1390,56 @@ assert_platform_rehearsal_contract() {
 	core_state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
 		--username winwidget_restore_rehearsal_bootstrap --dbname default_db \
 		--command "
-WITH expected_platform_core_acl(grantee, privilege_type, is_grantable) AS (
-	  VALUES
-	    (to_regrole('winwidget_api_runtime')::oid, 'SELECT'::text, false),
-	    (to_regrole('winwidget_maintenance')::oid, 'SELECT'::text, false),
-    (to_regrole('winwidget_backup')::oid, 'SELECT'::text, false)
-),
-actual_platform_core_acl AS (
-  SELECT privilege.grantee, privilege.privilege_type, privilege.is_grantable
-  FROM pg_class relation
-  JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-  CROSS JOIN LATERAL aclexplode(
-    COALESCE(relation.relacl, acldefault('r', relation.relowner))
-  ) privilege
-  WHERE namespace.nspname = 'public'
-    AND relation.relname = 'platform_core_state'
-    AND privilege.grantee <> relation.relowner
-)
 SELECT
   (SELECT count(*) = 1
-   FROM public.platform_core_state
-   WHERE id = 'singleton'
-     AND ownership = 'CORE'::public.\"PlatformCoreOwnership\"
-     AND source_writes_enabled
-     AND legacy_routes_enabled
-	     AND generation = 0
-	     AND prepared_revision IS NULL
-	     AND source_revision IS NULL
-	     AND ownership_revision IS NULL
-	     AND source_fingerprint IS NULL
-	     AND source_snapshot_sha256 IS NULL
-	     AND source_high_watermark IS NULL
-	     AND billing_offer_contract_version IS NULL
-	     AND billing_offer_sequence_scope IS NULL
-	     AND billing_offer_aggregate_version IS NULL
-	     AND billing_offer_source_sequence IS NULL
-	     AND billing_offer_fence_fingerprint IS NULL
-	     AND fenced_at IS NULL
-	     AND exported_at IS NULL
-	     AND activated_at IS NULL)
+   FROM public._prisma_migrations
+   WHERE migration_name = '20260825000000_remove_legacy_platform_core_source'
+     AND finished_at IS NOT NULL
+     AND rolled_back_at IS NULL
+     AND applied_steps_count = 1)
   AND NOT EXISTS (
-    (SELECT * FROM expected_platform_core_acl EXCEPT SELECT * FROM actual_platform_core_acl)
-    UNION ALL
-    (SELECT * FROM actual_platform_core_acl EXCEPT SELECT * FROM expected_platform_core_acl)
+    SELECT 1
+    FROM unnest(ARRAY[
+      'site_settings', 'legal_pages', 'home_page_content', 'platform_core_state'
+    ]::text[]) retired(relation_name)
+    WHERE to_regclass(format('public.%I', retired.relation_name)) IS NOT NULL
   )
-  AND has_function_privilege(
-    'winwidget_api_runtime', 'public.platform_core_source_writes_enabled()', 'EXECUTE'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM unnest(ARRAY[
+      'public.platform_core_state_transition_guard()',
+      'public.platform_core_source_writes_enabled()',
+      'public.platform_assert_core_write_enabled()',
+      'public.billing_offer_projection_trigger()'
+    ]::text[]) retired(signature)
+    WHERE to_regprocedure(retired.signature) IS NOT NULL
   )
-  AND has_function_privilege(
-    'winwidget_api_runtime', 'public.platform_assert_core_write_enabled()', 'EXECUTE'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_type type_entry
+    JOIN pg_catalog.pg_namespace namespace
+      ON namespace.oid = type_entry.typnamespace
+    WHERE namespace.nspname = 'public'
+      AND type_entry.typname = 'PlatformCoreOwnership'
   )
-  AND NOT has_function_privilege(
-    'winwidget_maintenance', 'public.platform_core_source_writes_enabled()', 'EXECUTE'
-  )
-  AND NOT has_function_privilege(
-    'winwidget_backup', 'public.platform_core_source_writes_enabled()', 'EXECUTE'
-  );")"
+  AND (SELECT count(*) = 0
+       FROM public.billing_source_aggregate_versions
+       WHERE aggregate_type = 'billing.offer' AND aggregate_id = 'offer')
+  AND to_regclass('public.billing_core_state') IS NOT NULL
+  AND to_regclass('public.billing_source_aggregate_versions') IS NOT NULL
+  AND to_regclass('public.billing_read_projection_versions') IS NOT NULL
+  AND to_regclass('public.billing_subscription_read_projections') IS NOT NULL
+  AND to_regclass('public.billing_payment_read_projections') IS NOT NULL
+  AND to_regclass('public.billing_affiliate_read_projections') IS NOT NULL
+  AND to_regclass('public.billing_settings_read_projection') IS NOT NULL
+  AND to_regclass('public.billing_settings_compositions') IS NOT NULL
+  AND to_regclass('public.billing_source_sequence') IS NOT NULL
+  AND to_regprocedure(
+    'public.billing_record_source_event(text,text,text,text,jsonb,boolean)'
+  ) IS NOT NULL
+  AND to_regprocedure(
+    'public.billing_iso_timestamp(timestamp without time zone)'
+  ) IS NOT NULL;")"
 	platform_state="$(docker exec "$PG_CONTAINER" psql --no-psqlrc --tuples-only --no-align \
 		--username winwidget_restore_rehearsal_bootstrap --dbname winwidget_platform \
 		--command "
@@ -1480,114 +1476,26 @@ SELECT
       AND attribute_state.atttypid = 'int4'::regtype
       AND attribute_state.attnum > 0
       AND NOT attribute_state.attisdropped
-	  )
-	  AND EXISTS (
-	    SELECT 1
-	    FROM pg_attribute attribute_state
-	    WHERE attribute_state.attrelid = 'platform.billing_offer_producer_state'::regclass
-	      AND attribute_state.attname = 'source_sequence_scope'
-	      AND attribute_state.atttypid = 'text'::regtype
-	      AND attribute_state.attnum > 0
-	      AND NOT attribute_state.attisdropped
-	  )
-	  AND NOT EXISTS (
-	    SELECT 1
-	    FROM pg_attribute attribute_state
-	    WHERE attribute_state.attrelid = 'platform.billing_offer_producer_state'::regclass
-	      AND attribute_state.attname IN ('producer_high_water', 'source_offer_sequence')
-	      AND attribute_state.attnum > 0
-	      AND NOT attribute_state.attisdropped
-	  );")"
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM pg_attribute attribute_state
+    WHERE attribute_state.attrelid = 'platform.billing_offer_producer_state'::regclass
+      AND attribute_state.attname = 'source_sequence_scope'
+      AND attribute_state.atttypid = 'text'::regtype
+      AND attribute_state.attnum > 0
+      AND NOT attribute_state.attisdropped
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM pg_attribute attribute_state
+    WHERE attribute_state.attrelid = 'platform.billing_offer_producer_state'::regclass
+      AND attribute_state.attname IN ('producer_high_water', 'source_offer_sequence')
+      AND attribute_state.attnum > 0
+      AND NOT attribute_state.attisdropped
+  );")"
 	[[ "$core_state" == 't' && "$platform_state" == 't' ]] ||
-		fail 'Platform rehearsal state, scoped offer cursor, or Core ACL contract is invalid'
-	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
-		--username winwidget_restore_rehearsal_bootstrap --dbname default_db <<'SQL'
-BEGIN;
-UPDATE public.platform_core_state
-SET prepared_revision = repeat('a', 40);
-UPDATE public.platform_core_state
-SET source_writes_enabled = FALSE,
-    billing_offer_contract_version = 2,
-    billing_offer_sequence_scope = 'billing.offer:offer',
-    billing_offer_aggregate_version = 41,
-    billing_offer_source_sequence = 870,
-    billing_offer_fence_fingerprint = repeat('b', 64),
-    fenced_at = CURRENT_TIMESTAMP;
-DO $probe$
-DECLARE rejected_constraint TEXT;
-BEGIN
-    BEGIN
-        UPDATE public.platform_core_state
-        SET source_revision = repeat('a', 40)
-        WHERE id = 'singleton';
-        RAISE EXCEPTION 'partial Platform export anchor was accepted';
-    EXCEPTION WHEN check_violation THEN
-        GET STACKED DIAGNOSTICS rejected_constraint = CONSTRAINT_NAME;
-        IF rejected_constraint <> 'platform_core_state_export_anchor_check' THEN
-            RAISE;
-        END IF;
-    END;
-END
-$probe$;
-UPDATE public.platform_core_state
-SET source_revision = repeat('a', 40),
-    source_fingerprint = repeat('c', 64),
-    source_snapshot_sha256 = repeat('d', 64),
-    source_high_watermark = 6,
-    exported_at = CURRENT_TIMESTAMP;
-DO $probe$
-BEGIN
-    BEGIN
-        UPDATE public.platform_core_state
-        SET source_snapshot_sha256 = repeat('e', 64)
-        WHERE id = 'singleton';
-        RAISE EXCEPTION 'durable Platform export anchor tampering was accepted';
-    EXCEPTION WHEN SQLSTATE '55000' THEN
-        IF SQLERRM NOT LIKE '%durable export anchors are immutable%' THEN
-            RAISE;
-        END IF;
-    END;
-END
-$probe$;
-UPDATE public.platform_core_state
-SET source_writes_enabled = TRUE,
-    prepared_revision = NULL,
-    source_revision = NULL,
-    source_fingerprint = NULL,
-    source_snapshot_sha256 = NULL,
-    source_high_watermark = NULL,
-    billing_offer_contract_version = NULL,
-    billing_offer_sequence_scope = NULL,
-    billing_offer_aggregate_version = NULL,
-    billing_offer_source_sequence = NULL,
-    billing_offer_fence_fingerprint = NULL,
-    fenced_at = NULL,
-    exported_at = NULL;
-DO $probe$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM public.platform_core_state
-        WHERE id = 'singleton'
-          AND source_writes_enabled
-          AND prepared_revision IS NULL
-          AND source_revision IS NULL
-          AND source_fingerprint IS NULL
-          AND source_snapshot_sha256 IS NULL
-          AND source_high_watermark IS NULL
-          AND billing_offer_contract_version IS NULL
-          AND billing_offer_sequence_scope IS NULL
-          AND billing_offer_aggregate_version IS NULL
-          AND billing_offer_source_sequence IS NULL
-          AND billing_offer_fence_fingerprint IS NULL
-          AND fenced_at IS NULL
-          AND exported_at IS NULL
-    ) THEN
-        RAISE EXCEPTION 'Platform abort did not atomically clear pre-activation anchors';
-    END IF;
-END
-$probe$;
-ROLLBACK;
-SQL
+		fail 'Platform cleanup or Platform service rehearsal contract is invalid'
 	docker exec -i "$PG_CONTAINER" psql --no-psqlrc --set ON_ERROR_STOP=1 \
 		--username winwidget_restore_rehearsal_bootstrap --dbname winwidget_platform <<'SQL'
 BEGIN;
@@ -2552,15 +2460,14 @@ expected_relation_acl AS (
     WHEN privilege.privilege_type = 'SELECT' THEN relation.relname <> '_prisma_migrations'
     WHEN privilege.privilege_type = 'INSERT' THEN
       relation.relname <> ALL(ARRAY[
-        '_prisma_migrations', 'reporting_producer_state', 'platform_core_state'
+        '_prisma_migrations', 'reporting_producer_state'
       ])
     WHEN privilege.privilege_type = 'UPDATE' THEN
       relation.relname <> ALL(ARRAY[
         '_prisma_migrations', 'reporting_producer_state'
       ])
     ELSE relation.relname <> ALL(ARRAY[
-      '_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions',
-      'platform_core_state'
+      '_prisma_migrations', 'reporting_producer_state', 'reporting_projection_versions'
     ])
   END
   UNION ALL
@@ -2576,7 +2483,7 @@ expected_relation_acl AS (
       WHEN 'SELECT' THEN relation.relname = ANY(ARRAY[
         'scheduled_job_runs', 'scheduled_job_idempotency_keys', 'outbox_events',
         'telegram_bot_settings', 'integration_delivery_failures',
-        'messaging_heartbeats', 'reporting_producer_state', 'platform_core_state'
+        'messaging_heartbeats', 'reporting_producer_state'
       ])
       WHEN 'INSERT' THEN relation.relname = ANY(ARRAY[
         'scheduled_job_runs', 'scheduled_job_idempotency_keys', 'outbox_events',
@@ -2623,9 +2530,7 @@ expected_function_signatures AS (
     'public.reporting_producers_enabled()',
     'public.reporting_iso_timestamp(timestamp without time zone)',
     'public.reporting_record_projection_event(text,text,text,text,jsonb,boolean)',
-    'public.reporting_settings_projection_trigger()',
-    'public.platform_core_source_writes_enabled()',
-    'public.platform_assert_core_write_enabled()'
+    'public.reporting_settings_projection_trigger()'
   ]::text[] ELSE ARRAY[]::text[] END) expected(signature)
 ),
 expected_function_acl AS (
