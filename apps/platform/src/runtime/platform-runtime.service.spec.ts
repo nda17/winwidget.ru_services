@@ -2,14 +2,17 @@ import { ConfigService } from '@nestjs/config';
 import { PlatformRuntimeService } from './platform-runtime.service';
 
 function runtime(retentionDays?: string): PlatformRuntimeService {
-	return new PlatformRuntimeService(
-		new ConfigService({
-			PLATFORM_PROCESS_ROLE: 'outbox-publisher',
-			...(retentionDays === undefined
-				? {}
-				: { PLATFORM_OUTBOX_RETENTION_DAYS: retentionDays })
-		})
-	);
+	const values: Record<string, string> = {
+		PLATFORM_PROCESS_ROLE: 'outbox-publisher',
+		...(retentionDays === undefined
+			? {}
+			: { PLATFORM_OUTBOX_RETENTION_DAYS: retentionDays })
+	};
+	const config = {
+		get: <T>(key: string): T | undefined => values[key] as T | undefined
+	} as ConfigService;
+
+	return new PlatformRuntimeService(config);
 }
 
 describe('PlatformRuntimeService Outbox retention', () => {
