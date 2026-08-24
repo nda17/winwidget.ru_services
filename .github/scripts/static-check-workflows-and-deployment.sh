@@ -121,10 +121,46 @@ fi
 node <<'NODE'
 const { createHash } = require("node:crypto");
 const { existsSync, readFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
 const workflow = readFileSync(
   ".github/workflows/deploy-production.yml",
   "utf8",
 );
+const platformLifecycleLines = workflow.split("\n");
+const platformLifecycleStarts = platformLifecycleLines
+  .map((line, index) =>
+    line.includes("<<'PLATFORM_LIFECYCLE'") ? index : -1,
+  )
+  .filter(index => index >= 0);
+if (platformLifecycleStarts.length !== 1) {
+  throw new Error("Expected exactly one Platform lifecycle heredoc");
+}
+const platformLifecycleStart = platformLifecycleStarts[0];
+const platformLifecycleEnd = platformLifecycleLines.indexOf(
+  "          PLATFORM_LIFECYCLE",
+  platformLifecycleStart + 1,
+);
+if (platformLifecycleEnd < 0) {
+  throw new Error("Platform lifecycle heredoc terminator is missing");
+}
+const platformLifecycle = platformLifecycleLines
+  .slice(platformLifecycleStart + 1, platformLifecycleEnd)
+  .map(line => {
+    if (line !== "" && !line.startsWith("          ")) {
+      throw new Error("Platform lifecycle heredoc indentation is invalid");
+    }
+    return line.slice(10);
+  })
+  .join("\n");
+const platformLifecycleSyntax = spawnSync("bash", ["-n"], {
+  input: platformLifecycle,
+  encoding: "utf8",
+});
+if (platformLifecycleSyntax.status !== 0) {
+  throw new Error(
+    `Platform lifecycle heredoc is not valid Bash: ${platformLifecycleSyntax.stderr.trim()}`,
+  );
+}
 const validateProductionComposeWrapper = readFileSync(
   ".github/scripts/validate-production-compose.sh",
   "utf8",

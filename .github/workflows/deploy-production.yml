@@ -7009,11 +7009,11 @@ jobs:
               chmod 600 "$stage/$artifact"
             done
             [[ "$(find "$stage" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]')" == 3 &&
-              "$(sha256sum "$stage/$public_name" | awk 'NR == 1 { print $1 }')" ==
+              "$(sha256sum "$stage/$public_name" | awk 'NR == 1 { print $1 }')" == \
                 "$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" &&
-              "$(sha256sum "$stage/$attestation_name" | awk 'NR == 1 { print $1 }')" ==
+              "$(sha256sum "$stage/$attestation_name" | awk 'NR == 1 { print $1 }')" == \
                 "$PLATFORM_COMPUTED_ATTESTATION_SHA256" &&
-              "$(sha256sum "$stage/$signature_name" | awk 'NR == 1 { print $1 }')" ==
+              "$(sha256sum "$stage/$signature_name" | awk 'NR == 1 { print $1 }')" == \
                 "$PLATFORM_COMPUTED_SIGNATURE_SHA256" ]]
             openssl pkey -pubin -in "$stage/$public_name" -noout
             openssl pkeyutl -verify -pubin -inkey "$stage/$public_name" -rawin \
@@ -7030,9 +7030,9 @@ jobs:
               [[ -f "$artifact_root/$artifact" && ! -L "$artifact_root/$artifact" &&
                 "$(stat -c '%u:%g:%a:%h' "$artifact_root/$artifact")" == '0:0:600:1' ]]
             done
-            [[ "$(sha256sum "$artifact_root/$attestation_name" | awk 'NR == 1 { print $1 }')" ==
+            [[ "$(sha256sum "$artifact_root/$attestation_name" | awk 'NR == 1 { print $1 }')" == \
                 "$PLATFORM_COMPUTED_ATTESTATION_SHA256" &&
-              "$(sha256sum "$artifact_root/$signature_name" | awk 'NR == 1 { print $1 }')" ==
+              "$(sha256sum "$artifact_root/$signature_name" | awk 'NR == 1 { print $1 }')" == \
                 "$PLATFORM_COMPUTED_SIGNATURE_SHA256" ]]
           else
             [[ "$PLATFORM_ACTION" == 'abort' &&
