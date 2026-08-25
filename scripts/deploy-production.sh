@@ -102,6 +102,48 @@ run_support_first_cutover_contract_self_test() {
 	printf 'support_first_cutover_contract_self_test=passed\n'
 }
 
+run_operations_final_api_readiness_self_test() {
+	local self_test_node
+	self_test_node="$(type -P node 2>/dev/null || true)"
+	[[ -n "$self_test_node" && -x "$self_test_node" ]] || {
+		echo 'Operations final API readiness self-test requires host Node.' >&2
+		return 1
+	}
+	"$self_test_node" - "${BASH_SOURCE[0]}" <<'NODE'
+const fs = require('node:fs');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const expectedCall = [
+  'wait_for_cutover_revision \\',
+  '\t"$OPERATIONS_API_READINESS_URL" "$OPERATIONS_REVISION" \\',
+  '\t"Operations API final readiness"',
+].join('\n');
+const hasExpectedContract = (candidate) => {
+  const callIndex = candidate.indexOf(expectedCall);
+  const nextFinalReadiness = candidate.indexOf(
+    '"Operations worker final readiness"',
+    callIndex + expectedCall.length,
+  );
+  return callIndex >= 0 && nextFinalReadiness > callIndex;
+};
+
+if (!hasExpectedContract(source)) {
+  console.error(
+    'Operations final API readiness must call wait_for_cutover_revision before the worker readiness check.',
+  );
+  process.exit(1);
+}
+const withoutWait = source.replace(
+  expectedCall,
+  expectedCall.split('\n').slice(1).join('\n'),
+);
+if (hasExpectedContract(withoutWait)) {
+  console.error('Operations final API readiness self-test accepted a direct URL execution.');
+  process.exit(1);
+}
+NODE
+	printf 'operations_final_api_readiness_self_test=passed\n'
+}
+
 validate_routine_database_restore_create_gate() {
 	local env_file="$1"
 	local matching_lines
@@ -1423,6 +1465,15 @@ if [[ "${1:-}" == '--self-test-support-first-cutover-contract' ]]; then
 		exit 1
 	}
 	run_support_first_cutover_contract_self_test
+	exit 0
+fi
+
+if [[ "${1:-}" == '--self-test-operations-final-api-readiness' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'Operations final API readiness self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_operations_final_api_readiness_self_test
 	exit 0
 fi
 
@@ -12031,6 +12082,7 @@ wait_for_cutover_revision \
 	"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Support worker"
 wait_for_cutover_revision \
 	"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Support Outbox publisher"
+wait_for_cutover_revision \
 	"$OPERATIONS_API_READINESS_URL" "$OPERATIONS_REVISION" \
 	"Operations API final readiness"
 wait_for_cutover_revision \

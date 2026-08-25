@@ -3262,6 +3262,16 @@ if (
 ) {
   throw new Error("Support first-cutover and routine-all regressions must run in CI");
 }
+if (
+  !deployProductionScript.includes(
+    "--self-test-operations-final-api-readiness",
+  ) ||
+  !workflow.includes(
+    "bash scripts/deploy-production.sh --self-test-operations-final-api-readiness",
+  )
+) {
+  throw new Error("Operations final API readiness regression must run in CI");
+}
 const supportRemoteAllStart = stageOrDeployRemoteScript.indexOf("\n  all)\n");
 const supportRemoteAllEnd = stageOrDeployRemoteScript.indexOf(
   "\n  maintenance)\n",
@@ -4584,6 +4594,7 @@ NODE
 node scripts/test-support-runtime-boundaries.mjs
 node scripts/test-support-core-source-cleanup-rehearsal.mjs
 bash scripts/deploy-production.sh --self-test-support-first-cutover-contract
+bash scripts/deploy-production.sh --self-test-operations-final-api-readiness
 bash .github/scripts/stage-or-deploy-backend-remote.sh --self-test-support-routine-all-guard
 bash scripts/support-release-identity.sh --self-test
 bash scripts/support-database-lifecycle.sh --self-test

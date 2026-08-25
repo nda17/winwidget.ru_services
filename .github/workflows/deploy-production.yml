@@ -5119,6 +5119,7 @@ jobs:
           bash scripts/deploy-production.sh --self-test-platform-cleanup-routine-gate
           bash scripts/deploy-production.sh --self-test-gateway-route-manifest-policy
           bash scripts/deploy-production.sh --self-test-support-first-cutover-contract
+          bash scripts/deploy-production.sh --self-test-operations-final-api-readiness
           bash .github/scripts/stage-or-deploy-backend-remote.sh --self-test-support-routine-all-guard
           bash scripts/campaigns-contract-migration-guard.sh --self-test
           bash scripts/test-reporting-cutover-rehearsal.sh --self-test

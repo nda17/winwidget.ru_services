@@ -2007,10 +2007,9 @@ rabbit_queue_snapshot() {
   [[ -n "$container_id" &&
     "$(docker inspect --format '{{.State.Running}}' "$container_id")" == true ]] ||
     fail 'RabbitMQ must already be running for the Operations handoff'
-  docker exec "$container_id" rabbitmqctl list_queues \
+  docker exec "$container_id" rabbitmqctl --formatter json list_queues \
     --vhost winwidget \
-    name messages_ready messages_unacknowledged consumers \
-    --formatter json --no-table-headers
+    name messages_ready messages_unacknowledged consumers
 }
 
 queue_state_matches() {
@@ -2317,7 +2316,6 @@ provision_rabbitmq() {
   RABBITMQ_OPERATIONS_WORKER_URL="$worker_url" \
   RABBITMQ_OPERATIONS_PUBLISHER_URL="$publisher_url" \
   RABBITMQ_INTEGRATION_WORKER_URL="$integration_url" \
-  OPERATIONS_STEADY_INTEGRATION_READ_PATTERN="$OPERATIONS_STEADY_INTEGRATION_READ_PATTERN" \
     docker run --rm --network host --read-only \
       --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 \
       --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
@@ -2329,7 +2327,7 @@ provision_rabbitmq() {
       --env RABBITMQ_OPERATIONS_WORKER_URL \
       --env RABBITMQ_OPERATIONS_PUBLISHER_URL \
       --env RABBITMQ_INTEGRATION_WORKER_URL \
-      --env OPERATIONS_STEADY_INTEGRATION_READ_PATTERN \
+      --env OPERATIONS_STEADY_INTEGRATION_READ_PATTERN="$OPERATIONS_STEADY_INTEGRATION_READ_PATTERN" \
       --entrypoint node "$image" -e '
 const amqp = require("amqplib");
 
@@ -2400,7 +2398,7 @@ const request = async (path, options = {}, expected = [200, 201, 204]) => {
     signal: AbortSignal.timeout(10_000),
   });
   if (!expected.includes(response.status)) fail();
-  if (response.status === 204) return null;
+  if ([201, 204, 404].includes(response.status)) return null;
   return response.json();
 };
 const encoded = value => encodeURIComponent(value);
@@ -2612,9 +2610,11 @@ const users = [
     });
     const topics = await request(
       `/api/topic-permissions/${encoded(vhost)}/${encoded(user.username)}`,
+      {},
+      [200, 404],
     );
-    if (!Array.isArray(topics)) fail();
-    for (const topic of topics) {
+    if (topics !== null && !Array.isArray(topics)) fail();
+    for (const topic of topics || []) {
       await request(
         `/api/topic-permissions/${encoded(vhost)}/${encoded(user.username)}/${encoded(topic.exchange)}`,
         { method: "DELETE" },
@@ -2668,6 +2668,44 @@ process.stdout.write(`${sha256} ${value.counts.notes} ${value.counts.adminEventL
 NODE
 }
 
+operations_classify_snapshot_state() {
+  billing_release_node - <<'NODE'
+const [sha256, notesText, eventsText] = (process.env.OPERATIONS_SNAPSHOT_METADATA || '').split(' ');
+const notes = Number(notesText);
+const events = Number(eventsText);
+let core;
+let target;
+try {
+  core = JSON.parse(process.env.OPERATIONS_CORE_STATUS || 'null');
+  target = JSON.parse(process.env.OPERATIONS_TARGET_STATUS || 'null');
+} catch { process.exit(1); }
+const revision = process.env.OPERATIONS_EXPECTED_REVISION || '';
+const targetCurrentCounts = target && Number.isSafeInteger(target.notes) &&
+  target.notes >= 0 && Number.isSafeInteger(target.adminEventLogs) &&
+  target.adminEventLogs >= 0;
+const targetIdentity = target && target.sourceRevision === revision &&
+  target.snapshotSha256 === sha256;
+const targetExact = targetIdentity && target.notes === notes &&
+  target.adminEventLogs === events;
+if (core?.source === 'removed') {
+  if (target?.phase !== 'ACTIVE' || !targetIdentity || !targetCurrentCounts) process.exit(1);
+  process.stdout.write(`complete ${sha256} ${notes} ${events}\n`);
+  process.exit(0);
+}
+const coreExact = core && ['CORE', 'OPERATIONS'].includes(core.ownership) &&
+  core.preparedRevision === revision && core.snapshotSha256 === sha256 &&
+  core.notes === notes && core.adminEventLogs === events &&
+  core.sourceWritesEnabled === false &&
+  ((core.ownership === 'CORE' && core.ownershipRevision === null && core.legacyRoutesEnabled === true) ||
+   (core.ownership === 'OPERATIONS' && core.ownershipRevision === revision && core.legacyRoutesEnabled === false));
+const targetEmpty = target?.phase === 'EMPTY' && target.sourceRevision === null &&
+  target.snapshotSha256 === null && target.notes === 0 && target.adminEventLogs === 0;
+const targetPrepared = ['IMPORTED', 'ACTIVE'].includes(target?.phase) && targetExact;
+if (!coreExact || (!targetEmpty && !targetPrepared)) process.exit(1);
+process.stdout.write(`resume-${core.ownership.toLowerCase()} ${sha256} ${notes} ${events}\n`);
+NODE
+}
+
 operations_resume_state() {
   local snapshot="$1" revision="$2" metadata core_status target_status unanchored_state
   if [[ ! -e "$snapshot" && ! -L "$snapshot" ]]; then
@@ -2715,37 +2753,70 @@ NODE
   OPERATIONS_SNAPSHOT_METADATA="$metadata" \
     OPERATIONS_CORE_STATUS="$core_status" \
     OPERATIONS_TARGET_STATUS="$target_status" \
-    OPERATIONS_EXPECTED_REVISION="$revision" billing_release_node - <<'NODE'
-const [sha256, notesText, eventsText] = (process.env.OPERATIONS_SNAPSHOT_METADATA || '').split(' ');
-const notes = Number(notesText);
-const events = Number(eventsText);
-let core;
-let target;
-try {
-  core = JSON.parse(process.env.OPERATIONS_CORE_STATUS || 'null');
-  target = JSON.parse(process.env.OPERATIONS_TARGET_STATUS || 'null');
-} catch { process.exit(1); }
-const revision = process.env.OPERATIONS_EXPECTED_REVISION || '';
-const targetCounts = target && target.notes === notes && target.adminEventLogs === events;
-const targetExact = target && target.sourceRevision === revision &&
-  target.snapshotSha256 === sha256 && targetCounts;
-if (core?.source === 'removed') {
-  if (target?.phase !== 'ACTIVE' || !targetExact) process.exit(1);
-  process.stdout.write(`complete ${sha256} ${notes} ${events}\n`);
-  process.exit(0);
+    OPERATIONS_EXPECTED_REVISION="$revision" operations_classify_snapshot_state
 }
-const coreExact = core && ['CORE', 'OPERATIONS'].includes(core.ownership) &&
-  core.preparedRevision === revision && core.snapshotSha256 === sha256 &&
-  core.notes === notes && core.adminEventLogs === events &&
-  core.sourceWritesEnabled === false &&
-  ((core.ownership === 'CORE' && core.ownershipRevision === null && core.legacyRoutesEnabled === true) ||
-   (core.ownership === 'OPERATIONS' && core.ownershipRevision === revision && core.legacyRoutesEnabled === false));
-const targetEmpty = target?.phase === 'EMPTY' && target.sourceRevision === null &&
-  target.snapshotSha256 === null && target.notes === 0 && target.adminEventLogs === 0;
-const targetPrepared = ['IMPORTED', 'ACTIVE'].includes(target?.phase) && targetExact;
-if (!coreExact || (!targetEmpty && !targetPrepared)) process.exit(1);
-process.stdout.write(`resume-${core.ownership.toLowerCase()} ${sha256} ${notes} ${events}\n`);
-NODE
+
+operations_resume_classifier_self_test() {
+  local revision='a234567890123456789012345678901234567890'
+  local sha256='b234567890123456789012345678901234567890123456789012345678901234'
+  local metadata core_core core_operations core_removed expected output target
+  metadata="$sha256 2 3"
+  core_core="{\"ownership\":\"CORE\",\"sourceWritesEnabled\":false,\"legacyRoutesEnabled\":true,\"preparedRevision\":\"$revision\",\"ownershipRevision\":null,\"snapshotSha256\":\"$sha256\",\"notes\":2,\"adminEventLogs\":3}"
+  core_operations="{\"ownership\":\"OPERATIONS\",\"sourceWritesEnabled\":false,\"legacyRoutesEnabled\":false,\"preparedRevision\":\"$revision\",\"ownershipRevision\":\"$revision\",\"snapshotSha256\":\"$sha256\",\"notes\":2,\"adminEventLogs\":3}"
+  core_removed='{"source":"removed"}'
+
+  while IFS=$'\t' read -r core target expected; do
+    output="$(OPERATIONS_SNAPSHOT_METADATA="$metadata" \
+      OPERATIONS_CORE_STATUS="$core" \
+      OPERATIONS_TARGET_STATUS="$target" \
+      OPERATIONS_EXPECTED_REVISION="$revision" \
+      operations_classify_snapshot_state)" || return 1
+    [[ "$output" == "$expected $sha256 2 3" ]] || return 1
+  done <<EOF
+$core_core	{"phase":"EMPTY","sourceRevision":null,"snapshotSha256":null,"notes":0,"adminEventLogs":0}	resume-core
+$core_core	{"phase":"IMPORTED","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":2,"adminEventLogs":3}	resume-core
+$core_core	{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":2,"adminEventLogs":3}	resume-core
+$core_operations	{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":2,"adminEventLogs":3}	resume-operations
+$core_removed	{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":2,"adminEventLogs":3}	complete
+$core_removed	{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":1,"adminEventLogs":4}	complete
+EOF
+
+  while IFS= read -r target; do
+    if OPERATIONS_SNAPSHOT_METADATA="$metadata" \
+      OPERATIONS_CORE_STATUS="$core_removed" \
+      OPERATIONS_TARGET_STATUS="$target" \
+      OPERATIONS_EXPECTED_REVISION="$revision" \
+      operations_classify_snapshot_state >/dev/null 2>&1; then
+      return 1
+    fi
+  done <<EOF
+{"phase":"IMPORTED","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":2,"adminEventLogs":3}
+{"phase":"ACTIVE","sourceRevision":"c$revision","snapshotSha256":"$sha256","notes":2,"adminEventLogs":3}
+{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"c$sha256","notes":2,"adminEventLogs":3}
+{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":-1,"adminEventLogs":3}
+{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":1.5,"adminEventLogs":3}
+{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":"2","adminEventLogs":3}
+{"phase":"ACTIVE","sourceRevision":"$revision","snapshotSha256":"$sha256","notes":9007199254740992,"adminEventLogs":3}
+EOF
+
+  target="{\"phase\":\"IMPORTED\",\"sourceRevision\":\"$revision\",\"snapshotSha256\":\"$sha256\",\"notes\":2,\"adminEventLogs\":4}"
+  ! OPERATIONS_SNAPSHOT_METADATA="$metadata" \
+    OPERATIONS_CORE_STATUS="$core_core" \
+    OPERATIONS_TARGET_STATUS="$target" \
+    OPERATIONS_EXPECTED_REVISION="$revision" \
+    operations_classify_snapshot_state >/dev/null 2>&1 || return 1
+
+  ! OPERATIONS_SNAPSHOT_METADATA="$metadata" \
+    OPERATIONS_CORE_STATUS="${core_core/\"notes\":2/\"notes\":1}" \
+    OPERATIONS_TARGET_STATUS="{\"phase\":\"EMPTY\",\"sourceRevision\":null,\"snapshotSha256\":null,\"notes\":0,\"adminEventLogs\":0}" \
+    OPERATIONS_EXPECTED_REVISION="$revision" \
+    operations_classify_snapshot_state >/dev/null 2>&1 || return 1
+
+  ! OPERATIONS_SNAPSHOT_METADATA="$metadata" \
+    OPERATIONS_CORE_STATUS="${core_core/\"preparedRevision\":\"$revision\"/\"preparedRevision\":\"c$revision\"}" \
+    OPERATIONS_TARGET_STATUS="{\"phase\":\"EMPTY\",\"sourceRevision\":null,\"snapshotSha256\":null,\"notes\":0,\"adminEventLogs\":0}" \
+    OPERATIONS_EXPECTED_REVISION="$revision" \
+    operations_classify_snapshot_state >/dev/null 2>&1 || return 1
 }
 
 status() {
@@ -2952,6 +3023,8 @@ self_test() {
   local guc_admin_source guc_configure_source
   local prepared_recovery_source archive_source rebind_source marker_retry_source terminal_runner_source
   local post_ddl_source descendant_finalizer_source sync_archive_source operations_prepare_source
+  local rabbit_snapshot_source rabbit_provision_source operations_snapshot_path_source node_docker_source
+  local resume_classifier_source resume_source
   local recovery_line post_ddl_line apply_line
   local -a source_contracts normalized_source_contracts cutover_contracts
   local -a forbidden_source_contracts
@@ -2990,6 +3063,7 @@ self_test() {
     assert_identity_release_prerequisite \
     identity_operations_overview_smoke \
     assert_integration_runtime \
+    operations_classify_snapshot_state \
     operations_resume_state \
     run_core_source_cleanup \
     provision_rabbitmq \
@@ -3009,6 +3083,12 @@ self_test() {
   post_ddl_source="$(declare -f platform_terminal_finalize_pinned_post_ddl_marker)"
   marker_retry_source="$(declare -f platform_terminal_marker_retry_mode)"
   operations_prepare_source="$(declare -f platform_terminal_operations_prepare_state)"
+  rabbit_snapshot_source="$(declare -f rabbit_queue_snapshot)"
+  rabbit_provision_source="$(declare -f provision_rabbitmq)"
+  operations_snapshot_path_source="$(declare -f billing_release_operations_snapshot_path_is_allowed)"
+  node_docker_source="$(declare -f billing_release_node_docker)"
+  resume_classifier_source="$(declare -f operations_classify_snapshot_state)"
+  resume_source="$(declare -f operations_resume_state)"
   terminal_runner_source="$(declare -f run_or_verify_terminal_platform_cleanup)"
   gateway_ready_contract="wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'"
   gateway_manifest_contract='platform_cutover_validate_gateway_manifest "$gateway_image_id"'
@@ -3322,6 +3402,64 @@ NODE
     "$operations_prepare_source" == *'operations_core_state_ownership_not_null'* &&
     "$operations_prepare_source" == *'operations_core_state_source_writes_enabled_not_null'* &&
     "$operations_prepare_source" == *'operations_core_state_updated_at_not_null'* ]]
+  [[ "$rabbit_snapshot_source" == *'rabbitmqctl --formatter json list_queues'* &&
+    "$rabbit_snapshot_source" == *'--vhost winwidget'* &&
+    "$rabbit_snapshot_source" == *'name messages_ready messages_unacknowledged consumers'* &&
+    "$rabbit_snapshot_source" != *'--no-table-headers'* &&
+    "$rabbit_snapshot_source" != *'rabbitmqctl list_queues'* ]]
+  [[ "$rabbit_provision_source" == *'--env OPERATIONS_STEADY_INTEGRATION_READ_PATTERN="$OPERATIONS_STEADY_INTEGRATION_READ_PATTERN"'* &&
+    "$rabbit_provision_source" == *'const request = async (path, options = {}, expected = [200, 201, 204]) => {'* &&
+    "$rabbit_provision_source" == *'if (!expected.includes(response.status)) fail();'* &&
+    "$rabbit_provision_source" == *'if ([201, 204, 404].includes(response.status)) return null;'* &&
+    "$rabbit_provision_source" == *'return response.json();'* &&
+    "$rabbit_provision_source" == *'[200, 404],'* &&
+    "$rabbit_provision_source" == *'if (topics !== null && !Array.isArray(topics)) fail();'* &&
+    "$rabbit_provision_source" == *'for (const topic of topics || []) {'* ]]
+  RUNNER_SOURCE="$rabbit_provision_source" billing_release_node - <<'NODE'
+const source = process.env.RUNNER_SOURCE || '';
+const markers = [
+  'if (!expected.includes(response.status)) fail();',
+  'if ([201, 204, 404].includes(response.status)) return null;',
+  'return response.json();',
+];
+let previous = -1;
+for (const marker of markers) {
+  const index = source.indexOf(marker, previous + 1);
+  if (index < 0) process.exit(1);
+  previous = index;
+}
+NODE
+  if grep -Eq '^[[:space:]]*OPERATIONS_STEADY_INTEGRATION_READ_PATTERN=' \
+    <<<"$rabbit_provision_source"; then
+    return 1
+  fi
+  [[ "$(printf '%s\n' "${BILLING_RELEASE_NODE_ENV_KEYS[@]}" |
+    grep -Fxc OPERATIONS_SNAPSHOT_PATH)" == 1 &&
+    "$(printf '%s\n' "${BILLING_RELEASE_NODE_ENV_KEYS[@]}" |
+      grep -Fxc OPERATIONS_SNAPSHOT_METADATA)" == 1 &&
+    "$(printf '%s\n' "${BILLING_RELEASE_NODE_FILE_ENV_KEYS[@]}" |
+    grep -Fxc OPERATIONS_SNAPSHOT_PATH)" == 1 &&
+    "$operations_snapshot_path_source" == *'"$expected_revision" == "${EXPECTED_REVISION:-}"'* &&
+    "$operations_snapshot_path_source" == *'"$filename" == "operations-$expected_revision.json"'* &&
+    "$operations_snapshot_path_source" == *"'1001:1001:600:1'"* &&
+    "$operations_snapshot_path_source" == *"'0:1001:770:2'"* ]]
+  [[ "$node_docker_source" == *"local runtime_user='0:0' snapshot_path_count=0"* &&
+    "$node_docker_source" == *'snapshot_directory="$app_root/deploy/backend/operations-cutover"'* &&
+    "$node_docker_source" == *'"$(basename -- "$path")" == operations-*.json'* &&
+    "$node_docker_source" == *'billing_release_operations_snapshot_path_is_allowed "$path" "$app_root"'* &&
+    "$node_docker_source" == *'billing_release_operations_snapshot_path_is_allowed "$path" "$app_root" || return 1'* &&
+    "$node_docker_source" == *'snapshot_path_count=$((snapshot_path_count + 1))'* &&
+    "$node_docker_source" == *'"$snapshot_path_count" == "${#host_paths[@]}"'* &&
+    "$node_docker_source" == *"runtime_user='1001:1001'"* &&
+    "$node_docker_source" == *'--log-driver none --user "$runtime_user" --security-opt no-new-privileges'* ]]
+  [[ "$resume_classifier_source" == *'const targetCurrentCounts = target && Number.isSafeInteger(target.notes)'* &&
+    "$resume_classifier_source" == *'const targetIdentity = target && target.sourceRevision === revision'* &&
+    "$resume_classifier_source" == *"target?.phase !== 'ACTIVE' || !targetIdentity || !targetCurrentCounts"* &&
+    "$resume_classifier_source" == *'const targetExact = targetIdentity && target.notes === notes'* ]]
+  [[ "$resume_source" == *'OPERATIONS_SNAPSHOT_METADATA="$metadata"'* &&
+    "$resume_source" == *'OPERATIONS_CORE_STATUS="$core_status"'* &&
+    "$resume_source" == *'OPERATIONS_TARGET_STATUS="$target_status"'* &&
+    "$resume_source" == *'OPERATIONS_EXPECTED_REVISION="$revision" operations_classify_snapshot_state'* ]]
   [[ "$marker_retry_source" == *'prepared:absent:applied) printf '\''prepared-post-ddl-completion\n'\'''* &&
     "$marker_retry_source" == *'prepared:*) printf '\''prepared-recovery\n'\'''* &&
     "$marker_retry_source" == *'complete:absent:applied) printf '\''descendant\n'\'''* &&
@@ -3406,6 +3544,7 @@ if (
   !sql.includes('(pg_control_system()).system_identifier::TEXT IS DISTINCT FROM expected_system_identifier')
 ) process.exit(1);
 NODE
+  operations_resume_classifier_self_test
   printf 'operations-cutover self-test passed\n'
 }
 

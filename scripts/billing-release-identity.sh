@@ -55,7 +55,8 @@ BILLING_RELEASE_NODE_ENV_KEYS=(
 	OPERATIONS_PLATFORM_LEDGER_STATE OPERATIONS_PREP_LEDGER_STATE
 	OPERATIONS_PRISMA_LEDGER OPERATIONS_PRISMA_MANIFEST
 	OPERATIONS_MIGRATION_DATABASE_URL OPERATIONS_QUEUE_MODE
-	OPERATIONS_QUEUE_SNAPSHOT OPERATIONS_TARGET_STATUS
+	OPERATIONS_QUEUE_SNAPSHOT OPERATIONS_SNAPSHOT_METADATA
+	OPERATIONS_SNAPSHOT_PATH OPERATIONS_TARGET_STATUS
 	POST_RESTORE_SHA POST_SHA PREVIOUS_REVISION PRE_RECEIPT_SHA
 	PROJECTION_EVIDENCE QUEUE_FILE QUEUE_LISTING
 	RABBITMQ_BINDING_DESTINATIONS RABBITMQ_CONTAINER_ID RABBITMQ_IMAGE_ID
@@ -66,7 +67,8 @@ BILLING_RELEASE_NODE_ENV_KEYS=(
 )
 BILLING_RELEASE_NODE_FILE_ENV_KEYS=(
 	BILLING_QUEUE_MANIFEST BILLING_WRITER_MANIFEST COMPLETION_FILE DEPLOY_FILE
-	DIRECTORY MIGRATIONS_ROOT OPERATIONS_ENV_PATH QUEUE_FILE RECEIPT_FILE
+	DIRECTORY MIGRATIONS_ROOT OPERATIONS_ENV_PATH OPERATIONS_SNAPSHOT_PATH
+	QUEUE_FILE RECEIPT_FILE
 	RESTORE_FILE WRITER_FILE
 )
 BILLING_RELEASE_NODE_HOST_BINARY="$(type -P node 2>/dev/null || true)"
@@ -216,6 +218,23 @@ billing_release_node_existing_path_is_safe() {
 	[[ "$canonical" == "$path" ]]
 }
 
+billing_release_operations_snapshot_path_is_allowed() {
+	[[ $# -eq 2 ]] || return 1
+	local path="$1" app_root="$2" directory filename expected_revision
+	directory="$app_root/deploy/backend/operations-cutover"
+	filename="$(basename -- "$path")" || return 1
+	expected_revision="${OPERATIONS_EXPECTED_REVISION:-}"
+	[[ "$(dirname -- "$path")" == "$directory" &&
+		"$expected_revision" =~ ^[0-9a-f]{40}$ &&
+		"$expected_revision" == "${EXPECTED_REVISION:-}" &&
+		"$filename" == "operations-$expected_revision.json" &&
+		-f "$path" && ! -L "$path" &&
+		"$(stat -c '%u:%g:%a:%h' "$path")" == '1001:1001:600:1' &&
+		-d "$directory" && ! -L "$directory" &&
+		"$(cd -- "$directory" && pwd -P)" == "$directory" &&
+		"$(stat -c '%u:%g:%a:%h' "$directory")" == '0:1001:770:2' ]]
+}
+
 billing_release_node_path_within() {
 	[[ $# -eq 2 && ( "$1" == "$2" || "$1" == "$2/"* ) ]]
 }
@@ -230,6 +249,9 @@ billing_release_node_input_path_is_allowed() {
 	fi
 	if [[ "$path" == "$app_root/deploy/backend/.env.production" ]]; then
 		[[ -f "$path" && "$(stat -c '%u:%g:%a:%h' "$path")" == '0:0:600:1' ]]
+		return
+	fi
+	if billing_release_operations_snapshot_path_is_allowed "$path" "$app_root"; then
 		return
 	fi
 	if billing_release_node_path_within "$path" \
@@ -250,10 +272,12 @@ billing_release_node_docker() (
 	[[ $# -ge 1 ]] || return 1
 	billing_release_prepare_node_runtime || return 1
 	local app_root cleanup_root path variable argument mapped index existing docker_binary
+	local runtime_user='0:0' snapshot_path_count=0 snapshot_directory
 	local cleanup_needed=false
 	local -a original_args=() mapped_args=() referenced_paths=() host_paths=()
 	local -a container_paths=() docker_args=()
 	app_root="${APP_ROOT:-/opt/winwidget}"
+	snapshot_directory="$app_root/deploy/backend/operations-cutover"
 	docker_binary="$(type -P docker 2>/dev/null || true)"
 	[[ -n "$docker_binary" && -f "$docker_binary" && ! -L "$docker_binary" &&
 		-x "$docker_binary" ]] || return 1
@@ -292,10 +316,24 @@ billing_release_node_docker() (
 		host_paths+=("$cleanup_root")
 		container_paths+=('/billing-node-cleanup')
 	fi
+	if ((${#host_paths[@]})); then
+		for path in "${host_paths[@]}"; do
+			if [[ "$(dirname -- "$path")" == "$snapshot_directory" &&
+				"$(basename -- "$path")" == operations-*.json ]]; then
+				billing_release_operations_snapshot_path_is_allowed "$path" "$app_root" || return 1
+				snapshot_path_count=$((snapshot_path_count + 1))
+			fi
+		done
+	fi
+	if ((snapshot_path_count > 0)); then
+		[[ "$cleanup_needed" == 'false' &&
+			"$snapshot_path_count" == "${#host_paths[@]}" ]] || return 1
+		runtime_user='1001:1001'
+	fi
 	docker_args=(
 		run --rm --network none --read-only --cap-drop ALL
 		--pids-limit 64 --cpus 1 --memory 512m --memory-swap 512m
-		--log-driver none --user 0:0 --security-opt no-new-privileges
+		--log-driver none --user "$runtime_user" --security-opt no-new-privileges
 		--entrypoint node
 	)
 	if [[ "$read_stdin" == 'true' ]]; then
