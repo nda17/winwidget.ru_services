@@ -925,9 +925,8 @@ ORDER BY migration_name COLLATE \"C\", started_at, id;")" || return 1
     OPERATIONS_PRISMA_LEDGER="$actual" \
     OPERATIONS_PREP_LEDGER_STATE="$operations_state" \
     OPERATIONS_PLATFORM_LEDGER_STATE="$platform_state" \
-    OPERATIONS_PREP_MIGRATION="$OPERATIONS_PREP_MIGRATION" \
-    OPERATIONS_PLATFORM_MIGRATION="$PLATFORM_TERMINAL_MIGRATION" \
-    billing_release_node - <<'NODE'
+    billing_release_node - "$OPERATIONS_PREP_MIGRATION" \
+      "$PLATFORM_TERMINAL_MIGRATION" <<'NODE'
 const manifestRows = (process.env.OPERATIONS_PRISMA_MANIFEST || '').trim().split('\n');
 const expected = new Map();
 for (const row of manifestRows) {
@@ -946,8 +945,8 @@ for (const row of actualRows) {
       !/^(0|[1-9][0-9]*)$/.test(row[4])) process.exit(1);
   grouped.get(row[0]).push({ finished: row[2] === '1', rolled: row[3] === '1', steps: Number(row[4]) });
 }
-const operations = process.env.OPERATIONS_PREP_MIGRATION;
-const platform = process.env.OPERATIONS_PLATFORM_MIGRATION;
+const operations = process.argv[2] || '';
+const platform = process.argv[3] || '';
 const successful = row => row.finished && !row.rolled && [0, 1].includes(row.steps);
 const validateCandidate = (rows, state) => {
   const applied = rows.filter(successful);
@@ -2436,7 +2435,7 @@ NODE
 
 self_test() {
   local revision='a234567890123456789012345678901234567890'
-  local source source_without_backslashes cutover_source cleanup_sql
+  local source source_without_backslashes cutover_source cleanup_sql ledger_argument_contract key
   local gateway_assert_contract gateway_manifest_contract gateway_ready_contract gateway_wait_contract
   local gateway_wait_source live_owner_runtime_source node_runtime_source self_test_server_root index
   local -a source_contracts normalized_source_contracts cutover_contracts
@@ -2492,6 +2491,18 @@ self_test() {
     "$PLATFORM_TERMINAL_MIGRATION" == '20260825000000_remove_legacy_platform_core_source' ]]
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
   [[ "$CONTAINER_ARTIFACT_DIR" == '/var/lib/winwidget/operations-cutover' ]]
+  ledger_argument_contract="$(billing_release_node - operations-migration platform-migration <<'NODE'
+if (process.argv[2] !== 'operations-migration' || process.argv[3] !== 'platform-migration') {
+  process.exit(1);
+}
+process.stdout.write('passed');
+NODE
+)"
+  [[ "$ledger_argument_contract" == passed ]]
+  for key in OPERATIONS_PLATFORM_LEDGER_STATE OPERATIONS_PREP_LEDGER_STATE \
+    OPERATIONS_PRISMA_LEDGER OPERATIONS_PRISMA_MANIFEST; do
+    [[ " ${BILLING_RELEASE_NODE_ENV_KEYS[*]} " == *" $key "* ]]
+  done
   if (export_coordinated_revision latest) >/dev/null 2>&1; then
     return 1
   fi
