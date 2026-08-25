@@ -4,6 +4,14 @@
 # separate reviewed control path; deploy and lifecycle scripts must only run
 # while that path is disabled and its durable state is quiescent.
 
+database_restore_guard_script_directory="$(
+	cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P
+)"
+if ! declare -F billing_release_node >/dev/null 2>&1; then
+	# shellcheck source=scripts/billing-release-identity.sh
+	source "$database_restore_guard_script_directory/billing-release-identity.sh"
+fi
+
 database_restore_guard_fail() {
 	echo "$1" >&2
 	return 1
@@ -431,10 +439,10 @@ database_restore_guard_validate_service_owned_snapshot() {
 	local env_snapshot="$1"
 	local health_test="$2"
 	local mounts="$3"
-	DATABASE_RESTORE_GUARD_ENV="$env_snapshot" \
-	DATABASE_RESTORE_GUARD_HEALTH="$health_test" \
-	DATABASE_RESTORE_GUARD_MOUNTS="$mounts" node <<'NODE'
-const entries = (process.env.DATABASE_RESTORE_GUARD_ENV || '').split('\n').filter(Boolean);
+	local validator_source
+	IFS= read -r -d '' validator_source <<'NODE' || true
+const { readFileSync } = require('node:fs');
+const entries = readFileSync(0, 'utf8').split('\n').filter(Boolean);
 const values = new Map();
 for (const entry of entries) {
   const index = entry.indexOf('=');
@@ -497,6 +505,9 @@ if (secretTargets.size !== targets.length ||
     !mounts.some(mount => mount?.Type === 'tmpfs' && mount?.RW === true &&
       mount?.Destination === '/run/database-restore-secrets')) process.exit(1);
 NODE
+	DATABASE_RESTORE_GUARD_HEALTH="$health_test" \
+	DATABASE_RESTORE_GUARD_MOUNTS="$mounts" \
+		billing_release_node_stdin -e "$validator_source" <<<"$env_snapshot"
 }
 
 database_restore_guard_validate_service_owned_targets() {
@@ -598,6 +609,17 @@ database_restore_guard_self_test() {
 	local test_worker_health
 	local service_owned_env service_owned_health service_owned_mounts
 	local service_owned_without_operations service_owned_without_mount
+	local service_owned_validator_source
+
+	service_owned_validator_source="$(
+		declare -f database_restore_guard_validate_service_owned_snapshot
+	)"
+	[[ "$service_owned_validator_source" == *'billing_release_node_stdin -e'* &&
+		"$service_owned_validator_source" == *"readFileSync(0, 'utf8')"* ]]
+	if grep -Eq '(^|[;&|][[:space:]]+|[[:space:]])node[[:space:]]+(-[[:space:]]+)?<<' \
+		<<<"$service_owned_validator_source"; then
+		return 1
+	fi
 
 	root="$(
 		mktemp -d "${TMPDIR:-/tmp}/winwidget-database-restore-guard.XXXXXX"

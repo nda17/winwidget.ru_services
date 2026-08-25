@@ -41,11 +41,18 @@ BILLING_RELEASE_NODE_ENV_KEYS=(
 	BILLING_SOURCE BILLING_SYSTEM_ID BILLING_WRITER_MANIFEST CAPTURED_AT
 	CLEANUP_MIGRATION CLEANUP_REVISION CLEANUP_URL COMPLETION_FILE
 	COMPLETION_REVISION CORE_RESTORE CORE_SHA CORE_SOURCE CORE_STATE
-	CORE_SYSTEM_ID DEPLOY_FILE DIRECTORY EXPECTED_CLEANUP_STATE
+	CORE_SYSTEM_ID DATABASE_RESTORE_GUARD_HEALTH DATABASE_RESTORE_GUARD_MOUNTS
+	DEPLOY_FILE DIRECTORY EXPECTED_CLEANUP_STATE
 	EXPECTED_GENERATION EXPECTED_KIND EXPECTED_POST_SHA EXPECTED_REVISION
 	EXPECTED_ROLE EXPECTED_SNAPSHOT EXPECTED_VOLUME FIELD GATEWAY_ROUTES
 	MIGRATIONS_ROOT MIGRATION_LEDGER_ROWS MIGRATION_MANIFEST_JSON
 	MIGRATION_SOURCE OPTIONS_URL OWNERSHIP_GENERATION POST_RECEIPT_SHA
+	OPERATIONS_BACKUP_URL OPERATIONS_CLEANUP_SQL OPERATIONS_CORE_STATUS
+	OPERATIONS_CUTOVER_SOURCE OPERATIONS_DATABASE_URL OPERATIONS_ENV_KEY
+	OPERATIONS_ENV_PATH OPERATIONS_EXPECTED_KINDS OPERATIONS_EXPECTED_REVISION
+	OPERATIONS_EXPECTED_ROLE OPERATIONS_EXPORT_JSON OPERATIONS_HEALTH_JSON
+	OPERATIONS_MIGRATION_DATABASE_URL OPERATIONS_QUEUE_MODE
+	OPERATIONS_QUEUE_SNAPSHOT OPERATIONS_TARGET_STATUS
 	POST_RESTORE_SHA POST_SHA PREVIOUS_REVISION PRE_RECEIPT_SHA
 	PROJECTION_EVIDENCE QUEUE_FILE QUEUE_LISTING
 	RABBITMQ_BINDING_DESTINATIONS RABBITMQ_CONTAINER_ID RABBITMQ_IMAGE_ID
@@ -56,7 +63,8 @@ BILLING_RELEASE_NODE_ENV_KEYS=(
 )
 BILLING_RELEASE_NODE_FILE_ENV_KEYS=(
 	BILLING_QUEUE_MANIFEST BILLING_WRITER_MANIFEST COMPLETION_FILE DEPLOY_FILE
-	DIRECTORY MIGRATIONS_ROOT QUEUE_FILE RECEIPT_FILE RESTORE_FILE WRITER_FILE
+	DIRECTORY MIGRATIONS_ROOT OPERATIONS_ENV_PATH QUEUE_FILE RECEIPT_FILE
+	RESTORE_FILE WRITER_FILE
 )
 BILLING_RELEASE_NODE_HOST_BINARY="$(type -P node 2>/dev/null || true)"
 BILLING_RELEASE_NODE_IMAGE_ID=''
@@ -85,9 +93,16 @@ billing_release_marker_value_for_node_runtime() {
 	' "$1"
 }
 
+billing_release_git_checkout_is_safe() {
+	[[ $# -eq 1 && "$1" == /* && -d "$1" && ! -L "$1" &&
+		-e "$1/.git" && ! -L "$1/.git" ]] || return 1
+	[[ "$(git -C "$1" rev-parse --is-inside-work-tree 2>/dev/null)" == 'true' ]]
+}
+
 billing_release_node_revision_is_allowed() {
-	[[ $# -eq 2 && "$1" =~ ^[0-9a-f]{40}$ && -d "$2/.git" ]] || return 1
+	[[ $# -eq 2 && "$1" =~ ^[0-9a-f]{40}$ ]] || return 1
 	local revision="$1" source_root="$2" candidate marker key value
+	billing_release_git_checkout_is_safe "$source_root" || return 1
 	for candidate in \
 		"${EXPECTED_REVISION:-}" \
 		"$(git -C "$source_root" rev-parse HEAD 2>/dev/null || true)"; do
@@ -129,7 +144,7 @@ billing_release_prepare_node_runtime() {
 	local restart_count image image_id image_revision image_user app_revision
 	local container_revision
 	source_root="${server_root:-${SERVER_ROOT:-${APP_ROOT:-/opt/winwidget}/winwidget.ru_server}}"
-	[[ "$source_root" == /* && -d "$source_root/.git" && ! -L "$source_root" ]] || return 1
+	billing_release_git_checkout_is_safe "$source_root" || return 1
 	if [[ -n "$BILLING_RELEASE_NODE_IMAGE_ID" ]]; then
 		[[ "$BILLING_RELEASE_NODE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ &&
 			"$BILLING_RELEASE_NODE_IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]] || return 1
@@ -208,6 +223,10 @@ billing_release_node_input_path_is_allowed() {
 	billing_release_node_existing_path_is_safe "$path" || return 1
 	if [[ "$path" == "$source_root/prisma/migrations" ]]; then
 		[[ -d "$path" ]]
+		return
+	fi
+	if [[ "$path" == "$app_root/deploy/backend/.env.production" ]]; then
+		[[ -f "$path" && "$(stat -c '%u:%g:%a:%h' "$path")" == '0:0:600:1' ]]
 		return
 	fi
 	if billing_release_node_path_within "$path" \

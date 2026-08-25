@@ -6,6 +6,9 @@ APP_ROOT="$(cd "$ROOT_DIR/.." && pwd -P)"
 COMPOSE_FILE="$ROOT_DIR/deploy/docker-compose.prod.yml"
 ENV_FILE="${OPERATIONS_ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 
+# shellcheck source=scripts/billing-release-identity.sh
+source "$ROOT_DIR/scripts/billing-release-identity.sh"
+
 fail() {
   printf 'operations-database-prepare: %s\n' "$1" >&2
   exit 1
@@ -29,20 +32,48 @@ load_env() {
     OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE OPERATIONS_DATABASE_URL \
     OPERATIONS_MIGRATION_DATABASE_URL OPERATIONS_BACKUP_URL \
     OPERATIONS_IMAGE OPERATIONS_REVISION
-  encoded_entries="$(OPERATIONS_ENV_PATH="$ENV_FILE" node <<'NODE'
+  encoded_entries="$(OPERATIONS_ENV_PATH="$ENV_FILE" billing_release_node - <<'NODE'
 const { readFileSync } = require('node:fs');
+const requiredKeys = [
+  'OPERATIONS_POSTGRES_IMAGE',
+  'OPERATIONS_POSTGRES_PORT',
+  'OPERATIONS_POSTGRES_DATA_VOLUME',
+  'OPERATIONS_POSTGRES_ADMIN_USER',
+  'OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE',
+  'OPERATIONS_DATABASE_URL',
+  'OPERATIONS_MIGRATION_DATABASE_URL',
+  'OPERATIONS_BACKUP_URL',
+  'OPERATIONS_IMAGE',
+  'OPERATIONS_REVISION',
+];
+const required = new Set(requiredKeys);
 const values = new Map();
 for (const line of readFileSync(process.env.OPERATIONS_ENV_PATH, 'utf8').split(/\r?\n/)) {
   if (!line.trim() || /^\s*#/.test(line)) continue;
   const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-  if (!match || values.has(match[1])) throw new Error('invalid or duplicate env entry');
+  if (!match) process.exit(1);
+  const key = match[1];
+  if (!required.has(key)) continue;
+  if (values.has(key)) process.exit(1);
   let value = match[2];
-  if (value.startsWith('"') && value.endsWith('"')) value = JSON.parse(value);
-  else if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
-  if (value.includes('\0')) throw new Error('invalid env value');
-  values.set(match[1], value);
+  if (value.startsWith('"') || value.endsWith('"')) {
+    if (!(value.startsWith('"') && value.endsWith('"'))) process.exit(1);
+    try {
+      value = JSON.parse(value);
+    } catch {
+      process.exit(1);
+    }
+  }
+  else if (value.startsWith("'") || value.endsWith("'")) {
+    if (!(value.startsWith("'") && value.endsWith("'"))) process.exit(1);
+    value = value.slice(1, -1);
+  }
+  if (value.includes('\0')) process.exit(1);
+  values.set(key, value);
 }
-for (const [key, value] of values) {
+if (values.size !== requiredKeys.length) process.exit(1);
+for (const key of requiredKeys) {
+  const value = values.get(key);
   process.stdout.write(`${key}\t${Buffer.from(value).toString('base64')}\n`);
 }
 NODE
@@ -100,7 +131,7 @@ validate_contract() {
   [[ "$(stat -c '%u:%g:%a:%h' "$OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE")" == '0:0:600:1' ]] ||
     fail "Operations PostgreSQL admin password file must be root:root mode 600 with one link"
 
-  node <<'NODE'
+  billing_release_node - <<'NODE'
 const contracts = [
   ['OPERATIONS_DATABASE_URL', 'winwidget_operations_runtime'],
   ['OPERATIONS_MIGRATION_DATABASE_URL', 'winwidget_operations_migration'],
@@ -108,7 +139,12 @@ const contracts = [
 ];
 const passwords = new Set();
 for (const [name, expectedUser] of contracts) {
-  const url = new URL(process.env[name] || '');
+  let url;
+  try {
+    url = new URL(process.env[name] || '');
+  } catch {
+    process.exit(1);
+  }
   if (
     url.protocol !== 'postgresql:' ||
     url.hostname !== '127.0.0.1' ||
@@ -166,10 +202,15 @@ wait_for_database() {
 }
 
 emit_role_sql() {
-  node <<'NODE'
+  billing_release_node - <<'NODE'
 const quoteLiteral = value => `'${value.replaceAll("'", "''")}'`;
 const password = name => {
-  const value = decodeURIComponent(new URL(process.env[name]).password);
+  let value;
+  try {
+    value = decodeURIComponent(new URL(process.env[name]).password);
+  } catch {
+    process.exit(1);
+  }
   if (value.length < 32 || value.startsWith('change_me')) throw new Error('invalid password');
   return quoteLiteral(value);
 };
@@ -178,14 +219,20 @@ const roles = [
   ['winwidget_operations_migration', password('OPERATIONS_MIGRATION_DATABASE_URL')],
   ['winwidget_operations_backup', password('OPERATIONS_BACKUP_URL')]
 ];
+const roleStatements = [];
 for (const [role, secret] of roles) {
-  process.stdout.write(`DO $$ BEGIN\n`);
-  process.stdout.write(`  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN\n`);
-  process.stdout.write(`    ALTER ROLE "${role}" WITH LOGIN PASSWORD ${secret} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;\n`);
-  process.stdout.write(`  ELSE\n`);
-  process.stdout.write(`    CREATE ROLE "${role}" WITH LOGIN PASSWORD ${secret} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;\n`);
-  process.stdout.write(`  END IF;\nEND $$;\n`);
+  roleStatements.push(
+    `  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${role}') THEN`,
+    `    ALTER ROLE "${role}" WITH LOGIN PASSWORD ${secret} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;`,
+    `  ELSE`,
+    `    CREATE ROLE "${role}" WITH LOGIN PASSWORD ${secret} NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;`,
+    `  END IF;`,
+  );
 }
+const body = roleStatements.join('\n');
+let delimiter = '$operations_roles$';
+while (body.includes(delimiter)) delimiter = `${delimiter.slice(0, -1)}_$`;
+process.stdout.write(`DO ${delimiter} BEGIN\n${body}\nEND ${delimiter};\n`);
 NODE
 }
 
@@ -194,6 +241,7 @@ psql_admin() {
   container_id="$(compose ps -q operations-postgres)"
   docker exec -i "$container_id" \
     psql --no-psqlrc --set=ON_ERROR_STOP=1 \
+      --set=VERBOSITY=terse --set=SHOW_CONTEXT=never \
       --username "$OPERATIONS_POSTGRES_ADMIN_USER" \
       --dbname winwidget_operations "$@"
 }
@@ -373,13 +421,30 @@ SQL
 self_test() {
   local image='postgres:18-bookworm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   local revision='a234567890123456789012345678901234567890'
-  local acl_source
+  local acl_source node_source role_sql
   acl_source="$(declare -f apply_runtime_acl)"
+  node_source="$(declare -f load_env validate_contract emit_role_sql)"
+  role_sql="$(
+    OPERATIONS_DATABASE_URL='postgresql://winwidget_operations_runtime:runtime_self_test_password_1234567890@127.0.0.1:55441/winwidget_operations?schema=operations&sslmode=disable' \
+    OPERATIONS_MIGRATION_DATABASE_URL='postgresql://winwidget_operations_migration:migration_self_test_password_12345678@127.0.0.1:55441/winwidget_operations?schema=operations&sslmode=disable' \
+    OPERATIONS_BACKUP_URL='postgresql://winwidget_operations_backup:backup_self_test_password_123456789012@127.0.0.1:55441/winwidget_operations?schema=operations&sslmode=disable' \
+      emit_role_sql
+  )"
   [[ "$image" == postgres:18-*'@sha256:'* ]]
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
   [[ "$(declare -f validate_contract)" == *"stat -c '%u:%g:%a:%h'"* &&
     "$(declare -f validate_contract)" == *"'0:0:600:1'"* &&
     "$(declare -f validate_contract)" == *'password parent must be canonical'* ]]
+  [[ "$node_source" == *'billing_release_node -'* &&
+    "$(grep -c 'billing_release_node -' <<<"$node_source")" == '3' ]]
+  if grep -Eq '(^|[;&|][[:space:]]+|[[:space:]])node[[:space:]]+(-[[:space:]]+)?<<' \
+    <<<"$node_source"; then
+    return 1
+  fi
+  [[ "$(grep -c '^DO \$operations_roles_*\$ BEGIN$' <<<"$role_sql")" == '1' &&
+    "$(grep -c '^END \$operations_roles_*\$;$' <<<"$role_sql")" == '1' &&
+    "$(grep -c 'ALTER ROLE "winwidget_operations_' <<<"$role_sql")" == '3' &&
+    "$(grep -c 'CREATE ROLE "winwidget_operations_' <<<"$role_sql")" == '3' ]]
   [[ "$acl_source" == *'REVOKE ALL ON TABLE operations."_prisma_migrations"'* &&
     "$acl_source" == *'REVOKE INSERT, UPDATE, DELETE, TRUNCATE'* &&
     "$acl_source" == *'operations.operations_ownership_state'* &&
@@ -394,7 +459,6 @@ main() {
       ;;
     --prepare)
       require_command docker
-      require_command node
       require_command grep
       load_env
       validate_contract

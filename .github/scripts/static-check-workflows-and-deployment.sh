@@ -338,6 +338,14 @@ const operationsCutoverScript = readFileSync(
   "scripts/operations-cutover-production.sh",
   "utf8",
 );
+const operationsDatabasePrepareScript = readFileSync(
+  "scripts/operations-database-prepare.sh",
+  "utf8",
+);
+const billingReleaseIdentityScript = readFileSync(
+  "scripts/billing-release-identity.sh",
+  "utf8",
+);
 const widgetsCoreCleanupRehearsal = readFileSync(
   "scripts/test-widgets-core-source-cleanup-rehearsal.sh",
   "utf8",
@@ -2751,6 +2759,125 @@ for (const requiredOperationsCutoverToken of [
       `Operations cutover lost strict Platform-cleanup/restore precondition: ${requiredOperationsCutoverToken}`,
     );
   }
+}
+const operationsNodeRuntimeSources = [
+  ["Operations cutover", operationsCutoverScript, 8],
+  ["Operations database prepare", operationsDatabasePrepareScript, 3],
+];
+for (const [sourceName, source, expectedRunnerCount] of operationsNodeRuntimeSources) {
+  const actualRunnerCount =
+    source.split("billing_release_node - <<'NODE'").length - 1;
+  if (
+    actualRunnerCount !== expectedRunnerCount ||
+    !source.includes("billing-release-identity.sh")
+  ) {
+    throw new Error(
+      `${sourceName} must use the reviewed Docker-only Node runner exactly ${expectedRunnerCount} times`,
+    );
+  }
+}
+if (
+  databaseRestoreGuard.split("billing_release_node_stdin -e").length - 1 !== 2 ||
+  !databaseRestoreGuard.includes("billing-release-identity.sh") ||
+  !databaseRestoreGuard.includes("readFileSync(0, 'utf8')")
+) {
+  throw new Error(
+    "Database restore service-owned preflight must validate its secret-bearing env snapshot through stdin and the Docker-only Node runner",
+  );
+}
+const directHostNodeHeredoc = source =>
+  source.split("\n").some(line =>
+    /(^|[;&|]\s+|\s)node\s+(?:-\s+)?<<['\"]?NODE/.test(line) &&
+    !line.includes("billing_release_node") &&
+    !line.includes('"$container_id" node'),
+  );
+if (
+  directHostNodeHeredoc(operationsCutoverScript) ||
+  directHostNodeHeredoc(operationsDatabasePrepareScript) ||
+  directHostNodeHeredoc(databaseRestoreGuard) ||
+  operationsDatabasePrepareScript.includes("require_command node")
+) {
+  throw new Error(
+    "Operations production cutover transitively requires a forbidden host Node runtime",
+  );
+}
+for (const requiredRunnerToken of [
+  "billing_release_host_node_available()",
+  "billing_release_prepare_node_runtime()",
+  "billing_release_git_checkout_is_safe()",
+  "OPERATIONS_ENV_PATH",
+  "OPERATIONS_DATABASE_URL",
+  "OPERATIONS_MIGRATION_DATABASE_URL",
+  "OPERATIONS_BACKUP_URL",
+  '"$path" == "$app_root/deploy/backend/.env.production"',
+  "'0:0:600:1'",
+  '"$image_id" == "$BILLING_RELEASE_NODE_IMAGE_ID"',
+  "org.opencontainers.image.revision",
+  "--network none --read-only --cap-drop ALL",
+  "--log-driver none",
+  "--security-opt no-new-privileges",
+  'docker_args+=(--env "$variable")',
+  '"$BILLING_RELEASE_NODE_IMAGE_ID" "${mapped_args[@]}"',
+]) {
+  if (!billingReleaseIdentityScript.includes(requiredRunnerToken)) {
+    throw new Error(
+      `Operations Docker-only Node runner lost a fail-closed contract: ${requiredRunnerToken}`,
+    );
+  }
+}
+const billingNodeDockerSource = billingReleaseIdentityScript.slice(
+  billingReleaseIdentityScript.indexOf("\nbilling_release_node_docker()"),
+  billingReleaseIdentityScript.indexOf("\nbilling_release_node()", billingReleaseIdentityScript.indexOf("\nbilling_release_node_docker()")),
+);
+if (
+  billingNodeDockerSource.includes("--env-file") ||
+  !operationsDatabasePrepareScript.includes("const requiredKeys = [") ||
+  !operationsDatabasePrepareScript.includes("if (!required.has(key)) continue;") ||
+  !operationsDatabasePrepareScript.includes("if (values.size !== requiredKeys.length) process.exit(1);") ||
+  operationsDatabasePrepareScript.includes("throw new Error('invalid or duplicate env entry')") ||
+  !operationsCutoverScript.includes("catch {\n      process.exit(1);\n    }") ||
+  !operationsDatabasePrepareScript.includes("--set=VERBOSITY=terse --set=SHOW_CONTEXT=never")
+) {
+  throw new Error(
+    "Operations env parsing must remain exact-key-only and fail generically without exposing secret fragments",
+  );
+}
+const operationsRequiredEnvKeyBlock = operationsDatabasePrepareScript.slice(
+  operationsDatabasePrepareScript.indexOf("const requiredKeys = ["),
+  operationsDatabasePrepareScript.indexOf("];", operationsDatabasePrepareScript.indexOf("const requiredKeys = [")) + 2,
+);
+const operationsRequiredEnvKeys = [
+  ...operationsRequiredEnvKeyBlock.matchAll(/'([A-Z0-9_]+)'/g),
+].map(match => match[1]);
+const expectedOperationsRequiredEnvKeys = [
+  "OPERATIONS_POSTGRES_IMAGE",
+  "OPERATIONS_POSTGRES_PORT",
+  "OPERATIONS_POSTGRES_DATA_VOLUME",
+  "OPERATIONS_POSTGRES_ADMIN_USER",
+  "OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE",
+  "OPERATIONS_DATABASE_URL",
+  "OPERATIONS_MIGRATION_DATABASE_URL",
+  "OPERATIONS_BACKUP_URL",
+  "OPERATIONS_IMAGE",
+  "OPERATIONS_REVISION",
+];
+if (
+  JSON.stringify(operationsRequiredEnvKeys) !==
+  JSON.stringify(expectedOperationsRequiredEnvKeys)
+) {
+  throw new Error(
+    `Operations database prepare must load only its exact ten required env keys: ${operationsRequiredEnvKeys.join(",")}`,
+  );
+}
+if (
+  operationsDatabasePrepareScript.split("process.stdout.write(`DO ${delimiter} BEGIN").length - 1 !== 1 ||
+  !operationsDatabasePrepareScript.includes("const roleStatements = [];") ||
+  !operationsDatabasePrepareScript.includes("while (body.includes(delimiter))") ||
+  operationsDatabasePrepareScript.includes("process.stdout.write(`DO $$ BEGIN")
+) {
+  throw new Error(
+    "Operations role password rotation must remain one delimiter-safe atomic PostgreSQL DO statement",
+  );
 }
 const operationsCutoverStart = operationsCutoverScript.indexOf("\ncutover() {");
 const operationsCheckoutGuard = operationsCutoverScript.indexOf(

@@ -11,6 +11,12 @@ CONTAINER_ARTIFACT_DIR='/var/lib/winwidget/operations-cutover'
 readonly OPERATIONS_STEADY_INTEGRATION_READ_PATTERN='^winwidget\.core\.billing\.(payment-details|subscription-details|affiliate)\.v1(\.dead-letter)?$'
 readonly OPERATIONS_STEADY_INTEGRATION_KINDS='billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
 
+operations_cutover_script_directory="$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P
+)"
+# shellcheck source=scripts/billing-release-identity.sh
+source "$operations_cutover_script_directory/billing-release-identity.sh"
+
 fail() {
   printf 'operations-cutover: %s\n' "$1" >&2
   exit 1
@@ -25,7 +31,8 @@ compose() {
 
 read_env_value() {
   local key="$1"
-  OPERATIONS_ENV_PATH="$ENV_FILE" OPERATIONS_ENV_KEY="$key" node <<'NODE'
+  OPERATIONS_ENV_PATH="$ENV_FILE" OPERATIONS_ENV_KEY="$key" \
+    billing_release_node - <<'NODE'
 const { readFileSync } = require('node:fs');
 const key = process.env.OPERATIONS_ENV_KEY;
 const matches = [];
@@ -34,8 +41,18 @@ for (const line of readFileSync(process.env.OPERATIONS_ENV_PATH, 'utf8').split(/
   const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
   if (!match || match[1] !== key) continue;
   let value = match[2];
-  if (value.startsWith('"') && value.endsWith('"')) value = JSON.parse(value);
-  else if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
+  if (value.startsWith('"') || value.endsWith('"')) {
+    if (!(value.startsWith('"') && value.endsWith('"'))) process.exit(1);
+    try {
+      value = JSON.parse(value);
+    } catch {
+      process.exit(1);
+    }
+  }
+  else if (value.startsWith("'") || value.endsWith("'")) {
+    if (!(value.startsWith("'") && value.endsWith("'"))) process.exit(1);
+    value = value.slice(1, -1);
+  }
   matches.push(value);
 }
 if (matches.length !== 1 || !matches[0] || matches[0].includes('\0')) process.exit(1);
@@ -252,7 +269,7 @@ wait_operations_ready() {
     if OPERATIONS_HEALTH_JSON="$response" \
       OPERATIONS_EXPECTED_ROLE="$role" \
       OPERATIONS_EXPECTED_REVISION="$revision" \
-      node <<'NODE'
+      billing_release_node - <<'NODE'
 const value = JSON.parse(process.env.OPERATIONS_HEALTH_JSON || 'null');
 const expectedKeys = ['revision', 'role', 'service', 'status'];
 const keys = value && typeof value === 'object' ? Object.keys(value).sort() : [];
@@ -336,7 +353,8 @@ rabbit_queue_snapshot() {
 queue_state_matches() {
   local mode="$1" snapshot
   snapshot="$(rabbit_queue_snapshot)" || return 1
-  OPERATIONS_QUEUE_MODE="$mode" OPERATIONS_QUEUE_SNAPSHOT="$snapshot" node <<'NODE'
+  OPERATIONS_QUEUE_MODE="$mode" OPERATIONS_QUEUE_SNAPSHOT="$snapshot" \
+    billing_release_node - <<'NODE'
 const rows = JSON.parse(process.env.OPERATIONS_QUEUE_SNAPSHOT || '[]');
 if (!Array.isArray(rows)) process.exit(1);
 const byName = new Map(rows.map(row => [row.name, row]));
@@ -425,7 +443,7 @@ retire_drained_legacy_audit_queues() {
     fail 'legacy audit queues must be empty and unused before retirement'
   snapshot="$(rabbit_queue_snapshot)"
   mapfile -t queues < <(
-    OPERATIONS_QUEUE_SNAPSHOT="$snapshot" node <<'NODE'
+    OPERATIONS_QUEUE_SNAPSHOT="$snapshot" billing_release_node - <<'NODE'
 const rows = JSON.parse(process.env.OPERATIONS_QUEUE_SNAPSHOT || '[]');
 const existing = new Set(rows.map(row => row.name));
 const bases = [
@@ -580,7 +598,7 @@ const fail = () => process.exit(1);
 }
 
 assert_integration_runtime() {
-  local revision="$1" container_id image environment_json
+  local revision="$1" container_id image
   container_id="$(compose ps -q integration-worker)"
   [[ -n "$container_id" &&
     "$(docker inspect --format '{{.State.Running}}' "$container_id")" == true ]] ||
@@ -588,27 +606,15 @@ assert_integration_runtime() {
   image="$(docker inspect --format '{{.Image}}' "$container_id")"
   [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$revision" ]] ||
     fail 'integration-worker image revision is stale'
-  environment_json="$(docker inspect --format '{{json .Config.Env}}' "$container_id")"
-  OPERATIONS_INTEGRATION_ENV="$environment_json" \
-  OPERATIONS_EXPECTED_REVISION="$revision" \
-  OPERATIONS_EXPECTED_KINDS="$OPERATIONS_STEADY_INTEGRATION_KINDS" \
-    node <<'NODE'
-const entries = JSON.parse(process.env.OPERATIONS_INTEGRATION_ENV || '[]');
-if (!Array.isArray(entries)) process.exit(1);
-const values = new Map();
-for (const entry of entries) {
-  const index = typeof entry === 'string' ? entry.indexOf('=') : -1;
-  if (index <= 0) continue;
-  const key = entry.slice(0, index);
-  if (values.has(key)) process.exit(1);
-  values.set(key, entry.slice(index + 1));
-}
+  docker exec --interactive \
+    --env "OPERATIONS_EXPECTED_REVISION=$revision" \
+    --env "OPERATIONS_EXPECTED_KINDS=$OPERATIONS_STEADY_INTEGRATION_KINDS" \
+    "$container_id" node - <<'NODE'
 if (
-  values.get('APP_REVISION') !== process.env.OPERATIONS_EXPECTED_REVISION ||
-  values.get('INTEGRATION_WORKER_KINDS') !== process.env.OPERATIONS_EXPECTED_KINDS
+  process.env.APP_REVISION !== process.env.OPERATIONS_EXPECTED_REVISION ||
+  process.env.INTEGRATION_WORKER_KINDS !== process.env.OPERATIONS_EXPECTED_KINDS
 ) process.exit(1);
 NODE
-  unset environment_json
 }
 
 provision_rabbitmq() {
@@ -976,7 +982,7 @@ status() {
   core_status="$(root_cutover status)"
   target_status="$(target_cutover status)"
   OPERATIONS_CORE_STATUS="$core_status" \
-    OPERATIONS_TARGET_STATUS="$target_status" node <<'NODE'
+    OPERATIONS_TARGET_STATUS="$target_status" billing_release_node - <<'NODE'
 const core = JSON.parse(process.env.OPERATIONS_CORE_STATUS || 'null');
 const target = JSON.parse(process.env.OPERATIONS_TARGET_STATUS || 'null');
 if (core?.source === 'removed') {
@@ -1080,7 +1086,7 @@ cutover() {
     --revision "$revision" \
     --file "$snapshot_container")"
   read -r sha256 note_count event_count < <(
-    OPERATIONS_EXPORT_JSON="$export_json" node <<'NODE'
+    OPERATIONS_EXPORT_JSON="$export_json" billing_release_node - <<'NODE'
 const value = JSON.parse(process.env.OPERATIONS_EXPORT_JSON);
 if (
   value.exported !== true ||
@@ -1125,7 +1131,7 @@ NODE
 
 self_test() {
   local revision='a234567890123456789012345678901234567890'
-  local source cutover_source cleanup_sql self_test_server_root
+  local source cutover_source cleanup_sql node_runtime_source self_test_server_root
   source="$(declare -f \
     assert_steady_integration_contract \
     assert_platform_cleanup_complete \
@@ -1142,6 +1148,13 @@ self_test() {
     status \
     cutover)"
   cutover_source="$(declare -f cutover)"
+  node_runtime_source="$(declare -f \
+    read_env_value \
+    wait_operations_ready \
+    queue_state_matches \
+    retire_drained_legacy_audit_queues \
+    status \
+    cutover)"
   [[ "$CONFIRMATION" == 'CUT OVER OPERATIONS FORWARD ONLY' ]]
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
   [[ "$CONTAINER_ARTIFACT_DIR" == '/var/lib/winwidget/operations-cutover' ]]
@@ -1224,7 +1237,14 @@ self_test() {
     "$source" == *'Identity image and revision must match the exact Operations cutover revision'* &&
     "$source" == *'Exact Identity cutover image and Operations scope verified'* &&
     "$source" == *'Identity to Operations overview contract verified'* ]]
-  OPERATIONS_CUTOVER_SOURCE="$cutover_source" node <<'NODE'
+  [[ "$(grep -c 'billing_release_node -' <<<"$node_runtime_source")" == '6' &&
+    "$source" == *'docker exec --interactive'* &&
+    "$source" == *'process.env.APP_REVISION !== process.env.OPERATIONS_EXPECTED_REVISION'* ]]
+  if grep -Eq '(^|[;&|][[:space:]]+|[[:space:]])node[[:space:]]+(-[[:space:]]+)?<<' \
+    <<<"$node_runtime_source"; then
+    return 1
+  fi
+  OPERATIONS_CUTOVER_SOURCE="$cutover_source" billing_release_node - <<'NODE'
 const source = process.env.OPERATIONS_CUTOVER_SOURCE || '';
 const markers = [
   'assert_checkout "$revision"',
@@ -1257,7 +1277,7 @@ for (const marker of markers) {
 NODE
   self_test_server_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
   cleanup_sql="$(<"$self_test_server_root/prisma/post-cutover/operations/20260825010000_remove_legacy_operations_core_source.sql")"
-  OPERATIONS_CLEANUP_SQL="$cleanup_sql" node <<'NODE'
+  OPERATIONS_CLEANUP_SQL="$cleanup_sql" billing_release_node - <<'NODE'
 const sql = process.env.OPERATIONS_CLEANUP_SQL || '';
 const approval = sql.indexOf('Operations Core cleanup requires exact approval');
 const lock = sql.indexOf('LOCK TABLE "public"."notes", "public"."admin_event_logs"');
