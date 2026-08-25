@@ -928,7 +928,7 @@ SELECT (to_regclass('public.billing_source_aggregate_versions') IS NOT NULL
 	AND to_regclass('public.billing_settings_compositions') IS NOT NULL
   AND to_regclass('public.billing_source_sequence') IS NOT NULL
   AND to_regprocedure('public.billing_record_source_event(text,text,text,text,jsonb,boolean)') IS NOT NULL
-  AND to_regprocedure('public.billing_iso_timestamp(timestamp without time zone)') IS NOT NULL)::text;")" || return 1
+  AND to_regprocedure('public.billing_iso_timestamp(timestamp without time zone)') IS NOT NULL);")" || return 1
 	[[ "$result" == t ]] || platform_cleanup_fail 'retained shared Billing seam is incomplete.'
 }
 
