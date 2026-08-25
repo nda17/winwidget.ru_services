@@ -628,7 +628,7 @@ platform_terminal_finalize_pinned_post_ddl_marker() {
   [[ "$1" =~ ^[0-9a-f]{40}$ && "$2" == absent && "$3" == applied &&
     "$4" =~ ^(pristine|forward|absent)$ ]] || return 1
   local revision="$1" source_state="$2" migration_state="$3" operations_schema="$4"
-  local original_ancestor intermediate parent expected_marker_sha expected_env_sha
+  local original_ancestor intermediate parent recovery expected_marker_sha expected_env_sha
   local expected_original_marker_sha expected_script_sha script_path changed_paths
   local migration_path compose_path marker cleanup_revision phase marker_migration_sha marker_compose_sha
   local original_archive current_archive candidate revision_sha operations_state guards running prisma_id
@@ -637,23 +637,27 @@ platform_terminal_finalize_pinned_post_ddl_marker() {
   original_ancestor="${OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_ANCESTOR_REVISION:-}"
   intermediate="${OPERATIONS_PLATFORM_POST_DDL_INTERMEDIATE_REVISION:-}"
   parent="${OPERATIONS_PLATFORM_POST_DDL_PARENT_REVISION:-}"
+  recovery="${OPERATIONS_PLATFORM_POST_DDL_RECOVERY_REVISION:-}"
   expected_marker_sha="${OPERATIONS_PLATFORM_POST_DDL_MARKER_SHA256:-}"
   expected_env_sha="${OPERATIONS_PLATFORM_POST_DDL_ENV_SHA256:-}"
   expected_original_marker_sha="${OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_MARKER_SHA256:-}"
   expected_script_sha="${OPERATIONS_PLATFORM_POST_DDL_FINAL_SCRIPT_SHA256:-}"
   [[ "$original_ancestor" =~ ^[0-9a-f]{40}$ && "$intermediate" =~ ^[0-9a-f]{40}$ &&
-    "$parent" =~ ^[0-9a-f]{40}$ && "$expected_marker_sha" =~ ^[0-9a-f]{64}$ &&
+    "$parent" =~ ^[0-9a-f]{40}$ && "$recovery" =~ ^[0-9a-f]{40}$ &&
+    "$expected_marker_sha" =~ ^[0-9a-f]{64}$ &&
     "$expected_env_sha" =~ ^[0-9a-f]{64}$ &&
     "$expected_original_marker_sha" =~ ^[0-9a-f]{64}$ &&
     "$expected_script_sha" =~ ^[0-9a-f]{64}$ &&
     "$original_ancestor" != "$intermediate" && "$intermediate" != "$parent" &&
-    "$parent" != "$revision" &&
+    "$parent" != "$recovery" && "$recovery" != "$revision" &&
     "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$intermediate")" == \
       "$intermediate $original_ancestor" &&
     "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$parent")" == \
       "$parent $intermediate" &&
+    "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$recovery")" == \
+      "$recovery $parent" &&
     "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$revision")" == \
-      "$revision $parent" ]] || return 1
+      "$revision $recovery" ]] || return 1
   script_path='scripts/operations-cutover-production.sh'
   changed_paths="$(git -C "$SERVER_ROOT" diff --name-only "$original_ancestor" "$revision")" || return 1
   [[ "$changed_paths" == "$script_path" &&
@@ -665,7 +669,7 @@ platform_terminal_finalize_pinned_post_ddl_marker() {
   platform_terminal_validate_marker "$marker" || return 1
   marker_migration_sha="$(platform_terminal_marker_value migration_sha256)" || return 1
   marker_compose_sha="$(platform_terminal_marker_value compose_sha256)" || return 1
-  for candidate in "$original_ancestor" "$intermediate" "$parent" "$revision"; do
+  for candidate in "$original_ancestor" "$intermediate" "$parent" "$recovery" "$revision"; do
     revision_sha="$(platform_terminal_git_file_sha256 "$candidate" "$migration_path")" || return 1
     [[ "$revision_sha" == "$marker_migration_sha" &&
       "$revision_sha" == "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" ]] || return 1
@@ -1308,7 +1312,7 @@ SELECT (
         'operations_core_state_snapshot_check','operations_core_state_activation_check'))
   AND NOT has_table_privilege('public','public.operations_core_state','INSERT,UPDATE,DELETE,TRUNCATE')
 )::text;")" || return 1
-  [[ "$semantic_inventory" == t ]] || { printf 'unsafe\n'; return; }
+  [[ "$semantic_inventory" == true ]] || { printf 'unsafe\n'; return; }
   state_inventory="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
 SELECT
   (SELECT count(*)::text || '|' || count(*) FILTER (WHERE id='singleton' AND
@@ -3158,6 +3162,7 @@ NODE
     'OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_ANCESTOR_REVISION'
     'OPERATIONS_PLATFORM_POST_DDL_INTERMEDIATE_REVISION'
     'OPERATIONS_PLATFORM_POST_DDL_PARENT_REVISION'
+    'OPERATIONS_PLATFORM_POST_DDL_RECOVERY_REVISION'
     'OPERATIONS_PLATFORM_POST_DDL_MARKER_SHA256'
     'OPERATIONS_PLATFORM_POST_DDL_ENV_SHA256'
     'OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_MARKER_SHA256'
@@ -3284,10 +3289,12 @@ NODE
     "$post_ddl_source" == *'"$intermediate $original_ancestor"'* &&
     "$post_ddl_source" == *'rev-list --parents -n 1 "$parent"'* &&
     "$post_ddl_source" == *'"$parent $intermediate"'* &&
+    "$post_ddl_source" == *'rev-list --parents -n 1 "$recovery"'* &&
+    "$post_ddl_source" == *'"$recovery $parent"'* &&
     "$post_ddl_source" == *'rev-list --parents -n 1 "$revision"'* &&
-    "$post_ddl_source" == *'"$revision $parent"'* &&
+    "$post_ddl_source" == *'"$revision $recovery"'* &&
     "$post_ddl_source" == *'changed_paths="$(git -C "$SERVER_ROOT" diff --name-only "$original_ancestor" "$revision")"'* &&
-    "$post_ddl_source" == *'for candidate in "$original_ancestor" "$intermediate" "$parent" "$revision"'* &&
+    "$post_ddl_source" == *'for candidate in "$original_ancestor" "$intermediate" "$parent" "$recovery" "$revision"'* &&
     "$post_ddl_source" == *'"$source_state" == absent && "$migration_state" == applied'* &&
     "$post_ddl_source" == *'"$operations_schema" == pristine'* &&
     "$post_ddl_source" == *'platform_terminal_assert_exact_repo_ledger applied applied creation'* &&
@@ -3297,7 +3304,9 @@ NODE
     "$post_ddl_source" == *'platform_terminal_archive_prepared_marker'* &&
     "$post_ddl_source" == *'platform_terminal_finalize_descendant_prepared_marker'* &&
     "$post_ddl_source" != *'platform_terminal_rebind_prepared_marker'* ]]
-  [[ "$operations_prepare_source" == *'operations_core_state_generation_not_null'* &&
+  [[ "$operations_prepare_source" == *'[[ "$semantic_inventory" == true ]]'* &&
+    "$operations_prepare_source" != *'[[ "$semantic_inventory" == t ]]'* &&
+    "$operations_prepare_source" == *'operations_core_state_generation_not_null'* &&
     "$operations_prepare_source" == *'operations_core_state_id_not_null'* &&
     "$operations_prepare_source" == *'operations_core_state_legacy_routes_enabled_not_null'* &&
     "$operations_prepare_source" == *'operations_core_state_ownership_not_null'* &&
