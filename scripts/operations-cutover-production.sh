@@ -1131,7 +1131,8 @@ NODE
 
 self_test() {
   local revision='a234567890123456789012345678901234567890'
-  local source cutover_source cleanup_sql node_runtime_source self_test_server_root
+  local source source_without_backslashes cutover_source cleanup_sql
+  local node_runtime_source self_test_server_root
   source="$(declare -f \
     assert_steady_integration_contract \
     assert_platform_cleanup_complete \
@@ -1147,6 +1148,7 @@ self_test() {
     provision_rabbitmq \
     status \
     cutover)"
+  source_without_backslashes="${source//\\/}"
   cutover_source="$(declare -f cutover)"
   node_runtime_source="$(declare -f \
     read_env_value \
@@ -1197,17 +1199,17 @@ self_test() {
     "$cutover_source" == *'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"'* &&
     "$source" == *'OPERATIONS_STEADY_INTEGRATION_READ_PATTERN'* &&
     "$source" == *'OPERATIONS_STEADY_INTEGRATION_KINDS'* &&
-    "$source" == *'admin\\.audit\\.(reporting|widgets|billing|identity|platform|support)'* &&
+    "$source_without_backslashes" == *'admin.audit.(reporting|widgets|billing|identity|platform|support)'* &&
     "$source" == *'const provisionTopology = async () => {'* &&
     "$source" == *'operations-messaging.constants.js'* &&
     "$source" == *'await channel.bindQueue('* &&
     "$source" == *'/bindings`'* &&
     "$source" == *'JSON.stringify(actual) !== JSON.stringify(canonicalExpected)'* &&
     "$source" == *'await provisionTopology();'* &&
-    "$source" == *'write: "^winwidget\\\\.(retry|dead-letter)$"'* &&
+    "$source_without_backslashes" == *'write: "^winwidget.(retry|dead-letter)$"'* &&
     "$source" == *'read: `^${queuePattern}$`'* &&
-    "$source" == *'winwidget\\\\.(events|retry|dead-letter|manual-retry)'* &&
-    "$source" == *'winwidget\\\\.(events|manual-retry)'* &&
+    "$source_without_backslashes" == *'winwidget.(events|retry|dead-letter|manual-retry)'* &&
+    "$source_without_backslashes" == *'winwidget.(events|manual-retry)'* &&
     "$source" == *'--env RABBITMQ_ADMIN_PASSWORD'* &&
     "$source" != *'--env "RABBITMQ_ADMIN_PASSWORD='* &&
     "$source" == *"chown 0:1001 \"\$artifact_dir\""* &&
