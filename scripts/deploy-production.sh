@@ -746,6 +746,7 @@ for (const [name, eventRoutingKey] of sourcePairs) {
       arguments: {
         "x-dead-letter-exchange": "winwidget.dead-letter",
         "x-dead-letter-routing-key": deadLetterRoutingKey,
+        "x-queue-type": "classic",
       },
     },
     {
@@ -756,6 +757,7 @@ for (const [name, eventRoutingKey] of sourcePairs) {
       arguments: {
         "x-dead-letter-exchange": "winwidget.events",
         "x-dead-letter-routing-key": eventRoutingKey,
+        "x-queue-type": "classic",
       },
     },
     {
@@ -763,7 +765,10 @@ for (const [name, eventRoutingKey] of sourcePairs) {
       durable: true,
       auto_delete: false,
       exclusive: false,
-      arguments: { "x-message-ttl": 604800000 },
+      arguments: {
+        "x-message-ttl": 604800000,
+        "x-queue-type": "classic",
+      },
     },
   );
   expectedBindings.push(
@@ -8088,11 +8093,16 @@ expectedQueues.set(deadLetterQueue, { "x-message-ttl": auditDlqRetentionMs });
 }
 const sameArguments = (actual, expected) => {
 	if (!actual || typeof actual !== "object" || Array.isArray(actual)) return false;
-	const actualKeys = Object.keys(actual).sort();
+	const normalizedActual = { ...actual };
+	if (
+		normalizedActual["x-queue-type"] === "classic" &&
+		expected["x-queue-type"] === undefined
+	) delete normalizedActual["x-queue-type"];
+	const actualKeys = Object.keys(normalizedActual).sort();
 	const expectedKeys = Object.keys(expected).sort();
 	return actualKeys.length === expectedKeys.length &&
 		actualKeys.every((key, index) =>
-			key === expectedKeys[index] && actual[key] === expected[key]);
+			key === expectedKeys[index] && normalizedActual[key] === expected[key]);
 };
 const requireLegacyAbsent = queues => {
 	if (!Array.isArray(queues)) fail();
