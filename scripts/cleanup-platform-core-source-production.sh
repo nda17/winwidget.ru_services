@@ -714,6 +714,29 @@ platform_cleanup_validate_live_prisma_ledger() (
 	platform_cleanup_capture_prisma_ledger "$manifest" "$temporary/ledger.evidence" "$mode" >/dev/null
 )
 
+platform_cleanup_grep_no_match() {
+	local grep_result
+	if grep "$@" >/dev/null; then
+		return 1
+	else
+		grep_result=$?
+	fi
+	[[ "$grep_result" == 1 ]]
+}
+
+platform_cleanup_runtime_source_has_no_match() {
+	[[ $# -ge 2 ]] || return 1
+	local pattern="$1" root
+	shift
+	for root in "$@"; do
+		[[ -d "$root" && ! -L "$root" && -r "$root" ]] || return 1
+	done
+	platform_cleanup_grep_no_match -rEn \
+		--include='*.ts' --include='*.js' --include='*.mjs' --include='*.cjs' \
+		--exclude='*.spec.*' --exclude='*.test.*' \
+		"$pattern" "$@"
+}
+
 platform_cleanup_assert_cleanup_source_retired() {
 	local path
 	local -a runtime_source_roots=("$SERVER_ROOT/src")
@@ -727,23 +750,24 @@ platform_cleanup_assert_cleanup_source_retired() {
 	done
 	grep -Fq 'model BillingSourceAggregateVersion' "$SERVER_ROOT/prisma/schema.prisma" ||
 		platform_cleanup_fail 'shared Billing source aggregate model must be retained.' || return 1
-	! rg -n "SiteSettingsModule|LegalPagesModule|HomePageContentModule|PlatformBoundaryModule" \
-		"$SERVER_ROOT/src/app.module.ts" >/dev/null ||
+	platform_cleanup_grep_no_match -En \
+		'SiteSettingsModule|LegalPagesModule|HomePageContentModule|PlatformBoundaryModule' \
+		"$SERVER_ROOT/src/app.module.ts" ||
 		platform_cleanup_fail 'Core AppModule still registers retired Platform modules.' || return 1
-	! rg -n --glob '*.{ts,js,mjs,cjs}' --glob '!*.spec.*' --glob '!*.test.*' \
-		'prisma\.(siteSettings|legalPage|homePageContent|platformCoreState)\b|@(Controller|All|Delete|Get|Head|Options|Patch|Post|Put|Search)\([^\n]*(site-settings|legal-pages|home-page-content)|/api/v1/(site-settings|legal-pages|home-page-content)' \
-		"$SERVER_ROOT/src" >/dev/null ||
+	platform_cleanup_runtime_source_has_no_match \
+		'prisma\.(siteSettings|legalPage|homePageContent|platformCoreState)([^[:alnum:]_]|$)|@(Controller|All|Delete|Get|Head|Options|Patch|Post|Put|Search)\(.*(site-settings|legal-pages|home-page-content)|/api/v1/(site-settings|legal-pages|home-page-content)' \
+		"$SERVER_ROOT/src" ||
 		platform_cleanup_fail 'cleanup revision still contains a legacy Core Platform read/write path.' || return 1
 	for path in "$SERVER_ROOT"/apps/*/src; do
 		[[ -d "$path" && ! -L "$path" ]] && runtime_source_roots+=("$path")
 	done
-	! rg -n --glob '*.{ts,js,mjs,cjs}' --glob '!*.spec.*' --glob '!*.test.*' \
+	platform_cleanup_runtime_source_has_no_match \
 		'billing\.settings\.source\.changed\.v1|billing-settings-source|winwidget\.billing\.settings-source\.v1' \
-		"${runtime_source_roots[@]}" >/dev/null ||
+		"${runtime_source_roots[@]}" ||
 		platform_cleanup_fail 'cleanup revision still produces or consumes the legacy Billing settings-source event.' || return 1
-	! rg -n --glob '*.{ts,js,mjs,cjs}' --glob '!*.spec.*' --glob '!*.test.*' \
+	platform_cleanup_runtime_source_has_no_match \
 		"@Patch\\(['\"]settings['\"]\\)|[[:space:]]updateSettings\\(" \
-		"$SERVER_ROOT/apps/billing/src/http" "$SERVER_ROOT/apps/billing/src/domain" >/dev/null ||
+		"$SERVER_ROOT/apps/billing/src/http" "$SERVER_ROOT/apps/billing/src/domain" ||
 		platform_cleanup_fail 'Billing internal update-settings second-writer route remains in the cleanup revision.'
 }
 
@@ -3205,9 +3229,23 @@ platform_cleanup_self_test() (
 	local manifest ledger completion completion_sha tampered candidate old_migration uuid1 uuid2
 	local expected_changed_migrations
 	local chain chain_sha next_chain_sha chain_previous challenge attestation signature
-	local topology_valid topology_invalid
+	local grep_fixture grep_root retirement_source topology_valid topology_invalid
 	directory="$(realpath -- "$(mktemp -d)")" || return 1
 	trap 'rm -rf -- "$directory"' EXIT
+	grep_fixture="$directory/runtime-source.ts"
+	printf 'const retained = true;\n' >"$grep_fixture"
+	platform_cleanup_grep_no_match -En 'retired' "$grep_fixture"
+	if platform_cleanup_grep_no_match -En 'retained' "$grep_fixture"; then return 1; fi
+	if platform_cleanup_grep_no_match -En 'retired' "$directory/missing.ts" >/dev/null 2>&1; then return 1; fi
+	grep_root="$directory/runtime-source"
+	mkdir -p "$grep_root/nested"
+	printf 'const retired = true;\n' >"$grep_root/nested/excluded.spec.ts"
+	printf 'const retired = true;\n' >"$grep_root/nested/excluded.test.js"
+	printf 'const retired = true;\n' >"$grep_root/nested/excluded.txt"
+	platform_cleanup_runtime_source_has_no_match 'retired' "$grep_root"
+	printf 'const retired = true;\n' >"$grep_root/nested/runtime.ts"
+	if platform_cleanup_runtime_source_has_no_match 'retired' "$grep_root"; then return 1; fi
+	if platform_cleanup_runtime_source_has_no_match 'retired' "$directory/missing-runtime" >/dev/null 2>&1; then return 1; fi
 	ENV_FILE="$directory/.env.production"
 	printf 'SELF_TEST=value\n' >"$ENV_FILE"
 	chmod 600 "$ENV_FILE"
@@ -3393,6 +3431,7 @@ winwidget.billing.settings-source.v1 true 0 0 0"; then return 1; fi
 	if platform_cleanup_validate_queue_listing <<<"$valid_queues
 winwidget.billing.offer.v2.unexpected true 0 0 0"; then return 1; fi
 	source="$(<"${BASH_SOURCE[0]}")"
+	retirement_source="$(declare -f platform_cleanup_assert_cleanup_source_retired)"
 	[[ "$source" == *'DROP LEGACY PLATFORM CORE SOURCE'* &&
 		"$source" == *'--stage|--seal|--run|--verify|--forward-recovery'* &&
 		"$source" == *'billing_offer_projection_trigger()'* &&
@@ -3414,7 +3453,9 @@ winwidget.billing.offer.v2.unexpected true 0 0 0"; then return 1; fi
 		"$source" == *'prisma-ledger-post.evidence'* &&
 		"$source" == *'--applied "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION"'* &&
 		"$source" != *'platform_cleanup_assert_first_ownership_has_no_second_writer'* &&
-		"$source" == *'platform_core_source_cleanup'* ]]
+		"$source" == *'platform_core_source_cleanup'* &&
+		"$retirement_source" == *'platform_cleanup_grep_no_match'* &&
+		"$retirement_source" == *'platform_cleanup_runtime_source_has_no_match'* ]]
 	printf 'platform_core_source_cleanup_self_test=passed\n'
 )
 
