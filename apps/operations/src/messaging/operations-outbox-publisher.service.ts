@@ -7,6 +7,7 @@ import {
 import { OutboxStatus, Prisma } from '@prisma/operations-client';
 import { randomUUID } from 'node:crypto';
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
+import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
 import { OperationsRabbitMqService } from './operations-rabbitmq.service';
 
@@ -26,11 +27,16 @@ export class OperationsOutboxPublisherService
 	constructor(
 		private readonly prisma: OperationsPrismaService,
 		private readonly runtime: OperationsRuntimeService,
-		private readonly rabbit: OperationsRabbitMqService
+		private readonly rabbit: OperationsRabbitMqService,
+		private readonly ownership: OperationsOwnershipService
 	) {}
 
-	onModuleInit(): void {
+	async onModuleInit(): Promise<void> {
 		if (!this.runtime.outboxPublisherEnabled) return;
+		if (!(await this.ownership.isActive())) {
+			this.ready = true;
+			return;
+		}
 		this.ready = true;
 		this.timer = setInterval(
 			() => void this.tick(),

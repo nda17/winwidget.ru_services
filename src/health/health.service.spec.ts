@@ -4,6 +4,7 @@ import {
 	getMessagingQueueHealthExpectations,
 	BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME,
 	BILLING_OWNED_QUEUE_NAMES,
+	CORE_OWNED_MESSAGING_KINDS,
 	MESSAGING_QUEUE_NAMES
 } from '@/messaging/messaging.constants';
 import type { BillingMessagingClientService } from '@/messaging/billing-messaging-client.service';
@@ -409,6 +410,34 @@ describe('HealthService notification delivery monitoring', () => {
 		});
 	});
 
+	it('models all eight Operations audit sources as bounded diagnostic DLQs', () => {
+		const expectations = getMessagingQueueHealthExpectations({
+			billingOwner: false
+		});
+		const operations = expectations.filter(item =>
+			item.name.startsWith('winwidget.operations.admin.audit.')
+		);
+
+		expect(operations).toHaveLength(24);
+		expect(
+			operations.filter(item => item.name.endsWith('.dead-letter'))
+		).toHaveLength(8);
+		expect(
+			operations
+				.filter(item => item.name.endsWith('.dead-letter'))
+				.every(
+					item =>
+						item.consumerExpectation === 'none' &&
+						item.alertOnAnyMessage === false
+				)
+		).toBe(true);
+		expect(
+			expectations.some(item =>
+				item.name.startsWith('winwidget.admin.audit.')
+			)
+		).toBe(false);
+	});
+
 	it('requires every Billing main queue and keeps its retry and DLQ queues passive after handoff', () => {
 		const expectations = getMessagingQueueHealthExpectations({
 			billingOwner: true
@@ -627,19 +656,7 @@ describe('HealthService notification delivery monitoring', () => {
 			where: {
 				resolvedAt: null,
 				integration: {
-					in: [
-						'campaign-admin-audit',
-						'reporting-admin-audit',
-						'widgets-admin-audit',
-						'billing-admin-audit',
-						'identity-admin-audit',
-						'platform-admin-audit',
-						'support-admin-audit',
-						'billing-payment-projection',
-						'billing-subscription-projection',
-						'billing-affiliate-projection',
-						'database-backup'
-					]
+					in: [...CORE_OWNED_MESSAGING_KINDS]
 				}
 			}
 		});

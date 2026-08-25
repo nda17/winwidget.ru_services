@@ -1435,4 +1435,94 @@ describe('messaging event contract', () => {
 			})
 		).toThrow('cannot be consumed by platform-admin-audit');
 	});
+
+	it('accepts the exact Core transactional audit Outbox contract', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-25T00:00:00.000Z',
+			correlationId: MESSAGE_ID,
+			actorId: 'dev-user',
+			action: 'DEV_DATABASE_RESTORE',
+			section: 'DEV_TOOLS',
+			description: 'Core restore completed',
+			actorSnapshot: { name: null, email: null },
+			entity: {
+				type: 'DATABASE',
+				id: 'core',
+				label: 'Core',
+				targetUserId: null,
+				targetSnapshot: { name: null, email: null }
+			},
+			metadata: {
+				jobId: MESSAGE_ID,
+				requestIp: null,
+				requestUserAgent: null
+			}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.core.v1',
+				messageId: MESSAGE_ID
+			})
+		).not.toThrow();
+	});
+
+	it('rejects Core audit source drift, message mismatch and forbidden fields', () => {
+		const payload = {
+			schemaVersion: 1,
+			eventType: 'admin.audit.event.v1',
+			eventId: MESSAGE_ID,
+			occurredAt: '2026-08-25T00:00:00.000Z',
+			correlationId: MESSAGE_ID,
+			actorId: 'dev-user',
+			action: 'UNKNOWN_ACTION',
+			section: 'DEV_TOOLS',
+			description: 'Invalid Core audit',
+			actorSnapshot: { name: null, email: null },
+			entity: {
+				type: 'DATABASE',
+				id: 'core',
+				label: null,
+				targetUserId: null,
+				targetSnapshot: { name: null, email: null }
+			},
+			metadata: {}
+		};
+
+		expect(() =>
+			assertMessagingEventContract(payload, {
+				eventType: payload.eventType,
+				routingKey: 'admin.audit.core.v1',
+				messageId: MESSAGE_ID
+			})
+		).toThrow('payload.action is invalid');
+		expect(() =>
+			assertMessagingEventContract(
+				{ ...payload, action: 'DEV_DATABASE_RESTORE' },
+				{
+					eventType: payload.eventType,
+					routingKey: 'admin.audit.core.v1',
+					messageId: '22222222-2222-4222-8222-222222222222'
+				}
+			)
+		).toThrow('eventId must match');
+		expect(() =>
+			assertMessagingEventContract(
+				{
+					...payload,
+					action: 'DEV_DATABASE_RESTORE',
+					metadata: { password: 'forbidden' }
+				},
+				{
+					eventType: payload.eventType,
+					routingKey: 'admin.audit.core.v1',
+					messageId: MESSAGE_ID
+				}
+			)
+		).toThrow('is forbidden');
+	});
 });

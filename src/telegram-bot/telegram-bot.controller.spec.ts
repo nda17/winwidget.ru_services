@@ -4,6 +4,7 @@ import { TelegramBotController } from '@/telegram-bot/telegram-bot.controller';
 import type { TelegramBotService } from '@/telegram-bot/telegram-bot.service';
 import { BadRequestException } from '@nestjs/common';
 import {
+	Prisma,
 	ScheduledJobRunStatus,
 	ScheduledJobRunTrigger
 } from '@prisma/client';
@@ -16,21 +17,32 @@ describe('TelegramBotController manual database backup', () => {
 	const request = {} as Request;
 
 	const createController = (created: boolean) => {
+		const transaction = {
+			transactionMarker: 'manual-backup-audit'
+		} as unknown as Prisma.TransactionClient;
 		const scheduledTasksService = {
-			enqueueManualDatabaseBackup: jest.fn().mockResolvedValue({
-				target: 'notification-delivery',
-				jobId: randomUUID(),
-				status: ScheduledJobRunStatus.QUEUED,
-				queuedAt: '2026-07-24T00:00:00.000Z',
-				created
-			}),
+			enqueueManualDatabaseBackup: jest.fn(
+				async (target, _adminId, _idempotencyKey, writeAudit) => {
+					const result = {
+						target,
+						jobId: randomUUID(),
+						status: ScheduledJobRunStatus.QUEUED,
+						queuedAt: '2026-07-24T00:00:00.000Z',
+						created
+					};
+					if (created) await writeAudit(transaction, result);
+					return result;
+				}
+			),
 			getLatestActiveManualDatabaseBackup: jest.fn(),
 			getDatabaseBackupJob: jest.fn(),
 			getDatabaseBackupOverview: jest.fn(),
 			getDatabaseBackupJobs: jest.fn()
 		} as unknown as ScheduledTasksService;
+		const record = jest.fn().mockResolvedValue(undefined);
 		const adminEventLogService = {
-			record: jest.fn().mockResolvedValue(undefined)
+			record,
+			recordInTransaction: jest.fn((_transaction, input) => record(input))
 		} as unknown as AdminEventLogService;
 		const controller = new TelegramBotController(
 			{} as TelegramBotService,
@@ -41,7 +53,8 @@ describe('TelegramBotController manual database backup', () => {
 		return {
 			controller,
 			scheduledTasksService,
-			adminEventLogService
+			adminEventLogService,
+			transaction
 		};
 	};
 
@@ -70,8 +83,12 @@ describe('TelegramBotController manual database backup', () => {
 	});
 
 	it('records one audit event only for a newly created job', async () => {
-		const { controller, scheduledTasksService, adminEventLogService } =
-			createController(true);
+		const {
+			controller,
+			scheduledTasksService,
+			adminEventLogService,
+			transaction
+		} = createController(true);
 
 		const result = await controller.sendDatabaseBackup(
 			'notification-delivery',
@@ -85,7 +102,12 @@ describe('TelegramBotController manual database backup', () => {
 		).toHaveBeenCalledWith(
 			'notification-delivery',
 			adminId,
-			idempotencyKey
+			idempotencyKey,
+			expect.any(Function)
+		);
+		expect(adminEventLogService.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.any(Object)
 		);
 		expect(adminEventLogService.record).toHaveBeenCalledTimes(1);
 		expect(result.created).toBe(true);
@@ -150,7 +172,8 @@ describe('TelegramBotController manual database backup', () => {
 		).toHaveBeenCalledWith(
 			'notification-delivery',
 			adminId,
-			idempotencyKey
+			idempotencyKey,
+			expect.any(Function)
 		);
 		expect(adminEventLogService.record).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -175,7 +198,12 @@ describe('TelegramBotController manual database backup', () => {
 
 		expect(
 			scheduledTasksService.enqueueManualDatabaseBackup
-		).toHaveBeenCalledWith('reporting', adminId, idempotencyKey);
+		).toHaveBeenCalledWith(
+			'reporting',
+			adminId,
+			idempotencyKey,
+			expect.any(Function)
+		);
 		expect(adminEventLogService.record).toHaveBeenCalledWith(
 			expect.objectContaining({
 				description: expect.stringContaining('Reporting'),
@@ -197,7 +225,12 @@ describe('TelegramBotController manual database backup', () => {
 
 		expect(
 			scheduledTasksService.enqueueManualDatabaseBackup
-		).toHaveBeenCalledWith('widgets', adminId, idempotencyKey);
+		).toHaveBeenCalledWith(
+			'widgets',
+			adminId,
+			idempotencyKey,
+			expect.any(Function)
+		);
 		expect(adminEventLogService.record).toHaveBeenCalledWith(
 			expect.objectContaining({
 				description: expect.stringContaining('Widgets'),
@@ -219,11 +252,43 @@ describe('TelegramBotController manual database backup', () => {
 
 		expect(
 			scheduledTasksService.enqueueManualDatabaseBackup
-		).toHaveBeenCalledWith('platform', adminId, idempotencyKey);
+		).toHaveBeenCalledWith(
+			'platform',
+			adminId,
+			idempotencyKey,
+			expect.any(Function)
+		);
 		expect(adminEventLogService.record).toHaveBeenCalledWith(
 			expect.objectContaining({
 				description: expect.stringContaining('Platform'),
 				metadata: expect.objectContaining({ target: 'platform' })
+			})
+		);
+	});
+
+	it('keeps Operations manual jobs isolated and records the target', async () => {
+		const { controller, scheduledTasksService, adminEventLogService } =
+			createController(true);
+
+		await controller.sendDatabaseBackup(
+			'operations',
+			adminId,
+			idempotencyKey,
+			request
+		);
+
+		expect(
+			scheduledTasksService.enqueueManualDatabaseBackup
+		).toHaveBeenCalledWith(
+			'operations',
+			adminId,
+			idempotencyKey,
+			expect.any(Function)
+		);
+		expect(adminEventLogService.record).toHaveBeenCalledWith(
+			expect.objectContaining({
+				description: expect.stringContaining('Operations'),
+				metadata: expect.objectContaining({ target: 'operations' })
 			})
 		);
 	});
@@ -298,6 +363,52 @@ describe('TelegramBotController manual database backup', () => {
 });
 
 describe('TelegramBotController schedule audit', () => {
+	it('writes a successful settings audit through the service transaction', async () => {
+		const transaction = {
+			transactionMarker: 'telegram-settings-audit'
+		} as unknown as Prisma.TransactionClient;
+		const settings = {
+			dailySummaryChatId: '-100123',
+			databaseBackupThreadId: 2,
+			paymentsThreadId: 3,
+			operationalAlertsThreadId: 4,
+			databaseBackupEnabled: true,
+			databaseBackupTime: '01:45',
+			telegramBotTokenConfigured: true,
+			telegramBotUsernameConfigured: true
+		};
+		const telegramBotService = {
+			updateSettings: jest.fn(async (_dto, writeAudit) => {
+				await writeAudit(transaction, settings);
+				return settings;
+			})
+		} as unknown as TelegramBotService;
+		const adminEventLogService = {
+			recordInTransaction: jest.fn().mockResolvedValue(undefined)
+		} as unknown as AdminEventLogService;
+		const controller = new TelegramBotController(
+			telegramBotService,
+			adminEventLogService,
+			{} as ScheduledTasksService
+		);
+		const adminId = randomUUID();
+
+		await expect(
+			controller.updateSettings(
+				{ operationalAlertsThreadId: 4 },
+				adminId,
+				{} as Request
+			)
+		).resolves.toEqual(settings);
+		expect(adminEventLogService.recordInTransaction).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({
+				adminId,
+				action: 'TELEGRAM_BOT_SETTINGS_UPDATE'
+			})
+		);
+	});
+
 	it('records a rejected direct backup schedule change without values', async () => {
 		const error = new BadRequestException('schedule conflict');
 		const telegramBotService = {

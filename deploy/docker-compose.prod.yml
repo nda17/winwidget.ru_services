@@ -93,7 +93,7 @@ x-integration-worker-env: &integration-worker-env
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
   MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,support-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection}
+  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-billing-payment-projection,billing-subscription-projection,billing-affiliate-projection}
   INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
   INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
   SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
@@ -270,6 +270,20 @@ x-support-env: &support-env
   SUPPORT_OUTBOX_RETENTION_DAYS: ${SUPPORT_OUTBOX_RETENTION_DAYS:-7}
   SUPPORT_RECEIPT_RETENTION_DAYS: ${SUPPORT_RECEIPT_RETENTION_DAYS:-90}
   SUPPORT_FAILURE_DETAIL_RETENTION_DAYS: ${SUPPORT_FAILURE_DETAIL_RETENTION_DAYS:-30}
+x-operations-env: &operations-env
+  APP_REVISION: ${OPERATIONS_REVISION:?OPERATIONS_REVISION is required}
+  NODE_ENV: production
+  MODE: ${MODE:-production}
+  OPERATIONS_DATABASE_URL: ${OPERATIONS_DATABASE_URL:?OPERATIONS_DATABASE_URL is required}
+  OPERATIONS_LISTEN_HOST: ${OPERATIONS_LISTEN_HOST:-127.0.0.1}
+  OPERATIONS_API_PORT: ${OPERATIONS_API_PORT:-5200}
+  OPERATIONS_WORKER_PORT: ${OPERATIONS_WORKER_PORT:-5201}
+  OPERATIONS_OUTBOX_PUBLISHER_PORT: ${OPERATIONS_OUTBOX_PUBLISHER_PORT:-5202}
+  OPERATIONS_OUTBOX_BATCH_SIZE: ${OPERATIONS_OUTBOX_BATCH_SIZE:-50}
+  OPERATIONS_OUTBOX_POLL_INTERVAL_MS: ${OPERATIONS_OUTBOX_POLL_INTERVAL_MS:-1000}
+  OPERATIONS_AUDIT_RECEIPT_LEASE_MS: ${OPERATIONS_AUDIT_RECEIPT_LEASE_MS:-60000}
+  OPERATIONS_AUDIT_RETRY_DELAY_MS: ${OPERATIONS_AUDIT_RETRY_DELAY_MS:-30000}
+  OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS: ${OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS:-4}
 
 x-maintenance-worker-env: &maintenance-worker-env
   <<: *runtime-env
@@ -283,6 +297,7 @@ x-maintenance-worker-env: &maintenance-worker-env
   IDENTITY_BACKUP_URL: ${IDENTITY_BACKUP_URL:?IDENTITY_BACKUP_URL is required}
   PLATFORM_BACKUP_URL: ${PLATFORM_BACKUP_URL:?PLATFORM_BACKUP_URL is required}
   SUPPORT_BACKUP_URL: ${SUPPORT_BACKUP_URL:?SUPPORT_BACKUP_URL is required}
+  OPERATIONS_BACKUP_URL: ${OPERATIONS_BACKUP_URL:?OPERATIONS_BACKUP_URL is required}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
   RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
@@ -313,6 +328,7 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_IDENTITY_PORT: ${IDENTITY_POSTGRES_PORT:?IDENTITY_POSTGRES_PORT is required}
   DATABASE_RESTORE_PLATFORM_PORT: ${PLATFORM_POSTGRES_PORT:?PLATFORM_POSTGRES_PORT is required}
   DATABASE_RESTORE_SUPPORT_PORT: ${SUPPORT_POSTGRES_PORT:?SUPPORT_POSTGRES_PORT is required}
+  DATABASE_RESTORE_OPERATIONS_PORT: ${OPERATIONS_POSTGRES_PORT:?OPERATIONS_POSTGRES_PORT is required}
   DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
   DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
   DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/reporting-admin-password
@@ -321,6 +337,7 @@ x-database-restore-worker-env: &database-restore-worker-env
   DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/identity-admin-password
   DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/platform-admin-password
   DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/support-admin-password
+  DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/operations-admin-password
 
 x-outbox-publisher-env: &outbox-publisher-env
   <<: *runtime-env
@@ -377,6 +394,10 @@ x-support-migration-env: &support-migration-env
   APP_REVISION: ${SUPPORT_REVISION:?SUPPORT_REVISION is required}
   NODE_ENV: production
   SUPPORT_DATABASE_URL: ${SUPPORT_MIGRATION_DATABASE_URL:?SUPPORT_MIGRATION_DATABASE_URL is required}
+x-operations-migration-env: &operations-migration-env
+  APP_REVISION: ${OPERATIONS_REVISION:?OPERATIONS_REVISION is required}
+  NODE_ENV: production
+  OPERATIONS_DATABASE_URL: ${OPERATIONS_MIGRATION_DATABASE_URL:?OPERATIONS_MIGRATION_DATABASE_URL is required}
 
 services:
   notification-delivery-postgres:
@@ -731,6 +752,50 @@ services:
         max-file: '5'
     restart: unless-stopped
 
+  operations-postgres:
+    image: ${OPERATIONS_POSTGRES_IMAGE:?OPERATIONS_POSTGRES_IMAGE is required}
+    profiles:
+      - operations-database
+    labels:
+      com.winwidget.owner: operations
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_operations
+      POSTGRES_USER: ${OPERATIONS_POSTGRES_ADMIN_USER:?OPERATIONS_POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/operations-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    ports:
+      - '127.0.0.1:${OPERATIONS_POSTGRES_PORT:-55441}:5432'
+    volumes:
+      - winwidget-operations-postgres-data:/var/lib/postgresql
+    networks:
+      - operations-postgres
+    secrets:
+      - operations-postgres-admin-password
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 60s
+    shm_size: ${OPERATIONS_POSTGRES_SHM_SIZE:-256m}
+    mem_limit: ${OPERATIONS_POSTGRES_MEMORY_LIMIT:-512m}
+    mem_reservation: ${OPERATIONS_POSTGRES_MEMORY_RESERVATION:-128m}
+    cpus: ${OPERATIONS_POSTGRES_CPUS:-0.75}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:4.2-management-alpine
     hostname: winwidget-rabbitmq
@@ -794,6 +859,8 @@ services:
       widgets-service:
         condition: service_healthy
       identity-api:
+        condition: service_healthy
+      operations-api:
         condition: service_healthy
     healthcheck:
       test:
@@ -1198,6 +1265,7 @@ services:
       IDENTITY_BILLING_TOKEN: ${IDENTITY_BILLING_TOKEN:?IDENTITY_BILLING_TOKEN is required}
       IDENTITY_PLATFORM_TOKEN: ${IDENTITY_PLATFORM_TOKEN:?IDENTITY_PLATFORM_TOKEN is required}
       IDENTITY_SUPPORT_TOKEN: ${IDENTITY_SUPPORT_TOKEN:?IDENTITY_SUPPORT_TOKEN is required}
+      IDENTITY_OPERATIONS_TOKEN: ${IDENTITY_OPERATIONS_TOKEN:?IDENTITY_OPERATIONS_TOKEN is required}
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
       BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
       BILLING_IDENTITY_TOKEN: ${BILLING_IDENTITY_TOKEN:?BILLING_IDENTITY_TOKEN is required}
@@ -1205,6 +1273,8 @@ services:
       WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
       WIDGETS_IDENTITY_TOKEN: ${WIDGETS_IDENTITY_TOKEN:?WIDGETS_IDENTITY_TOKEN is required}
       WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-5000}
+      OPERATIONS_INTERNAL_BASE_URL: ${OPERATIONS_INTERNAL_BASE_URL:-http://127.0.0.1:5200}
+      OPERATIONS_IDENTITY_TOKEN: ${OPERATIONS_IDENTITY_TOKEN:?OPERATIONS_IDENTITY_TOKEN is required}
       IDENTITY_AVATAR_S3_ENDPOINT: ${IDENTITY_AVATAR_S3_ENDPOINT:?IDENTITY_AVATAR_S3_ENDPOINT is required}
       IDENTITY_AVATAR_S3_REGION: ${IDENTITY_AVATAR_S3_REGION:?IDENTITY_AVATAR_S3_REGION is required}
       IDENTITY_AVATAR_S3_BUCKET: ${IDENTITY_AVATAR_S3_BUCKET:?IDENTITY_AVATAR_S3_BUCKET is required}
@@ -1469,6 +1539,52 @@ services:
         max-size: 10m
         max-file: '3'
 
+  operations-api:
+    image: ${OPERATIONS_IMAGE:?OPERATIONS_IMAGE is required}
+    build:
+      context: ../apps/operations
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${OPERATIONS_REVISION:?OPERATIONS_REVISION is required}
+    labels:
+      com.winwidget.owner: operations
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *operations-env
+      OPERATIONS_PROCESS_ROLE: api
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+      IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+      IDENTITY_OPERATIONS_TOKEN: ${IDENTITY_OPERATIONS_TOKEN:?IDENTITY_OPERATIONS_TOKEN is required}
+      OPERATIONS_IDENTITY_TOKEN: ${OPERATIONS_IDENTITY_TOKEN:?OPERATIONS_IDENTITY_TOKEN is required}
+      IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
+    network_mode: host
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.OPERATIONS_API_PORT||5200)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    mem_limit: ${OPERATIONS_API_MEMORY_LIMIT:-384m}
+    mem_reservation: ${OPERATIONS_API_MEMORY_RESERVATION:-96m}
+    cpus: ${OPERATIONS_API_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   support-worker:
     image: ${SUPPORT_IMAGE:?SUPPORT_IMAGE is required}
     labels:
@@ -1517,6 +1633,48 @@ services:
         max-size: 10m
         max-file: '3'
 
+  operations-worker:
+    image: ${OPERATIONS_IMAGE:?OPERATIONS_IMAGE is required}
+    labels:
+      com.winwidget.owner: operations
+      com.winwidget.purpose: worker
+    environment:
+      <<: *operations-env
+      OPERATIONS_PROCESS_ROLE: worker
+      RABBITMQ_URL: ${RABBITMQ_OPERATIONS_WORKER_URL:?RABBITMQ_OPERATIONS_WORKER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-operations-worker
+      RABBITMQ_ASSERT_TOPOLOGY: 'true'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: operations-worker
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.OPERATIONS_WORKER_PORT||5201)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${OPERATIONS_WORKER_MEMORY_LIMIT:-384m}
+    mem_reservation: ${OPERATIONS_WORKER_MEMORY_RESERVATION:-96m}
+    cpus: ${OPERATIONS_WORKER_CPUS:-0.5}
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
   support-outbox-publisher:
     image: ${SUPPORT_IMAGE:?SUPPORT_IMAGE is required}
     labels:
@@ -1553,6 +1711,48 @@ services:
     mem_limit: ${SUPPORT_OUTBOX_PUBLISHER_MEMORY_LIMIT:-256m}
     mem_reservation: ${SUPPORT_OUTBOX_PUBLISHER_MEMORY_RESERVATION:-64m}
     cpus: ${SUPPORT_OUTBOX_PUBLISHER_CPUS:-0.35}
+    pids_limit: 150
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  operations-outbox-publisher:
+    image: ${OPERATIONS_IMAGE:?OPERATIONS_IMAGE is required}
+    labels:
+      com.winwidget.owner: operations
+      com.winwidget.purpose: outbox-publisher
+    environment:
+      <<: *operations-env
+      OPERATIONS_PROCESS_ROLE: outbox-publisher
+      RABBITMQ_URL: ${RABBITMQ_OPERATIONS_PUBLISHER_URL:?RABBITMQ_OPERATIONS_PUBLISHER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-operations-outbox-publisher
+      RABBITMQ_ASSERT_TOPOLOGY: 'false'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      MESSAGING_SERVICE_NAME: operations-outbox-publisher
+    network_mode: host
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command: ['node', 'dist/src/main.js']
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:'+(process.env.OPERATIONS_OUTBOX_PUBLISHER_PORT||5202)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 90s
+    restart: unless-stopped
+    mem_limit: ${OPERATIONS_OUTBOX_PUBLISHER_MEMORY_LIMIT:-256m}
+    mem_reservation: ${OPERATIONS_OUTBOX_PUBLISHER_MEMORY_RESERVATION:-64m}
+    cpus: ${OPERATIONS_OUTBOX_PUBLISHER_CPUS:-0.35}
     pids_limit: 150
     logging:
       driver: json-file
@@ -1627,6 +1827,8 @@ services:
         target: database-restore-platform-admin-password
       - source: support-postgres-admin-password
         target: database-restore-support-admin-password
+      - source: operations-postgres-admin-password
+        target: database-restore-operations-admin-password
     tmpfs:
       - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -1649,7 +1851,7 @@ services:
           'nestjs:nodejs',
           'node',
           '-e',
-          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","identity","notification-delivery","platform","reporting","support","widgets"]''||fences.length!==0)process.exit(1)'
+          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","identity","notification-delivery","operations","platform","reporting","support","widgets"]''||fences.length!==0)process.exit(1)'
         ]
       interval: 10s
       timeout: 5s
@@ -1678,6 +1880,10 @@ services:
       - migration
     environment: *migration-env
     network_mode: host
+    volumes:
+      - type: bind
+        source: ${OPERATIONS_CUTOVER_ARTIFACT_DIR:-/opt/winwidget/deploy/backend/operations-cutover}
+        target: /var/lib/winwidget/operations-cutover
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy']
 
@@ -1793,10 +1999,31 @@ services:
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 
+  operations-migrate:
+    image: ${OPERATIONS_IMAGE:?OPERATIONS_IMAGE is required}
+    build:
+      context: ../apps/operations
+      dockerfile: Dockerfile
+      args:
+        APP_REVISION: ${OPERATIONS_REVISION:?OPERATIONS_REVISION is required}
+    profiles:
+      - operations-migration
+    environment: *operations-migration-env
+    network_mode: host
+    volumes:
+      - type: bind
+        source: ${OPERATIONS_CUTOVER_ARTIFACT_DIR:-/opt/winwidget/deploy/backend/operations-cutover}
+        target: /var/lib/winwidget/operations-cutover
+    entrypoint: ['./node_modules/.bin/prisma']
+    command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
 volumes:
   winwidget-support-postgres-data:
     external: true
     name: ${SUPPORT_POSTGRES_DATA_VOLUME:?SUPPORT_POSTGRES_DATA_VOLUME must name the verified Support PostgreSQL volume}
+  winwidget-operations-postgres-data:
+    external: true
+    name: ${OPERATIONS_POSTGRES_DATA_VOLUME:?OPERATIONS_POSTGRES_DATA_VOLUME must name the verified Operations PostgreSQL volume}
   winwidget-platform-postgres-data:
     external: true
     name: ${PLATFORM_POSTGRES_DATA_VOLUME:?PLATFORM_POSTGRES_DATA_VOLUME must name the verified Platform PostgreSQL volume}
@@ -1829,6 +2056,13 @@ networks:
     internal: false
     labels:
       com.winwidget.owner: support
+      com.winwidget.purpose: postgres-network
+  operations-postgres:
+    name: winwidget-operations-postgres
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: operations
       com.winwidget.purpose: postgres-network
   platform-postgres:
     name: winwidget-platform-postgres
@@ -1897,3 +2131,5 @@ secrets:
     file: ${PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE:?PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE is required}
   support-postgres-admin-password:
     file: ${SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE:?SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  operations-postgres-admin-password:
+    file: ${OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE:?OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE is required}

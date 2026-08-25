@@ -16,6 +16,10 @@ RUN pnpm build && pnpm prune --prod
 
 FROM node:20-bookworm-slim AS runtime
 
+ARG APP_REVISION=unknown
+LABEL org.opencontainers.image.title="winwidget-operations" \
+	org.opencontainers.image.revision="$APP_REVISION"
+
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates openssl \
 	&& rm -rf /var/lib/apt/lists/* \

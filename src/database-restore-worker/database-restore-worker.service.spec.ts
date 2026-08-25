@@ -67,6 +67,7 @@ function createConfig(
 			DATABASE_RESTORE_IDENTITY_PORT: '55438',
 			DATABASE_RESTORE_PLATFORM_PORT: '55439',
 			DATABASE_RESTORE_SUPPORT_PORT: '55440',
+			DATABASE_RESTORE_OPERATIONS_PORT: '55441',
 			DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 				'/secrets/notification-delivery',
 			DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: '/secrets/campaigns',
@@ -76,6 +77,8 @@ function createConfig(
 			DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: '/secrets/identity',
 			DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: '/secrets/platform',
 			DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: '/secrets/support',
+			DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE:
+				'/secrets/operations',
 			APP_REVISION: 'd'.repeat(40),
 			NODE_ENV: productionMode ? 'production' : 'test'
 		},
@@ -525,6 +528,7 @@ describe('DatabaseRestoreWorkerService', () => {
 			'campaigns',
 			'identity',
 			'notification-delivery',
+			'operations',
 			'platform',
 			'reporting',
 			'support',

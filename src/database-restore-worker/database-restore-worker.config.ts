@@ -31,7 +31,8 @@ const PASSWORD_FILE_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	billing: 'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE',
 	identity: 'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE',
 	platform: 'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE',
-	support: 'DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE'
+	support: 'DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE',
+	operations: 'DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE'
 };
 
 const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
@@ -42,7 +43,8 @@ const PORT_ENV_KEYS: Record<DatabaseRestoreTarget, string> = {
 	billing: 'DATABASE_RESTORE_BILLING_PORT',
 	identity: 'DATABASE_RESTORE_IDENTITY_PORT',
 	platform: 'DATABASE_RESTORE_PLATFORM_PORT',
-	support: 'DATABASE_RESTORE_SUPPORT_PORT'
+	support: 'DATABASE_RESTORE_SUPPORT_PORT',
+	operations: 'DATABASE_RESTORE_OPERATIONS_PORT'
 };
 
 export class DatabaseRestoreWorkerConfig {
@@ -292,6 +294,30 @@ export class DatabaseRestoreWorkerConfig {
 					'routing_settings',
 					'telegram_webhook_inbox',
 					'outbox_events'
+				]
+			}),
+			operations: this.target({
+				target: 'operations',
+				label: 'Operations',
+				port: this.requireTargetPort(environment, 'operations'),
+				database: 'winwidget_operations',
+				schema: 'operations',
+				adminRole: 'winwidget_operations_admin',
+				migrationRole: 'winwidget_operations_migration',
+				runtimeRoles: ['winwidget_operations_runtime'],
+				backupRole: 'winwidget_operations_backup',
+				passwordFile: passwordFiles.operations,
+				migrationsDirectory: join(
+					migrationsRoot,
+					'apps/operations/prisma/migrations'
+				),
+				anchorTables: [
+					'_prisma_migrations',
+					'notes',
+					'admin_event_logs',
+					'audit_event_receipts',
+					'outbox_events',
+					'operations_ownership_state'
 				]
 			})
 		};

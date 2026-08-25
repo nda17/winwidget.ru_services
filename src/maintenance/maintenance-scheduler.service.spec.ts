@@ -52,10 +52,6 @@ describe('MaintenanceSchedulerService', () => {
 		jest.setSystemTime(new Date('2026-07-24T00:00:00.000Z'));
 		const { service, tasks } = createService('01:45');
 		(tasks.enqueueDailyDatabaseBackups as jest.Mock).mockResolvedValue({
-			core: {
-				created: true,
-				job: { id: '11111111-1111-4111-8111-111111111111' }
-			},
 			notificationDelivery: {
 				created: true,
 				job: { id: '22222222-2222-4222-8222-222222222222' }
@@ -87,6 +83,10 @@ describe('MaintenanceSchedulerService', () => {
 			support: {
 				created: true,
 				job: { id: '99999999-9999-4999-8999-999999999999' }
+			},
+			operations: {
+				created: true,
+				job: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }
 			}
 		});
 

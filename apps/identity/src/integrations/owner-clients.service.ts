@@ -27,17 +27,20 @@ export class LifecycleRevocationError extends Error {
 export class OwnerClientsService {
 	private readonly billing = endpoint('BILLING_INTERNAL_BASE_URL', 4800);
 	private readonly widgets = endpoint('WIDGETS_INTERNAL_BASE_URL', 4700);
-	private readonly core = endpoint('CORE_INTERNAL_BASE_URL', 4200);
+	private readonly operations = endpoint(
+		'OPERATIONS_INTERNAL_BASE_URL',
+		5200
+	);
 	private readonly billingToken: string;
 	private readonly widgetsToken: string;
-	private readonly coreToken: string;
+	private readonly operationsToken: string;
 
 	constructor(config: ConfigService) {
 		this.billingToken = token(config, 'BILLING_IDENTITY_TOKEN');
 		this.widgetsToken = token(config, 'WIDGETS_IDENTITY_TOKEN');
-		this.coreToken = token(config, 'CORE_IDENTITY_TOKEN');
+		this.operationsToken = token(config, 'OPERATIONS_IDENTITY_TOKEN');
 		if (
-			new Set([this.billingToken, this.widgetsToken, this.coreToken])
+			new Set([this.billingToken, this.widgetsToken, this.operationsToken])
 				.size !== 3
 		) {
 			throw new Error(
@@ -174,9 +177,9 @@ export class OwnerClientsService {
 
 	async adminOverview(userId: string): Promise<unknown> {
 		return this.call(
-			this.core,
+			this.operations,
 			`/internal/v1/identity/users/${encodeURIComponent(userId)}/admin-events/overview`,
-			this.coreToken,
+			this.operationsToken,
 			undefined,
 			undefined,
 			'GET',
@@ -265,11 +268,14 @@ function token(
 		'billing_internal_token',
 		'widgets_internal_token',
 		'core_identity_token',
+		'operations_identity_token',
+		'change_me_operations_identity_token_at_least_32_chars',
 		'billing_identity_token',
 		'widgets_identity_token',
 		'ci_billing_internal_token_at_least_32_chars',
 		'ci_widgets_internal_token_at_least_32_chars',
 		'ci_core_identity_token_at_least_32_chars',
+		'ci_operations_identity_token_at_least_32_chars',
 		'ci_billing_identity_token_at_least_32_chars',
 		'ci_widgets_identity_token_at_least_32_chars'
 	]);

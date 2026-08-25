@@ -67,6 +67,34 @@ export class AdminEventLogService {
 		};
 	}
 
+	async getUserActivity(userId: string) {
+		const latest = await this.prisma.adminEventLog.findMany({
+			where: {
+				OR: [{ targetUserId: userId }, { adminId: userId }]
+			},
+			orderBy: { createdAt: 'desc' },
+			take: 5,
+			select: {
+				id: true,
+				section: true,
+				action: true,
+				description: true,
+				entityType: true,
+				entityLabel: true,
+				adminName: true,
+				adminEmail: true,
+				targetUserId: true,
+				createdAt: true
+			}
+		});
+		return {
+			latest: latest.map(item => ({
+				...item,
+				role: item.targetUserId === userId ? 'TARGET' : 'ADMIN'
+			}))
+		};
+	}
+
 	recordInTransaction(
 		transaction: Prisma.TransactionClient,
 		input: AdminEventLogRecordInput

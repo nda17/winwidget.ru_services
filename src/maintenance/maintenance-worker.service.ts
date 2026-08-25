@@ -720,6 +720,8 @@ export class MaintenanceWorkerService
 				return 'platform';
 			case SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP:
 				return 'support';
+			case SCHEDULED_JOB_TYPES.OPERATIONS_DATABASE_BACKUP:
+				return 'operations';
 		}
 	}
 

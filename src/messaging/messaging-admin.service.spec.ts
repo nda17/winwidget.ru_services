@@ -9,6 +9,7 @@ import type { PlatformMessagingClientService } from '@/messaging/platform-messag
 import { MessagingAdminService } from '@/messaging/messaging-admin.service';
 import {
 	CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
+	CORE_CLOSABLE_LEGACY_FAILURE_KINDS,
 	CORE_OWNED_MESSAGING_KINDS
 } from '@/messaging/messaging.constants';
 import {
@@ -27,6 +28,10 @@ import {
 } from '@nestjs/common';
 
 describe('MessagingAdminService', () => {
+	const coreManagedFailureKinds = [
+		...CORE_OWNED_MESSAGING_KINDS,
+		...CORE_CLOSABLE_LEGACY_FAILURE_KINDS
+	];
 	const notificationDelivery =
 		{} as unknown as NotificationDeliveryClientService;
 	const widgetsFailures =
@@ -203,7 +208,8 @@ describe('MessagingAdminService', () => {
 						'BILLING_DATABASE_BACKUP',
 						'IDENTITY_DATABASE_BACKUP',
 						'PLATFORM_DATABASE_BACKUP',
-						'SUPPORT_DATABASE_BACKUP'
+						'SUPPORT_DATABASE_BACKUP',
+						'OPERATIONS_DATABASE_BACKUP'
 					]
 				},
 				status: 'SUCCEEDED',
@@ -374,7 +380,7 @@ describe('MessagingAdminService', () => {
 		expect(transaction).not.toHaveBeenCalled();
 	});
 
-	it('queues a Reporting audit retry through the same transaction as its receipt claim', async () => {
+	it('rejects retry for a retired Core audit failure without publishing', async () => {
 		const eventId = '11111111-1111-4111-8111-111111111111';
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
@@ -422,32 +428,18 @@ describe('MessagingAdminService', () => {
 			widgetsFailures
 		);
 
-		await service.retryFailure(failure.id, 'dev-user-id');
-
-		expect(transaction.$queryRaw).toHaveBeenCalledTimes(1);
-		expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
-			data: expect.objectContaining({
-				messageId: eventId,
-				eventType: 'admin.audit.event.v1',
-				routingKey: 'manual.reporting-admin-audit',
-				payload: failure.payload,
-				headers: expect.objectContaining({
-					'x-retry-attempt': 0,
-					'x-delivery-token': expect.any(String)
-				})
-			})
-		});
-		expect(adminEventLog.recordInTransaction).toHaveBeenCalledWith(
-			transaction,
-			expect.objectContaining({
-				adminId: 'dev-user-id',
-				action: 'MESSAGING_FAILURE_RETRY',
-				metadata: {
-					eventId,
-					integration: 'reporting-admin-audit'
-				}
-			})
+		await expect(
+			service.retryFailure(failure.id, 'dev-user-id')
+		).rejects.toThrow(
+			'Повтор ошибки выведенного Core consumer недоступен; ошибку можно только закрыть'
 		);
+
+		expect(transaction.$queryRaw).not.toHaveBeenCalled();
+		expect(
+			transaction.integrationDeliveryFailure.updateMany
+		).not.toHaveBeenCalled();
+		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
+		expect(adminEventLog.recordInTransaction).not.toHaveBeenCalled();
 	});
 
 	it('routes a Widgets-owned provider retry without querying Core history', async () => {
@@ -466,11 +458,12 @@ describe('MessagingAdminService', () => {
 			$transaction: transaction
 		} as unknown as PrismaService;
 		const remote = {
-			retryFailure: jest
+			getFailure: jest
 				.fn()
 				.mockRejectedValue(
 					new NotificationDeliveryInternalApiError(404, 'Не найдено')
-				)
+				),
+			retryFailure: jest.fn()
 		} as unknown as NotificationDeliveryClientService;
 		const widgets = {
 			retryFailure: jest.fn().mockResolvedValue(result)
@@ -492,7 +485,7 @@ describe('MessagingAdminService', () => {
 			where: {
 				id,
 				integration: {
-					in: [...CORE_OWNED_MESSAGING_KINDS]
+					in: coreManagedFailureKinds
 				}
 			},
 			select: { id: true }
@@ -532,6 +525,11 @@ describe('MessagingAdminService', () => {
 			{} as RabbitMqManagementService,
 			adminEventLog,
 			{
+				getFailure: jest
+					.fn()
+					.mockRejectedValue(
+						new NotificationDeliveryInternalApiError(404, 'Не найдено')
+					),
 				closeFailure: notificationClose
 			} as unknown as NotificationDeliveryClientService,
 			{
@@ -560,7 +558,7 @@ describe('MessagingAdminService', () => {
 		const failure = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
-			integration: 'reporting-admin-audit',
+			integration: 'billing-payment-projection',
 			payload: {
 				schemaVersion: 1,
 				eventType: 'payment.succeeded.v1',
@@ -614,7 +612,8 @@ describe('MessagingAdminService', () => {
 		'WIDGETS_DATABASE_BACKUP',
 		'BILLING_DATABASE_BACKUP',
 		'IDENTITY_DATABASE_BACKUP',
-		'PLATFORM_DATABASE_BACKUP'
+		'PLATFORM_DATABASE_BACKUP',
+		'OPERATIONS_DATABASE_BACKUP'
 	])(
 		'reopens a failed %s job in the same transaction as manual retry Outbox',
 		async jobType => {
@@ -700,7 +699,8 @@ describe('MessagingAdminService', () => {
 
 	it.each([
 		['BILLING_DATABASE_BACKUP', 'Backup PostgreSQL Billing'],
-		['PLATFORM_DATABASE_BACKUP', 'Backup PostgreSQL Platform']
+		['PLATFORM_DATABASE_BACKUP', 'Backup PostgreSQL Platform'],
+		['OPERATIONS_DATABASE_BACKUP', 'Backup PostgreSQL Operations']
 	])(
 		'labels a failed %s job in the federated failure view',
 		(jobType, name) => {
@@ -902,7 +902,7 @@ describe('MessagingAdminService', () => {
 		).not.toHaveBeenCalled();
 	});
 
-	it('returns a successful remote retry when the global audit write fails', async () => {
+	it('fails closed before a remote retry when the audit Outbox write fails', async () => {
 		const remoteResult = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
@@ -910,14 +910,20 @@ describe('MessagingAdminService', () => {
 			retryingAt: '2026-07-27T12:00:00.000Z'
 		};
 		const remote = {
+			getFailure: jest
+				.fn()
+				.mockResolvedValue(
+					remoteFailure(
+						remoteResult.id,
+						remoteResult.integration,
+						'2026-07-27T11:59:00.000Z'
+					)
+				),
 			retryFailure: jest.fn().mockResolvedValue(remoteResult)
 		} as unknown as NotificationDeliveryClientService;
 		const adminEventLog = {
 			record: jest.fn().mockRejectedValue(new Error('audit unavailable'))
 		} as unknown as AdminEventLogService;
-		const logger = jest
-			.spyOn(Logger.prototype, 'error')
-			.mockImplementation(() => undefined);
 		const service = new MessagingAdminService(
 			{
 				integrationDeliveryFailure: {
@@ -932,16 +938,12 @@ describe('MessagingAdminService', () => {
 
 		await expect(
 			service.retryFailure(remoteResult.id, 'admin-1')
-		).resolves.toEqual(remoteResult);
+		).rejects.toThrow('audit unavailable');
 		expect(adminEventLog.record).toHaveBeenCalledTimes(1);
-		expect(logger).toHaveBeenCalledWith(
-			expect.stringContaining(
-				'"event":"notification_delivery.global_audit_failed"'
-			)
-		);
+		expect(remote.retryFailure).not.toHaveBeenCalled();
 	});
 
-	it('returns a successful remote close when the global audit write fails', async () => {
+	it('fails closed before a remote close when the audit Outbox write fails', async () => {
 		const remoteResult = {
 			id: '22222222-2222-4222-8222-222222222222',
 			eventId: '11111111-1111-4111-8111-111111111111',
@@ -951,14 +953,20 @@ describe('MessagingAdminService', () => {
 			resolutionComment: 'Проверено вручную'
 		};
 		const remote = {
+			getFailure: jest
+				.fn()
+				.mockResolvedValue(
+					remoteFailure(
+						remoteResult.id,
+						remoteResult.integration,
+						'2026-07-27T11:59:00.000Z'
+					)
+				),
 			closeFailure: jest.fn().mockResolvedValue(remoteResult)
 		} as unknown as NotificationDeliveryClientService;
 		const adminEventLog = {
 			record: jest.fn().mockRejectedValue(new Error('audit unavailable'))
 		} as unknown as AdminEventLogService;
-		const logger = jest
-			.spyOn(Logger.prototype, 'error')
-			.mockImplementation(() => undefined);
 		const service = new MessagingAdminService(
 			{
 				integrationDeliveryFailure: {
@@ -973,11 +981,9 @@ describe('MessagingAdminService', () => {
 
 		await expect(
 			service.closeFailure(remoteResult.id, 'admin-1', 'Проверено вручную')
-		).resolves.toEqual(remoteResult);
+		).rejects.toThrow('audit unavailable');
 		expect(adminEventLog.record).toHaveBeenCalledTimes(1);
-		expect(logger).toHaveBeenCalledWith(
-			expect.stringContaining('"action":"CLOSE"')
-		);
+		expect(remote.closeFailure).not.toHaveBeenCalled();
 	});
 
 	it('rejects a merged failure window over 10000 before querying either store', async () => {
@@ -1108,7 +1114,7 @@ describe('MessagingAdminService', () => {
 				where: {
 					OR: [
 						{
-							integration: { in: [...CORE_OWNED_MESSAGING_KINDS] }
+							integration: { in: coreManagedFailureKinds }
 						},
 						{
 							AND: [
@@ -1414,7 +1420,7 @@ describe('MessagingAdminService', () => {
 				where: {
 					OR: [
 						{
-							integration: { in: [...CORE_OWNED_MESSAGING_KINDS] }
+							integration: { in: coreManagedFailureKinds }
 						},
 						{
 							AND: [

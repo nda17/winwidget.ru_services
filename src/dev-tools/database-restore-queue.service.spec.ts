@@ -149,6 +149,11 @@ describe('DatabaseRestoreQueueService', () => {
 					id: 'support',
 					label: 'Support',
 					confirmation: 'ВОССТАНОВИТЬ SUPPORT'
+				},
+				{
+					id: 'operations',
+					label: 'Operations',
+					confirmation: 'ВОССТАНОВИТЬ OPERATIONS'
 				}
 			]
 		});

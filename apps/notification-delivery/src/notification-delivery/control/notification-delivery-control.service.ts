@@ -236,6 +236,17 @@ export class NotificationDeliveryControlService {
 		};
 	}
 
+	async getFailure(id: string) {
+		const failure =
+			await this.prisma.notificationDeliveryFailure.findUnique({
+				where: { id }
+			});
+		if (!failure || !this.isSupportedKind(failure.consumer)) {
+			throw new NotFoundException('Ошибка доставки не найдена');
+		}
+		return this.serializeFailure(failure);
+	}
+
 	async retryFailure(id: string, actorId: string) {
 		const normalizedActorId = this.normalizeActorId(actorId);
 		const retryingAt = new Date();

@@ -6,6 +6,7 @@ import { AdminEventLogService } from '../admin-event-log/admin-event-log.service
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
 import { OPERATIONS_AUDIT_CONSUMER } from './operations-messaging.constants';
+import type { OperationsAuditSource } from './operations-messaging.constants';
 
 export type AuditReceiptClaim =
 	| { state: 'claimed'; leaseToken: string }
@@ -142,7 +143,9 @@ export class AuditReceiptService {
 
 	async markDeadLettered(
 		eventId: string,
-		leaseToken: string
+		leaseToken: string,
+		source: OperationsAuditSource,
+		payload: Prisma.InputJsonObject
 	): Promise<void> {
 		const changed = await this.prisma.auditEventReceipt.updateMany({
 			where: {
@@ -157,6 +160,8 @@ export class AuditReceiptService {
 				leaseExpiresAt: null,
 				retryAvailableAt: null,
 				deadLetteredAt: new Date(),
+				deadLetterSource: source.source,
+				deadLetterPayload: payload,
 				lastError: 'AUDIT_RETRY_BUDGET_EXHAUSTED'
 			}
 		});

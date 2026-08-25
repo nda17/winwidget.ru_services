@@ -4,7 +4,7 @@ import { OwnerClientsService } from './owner-clients.service';
 const values = {
 	BILLING_IDENTITY_TOKEN: `billing-${'b'.repeat(48)}`,
 	WIDGETS_IDENTITY_TOKEN: `widgets-${'w'.repeat(48)}`,
-	CORE_IDENTITY_TOKEN: `core-${'c'.repeat(48)}`
+	OPERATIONS_IDENTITY_TOKEN: `operations-${'o'.repeat(48)}`
 };
 
 function config(overrides: Record<string, string> = {}) {
@@ -18,12 +18,13 @@ describe('Identity narrow owner clients', () => {
 	const originalFetch = global.fetch;
 	const originalBillingOrigin = process.env.BILLING_INTERNAL_BASE_URL;
 	const originalWidgetsOrigin = process.env.WIDGETS_INTERNAL_BASE_URL;
-	const originalCoreOrigin = process.env.CORE_INTERNAL_BASE_URL;
+	const originalOperationsOrigin =
+		process.env.OPERATIONS_INTERNAL_BASE_URL;
 
 	beforeEach(() => {
 		delete process.env.BILLING_INTERNAL_BASE_URL;
 		delete process.env.WIDGETS_INTERNAL_BASE_URL;
-		delete process.env.CORE_INTERNAL_BASE_URL;
+		delete process.env.OPERATIONS_INTERNAL_BASE_URL;
 	});
 
 	afterEach(() => {
@@ -34,9 +35,11 @@ describe('Identity narrow owner clients', () => {
 		if (originalWidgetsOrigin === undefined) {
 			delete process.env.WIDGETS_INTERNAL_BASE_URL;
 		} else process.env.WIDGETS_INTERNAL_BASE_URL = originalWidgetsOrigin;
-		if (originalCoreOrigin === undefined) {
-			delete process.env.CORE_INTERNAL_BASE_URL;
-		} else process.env.CORE_INTERNAL_BASE_URL = originalCoreOrigin;
+		if (originalOperationsOrigin === undefined) {
+			delete process.env.OPERATIONS_INTERNAL_BASE_URL;
+		} else {
+			process.env.OPERATIONS_INTERNAL_BASE_URL = originalOperationsOrigin;
+		}
 	});
 
 	it('uses only narrow Billing/Widgets routes and explicit identity provenance', async () => {
@@ -50,12 +53,16 @@ describe('Identity narrow owner clients', () => {
 			new Date('2026-08-14T10:00:00.000Z')
 		);
 		await clients.widgetsOverview('user-id');
+		await clients.adminOverview('user-id');
 		const calls = (global.fetch as jest.Mock).mock.calls;
 		expect(calls[0]?.[0]).toBe(
 			'http://127.0.0.1:4800/internal/v1/identity/billing/trials/ensure'
 		);
 		expect(calls[1]?.[0]).toBe(
 			'http://127.0.0.1:4700/internal/v1/identity/widgets/admin-owner-overview'
+		);
+		expect(calls[2]?.[0]).toBe(
+			'http://127.0.0.1:5200/internal/v1/identity/users/user-id/admin-events/overview'
 		);
 		for (const [, options] of calls) {
 			expect(options.headers).toMatchObject({
@@ -71,6 +78,15 @@ describe('Identity narrow owner clients', () => {
 					config({
 						BILLING_IDENTITY_TOKEN:
 							'ci_billing_identity_token_at_least_32_chars'
+					})
+				)
+		).toThrow('non-placeholder secret');
+		expect(
+			() =>
+				new OwnerClientsService(
+					config({
+						OPERATIONS_IDENTITY_TOKEN:
+							'change_me_operations_identity_token_at_least_32_chars'
 					})
 				)
 		).toThrow('non-placeholder secret');

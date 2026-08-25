@@ -94,6 +94,12 @@ const PLATFORM_ACTIONS = [
 	'PLATFORM_HOME_PAGE_CONTENT_UPDATE',
 	'PLATFORM_HOME_PAGE_RAW_CODE_UPDATE'
 ] as const;
+const SUPPORT_ACTIONS = [
+	'SUPPORT_ROUTING_SETTINGS_UPDATE',
+	'SUPPORT_WEBHOOK_REINSTALL',
+	'SUPPORT_DELIVERY_RETRY',
+	'SUPPORT_DELIVERY_CLOSE'
+] as const;
 const IDENTITY_USER_UPDATE_FIELDS = [
 	'name',
 	'avatarPath',
@@ -176,6 +182,10 @@ export function parseAdminAuditEvent(
 			return mapStructured(common, 'identity');
 		case 'platform-admin-audit':
 			return mapStructured(common, 'platform');
+		case 'support-admin-audit':
+			return mapStructured(common, 'support');
+		case 'core-admin-audit':
+			return mapStructured(common, 'core');
 	}
 }
 
@@ -460,13 +470,13 @@ function mapWidgets(common: CommonAuditEvent): NormalizedAdminAuditEvent {
 
 function mapStructured(
 	common: CommonAuditEvent,
-	source: 'billing' | 'identity' | 'platform'
+	source: 'billing' | 'identity' | 'platform' | 'support' | 'core'
 ): NormalizedAdminAuditEvent {
 	boundedString(common.actorId, 'actorId', 255);
 	if ('target' in common.payload) {
 		throw new Error('Structured admin audit target is invalid');
 	}
-	const identitySnapshots = source === 'identity';
+	const identitySnapshots = source === 'identity' || source === 'core';
 	if (identitySnapshots) {
 		if (!('actorSnapshot' in common.payload)) {
 			throw new Error('Identity admin audit snapshot is required');
@@ -475,11 +485,15 @@ function mapStructured(
 		throw new Error('Admin audit snapshot is not allowed');
 	}
 	const sourceActions =
-		source === 'identity'
-			? IDENTITY_ACTIONS
-			: source === 'platform'
-				? PLATFORM_ACTIONS
-				: BILLING_ACTIONS;
+		source === 'core'
+			? ADMIN_EVENT_LOG_ACTIONS
+			: source === 'identity'
+				? IDENTITY_ACTIONS
+				: source === 'platform'
+					? PLATFORM_ACTIONS
+					: source === 'support'
+						? SUPPORT_ACTIONS
+						: BILLING_ACTIONS;
 	if (!(sourceActions as readonly string[]).includes(common.action)) {
 		throw new Error('Structured admin audit action is invalid');
 	}
@@ -505,7 +519,9 @@ function mapStructured(
 			'TASKS',
 			'MESSAGING'
 		],
-		platform: ['PLATFORM_CONTENT']
+		platform: ['PLATFORM_CONTENT'],
+		support: ['SUPPORT'],
+		core: ADMIN_EVENT_LOG_SECTIONS
 	};
 	if (!allowedSections[source].includes(section)) {
 		throw new Error('Admin audit source section is invalid');
@@ -524,9 +540,15 @@ function mapStructured(
 	if (source === 'platform' && entity.targetUserId !== null) {
 		throw new Error('Platform admin audit target user must be null');
 	}
+	if (source === 'support' && entity.targetUserId !== null) {
+		throw new Error('Support admin audit target user must be null');
+	}
 	const metadata = plainRecord(common.payload.metadata, 'metadata');
 	if (source === 'platform') {
 		validatePlatformAudit(common.action, entity, metadata);
+	}
+	if (source === 'support') {
+		validateSupportAudit(common.action, entity, metadata);
 	}
 	if (source === 'identity') {
 		validateIdentityMetadata(common.action, metadata);
@@ -587,6 +609,85 @@ function mapStructured(
 			}
 		}
 	};
+}
+
+function validateSupportAudit(
+	action: AdminEventLogAction,
+	entity: Record<string, unknown>,
+	metadata: Record<string, unknown>
+): void {
+	if (
+		(action === 'SUPPORT_ROUTING_SETTINGS_UPDATE' &&
+			(entity.type !== 'support_routing_settings' ||
+				entity.id !== 'singleton')) ||
+		(action === 'SUPPORT_WEBHOOK_REINSTALL' &&
+			(entity.type !== 'support_webhook' || entity.id !== 'support')) ||
+		((action === 'SUPPORT_DELIVERY_RETRY' ||
+			action === 'SUPPORT_DELIVERY_CLOSE') &&
+			(entity.type !== 'support_delivery_failure' ||
+				typeof entity.id !== 'string'))
+	) {
+		throw new Error('Support admin audit entity is invalid');
+	}
+	if (
+		action === 'SUPPORT_DELIVERY_RETRY' ||
+		action === 'SUPPORT_DELIVERY_CLOSE'
+	) {
+		uuid(entity.id, 'entity.id');
+	}
+	const requestFields = ['actorRole', 'requestIp', 'requestUserAgent'];
+	if (!['ADMIN', 'DEV'].includes(String(metadata.actorRole))) {
+		throw new Error('Support actor role is invalid');
+	}
+	optionalString(metadata.requestIp, 'requestIp', 128);
+	optionalString(metadata.requestUserAgent, 'requestUserAgent', 500);
+	if (action === 'SUPPORT_ROUTING_SETTINGS_UPDATE') {
+		assertExactKeys(metadata, [
+			...requestFields,
+			'adminChatIdConfigured',
+			'supportThreadIdConfigured',
+			'aggregateVersion'
+		]);
+		assertBoolean(metadata.adminChatIdConfigured, 'adminChatIdConfigured');
+		assertBoolean(
+			metadata.supportThreadIdConfigured,
+			'supportThreadIdConfigured'
+		);
+		if (!/^[1-9][0-9]*$/.test(String(metadata.aggregateVersion))) {
+			throw new Error('Support aggregateVersion is invalid');
+		}
+	} else if (action === 'SUPPORT_WEBHOOK_REINSTALL') {
+		assertExactKeys(metadata, [
+			...requestFields,
+			'webhookMatchesExpected',
+			'usernameMatchesConfigured',
+			'dropPendingUpdates'
+		]);
+		assertBoolean(
+			metadata.webhookMatchesExpected,
+			'webhookMatchesExpected'
+		);
+		assertBoolean(
+			metadata.usernameMatchesConfigured,
+			'usernameMatchesConfigured'
+		);
+		assertBoolean(metadata.dropPendingUpdates, 'dropPendingUpdates');
+	} else {
+		assertExactKeys(
+			metadata,
+			action === 'SUPPORT_DELIVERY_RETRY'
+				? [...requestFields, 'eventId', 'manualRetryCycle']
+				: [...requestFields, 'eventId']
+		);
+		uuid(metadata.eventId, 'eventId');
+		if (
+			action === 'SUPPORT_DELIVERY_RETRY' &&
+			(!Number.isSafeInteger(metadata.manualRetryCycle) ||
+				Number(metadata.manualRetryCycle) < 1)
+		) {
+			throw new Error('Support manualRetryCycle is invalid');
+		}
+	}
 }
 
 function validatePlatformAudit(

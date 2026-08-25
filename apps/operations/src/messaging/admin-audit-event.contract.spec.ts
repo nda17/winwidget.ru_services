@@ -66,6 +66,127 @@ describe('admin audit event contract', () => {
 		);
 	});
 
+	it('normalizes the exact Core audit source with immutable snapshots', () => {
+		const result = parseAdminAuditEvent(source('core'), {
+			...common,
+			actorSnapshot: { name: 'Core DEV', email: null },
+			section: 'DEV_TOOLS',
+			action: 'DEV_DATABASE_RESTORE',
+			description: 'Core restore completed',
+			entity: {
+				type: 'DATABASE',
+				id: 'core',
+				label: 'Core',
+				targetUserId: null,
+				targetSnapshot: { name: null, email: null }
+			},
+			metadata: {
+				jobId: eventId,
+				requestIp: null,
+				requestUserAgent: null
+			}
+		});
+
+		expect(result.record).toEqual(
+			expect.objectContaining({
+				id: eventId,
+				adminName: 'Core DEV',
+				section: 'DEV_TOOLS',
+				action: 'DEV_DATABASE_RESTORE',
+				entityId: 'core'
+			})
+		);
+		expect(source('core').routingKey).toBe('admin.audit.core.v1');
+	});
+
+	it('rejects forbidden credentials on the Core audit source', () => {
+		expect(() =>
+			parseAdminAuditEvent(source('core'), {
+				...common,
+				actorSnapshot: { name: null, email: null },
+				section: 'DEV_TOOLS',
+				action: 'DEV_DATABASE_RESTORE',
+				description: 'Invalid Core audit',
+				entity: {
+					type: 'DATABASE',
+					id: 'core',
+					label: null,
+					targetUserId: null,
+					targetSnapshot: { name: null, email: null }
+				},
+				metadata: { password: 'forbidden' }
+			})
+		).toThrow('contains a forbidden field');
+	});
+
+	it('accepts the audited Support event contract on its dedicated source', () => {
+		const result = parseAdminAuditEvent(source('support'), {
+			...common,
+			section: 'SUPPORT',
+			action: 'SUPPORT_ROUTING_SETTINGS_UPDATE',
+			description: 'Настройки маршрутизации поддержки обновлены',
+			entity: {
+				type: 'support_routing_settings',
+				id: 'singleton',
+				label: null,
+				targetUserId: null
+			},
+			metadata: {
+				adminChatIdConfigured: true,
+				supportThreadIdConfigured: true,
+				aggregateVersion: '1',
+				actorRole: 'DEV',
+				requestIp: '127.0.0.1',
+				requestUserAgent: 'jest'
+			}
+		});
+		expect(result.record).toEqual(
+			expect.objectContaining({
+				id: eventId,
+				section: 'SUPPORT',
+				action: 'SUPPORT_ROUTING_SETTINGS_UPDATE'
+			})
+		);
+	});
+
+	it.each([
+		{
+			entity: {
+				type: 'support_delivery_failure',
+				id: 'not-a-uuid',
+				label: null,
+				targetUserId: null
+			}
+		},
+		{
+			entity: {
+				type: 'support_delivery_failure',
+				id: '00000000-0000-4000-8000-000000000099',
+				label: null,
+				targetUserId: 'unexpected-user'
+			}
+		}
+	])(
+		'rejects Support delivery events outside the exact producer contract',
+		fixture => {
+			expect(() =>
+				parseAdminAuditEvent(source('support'), {
+					...common,
+					section: 'SUPPORT',
+					action: 'SUPPORT_DELIVERY_CLOSE',
+					description: 'Support delivery закрыта',
+					entity: fixture.entity,
+					metadata: {
+						eventId: '00000000-0000-4000-8000-000000000098',
+						actorRole: 'DEV',
+						requestIp: '127.0.0.1',
+						requestUserAgent: 'jest'
+					}
+				})
+			).toThrow();
+		}
+	);
+
 	it.each([
 		{
 			source: 'reporting',

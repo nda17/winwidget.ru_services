@@ -31,6 +31,7 @@ export const BILLING_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.billing.v1';
 export const IDENTITY_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.identity.v1';
 export const PLATFORM_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.platform.v1';
 export const SUPPORT_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.support.v1';
+export const CORE_ADMIN_AUDIT_ROUTING_KEY = 'admin.audit.core.v1';
 export const BILLING_IDENTITY_EVENT_TYPE = 'billing.identity.changed.v1';
 export const BILLING_TRIAL_REQUESTED_EVENT_TYPE =
 	'billing.trial.requested.v1';
@@ -118,23 +119,37 @@ export const WIDGETS_PROVIDER_INTEGRATION_KINDS = [
 export type WidgetsProviderIntegrationKind =
 	(typeof WIDGETS_PROVIDER_INTEGRATION_KINDS)[number];
 
-export const CORE_OWNED_INTEGRATION_KINDS = [
+export const CORE_CLOSABLE_LEGACY_FAILURE_KINDS = [
 	'campaign-admin-audit',
 	'reporting-admin-audit',
 	'widgets-admin-audit',
 	'billing-admin-audit',
 	'identity-admin-audit',
-	'platform-admin-audit',
-	'support-admin-audit',
+	'platform-admin-audit'
+] as const satisfies readonly IntegrationKind[];
+
+export const CORE_OWNED_INTEGRATION_KINDS = [
+	'billing-payment-projection',
+	'billing-subscription-projection',
+	'billing-affiliate-projection'
+] as const satisfies readonly IntegrationKind[];
+
+// Operations owns every admin-audit queue after the forward-only handoff.
+// Core keeps only the Billing projections that still update its remaining
+// projection tables; this narrower catalog is the only integration subset
+// that may drive Core RabbitMQ topology.
+export const CORE_BILLING_PROJECTION_INTEGRATION_KINDS = [
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection'
 ] as const satisfies readonly IntegrationKind[];
 
 export type MonolithIntegrationKind =
-	(typeof CORE_OWNED_INTEGRATION_KINDS)[number];
+	| (typeof CORE_CLOSABLE_LEGACY_FAILURE_KINDS)[number]
+	| (typeof CORE_OWNED_INTEGRATION_KINDS)[number];
 
-export const MONOLITH_INTEGRATION_KINDS = CORE_OWNED_INTEGRATION_KINDS;
+export const MONOLITH_INTEGRATION_KINDS: readonly MonolithIntegrationKind[] =
+	[...CORE_CLOSABLE_LEGACY_FAILURE_KINDS, ...CORE_OWNED_INTEGRATION_KINDS];
 
 export const MAINTENANCE_KINDS = ['database-backup'] as const;
 
@@ -175,11 +190,11 @@ export type MessagingKind =
 	| BillingSourceKind;
 
 // MESSAGING_KINDS is the federated monitoring/admin contract. Topology ownership
-// is narrower: Widgets owns its provider queues and Core must not recreate them
-// after the ownership handoff.
+// is narrower: Widgets owns its provider queues and Operations owns admin-audit
+// queues, so Core must not recreate either set after their ownership handoffs.
 export const CORE_RABBITMQ_TOPOLOGY_KINDS = [
 	...NOTIFICATION_DELIVERY_KINDS,
-	...CORE_OWNED_INTEGRATION_KINDS,
+	...CORE_BILLING_PROJECTION_INTEGRATION_KINDS,
 	...MAINTENANCE_KINDS
 ] as const satisfies readonly CoreMessagingKind[];
 
@@ -304,10 +319,27 @@ export const BILLING_OWNED_QUEUE_NAMES: readonly string[] = [
 	BILLING_NOTIFICATION_OUTCOME_QUEUE_NAME
 ];
 
+export const OPERATIONS_ADMIN_AUDIT_SOURCES = [
+	'campaigns',
+	'reporting',
+	'widgets',
+	'billing',
+	'identity',
+	'platform',
+	'support',
+	'core'
+] as const;
+
+export const OPERATIONS_ADMIN_AUDIT_QUEUE_NAMES =
+	OPERATIONS_ADMIN_AUDIT_SOURCES.map(
+		source => `winwidget.operations.admin.audit.${source}.v1`
+	);
+
 export const MESSAGING_QUEUE_PREFIXES: readonly string[] = [
 	...new Set([
 		...Object.values(MESSAGING_QUEUE_NAMES),
-		...BILLING_OWNED_QUEUE_NAMES
+		...BILLING_OWNED_QUEUE_NAMES,
+		...OPERATIONS_ADMIN_AUDIT_QUEUE_NAMES
 	])
 ];
 
@@ -320,16 +352,21 @@ export type MessagingQueueHealthExpectation = Readonly<{
 const WIDGETS_PROVIDER_KIND_SET: ReadonlySet<CoreMessagingKind> = new Set(
 	WIDGETS_PROVIDER_INTEGRATION_KINDS
 );
+const OPERATIONS_OWNED_LEGACY_ADMIN_AUDIT_KIND_SET: ReadonlySet<CoreMessagingKind> =
+	new Set([...CORE_CLOSABLE_LEGACY_FAILURE_KINDS, 'support-admin-audit']);
 
 const BILLING_RETRY_ATTEMPTS = [1, 2, 3] as const;
 
-// Passive DLQ are durable holding queues: manual retry is driven by the
-// delivery-failure record, so a steady-state RabbitMQ consumer must not drain
-// them. They must still exist, stay empty and alert on the first message.
+// Passive Core/Billing DLQs are durable holding queues. Operations audit
+// failures remain canonical in PostgreSQL receipts; their physical broker
+// DLQs have a bounded TTL and are diagnostic copies.
 export const getMessagingQueueHealthExpectations = (options: {
 	billingOwner: boolean;
 }): readonly MessagingQueueHealthExpectation[] => {
 	const coreExpectations = MESSAGING_KINDS.flatMap(kind => {
+		if (OPERATIONS_OWNED_LEGACY_ADMIN_AUDIT_KIND_SET.has(kind)) {
+			return [];
+		}
 		if (
 			options.billingOwner &&
 			(kind === 'auto-renewal' || kind === 'notification-delivery-outcome')
@@ -357,7 +394,27 @@ export const getMessagingQueueHealthExpectations = (options: {
 			}
 		];
 	});
-	if (!options.billingOwner) return coreExpectations;
+	const operationsExpectations =
+		OPERATIONS_ADMIN_AUDIT_QUEUE_NAMES.flatMap(mainQueue => [
+			{
+				name: mainQueue,
+				consumerExpectation: 'at-least-one' as const,
+				alertOnAnyMessage: false
+			},
+			{
+				name: `${mainQueue}.retry-v1`,
+				consumerExpectation: 'none' as const,
+				alertOnAnyMessage: false
+			},
+			{
+				name: `${mainQueue}.dead-letter`,
+				consumerExpectation: 'none' as const,
+				alertOnAnyMessage: false
+			}
+		]);
+	if (!options.billingOwner) {
+		return [...coreExpectations, ...operationsExpectations];
+	}
 
 	const billingExpectations = BILLING_OWNED_QUEUE_NAMES.flatMap(
 		mainQueue => [
@@ -379,7 +436,11 @@ export const getMessagingQueueHealthExpectations = (options: {
 		]
 	);
 
-	return [...coreExpectations, ...billingExpectations];
+	return [
+		...coreExpectations,
+		...operationsExpectations,
+		...billingExpectations
+	];
 };
 
 export const INTEGRATION_ROUTING_KEYS = MESSAGING_ROUTING_KEYS;

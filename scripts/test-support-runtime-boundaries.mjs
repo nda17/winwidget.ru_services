@@ -476,10 +476,6 @@ requireText('.github/workflows/deploy-production.yml', [
 	'support_action:',
 	"prepare:'PREPARE SUPPORT OWNERSHIP'",
 	"cutover:'CUTOVER SUPPORT OWNERSHIP'",
-	"cleanup:'DROP LEGACY SUPPORT CORE SOURCE'",
-	'support_cleanup_migration_sha256:',
-	'support_cleanup_backup_sha256:',
-	'support_cleanup_restore_evidence_sha256:',
 	'apps/support/pnpm-lock.yaml',
 	'scripts/support-cutover-production.sh',
 	'guard_support_checkout_before_pull',
@@ -492,6 +488,22 @@ requireText('.github/workflows/deploy-production.yml', [
 	'scripts/support-release-identity.sh --self-test',
 	'scripts/support-database-lifecycle.sh --self-test',
 	'scripts/support-cutover-production.sh --self-test'
+]);
+requireText('.github/workflows/support-cleanup-production.yml', [
+	'name: Support Core Cleanup Production',
+	'group: deploy-production-server',
+	'environment: production',
+	'support_confirmation:',
+	'support_cleanup_migration_sha256:',
+	'support_cleanup_backup_sha256:',
+	'support_cleanup_restore_evidence_sha256:',
+	"SUPPORT_ACTION: cleanup",
+	"SUPPORT_CONFIRMATION: ${{ inputs.support_confirmation }}",
+	"SUPPORT_CLEANUP_MIGRATION_SHA256: ${{ inputs.support_cleanup_migration_sha256 }}",
+	"SUPPORT_CLEANUP_BACKUP_SHA256: ${{ inputs.support_cleanup_backup_sha256 }}",
+	"SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ${{ inputs.support_cleanup_restore_evidence_sha256 }}",
+	"\"$GITHUB_REF\" == 'refs/heads/prod'",
+	'bash .github/scripts/stage-or-deploy-backend.sh'
 ]);
 requireText('.github/scripts/stage-or-deploy-backend.sh', [
 	'if [[ "$DEPLOY_TARGET" == \'support\' ]]',

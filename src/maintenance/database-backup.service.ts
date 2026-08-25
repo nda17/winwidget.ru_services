@@ -52,7 +52,10 @@ const DATABASE_URL_ENV_KEYS = [
 	'PLATFORM_MIGRATION_DATABASE_URL',
 	'SUPPORT_BACKUP_URL',
 	'SUPPORT_DATABASE_URL',
-	'SUPPORT_MIGRATION_DATABASE_URL'
+	'SUPPORT_MIGRATION_DATABASE_URL',
+	'OPERATIONS_BACKUP_URL',
+	'OPERATIONS_DATABASE_URL',
+	'OPERATIONS_MIGRATION_DATABASE_URL'
 ] as const;
 
 const SERVICE_DATABASE_CONFIG = {
@@ -95,6 +98,11 @@ const SERVICE_DATABASE_CONFIG = {
 		key: 'SUPPORT_BACKUP_URL',
 		label: 'Support',
 		filePrefix: 'winwidget-support-db'
+	},
+	operations: {
+		key: 'OPERATIONS_BACKUP_URL',
+		label: 'Operations',
+		filePrefix: 'winwidget-operations-db'
 	}
 } as const;
 

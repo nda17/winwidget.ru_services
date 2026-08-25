@@ -359,8 +359,11 @@ export function buildDatabasePreReopenVerificationSql(
 	const applicationRolesSql = sqlTextArray(target.allApplicationRoles);
 	const anchorTablesSql = sqlTextArray(target.anchorTables);
 	const runtimeAclVerificationSql = buildRuntimeAclVerificationSql(target);
+	const operationsActiveOwnershipInvariantSql =
+		buildOperationsActiveOwnershipInvariantSql(target);
 
 	return `
+${operationsActiveOwnershipInvariantSql}
 DO $database_restore_verify$
 DECLARE
     role_name TEXT;
@@ -596,6 +599,34 @@ $database_restore_verify$;
 `;
 }
 
+function buildOperationsActiveOwnershipInvariantSql(
+	target: DatabaseRestoreTargetConfig
+): string {
+	if (target.target !== 'operations') return '';
+	const schema = quoteIdentifier(target.schema);
+	return `
+DO $database_restore_operations_active$
+BEGIN
+    IF (SELECT count(*) FROM ${schema}."operations_ownership_state") <> 1
+       OR NOT EXISTS (
+           SELECT 1
+           FROM ${schema}."operations_ownership_state"
+           WHERE "id" = 'singleton'
+             AND "phase"::TEXT = 'ACTIVE'
+             AND "source_revision" ~ '^[0-9a-f]{40}$'
+             AND "source_snapshot_sha256" ~ '^[0-9a-f]{64}$'
+             AND "source_note_count" >= 0
+             AND "source_event_count" >= 0
+             AND "imported_at" IS NOT NULL
+             AND "activated_at" IS NOT NULL
+       ) THEN
+        RAISE EXCEPTION 'Operations restore requires an ACTIVE ownership snapshot';
+    END IF;
+END
+$database_restore_operations_active$;
+`;
+}
+
 export function buildDatabaseReopenSql(
 	target: DatabaseRestoreTargetConfig
 ): string {
@@ -720,6 +751,13 @@ function buildRuntimeAclRepairSql(
 	const runtimeRoles = target.runtimeRoles.map(quoteIdentifier).join(', ');
 	const backup = quoteIdentifier(target.backupRole);
 	const defaultPrivilegeRoles = `${runtimeRoles}, ${backup}`;
+	const operationsOverrides =
+		target.target === 'operations'
+			? `
+REVOKE ALL ON TABLE ${schema}."operations_ownership_state" FROM ${primaryRuntime};
+GRANT SELECT ON TABLE ${schema}."operations_ownership_state" TO ${primaryRuntime};
+`
+			: '';
 
 	return `
 REVOKE ALL ON SCHEMA ${schema} FROM ${runtimeRoles}, ${backup};
@@ -730,6 +768,7 @@ GRANT USAGE ON SCHEMA ${schema} TO ${runtimeRoles}, ${backup};
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schema} TO ${primaryRuntime};
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA ${schema} TO ${primaryRuntime};
 REVOKE ALL ON TABLE ${schema}."_prisma_migrations" FROM ${primaryRuntime};
+${operationsOverrides}
 GRANT SELECT ON ALL TABLES IN SCHEMA ${schema} TO ${backup};
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA ${schema} TO ${backup};
 
@@ -755,6 +794,10 @@ function buildRuntimeAclVerificationSql(
 ): string {
 	const schemaLiteral = quoteLiteral(target.schema);
 	const primaryRuntimeLiteral = quoteLiteral(target.runtimeRoles[0]);
+	const runtimeWritableTablePredicate =
+		target.target === 'operations'
+			? "table_name <> ALL(ARRAY['_prisma_migrations', 'operations_ownership_state'])"
+			: "table_name <> '_prisma_migrations'";
 	const baseRuntimeChecks = `
     IF NOT has_schema_privilege(${primaryRuntimeLiteral}, ${schemaLiteral}, 'USAGE')
        OR has_schema_privilege(${primaryRuntimeLiteral}, ${schemaLiteral}, 'CREATE') THEN
@@ -769,11 +812,11 @@ function buildRuntimeAclVerificationSql(
         IF has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'SELECT')
                IS DISTINCT FROM (table_name <> '_prisma_migrations')
            OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'INSERT')
-               IS DISTINCT FROM (table_name <> '_prisma_migrations')
+			   IS DISTINCT FROM (${runtimeWritableTablePredicate})
            OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'UPDATE')
-               IS DISTINCT FROM (table_name <> '_prisma_migrations')
+			   IS DISTINCT FROM (${runtimeWritableTablePredicate})
            OR has_table_privilege(${primaryRuntimeLiteral}, format('%I.%I', ${schemaLiteral}, table_name), 'DELETE')
-               IS DISTINCT FROM (table_name <> '_prisma_migrations') THEN
+			   IS DISTINCT FROM (${runtimeWritableTablePredicate}) THEN
             RAISE EXCEPTION 'Primary runtime table ACL is invalid';
         END IF;
     END LOOP;

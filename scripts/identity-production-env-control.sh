@@ -28,7 +28,7 @@ identity_cutover_marker="$APP_ROOT/deploy/backend/.identity-cutover-v1"
 identity_cleanup_marker="$APP_ROOT/deploy/backend/.identity-core-cleanup-v1"
 
 readonly identity_env_postgres_image='postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296'
-readonly identity_env_integration_kinds='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
+readonly identity_env_integration_kinds='billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
 identity_env_node_image_id=''
 
 identity_env_fail() {
@@ -468,6 +468,7 @@ const requiredExact = new Map([
   ['IDENTITY_WORKER_PORT', '4901'],
   ['IDENTITY_OUTBOX_PUBLISHER_PORT', '4902'],
   ['IDENTITY_INTERNAL_BASE_URL', 'http://127.0.0.1:4900'],
+	['OPERATIONS_INTERNAL_BASE_URL', 'http://127.0.0.1:5200'],
   ['IDENTITY_INTERNAL_TIMEOUT_MS', '5000'],
   ['IDENTITY_PREFETCH', '10'],
   ['IDENTITY_OUTBOX_BATCH_SIZE', '50'],
@@ -508,7 +509,8 @@ const optionalScopedKeys = ['PLATFORM_CORE_TOKEN'].filter(key => values.has(key)
 const scopedKeys = [
   'IDENTITY_CORE_TOKEN', 'CORE_IDENTITY_TOKEN', 'IDENTITY_CAMPAIGNS_TOKEN',
   'IDENTITY_REPORTING_TOKEN', 'IDENTITY_WIDGETS_TOKEN', 'IDENTITY_BILLING_TOKEN',
-  'IDENTITY_PLATFORM_TOKEN',
+	'IDENTITY_PLATFORM_TOKEN', 'IDENTITY_OPERATIONS_TOKEN',
+	'OPERATIONS_IDENTITY_TOKEN',
   'BILLING_CAMPAIGNS_TOKEN', 'BILLING_IDENTITY_TOKEN', 'WIDGETS_IDENTITY_TOKEN',
   ...optionalScopedKeys,
 ];
@@ -667,11 +669,13 @@ const additions = [
   'IDENTITY_RESTORE_DRILL_EVIDENCE_FILE', 'IDENTITY_PROCESS_ROLE',
   'IDENTITY_LISTEN_HOST', 'IDENTITY_API_PORT', 'IDENTITY_WORKER_PORT',
   'IDENTITY_OUTBOX_PUBLISHER_PORT', 'IDENTITY_INTERNAL_BASE_URL',
+	'OPERATIONS_INTERNAL_BASE_URL',
   'IDENTITY_INTERNAL_TIMEOUT_MS', 'IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64',
   'IDENTITY_JWT_ACCESS_JWKS_BASE64', 'IDENTITY_JWT_ACCESS_ACTIVE_KID',
   'IDENTITY_CORE_TOKEN', 'CORE_IDENTITY_TOKEN', 'IDENTITY_CAMPAIGNS_TOKEN',
   'IDENTITY_REPORTING_TOKEN', 'IDENTITY_WIDGETS_TOKEN', 'IDENTITY_BILLING_TOKEN',
-  'IDENTITY_PLATFORM_TOKEN',
+	'IDENTITY_PLATFORM_TOKEN', 'IDENTITY_OPERATIONS_TOKEN',
+	'OPERATIONS_IDENTITY_TOKEN',
   'BILLING_CAMPAIGNS_TOKEN', 'BILLING_IDENTITY_TOKEN', 'WIDGETS_IDENTITY_TOKEN',
   'IDENTITY_PREFETCH', 'IDENTITY_OUTBOX_BATCH_SIZE',
   'IDENTITY_OUTBOX_POLL_INTERVAL_MS', 'IDENTITY_OUTBOX_RETENTION_DAYS',
@@ -727,6 +731,7 @@ const updates = new Map([
   ['IDENTITY_API_PORT', '4900'], ['IDENTITY_WORKER_PORT', '4901'],
   ['IDENTITY_OUTBOX_PUBLISHER_PORT', '4902'],
   ['IDENTITY_INTERNAL_BASE_URL', 'http://127.0.0.1:4900'],
+	['OPERATIONS_INTERNAL_BASE_URL', 'http://127.0.0.1:5200'],
   ['IDENTITY_INTERNAL_TIMEOUT_MS', '5000'],
   ['IDENTITY_JWT_ACCESS_PRIVATE_KEY_BASE64', Buffer.from(privatePem).toString('base64')],
   ['IDENTITY_JWT_ACCESS_JWKS_BASE64', Buffer.from(JSON.stringify({ keys: [publicJwk] })).toString('base64')],
@@ -734,7 +739,8 @@ const updates = new Map([
   ['IDENTITY_CORE_TOKEN', secret()], ['CORE_IDENTITY_TOKEN', secret()],
   ['IDENTITY_CAMPAIGNS_TOKEN', secret()], ['IDENTITY_REPORTING_TOKEN', secret()],
   ['IDENTITY_WIDGETS_TOKEN', secret()], ['IDENTITY_BILLING_TOKEN', secret()],
-  ['IDENTITY_PLATFORM_TOKEN', secret()],
+	['IDENTITY_PLATFORM_TOKEN', secret()], ['IDENTITY_OPERATIONS_TOKEN', secret()],
+	['OPERATIONS_IDENTITY_TOKEN', secret()],
   ['BILLING_CAMPAIGNS_TOKEN', secret()], ['BILLING_IDENTITY_TOKEN', secret()],
   ['WIDGETS_IDENTITY_TOKEN', secret()], ['IDENTITY_PREFETCH', '10'],
   ['IDENTITY_OUTBOX_BATCH_SIZE', '50'], ['IDENTITY_OUTBOX_POLL_INTERVAL_MS', '1000'],
@@ -1009,6 +1015,8 @@ identity_env_self_test() {
 		"$source" == *'legacy production env already contains a bootstrap-managed Identity key'* &&
 		"$source" == *'IDENTITY_CORE_TOKEN'* && "$source" == *'CORE_IDENTITY_TOKEN'* &&
 		"$source" == *'IDENTITY_PLATFORM_TOKEN'* &&
+		"$source" == *'IDENTITY_OPERATIONS_TOKEN'* &&
+		"$source" == *'OPERATIONS_IDENTITY_TOKEN'* &&
 		"$source" == *"optionalScopedKeys = ['PLATFORM_CORE_TOKEN']"* &&
 		"$source" == *'BILLING_CAMPAIGNS_TOKEN'* && "$source" == *'BILLING_IDENTITY_TOKEN'* &&
 		"$source" == *'WIDGETS_IDENTITY_TOKEN'* &&

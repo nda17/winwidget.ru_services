@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 
 const createTelegramBotService = (prisma: PrismaService) =>
 	new TelegramBotService(prisma, new ConfigService({ MODE: 'test' }));
+const createAuditWriter = () => jest.fn().mockResolvedValue(undefined);
 
 const telegramSettings = {
 	id: 'singleton',
@@ -23,7 +24,7 @@ const createSettingsPrisma = (
 	dailySummaryOwner: 'CORE' | 'REPORTING',
 	dailySummaryPolicyReservationTime = dailySummaryOwner === 'CORE'
 		? '01:50'
-		: '04:00',
+		: '04:15',
 	dailySummaryPolicyPendingTime: string | null = null
 ) => {
 	const upsert = jest
@@ -75,6 +76,7 @@ describe('TelegramBotService backup settings', () => {
 		expect((service as any).addMinutesToTime('23:55', 75)).toBe('01:10');
 		expect((service as any).addMinutesToTime('23:55', 90)).toBe('01:25');
 		expect((service as any).addMinutesToTime('23:55', 105)).toBe('01:40');
+		expect((service as any).addMinutesToTime('23:55', 120)).toBe('01:55');
 	});
 
 	it('exposes all delayed service backup schedules in settings', () => {
@@ -94,7 +96,10 @@ describe('TelegramBotService backup settings', () => {
 			identityDatabaseBackupTimeLabel: '03:15 МСК',
 			platformDatabaseBackupDelayMinutes: 105,
 			platformDatabaseBackupTime: '03:30',
-			platformDatabaseBackupTimeLabel: '03:30 МСК'
+			platformDatabaseBackupTimeLabel: '03:30 МСК',
+			operationsDatabaseBackupDelayMinutes: 135,
+			operationsDatabaseBackupTime: '04:00',
+			operationsDatabaseBackupTimeLabel: '04:00 МСК'
 		});
 	});
 
@@ -122,9 +127,10 @@ describe('TelegramBotService backup settings', () => {
 		const { prisma, upsert } = createSettingsPrisma('REPORTING');
 		const service = createTelegramBotService(prisma);
 
-		const result = await service.updateSettings({
-			databaseBackupTime: '01:48'
-		});
+		const result = await service.updateSettings(
+			{ databaseBackupTime: '01:48' },
+			createAuditWriter()
+		);
 
 		expect(result.databaseBackupTime).toBe('01:48');
 		expect(upsert).toHaveBeenLastCalledWith(
@@ -137,7 +143,10 @@ describe('TelegramBotService backup settings', () => {
 		const service = createTelegramBotService(prisma);
 
 		await expect(
-			service.updateSettings({ databaseBackupTime: '01:48' })
+			service.updateSettings(
+				{ databaseBackupTime: '01:48' },
+				createAuditWriter()
+			)
 		).rejects.toBeInstanceOf(BadRequestException);
 		expect(upsert).toHaveBeenCalledTimes(1);
 	});
@@ -151,7 +160,10 @@ describe('TelegramBotService backup settings', () => {
 		const service = createTelegramBotService(prisma);
 
 		await expect(
-			service.updateSettings({ databaseBackupTime: '01:48' })
+			service.updateSettings(
+				{ databaseBackupTime: '01:48' },
+				createAuditWriter()
+			)
 		).rejects.toBeInstanceOf(BadRequestException);
 		expect(upsert).toHaveBeenCalledTimes(1);
 	});
@@ -161,7 +173,10 @@ describe('TelegramBotService backup settings', () => {
 		const service = createTelegramBotService(prisma);
 
 		await expect(
-			service.updateSettings({ databaseBackupTime: '01:48' })
+			service.updateSettings(
+				{ databaseBackupTime: '01:48' },
+				createAuditWriter()
+			)
 		).rejects.toBeInstanceOf(BadRequestException);
 		expect(upsert).toHaveBeenCalledTimes(1);
 	});
@@ -171,16 +186,38 @@ describe('TelegramBotService backup settings', () => {
 		const service = createTelegramBotService(prisma);
 
 		await expect(
-			service.updateSettings({ operationalAlertsThreadId: 6 })
+			service.updateSettings(
+				{ operationalAlertsThreadId: 6 },
+				createAuditWriter()
+			)
 		).resolves.toEqual(
 			expect.objectContaining({ operationalAlertsThreadId: 6 })
 		);
 		await expect(
-			service.updateSettings({ dailySummaryChatId: '-100999' })
+			service.updateSettings(
+				{ dailySummaryChatId: '-100999' },
+				createAuditWriter()
+			)
 		).resolves.toEqual(
 			expect.objectContaining({ dailySummaryChatId: '-100999' })
 		);
 		expect(upsert).toHaveBeenCalledTimes(4);
+	});
+
+	it('fails the settings transaction when its audit Outbox write fails', async () => {
+		const { prisma, transaction } = createSettingsPrisma('REPORTING');
+		const service = createTelegramBotService(prisma);
+		const writeAudit = jest
+			.fn()
+			.mockRejectedValue(new Error('audit outbox unavailable'));
+
+		await expect(
+			service.updateSettings({ operationalAlertsThreadId: 6 }, writeAudit)
+		).rejects.toThrow('audit outbox unavailable');
+		expect(writeAudit).toHaveBeenCalledWith(
+			transaction,
+			expect.objectContaining({ operationalAlertsThreadId: 6 })
+		);
 	});
 });
 

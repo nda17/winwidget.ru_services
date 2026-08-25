@@ -12,6 +12,7 @@ import {
 } from '@/messaging/identity-messaging-client.service';
 import {
 	CORE_ARCHIVED_FAILURE_HISTORY_KINDS,
+	CORE_CLOSABLE_LEGACY_FAILURE_KINDS,
 	CORE_OWNED_MESSAGING_KINDS,
 	getManualRetryRoutingKey,
 	CoreMessagingKind,
@@ -929,6 +930,11 @@ export class MessagingAdminService {
 			if (!this.isCoreFailureKind(kind)) {
 				throw new NotFoundException('Ошибка доставки не найдена');
 			}
+			if (!this.isCoreRetryableFailureKind(kind)) {
+				throw new ConflictException(
+					'Повтор ошибки выведенного Core consumer недоступен; ошибку можно только закрыть'
+				);
+			}
 			const retryPayload: Prisma.JsonValue = failure.payload;
 			const retryEventType = this.getFailureEventType(retryPayload);
 			try {
@@ -1470,7 +1476,16 @@ export class MessagingAdminService {
 	}
 
 	private getCoreFailureKinds(): CoreMessagingKind[] {
-		return [...CORE_OWNED_MESSAGING_KINDS];
+		return [
+			...CORE_OWNED_MESSAGING_KINDS,
+			...CORE_CLOSABLE_LEGACY_FAILURE_KINDS
+		];
+	}
+
+	private isCoreRetryableFailureKind(value: CoreMessagingKind): boolean {
+		return CORE_OWNED_MESSAGING_KINDS.includes(
+			value as (typeof CORE_OWNED_MESSAGING_KINDS)[number]
+		);
 	}
 
 	private getArchivedFailureKinds(
@@ -1499,11 +1514,11 @@ export class MessagingAdminService {
 		adminId: string,
 		request?: Request
 	) {
-		let result: Awaited<
-			ReturnType<NotificationDeliveryClientService['retryFailure']>
+		let failure: Awaited<
+			ReturnType<NotificationDeliveryClientService['getFailure']>
 		>;
 		try {
-			result = await this.notificationDelivery.retryFailure(id, adminId);
+			failure = await this.notificationDelivery.getFailure(id);
 		} catch (error) {
 			if (
 				error instanceof NotificationDeliveryInternalApiError &&
@@ -1513,29 +1528,28 @@ export class MessagingAdminService {
 			}
 			this.rethrowNotificationDeliveryError(error);
 		}
-		await this.recordNotificationDeliveryAuditBestEffort(
-			{
-				adminId,
-				section: 'MESSAGING',
-				action: 'MESSAGING_FAILURE_RETRY',
-				description: `Повторно отправлено событие Notification Delivery ${result.integration}`,
-				entityType: 'notification_delivery_failure',
-				entityId: result.id,
-				entityLabel: result.integration,
-				metadata: {
-					eventId: result.eventId,
-					integration: result.integration
-				},
-				request
+		await this.adminEventLog.record({
+			adminId,
+			section: 'MESSAGING',
+			action: 'MESSAGING_FAILURE_RETRY',
+			description: `Запрошен повтор события Notification Delivery ${failure.integration}`,
+			entityType: 'notification_delivery_failure',
+			entityId: failure.id,
+			entityLabel: failure.integration,
+			metadata: {
+				eventId: failure.eventId,
+				integration: failure.integration
 			},
-			{
-				action: 'RETRY',
-				adminId,
-				failureId: result.id,
-				eventId: result.eventId,
-				integration: result.integration
-			}
-		);
+			request
+		});
+		let result: Awaited<
+			ReturnType<NotificationDeliveryClientService['retryFailure']>
+		>;
+		try {
+			result = await this.notificationDelivery.retryFailure(id, adminId);
+		} catch (error) {
+			this.rethrowNotificationDeliveryError(error);
+		}
 		return result;
 	}
 
@@ -1545,6 +1559,35 @@ export class MessagingAdminService {
 		comment: string,
 		request?: Request
 	) {
+		let failure: Awaited<
+			ReturnType<NotificationDeliveryClientService['getFailure']>
+		>;
+		try {
+			failure = await this.notificationDelivery.getFailure(id);
+		} catch (error) {
+			if (
+				error instanceof NotificationDeliveryInternalApiError &&
+				error.statusCode === 404
+			) {
+				return null;
+			}
+			this.rethrowNotificationDeliveryError(error);
+		}
+		await this.adminEventLog.record({
+			adminId,
+			section: 'MESSAGING',
+			action: 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
+			description: `Запрошено закрытие ошибки Notification Delivery ${failure.integration} без повтора`,
+			entityType: 'notification_delivery_failure',
+			entityId: failure.id,
+			entityLabel: failure.integration,
+			metadata: {
+				eventId: failure.eventId,
+				integration: failure.integration,
+				comment
+			},
+			request
+		});
 		let result: Awaited<
 			ReturnType<NotificationDeliveryClientService['closeFailure']>
 		>;
@@ -1555,65 +1598,9 @@ export class MessagingAdminService {
 				comment
 			);
 		} catch (error) {
-			if (
-				error instanceof NotificationDeliveryInternalApiError &&
-				error.statusCode === 404
-			) {
-				return null;
-			}
 			this.rethrowNotificationDeliveryError(error);
 		}
-		await this.recordNotificationDeliveryAuditBestEffort(
-			{
-				adminId,
-				section: 'MESSAGING',
-				action: 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
-				description: `Закрыта без повтора ошибка Notification Delivery ${result.integration}`,
-				entityType: 'notification_delivery_failure',
-				entityId: result.id,
-				entityLabel: result.integration,
-				metadata: {
-					eventId: result.eventId,
-					integration: result.integration,
-					comment
-				},
-				request
-			},
-			{
-				action: 'CLOSE',
-				adminId,
-				failureId: result.id,
-				eventId: result.eventId,
-				integration: result.integration
-			}
-		);
 		return result;
-	}
-
-	private async recordNotificationDeliveryAuditBestEffort(
-		entry: Parameters<AdminEventLogService['record']>[0],
-		context: {
-			action: 'RETRY' | 'CLOSE';
-			adminId: string;
-			failureId: string;
-			eventId: string;
-			integration: string;
-		}
-	): Promise<void> {
-		try {
-			await this.adminEventLog.record(entry);
-		} catch (error) {
-			this.logger.error(
-				JSON.stringify({
-					event: 'notification_delivery.global_audit_failed',
-					...context,
-					error:
-						error instanceof Error
-							? error.message.slice(0, 1000)
-							: String(error).slice(0, 1000)
-				})
-			);
-		}
 	}
 
 	private async isCoreOwnedFailure(id: string): Promise<boolean> {
@@ -1905,7 +1892,9 @@ export class MessagingAdminService {
 			[SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP]:
 				'Backup PostgreSQL Platform',
 			[SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP]:
-				'Backup PostgreSQL Support'
+				'Backup PostgreSQL Support',
+			[SCHEDULED_JOB_TYPES.OPERATIONS_DATABASE_BACKUP]:
+				'Backup PostgreSQL Operations'
 		};
 		const scheduledJobName =
 			jobPayload.jobType && isDatabaseBackupJobType(jobPayload.jobType)

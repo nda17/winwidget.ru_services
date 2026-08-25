@@ -342,6 +342,135 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(process.argv[2], "utf8");
+const operationsGate = source.indexOf(
+  "prepare_operations_database_for_routine_deploy || exit 1",
+);
+const firstRabbitAcl = source.indexOf(
+  "provision_rabbitmq_user \\\n\t\"$rabbitmq_admin_user\"",
+  operationsGate,
+);
+const operationsTopology = source.indexOf(
+  "\nprovision_operations_rabbitmq_topology\n",
+  firstRabbitAcl,
+);
+const operationsPermissions = source.indexOf(
+  "operations_queue_permission_pattern=",
+  operationsTopology,
+);
+const integrationNarrowing = source.indexOf(
+  "provision_rabbitmq_user \\\n\t\"$integration_user\"",
+  operationsPermissions,
+);
+assert(
+  operationsGate >= 0 && firstRabbitAcl > operationsGate &&
+  operationsTopology > firstRabbitAcl &&
+  operationsPermissions > operationsTopology &&
+  integrationNarrowing > operationsPermissions,
+  "Operations ACTIVE gate, privileged topology and RabbitMQ narrowing order drifted",
+);
+const operationsPermissionBlock = source.slice(
+  operationsPermissions,
+  integrationNarrowing,
+);
+assert.match(operationsPermissionBlock, /manual-retry/);
+assert.match(operationsPermissionBlock, /provision_operations_rabbitmq_topic_permissions/);
+const operationsWorkerConfigureOrReadPattern =
+  '"^(winwidget\\.(events|retry|dead-letter|manual-retry)|$operations_queue_permission_pattern)$"';
+assert.equal(
+  operationsPermissionBlock.split(operationsWorkerConfigureOrReadPattern).length - 1,
+  1,
+  "Operations worker configure permission must cover exact topology resources",
+);
+const operationsWorkerWritePattern =
+  "'^winwidget\\.(retry|dead-letter)$'";
+assert.equal(
+  operationsPermissionBlock.split(operationsWorkerWritePattern).length - 1,
+  1,
+  "Operations worker write permission must be limited to retry and dead-letter exchanges",
+);
+assert.equal(
+  operationsPermissionBlock.split('"^$operations_queue_permission_pattern$"').length - 1,
+  1,
+  "Operations worker read permission must be limited to exact Operations queues",
+);
+const operationsTopicFunctionStart = source.indexOf(
+  "\nprovision_operations_rabbitmq_topic_permissions() {",
+);
+const operationsTopicFunctionEnd = source.indexOf(
+  "\n}\n\nprovision_operations_rabbitmq_topology() {",
+  operationsTopicFunctionStart,
+);
+const operationsTopicFunction = source.slice(
+  operationsTopicFunctionStart,
+  operationsTopicFunctionEnd,
+);
+assert.doesNotMatch(
+  operationsTopicFunction,
+  /RABBITMQ_OPERATIONS_WORKER_USER" winwidget\.events/,
+);
+assert.match(
+  operationsTopicFunction,
+  /RABBITMQ_OPERATIONS_WORKER_USER" winwidget\.dead-letter[\s\S]*"\^\$"/,
+);
+const operationsTopologyFunctionStart = source.indexOf(
+  "\nprovision_operations_rabbitmq_topology() {",
+);
+const operationsTopologyFunctionEnd = source.indexOf(
+  "\n}\n\nassert_campaigns_shared_rabbitmq_topology() {",
+  operationsTopologyFunctionStart,
+);
+const operationsTopologyFunction = source.slice(
+  operationsTopologyFunctionStart,
+  operationsTopologyFunctionEnd,
+);
+assert.match(operationsTopologyFunction, /const exchanges = new Map/);
+assert.match(operationsTopologyFunction, /\["winwidget\.events", "topic"\]/);
+assert.match(operationsTopologyFunction, /\["winwidget\.retry", "direct"\]/);
+assert.match(operationsTopologyFunction, /\["winwidget\.dead-letter", "topic"\]/);
+assert.match(operationsTopologyFunction, /\["winwidget\.manual-retry", "direct"\]/);
+assert.match(operationsTopologyFunction, /requireLegacyAbsent\(beforeQueues\)/);
+assert.match(operationsTopologyFunction, /channel\.assertQueue\(retryQueue/);
+assert.match(operationsTopologyFunction, /channel\.bindQueue\(/);
+assert.match(operationsTopologyFunction, /seenBindings\.size !== expectedBindings\.size/);
+assert.equal(
+  source.match(/operations-api \\\n\t\toperations-worker \\\n\t\toperations-outbox-publisher/g)?.length,
+  2,
+  "Operations must restart in normal and notification-forward paths",
+);
+const operationsConsumerVerifierStart = source.indexOf(
+  "\nverify_operations_rabbitmq_consumers() {",
+);
+const operationsConsumerVerifierEnd = source.indexOf(
+  "\n}\n\ncompose_target up -d --no-deps --force-recreate \\\n\tbilling-api",
+  operationsConsumerVerifierStart,
+);
+const operationsConsumerVerifier = source.slice(
+  operationsConsumerVerifierStart,
+  operationsConsumerVerifierEnd,
+);
+assert.match(operationsConsumerVerifier, /if \(queues\.has\(`\$\{base\}\$\{suffix\}`\)\) process\.exit\(1\)/);
+assert.match(operationsConsumerVerifier, /deadLetterConsumers !== undefined && deadLetterConsumers !== 0/);
+assert.match(
+  operationsConsumerVerifier,
+  /for \(const source of \["campaigns", "reporting", "widgets", "billing", "identity", "platform", "support"\]\)/,
+);
+assert(source.includes('"apps/operations/prisma/migrations"'));
+const operationsDatabaseGateStart = source.indexOf(
+  "\nprepare_operations_database_for_routine_deploy() {",
+);
+const operationsDatabaseGateEnd = source.indexOf(
+  "\n}\n\ninitialize_notification_database_lifecycle_guard",
+  operationsDatabaseGateStart,
+);
+const operationsDatabaseGate = source.slice(
+  operationsDatabaseGateStart,
+  operationsDatabaseGateEnd,
+);
+assert.match(
+  operationsDatabaseGate,
+  /assert_operations_core_source_removed_for_routine_deploy/,
+);
+assert.doesNotMatch(operationsDatabaseGate, /DROP (?:TABLE|FUNCTION|TYPE)/);
 const functionStart = source.indexOf("\nprovision_rabbitmq_user() {");
 const scriptStart = source.indexOf('const amqp = require("amqplib");', functionStart);
 const scriptEnd = source.indexOf("\n'; then", scriptStart);
@@ -437,6 +566,219 @@ async function runFixture({ adminFails = false, managementStatus = 204 } = {}) {
   assert.equal(success.exitCode, undefined);
 })().catch(() => process.exit(1));
 NODE
+	"$self_test_node" - "$script_path" <<'NODE'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+
+const source = fs.readFileSync(process.argv[2], "utf8");
+const functionStart = source.indexOf("\nprovision_operations_rabbitmq_topology() {");
+const scriptStart = source.indexOf('const amqp = require("amqplib");', functionStart);
+const scriptEnd = source.indexOf("\n' || {", scriptStart);
+assert(functionStart >= 0 && scriptStart > functionStart && scriptEnd > scriptStart);
+const topologyScript = source.slice(scriptStart, scriptEnd);
+const sourcePairs = [
+  ["campaigns", "admin.audit.event.v1"],
+  ["reporting", "admin.audit.reporting.v1"],
+  ["widgets", "admin.audit.widgets.v1"],
+  ["billing", "admin.audit.billing.v1"],
+  ["identity", "admin.audit.identity.v1"],
+  ["platform", "admin.audit.platform.v1"],
+  ["support", "admin.audit.support.v1"],
+  ["core", "admin.audit.core.v1"],
+];
+const exchangeTypes = new Map([
+  ["winwidget.events", "topic"],
+  ["winwidget.retry", "direct"],
+  ["winwidget.dead-letter", "topic"],
+  ["winwidget.manual-retry", "direct"],
+]);
+const queueName = name => `winwidget.operations.admin.audit.${name}.v1`;
+const retryQueueName = name => `${queueName(name)}.retry-v1`;
+const deadLetterQueueName = name => `${queueName(name)}.dead-letter`;
+const expectedQueues = [];
+const expectedBindings = [];
+for (const [name, eventRoutingKey] of sourcePairs) {
+  const queue = queueName(name);
+  const retryQueue = retryQueueName(name);
+  const deadLetterQueue = deadLetterQueueName(name);
+  const deadLetterRoutingKey = `operations.admin.audit.${name}.dead-letter.v1`;
+  expectedQueues.push(
+    {
+      name: queue,
+      durable: true,
+      auto_delete: false,
+      exclusive: false,
+      arguments: {
+        "x-dead-letter-exchange": "winwidget.dead-letter",
+        "x-dead-letter-routing-key": deadLetterRoutingKey,
+      },
+    },
+    {
+      name: retryQueue,
+      durable: true,
+      auto_delete: false,
+      exclusive: false,
+      arguments: {
+        "x-dead-letter-exchange": "winwidget.events",
+        "x-dead-letter-routing-key": eventRoutingKey,
+      },
+    },
+    {
+      name: deadLetterQueue,
+      durable: true,
+      auto_delete: false,
+      exclusive: false,
+      arguments: { "x-message-ttl": 604800000 },
+    },
+  );
+  expectedBindings.push(
+    {
+      source: "winwidget.events",
+      destination: queue,
+      destination_type: "queue",
+      routing_key: eventRoutingKey,
+      arguments: {},
+    },
+    {
+      source: "winwidget.manual-retry",
+      destination: queue,
+      destination_type: "queue",
+      routing_key: `operations.admin.audit.${name}.manual.v1`,
+      arguments: {},
+    },
+    {
+      source: "winwidget.retry",
+      destination: retryQueue,
+      destination_type: "queue",
+      routing_key: `operations.admin.audit.${name}.retry.v1`,
+      arguments: {},
+    },
+    {
+      source: "winwidget.dead-letter",
+      destination: deadLetterQueue,
+      destination_type: "queue",
+      routing_key: deadLetterRoutingKey,
+      arguments: {},
+    },
+  );
+}
+const expectedExchanges = [...exchangeTypes].map(([name, type]) => ({
+  name,
+  type,
+  durable: true,
+  auto_delete: false,
+  internal: false,
+  arguments: {},
+}));
+
+async function runTopologyFixture({ legacyQueue = null } = {}) {
+  const events = [];
+  const errors = [];
+  let queueReadCount = 0;
+  const adminPassword = "a".repeat(40);
+  const environment = {
+    RABBITMQ_ADMIN_USER: "admin-user",
+    RABBITMQ_ADMIN_PASSWORD: adminPassword,
+    RABBITMQ_MANAGEMENT_URL: "http://127.0.0.1:15672",
+    RABBITMQ_PROVISION_VHOST: "winwidget",
+  };
+  const channel = {
+    async assertExchange(name, type, options) {
+      events.push(["exchange", name, type, options]);
+    },
+    async assertQueue(name, options) {
+      events.push(["queue", name, options]);
+    },
+    async bindQueue(queue, exchange, routingKey) {
+      events.push(["binding", exchange, queue, routingKey]);
+    },
+    async close() {
+      events.push(["channel-close"]);
+    },
+  };
+  const sandbox = {
+    AbortSignal,
+    Buffer,
+    process: {
+      env: environment,
+      exitCode: undefined,
+      stdout: { write: message => events.push(["stdout", message]) },
+      stderr: { write: message => errors.push(message) },
+    },
+    require(name) {
+      assert.equal(name, "amqplib");
+      return {
+        async connect(options) {
+          assert.equal(options.username, environment.RABBITMQ_ADMIN_USER);
+          assert.equal(options.password, environment.RABBITMQ_ADMIN_PASSWORD);
+          assert.equal(options.vhost, environment.RABBITMQ_PROVISION_VHOST);
+          events.push(["connect"]);
+          return {
+            createConfirmChannel: async () => channel,
+            close: async () => events.push(["connection-close"]),
+          };
+        },
+      };
+    },
+    async fetch(url, options) {
+      assert.equal(options.redirect, "error");
+      assert.equal(
+        Buffer.from(options.headers.authorization.slice(6), "base64").toString("utf8"),
+        `${environment.RABBITMQ_ADMIN_USER}:${environment.RABBITMQ_ADMIN_PASSWORD}`,
+      );
+      const path = new URL(url).pathname;
+      events.push(["fetch", path]);
+      let body;
+      if (path === "/api/queues/winwidget") {
+        queueReadCount += 1;
+        if (queueReadCount === 1) {
+          body = legacyQueue
+            ? [{ name: legacyQueue }]
+            : [];
+        } else {
+          body = expectedQueues;
+        }
+      } else if (path === "/api/exchanges/winwidget") {
+        body = expectedExchanges;
+      } else if (path === "/api/bindings/winwidget") {
+        body = expectedBindings;
+      } else {
+        throw new Error(`Unexpected management path: ${path}`);
+      }
+      return { status: 200, json: async () => body };
+    },
+    URL,
+  };
+  await vm.runInNewContext(topologyScript, sandbox);
+  return { errors, events, exitCode: sandbox.process.exitCode };
+}
+
+(async () => {
+  for (const legacyQueue of [
+    "winwidget.admin.audit.campaigns.v1",
+    "winwidget.admin.audit.support.v1",
+  ]) {
+    const rejectedLegacy = await runTopologyFixture({ legacyQueue });
+    assert.equal(rejectedLegacy.exitCode, 1);
+    assert.deepEqual(
+      rejectedLegacy.errors,
+      ["Operations RabbitMQ topology provisioning failed\n"],
+    );
+    assert.equal(rejectedLegacy.events.filter(([event]) => event === "connect").length, 0);
+    assert.equal(rejectedLegacy.events.filter(([event]) => event === "exchange").length, 0);
+  }
+
+  const success = await runTopologyFixture();
+  assert.equal(success.exitCode, undefined);
+  assert.deepEqual(success.errors, []);
+  assert.equal(success.events.filter(([event]) => event === "connect").length, 1);
+  assert.equal(success.events.filter(([event]) => event === "exchange").length, 4);
+  assert.equal(success.events.filter(([event]) => event === "queue").length, 24);
+  assert.equal(success.events.filter(([event]) => event === "binding").length, 32);
+  assert.equal(success.events.filter(([event]) => event === "fetch").length, 4);
+})().catch(() => process.exit(1));
+NODE
 	printf 'rabbitmq_routine_provisioning_self_test=passed\n'
 }
 
@@ -496,6 +838,10 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
     ['platform-site-settings', '/api/v1/site-settings'],
     ['platform-legal-pages', '/api/v1/legal-pages'],
     ['platform-home-page-content', '/api/v1/home-page-content'],
+  ];
+  const operationsRoutes = [
+    ['operations-notes', '/api/v1/notes'],
+    ['operations-admin-event-log', '/api/v1/admin-event-log'],
   ];
   const widgetsInvalid = widgetRoutes.some(([id, pathPrefix, authPolicy]) =>
     !routeMatches(
@@ -563,6 +909,18 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
         route => route.upstreamUrl?.origin === 'http://127.0.0.1:5000',
       ).length !== platformRoutes.length
     : true;
+  const operationsInvalid = operationsRoutes.some(([id, pathPrefix]) =>
+    !routeMatches(
+      routes.find(route => route.id === id),
+      id,
+      pathPrefix,
+      'http://127.0.0.1:5200',
+      'required',
+      30000,
+    ) || routes.indexOf(routes.find(route => route.id === id)) >=
+      routes.indexOf(monolith)) || routes.filter(
+        route => route.upstreamUrl?.origin === 'http://127.0.0.1:5200',
+      ).length !== operationsRoutes.length;
   const commonInvalid =
     !routeMatches(
       databaseRestores,
@@ -611,7 +969,8 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
     (reportingPolicy === 'reporting' ? 1 : 0) +
     (billingPolicy === 'billing' ? billingRoutes.length : 0) +
     (identityPolicy === 'identity' ? identityRoutes.length : 0) +
-    (platformPolicy === 'platform' ? platformRoutes.length : 0);
+    (platformPolicy === 'platform' ? platformRoutes.length : 0) +
+    operationsRoutes.length;
   const darkInvalid = reportingPolicy === 'dark' &&
     (reporting || routes.some(route =>
       route.pathPrefix === '/api/v1/admin/reporting' ||
@@ -635,11 +994,12 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
     billingInvalid ||
     identityInvalid ||
     platformInvalid ||
+    operationsInvalid ||
     darkInvalid ||
     reportingInvalid
   ) {
     throw new Error(
-      `Gateway route manifest conflicts with Reporting policy ${reportingPolicy}, Billing policy ${billingPolicy}, Identity policy ${identityPolicy}, and Platform policy ${platformPolicy}`,
+      `Gateway route manifest conflicts with Reporting policy ${reportingPolicy}, Billing policy ${billingPolicy}, Identity policy ${identityPolicy}, Platform policy ${platformPolicy}, or mandatory Operations ownership`,
     );
   }
 }
@@ -723,12 +1083,18 @@ const platform = [
   ['platform-home-page-content', '/api/v1/home-page-content'],
 ].map(([id, pathPrefix]) =>
   route(id, pathPrefix, 'http://127.0.0.1:5000', 'optional', 60000));
+const operations = [
+  ['operations-notes', '/api/v1/notes'],
+  ['operations-admin-event-log', '/api/v1/admin-event-log'],
+].map(([id, pathPrefix]) =>
+  route(id, pathPrefix, 'http://127.0.0.1:5200', 'required', 30000));
 const withPlatformBeforeMonolith = routes => {
   const monolithIndex = routes.findIndex(item => item.id === 'monolith');
   assert.notEqual(monolithIndex, -1);
 	const monolith = routes[monolithIndex];
   return [
 	...routes.filter((_, index) => index !== monolithIndex),
+    ...operations,
     ...platform,
 	monolith,
   ];
@@ -786,6 +1152,20 @@ rejects(
 );
 rejects(
   [...withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]), billing[5]],
+  'reporting',
+  'billing',
+);
+rejects(
+  withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]).map(item =>
+    item.id === 'operations-notes' ? { ...item, authPolicy: 'optional' } : item),
+  'reporting',
+  'billing',
+);
+rejects(
+  withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]).map(item =>
+    item.id === 'operations-admin-event-log'
+      ? { ...item, upstreamUrl: new URL('http://127.0.0.1:4200') }
+      : item),
   'reporting',
   'billing',
 );
@@ -973,6 +1353,11 @@ IDENTITY_OUTBOX_READINESS_URL="${IDENTITY_OUTBOX_READINESS_URL:-http://127.0.0.1
 SUPPORT_API_READINESS_URL="${SUPPORT_API_READINESS_URL:-http://127.0.0.1:5100/health/ready}"
 SUPPORT_WORKER_READINESS_URL="${SUPPORT_WORKER_READINESS_URL:-http://127.0.0.1:5101/health/ready}"
 SUPPORT_OUTBOX_READINESS_URL="${SUPPORT_OUTBOX_READINESS_URL:-http://127.0.0.1:5102/health/ready}"
+OPERATIONS_API_READINESS_URL="${OPERATIONS_API_READINESS_URL:-http://127.0.0.1:5200/health/ready}"
+OPERATIONS_WORKER_READINESS_URL="${OPERATIONS_WORKER_READINESS_URL:-http://127.0.0.1:5201/health/ready}"
+OPERATIONS_OUTBOX_READINESS_URL="${OPERATIONS_OUTBOX_READINESS_URL:-http://127.0.0.1:5202/health/ready}"
+readonly OPERATIONS_STEADY_INTEGRATION_WORKER_KINDS='billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
+readonly OPERATIONS_STEADY_INTEGRATION_READ_PATTERN='^winwidget\.core\.billing\.(payment-details|subscription-details|affiliate)\.v1(\.dead-letter)?$'
 NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
@@ -1326,6 +1711,11 @@ prepared:legacy | preparing:* | forward-only:* | active:*)
 esac
 identity_runtime_services=(identity-api identity-worker identity-outbox-publisher)
 support_runtime_services=(support-api support-worker support-outbox-publisher)
+operations_runtime_services=(
+	operations-api
+	operations-worker
+	operations-outbox-publisher
+)
 
 identity_cleanup_migration='20260815000000_remove_legacy_identity_core_source'
 identity_cleanup_directory="$server_root/prisma/migrations/$identity_cleanup_migration"
@@ -1744,11 +2134,11 @@ expected_integration_worker_kinds="$(
 	echo 'The integration-worker ownership contract is empty.' >&2
 	exit 1
 }
-expected_integration_worker_kinds="$IDENTITY_STEADY_INTEGRATION_WORKER_KINDS"
+expected_integration_worker_kinds="$OPERATIONS_STEADY_INTEGRATION_WORKER_KINDS"
 
 # database-restore-production-guard: before-mutation
 database_restore_guard_assert_before_mutation \
-	identity-if-present "$ENV_FILE"
+	service-owned-required "$ENV_FILE"
 reporting_transition_cleanup_integration_worker_env "$deploy_revision"
 
 reporting_automatic_prod_push="${REPORTING_AUTOMATIC_PROD_PUSH:-false}"
@@ -1865,6 +2255,8 @@ export IDENTITY_REVISION="$deploy_revision"
 export IDENTITY_IMAGE="winwidget-identity:git-$deploy_revision"
 export SUPPORT_REVISION="$deploy_revision"
 export SUPPORT_IMAGE="winwidget-support:git-$deploy_revision"
+export OPERATIONS_REVISION="$deploy_revision"
+export OPERATIONS_IMAGE="winwidget-operations:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
@@ -1878,6 +2270,7 @@ echo "Building Support image: $SUPPORT_IMAGE"
 echo "Building Reporting image for the coordinated backend revision: $REPORTING_IMAGE"
 echo "Building Billing image for the coordinated backend revision: $BILLING_IMAGE"
 echo "Building Identity image for the coordinated backend revision: $IDENTITY_IMAGE"
+echo "Building Operations image for the coordinated backend revision: $OPERATIONS_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -1927,7 +2320,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-	APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION | BILLING_IMAGE | BILLING_REVISION | IDENTITY_IMAGE | IDENTITY_REVISION)
+	APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION | BILLING_IMAGE | BILLING_REVISION | IDENTITY_IMAGE | IDENTITY_REVISION | OPERATIONS_IMAGE | OPERATIONS_REVISION)
 			continue
 			;;
 	esac
@@ -2082,6 +2475,9 @@ assert_distinct_database_roles() {
 		SUPPORT_DATABASE_URL
 		SUPPORT_MIGRATION_DATABASE_URL
 		SUPPORT_BACKUP_URL
+		OPERATIONS_DATABASE_URL
+		OPERATIONS_MIGRATION_DATABASE_URL
+		OPERATIONS_BACKUP_URL
 	)
 	local -a role_users=()
 	local key
@@ -2095,6 +2491,7 @@ assert_distinct_database_roles() {
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
 				echo "Core runtime/migration/maintenance and eight service-owned database contours must use twenty-seven distinct PostgreSQL roles." >&2
+				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets, Billing, Identity, Platform and Operations database URLs must use twenty-eight distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -2366,6 +2763,17 @@ case "$mode" in
 		require_env_key "SUPPORT_POSTGRES_DATA_VOLUME"
 		require_env_key "SUPPORT_POSTGRES_ADMIN_USER"
 		require_env_key "SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "OPERATIONS_IMAGE"
+		require_env_key "OPERATIONS_REVISION"
+		require_env_key "OPERATIONS_DATABASE_URL"
+		require_env_key "OPERATIONS_MIGRATION_DATABASE_URL"
+		require_env_key "OPERATIONS_BACKUP_URL"
+		require_env_key "OPERATIONS_POSTGRES_IMAGE"
+		require_env_key "OPERATIONS_POSTGRES_PORT"
+		require_env_key "OPERATIONS_POSTGRES_DATA_VOLUME"
+		require_env_key "OPERATIONS_POSTGRES_ADMIN_USER"
+		require_env_key "OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "OPERATIONS_CUTOVER_ARTIFACT_DIR"
 		require_env_key "CORE_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "DATABASE_RESTORE_STORAGE_DIR"
 		require_env_key "DATABASE_RESTORE_QUEUE_SECRET"
@@ -2394,6 +2802,8 @@ case "$mode" in
 		require_env_key "RABBITMQ_PLATFORM_PUBLISHER_URL"
 		require_env_key "RABBITMQ_SUPPORT_WORKER_URL"
 		require_env_key "RABBITMQ_SUPPORT_PUBLISHER_URL"
+		require_env_key "RABBITMQ_OPERATIONS_WORKER_URL"
+		require_env_key "RABBITMQ_OPERATIONS_PUBLISHER_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -2480,6 +2890,8 @@ case "$mode" in
 		require_env_key "IDENTITY_BILLING_TOKEN"
 		require_env_key "IDENTITY_PLATFORM_TOKEN"
 		require_env_key "IDENTITY_SUPPORT_TOKEN"
+		require_env_key "IDENTITY_OPERATIONS_TOKEN"
+		require_env_key "OPERATIONS_IDENTITY_TOKEN"
 		require_env_key "IDENTITY_LISTEN_HOST"
 		require_env_key "IDENTITY_API_PORT"
 		require_env_key "IDENTITY_WORKER_PORT"
@@ -2516,6 +2928,17 @@ case "$mode" in
 		require_env_key "SUPPORT_RECEIPT_RETENTION_DAYS"
 		require_env_key "SUPPORT_FAILURE_DETAIL_RETENTION_DAYS"
 		require_env_key "SUPPORT_RESTORE_DRILL_EVIDENCE_FILE"
+		require_env_key "OPERATIONS_PROCESS_ROLE"
+		require_env_key "OPERATIONS_LISTEN_HOST"
+		require_env_key "OPERATIONS_API_PORT"
+		require_env_key "OPERATIONS_WORKER_PORT"
+		require_env_key "OPERATIONS_OUTBOX_PUBLISHER_PORT"
+		require_env_key "OPERATIONS_OUTBOX_BATCH_SIZE"
+		require_env_key "OPERATIONS_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "OPERATIONS_AUDIT_RECEIPT_LEASE_MS"
+		require_env_key "OPERATIONS_AUDIT_RETRY_DELAY_MS"
+		require_env_key "OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS"
+		require_env_key "OPERATIONS_INTERNAL_BASE_URL"
 		require_env_key "RECAPTCHA_CLIENT_URL"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
@@ -2926,10 +3349,44 @@ case "$mode" in
 			echo 'Support must use the reviewed PG18 boundary, loopback ports, public Telegram relay and bounded retry settings.' >&2
 			exit 1
 		fi
+		operations_env_revision="$(get_env_value OPERATIONS_REVISION)"
+		operations_outbox_batch_size="$(get_env_value OPERATIONS_OUTBOX_BATCH_SIZE)"
+		operations_outbox_poll_interval_ms="$(get_env_value OPERATIONS_OUTBOX_POLL_INTERVAL_MS)"
+		operations_receipt_lease_ms="$(get_env_value OPERATIONS_AUDIT_RECEIPT_LEASE_MS)"
+		operations_retry_delay_ms="$(get_env_value OPERATIONS_AUDIT_RETRY_DELAY_MS)"
+		operations_max_retry_attempts="$(get_env_value OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS)"
+		if [[ ! "$operations_env_revision" =~ ^[0-9a-f]{40}$ ||
+			"$operations_env_revision" =~ ^0+$ ||
+			"$(get_env_value OPERATIONS_IMAGE)" != "winwidget-operations:git-$operations_env_revision" ||
+			! "$(get_env_value OPERATIONS_POSTGRES_IMAGE)" =~ ^postgres:18-[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ||
+			"$(get_env_value OPERATIONS_POSTGRES_PORT)" != '55441' ||
+			"$(get_env_value OPERATIONS_POSTGRES_DATA_VOLUME)" != 'winwidget-operations-postgres-data' ||
+			"$(get_env_value OPERATIONS_POSTGRES_ADMIN_USER)" != 'winwidget_operations_admin' ||
+			"$(get_env_value OPERATIONS_CUTOVER_ARTIFACT_DIR)" != "$APP_ROOT/deploy/backend/operations-cutover" ||
+			"$(get_env_value OPERATIONS_PROCESS_ROLE)" != 'api' ||
+			"$(get_env_value OPERATIONS_LISTEN_HOST)" != '127.0.0.1' ||
+			"$(get_env_value OPERATIONS_API_PORT)" != '5200' ||
+			"$(get_env_value OPERATIONS_WORKER_PORT)" != '5201' ||
+			"$(get_env_value OPERATIONS_OUTBOX_PUBLISHER_PORT)" != '5202' ||
+			"$(get_env_value OPERATIONS_INTERNAL_BASE_URL)" != 'http://127.0.0.1:5200' ||
+			! "$operations_outbox_batch_size" =~ ^[1-9][0-9]*$ ]] ||
+			((operations_outbox_batch_size > 500)) ||
+			[[ ! "$operations_outbox_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((operations_outbox_poll_interval_ms < 100 || operations_outbox_poll_interval_ms > 60000)) ||
+			[[ ! "$operations_receipt_lease_ms" =~ ^[0-9]+$ ]] ||
+			((operations_receipt_lease_ms < 10000 || operations_receipt_lease_ms > 900000)) ||
+			[[ ! "$operations_retry_delay_ms" =~ ^[0-9]+$ ]] ||
+			((operations_retry_delay_ms < 1000 || operations_retry_delay_ms > 3600000)) ||
+			[[ ! "$operations_max_retry_attempts" =~ ^[1-9][0-9]*$ ]] ||
+			((operations_max_retry_attempts > 10)); then
+			echo 'Operations must use the reviewed image, PG18, loopback ports and bounded worker/Outbox settings.' >&2
+			exit 1
+		fi
 		identity_credential_keys=(
 			IDENTITY_CORE_TOKEN CORE_IDENTITY_TOKEN IDENTITY_CAMPAIGNS_TOKEN
 			IDENTITY_REPORTING_TOKEN IDENTITY_WIDGETS_TOKEN IDENTITY_BILLING_TOKEN
 			IDENTITY_PLATFORM_TOKEN IDENTITY_SUPPORT_TOKEN
+			IDENTITY_OPERATIONS_TOKEN OPERATIONS_IDENTITY_TOKEN
 			BILLING_CAMPAIGNS_TOKEN BILLING_IDENTITY_TOKEN WIDGETS_IDENTITY_TOKEN
 			PLATFORM_CORE_TOKEN SUPPORT_CORE_TOKEN
 		)
@@ -3002,9 +3459,6 @@ case "$mode" in
 			exit 1
 		fi
 		assert_database_restore_admin_secret_file \
-			CORE_POSTGRES_ADMIN_PASSWORD_FILE \
-			"$APP_ROOT/deploy/backend/.core-postgres-temporary-admin-password"
-		assert_database_restore_admin_secret_file \
 			NOTIFICATION_DELIVERY_POSTGRES_ADMIN_PASSWORD_FILE \
 			"$APP_ROOT/deploy/backend/.notification-delivery-postgres-admin-password"
 		assert_database_restore_admin_secret_file \
@@ -3028,6 +3482,20 @@ case "$mode" in
 		assert_database_restore_admin_secret_file \
 			SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE \
 			"$APP_ROOT/deploy/backend/.support-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.operations-postgres-admin-password"
+		operations_admin_secret_file="$(
+			get_env_value OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE
+		)"
+		if [[ "$(
+			cd "$(dirname "$operations_admin_secret_file")" && pwd -P
+		)" != "$APP_ROOT/deploy/backend" ||
+			"$(stat -c '%u:%g:%a:%h' "$operations_admin_secret_file")" != '0:0:600:1' ]]; then
+			echo 'Operations PostgreSQL admin secret must use its canonical root-owned single-link file.' >&2
+			exit 1
+		fi
+		unset operations_admin_secret_file
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
 			SMTP_GREETING_TIMEOUT_MS \
@@ -3494,6 +3962,7 @@ routine_stop_services=(
 	widgets-service
 	"${identity_runtime_services[@]}"
 	"${support_runtime_services[@]}"
+	"${operations_runtime_services[@]}"
 )
 billing_core_cleanup_services=(
 	"${routine_stop_services[@]}"
@@ -5108,6 +5577,7 @@ for (const required of [
 	"apps/billing/prisma/migrations",
 	"apps/platform/prisma/migrations",
 	"apps/support/prisma/migrations",
+	"apps/operations/prisma/migrations",
 	"/usr/bin/pg_dump",
 	"/usr/bin/pg_restore",
 	"/usr/bin/psql",
@@ -5118,6 +5588,43 @@ for (const required of [
 }
 process.stdout.write("Isolated database restore worker image artifact verified\n");
 	'
+}
+
+verify_operations_image_artifact() {
+	local image_revision image_user
+	image_revision="$(
+		docker image inspect --format \
+			'{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+			"$OPERATIONS_IMAGE"
+	)"
+	image_user="$(docker image inspect --format '{{.Config.User}}' "$OPERATIONS_IMAGE")"
+	[[ "$image_revision" == "$OPERATIONS_REVISION" &&
+		"$image_user" == 'operations' ]] || {
+		echo 'Operations image revision or runtime user is invalid.' >&2
+		return 1
+	}
+	docker run --rm --network none \
+		--entrypoint node \
+		"$OPERATIONS_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of [
+	"dist/src/main.js",
+	"dist/src/cutover/main.js",
+	"prisma/schema.prisma",
+]) fs.accessSync(required);
+require("@prisma/operations-client");
+for (const forbidden of [
+	"dist/src/app.module.js",
+	"dist/src/outbox-publisher-main.js",
+	"public/widgets",
+]) {
+	if (fs.existsSync(forbidden)) {
+		throw new Error(`Operations image contains Core artifact: ${forbidden}`);
+	}
+}
+process.stdout.write("Standalone Operations image artifact verified\n");
+'
 }
 
 validate_widgets_database_urls() {
@@ -5219,6 +5726,45 @@ process.stdout.write("Support runtime, migration and backup URL boundaries verif
 '
 }
 
+validate_operations_database_urls() {
+	printf '%s\n%s\n%s\n' \
+		"$(get_env_value OPERATIONS_DATABASE_URL)" \
+		"$(get_env_value OPERATIONS_MIGRATION_DATABASE_URL)" \
+		"$(get_env_value OPERATIONS_BACKUP_URL)" |
+		docker run --rm -i --network none \
+			-e "EXPECTED_PORT=$(get_env_value OPERATIONS_POSTGRES_PORT)" \
+			--entrypoint node "$OPERATIONS_IMAGE" -e '
+const { readFileSync } = require("node:fs");
+const urls = readFileSync(0, "utf8").trim().split("\n").map(value => new URL(value));
+const expectedUsers = [
+	"winwidget_operations_runtime",
+	"winwidget_operations_migration",
+	"winwidget_operations_backup",
+];
+const passwords = new Set();
+for (const [index, url] of urls.entries()) {
+	const password = decodeURIComponent(url.password);
+	if (
+		url.protocol !== "postgresql:" ||
+		decodeURIComponent(url.username) !== expectedUsers[index] ||
+		url.hostname !== "127.0.0.1" ||
+		url.port !== process.env.EXPECTED_PORT ||
+		url.pathname !== "/winwidget_operations" ||
+		url.searchParams.get("schema") !== "operations" ||
+		url.searchParams.get("sslmode") !== "disable" ||
+		password.length < 32 ||
+		/[\0\r\n]/.test(password) ||
+		password.startsWith("change_me")
+	) throw new Error(`Invalid Operations database URL boundary at index ${index}`);
+	passwords.add(password);
+}
+if (passwords.size !== expectedUsers.length) {
+	throw new Error("Operations database roles must use distinct passwords");
+}
+process.stdout.write("Operations runtime, migration and backup URL boundaries verified\n");
+'
+}
+
 verify_support_steady_ownership() {
 	local core_status support_status support_lifecycle_marker support_ownership_revision
 	support_lifecycle_marker="$APP_ROOT/deploy/backend/.support-database-lifecycle-v1"
@@ -5275,6 +5821,19 @@ if (
 	!core.activatedAt || !support.activatedAt
 ) throw new Error("Core and Support ownership anchors are not in exact steady state");
 process.stdout.write("Core and Support ownership anchors verified\n");
+		url.pathname !== "/winwidget_operations" ||
+		url.searchParams.get("schema") !== "operations" ||
+		url.searchParams.get("sslmode") !== "disable" ||
+		password.length < 32 ||
+		/[\0\r\n]/.test(password) ||
+		password.startsWith("change_me")
+	) throw new Error(`Invalid Operations database URL boundary at index ${index}`);
+	passwords.add(password);
+}
+if (passwords.size !== expectedUsers.length) {
+	throw new Error("Operations database roles must use distinct passwords");
+}
+process.stdout.write("Operations runtime, migration and backup URL boundaries verified\n");
 '
 }
 
@@ -5313,6 +5872,143 @@ process.stdout.write("Campaigns runtime, migration and backup URL boundaries ver
 '
 }
 
+operations_ownership_source_revision=''
+assert_operations_core_source_removed_for_routine_deploy() {
+	compose_target --profile migration run --rm --no-deps \
+		--entrypoint node migrate -e '
+const { PrismaClient } = require("@prisma/client");
+const prisma = new PrismaClient();
+(async () => {
+  const [state] = await prisma.$queryRawUnsafe(`
+    SELECT
+      to_regclass('\''public.notes'\'') IS NOT NULL AS "notesPresent",
+      to_regclass('\''public.admin_event_logs'\'') IS NOT NULL AS "eventsPresent",
+      to_regclass('\''public.operations_core_state'\'') IS NOT NULL AS "statePresent",
+      to_regprocedure('\''public.operations_core_source_write_guard()'\'') IS NOT NULL AS "writeGuardPresent",
+      to_regprocedure('\''public.operations_core_state_transition_guard()'\'') IS NOT NULL AS "stateGuardPresent",
+      to_regtype('\''public."OperationsCoreOwnership"'\'') IS NOT NULL AS "typePresent"
+  `);
+  if (!state || Object.values(state).some(Boolean)) process.exitCode = 1;
+})().catch(() => { process.exitCode = 1; }).finally(() => prisma.$disconnect());
+'
+}
+
+prepare_operations_database_for_routine_deploy() {
+	local volume_name volume_contract artifact_dir container_id container_contract
+	local health status_json
+	local phase source_revision snapshot_sha256 note_count event_count
+
+	volume_name="$(get_env_value OPERATIONS_POSTGRES_DATA_VOLUME)"
+	volume_contract="$(
+		docker volume inspect --format \
+			'{{.Name}}|{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}' \
+			"$volume_name" 2>/dev/null || true
+	)"
+	[[ "$volume_contract" == "$volume_name|operations|postgres-data" ]] || {
+		echo 'Operations PostgreSQL volume is absent or lacks the cutover ownership labels.' >&2
+		echo 'Run the one-time Operations database prepare/cutover; routine deploy will not create ownership.' >&2
+		return 1
+	}
+	artifact_dir="$(get_env_value OPERATIONS_CUTOVER_ARTIFACT_DIR)"
+	[[ -d "$artifact_dir" && ! -L "$artifact_dir" &&
+		"$(cd "$artifact_dir" && pwd -P)" == "$artifact_dir" &&
+		"$(stat -c '%u:%g:%a' "$artifact_dir")" == '0:1001:770' ]] || {
+		echo 'Operations cutover artifact directory is absent or unsafe.' >&2
+		return 1
+	}
+
+	compose_target --profile operations-database up -d operations-postgres
+	container_id="$(
+		compose_target --profile operations-database \
+			ps --status running -q operations-postgres 2>/dev/null || true
+	)"
+	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
+		echo 'Exactly one running Operations PostgreSQL container is required.' >&2
+		return 1
+	}
+	container_contract="$(
+		docker inspect --format \
+			'{{.Config.Image}}|{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql"}}{{.Name}}{{end}}{{end}}' \
+			"$container_id"
+	)"
+	[[ "$container_contract" == "$(get_env_value OPERATIONS_POSTGRES_IMAGE)|operations|postgres|$volume_name" ]] || {
+		echo 'Operations PostgreSQL container image, labels or data volume are invalid.' >&2
+		return 1
+	}
+	for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+		health="$(
+			docker inspect --format \
+				'{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+				"$container_id"
+		)"
+		if [[ "$health" == 'healthy' ]]; then
+			break
+		fi
+		if [[ "$health" == 'unhealthy' || "$attempt" == "$HEALTHCHECK_ATTEMPTS" ]]; then
+			echo "Operations PostgreSQL readiness failed: health=$health" >&2
+			return 1
+		fi
+		sleep "$HEALTHCHECK_INTERVAL"
+	done
+
+	compose_target --profile operations-migration run --rm --no-deps \
+		operations-migrate
+	status_json="$(
+		docker run --rm --network host \
+			--env-file "$ENV_FILE" \
+			--entrypoint node "$OPERATIONS_IMAGE" \
+			dist/src/cutover/main.js status
+	)" || {
+		echo 'Operations ownership status could not be read after migration.' >&2
+		return 1
+	}
+	read -r phase source_revision snapshot_sha256 note_count event_count < <(
+		OPERATIONS_STATUS_JSON="$status_json" docker run --rm -i --network none \
+			-e OPERATIONS_STATUS_JSON \
+			--entrypoint node "$OPERATIONS_IMAGE" -e '
+const value = JSON.parse(process.env.OPERATIONS_STATUS_JSON || "null");
+if (
+	value?.phase !== "ACTIVE" ||
+	!/^[0-9a-f]{40}$/.test(value.sourceRevision || "") ||
+	!/^[0-9a-f]{64}$/.test(value.snapshotSha256 || "") ||
+	!Number.isSafeInteger(value.notes) || value.notes < 0 ||
+	!Number.isSafeInteger(value.adminEventLogs) || value.adminEventLogs < 0
+) process.exit(1);
+process.stdout.write([
+	value.phase,
+	value.sourceRevision,
+	value.snapshotSha256,
+	value.notes,
+	value.adminEventLogs,
+].join(" "));
+'
+	) || {
+		unset status_json
+		echo 'Operations ownership is not ACTIVE with an exact imported snapshot.' >&2
+		echo 'Complete the one-time Operations cutover before a routine deployment.' >&2
+		return 1
+	}
+	unset status_json
+	[[ "$phase" == 'ACTIVE' && "$snapshot_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+		echo 'Operations ownership status parser returned an invalid active boundary.' >&2
+		return 1
+	}
+	assert_operations_core_source_removed_for_routine_deploy || {
+		echo 'Routine deploy rejected a restored or partially removed legacy Operations Core source.' >&2
+		return 1
+	}
+	if ! git -C "$server_root" cat-file -e \
+		"$source_revision^{commit}" 2>/dev/null ||
+		! git -C "$server_root" merge-base --is-ancestor \
+			"$source_revision" "$deploy_revision"; then
+		echo 'Operations ownership source revision is not an ancestor of this deployment.' >&2
+		return 1
+	fi
+	operations_ownership_source_revision="$source_revision"
+	printf 'Operations ownership ACTIVE source verified: %s (notes=%s events=%s)\n' \
+		"$operations_ownership_source_revision" "$note_count" "$event_count"
+}
+
 initialize_notification_database_lifecycle_guard \
 	true \
 	"a routine full deployment" \
@@ -5327,6 +6023,8 @@ compose_target \
 	--profile billing-migration \
 	--profile identity-migration \
 	--profile support-migration \
+	--profile operations-database \
+	--profile operations-migration \
 	config --quiet
 routine_build_services=(
 	maintenance-worker
@@ -5336,6 +6034,7 @@ routine_build_services=(
 	reporting-service
 	widgets-service
 	identity-api
+	operations-api
 )
 if [[ "$support_first_cutover_deploy" == 'false' ]]; then
 	routine_build_services+=(api-gateway support-api)
@@ -5379,10 +6078,13 @@ verify_support_image_artifact
 verify_core_support_runtime_artifact
 verify_billing_core_cleanup_image_artifact
 verify_database_restore_image_artifact
+verify_operations_image_artifact
 validate_campaigns_database_urls
 validate_widgets_database_urls
 validate_billing_database_urls
 validate_support_database_urls
+validate_operations_database_urls
+prepare_operations_database_for_routine_deploy || exit 1
 assert_campaigns_contract_migration_applied_for_routine_deploy
 initialize_campaigns_database_lifecycle_guard \
 	"a routine full deployment" identity-if-present
@@ -6456,6 +7158,12 @@ support_worker_credentials="$(
 support_publisher_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_SUPPORT_PUBLISHER_URL"
 )"
+operations_worker_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_OPERATIONS_WORKER_URL"
+)"
+operations_publisher_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_OPERATIONS_PUBLISHER_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -6545,6 +7253,25 @@ if [[ "$support_worker_user" != 'winwidget-support-worker' ||
 	echo 'Support RabbitMQ URLs must use the two dedicated canonical users.' >&2
 	exit 1
 fi
+operations_worker_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$operations_worker_credentials")" |
+		base64 --decode
+)"
+operations_worker_password_base64="$(
+	sed -n '2p' <<<"$operations_worker_credentials"
+)"
+operations_publisher_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$operations_publisher_credentials")" |
+		base64 --decode
+)"
+operations_publisher_password_base64="$(
+	sed -n '2p' <<<"$operations_publisher_credentials"
+)"
+if [[ "$operations_worker_user" != 'winwidget-operations-worker' ||
+	"$operations_publisher_user" != 'winwidget-operations-publisher' ]]; then
+	echo 'Operations RabbitMQ URLs must use the two dedicated canonical users.' >&2
+	exit 1
+fi
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -6568,6 +7295,8 @@ service_users=(
 	"$identity_publisher_user"
 	"$support_worker_user"
 	"$support_publisher_user"
+	"$operations_worker_user"
+	"$operations_publisher_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -6999,6 +7728,259 @@ rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
 '
 }
 
+provision_operations_rabbitmq_topic_permissions() {
+	local worker_user="$1" publisher_user="$2"
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_OPERATIONS_WORKER_USER="$worker_user" \
+	RABBITMQ_OPERATIONS_PUBLISHER_USER="$publisher_user" \
+		docker exec \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_OPERATIONS_WORKER_USER \
+			-e RABBITMQ_OPERATIONS_PUBLISHER_USER \
+			"$provisioning_rabbitmq_container_id" sh -euc '
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_OPERATIONS_WORKER_USER"
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_OPERATIONS_PUBLISHER_USER"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_OPERATIONS_WORKER_USER" winwidget.dead-letter \
+  "^operations\.admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform|support|core)\.dead-letter\.v1$" \
+  "^$"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_OPERATIONS_PUBLISHER_USER" winwidget.events \
+  "^operations\.[a-z0-9.-]+\.v1$" "^$"
+'
+}
+
+provision_operations_rabbitmq_topology() {
+	RABBITMQ_ADMIN_USER="$rabbitmq_admin_user" \
+	RABBITMQ_ADMIN_PASSWORD="$rabbitmq_admin_password" \
+	RABBITMQ_MANAGEMENT_URL="$rabbitmq_management_url" \
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+		docker run --rm --network host --read-only \
+			--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 \
+			--cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+			--log-driver none \
+			--env RABBITMQ_ADMIN_USER \
+			--env RABBITMQ_ADMIN_PASSWORD \
+			--env RABBITMQ_MANAGEMENT_URL \
+			--env RABBITMQ_PROVISION_VHOST \
+			--entrypoint node "$OPERATIONS_IMAGE" -e '
+const amqp = require("amqplib");
+
+const value = name => process.env[name] || "";
+const adminUser = value("RABBITMQ_ADMIN_USER");
+const adminPassword = value("RABBITMQ_ADMIN_PASSWORD");
+const managementUrl = value("RABBITMQ_MANAGEMENT_URL").replace(/\/$/, "");
+const vhost = value("RABBITMQ_PROVISION_VHOST");
+const fail = () => {
+	throw new Error("Operations RabbitMQ topology contract failed");
+};
+if (
+	!/^[A-Za-z0-9._-]+$/.test(adminUser) ||
+	adminPassword.length < 32 || /[\0\r\n]/.test(adminPassword) ||
+	managementUrl !== "http://127.0.0.1:15672" ||
+	vhost !== "winwidget"
+) fail();
+
+const authorization = `Basic ${Buffer.from(`${adminUser}:${adminPassword}`).toString("base64")}`;
+const encodedVhost = encodeURIComponent(vhost);
+const request = async path => {
+	const response = await fetch(`${managementUrl}${path}`, {
+		headers: { authorization },
+		redirect: "error",
+		signal: AbortSignal.timeout(10_000),
+	});
+	if (response.status !== 200) fail();
+	return response.json();
+};
+const sources = [
+	["campaigns", "admin.audit.event.v1"],
+	["reporting", "admin.audit.reporting.v1"],
+	["widgets", "admin.audit.widgets.v1"],
+	["billing", "admin.audit.billing.v1"],
+	["identity", "admin.audit.identity.v1"],
+	["platform", "admin.audit.platform.v1"],
+	["support", "admin.audit.support.v1"],
+	["core", "admin.audit.core.v1"],
+];
+const exchanges = new Map([
+	["winwidget.events", "topic"],
+	["winwidget.retry", "direct"],
+	["winwidget.dead-letter", "topic"],
+	["winwidget.manual-retry", "direct"],
+]);
+const queueName = source => `winwidget.operations.admin.audit.${source}.v1`;
+const retryQueueName = source => `${queueName(source)}.retry-v1`;
+const deadLetterQueueName = source => `${queueName(source)}.dead-letter`;
+const retryRoutingKey = source => `operations.admin.audit.${source}.retry.v1`;
+const deadLetterRoutingKey = source => `operations.admin.audit.${source}.dead-letter.v1`;
+const manualRoutingKey = source => `operations.admin.audit.${source}.manual.v1`;
+const auditDlqRetentionMs = 604800000;
+const legacyBases = [
+	"campaigns", "reporting", "widgets", "billing", "identity", "platform", "support",
+].map(source => `winwidget.admin.audit.${source}.v1`);
+const legacyQueues = new Set(legacyBases.flatMap(base => [
+	base,
+	`${base}.retry-v2.1`,
+	`${base}.retry-v2.2`,
+	`${base}.retry-v2.3`,
+]));
+const expectedQueues = new Map();
+const expectedBindings = new Set();
+for (const [source, sourceRoutingKey] of sources) {
+	const queue = queueName(source);
+	const retryQueue = retryQueueName(source);
+	const deadLetterQueue = deadLetterQueueName(source);
+	const deadLetterKey = deadLetterRoutingKey(source);
+	expectedQueues.set(queue, {
+		"x-dead-letter-exchange": "winwidget.dead-letter",
+		"x-dead-letter-routing-key": deadLetterKey,
+	});
+	expectedQueues.set(retryQueue, {
+		"x-dead-letter-exchange": "winwidget.events",
+		"x-dead-letter-routing-key": sourceRoutingKey,
+	});
+expectedQueues.set(deadLetterQueue, { "x-message-ttl": auditDlqRetentionMs });
+	expectedBindings.add(["winwidget.events", queue, sourceRoutingKey].join("\t"));
+	expectedBindings.add(["winwidget.manual-retry", queue, manualRoutingKey(source)].join("\t"));
+	expectedBindings.add(["winwidget.retry", retryQueue, retryRoutingKey(source)].join("\t"));
+	expectedBindings.add(["winwidget.dead-letter", deadLetterQueue, deadLetterKey].join("\t"));
+}
+const sameArguments = (actual, expected) => {
+	if (!actual || typeof actual !== "object" || Array.isArray(actual)) return false;
+	const actualKeys = Object.keys(actual).sort();
+	const expectedKeys = Object.keys(expected).sort();
+	return actualKeys.length === expectedKeys.length &&
+		actualKeys.every((key, index) =>
+			key === expectedKeys[index] && actual[key] === expected[key]);
+};
+const requireLegacyAbsent = queues => {
+	if (!Array.isArray(queues)) fail();
+	const names = new Set(queues.map(queue => queue?.name));
+	if ([...legacyQueues].some(name => names.has(name))) fail();
+};
+
+(async () => {
+	const beforeQueues = await request(`/api/queues/${encodedVhost}`);
+	requireLegacyAbsent(beforeQueues);
+
+	const connection = await amqp.connect({
+		protocol: "amqp",
+		hostname: "127.0.0.1",
+		port: 5672,
+		username: adminUser,
+		password: adminPassword,
+		vhost,
+		clientProperties: {
+			connection_name: "winwidget-operations-routine-topology",
+		},
+	}, { timeout: 10_000 });
+	try {
+		const channel = await connection.createConfirmChannel();
+		try {
+			for (const [exchange, type] of exchanges) {
+				await channel.assertExchange(exchange, type, { durable: true });
+			}
+			for (const [source, sourceRoutingKey] of sources) {
+				const queue = queueName(source);
+				const retryQueue = retryQueueName(source);
+				const deadLetterQueue = deadLetterQueueName(source);
+				const deadLetterKey = deadLetterRoutingKey(source);
+				await channel.assertQueue(queue, {
+					durable: true,
+					arguments: expectedQueues.get(queue),
+				});
+				await channel.bindQueue(queue, "winwidget.events", sourceRoutingKey);
+				await channel.bindQueue(
+					queue,
+					"winwidget.manual-retry",
+					manualRoutingKey(source),
+				);
+				await channel.assertQueue(retryQueue, {
+					durable: true,
+					arguments: expectedQueues.get(retryQueue),
+				});
+				await channel.bindQueue(
+					retryQueue,
+					"winwidget.retry",
+					retryRoutingKey(source),
+				);
+				await channel.assertQueue(deadLetterQueue, {
+					durable: true,
+					arguments: expectedQueues.get(deadLetterQueue),
+				});
+				await channel.bindQueue(
+					deadLetterQueue,
+					"winwidget.dead-letter",
+					deadLetterKey,
+				);
+			}
+		} finally {
+			await channel.close();
+		}
+	} finally {
+		await connection.close();
+	}
+
+	const [actualExchanges, actualQueues, actualBindings] = await Promise.all([
+		request(`/api/exchanges/${encodedVhost}`),
+		request(`/api/queues/${encodedVhost}`),
+		request(`/api/bindings/${encodedVhost}`),
+	]);
+	if (![actualExchanges, actualQueues, actualBindings].every(Array.isArray)) fail();
+	requireLegacyAbsent(actualQueues);
+	const exchangeByName = new Map(actualExchanges.map(exchange => [exchange?.name, exchange]));
+	for (const [name, type] of exchanges) {
+		const exchange = exchangeByName.get(name);
+		if (
+			exchange?.type !== type || exchange.durable !== true ||
+			exchange.auto_delete !== false || exchange.internal !== false ||
+			!sameArguments(exchange.arguments || {}, {})
+		) fail();
+	}
+	const queueByName = new Map(actualQueues.map(queue => [queue?.name, queue]));
+	for (const [name, expectedArguments] of expectedQueues) {
+		const queue = queueByName.get(name);
+		if (
+			queue?.durable !== true || queue.auto_delete !== false ||
+			queue.exclusive !== false ||
+			!sameArguments(queue.arguments || {}, expectedArguments)
+		) fail();
+	}
+	for (const name of queueByName.keys()) {
+		if (
+			typeof name === "string" &&
+			name.startsWith("winwidget.operations.admin.audit.") &&
+			!expectedQueues.has(name)
+		) fail();
+	}
+	const seenBindings = new Set();
+	for (const binding of actualBindings) {
+		if (
+			binding?.destination_type !== "queue" ||
+			!expectedQueues.has(binding.destination) ||
+			binding.source === ""
+		) continue;
+		const key = [binding.source, binding.destination, binding.routing_key].join("\t");
+		if (
+			!expectedBindings.has(key) || seenBindings.has(key) ||
+			!sameArguments(binding.arguments || {}, {})
+		) fail();
+		seenBindings.add(key);
+	}
+	if (seenBindings.size !== expectedBindings.size) fail();
+	process.stdout.write("Operations RabbitMQ topology and retired legacy queues verified\n");
+})().catch(() => {
+	process.stderr.write("Operations RabbitMQ topology provisioning failed\n");
+	process.exitCode = 1;
+});
+' || {
+		echo 'Operations RabbitMQ topology provisioning failed.' >&2
+		return 1
+	}
+}
+
 assert_campaigns_shared_rabbitmq_topology() {
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
@@ -7093,12 +8075,34 @@ provision_rabbitmq_user \
 	''
 assert_campaigns_shared_rabbitmq_topology
 assert_reporting_shared_rabbitmq_topology
+provision_operations_rabbitmq_topology
+operations_queue_permission_pattern='winwidget\.operations\.admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform|support|core)\.v1(\.retry-v1|\.dead-letter)?'
+provision_rabbitmq_user \
+	"$operations_worker_user" \
+	"$operations_worker_password_base64" \
+	"^(winwidget\.(events|retry|dead-letter|manual-retry)|$operations_queue_permission_pattern)$" \
+	'^winwidget\.(retry|dead-letter)$' \
+	"^$operations_queue_permission_pattern$" \
+	''
+provision_rabbitmq_user \
+	"$operations_publisher_user" \
+	"$operations_publisher_password_base64" \
+	'^$' \
+	'^winwidget\.(events|manual-retry)$' \
+	'^$' \
+	''
+provision_operations_rabbitmq_topic_permissions \
+	"$operations_worker_user" "$operations_publisher_user"
+echo 'Operations RabbitMQ permissions, including manual retry, are verified before legacy integration narrowing.'
 post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
 post_identity_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform|support)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\.dead-letter)?$'
+post_operations_integration_read_pattern="$OPERATIONS_STEADY_INTEGRATION_READ_PATTERN"
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
-if [[ "$notification_delivery_first_cutover" == "true" ]]; then
+if [[ "$expected_integration_worker_kinds" == "$OPERATIONS_STEADY_INTEGRATION_WORKER_KINDS" ]]; then
+	integration_worker_read_pattern="$post_operations_integration_read_pattern"
+elif [[ "$notification_delivery_first_cutover" == "true" ]]; then
 	integration_worker_read_pattern="$legacy_integration_read_pattern"
 elif [[ "$identity_database_phase" == 'complete' ]]; then
 	integration_worker_read_pattern="$post_identity_integration_read_pattern"
@@ -9920,6 +10924,18 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Canonical Support worker"
 	wait_for_cutover_revision \
 		"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Canonical Support Outbox publisher"
+		operations-api \
+		operations-worker \
+		operations-outbox-publisher
+	wait_for_cutover_revision \
+		"$OPERATIONS_API_READINESS_URL" "$OPERATIONS_REVISION" \
+		"Canonical Operations API"
+	wait_for_cutover_revision \
+		"$OPERATIONS_WORKER_READINESS_URL" "$OPERATIONS_REVISION" \
+		"Canonical Operations worker"
+	wait_for_cutover_revision \
+		"$OPERATIONS_OUTBOX_READINESS_URL" "$OPERATIONS_REVISION" \
+		"Canonical Operations Outbox publisher"
 
 	stop_notification_cutover_services 30 false api
 	compose_target up -d --no-deps --force-recreate api
@@ -10220,6 +11236,19 @@ else
 		"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Support worker"
 	wait_for_cutover_revision \
 		"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Support Outbox publisher"
+	compose_target up -d --no-deps --force-recreate \
+		operations-api \
+		operations-worker \
+		operations-outbox-publisher
+	wait_for_cutover_revision \
+		"$OPERATIONS_API_READINESS_URL" "$OPERATIONS_REVISION" \
+		"Operations API"
+	wait_for_cutover_revision \
+		"$OPERATIONS_WORKER_READINESS_URL" "$OPERATIONS_REVISION" \
+		"Operations worker"
+	wait_for_cutover_revision \
+		"$OPERATIONS_OUTBOX_READINESS_URL" "$OPERATIONS_REVISION" \
+		"Operations Outbox publisher"
 	compose_target up -d --no-deps --force-recreate api-gateway
 	core_runtime_recovered=true
 	if ! wait_for_cutover_revision \
@@ -10301,6 +11330,63 @@ if (process.env.BILLING_EXPECT_ACTIVE === "true") {
 '
 }
 
+verify_operations_rabbitmq_consumers() {
+	local container_id
+	container_id="$(compose_target ps --status running -q rabbitmq)"
+	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+	docker exec "$container_id" rabbitmqctl --silent list_queues \
+		-p "$rabbitmq_vhost" name consumers |
+		docker run --rm -i --network none --entrypoint node \
+			"$OPERATIONS_IMAGE" -e '
+const { readFileSync } = require("node:fs");
+const rows = readFileSync(0, "utf8").trim().split("\n").filter(Boolean)
+	.map(line => line.trim().split(/\s+/));
+const queues = new Map(rows.map(([name, consumers]) => [name, Number(consumers)]));
+if ([...queues.values()].some(value => !Number.isSafeInteger(value) || value < 0)) {
+	process.exit(1);
+}
+const sources = [
+	"campaigns", "reporting", "widgets", "billing", "identity", "platform", "support", "core",
+];
+const expectedOperations = new Map();
+for (const source of sources) {
+	const base = `winwidget.operations.admin.audit.${source}.v1`;
+	expectedOperations.set(base, 1);
+	expectedOperations.set(`${base}.retry-v1`, 0);
+	expectedOperations.set(`${base}.dead-letter`, 0);
+}
+for (const [name, consumers] of expectedOperations) {
+	if (queues.get(name) !== consumers) process.exit(1);
+}
+for (const name of queues.keys()) {
+	if (name.startsWith("winwidget.operations.admin.audit.") && !expectedOperations.has(name)) {
+		process.exit(1);
+	}
+}
+for (const queue of [
+	"winwidget.core.billing.payment-details.v1",
+	"winwidget.core.billing.subscription-details.v1",
+	"winwidget.core.billing.affiliate.v1",
+]) {
+	if (queues.get(queue) !== 1 || queues.get(`${queue}.dead-letter`) !== 1) {
+		process.exit(1);
+	}
+	for (const suffix of [".retry-v2.1", ".retry-v2.2", ".retry-v2.3"]) {
+		if (queues.get(`${queue}${suffix}`) !== 0) process.exit(1);
+	}
+}
+for (const source of ["campaigns", "reporting", "widgets", "billing", "identity", "platform", "support"]) {
+	const base = `winwidget.admin.audit.${source}.v1`;
+	for (const suffix of ["", ".retry-v2.1", ".retry-v2.2", ".retry-v2.3"]) {
+		if (queues.has(`${base}${suffix}`)) process.exit(1);
+	}
+	const deadLetterConsumers = queues.get(`${base}.dead-letter`);
+	if (deadLetterConsumers !== undefined && deadLetterConsumers !== 0) process.exit(1);
+}
+process.stdout.write("Operations and steady integration RabbitMQ consumers verified\n");
+'
+}
+
 compose_target up -d --no-deps --force-recreate \
 	billing-api \
 	billing-worker \
@@ -10334,15 +11420,26 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	sleep "$HEALTHCHECK_INTERVAL"
 done
 
+for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
+	if verify_operations_rabbitmq_consumers; then
+		break
+	fi
+	if ((attempt == HEALTHCHECK_ATTEMPTS)); then
+		echo 'Operations/steady-integration RabbitMQ consumer verification failed.' >&2
+		exit 1
+	fi
+	sleep "$HEALTHCHECK_INTERVAL"
+done
+
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher support-api support-worker support-outbox-publisher rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher support-api support-worker support-outbox-publisher operations-api operations-worker operations-outbox-publisher rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher support-api support-worker support-outbox-publisher rabbitmq || true
-	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700, 4800-4803, 4900-4902 and 5100-5102:"
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher operations-api operations-worker operations-outbox-publisher rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700, 4800-4803, 4900-4902, 5100-5102 and 5200-5202:"
 	ss -ltnp \
-		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 or sport = :4900 or sport = :4901 or sport = :4902 or sport = :5100 or sport = :5101 or sport = :5102 )' ||
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 or sport = :4900 or sport = :4901 or sport = :4902 or sport = :5100 or sport = :5101 or sport = :5102 or sport = :5200 or sport = :5201 or sport = :5202 )' ||
 		true
 }
 
@@ -10363,7 +11460,8 @@ ensure_required_services_running() {
 		widgets-service \
 		"${identity_runtime_services[@]}" \
 		"${billing_runtime_services[@]}" \
-		"${support_runtime_services[@]}"; do
+		"${support_runtime_services[@]}" \
+		"${operations_runtime_services[@]}"; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -10748,6 +11846,14 @@ wait_for_cutover_revision \
 	"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Support worker"
 wait_for_cutover_revision \
 	"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Support Outbox publisher"
+	"$OPERATIONS_API_READINESS_URL" "$OPERATIONS_REVISION" \
+	"Operations API final readiness"
+wait_for_cutover_revision \
+	"$OPERATIONS_WORKER_READINESS_URL" "$OPERATIONS_REVISION" \
+	"Operations worker final readiness"
+wait_for_cutover_revision \
+	"$OPERATIONS_OUTBOX_READINESS_URL" "$OPERATIONS_REVISION" \
+	"Operations Outbox publisher final readiness"
 
 docker run --rm --network host --env-file "$ENV_FILE" \
 	--entrypoint node "$WIDGETS_IMAGE" \
@@ -10794,7 +11900,8 @@ for service in \
 	widgets-service \
 	"${identity_runtime_services[@]}" \
 	"${billing_runtime_services[@]}" \
-	"${support_runtime_services[@]}"; do
+	"${support_runtime_services[@]}" \
+	"${operations_runtime_services[@]}"; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -10827,6 +11934,9 @@ for service in \
 	fi
 	if [[ "$service" == support-* ]]; then
 		expected_image_revision="$SUPPORT_REVISION"
+	fi
+	if [[ "$service" == operations-* ]]; then
+		expected_image_revision="$OPERATIONS_REVISION"
 	fi
 	if [[ "$image_revision" != "$expected_image_revision" ]]; then
 		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
@@ -10966,4 +12076,4 @@ fi
 echo "Backend revision verified locally and publicly: $APP_REVISION"
 
 compose_target ps \
-	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service "${identity_runtime_services[@]}" "${billing_runtime_services[@]}" rabbitmq
+	api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service "${identity_runtime_services[@]}" "${support_runtime_services[@]}" "${operations_runtime_services[@]}" "${billing_runtime_services[@]}" rabbitmq

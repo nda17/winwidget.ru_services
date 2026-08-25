@@ -27,6 +27,7 @@ import {
 	OPERATIONS_AUDIT_SOURCES,
 	OPERATIONS_DEAD_LETTER_EXCHANGE,
 	OPERATIONS_EVENTS_EXCHANGE,
+	OPERATIONS_MANUAL_RETRY_EXCHANGE,
 	OPERATIONS_RETRY_EXCHANGE,
 	OperationsAuditSource
 } from './operations-messaging.constants';
@@ -49,6 +50,8 @@ export class OperationsRabbitMqService
 	private consumerReady = false;
 	private maxMessageBytes = 256 * 1024;
 	private consumerRegistered = false;
+	private consumerGeneration = 0;
+	private readonly consumerTags = new Map<string, string>();
 
 	constructor(
 		private readonly config: ConfigService,
@@ -64,30 +67,44 @@ export class OperationsRabbitMqService
 		handler: OperationsAuditHandler
 	): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
+		await this.registerAuditTopology(handler);
+	}
+
+	async prepareAuditTopology(): Promise<void> {
+		if (!this.runtime.workerEnabled) return;
+		await this.registerAuditTopology();
+	}
+
+	private async registerAuditTopology(
+		handler?: OperationsAuditHandler
+	): Promise<void> {
 		if (this.consumerRegistered) {
-			throw new Error('Operations audit consumer is already registered');
+			throw new Error('Operations audit topology is already registered');
 		}
 		this.consumerRegistered = true;
 		await this.connect();
 		if (!this.channel) throw new Error('RabbitMQ channel is unavailable');
 		await this.channel.addSetup(async (channel: ConfirmChannel) => {
+			const generation = ++this.consumerGeneration;
 			this.consumerReady = false;
-			await channel.assertExchange(OPERATIONS_EVENTS_EXCHANGE, 'topic', {
-				durable: true
-			});
-			await channel.assertExchange(OPERATIONS_RETRY_EXCHANGE, 'direct', {
-				durable: true
-			});
-			await channel.assertExchange(
-				OPERATIONS_DEAD_LETTER_EXCHANGE,
-				'topic',
-				{ durable: true }
-			);
+			this.consumerTags.clear();
+			await channel.checkExchange(OPERATIONS_EVENTS_EXCHANGE);
+			await channel.checkExchange(OPERATIONS_RETRY_EXCHANGE);
+			await channel.checkExchange(OPERATIONS_DEAD_LETTER_EXCHANGE);
+			await channel.checkExchange(OPERATIONS_MANUAL_RETRY_EXCHANGE);
 			await channel.prefetch(10);
 			for (const source of OPERATIONS_AUDIT_SOURCES) {
-				await this.setupAuditSource(channel, source, handler);
+				const consumerTag = await this.setupAuditSource(
+					channel,
+					source,
+					handler,
+					generation
+				);
+				if (consumerTag) this.consumerTags.set(source.source, consumerTag);
 			}
-			this.consumerReady = true;
+			this.consumerReady =
+				!handler ||
+				this.consumerTags.size === OPERATIONS_AUDIT_SOURCES.length;
 		});
 	}
 
@@ -98,6 +115,7 @@ export class OperationsRabbitMqService
 		options: Options.Publish = {}
 	): Promise<void> {
 		if (!this.channel) throw new Error('RabbitMQ publisher is disabled');
+		this.assertPublishBoundary(exchange);
 		const body = Buffer.from(JSON.stringify(payload));
 		if (body.length > this.maxMessageBytes) {
 			throw new Error('RabbitMQ payload exceeds configured limit');
@@ -122,6 +140,19 @@ export class OperationsRabbitMqService
 			if (returned) throw returned;
 		} finally {
 			this.returnedPublications.delete(publicationToken);
+		}
+	}
+
+	private assertPublishBoundary(exchange: string): void {
+		const allowedExchanges = this.runtime.workerEnabled
+			? [OPERATIONS_RETRY_EXCHANGE, OPERATIONS_DEAD_LETTER_EXCHANGE]
+			: [OPERATIONS_EVENTS_EXCHANGE, OPERATIONS_MANUAL_RETRY_EXCHANGE];
+		if (!allowedExchanges.includes(exchange)) {
+			throw new Error(
+				`RabbitMQ exchange is not allowed for the Operations ${
+					this.runtime.workerEnabled ? 'worker' : 'outbox publisher'
+				}`
+			);
 		}
 	}
 
@@ -180,6 +211,8 @@ export class OperationsRabbitMqService
 	}
 
 	async onApplicationShutdown(): Promise<void> {
+		this.consumerGeneration += 1;
+		this.consumerTags.clear();
 		await this.channel?.close().catch(() => undefined);
 		await this.connection?.close().catch(() => undefined);
 		this.topologyReady = false;
@@ -226,6 +259,8 @@ export class OperationsRabbitMqService
 			}
 		});
 		this.connection.on('disconnect', () => {
+			this.consumerGeneration += 1;
+			this.consumerTags.clear();
 			this.topologyReady = false;
 			this.consumerReady = false;
 			this.logger.warn('RabbitMQ disconnected');
@@ -259,47 +294,23 @@ export class OperationsRabbitMqService
 	private async setupAuditSource(
 		channel: ConfirmChannel,
 		source: OperationsAuditSource,
-		handler: OperationsAuditHandler
-	): Promise<void> {
+		handler: OperationsAuditHandler | undefined,
+		generation: number
+	): Promise<string | null> {
 		const queue = getOperationsAuditQueue(source);
 		const retryQueue = getOperationsAuditRetryQueue(source);
 		const deadLetterQueue = getOperationsAuditDeadLetterQueue(source);
-		const deadLetterRoutingKey =
-			getOperationsAuditDeadLetterRoutingKey(source);
-		await channel.assertQueue(queue, {
-			durable: true,
-			arguments: {
-				'x-dead-letter-exchange': OPERATIONS_DEAD_LETTER_EXCHANGE,
-				'x-dead-letter-routing-key': deadLetterRoutingKey
-			}
-		});
-		await channel.bindQueue(
-			queue,
-			OPERATIONS_EVENTS_EXCHANGE,
-			source.routingKey
-		);
-		await channel.assertQueue(retryQueue, {
-			durable: true,
-			arguments: {
-				'x-dead-letter-exchange': OPERATIONS_EVENTS_EXCHANGE,
-				'x-dead-letter-routing-key': source.routingKey
-			}
-		});
-		await channel.bindQueue(
-			retryQueue,
-			OPERATIONS_RETRY_EXCHANGE,
-			getOperationsAuditRetryRoutingKey(source)
-		);
-		await channel.assertQueue(deadLetterQueue, { durable: true });
-		await channel.bindQueue(
-			deadLetterQueue,
-			OPERATIONS_DEAD_LETTER_EXCHANGE,
-			deadLetterRoutingKey
-		);
-		await channel.consume(
+		await channel.checkQueue(queue);
+		await channel.checkQueue(retryQueue);
+		await channel.checkQueue(deadLetterQueue);
+		if (!handler) return null;
+		const consumer = await channel.consume(
 			queue,
 			message => {
-				if (!message) return;
+				if (!message) {
+					this.handleConsumerCancellation(channel, source, generation);
+					return;
+				}
 				void handler(source, message)
 					.then(decision => {
 						if (decision === 'ack') channel.ack(message);
@@ -311,5 +322,24 @@ export class OperationsRabbitMqService
 			},
 			{ noAck: false }
 		);
+		return consumer.consumerTag;
+	}
+
+	private handleConsumerCancellation(
+		channel: ConfirmChannel,
+		source: OperationsAuditSource,
+		generation: number
+	): void {
+		if (generation !== this.consumerGeneration) return;
+		this.consumerTags.delete(source.source);
+		this.consumerReady = false;
+		this.logger.error(
+			`RabbitMQ cancelled Operations consumer for ${source.source}`
+		);
+		void channel.close().catch(error => {
+			this.logger.error(
+				`Failed to close cancelled Operations consumer channel: ${String(error)}`
+			);
+		});
 	}
 }

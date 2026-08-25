@@ -60,9 +60,46 @@ export class TelegramBotController {
 	) {
 		let settings;
 		try {
-			settings = await this.telegramBotService.updateSettings(dto);
+			settings = await this.telegramBotService.updateSettings(
+				dto,
+				(transaction, nextSettings) =>
+					this.adminEventLogService.recordInTransaction(transaction, {
+						adminId,
+						section: 'TELEGRAM_BOT',
+						action: 'TELEGRAM_BOT_SETTINGS_UPDATE',
+						description: 'Обновлены настройки Telegram-ботов',
+						entityType: 'telegram_bot_settings',
+						entityId: 'singleton',
+						entityLabel: 'Telegram-боты',
+						metadata: {
+							dailySummaryChatIdConfigured: Boolean(
+								nextSettings.dailySummaryChatId.trim()
+							),
+							databaseBackupThreadIdConfigured: Boolean(
+								nextSettings.databaseBackupThreadId
+							),
+							paymentsThreadIdConfigured: Boolean(
+								nextSettings.paymentsThreadId
+							),
+							operationalAlertsThreadIdConfigured: Boolean(
+								nextSettings.operationalAlertsThreadId
+							),
+							databaseBackupEnabled: nextSettings.databaseBackupEnabled,
+							databaseBackupTime: nextSettings.databaseBackupTime,
+							telegramBotTokenConfigured:
+								nextSettings.telegramBotTokenConfigured,
+							telegramBotUsernameConfigured:
+								nextSettings.telegramBotUsernameConfigured
+						},
+						request
+					})
+			);
 		} catch (error) {
-			if ('databaseBackupTime' in dto) {
+			if (
+				'databaseBackupTime' in dto &&
+				(error instanceof BadRequestException ||
+					error instanceof ConflictException)
+			) {
 				await this.adminEventLogService.record({
 					adminId,
 					section: 'TELEGRAM_BOT',
@@ -82,35 +119,6 @@ export class TelegramBotController {
 			}
 			throw error;
 		}
-
-		await this.adminEventLogService.record({
-			adminId,
-			section: 'TELEGRAM_BOT',
-			action: 'TELEGRAM_BOT_SETTINGS_UPDATE',
-			description: 'Обновлены настройки Telegram-ботов',
-			entityType: 'telegram_bot_settings',
-			entityId: 'singleton',
-			entityLabel: 'Telegram-боты',
-			metadata: {
-				dailySummaryChatIdConfigured: Boolean(
-					settings.dailySummaryChatId.trim()
-				),
-				databaseBackupThreadIdConfigured: Boolean(
-					settings.databaseBackupThreadId
-				),
-				paymentsThreadIdConfigured: Boolean(settings.paymentsThreadId),
-				operationalAlertsThreadIdConfigured: Boolean(
-					settings.operationalAlertsThreadId
-				),
-				databaseBackupEnabled: settings.databaseBackupEnabled,
-				databaseBackupTime: settings.databaseBackupTime,
-				telegramBotTokenConfigured: settings.telegramBotTokenConfigured,
-				telegramBotUsernameConfigured:
-					settings.telegramBotUsernameConfigured
-			},
-			request
-		});
-
 		return settings;
 	}
 
@@ -130,44 +138,46 @@ export class TelegramBotController {
 			);
 		}
 
-		const result =
-			await this.scheduledTasksService.enqueueManualDatabaseBackup(
-				target,
-				adminId,
-				idempotencyKey
-			);
+		const targetLabel = this.getDatabaseBackupTargetLabel(target);
+		return this.scheduledTasksService.enqueueManualDatabaseBackup(
+			target,
+			adminId,
+			idempotencyKey,
+			(transaction, result) =>
+				this.adminEventLogService.recordInTransaction(transaction, {
+					adminId,
+					section: 'TELEGRAM_BOT',
+					action: 'TELEGRAM_DATABASE_BACKUP_CREATE',
+					description: `Backup ${targetLabel} поставлен в очередь`,
+					entityType: 'scheduled_job',
+					entityId: result.jobId,
+					entityLabel: `Backup PostgreSQL: ${targetLabel}`,
+					metadata: {
+						target,
+						jobId: result.jobId,
+						status: result.status,
+						queuedAt: result.queuedAt
+					},
+					request
+				})
+		);
+	}
 
-		if (result.created) {
-			const targetLabel = {
-				[DATABASE_BACKUP_TARGETS.NOTIFICATION_DELIVERY]:
-					'БД Notification Delivery',
-				[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns',
-				[DATABASE_BACKUP_TARGETS.REPORTING]: 'БД Reporting',
-				[DATABASE_BACKUP_TARGETS.WIDGETS]: 'БД Widgets',
-				[DATABASE_BACKUP_TARGETS.BILLING]: 'БД Billing',
-				[DATABASE_BACKUP_TARGETS.IDENTITY]: 'БД Identity',
-				[DATABASE_BACKUP_TARGETS.PLATFORM]: 'БД Platform',
-				[DATABASE_BACKUP_TARGETS.SUPPORT]: 'БД Support'
-			}[target];
-			await this.adminEventLogService.record({
-				adminId,
-				section: 'TELEGRAM_BOT',
-				action: 'TELEGRAM_DATABASE_BACKUP_CREATE',
-				description: `Backup ${targetLabel} поставлен в очередь`,
-				entityType: 'scheduled_job',
-				entityId: result.jobId,
-				entityLabel: `Backup PostgreSQL: ${targetLabel}`,
-				metadata: {
-					target,
-					jobId: result.jobId,
-					status: result.status,
-					queuedAt: result.queuedAt
-				},
-				request
-			});
-		}
-
-		return result;
+	private getDatabaseBackupTargetLabel(
+		target: DatabaseBackupTarget
+	): string {
+		return {
+			[DATABASE_BACKUP_TARGETS.NOTIFICATION_DELIVERY]:
+				'БД Notification Delivery',
+			[DATABASE_BACKUP_TARGETS.CAMPAIGNS]: 'БД Campaigns',
+			[DATABASE_BACKUP_TARGETS.REPORTING]: 'БД Reporting',
+			[DATABASE_BACKUP_TARGETS.WIDGETS]: 'БД Widgets',
+			[DATABASE_BACKUP_TARGETS.BILLING]: 'БД Billing',
+			[DATABASE_BACKUP_TARGETS.IDENTITY]: 'БД Identity',
+			[DATABASE_BACKUP_TARGETS.PLATFORM]: 'БД Platform',
+			[DATABASE_BACKUP_TARGETS.SUPPORT]: 'БД Support',
+			[DATABASE_BACKUP_TARGETS.OPERATIONS]: 'БД Operations'
+		}[target];
 	}
 
 	@HttpCode(200)

@@ -242,6 +242,21 @@ describe('NotificationDeliveryClientService', () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
+	it('loads and validates one exact failure before a modifying request', async () => {
+		const fetchMock = jest
+			.spyOn(global, 'fetch')
+			.mockResolvedValue(
+				new Response(JSON.stringify(failure), { status: 200 })
+			);
+
+		await expect(createService().getFailure(failure.id)).resolves.toEqual(
+			failure
+		);
+		expect(String(fetchMock.mock.calls[0][0])).toBe(
+			`http://127.0.0.1:4401/internal/notification-delivery/failures/${failure.id}`
+		);
+	});
+
 	it('accepts the service-owned Daily Summary delivery failure kind', async () => {
 		const dailySummaryFailure = {
 			...failure,

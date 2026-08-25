@@ -1,4 +1,8 @@
 import {
+	CORE_ADMIN_EVENT_LOG_ACTIONS,
+	CORE_ADMIN_EVENT_LOG_SECTIONS
+} from '@/admin-event-log/admin-event-log.contract';
+import {
 	AUTO_RENEWAL_CHARGE_EVENT_TYPE,
 	BILLING_AFFILIATE_EVENT_TYPE,
 	BILLING_IDENTITY_EVENT_TYPE,
@@ -10,6 +14,7 @@ import {
 	BILLING_SUBSCRIPTION_DETAILS_EVENT_TYPE,
 	BILLING_TRIAL_REQUESTED_EVENT_TYPE,
 	CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE,
+	CORE_ADMIN_AUDIT_ROUTING_KEY,
 	DATABASE_BACKUP_EVENT_TYPE,
 	getDeadLetterRoutingKey,
 	getManualRetryRoutingKey,
@@ -1617,6 +1622,99 @@ const assertBillingAdminAuditEvent = (
 	return 'billing-admin-audit';
 };
 
+const assertCoreAdminAuditEvent = (payload: JsonRecord): void => {
+	assertExactKeys(payload, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'occurredAt',
+		'correlationId',
+		'actorId',
+		'action',
+		'section',
+		'description',
+		'actorSnapshot',
+		'entity',
+		'metadata'
+	]);
+	if (
+		payload.schemaVersion !== 1 ||
+		payload.eventType !== CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE
+	) {
+		throw new Error('Invalid Core admin audit contract version');
+	}
+	assertUuid(payload.eventId, 'payload.eventId');
+	assertIsoDate(payload.occurredAt, 'payload.occurredAt');
+	if (
+		typeof payload.correlationId !== 'string' ||
+		!SAFE_CONTEXT_ID_PATTERN.test(payload.correlationId)
+	) {
+		throw new Error('payload.correlationId is invalid');
+	}
+	assertString(payload.actorId, 'payload.actorId', { maxLength: 255 });
+	assertString(payload.action, 'payload.action', { maxLength: 120 });
+	assertString(payload.section, 'payload.section', { maxLength: 80 });
+	if (
+		!CORE_ADMIN_EVENT_LOG_ACTIONS.includes(
+			payload.action as (typeof CORE_ADMIN_EVENT_LOG_ACTIONS)[number]
+		)
+	) {
+		throw new Error('payload.action is invalid');
+	}
+	if (
+		!CORE_ADMIN_EVENT_LOG_SECTIONS.includes(
+			payload.section as (typeof CORE_ADMIN_EVENT_LOG_SECTIONS)[number]
+		)
+	) {
+		throw new Error('payload.section is invalid');
+	}
+	assertString(payload.description, 'payload.description', {
+		maxLength: 2_000
+	});
+	const actorSnapshot = assertRecord(
+		payload.actorSnapshot,
+		'payload.actorSnapshot'
+	);
+	assertExactKeys(
+		actorSnapshot,
+		['name', 'email'],
+		[],
+		'payload.actorSnapshot'
+	);
+	assertOptionalString(actorSnapshot.name, 'payload.actorSnapshot.name');
+	assertOptionalString(actorSnapshot.email, 'payload.actorSnapshot.email');
+	const entity = assertRecord(payload.entity, 'payload.entity');
+	assertExactKeys(
+		entity,
+		['type', 'id', 'label', 'targetUserId', 'targetSnapshot'],
+		[],
+		'payload.entity'
+	);
+	assertString(entity.type, 'payload.entity.type', { maxLength: 255 });
+	assertString(entity.id, 'payload.entity.id', { maxLength: 255 });
+	assertOptionalString(entity.label, 'payload.entity.label');
+	assertOptionalString(entity.targetUserId, 'payload.entity.targetUserId');
+	const targetSnapshot = assertRecord(
+		entity.targetSnapshot,
+		'payload.entity.targetSnapshot'
+	);
+	assertExactKeys(
+		targetSnapshot,
+		['name', 'email'],
+		[],
+		'payload.entity.targetSnapshot'
+	);
+	assertOptionalString(
+		targetSnapshot.name,
+		'payload.entity.targetSnapshot.name'
+	);
+	assertOptionalString(
+		targetSnapshot.email,
+		'payload.entity.targetSnapshot.email'
+	);
+	assertRecord(payload.metadata, 'payload.metadata');
+};
+
 const PLATFORM_AUDIT_REQUEST_METADATA_KEYS = [
 	'actorRole',
 	'requestIp',
@@ -2794,6 +2892,18 @@ export function assertMessagingEventContract(
 		throw new Error(
 			`AMQP type does not match payload eventType: ${metadata.eventType}`
 		);
+	}
+	if (
+		payload.eventType === CAMPAIGN_ADMIN_AUDIT_EVENT_TYPE &&
+		metadata.routingKey === CORE_ADMIN_AUDIT_ROUTING_KEY
+	) {
+		assertCoreAdminAuditEvent(payload);
+		if (payload.eventId !== metadata.messageId) {
+			throw new Error(
+				'Core admin audit eventId must match the AMQP messageId'
+			);
+		}
+		return;
 	}
 
 	const expectedKinds = resolveExpectedKinds(payload, metadata.kind);

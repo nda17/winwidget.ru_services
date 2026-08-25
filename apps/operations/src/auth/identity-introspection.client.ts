@@ -14,6 +14,7 @@ const PLACEHOLDER_TOKENS = new Set([
 	'XYZXYZXYZ',
 	'identity_operations_token',
 	'change_me_operations_identity_token_at_least_32_chars',
+	'change_me_identity_operations_token_at_least_32_chars',
 	'ci_identity_operations_token_at_least_32_chars'
 ]);
 

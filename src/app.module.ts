@@ -1,6 +1,5 @@
 import { AdminAlertsModule } from '@/admin-alerts/admin-alerts.module';
 import { AdminEventLogModule } from '@/admin-event-log/admin-event-log.module';
-import { NotesModule } from '@/notes/notes.module';
 import { PrismaModule } from '@/prisma.module';
 import { PrismaService } from '@/prisma.service';
 import { TelegramBotModule } from '@/telegram-bot/telegram-bot.module';
@@ -19,7 +18,6 @@ import { ConfigModule } from '@nestjs/config';
 		}),
 		PrismaModule,
 		IdentityBoundaryModule,
-		NotesModule,
 		ReportingInternalModule,
 		MessagingAdminModule,
 		HealthModule,

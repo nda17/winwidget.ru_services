@@ -45,6 +45,12 @@ export class NotificationDeliveryControlController {
 		return this.controlService.getFailures(query);
 	}
 
+	@Get('failures/:id')
+	@HttpCode(200)
+	getFailure(@Param('id', new ParseUUIDPipe()) id: string) {
+		return this.controlService.getFailure(id);
+	}
+
 	@Post('failures/:id/retry')
 	@HttpCode(200)
 	retryFailure(

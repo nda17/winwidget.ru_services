@@ -7,7 +7,7 @@ describe('AdminEventLogService identity snapshots', () => {
 	const createFixture = () => {
 		const create = jest.fn().mockImplementation(({ data }) => data);
 		const identity = {
-			getAuditSnapshots: jest.fn()
+			getAuditSnapshots: jest.fn().mockResolvedValue(new Map())
 		};
 		const service = new AdminEventLogService(
 			{} as PrismaService,
@@ -17,7 +17,7 @@ describe('AdminEventLogService identity snapshots', () => {
 			service,
 			identity,
 			transaction: {
-				adminEventLog: { create }
+				outboxEvent: { create }
 			} as unknown as Prisma.TransactionClient,
 			create
 		};
@@ -49,12 +49,25 @@ describe('AdminEventLogService identity snapshots', () => {
 		]);
 		expect(create).toHaveBeenCalledWith({
 			data: expect.objectContaining({
-				adminName: 'Admin',
-				adminEmail: 'a@example.com',
-				targetUserName: 'User',
-				targetUserEmail: null
+				eventType: 'admin.audit.event.v1',
+				routingKey: 'admin.audit.core.v1',
+				messageId: expect.any(String),
+				payload: expect.objectContaining({
+					actorSnapshot: {
+						name: 'Admin',
+						email: 'a@example.com'
+					},
+					entity: expect.objectContaining({
+						targetSnapshot: { name: 'User', email: null }
+					})
+				})
 			})
 		});
+		const data = create.mock.calls[0][0].data;
+		expect(data.messageId).toBe(data.payload.eventId);
+		expect(data.headers['x-correlation-id']).toBe(
+			data.payload.correlationId
+		);
 	});
 
 	it('records null snapshots when Identity is temporarily unavailable', async () => {
@@ -70,9 +83,10 @@ describe('AdminEventLogService identity snapshots', () => {
 
 		expect(create).toHaveBeenCalledWith({
 			data: expect.objectContaining({
-				adminId: 'admin-id',
-				adminName: null,
-				adminEmail: null
+				payload: expect.objectContaining({
+					actorId: 'admin-id',
+					actorSnapshot: { name: null, email: null }
+				})
 			})
 		});
 	});
@@ -95,10 +109,18 @@ describe('AdminEventLogService identity snapshots', () => {
 		expect(identity.getAuditSnapshots).not.toHaveBeenCalled();
 		expect(create).toHaveBeenCalledWith({
 			data: expect.objectContaining({
-				adminName: 'Immutable actor',
-				adminEmail: null,
-				targetUserName: null,
-				targetUserEmail: 'target@example.com'
+				payload: expect.objectContaining({
+					actorSnapshot: {
+						name: 'Immutable actor',
+						email: null
+					},
+					entity: expect.objectContaining({
+						targetSnapshot: {
+							name: null,
+							email: 'target@example.com'
+						}
+					})
+				})
 			})
 		});
 	});
@@ -118,9 +140,47 @@ describe('AdminEventLogService identity snapshots', () => {
 		expect(identity.getAuditSnapshots).not.toHaveBeenCalled();
 		expect(create).toHaveBeenCalledWith({
 			data: expect.objectContaining({
-				section: 'PLATFORM_CONTENT',
-				action: 'PLATFORM_HOME_PAGE_CONTENT_UPDATE'
+				payload: expect.objectContaining({
+					section: 'PLATFORM_CONTENT',
+					action: 'PLATFORM_HOME_PAGE_CONTENT_UPDATE'
+				})
 			})
 		});
+	});
+
+	it('fails closed before Outbox insertion for forbidden metadata', async () => {
+		const { service, transaction, create } = createFixture();
+
+		await expect(
+			service.recordInTransaction(transaction, {
+				adminId: 'admin-id',
+				section: 'TELEGRAM_BOT',
+				action: 'TELEGRAM_BOT_WEBHOOK_REINSTALL',
+				description: 'Webhook reinstalled',
+				metadata: { webhookUrl: 'forbidden' }
+			})
+		).rejects.toThrow('is forbidden');
+		expect(create).not.toHaveBeenCalled();
+	});
+
+	it('propagates Outbox failures to fail closed', async () => {
+		const outboxError = new Error('outbox unavailable');
+		const prisma = {
+			outboxEvent: {
+				create: jest.fn().mockRejectedValue(outboxError)
+			}
+		} as unknown as PrismaService;
+		const service = new AdminEventLogService(prisma, {
+			getAuditSnapshots: jest.fn().mockResolvedValue(new Map())
+		} as unknown as IdentityInternalClient);
+
+		await expect(
+			service.record({
+				adminId: 'admin-id',
+				section: 'DEV_TOOLS',
+				action: 'DEV_DATABASE_RESTORE',
+				description: 'Restore requested'
+			})
+		).rejects.toBe(outboxError);
 	});
 });

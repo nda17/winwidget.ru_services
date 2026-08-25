@@ -633,4 +633,28 @@ describe('NotificationDeliveryControlService', () => {
 			take: 10_000
 		});
 	});
+
+	it('returns one exact owned failure and rejects an unsupported source', async () => {
+		const findUnique = jest
+			.fn()
+			.mockResolvedValueOnce(createFailure())
+			.mockResolvedValueOnce(createFailure({ consumer: 'unsupported' }));
+		const service = new NotificationDeliveryControlService({
+			notificationDeliveryFailure: { findUnique }
+		} as unknown as NotificationDeliveryPrismaService);
+
+		await expect(service.getFailure(FAILURE_ID)).resolves.toEqual(
+			expect.objectContaining({
+				id: FAILURE_ID,
+				eventId: EVENT_ID,
+				integration: 'email'
+			})
+		);
+		await expect(service.getFailure(FAILURE_ID)).rejects.toBeInstanceOf(
+			NotFoundException
+		);
+		expect(findUnique).toHaveBeenNthCalledWith(1, {
+			where: { id: FAILURE_ID }
+		});
+	});
 });

@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import type { Prisma } from '@prisma/operations-client';
 import type { ConsumeMessage } from 'amqplib';
 import { AuditReceiptService } from './audit-receipt.service';
 import { parseAdminAuditEvent } from './admin-audit-event.contract';
@@ -11,6 +12,7 @@ import {
 	OperationsAuditSource
 } from './operations-messaging.constants';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
+import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 
 @Injectable()
 export class AdminAuditConsumerService implements OnModuleInit {
@@ -20,11 +22,17 @@ export class AdminAuditConsumerService implements OnModuleInit {
 	constructor(
 		private readonly runtime: OperationsRuntimeService,
 		private readonly rabbit: OperationsRabbitMqService,
-		private readonly receipts: AuditReceiptService
+		private readonly receipts: AuditReceiptService,
+		private readonly ownership: OperationsOwnershipService
 	) {}
 
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
+		if (!(await this.ownership.isActive())) {
+			await this.rabbit.prepareAuditTopology();
+			this.ready = true;
+			return;
+		}
 		await this.rabbit.consumeAuditEvents((source, message) =>
 			this.handle(source, message)
 		);
@@ -104,7 +112,9 @@ export class AdminAuditConsumerService implements OnModuleInit {
 					);
 					await this.receipts.markDeadLettered(
 						normalized.eventId,
-						claim.leaseToken
+						claim.leaseToken,
+						source,
+						raw as Prisma.InputJsonObject
 					);
 					this.logger.error(
 						`Admin audit moved to DLQ eventId=${normalized.eventId} source=${source.source}`

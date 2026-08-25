@@ -2,9 +2,21 @@ import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common';
 import { AdminEventLogController } from './admin-event-log/admin-event-log.controller';
 import { OPERATIONS_REQUIRED_ROLES } from './auth/operations-auth.guard';
+import { OperationsIdentityGuard } from './internal/operations-identity.guard';
 import { NotesController } from './notes/notes.controller';
+import { getOperationsRoleScopedProviders } from './operations.module';
 
 describe('Operations HTTP access contract', () => {
+	it('registers the Identity inbound guard only in the API process role', () => {
+		expect(getOperationsRoleScopedProviders('api')).toEqual([
+			OperationsIdentityGuard
+		]);
+		expect(getOperationsRoleScopedProviders('worker')).toEqual([]);
+		expect(getOperationsRoleScopedProviders('outbox-publisher')).toEqual(
+			[]
+		);
+	});
+
 	it('keeps every Notes endpoint ADMIN-only', () => {
 		expect(
 			Reflect.getMetadata(OPERATIONS_REQUIRED_ROLES, NotesController)
@@ -54,5 +66,17 @@ describe('Operations HTTP access contract', () => {
 				AdminEventLogController.prototype.getAll
 			)
 		).toBe(RequestMethod.GET);
+		expect(
+			Reflect.getMetadata(
+				OPERATIONS_REQUIRED_ROLES,
+				AdminEventLogController.prototype.retryFailure
+			)
+		).toEqual(['DEV']);
+		expect(
+			Reflect.getMetadata(
+				METHOD_METADATA,
+				AdminEventLogController.prototype.retryFailure
+			)
+		).toBe(RequestMethod.POST);
 	});
 });

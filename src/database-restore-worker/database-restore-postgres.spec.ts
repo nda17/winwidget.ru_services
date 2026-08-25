@@ -21,6 +21,7 @@ function createEnvironment(): NodeJS.ProcessEnv {
 		DATABASE_RESTORE_IDENTITY_PORT: '55438',
 		DATABASE_RESTORE_PLATFORM_PORT: '55439',
 		DATABASE_RESTORE_SUPPORT_PORT: '55440',
+		DATABASE_RESTORE_OPERATIONS_PORT: '55441',
 		DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE:
 			'/secrets/notification-delivery',
 		DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: '/secrets/campaigns',
@@ -30,6 +31,7 @@ function createEnvironment(): NodeJS.ProcessEnv {
 		DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: '/secrets/identity',
 		DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: '/secrets/platform',
 		DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: '/secrets/support',
+		DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: '/secrets/operations',
 		APP_REVISION: 'd'.repeat(40)
 	};
 }
@@ -176,6 +178,36 @@ describe('database restore PostgreSQL contract', () => {
 			"ARRAY['winwidget_notification_delivery_migration', 'winwidget_notification_delivery_runtime', 'winwidget_notification_delivery_backup']::TEXT[]"
 		);
 	});
+
+	it('keeps Operations ownership state read-only and requires an ACTIVE snapshot', () => {
+		const target = createConfig().targets.operations;
+		const repairSql = buildDatabaseOwnershipAndAclRepairSql(target);
+		const verificationSql = buildDatabasePreReopenVerificationSql(target);
+
+		expect(repairSql).toContain(
+			'REVOKE ALL ON TABLE "operations"."operations_ownership_state" FROM "winwidget_operations_runtime"'
+		);
+		expect(repairSql).toContain(
+			'GRANT SELECT ON TABLE "operations"."operations_ownership_state" TO "winwidget_operations_runtime"'
+		);
+		expect(verificationSql).toContain(
+			"table_name <> ALL(ARRAY['_prisma_migrations', 'operations_ownership_state'])"
+		);
+		expect(verificationSql).toContain(
+			'Operations restore requires an ACTIVE ownership snapshot'
+		);
+		expect(verificationSql).toContain('AND "phase"::TEXT = \'ACTIVE\'');
+	});
+
+	it('does not require Operations ownership for another service restore', () => {
+		expect(
+			buildDatabasePreReopenVerificationSql(
+				createConfig().targets.platform
+			)
+		).not.toContain(
+			'Operations restore requires an ACTIVE ownership snapshot'
+		);
+	});
 });
 
 describe('DatabaseRestoreWorkerConfig', () => {
@@ -187,6 +219,7 @@ describe('DatabaseRestoreWorkerConfig', () => {
 			'campaigns',
 			'identity',
 			'notification-delivery',
+			'operations',
 			'platform',
 			'reporting',
 			'support',
@@ -209,6 +242,27 @@ describe('DatabaseRestoreWorkerConfig', () => {
 				'routing_settings',
 				'telegram_webhook_inbox',
 				'outbox_events'
+			]
+		});
+		expect(config.targets.operations).toMatchObject({
+			target: 'operations',
+			label: 'Operations',
+			port: 55441,
+			database: 'winwidget_operations',
+			schema: 'operations',
+			adminRole: 'winwidget_operations_admin',
+			migrationRole: 'winwidget_operations_migration',
+			runtimeRoles: ['winwidget_operations_runtime'],
+			backupRole: 'winwidget_operations_backup',
+			passwordFile: '/secrets/operations',
+			migrationsDirectory: '/app/apps/operations/prisma/migrations',
+			anchorTables: [
+				'_prisma_migrations',
+				'notes',
+				'admin_event_logs',
+				'audit_event_receipts',
+				'outbox_events',
+				'operations_ownership_state'
 			]
 		});
 	});

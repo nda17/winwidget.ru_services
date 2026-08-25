@@ -12,6 +12,7 @@ import {
 	DatabaseBackupTarget,
 	IDENTITY_DATABASE_BACKUP_DELAY_MINUTES,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
+	OPERATIONS_DATABASE_BACKUP_DELAY_MINUTES,
 	PLATFORM_DATABASE_BACKUP_DELAY_MINUTES,
 	REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
 	SUPPORT_DATABASE_BACKUP_DELAY_MINUTES,
@@ -46,6 +47,19 @@ export interface MoscowDayPeriod {
 	key: string;
 }
 
+export interface ManualDatabaseBackupEnqueueResult {
+	target: DatabaseBackupTarget;
+	jobId: string;
+	status: ScheduledJobRunStatus;
+	queuedAt: string;
+	created: boolean;
+}
+
+export type ManualDatabaseBackupAuditWriter = (
+	transaction: Prisma.TransactionClient,
+	result: ManualDatabaseBackupEnqueueResult
+) => Promise<unknown>;
+
 @Injectable()
 export class ScheduledTasksService {
 	constructor(
@@ -57,7 +71,8 @@ export class ScheduledTasksService {
 	async enqueueManualDatabaseBackup(
 		target: DatabaseBackupTarget,
 		adminId: string,
-		idempotencyKey: string
+		idempotencyKey: string,
+		writeAudit: ManualDatabaseBackupAuditWriter
 	) {
 		const jobType = this.getDatabaseBackupJobType(target);
 		const normalizedIdempotencyKey = idempotencyKey.trim().toLowerCase();
@@ -141,6 +156,15 @@ export class ScheduledTasksService {
 						jobId: enqueued.job.id
 					}
 				});
+				if (enqueued.created) {
+					await writeAudit(transaction, {
+						target,
+						jobId: enqueued.job.id,
+						status: enqueued.job.status,
+						queuedAt: enqueued.job.createdAt,
+						created: true
+					});
+				}
 				return enqueued;
 			},
 			{
@@ -193,6 +217,10 @@ export class ScheduledTasksService {
 			created: boolean;
 			job: ScheduledJobRunView;
 		};
+		operations: {
+			created: boolean;
+			job: ScheduledJobRunView;
+		};
 	} | null> {
 		const settings = await this.getSettings();
 		if (!settings.databaseBackupEnabled) return null;
@@ -237,6 +265,10 @@ export class ScheduledTasksService {
 		const supportScheduledFor = new Date(
 			scheduledFor.getTime() +
 				SUPPORT_DATABASE_BACKUP_DELAY_MINUTES * 60_000
+		);
+		const operationsScheduledFor = new Date(
+			scheduledFor.getTime() +
+				OPERATIONS_DATABASE_BACKUP_DELAY_MINUTES * 60_000
 		);
 
 		return this.prisma.$transaction(
@@ -364,6 +396,22 @@ export class ScheduledTasksService {
 						availableAt: supportScheduledFor
 					},
 					this.getEventForType(SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP)
+				),
+				operations: await this.scheduledJobs.enqueueUniqueInTransaction(
+					transaction,
+					{
+						jobType: SCHEDULED_JOB_TYPES.OPERATIONS_DATABASE_BACKUP,
+						scheduleKey: period.key,
+						trigger: ScheduledJobRunTrigger.SCHEDULED,
+						scheduledFor: operationsScheduledFor,
+						periodStart: period.start,
+						periodEnd: period.end,
+						input: input as unknown as Prisma.InputJsonObject,
+						availableAt: operationsScheduledFor
+					},
+					this.getEventForType(
+						SCHEDULED_JOB_TYPES.OPERATIONS_DATABASE_BACKUP
+					)
 				)
 			}),
 			{ timeout: 10_000 }
@@ -645,6 +693,8 @@ export class ScheduledTasksService {
 				return SCHEDULED_JOB_TYPES.PLATFORM_DATABASE_BACKUP;
 			case 'support':
 				return SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP;
+			case 'operations':
+				return SCHEDULED_JOB_TYPES.OPERATIONS_DATABASE_BACKUP;
 		}
 	}
 
@@ -666,6 +716,8 @@ export class ScheduledTasksService {
 				return DATABASE_BACKUP_TARGETS.PLATFORM;
 			case SCHEDULED_JOB_TYPES.SUPPORT_DATABASE_BACKUP:
 				return DATABASE_BACKUP_TARGETS.SUPPORT;
+			case SCHEDULED_JOB_TYPES.OPERATIONS_DATABASE_BACKUP:
+				return DATABASE_BACKUP_TARGETS.OPERATIONS;
 			default:
 				throw new Error(
 					`Unsupported database backup job type: ${jobType}`

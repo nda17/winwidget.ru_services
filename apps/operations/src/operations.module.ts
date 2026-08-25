@@ -6,23 +6,45 @@ import { IdentityIntrospectionClient } from './auth/identity-introspection.clien
 import { OperationsAuthGuard } from './auth/operations-auth.guard';
 import { OperationsHealthController } from './health/operations-health.controller';
 import { OperationsHealthService } from './health/operations-health.service';
+import { OperationsIdentityController } from './internal/operations-identity.controller';
+import { OperationsIdentityGuard } from './internal/operations-identity.guard';
 import { AdminAuditConsumerService } from './messaging/admin-audit-consumer.service';
+import { AdminAuditFailureService } from './messaging/admin-audit-failure.service';
 import { AuditReceiptService } from './messaging/audit-receipt.service';
 import { OperationsOutboxPublisherService } from './messaging/operations-outbox-publisher.service';
 import { OperationsOutboxService } from './messaging/operations-outbox.service';
 import { OperationsRabbitMqService } from './messaging/operations-rabbitmq.service';
 import { NotesController } from './notes/notes.controller';
 import { NotesService } from './notes/notes.service';
+import { OperationsOwnershipService } from './ownership/operations-ownership.service';
 import { OperationsPrismaModule } from './prisma/operations-prisma.module';
 import { OperationsPrismaService } from './prisma/operations-prisma.service';
 import { OperationsRuntimeModule } from './runtime/operations-runtime.module';
-import { parseOperationsProcessRole } from './runtime/operations-runtime.service';
+import {
+	OperationsProcessRole,
+	parseOperationsProcessRole
+} from './runtime/operations-runtime.service';
 
 const PROCESS_ROLE = parseOperationsProcessRole(
 	process.env.OPERATIONS_PROCESS_ROLE
 );
 const API_CONTROLLERS =
-	PROCESS_ROLE === 'api' ? [NotesController, AdminEventLogController] : [];
+	PROCESS_ROLE === 'api'
+		? [
+				NotesController,
+				AdminEventLogController,
+				OperationsIdentityController
+			]
+		: [];
+
+export function getOperationsRoleScopedProviders(
+	role: OperationsProcessRole
+) {
+	return role === 'api' ? [OperationsIdentityGuard] : [];
+}
+
+const ROLE_SCOPED_PROVIDERS =
+	getOperationsRoleScopedProviders(PROCESS_ROLE);
 
 @Module({
 	imports: [
@@ -34,13 +56,16 @@ const API_CONTROLLERS =
 	providers: [
 		IdentityIntrospectionClient,
 		OperationsAuthGuard,
+		...ROLE_SCOPED_PROVIDERS,
 		AdminEventLogService,
 		NotesService,
 		OperationsRabbitMqService,
 		OperationsOutboxService,
 		AuditReceiptService,
 		AdminAuditConsumerService,
+		AdminAuditFailureService,
 		OperationsOutboxPublisherService,
+		OperationsOwnershipService,
 		OperationsHealthService
 	]
 })

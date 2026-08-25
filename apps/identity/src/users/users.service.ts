@@ -464,7 +464,7 @@ export class UsersService {
 		]);
 		const billing = this.remoteRecord(billingValue, 'Billing');
 		const widgets = this.remoteRecord(widgetsValue, 'Widgets');
-		const audit = this.remoteRecord(auditValue, 'Core');
+		const audit = this.remoteRecord(auditValue, 'Operations');
 		const counts = this.remoteRecord(billing.paymentCounts, 'Billing');
 		const pending = this.remoteCount(counts.PENDING, 'Billing');
 		const succeeded = this.remoteCount(counts.SUCCEEDED, 'Billing');
@@ -489,7 +489,7 @@ export class UsersService {
 		}
 		if (!Array.isArray(audit.latest)) {
 			throw new ServiceUnavailableException(
-				'Core returned invalid admin overview'
+				'Operations returned invalid admin overview'
 			);
 		}
 		return {

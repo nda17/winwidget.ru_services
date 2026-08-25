@@ -87,11 +87,33 @@ describe('AdminAuditConsumerService', () => {
 			releaseForRedelivery: jest.fn().mockResolvedValue(undefined)
 		} as unknown as AuditReceiptService;
 		return {
-			service: new AdminAuditConsumerService(runtime, rabbit, receipts),
+			service: new AdminAuditConsumerService(runtime, rabbit, receipts, {
+				isActive: jest.fn().mockResolvedValue(true)
+			} as never),
 			rabbit,
 			receipts
 		};
 	}
+
+	it('starts ready but does not consume while ownership is staged', async () => {
+		const runtime = { workerEnabled: true } as OperationsRuntimeService;
+		const rabbit = {
+			consumeAuditEvents: jest.fn(),
+			prepareAuditTopology: jest.fn().mockResolvedValue(undefined)
+		} as unknown as OperationsRabbitMqService;
+		const service = new AdminAuditConsumerService(
+			runtime,
+			rabbit,
+			{} as AuditReceiptService,
+			{ isActive: jest.fn().mockResolvedValue(false) } as never
+		);
+
+		await service.onModuleInit();
+
+		expect(service.isReady()).toBe(true);
+		expect(rabbit.prepareAuditTopology).toHaveBeenCalledTimes(1);
+		expect(rabbit.consumeAuditEvents).not.toHaveBeenCalled();
+	});
 
 	it('acks only after the claimed receipt and audit transaction succeeds', async () => {
 		const { service, receipts } = setup('success');
@@ -131,7 +153,12 @@ describe('AdminAuditConsumerService', () => {
 			eventId,
 			5
 		);
-		expect(receipts.markDeadLettered).toHaveBeenCalledTimes(1);
+		expect(receipts.markDeadLettered).toHaveBeenCalledWith(
+			eventId,
+			'5e511f01-7c25-46b0-8e0e-f7c443355db5',
+			source,
+			payload
+		);
 		expect(rabbit.publishAuditRetry).not.toHaveBeenCalled();
 	});
 });

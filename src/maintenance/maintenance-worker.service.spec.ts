@@ -472,7 +472,8 @@ describe('MaintenanceWorkerService', () => {
 	it.each([
 		['Identity', 'IDENTITY_DATABASE_BACKUP', 'identity'],
 		['Platform', 'PLATFORM_DATABASE_BACKUP', 'platform'],
-		['Support', 'SUPPORT_DATABASE_BACKUP', 'support']
+		['Support', 'SUPPORT_DATABASE_BACKUP', 'support'],
+		['Operations', 'OPERATIONS_DATABASE_BACKUP', 'operations']
 	])(
 		'executes %s as an independent backup target',
 		async (_, jobType, target) => {

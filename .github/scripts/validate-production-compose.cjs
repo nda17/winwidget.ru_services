@@ -169,6 +169,27 @@ if (
 }
 const supportPostgresVolume =
 	config.volumes?.['winwidget-support-postgres-data'];
+const operationsPostgresVolume =
+	config.volumes?.['winwidget-operations-postgres-data'];
+if (
+	!operationsPostgresVolume?.external ||
+	operationsPostgresVolume.name !==
+		process.env.OPERATIONS_POSTGRES_DATA_VOLUME
+) {
+	throw new Error(
+		'Operations PostgreSQL must use its exact external volume'
+	);
+}
+const operationsPostgresSecret =
+	config.secrets?.['operations-postgres-admin-password'];
+if (
+	operationsPostgresSecret?.file !==
+	process.env.OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE
+) {
+	throw new Error(
+		'Operations PostgreSQL must use its admin password file secret'
+	);
+}
 if (
 	!supportPostgresVolume?.external ||
 	supportPostgresVolume.name !== process.env.SUPPORT_POSTGRES_DATA_VOLUME
@@ -207,6 +228,9 @@ const expectedPersistentServiceNames = [
 	'integration-worker',
 	'maintenance-worker',
 	'notification-delivery-worker',
+	'operations-api',
+	'operations-outbox-publisher',
+	'operations-worker',
 	'outbox-publisher',
 	'platform-api',
 	'platform-outbox-publisher',
@@ -813,6 +837,76 @@ if (
 		'Support PostgreSQL dedicated loopback lifecycle safeguards drifted'
 	);
 }
+const operationsPostgres = requireService('operations-postgres');
+const operationsPostgresEnvironment = requireEnvironment(
+	'operations-postgres',
+	[
+		'POSTGRES_DB',
+		'POSTGRES_USER',
+		'POSTGRES_PASSWORD_FILE',
+		'POSTGRES_INITDB_ARGS',
+		'PGDATA'
+	]
+);
+const operationsPorts = operationsPostgres.ports ?? [];
+const operationsNetworks = operationsPostgres.networks ?? {};
+const operationsNetwork = config.networks?.['operations-postgres'];
+if (
+	operationsPostgres.image !== process.env.OPERATIONS_POSTGRES_IMAGE ||
+	operationsPostgresEnvironment.POSTGRES_DB !== 'winwidget_operations' ||
+	operationsPostgresEnvironment.POSTGRES_USER !==
+		process.env.OPERATIONS_POSTGRES_ADMIN_USER ||
+	operationsPostgresEnvironment.POSTGRES_PASSWORD_FILE !==
+		'/run/secrets/operations-postgres-admin-password' ||
+	operationsPostgresEnvironment.POSTGRES_INITDB_ARGS !==
+		'--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums' ||
+	operationsPostgresEnvironment.PGDATA !==
+		'/var/lib/postgresql/18/docker' ||
+	operationsPorts.length !== 1 ||
+	operationsPorts[0].host_ip !== '127.0.0.1' ||
+	String(operationsPorts[0].published) !==
+		process.env.OPERATIONS_POSTGRES_PORT ||
+	Number(operationsPorts[0].target) !== 5432 ||
+	Object.keys(operationsNetworks).length !== 1 ||
+	!Object.hasOwn(operationsNetworks, 'operations-postgres') ||
+	operationsNetwork?.name !== 'winwidget-operations-postgres' ||
+	operationsNetwork.driver !== 'bridge' ||
+	operationsNetwork.internal === true ||
+	operationsNetwork.labels?.['com.winwidget.owner'] !== 'operations' ||
+	operationsNetwork.labels?.['com.winwidget.purpose'] !==
+		'postgres-network' ||
+	JSON.stringify(operationsPostgres.profiles ?? []) !==
+		JSON.stringify(['operations-database']) ||
+	operationsPostgres.network_mode != null ||
+	operationsPostgres.depends_on != null ||
+	operationsPostgres.restart !== 'unless-stopped' ||
+	(operationsPostgres.volumes ?? []).length !== 1 ||
+	operationsPostgres.volumes[0].type !== 'volume' ||
+	operationsPostgres.volumes[0].source !==
+		process.env.OPERATIONS_POSTGRES_DATA_VOLUME ||
+	operationsPostgres.volumes[0].target !== '/var/lib/postgresql' ||
+	(operationsPostgres.secrets ?? []).length !== 1 ||
+	operationsPostgres.secrets[0].source !==
+		'operations-postgres-admin-password' ||
+	JSON.stringify(operationsPostgres.healthcheck) !==
+		JSON.stringify(expectedPostgresHealthcheck) ||
+	operationsPostgres.stop_grace_period !== '1m0s' ||
+	operationsPostgres.shm_size !== '268435456' ||
+	operationsPostgres.mem_limit !== '536870912' ||
+	operationsPostgres.mem_reservation !== '134217728' ||
+	operationsPostgres.cpus !== 0.75 ||
+	operationsPostgres.pids_limit !== 200 ||
+	operationsPostgres.logging?.driver !== 'json-file' ||
+	operationsPostgres.logging?.options?.['max-size'] !== '10m' ||
+	operationsPostgres.logging?.options?.['max-file'] !== '5' ||
+	operationsPostgres.labels?.['com.winwidget.owner'] !== 'operations' ||
+	operationsPostgres.labels?.['com.winwidget.purpose'] !== 'postgres' ||
+	Object.keys(operationsPostgres.labels ?? {}).length !== 2
+) {
+	throw new Error(
+		'Operations PostgreSQL dedicated loopback lifecycle safeguards drifted'
+	);
+}
 for (const [name, service] of Object.entries(services)) {
 	if (
 		name === 'notification-delivery-postgres' ||
@@ -822,7 +916,8 @@ for (const [name, service] of Object.entries(services)) {
 		name === 'billing-postgres' ||
 		name === 'identity-postgres' ||
 		name === 'platform-postgres' ||
-		name === 'support-postgres'
+		name === 'support-postgres' ||
+		name === 'operations-postgres'
 	)
 		continue;
 	if (
@@ -906,7 +1001,16 @@ for (const [name, service] of Object.entries(services)) {
 				secret => secret.source === 'support-postgres-admin-password'
 			)) ||
 		Object.hasOwn(service.networks ?? {}, 'support-postgres') ||
-		Object.hasOwn(service.depends_on ?? {}, 'support-postgres')
+		Object.hasOwn(service.depends_on ?? {}, 'support-postgres') ||
+		(service.volumes ?? []).some(
+			mount => mount.source === process.env.OPERATIONS_POSTGRES_DATA_VOLUME
+		) ||
+		(name !== 'database-restore-worker' &&
+			(service.secrets ?? []).some(
+				secret => secret.source === 'operations-postgres-admin-password'
+			)) ||
+		Object.hasOwn(service.networks ?? {}, 'operations-postgres') ||
+		Object.hasOwn(service.depends_on ?? {}, 'operations-postgres')
 	) {
 		throw new Error(
 			`${name} must not share a standalone PostgreSQL lifecycle`
@@ -919,6 +1023,7 @@ for (const name of [
 	'maintenance-worker',
 	'database-restore-worker',
 	'identity-api',
+	'operations-api',
 	'platform-api',
 	'support-api',
 	'notification-delivery-worker',
@@ -934,6 +1039,7 @@ for (const name of [
 		'maintenance-worker': process.env.MAINTENANCE_REVISION,
 		'database-restore-worker': process.env.DATABASE_RESTORE_REVISION,
 		'identity-api': process.env.IDENTITY_REVISION,
+		'operations-api': process.env.OPERATIONS_REVISION,
 		'platform-api': process.env.PLATFORM_REVISION,
 		'support-api': process.env.SUPPORT_REVISION,
 		'notification-delivery-worker':
@@ -952,6 +1058,7 @@ for (const name of [
 		'maintenance-worker': process.env.MAINTENANCE_IMAGE,
 		'database-restore-worker': process.env.DATABASE_RESTORE_IMAGE,
 		'identity-api': process.env.IDENTITY_IMAGE,
+		'operations-api': process.env.OPERATIONS_IMAGE,
 		'platform-api': process.env.PLATFORM_IMAGE,
 		'support-api': process.env.SUPPORT_IMAGE,
 		'notification-delivery-worker':
@@ -1157,6 +1264,39 @@ if (requireService('platform-outbox-publisher').build != null) {
 		'platform-outbox-publisher must reuse the Platform API image build'
 	);
 }
+const requireStandaloneOperationsBuild = name => {
+	const service = requireService(name);
+	const build = service.build ?? {};
+	if (
+		!String(build.context ?? '')
+			.replaceAll('\\', '/')
+			.endsWith('/apps/operations') ||
+		build.dockerfile !== 'Dockerfile' ||
+		build.target != null ||
+		build.args?.APP_REVISION !== process.env.OPERATIONS_REVISION ||
+		service.image !== process.env.OPERATIONS_IMAGE
+	) {
+		throw new Error(
+			`${name} must use the exact standalone Operations app image and context`
+		);
+	}
+};
+requireStandaloneOperationsBuild('operations-api');
+requireStandaloneOperationsBuild('operations-migrate');
+for (const name of [
+	'operations-api',
+	'operations-worker',
+	'operations-outbox-publisher'
+]) {
+	if (requireService(name).image !== process.env.OPERATIONS_IMAGE) {
+		throw new Error(`${name} must share the immutable Operations image`);
+	}
+}
+for (const name of ['operations-worker', 'operations-outbox-publisher']) {
+	if (requireService(name).build != null) {
+		throw new Error(`${name} must reuse the Operations API image build`);
+	}
+}
 for (const name of [
 	'identity-api',
 	'identity-worker',
@@ -1260,6 +1400,17 @@ for (const name of ['platform-api', 'platform-outbox-publisher']) {
 }
 requireCommand(
 	'platform-migrate',
+	'migrate deploy --schema prisma/schema.prisma'
+);
+for (const name of [
+	'operations-api',
+	'operations-worker',
+	'operations-outbox-publisher'
+]) {
+	requireCommand(name, 'node dist/src/main.js');
+}
+requireCommand(
+	'operations-migrate',
 	'migrate deploy --schema prisma/schema.prisma'
 );
 const migration = requireService('migrate');
@@ -1523,6 +1674,50 @@ if (
 ) {
 	throw new Error('support-migrate receives an unexpected environment');
 }
+const operationsMigration = requireService('operations-migrate');
+const operationsMigrationEntrypoint = Array.isArray(
+	operationsMigration.entrypoint
+)
+	? operationsMigration.entrypoint.join(' ')
+	: String(operationsMigration.entrypoint ?? '');
+if (
+	operationsMigrationEntrypoint !== './node_modules/.bin/prisma' ||
+	JSON.stringify(operationsMigration.profiles ?? []) !==
+		JSON.stringify(['operations-migration']) ||
+	operationsMigration.network_mode !== 'host' ||
+	operationsMigration.depends_on != null
+) {
+	throw new Error(
+		'operations-migrate must use Prisma behind its isolated migration profile'
+	);
+}
+const operationsMigrationEnvironment = requireEnvironment(
+	'operations-migrate',
+	['APP_REVISION', 'NODE_ENV', 'OPERATIONS_DATABASE_URL']
+);
+if (
+	Object.keys(operationsMigrationEnvironment).some(
+		key =>
+			!['APP_REVISION', 'NODE_ENV', 'OPERATIONS_DATABASE_URL'].includes(
+				key
+			)
+	)
+) {
+	throw new Error('operations-migrate receives an unexpected environment');
+}
+for (const name of ['migrate', 'operations-migrate']) {
+	const mounts = requireService(name).volumes ?? [];
+	if (
+		mounts.length !== 1 ||
+		mounts[0].type !== 'bind' ||
+		mounts[0].source !== process.env.OPERATIONS_CUTOVER_ARTIFACT_DIR ||
+		mounts[0].target !== '/var/lib/winwidget/operations-cutover'
+	) {
+		throw new Error(
+			`${name} must use only the exact Operations cutover artifact mount`
+		);
+	}
+}
 if (requireService('maintenance-worker').command != null) {
 	throw new Error('maintenance-worker command must be owned by its image');
 }
@@ -1723,6 +1918,16 @@ const expectedGatewayRoutes = [
 		timeoutMs: 60000
 	},
 	...[
+		['operations-notes', '/api/v1/notes'],
+		['operations-admin-event-log', '/api/v1/admin-event-log']
+	].map(([id, pathPrefix]) => ({
+		id,
+		pathPrefix,
+		upstreamUrl: 'http://127.0.0.1:5200',
+		authPolicy: 'required',
+		timeoutMs: 30000
+	})),
+	...[
 		['platform-site-settings', '/api/v1/site-settings'],
 		['platform-legal-pages', '/api/v1/legal-pages'],
 		['platform-home-page-content', '/api/v1/home-page-content']
@@ -1842,7 +2047,7 @@ if (
 	JSON.stringify(gatewayRoutes) !== JSON.stringify(expectedGatewayRoutes)
 ) {
 	throw new Error(
-		'Production example must keep Platform, Billing, protected service, public Widgets and Reporting routes before the monolith catch-all'
+		'Production example must keep Operations, Platform, Billing, protected service, public Widgets and Reporting routes before the monolith catch-all'
 	);
 }
 if (
@@ -1881,13 +2086,6 @@ const integrationKinds =
 		.map(value => value.trim())
 		.filter(Boolean);
 const expectedIntegrationKinds = [
-	'campaign-admin-audit',
-	'reporting-admin-audit',
-	'widgets-admin-audit',
-	'billing-admin-audit',
-	'identity-admin-audit',
-	'platform-admin-audit',
-	'support-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection'
@@ -2343,6 +2541,7 @@ const identityApiEnvironment = requireEnvironment('identity-api', [
 	'IDENTITY_BILLING_TOKEN',
 	'IDENTITY_PLATFORM_TOKEN',
 	'IDENTITY_SUPPORT_TOKEN',
+	'IDENTITY_OPERATIONS_TOKEN',
 	'IDENTITY_INTERNAL_TIMEOUT_MS',
 	'BILLING_INTERNAL_BASE_URL',
 	'BILLING_IDENTITY_TOKEN',
@@ -2350,6 +2549,8 @@ const identityApiEnvironment = requireEnvironment('identity-api', [
 	'WIDGETS_INTERNAL_BASE_URL',
 	'WIDGETS_IDENTITY_TOKEN',
 	'WIDGETS_INTERNAL_TIMEOUT_MS',
+	'OPERATIONS_INTERNAL_BASE_URL',
+	'OPERATIONS_IDENTITY_TOKEN',
 	'IDENTITY_AVATAR_S3_ENDPOINT',
 	'IDENTITY_AVATAR_S3_REGION',
 	'IDENTITY_AVATAR_S3_BUCKET',
@@ -2826,6 +3027,151 @@ if (
 		'Support API singleton, Identity client or RabbitMQ role boundary drifted'
 	);
 }
+const operationsCommonEnvironmentKeys = [
+	'APP_REVISION',
+	'NODE_ENV',
+	'MODE',
+	'OPERATIONS_DATABASE_URL',
+	'OPERATIONS_PROCESS_ROLE',
+	'OPERATIONS_LISTEN_HOST',
+	'OPERATIONS_API_PORT',
+	'OPERATIONS_WORKER_PORT',
+	'OPERATIONS_OUTBOX_PUBLISHER_PORT',
+	'OPERATIONS_OUTBOX_BATCH_SIZE',
+	'OPERATIONS_OUTBOX_POLL_INTERVAL_MS',
+	'OPERATIONS_AUDIT_RECEIPT_LEASE_MS',
+	'OPERATIONS_AUDIT_RETRY_DELAY_MS',
+	'OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS'
+];
+const operationsApi = requireService('operations-api');
+const operationsWorker = requireService('operations-worker');
+const operationsPublisher = requireService('operations-outbox-publisher');
+const operationsApiEnvironment = requireEnvironment('operations-api', [
+	...operationsCommonEnvironmentKeys,
+	'CORS_ALLOWED_ORIGINS',
+	'TRUST_PROXY',
+	'IDENTITY_INTERNAL_BASE_URL',
+	'IDENTITY_OPERATIONS_TOKEN',
+	'OPERATIONS_IDENTITY_TOKEN',
+	'IDENTITY_INTERNAL_TIMEOUT_MS'
+]);
+const operationsWorkerEnvironment = requireEnvironment(
+	'operations-worker',
+	[
+		...operationsCommonEnvironmentKeys,
+		'RABBITMQ_URL',
+		'RABBITMQ_CONNECTION_NAME',
+		'RABBITMQ_ASSERT_TOPOLOGY',
+		'RABBITMQ_MAX_MESSAGE_BYTES',
+		'MESSAGING_SERVICE_NAME'
+	]
+);
+const operationsPublisherEnvironment = requireEnvironment(
+	'operations-outbox-publisher',
+	[
+		...operationsCommonEnvironmentKeys,
+		'RABBITMQ_URL',
+		'RABBITMQ_CONNECTION_NAME',
+		'RABBITMQ_ASSERT_TOPOLOGY',
+		'RABBITMQ_MAX_MESSAGE_BYTES',
+		'MESSAGING_SERVICE_NAME'
+	]
+);
+const operationsRoles = new Map([
+	['operations-api', [operationsApi, operationsApiEnvironment, 'api']],
+	[
+		'operations-worker',
+		[operationsWorker, operationsWorkerEnvironment, 'worker']
+	],
+	[
+		'operations-outbox-publisher',
+		[
+			operationsPublisher,
+			operationsPublisherEnvironment,
+			'outbox-publisher'
+		]
+	]
+]);
+const operationsRuntimeLimits = {
+	'operations-api': ['30s', 402653184, 100663296, 0.5, 200],
+	'operations-worker': ['1m30s', 402653184, 100663296, 0.5, 200],
+	'operations-outbox-publisher': ['1m30s', 268435456, 67108864, 0.35, 150]
+};
+for (const [name, [service, environment, role]] of operationsRoles) {
+	const [stopGracePeriod, memLimit, memReservation, cpus, pidsLimit] =
+		operationsRuntimeLimits[name];
+	if (
+		environment.APP_REVISION !== process.env.OPERATIONS_REVISION ||
+		environment.NODE_ENV !== 'production' ||
+		environment.MODE !== 'production' ||
+		environment.OPERATIONS_PROCESS_ROLE !== role ||
+		environment.OPERATIONS_LISTEN_HOST !== '127.0.0.1' ||
+		environment.OPERATIONS_API_PORT !== '5200' ||
+		environment.OPERATIONS_WORKER_PORT !== '5201' ||
+		environment.OPERATIONS_OUTBOX_PUBLISHER_PORT !== '5202' ||
+		environment.OPERATIONS_OUTBOX_BATCH_SIZE !== '50' ||
+		environment.OPERATIONS_OUTBOX_POLL_INTERVAL_MS !== '1000' ||
+		environment.OPERATIONS_AUDIT_RECEIPT_LEASE_MS !== '60000' ||
+		environment.OPERATIONS_AUDIT_RETRY_DELAY_MS !== '30000' ||
+		environment.OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS !== '4' ||
+		service.network_mode !== 'host' ||
+		!service.healthcheck?.test ||
+		service.restart !== 'unless-stopped' ||
+		(service.profiles ?? []).length !== 0 ||
+		service.stop_grace_period !== stopGracePeriod ||
+		Number(service.mem_limit) !== memLimit ||
+		Number(service.mem_reservation) !== memReservation ||
+		Number(service.cpus) !== cpus ||
+		Number(service.pids_limit) !== pidsLimit ||
+		service.logging?.driver !== 'json-file' ||
+		service.logging?.options?.['max-size'] !== '10m' ||
+		String(service.logging?.options?.['max-file']) !== '3'
+	) {
+		throw new Error(
+			`${name} must use the exact immutable loopback Operations role boundary`
+		);
+	}
+}
+if (
+	operationsApiEnvironment.CORS_ALLOWED_ORIGINS !==
+		gatewayEnvironment.CORS_ALLOWED_ORIGINS ||
+	operationsApiEnvironment.CORS_ALLOWED_ORIGINS !==
+		apiEnvironment.CORS_ALLOWED_ORIGINS ||
+	operationsApiEnvironment.TRUST_PROXY !== 'loopback' ||
+	operationsApiEnvironment.IDENTITY_INTERNAL_BASE_URL !==
+		'http://127.0.0.1:4900' ||
+	operationsApiEnvironment.IDENTITY_INTERNAL_TIMEOUT_MS !== '5000' ||
+	operationsApi.labels?.['com.winwidget.owner'] !== 'operations' ||
+	operationsApi.labels?.['com.winwidget.purpose'] !== 'api' ||
+	operationsApi.labels?.['com.winwidget.singleton'] !== 'true' ||
+	Object.keys(operationsApi.labels ?? {}).length !== 3 ||
+	operationsApi.depends_on != null ||
+	operationsWorker.labels?.['com.winwidget.owner'] !== 'operations' ||
+	operationsWorker.labels?.['com.winwidget.purpose'] !== 'worker' ||
+	Object.keys(operationsWorker.labels ?? {}).length !== 2 ||
+	operationsPublisher.labels?.['com.winwidget.owner'] !== 'operations' ||
+	operationsPublisher.labels?.['com.winwidget.purpose'] !==
+		'outbox-publisher' ||
+	Object.keys(operationsPublisher.labels ?? {}).length !== 2 ||
+	JSON.stringify(Object.keys(operationsWorker.depends_on ?? {})) !==
+		JSON.stringify(['rabbitmq']) ||
+	JSON.stringify(Object.keys(operationsPublisher.depends_on ?? {})) !==
+		JSON.stringify(['rabbitmq']) ||
+	operationsWorkerEnvironment.RABBITMQ_CONNECTION_NAME !==
+		'winwidget-operations-worker' ||
+	operationsWorkerEnvironment.RABBITMQ_ASSERT_TOPOLOGY !== 'true' ||
+	operationsWorkerEnvironment.MESSAGING_SERVICE_NAME !==
+		'operations-worker' ||
+	operationsPublisherEnvironment.RABBITMQ_CONNECTION_NAME !==
+		'winwidget-operations-outbox-publisher' ||
+	operationsPublisherEnvironment.RABBITMQ_ASSERT_TOPOLOGY !== 'false' ||
+	operationsPublisherEnvironment.MESSAGING_SERVICE_NAME !==
+		'operations-outbox-publisher'
+) {
+	throw new Error(
+		'Operations API singleton, Identity client or RabbitMQ role boundary drifted'
+	);
+}
 const providerSecretEnvironmentKeys = [
 	'YOOKASSA_PRODUCTION_SHOP_ID',
 	'YOOKASSA_PRODUCTION_SECRET_KEY',
@@ -3053,6 +3399,14 @@ requireMutualToken('Support to Identity', [
 	supportApiEnvironment.IDENTITY_SUPPORT_TOKEN,
 	identityApiEnvironment.IDENTITY_SUPPORT_TOKEN
 ]);
+requireMutualToken('Operations to Identity', [
+	operationsApiEnvironment.IDENTITY_OPERATIONS_TOKEN,
+	identityApiEnvironment.IDENTITY_OPERATIONS_TOKEN
+]);
+requireMutualToken('Identity to Operations', [
+	identityApiEnvironment.OPERATIONS_IDENTITY_TOKEN,
+	operationsApiEnvironment.OPERATIONS_IDENTITY_TOKEN
+]);
 requireMutualToken('Core to Platform', [
 	apiEnvironment.PLATFORM_CORE_TOKEN,
 	platformApiEnvironment.PLATFORM_CORE_TOKEN
@@ -3089,6 +3443,8 @@ const isolatedCallerTokens = [
 	billingApiEnvironment.IDENTITY_BILLING_TOKEN,
 	platformApiEnvironment.IDENTITY_PLATFORM_TOKEN,
 	supportApiEnvironment.IDENTITY_SUPPORT_TOKEN,
+	operationsApiEnvironment.IDENTITY_OPERATIONS_TOKEN,
+	operationsApiEnvironment.OPERATIONS_IDENTITY_TOKEN,
 	campaignsEnvironment.BILLING_CAMPAIGNS_TOKEN,
 	identityApiEnvironment.BILLING_IDENTITY_TOKEN,
 	identityApiEnvironment.WIDGETS_IDENTITY_TOKEN,
@@ -3116,6 +3472,7 @@ const maintenanceEnvironment = requireEnvironment(
 		'IDENTITY_BACKUP_URL',
 		'PLATFORM_BACKUP_URL',
 		'SUPPORT_BACKUP_URL',
+		'OPERATIONS_BACKUP_URL',
 		'TELEGRAM_INFO_BOT_TOKEN',
 		'TELEGRAM_API_BASE_URL',
 		'MAINTENANCE_WORKER_PREFETCH',
@@ -3160,6 +3517,7 @@ const databaseRestoreEnvironment = requireEnvironment(
 		'DATABASE_RESTORE_IDENTITY_PORT',
 		'DATABASE_RESTORE_PLATFORM_PORT',
 		'DATABASE_RESTORE_SUPPORT_PORT',
+		'DATABASE_RESTORE_OPERATIONS_PORT',
 		'DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE',
@@ -3167,7 +3525,8 @@ const databaseRestoreEnvironment = requireEnvironment(
 		'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE',
-		'DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE'
+		'DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE',
+		'DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE'
 	]
 );
 const expectedDatabaseRestoreEnvironmentKeys = [
@@ -3182,6 +3541,8 @@ const expectedDatabaseRestoreEnvironmentKeys = [
 	'DATABASE_RESTORE_MIGRATIONS_ROOT',
 	'DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE',
 	'DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT',
+	'DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE',
+	'DATABASE_RESTORE_OPERATIONS_PORT',
 	'DATABASE_RESTORE_POLL_INTERVAL_MS',
 	'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE',
 	'DATABASE_RESTORE_PLATFORM_PORT',
@@ -3226,6 +3587,8 @@ if (
 		process.env.PLATFORM_POSTGRES_PORT ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_SUPPORT_PORT !==
 		process.env.SUPPORT_POSTGRES_PORT ||
+	databaseRestoreEnvironment.DATABASE_RESTORE_OPERATIONS_PORT !==
+		process.env.OPERATIONS_POSTGRES_PORT ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE !==
 		'/run/database-restore-secrets/notification-delivery-admin-password' ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE !==
@@ -3241,7 +3604,9 @@ if (
 	databaseRestoreEnvironment.DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE !==
 		'/run/database-restore-secrets/platform-admin-password' ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE !==
-		'/run/database-restore-secrets/support-admin-password'
+		'/run/database-restore-secrets/support-admin-password' ||
+	databaseRestoreEnvironment.DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE !==
+		'/run/database-restore-secrets/operations-admin-password'
 ) {
 	throw new Error(
 		'database-restore-worker environment or credential boundary drifted'
@@ -3274,6 +3639,10 @@ const expectedDatabaseRestoreSecrets = [
 	[
 		'notification-delivery-postgres-admin-password',
 		'database-restore-notification-delivery-admin-password'
+	],
+	[
+		'operations-postgres-admin-password',
+		'database-restore-operations-admin-password'
 	],
 	[
 		'platform-postgres-admin-password',
@@ -3320,6 +3689,7 @@ if (
 			'campaigns',
 			'identity',
 			'notification-delivery',
+			'operations',
 			'platform',
 			'reporting',
 			'support',
@@ -3591,6 +3961,43 @@ if (
 		'Support runtime, migration and backup must use distinct roles'
 	);
 }
+
+const operationsDatabaseUrls = [
+	operationsApiEnvironment.OPERATIONS_DATABASE_URL,
+	operationsMigrationEnvironment.OPERATIONS_DATABASE_URL,
+	maintenanceEnvironment.OPERATIONS_BACKUP_URL
+].map(value => new URL(value));
+for (const url of operationsDatabaseUrls) {
+	if (
+		url.protocol !== 'postgresql:' ||
+		url.hostname !== '127.0.0.1' ||
+		url.port !== '55441' ||
+		url.pathname !== '/winwidget_operations' ||
+		url.searchParams.get('schema') !== 'operations' ||
+		url.searchParams.get('sslmode') !== 'disable'
+	) {
+		throw new Error(
+			'Operations roles must use the dedicated loopback PostgreSQL database'
+		);
+	}
+}
+if (
+	JSON.stringify(
+		operationsDatabaseUrls.map(url => decodeURIComponent(url.username))
+	) !==
+		JSON.stringify([
+			'winwidget_operations_runtime',
+			'winwidget_operations_migration',
+			'winwidget_operations_backup'
+		]) ||
+	new Set(
+		operationsDatabaseUrls.map(url => decodeURIComponent(url.password))
+	).size !== operationsDatabaseUrls.length
+) {
+	throw new Error(
+		'Operations runtime, migration and backup must use exact roles with distinct credentials'
+	);
+}
 for (const [, [, environment]] of billingRoles) {
 	for (const forbidden of [
 		'DATABASE_URL',
@@ -3707,6 +4114,57 @@ for (const [name, [, environment]] of platformRoles) {
 	}
 	if ('PLATFORM_CORE_TOKEN' in environment !== (name === 'platform-api')) {
 		throw new Error(`${name} Core credential scope drifted`);
+	}
+}
+for (const [name, [, environment]] of operationsRoles) {
+	for (const forbidden of [
+		'DATABASE_URL',
+		'DATABASE_URL_PRODUCTION',
+		'DATABASE_BACKUP_URL',
+		'NOTIFICATION_DELIVERY_DATABASE_URL',
+		'NOTIFICATION_DELIVERY_BACKUP_URL',
+		'CAMPAIGNS_DATABASE_URL',
+		'CAMPAIGNS_BACKUP_URL',
+		'REPORTING_DATABASE_URL',
+		'REPORTING_BACKUP_URL',
+		'WIDGETS_DATABASE_URL',
+		'WIDGETS_BACKUP_URL',
+		'BILLING_DATABASE_URL',
+		'BILLING_BACKUP_URL',
+		'IDENTITY_DATABASE_URL',
+		'IDENTITY_BACKUP_URL',
+		'PLATFORM_DATABASE_URL',
+		'PLATFORM_BACKUP_URL',
+		'OPERATIONS_BACKUP_URL',
+		'OPERATIONS_MIGRATION_DATABASE_URL',
+		'OPERATIONS_POSTGRES_ADMIN_USER',
+		'OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE',
+		'SMTP_LOGIN',
+		'SMTP_PASSWORD',
+		'TELEGRAM_INFO_BOT_TOKEN',
+		'S3_ACCESS_KEY_ID',
+		'S3_SECRET_ACCESS_KEY'
+	]) {
+		if (forbidden in environment) {
+			throw new Error(`${name} must not receive ${forbidden}`);
+		}
+	}
+	if ('RABBITMQ_URL' in environment !== (name !== 'operations-api')) {
+		throw new Error(`${name} RabbitMQ credential scope drifted`);
+	}
+	if (
+		'IDENTITY_OPERATIONS_TOKEN' in environment !==
+		(name === 'operations-api')
+	) {
+		throw new Error(`${name} Identity credential scope drifted`);
+	}
+	if (
+		'OPERATIONS_IDENTITY_TOKEN' in environment !==
+		(name === 'operations-api' || name === 'identity-api')
+	) {
+		throw new Error(
+			`${name} Operations Identity credential scope drifted`
+		);
 	}
 }
 for (const [name, service] of Object.entries(services)) {
@@ -3900,6 +4358,12 @@ const rabbitUsers = [
 	new URL(services['identity-outbox-publisher'].environment.RABBITMQ_URL)
 		.username,
 	new URL(services['platform-outbox-publisher'].environment.RABBITMQ_URL)
+		.username,
+	new URL(services['support-worker'].environment.RABBITMQ_URL).username,
+	new URL(services['support-outbox-publisher'].environment.RABBITMQ_URL)
+		.username,
+	new URL(services['operations-worker'].environment.RABBITMQ_URL).username,
+	new URL(services['operations-outbox-publisher'].environment.RABBITMQ_URL)
 		.username
 ];
 if (
@@ -3920,7 +4384,11 @@ for (const name of [
 	'billing-outbox-publisher',
 	'identity-worker',
 	'identity-outbox-publisher',
-	'platform-outbox-publisher'
+	'platform-outbox-publisher',
+	'support-worker',
+	'support-outbox-publisher',
+	'operations-worker',
+	'operations-outbox-publisher'
 ]) {
 	if (
 		new URL(services[name].environment.RABBITMQ_URL).pathname !==
@@ -3961,6 +4429,14 @@ if (
 	services['identity-outbox-publisher'].environment
 		.RABBITMQ_ASSERT_TOPOLOGY !== 'false' ||
 	services['platform-outbox-publisher'].environment
+		.RABBITMQ_ASSERT_TOPOLOGY !== 'false' ||
+	services['support-worker'].environment.RABBITMQ_ASSERT_TOPOLOGY !==
+		'true' ||
+	services['support-outbox-publisher'].environment
+		.RABBITMQ_ASSERT_TOPOLOGY !== 'false' ||
+	services['operations-worker'].environment.RABBITMQ_ASSERT_TOPOLOGY !==
+		'true' ||
+	services['operations-outbox-publisher'].environment
 		.RABBITMQ_ASSERT_TOPOLOGY !== 'false'
 ) {
 	throw new Error(
@@ -3979,7 +4455,11 @@ for (const name of [
 	'billing-outbox-publisher',
 	'identity-worker',
 	'identity-outbox-publisher',
-	'platform-outbox-publisher'
+	'platform-outbox-publisher',
+	'support-worker',
+	'support-outbox-publisher',
+	'operations-worker',
+	'operations-outbox-publisher'
 ]) {
 	const environment = services[name].environment ?? {};
 	for (const forbidden of [

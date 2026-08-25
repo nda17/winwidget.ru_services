@@ -56,11 +56,15 @@ CREATE TABLE "operations"."audit_event_receipts" (
     "retry_available_at" TIMESTAMP(3),
     "delivered_at" TIMESTAMP(3),
     "dead_lettered_at" TIMESTAMP(3),
+    "dead_letter_source" TEXT,
+    "dead_letter_payload" JSONB,
+    "manual_retry_cycle" INTEGER NOT NULL DEFAULT 0,
     "last_error" TEXT,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "audit_event_receipts_pkey" PRIMARY KEY ("id"),
     CONSTRAINT "audit_event_receipts_attempt_check" CHECK ("attempt" >= 1),
+    CONSTRAINT "audit_event_receipts_manual_retry_cycle_check" CHECK ("manual_retry_cycle" >= 0),
     CONSTRAINT "audit_event_receipts_consumer_check" CHECK (
         char_length("consumer") BETWEEN 1 AND 120
     ),
@@ -75,6 +79,8 @@ CREATE TABLE "operations"."audit_event_receipts" (
             AND "retry_available_at" IS NULL
             AND "delivered_at" IS NULL
             AND "dead_lettered_at" IS NULL
+            AND "dead_letter_source" IS NULL
+            AND "dead_letter_payload" IS NULL
         ) OR (
             "status" = 'RETRY_SCHEDULED'
             AND "lease_token" IS NULL
@@ -82,6 +88,8 @@ CREATE TABLE "operations"."audit_event_receipts" (
             AND "retry_available_at" IS NOT NULL
             AND "delivered_at" IS NULL
             AND "dead_lettered_at" IS NULL
+            AND "dead_letter_source" IS NULL
+            AND "dead_letter_payload" IS NULL
         ) OR (
             "status" = 'DELIVERED'
             AND "lease_token" IS NULL
@@ -89,6 +97,8 @@ CREATE TABLE "operations"."audit_event_receipts" (
             AND "retry_available_at" IS NULL
             AND "delivered_at" IS NOT NULL
             AND "dead_lettered_at" IS NULL
+            AND "dead_letter_source" IS NULL
+            AND "dead_letter_payload" IS NULL
         ) OR (
             "status" = 'DEAD_LETTERED'
             AND "lease_token" IS NULL
@@ -96,6 +106,11 @@ CREATE TABLE "operations"."audit_event_receipts" (
             AND "retry_available_at" IS NULL
             AND "delivered_at" IS NULL
             AND "dead_lettered_at" IS NOT NULL
+            AND "dead_letter_source" IN (
+                'campaigns', 'reporting', 'widgets', 'billing',
+                'identity', 'platform', 'support', 'core'
+            )
+            AND jsonb_typeof("dead_letter_payload") = 'object'
         )
     )
 );

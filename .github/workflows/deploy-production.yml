@@ -261,6 +261,14 @@ jobs:
             apps/support/prisma/schema.prisma
             apps/support/prisma/migrations/20260824010000_init_support/migration.sql
             prisma/post-cutover/support/20260824030000_remove_legacy_support_core_source.sql
+            apps/operations/Dockerfile
+            apps/operations/package.json
+            apps/operations/pnpm-lock.yaml
+            apps/operations/prisma/schema.prisma
+            apps/operations/prisma/migrations/20260824000000_init_operations/migration.sql
+            apps/operations/prisma/migrations/20260824010000_add_operations_ownership_state/migration.sql
+            prisma/migrations/20260824030000_prepare_operations_service_ownership/migration.sql
+            prisma/post-cutover/operations/20260825010000_remove_legacy_operations_core_source.sql
             .github/scripts/validate-production-compose.cjs
             deploy/docker-compose.prod.yml
             deploy/nginx.conf
@@ -295,6 +303,8 @@ jobs:
             scripts/cleanup-platform-core-source-production.sh
             scripts/test-platform-core-source-cleanup-rehearsal.sh
             scripts/platform-frontend-runtime-attestation.sh
+            scripts/operations-database-prepare.sh
+            scripts/operations-cutover-production.sh
             scripts/platform-backup-restore-rehearsal.sh
             scripts/deploy-platform-production.sh
             scripts/support-release-identity.sh
@@ -947,8 +957,29 @@ jobs:
             TELEGRAM_API_PROXY_IP \
             RABBITMQ_SUPPORT_WORKER_URL \
             RABBITMQ_SUPPORT_PUBLISHER_URL \
+            OPERATIONS_IMAGE \
+            OPERATIONS_REVISION \
+            OPERATIONS_POSTGRES_IMAGE \
+            OPERATIONS_POSTGRES_PORT \
+            OPERATIONS_POSTGRES_DATA_VOLUME \
+            OPERATIONS_POSTGRES_ADMIN_USER \
+            OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE \
+            OPERATIONS_DATABASE_URL \
+            OPERATIONS_MIGRATION_DATABASE_URL \
+            OPERATIONS_BACKUP_URL \
+            OPERATIONS_CUTOVER_ARTIFACT_DIR \
+            OPERATIONS_API_PORT \
+            OPERATIONS_WORKER_PORT \
+            OPERATIONS_OUTBOX_PUBLISHER_PORT \
+            IDENTITY_OPERATIONS_TOKEN \
+            OPERATIONS_INTERNAL_BASE_URL \
+            OPERATIONS_IDENTITY_TOKEN \
+            RABBITMQ_OPERATIONS_WORKER_URL \
+            RABBITMQ_OPERATIONS_PUBLISHER_URL \
             RABBITMQ_INTEGRATION_WORKER_URL \
             RABBITMQ_MANAGEMENT_URL \
+            RABBITMQ_ADMIN_USER \
+            RABBITMQ_ADMIN_PASSWORD \
             RABBITMQ_MONITOR_USER \
             RABBITMQ_MONITOR_PASSWORD \
             RABBITMQ_VHOST \
@@ -1331,6 +1362,8 @@ jobs:
       PLATFORM_IMAGE: winwidget-platform:git-${{ github.sha }}
       SUPPORT_REVISION: ${{ github.sha }}
       SUPPORT_IMAGE: winwidget-support:git-${{ github.sha }}
+      OPERATIONS_REVISION: ${{ github.sha }}
+      OPERATIONS_IMAGE: winwidget-operations:git-${{ github.sha }}
       # CI-only 32-byte key. Production uses deploy/backend/.env.production.
       PAYMENT_METHOD_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       YOOKASSA_PRODUCTION_SHOP_ID: ci_billing_shop
@@ -1382,6 +1415,11 @@ jobs:
       SUPPORT_BACKUP_URL: postgresql://winwidget_support_backup:support_backup_ci@127.0.0.1:55440/winwidget_support_ci?schema=support&sslmode=disable
       SUPPORT_CI_POSTGRES_CONTAINER: winwidget-support-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       SUPPORT_CI_POSTGRES_VOLUME: winwidget-support-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      OPERATIONS_DATABASE_URL: postgresql://winwidget_operations_runtime:operations_runtime_ci@127.0.0.1:55441/winwidget_operations_ci?schema=operations&sslmode=disable
+      OPERATIONS_CI_MIGRATION_DATABASE_URL: postgresql://winwidget_operations_migration:operations_migration_ci@127.0.0.1:55441/winwidget_operations_ci?schema=operations&sslmode=disable
+      OPERATIONS_BACKUP_URL: postgresql://winwidget_operations_backup:operations_backup_ci@127.0.0.1:55441/winwidget_operations_ci?schema=operations&sslmode=disable
+      OPERATIONS_CI_POSTGRES_CONTAINER: winwidget-operations-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      OPERATIONS_CI_POSTGRES_VOLUME: winwidget-operations-postgres-ci-${{ github.run_id }}-${{ github.run_attempt }}
       BILLING_PROCESS_ROLE: api
       BILLING_LISTEN_HOST: 127.0.0.1
       BILLING_API_PORT: 4800
@@ -1410,6 +1448,9 @@ jobs:
       IDENTITY_BILLING_TOKEN: ci_identity_billing_token_at_least_32_chars
       IDENTITY_PLATFORM_TOKEN: ci_identity_platform_token_at_least_32_chars
       IDENTITY_SUPPORT_TOKEN: ci_identity_support_token_at_least_32_chars
+      IDENTITY_OPERATIONS_TOKEN: ci_identity_operations_token_at_least_32_chars
+      OPERATIONS_INTERNAL_BASE_URL: http://127.0.0.1:5200
+      OPERATIONS_IDENTITY_TOKEN: ci_operations_identity_token_at_least_32_chars
       BILLING_CAMPAIGNS_TOKEN: ci_billing_campaigns_token_at_least_32_chars
       RABBITMQ_IDENTITY_WORKER_URL: amqp://winwidget-identity-worker:identity_worker_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       RABBITMQ_IDENTITY_PUBLISHER_URL: amqp://winwidget-identity-publisher:identity_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
@@ -1444,6 +1485,13 @@ jobs:
       TELEGRAM_API_PROXY_IP: 185.184.122.62
       RABBITMQ_SUPPORT_WORKER_URL: amqp://winwidget-support-worker:support_worker_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       RABBITMQ_SUPPORT_PUBLISHER_URL: amqp://winwidget-support-publisher:support_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
+      OPERATIONS_PROCESS_ROLE: api
+      OPERATIONS_LISTEN_HOST: 127.0.0.1
+      OPERATIONS_API_PORT: 5200
+      OPERATIONS_WORKER_PORT: 5201
+      OPERATIONS_OUTBOX_PUBLISHER_PORT: 5202
+      RABBITMQ_OPERATIONS_WORKER_URL: amqp://winwidget-operations-worker:operations_worker_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
+      RABBITMQ_OPERATIONS_PUBLISHER_URL: amqp://winwidget-operations-publisher:operations_publisher_ci_password_at_least_32_chars@127.0.0.1:5672/winwidget
       WIDGETS_PROCESS_ROLE: all
       WIDGETS_LISTEN_HOST: 127.0.0.1
       WIDGETS_PORT: 4700
@@ -1515,6 +1563,8 @@ jobs:
             IDENTITY_BILLING_TOKEN
             IDENTITY_PLATFORM_TOKEN
             IDENTITY_SUPPORT_TOKEN
+            IDENTITY_OPERATIONS_TOKEN
+            OPERATIONS_IDENTITY_TOKEN
             BILLING_IDENTITY_TOKEN
           )
           declare -A identity_scoped_token_values=()
@@ -1744,6 +1794,7 @@ jobs:
             apps/identity/pnpm-lock.yaml
             apps/platform/pnpm-lock.yaml
             apps/support/pnpm-lock.yaml
+            apps/operations/pnpm-lock.yaml
 
       - name: Install dependencies
         env:
@@ -1759,6 +1810,7 @@ jobs:
           pnpm --dir apps/identity install --frozen-lockfile
           pnpm --dir apps/platform install --frozen-lockfile
           pnpm --dir apps/support install --frozen-lockfile
+          pnpm --dir apps/operations install --frozen-lockfile
 
       - name: Start isolated Notification Delivery PostgreSQL
         env:
@@ -2528,6 +2580,45 @@ jobs:
             sleep 2
           done
 
+      - name: Start isolated Operations PostgreSQL
+        env:
+          OPERATIONS_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-operations-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          test ! -e "$OPERATIONS_CI_POSTGRES_PASSWORD_FILE"
+          umask 077
+          openssl rand -hex 32 > "$OPERATIONS_CI_POSTGRES_PASSWORD_FILE"
+          docker volume create \
+            --label com.winwidget.owner=operations \
+            --label com.winwidget.purpose=ci-postgres-data \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            "$OPERATIONS_CI_POSTGRES_VOLUME" > /dev/null
+          docker run --detach \
+            --name "$OPERATIONS_CI_POSTGRES_CONTAINER" \
+            --label com.winwidget.owner=operations \
+            --label com.winwidget.purpose=ci-postgres \
+            --label "com.winwidget.github-run=$GITHUB_RUN_ID" \
+            --publish 127.0.0.1:55441:5432 \
+            --mount "type=volume,source=$OPERATIONS_CI_POSTGRES_VOLUME,target=/var/lib/postgresql" \
+            --mount "type=bind,source=$OPERATIONS_CI_POSTGRES_PASSWORD_FILE,target=/run/secrets/operations-postgres-admin-password,readonly" \
+            --env POSTGRES_DB=winwidget_operations_ci \
+            --env POSTGRES_USER=winwidget_operations_admin \
+            --env POSTGRES_PASSWORD_FILE=/run/secrets/operations-postgres-admin-password \
+            --env "POSTGRES_INITDB_ARGS=--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums" \
+            --env PGDATA=/var/lib/postgresql/18/docker \
+            --health-cmd "pg_isready --username winwidget_operations_admin --dbname winwidget_operations_ci" \
+            --health-interval 5s --health-timeout 5s --health-retries 20 \
+            postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296 > /dev/null
+          for attempt in $(seq 1 30); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$OPERATIONS_CI_POSTGRES_CONTAINER")"
+            [[ "$status" == 'healthy' ]] && break
+            if [[ "$status" == 'unhealthy' || "$attempt" == '30' ]]; then
+              docker logs "$OPERATIONS_CI_POSTGRES_CONTAINER" >&2
+              echo "Isolated Operations PostgreSQL is $status." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
       - name: Create isolated Support roles
         env:
           POSTGRES_CONTAINER_ID: ${{ env.SUPPORT_CI_POSTGRES_CONTAINER }}
@@ -2565,6 +2656,45 @@ jobs:
             GRANT SELECT ON TABLES TO winwidget_support_backup;
           ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_support_migration IN SCHEMA support
             GRANT SELECT ON SEQUENCES TO winwidget_support_backup;
+          SQL
+
+      - name: Create isolated Operations roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.OPERATIONS_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_operations_admin \
+              --dbname winwidget_operations_ci <<'SQL'
+          REVOKE ALL ON DATABASE winwidget_operations_ci FROM PUBLIC;
+          CREATE ROLE winwidget_operations_migration LOGIN PASSWORD 'operations_migration_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE winwidget_operations_runtime LOGIN PASSWORD 'operations_runtime_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE winwidget_operations_backup LOGIN PASSWORD 'operations_backup_ci'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE winwidget_operations_ci
+            TO winwidget_operations_migration, winwidget_operations_runtime, winwidget_operations_backup;
+          REVOKE CREATE, TEMPORARY ON DATABASE winwidget_operations_ci
+            FROM winwidget_operations_migration, winwidget_operations_runtime, winwidget_operations_backup;
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA operations AUTHORIZATION winwidget_operations_migration;
+          REVOKE ALL ON SCHEMA operations FROM PUBLIC;
+          GRANT USAGE ON SCHEMA operations TO winwidget_operations_runtime, winwidget_operations_backup;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_operations_migration IN SCHEMA operations
+            REVOKE ALL ON TABLES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_operations_migration IN SCHEMA operations
+            REVOKE ALL ON SEQUENCES FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_operations_migration IN SCHEMA operations
+            REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_operations_migration IN SCHEMA operations
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO winwidget_operations_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_operations_migration IN SCHEMA operations
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO winwidget_operations_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_operations_migration IN SCHEMA operations
+            GRANT SELECT ON TABLES TO winwidget_operations_backup;
+          ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_operations_migration IN SCHEMA operations
+            GRANT SELECT ON SEQUENCES TO winwidget_operations_backup;
           SQL
 
       - name: Rehearse Widgets exact dump in isolated PostgreSQL 18
@@ -2658,6 +2788,8 @@ jobs:
           pnpm --dir apps/platform run prisma:generate
           pnpm --dir apps/support run prisma:validate
           pnpm --dir apps/support run prisma:generate
+          pnpm --dir apps/operations run prisma:validate
+          pnpm --dir apps/operations run prisma:generate
 
       - name: Fast-check Widgets snapshot SQL contract
         run: node scripts/export-widgets-cutover-snapshot.mjs --self-test
@@ -2682,6 +2814,8 @@ jobs:
             pnpm --dir apps/platform run prisma:migrate:deploy
           SUPPORT_DATABASE_URL="$SUPPORT_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/support run prisma:migrate:deploy
+          OPERATIONS_DATABASE_URL="$OPERATIONS_CI_MIGRATION_DATABASE_URL" \
+            pnpm --dir apps/operations run prisma:migrate:deploy
 
       - name: Verify Support PostgreSQL ACLs and clean restore
         env:
@@ -2771,6 +2905,111 @@ jobs:
               --dbname postgres \
               --command 'DROP DATABASE winwidget_support_restore_ci WITH (FORCE);'
           docker exec "$POSTGRES_CONTAINER_ID" rm -f -- /tmp/support-ci.dump
+
+      - name: Verify Operations PostgreSQL ownership boundary
+        env:
+          POSTGRES_CONTAINER_ID: ${{ env.OPERATIONS_CI_POSTGRES_CONTAINER }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 \
+              --username winwidget_operations_admin \
+              --dbname winwidget_operations_ci <<'SQL'
+          REVOKE ALL ON TABLE operations."_prisma_migrations"
+            FROM winwidget_operations_runtime;
+          DO $operations_acl$
+          DECLARE
+            runtime_role RECORD;
+          BEGIN
+            SELECT * INTO STRICT runtime_role
+            FROM pg_roles
+            WHERE rolname = 'winwidget_operations_runtime';
+            IF runtime_role.rolsuper OR runtime_role.rolcreatedb
+              OR runtime_role.rolcreaterole OR runtime_role.rolinherit
+              OR runtime_role.rolreplication OR runtime_role.rolbypassrls
+              OR pg_get_userbyid(
+                (SELECT nspowner FROM pg_namespace WHERE nspname = 'operations')
+              ) <> 'winwidget_operations_migration'
+              OR EXISTS (
+                SELECT 1
+                FROM unnest(ARRAY[
+                  'operations.notes',
+                  'operations.admin_event_logs',
+                  'operations.audit_event_receipts',
+                  'operations.outbox_events'
+                ]) AS runtime_table(name)
+                WHERE NOT (
+                  has_table_privilege(
+                    'winwidget_operations_runtime', name, 'SELECT'
+                  )
+                  AND has_table_privilege(
+                    'winwidget_operations_runtime', name, 'INSERT'
+                  )
+                  AND has_table_privilege(
+                    'winwidget_operations_runtime', name, 'UPDATE'
+                  )
+                  AND has_table_privilege(
+                    'winwidget_operations_runtime', name, 'DELETE'
+                  )
+                  AND NOT has_table_privilege(
+                    'winwidget_operations_runtime', name, 'TRUNCATE'
+                  )
+                )
+              )
+              OR NOT has_table_privilege(
+                'winwidget_operations_runtime',
+                'operations.operations_ownership_state',
+                'SELECT'
+              )
+              OR has_table_privilege(
+                'winwidget_operations_runtime',
+                'operations.operations_ownership_state',
+                'INSERT,UPDATE,DELETE,TRUNCATE'
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM unnest(ARRAY[
+                  'SELECT',
+                  'INSERT',
+                  'UPDATE',
+                  'DELETE',
+                  'TRUNCATE',
+                  'REFERENCES',
+                  'TRIGGER'
+                ]) AS ledger_privilege(name)
+                WHERE has_table_privilege(
+                  'winwidget_operations_runtime',
+                  'operations._prisma_migrations',
+                  ledger_privilege.name
+                )
+              )
+              OR NOT has_table_privilege(
+                'winwidget_operations_backup',
+                'operations.notes',
+                'SELECT'
+              )
+              OR has_table_privilege(
+                'winwidget_operations_backup',
+                'operations.notes',
+                'INSERT,UPDATE,DELETE,TRUNCATE'
+              )
+              OR NOT EXISTS (
+                SELECT 1
+                FROM operations.operations_ownership_state
+                WHERE id = 'singleton' AND phase = 'EMPTY'
+              )
+              OR NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgrelid = 'operations.operations_ownership_state'::regclass
+                  AND tgname = 'operations_ownership_transition_guard'
+                  AND NOT tgisinternal
+              )
+            THEN
+              RAISE EXCEPTION 'Operations PostgreSQL ownership boundary is invalid';
+            END IF;
+          END
+          $operations_acl$;
+          SQL
 
       - name: Rehearse guarded Widgets Core source cleanup in PostgreSQL 18
         env:
@@ -4698,6 +4937,7 @@ jobs:
           pnpm --dir apps/identity run typecheck
           pnpm --dir apps/platform run typecheck
           pnpm --dir apps/support run typecheck
+          pnpm --dir apps/operations run typecheck
 
       - name: Lint
         run: |
@@ -4710,6 +4950,7 @@ jobs:
           pnpm --dir apps/identity run lint
           pnpm --dir apps/platform run lint
           pnpm --dir apps/support run lint
+          pnpm --dir apps/operations run lint
 
       - name: Test
         run: |
@@ -4722,6 +4963,7 @@ jobs:
           pnpm --dir apps/identity test
           pnpm --dir apps/platform test
           pnpm --dir apps/support test
+          pnpm --dir apps/operations test
           widgets_browser_executable="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)"
           test -n "$widgets_browser_executable"
           WIDGETS_TEST_DATABASE_URL="$WIDGETS_DATABASE_URL" \
@@ -4802,6 +5044,15 @@ jobs:
           SUPPORT_DATABASE_URL: postgresql://winwidget_support_runtime:support_runtime_ci@127.0.0.1:55440/winwidget_support?schema=support&sslmode=disable
           SUPPORT_MIGRATION_DATABASE_URL: postgresql://winwidget_support_migration:support_migration_ci@127.0.0.1:55440/winwidget_support?schema=support&sslmode=disable
           SUPPORT_BACKUP_URL: postgresql://winwidget_support_backup:support_backup_ci@127.0.0.1:55440/winwidget_support?schema=support&sslmode=disable
+          OPERATIONS_POSTGRES_IMAGE: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+          OPERATIONS_POSTGRES_PORT: '55441'
+          OPERATIONS_POSTGRES_DATA_VOLUME: winwidget-operations-postgres-data
+          OPERATIONS_POSTGRES_ADMIN_USER: winwidget_operations_admin
+          OPERATIONS_POSTGRES_ADMIN_PASSWORD_FILE: /tmp/winwidget-operations-postgres-admin-password
+          OPERATIONS_DATABASE_URL: postgresql://winwidget_operations_runtime:operations_runtime_ci@127.0.0.1:55441/winwidget_operations?schema=operations&sslmode=disable
+          OPERATIONS_MIGRATION_DATABASE_URL: postgresql://winwidget_operations_migration:operations_migration_ci@127.0.0.1:55441/winwidget_operations?schema=operations&sslmode=disable
+          OPERATIONS_BACKUP_URL: postgresql://winwidget_operations_backup:operations_backup_ci@127.0.0.1:55441/winwidget_operations?schema=operations&sslmode=disable
+          OPERATIONS_CUTOVER_ARTIFACT_DIR: /opt/winwidget/deploy/backend/operations-cutover
           MODE: production
           GOOGLE_CLIENT_ID: ci_identity_google_client_id
           GOOGLE_CLIENT_SECRET: ci_identity_google_client_secret
@@ -4917,6 +5168,8 @@ jobs:
           CORE_CLEANUP_REHEARSAL_RUN_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             APP_ROOT="$reporting_ci_app_root" \
             bash scripts/test-billing-core-source-cleanup-rehearsal.sh --rehearsal
+          bash scripts/operations-database-prepare.sh --self-test
+          bash scripts/operations-cutover-production.sh --self-test
           pnpm build
           pnpm --dir apps/api-gateway run typecheck
           pnpm --dir apps/api-gateway test
@@ -4930,6 +5183,7 @@ jobs:
           pnpm --dir apps/identity run build
           pnpm --dir apps/platform run build
           pnpm --dir apps/support run build
+          pnpm --dir apps/operations run build
 
       - name: Create restricted Billing RabbitMQ users
         env:
@@ -5066,7 +5320,9 @@ jobs:
           );
           const expectedCoreTopologyKinds = [
             ...coreDeliveryKinds,
-            ...monolithIntegrationKinds,
+            "billing-payment-projection",
+            "billing-subscription-projection",
+            "billing-affiliate-projection",
             "database-backup",
           ];
           const reportingDeliveryKinds = [
@@ -5084,6 +5340,7 @@ jobs:
             "billing-admin-audit",
             "identity-admin-audit",
             "platform-admin-audit",
+            "support-admin-audit",
             "support-admin-audit",
             "billing-payment-projection",
             "billing-subscription-projection",
@@ -5809,6 +6066,66 @@ jobs:
               );
             }
           }
+          const operationsKindsMatch = deployScript.match(
+            /^readonly OPERATIONS_STEADY_INTEGRATION_WORKER_KINDS='([^']+)'$/m,
+          );
+          const postOperationsMatch = deployScript.match(
+            /^readonly OPERATIONS_STEADY_INTEGRATION_READ_PATTERN='([^']+)'$/m,
+          );
+          const operationsCutoverScript = fs.readFileSync(
+            "scripts/operations-cutover-production.sh",
+            "utf8",
+          );
+          const cutoverPostOperationsMatch = operationsCutoverScript.match(
+            /^readonly OPERATIONS_STEADY_INTEGRATION_READ_PATTERN='([^']+)'$/m,
+          );
+          const operationsProjectionKinds = [
+            "billing-payment-projection",
+            "billing-subscription-projection",
+            "billing-affiliate-projection",
+          ];
+          if (
+            !operationsKindsMatch ||
+            operationsKindsMatch[1] !== operationsProjectionKinds.join(",") ||
+            !postOperationsMatch ||
+            !cutoverPostOperationsMatch ||
+            cutoverPostOperationsMatch[1] !== postOperationsMatch[1]
+          ) {
+            throw new Error(
+              "Operations integration-worker ownership contract drifted",
+            );
+          }
+          const postOperationsPattern = new RegExp(postOperationsMatch[1]);
+          for (const kind of operationsProjectionKinds) {
+            const queue = monolith.MESSAGING_QUEUE_NAMES[kind];
+            if (
+              !postOperationsPattern.test(queue) ||
+              !postOperationsPattern.test(`${queue}.dead-letter`) ||
+              postOperationsPattern.test(`${queue}.retry-v2.1`)
+            ) {
+              throw new Error(
+                `Operations steady integration permission is invalid for ${queue}`,
+              );
+            }
+          }
+          for (const kind of [
+            "campaign-admin-audit",
+            "reporting-admin-audit",
+            "widgets-admin-audit",
+            "billing-admin-audit",
+            "identity-admin-audit",
+            "platform-admin-audit",
+          ]) {
+            const queue = monolith.MESSAGING_QUEUE_NAMES[kind];
+            if (
+              postOperationsPattern.test(queue) ||
+              postOperationsPattern.test(`${queue}.dead-letter`)
+            ) {
+              throw new Error(
+                `Operations steady integration permission retained admin-audit queue ${queue}`,
+              );
+            }
+          }
           for (const candidate of [
             "winwidget.billing.identity.v1",
             "winwidget.billing.notification-delivery-outcome",
@@ -5942,7 +6259,7 @@ jobs:
           trap 'docker volume rm "$ci_rabbitmq_volume" > /dev/null 2>&1 || true' EXIT
           export RABBITMQ_DATA_VOLUME="$ci_rabbitmq_volume"
 
-          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api identity-api platform-api support-api
+          docker compose --env-file .env.example -f deploy/docker-compose.prod.yml build api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api identity-api platform-api support-api operations-api
           test "$(
             docker image inspect "winwidget-api:$APP_VERSION" \
               --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
@@ -6064,6 +6381,32 @@ jobs:
               test ! -e dist/src/app.module.js
               test ! -e public/widgets
             '
+          test "$(
+            docker image inspect "$OPERATIONS_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+          )" = "$OPERATIONS_REVISION"
+          test "$(
+            docker image inspect "$OPERATIONS_IMAGE" \
+              --format '{{.Config.User}}'
+          )" = 'operations'
+          test "$(
+            docker image inspect "$OPERATIONS_IMAGE" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.title" }}'
+          )" = 'winwidget-operations'
+          docker run --rm --network none \
+            --entrypoint sh \
+            "$OPERATIONS_IMAGE" \
+            -euc '
+              test "$(id -u)" = 1001
+              openssl version > /dev/null
+              node -e "require(\"@prisma/operations-client\")"
+              test -f dist/src/main.js
+              test -f dist/src/cutover/main.js
+              test -f prisma/schema.prisma
+              test -d prisma/migrations
+              test ! -e dist/src/app.module.js
+              test ! -e public/widgets
+            '
           docker compose --env-file .env.example -f deploy/docker-compose.prod.yml \
             run --rm --no-deps --entrypoint sh maintenance-worker -lc \
             'pg_dump --version | grep -Eq " 18[.]" && pg_restore --version | grep -Eq " 18[.]" && test -f dist/src/maintenance-worker-main.js'
@@ -6083,6 +6426,7 @@ jobs:
               test -d apps/identity/prisma/migrations
               test -d apps/platform/prisma/migrations
               test -d apps/support/prisma/migrations
+              test -d apps/operations/prisma/migrations
             '
           restore_entrypoint_run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           restore_entrypoint_volume="winwidget-ci-restore-entrypoint-${restore_entrypoint_run_id}"
@@ -6144,7 +6488,8 @@ jobs:
             billing-admin-password \
             identity-admin-password \
             platform-admin-password \
-            support-admin-password; do
+            support-admin-password \
+            operations-admin-password; do
             sudo install -o root -g root -m 400 \
               "$restore_entrypoint_fixture" \
               "$restore_entrypoint_secret_root/$secret_name"
@@ -6160,7 +6505,8 @@ jobs:
             billing-admin-password \
             identity-admin-password \
             platform-admin-password \
-            support-admin-password; do
+            support-admin-password \
+            operations-admin-password; do
             test "$(sudo stat -c '%u:%g:%a' "$restore_entrypoint_secret_root/$secret_name")" = '0:0:400'
           done
           docker volume create \
@@ -6198,6 +6544,7 @@ jobs:
             --mount "type=bind,source=$restore_entrypoint_secret_root/identity-admin-password,target=/run/secrets/database-restore-identity-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/platform-admin-password,target=/run/secrets/database-restore-platform-admin-password,readonly" \
             --mount "type=bind,source=$restore_entrypoint_secret_root/support-admin-password,target=/run/secrets/database-restore-support-admin-password,readonly" \
+            --mount "type=bind,source=$restore_entrypoint_secret_root/operations-admin-password,target=/run/secrets/database-restore-operations-admin-password,readonly" \
             --tmpfs /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
             "$DATABASE_RESTORE_IMAGE" \
@@ -6213,7 +6560,8 @@ jobs:
                 /run/database-restore-secrets/billing-admin-password \
                 /run/database-restore-secrets/identity-admin-password \
                 /run/database-restore-secrets/platform-admin-password \
-                /run/database-restore-secrets/support-admin-password; do
+                /run/database-restore-secrets/support-admin-password \
+                /run/database-restore-secrets/operations-admin-password; do
                 test -f "$secret_file"
                 test ! -L "$secret_file"
                 test -r "$secret_file"
@@ -6222,7 +6570,7 @@ jobs:
                 test -n "$fixture_value"
                 copied=$((copied + 1))
               done
-              test "$copied" -eq 8
+              test "$copied" -eq 9
               printf "database-restore-entrypoint-secret-copy=passed\n"
             '
           cleanup_restore_entrypoint_smoke
@@ -7098,6 +7446,44 @@ jobs:
             fi
           fi
           rm -f -- "$SUPPORT_CI_POSTGRES_PASSWORD_FILE"
+          [[ "$cleanup_failed" == "false" ]]
+
+      - name: Cleanup isolated Operations PostgreSQL
+        if: ${{ always() }}
+        env:
+          OPERATIONS_CI_POSTGRES_PASSWORD_FILE: ${{ runner.temp }}/winwidget-operations-postgres-admin-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          cleanup_failed=false
+          if docker container inspect \
+            "$OPERATIONS_CI_POSTGRES_CONTAINER" > /dev/null 2>&1; then
+            container_identity="$(
+              docker container inspect \
+                --format '{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}|{{index .Config.Labels "com.winwidget.github-run"}}' \
+                "$OPERATIONS_CI_POSTGRES_CONTAINER"
+            )"
+            if [[ "$container_identity" != "operations|ci-postgres|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Operations container." >&2
+              cleanup_failed=true
+            else
+              docker container rm --force \
+                "$OPERATIONS_CI_POSTGRES_CONTAINER" > /dev/null
+            fi
+          fi
+          if docker volume inspect \
+            "$OPERATIONS_CI_POSTGRES_VOLUME" > /dev/null 2>&1; then
+            volume_identity="$(
+              docker volume inspect \
+                --format '{{index .Labels "com.winwidget.owner"}}|{{index .Labels "com.winwidget.purpose"}}|{{index .Labels "com.winwidget.github-run"}}' \
+                "$OPERATIONS_CI_POSTGRES_VOLUME"
+            )"
+            if [[ "$volume_identity" != "operations|ci-postgres-data|$GITHUB_RUN_ID" ]]; then
+              echo "Refusing to remove an unverified Operations volume." >&2
+              cleanup_failed=true
+            else
+              docker volume rm "$OPERATIONS_CI_POSTGRES_VOLUME" > /dev/null
+            fi
+          fi
+          rm -f -- "$OPERATIONS_CI_POSTGRES_PASSWORD_FILE"
           [[ "$cleanup_failed" == "false" ]]
 
   deploy:

@@ -51,7 +51,8 @@ describe('OperationsOutboxPublisherService', () => {
 		const service = new OperationsOutboxPublisherService(
 			prisma,
 			runtime,
-			rabbit
+			rabbit,
+			{ isActive: jest.fn().mockResolvedValue(true) } as never
 		);
 
 		await expect(service.publishOne()).resolves.toBe(true);
@@ -70,5 +71,31 @@ describe('OperationsOutboxPublisherService', () => {
 		expect(
 			(rabbit.publish as jest.Mock).mock.invocationCallOrder[0]
 		).toBeLessThan(updateMany.mock.invocationCallOrder[1]);
+	});
+
+	it('starts ready but does not poll while ownership is staged', async () => {
+		const prisma = {
+			outboxEvent: { findFirst: jest.fn() }
+		} as unknown as OperationsPrismaService;
+		const runtime = {
+			outboxPublisherEnabled: true,
+			outboxPollIntervalMs: 1_000,
+			outboxBatchSize: 50
+		} as OperationsRuntimeService;
+		const rabbit = {
+			publish: jest.fn()
+		} as unknown as OperationsRabbitMqService;
+		const service = new OperationsOutboxPublisherService(
+			prisma,
+			runtime,
+			rabbit,
+			{ isActive: jest.fn().mockResolvedValue(false) } as never
+		);
+
+		await service.onModuleInit();
+
+		expect(service.isReady()).toBe(true);
+		expect(prisma.outboxEvent.findFirst).not.toHaveBeenCalled();
+		expect(rabbit.publish).not.toHaveBeenCalled();
 	});
 });

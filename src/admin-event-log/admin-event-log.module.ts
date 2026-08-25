@@ -1,11 +1,9 @@
-import { AdminEventLogController } from '@/admin-event-log/admin-event-log.controller';
 import { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import { IdentityBoundaryModule } from '@/identity-boundary/identity-boundary.module';
-import { forwardRef, Module } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 
 @Module({
-	imports: [forwardRef(() => IdentityBoundaryModule)],
-	controllers: [AdminEventLogController],
+	imports: [IdentityBoundaryModule],
 	providers: [AdminEventLogService],
 	exports: [AdminEventLogService]
 })

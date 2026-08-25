@@ -1,165 +1,20 @@
 import { IdentityInternalClient } from '@/identity-boundary/identity-internal.client';
+import type {
+	AdminEventLogAction,
+	AdminEventLogSection
+} from '@/admin-event-log/admin-event-log.contract';
+import {
+	ADMIN_AUDIT_EVENT_TYPE,
+	CORE_ADMIN_AUDIT_ROUTING_KEY
+} from '@/messaging/messaging.constants';
+import { createMessagingHeaders } from '@/messaging/messaging-context';
+import { assertMessagingEventContract } from '@/messaging/messaging-event-contract';
 import { PrismaService } from '@/prisma.service';
 import { getClientIp } from '@/utils/ip.util';
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Request } from 'express';
-
-export type AdminEventLogSection =
-	| 'PAYMENTS'
-	| 'CAMPAIGNS'
-	| 'TASKS'
-	| 'SUBSCRIPTIONS'
-	| 'USERS'
-	| 'BACKLOG'
-	| 'SITE_SETTINGS'
-	| 'TELEGRAM_BOT'
-	| 'AFFILIATE'
-	| 'MESSAGING'
-	| 'REPORTING'
-	| 'DEV_TOOLS'
-	| 'WIDGETS'
-	| 'SUPPORT'
-	| 'PLATFORM_CONTENT';
-
-export type AdminEventLogAction =
-	| 'PAYMENT_MANUAL_CHECK'
-	| 'PAYMENT_CLEANUP_RUN'
-	| 'AUTO_RENEWAL_ADMIN_PAUSE'
-	| 'AUTO_RENEWAL_ADMIN_RESUME'
-	| 'AUTO_RENEWAL_REVOKE'
-	| 'AUTO_RENEWAL_RECONCILE'
-	| 'AUTO_RENEWAL_TECHNICAL_RESUME'
-	| 'TARIFF_PRICES_UPDATE'
-	| 'LEGAL_PAGE_UPDATE'
-	| 'CAMPAIGN_CREATE'
-	| 'CAMPAIGN_CANCEL'
-	| 'CAMPAIGN_DELIVERY_RETRY'
-	| 'SUBSCRIPTION_ACTIVATE'
-	| 'SUBSCRIPTION_EXTEND_DAYS'
-	| 'SUBSCRIPTION_CANCEL'
-	| 'SUBSCRIPTION_EXPIRY_CHECK_RUN'
-	| 'VERIFICATION_CHALLENGE_CLEANUP_RUN'
-	| 'USER_UPDATE'
-	| 'USER_TOGGLE_ACTIVATION'
-	| 'USER_DELETE'
-	| 'USER_SOFT_DELETE'
-	| 'USER_RESTORE'
-	| 'BACKLOG_TASK_CREATE'
-	| 'BACKLOG_TASK_UPDATE'
-	| 'BACKLOG_TASK_DELETE'
-	| 'SITE_SETTINGS_UPDATE'
-	| 'AFFILIATE_SETTINGS_UPDATE'
-	| 'TELEGRAM_BOT_SETTINGS_UPDATE'
-	| 'TELEGRAM_SCHEDULE_SETTINGS_REJECTED'
-	| 'TELEGRAM_BOT_WEBHOOK_REINSTALL'
-	| 'TELEGRAM_DATABASE_BACKUP_CREATE'
-	| 'TELEGRAM_DATABASE_RESTORE'
-	| 'MESSAGING_FAILURE_RETRY'
-	| 'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY'
-	| 'BILLING_DELIVERY_RETRY'
-	| 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE'
-	| 'REPORTING_DAILY_SUMMARY_SCHEDULE_UPDATE'
-	| 'REPORTING_DAILY_SUMMARY_SCHEDULE_REJECTED'
-	| 'REPORTING_DELIVERY_RETRY'
-	| 'DEV_DATABASE_RESTORE'
-	| 'DEV_DATABASE_RESTORE_PUBLISHED'
-	| 'WIDGET_UPDATE'
-	| 'WIDGET_PUBLISH'
-	| 'WIDGET_DRAFT_DISCARD'
-	| 'WIDGET_VERSION_RESTORE'
-	| 'WIDGET_CLONE'
-	| 'WIDGET_DELETE'
-	| 'WIDGET_BUTTON_IMAGE_UPDATE'
-	| 'WIDGET_DELIVERY_RETRY'
-	| 'WIDGET_DELIVERY_CLOSE'
-	| 'SUPPORT_ROUTING_SETTINGS_UPDATE'
-	| 'SUPPORT_WEBHOOK_REINSTALL'
-	| 'SUPPORT_DELIVERY_RETRY'
-	| 'SUPPORT_DELIVERY_CLOSE'
-	| 'PLATFORM_SITE_SETTINGS_UPDATE'
-	| 'PLATFORM_LEGAL_PAGE_UPDATE'
-	| 'PLATFORM_HOME_PAGE_CONTENT_UPDATE'
-	| 'PLATFORM_HOME_PAGE_RAW_CODE_UPDATE';
-
-const ADMIN_EVENT_LOG_SECTIONS: AdminEventLogSection[] = [
-	'PAYMENTS',
-	'CAMPAIGNS',
-	'TASKS',
-	'SUBSCRIPTIONS',
-	'USERS',
-	'BACKLOG',
-	'SITE_SETTINGS',
-	'TELEGRAM_BOT',
-	'AFFILIATE',
-	'MESSAGING',
-	'REPORTING',
-	'DEV_TOOLS',
-	'WIDGETS',
-	'SUPPORT',
-	'PLATFORM_CONTENT'
-];
-
-const ADMIN_EVENT_LOG_ACTIONS: AdminEventLogAction[] = [
-	'PAYMENT_MANUAL_CHECK',
-	'PAYMENT_CLEANUP_RUN',
-	'AUTO_RENEWAL_ADMIN_PAUSE',
-	'AUTO_RENEWAL_ADMIN_RESUME',
-	'AUTO_RENEWAL_REVOKE',
-	'AUTO_RENEWAL_RECONCILE',
-	'AUTO_RENEWAL_TECHNICAL_RESUME',
-	'TARIFF_PRICES_UPDATE',
-	'LEGAL_PAGE_UPDATE',
-	'CAMPAIGN_CREATE',
-	'CAMPAIGN_CANCEL',
-	'CAMPAIGN_DELIVERY_RETRY',
-	'SUBSCRIPTION_ACTIVATE',
-	'SUBSCRIPTION_EXTEND_DAYS',
-	'SUBSCRIPTION_CANCEL',
-	'SUBSCRIPTION_EXPIRY_CHECK_RUN',
-	'VERIFICATION_CHALLENGE_CLEANUP_RUN',
-	'USER_UPDATE',
-	'USER_TOGGLE_ACTIVATION',
-	'USER_DELETE',
-	'USER_SOFT_DELETE',
-	'USER_RESTORE',
-	'BACKLOG_TASK_CREATE',
-	'BACKLOG_TASK_UPDATE',
-	'BACKLOG_TASK_DELETE',
-	'SITE_SETTINGS_UPDATE',
-	'AFFILIATE_SETTINGS_UPDATE',
-	'TELEGRAM_BOT_SETTINGS_UPDATE',
-	'TELEGRAM_SCHEDULE_SETTINGS_REJECTED',
-	'TELEGRAM_BOT_WEBHOOK_REINSTALL',
-	'TELEGRAM_DATABASE_BACKUP_CREATE',
-	'TELEGRAM_DATABASE_RESTORE',
-	'MESSAGING_FAILURE_RETRY',
-	'MESSAGING_FAILURE_CLOSE_WITHOUT_RETRY',
-	'BILLING_DELIVERY_RETRY',
-	'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE',
-	'REPORTING_DAILY_SUMMARY_SCHEDULE_UPDATE',
-	'REPORTING_DAILY_SUMMARY_SCHEDULE_REJECTED',
-	'REPORTING_DELIVERY_RETRY',
-	'DEV_DATABASE_RESTORE',
-	'DEV_DATABASE_RESTORE_PUBLISHED',
-	'WIDGET_UPDATE',
-	'WIDGET_PUBLISH',
-	'WIDGET_DRAFT_DISCARD',
-	'WIDGET_VERSION_RESTORE',
-	'WIDGET_CLONE',
-	'WIDGET_DELETE',
-	'WIDGET_BUTTON_IMAGE_UPDATE',
-	'WIDGET_DELIVERY_RETRY',
-	'WIDGET_DELIVERY_CLOSE',
-	'SUPPORT_ROUTING_SETTINGS_UPDATE',
-	'SUPPORT_WEBHOOK_REINSTALL',
-	'SUPPORT_DELIVERY_RETRY',
-	'SUPPORT_DELIVERY_CLOSE',
-	'PLATFORM_SITE_SETTINGS_UPDATE',
-	'PLATFORM_LEGAL_PAGE_UPDATE',
-	'PLATFORM_HOME_PAGE_CONTENT_UPDATE',
-	'PLATFORM_HOME_PAGE_RAW_CODE_UPDATE'
-];
+import { randomUUID } from 'node:crypto';
 
 export interface AdminEventLogRecordInput {
 	adminId?: string | null;
@@ -180,15 +35,6 @@ export interface AdminEventLogRecordInput {
 	userAgent?: string | null;
 }
 
-interface AdminEventLogFilters {
-	userId?: string;
-	adminId?: string;
-	section?: string;
-	action?: string;
-	createdFrom?: string;
-	createdTo?: string;
-}
-
 interface UserSnapshot {
 	name: string | null;
 	email: string | null;
@@ -203,173 +49,14 @@ export class AdminEventLogService {
 		private readonly identity: IdentityInternalClient
 	) {}
 
-	async getAll(page = 1, limit = 20, filters: AdminEventLogFilters = {}) {
-		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
-		const normalizedLimit =
-			Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 20;
-		const where = this.getAdminEventLogWhere(filters);
-		const skip = (normalizedPage - 1) * normalizedLimit;
-
-		const [items, total] = await this.prisma.$transaction([
-			this.prisma.adminEventLog.findMany({
-				where,
-				orderBy: { createdAt: 'desc' },
-				skip,
-				take: normalizedLimit
-			}),
-			this.prisma.adminEventLog.count({ where })
-		]);
-
-		return {
-			items,
-			total,
-			page: normalizedPage,
-			limit: normalizedLimit,
-			totalPages: Math.max(1, Math.ceil(total / normalizedLimit))
-		};
-	}
-
-	async getUserActivity(userId: string) {
-		const latest = await this.prisma.adminEventLog.findMany({
-			where: {
-				OR: [{ targetUserId: userId }, { adminId: userId }]
-			},
-			orderBy: { createdAt: 'desc' },
-			take: 5,
-			select: {
-				id: true,
-				section: true,
-				action: true,
-				description: true,
-				entityType: true,
-				entityLabel: true,
-				adminName: true,
-				adminEmail: true,
-				targetUserId: true,
-				createdAt: true
-			}
-		});
-		return {
-			latest: latest.map(item => ({
-				...item,
-				role: item.targetUserId === userId ? 'TARGET' : 'ADMIN'
-			}))
-		};
-	}
-
-	private getAdminEventLogWhere(
-		filters: AdminEventLogFilters
-	): Prisma.AdminEventLogWhereInput | undefined {
-		const and: Prisma.AdminEventLogWhereInput[] = [];
-		const userId = filters.userId?.trim();
-		const adminId = filters.adminId?.trim();
-		const section = this.normalizeSection(filters.section);
-		const action = this.normalizeAction(filters.action);
-		const createdAt = this.getDateRangeFilter(
-			filters.createdFrom,
-			filters.createdTo
-		);
-
-		if (userId) {
-			and.push({
-				OR: [{ targetUserId: userId }, { adminId: userId }]
-			});
-		}
-
-		if (adminId) and.push({ adminId });
-		if (section) and.push({ section });
-		if (action) and.push({ action });
-		if (createdAt) and.push({ createdAt });
-
-		return and.length ? { AND: and } : undefined;
-	}
-
-	private normalizeSection(value?: string) {
-		const normalized = value?.trim().toUpperCase();
-
-		if (!normalized) {
-			return undefined;
-		}
-
-		if (
-			!ADMIN_EVENT_LOG_SECTIONS.includes(
-				normalized as AdminEventLogSection
-			)
-		) {
-			throw new BadRequestException('Некорректный раздел журнала');
-		}
-
-		return normalized;
-	}
-
-	private normalizeAction(value?: string) {
-		const normalized = value?.trim().toUpperCase();
-
-		if (!normalized) {
-			return undefined;
-		}
-
-		if (
-			!ADMIN_EVENT_LOG_ACTIONS.includes(normalized as AdminEventLogAction)
-		) {
-			throw new BadRequestException('Некорректное действие журнала');
-		}
-
-		return normalized;
-	}
-
-	private getDateRangeFilter(from?: string, to?: string) {
-		const gte = this.normalizeDate(from, false);
-		const lte = this.normalizeDate(to, true);
-
-		if (!gte && !lte) {
-			return undefined;
-		}
-
-		return {
-			...(gte ? { gte } : {}),
-			...(lte ? { lte } : {})
-		};
-	}
-
-	private normalizeDate(value?: string, endOfDay = false) {
-		const normalized = value?.trim();
-
-		if (!normalized) {
-			return undefined;
-		}
-
-		const date = new Date(
-			endOfDay
-				? `${normalized}T23:59:59.999Z`
-				: `${normalized}T00:00:00.000Z`
-		);
-
-		if (Number.isNaN(date.getTime())) {
-			throw new BadRequestException('Некорректная дата фильтра');
-		}
-
-		return date;
-	}
-
 	async record(input: AdminEventLogRecordInput) {
-		try {
-			return await this.recordWithClient(this.prisma, input);
-		} catch (error) {
-			this.logger.warn(
-				`Admin event log failed: ${
-					error instanceof Error ? error.message : String(error)
-				}`
-			);
-			return null;
-		}
+		return this.recordWithClient(this.prisma, input);
 	}
 
 	async recordOnce(recordId: string, input: AdminEventLogRecordInput) {
 		const normalizedRecordId = recordId.trim();
 		if (!/^[A-Za-z0-9_-]{1,128}$/.test(normalizedRecordId)) {
-			this.logger.warn('Admin event log idempotency id is invalid');
-			return null;
+			throw new Error('Admin event log idempotency id is invalid');
 		}
 		try {
 			return await this.recordWithClient(
@@ -379,24 +66,22 @@ export class AdminEventLogService {
 			);
 		} catch (error) {
 			try {
-				const existing = await this.prisma.adminEventLog.findUnique({
-					where: { id: normalizedRecordId }
+				const existing = await this.prisma.outboxEvent.findUnique({
+					where: {
+						deduplicationKey: this.getDeduplicationKey(normalizedRecordId)
+					}
 				});
 				if (
-					existing?.action === input.action &&
-					existing.entityId === (input.entityId || null)
+					existing?.eventType === ADMIN_AUDIT_EVENT_TYPE &&
+					existing.routingKey === CORE_ADMIN_AUDIT_ROUTING_KEY &&
+					this.matchesIdempotentAudit(existing.payload, input)
 				) {
 					return existing;
 				}
 			} catch {
 				// The original error is logged below without exposing audit payloads.
 			}
-			this.logger.warn(
-				`Idempotent admin event log failed: ${
-					error instanceof Error ? error.message : String(error)
-				}`
-			);
-			return null;
+			throw error;
 		}
 	}
 
@@ -421,26 +106,91 @@ export class AdminEventLogService {
 					userAgent: input.userAgent || null
 				};
 
-		return client.adminEventLog.create({
-			data: {
-				...(recordId ? { id: recordId } : {}),
-				adminId: input.adminId || null,
-				adminName: adminSnapshot.name,
-				adminEmail: adminSnapshot.email,
-				section: input.section,
-				action: input.action,
-				description: input.description.trim(),
-				entityType: input.entityType || null,
-				entityId: input.entityId || null,
-				entityLabel: input.entityLabel || null,
+		const eventId = randomUUID();
+		const description = input.description.trim();
+		if (!description) {
+			throw new Error('Admin event description must not be empty');
+		}
+		const metadata = this.getMetadata(input.metadata);
+		const headers = createMessagingHeaders({ messageId: eventId });
+		const correlationId = String(headers['x-correlation-id']);
+		const payload: Prisma.InputJsonObject = {
+			schemaVersion: 1,
+			eventType: ADMIN_AUDIT_EVENT_TYPE,
+			eventId,
+			occurredAt: new Date().toISOString(),
+			correlationId,
+			actorId: input.adminId || 'system:core',
+			action: input.action,
+			section: input.section,
+			description,
+			actorSnapshot: {
+				name: adminSnapshot.name,
+				email: adminSnapshot.email
+			},
+			entity: {
+				type: input.entityType?.trim() || 'admin_event',
+				id: input.entityId?.trim() || eventId,
+				label: input.entityLabel || null,
 				targetUserId: input.targetUserId || null,
-				targetUserName: targetUserSnapshot.name,
-				targetUserEmail: targetUserSnapshot.email,
-				metadata: input.metadata ?? {},
-				ip: requestSnapshot.ip,
-				userAgent: requestSnapshot.userAgent
+				targetSnapshot: {
+					name: targetUserSnapshot.name,
+					email: targetUserSnapshot.email
+				}
+			},
+			metadata: {
+				...metadata,
+				requestIp: requestSnapshot.ip,
+				requestUserAgent: requestSnapshot.userAgent
+			}
+		};
+		assertMessagingEventContract(payload, {
+			eventType: ADMIN_AUDIT_EVENT_TYPE,
+			routingKey: CORE_ADMIN_AUDIT_ROUTING_KEY,
+			messageId: eventId
+		});
+
+		return client.outboxEvent.create({
+			data: {
+				messageId: eventId,
+				...(recordId
+					? { deduplicationKey: this.getDeduplicationKey(recordId) }
+					: {}),
+				eventType: ADMIN_AUDIT_EVENT_TYPE,
+				routingKey: CORE_ADMIN_AUDIT_ROUTING_KEY,
+				payload,
+				headers
 			}
 		});
+	}
+
+	private getMetadata(value: Prisma.InputJsonValue | undefined) {
+		if (value === undefined) return {};
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			throw new Error('Admin event metadata must be an object');
+		}
+		return value as Prisma.InputJsonObject;
+	}
+
+	private getDeduplicationKey(recordId: string) {
+		return `core-admin-audit:${recordId}`;
+	}
+
+	private matchesIdempotentAudit(
+		value: Prisma.JsonValue,
+		input: AdminEventLogRecordInput
+	): boolean {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return false;
+		}
+		const entity = value.entity;
+		return (
+			value.action === input.action &&
+			Boolean(entity) &&
+			typeof entity === 'object' &&
+			!Array.isArray(entity) &&
+			entity.id === (input.entityId?.trim() || value.eventId)
+		);
 	}
 
 	private async resolveUserSnapshots(

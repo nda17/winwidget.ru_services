@@ -3,6 +3,7 @@ import {
 	CAMPAIGNS_DATABASE_BACKUP_DELAY_MINUTES,
 	IDENTITY_DATABASE_BACKUP_DELAY_MINUTES,
 	NOTIFICATION_DELIVERY_DATABASE_BACKUP_DELAY_MINUTES,
+	OPERATIONS_DATABASE_BACKUP_DELAY_MINUTES,
 	PLATFORM_DATABASE_BACKUP_DELAY_MINUTES,
 	REPORTING_DATABASE_BACKUP_DELAY_MINUTES,
 	SUPPORT_DATABASE_BACKUP_DELAY_MINUTES,
@@ -58,7 +59,8 @@ export const ensureReportingBackupScheduleSeparated = (
 		(backupMinutes + BILLING_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
 		(backupMinutes + IDENTITY_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
 		(backupMinutes + PLATFORM_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
-		(backupMinutes + SUPPORT_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
+		(backupMinutes + SUPPORT_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60),
+		(backupMinutes + OPERATIONS_DATABASE_BACKUP_DELAY_MINUTES) % (24 * 60)
 	];
 
 	if (
@@ -82,6 +84,22 @@ interface ReportingScheduleAuthorityState {
 	dailySummaryPolicyPendingGeneration: bigint | null;
 }
 
+export interface TelegramBotSettingsAuditSnapshot {
+	dailySummaryChatId: string;
+	databaseBackupThreadId: number | null;
+	paymentsThreadId: number | null;
+	operationalAlertsThreadId: number | null;
+	databaseBackupEnabled: boolean;
+	databaseBackupTime: string;
+	telegramBotTokenConfigured: boolean;
+	telegramBotUsernameConfigured: boolean;
+}
+
+export type TelegramBotSettingsAuditWriter = (
+	transaction: Prisma.TransactionClient,
+	settings: TelegramBotSettingsAuditSnapshot
+) => Promise<unknown>;
+
 @Injectable()
 export class TelegramBotService {
 	private readonly DEFAULT_DATABASE_BACKUP_TIME =
@@ -99,7 +117,10 @@ export class TelegramBotService {
 		return this.serializeSettings(settings);
 	}
 
-	async updateSettings(dto: UpdateTelegramBotSettingsDto) {
+	async updateSettings(
+		dto: UpdateTelegramBotSettingsDto,
+		writeAudit: TelegramBotSettingsAuditWriter
+	) {
 		return this.prisma.$transaction(async transaction => {
 			await transaction.telegramBotSettings.upsert({
 				where: { id: 'singleton' },
@@ -157,12 +178,14 @@ export class TelegramBotService {
 					'Daily Summary backup-policy state is missing or invalid'
 				);
 			}
-			return this.updateSettingsLocked(
+			const settings = await this.updateSettingsLocked(
 				transaction,
 				dto,
 				authorities[0],
 				currentSettings
 			);
+			await writeAudit(transaction, settings);
+			return settings;
 		});
 	}
 
@@ -356,6 +379,10 @@ export class TelegramBotService {
 			databaseBackupTime,
 			SUPPORT_DATABASE_BACKUP_DELAY_MINUTES
 		);
+		const operationsDatabaseBackupTime = this.addMinutesToTime(
+			databaseBackupTime,
+			OPERATIONS_DATABASE_BACKUP_DELAY_MINUTES
+		);
 
 		return {
 			dailySummaryChatId: settings.dailySummaryChatId,
@@ -397,6 +424,10 @@ export class TelegramBotService {
 				SUPPORT_DATABASE_BACKUP_DELAY_MINUTES,
 			supportDatabaseBackupTime,
 			supportDatabaseBackupTimeLabel: `${supportDatabaseBackupTime} МСК`,
+			operationsDatabaseBackupDelayMinutes:
+				OPERATIONS_DATABASE_BACKUP_DELAY_MINUTES,
+			operationsDatabaseBackupTime,
+			operationsDatabaseBackupTimeLabel: `${operationsDatabaseBackupTime} МСК`,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,
 			databaseBackupLastSentAt:

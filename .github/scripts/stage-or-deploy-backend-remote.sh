@@ -1757,6 +1757,25 @@ case "$DEPLOY_TARGET" in
         ;;
     esac
     ;;
+  operations)
+    [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
+      echo 'Operations lifecycle actions are manual-only.' >&2
+      exit 1
+    }
+    checkout_verified_prod_revision "$EXPECTED_REVISION"
+    case "$OPERATIONS_ACTION" in
+      status)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          bash scripts/operations-cutover-production.sh --status
+        ;;
+      cutover)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          OPERATIONS_CUTOVER_CONFIRMATION="$OPERATIONS_CONFIRMATION" \
+          bash scripts/operations-cutover-production.sh --cutover
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *)
     echo "Unsupported deploy target: $DEPLOY_TARGET" >&2
     exit 1

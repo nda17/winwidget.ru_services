@@ -559,6 +559,17 @@ platform_cleanup_migration_file() {
 	printf '%s/prisma/migrations/%s/migration.sql\n' "$SERVER_ROOT" "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION"
 }
 
+platform_cleanup_expected_changed_migrations() {
+	printf '%s\n' \
+		'prisma/migrations/20260824020000_prepare_support_service_ownership/migration.sql' \
+		"prisma/migrations/$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION/migration.sql"
+}
+
+platform_cleanup_changed_migrations_are_exact() {
+	[[ $# -eq 1 ]] || return 1
+	[[ "$1" == "$(platform_cleanup_expected_changed_migrations)" ]]
+}
+
 platform_cleanup_require_migration_contract() {
 	local file changed_migrations ownership_revision
 	file="$(platform_cleanup_migration_file)" ||
@@ -569,9 +580,9 @@ platform_cleanup_require_migration_contract() {
 		"$(platform_cleanup_sha256 "$file")" == "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" ]] ||
 		platform_cleanup_fail 'reviewed Platform Core cleanup migration SHA-256 is required.' || return 1
 	ownership_revision="$(platform_cutover_marker_value revision)" || return 1
-	changed_migrations="$(git -C "$SERVER_ROOT" diff --name-only "$ownership_revision" "$EXPECTED_REVISION" -- prisma/migrations)"
-	[[ "$changed_migrations" == "prisma/migrations/$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION/migration.sql" ]] ||
-		platform_cleanup_fail 'cleanup revision must add exactly one reviewed Core migration.' || return 1
+	changed_migrations="$(git -C "$SERVER_ROOT" diff --name-only "$ownership_revision" "$EXPECTED_REVISION" -- prisma/migrations | LC_ALL=C sort)"
+	platform_cleanup_changed_migrations_are_exact "$changed_migrations" ||
+		platform_cleanup_fail 'cleanup revision must contain only the already-applied Support prepare and reviewed Platform cleanup migrations.' || return 1
 	bash "$SERVER_ROOT/scripts/test-platform-core-source-cleanup-rehearsal.sh" \
 		--validate-migration "$file" "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256"
 }
@@ -3192,6 +3203,7 @@ platform_cleanup_status() {
 platform_cleanup_self_test() (
 	local directory now revision ownership generation sha env_sha image marker set_sql reset_sql valid_queues source
 	local manifest ledger completion completion_sha tampered candidate old_migration uuid1 uuid2
+	local expected_changed_migrations
 	local chain chain_sha next_chain_sha chain_previous challenge attestation signature
 	local topology_valid topology_invalid
 	directory="$(realpath -- "$(mktemp -d)")" || return 1
@@ -3333,6 +3345,13 @@ platform_cleanup_self_test() (
 	[[ "$marker" == *'pre_offsite_receipt_sha256='"$sha"* &&
 		"$marker" == *'completion_evidence_sha256='"$completion_sha"* ]]
 	candidate="$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION"
+	expected_changed_migrations="$(platform_cleanup_expected_changed_migrations)"
+	platform_cleanup_changed_migrations_are_exact "$expected_changed_migrations"
+	if platform_cleanup_changed_migrations_are_exact \
+		"prisma/migrations/$candidate/migration.sql"; then return 1; fi
+	if platform_cleanup_changed_migrations_are_exact \
+		"$expected_changed_migrations
+prisma/migrations/20260824030000_prepare_operations_service_ownership/migration.sql"; then return 1; fi
 	old_migration='20260101000000_base'
 	uuid1='00000000-0000-4000-8000-000000000001'
 	uuid2='00000000-0000-4000-8000-000000000002'

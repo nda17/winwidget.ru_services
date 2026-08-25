@@ -2,6 +2,7 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { AdminAuditConsumerService } from '../messaging/admin-audit-consumer.service';
 import { OperationsOutboxPublisherService } from '../messaging/operations-outbox-publisher.service';
 import { OperationsRabbitMqService } from '../messaging/operations-rabbitmq.service';
+import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
 
@@ -12,7 +13,8 @@ export class OperationsHealthService {
 		private readonly runtime: OperationsRuntimeService,
 		private readonly rabbit: OperationsRabbitMqService,
 		private readonly consumer: AdminAuditConsumerService,
-		private readonly publisher: OperationsOutboxPublisherService
+		private readonly publisher: OperationsOutboxPublisherService,
+		private readonly ownership: OperationsOwnershipService
 	) {}
 
 	liveness() {
@@ -22,6 +24,7 @@ export class OperationsHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			await this.ownership.isActive();
 		} catch {
 			throw new ServiceUnavailableException(
 				'Operations database is not ready'

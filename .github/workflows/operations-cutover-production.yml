@@ -1,0 +1,143 @@
+name: Operations Cutover Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Operations lifecycle action
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - cutover
+      confirmation:
+        description: Type CUT OVER OPERATIONS FORWARD ONLY for cutover
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production-server
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact Operations controller
+        uses: actions/checkout@v6
+
+      - name: Verify immutable Operations request
+        env:
+          OPERATIONS_ACTION: ${{ inputs.action }}
+          OPERATIONS_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/prod' &&
+            "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
+            "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+            -z "$(git status --porcelain --untracked-files=all)" ]]
+          case "$OPERATIONS_ACTION:$OPERATIONS_CONFIRMATION" in
+            status:) ;;
+            cutover:'CUT OVER OPERATIONS FORWARD ONLY') ;;
+            *) exit 1 ;;
+          esac
+          bash -n \
+            .github/scripts/stage-or-deploy-backend.sh \
+            .github/scripts/stage-or-deploy-backend-remote.sh \
+            scripts/operations-database-prepare.sh \
+            scripts/operations-cutover-production.sh \
+            scripts/cleanup-platform-core-source-production.sh
+          bash scripts/operations-database-prepare.sh --self-test
+          bash scripts/operations-cutover-production.sh --self-test
+
+  run:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: production
+    steps:
+      - name: Checkout exact Operations controller
+        uses: actions/checkout@v6
+
+      - name: Reverify immutable prod checkout
+        run: |
+          set -Eeuo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/prod' &&
+            "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
+            "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
+            -z "$(git status --porcelain --untracked-files=all)" ]]
+
+      - name: Configure SSH private key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
+
+      - name: Add VPS host to known_hosts
+        env:
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+        run: |
+          set -Eeuo pipefail
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run exact Operations lifecycle controller
+        env:
+          APP_ROOT: /opt/winwidget
+          AUTOMATIC_PROD_PUSH: 'false'
+          DEPLOY_REVISION: ${{ github.sha }}
+          DEPLOY_TARGET: operations
+          WIDGETS_CUTOVER_CONFIRMATION: ''
+          BILLING_ACTION: status
+          BILLING_CONFIRMATION: ''
+          BILLING_CLEANUP_ACTION: status
+          BILLING_CLEANUP_CONFIRMATION: ''
+          IDENTITY_ACTION: status
+          IDENTITY_CONFIRMATION: ''
+          IDENTITY_ENV_EXPECTED_SHA256: ''
+          IDENTITY_ENV_EXPORT_ID: ''
+          IDENTITY_CLEANUP_ACTION: status
+          IDENTITY_CLEANUP_CONFIRMATION: ''
+          IDENTITY_CLEANUP_MIGRATION_SHA256: ''
+          PLATFORM_ACTION: status
+          PLATFORM_CONFIRMATION: ''
+          PLATFORM_ENV_EXPECTED_SHA256: ''
+          PLATFORM_FRONTEND_REVISION: ''
+          PLATFORM_FRONTEND_RUNTIME_CHALLENGE: ''
+          PLATFORM_FRONTEND_ORIGIN: ''
+          PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256: ''
+          PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256: ''
+          PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ''
+          PLATFORM_CLEANUP_MIGRATION_SHA256: ''
+          PLATFORM_CLEANUP_COMPOSE_SHA256: ''
+          PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256: ''
+          PLATFORM_CLEANUP_SOAK_SECONDS: ''
+          SUPPORT_ACTION: status
+          SUPPORT_CONFIRMATION: ''
+          SUPPORT_CLEANUP_MIGRATION_SHA256: ''
+          SUPPORT_CLEANUP_BACKUP_SHA256: ''
+          SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ''
+          OPERATIONS_ACTION: ${{ inputs.action }}
+          OPERATIONS_CONFIRMATION: ${{ inputs.confirmation }}
+          SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+          SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+        run: |
+          set -Eeuo pipefail
+          case "$OPERATIONS_ACTION:$OPERATIONS_CONFIRMATION" in
+            status:) ;;
+            cutover:'CUT OVER OPERATIONS FORWARD ONLY') ;;
+            *) exit 1 ;;
+          esac
+          bash .github/scripts/stage-or-deploy-backend.sh

@@ -9,7 +9,11 @@ bash -n \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh \
   scripts/cleanup-platform-core-source-production.sh \
-  scripts/test-platform-core-source-cleanup-rehearsal.sh
+  scripts/test-platform-core-source-cleanup-rehearsal.sh \
+  scripts/operations-database-prepare.sh \
+  scripts/operations-cutover-production.sh \
+  scripts/database-restore-production-guard.sh \
+  scripts/test-database-restore-worker-rehearsal.sh
 node --check .github/scripts/validate-production-compose.cjs
 node --check scripts/test-support-runtime-boundaries.mjs
 node --check scripts/test-support-core-source-cleanup-rehearsal.mjs
@@ -17,6 +21,8 @@ bash -n scripts/support-release-identity.sh
 bash -n scripts/support-database-lifecycle.sh
 bash -n scripts/support-cutover-production.sh
 bash -n scripts/cleanup-support-core-source-production.sh
+bash scripts/database-restore-production-guard.sh --self-test
+bash scripts/test-database-restore-worker-rehearsal.sh --self-test
 # actionlint runs without its ShellCheck integration. Extracted workflow
 # runners are syntax-checked above; production scripts are checked separately.
 docker run --rm \
@@ -71,6 +77,7 @@ for shellcheck_target in \
   scripts/test-campaigns-cutover-rehearsal.sh \
   scripts/audit-legacy-telegram-channels-production.sh \
   scripts/database-restore-production-guard.sh \
+  scripts/test-database-restore-worker-rehearsal.sh \
   scripts/billing-release-identity.sh \
   scripts/billing-database-lifecycle.sh \
   scripts/deploy-billing-production.sh \
@@ -99,6 +106,8 @@ for shellcheck_target in \
   scripts/cleanup-support-core-source-production.sh \
   scripts/cleanup-platform-core-source-production.sh \
   scripts/test-platform-core-source-cleanup-rehearsal.sh \
+  scripts/operations-database-prepare.sh \
+  scripts/operations-cutover-production.sh \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh \
   database-restore-entrypoint.sh; do
@@ -164,6 +173,10 @@ const workflow = readFileSync(
 );
 const supportCleanupWorkflow = readFileSync(
   ".github/workflows/support-cleanup-production.yml",
+  "utf8",
+);
+const operationsCutoverWorkflow = readFileSync(
+  ".github/workflows/operations-cutover-production.yml",
   "utf8",
 );
 const platformLifecycleLines = workflow.split("\n");
@@ -244,11 +257,25 @@ if (!validateProductionComposeValidator.includes(
     "Widgets Compose build validation must accept an exact repository root independent of checkout basename",
   );
 }
-if (!validateProductionComposeValidator.includes(
-  "\t'support-admin-audit',",
-)) {
+const coreIntegrationKindsMatch = validateProductionComposeValidator.match(
+  /const expectedIntegrationKinds = \[([\s\S]*?)\];/,
+);
+const coreIntegrationKinds = coreIntegrationKindsMatch
+  ? [...coreIntegrationKindsMatch[1].matchAll(/'([^']+)'/g)].map(
+      match => match[1],
+    )
+  : [];
+const expectedCoreIntegrationKinds = [
+  "billing-payment-projection",
+  "billing-subscription-projection",
+  "billing-affiliate-projection",
+];
+if (
+  JSON.stringify(coreIntegrationKinds) !==
+  JSON.stringify(expectedCoreIntegrationKinds)
+) {
   throw new Error(
-    "Production Compose validation must retain the Support admin-audit consumer kind",
+    `Production Compose validation must retain only the three Core Billing projections: ${coreIntegrationKinds.join(",")}`,
   );
 }
 const staticWorkflowCheckScript = readFileSync(
@@ -307,6 +334,10 @@ const platformCoreCleanupRehearsal = readFileSync(
   "scripts/test-platform-core-source-cleanup-rehearsal.sh",
   "utf8",
 );
+const operationsCutoverScript = readFileSync(
+  "scripts/operations-cutover-production.sh",
+  "utf8",
+);
 const widgetsCoreCleanupRehearsal = readFileSync(
   "scripts/test-widgets-core-source-cleanup-rehearsal.sh",
   "utf8",
@@ -333,6 +364,18 @@ const databaseRestoreWorkflow = readFileSync(
   ".github/workflows/database-restore-production.yml",
   "utf8",
 );
+const databaseRestoreWorkerConfig = readFileSync(
+  "src/database-restore-worker/database-restore-worker.config.ts",
+  "utf8",
+);
+const databaseRestoreRehearsal = readFileSync(
+  "scripts/test-database-restore-worker-rehearsal.sh",
+  "utf8",
+);
+const databaseRestoreGuard = readFileSync(
+  "scripts/database-restore-production-guard.sh",
+  "utf8",
+);
 const coreRestoreTargetIsRetired =
   !databaseRestoreTargetContract.includes("\n\t'core',") &&
   !databaseRestoreTargetContract.includes("\n\t'core'\n") &&
@@ -340,6 +383,83 @@ const coreRestoreTargetIsRetired =
   !databaseRestoreWorkflow.includes("|core)");
 if (!coreRestoreTargetIsRetired) {
   throw new Error("Retired Core backup/restore target was reintroduced");
+}
+const expectedRestoreTargets = [
+  "notification-delivery",
+  "campaigns",
+  "reporting",
+  "widgets",
+  "billing",
+  "identity",
+  "platform",
+  "support",
+  "operations",
+];
+const restoreTargetsMatch = databaseRestoreTargetContract.match(
+  /export const DATABASE_RESTORE_TARGETS = \[([\s\S]*?)\] as const;/,
+);
+if (!restoreTargetsMatch) {
+  throw new Error("Database restore target contract is missing");
+}
+const restoreContractTargets = [
+  ...restoreTargetsMatch[1].matchAll(/'([a-z-]+)'/g),
+].map(match => match[1]);
+const restoreWorkflowTargetBlock = databaseRestoreWorkflow.match(
+  /      target:\n[\s\S]*?        options:\n([\s\S]*?)      evidence:/,
+);
+const restoreWorkflowTargets = restoreWorkflowTargetBlock
+  ? [...restoreWorkflowTargetBlock[1].matchAll(/^          - ([a-z-]+)$/gm)].map(
+      match => match[1],
+    )
+  : [];
+if (
+  JSON.stringify(restoreContractTargets) !==
+    JSON.stringify(expectedRestoreTargets) ||
+  JSON.stringify(restoreWorkflowTargets) !==
+    JSON.stringify(expectedRestoreTargets)
+) {
+  throw new Error(
+    `Database restore targets must be the exact nine service-owned databases without Core: contract=${restoreContractTargets.join(",")}; workflow=${restoreWorkflowTargets.join(",")}`,
+  );
+}
+for (const target of expectedRestoreTargets) {
+  const upperTarget = target.replaceAll("-", "_").toUpperCase();
+  for (const [sourceName, source, token] of [
+    ["worker config", databaseRestoreWorkerConfig, `target: '${target}'`],
+    ["restore rehearsal", databaseRestoreRehearsal, `${target}) printf`],
+    ["restore rehearsal", databaseRestoreRehearsal, `run_successful_restore ${target}`],
+    ["production Compose", productionCompose, `DATABASE_RESTORE_${upperTarget}_PORT`],
+    ["restore guard", databaseRestoreGuard, `DATABASE_RESTORE_${upperTarget}_PORT`],
+  ]) {
+    if (!source.includes(token)) {
+      throw new Error(`${sourceName} lost restore target ${target}: ${token}`);
+    }
+  }
+}
+for (const [sourceName, source] of [
+  ["target contract", databaseRestoreTargetContract],
+  ["worker config", databaseRestoreWorkerConfig],
+  ["production Compose", productionCompose],
+]) {
+  if (source.includes("DATABASE_RESTORE_CORE_") || source.includes("database-restore-core-admin-password")) {
+    throw new Error(`${sourceName} reintroduced the retired Core restore target`);
+  }
+}
+if (
+  !databaseRestoreGuard.includes("service-owned-required") ||
+  !databaseRestoreGuard.includes("key.startsWith('DATABASE_RESTORE_CORE_')") ||
+  !databaseRestoreGuard.includes(
+    "Database restore guard self-test accepted a retired Core target.",
+  ) ||
+  databaseRestoreGuard.includes("DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE") ||
+  !databaseRestoreGuard.includes(
+    '["billing","campaigns","identity","notification-delivery","operations","platform","reporting","support","widgets"]',
+  ) ||
+  !databaseRestoreRehearsal.includes("OPERATIONS_PORT=55441") ||
+  !databaseRestoreRehearsal.includes("'baseline-operations'") ||
+  !databaseRestoreRehearsal.includes("'mutated-operations'")
+) {
+  throw new Error("Exact nine-target restore guard/rehearsal contract is incomplete");
 }
 const coreAppModule = readFileSync("src/app.module.ts", "utf8");
 const retiredCorePlatformRuntimeFiles = [
@@ -462,6 +582,20 @@ for (const requiredCleanupControllerContract of [
   if (!platformCoreCleanupScript.includes(requiredCleanupControllerContract)) {
     throw new Error(
       `Platform cleanup controller lost its sealed evidence contract: ${requiredCleanupControllerContract}`,
+    );
+  }
+}
+for (const requiredPlatformCleanupLineageContract of [
+  "platform_cleanup_expected_changed_migrations()",
+  "platform_cleanup_changed_migrations_are_exact()",
+  "prisma/migrations/20260824020000_prepare_support_service_ownership/migration.sql",
+  '"prisma/migrations/$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION/migration.sql"',
+  "cleanup revision must contain only the already-applied Support prepare and reviewed Platform cleanup migrations.",
+  "prisma/migrations/20260824030000_prepare_operations_service_ownership/migration.sql",
+]) {
+  if (!platformCoreCleanupScript.includes(requiredPlatformCleanupLineageContract)) {
+    throw new Error(
+      `Platform cleanup lost exact Support-to-cleanup lineage guard: ${requiredPlatformCleanupLineageContract}`,
     );
   }
 }
@@ -2499,6 +2633,142 @@ if (
     "Support cleanup workflow must remain manual-only and minimal",
   );
 }
+if (!/\n  cleanup:\n[\s\S]*?\n    environment: production\n/.test(supportCleanupWorkflow)) {
+  throw new Error("Support cleanup destructive job must use the production environment gate");
+}
+const operationsCutoverInputsStart = operationsCutoverWorkflow.indexOf(
+  "  workflow_dispatch:\n    inputs:\n",
+);
+const operationsCutoverPermissionsStart = operationsCutoverWorkflow.indexOf(
+  "\npermissions:\n",
+  operationsCutoverInputsStart,
+);
+if (
+  operationsCutoverInputsStart < 0 ||
+  operationsCutoverPermissionsStart <= operationsCutoverInputsStart
+) {
+  throw new Error("Operations cutover workflow input block is missing or misplaced");
+}
+const operationsCutoverInputNames = [
+  ...operationsCutoverWorkflow
+    .slice(operationsCutoverInputsStart, operationsCutoverPermissionsStart)
+    .matchAll(/^      ([a-z][a-z0-9_]*):$/gm),
+].map(match => match[1]);
+if (
+  operationsCutoverInputNames.length > 25 ||
+  JSON.stringify(operationsCutoverInputNames) !==
+    JSON.stringify(["action", "confirmation"])
+) {
+  throw new Error(
+    `Unexpected Operations cutover workflow inputs: ${operationsCutoverInputNames.join(",")}`,
+  );
+}
+for (const requiredOperationsWorkflowToken of [
+  "name: Operations Cutover Production",
+  "group: deploy-production-server",
+  "environment: production",
+  '"$GITHUB_REF" == \'refs/heads/prod\'',
+  '"$(git rev-parse HEAD)" == "$GITHUB_SHA"',
+  "cutover:'CUT OVER OPERATIONS FORWARD ONLY'",
+  "DEPLOY_TARGET: operations",
+  "OPERATIONS_ACTION: ${{ inputs.action }}",
+  "OPERATIONS_CONFIRMATION: ${{ inputs.confirmation }}",
+  "PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256: ''",
+  "PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256: ''",
+  "PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ''",
+  "PLATFORM_CLEANUP_MIGRATION_SHA256: ''",
+  "PLATFORM_CLEANUP_COMPOSE_SHA256: ''",
+  "PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256: ''",
+  "SUPPORT_CLEANUP_MIGRATION_SHA256: ''",
+  "SUPPORT_CLEANUP_BACKUP_SHA256: ''",
+  "SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ''",
+  "bash .github/scripts/stage-or-deploy-backend.sh",
+]) {
+  if (!operationsCutoverWorkflow.includes(requiredOperationsWorkflowToken)) {
+    throw new Error(
+      `Operations cutover workflow lost exact manual guard: ${requiredOperationsWorkflowToken}`,
+    );
+  }
+}
+if (
+  operationsCutoverWorkflow.includes("\n  push:") ||
+  Buffer.byteLength(operationsCutoverWorkflow, "utf8") >= 30_000 ||
+  !/\n  run:\n[\s\S]*?\n    environment: production\n/.test(operationsCutoverWorkflow)
+) {
+  throw new Error(
+    "Operations cutover workflow must remain manual-only, production-gated and below 30000 bytes",
+  );
+}
+for (const requiredLocalOperationsControllerToken of [
+  'OPERATIONS_ACTION="${OPERATIONS_ACTION:-status}"',
+  'OPERATIONS_CONFIRMATION="${OPERATIONS_CONFIRMATION:-}"',
+  'if [[ "$DEPLOY_TARGET" == \'operations\' ]]',
+  "cutover:'CUT OVER OPERATIONS FORWARD ONLY'",
+  "OPERATIONS_ACTION='$OPERATIONS_ACTION'",
+  "OPERATIONS_CONFIRMATION='$OPERATIONS_CONFIRMATION'",
+  "Operations lifecycle inputs require the operations target.",
+]) {
+  if (!stageOrDeployLocalScript.includes(requiredLocalOperationsControllerToken)) {
+    throw new Error(
+      `Local deployment controller lost Operations isolation: ${requiredLocalOperationsControllerToken}`,
+    );
+  }
+}
+for (const requiredRemoteOperationsControllerToken of [
+  "  operations)",
+  "Operations lifecycle actions are manual-only.",
+  "bash scripts/operations-cutover-production.sh --status",
+  'OPERATIONS_CUTOVER_CONFIRMATION="$OPERATIONS_CONFIRMATION"',
+  "bash scripts/operations-cutover-production.sh --cutover",
+]) {
+  if (!stageOrDeployRemoteScript.includes(requiredRemoteOperationsControllerToken)) {
+    throw new Error(
+      `Remote deployment controller lost Operations isolation: ${requiredRemoteOperationsControllerToken}`,
+    );
+  }
+}
+for (const requiredOperationsCutoverToken of [
+  "assert_platform_cleanup_complete()",
+  "platform_cleanup_validate_marker",
+  "platform_cleanup_marker_value phase",
+  'git -C "$SERVER_ROOT" merge-base --is-ancestor',
+  '"$cleanup_revision" != "$EXPECTED_REVISION"',
+  '"$cleanup_revision" != "$revision"',
+  'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"',
+  "compose build api identity-api operations-api",
+  'assert_identity_release_prerequisite "$revision"',
+  '"winwidget-identity:git-$revision"',
+  "org.opencontainers.image.revision",
+  "up -d --no-deps --no-build --force-recreate identity-api",
+  "Identity image and revision must match the exact Operations cutover revision",
+  "Exact Identity cutover image and Operations scope verified",
+  'identity_introspection_smoke "$revision"',
+]) {
+  if (!operationsCutoverScript.includes(requiredOperationsCutoverToken)) {
+    throw new Error(
+      `Operations cutover lost strict Platform-cleanup/restore precondition: ${requiredOperationsCutoverToken}`,
+    );
+  }
+}
+const supportAuditReadPattern =
+  "post_identity_integration_read_pattern='^winwidget\\.(admin\\.audit\\.(campaigns|reporting|widgets|billing|identity|platform|support)\\.v1|core\\.billing\\.(payment-details|subscription-details|affiliate)\\.v1)(\\.dead-letter)?$'";
+if (
+  deployProductionScript.split("post_identity_integration_read_pattern=").length - 1 !== 1 ||
+  !deployProductionScript.includes(supportAuditReadPattern)
+) {
+  throw new Error(
+    "Routine deploy must preserve exactly one Support-inclusive pre-Operations integration read pattern",
+  );
+}
+if (
+  deployProductionScript.split(
+    'database_restore_guard_assert_before_mutation \\\n\tservice-owned-required "$ENV_FILE"',
+  ).length - 1 !== 1
+) {
+  throw new Error(
+    "Post-Operations routine deploy must require the exact service-owned restore boundary",
+  );
+}
 const workflowContract = [
   workflow,
   validateProductionComposeScript,
@@ -2593,6 +2863,8 @@ const exactIdentityScopedTokenNames = `          identity_scoped_token_names=(
             IDENTITY_BILLING_TOKEN
             IDENTITY_PLATFORM_TOKEN
             IDENTITY_SUPPORT_TOKEN
+            IDENTITY_OPERATIONS_TOKEN
+            OPERATIONS_IDENTITY_TOKEN
             BILLING_IDENTITY_TOKEN
           )`;
 if (!identityScopedTokenBlock.includes(exactIdentityScopedTokenNames)) {
@@ -2833,7 +3105,7 @@ requireCount("git checkout prod", 2);
 requireCount('git merge --ff-only "$fetched_revision"', 1);
 requireCount(
   'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-  12,
+  13,
 );
 requireCount(
   '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',

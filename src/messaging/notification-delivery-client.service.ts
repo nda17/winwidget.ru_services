@@ -341,6 +341,13 @@ export class NotificationDeliveryClientService {
 		return this.request(`failures?${query.toString()}`, isFailuresPage);
 	}
 
+	getFailure(id: string): Promise<NotificationDeliveryFailureView> {
+		return this.request(
+			`failures/${encodeURIComponent(id)}`,
+			isFailureView
+		);
+	}
+
 	retryFailure(
 		id: string,
 		actorId: string

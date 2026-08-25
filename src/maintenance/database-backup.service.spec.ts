@@ -181,6 +181,32 @@ describe('DatabaseBackupService', () => {
 		expect(connection.url).not.toContain('schema=');
 	});
 
+	it('uses the dedicated least-privilege Operations backup connection', () => {
+		const service = createService({
+			OPERATIONS_BACKUP_URL:
+				'postgresql://operations_backup:operations-secret@operations.example:5432/winwidget_operations?schema=operations&sslmode=require'
+		});
+
+		const connection = (service as any).getPostgresConnection(
+			'operations'
+		);
+
+		expect(connection).toEqual(
+			expect.objectContaining({
+				target: 'operations',
+				label: 'Operations',
+				databaseName: 'winwidget_operations',
+				schema: 'operations',
+				password: 'operations-secret'
+			})
+		);
+		expect(connection.url).toContain(
+			'operations.example:5432/winwidget_operations'
+		);
+		expect(connection.url).not.toContain('operations-secret');
+		expect(connection.url).not.toContain('schema=');
+	});
+
 	it('backs up only the selected notification-delivery target', async () => {
 		const sequence: string[] = [];
 		let dumpedPath = '';

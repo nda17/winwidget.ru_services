@@ -85,6 +85,14 @@ describe('IdentityInternalGuard', () => {
 		).toThrow(ForbiddenException);
 	});
 
+	it('does not let the Operations credential escape its endpoint scope', () => {
+		expect(() =>
+			guard(['core']).canActivate(
+				context('operations', credential('operations'))
+			)
+		).toThrow(ForbiddenException);
+	});
+
 	it('rejects non-loopback callers before token comparison', () => {
 		expect(() =>
 			guard(['core']).canActivate(

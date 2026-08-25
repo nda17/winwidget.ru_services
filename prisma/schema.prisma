@@ -429,6 +429,10 @@ enum SupportCoreOwnership {
   SUPPORT
 }
 
+enum OperationsCoreOwnership {
+  CORE
+  OPERATIONS
+}
 model SupportCoreState {
   id                       String               @id @default("singleton")
   ownership                SupportCoreOwnership @default(CORE)
@@ -450,6 +454,25 @@ model SupportCoreState {
   updatedAt                DateTime              @updatedAt @map("updated_at")
 
   @@map("support_core_state")
+}
+
+model OperationsCoreState {
+  id                   String                  @id @default("singleton")
+  ownership            OperationsCoreOwnership @default(CORE)
+  sourceWritesEnabled  Boolean                 @default(true) @map("source_writes_enabled")
+  legacyRoutesEnabled  Boolean                 @default(true) @map("legacy_routes_enabled")
+  generation           BigInt                  @default(0)
+  preparedRevision     String?                 @map("prepared_revision")
+  ownershipRevision    String?                 @map("ownership_revision")
+  sourceSnapshotSha256 String?                 @map("source_snapshot_sha256")
+  sourceNoteCount      BigInt?                 @map("source_note_count")
+  sourceEventCount     BigInt?                 @map("source_event_count")
+  fencedAt             DateTime?               @map("fenced_at")
+  exportedAt           DateTime?               @map("exported_at")
+  activatedAt          DateTime?               @map("activated_at")
+  updatedAt            DateTime                @updatedAt @map("updated_at")
+
+  @@map("operations_core_state")
 }
 
 model TelegramBotSettings {

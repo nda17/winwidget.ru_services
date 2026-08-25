@@ -39,7 +39,7 @@ describe('RabbitMqService topology', () => {
 		expect(service.isConnected()).toBe(true);
 	});
 
-	it('asserts non-Widgets queues without reclaiming provider topology', async () => {
+	it('asserts only Core queues without reclaiming service-owned topology', async () => {
 		const assertQueue = jest.fn().mockResolvedValue(undefined);
 		const bindQueue = jest.fn().mockResolvedValue(undefined);
 		const channel = {
@@ -99,58 +99,19 @@ describe('RabbitMqService topology', () => {
 			'database-backup.dead-letter'
 		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.reporting.v1',
+			'winwidget.core.billing.payment-details.v1',
 			'winwidget.events',
-			'admin.audit.reporting.v1'
+			'billing.payment.details.changed.v1'
 		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.reporting.v1',
+			'winwidget.core.billing.subscription-details.v1',
 			'winwidget.events',
-			'manual.reporting-admin-audit'
+			'billing.subscription.details.changed.v1'
 		);
 		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.reporting.v1',
-			'winwidget.manual-retry',
-			'reporting-admin-audit'
-		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.reporting.v1.dead-letter',
-			'winwidget.dead-letter',
-			'reporting-admin-audit.dead-letter'
-		);
-		expect(channel.assertQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.reporting.v1.retry-v2.1',
-			expect.objectContaining({
-				deadLetterExchange: 'winwidget.manual-retry',
-				deadLetterRoutingKey: 'reporting-admin-audit'
-			})
-		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.platform.v1',
+			'winwidget.core.billing.affiliate.v1',
 			'winwidget.events',
-			'admin.audit.platform.v1'
-		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.platform.v1',
-			'winwidget.events',
-			'manual.platform-admin-audit'
-		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.platform.v1',
-			'winwidget.manual-retry',
-			'platform-admin-audit'
-		);
-		expect(channel.bindQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.platform.v1.dead-letter',
-			'winwidget.dead-letter',
-			'platform-admin-audit.dead-letter'
-		);
-		expect(channel.assertQueue).toHaveBeenCalledWith(
-			'winwidget.admin.audit.platform.v1.retry-v2.1',
-			expect.objectContaining({
-				deadLetterExchange: 'winwidget.manual-retry',
-				deadLetterRoutingKey: 'platform-admin-audit'
-			})
+			'billing.affiliate.changed.v1'
 		);
 
 		const assertedQueues = assertQueue.mock.calls.map(([queue]) => queue);
@@ -185,6 +146,28 @@ describe('RabbitMqService topology', () => {
 					queue =>
 						queue === providerQueue ||
 						queue.startsWith(`${providerQueue}.`)
+				)
+			).toBe(false);
+		}
+		for (const auditSource of [
+			'campaigns',
+			'reporting',
+			'widgets',
+			'billing',
+			'identity',
+			'platform'
+		]) {
+			const auditQueue = `winwidget.admin.audit.${auditSource}.v1`;
+			expect(
+				assertedQueues.some(
+					queue =>
+						queue === auditQueue || queue.startsWith(`${auditQueue}.`)
+				)
+			).toBe(false);
+			expect(
+				boundQueues.some(
+					queue =>
+						queue === auditQueue || queue.startsWith(`${auditQueue}.`)
 				)
 			).toBe(false);
 		}

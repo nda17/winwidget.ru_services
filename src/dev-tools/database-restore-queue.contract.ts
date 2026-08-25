@@ -20,7 +20,8 @@ export const DATABASE_RESTORE_TARGETS = [
 	'billing',
 	'identity',
 	'platform',
-	'support'
+	'support',
+	'operations'
 ] as const;
 
 export type DatabaseRestoreTarget =
@@ -82,6 +83,11 @@ export const DATABASE_RESTORE_TARGET_SETTINGS: ReadonlyArray<{
 		id: 'support',
 		label: 'Support',
 		confirmation: 'ВОССТАНОВИТЬ SUPPORT'
+	},
+	{
+		id: 'operations',
+		label: 'Operations',
+		confirmation: 'ВОССТАНОВИТЬ OPERATIONS'
 	}
 ];
 
