@@ -17,7 +17,7 @@ source "$server_root/scripts/database-restore-production-guard.sh"
 source "$server_root/scripts/support-cutover-production.sh"
 
 self_test() {
-	local guard_call
+	local guard_call marker_key_guard
 
 	bash -n "${BASH_SOURCE[0]}"
 	test -f "$sql_contract"
@@ -60,6 +60,13 @@ self_test() {
 	fi
 	grep -Fq 'support_database_mark_cleanup "$revision"' "${BASH_SOURCE[0]}"
 	grep -Fq 'support_cleanup_write_marker complete' "${BASH_SOURCE[0]}"
+	marker_key_guard='^[[:space:]]*\[\[ \$# -eq [12] && "\$1" =~ \^\[a-z\]\[a-z0-9_\]\*\$'
+	[[ "$(grep -Ec "$marker_key_guard" "${BASH_SOURCE[0]}")" == '2' ]] || {
+		echo 'Support cleanup marker keys must permit sha256 fields without allowing unsafe characters.' >&2
+		return 1
+	}
+	grep -Fq '"$current_phase" == '\''complete'\'' || "$current_phase" == "$phase"' \
+		"${BASH_SOURCE[0]}"
 	printf 'Support Core source cleanup static self-test passed\n'
 }
 
@@ -155,12 +162,25 @@ support_cleanup_compose() {
 
 support_cleanup_marker="$APP_ROOT/deploy/backend/.support-core-cleanup-v1"
 support_cleanup_marker_value() {
-	[[ $# -eq 1 && "$1" =~ ^[a-z_]+$ && -f "$support_cleanup_marker" &&
+	[[ $# -eq 1 && "$1" =~ ^[a-z][a-z0-9_]*$ && -f "$support_cleanup_marker" &&
 		! -L "$support_cleanup_marker" ]] || return 1
 	awk -F= -v key="$1" '
 		$1 == key { print substr($0, index($0, "=") + 1); found += 1 }
 		END { exit(found == 1 ? 0 : 1) }
 	' "$support_cleanup_marker"
+}
+
+support_cleanup_require_marker_value() {
+	[[ $# -eq 2 && "$1" =~ ^[a-z][a-z0-9_]*$ ]] || return 1
+	local key="$1" expected="$2" actual
+	actual="$(support_cleanup_marker_value "$key")" || {
+		printf 'Support cleanup marker read failed: %s\n' "$key" >&2
+		return 1
+	}
+	[[ "$actual" == "$expected" ]] || {
+		printf 'Support cleanup marker mismatch: %s\n' "$key" >&2
+		return 1
+	}
 }
 
 support_cleanup_validate_marker() {
@@ -190,21 +210,33 @@ support_cleanup_validate_marker() {
 
 support_cleanup_write_marker() {
 	[[ $# -eq 1 && "$1" =~ ^(verified|complete)$ ]] || return 1
-	local phase="$1" temporary="${support_cleanup_marker}.tmp.$$"
+	local phase="$1" current_phase temporary="${support_cleanup_marker}.tmp.$$"
 	if [[ -e "$support_cleanup_marker" || -L "$support_cleanup_marker" ]]; then
-		support_cleanup_validate_marker || return 1
-		[[ "$(support_cleanup_marker_value cleanup_revision)" == "$revision" &&
-			"$(support_cleanup_marker_value ownership_revision)" == "$revision" &&
-			"$(support_cleanup_marker_value migration_sha256)" == "$reviewed_sql_sha256" &&
-			"$(support_cleanup_marker_value support_backup_sha256)" == "${SUPPORT_CORE_SOURCE_CLEANUP_SUPPORT_BACKUP_SHA256:-}" &&
-			"$(support_cleanup_marker_value restore_evidence_sha256)" == "${SUPPORT_CORE_SOURCE_CLEANUP_RESTORE_EVIDENCE_SHA256:-}" &&
-			"$(support_cleanup_marker_value target_database_id)" == "$target_database_id" &&
-			"$(support_cleanup_marker_value source_database_system_id)" == "$source_system_id" &&
-			"$(support_cleanup_marker_value source_fingerprint)" == "$source_fingerprint" &&
-			"$(support_cleanup_marker_value source_snapshot_sha256)" == "$snapshot_sha256" &&
-			"$(support_cleanup_marker_value source_mapping_count)" == "$mapping_count" &&
-			"$(support_cleanup_marker_value source_high_watermark)" == "$high_watermark" ]] || return 1
-		if [[ "$(support_cleanup_marker_value phase)" == 'complete' ]]; then
+		support_cleanup_validate_marker || {
+			printf 'Support cleanup marker structure is invalid.\n' >&2
+			return 1
+		}
+		printf 'Support cleanup marker stage: structure-ok\n' >&2
+		support_cleanup_require_marker_value cleanup_revision "$revision" || return 1
+		support_cleanup_require_marker_value ownership_revision "$revision" || return 1
+		support_cleanup_require_marker_value migration_sha256 "$reviewed_sql_sha256" || return 1
+		support_cleanup_require_marker_value support_backup_sha256 \
+			"${SUPPORT_CORE_SOURCE_CLEANUP_SUPPORT_BACKUP_SHA256:-}" || return 1
+		support_cleanup_require_marker_value restore_evidence_sha256 \
+			"${SUPPORT_CORE_SOURCE_CLEANUP_RESTORE_EVIDENCE_SHA256:-}" || return 1
+		support_cleanup_require_marker_value target_database_id "$target_database_id" || return 1
+		support_cleanup_require_marker_value source_database_system_id "$source_system_id" || return 1
+		support_cleanup_require_marker_value source_fingerprint "$source_fingerprint" || return 1
+		support_cleanup_require_marker_value source_snapshot_sha256 "$snapshot_sha256" || return 1
+		support_cleanup_require_marker_value source_mapping_count "$mapping_count" || return 1
+		support_cleanup_require_marker_value source_high_watermark "$high_watermark" || return 1
+		printf 'Support cleanup marker stage: immutable-fields-ok\n' >&2
+		current_phase="$(support_cleanup_marker_value phase)" || {
+			printf 'Support cleanup marker read failed: phase\n' >&2
+			return 1
+		}
+		if [[ "$current_phase" == 'complete' || "$current_phase" == "$phase" ]]; then
+			printf 'Support cleanup marker stage: idempotent-phase-ok\n' >&2
 			return 0
 		fi
 	fi
@@ -225,7 +257,11 @@ support_cleanup_write_marker() {
 	chmod 600 "$temporary"
 	chown 0:0 "$temporary"
 	mv -f -- "$temporary" "$support_cleanup_marker"
-	support_cleanup_validate_marker
+	support_cleanup_validate_marker || {
+		printf 'Support cleanup marker post-write validation failed.\n' >&2
+		return 1
+	}
+	printf 'Support cleanup marker stage: post-write-ok\n' >&2
 }
 
 core_image="$support_cutover_core_image_id"
@@ -355,6 +391,7 @@ actual_sql_sha256="$(sha256sum "$sql_contract" | awk '{print $1}')"
 
 support_cleanup_write_marker verified
 support_database_mark_cleanup "$revision"
+printf 'Support cleanup marker stage: database-cleanup-binding-ok\n' >&2
 
 source_shape="$(
 	docker run --rm --network host --env-file "$backend_env" \
