@@ -2665,7 +2665,7 @@ const operationsCutoverInputNames = [
 if (
   operationsCutoverInputNames.length > 25 ||
   JSON.stringify(operationsCutoverInputNames) !==
-    JSON.stringify(["action", "confirmation"])
+    JSON.stringify(["action", "confirmation", "platform_terminal_confirmation"])
 ) {
   throw new Error(
     `Unexpected Operations cutover workflow inputs: ${operationsCutoverInputNames.join(",")}`,
@@ -2681,6 +2681,8 @@ for (const requiredOperationsWorkflowToken of [
   "DEPLOY_TARGET: operations",
   "OPERATIONS_ACTION: ${{ inputs.action }}",
   "OPERATIONS_CONFIRMATION: ${{ inputs.confirmation }}",
+  "OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION: ${{ inputs.platform_terminal_confirmation }}",
+  "DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER",
   "PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256: ''",
   "PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256: ''",
   "PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ''",
@@ -2710,10 +2712,12 @@ if (
 for (const requiredLocalOperationsControllerToken of [
   'OPERATIONS_ACTION="${OPERATIONS_ACTION:-status}"',
   'OPERATIONS_CONFIRMATION="${OPERATIONS_CONFIRMATION:-}"',
+  'OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION="${OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION:-}"',
   'if [[ "$DEPLOY_TARGET" == \'operations\' ]]',
   "cutover:'CUT OVER OPERATIONS FORWARD ONLY'",
   "OPERATIONS_ACTION='$OPERATIONS_ACTION'",
   "OPERATIONS_CONFIRMATION='$OPERATIONS_CONFIRMATION'",
+  "OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION='$OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION'",
   "Operations lifecycle inputs require the operations target.",
 ]) {
   if (!stageOrDeployLocalScript.includes(requiredLocalOperationsControllerToken)) {
@@ -2727,6 +2731,7 @@ for (const requiredRemoteOperationsControllerToken of [
   "Operations lifecycle actions are manual-only.",
   "bash scripts/operations-cutover-production.sh --status",
   'OPERATIONS_CUTOVER_CONFIRMATION="$OPERATIONS_CONFIRMATION"',
+  'OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION="$OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION"',
   "bash scripts/operations-cutover-production.sh --cutover",
 ]) {
   if (!stageOrDeployRemoteScript.includes(requiredRemoteOperationsControllerToken)) {
@@ -2736,14 +2741,23 @@ for (const requiredRemoteOperationsControllerToken of [
   }
 }
 for (const requiredOperationsCutoverToken of [
-  "assert_platform_cleanup_complete()",
+  "assert_platform_cleanup_prerequisite()",
+  "run_or_verify_terminal_platform_cleanup()",
+  "verify_terminal_platform_cleanup()",
+  "platform_terminal_rollback_pristine_operations_prepare()",
+  "platform_terminal_assert_exact_repo_ledger()",
   "export_coordinated_revision()",
   'export_coordinated_revision "$revision"',
-  "platform_cleanup_validate_marker",
-  "platform_cleanup_marker_value phase",
+  "platform_terminal_validate_marker",
+  "platform_terminal_candidate_migration_state",
+  "platform_terminal_assert_files_unchanged",
+  "platform_terminal_wait_core_outbox_drained",
+  "api outbox-publisher platform-api platform-outbox-publisher api-gateway",
+  "'admin.audit.platform.v1','billing.offer.changed.v2'",
+  "DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER",
   'git -C "$SERVER_ROOT" merge-base --is-ancestor',
-  '"$cleanup_revision" != "$EXPECTED_REVISION"',
-  '"$cleanup_revision" != "$revision"',
+  'identity_mode=creation',
+  'identity_mode=descendant',
   'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"',
   "compose build --provenance=false",
   'assert_identity_release_prerequisite "$revision"',
@@ -2760,8 +2774,24 @@ for (const requiredOperationsCutoverToken of [
     );
   }
 }
+if (
+  operationsCutoverScript.split(
+    'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"',
+  ).length - 1 < 3
+) {
+  throw new Error(
+    "Operations cutover lost immediate restore-guard rechecks before import and terminal Core cleanup",
+  );
+}
+if (
+  operationsCutoverScript.split("platform_terminal_assert_files_unchanged").length - 1 < 4
+) {
+  throw new Error(
+    "Operations cutover lost checkout/env/Compose TOCTOU rechecks before Platform DDL, import or Core cleanup",
+  );
+}
 const operationsNodeRuntimeSources = [
-  ["Operations cutover", operationsCutoverScript, 8],
+  ["Operations cutover", operationsCutoverScript, 12],
   ["Operations database prepare", operationsDatabasePrepareScript, 3],
 ];
 for (const [sourceName, source, expectedRunnerCount] of operationsNodeRuntimeSources) {

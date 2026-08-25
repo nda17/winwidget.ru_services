@@ -7,7 +7,20 @@ SERVER_ROOT="${SERVER_ROOT:-$APP_ROOT/winwidget.ru_server}"
 ENV_FILE="${OPERATIONS_ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 COMPOSE_FILE="${OPERATIONS_COMPOSE_FILE:-$SERVER_ROOT/deploy/docker-compose.prod.yml}"
 CONFIRMATION='CUT OVER OPERATIONS FORWARD ONLY'
+PLATFORM_TERMINAL_CONFIRMATION='DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER'
 CONTAINER_ARTIFACT_DIR='/var/lib/winwidget/operations-cutover'
+readonly PLATFORM_TERMINAL_MIGRATION='20260825000000_remove_legacy_platform_core_source'
+readonly OPERATIONS_PREP_MIGRATION='20260824030000_prepare_operations_service_ownership'
+readonly PLATFORM_TERMINAL_MARKER_NAME='.platform-core-source-terminal-v1'
+readonly -a PLATFORM_TERMINAL_MARKER_KEYS=(
+  version phase ownership_revision cleanup_revision production_env_sha256
+  compose_sha256 core_database_name core_database_system_identifier generation
+  migration migration_sha256 snapshot_sha256 source_fingerprint
+  source_high_watermark billing_offer_contract_version
+  billing_offer_sequence_scope billing_offer_aggregate_version
+  billing_offer_source_sequence billing_offer_fence_fingerprint
+  before_inventory after_inventory prisma_migration_id created_at updated_at
+)
 readonly OPERATIONS_STEADY_INTEGRATION_READ_PATTERN='^winwidget\.core\.billing\.(payment-details|subscription-details|affiliate)\.v1(\.dead-letter)?$'
 readonly OPERATIONS_STEADY_INTEGRATION_KINDS='billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
 
@@ -103,8 +116,13 @@ export_coordinated_revision() {
 }
 
 assert_inputs() {
-  [[ "$(id -u)" == '0' ]] ||
-    fail 'production cutover must run as root'
+  [[ "$(id -u)" == '0' && "$(uname -s)" == Linux ]] ||
+    fail 'production cutover must run as root on Linux'
+  [[ -z "${DOCKER_HOST+x}" && -z "${DOCKER_CONTEXT+x}" &&
+    "$(docker context show)" == default &&
+    "$(docker context inspect default --format '{{.Endpoints.docker.Host}}')" == 'unix:///var/run/docker.sock' &&
+    "$(docker info --format '{{.OSType}}')" == linux ]] ||
+    fail 'canonical local production Docker daemon is required'
   [[ "${OPERATIONS_CUTOVER_CONFIRMATION:-}" == "$CONFIRMATION" ]] ||
     fail "set exact confirmation: $CONFIRMATION"
   [[ "$ENV_FILE" == "$APP_ROOT/deploy/backend/.env.production" &&
@@ -117,30 +135,1090 @@ assert_inputs() {
     fail 'backend production env must be root-owned mode 600'
 }
 
-assert_platform_cleanup_complete() {
-  local revision="$1" cleanup_revision
+load_platform_terminal_dependencies() {
+  local migration_file operations_migration_file
+  migration_file="$SERVER_ROOT/prisma/migrations/$PLATFORM_TERMINAL_MIGRATION/migration.sql"
+  operations_migration_file="$SERVER_ROOT/prisma/migrations/$OPERATIONS_PREP_MIGRATION/migration.sql"
+  [[ -f "$migration_file" && ! -L "$migration_file" ]] ||
+    fail 'terminal Platform migration is missing or unsafe'
+  [[ -f "$operations_migration_file" && ! -L "$operations_migration_file" ]] ||
+    fail 'Operations Core prepare migration is missing or unsafe'
+  export EXPECTED_REVISION="${EXPECTED_REVISION:-}"
+  export PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION="$PLATFORM_TERMINAL_MIGRATION"
+  export PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256
+  export PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256
+  export PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256
+  export OPERATIONS_PREP_MIGRATION_SHA256
+  if ! declare -F platform_cleanup_source_state >/dev/null; then
+    # shellcheck source=scripts/cleanup-platform-core-source-production.sh
+    source "$SERVER_ROOT/scripts/cleanup-platform-core-source-production.sh"
+  fi
+  platform_cleanup_load_dependencies
+  PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256="$(
+    platform_cleanup_sha256 "$migration_file"
+  )" || fail 'terminal Platform migration SHA-256 cannot be computed'
+  OPERATIONS_PREP_MIGRATION_SHA256="$(
+    platform_cleanup_sha256 "$operations_migration_file"
+  )" || fail 'Operations Core prepare migration SHA-256 cannot be computed'
+  PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256="$(
+    platform_cleanup_sha256 "$ENV_FILE"
+  )" || fail 'backend production env SHA-256 cannot be computed'
+  PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256="$(
+    platform_cleanup_sha256 "$COMPOSE_FILE"
+  )" || fail 'production Compose SHA-256 cannot be computed'
+  [[ "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+    "$OPERATIONS_PREP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+    "$PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+    "$PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+    fail 'terminal Platform identities are invalid'
+}
+
+platform_terminal_marker_path() {
+  printf '%s/deploy/backend/%s\n' "$APP_ROOT" "$PLATFORM_TERMINAL_MARKER_NAME"
+}
+
+platform_terminal_assert_files_unchanged() {
+  local migration_file="$SERVER_ROOT/prisma/migrations/$PLATFORM_TERMINAL_MIGRATION/migration.sql"
+  assert_checkout "$EXPECTED_REVISION"
+  [[ -f "$migration_file" && ! -L "$migration_file" &&
+    "$(platform_cleanup_sha256 "$migration_file")" == "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" &&
+    "$(platform_cleanup_sha256 "$ENV_FILE")" == "$PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256" &&
+    "$(platform_cleanup_sha256 "$COMPOSE_FILE")" == "$PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256" ]]
+}
+
+platform_terminal_marker_value() {
+  local marker key="$1"
+  [[ $# -eq 1 && "$key" =~ ^[a-z][a-z0-9_]*$ ]] || return 1
+  marker="$(platform_terminal_marker_path)" || return 1
+  platform_terminal_validate_marker "$marker" || return 1
+  awk -F= -v key="$key" '
+    $1 == key { print substr($0, index($0, "=") + 1); found += 1 }
+    END { exit(found == 1 ? 0 : 1) }
+  ' "$marker"
+}
+
+platform_terminal_validate_marker() {
+  local marker="${1:-$(platform_terminal_marker_path)}" directory
+  [[ -f "$marker" && ! -L "$marker" ]] || return 1
+  directory="$(dirname -- "$marker")"
+  [[ "$(cd -- "$directory" && pwd -P)" == "$APP_ROOT/deploy/backend" &&
+    "$(stat -c '%u:%g:%a:%h' "$marker")" == '0:0:600:1' ]] || return 1
+  awk -F= -v expected="${#PLATFORM_TERMINAL_MARKER_KEYS[@]}" \
+    -v expected_order="${PLATFORM_TERMINAL_MARKER_KEYS[*]}" '
+    function hex(value, length_) {
+      return length(value) == length_ && value ~ /^[0-9a-f]+$/ && value !~ /^0+$/
+    }
+    BEGIN { split(expected_order, order, " ") }
+    $1 != order[NR] { exit 1 }
+    $1 !~ /^(version|phase|ownership_revision|cleanup_revision|production_env_sha256|compose_sha256|core_database_name|core_database_system_identifier|generation|migration|migration_sha256|snapshot_sha256|source_fingerprint|source_high_watermark|billing_offer_contract_version|billing_offer_sequence_scope|billing_offer_aggregate_version|billing_offer_source_sequence|billing_offer_fence_fingerprint|before_inventory|after_inventory|prisma_migration_id|created_at|updated_at)$/ { exit 1 }
+    { seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
+    END {
+      if (NR != expected || value["version"] != "1" ||
+        value["phase"] !~ /^(prepared|complete)$/ ||
+        !hex(value["ownership_revision"], 40) ||
+        !hex(value["cleanup_revision"], 40) ||
+        value["ownership_revision"] == value["cleanup_revision"] ||
+        !hex(value["production_env_sha256"], 64) ||
+        !hex(value["compose_sha256"], 64) ||
+        value["core_database_name"] != "default_db" ||
+        value["core_database_system_identifier"] !~ /^[1-9][0-9]*$/ ||
+        value["generation"] !~ /^[1-9][0-9]{0,17}$/ ||
+        value["migration"] != "20260825000000_remove_legacy_platform_core_source" ||
+        !hex(value["migration_sha256"], 64) ||
+        !hex(value["snapshot_sha256"], 64) ||
+        !hex(value["source_fingerprint"], 64) ||
+        value["source_high_watermark"] !~ /^[1-9][0-9]*$/ ||
+        value["billing_offer_contract_version"] != "2" ||
+        value["billing_offer_sequence_scope"] != "billing.offer:offer" ||
+        value["billing_offer_aggregate_version"] !~ /^[1-9][0-9]*$/ ||
+        value["billing_offer_source_sequence"] !~ /^[1-9][0-9]*$/ ||
+        !hex(value["billing_offer_fence_fingerprint"], 64) ||
+        value["before_inventory"] != "platform-source-v1-present" ||
+        value["created_at"] !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ ||
+        value["updated_at"] !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/) exit 1
+      for (key in seen) if (seen[key] != 1) exit 1
+      if (value["phase"] == "prepared" &&
+        (value["after_inventory"] != "pending" ||
+         value["prisma_migration_id"] != "pending" ||
+         value["created_at"] != value["updated_at"])) exit 1
+      if (value["phase"] == "complete" &&
+        (value["after_inventory"] != "platform-source-v1-absent" ||
+         value["prisma_migration_id"] !~ /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)) exit 1
+    }
+  ' "$marker"
+}
+
+platform_terminal_write_marker() {
+  local phase="$1" prisma_id="$2" marker directory temporary now created_at
+  [[ "$phase" =~ ^(prepared|complete)$ ]] || return 1
+  [[ "$prisma_id" == pending ||
+    "$prisma_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return 1
+  marker="$(platform_terminal_marker_path)"
+  directory="$(dirname -- "$marker")"
+  [[ -d "$directory" && ! -L "$directory" &&
+    "$(cd -- "$directory" && pwd -P)" == "$APP_ROOT/deploy/backend" ]] || return 1
+  if [[ -e "$marker" || -L "$marker" ]]; then
+    platform_terminal_validate_marker "$marker" || return 1
+    [[ "$(platform_terminal_marker_value phase)" == prepared && "$phase" == complete ]] || {
+      [[ "$(platform_terminal_marker_value phase)" == "$phase" ]] && return 0
+      return 1
+    }
+    created_at="$(platform_terminal_marker_value created_at)"
+  else
+    [[ "$phase" == prepared ]] || return 1
+    created_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  fi
+  now="$created_at"
+  [[ "$phase" == prepared ]] || now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  temporary="$(mktemp "$directory/$PLATFORM_TERMINAL_MARKER_NAME.tmp.XXXXXX")"
+  {
+    printf 'version=1\nphase=%s\n' "$phase"
+    printf 'ownership_revision=%s\ncleanup_revision=%s\n' \
+      "$PLATFORM_TERMINAL_OWNERSHIP_REVISION" "$EXPECTED_REVISION"
+    printf 'production_env_sha256=%s\ncompose_sha256=%s\n' \
+      "$PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256" \
+      "$PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256"
+    printf 'core_database_name=%s\ncore_database_system_identifier=%s\n' \
+      "$PLATFORM_TERMINAL_DATABASE_NAME" "$PLATFORM_TERMINAL_DATABASE_SYSTEM_IDENTIFIER"
+    printf 'generation=%s\nmigration=%s\nmigration_sha256=%s\n' \
+      "$PLATFORM_TERMINAL_GENERATION" "$PLATFORM_TERMINAL_MIGRATION" \
+      "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256"
+    printf 'snapshot_sha256=%s\nsource_fingerprint=%s\nsource_high_watermark=%s\n' \
+      "$PLATFORM_TERMINAL_SNAPSHOT_SHA256" "$PLATFORM_TERMINAL_SOURCE_FINGERPRINT" \
+      "$PLATFORM_TERMINAL_SOURCE_HIGH_WATERMARK"
+    printf 'billing_offer_contract_version=2\n'
+    printf 'billing_offer_sequence_scope=billing.offer:offer\n'
+    printf 'billing_offer_aggregate_version=%s\n' "$PLATFORM_TERMINAL_BILLING_AGGREGATE_VERSION"
+    printf 'billing_offer_source_sequence=%s\n' "$PLATFORM_TERMINAL_BILLING_SOURCE_SEQUENCE"
+    printf 'billing_offer_fence_fingerprint=%s\n' "$PLATFORM_TERMINAL_BILLING_FENCE_FINGERPRINT"
+    printf 'before_inventory=platform-source-v1-present\n'
+    if [[ "$phase" == complete ]]; then
+      printf 'after_inventory=platform-source-v1-absent\n'
+    else
+      printf 'after_inventory=pending\n'
+    fi
+    printf 'prisma_migration_id=%s\ncreated_at=%s\nupdated_at=%s\n' \
+      "$prisma_id" "$created_at" "$now"
+  } >"$temporary"
+  chmod 600 "$temporary"
+  chown 0:0 "$temporary"
+  platform_terminal_validate_marker "$temporary" || { rm -f -- "$temporary"; return 1; }
+  sync -f "$temporary"
+  mv -fT -- "$temporary" "$marker"
+  sync -f "$directory"
+  platform_terminal_validate_marker "$marker"
+}
+
+platform_terminal_load_ownership_context() {
+  local identity anchor
+  platform_database_validate_marker
+  platform_cutover_validate_marker
+  [[ "$(platform_database_current_phase)" == complete &&
+    "$(platform_cutover_current_phase)" == complete ]] || return 1
+  PLATFORM_TERMINAL_OWNERSHIP_REVISION="$(platform_cutover_marker_value revision)"
+  [[ "$PLATFORM_TERMINAL_OWNERSHIP_REVISION" == "$(platform_database_marker_value revision)" &&
+    "$PLATFORM_TERMINAL_OWNERSHIP_REVISION" != "$EXPECTED_REVISION" ]] || return 1
+  git -C "$SERVER_ROOT" merge-base --is-ancestor \
+    "$PLATFORM_TERMINAL_OWNERSHIP_REVISION" "$EXPECTED_REVISION" || return 1
+  PLATFORM_TERMINAL_GENERATION="$(platform_cutover_marker_value generation)"
+  [[ "$PLATFORM_TERMINAL_GENERATION" == "$(platform_database_marker_value generation)" ]] || return 1
+  PLATFORM_TERMINAL_SNAPSHOT_SHA256="$(platform_cutover_marker_value snapshot_sha256)"
+  PLATFORM_TERMINAL_SOURCE_FINGERPRINT="$(platform_cutover_marker_value source_fingerprint)"
+  PLATFORM_TERMINAL_SOURCE_HIGH_WATERMARK="$(platform_cutover_marker_value source_high_watermark)"
+  identity="$(platform_cleanup_core_database_identity)" || return 1
+  IFS='|' read -r PLATFORM_TERMINAL_DATABASE_NAME \
+    PLATFORM_TERMINAL_DATABASE_SYSTEM_IDENTIFIER <<<"$identity"
+  [[ "$PLATFORM_TERMINAL_DATABASE_NAME" == default_db &&
+    "$PLATFORM_TERMINAL_DATABASE_SYSTEM_IDENTIFIER" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "$(platform_cleanup_source_state)" == present ]]; then
+    anchor="$(platform_cleanup_core_ownership_anchor)" || return 1
+    IFS='|' read -r PLATFORM_TERMINAL_ANCHOR_GENERATION \
+      PLATFORM_TERMINAL_BILLING_CONTRACT_VERSION \
+      PLATFORM_TERMINAL_BILLING_SEQUENCE_SCOPE \
+      PLATFORM_TERMINAL_BILLING_AGGREGATE_VERSION \
+      PLATFORM_TERMINAL_BILLING_SOURCE_SEQUENCE \
+      PLATFORM_TERMINAL_BILLING_FENCE_FINGERPRINT <<<"$anchor"
+    [[ "$PLATFORM_TERMINAL_ANCHOR_GENERATION" == "$PLATFORM_TERMINAL_GENERATION" &&
+      "$PLATFORM_TERMINAL_BILLING_CONTRACT_VERSION" == 2 &&
+      "$PLATFORM_TERMINAL_BILLING_SEQUENCE_SCOPE" == 'billing.offer:offer' ]] || return 1
+  fi
+}
+
+platform_terminal_load_marker_billing_context() {
+  PLATFORM_TERMINAL_BILLING_AGGREGATE_VERSION="$(
+    platform_terminal_marker_value billing_offer_aggregate_version
+  )" || return 1
+  PLATFORM_TERMINAL_BILLING_SOURCE_SEQUENCE="$(
+    platform_terminal_marker_value billing_offer_source_sequence
+  )" || return 1
+  PLATFORM_TERMINAL_BILLING_FENCE_FINGERPRINT="$(
+    platform_terminal_marker_value billing_offer_fence_fingerprint
+  )" || return 1
+}
+
+platform_terminal_assert_marker_identity() {
+  local mode="${1:-creation}" marker phase cleanup_revision marker_aggregate
+  local marker_sequence marker_fence historical_migration_sha historical_compose_sha
+  [[ "$mode" =~ ^(creation|descendant)$ ]] || return 1
+  marker="$(platform_terminal_marker_path)"
+  platform_terminal_validate_marker "$marker" || return 1
+  phase="$(platform_terminal_marker_value phase)" || return 1
+  cleanup_revision="$(platform_terminal_marker_value cleanup_revision)" || return 1
+  [[ "$(platform_terminal_marker_value ownership_revision)" == "$PLATFORM_TERMINAL_OWNERSHIP_REVISION" &&
+    "$(platform_terminal_marker_value core_database_name)" == "$PLATFORM_TERMINAL_DATABASE_NAME" &&
+    "$(platform_terminal_marker_value core_database_system_identifier)" == "$PLATFORM_TERMINAL_DATABASE_SYSTEM_IDENTIFIER" &&
+    "$(platform_terminal_marker_value generation)" == "$PLATFORM_TERMINAL_GENERATION" &&
+    "$(platform_terminal_marker_value migration_sha256)" == "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" &&
+    "$(platform_terminal_marker_value snapshot_sha256)" == "$PLATFORM_TERMINAL_SNAPSHOT_SHA256" &&
+    "$(platform_terminal_marker_value source_fingerprint)" == "$PLATFORM_TERMINAL_SOURCE_FINGERPRINT" &&
+    "$(platform_terminal_marker_value source_high_watermark)" == "$PLATFORM_TERMINAL_SOURCE_HIGH_WATERMARK" ]] || return 1
+  if [[ "$mode" == creation ]]; then
+    [[ "$cleanup_revision" == "$EXPECTED_REVISION" &&
+      "$(platform_terminal_marker_value production_env_sha256)" == "$PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256" &&
+      "$(platform_terminal_marker_value compose_sha256)" == "$PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256" ]] || return 1
+  else
+    [[ "$cleanup_revision" =~ ^[0-9a-f]{40}$ && "$cleanup_revision" != "$EXPECTED_REVISION" ]] || return 1
+    git -C "$SERVER_ROOT" merge-base --is-ancestor "$cleanup_revision" "$EXPECTED_REVISION" || return 1
+    historical_migration_sha="$(
+      git -C "$SERVER_ROOT" show \
+        "$cleanup_revision:prisma/migrations/$PLATFORM_TERMINAL_MIGRATION/migration.sql" |
+        sha256sum | awk 'NR == 1 { print $1 }'
+    )" || return 1
+    historical_compose_sha="$(
+      git -C "$SERVER_ROOT" show "$cleanup_revision:deploy/docker-compose.prod.yml" |
+        sha256sum | awk 'NR == 1 { print $1 }'
+    )" || return 1
+    [[ "$historical_migration_sha" == "$(platform_terminal_marker_value migration_sha256)" &&
+      "$historical_compose_sha" == "$(platform_terminal_marker_value compose_sha256)" ]] || return 1
+  fi
+  marker_aggregate="$(platform_terminal_marker_value billing_offer_aggregate_version)"
+  marker_sequence="$(platform_terminal_marker_value billing_offer_source_sequence)"
+  marker_fence="$(platform_terminal_marker_value billing_offer_fence_fingerprint)"
+  if [[ -n "${PLATFORM_TERMINAL_BILLING_AGGREGATE_VERSION:-}" ]]; then
+    [[ "$marker_aggregate" == "$PLATFORM_TERMINAL_BILLING_AGGREGATE_VERSION" &&
+      "$marker_sequence" == "$PLATFORM_TERMINAL_BILLING_SOURCE_SEQUENCE" &&
+      "$marker_fence" == "$PLATFORM_TERMINAL_BILLING_FENCE_FINGERPRINT" ]] || return 1
+  fi
+  PLATFORM_TERMINAL_BILLING_AGGREGATE_VERSION="$marker_aggregate"
+  PLATFORM_TERMINAL_BILLING_SOURCE_SEQUENCE="$marker_sequence"
+  PLATFORM_TERMINAL_BILLING_FENCE_FINGERPRINT="$marker_fence"
+  printf '%s\n' "$phase"
+}
+
+assert_platform_cleanup_prerequisite() {
+  local revision="$1" legacy_marker terminal_marker cleanup_revision ownership_revision
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]] ||
     fail 'Platform cleanup prerequisite requires the exact Operations revision'
-  cleanup_revision="$(
-    APP_ROOT="$APP_ROOT" \
-    SERVER_ROOT="$SERVER_ROOT" \
-    EXPECTED_REVISION="$revision" \
-      bash -Eeuo pipefail -c '
-        source "$SERVER_ROOT/scripts/cleanup-platform-core-source-production.sh"
-        platform_cleanup_validate_marker
-        [[ "$(platform_cleanup_marker_value phase)" == complete ]]
-        cleanup_revision="$(platform_cleanup_marker_value cleanup_revision)"
-        [[ "$cleanup_revision" =~ ^[0-9a-f]{40}$ &&
-          "$cleanup_revision" != "$EXPECTED_REVISION" ]]
-        git -C "$SERVER_ROOT" merge-base --is-ancestor \
-          "$cleanup_revision" "$EXPECTED_REVISION"
-        printf "%s\n" "$cleanup_revision"
-      '
-  )" || fail 'Operations cutover requires completed Platform cleanup at an immutable ancestor revision'
-  [[ "$cleanup_revision" =~ ^[0-9a-f]{40}$ &&
-    "$cleanup_revision" != "$revision" ]] ||
-    fail 'Platform cleanup prerequisite returned an invalid revision'
+  EXPECTED_REVISION="$revision"
+  export EXPECTED_REVISION
+  load_platform_terminal_dependencies
+  legacy_marker="$APP_ROOT/deploy/backend/.platform-core-source-cleanup-v1"
+  terminal_marker="$(platform_terminal_marker_path)"
+  if [[ -e "$legacy_marker" || -L "$legacy_marker" ]]; then
+    [[ ! -e "$terminal_marker" && ! -L "$terminal_marker" ]] ||
+      fail 'legacy and terminal Platform cleanup markers are ambiguous'
+    platform_cleanup_validate_marker "$legacy_marker" ||
+      fail 'legacy Platform cleanup marker is invalid'
+    [[ "$(platform_cleanup_marker_value phase)" == complete ]] ||
+      fail 'legacy Platform cleanup marker is incomplete'
+    cleanup_revision="$(platform_cleanup_marker_value cleanup_revision)"
+    [[ "$cleanup_revision" =~ ^[0-9a-f]{40}$ &&
+      "$cleanup_revision" != "$revision" ]] ||
+      fail 'legacy Platform cleanup revision is invalid'
+    git -C "$SERVER_ROOT" merge-base --is-ancestor "$cleanup_revision" "$revision" ||
+      fail 'legacy Platform cleanup is not an ancestor of Operations'
+    printf 'legacy|%s\n' "$cleanup_revision"
+    return
+  fi
+  [[ ! -L "$legacy_marker" ]] || fail 'legacy Platform cleanup marker path is unsafe'
+  [[ "${OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION:-}" == "$PLATFORM_TERMINAL_CONFIRMATION" ]] ||
+    fail "set exact terminal Platform confirmation: $PLATFORM_TERMINAL_CONFIRMATION"
+  platform_database_validate_marker || fail 'Platform database marker is invalid'
+  platform_cutover_validate_marker || fail 'Platform ownership marker is invalid'
+  [[ "$(platform_database_current_phase)" == complete &&
+    "$(platform_cutover_current_phase)" == complete ]] ||
+    fail 'Platform database and ownership markers must be complete'
+  ownership_revision="$(platform_cutover_marker_value revision)"
+  [[ "$ownership_revision" =~ ^[0-9a-f]{40}$ &&
+    "$ownership_revision" == "$(platform_database_marker_value revision)" &&
+    "$ownership_revision" != "$revision" ]] ||
+    fail 'Platform complete markers disagree with Operations revision'
+  git -C "$SERVER_ROOT" merge-base --is-ancestor "$ownership_revision" "$revision" ||
+    fail 'Operations revision must descend from completed Platform ownership'
+  if [[ -e "$terminal_marker" || -L "$terminal_marker" ]]; then
+    platform_terminal_validate_marker "$terminal_marker" ||
+      fail 'terminal Platform marker is invalid'
+  fi
+  printf 'terminal|%s\n' "$ownership_revision"
 }
+
+platform_terminal_stop_core_writers() {
+  local running sessions
+  compose stop --timeout 90 api outbox-publisher integration-worker
+  running="$(compose ps --status running -q api outbox-publisher integration-worker)" || return 1
+  [[ -z "$running" ]] || fail 'Core writers are still running before terminal Platform migration'
+  for _ in $(seq 1 60); do
+    sessions="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT count(*) FROM pg_catalog.pg_stat_activity
+WHERE pid <> pg_backend_pid() AND datname=current_database()
+  AND usename IN ('gen_user','winwidget_api_runtime');")" || return 1
+    [[ "$sessions" == 0 ]] && return 0
+    sleep 1
+  done
+  fail 'Core writer and migration database sessions did not drain'
+}
+
+platform_terminal_assert_core_outbox_runtime() {
+  local revision="$EXPECTED_REVISION" expected_image_id="$1" container metadata app_revision
+  [[ "$revision" =~ ^[0-9a-f]{40}$ && "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  container="$(compose ps --status running -q outbox-publisher)" || return 1
+  [[ "$container" =~ ^[0-9a-f]{64}$ ]] || return 1
+  metadata="$(docker inspect --format \
+    '{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{.RestartCount}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$container")" || return 1
+  app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" |
+    awk -F= '$1 == "APP_REVISION" { print substr($0, index($0, "=") + 1); found += 1 } END { exit(found == 1 ? 0 : 1) }')" || return 1
+  [[ "$metadata" == "$expected_image_id|running|true|0|winwidget|outbox-publisher" &&
+    "$app_revision" == "$revision" ]]
+}
+
+platform_terminal_wait_core_outbox_drained() {
+  local expected_image_id="$1" pending
+  for _ in $(seq 1 120); do
+    if ! platform_terminal_assert_core_outbox_runtime "$expected_image_id"; then
+      sleep 2
+      continue
+    fi
+    pending="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT count(*) FROM public.outbox_events
+WHERE event_type IN ('admin.audit.platform.v1','billing.offer.changed.v2')
+  AND status <> 'PUBLISHED'::public.\"OutboxEventStatus\";")" || return 1
+    [[ "$pending" =~ ^[0-9]+$ ]] || return 1
+    [[ "$pending" == 0 ]] && return 0
+    sleep 2
+  done
+  fail 'Core Platform/Billing Outbox rows did not drain before terminal Platform DDL'
+}
+
+platform_terminal_prepare_live_owner_runtime() {
+  local revision="$EXPECTED_REVISION" platform_image platform_image_id core_image_id metadata
+  local service purpose port container app_revision gateway_image_id path
+  local direct_sha gateway_sha public_sha headers owner status
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return 1
+  compose up -d --no-deps --no-build --force-recreate \
+    api outbox-publisher platform-api platform-outbox-publisher api-gateway
+  wait_ready 'http://127.0.0.1:4200/api/v1/health/ready' 'Core API'
+  wait_ready 'http://127.0.0.1:5000/health/ready' 'Platform API'
+  wait_ready 'http://127.0.0.1:5001/health/ready' 'Platform outbox publisher'
+  wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'
+  platform_cutover_cli target verify >/dev/null ||
+    fail 'Platform target is not ACTIVE at the completed ownership anchor'
+  core_image_id="$(docker image inspect --format '{{.Id}}' "winwidget-api:git-$revision")" || return 1
+  metadata="$(docker image inspect --format \
+    '{{.Id}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Config.User}}' \
+    "$core_image_id")" || return 1
+  [[ "$core_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+    "$metadata" == "$core_image_id|$revision|nestjs" ]] ||
+    fail 'coordinated Core API image identity is invalid'
+  container="$(compose ps --status running -q api)" || return 1
+  [[ "$container" =~ ^[0-9a-f]{64}$ ]] || return 1
+  metadata="$(docker inspect --format \
+    '{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}|{{.RestartCount}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
+    "$container")" || return 1
+  app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" |
+    awk -F= '$1 == "APP_REVISION" { print substr($0, index($0, "=") + 1); found += 1 } END { exit(found == 1 ? 0 : 1) }')" || return 1
+  [[ "$metadata" == "$core_image_id|running|true|healthy|0|winwidget|api" &&
+    "$app_revision" == "$revision" ]] || fail 'coordinated Core API runtime identity is invalid'
+  platform_terminal_wait_core_outbox_drained "$core_image_id"
+  platform_image="winwidget-platform:git-$revision"
+  platform_image_id="$(docker image inspect --format '{{.Id}}' "$platform_image")" || return 1
+  metadata="$(docker image inspect --format \
+    '{{.Id}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Config.User}}' \
+    "$platform_image_id")" || return 1
+  [[ "$platform_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+    "$metadata" == "$platform_image_id|$revision|platform" ]] ||
+    fail 'coordinated Platform image identity is invalid'
+  for service in platform-api platform-outbox-publisher; do
+    case "$service" in
+      platform-api) purpose=api; port=5000 ;;
+      platform-outbox-publisher) purpose=outbox-publisher; port=5001 ;;
+    esac
+    container="$(compose ps --status running -q "$service")" || return 1
+    [[ "$container" =~ ^[0-9a-f]{64}$ ]] || return 1
+    metadata="$(docker inspect --format \
+      '{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}|{{.RestartCount}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.winwidget.owner"}}|{{index .Config.Labels "com.winwidget.purpose"}}' \
+      "$container")" || return 1
+    app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" |
+      awk -F= '$1 == "APP_REVISION" { print substr($0, index($0, "=") + 1); found += 1 } END { exit(found == 1 ? 0 : 1) }')" || return 1
+    [[ "$metadata" == "$platform_image_id|running|true|healthy|0|winwidget|$service|platform|$purpose" &&
+      "$app_revision" == "$revision" ]] ||
+      fail "coordinated $service runtime identity is invalid"
+    curl --fail --silent --show-error --max-time 10 \
+      "http://127.0.0.1:$port/health/ready" >/dev/null
+  done
+  gateway_image_id="$(docker image inspect --format '{{.Id}}' \
+    "winwidget-api-gateway:git-$revision")" || return 1
+  platform_cutover_validate_gateway_manifest "$gateway_image_id" ||
+    fail 'coordinated Gateway route manifest is invalid'
+  platform_cutover_assert_gateway_runtime >/dev/null ||
+    fail 'coordinated Gateway runtime identity or env is invalid'
+  platform_cleanup_assert_gateway_contract || return 1
+  for path in site-settings legal-pages legal-pages/oferta home-page-content; do
+    direct_sha="$(platform_cleanup_response_sha \
+      "http://127.0.0.1:5000/api/v1/$path")" || return 1
+    gateway_sha="$(platform_cleanup_response_sha \
+      "http://127.0.0.1:4100/api/v1/$path")" || return 1
+    public_sha="$(platform_cleanup_response_sha \
+      "https://api.winwidget.ru/api/v1/$path")" || return 1
+    [[ "$direct_sha" == "$gateway_sha" && "$gateway_sha" == "$public_sha" ]] ||
+      fail "Platform route parity failed before terminal DDL: $path"
+    headers="$(curl -fsS -D - -o /dev/null --connect-timeout 3 --max-time 10 \
+      "http://127.0.0.1:4100/api/v1/$path")" || return 1
+    owner="$(awk -F: 'tolower($1)=="x-winwidget-service" { value=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print tolower(value); count += 1 } END { exit(count == 1 ? 0 : 1) }' \
+      <<<"$headers")" || return 1
+    [[ "$owner" == platform ]] || return 1
+  done
+  for path in /api/v1/site-settings /api/v1/legal-pages \
+    /api/v1/legal-pages/oferta /api/v1/home-page-content; do
+    status="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 \
+      --max-time 10 "http://127.0.0.1:4200$path" || true)"
+    [[ "$status" =~ ^(404|410)$ ]] ||
+      fail "legacy Core Platform route remains reachable before terminal DDL: $path status=$status"
+  done
+}
+
+platform_terminal_guc_entries() {
+  local mode="$1" marker_value
+  [[ "$mode" =~ ^(names|values)$ ]] || return 1
+  local -a names=(
+    winwidget.platform_pristine_replay
+    winwidget.platform_core_source_cleanup
+    winwidget.platform_ownership_revision
+    winwidget.platform_cleanup_revision
+    winwidget.platform_production_env_sha256
+    winwidget.platform_compose_sha256
+    winwidget.platform_core_database_name
+    winwidget.platform_core_database_system_identifier
+    winwidget.platform_generation
+    winwidget.platform_first_complete_proof_sha256
+    winwidget.platform_cleanup_migration_sha256
+    winwidget.platform_prisma_manifest_sha256
+    winwidget.platform_prisma_pre_ledger_sha256
+    winwidget.platform_snapshot_sha256
+    winwidget.platform_source_fingerprint
+    winwidget.platform_source_high_watermark
+    winwidget.platform_billing_offer_contract_version
+    winwidget.platform_billing_offer_sequence_scope
+    winwidget.platform_billing_offer_aggregate_version
+    winwidget.platform_billing_offer_source_sequence
+    winwidget.platform_billing_offer_fence_fingerprint
+    winwidget.platform_core_pre_backup_sha256
+    winwidget.platform_pre_backup_sha256
+    winwidget.platform_pre_restore_evidence_sha256
+    winwidget.platform_soak_evidence_sha256
+    winwidget.platform_route_evidence_sha256
+    winwidget.platform_queue_evidence_sha256
+    winwidget.platform_outbox_evidence_sha256
+    winwidget.platform_frontend_evidence_sha256
+    winwidget.platform_frontend_phase_evidence_chain_sha256
+    winwidget.platform_topology_scan_evidence_sha256
+    winwidget.platform_pre_offsite_receipt_sha256
+    winwidget.operations_platform_source_cleanup
+    winwidget.operations_platform_source_writers_stopped
+    winwidget.operations_platform_core_database_name
+    winwidget.operations_platform_core_database_system_identifier
+    winwidget.operations_platform_ownership_revision
+    winwidget.operations_platform_cleanup_revision
+    winwidget.operations_platform_generation
+    winwidget.operations_platform_source_high_watermark
+    winwidget.operations_platform_billing_offer_contract_version
+    winwidget.operations_platform_billing_offer_sequence_scope
+    winwidget.operations_platform_billing_offer_aggregate_version
+    winwidget.operations_platform_billing_offer_source_sequence
+    winwidget.operations_platform_migration_sha256
+    winwidget.operations_platform_production_env_sha256
+    winwidget.operations_platform_compose_sha256
+    winwidget.operations_platform_snapshot_sha256
+    winwidget.operations_platform_source_fingerprint
+    winwidget.operations_platform_billing_offer_fence_fingerprint
+  )
+  if [[ "$mode" == names ]]; then
+    printf '%s\n' "${names[@]}"
+    return
+  fi
+  local -a values=(
+    "winwidget.operations_platform_source_cleanup=production-destructive-approved"
+    "winwidget.operations_platform_source_writers_stopped=true"
+    "winwidget.operations_platform_core_database_name=$(platform_terminal_marker_value core_database_name)"
+    "winwidget.operations_platform_core_database_system_identifier=$(platform_terminal_marker_value core_database_system_identifier)"
+    "winwidget.operations_platform_ownership_revision=$(platform_terminal_marker_value ownership_revision)"
+    "winwidget.operations_platform_cleanup_revision=$(platform_terminal_marker_value cleanup_revision)"
+    "winwidget.operations_platform_generation=$(platform_terminal_marker_value generation)"
+    "winwidget.operations_platform_source_high_watermark=$(platform_terminal_marker_value source_high_watermark)"
+    "winwidget.operations_platform_billing_offer_contract_version=$(platform_terminal_marker_value billing_offer_contract_version)"
+    "winwidget.operations_platform_billing_offer_sequence_scope=$(platform_terminal_marker_value billing_offer_sequence_scope)"
+    "winwidget.operations_platform_billing_offer_aggregate_version=$(platform_terminal_marker_value billing_offer_aggregate_version)"
+    "winwidget.operations_platform_billing_offer_source_sequence=$(platform_terminal_marker_value billing_offer_source_sequence)"
+    "winwidget.operations_platform_migration_sha256=$(platform_terminal_marker_value migration_sha256)"
+    "winwidget.operations_platform_production_env_sha256=$(platform_terminal_marker_value production_env_sha256)"
+    "winwidget.operations_platform_compose_sha256=$(platform_terminal_marker_value compose_sha256)"
+    "winwidget.operations_platform_snapshot_sha256=$(platform_terminal_marker_value snapshot_sha256)"
+    "winwidget.operations_platform_source_fingerprint=$(platform_terminal_marker_value source_fingerprint)"
+    "winwidget.operations_platform_billing_offer_fence_fingerprint=$(platform_terminal_marker_value billing_offer_fence_fingerprint)"
+  )
+  for marker_value in "${values[@]}"; do
+    [[ "${marker_value%%=*}" =~ ^winwidget\.[a-z0-9_]+$ &&
+      "${marker_value#*=}" =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
+  done
+  printf '%s\n' "${values[@]}"
+}
+
+platform_terminal_guc_sql() {
+  local mode="$1" entry name value sql='BEGIN;'
+  [[ "$mode" =~ ^(set|reset)$ ]] || return 1
+  if [[ "$mode" == reset ]]; then
+    while IFS= read -r name; do
+      [[ "$name" =~ ^winwidget\.[a-z0-9_]+$ ]] || return 1
+      sql+="ALTER ROLE gen_user IN DATABASE default_db RESET \"$name\";"
+    done < <(platform_terminal_guc_entries names)
+  else
+    while IFS= read -r entry; do
+      name="${entry%%=*}"
+      value="${entry#*=}"
+      [[ "$name" =~ ^winwidget\.[a-z0-9_]+$ && "$value" =~ ^[A-Za-z0-9._:-]+$ ]] || return 1
+      sql+="ALTER ROLE gen_user IN DATABASE default_db SET \"$name\" TO '$value';"
+    done < <(platform_terminal_guc_entries values)
+  fi
+  printf '%sCOMMIT;\n' "$sql"
+}
+
+platform_terminal_configure_gucs() {
+  local mode="$1" sql actual
+  [[ "$mode" =~ ^(set|reset)$ ]] || return 1
+  [[ "$(platform_cleanup_database_url_field DATABASE_MIGRATION_URL_PRODUCTION username)" == gen_user &&
+    "$(platform_cleanup_database_url_field DATABASE_MIGRATION_URL_PRODUCTION database)" == default_db ]] || return 1
+  sql="$(platform_terminal_guc_sql "$mode")" || return 1
+  platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "$sql" >/dev/null || return 1
+  if [[ "$mode" == reset ]]; then
+    actual="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT count(*) FROM pg_catalog.pg_db_role_setting setting
+JOIN pg_catalog.pg_roles role ON role.oid=setting.setrole
+JOIN pg_catalog.pg_database database ON database.oid=setting.setdatabase
+CROSS JOIN LATERAL unnest(setting.setconfig) config
+WHERE role.rolname='gen_user' AND database.datname='default_db'
+  AND (config LIKE 'winwidget.platform_%' OR config LIKE 'winwidget.operations_platform_%');")" || return 1
+    [[ "$actual" == 0 ]]
+    return
+  fi
+  platform_terminal_guc_entries values >/dev/null || return 1
+  actual="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT count(*) FILTER (WHERE config LIKE 'winwidget.operations_platform_%')::text || '|' ||
+  count(*) FILTER (WHERE config IN (
+    'winwidget.operations_platform_source_cleanup=production-destructive-approved',
+    'winwidget.operations_platform_source_writers_stopped=true',
+    'winwidget.operations_platform_core_database_name=$(platform_terminal_marker_value core_database_name)',
+    'winwidget.operations_platform_core_database_system_identifier=$(platform_terminal_marker_value core_database_system_identifier)',
+    'winwidget.operations_platform_ownership_revision=$(platform_terminal_marker_value ownership_revision)',
+    'winwidget.operations_platform_cleanup_revision=$(platform_terminal_marker_value cleanup_revision)',
+    'winwidget.operations_platform_generation=$(platform_terminal_marker_value generation)',
+    'winwidget.operations_platform_source_high_watermark=$(platform_terminal_marker_value source_high_watermark)',
+    'winwidget.operations_platform_billing_offer_contract_version=2',
+    'winwidget.operations_platform_billing_offer_sequence_scope=billing.offer:offer',
+    'winwidget.operations_platform_billing_offer_aggregate_version=$(platform_terminal_marker_value billing_offer_aggregate_version)',
+    'winwidget.operations_platform_billing_offer_source_sequence=$(platform_terminal_marker_value billing_offer_source_sequence)',
+    'winwidget.operations_platform_migration_sha256=$(platform_terminal_marker_value migration_sha256)',
+    'winwidget.operations_platform_production_env_sha256=$(platform_terminal_marker_value production_env_sha256)',
+    'winwidget.operations_platform_compose_sha256=$(platform_terminal_marker_value compose_sha256)',
+    'winwidget.operations_platform_snapshot_sha256=$(platform_terminal_marker_value snapshot_sha256)',
+    'winwidget.operations_platform_source_fingerprint=$(platform_terminal_marker_value source_fingerprint)',
+    'winwidget.operations_platform_billing_offer_fence_fingerprint=$(platform_terminal_marker_value billing_offer_fence_fingerprint)'
+  ))::text || '|' ||
+  count(*) FILTER (WHERE config LIKE 'winwidget.platform_%')::text
+FROM pg_catalog.pg_db_role_setting setting
+JOIN pg_catalog.pg_roles role ON role.oid=setting.setrole
+JOIN pg_catalog.pg_database database ON database.oid=setting.setdatabase
+CROSS JOIN LATERAL unnest(setting.setconfig) config
+WHERE role.rolname='gen_user' AND database.datname='default_db';")" || return 1
+  [[ "$actual" == '18|18|0' ]]
+}
+
+platform_terminal_candidate_migration_state() {
+  local migration="$1" checksum="$2" result total applied pending rolled_back wrong
+  [[ "$migration" =~ ^[0-9]{14}_[a-z0-9_]+$ && "$checksum" =~ ^[0-9a-f]{64}$ ]] || return 1
+  result="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT count(*)::text || '|' ||
+  count(*) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
+    AND checksum='$checksum' AND applied_steps_count IN (0,1))::text || '|' ||
+  count(*) FILTER (WHERE finished_at IS NULL AND rolled_back_at IS NULL
+    AND checksum='$checksum' AND applied_steps_count IN (0,1))::text || '|' ||
+  count(*) FILTER (WHERE finished_at IS NULL AND rolled_back_at IS NOT NULL
+    AND checksum='$checksum' AND applied_steps_count IN (0,1))::text || '|' ||
+  count(*) FILTER (WHERE checksum <> '$checksum' OR applied_steps_count NOT IN (0,1)
+    OR (finished_at IS NOT NULL AND rolled_back_at IS NOT NULL))::text
+FROM public._prisma_migrations
+WHERE migration_name='$migration';")" || return 1
+  IFS='|' read -r total applied pending rolled_back wrong <<<"$result"
+  [[ "$total" =~ ^[0-9]+$ && "$applied" =~ ^[0-9]+$ && "$pending" =~ ^[0-9]+$ &&
+    "$rolled_back" =~ ^[0-9]+$ && "$wrong" == 0 ]] || { printf 'unsafe\n'; return; }
+  if ((total == 0)); then
+    printf 'pending\n'
+  elif ((applied == 0 && pending == 1 && rolled_back + 1 == total)); then
+    printf 'failed\n'
+  elif ((total > 0 && applied == 0 && pending == 0 && rolled_back == total)); then
+    printf 'rolled-back\n'
+  elif ((applied == 1 && pending == 0 && rolled_back + 1 == total)); then
+    printf 'applied\n'
+  else
+    printf 'unsafe\n'
+  fi
+}
+
+platform_terminal_operations_prepare_state() {
+  local inventory state_inventory semantic_inventory
+  inventory="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT
+  COALESCE((SELECT string_agg(c.relname, ',' ORDER BY c.relname COLLATE \"C\")
+    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relkind='r' AND c.relname='operations_core_state'), '') || '~' ||
+  COALESCE((SELECT string_agg(c.relname || ':' || t.tgname, ',' ORDER BY c.relname COLLATE \"C\", t.tgname COLLATE \"C\")
+    FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND NOT t.tgisinternal AND
+      ((c.relname='operations_core_state' AND t.tgname='operations_core_state_transition_guard') OR
+       (c.relname='notes' AND t.tgname IN ('notes_operations_source_write_guard','notes_operations_source_truncate_guard')) OR
+       (c.relname='admin_event_logs' AND t.tgname IN ('admin_event_logs_operations_source_write_guard','admin_event_logs_operations_source_truncate_guard')))), '') || '~' ||
+  COALESCE((SELECT string_agg(p.oid::regprocedure::text, ',' ORDER BY p.oid::regprocedure::text COLLATE \"C\")
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' AND p.proname IN
+      ('operations_core_source_write_guard','operations_core_state_transition_guard')), '') || '~' ||
+  (SELECT count(*) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace
+    WHERE n.nspname='public' AND t.typname='OperationsCoreOwnership')::text;")" || return 1
+  case "$inventory" in
+    '~~~0') printf 'absent\n'; return ;;
+    'operations_core_state~admin_event_logs:admin_event_logs_operations_source_truncate_guard,admin_event_logs:admin_event_logs_operations_source_write_guard,notes:notes_operations_source_truncate_guard,notes:notes_operations_source_write_guard,operations_core_state:operations_core_state_transition_guard~operations_core_source_write_guard(),operations_core_state_transition_guard()~1') ;;
+    *) printf 'unsafe\n'; return ;;
+  esac
+  semantic_inventory="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT (
+  (SELECT count(*)=1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' AND p.proname='operations_core_source_write_guard'
+      AND pg_get_functiondef(p.oid) LIKE '%Operations Core source is write-fenced%')
+  AND
+  (SELECT count(*)=1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' AND p.proname='operations_core_state_transition_guard'
+      AND pg_get_functiondef(p.oid) LIKE '%Operations ownership is forward-only%'
+      AND pg_get_functiondef(p.oid) LIKE '%Operations Core write fence is forward-only%'
+      AND pg_get_functiondef(p.oid) LIKE '%Operations source must be fenced and exported before activation%')
+  AND (SELECT count(*)=6 FROM pg_catalog.pg_constraint c
+    WHERE c.conrelid='public.operations_core_state'::regclass
+      AND c.conname IN ('operations_core_state_pkey','operations_core_state_singleton_check',
+        'operations_core_state_generation_check','operations_core_state_revision_check',
+        'operations_core_state_snapshot_check','operations_core_state_activation_check'))
+  AND NOT has_table_privilege('public','public.operations_core_state','INSERT,UPDATE,DELETE,TRUNCATE')
+)::text;")" || return 1
+  [[ "$semantic_inventory" == t ]] || { printf 'unsafe\n'; return; }
+  state_inventory="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT
+  (SELECT count(*)::text || '|' || count(*) FILTER (WHERE id='singleton' AND
+    ownership='CORE'::public.\"OperationsCoreOwnership\" AND source_writes_enabled AND
+    legacy_routes_enabled AND generation=0 AND prepared_revision IS NULL AND
+    ownership_revision IS NULL AND source_snapshot_sha256 IS NULL AND
+    source_note_count IS NULL AND source_event_count IS NULL AND fenced_at IS NULL AND
+    exported_at IS NULL AND activated_at IS NULL)::text || '|' ||
+    count(*) FILTER (WHERE prepared_revision='$EXPECTED_REVISION' AND generation >= 1 AND
+      ((ownership='CORE'::public.\"OperationsCoreOwnership\" AND ownership_revision IS NULL AND
+        legacy_routes_enabled AND activated_at IS NULL AND
+        ((source_writes_enabled AND fenced_at IS NULL AND exported_at IS NULL AND
+          source_snapshot_sha256 IS NULL AND source_note_count IS NULL AND source_event_count IS NULL) OR
+         (NOT source_writes_enabled AND fenced_at IS NOT NULL AND
+          ((exported_at IS NULL AND source_snapshot_sha256 IS NULL AND source_note_count IS NULL AND source_event_count IS NULL) OR
+           (exported_at IS NOT NULL AND exported_at >= fenced_at AND
+            source_snapshot_sha256 ~ '^[0-9a-f]{64}$' AND source_note_count >= 0 AND source_event_count >= 0)))) OR
+       (ownership='OPERATIONS'::public.\"OperationsCoreOwnership\" AND NOT source_writes_enabled AND
+        NOT legacy_routes_enabled AND ownership_revision='$EXPECTED_REVISION' AND generation >= 3 AND
+        source_snapshot_sha256 ~ '^[0-9a-f]{64}$' AND source_note_count >= 0 AND source_event_count >= 0 AND
+        fenced_at IS NOT NULL AND exported_at IS NOT NULL AND exported_at >= fenced_at AND
+        activated_at IS NOT NULL AND activated_at >= exported_at)))::text
+    FROM public.operations_core_state) || '~' ||
+  (SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+    FROM pg_catalog.pg_enum e WHERE e.enumtypid='public.\"OperationsCoreOwnership\"'::regtype) || '~' ||
+  (SELECT string_agg(a.attname || ':' || pg_catalog.format_type(a.atttypid,a.atttypmod) || ':' || a.attnotnull::text,
+    ',' ORDER BY a.attnum)
+    FROM pg_catalog.pg_attribute a WHERE a.attrelid='public.operations_core_state'::regclass
+      AND a.attnum > 0 AND NOT a.attisdropped) || '~' ||
+  (SELECT string_agg(c.conname, ',' ORDER BY c.conname COLLATE \"C\")
+    FROM pg_catalog.pg_constraint c WHERE c.conrelid='public.operations_core_state'::regclass);")" || return 1
+  case "$state_inventory" in
+'1|1|0~CORE,OPERATIONS~id:text:true,ownership:"OperationsCoreOwnership":true,source_writes_enabled:boolean:true,legacy_routes_enabled:boolean:true,generation:bigint:true,prepared_revision:text:false,ownership_revision:text:false,source_snapshot_sha256:text:false,source_note_count:bigint:false,source_event_count:bigint:false,fenced_at:timestamp(3) without time zone:false,exported_at:timestamp(3) without time zone:false,activated_at:timestamp(3) without time zone:false,updated_at:timestamp(3) without time zone:true~operations_core_state_activation_check,operations_core_state_generation_check,operations_core_state_pkey,operations_core_state_revision_check,operations_core_state_singleton_check,operations_core_state_snapshot_check') printf 'pristine\n' ;;
+'1|0|1~CORE,OPERATIONS~id:text:true,ownership:"OperationsCoreOwnership":true,source_writes_enabled:boolean:true,legacy_routes_enabled:boolean:true,generation:bigint:true,prepared_revision:text:false,ownership_revision:text:false,source_snapshot_sha256:text:false,source_note_count:bigint:false,source_event_count:bigint:false,fenced_at:timestamp(3) without time zone:false,exported_at:timestamp(3) without time zone:false,activated_at:timestamp(3) without time zone:false,updated_at:timestamp(3) without time zone:true~operations_core_state_activation_check,operations_core_state_generation_check,operations_core_state_pkey,operations_core_state_revision_check,operations_core_state_singleton_check,operations_core_state_snapshot_check') printf 'forward\n' ;;
+*)
+    printf 'unsafe\n'
+    return
+    ;;
+  esac
+}
+
+platform_terminal_assert_exact_repo_ledger() {
+  local operations_state="$1" platform_state="$2" mode="${3:-creation}"
+  local directory name migration_file sha manifest='' actual
+  local terminal_seen=false
+  [[ "$operations_state" =~ ^(pending|failed|rolled-back|applied)$ &&
+    "$platform_state" =~ ^(pending|failed|rolled-back|applied)$ &&
+    "$mode" =~ ^(creation|descendant)$ ]] || return 1
+  for directory in "$SERVER_ROOT"/prisma/migrations/*; do
+    [[ -d "$directory" && ! -L "$directory" ]] || continue
+    name="$(basename -- "$directory")"
+    [[ "$name" =~ ^[0-9]{14}_[a-z0-9_]+$ ]] || return 1
+    if [[ "$terminal_seen" == true ]]; then
+      [[ "$mode" == descendant ]] || return 1
+      continue
+    fi
+    migration_file="$directory/migration.sql"
+    [[ -f "$migration_file" && ! -L "$migration_file" ]] || return 1
+    sha="$(platform_cleanup_sha256 "$migration_file")" || return 1
+    manifest+="$name|$sha"$'\n'
+    [[ "$name" == "$PLATFORM_TERMINAL_MIGRATION" ]] && terminal_seen=true
+  done
+  [[ "$terminal_seen" == true &&
+    "$manifest" == *"$PLATFORM_TERMINAL_MIGRATION|$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256"$'\n' ]] || return 1
+  actual="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT migration_name || '|' || checksum || '|' ||
+  CASE WHEN finished_at IS NULL THEN '0' ELSE '1' END || '|' ||
+  CASE WHEN rolled_back_at IS NULL THEN '0' ELSE '1' END || '|' ||
+  applied_steps_count::text
+FROM public._prisma_migrations
+WHERE migration_name <= '$PLATFORM_TERMINAL_MIGRATION'
+ORDER BY migration_name COLLATE \"C\", started_at, id;")" || return 1
+  OPERATIONS_PRISMA_MANIFEST="$manifest" \
+    OPERATIONS_PRISMA_LEDGER="$actual" \
+    OPERATIONS_PREP_LEDGER_STATE="$operations_state" \
+    OPERATIONS_PLATFORM_LEDGER_STATE="$platform_state" \
+    OPERATIONS_PREP_MIGRATION="$OPERATIONS_PREP_MIGRATION" \
+    OPERATIONS_PLATFORM_MIGRATION="$PLATFORM_TERMINAL_MIGRATION" \
+    billing_release_node - <<'NODE'
+const manifestRows = (process.env.OPERATIONS_PRISMA_MANIFEST || '').trim().split('\n');
+const expected = new Map();
+for (const row of manifestRows) {
+  const fields = row.split('|');
+  if (fields.length !== 2 || !/^[0-9]{14}_[a-z0-9_]+$/.test(fields[0]) ||
+      !/^[0-9a-f]{64}$/.test(fields[1]) || expected.has(fields[0])) process.exit(1);
+  expected.set(fields[0], fields[1]);
+}
+const actualText = process.env.OPERATIONS_PRISMA_LEDGER || '';
+const actualRows = actualText ? actualText.trim().split('\n').map(row => row.split('|')) : [];
+const grouped = new Map([...expected.keys()].map(name => [name, []]));
+for (const row of actualRows) {
+  if (row.length !== 5 || !grouped.has(row[0]) || row[1] !== expected.get(row[0]) ||
+      !['0', '1'].includes(row[2]) || !['0', '1'].includes(row[3]) ||
+      (row[2] === '1' && row[3] === '1') ||
+      !/^(0|[1-9][0-9]*)$/.test(row[4])) process.exit(1);
+  grouped.get(row[0]).push({ finished: row[2] === '1', rolled: row[3] === '1', steps: Number(row[4]) });
+}
+const operations = process.env.OPERATIONS_PREP_MIGRATION;
+const platform = process.env.OPERATIONS_PLATFORM_MIGRATION;
+const successful = row => row.finished && !row.rolled && [0, 1].includes(row.steps);
+const validateCandidate = (rows, state) => {
+  const applied = rows.filter(successful);
+  const unresolved = rows.filter(row => !row.finished && !row.rolled);
+  const rolled = rows.filter(row => row.rolled);
+  if (applied.length + unresolved.length + rolled.length !== rows.length) process.exit(1);
+  if (state === 'pending' && rows.length !== 0) process.exit(1);
+  if (state === 'failed' &&
+      !(applied.length === 0 && unresolved.length === 1 && rolled.length + 1 === rows.length)) process.exit(1);
+  if (state === 'rolled-back' &&
+      !(rows.length > 0 && applied.length === 0 && unresolved.length === 0 && rolled.length === rows.length)) process.exit(1);
+  if (state === 'applied' &&
+      !(applied.length === 1 && unresolved.length === 0 && rolled.length + 1 === rows.length)) process.exit(1);
+};
+for (const [name, rows] of grouped) {
+  if (name === operations) {
+    validateCandidate(rows, process.env.OPERATIONS_PREP_LEDGER_STATE);
+    continue;
+  }
+  if (name !== platform) {
+    const applied = rows.filter(successful);
+    const unresolved = rows.filter(row => !row.finished && !row.rolled);
+    const rolled = rows.filter(row => row.rolled);
+    if (applied.length !== 1 || unresolved.length !== 0 ||
+        applied.length + rolled.length !== rows.length) process.exit(1);
+    continue;
+  }
+  validateCandidate(rows, process.env.OPERATIONS_PLATFORM_LEDGER_STATE);
+}
+NODE
+}
+
+platform_terminal_resolve_migration() {
+  local migration="$1" checksum="$2" resolution="$3" expected_state
+  [[ "$migration" =~ ^[0-9]{14}_[a-z0-9_]+$ && "$checksum" =~ ^[0-9a-f]{64}$ &&
+    "$resolution" =~ ^(rolled-back|applied)$ ]] || return 1
+  expected_state="$resolution"
+  compose --profile migration run --rm -T --no-deps migrate \
+    migrate resolve "--$resolution" "$migration" || return 1
+  [[ "$(platform_terminal_candidate_migration_state "$migration" "$checksum")" == "$expected_state" ]]
+}
+
+platform_terminal_rollback_pristine_operations_prepare() {
+  local note_count event_count
+  [[ "$(platform_terminal_candidate_migration_state \
+    "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" == failed &&
+    "$(platform_terminal_operations_prepare_state)" == pristine &&
+    "$PLATFORM_TERMINAL_DATABASE_NAME" == default_db &&
+    "$PLATFORM_TERMINAL_DATABASE_SYSTEM_IDENTIFIER" =~ ^[1-9][0-9]*$ ]] || return 1
+  note_count="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION \
+    'SELECT count(*) FROM public.notes;')" || return 1
+  event_count="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION \
+    'SELECT count(*) FROM public.admin_event_logs;')" || return 1
+  [[ "$note_count" =~ ^[0-9]+$ && "$event_count" =~ ^[0-9]+$ ]] || return 1
+  database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"
+  platform_terminal_stop_core_writers
+  platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+BEGIN;
+SET LOCAL lock_timeout='60s';
+SET LOCAL statement_timeout='5min';
+LOCK TABLE public.notes, public.admin_event_logs, public.operations_core_state IN ACCESS EXCLUSIVE MODE;
+DO \$operations_prepare_rollback\$
+DECLARE
+  state_count BIGINT;
+BEGIN
+  IF current_database() <> 'default_db'
+    OR (pg_control_system()).system_identifier::text <> '$PLATFORM_TERMINAL_DATABASE_SYSTEM_IDENTIFIER'
+    OR (SELECT count(*) FROM public.notes) <> $note_count
+    OR (SELECT count(*) FROM public.admin_event_logs) <> $event_count
+  THEN RAISE EXCEPTION 'Operations prepare rollback database boundary changed'; END IF;
+  SELECT count(*) INTO state_count FROM public.operations_core_state
+  WHERE id='singleton' AND ownership='CORE'::public.\"OperationsCoreOwnership\"
+    AND source_writes_enabled AND legacy_routes_enabled AND generation=0
+    AND prepared_revision IS NULL AND ownership_revision IS NULL
+    AND source_snapshot_sha256 IS NULL AND source_note_count IS NULL AND source_event_count IS NULL
+    AND fenced_at IS NULL AND exported_at IS NULL AND activated_at IS NULL;
+  IF state_count <> 1 OR (SELECT count(*) FROM public.operations_core_state) <> 1
+    OR (SELECT count(*) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND NOT t.tgisinternal
+      AND t.tgname IN ('operations_core_state_transition_guard','notes_operations_source_write_guard',
+        'notes_operations_source_truncate_guard','admin_event_logs_operations_source_write_guard',
+        'admin_event_logs_operations_source_truncate_guard')) <> 5
+  THEN RAISE EXCEPTION 'Operations prepare rollback source is not pristine'; END IF;
+  DROP TRIGGER operations_core_state_transition_guard ON public.operations_core_state;
+  DROP TRIGGER notes_operations_source_write_guard ON public.notes;
+  DROP TRIGGER notes_operations_source_truncate_guard ON public.notes;
+  DROP TRIGGER admin_event_logs_operations_source_write_guard ON public.admin_event_logs;
+  DROP TRIGGER admin_event_logs_operations_source_truncate_guard ON public.admin_event_logs;
+  DROP FUNCTION public.operations_core_source_write_guard();
+  DROP TABLE public.operations_core_state;
+  DROP FUNCTION public.operations_core_state_transition_guard();
+  DROP TYPE public.\"OperationsCoreOwnership\";
+  IF (SELECT count(*) FROM public.notes) <> $note_count
+    OR (SELECT count(*) FROM public.admin_event_logs) <> $event_count
+  THEN RAISE EXCEPTION 'Operations prepare rollback changed source rows'; END IF;
+END
+\$operations_prepare_rollback\$;
+COMMIT;" >/dev/null || return 1
+  [[ "$(platform_terminal_operations_prepare_state)" == absent ]] || return 1
+  platform_terminal_resolve_migration "$OPERATIONS_PREP_MIGRATION" \
+    "$OPERATIONS_PREP_MIGRATION_SHA256" rolled-back
+}
+
+platform_terminal_recover_operations_prepare() {
+  local state schema_state
+  state="$(platform_terminal_candidate_migration_state \
+    "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" || return 1
+  schema_state="$(platform_terminal_operations_prepare_state)" || return 1
+  case "$state:$schema_state" in
+    pending:absent | rolled-back:absent | applied:pristine | applied:forward) ;;
+    failed:absent)
+      platform_terminal_resolve_migration "$OPERATIONS_PREP_MIGRATION" \
+        "$OPERATIONS_PREP_MIGRATION_SHA256" rolled-back || return 1
+      state=rolled-back
+      ;;
+    failed:pristine)
+      platform_terminal_rollback_pristine_operations_prepare || return 1
+      state=rolled-back
+      ;;
+    *) fail "unsafe Operations prepare retry state: schema=$schema_state migration=$state" ;;
+  esac
+  printf '%s\n' "$state"
+}
+
+platform_terminal_applied_ledger_id() {
+  local result
+  result="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT CASE WHEN
+  count(*) FILTER (WHERE checksum <> '$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256')=0 AND
+  count(*) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NOT NULL)=0 AND
+  count(*) FILTER (WHERE applied_steps_count NOT IN (0,1))=0 AND
+  count(*) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
+    AND applied_steps_count IN (0,1))=1 AND
+  count(*) FILTER (WHERE finished_at IS NULL AND rolled_back_at IS NULL)=0 AND
+  count(*)=count(*) FILTER (WHERE rolled_back_at IS NOT NULL) +
+    count(*) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
+      AND applied_steps_count IN (0,1))
+THEN max(id::text) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL)
+ELSE 'unsafe' END
+FROM public._prisma_migrations
+WHERE migration_name='$PLATFORM_TERMINAL_MIGRATION';")" || return 1
+  [[ "$result" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return 1
+  printf '%s\n' "$result"
+}
+
+platform_terminal_apply_migrations() (
+  local reset_required=true status
+  platform_terminal_configure_gucs reset || return 1
+  trap 'status=$?; trap - EXIT INT TERM; if [[ "$reset_required" == true ]] && ! platform_terminal_configure_gucs reset >/dev/null 2>&1; then printf "%s\n" "operations-cutover: terminal Platform migration guard settings could not be reset" >&2; exit 1; fi; exit "$status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  platform_terminal_configure_gucs set || return 1
+  compose --profile migration run --rm -T --no-deps migrate || return 1
+  platform_terminal_configure_gucs reset || return 1
+  reset_required=false
+)
+
+run_or_verify_terminal_platform_cleanup() (
+  local revision="$1" marker phase source_state migration_state operations_state operations_schema prisma_id
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return 1
+  EXPECTED_REVISION="$revision"
+  export EXPECTED_REVISION
+  load_platform_terminal_dependencies
+  # A SIGKILL cannot run the previous trap. Clear both legacy and terminal
+  # persistent guard families before reading any retry state.
+  platform_terminal_configure_gucs reset ||
+    fail 'terminal Platform migration guard settings are not reset'
+  marker="$(platform_terminal_marker_path)"
+  source_state="$(platform_cleanup_source_state)" || return 1
+  migration_state="$(platform_terminal_candidate_migration_state \
+    "$PLATFORM_TERMINAL_MIGRATION" "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256")" || return 1
+  if [[ "$source_state" == present ]]; then
+    platform_terminal_prepare_live_owner_runtime
+  fi
+  database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"
+  platform_terminal_stop_core_writers
+  platform_terminal_load_ownership_context || return 1
+  platform_cutover_cli target verify >/dev/null || return 1
+  if [[ -e "$marker" || -L "$marker" ]]; then
+    phase="$(platform_terminal_assert_marker_identity)" || return 1
+  else
+    [[ ! -L "$marker" ]] || return 1
+    phase=absent
+  fi
+  operations_schema="$(platform_terminal_operations_prepare_state)" || return 1
+  if [[ "$phase:$source_state:$migration_state:$operations_schema" == complete:absent:applied:absent ]]; then
+    operations_state="$(platform_terminal_candidate_migration_state \
+      "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" || return 1
+    [[ "$operations_state" == applied ]] || return 1
+  else
+    operations_state="$(platform_terminal_recover_operations_prepare)" || return 1
+  fi
+  case "$phase:$source_state:$migration_state" in
+    absent:present:pending)
+      platform_cleanup_assert_cleanup_source_retired
+      platform_cleanup_assert_retained_billing_seam
+      platform_terminal_assert_exact_repo_ledger "$operations_state" pending
+      platform_terminal_write_marker prepared pending
+      phase=prepared
+      ;;
+    prepared:present:pending)
+      platform_cleanup_assert_cleanup_source_retired
+      platform_cleanup_assert_retained_billing_seam
+      platform_terminal_assert_exact_repo_ledger "$operations_state" pending
+      ;;
+    prepared:present:failed)
+      platform_cleanup_assert_cleanup_source_retired
+      platform_cleanup_assert_retained_billing_seam
+      platform_terminal_assert_exact_repo_ledger "$operations_state" failed
+      platform_terminal_resolve_migration "$PLATFORM_TERMINAL_MIGRATION" \
+        "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" rolled-back || return 1
+      migration_state=rolled-back
+      platform_terminal_assert_exact_repo_ledger "$operations_state" "$migration_state"
+      ;;
+    prepared:present:rolled-back)
+      platform_cleanup_assert_cleanup_source_retired
+      platform_cleanup_assert_retained_billing_seam
+      platform_terminal_assert_exact_repo_ledger "$operations_state" rolled-back
+      ;;
+    prepared:absent:failed | prepared:absent:rolled-back)
+      platform_cleanup_assert_retained_billing_seam
+      platform_terminal_assert_exact_repo_ledger "$operations_state" "$migration_state"
+      platform_terminal_resolve_migration "$PLATFORM_TERMINAL_MIGRATION" \
+        "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" applied || return 1
+      migration_state=applied
+      platform_terminal_assert_exact_repo_ledger "$operations_state" applied
+      ;;
+    prepared:absent:applied | complete:absent:applied)
+      platform_terminal_assert_exact_repo_ledger "$operations_state" applied
+      ;;
+    *) fail "unsafe terminal Platform cleanup state: marker=$phase source=$source_state migration=$migration_state" ;;
+  esac
+  if [[ "$source_state" == present ]]; then
+    [[ "$(platform_terminal_assert_marker_identity)" == prepared ]] || return 1
+    # Close the build/prepare-to-DDL window and clear any sessions that appeared
+    # while a failed Prisma row was reconciled.
+    database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"
+    platform_terminal_assert_files_unchanged ||
+      fail 'production env or Compose changed before terminal Platform DDL'
+    platform_terminal_stop_core_writers
+    platform_terminal_apply_migrations ||
+      fail 'terminal Platform migration failed; persistent guards were reset and exact forward retry is required'
+    source_state="$(platform_cleanup_source_state)" || return 1
+    migration_state="$(platform_terminal_candidate_migration_state \
+      "$PLATFORM_TERMINAL_MIGRATION" "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256")" || return 1
+    operations_state="$(platform_terminal_candidate_migration_state \
+      "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" || return 1
+    [[ "$source_state" == absent && "$migration_state" == applied ]] || return 1
+    platform_terminal_assert_files_unchanged || return 1
+    [[ "$(platform_terminal_operations_prepare_state)" == pristine ]] || return 1
+    platform_terminal_assert_exact_repo_ledger "$operations_state" applied
+  fi
+  platform_cleanup_assert_retained_billing_seam
+  operations_schema="$(platform_terminal_operations_prepare_state)" || return 1
+  operations_state="$(platform_terminal_candidate_migration_state \
+    "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" || return 1
+  [[ "$operations_state" == applied &&
+    ("$operations_schema" =~ ^(pristine|forward)$ ||
+      "$phase:$source_state:$migration_state:$operations_schema" == complete:absent:applied:absent) ]] || return 1
+  platform_terminal_assert_exact_repo_ledger applied applied
+  prisma_id="$(platform_terminal_applied_ledger_id)" || return 1
+  if [[ "$phase" != complete ]]; then
+    platform_terminal_write_marker complete "$prisma_id"
+  fi
+  [[ "$(platform_terminal_assert_marker_identity)" == complete &&
+    "$(platform_terminal_marker_value prisma_migration_id)" == "$prisma_id" &&
+    "$(platform_cleanup_source_state)" == absent &&
+    "$(platform_terminal_candidate_migration_state \
+      "$PLATFORM_TERMINAL_MIGRATION" "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256")" == applied ]] || return 1
+  platform_cleanup_assert_retained_billing_seam
+  printf 'terminal Platform Core source cleanup is complete at %s\n' "$revision"
+)
+
+verify_terminal_platform_cleanup() (
+  local revision="$1" marker phase prisma_id identity_mode cleanup_revision
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return 1
+  EXPECTED_REVISION="$revision"
+  export EXPECTED_REVISION
+  load_platform_terminal_dependencies
+  marker="$(platform_terminal_marker_path)"
+  [[ -e "$marker" && ! -L "$marker" ]] || return 1
+  [[ "$(platform_cleanup_source_state)" == absent &&
+    "$(platform_terminal_candidate_migration_state \
+      "$PLATFORM_TERMINAL_MIGRATION" "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256")" == applied ]] || return 1
+  platform_terminal_load_ownership_context || return 1
+  platform_cutover_cli target verify >/dev/null || return 1
+  cleanup_revision="$(platform_terminal_marker_value cleanup_revision)" || return 1
+  if [[ "$cleanup_revision" == "$revision" ]]; then
+    identity_mode=creation
+  else
+    identity_mode=descendant
+  fi
+  phase="$(platform_terminal_assert_marker_identity "$identity_mode")" || return 1
+  [[ "$phase" == complete ]] || return 1
+  [[ "$(platform_terminal_operations_prepare_state)" =~ ^(pristine|forward|absent)$ &&
+    "$(platform_terminal_candidate_migration_state \
+      "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" == applied ]] || return 1
+  platform_terminal_assert_exact_repo_ledger applied applied "$identity_mode"
+  prisma_id="$(platform_terminal_applied_ledger_id)" || return 1
+  [[ "$(platform_terminal_marker_value prisma_migration_id)" == "$prisma_id" ]] || return 1
+  platform_cleanup_assert_retained_billing_seam
+  printf 'terminal Platform Core source cleanup marker and live state are exact at %s\n' "$revision"
+)
 
 root_cutover() {
   compose --profile migration run --rm --no-deps \
@@ -156,7 +1234,7 @@ target_cutover() {
 
 run_core_source_cleanup() {
   local revision="$1" sha256="$2" note_count="$3" event_count="$4"
-  local service running_container_ids
+  local service running_container_ids database_identity database_name database_system_identifier
   local -a source_services=()
   [[ "$revision" =~ ^[0-9a-f]{40}$ &&
     "$sha256" =~ ^[0-9a-f]{64}$ &&
@@ -179,17 +1257,42 @@ run_core_source_cleanup() {
       fail "Source writer $service must remain stopped during terminal Operations source cleanup"
   done
 
+  platform_terminal_assert_files_unchanged ||
+    fail 'checkout, production env or Compose changed before terminal Operations cleanup'
+  database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"
+  database_identity="$(platform_cleanup_core_database_identity)" ||
+    fail 'Core database identity cannot be read before terminal Operations cleanup'
+  IFS='|' read -r database_name database_system_identifier <<<"$database_identity"
+  [[ "$database_name" == default_db && "$database_system_identifier" =~ ^[1-9][0-9]*$ ]] ||
+    fail 'Core database identity is invalid before terminal Operations cleanup'
+  if [[ -e "$(platform_terminal_marker_path)" || -L "$(platform_terminal_marker_path)" ]]; then
+    platform_terminal_validate_marker "$(platform_terminal_marker_path)" ||
+      fail 'terminal Platform marker is invalid before Operations cleanup'
+    [[ "$database_name" == "$(platform_terminal_marker_value core_database_name)" &&
+      "$database_system_identifier" == "$(platform_terminal_marker_value core_database_system_identifier)" ]] ||
+      fail 'Core database identity changed after terminal Platform cleanup'
+  else
+    platform_cleanup_validate_marker ||
+      fail 'legacy Platform cleanup marker is invalid before Operations cleanup'
+    [[ "$database_name" == "$(platform_cleanup_marker_value core_database_name)" &&
+      "$database_system_identifier" == "$(platform_cleanup_marker_value core_database_system_identifier)" ]] ||
+      fail 'Core database identity changed after legacy Platform cleanup'
+  fi
+
   local OPERATIONS_EXPECTED_REVISION="$revision"
   local OPERATIONS_EXPECTED_SNAPSHOT_SHA256="$sha256"
   local OPERATIONS_EXPECTED_NOTE_COUNT="$note_count"
   local OPERATIONS_EXPECTED_EVENT_COUNT="$event_count"
+  local OPERATIONS_EXPECTED_CORE_SYSTEM_IDENTIFIER="$database_system_identifier"
   export OPERATIONS_EXPECTED_REVISION OPERATIONS_EXPECTED_SNAPSHOT_SHA256 \
-    OPERATIONS_EXPECTED_NOTE_COUNT OPERATIONS_EXPECTED_EVENT_COUNT
+    OPERATIONS_EXPECTED_NOTE_COUNT OPERATIONS_EXPECTED_EVENT_COUNT \
+    OPERATIONS_EXPECTED_CORE_SYSTEM_IDENTIFIER
   compose --profile migration run --rm -T --no-deps \
     -e OPERATIONS_EXPECTED_REVISION \
     -e OPERATIONS_EXPECTED_SNAPSHOT_SHA256 \
     -e OPERATIONS_EXPECTED_NOTE_COUNT \
     -e OPERATIONS_EXPECTED_EVENT_COUNT \
+    -e OPERATIONS_EXPECTED_CORE_SYSTEM_IDENTIFIER \
     --entrypoint node migrate -e '
 const { existsSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
@@ -198,8 +1301,10 @@ const revision = process.env.OPERATIONS_EXPECTED_REVISION || "";
 const sha256 = process.env.OPERATIONS_EXPECTED_SNAPSHOT_SHA256 || "";
 const notes = process.env.OPERATIONS_EXPECTED_NOTE_COUNT || "";
 const events = process.env.OPERATIONS_EXPECTED_EVENT_COUNT || "";
+const systemIdentifier = process.env.OPERATIONS_EXPECTED_CORE_SYSTEM_IDENTIFIER || "";
 if (!/^[0-9a-f]{40}$/.test(revision) || !/^[0-9a-f]{64}$/.test(sha256) ||
     !/^(0|[1-9][0-9]*)$/.test(notes) || !/^(0|[1-9][0-9]*)$/.test(events) ||
+    !/^[1-9][0-9]*$/.test(systemIdentifier) ||
     !existsSync(cleanupPath)) process.exit(64);
 let url;
 try { url = new URL(process.env.DATABASE_URL || ""); } catch { process.exit(65); }
@@ -229,6 +1334,7 @@ const env = {
     `-c winwidget.operations_expected_snapshot_sha256=${sha256}`,
     `-c winwidget.operations_expected_note_count=${notes}`,
     `-c winwidget.operations_expected_event_count=${events}`,
+    `-c winwidget.operations_expected_core_system_identifier=${systemIdentifier}`,
   ].join(" "),
 };
 delete env.DATABASE_URL;
@@ -249,6 +1355,8 @@ const verification = spawnSync("psql", ["--no-psqlrc", "--no-password", "--set",
   "ON_ERROR_STOP=1", "--command", verifySql], { env, stdio: "inherit" });
 if (verification.error || verification.signal || verification.status !== 0) process.exit(68);
 '
+  platform_terminal_assert_files_unchanged ||
+    fail 'checkout, production env or Compose changed during terminal Operations cleanup'
 }
 
 wait_ready() {
@@ -336,6 +1444,19 @@ start_cutover_services() {
     api-gateway)
   ((${#services[@]} > 0)) || fail 'cutover services cannot be resolved'
   compose up -d "${services[@]}"
+}
+
+finish_operations_cutover() {
+  local revision="$1"
+  start_cutover_services
+  wait_operations_ready 'http://127.0.0.1:5200/health/ready' api "$revision"
+  wait_operations_ready 'http://127.0.0.1:5201/health/ready' worker "$revision"
+  wait_operations_ready 'http://127.0.0.1:5202/health/ready' outbox-publisher "$revision"
+  wait_ready 'http://127.0.0.1:4900/health/ready' 'Identity API'
+  wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'
+  identity_operations_overview_smoke "$revision"
+  assert_integration_runtime "$revision"
+  wait_queue_state steady 'Operations and steady integration consumers'
 }
 
 rabbit_queue_snapshot() {
@@ -977,8 +2098,118 @@ const users = [
 ' || fail 'Operations RabbitMQ provisioning failed'
 }
 
+operations_snapshot_metadata() {
+  local snapshot="$1" revision="$2"
+  [[ -f "$snapshot" && ! -L "$snapshot" &&
+    "$(stat -c '%u:%g:%a:%h' "$snapshot")" == '1001:1001:600:1' ]] || return 1
+  OPERATIONS_SNAPSHOT_PATH="$snapshot" \
+    OPERATIONS_EXPECTED_REVISION="$revision" billing_release_node - <<'NODE'
+const { createHash } = require('node:crypto');
+const { readFileSync } = require('node:fs');
+const body = readFileSync(process.env.OPERATIONS_SNAPSHOT_PATH);
+let value;
+try { value = JSON.parse(body.toString('utf8')); } catch { process.exit(1); }
+const keys = value && typeof value === 'object' && !Array.isArray(value)
+  ? Object.keys(value).sort() : [];
+const expected = ['adminEventLogs', 'counts', 'createdAt', 'notes', 'schemaVersion', 'sourceRevision'];
+if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index]) ||
+    value.schemaVersion !== 1 || value.sourceRevision !== process.env.OPERATIONS_EXPECTED_REVISION ||
+    !value.counts || Object.keys(value.counts).sort().join(',') !== 'adminEventLogs,notes' ||
+    !Number.isSafeInteger(value.counts.notes) || value.counts.notes < 0 ||
+    !Number.isSafeInteger(value.counts.adminEventLogs) || value.counts.adminEventLogs < 0 ||
+    !Array.isArray(value.notes) || value.notes.length !== value.counts.notes ||
+    !Array.isArray(value.adminEventLogs) || value.adminEventLogs.length !== value.counts.adminEventLogs ||
+    typeof value.createdAt !== 'string' || Number.isNaN(Date.parse(value.createdAt)) ||
+    body.length === 0 || body[body.length - 1] !== 0x0a) process.exit(1);
+const sha256 = createHash('sha256').update(body).digest('hex');
+process.stdout.write(`${sha256} ${value.counts.notes} ${value.counts.adminEventLogs}\n`);
+NODE
+}
+
+operations_resume_state() {
+  local snapshot="$1" revision="$2" metadata core_status target_status unanchored_state
+  if [[ ! -e "$snapshot" && ! -L "$snapshot" ]]; then
+    printf 'new - - -\n'
+    return
+  fi
+  [[ -f "$snapshot" && ! -L "$snapshot" &&
+    "$(stat -c '%u:%g:%a:%h' "$snapshot")" == '1001:1001:600:1' ]] ||
+    fail 'existing Operations snapshot path is unsafe'
+  core_status="$(root_cutover status)" || fail 'Core Operations retry state cannot be read'
+  target_status="$(target_cutover status)" || fail 'Operations target retry state cannot be read'
+  unanchored_state="$(OPERATIONS_CORE_STATUS="$core_status" \
+    OPERATIONS_TARGET_STATUS="$target_status" \
+    OPERATIONS_EXPECTED_REVISION="$revision" billing_release_node - <<'NODE'
+let core;
+let target;
+try {
+  core = JSON.parse(process.env.OPERATIONS_CORE_STATUS || 'null');
+  target = JSON.parse(process.env.OPERATIONS_TARGET_STATUS || 'null');
+} catch { process.exit(1); }
+const revision = process.env.OPERATIONS_EXPECTED_REVISION || '';
+const exactCore = core && core.ownership === 'CORE' &&
+  core.preparedRevision === revision && core.ownershipRevision === null &&
+  core.snapshotSha256 === null && core.sourceWritesEnabled === false &&
+  core.legacyRoutesEnabled === true && Number.isSafeInteger(core.notes) && core.notes >= 0 &&
+  Number.isSafeInteger(core.adminEventLogs) && core.adminEventLogs >= 0;
+const exactTarget = target && target.phase === 'EMPTY' && target.sourceRevision === null &&
+  target.snapshotSha256 === null && target.notes === 0 && target.adminEventLogs === 0;
+process.stdout.write(exactCore && exactTarget ? 'exact-unanchored' : 'anchored-or-unsafe');
+NODE
+  )" || fail 'Operations snapshot crash-window state cannot be classified'
+  if [[ "$unanchored_state" == exact-unanchored ]]; then
+    # exportSnapshot uses O_EXCL and fsyncs before anchoring the digest in Core.
+    # Only that exact crash window may discard the untrusted/unanchored file.
+    rm -- "$snapshot"
+    sync -f "$(dirname -- "$snapshot")"
+    [[ ! -e "$snapshot" && ! -L "$snapshot" ]] ||
+      fail 'unanchored Operations snapshot could not be retired'
+    printf 'new - - -\n'
+    return
+  fi
+  [[ "$unanchored_state" == anchored-or-unsafe ]] || return 1
+  metadata="$(operations_snapshot_metadata "$snapshot" "$revision")" ||
+    fail 'existing Operations snapshot is not the exact safe retry artifact'
+  OPERATIONS_SNAPSHOT_METADATA="$metadata" \
+    OPERATIONS_CORE_STATUS="$core_status" \
+    OPERATIONS_TARGET_STATUS="$target_status" \
+    OPERATIONS_EXPECTED_REVISION="$revision" billing_release_node - <<'NODE'
+const [sha256, notesText, eventsText] = (process.env.OPERATIONS_SNAPSHOT_METADATA || '').split(' ');
+const notes = Number(notesText);
+const events = Number(eventsText);
+let core;
+let target;
+try {
+  core = JSON.parse(process.env.OPERATIONS_CORE_STATUS || 'null');
+  target = JSON.parse(process.env.OPERATIONS_TARGET_STATUS || 'null');
+} catch { process.exit(1); }
+const revision = process.env.OPERATIONS_EXPECTED_REVISION || '';
+const targetCounts = target && target.notes === notes && target.adminEventLogs === events;
+const targetExact = target && target.sourceRevision === revision &&
+  target.snapshotSha256 === sha256 && targetCounts;
+if (core?.source === 'removed') {
+  if (target?.phase !== 'ACTIVE' || !targetExact) process.exit(1);
+  process.stdout.write(`complete ${sha256} ${notes} ${events}\n`);
+  process.exit(0);
+}
+const coreExact = core && ['CORE', 'OPERATIONS'].includes(core.ownership) &&
+  core.preparedRevision === revision && core.snapshotSha256 === sha256 &&
+  core.notes === notes && core.adminEventLogs === events &&
+  core.sourceWritesEnabled === false &&
+  ((core.ownership === 'CORE' && core.ownershipRevision === null && core.legacyRoutesEnabled === true) ||
+   (core.ownership === 'OPERATIONS' && core.ownershipRevision === revision && core.legacyRoutesEnabled === false));
+const targetEmpty = target?.phase === 'EMPTY' && target.sourceRevision === null &&
+  target.snapshotSha256 === null && target.notes === 0 && target.adminEventLogs === 0;
+const targetPrepared = ['IMPORTED', 'ACTIVE'].includes(target?.phase) && targetExact;
+if (!coreExact || (!targetEmpty && !targetPrepared)) process.exit(1);
+process.stdout.write(`resume-${core.ownership.toLowerCase()} ${sha256} ${notes} ${events}\n`);
+NODE
+}
+
 status() {
-  local core_status target_status
+  local revision="$1" core_status target_status
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || fail 'status requires EXPECTED_REVISION'
+  export_coordinated_revision "$revision"
   core_status="$(root_cutover status)"
   target_status="$(target_cutover status)"
   OPERATIONS_CORE_STATUS="$core_status" \
@@ -1000,10 +2231,11 @@ NODE
 
 cutover() {
   local revision="$1" artifact_dir snapshot_host snapshot_container
-  local export_json sha256 note_count event_count
-  local fence_started=false
+  local export_json sha256 note_count event_count resume_state
+  local platform_prerequisite platform_mode platform_revision
+  local forward_phase_started=false
 
-  trap 'if [[ "$fence_started" == true ]]; then printf "%s\n" "Operations cutover stopped after the Core write fence; continue forward and do not re-enable Core writes." >&2; fi' ERR
+  trap 'if [[ "$forward_phase_started" == true ]]; then printf "%s\n" "Operations cutover failed during or after a forward-only downtime phase; services may remain stopped. Keep the state unchanged and rerun this exact controller." >&2; fi' ERR
 
   assert_inputs
   assert_checkout "$revision"
@@ -1014,10 +2246,15 @@ cutover() {
   source "$SERVER_ROOT/scripts/production-deploy-lock.sh"
   acquire_production_deploy_lock 'Operations hard cutover'
 
-  # The pending Operations prepare migration must never share the destructive
-  # Platform cleanup revision. Platform cleanup is completed and sealed on an
-  # immutable ancestor before any Operations database or Core mutation starts.
-  assert_platform_cleanup_complete "$revision"
+  # Prefer the previously evidenced Platform cleanup when it exists. If it was
+  # never run, the same locked downtime window performs the real fenced source
+  # drop with a separate truthful terminal marker; no backup evidence is forged.
+  platform_prerequisite="$(assert_platform_cleanup_prerequisite "$revision")" ||
+    fail 'Platform cleanup prerequisite is invalid'
+  IFS='|' read -r platform_mode platform_revision <<<"$platform_prerequisite"
+  [[ "$platform_mode" =~ ^(legacy|terminal)$ &&
+    "$platform_revision" =~ ^[0-9a-f]{40}$ ]] ||
+    fail 'Platform cleanup prerequisite returned an invalid state'
 
   # This gate only proves that the independently controlled restore path is
   # disabled and quiescent. It does not require a Core backup or restore run.
@@ -1041,8 +2278,9 @@ cutover() {
     fail 'Operations artifact directory is unsafe'
   snapshot_host="$artifact_dir/operations-$revision.json"
   snapshot_container="$CONTAINER_ARTIFACT_DIR/operations-$revision.json"
-  [[ ! -e "$snapshot_host" && ! -L "$snapshot_host" ]] ||
-    fail 'cutover snapshot already exists; inspect state before continuing'
+  [[ ! -L "$snapshot_host" &&
+    (! -e "$snapshot_host" || -f "$snapshot_host") ]] ||
+    fail 'Operations snapshot path is unsafe'
 
   compose build --provenance=false \
     api api-gateway maintenance-worker database-restore-worker \
@@ -1052,13 +2290,43 @@ cutover() {
   assert_identity_release_prerequisite "$revision"
   OPERATIONS_ENV_FILE="$ENV_FILE" \
     bash "$SERVER_ROOT/scripts/operations-database-prepare.sh" --prepare
-  compose --profile migration run --rm --no-deps migrate
-  root_cutover prepare --revision "$revision"
+  if [[ "$platform_mode" == terminal ]]; then
+    forward_phase_started=true
+    run_or_verify_terminal_platform_cleanup "$revision"
+  fi
+  # The terminal runner may already have applied every pending migration. This
+  # idempotent deploy also covers the ordinary legacy-cleanup path and the
+  # Operations prepare migration immediately following the Platform DDL.
+  compose --profile migration run --rm -T --no-deps migrate
+  if [[ "$platform_mode" == terminal ]]; then
+    # The terminal DDL requires integration-worker to be stopped. Recreate the
+    # exact coordinated revision before the later legacy audit queue drain.
+    compose up -d --no-deps --no-build --force-recreate integration-worker
+    assert_integration_runtime "$revision"
+  fi
+  read -r resume_state sha256 note_count event_count < <(
+    operations_resume_state "$snapshot_host" "$revision"
+  ) || fail 'Operations cutover retry state is unsafe'
+  [[ "$resume_state" =~ ^(new|resume-core|resume-operations|complete)$ ]] ||
+    fail 'Operations cutover retry classifier returned an invalid state'
+  if [[ "$resume_state" == complete ]]; then
+    rabbit_queue_snapshot > /dev/null
+    provision_rabbitmq "$revision"
+    finish_operations_cutover "$revision"
+    forward_phase_started=false
+    trap - ERR
+    printf 'Operations ownership is already active at revision %s; exact terminal retry verification completed.\n' "$revision"
+    return
+  fi
+  if [[ "$resume_state" != resume-operations ]]; then
+    root_cutover prepare --revision "$revision"
+  fi
   rabbit_queue_snapshot > /dev/null
 
   # Hard-downtime handoff: freeze every audit source while the legacy
   # integration-worker drains its already-bound audit queues. DLQs are never
   # purged and pending source Outbox rows remain durable until restart.
+  forward_phase_started=true
   stop_audit_source_services
   # The third legacy retry tier has a 30-minute TTL. Keep the publishers
   # frozen and allow every retained retry to return to its main queue.
@@ -1079,14 +2347,14 @@ cutover() {
   identity_introspection_smoke "$revision"
 
   compose stop --timeout 30 \
-    operations-api operations-worker operations-outbox-publisher
-  root_cutover fence --revision "$revision"
-  fence_started=true
-  export_json="$(root_cutover export \
-    --revision "$revision" \
-    --file "$snapshot_container")"
-  read -r sha256 note_count event_count < <(
-    OPERATIONS_EXPORT_JSON="$export_json" billing_release_node - <<'NODE'
+    identity-api operations-api operations-worker operations-outbox-publisher
+  if [[ "$resume_state" == new ]]; then
+    root_cutover fence --revision "$revision"
+    export_json="$(root_cutover export \
+      --revision "$revision" \
+      --file "$snapshot_container")"
+    read -r sha256 note_count event_count < <(
+      OPERATIONS_EXPORT_JSON="$export_json" billing_release_node - <<'NODE'
 const value = JSON.parse(process.env.OPERATIONS_EXPORT_JSON);
 if (
   value.exported !== true ||
@@ -1096,13 +2364,26 @@ if (
 ) process.exit(1);
 process.stdout.write(`${value.sha256} ${value.notes} ${value.events}\n`);
 NODE
-  ) || fail 'Core export result is invalid'
-  unset export_json
-  [[ -f "$snapshot_host" && ! -L "$snapshot_host" ]] ||
-    fail 'Core snapshot was not created on the host'
-  [[ "$(stat -c '%u:%g:%a:%h' "$snapshot_host")" == '1001:1001:600:1' ]] ||
-    fail 'Core snapshot identity or mode is unsafe'
+    ) || fail 'Core export result is invalid'
+    unset export_json
+    [[ "$(operations_snapshot_metadata "$snapshot_host" "$revision")" == \
+      "$sha256 $note_count $event_count" ]] ||
+      fail 'Core snapshot was not created as the exact safe artifact'
+  elif [[ "$resume_state" == resume-core ]]; then
+    root_cutover fence --revision "$revision"
+    [[ "$(operations_snapshot_metadata "$snapshot_host" "$revision")" == \
+      "$sha256 $note_count $event_count" ]] ||
+      fail 'Core retry snapshot changed after classification'
+  else
+    [[ "$resume_state" == resume-operations &&
+      "$(operations_snapshot_metadata "$snapshot_host" "$revision")" == \
+        "$sha256 $note_count $event_count" ]] ||
+      fail 'activated Core retry snapshot changed after classification'
+  fi
 
+  platform_terminal_assert_files_unchanged ||
+    fail 'checkout, production env or Compose changed before Operations import'
+  database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"
   target_cutover import \
     --file "$snapshot_container" \
     --sha256 "$sha256"
@@ -1114,16 +2395,8 @@ NODE
     --events "$event_count"
   run_core_source_cleanup "$revision" "$sha256" "$note_count" "$event_count"
 
-  start_cutover_services
-  wait_operations_ready 'http://127.0.0.1:5200/health/ready' api "$revision"
-  wait_operations_ready 'http://127.0.0.1:5201/health/ready' worker "$revision"
-  wait_operations_ready 'http://127.0.0.1:5202/health/ready' outbox-publisher "$revision"
-  wait_ready 'http://127.0.0.1:4900/health/ready' 'Identity API'
-  wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'
-  identity_operations_overview_smoke "$revision"
-  assert_integration_runtime "$revision"
-  wait_queue_state steady 'Operations and steady integration consumers'
-  fence_started=false
+  finish_operations_cutover "$revision"
+  forward_phase_started=false
   trap - ERR
 
   printf 'Operations ownership is active at revision %s and the legacy Core source is removed.\n' "$revision"
@@ -1136,8 +2409,20 @@ self_test() {
   local -a source_contracts normalized_source_contracts cutover_contracts
   local -a forbidden_source_contracts
   source="$(declare -f \
+    assert_inputs \
     assert_steady_integration_contract \
-    assert_platform_cleanup_complete \
+    assert_platform_cleanup_prerequisite \
+    platform_terminal_assert_files_unchanged \
+    platform_terminal_prepare_live_owner_runtime \
+    platform_terminal_assert_core_outbox_runtime \
+    platform_terminal_wait_core_outbox_drained \
+    platform_terminal_candidate_migration_state \
+    platform_terminal_operations_prepare_state \
+    platform_terminal_assert_exact_repo_ledger \
+    platform_terminal_rollback_pristine_operations_prepare \
+    platform_terminal_recover_operations_prepare \
+    run_or_verify_terminal_platform_cleanup \
+    verify_terminal_platform_cleanup \
     export_coordinated_revision \
     stop_audit_source_services \
     queue_state_matches \
@@ -1146,6 +2431,7 @@ self_test() {
     assert_identity_release_prerequisite \
     identity_operations_overview_smoke \
     assert_integration_runtime \
+    operations_resume_state \
     run_core_source_cleanup \
     provision_rabbitmq \
     status \
@@ -1160,6 +2446,10 @@ self_test() {
     status \
     cutover)"
   [[ "$CONFIRMATION" == 'CUT OVER OPERATIONS FORWARD ONLY' ]]
+  [[ "$PLATFORM_TERMINAL_CONFIRMATION" == 'DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER' ]]
+  [[ "$PLATFORM_TERMINAL_MARKER_NAME" == '.platform-core-source-terminal-v1' &&
+    "$OPERATIONS_PREP_MIGRATION" == '20260824030000_prepare_operations_service_ownership' &&
+    "$PLATFORM_TERMINAL_MIGRATION" == '20260825000000_remove_legacy_platform_core_source' ]]
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
   [[ "$CONTAINER_ARTIFACT_DIR" == '/var/lib/winwidget/operations-cutover' ]]
   if (export_coordinated_revision latest) >/dev/null 2>&1; then
@@ -1197,7 +2487,22 @@ self_test() {
     'winwidget-operations-publisher'
     'winwidget-operations:git-$revision'
     'winwidget-integration'
-    'Operations cutover requires completed Platform cleanup at an immutable ancestor revision'
+    'OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION'
+    'platform_terminal_assert_exact_repo_ledger'
+    'platform_terminal_rollback_pristine_operations_prepare'
+    'failed:pristine'
+    'failed:absent'
+    'prepared:absent:failed | prepared:absent:rolled-back'
+    'platform_terminal_assert_files_unchanged'
+    'canonical local production Docker daemon is required'
+    'winwidget-api:git-$revision'
+    'coordinated Core API runtime identity is invalid'
+    'platform_terminal_wait_core_outbox_drained'
+    "'admin.audit.platform.v1','billing.offer.changed.v2'"
+    'identity-api operations-api operations-worker operations-outbox-publisher'
+    'failed during or after a forward-only downtime phase'
+    'platform_database_validate_marker'
+    'platform_cutover_validate_marker'
     'OPERATIONS_STEADY_INTEGRATION_READ_PATTERN'
     'OPERATIONS_STEADY_INTEGRATION_KINDS'
     'const provisionTopology = async () => {'
@@ -1221,6 +2526,8 @@ self_test() {
     'delete env.DATABASE_URL'
     'winwidget.operations_source_cleanup=approved'
     'winwidget.operations_core_stopped=true'
+    'winwidget.operations_expected_core_system_identifier'
+    'Core database identity changed after terminal Platform cleanup'
     'lock_timeout=60000'
     'statement_timeout=300000'
     'database-restore-production-guard.sh'
@@ -1245,13 +2552,17 @@ self_test() {
     'winwidget.(events|manual-retry)'
   )
   cutover_contracts=(
-    'assert_platform_cleanup_complete "$revision"'
+    'assert_platform_cleanup_prerequisite "$revision"'
+    'run_or_verify_terminal_platform_cleanup "$revision"'
+    'operations_resume_state "$snapshot_host" "$revision"'
     'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"'
   )
   forbidden_source_contracts=(
     '--env "RABBITMQ_ADMIN_PASSWORD='
     '--env DATABASE_URL'
     '--env "DATABASE_URL='
+    'OPERATIONS_PLATFORM_CLEANUP_BYPASS_CONFIRMATION'
+    'CUT OVER OPERATIONS WITH PLATFORM SOURCE RETAINED IN CORE'
   )
   for index in "${!source_contracts[@]}"; do
     [[ "$source" == *"${source_contracts[$index]}"* ]] || {
@@ -1271,13 +2582,19 @@ self_test() {
       return 1
     }
   done
+  [[ "$(grep -Fc 'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"' \
+    <<<"$cutover_source")" -ge 2 ]]
+  [[ "$(grep -Fc 'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"' \
+    <<<"$source")" -ge 3 ]]
+  [[ "$(grep -Fc 'platform_terminal_assert_files_unchanged' <<<"$cutover_source")" -ge 1 ]]
+  [[ "$(grep -Fc 'platform_terminal_assert_files_unchanged' <<<"$source")" -ge 3 ]]
   for index in "${!forbidden_source_contracts[@]}"; do
     [[ "$source" != *"${forbidden_source_contracts[$index]}"* ]] || {
       printf 'operations-cutover self-test forbidden source contract %s is present\n' "$index" >&2
       return 1
     }
   done
-  [[ "$(grep -c 'billing_release_node -' <<<"$node_runtime_source")" == '6' ]]
+  [[ "$(grep -c 'billing_release_node -' <<<"$node_runtime_source")" -ge 6 ]]
   if grep -Eq '(^|[;&|][[:space:]]+|[[:space:]])node[[:space:]]+(-[[:space:]]+)?<<' \
     <<<"$node_runtime_source"; then
     return 1
@@ -1291,6 +2608,9 @@ const markers = [
   'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"',
   'compose build --provenance=false',
   'assert_identity_release_prerequisite "$revision"',
+  'run_or_verify_terminal_platform_cleanup "$revision"',
+  'compose --profile migration run --rm -T --no-deps migrate',
+  'operations_resume_state "$snapshot_host" "$revision"',
   'stop_audit_source_services',
   'wait_queue_state legacy-drained',
   'compose stop --timeout 30 integration-worker',
@@ -1299,17 +2619,19 @@ const markers = [
   'retire_drained_legacy_audit_queues',
   'provision_rabbitmq "$revision"',
   'identity_introspection_smoke "$revision"',
+  'identity-api operations-api operations-worker operations-outbox-publisher',
   'root_cutover fence',
   'root_cutover activate',
   'run_core_source_cleanup "$revision" "$sha256" "$note_count" "$event_count"',
-  'start_cutover_services',
-  'identity_operations_overview_smoke',
-  'wait_queue_state steady',
+  'finish_operations_cutover "$revision"',
 ];
 let previous = -1;
 for (const marker of markers) {
   const index = source.indexOf(marker, previous + 1);
-  if (index < 0) process.exit(1);
+  if (index < 0) {
+    process.stderr.write(`operations-cutover self-test ordered marker missing: ${marker}\n`);
+    process.exit(1);
+  }
   previous = index;
 }
 NODE
@@ -1326,7 +2648,9 @@ const commit = sql.indexOf('COMMIT;');
 if (
   approval < 0 || lock <= approval || count <= lock || drop <= count ||
   absence <= drop || commit <= absence ||
-  !sql.includes('DROP TYPE "public"."OperationsCoreOwnership"')
+  !sql.includes('DROP TYPE "public"."OperationsCoreOwnership"') ||
+  !sql.includes("current_database() <> 'default_db'") ||
+  !sql.includes('(pg_control_system()).system_identifier::TEXT IS DISTINCT FROM expected_system_identifier')
 ) process.exit(1);
 NODE
   printf 'operations-cutover self-test passed\n'
@@ -1338,14 +2662,21 @@ main() {
       self_test
       ;;
     --status)
-      status
+      [[ -n "${EXPECTED_REVISION:-}" ]] || fail 'EXPECTED_REVISION is required'
+      status "$EXPECTED_REVISION"
+      ;;
+    --verify-platform-terminal-cleanup)
+      [[ -n "${EXPECTED_REVISION:-}" ]] || fail 'EXPECTED_REVISION is required'
+      assert_checkout "$EXPECTED_REVISION"
+      export_coordinated_revision "$EXPECTED_REVISION"
+      verify_terminal_platform_cleanup "$EXPECTED_REVISION"
       ;;
     --cutover)
       [[ -n "${EXPECTED_REVISION:-}" ]] || fail 'EXPECTED_REVISION is required'
       cutover "$EXPECTED_REVISION"
       ;;
     *)
-      fail 'usage: operations-cutover-production.sh --self-test|--status|--cutover'
+      fail 'usage: operations-cutover-production.sh --self-test|--status|--verify-platform-terminal-cleanup|--cutover'
       ;;
   esac
 }

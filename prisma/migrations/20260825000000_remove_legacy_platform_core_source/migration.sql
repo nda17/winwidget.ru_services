@@ -27,6 +27,7 @@ DECLARE
     source_inventory TEXT;
     pristine_bootstrap BOOLEAN;
     production_approved BOOLEAN;
+    operations_terminal_approved BOOLEAN;
     evidence_setting TEXT;
     evidence_value TEXT;
     expected_ownership_revision TEXT;
@@ -171,6 +172,125 @@ BEGIN
     expected_migration_sha256 := current_setting(
         'winwidget.platform_cleanup_migration_sha256',
         true
+    );
+
+    operations_terminal_approved := COALESCE(
+        current_setting(
+            'winwidget.operations_platform_source_cleanup',
+            true
+        ) = 'production-destructive-approved'
+        AND current_setting(
+            'winwidget.operations_platform_source_writers_stopped',
+            true
+        ) = 'true'
+        AND current_user = 'gen_user'
+        AND session_user = 'gen_user'
+        AND current_database() = current_setting(
+            'winwidget.operations_platform_core_database_name',
+            true
+        )
+        AND current_database() = 'default_db'
+        AND (pg_control_system()).system_identifier::TEXT =
+            current_setting(
+                'winwidget.operations_platform_core_database_system_identifier',
+                true
+            )
+        AND current_setting(
+            'winwidget.operations_platform_ownership_revision',
+            true
+        ) ~ '^[0-9a-f]{40}$'
+        AND current_setting(
+            'winwidget.operations_platform_ownership_revision',
+            true
+        ) <> repeat('0', 40)
+        AND current_setting(
+            'winwidget.operations_platform_cleanup_revision',
+            true
+        ) ~ '^[0-9a-f]{40}$'
+        AND current_setting(
+            'winwidget.operations_platform_cleanup_revision',
+            true
+        ) <> repeat('0', 40)
+        AND current_setting(
+            'winwidget.operations_platform_ownership_revision',
+            true
+        ) <> current_setting(
+            'winwidget.operations_platform_cleanup_revision',
+            true
+        )
+        AND current_setting(
+            'winwidget.operations_platform_generation',
+            true
+        ) ~ '^[1-9][0-9]{0,17}$'
+        AND current_setting(
+            'winwidget.operations_platform_source_high_watermark',
+            true
+        ) ~ '^[1-9][0-9]*$'
+        AND current_setting(
+            'winwidget.operations_platform_billing_offer_contract_version',
+            true
+        ) = '2'
+        AND current_setting(
+            'winwidget.operations_platform_billing_offer_sequence_scope',
+            true
+        ) = 'billing.offer:offer'
+        AND current_setting(
+            'winwidget.operations_platform_billing_offer_aggregate_version',
+            true
+        ) ~ '^[1-9][0-9]*$'
+        AND current_setting(
+            'winwidget.operations_platform_billing_offer_source_sequence',
+            true
+        ) ~ '^[1-9][0-9]*$'
+        AND current_setting(
+            'winwidget.operations_platform_migration_sha256',
+            true
+        ) ~ '^[0-9a-f]{64}$'
+        AND current_setting(
+            'winwidget.operations_platform_production_env_sha256',
+            true
+        ) ~ '^[0-9a-f]{64}$'
+        AND current_setting(
+            'winwidget.operations_platform_compose_sha256',
+            true
+        ) ~ '^[0-9a-f]{64}$'
+        AND current_setting(
+            'winwidget.operations_platform_snapshot_sha256',
+            true
+        ) ~ '^[0-9a-f]{64}$'
+        AND current_setting(
+            'winwidget.operations_platform_source_fingerprint',
+            true
+        ) ~ '^[0-9a-f]{64}$'
+        AND current_setting(
+            'winwidget.operations_platform_billing_offer_fence_fingerprint',
+            true
+        ) ~ '^[0-9a-f]{64}$'
+        AND current_setting(
+            'winwidget.operations_platform_migration_sha256',
+            true
+        ) <> repeat('0', 64)
+        AND current_setting(
+            'winwidget.operations_platform_production_env_sha256',
+            true
+        ) <> repeat('0', 64)
+        AND current_setting(
+            'winwidget.operations_platform_compose_sha256',
+            true
+        ) <> repeat('0', 64)
+        AND current_setting(
+            'winwidget.operations_platform_snapshot_sha256',
+            true
+        ) <> repeat('0', 64)
+        AND current_setting(
+            'winwidget.operations_platform_source_fingerprint',
+            true
+        ) <> repeat('0', 64)
+        AND current_setting(
+            'winwidget.operations_platform_billing_offer_fence_fingerprint',
+            true
+        ) <> repeat('0', 64),
+        false
     );
 
     production_approved := COALESCE(
@@ -347,12 +467,139 @@ BEGIN
         )
     INTO production_approved;
 
+    SELECT
+        operations_terminal_approved
+        AND (
+            SELECT count(*) = 1
+            FROM public._prisma_migrations
+            WHERE migration_name =
+                '20260825000000_remove_legacy_platform_core_source'
+              AND checksum = current_setting(
+                  'winwidget.operations_platform_migration_sha256',
+                  true
+              )
+              AND finished_at IS NULL
+              AND rolled_back_at IS NULL
+        )
+        AND (
+            SELECT count(*) = 1
+            FROM public.platform_core_state
+        )
+        AND EXISTS (
+            SELECT 1
+            FROM public.platform_core_state state
+            WHERE state.id = 'singleton'
+              AND state.ownership =
+                  'PLATFORM'::public."PlatformCoreOwnership"
+              AND NOT state.source_writes_enabled
+              AND NOT state.legacy_routes_enabled
+              AND state.generation::TEXT = current_setting(
+                  'winwidget.operations_platform_generation',
+                  true
+              )
+              AND state.prepared_revision = current_setting(
+                  'winwidget.operations_platform_ownership_revision',
+                  true
+              )
+              AND state.source_revision = current_setting(
+                  'winwidget.operations_platform_ownership_revision',
+                  true
+              )
+              AND state.ownership_revision = current_setting(
+                  'winwidget.operations_platform_ownership_revision',
+                  true
+              )
+              AND state.source_snapshot_sha256 = current_setting(
+                  'winwidget.operations_platform_snapshot_sha256',
+                  true
+              )
+              AND state.source_fingerprint = current_setting(
+                  'winwidget.operations_platform_source_fingerprint',
+                  true
+              )
+              AND state.source_high_watermark::TEXT = current_setting(
+                  'winwidget.operations_platform_source_high_watermark',
+                  true
+              )
+              AND state.billing_offer_contract_version::TEXT =
+                  current_setting(
+                      'winwidget.operations_platform_billing_offer_contract_version',
+                      true
+                  )
+              AND state.billing_offer_sequence_scope = current_setting(
+                  'winwidget.operations_platform_billing_offer_sequence_scope',
+                  true
+              )
+              AND state.billing_offer_aggregate_version::TEXT =
+                  current_setting(
+                      'winwidget.operations_platform_billing_offer_aggregate_version',
+                      true
+                  )
+              AND state.billing_offer_source_sequence::TEXT =
+                  current_setting(
+                      'winwidget.operations_platform_billing_offer_source_sequence',
+                      true
+                  )
+              AND state.billing_offer_fence_fingerprint = current_setting(
+                  'winwidget.operations_platform_billing_offer_fence_fingerprint',
+                  true
+              )
+              AND state.fenced_at IS NOT NULL
+              AND state.exported_at IS NOT NULL
+              AND state.activated_at IS NOT NULL
+              AND state.fenced_at <= state.exported_at
+              AND state.exported_at <= state.activated_at
+        )
+        AND EXISTS (
+            SELECT 1
+            FROM public.billing_source_aggregate_versions cursor
+            WHERE cursor.aggregate_type = 'billing.offer'
+              AND cursor.aggregate_id = 'offer'
+              AND cursor.version::TEXT = current_setting(
+                  'winwidget.operations_platform_billing_offer_aggregate_version',
+                  true
+              )
+              AND cursor.source_sequence::TEXT = current_setting(
+                  'winwidget.operations_platform_billing_offer_source_sequence',
+                  true
+              )
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM public.outbox_events
+            WHERE event_type IN (
+                'admin.audit.platform.v1',
+                'billing.offer.changed.v2'
+            )
+              AND status <> 'PUBLISHED'::public."OutboxEventStatus"
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_stat_activity activity
+            WHERE activity.pid <> pg_backend_pid()
+              AND activity.datname = current_database()
+              AND activity.usename IN (
+                  'gen_user',
+                  'winwidget_api_runtime'
+              )
+        )
+    INTO operations_terminal_approved;
+
+    IF COALESCE(production_approved, false)
+        AND COALESCE(operations_terminal_approved, false)
+    THEN
+        RAISE EXCEPTION
+            'Platform Core source cleanup has ambiguous production approvals'
+            USING ERRCODE = '55000';
+    END IF;
+
     IF NOT (
         COALESCE(pristine_bootstrap, false)
         OR COALESCE(production_approved, false)
+        OR COALESCE(operations_terminal_approved, false)
     ) THEN
         RAISE EXCEPTION
-            'Platform Core source cleanup requires a completed, evidenced production cutover or an exact pristine non-production database'
+            'Platform Core source cleanup requires an exact evidenced or Operations terminal production approval, or an exact pristine non-production database'
             USING ERRCODE = '55000';
     END IF;
 END

@@ -4,6 +4,7 @@ DO $$
 DECLARE
     expected_revision TEXT := current_setting('winwidget.operations_expected_revision', true);
     expected_sha256 TEXT := current_setting('winwidget.operations_expected_snapshot_sha256', true);
+    expected_system_identifier TEXT := current_setting('winwidget.operations_expected_core_system_identifier', true);
     expected_notes BIGINT := NULLIF(current_setting('winwidget.operations_expected_note_count', true), '')::BIGINT;
     expected_events BIGINT := NULLIF(current_setting('winwidget.operations_expected_event_count', true), '')::BIGINT;
 BEGIN
@@ -13,7 +14,10 @@ BEGIN
         RAISE EXCEPTION 'Operations Core cleanup requires exact approval and a stopped Core runtime';
     END IF;
 
-    IF expected_revision !~ '^[0-9a-f]{40}$'
+    IF current_database() <> 'default_db'
+        OR (pg_control_system()).system_identifier::TEXT IS DISTINCT FROM expected_system_identifier
+        OR expected_system_identifier !~ '^[1-9][0-9]*$'
+        OR expected_revision !~ '^[0-9a-f]{40}$'
         OR expected_sha256 !~ '^[0-9a-f]{64}$'
         OR expected_notes IS NULL
         OR expected_events IS NULL

@@ -1771,6 +1771,7 @@ case "$DEPLOY_TARGET" in
       cutover)
         APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
           OPERATIONS_CUTOVER_CONFIRMATION="$OPERATIONS_CONFIRMATION" \
+          OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION="$OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION" \
           bash scripts/operations-cutover-production.sh --cutover
         ;;
       *) exit 1 ;;

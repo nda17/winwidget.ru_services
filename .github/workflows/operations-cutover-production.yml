@@ -16,6 +16,11 @@ on:
         required: false
         default: ''
         type: string
+      platform_terminal_confirmation:
+        description: Type DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER only when the legacy Platform cleanup marker is absent
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -36,15 +41,17 @@ jobs:
         env:
           OPERATIONS_ACTION: ${{ inputs.action }}
           OPERATIONS_CONFIRMATION: ${{ inputs.confirmation }}
+          OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION: ${{ inputs.platform_terminal_confirmation }}
         run: |
           set -Eeuo pipefail
           [[ "$GITHUB_REF" == 'refs/heads/prod' &&
             "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
             "$(git rev-parse HEAD)" == "$GITHUB_SHA" &&
             -z "$(git status --porcelain --untracked-files=all)" ]]
-          case "$OPERATIONS_ACTION:$OPERATIONS_CONFIRMATION" in
-            status:) ;;
-            cutover:'CUT OVER OPERATIONS FORWARD ONLY') ;;
+          case "$OPERATIONS_ACTION:$OPERATIONS_CONFIRMATION:$OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION" in
+            status::) ;;
+            cutover:'CUT OVER OPERATIONS FORWARD ONLY': | \
+            cutover:'CUT OVER OPERATIONS FORWARD ONLY':'DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER') ;;
             *) exit 1 ;;
           esac
           bash -n \
@@ -130,14 +137,16 @@ jobs:
           SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ''
           OPERATIONS_ACTION: ${{ inputs.action }}
           OPERATIONS_CONFIRMATION: ${{ inputs.confirmation }}
+          OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION: ${{ inputs.platform_terminal_confirmation }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
           set -Eeuo pipefail
-          case "$OPERATIONS_ACTION:$OPERATIONS_CONFIRMATION" in
-            status:) ;;
-            cutover:'CUT OVER OPERATIONS FORWARD ONLY') ;;
+          case "$OPERATIONS_ACTION:$OPERATIONS_CONFIRMATION:$OPERATIONS_PLATFORM_TERMINAL_CONFIRMATION" in
+            status::) ;;
+            cutover:'CUT OVER OPERATIONS FORWARD ONLY': | \
+            cutover:'CUT OVER OPERATIONS FORWARD ONLY':'DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER') ;;
             *) exit 1 ;;
           esac
           bash .github/scripts/stage-or-deploy-backend.sh

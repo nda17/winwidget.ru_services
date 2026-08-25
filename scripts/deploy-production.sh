@@ -1332,31 +1332,38 @@ const ancestryGate = source.indexOf(
   'Routine deployment would downgrade past the completed Platform Core cleanup.',
   incompleteDefer,
 );
-const dirtyGate = source.indexOf('dirty_files="$(', ancestryGate);
+const terminalGate = source.indexOf(
+  'bash "$operations_cutover_controller" --verify-platform-terminal-cleanup',
+  ancestryGate,
+);
+const dirtyGate = source.indexOf('dirty_files="$(', terminalGate);
 const routineBuild = source.indexOf('compose_target build --provenance=false', dirtyGate);
 const routineMigrate = source.indexOf(
   'compose_target --profile migration run --rm --no-deps migrate',
   dirtyGate,
 );
 if ([markerIdentity, cleanupMigration, absentDefer, statusGate, markerBinding,
-    incompleteDefer, ancestryGate, dirtyGate, routineBuild, routineMigrate]
+    incompleteDefer, ancestryGate, terminalGate, dirtyGate, routineBuild, routineMigrate]
     .some(index => index < 0) ||
     !(markerIdentity < cleanupMigration && cleanupMigration < absentDefer &&
       absentDefer < statusGate && statusGate < markerBinding &&
       markerBinding < incompleteDefer && incompleteDefer < ancestryGate &&
-      ancestryGate < dirtyGate && dirtyGate < routineBuild && dirtyGate < routineMigrate)) {
+      ancestryGate < terminalGate && terminalGate < dirtyGate &&
+      dirtyGate < routineBuild && dirtyGate < routineMigrate)) {
   console.error(JSON.stringify({ markerIdentity, cleanupMigration, absentDefer, statusGate,
-    markerBinding, incompleteDefer, ancestryGate, dirtyGate, routineBuild, routineMigrate }));
+    markerBinding, incompleteDefer, ancestryGate, terminalGate, dirtyGate, routineBuild, routineMigrate }));
   process.exit(1);
 }
 const block = source.slice(cleanupMigration, dirtyGate);
 for (const token of [
-  'Use the manual platform-cleanup target; routine migrate must not apply the destructive migration.',
+  'Use the manual Operations cutover or platform-cleanup target; routine migrate must not apply the destructive migration.',
   'Resume the exact manual platform-cleanup workflow.',
   '"$platform_cleanup_actual_migration_sha" == "$platform_cleanup_migration_sha"',
   '"$platform_cleanup_ownership" == "$(platform_cutover_marker_value revision)"',
   '"$platform_cleanup_generation" == "$(platform_cutover_marker_value generation)"',
   '"$platform_cleanup_revision" "$deploy_revision"',
+  'Terminal Platform cleanup marker or live source state is invalid.',
+  'Legacy and terminal Platform cleanup markers are ambiguous.',
 ]) if (!block.includes(token)) {
   console.error(`missing Platform cleanup routine-gate token: ${token}`);
   process.exit(1);
@@ -1652,6 +1659,8 @@ platform_cleanup_migration='20260825000000_remove_legacy_platform_core_source'
 platform_cleanup_directory="$server_root/prisma/migrations/$platform_cleanup_migration"
 platform_cleanup_migration_file="$platform_cleanup_directory/migration.sql"
 platform_cleanup_controller="$server_root/scripts/cleanup-platform-core-source-production.sh"
+platform_terminal_marker="$APP_ROOT/deploy/backend/.platform-core-source-terminal-v1"
+operations_cutover_controller="$server_root/scripts/operations-cutover-production.sh"
 # Defined by the sourced Platform database lifecycle contract.
 # shellcheck disable=SC2154
 if [[ -e "$platform_cleanup_directory" || -L "$platform_cleanup_directory" ||
@@ -1662,23 +1671,29 @@ if [[ -e "$platform_cleanup_directory" || -L "$platform_cleanup_directory" ||
 		echo 'Platform Core cleanup release paths are incomplete or unsafe.' >&2
 		exit 1
 	}
-	if [[ ! -e "$platform_core_cleanup_marker" && ! -L "$platform_core_cleanup_marker" ]]; then
+	if [[ ! -e "$platform_core_cleanup_marker" && ! -L "$platform_core_cleanup_marker" &&
+		! -e "$platform_terminal_marker" && ! -L "$platform_terminal_marker" ]]; then
 		if [[ "$platform_cleanup_automatic_prod_push" == true ]]; then
 			echo "Automatic backend revision $deploy_revision is verified but the destructive Platform Core cleanup is deferred."
-			echo 'Use the manual platform-cleanup target after the post-cutover soak and evidence gates pass.'
+			echo 'Use the manual Operations cutover or the evidenced Platform cleanup workflow.'
 			exit 0
 		fi
 		echo 'Routine deployment is blocked for an unstaged Platform Core cleanup release.' >&2
-		echo 'Use the manual platform-cleanup target; routine migrate must not apply the destructive migration.' >&2
+		echo 'Use the manual Operations cutover or platform-cleanup target; routine migrate must not apply the destructive migration.' >&2
 		exit 1
 	fi
-	APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" EXPECTED_REVISION="$deploy_revision" \
-		bash "$platform_cleanup_controller" --status >/dev/null || {
-		echo 'Platform Core cleanup marker is invalid.' >&2
-		exit 1
-	}
-	platform_cleanup_state="$(awk -F= -v expected_migration="$platform_cleanup_migration" '
-	  $1 == "phase" { phase=substr($0, index($0, "=") + 1); phase_count += 1 }
+	if [[ -e "$platform_core_cleanup_marker" || -L "$platform_core_cleanup_marker" ]]; then
+		[[ ! -e "$platform_terminal_marker" && ! -L "$platform_terminal_marker" ]] || {
+			echo 'Legacy and terminal Platform cleanup markers are ambiguous.' >&2
+			exit 1
+		}
+		APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" EXPECTED_REVISION="$deploy_revision" \
+			bash "$platform_cleanup_controller" --status >/dev/null || {
+			echo 'Platform Core cleanup marker is invalid.' >&2
+			exit 1
+		}
+		platform_cleanup_state="$(awk -F= -v expected_migration="$platform_cleanup_migration" '
+		  $1 == "phase" { phase=substr($0, index($0, "=") + 1); phase_count += 1 }
 	  $1 == "ownership_revision" { ownership=substr($0, index($0, "=") + 1); ownership_count += 1 }
 	  $1 == "cleanup_revision" { cleanup=substr($0, index($0, "=") + 1); cleanup_count += 1 }
 	  $1 == "generation" { generation=substr($0, index($0, "=") + 1); generation_count += 1 }
@@ -1693,34 +1708,46 @@ if [[ -e "$platform_cleanup_directory" || -L "$platform_cleanup_directory" ||
 	        migration_sha !~ /^[0-9a-f]{64}$/) exit 1
 	    printf "%s|%s|%s|%s|%s", phase, ownership, cleanup, generation, migration_sha
 	  }
-	' "$platform_core_cleanup_marker")" || {
-		echo 'Platform Core cleanup marker identity is unreadable.' >&2
-		exit 1
-	}
-	IFS='|' read -r platform_cleanup_phase platform_cleanup_ownership \
-		platform_cleanup_revision platform_cleanup_generation platform_cleanup_migration_sha \
-		<<<"$platform_cleanup_state"
-	platform_cleanup_actual_migration_sha="$(sha256sum "$platform_cleanup_migration_file" | awk 'NR == 1 { print $1 }')"
-	[[ "$platform_cleanup_actual_migration_sha" == "$platform_cleanup_migration_sha" &&
-		"$platform_cleanup_ownership" == "$(platform_cutover_marker_value revision)" &&
-		"$platform_cleanup_generation" == "$(platform_cutover_marker_value generation)" ]] || {
-		echo 'Platform Core cleanup release is not bound to the completed ownership generation and reviewed migration.' >&2
-		exit 1
-	}
-	if [[ "$platform_cleanup_phase" != complete ]]; then
-		if [[ "$platform_cleanup_automatic_prod_push" == true ]]; then
-			echo "Automatic backend deployment is deferred while Platform Core cleanup is phase=$platform_cleanup_phase."
-			exit 0
+		' "$platform_core_cleanup_marker")" || {
+			echo 'Platform Core cleanup marker identity is unreadable.' >&2
+			exit 1
+		}
+		IFS='|' read -r platform_cleanup_phase platform_cleanup_ownership \
+			platform_cleanup_revision platform_cleanup_generation platform_cleanup_migration_sha \
+			<<<"$platform_cleanup_state"
+		platform_cleanup_actual_migration_sha="$(sha256sum "$platform_cleanup_migration_file" | awk 'NR == 1 { print $1 }')"
+		[[ "$platform_cleanup_actual_migration_sha" == "$platform_cleanup_migration_sha" &&
+			"$platform_cleanup_ownership" == "$(platform_cutover_marker_value revision)" &&
+			"$platform_cleanup_generation" == "$(platform_cutover_marker_value generation)" ]] || {
+			echo 'Platform Core cleanup release is not bound to the completed ownership generation and reviewed migration.' >&2
+			exit 1
+		}
+		if [[ "$platform_cleanup_phase" != complete ]]; then
+			if [[ "$platform_cleanup_automatic_prod_push" == true ]]; then
+				echo "Automatic backend deployment is deferred while Platform Core cleanup is phase=$platform_cleanup_phase."
+				exit 0
+			fi
+			echo "Routine deployment is blocked while Platform Core cleanup is phase=$platform_cleanup_phase." >&2
+			echo 'Resume the exact manual platform-cleanup workflow.' >&2
+			exit 1
 		fi
-		echo "Routine deployment is blocked while Platform Core cleanup is phase=$platform_cleanup_phase." >&2
-		echo 'Resume the exact manual platform-cleanup workflow.' >&2
-		exit 1
+		git -C "$server_root" merge-base --is-ancestor \
+			"$platform_cleanup_revision" "$deploy_revision" || {
+			echo 'Routine deployment would downgrade past the completed Platform Core cleanup.' >&2
+			exit 1
+		}
+	else
+		[[ -f "$platform_terminal_marker" && ! -L "$platform_terminal_marker" &&
+			-f "$operations_cutover_controller" && ! -L "$operations_cutover_controller" ]] || {
+			echo 'Terminal Platform cleanup release paths are incomplete or unsafe.' >&2
+			exit 1
+		}
+		APP_ROOT="$APP_ROOT" SERVER_ROOT="$server_root" EXPECTED_REVISION="$deploy_revision" \
+			bash "$operations_cutover_controller" --verify-platform-terminal-cleanup >/dev/null || {
+			echo 'Terminal Platform cleanup marker or live source state is invalid.' >&2
+			exit 1
+		}
 	fi
-	git -C "$server_root" merge-base --is-ancestor \
-		"$platform_cleanup_revision" "$deploy_revision" || {
-		echo 'Routine deployment would downgrade past the completed Platform Core cleanup.' >&2
-		exit 1
-	}
 fi
 
 dirty_files="$(
