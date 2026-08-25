@@ -1,4 +1,5 @@
 const { readFileSync } = require('node:fs');
+const { resolve } = require('node:path');
 const config = JSON.parse(readFileSync(0, 'utf8'));
 const restoreGateExampleLines = readFileSync('.env.example', 'utf8')
 	.split('\n')
@@ -166,13 +167,26 @@ if (
 		'Platform PostgreSQL must use its admin password file secret'
 	);
 }
-const coreRestoreSecret = config.secrets?.['core-postgres-admin-password'];
+const supportPostgresVolume =
+	config.volumes?.['winwidget-support-postgres-data'];
 if (
-	coreRestoreSecret?.file !== process.env.CORE_POSTGRES_ADMIN_PASSWORD_FILE
+	!supportPostgresVolume?.external ||
+	supportPostgresVolume.name !== process.env.SUPPORT_POSTGRES_DATA_VOLUME
+) {
+	throw new Error('Support PostgreSQL must use its exact external volume');
+}
+const supportPostgresSecret =
+	config.secrets?.['support-postgres-admin-password'];
+if (
+	supportPostgresSecret?.file !==
+	process.env.SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE
 ) {
 	throw new Error(
-		'Database restore worker must use the canonical Core admin password file secret'
+		'Support PostgreSQL must use its admin password file secret'
 	);
+}
+if (config.secrets?.['core-postgres-admin-password']) {
+	throw new Error('Retired Core restore secret must not remain in Compose');
 }
 const persistentServiceNames = Object.entries(services)
 	.filter(([, service]) => (service.profiles ?? []).length === 0)
@@ -198,6 +212,9 @@ const expectedPersistentServiceNames = [
 	'platform-outbox-publisher',
 	'rabbitmq',
 	'reporting-service',
+	'support-api',
+	'support-outbox-publisher',
+	'support-worker',
 	'widgets-service'
 ];
 if (
@@ -247,7 +264,7 @@ const requireTelegramProxy = (name, environment) => {
 	const extraHosts = requireService(name).extra_hosts ?? [];
 	if (
 		JSON.stringify(extraHosts) !==
-		JSON.stringify(['tg.winwidget.ru=192.0.2.1'])
+		JSON.stringify(['tg.winwidget.ru=185.184.122.62'])
 	) {
 		throw new Error(
 			`${name} must resolve tg.winwidget.ru only through the configured Telegram proxy IP`
@@ -730,6 +747,72 @@ if (
 		'Platform PostgreSQL dedicated loopback lifecycle safeguards drifted'
 	);
 }
+const supportPostgres = requireService('support-postgres');
+const supportPostgresEnvironment = requireEnvironment('support-postgres', [
+	'POSTGRES_DB',
+	'POSTGRES_USER',
+	'POSTGRES_PASSWORD_FILE',
+	'POSTGRES_INITDB_ARGS',
+	'PGDATA'
+]);
+const supportPorts = supportPostgres.ports ?? [];
+const supportNetworks = supportPostgres.networks ?? {};
+const supportNetwork = config.networks?.['support-postgres'];
+if (
+	supportPostgres.image !== process.env.SUPPORT_POSTGRES_IMAGE ||
+	supportPostgresEnvironment.POSTGRES_DB !== 'winwidget_support' ||
+	supportPostgresEnvironment.POSTGRES_USER !==
+		process.env.SUPPORT_POSTGRES_ADMIN_USER ||
+	supportPostgresEnvironment.POSTGRES_PASSWORD_FILE !==
+		'/run/secrets/support-postgres-admin-password' ||
+	supportPostgresEnvironment.POSTGRES_INITDB_ARGS !==
+		'--locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums' ||
+	supportPostgresEnvironment.PGDATA !== '/var/lib/postgresql/18/docker' ||
+	supportPorts.length !== 1 ||
+	supportPorts[0].host_ip !== '127.0.0.1' ||
+	String(supportPorts[0].published) !==
+		process.env.SUPPORT_POSTGRES_PORT ||
+	Number(supportPorts[0].target) !== 5432 ||
+	Object.keys(supportNetworks).length !== 1 ||
+	!Object.hasOwn(supportNetworks, 'support-postgres') ||
+	supportNetwork?.name !== 'winwidget-support-postgres' ||
+	supportNetwork.driver !== 'bridge' ||
+	supportNetwork.internal === true ||
+	supportNetwork.labels?.['com.winwidget.owner'] !== 'support' ||
+	supportNetwork.labels?.['com.winwidget.purpose'] !==
+		'postgres-network' ||
+	JSON.stringify(supportPostgres.profiles ?? []) !==
+		JSON.stringify(['support-database']) ||
+	supportPostgres.network_mode != null ||
+	supportPostgres.depends_on != null ||
+	supportPostgres.restart !== 'unless-stopped' ||
+	(supportPostgres.volumes ?? []).length !== 1 ||
+	supportPostgres.volumes[0].type !== 'volume' ||
+	supportPostgres.volumes[0].source !==
+		process.env.SUPPORT_POSTGRES_DATA_VOLUME ||
+	supportPostgres.volumes[0].target !== '/var/lib/postgresql' ||
+	(supportPostgres.secrets ?? []).length !== 1 ||
+	supportPostgres.secrets[0].source !==
+		'support-postgres-admin-password' ||
+	JSON.stringify(supportPostgres.healthcheck) !==
+		JSON.stringify(expectedPostgresHealthcheck) ||
+	supportPostgres.stop_grace_period !== '1m0s' ||
+	supportPostgres.shm_size !== '268435456' ||
+	supportPostgres.mem_limit !== '536870912' ||
+	supportPostgres.mem_reservation !== '134217728' ||
+	supportPostgres.cpus !== 0.75 ||
+	supportPostgres.pids_limit !== 200 ||
+	supportPostgres.logging?.driver !== 'json-file' ||
+	supportPostgres.logging?.options?.['max-size'] !== '10m' ||
+	supportPostgres.logging?.options?.['max-file'] !== '5' ||
+	supportPostgres.labels?.['com.winwidget.owner'] !== 'support' ||
+	supportPostgres.labels?.['com.winwidget.purpose'] !== 'postgres' ||
+	Object.keys(supportPostgres.labels ?? {}).length !== 2
+) {
+	throw new Error(
+		'Support PostgreSQL dedicated loopback lifecycle safeguards drifted'
+	);
+}
 for (const [name, service] of Object.entries(services)) {
 	if (
 		name === 'notification-delivery-postgres' ||
@@ -738,7 +821,8 @@ for (const [name, service] of Object.entries(services)) {
 		name === 'widgets-postgres' ||
 		name === 'billing-postgres' ||
 		name === 'identity-postgres' ||
-		name === 'platform-postgres'
+		name === 'platform-postgres' ||
+		name === 'support-postgres'
 	)
 		continue;
 	if (
@@ -813,7 +897,16 @@ for (const [name, service] of Object.entries(services)) {
 				secret => secret.source === 'platform-postgres-admin-password'
 			)) ||
 		Object.hasOwn(service.networks ?? {}, 'platform-postgres') ||
-		Object.hasOwn(service.depends_on ?? {}, 'platform-postgres')
+		Object.hasOwn(service.depends_on ?? {}, 'platform-postgres') ||
+		(service.volumes ?? []).some(
+			mount => mount.source === process.env.SUPPORT_POSTGRES_DATA_VOLUME
+		) ||
+		(name !== 'database-restore-worker' &&
+			(service.secrets ?? []).some(
+				secret => secret.source === 'support-postgres-admin-password'
+			)) ||
+		Object.hasOwn(service.networks ?? {}, 'support-postgres') ||
+		Object.hasOwn(service.depends_on ?? {}, 'support-postgres')
 	) {
 		throw new Error(
 			`${name} must not share a standalone PostgreSQL lifecycle`
@@ -827,6 +920,7 @@ for (const name of [
 	'database-restore-worker',
 	'identity-api',
 	'platform-api',
+	'support-api',
 	'notification-delivery-worker',
 	'campaigns-service',
 	'reporting-service',
@@ -841,6 +935,7 @@ for (const name of [
 		'database-restore-worker': process.env.DATABASE_RESTORE_REVISION,
 		'identity-api': process.env.IDENTITY_REVISION,
 		'platform-api': process.env.PLATFORM_REVISION,
+		'support-api': process.env.SUPPORT_REVISION,
 		'notification-delivery-worker':
 			process.env.NOTIFICATION_DELIVERY_REVISION,
 		'campaigns-service': process.env.CAMPAIGNS_REVISION,
@@ -858,6 +953,7 @@ for (const name of [
 		'database-restore-worker': process.env.DATABASE_RESTORE_IMAGE,
 		'identity-api': process.env.IDENTITY_IMAGE,
 		'platform-api': process.env.PLATFORM_IMAGE,
+		'support-api': process.env.SUPPORT_IMAGE,
 		'notification-delivery-worker':
 			process.env.NOTIFICATION_DELIVERY_IMAGE,
 		'campaigns-service': process.env.CAMPAIGNS_IMAGE,
@@ -947,9 +1043,7 @@ const requireStandaloneWidgetsBuild = name => {
 	const service = requireService(name);
 	const build = service.build ?? {};
 	if (
-		!String(build.context ?? '')
-			.replaceAll('\\', '/')
-			.endsWith('/winwidget.ru_server') ||
+		resolve(String(build.context ?? '')) !== resolve('.') ||
 		String(build.dockerfile ?? '').replaceAll('\\', '/') !==
 			'apps/widgets/Dockerfile' ||
 		build.target != null ||
@@ -1023,6 +1117,39 @@ requireStandalonePlatformBuild('platform-migrate');
 for (const name of ['platform-api', 'platform-outbox-publisher']) {
 	if (requireService(name).image !== process.env.PLATFORM_IMAGE) {
 		throw new Error(`${name} must share the immutable Platform image`);
+	}
+}
+const requireStandaloneSupportBuild = name => {
+	const service = requireService(name);
+	const build = service.build ?? {};
+	if (
+		!String(build.context ?? '')
+			.replaceAll('\\', '/')
+			.endsWith('/apps/support') ||
+		build.dockerfile !== 'Dockerfile' ||
+		build.target != null ||
+		build.args?.APP_REVISION !== process.env.SUPPORT_REVISION ||
+		service.image !== process.env.SUPPORT_IMAGE
+	) {
+		throw new Error(
+			`${name} must use the exact standalone Support app image and context`
+		);
+	}
+};
+requireStandaloneSupportBuild('support-api');
+requireStandaloneSupportBuild('support-migrate');
+for (const name of [
+	'support-api',
+	'support-worker',
+	'support-outbox-publisher'
+]) {
+	if (requireService(name).image !== process.env.SUPPORT_IMAGE) {
+		throw new Error(`${name} must reuse the pinned Support image`);
+	}
+}
+for (const name of ['support-worker', 'support-outbox-publisher']) {
+	if (requireService(name).build != null) {
+		throw new Error(`${name} must reuse the Support API image build`);
 	}
 }
 if (requireService('platform-outbox-publisher').build != null) {
@@ -1366,6 +1493,36 @@ if (
 ) {
 	throw new Error('platform-migrate receives an unexpected environment');
 }
+const supportMigration = requireService('support-migrate');
+const supportMigrationEntrypoint = Array.isArray(
+	supportMigration.entrypoint
+)
+	? supportMigration.entrypoint.join(' ')
+	: String(supportMigration.entrypoint ?? '');
+if (
+	supportMigrationEntrypoint !== './node_modules/.bin/prisma' ||
+	JSON.stringify(supportMigration.profiles ?? []) !==
+		JSON.stringify(['support-migration']) ||
+	supportMigration.network_mode !== 'host' ||
+	supportMigration.depends_on != null
+) {
+	throw new Error(
+		'support-migrate must use Prisma behind its isolated migration profile'
+	);
+}
+const supportMigrationEnvironment = requireEnvironment('support-migrate', [
+	'APP_REVISION',
+	'NODE_ENV',
+	'SUPPORT_DATABASE_URL'
+]);
+if (
+	Object.keys(supportMigrationEnvironment).some(
+		key =>
+			!['APP_REVISION', 'NODE_ENV', 'SUPPORT_DATABASE_URL'].includes(key)
+	)
+) {
+	throw new Error('support-migrate receives an unexpected environment');
+}
 if (requireService('maintenance-worker').command != null) {
 	throw new Error('maintenance-worker command must be owned by its image');
 }
@@ -1418,6 +1575,8 @@ requireEnvironment('api', [
 	'PLATFORM_INTERNAL_BASE_URL',
 	'PLATFORM_CORE_TOKEN',
 	'PLATFORM_INTERNAL_TIMEOUT_MS',
+	'SUPPORT_INTERNAL_BASE_URL',
+	'SUPPORT_CORE_TOKEN',
 	'DATABASE_RESTORE_STORAGE_DIR',
 	'DATABASE_RESTORE_QUEUE_SECRET',
 	'DATABASE_RESTORE_PRODUCTION_ENABLED'
@@ -1471,6 +1630,9 @@ if (
 	throw new Error(
 		'Core API must use the exact loopback Platform internal endpoint and timeout'
 	);
+}
+if (apiEnvironment.SUPPORT_INTERNAL_BASE_URL !== 'http://127.0.0.1:5100') {
+	throw new Error('api must use the exact loopback Support endpoint');
 }
 if (
 	apiEnvironment.DATABASE_RESTORE_STORAGE_DIR !==
@@ -1546,6 +1708,20 @@ const expectedGatewayRoutes = [
 		authPolicy: 'optional',
 		timeoutMs: 60000
 	})),
+	{
+		id: 'support-webhook',
+		pathPrefix: '/api/v1/telegram-bot/support-webhook',
+		upstreamUrl: 'http://127.0.0.1:5100',
+		authPolicy: 'optional',
+		timeoutMs: 10000
+	},
+	{
+		id: 'support-admin',
+		pathPrefix: '/api/v1/support/admin',
+		upstreamUrl: 'http://127.0.0.1:5100',
+		authPolicy: 'required',
+		timeoutMs: 60000
+	},
 	...[
 		['platform-site-settings', '/api/v1/site-settings'],
 		['platform-legal-pages', '/api/v1/legal-pages'],
@@ -1711,6 +1887,7 @@ const expectedIntegrationKinds = [
 	'billing-admin-audit',
 	'identity-admin-audit',
 	'platform-admin-audit',
+	'support-admin-audit',
 	'billing-payment-projection',
 	'billing-subscription-projection',
 	'billing-affiliate-projection'
@@ -1720,7 +1897,7 @@ if (
 	JSON.stringify(expectedIntegrationKinds)
 ) {
 	throw new Error(
-		'integration-worker kinds must match the steady Widgets ownership contract'
+		'integration-worker kinds must match the steady service ownership contract'
 	);
 }
 if (
@@ -2165,6 +2342,7 @@ const identityApiEnvironment = requireEnvironment('identity-api', [
 	'IDENTITY_WIDGETS_TOKEN',
 	'IDENTITY_BILLING_TOKEN',
 	'IDENTITY_PLATFORM_TOKEN',
+	'IDENTITY_SUPPORT_TOKEN',
 	'IDENTITY_INTERNAL_TIMEOUT_MS',
 	'BILLING_INTERNAL_BASE_URL',
 	'BILLING_IDENTITY_TOKEN',
@@ -2430,6 +2608,224 @@ if (
 		'Platform API singleton, Identity client or RabbitMQ role boundary drifted'
 	);
 }
+const supportCommonEnvironmentKeys = [
+	'APP_REVISION',
+	'NODE_ENV',
+	'MODE',
+	'SUPPORT_DATABASE_URL',
+	'SUPPORT_LISTEN_HOST',
+	'SUPPORT_INBOX_LEASE_MS',
+	'SUPPORT_PREFETCH',
+	'SUPPORT_OUTBOX_BATCH_SIZE',
+	'SUPPORT_OUTBOX_POLL_INTERVAL_MS',
+	'SUPPORT_OUTBOX_RETENTION_DAYS',
+	'SUPPORT_RECEIPT_RETENTION_DAYS',
+	'SUPPORT_FAILURE_DETAIL_RETENTION_DAYS'
+];
+const supportApiTelegramEnvironmentKeys = [
+	'SUPPORT_WEBHOOK_PUBLIC_URL',
+	'TELEGRAM_SUPPORT_BOT_TOKEN',
+	'TELEGRAM_SUPPORT_BOT_USERNAME',
+	'TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET',
+	'TELEGRAM_API_BASE_URL',
+	'TELEGRAM_API_PROXY_IP'
+];
+const supportWorkerTelegramEnvironmentKeys = [
+	'TELEGRAM_SUPPORT_BOT_TOKEN',
+	'TELEGRAM_API_BASE_URL',
+	'TELEGRAM_API_PROXY_IP'
+];
+const supportApi = requireService('support-api');
+const supportWorker = requireService('support-worker');
+const supportPublisher = requireService('support-outbox-publisher');
+const supportApiEnvironment = requireEnvironment('support-api', [
+	...supportCommonEnvironmentKeys,
+	...supportApiTelegramEnvironmentKeys,
+	'SUPPORT_PROCESS_ROLE',
+	'SUPPORT_PORT',
+	'CORS_ALLOWED_ORIGINS',
+	'TRUST_PROXY',
+	'IDENTITY_INTERNAL_BASE_URL',
+	'IDENTITY_SUPPORT_TOKEN',
+	'IDENTITY_INTERNAL_TIMEOUT_MS',
+	'SUPPORT_CORE_TOKEN'
+]);
+const supportWorkerEnvironment = requireEnvironment('support-worker', [
+	...supportCommonEnvironmentKeys,
+	...supportWorkerTelegramEnvironmentKeys,
+	'SUPPORT_PROCESS_ROLE',
+	'SUPPORT_PORT',
+	'RABBITMQ_URL',
+	'RABBITMQ_CONNECTION_NAME',
+	'RABBITMQ_ASSERT_TOPOLOGY',
+	'RABBITMQ_MAX_MESSAGE_BYTES',
+	'MESSAGING_SERVICE_NAME'
+]);
+const supportPublisherEnvironment = requireEnvironment(
+	'support-outbox-publisher',
+	[
+		...supportCommonEnvironmentKeys,
+		'SUPPORT_PROCESS_ROLE',
+		'SUPPORT_PORT',
+		'RABBITMQ_URL',
+		'RABBITMQ_CONNECTION_NAME',
+		'RABBITMQ_ASSERT_TOPOLOGY',
+		'RABBITMQ_MAX_MESSAGE_BYTES',
+		'MESSAGING_SERVICE_NAME'
+	]
+);
+const supportRoles = new Map([
+	['support-api', [supportApi, supportApiEnvironment, 'api', '5100']],
+	[
+		'support-worker',
+		[supportWorker, supportWorkerEnvironment, 'worker', '5101']
+	],
+	[
+		'support-outbox-publisher',
+		[
+			supportPublisher,
+			supportPublisherEnvironment,
+			'outbox-publisher',
+			'5102'
+		]
+	]
+]);
+const supportRuntimeLimits = {
+	'support-api': ['30s', 402653184, 100663296, 0.5, 200],
+	'support-worker': ['1m30s', 402653184, 100663296, 0.5, 200],
+	'support-outbox-publisher': ['1m30s', 268435456, 67108864, 0.35, 150]
+};
+for (const [name, [service, environment, role, port]] of supportRoles) {
+	const [stopGracePeriod, memLimit, memReservation, cpus, pidsLimit] =
+		supportRuntimeLimits[name];
+	if (
+		environment.APP_REVISION !== process.env.SUPPORT_REVISION ||
+		environment.NODE_ENV !== 'production' ||
+		environment.MODE !== 'production' ||
+		environment.SUPPORT_PROCESS_ROLE !== role ||
+		environment.SUPPORT_LISTEN_HOST !== '127.0.0.1' ||
+		environment.SUPPORT_PORT !== port ||
+		environment.SUPPORT_INBOX_LEASE_MS !== '60000' ||
+		environment.SUPPORT_PREFETCH !== '10' ||
+		environment.SUPPORT_OUTBOX_BATCH_SIZE !== '50' ||
+		environment.SUPPORT_OUTBOX_POLL_INTERVAL_MS !== '1000' ||
+		environment.SUPPORT_OUTBOX_RETENTION_DAYS !== '7' ||
+		environment.SUPPORT_RECEIPT_RETENTION_DAYS !== '90' ||
+		environment.SUPPORT_FAILURE_DETAIL_RETENTION_DAYS !== '30' ||
+		service.network_mode !== 'host' ||
+		!service.healthcheck?.test ||
+		service.restart !== 'unless-stopped' ||
+		(service.profiles ?? []).length !== 0 ||
+		service.stop_grace_period !== stopGracePeriod ||
+		Number(service.mem_limit) !== memLimit ||
+		Number(service.mem_reservation) !== memReservation ||
+		Number(service.cpus) !== cpus ||
+		Number(service.pids_limit) !== pidsLimit ||
+		service.logging?.driver !== 'json-file' ||
+		service.logging?.options?.['max-size'] !== '10m' ||
+		String(service.logging?.options?.['max-file']) !== '3'
+	) {
+		throw new Error(
+			`${name} must use the exact immutable loopback Support role boundary`
+		);
+	}
+	if (name === 'support-api' || name === 'support-worker') {
+		requireTelegramProxy(name, environment);
+	} else if (
+		service.extra_hosts != null ||
+		supportApiTelegramEnvironmentKeys.some(key => key in environment)
+	) {
+		throw new Error(
+			'Support Outbox publisher must not receive Telegram transport configuration'
+		);
+	}
+	requireCommand(name, 'node dist/src/main.js');
+}
+if (
+	JSON.stringify(Object.keys(supportApiEnvironment).sort()) !==
+		JSON.stringify(
+			[
+				...supportCommonEnvironmentKeys,
+				...supportApiTelegramEnvironmentKeys,
+				'SUPPORT_PROCESS_ROLE',
+				'SUPPORT_PORT',
+				'CORS_ALLOWED_ORIGINS',
+				'TRUST_PROXY',
+				'IDENTITY_INTERNAL_BASE_URL',
+				'IDENTITY_SUPPORT_TOKEN',
+				'IDENTITY_INTERNAL_TIMEOUT_MS',
+				'SUPPORT_CORE_TOKEN'
+			].sort()
+		) ||
+	JSON.stringify(Object.keys(supportWorkerEnvironment).sort()) !==
+		JSON.stringify(
+			[
+				...supportCommonEnvironmentKeys,
+				...supportWorkerTelegramEnvironmentKeys,
+				'SUPPORT_PROCESS_ROLE',
+				'SUPPORT_PORT',
+				'RABBITMQ_URL',
+				'RABBITMQ_CONNECTION_NAME',
+				'RABBITMQ_ASSERT_TOPOLOGY',
+				'RABBITMQ_MAX_MESSAGE_BYTES',
+				'MESSAGING_SERVICE_NAME'
+			].sort()
+		) ||
+	JSON.stringify(Object.keys(supportPublisherEnvironment).sort()) !==
+		JSON.stringify(
+			[
+				...supportCommonEnvironmentKeys,
+				'SUPPORT_PROCESS_ROLE',
+				'SUPPORT_PORT',
+				'RABBITMQ_URL',
+				'RABBITMQ_CONNECTION_NAME',
+				'RABBITMQ_ASSERT_TOPOLOGY',
+				'RABBITMQ_MAX_MESSAGE_BYTES',
+				'MESSAGING_SERVICE_NAME'
+			].sort()
+		) ||
+	supportApiEnvironment.CORS_ALLOWED_ORIGINS !==
+		gatewayEnvironment.CORS_ALLOWED_ORIGINS ||
+	supportApiEnvironment.CORS_ALLOWED_ORIGINS !==
+		apiEnvironment.CORS_ALLOWED_ORIGINS ||
+	supportApiEnvironment.TRUST_PROXY !== 'loopback' ||
+	supportApiEnvironment.IDENTITY_INTERNAL_BASE_URL !==
+		'http://127.0.0.1:4900' ||
+	supportApiEnvironment.IDENTITY_INTERNAL_TIMEOUT_MS !== '5000' ||
+	supportApiEnvironment.SUPPORT_WEBHOOK_PUBLIC_URL !==
+		'https://tg.winwidget.ru/api/v1/telegram-bot/support-webhook' ||
+	supportApiEnvironment.TELEGRAM_API_PROXY_IP !== '185.184.122.62' ||
+	supportWorkerEnvironment.TELEGRAM_API_PROXY_IP !== '185.184.122.62' ||
+	supportApi.labels?.['com.winwidget.owner'] !== 'support' ||
+	supportApi.labels?.['com.winwidget.purpose'] !== 'api' ||
+	supportApi.labels?.['com.winwidget.singleton'] !== 'true' ||
+	Object.keys(supportApi.labels ?? {}).length !== 3 ||
+	supportApi.depends_on != null ||
+	supportWorker.labels?.['com.winwidget.owner'] !== 'support' ||
+	supportWorker.labels?.['com.winwidget.purpose'] !== 'worker' ||
+	Object.keys(supportWorker.labels ?? {}).length !== 2 ||
+	JSON.stringify(Object.keys(supportWorker.depends_on ?? {})) !==
+		JSON.stringify(['rabbitmq']) ||
+	supportWorkerEnvironment.RABBITMQ_CONNECTION_NAME !==
+		'winwidget-support-worker' ||
+	supportWorkerEnvironment.RABBITMQ_ASSERT_TOPOLOGY !== 'true' ||
+	supportWorkerEnvironment.MESSAGING_SERVICE_NAME !== 'support-worker' ||
+	supportPublisher.labels?.['com.winwidget.owner'] !== 'support' ||
+	supportPublisher.labels?.['com.winwidget.purpose'] !==
+		'outbox-publisher' ||
+	Object.keys(supportPublisher.labels ?? {}).length !== 2 ||
+	JSON.stringify(Object.keys(supportPublisher.depends_on ?? {})) !==
+		JSON.stringify(['rabbitmq']) ||
+	supportPublisherEnvironment.RABBITMQ_CONNECTION_NAME !==
+		'winwidget-support-outbox-publisher' ||
+	supportPublisherEnvironment.RABBITMQ_ASSERT_TOPOLOGY !== 'false' ||
+	supportPublisherEnvironment.MESSAGING_SERVICE_NAME !==
+		'support-outbox-publisher'
+) {
+	throw new Error(
+		'Support API singleton, Identity client or RabbitMQ role boundary drifted'
+	);
+}
 const providerSecretEnvironmentKeys = [
 	'YOOKASSA_PRODUCTION_SHOP_ID',
 	'YOOKASSA_PRODUCTION_SECRET_KEY',
@@ -2653,9 +3049,17 @@ requireMutualToken('Platform to Identity', [
 	platformApiEnvironment.IDENTITY_PLATFORM_TOKEN,
 	identityApiEnvironment.IDENTITY_PLATFORM_TOKEN
 ]);
+requireMutualToken('Support to Identity', [
+	supportApiEnvironment.IDENTITY_SUPPORT_TOKEN,
+	identityApiEnvironment.IDENTITY_SUPPORT_TOKEN
+]);
 requireMutualToken('Core to Platform', [
 	apiEnvironment.PLATFORM_CORE_TOKEN,
 	platformApiEnvironment.PLATFORM_CORE_TOKEN
+]);
+requireMutualToken('Core to Support', [
+	apiEnvironment.SUPPORT_CORE_TOKEN,
+	supportApiEnvironment.SUPPORT_CORE_TOKEN
 ]);
 for (const forbiddenToken of [
 	apiEnvironment.NOTIFICATION_DELIVERY_INTERNAL_TOKEN,
@@ -2670,6 +3074,11 @@ for (const forbiddenToken of [
 			'Platform Core credential must differ from broad internal and restore credentials'
 		);
 	}
+	if (apiEnvironment.SUPPORT_CORE_TOKEN === forbiddenToken) {
+		throw new Error(
+			'Support Core credential must differ from broad internal and restore credentials'
+		);
+	}
 }
 const isolatedCallerTokens = [
 	apiEnvironment.IDENTITY_CORE_TOKEN,
@@ -2679,10 +3088,12 @@ const isolatedCallerTokens = [
 	widgetsEnvironment.IDENTITY_WIDGETS_TOKEN,
 	billingApiEnvironment.IDENTITY_BILLING_TOKEN,
 	platformApiEnvironment.IDENTITY_PLATFORM_TOKEN,
+	supportApiEnvironment.IDENTITY_SUPPORT_TOKEN,
 	campaignsEnvironment.BILLING_CAMPAIGNS_TOKEN,
 	identityApiEnvironment.BILLING_IDENTITY_TOKEN,
 	identityApiEnvironment.WIDGETS_IDENTITY_TOKEN,
-	apiEnvironment.PLATFORM_CORE_TOKEN
+	apiEnvironment.PLATFORM_CORE_TOKEN,
+	apiEnvironment.SUPPORT_CORE_TOKEN
 ];
 if (new Set(isolatedCallerTokens).size !== isolatedCallerTokens.length) {
 	throw new Error(
@@ -2697,7 +3108,6 @@ const maintenanceEnvironment = requireEnvironment(
 		'RABBITMQ_URL',
 		'RABBITMQ_ASSERT_TOPOLOGY',
 		'MESSAGING_SERVICE_NAME',
-		'DATABASE_BACKUP_URL',
 		'NOTIFICATION_DELIVERY_BACKUP_URL',
 		'CAMPAIGNS_BACKUP_URL',
 		'REPORTING_BACKUP_URL',
@@ -2705,6 +3115,7 @@ const maintenanceEnvironment = requireEnvironment(
 		'BILLING_BACKUP_URL',
 		'IDENTITY_BACKUP_URL',
 		'PLATFORM_BACKUP_URL',
+		'SUPPORT_BACKUP_URL',
 		'TELEGRAM_INFO_BOT_TOKEN',
 		'TELEGRAM_API_BASE_URL',
 		'MAINTENANCE_WORKER_PREFETCH',
@@ -2741,7 +3152,6 @@ const databaseRestoreEnvironment = requireEnvironment(
 		'DATABASE_RESTORE_POLL_INTERVAL_MS',
 		'DATABASE_RESTORE_COMMAND_TIMEOUT_MS',
 		'DATABASE_RESTORE_MIGRATIONS_ROOT',
-		'DATABASE_RESTORE_CORE_PORT',
 		'DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT',
 		'DATABASE_RESTORE_CAMPAIGNS_PORT',
 		'DATABASE_RESTORE_REPORTING_PORT',
@@ -2749,14 +3159,15 @@ const databaseRestoreEnvironment = requireEnvironment(
 		'DATABASE_RESTORE_BILLING_PORT',
 		'DATABASE_RESTORE_IDENTITY_PORT',
 		'DATABASE_RESTORE_PLATFORM_PORT',
-		'DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE',
+		'DATABASE_RESTORE_SUPPORT_PORT',
 		'DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE',
 		'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE',
-		'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE'
+		'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE',
+		'DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE'
 	]
 );
 const expectedDatabaseRestoreEnvironmentKeys = [
@@ -2766,8 +3177,6 @@ const expectedDatabaseRestoreEnvironmentKeys = [
 	'DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE',
 	'DATABASE_RESTORE_CAMPAIGNS_PORT',
 	'DATABASE_RESTORE_COMMAND_TIMEOUT_MS',
-	'DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE',
-	'DATABASE_RESTORE_CORE_PORT',
 	'DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE',
 	'DATABASE_RESTORE_IDENTITY_PORT',
 	'DATABASE_RESTORE_MIGRATIONS_ROOT',
@@ -2776,6 +3185,8 @@ const expectedDatabaseRestoreEnvironmentKeys = [
 	'DATABASE_RESTORE_POLL_INTERVAL_MS',
 	'DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE',
 	'DATABASE_RESTORE_PLATFORM_PORT',
+	'DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE',
+	'DATABASE_RESTORE_SUPPORT_PORT',
 	'DATABASE_RESTORE_QUEUE_SECRET',
 	'DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE',
 	'DATABASE_RESTORE_REPORTING_PORT',
@@ -2799,7 +3210,6 @@ if (
 	databaseRestoreEnvironment.DATABASE_RESTORE_COMMAND_TIMEOUT_MS !==
 		'1800000' ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_MIGRATIONS_ROOT !== '/app' ||
-	databaseRestoreEnvironment.DATABASE_RESTORE_CORE_PORT !== '55434' ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT !==
 		process.env.NOTIFICATION_DELIVERY_POSTGRES_PORT ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_CAMPAIGNS_PORT !==
@@ -2814,8 +3224,8 @@ if (
 		process.env.IDENTITY_POSTGRES_PORT ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_PLATFORM_PORT !==
 		process.env.PLATFORM_POSTGRES_PORT ||
-	databaseRestoreEnvironment.DATABASE_RESTORE_CORE_ADMIN_PASSWORD_FILE !==
-		'/run/database-restore-secrets/core-admin-password' ||
+	databaseRestoreEnvironment.DATABASE_RESTORE_SUPPORT_PORT !==
+		process.env.SUPPORT_POSTGRES_PORT ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE !==
 		'/run/database-restore-secrets/notification-delivery-admin-password' ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE !==
@@ -2829,7 +3239,9 @@ if (
 	databaseRestoreEnvironment.DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE !==
 		'/run/database-restore-secrets/identity-admin-password' ||
 	databaseRestoreEnvironment.DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE !==
-		'/run/database-restore-secrets/platform-admin-password'
+		'/run/database-restore-secrets/platform-admin-password' ||
+	databaseRestoreEnvironment.DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE !==
+		'/run/database-restore-secrets/support-admin-password'
 ) {
 	throw new Error(
 		'database-restore-worker environment or credential boundary drifted'
@@ -2855,7 +3267,6 @@ const expectedDatabaseRestoreSecrets = [
 		'campaigns-postgres-admin-password',
 		'database-restore-campaigns-admin-password'
 	],
-	['core-postgres-admin-password', 'database-restore-core-admin-password'],
 	[
 		'identity-postgres-admin-password',
 		'database-restore-identity-admin-password'
@@ -2871,6 +3282,10 @@ const expectedDatabaseRestoreSecrets = [
 	[
 		'reporting-postgres-admin-password',
 		'database-restore-reporting-admin-password'
+	],
+	[
+		'support-postgres-admin-password',
+		'database-restore-support-admin-password'
 	],
 	[
 		'widgets-postgres-admin-password',
@@ -2903,11 +3318,11 @@ if (
 		JSON.stringify([
 			'billing',
 			'campaigns',
-			'core',
 			'identity',
 			'notification-delivery',
 			'platform',
 			'reporting',
+			'support',
 			'widgets'
 		])
 	) ||
@@ -3149,6 +3564,33 @@ if (
 		'Platform runtime, migration and backup must use distinct roles'
 	);
 }
+const supportDatabaseUrls = [
+	supportApiEnvironment.SUPPORT_DATABASE_URL,
+	supportMigrationEnvironment.SUPPORT_DATABASE_URL,
+	maintenanceEnvironment.SUPPORT_BACKUP_URL
+].map(value => new URL(value));
+for (const url of supportDatabaseUrls) {
+	if (
+		url.protocol !== 'postgresql:' ||
+		url.hostname !== '127.0.0.1' ||
+		url.port !== '55440' ||
+		url.pathname !== '/winwidget_support' ||
+		url.searchParams.get('schema') !== 'support' ||
+		url.searchParams.get('sslmode') !== 'disable'
+	) {
+		throw new Error(
+			'Support roles must use the dedicated loopback PostgreSQL database'
+		);
+	}
+}
+if (
+	new Set(supportDatabaseUrls.map(url => url.username)).size !==
+	supportDatabaseUrls.length
+) {
+	throw new Error(
+		'Support runtime, migration and backup must use distinct roles'
+	);
+}
 for (const [, [, environment]] of billingRoles) {
 	for (const forbidden of [
 		'DATABASE_URL',
@@ -3275,6 +3717,82 @@ for (const [name, service] of Object.entries(services)) {
 		(name === 'api' || name === 'platform-api')
 	) {
 		throw new Error(`${name} Platform Core credential scope drifted`);
+	}
+}
+for (const [name, [, environment]] of supportRoles) {
+	for (const forbidden of [
+		'DATABASE_URL',
+		'DATABASE_URL_PRODUCTION',
+		'DATABASE_BACKUP_URL',
+		'NOTIFICATION_DELIVERY_DATABASE_URL',
+		'NOTIFICATION_DELIVERY_BACKUP_URL',
+		'CAMPAIGNS_DATABASE_URL',
+		'CAMPAIGNS_BACKUP_URL',
+		'REPORTING_DATABASE_URL',
+		'REPORTING_BACKUP_URL',
+		'WIDGETS_DATABASE_URL',
+		'WIDGETS_BACKUP_URL',
+		'BILLING_DATABASE_URL',
+		'BILLING_BACKUP_URL',
+		'IDENTITY_DATABASE_URL',
+		'IDENTITY_BACKUP_URL',
+		'PLATFORM_DATABASE_URL',
+		'PLATFORM_BACKUP_URL',
+		'SUPPORT_BACKUP_URL',
+		'SUPPORT_MIGRATION_DATABASE_URL',
+		'SUPPORT_POSTGRES_ADMIN_USER',
+		'SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE',
+		'SMTP_LOGIN',
+		'SMTP_PASSWORD',
+		'TELEGRAM_INFO_BOT_TOKEN',
+		'S3_ACCESS_KEY_ID',
+		'S3_SECRET_ACCESS_KEY'
+	]) {
+		if (forbidden in environment) {
+			throw new Error(`${name} must not receive ${forbidden}`);
+		}
+	}
+	if (
+		'RABBITMQ_URL' in environment !==
+		(name === 'support-worker' || name === 'support-outbox-publisher')
+	) {
+		throw new Error(`${name} RabbitMQ credential scope drifted`);
+	}
+	if (
+		'IDENTITY_SUPPORT_TOKEN' in environment !==
+		(name === 'support-api')
+	) {
+		throw new Error(`${name} Identity credential scope drifted`);
+	}
+	if ('SUPPORT_CORE_TOKEN' in environment !== (name === 'support-api')) {
+		throw new Error(`${name} Core credential scope drifted`);
+	}
+}
+for (const [name, service] of Object.entries(services)) {
+	const environment = service.environment ?? {};
+	if (
+		'SUPPORT_CORE_TOKEN' in environment !==
+		(name === 'api' || name === 'support-api')
+	) {
+		throw new Error(`${name} Support Core credential scope drifted`);
+	}
+	if (
+		'IDENTITY_SUPPORT_TOKEN' in environment !==
+		(name === 'identity-api' || name === 'support-api')
+	) {
+		throw new Error(`${name} Support Identity credential scope drifted`);
+	}
+	for (const key of [
+		'TELEGRAM_SUPPORT_BOT_TOKEN',
+		'TELEGRAM_SUPPORT_BOT_USERNAME',
+		'TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET'
+	]) {
+		const expected =
+			name === 'support-api' ||
+			(name === 'support-worker' && key === 'TELEGRAM_SUPPORT_BOT_TOKEN');
+		if (key in environment !== expected) {
+			throw new Error(`${name} Support Telegram credential scope drifted`);
+		}
 	}
 }
 for (const forbidden of [

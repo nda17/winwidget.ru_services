@@ -253,7 +253,9 @@ describe('ScheduledTasksService', () => {
 							IDENTITY_DATABASE_BACKUP:
 								'77777777-7777-4777-8777-777777777777',
 							PLATFORM_DATABASE_BACKUP:
-								'88888888-8888-4888-8888-888888888888'
+								'88888888-8888-4888-8888-888888888888',
+							SUPPORT_DATABASE_BACKUP:
+								'99999999-9999-4999-8999-999999999999'
 						}[input.jobType]
 					}
 				})
@@ -275,11 +277,12 @@ describe('ScheduledTasksService', () => {
 			widgets: expect.objectContaining({ created: true }),
 			billing: expect.objectContaining({ created: true }),
 			identity: expect.objectContaining({ created: true }),
-			platform: expect.objectContaining({ created: true })
+			platform: expect.objectContaining({ created: true }),
+			support: expect.objectContaining({ created: true })
 		});
 		expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 		expect(scheduledJobs.enqueueUniqueInTransaction).toHaveBeenCalledTimes(
-			7
+			8
 		);
 		expect(
 			scheduledJobs.enqueueUniqueInTransaction
@@ -382,6 +385,22 @@ describe('ScheduledTasksService', () => {
 			transaction,
 			expect.objectContaining({
 				jobType: 'PLATFORM_DATABASE_BACKUP',
+				scheduleKey: period.key,
+				input: expect.objectContaining({
+					trigger: 'SCHEDULED'
+				})
+			}),
+			expect.objectContaining({
+				eventType: 'database.backup.requested.v1'
+			})
+		);
+		expect(
+			scheduledJobs.enqueueUniqueInTransaction
+		).toHaveBeenNthCalledWith(
+			8,
+			transaction,
+			expect.objectContaining({
+				jobType: 'SUPPORT_DATABASE_BACKUP',
 				scheduleKey: period.key,
 				input: expect.objectContaining({
 					trigger: 'SCHEDULED'
@@ -1046,7 +1065,8 @@ describe('ScheduledTasksService', () => {
 			'WIDGETS_DATABASE_BACKUP',
 			'BILLING_DATABASE_BACKUP',
 			'IDENTITY_DATABASE_BACKUP',
-			'PLATFORM_DATABASE_BACKUP'
+			'PLATFORM_DATABASE_BACKUP',
+			'SUPPORT_DATABASE_BACKUP'
 		];
 		const jobs = new Map(
 			jobTypes.map((jobType, index) => [
@@ -1091,7 +1111,7 @@ describe('ScheduledTasksService', () => {
 
 		const result = await service.getDatabaseBackupOverview();
 
-		expect(result.items).toHaveLength(7);
+		expect(result.items).toHaveLength(8);
 		expect(result.items.map(item => item.target)).toEqual([
 			'notification-delivery',
 			'campaigns',
@@ -1099,7 +1119,8 @@ describe('ScheduledTasksService', () => {
 			'widgets',
 			'billing',
 			'identity',
-			'platform'
+			'platform',
+			'support'
 		]);
 		expect(result.items[0]).toEqual(
 			expect.objectContaining({
@@ -1113,7 +1134,7 @@ describe('ScheduledTasksService', () => {
 		);
 		expect(JSON.stringify(result)).not.toContain('/private/backup.dump');
 		expect(JSON.stringify(result)).not.toContain('-100-secret');
-		expect(prisma.scheduledJobRun.findFirst).toHaveBeenCalledTimes(28);
+		expect(prisma.scheduledJobRun.findFirst).toHaveBeenCalledTimes(32);
 	});
 
 	it('marks the exact freshness boundary stale and distinguishes missing and disabled backups', async () => {

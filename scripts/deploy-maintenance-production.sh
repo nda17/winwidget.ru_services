@@ -397,42 +397,33 @@ THEN '"'"'ok'"'"' ELSE '"'"'unsafe'"'"' END;
 }
 
 assert_distinct_database_roles() {
-	local api_user
-	local migration_user
-	local maintenance_user
-	local backup_user
-	local notification_delivery_backup_user
-	local campaigns_backup_user
+	local -a role_keys=(
+		DATABASE_URL_PRODUCTION
+		DATABASE_MIGRATION_URL_PRODUCTION
+		MAINTENANCE_DATABASE_URL_PRODUCTION
+		NOTIFICATION_DELIVERY_BACKUP_URL
+		CAMPAIGNS_BACKUP_URL
+		REPORTING_BACKUP_URL
+		WIDGETS_BACKUP_URL
+		BILLING_BACKUP_URL
+		IDENTITY_BACKUP_URL
+		PLATFORM_BACKUP_URL
+		SUPPORT_BACKUP_URL
+	)
+	local -a users=()
+	local key left right
 
-	api_user="$(get_database_username DATABASE_URL_PRODUCTION)"
-	migration_user="$(get_database_username DATABASE_MIGRATION_URL_PRODUCTION)"
-	maintenance_user="$(
-		get_database_username MAINTENANCE_DATABASE_URL_PRODUCTION
-	)"
-	backup_user="$(get_database_username DATABASE_BACKUP_URL)"
-	notification_delivery_backup_user="$(
-		get_database_username NOTIFICATION_DELIVERY_BACKUP_URL
-	)"
-	campaigns_backup_user="$(get_database_username CAMPAIGNS_BACKUP_URL)"
-
-	if [[ "$api_user" == "$migration_user" ||
-		"$api_user" == "$maintenance_user" ||
-		"$api_user" == "$backup_user" ||
-		"$api_user" == "$notification_delivery_backup_user" ||
-		"$api_user" == "$campaigns_backup_user" ||
-		"$migration_user" == "$maintenance_user" ||
-		"$migration_user" == "$backup_user" ||
-		"$migration_user" == "$notification_delivery_backup_user" ||
-		"$migration_user" == "$campaigns_backup_user" ||
-		"$maintenance_user" == "$backup_user" ||
-		"$maintenance_user" == "$notification_delivery_backup_user" ||
-		"$maintenance_user" == "$campaigns_backup_user" ||
-		"$backup_user" == "$notification_delivery_backup_user" ||
-		"$backup_user" == "$campaigns_backup_user" ||
-		"$notification_delivery_backup_user" == "$campaigns_backup_user" ]]; then
-		echo "API, migration, Maintenance runtime, core backup, notification delivery backup and Campaigns backup must use six distinct PostgreSQL roles" >&2
-		exit 1
-	fi
+	for key in "${role_keys[@]}"; do
+		users+=("$(get_database_username "$key")")
+	done
+	for ((left = 0; left < ${#users[@]}; left++)); do
+		for ((right = left + 1; right < ${#users[@]}; right++)); do
+			if [[ "${users[$left]}" == "${users[$right]}" ]]; then
+				echo "Core runtime/migration/maintenance and eight service backup URLs must use eleven distinct PostgreSQL roles" >&2
+				exit 1
+			fi
+		done
+	done
 }
 
 for key in \
@@ -441,9 +432,14 @@ for key in \
 	DATABASE_URL_PRODUCTION \
 	DATABASE_MIGRATION_URL_PRODUCTION \
 	MAINTENANCE_DATABASE_URL_PRODUCTION \
-	DATABASE_BACKUP_URL \
 	NOTIFICATION_DELIVERY_BACKUP_URL \
 	CAMPAIGNS_BACKUP_URL \
+	REPORTING_BACKUP_URL \
+	WIDGETS_BACKUP_URL \
+	BILLING_BACKUP_URL \
+	IDENTITY_BACKUP_URL \
+	PLATFORM_BACKUP_URL \
+	SUPPORT_BACKUP_URL \
 	NOTIFICATION_DELIVERY_POSTGRES_IMAGE \
 	NOTIFICATION_DELIVERY_POSTGRES_PORT \
 	NOTIFICATION_DELIVERY_POSTGRES_DATA_VOLUME \

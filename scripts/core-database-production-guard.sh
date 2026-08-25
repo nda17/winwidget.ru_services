@@ -68,10 +68,9 @@ assert_core_database_url_boundaries() {
 DATABASE_URL_PRODUCTION|winwidget_api_runtime
 DATABASE_MIGRATION_URL_PRODUCTION|gen_user
 MAINTENANCE_DATABASE_URL_PRODUCTION|winwidget_maintenance
-DATABASE_BACKUP_URL|winwidget_backup
 EOF
 
-	echo "Core runtime, migration, maintenance and backup URL boundaries verified."
+	echo "Core runtime, migration and maintenance URL boundaries verified."
 }
 
 assert_core_database_postgres_identity() {

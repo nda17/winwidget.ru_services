@@ -9,7 +9,6 @@ const createTelegramBotService = (prisma: PrismaService) =>
 const telegramSettings = {
 	id: 'singleton',
 	dailySummaryChatId: '-100123',
-	supportThreadId: 1,
 	databaseBackupThreadId: 2,
 	paymentsThreadId: 3,
 	operationalAlertsThreadId: 5,
@@ -66,38 +65,7 @@ const createSettingsPrisma = (
 	return { prisma, transaction, upsert };
 };
 
-describe('TelegramBotService webhook URLs', () => {
-	const originalMode = process.env.MODE;
-	const originalWebhookHost = process.env.TELEGRAM_WEBHOOK_HOST;
-
-	afterEach(() => {
-		if (originalMode === undefined) delete process.env.MODE;
-		else process.env.MODE = originalMode;
-
-		if (originalWebhookHost === undefined)
-			delete process.env.TELEGRAM_WEBHOOK_HOST;
-		else process.env.TELEGRAM_WEBHOOK_HOST = originalWebhookHost;
-	});
-
-	it('uses the v1 API prefix for the Core-owned Support webhook', () => {
-		process.env.MODE = 'production';
-		process.env.TELEGRAM_WEBHOOK_HOST = 'https://hooks.example.test/';
-		const service = createTelegramBotService({} as PrismaService);
-
-		expect(service.getWebhookHealth().expectedWebhooks).toEqual({
-			support:
-				'https://hooks.example.test/api/v1/telegram-bot/support-webhook'
-		});
-	});
-
-	it('rejects legacy Info_bot webhook administration in Core', async () => {
-		const service = createTelegramBotService({} as PrismaService);
-
-		await expect(service.reinstallWebhook('info')).rejects.toThrow(
-			'Неизвестный Telegram-бот'
-		);
-	});
-
+describe('TelegramBotService backup settings', () => {
 	it('derives the Notification Delivery backup time across midnight', () => {
 		const service = createTelegramBotService({} as PrismaService);
 
@@ -217,35 +185,6 @@ describe('TelegramBotService webhook URLs', () => {
 });
 
 describe('TelegramBotService operational alert routing', () => {
-	it('routes Support_bot API calls through the HTTPS reverse proxy', async () => {
-		const service = new TelegramBotService(
-			{} as PrismaService,
-			new ConfigService({
-				MODE: 'production',
-				TELEGRAM_API_BASE_URL: 'https://tg.winwidget.ru/telegram-api'
-			})
-		);
-		const fetchMock = jest.spyOn(globalThis, 'fetch').mockResolvedValue({
-			ok: true,
-			status: 200,
-			json: jest.fn().mockResolvedValue({
-				ok: true,
-				result: { message_id: 1 }
-			})
-		} as unknown as Response);
-
-		await (service as any).fetchTelegramApi(
-			'support-token',
-			'sendMessage',
-			{ chat_id: '123', text: 'test' }
-		);
-
-		expect(fetchMock.mock.calls[0][0]).toBe(
-			'https://tg.winwidget.ru/telegram-api/botsupport-token/sendMessage'
-		);
-		fetchMock.mockRestore();
-	});
-
 	it('uses the dedicated Core topic instead of the Daily Summary topic', async () => {
 		const prisma = {
 			telegramBotSettings: {

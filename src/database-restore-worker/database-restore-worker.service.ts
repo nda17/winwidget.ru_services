@@ -9,7 +9,6 @@ import {
 import {
 	assertDatabaseRestoreTableOfContents,
 	assertExactDatabaseMigrations,
-	buildCoreRestoreAuditSql,
 	buildDatabaseConnectionPreflightSql,
 	buildDatabaseFenceSql,
 	buildDatabaseOwnershipAndAclRepairSql,
@@ -282,12 +281,6 @@ export class DatabaseRestoreWorkerService
 				throw new Error(
 					'Terminal database restore manifest is unauthenticated'
 				);
-			}
-			if (
-				terminalManifest.status === 'SUCCEEDED' &&
-				terminalManifest.target === 'core'
-			) {
-				await this.writeCoreSuccessAudit(terminalManifest);
 			}
 			if (terminalManifest.status !== 'FAILED_FENCED') {
 				await this.releaseTargetLock(terminalManifest).catch(error => {
@@ -998,16 +991,6 @@ export class DatabaseRestoreWorkerService
 			this.terminalManifestPath(manifest.jobId),
 			terminal
 		);
-		if (terminal.target === 'core') {
-			try {
-				await this.writeCoreSuccessAudit(terminal);
-			} catch (error) {
-				this.logger.error(
-					`Core restore ${terminal.jobId} succeeded but its terminal audit is pending: ${this.safeErrorText(error)}`
-				);
-				return;
-			}
-		}
 		await this.releaseTargetLock(terminal).catch(error => {
 			this.logger.error(
 				`Database restore ${manifest.jobId} succeeded but its target lock could not be released: ${this.safeErrorText(error)}`
@@ -1020,30 +1003,6 @@ export class DatabaseRestoreWorkerService
 		});
 		await this.fileSystem.removeFile(this.uploadPath(manifest.jobId));
 		await this.cleanupCompletedProcessingFiles(manifest.jobId);
-	}
-
-	private async writeCoreSuccessAudit(
-		manifest: SignedDatabaseRestoreJobManifest
-	): Promise<void> {
-		if (manifest.target !== 'core' || manifest.status !== 'SUCCEEDED') {
-			throw new Error(
-				'Core restore terminal audit requires SUCCEEDED state'
-			);
-		}
-		const target = this.config.targets.core;
-		const password = await this.fileSystem.readSecretFile(
-			target.passwordFile
-		);
-		await this.runPsql(
-			target,
-			password,
-			buildCoreRestoreAuditSql({
-				jobId: manifest.jobId,
-				target: manifest.target,
-				sha256: manifest.sha256,
-				requestedBy: manifest.requestedBy
-			})
-		);
 	}
 
 	private async finishCancelled(

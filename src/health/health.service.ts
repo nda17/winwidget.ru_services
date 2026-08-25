@@ -116,7 +116,7 @@ export class HealthService {
 			...identityProviderChecks,
 			this.checkYooKassa(billingResult),
 			this.checkInfoTelegramBot(),
-			this.checkSupportTelegramBot()
+			this.checkSupportService()
 		]);
 
 		return {
@@ -782,12 +782,32 @@ export class HealthService {
 		});
 	}
 
-	private async checkSupportTelegramBot(): Promise<HealthCheck> {
-		return this.checkTelegramBot({
-			id: 'telegram_support_bot',
-			title: '@winwidget_support_bot',
-			tokenKey: 'TELEGRAM_SUPPORT_BOT_TOKEN',
-			usernameKey: 'TELEGRAM_SUPPORT_BOT_USERNAME'
+	private async checkSupportService(): Promise<HealthCheck> {
+		const baseUrl = this.configService.get<string>(
+			'SUPPORT_INTERNAL_BASE_URL'
+		);
+		if (baseUrl !== 'http://127.0.0.1:5100') {
+			return {
+				id: 'support_service',
+				title: 'Support service',
+				status: 'down',
+				message: 'SUPPORT_INTERNAL_BASE_URL must be http://127.0.0.1:5100'
+			};
+		}
+
+		return this.measure('support_service', 'Support service', async () => {
+			const response = await this.fetchWithTimeout(
+				`${baseUrl}/health/ready`
+			);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			const data = (await response.json()) as {
+				status?: string;
+				service?: string;
+			};
+			if (data.status !== 'ready' || data.service !== 'support') {
+				throw new Error('Support service returned invalid readiness');
+			}
+			return 'Support API готов';
 		});
 	}
 

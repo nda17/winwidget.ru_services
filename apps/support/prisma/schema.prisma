@@ -1,0 +1,304 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/support-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("SUPPORT_DATABASE_URL")
+  schemas  = ["support"]
+}
+
+model ServiceIdentity {
+  id                     String               @id @default("singleton")
+  serviceName            String               @default("support-service") @map("service_name")
+  databaseId             String               @default(uuid()) @map("database_id") @db.Uuid
+  phase                  ServiceDatabasePhase @default(SHADOW)
+  ownershipGeneration    BigInt               @default(0) @map("ownership_generation")
+  sourceDatabaseSystemId String?              @map("source_database_system_id")
+  sourceRevision         String?              @map("source_revision") @db.Char(40)
+  ownershipRevision      String?              @map("ownership_revision") @db.Char(40)
+  sourceFingerprint      String?              @map("source_fingerprint") @db.Char(64)
+  sourceSnapshotSha256   String?              @map("source_snapshot_sha256") @db.Char(64)
+  sourceSnapshotCounts   Json?                @map("source_snapshot_counts")
+  sourceHighWatermark    BigInt?              @map("source_high_watermark")
+  importedAt             DateTime?            @map("imported_at")
+  activatedAt            DateTime?            @map("activated_at")
+  createdAt              DateTime             @default(now()) @map("created_at")
+  updatedAt              DateTime             @updatedAt @map("updated_at")
+
+  @@map("service_identity")
+  @@schema("support")
+}
+
+model RoutingSettings {
+  id               String   @id @default("singleton")
+  adminChatId      String   @default("") @map("admin_chat_id")
+  supportThreadId  Int?     @map("support_thread_id")
+  aggregateVersion BigInt   @default(0) @map("aggregate_version")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("routing_settings")
+  @@schema("support")
+}
+
+model TelegramWebhookInbox {
+  id             String                     @id @default(uuid()) @db.Uuid
+  updateId       BigInt                     @unique @map("update_id")
+  bodyHash       String                     @map("body_hash") @db.Char(64)
+  rawPayload     Bytes                      @map("raw_payload")
+  status         SupportInboxStatus         @default(PENDING)
+  outcome        SupportInboxOutcome?
+  attempts       Int                        @default(0)
+  leaseToken     String?                    @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?                  @map("lease_expires_at")
+  lastError      String?                    @map("last_error") @db.Text
+  processedAt    DateTime?                  @map("processed_at")
+  createdAt      DateTime                   @default(now()) @map("created_at")
+  updatedAt      DateTime                   @updatedAt @map("updated_at")
+  mappings       SupportMessageMapping[]
+  outbound       TelegramOutboundDelivery[]
+
+  @@index([status, leaseExpiresAt, createdAt])
+  @@map("telegram_webhook_inbox")
+  @@schema("support")
+}
+
+model TelegramOutboundDelivery {
+  id                String                         @id @default(uuid()) @db.Uuid
+  inboxId           String                         @map("inbox_id") @db.Uuid
+  idempotencyKey    String                         @unique @map("idempotency_key")
+  method            TelegramOutboundMethod
+  requestHash       String                         @map("request_hash") @db.Char(64)
+  request           Json
+  status            TelegramOutboundDeliveryStatus @default(PENDING)
+  attempts          Int                            @default(0)
+  leaseToken        String?                        @map("lease_token") @db.Uuid
+  leaseExpiresAt    DateTime?                      @map("lease_expires_at")
+  responseMessageId Int?                           @map("response_message_id")
+  lastError         String?                        @map("last_error") @db.Text
+  deliveredAt       DateTime?                      @map("delivered_at")
+  createdAt         DateTime                       @default(now()) @map("created_at")
+  updatedAt         DateTime                       @updatedAt @map("updated_at")
+  inbox             TelegramWebhookInbox           @relation(fields: [inboxId], references: [id], onDelete: Restrict)
+
+  @@index([inboxId, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@map("telegram_outbound_deliveries")
+  @@schema("support")
+}
+
+model SupportMessageMapping {
+  id             String                @id @default(uuid()) @db.Uuid
+  inboxId        String?               @map("inbox_id") @db.Uuid
+  legacySourceId String?               @unique @map("legacy_source_id")
+  kind           SupportMappingKind
+  adminChatId    String                @map("admin_chat_id")
+  adminMessageId Int                   @map("admin_message_id")
+  userChatId     String                @map("user_chat_id")
+  telegramUserId String?               @map("telegram_user_id")
+  username       String?
+  firstName      String?               @map("first_name")
+  lastName       String?               @map("last_name")
+  text           String?               @db.Text
+  createdAt      DateTime              @default(now()) @map("created_at")
+  inbox          TelegramWebhookInbox? @relation(fields: [inboxId], references: [id], onDelete: Restrict)
+
+  @@unique([adminChatId, adminMessageId])
+  @@index([userChatId, createdAt])
+  @@index([inboxId])
+  @@map("support_message_mappings")
+  @@schema("support")
+}
+
+model OutboxEvent {
+  id               String         @id @default(uuid()) @db.Uuid
+  messageId        String         @default(uuid()) @map("message_id") @db.Uuid
+  deduplicationKey String?        @unique @map("deduplication_key")
+  exchange         OutboxExchange @default(EVENTS)
+  eventType        String         @map("event_type")
+  routingKey       String         @map("routing_key")
+  payload          Json
+  headers          Json           @default("{}")
+  aggregateType    String?        @map("aggregate_type")
+  aggregateId      String?        @map("aggregate_id")
+  aggregateVersion BigInt?        @map("aggregate_version")
+  status           OutboxStatus   @default(PENDING)
+  attempts         Int            @default(0)
+  availableAt      DateTime       @default(now()) @map("available_at")
+  lockedAt         DateTime?      @map("locked_at")
+  lockedBy         String?        @map("locked_by")
+  leaseToken       String?        @map("lease_token") @db.Uuid
+  leaseExpiresAt   DateTime?      @map("lease_expires_at")
+  publishedAt      DateTime?      @map("published_at")
+  lastError        String?        @map("last_error") @db.Text
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([publishedAt])
+  @@map("outbox_events")
+  @@schema("support")
+}
+
+model ConsumerReceipt {
+  id               String                @id @default(uuid()) @db.Uuid
+  eventId          String                @map("event_id") @db.Uuid
+  consumer         String
+  payloadHash      String                @map("payload_hash") @db.Char(64)
+  status           ConsumerReceiptStatus @default(PROCESSING)
+  lockedAt         DateTime?             @map("locked_at")
+  lockedBy         String?               @map("locked_by")
+  lockToken        String?               @map("lock_token") @db.Uuid
+  leaseExpiresAt   DateTime?             @map("lease_expires_at")
+  retryAttempt     Int?                  @map("retry_attempt")
+  manualRetryCycle Int                   @default(0) @map("manual_retry_cycle")
+  deliveredAt      DateTime?             @map("delivered_at")
+  lastError        String?               @map("last_error") @db.Text
+  createdAt        DateTime              @default(now()) @map("created_at")
+  updatedAt        DateTime              @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer])
+  @@index([status, leaseExpiresAt])
+  @@map("consumer_receipts")
+  @@schema("support")
+}
+
+model ConsumerFailure {
+  id                  String                @id @default(uuid()) @db.Uuid
+  eventId             String                @map("event_id") @db.Uuid
+  consumer            String
+  eventType           String                @map("event_type")
+  routingKey          String                @map("routing_key")
+  payload             Json
+  headers             Json                  @default("{}")
+  payloadHash         String                @map("payload_hash") @db.Char(64)
+  correlationId       String                @map("correlation_id") @db.Uuid
+  status              ConsumerFailureStatus @default(OPEN)
+  attempts            Int                   @default(0)
+  manualRetryCount    Int                   @default(0) @map("manual_retry_count")
+  lastError           String                @map("last_error") @db.Text
+  lastFailedAt        DateTime              @default(now()) @map("last_failed_at")
+  retryRequestedAt    DateTime?             @map("retry_requested_at")
+  retryRequestedById  String?               @map("retry_requested_by_id")
+  retryToken          String?               @map("retry_token") @db.Uuid
+  retryLeaseExpiresAt DateTime?             @map("retry_lease_expires_at")
+  resolvedAt          DateTime?             @map("resolved_at")
+  resolutionComment   String?               @map("resolution_comment") @db.Text
+  createdAt           DateTime              @default(now()) @map("created_at")
+  updatedAt           DateTime              @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer])
+  @@index([status, lastFailedAt])
+  @@index([status, retryLeaseExpiresAt])
+  @@map("consumer_failures")
+  @@schema("support")
+}
+
+model MessagingHeartbeat {
+  id         String   @id @default(uuid()) @db.Uuid
+  service    String
+  instanceId String   @map("instance_id")
+  revision   String
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@unique([service, instanceId])
+  @@index([service, lastSeenAt])
+  @@map("messaging_heartbeats")
+  @@schema("support")
+}
+
+enum ServiceDatabasePhase {
+  SHADOW
+  ACTIVE
+
+  @@schema("support")
+}
+
+enum SupportInboxStatus {
+  PENDING
+  PROCESSING
+  RETRY_SCHEDULED
+  DELIVERED
+  DEAD_LETTERED
+  CLOSED_NO_RETRY
+  IGNORED
+
+  @@schema("support")
+}
+
+enum SupportInboxOutcome {
+  USER_MESSAGE_FORWARDED
+  START_REPLIED
+  ADMIN_REPLY_DELIVERED
+  USER_MESSAGE_REJECTED
+  IGNORED_BOT
+  IGNORED_CHAT
+  IGNORED_UNMAPPED_REPLY
+
+  @@schema("support")
+}
+
+enum SupportMappingKind {
+  USER_COPY
+  USER_CONTEXT
+
+  @@schema("support")
+}
+
+enum TelegramOutboundMethod {
+  SEND_MESSAGE
+  COPY_MESSAGE
+
+  @@schema("support")
+}
+
+enum TelegramOutboundDeliveryStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+
+  @@schema("support")
+}
+
+enum OutboxExchange {
+  EVENTS
+  AUDIT
+  RETRY
+  MANUAL_RETRY
+  DEAD_LETTER
+
+  @@schema("support")
+}
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+
+  @@schema("support")
+}
+
+enum ConsumerReceiptStatus {
+  PROCESSING
+  RETRY_SCHEDULED
+  DELIVERED
+  DEAD_LETTERED
+  CLOSED_NO_RETRY
+
+  @@schema("support")
+}
+
+enum ConsumerFailureStatus {
+  OPEN
+  RETRYING
+  RESOLVED
+  CLOSED_NO_RETRY
+
+  @@schema("support")
+}

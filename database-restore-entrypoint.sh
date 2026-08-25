@@ -79,9 +79,6 @@ else
 	chmod 700 "$secret_target_directory"
 
 	copy_secret \
-		'/run/secrets/database-restore-core-admin-password' \
-		"$secret_target_directory/core-admin-password"
-	copy_secret \
 		'/run/secrets/database-restore-notification-delivery-admin-password' \
 		"$secret_target_directory/notification-delivery-admin-password"
 	copy_secret \
@@ -102,6 +99,9 @@ else
 	copy_secret \
 		'/run/secrets/database-restore-platform-admin-password' \
 		"$secret_target_directory/platform-admin-password"
+	copy_secret \
+		'/run/secrets/database-restore-support-admin-password' \
+		"$secret_target_directory/support-admin-password"
 	chown nestjs:nodejs "$secret_target_directory"
 fi
 

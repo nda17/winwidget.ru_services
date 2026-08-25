@@ -202,7 +202,8 @@ describe('MessagingAdminService', () => {
 						'WIDGETS_DATABASE_BACKUP',
 						'BILLING_DATABASE_BACKUP',
 						'IDENTITY_DATABASE_BACKUP',
-						'PLATFORM_DATABASE_BACKUP'
+						'PLATFORM_DATABASE_BACKUP',
+						'SUPPORT_DATABASE_BACKUP'
 					]
 				},
 				status: 'SUCCEEDED',
@@ -263,7 +264,10 @@ describe('MessagingAdminService', () => {
 			getCampaignsOverview: jest.fn().mockResolvedValue(campaignsOverview),
 			getReportingOverview: jest
 				.fn()
-				.mockRejectedValue(new Error('Reporting overview timeout'))
+				.mockRejectedValue(new Error('Reporting overview timeout')),
+			getSupportOverview: jest
+				.fn()
+				.mockRejectedValue(new Error('Support overview timeout'))
 		} as unknown as ServiceOwnedMessagingOverviewClientService;
 		const service = new MessagingAdminService(
 			prisma,
@@ -299,6 +303,7 @@ describe('MessagingAdminService', () => {
 				completedBackupsLast24Hours: 2,
 				campaignsError: null,
 				reportingError: 'Reporting overview timeout',
+				supportError: 'Support overview timeout',
 				heartbeats: expect.arrayContaining([
 					expect.objectContaining({
 						service: 'campaigns-api',
@@ -314,6 +319,11 @@ describe('MessagingAdminService', () => {
 						service: 'reporting-scheduler',
 						status: 'down',
 						activeInstances: 0
+					}),
+					expect.objectContaining({
+						service: 'support-api',
+						status: 'down',
+						activeInstances: 0
 					})
 				])
 			})
@@ -324,6 +334,9 @@ describe('MessagingAdminService', () => {
 		expect(
 			serviceOwnedOverview.getReportingOverview
 		).toHaveBeenCalledTimes(1);
+		expect(serviceOwnedOverview.getSupportOverview).toHaveBeenCalledTimes(
+			1
+		);
 	});
 
 	it('routes an Identity-owned destination retry without touching the Core Outbox', async () => {

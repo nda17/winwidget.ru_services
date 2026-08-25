@@ -3,6 +3,142 @@
 # all uppercase inputs are supplied by the verified local controller.
 # shellcheck disable=SC2097,SC2098,SC2153,SC2329
 set -euo pipefail
+
+support_routine_all_database_revision_from_marker() {
+  [[ "$#" -eq 1 && -f "$1" && ! -L "$1" ]] || return 1
+  awk -F= '
+    $1 !~ /^(version|phase|ownership_revision|cleanup_revision|volume|image_id|database_id|database_system_identifier|updated_at)$/ { exit 1 }
+    { seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
+    END {
+      if (seen["version"] != 1 || value["version"] != "1" ||
+        seen["phase"] != 1 || value["phase"] != "complete" ||
+        seen["ownership_revision"] != 1 || value["ownership_revision"] !~ /^[0-9a-f]{40}$/ ||
+        seen["cleanup_revision"] != 1 || value["cleanup_revision"] !~ /^(pending|[0-9a-f]{40})$/ ||
+        seen["volume"] != 1 || value["volume"] !~ /^[A-Za-z0-9][A-Za-z0-9_.-]+$/ ||
+        seen["image_id"] != 1 || value["image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+        seen["database_id"] != 1 || value["database_id"] !~ /^[0-9a-f-]{36}$/ ||
+        seen["database_system_identifier"] != 1 || value["database_system_identifier"] !~ /^[1-9][0-9]*$/ ||
+        seen["updated_at"] != 1 || value["updated_at"] !~ /^[0-9TZ:.-]+$/) exit 1
+      print value["ownership_revision"]
+    }
+  ' "$1"
+}
+
+support_routine_all_cutover_revision_from_marker() {
+  [[ "$#" -eq 1 && -f "$1" && ! -L "$1" ]] || return 1
+  awk -F= '
+    $1 !~ /^(version|phase|revision|core_image_id|support_image_id|gateway_image_id|updated_at)$/ { exit 1 }
+    { seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
+    END {
+      if (seen["version"] != 1 || value["version"] != "1" ||
+        seen["phase"] != 1 || value["phase"] != "complete" ||
+        seen["revision"] != 1 || value["revision"] !~ /^[0-9a-f]{40}$/ ||
+        seen["core_image_id"] != 1 || value["core_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+        seen["support_image_id"] != 1 || value["support_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+        seen["gateway_image_id"] != 1 || value["gateway_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+        seen["updated_at"] != 1 || value["updated_at"] !~ /^[0-9TZ:.-]+$/) exit 1
+      print value["revision"]
+    }
+  ' "$1"
+}
+
+support_routine_all_complete_revision_from_markers() {
+  [[ "$#" -eq 1 ]] || return 1
+  local marker_root="$1"
+  local database_marker="$marker_root/.support-database-lifecycle-v1"
+  local cutover_marker="$marker_root/.support-cutover-v1"
+  local database_revision cutover_revision
+  database_revision="$(
+    support_routine_all_database_revision_from_marker "$database_marker"
+  )" || return 1
+  cutover_revision="$(
+    support_routine_all_cutover_revision_from_marker "$cutover_marker"
+  )" || return 1
+  [[ "$database_revision" == "$cutover_revision" ]] || return 1
+  printf '%s\n' "$database_revision"
+}
+
+require_support_complete_before_routine_all() {
+  local marker_root="$APP_ROOT/deploy/backend"
+  local database_marker="$marker_root/.support-database-lifecycle-v1"
+  local cutover_marker="$marker_root/.support-cutover-v1"
+  [[ -f "$database_marker" && ! -L "$database_marker" &&
+    "$(stat -c '%u:%g:%a' "$database_marker")" == '0:0:600' &&
+    -f "$cutover_marker" && ! -L "$cutover_marker" &&
+    "$(stat -c '%u:%g:%a' "$cutover_marker")" == '0:0:600' ]] || {
+    echo 'Automatic/all deployment is blocked until Support ownership is exactly complete.' >&2
+    return 1
+  }
+  support_routine_all_complete_revision_from_markers "$marker_root" >/dev/null || {
+    echo 'Automatic/all deployment is blocked by incomplete or inconsistent Support ownership markers.' >&2
+    return 1
+  }
+}
+
+run_support_routine_all_guard_self_test() {
+  local self_test_directory marker_root revision
+  self_test_directory="$(
+    mktemp -d "${TMPDIR:-/tmp}/winwidget-support-routine-all.XXXXXX"
+  )"
+  marker_root="$self_test_directory/deploy/backend"
+  revision='0123456789abcdef0123456789abcdef01234567'
+  mkdir -p "$marker_root"
+  trap 'rm -f "$marker_root/.support-database-lifecycle-v1" "$marker_root/.support-cutover-v1"; rmdir "$marker_root" "$self_test_directory/deploy" "$self_test_directory"' RETURN
+
+  write_database_marker() {
+    printf '%s\n' \
+      'version=1' \
+      "phase=$1" \
+      "ownership_revision=$revision" \
+      'cleanup_revision=pending' \
+      'volume=winwidget-support-postgres' \
+      'image_id=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+      'database_id=01234567-89ab-cdef-0123-456789abcdef' \
+      'database_system_identifier=123456789' \
+      'updated_at=2026-08-25T00:00:00Z' >"$marker_root/.support-database-lifecycle-v1"
+  }
+  write_cutover_marker() {
+    printf '%s\n' \
+      'version=1' \
+      "phase=$1" \
+      "revision=$2" \
+      'core_image_id=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+      'support_image_id=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+      'gateway_image_id=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
+      'updated_at=2026-08-25T00:00:00Z' >"$marker_root/.support-cutover-v1"
+  }
+
+  if support_routine_all_complete_revision_from_markers "$marker_root" >/dev/null 2>&1; then
+    echo 'Support routine-all guard accepted absent markers.' >&2
+    return 1
+  fi
+  write_database_marker forward-only
+  write_cutover_marker forward-only "$revision"
+  if support_routine_all_complete_revision_from_markers "$marker_root" >/dev/null 2>&1; then
+    echo 'Support routine-all guard accepted forward-only ownership.' >&2
+    return 1
+  fi
+  write_database_marker complete
+  write_cutover_marker complete "$revision"
+  [[ "$(support_routine_all_complete_revision_from_markers "$marker_root")" == "$revision" ]]
+  write_cutover_marker complete 'fedcba9876543210fedcba9876543210fedcba98'
+  if support_routine_all_complete_revision_from_markers "$marker_root" >/dev/null 2>&1; then
+    echo 'Support routine-all guard accepted mismatched ownership revisions.' >&2
+    return 1
+  fi
+
+  printf 'support_routine_all_guard_self_test=passed\n'
+}
+
+if [[ "${1:-}" == '--self-test-support-routine-all-guard' ]]; then
+  [[ "$#" -eq 1 ]] || {
+    echo 'Support routine-all guard self-test does not accept extra arguments.' >&2
+    exit 1
+  }
+  run_support_routine_all_guard_self_test
+  exit 0
+fi
+
 unset ENV_FILE COMPOSE_FILE REPORTING_DATABASE_MARKER \
   REPORTING_FIRST_ROLLOUT_STAGED_MARKER
 cd "$APP_ROOT/winwidget.ru_server"
@@ -259,6 +395,35 @@ guard_platform_checkout_before_pull() {
       -e "$readiness_receipt" || -L "$readiness_receipt" ||
       -e "$phase_a_env" || -L "$phase_a_env" ) ]]; then
     echo 'Platform marker exists but its checkout guards are unavailable.' >&2
+    return 1
+  fi
+}
+guard_support_checkout_before_pull() {
+  local expected_revision="$1"
+  local guard_action="${2:---guard-before-fetch-revision}"
+  local database_script="scripts/support-database-lifecycle.sh"
+  local cutover_script="scripts/support-cutover-production.sh"
+  local database_marker="$APP_ROOT/deploy/backend/.support-database-lifecycle-v1"
+  local cleanup_marker="$APP_ROOT/deploy/backend/.support-core-cleanup-v1"
+  local script tracked_blob actual_blob
+
+  [[ "$expected_revision" =~ ^[0-9a-f]{40}$ &&
+    "$guard_action" =~ ^--guard-before-(fetch|checkout)-revision$ ]] || return 1
+  for script in "$database_script" "$cutover_script"; do
+    tracked_blob="$(git rev-parse --verify "HEAD:$script" 2>/dev/null || true)"
+    if [[ -e "$script" || -L "$script" ]]; then
+      [[ -f "$script" && ! -L "$script" && -n "$tracked_blob" ]] || return 1
+      actual_blob="$(git hash-object "$script")"
+      [[ "$actual_blob" == "$tracked_blob" ]] || return 1
+    elif [[ -n "$tracked_blob" ]]; then
+      return 1
+    fi
+  done
+  if [[ -e "$database_script" ]]; then
+    APP_ROOT="$APP_ROOT" bash "$database_script" "$guard_action" "$expected_revision"
+  elif [[ -e "$database_marker" || -L "$database_marker" ||
+    -e "$cleanup_marker" || -L "$cleanup_marker" ]]; then
+    echo 'Support marker exists but its checkout guards are unavailable.' >&2
     return 1
   fi
 }
@@ -975,12 +1140,14 @@ checkout_verified_prod_revision() {
   guard_billing_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
   guard_platform_checkout_before_pull "$current_revision"
+  guard_support_checkout_before_pull "$current_revision"
   guard_campaigns_checkout_before_pull "$expected_revision"
   guard_reporting_checkout_before_pull "$expected_revision"
   guard_widgets_checkout_before_pull "$expected_revision"
   guard_billing_checkout_before_pull "$expected_revision"
   guard_identity_checkout_before_pull "$expected_revision"
   guard_platform_checkout_before_pull "$expected_revision"
+  guard_support_checkout_before_pull "$expected_revision"
   if [[ -n "$prefetched_revision" ]]; then
     [[ "$prefetched_revision" == "$expected_revision" ]] || {
       echo "Prefetched prod revision differs from the reviewed revision." >&2
@@ -1009,6 +1176,8 @@ checkout_verified_prod_revision() {
     "$expected_revision" --guard-before-checkout-revision
   guard_platform_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
+  guard_support_checkout_before_pull \
+    "$expected_revision" --guard-before-checkout-revision
   git checkout prod
   git merge --ff-only "$fetched_revision"
   [[ "$(git rev-parse HEAD)" == "$expected_revision" ]] || {
@@ -1028,11 +1197,13 @@ checkout_retargeted_billing_cleanup_revision() {
   guard_widgets_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
   guard_platform_checkout_before_pull "$current_revision"
+  guard_support_checkout_before_pull "$current_revision"
   guard_campaigns_checkout_before_pull "$expected_revision"
   guard_reporting_checkout_before_pull "$expected_revision"
   guard_widgets_checkout_before_pull "$expected_revision"
   guard_identity_checkout_before_pull "$expected_revision"
   guard_platform_checkout_before_pull "$expected_revision"
+  guard_support_checkout_before_pull "$expected_revision"
   git cat-file -e "$prefetched_revision^{commit}" 2>/dev/null || return 1
   guard_reporting_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
@@ -1041,6 +1212,8 @@ checkout_retargeted_billing_cleanup_revision() {
   guard_identity_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
   guard_platform_checkout_before_pull \
+    "$expected_revision" --guard-before-checkout-revision
+  guard_support_checkout_before_pull \
     "$expected_revision" --guard-before-checkout-revision
   git checkout prod
   git merge --ff-only "$prefetched_revision"
@@ -1057,6 +1230,7 @@ if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
   guard_billing_checkout_before_pull "$current_revision"
   guard_identity_checkout_before_pull "$current_revision"
   guard_platform_checkout_before_pull "$current_revision"
+  guard_support_checkout_before_pull "$current_revision"
   if ! guard_campaigns_checkout_before_pull \
     "$EXPECTED_REVISION" > /dev/null 2>&1; then
     echo "Automatic backend deploy is verified but deferred: the incomplete Campaigns database lifecycle is pinned to $current_revision."
@@ -1089,9 +1263,15 @@ if [[ "$AUTOMATIC_PROD_PUSH" == "true" &&
     echo "Automatic backend deploy is verified but deferred: the active Platform ownership guard rejects $EXPECTED_REVISION."
     exit 1
   fi
+  if ! guard_support_checkout_before_pull \
+    "$EXPECTED_REVISION" > /dev/null 2>&1; then
+    echo "Automatic backend deploy is verified but deferred: the active Support ownership guard rejects $EXPECTED_REVISION."
+    exit 1
+  fi
 fi
 case "$DEPLOY_TARGET" in
   all)
+    require_support_complete_before_routine_all
     platform_cutover_marker="$APP_ROOT/deploy/backend/.platform-cutover-v1"
     [[ -f "$platform_cutover_marker" && ! -L "$platform_cutover_marker" ]] || {
       echo 'Automatic/all deployment is blocked until Platform ownership is exactly complete.' >&2
@@ -1225,9 +1405,11 @@ case "$DEPLOY_TARGET" in
         guard_campaigns_checkout_before_pull "$current_revision"
         guard_reporting_checkout_before_pull "$current_revision"
         guard_widgets_checkout_before_pull "$current_revision"
+        guard_support_checkout_before_pull "$current_revision"
         guard_campaigns_checkout_before_pull "$EXPECTED_REVISION"
         guard_reporting_checkout_before_pull "$EXPECTED_REVISION"
         guard_widgets_checkout_before_pull "$EXPECTED_REVISION"
+        guard_support_checkout_before_pull "$EXPECTED_REVISION"
         git fetch origin prod
         prefetched_cleanup_revision="$(git rev-parse FETCH_HEAD)"
         [[ "$prefetched_cleanup_revision" == "$EXPECTED_REVISION" ]] || {
@@ -1237,6 +1419,8 @@ case "$DEPLOY_TARGET" in
         guard_reporting_checkout_before_pull \
           "$EXPECTED_REVISION" --guard-before-checkout-revision
         guard_widgets_checkout_before_pull \
+          "$EXPECTED_REVISION" --guard-before-checkout-revision
+        guard_support_checkout_before_pull \
           "$EXPECTED_REVISION" --guard-before-checkout-revision
         retarget_billing_cleanup_revision \
           "$current_revision" "$EXPECTED_REVISION"
@@ -1472,6 +1656,45 @@ case "$DEPLOY_TARGET" in
           PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
           PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
           bash scripts/platform-cutover-production.sh --abort
+        ;;
+    esac
+    ;;
+  support)
+    [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
+      echo 'Support lifecycle actions are manual-only.' >&2
+      exit 1
+    }
+    checkout_verified_prod_revision "$EXPECTED_REVISION"
+    case "$SUPPORT_ACTION" in
+      status)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          bash scripts/support-cutover-production.sh --status
+        ;;
+      prepare)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          SUPPORT_CONFIRMATION="$SUPPORT_CONFIRMATION" \
+          bash scripts/support-cutover-production.sh --prepare
+        ;;
+      cutover)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          SUPPORT_CONFIRMATION="$SUPPORT_CONFIRMATION" \
+          bash scripts/support-cutover-production.sh --cutover
+        ;;
+      cleanup)
+        [[ "$SUPPORT_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+          "$SUPPORT_CLEANUP_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ &&
+          "$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+          echo 'Support cleanup requires all three exact evidence SHA-256 values.' >&2
+          exit 1
+        }
+        APP_ROOT="$APP_ROOT" \
+          SUPPORT_CORE_SOURCE_CLEANUP_APPROVED=true \
+          SUPPORT_CORE_SOURCE_CLEANUP_CONFIRMATION="$SUPPORT_CONFIRMATION" \
+          SUPPORT_CORE_SOURCE_CLEANUP_REVISION="$EXPECTED_REVISION" \
+          SUPPORT_CORE_SOURCE_CLEANUP_MIGRATION_SHA256="$SUPPORT_CLEANUP_MIGRATION_SHA256" \
+          SUPPORT_CORE_SOURCE_CLEANUP_SUPPORT_BACKUP_SHA256="$SUPPORT_CLEANUP_BACKUP_SHA256" \
+          SUPPORT_CORE_SOURCE_CLEANUP_RESTORE_EVIDENCE_SHA256="$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" \
+          bash scripts/cleanup-support-core-source-production.sh
         ;;
     esac
     ;;

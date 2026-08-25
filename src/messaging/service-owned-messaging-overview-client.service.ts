@@ -18,7 +18,8 @@ const INSECURE_TOKENS = new Set([
 	'campaigns_internal_token',
 	'reporting_internal_token',
 	'ci_campaigns_internal_token_at_least_32_chars',
-	'ci_reporting_internal_token_at_least_32_chars'
+	'ci_reporting_internal_token_at_least_32_chars',
+	'ci_support_core_token_at_least_32_chars'
 ]);
 const OUTBOX_STATUSES = [
 	'PENDING',
@@ -38,14 +39,22 @@ export const REPORTING_MESSAGING_HEARTBEAT_SERVICES = [
 	'reporting-outbox-publisher',
 	'reporting-scheduler'
 ] as const;
+export const SUPPORT_MESSAGING_HEARTBEAT_SERVICES = [
+	'support-api',
+	'support-worker',
+	'support-outbox-publisher'
+] as const;
 
 type CampaignsMessagingHeartbeatService =
 	(typeof CAMPAIGNS_MESSAGING_HEARTBEAT_SERVICES)[number];
 type ReportingMessagingHeartbeatService =
 	(typeof REPORTING_MESSAGING_HEARTBEAT_SERVICES)[number];
+type SupportMessagingHeartbeatService =
+	(typeof SUPPORT_MESSAGING_HEARTBEAT_SERVICES)[number];
 type ServiceOwnedMessagingHeartbeatService =
 	| CampaignsMessagingHeartbeatService
-	| ReportingMessagingHeartbeatService;
+	| ReportingMessagingHeartbeatService
+	| SupportMessagingHeartbeatService;
 
 export interface ServiceOwnedMessagingHeartbeat {
 	service: ServiceOwnedMessagingHeartbeatService;
@@ -178,10 +187,29 @@ export class ServiceOwnedMessagingOverviewClientService {
 		);
 	}
 
+	getSupportOverview(): Promise<ServiceOwnedMessagingOverview> {
+		const baseUrl =
+			this.config.get<string>('SUPPORT_INTERNAL_BASE_URL')?.trim() || '';
+		if (baseUrl !== 'http://127.0.0.1:5100') {
+			throw new ServiceUnavailableException(
+				'Support internal endpoint is not configured securely'
+			);
+		}
+		return this.request(
+			'Support',
+			`${baseUrl}/internal/v1/support/messaging/overview`,
+			'SUPPORT_CORE_TOKEN',
+			SUPPORT_MESSAGING_HEARTBEAT_SERVICES
+		);
+	}
+
 	private async request(
-		owner: 'Campaigns' | 'Reporting',
+		owner: 'Campaigns' | 'Reporting' | 'Support',
 		url: string,
-		tokenName: 'CAMPAIGNS_INTERNAL_TOKEN' | 'REPORTING_INTERNAL_TOKEN',
+		tokenName:
+			| 'CAMPAIGNS_INTERNAL_TOKEN'
+			| 'REPORTING_INTERNAL_TOKEN'
+			| 'SUPPORT_CORE_TOKEN',
 		expectedServices: readonly ServiceOwnedMessagingHeartbeatService[]
 	): Promise<ServiceOwnedMessagingOverview> {
 		const token = this.getToken(tokenName, owner);
@@ -232,8 +260,11 @@ export class ServiceOwnedMessagingOverviewClientService {
 	}
 
 	private getToken(
-		name: 'CAMPAIGNS_INTERNAL_TOKEN' | 'REPORTING_INTERNAL_TOKEN',
-		owner: 'Campaigns' | 'Reporting'
+		name:
+			| 'CAMPAIGNS_INTERNAL_TOKEN'
+			| 'REPORTING_INTERNAL_TOKEN'
+			| 'SUPPORT_CORE_TOKEN',
+		owner: 'Campaigns' | 'Reporting' | 'Support'
 	): string {
 		const token = this.config.get<string>(name)?.trim() || '';
 		if (

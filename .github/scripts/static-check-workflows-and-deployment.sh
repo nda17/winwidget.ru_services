@@ -9,6 +9,12 @@ bash -n \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh
 node --check .github/scripts/validate-production-compose.cjs
+node --check scripts/test-support-runtime-boundaries.mjs
+node --check scripts/test-support-core-source-cleanup-rehearsal.mjs
+bash -n scripts/support-release-identity.sh
+bash -n scripts/support-database-lifecycle.sh
+bash -n scripts/support-cutover-production.sh
+bash -n scripts/cleanup-support-core-source-production.sh
 # actionlint runs without its ShellCheck integration. Extracted workflow
 # runners are syntax-checked above; production scripts are checked separately.
 docker run --rm \
@@ -65,6 +71,10 @@ docker run --rm \
   scripts/platform-frontend-runtime-attestation.sh \
   scripts/platform-backup-restore-rehearsal.sh \
   scripts/deploy-platform-production.sh \
+  scripts/support-release-identity.sh \
+  scripts/support-database-lifecycle.sh \
+  scripts/support-cutover-production.sh \
+  scripts/cleanup-support-core-source-production.sh \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh \
   database-restore-entrypoint.sh
@@ -187,6 +197,30 @@ const productionCompose = readFileSync(
   "deploy/docker-compose.prod.yml",
   "utf8",
 );
+if (
+  productionCompose.includes("  core-postgres-admin-password:") ||
+  !validateProductionComposeValidator.includes(
+    "Retired Core restore secret must not remain in Compose",
+  )
+) {
+  throw new Error(
+    "Support hard cutover must retire the unused Core restore Compose secret",
+  );
+}
+if (!validateProductionComposeValidator.includes(
+  "resolve(String(build.context ?? '')) !== resolve('.')",
+)) {
+  throw new Error(
+    "Widgets Compose build validation must accept an exact repository root independent of checkout basename",
+  );
+}
+if (!validateProductionComposeValidator.includes(
+  "\t'support-admin-audit',",
+)) {
+  throw new Error(
+    "Production Compose validation must retain the Support admin-audit consumer kind",
+  );
+}
 const staticWorkflowCheckScript = readFileSync(
   ".github/scripts/static-check-workflows-and-deployment.sh",
   "utf8",
@@ -1803,6 +1837,11 @@ const expectedWorkflowDispatchInputNames = [
   "platform_frontend_attestation_sha256",
   "platform_frontend_signature_sha256",
   "platform_frontend_trusted_public_key_sha256",
+  "support_action",
+  "support_confirmation",
+  "support_cleanup_migration_sha256",
+  "support_cleanup_backup_sha256",
+  "support_cleanup_restore_evidence_sha256",
 ];
 if (
   JSON.stringify(workflowDispatchInputNames) !==
@@ -1905,6 +1944,7 @@ const exactIdentityScopedTokenNames = `          identity_scoped_token_names=(
             WIDGETS_IDENTITY_TOKEN
             IDENTITY_BILLING_TOKEN
             IDENTITY_PLATFORM_TOKEN
+            IDENTITY_SUPPORT_TOKEN
             BILLING_IDENTITY_TOKEN
           )`;
 if (!identityScopedTokenBlock.includes(exactIdentityScopedTokenNames)) {
@@ -2018,6 +2058,114 @@ if (
   );
 }
 
+for (const requiredSupportFirstCutoverContract of [
+  "support_steady_expected_lifecycle_phase() {",
+  "true) printf 'forward-only\\n'",
+  "false) printf 'complete\\n'",
+  'support_steady_ownership_revision_from_marker \\',
+  '"$support_lifecycle_marker" "$support_first_cutover_deploy"',
+  'core.sourceRevision !== process.env.EXPECTED_OWNERSHIP_REVISION',
+  'core.ownershipRevision !== process.env.EXPECTED_OWNERSHIP_REVISION',
+  'support.sourceRevision !== process.env.EXPECTED_OWNERSHIP_REVISION',
+  'support.ownershipRevision !== process.env.EXPECTED_OWNERSHIP_REVISION',
+  'core.sourceDatabaseSystemId !== support.sourceDatabaseSystemId',
+  'core.sourceFingerprint !== support.sourceFingerprint',
+  'core.sourceSnapshotSha256 !== support.sourceSnapshotSha256',
+  'core.sourceHighWatermark !== support.sourceHighWatermark',
+  'core.sourceMappingCount !== String(support.counts?.mappings)',
+  "--self-test-support-first-cutover-contract",
+]) {
+  if (!deployProductionScript.includes(requiredSupportFirstCutoverContract)) {
+    throw new Error(
+      `Support first-cutover steady-state contract is missing: ${requiredSupportFirstCutoverContract}`,
+    );
+  }
+}
+if (
+  !workflow.includes(
+    "bash scripts/deploy-production.sh --self-test-support-first-cutover-contract",
+  ) ||
+  !workflow.includes(
+    "bash .github/scripts/stage-or-deploy-backend-remote.sh --self-test-support-routine-all-guard",
+  )
+) {
+  throw new Error("Support first-cutover and routine-all regressions must run in CI");
+}
+const supportRemoteAllStart = stageOrDeployRemoteScript.indexOf("\n  all)\n");
+const supportRemoteAllEnd = stageOrDeployRemoteScript.indexOf(
+  "\n  maintenance)\n",
+  supportRemoteAllStart,
+);
+const supportRemoteAll = stageOrDeployRemoteScript.slice(
+  supportRemoteAllStart,
+  supportRemoteAllEnd,
+);
+const supportRemoteAllGuard = supportRemoteAll.indexOf(
+  "require_support_complete_before_routine_all",
+);
+const supportRemoteAllCheckout = supportRemoteAll.indexOf(
+  'checkout_verified_prod_revision "$EXPECTED_REVISION"',
+);
+const supportRemoteManualStart = stageOrDeployRemoteScript.indexOf(
+  "\n  support)\n",
+);
+const supportRemoteManualEnd = stageOrDeployRemoteScript.indexOf(
+  "\n  *)\n",
+  supportRemoteManualStart,
+);
+const supportRemoteManual = stageOrDeployRemoteScript.slice(
+  supportRemoteManualStart,
+  supportRemoteManualEnd,
+);
+if (
+  supportRemoteAllStart < 0 ||
+  supportRemoteAllEnd <= supportRemoteAllStart ||
+  supportRemoteAllGuard < 0 ||
+  supportRemoteAllCheckout <= supportRemoteAllGuard ||
+  supportRemoteManualStart < 0 ||
+  supportRemoteManualEnd <= supportRemoteManualStart ||
+  supportRemoteManual.includes("require_support_complete_before_routine_all") ||
+  !supportRemoteManual.includes("prepare)") ||
+  !supportRemoteManual.includes("cutover)") ||
+  !stageOrDeployRemoteScript.includes(
+    "--self-test-support-routine-all-guard",
+  )
+) {
+  throw new Error(
+    "Support routine all must fail before checkout while manual prepare/cutover remain available",
+  );
+}
+const supportWorkflowGuardDefinition = workflow.indexOf(
+  "          require_support_complete_before_routine_all() {",
+);
+const supportWorkflowGuardCall = workflow.indexOf(
+  '            require_support_complete_before_routine_all',
+  supportWorkflowGuardDefinition,
+);
+const supportWorkflowCurrentRevision = workflow.indexOf(
+  '          current_revision="$(git rev-parse HEAD)"',
+  supportWorkflowGuardDefinition,
+);
+const supportWorkflowPreflightDispatch = workflow.indexOf(
+  "          billing_retarget_preflight=false",
+  supportWorkflowGuardCall,
+);
+if (
+  supportWorkflowGuardDefinition < 0 ||
+  supportWorkflowGuardCall <= supportWorkflowGuardDefinition ||
+  supportWorkflowCurrentRevision <= supportWorkflowGuardDefinition ||
+  supportWorkflowGuardCall <= supportWorkflowCurrentRevision ||
+  supportWorkflowPreflightDispatch <= supportWorkflowGuardCall ||
+  !workflow.slice(
+    supportWorkflowCurrentRevision,
+    supportWorkflowPreflightDispatch,
+  ).includes('if [[ "$DEPLOY_TARGET" == \'all\' ]]')
+) {
+  throw new Error(
+    "Lifecycle preflight must reject incomplete Support ownership before routine checkout inspection",
+  );
+}
+
 requireCount("guard_campaigns_checkout_before_pull() {", 2);
 requireCount("checkout_verified_prod_revision() {", 1);
 requireCount(
@@ -2037,7 +2185,7 @@ requireCount("git checkout prod", 2);
 requireCount('git merge --ff-only "$fetched_revision"', 1);
 requireCount(
   'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-  10,
+  11,
 );
 requireCount(
   '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
@@ -2097,12 +2245,12 @@ requireCount(
 );
 requireCount(
   'local guard_action="${2:---guard-before-fetch-revision}"',
-  10,
+  12,
 );
 requireCount('"$guard_action" "$expected_revision"', 2);
 requireCount(
   '"$expected_revision" --guard-before-checkout-revision',
-  10,
+  12,
 );
 requireCount(
   '"$EXPECTED_NEXT_REVISION" --guard-before-checkout-revision',
@@ -2764,7 +2912,7 @@ if (
   billingCandidateGuard < 0 ||
   billingDeferredExit <= billingCandidateGuard ||
   automaticDefer.includes("exit 0") ||
-  (automaticDefer.match(/exit 1/g) || []).length !== 6 ||
+  (automaticDefer.match(/exit 1/g) || []).length !== 7 ||
   automaticDefer.includes("git fetch origin prod") ||
   automaticDefer.includes("git checkout prod") ||
   automaticDefer.includes("retarget_billing_cleanup_revision")
@@ -2990,6 +3138,9 @@ const expectedBuildImageEnv = {
   TELEGRAM_AUTH_BOT_TOKEN: "ci_identity_auth_bot_token",
   TELEGRAM_AUTH_BOT_USERNAME: "ci_identity_auth_bot",
   TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: "ci_identity_auth_webhook_secret",
+  TELEGRAM_SUPPORT_BOT_TOKEN: "ci_support_bot_token",
+  TELEGRAM_SUPPORT_BOT_USERNAME: "ci_support_bot",
+  TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET: "ci_support_webhook_secret",
   SMSAERO_EMAIL: "identity-ci@example.invalid",
   SMSAERO_API_KEY: "ci_identity_smsaero_api_key",
 };
@@ -3252,3 +3403,11 @@ process.stdout.write(
   "Backend checkout and standalone core database guards verified\n",
 );
 NODE
+node scripts/test-support-runtime-boundaries.mjs
+node scripts/test-support-core-source-cleanup-rehearsal.mjs
+bash scripts/deploy-production.sh --self-test-support-first-cutover-contract
+bash .github/scripts/stage-or-deploy-backend-remote.sh --self-test-support-routine-all-guard
+bash scripts/support-release-identity.sh --self-test
+bash scripts/support-database-lifecycle.sh --self-test
+bash scripts/support-cutover-production.sh --self-test
+bash scripts/cleanup-support-core-source-production.sh --self-test

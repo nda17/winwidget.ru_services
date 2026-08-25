@@ -11,7 +11,8 @@ export const DATABASE_BACKUP_TARGETS = {
 	WIDGETS: 'widgets',
 	BILLING: 'billing',
 	IDENTITY: 'identity',
-	PLATFORM: 'platform'
+	PLATFORM: 'platform',
+	SUPPORT: 'support'
 } as const;
 
 export type DatabaseBackupTarget =
@@ -24,6 +25,7 @@ export const WIDGETS_DATABASE_BACKUP_DELAY_MINUTES = 60;
 export const BILLING_DATABASE_BACKUP_DELAY_MINUTES = 75;
 export const IDENTITY_DATABASE_BACKUP_DELAY_MINUTES = 90;
 export const PLATFORM_DATABASE_BACKUP_DELAY_MINUTES = 105;
+export const SUPPORT_DATABASE_BACKUP_DELAY_MINUTES = 120;
 
 export interface DatabaseBackupInput {
 	chatId: string;

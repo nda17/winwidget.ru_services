@@ -1,6 +1,5 @@
 import type { AdminEventLogService } from '@/admin-event-log/admin-event-log.service';
 import type { DatabaseRestoreQueueService } from '@/dev-tools/database-restore-queue.service';
-import type { DatabaseRestoreService } from '@/dev-tools/database-restore.service';
 import { DevToolsController } from '@/dev-tools/dev-tools.controller';
 import type { Request } from 'express';
 import { randomUUID } from 'node:crypto';
@@ -32,14 +31,6 @@ describe('DevToolsController database restore', () => {
 			cancellationPending: false,
 			cancellationRequested: false
 		};
-		const databaseRestoreService = {
-			getSettings: jest.fn().mockReturnValue({
-				confirmation: 'ВОССТАНОВИТЬ БД'
-			}),
-			restore: jest.fn().mockResolvedValue({
-				restored: true
-			})
-		} as unknown as DatabaseRestoreService;
 		const databaseRestoreQueueService = {
 			getSettings: jest.fn().mockResolvedValue({
 				enabled: true,
@@ -107,24 +98,13 @@ describe('DevToolsController database restore', () => {
 
 		return {
 			controller: new DevToolsController(
-				databaseRestoreService,
 				databaseRestoreQueueService,
 				adminEventLogService
 			),
-			databaseRestoreService,
 			databaseRestoreQueueService,
 			adminEventLogService
 		};
 	};
-
-	it('returns restore settings from the DEV-only service', () => {
-		const { controller, databaseRestoreService } = createController();
-
-		expect(controller.getDatabaseRestoreSettings()).toEqual({
-			confirmation: 'ВОССТАНОВИТЬ БД'
-		});
-		expect(databaseRestoreService.getSettings).toHaveBeenCalledTimes(1);
-	});
 
 	it('returns async restore settings and delegates DEV-only job reads', async () => {
 		const { controller, databaseRestoreQueueService } = createController();
@@ -289,39 +269,6 @@ describe('DevToolsController database restore', () => {
 			)
 		).rejects.toThrow(
 			'Не удалось записать восстановление в журнал событий'
-		);
-	});
-
-	it('preserves audit logging and delegates restore execution', async () => {
-		const { controller, databaseRestoreService, adminEventLogService } =
-			createController();
-
-		await expect(
-			controller.restoreDatabaseBackup(
-				file,
-				{ confirmation: 'ВОССТАНОВИТЬ БД' },
-				adminId,
-				request
-			)
-		).resolves.toEqual({ restored: true });
-		expect(adminEventLogService.record).toHaveBeenCalledWith({
-			adminId,
-			section: 'DEV_TOOLS',
-			action: 'DEV_DATABASE_RESTORE',
-			description:
-				'DEV запросил legacy-восстановление основной базы из backup',
-			entityType: 'database_backup',
-			entityId: file.originalname,
-			entityLabel: file.originalname,
-			metadata: {
-				fileName: file.originalname,
-				fileSize: file.size
-			},
-			request
-		});
-		expect(databaseRestoreService.restore).toHaveBeenCalledWith(
-			file,
-			'ВОССТАНОВИТЬ БД'
 		);
 	});
 });

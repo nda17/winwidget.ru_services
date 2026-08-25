@@ -2,6 +2,81 @@
 
 set -euo pipefail
 
+support_steady_expected_lifecycle_phase() {
+	case "${1:-}" in
+	true) printf 'forward-only\n' ;;
+	false) printf 'complete\n' ;;
+	*) return 1 ;;
+	esac
+}
+
+support_steady_ownership_revision_from_marker() {
+	[[ "$#" -eq 2 ]] || return 1
+	local marker="$1"
+	local expected_phase
+	expected_phase="$(support_steady_expected_lifecycle_phase "$2")" || return 1
+	[[ -f "$marker" && ! -L "$marker" ]] || return 1
+	awk -F= -v expected_phase="$expected_phase" '
+		$1 !~ /^(version|phase|ownership_revision|cleanup_revision|volume|image_id|database_id|database_system_identifier|updated_at)$/ { exit 1 }
+		{ seen[$1] += 1; value[$1] = substr($0, index($0, "=") + 1) }
+		END {
+			if (seen["version"] != 1 || value["version"] != "1" ||
+				seen["phase"] != 1 || value["phase"] != expected_phase ||
+				seen["ownership_revision"] != 1 || value["ownership_revision"] !~ /^[0-9a-f]{40}$/ ||
+				seen["cleanup_revision"] != 1 || value["cleanup_revision"] !~ /^(pending|[0-9a-f]{40})$/ ||
+				seen["volume"] != 1 || value["volume"] !~ /^[A-Za-z0-9][A-Za-z0-9_.-]+$/ ||
+				seen["image_id"] != 1 || value["image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				seen["database_id"] != 1 || value["database_id"] !~ /^[0-9a-f-]{36}$/ ||
+				seen["database_system_identifier"] != 1 || value["database_system_identifier"] !~ /^[1-9][0-9]*$/ ||
+				seen["updated_at"] != 1 || value["updated_at"] !~ /^[0-9TZ:.-]+$/) exit 1
+			print value["ownership_revision"]
+		}
+	' "$marker"
+}
+
+run_support_first_cutover_contract_self_test() {
+	local self_test_directory marker revision
+	self_test_directory="$(
+		mktemp -d "${TMPDIR:-/tmp}/winwidget-support-first-cutover.XXXXXX"
+	)"
+	marker="$self_test_directory/lifecycle"
+	revision='0123456789abcdef0123456789abcdef01234567'
+	trap 'rm -f "$marker"; rmdir "$self_test_directory"' RETURN
+
+	write_marker() {
+		printf '%s\n' \
+			'version=1' \
+			"phase=$1" \
+			"ownership_revision=$revision" \
+			'cleanup_revision=pending' \
+			'volume=winwidget-support-postgres' \
+			'image_id=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+			'database_id=01234567-89ab-cdef-0123-456789abcdef' \
+			'database_system_identifier=123456789' \
+			'updated_at=2026-08-25T00:00:00Z' >"$marker"
+	}
+
+	write_marker complete
+	[[ "$(support_steady_ownership_revision_from_marker "$marker" false)" == "$revision" ]]
+	if support_steady_ownership_revision_from_marker "$marker" true >/dev/null 2>&1; then
+		echo 'Support first-cutover contract accepted a complete marker in special mode.' >&2
+		return 1
+	fi
+	write_marker forward-only
+	[[ "$(support_steady_ownership_revision_from_marker "$marker" true)" == "$revision" ]]
+	if support_steady_ownership_revision_from_marker "$marker" false >/dev/null 2>&1; then
+		echo 'Routine Support deploy accepted a forward-only marker.' >&2
+		return 1
+	fi
+	printf '%s\n' 'phase=forward-only' >>"$marker"
+	if support_steady_ownership_revision_from_marker "$marker" true >/dev/null 2>&1; then
+		echo 'Support first-cutover contract accepted duplicate lifecycle anchors.' >&2
+		return 1
+	fi
+
+	printf 'support_first_cutover_contract_self_test=passed\n'
+}
+
 validate_routine_database_restore_create_gate() {
 	local env_file="$1"
 	local matching_lines
@@ -380,6 +455,8 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
   const databaseRestores = routes.find(route => route.id === 'database-restores');
   const campaigns = routes.find(route => route.id === 'campaigns');
   const reporting = routes.find(route => route.id === 'reporting');
+  const supportWebhook = routes.find(route => route.id === 'support-webhook');
+  const supportAdmin = routes.find(route => route.id === 'support-admin');
   const monolith = routes.find(route => route.id === 'monolith');
   const widgetRoutes = [
     ['widgets-admin', '/api/v1/widgets/admin', 'required'],
@@ -504,6 +581,25 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
       60000,
     ) ||
     !routeMatches(
+      supportWebhook,
+      'support-webhook',
+      '/api/v1/telegram-bot/support-webhook',
+      'http://127.0.0.1:5100',
+      'optional',
+      10000,
+    ) ||
+    !routeMatches(
+      supportAdmin,
+      'support-admin',
+      '/api/v1/support/admin',
+      'http://127.0.0.1:5100',
+      'required',
+      60000,
+    ) ||
+    routes.filter(
+      route => route.upstreamUrl?.origin === 'http://127.0.0.1:5100',
+    ).length !== 2 ||
+    !routeMatches(
       monolith,
       'monolith',
       '/api/v1',
@@ -511,7 +607,7 @@ function validateGatewayRouteManifest(config, reportingPolicy, billingPolicy, id
       'optional',
       60000,
     );
-  const expectedRouteCount = 3 + widgetRoutes.length +
+  const expectedRouteCount = 5 + widgetRoutes.length +
     (reportingPolicy === 'reporting' ? 1 : 0) +
     (billingPolicy === 'billing' ? billingRoutes.length : 0) +
     (identityPolicy === 'identity' ? identityRoutes.length : 0) +
@@ -573,6 +669,8 @@ const route = (id, pathPrefix, upstreamOrigin, authPolicy, timeoutMs) => ({
 const common = [
   route('database-restores', '/api/v1/dev-tools/database-restores', 'http://127.0.0.1:4200', 'required', 120000),
   route('campaigns', '/api/v1/admin/campaigns', 'http://127.0.0.1:4500', 'required', 60000),
+  route('support-webhook', '/api/v1/telegram-bot/support-webhook', 'http://127.0.0.1:5100', 'optional', 10000),
+  route('support-admin', '/api/v1/support/admin', 'http://127.0.0.1:5100', 'required', 60000),
   route('monolith', '/api/v1', 'http://127.0.0.1:4200', 'optional', 60000),
 ];
 const widgets = [
@@ -654,7 +752,7 @@ accepts(
   'identity',
 );
 accepts(
-  [...billing, common[0], common[1], reporting, ...widgets, common[2]],
+  [...billing, common[0], common[1], common[2], common[3], reporting, ...widgets, common[4]],
   'reporting',
   'billing',
 );
@@ -681,7 +779,7 @@ rejects(
   [
     ...withPlatformBeforeMonolith([...common, ...widgets, reporting, ...billing]).slice(0, -1),
     route('billing-settings-alias', '/api/v1/billing-settings', 'http://127.0.0.1:4800', 'optional', 30000),
-    common[2],
+    common[4],
   ],
   'reporting',
   'billing',
@@ -770,6 +868,15 @@ if [[ "${1:-}" == '--self-test-rabbitmq-provisioning-contract' ]]; then
 	exit 0
 fi
 
+if [[ "${1:-}" == '--self-test-support-first-cutover-contract' ]]; then
+	[[ "$#" -eq 1 ]] || {
+		echo 'Support first-cutover contract self-test does not accept extra arguments.' >&2
+		exit 1
+	}
+	run_support_first_cutover_contract_self_test
+	exit 0
+fi
+
 APP_ROOT="${APP_ROOT:-/opt/winwidget}"
 ENV_FILE="${ENV_FILE:-$APP_ROOT/deploy/backend/.env.production}"
 COMPOSE_FILE="${COMPOSE_FILE:-$APP_ROOT/winwidget.ru_server/deploy/docker-compose.prod.yml}"
@@ -789,11 +896,19 @@ BILLING_OUTBOX_READINESS_URL="${BILLING_OUTBOX_READINESS_URL:-http://127.0.0.1:4
 IDENTITY_API_READINESS_URL="${IDENTITY_API_READINESS_URL:-http://127.0.0.1:4900/health/ready}"
 IDENTITY_WORKER_READINESS_URL="${IDENTITY_WORKER_READINESS_URL:-http://127.0.0.1:4901/health/ready}"
 IDENTITY_OUTBOX_READINESS_URL="${IDENTITY_OUTBOX_READINESS_URL:-http://127.0.0.1:4902/health/ready}"
+SUPPORT_API_READINESS_URL="${SUPPORT_API_READINESS_URL:-http://127.0.0.1:5100/health/ready}"
+SUPPORT_WORKER_READINESS_URL="${SUPPORT_WORKER_READINESS_URL:-http://127.0.0.1:5101/health/ready}"
+SUPPORT_OUTBOX_READINESS_URL="${SUPPORT_OUTBOX_READINESS_URL:-http://127.0.0.1:5102/health/ready}"
 NOTIFICATION_DELIVERY_INITIAL_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_MARKER="$APP_ROOT/deploy/backend/.notification-delivery-telegram-cutover-v1"
 NOTIFICATION_DELIVERY_CUTOVER_PROJECT="winwidget-notification-telegram-cutover"
 HEALTHCHECK_ATTEMPTS="${HEALTHCHECK_ATTEMPTS:-30}"
 HEALTHCHECK_INTERVAL="${HEALTHCHECK_INTERVAL:-2}"
+support_first_cutover_deploy="${SUPPORT_FIRST_CUTOVER_DEPLOY:-false}"
+[[ "$support_first_cutover_deploy" =~ ^(true|false)$ ]] || {
+	echo 'SUPPORT_FIRST_CUTOVER_DEPLOY must be true or false.' >&2
+	exit 1
+}
 
 cd "$APP_ROOT"
 
@@ -822,6 +937,66 @@ source "$server_root/scripts/platform-cutover-production.sh"
 # shellcheck source=scripts/campaigns-contract-migration-guard.sh
 source "$server_root/scripts/campaigns-contract-migration-guard.sh"
 deploy_revision="$(git -C "$server_root" rev-parse HEAD)"
+if [[ "$support_first_cutover_deploy" == 'true' ]]; then
+	support_lifecycle_marker="$APP_ROOT/deploy/backend/.support-database-lifecycle-v1"
+	support_cutover_marker="$APP_ROOT/deploy/backend/.support-cutover-v1"
+	[[ -f "$support_lifecycle_marker" && ! -L "$support_lifecycle_marker" &&
+		"$(stat -c '%u:%g:%a' "$support_lifecycle_marker")" == '0:0:600' &&
+		-f "$support_cutover_marker" && ! -L "$support_cutover_marker" &&
+		"$(stat -c '%u:%g:%a' "$support_cutover_marker")" == '0:0:600' ]] || {
+		echo 'Support first-cutover deploy requires the protected lifecycle marker.' >&2
+		exit 1
+	}
+	support_first_cutover_marker_state="$(awk -F= '
+		$1 == "phase" { phase=substr($0, index($0, "=") + 1); phases += 1 }
+		$1 == "ownership_revision" { revision=substr($0, index($0, "=") + 1); revisions += 1 }
+		$1 == "image_id" { image=substr($0, index($0, "=") + 1); images += 1 }
+		END {
+			if (phases != 1 || revisions != 1 || images != 1 ||
+				image !~ /^sha256:[0-9a-f]{64}$/) exit 1
+			printf "%s|%s|%s", phase, revision, image
+		}
+	' "$support_lifecycle_marker")" || exit 1
+	IFS='|' read -r support_first_database_phase support_first_database_revision \
+		support_first_database_image_id <<<"$support_first_cutover_marker_state"
+	support_first_release_state="$(awk -F= '
+		$1 !~ /^(version|phase|revision|core_image_id|support_image_id|gateway_image_id|updated_at)$/ { exit 1 }
+		{ seen[$1] += 1; value[$1]=substr($0, index($0, "=") + 1) }
+		END {
+			if (seen["version"] != 1 || value["version"] != "1" ||
+				seen["phase"] != 1 || value["phase"] != "forward-only" ||
+				seen["revision"] != 1 || value["revision"] !~ /^[0-9a-f]{40}$/ ||
+				seen["core_image_id"] != 1 || value["core_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				seen["support_image_id"] != 1 || value["support_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				seen["gateway_image_id"] != 1 || value["gateway_image_id"] !~ /^sha256:[0-9a-f]{64}$/ ||
+				seen["updated_at"] != 1) exit 1
+			printf "%s|%s|%s|%s", value["revision"], value["core_image_id"],
+				value["support_image_id"], value["gateway_image_id"]
+		}
+	' "$support_cutover_marker")" || exit 1
+	IFS='|' read -r support_first_release_revision support_first_core_image_id \
+		support_first_support_image_id support_first_gateway_image_id \
+		<<<"$support_first_release_state"
+	[[ "$support_first_database_phase" == 'forward-only' &&
+		"$support_first_database_revision" == "$deploy_revision" &&
+		"$support_first_release_revision" == "$deploy_revision" &&
+		"$support_first_database_image_id" == "$support_first_support_image_id" ]] || {
+		echo 'Support first-cutover deploy is allowed only for its exact forward-only revision.' >&2
+		exit 1
+	}
+	for support_first_image_contract in \
+		"winwidget-api:git-$deploy_revision|$support_first_core_image_id|nestjs" \
+		"winwidget-support:git-$deploy_revision|$support_first_support_image_id|support" \
+		"winwidget-api-gateway:git-$deploy_revision|$support_first_gateway_image_id|node"; do
+		IFS='|' read -r support_first_image_ref support_first_expected_image_id \
+			support_first_expected_user <<<"$support_first_image_contract"
+		[[ "$(docker image inspect --format '{{.Id}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Config.User}}' "$support_first_image_ref")" == \
+			"$support_first_expected_image_id|$deploy_revision|$support_first_expected_user" ]] || {
+			echo 'Support first-cutover release image identity changed.' >&2
+			exit 1
+		}
+	done
+fi
 expected_revision="${EXPECTED_REVISION:-$deploy_revision}"
 if [[ "$deploy_revision" != "$expected_revision" ]]; then
 	echo "Deployment revision mismatch: expected $expected_revision, got $deploy_revision" >&2
@@ -1000,6 +1175,7 @@ prepared:legacy | preparing:* | forward-only:* | active:*)
 	;;
 esac
 identity_runtime_services=(identity-api identity-worker identity-outbox-publisher)
+support_runtime_services=(support-api support-worker support-outbox-publisher)
 
 identity_cleanup_migration='20260815000000_remove_legacy_identity_core_source'
 identity_cleanup_directory="$server_root/prisma/migrations/$identity_cleanup_migration"
@@ -1537,6 +1713,8 @@ export BILLING_REVISION="$deploy_revision"
 export BILLING_IMAGE="winwidget-billing:git-$deploy_revision"
 export IDENTITY_REVISION="$deploy_revision"
 export IDENTITY_IMAGE="winwidget-identity:git-$deploy_revision"
+export SUPPORT_REVISION="$deploy_revision"
+export SUPPORT_IMAGE="winwidget-support:git-$deploy_revision"
 
 echo "Deploying backend revision: $APP_REVISION"
 echo "Building backend image: winwidget-api:$APP_VERSION"
@@ -1546,6 +1724,7 @@ echo "Building isolated database restore image: $DATABASE_RESTORE_IMAGE"
 echo "Building Widgets image: $WIDGETS_IMAGE"
 echo "Building notification delivery image: $NOTIFICATION_DELIVERY_IMAGE"
 echo "Building Campaigns image: $CAMPAIGNS_IMAGE"
+echo "Building Support image: $SUPPORT_IMAGE"
 echo "Building Reporting image for the coordinated backend revision: $REPORTING_IMAGE"
 echo "Building Billing image for the coordinated backend revision: $BILLING_IMAGE"
 echo "Building Identity image for the coordinated backend revision: $IDENTITY_IMAGE"
@@ -1729,7 +1908,6 @@ assert_distinct_database_roles() {
 		DATABASE_URL_PRODUCTION
 		DATABASE_MIGRATION_URL_PRODUCTION
 		MAINTENANCE_DATABASE_URL_PRODUCTION
-		DATABASE_BACKUP_URL
 		NOTIFICATION_DELIVERY_DATABASE_URL
 		NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION
 		NOTIFICATION_DELIVERY_BACKUP_URL
@@ -1751,6 +1929,9 @@ assert_distinct_database_roles() {
 		PLATFORM_DATABASE_URL
 		PLATFORM_MIGRATION_DATABASE_URL
 		PLATFORM_BACKUP_URL
+		SUPPORT_DATABASE_URL
+		SUPPORT_MIGRATION_DATABASE_URL
+		SUPPORT_BACKUP_URL
 	)
 	local -a role_users=()
 	local key
@@ -1763,7 +1944,7 @@ assert_distinct_database_roles() {
 	for ((left = 0; left < ${#role_users[@]}; left++)); do
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
-				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets, Billing, Identity and Platform database URLs must use twenty-five distinct PostgreSQL roles." >&2
+				echo "Core runtime/migration/maintenance and eight service-owned database contours must use twenty-seven distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -1964,7 +2145,6 @@ case "$mode" in
 		require_env_key "DATABASE_URL_PRODUCTION"
 		require_env_key "DATABASE_MIGRATION_URL_PRODUCTION"
 		require_env_key "MAINTENANCE_DATABASE_URL_PRODUCTION"
-		require_env_key "DATABASE_BACKUP_URL"
 		require_env_key "NOTIFICATION_DELIVERY_DATABASE_URL"
 		require_env_key "NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION"
 		require_env_key "NOTIFICATION_DELIVERY_BACKUP_URL"
@@ -2028,6 +2208,14 @@ case "$mode" in
 		require_env_key "PLATFORM_POSTGRES_DATA_VOLUME"
 		require_env_key "PLATFORM_POSTGRES_ADMIN_USER"
 		require_env_key "PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE"
+		require_env_key "SUPPORT_DATABASE_URL"
+		require_env_key "SUPPORT_MIGRATION_DATABASE_URL"
+		require_env_key "SUPPORT_BACKUP_URL"
+		require_env_key "SUPPORT_POSTGRES_IMAGE"
+		require_env_key "SUPPORT_POSTGRES_PORT"
+		require_env_key "SUPPORT_POSTGRES_DATA_VOLUME"
+		require_env_key "SUPPORT_POSTGRES_ADMIN_USER"
+		require_env_key "SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "CORE_POSTGRES_ADMIN_PASSWORD_FILE"
 		require_env_key "DATABASE_RESTORE_STORAGE_DIR"
 		require_env_key "DATABASE_RESTORE_QUEUE_SECRET"
@@ -2054,6 +2242,8 @@ case "$mode" in
 		require_env_key "RABBITMQ_IDENTITY_WORKER_URL"
 		require_env_key "RABBITMQ_IDENTITY_PUBLISHER_URL"
 		require_env_key "RABBITMQ_PLATFORM_PUBLISHER_URL"
+		require_env_key "RABBITMQ_SUPPORT_WORKER_URL"
+		require_env_key "RABBITMQ_SUPPORT_PUBLISHER_URL"
 		require_env_key "SMTP_SERVER"
 		require_env_key "SMTP_LOGIN"
 		require_env_key "SMTP_PASSWORD"
@@ -2061,6 +2251,9 @@ case "$mode" in
 		require_env_key "SMTP_GREETING_TIMEOUT_MS"
 		require_env_key "SMTP_SOCKET_TIMEOUT_MS"
 		require_env_key "TELEGRAM_INFO_BOT_TOKEN"
+		require_env_key "TELEGRAM_SUPPORT_BOT_TOKEN"
+		require_env_key "TELEGRAM_SUPPORT_BOT_USERNAME"
+		require_env_key "TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET"
 		require_env_key "TELEGRAM_API_BASE_URL"
 		require_env_key "TELEGRAM_API_PROXY_IP"
 		require_env_key "NOTIFICATION_DELIVERY_INTERNAL_URL"
@@ -2136,6 +2329,7 @@ case "$mode" in
 		require_env_key "IDENTITY_WIDGETS_TOKEN"
 		require_env_key "IDENTITY_BILLING_TOKEN"
 		require_env_key "IDENTITY_PLATFORM_TOKEN"
+		require_env_key "IDENTITY_SUPPORT_TOKEN"
 		require_env_key "IDENTITY_LISTEN_HOST"
 		require_env_key "IDENTITY_API_PORT"
 		require_env_key "IDENTITY_WORKER_PORT"
@@ -2157,6 +2351,21 @@ case "$mode" in
 		require_env_key "PLATFORM_OUTBOX_POLL_INTERVAL_MS"
 		require_env_key "PLATFORM_OUTBOX_RETENTION_DAYS"
 		require_env_key "PLATFORM_RESTORE_DRILL_EVIDENCE_FILE"
+		require_env_key "SUPPORT_LISTEN_HOST"
+		require_env_key "SUPPORT_API_PORT"
+		require_env_key "SUPPORT_WORKER_PORT"
+		require_env_key "SUPPORT_OUTBOX_PUBLISHER_PORT"
+		require_env_key "SUPPORT_INTERNAL_BASE_URL"
+		require_env_key "SUPPORT_CORE_TOKEN"
+		require_env_key "SUPPORT_WEBHOOK_PUBLIC_URL"
+		require_env_key "SUPPORT_INBOX_LEASE_MS"
+		require_env_key "SUPPORT_PREFETCH"
+		require_env_key "SUPPORT_OUTBOX_BATCH_SIZE"
+		require_env_key "SUPPORT_OUTBOX_POLL_INTERVAL_MS"
+		require_env_key "SUPPORT_OUTBOX_RETENTION_DAYS"
+		require_env_key "SUPPORT_RECEIPT_RETENTION_DAYS"
+		require_env_key "SUPPORT_FAILURE_DETAIL_RETENTION_DAYS"
+		require_env_key "SUPPORT_RESTORE_DRILL_EVIDENCE_FILE"
 		require_env_key "RECAPTCHA_CLIENT_URL"
 		require_env_key "NOTIFICATION_DELIVERY_LISTEN_HOST"
 		require_env_key "MAINTENANCE_WORKER_PREFETCH"
@@ -2254,8 +2463,9 @@ case "$mode" in
 			exit 1
 		fi
 		telegram_api_proxy_ip="$(get_env_value TELEGRAM_API_PROXY_IP)"
-		if ! validate_ipv4_address "$telegram_api_proxy_ip"; then
-			echo "Production TELEGRAM_API_PROXY_IP must be a valid IPv4 address" >&2
+		if ! validate_ipv4_address "$telegram_api_proxy_ip" ||
+			[[ "$telegram_api_proxy_ip" != '185.184.122.62' ]]; then
+			echo "Production TELEGRAM_API_PROXY_IP must be the reviewed public relay 185.184.122.62" >&2
 			exit 1
 		fi
 		if ! verify_telegram_https_reverse_proxy "$telegram_api_proxy_ip"; then
@@ -2539,12 +2749,39 @@ case "$mode" in
 			echo 'Platform must use the reviewed database, loopback boundary, ports and bounded Outbox settings.' >&2
 			exit 1
 		fi
+		support_inbox_lease_ms="$(get_env_value SUPPORT_INBOX_LEASE_MS)"
+		support_prefetch="$(get_env_value SUPPORT_PREFETCH)"
+		support_outbox_batch_size="$(get_env_value SUPPORT_OUTBOX_BATCH_SIZE)"
+		support_outbox_poll_interval_ms="$(get_env_value SUPPORT_OUTBOX_POLL_INTERVAL_MS)"
+		support_outbox_retention_days="$(get_env_value SUPPORT_OUTBOX_RETENTION_DAYS)"
+		support_receipt_retention_days="$(get_env_value SUPPORT_RECEIPT_RETENTION_DAYS)"
+		support_failure_detail_retention_days="$(get_env_value SUPPORT_FAILURE_DETAIL_RETENTION_DAYS)"
+		if [[ "$(get_env_value SUPPORT_POSTGRES_PORT)" != '55440' ||
+			"$(get_env_value SUPPORT_POSTGRES_ADMIN_USER)" != 'winwidget_support_admin' ||
+			"$(get_env_value SUPPORT_LISTEN_HOST)" != '127.0.0.1' ||
+			"$(get_env_value SUPPORT_API_PORT)" != '5100' ||
+			"$(get_env_value SUPPORT_WORKER_PORT)" != '5101' ||
+			"$(get_env_value SUPPORT_OUTBOX_PUBLISHER_PORT)" != '5102' ||
+			"$(get_env_value SUPPORT_INTERNAL_BASE_URL)" != 'http://127.0.0.1:5100' ||
+			"$(get_env_value SUPPORT_WEBHOOK_PUBLIC_URL)" != 'https://tg.winwidget.ru/api/v1/telegram-bot/support-webhook' ||
+			! "$support_inbox_lease_ms" =~ ^[0-9]+$ ]] ||
+			((support_inbox_lease_ms < 30000 || support_inbox_lease_ms > 600000)) ||
+			[[ ! "$support_prefetch" =~ ^[1-9][0-9]*$ ]] || ((support_prefetch > 100)) ||
+			[[ ! "$support_outbox_batch_size" =~ ^[1-9][0-9]*$ ]] || ((support_outbox_batch_size > 500)) ||
+			[[ ! "$support_outbox_poll_interval_ms" =~ ^[0-9]+$ ]] ||
+			((support_outbox_poll_interval_ms < 100 || support_outbox_poll_interval_ms > 60000)) ||
+			[[ ! "$support_outbox_retention_days" =~ ^[1-9][0-9]*$ ]] || ((support_outbox_retention_days > 365)) ||
+			[[ ! "$support_receipt_retention_days" =~ ^[1-9][0-9]*$ ]] || ((support_receipt_retention_days > 730)) ||
+			[[ ! "$support_failure_detail_retention_days" =~ ^[1-9][0-9]*$ ]] || ((support_failure_detail_retention_days > 365)); then
+			echo 'Support must use the reviewed PG18 boundary, loopback ports, public Telegram relay and bounded retry settings.' >&2
+			exit 1
+		fi
 		identity_credential_keys=(
 			IDENTITY_CORE_TOKEN CORE_IDENTITY_TOKEN IDENTITY_CAMPAIGNS_TOKEN
 			IDENTITY_REPORTING_TOKEN IDENTITY_WIDGETS_TOKEN IDENTITY_BILLING_TOKEN
-			IDENTITY_PLATFORM_TOKEN
+			IDENTITY_PLATFORM_TOKEN IDENTITY_SUPPORT_TOKEN
 			BILLING_CAMPAIGNS_TOKEN BILLING_IDENTITY_TOKEN WIDGETS_IDENTITY_TOKEN
-			PLATFORM_CORE_TOKEN
+			PLATFORM_CORE_TOKEN SUPPORT_CORE_TOKEN
 		)
 		identity_credentials=()
 		for identity_credential_key in "${identity_credential_keys[@]}"; do
@@ -2638,6 +2875,9 @@ case "$mode" in
 		assert_database_restore_admin_secret_file \
 			PLATFORM_POSTGRES_ADMIN_PASSWORD_FILE \
 			"$APP_ROOT/deploy/backend/.platform-postgres-admin-password"
+		assert_database_restore_admin_secret_file \
+			SUPPORT_POSTGRES_ADMIN_PASSWORD_FILE \
+			"$APP_ROOT/deploy/backend/.support-postgres-admin-password"
 		for smtp_timeout_key in \
 			SMTP_CONNECTION_TIMEOUT_MS \
 			SMTP_GREETING_TIMEOUT_MS \
@@ -3103,6 +3343,7 @@ routine_stop_services=(
 	reporting-service
 	widgets-service
 	"${identity_runtime_services[@]}"
+	"${support_runtime_services[@]}"
 )
 billing_core_cleanup_services=(
 	"${routine_stop_services[@]}"
@@ -3259,8 +3500,7 @@ billing_core_cleanup_require_broker_identity() {
 }
 
 capture_routine_stop_containers() {
-	local service
-	local container_id
+	local service container_id existing_id identity image_id image_revision app_revision state
 
 	routine_stop_container_ids=()
 	for service in "${routine_stop_services[@]}"; do
@@ -3268,6 +3508,40 @@ capture_routine_stop_containers() {
 			compose_target ps --status running -q "$service" \
 				2>/dev/null || true
 		)"
+		if [[ -z "$container_id" && "$support_first_cutover_deploy" == 'true' ]]; then
+			existing_id="$(compose_target ps -a -q "$service" 2>/dev/null || true)"
+			if [[ -z "$existing_id" ]]; then
+				[[ "$service" == 'database-restore-worker' ||
+					"$service" =~ ^support-(api|worker|outbox-publisher)$ ]] || {
+					echo "Support first-cutover lost the stopped $service container identity." >&2
+					return 1
+				}
+				continue
+			fi
+			[[ "$existing_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+			identity="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$existing_id")" || return 1
+			image_id="$(docker inspect --format '{{.Image}}' "$existing_id")" || return 1
+			image_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id")" || return 1
+			app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$existing_id" | sed -n 's/^APP_REVISION=//p')"
+			state="$(docker inspect --format '{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}' "$existing_id")" || return 1
+			[[ "$identity" == "$target_project|$service" &&
+				"$image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+				"$image_revision" =~ ^[0-9a-f]{40}$ &&
+				"$app_revision" == "$image_revision" ]] &&
+				git -C "$server_root" merge-base --is-ancestor \
+					"$image_revision" "$APP_REVISION" || {
+				echo "Support first-cutover found an untrusted stopped $service container." >&2
+				return 1
+			}
+			case "$state" in
+			'exited|0|false|' | 'exited|143|false|' | 'created|0|false|') ;;
+			*)
+				echo "Support first-cutover found an unsafe stopped $service state: $state" >&2
+				return 1
+				;;
+			esac
+			continue
+		fi
 		if [[ -z "$container_id" && "$service" == 'database-restore-worker' &&
 			-z "$(compose_target ps -a -q "$service" 2>/dev/null || true)" ]]; then
 			continue
@@ -4009,7 +4283,8 @@ stop_routine_topology_for_core_migration() {
 	capture_routine_stop_containers || return 1
 	for service in "${routine_stop_services[@]}"; do
 		if [[ -z "${routine_stop_container_ids[$service]:-}" &&
-			"$service" == 'database-restore-worker' ]]; then
+			( "$service" == 'database-restore-worker' ||
+				"$support_first_cutover_deploy" == 'true' ) ]]; then
 			continue
 		fi
 		if stop_routine_service_cleanly "$service" 30; then
@@ -4557,6 +4832,68 @@ process.stdout.write("Standalone Billing image artifact verified\n");
 	'
 }
 
+verify_support_image_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"$SUPPORT_IMAGE" \
+		-e '
+const fs = require("node:fs");
+for (const required of [
+	"dist/src/main.js",
+	"dist/src/cutover/main.js",
+	"prisma/schema.prisma",
+	"prisma/migrations",
+]) fs.accessSync(required);
+require("@prisma/support-client");
+for (const forbidden of [
+	"dist/src/app.module.js",
+	"dist/src/telegram-bot/telegram-bot.service.js",
+	"dist/src/outbox-publisher-main.js",
+	"public/widgets",
+]) {
+	if (fs.existsSync(forbidden)) {
+		throw new Error(`Support image contains Core artifact: ${forbidden}`);
+	}
+}
+
+process.stdout.write("Standalone Support image artifact verified\n");
+	'
+}
+
+verify_core_support_runtime_artifact() {
+	docker run --rm --network none \
+		--entrypoint node \
+		"winwidget-api:$APP_VERSION" \
+		-e '
+const fs = require("node:fs");
+fs.accessSync("dist/src/support-cutover-main.js");
+for (const file of [
+	"dist/src/telegram-bot/telegram-bot.service.js",
+	"dist/src/telegram-bot/telegram-bot.controller.js",
+]) {
+	const source = fs.readFileSync(file, "utf8");
+	for (const forbidden of [
+		"support-webhook",
+		"TELEGRAM_SUPPORT_BOT",
+		"handleSupportWebhook",
+		"telegramSupportMessage",
+		"setImmediate",
+	]) {
+		if (source.includes(forbidden)) {
+			throw new Error(`Core image retains Support runtime fallback: ${forbidden}`);
+		}
+	}
+}
+const schema = fs.readFileSync("prisma/schema.prisma", "utf8");
+for (const forbidden of ["model TelegramSupportMessage", "supportThreadId"]) {
+	if (schema.includes(forbidden)) {
+		throw new Error(`Core Prisma schema retains Support ownership: ${forbidden}`);
+	}
+}
+process.stdout.write("Legacy-free Core Support runtime artifact verified\n");
+'
+}
+
 billing_core_cleanup_require_pinned_images() {
 	local revision expected_core_id expected_billing_id core_image billing_image
 	local actual_core_id actual_billing_id core_revision billing_revision core_user billing_user
@@ -4620,6 +4957,7 @@ for (const required of [
 	"apps/widgets/prisma/migrations",
 	"apps/billing/prisma/migrations",
 	"apps/platform/prisma/migrations",
+	"apps/support/prisma/migrations",
 	"/usr/bin/pg_dump",
 	"/usr/bin/pg_restore",
 	"/usr/bin/psql",
@@ -4693,7 +5031,100 @@ for (const [index, url] of urls.entries()) {
 		/[\0\r\n]/.test(password)
 	) throw new Error(`Invalid Billing database URL boundary at index ${index}`);
 }
+
 process.stdout.write("Billing runtime, migration and backup URL boundaries verified\n");
+'
+}
+
+validate_support_database_urls() {
+	printf '%s\n%s\n%s\n' \
+		"$(get_env_value SUPPORT_DATABASE_URL)" \
+		"$(get_env_value SUPPORT_MIGRATION_DATABASE_URL)" \
+		"$(get_env_value SUPPORT_BACKUP_URL)" |
+		docker run --rm -i --network none \
+			-e "EXPECTED_PORT=$(get_env_value SUPPORT_POSTGRES_PORT)" \
+			--entrypoint node "$SUPPORT_IMAGE" -e '
+const { readFileSync } = require("node:fs");
+const urls = readFileSync(0, "utf8").trim().split("\n").map(value => new URL(value));
+const expectedUsers = [
+	"winwidget_support_runtime",
+	"winwidget_support_migration",
+	"winwidget_support_backup",
+];
+for (const [index, url] of urls.entries()) {
+	const password = decodeURIComponent(url.password);
+	if (
+		url.protocol !== "postgresql:" ||
+		decodeURIComponent(url.username) !== expectedUsers[index] ||
+		url.hostname !== "127.0.0.1" ||
+		url.port !== process.env.EXPECTED_PORT ||
+		url.pathname !== "/winwidget_support" ||
+		url.searchParams.get("schema") !== "support" ||
+		password.length < 16 ||
+		/[\0\r\n]/.test(password)
+	) throw new Error(`Invalid Support database URL boundary at index ${index}`);
+}
+
+process.stdout.write("Support runtime, migration and backup URL boundaries verified\n");
+'
+}
+
+verify_support_steady_ownership() {
+	local core_status support_status support_lifecycle_marker support_ownership_revision
+	support_lifecycle_marker="$APP_ROOT/deploy/backend/.support-database-lifecycle-v1"
+	[[ -f "$support_lifecycle_marker" && ! -L "$support_lifecycle_marker" &&
+		"$(stat -c '%u:%g:%a' "$support_lifecycle_marker")" == '0:0:600' ]] || {
+		echo 'Support steady ownership requires the protected lifecycle marker.' >&2
+		return 1
+	}
+	support_ownership_revision="$(
+		support_steady_ownership_revision_from_marker \
+			"$support_lifecycle_marker" "$support_first_cutover_deploy"
+	)" || {
+		echo 'Support steady ownership lifecycle marker is invalid.' >&2
+		return 1
+	}
+	core_status="$(
+		docker run --rm --network host --env-file "$ENV_FILE" \
+			--entrypoint node "winwidget-api:$APP_VERSION" \
+			dist/src/support-cutover-main.js status
+	)" || return 1
+	support_status="$(
+		docker run --rm --network host --env-file "$ENV_FILE" \
+			--entrypoint node "$SUPPORT_IMAGE" \
+			dist/src/cutover/main.js status
+	)" || return 1
+	printf '%s\n%s\n' "$core_status" "$support_status" |
+		docker run --rm -i --network none \
+			-e "EXPECTED_OWNERSHIP_REVISION=$support_ownership_revision" \
+			--entrypoint node "$SUPPORT_IMAGE" -e '
+const { readFileSync } = require("node:fs");
+const lines = readFileSync(0, "utf8").trim().split("\n");
+if (lines.length !== 2) throw new Error("Support ownership status shape drifted");
+const [core, support] = lines.map(line => JSON.parse(line));
+const exactHash = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+const exactSystemId = value => typeof value === "string" && /^[1-9][0-9]{0,31}$/.test(value);
+if (
+	core.action !== "status" || core.ownership !== "SUPPORT" ||
+	core.admissionEnabled !== false || core.reconcilerEnabled !== false ||
+	core.activeTaskCount !== 0 || !/^[1-9][0-9]*$/.test(core.generation) ||
+	core.sourceRevision !== process.env.EXPECTED_OWNERSHIP_REVISION ||
+	core.ownershipRevision !== process.env.EXPECTED_OWNERSHIP_REVISION ||
+	support.action !== "status" || support.phase !== "ACTIVE" ||
+	!/^([1-9][0-9]*)$/.test(support.ownershipGeneration) ||
+	support.sourceRevision !== process.env.EXPECTED_OWNERSHIP_REVISION ||
+	support.ownershipRevision !== process.env.EXPECTED_OWNERSHIP_REVISION ||
+	!exactSystemId(core.sourceDatabaseSystemId) ||
+	core.sourceDatabaseSystemId !== support.sourceDatabaseSystemId ||
+	!exactHash(core.sourceFingerprint) ||
+	core.sourceFingerprint !== support.sourceFingerprint ||
+	!exactHash(core.sourceSnapshotSha256) ||
+	core.sourceSnapshotSha256 !== support.sourceSnapshotSha256 ||
+	core.sourceHighWatermark !== support.sourceHighWatermark ||
+	core.sourceMappingCount !== String(support.counts?.mappings) ||
+	!core.activatedAt || !support.activatedAt
+) throw new Error("Core and Support ownership anchors are not in exact steady state");
+process.stdout.write("Core and Support ownership anchors verified\n");
 '
 }
 
@@ -4745,9 +5176,9 @@ compose_target \
 	--profile widgets-migration \
 	--profile billing-migration \
 	--profile identity-migration \
+	--profile support-migration \
 	config --quiet
 routine_build_services=(
-	api-gateway
 	maintenance-worker
 	database-restore-worker
 	notification-delivery-worker
@@ -4756,8 +5187,14 @@ routine_build_services=(
 	widgets-service
 	identity-api
 )
+if [[ "$support_first_cutover_deploy" == 'false' ]]; then
+	routine_build_services+=(api-gateway support-api)
+fi
 if [[ "$billing_core_cleanup_marker_phase" == 'complete' ]]; then
-	routine_build_services+=(api billing-api)
+	routine_build_services+=(billing-api)
+	if [[ "$support_first_cutover_deploy" == 'false' ]]; then
+		routine_build_services+=(api)
+	fi
 else
 	billing_database_require_pinned_candidate_images || {
 		echo 'Pinned historical Core/Billing candidate images are unavailable or changed.' >&2
@@ -4788,11 +5225,14 @@ verify_campaigns_image_artifact
 verify_reporting_image_artifact
 verify_widgets_image_artifact
 verify_billing_image_artifact
+verify_support_image_artifact
+verify_core_support_runtime_artifact
 verify_billing_core_cleanup_image_artifact
 verify_database_restore_image_artifact
 validate_campaigns_database_urls
 validate_widgets_database_urls
 validate_billing_database_urls
+validate_support_database_urls
 assert_campaigns_contract_migration_applied_for_routine_deploy
 initialize_campaigns_database_lifecycle_guard \
 	"a routine full deployment" identity-if-present
@@ -4993,7 +5433,7 @@ container_env_value() {
 assert_telegram_proxy_runtime() {
 	local service container_id base_url extra_hosts
 
-	for service in api identity-api notification-delivery-worker maintenance-worker; do
+	for service in api identity-api notification-delivery-worker maintenance-worker support-api support-worker; do
 		container_id="$(compose_target ps --status running -q "$service")" || return 1
 		[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
 		base_url="$(container_env_value "$container_id" TELEGRAM_API_BASE_URL)" || return 1
@@ -5007,20 +5447,28 @@ assert_telegram_proxy_runtime() {
 }
 
 assert_clean_core_identity_environment_boundary() {
-	local core_container identity_container integration_container
-	local core_keys identity_keys integration_keys key
+	local core_container identity_container integration_container support_api_container support_worker_container
+	local core_keys identity_keys integration_keys support_api_keys support_worker_keys key
 	core_container="$(compose_target ps --status running -q api)" || return 1
 	identity_container="$(compose_target ps --status running -q identity-api)" || return 1
 	integration_container="$(compose_target ps --status running -q integration-worker)" || return 1
+	support_api_container="$(compose_target ps --status running -q support-api)" || return 1
+	support_worker_container="$(compose_target ps --status running -q support-worker)" || return 1
 	[[ "$core_container" =~ ^[0-9a-f]{64}$ &&
 		"$identity_container" =~ ^[0-9a-f]{64}$ &&
-		"$integration_container" =~ ^[0-9a-f]{64}$ ]] || return 1
+		"$integration_container" =~ ^[0-9a-f]{64}$ &&
+		"$support_api_container" =~ ^[0-9a-f]{64}$ &&
+		"$support_worker_container" =~ ^[0-9a-f]{64}$ ]] || return 1
 	core_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
 		"$core_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
 	identity_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
 		"$identity_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
 	integration_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
 		"$integration_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	support_api_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$support_api_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
+	support_worker_keys="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		"$support_worker_container" | awk -F= '{ print $1 }' | LC_ALL=C sort -u)" || return 1
 	for key in JWT_ACCESS_PRIVATE_KEY_BASE64 JWT_ACCESS_JWKS_BASE64 JWT_ACCESS_ACTIVE_KID \
 		RECAPTCHA_SECRET_KEY RECAPTCHA_CLIENT_URL RECAPTCHA_ENABLED RECAPTCHA_MIN_SCORE \
 		SMTP_LOGIN SMTP_PASSWORD SMTP_SERVER SMTP_CONNECTION_TIMEOUT_MS \
@@ -5045,10 +5493,28 @@ assert_clean_core_identity_environment_boundary() {
 			return 1
 		}
 	done
-	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME \
-		TELEGRAM_SUPPORT_BOT_TOKEN TELEGRAM_SUPPORT_BOT_USERNAME TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET; do
+	for key in TELEGRAM_INFO_BOT_TOKEN TELEGRAM_INFO_BOT_USERNAME; do
 		grep -Fxq "$key" <<<"$core_keys" || {
 			echo "Clean Core API is missing required $key." >&2
+			return 1
+		}
+	done
+	for key in TELEGRAM_SUPPORT_BOT_TOKEN TELEGRAM_SUPPORT_BOT_USERNAME \
+		TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET; do
+		! grep -Fxq "$key" <<<"$core_keys" || {
+			echo "Clean Core API unexpectedly receives Support-owned $key." >&2
+			return 1
+		}
+		! grep -Fxq "$key" <<<"$integration_keys" || {
+			echo "Core integration worker unexpectedly receives Support-owned $key." >&2
+			return 1
+		}
+		grep -Fxq "$key" <<<"$support_api_keys" || {
+			echo "Support API is missing required $key." >&2
+			return 1
+		}
+		grep -Fxq "$key" <<<"$support_worker_keys" || {
+			echo "Support worker is missing required $key." >&2
 			return 1
 		}
 	done
@@ -5834,6 +6300,12 @@ identity_worker_credentials="$(
 identity_publisher_credentials="$(
 	parse_rabbitmq_service_url "RABBITMQ_IDENTITY_PUBLISHER_URL"
 )"
+support_worker_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_SUPPORT_WORKER_URL"
+)"
+support_publisher_credentials="$(
+	parse_rabbitmq_service_url "RABBITMQ_SUPPORT_PUBLISHER_URL"
+)"
 
 publisher_user="$(
 	printf '%s' "$(sed -n '1p' <<<"$publisher_credentials")" | base64 --decode
@@ -5908,6 +6380,21 @@ if [[ "$identity_worker_user" != 'winwidget-identity-worker' ||
 	echo 'Identity RabbitMQ URLs must use the two dedicated canonical users.' >&2
 	exit 1
 fi
+support_worker_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$support_worker_credentials")" |
+		base64 --decode
+)"
+support_worker_password_base64="$(sed -n '2p' <<<"$support_worker_credentials")"
+support_publisher_user="$(
+	printf '%s' "$(sed -n '1p' <<<"$support_publisher_credentials")" |
+		base64 --decode
+)"
+support_publisher_password_base64="$(sed -n '2p' <<<"$support_publisher_credentials")"
+if [[ "$support_worker_user" != 'winwidget-support-worker' ||
+	"$support_publisher_user" != 'winwidget-support-publisher' ]]; then
+	echo 'Support RabbitMQ URLs must use the two dedicated canonical users.' >&2
+	exit 1
+fi
 rabbitmq_admin_password_base64="$(
 	printf '%s' "$rabbitmq_admin_password" | base64 | tr -d '\n'
 )"
@@ -5929,6 +6416,8 @@ service_users=(
 	"$billing_publisher_user"
 	"$identity_worker_user"
 	"$identity_publisher_user"
+	"$support_worker_user"
+	"$support_publisher_user"
 )
 for ((left = 0; left < ${#service_users[@]}; left++)); do
 	for ((right = left + 1; right < ${#service_users[@]}; right++)); do
@@ -6334,6 +6823,32 @@ rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
 '
 }
 
+provision_support_rabbitmq_topic_permissions() {
+	local worker_user="$1" publisher_user="$2"
+	RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
+	RABBITMQ_SUPPORT_WORKER_USER="$worker_user" \
+	RABBITMQ_SUPPORT_PUBLISHER_USER="$publisher_user" \
+		docker exec \
+			-e RABBITMQ_PROVISION_VHOST \
+			-e RABBITMQ_SUPPORT_WORKER_USER \
+			-e RABBITMQ_SUPPORT_PUBLISHER_USER \
+			"$provisioning_rabbitmq_container_id" sh -euc '
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_SUPPORT_WORKER_USER"
+rabbitmqctl clear_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_SUPPORT_PUBLISHER_USER"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_SUPPORT_WORKER_USER" winwidget.events "^$" \
+  "^support\.telegram\.webhook-admitted\.v1$"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_SUPPORT_PUBLISHER_USER" winwidget.events \
+  "^(support\.telegram\.webhook-admitted\.v1|admin\.audit\.support\.v1)$" "^$"
+rabbitmqctl set_topic_permissions -p "$RABBITMQ_PROVISION_VHOST" \
+  "$RABBITMQ_SUPPORT_PUBLISHER_USER" winwidget.dead-letter \
+  "^support-telegram-webhook\.dead-letter$" "^$"
+'
+}
+
 assert_campaigns_shared_rabbitmq_topology() {
 	docker run --rm --network host \
 		--env-file "$ENV_FILE" \
@@ -6430,7 +6945,7 @@ assert_campaigns_shared_rabbitmq_topology
 assert_reporting_shared_rabbitmq_topology
 post_cutover_integration_read_pattern='^winwidget\.(payment\.auto-renewal|admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1|notification\.(telegram-destination-unavailable|delivery-outcome))(\..*)?$'
 post_billing_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1|notification\.telegram-destination-unavailable)(\..*)?$'
-post_identity_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\.dead-letter)?$'
+post_identity_integration_read_pattern='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform|support)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\.dead-letter)?$'
 legacy_integration_read_pattern='^winwidget\.(lead-integration\.(webhook|bitrix24|amo-crm)|payment\.auto-renewal|payment-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|mailing\..*|limit-notification\.telegram(\.dead-letter|\.retry-v2\.[123])?|admin\.audit\.campaigns\.v1|report\.daily-summary\.telegram)(\..*)?$'
 integration_worker_read_pattern="$post_cutover_integration_read_pattern"
 if [[ "$notification_delivery_first_cutover" == "true" ]]; then
@@ -6525,6 +7040,22 @@ provision_rabbitmq_user \
 	''
 provision_identity_rabbitmq_topic_permissions \
 	"$identity_worker_user" "$identity_publisher_user"
+provision_rabbitmq_user \
+	"$support_worker_user" \
+	"$support_worker_password_base64" \
+	'^(winwidget\.(events|retry|dead-letter|manual-retry)|winwidget\.support\.telegram-webhook\.v1(\.retry-v2\.[123]|\.dead-letter)?)$' \
+	'^winwidget\.(events|retry|dead-letter|manual-retry)$' \
+	'^(winwidget\.(events|retry|dead-letter|manual-retry)|winwidget\.support\.telegram-webhook\.v1(\.retry-v2\.[123]|\.dead-letter)?)$' \
+	''
+provision_rabbitmq_user \
+	"$support_publisher_user" \
+	"$support_publisher_password_base64" \
+	'^$' \
+	'^winwidget\.(events|retry|dead-letter|manual-retry)$' \
+	'^$' \
+	''
+provision_support_rabbitmq_topic_permissions \
+	"$support_worker_user" "$support_publisher_user"
 provision_rabbitmq_user \
 	"$rabbitmq_monitor_user" \
 	"$rabbitmq_monitor_password_base64" \
@@ -9017,6 +9548,14 @@ compose_target \
 compose_target \
 	--profile identity-migration \
 	run --rm --no-deps identity-migrate
+compose_target \
+	--profile support-migration \
+	run --rm --no-deps support-migrate
+verify_support_steady_ownership || {
+	echo 'Routine deployment requires an already completed, anchor-identical Support ownership switch.' >&2
+	echo 'Run the separate guarded Support cutover lifecycle; routine deploy never activates ownership.' >&2
+	exit 1
+}
 docker run --rm --network host --env-file "$ENV_FILE" \
 	--entrypoint node "$WIDGETS_IMAGE" \
 	dist/src/cutover-main.js verify-steady >/dev/null
@@ -9222,6 +9761,15 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		"$WIDGETS_READINESS_URL" \
 		"$WIDGETS_REVISION" \
 		"Canonical Widgets"
+
+	compose_target up -d --no-deps --force-recreate \
+		support-api support-worker support-outbox-publisher
+	wait_for_cutover_revision \
+		"$SUPPORT_API_READINESS_URL" "$SUPPORT_REVISION" "Canonical Support API"
+	wait_for_cutover_revision \
+		"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Canonical Support worker"
+	wait_for_cutover_revision \
+		"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Canonical Support Outbox publisher"
 
 	stop_notification_cutover_services 30 false api
 	compose_target up -d --no-deps --force-recreate api
@@ -9501,7 +10049,10 @@ else
 		database-restore-worker \
 		notification-delivery-worker \
 		campaigns-service \
-		widgets-service
+		widgets-service \
+		support-api \
+		support-worker \
+		support-outbox-publisher
 	compose_target up -d --no-deps --force-recreate api
 	compose_target up -d --no-deps --force-recreate \
 		identity-api \
@@ -9513,6 +10064,12 @@ else
 		"$IDENTITY_WORKER_READINESS_URL" "$IDENTITY_REVISION" "Identity worker"
 	wait_for_cutover_revision \
 		"$IDENTITY_OUTBOX_READINESS_URL" "$IDENTITY_REVISION" "Identity Outbox publisher"
+	wait_for_cutover_revision \
+		"$SUPPORT_API_READINESS_URL" "$SUPPORT_REVISION" "Support API"
+	wait_for_cutover_revision \
+		"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Support worker"
+	wait_for_cutover_revision \
+		"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Support Outbox publisher"
 	compose_target up -d --no-deps --force-recreate api-gateway
 	core_runtime_recovered=true
 	if ! wait_for_cutover_revision \
@@ -9630,12 +10187,12 @@ done
 show_api_diagnostics() {
 	echo "API deployment diagnostics:"
 	compose_target \
-		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher rabbitmq || true
+		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher support-api support-worker support-outbox-publisher rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher rabbitmq || true
-	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700, 4800-4803 and 4900-4902:"
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher support-api support-worker support-outbox-publisher rabbitmq || true
+	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700, 4800-4803, 4900-4902 and 5100-5102:"
 	ss -ltnp \
-		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 or sport = :4900 or sport = :4901 or sport = :4902 )' ||
+		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 or sport = :4900 or sport = :4901 or sport = :4902 or sport = :5100 or sport = :5101 or sport = :5102 )' ||
 		true
 }
 
@@ -9655,7 +10212,8 @@ ensure_required_services_running() {
 		reporting-service \
 		widgets-service \
 		"${identity_runtime_services[@]}" \
-		"${billing_runtime_services[@]}"; do
+		"${billing_runtime_services[@]}" \
+		"${support_runtime_services[@]}"; do
 		container_id="$(
 			compose_target ps --status running -q "$service"
 		)"
@@ -10034,6 +10592,13 @@ for ((attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt++)); do
 	sleep "$HEALTHCHECK_INTERVAL"
 done
 
+wait_for_cutover_revision \
+	"$SUPPORT_API_READINESS_URL" "$SUPPORT_REVISION" "Support API"
+wait_for_cutover_revision \
+	"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Support worker"
+wait_for_cutover_revision \
+	"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Support Outbox publisher"
+
 docker run --rm --network host --env-file "$ENV_FILE" \
 	--entrypoint node "$WIDGETS_IMAGE" \
 	dist/src/cutover-main.js verify-steady >/dev/null
@@ -10078,7 +10643,8 @@ for service in \
 	reporting-service \
 	widgets-service \
 	"${identity_runtime_services[@]}" \
-	"${billing_runtime_services[@]}"; do
+	"${billing_runtime_services[@]}" \
+	"${support_runtime_services[@]}"; do
 	container_id="$(
 		compose_target ps -q "$service"
 	)"
@@ -10108,6 +10674,9 @@ for service in \
 	fi
 	if [[ "$service" == billing-* ]]; then
 		expected_image_revision="$BILLING_REVISION"
+	fi
+	if [[ "$service" == support-* ]]; then
+		expected_image_revision="$SUPPORT_REVISION"
 	fi
 	if [[ "$image_revision" != "$expected_image_revision" ]]; then
 		echo "$service image revision mismatch: expected $expected_image_revision, got $image_revision"
