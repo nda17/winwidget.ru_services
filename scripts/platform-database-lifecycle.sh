@@ -178,8 +178,7 @@ platform_database_validate_marker() {
 				seen["database_system_identifier"] != 1 || value["database_system_identifier"] !~ /^(pending|[1-9][0-9]*)$/ ||
 				seen["updated_at"] != 1 || length(value["updated_at"]) != 20 ||
 				value["updated_at"] !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/) exit 1
-			if ((value["database_id"] == "pending") !=
-				(value["database_system_identifier"] == "pending")) exit 1
+			if ((value["database_id"] == "pending") != (value["database_system_identifier"] == "pending")) exit 1
 			if (value["phase"] ~ /^(prepared|active|complete)$/ &&
 				value["database_id"] == "pending") exit 1
 		}

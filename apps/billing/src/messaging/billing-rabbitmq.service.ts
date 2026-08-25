@@ -266,7 +266,10 @@ export class BillingRabbitMqService
 		});
 		for (const kind of BILLING_CONSUMER_KINDS) {
 			const queue = BILLING_QUEUE_NAMES[kind];
-			await channel.assertQueue(queue, { durable: true });
+			await channel.assertQueue(queue, {
+				durable: true,
+				arguments: { 'x-queue-type': 'classic' }
+			});
 			await channel.bindQueue(
 				queue,
 				BILLING_EVENTS_EXCHANGE,
@@ -278,7 +281,10 @@ export class BillingRabbitMqService
 				BILLING_ROUTING_KEYS[kind]
 			);
 			const deadLetterQueue = `${queue}.dead-letter`;
-			await channel.assertQueue(deadLetterQueue, { durable: true });
+			await channel.assertQueue(deadLetterQueue, {
+				durable: true,
+				arguments: { 'x-queue-type': 'classic' }
+			});
 			await channel.bindQueue(
 				deadLetterQueue,
 				BILLING_DEAD_LETTER_EXCHANGE,
@@ -289,6 +295,7 @@ export class BillingRabbitMqService
 				const retryQueue = `${queue}.retry.${attempt}`;
 				await channel.assertQueue(retryQueue, {
 					durable: true,
+					arguments: { 'x-queue-type': 'classic' },
 					messageTtl: delay,
 					deadLetterExchange: BILLING_RETRY_EXCHANGE,
 					deadLetterRoutingKey: BILLING_ROUTING_KEYS[kind]

@@ -26,7 +26,7 @@ readonly PLATFORM_CUTOVER_POSTGRES_IMAGE='postgres:18-bookworm@sha256:1961f96e60
 readonly PLATFORM_BILLING_OFFER_V1_QUEUE='winwidget.billing.offer.v1'
 readonly PLATFORM_BILLING_OFFER_V2_QUEUE='winwidget.billing.offer.v2'
 readonly PLATFORM_BILLING_OFFER_V2_EVENT='billing.offer.changed.v2'
-readonly PLATFORM_CORE_PREPARE_MIGRATION='20260824000000_prepare_platform_service_ownership'
+readonly PLATFORM_CORE_PREPARE_MIGRATION='20260824010000_fix_platform_core_state_acl'
 readonly PLATFORM_ADMIN_AUDIT_QUEUE='winwidget.admin.audit.platform.v1'
 readonly PLATFORM_ADMIN_AUDIT_EVENT='admin.audit.platform.v1'
 readonly PLATFORM_ADMIN_AUDIT_KIND='platform-admin-audit'
@@ -1183,6 +1183,7 @@ WITH expected_constraints(name, kind, validated, is_deferrable, is_deferred, key
   JOIN pg_catalog.pg_namespace procedure_namespace ON procedure_namespace.oid = procedure_entry.pronamespace
   WHERE namespace_entry.nspname = 'public'
     AND relation.relname IN ('platform_core_state', 'site_settings', 'legal_pages', 'home_page_content')
+    AND left(trigger_entry.tgname, 9) = 'platform_'
     AND NOT trigger_entry.tgisinternal
 ), expected_functions(function_name, result_type, arguments, language_name, volatility, security_definer, leakproof, parallel_mode, config_values, owner_name, source_sha256) AS (
   VALUES
@@ -1347,6 +1348,40 @@ platform_cutover_billing_offer_v1_listing_is_retirable() {
 	' <<<"$1"
 }
 
+platform_cutover_queue_presence_is_exact() {
+	[[ $# -eq 3 && "$1" =~ ^[0-9a-f]{64}$ && "$2" == winwidget &&
+		"$3" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
+	local container="$1" vhost="$2" queue="$3" listing
+	listing="$(platform_database_docker exec "$container" rabbitmqctl --silent \
+		list_queues -p "$vhost" name)" || return 2
+	awk -v queue="$queue" '
+		$0 == queue { found += 1 }
+		END { exit(found == 1 ? 0 : (found == 0 ? 1 : 2)) }
+	' <<<"$listing"
+}
+
+platform_cutover_delete_queue_if_present() {
+	[[ $# -eq 3 ]] || return 1
+	local container="$1" vhost="$2" queue="$3" presence
+	if platform_cutover_queue_presence_is_exact "$container" "$vhost" "$queue"; then
+		:
+	else
+		presence=$?
+		[[ "$presence" -eq 1 ]] && return 0
+		return 1
+	fi
+	if ! platform_database_docker exec "$container" rabbitmqctl --silent delete_queue \
+		-p "$vhost" "$queue" --if-empty --if-unused >/dev/null 2>&1; then
+		:
+	fi
+	if platform_cutover_queue_presence_is_exact "$container" "$vhost" "$queue"; then
+		return 1
+	else
+		presence=$?
+		[[ "$presence" -eq 1 ]]
+	fi
+}
+
 platform_cutover_billing_offer_v2_listing_is_exact() {
 	[[ $# -eq 1 ]] || return 1
 	awk -v old_prefix="$PLATFORM_BILLING_OFFER_V1_QUEUE" \
@@ -1399,27 +1434,38 @@ platform_cutover_billing_offer_v2_bindings_are_exact() {
 }
 
 platform_cutover_billing_offer_v2_queue_details_are_exact() {
-	[[ $# -eq 1 && -n "$1" ]] || return 1
+	[[ $# -eq 2 && -n "$1" && "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	local image="$2"
+	platform_cutover_assert_release_image_id billing "$image" || return 1
 	PLATFORM_QUEUE_DETAILS_JSON="$1" \
 		PLATFORM_QUEUE_PREFIX="$PLATFORM_BILLING_OFFER_V2_QUEUE" \
-		PLATFORM_QUEUE_EVENT="$PLATFORM_BILLING_OFFER_V2_EVENT" node -e '
+		PLATFORM_QUEUE_EVENT="$PLATFORM_BILLING_OFFER_V2_EVENT" \
+		platform_database_docker run --rm --pull never --network none --read-only \
+			--cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+			--cpus 1 --memory 134217728 --memory-swap 134217728 --log-driver none \
+			--env PLATFORM_QUEUE_DETAILS_JSON --env PLATFORM_QUEUE_PREFIX \
+			--env PLATFORM_QUEUE_EVENT --entrypoint node "$image" -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
 const prefix = process.env.PLATFORM_QUEUE_PREFIX;
 const event = process.env.PLATFORM_QUEUE_EVENT;
+const classic = { "x-queue-type": "classic" };
 const expected = new Map([
-  [prefix, {}],
-  [`${prefix}.dead-letter`, {}],
+  [prefix, classic],
+  [`${prefix}.dead-letter`, classic],
   [`${prefix}.retry.1`, {
+    ...classic,
     "x-message-ttl": 60_000,
     "x-dead-letter-exchange": "winwidget.billing.retry",
     "x-dead-letter-routing-key": event,
   }],
   [`${prefix}.retry.2`, {
+    ...classic,
     "x-message-ttl": 300_000,
     "x-dead-letter-exchange": "winwidget.billing.retry",
     "x-dead-letter-routing-key": event,
   }],
   [`${prefix}.retry.3`, {
+    ...classic,
     "x-message-ttl": 1_800_000,
     "x-dead-letter-exchange": "winwidget.billing.retry",
     "x-dead-letter-routing-key": event,
@@ -1494,27 +1540,38 @@ platform_cutover_platform_admin_audit_bindings_are_exact() {
 }
 
 platform_cutover_platform_admin_audit_queue_details_are_exact() {
-	[[ $# -eq 1 && -n "$1" ]] || return 1
+	[[ $# -eq 2 && -n "$1" && "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+	local image="$2"
+	platform_cutover_assert_release_image_id core "$image" || return 1
 	PLATFORM_QUEUE_DETAILS_JSON="$1" \
 		PLATFORM_QUEUE_PREFIX="$PLATFORM_ADMIN_AUDIT_QUEUE" \
-		PLATFORM_QUEUE_KIND="$PLATFORM_ADMIN_AUDIT_KIND" node -e '
+		PLATFORM_QUEUE_KIND="$PLATFORM_ADMIN_AUDIT_KIND" \
+		platform_database_docker run --rm --pull never --network none --read-only \
+			--cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+			--cpus 1 --memory 134217728 --memory-swap 134217728 --log-driver none \
+			--env PLATFORM_QUEUE_DETAILS_JSON --env PLATFORM_QUEUE_PREFIX \
+			--env PLATFORM_QUEUE_KIND --entrypoint node "$image" -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
 const prefix = process.env.PLATFORM_QUEUE_PREFIX;
 const kind = process.env.PLATFORM_QUEUE_KIND;
+const classic = { "x-queue-type": "classic" };
 const expected = new Map([
-  [prefix, {}],
-  [`${prefix}.dead-letter`, {}],
+  [prefix, classic],
+  [`${prefix}.dead-letter`, classic],
   [`${prefix}.retry-v2.1`, {
+    ...classic,
     "x-message-ttl": 30_000,
     "x-dead-letter-exchange": "winwidget.manual-retry",
     "x-dead-letter-routing-key": kind,
   }],
   [`${prefix}.retry-v2.2`, {
+    ...classic,
     "x-message-ttl": 300_000,
     "x-dead-letter-exchange": "winwidget.manual-retry",
     "x-dead-letter-routing-key": kind,
   }],
   [`${prefix}.retry-v2.3`, {
+    ...classic,
     "x-message-ttl": 1_800_000,
     "x-dead-letter-exchange": "winwidget.manual-retry",
     "x-dead-letter-routing-key": kind,
@@ -1635,13 +1692,13 @@ platform_cutover_provision_billing_offer_v2_permissions() {
 	platform_database_docker exec "$container" rabbitmqctl clear_topic_permissions -p "$vhost" "$username" >/dev/null
 	platform_database_docker exec "$container" rabbitmqctl set_topic_permissions -p "$vhost" "$username" \
 		winwidget.events '^$' "$PLATFORM_BILLING_WORKER_TOPIC_READ" >/dev/null
-	permissions="$(platform_database_docker exec "$container" rabbitmqctl --silent list_permissions -p "$vhost" \
-		user configure write read | awk -v user="$username" '
+	permissions="$(platform_database_docker exec "$container" rabbitmqctl --silent list_permissions -p "$vhost" | \
+		awk -v user="$username" '
 		$1 == user { print $1 "|" $2 "|" $3 "|" $4; count += 1 }
 		END { if (count != 1) exit 1 }
 	')" || return 1
-	topics="$(platform_database_docker exec "$container" rabbitmqctl --silent list_topic_permissions -p "$vhost" \
-		user exchange write read | awk -v user="$username" '
+	topics="$(platform_database_docker exec "$container" rabbitmqctl --silent list_topic_permissions -p "$vhost" | \
+		awk -v user="$username" '
 		$1 == user { print $1 "|" $2 "|" $3 "|" $4; count += 1 }
 		END { if (count != 1) exit 1 }
 	')" || return 1
@@ -1662,10 +1719,7 @@ platform_cutover_retire_billing_offer_v1() {
 	for queue in "$PLATFORM_BILLING_OFFER_V1_QUEUE" \
 		"$PLATFORM_BILLING_OFFER_V1_QUEUE.retry.1" "$PLATFORM_BILLING_OFFER_V1_QUEUE.retry.2" \
 		"$PLATFORM_BILLING_OFFER_V1_QUEUE.retry.3" "$PLATFORM_BILLING_OFFER_V1_QUEUE.dead-letter"; do
-		if awk -v queue="$queue" '$1 == queue { found += 1 } END { exit(found == 1 ? 0 : 1) }' <<<"$listing"; then
-			platform_database_docker exec "$container" rabbitmqctl --silent delete_queue \
-				-p "$vhost" "$queue" --if-empty --if-unused >/dev/null || return 1
-		fi
+		platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
 	done
 }
 
@@ -1731,15 +1785,15 @@ const names = [prefix, `${prefix}.dead-letter`, ...[1, 2, 3].map(index => `${pre
 		return 1
 	fi
 	unset admin_password
-	platform_cutover_billing_offer_v2_queue_details_are_exact "$queue_details" ||
+	platform_cutover_billing_offer_v2_queue_details_are_exact "$queue_details" "$image" ||
 		platform_cutover_fail 'Billing offer v2 queue arguments are not exact.' || return 1
-	permissions="$(platform_database_docker exec "$container" rabbitmqctl --silent list_permissions -p "$vhost" \
-		user configure write read | awk -v user="$username" '
+	permissions="$(platform_database_docker exec "$container" rabbitmqctl --silent list_permissions -p "$vhost" | \
+		awk -v user="$username" '
 		$1 == user { print $1 "|" $2 "|" $3 "|" $4; count += 1 }
 		END { if (count != 1) exit 1 }
 	')" || return 1
-	topics="$(platform_database_docker exec "$container" rabbitmqctl --silent list_topic_permissions -p "$vhost" \
-		user exchange write read | awk -v user="$username" '
+	topics="$(platform_database_docker exec "$container" rabbitmqctl --silent list_topic_permissions -p "$vhost" | \
+		awk -v user="$username" '
 		$1 == user { print $1 "|" $2 "|" $3 "|" $4; count += 1 }
 		END { if (count != 1) exit 1 }
 	')" || return 1
@@ -1894,7 +1948,7 @@ const names = [prefix, `${prefix}.dead-letter`, ...[1, 2, 3].map(index => `${pre
 		return 1
 	fi
 	unset admin_password
-	platform_cutover_platform_admin_audit_queue_details_are_exact "$queue_details" ||
+	platform_cutover_platform_admin_audit_queue_details_are_exact "$queue_details" "$image" ||
 		platform_cutover_fail 'Platform admin-audit queue arguments are not exact.'
 }
 
@@ -1940,17 +1994,24 @@ const delays = [30_000, 300_000, 1_800_000];
       await channel.assertExchange("winwidget.retry", "direct", { durable: true });
       await channel.assertExchange("winwidget.dead-letter", "topic", { durable: true });
       await channel.assertExchange("winwidget.manual-retry", "direct", { durable: true });
-      await channel.assertQueue(queue, { durable: true });
+      await channel.assertQueue(queue, {
+        durable: true,
+        arguments: { "x-queue-type": "classic" },
+      });
       await channel.bindQueue(queue, "winwidget.events", "admin.audit.platform.v1");
       await channel.bindQueue(queue, "winwidget.events", `manual.${kind}`);
       await channel.bindQueue(queue, "winwidget.manual-retry", kind);
-      await channel.assertQueue(`${queue}.dead-letter`, { durable: true });
+      await channel.assertQueue(`${queue}.dead-letter`, {
+        durable: true,
+        arguments: { "x-queue-type": "classic" },
+      });
       await channel.bindQueue(`${queue}.dead-letter`, "winwidget.dead-letter", `${kind}.dead-letter`);
       await channel.bindQueue(`${queue}.dead-letter`, "winwidget.events", `${kind}.dead-letter`);
       for (const [index, delay] of delays.entries()) {
         const retryQueue = `${queue}.retry-v2.${index + 1}`;
         await channel.assertQueue(retryQueue, {
           durable: true,
+          arguments: { "x-queue-type": "classic" },
           messageTtl: delay,
           deadLetterExchange: "winwidget.manual-retry",
           deadLetterRoutingKey: kind,
@@ -2170,11 +2231,10 @@ platform_cutover_retire_settings_projection() {
 		[[ "$unpublished" == 0 ]] ||
 			platform_cutover_fail 'Legacy Billing settings Outbox is not fully published.' || return 1
 		platform_cutover_verify_gateway_routes || return 1
-		while IFS=' ' read -r queue _; do
+		while IFS=$' \t' read -r queue _; do
 			[[ "$queue" =~ $PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN ]] || continue
-			platform_database_docker exec "$container" rabbitmqctl --silent delete_queue \
-				-p "$vhost" "$queue" --if-empty --if-unused >/dev/null || return 1
-			done <<<"$listing"
+			platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
+		done <<<"$listing"
 	fi
 	platform_cutover_provision_platform_admin_audit_topology || return 1
 	platform_cutover_provision_integration_worker_permissions || return 1
@@ -2254,9 +2314,9 @@ platform_cutover_wait_billing_offer_boundary() {
 		core_unpublished="$(platform_cutover_query DATABASE_BACKUP_URL \
 			"SELECT count(*) FROM public.outbox_events WHERE routing_key = 'billing.offer.changed.v1' AND status <> 'PUBLISHED';")" || return 1
 		billing_unresolved="$(platform_cutover_query BILLING_BACKUP_URL \
-			"SELECT count(*) FROM billing.integration_delivery_failures WHERE consumer = 'offer' AND resolved_at IS NULL;")" || return 1
+			"SELECT count(*) FROM billing.integration_delivery_failures WHERE integration = 'offer' AND resolved_at IS NULL;")" || return 1
 		billing_in_flight="$(platform_cutover_query BILLING_BACKUP_URL \
-			"SELECT count(*) FROM billing.integration_delivery_receipts WHERE consumer = 'offer' AND status IN ('PROCESSING', 'RETRY_SCHEDULED');")" || return 1
+			"SELECT count(*) FROM billing.integration_delivery_receipts WHERE integration = 'offer' AND status IN ('PROCESSING', 'RETRY_SCHEDULED');")" || return 1
 		if [[ "$core_unpublished|$billing_unresolved|$billing_in_flight" == '0|0|0' ]] &&
 			platform_cutover_billing_offer_queues_drained &&
 			platform_cutover_billing_offer_projection_matches; then
@@ -2350,7 +2410,7 @@ platform_cutover_snapshot_field() {
 	platform_cutover_validate_private_file "$snapshot" || return 1
 	image_id="$(platform_cutover_marker_value image_id)"
 	platform_database_docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
-		--mount "type=bind,source=$snapshot,target=/snapshot.json,readonly" \
+		--user 0:0 --mount "type=bind,source=$snapshot,target=/snapshot.json,readonly" \
 		--entrypoint node "$image_id" -e '
 const fs = require("node:fs");
 const snapshot = JSON.parse(fs.readFileSync("/snapshot.json", "utf8"));
@@ -3086,7 +3146,7 @@ platform_cutover_prepare() {
 	platform_database_require_inputs || return 1
 	database_phase="$(platform_database_current_phase)" || return 1
 	case "$phase:$database_phase" in
-	absent:absent | absent:prepared) catalog_mode=initial ;;
+	absent:absent | absent:preparing | absent:prepared) catalog_mode=initial ;;
 	prepared:prepared) catalog_mode=structure ;;
 	*) platform_cutover_fail "Platform prepare pre-state is inconsistent: $phase:$database_phase."; return 1 ;;
 	esac
@@ -3138,7 +3198,7 @@ platform_cutover_validate_restore_evidence() {
 	[[ "$(platform_cutover_sha256 "$dump")" == "$dump_sha" ]] || return 1
 	image_id="$(platform_cutover_marker_value image_id)" || return 1
 	migration_checksum="$(platform_cutover_sha256 \
-		"$SERVER_ROOT/apps/platform/prisma/migrations/20260823000000_init_platform/migration.sql")" || return 1
+		"$SERVER_ROOT/apps/platform/prisma/migrations/20260823010000_fix_service_identity_timestamp_monotonicity/migration.sql")" || return 1
 	dump_size="$(wc -c <"$dump" | tr -d '[:space:]')"
 	EVIDENCE_PHASE="$phase" EVIDENCE_REVISION="$EXPECTED_REVISION" \
 		EVIDENCE_DUMP_SHA="$dump_sha" EVIDENCE_DUMP_SIZE="$dump_size" \
@@ -3147,6 +3207,7 @@ platform_cutover_validate_restore_evidence() {
 		EVIDENCE_MIGRATION_CHECKSUM="$migration_checksum" \
 		platform_database_docker run --rm --pull never --network none --read-only \
 			--cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+			--user 0:0 \
 			--mount "type=bind,source=$evidence,target=/evidence.json,readonly" \
 			--env EVIDENCE_PHASE --env EVIDENCE_REVISION --env EVIDENCE_DUMP_SHA \
 			--env EVIDENCE_DUMP_SIZE --env EVIDENCE_DATABASE_ID \
@@ -3192,7 +3253,7 @@ if (!exact(value, ["schemaVersion", "action", "target", "status", "phase", "revi
   !sha(value.catalog.catalogSha256) || !sha(value.catalog.repeatArchiveListSha256) ||
   !exact(value.counts, ["tables", "migrations", "siteSettings", "legalPages",
     "homePageContent", "outboxEvents"]) || value.counts.tables !== 8 ||
-  value.counts.migrations !== 1 || value.counts.siteSettings !== 1 ||
+  value.counts.migrations !== 2 || value.counts.siteSettings !== 1 ||
   value.counts.legalPages !== 4 || value.counts.homePageContent !== 1 ||
   value.counts.outboxEvents !== 0 || !exact(value.checks, checkKeys) ||
   !checkKeys.every(key => value.checks[key] === true)) process.exit(1);
@@ -3784,8 +3845,80 @@ platform_cutover_self_test_complete_noop() (
 		"$source" != *'platform_release_compose'* ]]
 )
 
+platform_cutover_self_test_delete_queue_if_present() (
+	local container='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+	local vhost=winwidget queue=winwidget.platform.test.queue mode trace before
+	trace="$(mktemp)" || return 1
+	trap 'rm -f -- "$trace"' EXIT
+	platform_database_docker() {
+		[[ "$1" == exec && "$2" == "$container" && "$3" == rabbitmqctl &&
+			"$4" == --silent ]] || return 1
+		shift 4
+		case "$1" in
+		list_queues)
+			[[ "$*" == 'list_queues -p winwidget name' ]] || return 1
+			before="$(<"$trace")"
+			printf 'l' >>"$trace"
+			case "$mode:$before" in
+			vanished: | preserved: | delete-success:) printf '%s\n' "$queue" ;;
+			preserved:ld) printf '%s\n' "$queue" ;;
+			duplicate:) printf '%s\n%s\n' "$queue" "$queue" ;;
+			listing-failure:*) return 1 ;;
+			esac
+			;;
+		delete_queue)
+			[[ "$*" == "delete_queue -p winwidget $queue --if-empty --if-unused" ]] || return 1
+			printf 'd' >>"$trace"
+			[[ "$mode" == delete-success ]]
+			;;
+		*) return 1 ;;
+		esac
+	}
+	mode=vanished
+	: >"$trace"
+	platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
+	[[ "$(<"$trace")" == ldl ]] || return 1
+	mode=preserved
+	: >"$trace"
+	! platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
+	[[ "$(<"$trace")" == ldl ]] || return 1
+	mode='delete-success'
+	: >"$trace"
+	platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
+	[[ "$(<"$trace")" == ldl ]] || return 1
+	mode=absent
+	: >"$trace"
+	platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
+	[[ "$(<"$trace")" == l ]] || return 1
+	mode='listing-failure'
+	: >"$trace"
+	! platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
+	[[ "$(<"$trace")" == l ]] || return 1
+	mode=duplicate
+	: >"$trace"
+	! platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
+	[[ "$(<"$trace")" == l ]]
+)
+
 platform_cutover_self_test_billing_offer_topology() (
 	local valid_v2 legacy_v1 valid_bindings queue_details invalid_details trace=''
+	local validator_image='sha256:1111111111111111111111111111111111111111111111111111111111111111'
+	local permission_source
+	permission_source="$(declare -f platform_cutover_provision_billing_offer_v2_permissions \
+		platform_cutover_verify_billing_offer_v2_boundary)"
+	[[ "$permission_source" == *'list_permissions -p "$vhost" |'* &&
+		"$permission_source" == *'list_topic_permissions -p "$vhost" |'* &&
+		"$permission_source" != *'user configure write read'* &&
+		"$permission_source" != *'user exchange write read'* ]] || return 1
+	platform_cutover_assert_release_image_id() {
+		[[ "$1" == billing && "$2" == "$validator_image" ]]
+	}
+	platform_database_docker() {
+		[[ "$*" == *'run --rm --pull never --network none --read-only'* &&
+			"$*" == *'--cap-drop ALL --security-opt no-new-privileges --pids-limit 64'* &&
+			"$*" == *"--entrypoint node $validator_image -e"* ]] || return 1
+		command node -e "${!#}"
+	}
 	valid_v2="$(printf '%s true 0 0 1\n' "$PLATFORM_BILLING_OFFER_V2_QUEUE")"
 	valid_v2+="$(printf '\n%s.retry.1 true 0 0 0\n%s.retry.2 true 0 0 0\n%s.retry.3 true 0 0 0\n%s.dead-letter true 0 0 0' \
 		"$PLATFORM_BILLING_OFFER_V2_QUEUE" "$PLATFORM_BILLING_OFFER_V2_QUEUE" \
@@ -3825,36 +3958,43 @@ const retry = [60_000, 300_000, 1_800_000].map((ttl, index) => ({
   auto_delete: false,
   exclusive: false,
   arguments: {
+    "x-queue-type": "classic",
     "x-message-ttl": ttl,
     "x-dead-letter-exchange": "winwidget.billing.retry",
     "x-dead-letter-routing-key": event,
   },
 }));
 process.stdout.write(JSON.stringify([
-  { name: prefix, vhost: "winwidget", durable: true, auto_delete: false, exclusive: false, arguments: {} },
-  { name: `${prefix}.dead-letter`, vhost: "winwidget", durable: true, auto_delete: false, exclusive: false, arguments: {} },
+  { name: prefix, vhost: "winwidget", durable: true, auto_delete: false, exclusive: false, arguments: { "x-queue-type": "classic" } },
+  { name: `${prefix}.dead-letter`, vhost: "winwidget", durable: true, auto_delete: false, exclusive: false, arguments: { "x-queue-type": "classic" } },
   ...retry,
 ]));
 ')" || return 1
-	platform_cutover_billing_offer_v2_queue_details_are_exact "$queue_details" || return 1
+	platform_cutover_billing_offer_v2_queue_details_are_exact "$queue_details" "$validator_image" || return 1
 	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
 rows[2].arguments["x-message-ttl"] += 1;
 process.stdout.write(JSON.stringify(rows));
 ')" || return 1
-	! platform_cutover_billing_offer_v2_queue_details_are_exact "$invalid_details" || return 1
+	! platform_cutover_billing_offer_v2_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
 	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
-rows[0].arguments.unexpected = true;
+delete rows[0].arguments["x-queue-type"];
 process.stdout.write(JSON.stringify(rows));
 ')" || return 1
-	! platform_cutover_billing_offer_v2_queue_details_are_exact "$invalid_details" || return 1
+	! platform_cutover_billing_offer_v2_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
+	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
+const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
+rows[0].arguments["x-queue-type"] = "quorum";
+process.stdout.write(JSON.stringify(rows));
+')" || return 1
+	! platform_cutover_billing_offer_v2_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
 	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
 rows[0].auto_delete = true;
 process.stdout.write(JSON.stringify(rows));
 ')" || return 1
-	! platform_cutover_billing_offer_v2_queue_details_are_exact "$invalid_details" || return 1
+	! platform_cutover_billing_offer_v2_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
 	platform_cutover_assert_billing_worker_image() { trace+='i'; }
 	platform_release_compose() {
 		shift 3
@@ -3884,9 +4024,22 @@ process.stdout.write(JSON.stringify(rows));
 )
 
 platform_cutover_self_test_settings_projection_topology() (
-	local source retire_source provision_source listing bindings queue_details invalid_details attempt legacy_listing
+	local source retire_source provision_source listing bindings queue_details invalid_details attempt
+	local legacy_listing parsed_legacy_queues queue
+	local validator_image='sha256:2222222222222222222222222222222222222222222222222222222222222222'
+	platform_cutover_assert_release_image_id() {
+		[[ "$1" == core && "$2" == "$validator_image" ]]
+	}
+	platform_database_docker() {
+		[[ "$*" == *'run --rm --pull never --network none --read-only'* &&
+			"$*" == *'--cap-drop ALL --security-opt no-new-privileges --pids-limit 64'* &&
+			"$*" == *"--entrypoint node $validator_image -e"* ]] || return 1
+		command node -e "${!#}"
+	}
 	source="$(declare -f platform_cutover_settings_projection_topology_is_absent \
 		platform_cutover_retire_settings_projection \
+		platform_cutover_queue_presence_is_exact \
+		platform_cutover_delete_queue_if_present \
 		platform_cutover_legacy_settings_queue_listing_is_drained \
 		platform_cutover_platform_admin_audit_queue_listing_is_exact \
 		platform_cutover_platform_admin_audit_bindings_are_exact \
@@ -3915,24 +4068,29 @@ platform_cutover_self_test_settings_projection_topology() (
 		"$listing"$'\n'"$PLATFORM_ADMIN_AUDIT_QUEUE.retry.1 true false false" || return 1
 	! platform_cutover_platform_admin_audit_bindings_are_exact \
 		"$bindings"$'\n'"winwidget.events $PLATFORM_ADMIN_AUDIT_QUEUE queue unexpected" || return 1
-	legacy_listing='winwidget.core.billing.settings.v1 true 0 0 0
-winwidget.core.billing.settings.v1.dead-letter true 0 0 0
-winwidget.billing.settings-source.v1 true 0 0 0'
+	legacy_listing=$'winwidget.core.billing.settings.v1\ttrue\t0\t0\t0\nwinwidget.core.billing.settings.v1.dead-letter\ttrue\t0\t0\t0\nwinwidget.billing.settings-source.v1\ttrue\t0\t0\t0'
 	platform_cutover_legacy_settings_queue_listing_is_drained "$legacy_listing" || return 1
+	parsed_legacy_queues=''
+	while IFS=$' \t' read -r queue _; do
+		[[ "$queue" =~ $PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN ]] || continue
+		parsed_legacy_queues+="${parsed_legacy_queues:+|}$queue"
+	done <<<"$legacy_listing"
+	[[ "$parsed_legacy_queues" == 'winwidget.core.billing.settings.v1|winwidget.core.billing.settings.v1.dead-letter|winwidget.billing.settings-source.v1' ]] || return 1
 	! platform_cutover_legacy_settings_queue_listing_is_drained \
-		"${legacy_listing/winwidget.billing.settings-source.v1 true 0 0 0/winwidget.billing.settings-source.v1 true 1 0 0}" || return 1
+		"${legacy_listing/$'winwidget.billing.settings-source.v1\ttrue\t0\t0\t0'/$'winwidget.billing.settings-source.v1\ttrue\t1\t0\t0'}" || return 1
 	! platform_cutover_legacy_settings_queue_listing_is_drained \
-		"${legacy_listing/winwidget.core.billing.settings.v1 true 0 0 0/winwidget.core.billing.settings.v1 false 0 0 0}" || return 1
+		"${legacy_listing/$'winwidget.core.billing.settings.v1\ttrue\t0\t0\t0'/$'winwidget.core.billing.settings.v1\tfalse\t0\t0\t0'}" || return 1
 	queue_details="$(PLATFORM_QUEUE_PREFIX="$PLATFORM_ADMIN_AUDIT_QUEUE" \
 		PLATFORM_QUEUE_KIND="$PLATFORM_ADMIN_AUDIT_KIND" node -e '
 const prefix = process.env.PLATFORM_QUEUE_PREFIX;
 const kind = process.env.PLATFORM_QUEUE_KIND;
 const rows = [
-  { name: prefix, arguments: {} },
-  { name: `${prefix}.dead-letter`, arguments: {} },
+  { name: prefix, arguments: { "x-queue-type": "classic" } },
+  { name: `${prefix}.dead-letter`, arguments: { "x-queue-type": "classic" } },
   ...[30_000, 300_000, 1_800_000].map((ttl, index) => ({
     name: `${prefix}.retry-v2.${index + 1}`,
     arguments: {
+      "x-queue-type": "classic",
       "x-message-ttl": ttl,
       "x-dead-letter-exchange": "winwidget.manual-retry",
       "x-dead-letter-routing-key": kind,
@@ -3947,31 +4105,38 @@ const rows = [
 }));
 process.stdout.write(JSON.stringify(rows));
 ')" || return 1
-	platform_cutover_platform_admin_audit_queue_details_are_exact "$queue_details" || return 1
+	platform_cutover_platform_admin_audit_queue_details_are_exact "$queue_details" "$validator_image" || return 1
 	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
 rows[2].arguments["x-message-ttl"] += 1;
 process.stdout.write(JSON.stringify(rows));
 ')" || return 1
-	! platform_cutover_platform_admin_audit_queue_details_are_exact "$invalid_details" || return 1
+	! platform_cutover_platform_admin_audit_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
 	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
-rows[0].arguments.unexpected = true;
+delete rows[0].arguments["x-queue-type"];
 process.stdout.write(JSON.stringify(rows));
 ')" || return 1
-	! platform_cutover_platform_admin_audit_queue_details_are_exact "$invalid_details" || return 1
+	! platform_cutover_platform_admin_audit_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
+	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
+const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
+rows[0].arguments["x-queue-type"] = "quorum";
+process.stdout.write(JSON.stringify(rows));
+')" || return 1
+	! platform_cutover_platform_admin_audit_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
 	invalid_details="$(PLATFORM_QUEUE_DETAILS_JSON="$queue_details" node -e '
 const rows = JSON.parse(process.env.PLATFORM_QUEUE_DETAILS_JSON);
 rows.pop();
 process.stdout.write(JSON.stringify(rows));
 ')" || return 1
-	! platform_cutover_platform_admin_audit_queue_details_are_exact "$invalid_details" || return 1
+	! platform_cutover_platform_admin_audit_queue_details_are_exact "$invalid_details" "$validator_image" || return 1
 	[[ "$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" == *'winwidget\.core\.billing\.settings\.v1'* &&
 		"$PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN" == *'winwidget\.billing\.settings-source\.v1'* &&
 		"$source" == *'stop --timeout 90 integration-worker billing-worker'* &&
 		"$source" == *'platform_cutover_legacy_settings_queue_listing_is_drained'* &&
 		"$source" == *"billing.settings.source.changed.v1"*'status::text'*'PUBLISHED'* &&
 		"$source" == *'platform_cutover_verify_gateway_routes'* &&
+		"$retire_source" == *'platform_cutover_delete_queue_if_present'* &&
 		"$source" == *'delete_queue'*'--if-empty'*'--if-unused'* &&
 		"$retire_source" == *'platform_cutover_provision_platform_admin_audit_topology'*'platform_cutover_provision_integration_worker_permissions'*'if [[ "$mode" == hold-billing ]]'*'up -d --no-deps --force-recreate integration-worker'* &&
 		"$source" == *'stop --timeout 90 billing-worker'* &&
@@ -3982,7 +4147,7 @@ process.stdout.write(JSON.stringify(rows));
 		"$source" == *'platform_cutover_settings_projection_topology_is_absent'* &&
 		"$source" == *'platform_cutover_assert_integration_worker_permissions'*'platform_cutover_assert_platform_admin_audit_topology'* &&
 		"$source" == *'"x-message-ttl": 30_000'*'"x-message-ttl": 300_000'*'"x-message-ttl": 1_800_000'* &&
-		"$provision_source" == *'require("amqplib")'*'assertQueue(queue, { durable: true })'*'.retry-v2.${index + 1}'*'deadLetterExchange: "winwidget.manual-retry"'*'platform_cutover_assert_platform_admin_audit_topology'* ]]
+		"$provision_source" == *'require("amqplib")'*'assertQueue(queue'*'"x-queue-type": "classic"'*'.retry-v2.${index + 1}'*'deadLetterExchange: "winwidget.manual-retry"'*'platform_cutover_assert_platform_admin_audit_topology'* ]]
 )
 
 platform_cutover_self_test_core_route_matrix() (
@@ -4354,13 +4519,16 @@ platform_cutover_self_test_target_active_crash_resume() (
 )
 
 platform_cutover_self_test_core_migration_ledger() (
-	local prior repository before after wrong extra incomplete source readiness_source migration_source
+	local prior ownership repository before after wrong extra incomplete source readiness_source migration_source
 	prior='20260823000000_prior_platform_dependency'
+	ownership='20260824000000_prepare_platform_service_ownership'
 	repository="$prior|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-$PLATFORM_CORE_PREPARE_MIGRATION|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	before="$prior|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|applied"
+$ownership|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+$PLATFORM_CORE_PREPARE_MIGRATION|cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	before="$prior|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|applied
+$ownership|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|applied"
 	after="$before
-$PLATFORM_CORE_PREPARE_MIGRATION|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|applied"
+$PLATFORM_CORE_PREPARE_MIGRATION|cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc|applied"
 	platform_cutover_core_migration_ledger_is_exact before "$repository" "$before" || return 1
 	platform_cutover_core_migration_ledger_is_exact after "$repository" "$after" || return 1
 	! platform_cutover_core_migration_ledger_is_exact before "$repository" "$after" || return 1
@@ -4588,6 +4756,7 @@ platform_cutover_self_test() {
 	platform_cutover_self_test_bound_hash_tamper
 	platform_cutover_self_test_unbound_dump_resume
 	platform_cutover_self_test_complete_noop
+	platform_cutover_self_test_delete_queue_if_present
 	platform_cutover_self_test_billing_offer_topology
 	platform_cutover_self_test_settings_projection_topology
 	platform_cutover_self_test_core_route_matrix
@@ -4614,6 +4783,8 @@ platform_cutover_self_test() {
 		platform_cutover_verify_billing_offer_v2_boundary \
 		platform_cutover_retire_billing_offer_v1 \
 		platform_cutover_retire_settings_projection \
+		platform_cutover_queue_presence_is_exact \
+		platform_cutover_delete_queue_if_present \
 		platform_cutover_ensure_billing_api_candidate \
 		platform_cutover_assert_gateway_runtime \
 		platform_cutover_assert_gateway_receipt_identity \

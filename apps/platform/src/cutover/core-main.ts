@@ -949,18 +949,21 @@ export async function runPlatformCoreAction(args: Args) {
 	});
 	try {
 		await client.$connect();
-		if (args.action === 'status') return status(client);
+		if (args.action === 'status') return await status(client);
 		if (args.action === 'preflight')
-			return preflight(client, args.revision!);
-		if (args.action === 'prepare') return prepare(client, args.revision!);
-		if (args.action === 'fence') return fence(client, args.revision!);
+			return await preflight(client, args.revision!);
+		if (args.action === 'prepare')
+			return await prepare(client, args.revision!);
+		if (args.action === 'fence')
+			return await fence(client, args.revision!);
 		if (args.action === 'export') {
-			return exportSnapshot(client, args.revision!, args.file!);
+			return await exportSnapshot(client, args.revision!, args.file!);
 		}
 		if (args.action === 'activate') {
-			return activate(client, args as Required<Args>);
+			return await activate(client, args as Required<Args>);
 		}
-		if (args.action === 'abort') return abort(client, args.revision!);
+		if (args.action === 'abort')
+			return await abort(client, args.revision!);
 		throw new PlatformCutoverError('Unsupported Platform Core action');
 	} finally {
 		await client.$disconnect();

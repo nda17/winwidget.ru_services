@@ -251,6 +251,10 @@ const platformMigration = readFileSync(
   "apps/platform/prisma/migrations/20260823000000_init_platform/migration.sql",
   "utf8",
 );
+const platformMonotonicTimestampMigration = readFileSync(
+  "apps/platform/prisma/migrations/20260823010000_fix_service_identity_timestamp_monotonicity/migration.sql",
+  "utf8",
+);
 const platformSchema = readFileSync(
   "apps/platform/prisma/schema.prisma",
   "utf8",
@@ -277,6 +281,10 @@ const platformOfferContinuity = readFileSync(
 );
 const billingMessagingConstants = readFileSync(
   "apps/billing/src/messaging/billing-messaging.constants.ts",
+  "utf8",
+);
+const billingRabbitMqService = readFileSync(
+  "apps/billing/src/messaging/billing-rabbitmq.service.ts",
   "utf8",
 );
 const billingProjection = readFileSync(
@@ -497,6 +505,39 @@ if (
   !/CREATE FUNCTION "platform"\."refresh_current_semantic_fingerprint"\(\s*expected_post_fingerprint TEXT\s*\)/.test(
     platformMigration,
   ) ||
+  !/CREATE OR REPLACE FUNCTION "platform"\."refresh_current_semantic_fingerprint"\(\s*expected_post_fingerprint TEXT\s*\)/.test(
+    platformMonotonicTimestampMigration,
+  ) ||
+  !platformMonotonicTimestampMigration.includes("VOLATILE") ||
+  !platformMonotonicTimestampMigration.includes("SECURITY INVOKER") ||
+  platformMonotonicTimestampMigration.includes("SECURITY DEFINER") ||
+  !platformMonotonicTimestampMigration.includes(
+    "SET search_path = pg_catalog, platform",
+  ) ||
+  !platformMonotonicTimestampMigration.includes(
+    '"updated_at" = GREATEST(',
+  ) ||
+  !platformMonotonicTimestampMigration.includes(
+    "pg_catalog.clock_timestamp()::timestamp",
+  ) ||
+  platformMonotonicTimestampMigration.includes(
+    '"updated_at" = CURRENT_TIMESTAMP',
+  ) ||
+  !platformMonotonicTimestampMigration.includes(
+    "CONSTRAINT = 'platform_current_semantic_fingerprint_guard'",
+  ) ||
+  !platformMonotonicTimestampMigration.includes(
+    "'winwidget.platform_expected_semantic_fingerprint'",
+  ) ||
+  !platformMonotonicTimestampMigration.includes(
+    'REVOKE ALL ON FUNCTION "platform"."refresh_current_semantic_fingerprint"(TEXT) FROM PUBLIC;',
+  ) ||
+  !platformMonotonicTimestampMigration.includes(
+    'GRANT EXECUTE ON FUNCTION "platform"."refresh_current_semantic_fingerprint"(TEXT)',
+  ) ||
+  !platformMonotonicTimestampMigration.includes(
+    "GRANT UPDATE (current_semantic_fingerprint, updated_at)",
+  ) ||
   !platformMigration.includes(
     'CREATE FUNCTION "platform"."enforce_current_semantic_fingerprint"()',
   ) ||
@@ -581,6 +622,25 @@ if (
   !platformBackupRestoreRehearsal.includes(
     "coherent % probe rollback left database drift",
   ) ||
+  !platformBackupRestoreRehearsal.includes(
+    "monotonic_transaction_start + interval '1 second'",
+  ) ||
+  !platformBackupRestoreRehearsal.includes(
+    "Platform fingerprint refresh moved service identity timestamp backwards",
+  ) ||
+  !platformBackupRestoreRehearsal.includes(
+    "rollback monotonic timestamp probe",
+  ) ||
+  !platformBackupRestoreRehearsal.includes(
+    '"$migration_count" == 2',
+  ) ||
+  !platformBackupRestoreRehearsal.includes(
+    "20260823010000_fix_service_identity_timestamp_monotonicity",
+  ) ||
+  !platformCutoverScript.includes("value.counts.migrations !== 2") ||
+  !platformCutoverScript.includes(
+    "20260823010000_fix_service_identity_timestamp_monotonicity",
+  ) ||
   platformWorkflowRestoreStart < 0 ||
   platformWorkflowRestoreEnd <= platformWorkflowRestoreStart ||
   !platformWorkflowRestore.includes(
@@ -618,6 +678,13 @@ if (
   !platformWorkflowRestore.includes("trigger_entry.tgdeferrable") ||
   !platformWorkflowRestore.includes("trigger_entry.tginitdeferred") ||
   !platformWorkflowRestore.includes("DO $guard_probe$") ||
+  !platformWorkflowRestore.includes("DO $monotonic_timestamp$") ||
+  !platformWorkflowRestore.includes(
+    "transaction_started + interval '1 second'",
+  ) ||
+  !platformWorkflowRestore.includes(
+    "Platform CI fingerprint refresh moved service identity timestamp backwards",
+  ) ||
   !platformWorkflowRestore.includes("SET CONSTRAINTS ALL IMMEDIATE") ||
   !platformWorkflowRestore.includes("actual_state <> '23514'") ||
   !platformWorkflowRestore.includes(
@@ -627,6 +694,9 @@ if (
   !platformWorkflowRestore.includes("DELETE FROM platform.outbox_events") ||
   platformWorkflowRestore.includes(
     "INSERT INTO platform.source_sequences (id, next_value, updated_at) VALUES ('$sentinel_id', 42",
+  ) ||
+  !workflow.includes(
+    "apps/platform/prisma/migrations/20260823010000_fix_service_identity_timestamp_monotonicity/migration.sql",
   )
 ) {
   throw new Error(
@@ -861,6 +931,10 @@ const platformPrepare = platformSlice(
   "\nplatform_cutover_prepare() {\n",
   "\nplatform_cutover_validate_restore_evidence() {\n",
 );
+const platformRestoreEvidenceValidator = platformSlice(
+  "\nplatform_cutover_validate_restore_evidence() {\n",
+  "\nplatform_cutover_run_restore() {\n",
+);
 const platformRestorePhaseA = platformSlice(
   "\nplatform_cutover_restore_phase_a_runtime() {\n",
   "\nplatform_cutover_abort() {\n",
@@ -872,6 +946,22 @@ const platformAbort = platformSlice(
 const platformIntegrationTopology = platformSlice(
   "\nplatform_cutover_assert_platform_admin_audit_topology() {\n",
   "\nplatform_cutover_assert_integration_worker_permissions() {\n",
+);
+const platformQueueDeleteHelper = platformSlice(
+  "\nplatform_cutover_queue_presence_is_exact() {\n",
+  "\nplatform_cutover_billing_offer_v2_listing_is_exact() {\n",
+);
+const platformBillingQueueDetailsValidator = platformSlice(
+  "\nplatform_cutover_billing_offer_v2_queue_details_are_exact() {\n",
+  "\nplatform_cutover_platform_admin_audit_queue_listing_is_exact() {\n",
+);
+const platformAdminQueueDetailsValidator = platformSlice(
+  "\nplatform_cutover_platform_admin_audit_queue_details_are_exact() {\n",
+  "\nplatform_cutover_assert_billing_worker_image() {\n",
+);
+const platformRetireBillingOfferV1 = platformSlice(
+  "\nplatform_cutover_retire_billing_offer_v1() {\n",
+  "\nplatform_cutover_verify_billing_offer_v2_boundary() {\n",
 );
 const platformIntegrationCandidate = platformSlice(
   "\nplatform_cutover_assert_integration_worker_candidate() {\n",
@@ -1011,6 +1101,9 @@ if (
   platformPrepare.includes("build --pull --provenance=false") ||
   platformPrepareOrder.some((position) => position < 0) ||
   platformPrepareOrder.some((position, index) => index > 0 && position <= platformPrepareOrder[index - 1]) ||
+  !/--user 0:0\s*\\\s+--mount "type=bind,source=\$evidence,target=\/evidence\.json,readonly"/.test(
+    platformRestoreEvidenceValidator,
+  ) ||
   !platformReceiptValidator.includes("NR != 22") ||
   !platformReceiptValidator.includes("core_api_container_id") ||
   !platformReceiptValidator.includes("core_api_image_id") ||
@@ -1052,7 +1145,34 @@ if (
   !platformIntegrationTopology.includes("platform_cutover_platform_admin_audit_queue_details_are_exact") ||
   !platformIntegrationTopology.includes("platform_cutover_platform_admin_audit_queue_listing_is_exact") ||
   !platformIntegrationTopology.includes("platform_cutover_platform_admin_audit_bindings_are_exact") ||
+  !platformIntegrationTopology.includes('"x-queue-type": "classic"') ||
   platformIntegrationTopology.includes('--env "RABBITMQ_ADMIN_PASSWORD=') ||
+  !platformQueueDeleteHelper.includes("list_queues -p \"$vhost\" name") ||
+  !platformQueueDeleteHelper.includes("$0 == queue { found += 1 }") ||
+  (platformQueueDeleteHelper.match(/platform_cutover_queue_presence_is_exact/g) || []).length < 3 ||
+  !platformQueueDeleteHelper.includes("delete_queue") ||
+  !platformQueueDeleteHelper.includes("--if-empty --if-unused") ||
+  !platformRetireBillingOfferV1.includes("platform_cutover_delete_queue_if_present") ||
+  !platformRetireSettingsProjection.includes("while IFS=$' \\t' read -r queue _") ||
+  !platformRetireSettingsProjection.includes("platform_cutover_delete_queue_if_present") ||
+  !platformCutoverScript.includes("platform_cutover_self_test_delete_queue_if_present") ||
+  !platformCutoverScript.includes("legacy_listing=$'winwidget.core.billing.settings.v1\\ttrue") ||
+  (platformCutoverScript.match(/rabbitmqctl --silent list_permissions -p "\$vhost" \|/g) || []).length !== 2 ||
+  (platformCutoverScript.match(/rabbitmqctl --silent list_topic_permissions -p "\$vhost" \|/g) || []).length !== 2 ||
+  /list_permissions -p "\$vhost"\s*\\\s*user configure write read/.test(platformCutoverScript) ||
+  /list_topic_permissions -p "\$vhost"\s*\\\s*user exchange write read/.test(platformCutoverScript) ||
+  !platformBillingQueueDetailsValidator.includes("platform_cutover_assert_release_image_id billing \"$image\"") ||
+  !platformAdminQueueDetailsValidator.includes("platform_cutover_assert_release_image_id core \"$image\"") ||
+  ![platformBillingQueueDetailsValidator, platformAdminQueueDetailsValidator].every(
+    (validator) =>
+      validator.includes("platform_database_docker run --rm --pull never --network none --read-only") &&
+      validator.includes("--cap-drop ALL --security-opt no-new-privileges --pids-limit 64") &&
+      validator.includes('const classic = { "x-queue-type": "classic" };') &&
+      !/\snode -e '/.test(validator),
+  ) ||
+  (platformCutoverScript.match(/delete rows\[0\]\.arguments\["x-queue-type"\]/g) || []).length !== 2 ||
+  (platformCutoverScript.match(/rows\[0\]\.arguments\["x-queue-type"\] = "quorum"/g) || []).length !== 2 ||
+  (billingRabbitMqService.match(/arguments: \{ 'x-queue-type': 'classic' \}/g) || []).length !== 3 ||
   platformIntegrationCandidate.indexOf("platform_cutover_assert_integration_worker_permissions") < 0 ||
   platformIntegrationCandidate.indexOf("platform_cutover_assert_platform_admin_audit_topology") <=
     platformIntegrationCandidate.indexOf("platform_cutover_assert_integration_worker_permissions") ||

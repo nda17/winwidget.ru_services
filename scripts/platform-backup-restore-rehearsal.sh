@@ -380,7 +380,48 @@ DECLARE
     actual_state TEXT;
     actual_constraint TEXT;
     rollback_marker TEXT;
+    monotonic_transaction_start TIMESTAMP;
+    monotonic_before_refresh TIMESTAMP;
+    monotonic_after_refresh TIMESTAMP;
 BEGIN
+    BEGIN
+        monotonic_transaction_start := CURRENT_TIMESTAMP::timestamp;
+        UPDATE platform.service_identity
+        SET updated_at = GREATEST(
+            updated_at,
+            monotonic_transaction_start + interval '1 second'
+        )
+        WHERE id = 'singleton'
+        RETURNING updated_at INTO monotonic_before_refresh;
+        IF monotonic_before_refresh <= monotonic_transaction_start THEN
+            RAISE EXCEPTION 'Platform monotonic timestamp probe did not move beyond transaction start';
+        END IF;
+        PERFORM platform.refresh_current_semantic_fingerprint(
+            platform.current_semantic_fingerprint()
+        );
+        SET CONSTRAINTS ALL IMMEDIATE;
+        SELECT updated_at, current_semantic_fingerprint
+        INTO monotonic_after_refresh, after_persisted
+        FROM platform.service_identity
+        WHERE id = 'singleton';
+        after_recomputed := platform.current_semantic_fingerprint();
+        IF monotonic_after_refresh < monotonic_before_refresh THEN
+            RAISE EXCEPTION 'Platform fingerprint refresh moved service identity timestamp backwards';
+        END IF;
+        IF after_persisted IS DISTINCT FROM after_recomputed THEN
+            RAISE EXCEPTION 'Platform monotonic timestamp probe left a stale semantic fingerprint';
+        END IF;
+        RAISE EXCEPTION USING
+            ERRCODE = 'P0003',
+            MESSAGE = 'rollback monotonic timestamp probe';
+    EXCEPTION WHEN SQLSTATE 'P0003' THEN
+        GET STACKED DIAGNOSTICS rollback_marker = MESSAGE_TEXT;
+        IF rollback_marker <> 'rollback monotonic timestamp probe' THEN
+            RAISE EXCEPTION 'unexpected monotonic timestamp rollback marker';
+        END IF;
+    END;
+    SET CONSTRAINTS ALL DEFERRED;
+
     FOR probe IN
         SELECT * FROM (VALUES
             (
@@ -593,7 +634,8 @@ platform_restore_run() {
 
 	local restored_system restored_database_id table_count migration_count
 	local identity_phase offer_phase source_high_watermark site_count legal_count home_count outbox_count
-	local table_manifest index_manifest migration_manifest expected_migration_checksum
+	local table_manifest index_manifest migration_manifest expected_init_migration_checksum
+	local expected_migration_checksum
 	local repeat_dump repeat_list repeat_list_sha256
 	restored_system="$(platform_restore_query postgres 'SELECT (pg_control_system()).system_identifier;')"
 	[[ "$restored_system" =~ ^[1-9][0-9]*$ && "$restored_system" != "$source_system_identifier" ]] ||
@@ -620,16 +662,19 @@ platform_restore_run() {
 		"SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema = 'platform' AND table_type = 'BASE TABLE';")"
 	index_manifest="$(platform_restore_query winwidget_platform \
 		"SELECT string_agg(indexname, ',' ORDER BY indexname) FROM pg_indexes WHERE schemaname = 'platform';")"
-	expected_migration_checksum="$(platform_restore_sha256 \
+	expected_init_migration_checksum="$(platform_restore_sha256 \
 		"$PLATFORM_RESTORE_ROOT/apps/platform/prisma/migrations/20260823000000_init_platform/migration.sql")"
+	expected_migration_checksum="$(platform_restore_sha256 \
+		"$PLATFORM_RESTORE_ROOT/apps/platform/prisma/migrations/20260823010000_fix_service_identity_timestamp_monotonicity/migration.sql")"
 	migration_manifest="$(platform_restore_query winwidget_platform \
 		"SELECT migration_name || '|' || checksum FROM platform._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name;")"
-	[[ "$table_count" == 8 && "$migration_count" == 1 &&
+	[[ "$table_count" == 8 && "$migration_count" == 2 &&
 		"$site_count" == 1 && "$legal_count" == 4 && "$home_count" == 1 &&
 		"$outbox_count" == 0 &&
 		"$table_manifest" == '_prisma_migrations,billing_offer_producer_state,home_page_content,legal_pages,outbox_events,service_identity,site_settings,source_sequences' &&
 		"$index_manifest" == '_prisma_migrations_pkey,billing_offer_producer_state_pkey,home_page_content_pkey,legal_pages_pkey,outbox_events_deduplication_key_key,outbox_events_event_id_key,outbox_events_pkey,outbox_events_retention_idx,outbox_events_status_available_at_idx,service_identity_pkey,site_settings_pkey,source_sequences_pkey' &&
-		"$migration_manifest" == "20260823000000_init_platform|$expected_migration_checksum" ]] ||
+		"$migration_manifest" == "20260823000000_init_platform|$expected_init_migration_checksum
+20260823010000_fix_service_identity_timestamp_monotonicity|$expected_migration_checksum" ]] ||
 		platform_restore_fail 'restored Platform anchors are incomplete' || return 1
 	case "$phase" in
 	imported) [[ "$identity_phase|$offer_phase" == 'SHADOW|IMPORTED' ]] ;;
@@ -780,6 +825,11 @@ platform_restore_self_test() {
 		"$source" == *'platform.service_identity'* &&
 		"$source" == *'service_identity_source_check'* &&
 		"$source" == *'platform.refresh_current_semantic_fingerprint'* &&
+		"$source" == *'monotonic_transaction_start + interval '\''1 second'\'''* &&
+		"$source" == *'Platform fingerprint refresh moved service identity timestamp backwards'* &&
+		"$source" == *'rollback monotonic timestamp probe'* &&
+		"$source" == *'"$migration_count" == 2'* &&
+		"$source" == *'20260823010000_fix_service_identity_timestamp_monotonicity'* &&
 		"$source" == *'SET CONSTRAINTS ALL IMMEDIATE'* &&
 		"$source" == *'RETURNED_SQLSTATE'* &&
 		"$source" == *'CONSTRAINT_NAME'* &&

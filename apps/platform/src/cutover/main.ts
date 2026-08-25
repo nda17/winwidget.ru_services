@@ -1249,14 +1249,19 @@ export async function runPlatformCutover(
 	});
 	try {
 		await client.$connect();
-		if (args.action === 'status') return status(client);
-		if (args.action === 'validate-shadow') return validateShadow(client);
-		if (args.action === 'verify') return verify(client);
-		if (args.action === 'activate') return activate(client, args.sha256!);
-		if (args.action === 'abort') return abortImport(client, args.sha256!);
+		if (args.action === 'status') return await status(client);
+		if (args.action === 'validate-shadow')
+			return await validateShadow(client);
+		if (args.action === 'verify') return await verify(client);
+		if (args.action === 'activate')
+			return await activate(client, args.sha256!);
+		if (args.action === 'abort')
+			return await abortImport(client, args.sha256!);
 		const loaded = await loadPlatformSnapshot(args.file!, args.sha256);
-		if (args.action === 'preflight') return preflight(client, loaded);
-		if (args.action === 'import') return importSnapshot(client, loaded);
+		if (args.action === 'preflight')
+			return await preflight(client, loaded);
+		if (args.action === 'import')
+			return await importSnapshot(client, loaded);
 		throw new PlatformCutoverError('Unsupported Platform cutover action');
 	} finally {
 		await client.$disconnect();

@@ -8,6 +8,13 @@ const migration = readFileSync(
 	),
 	'utf8'
 );
+const monotonicTimestampMigration = readFileSync(
+	join(
+		__dirname,
+		'../../prisma/migrations/20260823010000_fix_service_identity_timestamp_monotonicity/migration.sql'
+	),
+	'utf8'
+);
 const sequenceSource = readFileSync(
 	join(__dirname, 'platform-sequence.ts'),
 	'utf8'
@@ -94,6 +101,57 @@ describe('Platform semantic fingerprint database guard', () => {
 			'platform.current_semantic_fingerprint()'
 		);
 		expect(migration).not.toContain('SECURITY DEFINER');
+	});
+
+	it('keeps service identity updated_at monotonic when a transaction refreshes the fingerprint', () => {
+		expect(monotonicTimestampMigration.trimStart()).toMatch(/^BEGIN;/);
+		expect(monotonicTimestampMigration.trimEnd()).toMatch(/COMMIT;$/);
+		expect(monotonicTimestampMigration).toContain(
+			'CREATE OR REPLACE FUNCTION "platform"."refresh_current_semantic_fingerprint"('
+		);
+		expect(monotonicTimestampMigration).toContain('VOLATILE');
+		expect(monotonicTimestampMigration).toContain('SECURITY INVOKER');
+		expect(monotonicTimestampMigration).not.toContain('SECURITY DEFINER');
+		expect(monotonicTimestampMigration).toContain(
+			'SET search_path = pg_catalog, platform'
+		);
+		expect(monotonicTimestampMigration).toContain(
+			'"updated_at" = GREATEST(\n            "updated_at",\n            pg_catalog.clock_timestamp()::timestamp\n        )'
+		);
+		expect(monotonicTimestampMigration).not.toContain(
+			'"updated_at" = CURRENT_TIMESTAMP'
+		);
+		expect(monotonicTimestampMigration).toContain(
+			"CONSTRAINT = 'platform_current_semantic_fingerprint_guard'"
+		);
+		expect(monotonicTimestampMigration).toContain(
+			"'winwidget.platform_expected_semantic_fingerprint'"
+		);
+		expect(monotonicTimestampMigration).toContain(
+			'REVOKE ALL ON FUNCTION "platform"."refresh_current_semantic_fingerprint"(TEXT) FROM PUBLIC;'
+		);
+		expect(monotonicTimestampMigration).toContain(
+			'GRANT EXECUTE ON FUNCTION "platform"."refresh_current_semantic_fingerprint"(TEXT)'
+		);
+		expect(monotonicTimestampMigration).toContain(
+			'GRANT UPDATE (current_semantic_fingerprint, updated_at)'
+		);
+		expect(restoreRehearsalSource).toContain(
+			"monotonic_transaction_start + interval '1 second'"
+		);
+		expect(restoreRehearsalSource).toContain(
+			'Platform fingerprint refresh moved service identity timestamp backwards'
+		);
+		expect(restoreRehearsalSource).toContain(
+			'rollback monotonic timestamp probe'
+		);
+		expect(deployWorkflowSource).toContain('DO $monotonic_timestamp$');
+		expect(deployWorkflowSource).toContain(
+			"transaction_started + interval '1 second'"
+		);
+		expect(deployWorkflowSource).toContain(
+			'Platform CI fingerprint refresh moved service identity timestamp backwards'
+		);
 	});
 
 	it('keeps runtime grants exact for the invoker protocol', () => {

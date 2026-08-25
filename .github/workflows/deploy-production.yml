@@ -213,6 +213,7 @@ jobs:
             apps/platform/pnpm-lock.yaml
             apps/platform/prisma/schema.prisma
             apps/platform/prisma/migrations/20260823000000_init_platform/migration.sql
+            apps/platform/prisma/migrations/20260823010000_fix_service_identity_timestamp_monotonicity/migration.sql
             .github/scripts/validate-production-compose.cjs
             deploy/docker-compose.prod.yml
             deploy/nginx.conf
@@ -3590,6 +3591,48 @@ jobs:
             END IF;
           END
           $guard_probe$;
+          SQL
+
+          docker exec -i -e PGPASSWORD=platform_runtime_ci "$POSTGRES_CONTAINER_ID" \
+            psql --set ON_ERROR_STOP=1 --host 127.0.0.1 \
+              --username winwidget_platform_runtime --dbname winwidget_platform_ci <<'SQL'
+          BEGIN;
+          DO $monotonic_timestamp$
+          DECLARE
+            transaction_started TIMESTAMP := CURRENT_TIMESTAMP::timestamp;
+            before_refresh TIMESTAMP;
+            after_refresh TIMESTAMP;
+            persisted_fingerprint TEXT;
+            recomputed_fingerprint TEXT;
+          BEGIN
+            UPDATE platform.service_identity
+            SET updated_at = GREATEST(
+              updated_at,
+              transaction_started + interval '1 second'
+            )
+            WHERE id = 'singleton'
+            RETURNING updated_at INTO before_refresh;
+            IF before_refresh <= transaction_started THEN
+              RAISE EXCEPTION 'Platform CI monotonic timestamp probe did not move beyond transaction start';
+            END IF;
+            PERFORM platform.refresh_current_semantic_fingerprint(
+              platform.current_semantic_fingerprint()
+            );
+            SET CONSTRAINTS ALL IMMEDIATE;
+            SELECT updated_at, current_semantic_fingerprint
+            INTO after_refresh, persisted_fingerprint
+            FROM platform.service_identity
+            WHERE id = 'singleton';
+            recomputed_fingerprint := platform.current_semantic_fingerprint();
+            IF after_refresh < before_refresh THEN
+              RAISE EXCEPTION 'Platform CI fingerprint refresh moved service identity timestamp backwards';
+            END IF;
+            IF persisted_fingerprint IS DISTINCT FROM recomputed_fingerprint THEN
+              RAISE EXCEPTION 'Platform CI monotonic timestamp probe left a stale semantic fingerprint';
+            END IF;
+          END
+          $monotonic_timestamp$;
+          ROLLBACK;
           SQL
 
           sentinel_id=ci-platform-restore-${{ github.run_id }}-${{ github.run_attempt }}

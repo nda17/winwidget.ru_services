@@ -112,4 +112,27 @@ describe('BillingRabbitMqService topology ordering', () => {
 			'winwidget.billing.settings-source.v1'
 		);
 	});
+
+	it('declares every durable queue explicitly as classic', async () => {
+		const channel = {
+			assertExchange: jest.fn().mockResolvedValue(undefined),
+			assertQueue: jest.fn().mockResolvedValue(undefined),
+			bindQueue: jest.fn().mockResolvedValue(undefined)
+		};
+		const service = makeService() as unknown as {
+			assertWorkerTopology: (candidate: typeof channel) => Promise<void>;
+		};
+
+		await service.assertWorkerTopology(channel);
+
+		expect(channel.assertQueue).toHaveBeenCalledTimes(
+			BILLING_CONSUMER_KINDS.length * 5
+		);
+		for (const [, options] of channel.assertQueue.mock.calls) {
+			expect(options).toMatchObject({
+				durable: true,
+				arguments: { 'x-queue-type': 'classic' }
+			});
+		}
+	});
 });
