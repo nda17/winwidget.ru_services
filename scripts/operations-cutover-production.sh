@@ -181,6 +181,8 @@ platform_terminal_marker_path() {
 
 platform_terminal_assert_files_unchanged() {
   local migration_file="$SERVER_ROOT/prisma/migrations/$PLATFORM_TERMINAL_MIGRATION/migration.sql"
+  declare -F platform_cleanup_sha256 >/dev/null ||
+    load_platform_terminal_dependencies || return 1
   assert_checkout "$EXPECTED_REVISION"
   [[ -f "$migration_file" && ! -L "$migration_file" &&
     "$(platform_cleanup_sha256 "$migration_file")" == "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" &&
@@ -3320,6 +3322,8 @@ NODE
       <<<"$guc_configure_source")" -ge 2 &&
     "$guc_configure_source" != \
       *'platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "$sql"'* ]]
+  [[ "$source" == *'declare -F platform_cleanup_sha256 >/dev/null ||'* &&
+    "$source" == *'load_platform_terminal_dependencies || return 1'* ]]
   [[ "$prepared_recovery_source" == *'git -C "$SERVER_ROOT" rev-list --parents -n 1 "$intermediate"'* &&
     "$prepared_recovery_source" == *'"$intermediate $ancestor"'* &&
     "$prepared_recovery_source" == *'git -C "$SERVER_ROOT" rev-list --parents -n 1 "$revision"'* &&
