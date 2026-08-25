@@ -539,6 +539,10 @@ assert.match(
   operationsDatabaseGate,
   /assert_operations_core_source_removed_for_routine_deploy/,
 );
+assert(
+  operationsDatabaseGate.includes('].join(" ") + "\\n");'),
+  "Operations ACTIVE status parser must emit a newline for Bash read",
+);
 assert.doesNotMatch(operationsDatabaseGate, /DROP (?:TABLE|FUNCTION|TYPE)/);
 const functionStart = source.indexOf("\nprovision_rabbitmq_user() {");
 const scriptStart = source.indexOf('const amqp = require("amqplib");', functionStart);
@@ -6151,7 +6155,7 @@ process.stdout.write([
 	value.snapshotSha256,
 	value.notes,
 	value.adminEventLogs,
-].join(" "));
+].join(" ") + "\n");
 '
 	) || {
 		unset status_json
