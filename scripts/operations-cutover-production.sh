@@ -500,9 +500,39 @@ WHERE event_type IN ('admin.audit.platform.v1','billing.offer.changed.v2')
   fail 'Core Platform/Billing Outbox rows did not drain before terminal Platform DDL'
 }
 
+platform_terminal_wait_gateway_healthy() {
+  local expected_image_id="$1" revision="$EXPECTED_REVISION"
+  local container metadata app_revision
+  [[ "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ &&
+    "$revision" =~ ^[0-9a-f]{40}$ ]] || return 1
+  for _ in $(seq 1 60); do
+    container="$(compose ps --status running -q api-gateway)" ||
+      fail 'coordinated Gateway container cannot be resolved while waiting for Docker health'
+    [[ "$container" =~ ^[0-9a-f]{64}$ ]] ||
+      fail 'coordinated Gateway container identity is invalid while waiting for Docker health'
+    metadata="$(docker inspect --format \
+      '{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{.RestartCount}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+      "$container")" ||
+      fail 'coordinated Gateway metadata cannot be inspected while waiting for Docker health'
+    app_revision="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" |
+      awk -F= '$1 == "APP_REVISION" { print substr($0, index($0, "=") + 1); found += 1 } END { exit(found == 1 ? 0 : 1) }')" ||
+      fail 'coordinated Gateway revision cannot be inspected while waiting for Docker health'
+    [[ "$app_revision" == "$revision" ]] ||
+      fail 'coordinated Gateway revision changed while waiting for Docker health'
+    if [[ "$metadata" == "$expected_image_id|running|true|0|winwidget|api-gateway|healthy" ]]; then
+      printf '%s\n' "$container"
+      return
+    fi
+    [[ "$metadata" == "$expected_image_id|running|true|0|winwidget|api-gateway|starting" ]] ||
+      fail 'coordinated Gateway runtime identity changed while waiting for Docker health'
+    sleep 2
+  done
+  fail 'coordinated Gateway Docker health timed out'
+}
+
 platform_terminal_prepare_live_owner_runtime() {
   local revision="$EXPECTED_REVISION" platform_image platform_image_id core_image_id metadata
-  local service purpose port container app_revision gateway_image_id path
+  local service purpose port container app_revision gateway_image_id gateway_container path
   local direct_sha gateway_sha public_sha headers owner status
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return 1
   compose up -d --no-deps --no-build --force-recreate \
@@ -560,7 +590,9 @@ platform_terminal_prepare_live_owner_runtime() {
     "winwidget-api-gateway:git-$revision")" || return 1
   platform_cutover_validate_gateway_manifest "$gateway_image_id" ||
     fail 'coordinated Gateway route manifest is invalid'
-  platform_cutover_assert_gateway_runtime >/dev/null ||
+  gateway_container="$(platform_terminal_wait_gateway_healthy "$gateway_image_id")" ||
+    fail 'coordinated Gateway did not reach exact Docker healthy state'
+  [[ "$(platform_cutover_assert_gateway_runtime)" == "$gateway_container" ]] ||
     fail 'coordinated Gateway runtime identity or env is invalid'
   platform_cleanup_assert_gateway_contract || return 1
   for path in site-settings legal-pages legal-pages/oferta home-page-content; do
@@ -2405,7 +2437,8 @@ NODE
 self_test() {
   local revision='a234567890123456789012345678901234567890'
   local source source_without_backslashes cutover_source cleanup_sql
-  local node_runtime_source self_test_server_root index
+  local gateway_assert_contract gateway_manifest_contract gateway_ready_contract gateway_wait_contract
+  local gateway_wait_source live_owner_runtime_source node_runtime_source self_test_server_root index
   local -a source_contracts normalized_source_contracts cutover_contracts
   local -a forbidden_source_contracts
   source="$(declare -f \
@@ -2416,6 +2449,7 @@ self_test() {
     platform_terminal_prepare_live_owner_runtime \
     platform_terminal_assert_core_outbox_runtime \
     platform_terminal_wait_core_outbox_drained \
+    platform_terminal_wait_gateway_healthy \
     platform_terminal_candidate_migration_state \
     platform_terminal_operations_prepare_state \
     platform_terminal_assert_exact_repo_ledger \
@@ -2438,6 +2472,12 @@ self_test() {
     cutover)"
   source_without_backslashes="${source//\\/}"
   cutover_source="$(declare -f cutover)"
+  gateway_wait_source="$(declare -f platform_terminal_wait_gateway_healthy)"
+  live_owner_runtime_source="$(declare -f platform_terminal_prepare_live_owner_runtime)"
+  gateway_ready_contract="wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'"
+  gateway_manifest_contract='platform_cutover_validate_gateway_manifest "$gateway_image_id"'
+  gateway_wait_contract='gateway_container="$(platform_terminal_wait_gateway_healthy "$gateway_image_id")"'
+  gateway_assert_contract='[[ "$(platform_cutover_assert_gateway_runtime)" == "$gateway_container" ]]'
   node_runtime_source="$(declare -f \
     read_env_value \
     wait_operations_ready \
@@ -2499,6 +2539,8 @@ self_test() {
     'coordinated Core API runtime identity is invalid'
     'platform_terminal_wait_core_outbox_drained'
     "'admin.audit.platform.v1','billing.offer.changed.v2'"
+    'coordinated Gateway Docker health timed out'
+    '$expected_image_id|running|true|0|winwidget|api-gateway|starting'
     'identity-api operations-api operations-worker operations-outbox-publisher'
     'failed during or after a forward-only downtime phase'
     'platform_database_validate_marker'
@@ -2588,6 +2630,10 @@ self_test() {
     <<<"$source")" -ge 3 ]]
   [[ "$(grep -Fc 'platform_terminal_assert_files_unchanged' <<<"$cutover_source")" -ge 1 ]]
   [[ "$(grep -Fc 'platform_terminal_assert_files_unchanged' <<<"$source")" -ge 3 ]]
+  [[ "$gateway_wait_source" == *'[[ "$app_revision" == "$revision" ]]'* &&
+    "$gateway_wait_source" == *'$expected_image_id|running|true|0|winwidget|api-gateway|healthy'* ]]
+  [[ "$live_owner_runtime_source" == \
+    *"$gateway_ready_contract"*"$gateway_manifest_contract"*"$gateway_wait_contract"*"$gateway_assert_contract"* ]]
   for index in "${!forbidden_source_contracts[@]}"; do
     [[ "$source" != *"${forbidden_source_contracts[$index]}"* ]] || {
       printf 'operations-cutover self-test forbidden source contract %s is present\n' "$index" >&2
