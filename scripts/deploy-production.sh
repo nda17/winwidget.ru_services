@@ -35,7 +35,7 @@ support_steady_ownership_revision_from_marker() {
 }
 
 run_support_first_cutover_contract_self_test() {
-	local self_test_directory marker revision
+	local self_test_directory marker revision script_source
 	self_test_directory="$(
 		mktemp -d "${TMPDIR:-/tmp}/winwidget-support-first-cutover.XXXXXX"
 	)"
@@ -73,6 +73,31 @@ run_support_first_cutover_contract_self_test() {
 		echo 'Support first-cutover contract accepted duplicate lifecycle anchors.' >&2
 		return 1
 	fi
+	script_source="$(<"${BASH_SOURCE[0]}")"
+	[[ "$script_source" == *'PLATFORM_IMAGE | PLATFORM_REVISION | SUPPORT_IMAGE | SUPPORT_REVISION'* ]] || {
+		echo 'Support first-cutover contract lost its derived service image allowlist.' >&2
+		return 1
+	}
+	[[ "$script_source" == *'pre_support_narrow_integration_kinds'* &&
+		"$script_source" == *'Allowing the pre-Support integration worker only for its one-way Support consumer bootstrap.'* ]] || {
+		echo 'Support first-cutover contract lost its integration-worker bootstrap boundary.' >&2
+		return 1
+	}
+	[[ "$script_source" == *'verify_support_steady_ownership() {'* &&
+		"$script_source" == *'DATABASE_URL="$(get_env_value DATABASE_URL_PRODUCTION)"'*'--env DATABASE_URL'* ]] || {
+		echo 'Support first-cutover contract lost its direct Core database boundary.' >&2
+		return 1
+	}
+	[[ "$script_source" == *'support_worker_resource_pattern='*'winwidget\.support\.telegram-webhook\.v1'* &&
+		"$script_source" == *'"$support_worker_resource_pattern"'*'"$support_worker_resource_pattern"'*'"$support_worker_resource_pattern"'* ]] || {
+		echo 'Support first-cutover contract lost its queue bind permission boundary.' >&2
+		return 1
+	}
+	[[ "$script_source" == *'Support worker is missing required TELEGRAM_SUPPORT_BOT_TOKEN.'* &&
+		"$script_source" == *'Support worker unexpectedly receives API-only'* ]] || {
+		echo 'Support first-cutover contract lost its Telegram credential role boundary.' >&2
+		return 1
+	}
 
 	printf 'support_first_cutover_contract_self_test=passed\n'
 }
@@ -220,7 +245,9 @@ run_rabbitmq_routine_provisioning_self_test() {
 	[[ "$provision_source" == *'if ! RABBITMQ_ADMIN_USER='* &&
 		"$provision_source" == *'--env RABBITMQ_ADMIN_PASSWORD'* &&
 		"$provision_source" == *'--env RABBITMQ_PROVISION_PASSWORD_BASE64'* &&
-		"$provision_source" == *'const adminConnection = await connectRabbitMq('*'const response = await fetch('*'/api/users/'*'const targetConnection = await connectRabbitMq('*'rabbitmqctl set_permissions'* &&
+		"$provision_source" == *'const adminConnection = await connectRabbitMq('*'const response = await fetch('*'/api/users/'* &&
+		"$provision_source" == *'const permissionResponse = await fetch('*'/api/permissions/'* &&
+		"$provision_source" == *'let targetConnection;'*'attempt <= 20'*'setTimeout(resolve, 250)'*'rabbitmqctl set_permissions'* &&
 		"$provision_source" == *'JSON.stringify({'*'password: targetPassword'*'tags: value("RABBITMQ_PROVISION_TAG")'* &&
 		"$provision_source" != *'rabbitmqctl add_user'* &&
 		"$provision_source" != *'rabbitmqctl change_password'* &&
@@ -479,7 +506,13 @@ const provisioningScript = source.slice(scriptStart, scriptEnd);
 const adminPassword = "a".repeat(40);
 const targetPassword = "b".repeat(40);
 
-async function runFixture({ adminFails = false, managementStatus = 204 } = {}) {
+async function runFixture({
+  adminFails = false,
+  managementStatus = 204,
+  permissionStatus = 204,
+  targetFailures = 0,
+  provisionTag = "administrator,monitoring",
+} = {}) {
   const events = [];
   const errors = [];
   let connectionAttempt = 0;
@@ -490,7 +523,10 @@ async function runFixture({ adminFails = false, managementStatus = 204 } = {}) {
     RABBITMQ_PROVISION_USER: "target-user",
     RABBITMQ_PROVISION_PASSWORD_BASE64: Buffer.from(targetPassword).toString("base64"),
     RABBITMQ_PROVISION_VHOST: "winwidget",
-    RABBITMQ_PROVISION_TAG: "administrator,monitoring",
+    RABBITMQ_PROVISION_TAG: provisionTag,
+    RABBITMQ_PROVISION_CONFIGURE: "^fixture.configure$",
+    RABBITMQ_PROVISION_WRITE: "^fixture.write$",
+    RABBITMQ_PROVISION_READ: "^fixture.read$",
   };
   const sandbox = {
     AbortSignal,
@@ -514,6 +550,10 @@ async function runFixture({ adminFails = false, managementStatus = 204 } = {}) {
           } else {
             assert.equal(options.username, environment.RABBITMQ_PROVISION_USER);
             assert.equal(options.password, targetPassword);
+            if (targetFailures > 0) {
+              targetFailures -= 1;
+              throw new Error("credential propagation pending");
+            }
           }
           assert.equal(options.vhost, environment.RABBITMQ_PROVISION_VHOST);
           return { close: async () => events.push(`close:${role}`) };
@@ -521,22 +561,34 @@ async function runFixture({ adminFails = false, managementStatus = 204 } = {}) {
       };
     },
     async fetch(url, options) {
-      events.push("fetch");
-      assert.equal(
-        url,
-        "http://127.0.0.1:15672/api/users/target-user",
-      );
       assert.equal(options.method, "PUT");
       assert.equal(options.redirect, "error");
       assert.equal(
         Buffer.from(options.headers.authorization.slice(6), "base64").toString("utf8"),
         `${environment.RABBITMQ_ADMIN_USER}:${environment.RABBITMQ_ADMIN_PASSWORD}`,
       );
+      if (url.endsWith("/api/users/target-user")) {
+        events.push("fetch:user");
+        assert.deepEqual(JSON.parse(options.body), {
+          password: targetPassword,
+          tags: environment.RABBITMQ_PROVISION_TAG,
+        });
+        return { status: managementStatus };
+      }
+      assert.equal(
+        url,
+        "http://127.0.0.1:15672/api/permissions/winwidget/target-user",
+      );
+      events.push("fetch:permissions");
       assert.deepEqual(JSON.parse(options.body), {
-        password: targetPassword,
-        tags: "administrator,monitoring",
+        configure: environment.RABBITMQ_PROVISION_CONFIGURE,
+        write: environment.RABBITMQ_PROVISION_WRITE,
+        read: environment.RABBITMQ_PROVISION_READ,
       });
-      return { status: managementStatus };
+      return { status: permissionStatus };
+    },
+    setTimeout(callback) {
+      callback();
     },
   };
   await vm.runInNewContext(provisioningScript, sandbox);
@@ -546,24 +598,60 @@ async function runFixture({ adminFails = false, managementStatus = 204 } = {}) {
 (async () => {
   const invalidAdmin = await runFixture({ adminFails: true });
   assert.deepEqual(invalidAdmin.events, ["connect:admin"]);
-  assert.deepEqual(invalidAdmin.errors, ["RabbitMQ credential provisioning failed\n"]);
+  assert.deepEqual(invalidAdmin.errors, [
+    "RabbitMQ credential provisioning failed at admin-credential-check\n",
+  ]);
   assert.equal(invalidAdmin.exitCode, 1);
 
   const rejectedUpdate = await runFixture({ managementStatus: 403 });
-  assert.deepEqual(rejectedUpdate.events, ["connect:admin", "close:admin", "fetch"]);
-  assert.deepEqual(rejectedUpdate.errors, ["RabbitMQ credential provisioning failed\n"]);
+  assert.deepEqual(rejectedUpdate.events, ["connect:admin", "close:admin", "fetch:user"]);
+  assert.deepEqual(rejectedUpdate.errors, [
+    "RabbitMQ credential provisioning failed at user-update\n",
+  ]);
   assert.equal(rejectedUpdate.exitCode, 1);
+
+  const rejectedPermissions = await runFixture({ permissionStatus: 403 });
+  assert.deepEqual(rejectedPermissions.events, [
+    "connect:admin",
+    "close:admin",
+    "fetch:user",
+    "fetch:permissions",
+  ]);
+  assert.deepEqual(rejectedPermissions.errors, [
+    "RabbitMQ credential provisioning failed at permission-update\n",
+  ]);
+  assert.equal(rejectedPermissions.exitCode, 1);
 
   const success = await runFixture();
   assert.deepEqual(success.events, [
     "connect:admin",
     "close:admin",
-    "fetch",
+    "fetch:user",
+    "fetch:permissions",
     "connect:target",
     "close:target",
   ]);
   assert.deepEqual(success.errors, []);
   assert.equal(success.exitCode, undefined);
+
+  const delayedCredential = await runFixture({ targetFailures: 2 });
+  assert.deepEqual(delayedCredential.events, [
+    "connect:admin",
+    "close:admin",
+    "fetch:user",
+    "fetch:permissions",
+    "connect:target",
+    "connect:target",
+    "connect:target",
+    "close:target",
+  ]);
+  assert.deepEqual(delayedCredential.errors, []);
+  assert.equal(delayedCredential.exitCode, undefined);
+
+  const emptyTag = await runFixture({ provisionTag: "" });
+  assert.deepEqual(emptyTag.events, success.events);
+  assert.deepEqual(emptyTag.errors, []);
+  assert.equal(emptyTag.exitCode, undefined);
 })().catch(() => process.exit(1));
 NODE
 	"$self_test_node" - "$script_path" <<'NODE'
@@ -2253,6 +2341,8 @@ export BILLING_REVISION="$deploy_revision"
 export BILLING_IMAGE="winwidget-billing:git-$deploy_revision"
 export IDENTITY_REVISION="$deploy_revision"
 export IDENTITY_IMAGE="winwidget-identity:git-$deploy_revision"
+export PLATFORM_REVISION="$deploy_revision"
+export PLATFORM_IMAGE="winwidget-platform:git-$deploy_revision"
 export SUPPORT_REVISION="$deploy_revision"
 export SUPPORT_IMAGE="winwidget-support:git-$deploy_revision"
 export OPERATIONS_REVISION="$deploy_revision"
@@ -2271,6 +2361,7 @@ echo "Building Reporting image for the coordinated backend revision: $REPORTING_
 echo "Building Billing image for the coordinated backend revision: $BILLING_IMAGE"
 echo "Building Identity image for the coordinated backend revision: $IDENTITY_IMAGE"
 echo "Building Operations image for the coordinated backend revision: $OPERATIONS_IMAGE"
+echo "Using Platform image for the coordinated backend revision: $PLATFORM_IMAGE"
 
 if [[ ! -f "$ENV_FILE" ]]; then
 	echo "Backend env file not found: $ENV_FILE" >&2
@@ -2320,7 +2411,7 @@ ambient_compose_overrides=()
 while IFS= read -r key; do
 	[[ -n "$key" ]] || continue
 	case "$key" in
-	APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION | BILLING_IMAGE | BILLING_REVISION | IDENTITY_IMAGE | IDENTITY_REVISION | OPERATIONS_IMAGE | OPERATIONS_REVISION)
+	APP_REVISION | APP_VERSION | MAINTENANCE_IMAGE | MAINTENANCE_REVISION | DATABASE_RESTORE_IMAGE | DATABASE_RESTORE_REVISION | NOTIFICATION_DELIVERY_IMAGE | NOTIFICATION_DELIVERY_REVISION | CAMPAIGNS_IMAGE | CAMPAIGNS_REVISION | REPORTING_IMAGE | REPORTING_REVISION | WIDGETS_IMAGE | WIDGETS_REVISION | BILLING_IMAGE | BILLING_REVISION | IDENTITY_IMAGE | IDENTITY_REVISION | PLATFORM_IMAGE | PLATFORM_REVISION | SUPPORT_IMAGE | SUPPORT_REVISION | OPERATIONS_IMAGE | OPERATIONS_REVISION)
 			continue
 			;;
 	esac
@@ -5781,7 +5872,9 @@ verify_support_steady_ownership() {
 		return 1
 	}
 	core_status="$(
-		docker run --rm --network host --env-file "$ENV_FILE" \
+		DATABASE_URL="$(get_env_value DATABASE_URL_PRODUCTION)" \
+			docker run --rm --network host --env-file "$ENV_FILE" \
+			--env DATABASE_URL \
 			--entrypoint node "winwidget-api:$APP_VERSION" \
 			dist/src/support-cutover-main.js status
 	)" || return 1
@@ -6365,8 +6458,14 @@ assert_clean_core_identity_environment_boundary() {
 			echo "Support API is missing required $key." >&2
 			return 1
 		}
-		grep -Fxq "$key" <<<"$support_worker_keys" || {
-			echo "Support worker is missing required $key." >&2
+	done
+	grep -Fxq TELEGRAM_SUPPORT_BOT_TOKEN <<<"$support_worker_keys" || {
+		echo 'Support worker is missing required TELEGRAM_SUPPORT_BOT_TOKEN.' >&2
+		return 1
+	}
+	for key in TELEGRAM_SUPPORT_BOT_USERNAME TELEGRAM_SUPPORT_BOT_WEBHOOK_SECRET; do
+		! grep -Fxq "$key" <<<"$support_worker_keys" || {
+			echo "Support worker unexpectedly receives API-only $key." >&2
 			return 1
 		}
 	done
@@ -6584,6 +6683,10 @@ pre_billing_narrow_integration_kinds="$(
 	normalize_csv \
 		"telegram-destination-unavailable,notification-delivery-outcome,campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,auto-renewal"
 )"
+pre_support_narrow_integration_kinds="$(
+	normalize_csv \
+		"campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection"
+)"
 broad_integration_kinds="$(
 	normalize_csv \
 		"webhook,bitrix24,amo-crm,payment-telegram,limit-telegram,daily-summary-telegram"
@@ -6739,6 +6842,10 @@ if [[ -e "$NOTIFICATION_DELIVERY_CUTOVER_MARKER" ||
 				"$current_integration_kinds_normalized" == \
 				"$pre_billing_narrow_integration_kinds" ]]; then
 				echo 'Allowing the pre-Billing integration worker only for its one-way Billing consumer bootstrap.'
+			elif [[ "$support_first_cutover_deploy" == 'true' &&
+				"$current_integration_kinds_normalized" == \
+				"$pre_support_narrow_integration_kinds" ]]; then
+				echo 'Allowing the pre-Support integration worker only for its one-way Support consumer bootstrap.'
 			else
 				echo "Cutover marker exists, but the live integration worker still owns an unexpected kind set." >&2
 				echo "Do not attempt an automatic legacy rollback after the cutover marker." >&2
@@ -7388,6 +7495,9 @@ provision_rabbitmq_user() {
 		RABBITMQ_PROVISION_PASSWORD_BASE64="$password_base64" \
 		RABBITMQ_PROVISION_VHOST="$rabbitmq_vhost" \
 		RABBITMQ_PROVISION_TAG="$tag" \
+		RABBITMQ_PROVISION_CONFIGURE="$configure_pattern" \
+		RABBITMQ_PROVISION_WRITE="$write_pattern" \
+		RABBITMQ_PROVISION_READ="$read_pattern" \
 		docker run --rm --network host --read-only \
 			--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 \
 			--cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
@@ -7399,6 +7509,9 @@ provision_rabbitmq_user() {
 			--env RABBITMQ_PROVISION_PASSWORD_BASE64 \
 			--env RABBITMQ_PROVISION_VHOST \
 			--env RABBITMQ_PROVISION_TAG \
+			--env RABBITMQ_PROVISION_CONFIGURE \
+			--env RABBITMQ_PROVISION_WRITE \
+			--env RABBITMQ_PROVISION_READ \
 			--entrypoint node \
 			"winwidget-api:$APP_VERSION" \
 			-e '
@@ -7412,19 +7525,32 @@ const required = [
   "RABBITMQ_PROVISION_PASSWORD_BASE64",
   "RABBITMQ_PROVISION_VHOST",
   "RABBITMQ_PROVISION_TAG",
+  "RABBITMQ_PROVISION_CONFIGURE",
+  "RABBITMQ_PROVISION_WRITE",
+  "RABBITMQ_PROVISION_READ",
 ];
 const value = name => process.env[name] ?? "";
 const invalid = () => {
   throw new Error("invalid RabbitMQ provisioning input");
 };
+let failureStage = "input-validation";
 
 (async () => {
-	if (required.slice(0, -1).some(name => !value(name))) invalid();
+	if (required
+		.filter(name => name !== "RABBITMQ_PROVISION_TAG")
+		.some(name => !value(name))) invalid();
 	if (value("RABBITMQ_MANAGEMENT_URL") !== "http://127.0.0.1:15672") invalid();
 	if (![value("RABBITMQ_ADMIN_USER"), value("RABBITMQ_PROVISION_USER")]
 		.every(username => /^[A-Za-z0-9._-]+$/.test(username))) invalid();
 	if (!/^[A-Za-z0-9._/-]+$/.test(value("RABBITMQ_PROVISION_VHOST"))) invalid();
 	if (!/^(?:[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*)?$/.test(value("RABBITMQ_PROVISION_TAG"))) invalid();
+	for (const name of [
+		"RABBITMQ_PROVISION_CONFIGURE",
+		"RABBITMQ_PROVISION_WRITE",
+		"RABBITMQ_PROVISION_READ",
+	]) {
+		if (!value(name) || /[\0\r\n]/.test(value(name))) invalid();
+	}
 
 	const encodedPassword = value("RABBITMQ_PROVISION_PASSWORD_BASE64");
 	if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedPassword)) invalid();
@@ -7447,6 +7573,7 @@ const invalid = () => {
 		await connection.close();
 	};
 
+  failureStage = "admin-credential-check";
   const adminConnection = await connectRabbitMq(
     value("RABBITMQ_ADMIN_USER"),
     value("RABBITMQ_ADMIN_PASSWORD"),
@@ -7457,6 +7584,7 @@ const invalid = () => {
   const authorization = `Basic ${Buffer.from(
     `${value("RABBITMQ_ADMIN_USER")}:${value("RABBITMQ_ADMIN_PASSWORD")}`,
   ).toString("base64")}`;
+  failureStage = "user-update";
   const response = await fetch(
     `${value("RABBITMQ_MANAGEMENT_URL")}/api/users/${encodeURIComponent(value("RABBITMQ_PROVISION_USER"))}`,
     {
@@ -7474,18 +7602,47 @@ const invalid = () => {
     throw new Error("RabbitMQ Management API rejected the user update");
   }
 
-  const targetConnection = await connectRabbitMq(
-    value("RABBITMQ_PROVISION_USER"),
-    targetPassword,
-    "winwidget-routine-deploy-target-credential-check",
+  failureStage = "permission-update";
+  const permissionResponse = await fetch(
+    `${value("RABBITMQ_MANAGEMENT_URL")}/api/permissions/${encodeURIComponent(value("RABBITMQ_PROVISION_VHOST"))}/${encodeURIComponent(value("RABBITMQ_PROVISION_USER"))}`,
+    {
+      method: "PUT",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        configure: value("RABBITMQ_PROVISION_CONFIGURE"),
+        write: value("RABBITMQ_PROVISION_WRITE"),
+        read: value("RABBITMQ_PROVISION_READ"),
+      }),
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    },
   );
+  if (![201, 204].includes(permissionResponse.status)) {
+    throw new Error("RabbitMQ Management API rejected the permission update");
+  }
+
+  let targetConnection;
+  failureStage = "target-credential-check";
+  for (let attempt = 1; attempt <= 20; attempt += 1) {
+    try {
+      targetConnection = await connectRabbitMq(
+        value("RABBITMQ_PROVISION_USER"),
+        targetPassword,
+        "winwidget-routine-deploy-target-credential-check",
+      );
+      break;
+    } catch (error) {
+      if (attempt === 20) throw error;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
   void targetConnection;
 })().catch(() => {
-  process.stderr.write("RabbitMQ credential provisioning failed\n");
+  process.stderr.write(`RabbitMQ credential provisioning failed at ${failureStage}\n`);
   process.exitCode = 1;
 });
 '; then
-		echo 'RabbitMQ credential provisioning failed before permissions were changed.' >&2
+		echo 'RabbitMQ credential and exact permission provisioning failed.' >&2
 		return 1
 	fi
 
@@ -8194,12 +8351,13 @@ provision_rabbitmq_user \
 	''
 provision_identity_rabbitmq_topic_permissions \
 	"$identity_worker_user" "$identity_publisher_user"
+support_worker_resource_pattern='^(winwidget\.(events|retry|dead-letter|manual-retry)|winwidget\.support\.telegram-webhook\.v1(\.retry-v2\.[123]|\.dead-letter)?)$'
 provision_rabbitmq_user \
 	"$support_worker_user" \
 	"$support_worker_password_base64" \
-	'^(winwidget\.(events|retry|dead-letter|manual-retry)|winwidget\.support\.telegram-webhook\.v1(\.retry-v2\.[123]|\.dead-letter)?)$' \
-	'^winwidget\.(events|retry|dead-letter|manual-retry)$' \
-	'^(winwidget\.(events|retry|dead-letter|manual-retry)|winwidget\.support\.telegram-webhook\.v1(\.retry-v2\.[123]|\.dead-letter)?)$' \
+	"$support_worker_resource_pattern" \
+	"$support_worker_resource_pattern" \
+	"$support_worker_resource_pattern" \
 	''
 provision_rabbitmq_user \
 	"$support_publisher_user" \

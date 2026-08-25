@@ -192,7 +192,8 @@ process.stdout.write("support_gateway_manifest=verified\n");
 
 support_cutover_run_core() {
 	support_cutover_require_image_ids || return 1
-	docker run --rm --network host --env-file "$ENV_FILE" \
+	DATABASE_URL="$(support_read_env_value "$ENV_FILE" DATABASE_URL_PRODUCTION)" \
+		docker run --rm --network host --env-file "$ENV_FILE" --env DATABASE_URL \
 		--entrypoint node "$support_cutover_core_image_id" \
 		dist/src/support-cutover-main.js "$@"
 }
@@ -279,7 +280,7 @@ const value = JSON.parse(readFileSync(0, "utf8"));
 for (const key of ["sha256", "fingerprint", "systemId", "mappingCount", "highWatermark"]) {
   if (value[key] === undefined || value[key] === null) throw new Error(`Missing ${key}`);
 }
-process.stdout.write([value.sha256, value.fingerprint, value.systemId, value.mappingCount, value.highWatermark].join("\t"));
+process.stdout.write(`${[value.sha256, value.fingerprint, value.systemId, value.mappingCount, value.highWatermark].join("\t")}\n`);
 '
 }
 
@@ -301,7 +302,9 @@ support_cutover_switch_ownership() {
 	support_cutover_compose stop -t 90 api-gateway api
 	support_cutover_run_core fence --revision "$EXPECTED_REVISION" >/dev/null
 	export_result="$(
-		docker run --rm --user 0:0 --network host --env-file "$ENV_FILE" \
+		DATABASE_URL="$(support_read_env_value "$ENV_FILE" DATABASE_URL_PRODUCTION)" \
+			docker run --rm --user 0:0 --network host --env-file "$ENV_FILE" \
+			--env DATABASE_URL \
 			--volume "$snapshot_dir:/support-cutover" \
 			--entrypoint node "$support_cutover_core_image_id" \
 			dist/src/support-cutover-main.js export \
@@ -324,7 +327,9 @@ support_cutover_switch_ownership() {
 		dist/src/cutover/main.js import \
 		--file "$snapshot_container" --sha256 "$sha256" >/dev/null
 	support_cutover_run_target activate --sha256 "$sha256" >/dev/null
-	docker run --rm --user 0:0 --network host --env-file "$ENV_FILE" \
+	DATABASE_URL="$(support_read_env_value "$ENV_FILE" DATABASE_URL_PRODUCTION)" \
+		docker run --rm --user 0:0 --network host --env-file "$ENV_FILE" \
+		--env DATABASE_URL \
 		--volume "$snapshot_dir:/support-cutover:ro" \
 			--entrypoint node "$support_cutover_core_image_id" \
 		dist/src/support-cutover-main.js activate \
@@ -356,7 +361,8 @@ support_cutover_deploy_steady() {
 	if [[ "$(support_database_current_phase)" == 'forward-only' ]]; then
 		first_cutover=true
 	fi
-	CAMPAIGNS_AUTOMATIC_PROD_PUSH=false \
+	env -u SUPPORT_IMAGE -u SUPPORT_REVISION \
+		CAMPAIGNS_AUTOMATIC_PROD_PUSH=false \
 		REPORTING_AUTOMATIC_PROD_PUSH=false \
 		WIDGETS_AUTOMATIC_PROD_PUSH=false \
 		BILLING_AUTOMATIC_PROD_PUSH=false \
@@ -429,7 +435,8 @@ support_cutover_self_test() {
 	source="$(declare -f support_cutover_prepare support_cutover_switch_ownership \
 		support_cutover_remove_completed_snapshot support_cutover_run \
 		support_cutover_validate_gateway_routes support_cutover_write_marker \
-		support_cutover_deploy_steady)"
+		support_cutover_deploy_steady support_cutover_run_core \
+		support_cutover_extract_export)"
 	[[ "$source" == *"acquire_production_deploy_lock 'Support ownership prepare'"* &&
 		"$source" == *'database_restore_guard_assert_before_mutation healthy-required'* &&
 		"$source" == *'--profile migration run --rm --no-deps migrate'* &&
@@ -444,8 +451,12 @@ support_cutover_self_test() {
 		"$source" == *'dist/src/cutover/main.js import'* &&
 		"$source" == *'support_cutover_compose stop -t 90 api-gateway api'* &&
 		"$source" == *'support_database_advance forward-only'* &&
+		"$source" == *'DATABASE_URL_PRODUCTION'*'--env DATABASE_URL'* &&
+		"$source" == *'join("\t")}\n`'* &&
+		"$source" == *'env -u SUPPORT_IMAGE -u SUPPORT_REVISION'* &&
+		"$source" != *'SUPPORT_DEPLOY_SCRIPT'* &&
 		"$source" == *'SUPPORT_FIRST_CUTOVER_DEPLOY="$first_cutover"'* &&
-		"$source" == *'scripts/deploy-production.sh'* ]] || return 1
+		"$source" == *'APP_ROOT="$APP_ROOT" bash "$SERVER_ROOT/scripts/deploy-production.sh"'* ]] || return 1
 	printf 'support_cutover_production_self_test=passed\n'
 }
 
