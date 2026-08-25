@@ -13,6 +13,7 @@ readonly PLATFORM_TERMINAL_MIGRATION='20260825000000_remove_legacy_platform_core
 readonly OPERATIONS_PREP_MIGRATION='20260824030000_prepare_operations_service_ownership'
 readonly PLATFORM_TERMINAL_MARKER_NAME='.platform-core-source-terminal-v1'
 readonly PLATFORM_PREPARED_RECOVERY_CONFIRMATION='RECOVER EXACT PREPARED PLATFORM MARKER'
+readonly PLATFORM_POST_DDL_RECOVERY_CONFIRMATION='FINALIZE EXACT POST-DDL PLATFORM MARKER'
 readonly -a PLATFORM_TERMINAL_MARKER_KEYS=(
   version phase ownership_revision cleanup_revision production_env_sha256
   compose_sha256 core_database_name core_database_system_identifier generation
@@ -549,6 +550,184 @@ WHERE database.datname='default_db';")" || return 1
     "$(platform_terminal_assert_marker_identity creation)" == prepared ]]
 }
 
+platform_terminal_sync_recovery_archive() {
+  [[ $# -eq 2 && "$1" == /* && "$2" =~ ^[0-9a-f]{64}$ ]] || return 1
+  local archive="$1" expected_sha="$2" directory parent grandparent
+  platform_cleanup_validate_private_file "$archive" || return 1
+  [[ "$(platform_cleanup_sha256 "$archive")" == "$expected_sha" ]] || return 1
+  directory="$(dirname -- "$archive")"
+  parent="$(dirname -- "$directory")"
+  grandparent="$(dirname -- "$parent")"
+  sync -f "$archive" || return 1
+  sync -f "$directory" || return 1
+  sync -f "$parent" || return 1
+  sync -f "$grandparent" || return 1
+}
+
+platform_terminal_finalize_descendant_prepared_marker() {
+  [[ $# -eq 4 ]] || return 1
+  [[ "$1" == "$(platform_terminal_prepared_recovery_archive_path "$3")" &&
+    "$2" =~ ^[0-9a-f]{64}$ && "$3" =~ ^[0-9a-f]{40}$ &&
+    "$4" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return 1
+  local archive="$1" expected_sha="$2" ancestor="$3" prisma_id="$4"
+  local marker directory temporary now
+  marker="$(platform_terminal_marker_path)" || return 1
+  platform_terminal_validate_marker "$marker" || return 1
+  platform_terminal_sync_recovery_archive "$archive" "$expected_sha" || return 1
+  [[ "$(platform_terminal_marker_value phase)" == prepared &&
+    "$(platform_terminal_marker_value cleanup_revision)" == "$ancestor" &&
+    "$(platform_cleanup_sha256 "$marker")" == "$expected_sha" &&
+    "$(platform_terminal_assert_marker_identity descendant)" == prepared ]] || return 1
+  directory="$(dirname -- "$marker")"
+  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" || return 1
+  temporary="$(mktemp "$directory/$PLATFORM_TERMINAL_MARKER_NAME.complete.XXXXXX")" || return 1
+  awk -F= -v now="$now" -v prisma_id="$prisma_id" '
+    $1 == "phase" { print "phase=complete"; phase += 1; next }
+    $1 == "after_inventory" {
+      print "after_inventory=platform-source-v1-absent"; inventory += 1; next
+    }
+    $1 == "prisma_migration_id" {
+      print "prisma_migration_id=" prisma_id; migration += 1; next
+    }
+    $1 == "updated_at" { print "updated_at=" now; updated += 1; next }
+    { print }
+    END { exit(phase == 1 && inventory == 1 && migration == 1 && updated == 1 ? 0 : 1) }
+  ' "$marker" >"$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  chmod 600 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  chown 0:0 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  platform_terminal_validate_marker "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  sync -f "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  mv -fT -- "$temporary" "$marker" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  sync -f "$marker" || return 1
+  sync -f "$directory" || return 1
+  [[ "$(platform_terminal_assert_marker_identity descendant)" == complete &&
+    "$(platform_terminal_marker_value cleanup_revision)" == "$ancestor" &&
+    "$(platform_terminal_marker_value prisma_migration_id)" == "$prisma_id" ]]
+}
+
+platform_terminal_finalize_pinned_post_ddl_marker() {
+  [[ $# -eq 4 ]] || return 1
+  [[ "$1" =~ ^[0-9a-f]{40}$ && "$2" == absent && "$3" == applied &&
+    "$4" =~ ^(pristine|forward|absent)$ ]] || return 1
+  local revision="$1" source_state="$2" migration_state="$3" operations_schema="$4"
+  local original_ancestor intermediate parent expected_marker_sha expected_env_sha
+  local expected_original_marker_sha expected_script_sha script_path changed_paths
+  local migration_path compose_path marker cleanup_revision phase marker_migration_sha marker_compose_sha
+  local original_archive current_archive candidate revision_sha operations_state guards running prisma_id
+  [[ "${OPERATIONS_PLATFORM_POST_DDL_RECOVERY_CONFIRMATION:-}" == \
+    "$PLATFORM_POST_DDL_RECOVERY_CONFIRMATION" ]] || return 1
+  original_ancestor="${OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_ANCESTOR_REVISION:-}"
+  intermediate="${OPERATIONS_PLATFORM_POST_DDL_INTERMEDIATE_REVISION:-}"
+  parent="${OPERATIONS_PLATFORM_POST_DDL_PARENT_REVISION:-}"
+  expected_marker_sha="${OPERATIONS_PLATFORM_POST_DDL_MARKER_SHA256:-}"
+  expected_env_sha="${OPERATIONS_PLATFORM_POST_DDL_ENV_SHA256:-}"
+  expected_original_marker_sha="${OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_MARKER_SHA256:-}"
+  expected_script_sha="${OPERATIONS_PLATFORM_POST_DDL_FINAL_SCRIPT_SHA256:-}"
+  [[ "$original_ancestor" =~ ^[0-9a-f]{40}$ && "$intermediate" =~ ^[0-9a-f]{40}$ &&
+    "$parent" =~ ^[0-9a-f]{40}$ && "$expected_marker_sha" =~ ^[0-9a-f]{64}$ &&
+    "$expected_env_sha" =~ ^[0-9a-f]{64}$ &&
+    "$expected_original_marker_sha" =~ ^[0-9a-f]{64}$ &&
+    "$expected_script_sha" =~ ^[0-9a-f]{64}$ &&
+    "$original_ancestor" != "$intermediate" && "$intermediate" != "$parent" &&
+    "$parent" != "$revision" &&
+    "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$intermediate")" == \
+      "$intermediate $original_ancestor" &&
+    "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$parent")" == \
+      "$parent $intermediate" &&
+    "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$revision")" == \
+      "$revision $parent" ]] || return 1
+  script_path='scripts/operations-cutover-production.sh'
+  changed_paths="$(git -C "$SERVER_ROOT" diff --name-only "$original_ancestor" "$revision")" || return 1
+  [[ "$changed_paths" == "$script_path" &&
+    "$(platform_terminal_git_file_sha256 "$revision" "$script_path")" == "$expected_script_sha" &&
+    "$(platform_cleanup_sha256 "$SERVER_ROOT/$script_path")" == "$expected_script_sha" ]] || return 1
+  migration_path="prisma/migrations/$PLATFORM_TERMINAL_MIGRATION/migration.sql"
+  compose_path='deploy/docker-compose.prod.yml'
+  marker="$(platform_terminal_marker_path)" || return 1
+  platform_terminal_validate_marker "$marker" || return 1
+  marker_migration_sha="$(platform_terminal_marker_value migration_sha256)" || return 1
+  marker_compose_sha="$(platform_terminal_marker_value compose_sha256)" || return 1
+  for candidate in "$original_ancestor" "$intermediate" "$parent" "$revision"; do
+    revision_sha="$(platform_terminal_git_file_sha256 "$candidate" "$migration_path")" || return 1
+    [[ "$revision_sha" == "$marker_migration_sha" &&
+      "$revision_sha" == "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" ]] || return 1
+    revision_sha="$(platform_terminal_git_file_sha256 "$candidate" "$compose_path")" || return 1
+    [[ "$revision_sha" == "$marker_compose_sha" &&
+      "$revision_sha" == "$PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256" ]] || return 1
+  done
+  cleanup_revision="$(platform_terminal_marker_value cleanup_revision)" || return 1
+  phase="$(platform_terminal_marker_value phase)" || return 1
+  [[ "$cleanup_revision" == "$parent" && "$phase" =~ ^(prepared|complete)$ &&
+    "$(platform_terminal_marker_value production_env_sha256)" == "$expected_env_sha" &&
+    "$(platform_terminal_assert_marker_identity descendant)" == "$phase" &&
+    "$source_state" == absent && "$migration_state" == applied ]] || return 1
+  if [[ "$phase" == prepared ]]; then
+    [[ "$operations_schema" == pristine &&
+      "$(platform_cleanup_sha256 "$marker")" == "$expected_marker_sha" ]] || return 1
+  fi
+  operations_state="$(platform_terminal_candidate_migration_state \
+    "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" || return 1
+  [[ "$operations_state" == applied ]] || return 1
+  platform_terminal_assert_exact_repo_ledger applied applied creation || return 1
+  platform_cleanup_assert_retained_billing_seam || return 1
+  platform_terminal_assert_files_unchanged || return 1
+  running="$(compose ps --status running -q api outbox-publisher integration-worker)" || return 1
+  [[ -z "$running" ]] || return 1
+  guards="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT count(*) FILTER (
+  WHERE role.rolname='gen_user' AND config LIKE 'winwidget.platform_%'
+)::text || '|' || count(*) FILTER (
+  WHERE role.rolname='gen_user' AND config LIKE 'winwidget.operations_platform_%'
+)::text
+FROM pg_catalog.pg_db_role_setting setting
+JOIN pg_catalog.pg_roles role ON role.oid=setting.setrole
+JOIN pg_catalog.pg_database database ON database.oid=setting.setdatabase
+CROSS JOIN LATERAL unnest(setting.setconfig) config
+WHERE database.datname='default_db';")" || return 1
+  [[ "$guards" == '0|0' ]] || return 1
+  original_archive="$(platform_terminal_prepared_recovery_archive_path "$original_ancestor")" || return 1
+  platform_terminal_sync_recovery_archive \
+    "$original_archive" "$expected_original_marker_sha" || return 1
+  current_archive="$(platform_terminal_prepared_recovery_archive_path "$parent")" || return 1
+  if [[ "$phase" == prepared ]]; then
+    current_archive="$(platform_terminal_archive_prepared_marker \
+      "$marker" "$parent" "$expected_marker_sha")" || return 1
+  fi
+  platform_terminal_sync_recovery_archive "$current_archive" "$expected_marker_sha" || return 1
+  prisma_id="$(platform_terminal_applied_ledger_id)" || return 1
+  if [[ "$phase" == prepared ]]; then
+    platform_terminal_finalize_descendant_prepared_marker \
+      "$current_archive" "$expected_marker_sha" "$parent" "$prisma_id" || return 1
+  fi
+  platform_terminal_sync_recovery_archive \
+    "$original_archive" "$expected_original_marker_sha" || return 1
+  platform_terminal_sync_recovery_archive "$current_archive" "$expected_marker_sha" || return 1
+  sync -f "$marker" || return 1
+  sync -f "$(dirname -- "$marker")" || return 1
+  [[ "$(platform_terminal_assert_marker_identity descendant)" == complete &&
+    "$(platform_terminal_marker_value cleanup_revision)" == "$parent" &&
+    "$(platform_terminal_marker_value production_env_sha256)" == "$expected_env_sha" &&
+    "$(platform_terminal_marker_value prisma_migration_id)" == "$prisma_id" ]]
+}
+
 platform_terminal_marker_retry_mode() {
   [[ $# -eq 5 ]] || return 1
   local cleanup_revision="$1" revision="$2" phase="$3" source_state="$4" migration_state="$5"
@@ -562,6 +741,7 @@ platform_terminal_marker_retry_mode() {
     return
   fi
   case "$phase:$source_state:$migration_state" in
+    prepared:absent:applied) printf 'prepared-post-ddl-completion\n' ;;
     prepared:*) printf 'prepared-recovery\n' ;;
     complete:absent:applied) printf 'descendant\n' ;;
     *) return 1 ;;
@@ -1161,8 +1341,8 @@ SELECT
   (SELECT string_agg(c.conname, ',' ORDER BY c.conname COLLATE \"C\")
     FROM pg_catalog.pg_constraint c WHERE c.conrelid='public.operations_core_state'::regclass);")" || return 1
   case "$state_inventory" in
-'1|1|0~CORE,OPERATIONS~id:text:true,ownership:"OperationsCoreOwnership":true,source_writes_enabled:boolean:true,legacy_routes_enabled:boolean:true,generation:bigint:true,prepared_revision:text:false,ownership_revision:text:false,source_snapshot_sha256:text:false,source_note_count:bigint:false,source_event_count:bigint:false,fenced_at:timestamp(3) without time zone:false,exported_at:timestamp(3) without time zone:false,activated_at:timestamp(3) without time zone:false,updated_at:timestamp(3) without time zone:true~operations_core_state_activation_check,operations_core_state_generation_check,operations_core_state_pkey,operations_core_state_revision_check,operations_core_state_singleton_check,operations_core_state_snapshot_check') printf 'pristine\n' ;;
-'1|0|1~CORE,OPERATIONS~id:text:true,ownership:"OperationsCoreOwnership":true,source_writes_enabled:boolean:true,legacy_routes_enabled:boolean:true,generation:bigint:true,prepared_revision:text:false,ownership_revision:text:false,source_snapshot_sha256:text:false,source_note_count:bigint:false,source_event_count:bigint:false,fenced_at:timestamp(3) without time zone:false,exported_at:timestamp(3) without time zone:false,activated_at:timestamp(3) without time zone:false,updated_at:timestamp(3) without time zone:true~operations_core_state_activation_check,operations_core_state_generation_check,operations_core_state_pkey,operations_core_state_revision_check,operations_core_state_singleton_check,operations_core_state_snapshot_check') printf 'forward\n' ;;
+'1|1|0~CORE,OPERATIONS~id:text:true,ownership:"OperationsCoreOwnership":true,source_writes_enabled:boolean:true,legacy_routes_enabled:boolean:true,generation:bigint:true,prepared_revision:text:false,ownership_revision:text:false,source_snapshot_sha256:text:false,source_note_count:bigint:false,source_event_count:bigint:false,fenced_at:timestamp(3) without time zone:false,exported_at:timestamp(3) without time zone:false,activated_at:timestamp(3) without time zone:false,updated_at:timestamp(3) without time zone:true~operations_core_state_activation_check,operations_core_state_generation_check,operations_core_state_generation_not_null,operations_core_state_id_not_null,operations_core_state_legacy_routes_enabled_not_null,operations_core_state_ownership_not_null,operations_core_state_pkey,operations_core_state_revision_check,operations_core_state_singleton_check,operations_core_state_snapshot_check,operations_core_state_source_writes_enabled_not_null,operations_core_state_updated_at_not_null') printf 'pristine\n' ;;
+'1|0|1~CORE,OPERATIONS~id:text:true,ownership:"OperationsCoreOwnership":true,source_writes_enabled:boolean:true,legacy_routes_enabled:boolean:true,generation:bigint:true,prepared_revision:text:false,ownership_revision:text:false,source_snapshot_sha256:text:false,source_note_count:bigint:false,source_event_count:bigint:false,fenced_at:timestamp(3) without time zone:false,exported_at:timestamp(3) without time zone:false,activated_at:timestamp(3) without time zone:false,updated_at:timestamp(3) without time zone:true~operations_core_state_activation_check,operations_core_state_generation_check,operations_core_state_generation_not_null,operations_core_state_id_not_null,operations_core_state_legacy_routes_enabled_not_null,operations_core_state_ownership_not_null,operations_core_state_pkey,operations_core_state_revision_check,operations_core_state_singleton_check,operations_core_state_snapshot_check,operations_core_state_source_writes_enabled_not_null,operations_core_state_updated_at_not_null') printf 'forward\n' ;;
 *)
     printf 'unsafe\n'
     return
@@ -1427,7 +1607,20 @@ run_or_verify_terminal_platform_cleanup() (
           "$revision" "$source_state" "$migration_state" "$operations_schema" ||
           fail 'pinned prepared Platform marker recovery failed'
         ;;
-      descendant) identity_mode=descendant ;;
+      prepared-post-ddl-completion)
+        platform_terminal_finalize_pinned_post_ddl_marker \
+          "$revision" "$source_state" "$migration_state" "$operations_schema" ||
+          fail 'pinned post-DDL Platform marker completion failed'
+        identity_mode=descendant
+        ;;
+      descendant)
+        identity_mode=descendant
+        if [[ -n "${OPERATIONS_PLATFORM_POST_DDL_RECOVERY_CONFIRMATION:-}" ]]; then
+          platform_terminal_finalize_pinned_post_ddl_marker \
+            "$revision" "$source_state" "$migration_state" "$operations_schema" ||
+            fail 'pinned post-DDL Platform marker verification failed'
+        fi
+        ;;
       *) return 1 ;;
     esac
     phase="$(platform_terminal_assert_marker_identity "$identity_mode")" || return 1
@@ -2749,7 +2942,8 @@ self_test() {
   local gateway_wait_source live_owner_runtime_source node_runtime_source self_test_server_root index
   local guc_admin_source guc_configure_source
   local prepared_recovery_source archive_source rebind_source marker_retry_source terminal_runner_source
-  local recovery_line apply_line
+  local post_ddl_source descendant_finalizer_source sync_archive_source operations_prepare_source
+  local recovery_line post_ddl_line apply_line
   local -a source_contracts normalized_source_contracts cutover_contracts
   local -a forbidden_source_contracts
   source="$(declare -f \
@@ -2768,6 +2962,9 @@ self_test() {
     platform_terminal_archive_prepared_marker \
     platform_terminal_rebind_prepared_marker \
     platform_terminal_recover_pinned_prepared_marker \
+    platform_terminal_sync_recovery_archive \
+    platform_terminal_finalize_descendant_prepared_marker \
+    platform_terminal_finalize_pinned_post_ddl_marker \
     platform_terminal_marker_retry_mode \
     platform_terminal_candidate_migration_state \
     platform_terminal_operations_prepare_state \
@@ -2798,7 +2995,11 @@ self_test() {
   prepared_recovery_source="$(declare -f platform_terminal_recover_pinned_prepared_marker)"
   archive_source="$(declare -f platform_terminal_archive_prepared_marker)"
   rebind_source="$(declare -f platform_terminal_rebind_prepared_marker)"
+  sync_archive_source="$(declare -f platform_terminal_sync_recovery_archive)"
+  descendant_finalizer_source="$(declare -f platform_terminal_finalize_descendant_prepared_marker)"
+  post_ddl_source="$(declare -f platform_terminal_finalize_pinned_post_ddl_marker)"
   marker_retry_source="$(declare -f platform_terminal_marker_retry_mode)"
+  operations_prepare_source="$(declare -f platform_terminal_operations_prepare_state)"
   terminal_runner_source="$(declare -f run_or_verify_terminal_platform_cleanup)"
   gateway_ready_contract="wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'"
   gateway_manifest_contract='platform_cutover_validate_gateway_manifest "$gateway_image_id"'
@@ -2815,6 +3016,8 @@ self_test() {
   [[ "$PLATFORM_TERMINAL_CONFIRMATION" == 'DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER' ]]
   [[ "$PLATFORM_PREPARED_RECOVERY_CONFIRMATION" == \
     'RECOVER EXACT PREPARED PLATFORM MARKER' ]]
+  [[ "$PLATFORM_POST_DDL_RECOVERY_CONFIRMATION" == \
+    'FINALIZE EXACT POST-DDL PLATFORM MARKER' ]]
   [[ "$PLATFORM_TERMINAL_MARKER_NAME" == '.platform-core-source-terminal-v1' &&
     "$OPERATIONS_PREP_MIGRATION" == '20260824030000_prepare_operations_service_ownership' &&
     "$PLATFORM_TERMINAL_MIGRATION" == '20260825000000_remove_legacy_platform_core_source' ]]
@@ -2824,6 +3027,9 @@ self_test() {
   [[ "$(platform_terminal_marker_retry_mode \
     b234567890123456789012345678901234567890 "$revision" prepared present pending)" == \
     prepared-recovery ]]
+  [[ "$(platform_terminal_marker_retry_mode \
+    b234567890123456789012345678901234567890 "$revision" prepared absent applied)" == \
+    prepared-post-ddl-completion ]]
   [[ "$(platform_terminal_marker_retry_mode \
     b234567890123456789012345678901234567890 "$revision" complete absent applied)" == \
     descendant ]]
@@ -2948,9 +3154,20 @@ NODE
     'OPERATIONS_PLATFORM_PREPARED_MARKER_SHA256'
     'OPERATIONS_PLATFORM_PREPARED_ENV_SHA256'
     'OPERATIONS_PLATFORM_PREPARED_FINAL_SCRIPT_SHA256'
+    'OPERATIONS_PLATFORM_POST_DDL_RECOVERY_CONFIRMATION'
+    'OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_ANCESTOR_REVISION'
+    'OPERATIONS_PLATFORM_POST_DDL_INTERMEDIATE_REVISION'
+    'OPERATIONS_PLATFORM_POST_DDL_PARENT_REVISION'
+    'OPERATIONS_PLATFORM_POST_DDL_MARKER_SHA256'
+    'OPERATIONS_PLATFORM_POST_DDL_ENV_SHA256'
+    'OPERATIONS_PLATFORM_POST_DDL_ORIGINAL_MARKER_SHA256'
+    'OPERATIONS_PLATFORM_POST_DDL_FINAL_SCRIPT_SHA256'
     'platform_terminal_archive_prepared_marker'
     'platform_terminal_rebind_prepared_marker'
+    'platform_terminal_finalize_descendant_prepared_marker'
+    'platform_terminal_finalize_pinned_post_ddl_marker'
     'pinned prepared Platform marker recovery failed'
+    'pinned post-DDL Platform marker completion failed'
   )
   normalized_source_contracts=(
     'winwidget.operations.admin.audit.(campaigns|reporting|widgets|billing|identity|platform|support|core).v1(?:.retry-v1|.dead-letter)?'
@@ -3048,19 +3265,62 @@ NODE
     "$prepared_recovery_source" == *'sync -f "$archive_directory" || return 1'* &&
     "$prepared_recovery_source" == *'sync -f "$archive_parent" || return 1'* &&
     "$prepared_recovery_source" == *'sync -f "$archive_grandparent" || return 1'* ]]
-  [[ "$marker_retry_source" == *'prepared:*) printf '\''prepared-recovery\n'\'''* &&
+  [[ "$sync_archive_source" == *'platform_cleanup_validate_private_file "$archive"'* &&
+    "$sync_archive_source" == *'"$(platform_cleanup_sha256 "$archive")" == "$expected_sha"'* &&
+    "$sync_archive_source" == *'sync -f "$archive" || return 1'* &&
+    "$sync_archive_source" == *'sync -f "$directory" || return 1'* &&
+    "$sync_archive_source" == *'sync -f "$parent" || return 1'* &&
+    "$sync_archive_source" == *'sync -f "$grandparent" || return 1'* ]]
+  [[ "$descendant_finalizer_source" == *'$1 == "phase" { print "phase=complete"'* &&
+    "$descendant_finalizer_source" == *'print "after_inventory=platform-source-v1-absent"'* &&
+    "$descendant_finalizer_source" == *'print "prisma_migration_id=" prisma_id'* &&
+    "$descendant_finalizer_source" == *'print "updated_at=" now'* &&
+    "$descendant_finalizer_source" == *'platform_terminal_assert_marker_identity descendant'* &&
+    "$descendant_finalizer_source" == *'mv -fT -- "$temporary" "$marker"'* &&
+    "$descendant_finalizer_source" == *'sync -f "$marker" || return 1'* &&
+    "$descendant_finalizer_source" != *'cleanup_revision=%s'* &&
+    "$descendant_finalizer_source" != *'platform_terminal_rebind_prepared_marker'* ]]
+  [[ "$post_ddl_source" == *'rev-list --parents -n 1 "$intermediate"'* &&
+    "$post_ddl_source" == *'"$intermediate $original_ancestor"'* &&
+    "$post_ddl_source" == *'rev-list --parents -n 1 "$parent"'* &&
+    "$post_ddl_source" == *'"$parent $intermediate"'* &&
+    "$post_ddl_source" == *'rev-list --parents -n 1 "$revision"'* &&
+    "$post_ddl_source" == *'"$revision $parent"'* &&
+    "$post_ddl_source" == *'changed_paths="$(git -C "$SERVER_ROOT" diff --name-only "$original_ancestor" "$revision")"'* &&
+    "$post_ddl_source" == *'for candidate in "$original_ancestor" "$intermediate" "$parent" "$revision"'* &&
+    "$post_ddl_source" == *'"$source_state" == absent && "$migration_state" == applied'* &&
+    "$post_ddl_source" == *'"$operations_schema" == pristine'* &&
+    "$post_ddl_source" == *'platform_terminal_assert_exact_repo_ledger applied applied creation'* &&
+    "$post_ddl_source" == *'platform_cleanup_assert_retained_billing_seam'* &&
+    "$post_ddl_source" == *'compose ps --status running -q api outbox-publisher integration-worker'* &&
+    "$post_ddl_source" == *'[[ "$guards" == '\''0|0'\'' ]]'* &&
+    "$post_ddl_source" == *'platform_terminal_archive_prepared_marker'* &&
+    "$post_ddl_source" == *'platform_terminal_finalize_descendant_prepared_marker'* &&
+    "$post_ddl_source" != *'platform_terminal_rebind_prepared_marker'* ]]
+  [[ "$operations_prepare_source" == *'operations_core_state_generation_not_null'* &&
+    "$operations_prepare_source" == *'operations_core_state_id_not_null'* &&
+    "$operations_prepare_source" == *'operations_core_state_legacy_routes_enabled_not_null'* &&
+    "$operations_prepare_source" == *'operations_core_state_ownership_not_null'* &&
+    "$operations_prepare_source" == *'operations_core_state_source_writes_enabled_not_null'* &&
+    "$operations_prepare_source" == *'operations_core_state_updated_at_not_null'* ]]
+  [[ "$marker_retry_source" == *'prepared:absent:applied) printf '\''prepared-post-ddl-completion\n'\'''* &&
+    "$marker_retry_source" == *'prepared:*) printf '\''prepared-recovery\n'\'''* &&
     "$marker_retry_source" == *'complete:absent:applied) printf '\''descendant\n'\'''* &&
     "$marker_retry_source" != *'complete:*)'* ]]
   recovery_line="$(grep -nF 'platform_terminal_recover_pinned_prepared_marker' \
     <<<"$terminal_runner_source" | awk -F: 'NR == 1 { print $1 }')"
+  post_ddl_line="$(grep -nF 'platform_terminal_finalize_pinned_post_ddl_marker' \
+    <<<"$terminal_runner_source" | awk -F: 'NR == 1 { print $1 }')"
   apply_line="$(grep -nF 'platform_terminal_apply_migrations' \
     <<<"$terminal_runner_source" | awk -F: 'NR == 1 { print $1 }')"
-  [[ "$recovery_line" =~ ^[1-9][0-9]*$ && "$apply_line" =~ ^[1-9][0-9]*$ &&
-    "$recovery_line" -lt "$apply_line" &&
+  [[ "$recovery_line" =~ ^[1-9][0-9]*$ && "$post_ddl_line" =~ ^[1-9][0-9]*$ &&
+    "$apply_line" =~ ^[1-9][0-9]*$ && "$recovery_line" -lt "$apply_line" &&
+    "$post_ddl_line" -lt "$apply_line" &&
     "$(grep -Fc 'platform_terminal_assert_marker_identity "$identity_mode"' \
       <<<"$terminal_runner_source")" -ge 3 &&
     "$terminal_runner_source" == *'prepared-recovery)'* &&
-    "$terminal_runner_source" == *'descendant) identity_mode=descendant'* &&
+    "$terminal_runner_source" == *'prepared-post-ddl-completion)'* &&
+    "$terminal_runner_source" == *'OPERATIONS_PLATFORM_POST_DDL_RECOVERY_CONFIRMATION'* &&
     "$terminal_runner_source" != *'rm -f -- "$marker"'* ]]
   for index in "${!forbidden_source_contracts[@]}"; do
     [[ "$source" != *"${forbidden_source_contracts[$index]}"* ]] || {
