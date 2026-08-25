@@ -381,7 +381,7 @@ WHERE migration_name > '$MIGRATION_NAME';")" == '0' ]] ||
 		--schema "$migrations_root/schema.prisma" >/dev/null
 	docker exec -e "PGPASSWORD=$ADMIN_PASSWORD" "$CONTAINER" \
 		createdb --username "$ADMIN_USER" clean_bootstrap
-	bootstrap_url="postgresql://$ADMIN_USER:$ADMIN_PASSWORD@127.0.0.1:$port/clean_bootstrap?schema=public&sslmode=disable&options=$legacy_options"
+	bootstrap_url="postgresql://$ADMIN_USER:$ADMIN_PASSWORD@127.0.0.1:$port/clean_bootstrap?schema=public&sslmode=disable&options=${legacy_options}%20-c%20winwidget.platform_pristine_replay%3Dapproved-nonproduction-replay"
 	DATABASE_URL="$bootstrap_url" pnpm exec prisma migrate deploy \
 		--schema "$SOURCE_ROOT/prisma/schema.prisma" >/dev/null
 	[[ "$(docker exec -e "PGPASSWORD=$ADMIN_PASSWORD" "$CONTAINER" psql --no-psqlrc \

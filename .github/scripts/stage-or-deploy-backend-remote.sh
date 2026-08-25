@@ -1603,6 +1603,65 @@ case "$DEPLOY_TARGET" in
         ;;
     esac
     ;;
+  platform-cleanup)
+    [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
+      echo 'Platform Core source cleanup actions are manual-only.' >&2
+      exit 1
+    }
+    checkout_verified_prod_revision "$EXPECTED_REVISION"
+    cleanup_controller='scripts/cleanup-platform-core-source-production.sh'
+    cleanup_migration='20260825000000_remove_legacy_platform_core_source'
+    cleanup_migration_file="prisma/migrations/$cleanup_migration/migration.sql"
+    cleanup_compose='deploy/docker-compose.prod.yml'
+    first_complete_proof="$APP_ROOT/deploy/backend/.platform-cutover-v1"
+    [[ -f "$cleanup_controller" && ! -L "$cleanup_controller" &&
+      -f "$cleanup_migration_file" && ! -L "$cleanup_migration_file" &&
+      -f "$cleanup_compose" && ! -L "$cleanup_compose" ]] || {
+      echo 'Platform Core cleanup release artifacts are unavailable.' >&2
+      exit 1
+    }
+    case "$PLATFORM_ACTION" in
+      status)
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          bash "$cleanup_controller" --status
+        ;;
+      inventory)
+        bash "$cleanup_controller" --inventory
+        ;;
+      stage|seal|run|verify|forward-recovery)
+        production_env="$APP_ROOT/deploy/backend/.env.production"
+        [[ -f "$production_env" && ! -L "$production_env" &&
+          "$(stat -c '%u:%g:%a' "$production_env")" == '0:0:600' &&
+          "$(sha256sum "$production_env" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_ENV_EXPECTED_SHA256" &&
+          "$(sha256sum "$cleanup_migration_file" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_CLEANUP_MIGRATION_SHA256" &&
+          "$(sha256sum "$cleanup_compose" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_CLEANUP_COMPOSE_SHA256" &&
+          -f "$first_complete_proof" && ! -L "$first_complete_proof" &&
+          "$(stat -c '%u:%g:%a' "$first_complete_proof")" == '0:0:600' &&
+          "$(sha256sum "$first_complete_proof" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256" ]] || {
+          echo 'Platform cleanup production env, migration, Compose or first-COMPLETE proof differs from its reviewed SHA-256.' >&2
+          exit 1
+        }
+        cleanup_command="--$PLATFORM_ACTION"
+        APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+          PLATFORM_CORE_SOURCE_CLEANUP_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+          PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION="$cleanup_migration" \
+          PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256="$PLATFORM_CLEANUP_MIGRATION_SHA256" \
+          PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+          PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256="$PLATFORM_CLEANUP_COMPOSE_SHA256" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FIRST_COMPLETE_PROOF_FILE="$first_complete_proof" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FIRST_COMPLETE_PROOF_SHA256="$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256" \
+          PLATFORM_CORE_SOURCE_CLEANUP_SOAK_SECONDS="$PLATFORM_CLEANUP_SOAK_SECONDS" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_ATTESTATION_SHA256="$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_SIGNATURE_SHA256="$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" \
+          PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
+          bash "$cleanup_controller" "$cleanup_command"
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
   platform)
     [[ "$AUTOMATIC_PROD_PUSH" == 'false' ]] || {
       echo 'Platform lifecycle actions are manual-only.' >&2

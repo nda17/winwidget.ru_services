@@ -7,7 +7,9 @@ bash -n \
   .github/scripts/validate-production-compose.sh \
   .github/scripts/static-check-workflows-and-deployment.sh \
   .github/scripts/stage-or-deploy-backend.sh \
-  .github/scripts/stage-or-deploy-backend-remote.sh
+  .github/scripts/stage-or-deploy-backend-remote.sh \
+  scripts/cleanup-platform-core-source-production.sh \
+  scripts/test-platform-core-source-cleanup-rehearsal.sh
 node --check .github/scripts/validate-production-compose.cjs
 node --check scripts/test-support-runtime-boundaries.mjs
 node --check scripts/test-support-core-source-cleanup-rehearsal.mjs
@@ -25,15 +27,35 @@ docker run --rm \
   --workdir /repo \
   rhysd/actionlint@sha256:ef8299f97635c4c30e2298f48f30763ab782a4ad2c95b744649439a039421e36 \
   -shellcheck=
-docker run --rm \
-  --network none \
-  --read-only \
-  --security-opt no-new-privileges \
-  --entrypoint shellcheck \
-  --volume "$GITHUB_WORKSPACE:/repo:ro" \
-  --workdir /repo \
-  koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
-  --severity=warning \
+run_pinned_shellcheck() {
+  [[ $# -eq 1 ]] || return 1
+  local -a source_options=()
+  case "$1" in
+    scripts/billing-cutover-production.sh | \
+      scripts/cleanup-support-core-source-production.sh | \
+      scripts/test-identity-production-env-recovery.sh)
+      source_options=(--external-sources)
+      ;;
+  esac
+  printf 'Pinned ShellCheck: %s\n' "$1"
+  docker run --rm \
+    --network none \
+    --read-only \
+    --security-opt no-new-privileges \
+    --entrypoint shellcheck \
+    --volume "$GITHUB_WORKSPACE:/repo:ro" \
+    --workdir /repo \
+    koalaman/shellcheck-alpine@sha256:5921d946dac740cbeec2fb1c898747b6105e585130cc7f0602eec9a10f7ddb63 \
+    "${source_options[@]}" \
+    --severity=warning \
+    "$1"
+}
+
+# Keep each target in an isolated ShellCheck process. A single invocation over
+# the full production script set can exceed the bounded CI runner memory before
+# it reports any diagnostic, while isolation preserves the exact pinned image
+# and fail-closed result for every target.
+for shellcheck_target in \
   scripts/deploy-production.sh \
   scripts/deploy-maintenance-production.sh \
   scripts/deploy-notification-delivery-production.sh \
@@ -75,9 +97,13 @@ docker run --rm \
   scripts/support-database-lifecycle.sh \
   scripts/support-cutover-production.sh \
   scripts/cleanup-support-core-source-production.sh \
+  scripts/cleanup-platform-core-source-production.sh \
+  scripts/test-platform-core-source-cleanup-rehearsal.sh \
   .github/scripts/stage-or-deploy-backend.sh \
   .github/scripts/stage-or-deploy-backend-remote.sh \
-  database-restore-entrypoint.sh
+  database-restore-entrypoint.sh; do
+  run_pinned_shellcheck "$shellcheck_target"
+done
 docker run --rm \
   --network none \
   --read-only \
@@ -134,6 +160,10 @@ const { existsSync, readFileSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const workflow = readFileSync(
   ".github/workflows/deploy-production.yml",
+  "utf8",
+);
+const supportCleanupWorkflow = readFileSync(
+  ".github/workflows/support-cleanup-production.yml",
   "utf8",
 );
 const platformLifecycleLines = workflow.split("\n");
@@ -261,6 +291,56 @@ const deployPlatformProductionScript = readFileSync(
   "scripts/deploy-platform-production.sh",
   "utf8",
 );
+const platformCutoverProductionScript = readFileSync(
+  "scripts/platform-cutover-production.sh",
+  "utf8",
+);
+const platformReleaseIdentityScript = readFileSync(
+  "scripts/platform-release-identity.sh",
+  "utf8",
+);
+const platformCoreCleanupScript = readFileSync(
+  "scripts/cleanup-platform-core-source-production.sh",
+  "utf8",
+);
+const platformCoreCleanupRehearsal = readFileSync(
+  "scripts/test-platform-core-source-cleanup-rehearsal.sh",
+  "utf8",
+);
+const widgetsCoreCleanupRehearsal = readFileSync(
+  "scripts/test-widgets-core-source-cleanup-rehearsal.sh",
+  "utf8",
+);
+const billingCoreCleanupRehearsal = readFileSync(
+  "scripts/test-billing-core-source-cleanup-rehearsal.sh",
+  "utf8",
+);
+const rootPackage = JSON.parse(readFileSync("package.json", "utf8"));
+const platformCoreCleanupMigration = readFileSync(
+  "prisma/migrations/20260825000000_remove_legacy_platform_core_source/migration.sql",
+  "utf8",
+);
+const corePrismaSchema = readFileSync("prisma/schema.prisma", "utf8");
+const databaseRestorePostgres = readFileSync(
+  "src/database-restore-worker/database-restore-postgres.ts",
+  "utf8",
+);
+const databaseRestoreTargetContract = readFileSync(
+  "src/dev-tools/database-restore-queue.contract.ts",
+  "utf8",
+);
+const databaseRestoreWorkflow = readFileSync(
+  ".github/workflows/database-restore-production.yml",
+  "utf8",
+);
+const coreRestoreTargetIsRetired =
+  !databaseRestoreTargetContract.includes("\n\t'core',") &&
+  !databaseRestoreTargetContract.includes("\n\t'core'\n") &&
+  !databaseRestoreWorkflow.includes("          - core\n") &&
+  !databaseRestoreWorkflow.includes("|core)");
+if (!coreRestoreTargetIsRetired) {
+  throw new Error("Retired Core backup/restore target was reintroduced");
+}
 const coreAppModule = readFileSync("src/app.module.ts", "utf8");
 const retiredCorePlatformRuntimeFiles = [
   "src/site-settings/site-settings.module.ts",
@@ -276,6 +356,496 @@ if (
   )
 ) {
   throw new Error("Retired Platform runtime or ownership guard remains registered in Core");
+}
+
+const retiredPlatformSchemaDeclarations = [
+  "enum PlatformCoreOwnership",
+  "model SiteSettings",
+  "model PlatformCoreState",
+  "model LegalPage",
+  "model HomePageContent",
+];
+if (
+  retiredPlatformSchemaDeclarations.some((declaration) =>
+    corePrismaSchema.includes(declaration),
+  )
+) {
+  throw new Error("Retired Platform ownership models remain in the Core Prisma schema");
+}
+
+const retainedBillingProjectionRelations = [
+  "billing_core_state",
+  "billing_source_aggregate_versions",
+  "billing_read_projection_versions",
+  "billing_subscription_read_projections",
+  "billing_payment_read_projections",
+  "billing_affiliate_read_projections",
+  "billing_settings_read_projection",
+  "billing_settings_compositions",
+];
+for (const relation of retainedBillingProjectionRelations) {
+  if (
+    !platformCoreCleanupMigration.includes(`'public.${relation}'`) ||
+    (!coreRestoreTargetIsRetired &&
+      !databaseRestorePostgres.includes(`'${relation}'`)) ||
+    !platformCoreCleanupScript.includes(`public.${relation}`)
+  ) {
+    throw new Error(
+      `Platform cleanup does not preserve and verify Billing projection ${relation}`,
+    );
+  }
+}
+
+for (const requiredCleanupMigrationContract of [
+  "BEGIN;",
+  "COMMIT;",
+  "hashtext('winwidget.platform.core-source-cleanup.v1')",
+  "source_inventory IS DISTINCT FROM '4|5|4|1|1|true'",
+  "current_setting(\n            'winwidget.platform_pristine_replay'",
+  "= 'approved-nonproduction-replay'",
+  "COALESCE(pristine_bootstrap, false)",
+  "COALESCE(production_approved, false)",
+  "= 'production-destructive-approved'",
+  "expected_cleanup_revision <> expected_ownership_revision",
+  "migration_name =\n                '20260825000000_remove_legacy_platform_core_source'",
+  "checksum = expected_migration_sha256",
+  "finished_at IS NULL",
+  "'winwidget.platform_frontend_phase_evidence_chain_sha256'",
+  "DROP TRIGGER \"billing_offer_projection\" ON public.legal_pages;",
+  "DROP FUNCTION public.billing_offer_projection_trigger();",
+  "DELETE FROM public.billing_source_aggregate_versions",
+  "DROP TYPE public.\"PlatformCoreOwnership\" RESTRICT;",
+  "post_inventory IS DISTINCT FROM '0|0|0|0|0|true'",
+]) {
+  if (!platformCoreCleanupMigration.includes(requiredCleanupMigrationContract)) {
+    throw new Error(
+      `Platform cleanup migration lost its fail-closed contract: ${requiredCleanupMigrationContract}`,
+    );
+  }
+}
+if (
+  /\bCASCADE\b/i.test(platformCoreCleanupMigration) ||
+  /DROP\s+(?:TRIGGER|FUNCTION|TABLE|TYPE|SEQUENCE)\s+IF\s+EXISTS/i.test(
+    platformCoreCleanupMigration,
+  ) ||
+  !platformCoreCleanupMigration.replace(/\s+/g, " ").trim().includes(
+    "DROP TABLE public.site_settings, public.legal_pages, public.home_page_content, public.platform_core_state RESTRICT;",
+  )
+) {
+  throw new Error(
+    "Platform cleanup migration must delete only the exact reviewed source without CASCADE or IF EXISTS",
+  );
+}
+
+for (const requiredCleanupControllerContract of [
+  "postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296",
+  "absent:preparing",
+  "sealed:forward-only",
+  "forward-only:migrating",
+  "verifying:complete",
+  "platform_cleanup_require_first_complete_proof",
+  "platform_cleanup_validate_prisma_ledger",
+  "platform_cleanup_validate_bound_frontend_evidence",
+  "platform_cleanup_attest_current_frontend_runtime",
+  "platform_cleanup_record_fresh_frontend_phase_evidence",
+  "platform_cleanup_frontend_phase_chain_contains_sha",
+  "platform_cleanup_validate_rendered_topology",
+  "platform_cleanup_candidate_frontend_validator_image_id",
+  "platform_cleanup_recreate_database_restore_runtime",
+  '"$frontend_evidence" == pending',
+  "platform_cleanup_configure_migration_gucs reset",
+  "config LIKE 'winwidget.platform_%'",
+  "all_core_role_credentials_absent=true",
+  "signed_frontend_attestation_valid=true",
+  "prisma_ledger_exact=true",
+]) {
+  if (!platformCoreCleanupScript.includes(requiredCleanupControllerContract)) {
+    throw new Error(
+      `Platform cleanup controller lost its sealed evidence contract: ${requiredCleanupControllerContract}`,
+    );
+  }
+}
+
+const cleanupMarkerKeys = platformCoreCleanupScript.match(
+  /readonly -a PLATFORM_CLEANUP_MARKER_KEYS=\(\n([\s\S]+?)\n\)/,
+)?.[1].trim().split(/\s+/);
+const rehearsalMarkerKeys = platformCoreCleanupRehearsal.match(
+  /readonly PLATFORM_CLEANUP_REHEARSAL_MARKER_KEYS='([^']+)'/,
+)?.[1].split(/\s+/);
+if (
+  !cleanupMarkerKeys ||
+  !rehearsalMarkerKeys ||
+  JSON.stringify(cleanupMarkerKeys) !== JSON.stringify(rehearsalMarkerKeys) ||
+  !platformCoreCleanupRehearsal.includes(
+    "[platform_frontend_phase_evidence_chain_sha256]",
+  )
+) {
+  throw new Error(
+    "Platform cleanup PostgreSQL rehearsal marker/evidence contract differs from the controller",
+  );
+}
+for (const requiredReplayContract of [
+  'prisma/migrations/*/; do',
+  'migration_directory="${migration_directory%/}"',
+  'RESET "winwidget.platform_pristine_replay"',
+  "missing-GUC replay did not roll back exactly",
+]) {
+  if (!platformCoreCleanupRehearsal.includes(requiredReplayContract)) {
+    throw new Error(
+      `Platform PostgreSQL full-tree replay lost its fail-closed contract: ${requiredReplayContract}`,
+    );
+  }
+}
+if (
+  platformCoreCleanupRehearsal.includes(
+    'for migration_directory in "$PLATFORM_CLEANUP_REHEARSAL_ROOT"/prisma/migrations/*; do',
+  )
+) {
+  throw new Error(
+    "Platform PostgreSQL full-tree replay must not treat migration_lock.toml as a migration directory",
+  );
+}
+
+for (const requiredCleanupFailClosedContract of [
+  '^frontend_(challenge|attestation_sha256|signature_sha256)$',
+  'Object.values(services)',
+  'build --pull --provenance=false api billing-api platform-api database-restore-worker',
+  'PLATFORM_FRONTEND_ATTESTATION_VALIDATOR_IMAGE="$validator_image_id"',
+  '"$metadata" == "$image_id|$EXPECTED_REVISION|running|true|healthy|0|winwidget|database-restore-worker|False|maintenance|database-restore-worker|root"',
+  'up -d --no-deps --no-build --force-recreate database-restore-worker',
+  'database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"',
+]) {
+  if (!platformCoreCleanupScript.includes(requiredCleanupFailClosedContract)) {
+    throw new Error(
+      `Platform cleanup controller lost a fail-closed runtime gate: ${requiredCleanupFailClosedContract}`,
+    );
+  }
+}
+if (
+  platformCoreCleanupScript.includes("runtime_surface_paths") ||
+  !platformCoreCleanupScript.includes(
+    "controller tests\n\t# and negative guards are deliberately not interpreted as live topology",
+  )
+) {
+  throw new Error(
+    "Platform cleanup topology must inspect rendered runtime state without treating negative guards as live references",
+  );
+}
+for (const actionCall of [
+  'platform_cleanup_record_fresh_frontend_phase_evidence seal "$directory"',
+  'platform_cleanup_record_fresh_frontend_phase_evidence "$frontend_action" "$directory"',
+  'platform_cleanup_record_fresh_frontend_phase_evidence verify "$directory"',
+]) {
+  if (!platformCoreCleanupScript.includes(actionCall)) {
+    throw new Error(`Platform cleanup lost fresh frontend evidence for ${actionCall}`);
+  }
+}
+if (
+  !platformReleaseIdentityScript.includes(
+    'DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"',
+  ) ||
+  !workflow.includes(
+    "Unique fresh 64-character hex challenge for this exact Platform lifecycle action",
+  )
+) {
+  throw new Error(
+    "Platform cleanup workflow lost the exact restore image or unique frontend challenge contract",
+  );
+}
+
+const requiredPristineReplayGuc =
+  "winwidget.platform_pristine_replay=approved-nonproduction-replay";
+const requiredEncodedPristineReplayGuc =
+  "winwidget.platform_pristine_replay%3Dapproved-nonproduction-replay";
+const exactSlice = (source, startToken, endToken, description) => {
+  const start = source.indexOf(startToken);
+  const end = source.indexOf(endToken, start + startToken.length);
+  if (start < 0 || end <= start) {
+    throw new Error(`Could not isolate ${description}`);
+  }
+  return source.slice(start, end);
+};
+const ciFullTreeReplay = exactSlice(
+  workflow,
+  "      - name: Apply database migrations\n",
+  "      - name:",
+  "the main CI full-tree migration replay",
+);
+const widgetsPristineReplay = exactSlice(
+  widgetsCoreCleanupRehearsal,
+  'createdb --username "$ADMIN_USER" clean_bootstrap',
+  "fail 'pristine bootstrap did not reach the post-cleanup schema'",
+  "the Widgets pristine full-tree replay",
+);
+const billingPristineReplay = exactSlice(
+  billingCoreCleanupRehearsal,
+  "# First prove a pristine replay through every tracked migration.",
+  "fail 'pristine bootstrap did not reach the cleanup schema'",
+  "the Billing pristine full-tree replay",
+);
+const devPrismaMigration = rootPackage.scripts?.["dev-prisma-migration"];
+if (
+  !ciFullTreeReplay.includes(requiredEncodedPristineReplayGuc) ||
+  !widgetsPristineReplay.includes(requiredEncodedPristineReplayGuc) ||
+  !billingPristineReplay.includes(requiredPristineReplayGuc) ||
+  typeof devPrismaMigration !== "string" ||
+  !devPrismaMigration.includes(requiredEncodedPristineReplayGuc)
+) {
+  throw new Error(
+    "Every non-production Core full-tree replay must pass the exact Platform pristine replay GUC",
+  );
+}
+if (
+  deployProductionScript.includes(requiredPristineReplayGuc) ||
+  deployProductionScript.includes(requiredEncodedPristineReplayGuc)
+) {
+  throw new Error(
+    "Routine production migration must never receive the Platform pristine replay GUC",
+  );
+}
+
+const cleanupFunction = (name) => {
+  const start = platformCoreCleanupScript.indexOf(`${name}() {`);
+  const end = platformCoreCleanupScript.indexOf("\n}\n\n", start);
+  if (start < 0 || end <= start) {
+    throw new Error(`Platform cleanup function is missing: ${name}`);
+  }
+  return platformCoreCleanupScript.slice(start, end);
+};
+for (const name of [
+  "platform_cleanup_stage",
+  "platform_cleanup_seal",
+  "platform_cleanup_execute_forward",
+  "platform_cleanup_verify",
+]) {
+  const body = cleanupFunction(name);
+  const lock = body.indexOf("acquire_production_deploy_lock");
+  const guard = body.indexOf(
+    'database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"',
+    lock,
+  );
+  if (lock < 0 || guard <= lock) {
+    throw new Error(`${name} must repeat the restore guard immediately after its deploy lock`);
+  }
+}
+for (const [name, recordToken, boundToken] of [
+  [
+    "platform_cleanup_seal",
+    'platform_cleanup_record_fresh_frontend_phase_evidence seal "$directory"',
+    "platform_cleanup_require_bound_pre_evidence",
+  ],
+  [
+    "platform_cleanup_execute_forward",
+    'platform_cleanup_record_fresh_frontend_phase_evidence "$frontend_action" "$directory"',
+    "platform_cleanup_require_bound_pre_evidence",
+  ],
+  [
+    "platform_cleanup_verify",
+    'platform_cleanup_record_fresh_frontend_phase_evidence verify "$directory"',
+    "platform_cleanup_require_bound_post_evidence",
+  ],
+]) {
+  const body = cleanupFunction(name);
+  if (
+    body.indexOf(recordToken) < 0 ||
+    body.indexOf(recordToken) >= body.indexOf(boundToken)
+  ) {
+    throw new Error(
+      `${name} must reconcile its durable frontend chain before the bound-evidence gate`,
+    );
+  }
+}
+const destructivePrecondition = cleanupFunction(
+  "platform_cleanup_recheck_destructive_preconditions",
+);
+if (
+  destructivePrecondition.indexOf(
+    'database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"',
+  ) < 0 ||
+  destructivePrecondition.indexOf(
+    'database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"',
+  ) >= destructivePrecondition.indexOf("platform_cleanup_assert_targets_unchanged") ||
+  !destructivePrecondition.includes("platform_cleanup_assert_database_restore_runtime")
+) {
+  throw new Error(
+    "Platform cleanup destructive precondition must start with the healthy restore guard",
+  );
+}
+const forwardExecution = cleanupFunction("platform_cleanup_execute_forward");
+const guardedCoreStops = forwardExecution.match(
+  /database_restore_guard_assert_before_mutation healthy-required "\$ENV_FILE" \|\| return 1\n\s*platform_release_compose "\$EXPECTED_REVISION" "\$ENV_FILE" "\$COMPOSE_FILE" \\\n\s*stop --timeout 90 api outbox-publisher integration-worker \|\| return 1/g,
+);
+if ((guardedCoreStops || []).length !== 2) {
+  throw new Error(
+    "Every Platform cleanup Core stop must have an adjacent healthy restore guard",
+  );
+}
+if (
+  !/database_restore_guard_assert_before_mutation healthy-required "\$ENV_FILE" \|\| return 1\n\s*platform_cleanup_assert_database_restore_runtime \|\| return 1\n\s*platform_cleanup_apply_migration/.test(
+    forwardExecution,
+  )
+) {
+  throw new Error(
+    "Platform cleanup DDL must have adjacent healthy and exact restore-runner gates",
+  );
+}
+const guardedMigrationResolutions = forwardExecution.match(
+  /database_restore_guard_assert_before_mutation healthy-required "\$ENV_FILE" \|\| return 1\n\s*platform_cleanup_assert_database_restore_runtime \|\| return 1\n\s*platform_release_compose "\$EXPECTED_REVISION" "\$ENV_FILE" "\$COMPOSE_FILE" \\\n\s*--profile migration run --rm -T --no-deps migrate migrate resolve/g,
+);
+if ((guardedMigrationResolutions || []).length !== 2) {
+  throw new Error(
+    "Every Platform cleanup migration-ledger resolution must have adjacent restore gates",
+  );
+}
+let forwardExecutionOrder = -1;
+for (const orderedToken of [
+  "platform_cleanup_recreate_database_restore_runtime",
+  'database_restore_guard_assert_before_mutation healthy-required "$ENV_FILE"',
+  "platform_cleanup_recheck_destructive_preconditions",
+  "stop --timeout 90 api outbox-publisher integration-worker",
+  "platform_cleanup_apply_migration",
+  "platform_cleanup_assert_database_restore_runtime",
+]) {
+  const nextOrder = forwardExecution.indexOf(orderedToken, forwardExecutionOrder + 1);
+  if (nextOrder <= forwardExecutionOrder) {
+    throw new Error(
+      `Platform cleanup forward execution lost ordered restore/DDL gate: ${orderedToken}`,
+    );
+  }
+  forwardExecutionOrder = nextOrder;
+}
+
+for (const requiredManualCleanupReleaseContract of [
+  "- platform-cleanup",
+  "platform_cleanup_migration_sha256:",
+  "platform_cleanup_compose_sha256:",
+  "platform_cleanup_first_complete_proof_sha256:",
+  "platform_cleanup_soak_seconds:",
+  "bash scripts/test-platform-core-source-cleanup-rehearsal.sh \\\n            --postgres18",
+  "platform-cleanup:stage:'DROP LEGACY PLATFORM CORE SOURCE'",
+  "marker='/opt/winwidget/deploy/backend/.platform-cutover-v1'",
+  "scripts/cleanup-platform-core-source-production.sh \"--$PLATFORM_ACTION\"",
+]) {
+  if (!workflow.includes(requiredManualCleanupReleaseContract)) {
+    throw new Error(
+      `Manual Platform cleanup workflow wiring is incomplete: ${requiredManualCleanupReleaseContract}`,
+    );
+  }
+}
+for (const requiredLocalCleanupReleaseContract of [
+  "elif [[ \"$DEPLOY_TARGET\" == 'platform-cleanup' ]]",
+  "stage:'DROP LEGACY PLATFORM CORE SOURCE'",
+  "PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256",
+  "PLATFORM_CLEANUP_SOAK_SECONDS",
+]) {
+  if (!stageOrDeployLocalScript.includes(requiredLocalCleanupReleaseContract)) {
+    throw new Error(
+      `Local deployment controller lost Platform cleanup validation: ${requiredLocalCleanupReleaseContract}`,
+    );
+  }
+}
+for (const requiredRemoteCleanupReleaseContract of [
+  "  platform-cleanup)",
+  "Platform Core source cleanup actions are manual-only.",
+  "cleanup_migration='20260825000000_remove_legacy_platform_core_source'",
+  '"$(stat -c \'%u:%g:%a\' "$first_complete_proof")" == \'0:0:600\'',
+  'bash "$cleanup_controller" "$cleanup_command"',
+]) {
+  if (!stageOrDeployRemoteScript.includes(requiredRemoteCleanupReleaseContract)) {
+    throw new Error(
+      `Remote deployment controller lost Platform cleanup validation: ${requiredRemoteCleanupReleaseContract}`,
+    );
+  }
+}
+
+for (const requiredCleanupRehearsalContract of [
+  "--postgres18 <file> <sha256>",
+  "approved-nonproduction-replay",
+  "full migration replay ledger is incomplete",
+  "cleanup migration unexpectedly succeeded without the prerequisite migration tree",
+  "--network none",
+  "--publish",
+]) {
+  const present = platformCoreCleanupRehearsal.includes(
+    requiredCleanupRehearsalContract,
+  );
+  if (requiredCleanupRehearsalContract === "--publish" ? present : !present) {
+    throw new Error(
+      `Platform cleanup rehearsal lost its isolated PostgreSQL 18 contract: ${requiredCleanupRehearsalContract}`,
+    );
+  }
+}
+
+const retiredCoreRestoreContracts = [
+  "20260825000000_remove_legacy_platform_core_source",
+  "Routine Core restore requires the applied legacy Platform cleanup migration",
+  "Core restore contains retired Platform relation",
+  "Core restore contains retired Platform function",
+  "Core restore contains retired Platform ownership type",
+  "Core restore is missing retained Billing projection relation",
+  "Core restore contains the retired Platform Billing offer cursor",
+];
+if (coreRestoreTargetIsRetired) {
+  for (const retiredRestoreContract of retiredCoreRestoreContracts) {
+    if (databaseRestorePostgres.includes(retiredRestoreContract)) {
+      throw new Error(
+        `Retired Core restore invariant remains reachable: ${retiredRestoreContract}`,
+      );
+    }
+  }
+} else {
+  for (const requiredRestoreContract of retiredCoreRestoreContracts) {
+    if (!databaseRestorePostgres.includes(requiredRestoreContract)) {
+      throw new Error(
+        `Core restore is not cleanup-aware: ${requiredRestoreContract}`,
+      );
+    }
+  }
+}
+
+const cleanupStatusBranch = platformCutoverProductionScript.indexOf(
+  'if [[ "$cleanup_phase" != absent ]]',
+);
+const cleanupStatusCoreQuery = platformCutoverProductionScript.indexOf(
+  'target_status="$(platform_cutover_cli target status)"',
+  cleanupStatusBranch,
+);
+const cleanupStatusReturn = platformCutoverProductionScript.indexOf(
+  "return 0",
+  cleanupStatusBranch,
+);
+if (
+  cleanupStatusBranch < 0 ||
+  cleanupStatusReturn <= cleanupStatusBranch ||
+  cleanupStatusCoreQuery <= cleanupStatusReturn ||
+  !platformCutoverProductionScript.includes(
+    "platform_cutover_require_no_core_cleanup",
+  )
+) {
+  throw new Error(
+    "Platform cutover status and ownership mutations must remain cleanup-aware",
+  );
+}
+
+const routineCleanupGate = deployProductionScript.indexOf(
+  "platform_cleanup_migration='20260825000000_remove_legacy_platform_core_source'",
+);
+const routineDirtyCheck = deployProductionScript.indexOf(
+  'dirty_files="$(',
+);
+if (
+  routineCleanupGate < 0 ||
+  routineDirtyCheck <= routineCleanupGate ||
+  !deployProductionScript.includes(
+    "Automatic backend revision $deploy_revision is verified but the destructive Platform Core cleanup is deferred.",
+  ) ||
+  !deployProductionScript.includes(
+    "Routine deployment is blocked for an unstaged Platform Core cleanup release.",
+  )
+) {
+  throw new Error(
+    "Routine production deployment must defer or block before the Platform cleanup migration can run",
+  );
 }
 const platformEnvExample = readFileSync(
   "apps/platform/.env.example",
@@ -350,6 +920,25 @@ const platformFrontendAttestationScript = readFileSync(
   "scripts/platform-frontend-runtime-attestation.sh",
   "utf8",
 );
+for (const field of [
+  "platform_frontend_runtime_local_payment_html_sha256",
+  "platform_frontend_runtime_public_payment_html_sha256",
+  "platform_frontend_runtime_payment_executable_graph_sha256",
+]) {
+  if (
+    !platformFrontendAttestationScript.includes(field) ||
+    !platformCoreCleanupScript.includes(field)
+  ) {
+    throw new Error(
+      `Platform cleanup frontend validator output contract lost ${field}`,
+    );
+  }
+}
+if (!platformCoreCleanupScript.includes("if (NR != 15) exit 1")) {
+  throw new Error(
+    "Platform cleanup frontend validator must consume the exact current 15-field output",
+  );
+}
 const telegramBridgeNginx = readFileSync(
   "deploy/telegram-bridge/nginx.conf",
   "utf8",
@@ -1839,9 +2428,10 @@ const expectedWorkflowDispatchInputNames = [
   "platform_frontend_trusted_public_key_sha256",
   "support_action",
   "support_confirmation",
-  "support_cleanup_migration_sha256",
-  "support_cleanup_backup_sha256",
-  "support_cleanup_restore_evidence_sha256",
+  "platform_cleanup_migration_sha256",
+  "platform_cleanup_compose_sha256",
+  "platform_cleanup_first_complete_proof_sha256",
+  "platform_cleanup_soak_seconds",
 ];
 if (
   JSON.stringify(workflowDispatchInputNames) !==
@@ -1849,6 +2439,64 @@ if (
 ) {
   throw new Error(
     `Unexpected workflow_dispatch inputs: ${workflowDispatchInputNames.join(",")}`,
+  );
+}
+const supportCleanupInputsStart = supportCleanupWorkflow.indexOf(
+  "  workflow_dispatch:\n    inputs:\n",
+);
+const supportCleanupPermissionsStart = supportCleanupWorkflow.indexOf(
+  "\npermissions:\n",
+  supportCleanupInputsStart,
+);
+if (
+  supportCleanupInputsStart < 0 ||
+  supportCleanupPermissionsStart <= supportCleanupInputsStart
+) {
+  throw new Error("Support cleanup workflow input block is missing or misplaced");
+}
+const supportCleanupInputNames = [
+  ...supportCleanupWorkflow
+    .slice(supportCleanupInputsStart, supportCleanupPermissionsStart)
+    .matchAll(/^      ([a-z][a-z0-9_]*):$/gm),
+].map(match => match[1]);
+const expectedSupportCleanupInputNames = [
+  "support_confirmation",
+  "support_cleanup_migration_sha256",
+  "support_cleanup_backup_sha256",
+  "support_cleanup_restore_evidence_sha256",
+];
+if (
+  supportCleanupInputNames.length > 25 ||
+  JSON.stringify(supportCleanupInputNames) !==
+    JSON.stringify(expectedSupportCleanupInputNames)
+) {
+  throw new Error(
+    `Unexpected Support cleanup workflow inputs: ${supportCleanupInputNames.join(",")}`,
+  );
+}
+for (const requiredSupportCleanupToken of [
+  "group: deploy-production-server",
+  '"$GITHUB_REF" == \'refs/heads/prod\'',
+  '"$(git rev-parse HEAD)" == "$GITHUB_SHA"',
+  '"$SUPPORT_CONFIRMATION" == \'DROP LEGACY SUPPORT CORE SOURCE\'',
+  '"$SUPPORT_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$',
+  '"$SUPPORT_CLEANUP_BACKUP_SHA256" =~ ^[0-9a-f]{64}$',
+  '"$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$',
+  "SUPPORT_ACTION: cleanup",
+  "bash .github/scripts/stage-or-deploy-backend.sh",
+]) {
+  if (!supportCleanupWorkflow.includes(requiredSupportCleanupToken)) {
+    throw new Error(
+      `Support cleanup workflow lost its exact guard: ${requiredSupportCleanupToken}`,
+    );
+  }
+}
+if (
+  supportCleanupWorkflow.includes("\n  push:") ||
+  Buffer.byteLength(supportCleanupWorkflow, "utf8") >= 30_000
+) {
+  throw new Error(
+    "Support cleanup workflow must remain manual-only and minimal",
   );
 }
 const workflowContract = [
@@ -2185,7 +2833,7 @@ requireCount("git checkout prod", 2);
 requireCount('git merge --ff-only "$fetched_revision"', 1);
 requireCount(
   'checkout_verified_prod_revision "$EXPECTED_REVISION"',
-  11,
+  12,
 );
 requireCount(
   '"$EXPECTED_REVISION" "$prefetched_cleanup_revision"',
@@ -2352,11 +3000,17 @@ if (
   );
 }
 for (const requiredStageToken of [
-  `if [[ "$DEPLOY_TARGET" == 'platform' && "$PLATFORM_ACTION" != 'status' ]]`,
+  `( "$DEPLOY_TARGET" == 'platform' && "$PLATFORM_ACTION" != 'status' ) ||`,
+  `( "$DEPLOY_TARGET" == 'platform-cleanup' &&`,
+  '"$PLATFORM_ACTION" =~ ^(stage|seal|run|verify|forward-recovery)$ )',
   "export PLATFORM_ACTION=status",
   "export PLATFORM_CONFIRMATION=''",
   "export PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256=''",
   "export PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256=''",
+  "export PLATFORM_CLEANUP_MIGRATION_SHA256=''",
+  "export PLATFORM_CLEANUP_COMPOSE_SHA256=''",
+  "export PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256=''",
+  "export PLATFORM_CLEANUP_SOAK_SECONDS=''",
   "bash .github/scripts/stage-or-deploy-backend.sh",
 ]) {
   if (!platformStageStep.includes(requiredStageToken)) {
@@ -2371,7 +3025,8 @@ for (const requiredTransportToken of [
   "secrets.FRONTEND_PRODUCTION_SSH_USER",
   "secrets.FRONTEND_PRODUCTION_SSH_PRIVATE_KEY",
   "git rev-parse --verify \"$GITHUB_SHA:$controller_source\"",
-  "PLATFORM_CUTOVER_GENERATION=1",
+  "platform_generation=1",
+  "PLATFORM_CUTOVER_GENERATION='$platform_generation'",
   'bash \\"\\$controller\\" --generate',
   "platform-frontend-runtime-attestation-v2.public.pem",
   "platform-frontend-runtime-attestation-v2.json",

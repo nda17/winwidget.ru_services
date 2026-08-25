@@ -21,6 +21,7 @@ on:
           - identity-cleanup
           - platform
           - support
+          - platform-cleanup
       widgets_cutover_confirmation:
         description: Type CUTOVER WIDGETS OWNERSHIP for the first Widgets ownership cutover
         required: false
@@ -95,7 +96,7 @@ on:
         default: ''
         type: string
       platform_action:
-        description: Platform lifecycle action (manual platform target only)
+        description: Platform lifecycle or Core cleanup action (manual platform/platform-cleanup targets only)
         required: true
         default: status
         type: choice
@@ -106,6 +107,11 @@ on:
           - cutover
           - abort
           - forward-recovery
+          - inventory
+          - stage
+          - seal
+          - run
+          - verify
       platform_confirmation:
         description: Type the exact Platform lifecycle confirmation when required
         required: false
@@ -122,7 +128,7 @@ on:
         default: ''
         type: string
       platform_frontend_runtime_challenge:
-        description: Fresh 64-character hex challenge bound to this Platform cutover generation
+        description: Unique fresh 64-character hex challenge for this exact Platform lifecycle action
         required: false
         default: ''
         type: string
@@ -155,24 +161,28 @@ on:
           - status
           - prepare
           - cutover
-          - cleanup
       support_confirmation:
         description: Type the exact Support lifecycle confirmation when required
         required: false
         default: ''
         type: string
-      support_cleanup_migration_sha256:
-        description: Reviewed SHA-256 of the exact Support Core cleanup SQL
+      platform_cleanup_migration_sha256:
+        description: Reviewed SHA-256 of the exact Platform Core cleanup migration
         required: false
         default: ''
         type: string
-      support_cleanup_backup_sha256:
-        description: SHA-256 of the protected Support database backup used for cleanup recovery
+      platform_cleanup_compose_sha256:
+        description: Reviewed SHA-256 of the exact backend production Compose file for Platform cleanup
         required: false
         default: ''
         type: string
-      support_cleanup_restore_evidence_sha256:
-        description: SHA-256 of the clean Support restore rehearsal evidence
+      platform_cleanup_first_complete_proof_sha256:
+        description: Reviewed SHA-256 of the immutable first-COMPLETE Platform cutover marker
+        required: false
+        default: ''
+        type: string
+      platform_cleanup_soak_seconds:
+        description: Reviewed minimum completed Platform ownership soak in seconds
         required: false
         default: ''
         type: string
@@ -282,6 +292,8 @@ jobs:
             scripts/platform-release-identity.sh
             scripts/platform-database-lifecycle.sh
             scripts/platform-cutover-production.sh
+            scripts/cleanup-platform-core-source-production.sh
+            scripts/test-platform-core-source-cleanup-rehearsal.sh
             scripts/platform-frontend-runtime-attestation.sh
             scripts/platform-backup-restore-rehearsal.sh
             scripts/deploy-platform-production.sh
@@ -298,6 +310,7 @@ jobs:
             prisma/migrations/20260815000000_remove_legacy_identity_core_source/migration.sql
             prisma/migrations/20260824000000_prepare_platform_service_ownership/migration.sql
             prisma/migrations/20260824020000_prepare_support_service_ownership/migration.sql
+            prisma/migrations/20260825000000_remove_legacy_platform_core_source/migration.sql
           )
           for path in "${required_files[@]}"; do
             test -f "$path"
@@ -330,6 +343,8 @@ jobs:
             scripts/platform-release-identity.sh \
             scripts/platform-database-lifecycle.sh \
             scripts/platform-cutover-production.sh \
+            scripts/cleanup-platform-core-source-production.sh \
+            scripts/test-platform-core-source-cleanup-rehearsal.sh \
             scripts/platform-frontend-runtime-attestation.sh \
             scripts/platform-backup-restore-rehearsal.sh \
             scripts/deploy-platform-production.sh \
@@ -388,6 +403,13 @@ jobs:
             bash scripts/platform-database-lifecycle.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/platform-cutover-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/cleanup-platform-core-source-production.sh --self-test
+          bash scripts/test-platform-core-source-cleanup-rehearsal.sh --self-test
+          platform_cleanup_migration="$(pwd -P)/prisma/migrations/20260825000000_remove_legacy_platform_core_source/migration.sql"
+          platform_cleanup_migration_sha="$(sha256sum "$platform_cleanup_migration" | awk 'NR == 1 { print $1 }')"
+          bash scripts/test-platform-core-source-cleanup-rehearsal.sh \
+            --postgres18 "$platform_cleanup_migration" "$platform_cleanup_migration_sha"
           bash scripts/platform-frontend-runtime-attestation.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/platform-backup-restore-rehearsal.sh --self-test
@@ -447,6 +469,8 @@ jobs:
             scripts/platform-release-identity.sh \
             scripts/platform-database-lifecycle.sh \
             scripts/platform-cutover-production.sh \
+            scripts/cleanup-platform-core-source-production.sh \
+            scripts/test-platform-core-source-cleanup-rehearsal.sh \
             scripts/platform-frontend-runtime-attestation.sh \
             scripts/platform-backup-restore-rehearsal.sh \
             scripts/deploy-platform-production.sh \
@@ -609,9 +633,13 @@ jobs:
           PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_trusted_public_key_sha256 || '' }}
           SUPPORT_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_action || 'status' }}
           SUPPORT_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_confirmation || '' }}
-          SUPPORT_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_migration_sha256 || '' }}
-          SUPPORT_CLEANUP_BACKUP_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_backup_sha256 || '' }}
-          SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_restore_evidence_sha256 || '' }}
+          SUPPORT_CLEANUP_MIGRATION_SHA256: ''
+          SUPPORT_CLEANUP_BACKUP_SHA256: ''
+          SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ''
+          PLATFORM_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_migration_sha256 || '' }}
+          PLATFORM_CLEANUP_COMPOSE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_compose_sha256 || '' }}
+          PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_first_complete_proof_sha256 || '' }}
+          PLATFORM_CLEANUP_SOAK_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_soak_seconds || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
@@ -718,8 +746,40 @@ jobs:
                 [[ -z "$PLATFORM_ENV_EXPECTED_SHA256$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]] || exit 1
                 ;;
             esac
+            [[ -z "$PLATFORM_CLEANUP_MIGRATION_SHA256$PLATFORM_CLEANUP_COMPOSE_SHA256$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256$PLATFORM_CLEANUP_SOAK_SECONDS" ]] || {
+              echo 'Platform cleanup inputs require the platform-cleanup target.' >&2
+              exit 1
+            }
+          elif [[ "$DEPLOY_TARGET" == 'platform-cleanup' ]]; then
+            case "$PLATFORM_ACTION:$PLATFORM_CONFIRMATION" in
+              status:|inventory:)
+                [[ -z "$PLATFORM_ENV_EXPECTED_SHA256$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256$PLATFORM_CLEANUP_MIGRATION_SHA256$PLATFORM_CLEANUP_COMPOSE_SHA256$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256$PLATFORM_CLEANUP_SOAK_SECONDS" ]] || exit 1
+                ;;
+              stage:'DROP LEGACY PLATFORM CORE SOURCE'|seal:'DROP LEGACY PLATFORM CORE SOURCE'|run:'DROP LEGACY PLATFORM CORE SOURCE'|verify:'DROP LEGACY PLATFORM CORE SOURCE'|forward-recovery:'DROP LEGACY PLATFORM CORE SOURCE')
+                [[ "$PLATFORM_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_FRONTEND_REVISION" =~ ^[0-9a-f]{40}$ &&
+                  "$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_FRONTEND_ORIGIN" =~ ^https://[a-z0-9.-]+(:[1-9][0-9]{0,4})?$ &&
+                  ( -z "$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" ||
+                    "$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256" =~ ^[0-9a-f]{64}$ ) &&
+                  ( -z "$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" ||
+                    "$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ) &&
+                  "$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_CLEANUP_COMPOSE_SHA256" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256" =~ ^[0-9a-f]{64}$ &&
+                  "$PLATFORM_CLEANUP_SOAK_SECONDS" =~ ^[1-9][0-9]{2,6}$ ]] || {
+                  echo 'Platform cleanup mutation requires exact release, first-COMPLETE and signed frontend evidence pins.' >&2
+                  exit 1
+                }
+                ;;
+              *)
+                echo 'Invalid Platform Core cleanup action or confirmation.' >&2
+                exit 1
+                ;;
+            esac
           elif [[ "$PLATFORM_ACTION" != 'status' || -n "$PLATFORM_CONFIRMATION" ||
-            -n "$PLATFORM_ENV_EXPECTED_SHA256$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]; then
+            -n "$PLATFORM_ENV_EXPECTED_SHA256$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256$PLATFORM_CLEANUP_MIGRATION_SHA256$PLATFORM_CLEANUP_COMPOSE_SHA256$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256$PLATFORM_CLEANUP_SOAK_SECONDS" ]]; then
             echo 'Platform lifecycle inputs require the platform target.' >&2
             exit 1
           fi
@@ -728,20 +788,12 @@ jobs:
               status:) ;;
               prepare:'PREPARE SUPPORT OWNERSHIP') ;;
               cutover:'CUTOVER SUPPORT OWNERSHIP') ;;
-              cleanup:'DROP LEGACY SUPPORT CORE SOURCE') ;;
               *)
                 echo 'Invalid Support lifecycle action or confirmation.' >&2
                 exit 1
                 ;;
             esac
-            if [[ "$SUPPORT_ACTION" == 'cleanup' ]]; then
-              [[ "$SUPPORT_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
-                "$SUPPORT_CLEANUP_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ &&
-                "$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-                echo 'Support cleanup requires all three exact evidence SHA-256 values.' >&2
-                exit 1
-              }
-            elif [[ -n "$SUPPORT_CLEANUP_MIGRATION_SHA256$SUPPORT_CLEANUP_BACKUP_SHA256$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" ]]; then
+            if [[ -n "$SUPPORT_CLEANUP_MIGRATION_SHA256$SUPPORT_CLEANUP_BACKUP_SHA256$SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256" ]]; then
               echo 'Support cleanup evidence is accepted only by the cleanup action.' >&2
               exit 1
             fi
@@ -757,7 +809,7 @@ jobs:
             -o TCPKeepAlive=yes \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
-            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256='$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256' PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256='$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' SUPPORT_ACTION='$SUPPORT_ACTION' SUPPORT_CONFIRMATION='$SUPPORT_CONFIRMATION' bash -s" <<'EOF'
+            "APP_ROOT='$APP_ROOT' EXPECTED_REVISION='$DEPLOY_REVISION' AUTOMATIC_PROD_PUSH='$AUTOMATIC_PROD_PUSH' DEPLOY_TARGET='$DEPLOY_TARGET' BILLING_CLEANUP_ACTION='$BILLING_CLEANUP_ACTION' BILLING_CLEANUP_CONFIRMATION='$BILLING_CLEANUP_CONFIRMATION' IDENTITY_ACTION='$IDENTITY_ACTION' IDENTITY_CONFIRMATION='$IDENTITY_CONFIRMATION' IDENTITY_CLEANUP_ACTION='$IDENTITY_CLEANUP_ACTION' IDENTITY_CLEANUP_CONFIRMATION='$IDENTITY_CLEANUP_CONFIRMATION' IDENTITY_CORE_CLEANUP_MIGRATION_SHA256='$IDENTITY_CLEANUP_MIGRATION_SHA256' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256='$PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256' PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256='$PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' PLATFORM_CLEANUP_MIGRATION_SHA256='$PLATFORM_CLEANUP_MIGRATION_SHA256' PLATFORM_CLEANUP_COMPOSE_SHA256='$PLATFORM_CLEANUP_COMPOSE_SHA256' PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256='$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256' PLATFORM_CLEANUP_SOAK_SECONDS='$PLATFORM_CLEANUP_SOAK_SECONDS' SUPPORT_ACTION='$SUPPORT_ACTION' SUPPORT_CONFIRMATION='$SUPPORT_CONFIRMATION' bash -s" <<'EOF'
           set -euo pipefail
           cd "$APP_ROOT/winwidget.ru_server"
           [[ "$(id -u)" == "0" &&
@@ -1597,6 +1649,8 @@ jobs:
           bash -n scripts/platform-release-identity.sh
           bash -n scripts/platform-database-lifecycle.sh
           bash -n scripts/platform-cutover-production.sh
+          bash -n scripts/cleanup-platform-core-source-production.sh
+          bash -n scripts/test-platform-core-source-cleanup-rehearsal.sh
           bash -n scripts/platform-frontend-runtime-attestation.sh
           bash -n scripts/platform-backup-restore-rehearsal.sh
           bash -n scripts/deploy-platform-production.sh
@@ -1630,6 +1684,9 @@ jobs:
             bash scripts/platform-database-lifecycle.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/platform-cutover-production.sh --self-test
+          APP_ROOT="$billing_ci_app_root" \
+            bash scripts/cleanup-platform-core-source-production.sh --self-test
+          bash scripts/test-platform-core-source-cleanup-rehearsal.sh --self-test
           bash scripts/platform-frontend-runtime-attestation.sh --self-test
           APP_ROOT="$billing_ci_app_root" \
             bash scripts/platform-backup-restore-rehearsal.sh --self-test
@@ -1660,6 +1717,8 @@ jobs:
             scripts/platform-release-identity.sh \
             scripts/platform-database-lifecycle.sh \
             scripts/platform-cutover-production.sh \
+            scripts/cleanup-platform-core-source-production.sh \
+            scripts/test-platform-core-source-cleanup-rehearsal.sh \
             scripts/platform-frontend-runtime-attestation.sh \
             scripts/platform-backup-restore-rehearsal.sh \
             scripts/deploy-platform-production.sh
@@ -2605,7 +2664,7 @@ jobs:
 
       - name: Apply database migrations
         run: |
-          DATABASE_URL="${DATABASE_URL}&options=-c%20winwidget.campaigns_contract_cutover%3Dproduction-destructive-approved%20-c%20winwidget.campaigns_forward_boundary%3Dforward-only%20-c%20winwidget.campaigns_source_manifest_sha256%3D0000000000000000000000000000000000000000000000000000000000000000%20-c%20winwidget.campaigns_telegram_audit_decision%3Dcompleted%20-c%20winwidget.campaigns_telegram_audit_reference%3Dci-test" \
+          DATABASE_URL="${DATABASE_URL}&options=-c%20winwidget.campaigns_contract_cutover%3Dproduction-destructive-approved%20-c%20winwidget.campaigns_forward_boundary%3Dforward-only%20-c%20winwidget.campaigns_source_manifest_sha256%3D0000000000000000000000000000000000000000000000000000000000000000%20-c%20winwidget.campaigns_telegram_audit_decision%3Dcompleted%20-c%20winwidget.campaigns_telegram_audit_reference%3Dci-test%20-c%20winwidget.platform_pristine_replay%3Dapproved-nonproduction-replay" \
             pnpm exec prisma migrate deploy
           NOTIFICATION_DELIVERY_DATABASE_URL="$NOTIFICATION_DELIVERY_CI_MIGRATION_DATABASE_URL" \
             pnpm --dir apps/notification-delivery run prisma:migrate:deploy
@@ -4806,6 +4865,7 @@ jobs:
             .github/workflows/deploy-production.yml
           bash scripts/deploy-production.sh --self-test-database-restore-create-gate
           bash scripts/deploy-production.sh --self-test-billing-routine-image-gate
+          bash scripts/deploy-production.sh --self-test-platform-cleanup-routine-gate
           bash scripts/deploy-production.sh --self-test-gateway-route-manifest-policy
           bash scripts/deploy-production.sh --self-test-support-first-cutover-contract
           bash .github/scripts/stage-or-deploy-backend-remote.sh --self-test-support-routine-all-guard
@@ -7173,14 +7233,20 @@ jobs:
           PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_frontend_trusted_public_key_sha256 || '' }}
           SUPPORT_ACTION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_action || 'status' }}
           SUPPORT_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.support_confirmation || '' }}
-          SUPPORT_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_migration_sha256 || '' }}
-          SUPPORT_CLEANUP_BACKUP_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_backup_sha256 || '' }}
-          SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.support_cleanup_restore_evidence_sha256 || '' }}
+          SUPPORT_CLEANUP_MIGRATION_SHA256: ''
+          SUPPORT_CLEANUP_BACKUP_SHA256: ''
+          SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ''
+          PLATFORM_CLEANUP_MIGRATION_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_migration_sha256 || '' }}
+          PLATFORM_CLEANUP_COMPOSE_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_compose_sha256 || '' }}
+          PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_first_complete_proof_sha256 || '' }}
+          PLATFORM_CLEANUP_SOAK_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs.platform_cleanup_soak_seconds || '' }}
           SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
           SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
           SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
         run: |
-          if [[ "$DEPLOY_TARGET" == 'platform' && "$PLATFORM_ACTION" != 'status' ]]; then
+          if [[ ( "$DEPLOY_TARGET" == 'platform' && "$PLATFORM_ACTION" != 'status' ) ||
+            ( "$DEPLOY_TARGET" == 'platform-cleanup' &&
+              "$PLATFORM_ACTION" =~ ^(stage|seal|run|verify|forward-recovery)$ ) ]]; then
             # Freeze/deploy the exact backend revision first, but leave the
             # requested lifecycle mutation until fresh frontend evidence has
             # been generated and transported below.
@@ -7193,15 +7259,21 @@ jobs:
             export PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256=''
             export PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256=''
             export PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256=''
+            export PLATFORM_CLEANUP_MIGRATION_SHA256=''
+            export PLATFORM_CLEANUP_COMPOSE_SHA256=''
+            export PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256=''
+            export PLATFORM_CLEANUP_SOAK_SECONDS=''
           fi
           bash .github/scripts/stage-or-deploy-backend.sh
 
       - name: Generate, transport, and consume Platform frontend attestation
         if: >-
           github.event_name == 'workflow_dispatch' &&
-          inputs.deploy_target == 'platform' &&
-          inputs.platform_action != 'status'
+          ((inputs.deploy_target == 'platform' && inputs.platform_action != 'status') ||
+           (inputs.deploy_target == 'platform-cleanup' &&
+            contains(fromJSON('["stage","seal","run","verify","forward-recovery"]'), inputs.platform_action)))
         env:
+          DEPLOY_TARGET: ${{ inputs.deploy_target }}
           PLATFORM_ACTION: ${{ inputs.platform_action }}
           PLATFORM_CONFIRMATION: ${{ inputs.platform_confirmation }}
           PLATFORM_ENV_EXPECTED_SHA256: ${{ inputs.platform_backend_env_expected_sha256 }}
@@ -7211,6 +7283,10 @@ jobs:
           PLATFORM_MANUAL_ATTESTATION_SHA256: ${{ inputs.platform_frontend_attestation_sha256 }}
           PLATFORM_MANUAL_SIGNATURE_SHA256: ${{ inputs.platform_frontend_signature_sha256 }}
           PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256: ${{ inputs.platform_frontend_trusted_public_key_sha256 }}
+          PLATFORM_CLEANUP_MIGRATION_SHA256: ${{ inputs.platform_cleanup_migration_sha256 }}
+          PLATFORM_CLEANUP_COMPOSE_SHA256: ${{ inputs.platform_cleanup_compose_sha256 }}
+          PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256: ${{ inputs.platform_cleanup_first_complete_proof_sha256 }}
+          PLATFORM_CLEANUP_SOAK_SECONDS: ${{ inputs.platform_cleanup_soak_seconds }}
           FRONTEND_SSH_HOST: ${{ secrets.FRONTEND_PRODUCTION_SSH_HOST }}
           FRONTEND_SSH_PORT: ${{ secrets.FRONTEND_PRODUCTION_SSH_PORT }}
           FRONTEND_SSH_USER: ${{ secrets.FRONTEND_PRODUCTION_SSH_USER }}
@@ -7239,6 +7315,7 @@ jobs:
           attested_mutation=false
           computed_attestation_sha=''
           computed_signature_sha=''
+          platform_generation=1
           declare -a frontend_ssh_options=()
           declare -a backend_ssh_options=(
             -i "$HOME/.ssh/deploy_key"
@@ -7277,6 +7354,7 @@ jobs:
 
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ &&
             "$transport_id" =~ ^[0-9]{1,20}-[0-9]{1,10}$ &&
+            "$DEPLOY_TARGET" =~ ^platform(-cleanup)?$ &&
             "$PLATFORM_ENV_EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ &&
             "$BACKEND_SSH_PORT" =~ ^[1-9][0-9]{0,4}$ &&
             "$BACKEND_SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ &&
@@ -7286,16 +7364,35 @@ jobs:
             exit 1
           }
           (( 10#$BACKEND_SSH_PORT <= 65535 ))
-          case "$PLATFORM_ACTION:$PLATFORM_CONFIRMATION" in
-            prepare-billing-readiness:'PREPARE PLATFORM BILLING READINESS'|prepare:'PREPARE PLATFORM OWNERSHIP'|cutover:'CUTOVER PLATFORM OWNERSHIP'|forward-recovery:'CUTOVER PLATFORM OWNERSHIP')
+          case "$DEPLOY_TARGET:$PLATFORM_ACTION:$PLATFORM_CONFIRMATION" in
+            platform:prepare-billing-readiness:'PREPARE PLATFORM BILLING READINESS'|platform:prepare:'PREPARE PLATFORM OWNERSHIP'|platform:cutover:'CUTOVER PLATFORM OWNERSHIP'|platform:forward-recovery:'CUTOVER PLATFORM OWNERSHIP'|platform-cleanup:stage:'DROP LEGACY PLATFORM CORE SOURCE'|platform-cleanup:seal:'DROP LEGACY PLATFORM CORE SOURCE'|platform-cleanup:run:'DROP LEGACY PLATFORM CORE SOURCE'|platform-cleanup:verify:'DROP LEGACY PLATFORM CORE SOURCE'|platform-cleanup:forward-recovery:'DROP LEGACY PLATFORM CORE SOURCE')
               attested_mutation=true
               ;;
-            abort:'ABORT PLATFORM CUTOVER') ;;
+            platform:abort:'ABORT PLATFORM CUTOVER') ;;
             *)
               echo 'Platform attestation transport rejected the requested lifecycle action.' >&2
               exit 1
               ;;
           esac
+
+          if [[ "$DEPLOY_TARGET" == 'platform-cleanup' ]]; then
+            [[ "$PLATFORM_CLEANUP_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ &&
+              "$PLATFORM_CLEANUP_COMPOSE_SHA256" =~ ^[0-9a-f]{64}$ &&
+              "$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256" =~ ^[0-9a-f]{64}$ &&
+              "$PLATFORM_CLEANUP_SOAK_SECONDS" =~ ^[1-9][0-9]{2,6}$ ]] || {
+              echo 'Platform cleanup attestation transport rejected its release evidence pins.' >&2
+              exit 1
+            }
+          else
+            [[ -z "$PLATFORM_CLEANUP_MIGRATION_SHA256$PLATFORM_CLEANUP_COMPOSE_SHA256$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256$PLATFORM_CLEANUP_SOAK_SECONDS" ]] || exit 1
+          fi
+
+          if [[ "$DEPLOY_TARGET" == 'platform-cleanup' ]]; then
+            platform_generation="$(ssh "${backend_ssh_options[@]}" \
+              "$BACKEND_SSH_USER@$BACKEND_SSH_HOST" \
+              "set -euo pipefail; marker='/opt/winwidget/deploy/backend/.platform-cutover-v1'; [[ -f \"\$marker\" && ! -L \"\$marker\" && \"\$(stat -c '%u:%g:%a' \"\$marker\")\" == '0:0:600' ]]; awk -F= '\$1 == \"phase\" { phase=\$2; phases += 1 } \$1 == \"generation\" { generation=\$2; generations += 1 } END { if (phases == 1 && phase == \"complete\" && generations == 1 && generation ~ /^[1-9][0-9]{0,17}$/) print generation; else exit 1 }' \"\$marker\"")"
+            [[ "$platform_generation" =~ ^[1-9][0-9]{0,17}$ ]] || exit 1
+          fi
 
           if [[ "$attested_mutation" == 'true' ]]; then
             [[ "$PLATFORM_FRONTEND_REVISION" =~ ^[0-9a-f]{40}$ &&
@@ -7373,7 +7470,7 @@ jobs:
               chmod 600 \"\$controller\"
               PLATFORM_BACKEND_REVISION='$GITHUB_SHA' \
                 PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' \
-                PLATFORM_CUTOVER_GENERATION=1 \
+                PLATFORM_CUTOVER_GENERATION='$platform_generation' \
                 PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' \
                 PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' \
                 PLATFORM_FRONTEND_ATTESTATION_ROOT='$frontend_root' \
@@ -7440,7 +7537,7 @@ jobs:
 
           ssh "${backend_ssh_options[@]}" \
             "$BACKEND_SSH_USER@$BACKEND_SSH_HOST" \
-            "APP_ROOT='/opt/winwidget' EXPECTED_REVISION='$GITHUB_SHA' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_COMPUTED_ATTESTATION_SHA256='$computed_attestation_sha' PLATFORM_COMPUTED_SIGNATURE_SHA256='$computed_signature_sha' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' PLATFORM_ATTESTED_MUTATION='$attested_mutation' PLATFORM_TRANSPORT_ID='$transport_id' bash -s" <<'PLATFORM_LIFECYCLE'
+            "APP_ROOT='/opt/winwidget' EXPECTED_REVISION='$GITHUB_SHA' DEPLOY_TARGET='$DEPLOY_TARGET' PLATFORM_ACTION='$PLATFORM_ACTION' PLATFORM_CONFIRMATION='$PLATFORM_CONFIRMATION' PLATFORM_ENV_EXPECTED_SHA256='$PLATFORM_ENV_EXPECTED_SHA256' PLATFORM_FRONTEND_REVISION='$PLATFORM_FRONTEND_REVISION' PLATFORM_FRONTEND_RUNTIME_CHALLENGE='$PLATFORM_FRONTEND_RUNTIME_CHALLENGE' PLATFORM_FRONTEND_ORIGIN='$PLATFORM_FRONTEND_ORIGIN' PLATFORM_COMPUTED_ATTESTATION_SHA256='$computed_attestation_sha' PLATFORM_COMPUTED_SIGNATURE_SHA256='$computed_signature_sha' PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256='$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256' PLATFORM_CLEANUP_MIGRATION_SHA256='$PLATFORM_CLEANUP_MIGRATION_SHA256' PLATFORM_CLEANUP_COMPOSE_SHA256='$PLATFORM_CLEANUP_COMPOSE_SHA256' PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256='$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256' PLATFORM_CLEANUP_SOAK_SECONDS='$PLATFORM_CLEANUP_SOAK_SECONDS' PLATFORM_ATTESTED_MUTATION='$attested_mutation' PLATFORM_TRANSPORT_ID='$transport_id' bash -s" <<'PLATFORM_LIFECYCLE'
           set -Eeuo pipefail
           umask 077
           server_root="$APP_ROOT/winwidget.ru_server"
@@ -7471,16 +7568,25 @@ jobs:
           [[ "$(git branch --show-current)" == 'prod' &&
             "$(git rev-parse HEAD)" == "$EXPECTED_REVISION" &&
             -z "$(git status --porcelain --untracked-files=all)" ]]
-          for controller in \
-            scripts/platform-cutover-production.sh \
-            scripts/platform-frontend-runtime-attestation.sh; do
+          controllers=(
+            scripts/platform-cutover-production.sh
+            scripts/platform-frontend-runtime-attestation.sh
+          )
+          if [[ "$DEPLOY_TARGET" == 'platform-cleanup' ]]; then
+            controllers+=(scripts/cleanup-platform-core-source-production.sh)
+          fi
+          for controller in "${controllers[@]}"; do
             [[ -f "$controller" && ! -L "$controller" &&
               "$(git hash-object "$controller")" == \
                 "$(git rev-parse --verify "HEAD:$controller")" ]]
           done
 
           if [[ "$PLATFORM_ATTESTED_MUTATION" == 'true' ]]; then
-            [[ "$PLATFORM_ACTION" =~ ^(prepare-billing-readiness|prepare|cutover|forward-recovery)$ &&
+            [[ ( "$DEPLOY_TARGET" == 'platform' &&
+                "$PLATFORM_ACTION" =~ ^(prepare-billing-readiness|prepare|cutover|forward-recovery)$ ) ||
+              ( "$DEPLOY_TARGET" == 'platform-cleanup' &&
+                "$PLATFORM_ACTION" =~ ^(stage|seal|run|verify|forward-recovery)$ ) ]]
+            [[
               "$PLATFORM_FRONTEND_REVISION" =~ ^[0-9a-f]{40}$ &&
               "$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" =~ ^[0-9a-f]{64}$ &&
               "$PLATFORM_FRONTEND_ORIGIN" =~ ^https://[a-z0-9.-]+(:[1-9][0-9]{0,4})?$ &&
@@ -7490,7 +7596,8 @@ jobs:
               -d "$stage" && ! -L "$stage" &&
               "$(stat -c '%u:%g:%a' "$stage")" == '0:0:700' ]]
             expected_origin_sha="$(printf '%s' "$PLATFORM_FRONTEND_ORIGIN" | sha256sum | awk 'NR == 1 { print $1 }')"
-            if [[ -e "$phase_a_intent" || -L "$phase_a_intent" ]]; then
+            if [[ "$DEPLOY_TARGET" == 'platform' &&
+              ( -e "$phase_a_intent" || -L "$phase_a_intent" ) ]]; then
               [[ -f "$phase_a_intent" && ! -L "$phase_a_intent" &&
                 "$(stat -c '%u:%g:%a' "$phase_a_intent")" == '0:0:600' ]]
               intent_frontend_identity="$(awk -F= '
@@ -7514,7 +7621,8 @@ jobs:
               ' "$phase_a_intent")"
               [[ "$intent_frontend_identity" == "$EXPECTED_REVISION|1|$PLATFORM_FRONTEND_REVISION|$PLATFORM_FRONTEND_RUNTIME_CHALLENGE|$expected_origin_sha|$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]
             fi
-            if [[ -e "$readiness_receipt" || -L "$readiness_receipt" ]]; then
+            if [[ "$DEPLOY_TARGET" == 'platform' &&
+              ( -e "$readiness_receipt" || -L "$readiness_receipt" ) ]]; then
               [[ -f "$readiness_receipt" && ! -L "$readiness_receipt" &&
                 "$(stat -c '%u:%g:%a' "$readiness_receipt")" == '0:0:600' ]]
               receipt_frontend_identity="$(awk -F= '
@@ -7530,7 +7638,11 @@ jobs:
               ' "$readiness_receipt")"
               [[ "$receipt_frontend_identity" == "$PLATFORM_FRONTEND_REVISION|$PLATFORM_FRONTEND_RUNTIME_CHALLENGE|$expected_origin_sha|$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]
             else
-              [[ "$PLATFORM_ACTION" == 'prepare-billing-readiness' ]]
+              [[ ( "$DEPLOY_TARGET" == 'platform' &&
+                  "$PLATFORM_ACTION" == 'prepare-billing-readiness' ) ||
+                ( "$DEPLOY_TARGET" == 'platform-cleanup' &&
+                  ! -e "$readiness_receipt" && ! -L "$readiness_receipt" &&
+                  ! -e "$phase_a_intent" && ! -L "$phase_a_intent" ) ]]
             fi
             for artifact in "$public_name" "$attestation_name" "$signature_name"; do
               [[ -f "$stage/$artifact" && ! -L "$stage/$artifact" &&
@@ -7565,28 +7677,66 @@ jobs:
               "$(sha256sum "$artifact_root/$signature_name" | awk 'NR == 1 { print $1 }')" == \
                 "$PLATFORM_COMPUTED_SIGNATURE_SHA256" ]]
           else
-            [[ "$PLATFORM_ACTION" == 'abort' &&
+            [[ "$DEPLOY_TARGET" == 'platform' && "$PLATFORM_ACTION" == 'abort' &&
               -z "$PLATFORM_FRONTEND_REVISION$PLATFORM_FRONTEND_RUNTIME_CHALLENGE$PLATFORM_FRONTEND_ORIGIN$PLATFORM_COMPUTED_ATTESTATION_SHA256$PLATFORM_COMPUTED_SIGNATURE_SHA256$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" ]]
           fi
 
-          case "$PLATFORM_ACTION" in
-            prepare-billing-readiness) platform_command='--prepare-billing-readiness' ;;
-            prepare) platform_command='--prepare' ;;
-            cutover) platform_command='--cutover' ;;
-            forward-recovery) platform_command='--forward-recovery' ;;
-            abort) platform_command='--abort' ;;
-            *) exit 1 ;;
-          esac
-          APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
-            PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
-            PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
-            PLATFORM_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
-            PLATFORM_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
-            PLATFORM_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
-            PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256="$PLATFORM_COMPUTED_ATTESTATION_SHA256" \
-            PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256="$PLATFORM_COMPUTED_SIGNATURE_SHA256" \
-            PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
-            bash scripts/platform-cutover-production.sh "$platform_command"
+          if [[ "$DEPLOY_TARGET" == 'platform-cleanup' ]]; then
+            cleanup_migration='20260825000000_remove_legacy_platform_core_source'
+            cleanup_migration_file="prisma/migrations/$cleanup_migration/migration.sql"
+            cleanup_compose='deploy/docker-compose.prod.yml'
+            production_env="$APP_ROOT/deploy/backend/.env.production"
+            first_complete_proof="$APP_ROOT/deploy/backend/.platform-cutover-v1"
+            [[ "$PLATFORM_ACTION" =~ ^(stage|seal|run|verify|forward-recovery)$ &&
+              -f "$production_env" && ! -L "$production_env" &&
+              "$(stat -c '%u:%g:%a' "$production_env")" == '0:0:600' &&
+              "$(sha256sum "$production_env" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_ENV_EXPECTED_SHA256" &&
+              -f "$cleanup_migration_file" && ! -L "$cleanup_migration_file" &&
+              "$(sha256sum "$cleanup_migration_file" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_CLEANUP_MIGRATION_SHA256" &&
+              -f "$cleanup_compose" && ! -L "$cleanup_compose" &&
+              "$(sha256sum "$cleanup_compose" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_CLEANUP_COMPOSE_SHA256" &&
+              -f "$first_complete_proof" && ! -L "$first_complete_proof" &&
+              "$(stat -c '%u:%g:%a' "$first_complete_proof")" == '0:0:600' &&
+              "$(sha256sum "$first_complete_proof" | awk 'NR == 1 { print $1 }')" == "$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256" ]] || {
+              echo 'Platform cleanup release evidence changed before the attested mutation.' >&2
+              exit 1
+            }
+            APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+              PLATFORM_CORE_SOURCE_CLEANUP_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+              PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION="$cleanup_migration" \
+              PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256="$PLATFORM_CLEANUP_MIGRATION_SHA256" \
+              PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+              PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256="$PLATFORM_CLEANUP_COMPOSE_SHA256" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FIRST_COMPLETE_PROOF_FILE="$first_complete_proof" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FIRST_COMPLETE_PROOF_SHA256="$PLATFORM_CLEANUP_FIRST_COMPLETE_PROOF_SHA256" \
+              PLATFORM_CORE_SOURCE_CLEANUP_SOAK_SECONDS="$PLATFORM_CLEANUP_SOAK_SECONDS" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_ATTESTATION_SHA256="$PLATFORM_COMPUTED_ATTESTATION_SHA256" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_SIGNATURE_SHA256="$PLATFORM_COMPUTED_SIGNATURE_SHA256" \
+              PLATFORM_CORE_SOURCE_CLEANUP_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
+              bash scripts/cleanup-platform-core-source-production.sh "--$PLATFORM_ACTION"
+          else
+            case "$PLATFORM_ACTION" in
+              prepare-billing-readiness) platform_command='--prepare-billing-readiness' ;;
+              prepare) platform_command='--prepare' ;;
+              cutover) platform_command='--cutover' ;;
+              forward-recovery) platform_command='--forward-recovery' ;;
+              abort) platform_command='--abort' ;;
+              *) exit 1 ;;
+            esac
+            APP_ROOT="$APP_ROOT" EXPECTED_REVISION="$EXPECTED_REVISION" \
+              PLATFORM_CONFIRMATION="$PLATFORM_CONFIRMATION" \
+              PLATFORM_ENV_EXPECTED_SHA256="$PLATFORM_ENV_EXPECTED_SHA256" \
+              PLATFORM_FRONTEND_REVISION="$PLATFORM_FRONTEND_REVISION" \
+              PLATFORM_FRONTEND_RUNTIME_CHALLENGE="$PLATFORM_FRONTEND_RUNTIME_CHALLENGE" \
+              PLATFORM_FRONTEND_ORIGIN="$PLATFORM_FRONTEND_ORIGIN" \
+              PLATFORM_FRONTEND_EXPECTED_ATTESTATION_SHA256="$PLATFORM_COMPUTED_ATTESTATION_SHA256" \
+              PLATFORM_FRONTEND_EXPECTED_SIGNATURE_SHA256="$PLATFORM_COMPUTED_SIGNATURE_SHA256" \
+              PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256="$PLATFORM_FRONTEND_TRUSTED_PUBLIC_KEY_SHA256" \
+              bash scripts/platform-cutover-production.sh "$platform_command"
+          fi
           PLATFORM_LIFECYCLE
 
       - name: Download encrypted canonical Identity production env
