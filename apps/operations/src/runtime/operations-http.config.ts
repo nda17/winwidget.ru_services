@@ -10,7 +10,11 @@ const TRUST_PROXY_VALUE_PATTERN = /^[A-Za-z0-9.:/_-]{1,128}$/;
 
 export const OPERATIONS_GLOBAL_PREFIX_EXCLUDES = [
 	{ path: 'health/live', method: RequestMethod.GET },
-	{ path: 'health/ready', method: RequestMethod.GET }
+	{ path: 'health/ready', method: RequestMethod.GET },
+	{
+		path: 'internal/v1/identity/users/:userId/admin-events/overview',
+		method: RequestMethod.GET
+	}
 ] as const;
 
 export function getOperationsTrustProxyConfig(

@@ -5,8 +5,16 @@ import { OPERATIONS_REQUIRED_ROLES } from './auth/operations-auth.guard';
 import { OperationsIdentityGuard } from './internal/operations-identity.guard';
 import { NotesController } from './notes/notes.controller';
 import { getOperationsRoleScopedProviders } from './operations.module';
+import { OPERATIONS_GLOBAL_PREFIX_EXCLUDES } from './runtime/operations-http.config';
 
 describe('Operations HTTP access contract', () => {
+	it('keeps the Identity owner overview on its unprefixed internal route', () => {
+		expect(OPERATIONS_GLOBAL_PREFIX_EXCLUDES).toContainEqual({
+			path: 'internal/v1/identity/users/:userId/admin-events/overview',
+			method: RequestMethod.GET
+		});
+	});
+
 	it('registers the Identity inbound guard only in the API process role', () => {
 		expect(getOperationsRoleScopedProviders('api')).toEqual([
 			OperationsIdentityGuard
