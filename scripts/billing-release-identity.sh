@@ -42,6 +42,7 @@ BILLING_RELEASE_NODE_ENV_KEYS=(
 	CLEANUP_MIGRATION CLEANUP_REVISION CLEANUP_URL COMPLETION_FILE
 	COMPLETION_REVISION CORE_RESTORE CORE_SHA CORE_SOURCE CORE_STATE
 	CORE_SYSTEM_ID DATABASE_RESTORE_GUARD_HEALTH DATABASE_RESTORE_GUARD_MOUNTS
+	DATABASE_RESTORE_GUARD_TMPFS
 	DEPLOY_FILE DIRECTORY EXPECTED_CLEANUP_STATE
 	EXPECTED_GENERATION EXPECTED_KIND EXPECTED_POST_SHA EXPECTED_REVISION
 	EXPECTED_ROLE EXPECTED_SNAPSHOT EXPECTED_VOLUME FIELD GATEWAY_ROUTES
@@ -454,7 +455,7 @@ MOCK
 	export BILLING_NODE_TEST_LOG="$log_file" BILLING_NODE_TEST_IMAGE="$expected_image"
 	export BILLING_NODE_TEST_REVISION="$revision"
 	PATH="$mock_directory:$(dirname -- "$real_bash"):$(dirname -- "$real_git"):/usr/bin:/bin"
-	FIELD=protocol billing_release_node -e \
+	DATABASE_RESTORE_GUARD_TMPFS='{}' FIELD=protocol billing_release_node -e \
 		'process.stdout.write(process.env.FIELD)' >"$output_file"
 	output="$(<"$output_file")"
 	[[ "$output" == 'protocol' ]] || return 1
@@ -483,6 +484,7 @@ NODE
 		"$log" == *'--security-opt no-new-privileges --entrypoint node'* &&
 		"$log" == *'--env FIELD'* && "$log" == *'--env RECEIPT_FILE'* &&
 		"$log" == *'--env EXPECTED_KIND'* &&
+		"$log" == *'--env DATABASE_RESTORE_GUARD_TMPFS'* &&
 		"$(awk '$1 == "run" && /--interactive/ { count += 1 } END { print count + 0 }' \
 			"$log_file")" == '3' &&
 		"$(awk '$1 == "run" && /--interactive/ && $NF == "-" { count += 1 } \

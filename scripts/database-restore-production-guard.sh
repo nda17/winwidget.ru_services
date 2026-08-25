@@ -435,10 +435,11 @@ database_restore_guard_validate_worker() {
 }
 
 database_restore_guard_validate_service_owned_snapshot() {
-	[[ $# -eq 3 ]] || return 1
+	[[ $# -eq 4 ]] || return 1
 	local env_snapshot="$1"
 	local health_test="$2"
 	local mounts="$3"
+	local tmpfs="$4"
 	local validator_source
 	IFS= read -r -d '' validator_source <<'NODE' || true
 const { readFileSync } = require('node:fs');
@@ -483,9 +484,11 @@ if (
 ) process.exit(1);
 let health;
 let mounts;
+let tmpfs;
 try {
   health = JSON.parse(process.env.DATABASE_RESTORE_GUARD_HEALTH || 'null');
   mounts = JSON.parse(process.env.DATABASE_RESTORE_GUARD_MOUNTS || 'null');
+  tmpfs = JSON.parse(process.env.DATABASE_RESTORE_GUARD_TMPFS || 'null');
 } catch {
   process.exit(1);
 }
@@ -493,26 +496,52 @@ const exactTargets =
   '["billing","campaigns","identity","notification-delivery","operations","platform","reporting","support","widgets"]';
 if (!Array.isArray(health) || health.length < 2 ||
     !health.some(value => typeof value === 'string' && value.includes(exactTargets)) ||
-    !Array.isArray(mounts)) process.exit(1);
-const secretTargets = new Set(
-  mounts
-    .filter(mount => mount?.RW === false &&
-      /^\/run\/secrets\/database-restore-[a-z-]+-admin-password$/.test(mount?.Destination || ''))
-    .map(mount => mount.Destination),
+    !Array.isArray(mounts) || !tmpfs || Array.isArray(tmpfs) ||
+    typeof tmpfs !== 'object') process.exit(1);
+const secretMountPrefix = '/run/secrets/database-restore-';
+const secretMounts = mounts.filter(mount =>
+  typeof mount?.Destination === 'string' &&
+  mount.Destination.startsWith(secretMountPrefix),
 );
-if (secretTargets.size !== targets.length ||
-    targets.some(target => !secretTargets.has(sourceSecretPath(target))) ||
-    !mounts.some(mount => mount?.Type === 'tmpfs' && mount?.RW === true &&
-      mount?.Destination === '/run/database-restore-secrets')) process.exit(1);
+const secretTargets = new Set(secretMounts.map(mount => mount.Destination));
+if (secretMounts.length !== targets.length ||
+    secretTargets.size !== targets.length ||
+    secretMounts.some(mount => mount?.Type !== 'bind' || mount?.RW !== false) ||
+    targets.some(target => !secretTargets.has(sourceSecretPath(target)))) {
+  process.exit(1);
+}
+const secretTmpfsPath = '/run/database-restore-secrets';
+const relevantTmpfsPaths = Object.keys(tmpfs).filter(path =>
+  path === secretTmpfsPath ||
+  path.startsWith(secretTmpfsPath + '/') ||
+  secretTmpfsPath.startsWith(path.endsWith('/') ? path : path + '/'),
+);
+const tmpfsOptions = tmpfs[secretTmpfsPath];
+if (relevantTmpfsPaths.length !== 1 || typeof tmpfsOptions !== 'string') {
+  process.exit(1);
+}
+const tmpfsTokens = tmpfsOptions.split(',');
+const requiredTmpfsTokens = new Set([
+  'rw',
+  'noexec',
+  'nosuid',
+  'nodev',
+  'size=64k',
+  'mode=0700',
+]);
+if (tmpfsTokens.length !== requiredTmpfsTokens.size ||
+    new Set(tmpfsTokens).size !== requiredTmpfsTokens.size ||
+    tmpfsTokens.some(token => !requiredTmpfsTokens.has(token))) process.exit(1);
 NODE
 	DATABASE_RESTORE_GUARD_HEALTH="$health_test" \
 	DATABASE_RESTORE_GUARD_MOUNTS="$mounts" \
+	DATABASE_RESTORE_GUARD_TMPFS="$tmpfs" \
 		billing_release_node_stdin -e "$validator_source" <<<"$env_snapshot"
 }
 
 database_restore_guard_validate_service_owned_targets() {
 	local container_id="${DATABASE_RESTORE_GUARD_WORKER_CONTAINER_ID:-}"
-	local env_snapshot health_test mounts
+	local env_snapshot health_test mounts tmpfs
 	[[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || {
 		database_restore_guard_fail \
 			'Service-owned restore gate requires the exact healthy restore worker.'
@@ -521,8 +550,9 @@ database_restore_guard_validate_service_owned_targets() {
 	env_snapshot="$(database_restore_guard_container_env "$container_id")" || return 1
 	health_test="$(docker inspect --format '{{json .Config.Healthcheck.Test}}' "$container_id")" || return 1
 	mounts="$(docker inspect --format '{{json .Mounts}}' "$container_id")" || return 1
+	tmpfs="$(docker inspect --format '{{json .HostConfig.Tmpfs}}' "$container_id")" || return 1
 	database_restore_guard_validate_service_owned_snapshot \
-		"$env_snapshot" "$health_test" "$mounts"
+		"$env_snapshot" "$health_test" "$mounts" "$tmpfs"
 }
 
 database_restore_guard_assert() {
@@ -608,8 +638,10 @@ database_restore_guard_self_test() {
 	local self_test_revision self_test_container_id self_test_image_id
 	local test_worker_health
 	local service_owned_env service_owned_health service_owned_mounts
+	local service_owned_tmpfs
 	local service_owned_without_operations service_owned_without_mount
-	local service_owned_validator_source
+	local invalid_tmpfs tmpfs_token
+	local service_owned_validator_source service_owned_target_source
 
 	service_owned_validator_source="$(
 		declare -f database_restore_guard_validate_service_owned_snapshot
@@ -620,6 +652,12 @@ database_restore_guard_self_test() {
 		<<<"$service_owned_validator_source"; then
 		return 1
 	fi
+	service_owned_target_source="$(
+		declare -f database_restore_guard_validate_service_owned_targets
+	)"
+	[[ "$service_owned_target_source" == *"'{{json .Mounts}}'"* &&
+		"$service_owned_target_source" == *"'{{json .HostConfig.Tmpfs}}'"* &&
+		"$service_owned_target_source" == *'"$env_snapshot" "$health_test" "$mounts" "$tmpfs"'* ]]
 
 	root="$(
 		mktemp -d "${TMPDIR:-/tmp}/winwidget-database-restore-guard.XXXXXX"
@@ -893,12 +931,15 @@ database_restore_guard_self_test() {
 		'DATABASE_RESTORE_OPERATIONS_PORT=55441' \
 		'DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE=/run/database-restore-secrets/operations-admin-password')"
 	service_owned_health='["CMD","node","[\"billing\",\"campaigns\",\"identity\",\"notification-delivery\",\"operations\",\"platform\",\"reporting\",\"support\",\"widgets\"]"]'
-	service_owned_mounts='[{"Type":"tmpfs","RW":true,"Destination":"/run/database-restore-secrets"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-notification-delivery-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-campaigns-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-reporting-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-widgets-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-billing-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-identity-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-platform-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-support-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-operations-admin-password"}]'
+	service_owned_mounts='[{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-notification-delivery-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-campaigns-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-reporting-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-widgets-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-billing-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-identity-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-platform-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-support-admin-password"},{"Type":"bind","RW":false,"Destination":"/run/secrets/database-restore-operations-admin-password"}]'
+	service_owned_tmpfs='{"/run/database-restore-secrets":"rw,noexec,nosuid,nodev,size=64k,mode=0700","/tmp":"rw,noexec,nosuid,nodev,size=16m,mode=1777"}'
 	database_restore_guard_validate_service_owned_snapshot \
-		"$service_owned_env" "$service_owned_health" "$service_owned_mounts"
+		"$service_owned_env" "$service_owned_health" "$service_owned_mounts" \
+		"$service_owned_tmpfs"
 	service_owned_without_operations="${service_owned_env//$'DATABASE_RESTORE_OPERATIONS_PORT=55441\n'/}"
 	if database_restore_guard_validate_service_owned_snapshot \
 		"$service_owned_without_operations" "$service_owned_health" "$service_owned_mounts" \
+		"$service_owned_tmpfs" \
 		>/dev/null 2>&1; then
 		database_restore_guard_fail \
 			'Database restore guard self-test accepted a missing Operations port.'
@@ -906,14 +947,15 @@ database_restore_guard_self_test() {
 	fi
 	if database_restore_guard_validate_service_owned_snapshot \
 		"${service_owned_env/OPERATIONS_PORT=55441/OPERATIONS_PORT=55442}" \
-		"$service_owned_health" "$service_owned_mounts" >/dev/null 2>&1; then
+		"$service_owned_health" "$service_owned_mounts" "$service_owned_tmpfs" \
+		>/dev/null 2>&1; then
 		database_restore_guard_fail \
 			'Database restore guard self-test accepted the wrong Operations port.'
 		return 1
 	fi
 	if database_restore_guard_validate_service_owned_snapshot \
 		"$service_owned_env" "${service_owned_health/operations/omitted}" \
-		"$service_owned_mounts" >/dev/null 2>&1; then
+		"$service_owned_mounts" "$service_owned_tmpfs" >/dev/null 2>&1; then
 		database_restore_guard_fail \
 			'Database restore guard self-test accepted a stale health target manifest.'
 		return 1
@@ -921,6 +963,7 @@ database_restore_guard_self_test() {
 	service_owned_without_mount="${service_owned_mounts/,\{\"Type\":\"bind\",\"RW\":false,\"Destination\":\"\/run\/secrets\/database-restore-operations-admin-password\"\}/}"
 	if database_restore_guard_validate_service_owned_snapshot \
 		"$service_owned_env" "$service_owned_health" "$service_owned_without_mount" \
+		"$service_owned_tmpfs" \
 		>/dev/null 2>&1; then
 		database_restore_guard_fail \
 			'Database restore guard self-test accepted a missing Operations secret mount.'
@@ -928,14 +971,49 @@ database_restore_guard_self_test() {
 	fi
 	if database_restore_guard_validate_service_owned_snapshot \
 		"$service_owned_env" "$service_owned_health" \
-		"${service_owned_mounts/tmpfs/volume}" >/dev/null 2>&1; then
+		"${service_owned_mounts/\"RW\":false/\"RW\":true}" \
+		"$service_owned_tmpfs" >/dev/null 2>&1; then
+		database_restore_guard_fail \
+			'Database restore guard self-test accepted a writable admin secret mount.'
+		return 1
+	fi
+	if database_restore_guard_validate_service_owned_snapshot \
+		"$service_owned_env" "$service_owned_health" \
+		"${service_owned_mounts%]},{\"Type\":\"bind\",\"RW\":false,\"Destination\":\"/run/secrets/database-restore-extra-admin-password\"}]" \
+		"$service_owned_tmpfs" >/dev/null 2>&1; then
+		database_restore_guard_fail \
+			'Database restore guard self-test accepted an extra admin secret mount.'
+		return 1
+	fi
+	if database_restore_guard_validate_service_owned_snapshot \
+		"$service_owned_env" "$service_owned_health" "$service_owned_mounts" '{}' \
+		>/dev/null 2>&1; then
 		database_restore_guard_fail \
 			'Database restore guard self-test accepted a missing secrets tmpfs.'
 		return 1
 	fi
+	for tmpfs_token in rw noexec nosuid nodev size=64k mode=0700; do
+		invalid_tmpfs="${service_owned_tmpfs/"$tmpfs_token"/invalid}"
+		if database_restore_guard_validate_service_owned_snapshot \
+			"$service_owned_env" "$service_owned_health" "$service_owned_mounts" \
+			"$invalid_tmpfs" >/dev/null 2>&1; then
+			database_restore_guard_fail \
+				'Database restore guard self-test accepted unsafe secrets tmpfs options.'
+			return 1
+		fi
+	done
+	if database_restore_guard_validate_service_owned_snapshot \
+		"$service_owned_env" "$service_owned_health" "$service_owned_mounts" \
+		"${service_owned_tmpfs/\"\/tmp\"/\"\/run\/database-restore-secrets\/nested\":\"rw,noexec,nosuid,nodev,size=1k,mode=0700\",\"\/tmp\"}" \
+		>/dev/null 2>&1; then
+		database_restore_guard_fail \
+			'Database restore guard self-test accepted an extra overlapping secrets tmpfs.'
+		return 1
+	fi
 	if database_restore_guard_validate_service_owned_snapshot \
 		"$service_owned_env"$'\nDATABASE_RESTORE_CORE_PORT=55434' \
-		"$service_owned_health" "$service_owned_mounts" >/dev/null 2>&1; then
+		"$service_owned_health" "$service_owned_mounts" "$service_owned_tmpfs" \
+		>/dev/null 2>&1; then
 		database_restore_guard_fail \
 			'Database restore guard self-test accepted a retired Core target.'
 		return 1
