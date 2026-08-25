@@ -12,6 +12,7 @@ CONTAINER_ARTIFACT_DIR='/var/lib/winwidget/operations-cutover'
 readonly PLATFORM_TERMINAL_MIGRATION='20260825000000_remove_legacy_platform_core_source'
 readonly OPERATIONS_PREP_MIGRATION='20260824030000_prepare_operations_service_ownership'
 readonly PLATFORM_TERMINAL_MARKER_NAME='.platform-core-source-terminal-v1'
+readonly PLATFORM_PREPARED_RECOVERY_CONFIRMATION='RECOVER EXACT PREPARED PLATFORM MARKER'
 readonly -a PLATFORM_TERMINAL_MARKER_KEYS=(
   version phase ownership_revision cleanup_revision production_env_sha256
   compose_sha256 core_database_name core_database_system_identifier generation
@@ -307,6 +308,264 @@ platform_terminal_write_marker() {
   mv -fT -- "$temporary" "$marker"
   sync -f "$directory"
   platform_terminal_validate_marker "$marker"
+}
+
+platform_terminal_git_file_sha256() {
+  [[ $# -eq 2 ]] || return 1
+  [[ "$1" =~ ^[0-9a-f]{40}$ &&
+    "$2" =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  git -C "$SERVER_ROOT" show "$1:$2" | sha256sum | awk 'NR == 1 { print $1 }'
+}
+
+platform_terminal_prepared_recovery_archive_path() {
+  [[ $# -eq 1 ]] || return 1
+  [[ "$1" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s/deploy/backend/.production-evidence/platform-terminal-prepared-recovery-%s/prepared-marker.evidence\n' \
+    "$APP_ROOT" "$1"
+}
+
+platform_terminal_archive_prepared_marker() {
+  [[ $# -eq 3 ]] || return 1
+  [[ "$1" == "$(platform_terminal_marker_path)" &&
+    "$2" =~ ^[0-9a-f]{40}$ && "$3" =~ ^[0-9a-f]{64}$ ]] || return 1
+  local marker="$1" ancestor="$2" expected_sha="$3" archive directory parent grandparent temporary
+  archive="$(platform_terminal_prepared_recovery_archive_path "$ancestor")" || return 1
+  directory="$(dirname -- "$archive")"
+  parent="$(dirname -- "$directory")"
+  grandparent="$(dirname -- "$parent")"
+  platform_cleanup_prepare_private_directory "$directory" || return 1
+  if [[ -e "$archive" || -L "$archive" ]]; then
+    platform_cleanup_validate_private_file "$archive" || return 1
+    [[ "$(platform_cleanup_sha256 "$archive")" == "$expected_sha" ]] || return 1
+    sync -f "$archive" || return 1
+    sync -f "$directory" || return 1
+    sync -f "$parent" || return 1
+    sync -f "$grandparent" || return 1
+    printf '%s\n' "$archive"
+    return
+  fi
+  temporary="$(mktemp "$directory/.prepared-marker.partial.XXXXXX")" || return 1
+  cp -- "$marker" "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  chmod 600 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  chown 0:0 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  [[ "$(platform_cleanup_sha256 "$temporary")" == "$expected_sha" ]] || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  sync -f "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  mv -fT -- "$temporary" "$archive" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  sync -f "$archive" || return 1
+  sync -f "$directory" || return 1
+  sync -f "$parent" || return 1
+  sync -f "$grandparent" || return 1
+  platform_cleanup_validate_private_file "$archive" || return 1
+  [[ "$(platform_cleanup_sha256 "$archive")" == "$expected_sha" ]] || return 1
+  printf '%s\n' "$archive"
+}
+
+platform_terminal_rebind_prepared_marker() {
+  [[ $# -eq 4 ]] || return 1
+  [[ "$1" =~ ^[0-9a-f]{40}$ && "$1" == "$EXPECTED_REVISION" &&
+    "$2" == "$(platform_terminal_prepared_recovery_archive_path "$4")" &&
+    "$3" =~ ^[0-9a-f]{64}$ && "$4" =~ ^[0-9a-f]{40}$ ]] || return 1
+  local marker directory temporary created_at archive="$2" expected_sha="$3" ancestor="$4"
+  marker="$(platform_terminal_marker_path)"
+  platform_terminal_validate_marker "$marker" || return 1
+  platform_cleanup_validate_private_file "$archive" || return 1
+  [[ "$(platform_terminal_marker_value phase)" == prepared &&
+    "$(platform_terminal_marker_value cleanup_revision)" == "$ancestor" &&
+    "$(platform_cleanup_sha256 "$marker")" == "$expected_sha" &&
+    "$(platform_cleanup_sha256 "$archive")" == "$expected_sha" ]] || return 1
+  created_at="$(platform_terminal_marker_value created_at)" || return 1
+  directory="$(dirname -- "$marker")"
+  temporary="$(mktemp "$directory/$PLATFORM_TERMINAL_MARKER_NAME.rebind.XXXXXX")" || return 1
+  {
+    printf 'version=1\nphase=prepared\n'
+    printf 'ownership_revision=%s\ncleanup_revision=%s\n' \
+      "$PLATFORM_TERMINAL_OWNERSHIP_REVISION" "$EXPECTED_REVISION"
+    printf 'production_env_sha256=%s\ncompose_sha256=%s\n' \
+      "$PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256" \
+      "$PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256"
+    printf 'core_database_name=%s\ncore_database_system_identifier=%s\n' \
+      "$PLATFORM_TERMINAL_DATABASE_NAME" "$PLATFORM_TERMINAL_DATABASE_SYSTEM_IDENTIFIER"
+    printf 'generation=%s\nmigration=%s\nmigration_sha256=%s\n' \
+      "$PLATFORM_TERMINAL_GENERATION" "$PLATFORM_TERMINAL_MIGRATION" \
+      "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256"
+    printf 'snapshot_sha256=%s\nsource_fingerprint=%s\nsource_high_watermark=%s\n' \
+      "$PLATFORM_TERMINAL_SNAPSHOT_SHA256" "$PLATFORM_TERMINAL_SOURCE_FINGERPRINT" \
+      "$PLATFORM_TERMINAL_SOURCE_HIGH_WATERMARK"
+    printf 'billing_offer_contract_version=2\n'
+    printf 'billing_offer_sequence_scope=billing.offer:offer\n'
+    printf 'billing_offer_aggregate_version=%s\n' "$PLATFORM_TERMINAL_BILLING_AGGREGATE_VERSION"
+    printf 'billing_offer_source_sequence=%s\n' "$PLATFORM_TERMINAL_BILLING_SOURCE_SEQUENCE"
+    printf 'billing_offer_fence_fingerprint=%s\n' "$PLATFORM_TERMINAL_BILLING_FENCE_FINGERPRINT"
+    printf 'before_inventory=platform-source-v1-present\nafter_inventory=pending\n'
+    printf 'prisma_migration_id=pending\ncreated_at=%s\nupdated_at=%s\n' \
+      "$created_at" "$created_at"
+  } >"$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  chmod 600 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  chown 0:0 "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  platform_terminal_validate_marker "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  sync -f "$temporary" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  mv -fT -- "$temporary" "$marker" || {
+    rm -f -- "$temporary"
+    return 1
+  }
+  sync -f "$marker" || return 1
+  sync -f "$directory" || return 1
+  [[ "$(platform_terminal_assert_marker_identity creation)" == prepared ]]
+}
+
+platform_terminal_recover_pinned_prepared_marker() {
+  [[ $# -eq 4 ]] || return 1
+  [[ "$1" =~ ^[0-9a-f]{40}$ &&
+    "$2" =~ ^(present|absent)$ &&
+    "$3" =~ ^(pending|failed|rolled-back|applied)$ &&
+    "$4" =~ ^(absent|pristine|forward|unsafe)$ ]] || return 1
+  local revision="$1" source_state="$2" migration_state="$3" operations_schema="$4"
+  local ancestor intermediate expected_marker_sha expected_env_sha expected_script_sha
+  local marker cleanup_revision phase archive operations_state guards running
+  local marker_directory archive_directory archive_parent archive_grandparent
+  local migration_path compose_path script_path revision_sha marker_migration_sha marker_compose_sha
+  local candidate changed_paths
+  [[ "${OPERATIONS_PLATFORM_PREPARED_RECOVERY_CONFIRMATION:-}" == \
+    "$PLATFORM_PREPARED_RECOVERY_CONFIRMATION" ]] || return 1
+  ancestor="${OPERATIONS_PLATFORM_PREPARED_ANCESTOR_REVISION:-}"
+  intermediate="${OPERATIONS_PLATFORM_PREPARED_INTERMEDIATE_REVISION:-}"
+  expected_marker_sha="${OPERATIONS_PLATFORM_PREPARED_MARKER_SHA256:-}"
+  expected_env_sha="${OPERATIONS_PLATFORM_PREPARED_ENV_SHA256:-}"
+  expected_script_sha="${OPERATIONS_PLATFORM_PREPARED_FINAL_SCRIPT_SHA256:-}"
+  [[ "$ancestor" =~ ^[0-9a-f]{40}$ && "$intermediate" =~ ^[0-9a-f]{40}$ &&
+    "$expected_marker_sha" =~ ^[0-9a-f]{64}$ &&
+    "$expected_env_sha" =~ ^[0-9a-f]{64}$ &&
+    "$expected_script_sha" =~ ^[0-9a-f]{64}$ &&
+    "$ancestor" != "$intermediate" && "$intermediate" != "$revision" &&
+    "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$intermediate")" == \
+      "$intermediate $ancestor" &&
+    "$(git -C "$SERVER_ROOT" rev-list --parents -n 1 "$revision")" == \
+      "$revision $intermediate" ]] || return 1
+  script_path='scripts/operations-cutover-production.sh'
+  changed_paths="$(git -C "$SERVER_ROOT" diff --name-only "$ancestor" "$revision")" || return 1
+  [[ "$changed_paths" == "$script_path" &&
+    "$(platform_terminal_git_file_sha256 "$revision" "$script_path")" == "$expected_script_sha" &&
+    "$(platform_cleanup_sha256 "$SERVER_ROOT/$script_path")" == "$expected_script_sha" ]] || return 1
+  migration_path="prisma/migrations/$PLATFORM_TERMINAL_MIGRATION/migration.sql"
+  compose_path='deploy/docker-compose.prod.yml'
+  marker="$(platform_terminal_marker_path)"
+  platform_terminal_validate_marker "$marker" || return 1
+  marker_migration_sha="$(platform_terminal_marker_value migration_sha256)" || return 1
+  marker_compose_sha="$(platform_terminal_marker_value compose_sha256)" || return 1
+  for candidate in "$ancestor" "$intermediate" "$revision"; do
+    revision_sha="$(platform_terminal_git_file_sha256 "$candidate" "$migration_path")" || return 1
+    [[ "$revision_sha" == "$marker_migration_sha" &&
+      "$revision_sha" == "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" ]] || return 1
+    revision_sha="$(platform_terminal_git_file_sha256 "$candidate" "$compose_path")" || return 1
+    [[ "$revision_sha" == "$marker_compose_sha" &&
+      "$revision_sha" == "$PLATFORM_CORE_SOURCE_CLEANUP_COMPOSE_EXPECTED_SHA256" ]] || return 1
+  done
+  cleanup_revision="$(platform_terminal_marker_value cleanup_revision)" || return 1
+  phase="$(platform_terminal_marker_value phase)" || return 1
+  archive="$(platform_terminal_prepared_recovery_archive_path "$ancestor")" || return 1
+  marker_directory="$(dirname -- "$marker")"
+  archive_directory="$(dirname -- "$archive")"
+  archive_parent="$(dirname -- "$archive_directory")"
+  archive_grandparent="$(dirname -- "$archive_parent")"
+  if [[ "$cleanup_revision" == "$revision" ]]; then
+    platform_cleanup_validate_private_file "$archive" || return 1
+    [[ "$(platform_cleanup_sha256 "$archive")" == "$expected_marker_sha" &&
+      "$(platform_terminal_assert_marker_identity creation)" == "$phase" &&
+      "$phase" =~ ^(prepared|complete)$ ]] || return 1
+    sync -f "$marker" || return 1
+    sync -f "$marker_directory" || return 1
+    sync -f "$archive" || return 1
+    sync -f "$archive_directory" || return 1
+    sync -f "$archive_parent" || return 1
+    sync -f "$archive_grandparent" || return 1
+    return
+  fi
+  [[ "$cleanup_revision" == "$ancestor" && "$phase" == prepared &&
+    "$(platform_cleanup_sha256 "$marker")" == "$expected_marker_sha" &&
+    "$(platform_terminal_marker_value production_env_sha256)" == "$expected_env_sha" &&
+    "$(platform_terminal_assert_marker_identity descendant)" == prepared &&
+    "$source_state" == present && "$migration_state" == pending &&
+    "$operations_schema" == absent ]] || return 1
+  operations_state="$(platform_terminal_candidate_migration_state \
+    "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" || return 1
+  [[ "$operations_state" == pending ]] || return 1
+  platform_terminal_assert_exact_repo_ledger pending pending creation || return 1
+  platform_cleanup_assert_retained_billing_seam || return 1
+  platform_terminal_assert_files_unchanged || return 1
+  running="$(compose ps --status running -q api outbox-publisher integration-worker)" || return 1
+  [[ -z "$running" ]] || return 1
+  guards="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
+SELECT count(*) FILTER (
+  WHERE role.rolname='gen_user' AND config LIKE 'winwidget.platform_%'
+)::text || '|' || count(*) FILTER (
+  WHERE role.rolname='gen_user' AND config LIKE 'winwidget.operations_platform_%'
+)::text
+FROM pg_catalog.pg_db_role_setting setting
+JOIN pg_catalog.pg_roles role ON role.oid=setting.setrole
+JOIN pg_catalog.pg_database database ON database.oid=setting.setdatabase
+CROSS JOIN LATERAL unnest(setting.setconfig) config
+WHERE database.datname='default_db';")" || return 1
+  [[ "$guards" == '0|0' ]] || return 1
+  archive="$(platform_terminal_archive_prepared_marker \
+    "$marker" "$ancestor" "$expected_marker_sha")" || return 1
+  platform_cleanup_validate_private_file "$archive" || return 1
+  [[ "$(platform_cleanup_sha256 "$archive")" == "$expected_marker_sha" ]] || return 1
+  platform_terminal_rebind_prepared_marker \
+    "$revision" "$archive" "$expected_marker_sha" "$ancestor" || return 1
+  [[ "$(platform_cleanup_sha256 "$archive")" == "$expected_marker_sha" &&
+    "$(platform_terminal_assert_marker_identity creation)" == prepared ]]
+}
+
+platform_terminal_marker_retry_mode() {
+  [[ $# -eq 5 ]] || return 1
+  local cleanup_revision="$1" revision="$2" phase="$3" source_state="$4" migration_state="$5"
+  [[ "$cleanup_revision" =~ ^[0-9a-f]{40}$ &&
+    "$revision" =~ ^[0-9a-f]{40}$ &&
+    "$phase" =~ ^(prepared|complete)$ &&
+    "$source_state" =~ ^(present|absent)$ &&
+    "$migration_state" =~ ^(pending|failed|rolled-back|applied)$ ]] || return 1
+  if [[ "$cleanup_revision" == "$revision" ]]; then
+    printf 'creation\n'
+    return
+  fi
+  case "$phase:$source_state:$migration_state" in
+    prepared:*) printf 'prepared-recovery\n' ;;
+    complete:absent:applied) printf 'descendant\n' ;;
+    *) return 1 ;;
+  esac
 }
 
 platform_terminal_load_ownership_context() {
@@ -1127,6 +1386,7 @@ platform_terminal_apply_migrations() (
 
 run_or_verify_terminal_platform_cleanup() (
   local revision="$1" marker phase source_state migration_state operations_state operations_schema prisma_id
+  local cleanup_revision identity_mode=creation marker_retry_mode
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return 1
   EXPECTED_REVISION="$revision"
   export EXPECTED_REVISION
@@ -1146,13 +1406,35 @@ run_or_verify_terminal_platform_cleanup() (
   platform_terminal_stop_core_writers
   platform_terminal_load_ownership_context || return 1
   platform_cutover_cli target verify >/dev/null || return 1
+  operations_schema="$(platform_terminal_operations_prepare_state)" || return 1
   if [[ -e "$marker" || -L "$marker" ]]; then
-    phase="$(platform_terminal_assert_marker_identity)" || return 1
+    platform_terminal_validate_marker "$marker" || return 1
+    cleanup_revision="$(platform_terminal_marker_value cleanup_revision)" || return 1
+    phase="$(platform_terminal_marker_value phase)" || return 1
+    marker_retry_mode="$(platform_terminal_marker_retry_mode \
+      "$cleanup_revision" "$revision" "$phase" "$source_state" "$migration_state")" ||
+      fail 'terminal Platform marker retry state is unsafe'
+    case "$marker_retry_mode" in
+      creation)
+        if [[ -n "${OPERATIONS_PLATFORM_PREPARED_RECOVERY_CONFIRMATION:-}" ]]; then
+          platform_terminal_recover_pinned_prepared_marker \
+            "$revision" "$source_state" "$migration_state" "$operations_schema" ||
+            fail 'pinned prepared Platform marker recovery failed'
+        fi
+        ;;
+      prepared-recovery)
+        platform_terminal_recover_pinned_prepared_marker \
+          "$revision" "$source_state" "$migration_state" "$operations_schema" ||
+          fail 'pinned prepared Platform marker recovery failed'
+        ;;
+      descendant) identity_mode=descendant ;;
+      *) return 1 ;;
+    esac
+    phase="$(platform_terminal_assert_marker_identity "$identity_mode")" || return 1
   else
     [[ ! -L "$marker" ]] || return 1
     phase=absent
   fi
-  operations_schema="$(platform_terminal_operations_prepare_state)" || return 1
   if [[ "$phase:$source_state:$migration_state:$operations_schema" == complete:absent:applied:absent ]]; then
     operations_state="$(platform_terminal_candidate_migration_state \
       "$OPERATIONS_PREP_MIGRATION" "$OPERATIONS_PREP_MIGRATION_SHA256")" || return 1
@@ -1164,44 +1446,49 @@ run_or_verify_terminal_platform_cleanup() (
     absent:present:pending)
       platform_cleanup_assert_cleanup_source_retired
       platform_cleanup_assert_retained_billing_seam
-      platform_terminal_assert_exact_repo_ledger "$operations_state" pending
+      platform_terminal_assert_exact_repo_ledger "$operations_state" pending "$identity_mode"
       platform_terminal_write_marker prepared pending
       phase=prepared
       ;;
     prepared:present:pending)
       platform_cleanup_assert_cleanup_source_retired
       platform_cleanup_assert_retained_billing_seam
-      platform_terminal_assert_exact_repo_ledger "$operations_state" pending
+      platform_terminal_assert_exact_repo_ledger "$operations_state" pending "$identity_mode"
       ;;
     prepared:present:failed)
       platform_cleanup_assert_cleanup_source_retired
       platform_cleanup_assert_retained_billing_seam
-      platform_terminal_assert_exact_repo_ledger "$operations_state" failed
+      platform_terminal_assert_exact_repo_ledger "$operations_state" failed "$identity_mode"
       platform_terminal_resolve_migration "$PLATFORM_TERMINAL_MIGRATION" \
         "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" rolled-back || return 1
       migration_state=rolled-back
-      platform_terminal_assert_exact_repo_ledger "$operations_state" "$migration_state"
+      platform_terminal_assert_exact_repo_ledger \
+        "$operations_state" "$migration_state" "$identity_mode"
       ;;
     prepared:present:rolled-back)
       platform_cleanup_assert_cleanup_source_retired
       platform_cleanup_assert_retained_billing_seam
-      platform_terminal_assert_exact_repo_ledger "$operations_state" rolled-back
+      platform_terminal_assert_exact_repo_ledger \
+        "$operations_state" rolled-back "$identity_mode"
       ;;
     prepared:absent:failed | prepared:absent:rolled-back)
       platform_cleanup_assert_retained_billing_seam
-      platform_terminal_assert_exact_repo_ledger "$operations_state" "$migration_state"
+      platform_terminal_assert_exact_repo_ledger \
+        "$operations_state" "$migration_state" "$identity_mode"
       platform_terminal_resolve_migration "$PLATFORM_TERMINAL_MIGRATION" \
         "$PLATFORM_CORE_SOURCE_CLEANUP_MIGRATION_SHA256" applied || return 1
       migration_state=applied
-      platform_terminal_assert_exact_repo_ledger "$operations_state" applied
+      platform_terminal_assert_exact_repo_ledger \
+        "$operations_state" applied "$identity_mode"
       ;;
     prepared:absent:applied | complete:absent:applied)
-      platform_terminal_assert_exact_repo_ledger "$operations_state" applied
+      platform_terminal_assert_exact_repo_ledger \
+        "$operations_state" applied "$identity_mode"
       ;;
     *) fail "unsafe terminal Platform cleanup state: marker=$phase source=$source_state migration=$migration_state" ;;
   esac
   if [[ "$source_state" == present ]]; then
-    [[ "$(platform_terminal_assert_marker_identity)" == prepared ]] || return 1
+    [[ "$(platform_terminal_assert_marker_identity "$identity_mode")" == prepared ]] || return 1
     # Close the build/prepare-to-DDL window and clear any sessions that appeared
     # while a failed Prisma row was reconciled.
     database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"
@@ -1218,7 +1505,8 @@ run_or_verify_terminal_platform_cleanup() (
     [[ "$source_state" == absent && "$migration_state" == applied ]] || return 1
     platform_terminal_assert_files_unchanged || return 1
     [[ "$(platform_terminal_operations_prepare_state)" == pristine ]] || return 1
-    platform_terminal_assert_exact_repo_ledger "$operations_state" applied
+    platform_terminal_assert_exact_repo_ledger \
+      "$operations_state" applied "$identity_mode"
   fi
   platform_cleanup_assert_retained_billing_seam
   operations_schema="$(platform_terminal_operations_prepare_state)" || return 1
@@ -1227,12 +1515,12 @@ run_or_verify_terminal_platform_cleanup() (
   [[ "$operations_state" == applied &&
     ("$operations_schema" =~ ^(pristine|forward)$ ||
       "$phase:$source_state:$migration_state:$operations_schema" == complete:absent:applied:absent) ]] || return 1
-  platform_terminal_assert_exact_repo_ledger applied applied
+  platform_terminal_assert_exact_repo_ledger applied applied "$identity_mode"
   prisma_id="$(platform_terminal_applied_ledger_id)" || return 1
   if [[ "$phase" != complete ]]; then
     platform_terminal_write_marker complete "$prisma_id"
   fi
-  [[ "$(platform_terminal_assert_marker_identity)" == complete &&
+  [[ "$(platform_terminal_assert_marker_identity "$identity_mode")" == complete &&
     "$(platform_terminal_marker_value prisma_migration_id)" == "$prisma_id" &&
     "$(platform_cleanup_source_state)" == absent &&
     "$(platform_terminal_candidate_migration_state \
@@ -2460,6 +2748,8 @@ self_test() {
   local gateway_assert_contract gateway_manifest_contract gateway_ready_contract gateway_wait_contract
   local gateway_wait_source live_owner_runtime_source node_runtime_source self_test_server_root index
   local guc_admin_source guc_configure_source
+  local prepared_recovery_source archive_source rebind_source marker_retry_source terminal_runner_source
+  local recovery_line apply_line
   local -a source_contracts normalized_source_contracts cutover_contracts
   local -a forbidden_source_contracts
   source="$(declare -f \
@@ -2473,6 +2763,12 @@ self_test() {
     platform_terminal_wait_gateway_healthy \
     platform_terminal_core_admin_query \
     platform_terminal_configure_gucs \
+    platform_terminal_git_file_sha256 \
+    platform_terminal_prepared_recovery_archive_path \
+    platform_terminal_archive_prepared_marker \
+    platform_terminal_rebind_prepared_marker \
+    platform_terminal_recover_pinned_prepared_marker \
+    platform_terminal_marker_retry_mode \
     platform_terminal_candidate_migration_state \
     platform_terminal_operations_prepare_state \
     platform_terminal_assert_exact_repo_ledger \
@@ -2499,6 +2795,11 @@ self_test() {
   live_owner_runtime_source="$(declare -f platform_terminal_prepare_live_owner_runtime)"
   guc_admin_source="$(declare -f platform_terminal_core_admin_query)"
   guc_configure_source="$(declare -f platform_terminal_configure_gucs)"
+  prepared_recovery_source="$(declare -f platform_terminal_recover_pinned_prepared_marker)"
+  archive_source="$(declare -f platform_terminal_archive_prepared_marker)"
+  rebind_source="$(declare -f platform_terminal_rebind_prepared_marker)"
+  marker_retry_source="$(declare -f platform_terminal_marker_retry_mode)"
+  terminal_runner_source="$(declare -f run_or_verify_terminal_platform_cleanup)"
   gateway_ready_contract="wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'"
   gateway_manifest_contract='platform_cutover_validate_gateway_manifest "$gateway_image_id"'
   gateway_wait_contract='gateway_container="$(platform_terminal_wait_gateway_healthy "$gateway_image_id")"'
@@ -2512,10 +2813,25 @@ self_test() {
     cutover)"
   [[ "$CONFIRMATION" == 'CUT OVER OPERATIONS FORWARD ONLY' ]]
   [[ "$PLATFORM_TERMINAL_CONFIRMATION" == 'DROP PLATFORM CORE SOURCE DURING OPERATIONS CUTOVER' ]]
+  [[ "$PLATFORM_PREPARED_RECOVERY_CONFIRMATION" == \
+    'RECOVER EXACT PREPARED PLATFORM MARKER' ]]
   [[ "$PLATFORM_TERMINAL_MARKER_NAME" == '.platform-core-source-terminal-v1' &&
     "$OPERATIONS_PREP_MIGRATION" == '20260824030000_prepare_operations_service_ownership' &&
     "$PLATFORM_TERMINAL_MIGRATION" == '20260825000000_remove_legacy_platform_core_source' ]]
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+  [[ "$(platform_terminal_marker_retry_mode \
+    "$revision" "$revision" prepared present pending)" == creation ]]
+  [[ "$(platform_terminal_marker_retry_mode \
+    b234567890123456789012345678901234567890 "$revision" prepared present pending)" == \
+    prepared-recovery ]]
+  [[ "$(platform_terminal_marker_retry_mode \
+    b234567890123456789012345678901234567890 "$revision" complete absent applied)" == \
+    descendant ]]
+  if platform_terminal_marker_retry_mode \
+    b234567890123456789012345678901234567890 "$revision" complete present applied \
+    >/dev/null 2>&1; then
+    return 1
+  fi
   [[ "$CONTAINER_ARTIFACT_DIR" == '/var/lib/winwidget/operations-cutover' ]]
   ledger_argument_contract="$(billing_release_node - operations-migration platform-migration <<'NODE'
 if (process.argv[2] !== 'operations-migration' || process.argv[3] !== 'platform-migration') {
@@ -2626,6 +2942,15 @@ NODE
     'platform_terminal_core_admin_query "$sql"'
     'docker exec --env PGPASSWORD'
     'assert_core_database_production_boundary'
+    'OPERATIONS_PLATFORM_PREPARED_RECOVERY_CONFIRMATION'
+    'OPERATIONS_PLATFORM_PREPARED_ANCESTOR_REVISION'
+    'OPERATIONS_PLATFORM_PREPARED_INTERMEDIATE_REVISION'
+    'OPERATIONS_PLATFORM_PREPARED_MARKER_SHA256'
+    'OPERATIONS_PLATFORM_PREPARED_ENV_SHA256'
+    'OPERATIONS_PLATFORM_PREPARED_FINAL_SCRIPT_SHA256'
+    'platform_terminal_archive_prepared_marker'
+    'platform_terminal_rebind_prepared_marker'
+    'pinned prepared Platform marker recovery failed'
   )
   normalized_source_contracts=(
     'winwidget.operations.admin.audit.(campaigns|reporting|widgets|billing|identity|platform|support|core).v1(?:.retry-v1|.dead-letter)?'
@@ -2687,6 +3012,56 @@ NODE
       <<<"$guc_configure_source")" -ge 2 &&
     "$guc_configure_source" != \
       *'platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "$sql"'* ]]
+  [[ "$prepared_recovery_source" == *'git -C "$SERVER_ROOT" rev-list --parents -n 1 "$intermediate"'* &&
+    "$prepared_recovery_source" == *'"$intermediate $ancestor"'* &&
+    "$prepared_recovery_source" == *'git -C "$SERVER_ROOT" rev-list --parents -n 1 "$revision"'* &&
+    "$prepared_recovery_source" == *'"$revision $intermediate"'* &&
+    "$prepared_recovery_source" == *"script_path='scripts/operations-cutover-production.sh'"* &&
+    "$prepared_recovery_source" == *'changed_paths="$(git -C "$SERVER_ROOT" diff --name-only "$ancestor" "$revision")"'* &&
+    "$prepared_recovery_source" == *'for candidate in "$ancestor" "$intermediate" "$revision"'* &&
+    "$prepared_recovery_source" == *'"$source_state" == present && "$migration_state" == pending'* &&
+    "$prepared_recovery_source" == *'"$operations_schema" == absent'* &&
+    "$prepared_recovery_source" == *'platform_terminal_assert_exact_repo_ledger pending pending creation'* &&
+    "$prepared_recovery_source" == *'platform_cleanup_assert_retained_billing_seam'* &&
+    "$prepared_recovery_source" == *'compose ps --status running -q api outbox-publisher integration-worker'* &&
+    "$prepared_recovery_source" == *'[[ "$guards" == '\''0|0'\'' ]]'* ]]
+  [[ "$archive_source" == *'platform_cleanup_prepare_private_directory "$directory"'* &&
+    "$archive_source" == *'platform_cleanup_validate_private_file "$archive"'* &&
+    "$archive_source" == *'sync -f "$archive" || return 1'* &&
+    "$archive_source" == *'sync -f "$directory" || return 1'* &&
+    "$archive_source" == *'sync -f "$parent" || return 1'* &&
+    "$archive_source" == *'sync -f "$grandparent" || return 1'* &&
+    "$archive_source" == *'mv -fT -- "$temporary" "$archive"'* &&
+    "$archive_source" == *'"$(platform_cleanup_sha256 "$archive")" == "$expected_sha"'* ]]
+  [[ "$rebind_source" == *'phase=prepared'* &&
+    "$rebind_source" == *'cleanup_revision=%s'* &&
+    "$rebind_source" == *'"$PLATFORM_CORE_SOURCE_CLEANUP_ENV_EXPECTED_SHA256"'* &&
+    "$rebind_source" == *'mv -fT -- "$temporary" "$marker"'* &&
+    "$rebind_source" == *'sync -f "$marker" || return 1'* &&
+    "$rebind_source" == *'sync -f "$directory" || return 1'* &&
+    "$rebind_source" == *'platform_terminal_assert_marker_identity creation'* &&
+    "$rebind_source" != *'rm -f -- "$marker"'* ]]
+  [[ "$prepared_recovery_source" == *'if [[ "$cleanup_revision" == "$revision" ]]'* &&
+    "$prepared_recovery_source" == *'sync -f "$marker" || return 1'* &&
+    "$prepared_recovery_source" == *'sync -f "$marker_directory" || return 1'* &&
+    "$prepared_recovery_source" == *'sync -f "$archive" || return 1'* &&
+    "$prepared_recovery_source" == *'sync -f "$archive_directory" || return 1'* &&
+    "$prepared_recovery_source" == *'sync -f "$archive_parent" || return 1'* &&
+    "$prepared_recovery_source" == *'sync -f "$archive_grandparent" || return 1'* ]]
+  [[ "$marker_retry_source" == *'prepared:*) printf '\''prepared-recovery\n'\'''* &&
+    "$marker_retry_source" == *'complete:absent:applied) printf '\''descendant\n'\'''* &&
+    "$marker_retry_source" != *'complete:*)'* ]]
+  recovery_line="$(grep -nF 'platform_terminal_recover_pinned_prepared_marker' \
+    <<<"$terminal_runner_source" | awk -F: 'NR == 1 { print $1 }')"
+  apply_line="$(grep -nF 'platform_terminal_apply_migrations' \
+    <<<"$terminal_runner_source" | awk -F: 'NR == 1 { print $1 }')"
+  [[ "$recovery_line" =~ ^[1-9][0-9]*$ && "$apply_line" =~ ^[1-9][0-9]*$ &&
+    "$recovery_line" -lt "$apply_line" &&
+    "$(grep -Fc 'platform_terminal_assert_marker_identity "$identity_mode"' \
+      <<<"$terminal_runner_source")" -ge 3 &&
+    "$terminal_runner_source" == *'prepared-recovery)'* &&
+    "$terminal_runner_source" == *'descendant) identity_mode=descendant'* &&
+    "$terminal_runner_source" != *'rm -f -- "$marker"'* ]]
   for index in "${!forbidden_source_contracts[@]}"; do
     [[ "$source" != *"${forbidden_source_contracts[$index]}"* ]] || {
       printf 'operations-cutover self-test forbidden source contract %s is present\n' "$index" >&2
