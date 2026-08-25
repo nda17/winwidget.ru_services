@@ -2729,13 +2729,15 @@ for (const requiredRemoteOperationsControllerToken of [
 }
 for (const requiredOperationsCutoverToken of [
   "assert_platform_cleanup_complete()",
+  "export_coordinated_revision()",
+  'export_coordinated_revision "$revision"',
   "platform_cleanup_validate_marker",
   "platform_cleanup_marker_value phase",
   'git -C "$SERVER_ROOT" merge-base --is-ancestor',
   '"$cleanup_revision" != "$EXPECTED_REVISION"',
   '"$cleanup_revision" != "$revision"',
   'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"',
-  "compose build api identity-api operations-api",
+  "compose build --provenance=false",
   'assert_identity_release_prerequisite "$revision"',
   '"winwidget-identity:git-$revision"',
   "org.opencontainers.image.revision",
@@ -2747,6 +2749,98 @@ for (const requiredOperationsCutoverToken of [
   if (!operationsCutoverScript.includes(requiredOperationsCutoverToken)) {
     throw new Error(
       `Operations cutover lost strict Platform-cleanup/restore precondition: ${requiredOperationsCutoverToken}`,
+    );
+  }
+}
+const operationsCutoverStart = operationsCutoverScript.indexOf("\ncutover() {");
+const operationsCheckoutGuard = operationsCutoverScript.indexOf(
+  'assert_checkout "$revision"',
+  operationsCutoverStart,
+);
+const operationsCoordinatedExport = operationsCutoverScript.indexOf(
+  'export_coordinated_revision "$revision"',
+  operationsCutoverStart,
+);
+const operationsSteadyGuard = operationsCutoverScript.indexOf(
+  "assert_steady_integration_contract",
+  operationsCutoverStart,
+);
+const operationsBuildStart = operationsCutoverScript.indexOf(
+  "compose build --provenance=false",
+  operationsCutoverStart,
+);
+const operationsBuildEnd = operationsCutoverScript.indexOf(
+  '\n  assert_identity_release_prerequisite "$revision"',
+  operationsBuildStart,
+);
+const normalizedOperationsBuild = operationsCutoverScript
+  .slice(operationsBuildStart, operationsBuildEnd)
+  .replace(/\\\n/g, " ")
+  .replace(/\s+/g, " ")
+  .trim();
+const expectedOperationsBuild =
+  "compose build --provenance=false api api-gateway maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api identity-api platform-api support-api operations-api";
+const firstOperationsStop = Math.min(
+  ...[
+    operationsCutoverScript.indexOf("\n  stop_audit_source_services", operationsCutoverStart),
+    operationsCutoverScript.indexOf("\n  compose stop", operationsCutoverStart),
+  ].filter(index => index >= 0),
+);
+if (
+  operationsCutoverStart < 0 ||
+  operationsCheckoutGuard <= operationsCutoverStart ||
+  operationsCoordinatedExport <= operationsCheckoutGuard ||
+  operationsSteadyGuard <= operationsCoordinatedExport ||
+  operationsBuildStart <= operationsCutoverStart ||
+  operationsBuildEnd <= operationsBuildStart ||
+  normalizedOperationsBuild !== expectedOperationsBuild ||
+  !Number.isFinite(firstOperationsStop) ||
+  operationsBuildStart >= firstOperationsStop
+) {
+  throw new Error(
+    "Operations cutover must build every recreatable coordinated image before its first stop",
+  );
+}
+const coordinatedRevisionStart = operationsCutoverScript.indexOf(
+  "\nexport_coordinated_revision() {",
+);
+const coordinatedRevisionEnd = operationsCutoverScript.indexOf(
+  "\nassert_inputs() {",
+  coordinatedRevisionStart,
+);
+const coordinatedRevisionSource = operationsCutoverScript.slice(
+  coordinatedRevisionStart,
+  coordinatedRevisionEnd,
+);
+for (const [name, value] of [
+  ["APP_REVISION", '"$revision"'],
+  ["APP_VERSION", '"git-$revision"'],
+  ["MAINTENANCE_REVISION", '"$revision"'],
+  ["MAINTENANCE_IMAGE", '"winwidget-maintenance:git-$revision"'],
+  ["DATABASE_RESTORE_REVISION", '"$revision"'],
+  ["DATABASE_RESTORE_IMAGE", '"winwidget-database-restore:git-$revision"'],
+  ["NOTIFICATION_DELIVERY_REVISION", '"$revision"'],
+  ["NOTIFICATION_DELIVERY_IMAGE", '"winwidget-notification-delivery:git-$revision"'],
+  ["CAMPAIGNS_REVISION", '"$revision"'],
+  ["CAMPAIGNS_IMAGE", '"winwidget-campaigns:git-$revision"'],
+  ["REPORTING_REVISION", '"$revision"'],
+  ["REPORTING_IMAGE", '"winwidget-reporting:git-$revision"'],
+  ["WIDGETS_REVISION", '"$revision"'],
+  ["WIDGETS_IMAGE", '"winwidget-widgets:git-$revision"'],
+  ["BILLING_REVISION", '"$revision"'],
+  ["BILLING_IMAGE", '"winwidget-billing:git-$revision"'],
+  ["IDENTITY_REVISION", '"$revision"'],
+  ["IDENTITY_IMAGE", '"winwidget-identity:git-$revision"'],
+  ["PLATFORM_REVISION", '"$revision"'],
+  ["PLATFORM_IMAGE", '"winwidget-platform:git-$revision"'],
+  ["SUPPORT_REVISION", '"$revision"'],
+  ["SUPPORT_IMAGE", '"winwidget-support:git-$revision"'],
+  ["OPERATIONS_REVISION", '"$revision"'],
+  ["OPERATIONS_IMAGE", '"winwidget-operations:git-$revision"'],
+]) {
+  if (!coordinatedRevisionSource.includes(`export ${name}=${value}`)) {
+    throw new Error(
+      `Operations cutover lost coordinated revision export: ${name}`,
     );
   }
 }

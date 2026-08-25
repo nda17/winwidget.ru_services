@@ -54,6 +54,37 @@ assert_checkout() {
     fail 'production cutover requires a clean checkout'
 }
 
+export_coordinated_revision() {
+  local revision="$1"
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] ||
+    fail 'coordinated Operations revision must be an exact commit SHA'
+
+  export APP_REVISION="$revision"
+  export APP_VERSION="git-$revision"
+  export MAINTENANCE_REVISION="$revision"
+  export MAINTENANCE_IMAGE="winwidget-maintenance:git-$revision"
+  export DATABASE_RESTORE_REVISION="$revision"
+  export DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"
+  export NOTIFICATION_DELIVERY_REVISION="$revision"
+  export NOTIFICATION_DELIVERY_IMAGE="winwidget-notification-delivery:git-$revision"
+  export CAMPAIGNS_REVISION="$revision"
+  export CAMPAIGNS_IMAGE="winwidget-campaigns:git-$revision"
+  export REPORTING_REVISION="$revision"
+  export REPORTING_IMAGE="winwidget-reporting:git-$revision"
+  export WIDGETS_REVISION="$revision"
+  export WIDGETS_IMAGE="winwidget-widgets:git-$revision"
+  export BILLING_REVISION="$revision"
+  export BILLING_IMAGE="winwidget-billing:git-$revision"
+  export IDENTITY_REVISION="$revision"
+  export IDENTITY_IMAGE="winwidget-identity:git-$revision"
+  export PLATFORM_REVISION="$revision"
+  export PLATFORM_IMAGE="winwidget-platform:git-$revision"
+  export SUPPORT_REVISION="$revision"
+  export SUPPORT_IMAGE="winwidget-support:git-$revision"
+  export OPERATIONS_REVISION="$revision"
+  export OPERATIONS_IMAGE="winwidget-operations:git-$revision"
+}
+
 assert_inputs() {
   [[ "$(id -u)" == '0' ]] ||
     fail 'production cutover must run as root'
@@ -970,6 +1001,7 @@ cutover() {
 
   assert_inputs
   assert_checkout "$revision"
+  export_coordinated_revision "$revision"
   assert_steady_integration_contract
 
   # shellcheck source=scripts/production-deploy-lock.sh
@@ -1006,7 +1038,11 @@ cutover() {
   [[ ! -e "$snapshot_host" && ! -L "$snapshot_host" ]] ||
     fail 'cutover snapshot already exists; inspect state before continuing'
 
-  compose build api identity-api operations-api
+  compose build --provenance=false \
+    api api-gateway maintenance-worker database-restore-worker \
+    notification-delivery-worker campaigns-service reporting-service \
+    widgets-service billing-api identity-api platform-api support-api \
+    operations-api
   assert_identity_release_prerequisite "$revision"
   OPERATIONS_ENV_FILE="$ENV_FILE" \
     bash "$SERVER_ROOT/scripts/operations-database-prepare.sh" --prepare
@@ -1093,6 +1129,7 @@ self_test() {
   source="$(declare -f \
     assert_steady_integration_contract \
     assert_platform_cleanup_complete \
+    export_coordinated_revision \
     stop_audit_source_services \
     queue_state_matches \
     retire_drained_legacy_audit_queues \
@@ -1108,6 +1145,36 @@ self_test() {
   [[ "$CONFIRMATION" == 'CUT OVER OPERATIONS FORWARD ONLY' ]]
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
   [[ "$CONTAINER_ARTIFACT_DIR" == '/var/lib/winwidget/operations-cutover' ]]
+  if (export_coordinated_revision latest) >/dev/null 2>&1; then
+    return 1
+  fi
+  (
+    export_coordinated_revision "$revision"
+    [[ "$APP_REVISION" == "$revision" &&
+      "$APP_VERSION" == "git-$revision" &&
+      "$MAINTENANCE_REVISION" == "$revision" &&
+      "$MAINTENANCE_IMAGE" == "winwidget-maintenance:git-$revision" &&
+      "$DATABASE_RESTORE_REVISION" == "$revision" &&
+      "$DATABASE_RESTORE_IMAGE" == "winwidget-database-restore:git-$revision" &&
+      "$NOTIFICATION_DELIVERY_REVISION" == "$revision" &&
+      "$NOTIFICATION_DELIVERY_IMAGE" == "winwidget-notification-delivery:git-$revision" &&
+      "$CAMPAIGNS_REVISION" == "$revision" &&
+      "$CAMPAIGNS_IMAGE" == "winwidget-campaigns:git-$revision" &&
+      "$REPORTING_REVISION" == "$revision" &&
+      "$REPORTING_IMAGE" == "winwidget-reporting:git-$revision" &&
+      "$WIDGETS_REVISION" == "$revision" &&
+      "$WIDGETS_IMAGE" == "winwidget-widgets:git-$revision" &&
+      "$BILLING_REVISION" == "$revision" &&
+      "$BILLING_IMAGE" == "winwidget-billing:git-$revision" &&
+      "$IDENTITY_REVISION" == "$revision" &&
+      "$IDENTITY_IMAGE" == "winwidget-identity:git-$revision" &&
+      "$PLATFORM_REVISION" == "$revision" &&
+      "$PLATFORM_IMAGE" == "winwidget-platform:git-$revision" &&
+      "$SUPPORT_REVISION" == "$revision" &&
+      "$SUPPORT_IMAGE" == "winwidget-support:git-$revision" &&
+      "$OPERATIONS_REVISION" == "$revision" &&
+      "$OPERATIONS_IMAGE" == "winwidget-operations:git-$revision" ]]
+  )
   [[ "$source" == *'winwidget-operations-worker'* &&
     "$source" == *'winwidget-operations-publisher'* &&
     "$source" == *"winwidget-operations:git-\$revision"* &&
@@ -1160,9 +1227,11 @@ self_test() {
   OPERATIONS_CUTOVER_SOURCE="$cutover_source" node <<'NODE'
 const source = process.env.OPERATIONS_CUTOVER_SOURCE || '';
 const markers = [
+  'assert_checkout "$revision"',
+  'export_coordinated_revision "$revision"',
   'assert_steady_integration_contract',
   'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"',
-  'compose build api identity-api operations-api',
+  'compose build --provenance=false',
   'assert_identity_release_prerequisite "$revision"',
   'stop_audit_source_services',
   'wait_queue_state legacy-drained',
