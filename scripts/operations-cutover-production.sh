@@ -1132,7 +1132,9 @@ NODE
 self_test() {
   local revision='a234567890123456789012345678901234567890'
   local source source_without_backslashes cutover_source cleanup_sql
-  local node_runtime_source self_test_server_root
+  local node_runtime_source self_test_server_root index
+  local -a source_contracts normalized_source_contracts cutover_contracts
+  local -a forbidden_source_contracts
   source="$(declare -f \
     assert_steady_integration_contract \
     assert_platform_cleanup_complete \
@@ -1190,58 +1192,92 @@ self_test() {
       "$OPERATIONS_REVISION" == "$revision" &&
       "$OPERATIONS_IMAGE" == "winwidget-operations:git-$revision" ]]
   )
-  [[ "$source" == *'winwidget-operations-worker'* &&
-    "$source" == *'winwidget-operations-publisher'* &&
-    "$source" == *"winwidget-operations:git-\$revision"* &&
-    "$source" == *'winwidget-integration'* &&
-    "$source" == *'Operations cutover requires completed Platform cleanup at an immutable ancestor revision'* &&
-    "$cutover_source" == *'assert_platform_cleanup_complete "$revision"'* &&
-    "$cutover_source" == *'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"'* &&
-    "$source" == *'OPERATIONS_STEADY_INTEGRATION_READ_PATTERN'* &&
-    "$source" == *'OPERATIONS_STEADY_INTEGRATION_KINDS'* &&
-    "$source_without_backslashes" == *'admin.audit.(reporting|widgets|billing|identity|platform|support)'* &&
-    "$source" == *'const provisionTopology = async () => {'* &&
-    "$source" == *'operations-messaging.constants.js'* &&
-    "$source" == *'await channel.bindQueue('* &&
-    "$source" == *'/bindings`'* &&
-    "$source" == *'JSON.stringify(actual) !== JSON.stringify(canonicalExpected)'* &&
-    "$source" == *'await provisionTopology();'* &&
-    "$source_without_backslashes" == *'write: "^winwidget.(retry|dead-letter)$"'* &&
-    "$source" == *'read: `^${queuePattern}$`'* &&
-    "$source_without_backslashes" == *'winwidget.(events|retry|dead-letter|manual-retry)'* &&
-    "$source_without_backslashes" == *'winwidget.(events|manual-retry)'* &&
-    "$source" == *'--env RABBITMQ_ADMIN_PASSWORD'* &&
-    "$source" != *'--env "RABBITMQ_ADMIN_PASSWORD='* &&
-    "$source" == *"chown 0:1001 \"\$artifact_dir\""* &&
-    "$source" == *"'1001:1001:600:1'"* &&
-    "$source" == *'legacy-drained'* &&
-    "$source" == *'legacy-absent'* &&
-    "$source" == *'operations-prebind'* &&
-    "$source" == *'delete_queue'*'--if-empty'*'--if-unused'* &&
-    "$source" == *'/app/prisma/post-cutover/operations/20260825010000_remove_legacy_operations_core_source.sql'* &&
-    "$source" == *'url.port !== "55434"'* &&
-    "$source" == *'delete env.DATABASE_URL'* &&
-    "$source" == *'winwidget.operations_source_cleanup=approved'* &&
-    "$source" == *'winwidget.operations_core_stopped=true'* &&
-    "$source" == *'lock_timeout=60000'* &&
-    "$source" == *'statement_timeout=300000'* &&
-    "$source" == *'database-restore-production-guard.sh'* &&
-    "$source" == *'database_restore_guard_assert_before_mutation service-owned-required'* &&
-    "$source" == *'Source writer $service must remain stopped'* &&
-    "$source" == *'OPERATIONS_AUDIT_DLQ_RETENTION_MS'* &&
-    "$source" == *'target?.phase !== '\''ACTIVE'\'''* &&
-    "$source" != *'--env DATABASE_URL'* &&
-    "$source" != *'--env "DATABASE_URL='* &&
-    "$source" == *'operations-cutover-invalid-control'* &&
-    "$source" == *'"winwidget-identity:git-$revision"'* &&
-    "$source" == *'org.opencontainers.image.revision'* &&
-    "$source" == *'up -d --no-deps --no-build --force-recreate identity-api'* &&
-    "$source" == *'Identity image and revision must match the exact Operations cutover revision'* &&
-    "$source" == *'Exact Identity cutover image and Operations scope verified'* &&
-    "$source" == *'Identity to Operations overview contract verified'* ]]
-  [[ "$(grep -c 'billing_release_node -' <<<"$node_runtime_source")" == '6' &&
-    "$source" == *'docker exec --interactive'* &&
-    "$source" == *'process.env.APP_REVISION !== process.env.OPERATIONS_EXPECTED_REVISION'* ]]
+  source_contracts=(
+    'winwidget-operations-worker'
+    'winwidget-operations-publisher'
+    'winwidget-operations:git-$revision'
+    'winwidget-integration'
+    'Operations cutover requires completed Platform cleanup at an immutable ancestor revision'
+    'OPERATIONS_STEADY_INTEGRATION_READ_PATTERN'
+    'OPERATIONS_STEADY_INTEGRATION_KINDS'
+    'const provisionTopology = async () => {'
+    'operations-messaging.constants.js'
+    'await channel.bindQueue('
+    '/bindings`'
+    'JSON.stringify(actual) !== JSON.stringify(canonicalExpected)'
+    'await provisionTopology();'
+    'read: `^${queuePattern}$`'
+    '--env RABBITMQ_ADMIN_PASSWORD'
+    'chown 0:1001 "$artifact_dir"'
+    "'1001:1001:600:1'"
+    'legacy-drained'
+    'legacy-absent'
+    'operations-prebind'
+    'delete_queue'
+    '--if-empty'
+    '--if-unused'
+    '/app/prisma/post-cutover/operations/20260825010000_remove_legacy_operations_core_source.sql'
+    'url.port !== "55434"'
+    'delete env.DATABASE_URL'
+    'winwidget.operations_source_cleanup=approved'
+    'winwidget.operations_core_stopped=true'
+    'lock_timeout=60000'
+    'statement_timeout=300000'
+    'database-restore-production-guard.sh'
+    'database_restore_guard_assert_before_mutation service-owned-required'
+    'Source writer $service must remain stopped'
+    'OPERATIONS_AUDIT_DLQ_RETENTION_MS'
+    "target?.phase !== 'ACTIVE'"
+    'operations-cutover-invalid-control'
+    '"winwidget-identity:git-$revision"'
+    'org.opencontainers.image.revision'
+    'up -d --no-deps --no-build --force-recreate identity-api'
+    'Identity image and revision must match the exact Operations cutover revision'
+    'Exact Identity cutover image and Operations scope verified'
+    'Identity to Operations overview contract verified'
+    'docker exec --interactive'
+    'process.env.APP_REVISION !== process.env.OPERATIONS_EXPECTED_REVISION'
+  )
+  normalized_source_contracts=(
+    'winwidget.operations.admin.audit.(campaigns|reporting|widgets|billing|identity|platform|support|core).v1(?:.retry-v1|.dead-letter)?'
+    'write: "^winwidget.(retry|dead-letter)$"'
+    'winwidget.(events|retry|dead-letter|manual-retry)'
+    'winwidget.(events|manual-retry)'
+  )
+  cutover_contracts=(
+    'assert_platform_cleanup_complete "$revision"'
+    'database_restore_guard_assert_before_mutation service-owned-required "$ENV_FILE"'
+  )
+  forbidden_source_contracts=(
+    '--env "RABBITMQ_ADMIN_PASSWORD='
+    '--env DATABASE_URL'
+    '--env "DATABASE_URL='
+  )
+  for index in "${!source_contracts[@]}"; do
+    [[ "$source" == *"${source_contracts[$index]}"* ]] || {
+      printf 'operations-cutover self-test source contract %s is missing\n' "$index" >&2
+      return 1
+    }
+  done
+  for index in "${!normalized_source_contracts[@]}"; do
+    [[ "$source_without_backslashes" == *"${normalized_source_contracts[$index]}"* ]] || {
+      printf 'operations-cutover self-test normalized source contract %s is missing\n' "$index" >&2
+      return 1
+    }
+  done
+  for index in "${!cutover_contracts[@]}"; do
+    [[ "$cutover_source" == *"${cutover_contracts[$index]}"* ]] || {
+      printf 'operations-cutover self-test cutover contract %s is missing\n' "$index" >&2
+      return 1
+    }
+  done
+  for index in "${!forbidden_source_contracts[@]}"; do
+    [[ "$source" != *"${forbidden_source_contracts[$index]}"* ]] || {
+      printf 'operations-cutover self-test forbidden source contract %s is present\n' "$index" >&2
+      return 1
+    }
+  done
+  [[ "$(grep -c 'billing_release_node -' <<<"$node_runtime_source")" == '6' ]]
   if grep -Eq '(^|[;&|][[:space:]]+|[[:space:]])node[[:space:]]+(-[[:space:]]+)?<<' \
     <<<"$node_runtime_source"; then
     return 1
