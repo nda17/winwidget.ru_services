@@ -724,13 +724,34 @@ platform_terminal_guc_sql() {
   printf '%sCOMMIT;\n' "$sql"
 }
 
+platform_terminal_core_admin_query() {
+  [[ $# -eq 1 ]] || return 1
+  local sql="$1" container_id admin_password PGPASSWORD status=0
+  [[ -n "$sql" ]] || return 1
+  assert_core_database_production_boundary >/dev/null || return 1
+  container_id="$(docker inspect --format '{{.Id}}' "$CORE_POSTGRES_CONTAINER")" || return 1
+  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$(awk 'END { print NR }' "$CORE_POSTGRES_ADMIN_PASSWORD_FILE")" == 1 ]] || return 1
+  admin_password="$(<"$CORE_POSTGRES_ADMIN_PASSWORD_FILE")"
+  [[ ${#admin_password} -ge 32 && "$admin_password" != *$'\r'* &&
+    "$admin_password" != *$'\n'* ]] || return 1
+  PGPASSWORD="$admin_password"
+  export PGPASSWORD
+  docker exec --env PGPASSWORD "$container_id" psql --no-psqlrc --no-password \
+    --set ON_ERROR_STOP=1 --tuples-only --no-align --host 127.0.0.1 \
+    --username "$CORE_POSTGRES_ADMIN_USER" --dbname "$CORE_POSTGRES_DATABASE" \
+    --command "$sql" || status=$?
+  unset PGPASSWORD admin_password
+  return "$status"
+}
+
 platform_terminal_configure_gucs() {
   local mode="$1" sql actual
   [[ "$mode" =~ ^(set|reset)$ ]] || return 1
   [[ "$(platform_cleanup_database_url_field DATABASE_MIGRATION_URL_PRODUCTION username)" == gen_user &&
     "$(platform_cleanup_database_url_field DATABASE_MIGRATION_URL_PRODUCTION database)" == default_db ]] || return 1
   sql="$(platform_terminal_guc_sql "$mode")" || return 1
-  platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "$sql" >/dev/null || return 1
+  platform_terminal_core_admin_query "$sql" >/dev/null || return 1
   if [[ "$mode" == reset ]]; then
     actual="$(platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "
 SELECT count(*) FROM pg_catalog.pg_db_role_setting setting
@@ -2438,6 +2459,7 @@ self_test() {
   local source source_without_backslashes cutover_source cleanup_sql ledger_argument_contract key
   local gateway_assert_contract gateway_manifest_contract gateway_ready_contract gateway_wait_contract
   local gateway_wait_source live_owner_runtime_source node_runtime_source self_test_server_root index
+  local guc_admin_source guc_configure_source
   local -a source_contracts normalized_source_contracts cutover_contracts
   local -a forbidden_source_contracts
   source="$(declare -f \
@@ -2449,6 +2471,8 @@ self_test() {
     platform_terminal_assert_core_outbox_runtime \
     platform_terminal_wait_core_outbox_drained \
     platform_terminal_wait_gateway_healthy \
+    platform_terminal_core_admin_query \
+    platform_terminal_configure_gucs \
     platform_terminal_candidate_migration_state \
     platform_terminal_operations_prepare_state \
     platform_terminal_assert_exact_repo_ledger \
@@ -2473,6 +2497,8 @@ self_test() {
   cutover_source="$(declare -f cutover)"
   gateway_wait_source="$(declare -f platform_terminal_wait_gateway_healthy)"
   live_owner_runtime_source="$(declare -f platform_terminal_prepare_live_owner_runtime)"
+  guc_admin_source="$(declare -f platform_terminal_core_admin_query)"
+  guc_configure_source="$(declare -f platform_terminal_configure_gucs)"
   gateway_ready_contract="wait_ready 'http://127.0.0.1:4100/health/ready' 'Gateway'"
   gateway_manifest_contract='platform_cutover_validate_gateway_manifest "$gateway_image_id"'
   gateway_wait_contract='gateway_container="$(platform_terminal_wait_gateway_healthy "$gateway_image_id")"'
@@ -2597,6 +2623,9 @@ NODE
     'Identity to Operations overview contract verified'
     'docker exec --interactive'
     'process.env.APP_REVISION !== process.env.OPERATIONS_EXPECTED_REVISION'
+    'platform_terminal_core_admin_query "$sql"'
+    'docker exec --env PGPASSWORD'
+    'assert_core_database_production_boundary'
   )
   normalized_source_contracts=(
     'winwidget.operations.admin.audit.(campaigns|reporting|widgets|billing|identity|platform|support|core).v1(?:.retry-v1|.dead-letter)?'
@@ -2614,6 +2643,8 @@ NODE
     '--env "RABBITMQ_ADMIN_PASSWORD='
     '--env DATABASE_URL'
     '--env "DATABASE_URL='
+    '--env "PGPASSWORD='
+    '--env PGPASSWORD='
     'OPERATIONS_PLATFORM_CLEANUP_BYPASS_CONFIRMATION'
     'CUT OVER OPERATIONS WITH PLATFORM SOURCE RETAINED IN CORE'
   )
@@ -2645,6 +2676,17 @@ NODE
     "$gateway_wait_source" == *'$expected_image_id|running|true|0|winwidget|api-gateway|healthy'* ]]
   [[ "$live_owner_runtime_source" == \
     *"$gateway_ready_contract"*"$gateway_manifest_contract"*"$gateway_wait_contract"*"$gateway_assert_contract"* ]]
+  [[ "$guc_admin_source" == *'assert_core_database_production_boundary >/dev/null'* &&
+    "$guc_admin_source" == *'"$CORE_POSTGRES_CONTAINER"'* &&
+    "$guc_admin_source" == *'"$CORE_POSTGRES_ADMIN_PASSWORD_FILE"'* &&
+    "$guc_admin_source" == *'--env PGPASSWORD'* &&
+    "$guc_admin_source" == *'--username "$CORE_POSTGRES_ADMIN_USER"'* &&
+    "$guc_admin_source" == *'--dbname "$CORE_POSTGRES_DATABASE"'* ]]
+  [[ "$guc_configure_source" == *'platform_terminal_core_admin_query "$sql"'* &&
+    "$(grep -Fc 'platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION' \
+      <<<"$guc_configure_source")" -ge 2 &&
+    "$guc_configure_source" != \
+      *'platform_cleanup_query DATABASE_MIGRATION_URL_PRODUCTION "$sql"'* ]]
   for index in "${!forbidden_source_contracts[@]}"; do
     [[ "$source" != *"${forbidden_source_contracts[$index]}"* ]] || {
       printf 'operations-cutover self-test forbidden source contract %s is present\n' "$index" >&2
