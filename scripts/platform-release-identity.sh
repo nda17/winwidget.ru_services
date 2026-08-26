@@ -87,6 +87,10 @@ platform_release_compose() {
 		BILLING_IMAGE="$billing_image" \
 		IDENTITY_REVISION="$revision" \
 		IDENTITY_IMAGE="winwidget-identity:git-$revision" \
+		SUPPORT_REVISION="$revision" \
+		SUPPORT_IMAGE="winwidget-support:git-$revision" \
+		OPERATIONS_REVISION="$revision" \
+		OPERATIONS_IMAGE="winwidget-operations:git-$revision" \
 		PLATFORM_REVISION="$revision" \
 		PLATFORM_IMAGE="$platform_image" \
 		docker compose --env-file "$env_file" -f "$compose_file" "$@"
@@ -103,6 +107,8 @@ platform_release_self_test() {
 		"$source" == *'PLATFORM_RELEASE_BILLING_IMAGE_OVERRIDE'* &&
 		"$source" == *'cutover-$revision-g'* &&
 		"$source" == *'DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"'* &&
+		"$source" == *'SUPPORT_REVISION="$revision"'*'SUPPORT_IMAGE="winwidget-support:git-$revision"'* &&
+		"$source" == *'OPERATIONS_REVISION="$revision"'*'OPERATIONS_IMAGE="winwidget-operations:git-$revision"'* &&
 		"$source" == *'PLATFORM_REVISION'* &&
 		"$source" == *'PLATFORM_IMAGE'* &&
 		"$source" == *'diff --quiet --no-ext-diff HEAD'* ]]

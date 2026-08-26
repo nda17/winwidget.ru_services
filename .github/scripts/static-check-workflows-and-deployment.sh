@@ -686,6 +686,14 @@ if (
   !platformReleaseIdentityScript.includes(
     'DATABASE_RESTORE_IMAGE="winwidget-database-restore:git-$revision"',
   ) ||
+  !platformReleaseIdentityScript.includes('SUPPORT_REVISION="$revision"') ||
+  !platformReleaseIdentityScript.includes(
+    'SUPPORT_IMAGE="winwidget-support:git-$revision"',
+  ) ||
+  !platformReleaseIdentityScript.includes('OPERATIONS_REVISION="$revision"') ||
+  !platformReleaseIdentityScript.includes(
+    'OPERATIONS_IMAGE="winwidget-operations:git-$revision"',
+  ) ||
   !workflow.includes(
     "Unique fresh 64-character hex challenge for this exact Platform lifecycle action",
   )
