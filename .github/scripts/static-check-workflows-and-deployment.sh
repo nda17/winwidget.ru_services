@@ -1709,7 +1709,7 @@ const platformAbort = platformSlice(
   "\nplatform_cutover_status() {\n",
 );
 const platformIntegrationTopology = platformSlice(
-  "\nplatform_cutover_assert_platform_admin_audit_topology() {\n",
+  "\nplatform_cutover_assert_operations_audit_handoff() {\n",
   "\nplatform_cutover_assert_integration_worker_permissions() {\n",
 );
 const platformQueueDeleteHelper = platformSlice(
@@ -1900,18 +1900,14 @@ if (
   platformCutoverScript.includes("core_backup_sha256") ||
   platformCutoverScript.includes("core-frozen.dump") ||
   !platformCutoverScript.includes("NR != 15") ||
-  !platformIntegrationTopology.includes('require("amqplib")') ||
-  !platformIntegrationTopology.includes('queue = "winwidget.admin.audit.platform.v1"') ||
-  !platformIntegrationTopology.includes('await channel.assertQueue(`${queue}.dead-letter`') ||
-  !platformIntegrationTopology.includes('`${queue}.retry-v2.${index + 1}`') ||
-  !platformIntegrationTopology.includes('deadLetterExchange: "winwidget.manual-retry"') ||
-  !platformIntegrationTopology.includes("RABBITMQ_MANAGEMENT_URL") ||
-  !platformIntegrationTopology.includes("AbortSignal.timeout(10_000)") ||
-  !platformIntegrationTopology.includes("platform_cutover_platform_admin_audit_queue_details_are_exact") ||
-  !platformIntegrationTopology.includes("platform_cutover_platform_admin_audit_queue_listing_is_exact") ||
-  !platformIntegrationTopology.includes("platform_cutover_platform_admin_audit_bindings_are_exact") ||
-  !platformIntegrationTopology.includes('"x-queue-type": "classic"') ||
-  platformIntegrationTopology.includes('--env "RABBITMQ_ADMIN_PASSWORD=') ||
+  !platformIntegrationTopology.includes("winwidget.operations.admin.audit.platform.v1") ||
+  !platformIntegrationTopology.includes("winwidget.operations.admin.audit.platform.v1.retry-v1") ||
+  !platformIntegrationTopology.includes("winwidget.operations.admin.audit.platform.v1.dead-letter") ||
+  !platformIntegrationTopology.includes("^winwidget\\.admin\\.audit\\.platform\\.v1(\\.retry-v2\\.[123]|\\.dead-letter)?$") ||
+  !platformIntegrationTopology.includes("permanently retired after the Operations handoff") ||
+  platformIntegrationTopology.includes("assertQueue") ||
+  platformIntegrationTopology.includes("bindQueue") ||
+  (platformCutoverScript.match(/platform_cutover_provision_platform_admin_audit_topology/g) || []).length !== 3 ||
   !platformQueueDeleteHelper.includes("list_queues -p \"$vhost\" name") ||
   !platformQueueDeleteHelper.includes("$0 == queue { found += 1 }") ||
   (platformQueueDeleteHelper.match(/platform_cutover_queue_presence_is_exact/g) || []).length < 3 ||
@@ -1939,11 +1935,10 @@ if (
   (platformCutoverScript.match(/rows\[0\]\.arguments\["x-queue-type"\] = "quorum"/g) || []).length !== 2 ||
   (billingRabbitMqService.match(/arguments: \{ 'x-queue-type': 'classic' \}/g) || []).length !== 3 ||
   platformIntegrationCandidate.indexOf("platform_cutover_assert_integration_worker_permissions") < 0 ||
-  platformIntegrationCandidate.indexOf("platform_cutover_assert_platform_admin_audit_topology") <=
+  platformIntegrationCandidate.indexOf("platform_cutover_assert_operations_audit_handoff") <=
     platformIntegrationCandidate.indexOf("platform_cutover_assert_integration_worker_permissions") ||
-  platformRetireSettingsProjection.indexOf("platform_cutover_provision_platform_admin_audit_topology") < 0 ||
-  platformRetireSettingsProjection.indexOf("platform_cutover_provision_integration_worker_permissions") <=
-    platformRetireSettingsProjection.indexOf("platform_cutover_provision_platform_admin_audit_topology") ||
+  platformRetireSettingsProjection.includes("platform_cutover_provision_platform_admin_audit_topology") ||
+  platformRetireSettingsProjection.indexOf("platform_cutover_provision_integration_worker_permissions") < 0 ||
   platformRetireSettingsProjection.indexOf("up -d --no-deps --force-recreate integration-worker") <=
     platformRetireSettingsProjection.indexOf("platform_cutover_provision_integration_worker_permissions") ||
   platformTargetActiveAdvance.indexOf("platform_cutover_retire_settings_projection hold-billing") < 0 ||

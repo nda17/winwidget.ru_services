@@ -364,7 +364,7 @@ platform_deploy_verify_steady_boundaries() {
 	[[ "$kinds" == "$PLATFORM_STEADY_INTEGRATION_KINDS" ]] ||
 		platform_deploy_fail 'Core integration-worker still has a retired or unknown projection kind.' || return 1
 	platform_cutover_assert_integration_worker_permissions || return 1
-	platform_cutover_assert_platform_admin_audit_topology || return 1
+	platform_cutover_assert_operations_audit_handoff || return 1
 	for path in /site-settings /legal-pages /home-page-content; do
 		[[ "$(platform_cutover_core_route_status GET "$path")" == 404 ]] ||
 			platform_deploy_fail "Retired Core GET route is reachable: $path" || return 1
@@ -435,6 +435,7 @@ platform_deploy_self_test() {
 	source="$(declare -f platform_deploy_require_active platform_deploy_gateway_manifest_validator_source \
 		platform_deploy_validate_gateway_manifest \
 		platform_deploy_assert_runtime platform_deploy_assert_internal_overview \
+		platform_cutover_assert_operations_audit_handoff \
 		platform_deploy_verify_steady_boundaries platform_deploy_run)"
 	routine_provision_source="$(awk '
 		/^provision_rabbitmq_user\(\) \{/ { capture = 1 }
@@ -451,7 +452,8 @@ platform_deploy_self_test() {
 		"$source" == *'snapshot_sha256 source_fingerprint'* &&
 		"$source" == *'/api/v1/billing-settings/public'*'/api/v1/billing-settings/admin'* &&
 		"$source" == *'PLATFORM_STEADY_INTEGRATION_KINDS'* &&
-		"$source" == *'platform_cutover_settings_projection_topology_is_absent'*'platform_cutover_assert_platform_admin_audit_topology'* &&
+		"$source" == *'platform_cutover_settings_projection_topology_is_absent'*'platform_cutover_assert_operations_audit_handoff'* &&
+		"$source" == *'winwidget.operations.admin.audit.platform.v1.retry-v1'*'winwidget\.admin\.audit\.platform\.v1(\.retry-v2\.[123]|\.dead-letter)?'* &&
 		"$source" == *'platform_database_require_inputs'* &&
 		"$source" == *'gateway_image_metadata'*'--entrypoint node "$gateway_image_id"'* &&
 		"$source" == *'/internal/v1/platform/messaging/overview'* &&
@@ -470,7 +472,8 @@ platform_deploy_self_test() {
 		"$gateway_validator_source" == *'/api/v1/billing-settings/unknown'* &&
 		"$gateway_validator_source" == *'candidate.pathPrefix.startsWith(`${pathPrefix}/`)'* &&
 		"$gateway_validator_source" != *'JSON.parse('* ]] || return 1
-	[[ "$routine_provision_source" == *'const adminConnection = await connectRabbitMq('*'const response = await fetch('*'/api/users/'*'const targetConnection = await connectRabbitMq('* &&
+	[[ "$routine_provision_source" == *'const adminConnection = await connectRabbitMq('*'const response = await fetch('*'/api/users/'* &&
+		"$routine_provision_source" == *'let targetConnection;'*'attempt <= 20'*'targetConnection = await connectRabbitMq('* &&
 		"$routine_provision_source" == *'JSON.stringify({'*'password: targetPassword'*'tags: value("RABBITMQ_PROVISION_TAG")'* &&
 		"$routine_provision_source" == *'--env RABBITMQ_ADMIN_PASSWORD'* &&
 		"$routine_provision_source" == *'--env RABBITMQ_PROVISION_PASSWORD_BASE64'* &&

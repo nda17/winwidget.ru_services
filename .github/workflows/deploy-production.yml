@@ -6713,7 +6713,7 @@ jobs:
               integration_ci \
               '^$' \
               '^(winwidget\.retry|winwidget\.dead-letter)$' \
-              '^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\..*)?$'
+              '^winwidget\.core\.billing\.(payment-details|subscription-details|affiliate)\.v1(\.dead-letter)?$'
           docker exec "$RABBITMQ_CONTAINER_ID" \
             rabbitmqctl set_user_tags integration_ci
           docker exec "$RABBITMQ_CONTAINER_ID" \
@@ -6724,31 +6724,27 @@ jobs:
               rabbitmqctl --silent list_user_permissions integration_ci |
               awk 'NF == 4 { print $1 "|" $2 "|" $3 "|" $4 }'
           )" = \
-            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\..*)?$'
+            'winwidget|^$|^(winwidget\.retry|winwidget\.dead-letter)$|^winwidget\.core\.billing\.(payment-details|subscription-details|affiliate)\.v1(\.dead-letter)?$'
           docker run --rm \
             --network host \
-            --env ADMIN_URL=amqp://winwidget:winwidget_ci@127.0.0.1:5672/winwidget \
             --env WORKER_URL=amqp://integration_ci:integration_ci_password_at_least_32_characters@127.0.0.1:5672/winwidget \
             --entrypoint node \
             "winwidget-api:$APP_VERSION" \
             -e '
           const amqp = require("amqplib");
-          const adminUrl = process.env.ADMIN_URL;
           const workerUrl = process.env.WORKER_URL;
-          const queue = "winwidget.admin.audit.reporting.v1";
-          const routingKey = "admin.audit.reporting.v1";
           const readableQueues = [
-            "winwidget.admin.audit.billing.v1",
             "winwidget.core.billing.payment-details.v1",
+            "winwidget.core.billing.payment-details.v1.dead-letter",
             "winwidget.core.billing.subscription-details.v1",
+            "winwidget.core.billing.subscription-details.v1.dead-letter",
             "winwidget.core.billing.affiliate.v1",
+            "winwidget.core.billing.affiliate.v1.dead-letter",
           ];
           (async () => {
             const worker = await amqp.connect(workerUrl);
-            const admin = await amqp.connect(adminUrl);
             try {
               const consumer = await worker.createChannel();
-              const publisher = await admin.createConfirmChannel();
               try {
                 for (const readableQueue of readableQueues) {
                   const registration = await consumer.consume(
@@ -6757,36 +6753,10 @@ jobs:
                   );
                   await consumer.cancel(registration.consumerTag);
                 }
-                let resolveReceived;
-                let rejectReceived;
-                const received = new Promise((resolve, reject) => {
-                  resolveReceived = resolve;
-                  rejectReceived = reject;
-                });
-                const timeout = setTimeout(
-                  () => rejectReceived(new Error("Restricted integration user did not receive Reporting audit event")),
-                  5000,
-                );
-                await consumer.consume(queue, message => {
-                  if (!message) return;
-                  consumer.ack(message);
-                  clearTimeout(timeout);
-                  resolveReceived();
-                });
-                publisher.publish(
-                  "winwidget.events",
-                  routingKey,
-                  Buffer.from(JSON.stringify({ id: "ci-reporting-audit" })),
-                  { mandatory: true, persistent: true },
-                );
-                await publisher.waitForConfirms();
-                await received;
               } finally {
-                await publisher.close();
                 await consumer.close();
               }
             } finally {
-              await admin.close();
               await worker.close();
             }
           })().catch(error => {

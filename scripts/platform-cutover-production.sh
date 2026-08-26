@@ -32,10 +32,10 @@ readonly PLATFORM_ADMIN_AUDIT_QUEUE='winwidget.admin.audit.platform.v1'
 readonly PLATFORM_ADMIN_AUDIT_EVENT='admin.audit.platform.v1'
 readonly PLATFORM_ADMIN_AUDIT_KIND='platform-admin-audit'
 readonly PLATFORM_LEGACY_SETTINGS_QUEUE_PATTERN='^(winwidget\.core\.billing\.settings\.v1|winwidget\.billing\.settings-source\.v1)(\.|$)'
-readonly PLATFORM_STEADY_INTEGRATION_KINDS='campaign-admin-audit,reporting-admin-audit,widgets-admin-audit,billing-admin-audit,identity-admin-audit,platform-admin-audit,billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
+readonly PLATFORM_STEADY_INTEGRATION_KINDS='billing-payment-projection,billing-subscription-projection,billing-affiliate-projection'
 readonly PLATFORM_STEADY_INTEGRATION_CONFIGURE='^$'
 readonly PLATFORM_STEADY_INTEGRATION_WRITE='^(winwidget\.retry|winwidget\.dead-letter)$'
-readonly PLATFORM_STEADY_INTEGRATION_READ='^winwidget\.(admin\.audit\.(campaigns|reporting|widgets|billing|identity|platform)\.v1|core\.billing\.(payment-details|subscription-details|affiliate)\.v1)(\.dead-letter)?$'
+readonly PLATFORM_STEADY_INTEGRATION_READ='^winwidget\.core\.billing\.(payment-details|subscription-details|affiliate)\.v1(\.dead-letter)?$'
 readonly PLATFORM_PUBLISHER_TOPIC_WRITE='^(admin\.audit\.platform\.v1|billing\.offer\.changed\.v2)$'
 readonly PLATFORM_BILLING_WORKER_CONFIGURE='^winwidget\.(billing\.(retry|dead-letter)|billing\.(identity|notification-routing|trial|referral|lifecycle-repair)\.v1(\.retry\.[123]|\.dead-letter)?|billing\.offer\.v2(\.retry\.[123]|\.dead-letter)?|billing\.notification-delivery-outcome(\.retry\.[123]|\.dead-letter)?|payment\.auto-renewal(\.retry\.[123]|\.dead-letter)?)$'
 readonly PLATFORM_BILLING_WORKER_WRITE="$PLATFORM_BILLING_WORKER_CONFIGURE"
@@ -1912,154 +1912,44 @@ platform_cutover_ensure_core_api_candidate() {
 	platform_cutover_fail 'Core API candidate did not become healthy.'
 }
 
-platform_cutover_assert_platform_admin_audit_topology() {
-	local container image vhost management_url admin_user admin_password listing bindings queue_details
-	container="$(platform_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" ps -q rabbitmq)" || return 1
-	image="$(platform_cutover_expected_release_image_id core)" || return 1
-	platform_cutover_assert_release_image_id core "$image" || return 1
+platform_cutover_assert_operations_audit_handoff() {
+	local container vhost listing
+	container="$(platform_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
+		ps --status running -q rabbitmq)" || return 1
 	vhost="$(platform_read_env_value "$ENV_FILE" RABBITMQ_VHOST)" || return 1
-	management_url="$(platform_read_env_value "$ENV_FILE" RABBITMQ_MANAGEMENT_URL)" || return 1
-	admin_user="$(platform_read_env_value "$ENV_FILE" RABBITMQ_ADMIN_USER)" || return 1
-	admin_password="$(platform_read_env_value "$ENV_FILE" RABBITMQ_ADMIN_PASSWORD)" || return 1
-	[[ "$container" =~ ^[0-9a-f]{64}$ && "$vhost" == winwidget &&
-		"$management_url" == http://127.0.0.1:15672 && "$admin_user" == winwidget-admin &&
-		${#admin_password} -ge 32 &&
-		"$(platform_database_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container")" == healthy &&
-		"$(platform_database_docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$EXPECTED_REVISION" ]] ||
-		platform_cutover_fail 'RabbitMQ is not healthy for Platform audit topology verification.' || return 1
-	listing="$(platform_database_docker exec "$container" rabbitmqctl --silent list_queues -p "$vhost" \
-		name durable auto_delete exclusive)" || return 1
-	bindings="$(platform_database_docker exec "$container" rabbitmqctl --silent list_bindings -p "$vhost" \
-		source_name destination_name destination_kind routing_key)" || return 1
-	platform_cutover_platform_admin_audit_queue_listing_is_exact "$listing" ||
-		platform_cutover_fail 'Platform admin-audit queue family is not exact.' || return 1
-	platform_cutover_platform_admin_audit_bindings_are_exact "$bindings" ||
-		platform_cutover_fail 'Platform admin-audit bindings are not exact.' || return 1
-	if ! queue_details="$(RABBITMQ_MANAGEMENT_URL="$management_url" \
-		RABBITMQ_ADMIN_USER="$admin_user" RABBITMQ_ADMIN_PASSWORD="$admin_password" \
-		RABBITMQ_PROVISION_VHOST="$vhost" platform_database_docker run --rm --network host --read-only \
-		--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 --cap-drop ALL \
-		--security-opt no-new-privileges --pids-limit 64 \
-		--env RABBITMQ_MANAGEMENT_URL --env RABBITMQ_ADMIN_USER --env RABBITMQ_ADMIN_PASSWORD \
-		--env RABBITMQ_PROVISION_VHOST --entrypoint node "$image" -e '
-const prefix = "winwidget.admin.audit.platform.v1";
-const names = [prefix, `${prefix}.dead-letter`, ...[1, 2, 3].map(index => `${prefix}.retry-v2.${index}`)];
-(async () => {
-  const authorization = `Basic ${Buffer.from(`${process.env.RABBITMQ_ADMIN_USER}:${process.env.RABBITMQ_ADMIN_PASSWORD}`).toString("base64")}`;
-  const rows = [];
-  for (const name of names) {
-    const response = await fetch(`${process.env.RABBITMQ_MANAGEMENT_URL}/api/queues/${encodeURIComponent(process.env.RABBITMQ_PROVISION_VHOST)}/${encodeURIComponent(name)}`, {
-      headers: { authorization },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error("queue lookup failed");
-    const row = await response.json();
-    rows.push({
-      name: row.name,
-      vhost: row.vhost,
-      durable: row.durable,
-      auto_delete: row.auto_delete,
-      exclusive: row.exclusive,
-      arguments: row.arguments,
-    });
-  }
-  process.stdout.write(JSON.stringify(rows));
-})().catch(() => {
-  process.stderr.write("Platform audit queue argument verification failed\n");
-  process.exitCode = 1;
-});
-')"; then
-		unset admin_password
-		return 1
-	fi
-	unset admin_password
-	platform_cutover_platform_admin_audit_queue_details_are_exact "$queue_details" "$image" ||
-		platform_cutover_fail 'Platform admin-audit queue arguments are not exact.'
+	[[ "$container" =~ ^[0-9a-f]{64}$ && "$vhost" == winwidget ]] ||
+		platform_cutover_fail 'Operations audit handoff RabbitMQ identity is invalid.' || return 1
+	listing="$(platform_database_docker exec "$container" rabbitmqctl --silent \
+		list_queues -p "$vhost" name consumers)" || return 1
+	awk '
+		BEGIN {
+			expected["winwidget.operations.admin.audit.platform.v1"] = 1
+			expected["winwidget.operations.admin.audit.platform.v1.retry-v1"] = 0
+			expected["winwidget.operations.admin.audit.platform.v1.dead-letter"] = 0
+		}
+		{
+			name = $1
+			consumers = $2
+			if (name in expected) {
+				seen[name] += 1
+				if (NF != 2 || seen[name] != 1 || consumers !~ /^[0-9]+$/ ||
+					consumers + 0 != expected[name]) bad = 1
+			}
+			if (name ~ /^winwidget\.admin\.audit\.platform\.v1(\.retry-v2\.[123]|\.dead-letter)?$/) {
+				bad = 1
+			}
+		}
+		END {
+			for (name in expected) if (seen[name] != 1) bad = 1
+			exit bad
+		}
+	' <<<"$listing" ||
+		platform_cutover_fail 'Operations audit handoff or retired Platform queues are not exact.'
 }
 
 platform_cutover_provision_platform_admin_audit_topology() {
-	local container image admin_user admin_password vhost
-	container="$(platform_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" ps -q rabbitmq)" || return 1
-	image="$(platform_cutover_expected_release_image_id core)" || return 1
-	platform_cutover_assert_release_image_id core "$image" || return 1
-	admin_user="$(platform_read_env_value "$ENV_FILE" RABBITMQ_ADMIN_USER)" || return 1
-	admin_password="$(platform_read_env_value "$ENV_FILE" RABBITMQ_ADMIN_PASSWORD)" || return 1
-	vhost="$(platform_read_env_value "$ENV_FILE" RABBITMQ_VHOST)" || return 1
-	[[ "$container" =~ ^[0-9a-f]{64}$ && "$admin_user" == winwidget-admin &&
-		${#admin_password} -ge 32 && "$vhost" == winwidget &&
-		"$(platform_database_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container")" == healthy &&
-		"$(platform_database_docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$EXPECTED_REVISION" ]] ||
-		platform_cutover_fail 'Platform audit topology provisioning identity is invalid.' || return 1
-	RABBITMQ_ADMIN_USER="$admin_user" RABBITMQ_ADMIN_PASSWORD="$admin_password" \
-		RABBITMQ_PROVISION_VHOST="$vhost" platform_database_docker run --rm --network host --read-only \
-		--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16777216 --cap-drop ALL \
-		--security-opt no-new-privileges --pids-limit 64 \
-		--env RABBITMQ_ADMIN_USER --env RABBITMQ_ADMIN_PASSWORD --env RABBITMQ_PROVISION_VHOST \
-		--env "APP_REVISION=$EXPECTED_REVISION" --entrypoint node "$image" -e '
-const amqp = require("amqplib");
-const queue = "winwidget.admin.audit.platform.v1";
-const kind = "platform-admin-audit";
-const delays = [30_000, 300_000, 1_800_000];
-(async () => {
-  const connection = await amqp.connect({
-    protocol: "amqp",
-    hostname: "127.0.0.1",
-    port: 5672,
-    username: process.env.RABBITMQ_ADMIN_USER,
-    password: process.env.RABBITMQ_ADMIN_PASSWORD,
-    vhost: process.env.RABBITMQ_PROVISION_VHOST,
-    clientProperties: {
-      connection_name: `winwidget-platform-cutover-topology-${process.env.APP_REVISION}`,
-    },
-  }, { timeout: 10_000 });
-  try {
-    const channel = await connection.createConfirmChannel();
-    try {
-      await channel.assertExchange("winwidget.events", "topic", { durable: true });
-      await channel.assertExchange("winwidget.retry", "direct", { durable: true });
-      await channel.assertExchange("winwidget.dead-letter", "topic", { durable: true });
-      await channel.assertExchange("winwidget.manual-retry", "direct", { durable: true });
-      await channel.assertQueue(queue, {
-        durable: true,
-        arguments: { "x-queue-type": "classic" },
-      });
-      await channel.bindQueue(queue, "winwidget.events", "admin.audit.platform.v1");
-      await channel.bindQueue(queue, "winwidget.events", `manual.${kind}`);
-      await channel.bindQueue(queue, "winwidget.manual-retry", kind);
-      await channel.assertQueue(`${queue}.dead-letter`, {
-        durable: true,
-        arguments: { "x-queue-type": "classic" },
-      });
-      await channel.bindQueue(`${queue}.dead-letter`, "winwidget.dead-letter", `${kind}.dead-letter`);
-      await channel.bindQueue(`${queue}.dead-letter`, "winwidget.events", `${kind}.dead-letter`);
-      for (const [index, delay] of delays.entries()) {
-        const retryQueue = `${queue}.retry-v2.${index + 1}`;
-        await channel.assertQueue(retryQueue, {
-          durable: true,
-          arguments: { "x-queue-type": "classic" },
-          messageTtl: delay,
-          deadLetterExchange: "winwidget.manual-retry",
-          deadLetterRoutingKey: kind,
-        });
-        await channel.bindQueue(retryQueue, "winwidget.retry", `${kind}.retry.${index + 1}`);
-      }
-    } finally {
-      await channel.close();
-    }
-  } finally {
-    await connection.close();
-  }
-})().catch(error => {
-  process.stderr.write(`${error instanceof Error ? error.message : "Platform audit topology provisioning failed"}\n`);
-  process.exitCode = 1;
-});
-' >/dev/null || {
-		unset admin_password
-		platform_cutover_fail 'Platform admin-audit topology provisioning failed.'
-		return 1
-	}
-	unset admin_password
-	platform_cutover_assert_platform_admin_audit_topology
+	platform_cutover_fail 'Legacy Platform admin-audit topology is permanently retired after the Operations handoff.' || return 1
+	return 1
 }
 
 platform_cutover_assert_integration_worker_permissions() {
@@ -2168,7 +2058,7 @@ platform_cutover_assert_integration_worker_candidate() {
 		"$kinds" == "$PLATFORM_STEADY_INTEGRATION_KINDS" ]] ||
 		platform_cutover_fail 'Core integration-worker candidate runtime identity failed.' || return 1
 	platform_cutover_assert_integration_worker_permissions || return 1
-	platform_cutover_assert_platform_admin_audit_topology
+	platform_cutover_assert_operations_audit_handoff
 }
 
 platform_cutover_legacy_settings_queue_listing_is_drained() {
@@ -2261,7 +2151,6 @@ platform_cutover_retire_settings_projection() {
 			platform_cutover_delete_queue_if_present "$container" "$vhost" "$queue" || return 1
 		done <<<"$listing"
 	fi
-	platform_cutover_provision_platform_admin_audit_topology || return 1
 	platform_cutover_provision_integration_worker_permissions || return 1
 	if [[ "$mode" == hold-billing ]]; then
 		platform_release_compose "$EXPECTED_REVISION" "$ENV_FILE" "$COMPOSE_FILE" \
@@ -4194,16 +4083,65 @@ process.stdout.write(JSON.stringify(rows));
 		"$source" == *'platform_cutover_verify_gateway_routes'* &&
 		"$retire_source" == *'platform_cutover_delete_queue_if_present'* &&
 		"$source" == *'delete_queue'*'--if-empty'*'--if-unused'* &&
-		"$retire_source" == *'platform_cutover_provision_platform_admin_audit_topology'*'platform_cutover_provision_integration_worker_permissions'*'if [[ "$mode" == hold-billing ]]'*'up -d --no-deps --force-recreate integration-worker'* &&
+		"$retire_source" == *'platform_cutover_provision_integration_worker_permissions'*'if [[ "$mode" == hold-billing ]]'*'up -d --no-deps --force-recreate integration-worker'* &&
+		"$retire_source" != *'platform_cutover_provision_platform_admin_audit_topology'* &&
 		"$source" == *'stop --timeout 90 billing-worker'* &&
 		"$source" == *'up -d --no-deps --force-recreate integration-worker'* &&
 		"$source" == *'Billing worker must remain stopped until offer-v2 permissions are installed.'* &&
 		"$source" == *'up -d --no-deps --force-recreate integration-worker billing-worker'* &&
 		"$source" == *'platform_cutover_assert_billing_worker_candidate'* &&
 		"$source" == *'platform_cutover_settings_projection_topology_is_absent'* &&
-		"$source" == *'platform_cutover_assert_integration_worker_permissions'*'platform_cutover_assert_platform_admin_audit_topology'* &&
+		"$source" == *'platform_cutover_assert_integration_worker_permissions'*'platform_cutover_assert_operations_audit_handoff'* &&
 		"$source" == *'"x-message-ttl": 30_000'*'"x-message-ttl": 300_000'*'"x-message-ttl": 1_800_000'* &&
-		"$provision_source" == *'require("amqplib")'*'assertQueue(queue'*'"x-queue-type": "classic"'*'.retry-v2.${index + 1}'*'deadLetterExchange: "winwidget.manual-retry"'*'platform_cutover_assert_platform_admin_audit_topology'* ]]
+		"$provision_source" == *'permanently retired after the Operations handoff'* &&
+		"$provision_source" != *'assertQueue'* &&
+		"$provision_source" != *'bindQueue'* ]]
+)
+
+platform_cutover_self_test_operations_audit_handoff() (
+	local fixture_container='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+	local fixture_listing legacy valid_listing
+	platform_release_compose() {
+		[[ "$*" == *'ps --status running -q rabbitmq' ]] || return 1
+		printf '%s\n' "$fixture_container"
+	}
+	platform_read_env_value() {
+		[[ "$2" == RABBITMQ_VHOST ]] || return 1
+		printf 'winwidget\n'
+	}
+	platform_database_docker() {
+		[[ "$*" == "exec $fixture_container rabbitmqctl --silent list_queues -p winwidget name consumers" ]] || return 1
+		printf '%s\n' "$fixture_listing"
+	}
+	platform_cutover_fail() { return 1; }
+
+	valid_listing=$'winwidget.operations.admin.audit.platform.v1\t1\nwinwidget.operations.admin.audit.platform.v1.retry-v1\t0\nwinwidget.operations.admin.audit.platform.v1.dead-letter\t0'
+	fixture_listing="$valid_listing"
+	platform_cutover_assert_operations_audit_handoff || return 1
+
+	fixture_listing="${valid_listing/winwidget.operations.admin.audit.platform.v1$'\t'1/winwidget.operations.admin.audit.platform.v1$'\t'0}"
+	! platform_cutover_assert_operations_audit_handoff || return 1
+	fixture_listing="${valid_listing/winwidget.operations.admin.audit.platform.v1.retry-v1$'\t'0/winwidget.operations.admin.audit.platform.v1.retry-v1$'\t'1}"
+	! platform_cutover_assert_operations_audit_handoff || return 1
+	fixture_listing="${valid_listing/winwidget.operations.admin.audit.platform.v1.dead-letter$'\t'0/winwidget.operations.admin.audit.platform.v1.dead-letter$'\t'1}"
+	! platform_cutover_assert_operations_audit_handoff || return 1
+	fixture_listing=$'winwidget.operations.admin.audit.platform.v1\t1\nwinwidget.operations.admin.audit.platform.v1.retry-v1\t0'
+	! platform_cutover_assert_operations_audit_handoff || return 1
+	fixture_listing="$valid_listing"$'\n'"winwidget.operations.admin.audit.platform.v1 1"
+	! platform_cutover_assert_operations_audit_handoff || return 1
+
+	for legacy in \
+		winwidget.admin.audit.platform.v1 \
+		winwidget.admin.audit.platform.v1.retry-v2.1 \
+		winwidget.admin.audit.platform.v1.retry-v2.2 \
+		winwidget.admin.audit.platform.v1.retry-v2.3 \
+		winwidget.admin.audit.platform.v1.dead-letter; do
+		fixture_listing="$valid_listing"$'\n'"$legacy 0"
+		! platform_cutover_assert_operations_audit_handoff || return 1
+	done
+
+	[[ "$(declare -f platform_cutover_provision_platform_admin_audit_topology)" == \
+		*'permanently retired after the Operations handoff'* ]] || return 1
 )
 
 platform_cutover_self_test_core_route_matrix() (
@@ -4815,6 +4753,7 @@ platform_cutover_self_test() {
 	platform_cutover_self_test_delete_queue_if_present
 	platform_cutover_self_test_billing_offer_topology
 	platform_cutover_self_test_settings_projection_topology
+	platform_cutover_self_test_operations_audit_handoff
 	platform_cutover_self_test_core_route_matrix
 	platform_cutover_self_test_billing_settings_boundary
 	platform_cutover_self_test_billing_readiness

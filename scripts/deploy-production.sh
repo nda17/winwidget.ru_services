@@ -255,7 +255,7 @@ NODE
 
 run_rabbitmq_routine_provisioning_self_test() {
 	local script_path cutover_path provision_source routine_source
-	local image_resolver_source topology_provision_source compose_guard_source self_test_node
+	local image_resolver_source compose_guard_source self_test_node
 	script_path="${BASH_SOURCE[0]}"
 	cutover_path="$(dirname -- "$script_path")/platform-cutover-production.sh"
 	[[ -f "$cutover_path" && ! -L "$cutover_path" ]] || {
@@ -271,11 +271,6 @@ run_rabbitmq_routine_provisioning_self_test() {
 	image_resolver_source="$(awk '
 		/^platform_cutover_expected_release_image_id\(\) \{/ { capture = 1 }
 		/^platform_cutover_assert_release_image_id\(\) \{/ { capture = 0 }
-		capture { print }
-	' "$cutover_path")"
-	topology_provision_source="$(awk '
-		/^platform_cutover_provision_platform_admin_audit_topology\(\) \{/ { capture = 1 }
-		/^platform_cutover_assert_integration_worker_permissions\(\) \{/ { capture = 0 }
 		capture { print }
 	' "$cutover_path")"
 	compose_guard_source="$(awk '
@@ -300,21 +295,19 @@ run_rabbitmq_routine_provisioning_self_test() {
 		return 1
 	}
 	[[ "$routine_source" == *'routine_compose_starts_integration_worker() {'*'up | start | restart'*'integration-worker)'* &&
-		"$routine_source" == *'routine_require_platform_admin_audit_topology() {'*'platform_cutover_provision_platform_admin_audit_topology'*'platform_cutover_assert_platform_admin_audit_topology'* &&
-		"$routine_source" == *'compose_target() {'*'routine_compose_starts_integration_worker "$@"'*'routine_require_platform_admin_audit_topology || return 1'*'docker compose --project-name "$target_project"'* &&
-		"$routine_source" == *'compose_notification_cutover() {'*'routine_compose_starts_integration_worker "$@"'*'routine_require_platform_admin_audit_topology || return 1'*'docker compose --project-name "$NOTIFICATION_DELIVERY_CUTOVER_PROJECT"'* &&
-		"$routine_source" == *'if [[ "$service" == integration-worker ]] &&'*'routine_require_platform_admin_audit_topology'*'docker start "$container_id"'* &&
-		"$routine_source" == *'if [[ "$service" == integration-worker ]]; then'*'routine_require_platform_admin_audit_topology'*'docker start "$container_id"'* &&
-		"$routine_source" == *'if [[ -n "$first_cutover_legacy_worker_id" ]]'*'routine_require_platform_admin_audit_topology'*'docker start "$first_cutover_legacy_worker_id"'* ]] || {
-		echo 'RabbitMQ Platform admin-audit ordering guard is incomplete.' >&2
+		"$routine_source" == *'routine_require_operations_admin_audit_topology() {'*'provision_operations_rabbitmq_topology'* &&
+		"$routine_source" == *'compose_target() {'*'routine_compose_starts_integration_worker "$@"'*'routine_require_operations_admin_audit_topology || return 1'*'docker compose --project-name "$target_project"'* &&
+		"$routine_source" == *'compose_notification_cutover() {'*'routine_compose_starts_integration_worker "$@"'*'routine_require_operations_admin_audit_topology || return 1'*'docker compose --project-name "$NOTIFICATION_DELIVERY_CUTOVER_PROJECT"'* &&
+		"$routine_source" == *'if [[ "$service" == integration-worker ]] &&'*'routine_require_operations_admin_audit_topology'*'docker start "$container_id"'* &&
+		"$routine_source" == *'if [[ "$service" == integration-worker ]]; then'*'routine_require_operations_admin_audit_topology'*'docker start "$container_id"'* &&
+		"$routine_source" == *'if [[ -n "$first_cutover_legacy_worker_id" ]]'*'routine_require_operations_admin_audit_topology'*'docker start "$first_cutover_legacy_worker_id"'* ]] || {
+		echo 'RabbitMQ Operations admin-audit ordering guard is incomplete.' >&2
 		return 1
 	}
 	[[ "$image_resolver_source" == *'core) key=core_api_image_id'*'if platform_cutover_receipt_is_present'*'platform_cutover_billing_readiness_value "$key"'* &&
 		"$image_resolver_source" == *'platform_cutover_validate_archived_readiness_receipt'*'platform_cutover_receipt_value_from_file "$archive" "$key"'*'platform_cutover_assert_phase_a_artifacts_retired'* &&
-		"$image_resolver_source" == *'core) image="winwidget-api:git-$EXPECTED_REVISION"'*'platform_database_docker image inspect --format'*'{{.Id}}'*'"$image"'* &&
-		"$topology_provision_source" == *'image="$(platform_cutover_expected_release_image_id core)"'*'platform_cutover_assert_release_image_id core "$image"'*'--entrypoint node "$image"'*'platform_cutover_assert_platform_admin_audit_topology'* &&
-		"$topology_provision_source" != *'--entrypoint node "winwidget-api:'* ]] || {
-		echo 'RabbitMQ Platform topology image identity contract is not immutable.' >&2
+		"$image_resolver_source" == *'core) image="winwidget-api:git-$EXPECTED_REVISION"'*'platform_database_docker image inspect --format'*'{{.Id}}'*'"$image"'* ]] || {
+		echo 'Platform release image identity contract is not immutable.' >&2
 		return 1
 	}
 	(
@@ -378,20 +371,19 @@ run_rabbitmq_routine_provisioning_self_test() {
 		NOTIFICATION_DELIVERY_CUTOVER_PROJECT=winwidget-notification-telegram-cutover
 		ENV_FILE=/fixture.env
 		COMPOSE_FILE=/fixture.yml
-		platform_cutover_provision_platform_admin_audit_topology() {
+		provision_operations_rabbitmq_topology() {
 			trace+='P'
 			return "$provision_result"
 		}
-		platform_cutover_assert_platform_admin_audit_topology() { trace+='A'; }
 		docker() { trace+='D'; }
 		compose_target up -d --no-deps --force-recreate integration-worker || return 1
-		[[ "$trace" == PAD ]] || return 1
+		[[ "$trace" == PD ]] || return 1
 		trace=''
 		compose_target ps --status running -q integration-worker || return 1
 		[[ "$trace" == D ]] || return 1
 		trace=''
 		compose_notification_cutover restart integration-worker || return 1
-		[[ "$trace" == PAD ]] || return 1
+		[[ "$trace" == PD ]] || return 1
 		trace=''
 		provision_result=1
 		! compose_target up -d integration-worker || return 1
@@ -493,11 +485,17 @@ const operationsTopologyFunction = source.slice(
   operationsTopologyFunctionEnd,
 );
 assert.match(operationsTopologyFunction, /const exchanges = new Map/);
+assert.match(operationsTopologyFunction, /--entrypoint node "\$OPERATIONS_IMAGE" -e/);
 assert.match(operationsTopologyFunction, /\["winwidget\.events", "topic"\]/);
 assert.match(operationsTopologyFunction, /\["winwidget\.retry", "direct"\]/);
 assert.match(operationsTopologyFunction, /\["winwidget\.dead-letter", "topic"\]/);
 assert.match(operationsTopologyFunction, /\["winwidget\.manual-retry", "direct"\]/);
-assert.match(operationsTopologyFunction, /requireLegacyAbsent\(beforeQueues\)/);
+assert.match(operationsTopologyFunction, /legacyQueueIsStrictlyEmptyAndUnused/);
+assert.match(
+  operationsTopologyFunction,
+  /channel\.deleteQueue\(queue\.name, \{ ifUnused: true, ifEmpty: true \}\)/,
+);
+assert.match(operationsTopologyFunction, /requireLegacyAbsent\(actualQueues\)/);
 assert.match(operationsTopologyFunction, /channel\.assertQueue\(retryQueue/);
 assert.match(operationsTopologyFunction, /channel\.bindQueue\(/);
 assert.match(operationsTopologyFunction, /seenBindings\.size !== expectedBindings\.size/);
@@ -518,7 +516,10 @@ const operationsConsumerVerifier = source.slice(
   operationsConsumerVerifierEnd,
 );
 assert.match(operationsConsumerVerifier, /if \(queues\.has\(`\$\{base\}\$\{suffix\}`\)\) process\.exit\(1\)/);
-assert.match(operationsConsumerVerifier, /deadLetterConsumers !== undefined && deadLetterConsumers !== 0/);
+assert.match(
+  operationsConsumerVerifier,
+  /\["", "\.retry-v2\.1", "\.retry-v2\.2", "\.retry-v2\.3", "\.dead-letter"\]/,
+);
 assert.match(
   operationsConsumerVerifier,
   /for \(const source of \["campaigns", "reporting", "widgets", "billing", "identity", "platform", "support"\]\)/,
@@ -811,7 +812,14 @@ const expectedExchanges = [...exchangeTypes].map(([name, type]) => ({
   arguments: {},
 }));
 
-async function runTopologyFixture({ legacyQueue = null } = {}) {
+async function runTopologyFixture({
+  legacyQueue = null,
+  legacyMessages = 0,
+  legacyUnacknowledged = 0,
+  legacyConsumers = 0,
+  deleteRejects = false,
+  legacyReappearsAfterDelete = false,
+} = {}) {
   const events = [];
   const errors = [];
   let queueReadCount = 0;
@@ -831,6 +839,16 @@ async function runTopologyFixture({ legacyQueue = null } = {}) {
     },
     async bindQueue(queue, exchange, routingKey) {
       events.push(["binding", exchange, queue, routingKey]);
+    },
+    async deleteQueue(name, options) {
+      events.push([
+        "delete",
+        name,
+        options.ifUnused,
+        options.ifEmpty,
+        Object.keys(options).sort().join(","),
+      ]);
+      if (deleteRejects) throw new Error("queue became active");
     },
     async close() {
       events.push(["channel-close"]);
@@ -873,10 +891,21 @@ async function runTopologyFixture({ legacyQueue = null } = {}) {
         queueReadCount += 1;
         if (queueReadCount === 1) {
           body = legacyQueue
-            ? [{ name: legacyQueue }]
+            ? [{
+                name: legacyQueue,
+                durable: true,
+                auto_delete: false,
+                exclusive: false,
+                messages: legacyMessages + legacyUnacknowledged,
+                messages_ready: legacyMessages,
+                messages_unacknowledged: legacyUnacknowledged,
+                consumers: legacyConsumers,
+              }]
             : [];
         } else {
-          body = expectedQueues;
+          body = legacyReappearsAfterDelete && legacyQueue
+            ? [...expectedQueues, { name: legacyQueue }]
+            : expectedQueues;
         }
       } else if (path === "/api/exchanges/winwidget") {
         body = expectedExchanges;
@@ -896,17 +925,72 @@ async function runTopologyFixture({ legacyQueue = null } = {}) {
 (async () => {
   for (const legacyQueue of [
     "winwidget.admin.audit.campaigns.v1",
+    "winwidget.admin.audit.platform.v1.dead-letter",
     "winwidget.admin.audit.support.v1",
   ]) {
-    const rejectedLegacy = await runTopologyFixture({ legacyQueue });
-    assert.equal(rejectedLegacy.exitCode, 1);
+    const retiredLegacy = await runTopologyFixture({ legacyQueue });
+    assert.equal(retiredLegacy.exitCode, undefined);
+    assert.deepEqual(retiredLegacy.errors, []);
     assert.deepEqual(
-      rejectedLegacy.errors,
-      ["Operations RabbitMQ topology provisioning failed\n"],
+      retiredLegacy.events.filter(([event]) => event === "delete"),
+      [["delete", legacyQueue, true, true, "ifEmpty,ifUnused"]],
     );
-    assert.equal(rejectedLegacy.events.filter(([event]) => event === "connect").length, 0);
-    assert.equal(rejectedLegacy.events.filter(([event]) => event === "exchange").length, 0);
   }
+  for (const unsafeLegacy of [
+    { legacyQueue: "winwidget.admin.audit.campaigns.v1", legacyMessages: 1 },
+    { legacyQueue: "winwidget.admin.audit.campaigns.v1", legacyUnacknowledged: 1 },
+    { legacyQueue: "winwidget.admin.audit.support.v1", legacyConsumers: 1 },
+  ]) {
+    const rejectedLegacy = await runTopologyFixture(unsafeLegacy);
+    assert.equal(rejectedLegacy.exitCode, 1);
+    assert.deepEqual(rejectedLegacy.errors, [
+      "Operations RabbitMQ topology provisioning failed\n",
+    ]);
+    assert.equal(
+      rejectedLegacy.events.filter(([event]) => event === "connect").length,
+      0,
+    );
+  }
+
+  const deleteRace = await runTopologyFixture({
+    legacyQueue: "winwidget.admin.audit.platform.v1",
+    deleteRejects: true,
+  });
+  assert.equal(deleteRace.exitCode, 1);
+  assert.deepEqual(deleteRace.errors, [
+    "Operations RabbitMQ topology provisioning failed\n",
+  ]);
+  assert.deepEqual(
+    deleteRace.events.filter(([event]) => event === "delete"),
+    [[
+      "delete",
+      "winwidget.admin.audit.platform.v1",
+      true,
+      true,
+      "ifEmpty,ifUnused",
+    ]],
+  );
+  assert.equal(
+    deleteRace.events.filter(([event]) => event === "exchange").length,
+    0,
+  );
+  assert.equal(
+    deleteRace.events.filter(([event]) => event === "channel-close").length,
+    1,
+  );
+  assert.equal(
+    deleteRace.events.filter(([event]) => event === "connection-close").length,
+    1,
+  );
+
+  const redeclaredLegacy = await runTopologyFixture({
+    legacyQueue: "winwidget.admin.audit.platform.v1",
+    legacyReappearsAfterDelete: true,
+  });
+  assert.equal(redeclaredLegacy.exitCode, 1);
+  assert.deepEqual(redeclaredLegacy.errors, [
+    "Operations RabbitMQ topology provisioning failed\n",
+  ]);
 
   const success = await runTopologyFixture();
   assert.equal(success.exitCode, undefined);
@@ -916,7 +1000,10 @@ async function runTopologyFixture({ legacyQueue = null } = {}) {
   assert.equal(success.events.filter(([event]) => event === "queue").length, 24);
   assert.equal(success.events.filter(([event]) => event === "binding").length, 32);
   assert.equal(success.events.filter(([event]) => event === "fetch").length, 4);
-})().catch(() => process.exit(1));
+})().catch(error => {
+  process.stderr.write(`${error?.stack || error}\n`);
+  process.exit(1);
+});
 NODE
 	printf 'rabbitmq_routine_provisioning_self_test=passed\n'
 }
@@ -3810,14 +3897,13 @@ routine_compose_starts_integration_worker() {
 		"$includes_integration_worker" == true ]]
 }
 
-routine_require_platform_admin_audit_topology() {
-	platform_cutover_provision_platform_admin_audit_topology || return 1
-	platform_cutover_assert_platform_admin_audit_topology
+routine_require_operations_admin_audit_topology() {
+	provision_operations_rabbitmq_topology
 }
 
 compose_target() {
 	if routine_compose_starts_integration_worker "$@"; then
-		routine_require_platform_admin_audit_topology || return 1
+		routine_require_operations_admin_audit_topology || return 1
 	fi
 	docker compose --project-name "$target_project" \
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
@@ -3825,7 +3911,7 @@ compose_target() {
 
 compose_notification_cutover() {
 	if routine_compose_starts_integration_worker "$@"; then
-		routine_require_platform_admin_audit_topology || return 1
+		routine_require_operations_admin_audit_topology || return 1
 	fi
 	docker compose --project-name "$NOTIFICATION_DELIVERY_CUTOVER_PROJECT" \
 		--env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
@@ -4539,8 +4625,8 @@ restore_routine_containers_after_failed_stop() {
 			continue
 		fi
 		if [[ "$service" == integration-worker ]] &&
-			! routine_require_platform_admin_audit_topology; then
-			echo 'Platform admin-audit topology is unsafe; integration-worker recovery remains stopped.' >&2
+			! routine_require_operations_admin_audit_topology; then
+			echo 'Operations admin-audit topology is unsafe; integration-worker recovery remains stopped.' >&2
 			recovery_failed=true
 			continue
 		fi
@@ -5401,7 +5487,7 @@ start_notification_cutover_services() {
 			return 1
 		fi
 		if [[ "$service" == integration-worker ]]; then
-			routine_require_platform_admin_audit_topology || return 1
+			routine_require_operations_admin_audit_topology || return 1
 		fi
 		if ! docker start "$container_id" >/dev/null; then
 			echo "Saved forward cutover service could not be started: $service" >&2
@@ -8055,6 +8141,7 @@ const legacyQueues = new Set(legacyBases.flatMap(base => [
 	`${base}.retry-v2.1`,
 	`${base}.retry-v2.2`,
 	`${base}.retry-v2.3`,
+	`${base}.dead-letter`,
 ]));
 const expectedQueues = new Map();
 const expectedBindings = new Set();
@@ -8095,10 +8182,17 @@ const requireLegacyAbsent = queues => {
 	const names = new Set(queues.map(queue => queue?.name));
 	if ([...legacyQueues].some(name => names.has(name))) fail();
 };
+const legacyQueueIsStrictlyEmptyAndUnused = queue =>
+	queue?.durable === true && queue.auto_delete === false &&
+	queue.exclusive === false &&
+	[queue.messages, queue.messages_ready, queue.messages_unacknowledged, queue.consumers]
+		.every(value => value === 0);
 
 (async () => {
 	const beforeQueues = await request(`/api/queues/${encodedVhost}`);
-	requireLegacyAbsent(beforeQueues);
+	if (!Array.isArray(beforeQueues)) fail();
+	const legacyToRetire = beforeQueues.filter(queue => legacyQueues.has(queue?.name));
+	if (legacyToRetire.some(queue => !legacyQueueIsStrictlyEmptyAndUnused(queue))) fail();
 
 	const connection = await amqp.connect({
 		protocol: "amqp",
@@ -8114,6 +8208,9 @@ const requireLegacyAbsent = queues => {
 	try {
 		const channel = await connection.createConfirmChannel();
 		try {
+			for (const queue of legacyToRetire) {
+				await channel.deleteQueue(queue.name, { ifUnused: true, ifEmpty: true });
+			}
 			for (const [exchange, type] of exchanges) {
 				await channel.assertExchange(exchange, type, { durable: true });
 			}
@@ -10061,7 +10158,7 @@ restore_first_cutover_producers_on_exit() {
 			docker inspect --format '{{ .Image }}' \
 				"$first_cutover_legacy_worker_id" 2>/dev/null
 		)" >/dev/null 2>&1 ||
-			! routine_require_platform_admin_audit_topology ||
+			! routine_require_operations_admin_audit_topology ||
 			! docker start "$first_cutover_legacy_worker_id" >/dev/null; then
 			echo "CRITICAL: the unchanged legacy integration worker could not be restarted." >&2
 			recovery_failed=true
@@ -11614,11 +11711,9 @@ for (const queue of [
 }
 for (const source of ["campaigns", "reporting", "widgets", "billing", "identity", "platform", "support"]) {
 	const base = `winwidget.admin.audit.${source}.v1`;
-	for (const suffix of ["", ".retry-v2.1", ".retry-v2.2", ".retry-v2.3"]) {
+	for (const suffix of ["", ".retry-v2.1", ".retry-v2.2", ".retry-v2.3", ".dead-letter"]) {
 		if (queues.has(`${base}${suffix}`)) process.exit(1);
 	}
-	const deadLetterConsumers = queues.get(`${base}.dead-letter`);
-	if (deadLetterConsumers !== undefined && deadLetterConsumers !== 0) process.exit(1);
 }
 process.stdout.write("Operations and steady integration RabbitMQ consumers verified\n");
 '
