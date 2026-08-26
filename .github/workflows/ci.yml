@@ -14,10 +14,16 @@ concurrency:
 jobs:
   lifecycle-contract:
     name: Apps-only lifecycle contract
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/prod' && vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.9
@@ -28,7 +34,7 @@ jobs:
 
   service:
     name: ${{ matrix.app }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/prod' && vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -46,6 +52,12 @@ jobs:
           - operations
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - uses: pnpm/action-setup@v4
         with:
           version: 9.15.9
