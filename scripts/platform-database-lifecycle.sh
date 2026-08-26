@@ -253,8 +253,21 @@ platform_database_write_marker() {
 	fi
 }
 
+platform_database_marker_revision_for_release() {
+	local marker_revision
+	marker_revision="$(platform_database_marker_value revision)" || return 1
+	[[ "$marker_revision" =~ ^[0-9a-f]{40}$ ]] ||
+		platform_database_fail 'Platform database marker revision is malformed.' || return 1
+	if [[ "$marker_revision" != "$EXPECTED_REVISION" ]]; then
+		git -C "$SERVER_ROOT" merge-base --is-ancestor \
+			"$marker_revision" "$EXPECTED_REVISION" ||
+			platform_database_fail 'Platform database marker revision is not an ancestor of the release.' || return 1
+	fi
+	printf '%s\n' "$marker_revision"
+}
+
 platform_database_url_parser_image() {
-	local phase image image_id metadata
+	local phase image image_id metadata marker_revision
 	if [[ -n "${PLATFORM_DATABASE_URL_PARSER_CORE_IMAGE_ID:-}" ]]; then
 		image_id="$PLATFORM_DATABASE_URL_PARSER_CORE_IMAGE_ID"
 		[[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
@@ -273,10 +286,10 @@ platform_database_url_parser_image() {
 		image_id="$(platform_database_docker image inspect --format '{{.Id}}' "$image")" || return 1
 		platform_database_verify_release_image "$image_id" "$image" || return 1
 	else
-		[[ "$(platform_database_marker_value revision)" == "$EXPECTED_REVISION" ]] ||
-			platform_database_fail 'Platform URL parser marker revision differs from the release.' || return 1
+		marker_revision="$(platform_database_marker_revision_for_release)" || return 1
 		image_id="$(platform_database_marker_value image_id)" || return 1
-		platform_database_verify_exact_image_id "$image_id" || return 1
+		platform_database_verify_exact_image_id_for_revision \
+			"$image_id" "$marker_revision" || return 1
 	fi
 	printf '%s\n' "$image_id"
 }
@@ -330,14 +343,19 @@ platform_database_validate_urls() {
 	done
 }
 
-platform_database_verify_exact_image_id() {
-	[[ $# -eq 1 && "$1" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
-	local expected_id="$1" metadata
+platform_database_verify_exact_image_id_for_revision() {
+	[[ $# -eq 2 && "$1" =~ ^sha256:[0-9a-f]{64}$ && "$2" =~ ^[0-9a-f]{40}$ ]] || return 1
+	local expected_id="$1" expected_revision="$2" metadata
 	metadata="$(platform_database_docker image inspect --format \
 		'{{.Id}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{.Config.User}}|{{index .Config.Labels "org.opencontainers.image.title"}}' \
 		"$expected_id")" || return 1
-	[[ "$metadata" == "$expected_id|$EXPECTED_REVISION|platform|winwidget-platform" ]] ||
+	[[ "$metadata" == "$expected_id|$expected_revision|platform|winwidget-platform" ]] ||
 		platform_database_fail 'Platform image metadata differs from the pinned lifecycle marker.'
+}
+
+platform_database_verify_exact_image_id() {
+	[[ $# -eq 1 ]] || return 1
+	platform_database_verify_exact_image_id_for_revision "$1" "$EXPECTED_REVISION"
 }
 
 platform_database_verify_release_image() {
@@ -882,7 +900,8 @@ platform_database_self_test() {
 	stop_source="$(declare -f platform_database_assert_pre_cutover_runtime_stopped \
 		platform_database_stop_pre_cutover_runtime)"
 	source="$(declare -f platform_database_require_inputs platform_database_require_local_docker \
-		platform_database_url_parser_image platform_database_url_field \
+		platform_database_marker_revision_for_release platform_database_url_parser_image \
+		platform_database_url_field platform_database_verify_exact_image_id_for_revision \
 		platform_database_verify_exact_image_id platform_database_verify_release_image \
 		platform_database_read_actual_identity \
 		platform_database_private_directory_mode_allowed \
@@ -905,6 +924,7 @@ platform_database_self_test() {
 		"$source" != *'--env "PLATFORM_PARSE_URL=$value"'* &&
 		"$source" == *'PLATFORM_DATABASE_URL_PARSER_CORE_IMAGE_ID'* &&
 		"$source" == *'$image_id|$EXPECTED_REVISION|nestjs'* &&
+		"$source" == *'merge-base --is-ancestor'*'platform_database_verify_exact_image_id_for_revision'* &&
 		"$source" == *'try {'*'const parsed = new URL(input);'*'} catch {'* &&
 		"$source" == *'export PLATFORM_DATABASE_URL'* &&
 		"$source" == *'--env PLATFORM_DATABASE_URL'* &&
@@ -951,6 +971,7 @@ platform_database_self_test() {
 	platform_database_self_test_core_image_id="sha256:$(printf 'c%.0s' {1..64})"
 	local platform_database_self_test_image='winwidget-platform:self-test'
 	local platform_database_self_test_image_mode=valid
+	local platform_database_self_test_image_revision="$EXPECTED_REVISION"
 	platform_database_docker() {
 		[[ "$1 $2 $3" == 'image inspect --format' ]] || return 1
 		local target argument
@@ -958,7 +979,7 @@ platform_database_self_test() {
 		case "$platform_database_self_test_image_mode:$target" in
 		valid:"$platform_database_self_test_image_id" | retag:"$platform_database_self_test_image_id")
 			printf '%s|%s|platform|winwidget-platform\n' \
-				"$platform_database_self_test_image_id" "$EXPECTED_REVISION"
+				"$platform_database_self_test_image_id" "$platform_database_self_test_image_revision"
 			;;
 		core-valid:"$platform_database_self_test_core_image_id")
 			printf '%s|%s|nestjs\n' \
@@ -1005,6 +1026,34 @@ platform_database_self_test() {
 		return 1
 	}
 	[[ "$(platform_database_url_parser_image)" == "$platform_database_self_test_image_id" ]]
+	(
+		local fixture_marker_revision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+		platform_database_self_test_image_revision="$fixture_marker_revision"
+		platform_database_marker_value() {
+			case "$1" in
+			revision) printf '%s\n' "$fixture_marker_revision" ;;
+			image_id) printf '%s\n' "$platform_database_self_test_image_id" ;;
+			*) return 1 ;;
+			esac
+		}
+		git() {
+			[[ "$1" == -C && "$2" == "$SERVER_ROOT" && "$3" == merge-base &&
+				"$4" == --is-ancestor && "$5" == "$fixture_marker_revision" &&
+				"$6" == "$EXPECTED_REVISION" ]]
+		}
+		[[ "$(platform_database_url_parser_image)" == "$platform_database_self_test_image_id" ]]
+	)
+	(
+		local fixture_marker_revision=cccccccccccccccccccccccccccccccccccccccc
+		platform_database_marker_value() {
+			[[ "$1" == revision ]] || return 1
+			printf '%s\n' "$fixture_marker_revision"
+		}
+		git() { return 1; }
+		if platform_database_marker_revision_for_release >/dev/null 2>&1; then
+			return 1
+		fi
+	)
 
 	local platform_database_self_test_url='postgresql://winwidget_platform_runtime:self-test-secret@127.0.0.1:55439/winwidget_platform?schema=platform'
 	platform_read_env_value() {
