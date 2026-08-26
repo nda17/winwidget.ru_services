@@ -2668,8 +2668,7 @@ assert_distinct_database_roles() {
 	for ((left = 0; left < ${#role_users[@]}; left++)); do
 		for ((right = left + 1; right < ${#role_users[@]}; right++)); do
 			if [[ "${role_users[$left]}" == "${role_users[$right]}" ]]; then
-				echo "Core runtime/migration/maintenance and eight service-owned database contours must use twenty-seven distinct PostgreSQL roles." >&2
-				echo "Core, Notification Delivery, Campaigns, Reporting, Widgets, Billing, Identity, Platform and Operations database URLs must use twenty-eight distinct PostgreSQL roles." >&2
+				echo "Core runtime/migration/maintenance and nine service-owned database contours must use thirty distinct PostgreSQL roles." >&2
 				exit 1
 			fi
 		done
@@ -6001,19 +6000,6 @@ if (
 	!core.activatedAt || !support.activatedAt
 ) throw new Error("Core and Support ownership anchors are not in exact steady state");
 process.stdout.write("Core and Support ownership anchors verified\n");
-		url.pathname !== "/winwidget_operations" ||
-		url.searchParams.get("schema") !== "operations" ||
-		url.searchParams.get("sslmode") !== "disable" ||
-		password.length < 32 ||
-		/[\0\r\n]/.test(password) ||
-		password.startsWith("change_me")
-	) throw new Error(`Invalid Operations database URL boundary at index ${index}`);
-	passwords.add(password);
-}
-if (passwords.size !== expectedUsers.length) {
-	throw new Error("Operations database roles must use distinct passwords");
-}
-process.stdout.write("Operations runtime, migration and backup URL boundaries verified\n");
 '
 }
 
@@ -11174,6 +11160,7 @@ if [[ "$notification_forward_candidate_active" == "true" ]]; then
 		"$SUPPORT_WORKER_READINESS_URL" "$SUPPORT_REVISION" "Canonical Support worker"
 	wait_for_cutover_revision \
 		"$SUPPORT_OUTBOX_READINESS_URL" "$SUPPORT_REVISION" "Canonical Support Outbox publisher"
+	compose_target up -d --no-deps --force-recreate \
 		operations-api \
 		operations-worker \
 		operations-outbox-publisher
@@ -11686,7 +11673,7 @@ show_api_diagnostics() {
 	compose_target \
 		ps api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher support-api support-worker support-outbox-publisher operations-api operations-worker operations-outbox-publisher rabbitmq || true
 	compose_target \
-		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher operations-api operations-worker operations-outbox-publisher rabbitmq || true
+		logs --tail=100 api-gateway api outbox-publisher integration-worker maintenance-worker database-restore-worker notification-delivery-worker campaigns-service reporting-service widgets-service billing-api billing-scheduler billing-worker billing-outbox-publisher identity-api identity-worker identity-outbox-publisher support-api support-worker support-outbox-publisher operations-api operations-worker operations-outbox-publisher rabbitmq || true
 	echo "Processes listening on ports 4100, 4200, 4300, 4401, 4500, 4600, 4700, 4800-4803, 4900-4902, 5100-5102 and 5200-5202:"
 	ss -ltnp \
 		'( sport = :4100 or sport = :4200 or sport = :4300 or sport = :4401 or sport = :4500 or sport = :4600 or sport = :4700 or sport = :4800 or sport = :4801 or sport = :4802 or sport = :4803 or sport = :4900 or sport = :4901 or sport = :4902 or sport = :5100 or sport = :5101 or sport = :5102 or sport = :5200 or sport = :5201 or sport = :5202 )' ||

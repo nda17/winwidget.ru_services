@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { Script } from 'node:vm';
 
 const root = resolve(import.meta.dirname, '..');
 const read = path => readFileSync(resolve(root, path), 'utf8');
@@ -215,8 +216,8 @@ if (
 	);
 }
 const steadyOwnership = deployProduction.slice(
-	deployProduction.indexOf('verify_support_steady_ownership() {'),
-	deployProduction.indexOf('validate_campaigns_database_urls() {')
+	deployProduction.indexOf('\nverify_support_steady_ownership() {') + 1,
+	deployProduction.indexOf('\nvalidate_campaigns_database_urls() {') + 1
 );
 for (const required of [
 	'.support-database-lifecycle-v1',
@@ -229,6 +230,117 @@ for (const required of [
 	if (!steadyOwnership.includes(required)) {
 		throw new Error(`Support steady ownership guard drifted: ${required}`);
 	}
+}
+for (const forbidden of [
+	'/winwidget_operations',
+	'Invalid Operations database URL boundary',
+	'Operations database roles must use distinct passwords',
+	'Operations runtime, migration and backup URL boundaries verified'
+]) {
+	if (steadyOwnership.includes(forbidden)) {
+		throw new Error(
+			`Support steady ownership guard contains an unrelated Operations validator fragment: ${forbidden}`
+		);
+	}
+}
+const steadyOwnershipNodeStart =
+	'--entrypoint node "$SUPPORT_IMAGE" -e \'\n';
+const steadyOwnershipNodeStartIndex = steadyOwnership.indexOf(
+	steadyOwnershipNodeStart
+);
+const steadyOwnershipNodeEndIndex = steadyOwnership.lastIndexOf("\n'\n}");
+if (
+	steadyOwnershipNodeStartIndex === -1 ||
+	steadyOwnershipNodeEndIndex === -1 ||
+	steadyOwnershipNodeEndIndex <= steadyOwnershipNodeStartIndex
+) {
+	throw new Error('Support steady ownership inline Node boundary drifted');
+}
+new Script(
+	steadyOwnership.slice(
+		steadyOwnershipNodeStartIndex + steadyOwnershipNodeStart.length,
+		steadyOwnershipNodeEndIndex
+	),
+	{ filename: 'deploy-production.verify-support-steady-ownership.js' }
+);
+if (
+	deployProduction.match(/validate_operations_database_urls\(\) \{/g)
+		?.length !== 1
+) {
+	throw new Error(
+		'Production deploy must retain exactly one Operations database URL validator'
+	);
+}
+const forwardCanonicalizeAnchor = deployProduction.indexOf(
+	'Canonicalizing the verified forward cutover topology service by service.'
+);
+const forwardCanonicalizeStart = deployProduction.lastIndexOf(
+	'if [[ "$notification_forward_candidate_active" == "true" ]]; then',
+	forwardCanonicalizeAnchor
+);
+const forwardCanonicalizeEnd = deployProduction.indexOf(
+	'\nelse\n',
+	forwardCanonicalizeAnchor
+);
+const forwardCanonicalize = deployProduction.slice(
+	forwardCanonicalizeStart,
+	forwardCanonicalizeEnd
+);
+if (
+	forwardCanonicalizeAnchor === -1 ||
+	forwardCanonicalizeStart === -1 ||
+	forwardCanonicalizeEnd === -1 ||
+	!forwardCanonicalize.includes(
+		'compose_target up -d --no-deps --force-recreate \\\n\t\toperations-api \\\n\t\toperations-worker \\\n\t\toperations-outbox-publisher'
+	)
+) {
+	throw new Error(
+		'Notification forward canonicalization lost the Operations runtime start command'
+	);
+}
+const diagnostics = deployProduction.slice(
+	deployProduction.indexOf('show_api_diagnostics() {'),
+	deployProduction.indexOf('ensure_required_services_running() {')
+);
+const diagnosticsPs = diagnostics.slice(
+	diagnostics.indexOf('\t\tps '),
+	diagnostics.indexOf('\n\tcompose_target', diagnostics.indexOf('\t\tps '))
+);
+const diagnosticsLogs = diagnostics.slice(
+	diagnostics.indexOf('\t\tlogs '),
+	diagnostics.indexOf('\n\techo ', diagnostics.indexOf('\t\tlogs '))
+);
+for (const service of [
+	'support-api',
+	'support-worker',
+	'support-outbox-publisher',
+	'operations-api',
+	'operations-worker',
+	'operations-outbox-publisher'
+]) {
+	if (
+		!diagnosticsPs.includes(service) ||
+		!diagnosticsLogs.includes(service)
+	) {
+		throw new Error(
+			`Production diagnostics ps/log service sets drifted: ${service}`
+		);
+	}
+}
+if (
+	!deployProduction.includes(
+		'Core runtime/migration/maintenance and nine service-owned database contours must use thirty distinct PostgreSQL roles.'
+	) ||
+	deployProduction.includes(
+		'must use twenty-seven distinct PostgreSQL roles'
+	) ||
+	deployProduction.includes(
+		'must use twenty-eight distinct PostgreSQL roles'
+	)
+) {
+	throw new Error(
+		'Production database-role cardinality diagnostic drifted'
+	);
 }
 for (const required of [
 	'support_steady_expected_lifecycle_phase() {',
@@ -497,12 +609,12 @@ requireText('.github/workflows/support-cleanup-production.yml', [
 	'support_cleanup_migration_sha256:',
 	'support_cleanup_backup_sha256:',
 	'support_cleanup_restore_evidence_sha256:',
-	"SUPPORT_ACTION: cleanup",
-	"SUPPORT_CONFIRMATION: ${{ inputs.support_confirmation }}",
-	"SUPPORT_CLEANUP_MIGRATION_SHA256: ${{ inputs.support_cleanup_migration_sha256 }}",
-	"SUPPORT_CLEANUP_BACKUP_SHA256: ${{ inputs.support_cleanup_backup_sha256 }}",
-	"SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ${{ inputs.support_cleanup_restore_evidence_sha256 }}",
-	"\"$GITHUB_REF\" == 'refs/heads/prod'",
+	'SUPPORT_ACTION: cleanup',
+	'SUPPORT_CONFIRMATION: ${{ inputs.support_confirmation }}',
+	'SUPPORT_CLEANUP_MIGRATION_SHA256: ${{ inputs.support_cleanup_migration_sha256 }}',
+	'SUPPORT_CLEANUP_BACKUP_SHA256: ${{ inputs.support_cleanup_backup_sha256 }}',
+	'SUPPORT_CLEANUP_RESTORE_EVIDENCE_SHA256: ${{ inputs.support_cleanup_restore_evidence_sha256 }}',
+	'"$GITHUB_REF" == \'refs/heads/prod\'',
 	'bash .github/scripts/stage-or-deploy-backend.sh'
 ]);
 requireText('.github/scripts/stage-or-deploy-backend.sh', [
