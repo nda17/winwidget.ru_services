@@ -1,3 +1,6 @@
+DELETE FROM reporting."heartbeats"
+WHERE "role" = 'backfill';
+
 ALTER TABLE reporting."heartbeats"
 DROP CONSTRAINT "heartbeats_identity_check",
 ADD CONSTRAINT "heartbeats_identity_check" CHECK (
