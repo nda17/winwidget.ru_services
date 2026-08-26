@@ -1,62 +1,65 @@
-# Identity service
+# Сервис Identity
 
-Identity owns users, authentication identities, sessions, verification
-challenges, OAuth, profile avatars, Telegram identity bindings, and the
-PostgreSQL `identity` schema. Avatar objects remain in the configured S3
-storage; this service does not replace them with host-bound files.
+Identity владеет пользователями, идентификаторами аутентификации, сессиями,
+проверочными challenge, OAuth, аватарами профиля, привязками Telegram и схемой
+PostgreSQL `identity`. Объекты аватаров остаются в настроенном S3-хранилище;
+сервис не заменяет их файлами, привязанными к хосту.
 
-## Process roles
+## Роли процессов
 
-| `IDENTITY_PROCESS_ROLE` | Default port | Responsibility                                    |
-| ----------------------- | -----------: | ------------------------------------------------- |
-| `api`                   |         4900 | Auth/users/OAuth/Telegram HTTP contracts and JWKS |
-| `worker`                |         4901 | Idempotent lifecycle/destination consumers        |
-| `outbox-publisher`      |         4902 | Confirmed/mandatory Outbox publication            |
+| `IDENTITY_PROCESS_ROLE` | Порт по умолчанию | Ответственность                                        |
+| ----------------------- | ----------------: | ------------------------------------------------------ |
+| `api`                   |              4900 | HTTP-контракты Auth/users/OAuth/Telegram и JWKS        |
+| `worker`                |              4901 | Идемпотентные consumers жизненного цикла и направлений |
+| `outbox-publisher`      |              4902 | Публикация Outbox с confirms и mandatory               |
 
-`IDENTITY_PORT` may override worker/publisher ports, but the API is fixed to
-`4900`. Every role exposes `/health/live`, `/health/ready`, `/health/revision`,
-and `/health/ownership`; only `api` registers business controllers.
+`IDENTITY_PORT` может переопределять порты worker/publisher, но API всегда
+работает на `4900`. Каждая роль предоставляет `/health/live`, `/health/ready`,
+`/health/revision` и `/health/ownership`; бизнес-контроллеры регистрирует
+только `api`.
 
-## HTTP and internal contracts
+## HTTP- и внутренние контракты
 
-Public routes are under `/api/v1`: `/auth/**`, `/users/**`,
-`/telegram-auth/**`, and Telegram webhooks. JWKS is
+Публичные маршруты находятся под `/api/v1`: `/auth/**`, `/users/**`,
+`/telegram-auth/**` и webhook Telegram. JWKS доступен по
 `GET /api/v1/auth/.well-known/jwks.json`.
 
-Private loopback contracts are outside the public Gateway:
+Закрытые loopback-контракты не публикуются через Gateway:
 
 - `POST /internal/v1/auth/introspect`
 - `/internal/v1/widgets/owners/**`
-- `/internal/v1/operations/audit-snapshots` and
+- `/internal/v1/operations/audit-snapshots` и
   `GET /internal/v1/operations/admin-health`
 - `POST /internal/v1/campaigns/eligible-contacts`
 - `POST /internal/v1/billing/lifecycle/complete`
 - `/internal/v1/identity/messaging/**`
 
-Campaigns, Reporting, Widgets, Billing, Platform, Support, and Operations each
-have a distinct `IDENTITY_<CALLER>_TOKEN`; the service rejects missing,
-placeholder, reused, or short credentials. Identity itself calls Billing,
-Widgets, and Operations through their dedicated Identity-scoped tokens.
+Campaigns, Reporting, Widgets, Billing, Platform, Support и Operations имеют
+раздельные `IDENTITY_<CALLER>_TOKEN`; сервис отклоняет отсутствующие, шаблонные,
+повторно используемые или короткие учётные данные. Сам Identity вызывает
+Billing, Widgets и Operations через отдельные токены с областью Identity.
 
-## External providers
+## Внешние провайдеры
 
-- Access JWTs use an RSA private key and public JWKS supplied as base64.
-- OAuth credentials/callbacks are configured separately for Google, GitHub,
-  Yandex, and VK.
-- Email/SMS verification uses SMTP and SMS Aero.
-- Telegram webhooks use the Auth and Info bot credentials. In production
-  `TELEGRAM_API_BASE_URL` must be
-  `https://tg.winwidget.ru/telegram-api`; direct Telegram is allowed only
-  outside production.
-- Avatar storage requires the dedicated `IDENTITY_AVATAR_S3_*` namespace.
+- Access JWT используют закрытый ключ RSA и публичный JWKS, переданные в
+  base64.
+- Учётные данные и callback OAuth настраиваются отдельно для Google, GitHub,
+  Yandex и VK.
+- Проверка email/SMS использует SMTP и SMS Aero.
+- Webhook Telegram использует учётные данные ботов Auth и Info. В production
+  `TELEGRAM_API_BASE_URL` должен быть равен
+  `https://tg.winwidget.ru/telegram-api`; прямой доступ к Telegram разрешён
+  только вне production.
+- Хранилище аватаров требует отдельного пространства имён
+  `IDENTITY_AVATAR_S3_*`.
 
-## Configuration and deployment
+## Настройка и развёртывание
 
-Keep `.env.example` tracked and create an ignored `.env.production` beside it
-on the VPS. Replace every `change_me`, use separate runtime/migration database
-roles, and pass only role-required secrets into each container. Never print
-private keys, bot tokens, provider secrets, or connection strings in deploy
-logs.
+Оставьте `.env.example` под контролем Git и создайте рядом на VPS игнорируемый
+`.env.production`. Замените каждое `change_me`, используйте отдельные роли базы
+данных для runtime и миграций и передавайте каждому контейнеру только нужные
+его роли секреты. Никогда не выводите в логи развёртывания закрытые ключи,
+токены ботов, секреты провайдеров или строки подключения.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -70,5 +73,5 @@ pnpm run build
 docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-identity .
 ```
 
-Start the API, worker, and Outbox publisher from the same immutable image and
-verify every role's readiness plus public JWKS before switching Gateway routes.
+Запустите API, worker и Outbox publisher из одного неизменяемого образа. До
+переключения маршрутов Gateway проверьте readiness каждой роли и публичный JWKS.

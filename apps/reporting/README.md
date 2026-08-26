@@ -1,32 +1,33 @@
-# Reporting service
+# Сервис Reporting
 
-Reporting owns aggregate analytics, Daily Summary settings/runs, its PostgreSQL
-schema, projections, transactional Outbox, retry/DLQ state, and delivery
-outcomes. It has no HTTP or snapshot dependency on the retired Core runtime.
+Reporting владеет агрегированной аналитикой, настройками и запусками Daily
+Summary, своей схемой PostgreSQL, проекциями, transactional Outbox,
+состоянием retry/DLQ и результатами доставки. У сервиса нет HTTP- или
+snapshot-зависимости от выведенного из эксплуатации runtime Core.
 
-## Runtime boundaries
+## Границы runtime
 
-- Identity authorization is fail-closed through
-  `POST /internal/v1/auth/introspect` on `IDENTITY_INTERNAL_BASE_URL`.
-- Daily Summary schedule changes reserve and confirm the backup-policy fence in
-  Operations:
+- Авторизация через Identity работает по принципу fail-closed через
+  `POST /internal/v1/auth/introspect` на `IDENTITY_INTERNAL_BASE_URL`.
+- Изменения расписания Daily Summary резервируют и подтверждают ограждение
+  политики резервного копирования в Operations:
   - `PUT /internal/v1/operations/reporting/schedule-policy`
   - `POST /internal/v1/operations/reporting/schedule-policy/confirm`
-- Operations notification routing is consumed from
-  `operations.notification-routing.changed.v1` on `winwidget.events`.
-  Reporting stores the latest `changedAt` watermark so a delayed retry cannot
-  overwrite newer routing.
-- Live Identity, Billing, and Widgets changes arrive through independent
-  RabbitMQ queues. Reporting publishes Daily Summary delivery requests and
-  admin audit events through its transactional Outbox.
+- Маршрутизация уведомлений Operations получается из события
+  `operations.notification-routing.changed.v1` в `winwidget.events`.
+  Reporting хранит последний watermark `changedAt`, чтобы отложенный retry не
+  мог перезаписать более новую маршрутизацию.
+- Актуальные изменения Identity, Billing и Widgets поступают через независимые
+  очереди RabbitMQ. Reporting публикует запросы доставки Daily Summary и
+  события аудита администратора через transactional Outbox.
 
-Legacy Core snapshot backfill and shadow-evidence roles are intentionally
-removed. Historical snapshot replay and compatibility aliases are not part of
-the steady-state service.
+Устаревший backfill snapshot Core и роли shadow-evidence намеренно удалены.
+Повторное воспроизведение исторических snapshot и алиасы совместимости не
+входят в штатный сервис.
 
-## Process roles
+## Роли процессов
 
-`REPORTING_PROCESS_ROLE` accepts only:
+`REPORTING_PROCESS_ROLE` принимает только:
 
 - `all`
 - `api`
@@ -34,41 +35,43 @@ the steady-state service.
 - `publisher`
 - `scheduler`
 
-The single-VPS production deployment currently uses `all`. Set
-`REPORTING_SCHEDULER_ENABLED=true` only for the process that owns scheduled
-Daily Summary runs.
+Production-развёртывание на одном VPS сейчас использует `all`. Устанавливайте
+`REPORTING_SCHEDULER_ENABLED=true` только для процесса, который владеет
+запусками Daily Summary по расписанию.
 
-## RabbitMQ hard cutover
+## Прямой cutover RabbitMQ
 
-The durable queue `winwidget.reporting.settings` keeps its name, but its only
-source binding is now `operations.notification-routing.changed.v1`. Remove the
-retired Core binding during cutover. Recreate
-`winwidget.reporting.settings.retry.1`, `.retry.2`, and `.retry.3` because their
-immutable dead-letter routing key changes to the Operations event. Historical
-messages on those retired routes are intentionally not replayed.
+Надёжная очередь `winwidget.reporting.settings` сохраняет имя, но её
+единственным source binding теперь является
+`operations.notification-routing.changed.v1`. Во время cutover удалите
+выведенный из эксплуатации binding Core. Пересоздайте
+`winwidget.reporting.settings.retry.1`, `.retry.2` и `.retry.3`, поскольку их
+неизменяемый dead-letter routing key меняется на событие Operations.
+Исторические сообщения из выведенных маршрутов намеренно не воспроизводятся.
 
-## Configuration
+## Настройка
 
-Copy `.env.example` to an ignored `.env.production` on the target VPS and set
-real secrets there. Never commit `.env.production`.
+Скопируйте `.env.example` в игнорируемый `.env.production` на целевом VPS и
+задайте там реальные секреты. Никогда не добавляйте `.env.production` в commit.
 
-Required service credentials:
+Обязательные учётные данные сервиса:
 
-- `REPORTING_DATABASE_URL` — Reporting PostgreSQL role/database/schema.
-- `REPORTING_INTERNAL_TOKEN` — dedicated outbound credential for Reporting →
-  Operations schedule-policy calls; at least 32 non-placeholder characters.
-- `REPORTING_OPERATIONS_TOKEN` — dedicated inbound credential for Operations →
-  Reporting monitoring calls; at least 32 non-placeholder characters.
-- `IDENTITY_REPORTING_TOKEN` — dedicated Reporting credential for Identity
-  introspection; at least 32 non-placeholder characters.
-- `RABBITMQ_URL` — restricted Reporting RabbitMQ user for worker/publisher
-  roles.
+- `REPORTING_DATABASE_URL` — роль/база/схема PostgreSQL сервиса Reporting.
+- `REPORTING_INTERNAL_TOKEN` — отдельные исходящие учётные данные для вызовов
+  политики расписания Reporting → Operations; не менее 32 нешаблонных
+  символов.
+- `REPORTING_OPERATIONS_TOKEN` — отдельные входящие учётные данные для вызовов
+  мониторинга Operations → Reporting; не менее 32 нешаблонных символов.
+- `IDENTITY_REPORTING_TOKEN` — отдельные учётные данные Reporting для
+  introspection Identity; не менее 32 нешаблонных символов.
+- `RABBITMQ_URL` — ограниченный пользователь RabbitMQ сервиса Reporting для
+  ролей worker/publisher.
 
-`OPERATIONS_INTERNAL_BASE_URL` defaults to `http://127.0.0.1:5200` and
-`IDENTITY_INTERNAL_BASE_URL` defaults to `http://127.0.0.1:4900`. Both clients
-reject non-loopback origins.
+`OPERATIONS_INTERNAL_BASE_URL` по умолчанию равен `http://127.0.0.1:5200`, а
+`IDENTITY_INTERNAL_BASE_URL` — `http://127.0.0.1:4900`. Оба клиента отклоняют
+origins не на loopback.
 
-## Commands
+## Команды
 
 ```bash
 pnpm install --frozen-lockfile
@@ -80,7 +83,8 @@ pnpm test
 pnpm run build
 ```
 
-Integration tests require isolated local PostgreSQL and RabbitMQ credentials:
+Интеграционные тесты требуют изолированные локальные учётные данные PostgreSQL
+и RabbitMQ:
 
 ```bash
 REPORTING_TEST_DATABASE_URL=postgresql://... \
@@ -91,15 +95,16 @@ REPORTING_INTEGRATION_ALLOW_MUTATION=true \
 pnpm run test:integration
 ```
 
-The integration database and RabbitMQ vhost must be disposable and local.
+Интеграционная база данных и RabbitMQ vhost должны быть одноразовыми и
+локальными.
 
 ## HTTP
 
 - `GET /health/live`
 - `GET /health/ready`
 - `GET /metrics`
-- `/api/v1/admin/reporting/**` — authenticated admin API via direct Identity
-  introspection.
-- `GET /internal/v1/reporting/messaging/overview` — loopback-only Operations
-  monitoring endpoint authenticated with `REPORTING_OPERATIONS_TOKEN` and
-  `x-winwidget-service: operations`.
+- `/api/v1/admin/reporting/**` — аутентифицированный admin API через прямой
+  introspection Identity.
+- `GET /internal/v1/reporting/messaging/overview` — доступный только через
+  loopback endpoint мониторинга Operations с аутентификацией через
+  `REPORTING_OPERATIONS_TOKEN` и `x-winwidget-service: operations`.

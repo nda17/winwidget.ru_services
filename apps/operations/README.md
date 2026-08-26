@@ -1,42 +1,46 @@
-# Operations service
+# Сервис Operations
 
-Operations owns the WinWidget operational control plane after the direct Core
-cutover. It does not read Core at runtime and does not implement dual-read,
-legacy routes, or historical job migration.
+После прямого cutover с Core сервис Operations владеет операционной плоскостью
+управления WinWidget. В runtime он не читает Core и не реализует dual-read,
+устаревшие маршруты или миграцию исторических заданий.
 
-## Responsibilities
+## Ответственность
 
-- Notes and the aggregated admin event log.
-- Admin alerts federated from Billing and Widgets plus Operations-owned alerts.
-- Messaging overview, failures, retry, and close federation.
-- Telegram operational settings and database backup administration.
-- Durable daily/manual backup jobs executed only by the maintenance worker.
-- DEV-only database restore control and execution.
-- Reporting schedule-policy reservation and confirmation.
-- Operations Outbox, delivery receipts, heartbeats, and role-aware health.
+- Notes и агрегированный журнал событий администратора.
+- Объединённые admin alerts из Billing и Widgets, а также собственные alerts
+  Operations.
+- Объединение обзора сообщений, ошибок, retry и close.
+- Операционные настройки Telegram и администрирование резервных копий баз
+  данных.
+- Надёжные ежедневные и ручные задания резервного копирования, которые
+  выполняет только maintenance worker.
+- Управление и выполнение восстановления баз данных только для DEV.
+- Резервирование и подтверждение политики расписания Reporting.
+- Operations Outbox, квитанции доставки, heartbeat и health с учётом ролей.
 
-All PostgreSQL-dependent publications are written to `OutboxEvent` in the same
-transaction as their state change. Workers consume RabbitMQ through
-`basic.consume`; durable jobs are claimed with PostgreSQL CAS leases.
+Все зависящие от PostgreSQL публикации записываются в `OutboxEvent` в одной
+транзакции с изменением состояния. Workers получают сообщения RabbitMQ через
+`basic.consume`; надёжные задания захватываются с помощью CAS lease PostgreSQL.
 
-## Process roles
+## Роли процессов
 
-The same image is started once for every role:
+Для каждой роли один раз запускается один и тот же образ:
 
-| `OPERATIONS_PROCESS_ROLE` | Default port | Responsibility                                                   |
-| ------------------------- | -----------: | ---------------------------------------------------------------- |
-| `api`                     |         5200 | Public/admin/internal HTTP contracts and restore enqueue         |
-| `worker`                  |         5201 | Audit consumers, scheduler, and read-only database backup jobs   |
-| `outbox-publisher`        |         5202 | Transactional Outbox publication with confirms/mandatory returns |
-| `restore-worker`          |         5203 | Privileged database restore execution only                       |
+| `OPERATIONS_PROCESS_ROLE` | Порт по умолчанию | Ответственность                                                |
+| ------------------------- | ----------------: | -------------------------------------------------------------- |
+| `api`                     |              5200 | Публичные/admin/внутренние HTTP-контракты и постановка restore |
+| `worker`                  |              5201 | Consumers аудита, scheduler и read-only backup баз данных      |
+| `outbox-publisher`        |              5202 | Публикация transactional Outbox с confirms/mandatory returns   |
+| `restore-worker`          |              5203 | Только привилегированное выполнение восстановления баз данных  |
 
-Only `api` registers business controllers. Every role exposes `/health/live`
-and `/health/ready`; API additionally owns `/api/v1/health/deployment` and the
-ADMIN-only `/api/v1/health/admin`.
+Бизнес-контроллеры регистрирует только `api`. Каждая роль предоставляет
+`/health/live` и `/health/ready`; API дополнительно владеет
+`/api/v1/health/deployment` и доступным только ADMIN
+`/api/v1/health/admin`.
 
-## HTTP contracts
+## HTTP-контракты
 
-Public routes keep the existing Gateway paths under `/api/v1`:
+Публичные маршруты сохраняют существующие пути Gateway под `/api/v1`:
 
 - `GET /admin-alerts`
 - `GET /messaging/admin/overview`
@@ -49,81 +53,84 @@ Public routes keep the existing Gateway paths under `/api/v1`:
 - `GET /telegram-bot/admin/database-backups/jobs`
 - `GET /telegram-bot/admin/database-backups/:target/jobs/active`
 - `GET /telegram-bot/admin/database-backups/:target/jobs/:jobId`
-- `/dev-tools/database-restores/*` for DEV users only
+- `/dev-tools/database-restores/*` — только для пользователей DEV
 
-Unprefixed internal routes:
+Внутренние маршруты без публичного префикса:
 
 - `GET /internal/v1/identity/users/:userId/admin-events/overview`
 - `PUT /internal/v1/operations/reporting/schedule-policy`
 - `POST /internal/v1/operations/reporting/schedule-policy/confirm`
 
-Federation always sends `x-winwidget-service: operations` and a dedicated
-`*_OPERATIONS_TOKEN`. Billing uses
-`/internal/v1/operations/billing/*`; Widgets uses
-`/api/v1/internal/v1/operations/widgets/*`. Service URLs must be exact private
-HTTP origins without embedded paths or credentials.
+Федерация всегда передаёт `x-winwidget-service: operations` и отдельный
+`*_OPERATIONS_TOKEN`. Billing использует
+`/internal/v1/operations/billing/*`, а Widgets —
+`/api/v1/internal/v1/operations/widgets/*`. URL сервисов должны быть точными
+закрытыми HTTP origins без встроенных путей или учётных данных.
 
-## RabbitMQ contracts
+## Контракты RabbitMQ
 
-Operations publishes to `winwidget.events`:
+Operations публикует в `winwidget.events`:
 
 - `operations.scheduled-job.requested.v1`
 - `operations.database-restore.requested.v1`
 - `operations.notification-routing.changed.v1`
 
-The new job queue families are:
+Новые семейства очередей заданий:
 
 - `winwidget.operations.scheduled-jobs.v1`, `.retry-v1`, `.dead-letter`
 - `winwidget.operations.database-restore.v1`, `.retry-v1`, `.dead-letter`
 
-The notification-routing payload is exactly
-`{ schemaVersion: 1, eventId, operationalAlertsThreadId, changedAt }`, with
-aggregate type `telegram-bot-settings` and aggregate ID `singleton`.
+Payload маршрутизации уведомлений имеет точный вид
+`{ schemaVersion: 1, eventId, operationalAlertsThreadId, changedAt }`, тип
+агрегата `telegram-bot-settings` и ID агрегата `singleton`.
 
-## Configuration and database
+## Настройка и база данных
 
-Copy `.env.example` to the per-service `.env.production` on the VPS and fill it
-with deployment secrets. `.env.production` is ignored by Git. Keep only the
-variables needed by Operations; do not reuse Core tokens.
+Скопируйте `.env.example` в отдельный `.env.production` сервиса на VPS и
+заполните секретами развёртывания. `.env.production` игнорируется Git. Оставьте
+только переменные, необходимые Operations; не используйте токены Core повторно.
 
-Operations uses one global `OperationsPrismaModule` and one Prisma client pool
-per process. Apply migrations before starting the new revision:
+Operations использует один глобальный `OperationsPrismaModule` и один пул
+Prisma Client на процесс. Примените миграции до запуска новой ревизии:
 
 ```bash
 pnpm prisma:generate
 pnpm prisma:migrate:deploy
 ```
 
-The runtime image pins PostgreSQL 18 `pg_dump`, `pg_restore`, and `psql`; its
-Docker build fails if the dump/restore major drifts. Backup URLs must use
-read-only backup roles and are provided only to the regular worker. Database
-restore has no admin URL contract: only `restore-worker` receives each exact
-`*_POSTGRES_ADMIN_USER`, `*_POSTGRES_PORT`, and
-`DATABASE_RESTORE_*_ADMIN_PASSWORD_FILE`. The host is fixed to `127.0.0.1`
-and every database name is hardcoded by target. Password files are existing
-Docker secrets mounted read-only below `/run/secrets`; neither API nor the
-regular worker receives them.
+Runtime-образ фиксирует PostgreSQL 18 `pg_dump`, `pg_restore` и `psql`; его
+Docker-сборка завершается ошибкой при расхождении major-версии dump/restore.
+URL резервного копирования должны использовать read-only роли backup и
+передаются только обычному worker. Для восстановления базы данных нет
+административного URL-контракта: только `restore-worker` получает точные
+`*_POSTGRES_ADMIN_USER`, `*_POSTGRES_PORT` и
+`DATABASE_RESTORE_*_ADMIN_PASSWORD_FILE`. Host зафиксирован как `127.0.0.1`, а
+имя каждой базы жёстко задано для соответствующего target. Файлы паролей — уже
+существующие Docker secrets, смонтированные read-only ниже `/run/secrets`; ни
+API, ни обычный worker их не получают.
 
-The API writes uploaded dumps and `restore-worker` consumes them, so only those
-two containers mount the same private persistent
-`DATABASE_RESTORE_STORAGE_DIR` read-write (owned by runtime UID 1001). Restore
-enqueue is disabled unless `DATABASE_RESTORE_ENABLED=true` on API. The isolated
-worker uses `RABBITMQ_CONNECTION_NAME=winwidget-operations-restore-worker` and
-consumes only the `winwidget.operations.database-restore.v1` queue family.
+API записывает загруженные dump, а `restore-worker` их читает, поэтому только
+эти два контейнера монтируют один закрытый постоянный
+`DATABASE_RESTORE_STORAGE_DIR` с read-write-доступом (владелец — runtime UID
+1001). Постановка restore отключена, пока на API не задано
+`DATABASE_RESTORE_ENABLED=true`. Изолированный worker использует
+`RABBITMQ_CONNECTION_NAME=winwidget-operations-restore-worker` и получает
+сообщения только из семейства очередей
+`winwidget.operations.database-restore.v1`.
 
-Telegram production traffic keeps the established encrypted proxy contract:
-`TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`. Only
-`operations-worker`, which sends backups, receives the bot token and proxy host
-mapping. `operations-api` receives only the non-secret
-`TELEGRAM_INFO_BOT_CONFIGURED=true` status flag and the public bot username.
+Production-трафик Telegram сохраняет установленный контракт зашифрованного
+прокси: `TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`. Только
+`operations-worker`, отправляющий резервные копии, получает токен бота и
+сопоставление proxy host. `operations-api` получает только несекретный флаг
+состояния `TELEGRAM_INFO_BOT_CONFIGURED=true` и публичное имя бота.
 
-## One-time direct-cutover bootstrap
+## Одноразовая инициализация прямого cutover
 
-Before Core is stopped, export only the current Telegram settings singleton and
-the current Reporting schedule-policy anchor into the strict schema accepted by
-`parseControlPlaneSnapshot`. No history or queued jobs are imported. After the
-Operations ownership row is `ACTIVE`, run the compiled CLI with an immutable
-file and its independently calculated SHA-256:
+До остановки Core экспортируйте только текущий singleton настроек Telegram и
+текущий anchor политики расписания Reporting в строгую схему, принимаемую
+`parseControlPlaneSnapshot`. История и задания из очередей не импортируются.
+После перехода строки владения Operations в состояние `ACTIVE` запустите
+скомпилированный CLI с неизменяемым файлом и независимо вычисленным SHA-256:
 
 ```json
 {
@@ -151,19 +158,19 @@ file and its independently calculated SHA-256:
 }
 ```
 
-Use current Core values in every field; the example is a shape contract, not a
-source of production defaults. The importer rejects extra fields, partial
-pending reservations, inconsistent Telegram settings, schedule collisions,
-and any non-pristine target.
+Используйте текущие значения Core во всех полях; пример задаёт форму контракта,
+а не production-значения по умолчанию. Импортёр отклоняет дополнительные поля,
+частичные pending reservations, несогласованные настройки Telegram, конфликты
+расписания и любую непустую целевую базу.
 
 ```bash
 pnpm control-plane:bootstrap -- --file /absolute/path/control-plane.json --sha256 <hex>
 ```
 
-The command is atomic, requires a pristine target, and is idempotent only for
-the same source revision and hash. Runtime code never reads Core afterward.
+Команда атомарна, требует чистую целевую базу и идемпотентна только для той же
+исходной ревизии и hash. После этого runtime-код никогда не читает Core.
 
-## Verification
+## Проверка
 
 ```bash
 pnpm prisma:generate

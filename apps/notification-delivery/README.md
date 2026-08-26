@@ -1,16 +1,16 @@
-# Notification Delivery service
+# Сервис Notification Delivery
 
-Notification Delivery is the sole transport worker for WinWidget email and
-informational Telegram messages. It owns delivery receipts, retry/failure
-state, delivery outcomes, its transactional Outbox, and the PostgreSQL
-`notification_delivery` schema. Domain services publish requests; they do not
-receive SMTP or Info-bot credentials.
+Notification Delivery — единственный транспортный worker для email и
+информационных сообщений Telegram в WinWidget. Он владеет квитанциями
+доставки, состоянием retry/ошибок, результатами доставки, transactional Outbox
+и схемой PostgreSQL `notification_delivery`. Доменные сервисы публикуют
+запросы, но не получают учётные данные SMTP или Info-бота.
 
-## Runtime
+## Выполнение
 
-The service currently runs worker consumers, its Outbox publisher, retention,
-and the private control API in one process. It listens only on
-`127.0.0.1:4401` by default and exposes:
+Сейчас сервис запускает consumers worker, Outbox publisher, очистку по сроку
+хранения и закрытый управляющий API в одном процессе. По умолчанию он слушает
+только `127.0.0.1:4401` и предоставляет:
 
 - `GET /health/live`
 - `GET /health/ready`
@@ -19,28 +19,29 @@ and the private control API in one process. It listens only on
 - `POST /internal/notification-delivery/failures/:id/retry`
 - `POST /internal/notification-delivery/failures/:id/close`
 
-Control endpoints accept only a loopback caller with
-`x-winwidget-service: operations` and
+Управляющие endpoints принимают только loopback-вызовы с
+`x-winwidget-service: operations` и
 `NOTIFICATION_DELIVERY_OPERATIONS_TOKEN`.
 
-## Messaging and providers
+## Сообщения и провайдеры
 
-Each delivery kind has an independent RabbitMQ queue, retry route, and DLQ.
-Consumers claim `eventId + consumer` receipts before external calls, ack only
-after durable success, and publish outcomes through the local Outbox.
+У каждого вида доставки есть независимые очередь RabbitMQ, маршрут retry и
+DLQ. До внешнего вызова consumers захватывают квитанцию по
+`eventId + consumer`, выполняют ack только после надёжно сохранённого успеха и
+публикуют результаты через локальный Outbox.
 
-`NOTIFICATION_DELIVERY_KINDS` can narrow the consumers owned by a process. The
-full supported set is recorded in `.env.example`. SMTP configuration is shared
-by email kinds; `TELEGRAM_INFO_BOT_TOKEN` belongs only here. Production
-Telegram traffic must use
+`NOTIFICATION_DELIVERY_KINDS` может ограничить набор consumers, принадлежащих
+процессу. Полный поддерживаемый набор указан в `.env.example`. Конфигурация
+SMTP общая для видов email; `TELEGRAM_INFO_BOT_TOKEN` принадлежит только этому
+сервису. Production-трафик Telegram должен использовать
 `TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`.
 
-## Configuration and deployment
+## Настройка и развёртывание
 
-Copy `.env.example` to the ignored `.env.production` beside this service on
-the VPS. Replace `change_me`, restrict the PostgreSQL and RabbitMQ accounts to
-Notification Delivery, and never pass transport credentials to domain-service
-containers.
+Скопируйте `.env.example` в игнорируемый `.env.production` рядом с сервисом на
+VPS. Замените `change_me`, ограничьте учётные записи PostgreSQL и RabbitMQ
+сервисом Notification Delivery и никогда не передавайте транспортные учётные
+данные контейнерам доменных сервисов.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -55,6 +56,6 @@ pnpm run test:integration
 docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-notification-delivery .
 ```
 
-Integration tests require disposable local PostgreSQL, RabbitMQ, and SMTP
-fixtures. Readiness proves the database, RabbitMQ connection, consumers, and
-Outbox publisher, not external provider delivery.
+Интеграционные тесты требуют одноразовых локальных окружений PostgreSQL,
+RabbitMQ и SMTP. Readiness подтверждает базу данных, соединение RabbitMQ,
+consumers и Outbox publisher, но не доставку внешним провайдером.

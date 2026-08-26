@@ -1,39 +1,40 @@
-# Platform service
+# Сервис Platform
 
-Platform owns editable site settings, legal pages, home-page content, raw
-home-page code, the related admin-audit events, and the PostgreSQL `platform`
-schema. It has no steady-state Core database dependency.
+Platform владеет редактируемыми настройками сайта, юридическими страницами,
+контентом и исходным кодом главной страницы, связанными событиями аудита
+администратора и схемой PostgreSQL `platform`. В штатном режиме сервис не
+зависит от базы данных Core.
 
-## Process roles
+## Роли процессов
 
-| `PLATFORM_PROCESS_ROLE` | Default port | Responsibility                                  |
-| ----------------------- | -----------: | ----------------------------------------------- |
-| `api`                   |         5000 | Public/admin content API and private monitoring |
-| `outbox-publisher`      |         5001 | Confirmed/mandatory Outbox publication          |
+| `PLATFORM_PROCESS_ROLE` | Порт по умолчанию | Ответственность                                    |
+| ----------------------- | ----------------: | -------------------------------------------------- |
+| `api`                   |              5000 | Публичный/admin API контента и закрытый мониторинг |
+| `outbox-publisher`      |              5001 | Публикация Outbox с confirms и mandatory           |
 
-Every role exposes `GET /health/live` and `GET /health/ready`; only `api`
-registers business controllers.
+Каждая роль предоставляет `GET /health/live` и `GET /health/ready`;
+бизнес-контроллеры регистрирует только `api`.
 
-Public Gateway routes are:
+Публичные маршруты Gateway:
 
 - `/api/v1/site-settings`
 - `/api/v1/legal-pages/**`
-- `/api/v1/home-page-content` and `/api/v1/home-page-content/raw-code`
+- `/api/v1/home-page-content` и `/api/v1/home-page-content/raw-code`
 
-Platform authorizes users through Identity introspection with
-`IDENTITY_PLATFORM_TOKEN`. Operations reads
-`GET /internal/v1/platform/messaging/overview` over loopback with
-`x-winwidget-service: operations` and `PLATFORM_OPERATIONS_TOKEN`.
+Platform авторизует пользователей через introspection Identity с
+`IDENTITY_PLATFORM_TOKEN`. Operations читает
+`GET /internal/v1/platform/messaging/overview` через loopback с
+`x-winwidget-service: operations` и `PLATFORM_OPERATIONS_TOKEN`.
 
-All content changes and admin actions that require publication are written to
-the Platform Outbox in the same PostgreSQL transaction. Only the
-`outbox-publisher` role connects to RabbitMQ.
+Все изменения контента и действия администратора, требующие публикации,
+записываются в Platform Outbox в той же транзакции PostgreSQL. К RabbitMQ
+подключается только роль `outbox-publisher`.
 
-## Configuration and deployment
+## Настройка и развёртывание
 
-Copy `.env.example` to an ignored `.env.production` in this service directory
-on the VPS. Replace every placeholder with a scoped value. Do not add retired
-Core URLs or tokens to the steady runtime.
+Скопируйте `.env.example` в игнорируемый `.env.production` в каталоге сервиса
+на VPS. Замените каждый шаблон значением с ограниченной областью действия. Не
+добавляйте выведенные из эксплуатации URL или токены Core в штатный runtime.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -47,5 +48,5 @@ pnpm run build
 docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-platform .
 ```
 
-Start `api` and `outbox-publisher` from the same revision and verify both
-readiness endpoints before enabling the Platform Gateway routes.
+Запустите `api` и `outbox-publisher` из одной ревизии и проверьте readiness
+обеих ролей до включения маршрутов Platform в Gateway.

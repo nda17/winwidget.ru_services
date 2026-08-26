@@ -1,39 +1,41 @@
 # API Gateway
 
-Public HTTP entry point for WinWidget. The Gateway does not own PostgreSQL or
-RabbitMQ state: it validates access JWTs against Identity JWKS and proxies each
-explicit `/api/v1` prefix to its domain service.
+Публичная HTTP-точка входа WinWidget. Gateway не владеет состоянием PostgreSQL
+или RabbitMQ: он проверяет access JWT по Identity JWKS и проксирует каждый
+явно заданный префикс `/api/v1` в соответствующий доменный сервис.
 
-## Runtime contract
+## Контракт выполнения
 
-- Listens on `GATEWAY_LISTEN_HOST:GATEWAY_PORT` (`127.0.0.1:4100` by default).
-- `GATEWAY_ROUTES_JSON` is required and contains exact route objects with
-  `id`, `pathPrefix`, `upstreamUrl`, `authPolicy`, and `timeoutMs`.
-- Longest matching prefix wins. `API_UPSTREAM_URL` is rejected; there is no
-  catch-all fallback.
-- Bearer validation fails closed when JWKS cannot be initialized or refreshed
-  within the configured stale window.
-- `/api/v1/internal/**` is never exposed through the public Gateway.
+- Слушает `GATEWAY_LISTEN_HOST:GATEWAY_PORT` (по умолчанию
+  `127.0.0.1:4100`).
+- Обязательная переменная `GATEWAY_ROUTES_JSON` содержит точные объекты
+  маршрутов с полями `id`, `pathPrefix`, `upstreamUrl`, `authPolicy` и
+  `timeoutMs`.
+- Побеждает самый длинный совпавший префикс. `API_UPSTREAM_URL` отклоняется;
+  универсального резервного маршрута нет.
+- Проверка Bearer-токена работает по принципу fail-closed, если JWKS нельзя
+  инициализировать или обновить в пределах настроенного окна устаревания.
+- `/api/v1/internal/**` никогда не публикуется через публичный Gateway.
 
-The Operations control plane owns these additive public prefixes and they must
-target `http://127.0.0.1:5200`:
+Плоскость управления Operations владеет следующими дополнительными публичными
+префиксами, которые должны вести на `http://127.0.0.1:5200`:
 
 - `/api/v1/admin-alerts`
 - `/api/v1/messaging/admin`
 - `/api/v1/telegram-bot/admin`
 - `/api/v1/dev-tools/database-restores`
 
-Gateway health is served directly at `GET /health/live`, `GET /health/ready`,
-and `GET /health` (readiness alias).
+Gateway напрямую обслуживает проверки `GET /health/live`,
+`GET /health/ready` и `GET /health` (алиас readiness).
 
-## Configuration and deployment
+## Настройка и развёртывание
 
-Copy `.env.example` to `.env.production` in the Gateway directory on the VPS.
-The production file stays next to this service, is ignored by Git, and must be
-supplied to only the Gateway container. Replace the sample route array with the
-complete production routing table; do not add a `/api/v1` Core catch-all.
+Скопируйте `.env.example` в `.env.production` в каталоге Gateway на VPS.
+Production-файл хранится рядом с сервисом, игнорируется Git и передаётся только
+контейнеру Gateway. Замените пример массива маршрутов полной production-таблицей
+маршрутизации; не добавляйте универсальный Core-маршрут `/api/v1`.
 
-Build and verify from this directory:
+Сборка и проверка из этого каталога:
 
 ```bash
 pnpm install --frozen-lockfile
@@ -43,5 +45,6 @@ pnpm run build
 docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-api-gateway .
 ```
 
-After deployment, verify both health endpoints and at least one route per
-upstream. A 200 from Gateway health alone does not prove any upstream is ready.
+После развёртывания проверьте обе health-точки и хотя бы один маршрут для
+каждого upstream. Ответ 200 от health Gateway сам по себе не доказывает
+готовность какого-либо upstream.

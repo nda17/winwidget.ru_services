@@ -1,53 +1,55 @@
-# Support service
+# Сервис Support
 
-Support owns the operator chat, Telegram Support-bot webhook, routing settings,
-delivery retry/failure state, and the PostgreSQL `support` schema. It is
-independent from Core and has no dual-read or legacy write path.
+Support владеет чатом с оператором, webhook бота Telegram Support, настройками
+маршрутизации, состоянием retry/ошибок доставки и схемой PostgreSQL `support`.
+Сервис не зависит от Core и не имеет путей dual-read или устаревшей записи.
 
-## Process roles
+## Роли процессов
 
-| `SUPPORT_PROCESS_ROLE` | Default port | Responsibility                                           |
-| ---------------------- | -----------: | -------------------------------------------------------- |
-| `api`                  |         5100 | Webhook admission, admin settings, and public/admin HTTP |
-| `worker`               |         5101 | Idempotent webhook processing and Telegram delivery      |
-| `outbox-publisher`     |         5102 | Confirmed/mandatory Outbox publication                   |
+| `SUPPORT_PROCESS_ROLE` | Порт по умолчанию | Ответственность                                       |
+| ---------------------- | ----------------: | ----------------------------------------------------- |
+| `api`                  |              5100 | Приём webhook, admin-настройки и публичный/admin HTTP |
+| `worker`               |              5101 | Идемпотентная обработка webhook и доставка в Telegram |
+| `outbox-publisher`     |              5102 | Публикация Outbox с confirms и mandatory              |
 
-Every role exposes `GET /health/live` and `GET /health/ready`. The API owns:
+Каждая роль предоставляет `GET /health/live` и `GET /health/ready`. API
+владеет следующими маршрутами:
 
 - `POST /api/v1/telegram-bot/support-webhook`
 - `/api/v1/support/admin/webhook/**`
 - `/api/v1/support/admin/routing-settings`
 - `/api/v1/support/admin/messaging/failures/**`
 
-Operations reads `GET /internal/v1/support/messaging/overview` over loopback
-with `x-winwidget-service: operations` and `SUPPORT_OPERATIONS_TOKEN`. Support
-authorizes admin users through Identity with `IDENTITY_SUPPORT_TOKEN`.
+Operations читает `GET /internal/v1/support/messaging/overview` через loopback
+с `x-winwidget-service: operations` и `SUPPORT_OPERATIONS_TOKEN`. Support
+авторизует пользователей admin через Identity с `IDENTITY_SUPPORT_TOKEN`.
 
-## Telegram and RabbitMQ
+## Telegram и RabbitMQ
 
-Production Telegram calls use the existing public TLS reverse proxy:
+Production-вызовы Telegram используют существующий публичный TLS reverse proxy:
 
 ```dotenv
 TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api
 TELEGRAM_API_PROXY_IP=185.184.122.62
 ```
 
-The API admits a webhook only after checking Telegram's secret header and
-durably storing the raw update plus its Outbox event. The worker claims
-PostgreSQL leases before external calls and acks RabbitMQ only after durable
-completion. Manual retry/close remains transactional.
+API принимает webhook только после проверки секретного заголовка Telegram и
+надёжного сохранения исходного update вместе с его событием Outbox. Worker
+захватывает lease PostgreSQL до внешних вызовов и выполняет ack RabbitMQ только
+после надёжно сохранённого завершения. Ручные retry/close остаются
+транзакционными.
 
-The `outbox-publisher` container must not receive Telegram, webhook, proxy, or
-Identity credentials; Compose should pass those only to `api`/`worker` as
-required. For RabbitMQ roles, the connection name must be exactly
+Контейнер `outbox-publisher` не должен получать учётные данные Telegram,
+webhook, proxy или Identity; Compose должен передавать их только `api`/`worker`
+по необходимости. Для ролей RabbitMQ имя соединения должно быть строго
 `winwidget-support-<role>`.
 
-## Configuration and deployment
+## Настройка и развёртывание
 
-Keep `.env.example` tracked and `.env.production` ignored beside this service
-on the VPS. Replace all placeholders with distinct scoped secrets. Apply the
-Support migration with a separate migration role before starting runtime
-containers.
+Храните отслеживаемый `.env.example` и игнорируемый `.env.production` рядом с
+сервисом на VPS. Замените все шаблоны отдельными секретами с ограниченной
+областью действия. До запуска runtime-контейнеров примените миграцию Support
+отдельной ролью миграций.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -61,6 +63,6 @@ pnpm run build
 docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-support .
 ```
 
-After deployment verify all role readiness and webhook status. A controlled
-operator-chat message should use an explicit test target; do not send an
-unsolicited production message.
+После развёртывания проверьте readiness всех ролей и состояние webhook. Для
+контрольного сообщения чата с оператором используйте явно заданную тестовую
+цель; не отправляйте незапрошенные production-сообщения.

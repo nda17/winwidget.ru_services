@@ -1,42 +1,42 @@
-# Campaigns service
+# Сервис Campaigns
 
-Campaigns owns admin-created bulk campaigns, immutable audience snapshots,
-per-recipient delivery state, retry state, and the PostgreSQL `campaigns`
-schema. It publishes email/Telegram delivery requests through its
-transactional Outbox; Notification Delivery performs the external sends.
+Campaigns владеет создаваемыми администраторами массовыми кампаниями,
+неизменяемыми снимками аудиторий, состоянием доставки каждому получателю,
+состоянием повторных попыток и схемой PostgreSQL `campaigns`. Запросы на
+доставку email/Telegram публикуются через transactional Outbox; внешнюю
+отправку выполняет Notification Delivery.
 
-## Process roles
+## Роли процессов
 
-`CAMPAIGNS_PROCESS_ROLE` accepts `all`, `api`, `worker`, or `publisher`.
-`all` is convenient for a single process; production can split the same image
-into independently restartable roles. Containers listen on
-`CAMPAIGNS_HEALTH_PORT` (`4500` by default), and all expose:
+`CAMPAIGNS_PROCESS_ROLE` принимает `all`, `api`, `worker` или `publisher`.
+`all` удобен для одного процесса; в production один образ можно разделить на
+независимо перезапускаемые роли. Контейнеры слушают
+`CAMPAIGNS_HEALTH_PORT` (по умолчанию `4500`) и предоставляют:
 
 - `GET /health/live`
 - `GET /health/ready`
 
-The public ADMIN contract is `/api/v1/admin/campaigns/**`. Operations reads
-`GET /internal/v1/campaigns/messaging/overview` with
-`x-winwidget-service: operations` and `CAMPAIGNS_OPERATIONS_TOKEN` over
-loopback only.
+Публичный ADMIN-контракт: `/api/v1/admin/campaigns/**`. Operations читает
+`GET /internal/v1/campaigns/messaging/overview` только через loopback, передавая
+`x-winwidget-service: operations` и `CAMPAIGNS_OPERATIONS_TOKEN`.
 
-## Dependencies
+## Зависимости
 
-- Identity: bearer introspection and eligible-contact snapshots through
+- Identity: introspection Bearer-токена и снимки подходящих контактов через
   `IDENTITY_INTERNAL_BASE_URL` / `IDENTITY_CAMPAIGNS_TOKEN`.
-- Billing: active-subscriber audience snapshots through
+- Billing: снимки аудитории активных подписчиков через
   `BILLING_INTERNAL_BASE_URL` / `BILLING_CAMPAIGNS_TOKEN`.
-- RabbitMQ: worker consumers and confirmed Outbox publication. Independent
-  retry and dead-letter queues are retained per consumer.
+- RabbitMQ: consumers worker и подтверждаемая публикация Outbox. Для каждого
+  consumer сохраняются независимые очереди retry и dead-letter.
 
-Campaigns does not own SMTP or Telegram credentials. Rate variables throttle
-delivery-request publication, not direct provider calls.
+Campaigns не владеет учётными данными SMTP или Telegram. Переменные частоты
+ограничивают публикацию запросов доставки, а не прямые вызовы провайдера.
 
-## Configuration and deployment
+## Настройка и развёртывание
 
-Keep the tracked `.env.example` beside an untracked `.env.production` in the
-Campaigns directory on the VPS. Replace all `change_me` values and scope each
-credential to this service.
+В каталоге Campaigns на VPS храните отслеживаемый `.env.example` рядом с
+неотслеживаемым `.env.production`. Замените все значения `change_me` и
+ограничьте область действия каждых учётных данных этим сервисом.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -51,6 +51,6 @@ pnpm run test:integration
 docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-campaigns .
 ```
 
-Integration tests require a disposable local PostgreSQL database and RabbitMQ
-vhost plus `CAMPAIGNS_INTEGRATION_ALLOW_MUTATION=true`; never point them at
-production.
+Интеграционные тесты требуют одноразовой локальной базы PostgreSQL, RabbitMQ
+vhost и `CAMPAIGNS_INTEGRATION_ALLOW_MUTATION=true`; никогда не направляйте их
+на production.

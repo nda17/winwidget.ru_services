@@ -1,62 +1,62 @@
-# Widgets service
+# Сервис Widgets
 
-Widgets owns widget definitions, draft/published versions, leads, telemetry,
-delivery failures, Identity/Billing projections, button images, and the
-PostgreSQL `widgets` schema. Widget browser assets are also built and packaged
-inside this service from `widgets-src/`.
+Widgets владеет определениями виджетов, черновыми и опубликованными версиями,
+заявками, телеметрией, ошибками доставки, проекциями Identity/Billing,
+изображениями кнопок и схемой PostgreSQL `widgets`. Браузерные assets виджетов
+также собираются из `widgets-src/` и упаковываются внутри этого сервиса.
 
-## Process roles
+## Роли процессов
 
-`WIDGETS_PROCESS_ROLE` accepts `all`, `api`, `worker`, or `publisher`:
+`WIDGETS_PROCESS_ROLE` принимает `all`, `api`, `worker` или `publisher`:
 
-- `api` serves HTTP and compiled assets on port `4700`.
-- `worker` consumes Identity, entitlement, webhook, Bitrix24, and amoCRM
-  queues with independent retry/DLQ state.
-- `publisher` publishes the transactional Outbox with confirms and mandatory
-  returns.
-- `all` runs all responsibilities in one process.
+- `api` обслуживает HTTP и собранные assets на порту `4700`.
+- `worker` получает сообщения из очередей Identity, entitlement, webhook,
+  Bitrix24 и amoCRM с независимым состоянием retry/DLQ.
+- `publisher` публикует transactional Outbox с confirms и mandatory returns.
+- `all` запускает все обязанности в одном процессе.
 
-Every role exposes `GET /health/live` and `GET /health/ready`. Containers use
-the same internal port because each has its own network namespace; only the API
-should be exposed to Gateway/Nginx.
+Каждая роль предоставляет `GET /health/live` и `GET /health/ready`.
+Контейнеры используют один внутренний порт, поскольку у каждого своё сетевое
+пространство имён; только API должен публиковаться через Gateway/Nginx.
 
-## HTTP and internal contracts
+## HTTP- и внутренние контракты
 
-Public and authenticated routes under `/api/v1` include:
+Публичные и аутентифицированные маршруты под `/api/v1` включают:
 
-- widget collections (`/widgets`, `/quizzes`, `/callbacks`,
+- коллекции виджетов (`/widgets`, `/quizzes`, `/callbacks`,
   `/countdown-timers`, `/stop-offers`, `/online-consultants`, `/calculators`)
-- `/widget-settings/**`, `/widgets/admin/**`, and delivery-failure controls
-- public widget configuration/lead endpoints and `/widget-events/**`
+- `/widget-settings/**`, `/widgets/admin/**` и управление ошибками доставки
+- публичные endpoints конфигурации/заявок виджетов и `/widget-events/**`
 
-Compiled assets are served at `/widgets/**`. Identity calls
-`/internal/v1/identity/widgets/admin-owner-overview` with
-`WIDGETS_IDENTITY_TOKEN`. Operations calls
-`/api/v1/internal/v1/operations/widgets/**` with
-`WIDGETS_OPERATIONS_TOKEN` for alerts, messaging overview, and failure
-controls. Widgets calls Identity with `IDENTITY_WIDGETS_TOKEN`.
+Собранные assets обслуживаются по `/widgets/**`. Identity вызывает
+`/internal/v1/identity/widgets/admin-owner-overview` с
+`WIDGETS_IDENTITY_TOKEN`. Operations вызывает
+`/api/v1/internal/v1/operations/widgets/**` с
+`WIDGETS_OPERATIONS_TOKEN` для alerts, обзора сообщений и управления ошибками.
+Widgets вызывает Identity с `IDENTITY_WIDGETS_TOKEN`.
 
-The older generic internal surface still uses `WIDGETS_INTERNAL_TOKEN`; do not
-reuse that credential for Identity or Operations.
+Более старый общий внутренний интерфейс по-прежнему использует
+`WIDGETS_INTERNAL_TOKEN`; не используйте эти учётные данные повторно для
+Identity или Operations.
 
-## Assets and storage
+## Ресурсы и хранилище
 
 ```bash
 pnpm run build:widgets
 pnpm run build:widgets:check
 ```
 
-These commands compile `widgets-src/` into `public/widgets/`; generated output
-is ignored by Git and copied into the image. In production, button images use
-the configured S3 bucket. `WIDGETS_UPLOADS_DIR` is a local-development fallback
-only.
+Эти команды компилируют `widgets-src/` в `public/widgets/`; сгенерированный
+результат игнорируется Git и копируется в образ. В production изображения
+кнопок используют настроенный S3 bucket. `WIDGETS_UPLOADS_DIR` предназначен
+только для резервного варианта локальной разработки.
 
-## Configuration and deployment
+## Настройка и развёртывание
 
-Copy `.env.example` to the ignored `.env.production` beside this service on
-the VPS. Replace all placeholders and pass only the variables required by each
-role. The entitlement staleness bound is mandatory and must remain within the
-validated range.
+Скопируйте `.env.example` в игнорируемый `.env.production` рядом с сервисом на
+VPS. Замените все шаблоны и передавайте только переменные, необходимые каждой
+роли. Граница устаревания entitlement обязательна и должна оставаться в
+проверяемом диапазоне.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -70,7 +70,7 @@ pnpm run build
 pnpm run test:integration
 ```
 
-The Widgets Dockerfile requires the repository root as build context:
+Для Dockerfile Widgets корень репозитория должен быть build context:
 
 ```bash
 docker build -f apps/widgets/Dockerfile \

@@ -1,21 +1,22 @@
-# WinWidget Services
+# Сервисы WinWidget
 
-Backend WinWidget состоит только из независимых сервисов. Общий NestJS API,
-общая Core PostgreSQL, Core workers/publishers и Gateway fallback удалены.
+Бэкенд WinWidget состоит только из независимых сервисов. Общий NestJS API,
+общая PostgreSQL Core, workers/publishers Core и резервный маршрут Gateway
+удалены.
 Обратной совместимости с монолитом нет.
 
-Это monorepo исходного кода сервисов. Каждый каталог в `apps/` имеет
+Это монорепозиторий исходного кода сервисов. Каждый каталог в `apps/` имеет
 собственные зависимости, lockfile, Dockerfile, `.env.example`, README и
-Prisma schema/migrations, если сервис использует PostgreSQL.
+схему/миграции Prisma, если сервис использует PostgreSQL.
 
 ## Сервисы
 
 | Каталог                      | Ответственность                                                                 | Процессы и порты                                           |
 | ---------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `apps/api-gateway`           | Публичная точка входа `/api/v1/*`, JWT/JWKS, CORS и proxy                       | Gateway `4100`                                             |
+| `apps/api-gateway`           | Публичная точка входа `/api/v1/*`, JWT/JWKS, CORS и проксирование               | Gateway `4100`                                             |
 | `apps/identity`              | Пользователи, auth, OAuth, Telegram auth, профиль и S3-аватары                  | API `4900`, worker `4901`, outbox `4902`                   |
 | `apps/billing`               | Тарифы, подписки, платежи и партнёрская программа                               | API `4800`, scheduler `4801`, worker `4802`, outbox `4803` |
-| `apps/widgets`               | Все виджеты, заявки, настройки, интеграции и runtime assets                     | API/worker/outbox `4700`                                   |
+| `apps/widgets`               | Все виджеты, заявки, настройки, интеграции и runtime-assets                     | API/worker/outbox `4700`                                   |
 | `apps/campaigns`             | Кампании, аудитории, email/Telegram-рассылки                                    | API/worker/outbox `4500`                                   |
 | `apps/reporting`             | Аналитические проекции, статистика и Daily Summary                              | API/worker/scheduler/outbox `4600`                         |
 | `apps/platform`              | Контент главной, юридические страницы и настройки сайта                         | API `5000`, outbox `5001`                                  |
@@ -23,9 +24,10 @@ Prisma schema/migrations, если сервис использует PostgreSQL.
 | `apps/notification-delivery` | Фактическая доставка email и Telegram-сообщений                                 | worker `4401`                                              |
 | `apps/operations`            | Notes, Admin Event Log, очереди/DLQ, Telegram settings, backup/restore и alerts | API `5200`, worker `5201`, outbox `5202`, restore `5203`   |
 
-Gateway использует exact-prefix manifest. Общего `/api/v1` catch-all нет:
+Gateway использует манифест точных префиксов. Общего универсального маршрута
+`/api/v1` нет:
 каждый публичный маршрут имеет конкретного владельца. Внутренние endpoints
-доступны только по loopback и защищены отдельными service-to-service токенами.
+доступны только по loopback и защищены отдельными межсервисными токенами.
 
 ## Структура
 
@@ -39,10 +41,10 @@ winwidget.ru_services/
     └── workflows/ci.yml                   # apps-only CI matrix
 ```
 
-Production lifecycle, Nginx/Telegram relay, SSH transport и runbooks находятся
-в отдельном репозитории `winwidget.ru_infra`.
+Жизненный цикл production, Nginx/Telegram relay, SSH-транспорт и инструкции
+находятся в отдельном репозитории `winwidget.ru_infra`.
 
-## Env-контракт
+## Контракт переменных окружения
 
 У каждого сервиса есть собственные файлы:
 
@@ -51,12 +53,12 @@ apps/<service>/.env.example     # tracked, без секретов
 apps/<service>/.env.production  # ignored, root:root 0600 на VPS
 ```
 
-Canonical production env синхронизируется побайтово с защищённой локальной
-копией. Infra controller атомарно материализует из него service-owned
+Канонический production env синхронизируется побайтово с защищённой локальной
+копией. Infra controller атомарно материализует из него принадлежащие сервисам
 `.env.production`; контейнеры получают только явный минимальный набор через
 Compose `environment`. S3-ключи аватаров получает только Identity, S3-ключи
-widget media — только Widgets. Runtime, migration и backup PostgreSQL roles
-разделены.
+медиафайлов виджетов — только Widgets. Роли PostgreSQL для runtime, миграций и
+резервного копирования разделены.
 
 ## Локальные проверки
 
@@ -86,9 +88,9 @@ build` для всех десяти приложений.
 
 ## Данные и RabbitMQ
 
-Каждый stateful service владеет собственной PostgreSQL database, schema,
-migrations, ролями и external Docker volume. Межсервисных SQL joins и доступа
-к чужим схемам нет.
+Каждый сервис с состоянием владеет собственной базой и схемой PostgreSQL,
+миграциями, ролями и внешним Docker volume. Межсервисных SQL joins и доступа к
+чужим схемам нет.
 
 Зависимое от PostgreSQL событие создаётся через transactional Outbox в той же
 транзакции. Publisher использует confirms и mandatory return. Consumers
@@ -96,24 +98,25 @@ migrations, ролями и external Docker volume. Межсервисных SQL
 идемпотентны по `eventId + consumer`. Retry/DLQ принадлежат конкретному
 consumer.
 
-Operations scheduler создаёт durable jobs с уникальным ключом периода и CAS
-lease. `pg_dump` выполняет только Operations worker, restore — отдельный
-Operations restore worker с изолированным RabbitMQ user.
+Scheduler Operations создаёт надёжные задания с уникальным ключом периода и
+CAS lease. `pg_dump` выполняет только worker Operations, восстановление —
+отдельный restore worker Operations с изолированным пользователем RabbitMQ.
 
-## Production
+## Развёртывание в production
 
-Release выполняется только из exact `origin/prod` commit по immutable
-40-символьному SHA и под единым deploy lock. Обязательны byte-identical env
-hash, OCI revision labels, migrations всех service databases, точные RabbitMQ
-permissions/topology, direct readiness, Gateway/public smoke и revision
-каждого контейнера.
+Релиз выполняется только из точного commit `origin/prod` по неизменяемому
+40-символьному SHA и под единым deploy lock. Обязательны побайтово идентичный
+hash env, метки OCI revision, миграции баз всех сервисов, точные
+permissions/topology RabbitMQ, прямые проверки readiness, smoke-проверки
+Gateway/публичного API и revision каждого контейнера.
 
-Одноразовый terminal cutover импортирует Notes, Admin Event Log и
-Telegram/Reporting control plane в Operations до запуска publishers. Только
-после green service/Gateway gates удаляются заранее проверенные пустые legacy
-RabbitMQ queues/users, Core containers, Core database/volume и restore staging.
-Rollback или автоматического восстановления монолита нет.
+Одноразовый завершающий cutover импортирует Notes, Admin Event Log и плоскость
+управления Telegram/Reporting в Operations до запуска publishers. Только после
+успешных проверок сервисов/Gateway удаляются заранее проверенные пустые
+устаревшие очереди/пользователи RabbitMQ, контейнеры Core, база/volume Core и
+временное хранилище restore. Отката или автоматического восстановления
+монолита нет.
 
-Production workflow и подробный runbook находятся в
-`winwidget.ru_infra`. Секреты, private keys и database password files в Git
+Workflow для production и подробная инструкция находятся в
+`winwidget.ru_infra`. Секреты, закрытые ключи и файлы паролей баз данных в Git
 не попадают. Контракт каждого приложения описан в `apps/<service>/README.md`.
