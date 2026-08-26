@@ -411,7 +411,7 @@ async function startService({ smtpPort, telegramPort, healthPort }) {
 		MODE: 'test',
 		APP_REVISION: 'notification-delivery-integration',
 		NOTIFICATION_DELIVERY_DATABASE_URL: databaseUrl,
-		NOTIFICATION_DELIVERY_INTERNAL_TOKEN: INTERNAL_TOKEN,
+		NOTIFICATION_DELIVERY_OPERATIONS_TOKEN: INTERNAL_TOKEN,
 		NOTIFICATION_DELIVERY_LISTEN_HOST: '127.0.0.1',
 		NOTIFICATION_DELIVERY_HEALTH_PORT: String(healthPort),
 		NOTIFICATION_DELIVERY_PREFETCH: '5',
@@ -441,7 +441,7 @@ async function startService({ smtpPort, telegramPort, healthPort }) {
 			'MODE',
 			'APP_REVISION',
 			'NOTIFICATION_DELIVERY_DATABASE_URL',
-			'NOTIFICATION_DELIVERY_INTERNAL_TOKEN',
+			'NOTIFICATION_DELIVERY_OPERATIONS_TOKEN',
 			'NOTIFICATION_DELIVERY_LISTEN_HOST',
 			'NOTIFICATION_DELIVERY_HEALTH_PORT',
 			'NOTIFICATION_DELIVERY_PREFETCH',
@@ -534,7 +534,10 @@ async function requestJson(baseUrl, route, options = {}) {
 		headers: {
 			...(options.body ? { 'Content-Type': 'application/json' } : {}),
 			...(options.token
-				? { 'x-winwidget-internal-token': options.token }
+				? {
+						'x-winwidget-internal-token': options.token,
+						'x-winwidget-service': 'operations'
+					}
 				: {}),
 			...(options.headers || {})
 		}
@@ -687,7 +690,7 @@ async function main() {
 		baseUrl,
 		'/internal/notification-delivery/overview'
 	);
-	if (unauthorized.status !== 401) {
+	if (unauthorized.status !== 403) {
 		throw new Error(
 			`control API without token returned ${unauthorized.status}`
 		);

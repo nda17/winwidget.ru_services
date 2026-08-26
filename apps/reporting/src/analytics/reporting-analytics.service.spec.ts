@@ -1,5 +1,5 @@
 import { ReportingAnalyticsService } from './reporting-analytics.service';
-import { normalizeLegacyPaymentAmount } from '../projections/projection.service';
+import { normalizePaymentAmount } from '../projections/projection.service';
 
 const ZERO_USERS = {
 	total: 0n,
@@ -352,13 +352,13 @@ describe('ReportingAnalyticsService DB aggregate goldens', () => {
 	it('keeps legacy amount semantics for invalid and comma-decimal source values', () => {
 		expect(
 			['10', '2,5', 'invalid'].reduce(
-				(sum, value) => sum + (normalizeLegacyPaymentAmount(value) || 0),
+				(sum, value) => sum + (normalizePaymentAmount(value) || 0),
 				0
 			)
 		).toBe(12.5);
-		expect(normalizeLegacyPaymentAmount(' 1 234,50 ')).toBeNull();
-		expect(normalizeLegacyPaymentAmount('001.50')).toBe(1.5);
-		expect(normalizeLegacyPaymentAmount('1e3')).toBe(1000);
+		expect(normalizePaymentAmount(' 1 234,50 ')).toBeNull();
+		expect(normalizePaymentAmount('001.50')).toBe(1.5);
+		expect(normalizePaymentAmount('1e3')).toBe(1000);
 	});
 
 	it('returns aggregate overview and preserves the legacy duplicated final registration month', async () => {

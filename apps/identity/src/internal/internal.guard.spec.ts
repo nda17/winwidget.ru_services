@@ -65,13 +65,15 @@ describe('IdentityInternalGuard', () => {
 
 	it('rejects a valid token from another service scope with 403', () => {
 		expect(() =>
-			guard(['core']).canActivate(context('core', credential('billing')))
+			guard(['operations']).canActivate(
+				context('operations', credential('billing'))
+			)
 		).toThrow(ForbiddenException);
 	});
 
 	it('does not let the Platform credential escape its endpoint scope', () => {
 		expect(() =>
-			guard(['core']).canActivate(
+			guard(['operations']).canActivate(
 				context('platform', credential('platform'))
 			)
 		).toThrow(ForbiddenException);
@@ -79,38 +81,39 @@ describe('IdentityInternalGuard', () => {
 
 	it('does not let the Support credential escape its endpoint scope', () => {
 		expect(() =>
-			guard(['core']).canActivate(
+			guard(['operations']).canActivate(
 				context('support', credential('support'))
 			)
 		).toThrow(ForbiddenException);
 	});
 
-	it('does not let the Operations credential escape its endpoint scope', () => {
+	it('does not let the Reporting credential escape its endpoint scope', () => {
 		expect(() =>
-			guard(['core']).canActivate(
-				context('operations', credential('operations'))
+			guard(['operations']).canActivate(
+				context('reporting', credential('reporting'))
 			)
 		).toThrow(ForbiddenException);
 	});
 
 	it('rejects non-loopback callers before token comparison', () => {
 		expect(() =>
-			guard(['core']).canActivate(
-				context('core', credential('core'), '10.10.0.25')
+			guard(['operations']).canActivate(
+				context('operations', credential('operations'), '10.10.0.25')
 			)
 		).toThrow('Invalid internal credentials');
 	});
 
 	it('rejects exact CI placeholders and pairwise-equal credentials at startup', () => {
 		const placeholder = environment();
-		placeholder.IDENTITY_CORE_TOKEN =
-			'ci_identity_core_token_at_least_32_chars';
+		placeholder.IDENTITY_OPERATIONS_TOKEN =
+			'ci_identity_operations_token_at_least_32_chars';
 		expect(
 			() => new IdentityInternalGuard(config(placeholder), new Reflector())
 		).toThrow('non-placeholder secret');
 
 		const duplicate = environment();
-		duplicate.IDENTITY_PLATFORM_TOKEN = duplicate.IDENTITY_CORE_TOKEN;
+		duplicate.IDENTITY_PLATFORM_TOKEN =
+			duplicate.IDENTITY_OPERATIONS_TOKEN;
 		expect(
 			() => new IdentityInternalGuard(config(duplicate), new Reflector())
 		).toThrow('pairwise distinct');

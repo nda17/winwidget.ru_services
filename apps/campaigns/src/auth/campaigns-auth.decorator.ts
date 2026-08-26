@@ -1,5 +1,5 @@
 import { SetMetadata } from '@nestjs/common';
-import type { IntrospectedActor } from '../internal/core-internal.client';
+import type { IntrospectedActor } from '../internal/campaigns-dependencies.client';
 
 export const CAMPAIGNS_REQUIRED_ROLE = 'campaigns-required-role';
 export type CampaignsRole = IntrospectedActor['roles'][number];

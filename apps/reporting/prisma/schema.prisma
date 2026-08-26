@@ -201,25 +201,18 @@ model ReportingConsumerFailure {
 }
 
 model ReportingSettings {
-  id                        String         @id @default("daily-summary")
-  owner                     ReportingOwner @default(CORE_SHADOW)
-  enabled                   Boolean        @default(false)
-  destinationChatId         String?        @map("destination_chat_id")
-  messageThreadId           Int?           @map("message_thread_id")
-  coreOperationalAlertsDestinationChatId String? @map("core_operational_alerts_destination_chat_id")
-  coreOperationalAlertsThreadId Int?       @map("core_operational_alerts_thread_id")
-  scheduleTime              String         @default("01:50") @map("schedule_time")
-  // Local Reporting CAS version. Core only fences backup-policy conflicts and
-  // is never read as a schedule source after the ownership switch.
-  scheduleGeneration          BigInt       @default(0) @map("schedule_authority_generation")
-  schedulePolicyChangeId      String?      @map("schedule_policy_change_id") @db.Uuid
+  id                         String    @id @default("daily-summary")
+  enabled                    Boolean   @default(false)
+  destinationChatId          String?   @map("destination_chat_id")
+  messageThreadId            Int?      @map("message_thread_id")
+  operationalAlertsThreadId  Int?      @map("operational_alerts_thread_id")
+  operationalAlertsChangedAt DateTime? @map("operational_alerts_changed_at")
+  scheduleTime               String    @default("01:50") @map("schedule_time")
+  // Local Reporting CAS version. Operations only fences backup-policy conflicts
+  // and is never read as a schedule source.
+  scheduleGeneration          BigInt   @default(0) @map("schedule_authority_generation")
+  schedulePolicyChangeId      String?  @map("schedule_policy_change_id") @db.Uuid
   timezone                  String         @default("Europe/Moscow")
-  sourceAggregateVersion    Decimal?       @map("source_aggregate_version") @db.Decimal(65, 0)
-  sourceSequence            Decimal?       @map("source_sequence") @db.Decimal(65, 0)
-  stateHash                 String?        @map("state_hash") @db.Char(64)
-  coreOperationalRoutingSourceAggregateVersion Decimal? @map("core_operational_routing_source_aggregate_version") @db.Decimal(65, 0)
-  coreOperationalRoutingSourceSequence Decimal? @map("core_operational_routing_source_sequence") @db.Decimal(65, 0)
-  coreOperationalRoutingStateHash String? @map("core_operational_routing_state_hash") @db.Char(64)
   lastSuccessfulPeriodStart DateTime?      @map("last_successful_period_start")
   lastSuccessfulAt          DateTime?      @map("last_successful_at")
   lastFailedPeriodStart     DateTime?      @map("last_failed_period_start")
@@ -308,33 +301,6 @@ model ReportingHeartbeat {
   @@schema("reporting")
 }
 
-model ReportingBackfillRun {
-  id             String                  @id @default(uuid()) @db.Uuid
-  snapshotId     String                  @unique(map: "reporting_backfill_runs_snapshot_unique") @map("snapshot_id") @db.Uuid
-  status         ReportingBackfillStatus @default(RUNNING)
-  watermarks     Json
-  counts         Json                    @default("{}")
-  recordCount    Int                     @default(0) @map("record_count")
-  appliedCount   Int                     @default(0) @map("applied_count")
-  duplicateCount Int                     @default(0) @map("duplicate_count")
-  staleCount     Int                     @default(0) @map("stale_count")
-  sha256         String?                 @db.Char(64)
-  expectedSha256 String?                 @map("expected_sha256") @db.Char(64)
-  lockedBy       String?                 @map("locked_by")
-  lockToken      String?                 @map("lock_token") @db.Uuid
-  leaseExpiresAt DateTime?               @map("lease_expires_at")
-  lastError      String?                 @map("last_error") @db.Text
-  startedAt      DateTime                @default(now()) @map("started_at")
-  verifiedAt     DateTime?               @map("verified_at")
-  failedAt       DateTime?               @map("failed_at")
-  createdAt      DateTime                @default(now()) @map("created_at")
-  updatedAt      DateTime                @updatedAt @map("updated_at")
-
-  @@index([status, leaseExpiresAt], map: "reporting_backfill_runs_lease_idx")
-  @@map("backfill_runs")
-  @@schema("reporting")
-}
-
 enum ProjectionReceiptResult {
   APPLIED
   DUPLICATE
@@ -348,13 +314,6 @@ enum ReportingConsumerReceiptStatus {
   RETRY_SCHEDULED
   DELIVERED
   DEAD_LETTERED
-
-  @@schema("reporting")
-}
-
-enum ReportingOwner {
-  CORE_SHADOW
-  REPORTING
 
   @@schema("reporting")
 }
@@ -391,14 +350,6 @@ enum ReportingConsumerFailureStatus {
   OPEN
   RETRY_REQUESTED
   RESOLVED
-
-  @@schema("reporting")
-}
-
-enum ReportingBackfillStatus {
-  RUNNING
-  VERIFIED
-  FAILED
 
   @@schema("reporting")
 }

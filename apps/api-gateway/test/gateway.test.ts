@@ -5,7 +5,6 @@ import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config';
 import {
 	createGateway,
-	isLegacyStatisticsRouteTombstoned,
 	matchGatewayRoute,
 	normalizeGatewayRoutingPathname,
 	resolveClientIp,
@@ -194,10 +193,10 @@ describe('Widget event rate limiter', () => {
 
 describe('API Gateway config', () => {
 	const baseEnv = {
-		PORT: '4200',
+		PORT: '4299',
 		GATEWAY_PORT: '4100',
 		JWT_JWKS_URL:
-			'http://127.0.0.1:4200/api/v1/auth/.well-known/jwks.json',
+			'http://127.0.0.1:4299/api/v1/auth/.well-known/jwks.json',
 		JWT_ISSUER: 'http://localhost:4100/auth',
 		JWT_AUDIENCE: 'http://localhost:4100',
 		CORS_ALLOWED_ORIGINS: 'http://localhost:3000,http://127.0.0.1:3000'
@@ -208,10 +207,10 @@ describe('API Gateway config', () => {
 			...baseEnv,
 			GATEWAY_ROUTES_JSON: JSON.stringify([
 				{
-					id: 'monolith',
-					pathPrefix: '/api/v1',
-					upstreamUrl: 'http://127.0.0.1:4200',
-					authPolicy: 'optional',
+					id: 'user-sessions',
+					pathPrefix: '/api/v1/users/sessions',
+					upstreamUrl: 'http://127.0.0.1:4299',
+					authPolicy: 'required',
 					timeoutMs: 60_000
 				},
 				{
@@ -227,15 +226,15 @@ describe('API Gateway config', () => {
 		assert.equal(config.port, 4100);
 		assert.deepEqual(
 			config.routes.map(route => route.id),
-			['users', 'monolith']
+			['user-sessions', 'users']
 		);
 		assert.equal(
 			config.routes[0].upstreamUrl.origin,
-			'http://127.0.0.1:4300'
+			'http://127.0.0.1:4299'
 		);
 	});
 
-	it('accepts a non-empty manifest without a monolith catch-all', () => {
+	it('accepts a non-empty manifest without a fallback catch-all', () => {
 		const config = loadConfig({
 			...baseEnv,
 			GATEWAY_ROUTES_JSON: JSON.stringify([
@@ -255,14 +254,14 @@ describe('API Gateway config', () => {
 		);
 	});
 
-	it('keeps protected restore and Reporting routes ahead of the monolith', () => {
+	it('keeps protected restore and Reporting routes exact', () => {
 		const config = loadConfig({
 			...baseEnv,
 			GATEWAY_ROUTES_JSON: JSON.stringify([
 				{
 					id: 'database-restores',
 					pathPrefix: '/api/v1/dev-tools/database-restores',
-					upstreamUrl: 'http://127.0.0.1:4200',
+					upstreamUrl: 'http://127.0.0.1:4299',
 					authPolicy: 'required',
 					timeoutMs: 120_000
 				},
@@ -279,20 +278,13 @@ describe('API Gateway config', () => {
 					upstreamUrl: 'http://127.0.0.1:4600',
 					authPolicy: 'required',
 					timeoutMs: 60_000
-				},
-				{
-					id: 'monolith',
-					pathPrefix: '/api/v1',
-					upstreamUrl: 'http://127.0.0.1:4200',
-					authPolicy: 'optional',
-					timeoutMs: 60_000
 				}
 			])
 		});
 
 		assert.deepEqual(
 			config.routes.map(route => route.id),
-			['database-restores', 'campaigns', 'reporting', 'monolith']
+			['database-restores', 'campaigns', 'reporting']
 		);
 		assert.equal(
 			matchGatewayRoute(
@@ -316,7 +308,7 @@ describe('API Gateway config', () => {
 		assert.equal(
 			matchGatewayRoute('/api/v1/admin/reporting-export', config.routes)
 				?.id,
-			'monolith'
+			undefined
 		);
 	});
 
@@ -362,19 +354,10 @@ describe('API Gateway config', () => {
 		];
 		const config = loadConfig({
 			...baseEnv,
-			GATEWAY_ROUTES_JSON: JSON.stringify([
-				...widgetRoutes,
-				{
-					id: 'monolith',
-					pathPrefix: '/api/v1',
-					upstreamUrl: 'http://127.0.0.1:4200',
-					authPolicy: 'optional',
-					timeoutMs: 60_000
-				}
-			])
+			GATEWAY_ROUTES_JSON: JSON.stringify(widgetRoutes)
 		});
 
-		assert.equal(config.routes.length, 19);
+		assert.equal(config.routes.length, 18);
 		const routeIndex = (id: string): number =>
 			config.routes.findIndex(route => route.id === id);
 		assert.ok(
@@ -404,7 +387,7 @@ describe('API Gateway config', () => {
 		}
 		assert.equal(
 			matchGatewayRoute('/api/v1/widgets-admin', config.routes)?.id,
-			'monolith'
+			undefined
 		);
 	});
 
@@ -426,13 +409,6 @@ describe('API Gateway config', () => {
 					upstreamUrl: billingOrigin,
 					authPolicy: 'required',
 					timeoutMs: 30_000
-				},
-				{
-					id: 'monolith',
-					pathPrefix: '/api/v1',
-					upstreamUrl: 'http://127.0.0.1:4200',
-					authPolicy: 'optional',
-					timeoutMs: 60_000
 				}
 			])
 		});
@@ -471,19 +447,14 @@ describe('API Gateway config', () => {
 		);
 		assert.equal(publicRoute?.upstreamUrl.origin, billingOrigin);
 		assert.equal(adminRoute?.upstreamUrl.origin, billingOrigin);
-		const monolithIndex = config.routes.findIndex(
-			route => route.id === 'monolith'
-		);
-		assert.ok(config.routes.indexOf(publicRoute!) < monolithIndex);
-		assert.ok(config.routes.indexOf(adminRoute!) < monolithIndex);
 		assert.equal(
 			matchGatewayRoute('/api/v1/billing-settings-public', config.routes)
 				?.id,
-			'monolith'
+			undefined
 		);
 	});
 
-	it('routes the exact Platform public boundaries before the monolith', () => {
+	it('routes only the exact Platform public boundaries', () => {
 		const platformOrigin = 'http://127.0.0.1:5000';
 		const platformRoutes = [
 			['platform-site-settings', '/api/v1/site-settings'],
@@ -498,20 +469,8 @@ describe('API Gateway config', () => {
 		}));
 		const config = loadConfig({
 			...baseEnv,
-			GATEWAY_ROUTES_JSON: JSON.stringify([
-				...platformRoutes,
-				{
-					id: 'monolith',
-					pathPrefix: '/api/v1',
-					upstreamUrl: 'http://127.0.0.1:4200',
-					authPolicy: 'optional',
-					timeoutMs: 60_000
-				}
-			])
+			GATEWAY_ROUTES_JSON: JSON.stringify(platformRoutes)
 		});
-		const monolithIndex = config.routes.findIndex(
-			route => route.id === 'monolith'
-		);
 
 		for (const expected of platformRoutes) {
 			const route = matchGatewayRoute(expected.pathPrefix, config.routes);
@@ -519,11 +478,10 @@ describe('API Gateway config', () => {
 			assert.equal(route?.upstreamUrl.origin, platformOrigin);
 			assert.equal(route?.authPolicy, 'optional');
 			assert.equal(route?.timeoutMs, 60_000);
-			assert.ok(config.routes.indexOf(route!) < monolithIndex);
 		}
 		assert.equal(
 			matchGatewayRoute('/api/v1/site-setting', config.routes)?.id,
-			'monolith'
+			undefined
 		);
 	});
 
@@ -532,7 +490,7 @@ describe('API Gateway config', () => {
 			() =>
 				loadConfig({
 					...baseEnv,
-					API_UPSTREAM_URL: 'http://127.0.0.1:4200',
+					API_UPSTREAM_URL: 'http://127.0.0.1:4299',
 					GATEWAY_ROUTES_JSON: '[]'
 				}),
 			/API_UPSTREAM_URL is no longer supported/
@@ -551,9 +509,25 @@ describe('API Gateway config', () => {
 					...baseEnv,
 					GATEWAY_ROUTES_JSON: JSON.stringify([
 						{
-							id: 'monolith',
+							id: 'catch-all',
 							pathPrefix: '/api/v1',
-							upstreamUrl: 'http://127.0.0.1:4200',
+							upstreamUrl: 'http://127.0.0.1:4299',
+							authPolicy: 'optional',
+							timeoutMs: 60_000
+						}
+					])
+				}),
+			/must be a canonical path below \/api\/v1/
+		);
+		assert.throws(
+			() =>
+				loadConfig({
+					...baseEnv,
+					GATEWAY_ROUTES_JSON: JSON.stringify([
+						{
+							id: 'incomplete',
+							pathPrefix: '/api/v1/test',
+							upstreamUrl: 'http://127.0.0.1:4299',
 							authPolicy: 'optional'
 						}
 					])
@@ -566,9 +540,9 @@ describe('API Gateway config', () => {
 					...baseEnv,
 					GATEWAY_ROUTES_JSON: JSON.stringify([
 						{
-							id: 'monolith',
-							pathPrefix: '/api/v1',
-							upstreamUrl: 'http://127.0.0.1:4200',
+							id: 'invalid-auth',
+							pathPrefix: '/api/v1/test',
+							upstreamUrl: 'http://127.0.0.1:4299',
 							authPolicy: 'public',
 							timeoutMs: 60_000
 						}
@@ -584,13 +558,13 @@ describe('API Gateway config', () => {
 						{
 							id: 'encoded',
 							pathPrefix: '/api/v1/%75sers',
-							upstreamUrl: 'http://127.0.0.1:4200',
+							upstreamUrl: 'http://127.0.0.1:4299',
 							authPolicy: 'required',
 							timeoutMs: 60_000
 						}
 					])
 				}),
-			/must be \/api\/v1 or a canonical path/
+			/must be a canonical path below \/api\/v1/
 		);
 	});
 
@@ -632,38 +606,6 @@ describe('API Gateway config', () => {
 		assert.equal(
 			normalizeGatewayRoutingPathname('/api/v1/%5Cadmin'),
 			null
-		);
-	});
-
-	it('tombstones only the exact legacy statistics boundary when Reporting is routed', () => {
-		const darkRoutes = [createTestRoute()];
-		const reportingRoutes = [
-			createTestRoute({
-				id: 'reporting',
-				pathPrefix: '/api/v1/admin/reporting'
-			}),
-			...darkRoutes
-		];
-		for (const path of [
-			'/api/v1/statistics',
-			'/api/v1/statistics/dashboard',
-			'/api/v1/statistics/dashboard/export'
-		]) {
-			assert.equal(
-				isLegacyStatisticsRouteTombstoned(path, darkRoutes),
-				false
-			);
-			assert.equal(
-				isLegacyStatisticsRouteTombstoned(path, reportingRoutes),
-				true
-			);
-		}
-		assert.equal(
-			isLegacyStatisticsRouteTombstoned(
-				'/api/v1/statistics-export',
-				reportingRoutes
-			),
-			false
 		);
 	});
 });
@@ -719,7 +661,21 @@ describe('API Gateway proxy', () => {
 						upstreamUrl,
 						authPolicy: 'required'
 					}),
-					createTestRoute({ upstreamUrl })
+					createTestRoute({
+						id: 'widget',
+						pathPrefix: '/api/v1/widget',
+						upstreamUrl
+					}),
+					createTestRoute({
+						id: 'auth',
+						pathPrefix: '/api/v1/auth',
+						upstreamUrl
+					}),
+					createTestRoute({
+						id: 'public',
+						pathPrefix: '/api/v1/public-route',
+						upstreamUrl
+					})
 				]
 			}),
 			{
@@ -832,67 +788,7 @@ describe('API Gateway proxy', () => {
 			completionLog?.fields?.correlationId,
 			result.headers['x-correlation-id']
 		);
-		assert.equal(completionLog?.fields?.routeId, 'monolith');
-	});
-
-	it('keeps dark legacy routes proxied and tombstones them after Reporting routing', async () => {
-		const accessToken = signAccessToken(signingKey, { roles: ['ADMIN'] });
-		const darkResult = await makeRequest(
-			new URL('/api/v1/statistics/dashboard', gatewayUrl),
-			{ headers: { authorization: `Bearer ${accessToken}` } }
-		);
-		assert.equal(darkResult.statusCode, 201);
-
-		const reportingGateway = createGateway(
-			createTestConfig({
-				routes: [
-					createTestRoute({
-						id: 'reporting',
-						pathPrefix: '/api/v1/admin/reporting',
-						upstreamUrl: new URL(
-							`http://127.0.0.1:${(routedUpstream.address() as AddressInfo).port}`
-						),
-						authPolicy: 'required'
-					}),
-					createTestRoute({
-						upstreamUrl: new URL(
-							`http://127.0.0.1:${(upstream.address() as AddressInfo).port}`
-						)
-					})
-				]
-			}),
-			{
-				logger: silentLogger,
-				fetch: createJwksFetch(() => [signingKey.publicJwk])
-			}
-		);
-		assert.equal(await reportingGateway.initialize(), true);
-		await reportingGateway.listen(0, '127.0.0.1');
-		try {
-			const address = reportingGateway.address() as AddressInfo;
-			const origin = new URL(`http://127.0.0.1:${address.port}`);
-			const current = await makeRequest(
-				new URL('/api/v1/admin/reporting/overview', origin),
-				{ headers: { authorization: `Bearer ${accessToken}` } }
-			);
-			assert.equal(current.statusCode, 202);
-			const capturedBefore = captured.length;
-			for (const path of [
-				'/api/v1/statistics/dashboard',
-				'/api/v1/statistics/overview',
-				'/api/v1/statistics/registrations-by-month',
-				'/api/v1/statistics/dashboard/export'
-			]) {
-				const result = await makeRequest(new URL(path, origin), {
-					headers: { authorization: `Bearer ${accessToken}` }
-				});
-				assert.equal(result.statusCode, 404);
-				assert.equal(JSON.parse(result.body).code, 'route_not_found');
-			}
-			assert.equal(captured.length, capturedBefore);
-		} finally {
-			await reportingGateway.close();
-		}
+		assert.equal(completionLog?.fields?.routeId, 'widget');
 	});
 
 	it('dispatches to the longest matching route upstream', async () => {
@@ -1148,7 +1044,18 @@ describe('Gateway trust boundary', () => {
 		const upstreamUrl = await listenServer(upstream);
 		const gateway = createGateway(
 			createTestConfig({
-				routes: [createTestRoute({ upstreamUrl })]
+				routes: [
+					createTestRoute({
+						id: 'users',
+						pathPrefix: '/api/v1/users',
+						upstreamUrl
+					}),
+					createTestRoute({
+						id: 'public',
+						pathPrefix: '/api/v1/public',
+						upstreamUrl
+					})
+				]
 			}),
 			{
 				logger: silentLogger,

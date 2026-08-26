@@ -174,15 +174,13 @@ describe('OAuth provider contracts', () => {
 	});
 
 	it('validates VK token state, user id and email instead of coercing undefined', async () => {
-		global.fetch = jest
-			.fn()
-			.mockImplementationOnce(() =>
-				fetchResponse({
-					access_token: 'token',
-					user_id: 9,
-					state: 'other-state'
-				})
-			) as typeof fetch;
+		global.fetch = jest.fn().mockImplementationOnce(() =>
+			fetchResponse({
+				access_token: 'token',
+				user_id: 9,
+				state: 'other-state'
+			})
+		) as typeof fetch;
 		const { service } = createService();
 		await expect(
 			(service as any).profile('vk', 'code', 'verifier', 'device', 'state')
@@ -362,7 +360,19 @@ describe('OAuth callback secret handling', () => {
 				`identityOAuthState_${provider}`,
 				expect.any(Object)
 			);
-			expect(target.cookie).toHaveBeenCalledTimes(2);
+			expect(target.cookie).toHaveBeenCalledTimes(1);
+			expect(target.cookie).toHaveBeenCalledWith(
+				'refreshToken',
+				'',
+				expect.objectContaining({
+					domain: '.winwidget.ru',
+					expires: new Date(0),
+					httpOnly: true,
+					path: '/',
+					sameSite: 'none',
+					secure: true
+				})
+			);
 			expect(target.redirect).toHaveBeenCalledWith(
 				'https://winwidget.ru/login?error=social_auth_failed'
 			);

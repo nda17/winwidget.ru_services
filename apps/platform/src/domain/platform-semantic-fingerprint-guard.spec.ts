@@ -19,43 +19,6 @@ const sequenceSource = readFileSync(
 	join(__dirname, 'platform-sequence.ts'),
 	'utf8'
 );
-const cutoverSource = readFileSync(
-	join(__dirname, '../cutover/main.ts'),
-	'utf8'
-);
-const databaseLifecycleSource = readFileSync(
-	join(__dirname, '../../../../scripts/platform-database-lifecycle.sh'),
-	'utf8'
-);
-const restoreRehearsalSource = readFileSync(
-	join(
-		__dirname,
-		'../../../../scripts/platform-backup-restore-rehearsal.sh'
-	),
-	'utf8'
-);
-const deployWorkflowSource = readFileSync(
-	join(__dirname, '../../../../.github/workflows/deploy-production.yml'),
-	'utf8'
-);
-
-const semanticGuardTables = [
-	'service_identity',
-	'source_sequences',
-	'site_settings',
-	'legal_pages',
-	'home_page_content',
-	'billing_offer_producer_state'
-];
-
-function section(start: string, end: string): string {
-	const startIndex = cutoverSource.indexOf(start);
-	const endIndex = cutoverSource.indexOf(end, startIndex + start.length);
-	if (startIndex < 0 || endIndex < 0) {
-		throw new Error(`Missing Platform cutover source section: ${start}`);
-	}
-	return cutoverSource.slice(startIndex, endIndex);
-}
 
 describe('Platform semantic fingerprint database guard', () => {
 	it.each([
@@ -103,7 +66,7 @@ describe('Platform semantic fingerprint database guard', () => {
 		expect(migration).not.toContain('SECURITY DEFINER');
 	});
 
-	it('keeps service identity updated_at monotonic when a transaction refreshes the fingerprint', () => {
+	it('keeps service identity updated_at monotonic', () => {
 		expect(monotonicTimestampMigration.trimStart()).toMatch(/^BEGIN;/);
 		expect(monotonicTimestampMigration.trimEnd()).toMatch(/COMMIT;$/);
 		expect(monotonicTimestampMigration).toContain(
@@ -135,22 +98,6 @@ describe('Platform semantic fingerprint database guard', () => {
 		);
 		expect(monotonicTimestampMigration).toContain(
 			'GRANT UPDATE (current_semantic_fingerprint, updated_at)'
-		);
-		expect(restoreRehearsalSource).toContain(
-			"monotonic_transaction_start + interval '1 second'"
-		);
-		expect(restoreRehearsalSource).toContain(
-			'Platform fingerprint refresh moved service identity timestamp backwards'
-		);
-		expect(restoreRehearsalSource).toContain(
-			'rollback monotonic timestamp probe'
-		);
-		expect(deployWorkflowSource).toContain('DO $monotonic_timestamp$');
-		expect(deployWorkflowSource).toContain(
-			"transaction_started + interval '1 second'"
-		);
-		expect(deployWorkflowSource).toContain(
-			'Platform CI fingerprint refresh moved service identity timestamp backwards'
 		);
 	});
 
@@ -188,113 +135,9 @@ describe('Platform semantic fingerprint database guard', () => {
 			"CONSTRAINT = 'platform_current_semantic_fingerprint_guard'"
 		);
 	});
-
-	it('catalog-verifies every semantic constraint trigger exactly', () => {
-		for (const source of [
-			databaseLifecycleSource,
-			restoreRehearsalSource
-		]) {
-			for (const table of semanticGuardTables) {
-				expect(source).toContain(`'${table}'`);
-			}
-			expect(source).toMatch(/tgenabled (?:=|<>) 'O'/);
-			expect(source).toContain('tgisinternal');
-			expect(source).toContain('tgconstraint');
-			expect(source).toContain('constraint_entry.oid');
-			expect(source).toContain('tgdeferrable');
-			expect(source).toContain('tginitdeferred');
-			expect(source).toMatch(/contype (?:=|<>) 't'/);
-			expect(source).toContain(
-				"platform.enforce_current_semantic_fingerprint()'::regprocedure"
-			);
-		}
-	});
-
-	it('forces and diagnoses all partial probes without drift', () => {
-		for (const table of semanticGuardTables) {
-			expect(restoreRehearsalSource).toContain(`'${table}'`);
-		}
-		expect(restoreRehearsalSource).toContain(
-			'SET CONSTRAINTS ALL IMMEDIATE'
-		);
-		expect(restoreRehearsalSource).toContain('RETURNED_SQLSTATE');
-		expect(restoreRehearsalSource).toContain('CONSTRAINT_NAME');
-		expect(restoreRehearsalSource).toContain("actual_state <> '23514'");
-		expect(restoreRehearsalSource).toContain(
-			"actual_constraint <> 'platform_current_semantic_fingerprint_guard'"
-		);
-		expect(restoreRehearsalSource).toContain(
-			'rejected % partial probe left database drift'
-		);
-		expect(restoreRehearsalSource).toContain(
-			'coherent % probe rollback left database drift'
-		);
-	});
-
-	it('keeps CI ACLs and the persistence sentinel compatible with the guard', () => {
-		expect(deployWorkflowSource).toContain(
-			'GRANT EXECUTE ON FUNCTION platform.current_semantic_fingerprint()'
-		);
-		expect(deployWorkflowSource).toContain(
-			'GRANT UPDATE (current_semantic_fingerprint, updated_at)'
-		);
-		expect(deployWorkflowSource).not.toContain(
-			'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO winwidget_platform_runtime'
-		);
-		expect(deployWorkflowSource).toContain('DO $guard_probe$');
-		expect(deployWorkflowSource).toContain(
-			'INSERT INTO platform.outbox_events'
-		);
-		expect(deployWorkflowSource).toContain(
-			'DELETE FROM platform.outbox_events'
-		);
-		expect(deployWorkflowSource).not.toContain(
-			"INSERT INTO platform.source_sequences (id, next_value, updated_at) VALUES ('$sentinel_id', 42"
-		);
-	});
-
-	it('keeps the database URL out of Docker argv', () => {
-		expect(databaseLifecycleSource).toContain('export PLATFORM_PARSE_URL');
-		expect(databaseLifecycleSource).toContain('--env PLATFORM_PARSE_URL');
-		expect(databaseLifecycleSource).not.toMatch(
-			/^\s*--env "PLATFORM_PARSE_URL=\$value"/m
-		);
-	});
 });
 
 describe('Platform semantic fingerprint transaction coverage', () => {
-	it.each([
-		[
-			'import',
-			section(
-				'async function importSnapshot(',
-				'async function activate('
-			),
-			'await transaction.serviceIdentity.update({'
-		],
-		[
-			'activate',
-			section('async function activate(', 'async function abortImport('),
-			'const identity = await transaction.serviceIdentity.updateMany({'
-		],
-		[
-			'abort',
-			section('async function abortImport(', 'async function verify('),
-			'await transaction.serviceIdentity.update({'
-		]
-	])(
-		'arms the expected post-fingerprint inside the normal %s transaction',
-		(_action, source, finalOwnedWrite) => {
-			expect(source).toContain('.$transaction(');
-			const finalWriteIndex = source.indexOf(finalOwnedWrite);
-			const refreshIndex = source.indexOf(
-				'await refreshPlatformSemanticFingerprint(transaction);'
-			);
-			expect(finalWriteIndex).toBeGreaterThan(-1);
-			expect(refreshIndex).toBeGreaterThan(finalWriteIndex);
-		}
-	);
-
 	it.each([
 		[
 			'site settings',

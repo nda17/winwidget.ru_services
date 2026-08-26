@@ -64,7 +64,7 @@ describe('Billing offer v2 scoped sequence contract', () => {
 		).toThrow('envelope type is invalid');
 	});
 
-	it('does not advance the retained Core Billing allocator', async () => {
+	it('does not advance the unscoped Billing allocator', async () => {
 		const transaction = {
 			$executeRaw: jest.fn().mockResolvedValue([]),
 			billingOfferProjection: {

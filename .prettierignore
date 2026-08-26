@@ -1,2 +1,4 @@
-.eslintrc.json
-.gitignore
+**/dist/
+**/node_modules/
+**/coverage/
+**/pnpm-lock.yaml

@@ -492,13 +492,11 @@ export class BillingProjectionService {
 					'operation',
 					'actorId',
 					'actorRole',
-					'coreMutationApplied',
 					'requestedAt'
 				]) ||
 				state.userId !== event.aggregateId ||
 				!['DEACTIVATE', 'DELETE'].includes(String(state.operation)) ||
 				!['ADMIN', 'DEV'].includes(String(state.actorRole)) ||
-				state.coreMutationApplied !== false ||
 				typeof state.commandId !== 'string' ||
 				!this.uuid(state.commandId) ||
 				typeof state.actorId !== 'string' ||

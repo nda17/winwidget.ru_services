@@ -66,22 +66,11 @@ const importedProjectionService = await import(
 		import.meta.url
 	)
 );
-const importedBackfillService = await import(
-	new URL(
-		'../../dist/src/backfill/reporting-backfill.service.js',
-		import.meta.url
-	)
-);
 const ProjectionService =
 	importedProjectionService.ProjectionService ||
 	importedProjectionService.default?.ProjectionService;
-const ReportingBackfillService =
-	importedBackfillService.ReportingBackfillService ||
-	importedBackfillService.default?.ReportingBackfillService;
-if (!ProjectionService || !ReportingBackfillService) {
-	throw new Error(
-		'Compiled Reporting projection services are unavailable'
-	);
+if (!ProjectionService) {
+	throw new Error('Compiled Reporting projection service is unavailable');
 }
 const prisma = new PrismaClient({
 	datasources: { db: { url: databaseUrl } }
@@ -91,40 +80,32 @@ const projectionService = new ProjectionService(
 	prisma,
 	integrationMetrics
 );
-const backfillService = new ReportingBackfillService(
-	{},
-	projectionService,
-	{ backfillEnabled: true },
-	integrationMetrics,
-	prisma
-);
 const internalToken = `reporting-integration-${randomUUID()}`;
+const operationsToken = `reporting-operations-integration-${randomUUID()}`;
 const identityToken = `reporting-identity-integration-${randomUUID()}`;
-if (internalToken === identityToken) {
+if (new Set([internalToken, operationsToken, identityToken]).size !== 3) {
 	throw new Error('Reporting integration tokens must be distinct');
 }
 const allowedOrigin = 'http://127.0.0.1:3000';
 let lastIntrospectionCorrelationId = null;
 let schedulePolicy = {
-	owner: 'CORE',
 	reservationTime: '01:50',
 	reservationGeneration: '0',
 	confirmedChangeId: null,
 	pending: null
 };
 let rejectNextPolicyConfirmation = false;
-const corePort = await getFreePort();
-const core = createServer(async (request, response) => {
+const operationsPort = await getFreePort();
+const operations = createServer(async (request, response) => {
 	if (request.headers['x-winwidget-internal-token'] !== internalToken) {
 		response.writeHead(403).end();
 		return;
 	}
-	if (request.url === '/api/v1/internal/reporting/schedule-policy') {
+	if (
+		request.url ===
+		'/internal/v1/operations/reporting/schedule-policy'
+	) {
 		if (request.method === 'PUT') {
-			if (schedulePolicy.owner !== 'REPORTING') {
-				response.writeHead(409).end();
-				return;
-			}
 			const body = JSON.parse(await readRequestBody(request));
 			if (
 				Object.keys(body).sort().join('|') !==
@@ -201,7 +182,8 @@ const core = createServer(async (request, response) => {
 		return;
 	}
 	if (
-		request.url === '/api/v1/internal/reporting/schedule-policy/confirm' &&
+		request.url ===
+			'/internal/v1/operations/reporting/schedule-policy/confirm' &&
 		request.method === 'POST'
 	) {
 		if (rejectNextPolicyConfirmation) {
@@ -256,8 +238,8 @@ const core = createServer(async (request, response) => {
 	response.writeHead(404).end();
 });
 await new Promise((resolve, reject) => {
-	core.once('error', reject);
-	core.listen(corePort, '127.0.0.1', resolve);
+	operations.once('error', reject);
+	operations.listen(operationsPort, '127.0.0.1', resolve);
 });
 
 const identityPort = await getFreePort();
@@ -314,7 +296,6 @@ try {
 	});
 	await waitForReady(apiPort, 'api');
 	await assertApiBoundary(apiPort);
-	await assertCorruptLateSnapshotIsAtomic();
 	await stopService(service);
 	service = null;
 
@@ -335,7 +316,7 @@ try {
 	if (service) await stopService(service);
 	if (rabbitFixture) await rabbitFixture.close();
 	await Promise.all([
-		new Promise(resolve => core.close(resolve)),
+		new Promise(resolve => operations.close(resolve)),
 		new Promise(resolve => identity.close(resolve))
 	]);
 	await cleanupDatabase().catch(() => undefined);
@@ -354,9 +335,10 @@ function startService({ port, role, rabbitUrl }) {
 			REPORTING_PROCESS_ROLE: role,
 			REPORTING_LISTEN_HOST: '127.0.0.1',
 			REPORTING_PORT: String(port),
-			REPORTING_CORE_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
+			OPERATIONS_INTERNAL_BASE_URL: `http://127.0.0.1:${operationsPort}`,
 			REPORTING_INTERNAL_TOKEN: internalToken,
 			REPORTING_INTERNAL_TIMEOUT_MS: '2000',
+			REPORTING_OPERATIONS_TOKEN: operationsToken,
 			IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${identityPort}`,
 			IDENTITY_REPORTING_TOKEN: identityToken,
 			IDENTITY_INTERNAL_TIMEOUT_MS: '2000',
@@ -437,38 +419,60 @@ async function assertApiBoundary(port) {
 		},
 		503
 	);
+	await requestJson(
+		port,
+		'/internal/v1/reporting/messaging/overview',
+		{
+			headers: {
+				'x-winwidget-service': 'operations',
+				'x-winwidget-internal-token': internalToken
+			}
+		},
+		401
+	);
+	await requestJson(
+		port,
+		'/internal/v1/reporting/messaging/overview',
+		{
+			headers: {
+				'x-winwidget-service': 'reporting',
+				'x-winwidget-internal-token': operationsToken
+			}
+		},
+		403
+	);
+	const messagingOverview = await requestJson(
+		port,
+		'/internal/v1/reporting/messaging/overview',
+		{
+			headers: {
+				'x-winwidget-service': 'operations',
+				'x-winwidget-internal-token': operationsToken
+			}
+		},
+		200
+	);
+	if (messagingOverview.schemaVersion !== 1) {
+		throw new Error('Reporting Operations messaging overview is invalid');
+	}
 	const settings = await requestJson(
 		port,
 		'/api/v1/admin/reporting/daily-summary/settings',
 		{ headers: { authorization: 'Bearer integration-admin' } },
 		200
 	);
-	if (settings.owner !== 'CORE_SHADOW') {
-		throw new Error('Reporting settings must start in CORE_SHADOW mode');
+	if (
+		Object.hasOwn(settings, 'owner') ||
+		settings.operationalAlertsThreadId !== null
+	) {
+		throw new Error('Reporting settings exposed a removed Core contract');
 	}
-	await requestJson(
-		port,
-		'/api/v1/admin/reporting/daily-summary/settings',
-		{
-			method: 'PATCH',
-			headers: {
-				authorization: 'Bearer integration-admin',
-				'content-type': 'application/json'
-			},
-			body: JSON.stringify({
-				scheduleTime: '02:10',
-				expectedScheduleGeneration: '0'
-			})
-		},
-		409
-	);
 	await assertConcurrentDailySummaryPatches(port);
-	await assertReportingOwnedSettingsProjection();
+	await assertOperationsNotificationRoutingProjection();
 }
 
 async function assertConcurrentDailySummaryPatches(port) {
 	schedulePolicy = {
-		owner: 'REPORTING',
 		reservationTime: '01:50',
 		reservationGeneration: '0',
 		confirmedChangeId: null,
@@ -477,12 +481,10 @@ async function assertConcurrentDailySummaryPatches(port) {
 	await prisma.reportingSettings.update({
 		where: { id: 'daily-summary' },
 		data: {
-			owner: 'REPORTING',
 			enabled: false,
 			destinationChatId: '-100100',
 			messageThreadId: 76,
-			coreOperationalAlertsDestinationChatId: '-100100',
-			coreOperationalAlertsThreadId: 43,
+			operationalAlertsThreadId: 43,
 			scheduleTime: '01:50',
 			timezone: 'Europe/Moscow',
 			scheduleGeneration: 0n,
@@ -627,7 +629,6 @@ async function assertConcurrentDailySummaryPatches(port) {
 		assert.equal(independentRead.scheduleGeneration, '2');
 	} finally {
 		schedulePolicy = {
-			owner: 'CORE',
 			reservationTime: '01:50',
 			reservationGeneration: '0',
 			confirmedChangeId: null,
@@ -635,59 +636,115 @@ async function assertConcurrentDailySummaryPatches(port) {
 		};
 		await prisma.reportingSettings.update({
 			where: { id: 'daily-summary' },
-			data: { owner: 'CORE_SHADOW' }
+			data: { enabled: false }
 		});
 	}
 }
 
-async function assertReportingOwnedSettingsProjection() {
+async function assertOperationsNotificationRoutingProjection() {
 	await prisma.reportingSettings.update({
 		where: { id: 'daily-summary' },
 		data: {
-			owner: 'REPORTING',
 			enabled: true,
 			destinationChatId: '-100111',
 			messageThreadId: 77,
-			coreOperationalAlertsDestinationChatId: '-100111',
+			operationalAlertsThreadId: 43,
 			scheduleTime: '02:20',
 			timezone: 'Europe/Moscow',
 			scheduleGeneration: 2n
 		}
 	});
+	const eventId = randomUUID();
+	const lockToken = randomUUID();
+	const staleEventId = randomUUID();
+	const staleLockToken = randomUUID();
+	const changedAt = new Date();
 	try {
-		await projectionService.applyEvent({
-			schemaVersion: 1,
-			eventType: 'reporting.core-operational-routing.changed.v1',
-			eventId: randomUUID(),
-			aggregateId: 'singleton',
-			aggregateVersion: '1',
-			sourceSequence: '1',
-			occurredAt: new Date().toISOString(),
-			tombstone: false,
-			state: {
-				id: 'singleton',
-				coreOperationalAlertsDestinationChatId: '-100777',
-				coreOperationalAlertsThreadId: 2024
+		await prisma.consumerReceipt.create({
+			data: {
+				eventId,
+				consumer: 'reporting-settings-v1',
+				payloadHash: 'a'.repeat(64),
+				status: 'PROCESSING',
+				lockedAt: new Date(),
+				lockedBy: 'integration',
+				lockToken,
+				leaseExpiresAt: new Date(Date.now() + 60_000)
 			}
 		});
+		await projectionService.applyOperationsNotificationRouting(
+			{
+				schemaVersion: 1,
+				eventId,
+				operationalAlertsThreadId: 2024,
+				changedAt: changedAt.toISOString()
+			},
+			{
+				eventId,
+				consumer: 'reporting-settings-v1',
+				lockToken
+			}
+		);
 		const postCleanupProjection =
 			await prisma.reportingSettings.findUniqueOrThrow({
 				where: { id: 'daily-summary' }
 			});
 		assert.equal(postCleanupProjection.destinationChatId, '-100111');
 		assert.equal(
-			postCleanupProjection.coreOperationalAlertsDestinationChatId,
-			'-100777'
-		);
-		assert.equal(
-			postCleanupProjection.coreOperationalAlertsThreadId,
+			postCleanupProjection.operationalAlertsThreadId,
 			2024
 		);
+		assert.equal(
+			postCleanupProjection.operationalAlertsChangedAt?.toISOString(),
+			changedAt.toISOString()
+		);
 		assert.equal(postCleanupProjection.scheduleTime, '02:20');
+
+		await prisma.consumerReceipt.create({
+			data: {
+				eventId: staleEventId,
+				consumer: 'reporting-settings-v1',
+				payloadHash: 'b'.repeat(64),
+				status: 'PROCESSING',
+				lockedAt: new Date(),
+				lockedBy: 'integration',
+				lockToken: staleLockToken,
+				leaseExpiresAt: new Date(Date.now() + 60_000)
+			}
+		});
+		await projectionService.applyOperationsNotificationRouting(
+			{
+				schemaVersion: 1,
+				eventId: staleEventId,
+				operationalAlertsThreadId: 43,
+				changedAt: new Date(changedAt.getTime() - 1_000).toISOString()
+			},
+			{
+				eventId: staleEventId,
+				consumer: 'reporting-settings-v1',
+				lockToken: staleLockToken
+			}
+		);
+		const afterStaleRetry =
+			await prisma.reportingSettings.findUniqueOrThrow({
+				where: { id: 'daily-summary' }
+			});
+		assert.equal(afterStaleRetry.operationalAlertsThreadId, 2024);
+		assert.equal(
+			afterStaleRetry.operationalAlertsChangedAt?.toISOString(),
+			changedAt.toISOString()
+		);
 	} finally {
 		await prisma.reportingSettings.update({
 			where: { id: 'daily-summary' },
-			data: { owner: 'CORE_SHADOW' }
+			data: {
+				enabled: false,
+				operationalAlertsThreadId: null,
+				operationalAlertsChangedAt: null
+			}
+		});
+		await prisma.consumerReceipt.deleteMany({
+			where: { eventId: { in: [eventId, staleEventId] } }
 		});
 	}
 }
@@ -716,90 +773,6 @@ async function findSettingsAuditOutbox() {
 			typeof event.payload === 'object' &&
 			!Array.isArray(event.payload) &&
 			event.payload.action === 'REPORTING_DAILY_SUMMARY_SETTINGS_UPDATE'
-	);
-}
-
-async function assertCorruptLateSnapshotIsAtomic() {
-	const before = await projectionStateSnapshot();
-	const snapshotId = randomUUID();
-	const headerLine = `${JSON.stringify({
-		schemaVersion: 1,
-		kind: 'header',
-		snapshotId,
-		watermarks: {
-			identityUser: '0',
-			billingPayment: '0',
-			billingSubscription: '0',
-			widget: '0',
-			lead: '0',
-			reportingSettings: '0'
-		}
-	})}\n`;
-	const recordLines = Array.from({ length: 101 }, (_, index) => {
-		const aggregateId = `corrupt-late-snapshot-user-${index}`;
-		return `${JSON.stringify({
-			schemaVersion: 1,
-			kind: 'record',
-			stream: 'identityUser',
-			event: {
-				schemaVersion: 1,
-				eventType: 'identity.user.changed.v1',
-				eventId: randomUUID(),
-				aggregateId,
-				aggregateVersion: '0',
-				sourceSequence: '0',
-				occurredAt: '2026-07-31T00:00:00.000Z',
-				tombstone: false,
-				state: identityState(aggregateId, false)
-			}
-		})}\n`;
-	});
-	const response = new Response(
-		`${headerLine}${recordLines.join('')}${JSON.stringify({
-			schemaVersion: 1,
-			kind: 'footer',
-			snapshotId,
-			recordCount: recordLines.length,
-			sha256: '0'.repeat(64)
-		})}\n`,
-		{ headers: { 'content-type': 'application/x-ndjson' } }
-	);
-	await assert.rejects(
-		backfillService.importResponse(response),
-		/Snapshot SHA-256 mismatch/
-	);
-	const [after, failedRun] = await Promise.all([
-		projectionStateSnapshot(),
-		prisma.reportingBackfillRun.findUnique({ where: { snapshotId } })
-	]);
-	assert.deepEqual(after, before);
-	assert.equal(failedRun?.status, 'FAILED');
-	assert.equal(failedRun?.recordCount, recordLines.length);
-	assert.equal(failedRun?.appliedCount, 0);
-	await prisma.reportingBackfillRun.delete({ where: { snapshotId } });
-}
-
-async function projectionStateSnapshot() {
-	const state = await Promise.all([
-		prisma.identityUserProjection.findMany({ orderBy: { id: 'asc' } }),
-		prisma.billingPaymentFact.findMany({ orderBy: { id: 'asc' } }),
-		prisma.billingSubscriptionProjection.findMany({
-			orderBy: { id: 'asc' }
-		}),
-		prisma.widgetProjection.findMany({
-			orderBy: { sourceAggregateId: 'asc' }
-		}),
-		prisma.leadFact.findMany({
-			orderBy: { sourceAggregateId: 'asc' }
-		}),
-		prisma.reportingSettings.findMany({ orderBy: { id: 'asc' } }),
-		prisma.projectionReceipt.findMany({ orderBy: { id: 'asc' } }),
-		prisma.projectionWatermark.findMany({ orderBy: { stream: 'asc' } })
-	]);
-	return JSON.parse(
-		JSON.stringify(state, (_key, value) =>
-			typeof value === 'bigint' ? value.toString() : value
-		)
 	);
 }
 
@@ -904,8 +877,32 @@ async function runRabbitSmoke(port) {
 				});
 				return receipt?.status === 'DELIVERED';
 			});
+			const routingEventId = randomUUID();
+			await publishOperationsNotificationRouting(
+				publisher,
+				routingEventId,
+				2024
+			);
+			await waitFor('Operations notification routing projection', async () => {
+				const [receipt, settings] = await Promise.all([
+					prisma.consumerReceipt.findUnique({
+						where: {
+							eventId_consumer: {
+								eventId: routingEventId,
+								consumer: 'reporting-settings-v1'
+							}
+						}
+					}),
+					prisma.reportingSettings.findUnique({
+						where: { id: 'daily-summary' }
+					})
+				]);
+				return (
+					receipt?.status === 'DELIVERED' &&
+					settings?.operationalAlertsThreadId === 2024
+				);
+			});
 
-			await assertConcurrentLiveAndBackfillBatch(publisher);
 
 			const aggregateId = `integration-user-${randomUUID()}`;
 			const baseEventId = randomUUID();
@@ -1084,101 +1081,6 @@ async function runRabbitSmoke(port) {
 		await admin.close();
 		await restricted.close();
 	}
-}
-
-async function assertConcurrentLiveAndBackfillBatch(publisher) {
-	const suffix = randomUUID();
-	const aggregateA = `concurrent-backfill-a-${suffix}`;
-	const aggregateB = `concurrent-backfill-b-${suffix}`;
-	const lockKey = `reporting:identityUser:${aggregateA}`;
-	const blockerReady = deferred();
-	const releaseBlocker = deferred();
-	const blocker = prisma
-		.$transaction(
-			async transaction => {
-				await transaction.$executeRawUnsafe(
-					'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
-					lockKey
-				);
-				blockerReady.resolve();
-				await releaseBlocker.promise;
-			},
-			{ timeout: 20_000 }
-		)
-		.catch(error => {
-			blockerReady.reject(error);
-			throw error;
-		});
-	await blockerReady.promise;
-	const snapshotEvents = [aggregateB, aggregateA].map(aggregateId => ({
-		schemaVersion: 1,
-		eventType: 'identity.user.changed.v1',
-		eventId: randomUUID(),
-		aggregateId,
-		aggregateVersion: '0',
-		sourceSequence: '0',
-		occurredAt: '2026-07-31T00:00:00.000Z',
-		tombstone: false,
-		state: identityState(aggregateId, false)
-	}));
-	const batch = projectionService.applyBatch(snapshotEvents);
-	try {
-		await waitFor('backfill batch advisory lock wait', async () => {
-			const rows = await prisma.$queryRawUnsafe(`
-				SELECT count(*)::INTEGER AS "waiting"
-				FROM pg_locks
-				WHERE locktype = 'advisory'
-					AND database = (
-						SELECT oid FROM pg_database WHERE datname = current_database()
-					)
-					AND NOT granted
-			`);
-			return rows[0]?.waiting > 0;
-		});
-		const liveEventId = randomUUID();
-		await publishProjection(publisher, {
-			eventId: liveEventId,
-			aggregateId: aggregateB,
-			aggregateVersion: '1',
-			sourceSequence: '500',
-			state: identityState(aggregateB, true)
-		});
-		await waitFor(
-			'live projection while backfill batch is blocked',
-			async () => {
-				const projection = await prisma.identityUserProjection.findUnique({
-					where: { id: aggregateB }
-				});
-				return (
-					projection?.aggregateVersion.toString() === '1' &&
-					projection.hasPhoneIdentity === true
-				);
-			}
-		);
-	} finally {
-		releaseBlocker.resolve();
-	}
-	const [, summary] = await withTimeout(
-		Promise.all([blocker, batch]),
-		10_000,
-		'Concurrent live projection and backfill batch deadlocked'
-	);
-	assert.deepEqual(summary, { applied: 1, duplicate: 0, stale: 1 });
-	const [projectionA, projectionB, watermark] = await Promise.all([
-		prisma.identityUserProjection.findUnique({
-			where: { id: aggregateA }
-		}),
-		prisma.identityUserProjection.findUnique({
-			where: { id: aggregateB }
-		}),
-		prisma.projectionWatermark.findUnique({
-			where: { stream: 'identityUser' }
-		})
-	]);
-	assert.equal(projectionA?.aggregateVersion.toString(), '0');
-	assert.equal(projectionB?.aggregateVersion.toString(), '1');
-	assert.equal(projectionB?.hasPhoneIdentity, true);
-	assert.equal(watermark?.sourceSequence.toString(), '500');
 }
 
 async function findDeliveryRetryAuditOutbox(eventId) {
@@ -1370,6 +1272,40 @@ async function publishProjection(channel, input) {
 	await channel.waitForConfirms();
 }
 
+async function publishOperationsNotificationRouting(
+	channel,
+	eventId,
+	operationalAlertsThreadId
+) {
+	const eventType = 'operations.notification-routing.changed.v1';
+	const payload = {
+		schemaVersion: 1,
+		eventId,
+		operationalAlertsThreadId,
+		changedAt: new Date().toISOString()
+	};
+	channel.publish(
+		'winwidget.events',
+		eventType,
+		Buffer.from(JSON.stringify(payload)),
+		{
+			mandatory: true,
+			persistent: true,
+			contentType: 'application/json',
+			messageId: eventId,
+			type: eventType,
+			correlationId: eventId,
+			headers: {
+				'x-aggregate-type': 'telegram-bot-settings',
+				'x-aggregate-id': 'singleton',
+				'x-retry-attempt': 0,
+				'x-retry-cycle': 0
+			}
+		}
+	);
+	await channel.waitForConfirms();
+}
+
 async function publishDeliveryOutcome(channel, messageId) {
 	const sourceEventId = randomUUID();
 	const payload = {
@@ -1407,7 +1343,6 @@ async function cleanupDatabase() {
 		prisma.projectionWatermark.deleteMany(),
 		prisma.reportingOutboxEvent.deleteMany(),
 		prisma.reportRun.deleteMany(),
-		prisma.reportingBackfillRun.deleteMany(),
 		prisma.leadFact.deleteMany(),
 		prisma.widgetProjection.deleteMany(),
 		prisma.billingSubscriptionProjection.deleteMany(),
@@ -1483,7 +1418,9 @@ async function waitForReady(port, expectedRole, timeoutMs = 20_000) {
 	const raw = await response.text();
 	if (
 		!response.ok ||
-		raw.includes(internalToken) ||
+		[internalToken, operationsToken, identityToken].some(token =>
+			raw.includes(token)
+		) ||
 		/postgres(?:ql)?:\/\//i.test(raw) ||
 		/amqps?:\/\//i.test(raw)
 	) {

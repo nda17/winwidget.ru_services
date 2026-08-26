@@ -39,20 +39,13 @@ const PROJECTION_EVENT = {
 
 const OPERATIONAL_ROUTING_EVENT_ID =
 	'22222222-2222-4222-8222-222222222222';
+const OPERATIONAL_ROUTING_EVENT_TYPE =
+	'operations.notification-routing.changed.v1';
 const OPERATIONAL_ROUTING_EVENT = {
 	schemaVersion: 1,
-	eventType: 'reporting.core-operational-routing.changed.v1',
 	eventId: OPERATIONAL_ROUTING_EVENT_ID,
-	aggregateId: 'singleton',
-	aggregateVersion: '2',
-	sourceSequence: '2',
-	occurredAt: '2026-07-31T00:00:00.000Z',
-	tombstone: false,
-	state: {
-		id: 'singleton',
-		coreOperationalAlertsDestinationChatId: '-100777',
-		coreOperationalAlertsThreadId: 2024
-	}
+	operationalAlertsThreadId: 2024,
+	changedAt: '2026-07-31T00:00:00.000Z'
 };
 
 describe('reporting RabbitMQ topology contract', () => {
@@ -94,9 +87,9 @@ describe('reporting RabbitMQ topology contract', () => {
 		).toBe(DAILY_SUMMARY_NOTIFICATION_EVENT_TYPE);
 	});
 
-	it('accepts only the steady-state Core routing event', () => {
+	it('accepts only the Operations notification-routing event', () => {
 		expect(REPORTING_ACCEPTED_ROUTING_KEYS.reportingSettings).toEqual([
-			'reporting.core-operational-routing.changed.v1'
+			OPERATIONAL_ROUTING_EVENT_TYPE
 		]);
 	});
 
@@ -145,7 +138,9 @@ describe('reporting RabbitMQ topology contract', () => {
 				'x-causation-id': OPERATIONAL_ROUTING_EVENT_ID,
 				'x-retry-attempt': 1,
 				'x-retry-cycle': 0,
-				'x-last-error': 'temporary failure'
+				'x-last-error': 'temporary failure',
+				'x-aggregate-type': 'telegram-bot-settings',
+				'x-aggregate-id': 'singleton'
 			}
 		},
 		{
@@ -163,7 +158,7 @@ describe('reporting RabbitMQ topology contract', () => {
 		expect(() =>
 			assertReportingConsumerOutboxEvent({
 				...event,
-				eventType: OPERATIONAL_ROUTING_EVENT.eventType,
+				eventType: OPERATIONAL_ROUTING_EVENT_TYPE,
 				messageId: OPERATIONAL_ROUTING_EVENT_ID,
 				payload: OPERATIONAL_ROUTING_EVENT
 			})

@@ -1,4 +1,5 @@
 import {
+	OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE,
 	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	type ReportingProjectionStream,
 	type ReportingSourceEventType
@@ -25,8 +26,6 @@ export const REPORTING_ADMIN_AUDIT_ROUTING_KEY =
 	'admin.audit.reporting.v1';
 export const DELIVERY_OUTCOME_EVENT_TYPE =
 	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
-export const CORE_OPERATIONAL_ROUTING_EVENT_TYPE =
-	'reporting.core-operational-routing.changed.v1';
 
 export const REPORTING_CONSUMER_KINDS = [
 	'identityUser',
@@ -54,14 +53,16 @@ export const REPORTING_QUEUE_NAMES: Record<ReportingConsumerKind, string> =
 
 export const REPORTING_ROUTING_KEYS: Record<
 	ReportingConsumerKind,
-	ReportingSourceEventType | typeof DELIVERY_OUTCOME_EVENT_TYPE
+	| ReportingSourceEventType
+	| typeof OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
+	| typeof DELIVERY_OUTCOME_EVENT_TYPE
 > = {
 	identityUser: 'identity.user.changed.v1',
 	billingPayment: 'billing.payment.changed.v1',
 	billingSubscription: 'billing.subscription.changed.v1',
 	widget: 'widgets.widget.changed.v1',
 	lead: 'widgets.lead.changed.v1',
-	reportingSettings: CORE_OPERATIONAL_ROUTING_EVENT_TYPE,
+	reportingSettings: OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE,
 	deliveryOutcome: DELIVERY_OUTCOME_EVENT_TYPE
 };
 
@@ -69,6 +70,7 @@ export const REPORTING_ACCEPTED_ROUTING_KEYS: Record<
 	ReportingConsumerKind,
 	readonly (
 		| ReportingSourceEventType
+		| typeof OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
 		| typeof DELIVERY_OUTCOME_EVENT_TYPE
 	)[]
 > = {
@@ -77,7 +79,7 @@ export const REPORTING_ACCEPTED_ROUTING_KEYS: Record<
 	billingSubscription: ['billing.subscription.changed.v1'],
 	widget: ['widgets.widget.changed.v1'],
 	lead: ['widgets.lead.changed.v1'],
-	reportingSettings: [CORE_OPERATIONAL_ROUTING_EVENT_TYPE],
+	reportingSettings: [OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE],
 	deliveryOutcome: [DELIVERY_OUTCOME_EVENT_TYPE]
 };
 
@@ -89,8 +91,7 @@ export const REPORTING_ACCEPTED_PROJECTION_EVENT_TYPES: Record<
 	billingPayment: ['billing.payment.changed.v1'],
 	billingSubscription: ['billing.subscription.changed.v1'],
 	widget: ['widgets.widget.changed.v1'],
-	lead: ['widgets.lead.changed.v1'],
-	reportingSettings: [CORE_OPERATIONAL_ROUTING_EVENT_TYPE]
+	lead: ['widgets.lead.changed.v1']
 };
 
 export const REPORTING_CONSUMERS: Record<ReportingConsumerKind, string> = {
@@ -123,5 +124,5 @@ export const getReportingManualRetryRoutingKey = (
 export function isProjectionConsumerKind(
 	kind: ReportingConsumerKind
 ): kind is ReportingProjectionStream {
-	return kind !== 'deliveryOutcome';
+	return kind !== 'reportingSettings' && kind !== 'deliveryOutcome';
 }

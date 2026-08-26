@@ -6,8 +6,8 @@ import {
 import { ExecutionContext } from '@nestjs/common/interfaces';
 import { Request } from 'express';
 import {
-	NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV,
 	NOTIFICATION_DELIVERY_INTERNAL_TOKEN_HEADER,
+	NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV,
 	NotificationDeliveryInternalTokenGuard,
 	isNotificationDeliveryLoopbackAddress
 } from './notification-delivery-internal-token.guard';
@@ -15,7 +15,8 @@ import {
 const createContext = (
 	remoteAddress: string,
 	token?: string,
-	forwardedFor?: string
+	forwardedFor?: string,
+	service = 'operations'
 ) =>
 	({
 		switchToHttp: () => ({
@@ -28,7 +29,8 @@ const createContext = (
 									[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_HEADER]: token
 								}
 							: {}),
-						...(forwardedFor ? { 'x-forwarded-for': forwardedFor } : {})
+						...(forwardedFor ? { 'x-forwarded-for': forwardedFor } : {}),
+						'x-winwidget-service': service
 					}
 				}) as unknown as Request
 		})
@@ -36,14 +38,14 @@ const createContext = (
 
 describe('NotificationDeliveryInternalTokenGuard', () => {
 	const originalToken =
-		process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV];
+		process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV];
 	const token = 'a-secure-internal-token-with-32-characters';
 
 	afterEach(() => {
 		if (originalToken === undefined) {
-			delete process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV];
+			delete process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV];
 		} else {
-			process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV] =
+			process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV] =
 				originalToken;
 		}
 	});
@@ -59,7 +61,7 @@ describe('NotificationDeliveryInternalTokenGuard', () => {
 	});
 
 	it('requires a valid token and uses the socket address', () => {
-		process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV] = token;
+		process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV] = token;
 		const guard = new NotificationDeliveryInternalTokenGuard();
 
 		expect(
@@ -70,7 +72,7 @@ describe('NotificationDeliveryInternalTokenGuard', () => {
 	});
 
 	it('does not trust x-forwarded-for for loopback access', () => {
-		process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV] = token;
+		process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV] = token;
 		const guard = new NotificationDeliveryInternalTokenGuard();
 
 		expect(() =>
@@ -78,8 +80,19 @@ describe('NotificationDeliveryInternalTokenGuard', () => {
 		).toThrow(ForbiddenException);
 	});
 
+	it('rejects a non-Operations caller', () => {
+		process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV] = token;
+		const guard = new NotificationDeliveryInternalTokenGuard();
+
+		expect(() =>
+			guard.canActivate(
+				createContext('127.0.0.1', token, undefined, 'core')
+			)
+		).toThrow(ForbiddenException);
+	});
+
 	it('rejects a missing or incorrect token', () => {
-		process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV] = token;
+		process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV] = token;
 		const guard = new NotificationDeliveryInternalTokenGuard();
 
 		expect(() => guard.canActivate(createContext('::1'))).toThrow(
@@ -91,7 +104,7 @@ describe('NotificationDeliveryInternalTokenGuard', () => {
 	});
 
 	it('fails closed when the configured secret is too short', () => {
-		process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV] = 'short';
+		process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV] = 'short';
 		const guard = new NotificationDeliveryInternalTokenGuard();
 
 		expect(() =>

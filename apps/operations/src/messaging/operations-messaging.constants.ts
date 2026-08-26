@@ -7,6 +7,26 @@ export const OPERATIONS_AUDIT_CONSUMER = 'operations-admin-event-log-v1';
 // PostgreSQL receipts are the canonical retry record. The physical broker DLQ
 // is only a bounded diagnostic copy.
 export const OPERATIONS_AUDIT_DLQ_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+export const OPERATIONS_SCHEDULED_JOB_EVENT_TYPE =
+	'operations.scheduled-job.requested.v1';
+export const OPERATIONS_SCHEDULED_JOB_ROUTING_KEY =
+	'operations.scheduled-job.requested.v1';
+export const OPERATIONS_SCHEDULED_JOB_QUEUE =
+	'winwidget.operations.scheduled-jobs.v1';
+export const OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE = `${OPERATIONS_SCHEDULED_JOB_QUEUE}.retry-v1`;
+export const OPERATIONS_SCHEDULED_JOB_DLQ = `${OPERATIONS_SCHEDULED_JOB_QUEUE}.dead-letter`;
+export const OPERATIONS_DATABASE_RESTORE_EVENT_TYPE =
+	'operations.database-restore.requested.v1';
+export const OPERATIONS_DATABASE_RESTORE_ROUTING_KEY =
+	'operations.database-restore.requested.v1';
+export const OPERATIONS_DATABASE_RESTORE_QUEUE =
+	'winwidget.operations.database-restore.v1';
+export const OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE = `${OPERATIONS_DATABASE_RESTORE_QUEUE}.retry-v1`;
+export const OPERATIONS_DATABASE_RESTORE_DLQ = `${OPERATIONS_DATABASE_RESTORE_QUEUE}.dead-letter`;
+export const OPERATIONS_NOTIFICATION_ROUTING_CHANGED_EVENT_TYPE =
+	'operations.notification-routing.changed.v1';
+export const OPERATIONS_NOTIFICATION_ROUTING_CHANGED_ROUTING_KEY =
+	'operations.notification-routing.changed.v1';
 
 export const OPERATIONS_AUDIT_SOURCES = [
 	{
@@ -43,11 +63,6 @@ export const OPERATIONS_AUDIT_SOURCES = [
 		kind: 'support-admin-audit',
 		source: 'support',
 		routingKey: 'admin.audit.support.v1'
-	},
-	{
-		kind: 'core-admin-audit',
-		source: 'core',
-		routingKey: 'admin.audit.core.v1'
 	}
 ] as const;
 

@@ -65,7 +65,6 @@ export class IdentityInternalController {
 	@Post('auth/introspect')
 	@HttpCode(200)
 	@InternalServices(
-		'core',
 		'campaigns',
 		'reporting',
 		'widgets',
@@ -92,16 +91,16 @@ export class IdentityInternalController {
 		return this.internal.searchOwners(dto);
 	}
 
-	@Post('core/audit-snapshots')
+	@Post('operations/audit-snapshots')
 	@HttpCode(200)
-	@InternalServices('core')
+	@InternalServices('operations')
 	auditSnapshots(@Body() dto: AuditSnapshotsDto) {
 		return this.internal.auditSnapshots(dto.userIds);
 	}
 
-	@Get('core/admin-health')
+	@Get('operations/admin-health')
 	@HttpCode(200)
-	@InternalServices('core')
+	@InternalServices('operations')
 	adminHealth() {
 		return this.providerHealth.providerHealth();
 	}

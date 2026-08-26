@@ -13,14 +13,15 @@ export class SupportInternalGuard implements CanActivate {
 	private readonly token: Buffer;
 
 	constructor(config: ConfigService) {
-		const value = config.get<string>('SUPPORT_CORE_TOKEN')?.trim() || '';
+		const value =
+			config.get<string>('SUPPORT_OPERATIONS_TOKEN')?.trim() || '';
 		if (
 			value.length < 32 ||
 			value.startsWith('change_me') ||
 			value.startsWith('ci_')
 		) {
 			throw new Error(
-				'SUPPORT_CORE_TOKEN must be a non-placeholder secret with at least 32 characters'
+				'SUPPORT_OPERATIONS_TOKEN must be a non-placeholder secret with at least 32 characters'
 			);
 		}
 		this.token = Buffer.from(value);
@@ -32,7 +33,7 @@ export class SupportInternalGuard implements CanActivate {
 			request.header('x-winwidget-internal-token') || ''
 		);
 		if (
-			request.header('x-winwidget-service') !== 'core' ||
+			request.header('x-winwidget-service') !== 'operations' ||
 			!this.isLoopback(request.socket.remoteAddress) ||
 			candidate.length !== this.token.length ||
 			!timingSafeEqual(candidate, this.token)

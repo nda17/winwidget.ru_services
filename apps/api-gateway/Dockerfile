@@ -1,4 +1,4 @@
-FROM node:20-alpine AS build
+FROM node:20.20.2-alpine3.23@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
 
 WORKDIR /app
 ENV PNPM_VERSION=9.15.9
@@ -12,7 +12,7 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN pnpm run build
 
-FROM node:20-alpine AS runtime
+FROM node:20.20.2-alpine3.23@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
 
 ARG APP_REVISION=unknown
 ENV NODE_ENV=production

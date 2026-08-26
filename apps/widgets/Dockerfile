@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:20-alpine AS base
+FROM node:20.20.2-alpine3.23@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS base
 
 WORKDIR /app
 
@@ -18,22 +18,21 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS assets
 
-COPY scripts/build-widgets.mjs scripts/check-widgets.mjs ./scripts/
-COPY widgets-src ./widgets-src
+COPY apps/widgets/scripts ./scripts
+COPY apps/widgets/widgets-src ./widgets-src
 
-RUN node scripts/build-widgets.mjs \
-	&& node scripts/check-widgets.mjs
+RUN pnpm run build:widgets
 
 FROM base AS builder
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY apps/widgets/package.json apps/widgets/pnpm-lock.yaml apps/widgets/tsconfig.json apps/widgets/tsconfig.build.json apps/widgets/nest-cli.json ./
+COPY apps/widgets/package.json apps/widgets/pnpm-lock.yaml apps/widgets/tsconfig.json apps/widgets/tsconfig.build.json ./
 COPY apps/widgets/prisma ./prisma
 COPY apps/widgets/src ./src
 COPY --from=assets /app/public/widgets ./public/widgets
 
 RUN pnpm run prisma:generate \
-	&& pnpm run build \
+	&& pnpm run build:server \
 	&& pnpm prune --prod --ignore-scripts \
 	&& pnpm run prisma:generate
 

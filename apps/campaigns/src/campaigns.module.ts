@@ -9,7 +9,7 @@ import { CampaignsService } from './campaigns/campaigns.service';
 import { CampaignsHealthController } from './health/campaigns-health.controller';
 import { CampaignsHealthService } from './health/campaigns-health.service';
 import { CampaignsHeartbeatService } from './health/campaigns-heartbeat.service';
-import { CoreInternalClient } from './internal/core-internal.client';
+import { CampaignsDependenciesClient } from './internal/campaigns-dependencies.client';
 import { CampaignsMessagingOverviewController } from './internal/campaigns-messaging-overview.controller';
 import { CampaignsMessagingOverviewService } from './messaging/campaigns-messaging-overview.service';
 import { CampaignsOutboxPublisherService } from './messaging/campaigns-outbox-publisher.service';
@@ -34,7 +34,7 @@ import { ConfigModule } from '@nestjs/config';
 		CampaignsMessagingOverviewController
 	],
 	providers: [
-		CoreInternalClient,
+		CampaignsDependenciesClient,
 		CampaignsApiGuard,
 		CampaignsAuthGuard,
 		CampaignsMessagingInternalGuard,

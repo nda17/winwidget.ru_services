@@ -11,7 +11,6 @@ import type { Request } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 
 export const IDENTITY_INTERNAL_SERVICES = [
-	'core',
 	'campaigns',
 	'reporting',
 	'widgets',
@@ -28,7 +27,6 @@ const PLACEHOLDERS = new Set([
 	'change_me',
 	'change-me',
 	'XYZXYZXYZ',
-	'identity_core_token',
 	'identity_campaigns_token',
 	'identity_reporting_token',
 	'identity_widgets_token',
@@ -37,7 +35,6 @@ const PLACEHOLDERS = new Set([
 	'identity_support_token',
 	'identity_operations_token',
 	'change_me_identity_operations_token_at_least_32_chars',
-	'ci_identity_core_token_at_least_32_chars',
 	'ci_identity_campaigns_token_at_least_32_chars',
 	'ci_identity_reporting_token_at_least_32_chars',
 	'ci_identity_widgets_token_at_least_32_chars',

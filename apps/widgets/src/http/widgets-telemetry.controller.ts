@@ -18,7 +18,7 @@ import {
 	WidgetsAuthGuard
 } from '../auth/widgets-auth.guard';
 import { parseWidgetType } from '../domain/widgets-domain.types';
-import type { IntrospectedWidgetsActor } from '../internal/core-internal.client';
+import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import { WidgetsTelemetryService } from '../telemetry/widgets-telemetry.service';
 import { RecordWidgetRuntimeEventDto } from './widgets.dto';
 import { CurrentWidgetsActor } from './widgets-http.util';

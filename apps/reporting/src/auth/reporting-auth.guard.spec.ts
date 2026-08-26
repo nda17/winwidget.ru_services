@@ -1,6 +1,6 @@
 import { ReportingAnalyticsController } from '../analytics/reporting-analytics.controller';
 import { ReportingDeliveryFailuresController } from '../delivery-failures/reporting-delivery-failures.controller';
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { IdentityIntrospectionClient } from '../internal/identity-introspection.client';
 import { ReportingMessagingOverviewController } from '../internal/reporting-messaging-overview.controller';
 import { ReportingRuntimeService } from '../runtime/reporting-runtime.service';
 import { DailySummarySettingsController } from '../settings/daily-summary-settings.controller';
@@ -35,13 +35,13 @@ const createContext = (
 	}) as unknown as ExecutionContext;
 
 describe('ReportingAdminGuard access matrix', () => {
-	const core = {
+	const identity = {
 		introspect: jest.fn()
 	};
 	const reflector = new Reflector();
 	const guard = new ReportingAdminGuard(
 		reflector,
-		core as unknown as CoreInternalClient
+		identity as unknown as IdentityIntrospectionClient
 	);
 
 	beforeEach(() => {
@@ -79,7 +79,7 @@ describe('ReportingAdminGuard access matrix', () => {
 	});
 
 	it('allows ADMIN to use the read-only analytics policy', async () => {
-		core.introspect.mockResolvedValue({
+		identity.introspect.mockResolvedValue({
 			active: true,
 			subject: 'admin-id',
 			sessionId: 'session-id',
@@ -100,7 +100,7 @@ describe('ReportingAdminGuard access matrix', () => {
 	});
 
 	it('rejects ADMIN without DEV on manual retry', async () => {
-		core.introspect.mockResolvedValue({
+		identity.introspect.mockResolvedValue({
 			active: true,
 			subject: 'admin-id',
 			sessionId: 'session-id',
@@ -119,7 +119,7 @@ describe('ReportingAdminGuard access matrix', () => {
 	});
 
 	it('allows DEV on manual retry without trusting forwarded roles', async () => {
-		core.introspect.mockResolvedValue({
+		identity.introspect.mockResolvedValue({
 			active: true,
 			subject: 'dev-id',
 			sessionId: 'session-id',
@@ -141,11 +141,11 @@ describe('ReportingAdminGuard access matrix', () => {
 				)
 			)
 		).resolves.toBe(true);
-		expect(core.introspect).toHaveBeenCalledWith('Bearer token');
+		expect(identity.introspect).toHaveBeenCalledWith('Bearer token');
 	});
 
 	it('fails closed when an endpoint has no explicit access policy', async () => {
-		core.introspect.mockResolvedValue({
+		identity.introspect.mockResolvedValue({
 			active: true,
 			subject: 'dev-id',
 			sessionId: 'session-id',
@@ -177,7 +177,7 @@ describe('ReportingAdminGuard access matrix', () => {
 		).rejects.toThrow(
 			new UnauthorizedException('Bearer token is required')
 		);
-		expect(core.introspect).not.toHaveBeenCalled();
+		expect(identity.introspect).not.toHaveBeenCalled();
 	});
 });
 
@@ -185,12 +185,14 @@ describe('Reporting messaging overview guards', () => {
 	const token = 'reporting-overview-internal-token-at-least-32-characters';
 	const guard = () =>
 		new ReportingMessagingInternalGuard({
-			get: jest.fn().mockReturnValue(token)
+			get: jest.fn((key: string) =>
+				key === 'REPORTING_OPERATIONS_TOKEN' ? token : undefined
+			)
 		} as unknown as ConfigService);
 	const internalContext = (
 		address: string,
 		suppliedToken: string | string[] | null = token,
-		service: string | string[] | undefined = 'core'
+		service: string | string[] | undefined = 'operations'
 	): ExecutionContext =>
 		({
 			switchToHttp: () => ({
@@ -216,7 +218,7 @@ describe('Reporting messaging overview guards', () => {
 	});
 
 	it.each(['127.0.0.1', '127.23.45.67', '::1', '::ffff:127.0.0.1'])(
-		'allows an authenticated Core caller on loopback %s',
+		'allows an authenticated Operations caller on loopback %s',
 		address => {
 			expect(guard().canActivate(internalContext(address))).toBe(true);
 		}
@@ -250,9 +252,22 @@ describe('Reporting messaging overview guards', () => {
 		expect(
 			() =>
 				new ReportingMessagingInternalGuard({
-					get: jest.fn().mockReturnValue('change_me')
+					get: jest.fn((key: string) =>
+						key === 'REPORTING_OPERATIONS_TOKEN' ? 'change_me' : undefined
+					)
 				} as unknown as ConfigService)
-		).toThrow('non-placeholder secret');
+		).toThrow('REPORTING_OPERATIONS_TOKEN');
+	});
+
+	it('does not accept the outbound Reporting-to-Operations credential', () => {
+		expect(
+			() =>
+				new ReportingMessagingInternalGuard({
+					get: jest.fn((key: string) =>
+						key === 'REPORTING_INTERNAL_TOKEN' ? token : undefined
+					)
+				} as unknown as ConfigService)
+		).toThrow('REPORTING_OPERATIONS_TOKEN');
 	});
 
 	it('rejects the endpoint outside the API process role', () => {

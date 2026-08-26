@@ -48,7 +48,7 @@ let appPort;
 let ownsTestData = false;
 let mutationIndex = 0;
 
-const coreServer = createCoreServer();
+const identityServer = createIdentityServer();
 const s3Server = createS3Server();
 const CASES = widgetCases();
 
@@ -63,7 +63,7 @@ try {
 	ownsTestData = true;
 	await prepareDatabase();
 
-	const corePort = await listenLoopback(coreServer);
+	const identityPort = await listenLoopback(identityServer);
 	const s3Port = await listenLoopback(s3Server);
 	appPort = await reservePort();
 	app = spawn('node', ['dist/src/main.js'], {
@@ -77,9 +77,8 @@ try {
 			WIDGETS_PROCESS_ROLE: 'api',
 			WIDGETS_LISTEN_HOST: '127.0.0.1',
 			WIDGETS_PORT: String(appPort),
-			WIDGETS_ASSETS_DIR: '../../public/widgets',
 			WIDGETS_INTERNAL_TOKEN: internalToken,
-			IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${corePort}`,
+			IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${identityPort}`,
 			IDENTITY_WIDGETS_TOKEN: identityToken,
 			IDENTITY_INTERNAL_TIMEOUT_MS: '2000',
 			WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: '86400000',
@@ -125,7 +124,9 @@ try {
 		await captureCleanupError(cleanupErrors, () => cleanupDatabase());
 	}
 	await captureCleanupError(cleanupErrors, () => prisma.$disconnect());
-	await captureCleanupError(cleanupErrors, () => closeServer(coreServer));
+	await captureCleanupError(cleanupErrors, () =>
+		closeServer(identityServer)
+	);
 	await captureCleanupError(cleanupErrors, () => closeServer(s3Server));
 	if (cleanupErrors.length) {
 		throw new Error(
@@ -1157,7 +1158,7 @@ async function cleanupDatabase() {
 	}
 }
 
-function createCoreServer() {
+function createIdentityServer() {
 	return createServer(async (request, response) => {
 		try {
 			if (
@@ -1204,7 +1205,7 @@ function createCoreServer() {
 		} catch (error) {
 			return sendJson(response, 500, {
 				message:
-					error instanceof Error ? error.message : 'fake Core failed'
+					error instanceof Error ? error.message : 'fake Identity failed'
 			});
 		}
 	});

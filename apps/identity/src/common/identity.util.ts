@@ -13,8 +13,7 @@ export function normalizeEmail(value: string): string {
 	return value.trim().toLowerCase();
 }
 
-// This intentionally preserves the Core contract, including international
-// values already accepted by the historical DTOs.
+// Keep international values already accepted by the public Identity API.
 export function normalizePhone(value: string): string {
 	const digits = value.replace(/\D/g, '');
 	if (

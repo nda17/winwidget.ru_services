@@ -128,8 +128,8 @@ const readRoutePathPrefix = (value: unknown, index: number): string => {
 		throw new Error(`${name} must be a non-empty string`);
 	}
 	if (
-		(value !== '/api/v1' && !value.startsWith('/api/v1/')) ||
-		(value.length > '/api/v1'.length && value.endsWith('/')) ||
+		!value.startsWith('/api/v1/') ||
+		value.endsWith('/') ||
 		value.includes('//') ||
 		value.includes('%') ||
 		value.includes('\\') ||
@@ -137,7 +137,7 @@ const readRoutePathPrefix = (value: unknown, index: number): string => {
 		value.includes('#')
 	) {
 		throw new Error(
-			`${name} must be /api/v1 or a canonical path below /api/v1 without a trailing slash`
+			`${name} must be a canonical path below /api/v1 without a trailing slash`
 		);
 	}
 

@@ -1,6 +1,7 @@
 /dist
 /node_modules
 /coverage
+/public/widgets
 
 .env
 .env.*

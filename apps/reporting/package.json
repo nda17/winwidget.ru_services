@@ -11,8 +11,6 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
 		"start": "node dist/src/main.js",
-		"start:backfill": "node dist/src/backfill/main.js",
-		"start:shadow-evidence": "node dist/src/shadow-evidence/main.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
 		"test:integration": "pnpm run build && node test/integration/reporting.integration.mjs",

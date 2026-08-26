@@ -8,10 +8,11 @@ import {
 import { Reflector } from '@nestjs/core';
 import { PlatformPrismaService } from '../prisma/platform-prisma.service';
 
-const PLATFORM_ALLOW_SHADOW = 'platform-allow-shadow';
+const PLATFORM_ALLOW_INACTIVE_OWNERSHIP =
+	'platform-allow-inactive-ownership';
 
-export const AllowPlatformShadow = () =>
-	SetMetadata(PLATFORM_ALLOW_SHADOW, true);
+export const AllowInactivePlatformOwnership = () =>
+	SetMetadata(PLATFORM_ALLOW_INACTIVE_OWNERSHIP, true);
 
 @Injectable()
 export class PlatformOwnershipService {
@@ -93,11 +94,12 @@ export class PlatformOwnershipGuard implements CanActivate {
 	) {}
 
 	async canActivate(context: ExecutionContext): Promise<boolean> {
-		const allowShadow = this.reflector.getAllAndOverride<boolean>(
-			PLATFORM_ALLOW_SHADOW,
-			[context.getHandler(), context.getClass()]
-		);
-		if (allowShadow) return true;
+		const allowInactiveOwnership =
+			this.reflector.getAllAndOverride<boolean>(
+				PLATFORM_ALLOW_INACTIVE_OWNERSHIP,
+				[context.getHandler(), context.getClass()]
+			);
+		if (allowInactiveOwnership) return true;
 		await this.ownership.assertActive();
 		return true;
 	}

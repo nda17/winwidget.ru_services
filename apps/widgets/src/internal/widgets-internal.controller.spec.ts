@@ -5,7 +5,7 @@ import {
 } from './widgets-internal.controller';
 
 describe('Widgets internal delivery failure DTOs', () => {
-	it('accepts the Core CUID actor identifier', async () => {
+	it('accepts the Identity CUID actor identifier', async () => {
 		const dto = new DeliveryFailureActionDto();
 		dto.actorId = 'cm0abc1230000qwertyuiopas';
 

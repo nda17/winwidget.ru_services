@@ -16,12 +16,7 @@
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",
 		"prisma:validate": "prisma validate --schema prisma/schema.prisma",
-		"prisma:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
-		"cutover:preflight": "node dist/src/cutover/main.js preflight",
-		"cutover:status": "node dist/src/cutover/main.js status",
-		"cutover:import": "node dist/src/cutover/main.js import",
-		"cutover:activate": "node dist/src/cutover/main.js activate",
-		"cutover:complete": "node dist/src/cutover/main.js complete"
+		"prisma:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma"
 	},
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1032.0",

@@ -107,9 +107,9 @@ export const createJwksFetch =
 export const createTestRoute = (
 	overrides: Partial<GatewayRouteConfig> = {}
 ): GatewayRouteConfig => ({
-	id: 'monolith',
-	pathPrefix: '/api/v1',
-	upstreamUrl: new URL('http://127.0.0.1:4200'),
+	id: 'test-route',
+	pathPrefix: '/api/v1/test',
+	upstreamUrl: new URL('http://127.0.0.1:4299'),
 	authPolicy: 'optional',
 	timeoutMs: 1000,
 	...overrides

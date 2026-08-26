@@ -1,4 +1,4 @@
-import type { IntrospectedActor } from '../internal/core-internal.client';
+import type { IntrospectedActor } from '../internal/campaigns-dependencies.client';
 import type { Request } from 'express';
 
 export interface CampaignsRequest extends Request {

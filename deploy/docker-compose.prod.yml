@@ -1,11 +1,5 @@
 name: ${COMPOSE_PROJECT_NAME:-winwidget}
 
-x-runtime-env: &runtime-env
-  APP_REVISION: ${APP_REVISION:-unknown}
-  MODE: ${MODE:-production}
-  NODE_ENV: production
-  DATABASE_URL_PRODUCTION: ${DATABASE_URL_PRODUCTION:-}
-
 x-smtp-env: &smtp-env
   SMTP_LOGIN: ${SMTP_LOGIN}
   SMTP_PASSWORD: ${SMTP_PASSWORD}
@@ -13,54 +7,6 @@ x-smtp-env: &smtp-env
   SMTP_CONNECTION_TIMEOUT_MS: ${SMTP_CONNECTION_TIMEOUT_MS:-5000}
   SMTP_GREETING_TIMEOUT_MS: ${SMTP_GREETING_TIMEOUT_MS:-5000}
   SMTP_SOCKET_TIMEOUT_MS: ${SMTP_SOCKET_TIMEOUT_MS:-15000}
-
-x-api-env: &api-env
-  <<: *runtime-env
-  PORT: ${PORT:-4200}
-  API_LISTEN_HOST: ${API_LISTEN_HOST:-127.0.0.1}
-  TRUST_PROXY: ${TRUST_PROXY:-loopback}
-  PRODUCTION_HOST: ${PRODUCTION_HOST}
-  AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
-  TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
-  JWT_ISSUER: ${JWT_ISSUER}
-  JWT_AUDIENCE: ${JWT_AUDIENCE}
-  JWT_ACCESS_TTL_SECONDS: ${JWT_ACCESS_TTL_SECONDS:-900}
-  JWT_CLOCK_TOLERANCE_SECONDS: ${JWT_CLOCK_TOLERANCE_SECONDS:-5}
-  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
-  TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
-  TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME}
-  RABBITMQ_MANAGEMENT_URL: ${RABBITMQ_MANAGEMENT_URL:-http://127.0.0.1:15672}
-  RABBITMQ_MONITOR_USER: ${RABBITMQ_MONITOR_USER}
-  RABBITMQ_MONITOR_PASSWORD: ${RABBITMQ_MONITOR_PASSWORD}
-  RABBITMQ_VHOST: ${RABBITMQ_VHOST:-winwidget}
-  MESSAGING_ALERTS_ENABLED: ${MESSAGING_ALERTS_ENABLED:-true}
-  MESSAGING_ACTIVITY_STALE_MS: ${MESSAGING_ACTIVITY_STALE_MS:-300000}
-  MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD: ${MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD:-100}
-  NOTIFICATION_DELIVERY_INTERNAL_URL: ${NOTIFICATION_DELIVERY_INTERNAL_URL:-http://127.0.0.1:4401/internal/notification-delivery}
-  NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ${NOTIFICATION_DELIVERY_INTERNAL_TOKEN:?NOTIFICATION_DELIVERY_INTERNAL_TOKEN is required}
-  NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS: ${NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS:-5000}
-  CAMPAIGNS_INTERNAL_TOKEN: ${CAMPAIGNS_INTERNAL_TOKEN:?CAMPAIGNS_INTERNAL_TOKEN is required}
-  CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE: ${CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE:-500}
-  CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: ${CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS:-300000}
-  REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
-  WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
-  WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
-  BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
-  BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
-  BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
-  IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
-  IDENTITY_CORE_TOKEN: ${IDENTITY_CORE_TOKEN:?IDENTITY_CORE_TOKEN is required}
-  CORE_IDENTITY_TOKEN: ${CORE_IDENTITY_TOKEN:?CORE_IDENTITY_TOKEN is required}
-  IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
-  PLATFORM_INTERNAL_BASE_URL: ${PLATFORM_INTERNAL_BASE_URL:-http://127.0.0.1:5000}
-  PLATFORM_CORE_TOKEN: ${PLATFORM_CORE_TOKEN:?PLATFORM_CORE_TOKEN is required}
-  PLATFORM_INTERNAL_TIMEOUT_MS: ${PLATFORM_INTERNAL_TIMEOUT_MS:-5000}
-  SUPPORT_CORE_TOKEN: ${SUPPORT_CORE_TOKEN:?SUPPORT_CORE_TOKEN is required}
-  SUPPORT_INTERNAL_BASE_URL: ${SUPPORT_INTERNAL_BASE_URL:-http://127.0.0.1:5100}
-  DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
-  DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
-  DATABASE_RESTORE_PRODUCTION_ENABLED: ${DATABASE_RESTORE_PRODUCTION_ENABLED:-false}
-  DATABASE_RESTORE_PRODUCTION_PERMIT: ${DATABASE_RESTORE_PRODUCTION_PERMIT:-}
 
 x-api-gateway-env: &api-gateway-env
   APP_REVISION: ${APP_REVISION:-unknown}
@@ -82,35 +28,19 @@ x-api-gateway-env: &api-gateway-env
   JWKS_MAX_BYTES: ${JWKS_MAX_BYTES:-262144}
   SHUTDOWN_GRACE_MS: ${GATEWAY_SHUTDOWN_GRACE_MS:-10000}
 
-x-integration-worker-env: &integration-worker-env
-  <<: *runtime-env
-  IDENTITY_CORE_TOKEN: ${IDENTITY_CORE_TOKEN:?IDENTITY_CORE_TOKEN is required}
-  CORE_IDENTITY_TOKEN: ${CORE_IDENTITY_TOKEN:?CORE_IDENTITY_TOKEN is required}
-  TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
-  RABBITMQ_URL: ${RABBITMQ_INTEGRATION_WORKER_URL}
-  RABBITMQ_CONNECTION_NAME: winwidget-integration-worker
-  RABBITMQ_ASSERT_TOPOLOGY: 'false'
-  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
-  RABBITMQ_WORKER_PREFETCH: ${RABBITMQ_WORKER_PREFETCH:-10}
-  MESSAGING_SERVICE_NAME: integration-worker
-  INTEGRATION_WORKER_KINDS: ${INTEGRATION_WORKER_KINDS:-billing-payment-projection,billing-subscription-projection,billing-affiliate-projection}
-  INTEGRATION_RECEIPT_RETENTION_DAYS: ${INTEGRATION_RECEIPT_RETENTION_DAYS:-90}
-  INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS: ${INTEGRATION_FAILURE_DETAIL_RETENTION_DAYS:-30}
-  SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
-  SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
 x-notification-delivery-env: &notification-delivery-env
   <<: *smtp-env
   APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
   MODE: ${MODE:-production}
   NODE_ENV: production
   NOTIFICATION_DELIVERY_DATABASE_URL: ${NOTIFICATION_DELIVERY_DATABASE_URL:?NOTIFICATION_DELIVERY_DATABASE_URL is required}
-  NOTIFICATION_DELIVERY_INTERNAL_TOKEN: ${NOTIFICATION_DELIVERY_INTERNAL_TOKEN:?NOTIFICATION_DELIVERY_INTERNAL_TOKEN is required}
+  NOTIFICATION_DELIVERY_OPERATIONS_TOKEN: ${NOTIFICATION_DELIVERY_OPERATIONS_TOKEN:?NOTIFICATION_DELIVERY_OPERATIONS_TOKEN is required}
   NOTIFICATION_DELIVERY_LISTEN_HOST: ${NOTIFICATION_DELIVERY_LISTEN_HOST:-127.0.0.1}
   TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
   TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
   RABBITMQ_URL: ${RABBITMQ_NOTIFICATION_DELIVERY_URL:?RABBITMQ_NOTIFICATION_DELIVERY_URL is required}
   RABBITMQ_CONNECTION_NAME: winwidget-notification-delivery-worker
-  RABBITMQ_ASSERT_TOPOLOGY: 'false'
+  RABBITMQ_ASSERT_TOPOLOGY: 'true'
   RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
   MESSAGING_SERVICE_NAME: notification-delivery-worker
   NOTIFICATION_DELIVERY_HEALTH_PORT: ${NOTIFICATION_DELIVERY_HEALTH_PORT:-4401}
@@ -127,8 +57,8 @@ x-campaigns-env: &campaigns-env
   CAMPAIGNS_PROCESS_ROLE: ${CAMPAIGNS_PROCESS_ROLE:-all}
   CAMPAIGNS_LISTEN_HOST: ${CAMPAIGNS_LISTEN_HOST:-127.0.0.1}
   CAMPAIGNS_HEALTH_PORT: ${CAMPAIGNS_HEALTH_PORT:-4500}
-  CAMPAIGNS_CORE_INTERNAL_BASE_URL: ${CAMPAIGNS_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
-  CAMPAIGNS_INTERNAL_TOKEN: ${CAMPAIGNS_INTERNAL_TOKEN:?CAMPAIGNS_INTERNAL_TOKEN is required}
+  CAMPAIGNS_INTERNAL_BASE_URL: ${CAMPAIGNS_INTERNAL_BASE_URL:-http://127.0.0.1:4500}
+  CAMPAIGNS_OPERATIONS_TOKEN: ${CAMPAIGNS_OPERATIONS_TOKEN:?CAMPAIGNS_OPERATIONS_TOKEN is required}
   CAMPAIGNS_INTERNAL_TIMEOUT_MS: ${CAMPAIGNS_INTERNAL_TIMEOUT_MS:-10000}
   CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS: ${CAMPAIGNS_AUDIENCE_EXPORT_TIMEOUT_MS:-300000}
   CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE: ${CAMPAIGNS_AUDIENCE_IMPORT_BATCH_SIZE:-1000}
@@ -137,7 +67,6 @@ x-campaigns-env: &campaigns-env
   IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
   BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
   BILLING_CAMPAIGNS_TOKEN: ${BILLING_CAMPAIGNS_TOKEN:?BILLING_CAMPAIGNS_TOKEN is required}
-  BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
   CAMPAIGNS_PREFETCH: ${CAMPAIGNS_PREFETCH:-10}
   CAMPAIGNS_EMAIL_RATE_PER_SECOND: ${CAMPAIGNS_EMAIL_RATE_PER_SECOND:-10}
   CAMPAIGNS_TELEGRAM_RATE_PER_SECOND: ${CAMPAIGNS_TELEGRAM_RATE_PER_SECOND:-5}
@@ -159,8 +88,9 @@ x-reporting-env: &reporting-env
   REPORTING_PROCESS_ROLE: ${REPORTING_PROCESS_ROLE:-all}
   REPORTING_LISTEN_HOST: ${REPORTING_LISTEN_HOST:-127.0.0.1}
   REPORTING_PORT: ${REPORTING_PORT:-4600}
-  REPORTING_CORE_INTERNAL_BASE_URL: ${REPORTING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
+  OPERATIONS_INTERNAL_BASE_URL: ${OPERATIONS_INTERNAL_BASE_URL:-http://127.0.0.1:5200}
   REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
+  REPORTING_OPERATIONS_TOKEN: ${REPORTING_OPERATIONS_TOKEN:?REPORTING_OPERATIONS_TOKEN is required}
   REPORTING_INTERNAL_TIMEOUT_MS: ${REPORTING_INTERNAL_TIMEOUT_MS:-10000}
   IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
   IDENTITY_REPORTING_TOKEN: ${IDENTITY_REPORTING_TOKEN:?IDENTITY_REPORTING_TOKEN is required}
@@ -185,8 +115,8 @@ x-widgets-env: &widgets-env
   WIDGETS_PROCESS_ROLE: ${WIDGETS_PROCESS_ROLE:-all}
   WIDGETS_LISTEN_HOST: ${WIDGETS_LISTEN_HOST:-127.0.0.1}
   WIDGETS_PORT: ${WIDGETS_PORT:-4700}
-  WIDGETS_CORE_INTERNAL_BASE_URL: ${WIDGETS_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
   WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
+  WIDGETS_OPERATIONS_TOKEN: ${WIDGETS_OPERATIONS_TOKEN:?WIDGETS_OPERATIONS_TOKEN is required}
   WIDGETS_IDENTITY_TOKEN: ${WIDGETS_IDENTITY_TOKEN:?WIDGETS_IDENTITY_TOKEN is required}
   WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-10000}
   IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
@@ -279,81 +209,12 @@ x-operations-env: &operations-env
   OPERATIONS_API_PORT: ${OPERATIONS_API_PORT:-5200}
   OPERATIONS_WORKER_PORT: ${OPERATIONS_WORKER_PORT:-5201}
   OPERATIONS_OUTBOX_PUBLISHER_PORT: ${OPERATIONS_OUTBOX_PUBLISHER_PORT:-5202}
+  OPERATIONS_RESTORE_WORKER_PORT: ${OPERATIONS_RESTORE_WORKER_PORT:-5203}
   OPERATIONS_OUTBOX_BATCH_SIZE: ${OPERATIONS_OUTBOX_BATCH_SIZE:-50}
   OPERATIONS_OUTBOX_POLL_INTERVAL_MS: ${OPERATIONS_OUTBOX_POLL_INTERVAL_MS:-1000}
   OPERATIONS_AUDIT_RECEIPT_LEASE_MS: ${OPERATIONS_AUDIT_RECEIPT_LEASE_MS:-60000}
   OPERATIONS_AUDIT_RETRY_DELAY_MS: ${OPERATIONS_AUDIT_RETRY_DELAY_MS:-30000}
   OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS: ${OPERATIONS_AUDIT_MAX_RETRY_ATTEMPTS:-4}
-
-x-maintenance-worker-env: &maintenance-worker-env
-  <<: *runtime-env
-  APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
-  DATABASE_URL_PRODUCTION: ${MAINTENANCE_DATABASE_URL_PRODUCTION:?MAINTENANCE_DATABASE_URL_PRODUCTION is required}
-  NOTIFICATION_DELIVERY_BACKUP_URL: ${NOTIFICATION_DELIVERY_BACKUP_URL:?NOTIFICATION_DELIVERY_BACKUP_URL is required}
-  CAMPAIGNS_BACKUP_URL: ${CAMPAIGNS_BACKUP_URL:?CAMPAIGNS_BACKUP_URL is required}
-  REPORTING_BACKUP_URL: ${REPORTING_BACKUP_URL:?REPORTING_BACKUP_URL is required}
-  WIDGETS_BACKUP_URL: ${WIDGETS_BACKUP_URL:?WIDGETS_BACKUP_URL is required}
-  BILLING_BACKUP_URL: ${BILLING_BACKUP_URL:?BILLING_BACKUP_URL is required}
-  IDENTITY_BACKUP_URL: ${IDENTITY_BACKUP_URL:?IDENTITY_BACKUP_URL is required}
-  PLATFORM_BACKUP_URL: ${PLATFORM_BACKUP_URL:?PLATFORM_BACKUP_URL is required}
-  SUPPORT_BACKUP_URL: ${SUPPORT_BACKUP_URL:?SUPPORT_BACKUP_URL is required}
-  OPERATIONS_BACKUP_URL: ${OPERATIONS_BACKUP_URL:?OPERATIONS_BACKUP_URL is required}
-  TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN}
-  TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
-  RABBITMQ_URL: ${RABBITMQ_MAINTENANCE_WORKER_URL}
-  RABBITMQ_CONNECTION_NAME: winwidget-maintenance-worker
-  RABBITMQ_ASSERT_TOPOLOGY: 'false'
-  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
-  MAINTENANCE_WORKER_PREFETCH: ${MAINTENANCE_WORKER_PREFETCH:-1}
-  MAINTENANCE_HEALTH_PORT: ${MAINTENANCE_HEALTH_PORT:-4300}
-  MESSAGING_SERVICE_NAME: maintenance-worker
-  MAINTENANCE_WORKER_KINDS: ${MAINTENANCE_WORKER_KINDS:-database-backup}
-  SCHEDULED_JOB_POLL_INTERVAL_MS: ${SCHEDULED_JOB_POLL_INTERVAL_MS:-30000}
-  SCHEDULED_JOB_LEASE_MS: ${SCHEDULED_JOB_LEASE_MS:-120000}
-  SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS: ${SCHEDULED_JOB_LEASE_RENEW_INTERVAL_MS:-30000}
-
-x-database-restore-worker-env: &database-restore-worker-env
-  APP_REVISION: ${DATABASE_RESTORE_REVISION:?DATABASE_RESTORE_REVISION is required}
-  NODE_ENV: production
-  DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget/database-restores
-  DATABASE_RESTORE_QUEUE_SECRET: ${DATABASE_RESTORE_QUEUE_SECRET:?DATABASE_RESTORE_QUEUE_SECRET is required}
-  DATABASE_RESTORE_POLL_INTERVAL_MS: ${DATABASE_RESTORE_POLL_INTERVAL_MS:-1000}
-  DATABASE_RESTORE_COMMAND_TIMEOUT_MS: ${DATABASE_RESTORE_COMMAND_TIMEOUT_MS:-1800000}
-  DATABASE_RESTORE_MIGRATIONS_ROOT: /app
-  DATABASE_RESTORE_NOTIFICATION_DELIVERY_PORT: ${NOTIFICATION_DELIVERY_POSTGRES_PORT:?NOTIFICATION_DELIVERY_POSTGRES_PORT is required}
-  DATABASE_RESTORE_CAMPAIGNS_PORT: ${CAMPAIGNS_POSTGRES_PORT:?CAMPAIGNS_POSTGRES_PORT is required}
-  DATABASE_RESTORE_REPORTING_PORT: ${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}
-  DATABASE_RESTORE_WIDGETS_PORT: ${WIDGETS_POSTGRES_PORT:?WIDGETS_POSTGRES_PORT is required}
-  DATABASE_RESTORE_BILLING_PORT: ${BILLING_POSTGRES_PORT:?BILLING_POSTGRES_PORT is required}
-  DATABASE_RESTORE_IDENTITY_PORT: ${IDENTITY_POSTGRES_PORT:?IDENTITY_POSTGRES_PORT is required}
-  DATABASE_RESTORE_PLATFORM_PORT: ${PLATFORM_POSTGRES_PORT:?PLATFORM_POSTGRES_PORT is required}
-  DATABASE_RESTORE_SUPPORT_PORT: ${SUPPORT_POSTGRES_PORT:?SUPPORT_POSTGRES_PORT is required}
-  DATABASE_RESTORE_OPERATIONS_PORT: ${OPERATIONS_POSTGRES_PORT:?OPERATIONS_POSTGRES_PORT is required}
-  DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/notification-delivery-admin-password
-  DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/campaigns-admin-password
-  DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/reporting-admin-password
-  DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/widgets-admin-password
-  DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/billing-admin-password
-  DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/identity-admin-password
-  DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/platform-admin-password
-  DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/support-admin-password
-  DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: /run/database-restore-secrets/operations-admin-password
-
-x-outbox-publisher-env: &outbox-publisher-env
-  <<: *runtime-env
-  RABBITMQ_URL: ${RABBITMQ_PUBLISHER_URL}
-  RABBITMQ_CONNECTION_NAME: winwidget-outbox-publisher
-  RABBITMQ_ASSERT_TOPOLOGY: 'true'
-  RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
-  MESSAGING_SERVICE_NAME: outbox-publisher
-  OUTBOX_BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
-  OUTBOX_POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
-  OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-7}
-
-x-migration-env: &migration-env
-  APP_REVISION: ${APP_REVISION:-unknown}
-  NODE_ENV: production
-  DATABASE_URL: ${DATABASE_MIGRATION_URL_PRODUCTION:?DATABASE_MIGRATION_URL_PRODUCTION is required}
 
 x-notification-delivery-migration-env: &notification-delivery-migration-env
   APP_REVISION: ${NOTIFICATION_DELIVERY_REVISION:?NOTIFICATION_DELIVERY_REVISION is required}
@@ -797,7 +658,7 @@ services:
     restart: unless-stopped
 
   rabbitmq:
-    image: rabbitmq:4.2-management-alpine
+    image: rabbitmq:4.2.9-management-alpine@sha256:0ab90fc05c41e9d2d8f11af5036e466c364adf5085ed83c477ab41aec0bdde86
     hostname: winwidget-rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_ADMIN_USER}
@@ -815,37 +676,8 @@ services:
       retries: 12
     restart: unless-stopped
 
-  api:
-    image: winwidget-api:${APP_VERSION:-latest}
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      args:
-        APP_REVISION: ${APP_REVISION:-unknown}
-    environment: *api-env
-    network_mode: host
-    extra_hosts:
-      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
-    volumes:
-      - type: bind
-        source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
-        target: /var/lib/winwidget/database-restores
-    healthcheck:
-      test:
-        [
-          'CMD',
-          'node',
-          '-e',
-          "fetch('http://127.0.0.1:'+(process.env.PORT||4200)+'/api/v1/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    stop_grace_period: 30s
-    restart: unless-stopped
-
   api-gateway:
-    image: winwidget-api-gateway:${APP_VERSION:-latest}
+    image: winwidget-api-gateway:${APP_VERSION:?APP_VERSION is required}
     build:
       context: ../apps/api-gateway
       dockerfile: Dockerfile
@@ -854,8 +686,6 @@ services:
     environment: *api-gateway-env
     network_mode: host
     depends_on:
-      api:
-        condition: service_healthy
       widgets-service:
         condition: service_healthy
       identity-api:
@@ -876,30 +706,6 @@ services:
     stop_grace_period: 15s
     restart: unless-stopped
 
-  outbox-publisher:
-    image: winwidget-api:${APP_VERSION:-latest}
-    environment: *outbox-publisher-env
-    network_mode: host
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-    command: ['node', 'dist/src/outbox-publisher-main.js']
-    stop_grace_period: 30s
-    restart: unless-stopped
-
-  integration-worker:
-    image: winwidget-api:${APP_VERSION:-latest}
-    environment: *integration-worker-env
-    network_mode: host
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      outbox-publisher:
-        condition: service_started
-    command: ['node', 'dist/src/integration-worker-main.js']
-    stop_grace_period: 30s
-    restart: unless-stopped
-
   notification-delivery-worker:
     image: ${NOTIFICATION_DELIVERY_IMAGE:?NOTIFICATION_DELIVERY_IMAGE is required}
     build:
@@ -914,8 +720,6 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
-      outbox-publisher:
-        condition: service_started
     healthcheck:
       test:
         [
@@ -1041,11 +845,9 @@ services:
       BILLING_PROCESS_ROLE: api
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS_ALLOWED_ORIGINS is required}
       TRUST_PROXY: ${TRUST_PROXY:-loopback}
-      BILLING_CORE_INTERNAL_BASE_URL: ${BILLING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
-      BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
+      BILLING_OPERATIONS_TOKEN: ${BILLING_OPERATIONS_TOKEN:?BILLING_OPERATIONS_TOKEN is required}
       BILLING_CAMPAIGNS_TOKEN: ${BILLING_CAMPAIGNS_TOKEN:?BILLING_CAMPAIGNS_TOKEN is required}
       BILLING_IDENTITY_TOKEN: ${BILLING_IDENTITY_TOKEN:?BILLING_IDENTITY_TOKEN is required}
-      BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
       WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
       WIDGETS_INTERNAL_TOKEN: ${WIDGETS_INTERNAL_TOKEN:?WIDGETS_INTERNAL_TOKEN is required}
       WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-5000}
@@ -1114,9 +916,6 @@ services:
     environment:
       <<: *billing-env
       BILLING_PROCESS_ROLE: worker
-      BILLING_CORE_INTERNAL_BASE_URL: ${BILLING_CORE_INTERNAL_BASE_URL:-http://127.0.0.1:4200}
-      BILLING_INTERNAL_TOKEN: ${BILLING_INTERNAL_TOKEN:?BILLING_INTERNAL_TOKEN is required}
-      BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
       IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
       IDENTITY_BILLING_TOKEN: ${IDENTITY_BILLING_TOKEN:?IDENTITY_BILLING_TOKEN is required}
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
@@ -1257,8 +1056,6 @@ services:
       TELEGRAM_AUTH_BOT_TOKEN: ${TELEGRAM_AUTH_BOT_TOKEN:?TELEGRAM_AUTH_BOT_TOKEN is required}
       TELEGRAM_AUTH_BOT_USERNAME: ${TELEGRAM_AUTH_BOT_USERNAME:?TELEGRAM_AUTH_BOT_USERNAME is required}
       TELEGRAM_AUTH_BOT_WEBHOOK_SECRET: ${TELEGRAM_AUTH_BOT_WEBHOOK_SECRET:?TELEGRAM_AUTH_BOT_WEBHOOK_SECRET is required}
-      IDENTITY_CORE_TOKEN: ${IDENTITY_CORE_TOKEN:?IDENTITY_CORE_TOKEN is required}
-      CORE_IDENTITY_TOKEN: ${CORE_IDENTITY_TOKEN:?CORE_IDENTITY_TOKEN is required}
       IDENTITY_CAMPAIGNS_TOKEN: ${IDENTITY_CAMPAIGNS_TOKEN:?IDENTITY_CAMPAIGNS_TOKEN is required}
       IDENTITY_REPORTING_TOKEN: ${IDENTITY_REPORTING_TOKEN:?IDENTITY_REPORTING_TOKEN is required}
       IDENTITY_WIDGETS_TOKEN: ${IDENTITY_WIDGETS_TOKEN:?IDENTITY_WIDGETS_TOKEN is required}
@@ -1269,7 +1066,6 @@ services:
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
       BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
       BILLING_IDENTITY_TOKEN: ${BILLING_IDENTITY_TOKEN:?BILLING_IDENTITY_TOKEN is required}
-      BILLING_INTERNAL_TIMEOUT_MS: ${BILLING_INTERNAL_TIMEOUT_MS:-10000}
       WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
       WIDGETS_IDENTITY_TOKEN: ${WIDGETS_IDENTITY_TOKEN:?WIDGETS_IDENTITY_TOKEN is required}
       WIDGETS_INTERNAL_TIMEOUT_MS: ${WIDGETS_INTERNAL_TIMEOUT_MS:-5000}
@@ -1415,7 +1211,7 @@ services:
       IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
       IDENTITY_PLATFORM_TOKEN: ${IDENTITY_PLATFORM_TOKEN:?IDENTITY_PLATFORM_TOKEN is required}
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
-      PLATFORM_CORE_TOKEN: ${PLATFORM_CORE_TOKEN:?PLATFORM_CORE_TOKEN is required}
+      PLATFORM_OPERATIONS_TOKEN: ${PLATFORM_OPERATIONS_TOKEN:?PLATFORM_OPERATIONS_TOKEN is required}
     network_mode: host
     command: ['node', 'dist/src/main.js']
     healthcheck:
@@ -1510,7 +1306,7 @@ services:
       IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
       IDENTITY_SUPPORT_TOKEN: ${IDENTITY_SUPPORT_TOKEN:?IDENTITY_SUPPORT_TOKEN is required}
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
-      SUPPORT_CORE_TOKEN: ${SUPPORT_CORE_TOKEN:?SUPPORT_CORE_TOKEN is required}
+      SUPPORT_OPERATIONS_TOKEN: ${SUPPORT_OPERATIONS_TOKEN:?SUPPORT_OPERATIONS_TOKEN is required}
     network_mode: host
     extra_hosts:
       - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
@@ -1559,7 +1355,34 @@ services:
       IDENTITY_OPERATIONS_TOKEN: ${IDENTITY_OPERATIONS_TOKEN:?IDENTITY_OPERATIONS_TOKEN is required}
       OPERATIONS_IDENTITY_TOKEN: ${OPERATIONS_IDENTITY_TOKEN:?OPERATIONS_IDENTITY_TOKEN is required}
       IDENTITY_INTERNAL_TIMEOUT_MS: ${IDENTITY_INTERNAL_TIMEOUT_MS:-5000}
+      NOTIFICATION_DELIVERY_INTERNAL_URL: ${NOTIFICATION_DELIVERY_INTERNAL_URL:-http://127.0.0.1:4401}
+      NOTIFICATION_DELIVERY_OPERATIONS_TOKEN: ${NOTIFICATION_DELIVERY_OPERATIONS_TOKEN:?NOTIFICATION_DELIVERY_OPERATIONS_TOKEN is required}
+      CAMPAIGNS_INTERNAL_BASE_URL: ${CAMPAIGNS_INTERNAL_BASE_URL:-http://127.0.0.1:4500}
+      CAMPAIGNS_OPERATIONS_TOKEN: ${CAMPAIGNS_OPERATIONS_TOKEN:?CAMPAIGNS_OPERATIONS_TOKEN is required}
+      REPORTING_INTERNAL_BASE_URL: ${REPORTING_INTERNAL_BASE_URL:-http://127.0.0.1:4600}
+      REPORTING_INTERNAL_TOKEN: ${REPORTING_INTERNAL_TOKEN:?REPORTING_INTERNAL_TOKEN is required}
+      REPORTING_OPERATIONS_TOKEN: ${REPORTING_OPERATIONS_TOKEN:?REPORTING_OPERATIONS_TOKEN is required}
+      WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
+      WIDGETS_OPERATIONS_TOKEN: ${WIDGETS_OPERATIONS_TOKEN:?WIDGETS_OPERATIONS_TOKEN is required}
+      BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
+      BILLING_OPERATIONS_TOKEN: ${BILLING_OPERATIONS_TOKEN:?BILLING_OPERATIONS_TOKEN is required}
+      PLATFORM_INTERNAL_BASE_URL: ${PLATFORM_INTERNAL_BASE_URL:-http://127.0.0.1:5000}
+      PLATFORM_OPERATIONS_TOKEN: ${PLATFORM_OPERATIONS_TOKEN:?PLATFORM_OPERATIONS_TOKEN is required}
+      SUPPORT_INTERNAL_BASE_URL: ${SUPPORT_INTERNAL_BASE_URL:-http://127.0.0.1:5100}
+      SUPPORT_OPERATIONS_TOKEN: ${SUPPORT_OPERATIONS_TOKEN:?SUPPORT_OPERATIONS_TOKEN is required}
+      RABBITMQ_MANAGEMENT_URL: ${RABBITMQ_MANAGEMENT_URL:-http://127.0.0.1:15672}
+      RABBITMQ_MONITOR_USER: ${RABBITMQ_MONITOR_USER:?RABBITMQ_MONITOR_USER is required}
+      RABBITMQ_MONITOR_PASSWORD: ${RABBITMQ_MONITOR_PASSWORD:?RABBITMQ_MONITOR_PASSWORD is required}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-winwidget}
+      TELEGRAM_INFO_BOT_CONFIGURED: 'true'
+      TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME:?TELEGRAM_INFO_BOT_USERNAME is required}
+      DATABASE_RESTORE_ENABLED: ${DATABASE_RESTORE_ENABLED:-false}
+      DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget-operations/restores
     network_mode: host
+    volumes:
+      - type: bind
+        source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
+        target: /var/lib/winwidget-operations/restores
     command: ['node', 'dist/src/main.js']
     healthcheck:
       test:
@@ -1646,7 +1469,22 @@ services:
       RABBITMQ_ASSERT_TOPOLOGY: 'true'
       RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
       MESSAGING_SERVICE_NAME: operations-worker
+      TELEGRAM_INFO_BOT_TOKEN: ${TELEGRAM_INFO_BOT_TOKEN:?TELEGRAM_INFO_BOT_TOKEN is required}
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:?TELEGRAM_API_BASE_URL is required}
+      NOTIFICATION_DELIVERY_BACKUP_URL: ${NOTIFICATION_DELIVERY_BACKUP_URL:?NOTIFICATION_DELIVERY_BACKUP_URL is required}
+      CAMPAIGNS_BACKUP_URL: ${CAMPAIGNS_BACKUP_URL:?CAMPAIGNS_BACKUP_URL is required}
+      REPORTING_BACKUP_URL: ${REPORTING_BACKUP_URL:?REPORTING_BACKUP_URL is required}
+      WIDGETS_BACKUP_URL: ${WIDGETS_BACKUP_URL:?WIDGETS_BACKUP_URL is required}
+      BILLING_BACKUP_URL: ${BILLING_BACKUP_URL:?BILLING_BACKUP_URL is required}
+      IDENTITY_BACKUP_URL: ${IDENTITY_BACKUP_URL:?IDENTITY_BACKUP_URL is required}
+      PLATFORM_BACKUP_URL: ${PLATFORM_BACKUP_URL:?PLATFORM_BACKUP_URL is required}
+      SUPPORT_BACKUP_URL: ${SUPPORT_BACKUP_URL:?SUPPORT_BACKUP_URL is required}
+      OPERATIONS_BACKUP_URL: ${OPERATIONS_BACKUP_URL:?OPERATIONS_BACKUP_URL is required}
     network_mode: host
+    extra_hosts:
+      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1760,56 +1598,56 @@ services:
         max-size: 10m
         max-file: '3'
 
-  maintenance-worker:
-    image: ${MAINTENANCE_IMAGE:-winwidget-maintenance:latest}
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: maintenance-runner
-      args:
-        APP_REVISION: ${MAINTENANCE_REVISION:-${APP_REVISION:-unknown}}
-    environment: *maintenance-worker-env
-    network_mode: host
-    extra_hosts:
-      - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
-    tmpfs:
-      - /tmp:size=64m,mode=1777
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      outbox-publisher:
-        condition: service_started
-    healthcheck:
-      test:
-        [
-          'CMD',
-          'node',
-          '-e',
-          "fetch('http://127.0.0.1:'+(process.env.MAINTENANCE_HEALTH_PORT||4300)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    stop_grace_period: 30s
-    restart: unless-stopped
-
-  database-restore-worker:
-    image: ${DATABASE_RESTORE_IMAGE:?DATABASE_RESTORE_IMAGE is required}
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: database-restore-runner
-      args:
-        APP_REVISION: ${DATABASE_RESTORE_REVISION:?DATABASE_RESTORE_REVISION is required}
+  operations-restore-worker:
+    image: ${OPERATIONS_IMAGE:?OPERATIONS_IMAGE is required}
     labels:
-      com.winwidget.owner: maintenance
+      com.winwidget.owner: operations
       com.winwidget.purpose: database-restore-worker
-    environment: *database-restore-worker-env
+    environment:
+      APP_REVISION: ${OPERATIONS_REVISION:?OPERATIONS_REVISION is required}
+      NODE_ENV: production
+      MODE: ${MODE:-production}
+      OPERATIONS_DATABASE_URL: ${OPERATIONS_DATABASE_URL:?OPERATIONS_DATABASE_URL is required}
+      OPERATIONS_LISTEN_HOST: ${OPERATIONS_LISTEN_HOST:-127.0.0.1}
+      OPERATIONS_RESTORE_WORKER_PORT: ${OPERATIONS_RESTORE_WORKER_PORT:-5203}
+      OPERATIONS_PROCESS_ROLE: restore-worker
+      RABBITMQ_URL: ${RABBITMQ_OPERATIONS_RESTORE_WORKER_URL:?RABBITMQ_OPERATIONS_RESTORE_WORKER_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-operations-restore-worker
+      RABBITMQ_ASSERT_TOPOLOGY: 'true'
+      RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
+      DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget-operations/restores
+      NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER: ${NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER:?NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER is required}
+      NOTIFICATION_DELIVERY_POSTGRES_PORT: ${NOTIFICATION_DELIVERY_POSTGRES_PORT:?NOTIFICATION_DELIVERY_POSTGRES_PORT is required}
+      DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-notification-delivery-admin-password
+      CAMPAIGNS_POSTGRES_ADMIN_USER: ${CAMPAIGNS_POSTGRES_ADMIN_USER:?CAMPAIGNS_POSTGRES_ADMIN_USER is required}
+      CAMPAIGNS_POSTGRES_PORT: ${CAMPAIGNS_POSTGRES_PORT:?CAMPAIGNS_POSTGRES_PORT is required}
+      DATABASE_RESTORE_CAMPAIGNS_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-campaigns-admin-password
+      REPORTING_POSTGRES_ADMIN_USER: ${REPORTING_POSTGRES_ADMIN_USER:?REPORTING_POSTGRES_ADMIN_USER is required}
+      REPORTING_POSTGRES_PORT: ${REPORTING_POSTGRES_PORT:?REPORTING_POSTGRES_PORT is required}
+      DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-reporting-admin-password
+      WIDGETS_POSTGRES_ADMIN_USER: ${WIDGETS_POSTGRES_ADMIN_USER:?WIDGETS_POSTGRES_ADMIN_USER is required}
+      WIDGETS_POSTGRES_PORT: ${WIDGETS_POSTGRES_PORT:-55436}
+      DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-widgets-admin-password
+      BILLING_POSTGRES_ADMIN_USER: ${BILLING_POSTGRES_ADMIN_USER:?BILLING_POSTGRES_ADMIN_USER is required}
+      BILLING_POSTGRES_PORT: ${BILLING_POSTGRES_PORT:-55437}
+      DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-billing-admin-password
+      IDENTITY_POSTGRES_ADMIN_USER: ${IDENTITY_POSTGRES_ADMIN_USER:?IDENTITY_POSTGRES_ADMIN_USER is required}
+      IDENTITY_POSTGRES_PORT: ${IDENTITY_POSTGRES_PORT:-55438}
+      DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-identity-admin-password
+      PLATFORM_POSTGRES_ADMIN_USER: ${PLATFORM_POSTGRES_ADMIN_USER:?PLATFORM_POSTGRES_ADMIN_USER is required}
+      PLATFORM_POSTGRES_PORT: ${PLATFORM_POSTGRES_PORT:-55439}
+      DATABASE_RESTORE_PLATFORM_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-platform-admin-password
+      SUPPORT_POSTGRES_ADMIN_USER: ${SUPPORT_POSTGRES_ADMIN_USER:?SUPPORT_POSTGRES_ADMIN_USER is required}
+      SUPPORT_POSTGRES_PORT: ${SUPPORT_POSTGRES_PORT:-55440}
+      DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-support-admin-password
+      OPERATIONS_POSTGRES_ADMIN_USER: ${OPERATIONS_POSTGRES_ADMIN_USER:?OPERATIONS_POSTGRES_ADMIN_USER is required}
+      OPERATIONS_POSTGRES_PORT: ${OPERATIONS_POSTGRES_PORT:-55441}
+      DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-operations-admin-password
     network_mode: host
     volumes:
       - type: bind
         source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
-        target: /var/lib/winwidget/database-restores
+        target: /var/lib/winwidget-operations/restores
     secrets:
       - source: notification-delivery-postgres-admin-password
         target: database-restore-notification-delivery-admin-password
@@ -1830,62 +1668,42 @@ services:
       - source: operations-postgres-admin-password
         target: database-restore-operations-admin-password
     tmpfs:
-      - /run/database-restore-secrets:rw,noexec,nosuid,nodev,size=64k,mode=0700
-      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
     read_only: true
     init: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cap_add:
-      - CHOWN
-      - KILL
-      - SETGID
-      - SETUID
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      operations-outbox-publisher:
+        condition: service_started
+    command: ['node', 'dist/src/main.js']
     healthcheck:
       test:
         [
           'CMD',
-          'su-exec',
-          'nestjs:nodejs',
           'node',
           '-e',
-          'const fs=require(''node:fs'');const root=''/var/lib/winwidget/database-restores'';const v=JSON.parse(fs.readFileSync(root+''/worker-ready.json'',''utf8''));const fences=fs.readdirSync(root+''/fences'').filter(name=>name.endsWith(''.json''));if(v.version!==1||v.revision!==process.env.APP_REVISION||JSON.stringify(v.targets)!==''["billing","campaigns","identity","notification-delivery","operations","platform","reporting","support","widgets"]''||fences.length!==0)process.exit(1)'
+          "fetch('http://127.0.0.1:'+(process.env.OPERATIONS_RESTORE_WORKER_PORT||5203)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
         ]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 20s
-    stop_grace_period: 45s
+      start_period: 10s
+    stop_grace_period: 90s
     restart: unless-stopped
-    mem_limit: ${DATABASE_RESTORE_MEMORY_LIMIT:-256m}
-    mem_reservation: ${DATABASE_RESTORE_MEMORY_RESERVATION:-64m}
-    cpus: ${DATABASE_RESTORE_CPUS:-0.5}
-    pids_limit: 100
+    mem_limit: ${OPERATIONS_RESTORE_WORKER_MEMORY_LIMIT:-384m}
+    mem_reservation: ${OPERATIONS_RESTORE_WORKER_MEMORY_RESERVATION:-96m}
+    cpus: ${OPERATIONS_RESTORE_WORKER_CPUS:-0.5}
+    pids_limit: 200
     logging:
       driver: json-file
       options:
         max-size: 10m
         max-file: '3'
-
-  migrate:
-    image: winwidget-api:${APP_VERSION:-latest}
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      args:
-        APP_REVISION: ${APP_REVISION:-unknown}
-    profiles:
-      - migration
-    environment: *migration-env
-    network_mode: host
-    volumes:
-      - type: bind
-        source: ${OPERATIONS_CUTOVER_ARTIFACT_DIR:-/opt/winwidget/deploy/backend/operations-cutover}
-        target: /var/lib/winwidget/operations-cutover
-    entrypoint: ['./node_modules/.bin/prisma']
-    command: ['migrate', 'deploy']
 
   notification-delivery-migrate:
     image: ${NOTIFICATION_DELIVERY_IMAGE:?NOTIFICATION_DELIVERY_IMAGE is required}
@@ -2010,10 +1828,6 @@ services:
       - operations-migration
     environment: *operations-migration-env
     network_mode: host
-    volumes:
-      - type: bind
-        source: ${OPERATIONS_CUTOVER_ARTIFACT_DIR:-/opt/winwidget/deploy/backend/operations-cutover}
-        target: /var/lib/winwidget/operations-cutover
     entrypoint: ['./node_modules/.bin/prisma']
     command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
 

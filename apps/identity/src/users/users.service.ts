@@ -1088,7 +1088,6 @@ export class UsersService {
 					operation: revocation.operation,
 					actorId: revocation.actorId,
 					actorRole: revocation.actorRole,
-					coreMutationApplied: false,
 					requestedAt: revocation.requestedAt
 				}
 			})

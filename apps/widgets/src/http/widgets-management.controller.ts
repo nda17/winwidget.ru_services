@@ -24,7 +24,7 @@ import {
 	WidgetsApiGuard,
 	WidgetsAuthGuard
 } from '../auth/widgets-auth.guard';
-import type { IntrospectedWidgetsActor } from '../internal/core-internal.client';
+import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
 import { WIDGET_DEFINITIONS } from '../domain/widgets-domain.types';
 import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '../domain/widgets-image.service';

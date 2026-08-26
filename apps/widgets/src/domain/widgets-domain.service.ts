@@ -14,7 +14,7 @@ export type { WidgetUpdateInput } from './widgets-configuration.service';
 export type LeadSubmissionInput = WidgetLeadInput;
 
 /**
- * Thin compatibility facade for the existing controllers. Business ownership
+ * Thin coordination facade for the HTTP controllers. Business ownership
  * is intentionally split between configuration, lifecycle, public lead flow,
  * and lead-query services.
  */

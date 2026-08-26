@@ -1,7 +1,9 @@
+import { OperationsDatabasePhase } from '@prisma/operations-client';
 import {
 	OperationsCutoverError,
 	parseOperationsCutoverArgs,
-	parseOperationsSnapshot
+	parseOperationsSnapshot,
+	requiresFrozenSnapshotCountCheck
 } from './main';
 
 const SHA = 'a'.repeat(64);
@@ -87,6 +89,38 @@ describe('Operations cutover contract', () => {
 				adminEventLogs: [],
 				legacy: true
 			})
+		).toThrow(OperationsCutoverError);
+	});
+
+	it('allows runtime rows to change after the matching snapshot is ACTIVE', () => {
+		const revision = 'b'.repeat(40);
+
+		expect(
+			requiresFrozenSnapshotCountCheck(
+				OperationsDatabasePhase.ACTIVE,
+				SHA,
+				revision,
+				SHA,
+				revision
+			)
+		).toBe(false);
+		expect(
+			requiresFrozenSnapshotCountCheck(
+				OperationsDatabasePhase.IMPORTED,
+				SHA,
+				revision,
+				SHA,
+				revision
+			)
+		).toBe(true);
+		expect(() =>
+			requiresFrozenSnapshotCountCheck(
+				OperationsDatabasePhase.ACTIVE,
+				'c'.repeat(64),
+				revision,
+				SHA,
+				revision
+			)
 		).toThrow(OperationsCutoverError);
 	});
 });

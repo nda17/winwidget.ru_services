@@ -12,7 +12,7 @@ import {
 	WidgetsRole
 } from './widgets-auth.decorator';
 import type { WidgetsRequest } from './widgets-request';
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { WidgetsIdentityClient } from '../internal/widgets-identity.client';
 import { WidgetsRuntimeService } from '../runtime/widgets-runtime.service';
 
 @Injectable()
@@ -33,7 +33,7 @@ export class WidgetsApiGuard implements CanActivate {
 export class WidgetsAuthGuard implements CanActivate {
 	constructor(
 		private readonly reflector: Reflector,
-		private readonly coreInternal: CoreInternalClient
+		private readonly identity: WidgetsIdentityClient
 	) {}
 
 	async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -43,7 +43,7 @@ export class WidgetsAuthGuard implements CanActivate {
 			throw new UnauthorizedException('Bearer token is required');
 		}
 
-		const actor = await this.coreInternal.introspect(authorization);
+		const actor = await this.identity.introspect(authorization);
 		const requiredRoles =
 			this.reflector.getAllAndOverride<WidgetsRole[]>(
 				WIDGETS_REQUIRED_ROLES,

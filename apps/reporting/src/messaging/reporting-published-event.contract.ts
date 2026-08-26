@@ -10,8 +10,10 @@ import {
 	getReportingRetryRoutingKey
 } from './reporting-messaging.constants';
 import {
+	OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE,
 	ReportingSourceEventType,
 	parseNotificationDeliveryOutcome,
+	parseOperationsNotificationRoutingChangedEvent,
 	parseReportingSourceEvent
 } from '../projections/reporting-event.contract';
 
@@ -102,6 +104,17 @@ export function assertReportingConsumerOutboxEvent(
 	}
 	if (kind === 'deliveryOutcome') {
 		parseNotificationDeliveryOutcome(event.payload);
+	} else if (
+		event.eventType === OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
+	) {
+		const payload = parseOperationsNotificationRoutingChangedEvent(
+			event.payload
+		);
+		if (payload.eventId !== event.messageId) {
+			throw new Error(
+				'Operations notification routing Outbox payload must equal messageId'
+			);
+		}
 	} else {
 		const payload = parseReportingSourceEvent(
 			event.payload,
@@ -114,24 +127,27 @@ export function assertReportingConsumerOutboxEvent(
 		}
 	}
 
-	const headers = exactRecord(
-		event.headers,
+	const headerKeys =
 		event.exchange === 'MANUAL_RETRY'
-			? [
+			? ([
 					'x-correlation-id',
 					'x-causation-id',
 					'x-retry-attempt',
 					'x-retry-cycle',
 					'x-manual-retry'
-				]
-			: [
+				] as const)
+			: ([
 					'x-correlation-id',
 					'x-causation-id',
 					'x-retry-attempt',
 					'x-retry-cycle',
-					'x-last-error'
-				]
-	);
+					'x-last-error',
+					...(event.eventType ===
+					OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
+						? (['x-aggregate-type', 'x-aggregate-id'] as const)
+						: [])
+				] as const);
+	const headers = exactRecord(event.headers, headerKeys);
 	if (
 		typeof headers['x-correlation-id'] !== 'string' ||
 		!SAFE_CONTEXT_ID.test(headers['x-correlation-id']) ||
@@ -157,6 +173,15 @@ export function assertReportingConsumerOutboxEvent(
 			throw new Error('Reporting manual retry Outbox route is invalid');
 		}
 		return;
+	}
+	if (
+		event.eventType === OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE &&
+		(headers['x-aggregate-type'] !== 'telegram-bot-settings' ||
+			headers['x-aggregate-id'] !== 'singleton')
+	) {
+		throw new Error(
+			'Operations notification routing Outbox aggregate headers are invalid'
+		);
 	}
 	if (
 		typeof headers['x-last-error'] !== 'string' ||

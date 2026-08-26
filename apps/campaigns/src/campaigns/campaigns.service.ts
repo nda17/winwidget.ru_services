@@ -86,7 +86,7 @@ export class CampaignsService {
 					);
 					return existing.resourceId;
 				}
-				const legacyCampaign = await transaction.campaign.findUnique({
+				const existingCampaign = await transaction.campaign.findUnique({
 					where: {
 						actorId_idempotencyKey: {
 							actorId,
@@ -94,13 +94,13 @@ export class CampaignsService {
 						}
 					}
 				});
-				if (legacyCampaign) {
+				if (existingCampaign) {
 					this.assertSameIdempotentRequest(
 						this.hash({
-							subject: legacyCampaign.subject.trim(),
-							message: legacyCampaign.message.trim(),
-							audience: legacyCampaign.audience,
-							channel: legacyCampaign.requestedChannel
+							subject: existingCampaign.subject.trim(),
+							message: existingCampaign.message.trim(),
+							audience: existingCampaign.audience,
+							channel: existingCampaign.requestedChannel
 						}),
 						requestHash
 					);
@@ -111,11 +111,11 @@ export class CampaignsService {
 							key,
 							requestHash,
 							resourceType: 'campaign',
-							resourceId: legacyCampaign.id,
+							resourceId: existingCampaign.id,
 							expiresAt: new Date(Date.now() + IDEMPOTENCY_TTL_MS)
 						}
 					});
-					return legacyCampaign.id;
+					return existingCampaign.id;
 				}
 
 				const campaign = await transaction.campaign.create({

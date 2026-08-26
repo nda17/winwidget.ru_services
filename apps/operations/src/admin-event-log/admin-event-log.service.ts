@@ -42,6 +42,12 @@ const PUBLIC_SELECT = {
 export class AdminEventLogService {
 	constructor(private readonly prisma: OperationsPrismaService) {}
 
+	record(input: AdminEventLogRecordInput) {
+		return this.prisma.$transaction(transaction =>
+			this.recordInTransaction(transaction, input)
+		);
+	}
+
 	async getAll(page = 1, limit = 20, filters: AdminEventLogFilters = {}) {
 		const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
 		const normalizedLimit =

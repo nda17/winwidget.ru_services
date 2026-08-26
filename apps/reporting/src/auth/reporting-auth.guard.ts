@@ -1,4 +1,4 @@
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { IdentityIntrospectionClient } from '../internal/identity-introspection.client';
 import { ReportingRuntimeService } from '../runtime/reporting-runtime.service';
 import type { ReportingRequest } from './reporting-request';
 import {
@@ -15,14 +15,15 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-const REPORTING_INTERNAL_TOKEN_MIN_LENGTH = 32;
-const REPORTING_INTERNAL_TOKEN_PLACEHOLDERS = new Set([
+const REPORTING_OPERATIONS_TOKEN_MIN_LENGTH = 32;
+const REPORTING_OPERATIONS_TOKEN_PLACEHOLDERS = new Set([
 	'XYZXYZXYZ',
 	'change-me',
 	'change_me',
-	'REPORTING_INTERNAL_TOKEN',
-	'reporting_internal_token',
-	'ci_reporting_internal_token_at_least_32_chars'
+	'REPORTING_OPERATIONS_TOKEN',
+	'reporting_operations_token',
+	'ci_reporting_operations_token_at_least_32_chars',
+	'change_me_to_a_unique_operations_secret_with_at_least_32_chars'
 ]);
 const IPV4_LOOPBACK_PATTERN =
 	/^127\.(?:\d{1,3})\.(?:\d{1,3})\.(?:\d{1,3})$/;
@@ -73,13 +74,13 @@ export class ReportingMessagingInternalGuard implements CanActivate {
 
 	constructor(config: ConfigService) {
 		const token =
-			config.get<string>('REPORTING_INTERNAL_TOKEN')?.trim() || '';
+			config.get<string>('REPORTING_OPERATIONS_TOKEN')?.trim() || '';
 		if (
-			token.length < REPORTING_INTERNAL_TOKEN_MIN_LENGTH ||
-			REPORTING_INTERNAL_TOKEN_PLACEHOLDERS.has(token)
+			token.length < REPORTING_OPERATIONS_TOKEN_MIN_LENGTH ||
+			REPORTING_OPERATIONS_TOKEN_PLACEHOLDERS.has(token)
 		) {
 			throw new Error(
-				'REPORTING_INTERNAL_TOKEN must be a non-placeholder secret with at least 32 characters'
+				'REPORTING_OPERATIONS_TOKEN must be a non-placeholder secret with at least 32 characters'
 			);
 		}
 		this.tokenHash = hashInternalToken(token);
@@ -89,7 +90,7 @@ export class ReportingMessagingInternalGuard implements CanActivate {
 		const request = context.switchToHttp().getRequest<Request>();
 		if (
 			!isReportingMessagingLoopback(request.socket?.remoteAddress) ||
-			request.headers['x-winwidget-service'] !== 'core'
+			request.headers['x-winwidget-service'] !== 'operations'
 		) {
 			throw new ForbiddenException('Invalid reporting internal caller');
 		}
@@ -110,7 +111,7 @@ export class ReportingMessagingInternalGuard implements CanActivate {
 export class ReportingAdminGuard implements CanActivate {
 	constructor(
 		private readonly reflector: Reflector,
-		private readonly coreInternal: CoreInternalClient
+		private readonly identity: IdentityIntrospectionClient
 	) {}
 
 	async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -120,8 +121,8 @@ export class ReportingAdminGuard implements CanActivate {
 			throw new UnauthorizedException('Bearer token is required');
 		}
 		// Forwarded role/user headers are intentionally ignored. Only the
-		// fail-closed core introspection result is trusted for authorization.
-		const actor = await this.coreInternal.introspect(authorization);
+		// fail-closed Identity introspection result is trusted for authorization.
+		const actor = await this.identity.introspect(authorization);
 		const requiredRole =
 			this.reflector.getAllAndOverride<ReportingRequiredRole>(
 				REPORTING_REQUIRED_ROLE,

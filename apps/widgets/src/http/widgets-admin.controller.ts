@@ -26,7 +26,7 @@ import {
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
 import { parseWidgetType } from '../domain/widgets-domain.types';
 import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '../domain/widgets-image.service';
-import type { IntrospectedWidgetsActor } from '../internal/core-internal.client';
+import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import { WidgetsAdminMonitoringService } from '../monitoring/widgets-admin-monitoring.service';
 import { WidgetsTelemetryService } from '../telemetry/widgets-telemetry.service';
 import {

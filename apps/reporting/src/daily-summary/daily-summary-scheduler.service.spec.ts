@@ -5,7 +5,7 @@ describe('DailySummarySchedulerService handoff safety', () => {
 		jest.useRealTimers();
 	});
 
-	it('does not recreate the last period already delivered by Core', async () => {
+	it('does not recreate the last period already delivered before cutover', async () => {
 		jest
 			.useFakeTimers()
 			.setSystemTime(new Date('2026-08-01T07:00:00.000Z'));
@@ -41,7 +41,7 @@ describe('DailySummarySchedulerService handoff safety', () => {
 		expect(prisma.reportRun.createMany).not.toHaveBeenCalled();
 	});
 
-	it('creates the next period after the projected successful Core period', async () => {
+	it('creates the next period after the last successful delivery', async () => {
 		jest
 			.useFakeTimers()
 			.setSystemTime(new Date('2026-08-01T07:00:00.000Z'));

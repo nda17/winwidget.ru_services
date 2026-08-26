@@ -1,5 +1,5 @@
 import { SetMetadata } from '@nestjs/common';
-import type { IntrospectedWidgetsActor } from '../internal/core-internal.client';
+import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 
 export const WIDGETS_REQUIRED_ROLES = 'widgets-required-roles';
 export type WidgetsRole = IntrospectedWidgetsActor['roles'][number];

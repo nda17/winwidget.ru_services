@@ -120,7 +120,7 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 				sha256: sourceSha256
 			})
 		].join('\n');
-		const core = {
+		const dependencies = {
 			exportActiveSubscriberIds: jest
 				.fn()
 				.mockResolvedValue(activeSubscriberResponse(['user-1', 'user-2'])),
@@ -134,7 +134,7 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 		};
 		const service = new AudienceSnapshotService(
 			{} as never,
-			core as never,
+			dependencies as never,
 			{ get: jest.fn().mockReturnValue('1') } as never
 		);
 		const onChunk = jest.fn().mockResolvedValue(undefined);
@@ -193,7 +193,7 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 				sha256: sourceSha256
 			})
 		].join('\n');
-		const core = {
+		const dependencies = {
 			exportActiveSubscriberIds: jest
 				.fn()
 				.mockResolvedValue(activeSubscriberResponse(['user-b'])),
@@ -201,7 +201,7 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 		};
 		const service = new AudienceSnapshotService(
 			{} as never,
-			core as never,
+			dependencies as never,
 			{ get: jest.fn().mockReturnValue('1000') } as never
 		);
 		const onChunk = jest.fn().mockResolvedValue(undefined);
@@ -260,13 +260,13 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 				sha256: sourceSha256
 			})
 		].join('\n');
-		const core = {
+		const dependencies = {
 			exportActiveSubscriberIds: jest.fn(),
 			exportAudience: jest.fn().mockResolvedValue(new Response(body))
 		};
 		const service = new AudienceSnapshotService(
 			{} as never,
-			core as never,
+			dependencies as never,
 			{ get: jest.fn().mockReturnValue('1000') } as never
 		);
 		const allCampaign = {
@@ -291,7 +291,7 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 
 		expect(result.totalCount).toBe(1);
 		expect(onChunk).toHaveBeenCalledWith([destination]);
-		expect(core.exportActiveSubscriberIds).not.toHaveBeenCalled();
+		expect(dependencies.exportActiveSubscriberIds).not.toHaveBeenCalled();
 	});
 
 	it('rejects an unverified/non-normalized email export', async () => {
@@ -317,7 +317,7 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 				sha256
 			})
 		].join('\n');
-		const core = {
+		const dependencies = {
 			exportActiveSubscriberIds: jest
 				.fn()
 				.mockResolvedValue(activeSubscriberResponse(['user-1'])),
@@ -325,7 +325,7 @@ describe('AudienceSnapshotService NDJSON verification', () => {
 		};
 		const service = new AudienceSnapshotService(
 			{} as never,
-			core as never,
+			dependencies as never,
 			{ get: jest.fn().mockReturnValue('1000') } as never
 		);
 		await expect(

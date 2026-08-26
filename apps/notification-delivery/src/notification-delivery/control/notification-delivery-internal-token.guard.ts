@@ -11,9 +11,9 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 
 export const NOTIFICATION_DELIVERY_INTERNAL_TOKEN_HEADER =
 	'x-winwidget-internal-token';
-export const NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV =
-	'NOTIFICATION_DELIVERY_INTERNAL_TOKEN';
-export const NOTIFICATION_DELIVERY_INTERNAL_TOKEN_MIN_LENGTH = 32;
+export const NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV =
+	'NOTIFICATION_DELIVERY_OPERATIONS_TOKEN';
+export const NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_MIN_LENGTH = 32;
 
 const IPV4_LOOPBACK_PATTERN =
 	/^127\.(?:\d{1,3})\.(?:\d{1,3})\.(?:\d{1,3})$/;
@@ -45,20 +45,23 @@ export class NotificationDeliveryInternalTokenGuard implements CanActivate {
 	canActivate(context: ExecutionContext): boolean {
 		const request = context.switchToHttp().getRequest<Request>();
 		if (
-			!isNotificationDeliveryLoopbackAddress(request.socket?.remoteAddress)
+			!isNotificationDeliveryLoopbackAddress(
+				request.socket?.remoteAddress
+			) ||
+			request.headers['x-winwidget-service'] !== 'operations'
 		) {
 			throw new ForbiddenException(
-				'Notification delivery control API is loopback-only'
+				'Invalid notification delivery control caller'
 			);
 		}
 
 		const expectedToken =
-			process.env[NOTIFICATION_DELIVERY_INTERNAL_TOKEN_ENV]?.trim();
+			process.env[NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_ENV]?.trim();
 		if (
 			!expectedToken ||
 			expectedToken === 'XYZXYZXYZ' ||
 			expectedToken.length <
-				NOTIFICATION_DELIVERY_INTERNAL_TOKEN_MIN_LENGTH
+				NOTIFICATION_DELIVERY_OPERATIONS_TOKEN_MIN_LENGTH
 		) {
 			throw new ServiceUnavailableException(
 				'Notification delivery internal token is not configured securely'

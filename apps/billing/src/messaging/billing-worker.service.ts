@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { InternalCommandsService } from '../domain/internal-commands.service';
 import { SubscriptionDomainService } from '../domain/subscription-domain.service';
 import { TariffAffiliateService } from '../domain/tariff-affiliate.service';
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { IdentityInternalClient } from '../internal/identity-internal.client';
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
 import { BillingProjectionService } from '../projections/billing-projection.service';
 import { BillingRuntimeService } from '../runtime/billing-runtime.service';
@@ -64,7 +64,7 @@ export class BillingWorkerService
 		private readonly subscriptions: SubscriptionDomainService,
 		private readonly affiliates: TariffAffiliateService,
 		private readonly commands: InternalCommandsService,
-		private readonly core: CoreInternalClient
+		private readonly identity: IdentityInternalClient
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -310,7 +310,6 @@ export class BillingWorkerService
 					'operation',
 					'actorId',
 					'actorRole',
-					'coreMutationApplied',
 					'requestedAt'
 				]) ||
 				typeof state.commandId !== 'string' ||
@@ -318,7 +317,6 @@ export class BillingWorkerService
 				!['DEACTIVATE', 'DELETE'].includes(String(state.operation)) ||
 				typeof state.actorId !== 'string' ||
 				!['ADMIN', 'DEV'].includes(String(state.actorRole)) ||
-				state.coreMutationApplied !== false ||
 				typeof state.requestedAt !== 'string' ||
 				!Number.isFinite(Date.parse(state.requestedAt))
 			) {
@@ -336,7 +334,7 @@ export class BillingWorkerService
 				actorRole: state.actorRole as 'ADMIN' | 'DEV',
 				occurredAt: state.requestedAt
 			});
-			await this.core.completeLifecycle({
+			await this.identity.completeLifecycle({
 				schemaVersion: 1,
 				commandId: state.commandId,
 				userId: event.aggregateId,

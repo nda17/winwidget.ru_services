@@ -3,7 +3,7 @@ import { WidgetType } from '../domain/widgets-domain.types';
 import type {
 	WidgetsOwnerDirectoryItem,
 	WidgetsOwnerSearchResult
-} from '../internal/core-internal.client';
+} from '../internal/widgets-identity.client';
 import { WidgetsAdminMonitoringService } from './widgets-admin-monitoring.service';
 
 const owner = (
@@ -22,7 +22,7 @@ const owner = (
 
 const setup = () => {
 	const repository = { client: jest.fn() };
-	const core = {
+	const identity = {
 		resolveOwners: jest.fn(),
 		searchOwners: jest.fn()
 	};
@@ -33,18 +33,18 @@ const setup = () => {
 	return {
 		service: new WidgetsAdminMonitoringService(
 			repository as never,
-			core as never,
+			identity as never,
 			domain as never
 		),
 		repository,
-		core,
+		identity,
 		domain
 	};
 };
 
 describe('WidgetsAdminMonitoringService', () => {
 	it('filters a plan through the local entitlement projection', async () => {
-		const { service, core } = setup();
+		const { service, identity } = setup();
 		const queryRows = jest.fn().mockResolvedValue({ rows: [], total: 0 });
 		(service as unknown as { queryRows: typeof queryRows }).queryRows =
 			queryRows;
@@ -61,7 +61,7 @@ describe('WidgetsAdminMonitoringService', () => {
 			20,
 			0
 		);
-		expect(core.searchOwners).not.toHaveBeenCalled();
+		expect(identity.searchOwners).not.toHaveBeenCalled();
 	});
 
 	it('always excludes tombstoned owners and applies a local plan predicate', () => {
@@ -80,7 +80,7 @@ describe('WidgetsAdminMonitoringService', () => {
 		expect(sql).toContain('widgets.entitlement_projections');
 	});
 
-	it('rejects search input that Core cannot validate', async () => {
+	it('rejects search input that Identity cannot validate', async () => {
 		const { service } = setup();
 		await expect(
 			service.list(1, 20, { search: 'x'.repeat(201) })
@@ -88,9 +88,9 @@ describe('WidgetsAdminMonitoringService', () => {
 	});
 
 	it('bounds owner-directory search and asks for a narrower query', async () => {
-		const { service, core } = setup();
+		const { service, identity } = setup();
 		let cursor = 0;
-		core.searchOwners.mockImplementation(
+		identity.searchOwners.mockImplementation(
 			async (): Promise<WidgetsOwnerSearchResult> => {
 				cursor += 1;
 				return {
@@ -111,15 +111,15 @@ describe('WidgetsAdminMonitoringService', () => {
 				}
 			).eachOwnerBatch('owner', consume)
 		).rejects.toThrow('Поисковый запрос слишком широкий');
-		expect(core.searchOwners).toHaveBeenCalledTimes(100);
+		expect(identity.searchOwners).toHaveBeenCalledTimes(100);
 		expect(consume).toHaveBeenCalledTimes(100);
 	});
 
 	it('preserves the legacy detail error for a deleted owner', async () => {
-		const { service, core, domain } = setup();
+		const { service, identity, domain } = setup();
 		domain.adminGet.mockResolvedValue({});
 		domain.ownerId.mockResolvedValue('user-deleted');
-		core.resolveOwners.mockResolvedValue([
+		identity.resolveOwners.mockResolvedValue([
 			owner({
 				id: 'user-deleted',
 				status: 'DELETED',

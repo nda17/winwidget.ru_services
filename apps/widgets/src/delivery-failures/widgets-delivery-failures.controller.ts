@@ -18,7 +18,7 @@ import {
 	WidgetsApiGuard,
 	WidgetsAuthGuard
 } from '../auth/widgets-auth.guard';
-import type { IntrospectedWidgetsActor } from '../internal/core-internal.client';
+import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import {
 	CurrentWidgetsActor,
 	requestCorrelationId

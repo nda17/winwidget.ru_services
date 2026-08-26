@@ -121,10 +121,10 @@ describe('Platform HTTP contract', () => {
 		).toEqual([PlatformInternalGuard]);
 		expect(
 			Reflect.getMetadata(
-				'platform-allow-shadow',
+				'platform-allow-inactive-ownership',
 				PlatformInternalController
 			)
-		).toBe(true);
+		).toBeUndefined();
 		expect(PLATFORM_GLOBAL_PREFIX_EXCLUDES).toEqual([
 			{ path: 'health/live', method: RequestMethod.GET },
 			{ path: 'health/ready', method: RequestMethod.GET },

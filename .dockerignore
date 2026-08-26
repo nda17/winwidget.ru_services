@@ -11,7 +11,7 @@ Dockerfile
 README.md
 coverage
 **/coverage
-/public/widgets
+**/public/widgets/
 tsconfig.tsbuildinfo
 **/*.tsbuildinfo
 npm-debug.log*

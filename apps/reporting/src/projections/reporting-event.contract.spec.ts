@@ -66,7 +66,7 @@ describe('reporting source event contract', () => {
 		).toThrow('aggregateVersion');
 	});
 
-	it('rejects zero ordering keys for live events and allows paired zero only for snapshots', () => {
+	it('rejects zero ordering keys', () => {
 		const zero = {
 			...identityEvent,
 			aggregateVersion: '0',
@@ -75,22 +75,10 @@ describe('reporting source event contract', () => {
 		expect(() => parseReportingSourceEvent(zero)).toThrow(
 			'must both be positive'
 		);
-		expect(
-			parseReportingSourceEvent(zero, undefined, {
-				allowZeroVersion: true
-			})
-		).toEqual(zero);
-		expect(() =>
-			parseReportingSourceEvent(
-				{ ...zero, sourceSequence: '1' },
-				undefined,
-				{ allowZeroVersion: true }
-			)
-		).toThrow('or both zero');
 	});
 
 	it.each([' 1 234,50 ', 'not-a-number', '001.50', '1e3'])(
-		'accepts bounded historical payment amount %p for legacy normalization',
+		'accepts bounded payment amount %p for numeric normalization',
 		amount => {
 			expect(
 				parseReportingSourceEvent({
@@ -223,52 +211,55 @@ describe('reporting source event contract', () => {
 		).toThrow('namespaced');
 	});
 
-	it('requires the singleton aggregate for reporting settings, including tombstones', () => {
-		for (const tombstone of [false, true]) {
-			expect(() =>
-				parseReportingSourceEvent({
-					schemaVersion: 1,
-					eventType: 'reporting.core-operational-routing.changed.v1',
-					eventId: '99999999-9999-4999-8999-999999999999',
-					aggregateId: 'other-settings',
-					aggregateVersion: '1',
-					sourceSequence: '14',
-					occurredAt: '2026-07-31T00:00:00.000Z',
-					tombstone,
-					state: tombstone
-						? null
-						: {
-								id: 'other-settings',
-								coreOperationalAlertsDestinationChatId: '',
-								coreOperationalAlertsThreadId: null
-							}
-				})
-			).toThrow('aggregateId must equal singleton');
-		}
-	});
-
-	it('accepts only the explicit post-cutover Core operational route', () => {
+	it('accepts only the exact Operations notification-routing payload and headers', () => {
 		const event = {
 			schemaVersion: 1,
-			eventType: 'reporting.core-operational-routing.changed.v1',
 			eventId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-			aggregateId: 'singleton',
-			aggregateVersion: '1',
-			sourceSequence: '15',
-			occurredAt: '2026-07-31T00:00:00.000Z',
-			tombstone: false,
-			state: {
-				id: 'singleton',
-				coreOperationalAlertsDestinationChatId: '-100999',
-				coreOperationalAlertsThreadId: 2024
+			operationalAlertsThreadId: 2024,
+			changedAt: '2026-07-31T00:00:00.000Z'
+		};
+		const message = {
+			content: Buffer.from(JSON.stringify(event)),
+			fields: {
+				routingKey: 'operations.notification-routing.changed.v1'
+			},
+			properties: {
+				messageId: event.eventId,
+				type: 'operations.notification-routing.changed.v1',
+				headers: {
+					'x-aggregate-type': 'telegram-bot-settings',
+					'x-aggregate-id': 'singleton'
+				}
 			}
 		};
-		expect(parseReportingSourceEvent(event)).toEqual(event);
+		expect(
+			parseReportingConsumeMessage(
+				message as never,
+				'operations.notification-routing.changed.v1'
+			)
+		).toEqual(expect.objectContaining({ payload: event }));
 		expect(() =>
-			parseReportingSourceEvent({
-				...event,
-				state: { ...event.state, destinationChatId: '-100legacy' }
-			})
+			parseReportingConsumeMessage(
+				{
+					...message,
+					properties: { ...message.properties, headers: {} }
+				} as never,
+				'operations.notification-routing.changed.v1'
+			)
+		).toThrow('aggregate headers');
+		expect(() =>
+			parseReportingConsumeMessage(
+				{
+					...message,
+					content: Buffer.from(
+						JSON.stringify({
+							...event,
+							eventType: message.properties.type
+						})
+					)
+				} as never,
+				'operations.notification-routing.changed.v1'
+			)
 		).toThrow(InvalidReportingEventError);
 	});
 
@@ -370,7 +361,7 @@ describe('notification delivery outcome contract', () => {
 		).toEqual(expect.objectContaining({ status: 'DELIVERED' }));
 	});
 
-	it('rejects the Core delivery outcome event type', () => {
+	it('rejects the removed legacy delivery outcome event type', () => {
 		expect(() =>
 			parseNotificationDeliveryOutcome({
 				schemaVersion: 1,
@@ -388,7 +379,7 @@ describe('notification delivery outcome contract', () => {
 		).toThrow('eventType');
 	});
 
-	it('rejects a Core-owned outcome on the Reporting event type', () => {
+	it('rejects a foreign outcome on the Reporting event type', () => {
 		expect(() =>
 			parseNotificationDeliveryOutcome({
 				schemaVersion: 1,

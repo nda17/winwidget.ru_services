@@ -4,7 +4,13 @@ import type { ConfirmChannel } from 'amqplib';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
 import {
 	OPERATIONS_AUDIT_DLQ_RETENTION_MS,
-	OPERATIONS_AUDIT_SOURCES
+	OPERATIONS_AUDIT_SOURCES,
+	OPERATIONS_DATABASE_RESTORE_DLQ,
+	OPERATIONS_DATABASE_RESTORE_QUEUE,
+	OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE,
+	OPERATIONS_SCHEDULED_JOB_DLQ,
+	OPERATIONS_SCHEDULED_JOB_QUEUE,
+	OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE
 } from './operations-messaging.constants';
 import { OperationsRabbitMqService } from './operations-rabbitmq.service';
 
@@ -12,6 +18,8 @@ interface RabbitInternals {
 	channel: ChannelWrapper | null;
 	topologyReady: boolean;
 	consumerReady: boolean;
+	jobConsumerRegistered: boolean;
+	jobConsumerReady: boolean;
 	consumerGeneration: number;
 	consumerTags: Map<string, string>;
 	handleConsumerCancellation(
@@ -22,7 +30,7 @@ interface RabbitInternals {
 }
 
 describe('OperationsRabbitMqService consumer readiness', () => {
-	it('keeps eight exact audit sources and a seven-day diagnostic DLQ copy', () => {
+	it('keeps seven service audit sources and no Core compatibility queue', () => {
 		expect(OPERATIONS_AUDIT_SOURCES.map(source => source.source)).toEqual([
 			'campaigns',
 			'reporting',
@@ -30,8 +38,7 @@ describe('OperationsRabbitMqService consumer readiness', () => {
 			'billing',
 			'identity',
 			'platform',
-			'support',
-			'core'
+			'support'
 		]);
 		expect(OPERATIONS_AUDIT_DLQ_RETENTION_MS).toBe(604_800_000);
 	});
@@ -76,6 +83,48 @@ describe('OperationsRabbitMqService consumer readiness', () => {
 		expect(assertExchange).not.toHaveBeenCalled();
 		expect(assertQueue).not.toHaveBeenCalled();
 		expect(bindQueue).not.toHaveBeenCalled();
+	});
+
+	it('gives the restore-worker only the database restore queue family', async () => {
+		const service = new OperationsRabbitMqService(
+			{} as ConfigService,
+			{
+				rabbitEnabled: true,
+				workerEnabled: false,
+				restoreWorkerEnabled: true
+			} as OperationsRuntimeService
+		);
+		const checkQueue = jest.fn().mockResolvedValue(undefined);
+		const consume = jest
+			.fn()
+			.mockResolvedValue({ consumerTag: 'restore-worker-consumer' });
+		const channel = {
+			checkQueue,
+			consume
+		} as unknown as ConfirmChannel;
+		const internal = service as unknown as RabbitInternals;
+		internal.topologyReady = true;
+		internal.channel = {
+			addSetup: jest.fn(async setup => setup(channel))
+		} as unknown as ChannelWrapper;
+
+		await service.consumeDatabaseRestoreJobs(async () => 'ack');
+
+		expect(checkQueue.mock.calls.map(([queue]) => queue)).toEqual([
+			OPERATIONS_DATABASE_RESTORE_QUEUE,
+			OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE,
+			OPERATIONS_DATABASE_RESTORE_DLQ
+		]);
+		expect(checkQueue).not.toHaveBeenCalledWith(
+			OPERATIONS_SCHEDULED_JOB_QUEUE
+		);
+		expect(checkQueue).not.toHaveBeenCalledWith(
+			OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE
+		);
+		expect(checkQueue).not.toHaveBeenCalledWith(
+			OPERATIONS_SCHEDULED_JOB_DLQ
+		);
+		expect(service.isReady()).toBe(true);
 	});
 
 	it('keeps the worker publish path away from events and manual retry', async () => {

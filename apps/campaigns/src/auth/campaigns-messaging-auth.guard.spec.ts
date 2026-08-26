@@ -19,7 +19,7 @@ const TOKEN = 'campaigns-overview-internal-token-at-least-32-characters';
 const createContext = (
 	address: string,
 	token: string | string[] | null = TOKEN,
-	service: string | string[] | undefined = 'core'
+	service: string | string[] | undefined = 'operations'
 ): ExecutionContext =>
 	({
 		switchToHttp: () => ({
@@ -51,7 +51,7 @@ describe('Campaigns messaging overview guards', () => {
 	});
 
 	it.each(['127.0.0.1', '127.23.45.67', '::1', '::ffff:127.0.0.1'])(
-		'allows an authenticated Core caller on loopback %s',
+		'allows an authenticated Operations caller on loopback %s',
 		address => {
 			expect(guard().canActivate(createContext(address))).toBe(true);
 		}

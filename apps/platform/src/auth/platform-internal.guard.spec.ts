@@ -4,7 +4,7 @@ import type { ConfigService } from '@nestjs/config';
 import type { PlatformRuntimeService } from '../runtime/platform-runtime.service';
 import { PlatformInternalGuard } from './platform-internal.guard';
 
-const TOKEN = 'platform-core-monitor-token-at-least-32-characters';
+const TOKEN = 'platform-operations-token-at-least-32-characters';
 
 const createGuard = (token = TOKEN) =>
 	new PlatformInternalGuard(
@@ -13,7 +13,7 @@ const createGuard = (token = TOKEN) =>
 	);
 
 const context = (
-	service = 'core',
+	service = 'operations',
 	token = TOKEN,
 	remoteAddress = '127.0.0.1'
 ) =>
@@ -28,17 +28,23 @@ const context = (
 	}) as unknown as ExecutionContext;
 
 describe('PlatformInternalGuard', () => {
-	it('accepts only the scoped Core token over loopback', () => {
+	it('accepts only the scoped Operations token over loopback', () => {
 		expect(createGuard().canActivate(context())).toBe(true);
 		expect(
-			createGuard().canActivate(context('core', TOKEN, '::ffff:127.0.0.1'))
+			createGuard().canActivate(
+				context('operations', TOKEN, '::ffff:127.0.0.1')
+			)
 		).toBe(true);
 	});
 
 	it.each([
 		['identity', TOKEN, '127.0.0.1'],
-		['core', 'wrong-token-that-is-long-enough-to-compare', '127.0.0.1'],
-		['core', TOKEN, '10.0.0.2']
+		[
+			'operations',
+			'wrong-token-that-is-long-enough-to-compare',
+			'127.0.0.1'
+		],
+		['operations', TOKEN, '10.0.0.2']
 	])(
 		'rejects service=%s token/address mismatch',
 		(service, token, address) => {
@@ -51,14 +57,14 @@ describe('PlatformInternalGuard', () => {
 	it.each([
 		'',
 		'change_me',
-		'change_me_platform_core_token_at_least_32_chars',
-		'change-me-platform-core-token-at-least-32-chars',
-		'ci_platform_core_token_at_least_32_chars',
-		'platform_core_token',
+		'change_me_platform_operations_token_at_least_32_chars',
+		'change-me-platform-operations-token-at-least-32-chars',
+		'ci_platform_operations_token_at_least_32_chars',
+		'platform_operations_token',
 		'short'
 	])('fails startup for insecure API token %p', token => {
 		expect(() => createGuard(token)).toThrow(
-			'PLATFORM_CORE_TOKEN must be a non-placeholder secret with at least 32 characters'
+			'PLATFORM_OPERATIONS_TOKEN must be a non-placeholder secret with at least 32 characters'
 		);
 	});
 });

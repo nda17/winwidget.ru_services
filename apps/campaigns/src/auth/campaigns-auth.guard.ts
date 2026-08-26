@@ -11,14 +11,14 @@ import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-const CAMPAIGNS_INTERNAL_TOKEN_MIN_LENGTH = 32;
-const CAMPAIGNS_INTERNAL_TOKEN_PLACEHOLDERS = new Set([
+const CAMPAIGNS_OPERATIONS_TOKEN_MIN_LENGTH = 32;
+const CAMPAIGNS_OPERATIONS_TOKEN_PLACEHOLDERS = new Set([
 	'XYZXYZXYZ',
 	'change-me',
 	'change_me',
-	'CAMPAIGNS_INTERNAL_TOKEN',
-	'campaigns_internal_token',
-	'ci_campaigns_internal_token_at_least_32_chars'
+	'CAMPAIGNS_OPERATIONS_TOKEN',
+	'campaigns_operations_token',
+	'ci_campaigns_operations_token_at_least_32_chars'
 ]);
 const IPV4_LOOPBACK_PATTERN =
 	/^127\.(?:\d{1,3})\.(?:\d{1,3})\.(?:\d{1,3})$/;
@@ -48,7 +48,7 @@ import {
 	CampaignsRole
 } from './campaigns-auth.decorator';
 import type { CampaignsRequest } from './campaigns-request';
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { CampaignsDependenciesClient } from '../internal/campaigns-dependencies.client';
 import { CampaignsRuntimeService } from '../runtime/campaigns-runtime.service';
 
 @Injectable()
@@ -71,13 +71,13 @@ export class CampaignsMessagingInternalGuard implements CanActivate {
 
 	constructor(config: ConfigService) {
 		const token =
-			config.get<string>('CAMPAIGNS_INTERNAL_TOKEN')?.trim() || '';
+			config.get<string>('CAMPAIGNS_OPERATIONS_TOKEN')?.trim() || '';
 		if (
-			token.length < CAMPAIGNS_INTERNAL_TOKEN_MIN_LENGTH ||
-			CAMPAIGNS_INTERNAL_TOKEN_PLACEHOLDERS.has(token)
+			token.length < CAMPAIGNS_OPERATIONS_TOKEN_MIN_LENGTH ||
+			CAMPAIGNS_OPERATIONS_TOKEN_PLACEHOLDERS.has(token)
 		) {
 			throw new Error(
-				'CAMPAIGNS_INTERNAL_TOKEN must be a non-placeholder secret with at least 32 characters'
+				'CAMPAIGNS_OPERATIONS_TOKEN must be a non-placeholder secret with at least 32 characters'
 			);
 		}
 		this.tokenHash = hashInternalToken(token);
@@ -87,7 +87,7 @@ export class CampaignsMessagingInternalGuard implements CanActivate {
 		const request = context.switchToHttp().getRequest<Request>();
 		if (
 			!isCampaignsMessagingLoopback(request.socket?.remoteAddress) ||
-			request.headers['x-winwidget-service'] !== 'core'
+			request.headers['x-winwidget-service'] !== 'operations'
 		) {
 			throw new ForbiddenException('Invalid campaigns internal caller');
 		}
@@ -108,7 +108,7 @@ export class CampaignsMessagingInternalGuard implements CanActivate {
 export class CampaignsAuthGuard implements CanActivate {
 	constructor(
 		private readonly reflector: Reflector,
-		private readonly coreInternal: CoreInternalClient
+		private readonly dependencies: CampaignsDependenciesClient
 	) {}
 
 	async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -118,7 +118,7 @@ export class CampaignsAuthGuard implements CanActivate {
 			throw new UnauthorizedException('Bearer token is required');
 		}
 
-		const actor = await this.coreInternal.introspect(authorization);
+		const actor = await this.dependencies.introspect(authorization);
 		const requiredRole = this.reflector.getAllAndOverride<CampaignsRole>(
 			CAMPAIGNS_REQUIRED_ROLE,
 			[context.getHandler(), context.getClass()]

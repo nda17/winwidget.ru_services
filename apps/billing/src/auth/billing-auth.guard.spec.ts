@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { ExecutionContext } from '@nestjs/common';
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { IdentityInternalClient } from '../internal/identity-internal.client';
 import type { BillingRuntimeService } from '../runtime/billing-runtime.service';
 import { BillingAuthGuard } from './billing-auth.guard';
 
@@ -21,8 +21,11 @@ describe('BillingAuthGuard', () => {
 		const reflector = {
 			getAllAndOverride: jest.fn().mockReturnValue([])
 		};
-		const core = { introspect: jest.fn() };
-		const guard = new BillingAuthGuard(reflector as never, core as never);
+		const identity = { introspect: jest.fn() };
+		const guard = new BillingAuthGuard(
+			reflector as never,
+			identity as never
+		);
 
 		const absent = await guard
 			.canActivate(context({ headers: {} }))
@@ -44,25 +47,28 @@ describe('BillingAuthGuard', () => {
 			error: 'Unauthorized',
 			statusCode: 401
 		});
-		expect(core.introspect).not.toHaveBeenCalled();
+		expect(identity.introspect).not.toHaveBeenCalled();
 	});
 
 	it('fails closed when a route has no explicit access policy', async () => {
 		const reflector = {
 			getAllAndOverride: jest.fn().mockReturnValue(undefined)
 		};
-		const core = { introspect: jest.fn() };
-		const guard = new BillingAuthGuard(reflector as never, core as never);
+		const identity = { introspect: jest.fn() };
+		const guard = new BillingAuthGuard(
+			reflector as never,
+			identity as never
+		);
 
 		await expect(
 			guard.canActivate(
 				context({ headers: { authorization: 'Bearer access-token' } })
 			)
 		).rejects.toBeInstanceOf(ForbiddenException);
-		expect(core.introspect).not.toHaveBeenCalled();
+		expect(identity.introspect).not.toHaveBeenCalled();
 	});
 
-	it('uses current Core roles and attaches the exact actor', async () => {
+	it('uses current Identity roles and attaches the exact actor', async () => {
 		const actor = {
 			active: true as const,
 			subject: 'user-1',
@@ -72,14 +78,19 @@ describe('BillingAuthGuard', () => {
 		const reflector = {
 			getAllAndOverride: jest.fn().mockReturnValue(['ADMIN'])
 		};
-		const core = { introspect: jest.fn().mockResolvedValue(actor) };
-		const guard = new BillingAuthGuard(reflector as never, core as never);
+		const identity = { introspect: jest.fn().mockResolvedValue(actor) };
+		const guard = new BillingAuthGuard(
+			reflector as never,
+			identity as never
+		);
 		const request = {
 			headers: { authorization: 'Bearer access-token' }
 		};
 
 		await expect(guard.canActivate(context(request))).resolves.toBe(true);
-		expect(core.introspect).toHaveBeenCalledWith('Bearer access-token');
+		expect(identity.introspect).toHaveBeenCalledWith(
+			'Bearer access-token'
+		);
 		expect(request).toEqual(
 			expect.objectContaining({ billingActor: actor })
 		);
@@ -95,8 +106,11 @@ describe('BillingAuthGuard', () => {
 		const reflector = {
 			getAllAndOverride: jest.fn().mockReturnValue(['USER'])
 		};
-		const core = { introspect: jest.fn().mockResolvedValue(actor) };
-		const guard = new BillingAuthGuard(reflector as never, core as never);
+		const identity = { introspect: jest.fn().mockResolvedValue(actor) };
+		const guard = new BillingAuthGuard(
+			reflector as never,
+			identity as never
+		);
 		const request = {
 			headers: {
 				authorization: 'Bearer access-token',
@@ -113,14 +127,16 @@ describe('BillingAuthGuard', () => {
 
 		await expect(guard.canActivate(context(request))).resolves.toBe(true);
 		expect(request.billingActor).toBe(actor);
-		expect(core.introspect).toHaveBeenCalledWith('Bearer access-token');
+		expect(identity.introspect).toHaveBeenCalledWith(
+			'Bearer access-token'
+		);
 	});
 
 	it('preserves the legacy role-denied response', async () => {
 		const reflector = {
 			getAllAndOverride: jest.fn().mockReturnValue(['DEV'])
 		};
-		const core = {
+		const identity = {
 			introspect: jest.fn().mockResolvedValue({
 				active: true,
 				subject: 'user-1',
@@ -128,7 +144,10 @@ describe('BillingAuthGuard', () => {
 				roles: ['ADMIN']
 			})
 		};
-		const guard = new BillingAuthGuard(reflector as never, core as never);
+		const guard = new BillingAuthGuard(
+			reflector as never,
+			identity as never
+		);
 
 		await expect(
 			guard.canActivate(
@@ -138,7 +157,7 @@ describe('BillingAuthGuard', () => {
 	});
 });
 
-describe('CoreInternalClient auth contract', () => {
+describe('IdentityInternalClient auth contract', () => {
 	const token = 'billing-test-internal-token-1234567890';
 	const originalFetch = global.fetch;
 
@@ -152,8 +171,7 @@ describe('CoreInternalClient auth contract', () => {
 	) => {
 		const values: Record<string, string> = {
 			IDENTITY_INTERNAL_BASE_URL: baseUrl,
-			IDENTITY_BILLING_TOKEN: identityToken,
-			BILLING_INTERNAL_TIMEOUT_MS: '10000'
+			IDENTITY_BILLING_TOKEN: identityToken
 		};
 		const config = {
 			get: jest.fn((key: string) => values[key])
@@ -162,14 +180,14 @@ describe('CoreInternalClient auth contract', () => {
 			apiEnabled: true,
 			workerEnabled: false
 		} as BillingRuntimeService;
-		return new CoreInternalClient(config, runtime);
+		return new IdentityInternalClient(config, runtime);
 	};
 
 	it('accepts only an exact private loopback origin', () => {
 		expect(() => createClient('https://127.0.0.1:4200')).toThrow(
 			'must use http'
 		);
-		expect(() => createClient('http://core:4200')).toThrow(
+		expect(() => createClient('http://remote-service:4200')).toThrow(
 			'must be an exact loopback origin'
 		);
 		expect(() => createClient('http://127.0.0.1:4200/path')).toThrow(
@@ -186,7 +204,7 @@ describe('CoreInternalClient auth contract', () => {
 		).toThrow('IDENTITY_BILLING_TOKEN');
 	});
 
-	it('proxies a bounded exact Core 401 response', async () => {
+	it('proxies a bounded exact Identity 401 response', async () => {
 		global.fetch = jest.fn().mockResolvedValue(
 			new Response(
 				JSON.stringify({

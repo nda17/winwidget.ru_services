@@ -14,6 +14,14 @@ export const OPERATIONS_GLOBAL_PREFIX_EXCLUDES = [
 	{
 		path: 'internal/v1/identity/users/:userId/admin-events/overview',
 		method: RequestMethod.GET
+	},
+	{
+		path: 'internal/v1/operations/reporting/schedule-policy',
+		method: RequestMethod.PUT
+	},
+	{
+		path: 'internal/v1/operations/reporting/schedule-policy/confirm',
+		method: RequestMethod.POST
 	}
 ] as const;
 

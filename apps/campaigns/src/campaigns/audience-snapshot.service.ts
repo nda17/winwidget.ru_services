@@ -1,4 +1,4 @@
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { CampaignsDependenciesClient } from '../internal/campaigns-dependencies.client';
 import { buildDeliveryOutboxData } from '../messaging/campaigns-outbox.factory';
 import { CampaignsPrismaService } from '../prisma/campaigns-prisma.service';
 import { Injectable } from '@nestjs/common';
@@ -50,7 +50,7 @@ class SnapshotImportCancelledError extends Error {
 export class AudienceSnapshotService {
 	constructor(
 		private readonly prisma: CampaignsPrismaService,
-		private readonly coreInternal: CoreInternalClient,
+		private readonly dependencies: CampaignsDependenciesClient,
 		private readonly config: ConfigService
 	) {}
 
@@ -273,7 +273,7 @@ export class AudienceSnapshotService {
 			campaign.audience === 'ACTIVE_SUBSCRIPTION'
 				? await this.readActiveSubscriberSnapshot(abortSignal)
 				: null;
-		const response = await this.coreInternal.exportAudience(
+		const response = await this.dependencies.exportAudience(
 			snapshot.channel,
 			abortSignal
 		);
@@ -489,7 +489,7 @@ export class AudienceSnapshotService {
 		abortSignal: AbortSignal
 	): Promise<ActiveSubscriberSnapshot> {
 		const response =
-			await this.coreInternal.exportActiveSubscriberIds(abortSignal);
+			await this.dependencies.exportActiveSubscriberIds(abortSignal);
 		const reader = response.body!.getReader();
 		const decoder = new TextDecoder();
 		const hasher = createHash('sha256');

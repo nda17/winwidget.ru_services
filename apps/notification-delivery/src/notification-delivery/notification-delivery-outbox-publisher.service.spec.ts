@@ -226,7 +226,7 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 		);
 	});
 
-	it('publishes a strictly validated Core delivery outcome', async () => {
+	it('publishes a strictly validated delivery outcome', async () => {
 		const { service, rabbitMq } = createService();
 		const outcome = {
 			...event,

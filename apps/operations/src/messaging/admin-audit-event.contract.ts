@@ -184,8 +184,6 @@ export function parseAdminAuditEvent(
 			return mapStructured(common, 'platform');
 		case 'support-admin-audit':
 			return mapStructured(common, 'support');
-		case 'core-admin-audit':
-			return mapStructured(common, 'core');
 	}
 }
 
@@ -470,13 +468,13 @@ function mapWidgets(common: CommonAuditEvent): NormalizedAdminAuditEvent {
 
 function mapStructured(
 	common: CommonAuditEvent,
-	source: 'billing' | 'identity' | 'platform' | 'support' | 'core'
+	source: 'billing' | 'identity' | 'platform' | 'support'
 ): NormalizedAdminAuditEvent {
 	boundedString(common.actorId, 'actorId', 255);
 	if ('target' in common.payload) {
 		throw new Error('Structured admin audit target is invalid');
 	}
-	const identitySnapshots = source === 'identity' || source === 'core';
+	const identitySnapshots = source === 'identity';
 	if (identitySnapshots) {
 		if (!('actorSnapshot' in common.payload)) {
 			throw new Error('Identity admin audit snapshot is required');
@@ -485,15 +483,13 @@ function mapStructured(
 		throw new Error('Admin audit snapshot is not allowed');
 	}
 	const sourceActions =
-		source === 'core'
-			? ADMIN_EVENT_LOG_ACTIONS
-			: source === 'identity'
-				? IDENTITY_ACTIONS
-				: source === 'platform'
-					? PLATFORM_ACTIONS
-					: source === 'support'
-						? SUPPORT_ACTIONS
-						: BILLING_ACTIONS;
+		source === 'identity'
+			? IDENTITY_ACTIONS
+			: source === 'platform'
+				? PLATFORM_ACTIONS
+				: source === 'support'
+					? SUPPORT_ACTIONS
+					: BILLING_ACTIONS;
 	if (!(sourceActions as readonly string[]).includes(common.action)) {
 		throw new Error('Structured admin audit action is invalid');
 	}
@@ -520,8 +516,7 @@ function mapStructured(
 			'MESSAGING'
 		],
 		platform: ['PLATFORM_CONTENT'],
-		support: ['SUPPORT'],
-		core: ADMIN_EVENT_LOG_SECTIONS
+		support: ['SUPPORT']
 	};
 	if (!allowedSections[source].includes(section)) {
 		throw new Error('Admin audit source section is invalid');

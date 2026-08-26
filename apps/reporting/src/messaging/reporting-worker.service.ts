@@ -4,6 +4,8 @@ import { ReportingPrismaService } from '../prisma/reporting-prisma.service';
 import {
 	InvalidReportingEventError,
 	NotificationDeliveryOutcomeEvent,
+	OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE,
+	OperationsNotificationRoutingChangedEvent,
 	ReportingSourceEvent,
 	parseReportingConsumeMessage,
 	reportingPayloadHash
@@ -128,9 +130,12 @@ export class ReportingWorkerService
 	): Promise<void> {
 		let parsed: ReturnType<typeof parseReportingConsumeMessage>;
 		try {
-			const expectedEventTypes = isProjectionConsumerKind(kind)
-				? REPORTING_ACCEPTED_PROJECTION_EVENT_TYPES[kind]
-				: REPORTING_ROUTING_KEYS.deliveryOutcome;
+			const expectedEventTypes =
+				kind === 'reportingSettings'
+					? OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
+					: isProjectionConsumerKind(kind)
+						? REPORTING_ACCEPTED_PROJECTION_EVENT_TYPES[kind]
+						: REPORTING_ROUTING_KEYS.deliveryOutcome;
 			parsed = parseReportingConsumeMessage(message, expectedEventTypes);
 		} catch (error) {
 			await this.deadLetterPoison(kind, message, error);
@@ -187,6 +192,15 @@ export class ReportingWorkerService
 			if (isProjectionConsumerKind(kind)) {
 				await this.projections.applyEvent(
 					parsed.payload as ReportingSourceEvent,
+					{
+						eventId: parsed.eventId,
+						consumer,
+						lockToken: claim.lockToken
+					}
+				);
+			} else if (kind === 'reportingSettings') {
+				await this.projections.applyOperationsNotificationRouting(
+					parsed.payload as OperationsNotificationRoutingChangedEvent,
 					{
 						eventId: parsed.eventId,
 						consumer,
@@ -398,7 +412,14 @@ export class ReportingWorkerService
 							? nextAttempt
 							: parsed.retryAttempt,
 						'x-retry-cycle': parsed.retryCycle,
-						'x-last-error': errorMessage.slice(0, 1000)
+						'x-last-error': errorMessage.slice(0, 1000),
+						...(parsed.eventType ===
+						OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
+							? {
+									'x-aggregate-type': 'telegram-bot-settings',
+									'x-aggregate-id': 'singleton'
+								}
+							: {})
 					},
 					status: ReportingOutboxStatus.PENDING
 				}

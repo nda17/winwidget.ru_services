@@ -117,7 +117,7 @@ let fixture = null;
 
 try {
 	fixture = await provisionRabbitFixture();
-	await assertProjectionTopologyPreservesLegacyProviderRetries(fixture);
+	await assertProjectionTopologyPreservesProviderRetries(fixture);
 	const port = await getFreePort();
 	service = startService(port);
 	await waitForReady(port);
@@ -152,10 +152,10 @@ try {
 	await prisma.$disconnect();
 }
 
-async function assertProjectionTopologyPreservesLegacyProviderRetries(
+async function assertProjectionTopologyPreservesProviderRetries(
 	rabbitFixture
 ) {
-	const legacyQueues = [];
+	const existingQueues = [];
 	for (const [kind, queue] of Object.entries(QUEUES).filter(([kind]) =>
 		['webhook', 'bitrix24', 'amo-crm'].includes(kind)
 	)) {
@@ -168,7 +168,7 @@ async function assertProjectionTopologyPreservesLegacyProviderRetries(
 				deadLetterRoutingKey: `lead.integration.${kind}.v1`
 			};
 			await rabbitFixture.adminChannel.assertQueue(retryQueue, options);
-			legacyQueues.push({ retryQueue, options });
+			existingQueues.push({ retryQueue, options });
 		}
 	}
 
@@ -192,15 +192,15 @@ async function assertProjectionTopologyPreservesLegacyProviderRetries(
 		await projectionService.onModuleInit();
 		assert.equal(projectionService.isConnected(), true);
 		assert.equal(projectionService.isTopologyReady(), true);
-		for (const { retryQueue, options } of legacyQueues) {
+		for (const { retryQueue, options } of existingQueues) {
 			await rabbitFixture.adminChannel.assertQueue(retryQueue, options);
 		}
 		console.log(
-			'Widgets projection-only topology preserved legacy provider retry arguments'
+			'Widgets projection-only topology preserved provider retry arguments'
 		);
 	} finally {
 		await projectionService.onApplicationShutdown().catch(() => undefined);
-		for (const { retryQueue } of legacyQueues) {
+		for (const { retryQueue } of existingQueues) {
 			await rabbitFixture.adminChannel
 				.deleteQueue(retryQueue, { ifEmpty: true, ifUnused: true })
 				.catch(() => undefined);
@@ -299,8 +299,6 @@ function startService(port) {
 			WIDGETS_PROCESS_ROLE: 'all',
 			WIDGETS_LISTEN_HOST: '127.0.0.1',
 			WIDGETS_PORT: String(port),
-			WIDGETS_ASSETS_DIR: '../../public/widgets',
-			WIDGETS_CORE_INTERNAL_BASE_URL: 'http://127.0.0.1:9',
 			WIDGETS_INTERNAL_TOKEN: `widgets-messaging-${runId}`,
 			WIDGETS_INTERNAL_TIMEOUT_MS: '500',
 			WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: '31968000000',

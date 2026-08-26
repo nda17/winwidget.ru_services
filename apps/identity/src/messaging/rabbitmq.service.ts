@@ -228,9 +228,8 @@ export class IdentityRabbitMqService
 		await channel.assertExchange(MANUAL_RETRY_EXCHANGE, 'direct', {
 			durable: true
 		});
-		// This queue already exists in Core with durable-only arguments. RabbitMQ
-		// queue arguments are immutable, so keep the declaration byte-for-byte
-		// compatible during the clean ownership handoff.
+		// Queue arguments are immutable. Keep the established durable-only
+		// declaration so a service restart can safely reuse the live queue.
 		await channel.assertQueue(DESTINATION_QUEUE, { durable: true });
 		await channel.bindQueue(
 			DESTINATION_QUEUE,

@@ -1,10 +1,11 @@
 import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { BillingAuthGuard } from './auth/billing-auth.guard';
-import { BillingInternalGuard } from './auth/billing-internal.guard';
+import { BillingOperationsGuard } from './auth/billing-operations.guard';
 import { BillingCampaignsGuard } from './auth/billing-campaigns.guard';
 import { BillingIdentityGuard } from './auth/billing-identity.guard';
 import { BillingCampaignAudienceService } from './domain/billing-campaign-audience.service';
+import { BillingAdminAlertsService } from './domain/billing-admin-alerts.service';
 import { InternalCommandsService } from './domain/internal-commands.service';
 import { BillingMessagingAdminService } from './domain/billing-messaging-admin.service';
 import { BillingSettingsService } from './domain/billing-settings.service';
@@ -16,13 +17,13 @@ import { BillingHealthController } from './health/billing-health.controller';
 import { BillingHealthService } from './health/billing-health.service';
 import { AffiliateController } from './http/affiliate.controller';
 import { BillingCampaignAudienceController } from './http/billing-campaign-audience.controller';
-import { BillingInternalController } from './http/billing-internal.controller';
+import { BillingOperationsController } from './http/billing-operations.controller';
 import { BillingIdentityController } from './http/billing-identity.controller';
 import { BillingSettingsController } from './http/billing-settings.controller';
 import { PaymentController } from './http/payment.controller';
 import { SubscriptionController } from './http/subscription.controller';
 import { TariffPricesController } from './http/tariff-prices.controller';
-import { CoreInternalClient } from './internal/core-internal.client';
+import { IdentityInternalClient } from './internal/identity-internal.client';
 import { WidgetsInternalClient } from './internal/widgets-internal.client';
 import { BillingOutboxPublisherService } from './messaging/billing-outbox-publisher.service';
 import { BillingRabbitMqService } from './messaging/billing-rabbitmq.service';
@@ -51,7 +52,7 @@ const API_CONTROLLERS =
 				BillingCampaignAudienceController,
 				BillingIdentityController,
 				BillingSettingsController,
-				BillingInternalController
+				BillingOperationsController
 			]
 		: [];
 
@@ -59,7 +60,7 @@ const API_PROVIDERS =
 	BILLING_PROCESS_ROLE === 'api'
 		? [
 				BillingAuthGuard,
-				BillingInternalGuard,
+				BillingOperationsGuard,
 				BillingCampaignsGuard,
 				BillingIdentityGuard
 			]
@@ -74,7 +75,7 @@ const API_PROVIDERS =
 	controllers: [BillingHealthController, ...API_CONTROLLERS],
 	providers: [
 		...API_PROVIDERS,
-		CoreInternalClient,
+		IdentityInternalClient,
 		WidgetsInternalClient,
 		PaymentDomainService,
 		PaymentSuccessTransaction,
@@ -82,6 +83,7 @@ const API_PROVIDERS =
 		TariffAffiliateService,
 		InternalCommandsService,
 		BillingCampaignAudienceService,
+		BillingAdminAlertsService,
 		BillingMessagingAdminService,
 		BillingSettingsService,
 		BillingProjectionService,

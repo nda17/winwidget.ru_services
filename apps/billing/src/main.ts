@@ -31,30 +31,6 @@ async function bootstrap(): Promise<void> {
 			{ path: 'health/live', method: RequestMethod.GET },
 			{ path: 'health/ready', method: RequestMethod.GET },
 			{
-				path: 'internal/v1/billing/users/revoke-entitlements',
-				method: RequestMethod.POST
-			},
-			{
-				path: 'internal/v1/billing/trials/ensure',
-				method: RequestMethod.POST
-			},
-			{
-				path: 'internal/v1/billing/settings',
-				method: RequestMethod.GET
-			},
-			{
-				path: 'internal/v1/billing/settings',
-				method: RequestMethod.PATCH
-			},
-			{
-				path: 'internal/v1/billing/users/:userId/admin-overview',
-				method: RequestMethod.GET
-			},
-			{
-				path: 'internal/v1/billing/directory/subscription-user-ids',
-				method: RequestMethod.GET
-			},
-			{
 				path: 'internal/v1/identity/billing/users/revoke-entitlements',
 				method: RequestMethod.POST
 			},
@@ -75,19 +51,23 @@ async function bootstrap(): Promise<void> {
 				method: RequestMethod.POST
 			},
 			{
-				path: 'internal/v1/billing/messaging/overview',
+				path: 'internal/v1/operations/billing/admin-alerts',
 				method: RequestMethod.GET
 			},
 			{
-				path: 'internal/v1/billing/messaging/failures',
+				path: 'internal/v1/operations/billing/messaging/overview',
 				method: RequestMethod.GET
 			},
 			{
-				path: 'internal/v1/billing/messaging/failures/:id/retry',
+				path: 'internal/v1/operations/billing/messaging/failures',
+				method: RequestMethod.GET
+			},
+			{
+				path: 'internal/v1/operations/billing/messaging/failures/:id/retry',
 				method: RequestMethod.POST
 			},
 			{
-				path: 'internal/v1/billing/messaging/failures/:id/close',
+				path: 'internal/v1/operations/billing/messaging/failures/:id/close',
 				method: RequestMethod.POST
 			}
 		]

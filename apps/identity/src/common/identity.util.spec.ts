@@ -9,7 +9,7 @@ describe('Identity canonical normalization', () => {
 		[' +44 (20) 1234-5678 ', '+442012345678'],
 		['legacy-extension', 'legacy-extension']
 	])(
-		'normalizes phone %s with the exact Core semantics',
+		'normalizes phone %s with the canonical Identity semantics',
 		(input, expected) => {
 			expect(normalizePhone(input)).toBe(expected);
 		}

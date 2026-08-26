@@ -28,8 +28,6 @@ const app = spawn('node', ['dist/src/main.js'], {
 		WIDGETS_PROCESS_ROLE: 'api',
 		WIDGETS_LISTEN_HOST: '127.0.0.1',
 		WIDGETS_PORT: String(port),
-		WIDGETS_ASSETS_DIR: '../../public/widgets',
-		WIDGETS_CORE_INTERNAL_BASE_URL: 'http://127.0.0.1:9',
 		WIDGETS_INTERNAL_TOKEN: internalToken,
 		WIDGETS_INTERNAL_TIMEOUT_MS: '500',
 		WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: '86400000',

@@ -3,10 +3,10 @@ import { ReportingPrismaService } from '../prisma/reporting-prisma.service';
 import {
 	BillingPaymentState,
 	BillingSubscriptionState,
-	CoreOperationalRoutingState,
 	IdentityUserState,
 	InvalidReportingEventError,
 	LeadState,
+	OperationsNotificationRoutingChangedEvent,
 	ReportingProjectionStream,
 	ReportingSourceEvent,
 	WidgetState,
@@ -18,8 +18,7 @@ import {
 	Prisma,
 	ProjectionReceiptResult,
 	ReportingConsumerFailureStatus,
-	ReportingConsumerReceiptStatus,
-	ReportingOwner
+	ReportingConsumerReceiptStatus
 } from '@prisma/reporting-client';
 import { createHash } from 'node:crypto';
 
@@ -27,12 +26,6 @@ export interface ConsumerReceiptCompletion {
 	eventId: string;
 	consumer: string;
 	lockToken: string;
-}
-
-export interface ProjectionApplySummary {
-	applied: number;
-	duplicate: number;
-	stale: number;
 }
 
 interface ProjectionIdentity {
@@ -60,9 +53,7 @@ export function reportingProjectionStateHash(
 		.digest('hex');
 }
 
-export function normalizeLegacyPaymentAmount(
-	value: string
-): number | null {
+export function normalizePaymentAmount(value: string): number | null {
 	const amount = Number(value.replace(',', '.'));
 	return Number.isFinite(amount) ? amount : null;
 }
@@ -101,41 +92,7 @@ export class ProjectionService {
 			async transaction => {
 				const applied = await this.applyInTransaction(transaction, event);
 				if (completion) {
-					const completedAt = new Date();
-					const completed = await transaction.consumerReceipt.updateMany({
-						where: {
-							eventId: completion.eventId,
-							consumer: completion.consumer,
-							status: ReportingConsumerReceiptStatus.PROCESSING,
-							lockToken: completion.lockToken
-						},
-						data: {
-							status: ReportingConsumerReceiptStatus.DELIVERED,
-							deliveredAt: completedAt,
-							lockedAt: null,
-							lockedBy: null,
-							lockToken: null,
-							leaseExpiresAt: null,
-							retryAttempt: null,
-							lastError: null
-						}
-					});
-					if (completed.count !== 1) {
-						throw new Error(
-							'Consumer receipt lease was lost before projection commit'
-						);
-					}
-					await transaction.reportingConsumerFailure.updateMany({
-						where: {
-							eventId: completion.eventId,
-							consumer: completion.consumer,
-							status: ReportingConsumerFailureStatus.RETRY_REQUESTED
-						},
-						data: {
-							status: ReportingConsumerFailureStatus.RESOLVED,
-							resolvedAt: completedAt
-						}
-					});
+					await this.completeConsumerReceipt(transaction, completion);
 				}
 				return applied;
 			},
@@ -145,53 +102,70 @@ export class ProjectionService {
 		return result;
 	}
 
-	async applyBatch(
-		events: readonly ReportingSourceEvent[]
-	): Promise<ProjectionApplySummary> {
-		if (!events.length) return { applied: 0, duplicate: 0, stale: 0 };
-		const results = await this.prisma.$transaction(
+	async applyOperationsNotificationRouting(
+		event: OperationsNotificationRoutingChangedEvent,
+		completion: ConsumerReceiptCompletion
+	): Promise<void> {
+		const changedAt = new Date(event.changedAt);
+		const applied = await this.prisma.$transaction(
 			async transaction => {
-				const aggregateLocks = [
-					...new Set(
-						events.map(
-							event =>
-								`reporting:${sourceEventTypeToStream(event.eventType)}:${event.aggregateId}`
-						)
-					)
-				].sort();
-				// The batch must own every aggregate before the first event advances a
-				// stream watermark. Otherwise a live event can own aggregate B while
-				// waiting for the watermark held by this batch, as the batch waits for B.
-				for (const lockKey of aggregateLocks) {
-					await transaction.$executeRaw`
-						SELECT pg_advisory_xact_lock(
-							hashtextextended(${lockKey}, 0)
-						)
-					`;
+				await transaction.reportingSettings.upsert({
+					where: { id: 'daily-summary' },
+					create: { id: 'daily-summary' },
+					update: {}
+				});
+				const lockedRows = await transaction.$queryRaw<
+					Array<{ id: string }>
+				>(
+					Prisma.sql`
+						SELECT "id"
+						FROM reporting."reporting_settings"
+						WHERE "id" = 'daily-summary'
+						FOR UPDATE
+					`
+				);
+				if (lockedRows.length !== 1) {
+					throw new Error('Daily Summary settings row is missing');
 				}
-				const batchResults: ProjectionReceiptResult[] = [];
-				for (const event of events) {
-					batchResults.push(
-						await this.applyInTransaction(transaction, event)
-					);
+				const current =
+					await transaction.reportingSettings.findUniqueOrThrow({
+						where: { id: 'daily-summary' },
+						select: {
+							messageThreadId: true,
+							operationalAlertsChangedAt: true
+						}
+					});
+				const isNewer =
+					current.operationalAlertsChangedAt === null ||
+					changedAt.getTime() >
+						current.operationalAlertsChangedAt.getTime();
+				if (isNewer) {
+					if (
+						event.operationalAlertsThreadId !== null &&
+						event.operationalAlertsThreadId === current.messageThreadId
+					) {
+						throw new InvalidReportingEventError(
+							'Daily Summary and operational alerts require separate Telegram topics'
+						);
+					}
+					await transaction.reportingSettings.update({
+						where: { id: 'daily-summary' },
+						data: {
+							operationalAlertsThreadId: event.operationalAlertsThreadId,
+							operationalAlertsChangedAt: changedAt
+						}
+					});
 				}
-				return batchResults;
+				await this.completeConsumerReceipt(transaction, completion);
+				return isNewer;
 			},
-			{ timeout: 60_000 }
+			{ timeout: 30_000 }
 		);
-		const summary: ProjectionApplySummary = {
-			applied: 0,
-			duplicate: 0,
-			stale: 0
-		};
-		for (const result of results) {
-			this.recordMetric(result);
-			if (result === ProjectionReceiptResult.APPLIED) summary.applied += 1;
-			if (result === ProjectionReceiptResult.DUPLICATE)
-				summary.duplicate += 1;
-			if (result === ProjectionReceiptResult.STALE) summary.stale += 1;
-		}
-		return summary;
+		this.metrics.increment(
+			applied
+				? 'projection_events_applied_total'
+				: 'projection_events_stale_total'
+		);
 	}
 
 	private async applyInTransaction(
@@ -311,29 +285,7 @@ export class ProjectionService {
 				})) ?? null
 			);
 		}
-		if (
-			event.eventType === 'reporting.core-operational-routing.changed.v1'
-		) {
-			const current = await transaction.reportingSettings.findUnique({
-				where: { id: 'daily-summary' },
-				select: {
-					coreOperationalRoutingSourceAggregateVersion: true,
-					coreOperationalRoutingStateHash: true
-				}
-			});
-			return current?.coreOperationalRoutingSourceAggregateVersion !==
-				null &&
-				current?.coreOperationalRoutingSourceAggregateVersion !== undefined
-				? {
-						aggregateVersion:
-							current.coreOperationalRoutingSourceAggregateVersion,
-						stateHash: current.coreOperationalRoutingStateHash
-					}
-				: null;
-		}
-		throw new InvalidReportingEventError(
-			'Unsupported reporting settings event type'
-		);
+		throw new InvalidReportingEventError('Unsupported projection stream');
 	}
 
 	private async applyNewerEvent(
@@ -386,7 +338,7 @@ export class ProjectionService {
 		if (stream === 'billingPayment') {
 			const state = event.state as BillingPaymentState | null;
 			const normalizedAmount = state
-				? normalizeLegacyPaymentAmount(state.amount)
+				? normalizePaymentAmount(state.amount)
 				: null;
 			await transaction.billingPaymentFact.upsert({
 				where: { id: event.aggregateId },
@@ -492,62 +444,48 @@ export class ProjectionService {
 			}
 			return ProjectionReceiptResult.APPLIED;
 		}
-		if (
-			event.eventType === 'reporting.core-operational-routing.changed.v1'
-		) {
-			const state = event.state as CoreOperationalRoutingState | null;
-			await transaction.reportingSettings.upsert({
-				where: { id: 'daily-summary' },
-				create: {
-					id: 'daily-summary',
-					owner: ReportingOwner.CORE_SHADOW,
-					enabled: false
-				},
-				update: {}
-			});
-			const lockedRows = await transaction.$queryRaw<
-				Array<{ id: string }>
-			>(
-				Prisma.sql`
-					SELECT "id"
-					FROM reporting."reporting_settings"
-					WHERE "id" = 'daily-summary'
-					FOR UPDATE
-				`
+		throw new InvalidReportingEventError('Unsupported projection stream');
+	}
+
+	private async completeConsumerReceipt(
+		transaction: Prisma.TransactionClient,
+		completion: ConsumerReceiptCompletion
+	): Promise<void> {
+		const completedAt = new Date();
+		const completed = await transaction.consumerReceipt.updateMany({
+			where: {
+				eventId: completion.eventId,
+				consumer: completion.consumer,
+				status: ReportingConsumerReceiptStatus.PROCESSING,
+				lockToken: completion.lockToken
+			},
+			data: {
+				status: ReportingConsumerReceiptStatus.DELIVERED,
+				deliveredAt: completedAt,
+				lockedAt: null,
+				lockedBy: null,
+				lockToken: null,
+				leaseExpiresAt: null,
+				retryAttempt: null,
+				lastError: null
+			}
+		});
+		if (completed.count !== 1) {
+			throw new Error(
+				'Consumer receipt lease was lost before projection commit'
 			);
-			if (lockedRows.length !== 1) {
-				throw new Error('Daily Summary settings row is missing');
-			}
-			const current =
-				await transaction.reportingSettings.findUniqueOrThrow({
-					where: { id: 'daily-summary' }
-				});
-			if (current.owner !== ReportingOwner.REPORTING) {
-				throw new ProjectionStateConflictError(
-					'Core operational routing events require Reporting ownership'
-				);
-			}
-			await transaction.reportingSettings.update({
-				where: { id: 'daily-summary' },
-				data: {
-					coreOperationalAlertsDestinationChatId:
-						state?.coreOperationalAlertsDestinationChatId.trim() || null,
-					coreOperationalAlertsThreadId:
-						state?.coreOperationalAlertsThreadId ?? null,
-					coreOperationalRoutingSourceAggregateVersion: new Prisma.Decimal(
-						event.aggregateVersion
-					),
-					coreOperationalRoutingSourceSequence: new Prisma.Decimal(
-						event.sourceSequence
-					),
-					coreOperationalRoutingStateHash: stateHash
-				}
-			});
-			return ProjectionReceiptResult.APPLIED;
 		}
-		throw new InvalidReportingEventError(
-			'Unsupported reporting settings event type'
-		);
+		await transaction.reportingConsumerFailure.updateMany({
+			where: {
+				eventId: completion.eventId,
+				consumer: completion.consumer,
+				status: ReportingConsumerFailureStatus.RETRY_REQUESTED
+			},
+			data: {
+				status: ReportingConsumerFailureStatus.RESOLVED,
+				resolvedAt: completedAt
+			}
+		});
 	}
 
 	private async advanceDiagnosticWatermark(

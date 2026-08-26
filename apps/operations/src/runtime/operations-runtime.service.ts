@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 export const OPERATIONS_PROCESS_ROLES = [
 	'api',
 	'worker',
+	'restore-worker',
 	'outbox-publisher'
 ] as const;
 export type OperationsProcessRole =
@@ -12,11 +13,13 @@ export type OperationsProcessRole =
 const ROLE_PORT_KEYS: Record<OperationsProcessRole, string> = {
 	api: 'OPERATIONS_API_PORT',
 	worker: 'OPERATIONS_WORKER_PORT',
+	'restore-worker': 'OPERATIONS_RESTORE_WORKER_PORT',
 	'outbox-publisher': 'OPERATIONS_OUTBOX_PUBLISHER_PORT'
 };
 const ROLE_DEFAULT_PORTS: Record<OperationsProcessRole, number> = {
 	api: 5200,
 	worker: 5201,
+	'restore-worker': 5203,
 	'outbox-publisher': 5202
 };
 
@@ -131,11 +134,23 @@ export class OperationsRuntimeService {
 		return this.role === 'worker';
 	}
 
+	get restoreWorkerEnabled(): boolean {
+		return this.role === 'restore-worker';
+	}
+
 	get outboxPublisherEnabled(): boolean {
 		return this.role === 'outbox-publisher';
 	}
 
 	get rabbitEnabled(): boolean {
-		return this.workerEnabled || this.outboxPublisherEnabled;
+		return (
+			this.workerEnabled ||
+			this.restoreWorkerEnabled ||
+			this.outboxPublisherEnabled
+		);
+	}
+
+	get consumerEnabled(): boolean {
+		return this.workerEnabled || this.restoreWorkerEnabled;
 	}
 }

@@ -9,13 +9,15 @@
 		"node": ">=20"
 	},
 	"scripts": {
-		"build": "tsc -p tsconfig.build.json",
-		"cutover": "node dist/src/cutover-main.js",
+		"build": "pnpm run build:server && pnpm run build:widgets",
+		"build:server": "tsc -p tsconfig.build.json",
+		"build:widgets": "node scripts/build-widgets.mjs && pnpm run build:widgets:check",
+		"build:widgets:check": "node scripts/check-widgets.mjs",
 		"start": "node dist/src/main.js",
 		"start:local": "node --env-file=../../.env dist/src/main.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
-		"test:integration": "pnpm run build && pnpm --dir ../.. run build:widgets && pnpm run test:integration:foundation && pnpm run test:integration:behavior && pnpm run test:integration:retention",
+		"test:integration": "pnpm run build && pnpm run test:integration:foundation && pnpm run test:integration:behavior && pnpm run test:integration:retention",
 		"test:integration:behavior": "node test/integration/widgets-behavior.integration.mjs",
 		"test:integration:foundation": "node test/integration/widgets-foundation.integration.mjs",
 		"test:integration:retention": "node test/integration/widgets-retention.integration.mjs",

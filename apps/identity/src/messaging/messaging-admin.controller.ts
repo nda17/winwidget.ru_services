@@ -36,7 +36,7 @@ class CloseIdentityFailureDto extends RetryIdentityFailureDto {
 
 @Controller('internal/v1/identity/messaging')
 @UseGuards(IdentityInternalGuard)
-@InternalServices('core')
+@InternalServices('operations')
 @UsePipes(
 	new ValidationPipe({
 		whitelist: true,

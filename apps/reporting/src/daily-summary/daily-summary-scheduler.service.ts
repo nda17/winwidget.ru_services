@@ -12,7 +12,6 @@ import {
 	Logger,
 	OnModuleInit
 } from '@nestjs/common';
-import { ReportingOwner } from '@prisma/reporting-client';
 import dayjs from 'dayjs';
 import timezone from 'dayjs/plugin/timezone';
 import utc from 'dayjs/plugin/utc';
@@ -88,15 +87,12 @@ export class DailySummarySchedulerService
 	private async tick(): Promise<void> {
 		await this.runs.recoverExpiredRuns();
 		const settings = await this.settingsService.getSchedulerSettings();
-		if (settings.owner === ReportingOwner.REPORTING && settings.enabled) {
+		if (settings.enabled) {
 			validateDailySummarySettingsConfig({
 				enabled: settings.enabled,
 				destinationChatId: settings.destinationChatId,
 				messageThreadId: settings.messageThreadId,
-				coreOperationalAlertsDestinationChatId:
-					settings.coreOperationalAlertsDestinationChatId,
-				coreOperationalAlertsThreadId:
-					settings.coreOperationalAlertsThreadId,
+				operationalAlertsThreadId: settings.operationalAlertsThreadId,
 				scheduleTime: settings.scheduleTime,
 				timezone: settings.timezone
 			});

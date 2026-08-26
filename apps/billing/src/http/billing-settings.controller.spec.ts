@@ -11,7 +11,6 @@ import {
 	BillingAuthGuard
 } from '../auth/billing-auth.guard';
 import { BillingSettingsPatchDto } from './billing.dto';
-import { BillingInternalController } from './billing-internal.controller';
 import { BillingSettingsController } from './billing-settings.controller';
 
 describe('BillingSettingsController contract', () => {
@@ -86,20 +85,5 @@ describe('BillingSettingsController contract', () => {
 				{ type: 'body', metatype: BillingSettingsPatchDto }
 			)
 		).rejects.toBeDefined();
-	});
-
-	it('does not expose the retired internal settings alias', () => {
-		const paths = Object.getOwnPropertyNames(
-			BillingInternalController.prototype
-		)
-			.filter(name => name !== 'constructor')
-			.map(name =>
-				Reflect.getMetadata(
-					PATH_METADATA,
-					Reflect.get(BillingInternalController.prototype, name)
-				)
-			)
-			.filter((path): path is string => typeof path === 'string');
-		expect(paths).not.toContain('settings');
 	});
 });

@@ -31,25 +31,16 @@ export class RefreshTokenService {
 	add(response: Response, token: string): void {
 		const expires = new Date();
 		expires.setDate(expires.getDate() + this.expirationDays);
-		this.removeLegacyHostCookie(response);
 		response.cookie(this.name, token, this.options(expires));
 	}
 
 	remove(response: Response): void {
-		this.removeLegacyHostCookie(response);
 		response.cookie(this.name, '', this.options(new Date(0)));
 	}
 
-	private removeLegacyHostCookie(response: Response): void {
-		if (!process.env.AUTH_COOKIE_DOMAIN?.trim()) return;
-		response.cookie(this.name, '', this.options(new Date(0), false));
-	}
-
-	private options(expires: Date, includeDomain = true) {
+	private options(expires: Date) {
 		const production = process.env.MODE === 'production';
-		const domain = includeDomain
-			? process.env.AUTH_COOKIE_DOMAIN?.trim()
-			: '';
+		const domain = process.env.AUTH_COOKIE_DOMAIN?.trim();
 		return {
 			httpOnly: true,
 			expires,

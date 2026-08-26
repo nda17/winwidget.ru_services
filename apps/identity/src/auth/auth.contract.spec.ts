@@ -176,7 +176,7 @@ describe('refresh cookie fail-closed contract', () => {
 		else process.env.AUTH_COOKIE_DOMAIN = previousDomain;
 	});
 
-	it('clears host-only and domain cookies on rejected refresh and logout', async () => {
+	it('clears the canonical domain cookie on rejected refresh and logout', async () => {
 		const refresh = new RefreshTokenService();
 		const auth = {
 			refresh: jest
@@ -200,26 +200,18 @@ describe('refresh cookie fail-closed contract', () => {
 				rejectedResponse
 			)
 		).rejects.toThrow('Invalid refresh token');
-		expect((rejectedResponse.cookie as jest.Mock).mock.calls).toEqual(
-			expect.arrayContaining([
-				[
-					'refreshToken',
-					'',
-					expect.not.objectContaining({ domain: expect.anything() })
-				],
-				[
-					'refreshToken',
-					'',
-					expect.objectContaining({
-						domain: '.winwidget.ru',
-						httpOnly: true,
-						secure: true,
-						sameSite: 'none',
-						path: '/'
-					})
-				]
-			])
+		expect(rejectedResponse.cookie).toHaveBeenCalledWith(
+			'refreshToken',
+			'',
+			expect.objectContaining({
+				domain: '.winwidget.ru',
+				httpOnly: true,
+				secure: true,
+				sameSite: 'none',
+				path: '/'
+			})
 		);
+		expect(rejectedResponse.cookie).toHaveBeenCalledTimes(1);
 
 		const logoutResponse = response();
 		await expect(
@@ -228,10 +220,10 @@ describe('refresh cookie fail-closed contract', () => {
 				logoutResponse
 			)
 		).resolves.toBe(true);
-		expect(logoutResponse.cookie).toHaveBeenCalledTimes(2);
+		expect(logoutResponse.cookie).toHaveBeenCalledTimes(1);
 	});
 
-	it('clears both cookies only when revoke-one removes the current session', async () => {
+	it('clears the canonical cookie when the current session is revoked', async () => {
 		const refresh = new RefreshTokenService();
 		const auth = {
 			revokeSession: jest
@@ -250,10 +242,10 @@ describe('refresh cookie fail-closed contract', () => {
 		await expect(
 			controller.revoke('user', 'current', 'current', one)
 		).resolves.toEqual({ currentSessionRevoked: true });
-		expect(one.cookie).toHaveBeenCalledTimes(2);
+		expect(one.cookie).toHaveBeenCalledTimes(1);
 
 		const all = response();
 		await expect(controller.revokeAll('user', all)).resolves.toBe(true);
-		expect(all.cookie).toHaveBeenCalledTimes(2);
+		expect(all.cookie).toHaveBeenCalledTimes(1);
 	});
 });

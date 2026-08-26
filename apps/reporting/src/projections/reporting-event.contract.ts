@@ -6,8 +6,7 @@ export const REPORTING_SOURCE_EVENT_TYPES = [
 	'billing.payment.changed.v1',
 	'billing.subscription.changed.v1',
 	'widgets.widget.changed.v1',
-	'widgets.lead.changed.v1',
-	'reporting.core-operational-routing.changed.v1'
+	'widgets.lead.changed.v1'
 ] as const;
 
 export type ReportingSourceEventType =
@@ -18,8 +17,7 @@ export const REPORTING_PROJECTION_STREAMS = [
 	'billingPayment',
 	'billingSubscription',
 	'widget',
-	'lead',
-	'reportingSettings'
+	'lead'
 ] as const;
 
 export type ReportingProjectionStream =
@@ -27,6 +25,8 @@ export type ReportingProjectionStream =
 
 export const REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'reporting.notification.delivery.outcome.v1';
+export const OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE =
+	'operations.notification-routing.changed.v1';
 
 export const REPORTING_WIDGET_TYPES = [
 	'wheel',
@@ -93,19 +93,12 @@ export interface LeadState {
 	createdAt: string;
 }
 
-export interface CoreOperationalRoutingState {
-	id: 'singleton';
-	coreOperationalAlertsDestinationChatId: string;
-	coreOperationalAlertsThreadId: number | null;
-}
-
 type SourceStateByType = {
 	'identity.user.changed.v1': IdentityUserState;
 	'billing.payment.changed.v1': BillingPaymentState;
 	'billing.subscription.changed.v1': BillingSubscriptionState;
 	'widgets.widget.changed.v1': WidgetState;
 	'widgets.lead.changed.v1': LeadState;
-	'reporting.core-operational-routing.changed.v1': CoreOperationalRoutingState;
 };
 
 export type ReportingSourceEvent<
@@ -141,6 +134,13 @@ export interface NotificationDeliveryOutcomeEvent {
 	occurredAt: string;
 }
 
+export interface OperationsNotificationRoutingChangedEvent {
+	schemaVersion: 1;
+	eventId: string;
+	operationalAlertsThreadId: number | null;
+	changedAt: string;
+}
+
 export class InvalidReportingEventError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -170,16 +170,14 @@ export function sourceEventTypeToStream(
 		'billing.payment.changed.v1': 'billingPayment',
 		'billing.subscription.changed.v1': 'billingSubscription',
 		'widgets.widget.changed.v1': 'widget',
-		'widgets.lead.changed.v1': 'lead',
-		'reporting.core-operational-routing.changed.v1': 'reportingSettings'
+		'widgets.lead.changed.v1': 'lead'
 	};
 	return mapping[eventType];
 }
 
 export function parseReportingSourceEvent(
 	value: unknown,
-	expectedType?: ReportingSourceEventType,
-	options: { allowZeroVersion?: boolean } = {}
+	expectedType?: ReportingSourceEventType
 ): ReportingSourceEvent {
 	const record = exactRecord(value, [
 		'schemaVersion',
@@ -203,25 +201,12 @@ export function parseReportingSourceEvent(
 	assertBoundedString(record.aggregateId, 'aggregateId', 255);
 	assertDecimal(record.aggregateVersion, 'aggregateVersion');
 	assertDecimal(record.sourceSequence, 'sourceSequence');
-	const aggregateIsZero = record.aggregateVersion === '0';
-	const sequenceIsZero = record.sourceSequence === '0';
-	if (
-		(!options.allowZeroVersion && (aggregateIsZero || sequenceIsZero)) ||
-		aggregateIsZero !== sequenceIsZero
-	) {
+	if (record.aggregateVersion === '0' || record.sourceSequence === '0') {
 		throw new InvalidReportingEventError(
-			'aggregateVersion and sourceSequence must both be positive, or both zero for a source snapshot'
+			'aggregateVersion and sourceSequence must both be positive'
 		);
 	}
 	assertIsoDate(record.occurredAt, 'occurredAt');
-	if (
-		record.eventType === 'reporting.core-operational-routing.changed.v1' &&
-		record.aggregateId !== 'singleton'
-	) {
-		throw new InvalidReportingEventError(
-			'reporting settings aggregateId must equal singleton'
-		);
-	}
 	if (typeof record.tombstone !== 'boolean') {
 		throw new InvalidReportingEventError('tombstone must be a boolean');
 	}
@@ -331,16 +316,41 @@ export function parseNotificationDeliveryOutcome(
 	return record as unknown as NotificationDeliveryOutcomeEvent;
 }
 
+export function parseOperationsNotificationRoutingChangedEvent(
+	value: unknown
+): OperationsNotificationRoutingChangedEvent {
+	const record = exactRecord(value, [
+		'schemaVersion',
+		'eventId',
+		'operationalAlertsThreadId',
+		'changedAt'
+	]);
+	assertLiteral(record.schemaVersion, 1, 'schemaVersion');
+	assertUuid(record.eventId, 'eventId');
+	if (record.operationalAlertsThreadId !== null) {
+		assertPositiveInteger(
+			record.operationalAlertsThreadId,
+			'operationalAlertsThreadId'
+		);
+	}
+	assertIsoDate(record.changedAt, 'changedAt');
+	return record as unknown as OperationsNotificationRoutingChangedEvent;
+}
+
 export function parseReportingConsumeMessage(
 	message: ConsumeMessage,
 	expected:
 		| ReportingSourceEventType
 		| readonly ReportingSourceEventType[]
+		| typeof OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
 		| typeof REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE
 ): {
 	eventId: string;
 	eventType: string;
-	payload: ReportingSourceEvent | NotificationDeliveryOutcomeEvent;
+	payload:
+		| ReportingSourceEvent
+		| NotificationDeliveryOutcomeEvent
+		| OperationsNotificationRoutingChangedEvent;
 	retryAttempt: number;
 	retryCycle: number;
 } {
@@ -355,16 +365,20 @@ export function parseReportingConsumeMessage(
 	}
 	const isDeliveryOutcome =
 		expected === REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE;
+	const isOperationsNotificationRouting =
+		expected === OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE;
 	const expectedTypes: readonly ReportingSourceEventType[] = Array.isArray(
 		expected
 	)
 		? expected
-		: isDeliveryOutcome
+		: isDeliveryOutcome || isOperationsNotificationRouting
 			? []
 			: [expected as ReportingSourceEventType];
 	const payload = isDeliveryOutcome
 		? parseNotificationDeliveryOutcome(value)
-		: parseReportingSourceEvent(value);
+		: isOperationsNotificationRouting
+			? parseOperationsNotificationRoutingChangedEvent(value)
+			: parseReportingSourceEvent(value);
 	const messageId =
 		typeof message.properties.messageId === 'string'
 			? message.properties.messageId
@@ -375,21 +389,43 @@ export function parseReportingConsumeMessage(
 			: '';
 	const payloadEventId =
 		'eventId' in payload ? payload.eventId : messageId;
+	const payloadEventType =
+		'eventType' in payload
+			? payload.eventType
+			: OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE;
 	if (!UUID_PATTERN.test(messageId) || payloadEventId !== messageId) {
 		throw new InvalidReportingEventError(
 			'AMQP messageId must be a UUID and equal payload eventId when present'
 		);
 	}
 	if (
-		eventType !== payload.eventType ||
+		eventType !== payloadEventType ||
 		(!isDeliveryOutcome &&
+			!isOperationsNotificationRouting &&
 			!expectedTypes.includes(eventType as ReportingSourceEventType)) ||
 		(isDeliveryOutcome &&
-			eventType !== REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE)
+			eventType !== REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE) ||
+		(isOperationsNotificationRouting &&
+			eventType !== OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE)
 	) {
 		throw new InvalidReportingEventError(
 			'AMQP type must equal the expected payload eventType'
 		);
+	}
+	if (
+		isOperationsNotificationRouting &&
+		message.fields.routingKey ===
+			OPERATIONS_NOTIFICATION_ROUTING_EVENT_TYPE
+	) {
+		if (
+			message.properties.headers?.['x-aggregate-type'] !==
+				'telegram-bot-settings' ||
+			message.properties.headers?.['x-aggregate-id'] !== 'singleton'
+		) {
+			throw new InvalidReportingEventError(
+				'Operations notification routing aggregate headers are invalid'
+			);
+		}
 	}
 	const retryAttempt = parseOptionalIntegerHeader(
 		message.properties.headers?.['x-retry-attempt'],
@@ -625,33 +661,6 @@ function parseSourceState(
 			REPORTING_WIDGET_TYPES,
 			'state.widgetType'
 		);
-		return;
-	}
-	if (eventType === 'reporting.core-operational-routing.changed.v1') {
-		const state = exactRecord(value, [
-			'id',
-			'coreOperationalAlertsDestinationChatId',
-			'coreOperationalAlertsThreadId'
-		]);
-		if (state.id !== 'singleton') {
-			throw new InvalidReportingEventError(
-				'state.id must equal singleton for Core operational routing'
-			);
-		}
-		if (
-			typeof state.coreOperationalAlertsDestinationChatId !== 'string' ||
-			state.coreOperationalAlertsDestinationChatId.length > 255
-		) {
-			throw new InvalidReportingEventError(
-				'state.coreOperationalAlertsDestinationChatId is invalid'
-			);
-		}
-		if (state.coreOperationalAlertsThreadId !== null) {
-			assertPositiveInteger(
-				state.coreOperationalAlertsThreadId,
-				'state.coreOperationalAlertsThreadId'
-			);
-		}
 		return;
 	}
 	throw new InvalidReportingEventError(

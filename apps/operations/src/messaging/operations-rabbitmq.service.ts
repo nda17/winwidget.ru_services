@@ -25,16 +25,25 @@ import {
 	getOperationsAuditRetryRoutingKey,
 	OPERATIONS_AUDIT_EVENT_TYPE,
 	OPERATIONS_AUDIT_SOURCES,
+	OPERATIONS_DATABASE_RESTORE_DLQ,
+	OPERATIONS_DATABASE_RESTORE_QUEUE,
+	OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE,
 	OPERATIONS_DEAD_LETTER_EXCHANGE,
 	OPERATIONS_EVENTS_EXCHANGE,
 	OPERATIONS_MANUAL_RETRY_EXCHANGE,
 	OPERATIONS_RETRY_EXCHANGE,
+	OPERATIONS_SCHEDULED_JOB_DLQ,
+	OPERATIONS_SCHEDULED_JOB_QUEUE,
+	OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE,
 	OperationsAuditSource
 } from './operations-messaging.constants';
 
 export type OperationsConsumeDecision = 'ack' | 'requeue' | 'reject';
 export type OperationsAuditHandler = (
 	source: OperationsAuditSource,
+	message: ConsumeMessage
+) => Promise<OperationsConsumeDecision>;
+export type OperationsJobHandler = (
 	message: ConsumeMessage
 ) => Promise<OperationsConsumeDecision>;
 
@@ -50,6 +59,8 @@ export class OperationsRabbitMqService
 	private consumerReady = false;
 	private maxMessageBytes = 256 * 1024;
 	private consumerRegistered = false;
+	private jobConsumerRegistered = false;
+	private jobConsumerReady = false;
 	private consumerGeneration = 0;
 	private readonly consumerTags = new Map<string, string>();
 
@@ -73,6 +84,30 @@ export class OperationsRabbitMqService
 	async prepareAuditTopology(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
 		await this.registerAuditTopology();
+	}
+
+	async consumeScheduledJobs(
+		handler: OperationsJobHandler
+	): Promise<void> {
+		if (!this.runtime.workerEnabled) return;
+		await this.consumeOperationalQueue(
+			OPERATIONS_SCHEDULED_JOB_QUEUE,
+			OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE,
+			OPERATIONS_SCHEDULED_JOB_DLQ,
+			handler
+		);
+	}
+
+	async consumeDatabaseRestoreJobs(
+		handler: OperationsJobHandler
+	): Promise<void> {
+		if (!this.runtime.restoreWorkerEnabled) return;
+		await this.consumeOperationalQueue(
+			OPERATIONS_DATABASE_RESTORE_QUEUE,
+			OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE,
+			OPERATIONS_DATABASE_RESTORE_DLQ,
+			handler
+		);
 	}
 
 	private async registerAuditTopology(
@@ -144,14 +179,19 @@ export class OperationsRabbitMqService
 	}
 
 	private assertPublishBoundary(exchange: string): void {
-		const allowedExchanges = this.runtime.workerEnabled
+		const consumerEnabled =
+			this.runtime.workerEnabled || this.runtime.restoreWorkerEnabled;
+		const allowedExchanges = consumerEnabled
 			? [OPERATIONS_RETRY_EXCHANGE, OPERATIONS_DEAD_LETTER_EXCHANGE]
 			: [OPERATIONS_EVENTS_EXCHANGE, OPERATIONS_MANUAL_RETRY_EXCHANGE];
 		if (!allowedExchanges.includes(exchange)) {
+			const processLabel = this.runtime.restoreWorkerEnabled
+				? 'restore worker'
+				: this.runtime.workerEnabled
+					? 'worker'
+					: 'outbox publisher';
 			throw new Error(
-				`RabbitMQ exchange is not allowed for the Operations ${
-					this.runtime.workerEnabled ? 'worker' : 'outbox publisher'
-				}`
+				`RabbitMQ exchange is not allowed for the Operations ${processLabel}`
 			);
 		}
 	}
@@ -207,7 +247,16 @@ export class OperationsRabbitMqService
 	isReady(): boolean {
 		if (!this.runtime.rabbitEnabled) return true;
 		if (!this.topologyReady) return false;
-		return !this.runtime.workerEnabled || this.consumerReady;
+		if (this.runtime.workerEnabled) {
+			return (
+				this.consumerReady &&
+				(!this.jobConsumerRegistered || this.jobConsumerReady)
+			);
+		}
+		if (this.runtime.restoreWorkerEnabled) {
+			return this.jobConsumerRegistered && this.jobConsumerReady;
+		}
+		return true;
 	}
 
 	async onApplicationShutdown(): Promise<void> {
@@ -217,15 +266,40 @@ export class OperationsRabbitMqService
 		await this.connection?.close().catch(() => undefined);
 		this.topologyReady = false;
 		this.consumerReady = false;
+		this.jobConsumerReady = false;
+	}
+
+	private async consumeOperationalQueue(
+		queue: string,
+		retryQueue: string,
+		deadLetterQueue: string,
+		handler: OperationsJobHandler
+	): Promise<void> {
+		if (this.jobConsumerRegistered) {
+			throw new Error('Operations job consumer is already registered');
+		}
+		this.jobConsumerRegistered = true;
+		await this.connect();
+		if (!this.channel) throw new Error('RabbitMQ channel is unavailable');
+		await this.channel.addSetup(async (channel: ConfirmChannel) => {
+			this.jobConsumerReady = false;
+			await channel.checkQueue(queue);
+			await channel.checkQueue(retryQueue);
+			await channel.checkQueue(deadLetterQueue);
+			const consumerTag = await this.consumeQueue(channel, queue, handler);
+			this.jobConsumerReady = Boolean(consumerTag);
+		});
 	}
 
 	private async connect(): Promise<void> {
 		if (this.channel) return;
 		const url = this.config.get<string>('RABBITMQ_URL')?.trim();
 		if (!url) throw new Error('RABBITMQ_URL is required');
-		const expectedConnectionName = this.runtime.workerEnabled
-			? 'winwidget-operations-worker'
-			: 'winwidget-operations-outbox-publisher';
+		const expectedConnectionName = this.runtime.restoreWorkerEnabled
+			? 'winwidget-operations-restore-worker'
+			: this.runtime.workerEnabled
+				? 'winwidget-operations-worker'
+				: 'winwidget-operations-outbox-publisher';
 		const connectionName = this.config
 			.get<string>('RABBITMQ_CONNECTION_NAME')
 			?.trim();
@@ -234,14 +308,16 @@ export class OperationsRabbitMqService
 				`RABBITMQ_CONNECTION_NAME must be ${expectedConnectionName}`
 			);
 		}
+		const consumerEnabled =
+			this.runtime.workerEnabled || this.runtime.restoreWorkerEnabled;
 		const assertTopology = parseOperationsStrictBoolean(
 			this.config.get<string>('RABBITMQ_ASSERT_TOPOLOGY'),
-			this.runtime.workerEnabled,
+			consumerEnabled,
 			'RABBITMQ_ASSERT_TOPOLOGY'
 		);
-		if (assertTopology !== this.runtime.workerEnabled) {
+		if (assertTopology !== consumerEnabled) {
 			throw new Error(
-				`RABBITMQ_ASSERT_TOPOLOGY must be ${this.runtime.workerEnabled}`
+				`RABBITMQ_ASSERT_TOPOLOGY must be ${consumerEnabled}`
 			);
 		}
 		this.maxMessageBytes = parseOperationsBoundedInteger(
@@ -263,6 +339,7 @@ export class OperationsRabbitMqService
 			this.consumerTags.clear();
 			this.topologyReady = false;
 			this.consumerReady = false;
+			this.jobConsumerReady = false;
 			this.logger.warn('RabbitMQ disconnected');
 		});
 		this.channel = this.connection.createChannel({
@@ -317,6 +394,33 @@ export class OperationsRabbitMqService
 						else if (decision === 'reject')
 							channel.nack(message, false, false);
 						else channel.nack(message, false, true);
+					})
+					.catch(() => channel.nack(message, false, true));
+			},
+			{ noAck: false }
+		);
+		return consumer.consumerTag;
+	}
+
+	private async consumeQueue(
+		channel: ConfirmChannel,
+		queue: string,
+		handler: OperationsJobHandler
+	): Promise<string> {
+		const consumer = await channel.consume(
+			queue,
+			message => {
+				if (!message) {
+					this.jobConsumerReady = false;
+					void channel.close().catch(() => undefined);
+					return;
+				}
+				void handler(message)
+					.then(decision => {
+						if (decision === 'ack') channel.ack(message);
+						else if (decision === 'reject') {
+							channel.nack(message, false, false);
+						} else channel.nack(message, false, true);
 					})
 					.catch(() => channel.nack(message, false, true));
 			},

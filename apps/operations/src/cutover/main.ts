@@ -409,6 +409,24 @@ async function verifyImportedCounts(
 	}
 }
 
+export function requiresFrozenSnapshotCountCheck(
+	phase: OperationsDatabasePhase,
+	storedSha256: string | null,
+	storedRevision: string | null,
+	expectedSha256: string,
+	expectedRevision: string
+): boolean {
+	if (
+		storedSha256 !== expectedSha256 ||
+		storedRevision !== expectedRevision
+	) {
+		throw new OperationsCutoverError(
+			'Operations already contains another cutover snapshot'
+		);
+	}
+	return phase === OperationsDatabasePhase.IMPORTED;
+}
+
 async function status(client: PrismaClient): Promise<void> {
 	const state = await client.operationsOwnershipState.findUniqueOrThrow({
 		where: { id: 'singleton' }
@@ -438,19 +456,20 @@ async function importSnapshot(
 		async transaction => {
 			const state = await lockState(transaction);
 			if (state.phase !== OperationsDatabasePhase.EMPTY) {
-				if (
-					state.sourceSnapshotSha256 !== sha256 ||
-					state.sourceRevision !== loaded.snapshot.sourceRevision
-				) {
-					throw new OperationsCutoverError(
-						'Operations already contains another cutover snapshot'
+				const requiresCountCheck = requiresFrozenSnapshotCountCheck(
+					state.phase,
+					state.sourceSnapshotSha256,
+					state.sourceRevision,
+					sha256,
+					loaded.snapshot.sourceRevision
+				);
+				if (requiresCountCheck) {
+					await verifyImportedCounts(
+						transaction,
+						state.sourceNoteCount!,
+						state.sourceEventCount!
 					);
 				}
-				await verifyImportedCounts(
-					transaction,
-					state.sourceNoteCount!,
-					state.sourceEventCount!
-				);
 				return;
 			}
 			const [noteCount, eventCount] = await Promise.all([

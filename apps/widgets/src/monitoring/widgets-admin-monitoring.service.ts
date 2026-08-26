@@ -6,9 +6,9 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/widgets-client';
 import {
-	CoreInternalClient,
+	WidgetsIdentityClient,
 	WidgetsOwnerDirectoryItem
-} from '../internal/core-internal.client';
+} from '../internal/widgets-identity.client';
 import { WidgetsDomainRepository } from '../domain/widgets-domain.repository';
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
 import {
@@ -103,7 +103,7 @@ interface WidgetUsageRow {
 export class WidgetsAdminMonitoringService {
 	constructor(
 		private readonly repository: WidgetsDomainRepository,
-		private readonly core: CoreInternalClient,
+		private readonly identity: WidgetsIdentityClient,
 		private readonly domain: WidgetsDomainService
 	) {}
 
@@ -157,7 +157,9 @@ export class WidgetsAdminMonitoringService {
 	async get(type: WidgetType, id: string) {
 		const lifecycle = await this.domain.adminGet(type, id);
 		const ownerId = await this.domain.ownerId(type, id);
-		const resolvedOwner = (await this.core.resolveOwners([ownerId]))[0];
+		const resolvedOwner = (
+			await this.identity.resolveOwners([ownerId])
+		)[0];
 		if (!resolvedOwner) {
 			throw new NotFoundException('Владелец виджета не найден');
 		}
@@ -426,7 +428,7 @@ export class WidgetsAdminMonitoringService {
 			pageNumber <= MAX_OWNER_DIRECTORY_PAGES;
 			pageNumber += 1
 		) {
-			const page = await this.core.searchOwners({
+			const page = await this.identity.searchOwners({
 				search,
 				...(afterId && { afterId }),
 				limit: OWNER_BATCH_SIZE
@@ -613,7 +615,7 @@ export class WidgetsAdminMonitoringService {
 		const ids = [...new Set(rows.map(row => row.ownerId))];
 		if (!ids.length) return [];
 		return this.enrichOwnersWithEntitlements(
-			await this.core.resolveOwners(ids)
+			await this.identity.resolveOwners(ids)
 		);
 	}
 

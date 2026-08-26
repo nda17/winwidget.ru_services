@@ -1,5 +1,5 @@
 import { createReportingCorrelationId } from '../common/reporting-context';
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { OperationsInternalClient } from '../internal/operations-internal.client';
 import {
 	ADMIN_AUDIT_EVENT_TYPE,
 	REPORTING_ADMIN_AUDIT_ROUTING_KEY
@@ -22,7 +22,6 @@ import {
 	Prisma,
 	ReportingOutboxExchange,
 	ReportingOutboxStatus,
-	ReportingOwner,
 	ReportingSettings
 } from '@prisma/reporting-client';
 import { createHash, randomUUID } from 'node:crypto';
@@ -31,8 +30,7 @@ export interface FinalDailySummaryConfig {
 	enabled: boolean;
 	destinationChatId: string | null;
 	messageThreadId: number | null;
-	coreOperationalAlertsDestinationChatId: string | null;
-	coreOperationalAlertsThreadId: number | null;
+	operationalAlertsThreadId: number | null;
 	scheduleTime: string;
 	timezone: string;
 }
@@ -75,22 +73,18 @@ export function validateDailySummarySettingsConfig(
 		config.enabled &&
 		(!config.destinationChatId ||
 			config.messageThreadId === null ||
-			!config.coreOperationalAlertsDestinationChatId ||
-			config.coreOperationalAlertsThreadId === null)
+			config.operationalAlertsThreadId === null)
 	) {
 		throw new BadRequestException(
-			'Enabled Daily Summary requires complete Daily Summary and Core operational alerts routes'
+			'Enabled Daily Summary requires Daily Summary and operational alerts topics'
 		);
 	}
 	if (
-		config.destinationChatId !== null &&
-		config.destinationChatId ===
-			config.coreOperationalAlertsDestinationChatId &&
 		config.messageThreadId !== null &&
-		config.messageThreadId === config.coreOperationalAlertsThreadId
+		config.messageThreadId === config.operationalAlertsThreadId
 	) {
 		throw new BadRequestException(
-			'Daily Summary and Core operational alerts require separate Telegram topics'
+			'Daily Summary and operational alerts require separate Telegram topics'
 		);
 	}
 }
@@ -118,11 +112,29 @@ export function getDailySummarySettingsUpdateKind(
 	return hasScheduleTime ? 'schedule' : 'local';
 }
 
+export function ensureDailySummaryDestinationChangeAllowed(
+	currentDestinationChatId: string | null,
+	requestedDestinationChatId: string | null | undefined
+): void {
+	const configuredDestinationChatId =
+		currentDestinationChatId?.trim() || null;
+	if (
+		configuredDestinationChatId !== null &&
+		requestedDestinationChatId !== undefined &&
+		(requestedDestinationChatId?.trim() || null) !==
+			configuredDestinationChatId
+	) {
+		throw new BadRequestException(
+			'Daily Summary Telegram group can only be changed through the maintenance procedure'
+		);
+	}
+}
+
 @Injectable()
 export class DailySummarySettingsService {
 	constructor(
 		private readonly prisma: ReportingPrismaService,
-		private readonly core: CoreInternalClient
+		private readonly operations: OperationsInternalClient
 	) {}
 
 	async getSettings() {
@@ -147,18 +159,19 @@ export class DailySummarySettingsService {
 		actorId: string
 	) {
 		const updateKind = getDailySummarySettingsUpdateKind(dto);
-		let currentSettings = await this.prisma.reportingSettings.findUnique({
-			where: { id: 'daily-summary' }
+		let currentSettings = await this.prisma.reportingSettings.upsert({
+			where: { id: 'daily-summary' },
+			create: { id: 'daily-summary' },
+			update: {}
 		});
-		if (currentSettings?.owner !== ReportingOwner.REPORTING) {
-			throw new ConflictException(
-				'Daily Summary settings are not owned by Reporting yet'
-			);
-		}
 		if (currentSettings.schedulePolicyChangeId) {
 			currentSettings =
 				await this.confirmPendingPolicyReservation(currentSettings);
 		}
+		ensureDailySummaryDestinationChangeAllowed(
+			currentSettings.destinationChatId,
+			dto.destinationChatId
+		);
 		const expectedScheduleGeneration =
 			updateKind === 'schedule'
 				? BigInt(dto.expectedScheduleGeneration!)
@@ -195,7 +208,7 @@ export class DailySummarySettingsService {
 				dto.expectedScheduleGeneration!
 			);
 			const reservation =
-				await this.core.reserveDailySummarySchedulePolicy(
+				await this.operations.reserveDailySummarySchedulePolicy(
 					policyChangeId,
 					dto.scheduleTime!,
 					dto.expectedScheduleGeneration!,
@@ -207,7 +220,7 @@ export class DailySummarySettingsService {
 				!reservation.confirmationRequired
 			) {
 				throw new ServiceUnavailableException(
-					'Core returned an invalid backup-policy reservation state'
+					'Operations returned an invalid backup-policy reservation state'
 				);
 			}
 			policyReservationAccepted = true;
@@ -237,11 +250,10 @@ export class DailySummarySettingsService {
 					await transaction.reportingSettings.findUniqueOrThrow({
 						where: { id: 'daily-summary' }
 					});
-				if (current.owner !== ReportingOwner.REPORTING) {
-					throw new ConflictException(
-						'Daily Summary settings are not owned by Reporting yet'
-					);
-				}
+				ensureDailySummaryDestinationChangeAllowed(
+					current.destinationChatId,
+					dto.destinationChatId
+				);
 				if (
 					expectedScheduleGeneration !== undefined &&
 					current.scheduleGeneration !== expectedScheduleGeneration
@@ -270,7 +282,7 @@ export class DailySummarySettingsService {
 					reservationGeneration !== nextScheduleGeneration
 				) {
 					throw new Error(
-						'Core backup-policy reservation does not match the local Reporting CAS generation'
+						'Operations backup-policy reservation does not match the local Reporting CAS generation'
 					);
 				}
 				const changedFields = REPORTING_SETTINGS_AUDIT_FIELDS.filter(
@@ -329,12 +341,12 @@ export class DailySummarySettingsService {
 			throw new ServiceUnavailableException({
 				code: 'SCHEDULE_POLICY_RESERVED_RETRY_REQUIRED',
 				message:
-					'Core reserved the backup-policy fence, but Reporting settings were not committed; retry the same request'
+					'Operations reserved the backup-policy fence, but Reporting settings were not committed; retry the same request'
 			});
 		}
 		if (policyChangeId) {
 			try {
-				await this.core.confirmDailySummarySchedulePolicy(
+				await this.operations.confirmDailySummarySchedulePolicy(
 					policyChangeId,
 					updated.scheduleGeneration.toString()
 				);
@@ -367,7 +379,7 @@ export class DailySummarySettingsService {
 				throw new ServiceUnavailableException({
 					code: 'SCHEDULE_POLICY_CONFIRMATION_PENDING',
 					message:
-						'Reporting settings were committed, but the Core backup-policy confirmation is pending; retry the same settings save'
+						'Reporting settings were committed, but the Operations backup-policy confirmation is pending; retry the same settings save'
 				});
 			}
 		}
@@ -381,7 +393,7 @@ export class DailySummarySettingsService {
 		if (!changeId) return current;
 		try {
 			const confirmation =
-				await this.core.confirmDailySummarySchedulePolicy(
+				await this.operations.confirmDailySummarySchedulePolicy(
 					changeId,
 					current.scheduleGeneration.toString()
 				);
@@ -390,7 +402,9 @@ export class DailySummarySettingsService {
 				confirmation.reservationGeneration !==
 					current.scheduleGeneration.toString()
 			) {
-				throw new Error('Core returned an invalid policy confirmation');
+				throw new Error(
+					'Operations returned an invalid policy confirmation'
+				);
 			}
 			await this.prisma.reportingSettings.updateMany({
 				where: {
@@ -407,7 +421,7 @@ export class DailySummarySettingsService {
 			throw new ServiceUnavailableException({
 				code: 'SCHEDULE_POLICY_CONFIRMATION_PENDING',
 				message:
-					'A previous Core backup-policy reservation is still pending confirmation; retry this save later'
+					'A previous Operations backup-policy reservation is still pending confirmation; retry this save later'
 			});
 		}
 	}
@@ -444,9 +458,7 @@ export class DailySummarySettingsService {
 				dto.messageThreadId !== undefined
 					? dto.messageThreadId
 					: current.messageThreadId,
-			coreOperationalAlertsThreadId: current.coreOperationalAlertsThreadId,
-			coreOperationalAlertsDestinationChatId:
-				current.coreOperationalAlertsDestinationChatId,
+			operationalAlertsThreadId: current.operationalAlertsThreadId,
 			scheduleTime: dto.scheduleTime ?? current.scheduleTime,
 			timezone: current.timezone
 		};
@@ -465,14 +477,10 @@ export class DailySummarySettingsService {
 	private toResponse(settings: ReportingSettings) {
 		return {
 			id: settings.id,
-			owner: settings.owner,
 			enabled: settings.enabled,
 			destinationChatId: settings.destinationChatId,
 			messageThreadId: settings.messageThreadId,
-			coreOperationalAlertsThreadId:
-				settings.coreOperationalAlertsThreadId,
-			coreOperationalAlertsDestinationChatId:
-				settings.coreOperationalAlertsDestinationChatId,
+			operationalAlertsThreadId: settings.operationalAlertsThreadId,
 			scheduleTime: settings.scheduleTime,
 			timezone: settings.timezone,
 			scheduleGeneration: settings.scheduleGeneration.toString(),

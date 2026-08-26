@@ -7,7 +7,7 @@ import {
 	UnauthorizedException
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { CoreInternalClient } from '../internal/core-internal.client';
+import { IdentityInternalClient } from '../internal/identity-internal.client';
 import type { BillingRequest, BillingRole } from './billing-request';
 
 export const BILLING_REQUIRED_ROLES = 'billing-required-roles';
@@ -19,7 +19,7 @@ export const BillingAuth = (roles: BillingRole[] = []) =>
 export class BillingAuthGuard implements CanActivate {
 	constructor(
 		private readonly reflector: Reflector,
-		private readonly core: CoreInternalClient
+		private readonly identity: IdentityInternalClient
 	) {}
 
 	async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -36,7 +36,7 @@ export class BillingAuthGuard implements CanActivate {
 				'Billing endpoint has no access policy'
 			);
 		}
-		const actor = await this.core.introspect(authorization);
+		const actor = await this.identity.introspect(authorization);
 		if (
 			required.length > 0 &&
 			!required.some(role => actor.roles.includes(role))

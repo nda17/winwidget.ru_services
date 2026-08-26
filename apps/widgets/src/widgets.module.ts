@@ -35,9 +35,11 @@ import { WidgetsTelemetryController } from './http/widgets-telemetry.controller'
 import { WidgetsIntegrationDeliveryService } from './integrations/widgets-integration-delivery.service';
 import { WidgetsIntegrationWorkerService } from './integrations/widgets-integration-worker.service';
 import { WidgetsSafeHttpService } from './integrations/widgets-safe-http.service';
-import { CoreInternalClient } from './internal/core-internal.client';
+import { WidgetsIdentityClient } from './internal/widgets-identity.client';
 import { WidgetsInternalController } from './internal/widgets-internal.controller';
 import { WidgetsInternalGuard } from './internal/widgets-internal.guard';
+import { WidgetsOperationsController } from './internal/widgets-operations.controller';
+import { WidgetsOperationsGuard } from './internal/widgets-operations.guard';
 import { WidgetsIdentityController } from './internal/widgets-identity.controller';
 import { WidgetsIdentityGuard } from './internal/widgets-identity.guard';
 import { WidgetsDomainEventsService } from './messaging/widgets-domain-events.service';
@@ -65,6 +67,7 @@ import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 	controllers: [
 		WidgetsHealthController,
 		WidgetsInternalController,
+		WidgetsOperationsController,
 		WidgetsIdentityController,
 		WidgetsDeliveryFailuresController,
 		WidgetsManagementController,
@@ -74,8 +77,9 @@ import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 		WidgetsTelemetryController
 	],
 	providers: [
-		CoreInternalClient,
+		WidgetsIdentityClient,
 		WidgetsInternalGuard,
+		WidgetsOperationsGuard,
 		WidgetsIdentityGuard,
 		WidgetsApiGuard,
 		WidgetsAuthGuard,

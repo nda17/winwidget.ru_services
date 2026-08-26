@@ -4,11 +4,7 @@ import {
 	reportingProjectionStateHash
 } from './projection.service';
 import type { ReportingSourceEvent } from './reporting-event.contract';
-import {
-	Prisma,
-	ProjectionReceiptResult,
-	ReportingOwner
-} from '@prisma/reporting-client';
+import { Prisma, ProjectionReceiptResult } from '@prisma/reporting-client';
 
 const EVENT: ReportingSourceEvent<'identity.user.changed.v1'> = {
 	schemaVersion: 1,
@@ -67,7 +63,7 @@ describe('ProjectionService equal-version integrity', () => {
 		return { apply, transaction };
 	}
 
-	it('accepts snapshot/queue replay with equal version and equal canonical state', async () => {
+	it('accepts queue replay with equal version and equal canonical state', async () => {
 		const hash = reportingProjectionStateHash(EVENT);
 		const { apply, transaction } = harness(hash);
 		await expect(apply(EVENT)).resolves.toBe(
@@ -94,107 +90,173 @@ describe('ProjectionService equal-version integrity', () => {
 	});
 });
 
-describe('ProjectionService batch locking', () => {
-	it('pre-acquires unique aggregate locks in stable order before applying the batch', async () => {
-		const transaction = { $executeRaw: jest.fn().mockResolvedValue(1) };
+describe('ProjectionService shared Telegram routing ownership', () => {
+	it('applies the exact Operations routing event with receipt completion atomically', async () => {
+		const transaction = {
+			reportingSettings: {
+				upsert: jest.fn().mockResolvedValue({}),
+				findUniqueOrThrow: jest.fn().mockResolvedValue({
+					operationalAlertsChangedAt: null
+				}),
+				update: jest.fn().mockResolvedValue({})
+			},
+			consumerReceipt: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			reportingConsumerFailure: {
+				updateMany: jest.fn().mockResolvedValue({ count: 0 })
+			},
+			$queryRaw: jest.fn().mockResolvedValue([{ id: 'daily-summary' }])
+		};
 		const prisma = {
 			$transaction: jest.fn(
 				(callback: (value: typeof transaction) => unknown) =>
 					callback(transaction)
 			)
 		};
+		const metrics = { increment: jest.fn() };
 		const service = new ProjectionService(
 			prisma as never,
-			{
-				increment: jest.fn()
-			} as never
+			metrics as never
 		);
-		const apply = jest
-			.spyOn(service as never, 'applyInTransaction' as never)
-			.mockResolvedValue(ProjectionReceiptResult.APPLIED as never);
-		const eventB = { ...EVENT, aggregateId: 'user-b' };
-		const eventA = {
-			...EVENT,
-			eventId: '22222222-2222-4222-8222-222222222222',
-			aggregateId: 'user-a'
-		};
 
-		await service.applyBatch([eventB, eventA, eventB]);
+		await expect(
+			service.applyOperationsNotificationRouting(
+				{
+					schemaVersion: 1,
+					eventId: '44444444-4444-4444-8444-444444444444',
+					operationalAlertsThreadId: 2024,
+					changedAt: '2026-08-26T00:00:00.000Z'
+				},
+				{
+					eventId: '44444444-4444-4444-8444-444444444444',
+					consumer: 'reporting-settings-v1',
+					lockToken: '55555555-5555-4555-8555-555555555555'
+				}
+			)
+		).resolves.toBeUndefined();
 
-		expect(
-			transaction.$executeRaw.mock.calls.map(call => call[1])
-		).toEqual([
-			'reporting:identityUser:user-a',
-			'reporting:identityUser:user-b'
-		]);
-		expect(apply).toHaveBeenCalledTimes(3);
-		expect(
-			transaction.$executeRaw.mock.invocationCallOrder[1]
-		).toBeLessThan(apply.mock.invocationCallOrder[0]);
+		const update =
+			transaction.reportingSettings.update.mock.calls[0][0].data;
+		expect(update).toEqual({
+			operationalAlertsThreadId: 2024,
+			operationalAlertsChangedAt: new Date('2026-08-26T00:00:00.000Z')
+		});
+		expect(update).not.toHaveProperty('destinationChatId');
+		expect(update).not.toHaveProperty('scheduleTime');
+		expect(transaction.consumerReceipt.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					eventId: '44444444-4444-4444-8444-444444444444',
+					consumer: 'reporting-settings-v1'
+				})
+			})
+		);
+		expect(metrics.increment).toHaveBeenCalledWith(
+			'projection_events_applied_total'
+		);
 	});
-});
 
-describe('ProjectionService shared Telegram routing ownership', () => {
-	it('applies the versioned post-cutover Core routing event without legacy fields', async () => {
+	it('completes an older retry without reverting newer Operations routing', async () => {
 		const transaction = {
 			reportingSettings: {
 				upsert: jest.fn().mockResolvedValue({}),
 				findUniqueOrThrow: jest.fn().mockResolvedValue({
-					owner: ReportingOwner.REPORTING
+					operationalAlertsChangedAt: new Date('2026-08-26T00:00:01.000Z')
 				}),
-				update: jest.fn().mockResolvedValue({})
+				update: jest.fn()
+			},
+			consumerReceipt: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			reportingConsumerFailure: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
 			},
 			$queryRaw: jest.fn().mockResolvedValue([{ id: 'daily-summary' }])
 		};
-		const event: ReportingSourceEvent<'reporting.core-operational-routing.changed.v1'> =
+		const prisma = {
+			$transaction: jest.fn(
+				(callback: (value: typeof transaction) => unknown) =>
+					callback(transaction)
+			)
+		};
+		const metrics = { increment: jest.fn() };
+		const service = new ProjectionService(
+			prisma as never,
+			metrics as never
+		);
+
+		await service.applyOperationsNotificationRouting(
 			{
 				schemaVersion: 1,
-				eventType: 'reporting.core-operational-routing.changed.v1',
-				eventId: '44444444-4444-4444-8444-444444444444',
-				aggregateId: 'singleton',
-				aggregateVersion: '1',
-				sourceSequence: '21',
-				occurredAt: '2026-07-31T00:00:00.000Z',
-				tombstone: false,
-				state: {
-					id: 'singleton',
-					coreOperationalAlertsDestinationChatId: '-100777',
-					coreOperationalAlertsThreadId: 2024
-				}
-			};
-		const service = new ProjectionService({} as never, {} as never);
+				eventId: '66666666-6666-4666-8666-666666666666',
+				operationalAlertsThreadId: 43,
+				changedAt: '2026-08-26T00:00:00.000Z'
+			},
+			{
+				eventId: '66666666-6666-4666-8666-666666666666',
+				consumer: 'reporting-settings-v1',
+				lockToken: '77777777-7777-4777-8777-777777777777'
+			}
+		);
+
+		expect(transaction.reportingSettings.update).not.toHaveBeenCalled();
+		expect(transaction.consumerReceipt.updateMany).toHaveBeenCalled();
+		expect(metrics.increment).toHaveBeenCalledWith(
+			'projection_events_stale_total'
+		);
+	});
+
+	it('rejects a newer Operations routing event that collides with the Daily Summary topic', async () => {
+		const transaction = {
+			reportingSettings: {
+				upsert: jest.fn().mockResolvedValue({}),
+				findUniqueOrThrow: jest.fn().mockResolvedValue({
+					messageThreadId: 2024,
+					operationalAlertsChangedAt: null
+				}),
+				update: jest.fn()
+			},
+			consumerReceipt: {
+				updateMany: jest.fn()
+			},
+			reportingConsumerFailure: {
+				updateMany: jest.fn()
+			},
+			$queryRaw: jest.fn().mockResolvedValue([{ id: 'daily-summary' }])
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				(callback: (value: typeof transaction) => unknown) =>
+					callback(transaction)
+			)
+		};
+		const metrics = { increment: jest.fn() };
+		const service = new ProjectionService(
+			prisma as never,
+			metrics as never
+		);
 
 		await expect(
-			(
-				service as unknown as {
-					applyNewerEvent(
-						transaction: unknown,
-						stream: 'reportingSettings',
-						event: ReportingSourceEvent,
-						stateHash: string
-					): Promise<ProjectionReceiptResult>;
+			service.applyOperationsNotificationRouting(
+				{
+					schemaVersion: 1,
+					eventId: '88888888-8888-4888-8888-888888888888',
+					operationalAlertsThreadId: 2024,
+					changedAt: '2026-08-26T00:00:00.000Z'
+				},
+				{
+					eventId: '88888888-8888-4888-8888-888888888888',
+					consumer: 'reporting-settings-v1',
+					lockToken: '99999999-9999-4999-8999-999999999999'
 				}
-			).applyNewerEvent(
-				transaction,
-				'reportingSettings',
-				event,
-				reportingProjectionStateHash(event)
 			)
-		).resolves.toBe(ProjectionReceiptResult.APPLIED);
-
-		const update =
-			transaction.reportingSettings.update.mock.calls[0][0].data;
-		expect(update).toEqual(
-			expect.objectContaining({
-				coreOperationalAlertsDestinationChatId: '-100777',
-				coreOperationalAlertsThreadId: 2024,
-				coreOperationalRoutingSourceAggregateVersion: new Prisma.Decimal(
-					'1'
-				),
-				coreOperationalRoutingSourceSequence: new Prisma.Decimal('21')
-			})
+		).rejects.toThrow(
+			'Daily Summary and operational alerts require separate Telegram topics'
 		);
-		expect(update).not.toHaveProperty('destinationChatId');
-		expect(update).not.toHaveProperty('scheduleTime');
+
+		expect(transaction.reportingSettings.update).not.toHaveBeenCalled();
+		expect(transaction.consumerReceipt.updateMany).not.toHaveBeenCalled();
+		expect(metrics.increment).not.toHaveBeenCalled();
 	});
 });

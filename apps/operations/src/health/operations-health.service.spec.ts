@@ -20,7 +20,13 @@ describe('OperationsHealthService', () => {
 			} as never,
 			{ isReady: jest.fn().mockReturnValue(true) } as never,
 			{ isReady: jest.fn().mockReturnValue(true) } as never,
-			ownership as never
+			ownership as never,
+			{ isReady: jest.fn().mockReturnValue(true) } as never,
+			{ isReady: jest.fn().mockReturnValue(true) } as never,
+			{ isReady: jest.fn().mockReturnValue(true) } as never,
+			{ getOverview: jest.fn() } as never,
+			{ getIdentityAdminHealth: jest.fn() } as never,
+			{ get: jest.fn() } as never
 		);
 
 		await expect(service.readiness()).resolves.toEqual(

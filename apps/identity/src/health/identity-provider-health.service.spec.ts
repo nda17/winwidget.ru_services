@@ -160,7 +160,7 @@ describe('IdentityProviderHealthService', () => {
 		);
 	});
 
-	it('keeps the admin health endpoint scoped to Core and delegates to the API provider', async () => {
+	it('keeps the admin health endpoint scoped to Operations and delegates to the API provider', async () => {
 		const providerHealth = jest.fn().mockResolvedValue({
 			service: 'identity',
 			checks: []
@@ -179,6 +179,6 @@ describe('IdentityProviderHealthService', () => {
 				'identity.internal.services',
 				IdentityInternalController.prototype.adminHealth
 			)
-		).toEqual(['core']);
+		).toEqual(['operations']);
 	});
 });

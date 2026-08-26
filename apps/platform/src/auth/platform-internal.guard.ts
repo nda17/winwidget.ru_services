@@ -13,7 +13,7 @@ const PLACEHOLDER_TOKENS = new Set([
 	'change_me',
 	'change-me',
 	'XYZXYZXYZ',
-	'platform_core_token'
+	'platform_operations_token'
 ]);
 
 const isPlaceholderToken = (value: string): boolean =>
@@ -27,13 +27,14 @@ export class PlatformInternalGuard implements CanActivate {
 	private readonly token: Buffer;
 
 	constructor(config: ConfigService, runtime: PlatformRuntimeService) {
-		const value = config.get<string>('PLATFORM_CORE_TOKEN')?.trim() || '';
+		const value =
+			config.get<string>('PLATFORM_OPERATIONS_TOKEN')?.trim() || '';
 		if (
 			runtime.apiEnabled &&
 			(value.length < 32 || isPlaceholderToken(value))
 		) {
 			throw new Error(
-				'PLATFORM_CORE_TOKEN must be a non-placeholder secret with at least 32 characters'
+				'PLATFORM_OPERATIONS_TOKEN must be a non-placeholder secret with at least 32 characters'
 			);
 		}
 		this.token = Buffer.from(value);
@@ -42,7 +43,7 @@ export class PlatformInternalGuard implements CanActivate {
 	canActivate(context: ExecutionContext): boolean {
 		const request = context.switchToHttp().getRequest<Request>();
 		if (
-			request.header('x-winwidget-service') !== 'core' ||
+			request.header('x-winwidget-service') !== 'operations' ||
 			!this.isLoopback(request.socket.remoteAddress)
 		) {
 			throw new ForbiddenException('Invalid internal credentials');

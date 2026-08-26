@@ -6,8 +6,7 @@ export const REPORTING_PROCESS_ROLES = [
 	'api',
 	'worker',
 	'publisher',
-	'scheduler',
-	'backfill'
+	'scheduler'
 ] as const;
 
 export type ReportingProcessRole =
@@ -70,10 +69,6 @@ export class ReportingRuntimeService {
 
 	get schedulerEnabled(): boolean {
 		return this.schedulerRoleEnabled && this.schedulerConfigured;
-	}
-
-	get backfillEnabled(): boolean {
-		return this.role === 'backfill';
 	}
 
 	get rabbitEnabled(): boolean {

@@ -29,7 +29,7 @@ async function bootstrap(): Promise<void> {
 			express.static(
 				resolve(
 					process.env.WIDGETS_ASSETS_DIR ||
-						join(process.cwd(), 'public/widgets')
+						join(__dirname, '../../public/widgets')
 				),
 				{
 					dotfiles: 'deny',

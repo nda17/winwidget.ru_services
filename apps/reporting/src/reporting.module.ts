@@ -5,7 +5,6 @@ import {
 } from './auth/reporting-auth.guard';
 import { ReportingAnalyticsController } from './analytics/reporting-analytics.controller';
 import { ReportingAnalyticsService } from './analytics/reporting-analytics.service';
-import { ReportingBackfillService } from './backfill/reporting-backfill.service';
 import { reportingContextMiddleware } from './common/reporting-context';
 import { waitForReportingShutdown } from './common/reporting-shutdown';
 import { DailySummaryReportService } from './daily-summary/daily-summary-report.service';
@@ -16,7 +15,8 @@ import { ReportingDeliveryFailuresService } from './delivery-failures/reporting-
 import { ReportingHealthController } from './health/reporting-health.controller';
 import { ReportingHealthService } from './health/reporting-health.service';
 import { ReportingHeartbeatService } from './health/reporting-heartbeat.service';
-import { CoreInternalClient } from './internal/core-internal.client';
+import { IdentityIntrospectionClient } from './internal/identity-introspection.client';
+import { OperationsInternalClient } from './internal/operations-internal.client';
 import { ReportingMessagingOverviewController } from './internal/reporting-messaging-overview.controller';
 import { ReportingMessagingOverviewService } from './messaging/reporting-messaging-overview.service';
 import { ReportingOutboxPublisherService } from './messaging/reporting-outbox-publisher.service';
@@ -55,7 +55,8 @@ import { ConfigModule } from '@nestjs/config';
 		ReportingMessagingOverviewController
 	],
 	providers: [
-		CoreInternalClient,
+		IdentityIntrospectionClient,
+		OperationsInternalClient,
 		ReportingApiGuard,
 		ReportingAdminGuard,
 		ReportingMessagingInternalGuard,
@@ -69,7 +70,6 @@ import { ConfigModule } from '@nestjs/config';
 		ReportingWorkerService,
 		ReportingOutboxPublisherService,
 		ReportingMessagingOverviewService,
-		ReportingBackfillService,
 		ReportingHeartbeatService,
 		ReportingHealthService
 	]

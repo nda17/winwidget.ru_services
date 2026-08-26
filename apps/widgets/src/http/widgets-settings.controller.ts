@@ -19,7 +19,7 @@ import {
 	WidgetsAuthGuard
 } from '../auth/widgets-auth.guard';
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
-import type { IntrospectedWidgetsActor } from '../internal/core-internal.client';
+import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import { CloneWidgetDto, ExpectedDraftRevisionDto } from './widgets.dto';
 import {
 	CurrentWidgetsActor,
