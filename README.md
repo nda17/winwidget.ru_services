@@ -86,12 +86,6 @@ bash .github/scripts/static-check-services-lifecycle.sh
 CI выполняет матрицу `install → prisma:generate → lint → typecheck → test →
 build` для всех десяти приложений.
 
-Для аварийного прогона при недоступности GitHub-hosted runners push в `prod`
-можно направить на изолированный временный runner через repository variable
-`CI_RUNNER_LABELS` с JSON-массивом точных self-hosted labels. Для остальных
-веток и событий всегда используется `ubuntu-latest`. После завершения прогона
-переменную, регистрацию runner и его одноразовое окружение необходимо удалить.
-
 ## Данные и RabbitMQ
 
 Каждый сервис с состоянием владеет собственной базой и схемой PostgreSQL,

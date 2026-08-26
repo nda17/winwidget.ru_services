@@ -14,7 +14,7 @@ concurrency:
 jobs:
   lifecycle-contract:
     name: Apps-only lifecycle contract
-    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/prod' && vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -34,7 +34,7 @@ jobs:
 
   service:
     name: ${{ matrix.app }}
-    runs-on: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/prod' && vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
