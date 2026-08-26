@@ -22,8 +22,11 @@ relay. The Telegram token remains part of Telegram's request path, so access and
 error logging are disabled for `/telegram-api/*`, and request bodies
 are never logged. Only methods used by WinWidget are allowed: `getMe`,
 `getWebhookInfo`, `deleteWebhook`, `setWebhook`, `sendMessage`, `sendDocument`,
-`copyMessage` and `answerCallbackQuery`. Each source IP is limited to 32
-simultaneous Bot API connections.
+`getFile`, `copyMessage` and `answerCallbackQuery`. Download is separately
+limited to GET requests for Telegram's generated
+`documents/file_<number>[.<ext>]` paths, which allows a reviewed backup receipt
+to be clean-restored without opening a general file proxy. Each source IP is
+limited to 32 simultaneous Bot API connections.
 
 `telegram-api-stream.conf` remains installed as
 `/etc/nginx/modules-enabled/99-winwidget-telegram-api-stream.conf` because public

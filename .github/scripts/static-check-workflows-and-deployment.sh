@@ -1118,9 +1118,12 @@ if (telegramBridgeStream.includes("server api.telegram.org:443")) {
   );
 }
 const telegramBotApiLocation =
-  "location ~ ^/telegram-api/(bot[0-9]+:[A-Za-z0-9_-]+)/(getMe|getWebhookInfo|deleteWebhook|setWebhook|sendMessage|sendDocument|copyMessage|answerCallbackQuery)$ {";
+  "location ~ ^/telegram-api/(bot[0-9]+:[A-Za-z0-9_-]+)/(getMe|getWebhookInfo|deleteWebhook|setWebhook|sendMessage|sendDocument|getFile|copyMessage|answerCallbackQuery)$ {";
+const telegramBotFileLocation =
+  "location ~ ^/telegram-api/file/(bot[0-9]+:[A-Za-z0-9_-]+)/(documents/file_[0-9]+(?:[.][A-Za-z0-9_-]+)?)$ {";
 for (const requiredTelegramBridgeContract of [
   telegramBotApiLocation,
+  telegramBotFileLocation,
   "location = /telegram-api-health {",
   'add_header X-WinWidget-Telegram-Proxy "active" always;',
   "limit_except GET POST {",
@@ -1143,9 +1146,9 @@ for (const requiredTelegramBridgeContract of [
   }
 }
 if (
-  (telegramBridgeNginx.match(/access_log off;/g) ?? []).length < 4 ||
-  (telegramBridgeNginx.match(/error_log \/dev\/null;/g) ?? []).length < 3 ||
-  (telegramBridgeNginx.match(/proxy_ssl_verify on;/g) ?? []).length < 2 ||
+  (telegramBridgeNginx.match(/access_log off;/g) ?? []).length < 5 ||
+  (telegramBridgeNginx.match(/error_log \/dev\/null;/g) ?? []).length < 4 ||
+  (telegramBridgeNginx.match(/proxy_ssl_verify on;/g) ?? []).length < 3 ||
   !/server \{[\s\S]*?listen 80;[\s\S]*?location \/telegram-api\/ \{[\s\S]*?access_log off;[\s\S]*?error_log \/dev\/null;[\s\S]*?return 404;[\s\S]*?\}[\s\S]*?location \/ \{[\s\S]*?return 301 https:\/\/\$host\$request_uri;[\s\S]*?\}/.test(
     telegramBridgeNginx,
   ) ||
@@ -1154,6 +1157,9 @@ if (
   ) ||
   !new RegExp(
     `${telegramBotApiLocation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?access_log off;[\\s\\S]*?error_log \/dev\/null;`,
+  ).test(telegramBridgeNginx) ||
+  !new RegExp(
+    `${telegramBotFileLocation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?limit_except GET[\\s\\S]*?access_log off;[\\s\\S]*?error_log \/dev\/null;`,
   ).test(telegramBridgeNginx)
 ) {
   throw new Error(
