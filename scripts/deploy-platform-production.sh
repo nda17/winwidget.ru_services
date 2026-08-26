@@ -400,7 +400,10 @@ platform_deploy_run() {
 		up -d --no-deps --force-recreate platform-api platform-outbox-publisher
 	for _ in {1..60}; do
 		if curl --fail --silent --show-error http://127.0.0.1:5000/health/ready >/dev/null 2>&1 &&
-			curl --fail --silent --show-error http://127.0.0.1:5001/health/ready >/dev/null 2>&1; then
+			curl --fail --silent --show-error http://127.0.0.1:5001/health/ready >/dev/null 2>&1 &&
+			platform_deploy_assert_runtime platform-api "$image_id" api >/dev/null 2>&1 &&
+			platform_deploy_assert_runtime platform-outbox-publisher "$image_id" outbox-publisher \
+				>/dev/null 2>&1; then
 			break
 		fi
 		sleep 2
@@ -461,6 +464,8 @@ platform_deploy_self_test() {
 		"$source" == *'/legal-pages/oferta'*'PATCH "$path"'* &&
 		"$source" == *'ROUTES="$routes" platform_database_docker run'*'--env ROUTES'* &&
 		"$source" == *'PLATFORM_DATABASE_URL="$target_url" platform_database_docker run'*'--env PLATFORM_DATABASE_URL'* &&
+		"$source" == *'platform_deploy_assert_runtime platform-api "$image_id" api > /dev/null 2>&1'* &&
+		"$source" == *'platform_deploy_assert_runtime platform-outbox-publisher "$image_id" outbox-publisher > /dev/null 2>&1'* &&
 		"$(grep -Ec '^[[:space:]]*platform_deploy_validate_gateway_manifest;?$' <<<"$source")" == 2 &&
 		"$source" != *'platform_deploy_validate_gateway_manifest "$image_id"'* &&
 		"$source" != *'--env "ROUTES='* &&
