@@ -254,11 +254,14 @@ platform_database_write_marker() {
 }
 
 platform_database_marker_revision_for_release() {
-	local marker_revision
+	[[ $# -eq 1 && "$1" =~ ^(preparing|prepared|aborted|active|complete)$ ]] || return 1
+	local phase="$1" marker_revision
 	marker_revision="$(platform_database_marker_value revision)" || return 1
 	[[ "$marker_revision" =~ ^[0-9a-f]{40}$ ]] ||
 		platform_database_fail 'Platform database marker revision is malformed.' || return 1
 	if [[ "$marker_revision" != "$EXPECTED_REVISION" ]]; then
+		[[ "$phase" == complete ]] ||
+			platform_database_fail 'Platform database lifecycle revision may advance only after completion.' || return 1
 		git -C "$SERVER_ROOT" merge-base --is-ancestor \
 			"$marker_revision" "$EXPECTED_REVISION" ||
 			platform_database_fail 'Platform database marker revision is not an ancestor of the release.' || return 1
@@ -286,7 +289,7 @@ platform_database_url_parser_image() {
 		image_id="$(platform_database_docker image inspect --format '{{.Id}}' "$image")" || return 1
 		platform_database_verify_release_image "$image_id" "$image" || return 1
 	else
-		marker_revision="$(platform_database_marker_revision_for_release)" || return 1
+		marker_revision="$(platform_database_marker_revision_for_release "$phase")" || return 1
 		image_id="$(platform_database_marker_value image_id)" || return 1
 		platform_database_verify_exact_image_id_for_revision \
 			"$image_id" "$marker_revision" || return 1
@@ -924,6 +927,7 @@ platform_database_self_test() {
 		"$source" != *'--env "PLATFORM_PARSE_URL=$value"'* &&
 		"$source" == *'PLATFORM_DATABASE_URL_PARSER_CORE_IMAGE_ID'* &&
 		"$source" == *'$image_id|$EXPECTED_REVISION|nestjs'* &&
+		"$source" == *'[[ "$phase" == complete ]]'* &&
 		"$source" == *'merge-base --is-ancestor'*'platform_database_verify_exact_image_id_for_revision'* &&
 		"$source" == *'try {'*'const parsed = new URL(input);'*'} catch {'* &&
 		"$source" == *'export PLATFORM_DATABASE_URL'* &&
@@ -1029,6 +1033,9 @@ platform_database_self_test() {
 	(
 		local fixture_marker_revision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 		platform_database_self_test_image_revision="$fixture_marker_revision"
+		platform_database_current_phase() {
+			printf '%s\n' complete
+		}
 		platform_database_marker_value() {
 			case "$1" in
 			revision) printf '%s\n' "$fixture_marker_revision" ;;
@@ -1042,6 +1049,16 @@ platform_database_self_test() {
 				"$6" == "$EXPECTED_REVISION" ]]
 		}
 		[[ "$(platform_database_url_parser_image)" == "$platform_database_self_test_image_id" ]]
+		platform_database_self_test_image_revision="$EXPECTED_REVISION"
+		if platform_database_url_parser_image >/dev/null 2>&1; then
+			return 1
+		fi
+		for fixture_phase in preparing prepared active aborted; do
+			if platform_database_marker_revision_for_release "$fixture_phase" \
+				>/dev/null 2>&1; then
+				return 1
+			fi
+		done
 	)
 	(
 		local fixture_marker_revision=cccccccccccccccccccccccccccccccccccccccc
@@ -1050,7 +1067,7 @@ platform_database_self_test() {
 			printf '%s\n' "$fixture_marker_revision"
 		}
 		git() { return 1; }
-		if platform_database_marker_revision_for_release >/dev/null 2>&1; then
+		if platform_database_marker_revision_for_release complete >/dev/null 2>&1; then
 			return 1
 		fi
 	)
