@@ -109,12 +109,7 @@ describe('BillingSettingsService', () => {
 				codeConfigured: true,
 				method: 'POST',
 				route: '/api/v1/payments/webhook',
-				acceptedEvents: [
-					'payment.succeeded',
-					'payment.canceled',
-					'receipt.succeeded',
-					'receipt.canceled'
-				],
+				acceptedEvents: ['payment.succeeded', 'payment.canceled'],
 				duplicateDeliveryFence:
 					'authenticated-provider-object-reverification'
 			},

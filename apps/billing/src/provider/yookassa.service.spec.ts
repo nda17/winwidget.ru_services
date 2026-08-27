@@ -149,4 +149,100 @@ describe('YooKassaService safe readiness', () => {
 			internet: true
 		});
 	});
+
+	it('reads every receipt page and forwards only an encoded opaque cursor', async () => {
+		process.env.MODE = 'development';
+		process.env.YOOKASSA_SHOP_ID = 'test-shop-id';
+		process.env.YOOKASSA_SECRET_KEY = 'test-secret';
+		const fetchMock = jest
+			.fn()
+			.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				json: jest.fn().mockResolvedValue({
+					type: 'list',
+					items: [{ id: 'provider-receipt-1', status: 'succeeded' }],
+					next_cursor: 'cursor:page-2'
+				})
+			})
+			.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				json: jest.fn().mockResolvedValue({
+					type: 'list',
+					items: [{ id: 'provider-receipt-2', status: 'canceled' }]
+				})
+			});
+		global.fetch = fetchMock as unknown as typeof fetch;
+		const service = new YooKassaService();
+
+		await expect(
+			service.getReceipts('provider-payment:1')
+		).resolves.toEqual({
+			type: 'list',
+			items: [
+				{ id: 'provider-receipt-1', status: 'succeeded' },
+				{ id: 'provider-receipt-2', status: 'canceled' }
+			]
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0]?.[0]).toBe(
+			'https://api.yookassa.ru/v3/receipts?payment_id=provider-payment%3A1&limit=100'
+		);
+		expect(fetchMock.mock.calls[1]?.[0]).toBe(
+			'https://api.yookassa.ru/v3/receipts?payment_id=provider-payment%3A1&limit=100&cursor=cursor%3Apage-2'
+		);
+	});
+
+	it('fails closed on a repeated receipt cursor', async () => {
+		process.env.MODE = 'development';
+		process.env.YOOKASSA_SHOP_ID = 'test-shop-id';
+		process.env.YOOKASSA_SECRET_KEY = 'test-secret';
+		const fetchMock = jest.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				type: 'list',
+				items: [],
+				next_cursor: 'same-cursor'
+			})
+		});
+		global.fetch = fetchMock as unknown as typeof fetch;
+
+		await expect(
+			new YooKassaService().getReceipts('provider-payment-1')
+		).rejects.toMatchObject({
+			code: 'PROVIDER_RECEIPT_PAGINATION_INVALID',
+			retryable: false
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
+	it('fails closed instead of silently truncating an excessive receipt list', async () => {
+		process.env.MODE = 'development';
+		process.env.YOOKASSA_SHOP_ID = 'test-shop-id';
+		process.env.YOOKASSA_SECRET_KEY = 'test-secret';
+		let page = 0;
+		const fetchMock = jest.fn().mockImplementation(() => {
+			page += 1;
+			return Promise.resolve({
+				ok: true,
+				status: 200,
+				json: jest.fn().mockResolvedValue({
+					type: 'list',
+					items: [],
+					next_cursor: `cursor-${page}`
+				})
+			});
+		});
+		global.fetch = fetchMock as unknown as typeof fetch;
+
+		await expect(
+			new YooKassaService().getReceipts('provider-payment-1')
+		).rejects.toMatchObject({
+			code: 'PROVIDER_RECEIPT_PAGINATION_LIMIT',
+			retryable: false
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(10);
+	});
 });

@@ -3,6 +3,9 @@ import { Injectable } from '@nestjs/common';
 const BASE_URL = 'https://api.yookassa.ru/v3';
 const REQUEST_TIMEOUT_MS = 20_000;
 const YOOKASSA_OBJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const RECEIPT_LIST_PAGE_LIMIT = 100;
+const RECEIPT_LIST_MAX_PAGES = 10;
+const RECEIPT_LIST_CURSOR_MAX_LENGTH = 1_024;
 
 export const isYooKassaObjectId = (value: unknown): value is string =>
 	typeof value === 'string' && YOOKASSA_OBJECT_ID_PATTERN.test(value);
@@ -142,12 +145,64 @@ export class YooKassaService {
 		);
 	}
 
-	getReceipts(
+	async getReceipts(
 		providerPaymentId: string
 	): Promise<Record<string, unknown>> {
-		return this.request(
-			`/receipts?payment_id=${encodeURIComponent(providerPaymentId)}`,
-			{ method: 'GET' }
+		const items: unknown[] = [];
+		const seenCursors = new Set<string>();
+		let cursor: string | null = null;
+
+		for (let page = 0; page < RECEIPT_LIST_MAX_PAGES; page += 1) {
+			const query = new URLSearchParams({
+				payment_id: providerPaymentId,
+				limit: String(RECEIPT_LIST_PAGE_LIMIT)
+			});
+			if (cursor) query.set('cursor', cursor);
+			const response = await this.request(
+				`/receipts?${query.toString()}`,
+				{
+					method: 'GET'
+				}
+			);
+			if (!Array.isArray(response.items)) {
+				throw new ProviderRequestError(
+					'Payment provider returned an invalid receipt list',
+					'PROVIDER_INVALID_RESPONSE',
+					true,
+					true
+				);
+			}
+			items.push(...response.items);
+
+			const nextCursor = response.next_cursor;
+			if (
+				nextCursor === undefined ||
+				nextCursor === null ||
+				nextCursor === ''
+			) {
+				return { type: response.type ?? 'list', items };
+			}
+			if (
+				typeof nextCursor !== 'string' ||
+				nextCursor.length > RECEIPT_LIST_CURSOR_MAX_LENGTH ||
+				seenCursors.has(nextCursor)
+			) {
+				throw new ProviderRequestError(
+					'Payment provider returned an invalid receipt cursor',
+					'PROVIDER_RECEIPT_PAGINATION_INVALID',
+					false,
+					false
+				);
+			}
+			seenCursors.add(nextCursor);
+			cursor = nextCursor;
+		}
+
+		throw new ProviderRequestError(
+			'Payment provider receipt pagination limit was exceeded',
+			'PROVIDER_RECEIPT_PAGINATION_LIMIT',
+			false,
+			false
 		);
 	}
 

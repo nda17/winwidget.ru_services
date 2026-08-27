@@ -531,6 +531,7 @@ describe('PaymentDomainService late webhook recovery', () => {
 			where: {
 				idempotencyKey: 'webhook:verify:provider-payment-1',
 				kind: ProviderOperationKind.VERIFY_PAYMENT,
+				paymentId: null,
 				providerPaymentId: 'provider-payment-1',
 				status: {
 					in: [
@@ -553,9 +554,8 @@ describe('PaymentDomainService late webhook recovery', () => {
 		});
 	});
 
-	it('rejects unbounded IDs and ignores receipt hints until the provider payment is locally bound', async () => {
+	it('rejects unbounded IDs and ignores unsupported receipt notifications', async () => {
 		const { service, prisma } = resolutionHarness();
-		prisma.payment.findUnique.mockResolvedValueOnce(null);
 
 		await service.webhook({
 			event: 'payment.succeeded',
@@ -569,26 +569,76 @@ describe('PaymentDomainService late webhook recovery', () => {
 			}
 		});
 
-		expect(prisma.payment.findUnique).toHaveBeenCalledWith({
-			where: { yookassaId: 'provider-payment-1' },
-			select: { id: true }
-		});
+		expect(prisma.payment.findUnique).not.toHaveBeenCalled();
 		expect(prisma.providerOperation.createMany).not.toHaveBeenCalled();
 	});
+});
 
-	it('uses a receipt webhook only to rearm the service-owned authenticated receipt sync', async () => {
-		const { service, prisma } = resolutionHarness();
-		prisma.payment.findUnique.mockResolvedValueOnce({ id: 'payment-1' });
-		prisma.providerOperation.createMany.mockResolvedValueOnce({
-			count: 0
+describe('PaymentDomainService receipt history recovery', () => {
+	it('rearms one terminal receipt sync through the shared command', async () => {
+		const payment = {
+			id: 'payment-1',
+			userId: 'user-1',
+			yookassaId: 'provider-payment-1',
+			status: PaymentStatus.SUCCEEDED,
+			kind: PaymentKind.ONE_TIME,
+			amount: '990.00',
+			currency: 'RUB',
+			plan: Plan.EASY,
+			billingPeriod: BillingPeriod.MONTHLY,
+			autoRenew: false,
+			receiptSyncEligible: true,
+			receipts: [
+				{
+					status: 'canceled',
+					type: 'payment',
+					registeredAt: null,
+					publicUrl: null,
+					fiscalDocumentNumber: null
+				}
+			],
+			createdAt: new Date('2026-08-27T10:00:00.000Z'),
+			succeededAt: new Date('2026-08-27T10:05:00.000Z')
+		};
+		const findMany = jest.fn().mockResolvedValueOnce([payment]);
+		const providerOperationFindUnique = jest.fn().mockResolvedValueOnce({
+			id: 'receipt-operation-1',
+			paymentId: 'payment-1',
+			providerPaymentId: 'provider-payment-1',
+			kind: ProviderOperationKind.SYNC_RECEIPT
 		});
-
-		await service.webhook({
-			event: 'receipt.succeeded',
-			object: {
-				id: 'provider-receipt-1',
-				payment_id: 'provider-payment-1'
+		const prisma = {
+			$transaction: jest.fn(async (operations: Array<Promise<unknown>>) =>
+				Promise.all(operations)
+			),
+			payment: {
+				findMany,
+				count: jest.fn().mockResolvedValue(1)
+			},
+			providerOperation: {
+				createMany: jest.fn().mockResolvedValue({ count: 0 }),
+				updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+				findUnique: providerOperationFindUnique
 			}
+		};
+		const service = new PaymentDomainService(prisma as never, {} as never);
+		const awaitProviderOperation = jest
+			.spyOn(
+				service as unknown as {
+					awaitProviderOperation(operationId: string): Promise<unknown>;
+				},
+				'awaitProviderOperation'
+			)
+			.mockResolvedValue(undefined);
+
+		await expect(service.history('user-1')).resolves.toMatchObject({
+			total: 1,
+			items: [
+				{
+					id: 'payment-1',
+					receipt: { status: 'canceled' }
+				}
+			]
 		});
 
 		expect(prisma.providerOperation.createMany).toHaveBeenCalledWith({
@@ -604,16 +654,54 @@ describe('PaymentDomainService late webhook recovery', () => {
 			},
 			skipDuplicates: true
 		});
+		expect(prisma.providerOperation.updateMany).toHaveBeenCalledWith({
+			where: {
+				idempotencyKey: 'receipt:payment-1',
+				kind: ProviderOperationKind.SYNC_RECEIPT,
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1',
+				status: {
+					in: [
+						ProviderOperationStatus.SUCCEEDED,
+						ProviderOperationStatus.FAILED,
+						ProviderOperationStatus.UNKNOWN
+					]
+				}
+			},
+			data: expect.objectContaining({
+				paymentId: 'payment-1',
+				status: ProviderOperationStatus.PENDING,
+				availableAt: expect.any(Date),
+				leaseToken: null,
+				leaseUntil: null
+			})
+		});
+		expect(findMany).toHaveBeenCalledTimes(1);
+		expect(providerOperationFindUnique).toHaveBeenCalledTimes(1);
+		expect(awaitProviderOperation).not.toHaveBeenCalled();
+	});
+
+	it('does not rebind a receipt operation owned by another local payment', async () => {
+		const prisma = {
+			providerOperation: {
+				createMany: jest.fn().mockResolvedValue({ count: 0 }),
+				updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+				findUnique: jest.fn().mockResolvedValue({
+					id: 'receipt-operation-1',
+					paymentId: 'payment-2',
+					providerPaymentId: 'provider-payment-1',
+					kind: ProviderOperationKind.SYNC_RECEIPT
+				})
+			}
+		};
+		const service = new PaymentDomainService(prisma as never, {} as never);
+
+		await expect(
+			service.enqueueReceiptSync('payment-1', 'provider-payment-1')
+		).rejects.toThrow('Не удалось запланировать синхронизацию чека');
 		expect(prisma.providerOperation.updateMany).toHaveBeenCalledWith(
 			expect.objectContaining({
-				where: expect.objectContaining({
-					idempotencyKey: 'receipt:payment-1',
-					kind: ProviderOperationKind.SYNC_RECEIPT
-				}),
-				data: expect.objectContaining({
-					status: ProviderOperationStatus.PENDING,
-					availableAt: expect.any(Date)
-				})
+				where: expect.objectContaining({ paymentId: 'payment-1' })
 			})
 		);
 	});

@@ -80,15 +80,10 @@ export const BILLING_PAYMENT_WEBHOOK_ROUTE =
 	`/api/v1/payments/${BILLING_PAYMENT_WEBHOOK_SUBPATH}` as const;
 export const BILLING_PAYMENT_WEBHOOK_EVENTS = [
 	'payment.succeeded',
-	'payment.canceled',
-	'receipt.succeeded',
-	'receipt.canceled'
+	'payment.canceled'
 ] as const;
 const BILLING_PAYMENT_STATUS_WEBHOOK_EVENTS = new Set<string>(
-	BILLING_PAYMENT_WEBHOOK_EVENTS.slice(0, 2)
-);
-const BILLING_RECEIPT_STATUS_WEBHOOK_EVENTS = new Set<string>(
-	BILLING_PAYMENT_WEBHOOK_EVENTS.slice(2)
+	BILLING_PAYMENT_WEBHOOK_EVENTS
 );
 
 interface PaymentListFilters {
@@ -498,50 +493,30 @@ export class PaymentDomainService {
 			}),
 			this.prisma.payment.count({ where })
 		]);
-		let items = initialItems;
+		const items = initialItems;
 		const missingReceipts = items.filter(
 			item =>
 				item.status === PaymentStatus.SUCCEEDED &&
 				Boolean(item.yookassaId) &&
 				item.receiptSyncEligible &&
-				item.receipts.length === 0
+				!item.receipts.some(
+					(receipt: { status: string; type: string | null }) =>
+						receipt.status === 'succeeded' && receipt.type === 'payment'
+				)
 		);
 		if (missingReceipts.length > 0) {
 			await Promise.all(
 				missingReceipts.map(async payment => {
-					const operation = await this.prisma.providerOperation.upsert({
-						where: { idempotencyKey: `receipt:${payment.id}` },
-						create: {
-							paymentId: payment.id,
-							providerPaymentId: payment.yookassaId,
-							idempotencyKey: `receipt:${payment.id}`,
-							kind: ProviderOperationKind.SYNC_RECEIPT,
-							payload: {
-								paymentId: payment.id,
-								providerPaymentId: payment.yookassaId
-							}
-						},
-						update: {}
-					});
+					const providerPaymentId = payment.yookassaId;
+					if (!providerPaymentId) return;
 					try {
-						await this.awaitProviderOperation(operation.id);
+						await this.enqueueReceiptSync(payment.id, providerPaymentId);
 					} catch (error) {
 						if (!(error instanceof ServiceUnavailableException))
 							throw error;
 					}
 				})
 			);
-			items = await this.prisma.payment.findMany({
-				where,
-				include: {
-					receipts: {
-						orderBy: [{ registeredAt: 'desc' }, { createdAt: 'desc' }]
-					}
-				},
-				orderBy: { createdAt: 'desc' },
-				skip: paging.skip,
-				take: paging.limit
-			});
 		}
 		return {
 			items: items.map(item => this.historyItem(item)),
@@ -1530,21 +1505,6 @@ export class PaymentDomainService {
 				: null;
 			if (!providerPaymentId) return { ok: true };
 			await this.enqueueWebhookVerification(providerPaymentId);
-		} else if (BILLING_RECEIPT_STATUS_WEBHOOK_EVENTS.has(event)) {
-			const providerPaymentId = isYooKassaObjectId(object.payment_id)
-				? object.payment_id
-				: null;
-			const receiptId = isYooKassaObjectId(object.id) ? object.id : null;
-			if (!providerPaymentId || !receiptId) return { ok: true };
-			const paymentId = (
-				await this.prisma.payment.findUnique({
-					where: { yookassaId: providerPaymentId },
-					select: { id: true }
-				})
-			)?.id;
-			if (paymentId) {
-				await this.enqueueReceiptSync(paymentId, providerPaymentId);
-			}
 		}
 		return { ok: true };
 	}
@@ -1577,10 +1537,10 @@ export class PaymentDomainService {
 		);
 	}
 
-	private async enqueueReceiptSync(
+	async enqueueReceiptSync(
 		paymentId: string,
 		providerPaymentId: string
-	): Promise<void> {
+	): Promise<string> {
 		const idempotencyKey = `receipt:${paymentId}`;
 		const payload = { paymentId, providerPaymentId };
 		const created = await this.prisma.providerOperation.createMany({
@@ -1593,14 +1553,40 @@ export class PaymentDomainService {
 			},
 			skipDuplicates: true
 		});
-		if (created.count) return;
-		await this.rearmWebhookOperation(
-			idempotencyKey,
-			ProviderOperationKind.SYNC_RECEIPT,
-			paymentId,
-			providerPaymentId,
-			payload
-		);
+		if (!created.count) {
+			await this.rearmWebhookOperation(
+				idempotencyKey,
+				ProviderOperationKind.SYNC_RECEIPT,
+				paymentId,
+				providerPaymentId,
+				payload,
+				[
+					ProviderOperationStatus.SUCCEEDED,
+					ProviderOperationStatus.FAILED,
+					ProviderOperationStatus.UNKNOWN
+				]
+			);
+		}
+		const operation = await this.prisma.providerOperation.findUnique({
+			where: { idempotencyKey },
+			select: {
+				id: true,
+				paymentId: true,
+				providerPaymentId: true,
+				kind: true
+			}
+		});
+		if (
+			!operation ||
+			operation.paymentId !== paymentId ||
+			operation.providerPaymentId !== providerPaymentId ||
+			operation.kind !== ProviderOperationKind.SYNC_RECEIPT
+		) {
+			throw new ServiceUnavailableException(
+				'Не удалось запланировать синхронизацию чека'
+			);
+		}
+		return operation.id;
 	}
 
 	private async rearmWebhookOperation(
@@ -1608,21 +1594,21 @@ export class PaymentDomainService {
 		kind: ProviderOperationKind,
 		paymentId: string | null,
 		providerPaymentId: string,
-		payload: Record<string, unknown>
+		payload: Record<string, unknown>,
+		rearmableStatuses: ProviderOperationStatus[] = [
+			ProviderOperationStatus.PENDING,
+			ProviderOperationStatus.SUCCEEDED,
+			ProviderOperationStatus.FAILED,
+			ProviderOperationStatus.UNKNOWN
+		]
 	): Promise<void> {
 		await this.prisma.providerOperation.updateMany({
 			where: {
 				idempotencyKey,
 				kind,
+				paymentId,
 				providerPaymentId,
-				status: {
-					in: [
-						ProviderOperationStatus.PENDING,
-						ProviderOperationStatus.SUCCEEDED,
-						ProviderOperationStatus.FAILED,
-						ProviderOperationStatus.UNKNOWN
-					]
-				}
+				status: { in: rearmableStatuses }
 			},
 			data: {
 				paymentId,
@@ -3051,6 +3037,13 @@ export class PaymentDomainService {
 
 	private historyItem(item: any) {
 		const receipt =
+			item.receipts.find(
+				(candidate: any) =>
+					candidate.status === 'succeeded' && candidate.type === 'payment'
+			) ??
+			item.receipts.find(
+				(candidate: any) => candidate.type === 'payment'
+			) ??
 			item.receipts.find((candidate: any) => candidate.publicUrl) ??
 			item.receipts[0] ??
 			null;

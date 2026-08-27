@@ -153,8 +153,7 @@ export class BillingProviderWorkerService
 
 	private async process(operation: any): Promise<boolean> {
 		if (operation.kind === ProviderOperationKind.SYNC_RECEIPT) {
-			await this.syncReceipt(operation);
-			return true;
+			return this.syncReceipt(operation);
 		}
 		if (operation.kind === ProviderOperationKind.VERIFY_PAYMENT) {
 			const providerPaymentId =
@@ -466,7 +465,7 @@ export class BillingProviderWorkerService
 		return status;
 	}
 
-	private async syncReceipt(operation: any): Promise<void> {
+	private async syncReceipt(operation: any): Promise<boolean> {
 		const providerPaymentId =
 			operation.providerPaymentId || operation.payment?.yookassaId;
 		if (!isYooKassaObjectId(providerPaymentId)) {
@@ -477,15 +476,13 @@ export class BillingProviderWorkerService
 				false
 			);
 		}
-		const paymentId =
-			operation.paymentId ||
-			(
-				await this.prisma.payment.findUnique({
-					where: { yookassaId: providerPaymentId },
-					select: { id: true }
-				})
-			)?.id;
-		if (!paymentId) {
+		const payment = await this.prisma.payment.findUnique({
+			where: operation.paymentId
+				? { id: operation.paymentId }
+				: { yookassaId: providerPaymentId },
+			select: { id: true, yookassaId: true }
+		});
+		if (!payment) {
 			throw new ProviderRequestError(
 				'Receipt arrived before local payment binding',
 				'LOCAL_PAYMENT_NOT_READY',
@@ -493,55 +490,130 @@ export class BillingProviderWorkerService
 				false
 			);
 		}
+		if (
+			!isYooKassaObjectId(payment.yookassaId) ||
+			payment.yookassaId !== providerPaymentId
+		) {
+			throw new ProviderRequestError(
+				'Receipt operation local payment binding is invalid',
+				'LOCAL_PAYMENT_PROVIDER_MISMATCH',
+				false,
+				false
+			);
+		}
+		const paymentId = payment.id;
 		const response = await this.provider.getReceipts(providerPaymentId);
 		const items = Array.isArray(response.items) ? response.items : [];
-		for (const raw of items) {
+		if (items.length === 0) return false;
+		const receiptIds = new Set<string>();
+		const receipts = items.map(raw => {
 			const receipt = this.record(raw);
 			const receiptId = this.providerObjectId(receipt, 'id');
-			await this.prisma.paymentReceipt.upsert({
-				where: { providerReceiptId: receiptId },
-				create: {
-					paymentId,
-					providerReceiptId: receiptId,
-					status: this.requiredString(receipt, 'status'),
-					type: typeof receipt.type === 'string' ? receipt.type : null,
-					fiscalDocumentNumber: this.optionalString(
-						receipt,
-						'fiscal_document_number'
-					),
-					fiscalStorageNumber: this.optionalString(
-						receipt,
-						'fiscal_storage_number'
-					),
-					fiscalAttribute: this.optionalString(
-						receipt,
-						'fiscal_attribute'
-					),
-					registeredAt: this.dateField(receipt, 'registered_at'),
-					publicUrl: null,
-					raw: receipt
-				},
-				update: {
-					status: this.requiredString(receipt, 'status'),
-					type: typeof receipt.type === 'string' ? receipt.type : null,
-					fiscalDocumentNumber: this.optionalString(
-						receipt,
-						'fiscal_document_number'
-					),
-					fiscalStorageNumber: this.optionalString(
-						receipt,
-						'fiscal_storage_number'
-					),
-					fiscalAttribute: this.optionalString(
-						receipt,
-						'fiscal_attribute'
-					),
-					registeredAt: this.dateField(receipt, 'registered_at'),
-					publicUrl: null,
-					raw: receipt
+			const receiptPaymentId = this.providerObjectId(
+				receipt,
+				'payment_id'
+			);
+			if (receiptPaymentId !== providerPaymentId) {
+				throw new ProviderRequestError(
+					'Provider receipt payment binding is invalid',
+					'PROVIDER_RECEIPT_PAYMENT_MISMATCH',
+					false,
+					false
+				);
+			}
+			if (receiptIds.has(receiptId)) {
+				throw new ProviderRequestError(
+					'Provider returned a duplicate receipt ID',
+					'PROVIDER_RECEIPT_DUPLICATE',
+					false,
+					false
+				);
+			}
+			receiptIds.add(receiptId);
+			const status = this.receiptStatus(receipt);
+			const type = receipt.type;
+			if (type !== 'payment' && type !== 'refund') {
+				throw new ProviderRequestError(
+					'Provider receipt type is invalid',
+					'PROVIDER_RECEIPT_TYPE_INVALID',
+					false,
+					false
+				);
+			}
+			return {
+				providerReceiptId: receiptId,
+				status,
+				type,
+				fiscalDocumentNumber: this.optionalString(
+					receipt,
+					'fiscal_document_number'
+				),
+				fiscalStorageNumber: this.optionalString(
+					receipt,
+					'fiscal_storage_number'
+				),
+				fiscalAttribute: this.optionalString(receipt, 'fiscal_attribute'),
+				registeredAt: this.dateField(receipt, 'registered_at'),
+				publicUrl: null,
+				raw: receipt as Prisma.InputJsonValue
+			};
+		});
+		await this.prisma.$transaction(
+			async transaction => {
+				const ownedPayments = await transaction.$queryRaw<
+					Array<{ id: string }>
+				>`
+					SELECT id
+					FROM billing.payments
+					WHERE id = ${paymentId}
+						AND yookassa_id = ${providerPaymentId}
+					FOR UPDATE
+				`;
+				if (ownedPayments.length !== 1) {
+					throw new ProviderRequestError(
+						'Receipt operation local payment binding changed',
+						'LOCAL_PAYMENT_PROVIDER_MISMATCH',
+						false,
+						false
+					);
 				}
-			});
-		}
+				await transaction.paymentReceipt.createMany({
+					data: receipts.map(receipt => ({
+						paymentId,
+						...receipt
+					})),
+					skipDuplicates: true
+				});
+				for (const receipt of receipts) {
+					const updated = await transaction.paymentReceipt.updateMany({
+						where: {
+							paymentId,
+							providerReceiptId: receipt.providerReceiptId
+						},
+						data: {
+							status: receipt.status,
+							type: receipt.type,
+							fiscalDocumentNumber: receipt.fiscalDocumentNumber,
+							fiscalStorageNumber: receipt.fiscalStorageNumber,
+							fiscalAttribute: receipt.fiscalAttribute,
+							registeredAt: receipt.registeredAt,
+							publicUrl: receipt.publicUrl,
+							raw: receipt.raw
+						}
+					});
+					if (updated.count !== 1) {
+						throw new ProviderRequestError(
+							'Provider receipt ownership is invalid',
+							'PROVIDER_RECEIPT_OWNERSHIP_MISMATCH',
+							false,
+							false
+						);
+					}
+				}
+			},
+			{ isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+		);
+		return receipts.every(receipt => receipt.status !== 'pending');
 	}
 
 	private async handleFailure(
@@ -553,7 +625,11 @@ export class BillingProviderWorkerService
 		const age = Date.now() - operation.createdAt.getTime();
 		const retryableOrUnexpected =
 			providerError?.retryable || !providerError;
-		if (retryableOrUnexpected && age < IDEMPOTENCY_WINDOW_MS) {
+		if (
+			retryableOrUnexpected &&
+			(operation.kind === ProviderOperationKind.SYNC_RECEIPT ||
+				age < IDEMPOTENCY_WINDOW_MS)
+		) {
 			const delay = Math.min(
 				60_000 * 2 ** Math.min(operation.attempt, 5),
 				30 * 60_000
@@ -621,6 +697,21 @@ export class BillingProviderWorkerService
 		key: string
 	): string | null {
 		return typeof value[key] === 'string' ? (value[key] as string) : null;
+	}
+
+	private receiptStatus(
+		value: Record<string, unknown>
+	): 'pending' | 'succeeded' | 'canceled' {
+		const status = this.requiredString(value, 'status');
+		if (!['pending', 'succeeded', 'canceled'].includes(status)) {
+			throw new ProviderRequestError(
+				'Provider receipt status is invalid',
+				'PROVIDER_RECEIPT_STATUS_INVALID',
+				false,
+				false
+			);
+		}
+		return status as 'pending' | 'succeeded' | 'canceled';
 	}
 
 	private providerObjectId(

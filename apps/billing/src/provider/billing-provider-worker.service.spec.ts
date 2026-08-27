@@ -330,6 +330,34 @@ describe('BillingProviderWorkerService failure classification', () => {
 		expect(payments.markProviderCancelled).not.toHaveBeenCalled();
 	});
 
+	it('keeps an old receipt sync retryable after a transient provider failure', async () => {
+		const { service, prisma, payments } = makeHarness();
+
+		await fail(
+			service,
+			ProviderOperationKind.SYNC_RECEIPT,
+			new ProviderRequestError(
+				'Receipt provider is temporarily unavailable',
+				'PROVIDER_RETRYABLE',
+				true,
+				false,
+				503
+			),
+			new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+		);
+
+		expect(prisma.providerOperation.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: ProviderOperationStatus.PENDING,
+					lastErrorCode: 'PROVIDER_RETRYABLE',
+					availableAt: expect.any(Date)
+				})
+			})
+		);
+		expect(payments.markProviderCancelled).not.toHaveBeenCalled();
+	});
+
 	it('keeps an expired ambiguous provider outcome UNKNOWN for manual reconciliation', async () => {
 		const { service, prisma, payments } = makeHarness();
 
@@ -405,6 +433,65 @@ describe('BillingProviderWorkerService webhook re-verification', () => {
 				}
 			).process(candidate);
 		return { process, prisma, provider, payments, success };
+	}
+
+	function receiptHarness(
+		items: Array<Record<string, unknown>>,
+		updateCounts: number[] = [],
+		localPayment: { id: string; yookassaId: string | null } | null = {
+			id: 'payment-1',
+			yookassaId: 'provider-payment-1'
+		},
+		transactionPayment: { id: string } | null = { id: 'payment-1' }
+	) {
+		const createMany = jest
+			.fn()
+			.mockResolvedValue({ count: items.length });
+		const updateMany = jest.fn().mockImplementation(() =>
+			Promise.resolve({
+				count: updateCounts.length > 0 ? updateCounts.shift() : 1
+			})
+		);
+		const transaction = {
+			$queryRaw: jest
+				.fn()
+				.mockResolvedValue(transactionPayment ? [transactionPayment] : []),
+			paymentReceipt: { createMany, updateMany }
+		};
+		const prisma = {
+			payment: {
+				findUnique: jest.fn().mockResolvedValue(localPayment)
+			},
+			$transaction: jest.fn(
+				async (callback: (client: typeof transaction) => unknown) =>
+					callback(transaction)
+			)
+		};
+		const provider = {
+			getReceipts: jest.fn().mockResolvedValue({ items })
+		};
+		const service = new BillingProviderWorkerService(
+			prisma as never,
+			{} as never,
+			provider as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+		const syncReceipt = (value: Record<string, unknown>) =>
+			(
+				service as unknown as {
+					syncReceipt(value: Record<string, unknown>): Promise<boolean>;
+				}
+			).syncReceipt(value);
+		return {
+			createMany,
+			prisma,
+			provider,
+			syncReceipt,
+			transaction,
+			updateMany
+		};
 	}
 
 	it('keeps a forged pre-trigger pending hint retryable and applies the later authenticated success once', async () => {
@@ -550,29 +637,16 @@ describe('BillingProviderWorkerService webhook re-verification', () => {
 	});
 
 	it('rejects an unbounded receipt ID from the authenticated provider response before persistence', async () => {
-		const prisma = {
-			paymentReceipt: { upsert: jest.fn() }
-		};
-		const provider = {
-			getReceipts: jest.fn().mockResolvedValue({
-				items: [{ id: '../invalid-receipt-id', status: 'succeeded' }]
-			})
-		};
-		const service = new BillingProviderWorkerService(
-			prisma as never,
-			{} as never,
-			provider as never,
-			{} as never,
-			{} as never,
-			{} as never
-		);
+		const value = receiptHarness([
+			{
+				id: '../invalid-receipt-id',
+				payment_id: 'provider-payment-1',
+				status: 'succeeded'
+			}
+		]);
 
 		await expect(
-			(
-				service as unknown as {
-					syncReceipt(value: Record<string, unknown>): Promise<void>;
-				}
-			).syncReceipt({
+			value.syncReceipt({
 				paymentId: 'payment-1',
 				providerPaymentId: 'provider-payment-1'
 			})
@@ -580,16 +654,239 @@ describe('BillingProviderWorkerService webhook re-verification', () => {
 			code: 'PROVIDER_OBJECT_ID_INVALID',
 			retryable: false
 		});
-		expect(prisma.paymentReceipt.upsert).not.toHaveBeenCalled();
+		expect(value.prisma.$transaction).not.toHaveBeenCalled();
+	});
+
+	it('rejects a receipt operation bound to a different local provider payment before the provider GET', async () => {
+		const value = receiptHarness([], [], {
+			id: 'payment-1',
+			yookassaId: 'provider-payment-2'
+		});
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).rejects.toMatchObject({
+			code: 'LOCAL_PAYMENT_PROVIDER_MISMATCH',
+			retryable: false
+		});
+		expect(value.prisma.payment.findUnique).toHaveBeenCalledWith({
+			where: { id: 'payment-1' },
+			select: { id: true, yookassaId: true }
+		});
+		expect(value.provider.getReceipts).not.toHaveBeenCalled();
+		expect(value.prisma.$transaction).not.toHaveBeenCalled();
+	});
+
+	it('keeps an empty authenticated receipt list non-terminal', async () => {
+		const value = receiptHarness([]);
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).resolves.toBe(false);
+		expect(value.prisma.$transaction).not.toHaveBeenCalled();
+	});
+
+	it('rejects a receipt bound to a different provider payment before persistence', async () => {
+		const value = receiptHarness([
+			{
+				id: 'provider-receipt-1',
+				payment_id: 'provider-payment-2',
+				status: 'succeeded',
+				type: 'payment'
+			}
+		]);
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).rejects.toMatchObject({
+			code: 'PROVIDER_RECEIPT_PAYMENT_MISMATCH',
+			retryable: false
+		});
+		expect(value.prisma.$transaction).not.toHaveBeenCalled();
+	});
+
+	it('rejects an unsupported provider receipt type before persistence', async () => {
+		const value = receiptHarness([
+			{
+				id: 'provider-receipt-1',
+				payment_id: 'provider-payment-1',
+				status: 'succeeded',
+				type: 'unknown'
+			}
+		]);
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).rejects.toMatchObject({
+			code: 'PROVIDER_RECEIPT_TYPE_INVALID',
+			retryable: false
+		});
+		expect(value.prisma.$transaction).not.toHaveBeenCalled();
+	});
+
+	it('rolls back when the local provider payment binding changes before receipt persistence', async () => {
+		const value = receiptHarness(
+			[
+				{
+					id: 'provider-receipt-1',
+					payment_id: 'provider-payment-1',
+					status: 'succeeded',
+					type: 'payment'
+				}
+			],
+			[],
+			{ id: 'payment-1', yookassaId: 'provider-payment-1' },
+			null
+		);
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).rejects.toMatchObject({
+			code: 'LOCAL_PAYMENT_PROVIDER_MISMATCH',
+			retryable: false
+		});
+		expect(value.transaction.$queryRaw).toHaveBeenCalledTimes(1);
+		const [queryParts, lockedPaymentId, lockedProviderPaymentId] =
+			value.transaction.$queryRaw.mock.calls[0];
+		const query = queryParts.join(' ').replace(/\s+/g, ' ').trim();
+		expect(query).toContain('SELECT id FROM billing.payments WHERE id =');
+		expect(query).toContain('AND yookassa_id =');
+		expect(query).toContain('FOR UPDATE');
+		expect(lockedPaymentId).toBe('payment-1');
+		expect(lockedProviderPaymentId).toBe('provider-payment-1');
+		expect(value.createMany).not.toHaveBeenCalled();
+		expect(value.updateMany).not.toHaveBeenCalled();
+	});
+
+	it('rolls back when a provider receipt ID belongs to another local payment', async () => {
+		const value = receiptHarness(
+			[
+				{
+					id: 'provider-receipt-1',
+					payment_id: 'provider-payment-1',
+					status: 'succeeded',
+					type: 'payment'
+				}
+			],
+			[0]
+		);
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).rejects.toMatchObject({
+			code: 'PROVIDER_RECEIPT_OWNERSHIP_MISMATCH',
+			retryable: false
+		});
+		expect(value.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					paymentId: 'payment-1',
+					providerReceiptId: 'provider-receipt-1'
+				}
+			})
+		);
+	});
+
+	it('persists pending receipts but keeps their operation non-terminal', async () => {
+		const receipt = {
+			id: 'provider-receipt-1',
+			payment_id: 'provider-payment-1',
+			status: 'pending',
+			type: 'payment'
+		};
+		const value = receiptHarness([receipt]);
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).resolves.toBe(false);
+		expect(value.createMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: [expect.objectContaining({ status: 'pending' })]
+			})
+		);
+		expect(value.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					paymentId: 'payment-1',
+					providerReceiptId: 'provider-receipt-1'
+				},
+				data: expect.objectContaining({ status: 'pending' })
+			})
+		);
+	});
+
+	it('persists every terminal receipt returned by the provider', async () => {
+		const value = receiptHarness([
+			{
+				id: 'provider-receipt-1',
+				payment_id: 'provider-payment-1',
+				status: 'succeeded',
+				type: 'payment'
+			},
+			{
+				id: 'provider-receipt-2',
+				payment_id: 'provider-payment-1',
+				status: 'canceled',
+				type: 'payment'
+			},
+			{
+				id: 'provider-receipt-3',
+				payment_id: 'provider-payment-1',
+				status: 'succeeded',
+				type: 'refund'
+			},
+			{
+				id: 'provider-receipt-4',
+				payment_id: 'provider-payment-1',
+				status: 'succeeded',
+				type: 'payment'
+			}
+		]);
+
+		await expect(
+			value.syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).resolves.toBe(true);
+		expect(value.updateMany).toHaveBeenCalledTimes(4);
+		expect(
+			value.updateMany.mock.calls.map(
+				call => call[0].where.providerReceiptId
+			)
+		).toEqual([
+			'provider-receipt-1',
+			'provider-receipt-2',
+			'provider-receipt-3',
+			'provider-receipt-4'
+		]);
 	});
 
 	it('normalizes official top-level fiscal fields and ignores undocumented lookalikes', async () => {
-		const upsert = jest.fn().mockResolvedValue({});
-		const prisma = {
-			paymentReceipt: { upsert }
-		};
 		const receipt = {
 			id: 'provider-receipt-1',
+			payment_id: 'provider-payment-1',
 			status: 'succeeded',
 			type: 'payment',
 			fiscal_document_number: 'fiscal-document-1',
@@ -603,28 +900,14 @@ describe('BillingProviderWorkerService webhook re-verification', () => {
 				fiscal_attribute: 'wrong-nested-attribute'
 			}
 		};
-		const provider = {
-			getReceipts: jest.fn().mockResolvedValue({ items: [receipt] })
-		};
-		const service = new BillingProviderWorkerService(
-			prisma as never,
-			{} as never,
-			provider as never,
-			{} as never,
-			{} as never,
-			{} as never
-		);
+		const value = receiptHarness([receipt]);
 
 		await expect(
-			(
-				service as unknown as {
-					syncReceipt(value: Record<string, unknown>): Promise<void>;
-				}
-			).syncReceipt({
+			value.syncReceipt({
 				paymentId: 'payment-1',
 				providerPaymentId: 'provider-payment-1'
 			})
-		).resolves.toBeUndefined();
+		).resolves.toBe(true);
 
 		const normalized = {
 			status: 'succeeded',
@@ -636,14 +919,22 @@ describe('BillingProviderWorkerService webhook re-verification', () => {
 			publicUrl: null,
 			raw: receipt
 		};
-		expect(upsert).toHaveBeenCalledWith({
-			where: { providerReceiptId: 'provider-receipt-1' },
-			create: {
+		expect(value.createMany).toHaveBeenCalledWith({
+			data: [
+				{
+					paymentId: 'payment-1',
+					providerReceiptId: 'provider-receipt-1',
+					...normalized
+				}
+			],
+			skipDuplicates: true
+		});
+		expect(value.updateMany).toHaveBeenCalledWith({
+			where: {
 				paymentId: 'payment-1',
-				providerReceiptId: 'provider-receipt-1',
-				...normalized
+				providerReceiptId: 'provider-receipt-1'
 			},
-			update: normalized
+			data: normalized
 		});
 	});
 });

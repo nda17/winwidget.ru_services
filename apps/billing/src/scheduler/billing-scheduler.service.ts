@@ -13,6 +13,8 @@ import {
 	PaymentStatus,
 	Plan,
 	Prisma,
+	ProviderOperationKind,
+	ProviderOperationStatus,
 	ScheduledRunStatus,
 	SubscriptionExpiryReminderStatus,
 	SubscriptionStatus
@@ -24,6 +26,7 @@ import {
 } from '../messaging/billing-messaging.constants';
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
 import { BillingRuntimeService } from '../runtime/billing-runtime.service';
+import { PaymentDomainService } from '../domain/payment-domain.service';
 import { SubscriptionDomainService } from '../domain/subscription-domain.service';
 import {
 	AUTO_RENEWAL_DUE_GRACE_MS,
@@ -34,6 +37,8 @@ import {
 } from '../domain/billing-legal.constants';
 
 const TICK_MS = 60_000;
+const RECEIPT_RECONCILIATION_BATCH_SIZE = 250;
+const RECEIPT_RECONCILIATION_MAX_BATCHES = 4;
 const RUN_LEASE_MS = 5 * 60_000;
 const RUN_LEASE_RENEW_MS = 60_000;
 const CHARGE_DATE_DRIFT_MS = 60_000;
@@ -59,7 +64,8 @@ export class BillingSchedulerService
 	constructor(
 		private readonly prisma: BillingPrismaService,
 		private readonly runtime: BillingRuntimeService,
-		private readonly subscriptions: SubscriptionDomainService
+		private readonly subscriptions: SubscriptionDomainService,
+		private readonly payments: PaymentDomainService
 	) {}
 
 	onModuleInit(): void {
@@ -99,12 +105,68 @@ export class BillingSchedulerService
 				this.moscowReminderSlotKey(now),
 				() => this.scheduleExpiryReminders(now)
 			);
+			await this.runDurable(
+				'payment-receipt-reconciliation',
+				this.hourKey(now),
+				() => this.reconcileMissingPaymentReceipts()
+			);
 		} catch (error) {
 			this.logger.error(
 				`Billing scheduler tick failed: ${this.safeError(error)}`
 			);
 		} finally {
 			this.running = false;
+		}
+	}
+
+	private async reconcileMissingPaymentReceipts(): Promise<void> {
+		const visitedPaymentIds: string[] = [];
+		for (
+			let batch = 0;
+			batch < RECEIPT_RECONCILIATION_MAX_BATCHES;
+			batch += 1
+		) {
+			const candidates = await this.prisma.payment.findMany({
+				where: {
+					id: { notIn: [...visitedPaymentIds] },
+					status: PaymentStatus.SUCCEEDED,
+					receiptSyncEligible: true,
+					yookassaId: { not: null },
+					receipts: {
+						none: { status: 'succeeded', type: 'payment' }
+					},
+					providerOperations: {
+						none: {
+							kind: ProviderOperationKind.SYNC_RECEIPT,
+							status: {
+								in: [
+									ProviderOperationStatus.PENDING,
+									ProviderOperationStatus.PROCESSING
+								]
+							}
+						}
+					}
+				},
+				orderBy: [{ succeededAt: 'asc' }, { createdAt: 'asc' }],
+				take: RECEIPT_RECONCILIATION_BATCH_SIZE,
+				select: { id: true, yookassaId: true }
+			});
+			if (candidates.length === 0) return;
+			visitedPaymentIds.push(...candidates.map(payment => payment.id));
+			for (const payment of candidates) {
+				if (!payment.yookassaId) continue;
+				try {
+					await this.payments.enqueueReceiptSync(
+						payment.id,
+						payment.yookassaId
+					);
+				} catch (error) {
+					this.logger.error(
+						`Receipt reconciliation failed payment=${payment.id}: ${this.safeError(error)}`
+					);
+				}
+			}
+			if (candidates.length < RECEIPT_RECONCILIATION_BATCH_SIZE) return;
 		}
 	}
 

@@ -5,6 +5,8 @@ import {
 	PaymentKind,
 	PaymentStatus,
 	Plan,
+	ProviderOperationKind,
+	ProviderOperationStatus,
 	SubscriptionStatus
 } from '@prisma/billing-client';
 import { BILLING_EVENT_TYPES } from '../messaging/billing-messaging.constants';
@@ -150,6 +152,7 @@ describe('BillingSchedulerService auto-renewal safety', () => {
 		const service = new BillingSchedulerService(
 			prisma as never,
 			{} as never,
+			{} as never,
 			{} as never
 		);
 		return { service, transaction, payment, currentRenewal };
@@ -248,8 +251,162 @@ describe('BillingSchedulerService auto-renewal safety', () => {
 		});
 	});
 
+	it('registers receipt reconciliation as an hourly durable task', async () => {
+		const service = new BillingSchedulerService(
+			{} as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+		const internal = service as unknown as {
+			tick(): Promise<void>;
+			runDurable(
+				task: string,
+				periodKey: string,
+				handler: () => Promise<void>
+			): Promise<void>;
+		};
+		const runDurable = jest
+			.spyOn(internal, 'runDurable')
+			.mockResolvedValue(undefined);
+
+		await internal.tick();
+
+		expect(runDurable).toHaveBeenCalledWith(
+			'payment-receipt-reconciliation',
+			'2026-08-10T09',
+			expect.any(Function)
+		);
+		expect(runDurable.mock.calls.map(call => call[0])).toEqual([
+			'billing-retention',
+			'auto-renewal',
+			'subscription-expiry',
+			'subscription-expiry-reminders',
+			'payment-receipt-reconciliation'
+		]);
+	});
+
+	it('selects only bounded receipt-eligible successes for reconciliation', async () => {
+		const findMany = jest.fn().mockResolvedValue([
+			{ id: 'payment-1', yookassaId: 'provider-payment-1' },
+			{ id: 'payment-2', yookassaId: 'provider-payment-2' }
+		]);
+		const enqueueReceiptSync = jest.fn().mockResolvedValue('operation-1');
+		const service = new BillingSchedulerService(
+			{ payment: { findMany } } as never,
+			{} as never,
+			{} as never,
+			{ enqueueReceiptSync } as never
+		) as unknown as {
+			reconcileMissingPaymentReceipts(): Promise<void>;
+		};
+
+		await service.reconcileMissingPaymentReceipts();
+
+		expect(findMany).toHaveBeenCalledWith({
+			where: {
+				id: { notIn: [] },
+				status: PaymentStatus.SUCCEEDED,
+				receiptSyncEligible: true,
+				yookassaId: { not: null },
+				receipts: {
+					none: { status: 'succeeded', type: 'payment' }
+				},
+				providerOperations: {
+					none: {
+						kind: ProviderOperationKind.SYNC_RECEIPT,
+						status: {
+							in: [
+								ProviderOperationStatus.PENDING,
+								ProviderOperationStatus.PROCESSING
+							]
+						}
+					}
+				}
+			},
+			orderBy: [{ succeededAt: 'asc' }, { createdAt: 'asc' }],
+			take: 250,
+			select: { id: true, yookassaId: true }
+		});
+		expect(enqueueReceiptSync).toHaveBeenNthCalledWith(
+			1,
+			'payment-1',
+			'provider-payment-1'
+		);
+		expect(enqueueReceiptSync).toHaveBeenNthCalledWith(
+			2,
+			'payment-2',
+			'provider-payment-2'
+		);
+	});
+
+	it('isolates one corrupted receipt gap from the remaining reconciliation batch', async () => {
+		const findMany = jest.fn().mockResolvedValue([
+			{ id: 'payment-1', yookassaId: 'provider-payment-1' },
+			{ id: 'payment-2', yookassaId: 'provider-payment-2' }
+		]);
+		const enqueueReceiptSync = jest
+			.fn()
+			.mockRejectedValueOnce(new Error('ownership mismatch'))
+			.mockResolvedValueOnce('operation-2');
+		const service = new BillingSchedulerService(
+			{ payment: { findMany } } as never,
+			{} as never,
+			{} as never,
+			{ enqueueReceiptSync } as never
+		) as unknown as {
+			logger: { error: jest.Mock };
+			reconcileMissingPaymentReceipts(): Promise<void>;
+		};
+		service.logger.error = jest.fn();
+
+		await expect(
+			service.reconcileMissingPaymentReceipts()
+		).resolves.toBeUndefined();
+
+		expect(enqueueReceiptSync).toHaveBeenCalledTimes(2);
+		expect(service.logger.error).toHaveBeenCalledWith(
+			expect.stringContaining('payment=payment-1')
+		);
+	});
+
+	it('continues after the first 250 gaps without selecting them again', async () => {
+		const firstBatch = Array.from({ length: 250 }, (_, index) => ({
+			id: `payment-${index + 1}`,
+			yookassaId: `provider-payment-${index + 1}`
+		}));
+		const findMany = jest
+			.fn()
+			.mockResolvedValueOnce(firstBatch)
+			.mockResolvedValueOnce([
+				{ id: 'payment-251', yookassaId: 'provider-payment-251' }
+			]);
+		const enqueueReceiptSync = jest.fn().mockResolvedValue('operation-1');
+		const service = new BillingSchedulerService(
+			{ payment: { findMany } } as never,
+			{} as never,
+			{} as never,
+			{ enqueueReceiptSync } as never
+		) as unknown as {
+			reconcileMissingPaymentReceipts(): Promise<void>;
+		};
+
+		await service.reconcileMissingPaymentReceipts();
+
+		expect(findMany).toHaveBeenCalledTimes(2);
+		expect(findMany.mock.calls[1]?.[0]).toEqual(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					id: { notIn: firstBatch.map(payment => payment.id) }
+				})
+			})
+		);
+		expect(enqueueReceiptSync).toHaveBeenCalledTimes(251);
+	});
+
 	it('uses Moscow calendar days and stable 03:00/15:00 slots', () => {
 		const service = new BillingSchedulerService(
+			{} as never,
 			{} as never,
 			{} as never,
 			{} as never
@@ -300,6 +457,7 @@ describe('BillingSchedulerService auto-renewal safety', () => {
 		};
 		const service = new BillingSchedulerService(
 			prisma as never,
+			{} as never,
 			{} as never,
 			{} as never
 		) as unknown as {

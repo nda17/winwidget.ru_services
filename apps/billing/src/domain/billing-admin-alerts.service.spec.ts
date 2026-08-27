@@ -131,12 +131,38 @@ describe('BillingAdminAlertsService', () => {
 		expect(sql).toContain("NOW() - INTERVAL '3 days'");
 		expect(sql).toContain('HAVING COUNT(*) > 1');
 		expect(sql).toContain("lower(pr.status) = 'canceled'");
-		expect(sql).toContain('replacement.type IS NOT DISTINCT FROM pr.type');
+		expect(sql).toContain("pr.type IN ('payment', 'refund')");
+		expect(sql).toContain('replacement.type = pr.type');
 		expect(sql).toContain("lower(replacement.status) = 'succeeded'");
+		expect(sql).toContain("jsonb_typeof(pr.raw) = 'object'");
+		expect(sql).toContain(
+			"jsonb_typeof(pr.raw -> 'payment_id') = 'string'"
+		);
+		expect(sql).toContain("pr.raw ->> 'payment_id' = p.yookassa_id");
+		expect(sql).toContain("jsonb_typeof(pr.raw -> 'items') = 'array'");
+		expect(sql).toContain("pr.raw -> 'items' <> '[]'::jsonb");
+		expect(sql).toContain(
+			"replacement.raw -> 'items' = pr.raw -> 'items'"
+		);
+		expect(sql).toContain(
+			"replacement.raw -> 'settlements' = pr.raw -> 'settlements'"
+		);
+		expect(sql).toContain("pr.raw -> 'internet' = 'true'::jsonb");
+		expect(sql).toContain("pr.type <> 'refund'");
+		expect(sql).toContain(
+			"jsonb_typeof(pr.raw -> 'refund_id') = 'string'"
+		);
+		expect(sql).toContain(
+			"replacement.raw ->> 'refund_id' = pr.raw ->> 'refund_id'"
+		);
+		expect(sql).not.toContain('jsonb_array_length');
+		expect(sql).not.toContain('replacement.created_at > pr.created_at');
 		expect(sql).toContain("po.kind::text = 'SYNC_RECEIPT'");
 		expect(sql).toContain("po.status::text IN ('FAILED', 'UNKNOWN')");
 		expect(sql).toContain('p.receipt_sync_eligible = TRUE');
 		expect(sql).toContain('NOT EXISTS');
+		expect(sql).toContain("lower(pr.status) = 'succeeded'");
+		expect(sql).toContain("pr.type = 'payment'");
 		expect(sql).toContain("lower(pr.status) = 'pending'");
 		expect(sql).not.toContain('billing_payment_read_projections');
 		expect(sql).not.toContain('billing_subscription_read_projections');

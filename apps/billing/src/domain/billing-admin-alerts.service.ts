@@ -143,9 +143,36 @@ export class BillingAdminAlertsService {
 							SELECT 1
 							FROM billing.payment_receipts replacement
 							WHERE replacement.payment_id = pr.payment_id
-								AND replacement.type IS NOT DISTINCT FROM pr.type
+								AND pr.type IN ('payment', 'refund')
+								AND replacement.type = pr.type
 								AND lower(replacement.status) = 'succeeded'
-								AND replacement.created_at > pr.created_at
+								AND jsonb_typeof(pr.raw) = 'object'
+								AND jsonb_typeof(replacement.raw) = 'object'
+								AND jsonb_typeof(pr.raw -> 'payment_id') = 'string'
+								AND jsonb_typeof(replacement.raw -> 'payment_id') = 'string'
+								AND pr.raw ->> 'payment_id' = p.yookassa_id
+								AND replacement.raw ->> 'payment_id' = p.yookassa_id
+								AND jsonb_typeof(pr.raw -> 'items') = 'array'
+								AND pr.raw -> 'items' <> '[]'::jsonb
+								AND jsonb_typeof(replacement.raw -> 'items') = 'array'
+								AND replacement.raw -> 'items' <> '[]'::jsonb
+								AND replacement.raw -> 'items' = pr.raw -> 'items'
+								AND jsonb_typeof(pr.raw -> 'settlements') = 'array'
+								AND pr.raw -> 'settlements' <> '[]'::jsonb
+								AND jsonb_typeof(replacement.raw -> 'settlements') = 'array'
+								AND replacement.raw -> 'settlements' <> '[]'::jsonb
+								AND replacement.raw -> 'settlements' = pr.raw -> 'settlements'
+								AND pr.raw -> 'internet' = 'true'::jsonb
+								AND replacement.raw -> 'internet' = 'true'::jsonb
+								AND (
+									pr.type <> 'refund'
+									OR (
+										jsonb_typeof(pr.raw -> 'refund_id') = 'string'
+										AND jsonb_typeof(replacement.raw -> 'refund_id') = 'string'
+										AND NULLIF(pr.raw ->> 'refund_id', '') IS NOT NULL
+										AND replacement.raw ->> 'refund_id' = pr.raw ->> 'refund_id'
+									)
+								)
 						)
 
 					UNION ALL
@@ -193,6 +220,8 @@ export class BillingAdminAlertsService {
 							SELECT 1
 							FROM billing.payment_receipts pr
 							WHERE pr.payment_id = p.id
+								AND lower(pr.status) = 'succeeded'
+								AND pr.type = 'payment'
 						)
 
 					UNION ALL
