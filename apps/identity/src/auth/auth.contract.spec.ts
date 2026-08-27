@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import {
 	Role,
+	UserStatus,
 	VerificationChallengePurpose,
 	VerificationChallengeType
 } from '@prisma/identity-client';
@@ -162,6 +163,45 @@ describe('public auth frozen contracts', () => {
 		await expect(value.auth.restorePassword({})).rejects.toEqual(
 			new NotFoundException('Email or phone not passed')
 		);
+	});
+
+	it('atomically updates the password and revokes every active session on restore', async () => {
+		const userId = '00000000-0000-4000-8000-000000000002';
+		const transaction = {
+			user: { update: jest.fn() },
+			userSession: { updateMany: jest.fn() }
+		};
+		const rootUserUpdate = jest.fn();
+		const value = service({
+			users: {
+				findByIdentity: jest.fn().mockResolvedValue({
+					id: userId,
+					status: UserStatus.ACTIVE,
+					deletedAt: null,
+					authIdentities: []
+				})
+			},
+			prisma: {
+				user: { update: rootUserUpdate },
+				$transaction: jest.fn(async callback => callback(transaction))
+			}
+		});
+
+		await expect(
+			value.auth.restorePassword({ email: 'USER@example.com' })
+		).resolves.toBeUndefined();
+
+		expect(value.prisma.$transaction).toHaveBeenCalledTimes(1);
+		expect(transaction.user.update).toHaveBeenCalledWith({
+			where: { id: userId },
+			data: { password: expect.any(String) }
+		});
+		expect(transaction.userSession.updateMany).toHaveBeenCalledWith({
+			where: { userId, revokedAt: null },
+			data: { revokedAt: expect.any(Date) }
+		});
+		expect(rootUserUpdate).not.toHaveBeenCalled();
+		expect(value.prisma.userSession.updateMany).not.toHaveBeenCalled();
 	});
 });
 
