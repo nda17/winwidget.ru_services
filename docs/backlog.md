@@ -113,16 +113,14 @@ idempotency/receipt API или явно принять семантику ред
 - При повторных отказах оценить второй relay и failover с теми же TLS и
   fixed-upstream ограничениями.
 
-### P1 — подтвердить live upstream TLS входящих webhook
+### P1 — подтвердить end-to-end входящий Support webhook
 
-Tracked Nginx bridge требует `proxy_ssl_verify on`, системный CA trust и SNI
-`api.winwidget.ru` для Auth, Info и Support webhook. Осталось получить
-доказательство точной deployed-конфигурации на bridge VPS:
+Tracked и установленный Nginx bridge побайтово сверены; `proxy_ssl_verify on`,
+системный CA trust и SNI `api.winwidget.ru` включены, `nginx -t` и reload
+успешны. Пустые запросы к Auth, Info и Support webhook отклоняются с `401`.
 
-- сверить tracked и установленный конфиги без вывода токенов;
-- выполнить `nginx -t` и подтверждённый reload;
-- проверить Auth, Info и Support webhook, включая реальное входящее Support
-  сообщение без роста pending updates/DLQ.
+Осталось отправить реальное входящее Support-сообщение через Telegram и
+подтвердить его обработку без роста pending updates, retry и DLQ.
 
 ## Backup и восстановление
 
