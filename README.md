@@ -129,7 +129,7 @@ Workflow для production и подробная инструкция наход
 
 ## Документация
 
-- [Технический backlog](DOCUMENTATION/backlog.md)
-- [API Gateway и авторизация](DOCUMENTATION/api-gateway-auth.md)
-- [Контракт Widgets](DOCUMENTATION/widgets-service.md)
-- [Production runbook](https://github.com/nda17/winwidget.ru_infra/blob/master/DOCUMENTATION/runbook.md)
+- [Технический backlog](docs/backlog.md)
+- [API Gateway и авторизация](docs/api-gateway-auth.md)
+- [Контракт Widgets](docs/widgets-service.md)
+- [Production runbook](https://github.com/nda17/winwidget.ru_infra/blob/master/docs/runbook.md)
