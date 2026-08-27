@@ -107,26 +107,65 @@ function createService(transaction?: Record<string, any>) {
 }
 
 describe('UsersService security and frozen contracts', () => {
-	it('revokes every other session transactionally on self password change', async () => {
+	it('revokes every pre-change session transactionally on self password change', async () => {
 		const value = createService();
 		value.tx.user.update.mockResolvedValue(user());
 		await expect(
 			value.service.updateProfile(
 				USER_ID,
-				'current-session',
 				{ password: 'Secure1' },
 				request()
 			)
 		).resolves.toBe(true);
 		expect(value.tx.userSession.updateMany).toHaveBeenCalledWith({
-			where: {
-				userId: USER_ID,
-				id: { not: 'current-session' },
-				revokedAt: null
-			},
+			where: { userId: USER_ID, revokedAt: null },
 			data: { revokedAt: expect.any(Date) }
 		});
+		expect(value.prisma.userSession.updateMany).not.toHaveBeenCalled();
 		expect(value.events.emitUserChanged).toHaveBeenCalled();
+	});
+
+	it('does not revoke sessions for a non-password self profile update', async () => {
+		const value = createService();
+		value.tx.user.update.mockResolvedValue(user({ name: 'Changed' }));
+
+		await expect(
+			value.service.updateProfile(USER_ID, { name: 'Changed' }, request())
+		).resolves.toBe(true);
+
+		expect(value.tx.userSession.updateMany).not.toHaveBeenCalled();
+		expect(value.tx.user.update).toHaveBeenCalledWith({
+			where: { id: USER_ID },
+			data: { name: 'Changed' }
+		});
+	});
+
+	it('revokes every session transactionally on an admin password reset', async () => {
+		const value = createService();
+		value.tx.user.findUnique.mockResolvedValue(user());
+		value.tx.user.findUniqueOrThrow.mockResolvedValue(user());
+
+		await value.service.adminUpdate(
+			'admin-id',
+			[Role.DEV],
+			USER_ID,
+			{ password: 'Secure1' },
+			request()
+		);
+
+		expect(value.tx.userSession.updateMany).toHaveBeenCalledWith({
+			where: { userId: USER_ID, revokedAt: null },
+			data: { revokedAt: expect.any(Date) }
+		});
+		expect(value.prisma.userSession.updateMany).not.toHaveBeenCalled();
+		expect(value.events.emitUserChanged).toHaveBeenCalled();
+		expect(value.events.emitAudit).toHaveBeenCalledWith(
+			value.tx,
+			expect.objectContaining({
+				action: 'USER_UPDATE',
+				metadata: expect.objectContaining({ passwordChanged: true })
+			})
+		);
 	});
 
 	it('rejects admin PATCH for a soft-deleted user before mutation', async () => {
@@ -179,9 +218,9 @@ describe('UsersService security and frozen contracts', () => {
 			{ name: 'Changed' },
 			request()
 		);
-		expect(value.tx.user.update.mock.calls[0]?.[0].data).not.toHaveProperty(
-			'avatarPath'
-		);
+		expect(
+			value.tx.user.update.mock.calls[0]?.[0].data
+		).not.toHaveProperty('avatarPath');
 	});
 
 	it('searches only name and EMAIL/PHONE identities and clamps unsafe paging', async () => {

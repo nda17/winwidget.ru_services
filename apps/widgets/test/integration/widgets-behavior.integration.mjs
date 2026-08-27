@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { Prisma, PrismaClient } from '@prisma/widgets-client';
+import { PrismaClient } from '@prisma/widgets-client';
 import { runWidgetsBrowserIntegration } from './widgets-browser.integration.mjs';
 
 const databaseUrl = process.env.WIDGETS_TEST_DATABASE_URL?.trim();
@@ -969,20 +969,6 @@ async function deleteAllWidgets(widgets, expectedLeadCount) {
 }
 
 async function prepareDatabase() {
-	const activatedAt = new Date();
-	await prisma.widgetsServiceIdentity.update({
-		where: { id: 'widgets-service' },
-		data: {
-			ownershipGeneration: 1n,
-			sourceDatabaseFingerprint: 'a'.repeat(64),
-			sourceExportedAt: activatedAt,
-			sourceSnapshotSha256: 'b'.repeat(64),
-			sourceSnapshotCounts: { widgets: 0, leads: 0 },
-			sourceReportingHighWater: 0n,
-			handoffStartedAt: activatedAt,
-			ownershipActivatedAt: activatedAt
-		}
-	});
 	await seedOwner(primaryOwnerId, {
 		unlimited: true,
 		maxWidgets: 20,
@@ -1086,14 +1072,9 @@ async function assertCleanDatabase() {
 	});
 	assert(
 		identity &&
-			identity.ownershipGeneration === 0n &&
-			identity.ownershipActivatedAt === null &&
-			identity.handoffStartedAt === null &&
-			identity.sourceDatabaseFingerprint === null &&
-			identity.sourceExportedAt === null &&
-			identity.sourceSnapshotSha256 === null &&
-			identity.sourceSnapshotCounts === null &&
-			identity.sourceReportingHighWater === null,
+			identity.id === 'widgets-service' &&
+			typeof identity.databaseId === 'string' &&
+			identity.databaseId.length > 0,
 		'Widgets service identity is not in the clean post-migration state'
 	);
 	assert(
@@ -1130,19 +1111,6 @@ async function cleanupDatabase() {
 			where: { id: 'reporting' },
 			create: { id: 'reporting', lastValue: 0n },
 			update: { lastValue: 0n }
-		}),
-		prisma.widgetsServiceIdentity.update({
-			where: { id: 'widgets-service' },
-			data: {
-				ownershipGeneration: 0n,
-				sourceDatabaseFingerprint: null,
-				sourceExportedAt: null,
-				sourceSnapshotSha256: null,
-				sourceSnapshotCounts: Prisma.DbNull,
-				sourceReportingHighWater: null,
-				handoffStartedAt: null,
-				ownershipActivatedAt: null
-			}
 		})
 	]);
 	const createdHeartbeats = await prisma.widgetsHeartbeat.findMany({

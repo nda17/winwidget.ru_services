@@ -43,6 +43,17 @@ function createService(
 	challengeValue: Record<string, any>,
 	config: Record<string, string> = {}
 ) {
+	const configValues = Object.fromEntries(
+		Object.entries(process.env).filter(
+			(entry): entry is [string, string] => entry[1] !== undefined
+		)
+	);
+	Object.assign(configValues, config);
+	for (const key of ['MODE', 'TELEGRAM_API_BASE_URL']) {
+		if (!Object.prototype.hasOwnProperty.call(config, key)) {
+			delete configValues[key];
+		}
+	}
 	const tx = {
 		verificationChallenge: {
 			findUnique: jest.fn().mockResolvedValue(challengeValue),
@@ -71,7 +82,7 @@ function createService(
 		emitAudit: jest.fn()
 	};
 	const service = new TelegramService(
-		new ConfigService(config),
+		{ get: (key: string) => configValues[key] } as ConfigService,
 		prisma as any,
 		events as any,
 		settings as any,

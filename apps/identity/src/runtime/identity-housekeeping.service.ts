@@ -8,7 +8,6 @@ import { Prisma } from '@prisma/identity-client';
 import { safeError } from '../common/identity.util';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { IdentityRuntimeService } from './identity-runtime.service';
-import { IdentityOwnershipService } from './identity-ownership.service';
 
 const BATCH_SIZE = 1_000;
 
@@ -35,8 +34,7 @@ export class IdentityHousekeepingService
 
 	constructor(
 		private readonly prisma: IdentityPrismaService,
-		private readonly runtime: IdentityRuntimeService,
-		private readonly ownership: IdentityOwnershipService
+		private readonly runtime: IdentityRuntimeService
 	) {}
 
 	onModuleInit(): void {
@@ -167,10 +165,6 @@ export class IdentityHousekeepingService
 		if (this.running) return;
 		this.running = true;
 		try {
-			if (!(await this.ownership.isActive())) {
-				this.ready = false;
-				return;
-			}
 			await this.runOnce();
 			this.ready = true;
 		} catch (error) {

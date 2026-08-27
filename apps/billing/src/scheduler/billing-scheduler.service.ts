@@ -81,7 +81,7 @@ export class BillingSchedulerService
 	}
 
 	private async tick(): Promise<void> {
-		if (this.running || !(await this.ownershipActive())) return;
+		if (this.running) return;
 		this.running = true;
 		try {
 			const now = new Date();
@@ -982,14 +982,6 @@ export class BillingSchedulerService
 				state
 			} as Prisma.InputJsonValue
 		};
-	}
-
-	private async ownershipActive() {
-		const marker = await this.prisma.billingOwnershipMarker.findUnique({
-			where: { id: 'singleton' },
-			select: { phase: true }
-		});
-		return marker?.phase === 'ACTIVE' || marker?.phase === 'COMPLETE';
 	}
 
 	private minuteKey(date: Date) {

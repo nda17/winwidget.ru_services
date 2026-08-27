@@ -683,18 +683,10 @@ model WidgetsHeartbeat {
 }
 
 model WidgetsServiceIdentity {
-  id                        String    @id @default("widgets-service")
-  databaseId                String    @unique(map: "service_identity_database_unique") @map("database_id") @db.Uuid
-  ownershipGeneration       BigInt    @default(0) @map("ownership_generation")
-  sourceDatabaseFingerprint String?   @map("source_database_fingerprint") @db.Char(64)
-  sourceExportedAt          DateTime? @map("source_exported_at")
-  sourceSnapshotSha256      String?   @map("source_snapshot_sha256") @db.Char(64)
-  sourceSnapshotCounts      Json?     @map("source_snapshot_counts")
-  sourceReportingHighWater  BigInt?   @map("source_reporting_high_water")
-  handoffStartedAt          DateTime? @map("handoff_started_at")
-  ownershipActivatedAt      DateTime? @map("ownership_activated_at")
-  createdAt                 DateTime  @default(now()) @map("created_at")
-  updatedAt                 DateTime  @updatedAt @map("updated_at")
+  id         String   @id @default("widgets-service")
+  databaseId String   @unique(map: "service_identity_database_unique") @map("database_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   @@map("service_identity")
   @@schema("widgets")

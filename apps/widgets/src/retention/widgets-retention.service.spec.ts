@@ -7,13 +7,18 @@ import {
 	WidgetsRetentionService
 } from './widgets-retention.service';
 
-const retentionConfig = (overrides: Record<string, string> = {}) =>
-	new ConfigService({
+const retentionConfig = (overrides: Record<string, string> = {}) => {
+	const values: Record<string, string> = {
 		WIDGETS_OUTBOX_RETENTION_DAYS: '7',
 		WIDGETS_RECEIPT_RETENTION_DAYS: '90',
 		WIDGETS_FAILURE_DETAIL_RETENTION_DAYS: '30',
 		...overrides
-	});
+	};
+
+	return {
+		get: (key: string) => values[key]
+	} as ConfigService;
+};
 
 describe('Widgets retention', () => {
 	it('parses all configured retention boundaries', () => {

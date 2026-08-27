@@ -7,6 +7,14 @@ import { Prisma } from '@prisma/billing-client';
 import type { BillingActor } from '../auth/billing-request';
 import type { BillingSettingsPatchDto } from '../http/billing.dto';
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
+import {
+	BILLING_PAYMENT_WEBHOOK_EVENTS,
+	BILLING_PAYMENT_WEBHOOK_ROUTE
+} from './payment-domain.service';
+import {
+	YOOKASSA_RECEIPT_CONTRACT,
+	YooKassaService
+} from '../provider/yookassa.service';
 import { enqueueBillingAdminAudit } from './billing-admin-audit';
 import {
 	AUTO_RENEWAL_CONSENT_TEXT,
@@ -15,7 +23,10 @@ import {
 
 @Injectable()
 export class BillingSettingsService {
-	constructor(private readonly prisma: BillingPrismaService) {}
+	constructor(
+		private readonly prisma: BillingPrismaService,
+		private readonly provider: YooKassaService
+	) {}
 
 	async publicSettings() {
 		const settings = await this.requireSettings();
@@ -28,6 +39,37 @@ export class BillingSettingsService {
 
 	async adminSettings() {
 		return this.serializeAdmin(await this.requireSettings());
+	}
+
+	async providerReadiness() {
+		const settings = await this.requireSettings();
+		return {
+			schemaVersion: 1,
+			source: 'CODE_AND_PERSISTED_SETTINGS' as const,
+			provider: {
+				name: 'YOOKASSA' as const,
+				...this.provider.configurationStatus()
+			},
+			features: {
+				paymentEnabled: settings.paymentEnabled,
+				autoRenewalSignupEnabled: settings.autoRenewalSignupEnabled,
+				autoRenewalChargesEnabled: settings.autoRenewalChargesEnabled
+			},
+			receipt: YOOKASSA_RECEIPT_CONTRACT,
+			webhook: {
+				codeConfigured: true,
+				method: 'POST' as const,
+				route: BILLING_PAYMENT_WEBHOOK_ROUTE,
+				acceptedEvents: [...BILLING_PAYMENT_WEBHOOK_EVENTS],
+				duplicateDeliveryFence:
+					'authenticated-provider-object-reverification' as const
+			},
+			externalVerification: {
+				merchantAutoPayments: 'NOT_VERIFIED' as const,
+				onlineCashRegister: 'NOT_VERIFIED' as const,
+				ofd: 'NOT_VERIFIED' as const
+			}
+		};
 	}
 
 	async updateAdminSettings(

@@ -8,7 +8,6 @@ import { OutboxStatus, Prisma } from '@prisma/support-client';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { safeError } from '../common/support-request-context';
-import { SupportOwnershipService } from '../ownership/support-ownership.service';
 import { SupportPrismaService } from '../prisma/support-prisma.service';
 import { SupportRuntimeService } from '../runtime/support-runtime.service';
 import { exchangeName } from './support-messaging.constants';
@@ -29,8 +28,7 @@ export class SupportOutboxPublisherService
 	constructor(
 		private readonly prisma: SupportPrismaService,
 		private readonly runtime: SupportRuntimeService,
-		private readonly rabbit: SupportRabbitMqService,
-		private readonly ownership: SupportOwnershipService
+		private readonly rabbit: SupportRabbitMqService
 	) {}
 
 	onModuleInit(): void {
@@ -116,7 +114,6 @@ export class SupportOutboxPublisherService
 		if (this.running) return;
 		this.running = true;
 		try {
-			if (!(await this.ownership.isActive())) return;
 			for (
 				let count = 0;
 				count < this.runtime.outboxBatchSize;

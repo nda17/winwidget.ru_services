@@ -135,19 +135,12 @@ export class PlatformLegalPagesService {
 						await transaction.billingOfferProducerState.updateMany({
 							where: {
 								id: 'offer',
-								phase: 'ACTIVE',
 								producerContractVersion:
 									offerProducer.producerContractVersion,
 								sourceSequenceScope: offerProducer.sourceSequenceScope,
-								importedAggregateVersion:
-									offerProducer.importedAggregateVersion,
-								importedSourceSequence:
-									offerProducer.importedSourceSequence,
 								currentAggregateVersion:
 									offerProducer.currentAggregateVersion,
-								currentSourceSequence: offerProducer.currentSourceSequence,
-								sourceFenceFingerprint:
-									offerProducer.sourceFenceFingerprint
+								currentSourceSequence: offerProducer.currentSourceSequence
 							},
 							data: {
 								currentAggregateVersion: offerCursor.aggregateVersion,
@@ -220,7 +213,7 @@ export class PlatformLegalPagesService {
 
 	private offerProducerUnavailable(): ServiceUnavailableException {
 		return new ServiceUnavailableException(
-			'Billing offer producer is not active'
+			'Billing offer producer cursor is unavailable'
 		);
 	}
 

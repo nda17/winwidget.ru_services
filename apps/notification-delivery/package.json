@@ -11,7 +11,7 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
 		"start": "node dist/src/main.js",
-		"start:local": "node --env-file=../../.env dist/src/main.js",
+		"start:local": "node --env-file=.env dist/src/main.js",
 		"lint": "eslint \"{src,emails}/**/*.{ts,tsx}\" --max-warnings=0",
 		"test": "jest --runInBand",
 		"test:integration": "node test/integration/notification-delivery.integration.mjs",

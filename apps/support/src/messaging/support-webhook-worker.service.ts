@@ -17,7 +17,6 @@ import type { ConsumeMessage } from 'amqplib';
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { safeError } from '../common/support-request-context';
-import { SupportOwnershipService } from '../ownership/support-ownership.service';
 import { SupportPrismaService } from '../prisma/support-prisma.service';
 import { SupportRuntimeService } from '../runtime/support-runtime.service';
 import { SupportTelegramError } from '../telegram/support-telegram.transport';
@@ -77,35 +76,21 @@ export class SupportWebhookWorkerService
 	private readonly logger = new Logger(SupportWebhookWorkerService.name);
 	private readonly instanceId = `${hostname()}:${process.pid}:${randomUUID()}`;
 	private ready = false;
-	private starting = false;
-	private ownershipTimer: NodeJS.Timeout | null = null;
 
 	constructor(
 		private readonly prisma: SupportPrismaService,
 		private readonly runtime: SupportRuntimeService,
 		private readonly rabbit: SupportRabbitMqService,
-		private readonly outbound: SupportTelegramOutboundService,
-		private readonly ownership: SupportOwnershipService
+		private readonly outbound: SupportTelegramOutboundService
 	) {}
 
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
-		await this.startWhenOwned();
-		if (!this.ready) {
-			this.ownershipTimer = setInterval(() => {
-				void this.startWhenOwned().catch(error => {
-					this.logger.error(
-						`Support consumer start failed: ${safeError(error)}`
-					);
-				});
-			}, 1000);
-			this.ownershipTimer.unref();
-		}
+		await this.rabbit.consume(message => this.handle(message));
+		this.ready = true;
 	}
 
 	onApplicationShutdown(): void {
-		if (this.ownershipTimer) clearInterval(this.ownershipTimer);
-		this.ownershipTimer = null;
 		this.ready = false;
 	}
 
@@ -114,25 +99,6 @@ export class SupportWebhookWorkerService
 			!this.runtime.workerEnabled ||
 			(this.ready && this.rabbit.isConsumerReady())
 		);
-	}
-
-	private async startWhenOwned(): Promise<void> {
-		if (
-			this.ready ||
-			this.starting ||
-			!(await this.ownership.isActive())
-		) {
-			return;
-		}
-		this.starting = true;
-		try {
-			await this.rabbit.consume(message => this.handle(message));
-			this.ready = true;
-			if (this.ownershipTimer) clearInterval(this.ownershipTimer);
-			this.ownershipTimer = null;
-		} finally {
-			this.starting = false;
-		}
 	}
 
 	private async handle(message: ConsumeMessage): Promise<void> {

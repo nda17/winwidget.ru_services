@@ -134,7 +134,6 @@ const appEnv = {
 	CORS_ALLOWED_ORIGINS: corsAllowedOrigin,
 	APP_REVISION: 'integration-test'
 };
-delete appEnv.CAMPAIGNS_CORE_INTERNAL_BASE_URL;
 delete appEnv.CAMPAIGNS_INTERNAL_TIMEOUT_MS;
 const app = spawn('node', ['dist/src/main.js'], {
 	cwd: new URL('../../', import.meta.url),
@@ -386,7 +385,6 @@ async function runRabbitMqSmoke(
 		RABBITMQ_CONNECTION_NAME: 'campaigns-ci-restricted-smoke',
 		APP_REVISION: 'integration-test'
 	};
-	delete serviceEnv.CAMPAIGNS_CORE_INTERNAL_BASE_URL;
 	delete serviceEnv.CAMPAIGNS_INTERNAL_TIMEOUT_MS;
 	const service = spawn('node', ['dist/src/main.js'], {
 		cwd: new URL('../../', import.meta.url),

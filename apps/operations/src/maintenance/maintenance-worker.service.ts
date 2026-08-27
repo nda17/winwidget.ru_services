@@ -8,7 +8,6 @@ import {
 	OperationsRabbitMqService
 } from '../messaging/operations-rabbitmq.service';
 import { OperationalAlertService } from '../monitoring/operational-alert.service';
-import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
 import {
@@ -31,7 +30,6 @@ export class MaintenanceWorkerService implements OnModuleInit {
 
 	constructor(
 		private readonly runtime: OperationsRuntimeService,
-		private readonly ownership: OperationsOwnershipService,
 		private readonly rabbit: OperationsRabbitMqService,
 		private readonly jobs: ScheduledJobsService,
 		private readonly backup: DatabaseBackupService,
@@ -41,10 +39,6 @@ export class MaintenanceWorkerService implements OnModuleInit {
 
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
-		if (!(await this.ownership.isActive())) {
-			this.ready = true;
-			return;
-		}
 		await this.rabbit.consumeScheduledJobs(message =>
 			this.handleScheduledJob(message)
 		);

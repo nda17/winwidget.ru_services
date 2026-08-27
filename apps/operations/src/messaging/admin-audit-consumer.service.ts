@@ -12,7 +12,6 @@ import {
 	OperationsAuditSource
 } from './operations-messaging.constants';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
-import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 
 @Injectable()
 export class AdminAuditConsumerService implements OnModuleInit {
@@ -22,17 +21,11 @@ export class AdminAuditConsumerService implements OnModuleInit {
 	constructor(
 		private readonly runtime: OperationsRuntimeService,
 		private readonly rabbit: OperationsRabbitMqService,
-		private readonly receipts: AuditReceiptService,
-		private readonly ownership: OperationsOwnershipService
+		private readonly receipts: AuditReceiptService
 	) {}
 
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
-		if (!(await this.ownership.isActive())) {
-			await this.rabbit.prepareAuditTopology();
-			this.ready = true;
-			return;
-		}
 		await this.rabbit.consumeAuditEvents((source, message) =>
 			this.handle(source, message)
 		);

@@ -7,7 +7,6 @@ import { MessagingAdminService } from '../messaging-admin/messaging-admin.servic
 import { OperationsHeartbeatService } from '../monitoring/operations-heartbeat.service';
 import { OperationsOutboxPublisherService } from '../messaging/operations-outbox-publisher.service';
 import { OperationsRabbitMqService } from '../messaging/operations-rabbitmq.service';
-import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
 import { DatabaseRestoreWorkerService } from '../restore/database-restore-worker.service';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
@@ -20,7 +19,6 @@ export class OperationsHealthService {
 		private readonly rabbit: OperationsRabbitMqService,
 		private readonly consumer: AdminAuditConsumerService,
 		private readonly publisher: OperationsOutboxPublisherService,
-		private readonly ownership: OperationsOwnershipService,
 		private readonly maintenanceWorker: MaintenanceWorkerService,
 		private readonly restoreWorker: DatabaseRestoreWorkerService,
 		private readonly heartbeat: OperationsHeartbeatService,
@@ -36,7 +34,16 @@ export class OperationsHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
-			await this.ownership.isActive();
+			const identity = await this.prisma.serviceIdentity.findUnique({
+				where: { id: 'singleton' },
+				select: { serviceName: true, databaseId: true }
+			});
+			if (
+				identity?.serviceName !== 'operations-service' ||
+				!identity.databaseId
+			) {
+				throw new Error('Operations database identity is invalid');
+			}
 		} catch {
 			throw new ServiceUnavailableException(
 				'Operations database is not ready'

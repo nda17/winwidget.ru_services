@@ -1,9 +1,7 @@
 import { Controller, Get, Header, HttpCode } from '@nestjs/common';
-import { AllowInactivePlatformOwnership } from '../ownership/platform-ownership.service';
 import { PlatformHealthService } from './platform-health.service';
 
 @Controller('health')
-@AllowInactivePlatformOwnership()
 export class PlatformHealthController {
 	constructor(private readonly health: PlatformHealthService) {}
 

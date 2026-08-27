@@ -28,6 +28,12 @@ describe('BillingSettingsController contract', () => {
 			roles: ['ADMIN', 'DEV']
 		},
 		{
+			handler: 'providerReadiness',
+			method: RequestMethod.GET,
+			path: 'admin/provider-readiness',
+			roles: ['ADMIN', 'DEV']
+		},
+		{
 			handler: 'updateAdminSettings',
 			method: RequestMethod.PATCH,
 			path: 'admin',

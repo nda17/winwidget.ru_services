@@ -81,7 +81,6 @@ export class UsersService {
 
 	async updateProfile(
 		userId: string,
-		currentSessionId: string,
 		dto: UpdateProfileDto,
 		request?: Request
 	) {
@@ -98,11 +97,7 @@ export class UsersService {
 			});
 			if (passwordHash) {
 				await transaction.userSession.updateMany({
-					where: {
-						userId,
-						id: { not: currentSessionId },
-						revokedAt: null
-					},
+					where: { userId, revokedAt: null },
 					data: { revokedAt: new Date() }
 				});
 			}

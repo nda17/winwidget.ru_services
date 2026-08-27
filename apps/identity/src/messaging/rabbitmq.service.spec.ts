@@ -1,7 +1,7 @@
 import { DESTINATION_QUEUE } from './messaging.constants';
 import { IdentityRabbitMqService } from './rabbitmq.service';
 
-describe('Identity RabbitMQ ownership topology', () => {
+describe('Identity RabbitMQ topology', () => {
 	it('reasserts the legacy main queue with durable-only arguments', async () => {
 		const channel = {
 			assertExchange: jest.fn(),

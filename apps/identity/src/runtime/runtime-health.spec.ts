@@ -1,23 +1,11 @@
-import {
-	ServiceUnavailableException,
-	type ExecutionContext
-} from '@nestjs/common';
-import { ServiceDatabasePhase } from '@prisma/identity-client';
 import { IdentityHealthService } from '../health/identity-health.service';
 import { IdentityHousekeepingService } from './identity-housekeeping.service';
-import { IdentityOwnershipGuard } from './identity-ownership.service';
 import {
 	parseIdentityPort,
 	parseIdentityProcessRole
 } from './identity-runtime.service';
 
-function context(path: string): ExecutionContext {
-	return {
-		switchToHttp: () => ({ getRequest: () => ({ path }) })
-	} as unknown as ExecutionContext;
-}
-
-describe('Identity runtime ownership fencing', () => {
+describe('Identity current runtime readiness', () => {
 	it('keeps the canonical roles and API port fail-closed', () => {
 		expect(parseIdentityProcessRole(undefined)).toBe('api');
 		expect(parseIdentityProcessRole('worker')).toBe('worker');
@@ -28,91 +16,58 @@ describe('Identity runtime ownership fencing', () => {
 		).toThrow('canonical port 4900');
 	});
 
-	it('allows health while dark but blocks every domain route before ACTIVE', async () => {
-		const ownership = {
-			assertActive: jest
-				.fn()
-				.mockRejectedValue(
-					new ServiceUnavailableException(
-						'Identity ownership is not active'
-					)
-				)
-		};
-		const guard = new IdentityOwnershipGuard(ownership as any);
-		await expect(
-			guard.canActivate(context('/health/ready'))
-		).resolves.toBe(true);
-		await expect(
-			guard.canActivate(context('/auth/register'))
-		).rejects.toThrow('Identity ownership is not active');
-	});
-
-	it('reports dark readiness without requiring worker side effects', async () => {
-		const state: {
-			serviceName: string;
-			databaseId: string;
-			phase: ServiceDatabasePhase;
-			ownershipGeneration: bigint;
-			importedAt: Date;
-			activatedAt: Date | null;
-		} = {
+	it('requires the exact database identity and every enabled component', async () => {
+		const identity = {
 			serviceName: 'identity-service',
-			databaseId: '00000000-0000-4000-8000-000000000001',
-			phase: ServiceDatabasePhase.IMPORTED,
-			ownershipGeneration: 0n,
-			importedAt: new Date(),
-			activatedAt: null
-		};
-		const ownership = {
-			state: jest.fn().mockResolvedValue(state),
-			isActive: jest.fn().mockResolvedValue(false),
-			assertActive: jest.fn()
+			databaseId: '00000000-0000-4000-8000-000000000001'
 		};
 		const worker = { isReady: jest.fn().mockReturnValue(false) };
 		const housekeeping = { isReady: jest.fn().mockReturnValue(false) };
 		const health = new IdentityHealthService(
 			{
-				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }])
+				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+				serviceIdentity: {
+					findUnique: jest.fn().mockImplementation(() => identity)
+				}
 			} as any,
-			{ role: 'worker', rabbitEnabled: true, workerEnabled: true } as any,
+			{
+				role: 'worker',
+				rabbitEnabled: true,
+				workerEnabled: true,
+				outboxPublisherEnabled: false
+			} as any,
 			{
 				isConnected: jest.fn().mockReturnValue(true),
 				isTopologyReady: jest.fn().mockReturnValue(true)
 			} as any,
 			worker as any,
-			{ isReady: jest.fn().mockReturnValue(false) } as any,
 			{ isReady: jest.fn().mockReturnValue(true) } as any,
-			housekeeping as any,
-			ownership as any
+			{ isReady: jest.fn().mockReturnValue(true) } as any,
+			housekeeping as any
 		);
-		await expect(health.readiness()).resolves.toMatchObject({
-			status: 'ready',
-			ownership: { phase: ServiceDatabasePhase.IMPORTED }
-		});
 
-		state.phase = ServiceDatabasePhase.ACTIVE;
-		state.ownershipGeneration = 1n;
-		state.activatedAt = new Date();
-		ownership.isActive.mockResolvedValue(true);
 		await expect(health.readiness()).rejects.toThrow(
 			'Identity worker is not ready'
 		);
 		worker.isReady.mockReturnValue(true);
+		await expect(health.readiness()).rejects.toThrow(
+			'Identity housekeeping is not ready'
+		);
 		housekeeping.isReady.mockReturnValue(true);
 		await expect(health.readiness()).resolves.toMatchObject({
 			status: 'ready',
-			ownership: { phase: ServiceDatabasePhase.ACTIVE }
+			service: 'identity',
+			role: 'worker'
 		});
+
+		identity.serviceName = 'another-service';
+		await expect(health.readiness()).rejects.toThrow(
+			'Identity database is not ready'
+		);
 	});
 
-	it('runs housekeeping promptly after IMPORTED transitions to ACTIVE', async () => {
+	it('runs housekeeping immediately for the enabled worker role', async () => {
 		jest.useFakeTimers();
-		const ownership = {
-			isActive: jest
-				.fn()
-				.mockResolvedValueOnce(false)
-				.mockResolvedValue(true)
-		};
 		const execute = jest.fn().mockResolvedValue(0);
 		const housekeeping = new IdentityHousekeepingService(
 			{
@@ -127,15 +82,11 @@ describe('Identity runtime ownership fencing', () => {
 				outboxRetentionDays: 7,
 				receiptRetentionDays: 90,
 				failureRetentionDays: 30
-			} as any,
-			ownership as any
+			} as any
 		);
 		try {
 			housekeeping.onModuleInit();
-			await Promise.resolve();
-			await Promise.resolve();
-			expect(housekeeping.isReady()).toBe(false);
-			await jest.advanceTimersByTimeAsync(1_000);
+			await jest.advanceTimersByTimeAsync(0);
 			expect(execute).toHaveBeenCalledTimes(8);
 			expect(housekeeping.isReady()).toBe(true);
 		} finally {

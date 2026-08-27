@@ -14,16 +14,10 @@ const AUTO_RENEWAL_OFFER_SECTION_SHA256 =
 	'f85b13c427d8ca2c48504b64d317277aeda7ea355bcaa4a8d0a218fa6b871df4';
 
 export interface BillingOfferContinuityState {
-	phase: 'BLOCKED' | 'IMPORTED' | 'ACTIVE';
-	producerContractVersion: number | null;
-	sourceSequenceScope: string | null;
-	importedAggregateVersion: bigint | null;
-	importedSourceSequence: bigint | null;
-	currentAggregateVersion: bigint | null;
-	currentSourceSequence: bigint | null;
-	sourceFenceFingerprint: string | null;
-	importedAt: Date | null;
-	activatedAt: Date | null;
+	producerContractVersion: number;
+	sourceSequenceScope: string;
+	currentAggregateVersion: bigint;
+	currentSourceSequence: bigint;
 }
 
 export interface BillingOfferCursor {
@@ -46,40 +40,18 @@ export function isAutoRenewalOfferCompatible(
 export function nextBillingOfferCursor(
 	state: BillingOfferContinuityState
 ): BillingOfferCursor {
-	if (state.phase !== 'ACTIVE') {
-		throw new Error('BILLING_OFFER_PRODUCER_NOT_ACTIVE');
-	}
-	const importedAggregateVersion = state.importedAggregateVersion;
-	const importedSourceSequence = state.importedSourceSequence;
-	const currentAggregateVersion = state.currentAggregateVersion;
-	const currentSourceSequence = state.currentSourceSequence;
 	if (
 		state.producerContractVersion !==
 			BILLING_OFFER_PRODUCER_CONTRACT_VERSION ||
 		state.sourceSequenceScope !== BILLING_OFFER_SOURCE_SEQUENCE_SCOPE ||
-		!state.sourceFenceFingerprint ||
-		!/^[0-9a-f]{64}$/.test(state.sourceFenceFingerprint) ||
-		!(state.importedAt instanceof Date) ||
-		!Number.isFinite(state.importedAt.getTime()) ||
-		!(state.activatedAt instanceof Date) ||
-		!Number.isFinite(state.activatedAt.getTime()) ||
-		state.activatedAt < state.importedAt ||
-		importedAggregateVersion === null ||
-		importedSourceSequence === null ||
-		currentAggregateVersion === null ||
-		currentSourceSequence === null ||
-		importedAggregateVersion < 1n ||
-		importedSourceSequence < 1n ||
-		currentAggregateVersion < importedAggregateVersion ||
-		currentSourceSequence < importedSourceSequence ||
-		currentAggregateVersion - importedAggregateVersion !==
-			currentSourceSequence - importedSourceSequence
+		state.currentAggregateVersion < 0n ||
+		state.currentSourceSequence < 0n
 	) {
 		throw new Error('BILLING_OFFER_SCOPED_CURSOR_INVALID');
 	}
 	return {
-		aggregateVersion: currentAggregateVersion + 1n,
-		sourceSequence: currentSourceSequence + 1n
+		aggregateVersion: state.currentAggregateVersion + 1n,
+		sourceSequence: state.currentSourceSequence + 1n
 	};
 }
 

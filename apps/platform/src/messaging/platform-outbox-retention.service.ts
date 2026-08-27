@@ -5,7 +5,6 @@ import {
 	OnModuleInit
 } from '@nestjs/common';
 import { Prisma } from '@prisma/platform-client';
-import { PlatformOwnershipService } from '../ownership/platform-ownership.service';
 import { PlatformPrismaService } from '../prisma/platform-prisma.service';
 import { PlatformRuntimeService } from '../runtime/platform-runtime.service';
 
@@ -61,8 +60,7 @@ export class PlatformOutboxRetentionService
 
 	constructor(
 		private readonly prisma: PlatformPrismaService,
-		private readonly runtime: PlatformRuntimeService,
-		private readonly ownership: PlatformOwnershipService
+		private readonly runtime: PlatformRuntimeService
 	) {}
 
 	onModuleInit(): void {
@@ -106,7 +104,6 @@ export class PlatformOutboxRetentionService
 
 	private async cleanup(): Promise<void> {
 		try {
-			if (!(await this.ownership.isActive())) return;
 			const deleted = await deletePublishedPlatformOutbox(
 				this.prisma,
 				this.runtime.outboxRetentionDays

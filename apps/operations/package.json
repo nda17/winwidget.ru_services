@@ -16,11 +16,7 @@
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",
 		"prisma:validate": "prisma validate --schema prisma/schema.prisma",
-		"prisma:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
-		"cutover:status": "node dist/src/cutover/main.js status",
-		"cutover:import": "node dist/src/cutover/main.js import",
-		"cutover:activate": "node dist/src/cutover/main.js activate",
-		"control-plane:bootstrap": "node dist/src/cutover/control-plane-bootstrap.js"
+		"prisma:migrate:deploy": "prisma migrate deploy --schema prisma/schema.prisma"
 	},
 	"dependencies": {
 		"@nestjs/common": "^10.4.15",

@@ -15,8 +15,7 @@ PostgreSQL `identity`. Объекты аватаров остаются в на�
 
 `IDENTITY_PORT` может переопределять порты worker/publisher, но API всегда
 работает на `4900`. Каждая роль предоставляет `/health/live`, `/health/ready`,
-`/health/revision` и `/health/ownership`; бизнес-контроллеры регистрирует
-только `api`.
+и `/health/revision`; бизнес-контроллеры регистрируются только для `api`.
 
 ## HTTP- и внутренние контракты
 
@@ -75,3 +74,6 @@ docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-ident
 
 Запустите API, worker и Outbox publisher из одного неизменяемого образа. До
 переключения маршрутов Gateway проверьте readiness каждой роли и публичный JWKS.
+Миграции сохраняют постоянный `service_identity` текущей базы; отдельной фазы
+активации нет, поэтому включённые worker, housekeeping и Outbox publisher
+запускаются сразу после успешного применения миграций.

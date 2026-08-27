@@ -15,6 +15,44 @@ describe('admin audit event contract', () => {
 		correlationId,
 		actorId: 'admin-1'
 	};
+	const unknownProviderResolution = (
+		overrides: {
+			section?: string;
+			entity?: Record<string, unknown>;
+			metadata?: Record<string, unknown>;
+		} = {}
+	) => ({
+		...common,
+		section: overrides.section ?? 'PAYMENTS',
+		action: 'PAYMENT_UNKNOWN_PROVIDER_RESOLVED',
+		description: 'Платёж с неизвестным provider ID разрешён вручную',
+		entity: {
+			type: 'payment',
+			id: 'payment-1',
+			label: 'payment-1',
+			targetUserId: 'user-1',
+			...overrides.entity
+		},
+		metadata: {
+			paymentId: 'payment-1',
+			commandId: 'c7de40a7-b401-41d5-92ef-2c437180e201',
+			resolution: 'PROVIDER_PAYMENT_NOT_FOUND',
+			reason: 'Provider payment was not found after manual reconciliation',
+			previousStatus: 'PENDING',
+			previousProviderStatus: 'creating',
+			finalStatus: 'CANCELLED',
+			finalProviderStatus: 'not_found',
+			providerOperationId: 'operation-1',
+			checkedMetadataPaymentId: 'payment-1',
+			providerIdempotencyKeySha256: 'a'.repeat(64),
+			providerReconciliationConfirmed: true,
+			resolvedAt: '2026-08-24T00:00:00.000Z',
+			actorRole: 'DEV',
+			requestIp: '203.0.113.7',
+			requestUserAgent: 'billing-resolution-test',
+			...overrides.metadata
+		}
+	});
 
 	it('normalizes the existing campaign event into the journal contract', () => {
 		const result = parseAdminAuditEvent(source('campaigns'), {
@@ -188,6 +226,141 @@ describe('admin audit event contract', () => {
 
 	it('binds the legacy campaign producer to its exact current route', () => {
 		expect(source('campaigns').routingKey).toBe('admin.audit.event.v1');
+	});
+
+	it('accepts the Billing unknown-provider resolution audit action', () => {
+		const result = parseAdminAuditEvent(
+			source('billing'),
+			unknownProviderResolution()
+		);
+
+		expect(result.record).toEqual(
+			expect.objectContaining({
+				section: 'PAYMENTS',
+				action: 'PAYMENT_UNKNOWN_PROVIDER_RESOLVED',
+				entityId: 'payment-1',
+				targetUserId: 'user-1',
+				ip: '203.0.113.7',
+				userAgent: 'billing-resolution-test'
+			})
+		);
+	});
+
+	it.each([
+		[
+			'non-Billing source',
+			() =>
+				parseAdminAuditEvent(
+					source('campaigns'),
+					unknownProviderResolution()
+				)
+		],
+		[
+			'wrong section',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({ section: 'SUBSCRIPTIONS' })
+				)
+		],
+		[
+			'wrong entity type',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						entity: { type: 'subscription' }
+					})
+				)
+		],
+		[
+			'non-DEV actor',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({ metadata: { actorRole: 'ADMIN' } })
+				)
+		],
+		[
+			'invalid command UUID',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({ metadata: { commandId: 'invalid' } })
+				)
+		],
+		[
+			'unsupported resolution',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						metadata: { resolution: 'SUCCEEDED' }
+					})
+				)
+		],
+		[
+			'non-final payment status',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						metadata: { finalStatus: 'SUCCEEDED' }
+					})
+				)
+		],
+		[
+			'non-final provider status',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						metadata: { finalProviderStatus: 'unknown' }
+					})
+				)
+		],
+		[
+			'missing reconciliation confirmation',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						metadata: { providerReconciliationConfirmed: false }
+					})
+				)
+		],
+		[
+			'mismatched metadata payment ID',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						metadata: { checkedMetadataPaymentId: 'payment-2' }
+					})
+				)
+		],
+		[
+			'invalid provider key hash',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						metadata: { providerIdempotencyKeySha256: 'A'.repeat(64) }
+					})
+				)
+		],
+		[
+			'extra metadata',
+			() =>
+				parseAdminAuditEvent(
+					source('billing'),
+					unknownProviderResolution({
+						metadata: { unexpected: true }
+					})
+				)
+		]
+	])('rejects unknown-provider audit with %s', (_case, parse) => {
+		expect(parse).toThrow();
 	});
 
 	it('rejects a valid payload on the wrong source route', () => {

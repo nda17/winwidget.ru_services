@@ -24,35 +24,23 @@ const COMPATIBLE_OFFER = `
 </section>`;
 
 describe('Billing offer producer continuity contract', () => {
-	it('fails closed while imported high-water is not active', () => {
-		expect(() =>
+	it('starts the current v2 cursor at one in a fresh apps-only database', () => {
+		expect(
 			nextBillingOfferCursor({
-				phase: 'BLOCKED',
-				producerContractVersion: null,
-				sourceSequenceScope: null,
-				importedAggregateVersion: null,
-				importedSourceSequence: null,
-				currentAggregateVersion: null,
-				currentSourceSequence: null,
-				sourceFenceFingerprint: null,
-				importedAt: null,
-				activatedAt: null
+				producerContractVersion: 2,
+				sourceSequenceScope: 'billing.offer:offer',
+				currentAggregateVersion: 0n,
+				currentSourceSequence: 0n
 			})
-		).toThrow('BILLING_OFFER_PRODUCER_NOT_ACTIVE');
+		).toEqual({ aggregateVersion: 1n, sourceSequence: 1n });
 	});
 
-	it('continues exactly one step after the imported producer-scoped cursor', () => {
+	it('continues exactly one step after the current producer-scoped cursor', () => {
 		const cursor = nextBillingOfferCursor({
-			phase: 'ACTIVE',
 			producerContractVersion: 2,
 			sourceSequenceScope: 'billing.offer:offer',
-			importedAggregateVersion: 41n,
-			importedSourceSequence: 870n,
 			currentAggregateVersion: 41n,
-			currentSourceSequence: 870n,
-			sourceFenceFingerprint: 'a'.repeat(64),
-			importedAt: new Date('2026-08-23T10:00:00.000Z'),
-			activatedAt: new Date('2026-08-23T10:01:00.000Z')
+			currentSourceSequence: 870n
 		});
 		const event = buildBillingOfferChangedEvent({
 			content: COMPATIBLE_OFFER,
@@ -71,36 +59,13 @@ describe('Billing offer producer continuity contract', () => {
 		expect(event.state.sha256).toMatch(/^[0-9a-f]{64}$/);
 	});
 
-	it('rejects a regressed runtime cursor', () => {
+	it('rejects a negative runtime cursor', () => {
 		expect(() =>
 			nextBillingOfferCursor({
-				phase: 'ACTIVE',
 				producerContractVersion: 2,
 				sourceSequenceScope: 'billing.offer:offer',
-				importedAggregateVersion: 41n,
-				importedSourceSequence: 870n,
-				currentAggregateVersion: 1n,
-				currentSourceSequence: 1n,
-				sourceFenceFingerprint: 'a'.repeat(64),
-				importedAt: new Date('2026-08-23T10:00:00.000Z'),
-				activatedAt: new Date('2026-08-23T10:01:00.000Z')
-			})
-		).toThrow('BILLING_OFFER_SCOPED_CURSOR_INVALID');
-	});
-
-	it('rejects an active cursor without the exact source fence', () => {
-		expect(() =>
-			nextBillingOfferCursor({
-				phase: 'ACTIVE',
-				producerContractVersion: 2,
-				sourceSequenceScope: 'billing.offer:offer',
-				importedAggregateVersion: 41n,
-				importedSourceSequence: 870n,
-				currentAggregateVersion: 41n,
-				currentSourceSequence: 870n,
-				sourceFenceFingerprint: 'not-a-sha256',
-				importedAt: new Date('2026-08-23T10:00:00.000Z'),
-				activatedAt: new Date('2026-08-23T10:01:00.000Z')
+				currentAggregateVersion: -1n,
+				currentSourceSequence: 1n
 			})
 		).toThrow('BILLING_OFFER_SCOPED_CURSOR_INVALID');
 	});
@@ -108,16 +73,10 @@ describe('Billing offer producer continuity contract', () => {
 	it('rejects the retired v1 allocator and an unscoped cursor', () => {
 		expect(() =>
 			nextBillingOfferCursor({
-				phase: 'ACTIVE',
 				producerContractVersion: 1,
 				sourceSequenceScope: 'billing',
-				importedAggregateVersion: 41n,
-				importedSourceSequence: 870n,
 				currentAggregateVersion: 41n,
-				currentSourceSequence: 870n,
-				sourceFenceFingerprint: 'a'.repeat(64),
-				importedAt: new Date('2026-08-23T10:00:00.000Z'),
-				activatedAt: new Date('2026-08-23T10:01:00.000Z')
+				currentSourceSequence: 870n
 			})
 		).toThrow('BILLING_OFFER_SCOPED_CURSOR_INVALID');
 	});
@@ -128,47 +87,22 @@ describe('Billing offer producer continuity contract', () => {
 		).toBe(true);
 	});
 
-	it('keeps fresh migration fingerprint columns aligned with Prisma mappings', () => {
+	it('removes cutover ceremony while preserving current producer continuity', () => {
 		const sql = readFileSync(
 			join(
 				__dirname,
-				'../../prisma/migrations/20260823000000_init_platform/migration.sql'
+				'../../prisma/migrations/20260827020000_remove_legacy_cutover_state/migration.sql'
 			),
 			'utf8'
 		);
-		const serviceIdentity = sql.match(
-			/CREATE TABLE "platform"\."service_identity" \([\s\S]*?\n\);/
-		)?.[0];
-		const offerProducer = sql.match(
-			/CREATE TABLE "platform"\."billing_offer_producer_state" \([\s\S]*?\n\);/
-		)?.[0];
-		expect(serviceIdentity).toContain('"source_fingerprint" TEXT');
-		expect(serviceIdentity).toContain(
-			'"current_semantic_fingerprint" TEXT NOT NULL'
-		);
-		expect(serviceIdentity).not.toContain('"source_fence_fingerprint"');
-		expect(serviceIdentity).toContain('"source_fingerprint" IS NOT NULL');
-		expect(serviceIdentity).toContain(
-			'"source_high_watermark" IS NOT NULL'
-		);
-		expect(offerProducer).toContain('"source_fence_fingerprint" TEXT');
-		expect(offerProducer).toContain('"producer_contract_version" INTEGER');
-		expect(offerProducer).toContain('"source_sequence_scope" TEXT');
-		expect(offerProducer).not.toContain('"producer_high_water"');
-		expect(offerProducer).not.toContain('"source_offer_sequence"');
-		expect(offerProducer).not.toContain('"source_fingerprint" TEXT');
-		expect(offerProducer).toContain('"activated_at" >= "imported_at"');
+		expect(sql).toContain('DROP TYPE "platform"."ServiceDatabasePhase";');
+		expect(sql).toContain('DROP TYPE "platform"."OfferProducerPhase";');
+		expect(sql).toContain('DROP COLUMN "ownership_generation"');
+		expect(sql).toContain('DROP COLUMN "source_snapshot_sha256"');
+		expect(sql).toContain('DROP COLUMN "imported_aggregate_version"');
+		expect(sql).toContain('DROP COLUMN "source_fence_fingerprint"');
 		expect(sql).toContain(
-			'CREATE TRIGGER "service_identity_lifecycle_guard"'
-		);
-		expect(sql).toContain(
-			'CREATE TRIGGER "billing_offer_producer_lifecycle_guard"'
-		);
-		expect(sql).toContain(
-			'Platform ACTIVE ownership is forward-only and immutable'
-		);
-		expect(sql).toContain(
-			'Imported Platform service identity anchors require an explicit abort'
+			'COALESCE(\n        producer."current_source_sequence"'
 		);
 		expect(sql).toContain(
 			'Platform Billing offer cursors must advance once in lockstep'
@@ -196,6 +130,10 @@ describe('Billing offer producer continuity contract', () => {
 		);
 		expect(semanticFingerprintFunction).toContain(
 			'"platform"."billing_offer_producer_state"'
+		);
+		expect(semanticFingerprintFunction).toContain("'schemaVersion', 2");
+		expect(semanticFingerprintFunction).not.toContain(
+			'"source_fence_fingerprint"'
 		);
 		expect(sql).toContain('SECURITY INVOKER');
 		expect(sql).not.toContain('SECURITY DEFINER');

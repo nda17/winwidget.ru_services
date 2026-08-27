@@ -17,12 +17,16 @@ import { BillingAuth, BillingAuthGuard } from '../auth/billing-auth.guard';
 import { CurrentBillingActor } from '../auth/current-billing-actor.decorator';
 import type { BillingActor } from '../auth/billing-request';
 import { getBillingClientContext } from '../common/billing-request-context';
-import { PaymentDomainService } from '../domain/payment-domain.service';
+import {
+	BILLING_PAYMENT_WEBHOOK_SUBPATH,
+	PaymentDomainService
+} from '../domain/payment-domain.service';
 import {
 	AdminAutoRenewalActionDto,
 	AdminPaymentCheckDto,
 	CancelPaymentDto,
 	CreatePaymentDto,
+	DevResolveUnknownProviderPaymentDto,
 	VerifyPaymentDto
 } from './billing.dto';
 
@@ -131,7 +135,7 @@ export class PaymentController {
 
 	@Get('admin/list')
 	@HttpCode(200)
-	@BillingAuth(['ADMIN'])
+	@BillingAuth(['ADMIN', 'DEV'])
 	@UseGuards(BillingAuthGuard)
 	adminList(
 		@Query('page') page?: string,
@@ -152,7 +156,7 @@ export class PaymentController {
 
 	@Post('admin/check')
 	@HttpCode(200)
-	@BillingAuth(['ADMIN'])
+	@BillingAuth(['ADMIN', 'DEV'])
 	@UseGuards(BillingAuthGuard)
 	@UsePipes(new ValidationPipe({ whitelist: true }))
 	async adminCheck(
@@ -291,7 +295,38 @@ export class PaymentController {
 		);
 	}
 
-	@Post('webhook')
+	@Get('dev/unknown-provider/:paymentId/evidence')
+	@HttpCode(200)
+	@BillingAuth(['DEV'])
+	@UseGuards(BillingAuthGuard)
+	unknownProviderPaymentEvidence(@Param('paymentId') paymentId: string) {
+		return this.payments.unknownProviderPaymentEvidence(paymentId);
+	}
+
+	@Post('dev/unknown-provider/resolve')
+	@HttpCode(200)
+	@BillingAuth(['DEV'])
+	@UseGuards(BillingAuthGuard)
+	@UsePipes(
+		new ValidationPipe({
+			whitelist: true,
+			forbidNonWhitelisted: true,
+			transform: true
+		})
+	)
+	resolveUnknownProviderPayment(
+		@Body() dto: DevResolveUnknownProviderPaymentDto,
+		@CurrentBillingActor() actor: BillingActor,
+		@Req() request: Request
+	) {
+		return this.payments.resolveUnknownProviderPayment(
+			dto,
+			this.admin(actor, request)
+		);
+	}
+
+	@Post(BILLING_PAYMENT_WEBHOOK_SUBPATH)
+	@HttpCode(200)
 	webhook(@Body() body: unknown) {
 		return this.payments.webhook(body);
 	}

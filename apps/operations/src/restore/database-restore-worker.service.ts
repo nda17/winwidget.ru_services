@@ -11,7 +11,6 @@ import {
 	OperationsRabbitMqService
 } from '../messaging/operations-rabbitmq.service';
 import { OperationalAlertService } from '../monitoring/operational-alert.service';
-import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
 import {
@@ -31,7 +30,6 @@ export class DatabaseRestoreWorkerService implements OnModuleInit {
 
 	constructor(
 		private readonly runtime: OperationsRuntimeService,
-		private readonly ownership: OperationsOwnershipService,
 		private readonly rabbit: OperationsRabbitMqService,
 		private readonly control: DatabaseRestoreService,
 		private readonly prisma: OperationsPrismaService,
@@ -41,10 +39,6 @@ export class DatabaseRestoreWorkerService implements OnModuleInit {
 
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.restoreWorkerEnabled) return;
-		if (!(await this.ownership.isActive())) {
-			this.ready = true;
-			return;
-		}
 		await this.rabbit.consumeDatabaseRestoreJobs(message =>
 			this.handleMessage(message)
 		);

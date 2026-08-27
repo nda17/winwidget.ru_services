@@ -144,20 +144,11 @@ model OAuthAuthorization {
 }
 
 model ServiceIdentity {
-  id                      String               @id @default("singleton")
-  serviceName             String               @default("identity-service") @map("service_name")
-  databaseId              String               @default(uuid()) @map("database_id") @db.Uuid
-  phase                   ServiceDatabasePhase @default(SHADOW)
-  ownershipGeneration     BigInt               @default(0) @map("ownership_generation")
-  sourceFingerprint       String?              @map("source_fingerprint") @db.Char(64)
-  sourceSnapshotSha256    String?              @map("source_snapshot_sha256") @db.Char(64)
-  sourceSnapshotCounts    Json?                @map("source_snapshot_counts")
-  sourceIdentityHighWater BigInt?              @map("source_identity_high_water")
-  sourceBillingHighWater  BigInt?              @map("source_billing_high_water")
-  importedAt              DateTime?            @map("imported_at")
-  activatedAt             DateTime?            @map("activated_at")
-  createdAt               DateTime             @default(now()) @map("created_at")
-  updatedAt               DateTime             @updatedAt @map("updated_at")
+  id          String   @id @default("singleton")
+  serviceName String   @default("identity-service") @map("service_name")
+  databaseId  String   @unique(map: "service_identity_database_id_key") @default(uuid()) @map("database_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
   @@map("service_identity")
   @@schema("identity")
@@ -397,14 +388,6 @@ enum OAuthProvider {
   GITHUB
   YANDEX
   VK
-
-  @@schema("identity")
-}
-
-enum ServiceDatabasePhase {
-  SHADOW
-  IMPORTED
-  ACTIVE
 
   @@schema("identity")
 }

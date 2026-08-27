@@ -26,6 +26,15 @@ export class WidgetsHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			const identity = await this.prisma.widgetsServiceIdentity.findUnique(
+				{
+					where: { id: 'widgets-service' },
+					select: { id: true, databaseId: true }
+				}
+			);
+			if (!identity?.databaseId) {
+				throw new Error('Widgets database identity is invalid');
+			}
 		} catch {
 			throw new ServiceUnavailableException('Database is not ready');
 		}

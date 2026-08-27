@@ -27,7 +27,6 @@ import { OperationalAlertService } from './monitoring/operational-alert.service'
 import { OperationsHeartbeatService } from './monitoring/operations-heartbeat.service';
 import { NotesController } from './notes/notes.controller';
 import { NotesService } from './notes/notes.service';
-import { OperationsOwnershipService } from './ownership/operations-ownership.service';
 import { OperationsPrismaModule } from './prisma/operations-prisma.module';
 import { OperationsPrismaService } from './prisma/operations-prisma.service';
 import { ReportingPolicyController } from './reporting-policy/reporting-policy.controller';
@@ -110,7 +109,6 @@ const ROLE_SCOPED_PROVIDERS =
 		MaintenanceWorkerService,
 		OperationalAlertService,
 		OperationsHeartbeatService,
-		OperationsOwnershipService,
 		OperationsHealthService
 	]
 })

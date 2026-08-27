@@ -25,11 +25,4 @@ export class IdentityHealthController {
 	revision() {
 		return this.health.revision();
 	}
-
-	@Get('ownership')
-	@HttpCode(200)
-	@Header('Cache-Control', 'no-store')
-	ownership() {
-		return this.health.ownership(true);
-	}
 }

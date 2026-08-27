@@ -35,6 +35,14 @@ export class BillingSettingsController {
 		return this.service.adminSettings();
 	}
 
+	@Get('admin/provider-readiness')
+	@HttpCode(200)
+	@BillingAuth(['ADMIN', 'DEV'])
+	@UseGuards(BillingAuthGuard)
+	providerReadiness() {
+		return this.service.providerReadiness();
+	}
+
 	@Patch('admin')
 	@HttpCode(200)
 	@BillingAuth(['ADMIN', 'DEV'])

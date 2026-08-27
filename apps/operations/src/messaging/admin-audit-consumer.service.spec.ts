@@ -87,32 +87,27 @@ describe('AdminAuditConsumerService', () => {
 			releaseForRedelivery: jest.fn().mockResolvedValue(undefined)
 		} as unknown as AuditReceiptService;
 		return {
-			service: new AdminAuditConsumerService(runtime, rabbit, receipts, {
-				isActive: jest.fn().mockResolvedValue(true)
-			} as never),
+			service: new AdminAuditConsumerService(runtime, rabbit, receipts),
 			rabbit,
 			receipts
 		};
 	}
 
-	it('starts ready but does not consume while ownership is staged', async () => {
+	it('starts consuming immediately in the worker role', async () => {
 		const runtime = { workerEnabled: true } as OperationsRuntimeService;
 		const rabbit = {
-			consumeAuditEvents: jest.fn(),
-			prepareAuditTopology: jest.fn().mockResolvedValue(undefined)
+			consumeAuditEvents: jest.fn().mockResolvedValue(undefined)
 		} as unknown as OperationsRabbitMqService;
 		const service = new AdminAuditConsumerService(
 			runtime,
 			rabbit,
-			{} as AuditReceiptService,
-			{ isActive: jest.fn().mockResolvedValue(false) } as never
+			{} as AuditReceiptService
 		);
 
 		await service.onModuleInit();
 
 		expect(service.isReady()).toBe(true);
-		expect(rabbit.prepareAuditTopology).toHaveBeenCalledTimes(1);
-		expect(rabbit.consumeAuditEvents).not.toHaveBeenCalled();
+		expect(rabbit.consumeAuditEvents).toHaveBeenCalledTimes(1);
 	});
 
 	it('acks only after the claimed receipt and audit transaction succeeds', async () => {

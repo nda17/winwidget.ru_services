@@ -17,7 +17,6 @@ import { safeError, sha256 } from '../common/identity.util';
 import { IdentityEventsService } from '../events/identity-events.service';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { IdentityRuntimeService } from '../runtime/identity-runtime.service';
-import { IdentityOwnershipService } from '../runtime/identity-ownership.service';
 import {
 	DEAD_ROUTING_KEY,
 	DESTINATION_EVENT,
@@ -56,35 +55,21 @@ export class DestinationUnavailableWorkerService
 	);
 	private readonly instanceId = `${hostname()}:${process.pid}:${randomUUID()}`;
 	private ready = false;
-	private starting = false;
-	private ownershipTimer: NodeJS.Timeout | null = null;
 
 	constructor(
 		private readonly prisma: IdentityPrismaService,
 		private readonly runtime: IdentityRuntimeService,
 		private readonly rabbit: IdentityRabbitMqService,
-		private readonly events: IdentityEventsService,
-		private readonly ownership: IdentityOwnershipService
+		private readonly events: IdentityEventsService
 	) {}
 
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
-		await this.startWhenOwned();
-		if (!this.ready) {
-			this.ownershipTimer = setInterval(() => {
-				void this.startWhenOwned().catch(error => {
-					this.logger.error(
-						`Destination consumer start failed: ${safeError(error)}`
-					);
-				});
-			}, 1_000);
-			this.ownershipTimer.unref();
-		}
+		await this.rabbit.consume(message => this.handle(message));
+		this.ready = true;
 	}
 
 	onApplicationShutdown(): void {
-		if (this.ownershipTimer) clearInterval(this.ownershipTimer);
-		this.ownershipTimer = null;
 		this.ready = false;
 	}
 
@@ -93,20 +78,6 @@ export class DestinationUnavailableWorkerService
 			!this.runtime.workerEnabled ||
 			(this.ready && this.rabbit.isConsumerReady())
 		);
-	}
-
-	private async startWhenOwned(): Promise<void> {
-		if (this.ready || this.starting || !(await this.ownership.isActive()))
-			return;
-		this.starting = true;
-		try {
-			await this.rabbit.consume(message => this.handle(message));
-			this.ready = true;
-			if (this.ownershipTimer) clearInterval(this.ownershipTimer);
-			this.ownershipTimer = null;
-		} finally {
-			this.starting = false;
-		}
 	}
 
 	private async handle(message: ConsumeMessage): Promise<void> {

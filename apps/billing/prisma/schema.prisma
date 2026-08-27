@@ -11,39 +11,13 @@ datasource db {
 }
 
 model ServiceIdentity {
-  id                  String                @id @default("singleton")
-  serviceName         String                @default("billing-service") @map("service_name")
-  databaseId          String                @default(uuid()) @map("database_id") @db.Uuid
-  phase               ServiceDatabasePhase @default(SHADOW)
-  ownershipGeneration BigInt                @default(0) @map("ownership_generation")
-  sourceFingerprint   String?               @map("source_fingerprint")
-  sourceSnapshot      Json?                 @map("source_snapshot")
-  sourceHighWatermark BigInt?               @map("source_high_watermark")
-  importedAt          DateTime?             @map("imported_at")
-  activatedAt         DateTime?             @map("activated_at")
-  createdAt           DateTime              @default(now()) @map("created_at")
-  updatedAt           DateTime              @updatedAt @map("updated_at")
+  id          String   @id @default("singleton")
+  serviceName String   @default("billing-service") @map("service_name")
+  databaseId  String   @unique(map: "service_identity_database_id_key") @default(uuid()) @map("database_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
   @@map("service_identity")
-  @@schema("billing")
-}
-
-model BillingOwnershipMarker {
-  id                  String                @id @default("singleton")
-  phase               BillingOwnershipPhase @default(PREPARED)
-  generation          BigInt                @default(0)
-  preparedRevision    String                @map("prepared_revision")
-  ownershipRevision   String?               @map("ownership_revision")
-  cleanupRevision     String?               @map("cleanup_revision")
-  sourceCutoff        DateTime               @map("source_cutoff")
-  sourceHighWatermark BigInt                 @map("source_high_watermark")
-  sourceFingerprint   String                 @map("source_fingerprint")
-  preparedAt          DateTime               @default(now()) @map("prepared_at")
-  activatedAt         DateTime?              @map("activated_at")
-  completedAt         DateTime?              @map("completed_at")
-  updatedAt           DateTime               @updatedAt @map("updated_at")
-
-  @@map("billing_ownership_marker")
   @@schema("billing")
 }
 
@@ -686,19 +660,5 @@ enum ScheduledRunStatus {
   PROCESSING
   COMPLETED
   FAILED
-  @@schema("billing")
-}
-
-enum ServiceDatabasePhase {
-  SHADOW
-  IMPORTED
-  ACTIVE
-  @@schema("billing")
-}
-
-enum BillingOwnershipPhase {
-  PREPARED
-  ACTIVE
-  COMPLETE
   @@schema("billing")
 }

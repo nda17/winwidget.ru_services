@@ -1,6 +1,5 @@
 import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
 import { IdentityIntrospectionClient } from './auth/identity-introspection.client';
 import { SupportAuthGuard } from './auth/support-auth.guard';
 import { SupportInternalGuard } from './auth/support-internal.guard';
@@ -14,10 +13,6 @@ import { SupportMessagingAdminService } from './messaging/support-messaging-admi
 import { SupportOutboxPublisherService } from './messaging/support-outbox-publisher.service';
 import { SupportRabbitMqService } from './messaging/support-rabbitmq.service';
 import { SupportWebhookWorkerService } from './messaging/support-webhook-worker.service';
-import {
-	SupportOwnershipGuard,
-	SupportOwnershipService
-} from './ownership/support-ownership.service';
 import { SupportPrismaModule } from './prisma/support-prisma.module';
 import { SupportPrismaService } from './prisma/support-prisma.service';
 import { SupportRuntimeModule } from './runtime/support-runtime.module';
@@ -75,9 +70,7 @@ const API_PROVIDERS =
 		SupportWebhookWorkerService,
 		SupportOutboxPublisherService,
 		SupportHealthService,
-		SupportMessagingHeartbeatService,
-		SupportOwnershipService,
-		{ provide: APP_GUARD, useClass: SupportOwnershipGuard }
+		SupportMessagingHeartbeatService
 	]
 })
 export class SupportModule implements OnApplicationShutdown {

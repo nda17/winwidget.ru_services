@@ -41,9 +41,10 @@ describe('BillingHealthService provider configuration', () => {
 			{
 				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 				serviceIdentity: {
-					findUnique: jest
-						.fn()
-						.mockResolvedValue({ serviceName: 'billing-service' })
+					findUnique: jest.fn().mockResolvedValue({
+						serviceName: 'billing-service',
+						databaseId: '00000000-0000-4000-8000-000000000001'
+					})
 				}
 			} as unknown as BillingPrismaService,
 			runtime,

@@ -2,6 +2,34 @@ import { Injectable } from '@nestjs/common';
 
 const BASE_URL = 'https://api.yookassa.ru/v3';
 const REQUEST_TIMEOUT_MS = 20_000;
+const YOOKASSA_OBJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+export const isYooKassaObjectId = (value: unknown): value is string =>
+	typeof value === 'string' && YOOKASSA_OBJECT_ID_PATTERN.test(value);
+
+export const YOOKASSA_RECEIPT_CONTRACT = {
+	schemaVersion: 1,
+	contractVersion: 'yookassa-receipt-create-v1',
+	requestIncluded: true,
+	customerContactRequired: true,
+	item: {
+		vatCode: 1,
+		paymentSubject: 'service',
+		paymentMode: 'full_payment'
+	},
+	internet: true,
+	normalizedStoredFields: [
+		'id',
+		'status',
+		'type',
+		'fiscal_document.fiscal_document_number',
+		'fiscal_document.fiscal_storage_number',
+		'fiscal_document.fiscal_attribute',
+		'registered_at',
+		'receipt_url'
+	],
+	rawProviderResponseStored: true
+} as const;
 
 export class ProviderRequestError extends Error {
 	constructor(
@@ -32,8 +60,22 @@ interface CreateProviderPaymentInput {
 @Injectable()
 export class YooKassaService {
 	isConfigured(): boolean {
+		return this.configurationStatus().credentialsConfigured;
+	}
+
+	configurationStatus() {
 		const { shopId, secret } = this.credentialValues();
-		return Boolean(shopId && secret);
+		const shopIdConfigured = Boolean(shopId);
+		const secretKeyConfigured = Boolean(secret);
+		return {
+			mode:
+				process.env.MODE?.trim().toLowerCase() === 'production'
+					? ('production' as const)
+					: ('non-production' as const),
+			shopIdConfigured,
+			secretKeyConfigured,
+			credentialsConfigured: shopIdConfigured && secretKeyConfigured
+		};
 	}
 
 	async createPayment(
@@ -68,12 +110,12 @@ export class YooKassaService {
 						description: `Подписка WinWidget ${input.plan}`,
 						quantity: '1.00',
 						amount: { value: input.amount, currency: input.currency },
-						vat_code: 1,
-						payment_subject: 'service',
-						payment_mode: 'full_payment'
+						vat_code: YOOKASSA_RECEIPT_CONTRACT.item.vatCode,
+						payment_subject: YOOKASSA_RECEIPT_CONTRACT.item.paymentSubject,
+						payment_mode: YOOKASSA_RECEIPT_CONTRACT.item.paymentMode
 					}
 				],
-				internet: true
+				internet: YOOKASSA_RECEIPT_CONTRACT.internet
 			}
 		};
 		if (input.paymentMethodId) {

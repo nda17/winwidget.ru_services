@@ -1,5 +1,4 @@
 import { Logger } from '@nestjs/common';
-import type { PlatformOwnershipService } from '../ownership/platform-ownership.service';
 import type { PlatformPrismaService } from '../prisma/platform-prisma.service';
 import type { PlatformRuntimeService } from '../runtime/platform-runtime.service';
 import {
@@ -61,41 +60,26 @@ describe('Platform Outbox retention', () => {
 		expect(prisma.$executeRaw).not.toHaveBeenCalled();
 	});
 
-	it('runs only in the active outbox-publisher process role', async () => {
+	it('runs only in the outbox-publisher process role', async () => {
 		const prisma = {
 			$executeRaw: jest.fn().mockResolvedValue(0)
 		} as unknown as PlatformPrismaService;
-		const ownership = {
-			isActive: jest.fn().mockResolvedValue(false)
-		} as unknown as PlatformOwnershipService;
-		const publisher = new PlatformOutboxRetentionService(
-			prisma,
-			{
-				outboxPublisherEnabled: true,
-				outboxRetentionDays: 7
-			} as PlatformRuntimeService,
-			ownership
-		);
+		const publisher = new PlatformOutboxRetentionService(prisma, {
+			outboxPublisherEnabled: true,
+			outboxRetentionDays: 7
+		} as PlatformRuntimeService);
 		publisher.onModuleInit();
 		await flushPromises();
-		expect(ownership.isActive).toHaveBeenCalledTimes(1);
-		expect(prisma.$executeRaw).not.toHaveBeenCalled();
+		expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
 		await publisher.beforeApplicationShutdown();
 
-		const apiOwnership = {
-			isActive: jest.fn()
-		} as unknown as PlatformOwnershipService;
-		const api = new PlatformOutboxRetentionService(
-			prisma,
-			{
-				outboxPublisherEnabled: false,
-				outboxRetentionDays: 7
-			} as PlatformRuntimeService,
-			apiOwnership
-		);
+		const api = new PlatformOutboxRetentionService(prisma, {
+			outboxPublisherEnabled: false,
+			outboxRetentionDays: 7
+		} as PlatformRuntimeService);
 		api.onModuleInit();
 		await flushPromises();
-		expect(apiOwnership.isActive).not.toHaveBeenCalled();
+		expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
 	});
 
 	it('isolates cleanup errors from the publisher loop and logs no details', async () => {
@@ -109,16 +93,10 @@ describe('Platform Outbox retention', () => {
 					new Error('database failure containing private detail')
 				)
 		} as unknown as PlatformPrismaService;
-		const service = new PlatformOutboxRetentionService(
-			prisma,
-			{
-				outboxPublisherEnabled: true,
-				outboxRetentionDays: 7
-			} as PlatformRuntimeService,
-			{
-				isActive: jest.fn().mockResolvedValue(true)
-			} as unknown as PlatformOwnershipService
-		);
+		const service = new PlatformOutboxRetentionService(prisma, {
+			outboxPublisherEnabled: true,
+			outboxRetentionDays: 7
+		} as PlatformRuntimeService);
 
 		service.onModuleInit();
 		await flushPromises();

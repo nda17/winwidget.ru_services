@@ -9,6 +9,7 @@ import {
 	PaymentStatus,
 	Plan,
 	Prisma,
+	ProviderOperation,
 	ProviderOperationKind,
 	ProviderOperationStatus,
 	Subscription,
@@ -30,15 +31,22 @@ import {
 } from '../messaging/billing-messaging.constants';
 import type {
 	AdminAutoRenewalActionDto,
-	CreatePaymentDto
+	CreatePaymentDto,
+	DevResolveUnknownProviderPaymentDto
 } from '../http/billing.dto';
 import {
 	enqueueBillingAdminAudit,
 	type BillingAdminActor,
 	type BillingAdminAuditAction
 } from './billing-admin-audit';
+import {
+	assertBillingCommandReceipt,
+	billingCommandRequestHash,
+	lockBillingCommand
+} from './billing-command-idempotency';
 import { getBillingCorrelationId } from '../common/billing-request-context';
 import { PaymentMethodCryptoService } from '../provider/payment-method-crypto.service';
+import { isYooKassaObjectId } from '../provider/yookassa.service';
 import {
 	AUTO_RENEWAL_DUE_GRACE_MS,
 	AUTO_RENEWAL_CONSENT_TEXT,
@@ -65,6 +73,23 @@ const PLAN_PRIORITY: Record<Plan, number> = {
 };
 const PROVIDER_COMMAND_TIMEOUT_MS = 25_000;
 const PROVIDER_COMMAND_POLL_MS = 100;
+const MANUAL_UNKNOWN_PROVIDER_REASON = 'MANUAL_PROVIDER_NOT_FOUND';
+
+export const BILLING_PAYMENT_WEBHOOK_SUBPATH = 'webhook';
+export const BILLING_PAYMENT_WEBHOOK_ROUTE =
+	`/api/v1/payments/${BILLING_PAYMENT_WEBHOOK_SUBPATH}` as const;
+export const BILLING_PAYMENT_WEBHOOK_EVENTS = [
+	'payment.succeeded',
+	'payment.canceled',
+	'receipt.succeeded',
+	'receipt.canceled'
+] as const;
+const BILLING_PAYMENT_STATUS_WEBHOOK_EVENTS = new Set<string>(
+	BILLING_PAYMENT_WEBHOOK_EVENTS.slice(0, 2)
+);
+const BILLING_RECEIPT_STATUS_WEBHOOK_EVENTS = new Set<string>(
+	BILLING_PAYMENT_WEBHOOK_EVENTS.slice(2)
+);
 
 interface PaymentListFilters {
 	status?: string;
@@ -825,6 +850,287 @@ export class PaymentDomainService {
 		};
 	}
 
+	async unknownProviderPaymentEvidence(paymentId: string) {
+		const normalizedPaymentId = paymentId.trim();
+		if (!normalizedPaymentId) {
+			throw new NotFoundException('Платёж не найден');
+		}
+		const payment = await this.prisma.payment.findUnique({
+			where: { id: normalizedPaymentId }
+		});
+		if (!payment) {
+			throw new NotFoundException('Платёж не найден');
+		}
+		this.assertUnknownProviderCandidate(payment, new Date());
+		const providerOperation =
+			await this.prisma.providerOperation.findUnique({
+				where: {
+					idempotencyKey: payment.providerIdempotencyKey!
+				}
+			});
+		this.assertUnknownProviderOperation(payment, providerOperation);
+
+		return {
+			schemaVersion: 1,
+			paymentId: payment.id,
+			status: payment.status,
+			providerStatus: payment.providerStatus,
+			checkoutExpiresAt: payment.checkoutExpiresAt.toISOString(),
+			yookassaId: payment.yookassaId,
+			providerOperation: {
+				id: providerOperation!.id,
+				kind: providerOperation!.kind,
+				status: providerOperation!.status,
+				providerPaymentId: providerOperation!.providerPaymentId,
+				idempotencyKey: providerOperation!.idempotencyKey
+			}
+		};
+	}
+
+	async resolveUnknownProviderPayment(
+		dto: DevResolveUnknownProviderPaymentDto,
+		actor: BillingAdminActor
+	) {
+		if (actor.role !== 'DEV') {
+			throw new ForbiddenException(
+				'Ручное разрешение UNKNOWN платежа доступно только DEV'
+			);
+		}
+		const paymentId = dto.paymentId.trim();
+		const reason = dto.reason.trim();
+		const checkedMetadataPaymentId = dto.checkedMetadataPaymentId.trim();
+		const checkedProviderIdempotencyKey =
+			dto.checkedProviderIdempotencyKey.trim();
+		if (
+			dto.schemaVersion !== 1 ||
+			dto.resolution !== 'PROVIDER_PAYMENT_NOT_FOUND' ||
+			dto.providerReconciliationConfirmed !== true
+		) {
+			throw new BadRequestException(
+				'Ручная сверка платежа должна быть явно подтверждена'
+			);
+		}
+		if (!paymentId || !checkedMetadataPaymentId) {
+			throw new BadRequestException('Укажите ID платежа из metadata');
+		}
+		if (reason.length < 3) {
+			throw new BadRequestException(
+				'Укажите причину ручного разрешения платежа'
+			);
+		}
+		if (!checkedProviderIdempotencyKey) {
+			throw new BadRequestException(
+				'Подтвердите проверенный idempotency key'
+			);
+		}
+
+		const commandType = 'RESOLVE_UNKNOWN_PROVIDER_PAYMENT';
+		const requestHash = billingCommandRequestHash(commandType, {
+			schemaVersion: dto.schemaVersion,
+			commandId: dto.commandId,
+			paymentId,
+			resolution: dto.resolution,
+			reason,
+			providerReconciliationConfirmed: dto.providerReconciliationConfirmed,
+			checkedMetadataPaymentId,
+			checkedProviderIdempotencyKey,
+			actorId: actor.id,
+			actorRole: actor.role
+		});
+
+		for (let attempt = 1; attempt <= 3; attempt += 1) {
+			try {
+				return await this.prisma.$transaction(
+					async transaction => {
+						await lockBillingCommand(transaction, dto.commandId);
+						const prior =
+							await transaction.billingCommandReceipt.findUnique({
+								where: { commandId: dto.commandId }
+							});
+						if (prior) {
+							return assertBillingCommandReceipt(
+								prior,
+								commandType,
+								requestHash
+							) as Record<string, unknown>;
+						}
+
+						await transaction.$queryRaw`
+							SELECT id FROM billing.payments
+							WHERE id = ${paymentId}
+							FOR UPDATE
+						`;
+						const payment = await transaction.payment.findUnique({
+							where: { id: paymentId }
+						});
+						if (!payment) {
+							throw new NotFoundException('Платёж не найден');
+						}
+
+						const now = new Date();
+						this.assertUnknownProviderResolutionEligible(
+							payment,
+							now,
+							checkedMetadataPaymentId,
+							checkedProviderIdempotencyKey
+						);
+
+						await transaction.$queryRaw`
+							SELECT id FROM billing.provider_operations
+							WHERE payment_id = ${payment.id}
+							FOR UPDATE
+						`;
+						const providerOperation =
+							await transaction.providerOperation.findUnique({
+								where: {
+									idempotencyKey: payment.providerIdempotencyKey!
+								}
+							});
+						this.assertUnknownProviderOperation(
+							payment,
+							providerOperation
+						);
+
+						const resolvedAt = new Date();
+						const providerIdempotencyKeySha256 = createHash('sha256')
+							.update(payment.providerIdempotencyKey!)
+							.digest('hex');
+						const operationChanged =
+							await transaction.providerOperation.updateMany({
+								where: {
+									id: providerOperation.id,
+									paymentId: payment.id,
+									idempotencyKey: payment.providerIdempotencyKey!,
+									status: ProviderOperationStatus.UNKNOWN
+								},
+								data: {
+									status: ProviderOperationStatus.FAILED,
+									leaseToken: null,
+									leaseUntil: null,
+									lastErrorCode: MANUAL_UNKNOWN_PROVIDER_REASON,
+									lastErrorSafe:
+										'DEV confirmed that the provider payment was not found',
+									response: {
+										schemaVersion: 1,
+										resolution: dto.resolution,
+										commandId: dto.commandId,
+										actorId: actor.id,
+										actorRole: actor.role,
+										reason,
+										checkedMetadataPaymentId,
+										providerIdempotencyKeySha256,
+										providerReconciliationConfirmed: true,
+										resolvedAt: resolvedAt.toISOString()
+									} as Prisma.InputJsonValue
+								}
+							});
+						if (operationChanged.count !== 1) {
+							throw new ConflictException(
+								'Provider-состояние платежа изменилось параллельно'
+							);
+						}
+
+						const sourceSequence = await this.nextSequence(transaction);
+						const paymentChanged = await transaction.payment.updateMany({
+							where: {
+								id: payment.id,
+								status: PaymentStatus.PENDING,
+								yookassaId: null,
+								providerStatus: { in: ['creating', 'unknown'] },
+								checkoutExpiresAt: { lte: resolvedAt },
+								aggregateVersion: payment.aggregateVersion
+							},
+							data: {
+								status: PaymentStatus.CANCELLED,
+								providerStatus: 'not_found',
+								confirmationUrl: null,
+								paymentMethodCiphertext: null,
+								cancelledAt: resolvedAt,
+								cancellationReason: MANUAL_UNKNOWN_PROVIDER_REASON,
+								lastProviderCheckedAt: resolvedAt,
+								aggregateVersion: { increment: 1n },
+								sourceSequence
+							}
+						});
+						if (paymentChanged.count !== 1) {
+							throw new ConflictException(
+								'Платёж изменился параллельно и не был разрешён'
+							);
+						}
+
+						await this.applyRecurringCancellation(
+							transaction,
+							payment,
+							MANUAL_UNKNOWN_PROVIDER_REASON,
+							resolvedAt
+						);
+						await this.cancelAffiliateReward(
+							transaction,
+							payment.id,
+							resolvedAt
+						);
+						const updated = await transaction.payment.findUniqueOrThrow({
+							where: { id: payment.id }
+						});
+						await this.emitPaymentState(transaction, updated);
+						await this.createAdminAuditOutbox(
+							transaction,
+							actor,
+							'PAYMENT_UNKNOWN_PROVIDER_RESOLVED',
+							payment.userId,
+							{
+								paymentId: payment.id,
+								commandId: dto.commandId,
+								resolution: dto.resolution,
+								reason,
+								previousStatus: payment.status,
+								previousProviderStatus: payment.providerStatus,
+								finalStatus: updated.status,
+								finalProviderStatus: updated.providerStatus,
+								providerOperationId: providerOperation.id,
+								checkedMetadataPaymentId,
+								providerIdempotencyKeySha256,
+								providerReconciliationConfirmed: true,
+								resolvedAt: resolvedAt.toISOString()
+							}
+						);
+
+						const result = {
+							schemaVersion: 1,
+							resolved: true,
+							commandId: dto.commandId,
+							paymentId: payment.id,
+							resolution: dto.resolution,
+							status: updated.status,
+							providerStatus: updated.providerStatus,
+							resolvedAt: resolvedAt.toISOString()
+						};
+						await transaction.billingCommandReceipt.create({
+							data: {
+								commandId: dto.commandId,
+								commandType,
+								requestHash,
+								requestHashVersion: 1,
+								result
+							}
+						});
+						return result;
+					},
+					{
+						isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+						maxWait: 5_000,
+						timeout: 30_000
+					}
+				);
+			} catch (error) {
+				if (attempt === 3 || !this.retryableTransactionError(error)) {
+					throw error;
+				}
+			}
+		}
+		throw new Error('Unknown provider resolution retry loop exhausted');
+	}
+
 	async runCleanup(actor: BillingAdminActor) {
 		const now = new Date();
 		const candidates = await this.prisma.payment.findMany({
@@ -1218,74 +1524,117 @@ export class PaymentDomainService {
 			root.object && typeof root.object === 'object'
 				? (root.object as Record<string, unknown>)
 				: {};
-		if (event === 'payment.succeeded' || event === 'payment.canceled') {
-			const providerPaymentId =
-				typeof object.id === 'string' ? object.id : '';
+		if (BILLING_PAYMENT_STATUS_WEBHOOK_EVENTS.has(event)) {
+			const providerPaymentId = isYooKassaObjectId(object.id)
+				? object.id
+				: null;
 			if (!providerPaymentId) return { ok: true };
-			const metadata =
-				object.metadata && typeof object.metadata === 'object'
-					? (object.metadata as Record<string, unknown>)
-					: {};
-			let paymentId =
-				typeof metadata.paymentId === 'string'
-					? metadata.paymentId
-					: undefined;
-			if (!paymentId) {
-				paymentId = (
-					await this.prisma.payment.findUnique({
-						where: { yookassaId: providerPaymentId },
-						select: { id: true }
-					})
-				)?.id;
-			}
-			await this.prisma.providerOperation.createMany({
-				data: {
-					paymentId,
-					providerPaymentId,
-					idempotencyKey: `webhook:${event}:${providerPaymentId}`,
-					kind: ProviderOperationKind.VERIFY_PAYMENT,
-					payload: {
-						paymentId,
-						providerPaymentId,
-						source: 'webhook',
-						event
-					}
-				},
-				skipDuplicates: true
-			});
-		} else if (
-			event === 'receipt.succeeded' ||
-			event === 'receipt.canceled'
-		) {
-			const providerPaymentId =
-				typeof object.payment_id === 'string' ? object.payment_id : '';
-			if (!providerPaymentId) return { ok: true };
+			await this.enqueueWebhookVerification(providerPaymentId);
+		} else if (BILLING_RECEIPT_STATUS_WEBHOOK_EVENTS.has(event)) {
+			const providerPaymentId = isYooKassaObjectId(object.payment_id)
+				? object.payment_id
+				: null;
+			const receiptId = isYooKassaObjectId(object.id) ? object.id : null;
+			if (!providerPaymentId || !receiptId) return { ok: true };
 			const paymentId = (
 				await this.prisma.payment.findUnique({
 					where: { yookassaId: providerPaymentId },
 					select: { id: true }
 				})
 			)?.id;
-			const receiptId =
-				typeof object.id === 'string' ? object.id : providerPaymentId;
-			await this.prisma.providerOperation.createMany({
-				data: {
-					paymentId,
-					providerPaymentId,
-					idempotencyKey: `webhook:${event}:${receiptId}`,
-					kind: ProviderOperationKind.SYNC_RECEIPT,
-					payload: {
-						paymentId,
-						providerPaymentId,
-						receiptId,
-						source: 'webhook',
-						event
-					}
-				},
-				skipDuplicates: true
-			});
+			if (paymentId) {
+				await this.enqueueReceiptSync(paymentId, providerPaymentId);
+			}
 		}
 		return { ok: true };
+	}
+
+	private async enqueueWebhookVerification(
+		providerPaymentId: string
+	): Promise<void> {
+		const idempotencyKey = `webhook:verify:${providerPaymentId}`;
+		const payload = {
+			providerPaymentId,
+			source: 'webhook'
+		};
+		const created = await this.prisma.providerOperation.createMany({
+			data: {
+				paymentId: null,
+				providerPaymentId,
+				idempotencyKey,
+				kind: ProviderOperationKind.VERIFY_PAYMENT,
+				payload
+			},
+			skipDuplicates: true
+		});
+		if (created.count) return;
+		await this.rearmWebhookOperation(
+			idempotencyKey,
+			ProviderOperationKind.VERIFY_PAYMENT,
+			null,
+			providerPaymentId,
+			payload
+		);
+	}
+
+	private async enqueueReceiptSync(
+		paymentId: string,
+		providerPaymentId: string
+	): Promise<void> {
+		const idempotencyKey = `receipt:${paymentId}`;
+		const payload = { paymentId, providerPaymentId };
+		const created = await this.prisma.providerOperation.createMany({
+			data: {
+				paymentId,
+				providerPaymentId,
+				idempotencyKey,
+				kind: ProviderOperationKind.SYNC_RECEIPT,
+				payload
+			},
+			skipDuplicates: true
+		});
+		if (created.count) return;
+		await this.rearmWebhookOperation(
+			idempotencyKey,
+			ProviderOperationKind.SYNC_RECEIPT,
+			paymentId,
+			providerPaymentId,
+			payload
+		);
+	}
+
+	private async rearmWebhookOperation(
+		idempotencyKey: string,
+		kind: ProviderOperationKind,
+		paymentId: string | null,
+		providerPaymentId: string,
+		payload: Record<string, unknown>
+	): Promise<void> {
+		await this.prisma.providerOperation.updateMany({
+			where: {
+				idempotencyKey,
+				kind,
+				providerPaymentId,
+				status: {
+					in: [
+						ProviderOperationStatus.PENDING,
+						ProviderOperationStatus.SUCCEEDED,
+						ProviderOperationStatus.FAILED,
+						ProviderOperationStatus.UNKNOWN
+					]
+				}
+			},
+			data: {
+				paymentId,
+				status: ProviderOperationStatus.PENDING,
+				payload: payload as Prisma.InputJsonValue,
+				availableAt: new Date(),
+				leaseToken: null,
+				leaseUntil: null,
+				lastErrorCode: null,
+				lastErrorSafe: null
+			}
+		});
 	}
 
 	async bindProviderState(
@@ -1631,6 +1980,11 @@ export class PaymentDomainService {
 				description: 'Ручная проверка платежа',
 				entityType: 'payment'
 			},
+			PAYMENT_UNKNOWN_PROVIDER_RESOLVED: {
+				section: 'PAYMENTS',
+				description: 'Платёж с неизвестным provider ID разрешён вручную',
+				entityType: 'payment'
+			},
 			PAYMENT_CLEANUP_RUN: {
 				section: 'TASKS',
 				description: 'Сверка просроченных платёжных попыток',
@@ -1737,11 +2091,13 @@ export class PaymentDomainService {
 						? typeof yookassaId === 'string'
 							? yookassaId
 							: null
-						: action.startsWith('AUTO_RENEWAL_')
+						: action === 'PAYMENT_UNKNOWN_PROVIDER_RESOLVED'
 							? entityId
-							: typeof metadata.title === 'string'
-								? metadata.title
-								: null,
+							: action.startsWith('AUTO_RENEWAL_')
+								? entityId
+								: typeof metadata.title === 'string'
+									? metadata.title
+									: null,
 				targetUserId: targetUserId || null
 			},
 			metadata: {
@@ -2449,6 +2805,83 @@ export class PaymentDomainService {
 		return normalized as BillingPeriod;
 	}
 
+	private assertUnknownProviderResolutionEligible(
+		payment: Payment,
+		now: Date,
+		checkedMetadataPaymentId: string,
+		checkedProviderIdempotencyKey: string
+	): void {
+		this.assertUnknownProviderCandidate(payment, now);
+		if (checkedMetadataPaymentId !== payment.id) {
+			throw new ConflictException(
+				'Проверенный metadata.paymentId не совпадает с платежом'
+			);
+		}
+		if (checkedProviderIdempotencyKey !== payment.providerIdempotencyKey) {
+			throw new ConflictException(
+				'Проверенный idempotency key не совпадает с платежом'
+			);
+		}
+	}
+
+	private assertUnknownProviderCandidate(
+		payment: Payment,
+		now: Date
+	): void {
+		if (payment.status === PaymentStatus.SUCCEEDED) {
+			throw new ConflictException(
+				'Успешный платёж нельзя разрешить вручную'
+			);
+		}
+		if (payment.status !== PaymentStatus.PENDING) {
+			throw new ConflictException(
+				'Только незавершённый платёж можно разрешить вручную'
+			);
+		}
+		if (payment.checkoutExpiresAt > now) {
+			throw new ConflictException(
+				'Непросроченный платёж нельзя разрешить вручную'
+			);
+		}
+		if (payment.yookassaId) {
+			throw new ConflictException(
+				'Платёж с provider ID нужно сверять по provider ID'
+			);
+		}
+		if (!['creating', 'unknown'].includes(payment.providerStatus || '')) {
+			throw new ConflictException(
+				'Платёж не находится в creating/unknown provider-состоянии'
+			);
+		}
+		if (!payment.providerIdempotencyKey) {
+			throw new ConflictException(
+				'У платежа отсутствует provider idempotency key'
+			);
+		}
+	}
+
+	private assertUnknownProviderOperation(
+		payment: Payment,
+		operation: ProviderOperation | null
+	): asserts operation is ProviderOperation {
+		const expectedOperationKind =
+			payment.kind === PaymentKind.RECURRING
+				? ProviderOperationKind.CAPTURE_RECURRING
+				: ProviderOperationKind.CREATE_CHECKOUT;
+		if (
+			!operation ||
+			operation.paymentId !== payment.id ||
+			operation.idempotencyKey !== payment.providerIdempotencyKey ||
+			operation.kind !== expectedOperationKind ||
+			operation.status !== ProviderOperationStatus.UNKNOWN ||
+			operation.providerPaymentId
+		) {
+			throw new ConflictException(
+				'Платёж не находится в подтверждённом UNKNOWN provider-состоянии'
+			);
+		}
+	}
+
 	private getDateRangeFilter(from?: string, to?: string) {
 		const gte = this.normalizeDate(from, false);
 		const lte = this.normalizeDate(to, true);
@@ -2933,6 +3366,15 @@ export class PaymentDomainService {
 			update: { nextValue: { increment: 1n } }
 		});
 		return state.nextValue - 1n;
+	}
+
+	private retryableTransactionError(error: unknown): boolean {
+		return (
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			(error as { code?: unknown }).code === 'P2034'
+		);
 	}
 
 	private formatAmount(amount: number): string {

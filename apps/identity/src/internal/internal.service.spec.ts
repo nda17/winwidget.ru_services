@@ -27,9 +27,15 @@ function service(session: unknown) {
 
 describe('canonical Identity introspection', () => {
 	it('distinguishes a missing/revoked session from an inactive user', async () => {
+		const revoked = service(null);
 		await expect(
-			service(null).value.introspect('Bearer access-token')
+			revoked.value.introspect('Bearer access-token')
 		).rejects.toThrow('Invalid session');
+		expect(revoked.prisma.userSession.findFirst).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({ revokedAt: null })
+			})
+		);
 
 		await expect(
 			service({

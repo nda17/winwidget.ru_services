@@ -1,9 +1,8 @@
 # Сервисы WinWidget
 
-Бэкенд WinWidget состоит только из независимых сервисов. Общий NestJS API,
-общая PostgreSQL Core, workers/publishers Core и резервный маршрут Gateway
-удалены.
-Обратной совместимости с монолитом нет.
+Бэкенд WinWidget состоит из десяти независимо собираемых приложений. Gateway
+использует только точные service-owned routes; catch-all, Core upstream и
+listener `:4200` запрещены steady-state verifier-ом.
 
 Это монорепозиторий исходного кода сервисов. Каждый каталог в `apps/` имеет
 собственные зависимости, lockfile, Dockerfile, `.env.example`, README и
@@ -50,6 +49,7 @@ winwidget.ru_services/
 
 ```text
 apps/<service>/.env.example     # tracked, без секретов
+apps/<service>/.env             # ignored, локальная разработка
 apps/<service>/.env.production  # ignored, root:root 0600 на VPS
 ```
 
@@ -59,6 +59,10 @@ apps/<service>/.env.production  # ignored, root:root 0600 на VPS
 Compose `environment`. S3-ключи аватаров получает только Identity, S3-ключи
 медиафайлов виджетов — только Widgets. Роли PostgreSQL для runtime, миграций и
 резервного копирования разделены.
+
+Локальный запуск также не читает общий корневой env: каждый сервис использует
+только собственный `apps/<service>/.env`, созданный на основе его
+`.env.example`.
 
 ## Локальные проверки
 
@@ -110,13 +114,19 @@ hash env, метки OCI revision, миграции баз всех сервис
 permissions/topology RabbitMQ, прямые проверки readiness, smoke-проверки
 Gateway/публичного API и revision каждого контейнера.
 
-Одноразовый завершающий cutover импортирует Notes, Admin Event Log и плоскость
-управления Telegram/Reporting в Operations до запуска publishers. Только после
-успешных проверок сервисов/Gateway удаляются заранее проверенные пустые
-устаревшие очереди/пользователи RabbitMQ, контейнеры Core, база/volume Core и
-временное хранилище restore. Отката или автоматического восстановления
-монолита нет.
+Notes, Admin Event Log и плоскость управления Telegram/Reporting принадлежат
+Operations. Обычный deploy проверяет актуальные границы service-owned баз,
+миграции, readiness и краткие negative invariants: отсутствуют Core runtime,
+routes, queues, users и listener `:4200`. Исторические import/activate/bootstrap
+состояния не участвуют в runtime или steady-state CLI.
 
 Workflow для production и подробная инструкция находятся в
 `winwidget.ru_infra`. Секреты, закрытые ключи и файлы паролей баз данных в Git
 не попадают. Контракт каждого приложения описан в `apps/<service>/README.md`.
+
+## Документация
+
+- [Технический backlog](docs/backlog.md)
+- [API Gateway и авторизация](docs/api-gateway-auth.md)
+- [Контракт Widgets](docs/widgets-service.md)
+- [Production runbook](https://github.com/nda17/winwidget.ru_infra/blob/master/docs/runbook.md)

@@ -24,6 +24,7 @@ import {
 	AdminPaymentCheckDto,
 	CancelPaymentDto,
 	CreatePaymentDto,
+	DevResolveUnknownProviderPaymentDto,
 	TariffPriceItemDto,
 	UpdateAffiliateSettingsDto,
 	UpdateTariffPricesDto,
@@ -42,6 +43,7 @@ interface BodyContract {
 	dto: DtoClass;
 	parameterIndex: number;
 	transform?: boolean;
+	forbidNonWhitelisted?: boolean;
 }
 
 interface PublicRouteContract {
@@ -134,7 +136,7 @@ const PUBLIC_ROUTES: readonly PublicRouteContract[] = [
 		method: RequestMethod.GET,
 		path: '/payments/admin/list',
 		status: HttpStatus.OK,
-		roles: ADMIN
+		roles: ADMIN_OR_DEV
 	},
 	{
 		controller: PaymentController,
@@ -142,7 +144,7 @@ const PUBLIC_ROUTES: readonly PublicRouteContract[] = [
 		method: RequestMethod.POST,
 		path: '/payments/admin/check',
 		status: HttpStatus.OK,
-		roles: ADMIN,
+		roles: ADMIN_OR_DEV,
 		body: { dto: AdminPaymentCheckDto, parameterIndex: 0 }
 	},
 	{
@@ -207,10 +209,32 @@ const PUBLIC_ROUTES: readonly PublicRouteContract[] = [
 	},
 	{
 		controller: PaymentController,
+		handler: 'unknownProviderPaymentEvidence',
+		method: RequestMethod.GET,
+		path: '/payments/dev/unknown-provider/:paymentId/evidence',
+		status: HttpStatus.OK,
+		roles: DEV
+	},
+	{
+		controller: PaymentController,
+		handler: 'resolveUnknownProviderPayment',
+		method: RequestMethod.POST,
+		path: '/payments/dev/unknown-provider/resolve',
+		status: HttpStatus.OK,
+		roles: DEV,
+		body: {
+			dto: DevResolveUnknownProviderPaymentDto,
+			parameterIndex: 0,
+			transform: true,
+			forbidNonWhitelisted: true
+		}
+	},
+	{
+		controller: PaymentController,
 		handler: 'webhook',
 		method: RequestMethod.POST,
 		path: '/payments/webhook',
-		status: HttpStatus.CREATED
+		status: HttpStatus.OK
 	},
 	{
 		controller: SubscriptionController,
@@ -380,7 +404,28 @@ const routeKey = (method: RequestMethod, path: string) =>
 	`${RequestMethod[method]} ${path}`;
 
 describe('Billing public HTTP compatibility contract', () => {
-	it('exposes exactly the 32 legacy public routes', () => {
+	it('pins the public provider webhook to POST /payments/webhook with HTTP 200', () => {
+		const route = PUBLIC_ROUTES.find(
+			item =>
+				item.controller === PaymentController && item.handler === 'webhook'
+		);
+		expect(route).toEqual(
+			expect.objectContaining({
+				method: RequestMethod.POST,
+				path: '/payments/webhook',
+				status: HttpStatus.OK
+			})
+		);
+		const handler = handlerFor(route!);
+		expect(normalizeRoutePath(PaymentController, handler)).toBe(
+			'/payments/webhook'
+		);
+		expect(effectiveStatus(handler, RequestMethod.POST)).toBe(
+			HttpStatus.OK
+		);
+	});
+
+	it('exposes exactly the legacy routes plus the DEV recovery route', () => {
 		const discovered = CONTROLLERS.flatMap(controller =>
 			Object.getOwnPropertyNames(controller.prototype)
 				.filter(name => name !== 'constructor')
@@ -406,7 +451,7 @@ describe('Billing public HTTP compatibility contract', () => {
 			routeKey(route.method, route.path)
 		).sort();
 
-		expect(PUBLIC_ROUTES).toHaveLength(32);
+		expect(PUBLIC_ROUTES).toHaveLength(34);
 		expect(discovered).toEqual(expected);
 	});
 
@@ -464,7 +509,7 @@ describe('Billing public HTTP compatibility contract', () => {
 			expect(pipeState.validatorOptions.whitelist).toBe(true);
 			expect(
 				pipeState.validatorOptions.forbidNonWhitelisted ?? false
-			).toBe(false);
+			).toBe(body.forbidNonWhitelisted ?? false);
 			expect(pipeState.isTransformEnabled).toBe(body.transform ?? false);
 		}
 	);
@@ -625,6 +670,74 @@ const DTO_CASES: DtoBehaviorCase[] = [
 		invalid: [{ paymentId: 42 }]
 	},
 	{
+		name: 'DevResolveUnknownProviderPaymentDto',
+		controller: PaymentController,
+		handler: 'resolveUnknownProviderPayment',
+		dto: DevResolveUnknownProviderPaymentDto,
+		valid: {
+			schemaVersion: 1,
+			commandId: 'c7de40a7-b401-41d5-92ef-2c437180e201',
+			paymentId: 'payment-1',
+			resolution: 'PROVIDER_PAYMENT_NOT_FOUND',
+			reason: 'Provider payment was not found after manual reconciliation',
+			providerReconciliationConfirmed: true,
+			checkedMetadataPaymentId: 'payment-1',
+			checkedProviderIdempotencyKey: 'provider-command-1'
+		},
+		allowedKeys: [
+			'schemaVersion',
+			'commandId',
+			'paymentId',
+			'resolution',
+			'reason',
+			'providerReconciliationConfirmed',
+			'checkedMetadataPaymentId',
+			'checkedProviderIdempotencyKey'
+		],
+		invalid: [
+			{
+				schemaVersion: 2,
+				commandId: 'c7de40a7-b401-41d5-92ef-2c437180e201',
+				paymentId: 'payment-1',
+				resolution: 'PROVIDER_PAYMENT_NOT_FOUND',
+				reason: 'manual reconciliation',
+				providerReconciliationConfirmed: true,
+				checkedMetadataPaymentId: 'payment-1',
+				checkedProviderIdempotencyKey: 'provider-command-1'
+			},
+			{
+				schemaVersion: 1,
+				commandId: 'not-a-uuid',
+				paymentId: 'payment-1',
+				resolution: 'PROVIDER_PAYMENT_NOT_FOUND',
+				reason: 'manual reconciliation',
+				providerReconciliationConfirmed: true,
+				checkedMetadataPaymentId: 'payment-1',
+				checkedProviderIdempotencyKey: 'provider-command-1'
+			},
+			{
+				schemaVersion: 1,
+				commandId: 'c7de40a7-b401-41d5-92ef-2c437180e201',
+				paymentId: 'payment-1',
+				resolution: 'SUCCEEDED',
+				reason: 'manual reconciliation',
+				providerReconciliationConfirmed: true,
+				checkedMetadataPaymentId: 'payment-1',
+				checkedProviderIdempotencyKey: 'provider-command-1'
+			},
+			{
+				schemaVersion: 1,
+				commandId: 'c7de40a7-b401-41d5-92ef-2c437180e201',
+				paymentId: 'payment-1',
+				resolution: 'PROVIDER_PAYMENT_NOT_FOUND',
+				reason: 'manual reconciliation',
+				providerReconciliationConfirmed: false,
+				checkedMetadataPaymentId: 'payment-1',
+				checkedProviderIdempotencyKey: 'provider-command-1'
+			}
+		]
+	},
+	{
 		name: 'AdminAutoRenewalActionDto',
 		controller: PaymentController,
 		handler: 'pause',
@@ -729,7 +842,7 @@ const DTO_CASES: DtoBehaviorCase[] = [
 
 describe('Billing public DTO compatibility contract', () => {
 	it.each(DTO_CASES)(
-		'$name accepts its legacy shape and strips unknown fields',
+		'$name accepts its valid shape with the route whitelist policy',
 		async contract => {
 			const route = PUBLIC_ROUTES.find(
 				item =>
@@ -737,13 +850,13 @@ describe('Billing public DTO compatibility contract', () => {
 					item.handler === contract.handler
 			)!;
 			const pipe = pipesFor(handlerFor(route))[0];
-			const result = (await pipe.transform(
-				{ ...contract.valid, unexpectedTopLevel: true },
-				{
-					type: 'body',
-					metatype: contract.dto
-				}
-			)) as Record<string, unknown>;
+			const input = route.body?.forbidNonWhitelisted
+				? contract.valid
+				: { ...contract.valid, unexpectedTopLevel: true };
+			const result = (await pipe.transform(input, {
+				type: 'body',
+				metatype: contract.dto
+			})) as Record<string, unknown>;
 
 			expect(Object.keys(result).sort()).toEqual(
 				[...contract.allowedKeys].sort()

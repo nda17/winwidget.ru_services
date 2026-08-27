@@ -4,6 +4,7 @@ import {
 	AUTO_RENEWAL_CONSENT_TEXT,
 	AUTO_RENEWAL_CONSENT_VERSION
 } from './billing-legal.constants';
+import { YOOKASSA_RECEIPT_CONTRACT } from '../provider/yookassa.service';
 
 const settings = (overrides: Record<string, unknown> = {}) => ({
 	id: 'singleton',
@@ -26,7 +27,10 @@ describe('BillingSettingsService', () => {
 				findUnique: jest.fn().mockResolvedValue(settings())
 			}
 		};
-		const service = new BillingSettingsService(prisma as never);
+		const service = new BillingSettingsService(
+			prisma as never,
+			{} as never
+		);
 		await expect(service.publicSettings()).resolves.toEqual({
 			paymentEnabled: true,
 			autoRenewalSignupEnabled: false,
@@ -43,7 +47,10 @@ describe('BillingSettingsService', () => {
 				findUnique: jest.fn().mockResolvedValue(settings())
 			}
 		};
-		const service = new BillingSettingsService(prisma as never);
+		const service = new BillingSettingsService(
+			prisma as never,
+			{} as never
+		);
 		const result = await service.adminSettings();
 		expect(result).toEqual({
 			id: 'singleton',
@@ -59,6 +66,66 @@ describe('BillingSettingsService', () => {
 			},
 			updatedAt: '2026-08-23T12:00:00.000Z'
 		});
+	});
+
+	it('returns code/config readiness without credential values or merchant claims', async () => {
+		const prisma = {
+			billingSettings: {
+				findUnique: jest.fn().mockResolvedValue(settings())
+			}
+		};
+		const provider = {
+			configurationStatus: jest.fn().mockReturnValue({
+				mode: 'production',
+				shopIdConfigured: true,
+				secretKeyConfigured: true,
+				credentialsConfigured: true
+			})
+		};
+		const service = new BillingSettingsService(
+			prisma as never,
+			provider as never
+		);
+
+		const result = await service.providerReadiness();
+
+		expect(result).toEqual({
+			schemaVersion: 1,
+			source: 'CODE_AND_PERSISTED_SETTINGS',
+			provider: {
+				name: 'YOOKASSA',
+				mode: 'production',
+				shopIdConfigured: true,
+				secretKeyConfigured: true,
+				credentialsConfigured: true
+			},
+			features: {
+				paymentEnabled: true,
+				autoRenewalSignupEnabled: false,
+				autoRenewalChargesEnabled: false
+			},
+			receipt: YOOKASSA_RECEIPT_CONTRACT,
+			webhook: {
+				codeConfigured: true,
+				method: 'POST',
+				route: '/api/v1/payments/webhook',
+				acceptedEvents: [
+					'payment.succeeded',
+					'payment.canceled',
+					'receipt.succeeded',
+					'receipt.canceled'
+				],
+				duplicateDeliveryFence:
+					'authenticated-provider-object-reverification'
+			},
+			externalVerification: {
+				merchantAutoPayments: 'NOT_VERIFIED',
+				onlineCashRegister: 'NOT_VERIFIED',
+				ofd: 'NOT_VERIFIED'
+			}
+		});
+		expect(JSON.stringify(result)).not.toContain('shop-secret');
+		expect(JSON.stringify(result)).not.toContain('shop-id-value');
 	});
 
 	it('updates settings and audit in one transaction', async () => {
@@ -86,7 +153,10 @@ describe('BillingSettingsService', () => {
 					work(transaction)
 				)
 		};
-		const service = new BillingSettingsService(prisma as never);
+		const service = new BillingSettingsService(
+			prisma as never,
+			{} as never
+		);
 
 		const result = await service.updateAdminSettings(
 			{ paymentEnabled: false, affiliateCashbackPercent: 15 },
@@ -126,7 +196,10 @@ describe('BillingSettingsService', () => {
 
 	it('rejects an empty PATCH before opening a transaction', async () => {
 		const prisma = { $transaction: jest.fn() };
-		const service = new BillingSettingsService(prisma as never);
+		const service = new BillingSettingsService(
+			prisma as never,
+			{} as never
+		);
 		await expect(
 			service.updateAdminSettings(
 				{},

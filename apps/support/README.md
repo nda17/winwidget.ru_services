@@ -2,7 +2,8 @@
 
 Support владеет чатом с оператором, webhook бота Telegram Support, настройками
 маршрутизации, состоянием retry/ошибок доставки и схемой PostgreSQL `support`.
-Сервис не зависит от Core и не имеет путей dual-read или устаревшей записи.
+Сервис читает и записывает только собственную БД и актуальные HTTP/event
+контракты.
 
 ## Роли процессов
 
@@ -19,6 +20,11 @@ Support владеет чатом с оператором, webhook бота Tele
 - `/api/v1/support/admin/webhook/**`
 - `/api/v1/support/admin/routing-settings`
 - `/api/v1/support/admin/messaging/failures/**`
+
+Readiness проверяет подключение к БД и минимальный маркер `service_identity`
+(`serviceName`, `databaseId`, временные метки). Worker и Outbox publisher
+запускаются по своей process role без отдельной фазы активации; readiness
+обязательно проверяет их фактическую готовность.
 
 Operations читает `GET /internal/v1/support/messaging/overview` через loopback
 с `x-winwidget-service: operations` и `SUPPORT_OPERATIONS_TOKEN`. Support
@@ -38,6 +44,10 @@ API принимает webhook только после проверки секр
 захватывает lease PostgreSQL до внешних вызовов и выполняет ack RabbitMQ только
 после надёжно сохранённого завершения. Ручные retry/close остаются
 транзакционными.
+
+Для `api` и `worker` readiness также проверяет обязательные Telegram settings.
+Для `api` требуются token, username, webhook secret/public URL и pinned proxy;
+для `worker` — token и pinned proxy.
 
 Контейнер `outbox-publisher` не должен получать учётные данные Telegram,
 webhook, proxy или Identity; Compose должен передавать их только `api`/`worker`

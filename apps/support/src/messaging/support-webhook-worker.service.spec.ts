@@ -7,7 +7,6 @@ import {
 } from '@prisma/support-client';
 import type { ConsumeMessage } from 'amqplib';
 import { createHash } from 'node:crypto';
-import type { SupportOwnershipService } from '../ownership/support-ownership.service';
 import type { SupportPrismaService } from '../prisma/support-prisma.service';
 import type { SupportRuntimeService } from '../runtime/support-runtime.service';
 import { SupportTelegramError } from '../telegram/support-telegram.transport';
@@ -204,10 +203,7 @@ function setup(fixture: MessageFixture) {
 			workerEnabled: true
 		} as SupportRuntimeService,
 		rabbit,
-		outbound,
-		{
-			isActive: jest.fn().mockResolvedValue(true)
-		} as unknown as SupportOwnershipService
+		outbound
 	);
 	const handle = (service as unknown as WorkerHandle).handle.bind(service);
 	return {

@@ -1,5 +1,4 @@
 import { Module, OnApplicationShutdown } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { AvatarStorageService } from './avatar/avatar-storage.service';
@@ -34,10 +33,6 @@ import { IdentityPrismaService } from './prisma/identity-prisma.service';
 import { IdentityHeartbeatService } from './runtime/identity-heartbeat.service';
 import { IdentityHousekeepingService } from './runtime/identity-housekeeping.service';
 import { IdentityRuntimeModule } from './runtime/identity-runtime.module';
-import {
-	IdentityOwnershipGuard,
-	IdentityOwnershipService
-} from './runtime/identity-ownership.service';
 import { parseIdentityProcessRole } from './runtime/identity-runtime.service';
 import {
 	TelegramAdminController,
@@ -102,8 +97,6 @@ const API_PROVIDERS =
 	providers: [
 		...API_PROVIDERS,
 		IdentityEventsService,
-		IdentityOwnershipService,
-		{ provide: APP_GUARD, useClass: IdentityOwnershipGuard },
 		IdentityRabbitMqService,
 		DestinationUnavailableWorkerService,
 		IdentityOutboxPublisherService,

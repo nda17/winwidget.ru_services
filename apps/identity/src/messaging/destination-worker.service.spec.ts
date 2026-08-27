@@ -53,13 +53,22 @@ function worker() {
 		prisma as any,
 		{ workerEnabled: true } as any,
 		rabbit as any,
-		{ emitUserChanged: jest.fn() } as any,
-		{ isActive: jest.fn().mockResolvedValue(true) } as any
+		{ emitUserChanged: jest.fn() } as any
 	);
 	return { service, prisma, transaction, rabbit };
 }
 
 describe('destination unavailable consumer contract', () => {
+	it('attaches immediately when the worker role starts', async () => {
+		const value = worker();
+		value.rabbit.consume.mockResolvedValue(undefined);
+
+		await value.service.onModuleInit();
+
+		expect(value.rabbit.consume).toHaveBeenCalledTimes(1);
+		expect(value.service.isReady()).toBe(true);
+	});
+
 	it('uses a stable semantic hash across key order and JSONB round-trips', () => {
 		const first = {
 			eventType: DESTINATION_EVENT,

@@ -183,6 +183,146 @@ for (const app of apps) {
 	}
 }
 
+const operationsPackage = JSON.parse(
+	readFileSync('apps/operations/package.json', 'utf8')
+);
+for (const script of [
+	'cutover:status',
+	'cutover:import',
+	'cutover:activate',
+	'control-plane:bootstrap'
+]) {
+	if (Object.hasOwn(operationsPackage.scripts ?? {}, script)) {
+		throw new Error(`retired Operations package script remains: ${script}`);
+	}
+}
+
+const operationsSchema = readFileSync(
+	'apps/operations/prisma/schema.prisma',
+	'utf8'
+);
+for (const retiredState of [
+	'OperationsOwnershipState',
+	'OperationsControlPlaneBootstrapState',
+	'OperationsDatabasePhase'
+]) {
+	if (operationsSchema.includes(retiredState)) {
+		throw new Error(`retired Operations state remains: ${retiredState}`);
+	}
+}
+for (const currentIdentityField of [
+	'model ServiceIdentity',
+	'@map("service_name")',
+	'@map("database_id")'
+]) {
+	if (!operationsSchema.includes(currentIdentityField)) {
+		throw new Error(
+			`Operations database identity is missing: ${currentIdentityField}`
+		);
+	}
+}
+
+for (const app of ['billing', 'identity']) {
+	const schema = readFileSync(`apps/${app}/prisma/schema.prisma`, 'utf8');
+	for (const retiredState of [
+		'ServiceDatabasePhase',
+		'ownershipGeneration',
+		'sourceFingerprint',
+		'importedAt',
+		'activatedAt'
+	]) {
+		if (schema.includes(retiredState)) {
+			throw new Error(
+				`retired ${app} database activation state remains: ${retiredState}`
+			);
+		}
+	}
+	for (const currentIdentityField of [
+		'model ServiceIdentity',
+		'@map("service_name")',
+		'@map("database_id")',
+		'@unique(map: "service_identity_database_id_key")'
+	]) {
+		if (!schema.includes(currentIdentityField)) {
+			throw new Error(
+				`${app} database identity is missing: ${currentIdentityField}`
+			);
+		}
+	}
+}
+
+const databaseActivationCleanupMigrations = {
+	billing: readFileSync(
+		'apps/billing/prisma/migrations/20260827020000_remove_legacy_ownership_state/migration.sql',
+		'utf8'
+	),
+	identity: readFileSync(
+		'apps/identity/prisma/migrations/20260827020000_remove_legacy_ownership_state/migration.sql',
+		'utf8'
+	)
+};
+for (const statement of [
+	'DROP TABLE "billing"."billing_ownership_marker"',
+	'DROP FUNCTION "billing"."enforce_ownership_forward_only"()',
+	'DROP FUNCTION "billing"."enforce_service_identity"()',
+	'DROP TYPE "billing"."BillingOwnershipPhase"',
+	'DROP TYPE "billing"."ServiceDatabasePhase"',
+	'CREATE UNIQUE INDEX "service_identity_database_id_key"'
+]) {
+	if (!databaseActivationCleanupMigrations.billing.includes(statement)) {
+		throw new Error(`Billing database cleanup migration drifted: ${statement}`);
+	}
+}
+for (const statement of [
+	'DROP TYPE "identity"."ServiceDatabasePhase"',
+	'ADD CONSTRAINT "service_identity_singleton_check"',
+	'CREATE UNIQUE INDEX "service_identity_database_id_key"'
+]) {
+	if (!databaseActivationCleanupMigrations.identity.includes(statement)) {
+		throw new Error(`Identity database cleanup migration drifted: ${statement}`);
+	}
+}
+
+const billingRuntime = [
+	'apps/billing/src/messaging/billing-worker.service.ts',
+	'apps/billing/src/provider/billing-provider-worker.service.ts',
+	'apps/billing/src/scheduler/billing-scheduler.service.ts'
+]
+	.map(path => readFileSync(path, 'utf8'))
+	.join('\n');
+if (
+	billingRuntime.includes('billingOwnershipMarker') ||
+	billingRuntime.includes('ownershipActive')
+) {
+	throw new Error('retired Billing database activation gate remains');
+}
+
+const identityRuntime = [
+	'apps/identity/src/avatar/avatar-cleanup.service.ts',
+	'apps/identity/src/health/identity-health.service.ts',
+	'apps/identity/src/messaging/destination-worker.service.ts',
+	'apps/identity/src/messaging/outbox-publisher.service.ts',
+	'apps/identity/src/runtime/identity-housekeeping.service.ts'
+]
+	.map(path => readFileSync(path, 'utf8'))
+	.join('\n');
+if (
+	identityRuntime.includes('IdentityOwnership') ||
+	identityRuntime.includes('health/ownership')
+) {
+	throw new Error('retired Identity database activation gate remains');
+}
+
+for (const app of apps) {
+	const appPackage = JSON.parse(
+		readFileSync(`apps/${app}/package.json`, 'utf8')
+	);
+	const localStart = appPackage.scripts?.['start:local'];
+	if (typeof localStart === 'string' && localStart.includes('../../.env')) {
+		throw new Error(`service reads the retired root env: ${app}`);
+	}
+}
+
 for (const path of [
 	'src',
 	'prisma',
@@ -197,6 +337,8 @@ for (const path of [
 	'apps/billing/src/cutover',
 	'apps/billing/src/cutover-main.ts',
 	'apps/identity/src/cutover',
+	'apps/identity/src/runtime/identity-ownership.service.ts',
+	'apps/operations/src/cutover',
 	'apps/platform/src/cutover',
 	'apps/support/src/cutover',
 	'apps/widgets/src/cutover-main.ts'

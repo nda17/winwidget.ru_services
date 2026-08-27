@@ -1,8 +1,9 @@
 # Сервис Operations
 
-После прямого cutover с Core сервис Operations владеет операционной плоскостью
-управления WinWidget. В runtime он не читает Core и не реализует dual-read,
-устаревшие маршруты или миграцию исторических заданий.
+Сервис Operations владеет операционной плоскостью управления WinWidget,
+использует собственную БД и только актуальные service-owned HTTP/event
+контракты. Готовность определяется доступностью собственной БД, RabbitMQ и
+включённых для роли workers без внешних import/bootstrap-маркеров.
 
 ## Ответственность
 
@@ -88,7 +89,7 @@ Payload маршрутизации уведомлений имеет точны�
 
 Скопируйте `.env.example` в отдельный `.env.production` сервиса на VPS и
 заполните секретами развёртывания. `.env.production` игнорируется Git. Оставьте
-только переменные, необходимые Operations; не используйте токены Core повторно.
+только переменные и отдельные scoped credentials, необходимые Operations.
 
 Operations использует один глобальный `OperationsPrismaModule` и один пул
 Prisma Client на процесс. Примените миграции до запуска новой ревизии:
@@ -123,52 +124,6 @@ Production-трафик Telegram сохраняет установленный �
 `operations-worker`, отправляющий резервные копии, получает токен бота и
 сопоставление proxy host. `operations-api` получает только несекретный флаг
 состояния `TELEGRAM_INFO_BOT_CONFIGURED=true` и публичное имя бота.
-
-## Одноразовая инициализация прямого cutover
-
-До остановки Core экспортируйте только текущий singleton настроек Telegram и
-текущий anchor политики расписания Reporting в строгую схему, принимаемую
-`parseControlPlaneSnapshot`. История и задания из очередей не импортируются.
-После перехода строки владения Operations в состояние `ACTIVE` запустите
-скомпилированный CLI с неизменяемым файлом и независимо вычисленным SHA-256:
-
-```json
-{
-	"schemaVersion": 1,
-	"sourceRevision": "<40 lowercase git hex>",
-	"createdAt": "<ISO-8601>",
-	"telegramBotSettings": {
-		"dailySummaryChatId": "<current value>",
-		"databaseBackupThreadId": null,
-		"paymentsThreadId": null,
-		"operationalAlertsThreadId": null,
-		"databaseBackupEnabled": false,
-		"databaseBackupTime": "01:45",
-		"databaseBackupLastSentPeriodStart": null,
-		"databaseBackupLastSentAt": null
-	},
-	"reportingSchedulePolicy": {
-		"reservationTime": "01:50",
-		"reservationGeneration": "0",
-		"confirmedChangeId": null,
-		"pendingChangeId": null,
-		"pendingTime": null,
-		"pendingGeneration": null
-	}
-}
-```
-
-Используйте текущие значения Core во всех полях; пример задаёт форму контракта,
-а не production-значения по умолчанию. Импортёр отклоняет дополнительные поля,
-частичные pending reservations, несогласованные настройки Telegram, конфликты
-расписания и любую непустую целевую базу.
-
-```bash
-pnpm control-plane:bootstrap -- --file /absolute/path/control-plane.json --sha256 <hex>
-```
-
-Команда атомарна, требует чистую целевую базу и идемпотентна только для той же
-исходной ревизии и hash. После этого runtime-код никогда не читает Core.
 
 ## Проверка
 

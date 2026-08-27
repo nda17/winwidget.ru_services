@@ -4,6 +4,7 @@ import {
 	ValidationPipe
 } from '@nestjs/common';
 import {
+	Role,
 	VerificationChallengePurpose,
 	VerificationChallengeType
 } from '@prisma/identity-client';
@@ -12,8 +13,11 @@ import type { Request, Response } from 'express';
 import { PASSWORD_SALT_ROUNDS } from '../common/identity.util';
 import { AuthController } from './auth.controller';
 import { AuthDto } from './auth.dto';
+import { IdentityAuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { RefreshTokenService } from './refresh-token.service';
+
+const SESSION_ID = '00000000-0000-4000-8000-000000000001';
 
 function request(cookies: Record<string, string> = {}) {
 	return { cookies } as Request;
@@ -53,16 +57,18 @@ function service(overrides: Record<string, any> = {}) {
 		smsPassword: jest.fn(),
 		...overrides.transport
 	};
+	const refreshTokens = new RefreshTokenService();
+	const jwt = { issue: jest.fn(), ...overrides.jwt };
 	const auth = new AuthService(
 		prisma as any,
 		users as any,
-		{ issue: jest.fn() } as any,
-		new RefreshTokenService(),
+		jwt as any,
+		refreshTokens,
 		{ emitUserChanged: jest.fn(), emitBillingRequest: jest.fn() } as any,
 		transport as any,
 		{ ensureTrial: jest.fn() } as any
 	);
-	return { auth, prisma, users, transport };
+	return { auth, prisma, users, transport, refreshTokens, jwt };
 }
 
 describe('public auth frozen contracts', () => {
@@ -247,5 +253,65 @@ describe('refresh cookie fail-closed contract', () => {
 		const all = response();
 		await expect(controller.revokeAll('user', all)).resolves.toBe(true);
 		expect(all.cookie).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('revoked session fail-closed contract', () => {
+	it('rejects the pre-change refresh token after its session is revoked', async () => {
+		const value = service();
+		const token = value.refreshTokens.create(SESSION_ID);
+		value.prisma.userSession.findUnique.mockResolvedValue({
+			id: SESSION_ID,
+			revokedAt: new Date(),
+			expiresAt: new Date(Date.now() + 60_000),
+			refreshTokenHash: 'revoked-token-hash'
+		});
+
+		await expect(value.auth.refresh(token)).rejects.toEqual(
+			new UnauthorizedException('Invalid refresh token')
+		);
+		expect(value.prisma.userSession.updateMany).not.toHaveBeenCalled();
+		expect(value.jwt.issue).not.toHaveBeenCalled();
+	});
+
+	it('rejects the pre-change bearer token when its session is revoked', async () => {
+		const prisma = {
+			userSession: { findFirst: jest.fn().mockResolvedValue(null) }
+		};
+		const jwt = {
+			verify: jest.fn().mockReturnValue({
+				sub: 'user-id',
+				sid: SESSION_ID
+			})
+		};
+		const guard = new IdentityAuthGuard(
+			{
+				getAllAndOverride: jest.fn().mockReturnValue([Role.USER])
+			} as any,
+			jwt as any,
+			prisma as any
+		);
+		const context = {
+			getHandler: jest.fn(),
+			getClass: jest.fn(),
+			switchToHttp: () => ({
+				getRequest: () => ({
+					headers: { authorization: 'Bearer access-token' }
+				})
+			})
+		};
+
+		await expect(guard.canActivate(context as any)).rejects.toEqual(
+			new UnauthorizedException('Invalid session')
+		);
+		expect(prisma.userSession.findFirst).toHaveBeenCalledWith({
+			where: {
+				id: SESSION_ID,
+				userId: 'user-id',
+				revokedAt: null,
+				expiresAt: { gt: expect.any(Date) }
+			},
+			include: { user: true }
+		});
 	});
 });

@@ -2,8 +2,8 @@
 
 Reporting владеет агрегированной аналитикой, настройками и запусками Daily
 Summary, своей схемой PostgreSQL, проекциями, transactional Outbox,
-состоянием retry/DLQ и результатами доставки. У сервиса нет HTTP- или
-snapshot-зависимости от выведенного из эксплуатации runtime Core.
+состоянием retry/DLQ и результатами доставки. Сервис использует только
+актуальные service-owned HTTP/event contracts.
 
 ## Границы runtime
 
@@ -21,10 +21,6 @@ snapshot-зависимости от выведенного из эксплуа�
   очереди RabbitMQ. Reporting публикует запросы доставки Daily Summary и
   события аудита администратора через transactional Outbox.
 
-Устаревший backfill snapshot Core и роли shadow-evidence намеренно удалены.
-Повторное воспроизведение исторических snapshot и алиасы совместимости не
-входят в штатный сервис.
-
 ## Роли процессов
 
 `REPORTING_PROCESS_ROLE` принимает только:
@@ -39,15 +35,14 @@ Production-развёртывание на одном VPS сейчас испо�
 `REPORTING_SCHEDULER_ENABLED=true` только для процесса, который владеет
 запусками Daily Summary по расписанию.
 
-## Прямой cutover RabbitMQ
+## RabbitMQ
 
 Надёжная очередь `winwidget.reporting.settings` сохраняет имя, но её
-единственным source binding теперь является
-`operations.notification-routing.changed.v1`. Во время cutover удалите
-выведенный из эксплуатации binding Core. Пересоздайте
-`winwidget.reporting.settings.retry.1`, `.retry.2` и `.retry.3`, поскольку их
-неизменяемый dead-letter routing key меняется на событие Operations.
-Исторические сообщения из выведенных маршрутов намеренно не воспроизводятся.
+единственным source binding является
+`operations.notification-routing.changed.v1`. Retry-очереди
+`winwidget.reporting.settings.retry.1`, `.retry.2` и `.retry.3` возвращают
+сообщения в этот же Operations-owned маршрут. Другие source bindings в штатной
+топологии запрещены.
 
 ## Настройка
 

@@ -81,11 +81,10 @@ export class UsersController {
 	@Auth(Role.USER)
 	updateProfile(
 		@CurrentUser('id') userId: string,
-		@CurrentUser('sessionId') sessionId: string,
 		@Body() dto: UpdateProfileDto,
 		@Req() request: Request
 	) {
-		return this.users.updateProfile(userId, sessionId, dto, request);
+		return this.users.updateProfile(userId, dto, request);
 	}
 
 	@Put('profile/avatar')

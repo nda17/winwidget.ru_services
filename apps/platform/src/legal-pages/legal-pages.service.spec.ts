@@ -12,16 +12,10 @@ const actor = {
 
 const activeProducer = (): BillingOfferProducerState => ({
 	id: 'offer',
-	phase: 'ACTIVE' as const,
 	producerContractVersion: 2,
 	sourceSequenceScope: 'billing.offer:offer',
-	importedAggregateVersion: 41n,
-	importedSourceSequence: 870n,
 	currentAggregateVersion: 41n,
 	currentSourceSequence: 870n,
-	sourceFenceFingerprint: 'a'.repeat(64),
-	importedAt: new Date('2026-08-23T10:00:00.000Z'),
-	activatedAt: new Date('2026-08-23T10:01:00.000Z'),
 	createdAt: new Date('2026-08-23T10:00:00.000Z'),
 	updatedAt: new Date('2026-08-23T10:01:00.000Z')
 });
@@ -91,24 +85,33 @@ describe('PlatformLegalPagesService offer continuity', () => {
 
 	afterEach(() => jest.restoreAllMocks());
 
-	it('rejects BLOCKED before any legal-page, sequence or Outbox write', async () => {
+	it('publishes the first offer event from a fresh apps-only cursor', async () => {
 		const tx = transaction({
 			...activeProducer(),
-			phase: 'BLOCKED',
-			activatedAt: null
+			currentAggregateVersion: 0n,
+			currentSourceSequence: 0n
 		});
 		const current = service(tx);
 
-		await expect(
-			current.value.update(
-				'oferta',
-				{ content: '<p>offer</p>' },
-				{ actor }
-			)
-		).rejects.toBeInstanceOf(ServiceUnavailableException);
-		expect(tx.platformSourceSequence.upsert).not.toHaveBeenCalled();
-		expect(tx.legalPage.upsert).not.toHaveBeenCalled();
-		expect(tx.outboxEvent.create).not.toHaveBeenCalled();
+		await current.value.update(
+			'oferta',
+			{ content: '<p>offer</p>' },
+			{ actor }
+		);
+
+		expect(tx.billingOfferProducerState.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					currentAggregateVersion: 0n,
+					currentSourceSequence: 0n
+				}),
+				data: {
+					currentAggregateVersion: 1n,
+					currentSourceSequence: 1n
+				}
+			})
+		);
+		expect(tx.outboxEvent.create).toHaveBeenCalledTimes(2);
 	});
 
 	it('atomically advances only the scoped offer cursor and enqueues v2', async () => {
@@ -124,12 +127,10 @@ describe('PlatformLegalPagesService offer continuity', () => {
 		expect(tx.billingOfferProducerState.updateMany).toHaveBeenCalledWith({
 			where: expect.objectContaining({
 				id: 'offer',
-				phase: 'ACTIVE',
 				producerContractVersion: 2,
 				sourceSequenceScope: 'billing.offer:offer',
 				currentAggregateVersion: 41n,
-				currentSourceSequence: 870n,
-				sourceFenceFingerprint: 'a'.repeat(64)
+				currentSourceSequence: 870n
 			}),
 			data: {
 				currentAggregateVersion: 42n,
@@ -174,5 +175,56 @@ describe('PlatformLegalPagesService offer continuity', () => {
 			1
 		);
 		expect(tx.outboxEvent.create).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('PlatformLegalPagesService HTML sanitation boundary', () => {
+	it('sanitizes legal HTML before persisting an admin write', async () => {
+		const tx = transaction();
+		const current = service(tx);
+
+		await current.value.update(
+			'personal-policy',
+			{
+				content: '<p onclick="alert(1)">Safe</p><script>alert(1)</script>'
+			},
+			{ actor }
+		);
+
+		expect(tx.legalPage.upsert).toHaveBeenCalledWith({
+			where: { slug: 'personal-policy' },
+			create: {
+				slug: 'personal-policy',
+				content: '<p>Safe</p>',
+				aggregateVersion: 1n,
+				sourceSequence: 17n
+			},
+			update: {
+				content: '<p>Safe</p>',
+				aggregateVersion: { increment: 1n },
+				sourceSequence: 17n
+			}
+		});
+	});
+
+	it('sanitizes stored legacy HTML again on the public read path', async () => {
+		const updatedAt = new Date('2026-08-23T12:00:00.000Z');
+		const prisma = {
+			legalPage: {
+				findUnique: jest.fn().mockResolvedValue({
+					slug: 'personal-policy',
+					content:
+						'<p onclick="alert(1)">Safe</p><a href="javascript:alert(1)">link</a>',
+					updatedAt
+				})
+			}
+		};
+		const value = new PlatformLegalPagesService(prisma as never);
+
+		await expect(value.getBySlug('personal-policy')).resolves.toEqual({
+			slug: 'personal-policy',
+			content: '<p>Safe</p><a>link</a>',
+			updatedAt: updatedAt.toISOString()
+		});
 	});
 });

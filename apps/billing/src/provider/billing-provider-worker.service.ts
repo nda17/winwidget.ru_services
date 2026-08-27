@@ -17,7 +17,11 @@ import { PaymentSuccessTransaction } from '../domain/payment-success.transaction
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
 import { BillingRuntimeService } from '../runtime/billing-runtime.service';
 import { PaymentMethodCryptoService } from './payment-method-crypto.service';
-import { ProviderRequestError, YooKassaService } from './yookassa.service';
+import {
+	isYooKassaObjectId,
+	ProviderRequestError,
+	YooKassaService
+} from './yookassa.service';
 
 const POLL_INTERVAL_MS = 1_000;
 const LEASE_MS = 45_000;
@@ -54,11 +58,10 @@ export class BillingProviderWorkerService
 	}
 
 	async processOne(): Promise<boolean> {
-		if (!(await this.ownershipActive())) return false;
 		const operation = await this.claim();
 		if (!operation) return false;
 		try {
-			await this.process(operation);
+			const completed = await this.process(operation);
 			await this.prisma.providerOperation.updateMany({
 				where: {
 					id: operation.id,
@@ -66,7 +69,12 @@ export class BillingProviderWorkerService
 					leaseToken: operation.leaseToken
 				},
 				data: {
-					status: ProviderOperationStatus.SUCCEEDED,
+					status: completed
+						? ProviderOperationStatus.SUCCEEDED
+						: ProviderOperationStatus.PENDING,
+					...(completed
+						? {}
+						: { availableAt: this.nextVerificationAt(operation.attempt) }),
 					leaseToken: null,
 					leaseUntil: null,
 					lastErrorCode: null,
@@ -143,20 +151,26 @@ export class BillingProviderWorkerService
 		});
 	}
 
-	private async process(operation: any): Promise<void> {
+	private async process(operation: any): Promise<boolean> {
 		if (operation.kind === ProviderOperationKind.SYNC_RECEIPT) {
 			await this.syncReceipt(operation);
-			return;
+			return true;
 		}
 		if (operation.kind === ProviderOperationKind.VERIFY_PAYMENT) {
 			const providerPaymentId =
 				operation.providerPaymentId ||
 				this.stringField(operation.payload, 'providerPaymentId');
-			if (!providerPaymentId)
-				throw new Error('Provider payment ID is missing');
+			if (!isYooKassaObjectId(providerPaymentId)) {
+				throw new ProviderRequestError(
+					'Provider payment ID is invalid',
+					'PROVIDER_PAYMENT_ID_INVALID',
+					false,
+					false
+				);
+			}
 			const response = await this.provider.getPayment(providerPaymentId);
-			await this.applyProviderResponse(operation, response);
-			return;
+			const status = await this.applyProviderResponse(operation, response);
+			return status === 'succeeded' || status === 'canceled';
 		}
 		if (
 			operation.kind !== ProviderOperationKind.CREATE_CHECKOUT &&
@@ -167,8 +181,9 @@ export class BillingProviderWorkerService
 		if (!operation.payment)
 			throw new Error('Provider operation payment is missing');
 		const response = await this.createProviderPaymentUnderFence(operation);
-		if (!response) return;
+		if (!response) return true;
 		await this.applyProviderResponse(operation, response);
+		return true;
 	}
 
 	private async createProviderPaymentUnderFence(
@@ -347,18 +362,35 @@ export class BillingProviderWorkerService
 	private async applyProviderResponse(
 		operation: any,
 		response: Record<string, unknown>
-	): Promise<void> {
-		const providerPaymentId = this.requiredString(response, 'id');
+	): Promise<string> {
+		const providerPaymentId = this.providerObjectId(response, 'id');
+		const expectedProviderPaymentId =
+			operation.providerPaymentId ||
+			this.stringField(operation.payload, 'providerPaymentId');
+		if (
+			expectedProviderPaymentId &&
+			providerPaymentId !== expectedProviderPaymentId
+		) {
+			throw new ProviderRequestError(
+				'Provider response ID does not match operation',
+				'PROVIDER_PAYMENT_ID_MISMATCH',
+				false,
+				false
+			);
+		}
 		const status = this.requiredString(response, 'status');
 		const amount = this.record(response.amount);
 		const value = this.requiredString(amount, 'value');
 		const currency = this.requiredString(amount, 'currency');
 		const metadata = this.record(response.metadata);
-		const metadataPaymentId = this.requiredString(metadata, 'paymentId');
+		const metadataPaymentId = this.localPaymentId(metadata, 'paymentId');
 		const localPaymentId = operation.paymentId || metadataPaymentId;
 		if (metadataPaymentId !== localPaymentId) {
-			throw new Error(
-				'Provider metadata paymentId does not match operation'
+			throw new ProviderRequestError(
+				'Provider metadata paymentId does not match operation',
+				'PROVIDER_PAYMENT_BINDING_MISMATCH',
+				false,
+				false
 			);
 		}
 		const payment =
@@ -366,8 +398,14 @@ export class BillingProviderWorkerService
 			(await this.prisma.payment.findUnique({
 				where: { id: localPaymentId }
 			}));
-		if (!payment)
-			throw new Error('Late provider payment has no local match');
+		if (!payment) {
+			throw new ProviderRequestError(
+				'Late provider payment has no local match',
+				'LOCAL_PAYMENT_NOT_FOUND',
+				false,
+				false
+			);
+		}
 		if (payment.amount !== value || payment.currency !== currency) {
 			throw new Error(
 				'Provider payment amount or currency does not match'
@@ -397,7 +435,7 @@ export class BillingProviderWorkerService
 					typeof card.last4 === 'string' ? card.last4 : null,
 				providerSnapshot: response
 			});
-			return;
+			return status;
 		}
 		if (status === 'canceled') {
 			const cancellation = this.record(response.cancellation_details);
@@ -411,7 +449,7 @@ export class BillingProviderWorkerService
 				status,
 				reason
 			);
-			return;
+			return status;
 		}
 		const confirmation = this.record(response.confirmation);
 		await this.payments.bindProviderState(payment.id, {
@@ -425,13 +463,19 @@ export class BillingProviderWorkerService
 			providerExpiresAt: this.dateField(response, 'expires_at'),
 			providerSnapshot: response
 		});
+		return status;
 	}
 
 	private async syncReceipt(operation: any): Promise<void> {
 		const providerPaymentId =
 			operation.providerPaymentId || operation.payment?.yookassaId;
-		if (!providerPaymentId) {
-			throw new Error('Receipt operation is incomplete');
+		if (!isYooKassaObjectId(providerPaymentId)) {
+			throw new ProviderRequestError(
+				'Receipt operation provider payment ID is invalid',
+				'PROVIDER_PAYMENT_ID_INVALID',
+				false,
+				false
+			);
 		}
 		const paymentId =
 			operation.paymentId ||
@@ -453,7 +497,7 @@ export class BillingProviderWorkerService
 		const items = Array.isArray(response.items) ? response.items : [];
 		for (const raw of items) {
 			const receipt = this.record(raw);
-			const receiptId = this.requiredString(receipt, 'id');
+			const receiptId = this.providerObjectId(receipt, 'id');
 			const fiscal = this.record(receipt.fiscal_document);
 			await this.prisma.paymentReceipt.upsert({
 				where: { providerReceiptId: receiptId },
@@ -550,14 +594,6 @@ export class BillingProviderWorkerService
 		}
 	}
 
-	private async ownershipActive(): Promise<boolean> {
-		const marker = await this.prisma.billingOwnershipMarker.findUnique({
-			where: { id: 'singleton' },
-			select: { phase: true }
-		});
-		return marker?.phase === 'ACTIVE' || marker?.phase === 'COMPLETE';
-	}
-
 	private record(value: unknown): Record<string, any> {
 		return value && typeof value === 'object' && !Array.isArray(value)
 			? (value as Record<string, any>)
@@ -580,6 +616,49 @@ export class BillingProviderWorkerService
 		key: string
 	): string | null {
 		return typeof value[key] === 'string' ? (value[key] as string) : null;
+	}
+
+	private providerObjectId(
+		value: Record<string, unknown>,
+		key: string
+	): string {
+		const result = value[key];
+		if (!isYooKassaObjectId(result)) {
+			throw new ProviderRequestError(
+				`Provider response ${key} is invalid`,
+				'PROVIDER_OBJECT_ID_INVALID',
+				false,
+				false
+			);
+		}
+		return result;
+	}
+
+	private localPaymentId(
+		value: Record<string, unknown>,
+		key: string
+	): string {
+		const result = value[key];
+		if (
+			typeof result !== 'string' ||
+			!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(result)
+		) {
+			throw new ProviderRequestError(
+				`Provider metadata ${key} is invalid`,
+				'PROVIDER_METADATA_PAYMENT_ID_INVALID',
+				false,
+				false
+			);
+		}
+		return result;
+	}
+
+	private nextVerificationAt(attempt: number): Date {
+		const delay = Math.min(
+			60_000 * 2 ** Math.min(Math.max(attempt, 0), 5),
+			30 * 60_000
+		);
+		return new Date(Date.now() + delay);
 	}
 
 	private stringField(value: unknown, key: string): string | undefined {

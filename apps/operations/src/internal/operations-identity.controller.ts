@@ -7,21 +7,16 @@ import {
 	UseGuards
 } from '@nestjs/common';
 import { AdminEventLogService } from '../admin-event-log/admin-event-log.service';
-import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 import { OperationsIdentityGuard } from './operations-identity.guard';
 
 @Controller('internal/v1/identity')
 @UseGuards(OperationsIdentityGuard)
 export class OperationsIdentityController {
-	constructor(
-		private readonly adminEvents: AdminEventLogService,
-		private readonly ownership: OperationsOwnershipService
-	) {}
+	constructor(private readonly adminEvents: AdminEventLogService) {}
 
 	@Get('users/:userId/admin-events/overview')
 	@HttpCode(200)
 	async activity(@Param('userId') userId: string) {
-		await this.ownership.assertActive();
 		if (
 			!userId ||
 			userId.length > 256 ||

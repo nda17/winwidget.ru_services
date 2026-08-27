@@ -30,9 +30,14 @@ export class BillingHealthService {
 			await this.prisma.$queryRaw`SELECT 1`;
 			const identity = await this.prisma.serviceIdentity.findUnique({
 				where: { id: 'singleton' },
-				select: { serviceName: true }
+				select: { serviceName: true, databaseId: true }
 			});
-			if (identity?.serviceName !== 'billing-service') throw new Error();
+			if (
+				identity?.serviceName !== 'billing-service' ||
+				!identity.databaseId
+			) {
+				throw new Error();
+			}
 		} catch {
 			throw new ServiceUnavailableException(
 				'Billing database is not ready'

@@ -2,11 +2,16 @@ import { OperationsRuntimeService } from '../runtime/operations-runtime.service'
 import { OperationsHealthService } from './operations-health.service';
 
 describe('OperationsHealthService', () => {
-	it('is ready while ownership is staged and business traffic remains fenced', async () => {
-		const ownership = { isActive: jest.fn().mockResolvedValue(false) };
+	it('is ready when the database and enabled workers are ready', async () => {
 		const service = new OperationsHealthService(
 			{
-				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }])
+				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+				serviceIdentity: {
+					findUnique: jest.fn().mockResolvedValue({
+						serviceName: 'operations-service',
+						databaseId: '11111111-1111-4111-8111-111111111111'
+					})
+				}
 			} as never,
 			{
 				role: 'worker',
@@ -20,7 +25,6 @@ describe('OperationsHealthService', () => {
 			} as never,
 			{ isReady: jest.fn().mockReturnValue(true) } as never,
 			{ isReady: jest.fn().mockReturnValue(true) } as never,
-			ownership as never,
 			{ isReady: jest.fn().mockReturnValue(true) } as never,
 			{ isReady: jest.fn().mockReturnValue(true) } as never,
 			{ isReady: jest.fn().mockReturnValue(true) } as never,
@@ -32,6 +36,5 @@ describe('OperationsHealthService', () => {
 		await expect(service.readiness()).resolves.toEqual(
 			expect.objectContaining({ status: 'ready', service: 'operations' })
 		);
-		expect(ownership.isActive).toHaveBeenCalledTimes(1);
 	});
 });

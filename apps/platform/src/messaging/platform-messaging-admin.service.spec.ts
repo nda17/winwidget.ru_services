@@ -37,7 +37,13 @@ describe('PlatformMessagingAdminService', () => {
 					service: 'platform',
 					role,
 					revision: 'a'.repeat(40),
-					ownership: { phase: 'ACTIVE' }
+					database: {
+						serviceName: 'platform-service',
+						databaseId: '11111111-1111-4111-8111-111111111111',
+						currentSemanticFingerprint: 'b'.repeat(64),
+						createdAt: '2026-08-24T10:00:00.000Z',
+						updatedAt: '2026-08-24T11:00:00.000Z'
+					}
 				}),
 				{ status: 200, headers: { 'content-type': 'application/json' } }
 			);

@@ -8,7 +8,6 @@ import { AvatarMediaObjectStatus } from '@prisma/identity-client';
 import { randomUUID } from 'node:crypto';
 import { safeError } from '../common/identity.util';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
-import { IdentityOwnershipService } from '../runtime/identity-ownership.service';
 import { AvatarStorageService } from './avatar-storage.service';
 
 const LEASE_MS = 30_000;
@@ -27,7 +26,6 @@ export class AvatarCleanupService
 
 	constructor(
 		private readonly prisma: IdentityPrismaService,
-		private readonly ownership: IdentityOwnershipService,
 		private readonly storage: AvatarStorageService
 	) {}
 
@@ -49,7 +47,6 @@ export class AvatarCleanupService
 	}
 
 	async deleteNow(id: string): Promise<void> {
-		if (!(await this.ownership.isActive())) return;
 		await this.processOne(id);
 	}
 
@@ -65,7 +62,7 @@ export class AvatarCleanupService
 		if (this.running || this.stopping) return;
 		this.running = true;
 		try {
-			if (await this.ownership.isActive()) await this.runOnce();
+			await this.runOnce();
 		} catch {
 			this.logger.warn('Avatar cleanup tick failed');
 		} finally {

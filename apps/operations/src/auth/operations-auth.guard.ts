@@ -7,7 +7,6 @@ import {
 	UnauthorizedException
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { OperationsOwnershipService } from '../ownership/operations-ownership.service';
 import { IdentityIntrospectionClient } from './identity-introspection.client';
 import type {
 	OperationsRequest,
@@ -22,12 +21,10 @@ export const OperationsAuth = (roles: OperationsRole[] = []) =>
 export class OperationsAuthGuard implements CanActivate {
 	constructor(
 		private readonly reflector: Reflector,
-		private readonly identity: IdentityIntrospectionClient,
-		private readonly ownership: OperationsOwnershipService
+		private readonly identity: IdentityIntrospectionClient
 	) {}
 
 	async canActivate(context: ExecutionContext): Promise<boolean> {
-		await this.ownership.assertActive();
 		const request = context.switchToHttp().getRequest<OperationsRequest>();
 		const authorization = this.requireAuthorization(
 			request.headers.authorization

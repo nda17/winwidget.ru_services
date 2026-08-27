@@ -61,6 +61,42 @@ export class AdminPaymentCheckDto {
 	paymentId!: string;
 }
 
+export class DevResolveUnknownProviderPaymentDto {
+	@IsInt()
+	@Equals(1)
+	schemaVersion!: number;
+
+	@IsUUID()
+	commandId!: string;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(100)
+	paymentId!: string;
+
+	@IsIn(['PROVIDER_PAYMENT_NOT_FOUND'])
+	resolution!: 'PROVIDER_PAYMENT_NOT_FOUND';
+
+	@IsString()
+	@MinLength(3)
+	@MaxLength(1000)
+	reason!: string;
+
+	@IsBoolean()
+	@Equals(true)
+	providerReconciliationConfirmed!: true;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(100)
+	checkedMetadataPaymentId!: string;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(128)
+	checkedProviderIdempotencyKey!: string;
+}
+
 export class AdminAutoRenewalActionDto {
 	@IsString()
 	@MinLength(3)

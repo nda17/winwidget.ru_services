@@ -4,7 +4,7 @@ import { join } from 'node:path';
 const migration = readFileSync(
 	join(
 		__dirname,
-		'../../prisma/migrations/20260823000000_init_platform/migration.sql'
+		'../../prisma/migrations/20260827020000_remove_legacy_cutover_state/migration.sql'
 	),
 	'utf8'
 );

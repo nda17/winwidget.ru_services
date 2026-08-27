@@ -4,7 +4,6 @@ export const IDENTITY_GLOBAL_PREFIX_EXCLUDES = [
 	{ path: 'health/live', method: RequestMethod.ALL },
 	{ path: 'health/ready', method: RequestMethod.ALL },
 	{ path: 'health/revision', method: RequestMethod.ALL },
-	{ path: 'health/ownership', method: RequestMethod.ALL },
 	{ path: 'internal/v1/auth/introspect', method: RequestMethod.ALL },
 	{
 		path: 'internal/v1/widgets/owners/resolve',

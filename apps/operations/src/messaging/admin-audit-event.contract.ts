@@ -61,6 +61,7 @@ const WIDGET_ACTIONS = [
 ] as const;
 const BILLING_ACTIONS = [
 	'PAYMENT_MANUAL_CHECK',
+	'PAYMENT_UNKNOWN_PROVIDER_RESOLVED',
 	'PAYMENT_CLEANUP_RUN',
 	'TARIFF_PRICES_UPDATE',
 	'SUBSCRIPTION_ACTIVATE',
@@ -539,6 +540,9 @@ function mapStructured(
 		throw new Error('Support admin audit target user must be null');
 	}
 	const metadata = plainRecord(common.payload.metadata, 'metadata');
+	if (source === 'billing') {
+		validateBillingAudit(common.action, section, entity, metadata);
+	}
 	if (source === 'platform') {
 		validatePlatformAudit(common.action, entity, metadata);
 	}
@@ -604,6 +608,75 @@ function mapStructured(
 			}
 		}
 	};
+}
+
+function validateBillingAudit(
+	action: AdminEventLogAction,
+	section: string,
+	entity: Record<string, unknown>,
+	metadata: Record<string, unknown>
+): void {
+	if (action !== 'PAYMENT_UNKNOWN_PROVIDER_RESOLVED') return;
+	assertExactKeys(metadata, [
+		'paymentId',
+		'commandId',
+		'resolution',
+		'reason',
+		'previousStatus',
+		'previousProviderStatus',
+		'finalStatus',
+		'finalProviderStatus',
+		'providerOperationId',
+		'checkedMetadataPaymentId',
+		'providerIdempotencyKeySha256',
+		'providerReconciliationConfirmed',
+		'resolvedAt',
+		'actorRole',
+		'requestIp',
+		'requestUserAgent'
+	]);
+	const paymentId = boundedString(metadata.paymentId, 'paymentId', 100);
+	const checkedMetadataPaymentId = boundedString(
+		metadata.checkedMetadataPaymentId,
+		'checkedMetadataPaymentId',
+		100
+	);
+	const providerIdempotencyKeySha256 = boundedString(
+		metadata.providerIdempotencyKeySha256,
+		'providerIdempotencyKeySha256',
+		64
+	);
+	const resolvedAt = boundedString(metadata.resolvedAt, 'resolvedAt', 64);
+	uuid(metadata.commandId, 'commandId');
+	const reason = boundedString(metadata.reason, 'reason', 1_000);
+	boundedString(metadata.providerOperationId, 'providerOperationId', 128);
+	optionalString(metadata.requestIp, 'requestIp', 128);
+	optionalString(metadata.requestUserAgent, 'requestUserAgent', 500);
+	if (
+		section !== 'PAYMENTS' ||
+		entity.type !== 'payment' ||
+		entity.id !== paymentId ||
+		entity.label !== paymentId ||
+		typeof entity.targetUserId !== 'string' ||
+		!entity.targetUserId ||
+		metadata.actorRole !== 'DEV' ||
+		metadata.resolution !== 'PROVIDER_PAYMENT_NOT_FOUND' ||
+		metadata.previousStatus !== 'PENDING' ||
+		!['creating', 'unknown'].includes(
+			String(metadata.previousProviderStatus)
+		) ||
+		metadata.finalStatus !== 'CANCELLED' ||
+		metadata.finalProviderStatus !== 'not_found' ||
+		metadata.providerReconciliationConfirmed !== true ||
+		checkedMetadataPaymentId !== paymentId ||
+		reason.trim().length < 3 ||
+		!/^[0-9a-f]{64}$/.test(providerIdempotencyKeySha256) ||
+		Number.isNaN(Date.parse(resolvedAt))
+	) {
+		throw new Error(
+			'Billing unknown-provider resolution audit is invalid'
+		);
+	}
 }
 
 function validateSupportAudit(

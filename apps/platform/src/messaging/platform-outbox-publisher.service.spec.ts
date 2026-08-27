@@ -27,7 +27,6 @@ const event = () => ({
 });
 
 function publisher(options: {
-	active?: boolean;
 	claimCount?: number;
 	publishCount?: number;
 	releaseCount?: number;
@@ -56,21 +55,12 @@ function publisher(options: {
 			outboxPollIntervalMs: 1_000,
 			outboxBatchSize: 10
 		} as never,
-		rabbit as never,
-		{
-			isActive: jest.fn().mockResolvedValue(options.active ?? true)
-		} as never
+		rabbit as never
 	);
 	return { value, prisma, rabbit };
 }
 
 describe('PlatformOutboxPublisherService CAS', () => {
-	it('does not claim while ownership is SHADOW', async () => {
-		const current = publisher({ active: false });
-		await expect(current.value.publishOne()).resolves.toBe(false);
-		expect(current.prisma.outboxEvent.findFirst).not.toHaveBeenCalled();
-	});
-
 	it('rechecks availableAt in the claim CAS predicate', async () => {
 		const current = publisher({ claimCount: 0 });
 		await expect(current.value.publishOne()).resolves.toBe(false);

@@ -351,3 +351,235 @@ describe('BillingProviderWorkerService failure classification', () => {
 		expect(payments.markProviderCancelled).not.toHaveBeenCalled();
 	});
 });
+
+describe('BillingProviderWorkerService webhook re-verification', () => {
+	const localPayment = {
+		id: 'payment-1',
+		amount: '990.00',
+		currency: 'RUB'
+	};
+	const operation = {
+		id: 'webhook-operation-1',
+		kind: ProviderOperationKind.VERIFY_PAYMENT,
+		paymentId: null,
+		providerPaymentId: 'provider-payment-1',
+		payload: {
+			providerPaymentId: 'provider-payment-1',
+			source: 'webhook'
+		}
+	};
+
+	function harness(responses: Array<Record<string, unknown>>) {
+		const prisma = {
+			payment: {
+				findUnique: jest.fn().mockResolvedValue(localPayment)
+			}
+		};
+		const provider = {
+			getPayment: jest
+				.fn()
+				.mockImplementation(() => Promise.resolve(responses.shift()))
+		};
+		const payments = {
+			bindProviderState: jest.fn().mockResolvedValue(localPayment),
+			markProviderCancelled: jest.fn()
+		};
+		const success = {
+			apply: jest
+				.fn()
+				.mockResolvedValueOnce({ duplicate: false })
+				.mockResolvedValue({ duplicate: true })
+		};
+		const service = new BillingProviderWorkerService(
+			prisma as never,
+			{} as never,
+			provider as never,
+			{ encrypt: jest.fn() } as never,
+			payments as never,
+			success as never
+		);
+		const process = (candidate: typeof operation = operation) =>
+			(
+				service as unknown as {
+					process(value: typeof operation): Promise<boolean>;
+				}
+			).process(candidate);
+		return { process, prisma, provider, payments, success };
+	}
+
+	it('keeps a forged pre-trigger pending hint retryable and applies the later authenticated success once', async () => {
+		const value = harness([
+			{
+				id: 'provider-payment-1',
+				status: 'pending',
+				amount: { value: '990.00', currency: 'RUB' },
+				metadata: { paymentId: 'payment-1' }
+			},
+			{
+				id: 'provider-payment-1',
+				status: 'succeeded',
+				amount: { value: '990.00', currency: 'RUB' },
+				metadata: { paymentId: 'payment-1' },
+				payment_method: {}
+			}
+		]);
+
+		await expect(value.process()).resolves.toBe(false);
+		expect(value.success.apply).not.toHaveBeenCalled();
+		expect(value.payments.bindProviderState).toHaveBeenCalledWith(
+			'payment-1',
+			expect.objectContaining({
+				providerPaymentId: 'provider-payment-1',
+				providerStatus: 'pending'
+			})
+		);
+		expect(
+			value.provider.getPayment.mock.invocationCallOrder[0]
+		).toBeLessThan(
+			value.prisma.payment.findUnique.mock.invocationCallOrder[0]
+		);
+
+		await expect(value.process()).resolves.toBe(true);
+		expect(value.success.apply).toHaveBeenCalledTimes(1);
+		expect(value.success.apply).toHaveBeenCalledWith(
+			expect.objectContaining({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		);
+	});
+
+	it('requeues a non-terminal authenticated verification instead of marking terminal dedup', async () => {
+		let leaseToken: string | null = null;
+		const providerOperation = {
+			findFirst: jest.fn().mockResolvedValue({
+				...operation,
+				status: ProviderOperationStatus.PENDING,
+				availableAt: new Date(0),
+				createdAt: new Date()
+			}),
+			updateMany: jest.fn().mockImplementation(({ data }: any) => {
+				if (typeof data.leaseToken === 'string')
+					leaseToken = data.leaseToken;
+				return Promise.resolve({ count: 1 });
+			}),
+			findUniqueOrThrow: jest.fn().mockImplementation(() =>
+				Promise.resolve({
+					...operation,
+					status: ProviderOperationStatus.PROCESSING,
+					leaseToken,
+					attempt: 1,
+					payment: null,
+					createdAt: new Date()
+				})
+			)
+		};
+		const prisma = {
+			providerOperation,
+			payment: { findUnique: jest.fn().mockResolvedValue(localPayment) }
+		};
+		const provider = {
+			getPayment: jest.fn().mockResolvedValue({
+				id: 'provider-payment-1',
+				status: 'pending',
+				amount: { value: '990.00', currency: 'RUB' },
+				metadata: { paymentId: 'payment-1' }
+			})
+		};
+		const service = new BillingProviderWorkerService(
+			prisma as never,
+			{} as never,
+			provider as never,
+			{} as never,
+			{ bindProviderState: jest.fn() } as never,
+			{} as never
+		);
+
+		await expect(service.processOne()).resolves.toBe(true);
+
+		const completion = providerOperation.updateMany.mock.calls.at(-1)?.[0];
+		expect(completion).toEqual(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					status: ProviderOperationStatus.PROCESSING,
+					leaseToken
+				}),
+				data: expect.objectContaining({
+					status: ProviderOperationStatus.PENDING,
+					availableAt: expect.any(Date),
+					leaseToken: null
+				})
+			})
+		);
+	});
+
+	it('uses authenticated succeeded state after a forged canceled hint and never downgrades the payment', async () => {
+		const value = harness([
+			{
+				id: 'provider-payment-1',
+				status: 'succeeded',
+				amount: { value: '990.00', currency: 'RUB' },
+				metadata: { paymentId: 'payment-1' },
+				payment_method: {}
+			}
+		]);
+
+		await expect(value.process()).resolves.toBe(true);
+		expect(value.success.apply).toHaveBeenCalledTimes(1);
+		expect(value.payments.markProviderCancelled).not.toHaveBeenCalled();
+		expect(operation.payload).not.toHaveProperty('event');
+	});
+
+	it('rejects an unbounded provider payment ID before the authenticated provider GET', async () => {
+		const value = harness([]);
+		const invalidOperation = {
+			...operation,
+			providerPaymentId: '../invalid-provider-id',
+			payload: {
+				providerPaymentId: '../invalid-provider-id',
+				source: 'webhook'
+			}
+		};
+
+		await expect(value.process(invalidOperation)).rejects.toMatchObject({
+			code: 'PROVIDER_PAYMENT_ID_INVALID',
+			retryable: false
+		});
+		expect(value.provider.getPayment).not.toHaveBeenCalled();
+		expect(value.prisma.payment.findUnique).not.toHaveBeenCalled();
+	});
+
+	it('rejects an unbounded receipt ID from the authenticated provider response before persistence', async () => {
+		const prisma = {
+			paymentReceipt: { upsert: jest.fn() }
+		};
+		const provider = {
+			getReceipts: jest.fn().mockResolvedValue({
+				items: [{ id: '../invalid-receipt-id', status: 'succeeded' }]
+			})
+		};
+		const service = new BillingProviderWorkerService(
+			prisma as never,
+			{} as never,
+			provider as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+
+		await expect(
+			(
+				service as unknown as {
+					syncReceipt(value: Record<string, unknown>): Promise<void>;
+				}
+			).syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).rejects.toMatchObject({
+			code: 'PROVIDER_OBJECT_ID_INVALID',
+			retryable: false
+		});
+		expect(prisma.paymentReceipt.upsert).not.toHaveBeenCalled();
+	});
+});

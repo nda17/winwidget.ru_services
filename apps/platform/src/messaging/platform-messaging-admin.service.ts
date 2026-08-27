@@ -9,6 +9,8 @@ import {
 
 const STALE_OUTBOX_MS = 15 * 60_000;
 const READINESS_TIMEOUT_MS = 2_000;
+const UUID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type PlatformRoleReadiness = {
 	service: 'platform-api' | 'platform-outbox-publisher';
@@ -167,6 +169,12 @@ export class PlatformMessagingAdminService {
 			return false;
 		}
 		const body = value as Record<string, unknown>;
+		const database =
+			body.database &&
+			typeof body.database === 'object' &&
+			!Array.isArray(body.database)
+				? (body.database as Record<string, unknown>)
+				: null;
 		return (
 			body.status === 'ready' &&
 			body.service === 'platform' &&
@@ -174,9 +182,15 @@ export class PlatformMessagingAdminService {
 			typeof body.revision === 'string' &&
 			body.revision.length > 0 &&
 			body.revision.length <= 128 &&
-			Boolean(body.ownership) &&
-			typeof body.ownership === 'object' &&
-			!Array.isArray(body.ownership)
+			database?.serviceName === 'platform-service' &&
+			typeof database.databaseId === 'string' &&
+			UUID.test(database.databaseId) &&
+			typeof database.currentSemanticFingerprint === 'string' &&
+			/^[0-9a-f]{64}$/.test(database.currentSemanticFingerprint) &&
+			typeof database.createdAt === 'string' &&
+			Number.isFinite(Date.parse(database.createdAt)) &&
+			typeof database.updatedAt === 'string' &&
+			Number.isFinite(Date.parse(database.updatedAt))
 		);
 	}
 

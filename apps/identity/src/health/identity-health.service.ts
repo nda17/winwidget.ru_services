@@ -5,7 +5,6 @@ import { IdentityRabbitMqService } from '../messaging/rabbitmq.service';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { IdentityHeartbeatService } from '../runtime/identity-heartbeat.service';
 import { IdentityHousekeepingService } from '../runtime/identity-housekeeping.service';
-import { IdentityOwnershipService } from '../runtime/identity-ownership.service';
 import { IdentityRuntimeService } from '../runtime/identity-runtime.service';
 
 @Injectable()
@@ -17,8 +16,7 @@ export class IdentityHealthService {
 		private readonly worker: DestinationUnavailableWorkerService,
 		private readonly publisher: IdentityOutboxPublisherService,
 		private readonly heartbeat: IdentityHeartbeatService,
-		private readonly housekeeping: IdentityHousekeepingService,
-		private readonly ownershipService: IdentityOwnershipService
+		private readonly housekeeping: IdentityHousekeepingService
 	) {}
 
 	liveness() {
@@ -32,25 +30,20 @@ export class IdentityHealthService {
 		};
 	}
 
-	async ownership(requireActive = false) {
-		const identity = await this.ownershipService.state();
-		if (requireActive) await this.ownershipService.assertActive();
-		return {
-			serviceName: identity.serviceName,
-			databaseId: identity.databaseId,
-			phase: identity.phase,
-			ownershipGeneration: identity.ownershipGeneration.toString(),
-			importedAt: identity.importedAt?.toISOString() || null,
-			activatedAt: identity.activatedAt?.toISOString() || null
-		};
-	}
-
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
-			await this.ownership(false);
-		} catch (error) {
-			if (error instanceof ServiceUnavailableException) throw error;
+			const identity = await this.prisma.serviceIdentity.findUnique({
+				where: { id: 'singleton' },
+				select: { serviceName: true, databaseId: true }
+			});
+			if (
+				identity?.serviceName !== 'identity-service' ||
+				!identity.databaseId
+			) {
+				throw new Error();
+			}
+		} catch {
 			throw new ServiceUnavailableException(
 				'Identity database is not ready'
 			);
@@ -61,26 +54,17 @@ export class IdentityHealthService {
 		) {
 			throw new ServiceUnavailableException('RabbitMQ is not ready');
 		}
-		const active = await this.ownershipService.isActive();
-		if (active && this.runtime.workerEnabled && !this.worker.isReady()) {
+		if (this.runtime.workerEnabled && !this.worker.isReady()) {
 			throw new ServiceUnavailableException(
 				'Identity worker is not ready'
 			);
 		}
-		if (
-			active &&
-			this.runtime.workerEnabled &&
-			!this.housekeeping.isReady()
-		) {
+		if (this.runtime.workerEnabled && !this.housekeeping.isReady()) {
 			throw new ServiceUnavailableException(
 				'Identity housekeeping is not ready'
 			);
 		}
-		if (
-			active &&
-			this.runtime.outboxPublisherEnabled &&
-			!this.publisher.isReady()
-		) {
+		if (this.runtime.outboxPublisherEnabled && !this.publisher.isReady()) {
 			throw new ServiceUnavailableException(
 				'Identity Outbox publisher is not ready'
 			);
@@ -90,10 +74,7 @@ export class IdentityHealthService {
 				'Identity heartbeat is not ready'
 			);
 		}
-		return {
-			...this.status('ready'),
-			ownership: await this.ownership(false)
-		};
+		return this.status('ready');
 	}
 
 	private status(status: 'ok' | 'ready') {

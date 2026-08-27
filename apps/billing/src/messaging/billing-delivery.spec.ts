@@ -389,3 +389,36 @@ describe('BillingWorkerService retry and DLQ durability', () => {
 		expect(rabbit.ack).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe('BillingWorkerService current consumer startup', () => {
+	it('attaches every current consumer immediately for the worker role', async () => {
+		const rabbit = {
+			consume: jest.fn().mockResolvedValue(undefined)
+		};
+		const service = new BillingWorkerService(
+			{} as never,
+			{ workerEnabled: true, prefetch: 10 } as never,
+			rabbit as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+
+		await service.onModuleInit();
+
+		expect(rabbit.consume.mock.calls.map(call => call[0])).toEqual([
+			'identity',
+			'offer',
+			'notification-routing',
+			'trial-request',
+			'referral-request',
+			'lifecycle-repair',
+			'auto-renewal-charge',
+			'notification-outcome'
+		]);
+		expect(service.isReady()).toBe(true);
+		service.onApplicationShutdown();
+	});
+});

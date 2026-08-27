@@ -10,6 +10,17 @@ datasource db {
   schemas  = ["operations"]
 }
 
+model ServiceIdentity {
+  id          String   @id @default("singleton")
+  serviceName String   @default("operations-service") @map("service_name")
+  databaseId  String   @unique(map: "service_identity_database_id_key") @default(uuid()) @map("database_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("service_identity")
+  @@schema("operations")
+}
+
 model Note {
   id        String   @id @default(cuid())
   text      String
@@ -102,21 +113,6 @@ model OutboxEvent {
   @@index([status, availableAt, createdAt], map: "outbox_events_dispatch_idx")
   @@index([status, publishedAt, id], map: "outbox_events_retention_idx")
   @@map("outbox_events")
-  @@schema("operations")
-}
-
-model OperationsOwnershipState {
-  id                   String                  @id @default("singleton")
-  phase                OperationsDatabasePhase @default(EMPTY)
-  sourceRevision       String?                 @map("source_revision")
-  sourceSnapshotSha256 String?                 @unique @map("source_snapshot_sha256")
-  sourceNoteCount      BigInt?                 @map("source_note_count")
-  sourceEventCount     BigInt?                 @map("source_event_count")
-  importedAt           DateTime?               @map("imported_at")
-  activatedAt          DateTime?               @map("activated_at")
-  updatedAt            DateTime                @updatedAt @map("updated_at")
-
-  @@map("operations_ownership_state")
   @@schema("operations")
 }
 
@@ -311,16 +307,6 @@ model DatabaseRestoreJob {
   @@schema("operations")
 }
 
-model OperationsControlPlaneBootstrapState {
-  id             String   @id @default("singleton")
-  sourceRevision String   @map("source_revision")
-  sourceSha256   String   @unique @map("source_sha256")
-  importedAt     DateTime @default(now()) @map("imported_at")
-
-  @@map("operations_control_plane_bootstrap_state")
-  @@schema("operations")
-}
-
 enum AuditReceiptStatus {
   PROCESSING
   RETRY_SCHEDULED
@@ -334,14 +320,6 @@ enum OutboxStatus {
   PENDING
   PROCESSING
   PUBLISHED
-
-  @@schema("operations")
-}
-
-enum OperationsDatabasePhase {
-  EMPTY
-  IMPORTED
-  ACTIVE
 
   @@schema("operations")
 }

@@ -41,18 +41,13 @@ function setup(
 			count: jest.fn().mockResolvedValue(options.referenced ? 1 : 0)
 		}
 	};
-	const ownership = { isActive: jest.fn().mockResolvedValue(true) };
 	const storage = {
 		deleteObject: options.deleteFails
 			? jest.fn().mockRejectedValue(new Error('provider failed'))
 			: jest.fn().mockResolvedValue(undefined)
 	};
-	const service = new AvatarCleanupService(
-		prisma as any,
-		ownership as any,
-		storage as any
-	);
-	return { service, prisma, ownership, storage, object };
+	const service = new AvatarCleanupService(prisma as any, storage as any);
+	return { service, prisma, storage, object };
 }
 
 describe('AvatarCleanupService', () => {

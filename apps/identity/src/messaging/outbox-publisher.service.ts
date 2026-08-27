@@ -10,7 +10,6 @@ import { randomUUID } from 'node:crypto';
 import { safeError } from '../common/identity.util';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { IdentityRuntimeService } from '../runtime/identity-runtime.service';
-import { IdentityOwnershipService } from '../runtime/identity-ownership.service';
 import { exchangeName } from './messaging.constants';
 import { IdentityRabbitMqService } from './rabbitmq.service';
 
@@ -31,8 +30,7 @@ export class IdentityOutboxPublisherService
 	constructor(
 		private readonly prisma: IdentityPrismaService,
 		private readonly runtime: IdentityRuntimeService,
-		private readonly rabbit: IdentityRabbitMqService,
-		private readonly ownership: IdentityOwnershipService
+		private readonly rabbit: IdentityRabbitMqService
 	) {}
 
 	onModuleInit(): void {
@@ -134,7 +132,6 @@ export class IdentityOutboxPublisherService
 		if (this.running) return;
 		this.running = true;
 		try {
-			if (!(await this.ownership.isActive())) return;
 			for (
 				let count = 0;
 				count < this.runtime.outboxBatchSize;

@@ -174,28 +174,6 @@ export class AdminOwnerOverviewDto {
 	userId: string;
 }
 
-export class ReportingSeedDto {
-	@IsString()
-	@Matches(/^[0-9a-f]{64}$/)
-	sourceDatabaseFingerprint: string;
-
-	@IsString()
-	sourceExportedAt: string;
-
-	@IsString()
-	@Matches(/^(?:0|[1-9][0-9]{0,18})$/)
-	sourceSequenceHighWater: string;
-
-	@IsArray()
-	aggregates: Array<{
-		aggregateType: string;
-		aggregateId: string;
-		version: string;
-		sourceSequence: string;
-		stateHash: string;
-	}>;
-}
-
 export class RetryDeliveryDto {
 	@IsString()
 	@MaxLength(255)

@@ -39,7 +39,7 @@ const SOURCE_KINDS: readonly BillingConsumerKind[] = [
 	'referral-request',
 	'lifecycle-repair'
 ];
-const ACTIVE_KINDS: readonly BillingConsumerKind[] = [
+const ACTION_KINDS: readonly BillingConsumerKind[] = [
 	'auto-renewal-charge',
 	'notification-outcome'
 ];
@@ -51,10 +51,7 @@ export class BillingWorkerService
 {
 	private readonly logger = new Logger(BillingWorkerService.name);
 	private readonly attached = new Set<BillingConsumerKind>();
-	private activationTimer: NodeJS.Timeout | null = null;
 	private ready = false;
-	private observedOwnershipPhase: string | null = null;
-	private reconcilingOwnership = false;
 
 	constructor(
 		private readonly prisma: BillingPrismaService,
@@ -69,34 +66,23 @@ export class BillingWorkerService
 
 	async onModuleInit(): Promise<void> {
 		if (!this.runtime.workerEnabled) return;
-		for (const kind of SOURCE_KINDS) await this.attach(kind);
-		await this.reconcileOwnershipConsumers();
-		this.activationTimer = setInterval(() => {
-			void this.reconcileOwnershipConsumers().catch(error => {
-				this.ready = false;
-				this.logger.error(
-					`Billing ownership consumer reconciliation failed: ${this.safeError(error)}`
-				);
-			});
-		}, 5_000);
-		this.activationTimer.unref();
+		for (const kind of [...SOURCE_KINDS, ...ACTION_KINDS]) {
+			await this.attach(kind);
+		}
+		this.ready = true;
 	}
 
 	isReady(): boolean {
-		const required =
-			this.observedOwnershipPhase === 'ACTIVE' ||
-			this.observedOwnershipPhase === 'COMPLETE'
-				? [...SOURCE_KINDS, ...ACTIVE_KINDS]
-				: SOURCE_KINDS;
 		return (
 			!this.runtime.workerEnabled ||
-			(this.ready && required.every(kind => this.attached.has(kind)))
+			(this.ready &&
+				[...SOURCE_KINDS, ...ACTION_KINDS].every(kind =>
+					this.attached.has(kind)
+				))
 		);
 	}
 
 	onApplicationShutdown(): void {
-		if (this.activationTimer) clearInterval(this.activationTimer);
-		this.activationTimer = null;
 		this.ready = false;
 	}
 
@@ -108,25 +94,6 @@ export class BillingWorkerService
 			this.runtime.prefetch
 		);
 		this.attached.add(kind);
-	}
-
-	private async reconcileOwnershipConsumers(): Promise<void> {
-		if (!this.runtime.workerEnabled || this.reconcilingOwnership) return;
-		this.reconcilingOwnership = true;
-		this.ready = false;
-		try {
-			const marker = await this.prisma.billingOwnershipMarker.findUnique({
-				where: { id: 'singleton' },
-				select: { phase: true }
-			});
-			this.observedOwnershipPhase = marker?.phase ?? 'UNPREPARED';
-			if (marker?.phase === 'ACTIVE' || marker?.phase === 'COMPLETE') {
-				for (const kind of ACTIVE_KINDS) await this.attach(kind);
-			}
-			this.ready = true;
-		} finally {
-			this.reconcilingOwnership = false;
-		}
 	}
 
 	private async handle(

@@ -9,6 +9,7 @@ import { getBillingCorrelationId } from '../common/billing-request-context';
 
 export const BILLING_ADMIN_AUDIT_ACTIONS = [
 	'PAYMENT_MANUAL_CHECK',
+	'PAYMENT_UNKNOWN_PROVIDER_RESOLVED',
 	'PAYMENT_CLEANUP_RUN',
 	'TARIFF_PRICES_UPDATE',
 	'SUBSCRIPTION_ACTIVATE',

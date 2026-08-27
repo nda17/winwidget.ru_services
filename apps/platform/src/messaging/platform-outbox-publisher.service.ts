@@ -7,7 +7,6 @@ import {
 import { OutboxStatus } from '@prisma/platform-client';
 import { randomUUID } from 'node:crypto';
 import { PlatformPrismaService } from '../prisma/platform-prisma.service';
-import { PlatformOwnershipService } from '../ownership/platform-ownership.service';
 import { PlatformRuntimeService } from '../runtime/platform-runtime.service';
 import { PlatformRabbitMqService } from './platform-rabbitmq.service';
 
@@ -27,8 +26,7 @@ export class PlatformOutboxPublisherService
 	constructor(
 		private readonly prisma: PlatformPrismaService,
 		private readonly runtime: PlatformRuntimeService,
-		private readonly rabbit: PlatformRabbitMqService,
-		private readonly ownership: PlatformOwnershipService
+		private readonly rabbit: PlatformRabbitMqService
 	) {}
 
 	onModuleInit(): void {
@@ -47,7 +45,6 @@ export class PlatformOutboxPublisherService
 	}
 
 	async publishOne(): Promise<boolean> {
-		if (!(await this.ownership.isActive())) return false;
 		const event = await this.claim();
 		if (!event) return false;
 		try {

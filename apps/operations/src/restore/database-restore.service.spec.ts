@@ -27,15 +27,18 @@ const message = (overrides: Record<string, unknown> = {}) => {
 	};
 };
 
+const restoreConfig = (values: Record<string, string>) =>
+	({
+		get: (key: string) => values[key]
+	}) as ConfigService;
+
 describe('DatabaseRestoreService RabbitMQ contract', () => {
 	it('starts the restore consumer only in the isolated restore-worker role', async () => {
-		const ownership = { isActive: jest.fn().mockResolvedValue(true) };
 		const rabbit = {
 			consumeDatabaseRestoreJobs: jest.fn().mockResolvedValue(undefined)
 		};
 		const worker = new DatabaseRestoreWorkerService(
 			{ restoreWorkerEnabled: true } as never,
-			ownership as never,
 			rabbit as never,
 			{} as never,
 			{} as never,
@@ -45,17 +48,14 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 
 		await worker.onModuleInit();
 
-		expect(ownership.isActive).toHaveBeenCalledTimes(1);
 		expect(rabbit.consumeDatabaseRestoreJobs).toHaveBeenCalledTimes(1);
 		expect(worker.isReady()).toBe(true);
 	});
 
 	it('does not start restore execution in the regular worker role', async () => {
-		const ownership = { isActive: jest.fn() };
 		const rabbit = { consumeDatabaseRestoreJobs: jest.fn() };
 		const worker = new DatabaseRestoreWorkerService(
 			{ restoreWorkerEnabled: false } as never,
-			ownership as never,
 			rabbit as never,
 			{} as never,
 			{} as never,
@@ -65,14 +65,13 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 
 		await worker.onModuleInit();
 
-		expect(ownership.isActive).not.toHaveBeenCalled();
 		expect(rabbit.consumeDatabaseRestoreJobs).not.toHaveBeenCalled();
 		expect(worker.isReady()).toBe(true);
 	});
 
 	it('keeps the frontend restore settings contract explicit', () => {
 		const service = new DatabaseRestoreService(
-			new ConfigService({ DATABASE_RESTORE_ENABLED: 'false' }),
+			restoreConfig({ DATABASE_RESTORE_ENABLED: 'false' }),
 			{} as never,
 			{} as never,
 			{} as never
@@ -119,7 +118,7 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 		const outbox = { enqueue: jest.fn().mockResolvedValue({}) };
 		const audit = { recordInTransaction: jest.fn().mockResolvedValue({}) };
 		const service = new DatabaseRestoreService(
-			new ConfigService({
+			restoreConfig({
 				DATABASE_RESTORE_ENABLED: 'true',
 				DATABASE_RESTORE_STORAGE_DIR: storage
 			}),
@@ -169,7 +168,6 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 			{} as never,
 			{} as never,
 			{} as never,
-			{} as never,
 			prisma as never,
 			{} as never,
 			{} as never
@@ -189,7 +187,6 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 			}
 		};
 		const worker = new DatabaseRestoreWorkerService(
-			{} as never,
 			{} as never,
 			{} as never,
 			{} as never,
