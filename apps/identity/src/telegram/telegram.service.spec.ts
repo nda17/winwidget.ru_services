@@ -297,6 +297,32 @@ describe('Telegram Info admin webhook contract', () => {
 		}
 	});
 
+	it.each(['group', 'supergroup'])(
+		'ignores Info_bot messages from %s chats without side effects',
+		async chatType => {
+			const fetchMock = jest.spyOn(global, 'fetch');
+			const value = createService(challenge());
+
+			await expect(
+				value.service.handleInfoWebhook(
+					{
+						update_id: 101,
+						message: {
+							message_id: 202,
+							text: 'Сообщение в General',
+							chat: { id: -1001234567890, type: chatType },
+							from: { id: 303, username: 'admin' }
+						}
+					},
+					'configured-info-webhook-secret'
+				)
+			).resolves.toBe(true);
+
+			expect(value.prisma.$transaction).not.toHaveBeenCalled();
+			expect(fetchMock).not.toHaveBeenCalled();
+		}
+	);
+
 	it('reads Info_bot status without changing the Telegram webhook', async () => {
 		const fetchMock = jest
 			.spyOn(global, 'fetch')

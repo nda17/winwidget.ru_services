@@ -178,6 +178,8 @@ export class TelegramService {
 
 	async handleInfoWebhook(update: TelegramWebhookUpdate, secret?: string) {
 		this.assertWebhookSecret('INFO', secret);
+		if (update.message && update.message.chat.type !== 'private')
+			return true;
 		return this.withWebhookReceipt(
 			TelegramBotKind.INFO,
 			update,
@@ -649,14 +651,7 @@ export class TelegramService {
 	}
 
 	private async handleInfoMessage(message: TelegramMessage) {
-		if (message.chat.type && message.chat.type !== 'private') {
-			await this.sendMessage(
-				'INFO',
-				message.chat.id,
-				'Подключите уведомления в личном чате с Info_bot.'
-			);
-			return;
-		}
+		if (message.chat.type !== 'private') return;
 		const requestId = this.startArgument(message.text);
 		if (!requestId || !message.from) {
 			await this.sendMessage(
