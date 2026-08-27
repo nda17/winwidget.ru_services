@@ -14,6 +14,8 @@ import {
 import { randomUUID } from 'node:crypto';
 import { PaymentDomainService } from '../domain/payment-domain.service';
 import { PaymentSuccessTransaction } from '../domain/payment-success.transaction';
+import { SubscriptionDomainService } from '../domain/subscription-domain.service';
+import { PROVIDER_IDEMPOTENCY_RETRY_WINDOW_MS } from '../domain/billing-legal.constants';
 import { BillingPrismaService } from '../prisma/billing-prisma.service';
 import { BillingRuntimeService } from '../runtime/billing-runtime.service';
 import { PaymentMethodCryptoService } from './payment-method-crypto.service';
@@ -25,7 +27,23 @@ import {
 
 const POLL_INTERVAL_MS = 1_000;
 const LEASE_MS = 45_000;
-const IDEMPOTENCY_WINDOW_MS = 23 * 60 * 60 * 1000;
+
+class ProviderDispatchFailure extends Error {
+	constructor(
+		readonly originalError: unknown,
+		readonly providerCallStarted: boolean,
+		readonly providerMayHaveReceived: boolean,
+		readonly providerResponseReceived: boolean,
+		readonly operationProviderPaymentId: string | null
+	) {
+		super(
+			originalError instanceof Error
+				? originalError.message
+				: 'Provider dispatch failed'
+		);
+		this.name = 'ProviderDispatchFailure';
+	}
+}
 
 @Injectable()
 export class BillingProviderWorkerService
@@ -42,6 +60,7 @@ export class BillingProviderWorkerService
 		private readonly provider: YooKassaService,
 		private readonly crypto: PaymentMethodCryptoService,
 		private readonly payments: PaymentDomainService,
+		private readonly subscriptions: SubscriptionDomainService,
 		private readonly success: PaymentSuccessTransaction
 	) {}
 
@@ -145,10 +164,15 @@ export class BillingProviderWorkerService
 			}
 		});
 		if (changed.count !== 1) return null;
-		return this.prisma.providerOperation.findUniqueOrThrow({
+		const claimed = await this.prisma.providerOperation.findUniqueOrThrow({
 			where: { id: candidate.id },
 			include: { payment: true }
 		});
+		return {
+			...claimed,
+			reclaimedProcessingLease:
+				candidate.status === ProviderOperationStatus.PROCESSING
+		};
 	}
 
 	private async process(operation: any): Promise<boolean> {
@@ -181,135 +205,242 @@ export class BillingProviderWorkerService
 			throw new Error('Provider operation payment is missing');
 		const response = await this.createProviderPaymentUnderFence(operation);
 		if (!response) return true;
-		await this.applyProviderResponse(operation, response);
+		try {
+			await this.applyProviderResponse(operation, response);
+		} catch (error) {
+			const boundProviderPaymentId = isYooKassaObjectId(
+				operation.payment?.yookassaId
+			)
+				? operation.payment.yookassaId
+				: isYooKassaObjectId(operation.providerPaymentId)
+					? operation.providerPaymentId
+					: null;
+			throw new ProviderDispatchFailure(
+				error,
+				true,
+				true,
+				true,
+				boundProviderPaymentId ||
+					(isYooKassaObjectId(response.id) ? response.id : null)
+			);
+		}
 		return true;
 	}
 
 	private async createProviderPaymentUnderFence(
 		operation: any
 	): Promise<Record<string, unknown> | null> {
-		return this.prisma.$transaction(
-			async transaction => {
-				const userId = operation.payment.userId as string;
-				await transaction.$queryRaw`
+		let providerMayHaveReceived =
+			operation.attempt > 1 || Boolean(operation.reclaimedProcessingLease);
+		let providerCallStarted = false;
+		let providerResponseReceived = false;
+		let operationProviderPaymentId: string | null = null;
+		try {
+			return await this.prisma.$transaction(
+				async transaction => {
+					const userId = operation.payment.userId as string;
+					await transaction.$queryRaw`
 					SELECT user_id FROM billing.identity_contact_projections
 					WHERE user_id = ${userId}
 					FOR UPDATE
 				`;
-				await transaction.$queryRaw`
+					await transaction.$queryRaw`
 					SELECT id FROM billing.auto_renewals
 					WHERE user_id = ${userId}
 					FOR UPDATE
 				`;
-				await transaction.$queryRaw`
+					await transaction.$queryRaw`
 					SELECT id FROM billing.payments
 					WHERE id = ${operation.payment.id}
 					FOR UPDATE
 				`;
-				await transaction.$queryRaw`
+					await transaction.$queryRaw`
 					SELECT id FROM billing.subscriptions
 					WHERE user_id = ${userId}
 					FOR UPDATE
 				`;
-				await transaction.$queryRaw`
+					await transaction.$queryRaw`
 					SELECT id FROM billing.provider_operations
 					WHERE id = ${operation.id}
 					FOR UPDATE
 				`;
-				const [lockedOperation, payment, identity] = await Promise.all([
-					transaction.providerOperation.findUnique({
-						where: { id: operation.id }
-					}),
-					transaction.payment.findUnique({
-						where: { id: operation.payment.id }
-					}),
-					transaction.identityContactProjection.findUnique({
-						where: { userId }
-					})
-				]);
-				if (
-					!lockedOperation ||
-					lockedOperation.status !== ProviderOperationStatus.PROCESSING ||
-					lockedOperation.leaseToken !== operation.leaseToken ||
-					!payment ||
-					payment.status !== 'PENDING' ||
-					!payment.plan ||
-					!payment.billingPeriod ||
-					!identity ||
-					identity.status !== 'ACTIVE' ||
-					identity.deletedAt
-				) {
-					await this.fenceProviderOperation(
-						transaction,
-						operation.id,
-						operation.leaseToken,
-						'PAYMENT_OR_IDENTITY_FENCED'
-					);
-					return null;
-				}
-				let paymentMethodId: string | undefined;
-				if (operation.kind === ProviderOperationKind.CAPTURE_RECURRING) {
-					const [renewal, subscription] = await Promise.all([
-						transaction.autoRenewal.findUnique({ where: { userId } }),
-						transaction.subscription.findUnique({ where: { userId } })
+					const [lockedOperation, payment, identity] = await Promise.all([
+						transaction.providerOperation.findUnique({
+							where: { id: operation.id }
+						}),
+						transaction.payment.findUnique({
+							where: { id: operation.payment.id }
+						}),
+						transaction.identityContactProjection.findUnique({
+							where: { userId }
+						})
 					]);
 					if (
-						!renewal ||
-						renewal.status !== AutoRenewalStatus.ACTIVE ||
-						!renewal.dispatchPending ||
-						renewal.pendingAmount ||
-						!renewal.paymentMethodCiphertext ||
-						payment.kind !== PaymentKind.RECURRING ||
-						payment.providerStatus !== 'queued' ||
-						payment.recurringAttempt !== renewal.retryAttempt ||
-						payment.recurringCycleKey !==
-							`${renewal.id}:${renewal.nextChargeAt.toISOString()}:attempt:${payment.recurringAttempt}` ||
-						!subscription?.expiresAt ||
-						!['ACTIVE', 'EXPIRED'].includes(subscription.status) ||
-						subscription.plan !== renewal.plan ||
-						subscription.billingPeriod !== renewal.billingPeriod
+						!lockedOperation ||
+						lockedOperation.status !==
+							ProviderOperationStatus.PROCESSING ||
+						lockedOperation.leaseToken !== operation.leaseToken ||
+						!payment ||
+						payment.status !== 'PENDING' ||
+						!payment.plan ||
+						!payment.billingPeriod ||
+						!identity ||
+						identity.status !== 'ACTIVE' ||
+						identity.deletedAt
 					) {
 						await this.fenceProviderOperation(
 							transaction,
 							operation.id,
 							operation.leaseToken,
-							'AUTO_RENEWAL_FENCED'
+							'PAYMENT_OR_IDENTITY_FENCED'
 						);
 						return null;
 					}
-					paymentMethodId = this.crypto.decrypt(
-						renewal.paymentMethodCiphertext
-					);
-				} else if (
-					payment.kind !== PaymentKind.ONE_TIME ||
-					payment.checkoutExpiresAt <= new Date()
-				) {
-					await this.fenceProviderOperation(
-						transaction,
-						operation.id,
-						operation.leaseToken,
-						'CHECKOUT_FENCED'
-					);
-					return null;
-				}
-				if (
-					payment.kind === PaymentKind.RECURRING &&
-					payment.providerStatus === 'queued'
-				) {
-					await transaction.payment.update({
-						where: { id: payment.id },
-						data: {
-							providerStatus: 'creating',
-							lastProviderCheckedAt: new Date()
+					if (
+						!payment.yookassaId &&
+						lockedOperation.attempt > 1 &&
+						this.providerCreateWindowExpired(lockedOperation.createdAt)
+					) {
+						providerMayHaveReceived = true;
+						await this.markProviderOperationUnknown(
+							transaction,
+							lockedOperation,
+							payment,
+							'PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED'
+						);
+						return null;
+					}
+					if (
+						!payment.yookassaId &&
+						operation.reclaimedProcessingLease &&
+						payment.checkoutExpiresAt <= new Date()
+					) {
+						providerMayHaveReceived = true;
+						await this.markProviderOperationUnknown(
+							transaction,
+							lockedOperation,
+							payment,
+							'PROVIDER_STALE_CLAIM_RECONCILIATION_REQUIRED'
+						);
+						return null;
+					}
+					if (payment.yookassaId) {
+						providerMayHaveReceived = true;
+						providerCallStarted = true;
+						operationProviderPaymentId = payment.yookassaId;
+						const response = await this.provider.getPayment(
+							payment.yookassaId
+						);
+						providerResponseReceived = true;
+						if (isYooKassaObjectId(response.id)) {
+							operationProviderPaymentId = response.id;
 						}
-					});
-				}
+						return response;
+					}
+					let paymentMethodId: string | undefined;
+					if (operation.kind === ProviderOperationKind.CAPTURE_RECURRING) {
+						const [renewal, subscription] = await Promise.all([
+							transaction.autoRenewal.findUnique({ where: { userId } }),
+							transaction.subscription.findUnique({ where: { userId } })
+						]);
+						if (
+							!renewal ||
+							renewal.status !== AutoRenewalStatus.ACTIVE ||
+							!renewal.dispatchPending ||
+							renewal.pendingAmount ||
+							!renewal.paymentMethodCiphertext ||
+							payment.kind !== PaymentKind.RECURRING ||
+							!['queued', 'creating'].includes(
+								payment.providerStatus || ''
+							) ||
+							payment.recurringAttempt !== renewal.retryAttempt ||
+							payment.recurringCycleKey !==
+								`${renewal.id}:${renewal.nextChargeAt.toISOString()}:attempt:${payment.recurringAttempt}` ||
+							!subscription?.expiresAt ||
+							!['ACTIVE', 'EXPIRED'].includes(subscription.status) ||
+							subscription.plan !== renewal.plan ||
+							subscription.billingPeriod !== renewal.billingPeriod
+						) {
+							if (
+								!payment.yookassaId &&
+								['creating', 'unknown'].includes(
+									payment.providerStatus || ''
+								)
+							) {
+								providerMayHaveReceived = true;
+								await this.markProviderOperationUnknown(
+									transaction,
+									lockedOperation,
+									payment,
+									'AUTO_RENEWAL_RECONCILIATION_REQUIRED'
+								);
+							} else {
+								await this.fenceProviderOperation(
+									transaction,
+									operation.id,
+									operation.leaseToken,
+									'AUTO_RENEWAL_FENCED'
+								);
+							}
+							return null;
+						}
+						if (payment.providerStatus === 'creating') {
+							providerMayHaveReceived = true;
+						}
+						const dispatchNow = new Date();
+						if (
+							payment.checkoutExpiresAt <= dispatchNow &&
+							lockedOperation.attempt <= 1
+						) {
+							if (providerMayHaveReceived) {
+								await this.markProviderOperationUnknown(
+									transaction,
+									lockedOperation,
+									payment,
+									'AUTO_RENEWAL_RECONCILIATION_REQUIRED'
+								);
+							} else {
+								await this.closeExpiredRecurringDispatch(
+									transaction,
+									lockedOperation,
+									payment,
+									renewal,
+									dispatchNow,
+									operation.id
+								);
+							}
+							return null;
+						}
+						paymentMethodId = this.crypto.decrypt(
+							renewal.paymentMethodCiphertext
+						);
+					} else if (
+						payment.kind !== PaymentKind.ONE_TIME ||
+						(payment.checkoutExpiresAt <= new Date() &&
+							lockedOperation.attempt <= 1)
+					) {
+						await this.fenceProviderOperation(
+							transaction,
+							operation.id,
+							operation.leaseToken,
+							'CHECKOUT_FENCED'
+						);
+						return null;
+					}
+					if (
+						payment.kind === PaymentKind.RECURRING &&
+						payment.providerStatus === 'queued'
+					) {
+						await transaction.payment.update({
+							where: { id: payment.id },
+							data: {
+								providerStatus: 'creating',
+								lastProviderCheckedAt: new Date()
+							}
+						});
+					}
 
-				if (payment.yookassaId) {
-					return this.provider.getPayment(payment.yookassaId);
-				}
-				return this.provider.createPayment(
-					{
+					const providerRequest = {
 						paymentId: payment.id,
 						amount: payment.amount,
 						currency: payment.currency,
@@ -322,17 +453,166 @@ export class BillingProviderWorkerService
 						paymentMethodId,
 						kind:
 							payment.kind === PaymentKind.RECURRING
-								? 'RECURRING'
-								: 'ONE_TIME'
-					},
-					lockedOperation.idempotencyKey
-				);
-			},
+								? ('RECURRING' as const)
+								: ('ONE_TIME' as const)
+					};
+					if (!payment.customerEmail && !payment.customerPhone) {
+						throw new ProviderRequestError(
+							'Payment customer contact is missing',
+							'CUSTOMER_CONTACT_MISSING',
+							false,
+							false
+						);
+					}
+					if (!this.provider.isConfigured()) {
+						throw new Error('YooKassa credentials are missing');
+					}
+					if (
+						(payment.kind === PaymentKind.RECURRING &&
+							lockedOperation.attempt <= 1) ||
+						operation.reclaimedProcessingLease
+					) {
+						const finalDispatchNow = new Date();
+						if (payment.checkoutExpiresAt <= finalDispatchNow) {
+							if (providerMayHaveReceived) {
+								await this.markProviderOperationUnknown(
+									transaction,
+									lockedOperation,
+									payment,
+									'AUTO_RENEWAL_RECONCILIATION_REQUIRED',
+									finalDispatchNow
+								);
+							} else {
+								const renewal = await transaction.autoRenewal.findUnique({
+									where: { userId }
+								});
+								if (!renewal) {
+									throw new Error(
+										'Auto-renewal disappeared under provider lock'
+									);
+								}
+								await this.closeExpiredRecurringDispatch(
+									transaction,
+									lockedOperation,
+									payment,
+									renewal,
+									finalDispatchNow,
+									operation.id
+								);
+							}
+							return null;
+						}
+					}
+					providerMayHaveReceived = true;
+					providerCallStarted = true;
+					const response = await this.provider.createPayment(
+						providerRequest,
+						lockedOperation.idempotencyKey
+					);
+					providerResponseReceived = true;
+					if (isYooKassaObjectId(response.id)) {
+						operationProviderPaymentId = response.id;
+					}
+					return response;
+				},
+				{
+					isolationLevel: 'Serializable',
+					maxWait: 5_000,
+					timeout: 30_000
+				}
+			);
+		} catch (error) {
+			throw new ProviderDispatchFailure(
+				error,
+				providerCallStarted,
+				providerMayHaveReceived,
+				providerResponseReceived,
+				operationProviderPaymentId
+			);
+		}
+	}
+
+	private async closeExpiredRecurringDispatch(
+		transaction: Prisma.TransactionClient,
+		operation: {
+			id: string;
+			leaseToken: string | null;
+			attempt: number;
+		},
+		payment: {
+			id: string;
+			userId: string;
+			recurringCycleKey: string | null;
+		},
+		renewal: { id: string },
+		now: Date,
+		triggerId: string
+	): Promise<void> {
+		if (!operation.leaseToken || !payment.recurringCycleKey) {
+			throw new Error('Recurring provider claim is incomplete');
+		}
+		const closeResult =
+			await this.subscriptions.closeExpiredRecurringDispatch(transaction, {
+				paymentId: payment.id,
+				autoRenewalId: renewal.id,
+				cycleKey: payment.recurringCycleKey,
+				now,
+				triggerId,
+				trustedClaim: {
+					operationId: operation.id,
+					leaseToken: operation.leaseToken
+				}
+			});
+		if (closeResult === 'CLOSED' || closeResult === 'ALREADY_CLOSED') {
+			return;
+		}
+		if (closeResult === 'NOT_EXPIRED') {
+			throw new Error('Recurring dispatch deadline changed under lock');
+		}
+		await this.markProviderOperationUnknown(
+			transaction,
+			operation,
+			payment,
+			'AUTO_RENEWAL_RECONCILIATION_REQUIRED',
+			now
+		);
+	}
+
+	private async markProviderOperationUnknown(
+		transaction: Prisma.TransactionClient,
+		operation: {
+			id: string;
+			leaseToken: string | null;
+			attempt: number;
+		},
+		payment: { id: string; userId: string },
+		code: string,
+		now = new Date()
+	): Promise<void> {
+		if (!operation.leaseToken) {
+			throw new Error('Provider operation lease token is missing');
+		}
+		await this.payments.settleProviderOperationTerminalInTransaction(
+			transaction,
 			{
-				isolationLevel: 'Serializable',
-				maxWait: 5_000,
-				timeout: 30_000
+				operationId: operation.id,
+				paymentId: payment.id,
+				userId: payment.userId,
+				leaseToken: operation.leaseToken,
+				operationAttempt: operation.attempt,
+				terminalStatus: ProviderOperationStatus.UNKNOWN,
+				errorCode: code,
+				errorSafe:
+					'Provider operation requires reconciliation without another POST',
+				now
 			}
+		);
+	}
+
+	private providerCreateWindowExpired(createdAt: Date): boolean {
+		return (
+			Date.now() - createdAt.getTime() >=
+			PROVIDER_IDEMPOTENCY_RETRY_WINDOW_MS
 		);
 	}
 
@@ -432,7 +712,7 @@ export class BillingProviderWorkerService
 					typeof method.title === 'string' ? method.title : null,
 				paymentMethodLast4:
 					typeof card.last4 === 'string' ? card.last4 : null,
-				providerSnapshot: response
+				providerSnapshot: this.sanitizeProviderSnapshot(response)
 			});
 			return status;
 		}
@@ -460,7 +740,7 @@ export class BillingProviderWorkerService
 					: null,
 			providerCreatedAt: this.dateField(response, 'created_at'),
 			providerExpiresAt: this.dateField(response, 'expires_at'),
-			providerSnapshot: response
+			providerSnapshot: this.sanitizeProviderSnapshot(response)
 		});
 		return status;
 	}
@@ -620,58 +900,138 @@ export class BillingProviderWorkerService
 		operation: any,
 		error: unknown
 	): Promise<void> {
+		const dispatchFailure =
+			error instanceof ProviderDispatchFailure ? error : null;
+		const failure = dispatchFailure?.originalError ?? error;
 		const providerError =
-			error instanceof ProviderRequestError ? error : null;
+			failure instanceof ProviderRequestError ? failure : null;
 		const age = Date.now() - operation.createdAt.getTime();
+		const paymentCreation =
+			operation.kind === ProviderOperationKind.CREATE_CHECKOUT ||
+			operation.kind === ProviderOperationKind.CAPTURE_RECURRING;
+		const knownProviderPaymentLookup = Boolean(
+			paymentCreation &&
+			(isYooKassaObjectId(operation.payment?.yookassaId) ||
+				isYooKassaObjectId(dispatchFailure?.operationProviderPaymentId))
+		);
+		const postResponseFailure = Boolean(
+			paymentCreation && dispatchFailure?.providerResponseReceived
+		);
+		const reclaimedPreProviderFailure = Boolean(
+			paymentCreation &&
+			operation.reclaimedProcessingLease &&
+			dispatchFailure &&
+			!dispatchFailure.providerCallStarted
+		);
+		const knownPreProviderFailure = Boolean(
+			paymentCreation &&
+			dispatchFailure &&
+			!dispatchFailure.providerCallStarted &&
+			!operation.reclaimedProcessingLease
+		);
 		const retryableOrUnexpected =
 			providerError?.retryable || !providerError;
 		if (
-			retryableOrUnexpected &&
-			(operation.kind === ProviderOperationKind.SYNC_RECEIPT ||
-				age < IDEMPOTENCY_WINDOW_MS)
+			!postResponseFailure &&
+			!reclaimedPreProviderFailure &&
+			(knownPreProviderFailure ||
+				(retryableOrUnexpected &&
+					(operation.kind === ProviderOperationKind.SYNC_RECEIPT ||
+						knownProviderPaymentLookup ||
+						age < PROVIDER_IDEMPOTENCY_RETRY_WINDOW_MS)))
 		) {
+			if (knownPreProviderFailure && operation.attempt < 1) {
+				throw new Error(
+					'Provider operation attempt cannot be decremented'
+				);
+			}
 			const delay = Math.min(
 				60_000 * 2 ** Math.min(operation.attempt, 5),
 				30 * 60_000
 			);
-			await this.prisma.providerOperation.updateMany({
-				where: { id: operation.id, leaseToken: operation.leaseToken },
+			const changed = await this.prisma.providerOperation.updateMany({
+				where: {
+					id: operation.id,
+					status: ProviderOperationStatus.PROCESSING,
+					leaseToken: operation.leaseToken,
+					attempt: operation.attempt
+				},
 				data: {
 					status: ProviderOperationStatus.PENDING,
+					...(knownPreProviderFailure
+						? { attempt: { decrement: 1 } }
+						: {}),
 					availableAt: new Date(Date.now() + delay),
 					leaseToken: null,
 					leaseUntil: null,
 					lastErrorCode: providerError?.code || 'WORKER_ERROR',
-					lastErrorSafe: this.safeError(error)
+					lastErrorSafe: this.safeError(failure)
 				}
 			});
+			if (changed.count !== 1) {
+				throw new Error('Provider operation retry claim changed');
+			}
 			return;
 		}
 		const unknown = Boolean(
-			!providerError || providerError.ambiguous || providerError.retryable
+			postResponseFailure ||
+			reclaimedPreProviderFailure ||
+			knownProviderPaymentLookup ||
+			!providerError ||
+			providerError.ambiguous ||
+			providerError.retryable
 		);
-		await this.prisma.providerOperation.updateMany({
-			where: { id: operation.id, leaseToken: operation.leaseToken },
+		const errorCode = providerError?.code || 'WORKER_ERROR';
+		const errorSafe = this.safeError(failure);
+		if (paymentCreation && operation.paymentId) {
+			if (!operation.leaseToken) {
+				throw new Error('Provider operation lease token is missing');
+			}
+			await this.payments.settleProviderOperationTerminal({
+				operationId: operation.id,
+				paymentId: operation.paymentId,
+				leaseToken: operation.leaseToken,
+				operationAttempt: operation.attempt,
+				terminalStatus: unknown
+					? ProviderOperationStatus.UNKNOWN
+					: ProviderOperationStatus.FAILED,
+				errorCode,
+				errorSafe,
+				now: new Date(),
+				...(unknown
+					? {
+							operationProviderPaymentId:
+								dispatchFailure?.operationProviderPaymentId ||
+								operation.providerPaymentId ||
+								null
+						}
+					: {
+							providerPaymentId: operation.providerPaymentId || null,
+							paymentProviderStatus: 'rejected',
+							cancellationReason: errorCode
+						})
+			});
+			return;
+		}
+		const changed = await this.prisma.providerOperation.updateMany({
+			where: {
+				id: operation.id,
+				status: ProviderOperationStatus.PROCESSING,
+				leaseToken: operation.leaseToken,
+				attempt: operation.attempt
+			},
 			data: {
 				status: unknown
 					? ProviderOperationStatus.UNKNOWN
 					: ProviderOperationStatus.FAILED,
 				leaseToken: null,
 				leaseUntil: null,
-				lastErrorCode: providerError?.code || 'WORKER_ERROR',
-				lastErrorSafe: this.safeError(error)
+				lastErrorCode: errorCode,
+				lastErrorSafe: errorSafe
 			}
 		});
-		const paymentCreation =
-			operation.kind === ProviderOperationKind.CREATE_CHECKOUT ||
-			operation.kind === ProviderOperationKind.CAPTURE_RECURRING;
-		if (!unknown && paymentCreation && operation.paymentId) {
-			await this.payments.markProviderCancelled(
-				operation.paymentId,
-				operation.providerPaymentId || null,
-				'rejected',
-				providerError?.code || 'provider_rejected'
-			);
+		if (changed.count !== 1) {
+			throw new Error('Provider operation terminal claim changed');
 		}
 	}
 
@@ -679,6 +1039,23 @@ export class BillingProviderWorkerService
 		return value && typeof value === 'object' && !Array.isArray(value)
 			? (value as Record<string, any>)
 			: {};
+	}
+
+	private sanitizeProviderSnapshot(
+		response: Record<string, unknown>
+	): Record<string, unknown> {
+		if (
+			!response.payment_method ||
+			typeof response.payment_method !== 'object' ||
+			Array.isArray(response.payment_method)
+		) {
+			return response;
+		}
+		const paymentMethod = {
+			...(response.payment_method as Record<string, unknown>)
+		};
+		delete paymentMethod.id;
+		return { ...response, payment_method: paymentMethod };
 	}
 
 	private requiredString(

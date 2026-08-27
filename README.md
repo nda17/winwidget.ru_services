@@ -111,9 +111,12 @@ CAS lease. `pg_dump` выполняет только worker Operations, восс
 
 ## Развёртывание в production
 
-Релиз выполняется только из точного commit `origin/prod` по неизменяемому
-40-символьному SHA и под единым deploy lock. Обязательны побайтово идентичный
-hash env, метки OCI revision, миграции баз всех сервисов, точные
+Релиз запускается только push точного commit в ветку `prod`. После зелёных
+lifecycle gate и полной CI-матрицы release-job автоматически вызывает reusable
+workflow `winwidget.ru_infra`, закреплённый неизменяемым 40-символьным SHA;
+ручного ввода ревизии и прямого запуска controller нет. На production действует
+единый deploy lock. Обязательны побайтово идентичный hash env, метки OCI
+revision, миграции баз всех сервисов, точные
 permissions/topology RabbitMQ, прямые проверки readiness, smoke-проверки
 Gateway/публичного API и revision каждого контейнера.
 

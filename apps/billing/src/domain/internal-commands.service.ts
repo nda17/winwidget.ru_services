@@ -21,6 +21,7 @@ import {
 	billingCommandRequestHash,
 	lockBillingCommand
 } from './billing-command-idempotency';
+import { providerOperationMayHaveReachedProvider } from './billing-legal.constants';
 import { SubscriptionDomainService } from './subscription-domain.service';
 
 @Injectable()
@@ -95,23 +96,6 @@ export class InternalCommandsService {
 					WHERE payment.user_id = ${dto.userId}
 					FOR UPDATE OF operation
 				`;
-				const inFlight = await transaction.providerOperation.findFirst({
-					where: {
-						payment: { userId: dto.userId },
-						status: {
-							in: [
-								ProviderOperationStatus.PROCESSING,
-								ProviderOperationStatus.UNKNOWN
-							]
-						}
-					},
-					select: { id: true, status: true }
-				});
-				if (inFlight) {
-					throw new ConflictException(
-						'Billing provider operation is in flight; deactivation is fenced'
-					);
-				}
 				const renewal = await transaction.autoRenewal.findUnique({
 					where: { userId: dto.userId }
 				});
@@ -153,38 +137,86 @@ export class InternalCommandsService {
 						}
 					});
 				}
-				await transaction.providerOperation.updateMany({
-					where: {
-						payment: { userId: dto.userId },
-						status: ProviderOperationStatus.PENDING
-					},
-					data: {
-						status: ProviderOperationStatus.FAILED,
-						lastErrorCode: 'IDENTITY_DEACTIVATION',
-						lastErrorSafe: 'Cancelled before identity deactivation'
-					}
-				});
 				const pendingPayments = await transaction.payment.findMany({
-					where: { userId: dto.userId, status: PaymentStatus.PENDING }
+					where: { userId: dto.userId, status: PaymentStatus.PENDING },
+					orderBy: { createdAt: 'asc' }
 				});
+				let cancelledPayments = 0;
 				for (const payment of pendingPayments) {
+					const providerOperation =
+						await transaction.providerOperation.findFirst({
+							where: {
+								paymentId: payment.id
+							},
+							orderBy: { createdAt: 'desc' },
+							select: { id: true, status: true, attempt: true }
+						});
+					const providerMayHaveReceived =
+						Boolean(payment.yookassaId) ||
+						Boolean(
+							providerOperation &&
+							providerOperationMayHaveReachedProvider(
+								providerOperation.status,
+								providerOperation.attempt
+							)
+						);
+					if (
+						providerOperation?.status === ProviderOperationStatus.PENDING
+					) {
+						const operationChanged =
+							await transaction.providerOperation.updateMany({
+								where: {
+									id: providerOperation.id,
+									status: ProviderOperationStatus.PENDING,
+									attempt: providerOperation.attempt
+								},
+								data: {
+									status: providerMayHaveReceived
+										? ProviderOperationStatus.UNKNOWN
+										: ProviderOperationStatus.FAILED,
+									lastErrorCode: providerMayHaveReceived
+										? 'IDENTITY_DEACTIVATION_RECONCILIATION_REQUIRED'
+										: 'IDENTITY_DEACTIVATION',
+									lastErrorSafe: providerMayHaveReceived
+										? 'Provider result requires reconciliation after identity deactivation'
+										: 'Cancelled before identity deactivation'
+								}
+							});
+						if (operationChanged.count !== 1) {
+							throw new ConflictException(
+								'Billing provider operation changed concurrently'
+							);
+						}
+					}
 					const sequence = await this.nextSequence(transaction);
 					const updated = await transaction.payment.update({
 						where: { id: payment.id },
 						data: {
-							status: PaymentStatus.CANCELLED,
-							cancelledAt: new Date(dto.occurredAt),
-							cancellationReason: 'IDENTITY_DEACTIVATION',
+							status: providerMayHaveReceived
+								? PaymentStatus.PENDING
+								: PaymentStatus.CANCELLED,
+							providerStatus: providerMayHaveReceived
+								? 'unknown'
+								: 'not_sent',
+							paymentMethodCiphertext: null,
+							confirmationUrl: null,
+							cancelledAt: providerMayHaveReceived
+								? payment.cancelledAt
+								: new Date(dto.occurredAt),
+							cancellationReason: providerMayHaveReceived
+								? payment.cancellationReason
+								: 'IDENTITY_DEACTIVATION',
 							aggregateVersion: { increment: 1n },
 							sourceSequence: sequence
 						}
 					});
 					await this.emitPaymentState(transaction, updated);
+					if (!providerMayHaveReceived) cancelledPayments += 1;
 				}
 				const result = {
 					revoked: true,
 					userId: dto.userId,
-					cancelledPayments: pendingPayments.length,
+					cancelledPayments,
 					stateVersion: renewal ? renewal.stateVersion + 1 : null
 				};
 				return result;

@@ -1,4 +1,13 @@
 import { ConflictException } from '@nestjs/common';
+import {
+	AutoRenewalConsentEventType,
+	AutoRenewalStatus,
+	BillingPeriod,
+	PaymentKind,
+	PaymentStatus,
+	Plan,
+	ProviderOperationStatus
+} from '@prisma/billing-client';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { billingCommandRequestHash } from './billing-command-idempotency';
@@ -13,6 +22,122 @@ function ensureTrialCommand(userId = 'user-1') {
 		userId,
 		trialDays: 7,
 		registeredAt: '2026-08-14T08:00:00.000Z'
+	};
+}
+
+function revokeCommand() {
+	return {
+		schemaVersion: 1,
+		commandId: 'd9e3a88c-e82e-4b05-a895-f273a5582545',
+		userId: 'user-1',
+		reason: 'USER_DEACTIVATION',
+		actorId: 'admin-1',
+		actorRole: 'ADMIN' as const,
+		occurredAt: '2026-08-27T10:00:00.000Z'
+	};
+}
+
+function revokeHarness(options: {
+	operationStatus?: ProviderOperationStatus;
+	operationAttempt?: number;
+	yookassaId?: string | null;
+}) {
+	const now = new Date('2026-08-27T09:00:00.000Z');
+	const renewal = {
+		id: 'renewal-1',
+		userId: 'user-1',
+		status: AutoRenewalStatus.ACTIVE,
+		stateVersion: 4,
+		consentVersion: 'v1',
+		consentText: 'Recurring payment consent',
+		offerSnapshot: 'Offer snapshot',
+		offerSha256: 'offer-sha256',
+		offerUpdatedAt: new Date('2026-08-01T00:00:00.000Z'),
+		plan: Plan.EASY,
+		billingPeriod: BillingPeriod.MONTHLY,
+		amount: '990.00',
+		currency: 'RUB',
+		paymentMethodCiphertext: 'encrypted-provider-method'
+	};
+	const payment = {
+		id: 'payment-1',
+		userId: 'user-1',
+		kind: PaymentKind.RECURRING,
+		status: PaymentStatus.PENDING,
+		yookassaId: options.yookassaId ?? null,
+		providerStatus: 'creating',
+		amount: '990.00',
+		paymentMethodCiphertext: 'encrypted-provider-method',
+		confirmationUrl: null,
+		cancelledAt: null,
+		cancellationReason: null,
+		aggregateVersion: 1n,
+		sourceSequence: 1n,
+		createdAt: now,
+		updatedAt: now
+	};
+	const providerOperation = options.operationStatus
+		? {
+				id: 'operation-1',
+				status: options.operationStatus,
+				attempt: options.operationAttempt ?? 0
+			}
+		: null;
+	const transaction = {
+		$executeRaw: jest.fn().mockResolvedValue(1),
+		$queryRaw: jest.fn().mockResolvedValue([]),
+		billingCommandReceipt: {
+			findUnique: jest.fn().mockResolvedValue(null),
+			create: jest.fn().mockResolvedValue({})
+		},
+		autoRenewal: {
+			findUnique: jest.fn().mockResolvedValue(renewal),
+			update: jest.fn(({ data }: { data: Record<string, unknown> }) =>
+				Promise.resolve({
+					...renewal,
+					...data,
+					stateVersion: 5,
+					paymentMethodCiphertext: null
+				})
+			)
+		},
+		autoRenewalConsentEvent: {
+			create: jest.fn().mockResolvedValue({})
+		},
+		providerOperation: {
+			findFirst: jest.fn().mockResolvedValue(providerOperation),
+			updateMany: jest.fn().mockResolvedValue({ count: 1 })
+		},
+		payment: {
+			findMany: jest.fn().mockResolvedValue([payment]),
+			update: jest.fn(({ data }: { data: Record<string, unknown> }) =>
+				Promise.resolve({
+					...payment,
+					...data,
+					aggregateVersion: 2n,
+					sourceSequence: data.sourceSequence,
+					updatedAt: new Date('2026-08-27T10:00:00.000Z')
+				})
+			)
+		},
+		billingSourceSequence: {
+			upsert: jest.fn().mockResolvedValue({ nextValue: 2n })
+		},
+		outboxEvent: {
+			create: jest.fn().mockResolvedValue({})
+		}
+	};
+	const prisma = {
+		$transaction: jest.fn(
+			async (work: (client: typeof transaction) => unknown) =>
+				work(transaction)
+		)
+	};
+	return {
+		payment,
+		renewal,
+		service: new InternalCommandsService(prisma as never, {} as never),
+		transaction
 	};
 }
 
@@ -85,6 +210,126 @@ describe('InternalCommandsService subscription directory', () => {
 			select: { userId: true }
 		});
 	});
+});
+
+describe('InternalCommandsService identity deactivation safety', () => {
+	it('revokes consent but preserves an attempted PENDING provider operation for reconciliation', async () => {
+		const { service, transaction } = revokeHarness({
+			operationStatus: ProviderOperationStatus.PENDING,
+			operationAttempt: 1
+		});
+
+		await expect(
+			service.revokeBeforeDeactivate(revokeCommand())
+		).resolves.toMatchObject({
+			revoked: true,
+			cancelledPayments: 0,
+			stateVersion: 5
+		});
+
+		expect(transaction.autoRenewal.update).toHaveBeenCalledWith({
+			where: { id: 'renewal-1' },
+			data: expect.objectContaining({
+				status: AutoRenewalStatus.REVOKED,
+				paymentMethodCiphertext: null,
+				dispatchPending: false
+			})
+		});
+		expect(
+			transaction.autoRenewalConsentEvent.create
+		).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				type: AutoRenewalConsentEventType.ADMIN_REVOKED,
+				source: 'IDENTITY_LIFECYCLE'
+			})
+		});
+		expect(transaction.providerOperation.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: 'operation-1',
+				status: ProviderOperationStatus.PENDING,
+				attempt: 1
+			},
+			data: expect.objectContaining({
+				status: ProviderOperationStatus.UNKNOWN,
+				lastErrorCode: 'IDENTITY_DEACTIVATION_RECONCILIATION_REQUIRED'
+			})
+		});
+		expect(transaction.payment.update).toHaveBeenCalledWith({
+			where: { id: 'payment-1' },
+			data: expect.objectContaining({
+				status: PaymentStatus.PENDING,
+				providerStatus: 'unknown',
+				paymentMethodCiphertext: null,
+				cancelledAt: null,
+				cancellationReason: null
+			})
+		});
+	});
+
+	it('fails and cancels a never-attempted PENDING provider operation', async () => {
+		const { service, transaction } = revokeHarness({
+			operationStatus: ProviderOperationStatus.PENDING,
+			operationAttempt: 0
+		});
+
+		await expect(
+			service.revokeBeforeDeactivate(revokeCommand())
+		).resolves.toMatchObject({
+			revoked: true,
+			cancelledPayments: 1
+		});
+
+		expect(transaction.providerOperation.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: 'operation-1',
+				status: ProviderOperationStatus.PENDING,
+				attempt: 0
+			},
+			data: expect.objectContaining({
+				status: ProviderOperationStatus.FAILED,
+				lastErrorCode: 'IDENTITY_DEACTIVATION'
+			})
+		});
+		expect(transaction.payment.update).toHaveBeenCalledWith({
+			where: { id: 'payment-1' },
+			data: expect.objectContaining({
+				status: PaymentStatus.CANCELLED,
+				providerStatus: 'not_sent',
+				paymentMethodCiphertext: null,
+				cancellationReason: 'IDENTITY_DEACTIVATION'
+			})
+		});
+	});
+
+	it.each([ProviderOperationStatus.SUCCEEDED, undefined])(
+		'preserves a payment with a known provider id when the latest operation is %s',
+		async operationStatus => {
+			const { service, transaction } = revokeHarness({
+				operationStatus,
+				operationAttempt: 1,
+				yookassaId: 'provider-payment-1'
+			});
+
+			await expect(
+				service.revokeBeforeDeactivate(revokeCommand())
+			).resolves.toMatchObject({
+				revoked: true,
+				cancelledPayments: 0
+			});
+
+			expect(
+				transaction.providerOperation.updateMany
+			).not.toHaveBeenCalled();
+			expect(transaction.payment.update).toHaveBeenCalledWith({
+				where: { id: 'payment-1' },
+				data: expect.objectContaining({
+					status: PaymentStatus.PENDING,
+					providerStatus: 'unknown',
+					paymentMethodCiphertext: null
+				})
+			});
+		}
+	);
 });
 
 describe('InternalCommandsService command idempotency', () => {

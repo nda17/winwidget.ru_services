@@ -334,52 +334,7 @@ export class BillingWorkerService
 			) {
 				throw new Error('Auto-renewal charge event is invalid');
 			}
-			const payment = await this.prisma.payment.findUnique({
-				where: { id: value.paymentId },
-				select: {
-					providerIdempotencyKey: true,
-					recurringCycleKey: true,
-					kind: true,
-					status: true,
-					providerStatus: true
-				}
-			});
-			if (
-				!payment?.providerIdempotencyKey ||
-				payment.recurringCycleKey !== value.cycleKey ||
-				payment.kind !== 'RECURRING' ||
-				payment.status !== 'PENDING' ||
-				payment.providerStatus !== 'queued'
-			) {
-				throw new Error('Auto-renewal charge payment snapshot is invalid');
-			}
-			await this.prisma.providerOperation.upsert({
-				where: { idempotencyKey: payment.providerIdempotencyKey },
-				create: {
-					paymentId: value.paymentId,
-					idempotencyKey: payment.providerIdempotencyKey,
-					kind: ProviderOperationKind.CAPTURE_RECURRING,
-					payload: value as Prisma.InputJsonValue
-				},
-				update: {}
-			});
-			await this.prisma.providerOperation.updateMany({
-				where: {
-					idempotencyKey: payment.providerIdempotencyKey,
-					paymentId: value.paymentId,
-					kind: ProviderOperationKind.CAPTURE_RECURRING,
-					status: ProviderOperationStatus.FAILED
-				},
-				data: {
-					status: ProviderOperationStatus.PENDING,
-					payload: value as Prisma.InputJsonValue,
-					availableAt: new Date(),
-					leaseToken: null,
-					leaseUntil: null,
-					lastErrorCode: null,
-					lastErrorSafe: null
-				}
-			});
+			await this.deliverAutoRenewalCharge(value, eventId);
 			return;
 		}
 		if (kind === 'notification-outcome') {
@@ -450,6 +405,76 @@ export class BillingWorkerService
 			return;
 		}
 		throw new Error(`Unsupported Billing consumer kind ${kind}`);
+	}
+
+	private async deliverAutoRenewalCharge(
+		value: Record<string, any>,
+		eventId: string
+	): Promise<void> {
+		const now = new Date();
+		await this.prisma.$transaction(
+			async transaction => {
+				const result =
+					await this.subscriptions.closeExpiredRecurringDispatch(
+						transaction,
+						{
+							paymentId: value.paymentId,
+							autoRenewalId: value.autoRenewalId,
+							cycleKey: value.cycleKey,
+							now,
+							triggerId: eventId
+						}
+					);
+				if (result === 'CLOSED' || result === 'ALREADY_CLOSED') return;
+				if (result === 'RECONCILIATION_REQUIRED') {
+					throw new Error(
+						'Auto-renewal charge requires provider reconciliation'
+					);
+				}
+
+				const payment = await transaction.payment.findUnique({
+					where: { id: value.paymentId },
+					select: { providerIdempotencyKey: true }
+				});
+				if (!payment?.providerIdempotencyKey) {
+					throw new Error(
+						'Auto-renewal charge payment snapshot is invalid'
+					);
+				}
+				await transaction.providerOperation.upsert({
+					where: { idempotencyKey: payment.providerIdempotencyKey },
+					create: {
+						paymentId: value.paymentId,
+						idempotencyKey: payment.providerIdempotencyKey,
+						kind: ProviderOperationKind.CAPTURE_RECURRING,
+						payload: value as Prisma.InputJsonValue
+					},
+					update: {}
+				});
+				await transaction.providerOperation.updateMany({
+					where: {
+						idempotencyKey: payment.providerIdempotencyKey,
+						paymentId: value.paymentId,
+						kind: ProviderOperationKind.CAPTURE_RECURRING,
+						status: ProviderOperationStatus.FAILED
+					},
+					data: {
+						status: ProviderOperationStatus.PENDING,
+						payload: value as Prisma.InputJsonValue,
+						availableAt: now,
+						leaseToken: null,
+						leaseUntil: null,
+						lastErrorCode: null,
+						lastErrorSafe: null
+					}
+				});
+			},
+			{
+				isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+				maxWait: 5_000,
+				timeout: 30_000
+			}
+		);
 	}
 
 	private async claimReceipt(

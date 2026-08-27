@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { ProviderOperationStatus } from '@prisma/billing-client';
 
 export const AUTO_RENEWAL_CONSENT_VERSION = 'auto-renewal-2026-07-28-v4';
 
@@ -21,6 +22,14 @@ const AUTO_RENEWAL_RETRYABLE_CANCELLATION_REASONS = new Set([
 export const isAutoRenewalRetryableCancellation = (
 	reason: string
 ): boolean => AUTO_RENEWAL_RETRYABLE_CANCELLATION_REASONS.has(reason);
+
+export const providerOperationMayHaveReachedProvider = (
+	status: ProviderOperationStatus,
+	attempt: number
+): boolean =>
+	status === ProviderOperationStatus.PROCESSING ||
+	status === ProviderOperationStatus.UNKNOWN ||
+	(status === ProviderOperationStatus.PENDING && attempt > 0);
 
 export const buildRecurringCycleKey = (
 	autoRenewalId: string,

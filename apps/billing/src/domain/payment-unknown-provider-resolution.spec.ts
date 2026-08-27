@@ -165,14 +165,32 @@ function resolutionHarness(
 		providerOperation: {
 			findUnique: jest
 				.fn()
-				.mockImplementation(() => Promise.resolve(operation)),
+				.mockImplementation(({ where }: any) =>
+					Promise.resolve(
+						where.id === 'verify-operation'
+							? { status: ProviderOperationStatus.SUCCEEDED }
+							: operation
+					)
+				),
+			upsert: jest.fn().mockResolvedValue({ id: 'verify-operation' }),
 			createMany: jest.fn().mockResolvedValue({ count: 1 }),
 			updateMany: jest.fn().mockResolvedValue({ count: 1 })
 		},
 		payment: {
+			findFirst: jest
+				.fn()
+				.mockImplementation(() => Promise.resolve(payment)),
 			findUnique: jest
 				.fn()
 				.mockImplementation(() => Promise.resolve(payment))
+		},
+		identityContactProjection: {
+			findUnique: jest.fn().mockResolvedValue({
+				userId: 'user-1',
+				name: 'Test User',
+				email: 'user@example.com',
+				phone: null
+			})
 		}
 	};
 	const service = new PaymentDomainService(prisma as never, {} as never);
@@ -216,6 +234,44 @@ describe('PaymentDomainService unknown provider resolution', () => {
 		expect(JSON.stringify(evidence)).not.toContain('user-1');
 	});
 
+	it('returns a provider ID retained only on the UNKNOWN operation as reconciliation evidence', async () => {
+		const { service } = resolutionHarness(
+			{ yookassaId: null, providerStatus: 'unknown' },
+			{ providerPaymentId: 'provider-payment-from-response' }
+		);
+
+		await expect(
+			service.unknownProviderPaymentEvidence('payment-1')
+		).resolves.toMatchObject({
+			yookassaId: null,
+			providerOperation: {
+				status: ProviderOperationStatus.UNKNOWN,
+				providerPaymentId: 'provider-payment-from-response'
+			}
+		});
+	});
+
+	it('queues authenticated verification from an observed UNKNOWN operation ID during admin check', async () => {
+		const { service, prisma } = resolutionHarness(
+			{ yookassaId: null, providerStatus: 'unknown' },
+			{ providerPaymentId: 'provider-payment-from-response' }
+		);
+
+		await expect(service.adminCheck('payment-1')).resolves.toMatchObject({
+			providerStatus: 'unknown'
+		});
+
+		expect(prisma.providerOperation.upsert).toHaveBeenCalledWith({
+			where: { idempotencyKey: expect.stringMatching(/^verify:/) },
+			create: expect.objectContaining({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-from-response',
+				kind: ProviderOperationKind.VERIFY_PAYMENT
+			}),
+			update: {}
+		});
+	});
+
 	it('returns 404 for missing evidence and 409 for a non-candidate snapshot', async () => {
 		const missing = resolutionHarness();
 		missing.prisma.payment.findUnique.mockResolvedValueOnce(null);
@@ -249,6 +305,20 @@ describe('PaymentDomainService unknown provider resolution', () => {
 			})
 		).rejects.toBeInstanceOf(ForbiddenException);
 		expect(prisma.$transaction).not.toHaveBeenCalled();
+	});
+
+	it('rejects manual not-found resolution when UNKNOWN retains an observed provider ID', async () => {
+		const { service, transaction } = resolutionHarness(
+			{},
+			{ providerPaymentId: 'provider-payment-from-response' }
+		);
+
+		await expect(
+			service.resolveUnknownProviderPayment(command(), actor)
+		).rejects.toThrow(
+			'Платёж с известным provider ID нужно проверить через adminCheck'
+		);
+		expect(transaction.payment.updateMany).not.toHaveBeenCalled();
 	});
 
 	it('atomically closes only the UNKNOWN operation and records Billing and Operations audit', async () => {
@@ -708,6 +778,272 @@ describe('PaymentDomainService receipt history recovery', () => {
 });
 
 describe('PaymentSuccessTransaction late manual-resolution recovery', () => {
+	function successHarness(options: {
+		kind: PaymentKind;
+		autoRenew: boolean;
+		renewalStatus?: AutoRenewalStatus;
+	}) {
+		const consentedAt = new Date('2026-08-27T09:00:00.000Z');
+		const payment = {
+			id: 'payment-1',
+			userId: 'user-1',
+			yookassaId: null,
+			kind: options.kind,
+			status: PaymentStatus.PENDING,
+			providerStatus: 'creating',
+			amount: '990.00',
+			currency: 'RUB',
+			plan: Plan.EASY,
+			billingPeriod: BillingPeriod.MONTHLY,
+			autoRenew: options.autoRenew,
+			consentedAt: options.autoRenew ? consentedAt : null,
+			consentVersion: options.autoRenew ? 'v1' : null,
+			consentText: options.autoRenew ? 'Recurring payment consent' : null,
+			consentIp: options.autoRenew ? '127.0.0.1' : null,
+			consentUserAgent: options.autoRenew ? 'billing-test' : null,
+			offerSnapshot: options.autoRenew ? 'Offer snapshot' : null,
+			offerSha256: options.autoRenew ? 'offer-sha256' : null,
+			offerUpdatedAt: options.autoRenew
+				? new Date('2026-08-01T00:00:00.000Z')
+				: null,
+			providerSnapshot: null,
+			confirmationUrl: null,
+			paymentMethodCiphertext: null,
+			succeededAt: null,
+			cancelledAt: null,
+			cancellationReason: null,
+			lastProviderCheckedAt: null,
+			aggregateVersion: 1n,
+			sourceSequence: 1n,
+			createdAt: new Date('2026-08-27T09:00:00.000Z'),
+			updatedAt: new Date('2026-08-27T09:00:00.000Z')
+		};
+		const currentRenewal = options.renewalStatus
+			? {
+					id: 'renewal-1',
+					userId: 'user-1',
+					status: options.renewalStatus,
+					stateVersion: 7,
+					consentVersion: 'v1',
+					consentText: 'Recurring payment consent',
+					offerSnapshot: 'Offer snapshot',
+					offerSha256: 'offer-sha256',
+					offerUpdatedAt: new Date('2026-08-01T00:00:00.000Z'),
+					plan: Plan.EASY,
+					billingPeriod: BillingPeriod.MONTHLY,
+					amount: '990.00',
+					currency: 'RUB',
+					nextChargeAt: new Date('2026-08-27T09:00:00.000Z'),
+					retryStartedAt: null,
+					retryAttempt: 0,
+					nextRetryAt: null,
+					dispatchPending: false,
+					lastChargeErrorCode: null,
+					disabledAt: new Date('2026-08-27T09:30:00.000Z'),
+					disableReason: 'Customer disabled renewal',
+					paymentMethodCiphertext: null,
+					paymentMethodType: null,
+					paymentMethodTitle: null,
+					paymentMethodLast4: null
+				}
+			: null;
+		const subscription = {
+			id: 'subscription-1',
+			userId: 'user-1',
+			plan: Plan.EASY,
+			billingPeriod: BillingPeriod.MONTHLY,
+			status: SubscriptionStatus.ACTIVE,
+			startsAt: new Date('2026-08-27T11:00:00.000Z'),
+			expiresAt: new Date('2026-09-27T11:00:00.000Z'),
+			leadsThisPeriod: 0,
+			periodResetsAt: new Date('2026-09-27T11:00:00.000Z'),
+			aggregateVersion: 1n,
+			sourceSequence: 2n,
+			createdAt: new Date('2026-08-27T11:00:00.000Z'),
+			updatedAt: new Date('2026-08-27T11:00:00.000Z')
+		};
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([]),
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			payment: {
+				findUnique: jest.fn().mockResolvedValue(payment),
+				findFirst: jest.fn().mockResolvedValue(null),
+				update: jest.fn(({ data }: { data: Record<string, unknown> }) =>
+					Promise.resolve({ ...payment, ...data })
+				)
+			},
+			identityContactProjection: {
+				findUnique: jest.fn().mockResolvedValue({
+					userId: 'user-1',
+					name: 'User',
+					email: 'user@example.com',
+					phone: null
+				})
+			},
+			autoRenewal: {
+				findUnique: jest.fn().mockResolvedValue(currentRenewal),
+				upsert: jest.fn().mockResolvedValue({
+					id: 'renewal-1',
+					userId: 'user-1'
+				}),
+				update: jest.fn().mockResolvedValue(currentRenewal)
+			},
+			autoRenewalConsentEvent: {
+				create: jest.fn().mockResolvedValue({})
+			},
+			subscription: {
+				findUnique: jest.fn().mockResolvedValue(null),
+				upsert: jest.fn().mockResolvedValue(subscription)
+			},
+			affiliateReferral: {
+				findUnique: jest.fn().mockResolvedValue(null)
+			},
+			providerOperation: {
+				upsert: jest.fn().mockResolvedValue({})
+			},
+			billingSourceSequence: {
+				upsert: jest
+					.fn()
+					.mockResolvedValueOnce({ nextValue: 2n })
+					.mockResolvedValueOnce({ nextValue: 3n })
+			},
+			notificationRoutingProjection: {
+				findUnique: jest.fn().mockResolvedValue(null)
+			},
+			outboxEvent: {
+				create: jest.fn().mockResolvedValue({})
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				async (work: (client: typeof transaction) => unknown) =>
+					work(transaction)
+			)
+		};
+		return {
+			currentRenewal,
+			payment,
+			service: new PaymentSuccessTransaction(prisma as never),
+			transaction
+		};
+	}
+
+	it('activates AutoRenewal from a successful opted-in checkout with a saved method', async () => {
+		const { service, transaction } = successHarness({
+			kind: PaymentKind.ONE_TIME,
+			autoRenew: true
+		});
+
+		await expect(
+			service.apply({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1',
+				providerAmount: '990.00',
+				providerCurrency: 'RUB',
+				succeededAt: new Date('2026-08-27T11:00:00.000Z'),
+				paymentMethodCiphertext: 'encrypted-provider-method-1',
+				paymentMethodType: 'bank_card',
+				paymentMethodTitle: 'Bank card *1111',
+				paymentMethodLast4: '1111'
+			})
+		).resolves.toMatchObject({
+			status: PaymentStatus.SUCCEEDED,
+			duplicate: false
+		});
+
+		expect(transaction.autoRenewal.upsert).toHaveBeenCalledWith({
+			where: { userId: 'user-1' },
+			create: expect.objectContaining({
+				status: AutoRenewalStatus.ACTIVE,
+				paymentMethodCiphertext: 'encrypted-provider-method-1',
+				paymentMethodType: 'bank_card',
+				paymentMethodLast4: '1111'
+			}),
+			update: expect.objectContaining({
+				status: AutoRenewalStatus.ACTIVE,
+				paymentMethodCiphertext: 'encrypted-provider-method-1'
+			})
+		});
+		expect(
+			transaction.autoRenewalConsentEvent.create
+		).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				type: AutoRenewalConsentEventType.CONSENT_GRANTED,
+				userId: 'user-1',
+				actorUserId: 'user-1',
+				metadata: expect.objectContaining({ paymentId: 'payment-1' })
+			})
+		});
+	});
+
+	it('applies a late one-time success after an unsafe cancellation request leaves the payment pending', async () => {
+		const { service, transaction } = successHarness({
+			kind: PaymentKind.ONE_TIME,
+			autoRenew: false
+		});
+		const succeededAt = new Date('2026-08-27T11:00:00.000Z');
+
+		await expect(
+			service.apply({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1',
+				providerAmount: '990.00',
+				providerCurrency: 'RUB',
+				succeededAt
+			})
+		).resolves.toMatchObject({
+			status: PaymentStatus.SUCCEEDED,
+			duplicate: false
+		});
+
+		expect(transaction.payment.update).toHaveBeenCalledWith({
+			where: { id: 'payment-1' },
+			data: expect.objectContaining({
+				yookassaId: 'provider-payment-1',
+				status: PaymentStatus.SUCCEEDED,
+				providerStatus: 'succeeded',
+				succeededAt
+			})
+		});
+		expect(transaction.subscription.upsert).toHaveBeenCalledTimes(1);
+		expect(transaction.autoRenewal.upsert).not.toHaveBeenCalled();
+	});
+
+	it.each([AutoRenewalStatus.USER_DISABLED, AutoRenewalStatus.REVOKED])(
+		'never reactivates %s renewal after a late recurring success',
+		async renewalStatus => {
+			const { currentRenewal, service, transaction } = successHarness({
+				kind: PaymentKind.RECURRING,
+				autoRenew: true,
+				renewalStatus
+			});
+
+			await expect(
+				service.apply({
+					paymentId: 'payment-1',
+					providerPaymentId: 'provider-payment-1',
+					providerAmount: '990.00',
+					providerCurrency: 'RUB',
+					succeededAt: new Date('2026-08-27T11:00:00.000Z'),
+					paymentMethodCiphertext: 'late-provider-method'
+				})
+			).resolves.toMatchObject({ status: PaymentStatus.SUCCEEDED });
+
+			expect(transaction.autoRenewal.update).toHaveBeenCalledTimes(1);
+			const renewalUpdate =
+				transaction.autoRenewal.update.mock.calls[0][0];
+			expect(renewalUpdate.where).toEqual({ id: 'renewal-1' });
+			expect(renewalUpdate.data).not.toHaveProperty('status');
+			expect(renewalUpdate.data).not.toHaveProperty('disabledAt');
+			expect(renewalUpdate.data).not.toHaveProperty('disableReason');
+			expect(renewalUpdate.data).not.toHaveProperty(
+				'paymentMethodCiphertext'
+			);
+			expect(currentRenewal?.paymentMethodCiphertext).toBeNull();
+			expect(transaction.autoRenewal.upsert).not.toHaveBeenCalled();
+		}
+	);
+
 	it('promotes a manually cancelled payment once and treats a repeated webhook as a duplicate', async () => {
 		let payment = {
 			id: 'payment-1',

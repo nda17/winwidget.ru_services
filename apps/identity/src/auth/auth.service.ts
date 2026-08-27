@@ -48,6 +48,10 @@ const USER_INCLUDE = {
 	telegramNotificationChannel: true
 } satisfies Prisma.UserInclude;
 
+type IdentityUser = NonNullable<
+	Awaited<ReturnType<UsersService['findById']>>
+>;
+
 @Injectable()
 export class AuthService {
 	constructor(
@@ -62,19 +66,12 @@ export class AuthService {
 
 	async login(dto: AuthDto, request?: Request) {
 		const email = normalizeEmail(dto.email);
-		const user = await this.users.findByIdentity(
+		return this.startPasswordSession(
 			AuthIdentityType.EMAIL,
-			email
+			email,
+			dto.password,
+			request
 		);
-		if (
-			!user ||
-			!user.password ||
-			!(await compare(dto.password, user.password))
-		) {
-			throw new UnauthorizedException('Email or password invalid');
-		}
-		this.ensureActive(user);
-		return this.startSession(user, request);
 	}
 
 	async register(dto: AuthDto) {
@@ -305,24 +302,12 @@ export class AuthService {
 	}
 
 	async loginByPhone(dto: PhoneLoginDto, request?: Request) {
-		const user = await this.users.findByIdentity(
+		return this.startPasswordSession(
 			AuthIdentityType.PHONE,
-			normalizePhone(dto.phone)
+			normalizePhone(dto.phone),
+			dto.password,
+			request
 		);
-		const phoneIdentity = user?.authIdentities.find(
-			item => item.type === 'PHONE'
-		);
-		if (!user) {
-			throw new UnauthorizedException('Email or password invalid');
-		}
-		if (!phoneIdentity?.verifiedAt) {
-			throw new UnauthorizedException('Phone not verified');
-		}
-		if (!user.password || !(await compare(dto.password, user.password))) {
-			throw new UnauthorizedException('Email or password invalid');
-		}
-		this.ensureActive(user);
-		return this.startSession(user, request);
 	}
 
 	async refresh(token: string) {
@@ -508,6 +493,92 @@ export class AuthService {
 			accessToken: this.jwt.issue(user.id, user.rights, sessionId),
 			refreshToken
 		};
+	}
+
+	private async startPasswordSession(
+		type: AuthIdentityType,
+		value: string,
+		password: string,
+		request?: Request
+	) {
+		const candidate = await this.requirePasswordLogin(
+			await this.users.findByIdentity(type, value),
+			type,
+			password
+		);
+		this.ensureActive(candidate);
+		await this.owners.ensureTrial(candidate.id, candidate.createdAt);
+
+		const sessionId = randomUUID();
+		const refreshToken = this.refreshTokens.create(sessionId);
+		const refreshTokenHash = await hash(
+			this.refreshTokens.hashInput(refreshToken),
+			PASSWORD_SALT_ROUNDS
+		);
+		const user = await this.prisma.$transaction(async transaction => {
+			await transaction.$queryRaw(
+				Prisma.sql`SELECT id FROM identity.users WHERE id = ${candidate.id} FOR UPDATE`
+			);
+			const current = await this.requirePasswordLogin(
+				await transaction.user.findFirst({
+					where: {
+						id: candidate.id,
+						authIdentities: { some: { type, value } }
+					},
+					include: USER_INCLUDE
+				}),
+				type,
+				password,
+				candidate.password
+			);
+			this.ensureActive(current);
+			await transaction.userSession.create({
+				data: {
+					id: sessionId,
+					userId: current.id,
+					refreshTokenHash,
+					userAgent: request?.get('user-agent')?.slice(0, 500),
+					ipAddress: request ? clientIp(request) : undefined,
+					expiresAt: new Date(Date.now() + 7 * 86_400_000)
+				}
+			});
+			return current;
+		});
+
+		return {
+			user: publicUser(user),
+			accessToken: this.jwt.issue(user.id, user.rights, sessionId),
+			refreshToken
+		};
+	}
+
+	private async requirePasswordLogin(
+		user: Awaited<ReturnType<UsersService['findById']>>,
+		type: AuthIdentityType,
+		password: string,
+		expectedPasswordHash?: string
+	): Promise<IdentityUser> {
+		if (!user) {
+			throw new UnauthorizedException('Email or password invalid');
+		}
+		if (
+			type === AuthIdentityType.PHONE &&
+			!user.authIdentities.some(
+				identity =>
+					identity.type === AuthIdentityType.PHONE && identity.verifiedAt
+			)
+		) {
+			throw new UnauthorizedException('Phone not verified');
+		}
+		if (
+			!user.password ||
+			(expectedPasswordHash !== undefined &&
+				user.password !== expectedPasswordHash) ||
+			!(await compare(password, user.password))
+		) {
+			throw new UnauthorizedException('Email or password invalid');
+		}
+		return user;
 	}
 
 	private ensureActive(user: {

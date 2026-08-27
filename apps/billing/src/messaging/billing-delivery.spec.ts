@@ -1,7 +1,13 @@
 import {
+	AutoRenewalConsentEventType,
+	AutoRenewalStatus,
 	DeliveryFailureStatus,
 	DeliveryReceiptStatus,
-	OutboxStatus
+	OutboxStatus,
+	PaymentKind,
+	PaymentStatus,
+	ProviderOperationKind,
+	ProviderOperationStatus
 } from '@prisma/billing-client';
 import type { ConsumeMessage } from 'amqplib';
 import { createHash } from 'node:crypto';
@@ -9,6 +15,7 @@ import {
 	AUTO_RENEWAL_CONSENT_TEXT,
 	AUTO_RENEWAL_CONSENT_VERSION
 } from '../domain/billing-legal.constants';
+import { SubscriptionDomainService } from '../domain/subscription-domain.service';
 import { BillingProjectionService } from '../projections/billing-projection.service';
 import {
 	BILLING_DEAD_LETTER_EXCHANGE,
@@ -420,5 +427,415 @@ describe('BillingWorkerService current consumer startup', () => {
 		]);
 		expect(service.isReady()).toBe(true);
 		service.onApplicationShutdown();
+	});
+});
+
+describe('BillingWorkerService recurring dispatch deadline', () => {
+	const eventId = '4c230515-2e4e-4e8c-a655-cdcfb8c3dc2b';
+	const payload = {
+		schemaVersion: 1,
+		eventType: BILLING_EVENT_TYPES.autoRenewalChargeRequested,
+		paymentId: 'payment-1',
+		autoRenewalId: 'renewal-1',
+		cycleKey: 'renewal-1:2026-08-27T10:00:00.000Z:attempt:0',
+		scheduledFor: '2026-08-27T10:00:00.000Z'
+	};
+	const initialPayment = () => ({
+		id: 'payment-1',
+		userId: 'user-1',
+		yookassaId: null,
+		providerIdempotencyKey: 'provider-idempotency-1',
+		recurringCycleKey: payload.cycleKey,
+		recurringAttempt: 0,
+		kind: PaymentKind.RECURRING,
+		amount: '990.00',
+		status: PaymentStatus.PENDING,
+		providerStatus: 'queued',
+		plan: 'EASY',
+		billingPeriod: 'MONTHLY',
+		paymentMethodCiphertext: 'encrypted-provider-method',
+		confirmationUrl: null,
+		checkoutExpiresAt: new Date('2026-08-27T11:00:00.000Z'),
+		cancelledAt: null,
+		cancellationReason: null,
+		aggregateVersion: 1n,
+		sourceSequence: 1n,
+		createdAt: new Date('2026-08-27T10:00:00.000Z'),
+		updatedAt: new Date('2026-08-27T10:00:00.000Z')
+	});
+	const initialRenewal = () => ({
+		id: 'renewal-1',
+		userId: 'user-1',
+		status: AutoRenewalStatus.ACTIVE,
+		dispatchPending: true,
+		retryAttempt: 0,
+		nextRetryAt: null,
+		nextChargeAt: new Date('2026-08-27T10:00:00.000Z'),
+		disabledAt: null,
+		disableReason: null,
+		lastChargeErrorCode: null,
+		stateVersion: 3,
+		consentVersion: 'consent-v1',
+		consentText: 'consent text',
+		offerSnapshot: 'offer snapshot',
+		offerSha256: 'offer-sha256',
+		offerUpdatedAt: new Date('2026-08-01T00:00:00.000Z'),
+		plan: 'EASY',
+		billingPeriod: 'MONTHLY',
+		amount: '990.00',
+		currency: 'RUB',
+		paymentMethodCiphertext: 'encrypted-provider-method'
+	});
+	const initialOperation = (attempt = 0) => ({
+		id: 'operation-1',
+		paymentId: 'payment-1',
+		providerPaymentId: null,
+		idempotencyKey: 'provider-idempotency-1',
+		kind: ProviderOperationKind.CAPTURE_RECURRING,
+		status: ProviderOperationStatus.PENDING,
+		attempt,
+		createdAt: new Date('2026-08-27T10:30:00.000Z')
+	});
+
+	const makeHarness = (
+		providerOperation: ReturnType<typeof initialOperation> | null,
+		checkoutExpiresAt?: Date
+	) => {
+		let payment = initialPayment();
+		if (checkoutExpiresAt) {
+			payment = { ...payment, checkoutExpiresAt };
+		}
+		let renewal = initialRenewal();
+		let operation = providerOperation;
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([]),
+			payment: {
+				findUnique: jest.fn().mockImplementation(() => payment),
+				findUniqueOrThrow: jest.fn().mockImplementation(() => payment),
+				updateMany: jest.fn().mockImplementation(({ data }) => {
+					if (
+						payment.status !== PaymentStatus.PENDING ||
+						payment.providerStatus !== 'queued'
+					) {
+						return { count: 0 };
+					}
+					payment = {
+						...payment,
+						status: data.status,
+						providerStatus: data.providerStatus,
+						paymentMethodCiphertext: data.paymentMethodCiphertext,
+						confirmationUrl: data.confirmationUrl,
+						cancelledAt: data.cancelledAt,
+						cancellationReason: data.cancellationReason,
+						aggregateVersion: payment.aggregateVersion + 1n,
+						sourceSequence: data.sourceSequence,
+						updatedAt: new Date()
+					};
+					return { count: 1 };
+				})
+			},
+			autoRenewal: {
+				findUnique: jest.fn().mockImplementation(() => renewal),
+				updateMany: jest.fn().mockImplementation(({ data }) => {
+					if (
+						renewal.status !== AutoRenewalStatus.ACTIVE ||
+						!renewal.dispatchPending
+					) {
+						return { count: 0 };
+					}
+					renewal = {
+						...renewal,
+						status: data.status,
+						nextRetryAt: data.nextRetryAt,
+						dispatchPending: data.dispatchPending,
+						disabledAt: data.disabledAt,
+						disableReason: data.disableReason,
+						lastChargeErrorCode: data.lastChargeErrorCode,
+						stateVersion: renewal.stateVersion + 1
+					};
+					return { count: 1 };
+				})
+			},
+			providerOperation: {
+				findFirst: jest.fn().mockImplementation(() => operation),
+				upsert: jest.fn(),
+				updateMany: jest.fn().mockImplementation(({ data }) => {
+					if (
+						!operation ||
+						operation.status !== ProviderOperationStatus.PENDING ||
+						operation.attempt !== 0
+					) {
+						return { count: 0 };
+					}
+					operation = { ...operation, ...data };
+					return { count: 1 };
+				})
+			},
+			billingSourceSequence: {
+				upsert: jest.fn().mockResolvedValue({ nextValue: 9n })
+			},
+			autoRenewalConsentEvent: {
+				create: jest.fn().mockResolvedValue({ id: 'consent-event-1' })
+			},
+			outboxEvent: {
+				create: jest.fn().mockResolvedValue({ id: 'outbox-1' })
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				async (callback: (client: typeof transaction) => unknown) =>
+					callback(transaction)
+			),
+			integrationDeliveryReceipt: {
+				findUnique: jest.fn().mockResolvedValue(null),
+				create: jest.fn().mockResolvedValue({ id: 'receipt-1' }),
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			integrationDeliveryFailure: {
+				updateMany: jest.fn().mockResolvedValue({ count: 0 })
+			}
+		};
+		const rabbit = { ack: jest.fn(), nack: jest.fn() };
+		const subscriptions = new SubscriptionDomainService(
+			{} as never,
+			{} as never
+		);
+		const service = new BillingWorkerService(
+			prisma as never,
+			{} as never,
+			rabbit as never,
+			{} as never,
+			subscriptions,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+		const deliver = () =>
+			(
+				service as unknown as {
+					deliver(
+						kind: 'auto-renewal-charge',
+						value: typeof payload,
+						eventId: string
+					): Promise<void>;
+				}
+			).deliver('auto-renewal-charge', payload, eventId);
+		const handle = () =>
+			(
+				service as unknown as {
+					handle(
+						kind: 'auto-renewal-charge',
+						message: ConsumeMessage
+					): Promise<void>;
+				}
+			).handle('auto-renewal-charge', {
+				content: Buffer.from(JSON.stringify(payload)),
+				fields: {
+					consumerTag: 'consumer-1',
+					deliveryTag: 1,
+					redelivered: false,
+					exchange: 'winwidget.events',
+					routingKey: BILLING_EVENT_TYPES.autoRenewalChargeRequested
+				},
+				properties: {
+					contentType: 'application/json',
+					contentEncoding: 'utf-8',
+					headers: {},
+					deliveryMode: 2,
+					priority: undefined,
+					correlationId: undefined,
+					replyTo: undefined,
+					expiration: undefined,
+					messageId: eventId,
+					timestamp: undefined,
+					type: BILLING_EVENT_TYPES.autoRenewalChargeRequested,
+					userId: undefined,
+					appId: undefined,
+					clusterId: undefined
+				}
+			} as ConsumeMessage);
+
+		return {
+			deliver,
+			handle,
+			prisma,
+			transaction,
+			rabbit,
+			getPayment: () => payment,
+			getRenewal: () => renewal,
+			getOperation: () => operation
+		};
+	};
+
+	beforeEach(() => {
+		jest
+			.useFakeTimers()
+			.setSystemTime(new Date('2026-08-27T12:00:00.000Z'));
+	});
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	it('terminally closes an unattempted delayed charge and ACKs it', async () => {
+		const value = makeHarness(null);
+
+		await expect(value.handle()).resolves.toBeUndefined();
+
+		expect(value.rabbit.ack).toHaveBeenCalledTimes(1);
+		expect(value.rabbit.nack).not.toHaveBeenCalled();
+		expect(
+			value.prisma.integrationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: DeliveryReceiptStatus.DELIVERED
+				})
+			})
+		);
+		expect(
+			value.transaction.providerOperation.upsert
+		).not.toHaveBeenCalled();
+		expect(
+			value.transaction.providerOperation.updateMany
+		).not.toHaveBeenCalled();
+		expect(value.getPayment()).toMatchObject({
+			providerIdempotencyKey: 'provider-idempotency-1',
+			status: PaymentStatus.CANCELLED,
+			providerStatus: 'not_sent',
+			paymentMethodCiphertext: null,
+			cancellationReason: 'CHARGE_WINDOW_EXPIRED',
+			aggregateVersion: 2n,
+			sourceSequence: 8n
+		});
+		expect(value.getRenewal()).toMatchObject({
+			status: AutoRenewalStatus.TECHNICAL_PAUSE,
+			dispatchPending: false,
+			lastChargeErrorCode: 'CHARGE_WINDOW_EXPIRED',
+			paymentMethodCiphertext: 'encrypted-provider-method',
+			stateVersion: 4
+		});
+		expect(
+			value.transaction.autoRenewalConsentEvent.create
+		).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				type: AutoRenewalConsentEventType.TECHNICAL_PAUSED,
+				source: 'AUTO_RENEWAL_DISPATCH_DEADLINE',
+				metadata: expect.objectContaining({
+					errorCode: 'CHARGE_WINDOW_EXPIRED',
+					paymentId: 'payment-1',
+					triggerId: eventId
+				})
+			})
+		});
+		expect(value.transaction.outboxEvent.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				eventType: BILLING_EVENT_TYPES.paymentChanged,
+				exchange: 'winwidget.events',
+				payload: expect.objectContaining({
+					eventType: BILLING_EVENT_TYPES.paymentChanged,
+					aggregateVersion: '2',
+					sourceSequence: '8',
+					state: expect.objectContaining({
+						id: 'payment-1',
+						status: PaymentStatus.CANCELLED
+					})
+				})
+			})
+		});
+		expect(value.prisma.$transaction).toHaveBeenCalledWith(
+			expect.any(Function),
+			expect.objectContaining({ isolationLevel: 'Serializable' })
+		);
+	});
+
+	it('repeats the terminal delivery without duplicate state or events', async () => {
+		const value = makeHarness(null);
+
+		await expect(value.deliver()).resolves.toBeUndefined();
+		await expect(value.deliver()).resolves.toBeUndefined();
+
+		expect(value.transaction.payment.updateMany).toHaveBeenCalledTimes(1);
+		expect(value.transaction.autoRenewal.updateMany).toHaveBeenCalledTimes(
+			1
+		);
+		expect(
+			value.transaction.billingSourceSequence.upsert
+		).toHaveBeenCalledTimes(1);
+		expect(
+			value.transaction.autoRenewalConsentEvent.create
+		).toHaveBeenCalledTimes(1);
+		expect(value.transaction.outboxEvent.create).toHaveBeenCalledTimes(1);
+	});
+
+	it('CAS-fails a matching PENDING attempt-zero operation without rearming it', async () => {
+		const value = makeHarness(initialOperation());
+
+		await expect(value.deliver()).resolves.toBeUndefined();
+
+		expect(
+			value.transaction.providerOperation.upsert
+		).not.toHaveBeenCalled();
+		expect(
+			value.transaction.providerOperation.updateMany
+		).toHaveBeenCalledWith({
+			where: {
+				id: 'operation-1',
+				status: ProviderOperationStatus.PENDING,
+				attempt: 0,
+				providerPaymentId: null
+			},
+			data: expect.objectContaining({
+				status: ProviderOperationStatus.FAILED,
+				lastErrorCode: 'CHARGE_WINDOW_EXPIRED'
+			})
+		});
+		expect(value.getOperation()).toMatchObject({
+			status: ProviderOperationStatus.FAILED,
+			attempt: 0,
+			lastErrorCode: 'CHARGE_WINDOW_EXPIRED'
+		});
+	});
+
+	it('does not terminally close an attempted operation that needs reconciliation', async () => {
+		const value = makeHarness(initialOperation(1));
+
+		await expect(value.deliver()).rejects.toThrow(
+			'Auto-renewal charge requires provider reconciliation'
+		);
+
+		expect(value.transaction.payment.updateMany).not.toHaveBeenCalled();
+		expect(
+			value.transaction.autoRenewal.updateMany
+		).not.toHaveBeenCalled();
+		expect(
+			value.transaction.autoRenewalConsentEvent.create
+		).not.toHaveBeenCalled();
+		expect(value.transaction.outboxEvent.create).not.toHaveBeenCalled();
+	});
+
+	it('keeps the normal not-expired charge dispatch path unchanged', async () => {
+		const value = makeHarness(null, new Date('2026-08-27T13:00:00.000Z'));
+
+		await expect(value.deliver()).resolves.toBeUndefined();
+
+		expect(
+			value.transaction.providerOperation.upsert
+		).toHaveBeenCalledWith({
+			where: { idempotencyKey: 'provider-idempotency-1' },
+			create: expect.objectContaining({
+				paymentId: 'payment-1',
+				idempotencyKey: 'provider-idempotency-1',
+				kind: ProviderOperationKind.CAPTURE_RECURRING
+			}),
+			update: {}
+		});
+		expect(value.transaction.payment.updateMany).not.toHaveBeenCalled();
+		expect(
+			value.transaction.autoRenewal.updateMany
+		).not.toHaveBeenCalled();
+		expect(
+			value.transaction.autoRenewalConsentEvent.create
+		).not.toHaveBeenCalled();
+		expect(value.transaction.outboxEvent.create).not.toHaveBeenCalled();
 	});
 });

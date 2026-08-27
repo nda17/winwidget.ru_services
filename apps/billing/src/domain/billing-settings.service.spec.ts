@@ -21,16 +21,23 @@ const settings = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe('BillingSettingsService', () => {
+	const originalFetch = global.fetch;
+	const originalRevision = process.env.APP_REVISION;
+
+	afterEach(() => {
+		global.fetch = originalFetch;
+		if (originalRevision === undefined) delete process.env.APP_REVISION;
+		else process.env.APP_REVISION = originalRevision;
+		jest.restoreAllMocks();
+	});
+
 	it('returns the exact narrow public response', async () => {
 		const prisma = {
 			billingSettings: {
 				findUnique: jest.fn().mockResolvedValue(settings())
 			}
 		};
-		const service = new BillingSettingsService(
-			prisma as never,
-			{} as never
-		);
+		const service = new BillingSettingsService(prisma as never);
 		await expect(service.publicSettings()).resolves.toEqual({
 			paymentEnabled: true,
 			autoRenewalSignupEnabled: false,
@@ -47,10 +54,7 @@ describe('BillingSettingsService', () => {
 				findUnique: jest.fn().mockResolvedValue(settings())
 			}
 		};
-		const service = new BillingSettingsService(
-			prisma as never,
-			{} as never
-		);
+		const service = new BillingSettingsService(prisma as never);
 		const result = await service.adminSettings();
 		expect(result).toEqual({
 			id: 'singleton',
@@ -69,23 +73,31 @@ describe('BillingSettingsService', () => {
 	});
 
 	it('returns code/config readiness without credential values or merchant claims', async () => {
+		process.env.APP_REVISION = 'billing-test-revision';
 		const prisma = {
 			billingSettings: {
 				findUnique: jest.fn().mockResolvedValue(settings())
 			}
 		};
-		const provider = {
-			configurationStatus: jest.fn().mockReturnValue({
-				mode: 'production',
-				shopIdConfigured: true,
-				secretKeyConfigured: true,
-				credentialsConfigured: true
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			json: jest.fn().mockResolvedValue({
+				status: 'ready',
+				service: 'billing',
+				role: 'worker',
+				revision: 'billing-test-revision',
+				providerConfiguration: {
+					yookassa: {
+						mode: 'production',
+						shopIdConfigured: true,
+						secretKeyConfigured: true,
+						credentialsConfigured: true
+					},
+					paymentMethodEncryptionKeyConfigured: true
+				}
 			})
-		};
-		const service = new BillingSettingsService(
-			prisma as never,
-			provider as never
-		);
+		}) as unknown as typeof fetch;
+		const service = new BillingSettingsService(prisma as never);
 
 		const result = await service.providerReadiness();
 
@@ -121,6 +133,87 @@ describe('BillingSettingsService', () => {
 		});
 		expect(JSON.stringify(result)).not.toContain('shop-secret');
 		expect(JSON.stringify(result)).not.toContain('shop-id-value');
+		expect(global.fetch).toHaveBeenCalledWith(
+			'http://127.0.0.1:4802/health/ready',
+			expect.objectContaining({ signal: expect.any(AbortSignal) })
+		);
+	});
+
+	it('fails closed when worker provider readiness cannot be verified', async () => {
+		process.env.APP_REVISION = 'billing-test-revision';
+		const prisma = {
+			billingSettings: {
+				findUnique: jest.fn().mockResolvedValue(settings())
+			}
+		};
+		global.fetch = jest
+			.fn()
+			.mockRejectedValue(new Error('worker unavailable'));
+		const service = new BillingSettingsService(prisma as never);
+
+		await expect(service.providerReadiness()).rejects.toThrow(
+			'Billing worker readiness is unavailable'
+		);
+	});
+
+	it.each([
+		{
+			name: 'wrong service identity',
+			patch: { service: 'other-service' }
+		},
+		{
+			name: 'wrong worker revision',
+			patch: { revision: 'stale-revision' }
+		},
+		{
+			name: 'missing encryption key',
+			patch: { paymentMethodEncryptionKeyConfigured: false }
+		},
+		{
+			name: 'unconfigured provider',
+			patch: {
+				yookassa: {
+					mode: 'production',
+					shopIdConfigured: true,
+					secretKeyConfigured: false,
+					credentialsConfigured: false
+				}
+			}
+		}
+	])('fails closed for $name', async ({ patch }) => {
+		process.env.APP_REVISION = 'billing-test-revision';
+		const providerConfiguration = {
+			yookassa: {
+				mode: 'production',
+				shopIdConfigured: true,
+				secretKeyConfigured: true,
+				credentialsConfigured: true
+			},
+			paymentMethodEncryptionKeyConfigured: true,
+			...(patch.yookassa ? { yookassa: patch.yookassa } : {}),
+			...(patch.paymentMethodEncryptionKeyConfigured === false
+				? { paymentMethodEncryptionKeyConfigured: false }
+				: {})
+		};
+		global.fetch = jest.fn().mockResolvedValue({
+			ok: true,
+			json: jest.fn().mockResolvedValue({
+				status: 'ready',
+				service: patch.service || 'billing',
+				role: 'worker',
+				revision: patch.revision || 'billing-test-revision',
+				providerConfiguration
+			})
+		}) as unknown as typeof fetch;
+		const service = new BillingSettingsService({
+			billingSettings: {
+				findUnique: jest.fn().mockResolvedValue(settings())
+			}
+		} as never);
+
+		await expect(service.providerReadiness()).rejects.toThrow(
+			'Billing worker readiness is unavailable'
+		);
 	});
 
 	it('updates settings and audit in one transaction', async () => {
@@ -148,10 +241,7 @@ describe('BillingSettingsService', () => {
 					work(transaction)
 				)
 		};
-		const service = new BillingSettingsService(
-			prisma as never,
-			{} as never
-		);
+		const service = new BillingSettingsService(prisma as never);
 
 		const result = await service.updateAdminSettings(
 			{ paymentEnabled: false, affiliateCashbackPercent: 15 },
@@ -191,10 +281,7 @@ describe('BillingSettingsService', () => {
 
 	it('rejects an empty PATCH before opening a transaction', async () => {
 		const prisma = { $transaction: jest.fn() };
-		const service = new BillingSettingsService(
-			prisma as never,
-			{} as never
-		);
+		const service = new BillingSettingsService(prisma as never);
 		await expect(
 			service.updateAdminSettings(
 				{},

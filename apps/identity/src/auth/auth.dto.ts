@@ -155,7 +155,12 @@ export class UpdateUserDto {
 	isPhoneVerified?: boolean;
 
 	@IsOptional()
+	@ValidateIf((_, value) => value !== '')
 	@IsString()
+	@Matches(PASSWORD, {
+		message:
+			'Мин. длина 6 символов. Должен содержать 1 цифру 0-9, 1 строчную букву a-z и 1 заглавную букву A-Z.'
+	})
 	password?: string;
 
 	@IsOptional()

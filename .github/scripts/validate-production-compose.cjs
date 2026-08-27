@@ -36,18 +36,53 @@ const config = JSON.parse(readFileSync(0, 'utf8'));
 const services = config.services ?? {};
 const rootExample = parseExample('.env.example');
 const gatewayExample = parseExample('apps/api-gateway/.env.example');
+const notificationDeliveryExample = parseExample(
+	'apps/notification-delivery/.env.example'
+);
 const expected = key => process.env[key] ?? rootExample.get(key);
+
+const composeUnusedLegacyRootExampleKeys = [
+	'NOTIFICATION_DELIVERY_INTERNAL_TIMEOUT_MS',
+	'CAMPAIGNS_AUDIENCE_EXPORT_CHUNK_SIZE',
+	'BILLING_PROCESS_ROLE',
+	'IDENTITY_PROCESS_ROLE',
+	'PLATFORM_PROCESS_ROLE',
+	'PLATFORM_INTERNAL_TIMEOUT_MS',
+	'SUPPORT_PROCESS_ROLE',
+	'OPERATIONS_PROCESS_ROLE',
+	'YOOKASSA_SHOP_ID',
+	'YOOKASSA_SECRET_KEY',
+	'TELEGRAM_INFO_BOT_CONFIGURED',
+	'RABBITMQ_USER',
+	'RABBITMQ_PASSWORD',
+	'RABBITMQ_URL',
+	'RABBITMQ_ASSERT_TOPOLOGY',
+	'MESSAGING_ALERTS_ENABLED',
+	'MESSAGING_ACTIVITY_STALE_MS',
+	'MESSAGING_QUEUE_BACKLOG_ALERT_THRESHOLD'
+];
+const reintroducedLegacyRootExampleKeys =
+	composeUnusedLegacyRootExampleKeys.filter(key => rootExample.has(key));
+assert(
+	reintroducedLegacyRootExampleKeys.length === 0,
+	'.env.example reintroduced Compose-unused legacy keys: ' +
+		reintroducedLegacyRootExampleKeys.join(',')
+);
 
 assert(config.name === 'winwidget', 'Unexpected Compose project name');
 for (const [name, service] of Object.entries(services)) {
-	assert(!('container_name' in service), name + ' must use the standard Compose container name');
+	assert(
+		!('container_name' in service),
+		name + ' must use the standard Compose container name'
+	);
 }
 
 const restoreGateLines = readFileSync('.env.example', 'utf8')
 	.split('\n')
 	.filter(line => line.startsWith('DATABASE_RESTORE_ENABLED='));
 assert(
-	restoreGateLines.length === 1 && restoreGateLines[0] === 'DATABASE_RESTORE_ENABLED=false',
+	restoreGateLines.length === 1 &&
+		restoreGateLines[0] === 'DATABASE_RESTORE_ENABLED=false',
 	'.env.example must keep Operations restore disabled by default'
 );
 
@@ -59,7 +94,9 @@ const retiredCoreServices = [
 	'database-restore-worker',
 	'migrate'
 ];
-const remainingRetiredServices = retiredCoreServices.filter(name => services[name]);
+const remainingRetiredServices = retiredCoreServices.filter(
+	name => services[name]
+);
 assert(
 	remainingRetiredServices.length === 0,
 	'Retired Core services remain: ' + remainingRetiredServices.join(',')
@@ -95,8 +132,10 @@ const actualPersistentServices = sorted(
 		.map(([name]) => name)
 );
 assert(
-	JSON.stringify(actualPersistentServices) === JSON.stringify(expectedPersistentServices),
-	'Unexpected apps-only persistent services: ' + actualPersistentServices.join(',')
+	JSON.stringify(actualPersistentServices) ===
+		JSON.stringify(expectedPersistentServices),
+	'Unexpected apps-only persistent services: ' +
+		actualPersistentServices.join(',')
 );
 
 const requireService = name => {
@@ -125,7 +164,10 @@ const usesStandaloneBuild = (build, slug) => {
 	);
 };
 const assertNoCommand = name => {
-	assert(requireService(name).command == null, name + ' command must be owned by its image');
+	assert(
+		requireService(name).command == null,
+		name + ' command must be owned by its image'
+	);
 };
 const assertExactKeys = (object, expectedKeys, label) => {
 	const actualKeys = sorted(Object.keys(object));
@@ -142,7 +184,10 @@ for (const [name, service] of Object.entries(services)) {
 		name + ' still uses the retired Core image'
 	);
 	for (const [key, value] of Object.entries(service.environment ?? {})) {
-		assert(!/(^|_)CORE($|_)/.test(key), name + ' still receives Core env ' + key);
+		assert(
+			!/(^|_)CORE($|_)/.test(key),
+			name + ' still receives Core env ' + key
+		);
 		assert(
 			!String(value).includes('127.0.0.1:4200') &&
 				!String(value).includes('localhost:4200'),
@@ -263,7 +308,10 @@ const databaseTargets = [
 ];
 
 const expectedPostgresHealth = JSON.stringify({
-	test: ['CMD-SHELL', 'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'],
+	test: [
+		'CMD-SHELL',
+		'pg_isready --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB"'
+	],
 	timeout: '5s',
 	interval: '10s',
 	retries: 12,
@@ -275,18 +323,42 @@ for (const target of databaseTargets) {
 		[target.runtimeKey, 'runtime'],
 		[target.migrationKey, 'migration']
 	]) {
-		const url = parseUrl(appExample.get(key), `apps/${target.slug}/.env.example ${key}`);
-		assert(url.protocol === 'postgresql:', target.slug + ' example protocol drifted');
-		assert(url.hostname === '127.0.0.1', target.slug + ' example host drifted');
-		assert(url.port === target.port, target.slug + ' example port drifted');
-		assert(url.pathname === '/' + target.database, target.slug + ' example database drifted');
+		const url = parseUrl(
+			appExample.get(key),
+			`apps/${target.slug}/.env.example ${key}`
+		);
+		assert(
+			url.protocol === 'postgresql:',
+			target.slug + ' example protocol drifted'
+		);
+		assert(
+			url.hostname === '127.0.0.1',
+			target.slug + ' example host drifted'
+		);
+		assert(
+			url.port === target.port,
+			target.slug + ' example port drifted'
+		);
+		assert(
+			url.pathname === '/' + target.database,
+			target.slug + ' example database drifted'
+		);
 		assert(
 			decodeURIComponent(url.username) === `${target.database}_${role}`,
 			target.slug + ' example database role drifted'
 		);
-		assert(url.password.length > 0, target.slug + ' example database password is empty');
-		assert(url.searchParams.get('schema') === target.schema, target.slug + ' example schema drifted');
-		assert(url.searchParams.get('sslmode') === 'disable', target.slug + ' example sslmode drifted');
+		assert(
+			url.password.length > 0,
+			target.slug + ' example database password is empty'
+		);
+		assert(
+			url.searchParams.get('schema') === target.schema,
+			target.slug + ' example schema drifted'
+		);
+		assert(
+			url.searchParams.get('sslmode') === 'disable',
+			target.slug + ' example sslmode drifted'
+		);
 	}
 	const postgresName = target.slug + '-postgres';
 	const postgres = requireService(postgresName);
@@ -298,22 +370,42 @@ for (const target of databaseTargets) {
 	const mount = (postgres.volumes ?? [])[0];
 	const secret = (postgres.secrets ?? [])[0];
 
-	assert((postgres.profiles ?? []).includes(target.slug + '-database'), postgresName + ' profile drifted');
-	assert(postgres.image === expected(target.prefix + '_POSTGRES_IMAGE'), postgresName + ' image drifted');
-	assert(/^postgres:18(?:-|@)/.test(postgres.image), postgresName + ' must stay on PostgreSQL 18');
-	assert(environment.POSTGRES_DB === target.database, postgresName + ' database name drifted');
 	assert(
-		environment.POSTGRES_USER === expected(target.prefix + '_POSTGRES_ADMIN_USER'),
+		(postgres.profiles ?? []).includes(target.slug + '-database'),
+		postgresName + ' profile drifted'
+	);
+	assert(
+		postgres.image === expected(target.prefix + '_POSTGRES_IMAGE'),
+		postgresName + ' image drifted'
+	);
+	assert(
+		/^postgres:18(?:-|@)/.test(postgres.image),
+		postgresName + ' must stay on PostgreSQL 18'
+	);
+	assert(
+		environment.POSTGRES_DB === target.database,
+		postgresName + ' database name drifted'
+	);
+	assert(
+		environment.POSTGRES_USER ===
+			expected(target.prefix + '_POSTGRES_ADMIN_USER'),
 		postgresName + ' admin user drifted'
 	);
 	assert(
 		environment.POSTGRES_PASSWORD_FILE === '/run/secrets/' + secretKey,
 		postgresName + ' password file drifted'
 	);
-	assert(environment.PGDATA === '/var/lib/postgresql/18/docker', postgresName + ' PGDATA drifted');
 	assert(
-		String(environment.POSTGRES_INITDB_ARGS).includes('--data-checksums') &&
-			String(environment.POSTGRES_INITDB_ARGS).includes('--auth-host=scram-sha-256'),
+		environment.PGDATA === '/var/lib/postgresql/18/docker',
+		postgresName + ' PGDATA drifted'
+	);
+	assert(
+		String(environment.POSTGRES_INITDB_ARGS).includes(
+			'--data-checksums'
+		) &&
+			String(environment.POSTGRES_INITDB_ARGS).includes(
+				'--auth-host=scram-sha-256'
+			),
 		postgresName + ' init safeguards drifted'
 	);
 	assert(
@@ -328,24 +420,50 @@ for (const target of databaseTargets) {
 			mount.target === '/var/lib/postgresql',
 		postgresName + ' external data volume drifted'
 	);
-	assert(secret?.source === secretKey, postgresName + ' admin secret drifted');
-	assert(Object.hasOwn(postgres.networks ?? {}, networkKey), postgresName + ' network drifted');
-	assert(postgres.restart === 'unless-stopped', postgresName + ' restart policy drifted');
-	assert(postgres.stop_grace_period === '1m0s', postgresName + ' stop grace drifted');
-	assert(Number(postgres.pids_limit) === 200, postgresName + ' pids limit drifted');
-	assert(JSON.stringify(postgres.healthcheck) === expectedPostgresHealth, postgresName + ' healthcheck drifted');
-	assert(postgres.labels?.['com.winwidget.owner'] === target.slug, postgresName + ' owner label drifted');
-	assert(postgres.labels?.['com.winwidget.purpose'] === 'postgres', postgresName + ' purpose label drifted');
+	assert(
+		secret?.source === secretKey,
+		postgresName + ' admin secret drifted'
+	);
+	assert(
+		Object.hasOwn(postgres.networks ?? {}, networkKey),
+		postgresName + ' network drifted'
+	);
+	assert(
+		postgres.restart === 'unless-stopped',
+		postgresName + ' restart policy drifted'
+	);
+	assert(
+		postgres.stop_grace_period === '1m0s',
+		postgresName + ' stop grace drifted'
+	);
+	assert(
+		Number(postgres.pids_limit) === 200,
+		postgresName + ' pids limit drifted'
+	);
+	assert(
+		JSON.stringify(postgres.healthcheck) === expectedPostgresHealth,
+		postgresName + ' healthcheck drifted'
+	);
+	assert(
+		postgres.labels?.['com.winwidget.owner'] === target.slug,
+		postgresName + ' owner label drifted'
+	);
+	assert(
+		postgres.labels?.['com.winwidget.purpose'] === 'postgres',
+		postgresName + ' purpose label drifted'
+	);
 
 	const externalVolume = config.volumes?.[volumeKey];
 	assert(
 		externalVolume?.external === true &&
-			externalVolume.name === expected(target.prefix + '_POSTGRES_DATA_VOLUME'),
+			externalVolume.name ===
+				expected(target.prefix + '_POSTGRES_DATA_VOLUME'),
 		postgresName + ' must use the exact external volume'
 	);
 	const composeSecret = config.secrets?.[secretKey];
 	assert(
-		composeSecret?.file === expected(target.prefix + '_POSTGRES_ADMIN_PASSWORD_FILE'),
+		composeSecret?.file ===
+			expected(target.prefix + '_POSTGRES_ADMIN_PASSWORD_FILE'),
 		postgresName + ' Compose secret file drifted'
 	);
 	const network = config.networks?.[networkKey];
@@ -359,20 +477,32 @@ for (const target of databaseTargets) {
 	const migrateName = target.slug + '-migrate';
 	const migrate = requireService(migrateName);
 	const migrateEnvironment = environmentOf(migrateName);
-	assert((migrate.profiles ?? []).includes(target.slug + '-migration'), migrateName + ' profile drifted');
-	assert(migrate.image === expected(target.prefix + '_IMAGE'), migrateName + ' image drifted');
+	assert(
+		(migrate.profiles ?? []).includes(target.slug + '-migration'),
+		migrateName + ' profile drifted'
+	);
+	assert(
+		migrate.image === expected(target.prefix + '_IMAGE'),
+		migrateName + ' image drifted'
+	);
 	assert(
 		usesStandaloneBuild(migrate.build, target.slug) &&
-			migrate.build?.args?.APP_REVISION === expected(target.prefix + '_REVISION'),
+			migrate.build?.args?.APP_REVISION ===
+				expected(target.prefix + '_REVISION'),
 		migrateName + ' standalone build drifted'
 	);
-	assert(normalizeCommand(migrate.entrypoint) === './node_modules/.bin/prisma', migrateName + ' entrypoint drifted');
 	assert(
-		normalizeCommand(migrate.command) === 'migrate deploy --schema prisma/schema.prisma',
+		normalizeCommand(migrate.entrypoint) === './node_modules/.bin/prisma',
+		migrateName + ' entrypoint drifted'
+	);
+	assert(
+		normalizeCommand(migrate.command) ===
+			'migrate deploy --schema prisma/schema.prisma',
 		migrateName + ' command drifted'
 	);
 	assert(
-		migrateEnvironment[target.migrationEnvironmentKey] === expected(target.migrationKey),
+		migrateEnvironment[target.migrationEnvironmentKey] ===
+			expected(target.migrationKey),
 		migrateName + ' database URL drifted'
 	);
 	assert(
@@ -405,16 +535,26 @@ for (const name of telegramRuntimeNames) {
 const operationsApiTelegramEnvironment =
 	requireService('operations-api').environment ?? {};
 assert(
-	operationsApiTelegramEnvironment.TELEGRAM_INFO_BOT_CONFIGURED === 'true' &&
+	operationsApiTelegramEnvironment.TELEGRAM_INFO_BOT_CONFIGURED ===
+		'true' &&
 		!Object.hasOwn(
 			operationsApiTelegramEnvironment,
 			'TELEGRAM_INFO_BOT_TOKEN'
 		) &&
-		!Object.hasOwn(operationsApiTelegramEnvironment, 'TELEGRAM_API_BASE_URL') &&
-		JSON.stringify(requireService('operations-api').extra_hosts ?? []) === '[]',
+		!Object.hasOwn(
+			operationsApiTelegramEnvironment,
+			'TELEGRAM_API_BASE_URL'
+		) &&
+		JSON.stringify(requireService('operations-api').extra_hosts ?? []) ===
+			'[]',
 	'operations-api must not receive Telegram transport credentials or routing'
 );
-for (const slug of ['notification-delivery', 'identity', 'support', 'operations']) {
+for (const slug of [
+	'notification-delivery',
+	'identity',
+	'support',
+	'operations'
+]) {
 	const example = parseExample(`apps/${slug}/.env.example`);
 	assert(
 		example.get('TELEGRAM_API_BASE_URL') ===
@@ -424,7 +564,10 @@ for (const slug of ['notification-delivery', 'identity', 'support', 'operations'
 	);
 }
 
-assert(!config.secrets?.['core-postgres-admin-password'], 'Retired Core restore secret must be absent');
+assert(
+	!config.secrets?.['core-postgres-admin-password'],
+	'Retired Core restore secret must be absent'
+);
 
 const rabbit = requireService('rabbitmq');
 assert(
@@ -441,10 +584,17 @@ assert(
 	'RabbitMQ ports must remain loopback-only'
 );
 const rabbitVolume = config.volumes?.['winwidget-rabbitmq-data'];
-assert(rabbitVolume?.external === true && rabbitVolume.name, 'RabbitMQ external volume drifted');
+assert(
+	rabbitVolume?.external === true && rabbitVolume.name,
+	'RabbitMQ external volume drifted'
+);
 
 const appBuilds = [
-	['notification-delivery-worker', 'notification-delivery', 'NOTIFICATION_DELIVERY'],
+	[
+		'notification-delivery-worker',
+		'notification-delivery',
+		'NOTIFICATION_DELIVERY'
+	],
 	['campaigns-service', 'campaigns', 'CAMPAIGNS'],
 	['reporting-service', 'reporting', 'REPORTING'],
 	['widgets-service', 'widgets', 'WIDGETS'],
@@ -456,7 +606,10 @@ const appBuilds = [
 ];
 for (const [name, slug, prefix] of appBuilds) {
 	const service = requireService(name);
-	assert(service.image === expected(prefix + '_IMAGE'), name + ' image drifted');
+	assert(
+		service.image === expected(prefix + '_IMAGE'),
+		name + ' image drifted'
+	);
 	assert(
 		usesStandaloneBuild(service.build, slug) &&
 			service.build?.args?.APP_REVISION === expected(prefix + '_REVISION'),
@@ -466,17 +619,45 @@ for (const [name, slug, prefix] of appBuilds) {
 }
 
 const sharedImageFamilies = [
-	['billing', ['billing-api', 'billing-scheduler', 'billing-worker', 'billing-outbox-publisher']],
-	['identity', ['identity-api', 'identity-worker', 'identity-outbox-publisher']],
+	[
+		'billing',
+		[
+			'billing-api',
+			'billing-scheduler',
+			'billing-worker',
+			'billing-outbox-publisher'
+		]
+	],
+	[
+		'identity',
+		['identity-api', 'identity-worker', 'identity-outbox-publisher']
+	],
 	['platform', ['platform-api', 'platform-outbox-publisher']],
-	['support', ['support-api', 'support-worker', 'support-outbox-publisher']],
-	['operations', ['operations-api', 'operations-worker', 'operations-restore-worker', 'operations-outbox-publisher']]
+	[
+		'support',
+		['support-api', 'support-worker', 'support-outbox-publisher']
+	],
+	[
+		'operations',
+		[
+			'operations-api',
+			'operations-worker',
+			'operations-restore-worker',
+			'operations-outbox-publisher'
+		]
+	]
 ];
 for (const [owner, names] of sharedImageFamilies) {
 	const images = new Set(names.map(name => requireService(name).image));
-	assert(images.size === 1, owner + ' roles must share one immutable image');
+	assert(
+		images.size === 1,
+		owner + ' roles must share one immutable image'
+	);
 	for (const name of names.slice(1)) {
-		assert(requireService(name).build == null, name + ' must reuse the ' + owner + ' image');
+		assert(
+			requireService(name).build == null,
+			name + ' must reuse the ' + owner + ' image'
+		);
 	}
 }
 
@@ -512,11 +693,24 @@ for (const name of [
 
 const gateway = requireService('api-gateway');
 const gatewayEnvironment = environmentOf('api-gateway');
-assert(gatewayEnvironment.GATEWAY_LISTEN_HOST === '127.0.0.1', 'Gateway listen host drifted');
+assert(
+	gatewayEnvironment.GATEWAY_LISTEN_HOST === '127.0.0.1',
+	'Gateway listen host drifted'
+);
 assert(gatewayEnvironment.PORT === '4100', 'Gateway port drifted');
-assert(!('API_UPSTREAM_URL' in gatewayEnvironment), 'Gateway monolith fallback must be absent');
-assert(!Object.hasOwn(gateway.depends_on ?? {}, 'api'), 'Gateway must not depend on Core');
-for (const dependency of ['widgets-service', 'identity-api', 'operations-api']) {
+assert(
+	!('API_UPSTREAM_URL' in gatewayEnvironment),
+	'Gateway monolith fallback must be absent'
+);
+assert(
+	!Object.hasOwn(gateway.depends_on ?? {}, 'api'),
+	'Gateway must not depend on Core'
+);
+for (const dependency of [
+	'widgets-service',
+	'identity-api',
+	'operations-api'
+]) {
 	assert(
 		gateway.depends_on?.[dependency]?.condition === 'service_healthy',
 		'Gateway must wait for healthy ' + dependency
@@ -533,46 +727,214 @@ const route = (id, pathPrefix, port, authPolicy, timeoutMs) => ({
 const expectedGatewayRoutes = [
 	route('identity-auth', '/api/v1/auth', 4900, 'optional', 60000),
 	route('identity-users', '/api/v1/users', 4900, 'optional', 60000),
-	route('identity-telegram-auth', '/api/v1/telegram-auth', 4900, 'optional', 60000),
-	route('identity-info-webhook', '/api/v1/telegram-bot/webhook', 4900, 'optional', 60000),
-	route('support-webhook', '/api/v1/telegram-bot/support-webhook', 5100, 'optional', 10000),
+	route(
+		'identity-telegram-auth',
+		'/api/v1/telegram-auth',
+		4900,
+		'optional',
+		60000
+	),
+	route(
+		'identity-info-webhook',
+		'/api/v1/telegram-bot/webhook',
+		4900,
+		'optional',
+		60000
+	),
+	route(
+		'support-webhook',
+		'/api/v1/telegram-bot/support-webhook',
+		5100,
+		'optional',
+		10000
+	),
 	route('support-admin', '/api/v1/support/admin', 5100, 'required', 60000),
 	route('operations-notes', '/api/v1/notes', 5200, 'required', 30000),
-	route('operations-admin-event-log', '/api/v1/admin-event-log', 5200, 'required', 30000),
-	route('operations-restores', '/api/v1/dev-tools/database-restores', 5200, 'required', 600000),
-	route('operations-telegram', '/api/v1/telegram-bot/admin', 5200, 'required', 600000),
-	route('operations-messaging', '/api/v1/messaging/admin', 5200, 'required', 30000),
-	route('operations-alerts', '/api/v1/admin-alerts', 5200, 'required', 30000),
-	route('operations-health-admin', '/api/v1/health/admin', 5200, 'required', 30000),
-	route('operations-health-deployment', '/api/v1/health/deployment', 5200, 'optional', 30000),
-	route('platform-site-settings', '/api/v1/site-settings', 5000, 'optional', 60000),
-	route('platform-legal-pages', '/api/v1/legal-pages', 5000, 'optional', 60000),
-	route('platform-home-page-content', '/api/v1/home-page-content', 5000, 'optional', 60000),
+	route(
+		'operations-admin-event-log',
+		'/api/v1/admin-event-log',
+		5200,
+		'required',
+		30000
+	),
+	route(
+		'operations-restores',
+		'/api/v1/dev-tools/database-restores',
+		5200,
+		'required',
+		600000
+	),
+	route(
+		'operations-telegram',
+		'/api/v1/telegram-bot/admin',
+		5200,
+		'required',
+		600000
+	),
+	route(
+		'operations-messaging',
+		'/api/v1/messaging/admin',
+		5200,
+		'required',
+		30000
+	),
+	route(
+		'operations-alerts',
+		'/api/v1/admin-alerts',
+		5200,
+		'required',
+		30000
+	),
+	route(
+		'operations-health-admin',
+		'/api/v1/health/admin',
+		5200,
+		'required',
+		30000
+	),
+	route(
+		'operations-health-deployment',
+		'/api/v1/health/deployment',
+		5200,
+		'optional',
+		30000
+	),
+	route(
+		'platform-site-settings',
+		'/api/v1/site-settings',
+		5000,
+		'optional',
+		60000
+	),
+	route(
+		'platform-legal-pages',
+		'/api/v1/legal-pages',
+		5000,
+		'optional',
+		60000
+	),
+	route(
+		'platform-home-page-content',
+		'/api/v1/home-page-content',
+		5000,
+		'optional',
+		60000
+	),
 	route('billing-payments', '/api/v1/payments', 4800, 'optional', 30000),
-	route('billing-subscriptions', '/api/v1/subscriptions', 4800, 'optional', 30000),
-	route('billing-tariff-prices', '/api/v1/tariff-prices', 4800, 'optional', 30000),
+	route(
+		'billing-subscriptions',
+		'/api/v1/subscriptions',
+		4800,
+		'optional',
+		30000
+	),
+	route(
+		'billing-tariff-prices',
+		'/api/v1/tariff-prices',
+		4800,
+		'optional',
+		30000
+	),
 	route('billing-affiliate', '/api/v1/affiliate', 4800, 'optional', 30000),
-	route('billing-settings-public', '/api/v1/billing-settings/public', 4800, 'optional', 30000),
-	route('billing-settings-admin', '/api/v1/billing-settings/admin', 4800, 'required', 30000),
+	route(
+		'billing-settings-public',
+		'/api/v1/billing-settings/public',
+		4800,
+		'optional',
+		30000
+	),
+	route(
+		'billing-settings-admin',
+		'/api/v1/billing-settings/admin',
+		4800,
+		'required',
+		30000
+	),
 	route('campaigns', '/api/v1/admin/campaigns', 4500, 'required', 60000),
 	route('reporting', '/api/v1/admin/reporting', 4600, 'required', 60000),
 	route('widgets-admin', '/api/v1/widgets/admin', 4700, 'required', 60000),
 	route('widgets-management', '/api/v1/widgets', 4700, 'required', 60000),
 	route('quizzes-management', '/api/v1/quizzes', 4700, 'required', 60000),
-	route('callbacks-management', '/api/v1/callbacks', 4700, 'required', 60000),
-	route('countdown-timers-management', '/api/v1/countdown-timers', 4700, 'required', 60000),
-	route('stop-offers-management', '/api/v1/stop-offers', 4700, 'required', 60000),
-	route('online-consultants-management', '/api/v1/online-consultants', 4700, 'required', 60000),
-	route('calculators-management', '/api/v1/calculators', 4700, 'required', 60000),
-	route('widget-settings', '/api/v1/widget-settings', 4700, 'required', 60000),
-	route('widget-runtime', '/api/v1/widget-runtime', 4700, 'required', 60000),
+	route(
+		'callbacks-management',
+		'/api/v1/callbacks',
+		4700,
+		'required',
+		60000
+	),
+	route(
+		'countdown-timers-management',
+		'/api/v1/countdown-timers',
+		4700,
+		'required',
+		60000
+	),
+	route(
+		'stop-offers-management',
+		'/api/v1/stop-offers',
+		4700,
+		'required',
+		60000
+	),
+	route(
+		'online-consultants-management',
+		'/api/v1/online-consultants',
+		4700,
+		'required',
+		60000
+	),
+	route(
+		'calculators-management',
+		'/api/v1/calculators',
+		4700,
+		'required',
+		60000
+	),
+	route(
+		'widget-settings',
+		'/api/v1/widget-settings',
+		4700,
+		'required',
+		60000
+	),
+	route(
+		'widget-runtime',
+		'/api/v1/widget-runtime',
+		4700,
+		'required',
+		60000
+	),
 	route('widget-public', '/api/v1/widget', 4700, 'optional', 60000),
 	route('quiz-public', '/api/v1/quiz', 4700, 'optional', 60000),
 	route('callback-public', '/api/v1/callback', 4700, 'optional', 60000),
-	route('countdown-timer-public', '/api/v1/countdown-timer', 4700, 'optional', 60000),
-	route('stop-offer-public', '/api/v1/stop-offer', 4700, 'optional', 60000),
-	route('online-consultant-public', '/api/v1/online-consultant', 4700, 'optional', 60000),
-	route('calculator-public', '/api/v1/calculator', 4700, 'optional', 60000),
+	route(
+		'countdown-timer-public',
+		'/api/v1/countdown-timer',
+		4700,
+		'optional',
+		60000
+	),
+	route(
+		'stop-offer-public',
+		'/api/v1/stop-offer',
+		4700,
+		'optional',
+		60000
+	),
+	route(
+		'online-consultant-public',
+		'/api/v1/online-consultant',
+		4700,
+		'optional',
+		60000
+	),
+	route(
+		'calculator-public',
+		'/api/v1/calculator',
+		4700,
+		'optional',
+		60000
+	),
 	route('widget-events', '/api/v1/widget-events', 4700, 'optional', 60000)
 ];
 const gatewayRoutes = JSON.parse(gatewayEnvironment.GATEWAY_ROUTES_JSON);
@@ -590,9 +952,14 @@ assert(
 		JSON.stringify(expectedGatewayRoutes),
 	'apps/api-gateway/.env.example Gateway route manifest drifted'
 );
-assert(gatewayRoutes.length === 43, 'Gateway must expose exactly 43 routes');
 assert(
-	gatewayRoutes.filter(item => item.upstreamUrl === 'http://127.0.0.1:5200').length === 8,
+	gatewayRoutes.length === 43,
+	'Gateway must expose exactly 43 routes'
+);
+assert(
+	gatewayRoutes.filter(
+		item => item.upstreamUrl === 'http://127.0.0.1:5200'
+	).length === 8,
 	'Gateway must expose exactly eight Operations route families'
 );
 assert(
@@ -605,7 +972,9 @@ assert(
 	'Gateway must not expose Core or internal fallbacks'
 );
 
-const notificationEnvironment = environmentOf('notification-delivery-worker');
+const notificationEnvironment = environmentOf(
+	'notification-delivery-worker'
+);
 const campaignsEnvironment = environmentOf('campaigns-service');
 const reportingEnvironment = environmentOf('reporting-service');
 const widgetsEnvironment = environmentOf('widgets-service');
@@ -615,12 +984,26 @@ const platformEnvironment = environmentOf('platform-api');
 const supportEnvironment = environmentOf('support-api');
 const operationsApi = requireService('operations-api');
 const operationsWorker = requireService('operations-worker');
-const operationsRestoreWorker = requireService('operations-restore-worker');
+const operationsRestoreWorker = requireService(
+	'operations-restore-worker'
+);
 const operationsPublisher = requireService('operations-outbox-publisher');
 const operationsApiEnvironment = environmentOf('operations-api');
 const operationsWorkerEnvironment = environmentOf('operations-worker');
-const operationsRestoreEnvironment = environmentOf('operations-restore-worker');
-const operationsPublisherEnvironment = environmentOf('operations-outbox-publisher');
+const operationsRestoreEnvironment = environmentOf(
+	'operations-restore-worker'
+);
+const operationsPublisherEnvironment = environmentOf(
+	'operations-outbox-publisher'
+);
+
+assert(
+	notificationDeliveryExample.get('RECAPTCHA_CLIENT_URL') ===
+		rootExample.get('RECAPTCHA_CLIENT_URL') &&
+		notificationEnvironment.RECAPTCHA_CLIENT_URL ===
+			expected('RECAPTCHA_CLIENT_URL'),
+	'Notification Delivery public site URL contract drifted'
+);
 
 const mutualToken = (label, left, right) => {
 	assert(
@@ -633,28 +1016,91 @@ const mutualToken = (label, left, right) => {
 	return left;
 };
 const operationsPeerContracts = [
-	['Notification Delivery', 'NOTIFICATION_DELIVERY_INTERNAL_URL', 'http://127.0.0.1:4401', 'NOTIFICATION_DELIVERY_OPERATIONS_TOKEN', notificationEnvironment],
-	['Campaigns', 'CAMPAIGNS_INTERNAL_BASE_URL', 'http://127.0.0.1:4500', 'CAMPAIGNS_OPERATIONS_TOKEN', campaignsEnvironment],
-	['Reporting', 'REPORTING_INTERNAL_BASE_URL', 'http://127.0.0.1:4600', 'REPORTING_OPERATIONS_TOKEN', reportingEnvironment],
-	['Widgets', 'WIDGETS_INTERNAL_BASE_URL', 'http://127.0.0.1:4700', 'WIDGETS_OPERATIONS_TOKEN', widgetsEnvironment],
-	['Billing', 'BILLING_INTERNAL_BASE_URL', 'http://127.0.0.1:4800', 'BILLING_OPERATIONS_TOKEN', billingEnvironment],
-	['Identity', 'IDENTITY_INTERNAL_BASE_URL', 'http://127.0.0.1:4900', 'IDENTITY_OPERATIONS_TOKEN', identityEnvironment],
-	['Platform', 'PLATFORM_INTERNAL_BASE_URL', 'http://127.0.0.1:5000', 'PLATFORM_OPERATIONS_TOKEN', platformEnvironment],
-	['Support', 'SUPPORT_INTERNAL_BASE_URL', 'http://127.0.0.1:5100', 'SUPPORT_OPERATIONS_TOKEN', supportEnvironment]
+	[
+		'Notification Delivery',
+		'NOTIFICATION_DELIVERY_INTERNAL_URL',
+		'http://127.0.0.1:4401',
+		'NOTIFICATION_DELIVERY_OPERATIONS_TOKEN',
+		notificationEnvironment
+	],
+	[
+		'Campaigns',
+		'CAMPAIGNS_INTERNAL_BASE_URL',
+		'http://127.0.0.1:4500',
+		'CAMPAIGNS_OPERATIONS_TOKEN',
+		campaignsEnvironment
+	],
+	[
+		'Reporting',
+		'REPORTING_INTERNAL_BASE_URL',
+		'http://127.0.0.1:4600',
+		'REPORTING_OPERATIONS_TOKEN',
+		reportingEnvironment
+	],
+	[
+		'Widgets',
+		'WIDGETS_INTERNAL_BASE_URL',
+		'http://127.0.0.1:4700',
+		'WIDGETS_OPERATIONS_TOKEN',
+		widgetsEnvironment
+	],
+	[
+		'Billing',
+		'BILLING_INTERNAL_BASE_URL',
+		'http://127.0.0.1:4800',
+		'BILLING_OPERATIONS_TOKEN',
+		billingEnvironment
+	],
+	[
+		'Identity',
+		'IDENTITY_INTERNAL_BASE_URL',
+		'http://127.0.0.1:4900',
+		'IDENTITY_OPERATIONS_TOKEN',
+		identityEnvironment
+	],
+	[
+		'Platform',
+		'PLATFORM_INTERNAL_BASE_URL',
+		'http://127.0.0.1:5000',
+		'PLATFORM_OPERATIONS_TOKEN',
+		platformEnvironment
+	],
+	[
+		'Support',
+		'SUPPORT_INTERNAL_BASE_URL',
+		'http://127.0.0.1:5100',
+		'SUPPORT_OPERATIONS_TOKEN',
+		supportEnvironment
+	]
 ];
 const operationsScopedTokens = [];
-for (const [label, originKey, origin, tokenKey, peerEnvironment] of operationsPeerContracts) {
-	assert(operationsApiEnvironment[originKey] === origin, 'Operations exact origin drifted: ' + originKey);
+for (const [
+	label,
+	originKey,
+	origin,
+	tokenKey,
+	peerEnvironment
+] of operationsPeerContracts) {
+	assert(
+		operationsApiEnvironment[originKey] === origin,
+		'Operations exact origin drifted: ' + originKey
+	);
 	operationsScopedTokens.push(
-		mutualToken(label + ' to Operations', operationsApiEnvironment[tokenKey], peerEnvironment[tokenKey])
+		mutualToken(
+			label + ' to Operations',
+			operationsApiEnvironment[tokenKey],
+			peerEnvironment[tokenKey]
+		)
 	);
 }
 assert(
-	reportingEnvironment.OPERATIONS_INTERNAL_BASE_URL === 'http://127.0.0.1:5200',
+	reportingEnvironment.OPERATIONS_INTERNAL_BASE_URL ===
+		'http://127.0.0.1:5200',
 	'Reporting must use the exact Operations origin'
 );
 assert(
-	identityEnvironment.OPERATIONS_INTERNAL_BASE_URL === 'http://127.0.0.1:5200',
+	identityEnvironment.OPERATIONS_INTERNAL_BASE_URL ===
+		'http://127.0.0.1:5200',
 	'Identity must use the exact Operations origin'
 );
 operationsScopedTokens.push(
@@ -677,16 +1123,59 @@ assert(
 );
 
 const operationsRoles = [
-	['operations-api', operationsApiEnvironment, 'api', 'OPERATIONS_API_PORT', '5200'],
-	['operations-worker', operationsWorkerEnvironment, 'worker', 'OPERATIONS_WORKER_PORT', '5201'],
-	['operations-restore-worker', operationsRestoreEnvironment, 'restore-worker', 'OPERATIONS_RESTORE_WORKER_PORT', '5203'],
-	['operations-outbox-publisher', operationsPublisherEnvironment, 'outbox-publisher', 'OPERATIONS_OUTBOX_PUBLISHER_PORT', '5202']
+	[
+		'operations-api',
+		operationsApiEnvironment,
+		'api',
+		'OPERATIONS_API_PORT',
+		'5200'
+	],
+	[
+		'operations-worker',
+		operationsWorkerEnvironment,
+		'worker',
+		'OPERATIONS_WORKER_PORT',
+		'5201'
+	],
+	[
+		'operations-restore-worker',
+		operationsRestoreEnvironment,
+		'restore-worker',
+		'OPERATIONS_RESTORE_WORKER_PORT',
+		'5203'
+	],
+	[
+		'operations-outbox-publisher',
+		operationsPublisherEnvironment,
+		'outbox-publisher',
+		'OPERATIONS_OUTBOX_PUBLISHER_PORT',
+		'5202'
+	]
 ];
-for (const [name, environment, roleName, portKey, port] of operationsRoles) {
-	assert(environment.APP_REVISION === expected('OPERATIONS_REVISION'), name + ' revision drifted');
-	assert(environment.OPERATIONS_DATABASE_URL === expected('OPERATIONS_DATABASE_URL'), name + ' DB URL drifted');
-	assert(environment.OPERATIONS_PROCESS_ROLE === roleName, name + ' process role drifted');
-	assert(environment.OPERATIONS_LISTEN_HOST === '127.0.0.1', name + ' listen host drifted');
+for (const [
+	name,
+	environment,
+	roleName,
+	portKey,
+	port
+] of operationsRoles) {
+	assert(
+		environment.APP_REVISION === expected('OPERATIONS_REVISION'),
+		name + ' revision drifted'
+	);
+	assert(
+		environment.OPERATIONS_DATABASE_URL ===
+			expected('OPERATIONS_DATABASE_URL'),
+		name + ' DB URL drifted'
+	);
+	assert(
+		environment.OPERATIONS_PROCESS_ROLE === roleName,
+		name + ' process role drifted'
+	);
+	assert(
+		environment.OPERATIONS_LISTEN_HOST === '127.0.0.1',
+		name + ' listen host drifted'
+	);
 	assert(environment[portKey] === port, name + ' port drifted');
 }
 
@@ -694,7 +1183,8 @@ const backupKeys = databaseTargets.map(target => target.backupKey);
 for (const [name, service] of Object.entries(services)) {
 	for (const key of backupKeys) {
 		assert(
-			(key in (service.environment ?? {})) === (name === 'operations-worker'),
+			key in (service.environment ?? {}) ===
+				(name === 'operations-worker'),
 			key + ' must be scoped only to operations-worker'
 		);
 	}
@@ -702,12 +1192,25 @@ for (const [name, service] of Object.entries(services)) {
 
 const validate_operations_database_urls = () => {
 	for (const target of databaseTargets) {
-		const runtimeValue = environmentOf(target.runtimeService)[target.runtimeKey];
-		const migrationValue = environmentOf(target.slug + '-migrate')[target.migrationEnvironmentKey];
+		const runtimeValue = environmentOf(target.runtimeService)[
+			target.runtimeKey
+		];
+		const migrationValue = environmentOf(target.slug + '-migrate')[
+			target.migrationEnvironmentKey
+		];
 		const backupValue = operationsWorkerEnvironment[target.backupKey];
-		assert(runtimeValue === expected(target.runtimeKey), target.runtimeKey + ' interpolation drifted');
-		assert(migrationValue === expected(target.migrationKey), target.migrationKey + ' interpolation drifted');
-		assert(backupValue === expected(target.backupKey), target.backupKey + ' interpolation drifted');
+		assert(
+			runtimeValue === expected(target.runtimeKey),
+			target.runtimeKey + ' interpolation drifted'
+		);
+		assert(
+			migrationValue === expected(target.migrationKey),
+			target.migrationKey + ' interpolation drifted'
+		);
+		assert(
+			backupValue === expected(target.backupKey),
+			target.backupKey + ' interpolation drifted'
+		);
 		const urls = [
 			parseUrl(runtimeValue, target.runtimeKey),
 			parseUrl(migrationValue, target.migrationKey),
@@ -734,7 +1237,8 @@ const validate_operations_database_urls = () => {
 			target.slug + ' database roles drifted'
 		);
 		assert(
-			new Set(urls.map(url => decodeURIComponent(url.password))).size === 3,
+			new Set(urls.map(url => decodeURIComponent(url.password))).size ===
+				3,
 			target.slug + ' runtime/migration/backup passwords must be distinct'
 		);
 	}
@@ -743,12 +1247,16 @@ validate_operations_database_urls();
 
 assert(
 	(operationsWorker.volumes ?? []).length === 0 &&
-		!Object.keys(operationsWorkerEnvironment).some(key => key.startsWith('DATABASE_RESTORE_')),
+		!Object.keys(operationsWorkerEnvironment).some(key =>
+			key.startsWith('DATABASE_RESTORE_')
+		),
 	'operations-worker must not receive restore storage or credentials'
 );
 assert(
-	operationsApiEnvironment.DATABASE_RESTORE_ENABLED === expected('DATABASE_RESTORE_ENABLED') &&
-		operationsApiEnvironment.DATABASE_RESTORE_STORAGE_DIR === '/var/lib/winwidget-operations/restores',
+	operationsApiEnvironment.DATABASE_RESTORE_ENABLED ===
+		expected('DATABASE_RESTORE_ENABLED') &&
+		operationsApiEnvironment.DATABASE_RESTORE_STORAGE_DIR ===
+			'/var/lib/winwidget-operations/restores',
 	'operations-api restore enqueue boundary drifted'
 );
 
@@ -778,31 +1286,43 @@ assertExactKeys(
 );
 for (const target of databaseTargets) {
 	assert(
-		operationsRestoreEnvironment[target.prefix + '_POSTGRES_ADMIN_USER'] ===
-			expected(target.prefix + '_POSTGRES_ADMIN_USER'),
+		operationsRestoreEnvironment[
+			target.prefix + '_POSTGRES_ADMIN_USER'
+		] === expected(target.prefix + '_POSTGRES_ADMIN_USER'),
 		target.slug + ' restore admin user drifted'
 	);
 	assert(
-		operationsRestoreEnvironment[target.prefix + '_POSTGRES_PORT'] === target.port,
+		operationsRestoreEnvironment[target.prefix + '_POSTGRES_PORT'] ===
+			target.port,
 		target.slug + ' restore port drifted'
 	);
 	assert(
-		operationsRestoreEnvironment['DATABASE_RESTORE_' + target.prefix + '_ADMIN_PASSWORD_FILE'] ===
+		operationsRestoreEnvironment[
+			'DATABASE_RESTORE_' + target.prefix + '_ADMIN_PASSWORD_FILE'
+		] ===
 			'/run/secrets/database-restore-' + target.slug + '-admin-password',
 		target.slug + ' restore password file drifted'
 	);
 	assert(
-		!('DATABASE_RESTORE_' + target.prefix + '_ADMIN_URL' in operationsRestoreEnvironment),
+		!(
+			'DATABASE_RESTORE_' + target.prefix + '_ADMIN_URL' in
+			operationsRestoreEnvironment
+		),
 		target.slug + ' restore admin URL must be absent'
 	);
 }
 assert(
-	operationsRestoreEnvironment.RABBITMQ_URL === expected('RABBITMQ_OPERATIONS_RESTORE_WORKER_URL') &&
-		operationsRestoreEnvironment.RABBITMQ_CONNECTION_NAME === 'winwidget-operations-restore-worker' &&
+	operationsRestoreEnvironment.RABBITMQ_URL ===
+		expected('RABBITMQ_OPERATIONS_RESTORE_WORKER_URL') &&
+		operationsRestoreEnvironment.RABBITMQ_CONNECTION_NAME ===
+			'winwidget-operations-restore-worker' &&
 		operationsRestoreEnvironment.RABBITMQ_ASSERT_TOPOLOGY === 'true',
 	'operations-restore-worker RabbitMQ contract drifted'
 );
-assert(!('TELEGRAM_INFO_BOT_TOKEN' in operationsRestoreEnvironment), 'restore-worker must not receive Telegram token');
+assert(
+	!('TELEGRAM_INFO_BOT_TOKEN' in operationsRestoreEnvironment),
+	'restore-worker must not receive Telegram token'
+);
 
 const expectedRestoreSecrets = databaseTargets
 	.map(target => [
@@ -814,7 +1334,8 @@ const actualRestoreSecrets = (operationsRestoreWorker.secrets ?? [])
 	.map(secret => [secret.source, secret.target])
 	.sort(([left], [right]) => left.localeCompare(right));
 assert(
-	JSON.stringify(actualRestoreSecrets) === JSON.stringify(expectedRestoreSecrets),
+	JSON.stringify(actualRestoreSecrets) ===
+		JSON.stringify(expectedRestoreSecrets),
 	'operations-restore-worker secret mount set drifted'
 );
 
@@ -831,7 +1352,8 @@ const assertRestoreMount = (service, name) => {
 assertRestoreMount(operationsApi, 'operations-api');
 assertRestoreMount(operationsRestoreWorker, 'operations-restore-worker');
 for (const [name, service] of Object.entries(services)) {
-	if (name === 'operations-api' || name === 'operations-restore-worker') continue;
+	if (name === 'operations-api' || name === 'operations-restore-worker')
+		continue;
 	assert(
 		!(service.volumes ?? []).some(
 			mount =>
@@ -843,15 +1365,22 @@ for (const [name, service] of Object.entries(services)) {
 }
 
 const restoreTmpfs = (operationsRestoreWorker.tmpfs ?? []).map(String);
-assert(operationsRestoreWorker.read_only === true, 'operations-restore-worker must be read-only');
-assert(operationsRestoreWorker.init === true, 'operations-restore-worker must run with init');
+assert(
+	operationsRestoreWorker.read_only === true,
+	'operations-restore-worker must be read-only'
+);
+assert(
+	operationsRestoreWorker.init === true,
+	'operations-restore-worker must run with init'
+);
 assert(
 	JSON.stringify(operationsRestoreWorker.security_opt ?? []) ===
 		JSON.stringify(['no-new-privileges:true']),
 	'operations-restore-worker no-new-privileges drifted'
 );
 assert(
-	JSON.stringify(sorted(operationsRestoreWorker.cap_drop ?? [])) === JSON.stringify(['ALL']) &&
+	JSON.stringify(sorted(operationsRestoreWorker.cap_drop ?? [])) ===
+		JSON.stringify(['ALL']) &&
 		(operationsRestoreWorker.cap_add ?? []).length === 0,
 	'operations-restore-worker Linux capabilities drifted'
 );
@@ -868,8 +1397,10 @@ assert(
 	'operations-restore-worker tmpfs hardening drifted'
 );
 assert(
-	operationsRestoreWorker.depends_on?.rabbitmq?.condition === 'service_healthy' &&
-		operationsRestoreWorker.depends_on?.['operations-outbox-publisher']?.condition === 'service_started',
+	operationsRestoreWorker.depends_on?.rabbitmq?.condition ===
+		'service_healthy' &&
+		operationsRestoreWorker.depends_on?.['operations-outbox-publisher']
+			?.condition === 'service_started',
 	'operations-restore-worker dependencies drifted'
 );
 assert(
@@ -878,8 +1409,14 @@ assert(
 	),
 	'operations-restore-worker readiness drifted'
 );
-assert(operationsRestoreWorker.stop_grace_period === '1m30s', 'restore-worker stop grace drifted');
-assert(operationsRestoreWorker.restart === 'unless-stopped', 'restore-worker restart policy drifted');
+assert(
+	operationsRestoreWorker.stop_grace_period === '1m30s',
+	'restore-worker stop grace drifted'
+);
+assert(
+	operationsRestoreWorker.restart === 'unless-stopped',
+	'restore-worker restart policy drifted'
+);
 
 for (const [name, service] of Object.entries(services)) {
 	if (
@@ -923,16 +1460,19 @@ for (const [name, topology] of rabbitContracts) {
 	const environment = environmentOf(name);
 	const url = parseUrl(environment.RABBITMQ_URL, name + ' RABBITMQ_URL');
 	assert(url.pathname === '/winwidget', name + ' RabbitMQ vhost drifted');
-	assert(environment.RABBITMQ_ASSERT_TOPOLOGY === topology, name + ' topology assertion drifted');
+	assert(
+		environment.RABBITMQ_ASSERT_TOPOLOGY === topology,
+		name + ' topology assertion drifted'
+	);
 	rabbitUsers.push(url.username);
 }
 assert(
-	operationsRestoreEnvironment.RABBITMQ_CONNECTION_NAME === 'winwidget-operations-restore-worker' &&
+	operationsRestoreEnvironment.RABBITMQ_CONNECTION_NAME ===
+		'winwidget-operations-restore-worker' &&
 		parseUrl(
 			operationsRestoreEnvironment.RABBITMQ_URL,
 			'operations-restore-worker RABBITMQ_URL'
-		).username ===
-			'winwidget-operations-restore-worker',
+		).username === 'winwidget-operations-restore-worker',
 	'operations-restore-worker must use its dedicated RabbitMQ identity'
 );
 assert(
@@ -941,7 +1481,12 @@ assert(
 		rabbitUsers.every(Boolean) &&
 		new Set(rabbitUsers).size === rabbitUsers.length &&
 		rabbitUsers.every(
-			user => !['winwidget-publisher', 'winwidget-integration', 'winwidget-maintenance'].includes(user)
+			user =>
+				![
+					'winwidget-publisher',
+					'winwidget-integration',
+					'winwidget-maintenance'
+				].includes(user)
 		),
 	'RabbitMQ admin, monitor and service identities must be distinct and Core-free'
 );
@@ -955,13 +1500,16 @@ const telegramProxyServices = [
 ];
 for (const name of telegramProxyServices) {
 	const service = requireService(name);
-	const entry = (service.extra_hosts ?? []).find(item => item.startsWith('tg.winwidget.ru='));
+	const entry = (service.extra_hosts ?? []).find(item =>
+		item.startsWith('tg.winwidget.ru=')
+	);
 	assert(
 		entry === 'tg.winwidget.ru=' + expected('TELEGRAM_API_PROXY_IP'),
 		name + ' must route Telegram through the configured proxy'
 	);
 	assert(
-		environmentOf(name).TELEGRAM_API_BASE_URL === expected('TELEGRAM_API_BASE_URL'),
+		environmentOf(name).TELEGRAM_API_BASE_URL ===
+			expected('TELEGRAM_API_BASE_URL'),
 		name + ' Telegram origin drifted'
 	);
 }

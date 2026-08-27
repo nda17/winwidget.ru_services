@@ -386,6 +386,56 @@ exactFiles('.github/scripts', [
 ]);
 exactFiles('deploy', ['docker-compose.prod.yml']);
 
+const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+const pinnedInfraRevision =
+	'ec6fe29aea47e374b2a081d0c8d29feda6a19cab';
+for (const evidence of [
+	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
+	'deploy-production:',
+	'needs:',
+	'- lifecycle-contract',
+	'- service',
+	"if: github.event_name == 'push' && github.ref == 'refs/heads/prod'",
+	`uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@${pinnedInfraRevision}`,
+	'services_revision: ${{ github.sha }}',
+	'BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}',
+	'BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}',
+	'BACKEND_PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}',
+	'BACKEND_PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}',
+	'BACKEND_PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}',
+	'BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}'
+]) {
+	if (!servicesWorkflow.includes(evidence)) {
+		throw new Error(`production release workflow drifted: ${evidence}`);
+	}
+}
+if (
+	servicesWorkflow.includes('workflow_dispatch:') ||
+	servicesWorkflow.includes('secrets: inherit') ||
+	servicesWorkflow.includes('FRONTEND_PRODUCTION_') ||
+	servicesWorkflow.includes(
+		'nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@master'
+	) ||
+	servicesWorkflow.includes(
+		'nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@prod'
+	)
+) {
+	throw new Error(
+		'production release workflow exposes a mutable, manual, inherited-secret, or frontend path'
+	);
+}
+const infraReleaseReferences = [
+	...servicesWorkflow.matchAll(
+		/uses: nda17\/winwidget\.ru_infra\/\.github\/workflows\/deploy-production\.yml@([0-9a-f]{40})/g
+	)
+];
+if (
+	infraReleaseReferences.length !== 1 ||
+	infraReleaseReferences[0][1] !== pinnedInfraRevision
+) {
+	throw new Error('production release workflow is not pinned to one exact infra SHA');
+}
+
 const rootReadme = readFileSync('README.md', 'utf8');
 if (
 	rootReadme.includes('Архив прежней документации') ||

@@ -13,7 +13,7 @@ import { hash } from 'bcryptjs';
 import type { Request, Response } from 'express';
 import { PASSWORD_SALT_ROUNDS } from '../common/identity.util';
 import { AuthController } from './auth.controller';
-import { AuthDto } from './auth.dto';
+import { AuthDto, UpdateUserDto } from './auth.dto';
 import { IdentityAuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { RefreshTokenService } from './refresh-token.service';
@@ -72,6 +72,147 @@ function service(overrides: Record<string, any> = {}) {
 	return { auth, prisma, users, transport, refreshTokens, jwt };
 }
 
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>(current => {
+		resolve = current;
+	});
+	return { promise, resolve };
+}
+
+function rowMutex() {
+	let tail = Promise.resolve();
+	return {
+		async acquire() {
+			const previous = tail;
+			let release!: () => void;
+			tail = new Promise<void>(current => {
+				release = current;
+			});
+			await previous;
+			return release;
+		}
+	};
+}
+
+async function passwordRaceService() {
+	const userId = '00000000-0000-4000-8000-000000000002';
+	const email = 'user@example.com';
+	const now = new Date('2026-08-27T10:00:00.000Z');
+	const state = {
+		password: await hash('OldPass1', 4),
+		sessions: new Map<string, { revokedAt: Date | null }>()
+	};
+	const mutex = rowMutex();
+	const events: string[] = [];
+	const hooks: {
+		onLoginLocked?: () => void;
+		beforeSessionCreate?: () => Promise<void>;
+	} = {};
+	const currentUser = () => ({
+		id: userId,
+		name: 'User',
+		password: state.password,
+		avatarPath: null,
+		status: UserStatus.ACTIVE,
+		personalDataConsentRevokedAt: null,
+		deletedAt: null,
+		rights: [Role.USER],
+		createdAt: now,
+		updatedAt: now,
+		authIdentities: [
+			{
+				id: 'email-identity',
+				userId,
+				type: 'EMAIL',
+				value: email,
+				verifiedAt: now,
+				createdAt: now,
+				updatedAt: now
+			}
+		],
+		telegramNotificationChannel: null
+	});
+	const transactions: Record<string, any>[] = [];
+	const prisma = {
+		$transaction: jest.fn(
+			async (callback: (transaction: any) => unknown) => {
+				let release: () => void = () => undefined;
+				const transaction = {
+					$queryRaw: jest.fn(async () => {
+						release = await mutex.acquire();
+						events.push('login-lock');
+						hooks.onLoginLocked?.();
+						return [{ id: userId }];
+					}),
+					user: {
+						findFirst: jest.fn(async () => {
+							events.push('login-read');
+							return currentUser();
+						})
+					},
+					userSession: {
+						create: jest.fn(async ({ data }: { data: { id: string } }) => {
+							await hooks.beforeSessionCreate?.();
+							events.push('session-create');
+							state.sessions.set(data.id, { revokedAt: null });
+							return data;
+						})
+					}
+				};
+				transactions.push(transaction);
+				try {
+					return await callback(transaction);
+				} finally {
+					release();
+				}
+			}
+		)
+	};
+	const users = {
+		findByIdentity: jest.fn(async () => currentUser())
+	};
+	const owners = { ensureTrial: jest.fn().mockResolvedValue(undefined) };
+	const jwt = { issue: jest.fn().mockReturnValue('access-token') };
+	const auth = new AuthService(
+		prisma as any,
+		users as any,
+		jwt as any,
+		new RefreshTokenService(),
+		{} as any,
+		{} as any,
+		owners as any
+	);
+	const changePassword = async (
+		passwordHash: string,
+		onLocked?: () => void
+	) => {
+		const release = await mutex.acquire();
+		try {
+			events.push('password-lock');
+			onLocked?.();
+			state.password = passwordHash;
+			events.push('password-write');
+			for (const session of state.sessions.values()) {
+				session.revokedAt = new Date();
+			}
+			events.push('session-revoke');
+		} finally {
+			release();
+		}
+	};
+	return {
+		auth,
+		changePassword,
+		events,
+		hooks,
+		jwt,
+		owners,
+		state,
+		transactions
+	};
+}
+
 describe('public auth frozen contracts', () => {
 	it('strips unknown auth fields without globally forbidding them', async () => {
 		const pipe = new ValidationPipe({ whitelist: true, transform: true });
@@ -88,6 +229,28 @@ describe('public auth frozen contracts', () => {
 			email: 'user@example.com',
 			password: 'Secure1'
 		});
+	});
+
+	it('enforces the canonical strong-password policy for an admin reset', async () => {
+		const pipe = new ValidationPipe({ whitelist: true, transform: true });
+		await expect(
+			pipe.transform(
+				{ password: '' },
+				{ type: 'body', metatype: UpdateUserDto }
+			)
+		).resolves.toEqual({ password: '' });
+		await expect(
+			pipe.transform(
+				{ password: 'weak' },
+				{ type: 'body', metatype: UpdateUserDto }
+			)
+		).rejects.toThrow();
+		await expect(
+			pipe.transform(
+				{ password: 'Secure1' },
+				{ type: 'body', metatype: UpdateUserDto }
+			)
+		).resolves.toEqual({ password: 'Secure1' });
 	});
 
 	it('returns registration and resend timing DTOs instead of booleans', async () => {
@@ -353,5 +516,82 @@ describe('revoked session fail-closed contract', () => {
 			},
 			include: { user: true }
 		});
+	});
+});
+
+describe('password login and revocation row-lock contract', () => {
+	it('rejects a stale password snapshot when the password mutation locks first', async () => {
+		const value = await passwordRaceService();
+		const trialStarted = deferred();
+		const continueLogin = deferred();
+		value.owners.ensureTrial.mockImplementation(async () => {
+			trialStarted.resolve();
+			await continueLogin.promise;
+		});
+		const login = value.auth.login({
+			email: 'USER@example.com',
+			password: 'OldPass1'
+		});
+		await trialStarted.promise;
+		await value.changePassword(await hash('OldPass1', 4));
+		continueLogin.resolve();
+
+		await expect(login).rejects.toEqual(
+			new UnauthorizedException('Email or password invalid')
+		);
+		expect(value.state.sessions.size).toBe(0);
+		expect(value.jwt.issue).not.toHaveBeenCalled();
+		expect(value.events).toEqual([
+			'password-lock',
+			'password-write',
+			'session-revoke',
+			'login-lock',
+			'login-read'
+		]);
+		expect(value.transactions[0].$queryRaw).toHaveBeenCalledTimes(1);
+	});
+
+	it('lets a password mutation revoke the session when login locks first', async () => {
+		const value = await passwordRaceService();
+		const loginLocked = deferred();
+		const continueSessionCreate = deferred();
+		const passwordLocked = deferred();
+		let passwordMutationHasLock = false;
+		value.hooks.onLoginLocked = loginLocked.resolve;
+		value.hooks.beforeSessionCreate = () => continueSessionCreate.promise;
+		const login = value.auth.login({
+			email: 'user@example.com',
+			password: 'OldPass1'
+		});
+		await loginLocked.promise;
+		const passwordChange = value.changePassword(
+			await hash('NewPass1', 4),
+			() => {
+				passwordMutationHasLock = true;
+				passwordLocked.resolve();
+			}
+		);
+		await Promise.resolve();
+		expect(passwordMutationHasLock).toBe(false);
+
+		continueSessionCreate.resolve();
+		await expect(login).resolves.toEqual(
+			expect.objectContaining({ accessToken: 'access-token' })
+		);
+		await passwordLocked.promise;
+		await passwordChange;
+
+		expect([...value.state.sessions.values()]).toEqual([
+			{ revokedAt: expect.any(Date) }
+		]);
+		expect(value.events).toEqual([
+			'login-lock',
+			'login-read',
+			'session-create',
+			'password-lock',
+			'password-write',
+			'session-revoke'
+		]);
+		expect(value.transactions[0].$queryRaw).toHaveBeenCalledTimes(1);
 	});
 });

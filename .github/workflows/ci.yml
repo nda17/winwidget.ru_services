@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: services-ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}
 
 jobs:
   lifecycle-contract:
@@ -80,3 +80,20 @@ jobs:
         run: pnpm --dir "apps/${{ matrix.app }}" run test
       - name: Build
         run: pnpm --dir "apps/${{ matrix.app }}" run build
+
+  deploy-production:
+    name: Deploy production
+    needs:
+      - lifecycle-contract
+      - service
+    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@ec6fe29aea47e374b2a081d0c8d29feda6a19cab
+    with:
+      services_revision: ${{ github.sha }}
+    secrets:
+      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+      BACKEND_PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+      BACKEND_PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+      BACKEND_PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}
+      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}

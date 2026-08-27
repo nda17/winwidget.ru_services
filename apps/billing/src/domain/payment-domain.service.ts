@@ -53,9 +53,11 @@ import {
 	AUTO_RENEWAL_CONSENT_VERSION,
 	AUTO_RENEWAL_RETRY_DELAYS_MS,
 	AUTO_RENEWAL_RETRY_DISPATCH_GRACE_MS,
+	PROVIDER_IDEMPOTENCY_RETRY_WINDOW_MS,
 	buildRecurringCycleKey,
 	isAutoRenewalRetryableCancellation,
-	isAutoRenewalOfferCompatible
+	isAutoRenewalOfferCompatible,
+	providerOperationMayHaveReachedProvider
 } from './billing-legal.constants';
 
 const DEFAULT_PRICES: Record<
@@ -100,12 +102,212 @@ export interface BillingPaymentRequestContext {
 	userAgent?: string | null;
 }
 
+export interface ProviderOperationTerminalInput {
+	operationId: string;
+	paymentId: string;
+	leaseToken: string;
+	operationAttempt: number;
+	terminalStatus: 'UNKNOWN' | 'FAILED';
+	errorCode: string;
+	errorSafe: string;
+	now: Date;
+	userId?: string;
+	providerPaymentId?: string | null;
+	operationProviderPaymentId?: string | null;
+	paymentProviderStatus?: string;
+	cancellationReason?: string;
+}
+
 @Injectable()
 export class PaymentDomainService {
 	constructor(
 		private readonly prisma: BillingPrismaService,
 		private readonly crypto: PaymentMethodCryptoService
 	) {}
+
+	async settleProviderOperationTerminal(
+		input: ProviderOperationTerminalInput
+	): Promise<Payment> {
+		const candidate = await this.prisma.payment.findUnique({
+			where: { id: input.paymentId },
+			select: { userId: true }
+		});
+		if (!candidate) throw new NotFoundException('Платёж не найден');
+		return this.prisma.$transaction(
+			transaction =>
+				this.settleProviderOperationTerminalInTransaction(transaction, {
+					...input,
+					userId: candidate.userId
+				}),
+			{
+				isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+				maxWait: 5_000,
+				timeout: 30_000
+			}
+		);
+	}
+
+	async settleProviderOperationTerminalInTransaction(
+		transaction: Prisma.TransactionClient,
+		input: ProviderOperationTerminalInput & { userId: string }
+	): Promise<Payment> {
+		await transaction.$queryRaw`
+			SELECT user_id FROM billing.identity_contact_projections
+			WHERE user_id = ${input.userId}
+			FOR UPDATE
+		`;
+		await transaction.$queryRaw`
+			SELECT id FROM billing.auto_renewals
+			WHERE user_id = ${input.userId}
+			FOR UPDATE
+		`;
+		await transaction.$queryRaw`
+			SELECT id FROM billing.payments
+			WHERE id = ${input.paymentId}
+			FOR UPDATE
+		`;
+		await transaction.$queryRaw`
+			SELECT id FROM billing.provider_operations
+			WHERE id = ${input.operationId}
+			FOR UPDATE
+		`;
+
+		const [operation, payment] = await Promise.all([
+			transaction.providerOperation.findUnique({
+				where: { id: input.operationId }
+			}),
+			transaction.payment.findUnique({
+				where: { id: input.paymentId }
+			})
+		]);
+		if (
+			!operation ||
+			operation.paymentId !== input.paymentId ||
+			(operation.kind !== ProviderOperationKind.CREATE_CHECKOUT &&
+				operation.kind !== ProviderOperationKind.CAPTURE_RECURRING) ||
+			operation.status !== ProviderOperationStatus.PROCESSING ||
+			operation.leaseToken !== input.leaseToken ||
+			operation.attempt !== input.operationAttempt ||
+			(input.operationProviderPaymentId !== undefined &&
+				input.operationProviderPaymentId !== null &&
+				(!isYooKassaObjectId(input.operationProviderPaymentId) ||
+					Boolean(
+						operation.providerPaymentId &&
+						operation.providerPaymentId !==
+							input.operationProviderPaymentId
+					))) ||
+			!payment ||
+			payment.userId !== input.userId ||
+			payment.status !== PaymentStatus.PENDING ||
+			!payment.providerIdempotencyKey ||
+			operation.idempotencyKey !== payment.providerIdempotencyKey ||
+			(operation.kind === ProviderOperationKind.CREATE_CHECKOUT &&
+				payment.kind !== PaymentKind.ONE_TIME) ||
+			(operation.kind === ProviderOperationKind.CAPTURE_RECURRING &&
+				payment.kind !== PaymentKind.RECURRING)
+		) {
+			throw new ConflictException(
+				'Provider-операция или платёж изменились параллельно'
+			);
+		}
+		if (
+			input.terminalStatus === ProviderOperationStatus.UNKNOWN &&
+			payment.yookassaId &&
+			input.operationProviderPaymentId !== payment.yookassaId
+		) {
+			throw new ConflictException(
+				'Provider payment ID не совпадает с заблокированным платежом'
+			);
+		}
+		if (
+			input.terminalStatus === ProviderOperationStatus.FAILED &&
+			(!input.paymentProviderStatus || !input.cancellationReason)
+		) {
+			throw new ConflictException(
+				'Не задано terminal-состояние отклонённого платежа'
+			);
+		}
+
+		const operationChanged =
+			await transaction.providerOperation.updateMany({
+				where: {
+					id: operation.id,
+					paymentId: payment.id,
+					status: ProviderOperationStatus.PROCESSING,
+					leaseToken: input.leaseToken,
+					attempt: input.operationAttempt,
+					providerPaymentId: operation.providerPaymentId,
+					idempotencyKey: payment.providerIdempotencyKey
+				},
+				data: {
+					status: input.terminalStatus,
+					...(input.operationProviderPaymentId
+						? {
+								providerPaymentId: input.operationProviderPaymentId
+							}
+						: {}),
+					leaseToken: null,
+					leaseUntil: null,
+					lastErrorCode: input.errorCode,
+					lastErrorSafe: input.errorSafe
+				}
+			});
+		if (operationChanged.count !== 1) {
+			throw new ConflictException(
+				'Provider-операция изменилась параллельно'
+			);
+		}
+
+		const sourceSequence = await this.nextSequence(transaction);
+		const paymentChanged = await transaction.payment.updateMany({
+			where: {
+				id: payment.id,
+				userId: input.userId,
+				status: PaymentStatus.PENDING,
+				yookassaId: payment.yookassaId,
+				providerStatus: payment.providerStatus,
+				aggregateVersion: payment.aggregateVersion
+			},
+			data:
+				input.terminalStatus === ProviderOperationStatus.UNKNOWN
+					? {
+							providerStatus: 'unknown',
+							confirmationUrl: null,
+							lastProviderCheckedAt: input.now,
+							aggregateVersion: { increment: 1n },
+							sourceSequence
+						}
+					: {
+							yookassaId: input.providerPaymentId || payment.yookassaId,
+							providerStatus: input.paymentProviderStatus!,
+							status: PaymentStatus.CANCELLED,
+							paymentMethodCiphertext: null,
+							confirmationUrl: null,
+							cancelledAt: payment.cancelledAt ?? input.now,
+							cancellationReason: input.cancellationReason!,
+							lastProviderCheckedAt: input.now,
+							aggregateVersion: { increment: 1n },
+							sourceSequence
+						}
+		});
+		if (paymentChanged.count !== 1) {
+			throw new ConflictException('Платёж изменился параллельно');
+		}
+		const updated = await transaction.payment.findUniqueOrThrow({
+			where: { id: payment.id }
+		});
+		if (input.terminalStatus === ProviderOperationStatus.FAILED) {
+			await this.applyRecurringCancellation(
+				transaction,
+				payment,
+				input.cancellationReason!,
+				input.now
+			);
+			await this.cancelAffiliateReward(transaction, payment.id, input.now);
+		}
+		await this.emitPaymentState(transaction, updated);
+		return updated;
+	}
 
 	async create(
 		userId: string,
@@ -190,12 +392,20 @@ export class PaymentDomainService {
 						kind: PaymentKind.ONE_TIME,
 						providerOperations: {
 							some: {
-								status: {
-									in: [
-										ProviderOperationStatus.PROCESSING,
-										ProviderOperationStatus.UNKNOWN
-									]
-								}
+								OR: [
+									{
+										status: {
+											in: [
+												ProviderOperationStatus.PROCESSING,
+												ProviderOperationStatus.UNKNOWN
+											]
+										}
+									},
+									{
+										status: ProviderOperationStatus.PENDING,
+										attempt: { gt: 0 }
+									}
+								]
 							}
 						}
 					}
@@ -245,12 +455,20 @@ export class PaymentDomainService {
 								kind: PaymentKind.ONE_TIME,
 								providerOperations: {
 									some: {
-										status: {
-											in: [
-												ProviderOperationStatus.PROCESSING,
-												ProviderOperationStatus.UNKNOWN
-											]
-										}
+										OR: [
+											{
+												status: {
+													in: [
+														ProviderOperationStatus.PROCESSING,
+														ProviderOperationStatus.UNKNOWN
+													]
+												}
+											},
+											{
+												status: ProviderOperationStatus.PENDING,
+												attempt: { gt: 0 }
+											}
+										]
 									}
 								}
 							}
@@ -401,79 +619,123 @@ export class PaymentDomainService {
 		if (!normalizedPaymentId) {
 			throw new BadRequestException('Незавершённый платёж не найден');
 		}
-		return this.prisma.$transaction(
-			async transaction => {
-				await transaction.$queryRaw`
+		try {
+			return await this.prisma.$transaction(
+				async transaction => {
+					await transaction.$queryRaw`
 					SELECT id FROM billing.payments
 					WHERE id = ${normalizedPaymentId}
 						AND user_id = ${userId}
 						AND kind = 'ONE_TIME'::billing."PaymentKind"
 					FOR UPDATE
 				`;
-				const payment = await transaction.payment.findFirst({
-					where: {
-						id: normalizedPaymentId,
-						userId,
-						kind: PaymentKind.ONE_TIME
+					const payment = await transaction.payment.findFirst({
+						where: {
+							id: normalizedPaymentId,
+							userId,
+							kind: PaymentKind.ONE_TIME
+						}
+					});
+					if (!payment) {
+						throw new BadRequestException(
+							'Незавершённый платёж не найден'
+						);
 					}
-				});
-				if (!payment) {
-					throw new BadRequestException('Незавершённый платёж не найден');
-				}
-				if (payment.status === PaymentStatus.CANCELLED) {
+					if (payment.status === PaymentStatus.CANCELLED) {
+						return {
+							cancelled: true,
+							message: 'Незавершённый платёж уже отменён.',
+							cancelledAt: (
+								payment.cancelledAt ?? payment.updatedAt
+							).toISOString()
+						};
+					}
+					if (payment.status === PaymentStatus.EXPIRED) {
+						return {
+							cancelled: true,
+							message: 'Срок незавершённого платежа уже истёк.',
+							cancelledAt: payment.updatedAt.toISOString()
+						};
+					}
+					if (payment.status === PaymentStatus.SUCCEEDED) {
+						throw new BadRequestException(
+							'Платёж уже подтверждён, отменить его нельзя'
+						);
+					}
+					await transaction.$queryRaw`
+					SELECT id FROM billing.provider_operations
+					WHERE payment_id = ${payment.id}
+						AND kind = 'CREATE_CHECKOUT'::billing."ProviderOperationKind"
+					FOR UPDATE
+				`;
+					const providerOperation =
+						await transaction.providerOperation.findFirst({
+							where: {
+								paymentId: payment.id,
+								kind: ProviderOperationKind.CREATE_CHECKOUT
+							},
+							orderBy: { createdAt: 'desc' }
+						});
+					if (
+						payment.yookassaId ||
+						!providerOperation ||
+						providerOperation.status !== ProviderOperationStatus.PENDING ||
+						providerOperation.attempt !== 0
+					) {
+						throw new ConflictException(
+							'Платёж уже мог быть передан в ЮKassa. Дождитесь сверки статуса — новый платёж создавать нельзя'
+						);
+					}
+					const operationChanged =
+						await transaction.providerOperation.updateMany({
+							where: {
+								id: providerOperation.id,
+								status: ProviderOperationStatus.PENDING,
+								attempt: 0
+							},
+							data: {
+								status: ProviderOperationStatus.FAILED,
+								lastErrorCode: 'USER_CANCELLED',
+								lastErrorSafe:
+									'Незавершённый платёж отменён пользователем до вызова провайдера'
+							}
+						});
+					if (operationChanged.count !== 1) {
+						throw new ConflictException(
+							'Provider-состояние платежа изменилось параллельно'
+						);
+					}
+					const cancelledAt = new Date();
+					const sequence = await this.nextSequence(transaction);
+					const updated = await transaction.payment.update({
+						where: { id: payment.id },
+						data: {
+							status: PaymentStatus.CANCELLED,
+							providerStatus: 'not_sent',
+							confirmationUrl: null,
+							cancelledAt,
+							cancellationReason: 'user_cancelled',
+							aggregateVersion: { increment: 1n },
+							sourceSequence: sequence
+						}
+					});
+					await this.emitPaymentState(transaction, updated);
 					return {
 						cancelled: true,
-						message: 'Незавершённый платёж уже отменён.',
-						cancelledAt: (
-							payment.cancelledAt ?? payment.updatedAt
-						).toISOString()
+						message: 'Незавершённый платёж отменён.',
+						cancelledAt: cancelledAt.toISOString()
 					};
-				}
-				if (payment.status === PaymentStatus.EXPIRED) {
-					return {
-						cancelled: true,
-						message: 'Срок незавершённого платежа уже истёк.',
-						cancelledAt: payment.updatedAt.toISOString()
-					};
-				}
-				if (payment.status === PaymentStatus.SUCCEEDED) {
-					throw new BadRequestException(
-						'Платёж уже подтверждён, отменить его нельзя'
-					);
-				}
-				const cancelledAt = new Date();
-				const sequence = await this.nextSequence(transaction);
-				const updated = await transaction.payment.update({
-					where: { id: payment.id },
-					data: {
-						status: PaymentStatus.CANCELLED,
-						confirmationUrl: null,
-						cancelledAt,
-						cancellationReason: 'user_cancelled',
-						aggregateVersion: { increment: 1n },
-						sourceSequence: sequence
-					}
-				});
-				await transaction.providerOperation.updateMany({
-					where: {
-						paymentId: payment.id,
-						status: ProviderOperationStatus.PENDING
-					},
-					data: {
-						status: ProviderOperationStatus.FAILED,
-						lastErrorCode: 'USER_CANCELLED',
-						lastErrorSafe: 'Незавершённый платёж отменён пользователем'
-					}
-				});
-				await this.emitPaymentState(transaction, updated);
-				return {
-					cancelled: true,
-					message: 'Незавершённый платёж отменён.',
-					cancelledAt: cancelledAt.toISOString()
-				};
-			},
-			{ isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
-		);
+				},
+				{ isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+			);
+		} catch (error) {
+			if (this.retryableTransactionError(error)) {
+				throw new ConflictException(
+					'Provider-состояние платежа изменилось параллельно'
+				);
+			}
+			throw error;
+		}
 	}
 
 	async history(userId: string, page = 1, limit = 10) {
@@ -800,10 +1062,31 @@ export class PaymentDomainService {
 			}
 		});
 		if (!payment) throw new NotFoundException('Платёж не найден');
-		if (payment.yookassaId) {
+		let providerPaymentId = payment.yookassaId;
+		if (!providerPaymentId && payment.providerIdempotencyKey) {
+			const expectedOperationKind =
+				payment.kind === PaymentKind.RECURRING
+					? ProviderOperationKind.CAPTURE_RECURRING
+					: ProviderOperationKind.CREATE_CHECKOUT;
+			const creationOperation =
+				await this.prisma.providerOperation.findUnique({
+					where: {
+						idempotencyKey: payment.providerIdempotencyKey
+					}
+				});
+			if (
+				creationOperation?.paymentId === payment.id &&
+				creationOperation.kind === expectedOperationKind &&
+				creationOperation.status === ProviderOperationStatus.UNKNOWN &&
+				isYooKassaObjectId(creationOperation.providerPaymentId)
+			) {
+				providerPaymentId = creationOperation.providerPaymentId;
+			}
+		}
+		if (providerPaymentId) {
 			const operationId = await this.queueVerification(
 				payment.id,
-				payment.yookassaId
+				providerPaymentId
 			);
 			await this.awaitProviderOperation(operationId);
 		}
@@ -965,6 +1248,11 @@ export class PaymentDomainService {
 							payment,
 							providerOperation
 						);
+						if (providerOperation.providerPaymentId) {
+							throw new ConflictException(
+								'Платёж с известным provider ID нужно проверить через adminCheck'
+							);
+						}
 
 						const resolvedAt = new Date();
 						const providerIdempotencyKeySha256 = createHash('sha256')
@@ -1110,34 +1398,18 @@ export class PaymentDomainService {
 		const now = new Date();
 		const candidates = await this.prisma.payment.findMany({
 			where: {
+				kind: PaymentKind.ONE_TIME,
 				status: PaymentStatus.PENDING,
-				checkoutExpiresAt: { lte: now },
-				providerOperations: {
-					none: { status: ProviderOperationStatus.UNKNOWN }
-				}
+				checkoutExpiresAt: { lte: now }
 			},
+			select: { id: true },
 			take: 500
 		});
 		let affectedCount = 0;
 		for (const candidate of candidates) {
-			const changed = await this.prisma.$transaction(async transaction => {
-				const sequence = await this.nextSequence(transaction);
-				const result = await transaction.payment.updateMany({
-					where: { id: candidate.id, status: PaymentStatus.PENDING },
-					data: {
-						status: PaymentStatus.EXPIRED,
-						cancellationReason: 'CHECKOUT_EXPIRED',
-						aggregateVersion: { increment: 1n },
-						sourceSequence: sequence
-					}
-				});
-				if (result.count !== 1) return false;
-				const updated = await transaction.payment.findUniqueOrThrow({
-					where: { id: candidate.id }
-				});
-				await this.emitPaymentState(transaction, updated);
-				return true;
-			});
+			const changed = await this.prisma.$transaction(transaction =>
+				this.settleExpiredCheckoutUnderLock(transaction, candidate.id, now)
+			);
 			if (changed) affectedCount += 1;
 		}
 		const result = {
@@ -1146,7 +1418,7 @@ export class PaymentDomainService {
 			affectedCount,
 			message:
 				affectedCount > 0
-					? `Помечено просроченными: ${affectedCount}.`
+					? `Обновлено просроченных попыток: ${affectedCount}.`
 					: 'Новые просроченные попытки не найдены.',
 			executedAt: now.toISOString()
 		};
@@ -2188,67 +2460,129 @@ export class PaymentDomainService {
 	}
 
 	private async cleanupStalePendingForUser(userId: string): Promise<void> {
+		const now = new Date();
 		const candidates = await this.prisma.payment.findMany({
 			where: {
 				userId,
 				kind: PaymentKind.ONE_TIME,
 				status: PaymentStatus.PENDING,
-				checkoutExpiresAt: { lte: new Date() },
-				providerOperations: {
-					none: {
-						status: {
-							in: [
-								ProviderOperationStatus.PROCESSING,
-								ProviderOperationStatus.UNKNOWN
-							]
-						}
-					}
-				}
+				checkoutExpiresAt: { lte: now }
 			},
 			select: { id: true },
 			take: 20
 		});
 		for (const candidate of candidates) {
-			await this.prisma.$transaction(async transaction => {
-				await transaction.$queryRaw`
-					SELECT id FROM billing.payments WHERE id = ${candidate.id} FOR UPDATE
-				`;
-				const current = await transaction.payment.findUnique({
-					where: { id: candidate.id }
-				});
-				if (
-					!current ||
-					current.status !== PaymentStatus.PENDING ||
-					current.checkoutExpiresAt > new Date()
-				)
-					return;
-				const inFlight = await transaction.providerOperation.count({
-					where: {
-						paymentId: current.id,
-						status: {
-							in: [
-								ProviderOperationStatus.PROCESSING,
-								ProviderOperationStatus.UNKNOWN
-							]
-						}
-					}
-				});
-				if (inFlight > 0) return;
-				const sequence = await this.nextSequence(transaction);
-				const updated = await transaction.payment.update({
-					where: { id: current.id },
-					data: {
-						status: PaymentStatus.EXPIRED,
-						confirmationUrl: null,
-						cancellationReason: 'checkout_expired',
-						aggregateVersion: { increment: 1n },
-						sourceSequence: sequence
-					}
-				});
+			await this.prisma.$transaction(transaction =>
+				this.settleExpiredCheckoutUnderLock(transaction, candidate.id, now)
+			);
+		}
+	}
+
+	private async settleExpiredCheckoutUnderLock(
+		transaction: Prisma.TransactionClient,
+		paymentId: string,
+		now: Date
+	): Promise<'EXPIRED' | 'UNKNOWN' | null> {
+		await transaction.$queryRaw`
+			SELECT id FROM billing.payments WHERE id = ${paymentId} FOR UPDATE
+		`;
+		await transaction.$queryRaw`
+			SELECT id FROM billing.provider_operations
+			WHERE payment_id = ${paymentId}
+				AND kind = 'CREATE_CHECKOUT'::billing."ProviderOperationKind"
+			FOR UPDATE
+		`;
+		const current = await transaction.payment.findUnique({
+			where: { id: paymentId }
+		});
+		if (
+			!current ||
+			current.kind !== PaymentKind.ONE_TIME ||
+			current.status !== PaymentStatus.PENDING ||
+			current.checkoutExpiresAt > now ||
+			current.yookassaId
+		) {
+			return null;
+		}
+		const operation = await transaction.providerOperation.findFirst({
+			where: {
+				paymentId: current.id,
+				kind: ProviderOperationKind.CREATE_CHECKOUT
+			},
+			orderBy: { createdAt: 'desc' }
+		});
+		if (
+			operation?.status === ProviderOperationStatus.PROCESSING ||
+			operation?.status === ProviderOperationStatus.UNKNOWN ||
+			operation?.status === ProviderOperationStatus.SUCCEEDED
+		) {
+			return null;
+		}
+		if (
+			operation?.status === ProviderOperationStatus.PENDING &&
+			operation.attempt > 0
+		) {
+			if (
+				now.getTime() - operation.createdAt.getTime() <
+				PROVIDER_IDEMPOTENCY_RETRY_WINDOW_MS
+			) {
+				return null;
+			}
+			const operationChanged =
 				await transaction.providerOperation.updateMany({
 					where: {
-						paymentId: current.id,
-						status: ProviderOperationStatus.PENDING
+						id: operation.id,
+						status: ProviderOperationStatus.PENDING,
+						attempt: operation.attempt
+					},
+					data: {
+						status: ProviderOperationStatus.UNKNOWN,
+						leaseToken: null,
+						leaseUntil: null,
+						lastErrorCode: 'PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED',
+						lastErrorSafe:
+							'Provider operation requires reconciliation without another POST'
+					}
+				});
+			if (operationChanged.count !== 1) return null;
+			const sequence = await this.nextSequence(transaction);
+			const paymentChanged = await transaction.payment.updateMany({
+				where: {
+					id: current.id,
+					status: PaymentStatus.PENDING,
+					aggregateVersion: current.aggregateVersion,
+					yookassaId: null
+				},
+				data: {
+					providerStatus: 'unknown',
+					confirmationUrl: null,
+					lastProviderCheckedAt: now,
+					aggregateVersion: { increment: 1n },
+					sourceSequence: sequence
+				}
+			});
+			if (paymentChanged.count !== 1) {
+				throw new ConflictException(
+					'Платёж изменился параллельно во время cleanup'
+				);
+			}
+			const updated = await transaction.payment.findUniqueOrThrow({
+				where: { id: current.id }
+			});
+			await this.emitPaymentState(transaction, updated);
+			return 'UNKNOWN';
+		}
+
+		if (
+			operation?.status === ProviderOperationStatus.PENDING &&
+			operation.attempt === 0
+		) {
+			const operationChanged =
+				await transaction.providerOperation.updateMany({
+					where: {
+						id: operation.id,
+						status: ProviderOperationStatus.PENDING,
+						attempt: 0
 					},
 					data: {
 						status: ProviderOperationStatus.FAILED,
@@ -2256,9 +2590,30 @@ export class PaymentDomainService {
 						lastErrorSafe: 'Срок локального checkout истёк'
 					}
 				});
-				await this.emitPaymentState(transaction, updated);
-			});
+			if (operationChanged.count !== 1) return null;
 		}
+		const sequence = await this.nextSequence(transaction);
+		const paymentChanged = await transaction.payment.updateMany({
+			where: {
+				id: current.id,
+				status: PaymentStatus.PENDING,
+				aggregateVersion: current.aggregateVersion,
+				yookassaId: null
+			},
+			data: {
+				status: PaymentStatus.EXPIRED,
+				confirmationUrl: null,
+				cancellationReason: 'checkout_expired',
+				aggregateVersion: { increment: 1n },
+				sourceSequence: sequence
+			}
+		});
+		if (paymentChanged.count !== 1) return null;
+		const updated = await transaction.payment.findUniqueOrThrow({
+			where: { id: current.id }
+		});
+		await this.emitPaymentState(transaction, updated);
+		return 'EXPIRED';
 	}
 
 	private async getRenewalContext(userId: string): Promise<{
@@ -2413,71 +2768,101 @@ export class PaymentDomainService {
 				userId,
 				kind: PaymentKind.RECURRING,
 				OR: [
-					{
-						status: PaymentStatus.PENDING,
-						yookassaId: null
-					},
+					{ status: PaymentStatus.PENDING },
 					{ paymentMethodCiphertext: { not: null } }
 				]
 			},
 			orderBy: { createdAt: 'asc' }
 		});
-		for (const payment of payments) {
+		for (const candidate of payments) {
 			await transaction.$queryRaw`
-				SELECT id FROM billing.payments WHERE id = ${payment.id} FOR UPDATE
+				SELECT id FROM billing.payments WHERE id = ${candidate.id} FOR UPDATE
 			`;
+			const payment = await transaction.payment.findUnique({
+				where: { id: candidate.id }
+			});
+			if (
+				!payment ||
+				payment.kind !== PaymentKind.RECURRING ||
+				(payment.status !== PaymentStatus.PENDING &&
+					!payment.paymentMethodCiphertext)
+			) {
+				continue;
+			}
 			await transaction.$queryRaw`
 				SELECT id FROM billing.provider_operations
 				WHERE payment_id = ${payment.id}
 					AND kind = 'CAPTURE_RECURRING'::billing."ProviderOperationKind"
 				FOR UPDATE
 			`;
-			const ambiguousOperation =
+			const providerOperation =
 				await transaction.providerOperation.findFirst({
 					where: {
 						paymentId: payment.id,
 						kind: ProviderOperationKind.CAPTURE_RECURRING,
 						status: {
 							in: [
+								ProviderOperationStatus.PENDING,
 								ProviderOperationStatus.PROCESSING,
 								ProviderOperationStatus.UNKNOWN
 							]
 						}
 					},
-					select: { id: true }
+					orderBy: { createdAt: 'desc' },
+					select: { id: true, status: true, attempt: true }
 				});
-			if (ambiguousOperation) {
-				throw new ConflictException(
-					'Списание уже обрабатывается. Повторите отключение автопродления после завершения проверки'
-				);
-			}
-			await transaction.providerOperation.updateMany({
-				where: {
-					paymentId: payment.id,
-					kind: ProviderOperationKind.CAPTURE_RECURRING,
-					status: ProviderOperationStatus.PENDING
-				},
-				data: {
-					status: ProviderOperationStatus.FAILED,
-					lastErrorCode: 'RENEWAL_REVOKED',
-					lastErrorSafe: reason
+			const ambiguousOperation = Boolean(
+				providerOperation &&
+				providerOperationMayHaveReachedProvider(
+					providerOperation.status,
+					providerOperation.attempt
+				)
+			);
+			const pending = payment.status === PaymentStatus.PENDING;
+			const providerMayHaveReceived =
+				pending && (Boolean(payment.yookassaId) || ambiguousOperation);
+			if (providerOperation?.status === ProviderOperationStatus.PENDING) {
+				const operationChanged =
+					await transaction.providerOperation.updateMany({
+						where: {
+							id: providerOperation.id,
+							status: ProviderOperationStatus.PENDING,
+							attempt: providerOperation.attempt
+						},
+						data: {
+							status: providerMayHaveReceived
+								? ProviderOperationStatus.UNKNOWN
+								: ProviderOperationStatus.FAILED,
+							lastErrorCode: providerMayHaveReceived
+								? 'RENEWAL_REVOKED_RECONCILIATION_REQUIRED'
+								: 'RENEWAL_REVOKED',
+							lastErrorSafe: reason
+						}
+					});
+				if (operationChanged.count !== 1) {
+					throw new ConflictException(
+						'Provider-состояние автосписания изменилось параллельно'
+					);
 				}
-			});
+			}
 			const sequence = await this.nextSequence(transaction);
-			const queued =
-				payment.status === PaymentStatus.PENDING && !payment.yookassaId;
-			const creating = queued && payment.providerStatus === 'creating';
 			const updated = await transaction.payment.update({
 				where: { id: payment.id },
 				data: {
-					...(queued
+					...(pending
 						? {
-								status: creating
-									? PaymentStatus.EXPIRED
+								status: providerMayHaveReceived
+									? PaymentStatus.PENDING
 									: PaymentStatus.CANCELLED,
-								providerStatus: creating ? 'unknown' : 'not_sent',
-								cancelledAt: creating ? payment.cancelledAt : new Date(),
-								cancellationReason: reason,
+								providerStatus: providerMayHaveReceived
+									? 'unknown'
+									: 'not_sent',
+								cancelledAt: providerMayHaveReceived
+									? payment.cancelledAt
+									: new Date(),
+								cancellationReason: providerMayHaveReceived
+									? payment.cancellationReason
+									: reason,
 								confirmationUrl: null
 							}
 						: {}),
@@ -2840,8 +3225,7 @@ export class PaymentDomainService {
 			operation.paymentId !== payment.id ||
 			operation.idempotencyKey !== payment.providerIdempotencyKey ||
 			operation.kind !== expectedOperationKind ||
-			operation.status !== ProviderOperationStatus.UNKNOWN ||
-			operation.providerPaymentId
+			operation.status !== ProviderOperationStatus.UNKNOWN
 		) {
 			throw new ConflictException(
 				'Платёж не находится в подтверждённом UNKNOWN provider-состоянии'

@@ -36,6 +36,11 @@ SMTP общая для видов email; `TELEGRAM_INFO_BOT_TOKEN` принад�
 сервису. Production-трафик Telegram должен использовать
 `TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`.
 
+Исторически общая переменная `RECAPTCHA_CLIENT_URL` передаёт Notification
+Delivery только публичный базовый URL сайта для ссылок в email. Сервис не
+выполняет через неё reCAPTCHA-проверки; имя сохранено, чтобы production deploy
+использовал уже существующий env-контракт без отдельной миграции.
+
 ## Настройка и развёртывание
 
 Скопируйте `.env.example` в игнорируемый `.env.production` рядом с сервисом на

@@ -114,7 +114,7 @@ describe('YooKassaService safe readiness', () => {
 				currency: 'RUB',
 				plan: 'EASY',
 				billingPeriod: 'MONTHLY',
-				autoRenew: false,
+				autoRenew: true,
 				customerEmail: 'payer@example.test',
 				customerPhone: '+79990000000',
 				returnUrl: 'https://winwidget.ru/payment/success',
@@ -148,6 +148,55 @@ describe('YooKassaService safe readiness', () => {
 			],
 			internet: true
 		});
+		expect(body.confirmation).toEqual({
+			type: 'redirect',
+			return_url: 'https://winwidget.ru/payment/success'
+		});
+		expect(body.save_payment_method).toBe(true);
+		expect(body).not.toHaveProperty('payment_method_id');
+	});
+
+	it('uses the saved provider method without redirect fields for recurring payment', async () => {
+		process.env.MODE = 'development';
+		process.env.YOOKASSA_SHOP_ID = 'test-shop-id';
+		process.env.YOOKASSA_SECRET_KEY = 'test-secret';
+		const fetchMock = jest.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: jest.fn().mockResolvedValue({
+				id: 'provider-payment-1',
+				status: 'pending'
+			})
+		});
+		global.fetch = fetchMock as unknown as typeof fetch;
+		const service = new YooKassaService();
+
+		await service.createPayment(
+			{
+				paymentId: 'payment-1',
+				amount: '990.00',
+				currency: 'RUB',
+				plan: 'EASY',
+				billingPeriod: 'MONTHLY',
+				autoRenew: true,
+				customerEmail: 'payer@example.test',
+				customerPhone: null,
+				returnUrl: 'https://winwidget.ru/payment/success',
+				paymentMethodId: 'provider-method-1',
+				kind: 'RECURRING'
+			},
+			'provider-command-1'
+		);
+
+		const [, options] = fetchMock.mock.calls[0] as [
+			string,
+			{ body: string; headers: Record<string, string> }
+		];
+		const body = JSON.parse(options.body) as Record<string, unknown>;
+		expect(options.headers['Idempotence-Key']).toBe('provider-command-1');
+		expect(body.payment_method_id).toBe('provider-method-1');
+		expect(body).not.toHaveProperty('confirmation');
+		expect(body).not.toHaveProperty('save_payment_method');
 	});
 
 	it('reads every receipt page and forwards only an encoded opaque cursor', async () => {

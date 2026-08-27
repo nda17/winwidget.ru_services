@@ -7,21 +7,39 @@ import {
 
 @Injectable()
 export class PaymentMethodCryptoService {
+	configurationStatus() {
+		return {
+			encryptionKeyConfigured: this.validEncodedKey(
+				process.env.PAYMENT_METHOD_ENCRYPTION_KEY?.trim() || ''
+			)
+		};
+	}
+
 	private key(): Buffer {
 		const encoded =
 			process.env.PAYMENT_METHOD_ENCRYPTION_KEY?.trim() || '';
-		let key: Buffer;
-		try {
-			key = Buffer.from(encoded, 'base64');
-		} catch {
-			key = Buffer.alloc(0);
-		}
-		if (key.length !== 32) {
+		if (!this.validEncodedKey(encoded)) {
 			throw new Error(
 				'PAYMENT_METHOD_ENCRYPTION_KEY must be a base64-encoded 32-byte key'
 			);
 		}
-		return key;
+		return Buffer.from(encoded, 'base64');
+	}
+
+	private validEncodedKey(encoded: string): boolean {
+		if (
+			!encoded ||
+			!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) ||
+			encoded.length % 4 === 1
+		) {
+			return false;
+		}
+		const key = Buffer.from(encoded, 'base64');
+		return (
+			key.length === 32 &&
+			key.toString('base64').replace(/=+$/, '') ===
+				encoded.replace(/=+$/, '')
+		);
 	}
 
 	encrypt(value: string): string {

@@ -35,6 +35,29 @@ import {
 	type BillingAdminActor,
 	type BillingAdminAuditAction
 } from './billing-admin-audit';
+import { providerOperationMayHaveReachedProvider } from './billing-legal.constants';
+
+export type ExpiredRecurringDispatchResult =
+	| 'CLOSED'
+	| 'ALREADY_CLOSED'
+	| 'RECONCILIATION_REQUIRED'
+	| 'NOT_EXPIRED';
+
+export interface ExpiredRecurringDispatchInput {
+	paymentId: string;
+	autoRenewalId: string;
+	cycleKey: string;
+	now: Date;
+	triggerId: string;
+	trustedClaim?: {
+		operationId: string;
+		leaseToken: string;
+	};
+}
+
+const CHARGE_WINDOW_EXPIRED = 'CHARGE_WINDOW_EXPIRED';
+const CHARGE_WINDOW_EXPIRED_REASON =
+	'Безопасное окно списания истекло до отправки запроса провайдеру';
 
 @Injectable()
 export class SubscriptionDomainService {
@@ -42,6 +65,217 @@ export class SubscriptionDomainService {
 		private readonly prisma: BillingPrismaService,
 		private readonly widgets: WidgetsInternalClient
 	) {}
+
+	async closeExpiredRecurringDispatch(
+		transaction: Prisma.TransactionClient,
+		input: ExpiredRecurringDispatchInput
+	): Promise<ExpiredRecurringDispatchResult> {
+		await transaction.$queryRaw`
+			SELECT id FROM billing.auto_renewals
+			WHERE id = ${input.autoRenewalId}
+			FOR UPDATE
+		`;
+		await transaction.$queryRaw`
+			SELECT id FROM billing.payments
+			WHERE id = ${input.paymentId}
+			FOR UPDATE
+		`;
+		await transaction.$queryRaw`
+			SELECT id FROM billing.provider_operations
+			WHERE payment_id = ${input.paymentId}
+				AND kind = 'CAPTURE_RECURRING'::billing."ProviderOperationKind"
+			FOR UPDATE
+		`;
+
+		const [payment, renewal, operation] = await Promise.all([
+			transaction.payment.findUnique({ where: { id: input.paymentId } }),
+			transaction.autoRenewal.findUnique({
+				where: { id: input.autoRenewalId }
+			}),
+			transaction.providerOperation.findFirst({
+				where: {
+					paymentId: input.paymentId,
+					kind: ProviderOperationKind.CAPTURE_RECURRING
+				},
+				orderBy: { createdAt: 'desc' }
+			})
+		]);
+		const transitionNow = new Date(
+			Math.max(input.now.getTime(), Date.now())
+		);
+
+		if (
+			payment &&
+			renewal &&
+			payment.kind === PaymentKind.RECURRING &&
+			payment.recurringCycleKey === input.cycleKey &&
+			payment.status === PaymentStatus.CANCELLED &&
+			payment.providerStatus === 'not_sent' &&
+			!payment.yookassaId &&
+			payment.paymentMethodCiphertext === null &&
+			payment.cancellationReason === CHARGE_WINDOW_EXPIRED &&
+			renewal.id === input.autoRenewalId &&
+			renewal.userId === payment.userId &&
+			renewal.status === AutoRenewalStatus.TECHNICAL_PAUSE &&
+			!renewal.dispatchPending &&
+			renewal.lastChargeErrorCode === CHARGE_WINDOW_EXPIRED
+		) {
+			return 'ALREADY_CLOSED';
+		}
+		const providerStatusCanBeClosed = input.trustedClaim
+			? ['queued', 'creating'].includes(payment?.providerStatus || '')
+			: payment?.providerStatus === 'queued';
+		if (
+			!payment?.providerIdempotencyKey ||
+			!renewal ||
+			payment.yookassaId ||
+			payment.kind !== PaymentKind.RECURRING ||
+			payment.status !== PaymentStatus.PENDING ||
+			!providerStatusCanBeClosed ||
+			payment.recurringCycleKey !== input.cycleKey ||
+			renewal.userId !== payment.userId ||
+			renewal.status !== AutoRenewalStatus.ACTIVE ||
+			!renewal.dispatchPending ||
+			payment.recurringAttempt !== renewal.retryAttempt ||
+			payment.recurringCycleKey !==
+				`${renewal.id}:${renewal.nextChargeAt.toISOString()}:attempt:${payment.recurringAttempt}`
+		) {
+			return 'RECONCILIATION_REQUIRED';
+		}
+		if (payment.checkoutExpiresAt > transitionNow) return 'NOT_EXPIRED';
+
+		const operationMatchesPayment = Boolean(
+			operation &&
+			operation.paymentId === payment.id &&
+			operation.idempotencyKey === payment.providerIdempotencyKey &&
+			operation.kind === ProviderOperationKind.CAPTURE_RECURRING &&
+			!operation.providerPaymentId
+		);
+		const safeUnclaimed = input.trustedClaim
+			? false
+			: !operation ||
+				(operationMatchesPayment &&
+					operation!.status === ProviderOperationStatus.PENDING &&
+					operation!.attempt === 0);
+		const safeClaimed = Boolean(
+			input.trustedClaim &&
+			operationMatchesPayment &&
+			operation!.id === input.trustedClaim.operationId &&
+			operation!.status === ProviderOperationStatus.PROCESSING &&
+			operation!.attempt === 1 &&
+			operation!.leaseToken === input.trustedClaim.leaseToken
+		);
+		if (!safeUnclaimed && !safeClaimed) {
+			return 'RECONCILIATION_REQUIRED';
+		}
+
+		if (operation) {
+			const operationChanged =
+				await transaction.providerOperation.updateMany({
+					where: {
+						id: operation.id,
+						status: operation.status,
+						attempt: operation.attempt,
+						providerPaymentId: null,
+						...(input.trustedClaim
+							? { leaseToken: input.trustedClaim.leaseToken }
+							: {})
+					},
+					data: {
+						status: ProviderOperationStatus.FAILED,
+						leaseToken: null,
+						leaseUntil: null,
+						lastErrorCode: CHARGE_WINDOW_EXPIRED,
+						lastErrorSafe: CHARGE_WINDOW_EXPIRED_REASON
+					}
+				});
+			if (operationChanged.count !== 1) {
+				return 'RECONCILIATION_REQUIRED';
+			}
+		}
+
+		const sourceSequence = await this.nextSequence(transaction);
+		const paymentChanged = await transaction.payment.updateMany({
+			where: {
+				id: payment.id,
+				kind: PaymentKind.RECURRING,
+				status: PaymentStatus.PENDING,
+				providerStatus: payment.providerStatus,
+				yookassaId: null,
+				providerIdempotencyKey: payment.providerIdempotencyKey,
+				recurringCycleKey: input.cycleKey,
+				checkoutExpiresAt: { lte: transitionNow },
+				aggregateVersion: payment.aggregateVersion
+			},
+			data: {
+				status: PaymentStatus.CANCELLED,
+				providerStatus: 'not_sent',
+				confirmationUrl: null,
+				cancelledAt: transitionNow,
+				cancellationReason: CHARGE_WINDOW_EXPIRED,
+				paymentMethodCiphertext: null,
+				aggregateVersion: { increment: 1n },
+				sourceSequence
+			}
+		});
+		if (paymentChanged.count !== 1) {
+			throw new ConflictException(
+				'Состояние просроченного автосписания изменилось параллельно'
+			);
+		}
+		const renewalChanged = await transaction.autoRenewal.updateMany({
+			where: {
+				id: renewal.id,
+				status: AutoRenewalStatus.ACTIVE,
+				dispatchPending: true,
+				stateVersion: renewal.stateVersion
+			},
+			data: {
+				status: AutoRenewalStatus.TECHNICAL_PAUSE,
+				nextRetryAt: null,
+				dispatchPending: false,
+				disabledAt: transitionNow,
+				disableReason: CHARGE_WINDOW_EXPIRED_REASON,
+				lastChargeErrorCode: CHARGE_WINDOW_EXPIRED,
+				stateVersion: { increment: 1 }
+			}
+		});
+		if (renewalChanged.count !== 1) {
+			throw new ConflictException(
+				'Состояние автопродления изменилось параллельно'
+			);
+		}
+
+		const updatedPayment = await transaction.payment.findUniqueOrThrow({
+			where: { id: payment.id }
+		});
+		await transaction.autoRenewalConsentEvent.create({
+			data: {
+				autoRenewalId: renewal.id,
+				userId: renewal.userId,
+				type: AutoRenewalConsentEventType.TECHNICAL_PAUSED,
+				source: 'AUTO_RENEWAL_DISPATCH_DEADLINE',
+				reason: CHARGE_WINDOW_EXPIRED_REASON,
+				consentVersion: renewal.consentVersion,
+				consentText: renewal.consentText,
+				offerSnapshot: renewal.offerSnapshot,
+				offerSha256: renewal.offerSha256,
+				offerUpdatedAt: renewal.offerUpdatedAt,
+				plan: renewal.plan,
+				billingPeriod: renewal.billingPeriod,
+				amount: renewal.amount,
+				currency: renewal.currency,
+				metadata: {
+					errorCode: CHARGE_WINDOW_EXPIRED,
+					paymentId: payment.id,
+					triggerId: input.triggerId,
+					checkoutExpiresAt: payment.checkoutExpiresAt.toISOString()
+				}
+			}
+		});
+		await this.emitPaymentState(transaction, updatedPayment);
+		return 'CLOSED';
+	}
 
 	async me(userId: string) {
 		const identity =
@@ -495,25 +729,6 @@ export class SubscriptionDomainService {
 					AND operation.kind = 'CAPTURE_RECURRING'::billing."ProviderOperationKind"
 				FOR UPDATE OF operation
 			`;
-			const ambiguousOperation =
-				await transaction.providerOperation.findFirst({
-					where: {
-						payment: { userId },
-						kind: ProviderOperationKind.CAPTURE_RECURRING,
-						status: {
-							in: [
-								ProviderOperationStatus.PROCESSING,
-								ProviderOperationStatus.UNKNOWN
-							]
-						}
-					},
-					select: { id: true }
-				});
-			if (ambiguousOperation) {
-				throw new ConflictException(
-					'Списание уже обрабатывается. Повторите отмену подписки после завершения проверки'
-				);
-			}
 			await transaction.$queryRaw`
 				SELECT id FROM billing.subscriptions WHERE id = ${current.id} FOR UPDATE
 			`;
@@ -708,6 +923,9 @@ export class SubscriptionDomainService {
 		userId: string,
 		actor: BillingAdminActor
 	): Promise<void> {
+		const reason =
+			'Автопродление отозвано при административной отмене подписки';
+		const now = new Date();
 		const renewal = await transaction.autoRenewal.findUnique({
 			where: { userId }
 		});
@@ -716,9 +934,6 @@ export class SubscriptionDomainService {
 				SELECT id FROM billing.auto_renewals WHERE id = ${renewal.id} FOR UPDATE
 			`;
 			if (renewal.status !== AutoRenewalStatus.REVOKED) {
-				const reason =
-					'Автопродление отозвано при административной отмене подписки';
-				const now = new Date();
 				const changed = await transaction.autoRenewal.updateMany({
 					where: { id: renewal.id, stateVersion: renewal.stateVersion },
 					data: {
@@ -771,40 +986,119 @@ export class SubscriptionDomainService {
 			where: {
 				userId,
 				kind: PaymentKind.RECURRING,
-				status: PaymentStatus.PENDING,
-				yookassaId: null
-			}
+				OR: [
+					{ status: PaymentStatus.PENDING },
+					{ paymentMethodCiphertext: { not: null } }
+				]
+			},
+			orderBy: { createdAt: 'asc' }
 		});
-		for (const payment of futurePayments) {
+		for (const candidate of futurePayments) {
+			await transaction.$queryRaw`
+				SELECT id FROM billing.payments WHERE id = ${candidate.id} FOR UPDATE
+			`;
+			await transaction.$queryRaw`
+				SELECT id FROM billing.provider_operations
+				WHERE payment_id = ${candidate.id}
+					AND kind = 'CAPTURE_RECURRING'::billing."ProviderOperationKind"
+				FOR UPDATE
+			`;
+			const payment = await transaction.payment.findUnique({
+				where: { id: candidate.id }
+			});
+			if (
+				!payment ||
+				payment.userId !== userId ||
+				payment.kind !== PaymentKind.RECURRING ||
+				(payment.status !== PaymentStatus.PENDING &&
+					!payment.paymentMethodCiphertext)
+			) {
+				continue;
+			}
+			const providerOperation =
+				await transaction.providerOperation.findFirst({
+					where: {
+						paymentId: payment.id,
+						kind: ProviderOperationKind.CAPTURE_RECURRING
+					},
+					orderBy: { createdAt: 'desc' },
+					select: { id: true, status: true, attempt: true }
+				});
+			const providerMayHaveReceived =
+				Boolean(payment.yookassaId) ||
+				Boolean(
+					providerOperation &&
+					providerOperationMayHaveReachedProvider(
+						providerOperation.status,
+						providerOperation.attempt
+					)
+				);
+			if (providerOperation?.status === ProviderOperationStatus.PENDING) {
+				const operationChanged =
+					await transaction.providerOperation.updateMany({
+						where: {
+							id: providerOperation.id,
+							status: ProviderOperationStatus.PENDING,
+							attempt: providerOperation.attempt
+						},
+						data: {
+							status: providerMayHaveReceived
+								? ProviderOperationStatus.UNKNOWN
+								: ProviderOperationStatus.FAILED,
+							lastErrorCode: providerMayHaveReceived
+								? 'RENEWAL_REVOKED_RECONCILIATION_REQUIRED'
+								: 'AUTO_RENEWAL_REVOKED',
+							lastErrorSafe: reason
+						}
+					});
+				if (operationChanged.count !== 1) {
+					throw new ConflictException(
+						'Provider-состояние автосписания изменилось параллельно'
+					);
+				}
+			}
 			const sequence = await this.nextSequence(transaction);
-			const updated = await transaction.payment.update({
-				where: { id: payment.id },
+			const paymentChanged = await transaction.payment.updateMany({
+				where: {
+					id: payment.id,
+					userId,
+					kind: PaymentKind.RECURRING,
+					status: payment.status,
+					yookassaId: payment.yookassaId,
+					providerStatus: payment.providerStatus,
+					paymentMethodCiphertext: payment.paymentMethodCiphertext,
+					aggregateVersion: payment.aggregateVersion
+				},
 				data: {
-					status:
-						payment.providerStatus === 'creating'
-							? PaymentStatus.EXPIRED
-							: PaymentStatus.CANCELLED,
-					providerStatus:
-						payment.providerStatus === 'creating' ? 'unknown' : 'not_sent',
+					...(payment.status === PaymentStatus.PENDING
+						? {
+								status: providerMayHaveReceived
+									? PaymentStatus.PENDING
+									: PaymentStatus.CANCELLED,
+								providerStatus: providerMayHaveReceived
+									? 'unknown'
+									: 'not_sent',
+								cancelledAt: providerMayHaveReceived
+									? payment.cancelledAt
+									: now,
+								cancellationReason: providerMayHaveReceived
+									? payment.cancellationReason
+									: reason,
+								confirmationUrl: null
+							}
+						: {}),
 					paymentMethodCiphertext: null,
-					confirmationUrl: null,
-					cancelledAt: new Date(),
-					cancellationReason:
-						'Автопродление отозвано при административной отмене подписки',
 					aggregateVersion: { increment: 1n },
 					sourceSequence: sequence
 				}
 			});
-			await transaction.providerOperation.updateMany({
-				where: {
-					paymentId: payment.id,
-					status: 'PENDING'
-				},
-				data: {
-					status: 'FAILED',
-					lastErrorCode: 'AUTO_RENEWAL_REVOKED',
-					lastErrorSafe: 'Автопродление отозвано'
-				}
+			if (paymentChanged.count !== 1) {
+				throw new ConflictException(
+					'Состояние автосписания изменилось параллельно'
+				);
+			}
+			const updated = await transaction.payment.findUniqueOrThrow({
+				where: { id: payment.id }
 			});
 			await this.emitPaymentState(transaction, updated);
 		}

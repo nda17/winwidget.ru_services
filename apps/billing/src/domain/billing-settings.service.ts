@@ -11,10 +11,7 @@ import {
 	BILLING_PAYMENT_WEBHOOK_EVENTS,
 	BILLING_PAYMENT_WEBHOOK_ROUTE
 } from './payment-domain.service';
-import {
-	YOOKASSA_RECEIPT_CONTRACT,
-	YooKassaService
-} from '../provider/yookassa.service';
+import { YOOKASSA_RECEIPT_CONTRACT } from '../provider/yookassa.service';
 import { enqueueBillingAdminAudit } from './billing-admin-audit';
 import {
 	AUTO_RENEWAL_CONSENT_TEXT,
@@ -23,10 +20,7 @@ import {
 
 @Injectable()
 export class BillingSettingsService {
-	constructor(
-		private readonly prisma: BillingPrismaService,
-		private readonly provider: YooKassaService
-	) {}
+	constructor(private readonly prisma: BillingPrismaService) {}
 
 	async publicSettings() {
 		const settings = await this.requireSettings();
@@ -43,12 +37,13 @@ export class BillingSettingsService {
 
 	async providerReadiness() {
 		const settings = await this.requireSettings();
+		const provider = await this.workerProviderConfiguration();
 		return {
 			schemaVersion: 1,
 			source: 'CODE_AND_PERSISTED_SETTINGS' as const,
 			provider: {
 				name: 'YOOKASSA' as const,
-				...this.provider.configurationStatus()
+				...provider
 			},
 			features: {
 				paymentEnabled: settings.paymentEnabled,
@@ -69,6 +64,88 @@ export class BillingSettingsService {
 				onlineCashRegister: 'NOT_VERIFIED' as const,
 				ofd: 'NOT_VERIFIED' as const
 			}
+		};
+	}
+
+	private async workerProviderConfiguration(): Promise<{
+		mode: 'production' | 'non-production';
+		shopIdConfigured: boolean;
+		secretKeyConfigured: boolean;
+		credentialsConfigured: boolean;
+	}> {
+		const port = Number.parseInt(
+			process.env.BILLING_WORKER_PORT?.trim() || '4802',
+			10
+		);
+		if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+			throw new ServiceUnavailableException(
+				'Billing worker readiness is unavailable'
+			);
+		}
+		let response: Response;
+		try {
+			response = await fetch(`http://127.0.0.1:${port}/health/ready`, {
+				signal: AbortSignal.timeout(2_000)
+			});
+		} catch {
+			throw new ServiceUnavailableException(
+				'Billing worker readiness is unavailable'
+			);
+		}
+		if (!response.ok) {
+			throw new ServiceUnavailableException(
+				'Billing worker readiness is unavailable'
+			);
+		}
+		let readiness: unknown;
+		try {
+			readiness = await response.json();
+		} catch {
+			throw new ServiceUnavailableException(
+				'Billing worker readiness is unavailable'
+			);
+		}
+		const root =
+			readiness && typeof readiness === 'object'
+				? (readiness as Record<string, unknown>)
+				: null;
+		const providerConfiguration =
+			root?.providerConfiguration &&
+			typeof root.providerConfiguration === 'object'
+				? (root.providerConfiguration as Record<string, unknown>)
+				: null;
+		const candidate =
+			providerConfiguration?.yookassa &&
+			typeof providerConfiguration.yookassa === 'object'
+				? (providerConfiguration.yookassa as Record<string, unknown>)
+				: null;
+		const expectedRevision = process.env.APP_REVISION?.trim() || '';
+		if (
+			!root ||
+			root.status !== 'ready' ||
+			root.service !== 'billing' ||
+			root.role !== 'worker' ||
+			!expectedRevision ||
+			root.revision !== expectedRevision ||
+			!candidate ||
+			!['production', 'non-production'].includes(String(candidate.mode)) ||
+			typeof candidate.shopIdConfigured !== 'boolean' ||
+			typeof candidate.secretKeyConfigured !== 'boolean' ||
+			typeof candidate.credentialsConfigured !== 'boolean' ||
+			candidate.credentialsConfigured !== true ||
+			candidate.credentialsConfigured !==
+				(candidate.shopIdConfigured && candidate.secretKeyConfigured) ||
+			providerConfiguration?.paymentMethodEncryptionKeyConfigured !== true
+		) {
+			throw new ServiceUnavailableException(
+				'Billing worker readiness is unavailable'
+			);
+		}
+		return {
+			mode: candidate.mode as 'production' | 'non-production',
+			shopIdConfigured: candidate.shopIdConfigured,
+			secretKeyConfigured: candidate.secretKeyConfigured,
+			credentialsConfigured: candidate.credentialsConfigured
 		};
 	}
 
