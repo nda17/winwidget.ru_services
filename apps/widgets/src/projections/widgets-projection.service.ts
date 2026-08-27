@@ -23,6 +23,14 @@ import {
 
 export type ProjectionApplyResult = 'applied' | 'duplicate' | 'stale';
 
+const PROJECTION_AGGREGATE_TYPES: Record<
+	WidgetsProjectionEvent['eventType'],
+	string
+> = {
+	[IDENTITY_USER_CHANGED_EVENT_TYPE]: 'identity.user',
+	[BILLING_SUBSCRIPTION_CHANGED_EVENT_TYPE]: 'billing.subscription'
+};
+
 export class WidgetsProjectionConflictError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -378,9 +386,9 @@ export class WidgetsProjectionService {
 		}
 	}
 
-	private aggregateType(eventType: string): string {
-		return eventType === IDENTITY_USER_CHANGED_EVENT_TYPE
-			? 'core.identity.user'
-			: 'core.billing.subscription';
+	private aggregateType(
+		eventType: WidgetsProjectionEvent['eventType']
+	): string {
+		return PROJECTION_AGGREGATE_TYPES[eventType];
 	}
 }
