@@ -1,6 +1,6 @@
 # API Gateway и авторизация
 
-Документ описывает apps-only steady-state. Tracked production Compose находится
+Канонический документ описывает apps-only steady-state. Tracked production Compose находится
 в [`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml), а
 пример route manifest — в [`.env.example`](../.env.example). Production env
 хранится вне Git. Репозиторий
